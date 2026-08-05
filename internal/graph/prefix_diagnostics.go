@@ -18,9 +18,9 @@ import (
 // The audit applies only to repository source nodes. Some synthetic nodes
 // retain a FilePath as attribution rather than as an on-disk source path:
 // semantic externals use `external::…`, synthesized external calls use
-// `external-call::…`, and contracts use identity namespaces that deliberately
-// do not mirror their source path. Those populations are outside the ownership
-// invariant even when FilePath is non-empty.
+// `external-call::…`, and contracts plus topics use identity namespaces that
+// deliberately do not mirror their source path. Those populations are outside
+// the ownership invariant even when FilePath is non-empty.
 //
 // Every other file-backed node with an empty prefix is an UNOWNED CODE NODE:
 // a real symbol, extracted from a real file, that no repository claims.
@@ -128,15 +128,15 @@ func IsAuditableRepoSourcePath(filePath string) bool {
 }
 
 // IsAuditableRepoSourceNode reports whether n participates in the repository
-// ownership invariant. Contract identities intentionally live in contract
-// namespaces rather than below their source repository prefix; contract bridge
-// nodes likewise use the virtual contracts://bridges path.
+// ownership invariant. Contract and topic identities intentionally live in
+// global namespaces rather than below their source repository prefix; contract
+// bridge nodes likewise use the virtual contracts://bridges path.
 func IsAuditableRepoSourceNode(n *Node) bool {
 	if n == nil || !IsAuditableRepoSourcePath(n.FilePath) {
 		return false
 	}
 	switch n.Kind {
-	case KindContract, KindContractBridge:
+	case KindContract, KindContractBridge, KindTopic:
 		return false
 	default:
 		return true

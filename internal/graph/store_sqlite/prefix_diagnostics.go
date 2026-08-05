@@ -11,7 +11,7 @@ import (
 // The predicates below are the SQL transcription of
 // graph.IsAuditableRepoSourceNode and graph.ClassifyNodePrefix, and the two
 // must be changed together. The auditable predicate admits repository source
-// while excluding exact virtual external paths and the contract identity
+// while excluding exact virtual external paths and the contract/topic identity
 // namespaces whose IDs deliberately are not path-prefixed.
 //
 // Each population is answered by one aggregate plus one bounded sample
@@ -24,7 +24,7 @@ const (
 	// of a broad punctuation/URI heuristic so real parser nodes cannot escape
 	// the audit merely because their path contains punctuation.
 	auditableRepoSourceNodePredicate = `file_path <> '' AND ` +
-		`kind NOT IN ('contract', 'contract_bridge') AND ` +
+		`kind NOT IN ('contract', 'contract_bridge', 'topic') AND ` +
 		`instr(file_path, 'external::') <> 1 AND ` +
 		`instr(file_path, 'external-call::') <> 1`
 

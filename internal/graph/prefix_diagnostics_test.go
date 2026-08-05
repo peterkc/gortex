@@ -59,6 +59,10 @@ func TestClassifyNodePrefix(t *testing.T) {
 		node: &Node{ID: "contract-bridge::request::response", Kind: KindContractBridge, FilePath: "contracts://bridges", RepoPrefix: "gortex"},
 		want: "",
 	}, {
+		name: "topic identity namespace is not audited",
+		node: &Node{ID: "topic::nats::go", Kind: KindTopic, FilePath: "gortex/main.go", RepoPrefix: "gortex"},
+		want: "",
+	}, {
 		name: "repo-scoped stub carries no file and is not audited",
 		node: &Node{ID: "gortex::builtin::go::make", Kind: KindBuiltin, RepoPrefix: "gortex"},
 		want: "",

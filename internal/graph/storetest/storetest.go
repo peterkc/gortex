@@ -138,6 +138,7 @@ func testPrefixDiagnostics(t *testing.T, factory Factory) {
 	s.AddNode(mkNode("external-call::npm:lodash", "lodash", "external-call::npm:lodash", graph.KindModule))
 	s.AddNode(mkRepoNode("contract::http::GET::/health", "GET /health", "r1/api.go", "r1", graph.KindContract))
 	s.AddNode(mkRepoNode("contract-bridge::request::response", "request → response", "contracts://bridges", "r1", graph.KindContractBridge))
+	s.AddNode(mkRepoNode("topic::nats::go", "go", "r1/main.go", "r1", graph.KindTopic))
 
 	d, ok := graph.ReadPrefixDiagnostics(s, 5)
 	if !ok {
