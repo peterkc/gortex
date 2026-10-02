@@ -1,0 +1,49 @@
+# FORK-ONLY EXPERIMENT (peterkc/gortex). Never for upstream.
+# Re-runs the stale-proof test and the fix's new tests on Windows (fix/stale-proof-test).
+name: wip-stale-proof-fix
+
+on:
+  push:
+    branches: ['wip/ci/stale-proof']
+  workflow_dispatch:
+
+jobs:
+  repeat:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            test: TestCheckoutStaleDiscoveryProofNeverReturnsBaseData
+            pkg: ./internal/mcp/
+            count: 50
+          - os: windows-latest
+            test: TestObserveCheckoutPathStaleProofDuringHEADSamplingDoesNotAllocate
+            pkg: ./internal/indexer/
+            count: 20
+          - os: windows-latest
+            test: TestObserveCheckoutPathRetainsStaleObservationAcrossRetries
+            pkg: ./internal/indexer/
+            count: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Repeat the test
+        shell: bash
+        env:
+          TEST: ${{ matrix.test }}
+          PKG: ${{ matrix.pkg }}
+          COUNT: ${{ matrix.count }}
+        run: |
+          set +e
+          go test -v -count="$COUNT" -cpu=1,4 -timeout=40m -run "^${TEST}\$" "$PKG" > out.txt 2>&1
+          rc=$?
+          pass=$(grep -c -- "^--- PASS: ${TEST}" out.txt)
+          fail=$(grep -c -- "^--- FAIL: ${TEST}" out.txt)
+          echo "RESULT ${TEST} pass=${pass} fail=${fail} rc=${rc}" | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -B2 -A12 -- "^--- FAIL: ${TEST}" out.txt | head -80
+          exit 0
