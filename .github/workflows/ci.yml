@@ -23,6 +23,27 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          # The build and test caches are restored below from the newest
+          # commit that saved them; setup-go's cache keys only on go.sum.
+          cache: false
+
+      - name: Locate the Go caches
+        id: go-cache
+        shell: bash
+        run: |
+          echo "build=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "mod=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Go caches
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.go-cache.outputs.build }}
+            ${{ steps.go-cache.outputs.mod }}
+          key: go-test-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-test-${{ runner.os }}-${{ hashFiles('go.sum') }}-
+            go-test-${{ runner.os }}-
 
       - name: Build
         run: go build -o gortex ./cmd/gortex/
@@ -52,6 +73,17 @@ jobs:
         with:
           files: coverage.out
         continue-on-error: true
+
+      - name: Save the Go caches
+        # EXPERIMENT: saves on every event. The real change saves on pushes
+        # to main only, so pull requests restore main's newest cache.
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.go-cache.outputs.build }}
+            ${{ steps.go-cache.outputs.mod }}
+          key: go-test-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
 
   build-linux-static:
     # The linux release ships a statically linked binary so it runs on any
