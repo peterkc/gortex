@@ -188,4 +188,4 @@ jobs:
           go-version-file: go.mod
 
       - name: Run benchmarks
-        run: go test -bench=. -benchmem -count=1 -benchtime=1s -timeout=20m ./internal/parser/languages/ ./internal/query/ ./internal/graph/
+        run: go test -bench=. -benchmem -count=1 -benchtime=1x -timeout=20m ./internal/parser/languages/ ./internal/query/ ./internal/graph/
