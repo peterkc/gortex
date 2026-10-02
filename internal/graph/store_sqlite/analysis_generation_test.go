@@ -608,8 +608,8 @@ func TestAnalysisGenerationQueryPlansUseBoundedIndexes(t *testing.T) {
 		"analysis_nodes_by_community":           {`SELECT id FROM analysis_nodes WHERE generation_id = ? AND community_id = ? AND node_id > ? ORDER BY node_id LIMIT ?`, []any{1, "c", "", 10}},
 		"analysis_concept_relations_by_related": {`SELECT token FROM analysis_concept_relations WHERE generation_id = ? AND related_token = ? ORDER BY rank, token`, []any{1, "x"}},
 
-		// The planner prefers the node_rowid index for this lookup; it still
-		// searches on both columns.
+		// The node_rowid index carries the WITHOUT ROWID primary key, so it
+		// covers this lookup on both columns.
 		"analysis_process_step_node_fk (node_rowid=? AND generation_id=?)": {`SELECT process_id FROM analysis_process_steps WHERE generation_id = ? AND node_rowid = ? ORDER BY process_id`, []any{1, 1}},
 		// The foreign-key lookup SQLite runs for each deleted analysis_nodes row.
 		"analysis_process_step_node_fk (node_rowid=?)": {`SELECT 1 FROM analysis_process_steps WHERE node_rowid = ?`, []any{1}},
@@ -637,6 +637,36 @@ func TestAnalysisGenerationQueryPlansUseBoundedIndexes(t *testing.T) {
 		plan := strings.Join(details, " | ")
 		if !strings.Contains(plan, index) {
 			t.Fatalf("plan for %s did not use index: %s", index, plan)
+		}
+	}
+}
+
+func TestOpenDropsRedundantAnalysisProcessStepIndex(t *testing.T) {
+	path := filepathForAnalysisTest(t)
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A store opened by an earlier build still has the old index.
+	if _, err := store.writerDB.Exec(`CREATE INDEX analysis_process_steps_by_node ON analysis_process_steps(generation_id, node_rowid, process_id)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for name, want := range map[string]int{"analysis_process_steps_by_node": 0, "analysis_process_step_node_fk": 1} {
+		var got int
+		if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name = ?`, name).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("index %s: count %d, want %d", name, got, want)
 		}
 	}
 }
