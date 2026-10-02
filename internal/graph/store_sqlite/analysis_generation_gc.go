@@ -75,7 +75,10 @@ func (s *Store) PruneAnalysisGenerations(ctx context.Context, keep, batch int) e
 		return err
 	}
 
-	for _, generationID := range candidates {
+	// Keep selection newest-first above; delete the eligible backlog oldest-first
+	// so new generations cannot displace a partially collected one on retry.
+	for i := len(candidates) - 1; i >= 0; i-- {
+		generationID := candidates[i]
 		for _, table := range analysisGenerationGCTables {
 			for {
 				if err := ctx.Err(); err != nil {

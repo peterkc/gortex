@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -345,34 +346,56 @@ func (s *Server) scheduleAnalysisGenerationPrune(writer graph.AnalysisGeneration
 		s.analysisPruneScheduled.Store(false)
 		return
 	}
+	maintenanceCtx, cancelMaintenance := context.WithCancel(context.Background())
+	s.analysisPruneCancel = cancelMaintenance
 	s.backgroundMaintenance.Add(1)
 	s.backgroundMaintenanceMu.Unlock()
 	go func() {
 		defer s.backgroundMaintenance.Done()
 		defer s.analysisPruneScheduled.Store(false)
-		runtimeactivity.Begin("analysis_generation_gc")
-		defer runtimeactivity.End("analysis_generation_gc")
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := writer.PruneAnalysisGenerations(ctx, analysisGenerationPruneKeep, analysisGenerationPruneBatch); err != nil && s.logger != nil {
-			s.logger.Warn("mcp: analysis generation prune failed", zap.Error(err))
+		defer cancelMaintenance()
+		// One owner retains the slot through backoff. A timed-out pass
+		// may have committed useful chunks; continue without another RunAnalysis.
+		for backoff := 30 * time.Second; maintenanceCtx.Err() == nil; backoff = min(backoff*2, 5*time.Minute) {
+			ctx, cancel := context.WithTimeout(maintenanceCtx, 30*time.Second)
+			runtimeactivity.Begin("analysis_generation_gc")
+			err := writer.PruneAnalysisGenerations(ctx, analysisGenerationPruneKeep, analysisGenerationPruneBatch)
+			runtimeactivity.End("analysis_generation_gc")
+			timedOut := ctx.Err() == context.DeadlineExceeded
+			cancel()
+			if err != nil && s.logger != nil {
+				s.logger.Warn("mcp: analysis generation prune failed", zap.Error(err))
+			}
+			if !timedOut || !errors.Is(err, context.DeadlineExceeded) {
+				return
+			}
+			timer := time.NewTimer(backoff)
+			select {
+			case <-maintenanceCtx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
 		}
 	}()
 }
 
-// DrainBackground waits for any in-flight analysis-generation prune and
-// permanently refuses to schedule new ones. Call it before closing the backend
-// store: the prune keeps writing on its already-acquired connection after
-// sql.DB.Close, and a commit there recreates WAL files under a directory being
-// torn down (a test TempDir, an uninstall). The wait ends once the prune's
-// 30s context expires between chunks, though an in-flight chunk can first
-// queue behind the store's writer gate. It does not quiesce RunAnalysis
+// DrainBackground cancels and joins the analysis-generation prune, including
+// its retry timer, and permanently refuses to schedule new ones. Call it before
+// closing the backend store: the prune keeps writing on its already-acquired
+// connection after sql.DB.Close, and a commit there recreates WAL files under
+// a directory being torn down (a test TempDir, an uninstall). Cancellation is
+// observed between chunks, though an in-flight chunk can first queue behind
+// the store's writer gate. It does not quiesce RunAnalysis
 // itself: a pass still running on a detached caller (on-demand ensureAnalysis,
 // the track_repository worker) keeps writing generations through the store,
 // and stopping those is the caller's lifecycle problem, not this drain's.
 func (s *Server) DrainBackground() {
 	s.backgroundMaintenanceMu.Lock()
 	s.backgroundMaintenanceDrained = true
+	if s.analysisPruneCancel != nil {
+		s.analysisPruneCancel()
+	}
 	s.backgroundMaintenanceMu.Unlock()
 	s.backgroundMaintenance.Wait()
 }
