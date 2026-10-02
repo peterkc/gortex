@@ -22,6 +22,8 @@ const (
 	analysisGenerationPruneKeep  = 2
 )
 
+const analysisGenerationPruneMaxIdlePasses = 3
+
 func (s *Server) analysisGenerationBackends() (graph.AnalysisGenerationStore, graph.AnalysisQueryStore) {
 	backend := s.backendStore()
 	writer, _ := backend.(graph.AnalysisGenerationStore)
@@ -354,12 +356,14 @@ func (s *Server) scheduleAnalysisGenerationPrune(writer graph.AnalysisGeneration
 		defer s.backgroundMaintenance.Done()
 		defer s.analysisPruneScheduled.Store(false)
 		defer cancelMaintenance()
-		// One owner retains the slot through backoff. A timed-out pass
-		// may have committed useful chunks; continue without another RunAnalysis.
+		// One owner retains the slot through backoff. Retry timed-out passes
+		// while they make progress; after consecutive idle passes, stop until
+		// another RunAnalysis schedules a new prune.
+		idlePasses := 0
 		for backoff := 30 * time.Second; maintenanceCtx.Err() == nil; backoff = min(backoff*2, 5*time.Minute) {
 			ctx, cancel := context.WithTimeout(maintenanceCtx, 30*time.Second)
 			runtimeactivity.Begin("analysis_generation_gc")
-			err := writer.PruneAnalysisGenerations(ctx, analysisGenerationPruneKeep, analysisGenerationPruneBatch)
+			removed, err := writer.PruneAnalysisGenerations(ctx, analysisGenerationPruneKeep, analysisGenerationPruneBatch)
 			runtimeactivity.End("analysis_generation_gc")
 			timedOut := ctx.Err() == context.DeadlineExceeded
 			cancel()
@@ -367,6 +371,17 @@ func (s *Server) scheduleAnalysisGenerationPrune(writer graph.AnalysisGeneration
 				s.logger.Warn("mcp: analysis generation prune failed", zap.Error(err))
 			}
 			if !timedOut || !errors.Is(err, context.DeadlineExceeded) {
+				return
+			}
+			if removed > 0 {
+				idlePasses = 0
+			} else {
+				idlePasses++
+			}
+			if idlePasses >= analysisGenerationPruneMaxIdlePasses {
+				if s.logger != nil {
+					s.logger.Warn("mcp: analysis generation prune made no progress; stopping until the next analysis run", zap.Int("idle_passes", idlePasses))
+				}
 				return
 			}
 			timer := time.NewTimer(backoff)

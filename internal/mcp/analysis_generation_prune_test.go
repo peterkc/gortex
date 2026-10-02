@@ -11,14 +11,16 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/graph"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type analysisPruneTestStore struct {
 	graph.AnalysisGenerationStore
-	prune func(context.Context, int, int) error
+	prune func(context.Context, int, int) (int64, error)
 }
 
-func (s *analysisPruneTestStore) PruneAnalysisGenerations(ctx context.Context, keep, batch int) error {
+func (s *analysisPruneTestStore) PruneAnalysisGenerations(ctx context.Context, keep, batch int) (int64, error) {
 	return s.prune(ctx, keep, batch)
 }
 
@@ -36,7 +38,7 @@ func TestAnalysisGenerationPruneRetriesDeadlinesUntilComplete(t *testing.T) {
 			defer mu.Unlock()
 			return append([]time.Duration(nil), calls...)
 		}
-		writer := &analysisPruneTestStore{prune: func(ctx context.Context, keep, batch int) error {
+		writer := &analysisPruneTestStore{prune: func(ctx context.Context, keep, batch int) (int64, error) {
 			if keep != 2 || batch != 1000 {
 				t.Errorf("keep=%d batch=%d", keep, batch)
 			}
@@ -49,10 +51,10 @@ func TestAnalysisGenerationPruneRetriesDeadlinesUntilComplete(t *testing.T) {
 			n := len(calls)
 			mu.Unlock()
 			if n == 7 {
-				return nil
+				return 0, nil
 			}
 			<-ctx.Done()
-			return fmt.Errorf("interrupted prune: %w", ctx.Err())
+			return 1, fmt.Errorf("interrupted prune: %w", ctx.Err())
 		}}
 		s.scheduleAnalysisGenerationPrune(writer)
 		synctest.Wait()
@@ -75,6 +77,65 @@ func TestAnalysisGenerationPruneRetriesDeadlinesUntilComplete(t *testing.T) {
 	})
 }
 
+func TestAnalysisGenerationPruneStopsAfterThreeIdlePasses(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		core, logs := observer.New(zap.WarnLevel)
+		s := &Server{logger: zap.New(core)}
+		t.Cleanup(s.DrainBackground)
+		calls := 0
+		writer := &analysisPruneTestStore{prune: func(ctx context.Context, _, _ int) (int64, error) {
+			calls++
+			<-ctx.Done()
+			return 0, ctx.Err()
+		}}
+		s.scheduleAnalysisGenerationPrune(writer)
+		time.Sleep(time.Hour)
+		synctest.Wait()
+		if calls != 3 || s.analysisPruneScheduled.Load() {
+			t.Fatalf("idle prune: calls=%d scheduled=%v", calls, s.analysisPruneScheduled.Load())
+		}
+		warnings := logs.FilterMessage("mcp: analysis generation prune made no progress; stopping until the next analysis run").All()
+		if len(warnings) != 1 || warnings[0].ContextMap()["idle_passes"] != int64(3) {
+			t.Fatalf("no-progress warnings=%v", warnings)
+		}
+		if got := logs.FilterMessage("mcp: analysis generation prune failed").Len(); got != 3 {
+			t.Fatalf("per-pass warnings=%d want=3", got)
+		}
+		// A later analysis can acquire the released slot and start a new prune.
+		s.scheduleAnalysisGenerationPrune(writer)
+		time.Sleep(time.Hour)
+		synctest.Wait()
+		if calls != 6 || s.analysisPruneScheduled.Load() {
+			t.Fatalf("rescheduled idle prune: calls=%d scheduled=%v", calls, s.analysisPruneScheduled.Load())
+		}
+	})
+}
+
+func TestAnalysisGenerationPruneProgressResetsIdlePasses(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := &Server{}
+		t.Cleanup(s.DrainBackground)
+		calls := 0
+		writer := &analysisPruneTestStore{prune: func(ctx context.Context, _, _ int) (int64, error) {
+			calls++
+			if calls == 6 {
+				return 0, nil
+			}
+			<-ctx.Done()
+			if calls == 3 {
+				return 1, ctx.Err()
+			}
+			return 0, ctx.Err()
+		}}
+		s.scheduleAnalysisGenerationPrune(writer)
+		time.Sleep(time.Hour)
+		synctest.Wait()
+		if calls != 6 || s.analysisPruneScheduled.Load() {
+			t.Fatalf("progress did not reset idle passes: calls=%d scheduled=%v", calls, s.analysisPruneScheduled.Load())
+		}
+	})
+}
+
 func TestAnalysisGenerationPruneDrainCancelsRunAndBackoff(t *testing.T) {
 	for _, backoff := range []bool{false, true} {
 		t.Run(fmt.Sprintf("backoff-%v", backoff), func(t *testing.T) {
@@ -82,10 +143,10 @@ func TestAnalysisGenerationPruneDrainCancelsRunAndBackoff(t *testing.T) {
 				s := &Server{}
 				t.Cleanup(s.DrainBackground)
 				calls := 0
-				writer := &analysisPruneTestStore{prune: func(ctx context.Context, _, _ int) error {
+				writer := &analysisPruneTestStore{prune: func(ctx context.Context, _, _ int) (int64, error) {
 					calls++
 					<-ctx.Done()
-					return ctx.Err()
+					return 0, ctx.Err()
 				}}
 				s.scheduleAnalysisGenerationPrune(writer)
 				synctest.Wait()
@@ -117,9 +178,9 @@ func TestAnalysisGenerationPruneDoesNotRetryOtherErrors(t *testing.T) {
 				s := &Server{}
 				t.Cleanup(s.DrainBackground)
 				calls := 0
-				writer := &analysisPruneTestStore{prune: func(context.Context, int, int) error {
+				writer := &analysisPruneTestStore{prune: func(context.Context, int, int) (int64, error) {
 					calls++
-					return failure // not an expired per-run context
+					return 0, failure // not an expired per-run context
 				}}
 				s.scheduleAnalysisGenerationPrune(writer)
 				time.Sleep(time.Hour)

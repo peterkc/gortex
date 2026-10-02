@@ -33,6 +33,53 @@ func (c *analysisGCInterruptContext) Err() error {
 	return c.Context.Err()
 }
 
+// Report a deadline at the same committed-chunk boundary as the cancellation
+// probe, without depending on wall-clock timing during SQLite work.
+type analysisGCDeadlineContext struct {
+	context.Context
+}
+
+func (c analysisGCDeadlineContext) Err() error {
+	if c.Context.Err() != nil {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+func TestAnalysisGenerationGCDeadlineCountsCommittedChunks(t *testing.T) {
+	store, err := Open(filepathForAnalysisTest(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	oldest := buildMinimalAnalysisGeneration(t, store, "oldest", 4, true)
+	buildMinimalAnalysisGeneration(t, store, "fallback", 0, true)
+	buildMinimalAnalysisGeneration(t, store, "active", 0, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	interrupted := &analysisGCInterruptContext{Context: ctx, store: store, cancel: cancel, stop: func() bool {
+		var count int
+		if err := store.writerDB.QueryRow(`SELECT COUNT(*) FROM analysis_concepts WHERE generation_id = ?`, oldest).Scan(&count); err != nil {
+			t.Errorf("observe committed chunk: %v", err)
+			return true
+		}
+		return count < 4
+	}}
+	removed, err := store.PruneAnalysisGenerations(analysisGCDeadlineContext{interrupted}, 1, 1)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline-limited prune, got %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed=%d want=1 committed row", removed)
+	}
+	if got := analysisGCCount(t, store, "analysis_concepts", oldest); got != 3 {
+		t.Fatalf("remaining concepts=%d want=3", got)
+	}
+	if got := analysisGCCount(t, store, "analysis_generations", oldest); got != 1 {
+		t.Fatalf("partially collected generation was deleted: %d", got)
+	}
+}
+
 func analysisGCCount(t *testing.T, store *Store, table string, generationID int64) int {
 	t.Helper()
 	var count int
@@ -63,7 +110,7 @@ func TestAnalysisGenerationGCInterruptedPruneResumesOldest(t *testing.T) {
 			}
 			return count < before
 		}}
-		err := store.PruneAnalysisGenerations(interrupted, 1, 1)
+		_, err := store.PruneAnalysisGenerations(interrupted, 1, 1)
 		cancel()
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("run %d: expected interrupted prune, got %v", run, err)
@@ -78,7 +125,7 @@ func TestAnalysisGenerationGCInterruptedPruneResumesOldest(t *testing.T) {
 		// abandon the partially collected generation for the newer backlog.
 		buildMinimalAnalysisGeneration(t, store, fmt.Sprintf("new-active-%d", run), 0, true)
 	}
-	if err := store.PruneAnalysisGenerations(context.Background(), 1, 1); err != nil {
+	if _, err := store.PruneAnalysisGenerations(context.Background(), 1, 1); err != nil {
 		t.Fatal(err)
 	}
 	if got := analysisGCCount(t, store, "analysis_generations", oldest); got != 0 {
@@ -127,7 +174,7 @@ func TestAnalysisGenerationGCBacklogReachesRetentionAcrossRuns(t *testing.T) {
 			}
 			return count < before
 		}}
-		err = store.PruneAnalysisGenerations(interrupted, 2, 1)
+		_, err = store.PruneAnalysisGenerations(interrupted, 2, 1)
 		cancel()
 		if err == nil {
 			finished = true
@@ -189,7 +236,7 @@ func TestAnalysisGenerationGCProtectsActiveAndBuilding(t *testing.T) {
 			before[id] = append(before[id], analysisGCCount(t, store, table, id))
 		}
 	}
-	if err := store.PruneAnalysisGenerations(context.Background(), 1, 1); err != nil {
+	if _, err := store.PruneAnalysisGenerations(context.Background(), 1, 1); err != nil {
 		t.Fatal(err)
 	}
 	if got := analysisGCCount(t, store, "analysis_generations", collectible); got != 0 {
@@ -204,7 +251,7 @@ func TestAnalysisGenerationGCProtectsActiveAndBuilding(t *testing.T) {
 				t.Fatalf("protected %d %s: removed=%d eligible=%v err=%v", id, table.name, removed, eligible, err)
 			}
 		}
-		if err := store.finishPruneAnalysisGeneration(context.Background(), id); err != nil {
+		if _, err := store.finishPruneAnalysisGeneration(context.Background(), id); err != nil {
 			t.Fatal(err)
 		}
 		var after []int
@@ -243,8 +290,12 @@ func TestAnalysisGenerationGCCanceledChunkRollsBackAndReleasesWriter(t *testing.
 			concepts = table
 		}
 	}
-	if _, _, err := store.pruneAnalysisGenerationChunk(ctx, id, concepts, 1); !errors.Is(err, context.Canceled) {
+	removed, _, err := store.pruneAnalysisGenerationChunk(ctx, id, concepts, 1)
+	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled chunk returned %v", err)
+	}
+	if removed != 0 {
+		t.Fatalf("rolled-back chunk counted %d removed rows", removed)
 	}
 	if !store.writeMu.TryLock() {
 		t.Fatal("canceled chunk retained writer lock")

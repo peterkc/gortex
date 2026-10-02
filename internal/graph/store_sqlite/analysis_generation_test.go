@@ -420,8 +420,14 @@ func TestAnalysisGenerationPruneKeepsActiveAndFallback(t *testing.T) {
 	first := buildMinimalAnalysisGeneration(t, store, "first", 3, true)
 	second := buildMinimalAnalysisGeneration(t, store, "second", 2, true)
 	third := buildMinimalAnalysisGeneration(t, store, "third", 1, true)
-	if err := store.PruneAnalysisGenerations(context.Background(), 1, 1); err != nil {
+	removed, err := store.PruneAnalysisGenerations(context.Background(), 1, 1)
+	if err != nil {
 		t.Fatal(err)
+	}
+	// The first generation has 3 concepts, 1 node, 1 community, 2 blobs,
+	// 6 component seals, and its generation row.
+	if removed != 14 {
+		t.Fatalf("removed=%d want=14", removed)
 	}
 	for generationID, want := range map[int64]int{first: 0, second: 1, third: 1} {
 		var count int
@@ -450,7 +456,8 @@ func TestAnalysisGenerationGCReleasesWriterLockBetweenChunks(t *testing.T) {
 
 	gcDone := make(chan error, 1)
 	go func() {
-		gcDone <- store.PruneAnalysisGenerations(context.Background(), 1, 1)
+		_, err := store.PruneAnalysisGenerations(context.Background(), 1, 1)
+		gcDone <- err
 	}()
 	deadline := time.Now().Add(5 * time.Second)
 	observedPartial := false
