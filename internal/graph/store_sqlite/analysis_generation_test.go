@@ -606,8 +606,13 @@ func TestAnalysisGenerationQueryPlansUseBoundedIndexes(t *testing.T) {
 	}{
 		"analysis_nodes_by_pagerank":            {`SELECT id FROM analysis_nodes WHERE generation_id = ? ORDER BY pagerank DESC, id ASC LIMIT ?`, []any{1, 10}},
 		"analysis_nodes_by_community":           {`SELECT id FROM analysis_nodes WHERE generation_id = ? AND community_id = ? AND node_id > ? ORDER BY node_id LIMIT ?`, []any{1, "c", "", 10}},
-		"analysis_process_steps_by_node":        {`SELECT process_id FROM analysis_process_steps WHERE generation_id = ? AND node_rowid = ? ORDER BY process_id`, []any{1, 1}},
 		"analysis_concept_relations_by_related": {`SELECT token FROM analysis_concept_relations WHERE generation_id = ? AND related_token = ? ORDER BY rank, token`, []any{1, "x"}},
+
+		// The planner prefers the node_rowid index for this lookup; it still
+		// searches on both columns.
+		"analysis_process_step_node_fk (node_rowid=? AND generation_id=?)": {`SELECT process_id FROM analysis_process_steps WHERE generation_id = ? AND node_rowid = ? ORDER BY process_id`, []any{1, 1}},
+		// The foreign-key lookup SQLite runs for each deleted analysis_nodes row.
+		"analysis_process_step_node_fk (node_rowid=?)": {`SELECT 1 FROM analysis_process_steps WHERE node_rowid = ?`, []any{1}},
 	}
 	for index, fixture := range plans {
 		rows, err := store.db.Query(`EXPLAIN QUERY PLAN `+fixture.query, fixture.args...)
