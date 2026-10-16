@@ -111,6 +111,41 @@ func TestAnalysisGenerationPruneStopsAfterThreeIdlePasses(t *testing.T) {
 	})
 }
 
+func TestAnalysisGenerationPruneLogsProgressingPassesAtInfo(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		core, logs := observer.New(zap.InfoLevel)
+		s := &Server{logger: zap.New(core)}
+		t.Cleanup(s.DrainBackground)
+		calls := 0
+		writer := &analysisPruneTestStore{prune: func(ctx context.Context, _, _ int) (int64, error) {
+			calls++
+			if calls == 3 {
+				return 0, nil
+			}
+			<-ctx.Done()
+			return 5, ctx.Err()
+		}}
+		s.scheduleAnalysisGenerationPrune(writer)
+		time.Sleep(time.Hour)
+		synctest.Wait()
+		if calls != 3 {
+			t.Fatalf("calls=%d want=3", calls)
+		}
+		if got := logs.FilterMessage("mcp: analysis generation prune failed").Len(); got != 0 {
+			t.Fatalf("progressing passes logged %d failure warnings", got)
+		}
+		passes := logs.FilterMessage("mcp: analysis generation prune pass reached its deadline; retrying").All()
+		if len(passes) != 2 {
+			t.Fatalf("progress logs=%d want=2", len(passes))
+		}
+		for _, e := range passes {
+			if e.Level != zap.InfoLevel || e.ContextMap()["removed"] != int64(5) {
+				t.Fatalf("progress log=%v level=%v", e.ContextMap(), e.Level)
+			}
+		}
+	})
+}
+
 func TestAnalysisGenerationPruneProgressResetsIdlePasses(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := &Server{}

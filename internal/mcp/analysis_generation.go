@@ -367,8 +367,16 @@ func (s *Server) scheduleAnalysisGenerationPrune(writer graph.AnalysisGeneration
 			runtimeactivity.End("analysis_generation_gc")
 			timedOut := ctx.Err() == context.DeadlineExceeded
 			cancel()
+			progressed := timedOut && errors.Is(err, context.DeadlineExceeded) && removed > 0
 			if err != nil && s.logger != nil {
-				s.logger.Warn("mcp: analysis generation prune failed", zap.Error(err))
+				if progressed {
+					// A deadline-limited pass that committed rows is the
+					// expected shape on a large backlog, not a failure.
+					s.logger.Info("mcp: analysis generation prune pass reached its deadline; retrying",
+						zap.Int64("removed", removed), zap.Duration("retry_in", backoff))
+				} else {
+					s.logger.Warn("mcp: analysis generation prune failed", zap.Error(err))
+				}
 			}
 			if !timedOut || !errors.Is(err, context.DeadlineExceeded) {
 				return
