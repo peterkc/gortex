@@ -2967,7 +2967,7 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 			return nil
 		})
 	} else {
-		err = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
+		err = idx.walkDisk(absRoot, absRoot, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				if !os.IsNotExist(err) && !idx.shouldExclude(path, absRoot, d != nil && d.IsDir()) {
 					recordFileOutcome(path, err)
@@ -2976,9 +2976,6 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 				return nil
 			}
 			if d.IsDir() {
-				if idx.admitWalkEntry(absRoot, path, -1, true).pruneDir {
-					return filepath.SkipDir
-				}
 				recordFileOutcome(path, nil)
 				return nil
 			}
@@ -6897,7 +6894,7 @@ func (idx *Indexer) incrementalReindexPathsMode(
 		}
 
 		if info.IsDir() {
-			walkErr := filepath.WalkDir(absPath, func(path string, d os.DirEntry, err error) error {
+			walkErr := idx.walkDisk(absRoot, absPath, func(path string, d os.DirEntry, err error) error {
 				if err != nil {
 					if !os.IsNotExist(err) && !idx.shouldExclude(path, absRoot, d != nil && d.IsDir()) {
 						idx.noteFileIndexFailure(path, err)
@@ -6906,9 +6903,6 @@ func (idx *Indexer) incrementalReindexPathsMode(
 					return nil
 				}
 				if d.IsDir() {
-					if idx.admitWalkEntry(absRoot, path, -1, true).pruneDir {
-						return filepath.SkipDir
-					}
 					idx.noteFileIndexFailure(path, nil)
 					walkedDirs = append(walkedDirs, path)
 					return nil
@@ -9779,20 +9773,14 @@ func (idx *Indexer) HasChangesSinceMtimes(root string) bool {
 
 	diskFiles := make(map[string]bool)
 	errStop := errors.New("stop-walk")
-	walkErr := filepath.WalkDir(absRoot, func(path string, d os.DirEntry, werr error) error {
+	walkErr := idx.walkDisk(absRoot, absRoot, func(path string, d os.DirEntry, werr error) error {
 		if werr != nil {
 			return nil
 		}
 		if d.IsDir() {
-			if idx.shouldPruneDir(path, absRoot) {
-				return filepath.SkipDir
-			}
 			return nil
 		}
-		if _, ok := idx.effectiveLanguage(path, nil); !ok {
-			return nil
-		}
-		if idx.shouldExclude(path, absRoot, false) {
+		if !idx.admitWalkEntry(absRoot, path, -1, false).admit {
 			return nil
 		}
 		rel := idx.relKey(path)
@@ -9927,21 +9915,18 @@ func (idx *Indexer) changedSinceMtimesCensus(root string) (
 
 	diskFiles := make(map[string]bool)
 	projectionCandidates := make([]string, 0, 1)
-	walkErr := filepath.WalkDir(absRoot, func(path string, d os.DirEntry, werr error) error {
+	walkErr := idx.walkDisk(absRoot, absRoot, func(path string, d os.DirEntry, werr error) error {
 		if werr != nil {
 			return werr
 		}
 		if d.IsDir() {
-			if idx.shouldPruneDir(path, absRoot) {
-				return filepath.SkipDir
-			}
+			return nil
+		}
+		if idx.shouldExclude(path, absRoot, false) {
 			return nil
 		}
 		lang, supported := idx.effectiveLanguage(path, nil)
 		if !supported && !idx.isIncrementalContractManifest(path) {
-			return nil
-		}
-		if idx.shouldExclude(path, absRoot, false) {
 			return nil
 		}
 		rel := idx.relKey(path)

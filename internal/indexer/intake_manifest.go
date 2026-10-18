@@ -109,14 +109,11 @@ func (idx *Indexer) dryRunIntake(ctx context.Context, root string) (*IntakeManif
 	admittedDirs := map[string]*DirBucket{}
 	largest := make([]FileBucket, 0, 16)
 
-	err = filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, walkErr error) error {
+	err = idx.walkDisk(absRoot, absRoot, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil
 		}
 		if d.IsDir() {
-			if idx.shouldPruneDir(path, absRoot) {
-				return filepath.SkipDir
-			}
 			return nil
 		}
 
@@ -129,11 +126,10 @@ func (idx *Indexer) dryRunIntake(ctx context.Context, root string) (*IntakeManif
 		manifest.BytesSeen += size
 
 		reason := ""
-		lang, ok := idx.effectiveLanguage(path, nil)
-		if !ok {
-			reason = "no_language"
-		} else if idx.shouldExclude(path, absRoot, false) {
+		if idx.shouldExclude(path, absRoot, false) {
 			reason = "excluded"
+		} else if lang, ok := idx.effectiveLanguage(path, nil); !ok {
+			reason = "no_language"
 		} else if maxSize > 0 && size > maxSize {
 			reason = "max_file_size"
 		} else if r, skip := untrackedGate.skip(lang, path); skip {
