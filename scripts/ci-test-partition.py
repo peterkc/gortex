@@ -115,18 +115,17 @@ def read_race_timings(path, package):
         return "malformed timing JSON"
     if not isinstance(timings, dict):
         return "wrong timing shape: expected package object"
-    for entries in timings.values():
-        if not isinstance(entries, dict) or not entries:
-            return "wrong timing shape: expected nonempty test object"
-        for seconds in entries.values():
-            if (type(seconds) not in (int, float) or seconds < 0
-                    or seconds > sys.float_info.max
-                    or not math.isfinite(seconds)):
-                return ("wrong timing shape: expected finite "
-                        "nonnegative seconds")
     if package not in timings:
         return "no entry for package in timing file"
-    return timings[package]
+    entries = timings[package]
+    if not isinstance(entries, dict) or not entries:
+        return "wrong timing shape: expected nonempty test object"
+    for seconds in entries.values():
+        if (type(seconds) not in (int, float) or seconds < 0
+                or seconds > sys.float_info.max
+                or not math.isfinite(seconds)):
+            return "wrong timing shape: expected finite nonnegative seconds"
+    return entries
 
 
 def plan_duration_shards(names, timings, shard_count):

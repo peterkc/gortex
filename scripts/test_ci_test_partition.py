@@ -150,6 +150,16 @@ class PartitionTests(unittest.TestCase):
                     self.assertEqual(len(conditions), 1)
                     self.assertIn("matrix.partition == 'remaining'",
                                   conditions[0])
+                    warm = [step for step in steps
+                            if step.startswith("name: Warm race cache")]
+                    self.assertEqual(len(warm), 1)
+                    packages = " ".join(
+                        "./" + path.lstrip("/")
+                        for path in planner.RACE_PACKAGES.values())
+                    for flags in ("-race -c", "-race -cover -c"):
+                        self.assertRegex(
+                            warm[0], rf"(?m)go test {flags} -o \S+ "
+                            + re.escape(packages) + "$")
 
     def test_committed_durations_balance_every_race_package(self):
         timings = json.loads(planner.RACE_TIMINGS_PATH.read_text())
@@ -210,6 +220,18 @@ class PartitionTests(unittest.TestCase):
                         self.assertLessEqual(planner.planned_command_units(
                             command + [flag, pattern, "package"]), 650)
 
+    def test_timing_errors_in_another_package_do_not_affect_this_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "timings.json"
+            path.write_text(json.dumps({
+                "example.org/a": {"TestA": "slow"},
+                "example.org/b": {"TestB": 1.5},
+            }))
+            self.assertEqual(planner.read_race_timings(path, "example.org/b"),
+                             {"TestB": 1.5})
+            self.assertIn("wrong timing shape",
+                          planner.read_race_timings(path, "example.org/a"))
+
     def test_main_race_timing_failures_warn_and_keep_count_balance(self):
         package = "example.org/gortex/internal/mcp"
         names = ["TestA", "TestB", "TestC", "TestD", "TestE", "TestF", "TestG"]
@@ -222,7 +244,8 @@ class PartitionTests(unittest.TestCase):
             ("empty-package", json.dumps({package: {}}), "wrong timing shape"),
             ("package-less", "{}", "no entry for package"),
         ]
-        for seconds in ("slow", -1, float("nan"), float("inf"), True):
+        for seconds in ("slow", -1, float("nan"), float("inf"), True,
+                        10 ** 400):
             cases.append((str(seconds), json.dumps({
                 package: {"TestA": seconds}}), "wrong timing shape"))
         for case, content, cause in cases:
