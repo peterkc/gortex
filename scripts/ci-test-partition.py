@@ -10,12 +10,17 @@ import sys
 import time
 from pathlib import Path
 
-SHARDS = {"store": 6, "indexer": 6, "mcp": 3}
+RACE_SHARDS = {"store": 6, "indexer": 6, "mcp": 3}
+PLAIN_SHARDS = {"indexer": 3}
 NAME_BUNDLE = 32
 WINDOWS_COMMAND_BUDGET = 30000
 TEST_EXECUTION_BUDGET_SECONDS = 45 * 60
-LARGE_PACKAGES = {
+RACE_PACKAGES = {
     "store": "/internal/graph/store_sqlite",
+    "indexer": "/internal/indexer",
+    "mcp": "/internal/mcp",
+}
+PLAIN_PACKAGES = {
     "indexer": "/internal/indexer",
     "mcp": "/internal/mcp",
 }
@@ -186,15 +191,21 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--manifest", type=Path, default=Path("test-selection.json"))
     args = parser.parse_args()
-    valid = {"remaining"} | {f"{package}-{index}" for package, count in SHARDS.items() for index in range(count)}
+    windows = os.environ.get("TEST_WINDOWS", "false") == "true"
+    race = (os.environ.get("TEST_RACE", "false" if windows else "true")
+            == "true")
+    shards = RACE_SHARDS if race else PLAIN_SHARDS
+    paths = RACE_PACKAGES if race else PLAIN_PACKAGES
+    valid = ({"remaining"} | (paths.keys() - shards.keys())
+             | {f"{family}-{index}" for family, count in shards.items()
+                for index in range(count)})
     if args.partition not in valid:
         parser.error(f"partition must be one of {sorted(valid)}")
-    windows = os.environ.get("TEST_WINDOWS", "false") == "true"
     module = capture(["go", "list", "-m"]).strip()
     packages = capture(["go", "list", "./..."]).splitlines()
     if not packages or len(packages) != len(set(packages)):
         raise ValueError("package census must be nonempty and unique")
-    package_partitions = {package: next((name for name, suffix in LARGE_PACKAGES.items()
+    package_partitions = {package: next((name for name, suffix in paths.items()
                                         if package == module + suffix), "remaining")
                           for package in packages}
     family = args.partition.split("-", 1)[0]
@@ -203,21 +214,23 @@ def main():
         raise ValueError(f"no packages selected for {args.partition}")
     manifest = {"partition": args.partition, "packages": package_partitions, "selected_packages": selected}
     command = ["go", "test"]
-    if windows:
-        command += ["-v", "-timeout=45m"]
-    else:
+    if race:
         command += ["-race", "-timeout=45m", "-coverprofile=coverage.out"]
-    if family in SHARDS:
+    else:
+        command += (["-v"] if windows else []) + ["-timeout=45m"]
+    if family in shards:
         if len(selected) != 1:
             raise ValueError("a test shard must own exactly one package")
-        census_command = ["go", "test"] + ([] if windows else ["-race"]) + ["-list", ".", selected[0]]
+        census_command = (["go", "test"] + (["-race"] if race else [])
+                          + ["-list", ".", selected[0]])
         census_start = time.monotonic()
         names = test_names(capture(census_command))
         census_seconds = time.monotonic() - census_start
         print(f"census seconds: {census_seconds:.3f}", flush=True)
         manifest["census_seconds"] = census_seconds
         assignments, pattern_chunks, bundle_size = plan_shard_commands(
-            names, census_command[:-3], command, selected[0], shard_count=SHARDS[family])
+            names, census_command[:-3], command, selected[0],
+            shard_count=shards[family])
         # Verify the Python-generated expressions with Go's own test matcher.
         # The per-platform compiled census is the authority for every shard.
         for index, chunks in enumerate(pattern_chunks):
@@ -231,7 +244,7 @@ def main():
         index = int(args.partition.rsplit("-", 1)[1])
         commands = [command + ["-run", pattern] + selected for pattern in pattern_chunks[index]]
         manifest.update(census=names, shards=assignments, pattern_chunks=pattern_chunks,
-                        name_bundle=bundle_size, shard_count=SHARDS[family])
+                        name_bundle=bundle_size, shard_count=shards[family])
         if all(len(chunks) == 1 for chunks in pattern_chunks):
             manifest["patterns"] = [chunks[0] for chunks in pattern_chunks]
         print(f"{selected[0]}: {len(names)} compiled tests/examples/fuzz seeds; "
