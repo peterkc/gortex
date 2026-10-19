@@ -123,6 +123,35 @@ func TestMultiWatcherRefreshesGitignoreMembershipWithoutSourceEdits(t *testing.T
 	require.Empty(t, mi.graph.FindNodesByName("Restored"))
 }
 
+// A managed policy change also reaches the folder rule and the backend
+// filter's anchored-negation check, not only the file rule.
+func TestMultiWatcherRefreshesGitignoreFolderRules(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(root, ".git"), 0o755))
+	gen := filepath.Join(root, "gen")
+	other := filepath.Join(root, "other")
+	require.NoError(t, os.MkdirAll(gen, 0o755))
+	require.NoError(t, os.MkdirAll(other, 0o755))
+	writeFile(t, filepath.Join(gen, "keep.go"), "package gen\n\nfunc GenKept() {}\n")
+	writeFile(t, filepath.Join(gen, "drop.go"), "package gen\n\nfunc GenDropped() {}\n")
+	writeFile(t, filepath.Join(other, "x.go"), "package other\n\nfunc OtherX() {}\n")
+	_, w, reconciled := newGitignoreRefreshWatcher(t, root, root, "# initially allowed\n")
+	filter := &watcherExcludeFilter{w: w}
+	require.True(t, filter.ShouldInclude(gen), "precondition: initial policy admits gen")
+	require.False(t, w.isExcluded(other), "precondition: initial policy admits other")
+
+	// No trailing slash: the backend filter does not stat, so it cannot apply
+	// a folder-only pattern to a path it has not classified.
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".gitignore"), []byte("gen\nother\n!/gen/keep.go\n"), 0o644))
+	require.True(t, filter.ShouldInclude(gen), "an anchored negation under gen must keep its folder event")
+	require.False(t, filter.ShouldInclude(other), "an excluded folder without a negation is dropped")
+	require.False(t, w.isExcluded(gen), "the folder rule must keep gen open for its re-included file")
+	require.True(t, w.isExcluded(other), "the folder rule must use the refreshed policy")
+	require.False(t, w.isExcluded(filepath.Join(gen, "keep.go")))
+	require.True(t, w.isExcluded(filepath.Join(gen, "drop.go")))
+	awaitGitignoreReconcile(t, reconciled)
+}
+
 func awaitGitignoreReconcile(t *testing.T, reconciled <-chan error) {
 	t.Helper()
 	select {
