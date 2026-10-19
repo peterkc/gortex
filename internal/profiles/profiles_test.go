@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/zzet/gortex/internal/toolref"
 )
 
 // Per-profile instruction-body byte ceilings. The body is re-read into
@@ -108,6 +110,24 @@ func TestEveryProfileKeepsPositioningCues(t *testing.T) {
 			if !strings.Contains(body, cue) {
 				t.Errorf("profile %q body lost the positioning cue %q", p.Name, cue)
 			}
+		}
+	}
+}
+
+// TestEveryProfileBoundsTheIntegrationFailureStop pins #900: the "report an
+// integration failure and stop" rule must carry its exception in every
+// profile, so an agent in an untracked directory, or one the user told to
+// proceed without Gortex, continues with native tools instead of refusing.
+func TestEveryProfileBoundsTheIntegrationFailureStop(t *testing.T) {
+	for _, p := range Table() {
+		body := p.Body()
+		stops := strings.Count(body, "integration failure and stop")
+		if stops == 0 {
+			t.Errorf("profile %q lost the tracked-repo integration-failure rule", p.Name)
+		}
+		if got := strings.Count(body, toolref.MCPMissingToolsException); got != stops {
+			t.Errorf("profile %q carries %d stop rule(s) but %d exception(s); every stop must be liftable outside a tracked repo",
+				p.Name, stops, got)
 		}
 	}
 }

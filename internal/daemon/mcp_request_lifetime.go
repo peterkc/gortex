@@ -73,7 +73,15 @@ func (r *mcpRequestRegistry) begin(parent context.Context, id json.RawMessage, t
 	if !valid {
 		return nil, nil, false
 	}
-	ctx, cancel := context.WithTimeout(parent, timeout)
+	var (
+		ctx    context.Context
+		cancel context.CancelFunc
+	)
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(parent, timeout)
+	} else {
+		ctx, cancel = context.WithCancel(parent)
+	}
 	entry := &mcpInFlightRequest{key: key, cancel: cancel}
 
 	r.mu.Lock()
@@ -197,6 +205,11 @@ type mcpDispatchAdmission struct {
 type mcpDispatchAdmissionContextKey struct{}
 type mcpDispatchWaitContextKey struct{}
 type mcpDispatchSlotsContextKey struct{}
+type mcpDispatchUnboundedContextKey struct{}
+
+func isLongLivedMCPRequest(method string) bool {
+	return method == "subscriptions/listen"
+}
 
 func newMCPDispatchAdmission() *mcpDispatchAdmission {
 	return &mcpDispatchAdmission{done: make(chan struct{})}
@@ -208,6 +221,15 @@ func withMCPDispatchAdmission(ctx context.Context, admission *mcpDispatchAdmissi
 
 func withMCPDispatchWait(ctx context.Context) context.Context {
 	return context.WithValue(ctx, mcpDispatchWaitContextKey{}, true)
+}
+
+func withMCPDispatchUnbounded(ctx context.Context) context.Context {
+	return context.WithValue(ctx, mcpDispatchUnboundedContextKey{}, true)
+}
+
+func isMCPDispatchUnbounded(ctx context.Context) bool {
+	unbounded, _ := ctx.Value(mcpDispatchUnboundedContextKey{}).(bool)
+	return unbounded
 }
 
 func withMCPDispatchSlots(ctx context.Context, slots chan struct{}) context.Context {
@@ -232,6 +254,10 @@ func signalMCPDispatchAdmission(ctx context.Context) {
 // cancelled caller returns without waiting for an uncooperative dispatcher;
 // the buffered result lets that dispatcher finish without retaining a waiter.
 func dispatchMCPWithContext(ctx context.Context, dispatch func() ([]byte, error)) ([]byte, error) {
+	if isMCPDispatchUnbounded(ctx) {
+		signalMCPDispatchAdmission(ctx)
+		return dispatch()
+	}
 	slots := mcpDispatchSlotsForContext(ctx)
 	if wait, _ := ctx.Value(mcpDispatchWaitContextKey{}).(bool); wait {
 		select {
@@ -252,9 +278,12 @@ func dispatchMCPWithContext(ctx context.Context, dispatch func() ([]byte, error)
 	result := make(chan mcpDispatchResult, 1)
 	started := make(chan struct{})
 	go func() {
-		defer func() { <-slots }()
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { <-slots }) }
+		defer release() // Retain the slot until an uncooperative handler returns, including panic unwinding.
 		close(started)
 		reply, err := dispatch()
+		release() // A terminal response must not overtake its dispatch capacity release.
 		result <- mcpDispatchResult{reply: reply, err: err}
 	}()
 	<-started
@@ -305,6 +334,10 @@ func serveMCPConnectionWithHooks(conn net.Conn, reader *bufio.Reader, timeout ti
 	}
 	var requests sync.WaitGroup
 	var initializeDone <-chan struct{}
+	var initializedDone <-chan struct{}
+	// At most one request per connection waits for the initialized notification.
+	// Keep the reader free for cancellation without an unbounded pending queue.
+	initializedWaiter := make(chan struct{}, 1)
 	defer func() {
 		connectionCancel()
 		registry.cancelAll()
@@ -321,10 +354,12 @@ func serveMCPConnectionWithHooks(conn net.Conn, reader *bufio.Reader, timeout ti
 		return true
 	}
 
-	launchNotification := func(line []byte, waitFor <-chan struct{}) {
+	launchNotification := func(line []byte, waitFor <-chan struct{}) <-chan struct{} {
+		done := make(chan struct{})
 		requests.Add(1)
 		go func() {
 			defer requests.Done()
+			defer close(done)
 			if waitFor != nil {
 				select {
 				case <-waitFor:
@@ -338,14 +373,20 @@ func serveMCPConnectionWithHooks(conn net.Conn, reader *bufio.Reader, timeout ti
 			notificationCtx := withMCPDispatchWait(connectionCtx)
 			_, _ = dispatch(notificationCtx, line)
 		}()
+		return done
 	}
 
 	launchRequest := func(line []byte, envelope mcpRequestEnvelope, responseID json.RawMessage, tracked bool) {
+		longLived := isLongLivedMCPRequest(envelope.Method)
+		requestTimeout := timeout
+		if longLived {
+			requestTimeout = 0
+		}
 		var requestCtx context.Context
 		var entry *mcpInFlightRequest
 		if tracked {
 			var admitted bool
-			requestCtx, entry, admitted = registry.begin(connectionCtx, responseID, timeout)
+			requestCtx, entry, admitted = registry.begin(connectionCtx, responseID, requestTimeout)
 			if !admitted {
 				write(mcpErrorResponse(responseID, -32600, "duplicate in-flight request id", map[string]any{
 					"outcome":   "duplicate_id",
@@ -355,14 +396,35 @@ func serveMCPConnectionWithHooks(conn net.Conn, reader *bufio.Reader, timeout ti
 			}
 		} else {
 			var cancel context.CancelFunc
-			requestCtx, cancel = context.WithTimeout(connectionCtx, timeout)
+			if requestTimeout > 0 {
+				requestCtx, cancel = context.WithTimeout(connectionCtx, requestTimeout)
+			} else {
+				requestCtx, cancel = context.WithCancel(connectionCtx)
+			}
 			entry = &mcpInFlightRequest{cancel: cancel}
+		}
+		if longLived {
+			requestCtx = withMCPDispatchUnbounded(requestCtx)
 		}
 
 		var initialized chan struct{}
 		if envelope.Method == "initialize" {
 			initialized = make(chan struct{})
 			initializeDone = initialized
+		}
+		var waitForInitialized <-chan struct{}
+		var admissionErr error
+		if initializedDone != nil {
+			select {
+			case <-initializedDone:
+			default:
+				select {
+				case initializedWaiter <- struct{}{}:
+					waitForInitialized = initializedDone
+				default:
+					admissionErr = errMCPDispatchSaturated
+				}
+			}
 		}
 		requestLine := append([]byte(nil), line...)
 		requestID := append(json.RawMessage(nil), responseID...)
@@ -388,8 +450,30 @@ func serveMCPConnectionWithHooks(conn net.Conn, reader *bufio.Reader, timeout ti
 			}
 			defer finish()
 
-			reply, dispatchErr := dispatch(dispatchCtx, requestLine)
+			if waitForInitialized != nil {
+				// The request is registered but has not entered the dispatcher.
+				// Let the reader process cancellation while this bounded waiter
+				// preserves notification-before-tool protocol order.
+				signalMCPDispatchAdmission(dispatchCtx)
+				select {
+				case <-waitForInitialized:
+				case <-requestCtx.Done():
+				}
+				<-initializedWaiter
+			}
+			var reply []byte
+			dispatchErr := admissionErr
+			dispatchInvoked := false
 			if requestErr := requestCtx.Err(); requestErr != nil {
+				dispatchErr = requestErr
+				signalMCPDispatchAdmission(dispatchCtx)
+			} else if dispatchErr != nil {
+				signalMCPDispatchAdmission(dispatchCtx)
+			} else {
+				dispatchInvoked = true
+				reply, dispatchErr = dispatch(dispatchCtx, requestLine)
+			}
+			if requestErr := requestCtx.Err(); requestErr != nil && (!longLived || dispatchErr != nil || len(reply) == 0) {
 				code := mcpRequestCancelledCode
 				message := "request cancelled"
 				data := map[string]any{"outcome": "cancelled"}
@@ -402,7 +486,7 @@ func serveMCPConnectionWithHooks(conn net.Conn, reader *bufio.Reader, timeout ti
 					}
 				}
 				if envelope.Method == "tools/call" {
-					data["delivery_unknown"] = true
+					data["delivery_unknown"] = dispatchInvoked
 					data["retryable"] = false
 				}
 				reply = mcpErrorResponse(requestID, code, message, data)
@@ -479,7 +563,10 @@ func serveMCPConnectionWithHooks(conn net.Conn, reader *bufio.Reader, timeout ti
 			if envelope.Method == "notifications/initialized" {
 				waitFor = initializeDone
 			}
-			launchNotification(append([]byte(nil), line...), waitFor)
+			done := launchNotification(append([]byte(nil), line...), waitFor)
+			if envelope.Method == "notifications/initialized" {
+				initializedDone = done
+			}
 			continue
 		}
 		if _, valid := canonicalMCPRequestID(envelope.ID); !valid {

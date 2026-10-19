@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/zzet/gortex/internal/profiles"
+	"github.com/zzet/gortex/internal/toolref"
 )
 
 // TestCursorMDCFrontmatter proves the MDC wrapper emits the two keys
@@ -64,6 +65,19 @@ func TestInstructionsBody_PolicyCoreAndSingleHome(t *testing.T) {
 	}
 	if len(InstructionsBody) > 3_584 {
 		t.Fatalf("InstructionsBody grew to %d bytes; keep ambient agent guidance lean", len(InstructionsBody))
+	}
+}
+
+// TestInstructionsBody_IntegrationFailureStopIsLiftable pins #900: the stop
+// rule written into AGENTS.md and friends must carry its exception, so an
+// agent in an untracked directory, or one the user told to proceed without
+// Gortex, continues with native tools instead of refusing to work.
+func TestInstructionsBody_IntegrationFailureStopIsLiftable(t *testing.T) {
+	if !strings.Contains(InstructionsBody, "integration failure and stop") {
+		t.Fatal("InstructionsBody lost the tracked-repo integration-failure rule")
+	}
+	if !strings.Contains(InstructionsBody, toolref.MCPMissingToolsException) {
+		t.Fatalf("InstructionsBody stop rule has no untracked-repo / user-override exception %q", toolref.MCPMissingToolsException)
 	}
 }
 
