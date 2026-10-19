@@ -242,6 +242,9 @@ type storeCore struct {
 	analysisViewRevisions     sync.Map
 	constantInputRevisions    sync.Map
 	payloadInputAdminRevision atomic.Uint64
+	// Contract proof history is dormant until a caller reserves a bounded
+	// portion of its existing cache budget. It owns data only, under writeMu.
+	contractProjectionHistory *contractProjectionHistory
 	// analysisLatchRemaining is what the last scoped durable invalidation
 	// left for the latch: whether any view still holds a pointer or a
 	// building analysis. Guarded by writeMu.

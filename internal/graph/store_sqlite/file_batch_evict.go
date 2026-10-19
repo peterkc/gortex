@@ -112,9 +112,11 @@ func (s *Store) evictByPredicateResult(predicate string, arg any, scope evictSco
 	// The binding sidecar follows the node/edge scope: an unscoped sweep would
 	// strand bindings against nodes that no longer exist, and a scoped one must
 	// not touch another generation's bindings for the same path.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM semantic_binding_types WHERE `+scoped, scopeArgs...); err != nil {
+	bindingsResult, err := tx.ExecContext(ctx, `DELETE FROM semantic_binding_types WHERE `+scoped, scopeArgs...)
+	if err != nil {
 		return 0, 0, err
 	}
+	bindingsChanged := semanticBindingWriteChanged(bindingsResult)
 	// File eviction is also used while reparsing. Keep its failure ledger until
 	// the indexer confirms that indexing succeeded or the file was deleted.
 	if predicate == evictRepoPredicate || predicate == evictNonEmptyRepoPredicate {
@@ -137,6 +139,13 @@ func (s *Store) evictByPredicateResult(predicate string, arg any, scope evictSco
 			return 0, 0, err
 		}
 		s.finishAnalysisMutationLocked(false)
+		if bindingsChanged {
+			if scope == evictAllGenerations {
+				s.payloadInputAdminRevision.Add(1)
+			} else {
+				s.noteContractUnknownSemanticBindingsLocked()
+			}
+		}
 		return 0, 0, nil
 	}
 
@@ -248,8 +257,10 @@ func (s *Store) evictByPredicateResult(predicate string, arg any, scope evictSco
 		s.analysisGenerationPresent = s.analysisLatchRemaining
 	}
 	s.finishAnalysisMutationLocked(changed)
-	if changed && scope == evictAllGenerations {
+	if (changed || bindingsChanged) && scope == evictAllGenerations {
 		s.payloadInputAdminRevision.Add(1)
+	} else if bindingsChanged {
+		s.noteContractUnknownSemanticBindingsLocked()
 	}
 	if changed {
 		if receiptDelta != nil && scalarChanges == 0 {

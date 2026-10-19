@@ -74,8 +74,9 @@ func (s *Store) analysisViewCounter(g int64) *atomic.Uint64 {
 // held.
 func (s *Store) bumpAnalysisViewRevision(g int64) {
 	s.analysisMutationRevision.Add(1)
-	s.analysisViewCounter(g).Add(1)
+	revision := s.analysisViewCounter(g).Add(1)
 	s.edgeMutationRevision.Add(1)
+	s.noteContractProjectionMutationLocked(g, revision, contractProjectionMutation{})
 }
 
 // initAnalysisGenerationState makes interrupted builders collectible and
@@ -191,16 +192,21 @@ func invalidateAnalysisGenerationTx(tx *sql.Tx) error {
 
 // finishAnalysisMutationLocked advances the in-process race detector only
 // after a graph mutation committed. writeMu must be held.
-func (s *Store) finishAnalysisMutationLocked(changed bool) {
+func (s *Store) finishAnalysisMutationLocked(changed bool, proof ...contractProjectionMutation) {
 	if changed {
 		s.analysisMutationRevision.Add(1)
-		s.analysisViewCounter(s.viewGen).Add(1)
+		revision := s.analysisViewCounter(s.viewGen).Add(1)
 		// Resolver liveness snapshots need one cheap process-local token for
 		// every committed edge-state change. This hook is intentionally coarse:
 		// node-only changes are safe false positives, while centralising the
 		// bump here covers reindex, attribute, eviction, contract replacement,
 		// and other edge mutation families without N per-row atomics.
 		s.edgeMutationRevision.Add(1)
+		change := contractProjectionMutation{}
+		if len(proof) == 1 {
+			change = proof[0]
+		}
+		s.noteContractProjectionMutationLocked(s.viewGen, revision, change)
 	}
 }
 

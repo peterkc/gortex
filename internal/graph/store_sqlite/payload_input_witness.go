@@ -19,9 +19,9 @@ type PayloadInputWitness struct {
 	revisions []payloadInputRevision
 }
 type payloadInputRevision struct {
-	generation          int64
-	analysis, constants uint64
-	state               string
+	generation                    int64
+	analysis, constants, bindings uint64
+	state                         string
 }
 
 // PayloadInputRevision is an opaque comparable revision of one selected handle.
@@ -90,7 +90,7 @@ func (s *Store) CapturePayloadInputWitness(ctx context.Context, generationIDs []
 				return nil, err
 			}
 		}
-		w.revisions = append(w.revisions, payloadInputRevision{g, s.analysisViewCounter(g).Load(), s.constantInputCounter(g).Load(), state})
+		w.revisions = append(w.revisions, payloadInputRevision{generation: g, analysis: s.analysisViewCounter(g).Load(), constants: s.constantInputCounter(g).Load(), bindings: s.semanticBindingInputCounter(g).Load(), state: state})
 	}
 	sort.Slice(w.revisions, func(i, j int) bool { return w.revisions[i].generation < w.revisions[j].generation })
 	return w, nil
@@ -119,7 +119,7 @@ func (w *PayloadInputWitness) validateLocked(s *Store, ctx context.Context) erro
 				return ErrPayloadInputChanged
 			}
 		}
-		if r.analysis != s.analysisViewCounter(r.generation).Load() || r.constants != s.constantInputCounter(r.generation).Load() {
+		if r.analysis != s.analysisViewCounter(r.generation).Load() || r.constants != s.constantInputCounter(r.generation).Load() || r.bindings != s.semanticBindingInputCounter(r.generation).Load() {
 			return ErrPayloadInputChanged
 		}
 	}
