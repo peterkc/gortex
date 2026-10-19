@@ -158,6 +158,8 @@ type Watcher struct {
 	// backend, relying on the adaptive poller + git hooks instead.
 	degradedNoFsnotify bool
 	excludes           *excludes.Matcher
+	dirIgnoreOnce      sync.Once
+	dirIgnore          *excludes.Hierarchical
 	// currentExcludePatterns is installed by MultiWatcher for its configured
 	// repository. ConfigManager returns immutable, shared policy snapshots.
 	currentExcludePatterns func() []string
@@ -3228,7 +3230,16 @@ func (w *Watcher) isExcluded(path string) bool {
 	if root == "" {
 		return m.MatchRel(filepath.Base(path))
 	}
-	return m.MatchAbs(path, root)
+	info, err := os.Lstat(path)
+	isDir := err == nil && info.IsDir()
+	// Keep watcher reads separate from the indexer's per-directory cache.
+	w.dirIgnoreOnce.Do(func() {
+		w.dirIgnore = excludes.NewHierarchical(root, dirIgnoreFiles...)
+	})
+	if isDir {
+		return shouldPruneDir(path, root, m, w.dirIgnore, true)
+	}
+	return shouldExcludeRules(path, root, false, m, w.dirIgnore)
 }
 
 // currentExcludeMatcher refreshes only when ConfigManager's immutable merged

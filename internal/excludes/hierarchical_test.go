@@ -182,3 +182,41 @@ func TestHierarchical_MultipleFilenames(t *testing.T) {
 		t.Error("c.go should not be excluded")
 	}
 }
+
+func TestHierarchical_HasAnchoredNegatedDescendant(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		file  string
+		rules string
+		dir   string
+		want  bool
+	}{
+		{"unanchored_gitkeep", ".gortexignore", "vendor2/\n!.gitkeep\n", "vendor2/pkg", false},
+		{"unanchored_env", ".gortexignore", "!.env.example\n", "vendor2/pkg", false},
+		{"wildcard_led", ".gortexignore", "!**/.gitkeep\n", "vendor2/pkg", false},
+		{"root_unrelated", ".gortexignore", "!/AGENTS.md\n", "vendor2/pkg", false},
+		{"root_at_root", ".gortexignore", "!/AGENTS.md\n", ".", true},
+		{"anchored", ".gortexignore", "gen/\n!gen/keep.go\n", "gen", true},
+		{"root_anchored", ".gortexignore", "gen/\n!/gen/keep.go\n", "gen", true},
+		{"nested", "sub/.gortexignore", "gen/\n!gen/keep.go\nother/\n", "sub/gen", true},
+		{"nested_unrelated", "sub/.gortexignore", "gen/\n!gen/keep.go\nother/\n", "sub/other", false},
+		{"nested_at_folder", "sub/.gortexignore", "!/AGENTS.md\n", "sub", true},
+		{"nested_scoping", "sub/.gortexignore", "gen/\n!gen/keep.go\n", "gen", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			mkIgnore(t, filepath.Join(root, tc.file), tc.rules)
+			h := NewHierarchical(root, ".gortexignore")
+			if got := h.HasAnchoredNegatedDescendant(filepath.Join(root, tc.dir)); got != tc.want {
+				t.Fatalf("HasAnchoredNegatedDescendant(%q) = %v, want %v", tc.dir, got, tc.want)
+			}
+			if h.HasAnchoredNegatedDescendant(filepath.Join(root, "..", "outside")) {
+				t.Fatal("outside path has no negated descendant")
+			}
+		})
+	}
+	var h *Hierarchical
+	if h.HasAnchoredNegatedDescendant("/anything") || NewHierarchical(t.TempDir()).HasAnchoredNegatedDescendant("/anything") {
+		t.Fatal("nil and empty matchers have no negated descendants")
+	}
+}

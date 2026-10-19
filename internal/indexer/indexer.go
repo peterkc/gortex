@@ -6262,6 +6262,22 @@ func (idx *Indexer) shouldExclude(path, root string, isDir bool) bool {
 // shouldExcludeRules applies the lexical and per-directory ignore rules.
 // Callers must first establish that a file is not an escaping symlink.
 func (idx *Indexer) shouldExcludeRules(path, root string, isDir bool) bool {
+	// Per-directory ignore files are a working-tree fact: the
+	// hierarchical matcher reads them off disk, while a snapshot
+	// source serves a revision whose ignore files may differ from the
+	// checkout's — or not be on disk at all. A snapshot is therefore
+	// admitted by the layered config excludes alone, and an index
+	// built from one should declare that omission in its producer
+	// state rather than claim per-directory ignore coverage it never
+	// had.
+	var perFolder *excludes.Hierarchical
+	if idx.contentSource() == nil {
+		perFolder = idx.dirIgnoreMatcher(root)
+	}
+	return shouldExcludeRules(path, root, isDir, idx.excludeMatcher(), perFolder)
+}
+
+func shouldExcludeRules(path, root string, isDir bool, flat *excludes.Matcher, perFolder *excludes.Hierarchical) bool {
 	// .claude/ and .kiro/ are Builtin-excluded wholesale, but may hold an
 	// MCP server config the MCP-config-as-graph feature targets (the
 	// extractor's own docs name .kiro/mcp.json). Descend those subtrees
@@ -6273,21 +6289,10 @@ func (idx *Indexer) shouldExcludeRules(path, root string, isDir bool) bool {
 		}
 		return !excludes.IsMCPConfigFile(rel)
 	}
-	if m := idx.excludeMatcher(); m != nil && m.MatchAbsDir(path, root, isDir) {
+	if flat != nil && flat.MatchAbsDir(path, root, isDir) {
 		return true
 	}
-	if idx.contentSource() != nil {
-		// Per-directory ignore files are a working-tree fact: the
-		// hierarchical matcher reads them off disk, while a snapshot
-		// source serves a revision whose ignore files may differ from the
-		// checkout's — or not be on disk at all. A snapshot is therefore
-		// admitted by the layered config excludes alone, and an index
-		// built from one should declare that omission in its producer
-		// state rather than claim per-directory ignore coverage it never
-		// had.
-		return false
-	}
-	return idx.dirIgnoreMatcher(root).Match(path, isDir)
+	return perFolder.Match(path, isDir)
 }
 
 // emptyWalkProbeCap bounds the diagnostic re-walk below. It only ever
@@ -6409,18 +6414,33 @@ func (idx *Indexer) warnIfWalkAdmittedNothing(absRoot string, admitted int) {
 // reaches the child. Mirroring git, we keep descending such a directory
 // and let the per-file shouldExclude check filter its contents.
 func (idx *Indexer) shouldPruneDir(path, root string) bool {
-	if !idx.shouldExclude(path, root, true) {
+	// Same snapshot bypass as shouldExcludeRules: do not build a matcher
+	// for working-tree ignore files when indexing a content source.
+	var perFolder *excludes.Hierarchical
+	if idx.contentSource() == nil {
+		perFolder = idx.dirIgnoreMatcher(root)
+	}
+	return shouldPruneDir(path, root, idx.excludeMatcher(), perFolder, false)
+}
+
+func shouldPruneDir(path, root string, flat *excludes.Matcher, perFolder *excludes.Hierarchical, anchoredOnly bool) bool {
+	if !shouldExcludeRules(path, root, true, flat, perFolder) {
 		return false
 	}
-	if m := idx.excludeMatcher(); m != nil {
-		if rel, err := filepath.Rel(root, path); err == nil && m.HasNegatedDescendant(filepath.ToSlash(rel)) {
+	if flat != nil {
+		hasNegatedDescendant := flat.HasNegatedDescendant
+		if anchoredOnly {
+			hasNegatedDescendant = flat.HasAnchoredNegatedDescendant
+		}
+		if rel, err := filepath.Rel(root, path); err == nil && hasNegatedDescendant(filepath.ToSlash(rel)) {
 			return false
 		}
 	}
-	// Same bypass as shouldExclude: under a snapshot source the
-	// per-directory ignore files are not part of the decision, so the
-	// matcher is not built at all.
-	if idx.contentSource() == nil && idx.dirIgnoreMatcher(root).HasNegatedDescendant(path) {
+	hasNegatedDescendant := perFolder.HasNegatedDescendant
+	if anchoredOnly {
+		hasNegatedDescendant = perFolder.HasAnchoredNegatedDescendant
+	}
+	if hasNegatedDescendant(path) {
 		return false
 	}
 	return true

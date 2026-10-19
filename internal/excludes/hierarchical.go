@@ -111,6 +111,17 @@ func (h *Hierarchical) Explain(absPath string, isDir bool) (bool, string, string
 // the per-directory counterpart of Matcher.HasNegatedDescendant. absDir
 // is an absolute directory path; a path outside the root never matches.
 func (h *Hierarchical) HasNegatedDescendant(absDir string) bool {
+	return h.hasNegatedDescendant(absDir, false)
+}
+
+// HasAnchoredNegatedDescendant is the per-directory counterpart of
+// Matcher.HasAnchoredNegatedDescendant, with each ignore file's patterns
+// relative to its own directory.
+func (h *Hierarchical) HasAnchoredNegatedDescendant(absDir string) bool {
+	return h.hasNegatedDescendant(absDir, true)
+}
+
+func (h *Hierarchical) hasNegatedDescendant(absDir string, anchoredOnly bool) bool {
 	if h == nil || len(h.filenames) == 0 {
 		return false
 	}
@@ -129,7 +140,7 @@ func (h *Hierarchical) HasNegatedDescendant(absDir string) bool {
 	// every ancestor matcher (and absDir's own) with absDir expressed
 	// relative to that ancestor.
 	dir := h.root
-	if h.dirMatcher(dir).HasNegatedDescendant(relUnder(dir, absDir)) {
+	if h.dirMatcher(dir).hasNegatedDescendant(relUnder(dir, absDir), anchoredOnly) {
 		return true
 	}
 	if rel == "." || rel == "" {
@@ -137,7 +148,7 @@ func (h *Hierarchical) HasNegatedDescendant(absDir string) bool {
 	}
 	for _, seg := range strings.Split(rel, "/") {
 		dir = filepath.Join(dir, seg)
-		if h.dirMatcher(dir).HasNegatedDescendant(relUnder(dir, absDir)) {
+		if h.dirMatcher(dir).hasNegatedDescendant(relUnder(dir, absDir), anchoredOnly) {
 			return true
 		}
 	}
