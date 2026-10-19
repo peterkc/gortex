@@ -94,3 +94,37 @@ func TestGenerationLayerExactDeclarationsPreserveContextBaseAndMasks(t *testing.
 		t.Fatalf("generation overlay batch = %v err=%v", got, err)
 	}
 }
+
+func TestGenerationLayerRepoDeclarationsPreserveContextBaseAndMasks(t *testing.T) {
+	store, err := store_sqlite.Open(filepath.Join(t.TempDir(), "generation.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	base := []*graph.Node{
+		{ID: "repo/context.go::fn", Name: "Shared", RepoPrefix: "repo", FilePath: "repo/context.go"},
+		{ID: "repo/covered.go::old", Name: "Shared", RepoPrefix: "repo", FilePath: "repo/covered.go"},
+		{ID: "repo/deleted.go::old", Name: "Shared", RepoPrefix: "repo", FilePath: "repo/deleted.go"},
+		{ID: "foreign/file.go::other", Name: "Shared", RepoPrefix: "foreign", FilePath: "foreign/file.go"},
+	}
+	if err := store.AddBatchChecked(base, nil); err != nil {
+		t.Fatal(err)
+	}
+	h := store.AtGeneration(41)
+	if err := h.AddBatchChecked([]*graph.Node{base[0], {ID: "repo/covered.go::new", Name: "Shared", RepoPrefix: "repo", FilePath: "repo/covered.go"}, {ID: "foreign/new.go::other", Name: "Shared", RepoPrefix: "foreign", FilePath: "foreign/new.go"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	layer := &GenerationLayer{handle: h, contextPaths: map[string]struct{}{"repo/context.go": {}}, covered: map[string]store_sqlite.OwnershipMode{"repo/covered.go": store_sqlite.OwnershipReplace, "repo/deleted.go": store_sqlite.OwnershipDelete}}
+	view := graph.NewOverlaidViewWithLayer(store, layer)
+	var got []string
+	if err := graph.VisitNodeDeclarationsByNamesInRepoContext(t.Context(), view, []string{"Shared", "Missing"}, "repo", func(n *graph.Node) bool { got = append(got, n.ID); return true }); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, []string{"repo/covered.go::new", "repo/context.go::fn"}) {
+		t.Fatalf("selected=%v", got)
+	}
+	seen := 0
+	if err := graph.VisitNodeDeclarationsByNamesInRepoContext(t.Context(), view, []string{"Shared"}, "repo", func(*graph.Node) bool { seen++; return false }); err != nil || seen != 1 {
+		t.Fatalf("stop=%d err=%v", seen, err)
+	}
+}

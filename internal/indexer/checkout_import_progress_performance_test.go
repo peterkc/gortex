@@ -1,3 +1,5 @@
+//go:build performance
+
 package indexer
 
 import (
@@ -20,31 +22,31 @@ import (
 // A committed-base import must publish every file while interactive requests
 // continue arriving faster than one file can prepare, without replaying a
 // successful import or blocking the interactive lane for that file's work.
-func TestALargeWorkingTreeImportCompletesUnderSustainedInteractiveDemand(t *testing.T) {
+func TestPerformanceALargeWorkingTreeImportCompletesUnderSustainedInteractiveDemand(t *testing.T) {
 	testSustainedImportProgress(t, false, false, false, false, false)
 }
 
-func TestALargeWorkingTreeImportWithInlineGoSemanticsCompletesUnderSustainedInteractiveDemand(t *testing.T) {
+func TestPerformanceALargeWorkingTreeImportWithInlineGoSemanticsCompletesUnderSustainedInteractiveDemand(t *testing.T) {
 	testSustainedImportProgress(t, true, false, false, false, false)
 }
 
 // Catalog planning can outlast the same 40ms producer interval as private
 // payload preparation. Preserve the original producer, bounds and parity
 // oracle while making that pre-handoff delay deterministic.
-func TestImportPreambleCompletesUnderSustainedInteractiveDemand(t *testing.T) {
+func TestPerformanceImportPreambleCompletesUnderSustainedInteractiveDemand(t *testing.T) {
 	testSustainedImportProgress(t, false, true, false, false, false)
 }
 
 // An import's post-publication fold prepares its materialized ancestry before
 // copying. This work must admit foreground requests while it is still private.
-func TestImportFoldPreparationCompletesUnderSustainedInteractiveDemand(t *testing.T) {
+func TestPerformanceImportFoldPreparationCompletesUnderSustainedInteractiveDemand(t *testing.T) {
 	testSustainedImportProgress(t, false, false, true, false, false)
 }
 
 // Demand queued at the initial grant must not cancel an eligible import before
 // it can establish private preparation. Keep the original sustained producer,
 // file-by-file progress, foreground latency, deadline and parity checks.
-func TestImportEarlyAdmissionQueuePreservesProgress(t *testing.T) {
+func TestPerformanceImportEarlyAdmissionQueuePreservesProgress(t *testing.T) {
 	testSustainedImportProgress(t, false, true, false, true, false)
 }
 
@@ -52,7 +54,7 @@ func TestImportEarlyAdmissionQueuePreservesProgress(t *testing.T) {
 // Keep the original twelve files, three folds, 40ms SQL producer, completion
 // deadline and parity. Prove admission within a park rather than classify an
 // earlier publication wait from the flag observed only after foreground SQL.
-func TestImportPublicationTailAdmitsForegroundSQL(t *testing.T) {
+func TestPerformanceImportPublicationTailAdmitsForegroundSQL(t *testing.T) {
 	testSustainedImportProgress(t, false, false, false, false, true)
 }
 

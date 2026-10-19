@@ -194,15 +194,17 @@ func (s *Store) restartWALInPlaceOn(ctx context.Context, conn *sql.Conn, result 
 	if err != nil {
 		return err
 	}
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return err
-	}
+	// ExecContext can report cancellation after SQLite applied BEGIN. Own
+	// rollback before issuing it, including that ambiguous error boundary.
 	committed := false
 	defer func() {
 		if !committed {
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
 	var version int64
 	if err := conn.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return err
@@ -259,10 +261,11 @@ func (s *Store) shrinkWALSliceOnce(ctx context.Context, ckptDB *sql.DB, slice in
 	defer conn.Close()
 	// BEGIN IMMEDIATE takes SQLite's WAL write lock: no connection of any
 	// pool can append a frame past the end read below until the ROLLBACK.
+	// The statement may have applied even when its context reports an error.
+	defer func() { _, _ = conn.ExecContext(context.Background(), `ROLLBACK`) }()
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
 		return out, err
 	}
-	defer func() { _, _ = conn.ExecContext(context.Background(), `ROLLBACK`) }()
 	var pageSize int64
 	if err := conn.QueryRowContext(ctx, `PRAGMA page_size`).Scan(&pageSize); err != nil {
 		return out, err

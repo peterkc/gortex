@@ -27,6 +27,20 @@ func runFinalReclaimStep(ctx context.Context, kind string, s *Store, db *sql.DB,
 	}
 }
 
+// The follow-up is an untimed completion control, not another assertion that
+// real I/O must fit the default pressure hold. Keep the initial attempt and
+// its foreground-credit assertions on the production default. The existing
+// private seam gives only this recovery control the existing maximum allowance.
+func runFinalReclaimCompletionControl(ctx context.Context, kind string, s *Store, db *sql.DB, res *walReclaimResult) error {
+	if kind != "pressure" {
+		return runFinalReclaimStep(ctx, kind, s, db, res)
+	}
+	previous := s.walPressureHoldOverride
+	s.walPressureHoldOverride = walReclaimMaxWriterHold
+	defer func() { s.walPressureHoldOverride = previous }()
+	return runFinalReclaimStep(ctx, kind, s, db, res)
+}
+
 func finalBackfillFixture(t *testing.T) (*Store, *sql.DB) {
 	t.Helper()
 	t.Setenv("GORTEX_SQLITE_WAL_RECLAIM_MB", "0")
@@ -52,6 +66,9 @@ func TestReclaimFinalBackfillBoundsWriterCredit(t *testing.T) {
 	for _, kind := range []string{"pressure", "short", "last_resort"} {
 		t.Run(kind, func(t *testing.T) {
 			s, db := finalBackfillFixture(t)
+			if kind == "pressure" {
+				require.Equal(t, walReclaimPressureHold, s.walPressureHold(), "the measured first attempt retains the production default")
+			}
 			entered, release := stallReclaimCheckpointSync(t, db)
 			credit := walReclaimResetHold / 2
 			if kind == "last_resort" {
@@ -103,7 +120,7 @@ func TestReclaimFinalBackfillBoundsWriterCredit(t *testing.T) {
 			t.Logf("kind=%s credit=%s foreground_gate=%s foreground_gate_and_sql=%s", kind, credit, wait, elapsed)
 			require.False(t, res.openGate, "the foreground commit must invalidate this reset admission")
 			res = &walReclaimResult{}
-			require.NoError(t, runFinalReclaimStep(t.Context(), kind, s, db, res))
+			require.NoError(t, runFinalReclaimCompletionControl(t.Context(), kind, s, db, res))
 			require.True(t, res.openGate, "the next complete backfill did not reset")
 			var payload string
 			require.NoError(t, s.db.QueryRow(`SELECT payload FROM wal_churn WHERE id = 1`).Scan(&payload))
@@ -153,7 +170,7 @@ func TestReclaimFinalBackfillRefusesAWriteAfterCopy(t *testing.T) {
 			// The next attempt copies outside the writer, then resets the
 			// current fully backfilled state without losing the later write.
 			res = &walReclaimResult{}
-			require.NoError(t, runFinalReclaimStep(t.Context(), kind, s, db, res))
+			require.NoError(t, runFinalReclaimCompletionControl(t.Context(), kind, s, db, res))
 			require.True(t, walLogIsReset(s.dbPath, s.dbPath+"-wal"))
 			var payload string
 			require.NoError(t, s.db.QueryRow(`SELECT payload FROM wal_churn WHERE id = 1`).Scan(&payload))

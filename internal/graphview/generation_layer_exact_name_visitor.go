@@ -64,3 +64,23 @@ func (l *GenerationLayer) VisitNodeDeclarationsByNamesContext(ctx context.Contex
 		return yield(node)
 	})
 }
+
+// VisitNodeDeclarationsByNamesInRepoContext applies ownership in the existing
+// physical checked reader before decoding, retaining this generation's mask.
+func (l *GenerationLayer) VisitNodeDeclarationsByNamesInRepoContext(ctx context.Context, names []string, repo string, yield func(*graph.Node) bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if yield == nil {
+		return nil
+	}
+	return l.handle.VisitNodeDeclarationsByNamesInRepoContext(ctx, names, repo, func(node *graph.Node) bool {
+		if !l.servesNode(node) {
+			return true
+		}
+		return yield(node)
+	})
+}

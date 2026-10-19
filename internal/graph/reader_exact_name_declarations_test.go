@@ -116,3 +116,55 @@ func TestDeltaWriterDeclarationFallbackPreservesOwnedNames(t *testing.T) {
 		t.Fatalf("cancellation=%v", err)
 	}
 }
+
+type scopedDeclarationGuardLayer struct {
+	*OverlayLayer
+	cause error
+	broad int
+}
+
+func (l *scopedDeclarationGuardLayer) VisitNodesByNamesInRepoContext(context.Context, []string, string, func(*Node) bool) error {
+	return l.cause
+}
+func (l *scopedDeclarationGuardLayer) VisitNodeDeclarationsByNamesContext(context.Context, []string, func(*Node) bool) error {
+	l.broad++
+	return nil
+}
+
+func TestExactNameDeclarationRepoChainKeepsMasksAndRefusal(t *testing.T) {
+	base := New()
+	base.AddBatch([]*Node{
+		{ID: "repo/covered.go::old", Name: "Match", RepoPrefix: "repo", FilePath: "repo/covered.go"},
+		{ID: "repo/deleted.go::old", Name: "Match", RepoPrefix: "repo", FilePath: "repo/deleted.go"},
+		{ID: "repo/visible.go::kept", Name: "Match", RepoPrefix: "repo", FilePath: "repo/visible.go"},
+		{ID: "foreign/file.go::other", Name: "Match", RepoPrefix: "foreign", FilePath: "foreign/file.go"},
+	}, nil)
+	layer := NewOverlayLayer()
+	layer.MarkFile("repo/covered.go", false)
+	layer.MarkFile("repo/deleted.go", true)
+	layer.AddNode("repo/covered.go", &Node{ID: "repo/covered.go::new", Name: "Match", RepoPrefix: "repo", FilePath: "repo/covered.go"})
+	view := NewOverlaidViewWithLayer(base, layer)
+	var got []string
+	if err := VisitNodeDeclarationsByNamesInRepoContext(t.Context(), view, []string{"Match", "Missing"}, "repo", func(n *Node) bool { got = append(got, n.ID); return true }); err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, []string{"repo/covered.go::new", "repo/visible.go::kept"}) {
+		t.Fatalf("selected=%v", got)
+	}
+	seen := 0
+	if err := VisitNodeDeclarationsByNamesInRepoContext(t.Context(), view, []string{"Match"}, "repo", func(*Node) bool { seen++; return false }); err != nil || seen != 1 {
+		t.Fatalf("stop=%d err=%v", seen, err)
+	}
+	cause := errors.New("scoped layer unavailable")
+	guard := &scopedDeclarationGuardLayer{OverlayLayer: NewOverlayLayer(), cause: cause}
+	broken := NewOverlaidViewWithLayer(base, guard)
+	if err := VisitNodeDeclarationsByNamesInRepoContext(t.Context(), broken, []string{"Match"}, "repo", func(*Node) bool { t.Fatal("guard bypassed"); return true }); !errors.Is(err, cause) || guard.broad != 0 {
+		t.Fatalf("scope guard=%v broad=%d", err, guard.broad)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := VisitNodeDeclarationsByNamesInRepoContext(ctx, view, []string{"Match"}, "repo", func(*Node) bool { t.Fatal("cancelled lookup delivered row"); return true }); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+}

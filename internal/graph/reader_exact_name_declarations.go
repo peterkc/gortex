@@ -104,3 +104,60 @@ func VisitNodeDeclarationsByNamesInRepoContext(ctx context.Context, reader Reade
 	}
 	return VisitNodeDeclarationsByNamesContext(ctx, reader, names, owned)
 }
+
+// VisitNodeDeclarationsByNamesInRepoContext keeps repository ownership at each
+// checked physical reader rather than decoding foreign rows in every layer.
+// File and identity masks still apply to the selected base rows. Unknown
+// layers keep their checked declaration/full fallback, including refusals.
+func (v *OverlaidView) VisitNodeDeclarationsByNamesInRepoContext(ctx context.Context, names []string, repo string, yield func(*Node) bool) error {
+	ctx = normalizeNameLookupContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if yield == nil || len(names) == 0 {
+		return nil
+	}
+	stopped := false
+	forward := func(node *Node) bool {
+		if ctx.Err() != nil {
+			stopped = true
+			return false
+		}
+		if node == nil || node.RepoPrefix != repo {
+			return true
+		}
+		if !yield(node) {
+			stopped = true
+			return false
+		}
+		return true
+	}
+	if v.layer != nil {
+		var err error
+		if visitor, ok := v.layer.(interface {
+			VisitNodeDeclarationsByNamesInRepoContext(context.Context, []string, string, func(*Node) bool) error
+		}); ok {
+			err = visitor.VisitNodeDeclarationsByNamesInRepoContext(ctx, names, repo, forward)
+		} else if visitor, ok := v.layer.(repoExactNamesContextVisitor); ok {
+			// A checked repository wrapper takes precedence over a broad projection.
+			err = visitor.VisitNodesByNamesInRepoContext(ctx, names, repo, forward)
+		} else {
+			err = (&OverlaidView{layer: v.layer}).VisitNodeDeclarationsByNamesContext(ctx, names, forward)
+		}
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if stopped {
+			return nil
+		}
+	}
+	return VisitNodeDeclarationsByNamesInRepoContext(ctx, v.base, names, repo, func(node *Node) bool {
+		if !v.baseNodeVisible(node) {
+			return true
+		}
+		return forward(node)
+	})
+}
