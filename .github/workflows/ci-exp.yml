@@ -58,7 +58,9 @@ jobs:
         run: go test -run '^$' ./...
       - name: Test
         shell: bash
-        run: go test -work -count=1 -timeout=100m ./... 2>&1 | tee test.txt
+        # No -count=1: an uncacheable run writes no testlog. The restored
+        # cache holds no non-race results, so every package still runs.
+        run: go test -work -timeout=100m ./... 2>&1 | tee test.txt
       - name: Keep the test input logs (which repo files each package reads)
         if: always()
         shell: bash
