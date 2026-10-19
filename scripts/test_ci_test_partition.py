@@ -1,9 +1,12 @@
+import contextlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import random
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -201,6 +204,32 @@ class PartitionTests(unittest.TestCase):
                 self.assertEqual(log.call_args_list, [
                     mock.call(line, end="", flush=True)
                     for line in process.stdout])
+
+    def test_json_output_tees_a_real_child_and_keeps_its_exit_status(self):
+        script = ("import sys; print('{\"Action\":\"run\"}'); "
+                  "sys.exit(int(sys.argv[1]))")
+        for returncode in (0, 7):
+            command = [sys.executable, "-c", script, str(returncode)]
+            with self.subTest(returncode=returncode), \
+                    tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "go-test.json"
+                echoed = io.StringIO()
+                with contextlib.redirect_stdout(echoed):
+                    if returncode:
+                        with self.assertRaises(
+                                subprocess.CalledProcessError) as caught:
+                            planner.run_commands(
+                                [command], {},
+                                Path(directory) / "selection.json",
+                                json_path=str(path))
+                        self.assertEqual(caught.exception.returncode, 7)
+                    else:
+                        planner.run_commands(
+                            [command], {},
+                            Path(directory) / "selection.json",
+                            json_path=str(path))
+                self.assertEqual(path.read_text(), '{"Action":"run"}\n')
+                self.assertEqual(echoed.getvalue(), '{"Action":"run"}\n')
 
     def test_main_records_census_seconds(self):
         package = "example.org/gortex/internal/indexer"
