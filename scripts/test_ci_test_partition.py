@@ -18,6 +18,13 @@ spec.loader.exec_module(planner)
 
 
 class PartitionTests(unittest.TestCase):
+    def setUp(self):
+        environment = mock.patch.dict(planner.os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        for name in ("TEST_RACE", "TEST_WINDOWS"):
+            planner.os.environ.pop(name, None)
+
     def names(self, count=90):
         randomizer = random.Random(806)
         return sorted("Test" + "".join(randomizer.choices("ABCDEFGHIJKLMNOPQRSTUVWXYZ", k=40))
