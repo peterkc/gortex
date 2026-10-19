@@ -52,10 +52,20 @@ func ConcreteCLIFallback(tool string) (string, bool) {
 	return example, ok
 }
 
+// MCPMissingToolsException bounds the "integration failure, stop" rule to
+// where it belongs: indexed code in a Gortex-tracked repo. In a directory no
+// tracked repo covers (an agent-created clone, a scratch checkout) the graph
+// tools are legitimately absent, and an explicit user instruction to proceed
+// without Gortex must win; otherwise the guidance is a hard stop the user
+// cannot lift (#900). The instruction profiles, the shared agent
+// InstructionsBody, and MCPRequiredLine append this sentence verbatim.
+const MCPMissingToolsException = "Outside a Gortex-tracked repo, or when the user says to proceed without Gortex, say so once and continue with native tools."
+
 // MCPRequiredLine is the standard transport rule appended to guidance emitted
 // by hooks installed for an MCP-capable profile. A configured server whose
 // tools are absent from the model's callable manifest is a host integration
-// failure, not permission to launch infrastructure or switch transports.
+// failure, not permission to launch infrastructure or switch transports —
+// except outside a tracked repo or on an explicit user override.
 func MCPRequiredLine() string {
-	return "  - Native Gortex MCP is mandatory for this profile. If a referenced Gortex tool is missing from the callable MCP tools despite the server being configured, surface a Gortex MCP integration failure to the user and stop. Do not start a daemon or use any CLI/shell fallback.\n"
+	return "  - Native Gortex MCP is mandatory for this profile. If a referenced Gortex tool is missing from the callable MCP tools despite the server being configured, surface a Gortex MCP integration failure to the user and stop. Do not start a daemon or use any CLI/shell fallback. " + MCPMissingToolsException + "\n"
 }

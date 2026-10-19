@@ -47,15 +47,21 @@ func TestPropertyConfigPersistenceRoundTrip(t *testing.T) {
 		for i := 0; i < numOps; i++ {
 			// Generate a repo path (use temp dir subdirectories as absolute paths).
 			repoName := rapid.StringMatching(`[a-z]{2,8}`).Draw(rt, "repoName")
-			repoPath := filepath.Join(dir, "repos", repoName)
+			// Generated names such as "nul" are Windows devices. The property
+			// needs real directories; every generated suffix remains represented.
+			repoPath := filepath.Join(dir, "repos", "repo-"+repoName)
 
 			isTrack := rapid.Bool().Draw(rt, "isTrack")
 
 			if isTrack {
 				// Create the directory so AddRepo can resolve it.
-				_ = os.MkdirAll(repoPath, 0o755)
+				if err := os.MkdirAll(repoPath, 0o755); err != nil {
+					rt.Fatalf("create valid repository directory: %v", err)
+				}
 				entry := config.RepoEntry{Path: repoPath}
-				_ = gc.AddRepo(entry)
+				if err := gc.AddRepo(entry); err != nil {
+					rt.Fatalf("track valid repository directory: %v", err)
+				}
 				tracked[repoPath] = true
 			} else {
 				// Untrack: try to remove. If it wasn't tracked, RemoveRepo returns error — that's fine.

@@ -44,6 +44,8 @@ mcp:
 
 # daemon:
 #   http_addr: 127.0.0.1:7411         # Opt in to /mcp + /v1 over HTTP (unset: socket only)
+#   log_max_size: 50                  # Rotate daemon.log at this many MB (0 disables)
+#   log_max_backups: 3                # Number of rotated logs to retain (minimum 1)
 
 exclude:                            # Applies to every tracked repo
   - "**/*.generated.*"
@@ -84,6 +86,35 @@ workspace where every repository opts out to avoid the scans entirely.
 
 ## Daemon tuning (optional)
 
+The background daemon writes JSON lines to `daemon.log` and rotates it while
+running. In the global config, `daemon.log_max_size` sets the size in MB
+(default `50`, where 1 MB = 1,048,576 bytes). `daemon.log_max_backups` sets the
+number of timestamped backups to retain (default `3`, minimum `1`). Out-of-range
+integers warn and use the default for that setting. A non-integer value such as
+`log_max_size: many` makes the global config fail to load; the daemon warns and
+uses the default log policy. Collectors should follow `daemon.log` by name
+(`tail -F` style), because rotation renames the file. On upgrade, a large legacy
+`daemon.log` becomes the newest backup; it can be deleted by hand.
+
+Launchers capture crashes and other output in `daemon.stderr.log`, in the same
+directory. Existing Unix and Windows installs that inherit `daemon.log` handles
+are redirected there automatically when rotation is enabled; no reinstall is
+needed for those installs.
+New Windows Task Scheduler logon tasks explicitly enable log capture: rotating
+JSON goes to `daemon.log`, and raw stdout/stderr and Go runtime panic output go
+to `daemon.stderr.log`. Reinstall an existing scheduled task with
+`gortex daemon install-service` to capture logs in these files; an old task
+captures no logs. Other Windows starts keep
+their output destinations, including terminals, pipes, shell redirections, CI
+captures, and third-party service wrappers such as NSSM and WinSW.
+
+If inherited descriptors cannot be redirected, the daemon warns and keeps stderr
+logging without rotation. Setting `daemon.log_max_size: 0` also keeps stderr
+logging without rotation and leaves existing descriptors unchanged, so legacy
+installs continue writing to their inherited destination, including `daemon.log`.
+New launchers and new Windows logon tasks capture both JSON and raw output in
+`daemon.stderr.log` when rotation is disabled.
+
 The daemon's defaults handle typical workflows without configuration. These knobs exist for monorepos, branch-heavy workflows, or filesystems without fsnotify support.
 
 ```yaml
@@ -112,7 +143,7 @@ Environment variables:
 - `GORTEX_WARMUP_FORCE_ENRICH=1` — bypass the persisted per-repo enrichment-completion markers and re-run semantic enrichment for every repo on warm restart, even ones whose marker already matches HEAD on a clean tree.
 - `GORTEX_DAEMON_HTTP_ADDR` — TCP listen address for the daemon HTTP surface (`/mcp` + `/v1`), e.g. `127.0.0.1:7411`. Overrides the `daemon.http_addr` global config value; a non-empty `--http-addr` flag wins over both. Resolved at startup only. Unset in all three leaves HTTP disabled. Non-loopback binds require `--http-auth-token` or `GORTEX_DAEMON_HTTP_TOKEN`.
 - `GORTEX_DAEMON_MEMLIMIT` — standing soft memory limit installed at daemon boot, as a human size (`4GiB`, `2048MiB`, `2G`) or `off` / `0` to disable. The daemon is a long-lived background service; a soft limit makes the GC pace against a ceiling and resist heap balloon growth rather than letting the high-water climb toward machine RAM. Overrides the `daemon.memory_limit` config value; an explicit `GOMEMLIMIT` overrides both (the runtime already honors it). Unset applies the default policy: a quarter of host RAM, clamped to `[1GiB, 8GiB]`. The cold-index window temporarily raises this to a larger budget and restores it afterward.
-- `GORTEX_POTION=0` — pin the rerank semantic-cosine channel to the small baked GloVe word vectors instead of the bundled `potion-code-16M-v2` code model, saving roughly 31 MiB of resident heap at the cost of natural-language rerank quality. The code model is loaded on the first search that reranks, independently of the `embedding:` section (that drives vector indexing; this drives rerank scoring), and is dropped again after 30 minutes with no rerank traffic. The supported config form is `search.rerank_embedder: false`, which disables the channel entirely.
+- `GORTEX_POTION=0` — pin the rerank semantic-cosine channel to the small baked GloVe word vectors instead of the bundled `potion-code-16M-v2` code model, saving roughly 31 MiB of resident heap at the cost of natural-language rerank quality. For symbol search, natural-language and other nonliteral queries can initialize the model; symbol, path, and signature queries only reuse an already loaded provider. The effective `query_class` override controls this choice. Other reranking consumers retain their existing initialization behavior. This is independent of the `embedding:` section (that drives vector indexing; this drives rerank scoring), and the provider is dropped after 30 minutes with no rerank traffic. The supported config form is `search.rerank_embedder: false`, which disables the channel entirely.
 - `GORTEX_TRIGRAM_MAX_MB` — ceiling on the summed estimated heap of every live trigram searcher (default `256`; `0` disables the byte ceiling). The trigram index is the in-memory literal-search structure behind `search_text` / `find_declaration`, built lazily per repo on first use. A count cap alone does not bound it — three indexes of an arbitrarily large repo is still arbitrarily large — so this is the rule that makes the worst case a number. `gortex daemon status` prints a `trigram` line with the live count, current heap and the active budget.
 - `GORTEX_TRIGRAM_MAX_LIVE` — how many repos may hold a built trigram index at once (default `3`). `0` means never build one: every text search then streams over the repo's known file list, holding no index state at the cost of scan latency. Binary files are excluded from the index and from literal search regardless of these settings.
 - `GORTEX_TRIGRAM_IDLE_TTL` — how long an unused trigram index is kept before it is dropped (default `10m`, any Go duration string). A repo being actively grepped re-touches its entry on every query, so the TTL only reclaims repos that have gone quiet.

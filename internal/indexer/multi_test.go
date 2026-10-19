@@ -39,6 +39,17 @@ func newTestRegistry() *parser.Registry {
 	return reg
 }
 
+var errInjectedCensusPanic = errors.New("injected census panic")
+
+// panickingTransform panics when the census asks it to re-type a file whose
+// extension no extractor claims.
+type panickingTransform struct{}
+
+func (panickingTransform) name() string                               { return "panicking" }
+func (panickingTransform) matches(string) bool                        { return true }
+func (panickingTransform) apply(_ string, src []byte) ([]byte, error) { return src, nil }
+func (panickingTransform) asLanguage() string                         { panic(errInjectedCensusPanic) }
+
 func TestReconcilePhaseTimingOutcomes(t *testing.T) {
 	for _, outcome := range []string{"complete", "error", "aborted"} {
 		t.Run(outcome, func(t *testing.T) {
@@ -77,8 +88,17 @@ func TestReconcilePhaseTimingOutcomes(t *testing.T) {
 	}
 }
 
+type reconcileCensusPanicStore struct {
+	graph.Store
+	panicValue string
+}
+
+func (s *reconcileCensusPanicStore) RepoNodesByKindsWithMetaKey(string, string, []graph.NodeKind, string) []*graph.Node {
+	panic(s.panicValue)
+}
+
 func TestReconcileCensusTiming(t *testing.T) {
-	for _, mode := range []string{"clean", "changed", "missing", "panic"} {
+	for _, mode := range []string{"clean", "changed", "missing", "panic", "panic_language"} {
 		t.Run(mode, func(t *testing.T) {
 			dir := setupRepoDir(t, "census")
 			core, logs := observer.New(zap.InfoLevel)
@@ -95,13 +115,26 @@ func TestReconcileCensusTiming(t *testing.T) {
 			if mode == "missing" {
 				dir = filepath.Join(dir, "missing")
 			}
-			if mode == "panic" {
-				// Inject a parser lookup panic; the telemetry must not claim a
-				// successful no-op merely because the named error is still nil.
-				registry := idx.registry
-				idx.registry = nil
-				defer func() { idx.registry = registry }()
-				require.Panics(t, func() { _, _, _, _ = idx.changedSinceMtimesCensus(dir) })
+			if mode == "panic" || mode == "panic_language" {
+				if mode == "panic" {
+					// Inject an explicit Go panic after the census timing defer;
+					// no hardware exception is needed to test aborted telemetry.
+					// The telemetry must not claim a successful no-op merely
+					// because the named error is still nil.
+					const panicValue = "injected census projection panic"
+					store := idx.graph
+					idx.graph = &reconcileCensusPanicStore{Store: store, panicValue: panicValue}
+					defer func() { idx.graph = store }()
+					require.PanicsWithValue(t, panicValue, func() { _, _, _, _ = idx.changedSinceMtimesCensus(dir) })
+				} else {
+					// Inject a language lookup panic; the telemetry must not claim a
+					// successful no-op merely because the named error is still nil.
+					// The panic is an ordinary one: a recovered nil dereference can
+					// corrupt the Go heap on some Windows runners (golang/go#81238).
+					require.NoError(t, os.WriteFile(filepath.Join(dir, "census.unknownext"), []byte("x"), 0o644))
+					idx.transforms.transforms = append(idx.transforms.transforms, panickingTransform{})
+					require.PanicsWithValue(t, errInjectedCensusPanic, func() { _, _, _, _ = idx.changedSinceMtimesCensus(dir) })
+				}
 				entries := logs.FilterMessage("indexer: reconcile phase complete").All()
 				require.Len(t, entries, 1)
 				fields := entries[0].ContextMap()
