@@ -43,6 +43,7 @@ jobs:
         env:
           TEST_PARTITION: ${{ matrix.partition }}
           TEST_WINDOWS: ${{ matrix.os == 'windows-latest' }}
+          GO_TEST_JSON: ${{ matrix.os == 'ubuntu-latest' && 'go-test.json' || '' }}
         run: |
           if [[ "$TEST_WINDOWS" == true ]]; then
             python - <<'PY_WINDOWS_TESTS'
@@ -67,6 +68,14 @@ jobs:
         with:
           name: selection-${{ matrix.os }}-${{ matrix.partition }}
           path: test-selection.json
+          if-no-files-found: warn
+
+      - name: Upload Go test JSON
+        if: always() && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gotest-json-${{ matrix.partition }}
+          path: go-test.json
           if-no-files-found: warn
 
       - name: Upload coverage

@@ -135,6 +135,73 @@ class PartitionTests(unittest.TestCase):
                 planner.run_commands([command], {}, Path(directory) / "selection.json")
             run.assert_called_once_with(command, check=True)
 
+    def test_main_json_flag_only_for_enabled_non_windows_runs(self):
+        package = "example.org/gortex/cmd/gortex"
+        cases = [(False, "", []), (False, "go-test.json", ["-json"]),
+                 (True, "go-test.json", [])]
+        for windows, json_path, extra_flags in cases:
+            with self.subTest(windows=windows, json_path=json_path), \
+                    tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "selection.json"
+                argv = ["partition", "--partition", "remaining",
+                        "--manifest", str(path)]
+                env = {"TEST_WINDOWS": str(windows).lower(),
+                       "GO_TEST_JSON": json_path}
+                with mock.patch.dict(planner.os.environ, env), \
+                        mock.patch.object(planner.sys, "argv", argv), \
+                        mock.patch.object(planner, "capture", side_effect=[
+                            "example.org/gortex", package]), \
+                        mock.patch.object(planner, "run_commands") as execute:
+                    planner.main()
+                flags = (["-v", "-timeout=45m"] if windows else
+                         ["-race", "-timeout=45m",
+                          "-coverprofile=coverage.out"])
+                expected = ["go", "test"] + flags + extra_flags + [package]
+                manifest = json.loads(path.read_text())
+                self.assertEqual(manifest["commands"], [expected])
+                self.assertNotIn("census_seconds", manifest)
+                execute.assert_called_once_with(
+                    [expected], manifest, path,
+                    json_path=None if windows else json_path)
+
+    def test_json_output_is_saved_echoed_and_preserves_exit_status(self):
+        command = ["go", "test", "-race", "-timeout=45m", "-json", "package"]
+        for returncode in (0, 7):
+            with self.subTest(returncode=returncode), \
+                    tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "go-test.json"
+                process = mock.MagicMock()
+                process.__enter__.return_value = process
+                process.stdout = ['{"Action":"run"}\n', '{"Action":"fail"}\n']
+                process.wait.return_value = returncode
+                with mock.patch.object(planner.subprocess, "Popen",
+                                       return_value=process) as popen, \
+                        mock.patch.object(planner.subprocess, "run") as run, \
+                        mock.patch("builtins.print") as log:
+                    if returncode:
+                        with self.assertRaises(
+                                subprocess.CalledProcessError) as caught:
+                            planner.run_commands(
+                                [command], {},
+                                Path(directory) / "selection.json",
+                                json_path=str(path))
+                        self.assertEqual(caught.exception.returncode, 7)
+                        self.assertEqual(caught.exception.cmd, command)
+                    else:
+                        planner.run_commands(
+                            [command], {},
+                            Path(directory) / "selection.json",
+                            json_path=str(path))
+                popen.assert_called_once_with(
+                    command, stdout=subprocess.PIPE,
+                    text=True, encoding="utf-8")
+                run.assert_not_called()
+                process.wait.assert_called_once_with()
+                self.assertEqual(path.read_text(), "".join(process.stdout))
+                self.assertEqual(log.call_args_list, [
+                    mock.call(line, end="", flush=True)
+                    for line in process.stdout])
+
     def test_main_records_census_seconds(self):
         package = "example.org/gortex/internal/indexer"
         names = ["TestA", "TestB", "TestC", "TestD", "TestE", "TestF"]

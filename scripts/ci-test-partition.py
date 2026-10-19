@@ -146,7 +146,7 @@ def write_manifest(path, manifest):
     path.write_text(json.dumps(manifest, indent=2) + "\n")
 
 
-def run_commands(commands, manifest, manifest_path):
+def run_commands(commands, manifest, manifest_path, *, json_path=None):
     # Only oversized Windows shards have multiple commands. One deadline covers
     # all chunks, including Go startup between them; no chunk receives a new 45m.
     deadline = time.monotonic() + TEST_EXECUTION_BUDGET_SECONDS
@@ -164,6 +164,18 @@ def run_commands(commands, manifest, manifest_path):
             write_manifest(manifest_path, manifest)
             if len(commands) > 1:
                 subprocess.run(actual, check=True, timeout=remaining)
+            elif json_path:
+                with open(json_path, "w", encoding="utf-8") as output, \
+                        subprocess.Popen(
+                            actual, stdout=subprocess.PIPE,
+                            text=True, encoding="utf-8") as process:
+                    for line in process.stdout:
+                        output.write(line)
+                        output.flush()
+                        print(line, end="", flush=True)
+                    returncode = process.wait()
+                    if returncode:
+                        raise subprocess.CalledProcessError(returncode, actual)
             else:
                 subprocess.run(actual, check=True)
     finally:
@@ -190,6 +202,7 @@ def main():
     if args.partition not in valid:
         parser.error(f"partition must be one of {sorted(valid)}")
     windows = os.environ.get("TEST_WINDOWS", "false") == "true"
+    json_path = os.environ.get("GO_TEST_JSON") if not windows else None
     module = capture(["go", "list", "-m"]).strip()
     packages = capture(["go", "list", "./..."]).splitlines()
     if not packages or len(packages) != len(set(packages)):
@@ -207,6 +220,8 @@ def main():
         command += ["-v", "-timeout=45m"]
     else:
         command += ["-race", "-timeout=45m", "-coverprofile=coverage.out"]
+    if json_path:
+        command += ["-json"]
     if family in SHARDS:
         if len(selected) != 1:
             raise ValueError("a test shard must own exactly one package")
@@ -249,7 +264,7 @@ def main():
     write_manifest(args.manifest, manifest)
     print(f"Running {len(selected)} packages in {args.partition}; command units={units}", flush=True)
     if not args.dry_run:
-        run_commands(commands, manifest, args.manifest)
+        run_commands(commands, manifest, args.manifest, json_path=json_path)
 
 
 if __name__ == "__main__":
