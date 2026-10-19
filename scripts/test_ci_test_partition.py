@@ -135,6 +135,24 @@ class PartitionTests(unittest.TestCase):
                 planner.run_commands([command], {}, Path(directory) / "selection.json")
             run.assert_called_once_with(command, check=True)
 
+    def test_main_records_census_seconds(self):
+        package = "example.org/gortex/internal/indexer"
+        names = ["TestA", "TestB", "TestC", "TestD", "TestE", "TestF"]
+        outputs = ["example.org/gortex", package, "\n".join(names)] + names
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "selection.json"
+            argv = ["partition", "--partition", "indexer-0", "--dry-run",
+                    "--manifest", str(path)]
+            with mock.patch.object(planner, "capture", side_effect=outputs), \
+                    mock.patch.object(planner.time, "monotonic",
+                                      side_effect=[100, 101.25]), \
+                    mock.patch.object(planner.sys, "argv", argv), \
+                    mock.patch("builtins.print") as log:
+                planner.main()
+            manifest = json.loads(path.read_text())
+            self.assertEqual(manifest["census_seconds"], 1.25)
+            log.assert_any_call("census seconds: 1.250", flush=True)
+
     def test_main_verifies_each_go_chunk_and_manifests_all_commands(self):
         names = self.names()
         package = "example.org/gortex/internal/indexer"

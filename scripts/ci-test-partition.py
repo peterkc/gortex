@@ -211,7 +211,11 @@ def main():
         if len(selected) != 1:
             raise ValueError("a test shard must own exactly one package")
         census_command = ["go", "test"] + ([] if windows else ["-race"]) + ["-list", ".", selected[0]]
+        census_start = time.monotonic()
         names = test_names(capture(census_command))
+        census_seconds = time.monotonic() - census_start
+        print(f"census seconds: {census_seconds:.3f}", flush=True)
+        manifest["census_seconds"] = census_seconds
         assignments, pattern_chunks, bundle_size = plan_shard_commands(
             names, census_command[:-3], command, selected[0], shard_count=SHARDS[family])
         # Verify the Python-generated expressions with Go's own test matcher.
