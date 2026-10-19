@@ -9,74 +9,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Same test slice, four flag sets: isolates what -race and -coverprofile cost.
-  slice:
-    runs-on: ${{ matrix.runner }}
+  # Per-test times with and without -race, to see where race time goes.
+  pertest:
+    runs-on: ubuntu-latest
     timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest]
-        partition: [store-1, indexer-2]
-        flags: ['-race -coverprofile=coverage.out', '-race', '-coverprofile=coverage.out', '']
-        include:
-          - {runner: ubuntu-24.04-arm, partition: store-1, flags: '-race'}
-          - {runner: ubuntu-24.04-arm, partition: indexer-2, flags: '-race'}
+        partition: [indexer-2, mcp]
+        flags: ['-race', '']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - name: Select the slice (same names as the #806 shard)
+      - name: Select the tests (same names as the #806 shard)
         env:
           TEST_PARTITION: ${{ matrix.partition }}
         run: |
           python3 scripts/ci-test-partition.py --dry-run --manifest sel.json
-          idx="${TEST_PARTITION##*-}"
-          jq -r --argjson i "$idx" '.patterns[$i]' sel.json > pattern.txt
+          if [ "$TEST_PARTITION" = mcp ]; then
+            echo . > pattern.txt
+          else
+            idx="${TEST_PARTITION##*-}"
+            jq -r --argjson i "$idx" '.patterns[$i]' sel.json > pattern.txt
+          fi
           jq -r '.selected_packages[0]' sel.json > pkg.txt
-          jq -r --argjson i "$idx" '.shards[$i] | length' sel.json
       - name: Compile only
         run: go test ${{ matrix.flags }} -run '^$' "$(cat pkg.txt)"
       - name: Test
-        run: go test ${{ matrix.flags }} -count=1 -timeout=70m -run "$(cat pattern.txt)" "$(cat pkg.txt)"
-
-  # Whole suite without -race or coverage: the cost of a platform-only job.
-  full-norace:
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-      - name: Compile only
-        run: go test -run '^$' ./...
-      - name: Test
-        shell: bash
-        # No -count=1: an uncacheable run writes no testlog. The restored
-        # cache holds no non-race results, so every package still runs.
-        run: go test -work -timeout=100m ./... 2>&1 | tee test.txt
-      - name: Keep the test input logs (which repo files each package reads)
-        if: always()
-        shell: bash
-        run: |
-          work=$(grep -m1 '^WORK=' test.txt | cut -d= -f2)
-          mkdir -p testlogs
-          find "$work" -name testlog.txt | while read -r f; do
-            d=$(dirname "$f")
-            bin=$(ls "$d"/*.test 2>/dev/null | head -1)
-            cp "$f" "testlogs/$(basename "${bin:-unknown}" .test)-$(basename "$d").txt"
-          done
-          ls testlogs | wc -l
+        run: go test ${{ matrix.flags }} -json -count=1 -timeout=70m -run "$(cat pattern.txt)" "$(cat pkg.txt)" > test.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: full-norace-${{ matrix.os }}
-          path: |
-            test.txt
-            testlogs/
+          name: pertest-${{ matrix.partition }}${{ matrix.flags == '-race' && '-race' || '' }}
+          path: test.json
