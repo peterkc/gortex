@@ -14,8 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Linux keeps its race/coverage shards; macOS and Windows run five plain
-  # partitions each, with the full compiled test set on every platform.
+  # Linux runs 22 duration-balanced race/coverage partitions. macOS and
+  # Windows run five plain partitions each, with the full compiled test set.
   test:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -24,13 +24,31 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         go-version: ['1.27']
-        partition: [remaining, store-0, store-1, store-2, store-3, store-4, store-5, indexer-0, indexer-1, indexer-2, indexer-3, indexer-4, indexer-5, mcp-0, mcp-1, mcp-2]
+        partition: [remaining, store-0, store-1, store-2, store-3, store-4, store-5, indexer-0, indexer-1, indexer-2, indexer-3, indexer-4, indexer-5, indexer-6, indexer-7, indexer-8, indexer-9, indexer-10, indexer-11, mcp-0, mcp-1, mcp-2]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
+
+      - name: Go cache paths
+        id: cache-paths
+        shell: bash
+        run: |
+          echo "build=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "mod=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.cache-paths.outputs.build }}
+            ${{ steps.cache-paths.outputs.mod }}
+          key: go-race-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-race-${{ runner.os }}-${{ hashFiles('go.sum') }}-
+            go-race-${{ runner.os }}-
 
       - name: Build
         run: go build -o gortex ./cmd/gortex/
@@ -41,6 +59,21 @@ jobs:
           TEST_RACE: "true"
           TEST_PARTITION: ${{ matrix.partition }}
         run: python3 scripts/ci-test-partition.py
+
+      - name: Warm race cache for sharded packages
+        if: ${{ !cancelled() && matrix.partition == 'remaining' && github.event_name == 'pull_request' }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/race-warm"
+          go test -race -c -o "$RUNNER_TEMP/race-warm/" ./internal/graph/store_sqlite ./internal/indexer ./internal/mcp
+
+      # Fork PR runs save (fork main never runs CI); upstream would use github.event_name == 'push' && github.ref == 'refs/heads/main'.
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ !cancelled() && matrix.partition == 'remaining' && github.event_name == 'pull_request' }}
+        with:
+          path: |
+            ${{ steps.cache-paths.outputs.build }}
+            ${{ steps.cache-paths.outputs.mod }}
+          key: go-race-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
 
       - name: Upload test selection
         if: always()

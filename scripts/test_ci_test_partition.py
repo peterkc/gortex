@@ -1,5 +1,7 @@
 from collections import Counter
+from contextlib import redirect_stdout
 import importlib.util
+import io
 from itertools import product
 import json
 from pathlib import Path
@@ -37,7 +39,7 @@ class PartitionTests(unittest.TestCase):
         tests = census + ["-v", "-timeout=45m"]
         package = "example.org/組織/internal/indexer"
         with mock.patch.object(planner, "WINDOWS_COMMAND_BUDGET", 650):
-            assignments, chunks, bundle = planner.plan_shard_commands(
+            assignments, chunks, bundle, _ = planner.plan_shard_commands(
                 names, census, tests, package, windows_api=True)
             original, _ = planner.plan_shards(names, bundle)
             self.assertEqual(assignments, original)
@@ -60,7 +62,7 @@ class PartitionTests(unittest.TestCase):
         names = self.names()
         prefix = ["go", "test", "-race", "-timeout=45m", "-coverprofile=coverage.out"]
         with mock.patch.object(planner, "WINDOWS_COMMAND_BUDGET", 1):
-            assignments, chunks, bundle = planner.plan_shard_commands(
+            assignments, chunks, bundle, _ = planner.plan_shard_commands(
                 names, ["go", "test", "-race"], prefix, "package", windows_api=False)
         original, patterns = planner.plan_shards(names)
         self.assertEqual(assignments, original)
@@ -71,7 +73,7 @@ class PartitionTests(unittest.TestCase):
         names = self.names(91) + ["ExampleFamily", "FuzzFamily"]
         names.sort()
         self.assertEqual(planner.RACE_SHARDS,
-                         {"store": 6, "indexer": 6, "mcp": 3})
+                         {"store": 6, "indexer": 12, "mcp": 3})
         self.assertEqual(planner.PLAIN_SHARDS, {"indexer": 3})
         modes = ((True, planner.RACE_SHARDS), (False, planner.PLAIN_SHARDS))
         for (race, shards), windows in product(modes, (False, True)):
@@ -81,7 +83,7 @@ class PartitionTests(unittest.TestCase):
                     prefix = census + (["-v"] if windows else [])
                     with mock.patch.object(
                             planner, "WINDOWS_COMMAND_BUDGET", 650):
-                        assignments, chunks, _ = (
+                        assignments, chunks, _, _ = (
                             planner.plan_shard_commands(
                                 names, census, prefix + ["-timeout=45m"],
                                 "package", windows_api=windows,
@@ -131,6 +133,178 @@ class PartitionTests(unittest.TestCase):
                     else:
                         self.assertEqual(values, expected)
                 self.assertRegex(job, r"(?m)^    timeout-minutes: 60$")
+                if job_id == "test":
+                    steps = re.split(r"(?m)^      - ", job)[1:]
+                    setup = [step for step in steps
+                             if "uses: actions/setup-go@" in step]
+                    self.assertEqual(len(setup), 1)
+                    self.assertRegex(setup[0], r"(?m)^          cache: false$")
+                    restore = [step for step in steps
+                               if "uses: actions/cache/restore@" in step]
+                    save = [step for step in steps
+                            if "uses: actions/cache/save@" in step]
+                    self.assertEqual(len(restore), 1)
+                    self.assertEqual(len(save), 1)
+                    conditions = re.findall(
+                        r"(?m)^        if: (.*)$", save[0])
+                    self.assertEqual(len(conditions), 1)
+                    self.assertIn("matrix.partition == 'remaining'",
+                                  conditions[0])
+
+    def test_committed_durations_balance_every_race_package(self):
+        timings = json.loads(planner.RACE_TIMINGS_PATH.read_text())
+        expected = {"store": 793.93, "indexer": 855.49, "mcp": 710.42}
+        for family, maximum in expected.items():
+            package = "github.com/zzet/gortex" + planner.RACE_PACKAGES[family]
+            entries = timings[package]
+            names = sorted(entries)
+            with self.subTest(family=family):
+                assignments, predicted = planner.plan_duration_shards(
+                    names, entries, planner.RACE_SHARDS[family])
+                self.assertEqual(len(assignments),
+                                 {"store": 6, "indexer": 12, "mcp": 3}[family])
+                self.assertAlmostEqual(max(predicted), maximum, places=2)
+                self.assertLessEqual(max(predicted),
+                                     max(900, max(entries.values())))
+                self.assertEqual(
+                    Counter(name for shard in assignments for name in shard),
+                    Counter(names))
+
+    def test_unknown_names_use_package_median_duration(self):
+        timings = {"TestA": 8, "TestB": 4, "TestC": 2, "TestD": 6}
+        names = ["TestA", "TestB", "TestC", "TestD", "TestE", "TestF"]
+        assignments, predicted = planner.plan_duration_shards(
+            names, timings, 3)
+        self.assertEqual(assignments, [
+            ["TestA", "TestC"], ["TestB", "TestD"], ["TestE", "TestF"],
+        ])
+        self.assertEqual(predicted, [10, 10, 10])
+        self.assertEqual(timings,
+                         {"TestA": 8, "TestB": 4, "TestC": 2, "TestD": 6})
+        self.assertEqual(
+            names, ["TestA", "TestB", "TestC", "TestD", "TestE", "TestF"])
+
+    def test_duration_shards_keep_windows_command_budget(self):
+        names = self.names() + ["ExampleDuration", "FuzzDuration"]
+        names.sort()
+        timings = {name: index + 1 for index, name in enumerate(names)}
+        census = ["go", "test", "-race"]
+        prefix = census + ["-timeout=45m", "-coverprofile=coverage.out"]
+        with mock.patch.object(planner, "WINDOWS_COMMAND_BUDGET", 650):
+            assignments, chunks, bundle, predicted = (
+                planner.plan_shard_commands(
+                    names, census, prefix, "package", windows_api=True,
+                    shard_count=3, timings=timings))
+            self.assertIsNone(bundle)
+            self.assertEqual(predicted, [1427, 1426, 1425])
+            self.assertTrue(any(len(shard) > 1 for shard in chunks))
+            self.assertEqual(
+                Counter(name for shard in assignments for name in shard),
+                Counter(names))
+            for index, shard in enumerate(chunks):
+                matched = [name for pattern in shard for name in names
+                           if re.fullmatch(pattern, name)]
+                self.assertEqual(sorted(matched), assignments[index])
+                for pattern in shard:
+                    for command, flag in ((census, "-list"), (prefix, "-run")):
+                        self.assertLessEqual(planner.planned_command_units(
+                            command + [flag, pattern, "package"]), 650)
+
+    def test_main_race_timing_failures_warn_and_keep_count_balance(self):
+        package = "example.org/gortex/internal/mcp"
+        names = ["TestA", "TestB", "TestC", "TestD", "TestE", "TestF", "TestG"]
+        cases = [
+            ("missing", None, "missing timing file"),
+            ("directory", None, "unreadable timing file"),
+            ("malformed", "{", "malformed timing JSON"),
+            ("top-level-list", "[]", "wrong timing shape"),
+            ("package-list", json.dumps({package: []}), "wrong timing shape"),
+            ("empty-package", json.dumps({package: {}}), "wrong timing shape"),
+            ("package-less", "{}", "no entry for package"),
+        ]
+        for seconds in ("slow", -1, float("nan"), float("inf"), True):
+            cases.append((str(seconds), json.dumps({
+                package: {"TestA": seconds}}), "wrong timing shape"))
+        for case, content, cause in cases:
+            with self.subTest(case=case), \
+                    tempfile.TemporaryDirectory() as directory:
+                timing_path = Path(directory) / "timings.json"
+                if case == "directory":
+                    timing_path.mkdir()
+                elif content is not None:
+                    timing_path.write_text(content)
+                path = Path(directory) / "selection.json"
+                argv = ["partition", "--partition", "mcp-0",
+                        "--manifest", str(path)]
+                outputs = [
+                    "example.org/gortex", package, "\n".join(names),
+                    "TestA\nTestB\nTestC", "TestD\nTestE", "TestF\nTestG",
+                ]
+                stdout = io.StringIO()
+                with mock.patch.object(planner, "RACE_TIMINGS_PATH",
+                                       timing_path), \
+                        mock.patch.object(planner, "capture",
+                                          side_effect=outputs), \
+                        mock.patch.object(planner.sys, "argv", argv), \
+                        mock.patch.object(planner.subprocess, "run") as run, \
+                        redirect_stdout(stdout):
+                    planner.main()
+                manifest = json.loads(path.read_text())
+                self.assertEqual(manifest["assignment"], "count")
+                self.assertNotIn("predicted_seconds", manifest)
+                self.assertEqual(manifest["shard_count"], 3)
+                self.assertEqual(manifest["shards"], [
+                    ["TestA", "TestB", "TestC"], ["TestD", "TestE"],
+                    ["TestF", "TestG"],
+                ])
+                counts = [len(shard) for shard in manifest["shards"]]
+                self.assertLessEqual(max(counts) - min(counts), 1)
+                warnings = [line for line in stdout.getvalue().splitlines()
+                            if line.startswith("::warning::")]
+                self.assertEqual(len(warnings), 1)
+                self.assertIn(cause, warnings[0])
+                self.assertIn(package, warnings[0])
+                run.assert_called_once_with(manifest["command"], check=True)
+
+    def test_main_race_duration_manifest_and_go_matcher(self):
+        package = "example.org/gortex/internal/mcp"
+        names = ["TestA", "TestB", "TestC", "TestD", "TestE", "TestF"]
+
+        def capture(command):
+            if command == ["go", "list", "-m"]:
+                return "example.org/gortex"
+            if command == ["go", "list", "./..."]:
+                return package
+            pattern = command[command.index("-list") + 1]
+            return "\n".join(name for name in names
+                             if pattern == "." or re.fullmatch(pattern, name))
+
+        with tempfile.TemporaryDirectory() as directory:
+            timing_path = Path(directory) / "timings.json"
+            timing_path.write_text(json.dumps({package: {
+                "TestA": 8.123, "TestB": 4, "TestC": 2, "TestD": 6,
+            }}))
+            path = Path(directory) / "selection.json"
+            argv = ["partition", "--partition", "mcp-0",
+                    "--manifest", str(path)]
+            stdout = io.StringIO()
+            with mock.patch.object(planner, "RACE_TIMINGS_PATH",
+                                   timing_path), \
+                    mock.patch.object(planner, "capture",
+                                      side_effect=capture) as census, \
+                    mock.patch.object(planner.sys, "argv", argv), \
+                    mock.patch.object(planner.subprocess, "run") as run, \
+                    redirect_stdout(stdout):
+                planner.main()
+            manifest = json.loads(path.read_text())
+            self.assertEqual(manifest["assignment"], "duration")
+            self.assertEqual(manifest["predicted_seconds"], [10.12, 10, 10])
+            self.assertEqual(manifest["shards"], [
+                ["TestA", "TestC"], ["TestB", "TestD"], ["TestE", "TestF"],
+            ])
+            self.assertEqual(census.call_count, 6)
+            self.assertNotIn("::warning::", stdout.getvalue())
+            run.assert_called_once_with(manifest["command"], check=True)
 
     def test_single_test_overflow_fails_without_dropping_it(self):
         with mock.patch.object(planner, "WINDOWS_COMMAND_BUDGET", 10):
@@ -185,7 +359,7 @@ class PartitionTests(unittest.TestCase):
 
     def test_main_records_census_seconds(self):
         package = "example.org/gortex/internal/indexer"
-        names = ["TestA", "TestB", "TestC", "TestD", "TestE", "TestF"]
+        names = [f"Test{letter}" for letter in "ABCDEFGHIJKL"]
         outputs = ["example.org/gortex", package, "\n".join(names)] + names
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "selection.json"
@@ -384,7 +558,7 @@ class PartitionTests(unittest.TestCase):
         run.assert_not_called()
 
     def test_main_refuses_duplicate_go_matcher_results_before_execution(self):
-        names = ["TestA", "TestB", "TestC", "TestD", "TestE", "TestF"]
+        names = [f"Test{letter}" for letter in "ABCDEFGHIJKL"]
         package = "example.org/gortex/internal/indexer"
 
         def capture(command):

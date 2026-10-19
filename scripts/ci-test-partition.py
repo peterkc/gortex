@@ -3,14 +3,17 @@
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
 import sys
 import time
 from pathlib import Path
+from statistics import median
 
-RACE_SHARDS = {"store": 6, "indexer": 6, "mcp": 3}
+RACE_SHARDS = {"store": 6, "indexer": 12, "mcp": 3}
+RACE_TIMINGS_PATH = Path(__file__).with_name("ci-race-timings.json")
 PLAIN_SHARDS = {"indexer": 3}
 NAME_BUNDLE = 32
 WINDOWS_COMMAND_BUDGET = 30000
@@ -101,6 +104,45 @@ def plan_shards(names, bundle_size=NAME_BUNDLE, shard_count=3):
     return assignments, patterns
 
 
+def read_race_timings(path, package):
+    try:
+        timings = json.loads(path.read_text())
+    except FileNotFoundError:
+        return "missing timing file"
+    except OSError as error:
+        return f"unreadable timing file: {error.strerror}"
+    except (ValueError, UnicodeError):
+        return "malformed timing JSON"
+    if not isinstance(timings, dict):
+        return "wrong timing shape: expected package object"
+    for entries in timings.values():
+        if not isinstance(entries, dict) or not entries:
+            return "wrong timing shape: expected nonempty test object"
+        for seconds in entries.values():
+            if (type(seconds) not in (int, float) or seconds < 0
+                    or seconds > sys.float_info.max
+                    or not math.isfinite(seconds)):
+                return ("wrong timing shape: expected finite "
+                        "nonnegative seconds")
+    if package not in timings:
+        return "no entry for package in timing file"
+    return timings[package]
+
+
+def plan_duration_shards(names, timings, shard_count):
+    default_seconds = median(timings.values())
+    weights = {name: timings.get(name, default_seconds) for name in names}
+    assignments = [[] for _ in range(shard_count)]
+    predicted = [0.0] * shard_count
+    for name in sorted(names, key=lambda name: (-weights[name], name)):
+        index = min(range(shard_count), key=lambda index: predicted[index])
+        assignments[index].append(name)
+        predicted[index] += weights[name]
+    if any(not assignment for assignment in assignments):
+        raise ValueError("every shard must have at least one compiled test")
+    return [sorted(shard) for shard in assignments], predicted
+
+
 def command_units(command):
     return len(subprocess.list2cmdline(command).encode("utf-16-le")) // 2
 
@@ -111,11 +153,21 @@ def planned_command_units(command):
                           for arg in command])
 
 
-def plan_shard_commands(names, census_prefix, test_prefix, package, windows_api=None, shard_count=3):
+def plan_shard_commands(names, census_prefix, test_prefix, package,
+                        windows_api=None, shard_count=3, timings=None):
     # Keep existing membership when it fits. Larger adjacent bundles retain
     # exact coverage and balance while factoring more shared name prefixes.
     if windows_api is None:
         windows_api = os.name == "nt"
+    if timings is not None:
+        assignments, predicted = plan_duration_shards(
+            names, timings, shard_count)
+        chunks = [
+            bounded_patterns(shard, census_prefix, test_prefix, package)
+            if windows_api else [exact_pattern(shard)]
+            for shard in assignments
+        ]
+        return assignments, chunks, None, predicted
     bundle_size = NAME_BUNDLE
     while True:
         assignments, patterns = plan_shards(names, bundle_size, shard_count)
@@ -124,13 +176,14 @@ def plan_shard_commands(names, census_prefix, test_prefix, package, windows_api=
                     for prefix, flag in ((census_prefix, "-list"), (test_prefix, "-run"))]
         if not windows_api or all(planned_command_units(command) <= WINDOWS_COMMAND_BUDGET
                                   for command in commands):
-            return assignments, [[pattern] for pattern in patterns], bundle_size
+            return (assignments, [[pattern] for pattern in patterns],
+                    bundle_size, None)
         if bundle_size >= len(names):
             # Preserve this balanced assignment. Splitting invocations does not
             # move tests between runners or increase their execution budget.
             chunks = [bounded_patterns(assignment, census_prefix, test_prefix, package)
                       for assignment in assignments]
-            return assignments, chunks, bundle_size
+            return assignments, chunks, bundle_size, None
         bundle_size = min(bundle_size * 2, len(names))
 
 
@@ -228,9 +281,20 @@ def main():
         census_seconds = time.monotonic() - census_start
         print(f"census seconds: {census_seconds:.3f}", flush=True)
         manifest["census_seconds"] = census_seconds
-        assignments, pattern_chunks, bundle_size = plan_shard_commands(
+        timings = (read_race_timings(RACE_TIMINGS_PATH, selected[0])
+                   if race else None)
+        manifest["assignment"] = "count"
+        if isinstance(timings, str):
+            print(f"::warning::{selected[0]}: {timings}", flush=True)
+        if not isinstance(timings, dict):
+            timings = None
+        shard_plan = plan_shard_commands(
             names, census_command[:-3], command, selected[0],
-            shard_count=shards[family])
+            shard_count=shards[family], timings=timings)
+        assignments, pattern_chunks, bundle_size, predicted = shard_plan
+        if predicted is not None:
+            manifest.update(assignment="duration", predicted_seconds=[
+                round(seconds, 2) for seconds in predicted])
         # Verify the Python-generated expressions with Go's own test matcher.
         # The per-platform compiled census is the authority for every shard.
         for index, chunks in enumerate(pattern_chunks):
