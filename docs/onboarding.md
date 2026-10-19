@@ -68,7 +68,7 @@ gortex init
 
 - `.mcp.json` — tells MCP clients (Claude Code, Cursor, VS Code) how to start the Gortex server
 - `CLAUDE.md` — codebase overview (with `--analyze`) plus a marker-guarded community-routing block
-- `.claude/settings.local.json` — installs three hooks: `PreToolUse` (redirects `Read` / `Grep` / `Glob` / `Task`), `PreCompact` (injects orientation snapshot before context compaction), `Stop` (post-task diagnostics)
+- `.claude/settings.local.json` — installs the Gortex hooks, among them `PreToolUse` (redirects `Read` / `Grep` / `Glob` / `Task`), `SessionStart` (orientation snapshot, including after context compaction), and `Stop` (post-task diagnostics)
 - `.claude/skills/generated/<DirName>/SKILL.md` — one per detected community (via `--skills`, default on)
 - `.cursor/mcp.json`, `.kiro/settings/mcp.json`, `.vscode/mcp.json`, etc. — per-agent MCP configs
 - Marker-guarded "Gortex Communities" routing block in each detected agent's per-repo instructions file (`AGENTS.md`, `.windsurfrules`, `GEMINI.md`, `.cursor/rules/gortex-communities.mdc`, etc.)
@@ -144,7 +144,7 @@ Once installed, three things happen without you lifting a finger:
 
 - **PreToolUse on `Read` / `Grep` / `Glob`** — Gortex suggests the right graph tool instead and, for indexed source files, blocks whole-file reads.
 - **PreToolUse on `Task`** — spawned subagents get a task-scoped briefing with `smart_context` results + a tool-swap table, so they don't inherit the bad habit of reaching for `Read`.
-- **PreCompact** — just before Claude Code compacts the conversation, Gortex injects an orientation snapshot (recent edits, hotspots, feedback-ranked symbols) so the agent survives compaction without re-exploring.
+- **SessionStart** — at session start, and again right after Claude Code compacts the conversation (`source="compact"`), Gortex injects an orientation snapshot so the agent survives compaction without re-exploring. Claude Code discards PreCompact output, which is why the snapshot rides on SessionStart.
 - **Stop** — after the agent finishes a turn, Gortex runs `detect_changes` → `get_test_targets`, `check_guards`, `analyze dead_code`, `contracts check` and feeds the results back so the agent self-corrects before handoff. The diagnostics are scoped to the symbols *this session* edited: PreToolUse records each write target, and the Stop hook partitions the working-tree diff against that set, so a sibling session editing the same checkout does not turn up as your work. Files it cannot attribute are listed separately rather than dropped, and when the session cannot be identified at all the briefing reports the whole tree and labels itself as such.
 
 All four degrade silently when the bridge is unreachable — they never block your normal flow.
@@ -215,7 +215,7 @@ gortex daemon start --detach  # spawn in background
 gortex daemon stop            # graceful shutdown; the graph store is already on disk
 gortex daemon restart         # stop + start
 gortex daemon reload          # re-read config, pick up new/removed repos
-gortex daemon logs -n 50      # tail the log
+gortex daemon logs -n 50      # tail daemon.log (background/service daemon: rotated; crash and raw stderr in daemon.stderr.log)
 ```
 
 `reload` re-reads the global `~/.gortex/config.yaml` *and* every tracked

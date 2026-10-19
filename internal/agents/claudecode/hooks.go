@@ -178,7 +178,7 @@ func HookCommandPathIsEphemeral(cmd string) bool {
 // entries whose path is healthy are also left alone.
 func healStaleHookCommands(hooks map[string]any, newCommand string) int {
 	healed := 0
-	for _, event := range []string{"PreToolUse", "PreCompact", "Stop", "SessionStart", "UserPromptSubmit", "SubagentStart", "SubagentStop"} {
+	for _, event := range []string{"PreToolUse", "Stop", "SessionStart", "UserPromptSubmit", "SubagentStart", "SubagentStop"} {
 		list, ok := hooks[event].([]any)
 		if !ok {
 			continue
@@ -341,7 +341,7 @@ func commandInvokesGortexHook(cmd string) bool {
 // rewritten entries.
 func rewriteGortexHookMode(hooks map[string]any, newCommand string) int {
 	rewritten := 0
-	for _, event := range []string{"PreToolUse", "PostToolUse", "PreCompact", "Stop", "SessionStart", "UserPromptSubmit", "SubagentStart", "SubagentStop"} {
+	for _, event := range []string{"PreToolUse", "PostToolUse", "Stop", "SessionStart", "UserPromptSubmit", "SubagentStart", "SubagentStop"} {
 		list, ok := hooks[event].([]any)
 		if !ok {
 			continue
@@ -468,6 +468,66 @@ func removeGortexHookEntries(hooks map[string]any, event string) int {
 	return removed
 }
 
+// retiredGortexHookEvents are events the installer used to wire to
+// `gortex hook` but no longer does. PreCompact was retired after #522:
+// Claude Code discards PreCompact output, so the post-compaction briefing
+// moved to SessionStart(source="compact") and the PreCompact entry became
+// dead wiring (#814). The `gortex hook` dispatcher still accepts the event,
+// so an install that has not been refreshed keeps working.
+var retiredGortexHookEvents = []string{"PreCompact"}
+
+// removeGortexHookCommands strips every `gortex hook` command from the
+// groups under hooks[event]. A group left with no commands is dropped and
+// the event key is deleted once no group remains. Commands owned by other
+// tools survive, including ones sharing a group with a Gortex command.
+// Returns the number of commands removed.
+func removeGortexHookCommands(hooks map[string]any, event string) int {
+	list, ok := hooks[event].([]any)
+	if !ok {
+		return 0
+	}
+	removed := 0
+	kept := make([]any, 0, len(list))
+	for _, h := range list {
+		hm, ok := h.(map[string]any)
+		if !ok {
+			kept = append(kept, h)
+			continue
+		}
+		inner, ok := hm["hooks"].([]any)
+		if !ok {
+			kept = append(kept, h)
+			continue
+		}
+		keptInner := make([]any, 0, len(inner))
+		for _, e := range inner {
+			if em, ok := e.(map[string]any); ok {
+				if cmd, _ := em["command"].(string); commandInvokesGortexHook(cmd) {
+					removed++
+					continue
+				}
+			}
+			keptInner = append(keptInner, e)
+		}
+		if len(keptInner) == len(inner) {
+			kept = append(kept, h)
+			continue
+		}
+		if len(keptInner) > 0 {
+			hm["hooks"] = keptInner
+			kept = append(kept, hm)
+		}
+	}
+	if removed > 0 {
+		if len(kept) == 0 {
+			delete(hooks, event)
+		} else {
+			hooks[event] = kept
+		}
+	}
+	return removed
+}
+
 // hasGortexHookEntry returns true when the given event already has a
 // hook entry that invokes `gortex hook`.
 func hasGortexHookEntry(hooks map[string]any, event string) bool {
@@ -490,9 +550,9 @@ func hasGortexHookEntry(hooks map[string]any, event string) bool {
 // InstallHook is the top-level "make settings.local.json hooks
 // match the current Gortex config" operation. It reads the file,
 // heals stale commands, upgrades old matchers, dedupes repeat
-// entries, then installs any missing Gortex hooks (PreToolUse,
-// PreCompact, Stop, SessionStart, UserPromptSubmit, SubagentStart,
-// SubagentStop, and PostToolUse).
+// entries, removes Gortex hooks on retired events (PreCompact), then
+// installs any missing Gortex hooks (PreToolUse, Stop, SessionStart,
+// UserPromptSubmit, SubagentStart, SubagentStop, and PostToolUse).
 // Writes back atomically via the shared helper.
 //
 // This function intentionally accepts a plain filesystem path
@@ -533,13 +593,16 @@ func InstallHookWithMode(w io.Writer, settingsPath string, mode string, opts age
 	}
 	hooks := settings["hooks"].(map[string]any)
 
+	retiredCount := 0
+	for _, event := range retiredGortexHookEvents {
+		retiredCount += removeGortexHookCommands(hooks, event)
+	}
 	healedCount := healStaleHookCommands(hooks, hookCommand)
 	matcherUpgraded := upgradeGortexMatcher(hooks)
 	preToolMatcherRewriteCount := rewriteGortexEventMatcher(hooks, "PreToolUse", localizationPreToolUseMatcher)
 	modeRewriteCount := rewriteGortexHookMode(hooks, hookCommand)
 	statusRewriteCount := rewriteGortexPreToolUseStatus(hooks, mode)
 	dedupedCount := dedupManagedGortexEntries(hooks, "PreToolUse") +
-		dedupGortexEntries(hooks, "PreCompact") +
 		dedupManagedGortexEntries(hooks, "PostToolUse") +
 		dedupGortexEntries(hooks, "Stop") +
 		dedupGortexEntries(hooks, "SessionStart") +
@@ -553,7 +616,6 @@ func InstallHookWithMode(w io.Writer, settingsPath string, mode string, opts age
 	postToolStatusRewriteCount := rewriteGortexPostToolUseStatus(hooks, mode)
 
 	preToolUseInstalled := hasManagedGortexHookEntry(hooks, "PreToolUse")
-	preCompactInstalled := hasGortexHookEntry(hooks, "PreCompact")
 	stopInstalled := hasGortexHookEntry(hooks, "Stop")
 	sessionStartInstalled := hasGortexHookEntry(hooks, "SessionStart")
 	userPromptSubmitInstalled := hasGortexHookEntry(hooks, "UserPromptSubmit")
@@ -574,18 +636,6 @@ func InstallHookWithMode(w io.Writer, settingsPath string, mode string, opts age
 			},
 		})
 	}
-	if !preCompactInstalled {
-		appendHookEntry(hooks, "PreCompact", map[string]any{
-			"hooks": []any{
-				map[string]any{
-					"type":          "command",
-					"command":       hookCommand,
-					"timeout":       3000,
-					"statusMessage": "Injecting Gortex orientation snapshot...",
-				},
-			},
-		})
-	}
 	if !stopInstalled {
 		appendHookEntry(hooks, "Stop", map[string]any{
 			"hooks": []any{
@@ -601,8 +651,9 @@ func InstallHookWithMode(w io.Writer, settingsPath string, mode string, opts age
 	if !sessionStartInstalled {
 		// SessionStart fires at the start of a new or resumed session
 		// — a perfect moment to inject the Gortex orientation snapshot
-		// so the first turn doesn't have to call graph_stats. It
-		// complements PreCompact (which fires on summary boundaries).
+		// so the first turn doesn't have to call graph_stats. With
+		// source="compact" it also carries the post-compaction briefing,
+		// which PreCompact cannot inject.
 		appendHookEntry(hooks, "SessionStart", map[string]any{
 			"hooks": []any{
 				map[string]any{
@@ -673,10 +724,10 @@ func InstallHookWithMode(w io.Writer, settingsPath string, mode string, opts age
 		postToolUseAdded = true
 	}
 
-	allPresent := preToolUseInstalled && preCompactInstalled && stopInstalled && sessionStartInstalled &&
+	allPresent := preToolUseInstalled && stopInstalled && sessionStartInstalled &&
 		userPromptSubmitInstalled && subagentStartInstalled && subagentStopInstalled && postToolUseInstalled
 	noChanges := allPresent && !matcherUpgraded && dedupedCount == 0 && healedCount == 0 &&
-		modeRewriteCount == 0 && statusRewriteCount == 0 && preToolMatcherRewriteCount == 0 &&
+		retiredCount == 0 && modeRewriteCount == 0 && statusRewriteCount == 0 && preToolMatcherRewriteCount == 0 &&
 		postToolMatcherRewriteCount == 0 && postToolStatusRewriteCount == 0 && !postToolUseAdded
 	if noChanges {
 		if w != nil {
@@ -722,11 +773,11 @@ func InstallHookWithMode(w io.Writer, settingsPath string, mode string, opts age
 	if healedCount > 0 {
 		changes = append(changes, fmt.Sprintf("rewrote %d stale hook path(s)", healedCount))
 	}
+	if retiredCount > 0 {
+		changes = append(changes, fmt.Sprintf("removed %d retired PreCompact hook(s)", retiredCount))
+	}
 	if !preToolUseInstalled {
 		changes = append(changes, "installed PreToolUse")
-	}
-	if !preCompactInstalled {
-		changes = append(changes, "installed PreCompact")
 	}
 	if !stopInstalled {
 		changes = append(changes, "installed Stop")
