@@ -1,0 +1,495 @@
+name: Lean indexer measurement
+
+on:
+  push:
+    branches: [measure/harness]
+    paths: [measure/run.json]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CGO_ENABLED: "1"
+
+jobs:
+  config:
+    if: github.repository == 'peterkc/gortex'
+    runs-on: ubuntu-24.04
+    outputs:
+      commits: ${{ steps.run.outputs.commits }}
+      repeats: ${{ steps.run.outputs.repeats }}
+      sustained_io: ${{ steps.run.outputs.sustained_io }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Read this run
+        id: run
+        run: |
+          jq -e '
+            (.commits | keys == ["candidate", "main", "pr806"]) and
+            ([.commits[] | type == "string" and test("^[0-9a-f]{40}$")] | all) and
+            (.workloads | type == "array" and length > 0 and length == (unique | length)) and
+            ([.workloads[] | IN("R-C2", "R-DE", "R-Fill", "R-Fresh", "R-Restart", "issue767-idle")] | all) and
+            (.repeats | type == "number" and . == floor and . >= 1 and . <= 3) and
+            (.sustained_io | type == "boolean") and (.note | type == "string")
+          ' measure/run.json
+          {
+            echo "commits=$(jq -c .commits measure/run.json)"
+            echo "repeats=$(jq -c '[range(0; .repeats)]' measure/run.json)"
+            echo "sustained_io=$(jq -c .sustained_io measure/run.json)"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: config
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Assert runner architecture and record machine
+        env:
+          LABEL: ${{ matrix.os }}
+        run: |
+          arch=$(uname -m)
+          case "$LABEL:$arch" in
+            ubuntu-24.04:x86_64|macos-15:arm64) ;;
+            *) echo "Unexpected architecture: $LABEL:$arch" >&2; exit 1 ;;
+          esac
+          mkdir -p results
+          jq -n --arg label "$LABEL" --arg arch "$arch" \
+            --arg image "${ImageOS:-unknown}" --arg version "${ImageVersion:-unknown}" \
+            --arg run_id "$GITHUB_RUN_ID" --arg run_commit "$GITHUB_SHA" \
+            '{label:$label, architecture:$arch, runner_image:$image, runner_image_version:$version,
+              workflow_run_id:$run_id, run_commit:$run_commit}' > results/machine.json
+          cp measure/run.json results/run.json
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ fromJSON(needs.config.outputs.commits).main }}
+          path: src-main
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: src-main/go.mod
+      - name: Build main
+        working-directory: src-main
+        run: |
+          test "$(git rev-parse HEAD)" = "$(jq -r .commits.main ../measure/run.json)"
+          mkdir -p ../binaries
+          go build -o ../binaries/main ./cmd/gortex
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ fromJSON(needs.config.outputs.commits).pr806 }}
+          path: src-pr806
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: src-pr806/go.mod
+      - name: Build pr806
+        working-directory: src-pr806
+        run: |
+          test "$(git rev-parse HEAD)" = "$(jq -r .commits.pr806 ../measure/run.json)"
+          mkdir -p ../binaries
+          go build -o ../binaries/pr806 ./cmd/gortex
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ fromJSON(needs.config.outputs.commits).candidate }}
+          path: src-candidate
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: src-candidate/go.mod
+      - name: Build candidate
+        working-directory: src-candidate
+        run: |
+          test "$(git rev-parse HEAD)" = "$(jq -r .commits.candidate ../measure/run.json)"
+          mkdir -p ../binaries
+          go build -o ../binaries/candidate ./cmd/gortex
+      - name: Record binary identities
+        run: |
+          cp results/machine.json binaries/machine.json
+          cp measure/run.json binaries/run.json
+          for name in main pr806 candidate; do
+            hash=$(shasum -a 256 "binaries/$name" | cut -d ' ' -f 1)
+            commit=$(jq -r --arg name "$name" '.commits[$name]' measure/run.json)
+            jq -n --arg name "$name" --arg commit "$commit" --arg sha256 "$hash" \
+              '{binary:$name, commit:$commit, sha256:$sha256}'
+          done | jq -s . > binaries/identities.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: binaries-${{ matrix.os }}
+          path: binaries
+          retention-days: 90
+
+  workloads:
+    needs: [config, build]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 170
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        repeat: ${{ fromJSON(needs.config.outputs.repeats) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: binaries-${{ matrix.os }}
+          path: binaries
+      - name: Assert runner architecture and record machine
+        env:
+          LABEL: ${{ matrix.os }}
+        run: |
+          arch=$(uname -m)
+          case "$LABEL:$arch" in
+            ubuntu-24.04:x86_64|macos-15:arm64) ;;
+            *) echo "Unexpected architecture: $LABEL:$arch" >&2; exit 1 ;;
+          esac
+          mkdir -p results
+          jq -n --arg label "$LABEL" --arg arch "$arch" \
+            --arg image "${ImageOS:-unknown}" --arg version "${ImageVersion:-unknown}" \
+            --arg run_id "$GITHUB_RUN_ID" --arg run_commit "$GITHUB_SHA" \
+            '{label:$label, architecture:$arch, runner_image:$image, runner_image_version:$version,
+              workflow_run_id:$run_id, run_commit:$run_commit}' > results/machine.json
+          cp measure/run.json results/run.json
+      - name: Export corpus
+        run: |
+          mkdir corpus
+          git archive 91a5c9514a9d41612183731f247ad46b03765abd | tar -x -C corpus
+          git -C corpus init -b main
+          git -C corpus -c user.name=Measurement -c user.email=measurement@example.invalid \
+            -c commit.gpgsign=false add .
+          git -C corpus -c user.name=Measurement -c user.email=measurement@example.invalid \
+            -c commit.gpgsign=false commit -m corpus
+      - name: Preflight sampler, then rotate binaries and run selected workloads
+        env:
+          REPEAT: ${{ matrix.repeat }}
+        run: |
+          while IFS='=' read -r key _value; do
+            case "$key" in GORTEX_*|GX_*) unset "$key" ;; esac
+          done < <(env)
+          chmod +x binaries/main binaries/pr806 binaries/candidate
+          cp binaries/identities.json results/identities.json
+          go test -tags acceptance -run '^TestProcessSamplerResources' -count=1 -v \
+            -timeout=5m ./cmd/gortex | tee results/sampler.log
+          status=0
+          names=(main pr806 candidate)
+          for offset in 0 1 2; do
+            name=${names[$(((REPEAT + offset) % 3))]}
+            binary="$PWD/binaries/$name"
+            actual=$(shasum -a 256 "$binary" | cut -d ' ' -f 1)
+            test "$actual" = "$(jq -r --arg name "$name" '.[] | select(.binary == $name) | .sha256' binaries/identities.json)"
+            echo "$name" >> results/order.txt
+            while IFS= read -r workload; do
+              case "$workload" in
+                R-C2) test_name=TestReconstructedC2 ;;
+                R-DE) test_name=TestReconstructedDE ;;
+                R-Fill) test_name=TestReconstructedFill ;;
+                R-Fresh) test_name=TestReconstructedFresh ;;
+                R-Restart) test_name=TestReconstructedRestart ;;
+                issue767-idle) test_name=TestIssue767IdleIOIntegration ;;
+                *) echo "Unknown workload $workload" >&2; exit 1 ;;
+              esac
+              export GORTEX_RECON_TEST_BINARY="$binary" GORTEX_RECON_CORPUS="$PWD/corpus"
+              export GORTEX_RECON_OUT="$PWD/results/$name.jsonl"
+              export GORTEX_ISSUE767_TEST_BINARY="$binary"
+              export GORTEX_ISSUE767_ARTIFACT_DIR="$PWD/results/$name/$workload"
+              if ! go test -tags acceptance -run "^${test_name}$" -count=1 -v \
+                -timeout=160m ./cmd/gortex | tee "results/$name-$workload.log"; then
+                status=1
+              fi
+            done < <(jq -r '.workloads[]' measure/run.json)
+          done
+          exit "$status"
+      - name: Upload raw measurements and fixture logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: workloads-${{ matrix.os }}-${{ matrix.repeat }}
+          path: results
+          retention-days: 90
+
+  sustained-io:
+    needs: [config, build]
+    if: needs.config.outputs.sustained_io == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 175
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04]
+        candidate: [pr806, candidate]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: binaries-ubuntu-24.04
+          path: binaries
+      - name: Assert runner architecture and record machine
+        env:
+          LABEL: ${{ matrix.os }}
+        run: |
+          arch=$(uname -m)
+          case "$LABEL:$arch" in
+            ubuntu-24.04:x86_64|macos-15:arm64) ;;
+            *) echo "Unexpected architecture: $LABEL:$arch" >&2; exit 1 ;;
+          esac
+          mkdir -p results
+          jq -n --arg label "$LABEL" --arg arch "$arch" \
+            --arg image "${ImageOS:-unknown}" --arg version "${ImageVersion:-unknown}" \
+            --arg run_id "$GITHUB_RUN_ID" --arg run_commit "$GITHUB_SHA" \
+            '{label:$label, architecture:$arch, runner_image:$image, runner_image_version:$version,
+              workflow_run_id:$run_id, run_commit:$run_commit}' > results/machine.json
+          cp measure/run.json results/run.json
+      - name: Paired sustained I/O driver
+        env:
+          CANDIDATE: ${{ matrix.candidate }}
+        run: |
+          while IFS='=' read -r key _value; do
+            case "$key" in GORTEX_*|GX_*) unset "$key" ;; esac
+          done < <(env)
+          chmod +x binaries/main binaries/pr806 binaries/candidate
+          cp binaries/identities.json results/identities.json
+          export GX_SUSTAINED_IO_BASELINE_BINARY="$PWD/binaries/main"
+          export GX_SUSTAINED_IO_TEST_BINARY="$PWD/binaries/$CANDIDATE"
+          export GX_SUSTAINED_IO_ARTIFACT_DIR="$PWD/results/sustained-io"
+          export GORTEX_ISSUE767_ARTIFACT_DIR="$PWD/results/fixtures"
+          go test -tags acceptance -run '^TestProcessSamplerResources' -count=1 -v \
+            -timeout=5m ./cmd/gortex | tee results/sampler.log
+          go test -tags acceptance -count=1 -timeout=170m -v ./cmd/gortex \
+            -run '^TestSustainedIOSustainedWriteAmplification$' | tee results/sustained-io.log
+      - name: Upload sustained I/O evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: sustained-io-main-${{ matrix.candidate }}
+          path: results
+          retention-days: 90
+
+  suite:
+    needs: config
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        binary: [main, candidate]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Assert runner architecture and record machine
+        env:
+          LABEL: ${{ matrix.os }}
+        run: |
+          arch=$(uname -m)
+          case "$LABEL:$arch" in
+            ubuntu-24.04:x86_64|macos-15:arm64) ;;
+            *) echo "Unexpected architecture: $LABEL:$arch" >&2; exit 1 ;;
+          esac
+          mkdir -p results
+          jq -n --arg label "$LABEL" --arg arch "$arch" \
+            --arg image "${ImageOS:-unknown}" --arg version "${ImageVersion:-unknown}" \
+            --arg run_id "$GITHUB_RUN_ID" --arg run_commit "$GITHUB_SHA" \
+            '{label:$label, architecture:$arch, runner_image:$image, runner_image_version:$version,
+              workflow_run_id:$run_id, run_commit:$run_commit}' > results/machine.json
+          cp measure/run.json results/run.json
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ fromJSON(needs.config.outputs.commits)[matrix.binary] }}
+          path: source
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: source/go.mod
+      - name: Exact source identity
+        env:
+          BINARY: ${{ matrix.binary }}
+        run: |
+          test "$(git -C source rev-parse HEAD)" = "$(jq -r --arg name "$BINARY" '.commits[$name]' measure/run.json)"
+          git -C source rev-parse HEAD > results/commit.txt
+      - name: Race suite (record both commits, compare below)
+        working-directory: source
+        run: |
+          while IFS='=' read -r key _value; do
+            case "$key" in GORTEX_*|GX_*) unset "$key" ;; esac
+          done < <(env)
+          set +e
+          go test -race -timeout=45m -json ./... > ../results/race.jsonl 2> ../results/race.stderr
+          status=$?
+          echo "$status" > ../results/race.exit
+          cat ../results/race.stderr
+          exit 0
+      - name: Vet (record both commits, compare below)
+        if: matrix.os == 'ubuntu-24.04'
+        working-directory: source
+        run: |
+          while IFS='=' read -r key _value; do
+            case "$key" in GORTEX_*|GX_*) unset "$key" ;; esac
+          done < <(env)
+          set +e
+          go vet ./... > ../results/vet.log 2>&1
+          status=$?
+          echo "$status" > ../results/vet.exit
+          cat ../results/vet.log
+          exit 0
+      - name: Lint with the CI pin (record both commits, compare below)
+        if: matrix.os == 'ubuntu-24.04'
+        id: lint
+        continue-on-error: true
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        with:
+          version: v2.13.1
+          working-directory: source
+          args: --timeout=10m --output.json.path=../results/lint.json
+          skip-cache: true
+      - name: Record lint outcome
+        if: always() && matrix.os == 'ubuntu-24.04'
+        env:
+          OUTCOME: ${{ steps.lint.outcome }}
+        run: echo "$OUTCOME" > results/lint.outcome
+      - name: Upload exact-commit suite evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: suite-${{ matrix.os }}-${{ matrix.binary }}
+          path: results
+          retention-days: 90
+
+  compare-checks:
+    needs: [config, suite]
+    if: always() && needs.config.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: suite-*
+          path: suites
+      - name: List shared failures and reject candidate-only failures
+        run: |
+          mkdir results
+          status=0
+          for os in ubuntu-24.04 macos-15; do
+            for arm in main candidate; do
+              dir="suites/suite-$os-$arm"
+              test -s "$dir/commit.txt"
+              expected='${{ needs.config.outputs.commits }}'
+              test "$(cat "$dir/commit.txt")" = "$(jq -r --arg arm "$arm" '.[$arm]' <<< "$expected")"
+              test -s "$dir/race.exit"
+              # Named test/package failures are structured go test events.
+              jq -s -r '[.[] | select(.Action == "fail") | [.Package, (.Test // "<package>")] | @json] | unique[]' \
+                "$dir/race.jsonl" | LC_ALL=C sort > "$dir/race.failures"
+              if [[ "$(cat "$dir/race.exit")" != 0 && ! -s "$dir/race.failures" ]]; then
+                echo "$os $arm: race suite failed without structured results" >&2
+                exit 1
+              fi
+            done
+            comm -12 "suites/suite-$os-main/race.failures" "suites/suite-$os-candidate/race.failures" \
+              > "results/$os-shared-race.txt"
+            comm -13 "suites/suite-$os-main/race.failures" "suites/suite-$os-candidate/race.failures" \
+              > "results/$os-new-race.txt"
+            test ! -s "results/$os-new-race.txt" || status=1
+          done
+          for arm in main candidate; do
+            dir="suites/suite-ubuntu-24.04-$arm"
+            test -s "$dir/vet.exit"
+            LC_ALL=C sort "$dir/vet.log" > "$dir/vet.failures"
+            if [[ "$(cat "$dir/vet.exit")" != 0 && ! -s "$dir/vet.failures" ]]; then exit 1; fi
+            # A missing report is an infrastructure/linter failure, never a shared issue.
+            jq -e 'has("Issues")' "$dir/lint.json"
+            jq -r '.Issues // [] | .[] | [.FromLinter, .Pos.Filename, .Pos.Line, .Pos.Column, .Text] | @json' \
+              "$dir/lint.json" | LC_ALL=C sort > "$dir/lint.failures"
+            if [[ "$(cat "$dir/lint.outcome")" != success && ! -s "$dir/lint.failures" ]]; then exit 1; fi
+          done
+          for check in vet lint; do
+            comm -12 "suites/suite-ubuntu-24.04-main/$check.failures" "suites/suite-ubuntu-24.04-candidate/$check.failures" \
+              > "results/shared-$check.txt"
+            comm -13 "suites/suite-ubuntu-24.04-main/$check.failures" "suites/suite-ubuntu-24.04-candidate/$check.failures" \
+              > "results/new-$check.txt"
+            test ! -s "results/new-$check.txt" || status=1
+          done
+          for file in results/*.txt; do
+            echo "### $file" >> "$GITHUB_STEP_SUMMARY"
+            cat "$file" >> "$GITHUB_STEP_SUMMARY"
+          done
+          exit "$status"
+      - name: Upload shared and new failure lists
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: check-comparison
+          path: results
+          retention-days: 90
+
+  export:
+    needs: [config, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      matrix:
+        os: [ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: binaries-ubuntu-24.04
+          path: binaries
+      - name: Assert runner architecture and record machine
+        env:
+          LABEL: ${{ matrix.os }}
+        run: |
+          arch=$(uname -m)
+          case "$LABEL:$arch" in
+            ubuntu-24.04:x86_64|macos-15:arm64) ;;
+            *) echo "Unexpected architecture: $LABEL:$arch" >&2; exit 1 ;;
+          esac
+          mkdir -p results
+          jq -n --arg label "$LABEL" --arg arch "$arch" \
+            --arg image "${ImageOS:-unknown}" --arg version "${ImageVersion:-unknown}" \
+            --arg run_id "$GITHUB_RUN_ID" --arg run_commit "$GITHUB_SHA" \
+            '{label:$label, architecture:$arch, runner_image:$image, runner_image_version:$version,
+              workflow_run_id:$run_id, run_commit:$run_commit}' > results/machine.json
+          cp measure/run.json results/run.json
+      - name: Export corpus and compare cold graph exports in the private fixture
+        run: |
+          while IFS='=' read -r key _value; do
+            case "$key" in GORTEX_*|GX_*) unset "$key" ;; esac
+          done < <(env)
+          chmod +x binaries/main binaries/pr806 binaries/candidate
+          cp binaries/identities.json results/identities.json
+          mkdir corpus
+          git archive 91a5c9514a9d41612183731f247ad46b03765abd | tar -x -C corpus
+          git -C corpus init -b main
+          git -C corpus -c user.name=Measurement -c user.email=measurement@example.invalid add .
+          git -C corpus -c user.name=Measurement -c user.email=measurement@example.invalid \
+            -c commit.gpgsign=false commit -m corpus
+          export GORTEX_RECON_EXPORT_MAIN_BINARY="$PWD/binaries/main"
+          export GORTEX_RECON_EXPORT_CANDIDATE_BINARY="$PWD/binaries/candidate"
+          export GORTEX_RECON_CORPUS="$PWD/corpus"
+          export GORTEX_RECON_EXPORT_OUT_DIR="$PWD/results"
+          export GORTEX_ISSUE767_ARTIFACT_DIR="$PWD/results/fixtures"
+          go test -tags acceptance -count=1 -v -timeout=35m ./cmd/gortex \
+            -run '^TestReconstructedExport$' | tee results/export.log
+          LC_ALL=C sort results/main.cypher > results/main.sorted.cypher
+          LC_ALL=C sort results/candidate.cypher > results/candidate.sorted.cypher
+          cmp results/main.sorted.cypher results/candidate.sorted.cypher
+      - name: Upload raw and sorted graph exports and daemon logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: graph-export
+          path: results
+          retention-days: 90
