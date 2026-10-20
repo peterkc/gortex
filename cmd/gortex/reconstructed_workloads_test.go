@@ -21,6 +21,10 @@ import (
 	"time"
 )
 
+// reconstructedSetupReadyTimeout bounds the unmeasured ready probes before a
+// workload. It matches the R-Fresh deadline.
+const reconstructedSetupReadyTimeout = 900 * time.Second
+
 type reconstructedSymbol struct {
 	Name string `json:"name"`
 	File string `json:"file"`
@@ -55,6 +59,7 @@ func newReconstructedDriver(t *testing.T, workload string) *reconstructedDriver 
 	d := &reconstructedDriver{run: reconstructedRun{Label: "reconstructed", Workload: workload, Parameters: map[string]any{
 		"corpus_commit": "91a5c951", "corpus_recipe": "git archive, private repository with one commit",
 		"binary": binary, "poll_ms": 100, "probe_timeout_s": 60, "fresh_timeout_s": 900,
+		"setup_ready_timeout_s": reconstructedSetupReadyTimeout.Seconds(), "Fresh_target_s": 180,
 		"quiet_window_s": 10, "quiet_write_limit_bytes_exclusive": 1 << 20, "quiet_timeout_s": 300,
 		"reconcile_interval": issue767DefaultTestReconcileInterval, "janitor": "fixture default",
 		"oracle":     "askSymbol + issue767Verdict; one gortex call search per search",
@@ -63,7 +68,7 @@ func newReconstructedDriver(t *testing.T, workload string) *reconstructedDriver 
 		"DE_saves": 150, "DE_save_interval_s": 2, "DE_probe_every": 7, "DE_probes": 20,
 		"DE_job_p95_target_ms": 700, "Fill_idle_searches": 100, "Fill_symbol_count": 20,
 		"Fill_loaded_searches": 100, "Fill_min_loaded_searches": 30, "Fill_max_rebuilds": 3,
-		"Fill_ratio_target": 2, "Fresh_target_s": 180, "Restart_after_ready_s": 60,
+		"Fill_ratio_target": 2, "Restart_after_ready_s": 60,
 		"Fresh_file_rule":   "lexicographically last non-test .go file, byte order of repository-relative path",
 		"Fresh_symbol_rule": "first exported top-level declaration in source order",
 	}}}
@@ -253,7 +258,9 @@ func (d *reconstructedDriver) probe(root string, symbol reconstructedSymbol, spe
 func (d *reconstructedDriver) readyAndQuiet() bool {
 	d.f.start()
 	symbol := d.symbols[0]
-	ready := d.probe(d.f.primary, symbol, issue767AsPrimary, time.Now(), time.Minute, "ready")
+	// Setup readiness is a cold start, not a measured probe: give it the
+	// fresh-start deadline so a slow cold index is not a harness failure.
+	ready := d.probe(d.f.primary, symbol, issue767AsPrimary, time.Now(), reconstructedSetupReadyTimeout, "ready")
 	d.run.Parameters["ready_probe"] = ready
 	if !ready.Passed {
 		d.run.Error = "initial ready probe failed: " + ready.Error
@@ -320,7 +327,7 @@ func TestReconstructedC2(t *testing.T) {
 		return
 	}
 	for _, root := range roots {
-		ready := d.probe(root, d.symbols[0], issue767AsAutomaticWorktree, time.Now(), time.Minute, "ready")
+		ready := d.probe(root, d.symbols[0], issue767AsAutomaticWorktree, time.Now(), reconstructedSetupReadyTimeout, "ready")
 		if !ready.Passed {
 			d.run.Error = "automatic worktree ready probe failed: " + ready.Error
 			return
