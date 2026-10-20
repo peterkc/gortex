@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 
+	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/excludes"
 )
 
@@ -34,7 +35,7 @@ func TestWalkDisk_PrunesDirectories(t *testing.T) {
 			name:  "root",
 			scope: ".",
 			want: []string{
-				".", "gen", "gen/drop.go", "gen/keep.go", "plain", "plain/a.go", "sub", "sub/keep.go",
+				".", "plain", "plain/a.go", "sub", "sub/keep.go",
 			},
 		},
 		{
@@ -86,8 +87,7 @@ func TestWalkDisk_SkipsGitFolders(t *testing.T) {
 		{name: "inside_git", scope: ".git/objects", want: nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// A wildcard-led negation keeps every ignored folder open for the
-			// prune check, so only the .git rule keeps the walk out of .git/.
+			// A wildcard-led negation must not open Git metadata folders.
 			idx := newAdmissionTestIndexer(t, root, "!*.xcodeproj/x")
 			var visited []string
 			err := idx.walkDisk(root, filepath.Join(root, tc.scope), func(path string, d fs.DirEntry, err error) error {
@@ -199,11 +199,58 @@ func TestExcludeMatcher_WarnsAboutGitReincludes(t *testing.T) {
 	idx := newAdmissionTestIndexer(t, t.TempDir())
 	idx.logger = zap.New(core)
 	idx.SetExcludePatterns(append(append([]string{}, excludes.Builtin...),
-		"!.git/hooks/", "!.gitkeep", "!/.GIT/info/", "!**/.git/config"))
+		"!.git/hooks/", "!.gitkeep", "!/.GIT/info/", "!**/.git/config", "!.git/hooks/"))
 
 	var warned []string
 	for _, entry := range logs.All() {
 		warned = append(warned, entry.ContextMap()["pattern"].(string))
 	}
 	assert.Equal(t, []string{"!.git/hooks/", "!/.GIT/info/", "!**/.git/config"}, warned)
+}
+
+func TestExcludeMatcher_WarnsAboutBlockedNegations(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		patterns               []string
+		warned, parents, rules []string
+	}{
+		{"closed_agent", []string{"*", "!/agent/skills/**"}, []string{"!/agent/skills/**"}, []string{"agent"}, []string{"*"}},
+		{"closed_dependency", []string{"node_modules/", "!node_modules/@org/**"}, []string{"!node_modules/@org/**"}, []string{"node_modules"}, []string{"node_modules/"}},
+		{"unrooted_under_root_only_exclude", []string{"/foo/", "!foo/keep.go"}, nil, nil, nil},
+		{"rooted_under_root_only_exclude", []string{"/foo/", "!/foo/keep.go"}, []string{"!/foo/keep.go"}, []string{"foo"}, []string{"/foo/"}},
+		{"basename_proto", []string{"node_modules/", "!*.proto"}, nil, nil, nil},
+		{"basename_gitkeep", []string{"node_modules/", "!.gitkeep"}, nil, nil, nil},
+		{"wildcard_leading", []string{"node_modules/", "!**/@org/**"}, nil, nil, nil},
+		{"reopen_self", []string{"build/", "!build/"}, nil, nil, nil},
+		{"open_child", []string{"dist/*", "!dist/keep/"}, nil, nil, nil},
+		{"reopen_every_parent", []string{"/*", "!/agent/", "/agent/*", "!/agent/skills/"}, nil, nil, nil},
+		{"later_parent_reopened", []string{"*", "!/agent/skills/**", "!/agent/"}, nil, nil, nil},
+		{"later_parent_closed", []string{"*", "!/agent/", "!/agent/skills/**", "agent/"}, []string{"!/agent/skills/**"}, []string{"agent"}, []string{"agent/"}},
+		{"deeper_parent", []string{"agent/*", "!/agent/skills/deep/**"}, []string{"!/agent/skills/deep/**"}, []string{"agent/skills"}, []string{"agent/*"}},
+		{"duplicate", []string{"*", "!/agent/skills/**", "!/agent/skills/**"}, []string{"!/agent/skills/**"}, []string{"agent"}, []string{"*"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zap.WarnLevel)
+			idx := &Indexer{config: config.IndexConfig{Exclude: tc.patterns}, logger: zap.New(core)}
+			// One lazy build, no repeated per-path warnings.
+			idx.excludeMatcher()
+			idx.excludeMatcher()
+			var warned, parents, rules []string
+			for _, entry := range logs.All() {
+				warned = append(warned, entry.ContextMap()["pattern"].(string))
+				parents = append(parents, entry.ContextMap()["parent"].(string))
+				rules = append(rules, entry.ContextMap()["excluded_by"].(string))
+				require.Contains(t, entry.Message, "reopen each parent folder")
+				require.Contains(t, entry.Message, "!/agent/")
+				require.Contains(t, entry.Message, "/agent/*")
+				require.Contains(t, entry.Message, "!/agent/skills/")
+			}
+			require.Equal(t, tc.warned, warned)
+			require.Equal(t, tc.parents, parents)
+			require.Equal(t, tc.rules, rules)
+			// A reload reports each blocked pattern once for the new effective list.
+			idx.SetExcludePatterns(tc.patterns)
+			require.Equal(t, 2*len(tc.warned), logs.Len())
+		})
+	}
 }

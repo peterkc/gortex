@@ -6340,7 +6340,7 @@ func (idx *Indexer) perFolderIgnores(root string) *excludes.Hierarchical {
 func shouldExcludeRules(path, root string, isDir bool, flat *excludes.Matcher, perFolder *excludes.Hierarchical) bool {
 	rel, relErr := filepath.Rel(root, path)
 	// Git's own data is never source, whatever the ignore rules say: no
-	// re-include reaches into a .git folder. See warnGitNegations.
+	// re-include reaches into a .git folder. See warnExcludedNegations.
 	if relErr == nil && inGitDir(rel) {
 		return true
 	}
@@ -6480,50 +6480,15 @@ func (idx *Indexer) warnIfWalkAdmittedNothing(absRoot string, admitted int) {
 		zap.String("pattern", cause.Pattern))
 }
 
-// shouldPruneDir reports whether the index walk may skip a directory
-// subtree wholesale (filepath.SkipDir) instead of descending it. A
-// directory is prunable only when it is excluded AND no re-include ("!")
-// pattern targets anything beneath it. go-gitignore's "*" matches across
-// "/", so a blanket like "wp-content/plugins/*" reports the parent
-// directory "wp-content/plugins" itself as excluded; pruning it would
-// skip a later "!wp-content/plugins/foo/" re-include before the walk ever
-// reaches the child. Mirroring git, we keep descending such a directory
-// and let the per-file shouldExclude check filter its contents.
+// shouldPruneDir reports whether an excluded directory and its entire
+// subtree can be skipped. The shared matcher enforces Git's rule that
+// negations cannot re-include descendants of an excluded directory.
 func (idx *Indexer) shouldPruneDir(path, root string) bool {
-	return shouldPruneDir(path, root, idx.excludeMatcher(), idx.perFolderIgnores(root), false)
+	return shouldPruneDir(path, root, idx.excludeMatcher(), idx.perFolderIgnores(root))
 }
 
-func shouldPruneDir(path, root string, flat *excludes.Matcher, perFolder *excludes.Hierarchical, anchoredOnly bool) bool {
-	// Checked before the negation checks below, which keep an excluded
-	// folder open whenever a re-include might reach into it.
-	if rel, err := filepath.Rel(root, path); err == nil && inGitDir(rel) {
-		return true
-	}
-	if !shouldExcludeRules(path, root, true, flat, perFolder) {
-		return false
-	}
-	// No re-include reaches a file under a closed agent-config folder (see
-	// shouldExcludeRules), so the negation checks below do not apply.
-	if rel, err := filepath.Rel(root, path); err == nil && excludes.InAgentConfigDir(rel) && !excludes.IsAgentConfigMCPDir(rel) {
-		return true
-	}
-	if flat != nil {
-		hasNegatedDescendant := flat.HasNegatedDescendant
-		if anchoredOnly {
-			hasNegatedDescendant = flat.HasAnchoredNegatedDescendant
-		}
-		if rel, err := filepath.Rel(root, path); err == nil && hasNegatedDescendant(filepath.ToSlash(rel)) {
-			return false
-		}
-	}
-	hasNegatedDescendant := perFolder.HasNegatedDescendant
-	if anchoredOnly {
-		hasNegatedDescendant = perFolder.HasAnchoredNegatedDescendant
-	}
-	if hasNegatedDescendant(path) {
-		return false
-	}
-	return true
+func shouldPruneDir(path, root string, flat *excludes.Matcher, perFolder *excludes.Hierarchical) bool {
+	return shouldExcludeRules(path, root, true, flat, perFolder)
 }
 
 // inGitDir reports whether a root-relative path names a .git folder or
@@ -6571,28 +6536,38 @@ func (idx *Indexer) excludeMatcher() *excludes.Matcher {
 }
 
 // newExcludeMatcher compiles the effective ignore list and warns about
-// re-includes the hard .git rule in shouldExcludeRules overrides.
+// re-includes blocked by a parent exclusion or the hard .git rule.
 func (idx *Indexer) newExcludeMatcher(patterns []string) *excludes.Matcher {
-	patterns = effectiveExcludePatterns(patterns)
-	idx.warnGitNegations(patterns)
-	return excludes.New(patterns)
+	m := excludes.New(effectiveExcludePatterns(patterns))
+	idx.warnExcludedNegations(m)
+	return m
 }
 
-// warnGitNegations logs each re-include ("!") pattern that names a .git
-// folder. Such a pattern once indexed files under .git; the walks now skip
-// every .git folder, so its files would leave the graph without notice.
-func (idx *Indexer) warnGitNegations(patterns []string) {
+// warnExcludedNegations runs once per effective-list build or reload,
+// never on the per-path matching hot path.
+func (idx *Indexer) warnExcludedNegations(m *excludes.Matcher) {
 	if idx.logger == nil {
 		return
 	}
-	for _, p := range patterns {
-		p = strings.TrimSpace(p)
-		if !strings.HasPrefix(p, "!") || !inGitDir(strings.Trim(p[1:], "/")) {
+	seen := make(map[string]bool)
+	for _, p := range m.Patterns() {
+		if !strings.HasPrefix(p, "!") || seen[p] {
 			continue
 		}
-		idx.logger.Warn("indexer: ignoring a re-include under .git; Git's own data is never indexed",
-			zap.String("repo", idx.repoPrefix),
-			zap.String("pattern", p))
+		seen[p] = true
+		if inGitDir(strings.Trim(p[1:], "/")) {
+			idx.logger.Warn("indexer: ignoring a re-include under .git; Git's own data is never indexed",
+				zap.String("repo", idx.repoPrefix),
+				zap.String("pattern", p))
+			continue
+		}
+		if parent, rule := m.ExcludedNegationParent(p); parent != "" {
+			idx.logger.Warn("indexer: re-include is blocked by an excluded parent; reopen each parent folder (for example: !/agent/, /agent/*, !/agent/skills/)",
+				zap.String("repo", idx.repoPrefix),
+				zap.String("pattern", p),
+				zap.String("parent", parent),
+				zap.String("excluded_by", rule))
+		}
 	}
 }
 

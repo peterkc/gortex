@@ -3244,7 +3244,7 @@ func (w *Watcher) isExcluded(path string) bool {
 	// condition.
 	perFolder := w.perFolderIgnores()
 	if err == nil && info.IsDir() {
-		return shouldPruneDir(path, root, m, perFolder, true)
+		return shouldPruneDir(path, root, m, perFolder)
 	}
 	return shouldExcludeRules(path, root, false, m, perFolder)
 }
