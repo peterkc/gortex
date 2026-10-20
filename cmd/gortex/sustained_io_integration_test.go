@@ -772,7 +772,7 @@ func sustainedIONewRunSampler(f *issue767Fixture, out io.Writer, interval time.D
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return issue767ReadProcessIO(ctx, pid)
+		return f.sampleProcessIO(ctx, pid)
 	}
 	sampler.readSize = func() sustainedIOFileSizes {
 		return sustainedIOFileSizes{
@@ -1095,6 +1095,8 @@ func (r *sustainedIORun) closePhase(report *sustainedIOPhaseReport, opening sust
 // closePhase it must survive a failure unwind, so every step here reports
 // rather than fails.
 func (r *sustainedIORun) finish(manifest sustainedIOManifest) {
+	// Final resource usage belongs to the exited child, not the last tick.
+	r.f.stop()
 	removed, retained := 0, []string{}
 	for _, dependent := range r.dependents {
 		if _, err := os.Stat(dependent); err != nil {
@@ -1127,6 +1129,7 @@ func (r *sustainedIORun) finish(manifest sustainedIOManifest) {
 		"worktrees_retained":     retained,
 		"retained_census":        census,
 		"samples":                samples,
+		"process_resources":      r.f.processResources(),
 		"sample_failures":        failures,
 		"wal_resets_total":       r.sampler.Resets(),
 		"wal_checkpoint_bytes":   r.sampler.CheckpointBytes(),

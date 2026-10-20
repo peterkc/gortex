@@ -68,6 +68,7 @@ type issue767Fixture struct {
 	// call goes through, including the ones awaitSymbol makes on the harness's
 	// behalf, which a caller-side counter cannot see.
 	clientCalls int
+	resources   map[int]issue767ProcessResources
 }
 
 // issue767FixtureOption adjusts how the private daemon is configured before it
@@ -294,6 +295,14 @@ func (f *issue767Fixture) start() {
 	go func() {
 		err := cmd.Wait()
 		f.mu.Lock()
+		usage := issue767FinalProcessResources(cmd.ProcessState)
+		previous := f.resources[run]
+		usage.Run, usage.PID = run, cmd.Process.Pid
+		usage.PeakFootprintBytes = previous.PeakFootprintBytes
+		if reason, ok := previous.Unavailable["PeakFootprintBytes"]; ok {
+			usage.Unavailable["PeakFootprintBytes"] = reason
+		}
+		f.resources[run] = usage
 		f.unjoinedChildren--
 		f.mu.Unlock()
 		done <- err
@@ -325,6 +334,11 @@ func (f *issue767Fixture) stop() {
 	}
 	if cmd == nil {
 		return
+	}
+	if runtime.GOOS == "darwin" {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, _ = f.sampleProcessIO(ctx, cmd.Process.Pid)
+		cancel()
 	}
 	_ = cmd.Process.Signal(os.Interrupt)
 	select {
@@ -360,6 +374,18 @@ func (f *issue767Fixture) setChild(cmd *exec.Cmd, done chan error, cancel contex
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.cmd, f.done, f.cancel, f.log = cmd, done, cancel, log
+	if f.resources == nil {
+		f.resources = make(map[int]issue767ProcessResources)
+	}
+	usage := issue767FinalProcessResources(nil)
+	usage.Run = f.run
+	if cmd.Process != nil {
+		usage.PID = cmd.Process.Pid
+	}
+	if runtime.GOOS == "darwin" {
+		usage.Unavailable["PeakFootprintBytes"] = "unavailable: no successful proc_pid_rusage sample"
+	}
+	f.resources[f.run] = usage
 	f.unjoinedChildren++
 }
 
@@ -939,13 +965,14 @@ type issue767ProcessIO struct {
 	BytesWritten        uint64
 	LogicalBytesWritten *uint64
 	StartTicks          uint64
-	BytesRead           uint64 `json:",omitempty"`
-	PhysFootprint       uint64 `json:",omitempty"`
-	UserTimeNS          uint64 `json:",omitempty"`
-	SystemTimeNS        uint64 `json:",omitempty"`
+	BytesRead           uint64  `json:",omitempty"`
+	PhysFootprint       uint64  `json:",omitempty"`
+	PeakFootprintBytes  *uint64 `json:",omitempty"`
+	UserTimeNS          uint64  `json:",omitempty"`
+	SystemTimeNS        uint64  `json:",omitempty"`
 }
 
-const issue767DarwinIOScript = "import ctypes,json,sys\nfields='user_time system_time pkg_idle_wkups interrupt_wkups pageins wired_size resident_size phys_footprint proc_start_abstime proc_exit_abstime child_user_time child_system_time child_pkg_idle_wkups child_interrupt_wkups child_pageins child_elapsed_abstime diskio_bytesread diskio_byteswritten cpu_time_qos_default cpu_time_qos_maintenance cpu_time_qos_background cpu_time_qos_utility cpu_time_qos_legacy cpu_time_qos_user_initiated cpu_time_qos_user_interactive billed_system_time serviced_system_time logical_writes lifetime_max_phys_footprint instructions cycles billed_energy serviced_energy interval_max_phys_footprint runnable_time'.split()\nclass R(ctypes.Structure):\n _fields_=[('uuid',ctypes.c_uint8*16)]+[(n,ctypes.c_uint64) for n in fields]\nr=R();lib=ctypes.CDLL('/usr/lib/libproc.dylib',use_errno=True);fn=lib.proc_pid_rusage;fn.argtypes=[ctypes.c_int,ctypes.c_int,ctypes.c_void_p];fn.restype=ctypes.c_int\nif fn(int(sys.argv[1]),4,ctypes.byref(r))!=0: raise OSError(ctypes.get_errno(),'proc_pid_rusage')\nprint(json.dumps({'BytesWritten':r.diskio_byteswritten,'LogicalBytesWritten':r.logical_writes,'StartTicks':r.proc_start_abstime,'BytesRead':r.diskio_bytesread,'PhysFootprint':r.phys_footprint,'UserTimeNS':r.user_time,'SystemTimeNS':r.system_time}))\n"
+const issue767DarwinIOScript = "import ctypes,json,sys\nfields='user_time system_time pkg_idle_wkups interrupt_wkups pageins wired_size resident_size phys_footprint proc_start_abstime proc_exit_abstime child_user_time child_system_time child_pkg_idle_wkups child_interrupt_wkups child_pageins child_elapsed_abstime diskio_bytesread diskio_byteswritten cpu_time_qos_default cpu_time_qos_maintenance cpu_time_qos_background cpu_time_qos_utility cpu_time_qos_legacy cpu_time_qos_user_initiated cpu_time_qos_user_interactive billed_system_time serviced_system_time logical_writes lifetime_max_phys_footprint instructions cycles billed_energy serviced_energy interval_max_phys_footprint runnable_time'.split()\nclass R(ctypes.Structure):\n _fields_=[('uuid',ctypes.c_uint8*16)]+[(n,ctypes.c_uint64) for n in fields]\nr=R();lib=ctypes.CDLL('/usr/lib/libproc.dylib',use_errno=True);fn=lib.proc_pid_rusage;fn.argtypes=[ctypes.c_int,ctypes.c_int,ctypes.c_void_p];fn.restype=ctypes.c_int\nif fn(int(sys.argv[1]),4,ctypes.byref(r))!=0: raise OSError(ctypes.get_errno(),'proc_pid_rusage')\nprint(json.dumps({'BytesWritten':r.diskio_byteswritten,'LogicalBytesWritten':r.logical_writes,'StartTicks':r.proc_start_abstime,'BytesRead':r.diskio_bytesread,'PhysFootprint':r.phys_footprint,'PeakFootprintBytes':r.lifetime_max_phys_footprint,'UserTimeNS':r.user_time,'SystemTimeNS':r.system_time}))\n"
 
 func issue767ReadProcessIO(ctx context.Context, pid int) (issue767ProcessIO, error) {
 	var result issue767ProcessIO

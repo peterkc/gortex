@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -128,6 +129,101 @@ func (c *sustainedIOCheckpointCounter) Observe(header sustainedIOWALHeader) {
 }
 
 func (c *sustainedIOCheckpointCounter) Resets() int { return c.resets }
+
+// issue767ProcessResources keeps final wait usage separate from sampled footprint.
+// Nil fields are named in Unavailable; they are never measurements of zero.
+type issue767ProcessResources struct {
+	Run                int
+	PID                int
+	UserCPUNS          *int64            `json:",omitempty"`
+	SystemCPUNS        *int64            `json:",omitempty"`
+	PeakRSSBytes       *int64            `json:",omitempty"`
+	PeakFootprintBytes *uint64           `json:",omitempty"`
+	Unavailable        map[string]string `json:",omitempty"`
+}
+
+func issue767FinalProcessResources(state *os.ProcessState) issue767ProcessResources {
+	result := issue767ProcessResources{Unavailable: make(map[string]string)}
+	if state == nil {
+		for _, field := range []string{"UserCPUNS", "SystemCPUNS", "PeakRSSBytes"} {
+			result.Unavailable[field] = "unavailable: process state missing (Wait has not completed)"
+		}
+		return result
+	}
+	usage, ok := state.SysUsage().(*syscall.Rusage)
+	if !ok || usage == nil {
+		for _, field := range []string{"UserCPUNS", "SystemCPUNS", "PeakRSSBytes"} {
+			result.Unavailable[field] = "unavailable: process SysUsage is not syscall.Rusage"
+		}
+		return result
+	}
+	user, system := state.UserTime().Nanoseconds(), state.SystemTime().Nanoseconds()
+	result.UserCPUNS, result.SystemCPUNS = &user, &system
+	rss := usage.Maxrss
+	switch runtime.GOOS {
+	case "linux":
+		rss *= 1024 // Linux reports KiB; Darwin reports bytes.
+	case "darwin":
+	default:
+		result.Unavailable["PeakRSSBytes"] = "unavailable: unsupported platform " + runtime.GOOS
+		return result
+	}
+	if rss <= 0 {
+		result.Unavailable["PeakRSSBytes"] = "unavailable: final Maxrss is not positive"
+		return result
+	}
+	result.PeakRSSBytes = &rss
+	return result
+}
+
+// sampleProcessIO retains the last successful lifetime footprint high-water mark,
+// including a final sample before stop signals the child. It is not peak RSS.
+func (f *issue767Fixture) sampleProcessIO(ctx context.Context, pid int) (issue767ProcessIO, error) {
+	sample, err := issue767ReadProcessIO(ctx, pid)
+	if runtime.GOOS != "darwin" {
+		return sample, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for run, usage := range f.resources {
+		if usage.PID != pid {
+			continue
+		}
+		if err == nil && sample.PeakFootprintBytes != nil && *sample.PeakFootprintBytes > 0 {
+			if usage.PeakFootprintBytes == nil || *sample.PeakFootprintBytes > *usage.PeakFootprintBytes {
+				usage.PeakFootprintBytes = sample.PeakFootprintBytes
+			}
+			delete(usage.Unavailable, "PeakFootprintBytes")
+		} else if usage.PeakFootprintBytes == nil {
+			reason := "proc_pid_rusage did not return a positive lifetime_max_phys_footprint"
+			if err != nil {
+				reason = err.Error()
+			}
+			usage.Unavailable["PeakFootprintBytes"] = "unavailable: " + reason
+		}
+		f.resources[run] = usage
+	}
+	return sample, err
+}
+
+func (f *issue767Fixture) processResources() []issue767ProcessResources {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	results := make([]issue767ProcessResources, 0, len(f.resources))
+	for run := 1; run <= f.run; run++ {
+		usage, ok := f.resources[run]
+		if !ok {
+			continue
+		}
+		reasons := make(map[string]string, len(usage.Unavailable))
+		for field, reason := range usage.Unavailable {
+			reasons[field] = reason
+		}
+		usage.Unavailable = reasons
+		results = append(results, usage)
+	}
+	return results
+}
 
 // --------------------------------------------------------------- sampler ---
 
