@@ -74,6 +74,7 @@ func newReconstructedDriver(t *testing.T, workload string) *reconstructedDriver 
 		"Fresh_symbol_rule": "first exported top-level declaration in source order",
 	}}}
 	count, bytes := 0, int64(0)
+	var goFiles []string
 	d.f = newIssue767FixtureWithCorpus(t, binary, func(f *issue767Fixture) {
 		err := filepath.WalkDir(corpus, func(path string, entry fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
@@ -105,8 +106,11 @@ func newReconstructedDriver(t *testing.T, workload string) *reconstructedDriver 
 			bytes += int64(len(content))
 			// Gortex classifies testdata files as fixtures, so their symbols
 			// never answer the oracle. Stimuli and probes use indexed source only.
-			if strings.HasSuffix(rel, ".go") && !strings.HasSuffix(rel, "_test.go") && !slices.Contains(strings.Split(filepath.ToSlash(rel), "/"), "testdata") {
-				d.files = append(d.files, filepath.ToSlash(rel))
+			if strings.HasSuffix(rel, ".go") && !slices.Contains(strings.Split(filepath.ToSlash(rel), "/"), "testdata") {
+				goFiles = append(goFiles, filepath.ToSlash(rel))
+				if !strings.HasSuffix(rel, "_test.go") {
+					d.files = append(d.files, filepath.ToSlash(rel))
+				}
 			}
 			return nil
 		})
@@ -114,35 +118,30 @@ func newReconstructedDriver(t *testing.T, workload string) *reconstructedDriver 
 			t.Fatal(err)
 		}
 	})
+	// A slow shutdown is a product result recorded in the row (forced_stops),
+	// not a harness failure.
+	d.f.forcedStopIsResult = true
 	sort.Strings(d.files)
 	if len(d.files) < 5 {
 		t.Fatal("exported corpus needs at least five existing non-test .go files")
 	}
-	seen := make(map[string]bool)
-	for _, file := range d.files {
-		if len(d.symbols) == 20 && file != d.files[len(d.files)-1] {
-			continue
-		}
-		declarations, err := reconstructedDeclarations(filepath.Join(d.f.primary, file))
+	declarations := make(map[string][]string, len(goFiles))
+	for _, file := range goFiles {
+		names, err := reconstructedDeclarations(filepath.Join(d.f.primary, file))
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, name := range declarations {
-			if len(d.symbols) < 20 && !seen[name] {
-				d.symbols = append(d.symbols, reconstructedSymbol{Name: name, File: file})
-				seen[name] = true
-			}
-		}
-		if file == d.files[len(d.files)-1] {
-			if len(declarations) == 0 {
-				t.Fatalf("last non-test .go file %s has no exported top-level declaration", file)
-			}
-			d.fresh = reconstructedSymbol{Name: declarations[0], File: file}
-		}
+		declarations[file] = names
 	}
+	d.symbols = reconstructedSearchSymbols(d.files, declarations, 20)
 	if len(d.symbols) != 20 {
-		t.Fatal("exported corpus needs 20 distinct exported corpus symbol names")
+		t.Fatal("exported corpus needs 20 exported corpus symbol names declared exactly once")
 	}
+	last := d.files[len(d.files)-1]
+	if len(declarations[last]) == 0 {
+		t.Fatalf("last non-test .go file %s has no exported top-level declaration", last)
+	}
+	d.fresh = reconstructedSymbol{Name: declarations[last][0], File: last}
 	d.run.Parameters["search_spelling"] = issue767AsPrimary.String()
 	if workload == "R-C2" {
 		d.run.Parameters["search_spelling"] = issue767AsAutomaticWorktree.String()
@@ -150,10 +149,31 @@ func newReconstructedDriver(t *testing.T, workload string) *reconstructedDriver 
 	d.run.Parameters["job_telemetry"] = "private JSON daemon logs: contract analysis job elapsed seconds; starts count jobs when available; missing telemetry unsupported"
 	d.run.Parameters["corpus_file_count"], d.run.Parameters["corpus_bytes"] = count, bytes
 	d.run.Parameters["search_symbols"] = d.symbols
-	d.run.Parameters["search_symbol_rule"] = "first 20 distinct exported top-level names, sorted non-test .go paths outside testdata, then source order"
+	d.run.Parameters["search_symbol_rule"] = "first 20 exported top-level names declared exactly once among .go files outside testdata (tests included), taken from sorted non-test paths, then source order"
 	d.run.Parameters["Fresh_file"], d.run.Parameters["Fresh_symbol"] = d.fresh.File, d.fresh.Name
 	t.Cleanup(func() { d.finish(t) })
 	return d
+}
+
+// reconstructedSearchSymbols returns the first count names, in file order, that
+// are declared exactly once across declarations. A name declared in several
+// files lets a name-only search rank another definition above the expected one.
+func reconstructedSearchSymbols(files []string, declarations map[string][]string, count int) []reconstructedSymbol {
+	uses := make(map[string]int)
+	for _, names := range declarations {
+		for _, name := range names {
+			uses[name]++
+		}
+	}
+	var symbols []reconstructedSymbol
+	for _, file := range files {
+		for _, name := range declarations[file] {
+			if uses[name] == 1 && len(symbols) < count {
+				symbols = append(symbols, reconstructedSymbol{Name: name, File: file})
+			}
+		}
+	}
+	return symbols
 }
 
 func reconstructedDeclarations(path string) ([]string, error) {
@@ -193,6 +213,7 @@ func (d *reconstructedDriver) finish(t *testing.T) {
 		d.run.Error = "fixture child did not join"
 	}
 	d.run.Resources = d.f.processResources()
+	d.run.Parameters["forced_stops"] = d.f.forcedStops
 	score, err := scoreReconstructed(d.run)
 	if err != nil {
 		// Keep the driver's own failure: it is the cause the report records.
@@ -545,6 +566,12 @@ func TestReconstructedRestart(t *testing.T) {
 	}
 	if !d.f.stopAndJoin() {
 		d.run.Error = "initial daemon did not join before restart"
+		return
+	}
+	// A joined child may still have been force-killed; that is not the clean
+	// stop the restart measurement requires.
+	if d.f.forcedStops > 0 {
+		d.run.Error = "initial daemon did not stop cleanly before restart"
 		return
 	}
 	_, _, telemetry, err := reconstructedJobs(d.f.logPath(), start, time.Now())

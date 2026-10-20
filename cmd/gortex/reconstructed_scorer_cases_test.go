@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"math"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -47,6 +48,8 @@ func TestReconstructedScorer(t *testing.T) {
 	for _, bounds := range [][2]int64{{90, 99}, {201, 202}, {99, 101}, {199, 201}} {
 		outsideFill.Samples = append(outsideFill.Samples, reconstructedSample{Kind: "load", Start: time.Unix(bounds[0], 0), End: time.Unix(bounds[1], 0), DurationMS: 999999, Passed: true})
 	}
+	erroredFill := fill([]float64{100}, thresholdLoad)
+	erroredFill.Rebuilds = []reconstructedRebuild{{Start: window.Start, End: window.End, DurationMS: window.DurationMS, Error: "index_repository: deadline"}}
 	timeoutSamples := reconstructedCaseSamples("probe", 1, 2, 3, 4, 5, 6, 7, 8, 9)
 	timeoutSamples = append(timeoutSamples, reconstructedSample{Kind: "probe", DurationMS: 1, TimeoutMS: 60000, TimedOut: true})
 	allEdits := reconstructedCaseSamples("probe", twenty...)
@@ -85,6 +88,7 @@ func TestReconstructedScorer(t *testing.T) {
 		{name: "Restart_nonzero_jobs", run: reconstructedRun{Workload: "R-Restart", Samples: reconstructedCaseSamples("ready", 100), ProcessBytes: &processBytes, StoreGrowth: &growth, JobCount: &oneJob}, status: "fail", p50: 100, p95: 100, job: "supported"},
 		{name: "Restart_missing_telemetry_unsupported", run: reconstructedRun{Workload: "R-Restart", Samples: reconstructedCaseSamples("ready", 100), ProcessBytes: &processBytes, StoreGrowth: &growth}, status: "unsupported", p50: 100, p95: 100},
 		{name: "empty_sample_set_error", run: reconstructedRun{Workload: "R-C2"}, errorText: "empty sample set"},
+		{name: "Fill_rebuild_error_not_insufficient", run: erroredFill, status: "fail", p50: 100, p95: 100, excluded: 30},
 		{name: "driver_error_without_samples_fails", run: reconstructedRun{Workload: "R-C2", Error: "ready probe failed"}, status: "fail"},
 		{name: "failed_call_probe_counts_at_60_seconds", run: reconstructedRun{Workload: "R-C2", Samples: append(reconstructedCaseSamples("probe", 1, 2, 3, 4, 5, 6, 7, 8, 9), reconstructedSample{Kind: "probe", DurationMS: 60000, TimeoutMS: 60000, TimedOut: true, Error: "search: context deadline exceeded"})}, status: "fail", p50: 5, p95: 60000, timeouts: 1, failures: 1},
 		{name: "invalid_duration_error", run: reconstructedRun{Workload: "R-C2", Samples: reconstructedCaseSamples("probe", -1)}, errorText: "invalid sample duration"},
@@ -180,6 +184,19 @@ func TestReconstructedScorer(t *testing.T) {
 				t.Fatal("invalid input must be an error, never a pass")
 			}
 		})
+	}
+}
+
+func TestReconstructedSearchSymbols(t *testing.T) {
+	declarations := map[string][]string{
+		"a/agents.go":       {"Adapter", "Run"},
+		"b/adapter.go":      {"Adapter", "Build"},
+		"b/adapter_test.go": {"Build"},
+	}
+	got := reconstructedSearchSymbols([]string{"a/agents.go", "b/adapter.go"}, declarations, 2)
+	want := []reconstructedSymbol{{Name: "Run", File: "a/agents.go"}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("reconstructedSearchSymbols() = %v; want %v", got, want)
 	}
 }
 

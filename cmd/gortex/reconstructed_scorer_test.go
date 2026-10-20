@@ -222,7 +222,10 @@ func scoreReconstructed(run reconstructedRun) (reconstructedScore, error) {
 		}
 		score.IdleP95MS = &idleP95
 		if len(loaded) < 30 {
-			score.Status, score.Reason = "insufficient", "fewer than 30 loaded searches"
+			// A rebuild or driver failure already explains the shortage; keep it.
+			if score.Status != "fail" {
+				score.Status, score.Reason = "insufficient", "fewer than 30 loaded searches"
+			}
 			break
 		}
 		loadedP95, err := reconstructedPercentile(loaded, .95)

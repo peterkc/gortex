@@ -69,6 +69,10 @@ type issue767Fixture struct {
 	// behalf, which a caller-side counter cannot see.
 	clientCalls int
 	resources   map[int]issue767ProcessResources
+	// forcedStopIsResult makes a force-killed stop a counted, logged result
+	// instead of a test error, for callers that report it as data.
+	forcedStopIsResult bool
+	forcedStops        int
 }
 
 // issue767FixtureOption adjusts how the private daemon is configured before it
@@ -363,7 +367,12 @@ func (f *issue767Fixture) stop() {
 		case <-time.After(5 * time.Second):
 			f.t.Errorf("isolated child %d did not exit after kill", cmd.Process.Pid)
 		}
-		f.t.Errorf("isolated child %d required force kill", cmd.Process.Pid)
+		if f.forcedStopIsResult {
+			f.forcedStops++
+			f.t.Logf("isolated child %d required force kill", cmd.Process.Pid)
+		} else {
+			f.t.Errorf("isolated child %d required force kill", cmd.Process.Pid)
+		}
 	}
 	if log != nil {
 		_ = log.Close()
