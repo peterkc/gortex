@@ -42,6 +42,33 @@ type PostTaskInput struct {
 // Degrades silently when: the bridge is unreachable, there are no
 // changes, or stop_hook_active is true.
 func runPostTask(data []byte, port int) {
+	runPostTaskWith(data, port, claudeStopBriefing)
+}
+
+// claudeStopBriefing wraps the briefing in Claude Code's
+// hookSpecificOutput.additionalContext envelope.
+func claudeStopBriefing(briefing string) HookOutput {
+	return HookOutput{
+		HookSpecificOutput: &HookSpecificOutput{
+			HookEventName:     "Stop",
+			AdditionalContext: briefing,
+		},
+	}
+}
+
+// codexStopBriefing carries the briefing as a top-level systemMessage.
+// Codex's Stop output schema is closed (additionalProperties: false) and
+// has no hookSpecificOutput, so the Claude envelope fails validation with
+// "invalid stop hook JSON output" (#779). decision:block would validate
+// too, but it forces another turn on every dirty working tree.
+func codexStopBriefing(briefing string) HookOutput {
+	return HookOutput{SystemMessage: briefing}
+}
+
+// runPostTaskWith is runPostTask with a host-specific envelope for the
+// diagnostics briefing. The claim-check block (decision/reason) is valid
+// on every host, so it does not go through wrap.
+func runPostTaskWith(data []byte, port int, wrap func(briefing string) HookOutput) {
 	started := time.Now()
 	var input PostTaskInput
 	if err := json.Unmarshal(data, &input); err != nil {
@@ -77,13 +104,7 @@ func runPostTask(data []byte, port int) {
 		return
 	}
 
-	output := HookOutput{
-		HookSpecificOutput: &HookSpecificOutput{
-			HookEventName:     "Stop",
-			AdditionalContext: briefing,
-		},
-	}
-	out, err := json.Marshal(output)
+	out, err := json.Marshal(wrap(briefing))
 	if err != nil {
 		return
 	}

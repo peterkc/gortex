@@ -176,9 +176,9 @@ func TestEmitPluginBundle_HooksShape(t *testing.T) {
 		t.Fatalf("hooks.json: missing top-level 'hooks' object: %v", doc)
 	}
 
-	// All seven lifecycle/tool event kinds must be present; each must reference the
+	// All six lifecycle/tool event kinds must be present; each must reference the
 	// hooks-handlers script via ${CLAUDE_PLUGIN_ROOT}.
-	for _, event := range []string{"PreToolUse", "UserPromptSubmit", "SubagentStart", "SubagentStop", "PreCompact", "Stop", "SessionStart"} {
+	for _, event := range []string{"PreToolUse", "UserPromptSubmit", "SubagentStart", "SubagentStop", "Stop", "SessionStart"} {
 		entries, ok := hooks[event].([]any)
 		if !ok || len(entries) == 0 {
 			t.Errorf("hooks.json: event %s missing or empty", event)
@@ -198,6 +198,12 @@ func TestEmitPluginBundle_HooksShape(t *testing.T) {
 		if !strings.Contains(cmd, "gortex-hook.sh") {
 			t.Errorf("hooks.json: %s command does not invoke gortex-hook.sh: %q", event, cmd)
 		}
+	}
+
+	// PreCompact output is discarded by Claude Code; the post-compaction
+	// briefing rides on SessionStart(source="compact") instead (#814).
+	if _, ok := hooks["PreCompact"]; ok {
+		t.Error("hooks.json: PreCompact must not be bound")
 	}
 
 	// PreToolUse should carry the canonical matcher.

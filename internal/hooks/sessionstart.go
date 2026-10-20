@@ -238,8 +238,41 @@ func buildSessionStartBriefing(cwd string) string {
 		sb.WriteString(renderCwdCoverage(cwd, status))
 	}
 	sb.WriteString("\n")
+	// No tracked repo covers this cwd, so the graph tools are legitimately
+	// absent: the MCP-required rule would be an unliftable stop (#900).
+	if cwdUntracked(cwd, status.TrackedRepos) {
+		sb.WriteString(untrackedCwdPreamble)
+		return sb.String()
+	}
 	sb.WriteString(rulePreamble())
 	return sb.String()
+}
+
+// untrackedCwdPreamble replaces rulePreamble when the daemon confirms no
+// tracked repo covers the session's cwd (an agent-created clone, a scratch
+// checkout). Restating "native Gortex MCP is mandatory … stop" there leaves
+// the agent nothing it may do, and a session-start block outranks the user's
+// own "ignore Gortex", so the rule is scoped out instead of restated.
+const untrackedCwdPreamble = "**Rule:** No tracked repo covers this directory, so the Gortex MCP-required and localization rules do not apply here. " +
+	"Work with your native read, search, edit, and shell tools; missing Gortex tools are expected in this directory, not an integration failure.\n"
+
+// cwdUntracked reports whether cwd is outside every tracked repo: not a
+// tracked repo or inside one, not a workspace root containing one, and not a
+// checkout awaiting automatic discovery into an already-tracked family. An
+// empty cwd is never untracked — there is nothing to scope the rules by.
+func cwdUntracked(cwd string, repos []daemon.TrackedRepoStatus) bool {
+	if strings.TrimSpace(cwd) == "" {
+		return false
+	}
+	abs, err := filepath.Abs(cwd)
+	if err != nil {
+		abs = cwd
+	}
+	exact, contained := classifyCwd(abs, repos)
+	if exact != nil || len(contained) > 0 {
+		return false
+	}
+	return !pendingAutomaticCheckout(abs, repos)
 }
 
 // activeHookTier reads the machine's hook-verbosity tier from the
@@ -400,10 +433,13 @@ func pendingAutomaticCheckout(cwd string, repos []daemon.TrackedRepoStatus) bool
 }
 
 // classifyCwd partitions the relationship between cwd and the daemon's
-// tracked repos. Returns either an exact match (cwd == repo path) or
-// the list of tracked repos contained under cwd (workspace-root case).
+// tracked repos. Returns either the covering repo (cwd == repo path, or
+// cwd inside it — the deepest one wins, matching the daemon's own
+// ScopeForCWD) or the list of tracked repos contained under cwd
+// (workspace-root case).
 func classifyCwd(cwd string, repos []daemon.TrackedRepoStatus) (exact *daemon.TrackedRepoStatus, contained []daemon.TrackedRepoStatus) {
 	cwd = filepath.Clean(cwd)
+	var enclosing *daemon.TrackedRepoStatus
 	for i := range repos {
 		repo := repos[i]
 		repoPath := filepath.Clean(repo.Path)
@@ -413,7 +449,15 @@ func classifyCwd(cwd string, repos []daemon.TrackedRepoStatus) (exact *daemon.Tr
 		}
 		if hasPathPrefix(repoPath, cwd) {
 			contained = append(contained, repo)
+			continue
 		}
+		if hasPathPrefix(cwd, repoPath) &&
+			(enclosing == nil || len(repoPath) > len(filepath.Clean(enclosing.Path))) {
+			enclosing = &repos[i]
+		}
+	}
+	if exact == nil {
+		exact = enclosing
 	}
 	return exact, contained
 }
