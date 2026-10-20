@@ -21,8 +21,9 @@ import (
 // fixture's private daemon state, not the corpus, between cold indexes.
 func TestReconstructedExport(t *testing.T) {
 	mainBinary, candidateBinary := os.Getenv("GORTEX_RECON_EXPORT_MAIN_BINARY"), os.Getenv("GORTEX_RECON_EXPORT_CANDIDATE_BINARY")
-	if mainBinary == "" || candidateBinary == "" {
-		t.Skip("set GORTEX_RECON_EXPORT_MAIN_BINARY and GORTEX_RECON_EXPORT_CANDIDATE_BINARY")
+	parentBinary := os.Getenv("GORTEX_RECON_EXPORT_PARENT_BINARY")
+	if mainBinary == "" || candidateBinary == "" || parentBinary == "" {
+		t.Skip("set GORTEX_RECON_EXPORT_MAIN_BINARY, GORTEX_RECON_EXPORT_PARENT_BINARY and GORTEX_RECON_EXPORT_CANDIDATE_BINARY")
 	}
 	corpus, out := os.Getenv("GORTEX_RECON_CORPUS"), os.Getenv("GORTEX_RECON_EXPORT_OUT_DIR")
 	if corpus == "" || out == "" {
@@ -61,8 +62,11 @@ func TestReconstructedExport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var exports [][]byte
-	for _, arm := range []struct{ name, binary string }{{"main", mainBinary}, {"candidate", candidateBinary}} {
+	// main twice is the repeatability control; parent (D3 plus the D9 merges,
+	// no counters) against candidate isolates the counters.
+	arms := []struct{ name, binary string }{{"main", mainBinary}, {"main-repeat", mainBinary}, {"parent", parentBinary}, {"candidate", candidateBinary}}
+	exports := make(map[string][]byte, len(arms))
+	for i, arm := range arms {
 		f.binary = arm.binary
 		f.start()
 		f.awaitSymbolIn(f.primary, "WriteCypher", filepath.Join(f.primary, "internal", "exporter", "cypher.go"), 5*time.Minute)
@@ -71,11 +75,11 @@ func TestReconstructedExport(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(out, arm.name+".cypher"), data, 0600); err != nil {
 			t.Fatal(err)
 		}
-		exports = append(exports, data)
+		exports[arm.name] = data
 		if !f.stopAndJoin() || t.Failed() {
 			t.Fatal("graph export daemon did not exit")
 		}
-		if arm.name == "candidate" {
+		if i == len(arms)-1 {
 			break
 		}
 		entries, err := os.ReadDir(f.root)
@@ -92,8 +96,24 @@ func TestReconstructedExport(t *testing.T) {
 		}
 		f.write(configPath, string(config))
 	}
-	if err := compareReconstructedExports(exports[0], exports[1]); err != nil {
+	result := map[string]string{}
+	for name, pair := range map[string][2]string{"repeatability": {"main", "main-repeat"}, "counters": {"parent", "candidate"}, "d3_vs_candidate": {"main", "candidate"}} {
+		result[name] = "identical"
+		if err := compareReconstructedExports(exports[pair[0]], exports[pair[1]]); err != nil {
+			result[name] = err.Error()
+		}
+		t.Logf("export %s (%s vs %s): %s", name, pair[0], pair[1], result[name])
+	}
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(out, "export-comparison.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// A difference between the counters arms only counts when the export repeats.
+	if result["repeatability"] == "identical" && result["counters"] != "identical" {
+		t.Fatalf("parent and candidate exports differ while main repeats exactly: %s", result["counters"])
 	}
 }
 

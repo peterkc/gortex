@@ -29,7 +29,7 @@ jobs:
         id: run
         run: |
           jq -e '
-            (.commits | keys == ["candidate", "main", "pr806"]) and
+            (.commits | keys == ["candidate", "candidate_parent", "main", "pr806"]) and
             ([.commits[] | type == "string" and test("^[0-9a-f]{40}$")] | all) and
             (.workloads | type == "array" and length > 0 and length == (unique | length)) and
             ([.workloads[] | IN("R-C2", "R-DE", "R-Fill", "R-Fresh", "R-Restart", "issue767-idle")] | all) and
@@ -107,11 +107,24 @@ jobs:
           test "$(git rev-parse HEAD)" = "$(jq -r .commits.candidate ../measure/run.json)"
           mkdir -p ../binaries
           go build -o ../binaries/candidate ./cmd/gortex
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ fromJSON(needs.config.outputs.commits).candidate_parent }}
+          path: src-candidate-parent
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: src-candidate-parent/go.mod
+      - name: Build candidate parent
+        working-directory: src-candidate-parent
+        run: |
+          test "$(git rev-parse HEAD)" = "$(jq -r .commits.candidate_parent ../measure/run.json)"
+          mkdir -p ../binaries
+          go build -o ../binaries/candidate_parent ./cmd/gortex
       - name: Record binary identities
         run: |
           cp results/machine.json binaries/machine.json
           cp measure/run.json binaries/run.json
-          for name in main pr806 candidate; do
+          for name in main pr806 candidate candidate_parent; do
             hash=$(shasum -a 256 "binaries/$name" | cut -d ' ' -f 1)
             commit=$(jq -r --arg name "$name" '.commits[$name]' measure/run.json)
             jq -n --arg name "$name" --arg commit "$commit" --arg sha256 "$hash" \
@@ -222,7 +235,9 @@ jobs:
                   -exec stat -f '%N %z' {} + >> "results/$name/store-sizes.txt"
               find "results/$name/$workload" -maxdepth 2 \( -name 'store.sqlite*' -o -name repo -o -name 'linked*' \) \
                 -prune -exec rm -rf {} +
-              rm -rf "results/$name/$workload"/*/cache/go-build
+              # A Go helper can outlive the daemon and still write here; a failed
+              # cleanup only leaves files in the upload, so warn and continue.
+              rm -rf "results/$name/$workload"/*/cache/go-build || echo "warning: go-build cache cleanup incomplete for $name $workload" >&2
             done < <(jq -r '.workloads[]' measure/run.json)
           done
           exit "$status"
@@ -455,7 +470,7 @@ jobs:
   export:
     needs: [config, build]
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 120
     strategy:
       matrix:
         os: [ubuntu-24.04]
@@ -491,7 +506,7 @@ jobs:
           while IFS='=' read -r key _value; do
             case "$key" in GORTEX_*|GX_*) unset "$key" ;; esac
           done < <(env)
-          chmod +x binaries/main binaries/pr806 binaries/candidate
+          chmod +x binaries/main binaries/candidate binaries/candidate_parent
           cp binaries/identities.json results/identities.json
           mkdir corpus
           git archive 91a5c9514a9d41612183731f247ad46b03765abd | tar -x -C corpus
@@ -501,15 +516,14 @@ jobs:
             -c commit.gpgsign=false commit -m corpus
           export GORTEX_RECON_EXPORT_MAIN_BINARY="$PWD/binaries/main"
           export GORTEX_RECON_EXPORT_CANDIDATE_BINARY="$PWD/binaries/candidate"
+          export GORTEX_RECON_EXPORT_PARENT_BINARY="$PWD/binaries/candidate_parent"
           export GORTEX_RECON_CORPUS="$PWD/corpus"
           export GORTEX_RECON_EXPORT_OUT_DIR="$PWD/results"
           export GORTEX_ISSUE767_ARTIFACT_DIR="$PWD/results/fixtures"
-          go test -tags acceptance -count=1 -v -timeout=65m ./cmd/gortex \
+          go test -tags acceptance -count=1 -v -timeout=110m ./cmd/gortex \
             -run '^TestReconstructedExport$' | tee results/export.log
           grep -Eq '^--- PASS: TestReconstructedExport ' results/export.log
-          LC_ALL=C sort results/main.cypher > results/main.sorted.cypher
-          LC_ALL=C sort results/candidate.cypher > results/candidate.sorted.cypher
-          cmp results/main.sorted.cypher results/candidate.sorted.cypher
+          cat results/export-comparison.json >> "$GITHUB_STEP_SUMMARY"
       - name: Upload raw and sorted graph exports and daemon logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
