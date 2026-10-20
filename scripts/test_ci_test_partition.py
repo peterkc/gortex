@@ -1,4 +1,8 @@
+from collections import Counter
+from contextlib import redirect_stdout
 import importlib.util
+import io
+from itertools import product
 import json
 from pathlib import Path
 import random
@@ -16,6 +20,13 @@ spec.loader.exec_module(planner)
 
 
 class PartitionTests(unittest.TestCase):
+    def setUp(self):
+        environment = mock.patch.dict(planner.os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        for name in ("TEST_RACE", "TEST_WINDOWS"):
+            planner.os.environ.pop(name, None)
+
     def names(self, count=90):
         randomizer = random.Random(806)
         return sorted("Test" + "".join(randomizer.choices("ABCDEFGHIJKLMNOPQRSTUVWXYZ", k=40))
@@ -28,7 +39,7 @@ class PartitionTests(unittest.TestCase):
         tests = census + ["-v", "-timeout=45m"]
         package = "example.org/組織/internal/indexer"
         with mock.patch.object(planner, "WINDOWS_COMMAND_BUDGET", 650):
-            assignments, chunks, bundle = planner.plan_shard_commands(
+            assignments, chunks, bundle, _ = planner.plan_shard_commands(
                 names, census, tests, package, windows_api=True)
             original, _ = planner.plan_shards(names, bundle)
             self.assertEqual(assignments, original)
@@ -51,7 +62,7 @@ class PartitionTests(unittest.TestCase):
         names = self.names()
         prefix = ["go", "test", "-race", "-timeout=45m", "-coverprofile=coverage.out"]
         with mock.patch.object(planner, "WINDOWS_COMMAND_BUDGET", 1):
-            assignments, chunks, bundle = planner.plan_shard_commands(
+            assignments, chunks, bundle, _ = planner.plan_shard_commands(
                 names, ["go", "test", "-race"], prefix, "package", windows_api=False)
         original, patterns = planner.plan_shards(names)
         self.assertEqual(assignments, original)
@@ -61,28 +72,456 @@ class PartitionTests(unittest.TestCase):
     def test_family_counts_preserve_exhaustive_windows_and_race_plans(self):
         names = self.names(91) + ["ExampleFamily", "FuzzFamily"]
         names.sort()
-        self.assertEqual(planner.SHARDS, {"store": 6, "indexer": 6, "mcp": 3})
-        for family, count in planner.SHARDS.items():
-            for windows in (False, True):
-                with self.subTest(family=family, windows=windows):
-                    prefix = ["go", "test"] + (["-v"] if windows else ["-race"])
-                    with mock.patch.object(planner, "WINDOWS_COMMAND_BUDGET", 650):
-                        assignments, chunks, _ = planner.plan_shard_commands(
-                            names, prefix, prefix + ["-timeout=45m"], "package",
-                            windows_api=windows, shard_count=count)
+        self.assertEqual(planner.RACE_SHARDS,
+                         {"store": 6, "indexer": 12, "mcp": 3})
+        self.assertEqual(planner.PLAIN_SHARDS, {"indexer": 3})
+        self.assertEqual(planner.PLAIN_WINDOWS_SHARDS, {"indexer": 4})
+        modes = ((True, planner.RACE_SHARDS),
+                 (False, planner.PLAIN_SHARDS),
+                 (False, planner.PLAIN_WINDOWS_SHARDS))
+        for (race, shards), windows in product(modes, (False, True)):
+            for family, count in shards.items():
+                with self.subTest(race=race, family=family, windows=windows):
+                    census = ["go", "test"] + (["-race"] if race else [])
+                    prefix = census + (["-v"] if windows else [])
+                    with mock.patch.object(
+                            planner, "WINDOWS_COMMAND_BUDGET", 650):
+                        assignments, chunks, _, _ = (
+                            planner.plan_shard_commands(
+                                names, census, prefix + ["-timeout=45m"],
+                                "package", windows_api=windows,
+                                shard_count=count))
                     self.assertEqual(len(assignments), count)
-                    self.assertEqual(sorted(name for shard in assignments for name in shard), names)
-                    self.assertLessEqual(max(map(len, assignments)) - min(map(len, assignments)), 1)
+                    self.assertEqual(
+                        sorted(name for shard in assignments
+                               for name in shard), names)
+                    counts = [len(shard) for shard in assignments]
+                    self.assertLessEqual(max(counts) - min(counts), 1)
                     for name in names:
-                        self.assertEqual(sum(bool(re.fullmatch(pattern, name))
-                                             for shard in chunks for pattern in shard), 1)
-        workflow = (Path(__file__).parents[1] / ".github/workflows/ci.yml").read_text()
-        for family, count in planner.SHARDS.items():
-            for index in range(count):
-                self.assertIn(f"{family}-{index}", workflow)
-            self.assertNotIn(f"{family}-{count}", workflow)
-        self.assertIn("timeout-minutes: 60", workflow)
+                        self.assertEqual(
+                            sum(bool(re.fullmatch(pattern, name))
+                                for shard in chunks for pattern in shard),
+                            1)
         self.assertEqual(planner.TEST_EXECUTION_BUDGET_SECONDS, 2700)
+
+    def test_workflow_partitions_match_each_mode_once_per_os(self):
+        workflow = (Path(__file__).parents[1]
+                    / ".github/workflows/ci.yml").read_text()
+        modes = (
+            ("test", planner.RACE_PACKAGES, ["ubuntu-latest"]),
+            ("test-platform", planner.PLAIN_PACKAGES,
+             ["macos-latest", "windows-latest"]),
+        )
+        expected_plain = {
+            "windows-latest": {"remaining", "indexer-0", "indexer-1",
+                               "indexer-2", "indexer-3", "mcp"},
+            "macos-latest": {"remaining", "indexer-0", "indexer-1",
+                             "indexer-2", "mcp"},
+        }
+        for job_id, packages, operating_systems in modes:
+            with self.subTest(job=job_id):
+                jobs = re.findall(
+                    rf"^  {job_id}:\n(.*?)(?=^  [\w-]+:|\Z)",
+                    workflow, re.MULTILINE | re.DOTALL)
+                self.assertEqual(len(jobs), 1)
+                job = jobs[0]
+                matrix = {}
+                for key in ("partition", "os"):
+                    lists = re.findall(
+                        rf"^        {key}: \[(.*?)\]$", job, re.MULTILINE)
+                    self.assertEqual(len(lists), 1)
+                    values = [value.strip().strip("'\"")
+                              for value in lists[0].split(",")]
+                    matrix[key] = values
+                self.assertEqual(matrix["os"], operating_systems)
+                exclusions = re.findall(
+                    r"^          - os: (\S+)\n            partition: (\S+)$",
+                    job, re.MULTILINE)
+                self.assertEqual(exclusions, [("macos-latest", "indexer-3")]
+                                 if job_id == "test-platform" else [])
+                for os_name in operating_systems:
+                    shards = (planner.RACE_SHARDS if job_id == "test" else
+                              planner.PLAIN_WINDOWS_SHARDS
+                              if os_name == "windows-latest" else
+                              planner.PLAIN_SHARDS)
+                    valid = {"remaining"} | (packages.keys() - shards.keys())
+                    valid |= {f"{family}-{index}"
+                              for family, count in shards.items()
+                              for index in range(count)}
+                    realized = [partition for partition in matrix["partition"]
+                                if (os_name, partition) not in exclusions]
+                    with self.subTest(os=os_name):
+                        self.assertEqual(Counter(realized), Counter(valid))
+                        if job_id == "test-platform":
+                            self.assertEqual(valid, expected_plain[os_name])
+                self.assertRegex(job, r"(?m)^    timeout-minutes: 60$")
+                if job_id == "test":
+                    steps = re.split(r"(?m)^      - ", job)[1:]
+                    setup = [step for step in steps
+                             if "uses: actions/setup-go@" in step]
+                    self.assertEqual(len(setup), 1)
+                    self.assertRegex(setup[0], r"(?m)^          cache: false$")
+                    restore = [step for step in steps
+                               if "uses: actions/cache/restore@" in step]
+                    save = [step for step in steps
+                            if "uses: actions/cache/save@" in step]
+                    self.assertEqual(len(restore), 1)
+                    self.assertEqual(len(save), 1)
+                    conditions = re.findall(
+                        r"(?m)^        if: (.*)$", save[0])
+                    self.assertEqual(len(conditions), 1)
+                    self.assertIn("matrix.partition == 'remaining'",
+                                  conditions[0])
+                    warm = [step for step in steps
+                            if step.startswith("name: Warm race cache")]
+                    self.assertEqual(len(warm), 1)
+                    packages = " ".join(
+                        "./" + path.lstrip("/")
+                        for path in planner.RACE_PACKAGES.values())
+                    for flags in ("-race -c", "-race -cover -c"):
+                        self.assertRegex(
+                            warm[0], rf"(?m)go test {flags} -o \S+ "
+                            + re.escape(packages) + "$")
+
+    def test_committed_durations_balance_every_race_package(self):
+        timings = json.loads(planner.RACE_TIMINGS_PATH.read_text())
+        for family in planner.RACE_SHARDS:
+            package = "github.com/zzet/gortex" + planner.RACE_PACKAGES[family]
+            entries = timings[package]
+            names = sorted(entries)
+            with self.subTest(family=family):
+                assignments, predicted = planner.plan_duration_shards(
+                    names, entries, planner.RACE_SHARDS[family])
+                self.assertEqual(len(assignments),
+                                 {"store": 6, "indexer": 12, "mcp": 3}[family])
+                weights = [max(0.005, seconds)
+                           for seconds in entries.values()]
+                self.assertAlmostEqual(sum(predicted), sum(weights))
+                self.assertLessEqual(
+                    max(predicted) - min(predicted), max(weights))
+                self.assertEqual(
+                    Counter(name for shard in assignments for name in shard),
+                    Counter(names))
+
+    def test_committed_plain_durations_balance_each_platform(self):
+        timings = json.loads(planner.PLAIN_TIMINGS_PATH.read_text())
+        entries = timings["github.com/zzet/gortex/internal/indexer"]
+        names = sorted(entries)
+        for count in (4, 3):
+            with self.subTest(shards=count):
+                assignments, predicted = planner.plan_duration_shards(
+                    names, entries, count)
+                self.assertEqual(len(assignments), count)
+                weights = [max(0.005, seconds)
+                           for seconds in entries.values()]
+                self.assertAlmostEqual(sum(predicted), sum(weights))
+                self.assertLessEqual(
+                    max(predicted) - min(predicted), max(weights))
+                self.assertEqual(
+                    Counter(name for shard in assignments for name in shard),
+                    Counter(names))
+
+    def test_main_plain_timing_failures_warn_and_keep_count_balance(self):
+        package = "example.org/gortex/internal/indexer"
+        names = ["TestA", "TestB", "TestC", "TestD", "TestE", "TestF", "TestG"]
+        cases = [
+            ("missing", None, "missing timing file"),
+            ("directory", None, "unreadable timing file"),
+            ("malformed", "{", "malformed timing JSON"),
+            ("package-less", "{}", "no entry for package in timing file"),
+        ]
+        platforms = [
+            ("true", 4, [["TestA", "TestB"], ["TestC", "TestD"],
+                         ["TestE", "TestF"], ["TestG"]]),
+            ("false", 3, [["TestA", "TestB", "TestC"], ["TestD", "TestE"],
+                          ["TestF", "TestG"]]),
+        ]
+        for (case, content, cause), (windows, count, shards) in product(
+                cases, platforms):
+            with self.subTest(case=case, windows=windows), \
+                    tempfile.TemporaryDirectory() as directory:
+                timing_path = Path(directory) / "timings.json"
+                if case == "directory":
+                    timing_path.mkdir()
+                elif content is not None:
+                    timing_path.write_text(content)
+                path = Path(directory) / "selection.json"
+                argv = ["partition", "--partition", "indexer-0",
+                        "--manifest", str(path)]
+                outputs = ["example.org/gortex", package, "\n".join(names)]
+                outputs += ["\n".join(shard) for shard in shards]
+                stdout = io.StringIO()
+                with mock.patch.object(planner, "PLAIN_TIMINGS_PATH",
+                                       timing_path), \
+                        mock.patch.dict(planner.os.environ,
+                                        {"TEST_WINDOWS": windows,
+                                         "TEST_RACE": "false"}), \
+                        mock.patch.object(planner, "capture",
+                                          side_effect=outputs), \
+                        mock.patch.object(planner.sys, "argv", argv), \
+                        mock.patch.object(planner.subprocess, "run") as run, \
+                        redirect_stdout(stdout):
+                    planner.main()
+                manifest = json.loads(path.read_text())
+                self.assertEqual(manifest["assignment"], "count")
+                self.assertNotIn("predicted_seconds", manifest)
+                self.assertEqual(manifest["shard_count"], count)
+                self.assertEqual(manifest["shards"], shards)
+                counts = [len(shard) for shard in manifest["shards"]]
+                self.assertLessEqual(max(counts) - min(counts), 1)
+                warnings = [line for line in stdout.getvalue().splitlines()
+                            if line.startswith("::warning::")]
+                self.assertEqual(len(warnings), 1)
+                prefix = f"::warning::{package}: {cause}"
+                if case == "directory":
+                    self.assertTrue(warnings[0].startswith(prefix + ": "))
+                else:
+                    self.assertEqual(warnings[0], prefix)
+                run.assert_called_once_with(manifest["command"], check=True)
+
+    def test_main_plain_duration_manifest_and_go_matcher(self):
+        package = "example.org/gortex/internal/indexer"
+        names = ["TestA", "TestB", "TestC", "TestD", "TestE"]
+
+        def capture(command):
+            if command == ["go", "list", "-m"]:
+                return "example.org/gortex"
+            if command == ["go", "list", "./..."]:
+                return package
+            pattern = command[command.index("-list") + 1]
+            return "\n".join(name for name in names
+                             if pattern == "." or re.fullmatch(pattern, name))
+
+        platforms = [
+            ("true", 4, "indexer-3",
+             [["TestA"], ["TestD"], ["TestE"], ["TestB", "TestC"]],
+             [8.12, 6, 5, 6]),
+            ("false", 3, "indexer-2",
+             [["TestA"], ["TestC", "TestD"], ["TestB", "TestE"]],
+             [8.12, 8, 9]),
+        ]
+        for windows, count, partition, shards, predicted in platforms:
+            with self.subTest(windows=windows), \
+                    tempfile.TemporaryDirectory() as directory:
+                timing_path = Path(directory) / "timings.json"
+                timing_path.write_text(json.dumps({package: {
+                    "TestA": 8.123, "TestB": 4, "TestC": 2, "TestD": 6,
+                }}))
+                path = Path(directory) / "selection.json"
+                argv = ["partition", "--partition", partition,
+                        "--manifest", str(path)]
+                stdout = io.StringIO()
+                with mock.patch.object(planner, "PLAIN_TIMINGS_PATH",
+                                       timing_path), \
+                        mock.patch.dict(planner.os.environ,
+                                        {"TEST_WINDOWS": windows,
+                                         "TEST_RACE": "false"}), \
+                        mock.patch.object(planner, "capture",
+                                          side_effect=capture) as census, \
+                        mock.patch.object(planner.sys, "argv", argv), \
+                        mock.patch.object(planner.subprocess, "run") as run, \
+                        redirect_stdout(stdout):
+                    planner.main()
+                manifest = json.loads(path.read_text())
+                self.assertEqual(manifest["assignment"], "duration")
+                self.assertEqual(manifest["shard_count"], count)
+                self.assertEqual(manifest["shards"], shards)
+                self.assertEqual(manifest["predicted_seconds"], predicted)
+                self.assertEqual(census.call_count, 3 + count)
+                self.assertNotIn("::warning::", stdout.getvalue())
+                run.assert_called_once_with(manifest["command"], check=True)
+
+    def test_zero_and_tiny_timings_spread_tests_evenly(self):
+        names = [f"Test{index:03}" for index in range(31)]
+        for seconds in (0.0, 0.00001):
+            with self.subTest(seconds=seconds):
+                timings = {name: seconds for name in names}
+                assignments, predicted = planner.plan_duration_shards(
+                    names, timings, 3)
+                counts = [len(shard) for shard in assignments]
+                self.assertLessEqual(max(counts) - min(counts), 1)
+                self.assertEqual(sorted(name for shard in assignments
+                                        for name in shard), names)
+                self.assertAlmostEqual(sum(predicted), 31 * 0.005)
+
+    def test_posix_run_pattern_budget_counts_bytes_and_allows_boundary(self):
+        with mock.patch.object(planner.os, "name", "posix"):
+            planner.guard_command(["go", "test", "-run", "A" * (120 * 1024)])
+            for pattern in ("A" * (120 * 1024 + 1), "組" * 42000):
+                with self.subTest(bytes=len(pattern.encode("utf-8"))):
+                    with self.assertRaisesRegex(ValueError,
+                                                "exceeds 120 KiB budget"):
+                        planner.guard_command(["go", "test", "-run", pattern])
+
+    def test_main_rejects_oversized_pattern_before_matcher_or_execution(self):
+        package = "example.org/gortex/internal/mcp"
+        names = ["TestA", "TestB", "TestC"]
+        outputs = ["example.org/gortex", package, "\n".join(names)]
+        plan = ([[name] for name in names],
+                [["A" * (120 * 1024 + 1)], ["TestB"], ["TestC"]],
+                None, [1.0, 1.0, 1.0])
+        argv = ["partition", "--partition", "mcp-0"]
+        with mock.patch.object(planner.sys, "argv", argv), \
+                mock.patch.object(planner, "capture",
+                                  side_effect=outputs) as capture, \
+                mock.patch.object(planner, "read_race_timings", return_value={
+                    name: 1.0 for name in names}), \
+                mock.patch.object(planner, "plan_shard_commands",
+                                  return_value=plan), \
+                mock.patch.object(planner.subprocess, "run") as run:
+            with self.assertRaisesRegex(ValueError, "exceeds 120 KiB budget"):
+                planner.main()
+        self.assertEqual(capture.call_count, 3)
+        run.assert_not_called()
+
+    def test_unknown_names_use_package_median_duration(self):
+        timings = {"TestA": 8, "TestB": 4, "TestC": 2, "TestD": 6}
+        names = ["TestA", "TestB", "TestC", "TestD", "TestE", "TestF"]
+        assignments, predicted = planner.plan_duration_shards(
+            names, timings, 3)
+        self.assertEqual(assignments, [
+            ["TestA", "TestC"], ["TestB", "TestD"], ["TestE", "TestF"],
+        ])
+        self.assertEqual(predicted, [10, 10, 10])
+        self.assertEqual(timings,
+                         {"TestA": 8, "TestB": 4, "TestC": 2, "TestD": 6})
+        self.assertEqual(
+            names, ["TestA", "TestB", "TestC", "TestD", "TestE", "TestF"])
+
+    def test_duration_shards_keep_windows_command_budget(self):
+        names = self.names() + ["ExampleDuration", "FuzzDuration"]
+        names.sort()
+        timings = {name: index + 1 for index, name in enumerate(names)}
+        census = ["go", "test", "-race"]
+        prefix = census + ["-timeout=45m", "-coverprofile=coverage.out"]
+        with mock.patch.object(planner, "WINDOWS_COMMAND_BUDGET", 650):
+            assignments, chunks, bundle, predicted = (
+                planner.plan_shard_commands(
+                    names, census, prefix, "package", windows_api=True,
+                    shard_count=3, timings=timings))
+            self.assertIsNone(bundle)
+            self.assertEqual(predicted, [1427, 1426, 1425])
+            self.assertTrue(any(len(shard) > 1 for shard in chunks))
+            self.assertEqual(
+                Counter(name for shard in assignments for name in shard),
+                Counter(names))
+            for index, shard in enumerate(chunks):
+                matched = [name for pattern in shard for name in names
+                           if re.fullmatch(pattern, name)]
+                self.assertEqual(sorted(matched), assignments[index])
+                for pattern in shard:
+                    for command, flag in ((census, "-list"), (prefix, "-run")):
+                        self.assertLessEqual(planner.planned_command_units(
+                            command + [flag, pattern, "package"]), 650)
+
+    def test_timing_errors_in_another_package_do_not_affect_this_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "timings.json"
+            path.write_text(json.dumps({
+                "example.org/a": {"TestA": "slow"},
+                "example.org/b": {"TestB": 1.5},
+            }))
+            self.assertEqual(planner.read_race_timings(path, "example.org/b"),
+                             {"TestB": 1.5})
+            self.assertIn("wrong timing shape",
+                          planner.read_race_timings(path, "example.org/a"))
+
+    def test_main_race_timing_failures_warn_and_keep_count_balance(self):
+        package = "example.org/gortex/internal/mcp"
+        names = ["TestA", "TestB", "TestC", "TestD", "TestE", "TestF", "TestG"]
+        cases = [
+            ("missing", None, "missing timing file"),
+            ("directory", None, "unreadable timing file"),
+            ("malformed", "{", "malformed timing JSON"),
+            ("top-level-list", "[]", "wrong timing shape"),
+            ("package-list", json.dumps({package: []}), "wrong timing shape"),
+            ("empty-package", json.dumps({package: {}}), "wrong timing shape"),
+            ("package-less", "{}", "no entry for package"),
+        ]
+        for seconds in ("slow", -1, float("nan"), float("inf"), True,
+                        10 ** 400):
+            cases.append((str(seconds), json.dumps({
+                package: {"TestA": seconds}}), "wrong timing shape"))
+        for case, content, cause in cases:
+            with self.subTest(case=case), \
+                    tempfile.TemporaryDirectory() as directory:
+                timing_path = Path(directory) / "timings.json"
+                if case == "directory":
+                    timing_path.mkdir()
+                elif content is not None:
+                    timing_path.write_text(content)
+                path = Path(directory) / "selection.json"
+                argv = ["partition", "--partition", "mcp-0",
+                        "--manifest", str(path)]
+                outputs = [
+                    "example.org/gortex", package, "\n".join(names),
+                    "TestA\nTestB\nTestC", "TestD\nTestE", "TestF\nTestG",
+                ]
+                stdout = io.StringIO()
+                with mock.patch.object(planner, "RACE_TIMINGS_PATH",
+                                       timing_path), \
+                        mock.patch.object(planner, "capture",
+                                          side_effect=outputs), \
+                        mock.patch.object(planner.sys, "argv", argv), \
+                        mock.patch.object(planner.subprocess, "run") as run, \
+                        redirect_stdout(stdout):
+                    planner.main()
+                manifest = json.loads(path.read_text())
+                self.assertEqual(manifest["assignment"], "count")
+                self.assertNotIn("predicted_seconds", manifest)
+                self.assertEqual(manifest["shard_count"], 3)
+                self.assertEqual(manifest["shards"], [
+                    ["TestA", "TestB", "TestC"], ["TestD", "TestE"],
+                    ["TestF", "TestG"],
+                ])
+                counts = [len(shard) for shard in manifest["shards"]]
+                self.assertLessEqual(max(counts) - min(counts), 1)
+                warnings = [line for line in stdout.getvalue().splitlines()
+                            if line.startswith("::warning::")]
+                self.assertEqual(len(warnings), 1)
+                self.assertIn(cause, warnings[0])
+                self.assertIn(package, warnings[0])
+                run.assert_called_once_with(manifest["command"], check=True)
+
+    def test_main_race_duration_manifest_and_go_matcher(self):
+        package = "example.org/gortex/internal/mcp"
+        names = ["TestA", "TestB", "TestC", "TestD", "TestE", "TestF"]
+
+        def capture(command):
+            if command == ["go", "list", "-m"]:
+                return "example.org/gortex"
+            if command == ["go", "list", "./..."]:
+                return package
+            pattern = command[command.index("-list") + 1]
+            return "\n".join(name for name in names
+                             if pattern == "." or re.fullmatch(pattern, name))
+
+        with tempfile.TemporaryDirectory() as directory:
+            timing_path = Path(directory) / "timings.json"
+            timing_path.write_text(json.dumps({package: {
+                "TestA": 8.123, "TestB": 4, "TestC": 2, "TestD": 6,
+            }}))
+            path = Path(directory) / "selection.json"
+            argv = ["partition", "--partition", "mcp-0",
+                    "--manifest", str(path)]
+            stdout = io.StringIO()
+            with mock.patch.object(planner, "RACE_TIMINGS_PATH",
+                                   timing_path), \
+                    mock.patch.object(planner, "capture",
+                                      side_effect=capture) as census, \
+                    mock.patch.object(planner.sys, "argv", argv), \
+                    mock.patch.object(planner.subprocess, "run") as run, \
+                    redirect_stdout(stdout):
+                planner.main()
+            manifest = json.loads(path.read_text())
+            self.assertEqual(manifest["assignment"], "duration")
+            self.assertEqual(manifest["predicted_seconds"], [10.12, 10, 10])
+            self.assertEqual(manifest["shards"], [
+                ["TestA", "TestC"], ["TestB", "TestD"], ["TestE", "TestF"],
+            ])
+            self.assertEqual(census.call_count, 6)
+            self.assertNotIn("::warning::", stdout.getvalue())
+            run.assert_called_once_with(manifest["command"], check=True)
 
     def test_single_test_overflow_fails_without_dropping_it(self):
         with mock.patch.object(planner, "WINDOWS_COMMAND_BUDGET", 10):
@@ -154,7 +593,10 @@ class PartitionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "selection.json"
             original_plan = planner.plan_shard_commands
-            with mock.patch.object(planner, "capture", side_effect=capture), \
+            with mock.patch.object(planner, "PLAIN_TIMINGS_PATH",
+                                   Path(directory) / "missing.json"), \
+                    mock.patch.object(planner, "capture",
+                                      side_effect=capture), \
                     mock.patch.object(planner, "WINDOWS_COMMAND_BUDGET", 650), \
                     mock.patch.object(planner, "plan_shard_commands", side_effect=
                                       lambda *args, **kwargs: original_plan(*args, windows_api=True, **kwargs)), \
@@ -172,8 +614,156 @@ class PartitionTests(unittest.TestCase):
             self.assertEqual(manifest["aggregate_test_execution_budget_seconds"], 2700)
             run.assert_not_called()
 
-    def test_main_refuses_duplicate_go_matcher_results_before_execution(self):
+    def test_main_plain_remaining_includes_store_and_other_packages(self):
+        packages = [
+            "example.org/gortex/cmd/gortex",
+            "example.org/gortex/internal/graph/store_sqlite",
+            "example.org/gortex/internal/indexer",
+            "example.org/gortex/internal/mcp",
+            "example.org/gortex/internal/parser",
+        ]
+        selected = [
+            "example.org/gortex/cmd/gortex",
+            "example.org/gortex/internal/graph/store_sqlite",
+            "example.org/gortex/internal/parser",
+        ]
+        for windows in ("false", "true"):
+            with self.subTest(windows=windows), \
+                    tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "selection.json"
+                argv = ["partition", "--partition", "remaining",
+                        "--manifest", str(path)]
+                outputs = ["example.org/gortex", "\n".join(packages)]
+                with mock.patch.object(planner, "capture",
+                                       side_effect=outputs) as capture, \
+                        mock.patch.dict(planner.os.environ,
+                                        {"TEST_RACE": "false",
+                                         "TEST_WINDOWS": windows}), \
+                        mock.patch.object(planner.sys, "argv", argv), \
+                        mock.patch.object(planner.subprocess, "run") as run:
+                    planner.main()
+                command = ["go", "test"]
+                if windows == "true":
+                    command += ["-v"]
+                command += ["-timeout=45m"] + selected
+                run.assert_called_once_with(command, check=True)
+                manifest = json.loads(path.read_text())
+                self.assertEqual(manifest["selected_packages"], selected)
+                self.assertEqual(manifest["command"], command)
+                self.assertEqual(capture.call_count, 2)
+
+    def test_main_plain_mcp_runs_whole_package_without_census(self):
+        packages = ["example.org/gortex/internal/indexer",
+                    "example.org/gortex/internal/mcp",
+                    "example.org/gortex/internal/graph/store_sqlite"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "selection.json"
+            argv = ["partition", "--partition", "mcp", "--manifest", str(path)]
+            outputs = ["example.org/gortex", "\n".join(packages)]
+            with mock.patch.object(planner, "capture",
+                                   side_effect=outputs) as capture, \
+                    mock.patch.dict(planner.os.environ,
+                                    {"TEST_RACE": "false",
+                                     "TEST_WINDOWS": "false"}), \
+                    mock.patch.object(planner.sys, "argv", argv), \
+                    mock.patch.object(planner.subprocess, "run") as run:
+                planner.main()
+            command = ["go", "test", "-timeout=45m",
+                       "example.org/gortex/internal/mcp"]
+            run.assert_called_once_with(command, check=True)
+            manifest = json.loads(path.read_text())
+            self.assertEqual(manifest["selected_packages"], [packages[1]])
+            self.assertEqual(manifest["command"], command)
+            self.assertNotIn("census", manifest)
+            self.assertEqual(capture.call_args_list, [
+                mock.call(["go", "list", "-m"]),
+                mock.call(["go", "list", "./..."]),
+            ])
+
+    def test_main_plain_indexer_uses_three_shards_without_race(self):
+        package = "example.org/gortex/internal/indexer"
+        names = ["ExampleShard", "FuzzShard", "TestA", "TestB",
+                 "TestC", "TestD"]
+        outputs = ["example.org/gortex", package, "\n".join(names),
+                   "ExampleShard\nFuzzShard", "TestA\nTestB", "TestC\nTestD"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "selection.json"
+            argv = ["partition", "--partition", "indexer-1",
+                    "--manifest", str(path)]
+            with mock.patch.object(planner, "PLAIN_TIMINGS_PATH",
+                                   Path(directory) / "missing.json"), \
+                    mock.patch.object(planner, "capture",
+                                   side_effect=outputs) as capture, \
+                    mock.patch.dict(planner.os.environ,
+                                    {"TEST_RACE": "false",
+                                     "TEST_WINDOWS": "false"}), \
+                    mock.patch.object(planner.sys, "argv", argv), \
+                    mock.patch.object(planner.subprocess, "run") as run:
+                planner.main()
+            manifest = json.loads(path.read_text())
+            self.assertEqual(manifest["shards"], [
+                ["ExampleShard", "FuzzShard"], ["TestA", "TestB"],
+                ["TestC", "TestD"],
+            ])
+            self.assertEqual(manifest["shard_count"], 3)
+            self.assertEqual(manifest["census"], names)
+            command = manifest["command"]
+            self.assertEqual(command[:4],
+                             ["go", "test", "-timeout=45m", "-run"])
+            self.assertEqual(command[5:], [package])
+            self.assertEqual([name for name in names
+                              if re.fullmatch(command[4], name)],
+                             ["TestA", "TestB"])
+            run.assert_called_once_with(command, check=True)
+            self.assertEqual(capture.call_args_list[2], mock.call(
+                ["go", "test", "-list", ".", package]))
+            for call in capture.call_args_list:
+                self.assertNotIn("-race", call.args[0])
+
+    def test_main_rejects_partitions_from_the_other_mode(self):
+        cases = (("false", "store-0"), ("true", "mcp"),
+                 ("false", "indexer-3"))
+        for race, partition in cases:
+            with self.subTest(race=race, partition=partition):
+                argv = ["partition", "--partition", partition]
+                with mock.patch.dict(planner.os.environ,
+                                     {"TEST_RACE": race}), \
+                        mock.patch.object(planner.sys, "argv", argv), \
+                        mock.patch.object(planner, "capture") as capture, \
+                        mock.patch.object(planner.subprocess, "run") as run, \
+                        mock.patch.object(planner.sys, "stderr"):
+                    with self.assertRaises(SystemExit) as error:
+                        planner.main()
+                self.assertEqual(error.exception.code, 2)
+                capture.assert_not_called()
+                run.assert_not_called()
+
+    def test_main_refuses_missing_go_matcher_results_before_execution(self):
+        package = "example.org/gortex/internal/indexer"
         names = ["TestA", "TestB", "TestC", "TestD", "TestE", "TestF"]
+
+        def capture(command):
+            if command == ["go", "list", "-m"]:
+                return "example.org/gortex"
+            if command == ["go", "list", "./..."]:
+                return package
+            pattern = command[command.index("-list") + 1]
+            if pattern == ".":
+                return "\n".join(names)
+            return "TestA"
+
+        argv = ["partition", "--partition", "indexer-0"]
+        with mock.patch.object(planner, "capture", side_effect=capture), \
+                mock.patch.dict(planner.os.environ, {"TEST_RACE": "false"}), \
+                mock.patch.object(planner.sys, "argv", argv), \
+                mock.patch.object(planner.subprocess, "run") as run:
+            with self.assertRaisesRegex(ValueError,
+                                        "Go matcher disagrees with shard 0"):
+                planner.main()
+        run.assert_not_called()
+
+    def test_main_refuses_duplicate_go_matcher_results_before_execution(self):
+        names = [f"Test{letter}" for letter in "ABCDEFGHIJKL"]
         package = "example.org/gortex/internal/indexer"
 
         def capture(command):

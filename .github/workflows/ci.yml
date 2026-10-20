@@ -14,17 +14,89 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Linux runs 22 duration-balanced race/coverage partitions. macOS runs
+  # five and Windows six duration-balanced plain partitions, with the full
+  # compiled test set.
   test:
     runs-on: ${{ matrix.os }}
-    # Give store/indexer six and MCP three exhaustive top-level test shards so
-    # race/coverage runs fit within the existing package and job time limits.
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest]
         go-version: ['1.27']
-        partition: [remaining, store-0, store-1, store-2, store-3, store-4, store-5, indexer-0, indexer-1, indexer-2, indexer-3, indexer-4, indexer-5, mcp-0, mcp-1, mcp-2]
+        partition: [remaining, store-0, store-1, store-2, store-3, store-4, store-5, indexer-0, indexer-1, indexer-2, indexer-3, indexer-4, indexer-5, indexer-6, indexer-7, indexer-8, indexer-9, indexer-10, indexer-11, mcp-0, mcp-1, mcp-2]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Go cache paths
+        id: cache-paths
+        shell: bash
+        run: |
+          echo "build=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "mod=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.cache-paths.outputs.build }}
+            ${{ steps.cache-paths.outputs.mod }}
+          key: go-race-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-race-${{ runner.os }}-${{ hashFiles('go.sum') }}-
+            go-race-${{ runner.os }}-
+
+      - name: Build
+        run: go build -o gortex ./cmd/gortex/
+
+      - name: Test
+        shell: bash
+        env:
+          TEST_RACE: "true"
+          TEST_PARTITION: ${{ matrix.partition }}
+        run: python3 scripts/ci-test-partition.py
+
+      - name: Warm race cache for sharded packages
+        if: ${{ !cancelled() && matrix.partition == 'remaining' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: |
+          # The census builds without coverage; the shard tests build with it.
+          mkdir -p "$RUNNER_TEMP/race-warm" "$RUNNER_TEMP/race-warm-cover"
+          go test -race -c -o "$RUNNER_TEMP/race-warm/" ./internal/graph/store_sqlite ./internal/indexer ./internal/mcp
+          go test -race -cover -c -o "$RUNNER_TEMP/race-warm-cover/" ./internal/graph/store_sqlite ./internal/indexer ./internal/mcp
+
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ !cancelled() && matrix.partition == 'remaining' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        with:
+          path: |
+            ${{ steps.cache-paths.outputs.build }}
+            ${{ steps.cache-paths.outputs.mod }}
+          key: go-race-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+
+      - name: Upload coverage
+        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.27'
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          files: coverage.out
+        continue-on-error: true
+
+  test-platform:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+        go-version: ['1.27']
+        partition: [remaining, indexer-0, indexer-1, indexer-2, indexer-3, mcp]
+        # macOS keeps 3 indexer shards: the account runs 5 macOS jobs at once.
+        exclude:
+          - os: macos-latest
+            partition: indexer-3
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -35,12 +107,10 @@ jobs:
       - name: Build
         run: go build -o gortex ./cmd/gortex/
 
-      # Derive each platform's compiled census; assign every top-level case once.
-      # Linux and macOS retain race/coverage checks; Windows retains its
-      # normal verbose run, whose per-test timings expose slow fixtures.
       - name: Test
         shell: bash
         env:
+          TEST_RACE: "false"
           TEST_PARTITION: ${{ matrix.partition }}
           TEST_WINDOWS: ${{ matrix.os == 'windows-latest' }}
         run: |
@@ -60,13 +130,6 @@ jobs:
           else
             python3 scripts/ci-test-partition.py
           fi
-
-      - name: Upload coverage
-        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.27'
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
-        with:
-          files: coverage.out
-        continue-on-error: true
 
   build-linux-static:
     # The linux release ships a statically linked binary so it runs on any
