@@ -18,6 +18,21 @@ spec = importlib.util.spec_from_file_location(
 planner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(planner)
 
+EXPECTED_RACE_EVENT_PARTITIONS = {
+    "pull_request": [
+        "remaining", "store", "indexer-0", "indexer-1", "indexer-2",
+        "indexer-3", "indexer-4", "indexer-5", "indexer-6", "indexer-7",
+        "indexer-8", "indexer-9", "indexer-10", "indexer-11",
+        "mcp-0", "mcp-1", "mcp-2",
+    ],
+    "push": [
+        "remaining", "store-0", "store-1", "store-2", "store-3", "store-4",
+        "store-5", "indexer-0", "indexer-1", "indexer-2", "indexer-3",
+        "indexer-4", "indexer-5", "indexer-6", "indexer-7", "indexer-8",
+        "indexer-9", "indexer-10", "indexer-11", "mcp-0", "mcp-1", "mcp-2",
+    ],
+}
+
 
 class PartitionTests(unittest.TestCase):
     def setUp(self):
@@ -121,8 +136,32 @@ class PartitionTests(unittest.TestCase):
                          | {f"{family}-{index}"
                             for family, count in shards.items()
                             for index in range(count)})
-                for key, expected in (("partition", valid),
-                                      ("os", operating_systems)):
+                if job_id == "test":
+                    expressions = re.findall(
+                        r"^        partition: (.*)$", job, re.MULTILINE)
+                    self.assertEqual(len(expressions), 1)
+                    expression = re.fullmatch(
+                        r"\$\{\{ fromJSON\((.*?) && '(\[.*?\])' "
+                        r"\|\| '(\[.*?\])'\) \}\}", expressions[0])
+                    self.assertIsNotNone(expression)
+                    self.assertEqual(expression[1],
+                                     "github.event_name == 'pull_request'")
+                    for event, encoded in zip(
+                            ("pull_request", "push"), expression.groups()[1:]):
+                        with self.subTest(event=event):
+                            values = json.loads(encoded)
+                            expected = EXPECTED_RACE_EVENT_PARTITIONS[event]
+                            self.assertEqual(Counter(values),
+                                             Counter(expected))
+                            self.assertEqual(
+                                Counter(values),
+                                Counter(planner.RACE_EVENT_PARTITIONS[event]))
+                            self.assertEqual(len(values), len(set(values)))
+                    matrix_lists = (("os", operating_systems),)
+                else:
+                    matrix_lists = (("partition", valid),
+                                    ("os", operating_systems))
+                for key, expected in matrix_lists:
                     lists = re.findall(
                         rf"^        {key}: \[(.*?)\]$", job, re.MULTILINE)
                     self.assertEqual(len(lists), 1)
@@ -501,6 +540,97 @@ class PartitionTests(unittest.TestCase):
                 mock.call(["go", "list", "./..."]),
             ])
 
+    def test_main_race_store_runs_whole_package_without_race_or_census(self):
+        packages = ["example.org/gortex/internal/indexer",
+                    "example.org/gortex/internal/mcp",
+                    "example.org/gortex/internal/graph/store_sqlite"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "selection.json"
+            argv = ["partition", "--partition", "store",
+                    "--manifest", str(path)]
+            outputs = ["example.org/gortex", "\n".join(packages)]
+            with mock.patch.object(planner, "capture",
+                                   side_effect=outputs) as capture, \
+                    mock.patch.dict(planner.os.environ,
+                                    {"TEST_RACE": "true",
+                                     "TEST_WINDOWS": "false"}), \
+                    mock.patch.object(planner.sys, "argv", argv), \
+                    mock.patch.object(planner.subprocess, "run") as run:
+                planner.main()
+            command = ["go", "test", "-timeout=45m",
+                       "-coverprofile=coverage.out",
+                       "example.org/gortex/internal/graph/store_sqlite"]
+            run.assert_called_once_with(command, check=True)
+            manifest = json.loads(path.read_text())
+            self.assertEqual(manifest["selected_packages"], [packages[2]])
+            self.assertEqual(manifest["command"], command)
+            self.assertNotIn("census", manifest)
+            self.assertEqual(capture.call_args_list, [
+                mock.call(["go", "list", "-m"]),
+                mock.call(["go", "list", "./..."]),
+            ])
+
+    def test_race_event_partitions_cover_each_package_once_per_family(self):
+        packages = [
+            "example.org/gortex/cmd/gortex",
+            "example.org/gortex/internal/graph/store_sqlite",
+            "example.org/gortex/internal/indexer",
+            "example.org/gortex/internal/mcp",
+            "example.org/gortex/internal/parser",
+        ]
+        expected_families = {
+            "remaining": [packages[0], packages[4]],
+            "store": [packages[1]],
+            "indexer": [packages[2]],
+            "mcp": [packages[3]],
+        }
+        names = [f"Test{letter}" for letter in "ABCDEFGHIJKL"]
+
+        def capture(command):
+            if command == ["go", "list", "-m"]:
+                return "example.org/gortex"
+            if command == ["go", "list", "./..."]:
+                return "\n".join(packages)
+            pattern = command[command.index("-list") + 1]
+            return "\n".join(name for name in names
+                             if pattern == "." or re.fullmatch(pattern, name))
+
+        self.assertEqual(set(planner.RACE_EVENT_PARTITIONS),
+                         {"pull_request", "push"})
+        for event, partitions in planner.RACE_EVENT_PARTITIONS.items():
+            with self.subTest(event=event), \
+                    tempfile.TemporaryDirectory() as directory:
+                self.assertEqual(Counter(partitions), Counter(
+                    EXPECTED_RACE_EVENT_PARTITIONS[event]))
+                if event == "pull_request":
+                    self.assertFalse(any(partition.startswith("store-")
+                                         for partition in partitions))
+                else:
+                    self.assertNotIn("store", partitions)
+                family_packages = {}
+                for partition in sorted(partitions):
+                    path = Path(directory) / "selection.json"
+                    argv = ["partition", "--partition", partition,
+                            "--manifest", str(path)]
+                    with mock.patch.object(planner, "capture",
+                                           side_effect=capture), \
+                            mock.patch.dict(planner.os.environ,
+                                            {"TEST_RACE": "true",
+                                             "TEST_WINDOWS": "false"}), \
+                            mock.patch.object(planner.sys, "argv", argv), \
+                            mock.patch.object(planner.subprocess, "run"), \
+                            redirect_stdout(io.StringIO()):
+                        planner.main()
+                    manifest = json.loads(path.read_text())
+                    family = partition.split("-", 1)[0]
+                    selected = manifest["selected_packages"]
+                    self.assertEqual(selected, expected_families[family])
+                    family_packages[family] = selected
+                self.assertEqual(family_packages, expected_families)
+                self.assertEqual(
+                    Counter(package for selected in family_packages.values()
+                            for package in selected), Counter(packages))
+
     def test_main_plain_indexer_uses_three_shards_without_race(self):
         package = "example.org/gortex/internal/indexer"
         names = ["ExampleShard", "FuzzShard", "TestA", "TestB",
@@ -541,7 +671,8 @@ class PartitionTests(unittest.TestCase):
                 self.assertNotIn("-race", call.args[0])
 
     def test_main_rejects_partitions_from_the_other_mode(self):
-        for race, partition in (("false", "store-0"), ("true", "mcp")):
+        for race, partition in (("false", "store-0"), ("false", "store"),
+                                ("true", "mcp")):
             with self.subTest(race=race, partition=partition):
                 argv = ["partition", "--partition", partition]
                 with mock.patch.dict(planner.os.environ,

@@ -27,6 +27,16 @@ PLAIN_PACKAGES = {
     "indexer": "/internal/indexer",
     "mcp": "/internal/mcp",
 }
+RACE_SHARD_PARTITIONS = {"remaining"} | {
+    f"{family}-{index}" for family, count in RACE_SHARDS.items()
+    for index in range(count)
+}
+RACE_EVENT_PARTITIONS = {
+    "pull_request": (RACE_SHARD_PARTITIONS
+                     - {f"store-{index}"
+                        for index in range(RACE_SHARDS["store"])}) | {"store"},
+    "push": RACE_SHARD_PARTITIONS,
+}
 
 
 def capture(command):
@@ -251,6 +261,8 @@ def main():
     valid = ({"remaining"} | (paths.keys() - shards.keys())
              | {f"{family}-{index}" for family, count in shards.items()
                 for index in range(count)})
+    if race:
+        valid = set.union(*RACE_EVENT_PARTITIONS.values())
     if args.partition not in valid:
         parser.error(f"partition must be one of {sorted(valid)}")
     module = capture(["go", "list", "-m"]).strip()
@@ -267,10 +279,12 @@ def main():
     manifest = {"partition": args.partition, "packages": package_partitions, "selected_packages": selected}
     command = ["go", "test"]
     if race:
-        command += ["-race", "-timeout=45m", "-coverprofile=coverage.out"]
+        if args.partition != "store":
+            command += ["-race"]
+        command += ["-timeout=45m", "-coverprofile=coverage.out"]
     else:
         command += (["-v"] if windows else []) + ["-timeout=45m"]
-    if family in shards:
+    if family in shards and args.partition != family:
         if len(selected) != 1:
             raise ValueError("a test shard must own exactly one package")
         census_command = (["go", "test"] + (["-race"] if race else [])
