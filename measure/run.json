@@ -2,7 +2,8 @@
   "commits": {
     "main": "91a5c9514a9d41612183731f247ad46b03765abd",
     "pr806": "d7250723b93486628ca70f0f7769942863293e9b",
-    "candidate": "3eaeeb77deab496e20d0b780f874765d4684350c"
+    "candidate": "3eaeeb77deab496e20d0b780f874765d4684350c",
+    "candidate_parent": "3379ff71fe66520d045424938da2cc95558cf0c8"
   },
   "workloads": [
     "R-Fill",
@@ -10,5 +11,5 @@
   ],
   "repeats": 1,
   "sustained_io": false,
-  "note": "Smoke run 4 (A6): checks the Fill name, Fill scoring, clean-restart and export fixes; one repeat, three binaries, R-Fill and R-Restart only."
+  "note": "Smoke run 5 (A6): export repeatability and counters controls; R-Fill and R-Restart only."
 }
