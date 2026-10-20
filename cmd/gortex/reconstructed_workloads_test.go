@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -69,7 +70,7 @@ func newReconstructedDriver(t *testing.T, workload string) *reconstructedDriver 
 		"DE_job_p95_target_ms": 700, "Fill_idle_searches": 100, "Fill_symbol_count": 20,
 		"Fill_loaded_searches": 100, "Fill_min_loaded_searches": 30, "Fill_max_rebuilds": 3,
 		"Fill_ratio_target": 2, "Restart_after_ready_s": 60,
-		"Fresh_file_rule":   "lexicographically last non-test .go file, byte order of repository-relative path",
+		"Fresh_file_rule":   "lexicographically last non-test .go file outside testdata, byte order of repository-relative path",
 		"Fresh_symbol_rule": "first exported top-level declaration in source order",
 	}}}
 	count, bytes := 0, int64(0)
@@ -102,7 +103,9 @@ func newReconstructedDriver(t *testing.T, workload string) *reconstructedDriver 
 			f.write(filepath.Join(f.primary, rel), string(content))
 			count++
 			bytes += int64(len(content))
-			if strings.HasSuffix(rel, ".go") && !strings.HasSuffix(rel, "_test.go") {
+			// Gortex classifies testdata files as fixtures, so their symbols
+			// never answer the oracle. Stimuli and probes use indexed source only.
+			if strings.HasSuffix(rel, ".go") && !strings.HasSuffix(rel, "_test.go") && !slices.Contains(strings.Split(filepath.ToSlash(rel), "/"), "testdata") {
 				d.files = append(d.files, filepath.ToSlash(rel))
 			}
 			return nil
@@ -147,7 +150,7 @@ func newReconstructedDriver(t *testing.T, workload string) *reconstructedDriver 
 	d.run.Parameters["job_telemetry"] = "private JSON daemon logs: contract analysis job elapsed seconds; starts count jobs when available; missing telemetry unsupported"
 	d.run.Parameters["corpus_file_count"], d.run.Parameters["corpus_bytes"] = count, bytes
 	d.run.Parameters["search_symbols"] = d.symbols
-	d.run.Parameters["search_symbol_rule"] = "first 20 distinct exported top-level names, sorted non-test .go paths then source order"
+	d.run.Parameters["search_symbol_rule"] = "first 20 distinct exported top-level names, sorted non-test .go paths outside testdata, then source order"
 	d.run.Parameters["Fresh_file"], d.run.Parameters["Fresh_symbol"] = d.fresh.File, d.fresh.Name
 	t.Cleanup(func() { d.finish(t) })
 	return d

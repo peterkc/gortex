@@ -213,6 +213,14 @@ jobs:
                 echo "$test_name did not run for $name" >&2
                 status=1
               fi
+              # Fixture stores are about 1 GB each. Record their sizes, then drop
+              # stores and corpus copies; logs, JSON and JSONL stay for upload.
+              find "results/$name/$workload" -maxdepth 2 -name 'store.sqlite*' -type f \
+                -exec stat -c '%n %s' {} + 2>/dev/null >> "results/$name/store-sizes.txt" ||
+                find "results/$name/$workload" -maxdepth 2 -name 'store.sqlite*' -type f \
+                  -exec stat -f '%N %z' {} + >> "results/$name/store-sizes.txt"
+              find "results/$name/$workload" -maxdepth 2 \( -name 'store.sqlite*' -o -name repo -o -name 'linked*' \) \
+                -prune -exec rm -rf {} +
             done < <(jq -r '.workloads[]' measure/run.json)
           done
           exit "$status"
