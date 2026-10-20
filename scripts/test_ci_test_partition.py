@@ -4,6 +4,7 @@ import importlib.util
 import io
 from itertools import product
 import json
+import os
 from pathlib import Path
 import random
 import re
@@ -21,10 +22,15 @@ spec.loader.exec_module(planner)
 
 class PartitionTests(unittest.TestCase):
     def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        cwd = Path.cwd()
+        self.addCleanup(os.chdir, cwd)
+        os.chdir(directory.name)
         environment = mock.patch.dict(planner.os.environ)
         environment.start()
         self.addCleanup(environment.stop)
-        for name in ("TEST_RACE", "TEST_WINDOWS"):
+        for name in ("TEST_RACE", "TEST_WINDOWS", "TEST_SHARD_COUNT"):
             planner.os.environ.pop(name, None)
 
     def names(self, count=90):
@@ -72,13 +78,13 @@ class PartitionTests(unittest.TestCase):
     def test_family_counts_preserve_exhaustive_windows_and_race_plans(self):
         names = self.names(91) + ["ExampleFamily", "FuzzFamily"]
         names.sort()
-        self.assertEqual(planner.RACE_SHARDS,
+        self.assertEqual(planner.FALLBACK_RACE_SHARDS,
                          {"store": 6, "indexer": 12, "mcp": 3})
-        self.assertEqual(planner.PLAIN_SHARDS, {"indexer": 3})
-        self.assertEqual(planner.PLAIN_WINDOWS_SHARDS, {"indexer": 4})
-        modes = ((True, planner.RACE_SHARDS),
-                 (False, planner.PLAIN_SHARDS),
-                 (False, planner.PLAIN_WINDOWS_SHARDS))
+        self.assertEqual(planner.FALLBACK_PLAIN_SHARDS, {"indexer": 3})
+        self.assertEqual(planner.FALLBACK_WINDOWS_SHARDS, {"indexer": 4})
+        modes = ((True, planner.FALLBACK_RACE_SHARDS),
+                 (False, planner.FALLBACK_PLAIN_SHARDS),
+                 (False, planner.FALLBACK_WINDOWS_SHARDS))
         for (race, shards), windows in product(modes, (False, True)):
             for family, count in shards.items():
                 with self.subTest(race=race, family=family, windows=windows):
@@ -104,94 +110,65 @@ class PartitionTests(unittest.TestCase):
                             1)
         self.assertEqual(planner.TEST_EXECUTION_BUDGET_SECONDS, 2700)
 
-    def test_workflow_partitions_match_each_mode_once_per_os(self):
+    def test_workflow_uses_plan_matrices_and_keeps_job_names(self):
         workflow = (Path(__file__).parents[1]
                     / ".github/workflows/ci.yml").read_text()
-        modes = (
-            ("test", planner.RACE_PACKAGES, ["ubuntu-latest"]),
-            ("test-platform", planner.PLAIN_PACKAGES,
-             ["macos-latest", "windows-latest"]),
-        )
-        expected_plain = {
-            "windows-latest": {"remaining", "indexer-0", "indexer-1",
-                               "indexer-2", "indexer-3", "mcp"},
-            "macos-latest": {"remaining", "indexer-0", "indexer-1",
-                             "indexer-2", "mcp"},
-        }
-        for job_id, packages, operating_systems in modes:
-            with self.subTest(job=job_id):
-                jobs = re.findall(
-                    rf"^  {job_id}:\n(.*?)(?=^  [\w-]+:|\Z)",
-                    workflow, re.MULTILINE | re.DOTALL)
-                self.assertEqual(len(jobs), 1)
-                job = jobs[0]
-                matrix = {}
-                for key in ("partition", "os"):
-                    lists = re.findall(
-                        rf"^        {key}: \[(.*?)\]$", job, re.MULTILINE)
-                    self.assertEqual(len(lists), 1)
-                    values = [value.strip().strip("'\"")
-                              for value in lists[0].split(",")]
-                    matrix[key] = values
-                self.assertEqual(matrix["os"], operating_systems)
-                exclusions = re.findall(
-                    r"^          - os: (\S+)\n            partition: (\S+)$",
-                    job, re.MULTILINE)
-                self.assertEqual(exclusions, [("macos-latest", "indexer-3")]
-                                 if job_id == "test-platform" else [])
-                for os_name in operating_systems:
-                    shards = (planner.RACE_SHARDS if job_id == "test" else
-                              planner.PLAIN_WINDOWS_SHARDS
-                              if os_name == "windows-latest" else
-                              planner.PLAIN_SHARDS)
-                    valid = {"remaining"} | (packages.keys() - shards.keys())
-                    valid |= {f"{family}-{index}"
-                              for family, count in shards.items()
-                              for index in range(count)}
-                    realized = [partition for partition in matrix["partition"]
-                                if (os_name, partition) not in exclusions]
-                    with self.subTest(os=os_name):
-                        self.assertEqual(Counter(realized), Counter(valid))
-                        if job_id == "test-platform":
-                            self.assertEqual(valid, expected_plain[os_name])
-                self.assertRegex(job, r"(?m)^    timeout-minutes: 60$")
-                if job_id == "test":
-                    steps = re.split(r"(?m)^      - ", job)[1:]
-                    setup = [step for step in steps
-                             if "uses: actions/setup-go@" in step]
-                    self.assertEqual(len(setup), 1)
-                    self.assertRegex(setup[0], r"(?m)^          cache: false$")
-                    restore = [step for step in steps
-                               if "uses: actions/cache/restore@" in step]
-                    save = [step for step in steps
-                            if "uses: actions/cache/save@" in step]
-                    self.assertEqual(len(restore), 1)
-                    self.assertEqual(len(save), 1)
-                    conditions = re.findall(
-                        r"(?m)^        if: (.*)$", save[0])
-                    self.assertEqual(len(conditions), 1)
-                    self.assertIn("matrix.partition == 'remaining'",
-                                  conditions[0])
-                    warm = [step for step in steps
-                            if step.startswith("name: Warm race cache")]
-                    self.assertEqual(len(warm), 1)
-                    packages = " ".join(
-                        "./" + path.lstrip("/")
-                        for path in planner.RACE_PACKAGES.values())
-                    for flags in ("-race -c", "-race -cover -c"):
-                        self.assertRegex(
-                            warm[0], rf"(?m)go test {flags} -o \S+ "
-                            + re.escape(packages) + "$")
+        for job_id, matrix in (("test", "linux"),
+                               ("test-platform", "platform")):
+            body = re.search(rf"^  {job_id}:\n(.*?)(?=^  [\w-]+:|\Z)",
+                             workflow, re.MULTILINE | re.DOTALL).group(1)
+            self.assertIn("    needs: plan", body)
+            self.assertIn("fromJSON(needs.plan.outputs." + matrix + ")", body)
+            self.assertIn("name: " + job_id + " (${{ matrix.os }}, "
+                          "${{ matrix.go-version }}, ${{ matrix.partition }})",
+                          body)
+            self.assertIn("TEST_SHARD_COUNT: ${{ matrix.shard_count }}", body)
+            self.assertIn("name: ci-timings-used", body)
+            self.assertRegex(body, r"(?m)^    timeout-minutes: 60$")
+            self.assertIn("- name: Test\n        id: test", body)
+            steps = re.split(r"(?m)^      - ", body)[1:]
+            timing_steps = [step for step in steps
+                            if "name: Write shard timings" in step
+                            or "path: ci-shard-timings/*.json" in step]
+            self.assertEqual(len(timing_steps), 2)
+            for step in timing_steps:
+                condition = re.search(r"(?m)^        if: (.*)$", step).group(1)
+                self.assertIn("steps.test.outcome == 'success'", condition)
+                self.assertNotIn("!cancelled()", condition)
+                self.assertIn("github.event_name", condition)
+            if job_id == "test":
+                setup = [step for step in steps
+                         if "uses: actions/setup-go@" in step]
+                self.assertEqual(len(setup), 1)
+                self.assertIn("          cache: false", setup[0])
+                restore = [step for step in steps
+                           if "uses: actions/cache/restore@" in step]
+                save = [step for step in steps
+                        if "uses: actions/cache/save@" in step]
+                self.assertEqual(len(restore), 1)
+                self.assertEqual(len(save), 1)
+                self.assertIn("matrix.partition == 'remaining'", save[0])
+                self.assertIn("github.event_name", save[0])
+                warm = [step for step in steps
+                        if step.startswith("name: Warm race cache")]
+                self.assertEqual(len(warm), 1)
+                packages = " ".join("./" + path.lstrip("/")
+                                    for path in planner.RACE_PACKAGES.values())
+                for flags in ("-race -c", "-race -cover -c"):
+                    self.assertRegex(warm[0], rf"(?m)go test {flags} -o \S+ "
+                                     + re.escape(packages) + "$")
+        self.assertIn("needs: [plan, test, test-platform]", workflow)
+        self.assertNotIn("partition: [remaining", workflow)
 
     def test_committed_durations_balance_every_race_package(self):
         timings = json.loads(planner.RACE_TIMINGS_PATH.read_text())
-        for family in planner.RACE_SHARDS:
+        for family in planner.FALLBACK_RACE_SHARDS:
             package = "github.com/zzet/gortex" + planner.RACE_PACKAGES[family]
             entries = timings[package]
             names = sorted(entries)
             with self.subTest(family=family):
                 assignments, predicted = planner.plan_duration_shards(
-                    names, entries, planner.RACE_SHARDS[family])
+                    names, entries, planner.FALLBACK_RACE_SHARDS[family])
                 self.assertEqual(len(assignments),
                                  {"store": 6, "indexer": 12, "mcp": 3}[family])
                 weights = [max(0.005, seconds)
@@ -331,6 +308,51 @@ class PartitionTests(unittest.TestCase):
                 self.assertNotIn("::warning::", stdout.getvalue())
                 run.assert_called_once_with(manifest["command"], check=True)
 
+    def test_parse_pass_durations_ignores_subtests_and_non_pass_results(self):
+        output = """2026-10-20T01:00:00.000Z === RUN   TestA
+2026-10-20T01:00:01.000Z     --- PASS: TestA/child (8.00s)
+2026-10-20T01:00:01.000Z --- PASS: TestA (1.25s)
+2026-10-20T01:00:02.000Z --- SKIP: TestSkip (0.00s)
+2026-10-20T01:00:02.000Z --- FAIL: TestFail (9.00s)
+2026-10-20T01:00:02.000Z --- PASS: ExampleA (0.00s)
+2026-10-20T01:00:02.000Z --- PASS: FuzzA (0.12s)
+2026-10-20T01:00:02.000Z ok  \texample.org/a\t1.5s
+--- PASS: TestB (2.50s)
+ok  \texample.org/b\t2.5s
+--- PASS: TestUnfinished (3.00s)
+"""
+        self.assertEqual(planner.parse_pass_durations(output), {
+            "example.org/a": {"TestA": 1.25, "ExampleA": 0.0, "FuzzA": 0.12},
+            "example.org/b": {"TestB": 2.5},
+        })
+
+    def test_main_verbose_only_for_race_timing_shards(self):
+        package = "example.org/gortex/internal/mcp"
+        names = ["TestA", "TestB", "TestC"]
+        outputs = ["example.org/gortex", package, "\n".join(names)] + names
+        with tempfile.TemporaryDirectory() as directory:
+            argv = ["partition", "--partition", "mcp-0", "--dry-run",
+                    "--manifest", str(Path(directory) / "selection.json")]
+            with mock.patch.object(planner.sys, "argv", argv), \
+                    mock.patch.object(planner, "capture",
+                                      side_effect=outputs), \
+                    mock.patch.object(planner, "read_race_timings",
+                                      return_value="missing timing file"):
+                planner.main()
+            command = json.loads((Path(directory)
+                                  / "selection.json").read_text())["command"]
+            self.assertIn("-v", command)
+            self.assertIn("-race", command)
+
+    def test_extra_timing_names_do_not_enter_the_compiled_census(self):
+        names = ["TestA", "TestB", "TestNew"]
+        timings = {"TestA": 1.0, "TestB": 2.0, "TestRemoved": 3.0}
+        assignments, predicted = planner.plan_duration_shards(
+            names, timings, 2)
+        self.assertEqual(
+            sorted(name for shard in assignments for name in shard), names)
+        self.assertEqual(sum(predicted), 5.0)
+
     def test_zero_and_tiny_timings_spread_tests_evenly(self):
         names = [f"Test{index:03}" for index in range(31)]
         for seconds in (0.0, 0.00001):
@@ -373,6 +395,376 @@ class PartitionTests(unittest.TestCase):
                 planner.main()
         self.assertEqual(capture.call_count, 3)
         run.assert_not_called()
+
+    def test_parser_resets_failed_package_and_preserves_indentation(self):
+        output = (
+            "2026-10-20T01:00:00Z --- PASS: TestFailedPackage (9.00s)\r\n"
+            "2026-10-20T01:00:00Z FAIL\texample.org/failed\t9.0s\r\n"
+            "2026-10-20T01:00:00Z --- PASS: TestGood (1.25s)\r\n"
+            "2026-10-20T01:00:00Z     --- PASS: TestIndented (7.00s)\r\n"
+            "2026-10-20T01:00:00Z     ok  \texample.org/other\t7.0s\r\n"
+            "2026-10-20T01:00:00Z ok  \texample.org/good\t1.3s\r\n")
+        self.assertEqual(planner.parse_pass_durations(output), {
+            "example.org/good": {"TestGood": 1.25},
+        })
+
+    def committed_plan(self):
+        module = "github.com/zzet/gortex"
+        race = {family: planner.read_race_timings(
+            planner.RACE_TIMINGS_PATH, module + planner.RACE_PACKAGES[family])
+                for family in planner.FALLBACK_RACE_SHARDS}
+        plain = {"indexer": planner.read_race_timings(
+            planner.PLAIN_TIMINGS_PATH, module + "/internal/indexer")}
+        return planner.build_plan(race, plain, "1.27")
+
+    def test_committed_timings_produce_ten_minute_layout(self):
+        plan = self.committed_plan()
+        expected = {
+            "ubuntu-latest": {"store": 3, "indexer": 2, "mcp": 2},
+            "windows-latest": {"indexer": 2},
+            "macos-latest": {"indexer": 2},
+        }
+        rows = plan["linux"]["include"] + plan["platform"]["include"]
+        for platform, counts in expected.items():
+            selected = [row for row in rows if row["os"] == platform]
+            realized = {family: sum(row["partition"].startswith(family + "-")
+                                    for row in selected) for family in counts}
+            self.assertEqual(realized, counts)
+            self.assertEqual(len(selected), sum(counts.values())
+                             + (1 if platform == "ubuntu-latest" else 2))
+            self.assertTrue(all(row["go-version"] == "1.27"
+                                for row in selected))
+            self.assertEqual(len({row["partition"] for row in selected}),
+                             len(selected))
+        self.assertEqual(json.loads(json.dumps(plan)), plan)
+
+    def test_plan_caps_shards_and_mac_jobs_and_keeps_one_minimum(self):
+        race = {family: {"TestSlow": 10 ** 9}
+                for family in planner.FALLBACK_RACE_SHARDS}
+        plan = planner.build_plan(race, {"indexer": {"TestSlow": 10 ** 9}},
+                                  "1.27")
+        self.assertEqual(max(row["shard_count"]
+                             for row in plan["linux"]["include"]),
+                         planner.MAX_SHARDS)
+        self.assertEqual(sum(row["os"] == "macos-latest"
+                             for row in plan["platform"]["include"]), 5)
+        counts = planner.family_counts({"indexer": {"TestZero": 0.0}},
+                                       {"indexer": 4}, planner.TARGET_SECONDS)
+        self.assertEqual(counts, {"indexer": 1})
+
+    def test_plan_warns_and_uses_count_fallback_for_missing_or_bad_files(self):
+        for content in (None, "{", "[]", '{"wrong": {}}'):
+            with self.subTest(content=content), \
+                    tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                source = base / "race.json"
+                if content is not None:
+                    source.write_text(content)
+                stdout = io.StringIO()
+                with mock.patch.object(planner, "RACE_TIMINGS_PATH", source), \
+                        mock.patch.object(planner, "PLAIN_TIMINGS_PATH",
+                                          base / "plain.json"), \
+                        redirect_stdout(stdout):
+                    planner.write_plan(base / "used", "example.org/gortex",
+                                       "1.27", base / "outputs")
+                plan = json.loads((base / "used/plan.json").read_text())
+                self.assertEqual(len(plan["linux"]["include"]), 22)
+                self.assertEqual(len(plan["platform"]["include"]), 11)
+                self.assertIn("::warning::", stdout.getvalue())
+                self.assertIn("count split", stdout.getvalue())
+
+    def test_plan_uses_exact_cached_files_and_outputs_matrices(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            used = base / "used"
+            used.mkdir()
+            module = "example.org/gortex"
+            race = {module + suffix: {"TestA": 2.0}
+                    for suffix in planner.RACE_PACKAGES.values()}
+            plain = {module + "/internal/indexer": {"TestB": 3.0}}
+            for filename, timings in (("ci-race-timings.json", race),
+                                      ("ci-plain-timings.json", plain)):
+                (used / filename).write_text(json.dumps(timings))
+            before = (used / "ci-race-timings.json").read_bytes()
+            with redirect_stdout(io.StringIO()):
+                planner.write_plan(used, module, "1.27", base / "outputs")
+            outputs = dict(line.split("=", 1) for line in
+                           (base / "outputs").read_text().splitlines())
+            self.assertEqual(set(outputs), {"linux", "platform"})
+            self.assertEqual(len(json.loads(outputs["linux"])["include"]), 4)
+            self.assertEqual((used / "ci-race-timings.json").read_bytes(),
+                             before)
+
+    def test_partition_count_override_and_index_validation(self):
+        self.assertEqual(planner.partition_shards(
+            "indexer-13", {"indexer": 3}, 14), {"indexer": 14})
+        for partition, count in (("indexer-3", 3), ("indexer--1", 3),
+                                 ("indexer-0", 0), ("indexer-0", 17),
+                                 ("remaining", 1)):
+            with self.subTest(partition=partition, count=count):
+                with self.assertRaises(ValueError):
+                    planner.partition_shards(partition, {"indexer": 3}, count)
+
+    def test_main_uses_supplied_shard_count_before_any_go_execution(self):
+        package = "example.org/gortex/internal/mcp"
+        names = ["TestA", "TestB", "TestC", "TestD"]
+        outputs = ["example.org/gortex", package, "\n".join(names)] + names
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "selection.json"
+            argv = ["partition", "--partition", "mcp-3", "--shard-count", "4",
+                    "--manifest", str(path), "--dry-run"]
+            with mock.patch.object(planner.sys, "argv", argv), \
+                    mock.patch.object(planner, "capture",
+                                      side_effect=outputs), \
+                    mock.patch.object(planner, "read_race_timings",
+                                      return_value=dict.fromkeys(names, 1.0)):
+                planner.main()
+            self.assertEqual(json.loads(path.read_text())["shard_count"], 4)
+            argv[5] = "3"
+            with mock.patch.object(planner.sys, "argv", argv), \
+                    mock.patch.object(planner, "capture") as capture, \
+                    mock.patch.object(planner.sys, "stderr"):
+                with self.assertRaises(SystemExit):
+                    planner.main()
+            capture.assert_not_called()
+
+    def test_timing_merge_averages_and_drops_only_for_complete_families(self):
+        old = {"TestA": 2.0, "TestGone": 9.0}
+        delivered = {"store-0": {"TestA": 4.02, "TestNew": 1.25}}
+        expected = {"store-0", "store-1"}
+        partial = planner.merge_family_timings(old, delivered, expected)
+        self.assertEqual(partial, {"TestA": 3.01, "TestGone": 9.0,
+                                   "TestNew": 1.25})
+        complete = {**delivered, "store-1": {"TestOther": 0.0}}
+        result = planner.merge_family_timings(old, complete, expected)
+        self.assertEqual(result, {"TestA": 3.01, "TestNew": 1.25,
+                                  "TestOther": 0.0})
+        self.assertEqual(result, planner.merge_family_timings(
+            old, dict(reversed(list(complete.items()))), expected))
+        self.assertEqual(old, {"TestA": 2.0, "TestGone": 9.0})
+
+    def test_merge_uses_counts_from_this_runs_plan(self):
+        plan = planner.build_plan(
+            {family: {"TestA": 1.0}
+             for family in planner.FALLBACK_RACE_SHARDS},
+            {"indexer": {"TestA": 1.0}}, "1.27")
+        module = "example.org/gortex"
+        package = module + "/internal/indexer"
+        old = {"race": {}, "plain": {package: {"TestA": 2.0, "TestOld": 3.0}}}
+        record = {"os": "windows-latest", "partition": "indexer-0",
+                  "shard_count": 4, "package": package,
+                  "timings": {"TestA": 6.0}}
+        merged = planner.merge_run_timings(plan, old, [record], module)
+        self.assertEqual(merged["plain"][package], old["plain"][package])
+        record = {**record, "shard_count": 1}
+        merged = planner.merge_run_timings(plan, old, [record], module)
+        self.assertEqual(merged["plain"][package], {"TestA": 4.0})
+
+    def test_merge_writes_json_and_preserves_missing_families(self):
+        module = "example.org/gortex"
+        race = {family: {"TestA": 1.0}
+                for family in planner.FALLBACK_RACE_SHARDS}
+        plan = planner.build_plan(race, {"indexer": {"TestA": 1.0}}, "1.27")
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            used, shards = base / "used", base / "shards"
+            used.mkdir()
+            shards.mkdir()
+            (used / "plan.json").write_text(json.dumps(plan))
+            old = {"TestA": 2.0, "TestGone": 9.0}
+            for source, paths in ((planner.RACE_TIMINGS_PATH,
+                                   planner.RACE_PACKAGES),
+                                  (planner.PLAIN_TIMINGS_PATH,
+                                   {"indexer": "/internal/indexer"})):
+                timings = {module + suffix: old for suffix in paths.values()}
+                (used / source.name).write_text(json.dumps(timings))
+            record = {"os": "ubuntu-latest", "partition": "store-0",
+                      "shard_count": 1,
+                      "package": module + "/internal/graph/store_sqlite",
+                      "timings": {"TestA": 4.0}}
+            (shards / "store.json").write_text(json.dumps(record))
+            planner.merge_timings(used, shards, module)
+            text = (used / "ci-race-timings.json").read_text()
+            merged = json.loads(text)
+            self.assertEqual(merged[record["package"]], {"TestA": 3.0})
+            self.assertEqual(merged[module + "/internal/indexer"], old)
+            self.assertEqual(merged[module + "/internal/mcp"], old)
+            self.assertEqual(text, json.dumps(merged, indent=2, sort_keys=True)
+                             + "\n")
+
+    def test_per_shard_writer_records_pass_results_without_go(self):
+        Path("go.mod").write_text("module github.com/zzet/gortex\ngo 1.27.0\n")
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            log = base / "test.log"
+            log.write_bytes(
+                b"--- PASS: TestA (1.25s)\r\n"
+                b"    --- PASS: TestA/child (0.25s)\r\n"
+                b"ok  \tgithub.com/zzet/gortex/internal/mcp\t1.5s\r\n")
+            argv = ["partition", "--write-timings", str(log),
+                    "--partition", "mcp-1", "--shard-count", "2",
+                    "--shard-timings-dir", str(base / "shards")]
+            with mock.patch.object(planner.sys, "argv", argv), \
+                    mock.patch.dict(planner.os.environ,
+                                    {"TEST_OS": "ubuntu-latest"}), \
+                    mock.patch.object(planner, "capture") as capture:
+                planner.main()
+            path = base / "shards/ubuntu-latest-mcp-1.json"
+            record = json.loads(path.read_text())
+            self.assertEqual(record["timings"], {"TestA": 1.25})
+            self.assertEqual(record["shard_count"], 2)
+            capture.assert_not_called()
+            with self.assertRaisesRegex(ValueError, "no completed PASS"):
+                planner.shard_timing_record("FAIL\tpkg\t1s", "ubuntu-latest",
+                                            "mcp-1", 2,
+                                            "github.com/zzet/gortex")
+
+    def test_timing_cache_attempt_keys_and_artifact_lifecycle(self):
+        workflow = (Path(__file__).parents[1]
+                    / ".github/workflows/ci.yml").read_text()
+        key = "key: ci-timings-${{ github.run_id }}-${{ github.run_attempt }}"
+        self.assertEqual(workflow.count(key), 2)
+        self.assertIn("restore-keys: ci-timings-", workflow)
+        uploads = [step for step in re.split(r"(?m)^      - ", workflow)[1:]
+                   if step.startswith("uses: actions/upload-artifact@")]
+        self.assertEqual(len(uploads), 4)
+        for step in uploads:
+            self.assertIn("overwrite: true", step)
+            retention = (7 if "path: ci-shard-timings/*.json" in step else 30)
+            self.assertIn(f"retention-days: {retention}", step)
+        self.assertNotIn("matrix.go-version == '1.27'", workflow)
+
+    def test_main_prefers_cached_timings_and_falls_back_per_family(self):
+        module = "example.org/gortex"
+        package = module + "/internal/mcp"
+        names = ["TestA", "TestB", "TestC", "TestD"]
+        fallback = {"TestA": 100.0, "TestB": 10.0, "TestC": 10.0,
+                    "TestD": 10.0}
+        cached = {"TestA": 9.0, "TestB": 2.0, "TestC": 2.0, "TestD": 2.0}
+
+        def capture(command):
+            if command == ["go", "list", "-m"]:
+                return module
+            if command == ["go", "list", "./..."]:
+                return package
+            pattern = command[command.index("-list") + 1]
+            return "\n".join(name for name in names
+                             if pattern == "." or re.fullmatch(pattern, name))
+
+        for missing in (False, True):
+            with self.subTest(missing=missing), \
+                    tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                used = base / "used"
+                used.mkdir()
+                source = base / "race.json"
+                source.write_text(json.dumps({package: fallback}))
+                (used / source.name).write_text(json.dumps(
+                    {} if missing else {package: cached}))
+                manifest = base / "selection.json"
+                argv = ["partition", "--partition", "mcp-0", "--shard-count",
+                        "2", "--timings-dir", str(used), "--dry-run",
+                        "--manifest", str(manifest)]
+                with mock.patch.object(planner.sys, "argv", argv), \
+                        mock.patch.object(planner, "RACE_TIMINGS_PATH",
+                                          source), \
+                        mock.patch.object(planner, "capture",
+                                          side_effect=capture), \
+                        redirect_stdout(io.StringIO()):
+                    planner.main()
+                result = json.loads(manifest.read_text())
+                self.assertEqual(result["assignment"], "duration")
+                self.assertEqual(sum(result["predicted_seconds"]),
+                                 130.0 if missing else 15.0)
+
+    def test_main_plan_materializes_missing_cached_families(self):
+        module = "example.org/gortex"
+        Path("go.mod").write_text(f"module {module}\ngo 1.28.2\n")
+        base = Path.cwd()
+        source = base / "fallback"
+        source.mkdir()
+        used = base / "used"
+        used.mkdir()
+        race = {module + suffix: {"TestOld": 20.0}
+                for suffix in planner.RACE_PACKAGES.values()}
+        plain = {module + "/internal/indexer": {"TestPlain": 40.0}}
+        race_path, plain_path = source / "race.json", source / "plain.json"
+        race_path.write_text(json.dumps(race))
+        plain_path.write_text(json.dumps(plain))
+        store = module + "/internal/graph/store_sqlite"
+        (used / race_path.name).write_text(json.dumps({
+            store: {"TestCached": 30000.0}}))
+        outputs = base / "outputs"
+        argv = ["partition", "--plan", "--timings-dir", str(used)]
+        with mock.patch.object(planner.sys, "argv", argv), \
+                mock.patch.dict(planner.os.environ,
+                                {"GITHUB_OUTPUT": str(outputs)}), \
+                mock.patch.object(planner, "RACE_TIMINGS_PATH", race_path), \
+                mock.patch.object(planner, "PLAIN_TIMINGS_PATH", plain_path), \
+                mock.patch.object(planner, "capture") as capture, \
+                redirect_stdout(io.StringIO()):
+            planner.main()
+        values = dict(line.split("=", 1)
+                      for line in outputs.read_text().splitlines())
+        matrix = json.loads(values["linux"])["include"]
+        self.assertTrue(all(row["go-version"] == "1.28" for row in matrix))
+        self.assertEqual(sum(row["partition"].startswith("store-")
+                             for row in matrix), 16)
+        materialized = json.loads((used / race_path.name).read_text())
+        self.assertEqual(materialized[store], {"TestCached": 30000.0})
+        self.assertEqual(materialized[module + "/internal/mcp"],
+                         {"TestOld": 20.0})
+        self.assertEqual(set(materialized), set(race))
+        capture.assert_not_called()
+
+    def test_incomplete_new_family_is_omitted_not_saved_as_partial_data(self):
+        self.assertEqual(planner.merge_family_timings(
+            {}, {"indexer-0": {"TestA": 2.0}},
+            {"indexer-0", "indexer-1"}), {})
+        module = "example.org/gortex"
+        plan = planner.build_plan(
+            {family: {"TestA": 1.0}
+             for family in planner.FALLBACK_RACE_SHARDS},
+            {"indexer": {"TestA": 2000.0}}, "1.27")
+        record = {"os": "windows-latest", "partition": "indexer-0",
+                  "shard_count": 2, "package": module + "/internal/indexer",
+                  "timings": {"TestA": 2.0}}
+        result = planner.merge_run_timings(
+            plan, {"race": {}, "plain": {}}, [record], module)
+        self.assertEqual(result, {"race": {}, "plain": {}})
+
+    def test_main_merge_with_missing_or_empty_shard_directory(self):
+        module = "example.org/gortex"
+        Path("go.mod").write_text(f"module {module}\ngo 1.27.0\n")
+        for present in (False, True):
+            with self.subTest(present=present), \
+                    tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                used = base / "used"
+                used.mkdir()
+                shards = base / "shards"
+                if present:
+                    shards.mkdir()
+                race = {module + suffix: {"TestA": 2.0}
+                        for suffix in planner.RACE_PACKAGES.values()}
+                plain = {module + "/internal/indexer": {"TestA": 2.0}}
+                (used / "ci-race-timings.json").write_text(json.dumps(race))
+                (used / "ci-plain-timings.json").write_text(json.dumps(plain))
+                plan = planner.build_plan(
+                    {family: {"TestA": 2.0}
+                     for family in planner.FALLBACK_RACE_SHARDS},
+                    {"indexer": {"TestA": 2.0}}, "1.27")
+                (used / "plan.json").write_text(json.dumps(plan))
+                argv = ["partition", "--merge-timings", "--timings-dir",
+                        str(used), "--shard-timings-dir", str(shards)]
+                with mock.patch.object(planner.sys, "argv", argv), \
+                        mock.patch.object(planner, "capture") as capture:
+                    planner.main()
+                self.assertEqual(json.loads(
+                    (used / "ci-race-timings.json").read_text()), race)
+                self.assertEqual(json.loads(
+                    (used / "ci-plain-timings.json").read_text()), plain)
+                capture.assert_not_called()
 
     def test_unknown_names_use_package_median_duration(self):
         timings = {"TestA": 8, "TestB": 4, "TestC": 2, "TestD": 6}
