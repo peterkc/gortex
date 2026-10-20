@@ -199,6 +199,10 @@ class PartitionTests(unittest.TestCase):
                         self.assertRegex(
                             warm[0], rf"(?m)go test {flags} -o \S+ "
                             + re.escape(packages) + "$")
+                    self.assertRegex(
+                        warm[0], r"(?m)go test -cover -c -o \S+ "
+                        + re.escape("./" + planner.RACE_PACKAGES["store"]
+                                    .lstrip("/")) + "$")
 
     def test_committed_durations_balance_every_race_package(self):
         timings = json.loads(planner.RACE_TIMINGS_PATH.read_text())

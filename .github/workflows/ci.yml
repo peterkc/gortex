@@ -14,8 +14,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Linux runs 22 duration-balanced race/coverage partitions. macOS and
-  # Windows run five plain partitions each, with the full compiled test set.
+  # Linux runs duration-balanced race/coverage partitions: 17 on PRs, where
+  # store_sqlite runs once without race, and 22 on pushes, which keep its race
+  # shards. macOS and Windows run five plain partitions each, with the full
+  # compiled test set.
   test:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -65,9 +67,11 @@ jobs:
         if: ${{ !cancelled() && matrix.partition == 'remaining' && github.event_name == 'pull_request' }}
         run: |
           # The census builds without coverage; the shard tests build with it.
-          mkdir -p "$RUNNER_TEMP/race-warm" "$RUNNER_TEMP/race-warm-cover"
+          mkdir -p "$RUNNER_TEMP/race-warm" "$RUNNER_TEMP/race-warm-cover" "$RUNNER_TEMP/plain-warm-cover"
           go test -race -c -o "$RUNNER_TEMP/race-warm/" ./internal/graph/store_sqlite ./internal/indexer ./internal/mcp
           go test -race -cover -c -o "$RUNNER_TEMP/race-warm-cover/" ./internal/graph/store_sqlite ./internal/indexer ./internal/mcp
+          # The PR store job tests store_sqlite without race, with coverage.
+          go test -cover -c -o "$RUNNER_TEMP/plain-warm-cover/" ./internal/graph/store_sqlite
 
       # Fork PR runs save (fork main never runs CI); upstream would use github.event_name == 'push' && github.ref == 'refs/heads/main'.
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

@@ -258,11 +258,12 @@ def main():
             == "true")
     shards = RACE_SHARDS if race else PLAIN_SHARDS
     paths = RACE_PACKAGES if race else PLAIN_PACKAGES
-    valid = ({"remaining"} | (paths.keys() - shards.keys())
-             | {f"{family}-{index}" for family, count in shards.items()
-                for index in range(count)})
     if race:
         valid = set.union(*RACE_EVENT_PARTITIONS.values())
+    else:
+        valid = ({"remaining"} | (paths.keys() - shards.keys())
+                 | {f"{family}-{index}" for family, count in shards.items()
+                    for index in range(count)})
     if args.partition not in valid:
         parser.error(f"partition must be one of {sorted(valid)}")
     module = capture(["go", "list", "-m"]).strip()
@@ -277,14 +278,16 @@ def main():
     if not selected:
         raise ValueError(f"no packages selected for {args.partition}")
     manifest = {"partition": args.partition, "packages": package_partitions, "selected_packages": selected}
+    # A race-mode family run as one whole package (store on PRs) skips -race.
+    whole_family = family in shards and args.partition == family
     command = ["go", "test"]
     if race:
-        if args.partition != "store":
+        if not whole_family:
             command += ["-race"]
         command += ["-timeout=45m", "-coverprofile=coverage.out"]
     else:
         command += (["-v"] if windows else []) + ["-timeout=45m"]
-    if family in shards and args.partition != family:
+    if family in shards and not whole_family:
         if len(selected) != 1:
             raise ValueError("a test shard must own exactly one package")
         census_command = (["go", "test"] + (["-race"] if race else [])
