@@ -2,7 +2,11 @@ package store_sqlite
 
 import (
 	"context"
+	"runtime"
+	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // sqliteWriteGate is a zero-value, context-aware binary semaphore. It keeps
@@ -14,6 +18,11 @@ import (
 type sqliteWriteGate struct {
 	once  sync.Once
 	token chan struct{}
+	stats writeGateStats
+	// holder is observational only. The token still owns exclusion; the empty
+	// windows before publication and after clearing are reported as unknown.
+	holder atomic.Pointer[writeGateSiteStats]
+	heldAt time.Time // protected by the token
 }
 
 func (g *sqliteWriteGate) init() {
@@ -21,6 +30,30 @@ func (g *sqliteWriteGate) init() {
 		g.token = make(chan struct{}, 1)
 		g.token <- struct{}{}
 	})
+}
+
+// callSite skips this file, including Lock and HoldWriteGate, so an outer
+// writer window is attributed to its caller rather than the wrapper. Cache
+// skipped PCs too: resolving inlined frames may allocate on the cold path.
+func (g *sqliteWriteGate) callSite() *writeGateSiteStats {
+	var pcs [8]uintptr
+	n := runtime.Callers(2, pcs[:])
+	for _, pc := range pcs[:n] {
+		if cached, ok := g.stats.sites.Load(pc); ok {
+			if site := cached.(*writeGateSiteStats); site != nil {
+				return site
+			}
+			continue
+		}
+		fn := runtime.FuncForPC(pc - 1)
+		file, line := fn.FileLine(pc - 1)
+		if strings.HasSuffix(file, "/write_gate.go") {
+			g.stats.sites.Store(pc, (*writeGateSiteStats)(nil))
+			continue
+		}
+		return g.stats.register(pc, fn.Name(), file, line)
+	}
+	return g.stats.register(0, "unknown", "unknown", 0)
 }
 
 func (g *sqliteWriteGate) Lock() {
@@ -36,30 +69,56 @@ func (g *sqliteWriteGate) LockContext(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	site := g.callSite()
+	started := time.Now()
+	holder := g.holder.Load()
+	waiting := len(g.token) == 0
 	select {
 	case <-ctx.Done():
+		site.recordWait(time.Since(started), holder, waiting)
+		g.stats.used.Store(true)
 		return ctx.Err()
 	case <-g.token:
+		g.holder.Store(site)
+		g.heldAt = time.Now()
+		site.recordWait(g.heldAt.Sub(started), holder, waiting)
 		if err := ctx.Err(); err != nil {
+			g.stats.used.Store(true)
+			g.holder.Store(nil)
 			g.token <- struct{}{}
 			return err
 		}
+		site.acquisitions.Add(1)
+		g.stats.used.Store(true)
 		return nil
 	}
 }
 
 func (g *sqliteWriteGate) TryLock() bool {
 	g.init()
+	site := g.callSite()
 	select {
 	case <-g.token:
+		g.holder.Store(site)
+		g.heldAt = time.Now()
+		site.acquisitions.Add(1)
+		site.wait.record(0)
+		g.stats.used.Store(true)
 		return true
 	default:
+		site.tryLockFailures.Add(1)
+		g.stats.used.Store(true)
 		return false
 	}
 }
 
 func (g *sqliteWriteGate) Unlock() {
 	g.init()
+	if site := g.holder.Load(); site != nil {
+		site.hold.record(time.Since(g.heldAt))
+		g.stats.used.Store(true)
+	}
+	g.holder.Store(nil)
 	select {
 	case g.token <- struct{}{}:
 	default:
