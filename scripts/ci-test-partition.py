@@ -3,19 +3,29 @@
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
 import sys
 import time
 from pathlib import Path
+from statistics import median
 
-SHARDS = {"store": 6, "indexer": 6, "mcp": 3}
+RACE_SHARDS = {"store": 6, "indexer": 12, "mcp": 3}
+RACE_TIMINGS_PATH = Path(__file__).with_name("ci-race-timings.json")
+PLAIN_SHARDS = {"indexer": 3}
+PLAIN_WINDOWS_SHARDS = {"indexer": 4}
+PLAIN_TIMINGS_PATH = Path(__file__).with_name("ci-plain-timings.json")
 NAME_BUNDLE = 32
 WINDOWS_COMMAND_BUDGET = 30000
 TEST_EXECUTION_BUDGET_SECONDS = 45 * 60
-LARGE_PACKAGES = {
+RACE_PACKAGES = {
     "store": "/internal/graph/store_sqlite",
+    "indexer": "/internal/indexer",
+    "mcp": "/internal/mcp",
+}
+PLAIN_PACKAGES = {
     "indexer": "/internal/indexer",
     "mcp": "/internal/mcp",
 }
@@ -96,6 +106,48 @@ def plan_shards(names, bundle_size=NAME_BUNDLE, shard_count=3):
     return assignments, patterns
 
 
+def read_race_timings(path, package):
+    try:
+        timings = json.loads(path.read_text())
+    except FileNotFoundError:
+        return "missing timing file"
+    except OSError as error:
+        return f"unreadable timing file: {error.strerror}"
+    except (ValueError, UnicodeError):
+        return "malformed timing JSON"
+    if not isinstance(timings, dict):
+        return "wrong timing shape: expected package object"
+    if package not in timings:
+        return "no entry for package in timing file"
+    entries = timings[package]
+    if not isinstance(entries, dict) or not entries:
+        return "wrong timing shape: expected nonempty test object"
+    for seconds in entries.values():
+        if (type(seconds) not in (int, float) or seconds < 0
+                or seconds > sys.float_info.max
+                or not math.isfinite(seconds)):
+            return "wrong timing shape: expected finite nonnegative seconds"
+    return entries
+
+
+def plan_duration_shards(names, timings, shard_count):
+    default_seconds = median(timings.values())
+    # Go reports centiseconds; rounded-zero cases still need a weight.
+    weights = {name: max(0.005, timings.get(name, default_seconds))
+               for name in names}
+    assignments = [[] for _ in range(shard_count)]
+    predicted = [0.0] * shard_count
+    for name in sorted(names, key=lambda name: (-weights[name], name)):
+        index = min(range(shard_count),
+                    key=lambda index: (predicted[index],
+                                       len(assignments[index])))
+        assignments[index].append(name)
+        predicted[index] += weights[name]
+    if any(not assignment for assignment in assignments):
+        raise ValueError("every shard must have at least one compiled test")
+    return [sorted(shard) for shard in assignments], predicted
+
+
 def command_units(command):
     return len(subprocess.list2cmdline(command).encode("utf-16-le")) // 2
 
@@ -106,11 +158,21 @@ def planned_command_units(command):
                           for arg in command])
 
 
-def plan_shard_commands(names, census_prefix, test_prefix, package, windows_api=None, shard_count=3):
+def plan_shard_commands(names, census_prefix, test_prefix, package,
+                        windows_api=None, shard_count=3, timings=None):
     # Keep existing membership when it fits. Larger adjacent bundles retain
     # exact coverage and balance while factoring more shared name prefixes.
     if windows_api is None:
         windows_api = os.name == "nt"
+    if timings is not None:
+        assignments, predicted = plan_duration_shards(
+            names, timings, shard_count)
+        chunks = [
+            bounded_patterns(shard, census_prefix, test_prefix, package)
+            if windows_api else [exact_pattern(shard)]
+            for shard in assignments
+        ]
+        return assignments, chunks, None, predicted
     bundle_size = NAME_BUNDLE
     while True:
         assignments, patterns = plan_shards(names, bundle_size, shard_count)
@@ -119,13 +181,14 @@ def plan_shard_commands(names, census_prefix, test_prefix, package, windows_api=
                     for prefix, flag in ((census_prefix, "-list"), (test_prefix, "-run"))]
         if not windows_api or all(planned_command_units(command) <= WINDOWS_COMMAND_BUDGET
                                   for command in commands):
-            return assignments, [[pattern] for pattern in patterns], bundle_size
+            return (assignments, [[pattern] for pattern in patterns],
+                    bundle_size, None)
         if bundle_size >= len(names):
             # Preserve this balanced assignment. Splitting invocations does not
             # move tests between runners or increase their execution budget.
             chunks = [bounded_patterns(assignment, census_prefix, test_prefix, package)
                       for assignment in assignments]
-            return assignments, chunks, bundle_size
+            return assignments, chunks, bundle_size, None
         bundle_size = min(bundle_size * 2, len(names))
 
 
@@ -177,6 +240,13 @@ def guard_command(command):
     units = command_units(command)
     if os.name == "nt" and units > WINDOWS_COMMAND_BUDGET:
         raise ValueError(f"factored test command exceeds Windows budget: {units}")
+    # Leave headroom below Linux's 128 KiB single-argument limit.
+    if os.name != "nt" and "-run" in command:
+        pattern = command[command.index("-run") + 1]
+        size = len(os.fsencode(pattern))
+        if size > 120 * 1024:
+            raise ValueError(
+                f"test -run argument exceeds 120 KiB budget: {size} bytes")
     return units
 
 
@@ -186,15 +256,22 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--manifest", type=Path, default=Path("test-selection.json"))
     args = parser.parse_args()
-    valid = {"remaining"} | {f"{package}-{index}" for package, count in SHARDS.items() for index in range(count)}
+    windows = os.environ.get("TEST_WINDOWS", "false") == "true"
+    race = (os.environ.get("TEST_RACE", "false" if windows else "true")
+            == "true")
+    plain_shards = PLAIN_WINDOWS_SHARDS if windows else PLAIN_SHARDS
+    shards = RACE_SHARDS if race else plain_shards
+    paths = RACE_PACKAGES if race else PLAIN_PACKAGES
+    valid = ({"remaining"} | (paths.keys() - shards.keys())
+             | {f"{family}-{index}" for family, count in shards.items()
+                for index in range(count)})
     if args.partition not in valid:
         parser.error(f"partition must be one of {sorted(valid)}")
-    windows = os.environ.get("TEST_WINDOWS", "false") == "true"
     module = capture(["go", "list", "-m"]).strip()
     packages = capture(["go", "list", "./..."]).splitlines()
     if not packages or len(packages) != len(set(packages)):
         raise ValueError("package census must be nonempty and unique")
-    package_partitions = {package: next((name for name, suffix in LARGE_PACKAGES.items()
+    package_partitions = {package: next((name for name, suffix in paths.items()
                                         if package == module + suffix), "remaining")
                           for package in packages}
     family = args.partition.split("-", 1)[0]
@@ -203,17 +280,30 @@ def main():
         raise ValueError(f"no packages selected for {args.partition}")
     manifest = {"partition": args.partition, "packages": package_partitions, "selected_packages": selected}
     command = ["go", "test"]
-    if windows:
-        command += ["-v", "-timeout=45m"]
-    else:
+    if race:
         command += ["-race", "-timeout=45m", "-coverprofile=coverage.out"]
-    if family in SHARDS:
+    else:
+        command += (["-v"] if windows else []) + ["-timeout=45m"]
+    if family in shards:
         if len(selected) != 1:
             raise ValueError("a test shard must own exactly one package")
-        census_command = ["go", "test"] + ([] if windows else ["-race"]) + ["-list", ".", selected[0]]
+        census_command = (["go", "test"] + (["-race"] if race else [])
+                          + ["-list", ".", selected[0]])
         names = test_names(capture(census_command))
-        assignments, pattern_chunks, bundle_size = plan_shard_commands(
-            names, census_command[:-3], command, selected[0], shard_count=SHARDS[family])
+        timing_path = RACE_TIMINGS_PATH if race else PLAIN_TIMINGS_PATH
+        timings = read_race_timings(timing_path, selected[0])
+        manifest["assignment"] = "count"
+        if isinstance(timings, str):
+            print(f"::warning::{selected[0]}: {timings}", flush=True)
+        if not isinstance(timings, dict):
+            timings = None
+        shard_plan = plan_shard_commands(
+            names, census_command[:-3], command, selected[0],
+            shard_count=shards[family], timings=timings)
+        assignments, pattern_chunks, bundle_size, predicted = shard_plan
+        if predicted is not None:
+            manifest.update(assignment="duration", predicted_seconds=[
+                round(seconds, 2) for seconds in predicted])
         # Verify the Python-generated expressions with Go's own test matcher.
         # The per-platform compiled census is the authority for every shard.
         for index, chunks in enumerate(pattern_chunks):
@@ -227,7 +317,7 @@ def main():
         index = int(args.partition.rsplit("-", 1)[1])
         commands = [command + ["-run", pattern] + selected for pattern in pattern_chunks[index]]
         manifest.update(census=names, shards=assignments, pattern_chunks=pattern_chunks,
-                        name_bundle=bundle_size, shard_count=SHARDS[family])
+                        name_bundle=bundle_size, shard_count=shards[family])
         if all(len(chunks) == 1 for chunks in pattern_chunks):
             manifest["patterns"] = [chunks[0] for chunks in pattern_chunks]
         print(f"{selected[0]}: {len(names)} compiled tests/examples/fuzz seeds; "
