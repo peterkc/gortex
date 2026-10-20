@@ -6,10 +6,14 @@
     "candidate_parent": "3379ff71fe66520d045424938da2cc95558cf0c8"
   },
   "workloads": [
+    "R-C2",
+    "R-DE",
     "R-Fill",
-    "R-Restart"
+    "R-Fresh",
+    "R-Restart",
+    "issue767-idle"
   ],
-  "repeats": 1,
-  "sustained_io": false,
-  "note": "Smoke run 5 (A6): export repeatability and counters controls; R-Fill and R-Restart only."
+  "repeats": 3,
+  "sustained_io": true,
+  "note": "Baseline run (A7): three repeats, three binaries, sustained I/O pairs."
 }
