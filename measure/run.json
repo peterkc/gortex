@@ -2,7 +2,7 @@
   "commits": {
     "main": "91a5c9514a9d41612183731f247ad46b03765abd",
     "pr806": "d7250723b93486628ca70f0f7769942863293e9b",
-    "candidate": "2435af8ba1372579f181bad62cbe532235bf3e25"
+    "candidate": "3eaeeb77deab496e20d0b780f874765d4684350c"
   },
   "workloads": [
     "R-C2",
@@ -14,5 +14,5 @@
   ],
   "repeats": 1,
   "sustained_io": false,
-  "note": "Smoke run (A6): one repeat, three binaries, no sustained I/O."
+  "note": "Smoke run 2 (A6): one repeat, three binaries, no sustained I/O; after harness fixes."
 }
