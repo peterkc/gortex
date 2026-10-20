@@ -126,7 +126,7 @@ jobs:
   workloads:
     needs: [config, build]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 170
+    timeout-minutes: 330
     strategy:
       fail-fast: false
       matrix:

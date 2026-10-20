@@ -14,5 +14,5 @@
   ],
   "repeats": 1,
   "sustained_io": false,
-  "note": "Smoke run 2 (A6): one repeat, three binaries, no sustained I/O; after harness fixes."
+  "note": "Smoke run 3 (A6): one repeat, three binaries, no sustained I/O; workloads job limit 330 min."
 }
