@@ -25,6 +25,9 @@ type Hierarchical struct {
 
 	mu    sync.RWMutex
 	cache map[string]*Matcher // abs dir -> compiled matcher; nil value = directory has no ignore files
+	// forgets counts Forget calls. A read that started before one does not
+	// store its result, which may predate the change Forget reports.
+	forgets uint64
 }
 
 // NewHierarchical builds a per-directory ignore matcher rooted at root.
@@ -39,6 +42,38 @@ func NewHierarchical(root string, filenames ...string) *Hierarchical {
 		root:      filepath.Clean(root),
 		filenames: filenames,
 		cache:     make(map[string]*Matcher),
+	}
+}
+
+// Forget drops the cached rules of absDir and of every folder beneath it,
+// so the next check reads their ignore files again. Call it when an ignore
+// file in absDir is created, changed or deleted, or when absDir is removed
+// or renamed: a folder moved away and replaced by another tree may bring
+// different ignore files at any depth.
+//
+// A folder is cached only after its parent (see dirMatcher), so when absDir
+// is not cached nothing beneath it is either, and Forget costs one map
+// lookup. That keeps file removals, which also call Forget, cheap.
+func (h *Hierarchical) Forget(absDir string) {
+	if h == nil {
+		return
+	}
+	dir := filepath.Clean(absDir)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.forgets++
+	if _, ok := h.cache[dir]; !ok {
+		return
+	}
+	prefix := dir + string(filepath.Separator)
+	if dir == h.root {
+		clear(h.cache)
+		return
+	}
+	for key := range h.cache {
+		if key == dir || strings.HasPrefix(key, prefix) {
+			delete(h.cache, key)
+		}
 	}
 }
 
@@ -96,6 +131,17 @@ func (h *Hierarchical) Explain(absPath string, isDir bool) (bool, string, string
 // the per-directory counterpart of Matcher.HasNegatedDescendant. absDir
 // is an absolute directory path; a path outside the root never matches.
 func (h *Hierarchical) HasNegatedDescendant(absDir string) bool {
+	return h.hasNegatedDescendant(absDir, false)
+}
+
+// HasAnchoredNegatedDescendant is the per-directory counterpart of
+// Matcher.HasAnchoredNegatedDescendant, with each ignore file's patterns
+// relative to its own directory.
+func (h *Hierarchical) HasAnchoredNegatedDescendant(absDir string) bool {
+	return h.hasNegatedDescendant(absDir, true)
+}
+
+func (h *Hierarchical) hasNegatedDescendant(absDir string, anchoredOnly bool) bool {
 	if h == nil || len(h.filenames) == 0 {
 		return false
 	}
@@ -114,7 +160,7 @@ func (h *Hierarchical) HasNegatedDescendant(absDir string) bool {
 	// every ancestor matcher (and absDir's own) with absDir expressed
 	// relative to that ancestor.
 	dir := h.root
-	if h.dirMatcher(dir).HasNegatedDescendant(relUnder(dir, absDir)) {
+	if h.dirMatcher(dir).hasNegatedDescendant(relUnder(dir, absDir), anchoredOnly) {
 		return true
 	}
 	if rel == "." || rel == "" {
@@ -122,7 +168,7 @@ func (h *Hierarchical) HasNegatedDescendant(absDir string) bool {
 	}
 	for _, seg := range strings.Split(rel, "/") {
 		dir = filepath.Join(dir, seg)
-		if h.dirMatcher(dir).HasNegatedDescendant(relUnder(dir, absDir)) {
+		if h.dirMatcher(dir).hasNegatedDescendant(relUnder(dir, absDir), anchoredOnly) {
 			return true
 		}
 	}
@@ -150,6 +196,7 @@ func relUnder(dir, child string) string {
 func (h *Hierarchical) dirMatcher(dir string) *Matcher {
 	h.mu.RLock()
 	m, ok := h.cache[dir]
+	forgets := h.forgets
 	h.mu.RUnlock()
 	if ok {
 		return m
@@ -164,9 +211,20 @@ func (h *Hierarchical) dirMatcher(dir string) *Matcher {
 	}
 
 	h.mu.Lock()
-	h.cache[dir] = m
+	// Store only when no Forget ran since the read and the parent is
+	// cached, so a cached folder always has cached ancestors and Forget
+	// can skip folders that are not cached.
+	if h.forgets == forgets && (dir == h.root || h.cached(filepath.Dir(dir))) {
+		h.cache[dir] = m
+	}
 	h.mu.Unlock()
 	return m
+}
+
+// cached reports whether dir has an entry. The caller holds h.mu.
+func (h *Hierarchical) cached(dir string) bool {
+	_, ok := h.cache[dir]
+	return ok
 }
 
 // readIgnoreFile reads one ignore file and returns its non-blank,

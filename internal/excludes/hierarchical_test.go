@@ -182,3 +182,120 @@ func TestHierarchical_MultipleFilenames(t *testing.T) {
 		t.Error("c.go should not be excluded")
 	}
 }
+
+func TestHierarchical_HasAnchoredNegatedDescendant(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		file  string
+		rules string
+		dir   string
+		want  bool
+	}{
+		{"unanchored_gitkeep", ".gortexignore", "vendor2/\n!.gitkeep\n", "vendor2/pkg", false},
+		{"unanchored_env", ".gortexignore", "!.env.example\n", "vendor2/pkg", false},
+		{"wildcard_led", ".gortexignore", "!**/.gitkeep\n", "vendor2/pkg", false},
+		{"root_unrelated", ".gortexignore", "!/AGENTS.md\n", "vendor2/pkg", false},
+		{"root_at_root", ".gortexignore", "!/AGENTS.md\n", ".", true},
+		{"anchored", ".gortexignore", "gen/\n!gen/keep.go\n", "gen", true},
+		{"root_anchored", ".gortexignore", "gen/\n!/gen/keep.go\n", "gen", true},
+		{"nested", "sub/.gortexignore", "gen/\n!gen/keep.go\nother/\n", "sub/gen", true},
+		{"nested_unrelated", "sub/.gortexignore", "gen/\n!gen/keep.go\nother/\n", "sub/other", false},
+		{"nested_at_folder", "sub/.gortexignore", "!/AGENTS.md\n", "sub", true},
+		{"nested_scoping", "sub/.gortexignore", "gen/\n!gen/keep.go\n", "gen", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			mkIgnore(t, filepath.Join(root, tc.file), tc.rules)
+			h := NewHierarchical(root, ".gortexignore")
+			if got := h.HasAnchoredNegatedDescendant(filepath.Join(root, tc.dir)); got != tc.want {
+				t.Fatalf("HasAnchoredNegatedDescendant(%q) = %v, want %v", tc.dir, got, tc.want)
+			}
+			if h.HasAnchoredNegatedDescendant(filepath.Join(root, "..", "outside")) {
+				t.Fatal("outside path has no negated descendant")
+			}
+		})
+	}
+	var h *Hierarchical
+	if h.HasAnchoredNegatedDescendant("/anything") || NewHierarchical(t.TempDir()).HasAnchoredNegatedDescendant("/anything") {
+		t.Fatal("nil and empty matchers have no negated descendants")
+	}
+}
+
+func TestHierarchicalForgetRereadsIgnoreFile(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "sub")
+	ignore := filepath.Join(sub, ".gortexignore")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h := NewHierarchical(root, ".gortexignore")
+	target := filepath.Join(sub, "gen", "x.go")
+	if h.Match(target, false) {
+		t.Fatal("no ignore file yet")
+	}
+	if err := os.WriteFile(ignore, []byte("gen/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if h.Match(target, false) {
+		t.Fatal("the cached empty rules stay until Forget")
+	}
+	h.Forget(sub)
+	if !h.Match(target, false) {
+		t.Fatal("Forget must reread the folder's ignore file")
+	}
+}
+
+// A folder moved away and replaced by another tree must not keep the old
+// tree's rules at any depth.
+func TestHierarchicalForgetDropsDescendants(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "sub")
+	mkIgnore(t, filepath.Join(sub, "nested", ".gortexignore"), "gen/\n")
+	h := NewHierarchical(root, ".gortexignore")
+	target := filepath.Join(sub, "nested", "gen", "x.go")
+	if !h.Match(target, false) {
+		t.Fatal("nested rule applies")
+	}
+	if err := os.RemoveAll(sub); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(sub, "nested", "gen"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.Forget(sub)
+	if h.Match(target, false) {
+		t.Fatal("Forget(sub) must drop the cached rules of sub/nested")
+	}
+	// Forget on a path that is not cached, such as a removed file, leaves
+	// the other entries alone.
+	h.Forget(filepath.Join(root, "other.go"))
+	h.mu.RLock()
+	n := len(h.cache)
+	h.mu.RUnlock()
+	if n != 4 {
+		t.Fatalf("cache entries = %d, want root, sub, sub/nested and sub/nested/gen", n)
+	}
+}
+
+// A folder is cached only after its parent, which lets Forget skip the
+// scan for a folder that is not cached.
+func TestHierarchicalCachesFolderOnlyAfterParent(t *testing.T) {
+	root := t.TempDir()
+	h := NewHierarchical(root, ".gortexignore")
+	sub := filepath.Join(root, "sub")
+	h.dirMatcher(sub)
+	h.mu.RLock()
+	_, ok := h.cache[sub]
+	h.mu.RUnlock()
+	if ok {
+		t.Fatal("sub cached before root")
+	}
+	h.dirMatcher(root)
+	h.dirMatcher(sub)
+	h.mu.RLock()
+	_, ok = h.cache[sub]
+	h.mu.RUnlock()
+	if !ok {
+		t.Fatal("sub not cached after root")
+	}
+}
