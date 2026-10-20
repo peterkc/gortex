@@ -187,7 +187,11 @@ func (d *reconstructedDriver) finish(t *testing.T) {
 	d.run.Resources = d.f.processResources()
 	score, err := scoreReconstructed(d.run)
 	if err != nil {
-		d.run.Error = err.Error()
+		// Keep the driver's own failure: it is the cause the report records.
+		if d.run.Error != "" {
+			d.run.Error += "; "
+		}
+		d.run.Error += "scorer: " + err.Error()
 		t.Errorf("reconstructed scorer: %v", err)
 	} else {
 		d.run.Score = &score
@@ -207,22 +211,25 @@ func (d *reconstructedDriver) finish(t *testing.T) {
 func (d *reconstructedDriver) probe(root string, symbol reconstructedSymbol, spelling issue767Spelling, start time.Time, timeout time.Duration, kind string) reconstructedSample {
 	sample := reconstructedSample{Kind: kind, Symbol: symbol.Name, File: filepath.Join(root, symbol.File), Start: start, TimeoutMS: float64(timeout) / float64(time.Millisecond)}
 	deadline := start.Add(timeout)
+	// A failed or slow CLI call is not an answer. The probe keeps polling, so
+	// a probe that never passes counts at the timeout, not at the elapsed time.
+	var callErr string
 	for time.Now().Before(deadline) {
 		sample.Polls++
 		answer, err := d.f.askSymbol(root, symbol.Name, sample.File, spelling)
 		sample.Answer = answer
 		if err != nil {
-			sample.Error = err.Error()
-			break
-		}
-		passed, err := issue767Verdict(answer, spelling)
-		if err != nil && !issue767Inexact(err) {
-			sample.Error = err.Error()
-			break
-		}
-		if passed && time.Now().Before(deadline) {
-			sample.Passed = true
-			break
+			callErr = err.Error()
+		} else {
+			passed, err := issue767Verdict(answer, spelling)
+			if err != nil && !issue767Inexact(err) {
+				sample.Error = err.Error()
+				break
+			}
+			if passed && time.Now().Before(deadline) {
+				sample.Passed = true
+				break
+			}
 		}
 		timer := time.NewTimer(min(100*time.Millisecond, time.Until(deadline)))
 		select {
@@ -238,7 +245,7 @@ func (d *reconstructedDriver) probe(root string, symbol reconstructedSymbol, spe
 	sample.End = time.Now()
 	sample.DurationMS = sample.End.Sub(start).Seconds() * 1000
 	if !sample.Passed && sample.Error == "" {
-		sample.TimedOut, sample.DurationMS = true, sample.TimeoutMS
+		sample.TimedOut, sample.DurationMS, sample.Error = true, sample.TimeoutMS, callErr
 	}
 	return sample
 }

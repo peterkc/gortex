@@ -85,6 +85,8 @@ func TestReconstructedScorer(t *testing.T) {
 		{name: "Restart_nonzero_jobs", run: reconstructedRun{Workload: "R-Restart", Samples: reconstructedCaseSamples("ready", 100), ProcessBytes: &processBytes, StoreGrowth: &growth, JobCount: &oneJob}, status: "fail", p50: 100, p95: 100, job: "supported"},
 		{name: "Restart_missing_telemetry_unsupported", run: reconstructedRun{Workload: "R-Restart", Samples: reconstructedCaseSamples("ready", 100), ProcessBytes: &processBytes, StoreGrowth: &growth}, status: "unsupported", p50: 100, p95: 100},
 		{name: "empty_sample_set_error", run: reconstructedRun{Workload: "R-C2"}, errorText: "empty sample set"},
+		{name: "driver_error_without_samples_fails", run: reconstructedRun{Workload: "R-C2", Error: "ready probe failed"}, status: "fail"},
+		{name: "failed_call_probe_counts_at_60_seconds", run: reconstructedRun{Workload: "R-C2", Samples: append(reconstructedCaseSamples("probe", 1, 2, 3, 4, 5, 6, 7, 8, 9), reconstructedSample{Kind: "probe", DurationMS: 60000, TimeoutMS: 60000, TimedOut: true, Error: "search: context deadline exceeded"})}, status: "fail", p50: 5, p95: 60000, timeouts: 1, failures: 1},
 		{name: "invalid_duration_error", run: reconstructedRun{Workload: "R-C2", Samples: reconstructedCaseSamples("probe", -1)}, errorText: "invalid sample duration"},
 	}
 	for _, tc := range tests {

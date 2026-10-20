@@ -179,6 +179,10 @@ jobs:
           cp binaries/identities.json results/identities.json
           go test -tags acceptance -run '^TestProcessSamplerResources' -count=1 -v \
             -timeout=5m ./cmd/gortex | tee results/sampler.log
+          # A skipped test or an empty -run match exits 0: require each named test.
+          for test in FinalUsage Unavailable RunReport; do
+            grep -Eq "^--- PASS: TestProcessSamplerResources${test} " results/sampler.log
+          done
           status=0
           names=(main pr806 candidate)
           for offset in 0 1 2; do
@@ -203,6 +207,10 @@ jobs:
               export GORTEX_ISSUE767_ARTIFACT_DIR="$PWD/results/$name/$workload"
               if ! go test -tags acceptance -run "^${test_name}$" -count=1 -v \
                 -timeout=160m ./cmd/gortex | tee "results/$name-$workload.log"; then
+                status=1
+              fi
+              if ! grep -Eq "^--- (PASS|FAIL): ${test_name} " "results/$name-$workload.log"; then
+                echo "$test_name did not run for $name" >&2
                 status=1
               fi
             done < <(jq -r '.workloads[]' measure/run.json)
@@ -266,8 +274,13 @@ jobs:
           export GORTEX_ISSUE767_ARTIFACT_DIR="$PWD/results/fixtures"
           go test -tags acceptance -run '^TestProcessSamplerResources' -count=1 -v \
             -timeout=5m ./cmd/gortex | tee results/sampler.log
+          # A skipped test or an empty -run match exits 0: require each named test.
+          for test in FinalUsage Unavailable RunReport; do
+            grep -Eq "^--- PASS: TestProcessSamplerResources${test} " results/sampler.log
+          done
           go test -tags acceptance -count=1 -timeout=170m -v ./cmd/gortex \
             -run '^TestSustainedIOSustainedWriteAmplification$' | tee results/sustained-io.log
+          grep -Eq '^--- PASS: TestSustainedIOSustainedWriteAmplification ' results/sustained-io.log
       - name: Upload sustained I/O evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -483,6 +496,7 @@ jobs:
           export GORTEX_ISSUE767_ARTIFACT_DIR="$PWD/results/fixtures"
           go test -tags acceptance -count=1 -v -timeout=35m ./cmd/gortex \
             -run '^TestReconstructedExport$' | tee results/export.log
+          grep -Eq '^--- PASS: TestReconstructedExport ' results/export.log
           LC_ALL=C sort results/main.cypher > results/main.sorted.cypher
           LC_ALL=C sort results/candidate.cypher > results/candidate.sorted.cypher
           cmp results/main.sorted.cypher results/candidate.sorted.cypher

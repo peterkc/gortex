@@ -167,6 +167,19 @@ func newIssue767FixtureWithCorpus(t *testing.T, binary string, corpus issue767Co
 	f.git(f.primary, "commit", "-m", "isolated fixture")
 	// Match configured cold startup; runtime track is a separate scenario.
 	f.write(filepath.Join(root, "config", "gortex", "config.yaml"), "repos:\n  - path: "+strconv.Quote(f.primary)+"\n    name: issue767\n")
+	if preserve {
+		// Registered before f.stop, so it runs after it: every child has exited
+		// and recorded its final usage. This covers drivers that write no record.
+		t.Cleanup(func() {
+			data, err := json.Marshal(f.processResources())
+			if err == nil {
+				err = os.WriteFile(filepath.Join(root, "process_resources.json"), data, 0600)
+			}
+			if err != nil {
+				t.Errorf("write process resources: %v", err)
+			}
+		})
+	}
 	t.Cleanup(f.stop)
 	t.Logf("isolated fixture artifacts: %s", root)
 	return f

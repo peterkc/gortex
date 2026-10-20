@@ -131,6 +131,11 @@ func scoreReconstructed(run reconstructedRun) (reconstructedScore, error) {
 		return score, nil
 	}
 	if len(run.Samples) == 0 {
+		// A driver failure before the first sample is a failed run with its
+		// cause, not a malformed result.
+		if run.Error != "" {
+			return score, nil
+		}
 		return score, errors.New("empty sample set")
 	}
 	for _, rebuild := range run.Rebuilds {
