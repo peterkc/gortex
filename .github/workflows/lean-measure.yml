@@ -445,7 +445,7 @@ jobs:
   export:
     needs: [config, build]
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 75
     strategy:
       matrix:
         os: [ubuntu-24.04]
@@ -494,7 +494,7 @@ jobs:
           export GORTEX_RECON_CORPUS="$PWD/corpus"
           export GORTEX_RECON_EXPORT_OUT_DIR="$PWD/results"
           export GORTEX_ISSUE767_ARTIFACT_DIR="$PWD/results/fixtures"
-          go test -tags acceptance -count=1 -v -timeout=35m ./cmd/gortex \
+          go test -tags acceptance -count=1 -v -timeout=65m ./cmd/gortex \
             -run '^TestReconstructedExport$' | tee results/export.log
           grep -Eq '^--- PASS: TestReconstructedExport ' results/export.log
           LC_ALL=C sort results/main.cypher > results/main.sorted.cypher

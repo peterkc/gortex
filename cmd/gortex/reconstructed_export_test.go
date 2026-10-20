@@ -3,9 +3,13 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -61,10 +65,8 @@ func TestReconstructedExport(t *testing.T) {
 		f.start()
 		f.awaitSymbolIn(f.primary, "WriteCypher", filepath.Join(f.primary, "internal", "exporter", "cypher.go"), 5*time.Minute)
 		f.settle()
-		path := filepath.Join(out, arm.name+".cypher")
-		f.command(5*time.Minute, f.primary, "export", "--format", "cypher", "--out", path)
-		data, err := os.ReadFile(path)
-		if err != nil {
+		data := reconstructedExportWhenWarm(t, f, 15*time.Minute)
+		if err := os.WriteFile(filepath.Join(out, arm.name+".cypher"), data, 0600); err != nil {
 			t.Fatal(err)
 		}
 		exports = append(exports, data)
@@ -93,6 +95,38 @@ func TestReconstructedExport(t *testing.T) {
 	}
 }
 
+// The daemon writes --out files only inside an indexed repository, so the
+// export is read from stdout. Until warm-up ends the daemon wraps a partial
+// result in a {"warming": ...} object; retry until the export is the bare graph.
+func reconstructedExportWhenWarm(t *testing.T, f *issue767Fixture, timeout time.Duration) []byte {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+		cmd := exec.CommandContext(ctx, f.binary, "export", "--format", "cypher")
+		var stderr bytes.Buffer
+		cmd.Dir, cmd.Env, cmd.Stderr = f.primary, f.env, &stderr
+		out, err := cmd.Output()
+		cancel()
+		if err == nil && !reconstructedExportWarming(out) {
+			return out
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("graph export not ready after %v: err=%v stdout=%.300q stderr=%.300q", timeout, err, out, stderr.String())
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+func reconstructedExportWarming(out []byte) bool {
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(out, &envelope) != nil {
+		return false
+	}
+	_, warming := envelope["warming"]
+	return warming
+}
+
 func compareReconstructedExports(main, candidate []byte) error {
 	left, right := strings.Split(strings.TrimSuffix(string(main), "\n"), "\n"), strings.Split(strings.TrimSuffix(string(candidate), "\n"), "\n")
 	slices.Sort(left)
@@ -109,6 +143,24 @@ func compareReconstructedExports(main, candidate []byte) error {
 		return fmt.Errorf("graph export line counts differ: main=%d candidate=%d", len(left), len(right))
 	}
 	return nil
+}
+
+func TestReconstructedExportWarming(t *testing.T) {
+	for _, tc := range []struct {
+		name, out string
+		want      bool
+	}{
+		{"cypher", "CREATE (:Function {id: \"a\"});\n", false},
+		{"warming envelope", `{"warming":{"warming":true,"percent":57},"results":"CREATE ..."}`, true},
+		{"other JSON object", `{"results":"CREATE ..."}`, false},
+		{"empty", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := reconstructedExportWarming([]byte(tc.out)); got != tc.want {
+				t.Fatalf("reconstructedExportWarming(%q) = %v; want %v", tc.out, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestReconstructedExportComparison(t *testing.T) {
