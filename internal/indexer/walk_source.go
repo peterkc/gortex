@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -32,6 +33,10 @@ type walkAdmission struct {
 	// before language detection, so an excluded entry has no lang to
 	// distinguish it from one nothing claims.
 	excluded bool
+	// manifest reports a root go.mod or go.work that cleared the ignore
+	// rules. No extractor claims either, but the walks keep them in their
+	// file set for the module contracts.
+	manifest bool
 }
 
 // admitWalkEntry applies the walk-time gates every index walk shares:
@@ -83,7 +88,7 @@ func (idx *Indexer) admitWalkFileKnownType(root, absPath string, size int64, mod
 func (idx *Indexer) admitUnexcludedWalkFile(absPath string, size int64) walkAdmission {
 	lang, ok := idx.effectiveLanguage(absPath, nil)
 	if !ok {
-		return walkAdmission{}
+		return walkAdmission{manifest: idx.isIncrementalContractManifest(absPath)}
 	}
 	if maxSize := idx.config.MaxFileSize; maxSize > 0 && size > maxSize {
 		return walkAdmission{lang: lang, oversize: true}
@@ -98,17 +103,18 @@ func (idx *Indexer) admitUnexcludedWalkFile(absPath string, size int64) walkAdmi
 // were written out at each call site.
 func (idx *Indexer) admitScopedWalkFile(root, absPath string) bool {
 	adm := idx.admitWalkEntry(root, absPath, -1, false)
-	if adm.admit {
-		return true
-	}
-	if adm.excluded {
-		return false
-	}
-	// Not excluded and unclaimed — the only rejection left, since the caller
-	// passes no size and so never meets the cap. Reaching here already means
-	// the ignore list let the path through, so the manifest check is the whole
-	// remaining question.
-	return idx.isIncrementalContractManifest(absPath)
+	return adm.admit || adm.manifest
+}
+
+// walkDisk walks scope, prunes the directories shouldPruneDir rejects
+// (every .git folder among them) and leaves file admission to fn.
+func (idx *Indexer) walkDisk(root, scope string, fn fs.WalkDirFunc) error {
+	return filepath.WalkDir(scope, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && d.IsDir() && idx.shouldPruneDir(path, root) {
+			return filepath.SkipDir
+		}
+		return fn(path, d, err)
+	})
 }
 
 // walkSource enumerates src through the same admission gate the
