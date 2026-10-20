@@ -6,17 +6,20 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 from statistics import median
 
-RACE_SHARDS = {"store": 6, "indexer": 12, "mcp": 3}
+FALLBACK_RACE_SHARDS = {"store": 6, "indexer": 12, "mcp": 3}
 RACE_TIMINGS_PATH = Path(__file__).with_name("ci-race-timings.json")
-PLAIN_SHARDS = {"indexer": 3}
-PLAIN_WINDOWS_SHARDS = {"indexer": 4}
+FALLBACK_PLAIN_SHARDS = {"indexer": 3}
+FALLBACK_WINDOWS_SHARDS = {"indexer": 4}
 PLAIN_TIMINGS_PATH = Path(__file__).with_name("ci-plain-timings.json")
+MAX_SHARDS = 16
+TARGET_SECONDS = 10 * 60
 NAME_BUNDLE = 32
 WINDOWS_COMMAND_BUDGET = 30000
 TEST_EXECUTION_BUDGET_SECONDS = 45 * 60
@@ -128,6 +131,14 @@ def read_race_timings(path, package):
                 or not math.isfinite(seconds)):
             return "wrong timing shape: expected finite nonnegative seconds"
     return entries
+
+
+def read_family_timings(path, fallback, package):
+    timings = read_race_timings(path, package)
+    missing = ("missing timing file", "no entry for package in timing file")
+    if timings in missing:
+        return read_race_timings(fallback, package), fallback
+    return timings, path
 
 
 def plan_duration_shards(names, timings, shard_count):
@@ -250,17 +261,259 @@ def guard_command(command):
     return units
 
 
+def parse_pass_durations(output):
+    """Group top-level PASS durations by package, taking duplicate maxima."""
+    packages = {}
+    pending = {}
+    for line in output.splitlines():
+        # Actions prefixes each output line with an RFC3339 timestamp.
+        text = re.sub(r"^\ufeff?\d{4}-\d\d-\d\dT\S+ ", "", line)
+        passed = re.fullmatch(
+            r"--- PASS: ((?:Test|Example|Fuzz)\w+) \((\d+(?:\.\d+)?)s\)",
+            text)
+        if passed:
+            name, seconds = passed.groups()
+            pending[name] = max(pending.get(name, 0.0), float(seconds))
+        summary = re.match(r"^(ok|FAIL)[ \t]+(\S+)\t", text)
+        if summary:
+            status, package = summary.groups()
+            if status == "ok":
+                entries = packages.setdefault(package, {})
+                for name, seconds in pending.items():
+                    entries[name] = max(entries.get(name, 0.0), seconds)
+            pending = {}
+    return packages
+
+
+def family_counts(entries, fallback, target):
+    counts = dict(fallback)
+    for family, timings in entries.items():
+        if isinstance(timings, dict):
+            seconds = sum(max(0.005, value) for value in timings.values())
+            counts[family] = min(MAX_SHARDS,
+                                 max(1, math.ceil(seconds / target)))
+    return counts
+
+
+def build_plan(race_entries, plain_entries, go_version):
+    race_counts = family_counts(
+        race_entries, FALLBACK_RACE_SHARDS, TARGET_SECONDS)
+    windows_counts = family_counts(
+        plain_entries, FALLBACK_WINDOWS_SHARDS, TARGET_SECONDS)
+    mac_counts = {family: min(3, count)
+                  for family, count in windows_counts.items()}
+    matrices = {}
+    for key, platforms, counts_by_os, paths in (
+            ("linux", ["ubuntu-latest"], {"ubuntu-latest": race_counts},
+             RACE_PACKAGES),
+            ("platform", ["macos-latest", "windows-latest"],
+             {"macos-latest": mac_counts, "windows-latest": windows_counts},
+             PLAIN_PACKAGES)):
+        include = []
+        for platform in platforms:
+            counts = counts_by_os[platform]
+            partitions = [("remaining", 0)]
+            for family in paths:
+                if family in counts:
+                    partitions += [(f"{family}-{index}", counts[family])
+                                   for index in range(counts[family])]
+                else:
+                    partitions.append((family, 0))
+            include += [{"os": platform, "go-version": go_version,
+                         "partition": partition, "shard_count": count}
+                        for partition, count in partitions]
+        matrices[key] = {"include": include}
+    return matrices
+
+
+def write_plan(directory, module, go_version, output_path):
+    directory.mkdir(parents=True, exist_ok=True)
+    entries = {}
+    for mode, source, families in (
+            ("race", RACE_TIMINGS_PATH, FALLBACK_RACE_SHARDS),
+            ("plain", PLAIN_TIMINGS_PATH, FALLBACK_WINDOWS_SHARDS)):
+        target = directory / source.name
+        chosen = target if target.exists() else source
+        print(f"{mode} timing source: {chosen}", flush=True)
+        if chosen.exists() and chosen != target:
+            shutil.copyfile(chosen, target)
+        paths = RACE_PACKAGES if mode == "race" else PLAIN_PACKAGES
+        entries[mode] = {}
+        additions = {}
+        for family in families:
+            package = module + paths[family]
+            timings, used = read_family_timings(chosen, source, package)
+            print(f"{mode}/{family} timing source: {used}", flush=True)
+            if (used == source and chosen != source
+                    and isinstance(timings, dict)):
+                additions[package] = timings
+            entries[mode][family] = timings
+            if isinstance(timings, str):
+                print(f"::warning::{mode}/{family}: {timings}; "
+                      "using fallback count and count split", flush=True)
+        if additions:
+            materialized = json.loads(target.read_text(encoding="utf-8"))
+            materialized.update(additions)
+            encoded = json.dumps(materialized, indent=2, sort_keys=True) + "\n"
+            target.write_text(encoded, encoding="utf-8")
+    plan = build_plan(entries["race"], entries["plain"], go_version)
+    (directory / "plan.json").write_text(
+        json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with output_path.open("a", encoding="utf-8") as output:
+        for name, matrix in plan.items():
+            encoded = json.dumps(matrix, separators=(",", ":"))
+            output.write(f"{name}={encoded}\n")
+            print(f"{name}={encoded}", flush=True)
+
+
+def partition_shards(partition, fallback, count):
+    shards = dict(fallback)
+    family, separator, index = (partition or "").rpartition("-")
+    if separator and family in shards:
+        actual = shards[family] if count is None else count
+        if not 1 <= actual <= MAX_SHARDS:
+            raise ValueError(f"shard count must be between 1 and {MAX_SHARDS}")
+        if not index.isdecimal() or int(index) >= actual:
+            raise ValueError("partition index must be below shard count")
+        shards[family] = actual
+    elif count not in (None, 0):
+        raise ValueError("unsharded partitions require shard count 0")
+    return shards
+
+
+def shard_timing_record(output, platform, partition, count, module):
+    race = platform == "ubuntu-latest"
+    fallback = FALLBACK_RACE_SHARDS if race else FALLBACK_WINDOWS_SHARDS
+    paths = RACE_PACKAGES if race else PLAIN_PACKAGES
+    family, separator, _ = partition.rpartition("-")
+    if (platform not in ("ubuntu-latest", "windows-latest")
+            or not separator or family not in fallback):
+        raise ValueError("timings require a Linux race or Windows plain shard")
+    counts = partition_shards(partition, fallback, count)
+    count = counts[family]
+    package = module + paths[family]
+    timings = parse_pass_durations(output).get(package)
+    if not timings:
+        raise ValueError(f"no completed PASS results for {package}")
+    return {"os": platform, "partition": partition, "shard_count": count,
+            "package": package, "timings": timings}
+
+
+def merge_family_timings(old, delivered, expected):
+    measured = {}
+    for partition in sorted(expected & delivered.keys()):
+        for name, seconds in delivered[partition].items():
+            measured[name] = max(measured.get(name, 0.0), seconds)
+    complete = bool(expected) and expected <= delivered.keys()
+    if not complete and not old:
+        return {}
+    names = measured.keys() if complete else old.keys() | measured.keys()
+    return {
+        name: (round((old[name] + measured[name]) / 2, 2)
+               if name in old and name in measured else
+               measured[name] if name in measured else old[name])
+        for name in sorted(names)
+    }
+
+
+def merge_run_timings(plan, old, records, module):
+    merged = {}
+    for mode, matrix, platform, families, paths in (
+            ("race", "linux", "ubuntu-latest", FALLBACK_RACE_SHARDS,
+             RACE_PACKAGES),
+            ("plain", "platform", "windows-latest", FALLBACK_WINDOWS_SHARDS,
+             PLAIN_PACKAGES)):
+        merged[mode] = {}
+        for family in families:
+            package = module + paths[family]
+            expected_rows = [row for row in plan[matrix]["include"]
+                             if row["os"] == platform
+                             and row["partition"].startswith(family + "-")]
+            expected = {row["partition"]: row["shard_count"]
+                        for row in expected_rows}
+            delivered = {}
+            for record in records:
+                partition = record["partition"]
+                if (record["os"] == platform and record["package"] == package
+                        and partition in expected
+                        and record["shard_count"] == expected[partition]):
+                    delivered[partition] = record["timings"]
+            timings = merge_family_timings(
+                old[mode].get(package, {}), delivered, set(expected))
+            if timings:
+                merged[mode][package] = timings
+    return merged
+
+
+def merge_timings(directory, shard_directory, module):
+    plan = json.loads((directory / "plan.json").read_text(encoding="utf-8"))
+    old = {}
+    for mode, source, families, paths in (
+            ("race", RACE_TIMINGS_PATH, FALLBACK_RACE_SHARDS, RACE_PACKAGES),
+            ("plain", PLAIN_TIMINGS_PATH, FALLBACK_WINDOWS_SHARDS,
+             PLAIN_PACKAGES)):
+        old[mode] = {}
+        for family in families:
+            package = module + paths[family]
+            timings = read_race_timings(directory / source.name, package)
+            old[mode][package] = timings if isinstance(timings, dict) else {}
+    records = [json.loads(path.read_text(encoding="utf-8"))
+               for path in sorted(shard_directory.glob("*.json"))]
+    merged = merge_run_timings(plan, old, records, module)
+    for mode, source in (("race", RACE_TIMINGS_PATH),
+                         ("plain", PLAIN_TIMINGS_PATH)):
+        (directory / source.name).write_text(
+            json.dumps(merged[mode], indent=2, sort_keys=True) + "\n",
+            encoding="utf-8")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--partition", default=os.environ.get("TEST_PARTITION"), required=False)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--manifest", type=Path, default=Path("test-selection.json"))
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--plan", action="store_true")
+    modes.add_argument("--merge-timings", action="store_true")
+    modes.add_argument("--write-timings", type=Path, metavar="TEST_LOG")
+    parser.add_argument("--timings-dir", type=Path, default=Path("ci-timings"))
+    parser.add_argument("--shard-timings-dir", type=Path,
+                        default=Path("ci-shard-timings"))
+    parser.add_argument("--shard-count", type=int,
+                        default=os.environ.get("TEST_SHARD_COUNT"))
     args = parser.parse_args()
+    if args.plan or args.merge_timings or args.write_timings is not None:
+        go_mod = Path("go.mod").read_text(encoding="utf-8").splitlines()
+        module = next(line.split()[1] for line in go_mod
+                      if line.startswith("module "))
+        if args.plan:
+            go_version = next(".".join(line.split()[1].split(".")[:2])
+                              for line in go_mod if line.startswith("go "))
+            write_plan(args.timings_dir, module, go_version,
+                       Path(os.environ["GITHUB_OUTPUT"]))
+        elif args.merge_timings:
+            merge_timings(args.timings_dir, args.shard_timings_dir, module)
+        else:
+            platform = os.environ["TEST_OS"]
+            output = args.write_timings.read_text(
+                encoding="utf-8", errors="replace")
+            record = shard_timing_record(
+                output, platform, args.partition, args.shard_count, module)
+            args.shard_timings_dir.mkdir(parents=True, exist_ok=True)
+            path = args.shard_timings_dir / f"{platform}-{args.partition}.json"
+            path.write_text(json.dumps(record, indent=2, sort_keys=True)
+                            + "\n", encoding="utf-8")
+        return
     windows = os.environ.get("TEST_WINDOWS", "false") == "true"
     race = (os.environ.get("TEST_RACE", "false" if windows else "true")
             == "true")
-    plain_shards = PLAIN_WINDOWS_SHARDS if windows else PLAIN_SHARDS
-    shards = RACE_SHARDS if race else plain_shards
+    plain_shards = (FALLBACK_WINDOWS_SHARDS if windows
+                    else FALLBACK_PLAIN_SHARDS)
+    fallback = FALLBACK_RACE_SHARDS if race else plain_shards
+    try:
+        shards = partition_shards(args.partition, fallback, args.shard_count)
+    except ValueError as error:
+        parser.error(str(error))
     paths = RACE_PACKAGES if race else PLAIN_PACKAGES
     valid = ({"remaining"} | (paths.keys() - shards.keys())
              | {f"{family}-{index}" for family, count in shards.items()
@@ -284,6 +537,8 @@ def main():
         command += ["-race", "-timeout=45m", "-coverprofile=coverage.out"]
     else:
         command += (["-v"] if windows else []) + ["-timeout=45m"]
+    if race and family in shards:
+        command += ["-v"]
     if family in shards:
         if len(selected) != 1:
             raise ValueError("a test shard must own exactly one package")
@@ -291,7 +546,8 @@ def main():
                           + ["-list", ".", selected[0]])
         names = test_names(capture(census_command))
         timing_path = RACE_TIMINGS_PATH if race else PLAIN_TIMINGS_PATH
-        timings = read_race_timings(timing_path, selected[0])
+        timings, _ = read_family_timings(
+            args.timings_dir / timing_path.name, timing_path, selected[0])
         manifest["assignment"] = "count"
         if isinstance(timings, str):
             print(f"::warning::{selected[0]}: {timings}", flush=True)
@@ -341,6 +597,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+    except (ValueError, OSError, subprocess.CalledProcessError,
+            subprocess.TimeoutExpired) as error:
         print(f"CI test partition failed: {error}", file=sys.stderr)
         sys.exit(1)
