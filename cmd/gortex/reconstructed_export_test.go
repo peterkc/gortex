@@ -59,7 +59,7 @@ func TestReconstructedExport(t *testing.T) {
 	for _, arm := range []struct{ name, binary string }{{"main", mainBinary}, {"candidate", candidateBinary}} {
 		f.binary = arm.binary
 		f.start()
-		f.awaitSymbolIn(f.primary, "WriteCypher", "internal/exporter/cypher.go", 5*time.Minute)
+		f.awaitSymbolIn(f.primary, "WriteCypher", filepath.Join(f.primary, "internal", "exporter", "cypher.go"), 5*time.Minute)
 		f.settle()
 		path := filepath.Join(out, arm.name+".cypher")
 		f.command(5*time.Minute, f.primary, "export", "--format", "cypher", "--out", path)
