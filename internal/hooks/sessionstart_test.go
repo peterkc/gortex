@@ -303,6 +303,50 @@ func TestRunSessionStart_DaemonReady_CwdNotTracked(t *testing.T) {
 	if !strings.Contains(ac, "gortex track "+playground) {
 		t.Errorf("expected actionable track command, got:\n%s", ac)
 	}
+	// #900: an untracked cwd (e.g. an agent-created clone) must not receive
+	// the MCP-required stop rule — a session-start block outranks the user's
+	// own "ignore Gortex", so restating it there leaves the agent stuck.
+	if strings.Contains(ac, "Native Gortex MCP is mandatory") || strings.Contains(ac, "and stop") {
+		t.Errorf("untracked cwd received the MCP-required stop rule:\n%s", ac)
+	}
+	if !strings.Contains(ac, untrackedCwdPreamble) {
+		t.Errorf("expected the native-tools preamble for an untracked cwd, got:\n%s", ac)
+	}
+}
+
+// TestRunSessionStart_DaemonReady_CwdInsideTrackedRepo pins the other side of
+// #900: a subdirectory of a tracked repo is covered (the daemon scopes it to
+// that repo), so it keeps the full MCP-required rule rather than being
+// mistaken for an untracked directory.
+func TestRunSessionStart_DaemonReady_CwdInsideTrackedRepo(t *testing.T) {
+	withFakeStatus(t, func() (*daemon.StatusResponse, error) {
+		return &daemon.StatusResponse{
+			Version: "0.15.0",
+			Ready:   true,
+			TrackedRepos: []daemon.TrackedRepoStatus{
+				{Name: "gortex", Path: gortexTmpFixtureRoot, Workspace: "gortex"},
+			},
+		}, nil
+	})
+
+	sub := filepath.Join(gortexTmpFixtureRoot, "internal", "hooks")
+	data := mustJSON(t, map[string]any{"hook_event_name": "SessionStart", "cwd": sub})
+	out := captureStdout(t, func() { runSessionStart(data, 0) })
+
+	var payload HookOutput
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("invalid HookOutput JSON: %v\n%s", err, out)
+	}
+	ac := payload.HookSpecificOutput.AdditionalContext
+	if !strings.Contains(ac, "is tracked** as repo `gortex`") {
+		t.Errorf("expected the subdirectory to resolve to its tracked repo, got:\n%s", ac)
+	}
+	if strings.Contains(ac, "not covered by any tracked repo") || strings.Contains(ac, untrackedCwdPreamble) {
+		t.Errorf("subdirectory of a tracked repo was treated as untracked:\n%s", ac)
+	}
+	if !strings.Contains(ac, "Native Gortex MCP is mandatory") {
+		t.Errorf("tracked repo lost the MCP-required rule:\n%s", ac)
+	}
 }
 
 func TestRunSessionStart_DaemonWarmup(t *testing.T) {

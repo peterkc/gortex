@@ -14,16 +14,98 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Linux runs 22 duration-balanced race/coverage partitions. macOS runs
+  # five and Windows six duration-balanced plain partitions, with the full
+  # compiled test set.
   test:
     runs-on: ${{ matrix.os }}
-    # The suite runs ~30m on the ubuntu runners and slower on macos, so the
-    # per-step budget needs headroom; this job-level cap still bounds a hang.
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest]
         go-version: ['1.27']
+        partition: [remaining, store-0, store-1, store-2, store-3, store-4, store-5, indexer-0, indexer-1, indexer-2, indexer-3, indexer-4, indexer-5, indexer-6, indexer-7, indexer-8, indexer-9, indexer-10, indexer-11, mcp-0, mcp-1, mcp-2]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Go cache paths
+        id: cache-paths
+        shell: bash
+        run: |
+          echo "build=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "mod=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.cache-paths.outputs.build }}
+            ${{ steps.cache-paths.outputs.mod }}
+          key: go-race-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-race-${{ runner.os }}-${{ hashFiles('go.sum') }}-
+            go-race-${{ runner.os }}-
+
+      - name: Build
+        run: go build -o gortex ./cmd/gortex/
+
+      - name: Test
+        shell: bash
+        env:
+          TEST_RACE: "true"
+          TEST_PARTITION: ${{ matrix.partition }}
+        run: python3 scripts/ci-test-partition.py
+
+      - name: Warm race cache for sharded packages
+        if: ${{ !cancelled() && matrix.partition == 'remaining' && github.event_name == 'pull_request' }}
+        run: |
+          # The census builds without coverage; the shard tests build with it.
+          mkdir -p "$RUNNER_TEMP/race-warm" "$RUNNER_TEMP/race-warm-cover"
+          go test -race -c -o "$RUNNER_TEMP/race-warm/" ./internal/graph/store_sqlite ./internal/indexer ./internal/mcp
+          go test -race -cover -c -o "$RUNNER_TEMP/race-warm-cover/" ./internal/graph/store_sqlite ./internal/indexer ./internal/mcp
+
+      # Fork PR runs save (fork main never runs CI); upstream would use github.event_name == 'push' && github.ref == 'refs/heads/main'.
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ !cancelled() && matrix.partition == 'remaining' && github.event_name == 'pull_request' }}
+        with:
+          path: |
+            ${{ steps.cache-paths.outputs.build }}
+            ${{ steps.cache-paths.outputs.mod }}
+          key: go-race-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+
+      - name: Upload test selection
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: selection-${{ matrix.os }}-${{ matrix.partition }}
+          path: test-selection.json
+          if-no-files-found: warn
+
+      - name: Upload coverage
+        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.27'
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          files: coverage.out
+        continue-on-error: true
+
+  test-platform:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+        go-version: ['1.27']
+        partition: [remaining, indexer-0, indexer-1, indexer-2, indexer-3, mcp]
+        # macOS keeps 3 indexer shards: the account runs 5 macOS jobs at once.
+        exclude:
+          - os: macos-latest
+            partition: indexer-3
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -35,30 +117,36 @@ jobs:
         run: go build -o gortex ./cmd/gortex/
 
       - name: Test
-        if: matrix.os != 'windows-latest'
-        run: go test -race -timeout=45m -coverprofile=coverage.out ./...
+        shell: bash
+        env:
+          TEST_RACE: "false"
+          TEST_PARTITION: ${{ matrix.partition }}
+          TEST_WINDOWS: ${{ matrix.os == 'windows-latest' }}
+        run: |
+          if [[ "$TEST_WINDOWS" == true ]]; then
+            python - <<'PY_WINDOWS_TESTS'
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
 
-      # The Windows shard checks the platform contract, not the race
-      # contract: the race detector multiplies runtime several times over and
-      # the windows runners are already the slowest of the three, so the two
-      # together overran the job cap before the suite finished. Linux and
-      # macOS keep -race, which is where a data race would surface anyway.
-      # -v is temporary: per-test timings are how we find which packages hang
-      # here, and it comes out once the shard is reliably green.
-      # It writes no coverage profile either: nothing uploads one from this
-      # shard, and the runner's default PowerShell tokenises
-      # -coverprofile=coverage.out into an extra ".out" package argument, so
-      # the job failed on an unresolvable package before any test ran.
-      - name: Test (windows, no race detector)
-        if: matrix.os == 'windows-latest'
-        run: go test -v -timeout=45m ./...
+          scratch = Path(os.environ["RUNNER_TEMP"]) / "gortex-storage-tests"
+          scratch.mkdir(parents=True, exist_ok=True)
+          os.environ["GOTMPDIR"] = str(scratch)
+          print("Windows test GOTMPDIR:", scratch, flush=True)
+          sys.exit(subprocess.call([sys.executable, "scripts/ci-test-partition.py"]))
+          PY_WINDOWS_TESTS
+          else
+            python3 scripts/ci-test-partition.py
+          fi
 
-      - name: Upload coverage
-        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.27'
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+      - name: Upload test selection
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          files: coverage.out
-        continue-on-error: true
+          name: selection-${{ matrix.os }}-${{ matrix.partition }}
+          path: test-selection.json
+          if-no-files-found: warn
 
   build-linux-static:
     # The linux release ships a statically linked binary so it runs on any
@@ -188,4 +276,4 @@ jobs:
           go-version-file: go.mod
 
       - name: Run benchmarks
-        run: go test -bench=. -benchmem -count=1 -benchtime=1x -timeout=20m ./internal/parser/languages/ ./internal/query/ ./internal/graph/
+        run: go test -run '^$' -bench=. -benchmem -count=1 -benchtime=1x -timeout=20m ./internal/parser/languages/ ./internal/query/ ./internal/graph/

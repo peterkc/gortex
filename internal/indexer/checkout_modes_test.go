@@ -925,6 +925,11 @@ func TestUntrackAPrimaryRetiresItsClosure(t *testing.T) {
 	assert.Equal(t, UntrackPlanPrimaryClosure, result.Plan)
 	assert.Equal(t, []string{string(TrackSourceCLI)}, result.Revoked)
 
+	// Pending is an admitted cleanup, not its terminal retirement.
+	if result.Pending {
+		finishRepositoryCleanup(t, f.lc, f.mainPrefix)
+	}
+
 	assert.Nil(t, f.mi.GetMetadata(f.mainPrefix), "the primary corpus is gone")
 	_, found, err := f.catalog.GetDedicatedGraph(ctx, f.primaryGraph)
 	require.NoError(t, err)

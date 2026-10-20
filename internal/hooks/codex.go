@@ -106,8 +106,9 @@ func runCodex(data []byte, port int, selected ...CodexMode) {
 	case peek.HookEventName == "Stop":
 		// Codex uses the same stop_hook_active and last_assistant_message
 		// fields as the shared Stop handler. Unsupported/older hosts omit the
-		// message and therefore fail open in runPostTask.
-		runPostTask(data, port)
+		// message and therefore fail open in runPostTask. The briefing rides
+		// Codex's Stop envelope, which rejects hookSpecificOutput (#779).
+		runPostTaskWith(data, port, codexStopBriefing)
 	case peek.HookEventName == "SessionStart":
 		runSessionStart(data, port)
 	case peek.HookEventName == "PreToolUse" && peek.ToolName == "Bash":

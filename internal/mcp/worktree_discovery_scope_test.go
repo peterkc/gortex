@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -35,8 +36,31 @@ func TestWorktreeDiscoveryDeniesForeignSelectorBeforeCatalogSideEffects(t *testi
 	// Register only discovers the worktrees present at that instant. This
 	// fixture never starts the daemon's topology watcher or family sweep.
 	// Creating the linked worktree afterwards makes the explicit selector the
-	// first possible observation of this previously unknown checkout.
+	// first possible catalog observation of this unknown checkout; the proof
+	// preparation below always denies permission to register or activate it.
 	checkoutMutationGit(t, foreignPrimary, "worktree", "add", "-b", "foreign-agent", foreignWorktree)
+	// Metadata discovery is read-only until this caller authorizes it. A
+	// first request may legitimately return pending after 250 ms on cold Git
+	// startup; establish that prerequisite without authorizing any catalog
+	// observation. The MCP denial below is still one actual request.
+	proofDenied := errors.New("fixture declines read-only checkout proof")
+	for {
+		_, found, proofErr := f.srv.lifecycle.ObserveCheckoutPath(ctx, foreignWorktree, func(prefix string) error {
+			require.Equal(t, "foreign", prefix)
+			return proofDenied
+		})
+		require.False(t, found, "a denied proof cannot return a checkout")
+		if errors.Is(proofErr, proofDenied) {
+			break
+		}
+		require.ErrorIs(t, proofErr, indexer.ErrCheckoutMutationBusy)
+		require.NoError(t, ctx.Err())
+		select {
+		case <-ctx.Done():
+			require.NoError(t, ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 	before, err := f.srv.lifecycle.FamiliesOverview(ctx, registered.FamilyID)
 	require.NoError(t, err)
 	require.Len(t, before.Families, 1)

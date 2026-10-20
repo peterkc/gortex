@@ -50,6 +50,25 @@ func TestMCPRequiredLineRejectsTransportFallback(t *testing.T) {
 	}
 }
 
+// TestMCPRequiredLineIsNotAnUnliftableStop pins #900: the stop rule must carry
+// its exception, so an agent in an untracked directory (or told by the user to
+// proceed without Gortex) continues with native tools instead of refusing.
+func TestMCPRequiredLineIsNotAnUnliftableStop(t *testing.T) {
+	t.Parallel()
+
+	got := MCPRequiredLine()
+	for _, want := range []string{
+		MCPMissingToolsException,
+		"Outside a Gortex-tracked repo",
+		"proceed without Gortex",
+		"continue with native tools",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("MCPRequiredLine() = %q, want %q", got, want)
+		}
+	}
+}
+
 func TestCLIFallbackPlaceholdersAreShellQuoted(t *testing.T) {
 	t.Parallel()
 	for name, example := range cliExample {
