@@ -1,0 +1,18 @@
+{
+  "commits": {
+    "main": "91a5c9514a9d41612183731f247ad46b03765abd",
+    "pr806": "d7250723b93486628ca70f0f7769942863293e9b",
+    "candidate": "2435af8ba1372579f181bad62cbe532235bf3e25"
+  },
+  "workloads": [
+    "R-C2",
+    "R-DE",
+    "R-Fill",
+    "R-Fresh",
+    "R-Restart",
+    "issue767-idle"
+  ],
+  "repeats": 1,
+  "sustained_io": false,
+  "note": "Smoke run (A6): one repeat, three binaries, no sustained I/O."
+}
