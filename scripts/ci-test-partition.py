@@ -15,6 +15,8 @@ from statistics import median
 RACE_SHARDS = {"store": 6, "indexer": 12, "mcp": 3}
 RACE_TIMINGS_PATH = Path(__file__).with_name("ci-race-timings.json")
 PLAIN_SHARDS = {"indexer": 3}
+PLAIN_WINDOWS_SHARDS = {"indexer": 4}
+PLAIN_TIMINGS_PATH = Path(__file__).with_name("ci-plain-timings.json")
 NAME_BUNDLE = 32
 WINDOWS_COMMAND_BUDGET = 30000
 TEST_EXECUTION_BUDGET_SECONDS = 45 * 60
@@ -246,7 +248,8 @@ def main():
     windows = os.environ.get("TEST_WINDOWS", "false") == "true"
     race = (os.environ.get("TEST_RACE", "false" if windows else "true")
             == "true")
-    shards = RACE_SHARDS if race else PLAIN_SHARDS
+    plain_shards = PLAIN_WINDOWS_SHARDS if windows else PLAIN_SHARDS
+    shards = RACE_SHARDS if race else plain_shards
     paths = RACE_PACKAGES if race else PLAIN_PACKAGES
     valid = ({"remaining"} | (paths.keys() - shards.keys())
              | {f"{family}-{index}" for family, count in shards.items()
@@ -280,8 +283,8 @@ def main():
         census_seconds = time.monotonic() - census_start
         print(f"census seconds: {census_seconds:.3f}", flush=True)
         manifest["census_seconds"] = census_seconds
-        timings = (read_race_timings(RACE_TIMINGS_PATH, selected[0])
-                   if race else None)
+        timing_path = RACE_TIMINGS_PATH if race else PLAIN_TIMINGS_PATH
+        timings = read_race_timings(timing_path, selected[0])
         manifest["assignment"] = "count"
         if isinstance(timings, str):
             print(f"::warning::{selected[0]}: {timings}", flush=True)

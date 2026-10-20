@@ -14,8 +14,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Linux runs 22 duration-balanced race/coverage partitions. macOS and
-  # Windows run five plain partitions each, with the full compiled test set.
+  # Linux runs 22 duration-balanced race/coverage partitions. macOS runs
+  # five and Windows six duration-balanced plain partitions, with the full
+  # compiled test set.
   test:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -100,7 +101,11 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
         go-version: ['1.27']
-        partition: [remaining, indexer-0, indexer-1, indexer-2, mcp]
+        partition: [remaining, indexer-0, indexer-1, indexer-2, indexer-3, mcp]
+        # macOS keeps 3 indexer shards: the account runs 5 macOS jobs at once.
+        exclude:
+          - os: macos-latest
+            partition: indexer-3
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

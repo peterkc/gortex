@@ -75,7 +75,10 @@ class PartitionTests(unittest.TestCase):
         self.assertEqual(planner.RACE_SHARDS,
                          {"store": 6, "indexer": 12, "mcp": 3})
         self.assertEqual(planner.PLAIN_SHARDS, {"indexer": 3})
-        modes = ((True, planner.RACE_SHARDS), (False, planner.PLAIN_SHARDS))
+        self.assertEqual(planner.PLAIN_WINDOWS_SHARDS, {"indexer": 4})
+        modes = ((True, planner.RACE_SHARDS),
+                 (False, planner.PLAIN_SHARDS),
+                 (False, planner.PLAIN_WINDOWS_SHARDS))
         for (race, shards), windows in product(modes, (False, True)):
             for family, count in shards.items():
                 with self.subTest(race=race, family=family, windows=windows):
@@ -105,33 +108,52 @@ class PartitionTests(unittest.TestCase):
         workflow = (Path(__file__).parents[1]
                     / ".github/workflows/ci.yml").read_text()
         modes = (
-            ("test", planner.RACE_SHARDS, planner.RACE_PACKAGES,
-             ["ubuntu-latest"]),
-            ("test-platform", planner.PLAIN_SHARDS, planner.PLAIN_PACKAGES,
+            ("test", planner.RACE_PACKAGES, ["ubuntu-latest"]),
+            ("test-platform", planner.PLAIN_PACKAGES,
              ["macos-latest", "windows-latest"]),
         )
-        for job_id, shards, packages, operating_systems in modes:
+        expected_plain = {
+            "windows-latest": {"remaining", "indexer-0", "indexer-1",
+                               "indexer-2", "indexer-3", "mcp"},
+            "macos-latest": {"remaining", "indexer-0", "indexer-1",
+                             "indexer-2", "mcp"},
+        }
+        for job_id, packages, operating_systems in modes:
             with self.subTest(job=job_id):
                 jobs = re.findall(
                     rf"^  {job_id}:\n(.*?)(?=^  [\w-]+:|\Z)",
                     workflow, re.MULTILINE | re.DOTALL)
                 self.assertEqual(len(jobs), 1)
                 job = jobs[0]
-                valid = ({"remaining"} | (packages.keys() - shards.keys())
-                         | {f"{family}-{index}"
-                            for family, count in shards.items()
-                            for index in range(count)})
-                for key, expected in (("partition", valid),
-                                      ("os", operating_systems)):
+                matrix = {}
+                for key in ("partition", "os"):
                     lists = re.findall(
                         rf"^        {key}: \[(.*?)\]$", job, re.MULTILINE)
                     self.assertEqual(len(lists), 1)
                     values = [value.strip().strip("'\"")
                               for value in lists[0].split(",")]
-                    if key == "partition":
-                        self.assertEqual(Counter(values), Counter(expected))
-                    else:
-                        self.assertEqual(values, expected)
+                    matrix[key] = values
+                self.assertEqual(matrix["os"], operating_systems)
+                exclusions = re.findall(
+                    r"^          - os: (\S+)\n            partition: (\S+)$",
+                    job, re.MULTILINE)
+                self.assertEqual(exclusions, [("macos-latest", "indexer-3")]
+                                 if job_id == "test-platform" else [])
+                for os_name in operating_systems:
+                    shards = (planner.RACE_SHARDS if job_id == "test" else
+                              planner.PLAIN_WINDOWS_SHARDS
+                              if os_name == "windows-latest" else
+                              planner.PLAIN_SHARDS)
+                    valid = {"remaining"} | (packages.keys() - shards.keys())
+                    valid |= {f"{family}-{index}"
+                              for family, count in shards.items()
+                              for index in range(count)}
+                    realized = [partition for partition in matrix["partition"]
+                                if (os_name, partition) not in exclusions]
+                    with self.subTest(os=os_name):
+                        self.assertEqual(Counter(realized), Counter(valid))
+                        if job_id == "test-platform":
+                            self.assertEqual(valid, expected_plain[os_name])
                 self.assertRegex(job, r"(?m)^    timeout-minutes: 60$")
                 if job_id == "test":
                     steps = re.split(r"(?m)^      - ", job)[1:]
@@ -179,6 +201,130 @@ class PartitionTests(unittest.TestCase):
                 self.assertEqual(
                     Counter(name for shard in assignments for name in shard),
                     Counter(names))
+
+    def test_committed_plain_durations_balance_each_platform(self):
+        timings = json.loads(planner.PLAIN_TIMINGS_PATH.read_text())
+        entries = timings["github.com/zzet/gortex/internal/indexer"]
+        names = sorted(entries)
+        for count, maximum in ((4, 1244.31), (3, 1659.07)):
+            with self.subTest(shards=count):
+                assignments, predicted = planner.plan_duration_shards(
+                    names, entries, count)
+                self.assertEqual(len(assignments), count)
+                self.assertAlmostEqual(max(predicted), maximum, delta=0.01)
+                self.assertEqual(
+                    Counter(name for shard in assignments for name in shard),
+                    Counter(names))
+
+    def test_main_plain_timing_failures_warn_and_keep_count_balance(self):
+        package = "example.org/gortex/internal/indexer"
+        names = ["TestA", "TestB", "TestC", "TestD", "TestE", "TestF", "TestG"]
+        cases = [
+            ("missing", None, "missing timing file"),
+            ("directory", None, "unreadable timing file"),
+            ("malformed", "{", "malformed timing JSON"),
+            ("package-less", "{}", "no entry for package in timing file"),
+        ]
+        platforms = [
+            ("true", 4, [["TestA", "TestB"], ["TestC", "TestD"],
+                         ["TestE", "TestF"], ["TestG"]]),
+            ("false", 3, [["TestA", "TestB", "TestC"], ["TestD", "TestE"],
+                          ["TestF", "TestG"]]),
+        ]
+        for (case, content, cause), (windows, count, shards) in product(
+                cases, platforms):
+            with self.subTest(case=case, windows=windows), \
+                    tempfile.TemporaryDirectory() as directory:
+                timing_path = Path(directory) / "timings.json"
+                if case == "directory":
+                    timing_path.mkdir()
+                elif content is not None:
+                    timing_path.write_text(content)
+                path = Path(directory) / "selection.json"
+                argv = ["partition", "--partition", "indexer-0",
+                        "--manifest", str(path)]
+                outputs = ["example.org/gortex", package, "\n".join(names)]
+                outputs += ["\n".join(shard) for shard in shards]
+                stdout = io.StringIO()
+                with mock.patch.object(planner, "PLAIN_TIMINGS_PATH",
+                                       timing_path), \
+                        mock.patch.dict(planner.os.environ,
+                                        {"TEST_WINDOWS": windows,
+                                         "TEST_RACE": "false"}), \
+                        mock.patch.object(planner, "capture",
+                                          side_effect=outputs), \
+                        mock.patch.object(planner.sys, "argv", argv), \
+                        mock.patch.object(planner.subprocess, "run") as run, \
+                        redirect_stdout(stdout):
+                    planner.main()
+                manifest = json.loads(path.read_text())
+                self.assertEqual(manifest["assignment"], "count")
+                self.assertNotIn("predicted_seconds", manifest)
+                self.assertEqual(manifest["shard_count"], count)
+                self.assertEqual(manifest["shards"], shards)
+                counts = [len(shard) for shard in manifest["shards"]]
+                self.assertLessEqual(max(counts) - min(counts), 1)
+                warnings = [line for line in stdout.getvalue().splitlines()
+                            if line.startswith("::warning::")]
+                self.assertEqual(len(warnings), 1)
+                prefix = f"::warning::{package}: {cause}"
+                if case == "directory":
+                    self.assertTrue(warnings[0].startswith(prefix + ": "))
+                else:
+                    self.assertEqual(warnings[0], prefix)
+                run.assert_called_once_with(manifest["command"], check=True)
+
+    def test_main_plain_duration_manifest_and_go_matcher(self):
+        package = "example.org/gortex/internal/indexer"
+        names = ["TestA", "TestB", "TestC", "TestD", "TestE"]
+
+        def capture(command):
+            if command == ["go", "list", "-m"]:
+                return "example.org/gortex"
+            if command == ["go", "list", "./..."]:
+                return package
+            pattern = command[command.index("-list") + 1]
+            return "\n".join(name for name in names
+                             if pattern == "." or re.fullmatch(pattern, name))
+
+        platforms = [
+            ("true", 4, "indexer-3",
+             [["TestA"], ["TestD"], ["TestE"], ["TestB", "TestC"]],
+             [8.12, 6, 5, 6]),
+            ("false", 3, "indexer-2",
+             [["TestA"], ["TestC", "TestD"], ["TestB", "TestE"]],
+             [8.12, 8, 9]),
+        ]
+        for windows, count, partition, shards, predicted in platforms:
+            with self.subTest(windows=windows), \
+                    tempfile.TemporaryDirectory() as directory:
+                timing_path = Path(directory) / "timings.json"
+                timing_path.write_text(json.dumps({package: {
+                    "TestA": 8.123, "TestB": 4, "TestC": 2, "TestD": 6,
+                }}))
+                path = Path(directory) / "selection.json"
+                argv = ["partition", "--partition", partition,
+                        "--manifest", str(path)]
+                stdout = io.StringIO()
+                with mock.patch.object(planner, "PLAIN_TIMINGS_PATH",
+                                       timing_path), \
+                        mock.patch.dict(planner.os.environ,
+                                        {"TEST_WINDOWS": windows,
+                                         "TEST_RACE": "false"}), \
+                        mock.patch.object(planner, "capture",
+                                          side_effect=capture) as census, \
+                        mock.patch.object(planner.sys, "argv", argv), \
+                        mock.patch.object(planner.subprocess, "run") as run, \
+                        redirect_stdout(stdout):
+                    planner.main()
+                manifest = json.loads(path.read_text())
+                self.assertEqual(manifest["assignment"], "duration")
+                self.assertEqual(manifest["shard_count"], count)
+                self.assertEqual(manifest["shards"], shards)
+                self.assertEqual(manifest["predicted_seconds"], predicted)
+                self.assertEqual(census.call_count, 3 + count)
+                self.assertNotIn("::warning::", stdout.getvalue())
+                run.assert_called_once_with(manifest["command"], check=True)
 
     def test_unknown_names_use_package_median_duration(self):
         timings = {"TestA": 8, "TestB": 4, "TestC": 2, "TestD": 6}
@@ -417,7 +563,10 @@ class PartitionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "selection.json"
             original_plan = planner.plan_shard_commands
-            with mock.patch.object(planner, "capture", side_effect=capture), \
+            with mock.patch.object(planner, "PLAIN_TIMINGS_PATH",
+                                   Path(directory) / "missing.json"), \
+                    mock.patch.object(planner, "capture",
+                                      side_effect=capture), \
                     mock.patch.object(planner, "WINDOWS_COMMAND_BUDGET", 650), \
                     mock.patch.object(planner, "plan_shard_commands", side_effect=
                                       lambda *args, **kwargs: original_plan(*args, windows_api=True, **kwargs)), \
@@ -511,7 +660,9 @@ class PartitionTests(unittest.TestCase):
             path = Path(directory) / "selection.json"
             argv = ["partition", "--partition", "indexer-1",
                     "--manifest", str(path)]
-            with mock.patch.object(planner, "capture",
+            with mock.patch.object(planner, "PLAIN_TIMINGS_PATH",
+                                   Path(directory) / "missing.json"), \
+                    mock.patch.object(planner, "capture",
                                    side_effect=outputs) as capture, \
                     mock.patch.dict(planner.os.environ,
                                     {"TEST_RACE": "false",
@@ -541,7 +692,9 @@ class PartitionTests(unittest.TestCase):
                 self.assertNotIn("-race", call.args[0])
 
     def test_main_rejects_partitions_from_the_other_mode(self):
-        for race, partition in (("false", "store-0"), ("true", "mcp")):
+        cases = (("false", "store-0"), ("true", "mcp"),
+                 ("false", "indexer-3"))
+        for race, partition in cases:
             with self.subTest(race=race, partition=partition):
                 argv = ["partition", "--partition", partition]
                 with mock.patch.dict(planner.os.environ,
