@@ -14,5 +14,5 @@
   ],
   "repeats": 1,
   "sustained_io": false,
-  "note": "Phase 1 smoke (A3): corrected protocol, one repeat, main, #806 and the common base on both labels."
+  "note": "Phase 1 smoke 2 (A3, D18 amendment): fixed harness, 1800 s warm-up/rebuild, three workload-group jobs per label, one repeat, main, #806 and the common base."
 }
