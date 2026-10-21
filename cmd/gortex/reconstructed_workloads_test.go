@@ -260,14 +260,10 @@ func (d *reconstructedDriver) probe(root string, symbol reconstructedSymbol, spe
 	deadline := start.Add(timeout)
 	// A failed or slow CLI call is not an answer. The probe keeps polling, so
 	// a probe that never passes counts at the timeout, not at the elapsed time.
-	var callErr string
 	for time.Now().Before(deadline) {
-		sample.Polls++
 		answer, err := d.f.askSymbol(root, symbol.Name, sample.File, spelling)
-		sample.Answer = answer
-		if err != nil {
-			callErr = err.Error()
-		} else {
+		sample.recordPoll(answer, err)
+		if err == nil {
 			passed, err := issue767Verdict(answer, spelling)
 			if err != nil && !issue767Inexact(err) {
 				sample.Error = err.Error()
@@ -292,7 +288,7 @@ func (d *reconstructedDriver) probe(root string, symbol reconstructedSymbol, spe
 	sample.End = time.Now()
 	sample.DurationMS = sample.End.Sub(start).Seconds() * 1000
 	if !sample.Passed && sample.Error == "" {
-		sample.TimedOut, sample.DurationMS, sample.Error = true, sample.TimeoutMS, callErr
+		sample.TimedOut, sample.DurationMS, sample.Error = true, sample.TimeoutMS, sample.LastError
 	}
 	return sample
 }
@@ -732,17 +728,18 @@ func TestReconstructedRestart(t *testing.T) {
 	if !d.readyAndQuiet() {
 		return
 	}
-	attachment := d.demand(reconstructedRoute(0))
-	if attachment.Error == "" {
-		observation, err := reconstructedContractAnswer([]byte(attachment.Response), reconstructedContractState{PreviousSave: -1})
-		attachment.reconstructedContractObservation = &observation
-		if err != nil {
-			attachment.Error = err.Error()
+	ctx, cancel := context.WithDeadline(t.Context(), d.started.Add(reconstructedSetupReadyTimeout))
+	attempts, err := reconstructedPrepareAttachment(ctx, d.f.primary, func(timeout time.Duration) reconstructedDemand {
+		return d.demandWithin(reconstructedRoute(0), timeout)
+	})
+	cancel()
+	d.run.Parameters["preparation_contract_demand"] = attempts
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			d.run.PreparationInsufficient = "preparation contract attachment: remaining warm-up deadline expired"
+		} else {
+			d.run.Error = "preparation contract attachment: " + err.Error()
 		}
-	}
-	d.run.Parameters["preparation_contract_demand"] = attachment
-	if attachment.Error != "" {
-		d.run.Error = "preparation contract attachment: " + attachment.Error
 		return
 	}
 	// The required consumer may add work; re-establish quiet after attachment.
@@ -810,7 +807,7 @@ func TestReconstructedRestart(t *testing.T) {
 	case <-timer.C:
 	}
 	joinDemand()
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	ctx, cancel = context.WithTimeout(t.Context(), 10*time.Second)
 	io, err := d.f.sampleProcessIO(ctx, d.f.pid())
 	cancel()
 	if err != nil {
@@ -942,6 +939,10 @@ type reconstructedDemand struct {
 	Error      string    `json:"error,omitempty"`
 	LatestSave int       `json:"latest_save"`
 	*reconstructedContractObservation
+
+	Available         bool   `json:"contract_available"`
+	UnavailableReason string `json:"unavailable_reason,omitempty"`
+	RetryAfter        string `json:"retry_after,omitempty"`
 }
 
 type reconstructedDemandOwner struct {
@@ -978,8 +979,12 @@ func (o *reconstructedDemandOwner) tick(at time.Time, route string) {
 }
 
 func (d *reconstructedDriver) demand(route string) reconstructedDemand {
+	return d.demandWithin(route, time.Minute)
+}
+
+func (d *reconstructedDriver) demandWithin(route string, timeout time.Duration) reconstructedDemand {
 	sample := reconstructedDemand{Start: time.Now(), Route: route}
-	raw, err := d.f.tryCommand(time.Minute, d.f.primary, "call", "contracts", "--arg", "action=list", "--arg", "type=http", "--arg", "limit=1000", "--format=json")
+	raw, err := d.f.tryCommand(timeout, d.f.primary, "call", "contracts", "--arg", "action=list", "--arg", "type=http", "--arg", "limit=1000", "--format=json")
 	sample.End, sample.Response = time.Now(), string(raw)
 	sample.DurationMS = sample.End.Sub(sample.Start).Seconds() * 1000
 	if err != nil {
@@ -1063,6 +1068,85 @@ func reconstructedContractAnswer(raw []byte, state reconstructedContractState) (
 	return observation, nil
 }
 
+// query.go:93 emits this refusal while restart has not re-attached the repo.
+// Only the matching repo before enrichment can be startup-unavailable data.
+func reconstructedObserveDemand(record reconstructedDemand, state reconstructedContractState, repo string) reconstructedDemand {
+	message := strings.TrimSpace(record.Response)
+	if record.Error == "exit status 1" {
+		if state.AllowPending && message == fmt.Sprintf("Error: the gortex daemon does not track %s — add it with `gortex track %s`", repo, repo) {
+			record.Error, record.UnavailableReason = "", "startup repository not tracked before enrichment"
+			return record
+		}
+		// #806 contract_consumer_wait.go:487-494 returns this typed refusal.
+		const prefix = "Error: required_capability_incomplete: graph.contracts did not become complete within this request: "
+		if strings.HasPrefix(message, prefix) && !strings.ContainsAny(message, "\r\n") {
+			reason, hint, hasHint := strings.Cut(strings.TrimPrefix(message, prefix), "; retry after ")
+			if reason == "" {
+				return record
+			}
+			if hasHint {
+				delay, err := time.ParseDuration(hint)
+				if err != nil || delay <= 0 {
+					return record
+				}
+				record.RetryAfter = hint
+			}
+			record.Error, record.UnavailableReason = "", "required_capability_incomplete: "+reason
+			return record
+		}
+	}
+	if record.Error != "" {
+		return record
+	}
+	observation, err := reconstructedContractAnswer([]byte(record.Response), state)
+	record.reconstructedContractObservation = &observation
+	if err != nil {
+		record.Error = err.Error()
+		return record
+	}
+	record.Available = observation.NewestSave >= 0
+	if !record.Available {
+		record.UnavailableReason = "startup attachment pending before enrichment"
+	}
+	return record
+}
+
+// Retry only completed typed-incomplete reads, sequentially, within the original
+// warm-up deadline. No retry or additional budget is added to measured demand.
+func reconstructedPrepareAttachment(ctx context.Context, repo string, request func(time.Duration) reconstructedDemand) ([]reconstructedDemand, error) {
+	var attempts []reconstructedDemand
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return attempts, errors.New("attachment preparation requires warm-up deadline")
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return attempts, err
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return attempts, context.DeadlineExceeded
+		}
+		record := reconstructedObserveDemand(request(min(time.Minute, remaining)), reconstructedContractState{PreviousSave: -1}, repo)
+		attempts = append(attempts, record)
+		if err := ctx.Err(); err != nil {
+			return attempts, err
+		}
+		if !time.Now().Before(deadline) {
+			return attempts, context.DeadlineExceeded
+		}
+		if record.Error != "" {
+			return attempts, errors.New(record.Error)
+		}
+		if record.Available && record.Route0 {
+			return attempts, nil
+		}
+		if !strings.HasPrefix(record.UnavailableReason, "required_capability_incomplete: ") {
+			return attempts, errors.New("preparation did not establish route 0 attachment")
+		}
+	}
+}
+
 func reconstructedDemandGaps(records []reconstructedDemand, start, end time.Time) ([]float64, bool) {
 	previous := start
 	var gaps []float64
@@ -1088,6 +1172,7 @@ func (d *reconstructedDriver) recordDemand(o *reconstructedDemandOwner, start, e
 		d.run.JobStatus, d.run.JobReason = "insufficient", "contract demand interest gap >=60 s or absent demand"
 	}
 	previous := -1
+	settledAnswers := 0
 	lags := map[int]int{}
 	for i := range o.records {
 		record := &o.records[i]
@@ -1096,24 +1181,34 @@ func (d *reconstructedDriver) recordDemand(o *reconstructedDemandOwner, start, e
 				record.LatestSave++
 			}
 		}
-		if record.Error == "" {
-			state := reconstructedContractState{LatestSave: record.LatestSave, PreviousSave: previous,
-				AllowPending: d.run.Workload == "R-Restart" && record.End.Before(enriched)}
-			observation, err := reconstructedContractAnswer([]byte(record.Response), state)
-			record.reconstructedContractObservation = &observation
-			if err != nil {
-				record.Error = err.Error()
-			} else {
-				previous = observation.NewestSave
-				lags[observation.LagSaves]++
+		state := reconstructedContractState{LatestSave: record.LatestSave, PreviousSave: previous,
+			AllowPending: d.run.Workload == "R-Restart" && record.End.Before(enriched)}
+		*record = reconstructedObserveDemand(*record, state, d.f.primary)
+		if record.Available {
+			if !state.AllowPending {
+				settledAnswers++
+			}
+			previous = record.NewestSave
+			lags[record.LagSaves]++
+		} else if record.UnavailableReason != "" {
+			d.run.ContractUnavailable++
+			if d.run.Workload == "R-Restart" && !state.AllowPending {
+				record.Error = record.UnavailableReason
 			}
 		}
 		if record.Error != "" {
 			d.run.Error = "contract demand: " + record.Error
 		}
 	}
+	if d.run.Workload == "R-Restart" && settledAnswers == 0 && d.run.Error == "" {
+		d.run.Error = "contract demand: no validated attachment after enrichment"
+	}
 	d.run.Parameters["contract_demand"] = o.records
 	d.run.Parameters["contract_route_lag_saves_distribution"] = lags
+	d.run.Parameters["contract_route_lag_unavailable_answers"] = d.run.ContractUnavailable
+	if len(lags) == 0 {
+		d.run.Parameters["contract_route_lag_reason"] = "no available route answers"
+	}
 }
 
 type reconstructedJobEvent struct {

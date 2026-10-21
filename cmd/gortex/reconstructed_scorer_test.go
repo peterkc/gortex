@@ -27,6 +27,24 @@ type reconstructedSample struct {
 	Error      string         `json:"error,omitempty"`
 	Polls      int            `json:"polls,omitempty"`
 	Answer     issue767Answer `json:"answer"`
+
+	LastError     string          `json:"last_error,omitempty"`
+	LastErrorPoll int             `json:"last_error_poll,omitempty"`
+	LastAnswer    *issue767Answer `json:"last_answer,omitempty"`
+	ErrorsCount   int             `json:"errors_count"`
+	OKPolls       int             `json:"ok_polls"`
+}
+
+func (sample *reconstructedSample) recordPoll(answer issue767Answer, err error) {
+	sample.Polls++
+	sample.Answer = answer
+	if err != nil {
+		sample.LastError, sample.LastErrorPoll = err.Error(), sample.Polls
+		sample.ErrorsCount++
+		return
+	}
+	sample.LastAnswer = &answer
+	sample.OKPolls++
 }
 
 type reconstructedRebuild struct {
@@ -56,6 +74,9 @@ type reconstructedRun struct {
 	StoreGrowth  *int64                     `json:"store_plus_wal_growth_bytes,omitempty"`
 	Resources    []issue767ProcessResources `json:"resources"`
 	Score        *reconstructedScore        `json:"score,omitempty"`
+
+	PreparationInsufficient string `json:"preparation_insufficient,omitempty"`
+	ContractUnavailable     int    `json:"contract_unavailable_answers"`
 }
 
 type reconstructedScore struct {
@@ -77,6 +98,8 @@ type reconstructedScore struct {
 	Timeouts     int                   `json:"timeouts"`
 	Failures     []reconstructedSample `json:"failures,omitempty"`
 	Reason       string                `json:"reason,omitempty"`
+
+	ContractRoute string `json:"contract_route,omitempty"`
 }
 
 func reconstructedPercentile(values []float64, percentile float64) (float64, error) {
@@ -130,6 +153,10 @@ func scoreReconstructed(run reconstructedRun) (reconstructedScore, error) {
 	}
 	if run.Error != "" {
 		score.Status, score.Reason = "fail", run.Error
+	}
+	if run.PreparationInsufficient != "" && run.Error == "" {
+		score.Status, score.Reason = "insufficient", run.PreparationInsufficient
+		return score, nil
 	}
 	if run.Workload != "R-Fresh" && !run.Quiet && run.Error == "" {
 		score.Status, score.Reason = "insufficient", "quiet did not arrive within 300 s"
@@ -202,6 +229,12 @@ func scoreReconstructed(run reconstructedRun) (reconstructedScore, error) {
 	score.Samples = len(client)
 	switch run.Workload {
 	case "R-DE":
+		if run.ContractUnavailable > 0 {
+			score.ContractRoute, score.Status = "fail", "fail"
+			if run.Error == "" {
+				score.Reason = "product contract route unavailable: required_capability_incomplete"
+			}
+		}
 		if run.JobStatus != "" {
 			score.Job = run.JobStatus
 			if run.JobStatus != "supported" {
