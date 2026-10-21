@@ -786,11 +786,15 @@ func (s *Store) runCheckpointLoopWithAttempt(
 	}
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
+	statsTicker := time.NewTicker(writeGateStatsInterval)
+	defer statsTicker.Stop()
 	retryDelay := retryInitial
 	for {
 		select {
 		case <-s.stopCheckpoint:
 			return
+		case <-statsTicker.C:
+			s.writeMu.logStats("periodic")
 		case <-timer.C:
 			// If shutdown and the timer become ready together, prefer shutdown
 			// before starting another bounded SQLite call.
@@ -1054,6 +1058,7 @@ func (s *Store) Close() error {
 			_ = st.Close()
 		}
 	}
+	s.writeMu.logStats("close")
 	return errors.Join(bulkErr, checkpointErr, closeSQLitePools(s.db, s.writerDB))
 }
 
