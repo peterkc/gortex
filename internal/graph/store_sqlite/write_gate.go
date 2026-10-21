@@ -46,6 +46,10 @@ func (g *sqliteWriteGate) callSite() *writeGateSiteStats {
 			continue
 		}
 		fn := runtime.FuncForPC(pc - 1)
+		if fn == nil {
+			// An unresolvable frame must not panic a store write; skip it.
+			continue
+		}
 		file, line := fn.FileLine(pc - 1)
 		if strings.HasSuffix(file, "/write_gate.go") {
 			g.stats.sites.Store(pc, (*writeGateSiteStats)(nil))

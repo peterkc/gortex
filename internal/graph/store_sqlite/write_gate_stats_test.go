@@ -193,7 +193,7 @@ func TestWriteGateStatsCanceledWait(t *testing.T) {
 
 func TestWriteGateStatsNoAllocationAfterRegistration(t *testing.T) {
 	var gate sqliteWriteGate
-	take := func() { gate.Lock(); gate.Unlock() }
+	take := func() { gate.Lock(); gate.Unlock() } //nolint:staticcheck // SA2001: an empty acquisition is the measured operation
 	takeContext := func() { _ = gate.LockContext(context.Background()); gate.Unlock() }
 	try := func() {
 		if gate.TryLock() {
