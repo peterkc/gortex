@@ -2963,7 +2963,7 @@ func (w *Watcher) isExcluded(path string) bool {
 	// cache per ignore file, and the same content-source condition.
 	perFolder := w.indexer.perFolderIgnores(root)
 	if err == nil && info.IsDir() {
-		return shouldPruneDir(path, root, w.excludes, perFolder, true)
+		return shouldPruneDir(path, root, w.excludes, perFolder)
 	}
 	return shouldExcludeRules(path, root, false, w.excludes, perFolder)
 }

@@ -37,7 +37,7 @@ func (f *watcherExcludeFilter) ShouldInclude(path string) bool {
 	}
 	root := f.w.indexer.rootPath
 	if root == "" {
-		return !f.w.excludes.MatchRel(path)
+		return !f.w.excludes.MatchRel(path) || !f.w.excludes.MatchRel(strings.TrimSuffix(path, "/")+"/")
 	}
 	// An ignore file's events keep the per-folder rule cache current, even
 	// when the file itself is excluded; the full check still keeps it out
@@ -46,16 +46,15 @@ func (f *watcherExcludeFilter) ShouldInclude(path string) bool {
 		return true
 	}
 	rel, err := filepath.Rel(root, path)
-	// Defer MCP config paths and potentially re-included subtrees to the
-	// full check, without statting paths in this backend hot path. Other
+	// Defer MCP config paths to the full check, without statting paths in
+	// this backend hot path. Other
 	// agent-config paths fall to the Builtin exclusion below.
 	if err == nil && (excludes.IsAgentConfigMCPDir(rel) || excludes.IsAgentConfigMCPFile(rel)) {
 		return true
 	}
-	if !f.w.excludes.MatchAbs(path, root) {
-		return true
-	}
-	return err == nil && f.w.excludes.HasAnchoredNegatedDescendant(filepath.ToSlash(rel))
+	// The backend does not know whether this is a file or a folder.
+	// A directory-only negation must keep its folder events deliverable.
+	return !f.w.excludes.MatchAbs(path, root) || !f.w.excludes.MatchAbsDir(path, root, true)
 }
 
 // isProbeMarkerPath reports whether path names a watcher handshake probe.
