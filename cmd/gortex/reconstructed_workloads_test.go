@@ -560,13 +560,16 @@ func TestReconstructedDE(t *testing.T) {
 
 func (d *reconstructedDriver) search(kind string, index int) reconstructedSample {
 	symbol := d.symbols[index%20]
-	sample := reconstructedSample{Kind: kind, Symbol: symbol.Name, File: filepath.Join(d.f.primary, symbol.File), Start: time.Now()}
+	sample := reconstructedSample{Kind: kind, Symbol: symbol.Name, File: filepath.Join(d.f.primary, symbol.File), Start: time.Now(), TimeoutMS: float64(issue767SearchTimeout.Milliseconds())}
 	answer, err := d.f.askSymbol(d.f.primary, symbol.Name, sample.File, issue767AsPrimary)
 	sample.End = time.Now()
 	sample.DurationMS = sample.End.Sub(sample.Start).Seconds() * 1000
 	sample.Answer = answer
 	if err != nil {
 		sample.Error = err.Error()
+		if errors.Is(err, errIssue767CommandTimeout) {
+			sample.TimedOut, sample.DurationMS = true, sample.TimeoutMS
+		}
 		return sample
 	}
 	sample.Passed, err = issue767Verdict(answer, issue767AsPrimary)
@@ -620,7 +623,7 @@ func reconstructedLoadWindows(load func() reconstructedRebuild, search func(int)
 			sample := search(index)
 			index++
 			samples = append(samples, sample)
-			if sample.Error != "" {
+			if sample.Error != "" && !sample.TimedOut {
 				searchErr = errors.New(sample.Error)
 				break
 			}

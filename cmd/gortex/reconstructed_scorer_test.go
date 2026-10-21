@@ -120,11 +120,13 @@ func reconstructedSampleMS(sample reconstructedSample) (float64, error) {
 	if !sample.TimedOut {
 		return sample.DurationMS, nil
 	}
-	// Ordinary probes always count at 60 s. Fresh startup has its own 900 s
-	// deadline; never trust a partial elapsed value for a timed-out probe.
+	// Censor at the owning operation's deadline, not a partial elapsed value.
 	timeout := 60000.0
-	if sample.Kind == "fresh" {
+	switch sample.Kind {
+	case "fresh":
 		timeout = 900000
+	case "idle", "load":
+		timeout = float64(issue767SearchTimeout.Milliseconds())
 	}
 	if sample.TimeoutMS != timeout {
 		return 0, fmt.Errorf("%s timeout_ms = %v, want %v", sample.Kind, sample.TimeoutMS, timeout)
@@ -183,24 +185,9 @@ func scoreReconstructed(run reconstructedRun) (reconstructedScore, error) {
 		if sample.Start.After(sample.End) {
 			return score, errors.New("sample ends before it starts")
 		}
-		if run.Workload == "R-Fill" && sample.Kind == "load" && !reconstructedLoaded(sample, run.Rebuilds) {
-			score.Excluded++
-			continue
-		}
 		value, err := reconstructedSampleMS(sample)
 		if err != nil {
 			return score, err
-		}
-		client = append(client, value)
-		if run.Workload == "R-Fill" {
-			switch sample.Kind {
-			case "idle":
-				idle = append(idle, value)
-			case "load":
-				loaded = append(loaded, value)
-			default:
-				return score, fmt.Errorf("unknown search phase %q", sample.Kind)
-			}
 		}
 		if sample.TimedOut {
 			score.Timeouts++
@@ -212,6 +199,24 @@ func scoreReconstructed(run reconstructedRun) (reconstructedScore, error) {
 			sample.DurationMS = value
 			score.Failures = append(score.Failures, sample)
 			score.Status = "fail"
+			if run.Workload == "R-Fill" && score.Reason == "" {
+				score.Reason = fmt.Sprintf("%s search %q failed: %s", sample.Kind, sample.Symbol, sample.Error)
+			}
+		}
+		if run.Workload == "R-Fill" && sample.Kind == "load" && !reconstructedLoaded(sample, run.Rebuilds) {
+			score.Excluded++
+			continue
+		}
+		client = append(client, value)
+		if run.Workload == "R-Fill" {
+			switch sample.Kind {
+			case "idle":
+				idle = append(idle, value)
+			case "load":
+				loaded = append(loaded, value)
+			default:
+				return score, fmt.Errorf("unknown search phase %q", sample.Kind)
+			}
 		}
 	}
 	if len(client) == 0 && score.Status == "fail" {

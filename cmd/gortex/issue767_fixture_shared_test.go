@@ -98,6 +98,9 @@ const issue767ProductReconcileInterval = "default"
 const issue767DefaultTestReconcileInterval = "5s"
 
 const issue767StopTimeout = 30 * time.Second
+const issue767SearchTimeout = 10 * time.Second
+
+var errIssue767CommandTimeout = errors.New("CLI context deadline exceeded")
 
 type issue767FixtureOptions struct {
 	reconcileInterval string
@@ -286,7 +289,7 @@ func (f *issue767Fixture) command(timeout time.Duration, dir string, args ...str
 }
 
 func (f *issue767Fixture) tryCommand(timeout time.Duration, dir string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(f.t.Context(), timeout)
+	ctx, cancel := context.WithTimeoutCause(f.t.Context(), timeout, errIssue767CommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, f.binary, args...)
 	cmd.Dir, cmd.Env = dir, f.env
@@ -301,6 +304,10 @@ func (f *issue767Fixture) tryCommand(timeout time.Duration, dir string, args ...
 	f.mu.Lock()
 	f.lastOutput = tail
 	f.mu.Unlock()
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && !exitErr.ProcessState.Exited() && errors.Is(context.Cause(ctx), errIssue767CommandTimeout) {
+		err = errors.Join(err, errIssue767CommandTimeout)
+	}
 	return output, err
 }
 
@@ -671,7 +678,7 @@ func (f *issue767Fixture) askSymbol(root, name, file string, spelling issue767Sp
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	output, err := f.tryCommand(10*time.Second, root, "call", "search", "--index", root, "--json", string(payload), "--format", "json")
+	output, err := f.tryCommand(issue767SearchTimeout, root, "call", "search", "--index", root, "--json", string(payload), "--format", "json")
 	if err != nil {
 		answer.Error = fmt.Sprintf("search command: %v: %s", err, output)
 		return answer, fmt.Errorf("search command: %w: %s", err, output)

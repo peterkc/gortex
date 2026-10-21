@@ -28,6 +28,7 @@ func TestReconstructedMeasurementDeadlines(t *testing.T) {
 		{"quiet", reconstructedQuietTimeout, 300 * time.Second},
 		{"cleanup", issue767StopTimeout, 30 * time.Second},
 		{"probe", reconstructedProbeTimeout, 60 * time.Second},
+		{"search", issue767SearchTimeout, 10 * time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.got != tc.want {
@@ -224,6 +225,130 @@ func TestReconstructedMeasurementLoadNoReplay(t *testing.T) {
 				})
 			if err == nil || len(windows) != 1 || requests.Load() != 1 || windows[0].Error == "" {
 				t.Fatalf("requests=%d windows=%+v error=%v", requests.Load(), windows, err)
+			}
+		})
+	}
+}
+
+func TestReconstructedMeasurementSearchTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name, script string
+		timedOut     bool
+	}{
+		{"own_deadline_kills_search", "exec /bin/sleep 30", true},
+		{"unrelated_kill", "kill -KILL $$", false},
+		{"deadline_text_is_not_deadline", "echo 'signal: killed: CLI context deadline exceeded'; exit 1", false},
+		{"malformed_answer", "echo 'not JSON'", false},
+		{"exit_status", "exit 2", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			binary := filepath.Join(dir, "search")
+			if err := os.WriteFile(binary, []byte("#!/bin/sh\n"+tc.script+"\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			f := &issue767Fixture{t: t, binary: binary, primary: dir, env: os.Environ()}
+			d := &reconstructedDriver{f: f, symbols: []reconstructedSymbol{{Name: "Target", File: "target.go"}}}
+			sample := d.search("load", 0)
+			if sample.Passed || sample.Error == "" || sample.Answer.Error == "" || sample.TimedOut != tc.timedOut || sample.TimeoutMS != 10000 {
+				t.Fatalf("sample=%+v", sample)
+			}
+			if tc.timedOut && sample.DurationMS != 10000 {
+				t.Fatalf("duration=%v, want censored 10000 ms", sample.DurationMS)
+			}
+			if sample.Start.IsZero() || !sample.End.After(sample.Start) || f.clientCallCount() != 1 {
+				t.Fatalf("sample=%+v calls=%d", sample, f.clientCallCount())
+			}
+		})
+	}
+}
+
+func TestReconstructedMeasurementLoadSearchError(t *testing.T) {
+	for _, timedOut := range []bool{true, false} {
+		name := "generic_error_aborts"
+		if timedOut {
+			name = "killed_at_limit_continues"
+		}
+		t.Run(name, func(t *testing.T) {
+			release := make(chan struct{})
+			var calls atomic.Int32
+			samples, windows, err := reconstructedLoadWindows(func() reconstructedRebuild {
+				call := calls.Add(1)
+				if call == 1 {
+					<-release
+					return reconstructedRebuild{Start: time.Unix(100, 0), End: time.Unix(120, 0)}
+				}
+				return reconstructedRebuild{Start: time.Unix(200, 0), End: time.Unix(220, 0)}
+			}, func(index int) reconstructedSample {
+				if index == 0 {
+					close(release)
+					return reconstructedSample{Kind: "load", Start: time.Unix(110, 0), End: time.Unix(121, 0),
+						TimedOut: timedOut, TimeoutMS: 10000, DurationMS: 10000, Error: "search command failed"}
+				}
+				return reconstructedSample{Kind: "load", Start: time.Unix(201, 0), End: time.Unix(202, 0), Passed: true}
+			})
+			if len(samples) == 0 || samples[0].TimedOut != timedOut || samples[0].Error == "" {
+				t.Fatalf("samples=%+v", samples)
+			}
+			if timedOut {
+				if err != nil || len(windows) < 2 || calls.Load() < 2 {
+					t.Fatalf("windows=%+v calls=%d error=%v", windows, calls.Load(), err)
+				}
+				if reconstructedLoaded(samples[0], windows) {
+					t.Fatal("search crossing the rebuild boundary qualified as loaded")
+				}
+			} else if err == nil || err.Error() != samples[0].Error || len(windows) != 1 || calls.Load() != 1 || len(samples) != 1 {
+				t.Fatalf("samples=%+v windows=%+v calls=%d error=%v", samples, windows, calls.Load(), err)
+			}
+		})
+	}
+}
+
+func TestReconstructedMeasurementScorerSearchTimeout(t *testing.T) {
+	timeout := reconstructedSample{Kind: "idle", Symbol: "Target", TimedOut: true, TimeoutMS: 10000, DurationMS: 1, Error: "search killed at CLI deadline"}
+	run := reconstructedRun{Label: "reconstructed", Workload: "R-Fill", Quiet: true, Samples: []reconstructedSample{timeout},
+		Rebuilds: []reconstructedRebuild{{Start: time.Unix(100, 0), End: time.Unix(200, 0)}}}
+	for i := 0; i < 30; i++ {
+		sample := reconstructedSample{Kind: "load", Start: time.Unix(110, 0), End: time.Unix(120, 0), Passed: true, DurationMS: 100}
+		if i >= 28 {
+			sample = timeout
+			sample.Kind, sample.Start, sample.End = "load", time.Unix(110, 0), time.Unix(120, 0)
+		}
+		run.Samples = append(run.Samples, sample)
+	}
+	// A boundary-crossing timeout still fails the row, but is not a loaded latency.
+	outside := timeout
+	outside.Kind, outside.Start, outside.End = "load", time.Unix(195, 0), time.Unix(205, 0)
+	run.Samples = append(run.Samples, outside)
+	score, err := scoreReconstructed(run)
+	if err != nil || run.Error != "" || score.Status != "fail" || score.Timeouts != 4 || len(score.Failures) != 4 || score.Loaded != 30 || score.Excluded != 1 || score.Samples != 31 {
+		t.Fatalf("score=%+v run error=%q scorer error=%v", score, run.Error, err)
+	}
+	if score.IdleP95MS == nil || *score.IdleP95MS != 10000 || score.LoadedP95MS == nil || *score.LoadedP95MS != 10000 || score.Ratio == nil || *score.Ratio != 1 || score.ClientP95MS != 10000 {
+		t.Fatalf("censored percentiles/ratio: %+v", score)
+	}
+	if score.Reason != `idle search "Target" failed: search killed at CLI deadline` {
+		t.Fatalf("reason=%q", score.Reason)
+	}
+	for _, failure := range score.Failures {
+		if !failure.TimedOut || failure.Passed || failure.TimeoutMS != 10000 || failure.DurationMS != 10000 || failure.Error != timeout.Error {
+			t.Fatalf("failure=%+v", failure)
+		}
+	}
+	t.Run("excluded_timeout_still_fails_row", func(t *testing.T) {
+		run.Samples = []reconstructedSample{{Kind: "idle", Passed: true, DurationMS: 100}, outside}
+		score, err := scoreReconstructed(run)
+		if err != nil || run.Error != "" || score.Status != "fail" || score.Timeouts != 1 || len(score.Failures) != 1 || score.Loaded != 0 || score.Excluded != 1 || score.Reason != `load search "Target" failed: search killed at CLI deadline` {
+			t.Fatalf("score=%+v run error=%q scorer error=%v", score, run.Error, err)
+		}
+	})
+	for _, workload := range []string{"R-C2", "R-DE"} {
+		t.Run(workload+"_rejects_search_limit_on_probe", func(t *testing.T) {
+			probe := timeout
+			probe.Kind = "probe"
+			_, err := scoreReconstructed(reconstructedRun{Label: "reconstructed", Workload: workload, Quiet: true, Samples: []reconstructedSample{probe}})
+			if err == nil || !strings.Contains(err.Error(), "want 60000") {
+				t.Fatalf("error=%v, want rejection of a 10 s probe timeout", err)
 			}
 		})
 	}
