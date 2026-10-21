@@ -17,6 +17,26 @@ import (
 	"time"
 )
 
+func TestReconstructedMeasurementDeadlines(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		got, want time.Duration
+	}{
+		{"warmup", reconstructedSetupReadyTimeout, 1800 * time.Second},
+		{"rebuild", reconstructedRebuildTimeout, 1800 * time.Second},
+		{"fresh_first_answer", reconstructedFreshTimeout, 900 * time.Second},
+		{"quiet", reconstructedQuietTimeout, 300 * time.Second},
+		{"cleanup", issue767StopTimeout, 30 * time.Second},
+		{"probe", reconstructedProbeTimeout, 60 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got != tc.want {
+				t.Fatalf("deadline = %s, want %s", tc.got, tc.want)
+			}
+		})
+	}
+}
+
 func TestReconstructedMeasurementWarmupOrder(t *testing.T) {
 	for _, enriched := range []bool{false, true} {
 		var order []string

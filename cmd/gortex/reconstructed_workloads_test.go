@@ -25,9 +25,15 @@ import (
 	"time"
 )
 
-// reconstructedSetupReadyTimeout bounds readiness and full enrichment separately.
-// Both use the approved R-Fresh driver deadline, not its 180 s target.
-const reconstructedSetupReadyTimeout = 900 * time.Second
+// Warm-up and rebuild have separate D18 driver bounds. R-Fresh's first-answer
+// deadline and the quiet/probe limits remain unchanged.
+const (
+	reconstructedSetupReadyTimeout = 1800 * time.Second
+	reconstructedRebuildTimeout    = 1800 * time.Second
+	reconstructedFreshTimeout      = 900 * time.Second
+	reconstructedQuietTimeout      = 300 * time.Second
+	reconstructedProbeTimeout      = 60 * time.Second
+)
 
 type reconstructedSymbol struct {
 	Name string `json:"name"`
@@ -63,9 +69,10 @@ func newReconstructedDriver(t *testing.T, workload string) *reconstructedDriver 
 	}
 	d := &reconstructedDriver{run: reconstructedRun{Label: "reconstructed", Workload: workload, Parameters: map[string]any{
 		"corpus_commit": "91a5c951", "corpus_recipe": "git archive, private repository with one commit",
-		"binary": binary, "poll_ms": 100, "probe_timeout_s": 60, "fresh_timeout_s": 900,
-		"setup_ready_timeout_s": reconstructedSetupReadyTimeout.Seconds(), "Fresh_target_s": 180,
-		"quiet_window_s": 10, "quiet_write_limit_bytes_exclusive": 1 << 20, "quiet_timeout_s": 300,
+		"binary": binary, "poll_ms": 100, "probe_timeout_s": reconstructedProbeTimeout.Seconds(), "fresh_timeout_s": reconstructedFreshTimeout.Seconds(),
+		"setup_ready_timeout_s": reconstructedSetupReadyTimeout.Seconds(), "rebuild_timeout_s": reconstructedRebuildTimeout.Seconds(), "Fresh_target_s": 180,
+		"quiet_window_s": 10, "quiet_write_limit_bytes_exclusive": 1 << 20, "quiet_timeout_s": reconstructedQuietTimeout.Seconds(),
+		"cleanup_timeout_s":  issue767StopTimeout.Seconds(),
 		"reconcile_interval": issue767DefaultTestReconcileInterval, "janitor": "fixture default",
 		"oracle":     "askSymbol + issue767Verdict; one gortex call search per search",
 		"percentile": "nearest rank, failures included", "C2_worktrees": 2, "C2_edits": 10,
@@ -381,7 +388,7 @@ func reconstructedWaitEnrichment(ctx context.Context, path string) error {
 }
 
 func (d *reconstructedDriver) quiet() bool {
-	ctx, cancel := context.WithTimeout(d.f.t.Context(), 300*time.Second)
+	ctx, cancel := context.WithTimeout(d.f.t.Context(), reconstructedQuietTimeout)
 	defer cancel()
 	type observation struct {
 		at time.Time
@@ -466,7 +473,7 @@ func TestReconstructedC2(t *testing.T) {
 		probes.Add(1)
 		go func() {
 			defer probes.Done()
-			results <- d.probe(edit.root, edit.symbol, issue767AsAutomaticWorktree, edit.start, time.Minute, "probe")
+			results <- d.probe(edit.root, edit.symbol, issue767AsAutomaticWorktree, edit.start, reconstructedProbeTimeout, "probe")
 		}()
 	}
 	probes.Wait()
@@ -525,7 +532,7 @@ func TestReconstructedDE(t *testing.T) {
 		probes.Add(1)
 		go func() {
 			defer probes.Done()
-			results <- d.probe(d.f.primary, symbol, issue767AsPrimary, start, time.Minute, "probe")
+			results <- d.probe(d.f.primary, symbol, issue767AsPrimary, start, reconstructedProbeTimeout, "probe")
 		}()
 	}
 	probes.Wait()
@@ -578,7 +585,7 @@ func TestReconstructedFill(t *testing.T) {
 		d.run.Samples = append(d.run.Samples, d.search("idle", i))
 	}
 	samples, windows, err := reconstructedLoadWindows(func() reconstructedRebuild {
-		ctx, cancel := context.WithTimeout(t.Context(), 900*time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), reconstructedRebuildTimeout)
 		defer cancel()
 		return reconstructedHTTPRebuild(ctx, "http://"+d.f.httpAddr, d.f.primary)
 	}, func(index int) reconstructedSample { return d.search("load", index) })
@@ -709,7 +716,7 @@ func TestReconstructedFresh(t *testing.T) {
 	start := time.Now()
 	d.started = start
 	d.f.start()
-	d.run.Samples = append(d.run.Samples, d.probe(d.f.primary, d.fresh, issue767AsPrimary, start, 900*time.Second, "fresh"))
+	d.run.Samples = append(d.run.Samples, d.probe(d.f.primary, d.fresh, issue767AsPrimary, start, reconstructedFreshTimeout, "fresh"))
 	if !d.awaitEnrichment() {
 		return
 	}
@@ -781,7 +788,7 @@ func TestReconstructedRestart(t *testing.T) {
 	var demandJoin sync.Once
 	joinDemand := func() { demandJoin.Do(func() { close(stopDemand); <-demandDone }) }
 	defer joinDemand()
-	ready := d.probe(d.f.primary, d.fresh, issue767AsPrimary, start, time.Minute, "ready")
+	ready := d.probe(d.f.primary, d.fresh, issue767AsPrimary, start, reconstructedProbeTimeout, "ready")
 	d.run.Samples = append(d.run.Samples, ready)
 	if !ready.Passed {
 		d.run.Error = "restart ready probe failed: " + ready.Error

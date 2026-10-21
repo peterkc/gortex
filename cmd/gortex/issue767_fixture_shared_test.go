@@ -97,6 +97,8 @@ const issue767ProductReconcileInterval = "default"
 // measurement choice and every artifact taken under it says so.
 const issue767DefaultTestReconcileInterval = "5s"
 
+const issue767StopTimeout = 30 * time.Second
+
 type issue767FixtureOptions struct {
 	reconcileInterval string
 	loopbackHTTP      bool
@@ -402,7 +404,7 @@ func (f *issue767Fixture) stop() {
 	_ = cmd.Process.Signal(os.Interrupt)
 	select {
 	case <-done:
-	case <-time.After(30 * time.Second):
+	case <-time.After(issue767StopTimeout):
 		_ = cmd.Process.Kill()
 		select {
 		case <-done:

@@ -172,6 +172,13 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-15]
         repeat: ${{ fromJSON(needs.config.outputs.repeats) }}
+        group:
+          - name: fill
+            workloads: [R-Fill]
+          - name: changes
+            workloads: [R-C2, R-DE]
+          - name: lifecycle
+            workloads: [R-Fresh, R-Restart, issue767-idle]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -216,10 +223,12 @@ jobs:
         env:
           REPEAT: ${{ matrix.repeat }}
           BINARIES: ${{ needs.config.outputs.binaries }}
+          WORKLOADS: ${{ toJSON(matrix.group.workloads) }}
         run: |
           while IFS='=' read -r key _value; do
             case "$key" in GORTEX_*|GX_*) unset "$key" ;; esac
           done < <(env)
+          jq -e 'type == "array" and length > 0' <<< "$WORKLOADS"
           for name in $(jq -r '.commits | keys[]' measure/run.json); do chmod +x "binaries/$name"; done
           cp binaries/identities.json results/identities.json
           go test -tags acceptance -run '^TestProcessSamplerResources' -count=1 -v \
@@ -230,7 +239,7 @@ jobs:
           done
           go test -tags acceptance -run '^TestReconstructed(Measurement|Scorer$|SearchSymbols$)' -count=1 -v \
             ./cmd/gortex | tee results/measurement-tests.log
-          for test in WarmupOrder Enrichment TerminalResult LoadNoReplay DemandOwner DemandGaps ContractAnswer JobEvidence ForcedPreparation ScorerErrors ScorerJobs RestartStarts PathSizes OversizedTerminal; do
+          for test in Deadlines WarmupOrder Enrichment TerminalResult LoadNoReplay DemandOwner DemandGaps ContractAnswer JobEvidence ForcedPreparation ScorerErrors ScorerJobs RestartStarts PathSizes OversizedTerminal; do
             grep -Eq "^--- PASS: TestReconstructedMeasurement${test} " results/measurement-tests.log
           done
           status=0
@@ -278,14 +287,14 @@ jobs:
                 if [[ -d "$cache" ]]; then chmod -R u+w "$cache" || echo "warning: go-mod cache chmod incomplete for $name $workload" >&2; fi
               done
               rm -rf "results/$name/$workload"/*/cache/{go-build,go-mod} || echo "warning: Go cache cleanup incomplete for $name $workload" >&2
-            done < <(jq -r '.workloads[]' measure/run.json)
+            done < <(jq -r '.[]' <<< "$WORKLOADS")
           done
           exit "$status"
       - name: Upload raw measurements and fixture logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: workloads-${{ matrix.os }}-${{ matrix.repeat }}
+          name: workloads-${{ matrix.os }}-${{ matrix.repeat }}-${{ matrix.group.name }}
           path: results
           retention-days: 90
 
