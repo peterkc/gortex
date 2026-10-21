@@ -1,9 +1,8 @@
 {
   "commits": {
-    "main": "91a5c9514a9d41612183731f247ad46b03765abd",
-    "pr806": "d7250723b93486628ca70f0f7769942863293e9b",
-    "candidate": "3eaeeb77deab496e20d0b780f874765d4684350c",
-    "candidate_parent": "3379ff71fe66520d045424938da2cc95558cf0c8"
+    "main": "76c080e56da3547f2b464522fd6acbe0accaa25e",
+    "pr806": "944cd9c125ad6ac4094986493d66c7703b2a0cc8",
+    "base": "9e9a842b2a023acc51ae5ba2cc7edf332160f128"
   },
   "workloads": [
     "R-C2",
@@ -13,7 +12,7 @@
     "R-Restart",
     "issue767-idle"
   ],
-  "repeats": 3,
-  "sustained_io": true,
-  "note": "Baseline run (A7): three repeats, three binaries, sustained I/O pairs."
+  "repeats": 1,
+  "sustained_io": false,
+  "note": "Phase 1 smoke (A3): corrected protocol, one repeat, main, #806 and the common base on both labels."
 }
