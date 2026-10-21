@@ -185,6 +185,11 @@ func scoreReconstructed(run reconstructedRun) (reconstructedScore, error) {
 		if sample.Start.After(sample.End) {
 			return score, errors.New("sample ends before it starts")
 		}
+		excluded := run.Workload == "R-Fill" && sample.Kind == "load" && !reconstructedLoaded(sample, run.Rebuilds)
+		if excluded && !sample.TimedOut {
+			score.Excluded++
+			continue
+		}
 		value, err := reconstructedSampleMS(sample)
 		if err != nil {
 			return score, err
@@ -200,10 +205,16 @@ func scoreReconstructed(run reconstructedRun) (reconstructedScore, error) {
 			score.Failures = append(score.Failures, sample)
 			score.Status = "fail"
 			if run.Workload == "R-Fill" && score.Reason == "" {
-				score.Reason = fmt.Sprintf("%s search %q failed: %s", sample.Kind, sample.Symbol, sample.Error)
+				cause := sample.Error
+				if cause == "" {
+					cause = "did not pass"
+				}
+				score.Reason = fmt.Sprintf("%s search %q failed: %s", sample.Kind, sample.Symbol, cause)
 			}
 		}
-		if run.Workload == "R-Fill" && sample.Kind == "load" && !reconstructedLoaded(sample, run.Rebuilds) {
+		// A timed-out search outside a window still fails the row, but stays
+		// out of the loaded percentiles.
+		if excluded {
 			score.Excluded++
 			continue
 		}

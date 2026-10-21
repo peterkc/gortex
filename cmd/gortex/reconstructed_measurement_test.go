@@ -342,6 +342,23 @@ func TestReconstructedMeasurementScorerSearchTimeout(t *testing.T) {
 			t.Fatalf("score=%+v run error=%q scorer error=%v", score, run.Error, err)
 		}
 	})
+	t.Run("excluded_wrong_answer_stays_excluded", func(t *testing.T) {
+		wrong := outside
+		wrong.TimedOut, wrong.TimeoutMS, wrong.Error, wrong.DurationMS = false, 0, "", 100
+		run.Samples = []reconstructedSample{{Kind: "idle", Passed: true, DurationMS: 100}, wrong}
+		score, err := scoreReconstructed(run)
+		if err != nil || score.Status == "fail" || len(score.Failures) != 0 || score.Excluded != 1 {
+			t.Fatalf("score=%+v scorer error=%v", score, err)
+		}
+	})
+	t.Run("wrong_answer_reason_not_empty", func(t *testing.T) {
+		wrong := reconstructedSample{Kind: "idle", Symbol: "Target", DurationMS: 100}
+		run.Samples = []reconstructedSample{wrong}
+		score, err := scoreReconstructed(run)
+		if err != nil || score.Status != "fail" || score.Reason != `idle search "Target" failed: did not pass` {
+			t.Fatalf("score=%+v scorer error=%v", score, err)
+		}
+	})
 	for _, workload := range []string{"R-C2", "R-DE"} {
 		t.Run(workload+"_rejects_search_limit_on_probe", func(t *testing.T) {
 			probe := timeout

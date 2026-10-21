@@ -239,7 +239,7 @@ jobs:
           done
           go test -tags acceptance -run '^TestReconstructed(Measurement|Scorer$|SearchSymbols$)' -count=1 -v \
             ./cmd/gortex | tee results/measurement-tests.log
-          for test in Deadlines WarmupOrder Enrichment TerminalResult LoadNoReplay DemandOwner DemandGaps ContractAnswer JobEvidence ForcedPreparation ScorerErrors ScorerJobs RestartStarts PathSizes OversizedTerminal; do
+          for test in Deadlines SearchTimeout LoadSearchError ScorerSearchTimeout WarmupOrder Enrichment TerminalResult LoadNoReplay DemandOwner DemandGaps ContractAnswer JobEvidence ForcedPreparation ScorerErrors ScorerJobs RestartStarts PathSizes OversizedTerminal; do
             grep -Eq "^--- PASS: TestReconstructedMeasurement${test} " results/measurement-tests.log
           done
           status=0
