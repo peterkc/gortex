@@ -208,6 +208,10 @@ jobs:
             -c commit.gpgsign=false add .
           git -C corpus -c user.name=Measurement -c user.email=measurement@example.invalid \
             -c commit.gpgsign=false commit -m corpus
+          # Fixtures reuse the runner module cache; fill it before any daemon
+          # starts so no binary pays module downloads inside its warm-up.
+          go -C corpus mod download
+          echo "corpus modules downloaded to $(go env GOMODCACHE)" > results/corpus-modules.txt
       - name: Preflight sampler, then rotate binaries and run selected workloads
         env:
           REPEAT: ${{ matrix.repeat }}
@@ -479,12 +483,12 @@ jobs:
                   exit 1
                 fi
                 # Identity excludes positions; full diagnostics remain available below.
-                sed -E 's/^((vet: )?[^:]+\.go):[0-9]+(:[0-9]+)?:/\1:/' "$dir/vet.diagnostics" | LC_ALL=C sort -u > "$dir/vet.failures"
+                sed -E 's/^((vet: )?[^:]+\.go):[0-9]+(:[0-9]+)?:/\1:/' "$dir/vet.diagnostics" | LC_ALL=C sort > "$dir/vet.failures"
                 cp "$dir/vet.diagnostics" "results/$os-$arm-vet-diagnostics.txt"
               fi
               jq -e 'has("Issues")' "$dir/lint.json"
               jq -r '.Issues // [] | .[] | [.Pos.Filename, .FromLinter, .Text] | @json' \
-                "$dir/lint.json" | LC_ALL=C sort -u > "$dir/lint.failures"
+                "$dir/lint.json" | LC_ALL=C sort > "$dir/lint.failures"
               jq -r '.Issues // [] | .[] | [.FromLinter, .Pos.Filename, .Pos.Line, .Pos.Column, .Text] | @json' \
                 "$dir/lint.json" > "results/$os-$arm-lint-diagnostics.txt"
               if [[ "$(cat "$dir/lint.outcome")" != success && ! -s "$dir/lint.failures" ]]; then exit 1; fi
