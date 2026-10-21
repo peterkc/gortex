@@ -12,7 +12,7 @@
     "R-Restart",
     "issue767-idle"
   ],
-  "repeats": 1,
+  "repeats": 3,
   "sustained_io": false,
-  "note": "Phase 1 smoke 2 (A3, D18 amendment): fixed harness, 1800 s warm-up/rebuild, three workload-group jobs per label, one repeat, main, #806 and the common base."
+  "note": "Phase 1 rebaseline (A3): three repeats, fixed harness, 1800 s warm-up/rebuild, three workload-group jobs per label, main, #806 and the common base."
 }
