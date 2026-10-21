@@ -731,15 +731,9 @@ func TestReconstructedRestart(t *testing.T) {
 	ctx, cancel := context.WithDeadline(t.Context(), d.started.Add(reconstructedSetupReadyTimeout))
 	attempts, err := reconstructedPrepareAttachment(ctx, d.f.primary, func(timeout time.Duration) reconstructedDemand {
 		return d.demandWithin(reconstructedRoute(0), timeout)
-	})
+	}, time.Now, reconstructedWait)
 	cancel()
-	d.run.Parameters["preparation_contract_demand"] = attempts
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			d.run.PreparationInsufficient = "preparation contract attachment: remaining warm-up deadline expired"
-		} else {
-			d.run.Error = "preparation contract attachment: " + err.Error()
-		}
+	if !reconstructedRecordPreparation(&d.run, attempts, err) {
 		return
 	}
 	// The required consumer may add work; re-establish quiet after attachment.
@@ -1086,7 +1080,7 @@ func reconstructedObserveDemand(record reconstructedDemand, state reconstructedC
 			}
 			if hasHint {
 				delay, err := time.ParseDuration(hint)
-				if err != nil || delay <= 0 {
+				if err != nil || delay < 0 {
 					return record
 				}
 				record.RetryAfter = hint
@@ -1111,40 +1105,91 @@ func reconstructedObserveDemand(record reconstructedDemand, state reconstructedC
 	return record
 }
 
-// Retry only completed typed-incomplete reads, sequentially, within the original
-// warm-up deadline. No retry or additional budget is added to measured demand.
-func reconstructedPrepareAttachment(ctx context.Context, repo string, request func(time.Duration) reconstructedDemand) ([]reconstructedDemand, error) {
+// Keep the original one-minute first request. Only retries use the remaining
+// warm-up deadline; measured demand never retries.
+func reconstructedPrepareAttachment(ctx context.Context, repo string, request func(time.Duration) reconstructedDemand, now func() time.Time, wait func(context.Context, time.Duration) error) ([]reconstructedDemand, error) {
 	var attempts []reconstructedDemand
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		return attempts, errors.New("attachment preparation requires warm-up deadline")
 	}
 	for {
-		if err := ctx.Err(); err != nil {
-			return attempts, err
+		timeout := time.Minute
+		if len(attempts) > 0 {
+			if err := ctx.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+				return attempts, err
+			}
+			remaining := deadline.Sub(now())
+			if remaining <= 0 {
+				return attempts, fmt.Errorf("deadline passed before retry: %w", context.DeadlineExceeded)
+			}
+			timeout = min(timeout, remaining)
 		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return attempts, context.DeadlineExceeded
-		}
-		record := reconstructedObserveDemand(request(min(time.Minute, remaining)), reconstructedContractState{PreviousSave: -1}, repo)
+		record := reconstructedObserveDemand(request(timeout), reconstructedContractState{PreviousSave: -1}, repo)
 		attempts = append(attempts, record)
-		if err := ctx.Err(); err != nil {
-			return attempts, err
-		}
-		if !time.Now().Before(deadline) {
-			return attempts, context.DeadlineExceeded
-		}
 		if record.Error != "" {
 			return attempts, errors.New(record.Error)
 		}
 		if record.Available && record.Route0 {
 			return attempts, nil
 		}
-		if !strings.HasPrefix(record.UnavailableReason, "required_capability_incomplete: ") {
+		if record.UnavailableReason != "required_capability_incomplete: context deadline exceeded" {
+			if record.UnavailableReason != "" {
+				return attempts, errors.New("product preparation failure")
+			}
 			return attempts, errors.New("preparation did not establish route 0 attachment")
 		}
+		delay := time.Second
+		if record.RetryAfter != "" {
+			delay, _ = time.ParseDuration(record.RetryAfter) // Already parsed by reconstructedObserveDemand.
+			if delay == 0 {
+				delay = time.Second
+			}
+		}
+		remaining := deadline.Sub(now())
+		if remaining <= 0 {
+			return attempts, fmt.Errorf("deadline passed before retry: %w", context.DeadlineExceeded)
+		}
+		if err := wait(ctx, min(delay, remaining)); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return attempts, fmt.Errorf("deadline passed before retry: %w", err)
+			}
+			return attempts, err
+		}
 	}
+}
+
+func reconstructedWait(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// False means the caller must return before quiet, clean stop or a second start.
+func reconstructedRecordPreparation(run *reconstructedRun, attempts []reconstructedDemand, err error) bool {
+	run.Parameters["preparation_contract_demand"] = attempts
+	if err == nil {
+		return true
+	}
+	reason := "preparation contract attachment: " + err.Error()
+	lastReason := ""
+	if len(attempts) > 0 {
+		lastReason = attempts[len(attempts)-1].UnavailableReason
+	}
+	if errors.Is(err, context.DeadlineExceeded) || (lastReason != "" && !errors.Is(err, context.Canceled)) {
+		run.PreparationInsufficient = reason
+		if lastReason != "" {
+			run.PreparationInsufficient += "; last unavailable: " + lastReason
+		}
+	} else {
+		run.Error = reason
+	}
+	return false
 }
 
 func reconstructedDemandGaps(records []reconstructedDemand, start, end time.Time) ([]float64, bool) {

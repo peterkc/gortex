@@ -324,7 +324,7 @@ func TestReconstructedMeasurementContractAnswer(t *testing.T) {
 			}
 		})
 	}
-	for _, hint := range []string{"", "; retry after 20s"} {
+	for _, hint := range []string{"", "; retry after 0s", "; retry after 20s"} {
 		t.Run("typed_incomplete_hint_"+hint, func(t *testing.T) {
 			raw := strings.ReplaceAll(incomplete, "; retry after 5s", hint)
 			record := reconstructedObserveDemand(reconstructedDemand{Response: raw, Error: "exit status 1"}, reconstructedContractState{PreviousSave: -1}, "/private/repo")
@@ -343,6 +343,7 @@ func TestReconstructedMeasurementContractAnswer(t *testing.T) {
 		}
 	})
 	t.Run("typed_incomplete_DE_product_miss_retains_samples", func(t *testing.T) {
+		incomplete := strings.ReplaceAll(incomplete, "5s", "0s")
 		at := time.Unix(100, 0)
 		jobs := reconstructedPairJobs([]reconstructedJobEvent{
 			{Message: "contract analysis job started", Job: "one", Repo: "issue767", Mode: "cold"},
@@ -366,7 +367,7 @@ func TestReconstructedMeasurementContractAnswer(t *testing.T) {
 		if err != nil || score.Status != "fail" || score.ContractRoute != "fail" || !strings.Contains(score.Reason, "product contract route unavailable") || score.Samples != 2 || score.ClientP50MS != 10 || score.ClientP95MS != 20 || run.Error != "" {
 			t.Fatalf("score=%+v error=%v run=%+v", score, err, run)
 		}
-		if record.Available || record.Error != "" || record.UnavailableReason != "required_capability_incomplete: context deadline exceeded" || record.RetryAfter != "5s" || record.Response != incomplete || record.DurationMS != 5000 || run.ContractUnavailable != 1 {
+		if record.Available || record.Error != "" || record.UnavailableReason != "required_capability_incomplete: context deadline exceeded" || record.RetryAfter != "0s" || record.Response != incomplete || record.DurationMS != 5000 || run.ContractUnavailable != 1 {
 			t.Fatalf("record=%+v", record)
 		}
 		if run.Jobs.Positive || len(run.Jobs.Events) != 2 || run.Jobs.Starts != 1 || score.JobP95ByMode["cold"] != 500 || !reflect.DeepEqual(d.run.Parameters["contract_route_lag_saves_distribution"], map[int]int{}) || d.run.Parameters["contract_route_lag_reason"] != "no available route answers" || d.run.Parameters["contract_route_lag_unavailable_answers"] != 1 {
@@ -377,6 +378,7 @@ func TestReconstructedMeasurementContractAnswer(t *testing.T) {
 		{"generic_command", "Error: command failed\n"},
 		{"embedded_refusal", "prefix " + incomplete},
 		{"invalid_retry_hint", strings.ReplaceAll(incomplete, "5s", "nonsense")},
+		{"negative_retry_hint", strings.ReplaceAll(incomplete, "5s", "-1s")},
 	} {
 		t.Run("non_contract_exit_1_"+tc.name, func(t *testing.T) {
 			record := reconstructedObserveDemand(reconstructedDemand{Response: tc.raw, Error: "exit status 1"}, reconstructedContractState{PreviousSave: -1}, "/private/repo")
@@ -459,6 +461,21 @@ func TestReconstructedMeasurementForcedPreparation(t *testing.T) {
 }
 
 func TestReconstructedMeasurementScorerErrors(t *testing.T) {
+	t.Run("poll_counts_omit_only_zero", func(t *testing.T) {
+		for _, sample := range []reconstructedSample{{}, {ErrorsCount: 1, OKPolls: 2}} {
+			raw, err := json.Marshal(sample)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				t.Fatal(err)
+			}
+			if (len(fields["errors_count"]) > 0) != (sample.ErrorsCount > 0) || (len(fields["ok_polls"]) > 0) != (sample.OKPolls > 0) {
+				t.Fatalf("sample=%+v raw=%s", sample, raw)
+			}
+		}
+	})
 	t.Run("C2_last_error_separate_from_later_success", func(t *testing.T) {
 		sample := reconstructedSample{Kind: "probe", TimedOut: true, TimeoutMS: 60000, DurationMS: 60000}
 		sample.recordPoll(issue767Answer{Error: "busy"}, errors.New("busy"))
@@ -514,45 +531,155 @@ func TestReconstructedMeasurementScorerJobs(t *testing.T) {
 }
 
 func TestReconstructedMeasurementRestartStarts(t *testing.T) {
-	incomplete := reconstructedDemand{Response: "Error: required_capability_incomplete: graph.contracts did not become complete within this request: context deadline exceeded; retry after 5s\n", Error: "exit status 1", DurationMS: 5000}
-	complete := reconstructedDemand{Response: `{"by_repo":{"repo":{"contracts":{"http":[{"id":"http::GET::/reconstructed-save-000","type":"http","role":"provider","file_path":"repo/reconstructed_http/route.go"}]}}},"contract_analysis":{"state":"complete"}}`}
-	t.Run("preparation_incomplete_then_complete", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-		defer cancel()
-		calls := 0
-		attempts, err := reconstructedPrepareAttachment(ctx, "/private/repo", func(timeout time.Duration) reconstructedDemand {
-			calls++
-			if timeout <= 0 || timeout > time.Second {
-				t.Fatalf("request timeout=%v", timeout)
-			}
-			if calls == 1 {
-				return incomplete
-			}
-			return complete
-		})
-		if err != nil || calls != 2 || len(attempts) != 2 || attempts[0].Available || attempts[0].RetryAfter != "5s" || attempts[0].Response != incomplete.Response || !attempts[1].Available || !attempts[1].Route0 {
-			t.Fatalf("calls=%d attempts=%+v error=%v", calls, attempts, err)
+	t.Run("preparation_wait_cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		if err := reconstructedWait(ctx, time.Hour); !errors.Is(err, context.Canceled) {
+			t.Fatalf("wait error=%v", err)
+		}
+		if err := reconstructedWait(t.Context(), 0); err != nil {
+			t.Fatalf("zero wait error=%v", err)
 		}
 	})
-	t.Run("preparation_deadline_insufficient_no_restart", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
-		defer cancel()
-		calls, secondStarts := 0, 0
-		attempts, err := reconstructedPrepareAttachment(ctx, "/private/repo", func(timeout time.Duration) reconstructedDemand {
-			calls++
-			if timeout <= 0 || timeout > 10*time.Millisecond {
-				t.Fatalf("request timeout=%v", timeout)
-			}
-			<-ctx.Done()
-			return incomplete
-		})
-		if err == nil {
-			secondStarts++
+	incomplete := reconstructedDemand{Response: "Error: required_capability_incomplete: graph.contracts did not become complete within this request: context deadline exceeded; retry after 5s\n", Error: "exit status 1", DurationMS: 5000}
+	complete := reconstructedDemand{Response: `{"by_repo":{"repo":{"contracts":{"http":[{"id":"http::GET::/reconstructed-save-000","type":"http","role":"provider","file_path":"repo/reconstructed_http/route.go"}]}}},"contract_analysis":{"state":"complete"}}`}
+	t.Run("preparation_result_keeps_last_reason_and_all_attempts", func(t *testing.T) {
+		attempts := []reconstructedDemand{
+			{UnavailableReason: "required_capability_incomplete: context deadline exceeded"},
+			{UnavailableReason: "required_capability_incomplete: contract analysis of these inputs failed"},
 		}
-		run := reconstructedRun{Label: "reconstructed", Workload: "R-Restart", Quiet: true, PreparationInsufficient: "remaining warm-up deadline expired", Parameters: map[string]any{"preparation_contract_demand": attempts}}
-		score, scoreErr := scoreReconstructed(run)
-		if !errors.Is(err, context.DeadlineExceeded) || calls != 1 || len(attempts) != 1 || attempts[0].Response != incomplete.Response || secondStarts != 0 || scoreErr != nil || score.Status != "insufficient" || score.Reason != run.PreparationInsufficient {
-			t.Fatalf("calls=%d second starts=%d attempts=%+v error=%v score=%+v scorer=%v", calls, secondStarts, attempts, err, score, scoreErr)
+		run := reconstructedRun{Parameters: map[string]any{}}
+		proceed := reconstructedRecordPreparation(&run, attempts, errors.New("product preparation failure"))
+		want := "preparation contract attachment: product preparation failure; last unavailable: " + attempts[1].UnavailableReason
+		if proceed || run.Error != "" || run.PreparationInsufficient != want || !reflect.DeepEqual(run.Parameters["preparation_contract_demand"], attempts) {
+			t.Fatalf("proceed=%v run=%+v", proceed, run)
+		}
+	})
+	for _, tc := range []struct {
+		name, hint       string
+		remaining, delay time.Duration
+		calls            int
+	}{
+		{"hint", "; retry after 5s", 10 * time.Second, 5 * time.Second, 2},
+		{"no_hint_floor", "", 10 * time.Second, time.Second, 2},
+		{"zero_hint_floor", "; retry after 0s", 10 * time.Second, time.Second, 2},
+		{"positive_subsecond_hint", "; retry after 100ms", 10 * time.Second, 100 * time.Millisecond, 2},
+		{"capped_by_remaining", "; retry after 5s", 2 * time.Second, 2 * time.Second, 1},
+	} {
+		t.Run("preparation_pacing_"+tc.name, func(t *testing.T) {
+			now := time.Now()
+			ctx, cancel := context.WithDeadline(t.Context(), now.Add(tc.remaining))
+			defer cancel()
+			calls := 0
+			var waits []time.Duration
+			refusal := incomplete
+			refusal.Response = strings.ReplaceAll(refusal.Response, "; retry after 5s", tc.hint)
+			attempts, err := reconstructedPrepareAttachment(ctx, "/private/repo", func(timeout time.Duration) reconstructedDemand {
+				calls++
+				wantTimeout := time.Minute
+				if calls > 1 {
+					wantTimeout = tc.remaining - tc.delay
+				}
+				if timeout != wantTimeout {
+					t.Fatalf("request %d timeout=%v want %v", calls, timeout, wantTimeout)
+				}
+				if calls == 1 {
+					return refusal
+				}
+				return complete
+			}, func() time.Time { return now }, func(_ context.Context, delay time.Duration) error {
+				waits = append(waits, delay)
+				now = now.Add(delay)
+				return nil
+			})
+			if calls != tc.calls || len(attempts) != tc.calls || !reflect.DeepEqual(waits, []time.Duration{tc.delay}) || attempts[0].Available || attempts[0].RetryAfter != strings.TrimPrefix(tc.hint, "; retry after ") || attempts[0].Response != refusal.Response {
+				t.Fatalf("calls=%d attempts=%+v waits=%v error=%v", calls, attempts, waits, err)
+			}
+			run := reconstructedRun{Label: "reconstructed", Workload: "R-Restart", Quiet: true, Parameters: map[string]any{}}
+			proceed := reconstructedRecordPreparation(&run, attempts, err)
+			if tc.calls == 2 {
+				if err != nil || !proceed || !attempts[1].Available || !attempts[1].Route0 || run.Error != "" || run.PreparationInsufficient != "" {
+					t.Fatalf("proceed=%v attempts=%+v error=%v run=%+v", proceed, attempts, err, run)
+				}
+				return
+			}
+			score, scoreErr := scoreReconstructed(run)
+			if !errors.Is(err, context.DeadlineExceeded) || proceed || run.Error != "" || !strings.Contains(run.PreparationInsufficient, "deadline passed before retry") || !strings.Contains(run.PreparationInsufficient, attempts[0].UnavailableReason) || scoreErr != nil || score.Status != "insufficient" || score.Reason != run.PreparationInsufficient || !reflect.DeepEqual(run.Parameters["preparation_contract_demand"], attempts) {
+				t.Fatalf("proceed=%v error=%v run=%+v score=%+v scorer=%v", proceed, err, run, score, scoreErr)
+			}
+		})
+	}
+	for _, first := range []struct {
+		name   string
+		answer reconstructedDemand
+		pass   bool
+	}{
+		{"complete", complete, true},
+		{"incomplete_deadline_before_retry", incomplete, false},
+	} {
+		t.Run("preparation_first_request_after_deadline_"+first.name, func(t *testing.T) {
+			now := time.Now()
+			ctx, cancel := context.WithDeadline(t.Context(), now.Add(-time.Second))
+			defer cancel()
+			calls := 0
+			attempts, err := reconstructedPrepareAttachment(ctx, "/private/repo", func(timeout time.Duration) reconstructedDemand {
+				calls++
+				if timeout != time.Minute {
+					t.Fatalf("first timeout=%v", timeout)
+				}
+				return first.answer
+			}, func() time.Time { return now }, func(context.Context, time.Duration) error {
+				t.Fatal("wait after deadline")
+				return nil
+			})
+			if calls != 1 || len(attempts) != 1 || (err == nil) != first.pass || attempts[0].Response != first.answer.Response {
+				t.Fatalf("calls=%d attempts=%+v error=%v", calls, attempts, err)
+			}
+			run := reconstructedRun{Parameters: map[string]any{}}
+			if reconstructedRecordPreparation(&run, attempts, err) != first.pass || (!first.pass && (!errors.Is(err, context.DeadlineExceeded) || !strings.Contains(run.PreparationInsufficient, "deadline passed before retry") || !strings.Contains(run.PreparationInsufficient, attempts[0].UnavailableReason))) {
+				t.Fatalf("error=%v run=%+v", err, run)
+			}
+		})
+	}
+	for _, reason := range []string{"contract analysis of these inputs failed", "contract analysis of these inputs stalled", "contract analysis of these inputs panic", "other product error"} {
+		t.Run("preparation_product_reason_stops_"+reason, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+			defer cancel()
+			calls := 0
+			refusal := incomplete
+			refusal.Response = strings.ReplaceAll(refusal.Response, "context deadline exceeded", reason)
+			attempts, err := reconstructedPrepareAttachment(ctx, "/private/repo", func(time.Duration) reconstructedDemand {
+				calls++
+				if calls > 1 {
+					t.Fatal("retried product failure")
+				}
+				return refusal
+			}, time.Now, func(context.Context, time.Duration) error {
+				t.Fatal("waited after product failure")
+				return nil
+			})
+			run := reconstructedRun{Label: "reconstructed", Workload: "R-Restart", Quiet: true, Parameters: map[string]any{}}
+			proceed := reconstructedRecordPreparation(&run, attempts, err)
+			score, scoreErr := scoreReconstructed(run)
+			if err == nil || calls != 1 || len(attempts) != 1 || attempts[0].Response != refusal.Response || attempts[0].Error != "" || proceed || run.Error != "" || !strings.Contains(run.PreparationInsufficient, "product preparation failure") || !strings.Contains(run.PreparationInsufficient, "required_capability_incomplete: "+reason) || scoreErr != nil || score.Status != "insufficient" || score.Reason != run.PreparationInsufficient || !reflect.DeepEqual(run.Parameters["preparation_contract_demand"], attempts) {
+				t.Fatalf("calls=%d attempts=%+v error=%v run=%+v score=%+v scorer=%v", calls, attempts, err, run, score, scoreErr)
+			}
+		})
+	}
+	t.Run("preparation_parent_cancellation_remains_error", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		calls := 0
+		attempts, err := reconstructedPrepareAttachment(ctx, "/private/repo", func(time.Duration) reconstructedDemand {
+			calls++
+			return incomplete
+		}, time.Now, func(context.Context, time.Duration) error {
+			cancel()
+			return ctx.Err()
+		})
+		run := reconstructedRun{Parameters: map[string]any{}}
+		if !errors.Is(err, context.Canceled) || calls != 1 || len(attempts) != 1 || reconstructedRecordPreparation(&run, attempts, err) || run.Error != "preparation contract attachment: context canceled" || run.PreparationInsufficient != "" {
+			t.Fatalf("calls=%d attempts=%+v error=%v run=%+v", calls, attempts, err, run)
 		}
 	})
 	t.Run("preparation_generic_exit_not_retried", func(t *testing.T) {
@@ -562,9 +689,13 @@ func TestReconstructedMeasurementRestartStarts(t *testing.T) {
 		attempts, err := reconstructedPrepareAttachment(ctx, "/private/repo", func(time.Duration) reconstructedDemand {
 			calls++
 			return reconstructedDemand{Response: "Error: generic failure\n", Error: "exit status 1"}
+		}, time.Now, func(context.Context, time.Duration) error {
+			t.Fatal("waited after command failure")
+			return nil
 		})
-		if err == nil || calls != 1 || len(attempts) != 1 || attempts[0].Error != "exit status 1" {
-			t.Fatalf("calls=%d attempts=%+v error=%v", calls, attempts, err)
+		run := reconstructedRun{Parameters: map[string]any{}}
+		if err == nil || calls != 1 || len(attempts) != 1 || attempts[0].Error != "exit status 1" || reconstructedRecordPreparation(&run, attempts, err) || run.Error != "preparation contract attachment: exit status 1" || run.PreparationInsufficient != "" {
+			t.Fatalf("calls=%d attempts=%+v error=%v run=%+v", calls, attempts, err, run)
 		}
 	})
 	for _, tc := range []struct {

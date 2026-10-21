@@ -31,8 +31,8 @@ type reconstructedSample struct {
 	LastError     string          `json:"last_error,omitempty"`
 	LastErrorPoll int             `json:"last_error_poll,omitempty"`
 	LastAnswer    *issue767Answer `json:"last_answer,omitempty"`
-	ErrorsCount   int             `json:"errors_count"`
-	OKPolls       int             `json:"ok_polls"`
+	ErrorsCount   int             `json:"errors_count,omitempty"`
+	OKPolls       int             `json:"ok_polls,omitempty"`
 }
 
 func (sample *reconstructedSample) recordPoll(answer issue767Answer, err error) {
