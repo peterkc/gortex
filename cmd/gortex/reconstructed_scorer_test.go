@@ -271,6 +271,11 @@ func scoreReconstructed(run reconstructedRun) (reconstructedScore, error) {
 			score.Status = "fail"
 		}
 	case "R-Restart":
+		if run.JobCount != nil && *run.JobCount > 0 {
+			score.Job, score.JobCount = "supported", run.JobCount
+			score.Status, score.Reason = "fail", "contract job started during restart"
+			break
+		}
 		if (run.ProcessBytes == nil || run.StoreGrowth == nil) && score.Status != "fail" {
 			score.Status, score.Reason = "insufficient", "restart I/O measurement unavailable"
 		}

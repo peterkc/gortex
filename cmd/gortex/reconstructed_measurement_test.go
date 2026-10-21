@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -47,17 +48,45 @@ func TestReconstructedMeasurementEnrichment(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tc.log+"\n"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithCancel(t.Context())
+			ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
 			defer cancel()
-			if !tc.pass {
-				cancel()
-			}
 			err := reconstructedWaitEnrichment(ctx, path)
+			if !tc.pass && !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("error=%v, want live deadline exceeded", err)
+			}
 			if (err == nil) != tc.pass {
 				t.Fatalf("error=%v pass=%v", err, tc.pass)
 			}
 		})
 	}
+	t.Run("incremental_partial_line", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "daemon.log")
+		if err := os.WriteFile(path, []byte("{\"msg\":\"daemon: graph queryable\"}\n{\"msg\":\"daemon: enrichment "), 0600); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- reconstructedWaitEnrichment(ctx, path) }()
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer file.Close()
+		for _, tail := range []string{"complete\"}", "\n"} {
+			select {
+			case err := <-done:
+				t.Fatalf("accepted partial line: %v", err)
+			case <-time.After(150 * time.Millisecond):
+			}
+			if _, err := file.WriteString(tail); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	})
 	t.Run("expired_full_warmup_deadline", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "daemon.log")
 		if err := os.WriteFile(path, []byte(`{"msg":"daemon: enrichment complete"}`), 0600); err != nil {
@@ -231,24 +260,51 @@ func TestReconstructedMeasurementDemandGaps(t *testing.T) {
 
 func TestReconstructedMeasurementContractAnswer(t *testing.T) {
 	good := `{"by_repo":{"issue767":{"contracts":{"http":[{"id":"http::GET::/reconstructed-save-007","type":"http","role":"provider","file_path":"issue767/reconstructed_http/route.go"}]}}},"contract_analysis":{"state":"complete"}}`
+	pending := `{"by_repo":{},"contract_analysis":{"state":"incomplete"}}`
 	for _, tc := range []struct {
-		name, raw string
-		pass      bool
+		name, raw   string
+		state       reconstructedContractState
+		pass        bool
+		newest, lag int
 	}{
-		{"current", good, true},
-		{"stale", strings.ReplaceAll(good, "save-007", "save-006"), false},
-		{"newer_while_saves_continue", strings.ReplaceAll(good, "save-007", "save-008"), true},
-		{"incomplete", strings.ReplaceAll(good, "complete", "incomplete"), false},
-		{"wrong_file", strings.ReplaceAll(good, "reconstructed_http/route.go", "unrelated.go"), false},
-		{"not_a_contract", `{"message":"/reconstructed-save-007"}`, false},
-		{"empty", `{}`, false},
+		{"current", good, reconstructedContractState{7, -1, false}, true, 7, 0},
+		{"previous_save_just_after_write", strings.ReplaceAll(good, "save-007", "save-006"), reconstructedContractState{7, 5, false}, true, 6, 1},
+		{"newer_while_saves_continue", strings.ReplaceAll(good, "save-007", "save-008"), reconstructedContractState{8, 7, false}, true, 8, 0},
+		{"regression", strings.ReplaceAll(good, "save-007", "save-006"), reconstructedContractState{7, 7, false}, false, 6, 1},
+		{"unknown_route", strings.ReplaceAll(good, "save-007", "unknown"), reconstructedContractState{7, -1, false}, false, -1, 0},
+		{"incomplete", strings.ReplaceAll(good, "complete", "incomplete"), reconstructedContractState{7, -1, false}, false, -1, 0},
+		{"wrong_file", strings.ReplaceAll(good, "reconstructed_http/route.go", "unrelated.go"), reconstructedContractState{7, -1, false}, false, -1, 0},
+		{"not_a_contract", `{"message":"/reconstructed-save-007"}`, reconstructedContractState{7, -1, false}, false, -1, 0},
+		{"empty", `{}`, reconstructedContractState{7, -1, false}, false, -1, 0},
+		{"malformed", `{`, reconstructedContractState{7, -1, false}, false, -1, 0},
+		{"restart_before_enrichment", pending, reconstructedContractState{0, -1, true}, true, -1, 1},
+		{"restart_after_enrichment_missing_route", `{"by_repo":{},"contract_analysis":{"state":"complete"}}`, reconstructedContractState{0, -1, false}, false, -1, 1},
+		{"restart_route_0", strings.ReplaceAll(good, "save-007", "save-000"), reconstructedContractState{0, -1, false}, true, 0, 0},
+		{"restart_warmup_regression", pending, reconstructedContractState{0, 0, true}, false, -1, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := reconstructedContractAnswer([]byte(tc.raw), reconstructedRoute(7)); (err == nil) != tc.pass {
-				t.Fatalf("error=%v pass=%v", err, tc.pass)
+			got, err := reconstructedContractAnswer([]byte(tc.raw), tc.state)
+			if (err == nil) != tc.pass || (tc.pass && (got.NewestSave != tc.newest || got.LagSaves != tc.lag || got.Route0 != (tc.newest == 0))) {
+				t.Fatalf("observation=%+v error=%v pass=%v", got, err, tc.pass)
 			}
 		})
 	}
+	t.Run("record_lag_and_keep_invalid_demand", func(t *testing.T) {
+		at := time.Unix(100, 0)
+		owner := &reconstructedDemandOwner{records: []reconstructedDemand{
+			{Start: at, End: at.Add(time.Second), Response: strings.ReplaceAll(good, "save-007", "save-000")},
+			{Start: at.Add(2 * time.Second), End: at.Add(3 * time.Second), Response: strings.ReplaceAll(good, "save-007", "save-000")},
+			{Start: at.Add(4 * time.Second), End: at.Add(5 * time.Second), Error: "command failed"},
+		}}
+		d := &reconstructedDriver{run: reconstructedRun{Workload: "R-DE", Parameters: map[string]any{}}}
+		d.recordDemand(owner, at, at.Add(6*time.Second), []time.Time{at.Add(2 * time.Second)}, time.Time{})
+		if owner.records[1].Error != "" || owner.records[1].LagSaves != 1 || d.run.Error != "contract demand: command failed" || len(d.run.Parameters["contract_demand"].([]reconstructedDemand)) != 3 {
+			t.Fatalf("records=%+v run=%+v", owner.records, d.run)
+		}
+		if !reflect.DeepEqual(d.run.Parameters["contract_route_lag_saves_distribution"], map[int]int{0: 1, 1: 1}) {
+			t.Fatal(d.run.Parameters)
+		}
+	})
 }
 
 func TestReconstructedMeasurementJobEvidence(t *testing.T) {
@@ -334,6 +390,28 @@ func TestReconstructedMeasurementScorerJobs(t *testing.T) {
 	score, err := scoreReconstructed(run)
 	if err != nil || score.Status != "fail" || score.JobP95MS != nil || score.JobP95ByMode["cold"] != 700 || score.JobP95ByMode["delta"] != 900 {
 		t.Fatalf("score=%+v error=%v", score, err)
+	}
+}
+
+func TestReconstructedMeasurementRestartStarts(t *testing.T) {
+	for _, tc := range []struct {
+		name, jobStatus, want string
+		count                 *int
+	}{
+		{"unfinished_start", "insufficient", "fail", new(1)},
+		{"gap_with_start", "insufficient", "fail", new(2)},
+		{"weak_zero", "insufficient", "insufficient", new(0)},
+		{"no_positive_preparation", "unsupported", "unsupported", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := reconstructedRun{Label: "reconstructed", Workload: "R-Restart", Quiet: true,
+				JobCount: tc.count, JobStatus: tc.jobStatus, JobReason: "weak telemetry or demand gap",
+				Samples: []reconstructedSample{{Passed: true, DurationMS: 1}}}
+			got, err := scoreReconstructed(run)
+			if err != nil || got.Status != tc.want {
+				t.Fatalf("score=%+v error=%v want=%s", got, err, tc.want)
+			}
+		})
 	}
 }
 

@@ -132,6 +132,8 @@ func newReconstructedDriver(t *testing.T, workload string) *reconstructedDriver 
 	d.run.Parameters["contract_route_fixture_bytes"] = len(reconstructedRouteSource(reconstructedRoute(0)))
 	d.run.Parameters["contract_route_file"] = reconstructedRouteFile
 	d.run.Parameters["fixture_HOME"] = filepath.Join(d.f.root, "home")
+	d.run.Parameters["fixture_GOMODCACHE"] = d.f.goModCache
+	d.run.Parameters["fixture_GOMODCACHE_choice"] = "runner module cache, captured before fixture HOME isolation"
 	d.run.Parameters["http_addr"] = d.f.httpAddr
 	d.run.Parameters["http_tool_timeout"] = "off (R-Fill only)"
 	// A slow shutdown is a product result recorded in the row (forced_stops),
@@ -337,21 +339,42 @@ func reconstructedPrepare(enrichment, views, quiet func() bool) bool {
 func reconstructedWaitEnrichment(ctx context.Context, path string) error {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
+	var offset int64
+	var partial []byte
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		data, err := os.ReadFile(path)
+		file, err := os.Open(path)
 		if err != nil {
 			return err
 		}
-		for _, raw := range bytes.Split(data, []byte("\n")) {
+		_, err = file.Seek(offset, io.SeekStart)
+		var data []byte
+		if err == nil {
+			data, err = io.ReadAll(file)
+		}
+		closeErr := file.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		offset += int64(len(data))
+		partial = append(partial, data...)
+		for {
+			end := bytes.IndexByte(partial, '\n')
+			if end < 0 {
+				break
+			}
 			var line struct {
 				Message string `json:"msg"`
 			}
-			if json.Unmarshal(raw, &line) == nil && line.Message == "daemon: enrichment complete" {
+			if json.Unmarshal(partial[:end], &line) == nil && line.Message == "daemon: enrichment complete" {
 				return nil
 			}
+			partial = partial[end+1:]
 		}
 		select {
 		case <-ctx.Done():
@@ -470,7 +493,7 @@ func TestReconstructedDE(t *testing.T) {
 	owner.records = append(owner.records, initial)
 	measurementStart := initial.Start
 	cadence := time.Now()
-	var saveTimes []time.Time
+	var saveTimes, routeSaveTimes []time.Time
 	for save := 1; save <= 150; save++ {
 		if save > 1 {
 			timer := time.NewTimer(time.Until(cadence.Add(time.Duration(save-1) * 2 * time.Second)))
@@ -491,10 +514,12 @@ func TestReconstructedDE(t *testing.T) {
 			break
 		}
 		saveTimes = append(saveTimes, start)
+		saved := time.Now()
 		if err := os.WriteFile(filepath.Join(d.f.primary, reconstructedRouteFile), []byte(reconstructedRouteSource(reconstructedRoute(save))), 0600); err != nil {
 			d.run.Error = err.Error()
 			break
 		}
+		routeSaveTimes = append(routeSaveTimes, saved)
 		if save%7 == 0 || save == 150 {
 			owner.tick(time.Now(), reconstructedRoute(save))
 		}
@@ -514,6 +539,7 @@ func TestReconstructedDE(t *testing.T) {
 	}
 	sort.Slice(d.run.Samples, func(i, j int) bool { return d.run.Samples[i].Start.Before(d.run.Samples[j].Start) })
 	d.run.Parameters["DE_observed_save_times"] = saveTimes
+	d.run.Parameters["DE_observed_route_write_times"] = routeSaveTimes
 	owner.collect()
 	end := time.Now()
 	evidence, err := reconstructedReadJobs(d.f.logPath(), measurementStart, end)
@@ -523,7 +549,7 @@ func TestReconstructedDE(t *testing.T) {
 	}
 	d.run.Jobs = &evidence
 	d.run.JobStatus, d.run.JobReason = evidence.Status, evidence.Reason
-	d.recordDemand(owner, measurementStart, end)
+	d.recordDemand(owner, measurementStart, end, routeSaveTimes, time.Time{})
 	if len(owner.records) == 0 || owner.records[len(owner.records)-1].Route != reconstructedRoute(150) {
 		d.run.JobStatus, d.run.JobReason = "insufficient", "final save contract demand tick was skipped"
 	}
@@ -707,6 +733,13 @@ func TestReconstructedRestart(t *testing.T) {
 		return
 	}
 	attachment := d.demand(reconstructedRoute(0))
+	if attachment.Error == "" {
+		observation, err := reconstructedContractAnswer([]byte(attachment.Response), reconstructedContractState{PreviousSave: -1})
+		attachment.reconstructedContractObservation = &observation
+		if err != nil {
+			attachment.Error = err.Error()
+		}
+	}
 	d.run.Parameters["preparation_contract_demand"] = attachment
 	if attachment.Error != "" {
 		d.run.Error = "preparation contract attachment: " + attachment.Error
@@ -804,14 +837,14 @@ func TestReconstructedRestart(t *testing.T) {
 	}
 	d.run.Jobs = &evidence
 	d.run.JobStatus, d.run.JobReason = "unsupported", "preparation did not establish positive job telemetry"
-	if preparation.Positive && preparation.Status == "supported" {
+	if preparation.Positive {
 		d.run.JobStatus, d.run.JobReason = evidence.Status, evidence.Reason
 		if len(evidence.Events) == 0 {
 			d.run.JobStatus = "supported"
 		}
 		d.run.JobCount = &evidence.Starts
 	}
-	d.recordDemand(owner, start, end)
+	d.recordDemand(owner, start, end, nil, enriched)
 	// Restart must still answer the unchanged graph query at the final boundary.
 	answer := d.search("restart_final", 0)
 	d.run.Parameters["restart_final_graph_query"] = answer
@@ -907,6 +940,8 @@ type reconstructedDemand struct {
 	Response   string    `json:"response"`
 	DurationMS float64   `json:"client_duration_ms"`
 	Error      string    `json:"error,omitempty"`
+	LatestSave int       `json:"latest_save"`
+	*reconstructedContractObservation
 }
 
 type reconstructedDemandOwner struct {
@@ -947,16 +982,28 @@ func (d *reconstructedDriver) demand(route string) reconstructedDemand {
 	raw, err := d.f.tryCommand(time.Minute, d.f.primary, "call", "contracts", "--arg", "action=list", "--arg", "type=http", "--arg", "limit=1000", "--format=json")
 	sample.End, sample.Response = time.Now(), string(raw)
 	sample.DurationMS = sample.End.Sub(sample.Start).Seconds() * 1000
-	if err == nil {
-		err = reconstructedContractAnswer(raw, route)
-	}
 	if err != nil {
 		sample.Error = err.Error()
 	}
 	return sample
 }
 
-func reconstructedContractAnswer(raw []byte, route string) error {
+type reconstructedContractState struct {
+	LatestSave   int
+	PreviousSave int
+	AllowPending bool // Restart demand before enrichment may lack its first attachment.
+}
+
+type reconstructedContractObservation struct {
+	NewestRoute string `json:"newest_route"`
+	NewestSave  int    `json:"newest_save"` // -1 means no fixture route yet.
+	LagSaves    int    `json:"lag_saves"`
+	Route0      bool   `json:"route_0_present"`
+	Completion  string `json:"completion_state"` // Empty means not reported by this binary.
+}
+
+func reconstructedContractAnswer(raw []byte, state reconstructedContractState) (reconstructedContractObservation, error) {
+	observation := reconstructedContractObservation{NewestSave: -1}
 	// `call --format=json` unwraps tool text into the contracts payload.
 	var result struct {
 		ByRepo map[string]struct {
@@ -972,35 +1019,48 @@ func reconstructedContractAnswer(raw []byte, route string) error {
 		} `json:"contract_analysis"`
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
-		return err
+		return observation, err
 	}
-	if result.Analysis != nil && result.Analysis.State != "complete" {
-		return errors.New("contract attachment incomplete")
+	if result.ByRepo == nil {
+		return observation, errors.New("missing contract repositories")
 	}
-	first := -1
-	for save := 0; save <= 150; save++ {
-		if reconstructedRoute(save) == route {
-			first = save
-			break
+	if result.Analysis != nil {
+		observation.Completion = result.Analysis.State
+		if result.Analysis.State == "" || (result.Analysis.State != "complete" && !state.AllowPending) {
+			return observation, errors.New("contract attachment incomplete")
 		}
-	}
-	if first < 0 {
-		return fmt.Errorf("unknown requested route %q", route)
 	}
 	for _, repo := range result.ByRepo {
 		for _, contract := range repo.Contracts["http"] {
 			if contract.Type != "http" || contract.Role != "provider" || !strings.HasSuffix(contract.File, "/"+reconstructedRouteFile) {
 				continue
 			}
-			// Saves continue during demand. A newer route is fresh too.
-			for save := first; save <= 150; save++ {
-				if contract.ID == "http::GET::"+reconstructedRoute(save) {
-					return nil
+			save := -1
+			for candidate := 0; candidate <= state.LatestSave; candidate++ {
+				if contract.ID == "http::GET::"+reconstructedRoute(candidate) {
+					save = candidate
+					break
 				}
+			}
+			if save < 0 {
+				return observation, fmt.Errorf("unknown fixture route %q", contract.ID)
+			}
+			if save == 0 {
+				observation.Route0 = true
+			}
+			if save > observation.NewestSave {
+				observation.NewestSave, observation.NewestRoute = save, reconstructedRoute(save)
 			}
 		}
 	}
-	return fmt.Errorf("missing current route %s from %s", route, reconstructedRouteFile)
+	observation.LagSaves = state.LatestSave - observation.NewestSave
+	if observation.NewestSave < state.PreviousSave {
+		return observation, fmt.Errorf("route regressed from save %d to %d", state.PreviousSave, observation.NewestSave)
+	}
+	if observation.NewestSave < 0 && !state.AllowPending {
+		return observation, fmt.Errorf("missing fixture route from %s", reconstructedRouteFile)
+	}
+	return observation, nil
 }
 
 func reconstructedDemandGaps(records []reconstructedDemand, start, end time.Time) ([]float64, bool) {
@@ -1020,20 +1080,40 @@ func reconstructedDemandGaps(records []reconstructedDemand, start, end time.Time
 	return gaps, insufficient || gap >= 60 || gap < 0
 }
 
-func (d *reconstructedDriver) recordDemand(o *reconstructedDemandOwner, start, end time.Time) {
+func (d *reconstructedDriver) recordDemand(o *reconstructedDemandOwner, start, end time.Time, saves []time.Time, enriched time.Time) {
 	gaps, insufficient := reconstructedDemandGaps(o.records, start, end)
-	d.run.Parameters["contract_demand"] = o.records
 	d.run.Parameters["contract_demand_skipped_ticks"] = o.skipped
 	d.run.Parameters["contract_demand_gaps_s"] = gaps
 	if insufficient {
 		d.run.JobStatus, d.run.JobReason = "insufficient", "contract demand interest gap >=60 s or absent demand"
 	}
-	for _, record := range o.records {
+	previous := -1
+	lags := map[int]int{}
+	for i := range o.records {
+		record := &o.records[i]
+		for _, saved := range saves {
+			if !saved.After(record.End) {
+				record.LatestSave++
+			}
+		}
+		if record.Error == "" {
+			state := reconstructedContractState{LatestSave: record.LatestSave, PreviousSave: previous,
+				AllowPending: d.run.Workload == "R-Restart" && record.End.Before(enriched)}
+			observation, err := reconstructedContractAnswer([]byte(record.Response), state)
+			record.reconstructedContractObservation = &observation
+			if err != nil {
+				record.Error = err.Error()
+			} else {
+				previous = observation.NewestSave
+				lags[observation.LagSaves]++
+			}
+		}
 		if record.Error != "" {
 			d.run.Error = "contract demand: " + record.Error
-			return
 		}
 	}
+	d.run.Parameters["contract_demand"] = o.records
+	d.run.Parameters["contract_route_lag_saves_distribution"] = lags
 }
 
 type reconstructedJobEvent struct {

@@ -41,11 +41,15 @@ import (
 // writes lands in the fixture's first commit.
 type issue767Corpus func(f *issue767Fixture)
 
+// Capture the runner environment before TestMain redirects HOME/XDG.
+var issue767RunnerEnv = os.Environ()
+
 type issue767Fixture struct {
 	t                                    *testing.T
 	binary, root, primary, linked, store string
 	env                                  []string
 	httpAddr                             string
+	goModCache                           string
 
 	// mu guards every field a concurrent reader may touch while the fixture
 	// starts, stops or restarts the child. The sustained harness samples the
@@ -151,6 +155,19 @@ func newIssue767FixtureWithCorpus(t *testing.T, binary string, corpus issue767Co
 		t.Cleanup(func() { _ = os.RemoveAll(root) })
 	}
 	f := &issue767Fixture{t: t, binary: binary, root: root, primary: filepath.Join(root, "repo"), linked: filepath.Join(root, "linked"), store: filepath.Join(root, "store.sqlite")}
+	f.goModCache = os.Getenv("GOMODCACHE")
+	if f.goModCache == "" {
+		cmd := exec.Command("go", "env", "GOMODCACHE")
+		cmd.Env = issue767RunnerEnv
+		output, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("resolve runner GOMODCACHE: %v", err)
+		}
+		f.goModCache = strings.TrimSpace(string(output))
+		if f.goModCache == "" {
+			t.Fatal("runner GOMODCACHE is empty")
+		}
+	}
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
 		if key == "HOME" || key == "GOCACHE" || key == "GOMODCACHE" || key == "GOPATH" || strings.HasPrefix(key, "GORTEX_") || strings.HasPrefix(key, "GX_") || strings.HasPrefix(key, "XDG_") || strings.HasPrefix(key, "GIT_") {
@@ -160,7 +177,7 @@ func newIssue767FixtureWithCorpus(t *testing.T, binary string, corpus issue767Co
 	}
 	f.env = append(f.env,
 		"HOME="+filepath.Join(root, "home"),
-		"GOCACHE="+filepath.Join(root, "cache", "go-build"), "GOMODCACHE="+filepath.Join(root, "cache", "go-mod"), "GOPATH="+filepath.Join(root, "go"),
+		"GOCACHE="+filepath.Join(root, "cache", "go-build"), "GOMODCACHE="+f.goModCache, "GOPATH="+filepath.Join(root, "go"),
 		"XDG_CONFIG_HOME="+filepath.Join(root, "config"), "XDG_DATA_HOME="+filepath.Join(root, "data"), "XDG_CACHE_HOME="+filepath.Join(root, "cache"),
 		"GORTEX_DAEMON_PPROF_ADDR=127.0.0.1:0",
 		// Telemetry is off by default and dormant without an endpoint, but a
