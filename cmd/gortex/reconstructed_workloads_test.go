@@ -1128,6 +1128,9 @@ func reconstructedPrepareAttachment(ctx context.Context, repo string, request fu
 		record := reconstructedObserveDemand(request(timeout), reconstructedContractState{PreviousSave: -1}, repo)
 		attempts = append(attempts, record)
 		if record.Error != "" {
+			if len(attempts) > 1 && !now().Before(deadline) {
+				return attempts, fmt.Errorf("deadline passed during retry: %w", context.DeadlineExceeded)
+			}
 			return attempts, errors.New(record.Error)
 		}
 		if record.Available && record.Route0 {

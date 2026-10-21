@@ -609,6 +609,28 @@ func TestReconstructedMeasurementRestartStarts(t *testing.T) {
 			}
 		})
 	}
+	t.Run("preparation_retry_killed_at_deadline", func(t *testing.T) {
+		now := time.Now()
+		ctx, cancel := context.WithDeadline(t.Context(), now.Add(7*time.Second))
+		defer cancel()
+		calls := 0
+		attempts, err := reconstructedPrepareAttachment(ctx, "/private/repo", func(time.Duration) reconstructedDemand {
+			calls++
+			if calls == 1 {
+				return incomplete
+			}
+			now = now.Add(2 * time.Second) // The CLI is killed when the remaining deadline ends.
+			return reconstructedDemand{Response: "", Error: "signal: killed"}
+		}, func() time.Time { return now }, func(_ context.Context, delay time.Duration) error {
+			now = now.Add(delay)
+			return nil
+		})
+		run := reconstructedRun{Label: "reconstructed", Workload: "R-Restart", Quiet: true, Parameters: map[string]any{}}
+		proceed := reconstructedRecordPreparation(&run, attempts, err)
+		if calls != 2 || len(attempts) != 2 || attempts[1].Error != "signal: killed" || !errors.Is(err, context.DeadlineExceeded) || proceed || run.Error != "" || !strings.Contains(run.PreparationInsufficient, "deadline passed during retry") {
+			t.Fatalf("calls=%d attempts=%+v error=%v run=%+v", calls, attempts, err, run)
+		}
+	})
 	for _, first := range []struct {
 		name   string
 		answer reconstructedDemand
