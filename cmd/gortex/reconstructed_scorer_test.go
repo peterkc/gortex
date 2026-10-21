@@ -34,6 +34,7 @@ type reconstructedRebuild struct {
 	End        time.Time `json:"end"`
 	DurationMS float64   `json:"duration_ms"`
 	Error      string    `json:"error,omitempty"`
+	Response   string    `json:"response,omitempty"`
 }
 
 // One JSON line is one workload, binary and repeat. The workflow records the
@@ -46,6 +47,9 @@ type reconstructedRun struct {
 	Error        string                     `json:"error,omitempty"`
 	Samples      []reconstructedSample      `json:"samples"`
 	Rebuilds     []reconstructedRebuild     `json:"rebuilds,omitempty"`
+	Jobs         *reconstructedJobEvidence  `json:"contract_jobs,omitempty"`
+	JobStatus    string                     `json:"job_status,omitempty"`
+	JobReason    string                     `json:"job_reason,omitempty"`
 	JobMS        []float64                  `json:"job_ms,omitempty"`
 	JobCount     *int                       `json:"job_count,omitempty"`
 	ProcessBytes *uint64                    `json:"process_bytes_written,omitempty"`
@@ -55,23 +59,24 @@ type reconstructedRun struct {
 }
 
 type reconstructedScore struct {
-	Label       string                `json:"label"`
-	Workload    string                `json:"workload"`
-	Status      string                `json:"status"`
-	Samples     int                   `json:"samples"`
-	Loaded      int                   `json:"loaded_searches,omitempty"`
-	Excluded    int                   `json:"excluded_searches,omitempty"`
-	ClientP50MS float64               `json:"client_p50_ms"`
-	ClientP95MS float64               `json:"client_p95_ms"`
-	IdleP95MS   *float64              `json:"idle_p95_ms,omitempty"`
-	LoadedP95MS *float64              `json:"loaded_p95_ms,omitempty"`
-	Ratio       *float64              `json:"load_to_idle_p95_ratio,omitempty"`
-	Job         string                `json:"job"`
-	JobP95MS    *float64              `json:"job_p95_ms,omitempty"`
-	JobCount    *int                  `json:"job_count,omitempty"`
-	Timeouts    int                   `json:"timeouts"`
-	Failures    []reconstructedSample `json:"failures,omitempty"`
-	Reason      string                `json:"reason,omitempty"`
+	Label        string                `json:"label"`
+	Workload     string                `json:"workload"`
+	Status       string                `json:"status"`
+	Samples      int                   `json:"samples"`
+	Loaded       int                   `json:"loaded_searches,omitempty"`
+	Excluded     int                   `json:"excluded_searches,omitempty"`
+	ClientP50MS  float64               `json:"client_p50_ms"`
+	ClientP95MS  float64               `json:"client_p95_ms"`
+	IdleP95MS    *float64              `json:"idle_p95_ms,omitempty"`
+	LoadedP95MS  *float64              `json:"loaded_p95_ms,omitempty"`
+	Ratio        *float64              `json:"load_to_idle_p95_ratio,omitempty"`
+	Job          string                `json:"job"`
+	JobP95ByMode map[string]float64    `json:"job_p95_ms_by_mode,omitempty"`
+	JobP95MS     *float64              `json:"job_p95_ms,omitempty"`
+	JobCount     *int                  `json:"job_count,omitempty"`
+	Timeouts     int                   `json:"timeouts"`
+	Failures     []reconstructedSample `json:"failures,omitempty"`
+	Reason       string                `json:"reason,omitempty"`
 }
 
 func reconstructedPercentile(values []float64, percentile float64) (float64, error) {
@@ -182,6 +187,9 @@ func scoreReconstructed(run reconstructedRun) (reconstructedScore, error) {
 			score.Status = "fail"
 		}
 	}
+	if len(client) == 0 && score.Status == "fail" {
+		return score, nil
+	}
 	var err error
 	score.ClientP50MS, err = reconstructedPercentile(client, .50)
 	if err != nil {
@@ -194,6 +202,31 @@ func scoreReconstructed(run reconstructedRun) (reconstructedScore, error) {
 	score.Samples = len(client)
 	switch run.Workload {
 	case "R-DE":
+		if run.JobStatus != "" {
+			score.Job = run.JobStatus
+			if run.JobStatus != "supported" {
+				if score.Status != "fail" {
+					score.Status, score.Reason = run.JobStatus, run.JobReason
+				}
+				break
+			}
+			score.JobP95ByMode = map[string]float64{}
+			if run.Jobs == nil || len(run.Jobs.BodyMS) == 0 {
+				return score, errors.New("supported jobs have no paired bodies")
+			}
+			for mode, values := range run.Jobs.BodyMS {
+				p95, err := reconstructedPercentile(values, .95)
+				if err != nil {
+					return score, err
+				}
+				score.JobP95ByMode[mode] = p95
+				if p95 > 700 {
+					score.Status = "fail"
+				}
+			}
+			break
+		}
+		// Legacy phase-0 scorer fixtures carry only pooled durations.
 		if len(run.JobMS) == 0 {
 			if score.Status == "pass" {
 				score.Status = "unsupported"
@@ -238,8 +271,15 @@ func scoreReconstructed(run reconstructedRun) (reconstructedScore, error) {
 			score.Status = "fail"
 		}
 	case "R-Restart":
-		if run.ProcessBytes == nil || run.StoreGrowth == nil {
+		if (run.ProcessBytes == nil || run.StoreGrowth == nil) && score.Status != "fail" {
 			score.Status, score.Reason = "insufficient", "restart I/O measurement unavailable"
+		}
+		if run.JobStatus != "" && run.JobStatus != "supported" {
+			score.Job = run.JobStatus
+			if score.Status != "fail" {
+				score.Status, score.Reason = run.JobStatus, run.JobReason
+			}
+			break
 		}
 		if run.JobCount != nil {
 			score.Job, score.JobCount = "supported", run.JobCount

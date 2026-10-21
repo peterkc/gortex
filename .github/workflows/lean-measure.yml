@@ -21,6 +21,8 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       commits: ${{ steps.run.outputs.commits }}
+      binaries: ${{ steps.run.outputs.binaries }}
+      check_binaries: ${{ steps.run.outputs.check_binaries }}
       repeats: ${{ steps.run.outputs.repeats }}
       sustained_io: ${{ steps.run.outputs.sustained_io }}
     steps:
@@ -29,15 +31,21 @@ jobs:
         id: run
         run: |
           jq -e '
-            (.commits | keys == ["candidate", "candidate_parent", "main", "pr806"]) and
+            (.commits | has("main") and has("pr806") and has("base")) and
+            (.commits | keys - ["main", "pr806", "base", "trial", "e_control"] | length == 0) and
+            (.commits | (has("e_control") | not) or has("trial")) and
+            (.commits.main == "76c080e56da3547f2b464522fd6acbe0accaa25e") and
+            (.commits.pr806 == "944cd9c125ad6ac4094986493d66c7703b2a0cc8") and
+            (.commits.base == "9e9a842b2a023acc51ae5ba2cc7edf332160f128") and
             ([.commits[] | type == "string" and test("^[0-9a-f]{40}$")] | all) and
-            (.workloads | type == "array" and length > 0 and length == (unique | length)) and
-            ([.workloads[] | IN("R-C2", "R-DE", "R-Fill", "R-Fresh", "R-Restart", "issue767-idle")] | all) and
+            (.workloads | sort == ["R-C2", "R-DE", "R-Fill", "R-Fresh", "R-Restart", "issue767-idle"]) and
             (.repeats | type == "number" and . == floor and . >= 1 and . <= 3) and
-            (.sustained_io | type == "boolean") and (.note | type == "string")
+            (.sustained_io == false) and (.note | type == "string")
           ' measure/run.json
           {
             echo "commits=$(jq -c .commits measure/run.json)"
+            echo "binaries=$(jq -c '.commits | if has("trial") then keys - ["main"] else keys end' measure/run.json)"
+            echo "check_binaries=$(jq -c '.commits | keys - ["pr806"]' measure/run.json)"
             echo "repeats=$(jq -c '[range(0; .repeats)]' measure/run.json)"
             echo "sustained_io=$(jq -c .sustained_io measure/run.json)"
           } >> "$GITHUB_OUTPUT"
@@ -96,35 +104,54 @@ jobs:
           go build -o ../binaries/pr806 ./cmd/gortex
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ fromJSON(needs.config.outputs.commits).candidate }}
-          path: src-candidate
+          ref: ${{ fromJSON(needs.config.outputs.commits).base }}
+          path: src-base
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: src-candidate/go.mod
-      - name: Build candidate
-        working-directory: src-candidate
+          go-version-file: src-base/go.mod
+      - name: Build base
+        working-directory: src-base
         run: |
-          test "$(git rev-parse HEAD)" = "$(jq -r .commits.candidate ../measure/run.json)"
+          test "$(git rev-parse HEAD)" = "$(jq -r .commits.base ../measure/run.json)"
           mkdir -p ../binaries
-          go build -o ../binaries/candidate ./cmd/gortex
+          go build -o ../binaries/base ./cmd/gortex
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: fromJSON(needs.config.outputs.commits).trial != null
         with:
-          ref: ${{ fromJSON(needs.config.outputs.commits).candidate_parent }}
-          path: src-candidate-parent
+          ref: ${{ fromJSON(needs.config.outputs.commits).trial }}
+          path: src-trial
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: fromJSON(needs.config.outputs.commits).trial != null
         with:
-          go-version-file: src-candidate-parent/go.mod
-      - name: Build candidate parent
-        working-directory: src-candidate-parent
+          go-version-file: src-trial/go.mod
+      - name: Build trial
+        if: fromJSON(needs.config.outputs.commits).trial != null
+        working-directory: src-trial
         run: |
-          test "$(git rev-parse HEAD)" = "$(jq -r .commits.candidate_parent ../measure/run.json)"
+          test "$(git rev-parse HEAD)" = "$(jq -r .commits.trial ../measure/run.json)"
           mkdir -p ../binaries
-          go build -o ../binaries/candidate_parent ./cmd/gortex
+          go build -o ../binaries/trial ./cmd/gortex
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: fromJSON(needs.config.outputs.commits).e_control != null
+        with:
+          ref: ${{ fromJSON(needs.config.outputs.commits).e_control }}
+          path: src-e_control
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: fromJSON(needs.config.outputs.commits).e_control != null
+        with:
+          go-version-file: src-e_control/go.mod
+      - name: Build e_control
+        if: fromJSON(needs.config.outputs.commits).e_control != null
+        working-directory: src-e_control
+        run: |
+          test "$(git rev-parse HEAD)" = "$(jq -r .commits.e_control ../measure/run.json)"
+          mkdir -p ../binaries
+          go build -o ../binaries/e_control ./cmd/gortex
       - name: Record binary identities
         run: |
           cp results/machine.json binaries/machine.json
           cp measure/run.json binaries/run.json
-          for name in main pr806 candidate candidate_parent; do
+          for name in $(jq -r ' .commits | keys[]' measure/run.json); do
             hash=$(shasum -a 256 "binaries/$name" | cut -d ' ' -f 1)
             commit=$(jq -r --arg name "$name" '.commits[$name]' measure/run.json)
             jq -n --arg name "$name" --arg commit "$commit" --arg sha256 "$hash" \
@@ -184,11 +211,12 @@ jobs:
       - name: Preflight sampler, then rotate binaries and run selected workloads
         env:
           REPEAT: ${{ matrix.repeat }}
+          BINARIES: ${{ needs.config.outputs.binaries }}
         run: |
           while IFS='=' read -r key _value; do
             case "$key" in GORTEX_*|GX_*) unset "$key" ;; esac
           done < <(env)
-          chmod +x binaries/main binaries/pr806 binaries/candidate
+          for name in $(jq -r '.commits | keys[]' measure/run.json); do chmod +x "binaries/$name"; done
           cp binaries/identities.json results/identities.json
           go test -tags acceptance -run '^TestProcessSamplerResources' -count=1 -v \
             -timeout=5m ./cmd/gortex | tee results/sampler.log
@@ -196,10 +224,15 @@ jobs:
           for test in FinalUsage Unavailable RunReport; do
             grep -Eq "^--- PASS: TestProcessSamplerResources${test} " results/sampler.log
           done
+          go test -tags acceptance -run '^TestReconstructed(Measurement|Scorer$|SearchSymbols$)' -count=1 -v \
+            ./cmd/gortex | tee results/measurement-tests.log
+          for test in WarmupOrder Enrichment TerminalResult LoadNoReplay DemandOwner DemandGaps ContractAnswer JobEvidence ForcedPreparation ScorerErrors ScorerJobs PathSizes OversizedTerminal; do
+            grep -Eq "^--- PASS: TestReconstructedMeasurement${test} " results/measurement-tests.log
+          done
           status=0
-          names=(main pr806 candidate)
-          for offset in 0 1 2; do
-            name=${names[$(((REPEAT + offset) % 3))]}
+          read -r -a names <<< "$(jq -r 'join(" ")' <<< "$BINARIES")"
+          for ((offset=0; offset<${#names[@]}; offset++)); do
+            name=${names[$(((REPEAT + offset) % ${#names[@]}))]}
             binary="$PWD/binaries/$name"
             actual=$(shasum -a 256 "$binary" | cut -d ' ' -f 1)
             test "$actual" = "$(jq -r --arg name "$name" '.[] | select(.binary == $name) | .sha256' binaries/identities.json)"
@@ -258,7 +291,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04]
-        candidate: [pr806, candidate]
+        candidate: [pr806, trial]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -291,7 +324,7 @@ jobs:
           while IFS='=' read -r key _value; do
             case "$key" in GORTEX_*|GX_*) unset "$key" ;; esac
           done < <(env)
-          chmod +x binaries/main binaries/pr806 binaries/candidate
+          for name in $(jq -r '.commits | keys[]' measure/run.json); do chmod +x "binaries/$name"; done
           cp binaries/identities.json results/identities.json
           export GX_SUSTAINED_IO_BASELINE_BINARY="$PWD/binaries/main"
           export GX_SUSTAINED_IO_TEST_BINARY="$PWD/binaries/$CANDIDATE"
@@ -322,7 +355,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-15]
-        binary: [main, candidate]
+        binary: ${{ fromJSON(needs.config.outputs.check_binaries) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Assert runner architecture and record machine
@@ -415,44 +448,53 @@ jobs:
         run: |
           mkdir results
           status=0
+          commits='${{ needs.config.outputs.commits }}'
+          arms=$(jq -r 'keys - ["pr806"] | .[]' <<< "$commits")
           for os in ubuntu-24.04 macos-15; do
-            for arm in main candidate; do
+            for arm in $arms; do
               dir="suites/suite-$os-$arm"
               test -s "$dir/commit.txt"
-              expected='${{ needs.config.outputs.commits }}'
-              test "$(cat "$dir/commit.txt")" = "$(jq -r --arg arm "$arm" '.[$arm]' <<< "$expected")"
+              test "$(cat "$dir/commit.txt")" = "$(jq -r --arg arm "$arm" '.[$arm]' <<< "$commits")"
               test -s "$dir/race.exit"
-              # Named test/package failures are structured go test events.
               jq -s -r '[.[] | select(.Action == "fail") | [.Package, (.Test // "<package>")] | @json] | unique[]' \
                 "$dir/race.jsonl" | LC_ALL=C sort > "$dir/race.failures"
               if [[ "$(cat "$dir/race.exit")" != 0 && ! -s "$dir/race.failures" ]]; then
                 echo "$os $arm: race suite failed without structured results" >&2
                 exit 1
               fi
+              if [[ "$os" != ubuntu-24.04 ]]; then continue; fi
+              test -s "$dir/vet.exit"
+              # Successful vet output is progress, not diagnostics. A failed
+              # command without real diagnostics is a blocked check, not parity.
+              : > "$dir/vet.failures"
+              if [[ "$(cat "$dir/vet.exit")" != 0 ]]; then
+                awk '!/^go: downloading / && !/^# / && NF' "$dir/vet.log" | LC_ALL=C sort > "$dir/vet.failures"
+                diagnostic='^(vet: )?[^:]+\.go:[0-9]+(:[0-9]+)?:'
+                if ! grep -Eq "$diagnostic" "$dir/vet.failures" || \
+                  grep -Ev "$diagnostic|^[[:space:]]" "$dir/vet.failures"; then
+                  echo "$arm: vet infrastructure failure or missing diagnostics" >&2
+                  exit 1
+                fi
+              fi
+              jq -e 'has("Issues")' "$dir/lint.json"
+              jq -r '.Issues // [] | .[] | [.FromLinter, .Pos.Filename, .Pos.Line, .Pos.Column, .Text] | @json' \
+                "$dir/lint.json" | LC_ALL=C sort > "$dir/lint.failures"
+              if [[ "$(cat "$dir/lint.outcome")" != success && ! -s "$dir/lint.failures" ]]; then exit 1; fi
             done
-            comm -12 "suites/suite-$os-main/race.failures" "suites/suite-$os-candidate/race.failures" \
-              > "results/$os-shared-race.txt"
-            comm -13 "suites/suite-$os-main/race.failures" "suites/suite-$os-candidate/race.failures" \
-              > "results/$os-new-race.txt"
-            test ! -s "results/$os-new-race.txt" || status=1
-          done
-          for arm in main candidate; do
-            dir="suites/suite-ubuntu-24.04-$arm"
-            test -s "$dir/vet.exit"
-            LC_ALL=C sort "$dir/vet.log" > "$dir/vet.failures"
-            if [[ "$(cat "$dir/vet.exit")" != 0 && ! -s "$dir/vet.failures" ]]; then exit 1; fi
-            # A missing report is an infrastructure/linter failure, never a shared issue.
-            jq -e 'has("Issues")' "$dir/lint.json"
-            jq -r '.Issues // [] | .[] | [.FromLinter, .Pos.Filename, .Pos.Line, .Pos.Column, .Text] | @json' \
-              "$dir/lint.json" | LC_ALL=C sort > "$dir/lint.failures"
-            if [[ "$(cat "$dir/lint.outcome")" != success && ! -s "$dir/lint.failures" ]]; then exit 1; fi
-          done
-          for check in vet lint; do
-            comm -12 "suites/suite-ubuntu-24.04-main/$check.failures" "suites/suite-ubuntu-24.04-candidate/$check.failures" \
-              > "results/shared-$check.txt"
-            comm -13 "suites/suite-ubuntu-24.04-main/$check.failures" "suites/suite-ubuntu-24.04-candidate/$check.failures" \
-              > "results/new-$check.txt"
-            test ! -s "results/new-$check.txt" || status=1
+            for arm in $arms; do
+              if [[ "$arm" == main ]]; then continue; fi
+              control=base
+              if [[ "$arm" == base ]]; then control=main; fi
+              checks=race
+              if [[ "$os" == ubuntu-24.04 ]]; then checks="race vet lint"; fi
+              for check in $checks; do
+                comm -12 "suites/suite-$os-$control/$check.failures" "suites/suite-$os-$arm/$check.failures" \
+                  > "results/$os-$arm-shared-$check.txt"
+                comm -13 "suites/suite-$os-$control/$check.failures" "suites/suite-$os-$arm/$check.failures" \
+                  > "results/$os-$arm-new-$check.txt"
+                if [[ "$arm" != base && -s "results/$os-$arm-new-$check.txt" ]]; then status=1; fi
+              done
+            done
           done
           for file in results/*.txt; do
             echo "### $file" >> "$GITHUB_STEP_SUMMARY"
@@ -468,6 +510,7 @@ jobs:
           retention-days: 90
 
   export:
+    if: fromJSON(needs.config.outputs.commits).trial != null
     needs: [config, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -506,7 +549,7 @@ jobs:
           while IFS='=' read -r key _value; do
             case "$key" in GORTEX_*|GX_*) unset "$key" ;; esac
           done < <(env)
-          chmod +x binaries/main binaries/candidate binaries/candidate_parent
+          chmod +x binaries/main binaries/trial binaries/base
           cp binaries/identities.json results/identities.json
           mkdir corpus
           git archive 91a5c9514a9d41612183731f247ad46b03765abd | tar -x -C corpus
@@ -515,8 +558,8 @@ jobs:
           git -C corpus -c user.name=Measurement -c user.email=measurement@example.invalid \
             -c commit.gpgsign=false commit -m corpus
           export GORTEX_RECON_EXPORT_MAIN_BINARY="$PWD/binaries/main"
-          export GORTEX_RECON_EXPORT_CANDIDATE_BINARY="$PWD/binaries/candidate"
-          export GORTEX_RECON_EXPORT_PARENT_BINARY="$PWD/binaries/candidate_parent"
+          export GORTEX_RECON_EXPORT_CANDIDATE_BINARY="$PWD/binaries/trial"
+          export GORTEX_RECON_EXPORT_PARENT_BINARY="$PWD/binaries/base"
           export GORTEX_RECON_CORPUS="$PWD/corpus"
           export GORTEX_RECON_EXPORT_OUT_DIR="$PWD/results"
           export GORTEX_ISSUE767_ARTIFACT_DIR="$PWD/results/fixtures"

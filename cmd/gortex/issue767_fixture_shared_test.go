@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	_ "modernc.org/sqlite"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,6 +45,7 @@ type issue767Fixture struct {
 	t                                    *testing.T
 	binary, root, primary, linked, store string
 	env                                  []string
+	httpAddr                             string
 
 	// mu guards every field a concurrent reader may touch while the fixture
 	// starts, stops or restarts the child. The sustained harness samples the
@@ -93,7 +95,10 @@ const issue767DefaultTestReconcileInterval = "5s"
 
 type issue767FixtureOptions struct {
 	reconcileInterval string
+	loopbackHTTP      bool
 }
+
+func issue767WithLoopbackHTTP(o *issue767FixtureOptions) { o.loopbackHTTP = true }
 
 // issue767WithReconcileInterval sets GORTEX_RECONCILE_INTERVAL for the private
 // daemon. The empty string keeps the harness default (5s);
@@ -148,12 +153,14 @@ func newIssue767FixtureWithCorpus(t *testing.T, binary string, corpus issue767Co
 	f := &issue767Fixture{t: t, binary: binary, root: root, primary: filepath.Join(root, "repo"), linked: filepath.Join(root, "linked"), store: filepath.Join(root, "store.sqlite")}
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
-		if strings.HasPrefix(key, "GORTEX_") || strings.HasPrefix(key, "XDG_") || strings.HasPrefix(key, "GIT_") {
+		if key == "HOME" || key == "GOCACHE" || key == "GOMODCACHE" || key == "GOPATH" || strings.HasPrefix(key, "GORTEX_") || strings.HasPrefix(key, "GX_") || strings.HasPrefix(key, "XDG_") || strings.HasPrefix(key, "GIT_") {
 			continue
 		}
 		f.env = append(f.env, entry)
 	}
 	f.env = append(f.env,
+		"HOME="+filepath.Join(root, "home"),
+		"GOCACHE="+filepath.Join(root, "cache", "go-build"), "GOMODCACHE="+filepath.Join(root, "cache", "go-mod"), "GOPATH="+filepath.Join(root, "go"),
 		"XDG_CONFIG_HOME="+filepath.Join(root, "config"), "XDG_DATA_HOME="+filepath.Join(root, "data"), "XDG_CACHE_HOME="+filepath.Join(root, "cache"),
 		"GORTEX_DAEMON_PPROF_ADDR=127.0.0.1:0",
 		// Telemetry is off by default and dormant without an endpoint, but a
@@ -161,6 +168,20 @@ func newIssue767FixtureWithCorpus(t *testing.T, binary string, corpus issue767Co
 		// data dir are writes like any other.
 		"GORTEX_TELEMETRY=0",
 		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+filepath.Join(root, "gitconfig"), "GIT_TERMINAL_PROMPT=0", "GOWORK=off", "NO_COLOR=1", "CI=1")
+	if err := os.MkdirAll(filepath.Join(root, "home"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if settings.loopbackHTTP {
+		listener, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.httpAddr = listener.Addr().String()
+		if err := listener.Close(); err != nil {
+			t.Fatal(err)
+		}
+		f.env = append(f.env, "GORTEX_MCP_TOOL_TIMEOUT=off")
+	}
 	if settings.reconcileInterval != issue767ProductReconcileInterval {
 		f.env = append(f.env, "GORTEX_RECONCILE_INTERVAL="+settings.reconcileInterval)
 	}
@@ -294,7 +315,11 @@ func (f *issue767Fixture) start() {
 		cancel()
 		ctx, cancel = context.WithDeadline(f.t.Context(), deadline.Add(-time.Minute))
 	}
-	cmd := exec.CommandContext(ctx, f.binary, "daemon", "start", "--embeddings=false", "--backend", "sqlite", "--backend-path", f.store, "--no-progress")
+	args := []string{"daemon", "start", "--embeddings=false", "--backend", "sqlite", "--backend-path", f.store, "--no-progress"}
+	if f.httpAddr != "" {
+		args = append(args, "--http-addr", f.httpAddr)
+	}
+	cmd := exec.CommandContext(ctx, f.binary, args...)
 	// Global testing timeout bypasses Cleanup. This captured child receives
 	// SIGINT and a bounded forced exit before the parent testing deadline.
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
