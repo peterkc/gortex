@@ -113,7 +113,9 @@ go test -bench=. -benchmem ./internal/graph/
 Your PR has to get past all of these
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
 
-- `go build` + `go test -race` with coverage on `ubuntu-latest`
+- `go build` + `go test` with coverage on `ubuntu-latest`.
+  `store_sqlite` runs without `-race` on PRs. Its race shards run on
+  pushes to `main`. Other Linux partitions keep `-race`.
 - `go build` + the full test suite without `-race` on `macos-latest` and
   `windows-latest`
 - a static Linux build (`netgo,osusergo,static_link`) verified to be
@@ -121,6 +123,9 @@ Your PR has to get past all of these
 - golangci-lint
 - builds with the ONNX and GoMLX embedding tags
 - benchmarks for the parser, query, and graph packages
+
+For changes to `internal/graph/store_sqlite`, run
+`go test -race ./internal/graph/store_sqlite` locally before opening a PR.
 
 Additional workflows cover security scanning, the install script, init smoke
 tests, and skill drift.

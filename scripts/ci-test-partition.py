@@ -295,9 +295,11 @@ def family_counts(entries, fallback, target):
     return counts
 
 
-def build_plan(race_entries, plain_entries, go_version):
+def build_plan(race_entries, plain_entries, go_version, event):
     race_counts = family_counts(
         race_entries, FALLBACK_RACE_SHARDS, TARGET_SECONDS)
+    if event == "pull_request":
+        race_counts.pop("store")
     windows_counts = family_counts(
         plain_entries, FALLBACK_WINDOWS_SHARDS, TARGET_SECONDS)
     mac_counts = {family: min(3, count)
@@ -319,14 +321,17 @@ def build_plan(race_entries, plain_entries, go_version):
                                    for index in range(counts[family])]
                 else:
                     partitions.append((family, 0))
-            include += [{"os": platform, "go-version": go_version,
-                         "partition": partition, "shard_count": count}
-                        for partition, count in partitions]
+            for partition, count in partitions:
+                row = {"os": platform, "go-version": go_version,
+                       "partition": partition, "shard_count": count}
+                if key == "linux":
+                    row["race"] = partition != "store"
+                include.append(row)
         matrices[key] = {"include": include}
     return matrices
 
 
-def write_plan(directory, module, go_version, output_path):
+def write_plan(directory, module, go_version, output_path, event):
     directory.mkdir(parents=True, exist_ok=True)
     entries = {}
     for mode, source, families in (
@@ -356,7 +361,7 @@ def write_plan(directory, module, go_version, output_path):
             materialized.update(additions)
             encoded = json.dumps(materialized, indent=2, sort_keys=True) + "\n"
             target.write_text(encoded, encoding="utf-8")
-    plan = build_plan(entries["race"], entries["plain"], go_version)
+    plan = build_plan(entries["race"], entries["plain"], go_version, event)
     (directory / "plan.json").write_text(
         json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     with output_path.open("a", encoding="utf-8") as output:
@@ -474,6 +479,8 @@ def main():
     parser.add_argument("--manifest", type=Path, default=Path("test-selection.json"))
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--plan", action="store_true")
+    parser.add_argument("--event", choices=("pull_request", "push"),
+                        default="push")
     modes.add_argument("--merge-timings", action="store_true")
     modes.add_argument("--write-timings", type=Path, metavar="TEST_LOG")
     parser.add_argument("--timings-dir", type=Path, default=Path("ci-timings"))
@@ -490,7 +497,7 @@ def main():
             go_version = next(".".join(line.split()[1].split(".")[:2])
                               for line in go_mod if line.startswith("go "))
             write_plan(args.timings_dir, module, go_version,
-                       Path(os.environ["GITHUB_OUTPUT"]))
+                       Path(os.environ["GITHUB_OUTPUT"]), args.event)
         elif args.merge_timings:
             merge_timings(args.timings_dir, args.shard_timings_dir, module)
         else:
@@ -505,16 +512,19 @@ def main():
                             + "\n", encoding="utf-8")
         return
     windows = os.environ.get("TEST_WINDOWS", "false") == "true"
-    race = (os.environ.get("TEST_RACE", "false" if windows else "true")
-            == "true")
+    race_mode = os.environ.get("TEST_RACE", "false" if windows else "true")
+    if race_mode not in ("true", "false"):
+        parser.error("TEST_RACE must be unset, 'true' or 'false'")
+    race = race_mode == "true"
     plain_shards = (FALLBACK_WINDOWS_SHARDS if windows
                     else FALLBACK_PLAIN_SHARDS)
+    plain_store = not race and not windows and args.partition == "store"
     fallback = FALLBACK_RACE_SHARDS if race else plain_shards
     try:
         shards = partition_shards(args.partition, fallback, args.shard_count)
     except ValueError as error:
         parser.error(str(error))
-    paths = RACE_PACKAGES if race else PLAIN_PACKAGES
+    paths = RACE_PACKAGES if race or plain_store else PLAIN_PACKAGES
     valid = ({"remaining"} | (paths.keys() - shards.keys())
              | {f"{family}-{index}" for family, count in shards.items()
                 for index in range(count)})
@@ -533,29 +543,33 @@ def main():
         raise ValueError(f"no packages selected for {args.partition}")
     manifest = {"partition": args.partition, "packages": package_partitions, "selected_packages": selected}
     command = ["go", "test"]
-    if race:
-        command += ["-race", "-timeout=45m", "-coverprofile=coverage.out"]
+    if race or plain_store:
+        command += (["-race"] if race else [])
+        command += ["-timeout=45m", "-coverprofile=coverage.out"]
     else:
         command += (["-v"] if windows else []) + ["-timeout=45m"]
     if race and family in shards:
         command += ["-v"]
-    if family in shards:
+    if family in shards or plain_store:
+        shard_count = 1 if plain_store else shards[family]
         if len(selected) != 1:
             raise ValueError("a test shard must own exactly one package")
         census_command = (["go", "test"] + (["-race"] if race else [])
                           + ["-list", ".", selected[0]])
         names = test_names(capture(census_command))
-        timing_path = RACE_TIMINGS_PATH if race else PLAIN_TIMINGS_PATH
-        timings, _ = read_family_timings(
-            args.timings_dir / timing_path.name, timing_path, selected[0])
+        timings = None
+        if not plain_store:
+            timing_path = RACE_TIMINGS_PATH if race else PLAIN_TIMINGS_PATH
+            timings, _ = read_family_timings(
+                args.timings_dir / timing_path.name, timing_path, selected[0])
+            if isinstance(timings, str):
+                print(f"::warning::{selected[0]}: {timings}", flush=True)
+            if not isinstance(timings, dict):
+                timings = None
         manifest["assignment"] = "count"
-        if isinstance(timings, str):
-            print(f"::warning::{selected[0]}: {timings}", flush=True)
-        if not isinstance(timings, dict):
-            timings = None
         shard_plan = plan_shard_commands(
             names, census_command[:-3], command, selected[0],
-            shard_count=shards[family], timings=timings)
+            shard_count=shard_count, timings=timings)
         assignments, pattern_chunks, bundle_size, predicted = shard_plan
         if predicted is not None:
             manifest.update(assignment="duration", predicted_seconds=[
@@ -570,10 +584,10 @@ def main():
                 matched.extend(test_names(capture(census_command[:-3] + ["-list", pattern, selected[0]])))
             if sorted(matched) != assignments[index] or len(matched) != len(set(matched)):
                 raise ValueError(f"Go matcher disagrees with shard {index}")
-        index = int(args.partition.rsplit("-", 1)[1])
+        index = 0 if plain_store else int(args.partition.rsplit("-", 1)[1])
         commands = [command + ["-run", pattern] + selected for pattern in pattern_chunks[index]]
         manifest.update(census=names, shards=assignments, pattern_chunks=pattern_chunks,
-                        name_bundle=bundle_size, shard_count=shards[family])
+                        name_bundle=bundle_size, shard_count=shard_count)
         if all(len(chunks) == 1 for chunks in pattern_chunks):
             manifest["patterns"] = [chunks[0] for chunks in pattern_chunks]
         print(f"{selected[0]}: {len(names)} compiled tests/examples/fuzz seeds; "

@@ -36,7 +36,7 @@ jobs:
           restore-keys: ci-timings-
       - name: Plan time-balanced partitions
         id: plan
-        run: python3 scripts/ci-test-partition.py --plan
+        run: python3 scripts/ci-test-partition.py --plan --event ${{ github.event_name }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ci-timings-used
@@ -93,7 +93,7 @@ jobs:
         id: test
         shell: bash
         env:
-          TEST_RACE: "true"
+          TEST_RACE: ${{ matrix.race }}
           SAVE_TIMINGS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: |
           if [[ "$SAVE_TIMINGS" == true && "$TEST_SHARD_COUNT" != 0 ]]; then
