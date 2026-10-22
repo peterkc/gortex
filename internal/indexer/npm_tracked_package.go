@@ -200,9 +200,20 @@ func firstNpmArrayTarget(items []json.RawMessage) (target string, unsupported bo
 		if t := pickConditionalTarget(item); strings.HasPrefix(t, "./") {
 			return t, false
 		}
-		if isObject {
+		// Only conditions the indexer cannot read leave the root to legacy
+		// candidates; a recognized condition with a null or invalid target
+		// resolves to nothing, as in Node.
+		if isObject && !hasRecognizedNpmCondition(conditions) {
 			unsupported = true
 		}
 	}
 	return "", unsupported
+}
+
+// hasRecognizedNpmCondition reports whether a conditional exports object
+// names a condition pickConditionalTarget reads.
+func hasRecognizedNpmCondition(conditions map[string]json.RawMessage) bool {
+	_, imp := conditions["import"]
+	_, def := conditions["default"]
+	return imp || def
 }

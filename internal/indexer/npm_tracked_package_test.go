@@ -53,6 +53,8 @@ func TestMultiIndexer_TrackedNpmPackage(t *testing.T) {
 		{name: "exports nested array", packageName: "p", manifest: `"exports":[["./src/index.ts"]]`, entry: "src/index.ts", resolves: true},
 		{name: "exports empty array blocks root", packageName: "p", manifest: `"exports":[]`, entry: "index.ts"},
 		{name: "exports null-only array blocks root", packageName: "p", manifest: `"exports":[null],"main":"./index.ts"`, entry: "index.ts"},
+		{name: "exports array recognized null condition blocks root", packageName: "p", manifest: `"exports":[{"import":null}],"main":"./index.ts"`, entry: "index.ts"},
+		{name: "exports array recognized invalid condition blocks root", packageName: "p", manifest: `"exports":[{"default":"index.ts"}],"main":"./index.ts"`, entry: "index.ts"},
 		{name: "exports array with unsupported conditions uses legacy", packageName: "p", manifest: `"exports":[{"require":"./dist/index.cjs"}],"main":"./src/main.ts"`, entry: "src/main.ts", resolves: true},
 		{name: "exports array blocks subpath", packageName: "p", specifier: "p/private", manifest: `"exports":["./index.ts"]`, entry: "private.ts"},
 		{name: "npm alias collision refused", packageName: "p", depVersion: "npm:other@^1", entry: "index.ts"},
