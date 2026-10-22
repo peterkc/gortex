@@ -3719,12 +3719,9 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 	// when the indexes aren't populated (ResolveEdge invoked outside
 	// of ResolveAll/ResolveFile).
 	//
-	// When a package-manager workspace lookup is installed, all
-	// same-repo candidates are collected (not just the first) so a
-	// same-named collision across two workspace members can be broken
-	// in favour of the importer's own workspace. Without the lookup
-	// the first same-repo hit short-circuits the scan, preserving the
-	// pre-feature cost.
+	// Prefer a same-repo folder matching the import path. When a
+	// package-manager workspace lookup is installed, collect candidates
+	// of the same match quality to break ties in the importer's workspace.
 	collectAll := r.workspaceMembers != nil
 	// A JS/TS bare specifier names a node_modules package or a workspace
 	// member. Node and tsc load such a directory through its entry point, so
@@ -3740,13 +3737,30 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 	// npm `graphql` and contains `src/feature/graphql/index.ts`.
 	externalNpmDep := bareJSTS && declaresExternalNpmDep(r.npmDep, jsTSImportCallerFile(e), importPath)
 	var sameRepo, crossRepoFile graph.FileNodeIdentity
-	var sameRepoFound, crossRepoFound bool
+	var sameRepoFound, sameRepoMatched, crossRepoFound bool
 	var sameRepoAll []graph.FileNodeIdentity
 	consider := func(file graph.FileNodeIdentity) {
 		if bareJSTS && !isJSTSDirEntryPoint(file.FilePath) {
 			return
 		}
 		if callerRepo == "" || file.RepoPrefix == callerRepo {
+			dir := filePathDir(file.FilePath)
+			if file.RepoPrefix != "" {
+				if dir == file.RepoPrefix {
+					dir = ""
+				} else {
+					dir = strings.TrimPrefix(dir, file.RepoPrefix+"/")
+				}
+			}
+			matches := dir != "" && (dir == importPath || strings.HasSuffix(importPath, "/"+dir))
+			if sameRepoMatched && !matches {
+				return
+			}
+			if matches && !sameRepoMatched {
+				sameRepoFound = false
+				sameRepoAll = nil
+				sameRepoMatched = true
+			}
 			if !sameRepoFound {
 				sameRepo, sameRepoFound = file, true
 			}
@@ -3765,9 +3779,9 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 		}
 	}
 	// stop reports whether the candidate scan can short-circuit: once a
-	// same-repo hit is found and we are not collecting every candidate
-	// for workspace disambiguation.
-	stop := func() bool { return sameRepoFound && !collectAll }
+	// matching same-repo folder is found and we are not collecting
+	// every matching candidate for workspace disambiguation.
+	stop := func() bool { return sameRepoMatched && !collectAll }
 	if externalNpmDep {
 		// Declared node_modules package — skip the cascade outright.
 	} else if r.dirIndex != nil {
@@ -3777,7 +3791,7 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 				break
 			}
 		}
-		if !sameRepoFound || collectAll {
+		if !sameRepoMatched || collectAll {
 			for _, file := range r.lastDirIndex[lastPathComponent(importPath)] {
 				consider(file)
 				if stop() {
