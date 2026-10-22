@@ -2421,6 +2421,7 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 	idx.deferredAttempt = nil
 	var coldManifests *coldManifestCensus
 	var censusMtimes map[string]int64
+	var shadowDrainPending bool
 	var sizeReceipts []fileReadReceipt
 	sizeReceiptCtx := ctx
 	var fileFailed atomic.Bool
@@ -2471,6 +2472,11 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 			}
 		}()
 		defer recoverIndexCtxRawStoragePanic(&result, &retErr)
+		// A panic can unwind the drain without setting retErr. Do not let the
+		// successful parse certify a shadow that never finished publication.
+		if shadowDrainPending {
+			censusMtimes = nil
+		}
 		published := retErr == nil && result != nil && censusMtimes != nil
 		if idx.finishColdSizeSkips(sizeReceiptCtx, sizeReceipts, censusMtimes, published) {
 			fileFailed.Store(true)
@@ -2863,7 +2869,9 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 	restoreGCTuning := applyIndexGCTuning(idx.logger)
 	defer restoreGCTuning()
 
+	workspaceFP := ""
 	if shadowTaken {
+		shadowDrainPending = true
 		// Keep the persisted repository queryable while the replacement graph is
 		// parsed in memory. Warm-restart rows are evicted only after parsing has
 		// succeeded, immediately before the INSERT-only bulk drain. Besides
@@ -2914,10 +2922,14 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 					deferredVectorPlan = nil
 				}
 			}()
-			if retErr != nil {
+			if retErr != nil || result == nil {
 				return
 			}
 			reporter.Report("persisting bulk graph", 0, 0)
+			if err := ctx.Err(); err != nil {
+				retErr = err
+				return
+			}
 			drainStart := time.Now()
 			shadowNodeCount := inMemShadow.NodeCount()
 			shadowEdgeCount := inMemShadow.EdgeCount()
@@ -2946,6 +2958,16 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 					zap.Int("nodes", n), zap.Int("edges", e))
 			}
 			bl.BeginBulkLoad()
+			// FlushBulk is a no-op under an outer coordinated window. Otherwise
+			// it must also restore the standalone window if a drain write panics.
+			bulkFlushPending := true
+			defer func() {
+				if bulkFlushPending {
+					if err := bl.FlushBulk(); err != nil && retErr == nil {
+						retErr = fmt.Errorf("indexer: persist bulk graph: %w", err)
+					}
+				}
+			}()
 			// Transfer the shadow in explicit row/byte-capped batches. The
 			// process-wide shadow admission caps all live shadows at 1 GiB; these
 			// much smaller buffers prevent persistence from double-buffering an
@@ -3036,7 +3058,11 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 				zap.String("repo", idx.RepoPrefix()),
 				zap.Duration("drain_elapsed", flushStart.Sub(drainStart)),
 			)
-			if ferr := bl.FlushBulk(); ferr != nil && retErr == nil {
+			// Clear the backstop only after FlushBulk returns, so a panic
+			// inside it still restores the standalone window.
+			ferr := bl.FlushBulk()
+			bulkFlushPending = false
+			if ferr != nil && retErr == nil {
 				retErr = fmt.Errorf("indexer: persist bulk graph: %w", ferr)
 			}
 			idx.logger.Info("indexer: FlushBulk complete",
@@ -3049,46 +3075,6 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 			)
 			finishDrainPressure()
 			if retErr == nil {
-				// End of this repository's drain: this block runs on the way
-				// out of IndexCtx, after persistRepoIndexState. It is not the
-				// last thing the pass does — the compact sidecars below it,
-				// the backend symbol index and the FTS normalization all still
-				// follow — but it is the first point at which BOTH halves of
-				// the freshness verdict are current, and nothing earlier on
-				// this path has them: the rows have just landed in the
-				// physical tables, and the counters describing them were
-				// written a moment ago.
-				//
-				// BeginBulkLoad was a no-op if the store was already
-				// populated, so FlushBulk returned without re-analyzing
-				// anything; nothing else has, since the store was a fraction
-				// of this size. Cheap when the statistics are already fresh.
-				//
-				// This runs INSIDE the process-global reach topology writer
-				// gate and the caller's repository mutation lane (see the
-				// BeginTopologyMutation window in IndexRepo). Reach readers
-				// give up rather than wait, so anything blocking here turns
-				// MCP answers empty for its duration.
-				//
-				// What the cooperative shape buys, exactly: the refresh never
-				// QUEUES on the store's write gate underneath these, and never
-				// holds it across more than one bounded index — so other store
-				// writers, and the bounded-gate writers that drop their
-				// batches after 15 s, keep making progress. It also bounds
-				// what THIS boundary pays under the gates above: a pass stops
-				// starting indexes once its budget is spent, so the
-				// gate-holding cost here is that budget plus one index's
-				// ANALYZE plus one bounded sqlite_schema reload. It does not
-				// make the cost zero — the remaining indexes are carried to
-				// the next boundary on a resume cursor, which is where the
-				// mechanism converges.
-				//
-				// Outside that bound, and paid under these same wider gates:
-				// two health probes, the present-index list, and the set of
-				// indexes that already carry a statistics row. All four are
-				// read-pool queries taking no store lock.
-				graph.MaybeEnsurePlannerStatsFresh(ctx, diskTarget)
-
 				if serr := persistShadowCompactSidecars(
 					inMemShadow, diskTarget, idx.RepoPrefix(),
 				); serr != nil {
@@ -3129,6 +3115,48 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 					deferredVectorPlan.Release()
 					deferredVectorPlan = nil
 				}
+			}
+			// A cancel during publication counts as a failed attempt.
+			// The drain itself ignores ctx, so its rows are complete, but no
+			// state is saved and the next pass indexes the repository again.
+			if retErr == nil {
+				retErr = ctx.Err()
+			}
+			if retErr == nil {
+				idx.persistRepoIndexState(diskTarget, absRoot, workspaceFP, result.NodeCount, result.EdgeCount)
+				shadowDrainPending = false
+				// The shadow and its sidecars are now published, and the counters
+				// were just saved. Both halves of the freshness verdict are current.
+				//
+				// BeginBulkLoad was a no-op if the store was already
+				// populated, so FlushBulk returned without re-analyzing
+				// anything; nothing else has, since the store was a fraction
+				// of this size. Cheap when the statistics are already fresh.
+				//
+				// This runs INSIDE the process-global reach topology writer
+				// gate and the caller's repository mutation lane (see the
+				// BeginTopologyMutation window in IndexRepo). Reach readers
+				// give up rather than wait, so anything blocking here turns
+				// MCP answers empty for its duration.
+				//
+				// What the cooperative shape buys, exactly: the refresh never
+				// QUEUES on the store's write gate underneath these, and never
+				// holds it across more than one bounded index — so other store
+				// writers, and the bounded-gate writers that drop their
+				// batches after 15 s, keep making progress. It also bounds
+				// what THIS boundary pays under the gates above: a pass stops
+				// starting indexes once its budget is spent, so the
+				// gate-holding cost here is that budget plus one index's
+				// ANALYZE plus one bounded sqlite_schema reload. It does not
+				// make the cost zero — the remaining indexes are carried to
+				// the next boundary on a resume cursor, which is where the
+				// mechanism converges.
+				//
+				// Outside that bound, and paid under these same wider gates:
+				// two health probes, the present-index list, and the set of
+				// indexes that already carry a statistics row. All four are
+				// read-pool queries taking no store lock.
+				graph.MaybeEnsurePlannerStatsFresh(ctx, diskTarget)
 			}
 		}()
 	} else if diskTarget == nil && idx.graph.NodeCount() == 0 && idx.graph.EdgeCount() == 0 {
@@ -4193,7 +4221,6 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 
 	// Persist the Merkle baseline so the next incremental pass diffs
 	// against content hashes rather than re-indexing the whole repo.
-	workspaceFP := ""
 	if merkleBaseline != nil {
 		paths := make([]string, len(files))
 		for i, wf := range files {
@@ -4204,7 +4231,9 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 	idx.indexGen.Add(1) // invalidate the trigram search cache
 
 	nodes, edges := idx.repoNodeEdgeCount()
-	idx.persistRepoIndexState(diskTarget, absRoot, workspaceFP, nodes, edges)
+	if diskTarget == nil {
+		idx.persistRepoIndexState(nil, absRoot, workspaceFP, nodes, edges)
+	}
 	// The persisted counters are what the planner-statistics freshness check
 	// measures growth with, and on the direct-SQLite path this is the only
 	// point in the pass where they and the corpus are both current — which is

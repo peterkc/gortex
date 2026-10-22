@@ -669,12 +669,8 @@ func (s *Store) plannerStatsHealth(ctx context.Context, probeReceivers bool) (gr
 	// Relation-is-populated evidence for the believed==0 rule, taken from the
 	// CORPUS and never from the counters.
 	//
-	// The counters cannot answer it. persistRepoIndexState writes them from
-	// the shadow's own count before the shadow is drained to disk, so on the
-	// shadow path there is a real window in which the counters describe rows
-	// the physical tables do not hold yet. Believing them there makes the rule
-	// ANALYZE an empty table — which writes no stat row at all, leaving the
-	// verdict permanently unfixable. And they are absent entirely on a fresh
+	// The counters cannot answer it. On the shadow path, persistRepoIndexState
+	// saves them only after a successful drain. They are absent on a fresh
 	// cold load, which is the case the rule exists for. EXISTS is a leftmost
 	// seek and is asked only when the statistics are already missing.
 	nodesPopulated := nodesIndex != "" && health.Nodes.Believed == 0 &&
