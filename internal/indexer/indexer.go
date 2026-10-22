@@ -2763,6 +2763,9 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 				}
 			}
 			owner.mu.Unlock()
+			if err := owner.postPublishGoModules(ctx, current, false); err != nil {
+				owner.logger.Warn("post-publish Go module follow-up", zap.Error(err))
+			}
 		}
 		return nil
 	})
@@ -3342,6 +3345,7 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 		// resolution, …) for any backend that takes the shadow path.
 		if idx.resolver != nil {
 			idx.resolver.SetGraph(inMemShadow)
+			idx.resolver.SetDeferGoModuleMisses(true)
 		}
 		defer func() {
 			// Restore the durable graph and every shadow-routed sink even when a
@@ -3354,6 +3358,7 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 				idx.contractStateSink = nil
 				if idx.resolver != nil {
 					idx.resolver.SetGraph(diskTarget)
+					idx.resolver.SetDeferGoModuleMisses(false)
 				}
 				if deferredVectorPlan != nil {
 					deferredVectorPlan.Release()
@@ -3617,6 +3622,7 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 			// ownership validation and every later incremental operation.
 			if idx.resolver != nil {
 				idx.resolver.SetGraph(diskTarget)
+				idx.resolver.SetDeferGoModuleMisses(false)
 			}
 			if deferredVectorPlan != nil {
 				if retErr == nil {

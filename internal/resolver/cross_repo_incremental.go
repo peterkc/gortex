@@ -1,6 +1,12 @@
 package resolver
 
-import "github.com/zzet/gortex/internal/graph"
+import (
+	"context"
+
+	"go.uber.org/zap"
+
+	"github.com/zzet/gortex/internal/graph"
+)
 
 // ResolveFilesAndIncoming runs one scoped cross-repository pass for a complete
 // mutation batch. The frontier contains unresolved edges emitted by the changed
@@ -85,6 +91,15 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 		if len(pending) > 0 {
 			stats = cr.resolveScopedLocked(pending)
 		}
+	}
+	if len(definitionFiles) > 0 && len(cr.goModules) > 0 {
+		nodes := cr.graph.GetFileNodesByPaths(definitionFiles)
+		cr.resolveGoModuleEdgesLocked(cr.goModuleIncomingEdges(nodes, definitionFiles))
+	}
+	// A newly tracked module also makes old dep/stdlib terminals eligible.
+	// This indexed sweep runs at most once per module/config revision.
+	if err := cr.retryGoModuleDeps(context.Background(), stats); err != nil {
+		cr.logger.Error("cross-repo resolve: retry Go module terminals", zap.Error(err))
 	}
 	DetectCrossRepoEdgesForMutationFiles(cr.graph, edgeSourceFiles, definitionFiles)
 	return stats, admission

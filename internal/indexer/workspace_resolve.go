@@ -496,6 +496,9 @@ func (mi *MultiIndexer) newCrossRepoResolver() *resolver.CrossRepoResolver {
 	cr := resolver.NewCrossRepo(mi.graph)
 	cr.SetLogger(mi.logger)
 	cr.SetCrossWorkspaceDepLookup(mi.crossWorkspacePassLookup())
+	modules, revision := mi.goModuleSnapshot()
+	cr.SetGoModules(modules)
+	cr.SetGoModuleDepRetry(&mi.goModuleRetry, revision)
 	cr.SetNpmAliasResolver(mi.npmAliasResolver())
 	cr.SetNpmDependencyLookup(mi.npmDependencyLookup())
 	cr.SetPathAliasResolver(mi.pathAliasResolver())
@@ -514,6 +517,15 @@ func (mi *MultiIndexer) runCrossRepoResolveContext(ctx context.Context, reconcil
 	cr := mi.newCrossRepoResolver()
 	if cr == nil {
 		return nil
+	}
+	mi.mu.RLock()
+	indexers := make([]*Indexer, 0, len(mi.indexers))
+	for _, idx := range mi.indexers {
+		indexers = append(indexers, idx)
+	}
+	mi.mu.RUnlock()
+	for _, idx := range indexers {
+		idx.resolver.TakeDeferredGoModuleEdges()
 	}
 	if _, err := cr.ResolveAllContext(ctx); err != nil {
 		return err
@@ -686,4 +698,53 @@ func (mi *MultiIndexer) crossWorkspaceLookup() resolver.CrossWorkspaceDepLookup 
 		// returning them directly keeps this hot lookup allocation-free.
 		return snapshot.rulesByWorkspace[sourceWS]
 	}
+}
+
+// resolveDeferredGoModules is the post-publication tail shared by cold-shadow callers.
+func (mi *MultiIndexer) resolveDeferredGoModules(idx *Indexer) error {
+	edges := idx.resolver.TakeDeferredGoModuleEdges()
+	if len(edges) == 0 {
+		return nil
+	}
+	cr := mi.newCrossRepoResolver()
+	if err := cr.ResolveDeferredGoModuleEdges(edges); err != nil {
+		return err
+	}
+	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
+	return nil
+}
+
+func (mi *MultiIndexer) resolveIncomingGoModules(repo string) error {
+	if mi.crossWorkspaceRepoCount() < 2 || mi.trackedGoModules()[repo] == "" {
+		return nil
+	}
+	cr := mi.newCrossRepoResolver()
+	if err := cr.ResolveGoModuleIncomingForRepo(repo); err != nil {
+		return err
+	}
+	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
+	return nil
+}
+
+// postPublishGoModules keeps every full-index caller on the same module tail.
+// New providers need the revision sweep; re-indexes probe their definitions.
+func (mi *MultiIndexer) postPublishGoModules(ctx context.Context, idx *Indexer, newProvider bool) error {
+	if err := mi.resolveDeferredGoModules(idx); err != nil {
+		return err
+	}
+	if idx.deferResolve.Load() {
+		return nil // the batch's shared pass owns resolution
+	}
+	if !newProvider {
+		return mi.resolveIncomingGoModules(idx.repoPrefix)
+	}
+	if mi.trackedGoModules()[idx.repoPrefix] == "" {
+		return nil
+	}
+	cr := mi.newCrossRepoResolver()
+	if err := cr.RetryGoModuleDeps(ctx); err != nil {
+		return err
+	}
+	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
+	return nil
 }

@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"golang.org/x/mod/modfile"
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/contracts"
@@ -98,6 +100,16 @@ type MultiIndexer struct {
 	// it to New; every per-repository construction flows through this factory.
 	newIndexer func(graph.Store, *parser.Registry, config.IndexConfig, *zap.Logger) *Indexer
 	mu         sync.RWMutex
+
+	goModuleMu         sync.Mutex
+	goModuleChecked    time.Time
+	goModuleRevision   uint64
+	goModuleGeneration uint64
+	goModuleRepoCount  int
+	goModuleCache      map[string]string
+	goModuleFiles      map[string]goModuleFileStamp
+	goModuleRetry      resolver.GoModuleDepRetry
+
 	// pendingRepositoryUntracks is guarded by mu. Entries are installed before
 	// a live repo is hidden and removed only after payload, vector, config, and
 	// derived-contract cleanup have all succeeded.
@@ -377,6 +389,7 @@ func (mi *MultiIndexer) newPerRepoIndexerGuardedWithMode(
 	idx.parseAdmission.Store(mi.parseAdmission.Load())
 	idx.nativeParseAdmission.Store(mi.nativeParseAdmission.Load())
 	idx.repositoryMutationOwner = mi
+	idx.installGoResolverContext()
 	idx.search = mi.search
 	if mi.embedder != nil {
 		idx.SetEmbedder(mi.embedder)
@@ -978,6 +991,8 @@ func (mi *MultiIndexer) newMasterResolver(useLSP bool) *resolver.Resolver {
 	master.SetPathAliasResolver(mi.pathAliasResolver())
 	master.SetWorkspaceMembership(mi.workspaceMembershipResolver())
 	master.SetGoPackageOwnershipInventoryFactory(mi.prepareGoPackageOwnership)
+	master.SetGoModules(mi.trackedGoModules())
+	master.SetCrossWorkspaceDepLookup(mi.crossWorkspacePassLookup())
 	return master
 }
 
@@ -2082,19 +2097,106 @@ func (mi *MultiIndexer) filterReposByScope(repos []config.RepoEntry, workspaceSl
 	return out
 }
 
+func (idx *Indexer) installGoResolverContext() {
+	mi := idx.repositoryMutationOwner
+	if mi == nil {
+		return
+	}
+	idx.resolver.SetGoModuleLookup(mi.trackedGoModules)
+	// Construction can hold mi.mu. Initialize the cached lookup lazily at
+	// first resolution, after construction and caller config loading finish.
+	var once sync.Once
+	var lookup resolver.CrossWorkspaceDepLookup
+	idx.resolver.SetCrossWorkspaceDepLookup(func(workspace string) []resolver.CrossWorkspaceDepRule {
+		once.Do(func() { lookup = mi.crossWorkspaceLookup() })
+		rules := lookup(workspace)
+		if mi.GetMetadata(idx.repoPrefix) != nil || workspace != idx.WorkspaceID() || mi.configMgr == nil {
+			return rules
+		}
+		rules = append([]resolver.CrossWorkspaceDepRule(nil), rules...)
+		for _, dep := range mi.configMgr.GetRepoConfig(idx.repoPrefix).CrossWorkspaceDeps {
+			if dep.Workspace != "" {
+				rules = append(rules, resolver.CrossWorkspaceDepRule{Workspace: dep.Workspace, Modules: append([]string(nil), dep.Modules...)})
+			}
+		}
+		return rules
+	})
+}
+
+// trackedGoModules caches root identities by config revision and root go.mod
+// stat. Configured roots keep cold-shadow imports recognizable before publish.
+func (mi *MultiIndexer) trackedGoModules() map[string]string {
+	modules, _ := mi.goModuleSnapshot()
+	return modules
+}
+
+func (mi *MultiIndexer) goModuleSnapshot() (map[string]string, uint64) {
+	mi.goModuleMu.Lock()
+	defer mi.goModuleMu.Unlock()
+	var revision uint64
+	if mi.configMgr != nil {
+		revision = mi.configMgr.Revision()
+	}
+	count := mi.crossWorkspaceRepoCount()
+	now := time.Now()
+	if mi.goModuleCache != nil && mi.goModuleRevision == revision && mi.goModuleRepoCount == count && now.Sub(mi.goModuleChecked) < time.Second {
+		return mi.goModuleCache, mi.goModuleGeneration
+	}
+	mi.goModuleChecked = now
+	roots := make(map[string]string)
+	if mi.configMgr != nil {
+		for _, entry := range mi.configMgr.Global().ReposSnapshot() {
+			roots[config.ResolvePrefix(entry)] = entry.Path
+		}
+	}
+	for prefix, meta := range mi.AllMetadata() {
+		if meta != nil && meta.RootPath != "" {
+			roots[prefix] = meta.RootPath
+		}
+	}
+	files := make(map[string]goModuleFileStamp, len(roots))
+	for prefix, root := range roots {
+		stamp := goModuleFileStamp{root: root}
+		if info, err := os.Stat(filepath.Join(root, "go.mod")); err == nil {
+			stamp.size, stamp.modified = info.Size(), info.ModTime().UnixNano()
+		}
+		files[prefix] = stamp
+	}
+	if mi.goModuleCache != nil && mi.goModuleRevision == revision && mi.goModuleRepoCount == count && maps.Equal(mi.goModuleFiles, files) {
+		return mi.goModuleCache, mi.goModuleGeneration
+	}
+	modules := readTrackedGoModules(roots)
+	mi.goModuleFiles = files
+	if mi.goModuleCache != nil && mi.goModuleRevision == revision && mi.goModuleRepoCount == count && maps.Equal(modules, mi.goModuleCache) {
+		return mi.goModuleCache, mi.goModuleGeneration
+	}
+	mi.goModuleCache, mi.goModuleRevision, mi.goModuleRepoCount = modules, revision, count
+	mi.goModuleGeneration++
+	return modules, mi.goModuleGeneration
+}
+
+type goModuleFileStamp struct {
+	root           string
+	size, modified int64
+}
+
+func readTrackedGoModules(roots map[string]string) map[string]string {
+	modules := make(map[string]string, len(roots))
+	for prefix, root := range roots {
+		if module := readGoModModule(root); module != "" {
+			modules[prefix] = module
+		}
+	}
+	return modules
+}
+
 // readGoModModule reads the module path from a go.mod file.
 func readGoModModule(repoPath string) string {
 	data, err := os.ReadFile(filepath.Join(repoPath, "go.mod"))
 	if err != nil {
 		return ""
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "module ") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "module"))
-		}
-	}
-	return ""
+	return modfile.ModulePath(data)
 }
 
 // rebuildColdRefFacts seeds the durable resolved-reference sidecar once for
@@ -2140,7 +2242,7 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 		absPath  string
 		identity *RepoIdentity
 	}
-	trackedModules := make(map[string]string)
+	moduleRoots := make(map[string]string)
 	resolved := make([]resolvedRepo, 0, len(repos))
 	seenPrefix := make(map[string]string, len(repos)) // prefix → absPath
 	var resolveErrors []string
@@ -2186,10 +2288,11 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 		}
 		seenPrefix[prefix] = absPath
 		resolved = append(resolved, resolvedRepo{entry: e, prefix: prefix, cfg: cfg, absPath: absPath, identity: identity})
-		if mod := readGoModModule(absPath); mod != "" {
-			trackedModules[prefix] = mod
-			mi.logger.Debug("tracked repo module", zap.String("repo", prefix), zap.String("module", mod))
-		}
+		moduleRoots[prefix] = absPath
+	}
+	trackedModules := readTrackedGoModules(moduleRoots)
+	for prefix, mod := range trackedModules {
+		mi.logger.Debug("tracked repo module", zap.String("repo", prefix), zap.String("module", mod))
 	}
 
 	if len(resolved) == 0 {
@@ -2361,6 +2464,11 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 						return nil, fmt.Errorf("multi-repo bulk-load finalize: %w", err)
 					}
 					coordinatedBulkActive = false
+				}
+				for _, rr := range completed {
+					if err := mi.postPublishGoModules(context.Background(), rr.idx, true); err != nil {
+						mi.logger.Warn("post-publish Go module follow-up", zap.Error(err))
+					}
 				}
 
 				// Do not publish a completed pipeline when no repository reached the
@@ -2580,8 +2688,9 @@ func (mi *MultiIndexer) indexRepoRaw(repoPrefix string) (*IndexResult, error) {
 		oldIdx.Close()
 	}
 
-	// TODO: After re-indexing, run CrossRepoResolver.ResolveForRepo(repoPrefix)
-	// to update cross-repo edges. This will be implemented in Task 7.1.
+	if err := mi.postPublishGoModules(context.Background(), idx, false); err != nil {
+		mi.logger.Warn("post-publish Go module follow-up", zap.Error(err))
+	}
 
 	mi.ReconcileContractEdges()
 
@@ -3160,6 +3269,9 @@ func (mi *MultiIndexer) trackPreparedRepoSourceCtx(
 		// after the loop (RunGlobalResolve does this for daemon warmup).
 		if !batchMode.deferGlobalPasses {
 			mi.ReconcileContractEdges()
+			if err := mi.postPublishGoModules(ctx, idx, true); err != nil {
+				mi.logger.Warn("post-publish Go module follow-up", zap.Error(err))
+			}
 		}
 		return nil
 	})
@@ -3439,6 +3551,9 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 				})
 			}
 		} else if result.FullRetrack && !batchMode.deferGlobalPasses {
+			if err := mi.postPublishGoModules(ctx, idx, false); err != nil {
+				mi.logger.Warn("post-publish Go module follow-up", zap.Error(err))
+			}
 			mi.ReconcileContractEdges()
 		}
 
