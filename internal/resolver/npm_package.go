@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"context"
 	"iter"
 	"strings"
 
@@ -8,9 +9,9 @@ import (
 )
 
 // NpmPackageLookup maps a bare npm specifier to tracked package directories.
-// Each directory has ordered graph-path entry candidates (exports, types, main,
-// then the directory index). The indexer owns manifest reads; the resolver
-// probes indexed files and applies repository/workspace policy.
+// Each directory has graph-path entry candidates from exports, or legacy
+// types/main/directory-index entry points only when exports is absent. The indexer
+// owns manifest reads; the resolver probes indexed files and applies repository/workspace policy.
 type NpmPackageLookup func(specifier string) map[string][]string
 
 // SetNpmPackageLookup installs tracked-package evidence for the cross-repo pass.
@@ -89,14 +90,17 @@ func (cr *CrossRepoResolver) trackedNpmImport(callerRepo, callerWS, importPath s
 
 // The per-repo pass has already made unindexed npm imports external. Retry only
 // imports with positive tracked-package evidence before building call reachability.
-func (cr *CrossRepoResolver) resolveTrackedNpmImports(edges iter.Seq[*graph.Edge], stats *CrossRepoStats) {
+func (cr *CrossRepoResolver) resolveTrackedNpmImports(ctx context.Context, edges iter.Seq[*graph.Edge], stats *CrossRepoStats) error {
 	if cr.npmPackages == nil {
-		return
+		return ctx.Err()
 	}
 	// Scan metadata-free projections. Hydrate only imports whose package name
 	// is tracked, so ordinary node_modules dependencies stay on the cheap path.
 	var eligible []*graph.Edge
 	for e := range edges {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		spec := trackedNpmImportSpec(e)
 		if spec == "" || !cr.eligibleTrackedNpmImport(e, spec) {
 			continue
@@ -108,12 +112,15 @@ func (cr *CrossRepoResolver) resolveTrackedNpmImports(edges iter.Seq[*graph.Edge
 		eligible = append(eligible, e)
 	}
 	if len(eligible) == 0 {
-		return
+		return ctx.Err()
 	}
 	memo := &npmImportMemo{probes: map[npmProbeKey]*graph.Node{}, nodes: map[string]*graph.Node{}}
 	// Close the light-edge cursor before reading or writing full edges. Hydrate
 	// only one bounded page at a time; metadata never accumulates across pages.
 	for start := 0; start < len(eligible); start += resolvePendingPageRows {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		page := eligible[start:min(start+resolvePendingPageRows, len(eligible))]
 		sites := make([]graph.EdgeSite, 0, len(page))
 		for _, e := range page {
@@ -137,6 +144,7 @@ func (cr *CrossRepoResolver) resolveTrackedNpmImports(edges iter.Seq[*graph.Edge
 			cr.graph.ReindexEdges(batch)
 		}
 	}
+	return ctx.Err()
 }
 
 func trackedNpmImportSpec(e *graph.Edge) string {
