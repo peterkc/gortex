@@ -1,0 +1,238 @@
+package resolver
+
+import (
+	"maps"
+	"strings"
+
+	"github.com/zzet/gortex/internal/graph"
+)
+
+// SetGoModules supplies root go.mod identities keyed by tracked repository
+// prefix. Graph paths are relative to these roots, not to the module name.
+func (r *Resolver) SetGoModules(modules map[string]string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.goModules = maps.Clone(modules)
+}
+
+// SetCrossWorkspaceDepLookup installs the same boundary policy used by the
+// cross-repository resolver. A nil lookup retains the legacy unwired behavior.
+func (r *Resolver) SetCrossWorkspaceDepLookup(lookup CrossWorkspaceDepLookup) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.crossWorkspaceLookup = lookup
+}
+
+// SetGoModuleLookup installs a revision-cached identity lookup for every resolve
+// entry point, including watcher batches that never run a per-repo full pass.
+func (r *Resolver) SetGoModuleLookup(lookup func() map[string]string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.goModuleLookup = lookup
+}
+
+// refreshGoModules runs under the resolver lock before pass workers start.
+// The lookup publishes an immutable map; edges read it without shared locks.
+func (r *Resolver) refreshGoModules() {
+	if r.goModuleLookup != nil {
+		r.goModules = r.goModuleLookup()
+	}
+}
+
+// SetDeferGoModuleMisses preserves symbol-bearing imports only while the
+// indexer resolves against a repository-only cold shadow.
+func (r *Resolver) SetDeferGoModuleMisses(deferMisses bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deferredGoMu.Lock()
+	defer r.deferredGoMu.Unlock()
+	r.deferGoModuleMisses = deferMisses
+	if deferMisses {
+		r.deferredGoEdges = nil
+	}
+}
+
+func (r *Resolver) pendingGoModuleExtern(e *graph.Edge) bool {
+	if !r.deferGoModuleMisses || !strings.HasSuffix(e.FilePath, ".go") {
+		return false
+	}
+	target := graph.UnresolvedName(e.To)
+	if !strings.HasPrefix(target, "extern::") {
+		return false
+	}
+	spec := strings.TrimPrefix(target, "extern::")
+	sep := strings.LastIndex(spec, "::")
+	if sep < 0 {
+		return false
+	}
+	importPath := spec[:sep]
+	caller := r.callerRepoPrefix(e)
+	ownModule := r.goModules[caller]
+	for repo, module := range r.goModules {
+		if repo != caller && len(module) > len(ownModule) &&
+			(importPath == module || strings.HasPrefix(importPath, module+"/")) {
+			return true
+		}
+	}
+	if ownModule != "" && (importPath == ownModule || strings.HasPrefix(importPath, ownModule+"/")) {
+		return false // the cold shadow already contains the caller's whole module
+	}
+	return trackedGoImport(r.goModules, importPath)
+}
+
+func (r *Resolver) externWorkspaceEligible(e *graph.Edge, candidate *graph.Node, importPath string) bool {
+	return crossWorkspaceEligible(r.crossWorkspaceLookup,
+		candidateWorkspaceID(r.cachedGetNode(e.From)), candidateWorkspaceID(candidate), importPath)
+}
+
+// resolveGoModuleExtern prefers module identity over graph-directory suffixes.
+// A tracked checkout is a source hint, not proof of the required module version.
+func (r *Resolver) resolveGoModuleExtern(e *graph.Edge, importPath, callerRepo string, candidates []*graph.Node, stats *ResolveStats) bool {
+	if !strings.HasSuffix(e.FilePath, ".go") {
+		return false
+	}
+	var match *graph.Node
+	if r.pendingGoModuleExtern(e) {
+		match = goModulePreciseLocal(r.goModules, importPath, candidates, callerRepo)
+		if match == nil {
+			var remote []*graph.Node
+			for _, candidate := range candidates {
+				if candidate.RepoPrefix != callerRepo {
+					remote = append(remote, candidate)
+				}
+			}
+			match = goModuleCandidate(r.goModules, importPath, remote,
+				callerRepo, candidateWorkspaceID(r.cachedGetNode(e.From)), r.crossWorkspaceLookup)
+		}
+	} else {
+		match = goModuleCandidate(r.goModules, importPath, candidates,
+			callerRepo, candidateWorkspaceID(r.cachedGetNode(e.From)), r.crossWorkspaceLookup)
+	}
+	if match == nil {
+		return false
+	}
+	bindGoModuleEdge(e, match, callerRepo)
+	stats.Resolved++
+	return true
+}
+
+func goModulePreciseLocal(modules map[string]string, importPath string, candidates []*graph.Node, callerRepo string) *graph.Node {
+	ownModule := modules[callerRepo]
+	ownDir := ""
+	if ownModule != "" && (importPath == ownModule || strings.HasPrefix(importPath, ownModule+"/")) {
+		ownDir = callerRepo + strings.TrimPrefix(importPath, ownModule)
+	}
+	// Only precise same-repo forms outrank a tracked module identity.
+	for _, c := range candidates {
+		if c.RepoPrefix != callerRepo || (c.Language != "" && c.Language != "go") ||
+			(c.Kind != graph.KindFunction && c.Kind != graph.KindMethod && c.Kind != graph.KindType && c.Kind != graph.KindInterface) {
+			continue
+		}
+		dir := filePathDir(c.FilePath)
+		if dir == ownDir || dir == importPath || strings.HasSuffix(dir, "/"+importPath) {
+			return c
+		}
+	}
+	return nil
+}
+
+func goModuleCandidate(modules map[string]string, importPath string, candidates []*graph.Node, callerRepo, sourceWS string, lookup CrossWorkspaceDepLookup) *graph.Node {
+	if match := goModulePreciseLocal(modules, importPath, candidates, callerRepo); match != nil {
+		return match
+	}
+	var match *graph.Node
+	longest := 0
+	ambiguous := false
+	for _, c := range candidates {
+		if (c.Language != "" && c.Language != "go") || (c.Kind != graph.KindFunction && c.Kind != graph.KindType && c.Kind != graph.KindInterface) {
+			continue // a package selector does not name a receiver method
+		}
+		module := modules[c.RepoPrefix]
+		if module == "" || (importPath != module && !strings.HasPrefix(importPath, module+"/")) {
+			continue
+		}
+		wantDir := c.RepoPrefix + strings.TrimPrefix(importPath, module)
+		if filePathDir(c.FilePath) != wantDir || !crossWorkspaceEligible(lookup, sourceWS, candidateWorkspaceID(c), importPath) {
+			continue
+		}
+		switch {
+		case match == nil || len(module) > longest:
+			match, longest, ambiguous = c, len(module), false
+		case len(module) == longest && c.RepoPrefix == callerRepo && match.RepoPrefix != callerRepo:
+			match, ambiguous = c, false
+		case len(module) == longest && match.RepoPrefix == callerRepo && c.RepoPrefix != callerRepo:
+			continue
+		case len(module) == longest:
+			if c.RepoPrefix != match.RepoPrefix || filePathDir(c.FilePath) != filePathDir(match.FilePath) {
+				ambiguous = true
+			} else if c.ID < match.ID {
+				match = c
+			}
+		}
+	}
+	if ambiguous {
+		return nil
+	}
+	if match != nil {
+		return match
+	}
+	// Keep the base loose same-repo fallback only after module identity found nothing.
+	for _, c := range candidates {
+		if c.RepoPrefix == callerRepo && (c.Language == "" || c.Language == "go") &&
+			(c.Kind == graph.KindFunction || c.Kind == graph.KindMethod || c.Kind == graph.KindType || c.Kind == graph.KindInterface) &&
+			strings.HasSuffix(filePathDir(c.FilePath), "/"+lastPathComponent(importPath)) {
+			return c
+		}
+	}
+	return nil
+}
+
+func bindGoModuleEdge(e *graph.Edge, match *graph.Node, callerRepo string) {
+	e.To = match.ID
+	e.CrossRepo = callerRepo != "" && match.RepoPrefix != "" && match.RepoPrefix != callerRepo
+	if e.CrossRepo {
+		e.Confidence = 0.6
+		e.ConfidenceLabel = graph.ConfidenceLabelFor(e.Kind, e.Confidence)
+		e.Origin = graph.OriginASTInferred
+	} else {
+		e.Confidence = 0
+		e.ConfidenceLabel = ""
+		e.Origin = ""
+	}
+	clearEdgeTerminal(e)
+}
+
+func trackedGoImport(modules map[string]string, importPath string) bool {
+	for _, module := range modules {
+		if importPath == module || strings.HasPrefix(importPath, module+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// TakeDeferredGoModuleEdges drains only imports the cold shadow left pending.
+func (r *Resolver) TakeDeferredGoModuleEdges() []*graph.Edge {
+	r.deferredGoMu.Lock()
+	defer r.deferredGoMu.Unlock()
+	if r.deferGoModuleMisses {
+		return nil // a global pass must not drain a shadow that has not published yet
+	}
+	edges := make([]*graph.Edge, 0, len(r.deferredGoEdges))
+	for _, e := range r.deferredGoEdges {
+		edges = append(edges, e)
+	}
+	r.deferredGoEdges = nil
+	return edges
+}
+
+func (r *Resolver) noteDeferredGoModuleEdge(e *graph.Edge) {
+	r.deferredGoMu.Lock()
+	defer r.deferredGoMu.Unlock()
+	if r.deferredGoEdges == nil {
+		r.deferredGoEdges = make(map[graph.EdgeIdentity]*graph.Edge)
+	}
+	copy := *e
+	copy.Meta = maps.Clone(e.Meta)
+	r.deferredGoEdges[graph.EdgeIdentityFor(e)] = &copy
+}
