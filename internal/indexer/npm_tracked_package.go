@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"bytes"
 	"encoding/json"
 	"path"
 	"sync"
@@ -13,10 +14,12 @@ import (
 // resolver captures fresh roots and reads fresh manifests after edits or track/untrack.
 func (mi *MultiIndexer) npmPackageLookup() resolver.NpmPackageLookup {
 	type entry struct {
-		dir     string
-		exports *packageExports
-		types   string
-		main    string
+		dir        string
+		exports    *packageExports
+		declared   map[string]string
+		hasExports bool
+		types      string
+		main       string
 	}
 	roots := map[string]string{}
 	for prefix, meta := range mi.AllMetadata() {
@@ -51,15 +54,27 @@ func (mi *MultiIndexer) npmPackageLookup() resolver.NpmPackageLookup {
 					src, _ = readDiskFile(joinPath(root, joinRel(dir, "package.json")))
 				}
 				var manifest struct {
-					Name  string `json:"name"`
-					Types string `json:"types"`
-					Main  string `json:"main"`
+					Name    string          `json:"name"`
+					Exports json.RawMessage `json:"exports"`
+					Types   string          `json:"types"`
+					Main    string          `json:"main"`
 				}
 				if json.Unmarshal(src, &manifest) != nil || manifest.Name == "" {
 					continue
 				}
+				exports := parsePackageExports(src)
+				declared := declaredNpmExports(manifest.Exports)
+				// Keep unsupported and blocked keys in the target map so an
+				// exact key cannot fall through to a broader wildcard target.
+				if exports != nil {
+					for key := range declared {
+						if _, ok := exports.subpaths[key]; !ok {
+							exports.subpaths[key] = ""
+						}
+					}
+				}
 				packages[manifest.Name] = append(packages[manifest.Name], entry{
-					dir: path.Join(prefix, dir), exports: parsePackageExports(src), types: manifest.Types, main: manifest.Main,
+					dir: path.Join(prefix, dir), exports: exports, declared: declared, hasExports: hasPackageExports(manifest.Exports), types: manifest.Types, main: manifest.Main,
 				})
 			}
 		}
@@ -73,14 +88,23 @@ func (mi *MultiIndexer) npmPackageLookup() resolver.NpmPackageLookup {
 		targets := map[string][]string{}
 		for _, pkg := range packages[name] {
 			targets[pkg.dir] = nil
-			var paths []string
+			var target string
 			if pkg.exports != nil {
-				paths = append(paths, resolveExportsSubpath(pkg.exports.subpaths, sub))
+				target = resolveExportsSubpath(pkg.exports.subpaths, sub)
 			}
-			if sub == "" {
-				paths = append(paths, pkg.types, pkg.main, "index")
-			} else if pkg.exports == nil {
-				paths = append(paths, sub)
+			declaration := resolveExportsSubpath(pkg.declared, sub)
+			if pkg.hasExports && declaration != "declared" {
+				continue
+			}
+			// A declared entry with unsupported conditions keeps legacy
+			// candidates; a supported target remains authoritative.
+			paths := []string{target}
+			if !pkg.hasExports || target == "" {
+				if sub == "" {
+					paths = append(paths, pkg.types, pkg.main, "index")
+				} else {
+					paths = append(paths, sub)
+				}
 			}
 			for _, target := range paths {
 				// Never let manifest paths bind another package/repository.
@@ -92,4 +116,35 @@ func (mi *MultiIndexer) npmPackageLookup() resolver.NpmPackageLookup {
 		}
 		return targets
 	}
+}
+
+// declaredNpmExports retains entry keys independently of supported conditions.
+// Values are matcher markers, not paths, so wildcard substitution leaves them intact.
+func declaredNpmExports(raw json.RawMessage) map[string]string {
+	var asString string
+	if json.Unmarshal(raw, &asString) == nil && hasPackageExports(raw) {
+		return map[string]string{".": "declared"}
+	}
+	var entries map[string]json.RawMessage
+	if json.Unmarshal(raw, &entries) != nil {
+		return nil
+	}
+	if !hasSubpathKeys(entries) {
+		return map[string]string{".": "declared"}
+	}
+	declared := make(map[string]string, len(entries))
+	for key, target := range entries {
+		declared[key] = "declared"
+		if bytes.Equal(bytes.TrimSpace(target), []byte("null")) {
+			declared[key] = "blocked"
+		}
+	}
+	return declared
+}
+
+// hasPackageExports reports whether package.json declares exports. Node treats
+// a null exports field like an absent one and falls back to main.
+func hasPackageExports(raw json.RawMessage) bool {
+	s := bytes.TrimSpace(raw)
+	return len(s) > 0 && !bytes.Equal(s, []byte("null"))
 }
