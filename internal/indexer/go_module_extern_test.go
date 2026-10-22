@@ -715,3 +715,90 @@ func TestMultiIndexer_GoModuleDeferredPublishDuringPass(t *testing.T) {
 	}
 	assert.Equal(t, []string{"b/lib.go::Fn"}, targets, "a pass cannot drain rows published outside its snapshot")
 }
+
+func TestMultiIndexer_GoModuleDeferredBeforeCancelledGlobalPass(t *testing.T) {
+	db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	library := t.TempDir()
+	writeFile(t, filepath.Join(library, "go.mod"), "module example.org/lib\n")
+	cm := newTestConfigManager(t)
+	cm.Global().Repos = []config.RepoEntry{{Name: "b", Path: library}}
+	mi := NewMultiIndexer(db, newTestRegistry(), search.NewNull(), cm, zap.NewNop())
+	t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
+	shadow := graph.New()
+	shadow.AddNode(&graph.Node{ID: "a/main.go::Caller", Name: "Caller", Kind: graph.KindFunction, FilePath: "a/main.go", RepoPrefix: "a", WorkspaceID: "shared", Language: "go"})
+	shadow.AddEdge(&graph.Edge{From: "a/main.go::Caller", To: "unresolved::extern::example.org/lib::Fn", Kind: graph.EdgeCalls, FilePath: "a/main.go"})
+	r := resolver.New(shadow)
+	r.SetGoModules(map[string]string{"b": "example.org/lib"})
+	r.SetDeferGoModuleMisses(true)
+	r.ResolveAll()
+	for _, n := range shadow.AllNodes() {
+		db.AddNode(n)
+	}
+	for _, e := range shadow.AllEdges() {
+		db.AddEdge(e)
+	}
+	db.AddNode(&graph.Node{ID: "b/lib.go::Fn", Name: "Fn", Kind: graph.KindFunction, FilePath: "b/lib.go", RepoPrefix: "b", WorkspaceID: "shared", Language: "go"})
+	r.SetGraph(db)
+	r.SetDeferGoModuleMisses(false)
+	idx := &Indexer{resolver: r}
+	mi.indexers["a"] = idx
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, mi.runCrossRepoResolveContext(ctx, false), context.Canceled)
+	require.NoError(t, mi.resolveDeferredGoModules(idx))
+	var calls []*graph.Edge
+	for _, e := range db.GetOutEdges("a/main.go::Caller") {
+		if e.Kind == graph.EdgeCalls {
+			calls = append(calls, e)
+		}
+	}
+	require.Len(t, calls, 1)
+	assert.Equal(t, "b/lib.go::Fn", calls[0].To, "a global pass must resolve receipts it drains, even if its later scan is cancelled")
+}
+
+type goModulePublishScanCountingStore struct {
+	graph.Store
+	scans int
+}
+
+func (s *goModulePublishScanCountingStore) ExternalCallCandidateEdgesSeq() iter.Seq[*graph.Edge] {
+	return func(yield func(*graph.Edge) bool) {
+		s.scans++
+		for e := range s.Store.(graph.ExternalCallCandidateIterator).ExternalCallCandidateEdgesSeq() {
+			if !yield(e) {
+				return
+			}
+		}
+	}
+}
+
+func TestMultiIndexer_GoModuleNonModulePublishRetries(t *testing.T) {
+	db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	g := &goModulePublishScanCountingStore{Store: db}
+	library := t.TempDir()
+	writeFile(t, filepath.Join(library, "go.mod"), "module example.org/lib\n")
+	cm := newTestConfigManager(t)
+	cm.Global().Repos = []config.RepoEntry{{Name: "b", Path: library}}
+	mi := NewMultiIndexer(g, newTestRegistry(), search.NewNull(), cm, zap.NewNop())
+	t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
+	g.AddNode(&graph.Node{ID: "a/main.go::Caller", Name: "Caller", Kind: graph.KindFunction, FilePath: "a/main.go", RepoPrefix: "a", WorkspaceID: "shared", Language: "go"})
+	g.AddNode(&graph.Node{ID: "b/lib.go::Fn", Name: "Fn", Kind: graph.KindFunction, FilePath: "b/lib.go", RepoPrefix: "b", WorkspaceID: "shared", Language: "go"})
+	g.AddEdge(&graph.Edge{From: "a/main.go::Caller", To: "dep::example.org/lib::Fn", Kind: graph.EdgeCalls, FilePath: "a/main.go"})
+	idx := &Indexer{resolver: resolver.New(g), repoPrefix: "non-go"}
+	for range 2 {
+		require.NoError(t, mi.postPublishGoModules(t.Context(), idx, true))
+	}
+	assert.Equal(t, 1, g.scans, "repeated publication with the same module revision must not repeat the sweep")
+	var calls []*graph.Edge
+	for _, e := range g.GetOutEdges("a/main.go::Caller") {
+		if e.Kind == graph.EdgeCalls {
+			calls = append(calls, e)
+		}
+	}
+	require.Len(t, calls, 1)
+	assert.Equal(t, "b/lib.go::Fn", calls[0].To)
+}
