@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -231,6 +232,44 @@ func TestReconstructedMeasurementLoadNoReplay(t *testing.T) {
 }
 
 func TestReconstructedMeasurementSearchTimeout(t *testing.T) {
+	t.Run("bounded_output_tail", func(t *testing.T) {
+		short := "notice\n"
+		if got := issue767OutputTail(short); got != short {
+			t.Fatalf("short output=%q", got)
+		}
+		long := strings.Repeat("x", 5000) + short
+		if got := issue767OutputTail(long); len(got) != 4096 || !strings.HasPrefix(got, "[truncated]\n") || !strings.HasSuffix(got, short) {
+			t.Fatalf("tail length=%d output=%q", len(got), got)
+		}
+	})
+	t.Run("stderr_notice_valid_stdout", func(t *testing.T) {
+		dir := t.TempDir()
+		binary := filepath.Join(dir, "search")
+		notice := "[gortex] daemon did not answer within 3s (a track / reload / enrichment may be holding it) — asking it anyway\n"
+		file := filepath.Join(dir, "target.go")
+		payload := `{"nodes":[{"name":"Target","absolute_file_path":` + strconv.Quote(file) + `,"repo_prefix":"issue767"}]}`
+		script := "#!/bin/sh\nprintf '%s' '" + notice + "' >&2\nprintf '%s' '" + payload + "'\n"
+		if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+			t.Fatal(err)
+		}
+		f := &issue767Fixture{t: t, binary: binary, primary: dir, env: os.Environ()}
+		d := &reconstructedDriver{f: f, symbols: []reconstructedSymbol{{Name: "Target", File: "target.go"}}}
+		sample := d.search("load", 0)
+		if !sample.Passed || sample.Error != "" || sample.TimedOut || sample.Answer.Stderr != notice || !sample.Answer.Found || !sample.Answer.FromExpectedFile || sample.Answer.Prefix != "issue767" {
+			t.Fatalf("sample=%+v", sample)
+		}
+		if !strings.Contains(f.lastResponse(), notice) || !strings.Contains(f.lastResponse(), payload) || f.clientCallCount() != 1 {
+			t.Fatalf("last response=%q calls=%d", f.lastResponse(), f.clientCallCount())
+		}
+		raw, err := json.Marshal(sample)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var roundTrip reconstructedSample
+		if err := json.Unmarshal(raw, &roundTrip); err != nil || roundTrip.Answer.Stderr != notice {
+			t.Fatalf("serialized sample=%s error=%v", raw, err)
+		}
+	})
 	for _, tc := range []struct {
 		name, script string
 		timedOut     bool
@@ -239,6 +278,7 @@ func TestReconstructedMeasurementSearchTimeout(t *testing.T) {
 		{"unrelated_kill", "kill -KILL $$", false},
 		{"deadline_text_is_not_deadline", "echo 'signal: killed: CLI context deadline exceeded'; exit 1", false},
 		{"malformed_answer", "echo 'not JSON'", false},
+		{"stderr_notice_only", "echo '[gortex] daemon did not answer within 3s — asking it anyway' >&2; exit 1", false},
 		{"exit_status", "exit 2", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -252,6 +292,9 @@ func TestReconstructedMeasurementSearchTimeout(t *testing.T) {
 			sample := d.search("load", 0)
 			if sample.Passed || sample.Error == "" || sample.Answer.Error == "" || sample.TimedOut != tc.timedOut || sample.TimeoutMS != 10000 {
 				t.Fatalf("sample=%+v", sample)
+			}
+			if tc.name == "stderr_notice_only" && (!strings.Contains(sample.Error, "[gortex] daemon did not answer") || !strings.Contains(sample.Answer.Stderr, "[gortex] daemon did not answer")) {
+				t.Fatalf("stderr notice missing from error or record: %+v", sample)
 			}
 			if tc.timedOut && sample.DurationMS != 10000 {
 				t.Fatalf("duration=%v, want censored 10000 ms", sample.DurationMS)
@@ -454,6 +497,50 @@ func TestReconstructedMeasurementContractAnswer(t *testing.T) {
 	notTracked := "Error: the gortex daemon does not track /private/repo — add it with `gortex track /private/repo`\n"
 	incomplete := "Error: required_capability_incomplete: graph.contracts did not become complete within this request: context deadline exceeded; retry after 5s\n"
 	good0 := strings.ReplaceAll(good, "save-007", "save-000")
+	t.Run("command_streams", func(t *testing.T) {
+		notice := "[gortex] daemon did not answer within 3s (a track / reload / enrichment may be holding it) — asking it anyway\n"
+		for _, tc := range []struct {
+			name, stdout, stderr string
+			exit                 int
+			pending, available   bool
+			unavailable, retry   string
+		}{
+			{name: "notice_and_answer", stdout: good, stderr: notice, available: true},
+			{name: "notice_only", stderr: notice, exit: 1},
+			{name: "not_tracked_stderr", stderr: notTracked, exit: 1, pending: true, unavailable: "startup repository not tracked before enrichment"},
+			{name: "not_tracked_after_enrichment", stderr: notTracked, exit: 1},
+			{name: "incomplete_stderr", stderr: incomplete, exit: 1, unavailable: "required_capability_incomplete: context deadline exceeded", retry: "5s"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				dir := t.TempDir()
+				binary := filepath.Join(dir, "contracts")
+				stderr := strings.ReplaceAll(tc.stderr, "/private/repo", dir)
+				script := "#!/bin/sh\nprintf '%s' '" + tc.stdout + "'\nprintf '%s' '" + stderr + "' >&2\nexit " + strconv.Itoa(tc.exit) + "\n"
+				if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+					t.Fatal(err)
+				}
+				f := &issue767Fixture{t: t, binary: binary, primary: dir, env: os.Environ()}
+				d := &reconstructedDriver{f: f}
+				raw := d.demandWithin(reconstructedRoute(7), time.Second)
+				got := reconstructedObserveDemand(raw, reconstructedContractState{LatestSave: 7, PreviousSave: -1, AllowPending: tc.pending}, dir)
+				wantError := !tc.available && tc.unavailable == ""
+				if (got.Error != "") != wantError || got.Available != tc.available || got.UnavailableReason != tc.unavailable || got.RetryAfter != tc.retry || got.Response != tc.stdout || got.Stderr != stderr {
+					t.Fatalf("record=%+v", got)
+				}
+				if tc.available && (got.NewestSave != 7 || got.NewestRoute != reconstructedRoute(7)) {
+					t.Fatalf("observation=%+v", got.reconstructedContractObservation)
+				}
+				encoded, err := json.Marshal(got)
+				if err != nil {
+					t.Fatal(err)
+				}
+				roundTrip := reconstructedDemand{reconstructedContractObservation: &reconstructedContractObservation{}}
+				if err := json.Unmarshal(encoded, &roundTrip); err != nil || roundTrip.Stderr != got.Stderr || roundTrip.Response != got.Response {
+					t.Fatalf("serialized demand=%s error=%v", encoded, err)
+				}
+			})
+		}
+	})
 	for _, tc := range []struct {
 		name, raw, commandError string
 		before, pass            bool

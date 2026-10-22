@@ -939,6 +939,7 @@ type reconstructedDemand struct {
 	End        time.Time `json:"end"`
 	Route      string    `json:"expected_route"`
 	Response   string    `json:"response"`
+	Stderr     string    `json:"stderr,omitempty"`
 	DurationMS float64   `json:"client_duration_ms"`
 	Error      string    `json:"error,omitempty"`
 	LatestSave int       `json:"latest_save"`
@@ -988,8 +989,9 @@ func (d *reconstructedDriver) demand(route string) reconstructedDemand {
 
 func (d *reconstructedDriver) demandWithin(route string, timeout time.Duration) reconstructedDemand {
 	sample := reconstructedDemand{Start: time.Now(), Route: route}
-	raw, err := d.f.tryCommand(timeout, d.f.primary, "call", "contracts", "--arg", "action=list", "--arg", "type=http", "--arg", "limit=1000", "--format=json")
+	raw, stderr, err := d.f.tryCommandStreams(timeout, d.f.primary, "call", "contracts", "--arg", "action=list", "--arg", "type=http", "--arg", "limit=1000", "--format=json")
 	sample.End, sample.Response = time.Now(), string(raw)
+	sample.Stderr = issue767OutputTail(string(stderr))
 	sample.DurationMS = sample.End.Sub(sample.Start).Seconds() * 1000
 	if err != nil {
 		sample.Error = err.Error()
@@ -1076,6 +1078,9 @@ func reconstructedContractAnswer(raw []byte, state reconstructedContractState) (
 // Only the matching repo before enrichment can be startup-unavailable data.
 func reconstructedObserveDemand(record reconstructedDemand, state reconstructedContractState, repo string) reconstructedDemand {
 	message := strings.TrimSpace(record.Response)
+	if message == "" {
+		message = strings.TrimSpace(record.Stderr)
+	}
 	if record.Error == "exit status 1" {
 		if state.AllowPending && message == fmt.Sprintf("Error: the gortex daemon does not track %s — add it with `gortex track %s`", repo, repo) {
 			record.Error, record.UnavailableReason = "", "startup repository not tracked before enrichment"

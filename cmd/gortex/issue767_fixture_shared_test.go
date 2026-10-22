@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -289,6 +290,14 @@ func (f *issue767Fixture) command(timeout time.Duration, dir string, args ...str
 }
 
 func (f *issue767Fixture) tryCommand(timeout time.Duration, dir string, args ...string) ([]byte, error) {
+	stdout, stderr, err := f.tryCommandStreams(timeout, dir, args...)
+	if err != nil {
+		return append(stdout, stderr...), err // Combined only for error display.
+	}
+	return stdout, nil
+}
+
+func (f *issue767Fixture) tryCommandStreams(timeout time.Duration, dir string, args ...string) ([]byte, []byte, error) {
 	ctx, cancel := context.WithTimeoutCause(f.t.Context(), timeout, errIssue767CommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, f.binary, args...)
@@ -296,19 +305,26 @@ func (f *issue767Fixture) tryCommand(timeout time.Duration, dir string, args ...
 	f.mu.Lock()
 	f.clientCalls++
 	f.mu.Unlock()
-	output, err := cmd.CombinedOutput()
-	tail := string(output)
-	if len(tail) > 4096 {
-		tail = tail[len(tail)-4096:]
-	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
 	f.mu.Lock()
-	f.lastOutput = tail
+	f.lastOutput = issue767OutputTail(stdout.String() + stderr.String())
 	f.mu.Unlock()
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && !exitErr.ProcessState.Exited() && errors.Is(context.Cause(ctx), errIssue767CommandTimeout) {
 		err = errors.Join(err, errIssue767CommandTimeout)
 	}
-	return output, err
+	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+func issue767OutputTail(output string) string {
+	const limit = 4096
+	const truncated = "[truncated]\n"
+	if len(output) > limit {
+		return truncated + output[len(output)-(limit-len(truncated)):]
+	}
+	return output
 }
 
 // clientCallCount is the number of CLI invocations this fixture has made. A
@@ -613,6 +629,7 @@ type issue767Answer struct {
 	// a spelling reached.
 	Prefix string `json:"repo_prefix,omitempty"`
 	Error  string `json:"error,omitempty"`
+	Stderr string `json:"stderr,omitempty"`
 }
 
 // issue767SearchRequest is the request body one spelling sends. Only the
@@ -678,15 +695,16 @@ func (f *issue767Fixture) askSymbol(root, name, file string, spelling issue767Sp
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	output, err := f.tryCommand(issue767SearchTimeout, root, "call", "search", "--index", root, "--json", string(payload), "--format", "json")
+	output, stderr, err := f.tryCommandStreams(issue767SearchTimeout, root, "call", "search", "--index", root, "--json", string(payload), "--format", "json")
+	answer.Stderr = issue767OutputTail(string(stderr))
 	if err != nil {
-		answer.Error = fmt.Sprintf("search command: %v: %s", err, output)
-		return answer, fmt.Errorf("search command: %w: %s", err, output)
+		answer.Error = fmt.Sprintf("search command: %v: %s%s", err, output, stderr)
+		return answer, fmt.Errorf("search command: %w: %s%s", err, output, stderr)
 	}
 	var value any
 	if err := json.Unmarshal(output, &value); err != nil {
-		answer.Error = fmt.Sprintf("search response: %v: %s", err, output)
-		return answer, fmt.Errorf("search response: %w: %s", err, output)
+		answer.Error = fmt.Sprintf("search response: %v: %s%s", err, output, stderr)
+		return answer, fmt.Errorf("search response: %w: %s%s", err, output, stderr)
 	}
 	answer.Found, answer.Fallback = issue767JSONEvidence(value, name)
 	answer.Exact = issue767JSONExact(value)
