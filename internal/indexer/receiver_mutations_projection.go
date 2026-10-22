@@ -7,7 +7,7 @@ const receiverMutationProjectionPageSize = 4096
 type projectedReceiverField struct {
 	id    string
 	name  string
-	owner string
+	owner receiverMutationOwnerKey
 }
 
 type projectedReceiverCall struct {
@@ -18,11 +18,11 @@ type projectedReceiverCall struct {
 }
 
 func indirectMutationEdgesProjected(scanner graph.ReceiverMutationScanner) []indirectMutSpec {
-	recvType := map[string]string{}
+	recvType := map[string]receiverMutationOwnerKey{}
 	scanner.ScanReceiverMutationMethods(receiverMutationProjectionPageSize, func(page []graph.ReceiverMutationMethod) bool {
 		for _, row := range page {
-			if row.Receiver != "" {
-				recvType[row.ID] = row.Receiver
+			if owner := receiverMutationOwner(row.RepoPrefix, row.Language, row.FilePath, row.ScopePkg, row.Receiver); owner != (receiverMutationOwnerKey{}) {
+				recvType[row.ID] = owner
 			}
 		}
 		return true
@@ -31,18 +31,19 @@ func indirectMutationEdgesProjected(scanner graph.ReceiverMutationScanner) []ind
 		return nil
 	}
 
-	fieldByOwner := map[string]map[string]string{}
+	fieldByOwner := map[receiverMutationOwnerKey]map[string]string{}
 	fieldByID := map[string]projectedReceiverField{}
 	scanner.ScanReceiverMutationFields(receiverMutationProjectionPageSize, func(page []graph.ReceiverMutationField) bool {
 		for _, row := range page {
-			if row.Receiver == "" || row.Name == "" {
+			owner := receiverMutationOwner(row.RepoPrefix, row.Language, row.FilePath, row.ScopePkg, row.Receiver)
+			if owner == (receiverMutationOwnerKey{}) || row.Name == "" {
 				continue
 			}
-			if fieldByOwner[row.Receiver] == nil {
-				fieldByOwner[row.Receiver] = map[string]string{}
+			if fieldByOwner[owner] == nil {
+				fieldByOwner[owner] = map[string]string{}
 			}
-			fieldByOwner[row.Receiver][row.Name] = row.ID
-			fieldByID[row.ID] = projectedReceiverField{id: row.ID, name: row.Name, owner: row.Receiver}
+			fieldByOwner[owner][row.Name] = row.ID
+			fieldByID[row.ID] = projectedReceiverField{id: row.ID, name: row.Name, owner: owner}
 		}
 		return true
 	})
@@ -108,7 +109,7 @@ func indirectMutationEdgesProjected(scanner graph.ReceiverMutationScanner) []ind
 					changed = true
 				}
 			case call.recvSelf:
-				if !calleeMutates || recvType[call.calleeID] != recvType[call.from] || recvType[call.from] == "" {
+				if !calleeMutates || recvType[call.calleeID] != recvType[call.from] || recvType[call.from] == (receiverMutationOwnerKey{}) {
 					continue
 				}
 				for fieldName := range mutators[call.calleeID] {
@@ -145,7 +146,7 @@ func indirectMutationEdgesProjected(scanner graph.ReceiverMutationScanner) []ind
 				emit(call.from, fieldID, call.file, call.calleeName, call.line)
 			}
 		case call.recvSelf && calleeMutates:
-			if recvType[call.calleeID] != owner || owner == "" {
+			if recvType[call.calleeID] != owner || owner == (receiverMutationOwnerKey{}) {
 				continue
 			}
 			for fieldName := range mutators[call.calleeID] {

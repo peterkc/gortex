@@ -3,16 +3,24 @@ package graph
 // ReceiverMutationMethod is the compact method declaration needed by the
 // whole-graph receiver-mutation fixpoint.
 type ReceiverMutationMethod struct {
-	ID       string
-	Receiver string
+	ID         string
+	Receiver   string
+	RepoPrefix string
+	FilePath   string
+	Language   string
+	ScopePkg   string
 }
 
 // ReceiverMutationField is the compact field declaration needed by the
 // whole-graph receiver-mutation fixpoint.
 type ReceiverMutationField struct {
-	ID       string
-	Name     string
-	Receiver string
+	ID         string
+	Name       string
+	Receiver   string
+	RepoPrefix string
+	FilePath   string
+	Language   string
+	ScopePkg   string
 }
 
 // ReceiverMutationWrite is the compact direct-write seed for the

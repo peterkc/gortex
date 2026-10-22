@@ -70,11 +70,11 @@ func receiverMutationSQLiteFixture(t testFataler, noiseCalls int) *store_sqlite.
 	t.Cleanup(func() { _ = s.Close() })
 
 	nodes := []*graph.Node{
-		{ID: "method::set", Kind: graph.KindMethod, Name: "Set", Meta: map[string]any{"receiver": "Type"}},
-		{ID: "method::wrap", Kind: graph.KindMethod, Name: "Wrap", Meta: map[string]any{"receiver": "Type"}},
-		{ID: "method::outer", Kind: graph.KindMethod, Name: "Outer", Meta: map[string]any{"receiver": "Type"}},
-		{ID: "method::append", Kind: graph.KindMethod, Name: "AppendItems", Meta: map[string]any{"receiver": "Type"}},
-		{ID: "field::items", Kind: graph.KindField, Name: "items", Meta: map[string]any{"receiver": "Type"}},
+		{ID: "method::set", Kind: graph.KindMethod, Name: "Set", FilePath: "type.go", Language: "go", Meta: map[string]any{"receiver": "Type"}},
+		{ID: "method::wrap", Kind: graph.KindMethod, Name: "Wrap", FilePath: "type.go", Language: "go", Meta: map[string]any{"receiver": "Type"}},
+		{ID: "method::outer", Kind: graph.KindMethod, Name: "Outer", FilePath: "type.go", Language: "go", Meta: map[string]any{"receiver": "Type"}},
+		{ID: "method::append", Kind: graph.KindMethod, Name: "AppendItems", FilePath: "type.go", Language: "go", Meta: map[string]any{"receiver": "Type"}},
+		{ID: "field::items", Kind: graph.KindField, Name: "items", FilePath: "type.go", Language: "go", Meta: map[string]any{"receiver": "Type"}},
 	}
 	edges := []*graph.Edge{
 		{From: "method::set", To: "field::items", Kind: graph.EdgeWrites, FilePath: "type.go", Line: 3},

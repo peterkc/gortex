@@ -10,70 +10,78 @@ import (
 
 var (
 	receiverMutationReceiverKey  = []byte("receiver")
+	receiverMutationScopePkgKey  = []byte("scope_pkg")
 	receiverMutationRecvFieldKey = []byte("recv_field")
 	receiverMutationRecvSelfKey  = []byte("recv_self")
 )
 
 // decodeReceiverMutationMeta validates every persisted metadata value while
-// retaining only the three scalar fields used by receiver-mutation synthesis.
+// retaining only the scalar fields used by receiver-mutation synthesis.
 // Current flat blobs are traversed without materializing a map; legacy JSON and
 // gob rows retain the authoritative decodeMeta behavior.
-func decodeReceiverMutationMeta(blob []byte) (receiver, recvField string, recvSelf bool, err error) {
+func decodeReceiverMutationMeta(blob []byte) (receiver, recvField string, recvSelf bool, scopePkg string, err error) {
 	if len(blob) == 0 {
-		return "", "", false, nil
+		return "", "", false, "", nil
 	}
 	if !isFlatMeta(blob) {
 		var meta map[string]any
 		meta, err = decodeMeta(blob)
 		if err != nil {
-			return "", "", false, err
+			return "", "", false, "", err
 		}
 		receiver, _ = meta["receiver"].(string)
+		scopePkg, _ = meta["scope_pkg"].(string)
 		recvField, _ = meta["recv_field"].(string)
 		recvSelf, _ = meta["recv_self"].(bool)
-		return receiver, recvField, recvSelf, nil
+		return receiver, recvField, recvSelf, scopePkg, nil
 	}
 
 	d := &metaDecoder{buf: blob[2:]}
 	count, err := d.readCount()
 	if err != nil {
-		return "", "", false, err
+		return "", "", false, "", err
 	}
 	for i := 0; i < count; i++ {
 		key, readErr := d.readRawString()
 		if readErr != nil {
-			return "", "", false, readErr
+			return "", "", false, "", readErr
 		}
 		switch {
 		case bytes.Equal(key, receiverMutationReceiverKey):
 			value, readErr := d.readValue()
 			if readErr != nil {
-				return "", "", false, readErr
+				return "", "", false, "", readErr
 			}
 			receiver, _ = value.(string)
+		case bytes.Equal(key, receiverMutationScopePkgKey):
+			value, readErr := d.readValue()
+			if readErr != nil {
+				return "", "", false, "", readErr
+			}
+			scopePkg, _ = value.(string)
 		case bytes.Equal(key, receiverMutationRecvFieldKey):
 			value, readErr := d.readValue()
 			if readErr != nil {
-				return "", "", false, readErr
+				return "", "", false, "", readErr
 			}
 			recvField, _ = value.(string)
 		case bytes.Equal(key, receiverMutationRecvSelfKey):
 			value, readErr := d.readValue()
 			if readErr != nil {
-				return "", "", false, readErr
+				return "", "", false, "", readErr
 			}
 			recvSelf, _ = value.(bool)
 		default:
 			if readErr := d.skipValue(); readErr != nil {
-				return "", "", false, readErr
+				return "", "", false, "", readErr
 			}
 		}
 	}
-	return receiver, recvField, recvSelf, nil
+	return receiver, recvField, recvSelf, scopePkg, nil
 }
 
 func validateReceiverMutationMeta(blob []byte) error {
-	_, _, _, err := decodeReceiverMutationMeta(blob)
+	_, _, _, _, err := decodeReceiverMutationMeta(blob)
 	return err
 }
 

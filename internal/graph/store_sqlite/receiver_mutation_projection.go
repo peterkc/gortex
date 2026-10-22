@@ -38,7 +38,7 @@ func (s *Store) receiverMutationEdgeHighWater(kind graph.EdgeKind) (int64, bool)
 	return highWater, highWater != 0
 }
 
-// ScanReceiverMutationMethods keyset-pages only method IDs and receiver
+// ScanReceiverMutationMethods keyset-pages method identity and receiver scope
 // metadata. sql.RawBytes is decoded before Rows.Next so database/sql does not
 // retain a second metadata copy.
 func (s *Store) ScanReceiverMutationMethods(
@@ -54,7 +54,7 @@ func (s *Store) ScanReceiverMutationMethods(
 		return
 	}
 	stmt, err := s.db.Prepare(`
-SELECT id, meta
+SELECT id, repo_prefix, file_path, language, meta
 FROM nodes
 WHERE kind = ? AND id > ? AND id <= ? AND view_gen = ?
 ORDER BY id
@@ -75,20 +75,22 @@ LIMIT ?`)
 		page := make([]graph.ReceiverMutationMethod, 0, pageSize)
 		scanned := 0
 		for rows.Next() {
-			var id string
+			var id, repoPrefix, filePath, language string
 			var meta sql.RawBytes
-			if err := rows.Scan(&id, &meta); err != nil {
+			if err := rows.Scan(&id, &repoPrefix, &filePath, &language, &meta); err != nil {
 				_ = rows.Close()
 				panicOnFatal(err)
 				return
 			}
 			scanned++
 			lastID = id
-			receiver, _, _, err := decodeReceiverMutationMeta(meta)
+			receiver, _, _, scopePkg, err := decodeReceiverMutationMeta(meta)
 			if err != nil {
 				continue
 			}
-			page = append(page, graph.ReceiverMutationMethod{ID: id, Receiver: receiver})
+			page = append(page, graph.ReceiverMutationMethod{
+				ID: id, Receiver: receiver, RepoPrefix: repoPrefix, FilePath: filePath, Language: language, ScopePkg: scopePkg,
+			})
 		}
 		if !closeReceiverMutationRows(rows) {
 			return
@@ -103,7 +105,7 @@ LIMIT ?`)
 }
 
 // ScanReceiverMutationFields keyset-pages only field identity, name, and
-// receiver metadata.
+// receiver scope metadata.
 func (s *Store) ScanReceiverMutationFields(
 	pageSize int,
 	yield func([]graph.ReceiverMutationField) bool,
@@ -117,7 +119,7 @@ func (s *Store) ScanReceiverMutationFields(
 		return
 	}
 	stmt, err := s.db.Prepare(`
-SELECT id, name, meta
+SELECT id, name, repo_prefix, file_path, language, meta
 FROM nodes
 WHERE kind = ? AND id > ? AND id <= ? AND view_gen = ?
 ORDER BY id
@@ -138,20 +140,22 @@ LIMIT ?`)
 		page := make([]graph.ReceiverMutationField, 0, pageSize)
 		scanned := 0
 		for rows.Next() {
-			var id, name string
+			var id, name, repoPrefix, filePath, language string
 			var meta sql.RawBytes
-			if err := rows.Scan(&id, &name, &meta); err != nil {
+			if err := rows.Scan(&id, &name, &repoPrefix, &filePath, &language, &meta); err != nil {
 				_ = rows.Close()
 				panicOnFatal(err)
 				return
 			}
 			scanned++
 			lastID = id
-			receiver, _, _, err := decodeReceiverMutationMeta(meta)
+			receiver, _, _, scopePkg, err := decodeReceiverMutationMeta(meta)
 			if err != nil {
 				continue
 			}
-			page = append(page, graph.ReceiverMutationField{ID: id, Name: name, Receiver: receiver})
+			page = append(page, graph.ReceiverMutationField{
+				ID: id, Name: name, Receiver: receiver, RepoPrefix: repoPrefix, FilePath: filePath, Language: language, ScopePkg: scopePkg,
+			})
 		}
 		if !closeReceiverMutationRows(rows) {
 			return
@@ -295,7 +299,7 @@ ORDER BY e.id`)
 			}
 			scanned++
 			lastID = id
-			_, recvField, recvSelf, err := decodeReceiverMutationMeta(edgeMeta)
+			_, recvField, recvSelf, _, err := decodeReceiverMutationMeta(edgeMeta)
 			if err != nil || (recvField == "" && !recvSelf) {
 				continue
 			}

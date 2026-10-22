@@ -14,8 +14,9 @@ func TestDecodeReceiverMutationMetaFormats(t *testing.T) {
 	t.Parallel()
 	wantReceiver := "pkg.Type"
 	wantField := "items"
+	wantScope := "com.example"
 	meta := map[string]any{
-		"receiver": wantReceiver, "recv_field": wantField, "recv_self": true,
+		"receiver": wantReceiver, "recv_field": wantField, "recv_self": true, "scope_pkg": wantScope,
 		"unrelated": []string{"a", "b"},
 	}
 	flat, err := encodeMeta(meta)
@@ -23,7 +24,7 @@ func TestDecodeReceiverMutationMetaFormats(t *testing.T) {
 		t.Fatal(err)
 	}
 	jsonBlob, err := encodeMeta(map[string]any{
-		"receiver": wantReceiver, "recv_field": wantField, "recv_self": true,
+		"receiver": wantReceiver, "recv_field": wantField, "recv_self": true, "scope_pkg": wantScope,
 		"unsupported": []int{1, 2},
 	})
 	if err != nil {
@@ -41,12 +42,12 @@ func TestDecodeReceiverMutationMetaFormats(t *testing.T) {
 		"flat": flat, "json": jsonBlob, "gob": gobBuf.Bytes(),
 	} {
 		t.Run(name, func(t *testing.T) {
-			receiver, field, self, err := decodeReceiverMutationMeta(blob)
+			receiver, field, self, scope, err := decodeReceiverMutationMeta(blob)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if receiver != wantReceiver || field != wantField || !self {
-				t.Fatalf("decoded (%q, %q, %v), want (%q, %q, true)", receiver, field, self, wantReceiver, wantField)
+			if receiver != wantReceiver || field != wantField || !self || scope != wantScope {
+				t.Fatalf("decoded (%q, %q, %v, %q), want (%q, %q, true, %q)", receiver, field, self, scope, wantReceiver, wantField, wantScope)
 			}
 		})
 	}
@@ -54,21 +55,21 @@ func TestDecodeReceiverMutationMetaFormats(t *testing.T) {
 	if len(flat) < 2 {
 		t.Fatal("flat fixture unexpectedly short")
 	}
-	if _, _, _, err := decodeReceiverMutationMeta(flat[:len(flat)-1]); err == nil {
+	if _, _, _, _, err := decodeReceiverMutationMeta(flat[:len(flat)-1]); err == nil {
 		t.Fatal("truncated flat metadata was accepted")
 	}
 	wrongTypes, err := encodeMeta(map[string]any{
-		"receiver": 7, "recv_field": false, "recv_self": "yes",
+		"receiver": 7, "recv_field": false, "recv_self": "yes", "scope_pkg": 7,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	receiver, field, self, err := decodeReceiverMutationMeta(wrongTypes)
+	receiver, field, self, scope, err := decodeReceiverMutationMeta(wrongTypes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if receiver != "" || field != "" || self {
-		t.Fatalf("wrongly typed selected values leaked through: (%q, %q, %v)", receiver, field, self)
+	if receiver != "" || field != "" || self || scope != "" {
+		t.Fatalf("wrongly typed selected values leaked through: (%q, %q, %v, %q)", receiver, field, self, scope)
 	}
 }
 
@@ -80,10 +81,10 @@ func TestReceiverMutationProjectionPagesAndReentry(t *testing.T) {
 	defer s.Close()
 
 	nodes := []*graph.Node{
-		{ID: "method::a", Kind: graph.KindMethod, Name: "A", Meta: map[string]any{"receiver": "Type"}},
+		{ID: "method::a", Kind: graph.KindMethod, Name: "A", FilePath: "pkg/type.java", Language: "java", Meta: map[string]any{"receiver": "Type", "scope_pkg": "com.example"}},
 		{ID: "method::b", Kind: graph.KindMethod, Name: "B", Meta: map[string]any{"receiver": "Type"}},
 		{ID: "method::target", Kind: graph.KindMethod, Name: "Target"},
-		{ID: "field::items", Kind: graph.KindField, Name: "items", Meta: map[string]any{"receiver": "Type"}},
+		{ID: "field::items", Kind: graph.KindField, Name: "items", FilePath: "pkg/type.java", Language: "java", Meta: map[string]any{"receiver": "Type", "scope_pkg": "com.example"}},
 	}
 	edges := []*graph.Edge{
 		{From: "method::a", To: "field::items", Kind: graph.EdgeWrites},
@@ -112,6 +113,7 @@ func TestReceiverMutationProjectionPagesAndReentry(t *testing.T) {
 	if len(methods) != 3 {
 		t.Fatalf("methods=%d, want frozen high-water count 3", len(methods))
 	}
+	assertReceiverMutationScope(t, methods[0])
 	if s.GetNode("zzzz::late-method") == nil {
 		t.Fatal("re-entrant high-water fixture was not persisted")
 	}
@@ -121,9 +123,10 @@ func TestReceiverMutationProjectionPagesAndReentry(t *testing.T) {
 		fields = append(fields, page...)
 		return true
 	})
-	if !reflect.DeepEqual(fields, []graph.ReceiverMutationField{{ID: "field::items", Name: "items", Receiver: "Type"}}) {
+	if len(fields) != 1 || fields[0].ID != "field::items" || fields[0].Name != "items" || fields[0].Receiver != "Type" {
 		t.Fatalf("fields=%#v", fields)
 	}
+	assertReceiverMutationScope(t, fields[0])
 
 	var writes []graph.ReceiverMutationWrite
 	s.ScanReceiverMutationWrites(1, func(page []graph.ReceiverMutationWrite) bool {
@@ -198,5 +201,15 @@ func TestReceiverMutationProjectionSkipsMalformedMetadata(t *testing.T) {
 	})
 	if len(calls) != 1 || calls[0].TargetMethodName != "" {
 		t.Fatalf("malformed target metadata should clear only target name: %#v", calls)
+	}
+}
+
+func assertReceiverMutationScope(t *testing.T, row any) {
+	t.Helper()
+	for name, want := range map[string]string{"FilePath": "pkg/type.java", "Language": "java", "ScopePkg": "com.example"} {
+		value := reflect.ValueOf(row).FieldByName(name)
+		if !value.IsValid() || value.String() != want {
+			t.Errorf("%T.%s=%v, want %q", row, name, value, want)
+		}
 	}
 }

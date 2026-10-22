@@ -13,13 +13,6 @@ func indirectMutationEdgesForMethods(
 	if g == nil || len(seedMethods) == 0 {
 		return nil, nil
 	}
-	receiverOf := func(node *graph.Node) string {
-		if node == nil || node.Meta == nil {
-			return ""
-		}
-		receiver, _ := node.Meta["receiver"].(string)
-		return receiver
-	}
 	receiverCall := func(edge *graph.Edge) (field string, self bool) {
 		if edge == nil || edge.Kind != graph.EdgeCalls || edge.Meta == nil {
 			return "", false
@@ -32,7 +25,7 @@ func indirectMutationEdgesForMethods(
 	impacted := make(map[string]*graph.Node)
 	frontier := make([]string, 0, len(seedMethods))
 	for _, method := range seedMethods {
-		if method == nil || method.Kind != graph.KindMethod || receiverOf(method) == "" {
+		if method == nil || method.Kind != graph.KindMethod || receiverMutationNodeOwner(method) == (receiverMutationOwnerKey{}) {
 			continue
 		}
 		if _, seen := impacted[method.ID]; seen {
@@ -67,7 +60,7 @@ func indirectMutationEdgesForMethods(
 		next := make([]string, 0, len(candidates))
 		for _, id := range candidateIDs {
 			method := candidates[id]
-			if method == nil || method.Kind != graph.KindMethod || receiverOf(method) == "" {
+			if method == nil || method.Kind != graph.KindMethod || receiverMutationNodeOwner(method) == (receiverMutationOwnerKey{}) {
 				continue
 			}
 			impacted[id] = method
@@ -114,7 +107,7 @@ func indirectMutationEdgesForMethods(
 		next := make([]string, 0, len(targets))
 		for _, id := range targetIDs {
 			method := targets[id]
-			if method == nil || method.Kind != graph.KindMethod || receiverOf(method) == "" {
+			if method == nil || method.Kind != graph.KindMethod || receiverMutationNodeOwner(method) == (receiverMutationOwnerKey{}) {
 				continue
 			}
 			analysisMethods[id] = method
@@ -149,11 +142,11 @@ func indirectMutationEdgesForMethods(
 	writeTargets := g.GetNodesByIDs(writeTargetIDs)
 	fieldsByName := g.FindNodesByNames(fieldNames)
 	fieldFor := func(method *graph.Node, name string) *graph.Node {
-		receiver := receiverOf(method)
+		receiver := receiverMutationNodeOwner(method)
 		var fallback *graph.Node
 		ambiguous := false
 		for _, field := range fieldsByName[name] {
-			if field == nil || field.Kind != graph.KindField || receiverOf(field) != receiver {
+			if field == nil || field.Kind != graph.KindField || receiverMutationNodeOwner(field) != receiver {
 				continue
 			}
 			if field.RepoPrefix == method.RepoPrefix {
@@ -191,7 +184,7 @@ func indirectMutationEdgesForMethods(
 				continue
 			}
 			field := writeTargets[edge.To]
-			if field == nil || field.Kind != graph.KindField || receiverOf(field) != receiverOf(method) {
+			if field == nil || field.Kind != graph.KindField || receiverMutationNodeOwner(field) != receiverMutationNodeOwner(method) {
 				continue
 			}
 			if field.RepoPrefix != "" && method.RepoPrefix != "" && field.RepoPrefix != method.RepoPrefix {
@@ -238,7 +231,7 @@ func indirectMutationEdgesForMethods(
 			case call.recvSelf:
 				caller := analysisMethods[call.from]
 				callee := analysisMethods[call.calleeID]
-				if !calleeMutates || caller == nil || callee == nil || receiverOf(caller) != receiverOf(callee) {
+				if !calleeMutates || caller == nil || callee == nil || receiverMutationNodeOwner(caller) != receiverMutationNodeOwner(callee) {
 					continue
 				}
 				if caller.RepoPrefix != "" && callee.RepoPrefix != "" && caller.RepoPrefix != callee.RepoPrefix {
@@ -273,7 +266,7 @@ func indirectMutationEdgesForMethods(
 		case call.recvSelf:
 			caller := analysisMethods[call.from]
 			callee := analysisMethods[call.calleeID]
-			if !calleeMutates || caller == nil || callee == nil || receiverOf(caller) != receiverOf(callee) {
+			if !calleeMutates || caller == nil || callee == nil || receiverMutationNodeOwner(caller) != receiverMutationNodeOwner(callee) {
 				continue
 			}
 			if caller.RepoPrefix != "" && callee.RepoPrefix != "" && caller.RepoPrefix != callee.RepoPrefix {

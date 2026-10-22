@@ -1,6 +1,8 @@
 package indexer
 
 import (
+	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -45,6 +47,30 @@ func bareCallName(id string) string {
 	return id
 }
 
+// receiverMutationOwnerKey identifies a receiver within its repository, language and package.
+type receiverMutationOwnerKey struct {
+	repo, language, scope, receiver string
+}
+
+func receiverMutationOwner(repo, language, file, scope, receiver string) receiverMutationOwnerKey {
+	if receiver == "" || (language == "go" && file == "") {
+		return receiverMutationOwnerKey{}
+	}
+	if scope == "" && language == "go" {
+		scope = path.Dir(filepath.ToSlash(file))
+	}
+	return receiverMutationOwnerKey{repo: repo, language: language, scope: scope, receiver: receiver}
+}
+
+func receiverMutationNodeOwner(n *graph.Node) receiverMutationOwnerKey {
+	if n == nil {
+		return receiverMutationOwnerKey{}
+	}
+	receiver, _ := n.Meta["receiver"].(string)
+	scope, _ := n.Meta["scope_pkg"].(string)
+	return receiverMutationOwner(n.RepoPrefix, n.Language, n.FilePath, scope, receiver)
+}
+
 // indirectMutationEdges computes, over the resolved graph, the indirect field
 // mutations: `s.counter.Increment()` mutates field counter because Increment
 // mutates its receiver; `s.helper()` mutates s's fields because helper does.
@@ -58,26 +84,26 @@ func indirectMutationEdges(g graph.Store) []indirectMutSpec {
 	if scanner, ok := g.(graph.ReceiverMutationScanner); ok {
 		return indirectMutationEdgesProjected(scanner)
 	}
-	recvType := map[string]string{} // methodID → its receiver type
+	recvType := map[string]receiverMutationOwnerKey{} // methodID → its scoped receiver
 	for n := range g.NodesByKind(graph.KindMethod) {
 		if n == nil || n.Meta == nil {
 			continue
 		}
-		if rt, _ := n.Meta["receiver"].(string); rt != "" {
+		if rt := receiverMutationNodeOwner(n); rt != (receiverMutationOwnerKey{}) {
 			recvType[n.ID] = rt
 		}
 	}
 	if len(recvType) == 0 {
 		return nil
 	}
-	// fieldByOwner[receiverType][fieldName] = fieldID.
-	fieldByOwner := map[string]map[string]string{}
+	// fieldByOwner[scopedReceiver][fieldName] = fieldID.
+	fieldByOwner := map[receiverMutationOwnerKey]map[string]string{}
 	for n := range g.NodesByKind(graph.KindField) {
 		if n == nil || n.Meta == nil {
 			continue
 		}
-		owner, _ := n.Meta["receiver"].(string)
-		if owner == "" || n.Name == "" {
+		owner := receiverMutationNodeOwner(n)
+		if owner == (receiverMutationOwnerKey{}) || n.Name == "" {
 			continue
 		}
 		if fieldByOwner[owner] == nil {
@@ -120,7 +146,7 @@ func indirectMutationEdges(g graph.Store) []indirectMutSpec {
 		if fn == nil || fn.Kind != graph.KindField {
 			continue
 		}
-		if fowner, _ := fn.Meta["receiver"].(string); fowner == owner {
+		if receiverMutationNodeOwner(fn) == owner {
 			addMut(e.From, fn.Name)
 		}
 	}
@@ -184,7 +210,7 @@ func indirectMutationEdges(g graph.Store) []indirectMutSpec {
 			case c.recvSelf:
 				// Sibling method call on the own receiver: callee must be a
 				// method of the same receiver type, and it must mutate.
-				if !calleeMutates || recvType[c.calleeID] != recvType[c.from] || recvType[c.from] == "" {
+				if !calleeMutates || recvType[c.calleeID] != recvType[c.from] || recvType[c.from] == (receiverMutationOwnerKey{}) {
 					continue
 				}
 				for f := range mutators[c.calleeID] {
@@ -222,7 +248,7 @@ func indirectMutationEdges(g graph.Store) []indirectMutSpec {
 				emit(c.from, fid, c.file, c.calleeName, c.line)
 			}
 		case c.recvSelf && calleeMutates:
-			if recvType[c.calleeID] != owner || owner == "" {
+			if recvType[c.calleeID] != owner || owner == (receiverMutationOwnerKey{}) {
 				continue
 			}
 			for f := range mutators[c.calleeID] {
