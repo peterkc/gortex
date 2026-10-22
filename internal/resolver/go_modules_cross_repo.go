@@ -72,11 +72,11 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 	for _, edge := range pending {
 		deferred = append(deferred, edge)
 		if len(deferred) == externalCallMutationChunk {
-			cr.resolveGoModuleEdgesLocked(deferred)
+			cr.resolveGoModuleEdgesLocked(deferred, stats)
 			deferred = deferred[:0]
 		}
 	}
-	cr.resolveGoModuleEdgesLocked(deferred)
+	cr.resolveGoModuleEdgesLocked(deferred, stats)
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if state.complete && state.revision == cr.goModuleRevision && maps.Equal(state.modules, cr.goModules) {
@@ -261,7 +261,7 @@ func (cr *CrossRepoResolver) ResolveDeferredGoModuleEdges(edges []*graph.Edge) e
 	for start := 0; start < len(edges); start += externalCallMutationChunk {
 		end := min(start+externalCallMutationChunk, len(edges))
 		cr.mu.Lock()
-		cr.resolveGoModuleEdgesLocked(edges[start:end])
+		cr.resolveGoModuleEdgesLocked(edges[start:end], nil)
 		cr.mu.Unlock()
 	}
 	return nil
@@ -284,10 +284,11 @@ func goModuleEdgeSpec(e *graph.Edge) string {
 	}
 }
 
-func (cr *CrossRepoResolver) resolveGoModuleEdgesLocked(edges []*graph.Edge) {
+func (cr *CrossRepoResolver) resolveGoModuleEdgesLocked(edges []*graph.Edge, stats *CrossRepoStats) {
 	var batch []graph.EdgeReindex
 	names := make(map[[2]string][]*graph.Node)
 	sources := make(map[string]*graph.Node)
+	targetRepos := make(map[string]string)
 	originals := make(map[graph.EdgeIdentity]*graph.Edge)
 	for _, e := range edges {
 		if e == nil || resolutionExempt(e) || !strings.HasSuffix(e.FilePath, ".go") {
@@ -317,6 +318,7 @@ func (cr *CrossRepoResolver) resolveGoModuleEdgesLocked(edges []*graph.Edge) {
 		copy := *e
 		copy.Meta = maps.Clone(e.Meta)
 		if match != nil {
+			targetRepos[match.ID] = match.RepoPrefix
 			bindGoModuleEdge(&copy, match, caller)
 		} else {
 			if !graph.IsUnresolvedTarget(e.To) {
@@ -338,7 +340,8 @@ func (cr *CrossRepoResolver) resolveGoModuleEdgesLocked(edges []*graph.Edge) {
 		delete(copy.Meta, "go_extern_target")
 		batch = append(batch, graph.EdgeReindex{Edge: &copy, OldTo: e.To, RefreshIdentity: true, OldFilePath: e.FilePath, OldLine: e.Line})
 	}
-	if !cr.applyGoModuleReindexes(cr.filterLiveReindex(batch)) {
+	batch = cr.filterLiveReindex(batch)
+	if !cr.applyGoModuleReindexes(batch) {
 		cr.logger.Warn("Go module rebind batch dropped; queued for a later module pass")
 		if cr.goModuleRetry == nil {
 			cr.goModuleRetry = &GoModuleDepRetry{}
@@ -349,6 +352,21 @@ func (cr *CrossRepoResolver) resolveGoModuleEdgesLocked(edges []*graph.Edge) {
 		}
 		maps.Copy(cr.goModuleRetry.pending, originals)
 		cr.goModuleRetry.mu.Unlock()
+		return
+	}
+	if stats == nil {
+		return
+	}
+	for _, row := range batch {
+		if isSyntheticResolveTarget(row.Edge.To) {
+			stats.Unresolved++
+			continue
+		}
+		stats.Resolved++
+		if row.Edge.CrossRepo {
+			stats.CrossRepoEdges++
+			stats.ByRepo[targetRepos[row.Edge.To]]++
+		}
 	}
 }
 

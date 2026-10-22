@@ -526,7 +526,9 @@ func (mi *MultiIndexer) runCrossRepoResolveContext(ctx context.Context, reconcil
 	}
 	mi.mu.RUnlock()
 	for _, idx := range indexers {
-		idx.resolver.TakeDeferredGoModuleEdges()
+		if err := cr.ResolveDeferredGoModuleEdges(idx.resolver.TakeDeferredGoModuleEdges()); err != nil {
+			return err
+		}
 	}
 	if _, err := cr.ResolveAllContext(ctx); err != nil {
 		return err
@@ -738,9 +740,6 @@ func (mi *MultiIndexer) postPublishGoModules(ctx context.Context, idx *Indexer, 
 	}
 	if !newProvider {
 		return mi.resolveIncomingGoModules(idx.repoPrefix)
-	}
-	if mi.trackedGoModules()[idx.repoPrefix] == "" {
-		return nil
 	}
 	cr := mi.newCrossRepoResolver()
 	if err := cr.RetryGoModuleDeps(ctx); err != nil {

@@ -433,7 +433,10 @@ func TestGoModuleIncomingFinalizedTarget(t *testing.T) {
 				cr.SetGoModules(map[string]string{"b": "example.org/library"})
 				cr.ResolveAll()
 				g.AddNode(&graph.Node{ID: "b/pkg/lib.go::NewFn", Kind: graph.KindFunction, Name: "NewFn", RepoPrefix: "b", FilePath: "b/pkg/lib.go", WorkspaceID: "shared", Language: "go"})
-				cr.ResolveMutationFrontiers([]string{"b/pkg/lib.go"}, []string{"b/pkg/lib.go"}, []string{"b/pkg/lib.go"})
+				stats := cr.ResolveMutationFrontiers(nil, nil, []string{"b/pkg/lib.go"})
+				assert.Equal(t, 1, stats.Resolved)
+				assert.Equal(t, 1, stats.CrossRepoEdges)
+				assert.Equal(t, map[string]int{"b": 1}, stats.ByRepo)
 				var calls []*graph.Edge
 				for _, e := range g.GetOutEdges("a/main.go::Caller") {
 					if e.Kind == graph.EdgeCalls {
@@ -683,7 +686,10 @@ func TestGoModuleIncomingDroppedRetries(t *testing.T) {
 			g.AddNode(&graph.Node{ID: "b/lib.go::Fn", Kind: graph.KindFunction, Name: "Fn", FilePath: "b/lib.go", RepoPrefix: "b", Language: "go"})
 			g.drop = true
 			if route == "mutation" {
-				cr.ResolveMutationFrontiers(nil, nil, []string{"b/lib.go"})
+				stats := cr.ResolveMutationFrontiers(nil, nil, []string{"b/lib.go"})
+				assert.Equal(t, 1, stats.Resolved, "count the recovery, not the dropped attempt")
+				assert.Equal(t, 1, stats.CrossRepoEdges)
+				assert.Equal(t, map[string]int{"b": 1}, stats.ByRepo)
 			} else {
 				require.NoError(t, cr.ResolveGoModuleIncomingForRepo("b"))
 			}
