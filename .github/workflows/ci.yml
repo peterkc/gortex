@@ -14,18 +14,148 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test-partition:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: python3 -m unittest scripts/test_ci_test_partition.py
+
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      linux: ${{ steps.plan.outputs.linux }}
+      platform: ${{ steps.plan.outputs.platform }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ci-timings/
+          key: ci-timings-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ci-timings-
+      - name: Plan time-balanced partitions
+        id: plan
+        run: python3 scripts/ci-test-partition.py --plan --event ${{ github.event_name }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-timings-used
+          path: ci-timings/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
   test:
+    name: test (${{ matrix.os }}, ${{ matrix.go-version }}, ${{ matrix.partition }})
+    needs: plan
+    env:
+      TEST_OS: ${{ matrix.os }}
+      TEST_PARTITION: ${{ matrix.partition }}
+      TEST_SHARD_COUNT: ${{ matrix.shard_count }}
     runs-on: ${{ matrix.os }}
-    # The suite runs ~30m on the ubuntu runners and slower on macos, so the
-    # per-step budget needs headroom; this job-level cap still bounds a hang.
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        go-version: ['1.27']
+      matrix: ${{ fromJSON(needs.plan.outputs.linux) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ci-timings-used
+          path: ci-timings/
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Go cache paths
+        id: cache-paths
+        shell: bash
+        run: |
+          echo "build=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "mod=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.cache-paths.outputs.build }}
+            ${{ steps.cache-paths.outputs.mod }}
+          key: go-race-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-race-${{ runner.os }}-${{ hashFiles('go.sum') }}-
+            go-race-${{ runner.os }}-
+
+      - name: Build
+        run: go build -o gortex ./cmd/gortex/
+
+      - name: Test
+        id: test
+        shell: bash
+        env:
+          TEST_RACE: ${{ matrix.race }}
+          SAVE_TIMINGS: ${{ (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+        run: |
+          if [[ "$SAVE_TIMINGS" == true && "$TEST_SHARD_COUNT" != 0 ]]; then
+            python3 scripts/ci-test-partition.py 2>&1 | tee test-output.log
+          else
+            python3 scripts/ci-test-partition.py
+          fi
+
+      - name: Warm race cache for sharded packages
+        if: ${{ !cancelled() && matrix.partition == 'remaining' && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+        run: |
+          # The census builds without coverage; the shard tests build with it.
+          mkdir -p "$RUNNER_TEMP/race-warm" "$RUNNER_TEMP/race-warm-cover"
+          go test -race -c -o "$RUNNER_TEMP/race-warm/" ./internal/graph/store_sqlite ./internal/indexer ./internal/mcp
+          go test -race -cover -c -o "$RUNNER_TEMP/race-warm-cover/" ./internal/graph/store_sqlite ./internal/indexer ./internal/mcp
+
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ !cancelled() && matrix.partition == 'remaining' && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+        with:
+          path: |
+            ${{ steps.cache-paths.outputs.build }}
+            ${{ steps.cache-paths.outputs.mod }}
+          key: go-race-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+
+      - name: Upload coverage
+        if: matrix.os == 'ubuntu-latest'
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          files: coverage.out
+        continue-on-error: true
+
+      - name: Write shard timings
+        if: ${{ steps.test.outcome == 'success' && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && matrix.shard_count > 0 }}
+        shell: bash
+        run: python3 scripts/ci-test-partition.py --write-timings test-output.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ steps.test.outcome == 'success' && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && matrix.shard_count > 0 }}
+        with:
+          name: ci-timings-${{ matrix.os }}-${{ matrix.partition }}
+          path: ci-shard-timings/*.json
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 7
+
+  test-platform:
+    name: test-platform (${{ matrix.os }}, ${{ matrix.go-version }}, ${{ matrix.partition }})
+    needs: plan
+    env:
+      TEST_OS: ${{ matrix.os }}
+      TEST_PARTITION: ${{ matrix.partition }}
+      TEST_SHARD_COUNT: ${{ matrix.shard_count }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.platform) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ci-timings-used
+          path: ci-timings/
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -34,31 +164,88 @@ jobs:
       - name: Build
         run: go build -o gortex ./cmd/gortex/
 
+      # Per-run plain timings require Windows -v output.
       - name: Test
-        if: matrix.os != 'windows-latest'
-        run: go test -race -timeout=45m -coverprofile=coverage.out ./...
+        id: test
+        shell: bash
+        env:
+          TEST_RACE: "false"
+          SAVE_TIMINGS: ${{ (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+          TEST_WINDOWS: ${{ matrix.os == 'windows-latest' }}
+        run: |
+          run_tests() {
+            if [[ "$TEST_WINDOWS" == true ]]; then
+              python - <<'PY_WINDOWS_TESTS'
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
 
-      # The Windows shard checks the platform contract, not the race
-      # contract: the race detector multiplies runtime several times over and
-      # the windows runners are already the slowest of the three, so the two
-      # together overran the job cap before the suite finished. Linux and
-      # macOS keep -race, which is where a data race would surface anyway.
-      # -v is temporary: per-test timings are how we find which packages hang
-      # here, and it comes out once the shard is reliably green.
-      # It writes no coverage profile either: nothing uploads one from this
-      # shard, and the runner's default PowerShell tokenises
-      # -coverprofile=coverage.out into an extra ".out" package argument, so
-      # the job failed on an unresolvable package before any test ran.
-      - name: Test (windows, no race detector)
-        if: matrix.os == 'windows-latest'
-        run: go test -v -timeout=45m ./...
+          scratch = Path(os.environ["RUNNER_TEMP"]) / "gortex-storage-tests"
+          scratch.mkdir(parents=True, exist_ok=True)
+          os.environ["GOTMPDIR"] = str(scratch)
+          print("Windows test GOTMPDIR:", scratch, flush=True)
+          sys.exit(subprocess.call([sys.executable, "scripts/ci-test-partition.py"]))
+          PY_WINDOWS_TESTS
+            else
+              python3 scripts/ci-test-partition.py
+            fi
+          }
+          if [[ "$SAVE_TIMINGS" == true && "$TEST_WINDOWS" == true && "$TEST_SHARD_COUNT" != 0 ]]; then
+            run_tests 2>&1 | tee test-output.log
+          else
+            run_tests
+          fi
 
-      - name: Upload coverage
-        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.27'
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+      - name: Write shard timings
+        if: ${{ steps.test.outcome == 'success' && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && matrix.shard_count > 0 && matrix.os == 'windows-latest' }}
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            python scripts/ci-test-partition.py --write-timings test-output.log
+          else
+            python3 scripts/ci-test-partition.py --write-timings test-output.log
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ steps.test.outcome == 'success' && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && matrix.shard_count > 0 && matrix.os == 'windows-latest' }}
         with:
-          files: coverage.out
-        continue-on-error: true
+          name: ci-timings-${{ matrix.os }}-${{ matrix.partition }}
+          path: ci-shard-timings/*.json
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 7
+
+  timings:
+    needs: [plan, test, test-platform]
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ci-timings-used
+          path: ci-timings/
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: ci-timings-*-*
+          merge-multiple: true
+          path: ci-shard-timings/
+      - name: Merge measured timings
+        run: python3 scripts/ci-test-partition.py --merge-timings
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ci-timings/
+          key: ci-timings-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-timings-merged
+          overwrite: true
+          retention-days: 30
+          # Copy these files into scripts/ to update the committed fallback.
+          path: |
+            ci-timings/ci-race-timings.json
+            ci-timings/ci-plain-timings.json
 
   build-linux-static:
     # The linux release ships a statically linked binary so it runs on any
@@ -188,4 +375,4 @@ jobs:
           go-version-file: go.mod
 
       - name: Run benchmarks
-        run: go test -bench=. -benchmem -count=1 -benchtime=1x -timeout=20m ./internal/parser/languages/ ./internal/query/ ./internal/graph/
+        run: go test -run '^$' -bench=. -benchmem -count=1 -benchtime=1x -timeout=20m ./internal/parser/languages/ ./internal/query/ ./internal/graph/
