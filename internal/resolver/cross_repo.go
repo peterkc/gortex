@@ -390,7 +390,9 @@ func (cr *CrossRepoResolver) ResolveAllContext(ctx context.Context) (*CrossRepoS
 	// Every exit applies the moves the pass deferred (a no-op after the
 	// normal flush below); it runs before the deferred unlock above.
 	defer cr.placeholderSrcIdx.applyDeferred(cr.graph)
-	cr.resolveTrackedNpmImports(graph.EdgesLightSeq(cr.graph, graph.EdgeImports), stats)
+	if err := cr.resolveTrackedNpmImports(ctx, graph.EdgesLightSeq(cr.graph, graph.EdgeImports), stats); err != nil {
+		return stats, err
+	}
 	// Share the master resolver's stable high-water/keyset stream. The cold
 	// residual can exceed 200k edges; retaining it plus the cross-repo name,
 	// raw-name, repo and qualified-name caches was the second whole-corpus heap
@@ -675,7 +677,7 @@ func (cr *CrossRepoResolver) ResolveForFile(repoPrefix, relPath string) *CrossRe
 // scopes. Caller holds cr.mu.
 func (cr *CrossRepoResolver) resolveScopedLocked(edges []*graph.Edge) *CrossRepoStats {
 	stats := &CrossRepoStats{ByRepo: make(map[string]int)}
-	cr.resolveTrackedNpmImports(slices.Values(edges), stats)
+	_ = cr.resolveTrackedNpmImports(context.Background(), slices.Values(edges), stats)
 	pending := make([]*graph.Edge, 0, len(edges))
 	for _, edge := range edges {
 		if edge != nil && graph.IsUnresolvedTarget(edge.To) {

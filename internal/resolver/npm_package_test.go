@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -233,7 +234,7 @@ func TestCrossRepoTrackedNpmPackageHydration(t *testing.T) {
 				lookups := 0
 				cr.SetNpmPackageLookup(func(_ string) map[string][]string { lookups++; return map[string][]string{"lib": {"lib/index.ts"}} })
 				stats := &CrossRepoStats{ByRepo: map[string]int{}}
-				cr.resolveTrackedNpmImports(graph.EdgesLightSeq(store, graph.EdgeImports), stats)
+				require.NoError(t, cr.resolveTrackedNpmImports(context.Background(), graph.EdgesLightSeq(store, graph.EdgeImports), stats))
 				if mode != "declared" {
 					assert.Zero(t, g.sites)
 					assert.Zero(t, lookups, "rejected imports must not trigger manifest lookup")
@@ -247,5 +248,60 @@ func TestCrossRepoTrackedNpmPackageHydration(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Cancellation must stop the npm prepass, not only the residual resolver.
+type npmCancelHydrationStore struct {
+	graph.Store
+	cancel context.CancelFunc
+	pages  int
+}
+
+func (g *npmCancelHydrationStore) GetEdgeCandidates(endpoints []graph.EdgeEndpoint, sites []graph.EdgeSite) graph.EdgeCandidateSet {
+	g.pages++
+	g.cancel()
+	return g.Store.GetEdgeCandidates(endpoints, sites)
+}
+
+func TestCrossRepoTrackedNpmPackageCancellation(t *testing.T) {
+	for _, phase := range []string{"before", "scan", "hydrate"} {
+		t.Run(phase, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			g := &npmCancelHydrationStore{Store: graph.New(), cancel: cancel}
+			g.AddNode(&graph.Node{ID: "app/a.ts", Kind: graph.KindFile, RepoPrefix: "app"})
+			g.AddNode(&graph.Node{ID: "lib/index.ts", Kind: graph.KindFile, RepoPrefix: "lib"})
+			for line := 1; line <= resolvePendingPageRows+3; line++ {
+				g.AddEdge(&graph.Edge{From: "app/a.ts", To: "external::p", Kind: graph.EdgeImports, FilePath: "app/a.ts", Line: line})
+			}
+			cr := NewCrossRepo(g)
+			cr.SetNpmDependencyLookup(func(_, _ string) bool { return true })
+			lookups := 0
+			cr.SetNpmPackageLookup(func(_ string) map[string][]string {
+				lookups++
+				if phase == "scan" {
+					cancel()
+				}
+				return map[string][]string{"lib": {"lib/index.ts"}}
+			})
+			if phase == "before" {
+				cancel()
+			}
+			stats, err := cr.ResolveAllContext(ctx)
+			require.ErrorIs(t, err, context.Canceled)
+			if phase == "hydrate" {
+				assert.Equal(t, 1, g.pages, "must not hydrate another page after cancellation")
+				assert.LessOrEqual(t, stats.Resolved, resolvePendingPageRows)
+			} else {
+				assert.Zero(t, g.pages)
+				assert.Zero(t, stats.Resolved)
+				if phase == "scan" {
+					assert.Equal(t, 1, lookups, "must stop scanning after cancellation")
+				} else {
+					assert.Zero(t, lookups)
+				}
+			}
+		})
 	}
 }
