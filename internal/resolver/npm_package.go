@@ -9,9 +9,11 @@ import (
 )
 
 // NpmPackageLookup maps a bare npm specifier to tracked package directories.
-// Each directory has graph-path entry candidates from exports, or legacy
-// types/main/directory-index entry points only when exports is absent. The indexer
-// owns manifest reads; the resolver probes indexed files and applies repository/workspace policy.
+// Each directory has graph-path entry candidates from exports. Legacy
+// types/main/directory-index entry points are added when exports is absent, and
+// when exports declares the requested entry but gives no target the indexer
+// supports (for example only `types` or `require` conditions). The indexer owns
+// manifest reads; the resolver probes indexed files and applies repository/workspace policy.
 type NpmPackageLookup func(specifier string) map[string][]string
 
 // SetNpmPackageLookup installs tracked-package evidence for the cross-repo pass.
