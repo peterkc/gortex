@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -1074,12 +1075,26 @@ func reconstructedContractAnswer(raw []byte, state reconstructedContractState) (
 	return observation, nil
 }
 
+// cli_daemon.go:252-256 writes this notice to stderr and continues the call,
+// so a refusal can follow it. Only exact notice lines are removed.
+var reconstructedSlowNotice = regexp.MustCompile(`^\[gortex\] daemon did not answer within [0-9.]+[a-zµ]+ \(a track / reload / enrichment may be holding it\) — asking it anyway$`)
+
+func reconstructedWithoutSlowNotice(stderr string) string {
+	var kept []string
+	for _, line := range strings.Split(strings.TrimSpace(stderr), "\n") {
+		if !reconstructedSlowNotice.MatchString(line) {
+			kept = append(kept, line)
+		}
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
+}
+
 // query.go:93 emits this refusal while restart has not re-attached the repo.
 // Only the matching repo before enrichment can be startup-unavailable data.
 func reconstructedObserveDemand(record reconstructedDemand, state reconstructedContractState, repo string) reconstructedDemand {
 	message := strings.TrimSpace(record.Response)
 	if message == "" {
-		message = strings.TrimSpace(record.Stderr)
+		message = reconstructedWithoutSlowNotice(record.Stderr)
 	}
 	if record.Error == "exit status 1" {
 		if state.AllowPending && message == fmt.Sprintf("Error: the gortex daemon does not track %s — add it with `gortex track %s`", repo, repo) {

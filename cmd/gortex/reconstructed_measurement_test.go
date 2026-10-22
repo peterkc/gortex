@@ -510,6 +510,10 @@ func TestReconstructedMeasurementContractAnswer(t *testing.T) {
 			{name: "not_tracked_stderr", stderr: notTracked, exit: 1, pending: true, unavailable: "startup repository not tracked before enrichment"},
 			{name: "not_tracked_after_enrichment", stderr: notTracked, exit: 1},
 			{name: "incomplete_stderr", stderr: incomplete, exit: 1, unavailable: "required_capability_incomplete: context deadline exceeded", retry: "5s"},
+			{name: "notice_then_not_tracked", stderr: notice + notTracked, exit: 1, pending: true, unavailable: "startup repository not tracked before enrichment"},
+			{name: "notice_then_incomplete", stderr: notice + incomplete, exit: 1, unavailable: "required_capability_incomplete: context deadline exceeded", retry: "5s"},
+			{name: "unknown_line_then_incomplete", stderr: "warning: something else\n" + incomplete, exit: 1},
+			{name: "altered_notice_then_incomplete", stderr: strings.Replace(notice, "asking it anyway", "asking", 1) + incomplete, exit: 1},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				dir := t.TempDir()
