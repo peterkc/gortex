@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"path"
+	"strings"
 	"sync"
 
 	"github.com/zzet/gortex/internal/modules"
@@ -17,6 +18,7 @@ func (mi *MultiIndexer) npmPackageLookup() resolver.NpmPackageLookup {
 		dir        string
 		exports    *packageExports
 		declared   map[string]string
+		arrayRoot  npmArrayRoot
 		hasExports bool
 		types      string
 		main       string
@@ -74,7 +76,7 @@ func (mi *MultiIndexer) npmPackageLookup() resolver.NpmPackageLookup {
 					}
 				}
 				packages[manifest.Name] = append(packages[manifest.Name], entry{
-					dir: path.Join(prefix, dir), exports: exports, declared: declared, hasExports: hasPackageExports(manifest.Exports), types: manifest.Types, main: manifest.Main,
+					dir: path.Join(prefix, dir), exports: exports, declared: declared, arrayRoot: npmExportsArrayRoot(manifest.Exports), hasExports: hasPackageExports(manifest.Exports), types: manifest.Types, main: manifest.Main,
 				})
 			}
 		}
@@ -95,6 +97,14 @@ func (mi *MultiIndexer) npmPackageLookup() resolver.NpmPackageLookup {
 			declaration := resolveExportsSubpath(pkg.declared, sub)
 			if pkg.hasExports && declaration != "declared" {
 				continue
+			}
+			if sub == "" && pkg.arrayRoot.isArray {
+				// Node picks the first supported array target before it looks at
+				// the filesystem; an array of only null items blocks the root.
+				if pkg.arrayRoot.blocked {
+					continue
+				}
+				target = pkg.arrayRoot.target
 			}
 			// A declared entry with unsupported conditions keeps legacy
 			// candidates; a supported target remains authoritative.
@@ -125,6 +135,9 @@ func declaredNpmExports(raw json.RawMessage) map[string]string {
 	if json.Unmarshal(raw, &asString) == nil && hasPackageExports(raw) {
 		return map[string]string{".": "declared"}
 	}
+	if npmExportsArrayRoot(raw).isArray {
+		return map[string]string{".": "declared"}
+	}
 	var entries map[string]json.RawMessage
 	if json.Unmarshal(raw, &entries) != nil {
 		return nil
@@ -147,4 +160,49 @@ func declaredNpmExports(raw json.RawMessage) map[string]string {
 func hasPackageExports(raw json.RawMessage) bool {
 	s := bytes.TrimSpace(raw)
 	return len(s) > 0 && !bytes.Equal(s, []byte("null"))
+}
+
+// npmArrayRoot describes a top-level exports array, which Node reads as an
+// ordered list of root targets.
+type npmArrayRoot struct {
+	isArray bool
+	target  string // first supported target, "" when none
+	blocked bool   // no item names a target, not even an unsupported one
+}
+
+// npmExportsArrayRoot picks the first supported target of a top-level exports
+// array, as Node does before it checks the filesystem. Nested arrays are
+// searched in order; items that are not "./" paths are skipped. When no item
+// is supported but some item has only conditions the indexer does not read,
+// the root is neither targeted nor blocked, so legacy candidates apply.
+func npmExportsArrayRoot(raw json.RawMessage) npmArrayRoot {
+	var items []json.RawMessage
+	if json.Unmarshal(raw, &items) != nil || items == nil {
+		return npmArrayRoot{}
+	}
+	target, unsupported := firstNpmArrayTarget(items)
+	return npmArrayRoot{isArray: true, target: target, blocked: target == "" && !unsupported}
+}
+
+func firstNpmArrayTarget(items []json.RawMessage) (target string, unsupported bool) {
+	for _, item := range items {
+		var nested []json.RawMessage
+		if json.Unmarshal(item, &nested) == nil && nested != nil {
+			t, u := firstNpmArrayTarget(nested)
+			if t != "" {
+				return t, false
+			}
+			unsupported = unsupported || u
+			continue
+		}
+		var conditions map[string]json.RawMessage
+		isObject := json.Unmarshal(item, &conditions) == nil && conditions != nil
+		if t := pickConditionalTarget(item); strings.HasPrefix(t, "./") {
+			return t, false
+		}
+		if isObject {
+			unsupported = true
+		}
+	}
+	return "", unsupported
 }
