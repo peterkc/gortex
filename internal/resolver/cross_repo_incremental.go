@@ -94,7 +94,7 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 	}
 	if len(definitionFiles) > 0 && len(cr.goModules) > 0 {
 		nodes := cr.graph.GetFileNodesByPaths(definitionFiles)
-		cr.resolveGoModuleEdgesLocked(cr.goModuleIncomingEdges(nodes, definitionFiles))
+		cr.resolveGoModuleEdgesLocked(cr.goModuleIncomingEdges(nodes, definitionFiles), stats)
 	}
 	// A newly tracked module also makes old dep/stdlib terminals eligible.
 	// This indexed sweep runs at most once per module/config revision.

@@ -2778,6 +2778,7 @@ func (s *Store) ReindexEdgesApplied(batch []graph.EdgeReindex) bool {
 			return false
 		}
 		panicOnFatal(err)
+		return false
 	}
 	return true
 }
