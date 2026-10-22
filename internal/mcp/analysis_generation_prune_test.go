@@ -227,3 +227,56 @@ func TestAnalysisGenerationPruneDoesNotRetryOtherErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestAnalysisGenerationPruneReplaysRequestFromLastPass(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := &Server{}
+		t.Cleanup(s.DrainBackground)
+		release := make(chan struct{})
+		calls := 0
+		writer := &analysisPruneTestStore{prune: func(context.Context, int, int) (int64, error) {
+			calls++
+			if calls == 1 {
+				<-release
+			}
+			return 0, nil
+		}}
+		s.scheduleAnalysisGenerationPrune(writer)
+		synctest.Wait()
+		// An analysis finishes while the only pass runs: the slot is taken.
+		s.scheduleAnalysisGenerationPrune(writer)
+		close(release)
+		synctest.Wait()
+		if calls != 2 || s.analysisPruneScheduled.Load() {
+			t.Fatalf("request from the last pass: calls=%d scheduled=%v", calls, s.analysisPruneScheduled.Load())
+		}
+	})
+}
+
+func TestAnalysisGenerationPruneReplayDoesNotRenewRequest(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := &Server{}
+		t.Cleanup(s.DrainBackground)
+		calls := 0
+		writer := &analysisPruneTestStore{prune: func(context.Context, int, int) (int64, error) {
+			calls++
+			return 0, errors.New("store unavailable")
+		}}
+		// A replacement owner took the slot and cleared the request before a
+		// retiring owner's replay ran: the replay must leave both untouched.
+		s.analysisPruneScheduled.Store(true)
+		s.startAnalysisGenerationPrune(writer)
+		synctest.Wait()
+		if calls != 0 || s.analysisPruneRequested.Load() {
+			t.Fatalf("replay renewed the request: calls=%d requested=%v", calls, s.analysisPruneRequested.Load())
+		}
+		// With the slot free, a replay runs one pass and, with no new
+		// request, stops on the failing store instead of replaying again.
+		s.analysisPruneScheduled.Store(false)
+		s.startAnalysisGenerationPrune(writer)
+		synctest.Wait()
+		if calls != 1 || s.analysisPruneScheduled.Load() {
+			t.Fatalf("replay on a failing store: calls=%d scheduled=%v", calls, s.analysisPruneScheduled.Load())
+		}
+	})
+}

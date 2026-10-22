@@ -335,7 +335,20 @@ func persistAnalysisGeneration(
 }
 
 func (s *Server) scheduleAnalysisGenerationPrune(writer graph.AnalysisGenerationStore) {
-	if writer == nil || !s.analysisPruneScheduled.CompareAndSwap(false, true) {
+	if writer == nil {
+		return
+	}
+	// Record the request before trying the slot, so an owner that is
+	// already past its last pass sees it on release and replays it.
+	s.analysisPruneRequested.Store(true)
+	s.startAnalysisGenerationPrune(writer)
+}
+
+// startAnalysisGenerationPrune takes the prune slot and starts its owner.
+// It does not record a request: a replay must not mark a replacement owner
+// as owing another pass.
+func (s *Server) startAnalysisGenerationPrune(writer graph.AnalysisGenerationStore) {
+	if !s.analysisPruneScheduled.CompareAndSwap(false, true) {
 		return
 	}
 	// Add under the gate so it cannot start at counter zero concurrently
@@ -353,14 +366,25 @@ func (s *Server) scheduleAnalysisGenerationPrune(writer graph.AnalysisGeneration
 	s.backgroundMaintenance.Add(1)
 	s.backgroundMaintenanceMu.Unlock()
 	go func() {
-		defer s.backgroundMaintenance.Done()
-		defer s.analysisPruneScheduled.Store(false)
-		defer cancelMaintenance()
+		defer func() {
+			cancelMaintenance()
+			s.analysisPruneScheduled.Store(false)
+			// A request that arrived after the last pass started found the
+			// slot taken. Replay it, or the generation it reported waits for
+			// the next analysis run. Scheduling here, before Done, keeps the
+			// WaitGroup above zero; a drained server refuses the replay.
+			if s.analysisPruneRequested.Load() {
+				s.startAnalysisGenerationPrune(writer)
+			}
+			s.backgroundMaintenance.Done()
+		}()
 		// One owner retains the slot through backoff. Retry timed-out passes
 		// while they make progress; after consecutive idle passes, stop until
 		// another RunAnalysis schedules a new prune.
 		idlePasses := 0
 		for backoff := 30 * time.Second; maintenanceCtx.Err() == nil; backoff = min(backoff*2, 5*time.Minute) {
+			// This pass covers every generation reported so far.
+			s.analysisPruneRequested.Store(false)
 			ctx, cancel := context.WithTimeout(maintenanceCtx, 30*time.Second)
 			runtimeactivity.Begin("analysis_generation_gc")
 			removed, err := writer.PruneAnalysisGenerations(ctx, analysisGenerationPruneKeep, analysisGenerationPruneBatch)

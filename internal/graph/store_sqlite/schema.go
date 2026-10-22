@@ -445,7 +445,12 @@ CREATE TABLE IF NOT EXISTS analysis_process_steps (
 -- index led by node_rowid, each delete scans every generation's steps. The
 -- table is WITHOUT ROWID, so this index also carries the primary key and
 -- covers lookups by (generation_id, node_rowid); it replaces
--- analysis_process_steps_by_node, which existing stores drop here.
+-- analysis_process_steps_by_node, which existing stores drop here. Both
+-- statements are idempotent, so they stay in schemaSQL rather than a versioned
+-- migration: a currentSchemaVersion bump would make every older daemon build
+-- drop and rebuild the store when it opens one (planSchemaMigrationWith,
+-- stored > current; the daemon opens WithRebuild), and an older build's
+-- schemaSQL only recreates the old index.
 DROP INDEX IF EXISTS analysis_process_steps_by_node;
 CREATE INDEX IF NOT EXISTS analysis_process_step_node_fk
     ON analysis_process_steps(node_rowid);
