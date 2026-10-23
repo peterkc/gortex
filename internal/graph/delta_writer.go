@@ -735,11 +735,10 @@ func (dw *DeltaWriter) ReindexEdge(e *Edge, oldTo string) {
 	dw.ReindexEdges([]EdgeReindex{{Edge: e, OldTo: oldTo}})
 }
 
-// ReindexEdges implements Store. The engine hands in edges it read, which
-// are copies; the working graph's in-memory reindex keeps the stored row's
-// pointer and expects the caller to have mutated it, so the new content is
-// copied into the stored row first. A retarget of a row the delta does not
-// hold is a no-op, as it is in a store.
+// ReindexEdges implements Store. The engine hands in copies of the rows it
+// read. The working graph applies them as one batch, preserving stored pointers
+// and freeing old identities before assigning new ones. A retarget of a row
+// the delta does not hold is a no-op, as it is in a store.
 func (dw *DeltaWriter) ReindexEdges(batch []EdgeReindex) {
 	if len(batch) == 0 {
 		return
@@ -789,93 +788,58 @@ func (dw *DeltaWriter) ReindexEdges(batch []EdgeReindex) {
 			dw.noteImportSources([]*Edge{r.Edge})
 		}
 	}
-	var refresh []EdgeReindex
-	for _, r := range batch {
-		if r.Edge == nil {
-			continue
-		}
-		if r.RefreshIdentity {
-			refresh = append(refresh, EdgeReindex{
-				Edge: cloneDeltaEdge(r.Edge), OldFrom: r.OldFrom, OldTo: r.OldTo, OldKind: r.OldKind,
-				RefreshIdentity: true, OldFilePath: r.OldFilePath, OldLine: r.OldLine,
-			})
-			continue
-		}
-		oldKind := r.OldKind
-		if oldKind == "" {
-			oldKind = r.Edge.Kind
-		}
-		dw.work.reindexStoredEdge(r.Edge, r.OldTo, oldKind)
-	}
-	for _, r := range refresh {
-		dw.work.refreshStoredEdgeIdentity(r)
-	}
+	dw.work.reindexStoredEdges(batch)
 }
 
-// refreshStoredEdgeIdentity applies a source-span or metadata refresh (an
-// EdgeReindex with RefreshIdentity) to the working graph and describes it to
-// the active receipts the way a disk store does: the rewritten row is an
-// inserted row, which is work for the resolver only when it is left at an
-// unresolved target. The in-memory graph's own refresh voids every active
-// receipt instead, which would turn the engine's exact resolver frontier into
-// a whole-graph resolution a disk store never runs.
-func (g *Graph) refreshStoredEdgeIdentity(r EdgeReindex) {
-	e := r.Edge
-	if e == nil {
-		return
-	}
-	oldKind := r.OldKind
-	if oldKind == "" {
-		oldKind = e.Kind
-	}
-	oldFrom := r.OldFrom
-	if oldFrom == "" {
-		oldFrom = e.From
-	}
+// reindexStoredEdges applies copied rows as one batch, so moving siblings free
+// their old keys together. Refreshes preserve exact receipts; retargets record
+// resolver work only when To or Kind changes, as in reindexEdge.
+func (g *Graph) reindexStoredEdges(batch []EdgeReindex) {
 	receiptActive := g.beginReceiptMutation()
 	if receiptActive {
 		defer g.endReceiptMutation()
 	}
-	if oldFrom != e.From {
-		g.moveEdgeIdentity(e, oldFrom, r.OldTo, oldKind, r.OldFilePath, r.OldLine)
-	} else {
-		g.refreshSameSourceEdge(e, r.OldTo, oldKind, r.OldFilePath, r.OldLine)
-	}
-	g.edgeMutGen.Add(1)
-	g.recordReindexedEdgeForReceipts(e)
-}
-
-// refreshSameSourceEdge is refreshEdgeIdentity's same-source arm without the
-// receipt voiding: the stored row takes e's content and moves between the
-// identity indexes when its key changed.
-func (g *Graph) refreshSameSourceEdge(e *Edge, oldTo string, oldKind EdgeKind, oldFilePath string, oldLine int) {
-	unlock := g.lockThreeWrite(e.From, oldTo, e.To)
-	defer unlock()
-	oldKey := hashEdgeKey(edgeKey{From: e.From, To: oldTo, Kind: oldKind, FilePath: oldFilePath, Line: oldLine})
-	newKey := hashEdgeKey(keyOf(e))
-	sFrom := g.shardFor(e.From)
-	fromIdx := sFrom.outEdgeIdx[e.From]
-	pos, ok := fromIdx[oldKey]
-	if !ok || pos >= len(sFrom.outEdges[e.From]) {
-		return
-	}
-	stored := sFrom.outEdges[e.From][pos]
-	content := cloneDeltaEdge(e)
-	if oldKey != newKey || oldTo != e.To {
-		delete(fromIdx, oldKey)
-		fromIdx[newKey] = pos
-		if keys := sFrom.outEdgeKeys[e.From]; pos < len(keys) {
-			keys[pos] = newKey
+	prepared := make([]EdgeReindex, 0, len(batch))
+	seen := make(map[edgeKey]struct{}, len(batch))
+	for _, r := range batch {
+		if r.Edge == nil {
+			continue
 		}
-		sOld := g.shardFor(oldTo)
-		removeEdgeFromBucket(sOld.inEdges, sOld.inEdgeKeys, sOld.inEdgeIdx, oldTo, oldKey)
-		*stored = *content
-		sNew := g.shardFor(e.To)
-		addEdgeToBucket(sNew.inEdges, sNew.inEdgeKeys, sNew.inEdgeIdx, e.To, stored)
-		g.edgeIdentityRevisions.Add(1)
-		return
+		r.Edge = cloneDeltaEdge(r.Edge)
+		oldKind := r.OldKind
+		if oldKind == "" {
+			oldKind = r.Edge.Kind
+		}
+		old := edgeKey{From: r.Edge.From, To: r.OldTo, Kind: oldKind, FilePath: r.Edge.FilePath, Line: r.Edge.Line}
+		if r.RefreshIdentity {
+			if r.OldFrom != "" {
+				old.From = r.OldFrom
+			}
+			old.FilePath, old.Line = r.OldFilePath, r.OldLine
+		}
+		if _, duplicate := seen[old]; duplicate {
+			continue // The first row sent for an old identity wins.
+		}
+		if !r.RefreshIdentity {
+			stored := g.storedEdge(old)
+			if stored == nil {
+				continue
+			}
+			if r.OldTo == r.Edge.To && oldKind == r.Edge.Kind {
+				// A same-key payload update changes no resolver frontier.
+				s := g.shardFor(r.Edge.From)
+				s.mu.Lock()
+				*stored = *r.Edge
+				s.mu.Unlock()
+				g.edgeMutGen.Add(1)
+				continue
+			}
+		}
+		g.recordReindexedEdgeForReceipts(r.Edge)
+		prepared = append(prepared, r)
+		seen[old] = struct{}{}
 	}
-	*stored = *content
+	g.reindexEdges(prepared)
 }
 
 // storedEdge returns the working graph's row under an exact identity, nil
@@ -893,26 +857,6 @@ func (g *Graph) storedEdge(k edgeKey) *Edge {
 		return nil
 	}
 	return s.outEdges[k.From][pos]
-}
-
-// reindexStoredEdge applies a To/Kind retarget, or a same-key payload update,
-// described by a copy of the row: the stored row takes the copy's content
-// and then moves in the indexes exactly as reindexEdge moves a row its caller
-// mutated in place.
-func (g *Graph) reindexStoredEdge(e *Edge, oldTo string, oldKind EdgeKind) {
-	stored := g.storedEdge(edgeKey{From: e.From, To: oldTo, Kind: oldKind, FilePath: e.FilePath, Line: e.Line})
-	if stored == nil {
-		return
-	}
-	if stored != e {
-		s := g.shardFor(e.From)
-		s.mu.Lock()
-		content := cloneDeltaEdge(e)
-		*stored = *content
-		s.mu.Unlock()
-	}
-	g.reindexEdge(stored, oldTo, oldKind)
-	g.edgeMutGen.Add(1)
 }
 
 // SetEdgeProvenanceBatch implements Store.

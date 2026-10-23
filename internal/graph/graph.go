@@ -705,13 +705,10 @@ func (g *Graph) ReindexEdges(batch []EdgeReindex) {
 	if receiptActive {
 		defer g.endReceiptMutation()
 	}
-	touched := make([]bool, g.shardCount)
-	mutated := false
 	for _, r := range batch {
 		if r.Edge == nil {
 			continue
 		}
-		mutated = true
 		oldKind := r.OldKind
 		if oldKind == "" {
 			oldKind = r.Edge.Kind
@@ -722,6 +719,20 @@ func (g *Graph) ReindexEdges(batch []EdgeReindex) {
 			// Like reindexEdge, an unchanged target records no resolver work.
 			g.recordReindexedEdgeForReceipts(r.Edge)
 		}
+	}
+	g.reindexEdges(batch)
+}
+
+// reindexEdges repairs adjacency and identity indexes without choosing a receipt
+// policy. DeltaWriter records refreshes as exact inserted rows, unlike Graph.
+func (g *Graph) reindexEdges(batch []EdgeReindex) {
+	touched := make([]bool, g.shardCount)
+	mutated := false
+	for _, r := range batch {
+		if r.Edge == nil {
+			continue
+		}
+		mutated = true
 		oldFrom := r.OldFrom
 		if oldFrom == "" || !r.RefreshIdentity {
 			oldFrom = r.Edge.From
