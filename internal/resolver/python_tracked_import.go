@@ -3,6 +3,7 @@ package resolver
 import (
 	"context"
 	"iter"
+	"slices"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -94,40 +95,73 @@ func (cr *CrossRepoResolver) trackedPythonImport(caller *graph.Node, spec string
 	return match
 }
 
-// Retry only import/file edges; never reconsider working links. As in the npm
-// bridge, close the light cursor before probing nodes or hydrating bounded pages.
+// SQLite's projection scanner closes each page cursor before yielding, so the
+// retry may hydrate and reindex edges without retaining the complete light scan.
+// Other stores drain the light scan first: EdgesLightSeq can hold a live cursor
+// that must be closed before the retry reads or writes the graph.
+func (cr *CrossRepoResolver) trackedPythonImportEdges() iter.Seq[*graph.Edge] {
+	if scanner, ok := cr.graph.(interface {
+		ScanTestEdgeProjections([]graph.EdgeKind, int, func([]graph.TestEdgeProjection) bool)
+	}); ok {
+		return func(yield func(*graph.Edge) bool) {
+			scanner.ScanTestEdgeProjections([]graph.EdgeKind{graph.EdgeImports}, resolvePendingPageRows, func(page []graph.TestEdgeProjection) bool {
+				for _, e := range page {
+					if !yield(&graph.Edge{From: e.From, To: e.To, Kind: e.Kind, FilePath: e.FilePath, Line: e.Line}) {
+						return false
+					}
+				}
+				return true
+			})
+		}
+	}
+	var edges []*graph.Edge
+	for e := range graph.EdgesLightSeq(cr.graph, graph.EdgeImports) {
+		if trackedPythonImportTop(e) != "" {
+			edges = append(edges, e)
+		}
+	}
+	return slices.Values(edges)
+}
+
+// Retry only import/file edges; never reconsider working links.
 func (cr *CrossRepoResolver) resolveTrackedPythonImports(ctx context.Context, edges iter.Seq[*graph.Edge], stats *CrossRepoStats) error {
 	if cr.pythonPackages == nil {
 		return ctx.Err()
 	}
-	var pending []*graph.Edge
-	for e := range edges {
+	next, stop := iter.Pull(edges)
+	defer stop()
+	var lookup *PythonPackageLookup
+	for {
+		page := make([]*graph.Edge, 0, resolvePendingPageRows)
+		for len(page) < resolvePendingPageRows {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			e, ok := next()
+			if !ok {
+				break
+			}
+			top := trackedPythonImportTop(e)
+			if top == "" {
+				continue
+			}
+			if lookup == nil {
+				lookup = cr.pythonPackages()
+				if lookup == nil {
+					return ctx.Err()
+				}
+			}
+			if lookup.HasTop(top) {
+				page = append(page, e)
+			}
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if trackedPythonImportTop(e) != "" {
-			pending = append(pending, e)
+		if len(page) == 0 {
+			return nil
 		}
-	}
-	if len(pending) == 0 {
-		return ctx.Err()
-	}
-	lookup := cr.pythonPackages()
-	if lookup == nil {
-		return ctx.Err()
-	}
-	eligible := pending[:0]
-	for _, e := range pending {
-		if lookup.HasTop(trackedPythonImportTop(e)) {
-			eligible = append(eligible, e)
-		}
-	}
-	nodes := map[string]*graph.Node{}
-	for start := 0; start < len(eligible); start += resolvePendingPageRows {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		page := eligible[start:min(start+resolvePendingPageRows, len(eligible))]
+		nodes := map[string]*graph.Node{}
 		sites := make([]graph.EdgeSite, 0, len(page))
 		ids := make([]string, 0, len(page))
 		seen := map[string]bool{}
@@ -171,5 +205,4 @@ func (cr *CrossRepoResolver) resolveTrackedPythonImports(ctx context.Context, ed
 			cr.graph.ReindexEdges(batch)
 		}
 	}
-	return ctx.Err()
 }
