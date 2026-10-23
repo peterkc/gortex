@@ -94,7 +94,9 @@ func TestRepositoryPrefixCollision(t *testing.T) {
 func TestRepositoryPrefixCollisionSymlinkAlias(t *testing.T) {
 	first := setupRepoDir(t, "src")
 	alias := filepath.Join(t.TempDir(), "src")
-	require.NoError(t, os.Symlink(first, alias))
+	if err := os.Symlink(first, alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
 	_, mi, _ := newWorktreeTestIndexer(t)
 	t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
 	_, err := mi.TrackRepoCtx(t.Context(), config.RepoEntry{Path: first})

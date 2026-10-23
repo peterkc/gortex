@@ -71,7 +71,9 @@ func TestRunTrackPrefixCollisionKeepsAliasEntry(t *testing.T) {
 	t.Setenv("GORTEX_DAEMON_SOCKET", filepath.Join(t.TempDir(), "absent.sock"))
 	first, second := pathkey.CanonicalExistingRoot(t.TempDir()), pathkey.CanonicalExistingRoot(t.TempDir())
 	alias := filepath.Join(t.TempDir(), "alias")
-	require.NoError(t, os.Symlink(second, alias))
+	if err := os.Symlink(second, alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
 	gc, err := config.LoadGlobal()
 	require.NoError(t, err)
 	require.NoError(t, gc.AddRepo(config.RepoEntry{Path: first, Name: "src"}))
