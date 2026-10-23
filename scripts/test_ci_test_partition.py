@@ -420,9 +420,9 @@ ok  \texample.org/b\t2.5s
     def test_committed_timings_produce_ten_minute_layout(self):
         plan = self.committed_plan()
         expected = {
-            "ubuntu-latest": {"store": 3, "indexer": 2, "mcp": 2},
-            "windows-latest": {"indexer": 2},
-            "macos-latest": {"indexer": 2},
+            "ubuntu-latest": {"store": 8, "indexer": 16, "mcp": 4},
+            "windows-latest": {"indexer": 9},
+            "macos-latest": {"indexer": 3},
         }
         rows = plan["linux"]["include"] + plan["platform"]["include"]
         for platform, counts in expected.items():
