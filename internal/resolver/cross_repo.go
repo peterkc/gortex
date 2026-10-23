@@ -157,7 +157,7 @@ type CrossRepoResolver struct {
 
 	cargoCrates        CargoCrateLookup
 	cargoRetargetRepos map[string]bool
-
+	pythonPackages func() *PythonPackageLookup
 	// pathAlias expands a JS/TS tsconfig/jsconfig path-alias / baseUrl
 	// import specifier to the repo-prefixed file stem it targets. Same
 	// contract as the field of the same name on Resolver — see
@@ -433,6 +433,9 @@ func (cr *CrossRepoResolver) ResolveAllContext(ctx context.Context) (*CrossRepoS
 		return stats, err
 	}
 	if err := cr.resolveCargoImports(ctx, graph.EdgesLightSeq(cr.graph, graph.EdgeImports), stats); err != nil {
+		return stats, err
+	}
+	if err := cr.resolveTrackedPythonImports(ctx, graph.EdgesLightSeq(cr.graph, graph.EdgeImports), stats); err != nil {
 		return stats, err
 	}
 	// Share the master resolver's stable high-water/keyset stream. The cold
@@ -721,6 +724,7 @@ func (cr *CrossRepoResolver) resolveScopedLocked(edges []*graph.Edge) *CrossRepo
 	stats := &CrossRepoStats{ByRepo: make(map[string]int)}
 	_ = cr.resolveTrackedNpmImports(context.Background(), slices.Values(edges), stats)
 	_ = cr.resolveCargoImports(context.Background(), slices.Values(edges), stats)
+	_ = cr.resolveTrackedPythonImports(context.Background(), slices.Values(edges), stats)
 	pending := make([]*graph.Edge, 0, len(edges))
 	for _, edge := range edges {
 		if edge != nil && graph.IsUnresolvedTarget(edge.To) {
