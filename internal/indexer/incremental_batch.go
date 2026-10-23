@@ -1352,6 +1352,7 @@ func restubIncomingRefsFromView(
 ) []*graph.Edge {
 	evicted := structuralPriorIDs(stages)
 	reparsed := reparsedPaths(stages)
+	restubTrackedNpmImportsFromView(g, evicted, view.inByNode)
 	var reindexes []graph.EdgeReindex
 	var carried []*graph.Edge
 	carriedSeen := make(map[*graph.Edge]struct{})
