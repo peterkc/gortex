@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -207,7 +208,17 @@ func runTrack(cmd *cobra.Command, args []string) error {
 			}
 			emitTrackSummary(w, absPath, trackResult{viaDaemon: true, prefix: prefix, alreadyTracked: already})
 			return nil
-		} else if trackWait {
+		}
+		var collision *trackPrefixCollisionError
+		if errors.As(notifyErr, &collision) {
+			if !already {
+				if err := removeAddedRepoEntry(absPath); err != nil {
+					return fmt.Errorf("%w; removing rejected entry from config: %v", notifyErr, err)
+				}
+			}
+			return notifyErr
+		}
+		if trackWait {
 			// The repo is persisted, but --wait promised a queryable graph we
 			// can no longer deliver — surface that rather than a soft success.
 			return fmt.Errorf("--wait: daemon did not accept the repo (it remains tracked in config): %w", notifyErr)
@@ -365,14 +376,37 @@ type trackResult struct {
 	prefix         string // the prefix the repo was registered under (may differ from basename for worktree instances)
 }
 
+// trackPrefixCollisionError is the daemon's prefix_collision rejection.
+type trackPrefixCollisionError struct{ message string }
+
+func (e *trackPrefixCollisionError) Error() string { return "track rejected: " + e.message }
+
+// removeAddedRepoEntry drops only the top-level entry this command added,
+// matched by its exact path. Other spellings of the same directory and
+// project memberships stay. The config is reloaded first so a track that
+// completed meanwhile is preserved.
+func removeAddedRepoEntry(path string) error {
+	gc, err := config.LoadGlobal()
+	if err != nil {
+		return err
+	}
+	for i, entry := range gc.Repos {
+		if entry.Path == path {
+			gc.Repos = append(gc.Repos[:i], gc.Repos[i+1:]...)
+			return gc.Save()
+		}
+	}
+	return nil
+}
+
 // emitTrackBanner prints the gortex mesh banner + subtitle indicating which
 // path will be tracked and whether a daemon will pick it up immediately. Only
 // emitted when stderr is a TTY — non-TTY runs (CI scripts) stay quiet so
 // existing piped output still parses.
 // notifyDaemonTrack hands the repo to a running daemon via the control
 // socket. It returns an error when the daemon can't be reached or rejects
-// the request; the caller treats that as non-fatal because the config
-// write already persisted the repo.
+// the request. A prefix collision is fatal and rolls back a new config
+// entry; transport failures keep the offline-safe config write.
 func notifyDaemonTrack(absPath string, deadline time.Time) error {
 	c, err := daemon.Dial(daemon.Handshake{Mode: daemon.ModeControl, ClientName: "cli"})
 	if err != nil {
@@ -396,6 +430,9 @@ func notifyDaemonTrack(absPath string, deadline time.Time) error {
 		return err
 	}
 	if !resp.OK {
+		if resp.ErrorCode == daemon.ErrPrefixCollision {
+			return &trackPrefixCollisionError{message: resp.ErrorMsg}
+		}
 		return fmt.Errorf("track rejected: %s %s", resp.ErrorCode, resp.ErrorMsg)
 	}
 	return nil
