@@ -20,6 +20,15 @@ import (
 // Preset names are deliberately not reserved: a user custom provider of
 // the same name (providers.json or inline `llm.custom`) always wins.
 var gatewayPresets = map[string]CustomProvider{
+	// Cheaper Inference (https://cheaperinference.com/docs) is an
+	// OpenAI-compatible gateway; model ids are bare (no vendor prefix).
+	"cheaperinference": {
+		BaseURL:       "https://api.cheaperinference.com/v1",
+		Model:         "gpt-5.4-mini",
+		APIKeyEnv:     "CHEAPER_INFERENCE_API_KEY",
+		SchemaMode:    "json_schema",
+		PromptProfile: "frontier",
+	},
 	// Requesty (https://docs.requesty.ai) fronts many vendors behind one
 	// key; model ids carry a vendor prefix. Regional routers:
 	// https://router.eu.requesty.ai/v1 (and .us / .ap).

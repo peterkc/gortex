@@ -2,7 +2,10 @@ package indexer
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
+
+	"github.com/zzet/gortex/internal/excludes"
 )
 
 // watcherExcludeFilter adapts the indexer's exclude matcher to the file
@@ -36,7 +39,23 @@ func (f *watcherExcludeFilter) ShouldInclude(path string) bool {
 	if root == "" {
 		return !f.w.excludes.MatchRel(path)
 	}
-	return !f.w.excludes.MatchAbs(path, root)
+	// An ignore file's events keep the per-folder rule cache current, even
+	// when the file itself is excluded; the full check still keeps it out
+	// of the index.
+	if slices.Contains(dirIgnoreFiles, filepath.Base(path)) {
+		return true
+	}
+	rel, err := filepath.Rel(root, path)
+	// Defer MCP config paths and potentially re-included subtrees to the
+	// full check, without statting paths in this backend hot path. Other
+	// agent-config paths fall to the Builtin exclusion below.
+	if err == nil && (excludes.IsAgentConfigMCPDir(rel) || excludes.IsAgentConfigMCPFile(rel)) {
+		return true
+	}
+	if !f.w.excludes.MatchAbs(path, root) {
+		return true
+	}
+	return err == nil && f.w.excludes.HasAnchoredNegatedDescendant(filepath.ToSlash(rel))
 }
 
 // isProbeMarkerPath reports whether path names a watcher handshake probe.

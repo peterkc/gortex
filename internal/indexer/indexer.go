@@ -5642,6 +5642,28 @@ func (idx *Indexer) shouldExclude(path, root string, isDir bool) bool {
 // shouldExcludeRules applies the lexical and per-directory ignore rules.
 // Callers must first establish that a file is not an escaping symlink.
 func (idx *Indexer) shouldExcludeRules(path, root string, isDir bool) bool {
+	return shouldExcludeRules(path, root, isDir, idx.excludeMatcher(), idx.perFolderIgnores(root))
+}
+
+// perFolderIgnores returns the per-directory ignore matcher the exclusion
+// rules apply, or nil when the index reads a content source.
+//
+// Per-directory ignore files are a working-tree fact: the hierarchical
+// matcher reads them off disk, while a snapshot source serves a revision
+// whose ignore files may differ from the checkout's — or not be on disk at
+// all. A snapshot is therefore admitted by the layered config excludes
+// alone, and an index built from one should declare that omission in its
+// producer state rather than claim per-directory ignore coverage it never
+// had. The watcher uses the same matcher, so both read and cache each
+// ignore file once and agree on when per-directory rules apply.
+func (idx *Indexer) perFolderIgnores(root string) *excludes.Hierarchical {
+	if idx.contentSource() != nil {
+		return nil
+	}
+	return idx.dirIgnoreMatcher(root)
+}
+
+func shouldExcludeRules(path, root string, isDir bool, flat *excludes.Matcher, perFolder *excludes.Hierarchical) bool {
 	rel, relErr := filepath.Rel(root, path)
 	// Git's own data is never source, whatever the ignore rules say: no
 	// re-include reaches into a .git folder. See warnGitNegations.
@@ -5649,31 +5671,30 @@ func (idx *Indexer) shouldExcludeRules(path, root string, isDir bool) bool {
 		return true
 	}
 	// .claude/ and .kiro/ are Builtin-excluded wholesale, but may hold an
-	// MCP server config the MCP-config-as-graph feature targets (the
-	// extractor's own docs name .kiro/mcp.json). Descend those subtrees
-	// and index only the MCP config files within them — everything else
-	// stays excluded, so the agent-state noise never reaches the graph.
+	// MCP server config the MCP-config-as-graph feature targets
+	// (.kiro/settings/mcp.json). Only the folders where an agent keeps that
+	// config stay open, and only the MCP config files in them are admitted;
+	// agent state such as the checkouts under .claude/worktrees/ never
+	// reaches the graph or the watcher.
 	if relErr == nil && excludes.InAgentConfigDir(rel) {
+		open := excludes.IsAgentConfigMCPFile(rel)
 		if isDir {
-			return false
+			open = excludes.IsAgentConfigMCPDir(rel)
 		}
-		return !excludes.IsMCPConfigFile(rel)
+		if !open {
+			return true
+		}
+		// The exception lifts only the Builtin line for the agent-config
+		// root; the user's excludes and per-folder ignore files still apply.
+		if excludes.ExcludesAgentConfigPath(flat, path, root, isDir) {
+			return true
+		}
+		return perFolder.Match(path, isDir)
 	}
-	if m := idx.excludeMatcher(); m != nil && m.MatchAbsDir(path, root, isDir) {
+	if flat != nil && flat.MatchAbsDir(path, root, isDir) {
 		return true
 	}
-	if idx.contentSource() != nil {
-		// Per-directory ignore files are a working-tree fact: the
-		// hierarchical matcher reads them off disk, while a snapshot
-		// source serves a revision whose ignore files may differ from the
-		// checkout's — or not be on disk at all. A snapshot is therefore
-		// admitted by the layered config excludes alone, and an index
-		// built from one should declare that omission in its producer
-		// state rather than claim per-directory ignore coverage it never
-		// had.
-		return false
-	}
-	return idx.dirIgnoreMatcher(root).Match(path, isDir)
+	return perFolder.Match(path, isDir)
 }
 
 // emptyWalkProbeCap bounds the diagnostic re-walk below. It only ever
@@ -5795,23 +5816,37 @@ func (idx *Indexer) warnIfWalkAdmittedNothing(absRoot string, admitted int) {
 // reaches the child. Mirroring git, we keep descending such a directory
 // and let the per-file shouldExclude check filter its contents.
 func (idx *Indexer) shouldPruneDir(path, root string) bool {
+	return shouldPruneDir(path, root, idx.excludeMatcher(), idx.perFolderIgnores(root), false)
+}
+
+func shouldPruneDir(path, root string, flat *excludes.Matcher, perFolder *excludes.Hierarchical, anchoredOnly bool) bool {
 	// Checked before the negation checks below, which keep an excluded
 	// folder open whenever a re-include might reach into it.
 	if rel, err := filepath.Rel(root, path); err == nil && inGitDir(rel) {
 		return true
 	}
-	if !idx.shouldExclude(path, root, true) {
+	if !shouldExcludeRules(path, root, true, flat, perFolder) {
 		return false
 	}
-	if m := idx.excludeMatcher(); m != nil {
-		if rel, err := filepath.Rel(root, path); err == nil && m.HasNegatedDescendant(filepath.ToSlash(rel)) {
+	// No re-include reaches a file under a closed agent-config folder (see
+	// shouldExcludeRules), so the negation checks below do not apply.
+	if rel, err := filepath.Rel(root, path); err == nil && excludes.InAgentConfigDir(rel) && !excludes.IsAgentConfigMCPDir(rel) {
+		return true
+	}
+	if flat != nil {
+		hasNegatedDescendant := flat.HasNegatedDescendant
+		if anchoredOnly {
+			hasNegatedDescendant = flat.HasAnchoredNegatedDescendant
+		}
+		if rel, err := filepath.Rel(root, path); err == nil && hasNegatedDescendant(filepath.ToSlash(rel)) {
 			return false
 		}
 	}
-	// Same bypass as shouldExclude: under a snapshot source the
-	// per-directory ignore files are not part of the decision, so the
-	// matcher is not built at all.
-	if idx.contentSource() == nil && idx.dirIgnoreMatcher(root).HasNegatedDescendant(path) {
+	hasNegatedDescendant := perFolder.HasNegatedDescendant
+	if anchoredOnly {
+		hasNegatedDescendant = perFolder.HasAnchoredNegatedDescendant
+	}
+	if hasNegatedDescendant(path) {
 		return false
 	}
 	return true

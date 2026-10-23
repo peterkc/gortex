@@ -56,6 +56,13 @@ func TestConfig_ActiveCustom_PresetResolution(t *testing.T) {
 		t.Errorf("preset config: enabled=%v model=%q profile=%v", c.IsEnabled(), c.ActiveModel(), ProfileFor(c))
 	}
 
+	// A shipped preset resolves with no setup.
+	ci := Config{Provider: "cheaperinference"}
+	cp, ok = ci.ActiveCustom()
+	if !ok || cp.BaseURL != "https://api.cheaperinference.com/v1" || cp.Model != "gpt-5.4-mini" || cp.APIKeyEnv != "CHEAPER_INFERENCE_API_KEY" || ProfileFor(ci) != ProfileFrontier {
+		t.Errorf("cheaperinference preset: %+v ok=%v profile=%v", cp, ok, ProfileFor(ci))
+	}
+
 	// A user custom provider of the same name always wins, wholesale —
 	// no preset field leaks into it.
 	c.Custom = map[string]CustomProvider{"testgw": {BaseURL: "https://mine/v1", Model: "my-model"}}
