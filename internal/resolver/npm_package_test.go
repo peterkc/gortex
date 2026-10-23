@@ -14,7 +14,7 @@ import (
 
 func TestCrossRepoTrackedNpmPackage(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
-		for _, target := range []string{"external::p", "unresolved::import::p"} {
+		for _, target := range []string{"external::p::f", "unresolved::import::p::f"} {
 			for _, mode := range []string{"all", "repo", "file", "mutation", "import only"} {
 				t.Run(backend+"/"+target+"/"+mode, func(t *testing.T) {
 					var g graph.Store = graph.New()
@@ -28,7 +28,7 @@ func TestCrossRepoTrackedNpmPackage(t *testing.T) {
 						{ID: "app/src/app.ts", Kind: graph.KindFile, FilePath: "app/src/app.ts", RepoPrefix: "app", Language: "typescript"},
 						{ID: "app/src/app.ts::run", Kind: graph.KindFunction, Name: "run", FilePath: "app/src/app.ts", RepoPrefix: "app", Language: "typescript"},
 						{ID: "lib/src/index.ts", Kind: graph.KindFile, FilePath: "lib/src/index.ts", RepoPrefix: "lib", Language: "typescript"},
-						{ID: "lib/src/index.ts::f", Kind: graph.KindFunction, Name: "f", FilePath: "lib/src/index.ts", RepoPrefix: "lib", Language: "typescript"},
+						{ID: "lib/src/index.ts::f", Kind: graph.KindFunction, Name: "f", FilePath: "lib/src/index.ts", RepoPrefix: "lib", Language: "typescript", Meta: map[string]any{"visibility": "public"}},
 					}, nil)
 					imp := &graph.Edge{From: "app/src/app.ts", To: target, Kind: graph.EdgeImports, FilePath: "app/src/app.ts", Line: 1, Meta: map[string]any{"test_marker": "preserved"}}
 					g.AddEdge(imp)
@@ -37,11 +37,11 @@ func TestCrossRepoTrackedNpmPackage(t *testing.T) {
 					}
 					cr := NewCrossRepo(g)
 					cr.SetNpmDependencyLookup(func(_, spec string) bool { return spec == "p" })
-					cr.SetNpmPackageLookup(func(spec string) map[string][]string {
+					cr.SetNpmPackageLookup(func(spec string) map[string]NpmPackageTarget {
 						if spec != "p" {
 							return nil
 						}
-						return map[string][]string{"lib": {"lib/src/index.ts", "lib"}}
+						return map[string]NpmPackageTarget{"lib": {Entries: []string{"lib/src/index.ts", "lib"}}}
 					})
 					var stats *CrossRepoStats
 					switch mode {
@@ -68,7 +68,7 @@ func TestCrossRepoTrackedNpmPackage(t *testing.T) {
 							continue
 						}
 						found = true
-						assert.Equal(t, "lib/src/index.ts", e.To)
+						assert.Equal(t, "lib/src/index.ts::f", e.To)
 						assert.True(t, e.CrossRepo)
 						assert.Equal(t, "preserved", e.Meta["test_marker"])
 					}
@@ -104,10 +104,10 @@ func TestCrossRepoTrackedNpmPackageAmbiguousOrUndeclared(t *testing.T) {
 			g.AddEdge(imp)
 			cr := NewCrossRepo(g)
 			cr.SetNpmDependencyLookup(func(_, _ string) bool { return declared })
-			cr.SetNpmPackageLookup(func(_ string) map[string][]string {
-				targets := map[string][]string{"one": {"one/index.ts"}}
+			cr.SetNpmPackageLookup(func(_ string) map[string]NpmPackageTarget {
+				targets := map[string]NpmPackageTarget{"one": {WorkspaceID: "shared", Entries: []string{"one/index.ts"}}}
 				if declared {
-					targets["two"] = []string{"two/index.ts"}
+					targets["two"] = NpmPackageTarget{Entries: []string{"two/index.ts"}}
 				}
 				return targets
 			})
@@ -121,15 +121,15 @@ func TestCrossRepoTrackedNpmPackageAmbiguousOrUndeclared(t *testing.T) {
 func TestCrossRepoTrackedNpmPackageBoundaries(t *testing.T) {
 	for _, tc := range []struct {
 		name, visibility string
-		dirs             map[string][]string
+		dirs             map[string]NpmPackageTarget
 		want             string
 	}{
-		{"own package missing index", "private", map[string][]string{"app/packages/p": {"app/packages/p/missing"}, "one": {"one/index.ts"}}, "external::p::f"},
-		{"own root package", "private", map[string][]string{"app": {"app/missing"}, "one": {"one/index.ts"}}, "external::p::f"},
-		{"same workspace ambiguous", "private", map[string][]string{"one": {"one/index.ts"}, "two": {"two/index.ts"}}, "external::p::f"},
-		{"private symbol", "private", map[string][]string{"one": {"one/index.ts"}}, "one/index.ts"},
-		{"public symbol", "public", map[string][]string{"one": {"one/index.ts"}}, "one/index.ts::f"},
-		{"unknown visibility", "", map[string][]string{"one": {"one/index.ts"}}, "one/index.ts"},
+		{"own package missing index", "private", map[string]NpmPackageTarget{"app/packages/p": {Entries: []string{"app/packages/p/missing"}}, "one": {WorkspaceID: "shared", Entries: []string{"one/index.ts"}}}, "external::p::f"},
+		{"own root package", "private", map[string]NpmPackageTarget{"app": {Entries: []string{"app/missing"}}, "one": {WorkspaceID: "shared", Entries: []string{"one/index.ts"}}}, "external::p::f"},
+		{"same workspace ambiguous", "private", map[string]NpmPackageTarget{"one": {WorkspaceID: "shared", Entries: []string{"one/index.ts"}}, "two": {WorkspaceID: "shared", Entries: []string{"two/index.ts"}}}, "external::p::f"},
+		{"private symbol", "private", map[string]NpmPackageTarget{"one": {WorkspaceID: "shared", Entries: []string{"one/index.ts"}}}, "one/index.ts"},
+		{"public symbol", "public", map[string]NpmPackageTarget{"one": {WorkspaceID: "shared", Entries: []string{"one/index.ts"}}}, "one/index.ts::f"},
+		{"unknown visibility", "", map[string]NpmPackageTarget{"one": {WorkspaceID: "shared", Entries: []string{"one/index.ts"}}}, "one/index.ts"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := graph.New()
@@ -143,7 +143,7 @@ func TestCrossRepoTrackedNpmPackageBoundaries(t *testing.T) {
 			g.AddEdge(imp)
 			cr := NewCrossRepo(g)
 			cr.SetNpmDependencyLookup(func(_, _ string) bool { return true })
-			cr.SetNpmPackageLookup(func(_ string) map[string][]string { return tc.dirs })
+			cr.SetNpmPackageLookup(func(_ string) map[string]NpmPackageTarget { return tc.dirs })
 			cr.ResolveAll()
 			assert.Equal(t, tc.want, imp.To)
 			assert.Equal(t, tc.want != "external::p::f", imp.CrossRepo)
@@ -173,7 +173,9 @@ func TestCrossRepoTrackedNpmPackageProbeMemo(t *testing.T) {
 			}
 			cr := NewCrossRepo(g)
 			cr.SetNpmDependencyLookup(func(_, _ string) bool { return declared })
-			cr.SetNpmPackageLookup(func(_ string) map[string][]string { return map[string][]string{"lib": {"lib/missing"}} })
+			cr.SetNpmPackageLookup(func(_ string) map[string]NpmPackageTarget {
+				return map[string]NpmPackageTarget{"lib": {Entries: []string{"lib/missing"}}}
+			})
 			for pass := 0; pass < 2; pass++ {
 				g.providerReads = 0
 				cr.ResolveAll()
@@ -232,7 +234,10 @@ func TestCrossRepoTrackedNpmPackageHydration(t *testing.T) {
 					cr.SetNpmAliasResolver(func(_, _ string) string { return "other" })
 				}
 				lookups := 0
-				cr.SetNpmPackageLookup(func(_ string) map[string][]string { lookups++; return map[string][]string{"lib": {"lib/index.ts"}} })
+				cr.SetNpmPackageLookup(func(_ string) map[string]NpmPackageTarget {
+					lookups++
+					return map[string]NpmPackageTarget{"lib": {Entries: []string{"lib/index.ts"}}}
+				})
 				stats := &CrossRepoStats{ByRepo: map[string]int{}}
 				require.NoError(t, cr.resolveTrackedNpmImports(context.Background(), graph.EdgesLightSeq(store, graph.EdgeImports), stats))
 				if mode != "declared" {
@@ -278,12 +283,12 @@ func TestCrossRepoTrackedNpmPackageCancellation(t *testing.T) {
 			cr := NewCrossRepo(g)
 			cr.SetNpmDependencyLookup(func(_, _ string) bool { return true })
 			lookups := 0
-			cr.SetNpmPackageLookup(func(_ string) map[string][]string {
+			cr.SetNpmPackageLookup(func(_ string) map[string]NpmPackageTarget {
 				lookups++
 				if phase == "scan" {
 					cancel()
 				}
-				return map[string][]string{"lib": {"lib/index.ts"}}
+				return map[string]NpmPackageTarget{"lib": {Entries: []string{"lib/index.ts"}}}
 			})
 			if phase == "before" {
 				cancel()
@@ -302,6 +307,272 @@ func TestCrossRepoTrackedNpmPackageCancellation(t *testing.T) {
 					assert.Zero(t, lookups)
 				}
 			}
+		})
+	}
+}
+
+func TestTrackedNpmCallUsesImportBinding(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			var g graph.Store = graph.New()
+			if backend == "sqlite" {
+				db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.sqlite"))
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, db.Close()) })
+				g = db
+			}
+			g.AddBatch([]*graph.Node{
+				{ID: "app/a.ts", Kind: graph.KindFile, FilePath: "app/a.ts", RepoPrefix: "app", Language: "typescript"},
+				{ID: "app/a.ts::run", Kind: graph.KindFunction, FilePath: "app/a.ts", RepoPrefix: "app", Language: "typescript"},
+				{ID: "lib/z.ts", Kind: graph.KindFile, FilePath: "lib/z.ts", RepoPrefix: "lib", Language: "typescript"},
+				{ID: "lib/z.ts::f", Name: "f", Kind: graph.KindFunction, FilePath: "lib/z.ts", RepoPrefix: "lib", Language: "typescript", Meta: map[string]any{"visibility": "public"}},
+				{ID: "lib/a/helpers.ts::f", Name: "f", Kind: graph.KindFunction, FilePath: "lib/a/helpers.ts", RepoPrefix: "lib", Language: "typescript"},
+				{ID: "lib/internal.ts::debounce", Name: "debounce", Kind: graph.KindFunction, FilePath: "lib/internal.ts", RepoPrefix: "lib", Language: "typescript"},
+			}, []*graph.Edge{
+				{From: "app/a.ts", To: "external::p", Kind: graph.EdgeImports, FilePath: "app/a.ts", Line: 1},
+				{From: "app/a.ts", To: "external::p::f", Kind: graph.EdgeImports, FilePath: "app/a.ts", Line: 1},
+				{From: "app/a.ts", To: "external::lodash::debounce", Kind: graph.EdgeImports, FilePath: "app/a.ts", Line: 2},
+				{From: "app/a.ts::run", To: "unresolved::f", Kind: graph.EdgeCalls, FilePath: "app/a.ts", Line: 3},
+				{From: "app/a.ts::run", To: "unresolved::debounce", Kind: graph.EdgeCalls, FilePath: "app/a.ts", Line: 4},
+			})
+			cr := NewCrossRepo(g)
+			cr.SetNpmDependencyLookup(func(_, _ string) bool { return true })
+			cr.SetNpmPackageLookup(func(spec string) map[string]NpmPackageTarget {
+				if spec == "p" {
+					return map[string]NpmPackageTarget{"lib": {Entries: []string{"lib/z.ts"}}}
+				}
+				return nil
+			})
+			cr.ResolveAll()
+			var calls []*graph.Edge
+			for _, e := range g.GetOutEdges("app/a.ts::run") {
+				if e.Kind == graph.EdgeCalls {
+					calls = append(calls, e)
+				}
+			}
+			require.Len(t, calls, 2)
+			for _, e := range calls {
+				if e.Line == 3 {
+					assert.Equal(t, "lib/z.ts::f", e.To)
+				} else {
+					assert.Equal(t, "unresolved::debounce", e.To)
+					assert.False(t, e.CrossRepo)
+				}
+			}
+		})
+	}
+}
+
+func TestTrackedNpmAmbiguityCountsUnindexedManifests(t *testing.T) {
+	for _, workspace := range []string{"shared", "foreign"} {
+		t.Run(workspace, func(t *testing.T) {
+			g := graph.New()
+			g.AddBatch([]*graph.Node{
+				{ID: "app/a.ts", Kind: graph.KindFile, RepoPrefix: "app", WorkspaceID: "shared"},
+				{ID: "fork/index.ts", Kind: graph.KindFile, RepoPrefix: "fork", WorkspaceID: workspace},
+			}, []*graph.Edge{{From: "app/a.ts", To: "external::p", Kind: graph.EdgeImports, FilePath: "app/a.ts", Line: 1}})
+			cr := NewCrossRepo(g)
+			cr.SetNpmDependencyLookup(func(_, _ string) bool { return true })
+			cr.SetNpmPackageLookup(func(_ string) map[string]NpmPackageTarget {
+				return map[string]NpmPackageTarget{"real": {WorkspaceID: workspace, Entries: []string{"real/dist/index.js"}}, "fork": {WorkspaceID: workspace, Entries: []string{"fork/index.ts"}}}
+			})
+			cr.ResolveAll()
+			imports := g.GetOutEdges("app/a.ts")
+			require.Len(t, imports, 1)
+			assert.Equal(t, "external::p", imports[0].To)
+			assert.False(t, imports[0].CrossRepo)
+		})
+	}
+}
+
+func TestTrackedNpmLinkedImportsRechecked(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, change := range []string{"renamed", "blocked", "dependency removed", "alias", "repointed"} {
+			t.Run(backend+"/"+change, func(t *testing.T) {
+				var g graph.Store = graph.New()
+				if backend == "sqlite" {
+					db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.sqlite"))
+					require.NoError(t, err)
+					t.Cleanup(func() { require.NoError(t, db.Close()) })
+					g = db
+				}
+				g.AddBatch([]*graph.Node{
+					{ID: "app/a.ts", Kind: graph.KindFile, RepoPrefix: "app"},
+					{ID: "app/a.ts::run", Kind: graph.KindFunction, FilePath: "app/a.ts", RepoPrefix: "app"},
+					{ID: "lib/index.ts", Kind: graph.KindFile, RepoPrefix: "lib"},
+					{ID: "lib/index.ts::f", Name: "f", Kind: graph.KindFunction, RepoPrefix: "lib", Meta: map[string]any{"visibility": "public"}},
+					{ID: "next/index.ts", Kind: graph.KindFile, RepoPrefix: "next"},
+					{ID: "next/index.ts::f", Name: "f", Kind: graph.KindFunction, RepoPrefix: "next", Meta: map[string]any{"visibility": "public"}},
+				}, []*graph.Edge{
+					{From: "app/a.ts", To: "external::p", Kind: graph.EdgeImports, FilePath: "app/a.ts", Line: 1},
+					{From: "app/a.ts", To: "external::p::f", Kind: graph.EdgeImports, FilePath: "app/a.ts", Line: 1},
+					{From: "app/a.ts::run", To: "unresolved::f", Kind: graph.EdgeCalls, FilePath: "app/a.ts", Line: 2},
+				})
+				changed := false
+				cr := NewCrossRepo(g)
+				cr.SetNpmDependencyLookup(func(_, _ string) bool { return !changed || change != "dependency removed" })
+				cr.SetNpmAliasResolver(func(_, _ string) string {
+					if changed && change == "alias" {
+						return "other"
+					}
+					return ""
+				})
+				cr.SetNpmPackageLookup(func(_ string) map[string]NpmPackageTarget {
+					if changed && change == "repointed" {
+						return map[string]NpmPackageTarget{"next": {Entries: []string{"next/index.ts"}}}
+					}
+					if changed && change == "renamed" {
+						return nil
+					}
+					if changed && change == "blocked" {
+						return map[string]NpmPackageTarget{"lib": {}}
+					}
+					return map[string]NpmPackageTarget{"lib": {Entries: []string{"lib/index.ts"}}}
+				})
+				cr.ResolveAll()
+				for _, e := range g.GetOutEdges("app/a.ts") {
+					require.True(t, e.CrossRepo)
+					assert.NotEmpty(t, e.Meta["npm_import"])
+				}
+				for _, e := range g.GetOutEdges("app/a.ts::run") {
+					if e.Kind == graph.EdgeCalls {
+						require.Equal(t, "lib/index.ts::f", e.To)
+					}
+				}
+				changed = true
+				cr.ResolveAll()
+				if change == "repointed" {
+					calls := g.GetOutEdges("app/a.ts::run")
+					require.Len(t, calls, 2, "one base call and one parallel")
+					for _, e := range calls {
+						assert.Equal(t, "next/index.ts::f", e.To, "base and parallel must both target the new provider")
+					}
+					assert.Empty(t, g.GetInEdges("lib/index.ts::f"))
+					return
+				}
+				var targets []string
+				for _, e := range g.GetOutEdges("app/a.ts") {
+					targets = append(targets, e.To)
+					assert.False(t, e.CrossRepo)
+				}
+				assert.ElementsMatch(t, []string{"external::p", "external::p::f"}, targets)
+				for _, e := range g.GetOutEdges("app/a.ts::run") {
+					assert.NotEqual(t, graph.EdgeCrossRepoCalls, e.Kind, "restubbed call must not keep its old parallel")
+					if e.Kind == graph.EdgeCalls {
+						assert.Equal(t, "unresolved::f", e.To)
+						assert.False(t, e.CrossRepo)
+					}
+				}
+				assert.Zero(t, cr.ResolveAll().Resolved, "repeated rejection is idempotent")
+			})
+		}
+	}
+}
+
+func TestTrackedNpmOwnWorkspaceWins(t *testing.T) {
+	g := graph.New()
+	g.AddBatch([]*graph.Node{
+		{ID: "app/a.ts", Kind: graph.KindFile, RepoPrefix: "app", WorkspaceID: "shared"},
+		{ID: "local/index.ts", Kind: graph.KindFile, RepoPrefix: "local", WorkspaceID: "shared"},
+		{ID: "foreign/index.ts", Kind: graph.KindFile, RepoPrefix: "foreign", WorkspaceID: "elsewhere"},
+	}, []*graph.Edge{{From: "app/a.ts", To: "external::p", Kind: graph.EdgeImports, FilePath: "app/a.ts", Line: 1}})
+	cr := NewCrossRepo(g)
+	cr.SetCrossWorkspaceDepLookup(func(_ string) []CrossWorkspaceDepRule {
+		return []CrossWorkspaceDepRule{{Workspace: "elsewhere", Modules: []string{"p"}}}
+	})
+	cr.SetNpmDependencyLookup(func(_, _ string) bool { return true })
+	cr.SetNpmPackageLookup(func(_ string) map[string]NpmPackageTarget {
+		return map[string]NpmPackageTarget{"local": {WorkspaceID: "shared", Entries: []string{"local/index.ts"}}, "foreign": {WorkspaceID: "elsewhere", Entries: []string{"foreign/index.ts"}}}
+	})
+	cr.ResolveAll()
+	imports := g.GetOutEdges("app/a.ts")
+	require.Len(t, imports, 1)
+	assert.Equal(t, "local/index.ts", imports[0].To)
+	assert.True(t, imports[0].CrossRepo)
+}
+
+func TestTrackedNpmRenamedImportDoesNotExposeOriginal(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			var g graph.Store = graph.New()
+			if backend == "sqlite" {
+				db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.sqlite"))
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, db.Close()) })
+				g = db
+			}
+			g.AddBatch([]*graph.Node{
+				{ID: "app/a.ts", Kind: graph.KindFile, RepoPrefix: "app"},
+				{ID: "app/a.ts::run", Kind: graph.KindFunction, FilePath: "app/a.ts", RepoPrefix: "app"},
+				{ID: "lib/index.ts", Kind: graph.KindFile, RepoPrefix: "lib"},
+				{ID: "lib/index.ts::f", Kind: graph.KindFunction, Name: "f", FilePath: "lib/index.ts", RepoPrefix: "lib", Meta: map[string]any{"visibility": "public"}},
+			}, []*graph.Edge{
+				{From: "app/a.ts", To: "external::p::f", Kind: graph.EdgeImports, Alias: "renamed", Meta: map[string]any{"import_alias": "renamed"}, FilePath: "app/a.ts", Line: 1},
+				{From: "app/a.ts", To: "external::lodash::f", Kind: graph.EdgeImports, FilePath: "app/a.ts", Line: 2},
+				{From: "app/a.ts::run", To: "unresolved::f", Kind: graph.EdgeCalls, FilePath: "app/a.ts", Line: 3},
+				{From: "app/a.ts::run", To: "unresolved::renamed", Kind: graph.EdgeCalls, FilePath: "app/a.ts", Line: 4},
+			})
+			cr := NewCrossRepo(g)
+			cr.SetNpmDependencyLookup(func(_, spec string) bool { return spec == "p" || spec == "lodash" })
+			cr.SetNpmPackageLookup(func(spec string) map[string]NpmPackageTarget {
+				if spec == "p" {
+					return map[string]NpmPackageTarget{"lib": {Entries: []string{"lib/index.ts"}}}
+				}
+				return nil
+			})
+			cr.ResolveAll()
+			// The provider changes, but the consumer's marked import is outside
+			// the outgoing frontier. Its incoming bare f() must stay unresolved.
+			cr.ResolveMutationFrontiers([]string{"lib/index.ts"}, nil, []string{"lib/index.ts"})
+			var calls []*graph.Edge
+			for _, e := range g.GetOutEdges("app/a.ts::run") {
+				if e.Kind == graph.EdgeCalls {
+					calls = append(calls, e)
+				}
+			}
+			require.Len(t, calls, 2)
+			for _, call := range calls {
+				if call.Line == 3 {
+					assert.Equal(t, "unresolved::f", call.To)
+					assert.False(t, call.CrossRepo)
+				} else {
+					assert.Equal(t, "lib/index.ts::f", call.To)
+					assert.True(t, call.CrossRepo)
+				}
+			}
+		})
+	}
+}
+
+func TestJSTSCrossRepoFileImportFallback(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			var g graph.Store = graph.New()
+			if backend == "sqlite" {
+				db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.sqlite"))
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, db.Close()) })
+				g = db
+			}
+			g.AddBatch([]*graph.Node{
+				{ID: "app/a.ts", Kind: graph.KindFile, RepoPrefix: "app"},
+				{ID: "app/a.ts::run", Kind: graph.KindFunction, FilePath: "app/a.ts", RepoPrefix: "app"},
+				{ID: "lib/index.ts", Kind: graph.KindFile, RepoPrefix: "lib"},
+				{ID: "lib/index.ts::f", Kind: graph.KindFunction, Name: "f", FilePath: "lib/index.ts", RepoPrefix: "lib"},
+			}, []*graph.Edge{
+				{From: "app/a.ts", To: "lib/index.ts", Kind: graph.EdgeImports, FilePath: "app/a.ts", CrossRepo: true},
+				{From: "app/a.ts::run", To: "unresolved::f", Kind: graph.EdgeCalls, FilePath: "app/a.ts"},
+			})
+			NewCrossRepo(g).ResolveAll()
+			var calls []*graph.Edge
+			for _, e := range g.GetOutEdges("app/a.ts::run") {
+				if e.Kind == graph.EdgeCalls {
+					calls = append(calls, e)
+				}
+			}
+			require.Len(t, calls, 1)
+			assert.Equal(t, "lib/index.ts::f", calls[0].To)
+			assert.True(t, calls[0].CrossRepo)
 		})
 	}
 }

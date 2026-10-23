@@ -112,6 +112,7 @@ type CrossRepoResolver struct {
 	// rows. A Go call the per-repo package guard refused must not regain a
 	// same-repo name-only binding just because the repository is reachable.
 	importedDirsByFile map[string]map[string]struct{}
+	jsTSBindingsByFile map[string]map[string]string
 	// depModuleIndex bridges Go imports to dep::<module> contract
 	// nodes from the caller's go.mod. Same shape and rationale as
 	// the field of the same name on Resolver — see resolver.go for
@@ -801,6 +802,7 @@ func (cr *CrossRepoResolver) clearDirIndexes() {
 func (cr *CrossRepoResolver) buildReachableReposIndex() {
 	idx := make(map[string]map[string]struct{})
 	dirs := make(map[string]map[string]struct{})
+	cr.jsTSBindingsByFile = make(map[string]map[string]string)
 	// Materialise metadata-free import projections and batch-load only target
 	// placement fields. A per-edge point lookup here is a query round-trip per
 	// import on a disk backend, which under the cross-repo pass's import
@@ -823,29 +825,74 @@ func (cr *CrossRepoResolver) buildReachableReposIndex() {
 		idList = append(idList, id)
 	}
 	placements := graph.NodePlacementsByIDs(cr.graph, idList)
-	for _, e := range imports {
-		// Only resolved imports carry evidence — an unresolved import
-		// target tells us nothing about which repo the caller reaches.
-		to, ok := placements[e.To]
-		if !ok {
-			continue
-		}
-		if to.FilePath != "" {
-			dir := filePathDir(to.FilePath)
-			if dirs[e.From] == nil {
-				dirs[e.From] = make(map[string]struct{})
+	for start := 0; start < len(imports); start += resolvePendingPageRows {
+		page := imports[start:min(start+resolvePendingPageRows, len(imports))]
+		var sites []graph.EdgeSite
+		for _, e := range page {
+			if e.CrossRepo && isJSTSPath(e.From) {
+				sites = append(sites, graph.EdgeSite{From: e.From, Line: e.Line, Kind: graph.EdgeImports})
 			}
-			dirs[e.From][dir] = struct{}{}
 		}
-		if to.RepoPrefix == "" {
-			continue
+		// Markers belong to the persisted import, including imports outside a
+		// scoped resolution frontier. Hydrate only cross-repo JS/TS imports.
+		full := cr.graph.GetEdgeCandidates(nil, sites)
+		for _, e := range page {
+			for _, candidate := range full.Site(e.From, e.Line, graph.EdgeImports) {
+				if candidate.To == e.To && candidate.FilePath == e.FilePath {
+					e = candidate
+					break
+				}
+			}
+			// Only resolved imports carry evidence — an unresolved import
+			// target tells us nothing about which repo the caller reaches.
+			to, ok := placements[e.To]
+			if !ok {
+				continue
+			}
+			if to.FilePath != "" {
+				dir := filePathDir(to.FilePath)
+				if dirs[e.From] == nil {
+					dirs[e.From] = make(map[string]struct{})
+				}
+				dirs[e.From][dir] = struct{}{}
+			}
+			if to.RepoPrefix == "" {
+				continue
+			}
+			marked, _ := e.Meta[NpmImportSpecifierMeta].(string)
+			npmLinked := marked != "" && e.CrossRepo
+			alias, _ := e.Meta["import_alias"].(string)
+			if alias == "" {
+				alias = e.Alias
+			}
+			if isJSTSPath(e.From) {
+				// JS/TS imports name bindings, not every symbol in the provider.
+				if _, name, ok := strings.Cut(e.To, "::"); ok {
+					if npmLinked && alias != "" {
+						name = alias
+					}
+					bindings := cr.jsTSBindingsByFile[e.From]
+					if bindings == nil {
+						bindings = make(map[string]string)
+						cr.jsTSBindingsByFile[e.From] = bindings
+					}
+					if prior, exists := bindings[name]; !exists || prior == e.To {
+						bindings[name] = e.To
+					} else {
+						bindings[name] = "" // Conflicting bindings must not pick a winner.
+					}
+				}
+			}
+			if npmLinked {
+				continue
+			}
+			set := idx[e.From]
+			if set == nil {
+				set = make(map[string]struct{})
+				idx[e.From] = set
+			}
+			set[to.RepoPrefix] = struct{}{}
 		}
-		set := idx[e.From]
-		if set == nil {
-			set = make(map[string]struct{})
-			idx[e.From] = set
-		}
-		set[to.RepoPrefix] = struct{}{}
 	}
 	cr.reachableReposByFile = idx
 	cr.importedDirsByFile = dirs
@@ -854,6 +901,7 @@ func (cr *CrossRepoResolver) buildReachableReposIndex() {
 func (cr *CrossRepoResolver) clearReachableReposIndex() {
 	cr.reachableReposByFile = nil
 	cr.importedDirsByFile = nil
+	cr.jsTSBindingsByFile = nil
 }
 
 // A package-guard refusal is stronger than the cross-repo pass's same-repo
@@ -1321,6 +1369,19 @@ func (cr *CrossRepoResolver) csharpVerdictCaller(e *graph.Edge) bool {
 }
 
 func (cr *CrossRepoResolver) resolveFunctionCall(e *graph.Edge, funcName string, stats *CrossRepoStats) {
+	file := cr.callerFileID(e)
+	if target := cr.jsTSBindingsByFile[file][funcName]; target != "" {
+		if imported := cr.cachedGetNode(target); imported != nil && (imported.Kind == graph.KindFunction || imported.Kind == graph.KindMethod) {
+			e.To = imported.ID
+			stats.Resolved++
+			if isCrossRepoHop(cr.callerRepoPrefix(e), imported.RepoPrefix) {
+				e.CrossRepo = true
+				stats.CrossRepoEdges++
+				stats.ByRepo[imported.RepoPrefix]++
+			}
+			return
+		}
+	}
 	candidates := cr.scopedCandidates(e, funcName)
 	if len(candidates) == 0 {
 		stats.Unresolved++

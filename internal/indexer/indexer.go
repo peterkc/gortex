@@ -5878,7 +5878,7 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) {
 			continue
 		}
 		evicted[n.ID] = struct{}{}
-		if n.Name != "" && graph.IsReferenceableSymbol(n.Kind) {
+		if n.Kind == graph.KindFile || (n.Name != "" && graph.IsReferenceableSymbol(n.Kind)) {
 			refIDs = append(refIDs, n.ID)
 		}
 	}
@@ -5889,6 +5889,7 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) {
 	// operation. On SQLite this is chunked under the parameter limit; more
 	// importantly, it avoids one transaction/query per definition in the file.
 	inEdges := idx.graph.GetInEdgesByNodeIDs(refIDs)
+	restubTrackedNpmImportsFromView(idx.graph, evicted, inEdges)
 	var batch []graph.EdgeReindex
 	for _, n := range nodes {
 		if n == nil || n.Name == "" || !graph.IsReferenceableSymbol(n.Kind) {
