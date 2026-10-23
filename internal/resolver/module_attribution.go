@@ -144,6 +144,12 @@ func (r *Resolver) attributeNonGoModuleImports() {
 	}
 	dependsBatch := make([]*graph.Edge, 0, dependsBatchCapacity)
 	for _, p := range rewrites {
+		if strings.HasPrefix(p.moduleID, "module::pypi:") {
+			if p.edge.Meta == nil {
+				p.edge.Meta = map[string]any{}
+			}
+			p.edge.Meta["python_import"] = strings.TrimPrefix(p.oldTo, "external::")
+		}
 		p.edge.To = p.moduleID
 		p.edge.Origin = graph.OriginASTResolved
 		reindexBatch = append(reindexBatch, graph.EdgeReindex{Edge: p.edge, OldTo: p.oldTo})
