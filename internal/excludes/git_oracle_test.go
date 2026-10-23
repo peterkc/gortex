@@ -33,6 +33,7 @@ func TestGitIgnoreOracle(t *testing.T) {
 		{name: "open_child", root: "dir/*\n!dir/keep/\n", paths: []string{"dir/", "dir/keep/", "dir/keep/sub/a.go", "dir/drop/", "dir/drop/a.go", "other/dir/drop/a.go"}},
 		{name: "deep_blanket", root: "a/b/*\n!a/b/keep/\n", paths: []string{"a/", "a/b/", "a/b/keep/", "a/b/keep/a.go", "a/b/drop/a.go"}},
 		{name: "globstar", root: "**/dir/\n!**/dir/keep.go\n", paths: []string{"dir/keep.go", "x/dir/", "x/dir/keep.go", "x/else/a.go"}},
+		{name: "builtin_allow_list", root: strings.Join(Builtin, "\n") + "\n/*\n!/agent/\n/agent/*\n!/agent/skills/\n", paths: []string{"agent/", "agent/skills/", "agent/skills/keep.go", "agent/skills/node_modules/pkg/index.js", "agent/skills/dist/bundle.js", "agent/skills/scratch.tmp"}},
 		{name: "bare_globstar", root: "/**\n", paths: []string{"root.go", "dir/", "dir/deep.go"}},
 		{name: "terminal_directory_globstar", root: "foo/**/\n", paths: []string{"foo/", "foo/direct.go", "foo/sub/", "foo/sub/deep.go"}},
 		{name: "globstar_contents", root: "dir/**\n!dir/keep/\n", paths: []string{"dir/", "dir/keep/", "dir/keep/a.go", "dir/drop/a.go"}},
@@ -51,6 +52,7 @@ func TestGitIgnoreOracle(t *testing.T) {
 	// These pre-existing dependency differences are outside this prototype.
 	// Keep asserting them so the oracle never silently treats them as Git.
 	knownDifferences := map[string]map[string]string{
+		"builtin_allow_list":          {"agent/skills/node_modules/pkg/index.js": "folder negation propagates over Builtin node_modules exclusion", "agent/skills/dist/bundle.js": "folder negation propagates over Builtin dist exclusion", "agent/skills/scratch.tmp": "folder negation propagates over Builtin file exclusion"},
 		"bare_globstar":               {"root.go": "go-gitignore's bare /** file regexp does not match root files", "dir/deep.go": "bare /** does not propagate to file descendants without the parent loop"},
 		"terminal_directory_globstar": {"foo/sub/deep.go": "terminal **/ does not propagate its folder match to file descendants"},
 		"open_child":                  {"other/dir/drop/a.go": "slash-bearing patterns are not anchored by go-gitignore"},
@@ -206,6 +208,8 @@ func TestMatcherParentOrderEdgeCases(t *testing.T) {
 	for _, patterns := range [][]string{
 		{"/**", "!keep.go"}, {"foo/**/", "!keep.go"}, {"a//", "!keep.go"}, {"//", "!keep.go"}, {"build//", "!keep.go"}, {"!keep.go", "foo[!a]"},
 		{"foo/*", "!foo/keep/"}, {"a/b/**", "!a/b/keep/"},
+		append(append([]string{}, Builtin...), "/**", "!keep.go"),
+		append(append([]string{}, Builtin...), "foo/**/", "!keep.go"),
 		append(append([]string{}, Builtin...), "*.log", "!keep.log", ".env", "!.env.example"),
 	} {
 		m := New(patterns)

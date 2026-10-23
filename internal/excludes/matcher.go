@@ -14,8 +14,10 @@ import (
 // Matcher tests whether a path should be excluded from indexing/watching.
 // It is safe for concurrent reads after construction.
 type Matcher struct {
-	ign      *ignore.GitIgnore
-	patterns []string
+	includes        *Matcher
+	literalIncludes []string
+	ign             *ignore.GitIgnore
+	patterns        []string
 	// Required literals cheaply rule out simple positive patterns. Positive
 	// patterns with uncertain syntax retain their original compiled matcher.
 	requiredLiterals []string
@@ -209,6 +211,8 @@ func (m *Matcher) withoutBuiltinAgentRoots() *Matcher {
 			patterns = append(patterns, p)
 		}
 		m.agentRootsLifted = New(patterns)
+		m.agentRootsLifted.includes = m.includes
+		m.agentRootsLifted.literalIncludes = m.literalIncludes
 	})
 	return m.agentRootsLifted
 }
@@ -228,11 +232,36 @@ func (m *Matcher) MatchRel(relPath string) bool {
 	if rel == "" || rel == "." {
 		return false
 	}
-	if !m.couldMatch(rel) {
+	if (!m.hasNegation || !m.checkUnmatchedParents) && !m.couldMatch(rel) {
 		return false
 	}
 	matched, _ := m.explainRel(rel)
 	return matched
+}
+
+// MatchRelEither reports exclusion for both a file and a directory query.
+// Watcher backends do not know the entry type. Check parents once, then
+// evaluate the final segment against each pattern form.
+func (m *Matcher) MatchRelEither(relPath string) bool {
+	if m == nil || m.ign == nil {
+		return false
+	}
+	rel := strings.TrimPrefix(pathkey.Normalize(filepath.ToSlash(relPath)), "./")
+	rel = strings.TrimSuffix(rel, "/")
+	if rel == "" || rel == "." {
+		return false
+	}
+	if (m.includes != nil || len(m.literalIncludes) > 0) && (m.IncludesRel(rel) || m.IncludesRel(rel+"/")) {
+		return false
+	}
+	if (!m.hasNegation || !m.checkUnmatchedParents) && !m.couldMatch(rel) {
+		return false
+	}
+	matched, ip := m.ign.MatchesPathHow(rel)
+	if m.hasNegation && (ip != nil || m.checkUnmatchedParents) && m.excludesParent(rel) {
+		return true
+	}
+	return matched && m.dirs.MatchesPath(rel)
 }
 
 // Explain reports whether a repo-root-relative path is excluded and, when
@@ -258,6 +287,9 @@ func (m *Matcher) Explain(relPath string) (bool, string) {
 // Without a positive match (even one later negated), ordinary patterns
 // cannot exclude a parent. Uncertain compiler forms retain the slow check.
 func (m *Matcher) explainRel(rel string) (bool, string) {
+	if m.IncludesRel(rel) {
+		return false, ""
+	}
 	isDir := strings.HasSuffix(rel, "/")
 	rel = strings.TrimSuffix(rel, "/")
 	ign := m.ign
@@ -268,7 +300,7 @@ func (m *Matcher) explainRel(rel string) (bool, string) {
 	if m.hasNegation && (ip != nil || m.checkUnmatchedParents) {
 		for i := 0; i < len(rel); i++ {
 			if rel[i] == '/' {
-				if matched, ip := m.dirs.MatchesPathHow(rel[:i]); matched {
+				if matched, ip := m.dirs.MatchesPathHow(rel[:i]); matched && !m.includesLiteral(rel[:i]+"/") {
 					return m.explainPattern(matched, ip)
 				}
 			}
@@ -313,6 +345,35 @@ func (m *Matcher) MatchAbsDir(absPath, root string, isDir bool) bool {
 		rel += "/"
 	}
 	return m.MatchRel(rel)
+}
+
+// ExplainAbsDirInOpenDir tests only the final entry. A pruned filesystem
+// walk must already have proved every parent open. Explicit paths and
+// content-source walks must use ExplainAbsDir instead.
+func (m *Matcher) ExplainAbsDirInOpenDir(absPath, root string, isDir bool) (bool, string) {
+	if m == nil || m.ign == nil {
+		return false, ""
+	}
+	rel, err := filepath.Rel(root, absPath)
+	if err != nil {
+		return false, ""
+	}
+	rel = pathkey.Normalize(filepath.ToSlash(rel))
+	if isDir {
+		rel += "/"
+	}
+	if m.IncludesRel(rel) {
+		return false, ""
+	}
+	if !m.couldMatch(rel) {
+		return false, ""
+	}
+	ign := m.ign
+	if isDir {
+		ign = m.dirs
+	}
+	matched, ip := ign.MatchesPathHow(strings.TrimSuffix(rel, "/"))
+	return m.explainPattern(matched, ip)
 }
 
 // ExplainAbsDir is MatchAbsDir plus the pattern that excluded the path,

@@ -320,6 +320,8 @@ func (cm *ConfigManager) GetRepoConfig(repoPrefix string) *Config {
 	out.Exclude = effective
 	out.Index.Exclude = effective
 	out.Watch.Exclude = effective
+	out.Index.Include = out.Include
+	out.Watch.Include = out.Include
 	// Plumb semantic.skip_embed through to the indexer's config so the
 	// embedder can filter without a new setter. Workspace > compiled
 	// defaults.
@@ -437,23 +439,6 @@ func (cm *ConfigManager) effectiveExcludeForRoot(repoPrefix, root string) []stri
 		if len(ws.Exclude) == 0 {
 			out = append(out, ws.Index.Exclude...)
 			out = append(out, ws.Watch.Exclude...)
-		}
-	}
-
-	// Force-include last so it wins: each Include entry becomes a gitignore
-	// `!pattern` re-include over every exclude layer above (builtin,
-	// .gitignore, global, repo). This is the readable form of hand-writing
-	// negations, for a vendored/generated tree you want indexed anyway.
-	if ws != nil {
-		for _, inc := range ws.Include {
-			inc = strings.TrimSpace(inc)
-			if inc == "" {
-				continue
-			}
-			if !strings.HasPrefix(inc, "!") {
-				inc = "!" + inc
-			}
-			out = append(out, inc)
 		}
 	}
 

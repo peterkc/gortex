@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -199,7 +200,7 @@ func TestExcludeMatcher_WarnsAboutGitReincludes(t *testing.T) {
 	idx := newAdmissionTestIndexer(t, t.TempDir())
 	idx.logger = zap.New(core)
 	idx.SetExcludePatterns(append(append([]string{}, excludes.Builtin...),
-		"!.git/hooks/", "!.gitkeep", "!/.GIT/info/", "!**/.git/config", "!.git/hooks/"))
+		"!.git/hooks/", "!/.GIT/info/", "!**/.git/config", "!.git/hooks/"))
 
 	var warned []string
 	for _, entry := range logs.All() {
@@ -209,6 +210,13 @@ func TestExcludeMatcher_WarnsAboutGitReincludes(t *testing.T) {
 }
 
 func TestExcludeMatcher_WarnsAboutBlockedNegations(t *testing.T) {
+	if os.Getenv("GORTEX_TEST_BLOCKED_NEGATIONS") != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestExcludeMatcher_WarnsAboutBlockedNegations$")
+		cmd.Env = append(os.Environ(), "GORTEX_TEST_BLOCKED_NEGATIONS=1")
+		output, err := cmd.CombinedOutput()
+		require.NoError(t, err, "%s", output)
+		return
+	}
 	for _, tc := range []struct {
 		name                   string
 		patterns               []string
@@ -216,11 +224,8 @@ func TestExcludeMatcher_WarnsAboutBlockedNegations(t *testing.T) {
 	}{
 		{"closed_agent", []string{"*", "!/agent/skills/**"}, []string{"!/agent/skills/**"}, []string{"agent"}, []string{"*"}},
 		{"closed_dependency", []string{"node_modules/", "!node_modules/@org/**"}, []string{"!node_modules/@org/**"}, []string{"node_modules"}, []string{"node_modules/"}},
-		{"unrooted_under_root_only_exclude", []string{"/foo/", "!foo/keep.go"}, nil, nil, nil},
+		{"unrooted_under_root_only_exclude", []string{"/foo/", "!foo/keep.go"}, []string{"!foo/keep.go"}, nil, nil},
 		{"rooted_under_root_only_exclude", []string{"/foo/", "!/foo/keep.go"}, []string{"!/foo/keep.go"}, []string{"foo"}, []string{"/foo/"}},
-		{"basename_proto", []string{"node_modules/", "!*.proto"}, nil, nil, nil},
-		{"basename_gitkeep", []string{"node_modules/", "!.gitkeep"}, nil, nil, nil},
-		{"wildcard_leading", []string{"node_modules/", "!**/@org/**"}, nil, nil, nil},
 		{"reopen_self", []string{"build/", "!build/"}, nil, nil, nil},
 		{"open_child", []string{"dist/*", "!dist/keep/"}, nil, nil, nil},
 		{"reopen_every_parent", []string{"/*", "!/agent/", "/agent/*", "!/agent/skills/"}, nil, nil, nil},
@@ -231,13 +236,17 @@ func TestExcludeMatcher_WarnsAboutBlockedNegations(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			core, logs := observer.New(zap.WarnLevel)
-			idx := &Indexer{config: config.IndexConfig{Exclude: tc.patterns}, logger: zap.New(core)}
+			idx := &Indexer{rootPath: t.TempDir(), config: config.IndexConfig{Exclude: tc.patterns}, logger: zap.New(core)}
 			// One lazy build, no repeated per-path warnings.
 			idx.excludeMatcher()
 			idx.excludeMatcher()
 			var warned, parents, rules []string
 			for _, entry := range logs.All() {
 				warned = append(warned, entry.ContextMap()["pattern"].(string))
+				if _, ok := entry.ContextMap()["parent"]; !ok {
+					require.Contains(t, entry.Message, "negations no longer reach inside excluded folders")
+					continue
+				}
 				parents = append(parents, entry.ContextMap()["parent"].(string))
 				rules = append(rules, entry.ContextMap()["excluded_by"].(string))
 				require.Contains(t, entry.Message, "reopen each parent folder")
@@ -248,9 +257,130 @@ func TestExcludeMatcher_WarnsAboutBlockedNegations(t *testing.T) {
 			require.Equal(t, tc.warned, warned)
 			require.Equal(t, tc.parents, parents)
 			require.Equal(t, tc.rules, rules)
-			// A reload reports each blocked pattern once for the new effective list.
+			// Exact parent warnings repeat on reload; keyed general warnings do not.
+			firstBuild := logs.Len()
 			idx.SetExcludePatterns(tc.patterns)
-			require.Equal(t, 2*len(tc.warned), logs.Len())
+			require.Equal(t, firstBuild+len(tc.parents), logs.Len())
+		})
+	}
+}
+
+func TestExcludeMatcher_WarnsBroadNegationsOnce(t *testing.T) {
+	if os.Getenv("GORTEX_TEST_BROAD_NEGATIONS") != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestExcludeMatcher_WarnsBroadNegationsOnce$")
+		cmd.Env = append(os.Environ(), "GORTEX_TEST_BROAD_NEGATIONS=1")
+		output, err := cmd.CombinedOutput()
+		require.NoError(t, err, "%s", output)
+		return
+	}
+	core, logs := observer.New(zap.WarnLevel)
+	for _, pattern := range []string{"!/keep.go", "!/*.proto"} {
+		idx := &Indexer{config: config.IndexConfig{Exclude: []string{"gen/", pattern}}, logger: zap.New(core)}
+		idx.excludeMatcher()
+	}
+	assert.Zero(t, logs.Len(), "root-level targets have no parent that can block them")
+	logs.TakeAll()
+	patterns := []string{"!*.proto", "!.gitkeep", "!**/@org/**", "!src/**/*.proto"}
+	repos := []string{t.TempDir(), t.TempDir()}
+	for _, repo := range repos {
+		for _, pattern := range patterns {
+			for range 2 {
+				idx := &Indexer{rootPath: repo, config: config.IndexConfig{Exclude: []string{"gen/", pattern, pattern}}, logger: zap.New(core)}
+				idx.excludeMatcher()
+				idx.SetExcludePatterns(idx.config.Exclude)
+				idx.warnExcludedNegationsAt(excludes.New([]string{"gen/", pattern}), "sub")
+			}
+		}
+	}
+	require.Equal(t, 2*len(patterns), logs.Len(), "one warning per repo and pattern, including across indexer rebuilds")
+	for i, entry := range logs.All() {
+		require.Equal(t, repos[i/len(patterns)], entry.ContextMap()["repo"])
+		require.Equal(t, patterns[i%len(patterns)], entry.ContextMap()["pattern"])
+		require.Contains(t, entry.Message, "negations no longer reach inside excluded folders")
+		require.Contains(t, entry.Message, "unanchored")
+	}
+}
+
+func TestExcludeMatcher_WarnsPerFolderNegations(t *testing.T) {
+	for _, filename := range dirIgnoreFiles {
+		for _, pattern := range []string{"!gen/keep.go"} {
+			t.Run(filename+"/"+pattern, func(t *testing.T) {
+				root := t.TempDir()
+				writeExcludeFixture(t, filepath.Join(root, "sub", filename), "gen/\n"+pattern+"\n")
+				core, logs := observer.New(zap.WarnLevel)
+				idx := newAdmissionTestIndexer(t, root)
+				idx.logger = zap.New(core)
+				path := filepath.Join(root, "sub/gen/keep.go")
+				require.True(t, idx.shouldExcludeRules(path, root, false))
+				idx.shouldExcludeRules(path, root, false)
+				require.Equal(t, 1, logs.Len())
+				require.Equal(t, filepath.Join(root, "sub"), logs.All()[0].ContextMap()["ignore_dir"])
+				idx.dirIgnore.Forget(filepath.Join(root, "sub"))
+				idx.shouldExcludeRules(path, root, false)
+				require.Equal(t, 2, logs.Len(), "one warning for the reloaded list")
+			})
+		}
+	}
+}
+
+func TestExcludeMatcher_AgentNegationAdvice(t *testing.T) {
+	for _, patterns := range [][]string{
+		{"!.claude/skills/"}, {"!.claude/", ".claude/*", "!.claude/skills/"},
+	} {
+		core, logs := observer.New(zap.WarnLevel)
+		idx := newAdmissionTestIndexer(t, t.TempDir())
+		idx.logger = zap.New(core)
+		idx.SetExcludePatterns(append(append([]string{}, excludes.Builtin...), patterns...))
+		require.Equal(t, 1, logs.Len())
+		require.Contains(t, logs.All()[0].Message, "agent state is never indexed")
+		require.NotContains(t, logs.All()[0].Message, "reopen")
+	}
+}
+
+func TestExcludeMatcher_WarnsUnanchoredIncludes(t *testing.T) {
+	if os.Getenv("GORTEX_TEST_UNANCHORED_INCLUDES") != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestExcludeMatcher_WarnsUnanchoredIncludes$")
+		cmd.Env = append(os.Environ(), "GORTEX_TEST_UNANCHORED_INCLUDES=1")
+		output, err := cmd.CombinedOutput()
+		require.NoError(t, err, "%s", output)
+		return
+	}
+	core, logs := observer.New(zap.WarnLevel)
+	idx := &Indexer{config: config.IndexConfig{Include: []string{"vendor/acme/"}}, logger: zap.New(core)}
+	idx.excludeMatcher()
+	require.Zero(t, logs.Len())
+	idx.SetIgnorePatterns(nil, []string{"Pods/"})
+	idx.SetIgnorePatterns(nil, []string{"*.proto"})
+	require.Equal(t, 2, logs.Len())
+	require.Equal(t, "Pods/", logs.All()[0].ContextMap()["pattern"])
+	require.Equal(t, "*.proto", logs.All()[1].ContextMap()["pattern"])
+	require.Contains(t, logs.All()[0].Message, "unanchored includes")
+}
+
+func TestExcludeMatcher_SkipsOpenParentWarnings(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		exclude, include []string
+	}{
+		{"root_negation_literal", []string{"gen/", "!/keep.go"}, nil},
+		{"root_negation_glob", []string{"gen/", "!/*.proto"}, nil},
+		{"root_include_glob", []string{"gen/"}, []string{"/*.proto"}},
+		{"open_negation_parents", []string{"*", "!/agent/", "!/agent/skills/**"}, nil},
+		{"later_open_negation_parents", []string{"*", "!/agent/skills/**", "!/agent/"}, nil},
+		{"open_include_parents", []string{"*.go"}, []string{"src/*.go"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if os.Getenv("GORTEX_TEST_OPEN_PARENT_WARNING") != tc.name {
+				cmd := exec.Command(os.Args[0], "-test.run=^TestExcludeMatcher_SkipsOpenParentWarnings$/^"+tc.name+"$")
+				cmd.Env = append(os.Environ(), "GORTEX_TEST_OPEN_PARENT_WARNING="+tc.name)
+				output, err := cmd.CombinedOutput()
+				require.NoError(t, err, "%s", output)
+				return
+			}
+			core, logs := observer.New(zap.WarnLevel)
+			idx := &Indexer{rootPath: t.TempDir(), config: config.IndexConfig{Exclude: tc.exclude, Include: tc.include}, logger: zap.New(core)}
+			idx.excludeMatcher()
+			require.Zero(t, logs.Len())
 		})
 	}
 }

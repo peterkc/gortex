@@ -404,7 +404,7 @@ func NewWatcher(idx *Indexer, cfg config.WatchConfig, logger *zap.Logger) (*Watc
 	return &Watcher{
 		indexer:           idx,
 		config:            cfg,
-		excludes:          excludes.New(patterns),
+		excludes:          excludes.NewWithIncludes(patterns, cfg.Include),
 		events:            make(chan GraphChangeEvent, 64),
 		pending:           make(map[string]*time.Timer),
 		pendingGeneration: make(map[string]uint64),

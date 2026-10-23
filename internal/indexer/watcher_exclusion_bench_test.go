@@ -46,6 +46,7 @@ func BenchmarkWatcherExclusion(b *testing.B) {
 				{"admitted_file", "src/main.go"},
 				{"admitted_folder", "src"},
 				{"ignored_tree", "node_modules/pkg/index.js"},
+				{"deep_ignored_tree", "node_modules/pkg/a/b/c/d/e/f/index.js"},
 				{"mcp", ".claude/mcp.json"},
 			} {
 				path := filepath.Join(root, tc.rel)

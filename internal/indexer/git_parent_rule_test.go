@@ -86,8 +86,13 @@ func TestPruneDir_GitParentRuleAgreement(t *testing.T) {
 				visitedFiles := map[string]bool{}
 				require.NoError(t, idx.walkDisk(root, root, func(path string, d fs.DirEntry, err error) error {
 					require.NoError(t, err)
-					if !d.IsDir() && filepath.Ext(path) == ".go" && !idx.shouldExcludeRules(path, root, false) {
-						visitedFiles[path] = true
+					if !d.IsDir() && filepath.Ext(path) == ".go" {
+						full := idx.admitWalkFileKnownType(root, path, -1, d.Type())
+						walk := idx.admitFileInOpenDir(root, path, -1, d.Type())
+						require.Equal(t, full, walk, "walk/full agreement: %s", path)
+						if walk.admit {
+							visitedFiles[path] = true
+						}
 					}
 					return nil
 				}))
@@ -109,5 +114,63 @@ func TestPruneDir_GitParentRuleAgreement(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestIndex_IncludeOverridesExcludedParents(t *testing.T) {
+	for _, tc := range []struct {
+		name, include, target string
+		want                  bool
+	}{
+		{"basename", "Pods/", "ios/Pods/keep.go", true},
+		{"basename_closed_ancestor", "Pods/", "ios/Pods/keep.go", false},
+		{"basename_per_folder", "Pods/", "ios/Pods/keep.go", false},
+		{"vendor", "vendor/github.com/acme/lib/", "vendor/github.com/acme/lib/keep.go", true},
+		{"vendor_per_folder", "vendor/github.com/acme/lib/", "vendor/github.com/acme/lib/keep.go", false},
+		{"vendor_no_slash", "vendor/github.com/acme/lib", "vendor/github.com/acme/lib/keep.go", true},
+		{"node_modules", "node_modules/@org/pkg/", "node_modules/@org/pkg/keep.go", true},
+		{"literal_file", "vendor/acme/keep.go", "vendor/acme/keep.go", true},
+		{"wildcard_closed", "*.go", "node_modules/dep/keep.go", false},
+		{"wildcard_open", "*.go", "src/keep.go", true},
+		{"git_hard_rule", ".git/", ".git/keep.go", false},
+		{"agent_hard_rule", ".claude/skills/", ".claude/skills/keep.go", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeExcludeFixture(t, filepath.Join(root, tc.target), "package fixture\nfunc Kept() {}\n")
+			writeExcludeFixture(t, filepath.Join(root, "vendor/other/drop.go"), "package fixture\nfunc Dropped() {}\n")
+			writeExcludeFixture(t, filepath.Join(root, ".gortex.yaml"), "include:\n  - '"+tc.include+"'\n")
+			if strings.HasPrefix(tc.name, "basename") {
+				rules := "Pods/\n"
+				if tc.name == "basename_closed_ancestor" {
+					rules += "ios/\n"
+				}
+				writeExcludeFixture(t, filepath.Join(root, ".gitignore"), rules)
+				if tc.name == "basename_per_folder" {
+					writeExcludeFixture(t, filepath.Join(root, "ios/.gortexignore"), "Pods/\n")
+				}
+			}
+			if tc.name == "vendor_per_folder" {
+				writeExcludeFixture(t, filepath.Join(root, ".gortexignore"), "vendor/\n")
+			}
+			cm, err := config.NewConfigManager(filepath.Join(t.TempDir(), "config.yaml"))
+			require.NoError(t, err)
+			cm.LoadWorkspaceConfig("fixture", root)
+			cfg := cm.GetRepoConfig("fixture")
+			idx := newAdmissionTestIndexer(t, root)
+			// GetRepoConfig is the production config boundary.
+			idx.config = cfg.Index
+			_, err = idx.Index(root)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, len(idx.graph.FindNodesByName("Kept")) > 0)
+			require.Empty(t, idx.graph.FindNodesByName("Dropped"))
+			require.Equal(t, tc.want, !mustIndexability(t, idx, tc.target).Skipped)
+			w, err := NewWatcher(idx, cfg.Watch, zap.NewNop())
+			require.NoError(t, err)
+			require.Equal(t, tc.want, !w.isExcluded(filepath.Join(root, tc.target)))
+			if tc.want {
+				require.True(t, (&watcherExcludeFilter{w: w}).ShouldInclude(filepath.Join(root, tc.target)))
+			}
+		})
 	}
 }

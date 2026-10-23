@@ -3012,7 +3012,7 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 				}
 				return nil
 			}
-			adm := idx.admitWalkFileKnownType(absRoot, path, info.Size(), info.Mode())
+			adm := idx.admitFileInOpenDir(absRoot, path, info.Size(), info.Mode())
 			if adm.oversize {
 				skippedLarge++
 				skippedBytes += info.Size()
@@ -6338,6 +6338,19 @@ func (idx *Indexer) perFolderIgnores(root string) *excludes.Hierarchical {
 }
 
 func shouldExcludeRules(path, root string, isDir bool, flat *excludes.Matcher, perFolder *excludes.Hierarchical) bool {
+	return (pathExclusionRules{flat: flat, perFolder: perFolder}).match(path, root, isDir)
+}
+
+// parentsOpen is valid only inside a disk walk after directory pruning.
+// The watcher, explicit paths and content sources use the full checks.
+type pathExclusionRules struct {
+	flat        *excludes.Matcher
+	perFolder   *excludes.Hierarchical
+	parentsOpen bool
+}
+
+func (rules pathExclusionRules) match(path, root string, isDir bool) bool {
+	flat, perFolder := rules.flat, rules.perFolder
 	rel, relErr := filepath.Rel(root, path)
 	// Git's own data is never source, whatever the ignore rules say: no
 	// re-include reaches into a .git folder. See warnExcludedNegations.
@@ -6364,6 +6377,10 @@ func shouldExcludeRules(path, root string, isDir bool, flat *excludes.Matcher, p
 			return true
 		}
 		return perFolder.Match(path, isDir)
+	}
+	if rules.parentsOpen {
+		matched, _ := flat.ExplainAbsDirInOpenDir(path, root, isDir)
+		return matched || perFolder.MatchInOpenDir(path, isDir)
 	}
 	if flat != nil && flat.MatchAbsDir(path, root, isDir) {
 		return true
@@ -6510,7 +6527,9 @@ func inGitDir(rel string) bool {
 // against the repo root the index walk is anchored at.
 func (idx *Indexer) dirIgnoreMatcher(root string) *excludes.Hierarchical {
 	idx.dirIgnoreOnce.Do(func() {
-		idx.dirIgnore = excludes.NewHierarchical(root, dirIgnoreFiles...)
+		idx.dirIgnore = excludes.NewHierarchicalWithDiagnostics(root, dirIgnoreFiles, func(dir string, m *excludes.Matcher) {
+			idx.warnExcludedNegationsAt(m, dir)
+		})
 		// A build that proves its reads records every ignore file the walk
 		// gate reads (its bytes, or its absence): an ignore file moved and
 		// restored while the gate read it refutes the build at its fence.
@@ -6538,35 +6557,107 @@ func (idx *Indexer) excludeMatcher() *excludes.Matcher {
 // newExcludeMatcher compiles the effective ignore list and warns about
 // re-includes blocked by a parent exclusion or the hard .git rule.
 func (idx *Indexer) newExcludeMatcher(patterns []string) *excludes.Matcher {
-	m := excludes.New(effectiveExcludePatterns(patterns))
+	m := excludes.NewWithIncludes(effectiveExcludePatterns(patterns), idx.config.Include)
 	idx.warnExcludedNegations(m)
+	if idx.logger != nil {
+		for _, p := range m.ParentLimitedIncludes() {
+			idx.warnParentLimitedReincludes(idx.logger, m, p)
+		}
+	}
 	return m
+}
+
+var parentLimitedReincludeWarnings sync.Map
+
+func (idx *Indexer) warnParentLimitedReincludes(logger *zap.Logger, m *excludes.Matcher, pattern string) {
+	body := strings.TrimSuffix(strings.TrimPrefix(pattern, "!"), "/")
+	// An inner slash anchors a negation just like a leading slash.
+	if strings.Contains(body, "/") {
+		body = strings.TrimPrefix(body, "/")
+		if !strings.Contains(body, "/") {
+			return // Root-level targets have no parent that can block them.
+		}
+		parent := body[:strings.LastIndexByte(body, '/')]
+		if !strings.ContainsAny(parent, `*?[\`) {
+			open := true
+			for i := range parent {
+				if parent[i] == '/' && m.MatchRel(parent[:i]+"/") {
+					open = false
+					break
+				}
+			}
+			if open && !m.MatchRel(parent+"/") {
+				return
+			}
+		}
+	}
+	repo := idx.rootPath
+	if repo == "" {
+		repo = idx.repoPrefix
+	}
+	if _, loaded := parentLimitedReincludeWarnings.LoadOrStore([2]string{repo, pattern}, struct{}{}); loaded {
+		return
+	}
+	logger.Warn("indexer: negations no longer reach inside excluded folders; wildcard and unanchored includes also need open parents; use an anchored literal include to keep its ancestors open",
+		zap.String("repo", repo), zap.String("pattern", pattern))
 }
 
 // warnExcludedNegations runs once per effective-list build or reload,
 // never on the per-path matching hot path.
 func (idx *Indexer) warnExcludedNegations(m *excludes.Matcher) {
+	idx.warnExcludedNegationsAt(m, "")
+}
+
+func (idx *Indexer) warnExcludedNegationsAt(m *excludes.Matcher, dir string) {
 	if idx.logger == nil {
 		return
 	}
+	logger := idx.logger.With(zap.String("ignore_dir", dir))
 	seen := make(map[string]bool)
+	hasExclusion := false
+	for _, p := range m.Patterns() {
+		if !strings.HasPrefix(p, "!") {
+			hasExclusion = true
+			break
+		}
+	}
 	for _, p := range m.Patterns() {
 		if !strings.HasPrefix(p, "!") || seen[p] {
 			continue
 		}
 		seen[p] = true
 		if inGitDir(strings.Trim(p[1:], "/")) {
-			idx.logger.Warn("indexer: ignoring a re-include under .git; Git's own data is never indexed",
+			logger.Warn("indexer: ignoring a re-include under .git; Git's own data is never indexed",
 				zap.String("repo", idx.repoPrefix),
 				zap.String("pattern", p))
 			continue
 		}
+		body := strings.Trim(p[1:], "/")
+		if dir != "" {
+			if rel, err := filepath.Rel(idx.rootPath, dir); err == nil && rel != "." {
+				body = filepath.ToSlash(filepath.Join(rel, body))
+			}
+		}
+		if excludes.InAgentConfigDir(body) && !excludes.IsAgentConfigMCPDir(body) && !excludes.IsAgentConfigMCPFile(body) {
+			logger.Warn("indexer: ignoring a re-include under an agent-config folder; non-MCP agent state is never indexed",
+				zap.String("repo", idx.repoPrefix), zap.String("pattern", p))
+			continue
+		}
 		if parent, rule := m.ExcludedNegationParent(p); parent != "" {
-			idx.logger.Warn("indexer: re-include is blocked by an excluded parent; reopen each parent folder (for example: !/agent/, /agent/*, !/agent/skills/)",
+			logger.Warn("indexer: re-include is blocked by an excluded parent; reopen each parent folder (for example: !/agent/, /agent/*, !/agent/skills/)",
 				zap.String("repo", idx.repoPrefix),
 				zap.String("pattern", p),
 				zap.String("parent", parent),
 				zap.String("excluded_by", rule))
+			continue
+		}
+		body = strings.TrimSuffix(p[1:], "/")
+		if strings.HasPrefix(body, "/") && !strings.Contains(body[1:], "/") {
+			continue // A root-level target has no parent that can block it.
+		}
+		basename := !strings.Contains(body, "/") && !strings.HasSuffix(p, "/")
+		if hasExclusion && (basename || strings.Contains(body, "/") || strings.ContainsAny(body, `*?[\`)) {
+			idx.warnParentLimitedReincludes(logger, m, p)
 		}
 	}
 }
@@ -6600,6 +6691,15 @@ func (idx *Indexer) refreshEffectiveExcludePatterns(patterns []string) {
 	}
 	idx.config.Exclude = patterns
 	idx.excludes.Store(excludes.New(effectiveExcludePatterns(patterns)))
+}
+
+// SetIgnorePatterns reloads excludes and force-includes together.
+func (idx *Indexer) SetIgnorePatterns(patterns, includes []string) {
+	idx.excludeMu.Lock()
+	defer idx.excludeMu.Unlock()
+	idx.config.Exclude = patterns
+	idx.config.Include = includes
+	idx.excludes.Store(idx.newExcludeMatcher(patterns))
 }
 
 // effectiveExcludePatterns falls back to the builtin baseline when the
@@ -7023,7 +7123,8 @@ func (idx *Indexer) incrementalReindexPathsMode(
 					walkedDirs = append(walkedDirs, path)
 					return nil
 				}
-				if !idx.admitScopedWalkFile(absRoot, path) {
+				adm := idx.admitFileInOpenDir(absRoot, path, -1, d.Type())
+				if !adm.admit && !adm.manifest {
 					return nil
 				}
 				// relKey (slash + NFC) keeps the disk set keyed
@@ -9954,7 +10055,7 @@ func (idx *Indexer) HasChangesSinceMtimes(root string) bool {
 			return nil
 		}
 		// Same file set as the census, root go.mod and go.work included.
-		adm := idx.admitWalkFileKnownType(absRoot, path, -1, d.Type())
+		adm := idx.admitFileInOpenDir(absRoot, path, -1, d.Type())
 		if !adm.admit && !adm.manifest {
 			return nil
 		}
@@ -10097,7 +10198,7 @@ func (idx *Indexer) changedSinceMtimesCensus(root string) (
 		if d.IsDir() {
 			return nil
 		}
-		adm := idx.admitWalkFileKnownType(absRoot, path, -1, d.Type())
+		adm := idx.admitFileInOpenDir(absRoot, path, -1, d.Type())
 		if !adm.admit && !adm.manifest {
 			return nil
 		}

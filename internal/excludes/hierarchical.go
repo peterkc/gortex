@@ -28,7 +28,8 @@ type Hierarchical struct {
 	cache map[string]*Matcher // abs dir -> compiled matcher; nil value = directory has no ignore files
 	// forgets counts Forget calls. A read that started before one does not
 	// store its result, which may predate the change Forget reports.
-	forgets uint64
+	forgets  uint64
+	diagnose func(string, *Matcher)
 
 	// observe, when set (ObserveReads), is handed every ignore file read.
 	observe func(path string, data []byte, err error)
@@ -50,6 +51,12 @@ func (h *Hierarchical) ObserveReads(fn func(path string, data []byte, err error)
 // (e.g. ".gortexignore"). An empty filename list yields a matcher that
 // excludes nothing.
 func NewHierarchical(root string, filenames ...string) *Hierarchical {
+	return NewHierarchicalWithDiagnostics(root, filenames, nil)
+}
+
+// NewHierarchicalWithDiagnostics reports each loaded list once, when cached.
+// diagnose must not call back into the hierarchical matcher.
+func NewHierarchicalWithDiagnostics(root string, filenames []string, diagnose func(string, *Matcher)) *Hierarchical {
 	if abs, err := filepath.Abs(root); err == nil {
 		root = abs
 	}
@@ -57,6 +64,7 @@ func NewHierarchical(root string, filenames ...string) *Hierarchical {
 		root:      filepath.Clean(root),
 		filenames: filenames,
 		cache:     make(map[string]*Matcher),
+		diagnose:  diagnose,
 	}
 }
 
@@ -107,6 +115,16 @@ func (h *Hierarchical) Match(absPath string, isDir bool) bool {
 // nothing matched. Used to name the culprit when an over-broad ignore
 // leaves a repo with nothing to index.
 func (h *Hierarchical) Explain(absPath string, isDir bool) (bool, string, string) {
+	return h.explain(absPath, isDir, (*Matcher).ExplainAbsDir)
+}
+
+// MatchInOpenDir omits parent checks already proved by a pruned disk walk.
+func (h *Hierarchical) MatchInOpenDir(absPath string, isDir bool) bool {
+	matched, _, _ := h.explain(absPath, isDir, (*Matcher).ExplainAbsDirInOpenDir)
+	return matched
+}
+
+func (h *Hierarchical) explain(absPath string, isDir bool, match func(*Matcher, string, string, bool) (bool, string)) (bool, string, string) {
 	if h == nil || len(h.filenames) == 0 {
 		return false, "", ""
 	}
@@ -125,13 +143,13 @@ func (h *Hierarchical) Explain(absPath string, isDir bool) (bool, string, string
 	// level that excludes the path wins; a file's own directory cannot
 	// exclude the file from itself.
 	dir := h.root
-	if matched, pat := h.dirMatcher(dir).ExplainAbsDir(absPath, dir, isDir); matched {
+	if matched, pat := match(h.dirMatcher(dir), absPath, dir, isDir); matched {
 		return true, dir, pat
 	}
 	segs := strings.Split(rel, "/")
 	for _, seg := range segs[:len(segs)-1] {
 		dir = filepath.Join(dir, seg)
-		if matched, pat := h.dirMatcher(dir).ExplainAbsDir(absPath, dir, isDir); matched {
+		if matched, pat := match(h.dirMatcher(dir), absPath, dir, isDir); matched {
 			return true, dir, pat
 		}
 	}
@@ -163,8 +181,13 @@ func (h *Hierarchical) dirMatcher(dir string) *Matcher {
 	// Store only when no Forget ran since the read and the parent is
 	// cached, so a cached folder always has cached ancestors and Forget
 	// can skip folders that are not cached.
-	if h.forgets == forgets && (dir == h.root || h.cached(filepath.Dir(dir))) {
+	if cached, ok := h.cache[dir]; ok {
+		m = cached
+	} else if h.forgets == forgets && (dir == h.root || h.cached(filepath.Dir(dir))) {
 		h.cache[dir] = m
+		if m != nil && h.diagnose != nil {
+			h.diagnose(dir, m)
+		}
 	}
 	h.mu.Unlock()
 	return m
