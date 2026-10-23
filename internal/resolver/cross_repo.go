@@ -435,7 +435,7 @@ func (cr *CrossRepoResolver) ResolveAllContext(ctx context.Context) (*CrossRepoS
 	if err := cr.resolveCargoImports(ctx, graph.EdgesLightSeq(cr.graph, graph.EdgeImports), stats); err != nil {
 		return stats, err
 	}
-	if err := cr.resolveTrackedPythonImports(ctx, graph.EdgesLightSeq(cr.graph, graph.EdgeImports), stats); err != nil {
+	if err := cr.resolveTrackedPythonImports(ctx, cr.trackedPythonImportEdges(), stats); err != nil {
 		return stats, err
 	}
 	// Share the master resolver's stable high-water/keyset stream. The cold
