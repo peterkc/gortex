@@ -4368,6 +4368,12 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 				idx.graph = streamingDisk
 				return nil, err
 			}
+			if chunkStart == 0 {
+				if err := resetShadowCloneCorpus(streamingDisk, idx.RepoPrefix()); err != nil {
+					idx.graph = streamingDisk
+					return nil, fmt.Errorf("indexer: reset streaming shadow clone corpus: %w", err)
+				}
+			}
 			// Flush the chunk to disk through the same explicit caps as the
 			// admitted whole-repository shadow. Node and edge buffers never
 			// overlap, and compact sidecars drain independently afterwards.
