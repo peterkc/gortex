@@ -67,8 +67,9 @@ func TestTrackedPythonImportSkipsStdlibBeforeLookup(t *testing.T) {
 
 type pythonImportPageStore struct {
 	graph.Store
-	fullScans, callerReads  int
-	hydrated, callerBatches []int
+	fullScans, callerReads          int
+	hydrated, callerBatches         []int
+	scanned, processed, peakPending int
 }
 
 func (s *pythonImportPageStore) EdgesByKind(kind graph.EdgeKind) iter.Seq[*graph.Edge] {
@@ -79,7 +80,34 @@ func (s *pythonImportPageStore) EdgesByKind(kind graph.EdgeKind) iter.Seq[*graph
 }
 
 func (s *pythonImportPageStore) EdgesLightSeq(kinds ...graph.EdgeKind) iter.Seq[*graph.Edge] {
-	return graph.EdgesLightSeq(s.Store, kinds...)
+	return func(yield func(*graph.Edge) bool) {
+		for e := range graph.EdgesLightSeq(s.Store, kinds...) {
+			if trackedPythonImportTop(e) == "PIL" {
+				s.scanned++
+			}
+			if !yield(e) {
+				return
+			}
+		}
+	}
+}
+
+type pythonImportProjectionStore struct {
+	*pythonImportPageStore
+}
+
+func (s *pythonImportProjectionStore) ScanTestEdgeProjections(kinds []graph.EdgeKind, pageSize int, yield func([]graph.TestEdgeProjection) bool) {
+	s.Store.(graph.TestProjectionScanner).ScanTestEdgeProjections(kinds, pageSize, func(page []graph.TestEdgeProjection) bool {
+		for _, e := range page {
+			if e.To == "module::pypi:PIL" {
+				s.scanned++
+			}
+			if !yield([]graph.TestEdgeProjection{e}) {
+				return false
+			}
+		}
+		return true
+	})
 }
 
 func (s *pythonImportPageStore) GetNode(id string) *graph.Node {
@@ -96,6 +124,8 @@ func (s *pythonImportPageStore) GetNodesByIDs(ids []string) map[string]*graph.No
 
 func (s *pythonImportPageStore) GetEdgeCandidates(endpoints []graph.EdgeEndpoint, sites []graph.EdgeSite) graph.EdgeCandidateSet {
 	s.hydrated = append(s.hydrated, len(sites))
+	s.peakPending = max(s.peakPending, s.scanned-s.processed)
+	s.processed += len(sites)
 	return s.Store.GetEdgeCandidates(endpoints, sites)
 }
 
@@ -116,8 +146,14 @@ func TestTrackedPythonImportPagedFullPass(t *testing.T) {
 				g.AddEdge(&graph.Edge{From: "consumer/a.py", FilePath: "consumer/a.py", To: "module::pypi:PIL", Kind: graph.EdgeImports, Line: line, Meta: map[string]any{"python_import": "PIL", "keep": "metadata"}})
 			}
 			g.AddEdge(&graph.Edge{From: "consumer/a.py", FilePath: "consumer/a.py", To: "module::pypi:untracked", Kind: graph.EdgeImports, Line: resolvePendingPageRows + 2, Meta: map[string]any{"python_import": "untracked"}})
-			cr := NewCrossRepo(g)
+			var retryStore graph.Store = g
+			if backend == "sqlite" {
+				retryStore = &pythonImportProjectionStore{g}
+			}
+			cr := NewCrossRepo(retryStore)
+			lookups := 0
 			cr.SetPythonPackageLookup(func() *PythonPackageLookup {
+				lookups++
 				return &PythonPackageLookup{HasTop: func(top string) bool { return top == "PIL" }, Providers: func(caller, top string) map[string][]graph.FileNodeIdentity {
 					if top != "PIL" {
 						return nil
@@ -128,8 +164,14 @@ func TestTrackedPythonImportPagedFullPass(t *testing.T) {
 			stats, err := cr.ResolveAllContext(context.Background())
 			require.NoError(t, err)
 			require.Equal(t, resolvePendingPageRows+1, stats.Resolved)
+			require.Equal(t, 1, lookups, "build the lookup once across all pages")
 			require.Zero(t, g.fullScans, "full import scans must use metadata-free projections")
 			require.Zero(t, g.callerReads, "caller nodes must be loaded in batches")
+			if backend == "sqlite" {
+				// Stores without the projection scanner drain the light scan
+				// first so no live cursor stays open during the retry.
+				require.LessOrEqual(t, g.peakPending, resolvePendingPageRows, "process each bounded page before retaining more tracked imports")
+			}
 			require.Equal(t, []int{resolvePendingPageRows, 1}, g.hydrated)
 			require.Equal(t, []int{1, 1}, g.callerBatches)
 			imports := g.GetOutEdges("consumer/a.py")

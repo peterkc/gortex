@@ -20,8 +20,8 @@ import (
 func TestMultiIndexer_TrackedPythonImport(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
 		for _, tc := range []struct {
-			name, manifest, requirements, entry, statement, providerName, workspace, localFile string
-			duplicate, cloneMissing, resolves                                                  bool
+			name, manifest, requirements, entry, statement, providerName, workspace, localFile, extraLocal string
+			duplicate, cloneMissing, resolves                                                              bool
 		}{
 			{name: "src module distribution differs", manifest: "[project]\ndependencies = ['pillow >= 1']", entry: "src/PIL/image.py", statement: "import PIL.image", resolves: true},
 			{name: "package init", manifest: "[project]\ndependencies = ['pillow']", entry: "PIL/image/__init__.py", statement: "import PIL.image", resolves: true},
@@ -32,6 +32,8 @@ func TestMultiIndexer_TrackedPythonImport(t *testing.T) {
 			{name: "top level module", manifest: "[project]\ndependencies = ['pillow']", entry: "image.py", statement: "import image", resolves: true},
 			{name: "consumer namespace root", manifest: "[project]\ndependencies = ['pillow']", entry: "tests/helpers.py", statement: "import tests.helpers", localFile: "tests/helpers.py"},
 			{name: "consumer namespace src", manifest: "[project]\ndependencies = ['pillow']", entry: "tests/helpers.py", statement: "import tests.helpers", localFile: "src/tests/helpers.py"},
+			{name: "consumer root src package", manifest: "[project]\ndependencies = ['pillow']", entry: "src/foo.py", statement: "import src.foo", localFile: "src/__init__.py"},
+			{name: "consumer src init with src namespace", manifest: "[project]\ndependencies = ['pillow']", entry: "tests/helpers.py", statement: "import tests.helpers", localFile: "src/__init__.py", extraLocal: "src/tests/helpers.py"},
 			{name: "stdlib package", manifest: "[project]\ndependencies = ['pillow']", entry: "json/__init__.py", statement: "import json"},
 			{name: "root setup script", manifest: "[project]\ndependencies = ['pillow']", entry: "setup.py", statement: "import setup"},
 			{name: "root conftest script", manifest: "[project]\ndependencies = ['pillow']", entry: "conftest.py", statement: "import conftest"},
@@ -60,8 +62,14 @@ func TestMultiIndexer_TrackedPythonImport(t *testing.T) {
 				if strings.HasPrefix(tc.entry, "tests/") {
 					writeWorkspaceFile(t, provider, "tests/__init__.py", "")
 				}
+				if tc.statement == "import src.foo" {
+					writeWorkspaceFile(t, provider, "src/__init__.py", "")
+				}
 				if tc.localFile != "" {
 					writeWorkspaceFile(t, consumer, tc.localFile, "def local(): pass\n")
+				}
+				if tc.extraLocal != "" {
+					writeWorkspaceFile(t, consumer, tc.extraLocal, "def local(): pass\n")
 				}
 				writeWorkspaceFile(t, provider, tc.entry, "def f(): pass\n")
 				writeWorkspaceFile(t, consumer, "pyproject.toml", tc.manifest)
