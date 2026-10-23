@@ -206,7 +206,7 @@ func walkIndex(n *sitter.Node) int {
 // TestNamedChildrenLinearScaling proves the cursor iterator walks a wide
 // node in O(N), not O(N^2), by measuring it at two widths a 10x factor
 // apart. A linear walk costs ~10x more at 10x the width; a quadratic walk
-// costs ~100x more. The assertion is a loose growth-ratio bound (< 20x):
+// costs ~100x more. The assertion is a loose growth-ratio bound (< 40x):
 // machine-speed-independent (it is a ratio of two times on the same
 // machine), never flaky for a genuinely linear walk, and decisive against
 // a regression that reintroduces NamedChild(i) indexing inside the helper
@@ -251,10 +251,13 @@ func TestNamedChildrenLinearScaling(t *testing.T) {
 		t.Fatalf("iterator pass took %v for N=%d — not linear", iterLarge, large)
 	}
 	// Linear proof: a 10x width increase costs an O(N) walk ~10x; an
-	// O(N^2) walk would cost ~100x. The 20x bound passes comfortably for
-	// linear and fails decisively for any quadratic regression.
-	if iterRatio >= 20 {
-		t.Fatalf("iterator growth %.1fx over a 10x width increase — not linear (want < 20x)", iterRatio)
+	// O(N^2) walk would cost ~100x. A linear walk can still exceed 10x:
+	// the small tree stays in CPU cache and the large one does not, so a
+	// quiet runner measured 20-22x while a busy one measured 10-14x. The
+	// 40x bound passes comfortably for linear and fails decisively for
+	// any quadratic regression.
+	if iterRatio >= 40 {
+		t.Fatalf("iterator growth %.1fx over a 10x width increase — not linear (want < 40x)", iterRatio)
 	}
 }
 
