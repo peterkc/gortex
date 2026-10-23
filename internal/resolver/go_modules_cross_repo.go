@@ -124,10 +124,6 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 	if complete {
 		return nil
 	}
-	err := cr.resolveGoModuleImportSweep(ctx, stats)
-	if err != nil {
-		return err
-	}
 	var batch []graph.EdgeReindex
 	originals := make(map[graph.EdgeIdentity]*graph.Edge)
 	names := make(map[string][]*graph.Node)
@@ -502,9 +498,15 @@ func (cr *CrossRepoResolver) resolveGoModuleEdgesLocked(edges []*graph.Edge, sta
 
 // RetryGoModuleDeps is the revision-keyed migration used after publishing a module.
 func (cr *CrossRepoResolver) RetryGoModuleDeps(ctx context.Context) error {
-	cr.mu.Lock()
-	defer cr.mu.Unlock()
-	return cr.retryGoModuleDeps(ctx, &CrossRepoStats{ByRepo: make(map[string]int)})
+	stats := &CrossRepoStats{ByRepo: make(map[string]int)}
+	if err := func() error {
+		cr.mu.Lock()
+		defer cr.mu.Unlock()
+		return cr.retryGoModuleDeps(ctx, stats)
+	}(); err != nil {
+		return err
+	}
+	return cr.resolveGoModuleImportSweep(ctx, stats)
 }
 
 // ResolveGoModuleIncomingForRepo probes the provider's definitions and retained
@@ -514,7 +516,10 @@ func (cr *CrossRepoResolver) ResolveGoModuleIncomingForRepo(repo string) error {
 	if len(cr.goModules) == 0 {
 		return nil
 	}
-	if cr.goModules[repo] != "" {
+	if err := cr.resolveGoModuleImportSweep(context.Background(), nil); err != nil {
+		return err
+	}
+	if cr.goModules[repo] != "" && len(cr.graph.RepoPrefixes()) >= 2 {
 		var importIDs []string
 		func() {
 			cr.mu.Lock()
