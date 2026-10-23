@@ -373,6 +373,7 @@ type warmupTimings struct {
 	// err prevents an incomplete repair from being promoted to enriched by
 	// the outer startup owner even when its context remains live.
 	err               error
+	resolveErr        error // pre-enrichment resolve failure: ready, but warmup_incomplete
 	prelude           time.Duration
 	prepareResolve    time.Duration
 	contractRehydrate time.Duration
@@ -1131,6 +1132,7 @@ func warmupDaemonStateContext(ctx context.Context, state *daemonState, logger *z
 				zap.Any("timing", state.lspRouter.TimingStats().Sub(lspBefore)))
 		}
 		if resolveErr != nil {
+			timings.resolveErr = resolveErr
 			resolveOK = false
 			exactWarmDelta = false
 			scopeUnknown.Store(true)
