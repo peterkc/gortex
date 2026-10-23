@@ -508,11 +508,13 @@ func (cr *CrossRepoResolver) ResolveGoModuleIncomingForRepo(repo string) error {
 			importIDs = cr.goModuleImportIDs(repo)
 		}()
 		for start := 0; start < len(importIDs); start += externalCallMutationChunk {
-			func() {
+			if err := func() error {
 				cr.mu.Lock()
 				defer cr.mu.Unlock()
-				cr.restoreGoModuleImportBatch(repo, importIDs[start:min(start+externalCallMutationChunk, len(importIDs))], nil)
-			}()
+				return cr.restoreGoModuleImportBatch(context.Background(), repo, importIDs[start:min(start+externalCallMutationChunk, len(importIDs))], nil)
+			}(); err != nil {
+				return err
+			}
 		}
 	}
 	for files := range cr.goModuleImportFileBatches([]string{repo}) {

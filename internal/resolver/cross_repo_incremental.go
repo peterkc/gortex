@@ -80,7 +80,9 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 		for _, file := range definitionFiles {
 			if repo := graph.RepoPrefixOfID(file); cr.goModules[repo] != "" && !repos[repo] {
 				repos[repo] = true
-				cr.restoreGoModuleImports(repo, stats)
+				if err := cr.restoreGoModuleImports(context.Background(), repo, stats); err != nil {
+					cr.logger.Error("cross-repo resolve: restore Go module imports", zap.Error(err))
+				}
 			}
 		}
 	}
