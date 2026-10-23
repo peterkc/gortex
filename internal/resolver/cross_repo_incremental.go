@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -69,6 +70,13 @@ func (cr *CrossRepoResolver) resolveMutationFrontiersBounded(resolutionFiles, ed
 		return stats, admission
 	}
 
+	// Provider recovery needs the lazy seed before the pass lock is taken.
+	// Ordinary consumer frontiers keep local resolution ahead of the bridge.
+	if len(definitionFiles) > 0 {
+		if err := cr.resolveGoModuleImportSweep(context.Background(), stats); err != nil {
+			cr.logger.Error("cross-repo resolve: seed Go module imports", zap.Error(err))
+		}
+	}
 	var started, acquired time.Time
 	if observe != nil {
 		started = time.Now()
@@ -137,7 +145,7 @@ func (cr *CrossRepoResolver) resolveMutationFrontiersBounded(resolutionFiles, ed
 		counted := make(map[graph.EdgeIdentity]bool)
 		for _, e := range pending {
 			if e.Kind == graph.EdgeImports {
-				counted[graph.EdgeIdentityFor(e)] = !graph.IsUnresolvedTarget(e.To)
+				counted[graph.EdgeIdentityFor(e)] = !graph.IsUnresolvedTarget(e.To) && !strings.HasPrefix(e.To, "external::")
 			}
 		}
 		_ = cr.resolveGoModuleImports(context.Background(), resolutionFiles, stats, counted)
