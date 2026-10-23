@@ -1653,11 +1653,12 @@ type CloneCorpusSignatureWriter interface {
 	BulkSetCloneSignatures(repoPrefix string, updates []CloneCorpusSignatureUpdate) error
 }
 
-// CloneCorpusRepoReplacer resets one repository's authoritative clone
-// projection before a full shadow drain. The empty replacement must clear
-// stale rows left by a prior index.
+// CloneCorpusRepoReplacer replaces one repository's authoritative clone
+// projection. ResetCloneCorpus clears stale rows and the initialization marker
+// before a full shadow drain; successful drains mark initialization separately.
 type CloneCorpusRepoReplacer interface {
 	ReplaceCloneCorpus(repoPrefix string, rows []CloneCorpusRow) error
+	ResetCloneCorpus(repoPrefix string) error
 }
 
 // UnresolvedInsertionCounter is an optional capability: a monotonic count of

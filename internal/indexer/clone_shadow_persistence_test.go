@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -22,12 +23,12 @@ type cloneCorpusResetCountingStore struct {
 	resetErr error
 }
 
-func (s *cloneCorpusResetCountingStore) ReplaceCloneCorpus(prefix string, rows []graph.CloneCorpusRow) error {
+func (s *cloneCorpusResetCountingStore) ResetCloneCorpus(prefix string) error {
 	s.resets++
 	if s.resetErr != nil {
 		return s.resetErr
 	}
-	return s.Store.ReplaceCloneCorpus(prefix, rows)
+	return s.Store.ResetCloneCorpus(prefix)
 }
 
 func TestSQLiteShadowCloneCorpusReplacement(t *testing.T) {
@@ -129,5 +130,69 @@ func TestSQLiteShadowCloneCorpusResetFailure(t *testing.T) {
 			assert.Same(t, store, idx.graph, "a rejected drain must restore the durable graph")
 			assert.Zero(t, disk.NodeCount(), "no shadow nodes may drain after a failed reset")
 		})
+	}
+}
+
+type cloneCorpusDrainFailingStore struct {
+	*store_sqlite.Store
+	flushErr error
+}
+
+func (s *cloneCorpusDrainFailingStore) FlushBulk() error {
+	if err := s.Store.FlushBulk(); err != nil {
+		return err
+	}
+	return s.flushErr
+}
+
+func TestSQLiteShadowCloneCorpusDrainInitialization(t *testing.T) {
+	for _, shadowMax := range []string{"1000000", "0"} {
+		for _, fail := range []bool{true, false} {
+			t.Run(fmt.Sprintf("shadow_max_%s/fail_%t", shadowMax, fail), func(t *testing.T) {
+				t.Setenv("GORTEX_SHADOW_MAX_FILES", shadowMax)
+				t.Setenv("GORTEX_STREAMING_FLUSH", "1")
+				repo := t.TempDir()
+				writeFile(t, filepath.Join(repo, "main.go"), "package main\nconst Value = 1\n")
+				path := filepath.Join(t.TempDir(), "clone.sqlite")
+				disk, err := store_sqlite.Open(path)
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = disk.Close() })
+				// A previous successful empty index already has an initialization marker.
+				require.NoError(t, disk.ReplaceCloneCorpus("repo", nil))
+				var flushErr error
+				if fail {
+					flushErr = errors.New("injected clone corpus drain failure")
+				}
+				store := &cloneCorpusDrainFailingStore{Store: disk, flushErr: flushErr}
+				idx := newTestIndexer(store)
+				idx.SetRepoPrefix("repo")
+
+				_, err = idx.Index(repo)
+				if fail {
+					require.ErrorIs(t, err, flushErr)
+					if shadowMax == "0" {
+						require.ErrorContains(t, err, "streaming-flush chunk")
+					} else {
+						require.ErrorContains(t, err, "persist bulk graph")
+					}
+				} else {
+					require.NoError(t, err)
+				}
+				rows, err := disk.CloneCorpusPage("repo", "", 10)
+				require.NoError(t, err)
+				require.Empty(t, rows)
+				initialized, err := disk.CloneCorpusInitialized("repo")
+				require.NoError(t, err)
+				assert.Equal(t, !fail, initialized, "only a successful drain may leave an authoritative empty corpus")
+				require.NoError(t, disk.Close())
+
+				reopened, err := store_sqlite.Open(path)
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+				initialized, err = reopened.CloneCorpusInitialized("repo")
+				require.NoError(t, err)
+				assert.Equal(t, !fail, initialized, "restart must retain the clone-corpus initialization state")
+			})
+		}
 	}
 }
