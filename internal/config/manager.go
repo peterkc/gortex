@@ -170,6 +170,22 @@ func (cm *ConfigManager) LoadWorkspaceConfig(repoPrefix, repoPath string) {
 	cm.publishWorkspaceConfig(repoPrefix, repoPath, cfg, authoritative)
 }
 
+// PrepareWorkspaceConfig reads a repository's config and excludes without
+// publishing a prefix binding. The returned commit publishes only the prepared
+// workspace snapshot, without file I/O; callers can recheck ownership first.
+func (cm *ConfigManager) PrepareWorkspaceConfig(repoPrefix, repoPath string) (*Config, func()) {
+	workspace, authoritative := cm.readWorkspaceConfig(repoPrefix, repoPath)
+	ws := workspace
+	if !authoritative {
+		ws = cm.getWorkspaceConfig(repoPrefix)
+	}
+	cm.excludeCache.forgetChain(repoPath)
+	cfg := cm.repoConfig(repoPrefix, ws, repoPath)
+	return cfg, func() {
+		cm.publishWorkspaceConfig(repoPrefix, repoPath, workspace, authoritative)
+	}
+}
+
 // readWorkspaceConfig reads and parses a repo's `.gortex.yaml`. The second
 // return reports whether the result reflects what is on disk: it is false
 // only when the file exists but could not be read or parsed, in which case
@@ -309,14 +325,21 @@ func (cm *ConfigManager) getWorkspaceConfig(repoPrefix string) *Config {
 // layered exclude list from EffectiveExclude, so callers passing
 // cfg.Index into indexer.New automatically receive the effective patterns.
 func (cm *ConfigManager) GetRepoConfig(repoPrefix string) *Config {
+	cm.mu.RLock()
+	ws, repoPath := cm.workspace[repoPrefix], cm.workspacePaths[repoPrefix]
+	cm.mu.RUnlock()
+	return cm.repoConfig(repoPrefix, ws, repoPath)
+}
+
+func (cm *ConfigManager) repoConfig(repoPrefix string, ws *Config, repoPath string) *Config {
 	var out *Config
-	if ws := cm.getWorkspaceConfig(repoPrefix); ws != nil {
+	if ws != nil {
 		dup := *ws
 		out = &dup
 	} else {
 		out = repoConfigSeed()
 	}
-	effective := cm.EffectiveExclude(repoPrefix)
+	effective := cm.effectiveExclude(repoPrefix, cm.Global(), ws, repoPath, "")
 	out.Exclude = effective
 	out.Index.Exclude = effective
 	out.Watch.Exclude = effective
@@ -354,7 +377,7 @@ func (cm *ConfigManager) GetRepoConfig(repoPrefix string) *Config {
 //     the tracked root (read from disk; opt out with
 //     `respect_gitignore: false` in `.gortex.yaml`)
 //  3. Global Exclude from ~/.gortex/config.yaml
-//  4. Matching RepoEntry.Exclude (first match in Repos, then Projects)
+//  4. Matching root's RepoEntry.Exclude (first match in Repos, then Projects)
 //  5. Workspace .gortex.yaml top-level Exclude
 //  6. Legacy workspace Index.Exclude / Watch.Exclude (deprecated)
 //
@@ -390,6 +413,10 @@ func (cm *ConfigManager) effectiveExcludeForRoot(repoPrefix, root string) []stri
 	if root != "" {
 		repoPath = root
 	}
+	return cm.effectiveExclude(repoPrefix, gc, ws, repoPath, root)
+}
+
+func (cm *ConfigManager) effectiveExclude(repoPrefix string, gc *GlobalConfig, ws *Config, repoPath, root string) []string {
 	respect := shouldRespectGitignore(ws)
 	var chain []gitignoreLayer
 	if respect && repoPath != "" {
@@ -426,7 +453,13 @@ func (cm *ConfigManager) effectiveExcludeForRoot(repoPrefix, root string) []stri
 
 	if gc != nil {
 		out = append(out, gc.Exclude...)
-		if entry := gc.FindRepoByPrefix(repoPrefix); entry != nil {
+		var entry *RepoEntry
+		if repoPath != "" {
+			entry = gc.FindRepoByPath(repoPath)
+		} else {
+			entry = gc.FindRepoByPrefix(repoPrefix)
+		}
+		if entry != nil {
 			out = append(out, entry.Exclude...)
 		}
 	}
