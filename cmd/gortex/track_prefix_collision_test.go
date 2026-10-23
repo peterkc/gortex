@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -34,7 +35,7 @@ func TestRunTrackPrefixCollision(t *testing.T) {
 				origEnsure, origNotify := trackEnsureDaemonReadyFn, trackNotifyDaemonTrackFn
 				trackWait, trackName, trackAsWorktree = wait, "src", false
 				trackEnsureDaemonReadyFn = func(bool) daemonDecision { return daemonReady }
-				trackNotifyDaemonTrackFn = func(string, time.Time) error {
+				trackNotifyDaemonTrackFn = func(string, string, time.Time) error {
 					return &trackPrefixCollisionError{message: (&indexer.PrefixCollisionError{
 						Prefix: "src", ExistingPath: first, Path: second,
 					}).Error()}
@@ -83,7 +84,7 @@ func TestRunTrackPrefixCollisionKeepsAliasEntry(t *testing.T) {
 	origEnsure, origNotify := trackEnsureDaemonReadyFn, trackNotifyDaemonTrackFn
 	trackWait, trackName, trackAsWorktree = false, "src", false
 	trackEnsureDaemonReadyFn = func(bool) daemonDecision { return daemonReady }
-	trackNotifyDaemonTrackFn = func(string, time.Time) error {
+	trackNotifyDaemonTrackFn = func(string, string, time.Time) error {
 		return &trackPrefixCollisionError{message: "prefix collision"}
 	}
 	t.Cleanup(func() {
@@ -109,10 +110,93 @@ func TestNotifyDaemonTrackPrefixCollision(t *testing.T) {
 	origName := trackName
 	trackName = ""
 	t.Cleanup(func() { trackName = origName })
-	err := notifyDaemonTrack(second, time.Time{})
+	err := notifyDaemonTrack(second, "", time.Time{})
 	var collision *trackPrefixCollisionError
 	require.ErrorAs(t, err, &collision)
 	assert.Equal(t, "track rejected: "+(&indexer.PrefixCollisionError{
 		Prefix: filepath.Base(first), ExistingPath: first, Path: second,
 	}).Error(), err.Error())
+}
+
+func TestRunTrackOfflineRejectsPrefixBeforeSave(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		t.Run(fmt.Sprint(explicit), func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("GORTEX_DAEMON_SOCKET", filepath.Join(t.TempDir(), "absent.sock"))
+			first := filepath.Join(t.TempDir(), "src")
+			second := filepath.Join(t.TempDir(), "src")
+			require.NoError(t, os.MkdirAll(first, 0o755))
+			require.NoError(t, os.MkdirAll(second, 0o755))
+			gc, err := config.LoadGlobal()
+			require.NoError(t, err)
+			name := ""
+			if explicit {
+				name = "chosen"
+			}
+			require.NoError(t, gc.AddRepo(config.RepoEntry{Path: first, Name: name}))
+			require.NoError(t, gc.Save())
+			before, err := os.ReadFile(gc.ConfigPath())
+			require.NoError(t, err)
+			origWait, origName, origAs := trackWait, trackName, trackAsWorktree
+			origEnsure := trackEnsureDaemonReadyFn
+			trackWait, trackName, trackAsWorktree = false, name, false
+			contacted := false
+			trackEnsureDaemonReadyFn = func(bool) daemonDecision { contacted = true; return daemonUnavailable }
+			t.Cleanup(func() {
+				trackWait, trackName, trackAsWorktree = origWait, origName, origAs
+				trackEnsureDaemonReadyFn = origEnsure
+			})
+			cmd := &cobra.Command{}
+			output := &bytes.Buffer{}
+			cmd.SetErr(output)
+			err = runTrack(cmd, []string{second})
+			var collision *indexer.PrefixCollisionError
+			require.ErrorAs(t, err, &collision)
+			assert.False(t, contacted, "reject before daemon contact")
+			after, err := os.ReadFile(gc.ConfigPath())
+			require.NoError(t, err)
+			assert.Equal(t, before, after)
+			assert.NotContains(t, output.String(), "config only")
+		})
+	}
+}
+
+func TestRunTrackOfflineUsesWorktreeInstancePrefix(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("GORTEX_DAEMON_SOCKET", filepath.Join(t.TempDir(), "absent.sock"))
+	canonical, worktree := filepath.Join(t.TempDir(), "src"), filepath.Join(t.TempDir(), "src")
+	require.NoError(t, os.MkdirAll(canonical, 0o755))
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", canonical}, args...)...)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "%s", out)
+	}
+	git("init", "-q", "-b", "main")
+	git("-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "init")
+	git("worktree", "add", "-q", "-b", "review", worktree)
+	require.NoError(t, os.WriteFile(filepath.Join(worktree, ".gortex.yaml"), []byte("workspace: review\n"), 0o644))
+	gc, err := config.LoadGlobal()
+	require.NoError(t, err)
+	require.NoError(t, gc.AddRepo(config.RepoEntry{Path: canonical}))
+	require.NoError(t, gc.Save())
+	origWait, origName, origAs := trackWait, trackName, trackAsWorktree
+	origEnsure := trackEnsureDaemonReadyFn
+	trackWait, trackName, trackAsWorktree = false, "", false
+	trackEnsureDaemonReadyFn = func(bool) daemonDecision { return daemonUnavailable }
+	t.Cleanup(func() {
+		trackWait, trackName, trackAsWorktree = origWait, origName, origAs
+		trackEnsureDaemonReadyFn = origEnsure
+	})
+	cmd := &cobra.Command{}
+	cmd.SetErr(&bytes.Buffer{})
+	require.NoError(t, runTrack(cmd, []string{worktree}))
+	gc, err = config.LoadGlobal()
+	require.NoError(t, err)
+	require.Len(t, gc.Repos, 2)
+	assert.Equal(t, "src@review", gc.Repos[1].Name)
+	// An unpinned worktree entry also reserves its instance, not the basename.
+	gc.Repos = []config.RepoEntry{{Path: worktree}}
+	require.NoError(t, gc.Save())
+	require.NoError(t, runTrack(cmd, []string{canonical}))
 }

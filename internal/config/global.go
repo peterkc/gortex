@@ -9,8 +9,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/google/renameio"
 	"github.com/go-viper/mapstructure/v2"
+	"github.com/google/renameio"
 	"gopkg.in/yaml.v3"
 
 	"github.com/zzet/gortex/internal/llm"
@@ -459,6 +459,28 @@ func (gc *GlobalConfig) FindRepoByPrefix(prefix string) *RepoEntry {
 	for _, proj := range gc.Projects {
 		for i := range proj.Repos {
 			if ResolvePrefix(proj.Repos[i]) == prefix {
+				return &proj.Repos[i]
+			}
+		}
+	}
+	return nil
+}
+
+// FindRepoByPath searches top-level Repos and all Projects for the given root.
+// Callers that know the loaded root must not take settings from a prefix collision.
+func (gc *GlobalConfig) FindRepoByPath(root string) *RepoEntry {
+	if gc == nil || root == "" {
+		return nil
+	}
+	root = pathkey.CanonicalPath(root)
+	for i := range gc.Repos {
+		if pathkey.SamePathIdentity(pathkey.CanonicalPath(gc.Repos[i].Path), root) {
+			return &gc.Repos[i]
+		}
+	}
+	for _, proj := range gc.Projects {
+		for i := range proj.Repos {
+			if pathkey.SamePathIdentity(pathkey.CanonicalPath(proj.Repos[i].Path), root) {
 				return &proj.Repos[i]
 			}
 		}

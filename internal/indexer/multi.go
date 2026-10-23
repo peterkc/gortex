@@ -2542,7 +2542,7 @@ func (mi *MultiIndexer) indexRepoRaw(repoPrefix string) (*IndexResult, error) {
 	// split: a repo is prefixed from its first index, and adding another is
 	// purely additive.
 	idx.SetRepoPrefix(repoPrefix)
-	entry := mi.configMgr.Global().FindRepoByPrefix(repoPrefix)
+	entry := mi.configMgr.Global().FindRepoByPath(meta.RootPath)
 	idx.SetWorkspaceID(resolveWorkspaceID(entry, cfg, repoPrefix))
 	idx.SetProjectID(resolveProjectID(entry, cfg, repoPrefix))
 
@@ -2866,6 +2866,10 @@ type PrefixCollisionError struct {
 }
 
 func (e *PrefixCollisionError) Error() string {
+	if _, err := os.Stat(e.ExistingPath); os.IsNotExist(err) {
+		return fmt.Sprintf("repository prefix %q is already used by %s, which no longer exists; inspect `gortex untrack %s` before tracking %s again",
+			e.Prefix, e.ExistingPath, e.ExistingPath, e.Path)
+	}
 	return fmt.Sprintf("repository prefix %q is already used by %s; use `gortex track --name <other> %s`", e.Prefix, e.ExistingPath, e.Path)
 }
 
@@ -2951,25 +2955,23 @@ func (mi *MultiIndexer) resolveTrackPrefix(entry *config.RepoEntry, absPath stri
 			existing, ok := mi.repos[prefix]
 			mi.mu.RUnlock()
 			if ok && existing != nil && !pathkey.SamePathIdentity(existing.RootPath, absPath) {
-				prefix = name + "-" + shortPathHash(absPath)
+				prefix = WorktreeInstanceCollisionName(name, absPath)
 			}
 			entry.Name = prefix // persist the decision so warmup reproduces it
 		}
 	}
 
-	// Check and publish under one lock, so a request rejected for this
-	// prefix, or a no-op re-track of a directory tracked under another
-	// prefix, never replaces the owner's cached config. A request that
-	// wins before the owner publishes is overwritten by the owner's
-	// reload at publication. The cost is one small file read.
+	// Read outside the registry lock, then re-check ownership before publishing.
+	cfg, publish := mi.configMgr.PrepareWorkspaceConfig(prefix, absPath)
 	mi.mu.Lock()
-	defer mi.mu.Unlock()
 	tracked, collision := mi.trackedLocked(prefix, absPath)
 	if collision != nil || tracked && !mi.ownsPrefixLocked(prefix, absPath) {
+		mi.mu.Unlock()
 		return prefix, mi.configMgr.GetRepoConfig(prefix)
 	}
-	mi.configMgr.LoadWorkspaceConfig(prefix, absPath)
-	return prefix, mi.configMgr.GetRepoConfig(prefix)
+	publish()
+	mi.mu.Unlock()
+	return prefix, cfg
 }
 
 // ownsPrefixLocked reports whether path is the repository registered under
@@ -3000,8 +3002,7 @@ func EffectiveRepoPrefix(cm *config.ConfigManager, entry config.RepoEntry) strin
 	}
 	declaredWS := entry.Workspace
 	if declaredWS == "" && cm != nil {
-		cm.LoadWorkspaceConfig(base, absPath)
-		if cfg := cm.GetRepoConfig(base); cfg != nil {
+		if cfg, err := config.ParseWorkspaceFile(filepath.Join(absPath, ".gortex.yaml")); err == nil {
 			declaredWS = cfg.Workspace
 		}
 	}
@@ -3174,9 +3175,11 @@ func (mi *MultiIndexer) trackPreparedRepoSourceCtx(
 		result.RepoPrefix = prefix
 
 		fileMtimes := idx.publishFileMtimes()
+		// Restore the winner's config after any competing prefix resolution.
+		_, publish := mi.configMgr.PrepareWorkspaceConfig(prefix, absPath)
+		isWorktree := ResolveWorktree(absPath).IsWorktree
 		mi.mu.Lock()
-		// Another request may have resolved this prefix before it had an owner.
-		mi.configMgr.LoadWorkspaceConfig(prefix, absPath)
+		publish()
 		mi.repos[prefix] = &RepoMetadata{
 			RepoPrefix:    prefix,
 			RootPath:      absPath,
@@ -3188,7 +3191,7 @@ func (mi *MultiIndexer) trackPreparedRepoSourceCtx(
 			ParseErrors:   result.Errors,
 			FileMtimes:    fileMtimes,
 
-			IsWorktree: ResolveWorktree(absPath).IsWorktree,
+			IsWorktree: isWorktree,
 		}
 		mi.indexers[prefix] = idx
 		mi.mu.Unlock()
@@ -3429,9 +3432,11 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 		result.RepoPrefix = prefix
 
 		fileMtimes := idx.publishFileMtimes()
+		// Restore the winner's config after any competing prefix resolution.
+		_, publish := mi.configMgr.PrepareWorkspaceConfig(prefix, absPath)
+		isWorktree := ResolveWorktree(absPath).IsWorktree
 		mi.mu.Lock()
-		// Another request may have resolved this prefix before it had an owner.
-		mi.configMgr.LoadWorkspaceConfig(prefix, absPath)
+		publish()
 		mi.repos[prefix] = &RepoMetadata{
 			RepoPrefix:    prefix,
 			RootPath:      absPath,
@@ -3443,7 +3448,7 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 			ParseErrors:   result.Errors,
 			FileMtimes:    fileMtimes,
 
-			IsWorktree: ResolveWorktree(absPath).IsWorktree,
+			IsWorktree: isWorktree,
 		}
 		mi.indexers[prefix] = idx
 		mi.mu.Unlock()

@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/pathkey"
 )
 
 func TestRepositoryPrefixCollision(t *testing.T) {
@@ -227,4 +228,173 @@ func TestRepositoryPrefixCollisionLifecycleHasNoSideEffects(t *testing.T) {
 	afterInvalidated, afterAnalysed := f.notify.counts()
 	assert.Equal(t, invalidated, afterInvalidated)
 	assert.Equal(t, analysed, afterAnalysed)
+}
+
+func TestPromotionPrefixCollisionKeepsOtherCorpus(t *testing.T) {
+	f := newFamilyFixture(t, "collision")
+	t.Cleanup(f.close)
+	prefix := f.mainPrefix + "@" + f.automatic.AdminName
+	other := f.gitRepo("other-owner")
+	f.lc.indexBarrier = func() {
+		_, err := f.lc.Register(t.Context(), config.RepoEntry{Path: other, Name: prefix}, TrackSourceCLI)
+		require.NoError(t, err)
+	}
+	result, err := f.lc.PromoteCheckout(t.Context(), f.automatic.CheckoutID, TrackSourceCLI)
+	var collision *PrefixCollisionError
+	require.ErrorAs(t, err, &collision)
+	assert.True(t, result.Retryable)
+	require.NotNil(t, f.mi.GetMetadata(prefix), "collision must not purge the other root")
+	assert.Equal(t, other, f.mi.GetMetadata(prefix).RootPath)
+	assert.NotEmpty(t, f.store.GetRepoNodes(prefix))
+	assert.Equal(t, pathkey.CanonicalExistingRoot(other), f.checkoutOf(prefix).RootPath)
+}
+
+func TestSeedPrefixCollisionKeepsCatalogOwner(t *testing.T) {
+	f := newLifecycleFixture(t)
+	t.Cleanup(f.close)
+	first, second := f.gitRepo("first"), f.gitRepo("second")
+	owner, err := f.lc.Register(t.Context(), config.RepoEntry{Path: first, Name: "src"}, TrackSourceCLI)
+	require.NoError(t, err)
+	require.NoError(t, owner.CatalogErr)
+	before := f.familyOf("src")
+	require.NoError(t, f.cm.Global().AddRepo(config.RepoEntry{Path: second, Name: "src"}))
+	require.NoError(t, f.lc.Seed(t.Context()))
+	assert.Equal(t, before, f.familyOf("src"))
+	families, err := f.catalog.ListRepositoryFamilies(t.Context())
+	require.NoError(t, err)
+	assert.Len(t, families, 1, "rejected config must not mint a family")
+	_, err = f.lc.PreviewUntrack(t.Context(), second)
+	assert.ErrorIs(t, err, ErrCheckoutNotTracked, "the rejected root must not target the owner's corpus")
+	assert.Equal(t, before, f.familyOf("src"))
+	assert.NotEmpty(t, f.store.GetRepoNodes("src"))
+}
+
+func TestBindDedicatedGraphRefusesAnotherOwner(t *testing.T) {
+	f := newLifecycleFixture(t)
+	t.Cleanup(f.close)
+	first, second := f.gitRepo("first"), f.gitRepo("second")
+	_, err := f.lc.Register(t.Context(), config.RepoEntry{Path: first, Name: "src"}, TrackSourceCLI)
+	require.NoError(t, err)
+	before := f.familyOf("src")
+	_, err = f.lc.recordCheckout(t.Context(), "src", second, TrackSourceConfig, true)
+	require.Error(t, err)
+	assert.Equal(t, before, f.familyOf("src"))
+}
+
+func TestEffectiveRepoPrefixDoesNotPublishConfig(t *testing.T) {
+	first, second := setupRepoDir(t, "src"), setupRepoDir(t, "src")
+	writeFile(t, filepath.Join(first, ".gortex.yaml"), "workspace: owner\nexclude:\n  - owner-only\n")
+	writeFile(t, filepath.Join(second, ".gortex.yaml"), "workspace: rejected\nexclude:\n  - rejected-only\n")
+	_, mi, cm := newWorktreeTestIndexer(t)
+	t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
+	_, err := mi.TrackRepoCtx(t.Context(), config.RepoEntry{Path: first})
+	require.NoError(t, err)
+	before, revision := cm.GetRepoConfig("src"), cm.Revision()
+	assert.Equal(t, "src", EffectiveRepoPrefix(cm, config.RepoEntry{Path: second}))
+	assert.Equal(t, before, cm.GetRepoConfig("src"))
+	assert.Equal(t, revision, cm.Revision())
+}
+
+func TestSeedPrefixCollisionKeepsPersistedOwner(t *testing.T) {
+	f := newLifecycleFixture(t)
+	t.Cleanup(f.close)
+	first, second := f.gitRepo("first"), f.gitRepo("second")
+	_, err := f.lc.Register(t.Context(), config.RepoEntry{Path: first, Name: "src"}, TrackSourceCLI)
+	require.NoError(t, err)
+	before := f.familyOf("src")
+	f.cm.Global().Repos = []config.RepoEntry{{Path: second, Name: "src"}, {Path: first, Name: "src"}}
+	require.NoError(t, f.cm.Global().Save())
+	f.restart()
+	require.Empty(t, f.mi.AllMetadata())
+	require.NoError(t, f.lc.Seed(t.Context()))
+	assert.Equal(t, before, f.familyOf("src"))
+	families, err := f.catalog.ListRepositoryFamilies(t.Context())
+	require.NoError(t, err)
+	assert.Len(t, families, 1)
+	// A sweep must not let the skipped entry probe the owner's family either.
+	f.cm.Global().Repos = []config.RepoEntry{{Path: second, Name: "src"}}
+	assert.Empty(t, f.lc.knownFamilies(t.Context()))
+}
+
+func TestRepositoryPrefixPublicationRestoresOwnerConfig(t *testing.T) {
+	for _, reconcile := range []bool{false, true} {
+		t.Run(fmt.Sprint(reconcile), func(t *testing.T) {
+			first, second := setupRepoDir(t, "src"), setupRepoDir(t, "src")
+			writeFile(t, filepath.Join(first, ".gortex.yaml"), "workspace: owner\n")
+			writeFile(t, filepath.Join(second, ".gortex.yaml"), "workspace: rejected\n")
+			_, mi, cm := newWorktreeTestIndexer(t)
+			t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
+			resolvedLoser := false
+			mi.repositoryMutationCoordinator("src").batchAdmissionHook = func() {
+				resolvedLoser = true
+				// The winner has resolved, but is not yet published. Resolve
+				// a competing root now so the publication must restore its config.
+				entry := config.RepoEntry{Path: second}
+				mi.resolveTrackPrefix(&entry, second, nil)
+				require.Equal(t, "rejected", cm.GetRepoConfig("src").Workspace)
+			}
+			var err error
+			if reconcile {
+				_, err = mi.ReconcileRepoCtx(t.Context(), config.RepoEntry{Path: first}, map[string]int64{"main.go": 1})
+			} else {
+				_, err = mi.TrackRepoCtx(t.Context(), config.RepoEntry{Path: first})
+			}
+			require.NoError(t, err)
+			require.True(t, resolvedLoser)
+			require.NotNil(t, mi.GetMetadata("src"))
+			assert.Equal(t, first, mi.GetMetadata("src").RootPath)
+			assert.Equal(t, "owner", cm.GetRepoConfig("src").Workspace)
+		})
+	}
+}
+
+func TestPrefixCollisionMissingOwnerSuggestsUntrack(t *testing.T) {
+	first, second := setupRepoDir(t, "src"), setupRepoDir(t, "src")
+	_, mi, _ := newWorktreeTestIndexer(t)
+	t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
+	_, err := mi.TrackRepoCtx(t.Context(), config.RepoEntry{Path: first})
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(first))
+	_, err = mi.TrackRepoCtx(t.Context(), config.RepoEntry{Path: second})
+	var collision *PrefixCollisionError
+	require.ErrorAs(t, err, &collision)
+	assert.Contains(t, err.Error(), "no longer exists")
+	assert.Contains(t, err.Error(), "gortex untrack "+first)
+	assert.NotContains(t, err.Error(), "track --name")
+	assert.Len(t, mi.AllMetadata(), 1)
+}
+
+func TestRepositoryPrefixCollisionGitLifecycleHasNoSideEffects(t *testing.T) {
+	f := newLifecycleFixture(t)
+	t.Cleanup(f.close)
+	first, second := f.gitRepo("first"), f.gitRepo("second")
+	_, err := f.lc.Register(t.Context(), config.RepoEntry{Path: first, Name: "src"}, TrackSourceCLI)
+	require.NoError(t, err)
+	before := f.familyOf("src")
+	_, err = f.lc.Register(t.Context(), config.RepoEntry{Path: second, Name: "src"}, TrackSourceCLI)
+	var collision *PrefixCollisionError
+	require.ErrorAs(t, err, &collision)
+	assert.Equal(t, before, f.familyOf("src"))
+	families, err := f.catalog.ListRepositoryFamilies(t.Context())
+	require.NoError(t, err)
+	assert.Len(t, families, 1)
+}
+
+func TestResolveConfiguredReposUsesOrderThenLiveOwner(t *testing.T) {
+	first, second := setupRepoDir(t, "src"), setupRepoDir(t, "src")
+	_, mi, _ := newWorktreeTestIndexer(t)
+	t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
+	entries := []config.RepoEntry{{Path: first}, {Path: second}}
+	selected := mi.ResolveConfiguredRepos(t.Context(), entries)
+	require.Len(t, selected, 1)
+	assert.Equal(t, first, selected[0].Path)
+	assert.Empty(t, entries[0].Name, "selection must not mutate config")
+	_, err := mi.TrackRepoCtx(t.Context(), config.RepoEntry{Path: second})
+	require.NoError(t, err)
+	selected = mi.ResolveConfiguredRepos(t.Context(), entries)
+	require.Len(t, selected, 1)
+	assert.Equal(t, second, selected[0].Path)
+	selected = mi.ResolveConfiguredRepos(t.Context(), []config.RepoEntry{{Path: second, Name: "other"}})
+	require.Len(t, selected, 1)
+	assert.Equal(t, "src", selected[0].Name, "an already-loaded root keeps its registered prefix")
 }
