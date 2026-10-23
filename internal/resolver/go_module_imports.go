@@ -288,17 +288,23 @@ func (cr *CrossRepoResolver) goModuleImportIDs(repo string) []string {
 	return ids
 }
 
-func (cr *CrossRepoResolver) restoreGoModuleImports(repo string, stats *CrossRepoStats) {
+func (cr *CrossRepoResolver) restoreGoModuleImports(ctx context.Context, repo string, stats *CrossRepoStats) error {
 	if len(cr.graph.RepoPrefixes()) < 2 {
-		return
+		return ctx.Err()
 	}
 	ids := cr.goModuleImportIDs(repo)
 	for start := 0; start < len(ids); start += externalCallMutationChunk {
-		cr.restoreGoModuleImportBatch(repo, ids[start:min(start+externalCallMutationChunk, len(ids))], stats)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := cr.restoreGoModuleImportBatch(ctx, repo, ids[start:min(start+externalCallMutationChunk, len(ids))], stats); err != nil {
+			return err
+		}
 	}
+	return ctx.Err()
 }
 
-func (cr *CrossRepoResolver) restoreGoModuleImportBatch(repo string, ids []string, stats *CrossRepoStats) {
+func (cr *CrossRepoResolver) restoreGoModuleImportBatch(ctx context.Context, repo string, ids []string, stats *CrossRepoStats) error {
 	state := cr.goModuleImportState()
 	nodes := cr.graph.GetNodesByIDs(ids)
 	paths := make(map[string]bool)
@@ -310,6 +316,7 @@ func (cr *CrossRepoResolver) restoreGoModuleImportBatch(repo string, ids []strin
 		}
 	}
 	outgoing := cr.graph.GetOutEdgesByNodeIDs(files)
+	var fileNodes map[string][]*graph.Node
 	for _, id := range ids {
 		n := nodes[id]
 		if n == nil || n.Kind != graph.KindImport || n.Language != "go" {
@@ -324,7 +331,27 @@ func (cr *CrossRepoResolver) restoreGoModuleImportBatch(repo string, ids []strin
 		}
 		present := false
 		for _, e := range outgoing[n.FilePath] {
-			if e.Kind == graph.EdgeImports && e.Line == n.StartLine {
+			if e.Kind != graph.EdgeImports || e.Line != n.StartLine {
+				continue
+			}
+			target := graph.UnresolvedName(e.To)
+			if target == "" {
+				target = e.To
+			}
+			if strings.HasPrefix(strings.TrimPrefix(target, externalCallPrefix), "dep::") && fileNodes == nil {
+				fileNodes = cr.graph.GetFileNodesByPaths(files)
+			}
+			if goModuleImportPath(e, fileNodes[n.FilePath]) == path {
+				present = true
+				break
+			}
+			// A longer module may own the bound package, even when this
+			// statement is also registered under the edited provider.
+			targetRepo := graph.RepoPrefixOfID(e.To)
+			targetModule := cr.goModules[targetRepo]
+			if strings.HasSuffix(e.To, ".go") && targetModule != "" &&
+				(path == targetModule || strings.HasPrefix(path, targetModule+"/")) &&
+				filePathDir(e.To) == targetRepo+strings.TrimPrefix(path, targetModule) {
 				present = true
 				break
 			}
@@ -333,5 +360,5 @@ func (cr *CrossRepoResolver) restoreGoModuleImportBatch(repo string, ids []strin
 			cr.graph.AddEdge(&graph.Edge{From: n.FilePath, To: "unresolved::import::" + path, Kind: graph.EdgeImports, FilePath: n.FilePath, Line: n.StartLine})
 		}
 	}
-	_ = cr.resolveGoModuleImports(context.Background(), files, stats, nil)
+	return cr.resolveGoModuleImports(ctx, files, stats, nil)
 }
