@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -404,4 +405,187 @@ func TestGoModuleImportIDsDoesNotSeed(t *testing.T) {
 	cr.goModuleImportIDs("b")
 	assert.Zero(t, g.importScans, "the ID getter must not run a lock-yielding seed")
 	assert.Zero(t, g.hydrated)
+}
+
+type goImportCancelStore struct {
+	graph.Store
+	cancel  context.CancelFunc
+	batches int
+}
+
+func (s *goImportCancelStore) GetNodesByIDs(ids []string) map[string]*graph.Node {
+	if s.cancel != nil && len(ids) > 0 && strings.Contains(ids[0], "::import::") {
+		s.batches++
+		s.cancel()
+	}
+	return s.Store.GetNodesByIDs(ids)
+}
+
+func TestGoModuleImportRestoreCancellation(t *testing.T) {
+	g := &goImportCancelStore{Store: graph.New()}
+	g.AddNode(&graph.Node{ID: "b/lib.go", Kind: graph.KindFile, FilePath: "b/lib.go", RepoPrefix: "b", Language: "go"})
+	for i := range 2*externalCallMutationChunk + 1 {
+		file := fmt.Sprintf("a/f%d.go", i)
+		g.AddNode(&graph.Node{ID: file, Kind: graph.KindFile, FilePath: file, RepoPrefix: "a", Language: "go"})
+		g.AddNode(&graph.Node{ID: file + "::import::example.com/lib", Kind: graph.KindImport, FilePath: file, RepoPrefix: "a", Language: "go", StartLine: 2})
+		g.AddEdge(&graph.Edge{From: file, To: "unresolved::import::example.com/lib", Kind: graph.EdgeImports, FilePath: file, Line: 2})
+	}
+	cr := NewCrossRepo(g)
+	cr.SetGoModules(map[string]string{"b": "example.com/lib"})
+	require.NoError(t, cr.RetryGoModuleDeps(t.Context()))
+	g.EvictFile("b/lib.go")
+	g.AddNode(&graph.Node{ID: "b/lib.go", Kind: graph.KindFile, FilePath: "b/lib.go", RepoPrefix: "b", Language: "go"})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	g.cancel = cancel // cancel when restoration starts its first payload batch
+	stats, err := cr.ResolveAllContext(ctx)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, 1, g.batches, "cancellation must stop before the next restoration batch")
+	assert.Zero(t, stats.Resolved, "the cancelled context must reach the import rebind")
+}
+
+func TestGoModuleImportRestoreSameLine(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, route := range []string{"mutation", "fallback", "post_publish"} {
+			t.Run(backend+"/"+route, func(t *testing.T) {
+				var g graph.Store = graph.New()
+				if backend == "sqlite" {
+					s, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.sqlite"))
+					require.NoError(t, err)
+					t.Cleanup(func() { require.NoError(t, s.Close()) })
+					g = s
+				}
+				g.AddNode(&graph.Node{ID: "a/main.go", Kind: graph.KindFile, FilePath: "a/main.go", RepoPrefix: "a", Language: "go"})
+				// import ( b "example.com/lib/sub"; c "example.net/other/pkg" )
+				for _, path := range []string{"example.com/lib/sub", "example.net/other/pkg"} {
+					g.AddNode(&graph.Node{ID: "a/main.go::import::" + path, Kind: graph.KindImport, FilePath: "a/main.go", RepoPrefix: "a", Language: "go", StartLine: 2, Meta: map[string]any{"path": path}})
+					g.AddEdge(&graph.Edge{From: "a/main.go", To: "unresolved::import::" + path, Kind: graph.EdgeImports, FilePath: "a/main.go", Line: 2})
+				}
+				for _, file := range []string{"b/sub/lib.go", "c/pkg/other.go"} {
+					g.AddNode(&graph.Node{ID: file, Kind: graph.KindFile, FilePath: file, RepoPrefix: graph.RepoPrefixOfID(file), Language: "go"})
+				}
+				cr := NewCrossRepo(g)
+				cr.SetGoModules(map[string]string{"b": "example.com/lib", "c": "example.net/other"})
+				require.NoError(t, cr.RetryGoModuleDeps(t.Context()))
+				require.Len(t, g.GetOutEdges("a/main.go"), 2)
+				g.EvictFile("b/sub/lib.go")
+				remaining := g.GetOutEdges("a/main.go")
+				require.Len(t, remaining, 1)
+				require.Equal(t, "c/pkg/other.go", remaining[0].To)
+				g.AddNode(&graph.Node{ID: "b/sub/lib.go", Kind: graph.KindFile, FilePath: "b/sub/lib.go", RepoPrefix: "b", Language: "go"})
+				resolve := func() *CrossRepoStats {
+					switch route {
+					case "mutation":
+						return cr.ResolveMutationFrontiers(nil, nil, []string{"b/sub/lib.go"})
+					case "fallback":
+						stats, err := cr.ResolveAllContext(t.Context())
+						require.NoError(t, err)
+						return stats
+					default:
+						require.NoError(t, cr.ResolveGoModuleIncomingForRepo("b"))
+						return nil
+					}
+				}
+				for pass := range 2 { // recovery, then an unchanged provider pass
+					if stats := resolve(); stats != nil {
+						assert.Equal(t, 1-pass, stats.Resolved, "only the missing import may be rebound")
+					}
+					var targets []string
+					for _, e := range g.GetOutEdges("a/main.go") {
+						if e.Kind == graph.EdgeImports {
+							targets = append(targets, e.To)
+							assert.True(t, e.CrossRepo)
+							assert.Equal(t, 2, e.Line)
+						}
+					}
+					assert.ElementsMatch(t, []string{"b/sub/lib.go", "c/pkg/other.go"}, targets, "both same-line imports must survive provider recovery without duplicates")
+				}
+			})
+		}
+	}
+}
+
+func TestGoModuleImportRestoreNestedProvider(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, module := range []string{"example.com/lib/v2", "example.com/lib/nested"} {
+			t.Run(backend+"/"+module, func(t *testing.T) {
+				var g graph.Store = graph.New()
+				if backend == "sqlite" {
+					s, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.sqlite"))
+					require.NoError(t, err)
+					t.Cleanup(func() { require.NoError(t, s.Close()) })
+					g = s
+				}
+				path := module + "/pkg"
+				g.AddNode(&graph.Node{ID: "a/main.go", Kind: graph.KindFile, FilePath: "a/main.go", RepoPrefix: "a", Language: "go"})
+				g.AddNode(&graph.Node{ID: "a/main.go::import::" + path, Kind: graph.KindImport, FilePath: "a/main.go", RepoPrefix: "a", Language: "go", StartLine: 2, Meta: map[string]any{"path": path}})
+				g.AddEdge(&graph.Edge{From: "a/main.go", To: "unresolved::import::" + path, Kind: graph.EdgeImports, FilePath: "a/main.go", Line: 2})
+				bFile := "b" + strings.TrimPrefix(path, "example.com/lib") + "/lib.go"
+				for _, file := range []string{bFile, "d/pkg/lib.go"} {
+					g.AddNode(&graph.Node{ID: file, Kind: graph.KindFile, FilePath: file, RepoPrefix: graph.RepoPrefixOfID(file), Language: "go"})
+				}
+				cr := NewCrossRepo(g)
+				cr.SetGoModules(map[string]string{"b": "example.com/lib", "d": module})
+				require.NoError(t, cr.RetryGoModuleDeps(t.Context()))
+				check := func(stats *CrossRepoStats) {
+					t.Helper()
+					edges := g.GetOutEdges("a/main.go")
+					require.Len(t, edges, 1, "an import bound to the longer module must not be restored again")
+					assert.Equal(t, "d/pkg/lib.go", edges[0].To)
+					assert.Equal(t, graph.EdgeImports, edges[0].Kind)
+					assert.Equal(t, 2, edges[0].Line)
+					assert.True(t, edges[0].CrossRepo)
+					if stats != nil {
+						assert.Zero(t, stats.Resolved)
+						assert.Zero(t, stats.CrossRepoEdges)
+						assert.Empty(t, stats.ByRepo)
+					}
+				}
+				check(nil)
+				for range 2 {
+					stats, err := cr.ResolveAllContext(t.Context())
+					require.NoError(t, err)
+					check(stats)
+					g.EvictFile(bFile)
+					g.AddNode(&graph.Node{ID: bFile, Kind: graph.KindFile, FilePath: bFile, RepoPrefix: "b", Language: "go"})
+					check(cr.ResolveMutationFrontiers(nil, nil, []string{bFile}))
+				}
+			})
+		}
+	}
+}
+
+func TestGoModuleImportRestoreLookupBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name, target string
+		line, want   int
+	}{
+		{"bound", "b/lib.go", 2, 1},
+		{"missing", "", 2, 1},
+		{"unresolved", "unresolved::import::example.com/lib", 2, 1},
+		{"external", "external::example.com/lib", 2, 1},
+		{"dep", "dep::example.com/lib", 2, 2},
+		{"unresolved_dep", "unresolved::dep::example.com/lib", 2, 2},
+		{"external_call_dep", "external-call::dep::example.com/lib", 2, 2},
+		{"other_line_dep", "dep::example.com/lib", 3, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := &goImportCountingStore{Store: graph.New()}
+			g.AddNode(&graph.Node{ID: "a/main.go", Kind: graph.KindFile, FilePath: "a/main.go", RepoPrefix: "a", Language: "go"})
+			g.AddNode(&graph.Node{ID: "a/main.go::import::example.com/lib", Kind: graph.KindImport, FilePath: "a/main.go", RepoPrefix: "a", Language: "go", StartLine: 2, Meta: map[string]any{"path": "example.com/lib"}})
+			g.AddNode(&graph.Node{ID: "b/lib.go", Kind: graph.KindFile, FilePath: "b/lib.go", RepoPrefix: "b", Language: "go"})
+			g.AddEdge(&graph.Edge{From: "a/main.go", To: "unresolved::import::example.com/lib", Kind: graph.EdgeImports, FilePath: "a/main.go", Line: 2})
+			cr := NewCrossRepo(g)
+			cr.SetGoModules(map[string]string{"b": "example.com/lib"})
+			require.NoError(t, cr.RetryGoModuleDeps(t.Context()))
+			g.RemoveEdge("a/main.go", "b/lib.go", graph.EdgeImports)
+			if tc.target != "" {
+				g.AddEdge(&graph.Edge{From: "a/main.go", To: tc.target, Kind: graph.EdgeImports, FilePath: "a/main.go", Line: tc.line})
+			}
+			g.hydrated = 0
+			_, err := cr.ResolveAllContext(t.Context())
+			require.NoError(t, err)
+			assert.LessOrEqual(t, g.hydrated, tc.want, "only a same-line dep terminal may need restore payloads in addition to the rebind's single load")
+		})
+	}
 }
