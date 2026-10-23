@@ -407,7 +407,9 @@ func (cr *CrossRepoResolver) ResolveAllContext(ctx context.Context) (*CrossRepoS
 		return stats, err
 	}
 	for repo := range cr.goModules {
-		cr.restoreGoModuleImports(repo, stats)
+		if err := cr.restoreGoModuleImports(ctx, repo, stats); err != nil {
+			return stats, err
+		}
 	}
 	if err := cr.retryGoModuleDeps(ctx, stats); err != nil {
 		return stats, err
