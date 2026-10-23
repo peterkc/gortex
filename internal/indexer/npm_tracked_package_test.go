@@ -15,6 +15,7 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/parser/languages"
+	"github.com/zzet/gortex/internal/resolver"
 	"github.com/zzet/gortex/internal/search"
 )
 
@@ -23,6 +24,9 @@ func TestMultiIndexer_TrackedNpmPackage(t *testing.T) {
 		name, packageName, manifest, entry, packageDir, consumerName, providerWS, providerName, specifier, depVersion string
 		resolves, pnpm                                                                                                bool
 	}{
+		{name: "exports missing runtime uses types condition", packageName: "p", manifest: `"exports":{"types":"./src/index.ts","import":"./dist/index.js"}`, entry: "src/index.ts", resolves: true},
+		{name: "exports subpath missing runtime uses types condition", packageName: "p", specifier: "p/utils", manifest: `"exports":{"./utils":{"types":"./src/utils.ts","import":"./dist/utils.js"}}`, entry: "src/utils.ts", resolves: true},
+		{name: "unsupported subpath does not guess directory", packageName: "p", specifier: "p/utils", manifest: `"exports":{"./utils":{"browser":"./dist/utils.js"}}`, entry: "utils/index.ts"},
 		{name: "scoped exports", packageName: "@scope/p", manifest: `"exports":"./src/index.ts","types":"./wrong.ts","main":"./wrong.ts"`, entry: "src/index.ts", resolves: true},
 		{name: "unscoped subpath exports", packageName: "p", specifier: "p/utils", manifest: `"exports":{"./utils":"./src/util.js"}`, entry: "src/util.ts", resolves: true},
 		{name: "scoped subpath exports", packageName: "@scope/p", specifier: "@scope/p/utils", manifest: `"exports":{"./utils":{"import":"./src/util.ts"}}`, entry: "src/util.ts", resolves: true},
@@ -40,12 +44,12 @@ func TestMultiIndexer_TrackedNpmPackage(t *testing.T) {
 		{name: "exports blocked subpath", packageName: "p", specifier: "p/private", manifest: `"exports":{"./private":null}`, entry: "private.ts"},
 		{name: "exports types require root uses legacy main", packageName: "p", manifest: `"main":"./src/index.ts","exports":{".":{"types":"./src/index.ts","require":"./dist/index.cjs"}}`, entry: "src/index.ts", resolves: true},
 		{name: "exports types require root uses legacy types", packageName: "p", manifest: `"types":"./src/index.ts","exports":{".":{"types":"./dist/index.d.ts","require":"./dist/index.cjs"}}`, entry: "src/index.ts", resolves: true},
-		{name: "exports require subpath uses legacy path", packageName: "p", specifier: "p/utils", manifest: `"exports":{"./utils":{"require":"./dist/utils.cjs"}}`, entry: "utils/index.ts", resolves: true},
+		{name: "exports require subpath uses legacy path", packageName: "p", specifier: "p/utils", manifest: `"exports":{"./utils":{"require":"./dist/utils.cjs"}}`, entry: "utils/index.ts"},
 		{name: "exports browser root uses legacy index", packageName: "p", manifest: `"exports":{"browser":"./dist/index.js"}`, entry: "index.ts", resolves: true},
-		{name: "exports require wildcard uses legacy path", packageName: "p", specifier: "p/utils", manifest: `"exports":{"./*":{"require":"./dist/*.cjs"}}`, entry: "utils/index.ts", resolves: true},
+		{name: "exports require wildcard uses legacy path", packageName: "p", specifier: "p/utils", manifest: `"exports":{"./*":{"require":"./dist/*.cjs"}}`, entry: "utils/index.ts"},
 		{name: "exports null overrides wildcard", packageName: "p", specifier: "p/private", manifest: `"exports":{"./*":"./src/*.ts","./private":null}`, entry: "src/private.ts"},
 		{name: "exports null wildcard blocks legacy", packageName: "p", specifier: "p/private", manifest: `"exports":{"./*":null}`, entry: "private.ts"},
-		{name: "exports require exact overrides wildcard", packageName: "p", specifier: "p/utils", manifest: `"exports":{"./*":"./wrong/*.ts","./utils":{"require":"./dist/utils.cjs"}}`, entry: "utils/index.ts", resolves: true},
+		{name: "exports require exact overrides wildcard", packageName: "p", specifier: "p/utils", manifest: `"exports":{"./*":"./wrong/*.ts","./utils":{"require":"./dist/utils.cjs"}}`, entry: "utils/index.ts"},
 		{name: "exports conditional root", packageName: "p", manifest: `"exports":{"import":"./src/index.ts"}`, entry: "src/index.ts", resolves: true},
 		{name: "exports array root", packageName: "p", manifest: `"exports":["./src/index.ts"]`, entry: "src/index.ts", resolves: true},
 		{name: "exports array first target is authoritative", packageName: "p", manifest: `"exports":["./missing.ts","./src/index.ts"],"main":"./src/index.ts"`, entry: "src/index.ts"},
@@ -188,77 +192,124 @@ func TestTrackedNpmPackageWorkspaceEscape(t *testing.T) {
 	assert.Empty(t, lookup("p"), "an escaped workspace must not supply another repo's graph prefix")
 }
 
-func TestMultiIndexer_TrackedNpmPackageTrackSQLite(t *testing.T) {
-	for _, providerFirst := range []bool{true, false} {
-		t.Run(strconv.FormatBool(providerFirst), func(t *testing.T) {
-			provider, consumer := t.TempDir(), t.TempDir()
-			writePackageJSON(t, provider, `{"name":"p","exports":"./src/index.ts"}`)
-			writeWorkspaceFile(t, provider, "src/index.ts", "export function f(): number { return 42; }\n")
-			writePackageJSON(t, consumer, `{"name":"app","dependencies":{"p":"^1"}}`)
-			writeWorkspaceFile(t, consumer, "src/app.ts", "import { f } from 'p';\nexport function run(): number { return f(); }\n")
-			entries := []config.RepoEntry{{Path: provider, Name: "provider", Workspace: "shared"}, {Path: consumer, Name: "consumer", Workspace: "shared"}}
-			if !providerFirst {
-				entries[0], entries[1] = entries[1], entries[0]
-			}
-			cfgPath := filepath.Join(t.TempDir(), "config.yaml")
-			gc := &config.GlobalConfig{Repos: entries}
-			gc.SetConfigPath(cfgPath)
-			require.NoError(t, gc.Save())
-			cm, err := config.NewConfigManager(cfgPath)
-			require.NoError(t, err)
-			db := filepath.Join(t.TempDir(), "graph.sqlite")
-			g, err := store_sqlite.Open(db)
-			require.NoError(t, err)
-			t.Cleanup(func() { require.NoError(t, g.Close()) })
-			newIndexer := func() *MultiIndexer {
-				reg := newTestRegistry()
-				reg.Register(languages.NewTypeScriptExtractor())
-				return NewMultiIndexer(g, reg, search.NewNull(), cm, zap.NewNop())
-			}
-			mi := newIndexer()
-			for _, entry := range entries {
-				_, err := mi.TrackRepoCtx(context.Background(), entry)
-				require.NoError(t, err)
-			}
-			// The daemon runs this whole-store resolve after cold per-repo tracking.
-			require.NoError(t, mi.RunPreEnrichResolve(context.Background(), nil, nil))
-			check := func(stage string) {
-				t.Helper()
-				var imports, calls []string
-				for _, e := range g.AllEdges() {
-					if e.FilePath != "consumer/src/app.ts" {
-						continue
+func TestMultiIndexer_TrackedNpmPackageLifecycle(t *testing.T) {
+	for _, binding := range []string{"f", "renamed"} {
+		for _, backend := range []string{"memory", "sqlite"} {
+			for _, providerFirst := range []bool{true, false} {
+				t.Run(binding+"/"+backend+"/"+strconv.FormatBool(providerFirst), func(t *testing.T) {
+					provider, consumer := t.TempDir(), t.TempDir()
+					writePackageJSON(t, provider, `{"name":"p","exports":"./src/index.ts"}`)
+					writeWorkspaceFile(t, provider, "src/index.ts", "export function f(): number { return 42; }\n")
+					writePackageJSON(t, consumer, `{"name":"app","dependencies":{"p":"^1"}}`)
+					importName := "f"
+					if binding != "f" {
+						importName += " as " + binding
 					}
-					switch e.Kind {
-					case graph.EdgeImports:
-						imports = append(imports, e.To)
-						assert.True(t, e.CrossRepo, stage)
-					case graph.EdgeCalls:
-						calls = append(calls, e.To)
-						assert.True(t, e.CrossRepo, stage)
+					writeWorkspaceFile(t, consumer, "src/app.ts", "import { "+importName+" } from 'p';\nexport function run(): number { return "+binding+"(); }\n")
+					entries := []config.RepoEntry{{Path: provider, Name: "provider", Workspace: "shared"}, {Path: consumer, Name: "consumer", Workspace: "shared"}}
+					if !providerFirst {
+						entries[0], entries[1] = entries[1], entries[0]
 					}
-				}
-				assert.ElementsMatch(t, []string{"provider/src/index.ts", "provider/src/index.ts::f"}, imports, stage)
-				assert.Equal(t, []string{"provider/src/index.ts::f"}, calls, stage)
+					cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+					gc := &config.GlobalConfig{Repos: entries}
+					gc.SetConfigPath(cfgPath)
+					require.NoError(t, gc.Save())
+					cm, err := config.NewConfigManager(cfgPath)
+					require.NoError(t, err)
+					db := filepath.Join(t.TempDir(), "graph.sqlite")
+					var g graph.Store = graph.New()
+					var sqlite *store_sqlite.Store
+					if backend == "sqlite" {
+						sqlite, err = store_sqlite.Open(db)
+						require.NoError(t, err)
+						g = sqlite
+						t.Cleanup(func() { require.NoError(t, sqlite.Close()) })
+					}
+					newIndexer := func() *MultiIndexer {
+						reg := newTestRegistry()
+						reg.Register(languages.NewTypeScriptExtractor())
+						return NewMultiIndexer(g, reg, search.NewNull(), cm, zap.NewNop())
+					}
+					mi := newIndexer()
+					for _, entry := range entries {
+						_, err := mi.TrackRepoCtx(context.Background(), entry)
+						require.NoError(t, err)
+					}
+					// The daemon runs this whole-store resolve after cold per-repo tracking.
+					require.NoError(t, mi.RunPreEnrichResolve(context.Background(), nil, nil))
+					check := func(stage string) {
+						t.Helper()
+						var imports, calls []string
+						for _, e := range g.AllEdges() {
+							if e.FilePath != "consumer/src/app.ts" {
+								continue
+							}
+							switch e.Kind {
+							case graph.EdgeImports:
+								imports = append(imports, e.To)
+								assert.True(t, e.CrossRepo, stage)
+							case graph.EdgeCalls:
+								calls = append(calls, e.To)
+								assert.True(t, e.CrossRepo, stage)
+							}
+						}
+						assert.ElementsMatch(t, []string{"provider/src/index.ts", "provider/src/index.ts::f"}, imports, stage)
+						assert.Equal(t, []string{"provider/src/index.ts::f"}, calls, stage)
+					}
+					check("cold track")
+					warm := mi
+					if backend == "sqlite" {
+						mtimes := map[string]map[string]int64{}
+						for _, entry := range entries {
+							mtimes[entry.Name] = mi.FileMtimes(entry.Name)
+						}
+						require.NoError(t, mi.Close(context.Background()))
+						require.NoError(t, sqlite.Close())
+						sqlite, err = store_sqlite.Open(db)
+						require.NoError(t, err)
+						g = sqlite
+						warm = newIndexer()
+						for _, entry := range entries {
+							_, err := warm.ReconcileRepoCtx(context.Background(), entry, mtimes[entry.Name])
+							require.NoError(t, err)
+						}
+						// A clean warm restart skips the global pass and keeps persisted links.
+						check("warm restart")
+					}
+					t.Cleanup(func() { require.NoError(t, warm.Close(context.Background())) })
+					writeWorkspaceFile(t, provider, "src/index.ts", "export function f(): number { return 43; }\n")
+					_, err = warm.IncrementalReindexRepo("provider", []string{"src/index.ts"})
+					require.NoError(t, err)
+					require.NoError(t, warm.RunPreEnrichResolve(context.Background(), nil, nil))
+					check("provider save")
+					_, err = warm.IndexRepo("provider")
+					require.NoError(t, err)
+					require.NoError(t, warm.RunPreEnrichResolve(context.Background(), nil, nil))
+					check("provider reindex")
+					warm.UntrackRepo("provider")
+					var imports []string
+					for _, e := range g.GetOutEdges("consumer/src/app.ts") {
+						if e.Kind == graph.EdgeImports {
+							imports = append(imports, e.To)
+							assert.False(t, e.CrossRepo)
+						}
+					}
+					assert.ElementsMatch(t, []string{"external::p", "external::p::f"}, imports, "provider untrack")
+					var pendingCalls []string
+					for _, e := range g.GetOutEdges("consumer/src/app.ts::run") {
+						if e.Kind == graph.EdgeCalls {
+							pendingCalls = append(pendingCalls, e.To)
+							assert.False(t, e.CrossRepo)
+						}
+					}
+					assert.Equal(t, []string{"unresolved::" + binding}, pendingCalls, "provider untrack")
+					_, err = warm.TrackRepoCtx(context.Background(), config.RepoEntry{Path: provider, Name: "provider", Workspace: "shared"})
+					require.NoError(t, err)
+					require.NoError(t, warm.RunPreEnrichResolve(context.Background(), nil, nil))
+					check("provider retrack")
+				})
 			}
-			check("cold track")
-			mtimes := map[string]map[string]int64{}
-			for _, entry := range entries {
-				mtimes[entry.Name] = mi.FileMtimes(entry.Name)
-			}
-			require.NoError(t, mi.Close(context.Background()))
-			require.NoError(t, g.Close())
-			g, err = store_sqlite.Open(db)
-			require.NoError(t, err)
-			warm := newIndexer()
-			t.Cleanup(func() { require.NoError(t, warm.Close(context.Background())) })
-			for _, entry := range entries {
-				_, err := warm.ReconcileRepoCtx(context.Background(), entry, mtimes[entry.Name])
-				require.NoError(t, err)
-			}
-			// A clean warm restart skips the global pass and keeps persisted links.
-			check("warm restart")
-		})
+		}
 	}
 }
 
@@ -288,5 +339,57 @@ func TestTrackedNpmPackagePnpmWorkspace(t *testing.T) {
 	mi := &MultiIndexer{repos: map[string]*RepoMetadata{"lib": {RootPath: root}}}
 	lookup := mi.npmPackageLookup()
 	require.NotNil(t, lookup)
-	assert.Equal(t, map[string][]string{"lib/packages/lib": {"lib/packages/lib/index.ts", "lib/packages/lib/index"}}, lookup("p"))
+	assert.Equal(t, map[string]resolver.NpmPackageTarget{"lib/packages/lib": {WorkspaceID: "lib", Entries: []string{"lib/packages/lib/index.ts", "lib/packages/lib/index"}}}, lookup("p"))
+}
+
+func TestTrackedNpmCallShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name, source              string
+		calls, imports, reexports []string
+	}{
+		{"namespace", "import * as m from 'p'; export function run() { return m.f(); }", []string{"external-call::stdlib::p"}, []string{"provider/index.ts"}, nil},
+		{"default", "import f from 'p'; export function run() { return f(); }", []string{"unresolved::f"}, []string{"provider/index.ts"}, nil},
+		{"require member", "export function run() { return require('p').f(); }", []string{"unresolved::require", "unresolved::*.f"}, nil, nil},
+		{"require destructured", "const {f} = require('p'); export function run() { return f(); }", []string{"unresolved::require", "unresolved::f"}, nil, nil},
+		{"reexport", "export * from 'p';", nil, nil, []string{"external::p"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider, consumer := t.TempDir(), t.TempDir()
+			writePackageJSON(t, provider, `{"name":"p","exports":"./index.ts"}`)
+			writeWorkspaceFile(t, provider, "index.ts", "export default function f() { return 42; }\n")
+			writePackageJSON(t, consumer, `{"name":"app","dependencies":{"p":"^1"}}`)
+			writeWorkspaceFile(t, consumer, "app.ts", tc.source)
+			cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+			gc := &config.GlobalConfig{Repos: []config.RepoEntry{{Path: provider, Name: "provider", Workspace: "shared"}, {Path: consumer, Name: "consumer", Workspace: "shared"}}}
+			gc.SetConfigPath(cfgPath)
+			require.NoError(t, gc.Save())
+			cm, err := config.NewConfigManager(cfgPath)
+			require.NoError(t, err)
+			reg := newTestRegistry()
+			reg.Register(languages.NewTypeScriptExtractor())
+			g := graph.New()
+			mi := NewMultiIndexer(g, reg, search.NewNull(), cm, zap.NewNop())
+			t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
+			_, err = mi.IndexAll()
+			require.NoError(t, err)
+			var calls, imports, reexports []string
+			for _, e := range g.AllEdges() {
+				if e.FilePath != "consumer/app.ts" {
+					continue
+				}
+				switch e.Kind {
+				case graph.EdgeCalls:
+					calls = append(calls, e.To)
+					assert.False(t, e.CrossRepo, "no module-wide call-name guesses")
+				case graph.EdgeImports:
+					imports = append(imports, e.To)
+				case graph.EdgeReExports:
+					reexports = append(reexports, e.To)
+				}
+			}
+			assert.ElementsMatch(t, tc.calls, calls)
+			assert.ElementsMatch(t, tc.imports, imports)
+			assert.ElementsMatch(t, tc.reexports, reexports)
+		})
+	}
 }

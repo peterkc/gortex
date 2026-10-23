@@ -15,18 +15,25 @@ import (
 // resolver captures fresh roots and reads fresh manifests after edits or track/untrack.
 func (mi *MultiIndexer) npmPackageLookup() resolver.NpmPackageLookup {
 	type entry struct {
-		dir        string
-		exports    *packageExports
-		declared   map[string]string
-		arrayRoot  npmArrayRoot
-		hasExports bool
-		types      string
-		main       string
+		dir          string
+		workspaceID  string
+		exports      *packageExports
+		declared     map[string]string
+		typesExports map[string]string
+		arrayRoot    npmArrayRoot
+		hasExports   bool
+		types        string
+		main         string
 	}
 	roots := map[string]string{}
+	workspaces := map[string]string{}
 	for prefix, meta := range mi.AllMetadata() {
 		if meta != nil && meta.RootPath != "" {
 			roots[prefix] = meta.RootPath
+			workspaces[prefix] = prefix
+			if idx := mi.GetIndexer(prefix); idx != nil && idx.WorkspaceID() != "" {
+				workspaces[prefix] = idx.WorkspaceID()
+			}
 		}
 	}
 	if len(roots) == 0 {
@@ -76,20 +83,20 @@ func (mi *MultiIndexer) npmPackageLookup() resolver.NpmPackageLookup {
 					}
 				}
 				packages[manifest.Name] = append(packages[manifest.Name], entry{
-					dir: path.Join(prefix, dir), exports: exports, declared: declared, arrayRoot: npmExportsArrayRoot(manifest.Exports), hasExports: hasPackageExports(manifest.Exports), types: manifest.Types, main: manifest.Main,
+					dir: path.Join(prefix, dir), workspaceID: workspaces[prefix], exports: exports, declared: declared, typesExports: npmTypesExportTargets(manifest.Exports), arrayRoot: npmExportsArrayRoot(manifest.Exports), hasExports: hasPackageExports(manifest.Exports), types: manifest.Types, main: manifest.Main,
 				})
 			}
 		}
 	}
-	return func(specifier string) map[string][]string {
+	return func(specifier string) map[string]resolver.NpmPackageTarget {
 		once.Do(build)
 		name, sub := splitPackageSpecifier(specifier)
 		if name == "" || hasDotDotSegment(sub) || len(packages[name]) == 0 {
 			return nil
 		}
-		targets := map[string][]string{}
+		targets := map[string]resolver.NpmPackageTarget{}
 		for _, pkg := range packages[name] {
-			targets[pkg.dir] = nil
+			targets[pkg.dir] = resolver.NpmPackageTarget{WorkspaceID: pkg.workspaceID}
 			var target string
 			if pkg.exports != nil {
 				target = resolveExportsSubpath(pkg.exports.subpaths, sub)
@@ -106,10 +113,10 @@ func (mi *MultiIndexer) npmPackageLookup() resolver.NpmPackageLookup {
 				}
 				target = pkg.arrayRoot.target
 			}
-			// A declared entry with unsupported conditions keeps legacy
-			// candidates; a supported target remains authoritative.
-			paths := []string{target}
-			if !pkg.hasExports || target == "" {
+			// Root entries with unsupported conditions keep legacy candidates.
+			// A subpath must name its target; never invent a directory probe.
+			paths := []string{target, resolveExportsSubpath(pkg.typesExports, sub)}
+			if !pkg.hasExports || (target == "" && sub == "") {
 				if sub == "" {
 					paths = append(paths, pkg.types, pkg.main, "index")
 				} else {
@@ -121,7 +128,9 @@ func (mi *MultiIndexer) npmPackageLookup() resolver.NpmPackageLookup {
 				if target == "" || path.IsAbs(target) || hasDotDotSegment(target) {
 					continue
 				}
-				targets[pkg.dir] = append(targets[pkg.dir], path.Join(pkg.dir, target))
+				candidate := targets[pkg.dir]
+				candidate.Entries = append(candidate.Entries, path.Join(pkg.dir, target))
+				targets[pkg.dir] = candidate
 			}
 		}
 		return targets
@@ -216,4 +225,37 @@ func hasRecognizedNpmCondition(conditions map[string]json.RawMessage) bool {
 	_, imp := conditions["import"]
 	_, def := conditions["default"]
 	return imp || def
+}
+
+// npmTypesExportTargets keeps declaration-file alternatives separate from the
+// runtime target. The resolver tries them only after the runtime file misses.
+func npmTypesExportTargets(raw json.RawMessage) map[string]string {
+	var entries map[string]json.RawMessage
+	if json.Unmarshal(raw, &entries) != nil || entries == nil {
+		return nil
+	}
+	if !hasSubpathKeys(entries) {
+		return map[string]string{".": npmTypesCondition(raw)}
+	}
+	targets := make(map[string]string, len(entries))
+	for key, value := range entries {
+		targets[key] = npmTypesCondition(value)
+	}
+	return targets
+}
+
+func npmTypesCondition(raw json.RawMessage) string {
+	var conditions map[string]json.RawMessage
+	if json.Unmarshal(raw, &conditions) != nil {
+		return ""
+	}
+	if target := pickConditionalTarget(conditions["types"]); target != "" {
+		return target
+	}
+	for _, condition := range []string{"import", "default"} {
+		if target := npmTypesCondition(conditions[condition]); target != "" {
+			return target
+		}
+	}
+	return ""
 }
