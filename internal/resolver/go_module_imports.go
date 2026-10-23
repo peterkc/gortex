@@ -138,6 +138,7 @@ func (cr *CrossRepoResolver) goModuleImportCandidate(importPath, caller, workspa
 }
 
 func (cr *CrossRepoResolver) applyGoModuleImportReindexes(batch []graph.EdgeReindex, stats *CrossRepoStats, counted map[graph.EdgeIdentity]bool) {
+	batch = cr.filterLiveReindex(batch)
 	if !cr.applyGoModuleReindexes(batch) {
 		originals := make(map[graph.EdgeIdentity]*graph.Edge)
 		for _, row := range batch {
@@ -182,6 +183,9 @@ func (cr *CrossRepoResolver) goModuleImportFileBatches(repos []string) iter.Seq[
 			if !ok || !strings.HasSuffix(file, ".go") || !trackedGoImport(cr.goModules, path) || seen[file] {
 				continue
 			}
+			if module := cr.goModules[n.RepoPrefix]; module != "" && (path == module || strings.HasPrefix(path, module+"/")) {
+				continue
+			}
 			seen[file] = true
 			files = append(files, file)
 			if len(files) == externalCallMutationChunk {
@@ -220,34 +224,34 @@ func (cr *CrossRepoResolver) goModuleImportState() *GoModuleDepRetry {
 	return state
 }
 
-// An unchanged warm restart skips global resolution. Seed once, lazily, if
-// the first operation is a provider edit; reuse the same seed in legacy retry.
-// Callers hold the resolve mutex. Each candidate batch releases it afterward.
+// An unchanged warm restart skips global resolution. Public entry points seed
+// once before taking the pass lock; each candidate batch takes its own lock.
 func (cr *CrossRepoResolver) resolveGoModuleImportSweep(ctx context.Context, stats *CrossRepoStats) error {
+	cr.mu.Lock()
 	state := cr.goModuleImportState()
-	if state.importsSeeded {
-		return nil
-	}
-	err := func() error {
-		cr.mu.Unlock()
-		// Reacquire on panic too, before the caller's deferred Unlock runs.
-		defer cr.mu.Lock()
-		for files := range cr.goModuleImportFileBatches(nil) {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			func() {
-				cr.mu.Lock()
-				defer cr.mu.Unlock()
-				_ = cr.resolveGoModuleImports(ctx, files, stats, nil)
-			}()
-		}
+	seeded := state.importsSeeded
+	cr.mu.Unlock()
+	if seeded || len(cr.goModules) == 0 {
 		return ctx.Err()
-	}()
-	if err == nil && state.packageRevision == cr.goModuleRevision && maps.Equal(state.packageModules, cr.goModules) {
+	}
+	for files := range cr.goModuleImportFileBatches(nil) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := func() error {
+			cr.mu.Lock()
+			defer cr.mu.Unlock()
+			return cr.resolveGoModuleImports(ctx, files, stats, nil)
+		}(); err != nil {
+			return err
+		}
+	}
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	if ctx.Err() == nil && state.packageRevision == cr.goModuleRevision && maps.Equal(state.packageModules, cr.goModules) {
 		state.importsSeeded = true
 	}
-	return err
+	return ctx.Err()
 }
 
 func (cr *CrossRepoResolver) rememberGoModuleImports(nodes []*graph.Node) {
@@ -261,7 +265,7 @@ func (cr *CrossRepoResolver) rememberGoModuleImports(nodes []*graph.Node) {
 			continue
 		}
 		for repo, module := range cr.goModules {
-			if module == "" || (path != module && !strings.HasPrefix(path, module+"/")) {
+			if repo == n.RepoPrefix || module == "" || (path != module && !strings.HasPrefix(path, module+"/")) {
 				continue
 			}
 			if state.imports[repo] == nil {
@@ -277,7 +281,6 @@ func (cr *CrossRepoResolver) rememberGoModuleImports(nodes []*graph.Node) {
 func (cr *CrossRepoResolver) goModuleImportIDs(repo string) []string {
 	state := cr.goModuleImportState()
 	delete(state.packages, repo)
-	_ = cr.resolveGoModuleImportSweep(context.Background(), nil)
 	var ids []string
 	for id := range state.imports[repo] {
 		ids = append(ids, id)
@@ -286,6 +289,9 @@ func (cr *CrossRepoResolver) goModuleImportIDs(repo string) []string {
 }
 
 func (cr *CrossRepoResolver) restoreGoModuleImports(repo string, stats *CrossRepoStats) {
+	if len(cr.graph.RepoPrefixes()) < 2 {
+		return
+	}
 	ids := cr.goModuleImportIDs(repo)
 	for start := 0; start < len(ids); start += externalCallMutationChunk {
 		cr.restoreGoModuleImportBatch(repo, ids[start:min(start+externalCallMutationChunk, len(ids))], stats)
@@ -312,7 +318,7 @@ func (cr *CrossRepoResolver) restoreGoModuleImportBatch(repo string, ids []strin
 		}
 		_, path, ok := strings.Cut(n.ID, "::import::")
 		module := cr.goModules[repo]
-		if !ok || module == "" || (path != module && !strings.HasPrefix(path, module+"/")) {
+		if n.RepoPrefix == repo || !ok || module == "" || (path != module && !strings.HasPrefix(path, module+"/")) {
 			delete(state.imports[repo], id)
 			continue
 		}
