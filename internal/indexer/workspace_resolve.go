@@ -498,6 +498,9 @@ func (mi *MultiIndexer) newCrossRepoResolver() *resolver.CrossRepoResolver {
 	cr.SetNpmDependencyLookup(mi.npmDependencyLookup())
 	cr.SetNpmPackageLookup(mi.npmPackageLookup())
 	cr.SetCargoCrateLookup(mi.cargoCrateLookup())
+	if mi.IsMultiRepo() {
+		cr.SetPythonPackageLookup(mi.pythonPackageLookup)
+	}
 	cr.SetPathAliasResolver(mi.pathAliasResolver())
 	cr.SetWorkspaceMembership(mi.workspaceMembershipResolver())
 	mi.applyRemoteStitch(cr)
