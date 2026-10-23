@@ -67,6 +67,15 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
 
+	if len(definitionFiles) > 0 && len(cr.goModules) > 0 {
+		repos := make(map[string]bool)
+		for _, file := range definitionFiles {
+			if repo := graph.RepoPrefixOfID(file); cr.goModules[repo] != "" && !repos[repo] {
+				repos[repo] = true
+				cr.restoreGoModuleImports(repo, stats)
+			}
+		}
+	}
 	if len(resolutionFiles) > 0 {
 		frontier := collectIncrementalFileFrontier(cr.graph, resolutionFiles, nil)
 		admission = CrossRepoIncomingAdmission{
@@ -100,8 +109,23 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 			pending = append(pending, edge)
 		}
 		if len(pending) > 0 {
-			stats = cr.resolveScopedLocked(pending)
+			resolved := cr.resolveScopedLocked(pending)
+			stats.Resolved += resolved.Resolved
+			stats.Unresolved += resolved.Unresolved
+			stats.CrossRepoEdges += resolved.CrossRepoEdges
+			for repo, count := range resolved.ByRepo {
+				stats.ByRepo[repo] += count
+			}
 		}
+		// Preserve ordinary local-file resolution, but count each import only
+		// once if the module bridge subsequently lifts its dependency fallback.
+		counted := make(map[graph.EdgeIdentity]bool)
+		for _, e := range pending {
+			if e.Kind == graph.EdgeImports {
+				counted[graph.EdgeIdentityFor(e)] = !graph.IsUnresolvedTarget(e.To)
+			}
+		}
+		_ = cr.resolveGoModuleImports(context.Background(), resolutionFiles, stats, counted)
 	}
 	if len(definitionFiles) > 0 && len(cr.goModules) > 0 && !admission.Refused {
 		budget := &graph.IncomingSourceBudget{}
