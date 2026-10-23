@@ -131,14 +131,18 @@ func (mi *MultiIndexer) pythonPackageLookup() *resolver.PythonPackageLookup {
 			local, seen := localTops[caller]
 			if !seen {
 				local = map[string]bool{}
+				// Record both the literal top-level name and the src-layout name:
+				// a root `src` package and src/<pkg> must each stay local, and an
+				// extra local name only blocks a cross-repo link.
 				for file := range graph.FileNodeIdentitiesSeq(mi.graph, []string{caller}) {
 					if !strings.HasSuffix(file.FilePath, ".py") {
 						continue
 					}
 					rel := strings.TrimPrefix(file.FilePath, caller+"/")
-					rel = strings.TrimPrefix(rel, "src/")
-					name, _, _ := strings.Cut(rel, "/")
-					local[strings.TrimSuffix(name, ".py")] = true
+					for _, path := range []string{rel, strings.TrimPrefix(rel, "src/")} {
+						name, _, _ := strings.Cut(path, "/")
+						local[strings.TrimSuffix(name, ".py")] = true
+					}
 				}
 				localTops[caller] = local
 			}
