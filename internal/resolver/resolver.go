@@ -4962,9 +4962,21 @@ func (r *Resolver) resolveFieldRef(e *graph.Edge, fieldName string, stats *Resol
 	// Pass 3: caller is a method on type T, prefer a same-T field.
 	if callerNode := r.cachedGetNode(e.From); callerNode != nil && callerNode.Kind == graph.KindMethod {
 		callerRecv := nodeReceiverType(callerNode)
-		if callerRecv != "" {
+		packageScope := func(n *graph.Node) string {
+			if scope := scopePkgOf(n); scope != "" {
+				return scope
+			}
+			if n.Language == "go" && n.FilePath != "" {
+				return r.dirFor(n.FilePath)
+			}
+			return ""
+		}
+		callerScope := packageScope(callerNode)
+		if callerRecv != "" && (callerNode.Language != "go" || callerNode.FilePath != "") {
 			for _, c := range candidates {
-				if c.Kind == graph.KindField && nodeReceiverType(c) == callerRecv {
+				if c.Kind == graph.KindField && nodeReceiverType(c) == callerRecv &&
+					c.Language == callerNode.Language && packageScope(c) == callerScope &&
+					(c.Language != "go" || c.FilePath != "") {
 					e.To = c.ID
 					e.Confidence = 0.85
 					stats.Resolved++
