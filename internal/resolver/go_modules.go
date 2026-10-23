@@ -158,7 +158,7 @@ func goModuleCandidate(modules map[string]string, importPath string, candidates 
 	ambiguous := false
 	priority := -1
 	for _, c := range candidates {
-		if (c.Language != "" && c.Language != "go") || (c.Kind != graph.KindFunction && c.Kind != graph.KindType && c.Kind != graph.KindInterface) {
+		if (c.Language != "" && c.Language != "go") || (c.Kind != graph.KindFunction && c.Kind != graph.KindType && c.Kind != graph.KindInterface && c.Kind != graph.KindFile) {
 			continue // a package selector does not name a receiver method
 		}
 		module := modules[c.RepoPrefix]
