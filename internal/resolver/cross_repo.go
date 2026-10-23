@@ -390,7 +390,7 @@ func (cr *CrossRepoResolver) ResolveAllContext(ctx context.Context) (*CrossRepoS
 	// Every exit applies the moves the pass deferred (a no-op after the
 	// normal flush below); it runs before the deferred unlock above.
 	defer cr.placeholderSrcIdx.applyDeferred(cr.graph)
-	if err := cr.resolveTrackedPythonImports(ctx, graph.EdgesLightSeq(cr.graph, graph.EdgeImports), stats); err != nil {
+	if err := cr.resolveTrackedPythonImports(ctx, cr.trackedPythonImportEdges(), stats); err != nil {
 		return stats, err
 	}
 	// Share the master resolver's stable high-water/keyset stream. The cold
