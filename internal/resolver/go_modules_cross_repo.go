@@ -52,6 +52,12 @@ type GoModuleDepRetry struct {
 	revision     uint64
 	complete     bool
 	pending      map[graph.EdgeIdentity]*graph.Edge
+	// These compact import indexes are protected by the store resolve mutex.
+	packageModules  map[string]string
+	packageRevision uint64
+	packages        map[string]map[string]graph.FileNodeIdentity
+	imports         map[string]map[string]struct{}
+	importsSeeded   bool
 }
 
 func (cr *CrossRepoResolver) SetGoModuleDepRetry(state *GoModuleDepRetry, revision uint64) {
@@ -107,14 +113,20 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 	}
 	cr.resolveGoModuleEdgesLocked(deferred, stats)
 	state.mu.Lock()
-	defer state.mu.Unlock()
 	if len(cr.goModules) == 0 {
 		state.modules, state.revision, state.complete = maps.Clone(cr.goModules), cr.goModuleRevision, true
 		state.replacements = maps.Clone(cr.goModuleReplacements)
+		state.mu.Unlock()
 		return nil
 	}
-	if state.complete && state.revision == cr.goModuleRevision && maps.Equal(state.modules, cr.goModules) && !changedReplacements {
+	complete := state.complete && state.revision == cr.goModuleRevision && maps.Equal(state.modules, cr.goModules) && !changedReplacements
+	state.mu.Unlock()
+	if complete {
 		return nil
+	}
+	err := cr.resolveGoModuleImportSweep(ctx, stats)
+	if err != nil {
+		return err
 	}
 	var batch []graph.EdgeReindex
 	originals := make(map[graph.EdgeIdentity]*graph.Edge)
@@ -126,10 +138,7 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 		if len(batch) > 0 {
 			if !cr.applyGoModuleReindexes(batch) {
 				cr.logger.Warn("Go module terminal batch dropped; queued for a later module pass")
-				if state.pending == nil {
-					state.pending = make(map[graph.EdgeIdentity]*graph.Edge)
-				}
-				maps.Copy(state.pending, originals)
+				cr.queueGoModuleEdges(originals)
 			}
 			batch = nil
 			clear(originals)
@@ -212,6 +221,8 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
 	state.modules, state.revision, state.complete = maps.Clone(cr.goModules), cr.goModuleRevision, true
 	state.replacements = maps.Clone(cr.goModuleReplacements)
 	return nil
@@ -395,6 +406,17 @@ func goModuleEdgeSpec(e *graph.Edge) string {
 }
 
 func (cr *CrossRepoResolver) resolveGoModuleEdgesLocked(edges []*graph.Edge, stats *CrossRepoStats) {
+	var importFiles []string
+	seenImports := make(map[string]bool)
+	for _, e := range edges {
+		if e != nil && e.Kind == graph.EdgeImports && !seenImports[e.FilePath] {
+			seenImports[e.FilePath] = true
+			importFiles = append(importFiles, e.FilePath)
+		}
+	}
+	if len(importFiles) > 0 {
+		_ = cr.resolveGoModuleImports(context.Background(), importFiles, stats, nil)
+	}
 	var batch []graph.EdgeReindex
 	names := make(map[[2]string][]*graph.Node)
 	sources := make(map[string]*graph.Node)
@@ -459,15 +481,7 @@ func (cr *CrossRepoResolver) resolveGoModuleEdgesLocked(edges []*graph.Edge, sta
 	batch = cr.filterLiveReindex(batch)
 	if !cr.applyGoModuleReindexes(batch) {
 		cr.logger.Warn("Go module rebind batch dropped; queued for a later module pass")
-		if cr.goModuleRetry == nil {
-			cr.goModuleRetry = &GoModuleDepRetry{}
-		}
-		cr.goModuleRetry.mu.Lock()
-		if cr.goModuleRetry.pending == nil {
-			cr.goModuleRetry.pending = make(map[graph.EdgeIdentity]*graph.Edge)
-		}
-		maps.Copy(cr.goModuleRetry.pending, originals)
-		cr.goModuleRetry.mu.Unlock()
+		cr.queueGoModuleEdges(originals)
 		return
 	}
 	if stats == nil {
@@ -493,10 +507,35 @@ func (cr *CrossRepoResolver) RetryGoModuleDeps(ctx context.Context) error {
 	return cr.retryGoModuleDeps(ctx, &CrossRepoStats{ByRepo: make(map[string]int)})
 }
 
-// ResolveGoModuleIncomingForRepo probes exact targets for the provider's definitions.
-// Reindexing has no changed-symbol receipt, so stream only its definition IDs and
-// hydrate at most one batch; never load the repository's nodes or edges as a set.
+// ResolveGoModuleIncomingForRepo probes the provider's definitions and retained
+// consumer import statements. Stream identities and hydrate at most one batch;
+// never load the repository's nodes or edges as a set.
 func (cr *CrossRepoResolver) ResolveGoModuleIncomingForRepo(repo string) error {
+	if len(cr.goModules) == 0 {
+		return nil
+	}
+	if cr.goModules[repo] != "" {
+		var importIDs []string
+		func() {
+			cr.mu.Lock()
+			defer cr.mu.Unlock()
+			importIDs = cr.goModuleImportIDs(repo)
+		}()
+		for start := 0; start < len(importIDs); start += externalCallMutationChunk {
+			func() {
+				cr.mu.Lock()
+				defer cr.mu.Unlock()
+				cr.restoreGoModuleImportBatch(repo, importIDs[start:min(start+externalCallMutationChunk, len(importIDs))], nil)
+			}()
+		}
+	}
+	for files := range cr.goModuleImportFileBatches([]string{repo}) {
+		func() {
+			cr.mu.Lock()
+			defer cr.mu.Unlock()
+			_ = cr.resolveGoModuleImports(context.Background(), files, nil, nil)
+		}()
+	}
 	if cr.goModules[repo] == "" {
 		return nil
 	}
@@ -866,4 +905,17 @@ func (state *GoModuleDepRetry) Invalidate() {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	state.complete = false
+}
+
+func (cr *CrossRepoResolver) queueGoModuleEdges(originals map[graph.EdgeIdentity]*graph.Edge) {
+	if cr.goModuleRetry == nil {
+		cr.goModuleRetry = &GoModuleDepRetry{}
+	}
+	state := cr.goModuleRetry
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.pending == nil {
+		state.pending = make(map[graph.EdgeIdentity]*graph.Edge)
+	}
+	maps.Copy(state.pending, originals)
 }
