@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -101,14 +102,15 @@ type MultiIndexer struct {
 	newIndexer func(graph.Store, *parser.Registry, config.IndexConfig, *zap.Logger) *Indexer
 	mu         sync.RWMutex
 
-	goModuleMu         sync.Mutex
-	goModuleChecked    time.Time
-	goModuleRevision   uint64
-	goModuleGeneration uint64
-	goModuleRepoCount  int
-	goModuleCache      map[string]string
-	goModuleFiles      map[string]goModuleFileStamp
-	goModuleRetry      resolver.GoModuleDepRetry
+	goModuleMu           sync.Mutex
+	goModuleChecked      time.Time
+	goModuleRevision     uint64
+	goModuleGeneration   uint64
+	goModuleRepoCount    int
+	goModuleCache        map[string]string
+	goModuleReplacements map[string][]resolver.GoModuleReplacement
+	goModuleFiles        map[string]goModuleFileStamp
+	goModuleRetry        resolver.GoModuleDepRetry
 
 	// pendingRepositoryUntracks is guarded by mu. Entries are installed before
 	// a live repo is hidden and removed only after payload, vector, config, and
@@ -2103,6 +2105,7 @@ func (idx *Indexer) installGoResolverContext() {
 		return
 	}
 	idx.resolver.SetGoModuleLookup(mi.trackedGoModules)
+	idx.resolver.SetGoModuleReplacementLookup(mi.trackedGoModuleReplacements)
 	// Construction can hold mi.mu. Initialize the cached lookup lazily at
 	// first resolution, after construction and caller config loading finish.
 	var once sync.Once
@@ -2166,8 +2169,11 @@ func (mi *MultiIndexer) goModuleSnapshot() (map[string]string, uint64) {
 		return mi.goModuleCache, mi.goModuleGeneration
 	}
 	modules := readTrackedGoModules(roots)
+	replacements := mi.readGoModuleReplacements(roots)
+	sameReplacements := maps.EqualFunc(replacements, mi.goModuleReplacements, slices.Equal[[]resolver.GoModuleReplacement])
+	mi.goModuleReplacements = replacements
 	mi.goModuleFiles = files
-	if mi.goModuleCache != nil && mi.goModuleRevision == revision && mi.goModuleRepoCount == count && maps.Equal(modules, mi.goModuleCache) {
+	if mi.goModuleCache != nil && mi.goModuleRevision == revision && mi.goModuleRepoCount == count && maps.Equal(modules, mi.goModuleCache) && sameReplacements {
 		return mi.goModuleCache, mi.goModuleGeneration
 	}
 	mi.goModuleCache, mi.goModuleRevision, mi.goModuleRepoCount = modules, revision, count
@@ -2624,6 +2630,7 @@ func (mi *MultiIndexer) indexRepoRaw(repoPrefix string) (*IndexResult, error) {
 	// Replace only the base handle's generation before re-indexing. A lone repo
 	// is stored prefixed from its first index, but immutable commit/dirty/ref
 	// payload generations may carry the same prefix and must remain intact.
+	restubGoModuleRepoIncoming(mi.graph, repoPrefix)
 
 	mi.configMgr.LoadWorkspaceConfig(repoPrefix, meta.RootPath)
 	cfg := mi.configMgr.GetRepoConfig(repoPrefix)

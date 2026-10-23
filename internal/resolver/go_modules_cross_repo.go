@@ -3,6 +3,7 @@ package resolver
 import (
 	"context"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 
@@ -11,6 +12,7 @@ import (
 
 func (cr *CrossRepoResolver) SetGoModules(modules map[string]string) {
 	cr.goModules = maps.Clone(modules)
+	cr.goModulePaths = indexGoModulePaths(modules)
 }
 
 func (cr *CrossRepoResolver) resolveGoExtern(e *graph.Edge, spec string, stats *CrossRepoStats) {
@@ -19,12 +21,13 @@ func (cr *CrossRepoResolver) resolveGoExtern(e *graph.Edge, spec string, stats *
 		stats.Unresolved++
 		return
 	}
-	match := goModuleCandidate(cr.goModules, spec[:sep], cr.cachedFindNodesByName(spec[sep+2:]), cr.callerRepoPrefix(e), cr.callerWorkspaceID(e), cr.crossWorkspaceLookup)
+	match := cr.goModuleCandidate(spec[:sep], cr.cachedFindNodesByName(spec[sep+2:]), cr.callerRepoPrefix(e), cr.callerWorkspaceID(e))
 	if match == nil {
 		if isStdlibLike(spec[:sep]) {
 			e.To = graph.StubID(cr.callerRepoPrefix(e), graph.StubKindStdlib, spec[:sep], spec[sep+2:])
 		} else {
 			e.To = "dep::" + spec
+			cr.noteDemotedGoModuleCall(e)
 		}
 		stats.Unresolved++
 		return
@@ -40,11 +43,12 @@ func (cr *CrossRepoResolver) resolveGoExtern(e *graph.Edge, spec string, stats *
 // GoModuleDepRetry remembers the last completed legacy-terminal sweep for a
 // store's module/config revision. MultiIndexer shares it across pass objects.
 type GoModuleDepRetry struct {
-	mu       sync.Mutex
-	modules  map[string]string
-	revision uint64
-	complete bool
-	pending  map[graph.EdgeIdentity]*graph.Edge
+	mu           sync.Mutex
+	modules      map[string]string
+	replacements map[string][]GoModuleReplacement
+	revision     uint64
+	complete     bool
+	pending      map[graph.EdgeIdentity]*graph.Edge
 }
 
 func (cr *CrossRepoResolver) SetGoModuleDepRetry(state *GoModuleDepRetry, revision uint64) {
@@ -57,13 +61,26 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if len(cr.goModules) == 0 {
+	if len(cr.goModules) == 0 && cr.goModuleRetry == nil {
 		return nil
 	}
 	if cr.goModuleRetry == nil {
 		cr.goModuleRetry = &GoModuleDepRetry{}
 	}
 	state := cr.goModuleRetry
+	state.mu.Lock()
+	previous := maps.Clone(state.modules)
+	seedBindings := !state.complete
+	changedReplacements := !maps.EqualFunc(state.replacements, cr.goModuleReplacements, slices.Equal[[]GoModuleReplacement])
+	state.mu.Unlock()
+	if seedBindings || changedReplacements || !maps.Equal(previous, cr.goModules) {
+		if seedBindings || changedReplacements {
+			previous = nil
+		}
+		if err := cr.recheckGoModuleBindings(ctx, previous, stats); err != nil {
+			return err
+		}
+	}
 	state.mu.Lock()
 	pending := state.pending
 	state.pending = nil
@@ -79,7 +96,11 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 	cr.resolveGoModuleEdgesLocked(deferred, stats)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if state.complete && state.revision == cr.goModuleRevision && maps.Equal(state.modules, cr.goModules) {
+	if state.complete && len(state.modules) == 0 && len(cr.goModules) == 0 && !changedReplacements {
+		state.revision = cr.goModuleRevision
+		return nil
+	}
+	if state.complete && state.revision == cr.goModuleRevision && maps.Equal(state.modules, cr.goModules) && !changedReplacements {
 		return nil
 	}
 	var batch []graph.EdgeReindex
@@ -118,7 +139,7 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 		importPath := spec[:sep]
 		tracked, known := imports[importPath]
 		if !known {
-			tracked = trackedGoImport(cr.goModules, importPath)
+			tracked = trackedGoImport(cr.goModulePaths, importPath)
 			imports[importPath] = tracked
 		}
 		if len(imports) >= externalCallMutationChunk {
@@ -141,7 +162,7 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 		if source != nil {
 			caller = source.RepoPrefix
 		}
-		match := goModuleCandidate(cr.goModules, spec[:sep], candidates, caller, candidateWorkspaceID(source), cr.crossWorkspaceLookup)
+		match := cr.goModuleCandidate(spec[:sep], candidates, caller, candidateWorkspaceID(source))
 		if match != nil {
 			original := *e
 			original.Meta = maps.Clone(e.Meta)
@@ -167,6 +188,7 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 		return err
 	}
 	state.modules, state.revision, state.complete = maps.Clone(cr.goModules), cr.goModuleRevision, true
+	state.replacements = maps.Clone(cr.goModuleReplacements)
 	return nil
 }
 
@@ -248,9 +270,11 @@ func (cr *CrossRepoResolver) applyGoModuleReindexes(batch []graph.EdgeReindex) b
 	} else {
 		cr.graph.ReindexEdges(batch)
 	}
+	cr.removeRetargetedGoModuleParallels(batch)
 	DetectCrossRepoEdgesForReindexes(cr.graph, batch)
 	for _, row := range batch {
 		cr.noteRetargetedCall(row.Edge)
+		cr.noteDemotedGoModuleCall(row.Edge)
 	}
 	return true
 }
@@ -268,6 +292,9 @@ func (cr *CrossRepoResolver) ResolveDeferredGoModuleEdges(edges []*graph.Edge) e
 }
 
 func goModuleEdgeSpec(e *graph.Edge) string {
+	if spec, ok := e.Meta["go_import"].(string); ok && spec != "" {
+		return spec
+	}
 	target := e.To
 	if strings.HasPrefix(target, externalCallPrefix) {
 		target, _ = e.Meta["go_extern_target"].(string)
@@ -314,16 +341,17 @@ func (cr *CrossRepoResolver) resolveGoModuleEdgesLocked(edges []*graph.Edge, sta
 			candidates = cr.cachedFindNodesByName(key[0])
 			names[key] = candidates
 		}
-		match := goModuleCandidate(cr.goModules, spec[:sep], candidates, caller, candidateWorkspaceID(source), cr.crossWorkspaceLookup)
+		match := cr.goModuleCandidate(spec[:sep], candidates, caller, candidateWorkspaceID(source))
 		copy := *e
 		copy.Meta = maps.Clone(e.Meta)
 		if match != nil {
 			targetRepos[match.ID] = match.RepoPrefix
 			bindGoModuleEdge(&copy, match, caller)
 		} else {
-			if !graph.IsUnresolvedTarget(e.To) {
+			if !graph.IsUnresolvedTarget(e.To) && e.Meta["go_import"] == nil {
 				continue
 			}
+			copy.CrossRepo, copy.Confidence, copy.ConfidenceLabel, copy.Origin, copy.Tier = false, 0, "", "", ""
 			if isStdlibLike(spec[:sep]) {
 				copy.To = graph.StubID(caller, graph.StubKindStdlib, spec[:sep], spec[sep+2:])
 			} else {
@@ -414,4 +442,146 @@ func (cr *CrossRepoResolver) ResolveGoModuleIncomingForRepo(repo string) error {
 		return flush()
 	}
 	return nil
+}
+
+// Re-check only marked incoming calls into providers affected by identity edits.
+// The compact definition stream avoids loading a whole repo's nodes or edges.
+func (cr *CrossRepoResolver) recheckGoModuleBindings(ctx context.Context, previous map[string]string, stats *CrossRepoStats) error {
+	changed := make(map[string]bool)
+	for repo, module := range previous {
+		if cr.goModules[repo] != module {
+			changed[module] = true
+			changed[cr.goModules[repo]] = true
+		}
+	}
+	for repo, module := range cr.goModules {
+		if previous[repo] != module {
+			changed[module] = true
+			changed[previous[repo]] = true
+		}
+	}
+	var repos []string
+	if previous == nil {
+		repos = cr.graph.RepoPrefixes()
+	}
+	for repo, module := range previous {
+		for path := range changed {
+			if path != "" && (module == path || strings.HasPrefix(path, module+"/") || strings.HasPrefix(module, path+"/")) {
+				repos = append(repos, repo)
+				break
+			}
+		}
+	}
+	if len(repos) == 0 {
+		return ctx.Err()
+	}
+	var ids []string
+	flush := func() {
+		var edges []*graph.Edge
+		for _, incoming := range cr.graph.GetInEdgesByNodeIDs(ids) {
+			for _, e := range incoming {
+				if !e.CrossRepo || e.Meta["go_import"] == nil || resolutionExempt(e) {
+					continue
+				}
+				edges = append(edges, e)
+				if len(edges) == externalCallMutationChunk {
+					cr.resolveGoModuleEdgesLocked(edges, stats)
+					edges = edges[:0]
+				}
+			}
+		}
+		cr.resolveGoModuleEdgesLocked(edges, stats)
+		ids = ids[:0]
+	}
+	for n := range graph.RepoNodeIdentitiesSeq(cr.graph, repos, graph.KindFunction, graph.KindType, graph.KindInterface) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		ids = append(ids, n.ID)
+		if len(ids) == externalCallMutationChunk {
+			flush()
+		}
+	}
+	if len(ids) > 0 {
+		flush()
+	}
+	return ctx.Err()
+}
+
+// SetGoModuleReplacements supplies caller-local replacement restrictions.
+func (cr *CrossRepoResolver) SetGoModuleReplacements(replacements map[string][]GoModuleReplacement) {
+	cr.goModuleReplacements = replacements
+}
+
+func (cr *CrossRepoResolver) goModuleCandidate(importPath string, candidates []*graph.Node, caller, workspace string) *graph.Node {
+	replacement, replaced := goModuleReplacementFor(cr.goModuleReplacements, caller, importPath)
+	if match := goModulePreciseLocal(cr.goModules, importPath, candidates, caller, replacement.Directory); match != nil {
+		return match
+	}
+	if replaced {
+		return nil
+	}
+	return goModuleCandidate(cr.goModules, importPath, candidates, caller, workspace, cr.crossWorkspaceLookup)
+}
+
+// A module-map demotion does not evict either file, so its old parallel survives
+// ordinary eviction cleanup. Edge identity includes the caller file and line.
+func (cr *CrossRepoResolver) removeRetargetedGoModuleParallels(batch []graph.EdgeReindex) {
+	var sites []graph.EdgeSite
+	for _, row := range batch {
+		if row.Edge.Meta["go_import"] == nil || row.OldTo == row.Edge.To {
+			continue
+		}
+		if kind, ok := graph.CrossRepoKindFor(row.Edge.Kind); ok {
+			sites = append(sites, graph.EdgeSite{From: row.Edge.From, Line: row.Edge.Line, Kind: kind})
+		}
+	}
+	if len(sites) == 0 {
+		return
+	}
+	candidates := cr.graph.GetEdgeCandidates(nil, sites)
+	var obsolete []*graph.Edge
+	for _, row := range batch {
+		e := row.Edge
+		kind, ok := graph.CrossRepoKindFor(e.Kind)
+		if !ok || e.Meta["go_import"] == nil || row.OldTo == e.To {
+			continue
+		}
+		for _, parallel := range candidates.Site(e.From, e.Line, kind) {
+			if parallel.To == row.OldTo && parallel.FilePath == e.FilePath {
+				obsolete = append(obsolete, parallel)
+			}
+		}
+	}
+	graph.RemoveEdgesExact(cr.graph, obsolete)
+}
+
+// resolveGoExtern also runs in parallel pass workers; cr.mu alone does not
+// serialize their demotion records.
+func (cr *CrossRepoResolver) noteDemotedGoModuleCall(e *graph.Edge) {
+	if !strings.HasPrefix(e.To, "dep::") || e.Meta["go_import"] == nil || e.FilePath == "" {
+		return
+	}
+	cr.goModuleDemotedMu.Lock()
+	defer cr.goModuleDemotedMu.Unlock()
+	if cr.goModuleDemotedFiles == nil {
+		cr.goModuleDemotedFiles = make(map[string]struct{})
+	}
+	cr.goModuleDemotedFiles[e.FilePath] = struct{}{}
+}
+
+// TakeDemotedGoModuleCallFiles drains caller files after the resolve lock is
+// released, so the indexer can synthesize external calls using caller config.
+func (cr *CrossRepoResolver) TakeDemotedGoModuleCallFiles() []string {
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	cr.goModuleDemotedMu.Lock()
+	defer cr.goModuleDemotedMu.Unlock()
+	files := make([]string, 0, len(cr.goModuleDemotedFiles))
+	for file := range cr.goModuleDemotedFiles {
+		files = append(files, file)
+	}
+	cr.goModuleDemotedFiles = nil
+	slices.Sort(files)
+	return files
 }

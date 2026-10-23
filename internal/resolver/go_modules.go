@@ -13,6 +13,7 @@ func (r *Resolver) SetGoModules(modules map[string]string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.goModules = maps.Clone(modules)
+	r.goModulePaths = indexGoModulePaths(modules)
 }
 
 // SetCrossWorkspaceDepLookup installs the same boundary policy used by the
@@ -34,8 +35,15 @@ func (r *Resolver) SetGoModuleLookup(lookup func() map[string]string) {
 // refreshGoModules runs under the resolver lock before pass workers start.
 // The lookup publishes an immutable map; edges read it without shared locks.
 func (r *Resolver) refreshGoModules() {
+	if r.goModuleReplacementLookup != nil {
+		r.goModuleReplacements = r.goModuleReplacementLookup()
+	}
 	if r.goModuleLookup != nil {
-		r.goModules = r.goModuleLookup()
+		modules := r.goModuleLookup()
+		if !maps.Equal(modules, r.goModules) {
+			r.goModulePaths = indexGoModulePaths(modules)
+		}
+		r.goModules = modules
 	}
 }
 
@@ -68,16 +76,14 @@ func (r *Resolver) pendingGoModuleExtern(e *graph.Edge) bool {
 	importPath := spec[:sep]
 	caller := r.callerRepoPrefix(e)
 	ownModule := r.goModules[caller]
-	for repo, module := range r.goModules {
-		if repo != caller && len(module) > len(ownModule) &&
-			(importPath == module || strings.HasPrefix(importPath, module+"/")) {
-			return true
-		}
+	longest := r.goModulePaths.longest(importPath)
+	if len(longest) > len(ownModule) {
+		return true
 	}
 	if ownModule != "" && (importPath == ownModule || strings.HasPrefix(importPath, ownModule+"/")) {
 		return false // the cold shadow already contains the caller's whole module
 	}
-	return trackedGoImport(r.goModules, importPath)
+	return longest != ""
 }
 
 func (r *Resolver) externWorkspaceEligible(e *graph.Edge, candidate *graph.Node, importPath string) bool {
@@ -91,20 +97,21 @@ func (r *Resolver) resolveGoModuleExtern(e *graph.Edge, importPath, callerRepo s
 	if !strings.HasSuffix(e.FilePath, ".go") {
 		return false
 	}
-	var match *graph.Node
-	if r.pendingGoModuleExtern(e) {
-		match = goModulePreciseLocal(r.goModules, importPath, candidates, callerRepo)
-		if match == nil {
-			var remote []*graph.Node
-			for _, candidate := range candidates {
-				if candidate.RepoPrefix != callerRepo {
-					remote = append(remote, candidate)
-				}
+	replacement, replaced := goModuleReplacementFor(r.goModuleReplacements, callerRepo, importPath)
+	match := goModulePreciseLocal(r.goModules, importPath, candidates, callerRepo, replacement.Directory)
+	if match == nil && replaced {
+		return false
+	}
+	if match == nil && r.pendingGoModuleExtern(e) {
+		var remote []*graph.Node
+		for _, candidate := range candidates {
+			if candidate.RepoPrefix != callerRepo {
+				remote = append(remote, candidate)
 			}
-			match = goModuleCandidate(r.goModules, importPath, remote,
-				callerRepo, candidateWorkspaceID(r.cachedGetNode(e.From)), r.crossWorkspaceLookup)
 		}
-	} else {
+		match = goModuleCandidate(r.goModules, importPath, remote,
+			callerRepo, candidateWorkspaceID(r.cachedGetNode(e.From)), r.crossWorkspaceLookup)
+	} else if match == nil {
 		match = goModuleCandidate(r.goModules, importPath, candidates,
 			callerRepo, candidateWorkspaceID(r.cachedGetNode(e.From)), r.crossWorkspaceLookup)
 	}
@@ -116,7 +123,7 @@ func (r *Resolver) resolveGoModuleExtern(e *graph.Edge, importPath, callerRepo s
 	return true
 }
 
-func goModulePreciseLocal(modules map[string]string, importPath string, candidates []*graph.Node, callerRepo string) *graph.Node {
+func goModulePreciseLocal(modules map[string]string, importPath string, candidates []*graph.Node, callerRepo, replacementDir string) *graph.Node {
 	ownModule := modules[callerRepo]
 	ownDir := ""
 	if ownModule != "" && (importPath == ownModule || strings.HasPrefix(importPath, ownModule+"/")) {
@@ -129,6 +136,12 @@ func goModulePreciseLocal(modules map[string]string, importPath string, candidat
 			continue
 		}
 		dir := filePathDir(c.FilePath)
+		if replacementDir != "" {
+			if dir == replacementDir {
+				return c
+			}
+			continue
+		}
 		if dir == ownDir || dir == importPath || strings.HasSuffix(dir, "/"+importPath) {
 			return c
 		}
@@ -137,7 +150,7 @@ func goModulePreciseLocal(modules map[string]string, importPath string, candidat
 }
 
 func goModuleCandidate(modules map[string]string, importPath string, candidates []*graph.Node, callerRepo, sourceWS string, lookup CrossWorkspaceDepLookup) *graph.Node {
-	if match := goModulePreciseLocal(modules, importPath, candidates, callerRepo); match != nil {
+	if match := goModulePreciseLocal(modules, importPath, candidates, callerRepo, ""); match != nil {
 		return match
 	}
 	var match *graph.Node
@@ -188,6 +201,14 @@ func goModuleCandidate(modules map[string]string, importPath string, candidates 
 }
 
 func bindGoModuleEdge(e *graph.Edge, match *graph.Node, callerRepo string) {
+	// Retain the symbol-bearing import, not just the selected checkout.
+	if spec := goModuleEdgeSpec(e); spec != "" {
+		e.Meta = maps.Clone(e.Meta)
+		if e.Meta == nil {
+			e.Meta = make(map[string]any)
+		}
+		e.Meta["go_import"] = spec
+	}
 	e.To = match.ID
 	e.CrossRepo = callerRepo != "" && match.RepoPrefix != "" && match.RepoPrefix != callerRepo
 	if e.CrossRepo {
@@ -202,13 +223,35 @@ func bindGoModuleEdge(e *graph.Edge, match *graph.Node, callerRepo string) {
 	clearEdgeTerminal(e)
 }
 
-func trackedGoImport(modules map[string]string, importPath string) bool {
+// Index module paths once per snapshot; import lookups depend only on path depth.
+type goModulePathIndex map[string]struct{}
+
+func indexGoModulePaths(modules map[string]string) goModulePathIndex {
+	paths := make(goModulePathIndex, len(modules))
 	for _, module := range modules {
-		if importPath == module || strings.HasPrefix(importPath, module+"/") {
-			return true
+		if module != "" {
+			paths[module] = struct{}{}
 		}
 	}
-	return false
+	return paths
+}
+
+func (paths goModulePathIndex) longest(importPath string) string {
+	for path := importPath; path != ""; {
+		if _, ok := paths[path]; ok {
+			return path
+		}
+		sep := strings.LastIndexByte(path, '/')
+		if sep < 0 {
+			break
+		}
+		path = path[:sep]
+	}
+	return ""
+}
+
+func trackedGoImport(paths goModulePathIndex, importPath string) bool {
+	return paths.longest(importPath) != ""
 }
 
 // TakeDeferredGoModuleEdges drains only imports the cold shadow left pending.
@@ -235,4 +278,34 @@ func (r *Resolver) noteDeferredGoModuleEdge(e *graph.Edge) {
 	copy := *e
 	copy.Meta = maps.Clone(e.Meta)
 	r.deferredGoEdges[graph.EdgeIdentityFor(e)] = &copy
+}
+
+// SetGoModuleReplacementLookup supplies immutable caller-local replacement restrictions.
+func (r *Resolver) SetGoModuleReplacementLookup(lookup func() map[string][]GoModuleReplacement) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.goModuleReplacementLookup = lookup
+}
+
+// GoModuleReplacement restricts a caller's import to an exact in-checkout
+// graph directory. An empty Directory refuses remote module-path binding.
+type GoModuleReplacement struct {
+	Module    string
+	Directory string
+}
+
+func goModuleReplacementFor(replacements map[string][]GoModuleReplacement, caller, importPath string) (GoModuleReplacement, bool) {
+	var selected GoModuleReplacement
+	found := false
+	for _, replacement := range replacements[caller] {
+		module := replacement.Module
+		if (module == "" || importPath == module || strings.HasPrefix(importPath, module+"/")) &&
+			(!found || len(module) > len(selected.Module)) {
+			selected, found = replacement, true
+		}
+	}
+	if selected.Directory != "" {
+		selected.Directory += strings.TrimPrefix(importPath, selected.Module)
+	}
+	return selected, found
 }

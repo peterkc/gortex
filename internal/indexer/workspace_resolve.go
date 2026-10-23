@@ -498,6 +498,7 @@ func (mi *MultiIndexer) newCrossRepoResolver() *resolver.CrossRepoResolver {
 	cr.SetCrossWorkspaceDepLookup(mi.crossWorkspacePassLookup())
 	modules, revision := mi.goModuleSnapshot()
 	cr.SetGoModules(modules)
+	cr.SetGoModuleReplacements(mi.trackedGoModuleReplacements())
 	cr.SetGoModuleDepRetry(&mi.goModuleRetry, revision)
 	cr.SetNpmAliasResolver(mi.npmAliasResolver())
 	cr.SetNpmDependencyLookup(mi.npmDependencyLookup())
@@ -525,9 +526,11 @@ func (mi *MultiIndexer) runCrossRepoResolveContext(ctx context.Context, reconcil
 	}
 	mi.mu.RUnlock()
 	for _, idx := range indexers {
-		if err := cr.ResolveDeferredGoModuleEdges(idx.resolver.TakeDeferredGoModuleEdges()); err != nil {
+		edges := idx.resolver.TakeDeferredGoModuleEdges()
+		if err := cr.ResolveDeferredGoModuleEdges(edges); err != nil {
 			return err
 		}
+		mi.synthesizeDeferredGoModuleCalls(idx, edges)
 	}
 	if _, err := cr.ResolveAllContext(ctx); err != nil {
 		return err
@@ -537,6 +540,7 @@ func (mi *MultiIndexer) runCrossRepoResolveContext(ctx context.Context, reconcil
 	}
 	// Bounded by the calls this pass actually bound; the deferred
 	// fallback lane runs with no global test-edges pass behind it.
+	mi.synthesizeDemotedGoModuleCalls(cr.TakeDemotedGoModuleCallFiles())
 	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 	return nil
 }
@@ -562,6 +566,7 @@ func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiers(resolutionFiles, ed
 		return
 	}
 	cr.ResolveMutationFrontiers(resolutionFiles, edgeSourceFiles, definitionFiles)
+	mi.synthesizeDemotedGoModuleCalls(cr.TakeDemotedGoModuleCallFiles())
 	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 }
 
@@ -712,18 +717,21 @@ func (mi *MultiIndexer) resolveDeferredGoModules(idx *Indexer) error {
 	if err := cr.ResolveDeferredGoModuleEdges(edges); err != nil {
 		return err
 	}
+	mi.synthesizeDeferredGoModuleCalls(idx, edges)
+	mi.synthesizeDemotedGoModuleCalls(cr.TakeDemotedGoModuleCallFiles())
 	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 	return nil
 }
 
 func (mi *MultiIndexer) resolveIncomingGoModules(repo string) error {
-	if mi.crossWorkspaceRepoCount() < 2 || mi.trackedGoModules()[repo] == "" {
+	if mi.graph == nil || len(mi.graph.RepoPrefixes()) < 2 || mi.trackedGoModules()[repo] == "" {
 		return nil
 	}
 	cr := mi.newCrossRepoResolver()
 	if err := cr.ResolveGoModuleIncomingForRepo(repo); err != nil {
 		return err
 	}
+	mi.synthesizeDemotedGoModuleCalls(cr.TakeDemotedGoModuleCallFiles())
 	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 	return nil
 }
@@ -737,13 +745,42 @@ func (mi *MultiIndexer) postPublishGoModules(ctx context.Context, idx *Indexer, 
 	if idx.deferResolve.Load() {
 		return nil // the batch's shared pass owns resolution
 	}
+	if err := mi.resolveIncomingGoModules(idx.repoPrefix); err != nil {
+		return err
+	}
 	if !newProvider {
-		return mi.resolveIncomingGoModules(idx.repoPrefix)
+		return nil
 	}
 	cr := mi.newCrossRepoResolver()
 	if err := cr.RetryGoModuleDeps(ctx); err != nil {
 		return err
 	}
+	mi.synthesizeDemotedGoModuleCalls(cr.TakeDemotedGoModuleCallFiles())
 	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 	return nil
+}
+
+func (mi *MultiIndexer) synthesizeDeferredGoModuleCalls(idx *Indexer, edges []*graph.Edge) {
+	if !idx.externalCallSynthesisEnabled() || len(edges) == 0 {
+		return
+	}
+	seen := make(map[string]bool)
+	var files []string
+	for _, e := range edges {
+		if e != nil && e.FilePath != "" && !seen[e.FilePath] {
+			seen[e.FilePath] = true
+			files = append(files, e.FilePath)
+		}
+	}
+	resolver.SynthesizeExternalCallsForFiles(mi.graph, true, files)
+}
+
+func (mi *MultiIndexer) synthesizeDemotedGoModuleCalls(files []string) {
+	var enabled []string
+	for _, file := range files {
+		if idx := mi.GetIndexer(graph.RepoPrefixOfID(file)); idx != nil && idx.externalCallSynthesisEnabled() {
+			enabled = append(enabled, file)
+		}
+	}
+	resolver.SynthesizeExternalCallsForFiles(mi.graph, true, enabled)
 }

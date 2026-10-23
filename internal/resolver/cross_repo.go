@@ -132,8 +132,12 @@ type CrossRepoResolver struct {
 	validateLiveness     bool
 	crossWorkspaceLookup CrossWorkspaceDepLookup
 	goModules            map[string]string
+	goModulePaths        goModulePathIndex
+	goModuleReplacements map[string][]GoModuleReplacement
 	goModuleRetry        *GoModuleDepRetry
 	goModuleRevision     uint64
+	goModuleDemotedMu    sync.Mutex
+	goModuleDemotedFiles map[string]struct{}
 	// npmAlias rewrites a JS/TS import specifier that matches an
 	// npm-alias dependency key in the importing file's nearest-
 	// ancestor package.json. Same contract as the field of the

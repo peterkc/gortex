@@ -815,3 +815,113 @@ func TestGoModuleDeferredDropRetryWithoutSweep(t *testing.T) {
 	require.NoError(t, cr.RetryGoModuleDeps(t.Context()))
 	assert.Equal(t, "b/lib.go::Fn", g.GetOutEdges("a/main.go::Caller")[0].To, "the next module tail must recover unresolved edges without a whole pass")
 }
+
+func BenchmarkGoModulePendingStdlib(b *testing.B) {
+	for _, count := range []int{0, 1000} {
+		b.Run(fmt.Sprint(count), func(b *testing.B) {
+			modules := make(map[string]string)
+			for i := range count {
+				modules[fmt.Sprint(i)] = fmt.Sprintf("example.org/module%d", i)
+			}
+			r := New(graph.New())
+			r.SetGoModules(modules)
+			r.SetDeferGoModuleMisses(true)
+			e := &graph.Edge{From: "a/main.go::Caller", FilePath: "a/main.go", To: "unresolved::extern::fmt::Println"}
+			b.ResetTimer()
+			for b.Loop() {
+				r.pendingGoModuleExtern(e)
+			}
+		})
+	}
+}
+
+func TestGoModuleDemotionDroppedBatchRetries(t *testing.T) {
+	g := &goModuleDroppingStore{Store: graph.New(), drop: true}
+	g.AddNode(&graph.Node{ID: "a/main.go::Caller", Kind: graph.KindFunction, FilePath: "a/main.go", RepoPrefix: "a", Language: "go"})
+	g.AddNode(&graph.Node{ID: "b/lib.go::Hello", Name: "Hello", Kind: graph.KindFunction, FilePath: "b/lib.go", RepoPrefix: "b", Language: "go"})
+	edge := &graph.Edge{From: "a/main.go::Caller", To: "b/lib.go::Hello", FilePath: "a/main.go", Line: 3, Kind: graph.EdgeCalls, CrossRepo: true, Origin: graph.OriginASTInferred, Meta: map[string]any{"go_import": "example.org/library::Hello"}}
+	g.AddEdge(edge)
+	state := &GoModuleDepRetry{}
+	cr := NewCrossRepo(g)
+	cr.SetGoModuleDepRetry(state, 1)
+	require.NoError(t, cr.ResolveDeferredGoModuleEdges([]*graph.Edge{edge}))
+	assert.Equal(t, "b/lib.go::Hello", firstOutEdgeByKind(g, edge.From, graph.EdgeCalls).To)
+	g.drop = false
+	require.NoError(t, cr.RetryGoModuleDeps(t.Context()))
+	assert.Equal(t, "dep::example.org/library::Hello", firstOutEdgeByKind(g, edge.From, graph.EdgeCalls).To)
+	assert.Empty(t, state.pending)
+}
+
+func TestGoModuleRetryGenerationSkipsBindingRecheck(t *testing.T) {
+	for _, modules := range []map[string]string{nil, {"b": "example.org/library"}} {
+		name := "without_modules"
+		if len(modules) > 0 {
+			name = "with_modules"
+		}
+		t.Run(name, func(t *testing.T) {
+			g := &crossRepoPassCountingStore{Store: graph.New()}
+			g.AddNode(&graph.Node{ID: "b/lib.go::Hello", Kind: graph.KindFunction, Name: "Hello", FilePath: "b/lib.go", RepoPrefix: "b", Language: "go"})
+			state := &GoModuleDepRetry{}
+			cr := NewCrossRepo(g)
+			cr.SetGoModules(modules)
+			cr.SetGoModuleDepRetry(state, 1)
+			require.NoError(t, cr.RetryGoModuleDeps(t.Context()))
+			require.Positive(t, g.dependencyIndexBuilds, "fresh state must seed persisted bindings once")
+			g.dependencyIndexBuilds = 0
+			cr = NewCrossRepo(g)
+			cr.SetGoModules(modules)
+			cr.SetGoModuleDepRetry(state, 2)
+			require.NoError(t, cr.RetryGoModuleDeps(t.Context()))
+			assert.Zero(t, g.dependencyIndexBuilds, "a generation-only bump must not recheck bindings")
+		})
+	}
+	g := &crossRepoPassCountingStore{Store: graph.New()}
+	require.NoError(t, NewCrossRepo(g).RetryGoModuleDeps(t.Context()))
+	assert.Zero(t, g.dependencyIndexBuilds, "no modules and no retry state need no scan")
+}
+
+func TestGoModuleReplacementDenialKeepsPreciseLocal(t *testing.T) {
+	g := graph.New()
+	caller := &graph.Node{ID: "a/main.go::Caller", RepoPrefix: "a", FilePath: "a/main.go", Kind: graph.KindFunction, Language: "go"}
+	g.AddNode(caller)
+	for _, target := range []string{"a/staging/src/k8s.io/api/v1/lib.go", "a/vendor/k8s.io/api/v1/lib.go"} {
+		t.Run(target, func(t *testing.T) {
+			local := &graph.Node{ID: target + "::Hello", RepoPrefix: "a", FilePath: target, Kind: graph.KindFunction, Language: "go"}
+			denied := map[string][]GoModuleReplacement{"a": {{Module: "k8s.io/api"}}}
+			candidates := []*graph.Node{local}
+			r := New(g)
+			r.goModuleReplacements = denied
+			e := &graph.Edge{From: caller.ID, To: "unresolved::extern::k8s.io/api/v1::Hello", FilePath: caller.FilePath, Kind: graph.EdgeCalls}
+			stats := &ResolveStats{}
+			assert.True(t, r.resolveGoModuleExtern(e, "k8s.io/api/v1", "a", candidates, stats))
+			assert.Equal(t, local.ID, e.To)
+			cr := NewCrossRepo(g)
+			cr.SetGoModuleReplacements(denied)
+			assert.Equal(t, local, cr.goModuleCandidate("k8s.io/api/v1", candidates, "a", ""))
+			remote := *local
+			remote.RepoPrefix = "b"
+			assert.Nil(t, cr.goModuleCandidate("k8s.io/api/v1", []*graph.Node{&remote}, "a", ""), "denial still excludes foreign providers")
+		})
+	}
+}
+
+func TestGoModuleExternDemotionFiles(t *testing.T) {
+	g := graph.New()
+	var want []string
+	for i := range 17 {
+		file := fmt.Sprintf("a/caller%d.go", i)
+		from := file + "::Caller"
+		g.AddNode(&graph.Node{ID: from, RepoPrefix: "a", FilePath: file, Kind: graph.KindFunction, Language: "go"})
+		e := &graph.Edge{From: from, To: "unresolved::extern::example.org/library::Hello", FilePath: file, Kind: graph.EdgeCalls}
+		if i < 16 {
+			e.Meta = map[string]any{"go_import": "example.org/library::Hello"}
+			want = append(want, file)
+		}
+		g.AddEdge(e)
+	}
+	cr := NewCrossRepo(g)
+	_, err := cr.ResolveAllContext(t.Context())
+	require.NoError(t, err)
+	assert.ElementsMatch(t, want, cr.TakeDemotedGoModuleCallFiles(), "parallel workers must record every marked caller, and no unmarked caller")
+	assert.Empty(t, cr.TakeDemotedGoModuleCallFiles(), "draining is idempotent")
+}

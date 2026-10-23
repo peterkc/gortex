@@ -1497,7 +1497,7 @@ func restubIncomingRefsFromView(
 				}
 				oldTo := edge.To
 				graph.StashRestubProvenance(edge)
-				edge.To = stub
+				edge.To = goModuleRestubTarget(edge, stub)
 				reindexes = append(reindexes, graph.EdgeReindex{Edge: edge, OldTo: oldTo})
 			}
 		}
