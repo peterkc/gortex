@@ -3421,6 +3421,9 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 			// this handle's generation after the replacement parse succeeds and
 			// before its first disk write. Immutable payload generations sharing
 			// the prefix remain queryable through their catalog pointers.
+			if idx.repositoryMutationOwner != nil {
+				restubGoModuleRepoIncoming(diskTarget, idx.RepoPrefix())
+			}
 			var evictedNodes, evictedEdges int
 			if sqlite, ok := diskTarget.(*store_sqlite.Store); ok && sqlite.SupportsShadowReplacementRetirement() {
 				var err error
@@ -5955,7 +5958,7 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) []string {
 			// rebinds to the same target (idempotent re-parse); a deleted or
 			// moved target leaves the stub honestly unresolved.
 			graph.StashRestubProvenance(e)
-			e.To = stub
+			e.To = goModuleRestubTarget(e, stub)
 			batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		}
 	}

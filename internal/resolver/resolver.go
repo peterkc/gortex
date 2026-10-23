@@ -664,12 +664,15 @@ type Resolver struct {
 	// SetWorkspaceMembership before ResolveAll runs.
 	workspaceMembers WorkspaceMembership
 
-	goModules            map[string]string // tracked repo prefix → root go.mod module path
-	crossWorkspaceLookup CrossWorkspaceDepLookup
-	goModuleLookup       func() map[string]string
-	deferGoModuleMisses  bool
-	deferredGoMu         sync.Mutex
-	deferredGoEdges      map[graph.EdgeIdentity]*graph.Edge
+	goModules                 map[string]string // tracked repo prefix → root go.mod module path
+	goModulePaths             goModulePathIndex
+	goModuleReplacements      map[string][]GoModuleReplacement
+	goModuleReplacementLookup func() map[string][]GoModuleReplacement
+	crossWorkspaceLookup      CrossWorkspaceDepLookup
+	goModuleLookup            func() map[string]string
+	deferGoModuleMisses       bool
+	deferredGoMu              sync.Mutex
+	deferredGoEdges           map[graph.EdgeIdentity]*graph.Edge
 
 	// scope, when non-empty, restricts the next ResolveAll pass to the
 	// pending edges that could resolve into one of the named repo
@@ -4130,7 +4133,7 @@ func (r *Resolver) resolveExtern(e *graph.Edge, spec string, stats *ResolveStats
 	if strings.HasSuffix(e.FilePath, ".go") {
 		modules = r.goModules
 	}
-	trackedImport := trackedGoImport(modules, importPath)
+	trackedImport := strings.HasSuffix(e.FilePath, ".go") && trackedGoImport(r.goModulePaths, importPath)
 	// A Go selector into a caller-local package must agree with resolveImport,
 	// which prefers the caller's own instance of a duplicated module. Keep the
 	// first eligible foreign candidate as a fallback instead of letting global
