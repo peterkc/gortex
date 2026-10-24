@@ -317,6 +317,7 @@ type Resolver struct {
 	logger                      *zap.Logger
 	dirIndex                    map[string][]graph.FileNodeIdentity
 	lastDirIndex                map[string][]graph.FileNodeIdentity
+	importFileLanguages         map[string]string
 	// OnComputeDone, when set, fires once per ResolveAll immediately after
 	// the parallel compute loop has committed — BEFORE the deferred LSP
 	// batch and the serial refinement tail (guard, attribution, dispatch
@@ -2144,6 +2145,7 @@ func (r *Resolver) scopedFiles() []string {
 //   - lastDirIndex keys on the last path component of that directory
 //     so an import of "logger" matches any file under .../logger/.
 func (r *Resolver) buildDirIndexes() {
+	r.importFileLanguages = r.collectFileLanguages()
 	r.dirIndex = make(map[string][]graph.FileNodeIdentity, 128)
 	r.lastDirIndex = make(map[string][]graph.FileNodeIdentity, 128)
 	for file := range graph.FileNodeIdentitiesSeq(r.graph, nil) {
@@ -2164,6 +2166,7 @@ func (r *Resolver) buildDirIndexes() {
 }
 
 func (r *Resolver) clearDirIndexes() {
+	r.importFileLanguages = nil
 	r.dirIndex = nil
 	r.lastDirIndex = nil
 	r.receiverTypeIdxByDir = nil
@@ -4326,8 +4329,9 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 	// when the indexes aren't populated (ResolveEdge invoked outside
 	// of ResolveAll/ResolveFile).
 	//
-	// Prefer a same-repo folder matching the import path. When a
-	// package-manager workspace lookup is installed, collect candidates
+	// Prefer certified Go ownership, then a same-language same-repo folder
+	// matching the import path. With a package-manager workspace lookup,
+	// collect candidates
 	// of the same match quality to break ties in the importer's workspace.
 	collectAll := r.workspaceMembers != nil
 	// A JS/TS bare specifier names a node_modules package or a workspace
@@ -4343,11 +4347,30 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 	// case the entry-point rule alone cannot: a repo that both depends on
 	// npm `graphql` and contains `src/feature/graphql/index.ts`.
 	externalNpmDep := bareJSTS && declaresExternalNpmDep(r.npmDep, jsTSImportCallerFile(e), importPath)
+	fileLanguages := r.importFileLanguages
+	if fileLanguages == nil {
+		fileLanguages = r.collectFileLanguages()
+	}
+	source := r.nodeByID[e.From]
+	if source == nil && r.nodeByID == nil {
+		source = r.graph.GetNode(e.From)
+	}
+	callerLanguage := ""
+	if source != nil {
+		callerLanguage = source.Language
+	}
+	const (
+		fallback = iota
+		folderMatch
+		exactOwnership
+	)
 	var sameRepo, crossRepoFile graph.FileNodeIdentity
-	var sameRepoFound, sameRepoMatched, crossRepoFound bool
+	var sameRepoFound, crossRepoFound bool
+	var sameRepoQuality int
 	var sameRepoAll []graph.FileNodeIdentity
 	consider := func(file graph.FileNodeIdentity) {
-		if !goOwnership.retainFile(file) {
+		ownership := goOwnership.ownership(file.ID, file.RepoPrefix, file.FilePath, nil)
+		if ownership == GoPackageOwnershipDifferent {
 			return
 		}
 		if bareJSTS && !isJSTSDirEntryPoint(file.FilePath) {
@@ -4362,14 +4385,21 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 					dir = strings.TrimPrefix(dir, file.RepoPrefix+"/")
 				}
 			}
-			matches := dir != "" && (dir == importPath || strings.HasSuffix(importPath, "/"+dir))
-			if sameRepoMatched && !matches {
+			quality := fallback
+			if callerLanguage != "" && fileLanguages[file.ID] == callerLanguage && dir != "" &&
+				(dir == importPath || strings.HasSuffix(importPath, "/"+dir)) {
+				quality = folderMatch
+			}
+			if ownership == GoPackageOwnershipExact {
+				quality = exactOwnership
+			}
+			if quality < sameRepoQuality {
 				return
 			}
-			if matches && !sameRepoMatched {
+			if quality > sameRepoQuality {
 				sameRepoFound = false
 				sameRepoAll = nil
-				sameRepoMatched = true
+				sameRepoQuality = quality
 			}
 			if !sameRepoFound {
 				sameRepo, sameRepoFound = file, true
@@ -4388,10 +4418,11 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 			crossRepoFile, crossRepoFound = file, true
 		}
 	}
-	// stop reports whether the candidate scan can short-circuit: once a
-	// matching same-repo folder is found and we are not collecting
-	// every matching candidate for workspace disambiguation.
-	stop := func() bool { return sameRepoMatched && !collectAll }
+	// A folder match cannot stop a scan that may still find certified ownership.
+	stop := func() bool {
+		return !collectAll && (sameRepoQuality == exactOwnership ||
+			(sameRepoQuality == folderMatch && goOwnership.lookup == nil))
+	}
 	if externalNpmDep {
 		// Declared node_modules package — skip the cascade outright.
 	} else if r.dirIndex != nil {
@@ -4401,7 +4432,7 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 				break
 			}
 		}
-		if !sameRepoMatched || collectAll {
+		if !stop() {
 			for _, file := range r.lastDirIndex[lastPathComponent(importPath)] {
 				consider(file)
 				if stop() {

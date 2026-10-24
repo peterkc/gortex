@@ -1385,17 +1385,16 @@ func closureBareName(raw string) string {
 //     last component, reached when the first arm found no matching folder or
 //     when workspace disambiguation collects all matching candidates.
 //
-// The resolver prefers a same-repo directory whose repo-relative path equals
-// the import path or is its slash-delimited suffix. If none matches, it keeps
+// The resolver prefers certified Go ownership, then a same-language same-repo
+// directory whose repo-relative path equals the import path or is its
+// slash-delimited suffix. If neither evidence is available, it keeps
 // the first candidate, with workspace locality breaking ties at equal match
 // quality. The closure carries the candidate set rather than guessing the
 // winner, since ownership gates and the post-change graph can change it.
 //
-// An exact raw-directory hit normally matches after removing the repo prefix.
-// The exception is the repository root when importPath equals that prefix:
-// the root has no repo-relative directory. The resolver keeps scanning and
-// binds a matching nested folder when one survives its ownership gates, so
-// the closure places both arms even when the base has a root file.
+// A raw-directory hit may be in another language, lose to certified ownership,
+// or lose the workspace tie-break to a candidate in the fallback arm. The
+// closure has none of that ranking evidence, so it places both arms.
 // `dirMatchesImport` remains a cross-repo gate, not a same-repo rejection rule:
 // narrowing placement to suffix matches would drop the no-match fallback.
 //
@@ -1698,17 +1697,12 @@ func (w *closureWalk) ownedCandidateFiles(candidates []*graph.Node) []string {
 // cascadeImportedFiles is the dirIndex/lastDirIndex candidate scan itself,
 // keyed exactly as resolveImport keys it (resolver.go:4036-4049): the raw
 // specifier for the exact-directory arm, its last path component for the
-// fallback arm. At the repo root the exact hit is not a repo-relative match;
-// retain the fallback too, since ownership may reject the root candidate.
+// fallback arm. Keep both: ownership, language, and workspace ranking can
+// select a fallback-arm candidate even when the raw directory exists.
 func (w *closureWalk) cascadeImportedFiles(importPath string, bare bool) []string {
-	if files := closureJSTSEntryPoints(w.dirIndex[importPath], bare); len(files) > 0 {
-		if importPath == w.req.RepoPrefix {
-			return closureUnionPlacements(files,
-				closureJSTSEntryPoints(w.lastDirIndex[path.Base(importPath)], bare))
-		}
-		return files
-	}
-	return closureJSTSEntryPoints(w.lastDirIndex[path.Base(importPath)], bare)
+	return closureUnionPlacements(
+		closureJSTSEntryPoints(w.dirIndex[importPath], bare),
+		closureJSTSEntryPoints(w.lastDirIndex[path.Base(importPath)], bare))
 }
 
 // closureUnionPlacements merges two placements into one sorted, deduplicated
