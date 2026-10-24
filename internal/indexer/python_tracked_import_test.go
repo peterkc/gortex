@@ -141,6 +141,7 @@ func TestPythonPackageLookupNoProviders(t *testing.T) {
 type pythonLookupScanStore struct {
 	graph.Store
 	globalScans int
+	importScans int
 }
 
 func (s *pythonLookupScanStore) FileNodeIdentitiesSeq(repos []string) iter.Seq[graph.FileNodeIdentity] {
@@ -164,4 +165,78 @@ func TestPythonPackageLookupAvoidsGlobalFileScan(t *testing.T) {
 	require.NotNil(t, lookup)
 	require.Len(t, lookup.Providers("consumer", "PIL"), 1)
 	require.Zero(t, g.globalScans)
+}
+
+func TestPythonPackageLookupUsesInstalledManifestTree(t *testing.T) {
+	for _, entry := range []string{"PIL.py", "PIL/__init__.py", "src/PIL.py", "src/PIL/__init__.py"} {
+		for _, mode := range []string{"pyproject", "requirements", "layout", "undeclared", "missing_layout"} {
+			t.Run(entry+"/"+mode, func(t *testing.T) {
+				provider, consumer, providerSnapshot, consumerSnapshot := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+				providerName, checkoutDeps := "pillow", "[project]\ndependencies = ['pillow']\n"
+				if mode == "pyproject" {
+					providerName, checkoutDeps = "wrong-checkout", ""
+				}
+				snapshotDeps := "[project]\ndependencies = ['pillow']\n"
+				if mode == "requirements" || mode == "undeclared" {
+					snapshotDeps = ""
+				}
+				if mode == "requirements" {
+					checkoutDeps = ""
+					writeWorkspaceFile(t, consumer, "requirements-dev.txt", "other\n")
+					writeWorkspaceFile(t, consumerSnapshot, "requirements-dev.txt", "pillow >= 1\n")
+				}
+				writeWorkspaceFile(t, provider, "pyproject.toml", "[project]\nname = '"+providerName+"'\n")
+				writeWorkspaceFile(t, consumer, "pyproject.toml", checkoutDeps)
+				writeWorkspaceFile(t, providerSnapshot, "pyproject.toml", "[project]\nname = 'pillow'\n")
+				writeWorkspaceFile(t, consumerSnapshot, "pyproject.toml", snapshotDeps)
+				if mode != "layout" {
+					writeWorkspaceFile(t, provider, entry, "")
+				}
+				if mode != "missing_layout" {
+					writeWorkspaceFile(t, providerSnapshot, entry, "")
+				}
+				g := graph.New()
+				id := "provider/" + entry
+				g.AddNode(&graph.Node{ID: id, FilePath: id, Kind: graph.KindFile, RepoPrefix: "provider"})
+				providerIdx, consumerIdx := sideChannelIndexer(t, g, provider), sideChannelIndexer(t, g, consumer)
+				providerIdx.SetContentSource(snapshotOf(t, providerSnapshot))
+				consumerIdx.SetContentSource(snapshotOf(t, consumerSnapshot))
+				mi := &MultiIndexer{graph: g,
+					repos:    map[string]*RepoMetadata{"provider": {RootPath: provider}, "consumer": {RootPath: consumer}},
+					indexers: map[string]*Indexer{"provider": providerIdx, "consumer": consumerIdx}}
+				lookup := mi.pythonPackageLookup()
+				if mode == "undeclared" || mode == "missing_layout" {
+					require.Nil(t, lookup, "checkout-only declaration/layout must not supply a provider")
+					return
+				}
+				require.NotNil(t, lookup)
+				require.Equal(t, []graph.FileNodeIdentity{{ID: id, FilePath: id, RepoPrefix: "provider"}}, lookup.Providers("consumer", "PIL")["provider"])
+			})
+		}
+	}
+}
+
+func (s *pythonLookupScanStore) EdgesLightSeq(kinds ...graph.EdgeKind) iter.Seq[*graph.Edge] {
+	if len(kinds) == 1 && kinds[0] == graph.EdgeImports {
+		s.importScans++
+	}
+	return graph.EdgesLightSeq(s.Store, kinds...)
+}
+
+func TestPythonAddedFileConsumerFrontier(t *testing.T) {
+	g := &pythonLookupScanStore{Store: graph.New()}
+	for _, row := range []struct{ file, target string }{
+		{"consumer/a.py", "module::pypi:PIL"},
+		{"consumer/b.py", "external::PIL.extra"},
+		{"consumer/c.py", "unresolved::import::PIL.extra"},
+		{"consumer/d.py", "module::pypi:other"},
+		{"consumer/e.py", "provider/src/PIL/image.py"},
+		{"consumer/f.rs", "external::PIL.extra"},
+	} {
+		g.AddEdge(&graph.Edge{From: row.file, FilePath: row.file, To: row.target, Kind: graph.EdgeImports})
+	}
+	require.Empty(t, pythonConsumerFilesForAddedFiles(g, nil))
+	require.Zero(t, g.importScans)
+	require.Equal(t, []string{"consumer/a.py", "consumer/b.py", "consumer/c.py"}, pythonConsumerFilesForAddedFiles(g, []string{"provider/src/PIL/extra.py"}))
+	require.Equal(t, 1, g.importScans)
 }
