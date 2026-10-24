@@ -126,6 +126,11 @@ class PartitionTests(unittest.TestCase):
             self.assertIn("name: ci-timings-used", body)
             self.assertRegex(body, r"(?m)^    timeout-minutes: 60$")
             self.assertIn("- name: Test\n        id: test", body)
+            # A step timeout fails the step, so the timing steps still run;
+            # a job timeout cancels the job and skips them.
+            step_limit = re.search(r"(?m)^        timeout-minutes: (\d+)$",
+                                   body)
+            self.assertLess(int(step_limit.group(1)), 60)
             steps = re.split(r"(?m)^      - ", body)[1:]
             timing_steps = [step for step in steps
                             if "name: Write shard timings" in step
