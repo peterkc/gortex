@@ -263,7 +263,7 @@ var reuseSemanticMetaKeys = []string{"confirmed_from_origin", "semantic_source"}
 // reuseBindingMetaKeys are importer-owned binding stubs a reused bind keeps
 // even without confirmation reuse; applyReuseSemanticMeta rewrites each to the
 // fresh call spelling.
-var reuseBindingMetaKeys = []string{"cargo_call_stub"}
+var reuseBindingMetaKeys = []string{"cargo_call_stub", "python_call_stub"}
 
 // reuseCarriedMetaKeys are importer-owned binding markers a reused bind keeps
 // verbatim, even when its confirmation provenance is dropped. go_import lets a
