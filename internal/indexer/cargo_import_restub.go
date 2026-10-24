@@ -83,8 +83,8 @@ func restubTrackedCargoImportsFromView(g graph.Store, evicted map[string]struct{
 	return sortedStringKeys(consumers)
 }
 
-// Retry only parked imports claimed by this provider, or owned by this repo.
-func (mi *MultiIndexer) cargoConsumerFilesForRepo(repo string) []string {
+// Retry parked imports; new Rust files can also retarget marked provider bindings.
+func (mi *MultiIndexer) cargoConsumerFilesForRepo(repo string, retargetBound bool) []string {
 	lookup := mi.cargoCrateLookup()
 	if lookup == nil {
 		return nil
@@ -93,6 +93,9 @@ func (mi *MultiIndexer) cargoConsumerFilesForRepo(repo string) []string {
 	for edge := range graph.EdgesLightSeq(mi.graph, graph.EdgeImports) {
 		spec, external := strings.CutPrefix(edge.To, "external::")
 		if !external || !strings.HasSuffix(edge.FilePath, ".rs") {
+			if retargetBound && edge.CrossRepo && strings.HasSuffix(edge.FilePath, ".rs") && graph.RepoPrefixOfID(edge.To) == repo {
+				files[edge.FilePath] = struct{}{}
+			}
 			continue
 		}
 		name, _, _ := strings.Cut(spec, "/")

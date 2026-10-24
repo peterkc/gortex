@@ -547,25 +547,28 @@ func (mi *MultiIndexer) runCrossRepoResolveContext(ctx context.Context, reconcil
 // and the topology-writer gates of every repository the mutation can affect, so
 // the graph cannot expose a half-resolved batch between same-repo, semantic,
 // and cross-repository phases.
-func (mi *MultiIndexer) runCrossRepoResolveFiles(filePaths []string) {
-	mi.runCrossRepoResolveMutationFiles(filePaths, filePaths)
+func (mi *MultiIndexer) runCrossRepoResolveFiles(filePaths []string, cargoRetargetRepo ...string) {
+	mi.runCrossRepoResolveMutationFrontiers(filePaths, filePaths, filePaths, cargoRetargetRepo...)
 }
 
 func (mi *MultiIndexer) runCrossRepoResolveMutationFiles(resolutionFiles, materializationFiles []string) {
 	mi.runCrossRepoResolveMutationFrontiers(resolutionFiles, materializationFiles, materializationFiles)
 }
 
-func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiers(resolutionFiles, edgeSourceFiles, definitionFiles []string) {
-	mi.runCrossRepoResolveMutationFrontiersObserved(resolutionFiles, edgeSourceFiles, definitionFiles, nil)
+func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiers(resolutionFiles, edgeSourceFiles, definitionFiles []string, cargoRetargetRepo ...string) {
+	mi.runCrossRepoResolveMutationFrontiersObserved(resolutionFiles, edgeSourceFiles, definitionFiles, nil, cargoRetargetRepo...)
 }
 
-func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiersObserved(resolutionFiles, edgeSourceFiles, definitionFiles []string, observe func(time.Time, time.Time)) {
+func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiersObserved(resolutionFiles, edgeSourceFiles, definitionFiles []string, observe func(time.Time, time.Time), cargoRetargetRepo ...string) {
 	if len(resolutionFiles) == 0 && len(edgeSourceFiles) == 0 && len(definitionFiles) == 0 {
 		return
 	}
 	cr := mi.newCrossRepoResolver()
 	if cr == nil {
 		return
+	}
+	if len(cargoRetargetRepo) > 0 {
+		cr.SetCargoImportRetargetRepo(cargoRetargetRepo[0])
 	}
 	cr.ResolveMutationFrontiersObserved(resolutionFiles, edgeSourceFiles, definitionFiles, observe)
 	mi.finishGoModuleCalls(cr)

@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -259,13 +260,18 @@ func pruneBuiltinReuse(reuse map[reuseKey]*reuseVal) {
 // edge (semantic.ConfirmEdge).
 var reuseSemanticMetaKeys = []string{"confirmed_from_origin", "semantic_source"}
 
+// reuseBindingMetaKeys are importer-owned binding stubs a reused bind keeps
+// even without confirmation reuse; applyReuseSemanticMeta rewrites each to the
+// fresh call spelling.
+var reuseBindingMetaKeys = []string{"cargo_call_stub"}
+
 // reuseCarriedMetaKeys are importer-owned binding markers a reused bind keeps
 // verbatim, even when its confirmation provenance is dropped. go_import lets a
 // parked cross-module Go call relink when its provider returns.
 var reuseCarriedMetaKeys = []string{"go_import"}
 
 // reuseSemanticMeta is the confirmation provenance and binding markers of a
-// captured bind, nil when it carries neither. A confirmed bind's origin is
+// captured bind, nil when it carries none. A confirmed bind's origin is
 // LSP-grade, and a later confirmation of an edge that already carries an
 // LSP-grade origin leaves it as it is, so a reuse that restored the origin
 // without this provenance would leave the edge different from the one a whole
@@ -275,7 +281,7 @@ func reuseSemanticMeta(edge *graph.Edge) map[string]any {
 		return nil
 	}
 	var out map[string]any
-	for _, keys := range [][]string{reuseSemanticMetaKeys, reuseCarriedMetaKeys} {
+	for _, keys := range [][]string{reuseSemanticMetaKeys, reuseBindingMetaKeys, reuseCarriedMetaKeys} {
 		for _, key := range keys {
 			if value, ok := edge.Meta[key]; ok {
 				if out == nil {
@@ -288,9 +294,9 @@ func reuseSemanticMeta(edge *graph.Edge) map[string]any {
 	return out
 }
 
-// applyReuseSemanticMeta restores a reused bind's confirmation provenance and
-// carried binding markers.
-func applyReuseSemanticMeta(edge *graph.Edge, meta map[string]any) {
+// applyReuseSemanticMeta restores provenance, carried markers and the fresh
+// call spelling of binding stubs.
+func applyReuseSemanticMeta(edge *graph.Edge, meta map[string]any, originalTarget string) {
 	if len(meta) == 0 {
 		return
 	}
@@ -298,6 +304,9 @@ func applyReuseSemanticMeta(edge *graph.Edge, meta map[string]any) {
 		edge.Meta = make(map[string]any, len(meta))
 	}
 	for key, value := range meta {
+		if slices.Contains(reuseBindingMetaKeys, key) {
+			value = originalTarget // A name-level reuse can cover different call spellings.
+		}
 		edge.Meta[key] = value
 	}
 }

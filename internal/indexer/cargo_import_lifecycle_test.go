@@ -24,7 +24,7 @@ import (
 func TestTrackedCargoImportLifecycle(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
 		for _, providerFirst := range []bool{false, true} {
-			for _, operation := range []string{"consumer_save", "provider_save", "provider_save_util", "provider_save_lib_contract", "provider_delete_util_batched", "forced_evict_util", "consumer_full", "provider_full", "warm_full_retrack", "untrack_retrack", "no_change", "track", "deferred_track"} {
+			for _, operation := range []string{"consumer_save", "provider_save", "provider_save_util", "provider_save_lib_contract", "provider_delete_util_batched", "forced_evict_util", "delete_restore_util", "consumer_save_then_restore", "provider_gains_new_module", "provider_gains_empty_module", "no_new_file_noop", "consumer_full", "provider_full", "warm_full_retrack", "untrack_retrack", "no_change", "track", "deferred_track"} {
 				if operation == "deferred_track" && providerFirst {
 					continue // This case starts with an already tracked consumer.
 				}
@@ -35,10 +35,23 @@ func TestTrackedCargoImportLifecycle(t *testing.T) {
 				t.Run(backend+"/"+order+"/"+operation, func(t *testing.T) {
 					provider, consumer := t.TempDir(), t.TempDir()
 					writeWorkspaceFile(t, provider, "Cargo.toml", "[package]\nname = 'other-crate'\nversion = '0.1.0'\n")
-					writeWorkspaceFile(t, provider, "src/lib.rs", cargoLifecycleProvider)
+					providerSource := cargoLifecycleProvider
+					if operation == "provider_gains_new_module" || operation == "provider_gains_empty_module" {
+						providerSource += "pub mod newmod;\n"
+					}
+					writeWorkspaceFile(t, provider, "src/lib.rs", providerSource)
 					writeWorkspaceFile(t, provider, "src/util.rs", "pub fn helper() {}\n")
+					if operation == "no_new_file_noop" {
+						writeWorkspaceFile(t, provider, "src/spare.rs", "pub fn unused() {}\n")
+					}
 					writeWorkspaceFile(t, consumer, "Cargo.toml", "[package]\nname = 'app'\nversion = '0.1.0'\n[dependencies]\nother-crate = '1'\n")
-					writeWorkspaceFile(t, consumer, "src/lib.rs", cargoLifecycleConsumer)
+					consumerSource := cargoLifecycleConsumer
+					if operation == "provider_gains_new_module" {
+						consumerSource += "use other_crate::newmod::later;\npub fn after() { later(); }\n"
+					} else if operation == "provider_gains_empty_module" {
+						consumerSource += "use other_crate::newmod::*;\n"
+					}
+					writeWorkspaceFile(t, consumer, "src/lib.rs", consumerSource)
 					entries := []config.RepoEntry{{Path: consumer, Name: "consumer", Workspace: "shared"}, {Path: provider, Name: "provider", Workspace: "shared"}}
 					cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 					gc := &config.GlobalConfig{Repos: entries}
@@ -88,7 +101,7 @@ func TestTrackedCargoImportLifecycle(t *testing.T) {
 						t.Helper()
 						var imports []*graph.Edge
 						for _, edge := range g.GetOutEdges("consumer/src/lib.rs") {
-							if edge.Kind == graph.EdgeImports {
+							if edge.Kind == graph.EdgeImports && edge.Line <= 3 {
 								imports = append(imports, edge)
 							}
 						}
@@ -130,6 +143,41 @@ func TestTrackedCargoImportLifecycle(t *testing.T) {
 						require.NoError(t, os.Remove(filepath.Join(provider, "src/util.rs")))
 						writeWorkspaceFile(t, provider, "src/lib.rs", strings.Replace(cargoLifecycleProvider, "pub mod util;\n", "", 1))
 						_, err = mi.IncrementalReindexRepo("provider", []string{filepath.Join(provider, "src/util.rs"), filepath.Join(provider, "src/lib.rs")})
+					case "no_new_file_noop":
+						observed := &cargoImportReindexObserver{Store: mi.graph}
+						mi.graph = observed
+						writeWorkspaceFile(t, provider, "src/spare.rs", "pub fn unused() {}\npub fn added() {}\n")
+						_, err = mi.IncrementalReindexRepo("provider", []string{filepath.Join(provider, "src/spare.rs")})
+						require.NoError(t, err)
+						require.Zero(t, observed.importReindexes, "an ordinary provider edit must not reindex working imports")
+						require.Zero(t, observed.importReads, "bound imports must not be admitted for an ordinary edit")
+					case "provider_gains_empty_module":
+						writeWorkspaceFile(t, provider, "src/newmod.rs", "")
+						_, err = mi.IncrementalReindexRepo("provider", []string{filepath.Join(provider, "src/newmod.rs")})
+					case "provider_gains_new_module":
+						writeWorkspaceFile(t, provider, "src/newmod.rs", "pub fn later() {}\n")
+						_, err = mi.IncrementalReindexRepo("provider", []string{filepath.Join(provider, "src/newmod.rs")})
+					case "delete_restore_util", "consumer_save_then_restore":
+						if operation == "consumer_save_then_restore" {
+							writeWorkspaceFile(t, consumer, "src/lib.rs", cargoLifecycleConsumer+"pub fn edited() {}\n")
+							_, err = mi.IncrementalReindexRepo("consumer", []string{filepath.Join(consumer, "src/lib.rs")})
+							require.NoError(t, err)
+							assertImport()
+						}
+						require.NoError(t, os.Remove(filepath.Join(provider, "src/util.rs")))
+						_, err = mi.IncrementalReindexRepo("provider", []string{filepath.Join(provider, "src/util.rs")})
+						require.NoError(t, err)
+						var parked []*graph.Edge
+						for _, edge := range g.GetOutEdges("consumer/src/lib.rs::run") {
+							if edge.Kind == graph.EdgeCalls && edge.Line == 8 {
+								parked = append(parked, edge)
+							}
+						}
+						require.Len(t, parked, 1)
+						require.Equal(t, "unresolved::helper", parked[0].To)
+						require.False(t, parked[0].CrossRepo)
+						writeWorkspaceFile(t, provider, "src/util.rs", "pub fn helper() {}\n")
+						_, err = mi.IncrementalReindexRepo("provider", []string{filepath.Join(provider, "src/util.rs")})
 					case "forced_evict_util":
 						require.NoError(t, os.Remove(filepath.Join(provider, "src/util.rs")))
 						mi.GetIndexer("provider").EvictFile(filepath.Join(provider, "src/util.rs"))
@@ -187,6 +235,18 @@ func TestTrackedCargoImportLifecycle(t *testing.T) {
 						_, err = mi.TrackRepoCtx(context.Background(), entries[1])
 					}
 					require.NoError(t, err)
+					if operation == "provider_delete_util_batched" || operation == "forced_evict_util" {
+						var parked []*graph.Edge
+						for _, edge := range g.GetOutEdges("consumer/src/lib.rs::run") {
+							if edge.Kind == graph.EdgeCalls && edge.Line == 8 {
+								parked = append(parked, edge)
+							}
+						}
+						require.Len(t, parked, 1)
+						require.Equal(t, "unresolved::helper", parked[0].To)
+						require.Equal(t, parked[0].To, parked[0].Meta["cargo_call_stub"])
+						require.False(t, parked[0].CrossRepo)
+					}
 					var cold graph.Store = graph.New()
 					if backend == "sqlite" {
 						db, openErr := store_sqlite.Open(filepath.Join(t.TempDir(), "cold.sqlite"))
@@ -198,7 +258,7 @@ func TestTrackedCargoImportLifecycle(t *testing.T) {
 					t.Cleanup(func() { require.NoError(t, coldIndexer.Close(context.Background())) })
 					_, err = coldIndexer.IndexAll()
 					require.NoError(t, err)
-					require.Equal(t, cargoLifecycleBindings(cold), cargoLifecycleBindings(g), "after %s", operation)
+					require.Equal(t, cargoLifecycleBindings(cold, operation), cargoLifecycleBindings(g, operation), "after %s", operation)
 					require.Empty(t, logs.FilterMessage("cross-repo resolve: pass start").All())
 					require.Empty(t, logs.FilterMessage("DEFERRED-TIMING master.ResolveAll").All())
 				})
@@ -210,15 +270,47 @@ func TestTrackedCargoImportLifecycle(t *testing.T) {
 const cargoLifecycleProvider = "pub mod util;\npub struct Foo;\nimpl Foo {\n    pub fn new() -> Foo { Foo }\n    pub fn go(&self) {}\n}\npub fn action() {}\n"
 const cargoLifecycleConsumer = "use other_crate::Foo;\nuse other_crate::action;\nuse other_crate::util::helper;\npub fn run() {\n    let f = Foo::new();\n    f.go();\n    action();\n    helper();\n}\n"
 
-func cargoLifecycleBindings(g graph.Store) []string {
+func cargoLifecycleBindings(g graph.Store, operation string) []string {
 	var bindings []string
 	for _, node := range g.GetFileNodes("consumer/src/lib.rs") {
 		for _, edge := range g.GetOutEdges(node.ID) {
 			if edge.Kind == graph.EdgeImports || edge.Kind == graph.EdgeCalls {
-				bindings = append(bindings, fmt.Sprintf("%s -%s-> %s cross=%v line=%d", edge.From, edge.Kind, edge.To, edge.CrossRepo, edge.Line))
+				var stub any
+				if edge.Kind == graph.EdgeCalls {
+					stub = edge.Meta["cargo_call_stub"]
+					if edge.Line == 8 && (operation == "provider_delete_util_batched" || operation == "forced_evict_util") {
+						stub = nil // Cold has no prior bind; the exact parked marker is asserted separately.
+					}
+				}
+				bindings = append(bindings, fmt.Sprintf("%s -%s-> %s cross=%v line=%d stub=%v", edge.From, edge.Kind, edge.To, edge.CrossRepo, edge.Line, stub))
 			}
 		}
 	}
 	slices.Sort(bindings)
 	return bindings
+}
+
+// Observe only the shared resolver; the per-repo indexer retains its native store.
+type cargoImportReindexObserver struct {
+	graph.Store
+	importReindexes int
+	importReads     int
+}
+
+func (s *cargoImportReindexObserver) ReindexEdges(batch []graph.EdgeReindex) {
+	for _, change := range batch {
+		if change.Edge != nil && change.Edge.Kind == graph.EdgeImports && change.Edge.FilePath == "consumer/src/lib.rs" {
+			s.importReindexes++
+		}
+	}
+	s.Store.ReindexEdges(batch)
+}
+
+func (s *cargoImportReindexObserver) GetEdgeCandidates(endpoints []graph.EdgeEndpoint, sites []graph.EdgeSite) graph.EdgeCandidateSet {
+	for _, site := range sites {
+		if site.Kind == graph.EdgeImports && site.From == "consumer/src/lib.rs" {
+			s.importReads++
+		}
+	}
+	return s.Store.GetEdgeCandidates(endpoints, sites)
 }
