@@ -214,7 +214,7 @@ func TestReindexEdgesKeepsOutgoingOrderAroundConvergence(t *testing.T) {
 	require.NoError(t, g.VerifyEdgeIdentities())
 }
 
-func TestReindexEdgesNonconvergingRefresh(t *testing.T) {
+func TestGraphReindexEdgesNonconvergingRefresh(t *testing.T) {
 	g := New()
 	g.AddNode(&Node{ID: "a::A", RepoPrefix: "repo"})
 	edge := &Edge{From: "a::A", To: "b::B", Kind: EdgeCalls, FilePath: "a.go", Line: 3}
@@ -228,5 +228,4 @@ func TestReindexEdgesNonconvergingRefresh(t *testing.T) {
 	assert.Equal(t, 1, g.EdgeCount())
 	assert.Equal(t, 1, g.RepoMemoryEstimate("repo").EdgeCount)
 	require.NoError(t, g.VerifyEdgeIdentities())
-	t.Logf("out=%s in=%s count=%d", edgeSetRender(g.GetOutEdges("a::A")), edgeSetRender(g.GetInEdges("b::B")), g.EdgeCount())
 }
