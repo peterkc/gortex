@@ -5986,7 +5986,7 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) ([]string, []string, []
 			if original, _ := e.Meta[resolver.CargoCallStubMeta].(string); e.Kind == graph.EdgeCalls && e.CrossRepo && original != "" {
 				e.To, e.CrossRepo, e.ConfidenceLabel = original, false, ""
 			}
-			if original, _ := e.Meta[resolver.PythonCallStubMeta].(string); e.Kind == graph.EdgeCalls && original != "" {
+			if original, _ := e.Meta[resolver.PythonCallStubMeta].(string); e.Kind == graph.EdgeCalls && e.CrossRepo && original != "" {
 				e.To, e.CrossRepo, e.ConfidenceLabel = original, false, ""
 			}
 			batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
