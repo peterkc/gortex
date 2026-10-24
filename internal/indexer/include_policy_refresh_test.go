@@ -112,7 +112,9 @@ func TestWalkDiskRejectsEscapingSymlink(t *testing.T) {
 	outside := filepath.Join(t.TempDir(), "outside.go")
 	writeFile(t, outside, "package outside\nfunc Escaped() {}\n")
 	link := filepath.Join(root, "escape.go")
-	require.NoError(t, os.Symlink(outside, link))
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
 	idx := newAdmissionTestIndexer(t, root)
 	seen := false
 	require.NoError(t, idx.walkDisk(root, root, func(path string, d os.DirEntry, err error) error {
