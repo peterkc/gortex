@@ -1,0 +1,109 @@
+# Fork-only A/B benchmark for zzet/gortex#945. Do not merge.
+# Replace BRANCH_SHA with the final reviewed #945 fix commit before pushing.
+name: bench-945
+on:
+  push:
+    branches: [exp/bench-945]
+permissions:
+  contents: read
+env:
+  MAIN_SHA: ce04b3e8e37d206841770129b30be0f22ee27ccc
+  BRANCH_SHA: 72feeb4b03d0fb1426aebeff5b823b08662bdd15
+  GOMAXPROCS: '2'
+  GOFLAGS: '-p=1'
+jobs:
+  ab:
+    if: github.repository == 'peterkc/gortex'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: bench
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.MAIN_SHA }}
+          path: main
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.BRANCH_SHA }}
+          path: branch
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: main/go.mod
+          cache: false
+      - name: Freeze the production Go corpus from main (at most 1200 files)
+        shell: python
+        run: |
+          import pathlib
+          import re
+          import shutil
+          import subprocess
+          import os
+
+          root = pathlib.Path('main')
+          corpus = pathlib.Path(os.environ['RUNNER_TEMP']) / 'corpus'
+          corpus.mkdir()
+          paths = subprocess.check_output(['git', '-C', str(root), 'ls-files', '-z']).decode().split('\0')
+          selected = []
+          for name in sorted(paths):
+              path = pathlib.PurePosixPath(name)
+              if not name.startswith(('cmd/', 'internal/')) or name.startswith('internal/thirdparty/'):
+                  continue
+              if not name.endswith('.go') or name.endswith('_test.go') or 'testdata' in path.parts:
+                  continue
+              data = (root / name).read_bytes()
+              if re.search(rb'(?m)^// Code generated .* DO NOT EDIT\.$', data):
+                  continue
+              selected.append(name)
+              if len(selected) == 1200:
+                  break
+          if not selected:
+              raise SystemExit('no production Go files selected')
+          for name in selected:
+              destination = corpus / name
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copyfile(root / name, destination)
+          pathlib.Path('corpus.txt').write_text('\n'.join(selected) + '\n')
+          pathlib.Path(os.environ['GITHUB_ENV']).open('a').write(f'GORTEX_BENCH_CORPUS={corpus}\n')
+          print(f'Selected {len(selected)} production Go files; no tests, testdata, generated or non-Go files.')
+          # No go.mod: this source-only corpus exercises unknown Go ownership,
+          # where the folder preference remains relevant after #806.
+      - name: Install identical fixture and build both binaries (not timed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C main rev-parse HEAD > revisions.txt
+          git -C branch rev-parse HEAD >> revisions.txt
+          go version >> revisions.txt
+          for side in main branch; do
+            cp bench/.github/bench/cold_resolve_bench_test.go "$side/internal/indexer/cold_resolve_bench_test.go"
+            (cd "$side" && go test -p=1 -c -o "$RUNNER_TEMP/$side.test" ./internal/indexer)
+          done
+      - name: Run A then B once each (fresh graph and indexer)
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          for side in main branch; do
+            (cd "$side/internal/indexer" && "$RUNNER_TEMP/$side.test" \
+              -test.run '^$' -test.bench '^BenchmarkColdResolve945$' \
+              -test.benchmem -test.count=1 -test.benchtime=1x -test.timeout=9m) | tee "$side.txt"
+          done
+      - name: Compare timings
+        shell: bash
+        run: |
+          set -euo pipefail
+          go run golang.org/x/perf/cmd/benchstat@v0.0.0-20260409210113-8e83ce0f7b1c main.txt branch.txt | tee benchstat.txt
+          echo 'Single samples: descriptive comparison only, not statistical significance.' >> "$GITHUB_STEP_SUMMARY"
+          cat benchstat.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: bench-945-ubuntu-24.04-arm
+          path: |
+            main.txt
+            branch.txt
+            benchstat.txt
+            corpus.txt
+            revisions.txt
