@@ -92,7 +92,43 @@ func TestGoModuleImportPathAmbiguousLine(t *testing.T) {
 		{Kind: graph.KindImport, Language: "go", StartLine: 2, Meta: map[string]any{"path": "example.com/lib/a"}},
 		{Kind: graph.KindImport, Language: "go", StartLine: 2, Meta: map[string]any{"path": "example.com/lib/b"}},
 	}
-	assert.Empty(t, goModuleImportPath(edge, nodes), "a legacy module-only target is not enough evidence for either package")
+	assert.Empty(t, goModuleImportPath(edge, nodes, nil), "a legacy module-only target is not enough evidence for either package")
+}
+
+func TestGoModuleImportPathContainment(t *testing.T) {
+	const file = "a/main.go"
+	const path = "example.com/lib/sub"
+	const id = file + "::import::" + path
+	edge := &graph.Edge{From: file, To: "dep::example.com/lib", Kind: graph.EdgeImports, FilePath: file, Line: 3}
+	nodes := []*graph.Node{
+		{ID: id, Kind: graph.KindImport, Language: "go", StartLine: 4, Meta: map[string]any{"path": path}},
+	}
+	for _, tc := range []struct {
+		name string
+		link *graph.Edge
+		want string
+	}{
+		{"exact_line", &graph.Edge{From: file, To: id, Kind: graph.EdgeContains, Line: 3}, path},
+		{"wrong_owner", &graph.Edge{From: "a/other.go", To: id, Kind: graph.EdgeContains, Line: 3}, ""},
+		{"wrong_line", &graph.Edge{From: file, To: id, Kind: graph.EdgeContains, Line: 4}, ""},
+		{"wrong_kind", &graph.Edge{From: file, To: id, Kind: graph.EdgeImports, Line: 3}, ""},
+		{"wrong_target", &graph.Edge{From: file, To: "other", Kind: graph.EdgeContains, Line: 3}, ""},
+		{"missing", nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var links []*graph.Edge
+			if tc.link != nil {
+				links = append(links, tc.link)
+			}
+			assert.Equal(t, tc.want, goModuleImportPath(edge, nodes, links))
+		})
+	}
+	nodes = append(nodes, &graph.Node{ID: "other", Kind: graph.KindImport, Language: "go", StartLine: 4, Meta: map[string]any{"path": "example.com/lib/other"}})
+	links := []*graph.Edge{
+		{From: file, To: id, Kind: graph.EdgeContains, Line: 3},
+		{From: file, To: "other", Kind: graph.EdgeContains, Line: 3},
+	}
+	assert.Empty(t, goModuleImportPath(edge, nodes, links), "containment must not bypass same-line package ambiguity")
 }
 
 func TestGoModuleImportDroppedBatch(t *testing.T) {
