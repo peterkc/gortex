@@ -1113,8 +1113,9 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 		markerBatch.recordDeferredPriorBindings(stagePriorBindings(idx.graph, stages, view))
 	}
 	idx.applyLap("prior_bindings")
-	carried, npmConsumers, cargoConsumers := restubIncomingRefsFromView(idx.graph, stages, view)
+	carried, npmConsumers, cargoConsumers, pythonConsumers := restubIncomingRefsFromView(idx.graph, stages, view)
 	if markerBatch != nil {
+		markerBatch.pythonConsumerFiles = appendUniqueSorted(markerBatch.pythonConsumerFiles, pythonConsumers...)
 		markerBatch.npmConsumerFiles = appendUniqueSorted(markerBatch.npmConsumerFiles, npmConsumers...)
 		markerBatch.cargoConsumerFiles = appendUniqueSorted(markerBatch.cargoConsumerFiles, cargoConsumers...)
 		for _, stage := range stages {
@@ -1379,9 +1380,10 @@ func restubIncomingRefsFromView(
 	g graph.Store,
 	stages []*incrementalBatchStage,
 	view incrementalPriorView,
-) ([]*graph.Edge, []string, []string) {
+) ([]*graph.Edge, []string, []string, []string) {
 	evicted := structuralPriorIDs(stages)
-	consumers := restubTrackedCargoImportsFromView(g, evicted, view.inByNode, false)
+	cargoConsumers := restubTrackedCargoImportsFromView(g, evicted, view.inByNode, false)
+	pythonConsumers := restubTrackedPythonImportsFromView(g, evicted, view.inByNode, false)
 	reparsed := reparsedPaths(stages)
 	npmConsumers := restubTrackedNpmImportsFromView(g, evicted, view.inByNode)
 	var reindexes []graph.EdgeReindex
@@ -1405,7 +1407,7 @@ func restubIncomingRefsFromView(
 				// is not reparsed — so re-state it.
 				if _, survives := frontier.survivingIDs[node.ID]; !survives && (!frontier.conservative || stage.result == nil) {
 					for _, edge := range view.inByNode[node.ID] {
-						if edge == nil || edge.Kind != graph.EdgeImports {
+						if edge == nil || edge.Kind != graph.EdgeImports || edge.To != node.ID {
 							continue
 						}
 						if _, sourceEvicted := evicted[edge.From]; sourceEvicted {
@@ -1558,6 +1560,9 @@ func restubIncomingRefsFromView(
 				if original, _ := edge.Meta[resolver.CargoCallStubMeta].(string); edge.Kind == graph.EdgeCalls && edge.CrossRepo && original != "" {
 					edge.To, edge.CrossRepo, edge.ConfidenceLabel = original, false, ""
 				}
+				if original, _ := edge.Meta[resolver.PythonCallStubMeta].(string); edge.Kind == graph.EdgeCalls && original != "" {
+					edge.To, edge.CrossRepo, edge.ConfidenceLabel = original, false, ""
+				}
 				reindexes = append(reindexes, graph.EdgeReindex{Edge: edge, OldTo: oldTo})
 			}
 		}
@@ -1565,7 +1570,7 @@ func restubIncomingRefsFromView(
 	if len(reindexes) > 0 {
 		g.ReindexEdges(reindexes)
 	}
-	return canonicalizeLegacyCarried(stages, evicted, carried), npmConsumers, consumers
+	return canonicalizeLegacyCarried(stages, evicted, carried), npmConsumers, cargoConsumers, pythonConsumers
 }
 
 // dataflowSourceSite is a reference's site: the file that records it and its
@@ -2552,9 +2557,10 @@ func (idx *Indexer) evictDeletedFilesBatched(deleted []string, plan *DerivedInva
 		// carry therefore means a deletion stage stopped being conservative,
 		// which would destroy those edges with no compile error to show for
 		// it — so the assumption is checked, not just documented.
-		carried, _, consumers := restubIncomingRefsFromView(idx.graph, stages, view)
+		carried, _, cargoConsumers, pythonConsumers := restubIncomingRefsFromView(idx.graph, stages, view)
 		if markerBatch != nil {
-			markerBatch.cargoConsumerFiles = appendUniqueSorted(markerBatch.cargoConsumerFiles, consumers...)
+			markerBatch.cargoConsumerFiles = appendUniqueSorted(markerBatch.cargoConsumerFiles, cargoConsumers...)
+			markerBatch.pythonConsumerFiles = appendUniqueSorted(markerBatch.pythonConsumerFiles, pythonConsumers...)
 		}
 		if len(carried) > 0 {
 			idx.logger.Error("indexer: deletion restub carried in-edges with no re-state path",

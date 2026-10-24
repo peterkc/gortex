@@ -3445,6 +3445,7 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 				shadowReplacementStarted = true
 				restubTrackedNpmRepoIncoming(diskTarget, idx.RepoPrefix())
 				parked := restubTrackedCargoRepoIncoming(diskTarget, idx.RepoPrefix())
+				parked = appendUniqueSorted(parked, restubTrackedPythonRepoIncoming(diskTarget, idx.RepoPrefix())...)
 				if result != nil {
 					result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, parked...)
 				}
@@ -5175,9 +5176,9 @@ func (idx *Indexer) indexFile(
 		// batch replacement by deleting its prior documents explicitly;
 		// canonical contracts follow the store's owner-retention decision.
 		idx.deleteSymbolFTS(oldFTSNodeIDs)
-		var npmConsumers, cargoConsumers []string
+		var npmConsumers, cargoConsumers, pythonConsumers []string
 		if len(legacyIDs) == 0 {
-			npmConsumers, cargoConsumers = idx.restubIncomingRefs(graphPath)
+			npmConsumers, cargoConsumers, pythonConsumers = idx.restubIncomingRefs(graphPath)
 		} else {
 			// Extraction is still unprefixed here. Build only the identity surface
 			// needed by the same incoming frontier used by the structural batch.
@@ -5192,11 +5193,12 @@ func (idx *Indexer) indexFile(
 			}
 			stage := &incrementalBatchStage{graphPath: graphPath, legacyPath: legacyPath, priorNodes: priorNodes, result: fresh}
 			stages := []*incrementalBatchStage{stage}
-			legacyCarried, npmConsumers, cargoConsumers = restubIncomingRefsFromView(idx.graph, stages, loadIncrementalPriorView(idx.graph, stages))
+			legacyCarried, npmConsumers, cargoConsumers, pythonConsumers = restubIncomingRefsFromView(idx.graph, stages, loadIncrementalPriorView(idx.graph, stages))
 		}
 		if markerBatch != nil {
 			markerBatch.npmConsumerFiles = appendUniqueSorted(markerBatch.npmConsumerFiles, npmConsumers...)
 			markerBatch.cargoConsumerFiles = appendUniqueSorted(markerBatch.cargoConsumerFiles, cargoConsumers...)
+			markerBatch.pythonConsumerFiles = appendUniqueSorted(markerBatch.pythonConsumerFiles, pythonConsumers...)
 		}
 		if len(legacyIDs) == 0 {
 			idx.graph.EvictFile(graphPath)
@@ -5959,10 +5961,10 @@ func (idx *Indexer) reresolveFileScopedRaw(filePath string) error {
 // agnostic: GetInEdges + ReindexEdges are the same Store primitives the
 // resolver uses, so this behaves identically on the in-memory and disk
 // stores.
-func (idx *Indexer) restubIncomingRefs(graphPath string) ([]string, []string) {
+func (idx *Indexer) restubIncomingRefs(graphPath string) ([]string, []string, []string) {
 	nodes := idx.graph.GetFileNodes(graphPath)
 	if len(nodes) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	evicted := make(map[string]struct{}, len(nodes))
 	refIDs := make([]string, 0, len(nodes))
@@ -5976,14 +5978,15 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) ([]string, []string) {
 		}
 	}
 	if len(refIDs) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	// Fetch the whole changed file's incoming adjacency in one bounded store
 	// operation. On SQLite this is chunked under the parameter limit; more
 	// importantly, it avoids one transaction/query per definition in the file.
 	inEdges := idx.graph.GetInEdgesByNodeIDs(refIDs)
 	npmConsumers := restubTrackedNpmImportsFromView(idx.graph, evicted, inEdges)
-	consumers := restubTrackedCargoImportsFromView(idx.graph, evicted, inEdges, false)
+	cargoConsumers := restubTrackedCargoImportsFromView(idx.graph, evicted, inEdges, false)
+	pythonConsumers := restubTrackedPythonImportsFromView(idx.graph, evicted, inEdges, false)
 	var batch []graph.EdgeReindex
 	for _, n := range nodes {
 		if n == nil || n.Name == "" || !graph.IsReferenceableSymbol(n.Kind) && n.Kind != graph.KindFile {
@@ -6014,13 +6017,16 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) ([]string, []string) {
 			if original, _ := e.Meta[resolver.CargoCallStubMeta].(string); e.Kind == graph.EdgeCalls && e.CrossRepo && original != "" {
 				e.To, e.CrossRepo, e.ConfidenceLabel = original, false, ""
 			}
+			if original, _ := e.Meta[resolver.PythonCallStubMeta].(string); e.Kind == graph.EdgeCalls && original != "" {
+				e.To, e.CrossRepo, e.ConfidenceLabel = original, false, ""
+			}
 			batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		}
 	}
 	if len(batch) > 0 {
 		idx.graph.ReindexEdges(batch)
 	}
-	return npmConsumers, consumers
+	return npmConsumers, cargoConsumers, pythonConsumers
 }
 
 // embeddingDimsOrDefault returns the embedder's reported vector width,
@@ -7550,6 +7556,7 @@ func (idx *Indexer) incrementalReindexPathsMode(
 	result.CrossRepoResolveFiles = appendUniqueSorted(nil, markerBatch.npmConsumerFiles...)
 	result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, markerBatch.cargoConsumerFiles...)
 	result.CargoRetarget = markerBatch.cargoAddedFile
+	result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, markerBatch.pythonConsumerFiles...)
 	for _, path := range failedFiles {
 		result.Errors = append(result.Errors, IndexError{FilePath: path, Error: idx.fileIndexFailureError(path).Error()})
 	}

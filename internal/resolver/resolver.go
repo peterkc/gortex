@@ -4112,6 +4112,14 @@ func (r *Resolver) resolveEdge(e *graph.Edge, stats *ResolveStats) (oldTo string
 		}
 	}
 
+	if e.To != oldTo && e.Kind == graph.EdgeCalls && isPythonSourcePath(e.FilePath) {
+		if e.Meta == nil {
+			e.Meta = make(map[string]any)
+		}
+		if original, _ := e.Meta[PythonCallStubMeta].(string); original == "" {
+			e.Meta[PythonCallStubMeta] = oldTo
+		}
+	}
 	return oldTo, e.To != oldTo
 }
 
