@@ -69,7 +69,7 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 	// Provider recovery needs the lazy seed before the pass lock is taken.
 	// Ordinary consumer frontiers keep local resolution ahead of the bridge.
 	if len(definitionFiles) > 0 {
-		if err := cr.resolveGoModuleImportSweep(context.Background(), stats, importBudget); err != nil {
+		if err := cr.seedGoModuleImportRegistry(context.Background()); err != nil {
 			cr.logger.Warn("cross-repo resolve: seed Go module imports deferred", zap.Error(err))
 		}
 	}
