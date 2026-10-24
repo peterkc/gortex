@@ -144,7 +144,7 @@ func TestGoModuleImportParkBeforeEviction(t *testing.T) {
 				g.AddBatch([]*graph.Node{
 					{ID: "a/main.go", Name: "main.go", Kind: graph.KindFile, FilePath: "a/main.go", RepoPrefix: "a", Language: "go"},
 					{ID: "b/lib.go", Name: "lib.go", Kind: graph.KindFile, FilePath: "b/lib.go", RepoPrefix: "b", Language: "go"},
-				}, []*graph.Edge{{From: "a/main.go", To: "b/lib.go", Kind: graph.EdgeImports, FilePath: "a/main.go", Line: 2, CrossRepo: true, Meta: map[string]any{"go_import": "example.org/lib"}}})
+				}, []*graph.Edge{{From: "a/main.go", To: "b/lib.go", Kind: graph.EdgeImports, FilePath: "a/main.go", Line: 2, CrossRepo: true, Confidence: 0.6, ConfidenceLabel: "EXTRACTED", Origin: graph.OriginASTInferred, Meta: map[string]any{"go_import": "example.org/lib"}}})
 				if route == "repo" {
 					restubGoModuleRepoIncoming(g, "b")
 				} else if route == "deleted_batch" {
@@ -163,6 +163,10 @@ func TestGoModuleImportParkBeforeEviction(t *testing.T) {
 				rows := g.GetOutEdges("a/main.go")
 				require.Len(t, rows, 1, "the consumer-owned row must survive provider eviction")
 				assert.Equal(t, "unresolved::import::example.org/lib", rows[0].To)
+				assert.False(t, rows[0].CrossRepo)
+				assert.Empty(t, rows[0].ConfidenceLabel)
+				assert.Empty(t, rows[0].Origin)
+				assert.Zero(t, rows[0].Confidence)
 				assert.Equal(t, "example.org/lib", rows[0].Meta["go_import"])
 				g.AddNode(&graph.Node{ID: "b/lib.go", Name: "lib.go", Kind: graph.KindFile, FilePath: "b/lib.go", RepoPrefix: "b", Language: "go"})
 				cr := resolver.NewCrossRepo(g)

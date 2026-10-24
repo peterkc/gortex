@@ -14,7 +14,7 @@ import (
 // counted records whether the ordinary frontier pass already counted an import
 // as resolved (true) or unresolved (false), before this pass retargets it.
 func (cr *CrossRepoResolver) resolveGoModuleImports(ctx context.Context, files []string, stats *CrossRepoStats, counted map[graph.EdgeIdentity]bool) error {
-	if len(files) == 0 {
+	if len(files) == 0 || len(cr.goModules) == 0 && cr.goModuleRetry == nil {
 		return nil
 	}
 	cr.goModuleImportState()
@@ -255,13 +255,17 @@ func (cr *CrossRepoResolver) goModuleImportState() *GoModuleDepRetry {
 	return state
 }
 
-// Seed the save-time registry once, without hydrating files or mutating edges.
-// A workspace-sized identity scan must not consume a provider's recovery budget.
+// Seed import identities without hydrating files or mutating edges. Saves seed
+// once; whole-graph passes invalidate the seed. This scan must not consume a
+// provider's recovery budget.
 func (cr *CrossRepoResolver) seedGoModuleImportRegistry(ctx context.Context) error {
+	if len(cr.goModules) == 0 {
+		return ctx.Err()
+	}
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
 	state := cr.goModuleImportState()
-	if state.importsSeeded || len(cr.goModules) == 0 {
+	if state.importsSeeded {
 		return ctx.Err()
 	}
 	for n := range graph.RepoNodeIdentitiesSeq(cr.graph, nil, graph.KindImport) {
@@ -284,11 +288,14 @@ func (cr *CrossRepoResolver) seedGoModuleImportRegistry(ctx context.Context) err
 // An unchanged warm restart skips global resolution. Public entry points seed
 // once before taking the pass lock; each candidate batch takes its own lock.
 func (cr *CrossRepoResolver) resolveGoModuleImportSweep(ctx context.Context, stats *CrossRepoStats) error {
+	if len(cr.goModules) == 0 {
+		return ctx.Err()
+	}
 	cr.mu.Lock()
 	state := cr.goModuleImportState()
 	seeded := state.importsSeeded
 	cr.mu.Unlock()
-	if seeded || len(cr.goModules) == 0 {
+	if seeded {
 		return ctx.Err()
 	}
 	for files, err := range cr.goModuleImportFileBatches(ctx, nil) {
