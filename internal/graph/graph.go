@@ -788,8 +788,6 @@ func (g *Graph) reindexEdges(batch []EdgeReindex) []*Edge {
 			}
 			old.FilePath = r.OldFilePath
 			old.Line = r.OldLine
-		} else if old.To == e.To && old.Kind == e.Kind {
-			continue
 		}
 		oldKey := hashEdgeKey(keyOf(&old))
 		sFrom := g.shardFor(old.From)
@@ -806,7 +804,7 @@ func (g *Graph) reindexEdges(batch []EdgeReindex) []*Edge {
 		stored := sFrom.outEdges[old.From][pos]
 		if oldKey == hashEdgeKey(keyOf(e)) {
 			// A payload-only refresh keeps its identity and both slots.
-			if receiptRows != nil && !deltaEdgeContentEqual(stored, e) {
+			if receiptRows != nil && r.RefreshIdentity && !deltaEdgeContentEqual(stored, e) {
 				receiptRows[oldKey] = stored
 			}
 			sFrom.repoEdgeRemove(repoOf(sFrom, old.From), stored)

@@ -367,3 +367,19 @@ func TestDeltaWriterReindexRepeatedOldIdentityInOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestDeltaWriterReindexMixedPayloadRefreshesInOrder(t *testing.T) {
+	for _, firstRefresh := range []bool{false, true} {
+		t.Run(fmt.Sprintf("firstRefresh=%t", firstRefresh), func(t *testing.T) {
+			edge := &Edge{From: "a::A", To: "b::X", Kind: EdgeCalls, FilePath: "a.go", Line: 10}
+			store, g := retargetBatchStore(true, edge)
+			first, last := cloneDeltaEdge(edge), cloneDeltaEdge(edge)
+			first.Origin, last.Origin = "first", "last"
+			store.ReindexEdges([]EdgeReindex{
+				{Edge: first, OldTo: edge.To, RefreshIdentity: firstRefresh, OldFilePath: edge.FilePath, OldLine: edge.Line},
+				{Edge: last, OldTo: edge.To, RefreshIdentity: !firstRefresh, OldFilePath: edge.FilePath, OldLine: edge.Line},
+			})
+			assertRetargetBatchLifecycle(t, store, g, last)
+		})
+	}
+}
