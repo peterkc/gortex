@@ -2915,7 +2915,7 @@ func (mi *MultiIndexer) logCollision(err error) {
 }
 
 // sameDirectory reports whether two existing paths are the same directory,
-// for example a symlinked spelling. It stats only the one prefix owner.
+// for example a symlinked spelling. It stats both paths.
 func sameDirectory(a, b string) bool {
 	ai, aerr := os.Stat(a)
 	bi, berr := os.Stat(b)
@@ -2927,20 +2927,11 @@ func (mi *MultiIndexer) TrackRepo(entry config.RepoEntry) (*IndexResult, error) 
 	return mi.TrackRepoCtx(context.Background(), entry)
 }
 
-// resolveTrackPrefix determines the repo prefix that absPath should be
-// registered under and loads the per-repo `.gortex.yaml` config keyed to
-// that prefix. It is the single place that decides whether a git
-// worktree of an already-tracked repo becomes an INDEPENDENT instance
-// (see WorktreeInstanceName); the track and reconcile paths both call it
-// before their "already tracked?" check so a worktree that joins a
-// different workspace than the canonical no longer silently coalesces
-// into it.
-//
-// When a separate instance is created the derived `<base>@<tag>` prefix
-// is written back into entry.Name so it is persisted to config and
-// reproduced deterministically on the next daemon warmup. entry is
-// mutated in place; callers pass a pointer to the value they will add to
-// the global config.
+// resolveTrackPrefix prepares workspace config and resolves workspace/forced
+// instancing when the caller has not pinned Name. CheckoutLifecycle.Register
+// pins existing and family admin-name prefixes before reaching this fallback.
+// The prepared config is published only after live and configured ownership
+// checks succeed. A derived instance name is written back to entry for config.
 func (mi *MultiIndexer) resolveTrackPrefix(entry *config.RepoEntry, absPath string, identity *RepoIdentity, lookup config.RepoPathLookup) (string, *config.Config) {
 	base := config.ResolvePrefix(*entry)
 	if base == "" || base == "." {
@@ -3018,7 +3009,7 @@ func EffectiveRepoPrefix(cm *config.ConfigManager, entry config.RepoEntry) strin
 	}
 	declaredWS := entry.Workspace
 	if declaredWS == "" && cm != nil {
-		// Read only the workspace name, as main does. On a malformed or
+		// Read only the workspace name. On a malformed or
 		// unreadable file, use the last good parse for this root.
 		if cfg, err := config.ParseWorkspaceFile(filepath.Join(absPath, ".gortex.yaml")); err == nil {
 			declaredWS = cfg.Workspace

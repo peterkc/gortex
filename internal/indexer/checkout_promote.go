@@ -439,8 +439,14 @@ func (l *CheckoutLifecycle) beginModeChange(
 func (l *CheckoutLifecycle) promotionFailed(
 	ctx context.Context, out *PromoteResult, transition store_sqlite.IntentTransition, cause error,
 ) error {
+	lastError := cause.Error()
+	var collision *PrefixCollisionError
+	if errors.As(cause, &collision) {
+		lastError = fmt.Sprintf("repository prefix %q is already used by %s; promotion will retry under a suffixed prefix",
+			collision.Prefix, collision.ExistingPath)
+	}
 	err := l.catalog.UpdateIntentTransitionProgress(ctx, out.CheckoutID, transition.TransitionID,
-		store_sqlite.IntentTransitionPending, cause.Error(), l.clock().Unix())
+		store_sqlite.IntentTransitionPending, lastError, l.clock().Unix())
 	if err != nil {
 		l.logger.Warn("checkout lifecycle: could not journal a failed promotion",
 			zap.String("checkout", out.CheckoutID), zap.Error(err))

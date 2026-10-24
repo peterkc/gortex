@@ -243,6 +243,11 @@ func TestPromotionPrefixCollisionKeepsOtherCorpus(t *testing.T) {
 	var collision *PrefixCollisionError
 	require.ErrorAs(t, err, &collision)
 	assert.True(t, result.Retryable)
+	transition, found, journalErr := f.catalog.GetIntentTransition(t.Context(), f.automatic.CheckoutID)
+	require.NoError(t, journalErr)
+	require.True(t, found)
+	assert.Contains(t, transition.LastError, "promotion will retry under a suffixed prefix")
+	assert.NotContains(t, transition.LastError, "track --name")
 	require.NotNil(t, f.mi.GetMetadata(prefix), "collision must not purge the other root")
 	assert.Equal(t, other, f.mi.GetMetadata(prefix).RootPath)
 	assert.NotEmpty(t, f.store.GetRepoNodes(prefix))
@@ -290,6 +295,7 @@ func TestSeedPrefixCollisionKeepsPersistedOwner(t *testing.T) {
 	first, second := f.gitRepo("first"), f.gitRepo("second")
 	_, err := f.lc.Register(t.Context(), config.RepoEntry{Path: first, Name: "src"}, TrackSourceCLI)
 	require.NoError(t, err)
+	guardConfiguredOwner(t, f, "src")
 	before := f.familyOf("src")
 	f.cm.Global().Repos = []config.RepoEntry{{Path: second, Name: "src"}, {Path: first, Name: "src"}}
 	require.NoError(t, f.cm.Global().Save())
