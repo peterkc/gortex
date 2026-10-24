@@ -99,3 +99,60 @@ func RunReindexConvergencePayload(t *testing.T, factory Factory) {
 		}
 	}
 }
+
+// RunReindexMovingSiblings checks that a batch frees its old keys together.
+func RunReindexMovingSiblings(t *testing.T, factory Factory) {
+	for _, shape := range []string{"target_chain", "target_swap", "line_chain"} {
+		for _, reverse := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/reverse=%t", shape, reverse), func(t *testing.T) {
+				s := factory(t)
+				first := graph.Edge{From: "caller", To: "X", Kind: graph.EdgeCalls,
+					FilePath: "a.go", Line: 10, Origin: "first", Confidence: 0.2}
+				second := first
+				second.To, second.Origin, second.Confidence = "Y", "second", 0.9
+				if shape == "line_chain" {
+					second.To, second.Line = first.To, 11
+				}
+				s.AddEdge(&first)
+				s.AddEdge(&second)
+				wantFirst, wantSecond := first, second
+				wantFirst.To, wantSecond.To = "Y", "Z"
+				if shape == "target_swap" {
+					wantSecond.To = "X"
+				}
+				batch := []graph.EdgeReindex{{Edge: &wantFirst, OldTo: first.To}, {Edge: &wantSecond, OldTo: second.To}}
+				if shape == "line_chain" {
+					wantFirst.To, wantSecond.To = first.To, second.To
+					wantFirst.Line, wantSecond.Line = 11, 12
+					for i, old := range []*graph.Edge{&first, &second} {
+						batch[i].RefreshIdentity = true
+						batch[i].OldFilePath, batch[i].OldLine = old.FilePath, old.Line
+					}
+				}
+				if reverse {
+					batch[0], batch[1] = batch[1], batch[0]
+				}
+				s.ReindexEdges(batch)
+				out := s.GetOutEdges("caller")
+				if len(out) != 2 || s.EdgeCount() != 2 || len(s.AllEdges()) != 2 {
+					t.Fatalf("surviving edges = %d, count = %d, all = %d, want 2", len(out), s.EdgeCount(), len(s.AllEdges()))
+				}
+				for _, want := range []graph.Edge{wantFirst, wantSecond} {
+					foundOut, foundIn := false, false
+					for _, row := range out {
+						foundOut = foundOut || reflect.DeepEqual(*row, want)
+					}
+					for _, row := range s.GetInEdges(want.To) {
+						foundIn = foundIn || reflect.DeepEqual(*row, want)
+					}
+					if !foundOut || !foundIn {
+						t.Errorf("payload %+v: outgoing=%t incoming=%t", want, foundOut, foundIn)
+					}
+				}
+				if err := s.VerifyEdgeIdentities(); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
+}
