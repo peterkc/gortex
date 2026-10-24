@@ -65,3 +65,13 @@ func TestParentLimitedIncludesAnchoredOnly(t *testing.T) {
 		t.Fatal("literal include lost")
 	}
 }
+
+func TestIncludeAnchoringLiteralOpensGlobParent(t *testing.T) {
+	m := NewWithIncludes(Builtin, []string{"vendor/acme/lib/", "*.proto"})
+	if !m.IncludesRel("vendor/x.proto") || m.MatchRel("vendor/x.proto") {
+		t.Fatal("literal include opens vendor/ so the wildcard can include its .proto sibling")
+	}
+	if m.IncludesRel("vendor/x.go") || !m.MatchRel("vendor/x.go") {
+		t.Fatal("opening an ancestor must not include unrelated siblings")
+	}
+}
