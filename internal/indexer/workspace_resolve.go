@@ -498,6 +498,7 @@ func (mi *MultiIndexer) newCrossRepoResolver() *resolver.CrossRepoResolver {
 	cr.SetCrossWorkspaceDepLookup(mi.crossWorkspacePassLookup())
 	cr.SetNpmAliasResolver(mi.npmAliasResolver())
 	cr.SetNpmDependencyLookup(mi.npmDependencyLookup())
+	cr.SetCargoCrateLookup(mi.cargoCrateLookup())
 	cr.SetPathAliasResolver(mi.pathAliasResolver())
 	cr.SetWorkspaceMembership(mi.workspaceMembershipResolver())
 	mi.applyRemoteStitch(cr)
@@ -510,11 +511,12 @@ func (mi *MultiIndexer) runCrossRepoResolve(reconcileContracts bool) {
 	}
 }
 
-func (mi *MultiIndexer) runCrossRepoResolveContext(ctx context.Context, reconcileContracts bool) error {
+func (mi *MultiIndexer) runCrossRepoResolveContext(ctx context.Context, reconcileContracts bool, cargoRetargetRepo ...string) error {
 	cr := mi.newCrossRepoResolver()
 	if cr == nil {
 		return nil
 	}
+	cr.SetCargoImportRetargetRepo(cargoRetargetRepo...)
 	if _, err := cr.ResolveAllContext(ctx); err != nil {
 		return err
 	}
@@ -531,15 +533,15 @@ func (mi *MultiIndexer) runCrossRepoResolveContext(ctx context.Context, reconcil
 // for one coordinated mutation frontier. Its caller owns the repository lane
 // and global topology-writer gate, so the graph cannot expose a half-resolved
 // batch between same-repo, semantic, and cross-repository phases.
-func (mi *MultiIndexer) runCrossRepoResolveFiles(filePaths []string) {
-	mi.runCrossRepoResolveMutationFiles(filePaths, filePaths)
+func (mi *MultiIndexer) runCrossRepoResolveFiles(filePaths []string, cargoRetargetRepo ...string) {
+	mi.runCrossRepoResolveMutationFrontiers(filePaths, filePaths, filePaths, cargoRetargetRepo...)
 }
 
 func (mi *MultiIndexer) runCrossRepoResolveMutationFiles(resolutionFiles, materializationFiles []string) {
 	mi.runCrossRepoResolveMutationFrontiers(resolutionFiles, materializationFiles, materializationFiles)
 }
 
-func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiers(resolutionFiles, edgeSourceFiles, definitionFiles []string) {
+func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiers(resolutionFiles, edgeSourceFiles, definitionFiles []string, cargoRetargetRepo ...string) {
 	if len(resolutionFiles) == 0 && len(edgeSourceFiles) == 0 && len(definitionFiles) == 0 {
 		return
 	}
@@ -547,6 +549,7 @@ func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiers(resolutionFiles, ed
 	if cr == nil {
 		return
 	}
+	cr.SetCargoImportRetargetRepo(cargoRetargetRepo...)
 	cr.ResolveMutationFrontiers(resolutionFiles, edgeSourceFiles, definitionFiles)
 	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 }

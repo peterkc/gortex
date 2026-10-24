@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -141,6 +142,10 @@ type CrossRepoResolver struct {
 	// contract as the field of the same name on Resolver — see
 	// npm_dependency.go.
 	npmDep NpmDependencyLookup
+
+	cargoCrates        CargoCrateLookup
+	cargoRetargetRepos map[string]bool
+
 	// pathAlias expands a JS/TS tsconfig/jsconfig path-alias / baseUrl
 	// import specifier to the repo-prefixed file stem it targets. Same
 	// contract as the field of the same name on Resolver — see
@@ -388,6 +393,9 @@ func (cr *CrossRepoResolver) ResolveAllContext(ctx context.Context) (*CrossRepoS
 	// Every exit applies the moves the pass deferred (a no-op after the
 	// normal flush below); it runs before the deferred unlock above.
 	defer cr.placeholderSrcIdx.applyDeferred(cr.graph)
+	if err := cr.resolveCargoImports(ctx, graph.EdgesLightSeq(cr.graph, graph.EdgeImports), stats); err != nil {
+		return stats, err
+	}
 	// Share the master resolver's stable high-water/keyset stream. The cold
 	// residual can exceed 200k edges; retaining it plus the cross-repo name,
 	// raw-name, repo and qualified-name caches was the second whole-corpus heap
@@ -672,6 +680,7 @@ func (cr *CrossRepoResolver) ResolveForFile(repoPrefix, relPath string) *CrossRe
 // scopes. Caller holds cr.mu.
 func (cr *CrossRepoResolver) resolveScopedLocked(edges []*graph.Edge) *CrossRepoStats {
 	stats := &CrossRepoStats{ByRepo: make(map[string]int)}
+	_ = cr.resolveCargoImports(context.Background(), slices.Values(edges), stats)
 	pending := make([]*graph.Edge, 0, len(edges))
 	for _, edge := range edges {
 		if edge != nil && graph.IsUnresolvedTarget(edge.To) {
@@ -1189,6 +1198,12 @@ func (cr *CrossRepoResolver) resolveEdge(e *graph.Edge, stats *CrossRepoStats, b
 	}
 
 	if e.To != oldTo {
+		if e.Kind == graph.EdgeCalls && e.CrossRepo && cr.cargoCrates != nil && strings.HasSuffix(e.FilePath, ".rs") {
+			if e.Meta == nil {
+				e.Meta = make(map[string]any)
+			}
+			e.Meta[CargoCallStubMeta] = oldTo
+		}
 		*batch = append(*batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		cr.noteRetargetedCall(e)
 	}
@@ -1432,6 +1447,11 @@ func (cr *CrossRepoResolver) resolveImport(e *graph.Edge, importPath string, sta
 		ambiguousQualName = ambiguous
 		// No unique policy-eligible candidate: retain directory/dependency
 		// evidence fallbacks below before deciding that the import is ambiguous.
+	}
+
+	if node := cr.cargoImportTarget(e, importPath); node != nil {
+		cr.bindCargoImport(e, node, stats)
+		return
 	}
 
 	// Look for file nodes whose directory matches the import path. Two
