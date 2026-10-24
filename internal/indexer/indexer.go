@@ -5950,7 +5950,7 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) ([]string, []string) {
 	// importantly, it avoids one transaction/query per definition in the file.
 	inEdges := idx.graph.GetInEdgesByNodeIDs(refIDs)
 	npmConsumers := restubTrackedNpmImportsFromView(idx.graph, evicted, inEdges)
-	consumers := restubTrackedCargoImportsFromView(idx.graph, evicted, inEdges)
+	consumers := restubTrackedCargoImportsFromView(idx.graph, evicted, inEdges, false)
 	var batch []graph.EdgeReindex
 	for _, n := range nodes {
 		if n == nil || n.Name == "" || !graph.IsReferenceableSymbol(n.Kind) && n.Kind != graph.KindFile {
@@ -5977,6 +5977,9 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) ([]string, []string) {
 			e.To = goModuleRestubTarget(e, stub)
 			if e.Kind == graph.EdgeImports {
 				e.CrossRepo, e.ConfidenceLabel = false, ""
+			}
+			if original, _ := e.Meta[resolver.CargoCallStubMeta].(string); e.Kind == graph.EdgeCalls && original != "" {
+				e.To, e.CrossRepo, e.ConfidenceLabel = original, false, ""
 			}
 			batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		}
