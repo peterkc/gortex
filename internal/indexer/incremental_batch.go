@@ -522,6 +522,9 @@ func (idx *Indexer) reindexIncrementalFallback(
 	if markerBatch != nil && len(fallback.priorNodes) == 0 && strings.HasSuffix(fallback.graphPath, ".rs") {
 		markerBatch.cargoAddedFile = true
 	}
+	if markerBatch != nil && len(fallback.priorNodes) == 0 && strings.HasSuffix(fallback.graphPath, ".py") {
+		markerBatch.pythonAddedFiles = append(markerBatch.pythonAddedFiles, fallback.graphPath)
+	}
 	freshNodes := idx.graph.GetFileNodesByPaths([]string{fallback.graphPath})[fallback.graphPath]
 	freshDerived := storedDerivedFingerprints(freshNodes)
 	if fallback.probeOK && fallback.probe.derived.complete() {
