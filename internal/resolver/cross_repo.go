@@ -865,10 +865,10 @@ func (cr *CrossRepoResolver) buildReachableReposIndex() {
 			if alias == "" {
 				alias = e.Alias
 			}
-			if isJSTSPath(e.From) {
+			if e.CrossRepo && isJSTSPath(e.From) {
 				// JS/TS imports name bindings, not every symbol in the provider.
 				if _, name, ok := strings.Cut(e.To, "::"); ok {
-					if npmLinked && alias != "" {
+					if alias != "" {
 						name = alias
 					}
 					bindings := cr.jsTSBindingsByFile[e.From]

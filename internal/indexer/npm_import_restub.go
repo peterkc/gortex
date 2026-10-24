@@ -75,7 +75,8 @@ func restubTrackedNpmRepoIncoming(g graph.Store, repo string) {
 	}
 }
 
-func restubTrackedNpmImportsFromView(g graph.Store, evicted map[string]struct{}, incoming map[string][]*graph.Edge) {
+func restubTrackedNpmImportsFromView(g graph.Store, evicted map[string]struct{}, incoming map[string][]*graph.Edge) []string {
+	var consumerFiles []string
 	consumers := make(map[string]map[string]string)
 	var batch []graph.EdgeReindex
 	for _, edges := range incoming {
@@ -87,6 +88,7 @@ func restubTrackedNpmImportsFromView(g graph.Store, evicted map[string]struct{},
 			if _, sourceEvicted := evicted[edge.From]; spec == "" || sourceEvicted {
 				continue
 			}
+			consumerFiles = appendUniqueSorted(consumerFiles, edge.From)
 			oldTo := edge.To
 			if _, name, symbol := strings.Cut(oldTo, "::"); symbol {
 				if alias, _ := edge.Meta["import_alias"].(string); alias != "" {
@@ -124,4 +126,37 @@ func restubTrackedNpmImportsFromView(g graph.Store, evicted map[string]struct{},
 	if len(batch) > 0 {
 		g.ReindexEdges(batch)
 	}
+	return consumerFiles
+}
+
+// npmConsumerFilesForRepo finds parked imports whose package is claimed by this
+// provider. Used only after a full index or track; incremental saves carry their
+// exact parked consumer files directly from the restub step.
+func (mi *MultiIndexer) npmConsumerFilesForRepo(repo string) []string {
+	lookup := mi.npmPackageLookup()
+	if lookup == nil {
+		return nil
+	}
+	files := make(map[string]struct{})
+	claims := make(map[string]bool)
+	for edge := range graph.EdgesLightSeq(mi.graph, graph.EdgeImports) {
+		if !strings.HasPrefix(edge.To, "external::") {
+			continue
+		}
+		spec, _, _ := strings.Cut(strings.TrimPrefix(edge.To, "external::"), "::")
+		claimed, known := claims[spec]
+		if !known {
+			for dir := range lookup(spec) {
+				if dir == repo || strings.HasPrefix(dir, repo+"/") {
+					claimed = true
+					break
+				}
+			}
+			claims[spec] = claimed
+		}
+		if claimed {
+			files[edge.From] = struct{}{}
+		}
+	}
+	return sortedStringKeys(files)
 }

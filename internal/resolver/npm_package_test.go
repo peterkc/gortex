@@ -576,3 +576,43 @@ func TestJSTSCrossRepoFileImportFallback(t *testing.T) {
 		})
 	}
 }
+
+func TestJSTSRenamedImportPreservesSameRepoCall(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, importedRepo := range []string{"lib", "app"} {
+			t.Run(backend+"/"+importedRepo, func(t *testing.T) {
+				var g graph.Store = graph.New()
+				if backend == "sqlite" {
+					db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.sqlite"))
+					require.NoError(t, err)
+					t.Cleanup(func() { require.NoError(t, db.Close()) })
+					g = db
+				}
+				target := importedRepo + "/x.ts::f"
+				importedName := "f"
+				if importedRepo == "app" {
+					importedName = "" // Do not add a second same-repo name candidate.
+				}
+				g.AddBatch([]*graph.Node{
+					{ID: "app/a.ts", Kind: graph.KindFile, RepoPrefix: "app"},
+					{ID: "app/a.ts::run", Kind: graph.KindFunction, FilePath: "app/a.ts", RepoPrefix: "app"},
+					{ID: "app/b.ts::f", Kind: graph.KindFunction, Name: "f", FilePath: "app/b.ts", RepoPrefix: "app"},
+					{ID: target, Kind: graph.KindFunction, Name: importedName, FilePath: importedRepo + "/x.ts", RepoPrefix: importedRepo},
+				}, []*graph.Edge{
+					{From: "app/a.ts", To: target, Kind: graph.EdgeImports, Alias: "g", Meta: map[string]any{"import_alias": "g"}, FilePath: "app/a.ts", CrossRepo: importedRepo != "app"},
+					{From: "app/a.ts::run", To: "unresolved::f", Kind: graph.EdgeCalls, FilePath: "app/a.ts"},
+				})
+				NewCrossRepo(g).ResolveAll()
+				var calls []*graph.Edge
+				for _, edge := range g.GetOutEdges("app/a.ts::run") {
+					if edge.Kind == graph.EdgeCalls {
+						calls = append(calls, edge)
+					}
+				}
+				require.Len(t, calls, 1)
+				assert.Equal(t, "app/b.ts::f", calls[0].To)
+				assert.False(t, calls[0].CrossRepo)
+			})
+		}
+	}
+}
