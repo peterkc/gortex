@@ -118,7 +118,7 @@ func (r *Resolver) resolveGoModuleExtern(e *graph.Edge, importPath, callerRepo s
 	if match == nil {
 		return false
 	}
-	bindGoModuleEdge(e, match, callerRepo)
+	bindGoModuleEdge(e, match, callerRepo, r.goModuleReplacements)
 	stats.Resolved++
 	return true
 }
@@ -195,17 +195,21 @@ func goModuleCandidate(modules map[string]string, importPath string, candidates 
 	return match
 }
 
-func bindGoModuleEdge(e *graph.Edge, match *graph.Node, callerRepo string) {
-	// Retain the symbol-bearing import, not just the selected checkout.
-	if spec := goModuleEdgeSpec(e); spec != "" {
+func bindGoModuleEdge(e *graph.Edge, match *graph.Node, callerRepo string, replacements map[string][]GoModuleReplacement) {
+	e.CrossRepo = callerRepo != "" && match.RepoPrefix != "" && match.RepoPrefix != callerRepo
+	// Only foreign or replacement bindings depend on a module-map recheck.
+	spec := goModuleEdgeSpec(e)
+	if sep := strings.LastIndex(spec, "::"); sep >= 0 {
 		e.Meta = maps.Clone(e.Meta)
-		if e.Meta == nil {
-			e.Meta = make(map[string]any)
+		_, replaced := goModuleReplacementFor(replacements, callerRepo, spec[:sep])
+		if e.CrossRepo || replaced {
+			if e.Meta == nil {
+				e.Meta = make(map[string]any)
+			}
+			e.Meta["go_import"] = spec
 		}
-		e.Meta["go_import"] = spec
 	}
 	e.To = match.ID
-	e.CrossRepo = callerRepo != "" && match.RepoPrefix != "" && match.RepoPrefix != callerRepo
 	if e.CrossRepo {
 		e.Confidence = 0.6
 		e.ConfidenceLabel = graph.ConfidenceLabelFor(e.Kind, e.Confidence)
