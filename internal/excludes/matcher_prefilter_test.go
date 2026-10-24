@@ -179,3 +179,52 @@ func TestMatcherUnrelatedIncludeSkipsCompiledMatchers(t *testing.T) {
 		})
 	}
 }
+
+// One compiled file query is sufficient when no negation can match and its
+// positive verdict is identical in directory form. A nil directory matcher
+// makes any extra compiled evaluation fail without a timing assertion.
+func TestMatchRelEitherNonmatchingNegationSkipsParents(t *testing.T) {
+	for _, rel := range []string{"node_modules/pkg/index.js", "node_modules/pkg/a/b/c/d/e/f/index.js"} {
+		m := New(append(append([]string{}, Builtin...), "!.gitkeep"))
+		m.dirs = nil
+		if !m.MatchRelEither(rel) {
+			t.Fatalf("excluded event admitted: %s", rel)
+		}
+	}
+}
+
+func TestMatcherNegationPrefilterDifferential(t *testing.T) {
+	rng := rand.New(rand.NewSource(95103))
+	pool := []string{"gen/", "node_modules/", "*.tmp", "/**", "gen/**/", "gen/**", "a/b/*", "[ab]", "?x", `\#*\#`, "!.gitkeep", "!*.proto", "!gen/", "!gen/keep/", "!**/keep.go", "!a/**/b", "!gen?/", "!/[ab]/", `!a\*b/`, "!*", "!/**", "!café/", "!foo//", "!!bang"}
+	includePool := []string{"*.proto", "gen/", "vendor/acme/lib/", "/gen/keep/", "**/keep.go", "a?/", "[ab]/"}
+	paths := []string{"main.go", "index.js", ".gitkeep", "schema.proto", "keep.go", "keep/file.go", "gen", "gen/lib/file.go", "gen/keep/a.tmp", "node_modules/pkg/index.js", "node_modules/pkg/.gitkeep", "node_modules/pkg/schema.proto", "node_modules/pkg/a/b/c/d/index.js", "a/b", "a/deep/b", "a/b/file.go", "foo", "foo//child", "cache.tmp", "a", "b", "ax", "#lock#", "cafe\u0301/x", "café/keep.go", "vendor/x.proto", "vendor/acme/lib/x.go", "!bang/x"}
+	queries := 0
+	for range 4200 {
+		var patterns, includes []string
+		if rng.Intn(2) == 0 {
+			patterns = append(patterns, Builtin...)
+		}
+		for range 1 + rng.Intn(12) {
+			patterns = append(patterns, pool[rng.Intn(len(pool))])
+		}
+		for range rng.Intn(4) {
+			includes = append(includes, includePool[rng.Intn(len(includePool))])
+		}
+		m := NewWithIncludes(patterns, includes)
+		ungated := NewWithIncludes(patterns, includes)
+		ungated.negationLiterals = nil // Force the old, unconditional parent check.
+		for _, path := range paths {
+			for _, prefix := range []string{"", "sub/", "deep/sub/"} {
+				rel := prefix + path
+				got, want := m.MatchRelEither(rel), ungated.MatchRelEither(rel)
+				queries++
+				if got != want {
+					t.Fatalf("patterns=%q includes=%q path=%q: got %v, ungated %v", patterns, includes, rel, got, want)
+				}
+			}
+		}
+	}
+	if queries != 352800 {
+		t.Fatalf("checked %d paths, want 352800", queries)
+	}
+}

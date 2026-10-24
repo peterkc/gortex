@@ -27,6 +27,9 @@ type Matcher struct {
 	// such as a/b/* from matching the parent a/b/ with an empty child name.
 	dirs        *ignore.GitIgnore
 	hasNegation bool
+	// A non-empty list rules out negations missing all required literals.
+	// Any uncertain negation keeps the parent check unfiltered.
+	negationLiterals []string
 	// Some dependency regexps do not propagate an ancestor match to a
 	// full file path. Those lists cannot skip unmatched parent queries.
 	checkUnmatchedParents bool
@@ -85,10 +88,16 @@ func New(patterns []string) *Matcher {
 		patterns: cleaned,
 	}
 	var unfiltered []string
+	var unfilteredNegation bool
 	seen := make(map[string]bool)
 	for i, p := range cleaned {
 		if strings.HasPrefix(p, "!") {
 			m.hasNegation = true
+			if literal := requiredLiteral(p[1:]); literal != "" {
+				m.negationLiterals = append(m.negationLiterals, literal)
+			} else {
+				unfilteredNegation = true
+			}
 			continue
 		}
 		if p == "/**" || strings.HasSuffix(p, "**/") || strings.Contains(p, `\`) {
@@ -101,6 +110,9 @@ func New(patterns []string) *Matcher {
 			seen[literal] = true
 			m.requiredLiterals = append(m.requiredLiterals, literal)
 		}
+	}
+	if unfilteredNegation {
+		m.negationLiterals = nil
 	}
 	if len(m.requiredLiterals) > 0 && len(unfiltered) > 0 {
 		m.unfiltered = ignore.CompileIgnoreLines(unfiltered...)
@@ -134,6 +146,20 @@ func (m *Matcher) couldMatch(rel string) bool {
 		}
 	}
 	return m.unfiltered != nil && m.unfiltered.MatchesPath(rel)
+}
+
+// couldNegate is conservative: folder negations can match descendants too,
+// so test the whole path rather than only its final basename.
+func (m *Matcher) couldNegate(rel string) bool {
+	if len(m.negationLiterals) == 0 {
+		return true
+	}
+	for _, literal := range m.negationLiterals {
+		if strings.Contains(rel, literal) {
+			return true
+		}
+	}
+	return false
 }
 
 // Patterns returns the cleaned pattern list (empties and comments removed).
@@ -258,13 +284,14 @@ func (m *Matcher) MatchRelEither(relPath string) bool {
 		return false
 	}
 	matched, ip := m.ign.MatchesPathHow(rel)
-	if m.hasNegation && (ip != nil || m.checkUnmatchedParents) && m.excludesParent(rel) {
+	couldNegate := m.hasNegation && m.couldNegate(rel)
+	if m.hasNegation && ((couldNegate && ip != nil) || m.checkUnmatchedParents) && m.excludesParent(rel) {
 		return true
 	}
 	if !matched {
 		return false
 	}
-	if !m.hasNegation && ip != nil {
+	if !couldNegate && ip != nil {
 		// A matched file already crossed a directory-only marker. Only a
 		// terminal /** (or repeated slash) can change this positive verdict
 		// in the directory form; ordinary default rules need no second pass.
