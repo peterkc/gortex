@@ -176,14 +176,14 @@ func (cm *ConfigManager) LoadWorkspaceConfig(repoPrefix, repoPath string) {
 // ownership before calling it.
 func (cm *ConfigManager) PrepareWorkspaceConfig(repoPrefix, repoPath string, lookup RepoPathLookup) (*Config, func(string)) {
 	workspace, authoritative := cm.readWorkspaceConfig(repoPrefix, repoPath)
-	ws := workspace
 	if !authoritative {
-		ws = cm.getWorkspaceConfig(repoPrefix)
+		workspace = cm.LastGoodWorkspace(repoPrefix, repoPath)
 	}
 	cm.excludeCache.forgetChain(repoPath)
-	cfg := cm.repoConfig(repoPrefix, ws, repoPath, lookup)
+	cfg := cm.repoConfig(repoPrefix, workspace, repoPath, lookup)
 	return cfg, func(prefix string) {
-		cm.publishWorkspaceConfig(prefix, repoPath, workspace, authoritative)
+		// Publish the same snapshot used to build cfg, even after a rekey.
+		cm.publishWorkspaceConfig(prefix, repoPath, workspace, true)
 	}
 }
 
@@ -318,6 +318,17 @@ func repoConfigSeed() *Config {
 }
 
 // getWorkspaceConfig returns the cached workspace config for a repo, or nil.
+// LastGoodWorkspace returns the workspace config last published for
+// repoPrefix when it was read from repoPath, or nil. It reads no file.
+func (cm *ConfigManager) LastGoodWorkspace(repoPrefix, repoPath string) *Config {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	if cm.workspacePaths[repoPrefix] != repoPath {
+		return nil
+	}
+	return cm.workspace[repoPrefix]
+}
+
 func (cm *ConfigManager) getWorkspaceConfig(repoPrefix string) *Config {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
@@ -430,7 +441,7 @@ func (cm *ConfigManager) effectiveExclude(repoPrefix string, gc *GlobalConfig, w
 			chain = cm.excludeCache.chain(repoPath)
 		}
 	}
-	if root == "" {
+	if root == "" && lookup == nil {
 		if m, ok := cm.excludeCache.lookupMerged(repoPrefix, gc, ws, repoPath, respect, chain); ok {
 			return m
 		}
@@ -500,7 +511,7 @@ func (cm *ConfigManager) effectiveExclude(repoPrefix string, gc *GlobalConfig, w
 	// forced to reallocate and can never write through the shared backing
 	// array the cache hands to every reader.
 	out = out[:len(out):len(out)]
-	if root == "" {
+	if root == "" && lookup == nil {
 		cm.excludeCache.storeMerged(repoPrefix, gc, ws, repoPath, respect, chain, out)
 	}
 	return out

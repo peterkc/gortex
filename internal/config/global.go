@@ -508,17 +508,16 @@ func (gc *GlobalConfig) snapshotRepoPaths(canonicalize func(string) string) Repo
 	var roots []repoRoot
 	canonicalRoots := make(map[string]string)
 	if gc != nil {
-		for _, entry := range gc.ReposSnapshot() {
+		globalConfigMu.Lock()
+		entries := append([]RepoEntry(nil), gc.Repos...)
+		for _, project := range gc.Projects {
+			entries = append(entries, project.Repos...)
+		}
+		globalConfigMu.Unlock()
+		for _, entry := range entries {
 			root := canonicalize(entry.Path)
 			canonicalRoots[entry.Path] = root
 			roots = append(roots, repoRoot{root, entry})
-		}
-		for _, project := range gc.Projects {
-			for _, entry := range project.Repos {
-				root := canonicalize(entry.Path)
-				canonicalRoots[entry.Path] = root
-				roots = append(roots, repoRoot{root, entry})
-			}
 		}
 	}
 	return func(root string) *RepoEntry {
@@ -532,7 +531,13 @@ func (gc *GlobalConfig) snapshotRepoPaths(canonicalize func(string) string) Repo
 				return &roots[i].entry
 			}
 		}
-		return gc.FindRepoByPath(root)
+		globalConfigMu.Lock()
+		defer globalConfigMu.Unlock()
+		if entry := gc.FindRepoByPath(root); entry != nil {
+			copy := *entry
+			return &copy
+		}
+		return nil
 	}
 }
 

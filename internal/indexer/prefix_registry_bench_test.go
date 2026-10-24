@@ -27,6 +27,8 @@ func BenchmarkResolveTrackPrefixRegistryReaders(b *testing.B) {
 	stop, done, started := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(done)
+		entry := config.RepoEntry{Path: root, Name: "src"}
+		mi.resolveTrackPrefix(&entry, root, nil, nil)
 		close(started)
 		for {
 			select {

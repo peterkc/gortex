@@ -2147,7 +2147,10 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 		absPath  string
 		identity *RepoIdentity
 	}
-	configLookup := mi.configMgr.Global().SnapshotRepoPaths()
+	var configLookup config.RepoPathLookup
+	if mi.configMgr != nil {
+		configLookup = mi.configMgr.Global().SnapshotRepoPaths()
+	}
 	trackedModules := make(map[string]string)
 	resolved := make([]resolvedRepo, 0, len(repos))
 	seenPrefix := make(map[string]string, len(repos)) // prefix → absPath
@@ -3000,8 +3003,14 @@ func EffectiveRepoPrefix(cm *config.ConfigManager, entry config.RepoEntry) strin
 	}
 	declaredWS := entry.Workspace
 	if declaredWS == "" && cm != nil {
+		// Read only the workspace name, as main does. On a malformed or
+		// unreadable file, use the last good parse for this root.
 		if cfg, err := config.ParseWorkspaceFile(filepath.Join(absPath, ".gortex.yaml")); err == nil {
 			declaredWS = cfg.Workspace
+		} else if !os.IsNotExist(err) {
+			if ws := cm.LastGoodWorkspace(base, absPath); ws != nil {
+				declaredWS = ws.Workspace
+			}
 		}
 	}
 	name, _ := WorktreeInstanceName(absPath, base, declaredWS, entry.AsWorktree)
