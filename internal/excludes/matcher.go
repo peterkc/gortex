@@ -93,10 +93,10 @@ func New(patterns []string) *Matcher {
 	for i, p := range cleaned {
 		if strings.HasPrefix(p, "!") {
 			m.hasNegation = true
-			// A line starting with "!!" compiles as a negation of a pattern
-			// that itself starts with "!", whose match does not need that
-			// literal, so it gets no prefilter literal.
-			if literal := requiredLiteral(p[1:]); literal != "" && !strings.HasPrefix(p[1:], "!") {
+			// After the negation "!", the compiler strips one more leading
+			// "!" or "#", so "!!x" and "!#x" both negate "x". Their match
+			// does not need that character, so they get no prefilter literal.
+			if literal := requiredLiteral(p[1:]); literal != "" && !strings.HasPrefix(p[1:], "!") && !strings.HasPrefix(p[1:], "#") {
 				m.negationLiterals = append(m.negationLiterals, literal)
 			} else {
 				unfilteredNegation = true

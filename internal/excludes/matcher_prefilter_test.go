@@ -195,9 +195,9 @@ func TestMatchRelEitherNonmatchingNegationSkipsParents(t *testing.T) {
 
 func TestMatcherNegationPrefilterDifferential(t *testing.T) {
 	rng := rand.New(rand.NewSource(95103))
-	pool := []string{"gen/", "node_modules/", "*.tmp", "/**", "gen/**/", "gen/**", "a/b/*", "[ab]", "?x", `\#*\#`, "!.gitkeep", "!*.proto", "!gen/", "!gen/keep/", "!**/keep.go", "!a/**/b", "!gen?/", "!/[ab]/", `!a\*b/`, "!*", "!/**", "!café/", "!foo//", "!!bang", "!!bang/", "bang"}
+	pool := []string{"gen/", "node_modules/", "*.tmp", "/**", "gen/**/", "gen/**", "a/b/*", "[ab]", "?x", `\#*\#`, "!.gitkeep", "!*.proto", "!gen/", "!gen/keep/", "!**/keep.go", "!a/**/b", "!gen?/", "!/[ab]/", `!a\*b/`, "!*", "!/**", "!café/", "!foo//", "!!bang", "!!bang/", "bang", "!#x", "src/"}
 	includePool := []string{"*.proto", "gen/", "vendor/acme/lib/", "/gen/keep/", "**/keep.go", "a?/", "[ab]/"}
-	paths := []string{"main.go", "index.js", ".gitkeep", "schema.proto", "keep.go", "keep/file.go", "gen", "gen/lib/file.go", "gen/keep/a.tmp", "node_modules/pkg/index.js", "node_modules/pkg/.gitkeep", "node_modules/pkg/schema.proto", "node_modules/pkg/a/b/c/d/index.js", "a/b", "a/deep/b", "a/b/file.go", "foo", "foo//child", "cache.tmp", "a", "b", "ax", "#lock#", "cafe\u0301/x", "café/keep.go", "vendor/x.proto", "vendor/acme/lib/x.go", "!bang/x", "bang", "src/bang"}
+	paths := []string{"main.go", "index.js", ".gitkeep", "schema.proto", "keep.go", "keep/file.go", "gen", "gen/lib/file.go", "gen/keep/a.tmp", "node_modules/pkg/index.js", "node_modules/pkg/.gitkeep", "node_modules/pkg/schema.proto", "node_modules/pkg/a/b/c/d/index.js", "a/b", "a/deep/b", "a/b/file.go", "foo", "foo//child", "cache.tmp", "a", "b", "ax", "#lock#", "cafe\u0301/x", "café/keep.go", "vendor/x.proto", "vendor/acme/lib/x.go", "!bang/x", "bang", "src/bang", "src/x/y.go"}
 	queries := 0
 	for range 2000 {
 		var patterns, includes []string
@@ -229,7 +229,7 @@ func TestMatcherNegationPrefilterDifferential(t *testing.T) {
 			}
 		}
 	}
-	if queries != 180000 {
-		t.Fatalf("checked %d paths, want 180000", queries)
+	if queries != 186000 {
+		t.Fatalf("checked %d paths, want 186000", queries)
 	}
 }
