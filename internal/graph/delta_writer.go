@@ -801,6 +801,7 @@ func (g *Graph) reindexStoredEdges(batch []EdgeReindex) {
 	}
 	prepared := make([]EdgeReindex, 0, len(batch))
 	moving := make(map[edgeKey]bool, len(batch))
+	created := make(map[edgeKey]bool, len(batch))
 	for _, r := range batch {
 		if r.Edge == nil {
 			continue
@@ -820,11 +821,12 @@ func (g *Graph) reindexStoredEdges(batch []EdgeReindex) {
 		if moving[old] {
 			continue // A preceding move already consumed this old identity.
 		}
-		if !r.RefreshIdentity && g.storedEdge(old) == nil {
+		if !r.RefreshIdentity && !created[old] && g.storedEdge(old) == nil {
 			continue
 		}
 		prepared = append(prepared, r)
 		moving[old] = old != keyOf(r.Edge)
+		created[keyOf(r.Edge)] = true
 	}
 	for _, edge := range g.reindexEdges(prepared) {
 		g.recordReindexedEdgeForReceipts(edge)
