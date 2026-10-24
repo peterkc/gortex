@@ -38,6 +38,11 @@ func TestMultiIndexer_TrackedNpmPackage(t *testing.T) {
 		{name: "exports missing target blocks index", packageName: "p", manifest: `"exports":"./missing.ts"`, entry: "index.ts"},
 		{name: "exports subpath only blocks root", packageName: "p", manifest: `"exports":{"./utils":"./utils.ts"},"types":"./index.ts","main":"./index.ts"`, entry: "index.ts"},
 		{name: "exports empty object blocks root", packageName: "p", manifest: `"exports":{}`, entry: "index.ts"},
+		{name: "exports import null blocks main", packageName: "p", manifest: `"main":"index.ts","exports":{"import":null}`, entry: "index.ts"},
+		{name: "exports import null blocks require", packageName: "p", manifest: `"exports":{"import":null,"require":"./cjs.js"}`, entry: "index.ts"},
+		{name: "exports default null blocks index", packageName: "p", manifest: `"exports":{"default":null}`, entry: "index.ts"},
+		{name: "exports dot import null blocks types", packageName: "p", manifest: `"types":"index.ts","exports":{".":{"import":null}}`, entry: "index.ts"},
+		{name: "exports node condition keeps legacy index", packageName: "p", manifest: `"exports":{"node":"./n.js"}`, entry: "index.ts", resolves: true},
 		{name: "exports null uses legacy index", packageName: "p", manifest: `"exports":null`, entry: "index.ts", resolves: true},
 		{name: "exports empty string blocks subpath", packageName: "p", specifier: "p/private", manifest: `"exports":""`, entry: "private.ts"},
 		{name: "exports root-only unsupported conditions block subpath", packageName: "p", specifier: "p/private", manifest: `"exports":{"browser":"./index.ts"}`, entry: "private.ts"},
@@ -235,6 +240,21 @@ func TestMultiIndexer_TrackedNpmPackageLifecycle(t *testing.T) {
 						_, err := mi.TrackRepoCtx(context.Background(), entry)
 						require.NoError(t, err)
 					}
+					// Live tracking must link in either order without a whole-store pass.
+					var liveImports, liveCalls []string
+					for _, e := range g.AllEdges() {
+						if e.FilePath != "consumer/src/app.ts" {
+							continue
+						}
+						if e.Kind == graph.EdgeImports {
+							liveImports = append(liveImports, e.To)
+						}
+						if e.Kind == graph.EdgeCalls {
+							liveCalls = append(liveCalls, e.To)
+						}
+					}
+					assert.ElementsMatch(t, []string{"provider/src/index.ts", "provider/src/index.ts::f"}, liveImports)
+					assert.Equal(t, []string{"provider/src/index.ts::f"}, liveCalls)
 					// The daemon runs this whole-store resolve after cold per-repo tracking.
 					require.NoError(t, mi.RunPreEnrichResolve(context.Background(), nil, nil))
 					check := func(stage string) {
@@ -275,6 +295,41 @@ func TestMultiIndexer_TrackedNpmPackageLifecycle(t *testing.T) {
 						}
 						// A clean warm restart skips the global pass and keeps persisted links.
 						check("warm restart")
+						require.NoError(t, warm.Close(context.Background()))
+						require.NoError(t, sqlite.Close())
+						sqlite, err = store_sqlite.Open(db)
+						require.NoError(t, err)
+						g = sqlite
+						warm = newIndexer()
+						t.Setenv("GORTEX_WARMUP_FULL_RETRACK", "1")
+						for _, entry := range entries {
+							result, err := warm.ReconcileRepoCtx(context.Background(), entry, mtimes[entry.Name])
+							require.NoError(t, err)
+							require.True(t, result.FullRetrack)
+							if entry.Name == "provider" {
+								if providerFirst {
+									// The consumer is not restored yet: retain its parked edges.
+									var imports, calls []string
+									for _, e := range g.GetOutEdges("consumer/src/app.ts") {
+										if e.Kind == graph.EdgeImports {
+											imports = append(imports, e.To)
+										}
+									}
+									for _, e := range g.GetOutEdges("consumer/src/app.ts::run") {
+										if e.Kind == graph.EdgeCalls {
+											calls = append(calls, e.To)
+										}
+									}
+									assert.ElementsMatch(t, []string{"external::p", "external::p::f"}, imports, "provider full retrack")
+									assert.Equal(t, []string{"unresolved::" + binding}, calls, "provider full retrack")
+								} else {
+									check("provider full retrack")
+								}
+							}
+						}
+						check("warm full retrack")
+						require.NoError(t, warm.RunPreEnrichResolve(context.Background(), nil, nil))
+						check("full retrack global resolve")
 					}
 					t.Cleanup(func() { require.NoError(t, warm.Close(context.Background())) })
 					writeWorkspaceFile(t, provider, "src/index.ts", "export function f(value = 0): number { return 43 + value; }\nexport function added(): number { return 1; }\n")
