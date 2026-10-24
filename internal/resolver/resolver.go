@@ -317,7 +317,6 @@ type Resolver struct {
 	logger                      *zap.Logger
 	dirIndex                    map[string][]graph.FileNodeIdentity
 	lastDirIndex                map[string][]graph.FileNodeIdentity
-	importFileLanguages         map[string]string
 	// OnComputeDone, when set, fires once per ResolveAll immediately after
 	// the parallel compute loop has committed — BEFORE the deferred LSP
 	// batch and the serial refinement tail (guard, attribution, dispatch
@@ -2145,7 +2144,6 @@ func (r *Resolver) scopedFiles() []string {
 //   - lastDirIndex keys on the last path component of that directory
 //     so an import of "logger" matches any file under .../logger/.
 func (r *Resolver) buildDirIndexes() {
-	r.importFileLanguages = r.collectFileLanguages()
 	r.dirIndex = make(map[string][]graph.FileNodeIdentity, 128)
 	r.lastDirIndex = make(map[string][]graph.FileNodeIdentity, 128)
 	for file := range graph.FileNodeIdentitiesSeq(r.graph, nil) {
@@ -2166,7 +2164,6 @@ func (r *Resolver) buildDirIndexes() {
 }
 
 func (r *Resolver) clearDirIndexes() {
-	r.importFileLanguages = nil
 	r.dirIndex = nil
 	r.lastDirIndex = nil
 	r.receiverTypeIdxByDir = nil
@@ -4347,10 +4344,6 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 	// case the entry-point rule alone cannot: a repo that both depends on
 	// npm `graphql` and contains `src/feature/graphql/index.ts`.
 	externalNpmDep := bareJSTS && declaresExternalNpmDep(r.npmDep, jsTSImportCallerFile(e), importPath)
-	fileLanguages := r.importFileLanguages
-	if fileLanguages == nil {
-		fileLanguages = r.collectFileLanguages()
-	}
 	source := r.nodeByID[e.From]
 	if source == nil && r.nodeByID == nil {
 		source = r.graph.GetNode(e.From)
@@ -4386,9 +4379,12 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 				}
 			}
 			quality := fallback
-			if callerLanguage != "" && fileLanguages[file.ID] == callerLanguage && dir != "" &&
-				(dir == importPath || strings.HasSuffix(importPath, "/"+dir)) {
-				quality = folderMatch
+			// The candidate's language is read only for a folder match, so an
+			// import costs no file-wide language walk.
+			if callerLanguage != "" && dir != "" && (dir == importPath || strings.HasSuffix(importPath, "/"+dir)) {
+				if node := r.cachedGetNode(file.ID); node != nil && node.Language == callerLanguage {
+					quality = folderMatch
+				}
 			}
 			if ownership == GoPackageOwnershipExact {
 				quality = exactOwnership

@@ -374,14 +374,6 @@ func (p *resolveAllPassIndexes) ensureDir(prefixes []string) {
 		p.resolver.dirIndex = make(map[string][]graph.FileNodeIdentity, 128)
 		p.resolver.lastDirIndex = make(map[string][]graph.FileNodeIdentity, 128)
 	}
-	if p.resolver.importFileLanguages == nil {
-		p.resolver.importFileLanguages = make(map[string]string)
-	}
-	// Retain languages with the directory indexes, using only newly added
-	// repositories rather than a whole-store language walk per import.
-	for file := range graph.NodesLightByKindsInScopeSeq(p.resolver.graph, missing, nil, graph.KindFile) {
-		p.resolver.importFileLanguages[file.ID] = file.Language
-	}
 	touchedDirs := make(map[string]struct{})
 	touchedLast := make(map[string]struct{})
 	for file := range graph.FileNodeIdentitiesSeq(p.resolver.graph, missing) {

@@ -3,7 +3,6 @@ package resolver
 import (
 	"fmt"
 	"iter"
-	"reflect"
 	"sync/atomic"
 	"testing"
 
@@ -68,44 +67,10 @@ func TestResolveAllScopedImportLanguagesDoNotWalkPerImport(t *testing.T) {
 	if got := store.languageWalks.Load(); got > 5 {
 		t.Fatalf("whole-store language walks = %d for %d imports, want at most 5", got, imports)
 	}
-	if store.summaryRows != files+imports || !reflect.DeepEqual(store.summaryRepos, [][]string{{"repo"}}) {
-		t.Fatalf("scoped language reads = %v / %d rows, want repo only / %d rows", store.summaryRepos, store.summaryRows, files+imports)
+	if store.summaryRows != 0 {
+		t.Fatalf("import resolution read %d file summaries for languages, want 0", store.summaryRows)
 	}
-	if r.importFileLanguages != nil || r.dirIndex != nil || r.lastDirIndex != nil {
-		t.Fatal("ResolveAll retained directory or language indexes after the pass")
-	}
-}
-
-func TestResolveAllPendingImportLanguagesFollowDirectoryPrefixes(t *testing.T) {
-	g := graph.New()
-	g.AddBatch([]*graph.Node{
-		{ID: "a/file.go", Kind: graph.KindFile, FilePath: "a/file.go", Language: "go", RepoPrefix: "a"},
-		{ID: "b/file.py", Kind: graph.KindFile, FilePath: "b/file.py", Language: "python", RepoPrefix: "b"},
-		{ID: "other/file.ts", Kind: graph.KindFile, FilePath: "other/file.ts", Language: "typescript", RepoPrefix: "other"},
-	}, nil)
-	store := &importLanguageCountingStore{Store: g}
-	r := New(store)
-	p := newPendingFrontierPassIndexes(r)
-	defer p.close()
-	p.ensureDir([]string{"a"})
-	p.ensureDir([]string{"a", "b"})
-	p.ensureDir([]string{"b"})
-	want := map[string]string{"a/file.go": "go", "b/file.py": "python"}
-	if !reflect.DeepEqual(r.importFileLanguages, want) {
-		t.Fatalf("file languages = %v, want %v", r.importFileLanguages, want)
-	}
-	if store.summaryRows != 2 || !reflect.DeepEqual(store.summaryRepos, [][]string{{"a"}, {"b"}}) || store.languageWalks.Load() != 0 {
-		t.Fatalf("language reads: scopes=%v rows=%d global=%d, want a/b once each and no global walk", store.summaryRepos, store.summaryRows, store.languageWalks.Load())
-	}
-	p.close()
-	if r.importFileLanguages != nil || r.dirIndex != nil || r.lastDirIndex != nil {
-		t.Fatal("closing pending pass retained directory or language indexes")
-	}
-	g.AddNode(&graph.Node{ID: "a/file.go", Kind: graph.KindFile, FilePath: "a/file.go", Language: "rust", RepoPrefix: "a"})
-	p = newPendingFrontierPassIndexes(r)
-	defer p.close()
-	p.ensureDir([]string{"a"})
-	if got := r.importFileLanguages["a/file.go"]; got != "rust" || len(r.importFileLanguages) != 1 {
-		t.Fatalf("new pass languages = %v, want only updated a/file.go", r.importFileLanguages)
+	if r.dirIndex != nil || r.lastDirIndex != nil {
+		t.Fatal("ResolveAll retained directory indexes after the pass")
 	}
 }
