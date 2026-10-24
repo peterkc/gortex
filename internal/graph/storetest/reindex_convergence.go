@@ -10,7 +10,7 @@ import (
 
 // RunReindexConvergencePayload pins the payload and receipt rule shared by stores.
 func RunReindexConvergencePayload(t *testing.T, factory Factory) {
-	for _, shape := range []string{"single_stationary", "retarget_stationary", "retarget_refreshed", "refresh_stationary", "two_movers"} {
+	for _, shape := range []string{"single_stationary", "retarget_stationary", "retarget_refreshed", "refresh_stationary", "two_movers", "refresh_then_retarget_wins", "refresh_then_retarget_loses"} {
 		for _, reverse := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/reverse=%t", shape, reverse), func(t *testing.T) {
 				s := factory(t)
@@ -23,6 +23,10 @@ func RunReindexConvergencePayload(t *testing.T, factory Factory) {
 				moving.Meta = map[string]any{"payload": "mover"}
 				if shape == "refresh_stationary" {
 					moving.To, moving.Line = destination.To, 20
+				}
+				refreshThenRetarget := shape == "refresh_then_retarget_wins" || shape == "refresh_then_retarget_loses"
+				if refreshThenRetarget {
+					moving.To = "unresolved::Original"
 				}
 				candidate := moving
 				candidate.To, candidate.Line = destination.To, destination.Line
@@ -42,8 +46,21 @@ func RunReindexConvergencePayload(t *testing.T, factory Factory) {
 					if reverse {
 						want = next
 					}
-				} else {
+				} else if shape != "refresh_then_retarget_wins" {
 					s.AddEdge(&destination)
+				}
+				if refreshThenRetarget {
+					refreshed := moving
+					refreshed.Origin, refreshed.Confidence = "refreshed", 0.8
+					refreshed.Meta = map[string]any{"payload": "refreshed"}
+					batch = []graph.EdgeReindex{
+						{Edge: &refreshed, OldTo: moving.To, RefreshIdentity: true,
+							OldFilePath: moving.FilePath, OldLine: moving.Line},
+						batch[0],
+					}
+					if shape == "refresh_then_retarget_wins" {
+						want, wantWork = candidate, true
+					}
 				}
 				if shape == "retarget_refreshed" {
 					refreshed := destination
@@ -82,6 +99,9 @@ func RunReindexConvergencePayload(t *testing.T, factory Factory) {
 				if got := s.GetInEdges("old::First"); len(got) != 0 {
 					t.Errorf("old incoming rows = %+v", got)
 				}
+				if got := s.GetInEdges("unresolved::Original"); len(got) != 0 {
+					t.Errorf("refreshed old incoming rows = %+v", got)
+				}
 				if got := s.GetInEdges("old::Second"); len(got) != 0 {
 					t.Errorf("second old incoming rows = %+v", got)
 				}
@@ -94,6 +114,15 @@ func RunReindexConvergencePayload(t *testing.T, factory Factory) {
 				}
 				if !reflect.DeepEqual(receipt.UnresolvedFiles, wantFiles) || !reflect.DeepEqual(receipt.ChangedFiles, wantFiles) {
 					t.Errorf("receipt = %+v, want winner files %v", receipt, wantFiles)
+				}
+				if refreshThenRetarget {
+					var wantTargets []string
+					if wantWork {
+						wantTargets = []string{destination.To}
+					}
+					if !reflect.DeepEqual(receipt.TargetIDs, wantTargets) {
+						t.Errorf("receipt targets = %v, want %v", receipt.TargetIDs, wantTargets)
+					}
 				}
 			})
 		}
