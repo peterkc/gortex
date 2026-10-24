@@ -221,15 +221,25 @@ func TestWalkAdmissionUsesParentsOpen(t *testing.T) {
 func TestSourceSearchMatcherReusesImmutableSnapshot(t *testing.T) {
 	root := t.TempDir()
 	idx := newAdmissionTestIndexer(t, root)
+	path := filepath.Join(root, "main.go")
+	writeExcludeFixture(t, path, "package app\n")
 	patterns := []string{"vendor/"}
-	before := idx.sourceSearchMatcher(patterns)
+	for range 2 {
+		files, err := idx.CurrentSourceSearchFiles(context.Background(), root, nil, nil, 0, patterns)
+		require.NoError(t, err)
+		require.Equal(t, []string{"main.go"}, files)
+		require.NotNil(t, idx.sourceSearchCompiled, "enumeration must populate the snapshot cache")
+	}
+	before := idx.sourceSearchCompiled
 	require.Same(t, before, idx.sourceSearchMatcher(patterns))
 	idx.SetIgnorePatterns(idx.config.Exclude, []string{"vendor/keep.go"})
-	after := idx.sourceSearchMatcher(patterns)
-	require.NotSame(t, before, after)
+	require.True(t, idx.AdmitSourceSearchBuffer(context.Background(), root, path, []byte("package app\n"), patterns))
+	after := idx.sourceSearchCompiled
+	require.NotSame(t, before, after, "buffer admission must refresh the shared cache when includes change")
 	require.True(t, after.IncludesRel("vendor/keep.go"))
 	require.Same(t, after, idx.sourceSearchMatcher(patterns))
 	changed := []string{"vendor/", "*.go"}
-	require.NotSame(t, after, idx.sourceSearchMatcher(changed))
+	require.False(t, idx.AdmitSourceSearchBuffer(context.Background(), root, path, []byte("package app\n"), changed))
+	require.NotSame(t, after, idx.sourceSearchCompiled)
 	require.Same(t, idx.excludeMatcher(), idx.sourceSearchMatcher(nil))
 }
