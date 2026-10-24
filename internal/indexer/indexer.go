@@ -131,6 +131,8 @@ type IndexResult struct {
 	// incremental reconcile. A zero plan proves that no graph-wide derived
 	// pass is required; callers must not infer work merely from stale count.
 	DerivedInvalidation DerivedInvalidationPlan `json:"derived_invalidation,omitempty"`
+	// Parked importers belong to cross-repo resolution, not this repo's derived plan.
+	CrossRepoResolveFiles []string `json:"cross_repo_resolve_files,omitempty"`
 
 	// mutationErr carries a point-operation compatibility error through the
 	// resolver/semantic/derived tail. It is intentionally unexported and never
@@ -3409,6 +3411,10 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 			if sqlite, ok := diskTarget.(*store_sqlite.Store); ok && sqlite.SupportsShadowReplacementRetirement() {
 				var err error
 				shadowReplacementStarted = true
+				parked := restubTrackedCargoRepoIncoming(diskTarget, idx.RepoPrefix())
+				if result != nil {
+					result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, parked...)
+				}
 				evictedNodes, evictedEdges, err = sqlite.EvictRepoForShadowReplacement(ctx, idx.RepoPrefix())
 				if err != nil {
 					retErr = fmt.Errorf("indexer: retire shadow replacement rows: %w", err)
@@ -5111,7 +5117,10 @@ func (idx *Indexer) indexFile(
 		// batch replacement by deleting its prior documents explicitly;
 		// canonical contracts follow the store's owner-retention decision.
 		idx.deleteSymbolFTS(oldFTSNodeIDs)
-		idx.restubIncomingRefs(graphPath)
+		cargoConsumers := idx.restubIncomingRefs(graphPath)
+		if markerBatch != nil {
+			markerBatch.cargoConsumerFiles = appendUniqueSorted(markerBatch.cargoConsumerFiles, cargoConsumers...)
+		}
 		idx.graph.EvictFile(graphPath)
 	}
 
@@ -5866,10 +5875,10 @@ func (idx *Indexer) reresolveFileScopedRaw(filePath string) error {
 // agnostic: GetInEdges + ReindexEdges are the same Store primitives the
 // resolver uses, so this behaves identically on the in-memory and disk
 // stores.
-func (idx *Indexer) restubIncomingRefs(graphPath string) {
+func (idx *Indexer) restubIncomingRefs(graphPath string) []string {
 	nodes := idx.graph.GetFileNodes(graphPath)
 	if len(nodes) == 0 {
-		return
+		return nil
 	}
 	evicted := make(map[string]struct{}, len(nodes))
 	refIDs := make([]string, 0, len(nodes))
@@ -5878,17 +5887,18 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) {
 			continue
 		}
 		evicted[n.ID] = struct{}{}
-		if n.Name != "" && graph.IsReferenceableSymbol(n.Kind) {
+		if n.Kind == graph.KindFile || n.Name != "" && graph.IsReferenceableSymbol(n.Kind) {
 			refIDs = append(refIDs, n.ID)
 		}
 	}
 	if len(refIDs) == 0 {
-		return
+		return nil
 	}
 	// Fetch the whole changed file's incoming adjacency in one bounded store
 	// operation. On SQLite this is chunked under the parameter limit; more
 	// importantly, it avoids one transaction/query per definition in the file.
 	inEdges := idx.graph.GetInEdgesByNodeIDs(refIDs)
+	consumers := restubTrackedCargoImportsFromView(idx.graph, evicted, inEdges)
 	var batch []graph.EdgeReindex
 	for _, n := range nodes {
 		if n == nil || n.Name == "" || !graph.IsReferenceableSymbol(n.Kind) {
@@ -5919,6 +5929,7 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) {
 	if len(batch) > 0 {
 		idx.graph.ReindexEdges(batch)
 	}
+	return consumers
 }
 
 // embeddingDimsOrDefault returns the embedder's reported vector width,
@@ -7310,6 +7321,7 @@ func (idx *Indexer) incrementalReindexPathsMode(
 		CountsCached:        countsCached,
 		capabilityPrior:     idx.takeCapabilityPrior(),
 	}
+	result.CrossRepoResolveFiles = appendUniqueSorted(nil, markerBatch.cargoConsumerFiles...)
 	for _, path := range failedFiles {
 		result.Errors = append(result.Errors, IndexError{FilePath: path, Error: idx.fileIndexFailureError(path).Error()})
 	}
