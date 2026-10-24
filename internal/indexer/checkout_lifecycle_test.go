@@ -1221,3 +1221,27 @@ func TestCheckoutLifecycleAdminNameIdentity(t *testing.T) {
 	slices.Sort(names)
 	assert.Len(t, names, 2, "two working copies, two identities")
 }
+
+func TestCheckoutLifecycleReloadKeepsImplicitLiveRepo(t *testing.T) {
+	f := newLifecycleFixture(t)
+	t.Cleanup(f.close)
+	root, skipped := f.gitRepo("owner"), f.gitRepo("skipped")
+	_, err := f.mi.TrackRepoCtx(t.Context(), config.RepoEntry{Path: root, Name: "src"})
+	require.NoError(t, err)
+	require.NoError(t, f.lc.RecordImplicit(t.Context(), root))
+	checkout := f.checkoutOf("src")
+	f.cm.Global().Repos = []config.RepoEntry{{Path: skipped, Name: "src"}}
+	require.NoError(t, f.cm.Global().Save())
+	// The CLI fallback removes only the unloaded configured entry, then reloads.
+	require.NoError(t, f.cm.Global().RemoveRepo(skipped))
+	require.NoError(t, f.cm.Global().Save())
+	require.NoError(t, f.cm.Reload())
+	out, err := f.lc.ApplyReload(t.Context())
+	require.NoError(t, err)
+	assert.Zero(t, out.Pending, "config-only removal must not start retiring an implicit live owner")
+	assert.Zero(t, out.Removed)
+	require.NotNil(t, f.mi.GetMetadata("src"))
+	_, pending, err := f.catalog.GetIntentTransition(t.Context(), checkout.CheckoutID)
+	require.NoError(t, err)
+	assert.False(t, pending)
+}
