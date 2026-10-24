@@ -1538,7 +1538,7 @@ func restubIncomingRefsFromView(
 				if original, _ := edge.Meta[resolver.CargoCallStubMeta].(string); edge.Kind == graph.EdgeCalls && edge.CrossRepo && original != "" {
 					edge.To, edge.CrossRepo, edge.ConfidenceLabel = original, false, ""
 				}
-				if original, _ := edge.Meta[resolver.PythonCallStubMeta].(string); edge.Kind == graph.EdgeCalls && original != "" {
+				if original, _ := edge.Meta[resolver.PythonCallStubMeta].(string); edge.Kind == graph.EdgeCalls && edge.CrossRepo && original != "" {
 					edge.To, edge.CrossRepo, edge.ConfidenceLabel = original, false, ""
 				}
 				reindexes = append(reindexes, graph.EdgeReindex{Edge: edge, OldTo: oldTo})
