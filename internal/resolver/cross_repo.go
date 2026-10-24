@@ -157,7 +157,7 @@ type CrossRepoResolver struct {
 
 	cargoCrates        CargoCrateLookup
 	cargoRetargetRepos map[string]bool
-	pythonPackages func() *PythonPackageLookup
+	pythonPackages     func() *PythonPackageLookup
 	// pathAlias expands a JS/TS tsconfig/jsconfig path-alias / baseUrl
 	// import specifier to the repo-prefixed file stem it targets. Same
 	// contract as the field of the same name on Resolver — see

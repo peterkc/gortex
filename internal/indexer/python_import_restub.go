@@ -86,6 +86,13 @@ func restubTrackedPythonImportsFromView(g graph.Store, evicted map[string]struct
 					call.To, call.CrossRepo, call.ConfidenceLabel = original, false, ""
 					delete(call.Meta, resolver.PythonReExportFileMeta)
 					batch = append(batch, graph.EdgeReindex{Edge: call, OldTo: previous})
+					// SQLite reads return separate objects. Update the prior view too,
+					// so the generic carry cannot re-state the old call target.
+					for _, prior := range incoming[previous] {
+						if prior != nil && prior.From == call.From && prior.Kind == call.Kind && prior.Line == call.Line && prior.To == previous {
+							prior.To, prior.CrossRepo, prior.ConfidenceLabel = call.To, false, ""
+						}
+					}
 				}
 			}
 			if edge.Kind == graph.EdgeCalls {
