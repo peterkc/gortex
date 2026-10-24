@@ -21,7 +21,7 @@ func TestFindRepoByPathUsesRootNotPrefix(t *testing.T) {
 		Projects: map[string]ProjectConfig{"project": {Repos: []RepoEntry{ownerEntry}}},
 	}
 	assert.Equal(t, &ownerEntry, gc.FindRepoByPath(owner))
-	assert.Nil(t, gc.FindRepoByPath(t.TempDir()), "do not fall back to another root with the same prefix")
+	assert.Nil(t, gc.FindRepoByPath(loser+"2"), "a non-boundary path suffix must not match a configured root")
 	assert.Nil(t, gc.FindRepoByPath(""))
 	assert.Nil(t, (*GlobalConfig)(nil).FindRepoByPath(owner))
 	gc.Repos = append(gc.Repos, ownerEntry)

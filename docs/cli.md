@@ -83,8 +83,8 @@ gortex status
 ## Repository prefix collisions
 
 A repository prefix identifies one indexed root. By default, it is the directory
-basename. Tracking a different root with a prefix that is already taken fails,
-even without a daemon. Tracking the same root again remains a no-op.
+basename. Tracking a different root with a prefix taken by another top-level
+entry fails, even without a daemon. Tracking the same top-level root again is a no-op.
 
 Give same-named directories distinct prefixes:
 
@@ -93,8 +93,9 @@ gortex track ~/projects/one/src
 gortex track --name other-src ~/projects/two/src
 ```
 
-The CLI checks configured prefixes before saving a new entry. The daemon also
-checks the live registry, which remains authoritative. A live rejection removes
+The CLI checks top-level configured prefixes before saving a new entry.
+Project-scoped entries are not checked before this save. The daemon checks the
+live registry, which remains authoritative. A live rejection removes
 only the entry the CLI just added. Other daemon failures can leave a config-only
 entry for a later restart.
 

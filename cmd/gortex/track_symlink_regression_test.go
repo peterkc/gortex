@@ -19,7 +19,9 @@ func TestRunTrackOfflineSymlinkAlreadyTracked(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "src")
 	require.NoError(t, os.Mkdir(root, 0o755))
 	alias := filepath.Join(t.TempDir(), "src")
-	require.NoError(t, os.Symlink(root, alias))
+	if err := os.Symlink(root, alias); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
 	gc, err := config.LoadGlobal()
 	require.NoError(t, err)
 	require.NoError(t, gc.AddRepo(config.RepoEntry{Path: alias, Name: "src"}))
