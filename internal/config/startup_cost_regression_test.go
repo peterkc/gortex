@@ -28,8 +28,7 @@ func TestSnapshotRepoPathsCountLinearAllocations(t *testing.T) {
 			}
 		}
 	})
-	t.Logf("allocations for a 200-root snapshot and lookup pass: %.0f", allocs)
-	assert.Less(t, allocs, float64(2500), "case folding must not allocate for every root pair")
+	assert.Lessf(t, allocs, float64(2500), "case folding must not allocate for every root pair: %.0f allocations", allocs)
 }
 
 func TestPrepareWorkspaceConfigRetainsPreparedChain(t *testing.T) {

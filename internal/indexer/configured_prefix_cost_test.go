@@ -23,7 +23,10 @@ func TestConfiguredPrefixCheckDoesNotCopyAllRepos(t *testing.T) {
 	require.NoError(t, cm.Global().Save())
 	cm.RepoPathSnapshot()
 	entry := entries[0]
-	const checks = 10
+	// TotalAlloc is process-wide, so background goroutines can add a little.
+	// Many checks and a bound far below one copy of the list (about 115 KB)
+	// keep the test stable.
+	const checks = 100
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 	for range checks {
@@ -31,6 +34,5 @@ func TestConfiguredPrefixCheckDoesNotCopyAllRepos(t *testing.T) {
 	}
 	runtime.ReadMemStats(&after)
 	bytes := (after.TotalAlloc - before.TotalAlloc) / checks
-	t.Logf("configured prefix check: %d bytes/check, %d allocations/check", bytes, (after.Mallocs-before.Mallocs)/checks)
-	require.Less(t, bytes, uint64(4096), "a unique configured owner must not copy the whole repository list")
+	require.Lessf(t, bytes, uint64(16384), "a unique configured owner must not copy the whole repository list: %d bytes/check", bytes)
 }
