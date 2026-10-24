@@ -10,7 +10,7 @@ on:
       head_sha:
         description: Final head containing both prefix benchmark fixtures
         required: true
-        default: c46d57e5f58ec05c1d6e2c4b0a274672f76181c9
+        default: 87f973455f9142979054d85d0e16b2d6c3001bea
         type: string
 permissions:
   contents: read
@@ -18,7 +18,7 @@ env:
   GOMAXPROCS: 2
   GOTOOLCHAIN: local
   MAIN_SHA: 57faeca2fe4d742acb8f58da596529a2710c8e09
-  BRANCH_SHA: ${{ inputs.head_sha || 'bbd58affd1dd726bdc4d369ffb9916d2c64cec01' }}
+  BRANCH_SHA: ${{ inputs.head_sha || '87f973455f9142979054d85d0e16b2d6c3001bea' }}
 jobs:
   ab:
     if: github.repository == 'peterkc/gortex'
