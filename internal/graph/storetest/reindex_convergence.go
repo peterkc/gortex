@@ -165,6 +165,38 @@ func RunReindexMovingSiblings(t *testing.T, factory Factory) {
 			}
 		})
 	}
+	t.Run("intermediate_converges_after_first_mover", func(t *testing.T) {
+		s := factory(t)
+		original := graph.Edge{From: "caller", To: "X", Kind: graph.EdgeCalls,
+			FilePath: "a.go", Line: 10, Origin: "original"}
+		first := original
+		first.To, first.Origin = "W", "first"
+		s.AddEdge(&original)
+		s.AddEdge(&first)
+		intermediate, winner, last := original, first, original
+		intermediate.To, winner.To, last.To = "Y", "Z", "Z"
+		last.Origin = "last"
+		s.ReindexEdges([]graph.EdgeReindex{
+			{Edge: &intermediate, OldTo: "X"},
+			{Edge: &winner, OldTo: "W"},
+			{Edge: &last, OldTo: "Y"},
+		})
+		for name, rows := range map[string][]*graph.Edge{
+			"all": s.AllEdges(), "out": s.GetOutEdges("caller"), "in": s.GetInEdges("Z"),
+		} {
+			if len(rows) != 1 || !reflect.DeepEqual(*rows[0], winner) {
+				t.Errorf("%s rows = %+v, want only %+v", name, rows, winner)
+			}
+		}
+		for _, target := range []string{"X", "W", "Y"} {
+			if len(s.GetInEdges(target)) != 0 {
+				t.Errorf("dangling incoming rows at %s", target)
+			}
+		}
+		if err := s.VerifyEdgeIdentities(); err != nil {
+			t.Fatal(err)
+		}
+	})
 	for _, shape := range []string{"target_chain", "target_swap", "line_chain"} {
 		for _, reverse := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/reverse=%t", shape, reverse), func(t *testing.T) {
