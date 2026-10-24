@@ -213,3 +213,20 @@ func TestReindexEdgesKeepsOutgoingOrderAroundConvergence(t *testing.T) {
 	assert.Equal(t, edgeBytes(p)+edgeBytes(q)+edgeBytes(s), g.RepoMemoryEstimate("repo").EdgeBytes)
 	require.NoError(t, g.VerifyEdgeIdentities())
 }
+
+func TestReindexEdgesNonconvergingRefresh(t *testing.T) {
+	g := New()
+	g.AddNode(&Node{ID: "a::A", RepoPrefix: "repo"})
+	edge := &Edge{From: "a::A", To: "b::B", Kind: EdgeCalls, FilePath: "a.go", Line: 3}
+	g.AddEdge(edge)
+	updated := cloneDeltaEdge(edge)
+	updated.Line = 4
+	g.ReindexEdges([]EdgeReindex{{}, {Edge: updated, OldTo: edge.To,
+		OldFilePath: edge.FilePath, OldLine: edge.Line, RefreshIdentity: true}})
+	assert.Equal(t, []*Edge{updated}, g.GetOutEdges("a::A"))
+	assert.Equal(t, []*Edge{updated}, g.GetInEdges("b::B"))
+	assert.Equal(t, 1, g.EdgeCount())
+	assert.Equal(t, 1, g.RepoMemoryEstimate("repo").EdgeCount)
+	require.NoError(t, g.VerifyEdgeIdentities())
+	t.Logf("out=%s in=%s count=%d", edgeSetRender(g.GetOutEdges("a::A")), edgeSetRender(g.GetInEdges("b::B")), g.EdgeCount())
+}
