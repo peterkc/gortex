@@ -24,7 +24,7 @@ import (
 func TestTrackedPythonImportLifecycle(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
 		for _, providerFirst := range []bool{false, true} {
-			for _, operation := range []string{"consumer_save", "provider_save", "provider_save_util", "provider_save_lib_contract", "provider_delete_util_batched", "forced_evict_util", "delete_restore_util", "consumer_save_then_restore", "provider_gains_new_module", "consumer_full", "provider_full", "warm_full_retrack", "untrack_retrack", "no_change", "track", "deferred_track"} {
+			for _, operation := range []string{"consumer_save", "provider_save", "provider_save_util", "provider_save_lib_contract", "provider_delete_util_batched", "forced_evict_util", "delete_restore_util", "consumer_save_then_restore", "provider_gains_new_module", "provider_gains_empty_module", "consumer_full", "provider_full", "warm_full_retrack", "untrack_retrack", "no_change", "track", "deferred_track"} {
 				if operation == "deferred_track" && providerFirst {
 					continue // This case starts with an already tracked consumer.
 				}
@@ -42,6 +42,8 @@ func TestTrackedPythonImportLifecycle(t *testing.T) {
 					consumerSource := pythonLifecycleConsumer
 					if operation == "provider_gains_new_module" {
 						consumerSource += "\nfrom PIL.extra import later\ndef after(): return later()\n"
+					} else if operation == "provider_gains_empty_module" {
+						consumerSource += "\nimport PIL.extra\n"
 					}
 					writeWorkspaceFile(t, consumer, "app.py", consumerSource)
 					entries := []config.RepoEntry{{Path: consumer, Name: "consumer", Workspace: "shared"}, {Path: provider, Name: "provider", Workspace: "shared"}}
@@ -119,6 +121,11 @@ func TestTrackedPythonImportLifecycle(t *testing.T) {
 					}
 					assertImport()
 					logs.TakeAll()
+					var scans *pythonLookupScanStore
+					if operation == "provider_save" {
+						scans = &pythonLookupScanStore{Store: g}
+						mi.graph = scans
+					}
 					switch operation {
 					case "consumer_save":
 						writeWorkspaceFile(t, consumer, "app.py", pythonLifecycleConsumer+"def edited(): pass\n")
@@ -136,6 +143,9 @@ func TestTrackedPythonImportLifecycle(t *testing.T) {
 						require.NoError(t, os.Remove(filepath.Join(provider, "src/PIL/util.py")))
 						writeWorkspaceFile(t, provider, "src/PIL/image.py", pythonLifecycleProvider+"def added(): pass\n")
 						_, err = mi.IncrementalReindexRepo("provider", []string{filepath.Join(provider, "src/PIL/util.py"), filepath.Join(provider, "src/PIL/image.py")})
+					case "provider_gains_empty_module":
+						writeWorkspaceFile(t, provider, "src/PIL/extra.py", "")
+						_, err = mi.IncrementalReindexRepo("provider", []string{filepath.Join(provider, "src/PIL/extra.py")})
 					case "provider_gains_new_module":
 						writeWorkspaceFile(t, provider, "src/PIL/extra.py", "def later(): pass\n")
 						_, err = mi.IncrementalReindexRepo("provider", []string{filepath.Join(provider, "src/PIL/extra.py")})
@@ -223,6 +233,10 @@ func TestTrackedPythonImportLifecycle(t *testing.T) {
 						_, err = mi.TrackRepoCtx(context.Background(), entries[1])
 					}
 					require.NoError(t, err)
+					if scans != nil {
+						// The existing cross-repo pass scans imports once for reachability.
+						require.Equal(t, 1, scans.importScans, "ordinary saves must not add a Python consumer-frontier scan")
+					}
 					missingUtil := operation == "provider_delete_util_batched" || operation == "forced_evict_util"
 					if missingUtil {
 						var missingImport, missingCall []*graph.Edge
@@ -286,4 +300,16 @@ func pythonLifecycleBindings(g graph.Store, missingUtil bool) []string {
 	}
 	slices.Sort(bindings)
 	return bindings
+}
+
+func TestPythonAddedFileWithoutConsumersDoesNotRunGlobalResolve(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "consumer/app.py::run", Kind: graph.KindFunction, Name: "run", FilePath: "consumer/app.py", RepoPrefix: "consumer", Language: "python"})
+	g.AddNode(&graph.Node{ID: "provider/new.py::f", Kind: graph.KindFunction, Name: "f", FilePath: "provider/new.py", RepoPrefix: "provider", Language: "python"})
+	g.AddEdge(&graph.Edge{From: "consumer/app.py::run", To: "unresolved::f", Kind: graph.EdgeCalls, FilePath: "consumer/app.py"})
+	mi := &MultiIndexer{graph: g, logger: zap.New(core)}
+	mi.resolveIncrementalRepoMutation("provider", &IndexResult{}, &graph.MutationReceipt{Complete: true},
+		&reparsePendingEnrichmentBatch{pythonAddedFiles: []string{"provider/empty.py"}})
+	require.Empty(t, logs.FilterMessage("cross-repo resolve: pass start").All())
 }
