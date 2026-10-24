@@ -45,7 +45,6 @@ func TestGoModuleCallerSaveHonorsUntrackedReplace(t *testing.T) {
 					t.Fatal(err)
 				}
 				e = goModuleLifecycleCall(t, g)
-				t.Logf("after caller save: to=%s cross=%v origin=%s", e.To, e.CrossRepo, e.Origin)
 				require.Equal(t, "external-call::dep::example.org/library", e.To)
 			})
 		}
@@ -97,12 +96,12 @@ func TestGoModuleBatchHonorsUntrackedReplace(t *testing.T) {
 	}
 }
 
-type goModuleReviewScanStore struct {
+type goModuleRetryScanStore struct {
 	goModulePublishScanCountingStore
 	definitions int
 }
 
-func (s *goModuleReviewScanStore) RepoNodeIdentitiesSeq(repos []string, kinds ...graph.NodeKind) iter.Seq[graph.RepoNodeIdentity] {
+func (s *goModuleRetryScanStore) RepoNodeIdentitiesSeq(repos []string, kinds ...graph.NodeKind) iter.Seq[graph.RepoNodeIdentity] {
 	s.definitions++
 	return graph.RepoNodeIdentitiesSeq(s.Store, repos, kinds...)
 }
@@ -125,7 +124,7 @@ func TestGoModuleRetrySkipsUnrelatedWorkspaceChanges(t *testing.T) {
 			db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.sqlite"))
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, db.Close()) })
-			g := &goModuleReviewScanStore{goModulePublishScanCountingStore: goModulePublishScanCountingStore{Store: db}}
+			g := &goModuleRetryScanStore{goModulePublishScanCountingStore: goModulePublishScanCountingStore{Store: db}}
 			g.AddNode(&graph.Node{ID: file + "::Hello", Name: "Hello", Kind: graph.KindFunction, RepoPrefix: "b", FilePath: file, Language: lang})
 			mi := NewMultiIndexer(g, newTestRegistry(), search.NewNull(), cm, zap.NewNop())
 			t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })

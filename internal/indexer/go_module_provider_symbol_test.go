@@ -44,7 +44,6 @@ func TestGoModuleDotlessProviderAddsSymbol(t *testing.T) {
 					require.Len(t, calls, 1)
 					return calls[0]
 				}
-				t.Logf("before add: %s meta=%v", call().To, call().Meta)
 				writeFile(t, filepath.Join(library, "lib.go"), "package library\nfunc Hello() {}\nfunc NewFn() {}\n")
 				if mode == "watcher" {
 					_, err = mi.incrementalPointRepoRaw("b", filepath.Join(library, "lib.go"))
@@ -52,12 +51,11 @@ func TestGoModuleDotlessProviderAddsSymbol(t *testing.T) {
 					_, err = mi.IndexRepo("b")
 				}
 				require.NoError(t, err)
-				t.Logf("after add: %s", call().To)
 				if call().To != "b/lib.go::NewFn" {
 					t.Errorf("provider-added symbol not bound: %s", call().To)
 				}
 				mi.RunGlobalResolve()
-				t.Logf("after global resolve: %s", call().To)
+				require.Equal(t, "b/lib.go::NewFn", call().To)
 			})
 		}
 	}

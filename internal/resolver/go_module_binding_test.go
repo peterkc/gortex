@@ -7,7 +7,7 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
-func goModule806Call(t *testing.T, g graph.Store, caller string) *graph.Edge {
+func goModuleBindingCall(t *testing.T, g graph.Store, caller string) *graph.Edge {
 	t.Helper()
 	var calls []*graph.Edge
 	for _, edge := range g.GetOutEdges(caller) {
@@ -47,7 +47,7 @@ func TestGoModuleCrossPathsRejectLooseLocal(t *testing.T) {
 			case "incoming":
 				cr.ResolveMutationFrontiers(nil, nil, []string{provider.FilePath})
 			}
-			if row := goModule806Call(t, g, source.ID); row.To != "dep::example.org/lib::Hello" {
+			if row := goModuleBindingCall(t, g, source.ID); row.To != "dep::example.org/lib::Hello" {
 				t.Fatalf("%s did not retain the terminal after ownership rejection: %+v", route, row)
 			}
 		})
@@ -90,7 +90,7 @@ func TestGoModuleDedicatedWorktreeTie(t *testing.T) {
 				if len(prefixes) == 1 {
 					want = "lib@task/lib.go::Hello"
 				}
-				row := goModule806Call(t, g, caller.ID)
+				row := goModuleBindingCall(t, g, caller.ID)
 				if len(prefixes) == 3 {
 					if !isSyntheticResolveTarget(row.To) {
 						t.Fatalf("independent fork must remain ambiguous: %+v", row)
@@ -113,7 +113,7 @@ func TestGoModuleOutgoingRefreshesIdentity(t *testing.T) {
 	r := New(g)
 	r.SetGoModuleLookup(func() map[string]string { return map[string]string{"a": "example.org/app", "b": "example.org/lib"} })
 	r.ResolveFilesOutgoing([]string{source.FilePath})
-	if got := goModule806Call(t, g, source.ID); got.To != target.ID || got.Confidence != 0.6 {
+	if got := goModuleBindingCall(t, g, source.ID); got.To != target.ID || got.Confidence != 0.6 {
 		t.Fatalf("outgoing pass missed refreshed module: %+v", got)
 	}
 }
@@ -167,7 +167,7 @@ func TestGoModuleIncomingAdmissionRefused(t *testing.T) {
 			if preparation && s.moduleReads != 0 {
 				t.Fatalf("module incoming read ran after an earlier refusal: %d", s.moduleReads)
 			}
-			if got := goModule806Call(t, s, source.ID); got.To != original {
+			if got := goModuleBindingCall(t, s, source.ID); got.To != original {
 				t.Fatalf("refused leg changed edge: %+v", got)
 			}
 		})

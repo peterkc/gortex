@@ -91,7 +91,7 @@ func TestCrossRepoGoModuleRetry(t *testing.T) {
 	}
 }
 
-func TestGoModuleExternReviewRegressions(t *testing.T) {
+func TestGoModuleExternBindingBoundaries(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
 		for _, tc := range []struct {
 			name    string
