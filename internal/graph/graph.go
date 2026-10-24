@@ -696,10 +696,16 @@ func (g *Graph) ResolveMutex() *sync.Mutex {
 
 // ReindexEdges frees all old identities before it assigns new ones, so a
 // moving edge cannot converge onto a sibling that is also moving in this batch.
-// An edge keeps its outgoing slot unless it converges or changes source; those
-// slots are dropped in order at the end, so outgoing order stays stable. It
-// holds all affected shards across both phases and snapshots payloads before
-// overwriting stored pointers, including live caller edges.
+// A stationary destination keeps its payload unless this batch refreshes it;
+// the first mover in batch order wins a fresh key. Losing rows create no new
+// resolver work. Surviving outgoing slots keep their relative order, but a
+// converged bucket can differ from the old swap-with-last removal order.
+//
+// Every touched shard stays write-locked for the whole batch, including both
+// phases and compaction. Large batches can therefore hold all shards at once.
+// Production callers use private staging graphs, not a shared in-memory store.
+// Payloads are snapshotted before overwriting stored pointers, including live
+// caller edges.
 func (g *Graph) ReindexEdges(batch []EdgeReindex) {
 	receiptActive := g.beginReceiptMutation()
 	if receiptActive {
