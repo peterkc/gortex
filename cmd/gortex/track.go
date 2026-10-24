@@ -45,6 +45,7 @@ var (
 	trackStatusFn            = fetchDaemonStatusForCLI
 	trackEnsureDaemonReadyFn = ensureDaemonReady
 	trackNotifyDaemonTrackFn = notifyDaemonTrack
+	trackInventoryFn         = gitstate.Inventory
 )
 
 // trackPollInterval is how often --wait re-queries the daemon. A package var so
@@ -106,7 +107,7 @@ func declaredWorkspace(repoPath string) string {
 // configuredWorktreePrefix applies the daemon's admin-name rule offline.
 // The first configured corpus in the git family supplies its base prefix.
 func configuredWorktreePrefix(root string, entries []config.RepoEntry, owners map[string]string) string {
-	inv, err := gitstate.Inventory(context.Background(), root)
+	inv, err := trackInventoryFn(context.Background(), root)
 	if err != nil {
 		return ""
 	}
@@ -120,9 +121,12 @@ func configuredWorktreePrefix(root string, entries []config.RepoEntry, owners ma
 	if admin == "" || admin == gitstate.MainAdminName {
 		return ""
 	}
+	members := make(map[string]bool, len(inv.Records))
+	for _, record := range inv.Records {
+		members[pathkey.CanonicalPath(record.Path)] = true
+	}
 	for _, entry := range entries {
-		family, err := gitstate.Inventory(context.Background(), entry.Path)
-		if err != nil || !pathkey.SamePathIdentity(family.CommonDir, inv.CommonDir) {
+		if !members[pathkey.CanonicalPath(entry.Path)] {
 			continue
 		}
 		if entry.Workspace == "" {

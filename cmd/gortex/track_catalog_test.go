@@ -16,6 +16,7 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/daemon"
+	"github.com/zzet/gortex/internal/gitstate"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer"
 	gortexmcp "github.com/zzet/gortex/internal/mcp"
@@ -281,4 +282,39 @@ func TestControllerTrackConfiguredNameChangeRequiresConfigEdit(t *testing.T) {
 	require.ErrorContains(t, err, "already configured; set name: other-src")
 	assert.Empty(t, mi.AllMetadata(), "refusal must precede indexing")
 	assert.Equal(t, "src", cm.Global().FindRepoByPath(root).Name)
+}
+
+func TestConfiguredWorktreePrefixInventoriesOnce(t *testing.T) {
+	root := pathkey.CanonicalExistingRoot(t.TempDir())
+	main, linked := filepath.Join(root, "proj"), filepath.Join(root, "linked")
+	require.NoError(t, os.MkdirAll(main, 0o755))
+	git := func(args ...string) {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", main}, args...)...).CombinedOutput()
+		require.NoError(t, err, "%s", out)
+	}
+	git("init", "-q", "-b", "main")
+	git("-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "init")
+	git("worktree", "add", "-q", "-b", "linked", linked)
+	old := trackInventoryFn
+	t.Cleanup(func() { trackInventoryFn = old })
+	calls := 0
+	trackInventoryFn = func(ctx context.Context, path string) (*gitstate.FamilyInventory, error) {
+		calls++
+		return gitstate.Inventory(ctx, path)
+	}
+	for _, configured := range []bool{false, true} {
+		calls = 0
+		entries := []config.RepoEntry{{Path: t.TempDir()}, {Path: t.TempDir()}}
+		if configured {
+			entries = append(entries, config.RepoEntry{Path: main})
+		}
+		got := configuredWorktreePrefix(linked, entries, nil)
+		if configured {
+			require.Equal(t, "proj@linked", got)
+		} else {
+			require.Empty(t, got)
+		}
+		require.Equal(t, 1, calls, "inventory is per command, not per configured entry")
+	}
 }
