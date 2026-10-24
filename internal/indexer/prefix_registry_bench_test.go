@@ -34,7 +34,7 @@ func BenchmarkResolveTrackPrefixRegistryReaders(b *testing.B) {
 				return
 			default:
 				entry := config.RepoEntry{Path: root, Name: "src"}
-				mi.resolveTrackPrefix(&entry, root, nil)
+				mi.resolveTrackPrefix(&entry, root, nil, nil)
 			}
 		}
 	}()

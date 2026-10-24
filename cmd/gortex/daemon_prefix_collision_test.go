@@ -71,7 +71,7 @@ func TestWarmupPrefixCollisionPrefersCatalogOwner(t *testing.T) {
 			if includeOwner {
 				assert.Equal(t, []string{owner}, attempted, "reject collisions before parallel dispatch")
 			} else {
-				assert.Empty(t, attempted, "a skipped config entry must not displace an unconfigured owner")
+				assert.Equal(t, []string{rejected}, attempted, "an unconfigured catalog owner must not hide the configured root")
 			}
 			mu.Unlock()
 			if includeOwner {

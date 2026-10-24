@@ -1118,12 +1118,7 @@ func (l *CheckoutLifecycle) bindDedicatedGraph(
 	}
 
 	graphID := GraphIDFor(prefix)
-	if existing, found, err := l.catalog.GetDedicatedGraph(ctx, graphID); err != nil {
-		return "", err
-	} else if found && (existing.OwnerCheckoutID != checkoutID || existing.FamilyID != familyID) {
-		return "", fmt.Errorf("%w: dedicated graph %s belongs to checkout %s in family %s",
-			store_sqlite.ErrCatalogStaleGuard, graphID, existing.OwnerCheckoutID, existing.FamilyID)
-	}
+
 	graphs, err := l.catalog.ListDedicatedGraphs(ctx, familyID)
 	if err != nil {
 		return "", err

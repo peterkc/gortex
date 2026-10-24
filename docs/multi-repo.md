@@ -35,10 +35,13 @@ Re-tracking the same root does not create another corpus.
 The CLI rejects configured collisions before writing a new entry, including
 when the daemon is unavailable. The daemon also checks live ownership, including
 requests that race for one prefix. Worktree instance naming still applies before
-this check; a distinct worktree instance does not conflict with its base prefix.
+this check. A plain linked worktree whose main checkout is configured uses
+`<base>@<admin>`, where `admin` is Git's stable worktree administration name.
+For example, a linked checkout also named `src` uses `src@src`, not `src`.
 
 For a collision already stored in config, startup prefers the root bound in the
-live metadata or checkout catalog. Otherwise the first config entry wins.
+live metadata. A checkout catalog binding wins only while its root is still
+configured under that prefix. Otherwise the first config entry wins.
 The skipped entry does not replace the owner's workspace, excludes, gitignore
 root, or catalog graph. Give the skipped entry a unique `name` in the global
 config rather than untracking the live owner. If the old owner's path is gone,

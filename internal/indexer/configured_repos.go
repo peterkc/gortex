@@ -11,7 +11,8 @@ import (
 )
 
 // ResolveConfiguredRepos selects one root per prefix before parallel warmup.
-// Existing corpus and catalog ownership win; otherwise config order decides.
+// Live ownership wins; catalog ownership wins only for a configured root
+// under that prefix. Otherwise config order decides.
 // Returned entries pin the resolved name without changing the config list.
 func (mi *MultiIndexer) ResolveConfiguredRepos(ctx context.Context, entries []config.RepoEntry) []config.RepoEntry {
 	owners := make(map[string]string)
@@ -25,17 +26,29 @@ func (mi *MultiIndexer) ResolveConfiguredRepos(ctx context.Context, entries []co
 	if provider, ok := mi.graph.(interface{ Catalog() *store_sqlite.Catalog }); ok {
 		catalog = provider.Catalog()
 	}
-	seen := make(map[string]bool)
-	out := make([]config.RepoEntry, 0, len(entries))
-	for _, entry := range entries {
-		abs := pathkey.CanonicalPath(entry.Path)
-		prefix := EffectiveRepoPrefix(mi.configMgr, entry)
-		for registered, meta := range metadata {
-			if meta != nil && pathkey.SamePathIdentity(pathkey.CanonicalPath(meta.RootPath), abs) {
-				prefix = registered
+	registeredRoots := make(map[string]string, len(metadata))
+	for prefix, meta := range metadata {
+		if meta != nil {
+			registeredRoots[pathkey.CanonicalPath(meta.RootPath)] = prefix
+		}
+	}
+	prefixes, roots := make([]string, len(entries)), make([]string, len(entries))
+	configured := make(map[string][]string)
+	for i, entry := range entries {
+		roots[i] = pathkey.CanonicalPath(entry.Path)
+		prefixes[i] = EffectiveRepoPrefix(mi.configMgr, entry)
+		for root, registered := range registeredRoots {
+			if pathkey.SamePathIdentity(root, roots[i]) {
+				prefixes[i] = registered
 				break
 			}
 		}
+		configured[prefixes[i]] = append(configured[prefixes[i]], roots[i])
+	}
+	seen := make(map[string]bool)
+	out := make([]config.RepoEntry, 0, len(entries))
+	for i, entry := range entries {
+		abs, prefix := roots[i], prefixes[i]
 		if prefix == "" || prefix == "." {
 			continue
 		}
@@ -53,7 +66,13 @@ func (mi *MultiIndexer) ResolveConfiguredRepos(ctx context.Context, entries []co
 					if err != nil {
 						mi.logger.Warn("reading configured repository owner; using config order", zap.Error(err))
 					} else if found {
-						owner, held = checkout.RootPath, true
+						root := pathkey.CanonicalPath(checkout.RootPath)
+						for _, configuredRoot := range configured[prefix] {
+							if pathkey.SamePathIdentity(root, configuredRoot) {
+								owner, held = checkout.RootPath, true
+								break
+							}
+						}
 					}
 				}
 			}
