@@ -863,8 +863,9 @@ func resolveSearchBackend(b search.Backend) searchBackendInfo {
 // status row for a repo the daemon holds no index for is itself synthesised
 // from it.
 //
-// Anything added here that reads the store or takes a lock reintroduces
-// exactly the stall this exists to avoid; TestProbeAnswersDuringLongMutation
+// The loaded-root snapshot takes only the registry's short read lock, not
+// the controller's mutation mutex. Store reads or c.mu would reintroduce
+// the stall this exists to avoid; TestProbeAnswersDuringLongMutation
 // pins that.
 func (c *realController) Probe(ctx context.Context) (daemon.ProbeResponse, error) {
 	if err := ctx.Err(); err != nil {
@@ -874,6 +875,15 @@ func (c *realController) Probe(ctx context.Context) (daemon.ProbeResponse, error
 	resp := daemon.ProbeResponse{
 		Ready:    c.ready.Load(),
 		Enriched: c.enriched.Load(),
+	}
+	if c.multiIndexer != nil {
+		roots := make([]string, 0)
+		for _, meta := range c.multiIndexer.AllMetadata() {
+			if meta != nil {
+				roots = append(roots, meta.RootPath)
+			}
+		}
+		resp.LoadedRoots = &roots
 	}
 	if c.configManager == nil {
 		return resp, nil

@@ -372,18 +372,7 @@ func (mi *MultiIndexer) backfillWorkspaceSlugsWithImpact() (nodesStamped, contra
 	bySlug := make(map[string]slugs, len(repoMeta))
 	// Map each repo prefix to its global-config RepoEntry so we honour
 	// the user-level workspace/project override even on backfill.
-	entryByPrefix := make(map[string]config.RepoEntry, len(repoMeta))
-	// ReposSnapshot copies the list under the config mutation mutex, the same
-	// reason the crossWorkspaceLookup path below takes it: the deferred
-	// receipt tail reaches this backfill through RunPreEnrichResolve while
-	// UntrackRepo and TrackRepoCtx edit the live Repos slice in place.
-	for _, e := range mi.configMgr.Global().ReposSnapshot() {
-		p := config.ResolvePrefix(e)
-		if p == "" || p == "." {
-			continue
-		}
-		entryByPrefix[p] = e
-	}
+	lookup := mi.configMgr.RepoPathLookup()
 	for prefix, root := range repoMeta {
 		// Make sure the per-repo `.gortex.yaml` is loaded — at warmup
 		// time TrackRepoCtx/ReconcileRepoCtx already calls this, but
@@ -391,11 +380,7 @@ func (mi *MultiIndexer) backfillWorkspaceSlugsWithImpact() (nodesStamped, contra
 		// on a path that didn't.
 		mi.configMgr.LoadWorkspaceConfig(prefix, root)
 		cfg := mi.configMgr.GetRepoConfig(prefix)
-		var entryPtr *config.RepoEntry
-		if e, ok := entryByPrefix[prefix]; ok {
-			entryCopy := e
-			entryPtr = &entryCopy
-		}
+		entryPtr := lookup(root)
 		bySlug[prefix] = slugs{
 			ws:   resolveWorkspaceID(entryPtr, cfg, prefix),
 			proj: resolveProjectID(entryPtr, cfg, prefix),
@@ -600,36 +585,25 @@ func (mi *MultiIndexer) collectCrossWorkspaceRules() (map[string][]resolver.Cros
 	rulesByWorkspace := make(map[string][]resolver.CrossWorkspaceDepRule)
 	mi.mu.RLock()
 	repoPrefixes := make([]string, 0, len(mi.repos))
-	for prefix := range mi.repos {
+	roots := make(map[string]string, len(mi.repos))
+	for prefix, meta := range mi.repos {
 		repoPrefixes = append(repoPrefixes, prefix)
+		if meta != nil {
+			roots[prefix] = meta.RootPath
+		}
 	}
 	repoCount := len(mi.repos)
 	mi.mu.RUnlock()
 	sort.Strings(repoPrefixes)
-	// Per-repo crossWorkspaceLookup needs the same precedence as the
-	// stamp path: a global-config Workspace override changes which
-	// source-workspace bucket receives the repo's dependency rules.
-	// ReposSnapshot copies the list under the config mutation mutex — the
-	// deferred receipt tail runs this concurrently with UntrackRepo, which
-	// edits the live Repos slice in place.
-	entryByPrefix := make(map[string]config.RepoEntry)
-	for _, e := range mi.configMgr.Global().ReposSnapshot() {
-		p := config.ResolvePrefix(e)
-		if p == "" || p == "." {
-			continue
-		}
-		entryByPrefix[p] = e
-	}
+	// Live prefixes already have an owner. Read overrides by that owner's
+	// root without resolving configured collisions or reading other workspaces.
+	lookup := mi.configMgr.RepoPathLookup()
 	for _, prefix := range repoPrefixes {
 		cfg := mi.configMgr.GetRepoConfig(prefix)
 		if cfg == nil {
 			continue
 		}
-		var entryPtr *config.RepoEntry
-		if e, ok := entryByPrefix[prefix]; ok {
-			entryCopy := e
-			entryPtr = &entryCopy
-		}
+		entryPtr := lookup(roots[prefix])
 		repoWS := resolveWorkspaceID(entryPtr, cfg, prefix)
 		for _, dep := range cfg.CrossWorkspaceDeps {
 			if dep.Workspace == "" {

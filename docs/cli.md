@@ -80,6 +80,45 @@ gortex untrack backend
 gortex status
 ```
 
+## Repository prefix collisions
+
+A repository prefix identifies one indexed root. By default, it is the directory
+basename. Tracking a different root with a prefix taken by another top-level
+entry fails, even without a daemon. Tracking the same top-level root again is a no-op.
+
+When a linked worktree's family already has a corpus, the daemon names a new
+independent corpus `<family-base>@<admin-name>`. The admin name comes from Git's
+worktree metadata, not its current branch. The CLI uses the same rule offline,
+including families tracked through a linked checkout or a bare repository.
+An explicit `--name` takes precedence.
+
+Give same-named directories distinct prefixes:
+
+```bash
+gortex track ~/projects/one/src
+gortex track --name other-src ~/projects/two/src
+```
+
+The CLI checks top-level configured prefixes before saving a new entry.
+Project-scoped entries are not checked before this save. The daemon checks the
+live registry, which remains authoritative. A live rejection removes
+only the entry the CLI just added. Other daemon failures can leave a config-only
+entry for a later restart.
+
+Older configs can already contain collisions. At startup, Gortex keeps the
+live owner, or a configured catalog owner guarded by a base publication.
+Otherwise config order decides. A legacy catalog row that points at the other
+configured root is repaired without deleting corpus or generation payloads.
+Gortex warns and skips the other entry without replacing the owner's config or corpus.
+Give the skipped entry a unique `name` in the global config, then run
+`gortex daemon reload`. `track --name` refuses a different name for an entry
+already in config; it does not report a temporary rename as a saved change.
+Untracking a configured but unloaded path removes only that config entry and
+reloads the daemon. If it cannot verify which roots are loaded, it refuses
+without changing config. Do not untrack the live owner just to resolve a
+duplicate name. If the owner's path no longer exists, inspect the untrack
+preview before confirming removal of its corpus.
+
 ## Per-repo setup
 
 ```bash

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/google/renameio"
 	"github.com/go-viper/mapstructure/v2"
+	"github.com/google/renameio"
 	"gopkg.in/yaml.v3"
 
 	"github.com/zzet/gortex/internal/llm"
@@ -101,6 +101,8 @@ type GlobalConfig struct {
 
 	// configPath stores the file path used for Save(). Set by LoadGlobal or SetConfigPath.
 	configPath string `yaml:"-"`
+	// repoRevision invalidates ConfigManager's root lookup after list edits.
+	repoRevision uint64
 }
 
 // DaemonConfig is the `daemon:` block in ~/.gortex/config.yaml.
@@ -231,6 +233,10 @@ func UnknownWorkspaceKeys(path string) []string {
 	if err != nil {
 		return nil
 	}
+	return unknownWorkspaceKeys(data)
+}
+
+func unknownWorkspaceKeys(data []byte) []string {
 	var raw map[string]any
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		return nil
@@ -363,6 +369,7 @@ func (gc *GlobalConfig) ConfigPath() string {
 func (gc *GlobalConfig) Save() error {
 	globalConfigMu.Lock()
 	defer globalConfigMu.Unlock()
+	gc.repoRevision++
 	return saveGlobalConfigLocked(gc)
 }
 
@@ -466,6 +473,149 @@ func (gc *GlobalConfig) FindRepoByPrefix(prefix string) *RepoEntry {
 	return nil
 }
 
+// FindRepoByPath searches top-level Repos and all Projects for the given root.
+// Callers that know the loaded root must not take settings from a prefix collision.
+func (gc *GlobalConfig) FindRepoByPath(root string) *RepoEntry {
+	if gc == nil || root == "" {
+		return nil
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return nil
+	}
+	var canonical string
+	matches := func(path string) bool {
+		entryAbs, _ := filepath.Abs(path)
+		if pathkey.SamePathIdentity(entryAbs, abs) {
+			return true
+		}
+		if canonical == "" {
+			canonical = pathkey.CanonicalPath(root)
+		}
+		return pathkey.SamePathIdentity(pathkey.CanonicalPath(path), canonical)
+	}
+	for i := range gc.Repos {
+		if matches(gc.Repos[i].Path) {
+			return &gc.Repos[i]
+		}
+	}
+	for _, proj := range gc.Projects {
+		for i := range proj.Repos {
+			if matches(proj.Repos[i].Path) {
+				return &proj.Repos[i]
+			}
+		}
+	}
+	return nil
+}
+
+// RepoPathLookup reads repository overrides from a fixed configuration snapshot.
+type RepoPathLookup func(root string) *RepoEntry
+
+// SnapshotRepoPaths canonicalizes configured roots once for a multi-repository pass.
+func (gc *GlobalConfig) SnapshotRepoPaths() RepoPathLookup {
+	return gc.snapshotRepoPaths(pathkey.CanonicalPath)
+}
+
+func (gc *GlobalConfig) snapshotRepoPaths(canonicalize func(string) string) RepoPathLookup {
+	globalConfigMu.Lock()
+	entries := gc.repoEntriesLocked()
+	globalConfigMu.Unlock()
+	return gc.repoPathLookup(entries, canonicalize)
+}
+
+func (gc *GlobalConfig) repoEntriesLocked() []RepoEntry {
+	if gc == nil {
+		return nil
+	}
+	entries := append([]RepoEntry(nil), gc.Repos...)
+	for _, project := range gc.Projects {
+		entries = append(entries, project.Repos...)
+	}
+	return entries
+}
+
+// RepoPathSnapshot shares canonical roots and entry lookups for one config revision.
+// Known roots need no filesystem work. Unknown roots use the caller's fallback.
+type RepoPathSnapshot struct {
+	Lookup         RepoPathLookup
+	canonicalRoots map[string]string
+	prefixCounts   map[string]int
+}
+
+// IsOnlyRepoForPrefix recognizes an unambiguous configured owner. Derived
+// instance prefixes still need the ownership resolver's workspace checks.
+func (s *RepoPathSnapshot) IsOnlyRepoForPrefix(prefix, root string) bool {
+	if strings.Contains(prefix, "@") || s.prefixCounts[prefix] != 1 {
+		return false
+	}
+	entry := s.Lookup(root)
+	return entry != nil && ResolvePrefix(*entry) == prefix
+}
+
+func (s *RepoPathSnapshot) CanonicalRoot(root string, canonicalize func(string) string) string {
+	if canonical, ok := s.canonicalRoots[root]; ok {
+		return canonical
+	}
+	return canonicalize(root)
+}
+
+func (gc *GlobalConfig) repoPathLookup(entries []RepoEntry, canonicalize func(string) string) RepoPathLookup {
+	return gc.repoPathSnapshot(entries, canonicalize).Lookup
+}
+
+func (gc *GlobalConfig) repoPathSnapshot(entries []RepoEntry, canonicalize func(string) string) *RepoPathSnapshot {
+	type repoRoot struct {
+		path  string
+		entry RepoEntry
+	}
+	// CanonicalPath has already cleaned paths and normalized volumes. Fold
+	// Unicode and case for bucketing, then retain SamePathIdentity's file
+	// check within each bucket for case-sensitive mounts.
+	lookupKey := func(root string) string {
+		root = pathkey.Normalize(root)
+		if pathkey.CaseInsensitivePaths {
+			root = strings.ToLower(root)
+		}
+		return root
+	}
+	roots := make(map[string][]repoRoot)
+	canonicalRoots := make(map[string]string)
+	prefixCounts := make(map[string]int)
+	if gc != nil {
+		for _, entry := range entries {
+			prefixCounts[ResolvePrefix(entry)]++
+			root := canonicalize(entry.Path)
+			canonicalRoots[entry.Path] = root
+			canonicalRoots[root] = root
+			key := lookupKey(root)
+			roots[key] = append(roots[key], repoRoot{root, entry})
+		}
+	}
+	snapshot := &RepoPathSnapshot{canonicalRoots: canonicalRoots, prefixCounts: prefixCounts}
+	snapshot.Lookup = func(root string) *RepoEntry {
+		if canonical, ok := canonicalRoots[root]; ok {
+			root = canonical
+		} else {
+			root = pathkey.CanonicalPath(root)
+		}
+		candidates := roots[lookupKey(root)]
+		for i := range candidates {
+			if pathkey.SamePathIdentity(candidates[i].path, root) {
+				return &candidates[i].entry
+			}
+		}
+		globalConfigMu.Lock()
+		defer globalConfigMu.Unlock()
+		if entry := gc.FindRepoByPath(root); entry != nil {
+			copy := *entry
+			return &copy
+		}
+		return nil
+	}
+	return snapshot
+}
+
 // checkDuplicatePrefixes returns errors for any duplicate Repo_Prefix values.
 func checkDuplicatePrefixes(entries []RepoEntry) []string {
 	seen := make(map[string]string) // prefix → first path
@@ -555,6 +705,7 @@ func (gc *GlobalConfig) AddRepo(entry RepoEntry) error {
 	}
 
 	gc.Repos = append(gc.Repos, entry)
+	gc.repoRevision++
 	return nil
 }
 
@@ -594,6 +745,7 @@ func (gc *GlobalConfig) RemoveRepoIfPresent(path string) (bool, error) {
 		}
 		if matched {
 			gc.Repos = append(gc.Repos[:i], gc.Repos[i+1:]...)
+			gc.repoRevision++
 			return true, nil
 		}
 	}
@@ -668,6 +820,7 @@ func (gc *GlobalConfig) RemoveRepoAndSaveIfPresent(path string) (bool, error) {
 	}
 	gc.Repos = candidate.Repos
 	gc.Projects = candidate.Projects
+	gc.repoRevision++
 	return true, nil
 }
 

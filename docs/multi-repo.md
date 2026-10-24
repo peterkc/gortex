@@ -24,6 +24,48 @@ Such a session has no single workspace slug, so `_meta.scope_applied` reports `r
 
 A directory that neither lies inside nor contains a tracked repo still fails closed with the structured `repo_not_tracked` error — tracking the parent of your repos is not required, and doing so would index every child a second time. A configured repo that warmup has not registered yet after a daemon start is not "untracked": its sessions get `repo_loading` (retryable) until it is ready, then work in place without reconnecting — see [Startup states](mcp.md#startup-states). Over the HTTP surface (`gortex daemon start --http-addr ...`) the `/v1/graph` route accepts `?project=` and `?repo=` to narrow the dump, so a typo'd value returns an empty result for that request instead of bringing the whole index up empty.
 
+## Repository prefixes
+
+Each indexed root needs a unique repository prefix. The default is its directory
+basename, so two unrelated directories named `src` cannot both use `src`.
+Use `gortex track --name other-src /path/to/other/src` for the second root.
+The MCP `track_repository` tool accepts the equivalent `name` parameter.
+Re-tracking the same root does not create another corpus.
+
+The CLI rejects configured collisions before writing a new entry, including
+when the daemon is unavailable. The daemon also checks live and configured
+ownership, including requests that race for one prefix or arrive before warmup loads the owner.
+For a linked worktree, the first configured member of its Git family supplies
+`<family-base>@<admin>`, where `admin` is Git's stable worktree administration
+name. That member can be a linked checkout or a bare repository. Workspace-based
+instance naming is the fallback when no family corpus supplies a base.
+Online, the daemon chooses the name. Offline, the CLI inventories the target's
+Git family once and applies the same admin-name rule.
+
+For a collision already stored in config, startup prefers the root bound in the
+live metadata. A checkout catalog binding wins only while a base publication
+protects it and its root is still configured under that prefix. Otherwise the
+first config entry wins. Startup can repair a wrong unpublished binding from
+older versions when both roots remain configured and no live owner protects it.
+The repair changes identity metadata only. It retains the corpus for reconcile.
+An abandoned unpublished binding can also move to a replacement root when the
+old owner is neither configured nor live. Published, configured and live owners
+remain protected against that rebind.
+
+The skipped entry does not replace the owner's workspace, excludes, gitignore
+root, or catalog graph. For an already configured path, CLI `--name`, MCP `name`
+and control `Track` refuse a different name rather than accepting a rename that
+would disappear on restart. Set `name:` in the global config and run
+`gortex daemon reload`. Tracking a configured but unloaded root without a name
+keeps its configured name.
+
+Alternatively, `gortex untrack <absolute-path>` can remove an exact configured
+root that the daemon proves is not loaded, then reload the config. It does not
+untrack a containing live root or start retirement of an implicit live root.
+An older daemon that omits loaded-root information cannot prove this condition;
+restart with the matching daemon build before using this fallback. For a loaded
+root, inspect the untrack preview before confirming removal.
+
 ## Configuration
 
 Two-tier config hierarchy:

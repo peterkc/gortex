@@ -159,6 +159,10 @@ type CheckoutLifecycle struct {
 	catalog      *store_sqlite.Catalog
 	store        *store_sqlite.Store
 	leases       *graphview.LeaseManager
+	// Non-Git observations have no catalog intent to distinguish them from
+	// removed config entries. Keep their live root until explicit registration
+	// supersedes the observation or teardown removes it.
+	implicitRoots sync.Map // prefix -> registered root (non-catalog observations)
 
 	// Owner registration and closure share this lock; serving acquisition is
 	// registry-only and always precedes the reader's catalog snapshot.
@@ -738,6 +742,18 @@ func (l *CheckoutLifecycle) Register(
 	if err != nil {
 		return RegisterResult{}, fmt.Errorf("resolve path %s: %w", entry.Path, err)
 	}
+	// Existing config is the restart authority. Do not accept a rename that
+	// AddRepo would discard, and keep a pinned name when warmup has not loaded it.
+	if l.cfgMgr != nil {
+		if configured := l.cfgMgr.RepoPathLookup()(absPath); configured != nil {
+			if entry.Name != "" && entry.Name != config.ResolvePrefix(*configured) {
+				return RegisterResult{}, fmt.Errorf("%s is already configured; set name: %s in the global config and run `gortex daemon reload`", absPath, entry.Name)
+			}
+			if entry.Name == "" {
+				entry.Name = configured.Name
+			}
+		}
+	}
 	// One fan-out for the whole registration: the family reconciliation at the
 	// end drives the same cleanup hooks a sweep does, and each of them tells
 	// the sessions the tracked set moved.
@@ -769,6 +785,7 @@ func (l *CheckoutLifecycle) Register(
 		out.Prefix = config.ResolvePrefix(entry)
 	}
 
+	l.implicitRoots.Delete(out.Prefix)
 	identity, catalogErr := l.recordCheckout(ctx, out.Prefix, absPath, source, false)
 	out.CheckoutID, out.Incarnation = identity.checkoutID, identity.incarnation
 	out.FamilyID, out.GraphID = identity.familyID, identity.graphID
@@ -810,6 +827,11 @@ func (l *CheckoutLifecycle) RecordImplicit(ctx context.Context, root string) err
 	defer l.beginBatch()()
 
 	identity, err := l.recordCheckout(ctx, prefix, root, TrackSourceImplicit, false)
+	if identity.checkoutID == "" {
+		if meta := l.mi.GetMetadata(prefix); meta != nil {
+			l.implicitRoots.Store(prefix, meta.RootPath)
+		}
+	}
 	l.attachWatcherContext(ctx, prefix)
 	_ = l.reconcileFamilyNow(ctx, identity.familyID, root)
 	l.notifyTrackedSetChanged()
@@ -1084,6 +1106,32 @@ func (l *CheckoutLifecycle) claimDedicated(
 	return err
 }
 
+// releaseUnconfiguredBinding removes only abandoned, unpublished identity
+// metadata. Configured and live owners are protected under the binding's prefix.
+// The catalog guards publication and the exact row against intervening changes.
+func (l *CheckoutLifecycle) releaseUnconfiguredBinding(ctx context.Context, binding store_sqlite.DedicatedGraph) error {
+	owner, found, err := l.catalog.GetCheckout(ctx, binding.OwnerCheckoutID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("%w: dedicated graph %s has no known owner", store_sqlite.ErrCatalogStaleGuard, binding.GraphID)
+	}
+	root := pathkey.CanonicalPath(owner.RootPath)
+	if meta := l.mi.GetMetadata(binding.RepoPrefix); meta != nil &&
+		(pathkey.SamePathIdentity(pathkey.CanonicalPath(meta.RootPath), root) || sameDirectory(meta.RootPath, root)) {
+		return fmt.Errorf("%w: dedicated graph %s has a live owner", store_sqlite.ErrCatalogStaleGuard, binding.GraphID)
+	}
+	if l.cfgMgr == nil {
+		return fmt.Errorf("%w: configured owners are unavailable", store_sqlite.ErrCatalogStaleGuard)
+	}
+	if configured := l.cfgMgr.RepoPathLookup()(root); configured != nil &&
+		EffectiveRepoPrefix(l.cfgMgr, *configured) == binding.RepoPrefix {
+		return fmt.Errorf("%w: dedicated graph %s has a configured owner", store_sqlite.ErrCatalogStaleGuard, binding.GraphID)
+	}
+	return l.catalog.DeleteUnpublishedDedicatedGraph(ctx, binding)
+}
+
 // bindDedicatedGraph binds a checkout to the repo prefix its nodes live
 // under. Only the first graph ever admitted to an empty family becomes its
 // primary automatically. A family that still owns independent dedicated
@@ -1106,6 +1154,24 @@ func (l *CheckoutLifecycle) bindDedicatedGraph(
 				store_sqlite.ErrCatalogStaleGuard, checkoutID, existing.GraphID, existing.FamilyID,
 			)
 		}
+		if existing.RepoPrefix != prefix && l.cfgMgr != nil {
+			owner, found, err := l.catalog.GetCheckout(ctx, checkoutID)
+			if err != nil {
+				return "", true, err
+			}
+			// Keep stable bindings across an unopposed rename, but not when
+			// config assigns the previous prefix to another checkout.
+			for _, entry := range l.cfgMgr.Global().ReposSnapshot() {
+				if !found || EffectiveRepoPrefix(l.cfgMgr, entry) != existing.RepoPrefix ||
+					pathkey.SamePathIdentity(pathkey.CanonicalPath(entry.Path), owner.RootPath) || sameDirectory(entry.Path, owner.RootPath) {
+					continue
+				}
+				if err := l.releaseUnconfiguredBinding(ctx, existing); err != nil {
+					return "", true, err
+				}
+				return "", false, nil
+			}
+		}
 		if err := l.RegisterRepositoryOwner(ctx, existing.GraphID); err != nil {
 			return "", true, err
 		}
@@ -1123,6 +1189,15 @@ func (l *CheckoutLifecycle) bindDedicatedGraph(
 	}
 
 	graphID := GraphIDFor(prefix)
+	existing, found, err := l.catalog.GetDedicatedGraph(ctx, graphID)
+	if err != nil {
+		return "", err
+	}
+	if found && (existing.OwnerCheckoutID != checkoutID || existing.FamilyID != familyID) {
+		if err := l.releaseUnconfiguredBinding(ctx, existing); err != nil {
+			return "", err
+		}
+	}
 	graphs, err := l.catalog.ListDedicatedGraphs(ctx, familyID)
 	if err != nil {
 		return "", err
@@ -1623,9 +1698,32 @@ func (l *CheckoutLifecycle) ApplyReload(ctx context.Context) (ReloadResult, erro
 		}
 	}
 
-	for prefix := range l.mi.AllMetadata() {
+	for prefix, meta := range l.mi.AllMetadata() {
 		if wanted[prefix] {
 			continue
+		}
+		if root, implicit := l.implicitRoots.Load(prefix); implicit && meta != nil &&
+			pathkey.SamePathIdentity(root.(string), meta.RootPath) {
+			continue
+		}
+		// An implicit observation never came from the config file. Its absence
+		// after reload is not a removal request, so do not mint a retirement.
+		checkout, err := l.checkoutForPrefix(ctx, prefix)
+		if err != nil {
+			l.logger.Warn("reload: read checkout failed",
+				zap.String("prefix", prefix), zap.Error(err))
+			continue
+		}
+		if checkout != nil {
+			intents, err := l.catalog.ListTrackingIntents(ctx, checkout.CheckoutID)
+			if err != nil {
+				l.logger.Warn("reload: read tracking intents failed",
+					zap.String("prefix", prefix), zap.Error(err))
+				continue
+			}
+			if len(intents) == 0 {
+				continue
+			}
 		}
 		outcome, err := l.retireOnReload(ctx, prefix)
 		if err != nil {
@@ -1945,14 +2043,14 @@ func (l *CheckoutLifecycle) knownFamilies(ctx context.Context) []familyProbe {
 	if l.cfgMgr == nil {
 		return out
 	}
-	for _, entry := range l.cfgMgr.Global().Repos {
+	for _, entry := range l.mi.ResolveConfiguredRepos(ctx, l.cfgMgr.Global().Repos) {
 		abs, err := filepath.Abs(entry.Path)
 		if err != nil {
 			abs = entry.Path
 		}
-		prefix := l.ResolvePrefix(abs)
+		prefix := entry.Name
 		if prefix == "" {
-			prefix = EffectiveRepoPrefix(l.cfgMgr, entry)
+			continue
 		}
 		add(l.familyForPrefix(ctx, prefix), abs)
 	}
@@ -3949,6 +4047,46 @@ func (l *CheckoutLifecycle) walkDedicatedChain(
 
 // --- startup ------------------------------------------------------------
 
+// repairLegacyConfiguredBinding corrects main's pre-publication Seed upserts.
+// Config order is authoritative only when both roots remain configured and no
+// live owner or base publication protects the row. Delete metadata only; the
+// selected root binds normally below and reconcile brings the retained corpus
+// into agreement with that root.
+func (l *CheckoutLifecycle) repairLegacyConfiguredBinding(ctx context.Context, entry config.RepoEntry) error {
+	if l.catalog == nil || l.mi.GetMetadata(entry.Name) != nil {
+		return nil
+	}
+	binding, found, err := l.catalog.GetDedicatedGraph(ctx, GraphIDFor(entry.Name))
+	if err != nil || !found {
+		return err
+	}
+	owner, found, err := l.catalog.GetCheckout(ctx, binding.OwnerCheckoutID)
+	if err != nil || !found {
+		return err
+	}
+	root := pathkey.CanonicalPath(entry.Path)
+	if pathkey.SamePathIdentity(owner.RootPath, root) || sameDirectory(owner.RootPath, root) {
+		return nil
+	}
+	_, published, err := l.catalog.DedicatedBasePublication(ctx, binding.GraphID)
+	if err != nil || published {
+		return err
+	}
+	for _, configured := range l.cfgMgr.Global().ReposSnapshot() {
+		if EffectiveRepoPrefix(l.cfgMgr, configured) != entry.Name ||
+			!pathkey.SamePathIdentity(pathkey.CanonicalPath(configured.Path), owner.RootPath) {
+			continue
+		}
+		if err := l.catalog.DeleteUnpublishedDedicatedGraph(ctx, binding); err != nil {
+			return err
+		}
+		l.logger.Warn("repaired unpublished configured repository owner",
+			zap.String("prefix", entry.Name), zap.String("old_root", owner.RootPath), zap.String("new_root", root))
+		return nil
+	}
+	return nil
+}
+
 // Seed brings the catalog in line with what the daemon already tracks.
 //
 // It is the migration path for an installation that predates the catalog and
@@ -4067,20 +4205,23 @@ func (l *CheckoutLifecycle) Seed(ctx context.Context) error {
 	var recordErrs []error
 	seeded := map[string]string{}
 	if l.cfgMgr != nil {
-		for _, entry := range l.cfgMgr.Global().Repos {
+		for _, entry := range l.mi.ResolveConfiguredRepos(ctx, l.cfgMgr.Global().Repos) {
 			abs, err := filepath.Abs(entry.Path)
 			if err != nil {
 				abs = entry.Path
 			}
-			prefix := l.ResolvePrefix(abs)
-			if prefix == "" {
-				prefix = EffectiveRepoPrefix(l.cfgMgr, entry)
-			}
+			prefix := entry.Name
 			if prefix == "" {
 				continue
 			}
 			if l.RepositoryAdmissionClosed(prefix) {
 				continue // Durable cleanup owns this stale configuration entry.
+			}
+			if err := l.repairLegacyConfiguredBinding(ctx, entry); err != nil {
+				seedErr := fmt.Errorf("repair configured owner %s: %w", abs, err)
+				errs = append(errs, seedErr)
+				recordErrs = append(recordErrs, seedErr)
+				continue
 			}
 			started = stageStarted("record_checkout", zap.String("prefix", prefix))
 			identity, err := l.recordCheckout(ctx, prefix, abs, TrackSourceConfig, true)
@@ -4289,6 +4430,7 @@ func (l *CheckoutLifecycle) evictRepoChecked(
 	}
 	nodesRemoved, edgesRemoved, err = l.mi.purgeRepoChecked(ctx, prefix, finalize)
 	if l.mi.GetMetadata(prefix) == nil {
+		l.implicitRoots.Delete(prefix)
 		// The registry is hidden even when a later payload/vector/config phase
 		// fails. Invalidate cached scopes now; the closed mutation lane prevents
 		// the retained config intent from retracking in this process.

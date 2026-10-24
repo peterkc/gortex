@@ -203,3 +203,20 @@ func TestSourceSearchFallbackWaitsWithinOriginalDeadline(t *testing.T) {
 	require.True(t, res.IsError)
 	require.Len(t, waiter.observed(), 1, "fallback should wait internally rather than ask the caller to retry")
 }
+
+func TestSourceSearchWorktreeKeepsRepoEntryExclude(t *testing.T) {
+	stack := newViewStack(t)
+	cm, err := config.NewConfigManager(filepath.Join(t.TempDir(), "global.yaml"))
+	require.NoError(t, err)
+	cm.Global().Repos = []config.RepoEntry{{Path: stack.repoRoot, Name: "repo", Exclude: []string{"selected/secrets/**"}}}
+	cm.LoadWorkspaceConfig("repo", stack.repoRoot)
+	stack.srv.configManager = cm
+	require.NoError(t, os.MkdirAll(filepath.Join(stack.worktreeRoot, "selected", "secrets"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(stack.worktreeRoot, "selected", "secrets", "key.go"), []byte("package secrets\n// excludedneedle secret\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(stack.worktreeRoot, "selected", "public.go"), []byte("package public\n// excludedneedle public\n"), 0o644))
+	routeViewCheckout(t, stack.store, stack.graphID, stack.commit, stack.dirty, store_sqlite.RoutePending)
+	res, err := stack.callHandler(t, stack.worktreeRoot, "search_text", freshArgs(map[string]any{"query": "excludedneedle", "path": "selected", requireExactArgName: true}, time.Second), stack.srv.handleSearchText)
+	require.NoError(t, err)
+	require.False(t, res.IsError, viewResultText(t, res))
+	require.Equal(t, []string{"repo/selected/public.go"}, searchTextMatchPaths(t, res))
+}

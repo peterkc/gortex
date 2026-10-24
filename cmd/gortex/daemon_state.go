@@ -480,10 +480,12 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func())
 	removedDuplicates := healDuplicateRepos(state.configManager.Global(), logger)
 	finishHeal(zap.Int("removed", removedDuplicates))
 
-	repos := state.configManager.Global().Repos
+	repos := state.multiIndexer.ResolveConfiguredRepos(ctx, state.configManager.Global().Repos)
 	// This snapshot is warmup's job set, so it is also the set that reads as
 	// loading. Re-announced after the duplicate heal above, which can drop a
-	// second spelling of one directory the boot-time announcement still held.
+	// second spelling of one directory the boot-time announcement still held,
+	// and after prefix resolution, which skips a colliding entry that would
+	// otherwise read as loading forever.
 	state.multiIndexer.ExpectRepos(repos)
 
 	// Purge orphaned repo prefixes BEFORE the warmup loop re-registers the
@@ -507,8 +509,11 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func())
 		if purger, ok := state.graph.(interface{ PurgeRepo(string) error }); ok {
 			orphanSupported = true
 			finishScan := startWarmupStep(logger, "orphan_prefix_scan", zap.Int("repos", len(repos)))
-			known := make([]string, 0, len(repos))
-			for _, entry := range repos {
+			// A rejected collision still names a configured prefix, not an orphan.
+			knownRepos := append([]config.RepoEntry(nil), state.configManager.Global().Repos...)
+			knownRepos = append(knownRepos, repos...)
+			known := make([]string, 0, len(knownRepos))
+			for _, entry := range knownRepos {
 				p := strings.TrimPrefix(indexer.EffectiveRepoPrefix(state.configManager, entry), "/")
 				if p != "" {
 					known = append(known, p)

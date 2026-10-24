@@ -92,6 +92,7 @@ const (
 	ErrProtocolMismatch = "protocol_mismatch"
 	ErrUnsupportedMode  = "unsupported_mode"
 	ErrRepoNotTracked   = "repo_not_tracked"
+	ErrPrefixCollision  = "prefix_collision"
 	ErrInternal         = "internal"
 	// ErrTimeout means the daemon accepted the control request but did not
 	// finish it inside the kind's budget — almost always because a
@@ -286,7 +287,10 @@ type ProbeResponse struct {
 	// grouping. No counts, no byte estimates, and no on-disk liveness stat:
 	// each of those is a scan, and identity is what a scope decision needs.
 	TrackedRepos []ProbeRepo `json:"tracked_repos"`
-	Sessions     int         `json:"sessions"`
+	// LoadedRoots distinguishes loaded corpora from configured-but-skipped
+	// entries. Nil means the daemon cannot prove this distinction.
+	LoadedRoots *[]string `json:"loaded_roots,omitempty"`
+	Sessions    int       `json:"sessions"`
 }
 
 // ProbeRepo is one tracked repo as ControlProbe reports it.
