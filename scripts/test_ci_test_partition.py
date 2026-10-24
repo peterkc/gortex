@@ -84,6 +84,90 @@ class PartitionTests(unittest.TestCase):
         self.assertIn("timeout-minutes: 60", workflow)
         self.assertEqual(planner.TEST_EXECUTION_BUDGET_SECONDS, 2700)
 
+    def test_plain_platform_layout_matches_the_workflow(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/ci.yml").read_text()
+        rows = re.findall(r"(?m)^          - \{os: (\w+)-latest, go-version: '1.27', partition: ([\w-]+)\}$",
+                          workflow)
+        self.assertEqual({os_name for os_name, _ in rows}, {"macos", "windows"})
+        # Linux runs every race shard; the plain rows reuse some of the names.
+        linux = re.search(r"(?m)^        partition: \[(.*)\]$", workflow).group(1).split(", ")
+        self.assertEqual(linux, ["remaining"] + [f"{family}-{index}" for family, count in planner.SHARDS.items()
+                                                 for index in range(count)])
+        self.assertEqual(set(planner.PLAIN_SHARDS), {"macos", "windows"})
+        for platform, shards in planner.PLAIN_SHARDS.items():
+            expected = {"remaining", "mcp"} | {f"{family}-{index}" for family, count in shards.items()
+                                                for index in range(count)}
+            with self.subTest(platform=platform):
+                listed = [partition for os_name, partition in rows if os_name == platform]
+                self.assertEqual(sorted(listed), sorted(expected))
+        self.assertLessEqual(sum(os_name == "macos" for os_name, _ in rows), 5)
+        self.assertIn("TEST_RACE: ${{ matrix.os == 'ubuntu-latest' }}", workflow)
+        self.assertIn("os: [ubuntu-latest]\n", workflow)
+
+    def run_dry(self, partition, environ):
+        module = "example.org/gortex"
+        packages = [module + suffix for suffix in ("/cmd/gortex", "/internal/graph/store_sqlite",
+                                                   "/internal/indexer", "/internal/mcp")]
+        names = self.names(12)
+
+        def capture(command):
+            if command == ["go", "list", "-m"]:
+                return module + "\n"
+            if command == ["go", "list", "./..."]:
+                return "\n".join(packages) + "\n"
+            pattern = command[command.index("-list") + 1]
+            return "\n".join(name for name in names if pattern == "." or re.fullmatch(pattern, name))
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "selection.json"
+            with mock.patch.object(planner, "capture", side_effect=capture) as captured, \
+                    mock.patch.dict(planner.os.environ, environ, clear=True), \
+                    mock.patch.object(planner.sys, "argv", ["partition", "--partition", partition,
+                                                           "--dry-run", "--manifest", str(path)]), \
+                    mock.patch.object(planner.subprocess, "run") as run:
+                planner.main()
+            run.assert_not_called()
+            return json.loads(path.read_text()), captured.call_args_list
+
+    def test_plain_platforms_run_without_race_or_coverage(self):
+        for environ, partition, count in (({"TEST_RACE": "false"}, "indexer-2", 3),
+                                          ({"TEST_WINDOWS": "true"}, "indexer-3", 4)):
+            with self.subTest(environ=environ):
+                manifest, calls = self.run_dry(partition, environ)
+                self.assertEqual(manifest["shard_count"], count)
+                for command in manifest["commands"]:
+                    self.assertNotIn("-race", command)
+                    self.assertNotIn("-coverprofile=coverage.out", command)
+                    self.assertEqual("-v" in command, "TEST_WINDOWS" in environ)
+                self.assertTrue(all("-race" not in call.args[0] for call in calls))
+        manifest, _ = self.run_dry("remaining", {"TEST_RACE": "false"})
+        self.assertEqual(manifest["selected_packages"], [
+            "example.org/gortex/cmd/gortex", "example.org/gortex/internal/graph/store_sqlite"])
+        manifest, _ = self.run_dry("mcp", {"TEST_RACE": "false"})
+        self.assertEqual(manifest["command"], ["go", "test", "-timeout=45m",
+                                               "example.org/gortex/internal/mcp"])
+        for environ in ({}, {"TEST_RACE": "true"}):
+            with self.subTest(environ=environ):
+                manifest, _ = self.run_dry("indexer-5", environ)
+                self.assertIn("-race", manifest["command"])
+                self.assertIn("-coverprofile=coverage.out", manifest["command"])
+                self.assertEqual(manifest["shard_count"], 6)
+
+    def test_partition_and_race_settings_are_checked(self):
+        for environ, partition in (({"TEST_RACE": "false"}, "store-0"),
+                                   ({"TEST_RACE": "false"}, "indexer-3"),
+                                   ({"TEST_WINDOWS": "true"}, "indexer-4"),
+                                   ({}, "mcp"),
+                                   ({"TEST_RACE": "False"}, "remaining"),
+                                   ({"TEST_WINDOWS": "true", "TEST_RACE": "true"}, "remaining")):
+            with self.subTest(environ=environ, partition=partition), \
+                    mock.patch.dict(planner.os.environ, environ, clear=True), \
+                    mock.patch.object(planner.sys, "argv", ["partition", "--partition", partition]), \
+                    mock.patch.object(planner, "capture") as capture, \
+                    mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                planner.main()
+            capture.assert_not_called()
+
     def test_single_test_overflow_fails_without_dropping_it(self):
         with mock.patch.object(planner, "WINDOWS_COMMAND_BUDGET", 10):
             with self.assertRaisesRegex(ValueError, "one compiled test cannot fit"):
