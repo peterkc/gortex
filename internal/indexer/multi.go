@@ -994,6 +994,7 @@ func (mi *MultiIndexer) newMasterResolver(useLSP bool) *resolver.Resolver {
 	master.SetWorkspaceMembership(mi.workspaceMembershipResolver())
 	master.SetGoPackageOwnershipInventoryFactory(mi.prepareGoPackageOwnership)
 	master.SetGoModules(mi.trackedGoModules())
+	master.SetGoModuleReplacementLookup(mi.trackedGoModuleReplacements)
 	master.SetCrossWorkspaceDepLookup(mi.crossWorkspacePassLookup())
 	return master
 }
@@ -2105,7 +2106,21 @@ func (idx *Indexer) installGoResolverContext() {
 		return
 	}
 	idx.resolver.SetGoModuleLookup(mi.trackedGoModules)
-	idx.resolver.SetGoModuleReplacementLookup(mi.trackedGoModuleReplacements)
+	idx.resolver.SetGoModuleReplacementLookup(func() map[string][]resolver.GoModuleReplacement {
+		replacements := mi.trackedGoModuleReplacements()
+		if idx.rootPath == "" || mi.GetMetadata(idx.repoPrefix) != nil {
+			return replacements
+		}
+		// Cold resolution precedes publication of this caller's root.
+		mi.goModuleMu.Lock()
+		roots := make(map[string]string, len(mi.goModuleFiles)+1)
+		for repo, file := range mi.goModuleFiles {
+			roots[repo] = file.root
+		}
+		mi.goModuleMu.Unlock()
+		roots[idx.repoPrefix] = idx.rootPath
+		return mi.readGoModuleReplacements(roots)
+	})
 	// Construction can hold mi.mu. Initialize the cached lookup lazily at
 	// first resolution, after construction and caller config loading finish.
 	var once sync.Once
@@ -2173,10 +2188,11 @@ func (mi *MultiIndexer) goModuleSnapshot() (map[string]string, uint64) {
 	sameReplacements := maps.EqualFunc(replacements, mi.goModuleReplacements, slices.Equal[[]resolver.GoModuleReplacement])
 	mi.goModuleReplacements = replacements
 	mi.goModuleFiles = files
-	if mi.goModuleCache != nil && mi.goModuleRevision == revision && mi.goModuleRepoCount == count && maps.Equal(modules, mi.goModuleCache) && sameReplacements {
+	mi.goModuleRevision, mi.goModuleRepoCount = revision, count
+	if mi.goModuleCache != nil && maps.Equal(modules, mi.goModuleCache) && sameReplacements {
 		return mi.goModuleCache, mi.goModuleGeneration
 	}
-	mi.goModuleCache, mi.goModuleRevision, mi.goModuleRepoCount = modules, revision, count
+	mi.goModuleCache = modules
 	mi.goModuleGeneration++
 	return modules, mi.goModuleGeneration
 }
@@ -2922,6 +2938,14 @@ func (mi *MultiIndexer) incrementalReindexRepoRawMode(repoPrefix string, paths [
 	topologyChanged := true
 	defer func() { finishTopologyMutation(topologyChanged) }()
 
+	for _, path := range paths {
+		if filepath.Base(path) == "go.mod" {
+			mi.goModuleMu.Lock()
+			mi.goModuleChecked = time.Time{}
+			mi.goModuleMu.Unlock()
+			break
+		}
+	}
 	result, receipt, batch, err := idx.incrementalReindexPathsWithReceiptMode(meta.RootPath, paths, mode)
 	if err != nil {
 		return nil, fmt.Errorf("reindexing %s: %w", meta.RootPath, err)

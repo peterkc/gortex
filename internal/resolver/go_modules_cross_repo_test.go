@@ -204,9 +204,6 @@ func TestGoModuleMasterAndShadowMissClassification(t *testing.T) {
 			cr.SetGoModules(map[string]string{"b": importPath})
 			cr.ResolveAll()
 			want := "dep::" + importPath + "::Gone"
-			if importPath == "local/library" {
-				want = "a::stdlib::local/library::Gone"
-			}
 			assert.Equal(t, want, edge.To)
 		}
 	}
@@ -871,7 +868,11 @@ func TestGoModuleRetryGenerationSkipsBindingRecheck(t *testing.T) {
 			cr.SetGoModules(modules)
 			cr.SetGoModuleDepRetry(state, 1)
 			require.NoError(t, cr.RetryGoModuleDeps(t.Context()))
-			require.Positive(t, g.dependencyIndexBuilds, "fresh state must seed persisted bindings once")
+			if len(modules) > 0 {
+				require.Positive(t, g.dependencyIndexBuilds, "fresh state must seed persisted bindings once")
+			} else {
+				assert.Zero(t, g.dependencyIndexBuilds, "no tracked modules or persisted Go files need no binding seed")
+			}
 			g.dependencyIndexBuilds = 0
 			cr = NewCrossRepo(g)
 			cr.SetGoModules(modules)
