@@ -4119,7 +4119,7 @@ func (r *Resolver) resolveExtern(e *graph.Edge, spec string, stats *ResolveStats
 		stats.Unresolved++
 		return
 	}
-	if r.resolveGoModuleExtern(e, importPath, callerRepo, candidates, stats) {
+	if r.resolveGoModuleExtern(e, importPath, callerRepo, goOwnership.filterNodes(candidates), stats) {
 		return
 	}
 	// A configured module may not be visible in this repository's cold

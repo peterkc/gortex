@@ -240,7 +240,12 @@ func TestGoModuleSameRepoFallback(t *testing.T) {
 					cr.SetGoModules(modules)
 					cr.ResolveAll()
 				}
-				assert.Equal(t, tc.target, e.To)
+				if route == "cross_repo" && tc.name == "replace" {
+					// Loose directory guesses belong to the ownership-filtered master pass.
+					assert.Equal(t, "dep::"+tc.importPath+"::Serve", e.To)
+				} else {
+					assert.Equal(t, tc.target, e.To)
+				}
 				assert.False(t, e.CrossRepo)
 			})
 		}
