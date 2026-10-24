@@ -32,10 +32,12 @@ func (idx *Indexer) DecodeSourceSearchText(path string, src []byte) []byte {
 // are read from this checkout rather than cached from its canonical sibling.
 // Scope is applied before reading sources and before any result limit.
 func (idx *Indexer) CurrentSourceSearchFiles(ctx context.Context, root string, allow, allowDir func(string) bool, maxFiles int, patterns []string) ([]string, error) {
-	ignores := excludes.NewHierarchical(root, dirIgnoreFiles...)
+	ignores := excludes.NewHierarchicalWithDiagnostics(root, dirIgnoreFiles, func(dir string, m *excludes.Matcher) {
+		idx.warnExcludedNegationsAt(m, dir)
+	})
 	matcher := idx.excludeMatcher()
 	if patterns != nil {
-		matcher = excludes.New(effectiveExcludePatterns(patterns))
+		matcher = idx.newExcludeMatcher(patterns)
 	}
 	content := idx.newContentAdmissionGate()
 	untracked := idx.newUntrackedAssetGate(ctx, root)
@@ -61,7 +63,7 @@ func (idx *Indexer) CurrentSourceSearchFiles(ctx context.Context, root string, a
 			// The index walk's pruning rule: .git and agent-state folders
 			// close, and an excluded folder stays open only while a
 			// re-include might reach into it.
-			if shouldPruneDir(path, root, matcher, ignores, false) {
+			if shouldPruneDir(path, root, matcher, ignores) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -112,9 +114,11 @@ func sourceSearchExcluded(matcher *excludes.Matcher, ignores *excludes.Hierarchi
 func (idx *Indexer) AdmitSourceSearchBuffer(ctx context.Context, root, path string, content []byte, patterns []string) bool {
 	matcher := idx.excludeMatcher()
 	if patterns != nil {
-		matcher = excludes.New(effectiveExcludePatterns(patterns))
+		matcher = idx.newExcludeMatcher(patterns)
 	}
-	if sourceSearchExcluded(matcher, excludes.NewHierarchical(root, dirIgnoreFiles...), root, path, false) {
+	if sourceSearchExcluded(matcher, excludes.NewHierarchicalWithDiagnostics(root, dirIgnoreFiles, func(dir string, m *excludes.Matcher) {
+		idx.warnExcludedNegationsAt(m, dir)
+	}), root, path, false) {
 		return false
 	}
 	lang, ok := idx.effectiveLanguage(path, content)

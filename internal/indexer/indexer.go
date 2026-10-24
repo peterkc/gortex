@@ -6569,6 +6569,15 @@ func (idx *Indexer) newExcludeMatcher(patterns []string) *excludes.Matcher {
 
 var parentLimitedReincludeWarnings sync.Map
 
+func (idx *Indexer) firstReincludeWarning(pattern string) bool {
+	repo := idx.rootPath
+	if repo == "" {
+		repo = idx.repoPrefix
+	}
+	_, loaded := parentLimitedReincludeWarnings.LoadOrStore([2]string{repo, pattern}, struct{}{})
+	return !loaded
+}
+
 func (idx *Indexer) warnParentLimitedReincludes(logger *zap.Logger, m *excludes.Matcher, pattern string) {
 	body := strings.TrimSuffix(strings.TrimPrefix(pattern, "!"), "/")
 	// An inner slash anchors a negation just like a leading slash.
@@ -6595,7 +6604,7 @@ func (idx *Indexer) warnParentLimitedReincludes(logger *zap.Logger, m *excludes.
 	if repo == "" {
 		repo = idx.repoPrefix
 	}
-	if _, loaded := parentLimitedReincludeWarnings.LoadOrStore([2]string{repo, pattern}, struct{}{}); loaded {
+	if !idx.firstReincludeWarning(pattern) {
 		return
 	}
 	logger.Warn("indexer: negations no longer reach inside excluded folders; wildcard and unanchored includes also need open parents; use an anchored literal include to keep its ancestors open",
@@ -6627,6 +6636,9 @@ func (idx *Indexer) warnExcludedNegationsAt(m *excludes.Matcher, dir string) {
 		}
 		seen[p] = true
 		if inGitDir(strings.Trim(p[1:], "/")) {
+			if !idx.firstReincludeWarning(p) {
+				continue
+			}
 			logger.Warn("indexer: ignoring a re-include under .git; Git's own data is never indexed",
 				zap.String("repo", idx.repoPrefix),
 				zap.String("pattern", p))
@@ -6639,11 +6651,17 @@ func (idx *Indexer) warnExcludedNegationsAt(m *excludes.Matcher, dir string) {
 			}
 		}
 		if excludes.InAgentConfigDir(body) && !excludes.IsAgentConfigMCPDir(body) && !excludes.IsAgentConfigMCPFile(body) {
+			if !idx.firstReincludeWarning(p) {
+				continue
+			}
 			logger.Warn("indexer: ignoring a re-include under an agent-config folder; non-MCP agent state is never indexed",
 				zap.String("repo", idx.repoPrefix), zap.String("pattern", p))
 			continue
 		}
 		if parent, rule := m.ExcludedNegationParent(p); parent != "" {
+			if !idx.firstReincludeWarning(p) {
+				continue
+			}
 			logger.Warn("indexer: re-include is blocked by an excluded parent; reopen each parent folder (for example: !/agent/, /agent/*, !/agent/skills/)",
 				zap.String("repo", idx.repoPrefix),
 				zap.String("pattern", p),
@@ -6690,7 +6708,7 @@ func (idx *Indexer) refreshEffectiveExcludePatterns(patterns []string) {
 		return
 	}
 	idx.config.Exclude = patterns
-	idx.excludes.Store(excludes.New(effectiveExcludePatterns(patterns)))
+	idx.excludes.Store(idx.newExcludeMatcher(patterns))
 }
 
 // SetIgnorePatterns reloads excludes and force-includes together.

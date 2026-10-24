@@ -257,10 +257,10 @@ func TestExcludeMatcher_WarnsAboutBlockedNegations(t *testing.T) {
 			require.Equal(t, tc.warned, warned)
 			require.Equal(t, tc.parents, parents)
 			require.Equal(t, tc.rules, rules)
-			// Exact parent warnings repeat on reload; keyed general warnings do not.
+			// All diagnostics are keyed by repository and pattern across reloads.
 			firstBuild := logs.Len()
 			idx.SetExcludePatterns(tc.patterns)
-			require.Equal(t, firstBuild+len(tc.parents), logs.Len())
+			require.Equal(t, firstBuild, logs.Len())
 		})
 	}
 }
@@ -317,7 +317,7 @@ func TestExcludeMatcher_WarnsPerFolderNegations(t *testing.T) {
 				require.Equal(t, filepath.Join(root, "sub"), logs.All()[0].ContextMap()["ignore_dir"])
 				idx.dirIgnore.Forget(filepath.Join(root, "sub"))
 				idx.shouldExcludeRules(path, root, false)
-				require.Equal(t, 2, logs.Len(), "one warning for the reloaded list")
+				require.Equal(t, 1, logs.Len(), "the reloaded list must not repeat the warning")
 			})
 		}
 	}

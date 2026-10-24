@@ -3280,7 +3280,7 @@ func (w *Watcher) currentExcludeMatcher() *excludes.Matcher {
 	changed := !sameImmutableExcludeSnapshot(w.excludePolicyPatterns, patterns)
 	if changed {
 		w.excludePolicyPatterns = patterns
-		w.excludePolicyMatcher = excludes.New(effectiveExcludePatterns(patterns))
+		w.excludePolicyMatcher = excludes.NewWithIncludes(effectiveExcludePatterns(patterns), w.config.Include)
 	}
 	m := w.excludePolicyMatcher
 	w.excludePolicyMu.Unlock()
