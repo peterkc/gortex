@@ -66,11 +66,12 @@ func TestGoModuleGoModSaveInvalidatesSnapshot(t *testing.T) {
 				manifest := filepath.Join(repos[1].Path, "go.mod")
 				writeFile(t, manifest, "module example.org/renamed\n")
 				var err error
-				if mode == "reindex" {
+				switch mode {
+				case "reindex":
 					_, err = mi.IncrementalReindexRepo("b", []string{manifest})
-				} else if mode == "point" {
+				case "point":
 					_, err = mi.incrementalPointRepoRaw("b", manifest)
-				} else {
+				default:
 					err = mi.GetIndexer("b").IndexFile(manifest)
 				}
 				require.NoError(t, err)
