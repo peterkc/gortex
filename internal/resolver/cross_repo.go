@@ -135,6 +135,7 @@ type CrossRepoResolver struct {
 	crossWorkspaceLookup CrossWorkspaceDepLookup
 	goModules            map[string]string
 	goModulePaths        goModulePathIndex
+	goModuleRepos        map[string][]string
 	goModuleReplacements map[string][]GoModuleReplacement
 	goModuleRetry        *GoModuleDepRetry
 	goModuleRevision     uint64
