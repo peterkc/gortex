@@ -2582,7 +2582,8 @@ func (mi *MultiIndexer) indexRepoRaw(repoPrefix string) (*IndexResult, error) {
 
 	// TODO: After re-indexing, run CrossRepoResolver.ResolveForRepo(repoPrefix)
 	// to update cross-repo edges. This will be implemented in Task 7.1.
-	mi.runCrossRepoResolveFiles(mi.cargoConsumerFilesForRepo(repoPrefix))
+	result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, mi.cargoConsumerFilesForRepo(repoPrefix)...)
+	mi.runCrossRepoResolveFiles(result.CrossRepoResolveFiles)
 
 	mi.ReconcileContractEdges()
 
@@ -3147,7 +3148,9 @@ func (mi *MultiIndexer) trackPreparedRepoSourceCtx(
 		mi.indexers[prefix] = idx
 		mi.mu.Unlock()
 		installed = true
-		mi.runCrossRepoResolveFiles(mi.cargoConsumerFilesForRepo(prefix))
+		if !batchMode.deferResolve {
+			mi.runCrossRepoResolveFiles(mi.cargoConsumerFilesForRepo(prefix))
+		}
 
 		// Add to global config.
 		entry.Path = absPath
