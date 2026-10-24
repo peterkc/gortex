@@ -66,6 +66,12 @@ func pythonModuleFileMatches(filePath, module string) bool {
 // ambiguous layout keeps the previous behaviour. Methods never match: an
 // import binds module attributes, not class members.
 func (r *Resolver) resolvePythonModuleExtern(e *graph.Edge, importPath, symbol, callerRepo string, stats *ResolveStats) bool {
+	return resolvePythonModuleExtern(e, importPath, symbol, callerRepo, stats, func(name string) ([]*graph.Node, error) {
+		return r.cachedFindExternNodesByName(name, e)
+	})
+}
+
+func resolvePythonModuleExtern(e *graph.Edge, importPath, symbol, callerRepo string, stats *ResolveStats, find func(string) ([]*graph.Node, error)) bool {
 	if !isPythonSourcePath(e.FilePath) || !isDottedPythonModule(importPath) {
 		return false
 	}
@@ -75,7 +81,7 @@ func (r *Resolver) resolvePythonModuleExtern(e *graph.Edge, importPath, symbol, 
 		readings = append(readings, reading{importPath[:len(importPath)-len(name)-1], name})
 	}
 	for _, rd := range readings {
-		candidates, err := r.cachedFindExternNodesByName(rd.name, e)
+		candidates, err := find(rd.name)
 		if err != nil {
 			return false
 		}
