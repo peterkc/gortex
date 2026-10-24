@@ -1,0 +1,179 @@
+{
+  "status": "source recovery only; historical checks are not current build evidence",
+  "files": [
+    {
+      "file": "hybrid-followup/cmd/ann/data.go",
+      "historical_sha256": "6648e84e26738da36ccc88420dd1f8333fc049dc03da608d69cee37fc42b23c2",
+      "recovered_sha256": "6648e84e26738da36ccc88420dd1f8333fc049dc03da608d69cee37fc42b23c2",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "hybrid-followup/cmd/ann/data_test.go",
+      "historical_sha256": "7efeeea4e914d4264487318de135c173e7acc3d843f7a091085a6739ac731abe",
+      "recovered_sha256": "7efeeea4e914d4264487318de135c173e7acc3d843f7a091085a6739ac731abe",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "hybrid-followup/cmd/ann/engine.go",
+      "historical_sha256": "762590cc5f9340dc07c841b587c4c6c5682dbd6d30e8166e7a787a264c3fd9e6",
+      "recovered_sha256": "762590cc5f9340dc07c841b587c4c6c5682dbd6d30e8166e7a787a264c3fd9e6",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "hybrid-followup/cmd/ann/main.go",
+      "historical_sha256": "0d986019c73378b60ccc2821481429438d0ed8ca16338ff3b576673c2b8b912f",
+      "recovered_sha256": "0d986019c73378b60ccc2821481429438d0ed8ca16338ff3b576673c2b8b912f",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "hybrid-followup/cmd/timing/main.go",
+      "historical_sha256": "92ad11c62306ca6fa0b654832ee9be00639b77cc49a560da603514e464bc102c",
+      "recovered_sha256": "92ad11c62306ca6fa0b654832ee9be00639b77cc49a560da603514e464bc102c",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "hybrid-followup/embed_voyage.py",
+      "historical_sha256": "56d6636eafbe47c9d1c97aed9435c93d38dd9217fbefe0a96d263383a75ad99e",
+      "recovered_sha256": "56d6636eafbe47c9d1c97aed9435c93d38dd9217fbefe0a96d263383a75ad99e",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "hybrid-followup/export_vectors.py",
+      "historical_sha256": "eca1785d496c527b7922a8832a3e3f7d0bf3b61795cd2c1a6ba50259967f8087",
+      "recovered_sha256": "eca1785d496c527b7922a8832a3e3f7d0bf3b61795cd2c1a6ba50259967f8087",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "hybrid-followup/go.mod",
+      "historical_sha256": "69f2dd13323146c22b3f556ef5683c76e879454e6042f93076e300b71ea27eff",
+      "recovered_sha256": "69f2dd13323146c22b3f556ef5683c76e879454e6042f93076e300b71ea27eff",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "hybrid-followup/internal/quality/metrics.go",
+      "historical_sha256": "c9ac540a6c3b91011c0ca58a1b374ec313e7d306ea7cb6f824ae49a893d56ef6",
+      "recovered_sha256": "c9ac540a6c3b91011c0ca58a1b374ec313e7d306ea7cb6f824ae49a893d56ef6",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "hybrid-followup/internal/quality/metrics_test.go",
+      "historical_sha256": "37ef87ac0ec0007a817462a3a82150f6166c642c7e8079f18da63e4efbb009dc",
+      "recovered_sha256": "37ef87ac0ec0007a817462a3a82150f6166c642c7e8079f18da63e4efbb009dc",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "hybrid-followup/internal/quantindex/generated.go",
+      "historical_sha256": "6c7552c79520cf3fa7309f2ea2b1478cf8f093243bfcb90383df69c7b4c51dc4",
+      "recovered_sha256": "6c7552c79520cf3fa7309f2ea2b1478cf8f093243bfcb90383df69c7b4c51dc4",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "hybrid-followup/internal/quantindex/generated_test.go",
+      "historical_sha256": "e330d2c3e4af07db675ce073473374d3baaab8329361f9e8c96ab028cd36cfde",
+      "recovered_sha256": "e330d2c3e4af07db675ce073473374d3baaab8329361f9e8c96ab028cd36cfde",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "hybrid-followup/internal/quantindex/parallel.go",
+      "historical_sha256": "c71aabc564fdd5240a40cf7e00c9b49aadd6d904f56feeff2c49ce7dab1e555e",
+      "recovered_sha256": "c71aabc564fdd5240a40cf7e00c9b49aadd6d904f56feeff2c49ce7dab1e555e",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "hybrid-followup/internal/quantindex/parallel_test.go",
+      "historical_sha256": "d519d5ca589e0d35e15e6a1df0ff1d45b7095e1ee08b6dc54924a773a4fcb6b7",
+      "recovered_sha256": "d519d5ca589e0d35e15e6a1df0ff1d45b7095e1ee08b6dc54924a773a4fcb6b7",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "hybrid-followup/internal/quantindex/quant.go",
+      "historical_sha256": "a6e604bb196e13da2c4ce8157d692a59c064a00aa4cd803a2a7cd16963c59a7e",
+      "recovered_sha256": "a6e604bb196e13da2c4ce8157d692a59c064a00aa4cd803a2a7cd16963c59a7e",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "hybrid-followup/internal/vector/vector.go",
+      "historical_sha256": "7579a9631fcd92407d350a64b558d02313772b991b347b6a193dd6e4aed1718a",
+      "recovered_sha256": "7579a9631fcd92407d350a64b558d02313772b991b347b6a193dd6e4aed1718a",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "hybrid-followup/prepare_dataset.py",
+      "historical_sha256": "0fdaa90caa7d8b7ea14a5dab95aec661a26fce8f66b5109ed2993f8cec3540b6",
+      "recovered_sha256": "0fdaa90caa7d8b7ea14a5dab95aec661a26fce8f66b5109ed2993f8cec3540b6",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "hybrid-followup/run.py",
+      "historical_sha256": "b147b9de2f2ffc52c3699d225ebd4fba01747dbf3cb662b9ec1ad07b307b9bda",
+      "recovered_sha256": "b147b9de2f2ffc52c3699d225ebd4fba01747dbf3cb662b9ec1ad07b307b9bda",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "hybrid-followup/test_followup.py",
+      "historical_sha256": "5fa0c97f4ca72761b20bd0634b36793a93201c1df0fd92fa3dc095fc34b10f57",
+      "recovered_sha256": "5fa0c97f4ca72761b20bd0634b36793a93201c1df0fd92fa3dc095fc34b10f57",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "adapters/sqlite-usearch/backend.go",
+      "historical_sha256": "9cf4891c59fbdbf7558bdb33aad7b4632f31a50c921068261fd7bc36cecffd5d",
+      "recovered_sha256": "9cf4891c59fbdbf7558bdb33aad7b4632f31a50c921068261fd7bc36cecffd5d",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "adapters/sqlite-usearch/backend_test.go",
+      "historical_sha256": "84cfcb6809861d4d8112edbf258114f6b2e341cf2209704c1b8eee0f4d111e92",
+      "recovered_sha256": "84cfcb6809861d4d8112edbf258114f6b2e341cf2209704c1b8eee0f4d111e92",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "adapters/sqlite-usearch/driver.go",
+      "historical_sha256": "d28244cf9f0ffc0c86e927b656b84998698e27101c8bf20f29c8f5b731cfb2b7",
+      "recovered_sha256": "d28244cf9f0ffc0c86e927b656b84998698e27101c8bf20f29c8f5b731cfb2b7",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "adapters/sqlite-usearch/open_load.go",
+      "historical_sha256": "bc00f70e86874a5fec444e5709c5ecc57389122c20686b1f8b48ed5590a4cd56",
+      "recovered_sha256": "bc00f70e86874a5fec444e5709c5ecc57389122c20686b1f8b48ed5590a4cd56",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "adapters/sqlite-usearch/open_view.go",
+      "historical_sha256": "d03234aaeebd06459307168e0f965ad4fbb9f1963f027ac17054244542f8517b",
+      "recovered_sha256": "d03234aaeebd06459307168e0f965ad4fbb9f1963f027ac17054244542f8517b",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "adapters/sqlite-usearch/vectors.go",
+      "historical_sha256": "bce47fae82ae0d365025f249ac617a9957bb2e255ef8df48cb67620d9bac3f32",
+      "recovered_sha256": "bce47fae82ae0d365025f249ac617a9957bb2e255ef8df48cb67620d9bac3f32",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "MAC-ACCURACY-REPORT.md",
+      "historical_sha256": "f64b28c3073d8f74ec8cfad6328141021efba25de081febad2b5260b4ac563ff",
+      "recovered_sha256": "f64b28c3073d8f74ec8cfad6328141021efba25de081febad2b5260b4ac563ff",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "hybrid-followup/pyproject.toml",
+      "historical_sha256": "6c0b7f03f0960a7dec7c60ad2c92d9624519107e76751e40af9965b45ef5d06b",
+      "recovered_sha256": "6c0b7f03f0960a7dec7c60ad2c92d9624519107e76751e40af9965b45ef5d06b",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "hybrid-followup/METRICS.md",
+      "historical_sha256": "54070e3e8f7d7220df27b21918f9a08a89f1872a9edcbe2091a096b626e3315f",
+      "recovered_sha256": "54070e3e8f7d7220df27b21918f9a08a89f1872a9edcbe2091a096b626e3315f",
+      "exact_before_adaptation": true
+    },
+    {
+      "file": "adapters/sqlite-usearch/go.mod",
+      "historical_sha256": "77f15a6aef5863aa8d4f5c7621bc7463e27a3fb2da88b2499ad08edd66728494",
+      "recovered_sha256_before_path_change": "77f15a6aef5863aa8d4f5c7621bc7463e27a3fb2da88b2499ad08edd66728494",
+      "exact_before_adaptation": true
+    }
+  ]
+}

@@ -1,0 +1,125 @@
+{
+  "reason": "Lead required persistent scratch paths after OS temporary-data loss.",
+  "changes": [
+    {
+      "file": "hybrid-followup/run.py",
+      "old": "ROOT = Path(__file__).resolve().parent",
+      "new": "ROOT = Path(__file__).resolve().parent\nSCRATCH = Path.home() / \".prime/research/gortex/storage-architecture/tmp\"\nWORK = SCRATCH / \"vector/hybrid-followup\""
+    },
+    {
+      "file": "hybrid-followup/run.py",
+      "old": "ROOT / \"real-10k-export\" / repo",
+      "new": "WORK / \"real-10k-export\" / repo"
+    },
+    {
+      "file": "hybrid-followup/run.py",
+      "old": "ROOT / \"real-100k-export/beads\"",
+      "new": "WORK / \"real-100k-export/beads\""
+    },
+    {
+      "file": "hybrid-followup/run.py",
+      "old": "directory = ROOT / \"timing-data\"",
+      "new": "directory = WORK / \"timing-data\""
+    },
+    {
+      "file": "hybrid-followup/run.py",
+      "old": "(ROOT / \"orchestration-adoption.json\")",
+      "new": "(WORK / \"orchestration-adoption.json\")"
+    },
+    {
+      "file": "hybrid-followup/run.py",
+      "old": "default=ROOT / \"native\"",
+      "new": "default=SCRATCH / \"native/usearch\""
+    },
+    {
+      "file": "hybrid-followup/run.py",
+      "old": "binary = ROOT / \"bin\"",
+      "new": "binary = WORK / \"bin\""
+    },
+    {
+      "file": "hybrid-followup/run.py",
+      "old": "directory = ROOT / \"runs\" / mode / args.run_id",
+      "new": "directory = WORK / \"runs\" / mode / args.run_id"
+    },
+    {
+      "file": "hybrid-followup/run.py",
+      "old": "directory.relative_to(ROOT)",
+      "new": "directory.relative_to(WORK)"
+    },
+    {
+      "file": "hybrid-followup/run.py",
+      "old": "with (ROOT / \"execution.lock\").open(\"a\") as lock:",
+      "new": "with (WORK / \"execution.lock\").open(\"a\") as lock:"
+    },
+    {
+      "file": "hybrid-followup/run.py",
+      "old": "str(path.relative_to(ROOT)): file_digest(path)\n                for path in (directory / \"input-receipt.json\"",
+      "new": "str(path.relative_to(WORK)): file_digest(path)\n                for path in (directory / \"input-receipt.json\""
+    },
+    {
+      "file": "hybrid-followup/run.py",
+      "old": "environment[\"GOWORK\"] = \"off\"",
+      "new": "environment[\"GOWORK\"] = \"off\"\n    for key, suffix in ((\"GOCACHE\", \"cache/go-build\"),\n                        (\"GOMODCACHE\", \"cache/go-mod\"),\n                        (\"TMPDIR\", \"cache/tmp\")):\n        path = SCRATCH / suffix\n        path.mkdir(parents=True, exist_ok=True)\n        environment[key] = str(path)"
+    },
+    {
+      "file": "hybrid-followup/run.py",
+      "old": "    with (WORK / \"execution.lock\").open(\"a\") as lock:",
+      "new": "    temporary = SCRATCH / \"cache/tmp\"\n    temporary.mkdir(parents=True, exist_ok=True)\n    os.environ[\"TMPDIR\"] = str(temporary)\n    with (WORK / \"execution.lock\").open(\"a\") as lock:"
+    },
+    {
+      "file": "hybrid-followup/prepare_dataset.py",
+      "old": "STUDY = Path(__file__).resolve().parents[2]",
+      "new": "STUDY = Path.home() / \".prime/research/gortex/storage-architecture/tmp\""
+    },
+    {
+      "file": "hybrid-followup/prepare_dataset.py",
+      "old": "DESTINATION = Path(__file__).resolve().parent / \"real-100k-beads\"",
+      "new": "DESTINATION = STUDY / \"vector/hybrid-followup/real-100k-beads\""
+    },
+    {
+      "file": "hybrid-followup/prepare_dataset.py",
+      "old": "CORPORA = STUDY.parent / \"corpora\"",
+      "new": "CORPORA = STUDY / \"corpora\""
+    },
+    {
+      "file": "hybrid-followup/prepare_dataset.py",
+      "old": "provenance_path = Path(__file__).with_name(\"source-provenance.json\")",
+      "new": "provenance_path = DESTINATION.parent / \"source-provenance.json\""
+    },
+    {
+      "file": "hybrid-followup/embed_voyage.py",
+      "old": "ROOT = Path(__file__).resolve().parent",
+      "new": "ROOT = Path.home() / \".prime/research/gortex/storage-architecture/tmp\" / \"vector/hybrid-followup\""
+    },
+    {
+      "file": "hybrid-followup/cmd/ann/main.go",
+      "old": "var o options",
+      "new": "home, err := os.UserHomeDir()\n\tif err != nil { return err }\n\tdataRoot := filepath.Join(home, \".prime\", \"research\", \"gortex\", \"storage-architecture\", \"tmp\", \"vector\", \"hybrid-followup\")\n\tvar o options"
+    },
+    {
+      "file": "hybrid-followup/cmd/ann/main.go",
+      "old": "\"dataset\", \"real-100k-export/beads\",",
+      "new": "\"dataset\", filepath.Join(dataRoot, \"real-100k-export\", \"beads\"),"
+    },
+    {
+      "file": "hybrid-followup/cmd/timing/main.go",
+      "old": "func run() error {",
+      "new": "func run() error {\n\thome, err := os.UserHomeDir()\n\tif err != nil { return err }\n\tdataRoot := filepath.Join(home, \".prime\", \"research\", \"gortex\", \"storage-architecture\", \"tmp\", \"vector\", \"hybrid-followup\")"
+    },
+    {
+      "file": "hybrid-followup/cmd/timing/main.go",
+      "old": "flag.String(\"data-dir\", \"timing-data\",",
+      "new": "flag.String(\"data-dir\", filepath.Join(dataRoot, \"timing-data\"),"
+    },
+    {
+      "file": "hybrid-followup/cmd/timing/main.go",
+      "old": "os.MkdirTemp(\"\", \"hybrid-followup-dry-\")",
+      "new": "os.MkdirTemp(temporaryRoot, \"hybrid-followup-dry-\")"
+    },
+    {
+      "file": "hybrid-followup/cmd/timing/main.go",
+      "old": "if *phase == \"dry\" {\n\t\t*n = 32",
+      "new": "if *phase == \"dry\" {\n\t\ttemporaryRoot := filepath.Join(dataRoot, \"cache\", \"tmp\")\n\t\tif err := os.MkdirAll(temporaryRoot, 0755); err != nil { return err }\n\t\t*n = 32"
+    }
+  ]
+}
