@@ -63,7 +63,7 @@ func TestRefreshEdgeIdentityConvergenceSingleSlot(t *testing.T) {
 			g.AddEdge(existing)
 			require.Len(t, g.AllEdges(), 2) // Populate the snapshot before convergence.
 
-			// Refresh a detached payload, preserving the stored edge pointer.
+			// Refresh a detached payload onto a stationary destination.
 			updated := *moving
 			updated.To = existing.To
 			updated.Line = existing.Line
@@ -79,9 +79,9 @@ func TestRefreshEdgeIdentityConvergenceSingleSlot(t *testing.T) {
 			assert.Equal(t, 1, g.EdgeCount(), "only one unique edge remains")
 			assert.Equal(t, 1, g.RepoMemoryEstimate("repo").EdgeCount)
 			assert.Equal(t, edgeBytes(existing), g.RepoMemoryEstimate("repo").EdgeBytes)
-			assert.Equal(t, []*Edge{moving}, out)
-			assert.Same(t, moving, in[0])
-			assert.Equal(t, updated, *moving)
+			assert.Equal(t, []*Edge{existing}, out)
+			assert.Same(t, existing, in[0])
+			assert.Equal(t, updated, *existing)
 			if oldTo != updated.To {
 				assert.Empty(t, g.GetInEdges(oldTo))
 			}
@@ -89,7 +89,7 @@ func TestRefreshEdgeIdentityConvergenceSingleSlot(t *testing.T) {
 			require.NoError(t, g.VerifyEdgeIdentities())
 
 			// A later replacement and removal must use consistent sidecars.
-			g.AddEdge(moving)
+			g.AddEdge(existing)
 			require.True(t, g.RemoveEdge("a::A", "b::B", EdgeCalls))
 			assert.Empty(t, g.GetOutEdges("a::A"))
 			assert.Empty(t, g.GetInEdges("b::B"))
@@ -207,7 +207,7 @@ func TestReindexEdgesKeepsOutgoingOrderAroundConvergence(t *testing.T) {
 	p.To, q.To = "p::P", r.To
 	g.ReindexEdges([]EdgeReindex{{Edge: q, OldTo: "unresolved::q"}, {Edge: p, OldTo: "unresolved::p"}})
 
-	assert.Equal(t, []*Edge{p, q, s}, g.GetOutEdges("a::A"), "survivors keep their order; q replaces r in its slot")
+	assert.Equal(t, []*Edge{p, r, s}, g.GetOutEdges("a::A"), "survivors keep their order; stationary r keeps its slot")
 	assert.Equal(t, 3, g.EdgeCount())
 	assert.Equal(t, 3, g.RepoMemoryEstimate("repo").EdgeCount)
 	assert.Equal(t, edgeBytes(p)+edgeBytes(q)+edgeBytes(s), g.RepoMemoryEstimate("repo").EdgeBytes)

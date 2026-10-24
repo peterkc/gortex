@@ -706,26 +706,19 @@ func (g *Graph) ReindexEdges(batch []EdgeReindex) {
 		defer g.endReceiptMutation()
 	}
 	for _, r := range batch {
-		if r.Edge == nil {
-			continue
-		}
-		oldKind := r.OldKind
-		if oldKind == "" {
-			oldKind = r.Edge.Kind
-		}
-		if r.RefreshIdentity {
+		if r.Edge != nil && r.RefreshIdentity {
 			g.markMutationReceiptsIncomplete()
-		} else if receiptActive && (r.OldTo != r.Edge.To || oldKind != r.Edge.Kind) {
-			// Like reindexEdge, an unchanged target records no resolver work.
-			g.recordReindexedEdgeForReceipts(r.Edge)
 		}
 	}
-	g.reindexEdges(batch)
+	for _, edge := range g.reindexEdges(batch) {
+		g.recordReindexedEdgeForReceipts(edge)
+	}
 }
 
-// reindexEdges repairs adjacency and identity indexes without choosing a receipt
-// policy. DeltaWriter records refreshes as exact inserted rows, unlike Graph.
-func (g *Graph) reindexEdges(batch []EdgeReindex) {
+// reindexEdges chooses payloads before returning the winning rows that create
+// resolver work. DeltaWriter can therefore keep refresh receipts exact without
+// choosing a different convergence rule.
+func (g *Graph) reindexEdges(batch []EdgeReindex) []*Edge {
 	touched := make([]bool, g.shardCount)
 	mutated := false
 	for _, r := range batch {
@@ -769,6 +762,10 @@ func (g *Graph) reindexEdges(batch []EdgeReindex) {
 		pos     int
 	}
 	pending := make([]pendingEdge, 0, len(batch))
+	var receiptRows map[edgeHash]*Edge
+	if g.mutationReceipts.activeCount.Load() != 0 {
+		receiptRows = make(map[edgeHash]*Edge)
+	}
 	for _, r := range batch {
 		if r.Edge == nil {
 			continue
@@ -803,7 +800,12 @@ func (g *Graph) reindexEdges(batch []EdgeReindex) {
 		stored := sFrom.outEdges[old.From][pos]
 		if oldKey == hashEdgeKey(keyOf(e)) {
 			// A payload-only refresh keeps its identity and both slots.
+			if receiptRows != nil && !deltaEdgeContentEqual(stored, e) {
+				receiptRows[oldKey] = stored
+			}
+			sFrom.repoEdgeRemove(repoOf(sFrom, old.From), stored)
 			*stored = *e
+			sFrom.repoEdgeAdd(repoOf(sFrom, e.From), stored)
 			continue
 		}
 		// Free only the old key; the slot stays until the second phase.
@@ -818,36 +820,41 @@ func (g *Graph) reindexEdges(batch []EdgeReindex) {
 	}
 	var dropped map[string]map[int]bool
 	for _, p := range pending {
+		e := &p.updated
+		sFrom := g.shardFor(e.From)
+		newKey := hashEdgeKey(keyOf(e))
+		_, taken := sFrom.outEdgeIdx[e.From][newKey]
+		if p.oldFrom != "" && (p.oldFrom != e.From || taken) {
+			if dropped == nil {
+				dropped = map[string]map[int]bool{}
+			}
+			if dropped[p.oldFrom] == nil {
+				dropped[p.oldFrom] = map[int]bool{}
+			}
+			dropped[p.oldFrom][p.pos] = true
+		}
+		if taken {
+			// A stationary destination (possibly refreshed above) or the
+			// first mover owns this key. Losing rows create no resolver work.
+			continue
+		}
 		*p.stored = p.updated
-		e := p.stored
+		e = p.stored
 		if p.oldFrom != "" {
-			sFrom := g.shardFor(e.From)
-			newKey := hashEdgeKey(keyOf(e))
-			_, taken := sFrom.outEdgeIdx[e.From][newKey]
-			if p.oldFrom == e.From && !taken {
+			if p.oldFrom == e.From {
 				// Keep the slot so outgoing order does not change.
 				sFrom.outEdgeIdx[e.From][newKey] = p.pos
 				sFrom.outEdgeKeys[e.From][p.pos] = newKey
-				sFrom.repoEdgeAdd(repoOf(sFrom, e.From), e)
 			} else {
-				if dropped == nil {
-					dropped = map[string]map[int]bool{}
-				}
-				if dropped[p.oldFrom] == nil {
-					dropped[p.oldFrom] = map[int]bool{}
-				}
-				dropped[p.oldFrom][p.pos] = true
-				inserted, originChanged := addEdgeToBucket(sFrom.outEdges, sFrom.outEdgeKeys, sFrom.outEdgeIdx, e.From, e)
-				if inserted {
-					sFrom.repoEdgeAdd(repoOf(sFrom, e.From), e)
-				}
-				if originChanged {
-					g.edgeIdentityRevisions.Add(1)
-				}
+				addEdgeToBucket(sFrom.outEdges, sFrom.outEdgeKeys, sFrom.outEdgeIdx, e.From, e)
 			}
+			sFrom.repoEdgeAdd(repoOf(sFrom, e.From), e)
 		}
 		sTo := g.shardFor(e.To)
 		addEdgeToBucket(sTo.inEdges, sTo.inEdgeKeys, sTo.inEdgeIdx, e.To, e)
+		if receiptRows != nil {
+			receiptRows[newKey] = e
+		}
 	}
 	for from, slots := range dropped {
 		g.shardFor(from).dropOutEdgeSlots(from, slots)
@@ -855,6 +862,16 @@ func (g *Graph) reindexEdges(batch []EdgeReindex) {
 	if mutated {
 		g.edgeMutGen.Add(1)
 	}
+	var receiptEdges []*Edge
+	for key, edge := range receiptRows {
+		// A later row may have moved a refreshed pointer away from this key.
+		sFrom := g.shardFor(edge.From)
+		pos, exists := sFrom.outEdgeIdx[edge.From][key]
+		if exists && sFrom.outEdges[edge.From][pos] == edge && hashEdgeKey(keyOf(edge)) == key {
+			receiptEdges = append(receiptEdges, edge)
+		}
+	}
+	return receiptEdges
 }
 
 // dropOutEdgeSlots removes the given slots from one outgoing bucket, keeping
@@ -2961,78 +2978,7 @@ func (g *Graph) ReindexEdge(e *Edge, oldTo string) {
 }
 
 func (g *Graph) reindexEdge(e *Edge, oldTo string, oldKind EdgeKind) {
-	if oldTo == e.To && oldKind == e.Kind {
-		return
-	}
-	receiptActive := g.beginReceiptMutation()
-	if receiptActive {
-		defer g.endReceiptMutation()
-	}
-	if receiptActive {
-		// Mirror the SQLite reindex recorder: only a write that leaves the
-		// edge at an unresolved target creates resolver work; replacing a
-		// stub with a resolved target creates none. The source-node lookup
-		// happens before the shard write locks below.
-		g.recordReindexedEdgeForReceipts(e)
-	}
-	// Must lock the From shard too — we mutate sFrom.outEdgeIdx below,
-	// and without its lock a concurrent AddEdge on From panics the
-	// runtime with "concurrent map read and map write".
-	unlock := g.lockThreeWrite(e.From, oldTo, e.To)
-	defer unlock()
-
-	// Old identity uses oldTo; the current edge struct already has the
-	// new To set, so we reconstruct the key before mutation.
-	oldKey := hashEdgeKey(edgeKey{From: e.From, To: oldTo, Kind: oldKind, FilePath: e.FilePath, Line: e.Line})
-	newKey := hashEdgeKey(keyOf(e))
-
-	sFrom := g.shardFor(e.From)
-	// Convergence replaces the existing identity, matching the incoming
-	// bucket's rule, and removes the redundant outgoing slot. Otherwise
-	// only the sidecar key changes, avoiding slice growth.
-	//
-	// The parallel outEdgeKeys slice MUST be updated alongside
-	// outEdgeIdx. removeEdgeFromBucket reads outEdgeKeys[pos] to
-	// learn the swapped slot's insertion-time key during swap-with-
-	// last; leaving outEdgeKeys stale here would re-insert the old
-	// key into outEdgeIdx pointing at a swapped position, and the
-	// next swap on that key would compute a pos past the (now
-	// shorter) slice — the exact index-out-of-range panic that
-	// surfaces during evictEdgesLocked when warmup retargets a lot
-	// of edges via ReindexEdge.
-	if fromIdx, ok := sFrom.outEdgeIdx[e.From]; ok {
-		if pos, exists := fromIdx[oldKey]; exists {
-			old := *e
-			old.To = oldTo
-			old.Kind = oldKind
-			var srcRepo string
-			if src := sFrom.nodes[e.From]; src != nil {
-				srcRepo = src.RepoPrefix
-			}
-			sFrom.repoEdgeRemove(srcRepo, &old)
-			if _, duplicate := fromIdx[newKey]; duplicate {
-				removeEdgeFromBucket(sFrom.outEdges, sFrom.outEdgeKeys, sFrom.outEdgeIdx, e.From, oldKey)
-				addEdgeToBucket(sFrom.outEdges, sFrom.outEdgeKeys, sFrom.outEdgeIdx, e.From, e)
-				g.edgeMutGen.Add(1)
-			} else {
-				sFrom.repoEdgeAdd(srcRepo, e)
-				delete(fromIdx, oldKey)
-				fromIdx[newKey] = pos
-				if keys, ok := sFrom.outEdgeKeys[e.From]; ok && pos < len(keys) {
-					keys[pos] = newKey
-				}
-			}
-		}
-	}
-
-	// Move from the old target's inEdges bucket to the new one.
-	sOld := g.shardFor(oldTo)
-	removeEdgeFromBucket(sOld.inEdges, sOld.inEdgeKeys, sOld.inEdgeIdx, oldTo, oldKey)
-	sNew := g.shardFor(e.To)
-	addEdgeToBucket(sNew.inEdges, sNew.inEdgeKeys, sNew.inEdgeIdx, e.To, e)
-	// Without convergence, outEdges retains the same *Edge slot and the
-	// cached AllEdges slice sees e.To through its pointer. Convergence
-	// invalidates that cache above because an outgoing slot was removed.
+	g.ReindexEdges([]EdgeReindex{{Edge: e, OldTo: oldTo, OldKind: oldKind}})
 }
 
 // GetNode returns a node by ID, or nil if not found.
