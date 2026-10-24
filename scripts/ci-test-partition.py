@@ -261,16 +261,19 @@ def guard_command(command):
     return units
 
 
+# Actions prefixes each output line with an RFC3339 timestamp.
+LOG_TIMESTAMP = re.compile(r"^\ufeff?\d{4}-\d\d-\d\dT\S+ ")
+PASS_LINE = re.compile(
+    r"--- PASS: ((?:Test|Example|Fuzz)\w+) \((\d+(?:\.\d+)?)s\)")
+
+
 def parse_pass_durations(output):
     """Group top-level PASS durations by package, taking duplicate maxima."""
     packages = {}
     pending = {}
     for line in output.splitlines():
-        # Actions prefixes each output line with an RFC3339 timestamp.
-        text = re.sub(r"^\ufeff?\d{4}-\d\d-\d\dT\S+ ", "", line)
-        passed = re.fullmatch(
-            r"--- PASS: ((?:Test|Example|Fuzz)\w+) \((\d+(?:\.\d+)?)s\)",
-            text)
+        text = LOG_TIMESTAMP.sub("", line)
+        passed = PASS_LINE.fullmatch(text)
         if passed:
             name, seconds = passed.groups()
             pending[name] = max(pending.get(name, 0.0), float(seconds))
@@ -381,7 +384,26 @@ def partition_shards(partition, fallback, count):
     return shards
 
 
-def shard_timing_record(output, platform, partition, count, module):
+def passed_durations(output):
+    """Return every top-level PASS duration, even without a package summary."""
+    durations = {}
+    for line in output.splitlines():
+        passed = PASS_LINE.fullmatch(LOG_TIMESTAMP.sub("", line))
+        if passed:
+            name, seconds = passed.groups()
+            durations[name] = max(durations.get(name, 0.0), float(seconds))
+    return durations
+
+
+def shard_timing_record(output, platform, partition, count, module,
+                        complete=True):
+    """Build one shard's timing record.
+
+    A failed or timed-out shard still reports the tests that passed, marked
+    incomplete: the merge adds those times but never drops a test because of
+    them. A shard owns exactly one package, so its PASS lines need no package
+    summary.
+    """
     race = platform == "ubuntu-latest"
     fallback = FALLBACK_RACE_SHARDS if race else FALLBACK_WINDOWS_SHARDS
     paths = RACE_PACKAGES if race else PLAIN_PACKAGES
@@ -392,19 +414,27 @@ def shard_timing_record(output, platform, partition, count, module):
     counts = partition_shards(partition, fallback, count)
     count = counts[family]
     package = module + paths[family]
-    timings = parse_pass_durations(output).get(package)
+    timings = (parse_pass_durations(output).get(package) if complete
+               else passed_durations(output))
     if not timings:
+        if not complete:
+            return None
         raise ValueError(f"no completed PASS results for {package}")
     return {"os": platform, "partition": partition, "shard_count": count,
-            "package": package, "timings": timings}
+            "package": package, "timings": timings, "complete": complete}
 
 
-def merge_family_timings(old, delivered, expected):
+def merge_family_timings(old, delivered, expected, finished):
+    """Average this run's times with the old ones.
+
+    A test is dropped only when every expected shard finished; times from
+    failed shards are added but never drop a test.
+    """
     measured = {}
     for partition in sorted(expected & delivered.keys()):
         for name, seconds in delivered[partition].items():
             measured[name] = max(measured.get(name, 0.0), seconds)
-    complete = bool(expected) and expected <= delivered.keys()
+    complete = bool(expected) and expected <= finished
     if not complete and not old:
         return {}
     names = measured.keys() if complete else old.keys() | measured.keys()
@@ -432,14 +462,18 @@ def merge_run_timings(plan, old, records, module):
             expected = {row["partition"]: row["shard_count"]
                         for row in expected_rows}
             delivered = {}
+            finished = set()
             for record in records:
                 partition = record["partition"]
                 if (record["os"] == platform and record["package"] == package
                         and partition in expected
                         and record["shard_count"] == expected[partition]):
                     delivered[partition] = record["timings"]
+                    if record.get("complete") is True:
+                        finished.add(partition)
             timings = merge_family_timings(
-                old[mode].get(package, {}), delivered, set(expected))
+                old[mode].get(package, {}), delivered, set(expected),
+                finished)
             if timings:
                 merged[mode][package] = timings
     return merged
@@ -495,10 +529,17 @@ def main():
             merge_timings(args.timings_dir, args.shard_timings_dir, module)
         else:
             platform = os.environ["TEST_OS"]
+            outcome = os.environ.get("TEST_OUTCOME")
+            if outcome not in ("success", "failure"):
+                raise ValueError("TEST_OUTCOME must be success or failure")
             output = args.write_timings.read_text(
                 encoding="utf-8", errors="replace")
             record = shard_timing_record(
-                output, platform, args.partition, args.shard_count, module)
+                output, platform, args.partition, args.shard_count, module,
+                complete=outcome == "success")
+            if record is None:
+                print("no passed tests to record", flush=True)
+                return
             args.shard_timings_dir.mkdir(parents=True, exist_ok=True)
             path = args.shard_timings_dir / f"{platform}-{args.partition}.json"
             path.write_text(json.dumps(record, indent=2, sort_keys=True)

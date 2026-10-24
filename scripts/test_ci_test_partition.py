@@ -133,9 +133,12 @@ class PartitionTests(unittest.TestCase):
             self.assertEqual(len(timing_steps), 2)
             for step in timing_steps:
                 condition = re.search(r"(?m)^        if: (.*)$", step).group(1)
-                self.assertIn("steps.test.outcome == 'success'", condition)
-                self.assertNotIn("!cancelled()", condition)
+                self.assertIn("!cancelled() && (steps.test.outcome == 'success'"
+                              " || steps.test.outcome == 'failure')", condition)
                 self.assertIn("github.event_name", condition)
+                if "name: Write shard timings" in step:
+                    self.assertIn(
+                        "TEST_OUTCOME: ${{ steps.test.outcome }}", step)
             if job_id == "test":
                 setup = [step for step in steps
                          if "uses: actions/setup-go@" in step]
@@ -532,15 +535,22 @@ ok  \texample.org/b\t2.5s
         old = {"TestA": 2.0, "TestGone": 9.0}
         delivered = {"store-0": {"TestA": 4.02, "TestNew": 1.25}}
         expected = {"store-0", "store-1"}
-        partial = planner.merge_family_timings(old, delivered, expected)
+        partial = planner.merge_family_timings(
+            old, delivered, expected, {"store-0"})
         self.assertEqual(partial, {"TestA": 3.01, "TestGone": 9.0,
                                    "TestNew": 1.25})
         complete = {**delivered, "store-1": {"TestOther": 0.0}}
-        result = planner.merge_family_timings(old, complete, expected)
+        # A failed shard adds its passed tests but never drops one.
+        failed = planner.merge_family_timings(
+            old, complete, expected, {"store-0"})
+        self.assertEqual(failed, {"TestA": 3.01, "TestGone": 9.0,
+                                  "TestNew": 1.25, "TestOther": 0.0})
+        result = planner.merge_family_timings(old, complete, expected,
+                                              expected)
         self.assertEqual(result, {"TestA": 3.01, "TestNew": 1.25,
                                   "TestOther": 0.0})
         self.assertEqual(result, planner.merge_family_timings(
-            old, dict(reversed(list(complete.items()))), expected))
+            old, dict(reversed(list(complete.items()))), expected, expected))
         self.assertEqual(old, {"TestA": 2.0, "TestGone": 9.0})
 
     def test_merge_uses_counts_from_this_runs_plan(self):
@@ -553,12 +563,21 @@ ok  \texample.org/b\t2.5s
         old = {"race": {}, "plain": {package: {"TestA": 2.0, "TestOld": 3.0}}}
         record = {"os": "windows-latest", "partition": "indexer-0",
                   "shard_count": 4, "package": package,
-                  "timings": {"TestA": 6.0}}
+                  "timings": {"TestA": 6.0}, "complete": True}
         merged = planner.merge_run_timings(plan, old, [record], module)
         self.assertEqual(merged["plain"][package], old["plain"][package])
         record = {**record, "shard_count": 1}
         merged = planner.merge_run_timings(plan, old, [record], module)
         self.assertEqual(merged["plain"][package], {"TestA": 4.0})
+        for complete in (False, None):
+            partial = dict(record, complete=complete)
+            if complete is None:
+                del partial["complete"]
+            with self.subTest(complete=complete):
+                merged = planner.merge_run_timings(plan, old, [partial],
+                                                   module)
+                self.assertEqual(merged["plain"][package],
+                                 {"TestA": 4.0, "TestOld": 3.0})
 
     def test_merge_writes_json_and_preserves_missing_families(self):
         module = "example.org/gortex"
@@ -581,7 +600,7 @@ ok  \texample.org/b\t2.5s
             record = {"os": "ubuntu-latest", "partition": "store-0",
                       "shard_count": 1,
                       "package": module + "/internal/graph/store_sqlite",
-                      "timings": {"TestA": 4.0}}
+                      "timings": {"TestA": 4.0}, "complete": True}
             (shards / "store.json").write_text(json.dumps(record))
             planner.merge_timings(used, shards, module)
             text = (used / "ci-race-timings.json").read_text()
@@ -606,14 +625,60 @@ ok  \texample.org/b\t2.5s
                     "--shard-timings-dir", str(base / "shards")]
             with mock.patch.object(planner.sys, "argv", argv), \
                     mock.patch.dict(planner.os.environ,
-                                    {"TEST_OS": "ubuntu-latest"}), \
+                                    {"TEST_OS": "ubuntu-latest",
+                                     "TEST_OUTCOME": "success"}), \
                     mock.patch.object(planner, "capture") as capture:
                 planner.main()
             path = base / "shards/ubuntu-latest-mcp-1.json"
             record = json.loads(path.read_text())
             self.assertEqual(record["timings"], {"TestA": 1.25})
             self.assertEqual(record["shard_count"], 2)
+            self.assertIs(record["complete"], True)
             capture.assert_not_called()
+            path.unlink()
+            # A timed-out shard has no ok summary; its passed tests still count.
+            log.write_bytes(
+                b"--- PASS: TestA (1.25s)\r\n"
+                b"--- FAIL: TestB (0.50s)\r\n"
+                b"--- PASS: TestC (2.00s)\r\n"
+                b"panic: test timed out after 45m0s\r\n")
+            for outcome, expected in (("failure", {"TestA": 1.25,
+                                                   "TestC": 2.0}),
+                                      ("success", None)):
+                with self.subTest(outcome=outcome), \
+                        mock.patch.object(planner.sys, "argv", argv), \
+                        mock.patch.dict(planner.os.environ,
+                                        {"TEST_OS": "ubuntu-latest",
+                                         "TEST_OUTCOME": outcome}):
+                    if expected is None:
+                        with self.assertRaisesRegex(ValueError,
+                                                    "no completed PASS"):
+                            planner.main()
+                        continue
+                    planner.main()
+                    record = json.loads(path.read_text())
+                    self.assertEqual(record["timings"], expected)
+                    self.assertIs(record["complete"], False)
+                    path.unlink()
+            log.write_bytes(b"--- FAIL: TestB (0.50s)\r\n")
+            with mock.patch.object(planner.sys, "argv", argv), \
+                    mock.patch.dict(planner.os.environ,
+                                    {"TEST_OS": "ubuntu-latest",
+                                     "TEST_OUTCOME": "failure"}), \
+                    redirect_stdout(io.StringIO()):
+                planner.main()
+            self.assertFalse(path.exists())
+            for outcome in (None, "skipped", "cancelled"):
+                environ = {"TEST_OS": "ubuntu-latest"}
+                if outcome is not None:
+                    environ["TEST_OUTCOME"] = outcome
+                with self.subTest(outcome=outcome), \
+                        mock.patch.object(planner.sys, "argv", argv), \
+                        mock.patch.dict(planner.os.environ, environ), \
+                        self.assertRaisesRegex(ValueError, "TEST_OUTCOME"):
+                    if outcome is None:
+                        planner.os.environ.pop("TEST_OUTCOME", None)
+                    planner.main()
             with self.assertRaisesRegex(ValueError, "no completed PASS"):
                 planner.shard_timing_record("FAIL\tpkg\t1s", "ubuntu-latest",
                                             "mcp-1", 2,
@@ -622,9 +687,15 @@ ok  \texample.org/b\t2.5s
     def test_timing_cache_attempt_keys_and_artifact_lifecycle(self):
         workflow = (Path(__file__).parents[1]
                     / ".github/workflows/ci.yml").read_text()
-        key = "key: ci-timings-${{ github.run_id }}-${{ github.run_attempt }}"
+        files = ("${{ hashFiles('scripts/ci-race-timings.json', "
+                 "'scripts/ci-plain-timings.json') }}")
+        key = ("key: ci-timings-" + files
+               + "-${{ github.run_id }}-${{ github.run_attempt }}")
         self.assertEqual(workflow.count(key), 2)
-        self.assertIn("restore-keys: ci-timings-", workflow)
+        self.assertEqual(
+            re.findall(r"(?m)^\s+restore-keys: ci-timings-.*$", workflow),
+            ["          restore-keys: ci-timings-" + files + "-"])
+        self.assertNotIn("key: ci-timings-${{ github.run_id }}", workflow)
         uploads = [step for step in re.split(r"(?m)^      - ", workflow)[1:]
                    if step.startswith("uses: actions/upload-artifact@")]
         self.assertEqual(len(uploads), 4)
@@ -720,7 +791,7 @@ ok  \texample.org/b\t2.5s
     def test_incomplete_new_family_is_omitted_not_saved_as_partial_data(self):
         self.assertEqual(planner.merge_family_timings(
             {}, {"indexer-0": {"TestA": 2.0}},
-            {"indexer-0", "indexer-1"}), {})
+            {"indexer-0", "indexer-1"}, {"indexer-0"}), {})
         module = "example.org/gortex"
         plan = planner.build_plan(
             {family: {"TestA": 1.0}
@@ -728,7 +799,7 @@ ok  \texample.org/b\t2.5s
             {"indexer": {"TestA": 2000.0}}, "1.27")
         record = {"os": "windows-latest", "partition": "indexer-0",
                   "shard_count": 2, "package": module + "/internal/indexer",
-                  "timings": {"TestA": 2.0}}
+                  "timings": {"TestA": 2.0}, "complete": True}
         result = planner.merge_run_timings(
             plan, {"race": {}, "plain": {}}, [record], module)
         self.assertEqual(result, {"race": {}, "plain": {}})
