@@ -135,9 +135,9 @@ func TestGoModuleImportBudgetDoesNotStarveCalls(t *testing.T) {
 	}
 }
 
-// A lazy restart seed must stop even when all import identities are filtered out.
-func TestGoModuleImportSeedBoundAndCancellation(t *testing.T) {
-	for _, mode := range []string{"budget", "cancel"} {
+// A restart seeds all identities once; cancellation still stops filtered rows.
+func TestGoModuleImportSeedCompletionAndCancellation(t *testing.T) {
+	for _, mode := range []string{"complete", "cancel"} {
 		t.Run(mode, func(t *testing.T) {
 			g := &goImportCountingStore{Store: graph.New()}
 			count := graph.MaxIncomingSourceCandidateRows + 10
@@ -161,10 +161,15 @@ func TestGoModuleImportSeedBoundAndCancellation(t *testing.T) {
 			} else {
 				_, admission := cr.ResolveMutationFrontiersBounded(nil, nil, []string{"b/lib.go"})
 				assert.False(t, admission.Refused)
-				assert.LessOrEqual(t, g.importRows, graph.MaxIncomingSourceCandidateRows+1)
+				assert.Equal(t, count, g.importRows)
+				assert.True(t, cr.goModuleRetry.importsSeeded)
+				cr.ResolveMutationFrontiersBounded(nil, nil, []string{"b/lib.go"})
+				assert.Equal(t, 1, g.importScans)
 			}
 			require.NotNil(t, cr.goModuleRetry)
-			assert.False(t, cr.goModuleRetry.importsSeeded, "a partial seed must remain eligible for the full pass")
+			if mode == "cancel" {
+				assert.False(t, cr.goModuleRetry.importsSeeded, "a cancelled seed remains eligible for retry")
+			}
 		})
 	}
 }

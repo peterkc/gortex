@@ -197,8 +197,7 @@ func (cr *CrossRepoResolver) applyGoModuleImportReindexes(batch []graph.EdgeRein
 }
 
 // Filter identity-only rows before loading any file payload or adjacency.
-// Charge every inspected identity, including unrelated and duplicate imports.
-func (cr *CrossRepoResolver) goModuleImportFileBatches(ctx context.Context, repos []string, budget *graph.IncomingSourceBudget) iter.Seq2[[]string, error] {
+func (cr *CrossRepoResolver) goModuleImportFileBatches(ctx context.Context, repos []string) iter.Seq2[[]string, error] {
 	return func(yield func([]string, error) bool) {
 		seen := make(map[string]bool)
 		var files []string
@@ -206,12 +205,6 @@ func (cr *CrossRepoResolver) goModuleImportFileBatches(ctx context.Context, repo
 			if err := ctx.Err(); err != nil {
 				yield(nil, err)
 				return
-			}
-			if budget != nil {
-				if err := budget.Charge(1); err != nil {
-					yield(nil, err)
-					return
-				}
 			}
 			file, path, ok := strings.Cut(n.ID, "::import::")
 			if !ok || !strings.HasSuffix(file, ".go") || !trackedGoImport(cr.goModulePaths, path) || seen[file] {
@@ -262,10 +255,35 @@ func (cr *CrossRepoResolver) goModuleImportState() *GoModuleDepRetry {
 	return state
 }
 
+// Seed the save-time registry once, without hydrating files or mutating edges.
+// A workspace-sized identity scan must not consume a provider's recovery budget.
+func (cr *CrossRepoResolver) seedGoModuleImportRegistry(ctx context.Context) error {
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	state := cr.goModuleImportState()
+	if state.importsSeeded || len(cr.goModules) == 0 {
+		return ctx.Err()
+	}
+	for n := range graph.RepoNodeIdentitiesSeq(cr.graph, nil, graph.KindImport) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		file, path, ok := strings.Cut(n.ID, "::import::")
+		if !ok || !strings.HasSuffix(file, ".go") || !trackedGoImport(cr.goModulePaths, path) {
+			continue
+		}
+		if module := cr.goModules[n.RepoPrefix]; module != "" && (path == module || strings.HasPrefix(path, module+"/")) {
+			continue
+		}
+		cr.rememberGoModuleImports([]*graph.Node{{ID: n.ID, RepoPrefix: n.RepoPrefix, Kind: graph.KindImport, Language: "go"}})
+	}
+	state.importsSeeded = ctx.Err() == nil
+	return ctx.Err()
+}
+
 // An unchanged warm restart skips global resolution. Public entry points seed
 // once before taking the pass lock; each candidate batch takes its own lock.
-// Mutation passes supply their import budget; full passes supply nil.
-func (cr *CrossRepoResolver) resolveGoModuleImportSweep(ctx context.Context, stats *CrossRepoStats, budget *graph.IncomingSourceBudget) error {
+func (cr *CrossRepoResolver) resolveGoModuleImportSweep(ctx context.Context, stats *CrossRepoStats) error {
 	cr.mu.Lock()
 	state := cr.goModuleImportState()
 	seeded := state.importsSeeded
@@ -273,7 +291,7 @@ func (cr *CrossRepoResolver) resolveGoModuleImportSweep(ctx context.Context, sta
 	if seeded || len(cr.goModules) == 0 {
 		return ctx.Err()
 	}
-	for files, err := range cr.goModuleImportFileBatches(ctx, nil, budget) {
+	for files, err := range cr.goModuleImportFileBatches(ctx, nil) {
 		if err != nil {
 			return err
 		}

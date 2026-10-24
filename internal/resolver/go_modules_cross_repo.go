@@ -519,7 +519,7 @@ func (cr *CrossRepoResolver) RetryGoModuleDeps(ctx context.Context) error {
 	}(); err != nil {
 		return err
 	}
-	return cr.resolveGoModuleImportSweep(ctx, stats, nil)
+	return cr.resolveGoModuleImportSweep(ctx, stats)
 }
 
 // ResolveGoModuleIncomingForRepo probes the provider's definitions and retained
@@ -529,7 +529,7 @@ func (cr *CrossRepoResolver) ResolveGoModuleIncomingForRepo(repo string) error {
 	if len(cr.goModules) == 0 {
 		return nil
 	}
-	if err := cr.resolveGoModuleImportSweep(context.Background(), nil, nil); err != nil {
+	if err := cr.resolveGoModuleImportSweep(context.Background(), nil); err != nil {
 		return err
 	}
 	if cr.goModules[repo] != "" && len(cr.graph.RepoPrefixes()) >= 2 {
@@ -549,7 +549,7 @@ func (cr *CrossRepoResolver) ResolveGoModuleIncomingForRepo(repo string) error {
 			}
 		}
 	}
-	for files, err := range cr.goModuleImportFileBatches(context.Background(), []string{repo}, nil) {
+	for files, err := range cr.goModuleImportFileBatches(context.Background(), []string{repo}) {
 		if err != nil {
 			return err
 		}
