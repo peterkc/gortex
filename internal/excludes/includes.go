@@ -87,7 +87,7 @@ func (m *Matcher) includesLiteral(rel string) bool {
 
 func (m *Matcher) excludesParent(rel string) bool {
 	for i := 0; i < len(rel); i++ {
-		if rel[i] == '/' && !m.IncludesRel(rel[:i]+"/") && m.dirs.MatchesPath(rel[:i]) {
+		if rel[i] == '/' && m.dirs.MatchesPath(rel[:i]) && ((m.includes == nil && len(m.literalIncludes) == 0) || !m.IncludesRel(rel[:i]+"/")) {
 			return true
 		}
 	}
