@@ -52,11 +52,12 @@ var (
 var trackPollInterval = time.Second
 
 var trackCmd = &cobra.Command{
-	Use:   "track <path>",
-	Short: "Add a repository to the tracked workspace",
-	Long:  "Resolves the path to absolute, validates it exists, and adds it to the global config.",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runTrack,
+	Use:          "track <path>",
+	Short:        "Add a repository to the tracked workspace",
+	Long:         "Resolves the path to absolute, validates it exists, and adds it to the global config.",
+	Args:         cobra.ExactArgs(1),
+	SilenceUsage: true,
+	RunE:         runTrack,
 }
 
 var untrackCmd = &cobra.Command{
@@ -102,35 +103,36 @@ func declaredWorkspace(repoPath string) string {
 	return cfg.Workspace
 }
 
-// configuredWorktreePrefix mirrors the daemon's admin-name rule when the
-// family's primary checkout is in config. Explicit and workspace names keep
-// their existing precedence.
+// configuredWorktreePrefix applies the daemon's admin-name rule offline.
+// The first configured corpus in the git family supplies its base prefix.
 func configuredWorktreePrefix(root string, entries []config.RepoEntry, owners map[string]string) string {
-	info := indexer.ResolveWorktree(root)
-	if !info.IsWorktree {
-		return ""
-	}
-	var base string
-	for _, entry := range entries {
-		if pathkey.SamePathIdentity(pathkey.CanonicalPath(entry.Path), pathkey.CanonicalPath(info.MainRepoPath)) {
-			base = config.ResolvePrefix(entry)
-			break
-		}
-	}
-	if base == "" {
-		return ""
-	}
 	inv, err := gitstate.Inventory(context.Background(), root)
 	if err != nil {
 		return ""
 	}
+	var admin string
 	for _, record := range inv.Records {
 		if pathkey.SamePathIdentity(pathkey.CanonicalPath(record.Path), root) {
-			return indexer.DedicatedWorktreePrefix(base, record.AdminName, root, func(prefix string) (string, bool) {
-				owner, held := owners[prefix]
-				return pathkey.CanonicalPath(owner), held
-			})
+			admin = record.AdminName
+			break
 		}
+	}
+	if admin == "" || admin == gitstate.MainAdminName {
+		return ""
+	}
+	for _, entry := range entries {
+		family, err := gitstate.Inventory(context.Background(), entry.Path)
+		if err != nil || !pathkey.SamePathIdentity(family.CommonDir, inv.CommonDir) {
+			continue
+		}
+		if entry.Workspace == "" {
+			entry.Workspace = declaredWorkspace(entry.Path)
+		}
+		base := indexer.EffectiveRepoPrefix(nil, entry)
+		return indexer.DedicatedWorktreePrefix(base, admin, root, func(prefix string) (string, bool) {
+			owner, held := owners[prefix]
+			return pathkey.CanonicalPath(owner), held
+		})
 	}
 	return ""
 }
@@ -182,14 +184,11 @@ func runTrack(cmd *cobra.Command, args []string) error {
 		}
 	}
 	var prefix string
-	daemonName := trackName
 	if already {
-		prefix = config.ResolvePrefix(config.RepoEntry{Path: absPath, Name: trackName})
-		if daemonName == "" {
-			if entry := gc.FindRepoByPath(absPath); entry != nil {
-				daemonName = entry.Name
-			}
+		if entry := gc.FindRepoByPath(absPath); entry != nil && trackName != "" && trackName != config.ResolvePrefix(*entry) {
+			return fmt.Errorf("%s is already configured; set name: %s in the global config and run `gortex daemon reload`", absPath, trackName)
 		}
+		prefix = config.ResolvePrefix(config.RepoEntry{Path: absPath, Name: trackName})
 	} else {
 		owners := make(map[string]string, len(gc.Repos))
 		for _, existing := range gc.Repos {
@@ -210,18 +209,18 @@ func runTrack(cmd *cobra.Command, args []string) error {
 		entry := config.RepoEntry{Path: absPath, Name: trackName}
 		prefix = config.ResolvePrefix(entry)
 		if entry.Name == "" {
-			if name, separate := indexer.WorktreeInstanceName(absPath, prefix, declaredWorkspace(absPath), trackAsWorktree); separate {
+			if name := configuredWorktreePrefix(absPath, gc.Repos, owners); name != "" {
+				prefix, entry.Name = name, name
+			} else if name, separate := indexer.WorktreeInstanceName(absPath, prefix, declaredWorkspace(absPath), trackAsWorktree); separate {
 				prefix = name
 				if owner, held := owners[prefix]; held && !pathkey.SamePathIdentity(pathkey.CanonicalPath(owner), absPath) {
 					prefix = indexer.WorktreeInstanceCollisionName(name, absPath)
 				}
 				entry.Name = prefix
-			} else if name := configuredWorktreePrefix(absPath, gc.Repos, owners); name != "" {
-				prefix, entry.Name = name, name
 			}
 		}
 		if owner, held := owners[prefix]; held && !pathkey.SamePathIdentity(pathkey.CanonicalPath(owner), absPath) {
-			return &indexer.PrefixCollisionError{Prefix: prefix, ExistingPath: owner, Path: absPath}
+			return indexer.NewPrefixCollisionError(prefix, owner, absPath)
 		}
 		if err := gc.AddRepo(entry); err != nil {
 			return err
@@ -229,7 +228,6 @@ func runTrack(cmd *cobra.Command, args []string) error {
 		if err := gc.Save(); err != nil {
 			return fmt.Errorf("saving global config: %w", err)
 		}
-		daemonName = entry.Name
 	}
 
 	// 2. Best-effort daemon: bring it up (single-flight) and hand it the
@@ -250,7 +248,7 @@ func runTrack(cmd *cobra.Command, args []string) error {
 	if decision != daemonUnavailable {
 		notifyFn := trackNotifyDaemonTrackFn
 		notifyErr, notifyTimedOut := beforeTrackDeadline(waitDeadline, func() error {
-			return notifyFn(absPath, daemonName, waitDeadline)
+			return notifyFn(absPath, trackName, waitDeadline)
 		})
 		if notifyTimedOut || trackDeadlineExpired(waitDeadline) {
 			return trackWaitTimeoutError(absPath, trackWaitTimeout, "waiting for the daemon to accept the repository")
@@ -591,7 +589,11 @@ func runUntrack(cmd *cobra.Command, args []string) error {
 
 	emitUntrackBanner(w, target, daemon.IsRunning())
 
-	if index, reachable := untrackDaemonIndex(target); reachable {
+	index, reachable, err := untrackDaemonIndex(target)
+	if err != nil {
+		return err
+	}
+	if reachable {
 		return untrackViaDaemon(cmd, w, index, target)
 	}
 
@@ -606,6 +608,7 @@ func runUntrack(cmd *cobra.Command, args []string) error {
 	if err := gc.Save(); err != nil {
 		return fmt.Errorf("saving global config: %w", err)
 	}
+	notifyDaemonReload()
 	emitUntrackSummary(w, target, untrackResult{configOnly: true, repoCount: len(gc.Repos)})
 	return nil
 }
@@ -616,25 +619,53 @@ func runUntrack(cmd *cobra.Command, args []string) error {
 // False is what keeps `gortex untrack` offline-safe: a repo the daemon never
 // loaded is still a line in the user's config, and removing that line is
 // exactly what the standalone fallback is for.
-func untrackDaemonIndex(target string) (string, bool) {
+func untrackDaemonIndex(target string) (string, bool, error) {
 	if !daemon.IsRunning() {
-		return "", false
+		return "", false, nil
 	}
-	// A bare repo prefix names no directory, so the call is routed through the
-	// caller's own working directory instead; the prefix rides as the tool's
-	// argument either way.
+	// Prefixes and automatic checkouts keep the query routing path. An exact
+	// configured root instead needs proof that its own corpus was loaded:
+	// query containment may otherwise route a skipped child to its owner.
 	index := target
 	if !filepath.IsAbs(target) {
 		index = "."
 	}
 	abs, err := filepath.Abs(index)
 	if err != nil {
-		return "", false
+		return "", false, err
+	}
+	if filepath.IsAbs(target) {
+		gc, err := config.LoadGlobal()
+		if err != nil {
+			return "", false, err
+		}
+		if gc.FindRepoByPath(abs) != nil {
+			c, err := daemon.Dial(daemon.Handshake{Mode: daemon.ModeControl, ClientName: "cli-untrack"})
+			if err != nil {
+				return "", false, fmt.Errorf("verify loaded root before untrack: %w", err)
+			}
+			defer c.Close()
+			resp, err := c.ControlWithTimeout(daemon.ControlProbe, nil, daemonRoutingProbeTimeout)
+			if err != nil {
+				return "", false, fmt.Errorf("verify loaded root before untrack: %w", err)
+			}
+			var probe daemon.ProbeResponse
+			if !resp.OK || json.Unmarshal(resp.Result, &probe) != nil || probe.LoadedRoots == nil {
+				return "", false, fmt.Errorf("daemon cannot verify loaded roots; restart the matching daemon before untracking %s", target)
+			}
+			root := pathkey.CanonicalPath(abs)
+			for _, loaded := range *probe.LoadedRoots {
+				if pathkey.SamePathIdentity(pathkey.CanonicalPath(loaded), root) {
+					return index, true, nil
+				}
+			}
+			return "", false, nil
+		}
 	}
 	if !daemonOwnsRepo(abs) {
-		return "", false
+		return "", false, nil
 	}
-	return index, true
+	return index, true, nil
 }
 
 // untrackViaDaemon runs the untrack tool and renders what it decided: a

@@ -2882,7 +2882,7 @@ func (e *PrefixCollisionError) Error() string {
 		return fmt.Sprintf("repository prefix %q is already used by %s, which no longer exists; inspect `gortex untrack %s` before tracking %s again",
 			e.Prefix, e.ExistingPath, e.ExistingPath, e.Path)
 	}
-	return fmt.Sprintf("repository prefix %q is already used by %s; use `gortex track --name <other> %s`", e.Prefix, e.ExistingPath, e.Path)
+	return fmt.Sprintf("repository prefix %q is already used by %s; use `gortex track --name <other> %s` for a new entry, or set a unique name in the global config and reload", e.Prefix, e.ExistingPath, e.Path)
 }
 
 // trackedLocked reports whether path is already tracked under any prefix,
