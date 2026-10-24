@@ -106,3 +106,32 @@ func TestGoModuleImportUnconfiguredRetryState(t *testing.T) {
 		}
 	}
 }
+
+func TestGoModuleImportReplacementDirectory(t *testing.T) {
+	for _, tc := range []struct{ name, directory, path, want string }{
+		{"local", "a/third_party/library", "example.org/library", "a/third_party/library/lib.go"},
+		{"sub_package", "a/third_party/library", "example.org/library/sub", "a/third_party/library/sub/a.go"},
+		{"denied", "", "example.org/library", ""},
+		{"missing", "a/missing", "example.org/library", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := graph.New()
+			for _, file := range []string{"a/third_party/library/lib.go", "a/third_party/library/sub/a.go", "b/lib.go", "b/sub/a.go"} {
+				repo := file[:1]
+				g.AddNode(&graph.Node{ID: file, Name: file, Kind: graph.KindFile, FilePath: file, RepoPrefix: repo, Language: "go"})
+			}
+			cr := NewCrossRepo(g)
+			cr.SetGoModules(map[string]string{"a": "example.org/caller", "b": "example.org/library"})
+			cr.SetGoModuleReplacements(map[string][]GoModuleReplacement{"a": {{Module: "example.org/library", Directory: tc.directory}}})
+			cr.goModuleImportState()
+			match := cr.goModuleImportCandidate(tc.path, "a", "")
+			if tc.want == "" {
+				assert.Nil(t, match, "a replacement must never fall through to the remote module")
+			} else {
+				require.NotNil(t, match)
+				assert.Equal(t, tc.want, match.ID)
+				assert.Equal(t, "a", match.RepoPrefix)
+			}
+		})
+	}
+}

@@ -53,6 +53,10 @@ func (cr *CrossRepoResolver) resolveGoModuleImports(ctx context.Context, files [
 				if match != nil {
 					copy.To = match.ID
 					copy.CrossRepo = caller != "" && match.RepoPrefix != caller
+					if match.RepoPrefix == caller {
+						delete(copy.Meta, "go_import")
+						delete(copy.Meta, "go_import_fallback")
+					}
 				} else {
 					copy.To, _ = copy.Meta["go_import_fallback"].(string)
 					if copy.To == "" || graph.IsUnresolvedTarget(copy.To) {
@@ -135,7 +139,15 @@ func (cr *CrossRepoResolver) goModuleImportCandidate(importPath, caller, workspa
 	state := cr.goModuleRetry
 	var candidates []*graph.Node
 	module := cr.goModulePaths.longest(importPath)
-	for _, repo := range cr.goModuleRepos[module] {
+	replacement, replaced := goModuleReplacementFor(cr.goModuleReplacements, caller, importPath)
+	repos := cr.goModuleRepos[module]
+	if replaced {
+		if replacement.Directory == "" {
+			return nil
+		}
+		repos = []string{caller}
+	}
+	for _, repo := range repos {
 		packages, cached := state.packages[repo]
 		if !cached {
 			packages = make(map[string]graph.FileNodeIdentity)
@@ -150,11 +162,19 @@ func (cr *CrossRepoResolver) goModuleImportCandidate(importPath, caller, workspa
 			}
 			state.packages[repo] = packages
 		}
-		if file, ok := packages[repo+strings.TrimPrefix(importPath, module)]; ok {
-			candidates = append(candidates, &graph.Node{ID: file.ID, Kind: graph.KindFile, FilePath: file.FilePath, RepoPrefix: file.RepoPrefix, WorkspaceID: file.WorkspaceID, Language: "go"})
+		dir := repo + strings.TrimPrefix(importPath, module)
+		if replaced {
+			dir = replacement.Directory
+		}
+		if file, ok := packages[dir]; ok {
+			candidate := &graph.Node{ID: file.ID, Kind: graph.KindFile, FilePath: file.FilePath, RepoPrefix: file.RepoPrefix, WorkspaceID: file.WorkspaceID, Language: "go"}
+			if replaced {
+				return candidate
+			}
+			candidates = append(candidates, candidate)
 		}
 	}
-	if _, replaced := goModuleReplacementFor(cr.goModuleReplacements, caller, importPath); replaced {
+	if replaced {
 		return nil
 	}
 	return goModuleCandidate(cr.goModules, importPath, candidates, caller, workspace, cr.crossWorkspaceLookup)
