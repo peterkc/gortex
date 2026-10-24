@@ -17,7 +17,7 @@ permissions:
 env:
   GOMAXPROCS: 2
   GOTOOLCHAIN: local
-  MAIN_SHA: ebe58c678147acde1886f565596313b4c7b15cfa
+  MAIN_SHA: 57faeca2fe4d742acb8f58da596529a2710c8e09
   BRANCH_SHA: ${{ inputs.head_sha || 'c46d57e5f58ec05c1d6e2c4b0a274672f76181c9' }}
 jobs:
   ab:
