@@ -291,3 +291,49 @@ func TestDeltaWriterRetargetPreservesExistingDestinationPayload(t *testing.T) {
 		})
 	}
 }
+
+func TestDeltaWriterRetargetPreservesRefreshedDestinationPayload(t *testing.T) {
+	for _, target := range []string{"b::Y", "unresolved::Y"} {
+		for _, reverse := range []bool{false, true} {
+			t.Run(fmt.Sprintf("target=%s/reverse=%t", target, reverse), func(t *testing.T) {
+				existing := &Edge{From: "a::A", To: target, Kind: EdgeReads, FilePath: "a.go", Line: 10,
+					Confidence: 0.7, ConfidenceLabel: "INFERRED", Origin: "ast_resolved",
+					Meta: map[string]any{"version": "stored"}}
+				candidate := cloneDeltaEdge(existing)
+				candidate.To = "b::X"
+				candidate.Meta = map[string]any{"version": "candidate"}
+				store, g := retargetBatchStore(true, existing, candidate)
+				dw := store.(*DeltaWriter)
+				refreshed := cloneDeltaEdge(existing)
+				refreshed.Confidence = 0.9
+				refreshed.Meta = map[string]any{"version": "refreshed"}
+				retargeted := cloneDeltaEdge(candidate)
+				retargeted.To = target
+				batch := []EdgeReindex{
+					{Edge: refreshed, OldTo: target, OldFilePath: existing.FilePath, OldLine: existing.Line, RefreshIdentity: true},
+					{Edge: retargeted, OldTo: candidate.To},
+				}
+				if reverse {
+					batch[0], batch[1] = batch[1], batch[0]
+				}
+				token := dw.BeginMutationReceipt()
+				dw.ReindexEdges(batch)
+				wantReceipt := MutationReceipt{Complete: true}
+				if IsUnresolvedTarget(target) {
+					wantReceipt.ResolutionRelevant = true
+					wantReceipt.ChangedFiles = []string{"a.go"}
+					wantReceipt.UnresolvedFiles = []string{"a.go"}
+					wantReceipt.TargetNames = []string{"Y"}
+					wantReceipt.TargetIDs = []string{target}
+				}
+				assert.Equal(t, wantReceipt, dw.EndMutationReceipt(token))
+				assert.Empty(t, dw.GetInEdges(candidate.To))
+				out, in := g.GetOutEdges(existing.From), g.GetInEdges(target)
+				require.Len(t, out, 1)
+				require.Len(t, in, 1)
+				assert.Same(t, out[0], in[0])
+				assertRetargetBatchLifecycle(t, dw, g, refreshed)
+			})
+		}
+	}
+}

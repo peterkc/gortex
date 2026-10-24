@@ -801,6 +801,7 @@ func (g *Graph) reindexStoredEdges(batch []EdgeReindex) {
 	}
 	prepared := make([]EdgeReindex, 0, len(batch))
 	moving := make(map[edgeKey]bool, len(batch))
+	stationaryRefreshes := make(map[edgeKey]*Edge)
 	for _, r := range batch {
 		if r.Edge == nil {
 			continue
@@ -837,14 +838,20 @@ func (g *Graph) reindexStoredEdges(batch []EdgeReindex) {
 		}
 		prepared = append(prepared, r)
 		moving[old] = old != keyOf(r.Edge)
+		if r.RefreshIdentity && !moving[old] {
+			stationaryRefreshes[old] = r.Edge
+		}
 	}
 	for i, r := range prepared {
 		if !r.RefreshIdentity {
 			if !moving[keyOf(r.Edge)] {
 				if existing := g.storedEdge(keyOf(r.Edge)); existing != nil {
 					// Like SQLite's INSERT OR IGNORE, a retarget onto a
-					// stationary destination keeps its payload and adds no
+					// stationary destination keeps its final payload and adds no
 					// resolver work. The old identity still has to be removed.
+					if refreshed := stationaryRefreshes[keyOf(r.Edge)]; refreshed != nil {
+						existing = refreshed
+					}
 					prepared[i].Edge = cloneDeltaEdge(existing)
 					continue
 				}
