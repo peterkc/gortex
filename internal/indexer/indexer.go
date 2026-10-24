@@ -134,6 +134,8 @@ type IndexResult struct {
 	// CrossRepoResolveFiles contains parked consumers outside this repository's
 	// derived frontier. Batch callers must include them in cross-repo resolution.
 	CrossRepoResolveFiles []string `json:"cross_repo_resolve_files,omitempty"`
+	// CargoRetarget records a Rust file addition for the post-registration warm tail.
+	CargoRetarget bool `json:"cargo_retarget,omitempty"`
 
 	// mutationErr carries a point-operation compatibility error through the
 	// resolver/semantic/derived tail. It is intentionally unexported and never
@@ -7547,6 +7549,7 @@ func (idx *Indexer) incrementalReindexPathsMode(
 	}
 	result.CrossRepoResolveFiles = appendUniqueSorted(nil, markerBatch.npmConsumerFiles...)
 	result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, markerBatch.cargoConsumerFiles...)
+	result.CargoRetarget = markerBatch.cargoAddedFile
 	for _, path := range failedFiles {
 		result.Errors = append(result.Errors, IndexError{FilePath: path, Error: idx.fileIndexFailureError(path).Error()})
 	}

@@ -1,6 +1,8 @@
 package indexer
 
 import (
+	"context"
+	"sort"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -90,10 +92,15 @@ func (mi *MultiIndexer) cargoConsumerFilesForRepo(repo string, retargetBound boo
 		return nil
 	}
 	files := make(map[string]struct{})
-	for edge := range graph.EdgesLightSeq(mi.graph, graph.EdgeImports) {
+	edges := graph.EdgesLightSeq(mi.graph, graph.EdgeImports)
+	if retargetBound {
+		edges = mi.graph.EdgesByKind(graph.EdgeImports)
+	}
+	for edge := range edges {
 		spec, external := strings.CutPrefix(edge.To, "external::")
 		if !external || !strings.HasSuffix(edge.FilePath, ".rs") {
-			if retargetBound && edge.CrossRepo && strings.HasSuffix(edge.FilePath, ".rs") && graph.RepoPrefixOfID(edge.To) == repo {
+			stub, _ := edge.Meta[resolver.CargoImportStubMeta].(string)
+			if retargetBound && stub != "" && edge.CrossRepo && strings.HasSuffix(edge.FilePath, ".rs") && graph.RepoPrefixOfID(edge.To) == repo {
 				files[edge.FilePath] = struct{}{}
 			}
 			continue
@@ -107,4 +114,41 @@ func (mi *MultiIndexer) cargoConsumerFilesForRepo(repo string, retargetBound boo
 		}
 	}
 	return sortedStringKeys(files)
+}
+
+// Consume warm receipts only after all repositories are registered.
+func (mi *MultiIndexer) runWarmCargoResolve(ctx context.Context, files []string, full bool) error {
+	mi.mu.RLock()
+	pending := map[string]*IndexResult{}
+	var repos []string
+	for repo, meta := range mi.repos {
+		if meta != nil && meta.cargoRetarget != nil {
+			pending[repo] = meta.cargoRetarget
+			repos = append(repos, repo)
+		}
+	}
+	mi.mu.RUnlock()
+	sort.Strings(repos)
+	var err error
+	if full {
+		err = mi.runCrossRepoResolveContext(ctx, false, repos...)
+	} else {
+		for _, repo := range repos {
+			files = appendUniqueSorted(files, mi.cargoConsumerFilesForRepo(repo, true)...)
+		}
+		if err = context.Cause(ctx); err == nil {
+			mi.runCrossRepoResolveFiles(files, repos...)
+			err = context.Cause(ctx)
+		}
+	}
+	if err == nil {
+		mi.mu.Lock()
+		for repo, receipt := range pending {
+			if meta := mi.repos[repo]; meta != nil && meta.cargoRetarget == receipt {
+				meta.cargoRetarget = nil
+			}
+		}
+		mi.mu.Unlock()
+	}
+	return err
 }

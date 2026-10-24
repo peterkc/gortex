@@ -35,6 +35,7 @@ import (
 
 // RepoMetadata holds per-repo indexing state.
 type RepoMetadata struct {
+	cargoRetarget *IndexResult // warm receipt, guarded by MultiIndexer.mu
 	RepoPrefix    string
 	RootPath      string
 	Identity      *RepoIdentity
@@ -1204,7 +1205,7 @@ func (mi *MultiIndexer) RunPreEnrichResolve(ctx context.Context, scope map[strin
 	// Cross-repo references resolve here so a multi-repo workspace is fully
 	// resolved, not just within each repo. Whole-graph so inbound references
 	// from unchanged repos into the changed repos bind too.
-	return mi.runCrossRepoResolveContext(ctx, false)
+	return mi.runWarmCargoResolve(ctx, nil, true)
 }
 
 // RunPreEnrichResolveFiles preserves an exact warm-reconcile frontier through
@@ -1234,10 +1235,9 @@ func (mi *MultiIndexer) RunPreEnrichResolveFiles(ctx context.Context, files []st
 		return err
 	}
 	if resolutionAffected > 0 {
-		return mi.runCrossRepoResolveContext(ctx, false)
+		return mi.runWarmCargoResolve(ctx, nil, true)
 	}
-	mi.runCrossRepoResolveFiles(files)
-	return context.Cause(ctx)
+	return mi.runWarmCargoResolve(ctx, files, false)
 }
 
 func (mi *MultiIndexer) runDeferredGoModAll() {
@@ -3704,6 +3704,9 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 			IsWorktree: isWorktree,
 		}
 		mi.indexers[prefix] = idx
+		if result.CargoRetarget {
+			mi.repos[prefix].cargoRetarget = result
+		}
 		mi.mu.Unlock()
 		installed = true
 		mi.markRepoRegistered(prefix, absPath)
