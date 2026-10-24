@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/excludes"
+	"github.com/zzet/gortex/internal/pathkey"
 )
 
 // ConfigManager merges GlobalConfig + per-repo WorkspaceConfig.
@@ -183,7 +184,7 @@ func (cm *ConfigManager) PrepareWorkspaceConfig(repoPrefix, repoPath string, loo
 	cfg := cm.repoConfig(repoPrefix, workspace, repoPath, lookup)
 	return cfg, func(prefix string) {
 		// Publish the same snapshot used to build cfg, even after a rekey.
-		cm.publishWorkspaceConfig(prefix, repoPath, workspace, true)
+		cm.publishPreparedWorkspaceConfig(prefix, repoPath, workspace, true)
 	}
 }
 
@@ -255,7 +256,10 @@ func (cm *ConfigManager) publishWorkspaceConfig(repoPrefix, repoPath string, cfg
 	// reindexed, or refreshed — re-discover where its git root is rather
 	// than trusting a shape memoized before the repo existed in this form.
 	cm.excludeCache.forgetChain(repoPath)
+	cm.publishPreparedWorkspaceConfig(repoPrefix, repoPath, cfg, authoritative)
+}
 
+func (cm *ConfigManager) publishPreparedWorkspaceConfig(repoPrefix, repoPath string, cfg *Config, authoritative bool) {
 	cm.mu.Lock()
 	changed := false
 	if repoPath != "" && cm.workspacePaths[repoPrefix] != repoPath {
@@ -317,18 +321,21 @@ func repoConfigSeed() *Config {
 	return cfg
 }
 
-// getWorkspaceConfig returns the cached workspace config for a repo, or nil.
 // LastGoodWorkspace returns the workspace config last published for
-// repoPrefix when it was read from repoPath, or nil. It reads no file.
+// repoPrefix when it was read from the same root as repoPath, or nil.
+// Matching spellings require no filesystem work.
 func (cm *ConfigManager) LastGoodWorkspace(repoPrefix, repoPath string) *Config {
 	cm.mu.RLock()
-	defer cm.mu.RUnlock()
-	if cm.workspacePaths[repoPrefix] != repoPath {
+	cachedPath, ws := cm.workspacePaths[repoPrefix], cm.workspace[repoPrefix]
+	cm.mu.RUnlock()
+	if cachedPath != repoPath && (cachedPath == "" || repoPath == "" ||
+		!pathkey.SamePathIdentity(pathkey.CanonicalPath(cachedPath), pathkey.CanonicalPath(repoPath))) {
 		return nil
 	}
-	return cm.workspace[repoPrefix]
+	return ws
 }
 
+// getWorkspaceConfig returns the cached workspace config for a repo, or nil.
 func (cm *ConfigManager) getWorkspaceConfig(repoPrefix string) *Config {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()

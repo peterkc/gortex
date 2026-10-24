@@ -505,7 +505,17 @@ func (gc *GlobalConfig) snapshotRepoPaths(canonicalize func(string) string) Repo
 		path  string
 		entry RepoEntry
 	}
-	var roots []repoRoot
+	// CanonicalPath has already cleaned paths and normalized volumes. Fold
+	// Unicode and case for bucketing, then retain SamePathIdentity's file
+	// check within each bucket for case-sensitive mounts.
+	lookupKey := func(root string) string {
+		root = pathkey.Normalize(root)
+		if pathkey.CaseInsensitivePaths {
+			root = strings.ToLower(root)
+		}
+		return root
+	}
+	roots := make(map[string][]repoRoot)
 	canonicalRoots := make(map[string]string)
 	if gc != nil {
 		globalConfigMu.Lock()
@@ -517,7 +527,8 @@ func (gc *GlobalConfig) snapshotRepoPaths(canonicalize func(string) string) Repo
 		for _, entry := range entries {
 			root := canonicalize(entry.Path)
 			canonicalRoots[entry.Path] = root
-			roots = append(roots, repoRoot{root, entry})
+			key := lookupKey(root)
+			roots[key] = append(roots[key], repoRoot{root, entry})
 		}
 	}
 	return func(root string) *RepoEntry {
@@ -526,9 +537,10 @@ func (gc *GlobalConfig) snapshotRepoPaths(canonicalize func(string) string) Repo
 		} else {
 			root = pathkey.CanonicalPath(root)
 		}
-		for i := range roots {
-			if pathkey.SamePathIdentity(roots[i].path, root) {
-				return &roots[i].entry
+		candidates := roots[lookupKey(root)]
+		for i := range candidates {
+			if pathkey.SamePathIdentity(candidates[i].path, root) {
+				return &candidates[i].entry
 			}
 		}
 		globalConfigMu.Lock()
