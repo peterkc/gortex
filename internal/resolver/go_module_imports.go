@@ -14,9 +14,10 @@ import (
 // counted records whether the ordinary frontier pass already counted an import
 // as resolved (true) or unresolved (false), before this pass retargets it.
 func (cr *CrossRepoResolver) resolveGoModuleImports(ctx context.Context, files []string, stats *CrossRepoStats, counted map[graph.EdgeIdentity]bool) error {
-	if len(cr.goModules) == 0 || len(files) == 0 {
+	if len(files) == 0 {
 		return nil
 	}
+	cr.goModuleImportState()
 	flush := func(paths []string) {
 		nodes := cr.graph.GetFileNodesByPaths(paths)
 		outgoing := cr.graph.GetOutEdgesByNodeIDs(paths)
@@ -28,7 +29,7 @@ func (cr *CrossRepoResolver) resolveGoModuleImports(ctx context.Context, files [
 					continue
 				}
 				importPath := goModuleImportPath(e, nodes[path])
-				if importPath == "" || !trackedGoImport(cr.goModules, importPath) {
+				if importPath == "" || !trackedGoImport(cr.goModulePaths, importPath) && e.Meta["go_import"] == nil {
 					continue
 				}
 				source := cr.graph.GetNode(e.From)
@@ -37,13 +38,31 @@ func (cr *CrossRepoResolver) resolveGoModuleImports(ctx context.Context, files [
 					caller = source.RepoPrefix
 				}
 				match := cr.goModuleImportCandidate(importPath, caller, candidateWorkspaceID(source))
-				if match == nil || match.ID == e.To {
+				if match != nil && match.ID == e.To || match == nil && e.Meta["go_import"] == nil {
 					continue
 				}
 				copy := *e
 				copy.Meta = maps.Clone(e.Meta)
-				copy.To = match.ID
-				copy.CrossRepo = caller != "" && match.RepoPrefix != caller
+				if copy.Meta == nil {
+					copy.Meta = make(map[string]any)
+				}
+				if copy.Meta["go_import"] == nil {
+					copy.Meta["go_import"] = importPath
+					copy.Meta["go_import_fallback"] = e.To
+				}
+				if match != nil {
+					copy.To = match.ID
+					copy.CrossRepo = caller != "" && match.RepoPrefix != caller
+				} else {
+					copy.To, _ = copy.Meta["go_import_fallback"].(string)
+					if copy.To == "" || graph.IsUnresolvedTarget(copy.To) {
+						copy.To = "external::" + importPath
+					}
+					copy.CrossRepo, copy.Confidence, copy.ConfidenceLabel, copy.Origin, copy.Tier = false, 0, "", "", ""
+				}
+				if copy.To == e.To {
+					continue
+				}
 				clearEdgeTerminal(&copy)
 				batch = append(batch, graph.EdgeReindex{Edge: &copy, OldTo: e.To, RefreshIdentity: true, OldFilePath: e.FilePath, OldLine: e.Line})
 				if len(batch) == externalCallMutationChunk {
@@ -75,6 +94,9 @@ func (cr *CrossRepoResolver) resolveGoModuleImports(ctx context.Context, files [
 // A dep contract has lost the package suffix. Recover it from the retained
 // import statement, but never guess when several same-line imports fit.
 func goModuleImportPath(e *graph.Edge, nodes []*graph.Node) string {
+	if path, ok := e.Meta["go_import"].(string); ok && path != "" {
+		return path
+	}
 	target := graph.UnresolvedName(e.To)
 	if target == "" {
 		target = e.To
@@ -110,12 +132,10 @@ func goModuleImportPath(e *graph.Edge, nodes []*graph.Node) string {
 // Package identities are cached across resolver objects by module revision.
 // A provider mutation invalidates only that provider's projection.
 func (cr *CrossRepoResolver) goModuleImportCandidate(importPath, caller, workspace string) *graph.Node {
-	state := cr.goModuleImportState()
+	state := cr.goModuleRetry
 	var candidates []*graph.Node
-	for repo, module := range cr.goModules {
-		if module == "" || (importPath != module && !strings.HasPrefix(importPath, module+"/")) {
-			continue
-		}
+	module := cr.goModulePaths.longest(importPath)
+	for _, repo := range cr.goModuleRepos[module] {
 		packages, cached := state.packages[repo]
 		if !cached {
 			packages = make(map[string]graph.FileNodeIdentity)
@@ -133,6 +153,9 @@ func (cr *CrossRepoResolver) goModuleImportCandidate(importPath, caller, workspa
 		if file, ok := packages[repo+strings.TrimPrefix(importPath, module)]; ok {
 			candidates = append(candidates, &graph.Node{ID: file.ID, Kind: graph.KindFile, FilePath: file.FilePath, RepoPrefix: file.RepoPrefix, WorkspaceID: file.WorkspaceID, Language: "go"})
 		}
+	}
+	if _, replaced := goModuleReplacementFor(cr.goModuleReplacements, caller, importPath); replaced {
+		return nil
 	}
 	return goModuleCandidate(cr.goModules, importPath, candidates, caller, workspace, cr.crossWorkspaceLookup)
 }
@@ -180,7 +203,7 @@ func (cr *CrossRepoResolver) goModuleImportFileBatches(repos []string) iter.Seq[
 		var files []string
 		for n := range graph.RepoNodeIdentitiesSeq(cr.graph, repos, graph.KindImport) {
 			file, path, ok := strings.Cut(n.ID, "::import::")
-			if !ok || !strings.HasSuffix(file, ".go") || !trackedGoImport(cr.goModules, path) || seen[file] {
+			if !ok || !strings.HasSuffix(file, ".go") || !trackedGoImport(cr.goModulePaths, path) || seen[file] {
 				continue
 			}
 			if module := cr.goModules[n.RepoPrefix]; module != "" && (path == module || strings.HasPrefix(path, module+"/")) {
@@ -208,7 +231,11 @@ func (cr *CrossRepoResolver) goModuleImportState() *GoModuleDepRetry {
 		cr.goModuleRetry = &GoModuleDepRetry{}
 	}
 	state := cr.goModuleRetry
-	if state.packageRevision != cr.goModuleRevision || !maps.Equal(state.packageModules, cr.goModules) {
+	if state.packageRevision != cr.goModuleRevision {
+		state.packageRevision = cr.goModuleRevision
+		state.packages = nil
+	}
+	if !maps.Equal(state.packageModules, cr.goModules) {
 		state.packageModules = maps.Clone(cr.goModules)
 		state.packageRevision = cr.goModuleRevision
 		state.packages = nil
@@ -255,7 +282,7 @@ func (cr *CrossRepoResolver) resolveGoModuleImportSweep(ctx context.Context, sta
 }
 
 func (cr *CrossRepoResolver) rememberGoModuleImports(nodes []*graph.Node) {
-	state := cr.goModuleImportState()
+	state := cr.goModuleRetry
 	for _, n := range nodes {
 		if n.Kind != graph.KindImport || n.Language != "go" {
 			continue
@@ -264,8 +291,8 @@ func (cr *CrossRepoResolver) rememberGoModuleImports(nodes []*graph.Node) {
 		if !ok {
 			continue
 		}
-		for repo, module := range cr.goModules {
-			if repo == n.RepoPrefix || module == "" || (path != module && !strings.HasPrefix(path, module+"/")) {
+		for _, repo := range cr.goModuleRepos[cr.goModulePaths.longest(path)] {
+			if repo == n.RepoPrefix {
 				continue
 			}
 			if state.imports[repo] == nil {
