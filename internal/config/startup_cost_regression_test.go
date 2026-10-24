@@ -76,3 +76,42 @@ func TestSnapshotRepoPathsCaseCollisionMatchesLiveLookup(t *testing.T) {
 	assert.Equal(t, gc.FindRepoByPath(upper), lookup(upper))
 	assert.Equal(t, gc.FindRepoByPath(lower), lookup(lower))
 }
+
+func TestConfigManagerRepoPathLookupRefreshesOnMutationAndReload(t *testing.T) {
+	root, other := t.TempDir(), t.TempDir()
+	cm, err := NewConfigManager(filepath.Join(t.TempDir(), "global.yaml"))
+	require.NoError(t, err)
+	require.NoError(t, cm.Global().AddRepo(RepoEntry{Path: root, Name: "src", Exclude: []string{"first"}}))
+	require.NoError(t, cm.Global().Save())
+	first := cm.RepoPathLookup()
+	require.Contains(t, first(root).Exclude, "first")
+	assert.Same(t, first(root), cm.RepoPathLookup()(root), "unchanged config must reuse one path snapshot")
+	require.NoError(t, cm.Global().RemoveRepo(root))
+	require.Nil(t, cm.RepoPathLookup()(root), "removed roots must not survive the cached lookup")
+	require.NoError(t, cm.Global().AddRepo(RepoEntry{Path: other, Name: "other"}))
+	require.NotNil(t, cm.RepoPathLookup()(other))
+	require.NoError(t, cm.Global().Save())
+	gc, err := LoadGlobal(cm.Global().ConfigPath())
+	require.NoError(t, err)
+	gc.Repos[0].Exclude = []string{"reloaded"}
+	require.NoError(t, gc.Save())
+	require.NoError(t, cm.Reload())
+	require.Equal(t, []string{"reloaded"}, cm.RepoPathLookup()(other).Exclude)
+}
+
+func TestPrepareWorkspaceConfigNilLookupReusesRootSnapshot(t *testing.T) {
+	root := t.TempDir()
+	cm, err := NewConfigManager(filepath.Join(t.TempDir(), "global.yaml"))
+	require.NoError(t, err)
+	cm.Global().Repos = []RepoEntry{{Path: root, Name: "src", Exclude: []string{"repo-only"}}}
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".gortex.yaml"), []byte("workspace: team\n"), 0o644))
+	for range 3 {
+		cfg, publish := cm.PrepareWorkspaceConfig("src", root, nil)
+		require.Contains(t, cfg.Index.Exclude, "repo-only")
+		publish("src")
+	}
+	require.NotNil(t, cm.pathLookup, "daemon's nil-lookup path must populate the revision cache")
+	first := cm.pathLookup(root)
+	_, _ = cm.PrepareWorkspaceConfig("src", root, nil)
+	require.Same(t, first, cm.pathLookup(root))
+}

@@ -93,6 +93,7 @@ type MultiIndexer struct {
 	indexers            map[string]*Indexer      // repoPrefix → per-repo indexer
 	configMgr           *config.ConfigManager
 	logger              *zap.Logger
+	loggedCollisions    sync.Map
 	// newIndexer is instance-local so lifecycle tests can observe a constructor
 	// failure without publishing the candidate Indexer. Production instances set
 	// it to New; every per-repository construction flows through this factory.
@@ -2898,7 +2899,10 @@ func (mi *MultiIndexer) trackedLocked(prefix, path string) (bool, error) {
 // logCollision warns about a configured repository that is not loaded
 // because another repository owns its prefix.
 func (mi *MultiIndexer) logCollision(err error) {
-	if err != nil {
+	if err == nil {
+		return
+	}
+	if _, logged := mi.loggedCollisions.LoadOrStore(err.Error(), struct{}{}); !logged {
 		mi.logger.Warn("repository not loaded", zap.Error(err))
 	}
 }

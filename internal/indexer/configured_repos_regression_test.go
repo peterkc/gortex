@@ -166,3 +166,20 @@ cross_workspace_deps:
 		"owner-ws": {{Workspace: "shared", Modules: []string{"example.com/shared"}}},
 	}, rules)
 }
+
+func TestConfiguredCollisionWarnsOnceAndLiveRulesDoNotResolveOwners(t *testing.T) {
+	owner, other := setupRepoDir(t, "src"), setupRepoDir(t, "src")
+	_, mi, cm := newWorktreeTestIndexer(t)
+	t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
+	cm.Global().Repos = []config.RepoEntry{{Path: owner}, {Path: other}}
+	core, logs := observer.New(zap.WarnLevel)
+	mi.logger = zap.New(core)
+	mi.ResolveConfiguredRepos(t.Context(), cm.Global().Repos)
+	mi.ResolveConfiguredRepos(t.Context(), cm.Global().Repos)
+	require.Len(t, logs.FilterMessage("repository not loaded").All(), 1)
+	mi.repos["src"] = &RepoMetadata{RepoPrefix: "src", RootPath: owner}
+	cm.LoadWorkspaceConfig("src", owner)
+	logs.TakeAll()
+	mi.collectCrossWorkspaceRules()
+	require.Empty(t, logs.All(), "live rule collection must not select or warn about configured owners")
+}

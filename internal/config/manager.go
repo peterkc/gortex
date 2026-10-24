@@ -39,7 +39,11 @@ type ConfigManager struct {
 	// excludeCache memoizes the per-repo `.gitignore` parse and the layered
 	// exclude list so EffectiveExclude — called on every indexer walk and
 	// per-file reconcile — does not re-read and re-merge on every call.
-	excludeCache *excludeCache
+	excludeCache   *excludeCache
+	lookupMu       sync.Mutex
+	lookupGlobal   *GlobalConfig
+	lookupRevision uint64
+	pathLookup     RepoPathLookup
 }
 
 // NewConfigManager creates a ConfigManager by loading the GlobalConfig
@@ -64,6 +68,28 @@ func NewConfigManager(globalPath string) (*ConfigManager, error) {
 		logger:         zap.NewNop(),
 		excludeCache:   newExcludeCache(),
 	}, nil
+}
+
+// RepoPathLookup reuses one root lookup until global repository settings change.
+// Workspace publications do not rebuild it: daemon warmup publishes once per repo.
+func (cm *ConfigManager) RepoPathLookup() RepoPathLookup {
+	return cm.repoPathLookup(cm.Global())
+}
+
+func (cm *ConfigManager) repoPathLookup(gc *GlobalConfig) RepoPathLookup {
+	cm.lookupMu.Lock()
+	defer cm.lookupMu.Unlock()
+	globalConfigMu.Lock()
+	revision := gc.repoRevision
+	if cm.lookupGlobal == gc && cm.lookupRevision == revision && cm.pathLookup != nil {
+		globalConfigMu.Unlock()
+		return cm.pathLookup
+	}
+	entries := gc.repoEntriesLocked()
+	globalConfigMu.Unlock()
+	cm.pathLookup = gc.repoPathLookup(entries, pathkey.CanonicalPath)
+	cm.lookupGlobal, cm.lookupRevision = gc, revision
+	return cm.pathLookup
 }
 
 // SetLogger sets the logger for the ConfigManager.
@@ -481,7 +507,7 @@ func (cm *ConfigManager) effectiveExclude(repoPrefix string, gc *GlobalConfig, w
 		if lookup != nil {
 			entry = lookup(repoPath)
 		} else if repoPath != "" {
-			entry = gc.FindRepoByPath(repoPath)
+			entry = cm.repoPathLookup(gc)(repoPath)
 		} else {
 			entry = gc.FindRepoByPrefix(repoPrefix)
 		}

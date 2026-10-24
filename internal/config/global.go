@@ -101,6 +101,8 @@ type GlobalConfig struct {
 
 	// configPath stores the file path used for Save(). Set by LoadGlobal or SetConfigPath.
 	configPath string `yaml:"-"`
+	// repoRevision invalidates ConfigManager's root lookup after list edits.
+	repoRevision uint64
 }
 
 // DaemonConfig is the `daemon:` block in ~/.gortex/config.yaml.
@@ -367,6 +369,7 @@ func (gc *GlobalConfig) ConfigPath() string {
 func (gc *GlobalConfig) Save() error {
 	globalConfigMu.Lock()
 	defer globalConfigMu.Unlock()
+	gc.repoRevision++
 	return saveGlobalConfigLocked(gc)
 }
 
@@ -476,15 +479,29 @@ func (gc *GlobalConfig) FindRepoByPath(root string) *RepoEntry {
 	if gc == nil || root == "" {
 		return nil
 	}
-	root = pathkey.CanonicalPath(root)
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return nil
+	}
+	var canonical string
+	matches := func(path string) bool {
+		entryAbs, _ := filepath.Abs(path)
+		if pathkey.SamePathIdentity(entryAbs, abs) {
+			return true
+		}
+		if canonical == "" {
+			canonical = pathkey.CanonicalPath(root)
+		}
+		return pathkey.SamePathIdentity(pathkey.CanonicalPath(path), canonical)
+	}
 	for i := range gc.Repos {
-		if pathkey.SamePathIdentity(pathkey.CanonicalPath(gc.Repos[i].Path), root) {
+		if matches(gc.Repos[i].Path) {
 			return &gc.Repos[i]
 		}
 	}
 	for _, proj := range gc.Projects {
 		for i := range proj.Repos {
-			if pathkey.SamePathIdentity(pathkey.CanonicalPath(proj.Repos[i].Path), root) {
+			if matches(proj.Repos[i].Path) {
 				return &proj.Repos[i]
 			}
 		}
@@ -501,6 +518,24 @@ func (gc *GlobalConfig) SnapshotRepoPaths() RepoPathLookup {
 }
 
 func (gc *GlobalConfig) snapshotRepoPaths(canonicalize func(string) string) RepoPathLookup {
+	globalConfigMu.Lock()
+	entries := gc.repoEntriesLocked()
+	globalConfigMu.Unlock()
+	return gc.repoPathLookup(entries, canonicalize)
+}
+
+func (gc *GlobalConfig) repoEntriesLocked() []RepoEntry {
+	if gc == nil {
+		return nil
+	}
+	entries := append([]RepoEntry(nil), gc.Repos...)
+	for _, project := range gc.Projects {
+		entries = append(entries, project.Repos...)
+	}
+	return entries
+}
+
+func (gc *GlobalConfig) repoPathLookup(entries []RepoEntry, canonicalize func(string) string) RepoPathLookup {
 	type repoRoot struct {
 		path  string
 		entry RepoEntry
@@ -518,15 +553,10 @@ func (gc *GlobalConfig) snapshotRepoPaths(canonicalize func(string) string) Repo
 	roots := make(map[string][]repoRoot)
 	canonicalRoots := make(map[string]string)
 	if gc != nil {
-		globalConfigMu.Lock()
-		entries := append([]RepoEntry(nil), gc.Repos...)
-		for _, project := range gc.Projects {
-			entries = append(entries, project.Repos...)
-		}
-		globalConfigMu.Unlock()
 		for _, entry := range entries {
 			root := canonicalize(entry.Path)
 			canonicalRoots[entry.Path] = root
+			canonicalRoots[root] = root
 			key := lookupKey(root)
 			roots[key] = append(roots[key], repoRoot{root, entry})
 		}
@@ -642,6 +672,7 @@ func (gc *GlobalConfig) AddRepo(entry RepoEntry) error {
 	}
 
 	gc.Repos = append(gc.Repos, entry)
+	gc.repoRevision++
 	return nil
 }
 
@@ -681,6 +712,7 @@ func (gc *GlobalConfig) RemoveRepoIfPresent(path string) (bool, error) {
 		}
 		if matched {
 			gc.Repos = append(gc.Repos[:i], gc.Repos[i+1:]...)
+			gc.repoRevision++
 			return true, nil
 		}
 	}
@@ -755,6 +787,7 @@ func (gc *GlobalConfig) RemoveRepoAndSaveIfPresent(path string) (bool, error) {
 	}
 	gc.Repos = candidate.Repos
 	gc.Projects = candidate.Projects
+	gc.repoRevision++
 	return true, nil
 }
 
