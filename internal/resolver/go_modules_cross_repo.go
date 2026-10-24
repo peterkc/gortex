@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 
+	"go.uber.org/zap"
+
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -608,6 +610,24 @@ func (cr *CrossRepoResolver) recheckGoModuleBindings(ctx context.Context, previo
 	}
 	if len(ids) > 0 {
 		flush()
+	}
+	// A changed module can make another provider's fallback imports bindable,
+	// even when that provider is outside the saved-file frontier.
+	importBudget := &graph.IncomingSourceBudget{}
+	for _, repo := range repos {
+		if cr.goModules[repo] == "" {
+			continue
+		}
+		importIDs := cr.goModuleImportIDs(repo)
+		if err := importBudget.Charge(len(importIDs)); err != nil {
+			cr.logger.Warn("Go module import identity recheck deferred to full pass", zap.Error(err))
+			continue
+		}
+		for start := 0; start < len(importIDs); start += externalCallMutationChunk {
+			if err := cr.restoreGoModuleImportBatch(ctx, repo, importIDs[start:min(start+externalCallMutationChunk, len(importIDs))], stats); err != nil {
+				return err
+			}
+		}
 	}
 	return ctx.Err()
 }
