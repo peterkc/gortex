@@ -1073,6 +1073,9 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 	var edges []*graph.Edge
 	var priorPending []*graph.Edge
 	for _, stage := range stages {
+		if markerBatch != nil && len(stage.priorNodes) == 0 && strings.HasSuffix(stage.graphPath, ".py") {
+			markerBatch.pythonAddedFiles = append(markerBatch.pythonAddedFiles, stage.graphPath)
+		}
 		paths = append(paths, stage.graphPath)
 		nodes = append(nodes, stage.result.Nodes...)
 		edges = append(edges, stage.result.Edges...)
