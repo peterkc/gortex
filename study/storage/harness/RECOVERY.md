@@ -145,3 +145,28 @@ and passed after the change. No existing test was deleted.
 memory level 78 before each. The root module and adapters were not changed.
 The current fingerprint is recorded outside this directory in the Batch B
 measurement evidence, so this recovery log does not contain its own hash.
+
+## Post-recovery change: configurable safety timeout
+
+On 2026-10-24, the lead approved one runner option, `-safety-timeout`. Its
+30-second default preserves the existing behavior. The positive duration travels
+in the existing fresh-process request and through explicit duration arguments to
+the commit-race and crash-child guards. Missing timeout fields in saved requests
+keep the default. The guard scopes, algorithms, reader handshake timers and
+sample requirements are unchanged. `README.md` and `FORMAT.md` document the option.
+
+`runner/safety_timeout_test.go` checks CLI serialization and the default/custom
+commit-race deadline. A one-nanosecond option makes the real crash-test path
+return `context.DeadlineExceeded` without cancelling its parent. Both custom
+guard tests failed when only the two old hard-coded 30-second expressions were
+restored, and passed with the configurable expressions. Nonpositive CLI values
+are rejected before output creation. Existing direct-call tests use the original
+default; no test was deleted. The test binary skips measurement execution only
+for the CLI serialization probes; publication child tests retain their real path.
+
+`go vet -p=1 ./...` and `go test -p=1 ./...` passed in sequence with the same
+Go 1.27.1, readonly/offline module environment and `GOMAXPROCS=2`. Memory levels
+before the commands were 75 and 75. No root-module, adapter or race checks ran.
+The updated full Go/Markdown fingerprint is recorded outside the harness so this
+log does not hash itself. Gortex task localization and memory remained unavailable
+because the daemon was stopped; it was not started or administered.

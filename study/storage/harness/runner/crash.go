@@ -119,7 +119,7 @@ func CheckViewAllowed(got, old, next adapter.View, allowed string, validate func
 	}
 	return nil
 }
-func killPublish(ctx context.Context, req publishRequest, requestPath, stage string) (bool, error) {
+func killPublish(ctx context.Context, req publishRequest, requestPath, stage string, safetyTimeout time.Duration) (bool, error) {
 	if e := dataset.WriteJSON(requestPath, req); e != nil {
 		return false, e
 	}
@@ -127,7 +127,7 @@ func killPublish(ctx context.Context, req publishRequest, requestPath, stage str
 	if e != nil {
 		return false, e
 	}
-	childCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	childCtx, cancel := context.WithTimeout(ctx, safetyTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(childCtx, exe, "__catalog_publish", requestPath)
 	stdout, e := cmd.StdoutPipe()
@@ -227,7 +227,7 @@ func recovered(ctx context.Context, b adapter.Backend, cat adapter.Catalog, old,
 	})
 	return got, e
 }
-func crashTests(ctx context.Context, b adapter.Backend, factory adapter.CatalogFactory, base dataset.Dataset, oldA, newA adapter.SegmentRef, dir string, trials int) ([]CrashTrial, error) {
+func crashTests(ctx context.Context, b adapter.Backend, factory adapter.CatalogFactory, base dataset.Dataset, oldA, newA adapter.SegmentRef, dir string, trials int, safetyTimeout time.Duration) ([]CrashTrial, error) {
 	if e := os.MkdirAll(dir, 0755); e != nil {
 		return nil, e
 	}
@@ -311,7 +311,7 @@ func crashTests(ctx context.Context, b adapter.Backend, factory adapter.CatalogF
 		}
 		t := CrashTrial{Trial: i, Kind: kind, Checkpoint: stage, Mode: mode, Allowed: allowed, DelayNS: delay, CommitPoint: commitPoint}
 		req := publishRequest{Dir: trialDir, Set: set, Old: expected, Single: single, External: external, DelayNS: delay}
-		t.Killed, e = killPublish(ctx, req, filepath.Join(dir, fmt.Sprintf("request-%02d.json", i)), stage)
+		t.Killed, e = killPublish(ctx, req, filepath.Join(dir, fmt.Sprintf("request-%02d.json", i)), stage, safetyTimeout)
 		if e == nil {
 			cat, e = factory(trialDir)
 			if e == nil {

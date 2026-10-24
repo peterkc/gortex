@@ -147,11 +147,14 @@ func ReferenceCatalog(b adapter.Backend) adapter.CatalogFactory {
 	}
 }
 
+const defaultSafetyTimeout = 30 * time.Second
+
 type runRequest struct {
-	Data   string
-	Out    string
-	Run    int
-	Trials int
+	Data          string
+	Out           string
+	Run           int
+	Trials        int
+	SafetyTimeout time.Duration
 }
 
 // trackedBackend owns all refs produced by this run, including crash fixtures.
@@ -219,11 +222,15 @@ func RunCLI(b adapter.Backend, factory adapter.CatalogFactory) error {
 	runs := fs.Int("runs", 5, "measured fresh-process runs")
 	trials := fs.Int("crash-trials", 12, "hook trials plus this many external-time trials")
 	warm := fs.Bool("warmup", true, "discard one full fresh-process warm-up")
+	safetyTimeout := fs.Duration("safety-timeout", defaultSafetyTimeout, "safety deadline for each commit-race check and crash child")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return err
 	}
 	if *data == "" || *out == "" || *runs < 1 || *trials < 1 {
 		return fmt.Errorf("data, out and positive runs/trials required")
+	}
+	if *safetyTimeout <= 0 {
+		return fmt.Errorf("safety-timeout must be positive")
 	}
 	var err error
 	*data, err = filepath.Abs(*data)
@@ -253,7 +260,7 @@ func RunCLI(b adapter.Backend, factory adapter.CatalogFactory) error {
 	}
 	for run := first; run <= *runs; run++ {
 		path := filepath.Join(*out, fmt.Sprintf("request-%02d.json", run))
-		if err = dataset.WriteJSON(path, runRequest{Data: *data, Out: *out, Run: run, Trials: *trials}); err != nil {
+		if err = dataset.WriteJSON(path, runRequest{Data: *data, Out: *out, Run: run, Trials: *trials, SafetyTimeout: *safetyTimeout}); err != nil {
 			return err
 		}
 		cmd := exec.Command(exe, "__measure_run", path)
@@ -307,6 +314,12 @@ func loadTier(dir string) ([]dataset.Dataset, []workload.Query, []workload.Expec
 	return ds, qs, want, digest, e
 }
 func runChild(original adapter.Backend, factory adapter.CatalogFactory, req runRequest) error {
+	if req.SafetyTimeout < 0 {
+		return fmt.Errorf("safety-timeout must be positive")
+	}
+	if req.SafetyTimeout == 0 {
+		req.SafetyTimeout = defaultSafetyTimeout
+	}
 	ctx := context.Background()
 	load, e := exec.Command("uptime").CombinedOutput()
 	if e != nil {
@@ -328,7 +341,7 @@ func runChild(original adapter.Backend, factory adapter.CatalogFactory, req runR
 			return e
 		}
 	}
-	e = runOnce(ctx, b, factory, ds, qs, want, dir, req.Trials, &r)
+	e = runOnce(ctx, b, factory, ds, qs, want, dir, req.Trials, req.SafetyTimeout, &r)
 	if e != nil {
 		r.Failures = append(r.Failures, e.Error())
 	}
@@ -537,7 +550,7 @@ func warmedQueries(ctx context.Context, s map[string]adapter.Segment, m adapter.
 	}
 	return ns, checks, e
 }
-func runOnce(ctx context.Context, b *trackedBackend, factory adapter.CatalogFactory, ds []dataset.Dataset, qs []workload.Query, want []workload.Expected, dir string, trials int, r *Result) (err error) {
+func runOnce(ctx context.Context, b *trackedBackend, factory adapter.CatalogFactory, ds []dataset.Dataset, qs []workload.Query, want []workload.Expected, dir string, trials int, safetyTimeout time.Duration, r *Result) (err error) {
 	var referenceErr error
 	want, referenceErr = oracle.ReferenceAnswers(ds, qs, want)
 	if referenceErr != nil {
@@ -697,7 +710,7 @@ func runOnce(ctx context.Context, b *trackedBackend, factory adapter.CatalogFact
 		return e
 	}
 	preparePhase()
-	r.Concurrent, e = concurrent(ctx, b, factory, segments, ds, refs[ds[0].Repo], changed, qs, want, filepath.Join(dir, "concurrent"))
+	r.Concurrent, e = concurrent(ctx, b, factory, segments, ds, refs[ds[0].Repo], changed, qs, want, filepath.Join(dir, "concurrent"), safetyTimeout)
 	if e != nil {
 		return e
 	}
@@ -705,7 +718,7 @@ func runOnce(ctx context.Context, b *trackedBackend, factory adapter.CatalogFact
 		return e
 	}
 	preparePhase()
-	r.Crash, e = crashTests(ctx, b, factory, ds[0], refs[ds[0].Repo], delta, filepath.Join(dir, "crash"), trials)
+	r.Crash, e = crashTests(ctx, b, factory, ds[0], refs[ds[0].Repo], delta, filepath.Join(dir, "crash"), trials, safetyTimeout)
 	if e != nil {
 		return e
 	}

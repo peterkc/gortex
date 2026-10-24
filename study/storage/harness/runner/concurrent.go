@@ -214,7 +214,7 @@ func changedAnswers(ctx context.Context, ds []dataset.Dataset, changed dataset.D
 	}
 	return oracle.ReferenceAnswers(copies, qs, want)
 }
-func concurrent(ctx context.Context, b adapter.Backend, factory adapter.CatalogFactory, segments map[string]adapter.Segment, ds []dataset.Dataset, old adapter.SegmentRef, changed dataset.Dataset, qs []workload.Query, want []workload.Expected, dir string) (ConcurrentResult, error) {
+func concurrent(ctx context.Context, b adapter.Backend, factory adapter.CatalogFactory, segments map[string]adapter.Segment, ds []dataset.Dataset, old adapter.SegmentRef, changed dataset.Dataset, qs []workload.Query, want []workload.Expected, dir string, safetyTimeout time.Duration) (ConcurrentResult, error) {
 	r := ConcurrentResult{}
 	supported := 0
 	for _, q := range qs {
@@ -387,7 +387,7 @@ func concurrent(ctx context.Context, b adapter.Backend, factory adapter.CatalogF
 		return r, fmt.Errorf("removed symbol remains in new version: %v", e)
 	}
 	r.CommitRaceMinimum = MinimumCommitRaceSamples
-	windows, raceChecks, raceErr := commitRace(ctx, b, factory, ds[0], ref, old, filepath.Join(dir, "commit-race"))
+	windows, raceChecks, raceErr := commitRace(ctx, b, factory, ds[0], ref, old, filepath.Join(dir, "commit-race"), safetyTimeout)
 	r.CommitRaceWindows = windows
 	r.Checks = append(r.Checks, raceChecks...)
 	if raceErr != nil {

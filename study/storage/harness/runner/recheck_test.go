@@ -171,7 +171,7 @@ func TestCommitRaceChecksEveryWindow(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	windows, checks, e := commitRace(ctx, b, ReferenceCatalog(b), base, next, old, filepath.Join(dir, "catalog"))
+	windows, checks, e := commitRace(ctx, b, ReferenceCatalog(b), base, next, old, filepath.Join(dir, "catalog"), defaultSafetyTimeout)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -214,7 +214,7 @@ func TestMissingCommitRaceSamplesFail(t *testing.T) {
 		cat, e := oracle.NewCatalog(dir)
 		return missingHooksCatalog{cat}, e
 	}
-	if _, _, e = commitRace(ctx, b, factory, base, next, old, filepath.Join(dir, "catalog")); e == nil {
+	if _, _, e = commitRace(ctx, b, factory, base, next, old, filepath.Join(dir, "catalog"), defaultSafetyTimeout); e == nil {
 		t.Fatal("missing checked windows passed")
 	}
 }
@@ -249,7 +249,7 @@ func TestCommitRaceRejectsStaleNewVersionAnswers(t *testing.T) {
 		t.Fatal(e)
 	}
 	b := staleVersionBackend{path: next.Path, old: base}
-	windows, _, e := commitRace(ctx, b, ReferenceCatalog(b), base, next, old, filepath.Join(dir, "catalog"))
+	windows, _, e := commitRace(ctx, b, ReferenceCatalog(b), base, next, old, filepath.Join(dir, "catalog"), defaultSafetyTimeout)
 	if e == nil || windows["after-rename"] >= MinimumCommitRaceSamples {
 		t.Fatal("stale new-version content passed", windows, e)
 	}

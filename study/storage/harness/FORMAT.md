@@ -223,3 +223,16 @@ added IDs, changed edges, retained dangling incoming edges, exact `deltaprobe`
 search results and vector neighbours. The inserted vector must be present in the delta top-k. The content hash is a synthetic record
 hash, not a hash of an edited source file. This is not a parsing benchmark.
 `BuildStats.Mode` must explicitly say `full` or `delta`.
+
+## Runner safety timeout
+
+Runner binaries accept `-safety-timeout`, a positive Go duration with a `30s`
+default. One guard covers the complete untimed commit-race pass. A separate
+guard covers each crash child, including full segment verification Opens.
+These are safety limits, not latency measurements or a deadline for the full run.
+The concurrent reader handshake and minimum-sample timeouts remain 30 seconds.
+
+Fresh-process request JSON stores `SafetyTimeout` as integer nanoseconds.
+A missing or zero field in an older saved request retains the 30-second default;
+negative values are rejected. The CLI rejects zero and negative durations before
+creating an output directory or starting a child.

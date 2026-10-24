@@ -47,6 +47,10 @@ func TestSummary(t *testing.T) {
 }
 
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "__measure_run" {
+		// CLI tests inspect the serialized request without running a second suite.
+		os.Exit(0)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "__catalog_publish" {
 		factory := adapter.CatalogFactory(oracle.NewCatalog)
 		if os.Getenv("GXSTUDY_BROKEN_CATALOG") == "1" {
@@ -83,7 +87,7 @@ func TestSIGKILLCheckpointProtocol(t *testing.T) {
 			t.Fatal(err)
 		}
 		cat.Close()
-		killed, err := killPublish(ctx, publishRequest{Dir: dir, Set: adapter.View{"r": next}, Old: adapter.View{"r": old}, Single: true}, filepath.Join(root, stage+".json"), stage)
+		killed, err := killPublish(ctx, publishRequest{Dir: dir, Set: adapter.View{"r": next}, Old: adapter.View{"r": old}, Single: true}, filepath.Join(root, stage+".json"), stage, defaultSafetyTimeout)
 		if err != nil || !killed {
 			t.Fatalf("%s: killed=%v err=%v", stage, killed, err)
 		}
@@ -217,7 +221,7 @@ func TestExternalKillRejectsNonAtomicSet(t *testing.T) {
 	if err = cat.PublishSet(ctx, old, nil); err != nil {
 		t.Fatal(err)
 	}
-	killed, err := killPublish(ctx, publishRequest{Dir: dir, Set: next, Old: old, External: true, DelayNS: int64(10 * time.Millisecond)}, filepath.Join(dir, "request.json"), "external")
+	killed, err := killPublish(ctx, publishRequest{Dir: dir, Set: next, Old: old, External: true, DelayNS: int64(10 * time.Millisecond)}, filepath.Join(dir, "request.json"), "external", defaultSafetyTimeout)
 	if err != nil || !killed {
 		t.Fatal(killed, err)
 	}
@@ -336,7 +340,7 @@ func TestPublicationStartDoesNotRequireVectorQuery(t *testing.T) {
 	qs := []workload.Query{{ID: "point", Op: "id", Repo: base.Repo, Key: "a"}}
 	n := base.Nodes[0]
 	want := []workload.Expected{{QueryID: "point", Answer: workload.Answer{Node: &n}}}
-	_, err = concurrent(ctx, b, oracle.NewCatalog, map[string]adapter.Segment{base.Repo: oracle.New(base)}, []dataset.Dataset{base}, old, changed, qs, want, filepath.Join(dir, "concurrent"))
+	_, err = concurrent(ctx, b, oracle.NewCatalog, map[string]adapter.Segment{base.Repo: oracle.New(base)}, []dataset.Dataset{base}, old, changed, qs, want, filepath.Join(dir, "concurrent"), defaultSafetyTimeout)
 	if err != nil {
 		t.Fatal(err)
 	}

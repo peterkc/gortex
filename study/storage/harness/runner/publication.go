@@ -73,8 +73,8 @@ func measurePublication(ctx context.Context, b adapter.Backend, cat adapter.Cata
 // CommitRace is deliberately untimed. At every checkpoint two independent
 // readers Pin, Open and compare real changed/removed content before the writer
 // proceeds. The minimum is a correctness requirement, never a best-effort metric.
-func commitRace(ctx context.Context, b adapter.Backend, factory adapter.CatalogFactory, base dataset.Dataset, next, old adapter.SegmentRef, dir string) (map[string]int, []workload.Check, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+func commitRace(ctx context.Context, b adapter.Backend, factory adapter.CatalogFactory, base dataset.Dataset, next, old adapter.SegmentRef, dir string, safetyTimeout time.Duration) (map[string]int, []workload.Check, error) {
+	ctx, cancel := context.WithTimeout(ctx, safetyTimeout)
 	defer cancel()
 	cat, e := factory(dir)
 	if e != nil {

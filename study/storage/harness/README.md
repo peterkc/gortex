@@ -256,7 +256,15 @@ process, then starts five distinct measured processes in sequence:
 ```
 
 A bounded smoke run can use `-runs 1 -warmup=false`. Do not use smoke results as
-five-run measurements. Start servers and prepare native libraries before running.
+five-run measurements. `-safety-timeout` accepts a positive Go duration and
+reaches every fresh-process run. Its default is `30s`. It bounds the whole
+untimed commit-race pass and, separately, each crash child, including segment
+verification Opens. It does not bound the full run or change serving latency
+measurements. For a separately authorized large-corpus run, use
+`-safety-timeout 15m` if the default cannot cover those Opens. The concurrent
+reader handshake and minimum-sample timeouts remain fixed at 30 seconds.
+
+Start servers and prepare native libraries before running.
 Run candidates sequentially with no other heavy study work. `uptime` records
 machine load before each child run; load is evidence, not a pass/fail threshold.
 
@@ -310,8 +318,9 @@ check changed/removed content before the writer proceeds. Precommit windows
 require the old ref; postcommit windows require the new ref. Missing hooks,
 insufficient checked samples, stale new-version data or a timeout fail the run.
 This deliberately requires Pin/read progress while publication is paused. It is
-not a publication latency measurement. The retained old pin is also reopened and
-checked after commit, and Previous/new visibility remain checked.
+not a publication latency measurement. Its safety limit is controlled by
+`-safety-timeout`, with a 30-second default. The retained old pin is also reopened
+and checked after commit, and Previous/new visibility remain checked.
 
 The delta mutates a Go source file's graph records: rename, delete and add symbols,
 change/add/remove owned edges, and remove/add vectors and text documents. Old-name,
@@ -349,9 +358,10 @@ new, but never a mixed/incomplete view. The parent confirms SIGKILL, calls Recov
 Pins the view and opens every visible ref. A test-only two-step catalog proves
 that the external kill can expose and reject a mixed set.
 
-Crash children are the same prebuilt adapter binary. A child has a 30-second
-limit. stdin stays open through Wait so EOF cannot race SIGKILL. Trials start
-from sealed segments; tier1 gets an extra small derived peer for linked sets.
+Crash children are the same prebuilt adapter binary. Each child uses
+`-safety-timeout`, with a 30-second default. This limit includes catalog creation
+and full segment verification. stdin stays open through Wait so EOF cannot race
+SIGKILL. Trials start from sealed segments; tier1 gets an extra small derived peer for linked sets.
 These tests do not simulate power loss, interrupt Build, inject disk failures or
 prove that every possible instruction boundary is safe. The reference catalog
 leaves unpublished temp files and has no garbage collector or throughput claim.
