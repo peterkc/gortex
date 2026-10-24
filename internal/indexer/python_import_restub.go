@@ -111,3 +111,35 @@ func (mi *MultiIndexer) pythonConsumerFilesForRepo(repo string) []string {
 	}
 	return sortedStringKeys(files)
 }
+
+// Keep candidate importers before warmup has registered every repository.
+// The existing cross-repo matcher still checks providers and declarations.
+func pythonConsumerFilesForAddedFiles(g graph.Store, files []string) []string {
+	if len(files) == 0 {
+		return nil
+	}
+	tops := map[string]bool{}
+	for _, file := range files {
+		rel := strings.TrimPrefix(file, graph.RepoPrefixOfID(file)+"/")
+		for _, path := range []string{rel, strings.TrimPrefix(rel, "src/")} {
+			top, _, _ := strings.Cut(path, "/")
+			tops[strings.TrimSuffix(top, ".py")] = true
+		}
+	}
+	consumers := map[string]struct{}{}
+	for edge := range graph.EdgesLightSeq(g, graph.EdgeImports) {
+		if !strings.HasSuffix(edge.FilePath, ".py") {
+			continue
+		}
+		for _, prefix := range []string{"module::pypi:", "external::", "unresolved::import::"} {
+			if spec, ok := strings.CutPrefix(edge.To, prefix); ok {
+				top, _, _ := strings.Cut(spec, ".")
+				if tops[top] {
+					consumers[edge.FilePath] = struct{}{}
+				}
+				break
+			}
+		}
+	}
+	return sortedStringKeys(consumers)
+}
