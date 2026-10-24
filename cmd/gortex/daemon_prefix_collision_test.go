@@ -21,7 +21,7 @@ import (
 	"github.com/zzet/gortex/internal/search"
 )
 
-func TestWarmupPrefixCollisionPrefersCatalogOwner(t *testing.T) {
+func TestWarmupPrefixCollisionPrefersPublishedCatalogOwner(t *testing.T) {
 	for _, includeOwner := range []bool{false, true} {
 		t.Run(fmt.Sprint(includeOwner), func(t *testing.T) {
 			dir := t.TempDir()
@@ -45,9 +45,15 @@ func TestWarmupPrefixCollisionPrefersCatalogOwner(t *testing.T) {
 			binding := store_sqlite.DedicatedGraph{GraphID: indexer.GraphIDFor("src"), OwnerCheckoutID: "owner",
 				FamilyID: "family", RepoPrefix: "src", IsPrimaryBase: true, State: "graph_ready"}
 			require.NoError(t, catalog.UpsertDedicatedGraph(t.Context(), binding))
+			_, err = catalog.AcquireDedicatedBaseAuthority(t.Context(), store_sqlite.AcquireDedicatedBaseAuthorityRequest{
+				GraphID: binding.GraphID,
+				Owner:   store_sqlite.DedicatedBaseOwner{CheckoutID: "owner", Incarnation: "one"},
+				Token:   "warmup-owner",
+			})
+			require.NoError(t, err)
 			cm, err := config.NewConfigManager(filepath.Join(dir, "config.yaml"))
 			require.NoError(t, err)
-			// The existing owner must win even when a colliding entry precedes it.
+			// A published owner must win even when a colliding entry precedes it.
 			cm.Global().Repos = []config.RepoEntry{{Path: rejected, Name: "src"}}
 			if includeOwner {
 				cm.Global().Repos = append(cm.Global().Repos, config.RepoEntry{Path: owner, Name: "src"})

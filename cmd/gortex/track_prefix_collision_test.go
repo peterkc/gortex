@@ -194,7 +194,7 @@ func TestRunTrackOfflineUsesWorktreeInstancePrefix(t *testing.T) {
 	gc, err = config.LoadGlobal()
 	require.NoError(t, err)
 	require.Len(t, gc.Repos, 2)
-	assert.Equal(t, "src@review", gc.Repos[1].Name)
+	assert.Equal(t, "src@src", gc.Repos[1].Name, "use Git admin name, not branch or workspace")
 	// An unpinned worktree entry also reserves its instance, not the basename.
 	gc.Repos = []config.RepoEntry{{Path: worktree}}
 	require.NoError(t, gc.Save())
