@@ -1,28 +1,38 @@
 # Fork-only A/B benchmark for zzet/gortex#954. Do not merge.
-# Push this file alone on fork branch exp/bench-954 (based on fork main ce04b3e8),
-# with the main-compatible fixture at .github/bench/warmup_prefix_bench_test.go.
-# Set BRANCH_SHA to the final head of review/duplicate-prefix-error before pushing.
+# Push this file alone on fork branch exp/bench-954.
+# Set BRANCH_SHA to the final head before pushing, or dispatch with head_sha.
 name: bench-954
 on:
   push:
     branches: [exp/bench-954]
+  workflow_dispatch:
+    inputs:
+      head_sha:
+        description: Final head containing both prefix benchmark fixtures
+        required: true
+        default: c46d57e5f58ec05c1d6e2c4b0a274672f76181c9
+        type: string
 permissions:
   contents: read
 env:
-  MAIN_SHA: ce04b3e8e37d206841770129b30be0f22ee27ccc
-  BRANCH_SHA: 9225b1a57506f7c0ec3f946da8dd1bc6500b6a65
+  GOMAXPROCS: 2
+  GOTOOLCHAIN: local
+  MAIN_SHA: ebe58c678147acde1886f565596313b4c7b15cfa
+  BRANCH_SHA: ${{ inputs.head_sha || 'c46d57e5f58ec05c1d6e2c4b0a274672f76181c9' }}
 jobs:
   ab:
+    if: github.repository == 'peterkc/gortex'
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         os: [ubuntu-24.04-arm, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          path: bench
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.MAIN_SHA }}
@@ -35,31 +45,49 @@ jobs:
         with:
           go-version-file: main/go.mod
           cache: false
-      - name: Add the main-compatible fixture
-        run: cp bench/.github/bench/warmup_prefix_bench_test.go main/internal/indexer/warmup_prefix_bench_test.go
+      - name: Record compared revisions and toolchain
+        run: |
+          {
+            echo "Baseline: $(git -C main rev-parse HEAD)"
+            echo "Final head: $(git -C branch rev-parse HEAD)"
+            go version
+          } | tee revisions.txt
+          cat revisions.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Copy identical fixtures from final head into baseline
+        run: |
+          cp branch/internal/indexer/prefix_latency_bench_test.go main/internal/indexer/prefix_latency_bench_test.go
+          cp branch/cmd/gortex/prefix_daemon_bench_test.go main/cmd/gortex/prefix_daemon_bench_test.go
       - name: Build both test binaries (compile time stays out of the timings)
         run: |
-          (cd main && go test -c -o "$RUNNER_TEMP/main.test" ./internal/indexer)
-          (cd branch && go test -c -o "$RUNNER_TEMP/branch.test" ./internal/indexer)
-      - name: Alternate main and branch, 5 rounds
-        shell: bash
+          for side in main branch; do
+            (cd "$side" && go test -p=1 -c -o "$RUNNER_TEMP/$side-indexer.test" ./internal/indexer) 2>&1 | tee "$side-indexer-build.log"
+            (cd "$side" && go test -p=1 -c -o "$RUNNER_TEMP/$side-daemon.test" ./cmd/gortex) 2>&1 | tee "$side-daemon-build.log"
+          done
+      - name: Alternate baseline and final head, 6 rounds
         run: |
-          for round in 1 2 3 4 5; do
+          for round in 1 2 3 4 5 6; do
             for side in main branch; do
-              (cd "$side/internal/indexer" && "$RUNNER_TEMP/$side.test" \
-                -test.run '^$' -test.bench '^BenchmarkWarmupResolve200$' \
-                -test.benchmem -test.count=5 -test.benchtime=20x) | tee -a "$side.txt"
+              echo "Round $round: $side indexer" | tee -a "$side.txt"
+              (cd "$side/internal/indexer" && "$RUNNER_TEMP/$side-indexer.test" \
+                -test.run '^$' -test.bench '^BenchmarkPrefix(ReconcileRepo|CallChangingSave)$' \
+                -test.benchmem -test.count=1 -test.benchtime=1x -test.timeout=10m) 2>&1 | tee -a "$side.txt"
+              echo "Round $round: $side daemon" | tee -a "$side.txt"
+              (cd "$side/cmd/gortex" && "$RUNNER_TEMP/$side-daemon.test" \
+                -test.run '^$' -test.bench '^BenchmarkPrefixDaemonWarmup$' \
+                -test.benchmem -test.count=1 -test.benchtime=1x -test.timeout=10m) 2>&1 | tee -a "$side.txt"
             done
           done
       - name: benchstat
-        shell: bash
         run: |
-          go run golang.org/x/perf/cmd/benchstat@v0.0.0-20260409210113-8e83ce0f7b1c main.txt branch.txt | tee benchstat.txt
+          go run golang.org/x/perf/cmd/benchstat@v0.0.0-20260409210113-8e83ce0f7b1c main.txt branch.txt 2>&1 | tee benchstat.txt
           cat benchstat.txt >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
         with:
           name: bench-954-${{ matrix.os }}
           path: |
+            revisions.txt
             main.txt
             branch.txt
+            *-build.log
             benchstat.txt
