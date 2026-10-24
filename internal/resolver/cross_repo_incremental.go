@@ -69,10 +69,19 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 		}
 		logIncomingAdmissionRefusal(cr.logger, "cross_repo_preparation", len(frontier.stubKeys),
 			frontier.incomingAdmission, frontier.incomingRefusal)
+		if cr.pythonPackages != nil {
+			for _, edges := range frontier.outByNode {
+				for _, edge := range edges {
+					if trackedPythonImportSpec(edge) != "" {
+						frontier.pending = append(frontier.pending, edge)
+					}
+				}
+			}
+		}
 		pending := make([]*graph.Edge, 0, len(frontier.pending))
 		seen := make(map[graph.EdgeIdentity]struct{}, len(frontier.pending))
 		for _, edge := range frontier.pending {
-			if edge == nil || !graph.IsUnresolvedTarget(edge.To) {
+			if edge == nil || !graph.IsUnresolvedTarget(edge.To) && trackedPythonImportSpec(edge) == "" {
 				continue
 			}
 			identity := graph.EdgeIdentityFor(edge)

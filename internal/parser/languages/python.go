@@ -1041,12 +1041,14 @@ func (e *PythonExtractor) emitImportFromRelative(m parser.QueryResult, filePath,
 	// `from numpy import array` path uses (one import edge to the
 	// originating module) — the only difference is that for `from .
 	// import X` the module name comes from the import list.
+	var moduleImport *graph.Edge
 	if modPath != "" {
 		pyEmitImportNode(filePath, fileID, modPath, "", importLine, result)
-		result.Edges = append(result.Edges, &graph.Edge{
+		moduleImport = &graph.Edge{
 			From: fileID, To: "unresolved::pyrel::" + stem,
 			Kind: graph.EdgeImports, FilePath: filePath, Line: importLine,
-		})
+		}
+		result.Edges = append(result.Edges, moduleImport)
 	}
 
 	def, ok := m.Captures["importfrom_rel.def"]
@@ -1054,9 +1056,23 @@ func (e *PythonExtractor) emitImportFromRelative(m parser.QueryResult, filePath,
 		return
 	}
 	stmt := def.Node
+	// Keep exact package bindings for the tracked-import call bridge. Ordinary
+	// imports and function-local bindings do not expose package attributes.
+	var exports map[string]any
+	if moduleImport != nil && strings.HasSuffix(filePath, "/__init__.py") && stmt.Parent().Type() == "module" {
+		exports = make(map[string]any)
+		moduleImport.Meta = map[string]any{"python_reexports": exports, "python_reexport_stem": stem}
+	}
 	moduleSeen := false
 	emittedSub := map[string]bool{}
 	emitSubmodule := func(name, alias string) {
+		if exports != nil && name != "" {
+			binding := alias
+			if binding == "" {
+				binding = name
+			}
+			exports[binding] = name
+		}
 		if modPath != "" || name == "" {
 			return
 		}

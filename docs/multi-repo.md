@@ -84,6 +84,14 @@ the participating repositories' allow-lists. This keeps a repository from
 silently losing framework edges requested by a sibling while allowing a
 workspace where every repository opts out to avoid the scans entirely.
 
+### Python package re-exports
+
+Calls through a declared, tracked Python distribution can follow one level of
+relative `from .module import Name` or `from .module import Name as Alias` in its
+package `__init__.py`. The bridge requires an exact imported binding and a unique
+function or class in the provider. It does not follow wildcard imports,
+conditional or function-local imports, or multi-level re-export chains.
+
 ## Daemon tuning (optional)
 
 The background daemon writes JSON lines to `daemon.log` and rotates it while

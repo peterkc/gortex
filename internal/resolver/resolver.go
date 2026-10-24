@@ -4050,6 +4050,15 @@ func (r *Resolver) resolveEdge(e *graph.Edge, stats *ResolveStats) (oldTo string
 		}
 	}
 
+	// External terminals need their spelling before a later tracked import retry.
+	if e.To != oldTo && e.Kind == graph.EdgeCalls && isPythonSourcePath(e.FilePath) && (e.CrossRepo || isExternalCandidateTarget(e.To)) {
+		if e.Meta == nil {
+			e.Meta = make(map[string]any)
+		}
+		if original, _ := e.Meta[PythonCallStubMeta].(string); original == "" {
+			e.Meta[PythonCallStubMeta] = oldTo
+		}
+	}
 	return oldTo, e.To != oldTo
 }
 

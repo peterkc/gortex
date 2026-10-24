@@ -156,7 +156,7 @@ func (idx *Indexer) reindexIncrementalFilesBatched(
 	deleteTiming := startReconcilePhase(idx.logger, idx.repoPrefix, "graph_delete",
 		zap.Int("deleted_files", len(deletedFiles)))
 	defer deleteTiming.abort()
-	idx.evictDeletedFilesBatched(deletedFiles, &invalidation)
+	idx.evictDeletedFilesBatched(deletedFiles, &invalidation, markerBatch)
 	deleteTiming.complete(nil)
 
 	passPlan, reparsed, failed, versionChanged := idx.reindexIncrementalStalePass(
@@ -512,6 +512,9 @@ func (idx *Indexer) reindexIncrementalFallback(
 	resolve := markerBatch == nil || !markerBatch.deferResolverCatchup
 	if err := idx.indexFile(fallback.filePath, resolve, markerBatch); err != nil {
 		return err
+	}
+	if markerBatch != nil && len(fallback.priorNodes) == 0 && strings.HasSuffix(fallback.graphPath, ".py") {
+		markerBatch.pythonAddedFiles = append(markerBatch.pythonAddedFiles, fallback.graphPath)
 	}
 	freshNodes := idx.graph.GetFileNodesByPaths([]string{fallback.graphPath})[fallback.graphPath]
 	freshDerived := storedDerivedFingerprints(freshNodes)
@@ -983,7 +986,7 @@ func applyResolvedOutEdgesFromView(
 		edge.Origin = value.origin
 		edge.Tier = value.tier
 		applyReuseResolutionTag(edge, value.resolution)
-		applyReuseSemanticMeta(edge, value.semanticMeta)
+		applyReuseSemanticMeta(edge, value.semanticMeta, oldTo)
 		retargeted = append(retargeted, graph.EdgeReindex{Edge: edge, OldTo: oldTo})
 		reused++
 	}
@@ -1067,6 +1070,9 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 	var edges []*graph.Edge
 	var priorPending []*graph.Edge
 	for _, stage := range stages {
+		if markerBatch != nil && len(stage.priorNodes) == 0 && strings.HasSuffix(stage.graphPath, ".py") {
+			markerBatch.pythonAddedFiles = append(markerBatch.pythonAddedFiles, stage.graphPath)
+		}
 		paths = append(paths, stage.graphPath)
 		nodes = append(nodes, stage.result.Nodes...)
 		edges = append(edges, stage.result.Edges...)
@@ -1092,7 +1098,10 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 		markerBatch.recordDeferredPriorBindings(stagePriorBindings(idx.graph, stages, view))
 	}
 	idx.applyLap("prior_bindings")
-	carried := restubIncomingRefsFromView(idx.graph, stages, view)
+	carried, consumers := restubIncomingRefsFromView(idx.graph, stages, view)
+	if markerBatch != nil {
+		markerBatch.pythonConsumerFiles = appendUniqueSorted(markerBatch.pythonConsumerFiles, consumers...)
+	}
 	idx.applyLap("restub")
 	// The capability state of the files, read before the eviction below
 	// deletes it; the carried set says which incoming accesses_field rows
@@ -1349,8 +1358,9 @@ func restubIncomingRefsFromView(
 	g graph.Store,
 	stages []*incrementalBatchStage,
 	view incrementalPriorView,
-) []*graph.Edge {
+) ([]*graph.Edge, []string) {
 	evicted := structuralPriorIDs(stages)
+	consumers := restubTrackedPythonImportsFromView(g, evicted, view.inByNode, false)
 	reparsed := reparsedPaths(stages)
 	var reindexes []graph.EdgeReindex
 	var carried []*graph.Edge
@@ -1366,7 +1376,7 @@ func restubIncomingRefsFromView(
 				// is not reparsed — so re-state it.
 				if _, survives := frontier.survivingIDs[node.ID]; survives || frontier.conservative {
 					for _, edge := range view.inByNode[node.ID] {
-						if edge == nil || edge.Kind != graph.EdgeImports {
+						if edge == nil || edge.Kind != graph.EdgeImports || edge.To != node.ID {
 							continue
 						}
 						if _, sourceEvicted := evicted[edge.From]; sourceEvicted {
@@ -1498,6 +1508,9 @@ func restubIncomingRefsFromView(
 				oldTo := edge.To
 				graph.StashRestubProvenance(edge)
 				edge.To = stub
+				if original, _ := edge.Meta[resolver.PythonCallStubMeta].(string); edge.Kind == graph.EdgeCalls && edge.CrossRepo && original != "" {
+					edge.To, edge.CrossRepo, edge.ConfidenceLabel = original, false, ""
+				}
 				reindexes = append(reindexes, graph.EdgeReindex{Edge: edge, OldTo: oldTo})
 			}
 		}
@@ -1505,7 +1518,7 @@ func restubIncomingRefsFromView(
 	if len(reindexes) > 0 {
 		g.ReindexEdges(reindexes)
 	}
-	return carried
+	return carried, consumers
 }
 
 // dataflowSourceSite is a reference's site: the file that records it and its
@@ -2377,7 +2390,7 @@ func (idx *Indexer) evictFileIncrementalRaw(relPath string) forcedFileEviction {
 	// recover this file's records from a sibling's canonical scalar payload.
 	idx.ensureIncrementalContractRegistry()
 	var invalidation DerivedInvalidationPlan
-	nodesRemoved, edgesRemoved := idx.evictDeletedFilesBatched([]string{relPath}, &invalidation)
+	nodesRemoved, edgesRemoved := idx.evictDeletedFilesBatched([]string{relPath}, &invalidation, batch)
 	graphPath := idx.prefixPath(relPath)
 	idx.removeIncrementalContractsForFile(graphPath, &invalidation)
 	invalidation.Files = appendUniqueSorted(invalidation.Files, dependencyFiles...)
@@ -2427,7 +2440,7 @@ func (idx *Indexer) removeIncrementalContractsForFile(graphPath string, plan *De
 	plan.ContractSymbolIDs = appendUniqueSorted(plan.ContractSymbolIDs, refresh.SymbolIDs...)
 }
 
-func (idx *Indexer) evictDeletedFilesBatched(deleted []string, plan *DerivedInvalidationPlan) (nodesRemoved, edgesRemoved int) {
+func (idx *Indexer) evictDeletedFilesBatched(deleted []string, plan *DerivedInvalidationPlan, markerBatch *reparsePendingEnrichmentBatch) (nodesRemoved, edgesRemoved int) {
 	if len(deleted) == 0 {
 		return 0, 0
 	}
@@ -2483,7 +2496,11 @@ func (idx *Indexer) evictDeletedFilesBatched(deleted []string, plan *DerivedInva
 		// carry therefore means a deletion stage stopped being conservative,
 		// which would destroy those edges with no compile error to show for
 		// it — so the assumption is checked, not just documented.
-		if carried := restubIncomingRefsFromView(idx.graph, stages, view); len(carried) > 0 {
+		carried, consumers := restubIncomingRefsFromView(idx.graph, stages, view)
+		if markerBatch != nil {
+			markerBatch.pythonConsumerFiles = appendUniqueSorted(markerBatch.pythonConsumerFiles, consumers...)
+		}
+		if len(carried) > 0 {
 			idx.logger.Error("indexer: deletion restub carried in-edges with no re-state path",
 				zap.String("repo", idx.repoPrefix),
 				zap.Int("carried", len(carried)),
