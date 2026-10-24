@@ -801,8 +801,15 @@ func (g *Graph) reindexEdges(batch []EdgeReindex) []*Edge {
 			if i, ok := created[oldKey]; ok {
 				// Fold an intermediate identity into its original outgoing slot.
 				delete(created, oldKey)
-				pending[i].updated = *e
-				created[hashEdgeKey(keyOf(e))] = i
+				p := pending[i]
+				pending[i].stored = nil
+				p.updated = *e
+				newKey := hashEdgeKey(keyOf(e))
+				if _, exists := created[newKey]; !exists {
+					created[newKey] = len(pending)
+				}
+				// Choose winners at this row's position in batch order.
+				pending = append(pending, p)
 				continue
 			}
 			if !r.RefreshIdentity {
@@ -841,6 +848,9 @@ func (g *Graph) reindexEdges(batch []EdgeReindex) []*Edge {
 	}
 	var dropped map[string]map[int]bool
 	for _, p := range pending {
+		if p.stored == nil {
+			continue // Superseded by a later intermediate-identity move.
+		}
 		e := &p.updated
 		sFrom := g.shardFor(e.From)
 		newKey := hashEdgeKey(keyOf(e))
