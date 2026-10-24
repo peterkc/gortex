@@ -36,6 +36,7 @@ import (
 // published matches, every layer rebuilds on first contact, and from then on
 // the cache is keyed by the contract that produced it.
 // Same-repository folder matching changes import bindings for an unchanged corpus.
+// Package-scoped same-receiver field fallback changes edges for an unchanged corpus.
 const ResolutionSemanticsVersion = 3
 
 // resolverVersionDomain versions the ENCODING below, not the contract. Two
