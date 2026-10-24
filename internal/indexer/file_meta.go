@@ -200,6 +200,7 @@ type reparsePendingEnrichmentBatch struct {
 	cargoAddedFile        bool
 	cargoConsumerFiles    []string
 	pythonConsumerFiles   []string
+	pythonAddedFiles      []string
 	byFile                map[string]bool
 	deferResolverCatchup  bool
 	deferredAffectedFiles map[string]struct{}
