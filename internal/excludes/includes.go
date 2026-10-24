@@ -43,47 +43,34 @@ func (m *Matcher) ParentLimitedIncludes() []string {
 	return m.includes.Patterns()
 }
 
-// IncludesRel reports a force-include. Basename literals reopen their own
-// target, but only anchored literals can open excluded ancestors. The caller still
-// enforces hard exclusions and applies per-directory ignore files independently.
+// IncludesRel reports a force-include. A wildcard or basename entry can
+// reopen its target folder, but cannot reach through a closed ancestor.
+// Only anchored literals open ancestors. Callers still enforce hard exclusions
+// and per-directory ignore files independently.
 func (m *Matcher) IncludesRel(rel string) bool {
 	if m == nil || (m.includes == nil && len(m.literalIncludes) == 0) {
 		return false
 	}
-	rel = pathkey.Normalize(filepath.ToSlash(rel))
-	rel = strings.TrimPrefix(rel, "./")
-	if m.includesLiteral(rel) || m.includesBasename(rel) {
+	rel = strings.TrimPrefix(pathkey.Normalize(filepath.ToSlash(rel)), "./")
+	if m.includesLiteral(rel) {
 		return true
 	}
-	if strings.HasSuffix(rel, "/") || m.includes == nil || !m.includes.MatchRel(rel) {
-		return false
-	}
-	return !m.excludesParent(rel)
-}
-
-func (m *Matcher) includesBasename(rel string) bool {
 	if m.includes == nil {
 		return false
 	}
-	for _, p := range m.includes.patterns {
-		target := strings.TrimSuffix(p, "/")
-		if strings.ContainsAny(target, `/*?[\`) {
+	for i := range rel {
+		if rel[i] != '/' {
 			continue
 		}
-		parent, body := "", rel
-		for body != "" {
-			segment, rest, slash := strings.Cut(body, "/")
-			if segment == target && (!strings.HasSuffix(p, "/") || slash) && !m.excludesParent(parent) {
-				return true
-			}
-			if !slash {
-				break
-			}
-			parent += segment + "/"
-			body = rest
+		// Test the target before its exclusion: includes override excludes.
+		if m.includes.dirs.MatchesPath(rel[:i]) {
+			return true
+		}
+		if !m.includesLiteral(rel[:i]+"/") && m.dirs.MatchesPath(rel[:i]) {
+			return false
 		}
 	}
-	return false
+	return !strings.HasSuffix(rel, "/") && m.includes.ign.MatchesPath(rel)
 }
 
 func (m *Matcher) includesLiteral(rel string) bool {
@@ -100,7 +87,7 @@ func (m *Matcher) includesLiteral(rel string) bool {
 
 func (m *Matcher) excludesParent(rel string) bool {
 	for i := 0; i < len(rel); i++ {
-		if rel[i] == '/' && !m.includesLiteral(rel[:i]+"/") && m.dirs.MatchesPath(rel[:i]) {
+		if rel[i] == '/' && !m.IncludesRel(rel[:i]+"/") && m.dirs.MatchesPath(rel[:i]) {
 			return true
 		}
 	}

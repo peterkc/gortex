@@ -144,3 +144,44 @@ func TestExcludeMatcherIncludeOnlyRefresh(t *testing.T) {
 	idx.refreshEffectiveExcludePatterns(patterns, nil)
 	require.False(t, idx.excludeMatcher().IncludesRel("vendor/keep.go"))
 }
+
+func TestWildcardIncludeFolderSurfaces(t *testing.T) {
+	for _, tc := range []struct {
+		include, target string
+		want            bool
+	}{
+		{"gen*/", "gen1", true}, {"gen?/", "gen1", true},
+		{"**/generated/", "generated", true}, {"**/generated/", "src/generated", true},
+		{"out*", "out", true}, {"vendor/**", "vendor", false}, {"build/**", "build", false},
+	} {
+		t.Run(tc.include+tc.target, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, tc.target, "a.go")
+			writeExcludeFixture(t, path, "package app\n")
+			idx := newAdmissionTestIndexer(t, root, tc.target+"/")
+			idx.SetIgnorePatterns(idx.config.Exclude, []string{tc.include})
+			var walked []string
+			require.NoError(t, idx.walkDisk(root, root, func(p string, d os.DirEntry, err error) error {
+				require.NoError(t, err)
+				if !d.IsDir() && idx.admitFileInOpenDir(root, p, -1, d.Type()).admit {
+					walked = append(walked, p)
+				}
+				return nil
+			}))
+			require.Equal(t, tc.want, len(walked) == 1)
+			require.Equal(t, !tc.want, idx.shouldExclude(path, root, false))
+			filter := &checkoutWatchFilter{excludes: idx.excludeMatcher(), roots: []string{root}}
+			// The backend conservatively admits folder events when the file form
+			// of a contents glob matches; semantic admission still rejects it.
+			require.True(t, filter.ShouldInclude(filepath.Dir(path)))
+			require.Equal(t, tc.want, filter.ShouldInclude(path))
+			files, err := idx.CurrentSourceSearchFiles(context.Background(), root, nil, nil, 0, nil)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, len(files) == 1)
+			require.Equal(t, tc.want, idx.AdmitSourceSearchBuffer(context.Background(), root, path, []byte("package app\n"), nil))
+			manifest, err := idx.dryRunIntake(context.Background(), root)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, manifest.FilesAdmitted == 1)
+		})
+	}
+}

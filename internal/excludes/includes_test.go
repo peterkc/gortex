@@ -9,6 +9,15 @@ func TestIncludeAnchoring(t *testing.T) {
 		include, rel string
 		want         bool
 	}{
+		{"glob_star_dir", []string{"gen1/"}, "gen*/", "gen1/a.go", true},
+		{"glob_question_dir", []string{"gen1/"}, "gen?/", "gen1/", true},
+		{"glob_recursive_root", []string{"generated/"}, "**/generated/", "generated/a.go", true},
+		{"glob_recursive_nested", []string{"generated/"}, "**/generated/", "src/generated/a.go", true},
+		{"glob_without_slash", []string{"out/"}, "out*", "out/a.go", true},
+		{"glob_closed_ancestor", []string{"src/", "generated/"}, "**/generated/", "src/generated/a.go", false},
+		{"glob_vendor_contents", Builtin, "vendor/**", "vendor/a.go", false},
+		{"glob_build_contents", []string{"build/"}, "build/**", "build/a.go", false},
+		{"glob_build_open", []string{"build/**"}, "build/**", "build/a.go", true},
 		{"basename_dir_nested", []string{"*.go"}, "Pods/", "ios/Pods/x.go", true},
 		{"basename_dir_root", []string{"*.go"}, "Pods/", "Pods/x.go", true},
 		{"basename_dir_closed_ancestor", []string{"ios/"}, "Pods/", "ios/Pods/x.go", false},

@@ -438,7 +438,8 @@ type Config struct {
 	// other entries match at any depth. Anchored literal paths also keep
 	// their parents open, for example vendor/acme/lib/. Wildcard and
 	// unanchored literals reopen their target only when its parents are open.
-	// Wildcards only match inside open folders.
+	// Wildcards can reopen a matching folder, but not its excluded parents.
+	// A contents glob (vendor/**) does not reopen vendor/ itself.
 	// Per-directory ignore files still apply. Git metadata, non-MCP agent
 	// state and escaping symlinks remain excluded.
 	Include []string `mapstructure:"include" yaml:"include,omitempty"`

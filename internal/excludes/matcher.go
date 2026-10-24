@@ -300,7 +300,7 @@ func (m *Matcher) explainRel(rel string) (bool, string) {
 	if m.hasNegation && (ip != nil || m.checkUnmatchedParents) {
 		for i := 0; i < len(rel); i++ {
 			if rel[i] == '/' {
-				if matched, ip := m.dirs.MatchesPathHow(rel[:i]); matched && !m.includesLiteral(rel[:i]+"/") {
+				if matched, ip := m.dirs.MatchesPathHow(rel[:i]); matched && !m.IncludesRel(rel[:i]+"/") {
 					return m.explainPattern(matched, ip)
 				}
 			}
