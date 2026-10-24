@@ -24,7 +24,10 @@ import (
 func TestTrackedCargoImportLifecycle(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
 		for _, providerFirst := range []bool{false, true} {
-			for _, operation := range []string{"consumer_save", "provider_save", "provider_save_util", "provider_save_lib_contract", "provider_delete_util_batched", "forced_evict_util", "consumer_full", "provider_full", "warm_full_retrack", "untrack_retrack", "no_change", "track"} {
+			for _, operation := range []string{"consumer_save", "provider_save", "provider_save_util", "provider_save_lib_contract", "provider_delete_util_batched", "forced_evict_util", "consumer_full", "provider_full", "warm_full_retrack", "untrack_retrack", "no_change", "track", "deferred_track"} {
+				if operation == "deferred_track" && providerFirst {
+					continue // This case starts with an already tracked consumer.
+				}
 				order := "consumer_first"
 				if providerFirst {
 					order = "provider_first"
@@ -59,7 +62,20 @@ func TestTrackedCargoImportLifecycle(t *testing.T) {
 					logger := zap.New(core)
 					mi := NewMultiIndexer(g, reg, search.NewNull(), cm, logger)
 					t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
-					if operation == "track" {
+					if operation == "deferred_track" {
+						_, err = mi.TrackRepoCtx(context.Background(), entries[0])
+						require.NoError(t, err)
+						mi.BeginParallelBatch()
+						_, err = mi.TrackRepoCtx(context.Background(), entries[1])
+						require.NoError(t, err)
+						for _, edge := range g.GetOutEdges("consumer/src/lib.rs") {
+							if edge.Kind == graph.EdgeImports {
+								require.False(t, edge.CrossRepo, "deferred track must not resolve shared imports early")
+							}
+						}
+						require.NoError(t, mi.RunPreEnrichResolveFiles(context.Background(), []string{"consumer/src/lib.rs", "provider/src/lib.rs", "provider/src/util.rs"}, nil))
+						mi.EndBatch()
+					} else if operation == "track" {
 						for _, entry := range gc.Repos {
 							_, err = mi.TrackRepoCtx(context.Background(), entry)
 							require.NoError(t, err)
@@ -120,30 +136,45 @@ func TestTrackedCargoImportLifecycle(t *testing.T) {
 					case "consumer_full":
 						_, err = mi.IndexRepo("consumer")
 					case "provider_full":
-						_, err = mi.IndexRepo("provider")
+						var result *IndexResult
+						result, err = mi.IndexRepo("provider")
+						require.NoError(t, err)
+						require.Contains(t, result.CrossRepoResolveFiles, "consumer/src/lib.rs")
 					case "warm_full_retrack":
 						prior := map[string]map[string]int64{"consumer": mi.FileMtimes("consumer"), "provider": mi.FileMtimes("provider")}
 						restarted := NewMultiIndexer(g, reg, search.NewNull(), cm, logger)
 						t.Cleanup(func() { require.NoError(t, restarted.Close(context.Background())) })
 						restarted.BeginBatch()
-						_, err = restarted.ReconcileRepoCtx(context.Background(), entries[0], prior["consumer"])
-						require.NoError(t, err)
-						t.Setenv("GORTEX_WARMUP_FULL_RETRACK", "1")
-						result, restoreErr := restarted.ReconcileRepoCtx(context.Background(), entries[1], prior["provider"])
-						require.NoError(t, restoreErr)
-						require.True(t, result.FullRetrack)
-						data, marshalErr := json.Marshal(result)
-						require.NoError(t, marshalErr)
 						var output struct {
 							Files []string `json:"cross_repo_resolve_files"`
 						}
-						require.NoError(t, json.Unmarshal(data, &output))
+						for _, entry := range gc.Repos {
+							force := "0"
+							if entry.Name == "provider" {
+								force = "1"
+							}
+							t.Setenv("GORTEX_WARMUP_FULL_RETRACK", force)
+							result, restoreErr := restarted.ReconcileRepoCtx(context.Background(), entry, prior[entry.Name])
+							require.NoError(t, restoreErr)
+							if entry.Name == "provider" {
+								require.True(t, result.FullRetrack)
+							}
+							data, marshalErr := json.Marshal(result)
+							require.NoError(t, marshalErr)
+							var current struct {
+								Files []string `json:"cross_repo_resolve_files"`
+							}
+							require.NoError(t, json.Unmarshal(data, &current))
+							output.Files = appendUniqueSorted(output.Files, current.Files...)
+							if entry.Name == "provider" {
+								require.NotContains(t, result.DerivedInvalidation.Files, "consumer/src/lib.rs")
+							}
+						}
 						if backend == "sqlite" {
 							require.Contains(t, output.Files, "consumer/src/lib.rs")
 						} else {
 							require.Empty(t, output.Files, "memory replacement preserved the existing import")
 						}
-						require.NotContains(t, result.DerivedInvalidation.Files, "consumer/src/lib.rs")
 						err = restarted.RunPreEnrichResolveFiles(context.Background(), output.Files, nil)
 						restarted.EndBatch()
 					case "no_change":
