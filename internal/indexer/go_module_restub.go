@@ -8,6 +8,9 @@ import (
 
 func goModuleRestubTarget(e *graph.Edge, fallback string) string {
 	if spec, ok := e.Meta["go_import"].(string); ok && spec != "" && e.CrossRepo && strings.HasSuffix(e.FilePath, ".go") {
+		if e.Kind == graph.EdgeImports {
+			return graph.UnresolvedMarker + "import::" + spec
+		}
 		return graph.UnresolvedMarker + "extern::" + spec
 	}
 	return fallback
@@ -25,7 +28,7 @@ func restubGoModuleRepoIncoming(g graph.Store, repo string) []graph.EdgeIdentity
 		var batch []graph.EdgeReindex
 		for _, incoming := range g.GetInEdgesByNodeIDs(ids) {
 			for _, e := range incoming {
-				if !graph.IsResolvableRefEdge(e.Kind) || graph.RepoPrefixOfID(e.From) == repo {
+				if !graph.IsResolvableRefEdge(e.Kind) && e.Kind != graph.EdgeImports || graph.RepoPrefixOfID(e.From) == repo {
 					continue
 				}
 				stub := goModuleRestubTarget(e, "")
@@ -43,7 +46,7 @@ func restubGoModuleRepoIncoming(g graph.Store, repo string) []graph.EdgeIdentity
 		g.ReindexEdges(batch)
 		ids = ids[:0]
 	}
-	for n := range graph.RepoNodeIdentitiesSeq(g, []string{repo}, graph.KindFunction, graph.KindType, graph.KindInterface) {
+	for n := range graph.RepoNodeIdentitiesSeq(g, []string{repo}, graph.KindFunction, graph.KindType, graph.KindInterface, graph.KindFile) {
 		ids = append(ids, n.ID)
 		if len(ids) == 512 {
 			flush()

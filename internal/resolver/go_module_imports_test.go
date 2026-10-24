@@ -589,3 +589,33 @@ func TestGoModuleImportRestoreLookupBudget(t *testing.T) {
 		})
 	}
 }
+
+// Given import rows above the shared admission ceiling, the incoming leg
+// refuses before either parked-edge binding or legacy recovery changes rows.
+func TestGoModuleImportIncomingAdmissionRefused(t *testing.T) {
+	for _, recovery := range []bool{false, true} {
+		t.Run(fmt.Sprint(recovery), func(t *testing.T) {
+			source := &graph.Node{ID: "a/main.go", Name: "main.go", Kind: graph.KindFile, FilePath: "a/main.go", RepoPrefix: "a", Language: "go"}
+			provider := &graph.Node{ID: "b/lib.go", Name: "lib.go", Kind: graph.KindFile, FilePath: "b/lib.go", RepoPrefix: "b", Language: "go"}
+			edge := &graph.Edge{From: source.ID, To: "unresolved::import::example.org/lib", Kind: graph.EdgeImports, FilePath: source.FilePath, Meta: map[string]any{"go_import": "example.org/lib"}}
+			g := &goModuleAdmissionStore{Store: graph.New(), edge: edge}
+			g.AddBatch([]*graph.Node{source, provider}, []*graph.Edge{edge})
+			modules := map[string]string{"a": "example.org/app", "b": "example.org/lib"}
+			state := &GoModuleDepRetry{modules: modules, complete: true, revision: 1, packageModules: modules, packageRevision: 1, importsSeeded: true}
+			if recovery {
+				state.imports = map[string]map[string]struct{}{"b": {}}
+				for i := 0; i <= graph.MaxIncomingSourceCandidateRows; i++ {
+					state.imports["b"][fmt.Sprint(i)] = struct{}{}
+				}
+			}
+			cr := NewCrossRepo(g)
+			cr.SetGoModules(modules)
+			cr.SetGoModuleDepRetry(state, 1)
+			_, admission := cr.ResolveMutationFrontiersBounded(nil, nil, []string{provider.FilePath})
+			require.True(t, admission.Refused)
+			var limit *graph.BoundedLocalizationLimitError
+			require.ErrorAs(t, admission.Refusal, &limit)
+			assert.Equal(t, "unresolved::import::example.org/lib", g.GetOutEdges(source.ID)[0].To)
+		})
+	}
+}
