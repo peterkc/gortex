@@ -57,8 +57,9 @@ func (idx *Indexer) CurrentSourceSearchFiles(ctx context.Context, root string, a
 			return filepath.SkipDir
 		}
 		if entry.IsDir() {
-			// Only an anchored literal include can keep an excluded
-			// ancestor open. Git metadata and agent state remain closed.
+			// An excluded folder stays open only when an include reopens it
+			// or it is an ancestor of an anchored literal include.
+			// Git metadata and agent state remain closed.
 			if shouldPruneDir(path, root, matcher, ignores) {
 				return filepath.SkipDir
 			}
