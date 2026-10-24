@@ -268,6 +268,7 @@ type Indexer struct {
 	dirIgnore            *excludes.Hierarchical
 	dirIgnoreOnce        sync.Once
 	rootPath             string
+	warningRoot          string // Canonical owner for linked-checkout diagnostics.
 	// contentSrc is the optional immutable snapshot every content read
 	// goes through; nil reads the working tree with the os package. Held
 	// in an atomic pointer because reindex paths read it without a lock,
@@ -6563,26 +6564,64 @@ func (idx *Indexer) excludeMatcher() *excludes.Matcher {
 func (idx *Indexer) newExcludeMatcher(patterns []string) *excludes.Matcher {
 	m := excludes.NewWithIncludes(effectiveExcludePatterns(patterns), idx.config.Include)
 	idx.warnExcludedNegations(m)
-	if idx.logger != nil {
-		for _, p := range m.ParentLimitedIncludes() {
-			idx.warnParentLimitedReincludes(idx.logger, m, p)
-		}
-	}
+	idx.warnIncludes(m)
 	return m
 }
 
-var parentLimitedReincludeWarnings sync.Map
+const maxReincludeWarnings = 1024
 
-func (idx *Indexer) firstReincludeWarning(pattern string) bool {
-	repo := idx.rootPath
+type reincludeWarningKey struct {
+	repo, dir, kind, pattern string
+}
+
+// Bound daemon-lifetime deduplication across reloads and indexer rebuilds.
+// Once evicted, an old diagnostic may be logged again.
+type reincludeWarningCache struct {
+	mu    sync.Mutex
+	seen  map[reincludeWarningKey]struct{}
+	order []reincludeWarningKey
+	next  int
+}
+
+func (c *reincludeWarningCache) first(key reincludeWarningKey) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, exists := c.seen[key]; exists {
+		return false
+	}
+	if c.seen == nil {
+		c.seen = make(map[reincludeWarningKey]struct{})
+	}
+	if len(c.order) < maxReincludeWarnings {
+		c.order = append(c.order, key)
+	} else {
+		delete(c.seen, c.order[c.next])
+		c.order[c.next] = key
+		c.next = (c.next + 1) % maxReincludeWarnings
+	}
+	c.seen[key] = struct{}{}
+	return true
+}
+
+var parentLimitedReincludeWarnings reincludeWarningCache
+
+func (idx *Indexer) firstReincludeWarning(dir, kind, pattern string) bool {
+	repo := idx.warningRoot
+	if repo == "" {
+		repo = idx.rootPath
+	}
 	if repo == "" {
 		repo = idx.repoPrefix
 	}
-	_, loaded := parentLimitedReincludeWarnings.LoadOrStore([2]string{repo, pattern}, struct{}{})
-	return !loaded
+	if filepath.IsAbs(dir) {
+		if rel, err := filepath.Rel(idx.rootPath, dir); err == nil {
+			dir = filepath.ToSlash(rel)
+		}
+	}
+	return parentLimitedReincludeWarnings.first(reincludeWarningKey{repo, dir, kind, pattern})
 }
 
-func (idx *Indexer) warnParentLimitedReincludes(logger *zap.Logger, m *excludes.Matcher, pattern string) {
+func (idx *Indexer) warnParentLimitedReincludes(logger *zap.Logger, m *excludes.Matcher, dir, pattern string) {
 	body := strings.TrimSuffix(strings.TrimPrefix(pattern, "!"), "/")
 	// An inner slash anchors a negation just like a leading slash.
 	if strings.Contains(body, "/") {
@@ -6608,7 +6647,7 @@ func (idx *Indexer) warnParentLimitedReincludes(logger *zap.Logger, m *excludes.
 	if repo == "" {
 		repo = idx.repoPrefix
 	}
-	if !idx.firstReincludeWarning(pattern) {
+	if !idx.firstReincludeWarning(dir, "negation", pattern) {
 		return
 	}
 	logger.Warn("indexer: negations no longer reach inside excluded folders; wildcard and unanchored includes also need open parents; use an anchored literal include to keep its ancestors open",
@@ -6640,7 +6679,7 @@ func (idx *Indexer) warnExcludedNegationsAt(m *excludes.Matcher, dir string) {
 		}
 		seen[p] = true
 		if inGitDir(strings.Trim(p[1:], "/")) {
-			if !idx.firstReincludeWarning(p) {
+			if !idx.firstReincludeWarning(dir, "negation", p) {
 				continue
 			}
 			logger.Warn("indexer: ignoring a re-include under .git; Git's own data is never indexed",
@@ -6655,7 +6694,7 @@ func (idx *Indexer) warnExcludedNegationsAt(m *excludes.Matcher, dir string) {
 			}
 		}
 		if excludes.InAgentConfigDir(body) && !excludes.IsAgentConfigMCPDir(body) && !excludes.IsAgentConfigMCPFile(body) {
-			if !idx.firstReincludeWarning(p) {
+			if !idx.firstReincludeWarning(dir, "negation", p) {
 				continue
 			}
 			logger.Warn("indexer: ignoring a re-include under an agent-config folder; non-MCP agent state is never indexed",
@@ -6663,7 +6702,7 @@ func (idx *Indexer) warnExcludedNegationsAt(m *excludes.Matcher, dir string) {
 			continue
 		}
 		if parent, rule := m.ExcludedNegationParent(p); parent != "" {
-			if !idx.firstReincludeWarning(p) {
+			if !idx.firstReincludeWarning(dir, "negation", p) {
 				continue
 			}
 			logger.Warn("indexer: re-include is blocked by an excluded parent; reopen each parent folder (for example: !/agent/, /agent/*, !/agent/skills/)",
@@ -6679,7 +6718,7 @@ func (idx *Indexer) warnExcludedNegationsAt(m *excludes.Matcher, dir string) {
 		}
 		basename := !strings.Contains(body, "/") && !strings.HasSuffix(p, "/")
 		if hasExclusion && (basename || strings.Contains(body, "/") || strings.ContainsAny(body, `*?[\`)) {
-			idx.warnParentLimitedReincludes(logger, m, p)
+			idx.warnParentLimitedReincludes(logger, m, dir, p)
 		}
 	}
 }

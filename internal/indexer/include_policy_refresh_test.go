@@ -83,7 +83,7 @@ func TestSourceSearchIncludeCompilationHoldsLock(t *testing.T) {
 			idx.SetIgnorePatterns([]string{"vendor/"}, []string{"*.go"})
 			idx.excludeMatcher()
 			warnings := 0
-			// A real warning runs during compilation, before any filesystem walk.
+			// A real policy notice runs during compilation, before any filesystem walk.
 			core := zap.NewExample().Core()
 			idx.logger = zap.New(core, zap.Hooks(func(e zapcore.Entry) error {
 				warnings++

@@ -292,10 +292,10 @@ func TestExcludeMatcher_WarnsBroadNegationsOnce(t *testing.T) {
 			}
 		}
 	}
-	require.Equal(t, 2*len(patterns), logs.Len(), "one warning per repo and pattern, including across indexer rebuilds")
+	require.Equal(t, 4*len(patterns), logs.Len(), "one warning per repo, ignore directory and pattern, including across indexer rebuilds")
 	for i, entry := range logs.All() {
-		require.Equal(t, repos[i/len(patterns)], entry.ContextMap()["repo"])
-		require.Equal(t, patterns[i%len(patterns)], entry.ContextMap()["pattern"])
+		require.Equal(t, repos[i/(2*len(patterns))], entry.ContextMap()["repo"])
+		require.Equal(t, patterns[(i/2)%len(patterns)], entry.ContextMap()["pattern"])
 		require.Contains(t, entry.Message, "negations no longer reach inside excluded folders")
 		require.Contains(t, entry.Message, "unanchored")
 	}
@@ -345,16 +345,18 @@ func TestExcludeMatcher_WarnsUnanchoredIncludes(t *testing.T) {
 		require.NoError(t, err, "%s", output)
 		return
 	}
-	core, logs := observer.New(zap.WarnLevel)
-	idx := &Indexer{config: config.IndexConfig{Include: []string{"vendor/acme/"}}, logger: zap.New(core)}
+	core, logs := observer.New(zap.InfoLevel)
+	idx := &Indexer{rootPath: t.TempDir(), config: config.IndexConfig{Include: []string{"vendor/acme/"}}, logger: zap.New(core)}
 	idx.excludeMatcher()
-	require.Zero(t, logs.Len())
+	require.Equal(t, 1, logs.Len(), "inner-slash anchoring gets one notice")
 	idx.SetIgnorePatterns(nil, []string{"Pods/"})
+	require.Equal(t, 1, logs.Len(), "a basename literal with no proven blocked parent stays quiet")
 	idx.SetIgnorePatterns(nil, []string{"*.proto"})
 	require.Equal(t, 2, logs.Len())
-	require.Equal(t, "Pods/", logs.All()[0].ContextMap()["pattern"])
+	require.Zero(t, logs.FilterLevelExact(zap.WarnLevel).Len())
+	require.Equal(t, "vendor/acme/", logs.All()[0].ContextMap()["pattern"])
 	require.Equal(t, "*.proto", logs.All()[1].ContextMap()["pattern"])
-	require.Contains(t, logs.All()[0].Message, "unanchored includes")
+	require.Contains(t, logs.All()[1].Message, "cannot reach through excluded ancestors")
 }
 
 func TestExcludeMatcher_SkipsOpenParentWarnings(t *testing.T) {

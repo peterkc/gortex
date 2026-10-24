@@ -2502,6 +2502,11 @@ func (l *CheckoutLifecycle) watchCheckout(coordinator *CheckoutCoordinator, repo
 		cfg := l.cfgMgr.GetRepoConfig(repoPrefix).Index
 		cfg.Exclude = l.cfgMgr.EffectiveExcludeForRoot(repoPrefix, root)
 		policy := &Indexer{rootPath: root, repoPrefix: repoPrefix, config: cfg, logger: logger}
+		if l.mi != nil {
+			if owner := l.mi.GetIndexer(repoPrefix); owner != nil {
+				policy.warningRoot = owner.rootPath
+			}
+		}
 		matcher = policy.newExcludeMatcher(cfg.Exclude)
 	}
 	go func() {
