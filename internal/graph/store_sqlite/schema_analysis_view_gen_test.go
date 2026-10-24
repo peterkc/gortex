@@ -311,7 +311,7 @@ func TestPruneAnalysisGenerationsRetainsPerViewGeneration(t *testing.T) {
 		buildMinimalAnalysisGeneration(t, busy, fmt.Sprintf("busy-%d", i), 1, true)
 	}
 
-	if err := store.PruneAnalysisGenerations(context.Background(), 2, 100); err != nil {
+	if _, err := store.PruneAnalysisGenerations(context.Background(), 2, 100); err != nil {
 		t.Fatalf("PruneAnalysisGenerations: %v", err)
 	}
 
@@ -1212,7 +1212,7 @@ func TestPruneAnalysisGenerationsBoundsRetainedHistoryAcrossViews(t *testing.T) 
 		t.Fatalf("seeded %d analyses, want %d", got, views*perView)
 	}
 
-	if err := store.PruneAnalysisGenerations(context.Background(), keep, 100); err != nil {
+	if _, err := store.PruneAnalysisGenerations(context.Background(), keep, 100); err != nil {
 		t.Fatalf("PruneAnalysisGenerations: %v", err)
 	}
 

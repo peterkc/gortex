@@ -241,6 +241,7 @@ type Server struct {
 	analysisGeneration      graph.AnalysisGenerationHeader
 	analysisGenerationReady bool
 	analysisPruneScheduled  atomic.Bool
+	analysisPruneRequested  atomic.Bool
 	// backgroundMaintenance joins the detached analysis-generation prune
 	// goroutine. Anyone closing the backend store must DrainBackground
 	// first: an in-flight prune batch survives sql.DB.Close on its pinned
@@ -251,6 +252,7 @@ type Server struct {
 	backgroundMaintenance        sync.WaitGroup
 	backgroundMaintenanceMu      sync.Mutex
 	backgroundMaintenanceDrained bool
+	analysisPruneCancel          context.CancelFunc // guarded by backgroundMaintenanceMu
 	analysisMaterializeMu        sync.Mutex
 	analysisMu                   sync.RWMutex
 	// answerAnalysis is the analysis receipt the answer path last observed
