@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"strings"
 
 	"go.uber.org/zap"
 
@@ -10,9 +11,9 @@ import (
 	"github.com/zzet/gortex/internal/pathkey"
 )
 
-// ResolveConfiguredRepos selects one root per prefix before parallel warmup.
-// Live ownership wins; catalog ownership wins only for a configured root
-// under that prefix. Otherwise config order decides.
+// ResolveConfiguredRepos selects one configured root per prefix for startup
+// and lifecycle discovery. Live ownership wins. A published catalog owner
+// wins only while configured under that prefix; otherwise config order decides.
 // Returned entries pin the resolved name without changing the config list.
 func (mi *MultiIndexer) ResolveConfiguredRepos(ctx context.Context, entries []config.RepoEntry) []config.RepoEntry {
 	owners := make(map[string]string)
@@ -62,6 +63,13 @@ func (mi *MultiIndexer) ResolveConfiguredRepos(ctx context.Context, entries []co
 				if err != nil {
 					mi.logger.Warn("reading configured repository owner; using config order", zap.Error(err))
 				} else if found {
+					_, published, err := catalog.DedicatedBasePublication(ctx, binding.GraphID)
+					if err != nil {
+						mi.logger.Warn("reading configured repository publication; using config order", zap.Error(err))
+					}
+					if err != nil || !published {
+						break
+					}
 					checkout, found, err := catalog.GetCheckout(ctx, binding.OwnerCheckoutID)
 					if err != nil {
 						mi.logger.Warn("reading configured repository owner; using config order", zap.Error(err))
@@ -84,7 +92,7 @@ func (mi *MultiIndexer) ResolveConfiguredRepos(ctx context.Context, entries []co
 			break
 		}
 		if held && !pathkey.SamePathIdentity(pathkey.CanonicalPath(owner), abs) && !sameDirectory(owner, abs) {
-			mi.logCollision(&PrefixCollisionError{Prefix: prefix, ExistingPath: owner, Path: abs})
+			mi.logCollision(NewPrefixCollisionError(prefix, owner, abs))
 			continue
 		}
 		if seen[prefix] {
@@ -95,4 +103,32 @@ func (mi *MultiIndexer) ResolveConfiguredRepos(ctx context.Context, entries []co
 		out = append(out, entry)
 	}
 	return out
+}
+
+// configuredPrefixCollision protects configured owners that warmup has not
+// loaded yet. Filter by base name before resolving workspaces: the ordinary
+// one-root case needs no workspace reads or catalog ownership pass.
+func (mi *MultiIndexer) configuredPrefixCollision(prefix, root string) error {
+	if mi.configMgr == nil {
+		return nil
+	}
+	var candidates []config.RepoEntry
+	for _, entry := range mi.configMgr.Global().ReposSnapshot() {
+		base := config.ResolvePrefix(entry)
+		if prefix == base || entry.Name == "" && strings.HasPrefix(prefix, base+"@") {
+			candidates = append(candidates, entry)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	if len(candidates) == 1 && (pathkey.SamePathIdentity(candidates[0].Path, root) || sameDirectory(candidates[0].Path, root)) {
+		return nil
+	}
+	for _, entry := range mi.ResolveConfiguredRepos(context.Background(), candidates) {
+		if entry.Name == prefix && !pathkey.SamePathIdentity(entry.Path, root) && !sameDirectory(entry.Path, root) {
+			return NewPrefixCollisionError(prefix, entry.Path, root)
+		}
+	}
+	return nil
 }

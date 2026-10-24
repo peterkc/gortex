@@ -1123,7 +1123,14 @@ func (l *CheckoutLifecycle) bindDedicatedGraph(
 	}
 
 	graphID := GraphIDFor(prefix)
-
+	existing, found, err := l.catalog.GetDedicatedGraph(ctx, graphID)
+	if err != nil {
+		return "", err
+	}
+	if found && (existing.OwnerCheckoutID != checkoutID || existing.FamilyID != familyID) {
+		return "", fmt.Errorf("%w: dedicated graph %s already belongs to checkout %s in family %s",
+			store_sqlite.ErrCatalogStaleGuard, graphID, existing.OwnerCheckoutID, existing.FamilyID)
+	}
 	graphs, err := l.catalog.ListDedicatedGraphs(ctx, familyID)
 	if err != nil {
 		return "", err
@@ -3950,6 +3957,45 @@ func (l *CheckoutLifecycle) walkDedicatedChain(
 
 // --- startup ------------------------------------------------------------
 
+// repairLegacyConfiguredBinding corrects main's pre-publication Seed upserts.
+// Config order is authoritative only when both roots remain configured and no
+// live owner or base publication protects the row. Delete metadata only; the
+// selected root reuses its stored corpus and binds normally below.
+func (l *CheckoutLifecycle) repairLegacyConfiguredBinding(ctx context.Context, entry config.RepoEntry) error {
+	if l.catalog == nil || l.mi.GetMetadata(entry.Name) != nil {
+		return nil
+	}
+	binding, found, err := l.catalog.GetDedicatedGraph(ctx, GraphIDFor(entry.Name))
+	if err != nil || !found {
+		return err
+	}
+	owner, found, err := l.catalog.GetCheckout(ctx, binding.OwnerCheckoutID)
+	if err != nil || !found {
+		return err
+	}
+	root := pathkey.CanonicalPath(entry.Path)
+	if pathkey.SamePathIdentity(owner.RootPath, root) || sameDirectory(owner.RootPath, root) {
+		return nil
+	}
+	_, published, err := l.catalog.DedicatedBasePublication(ctx, binding.GraphID)
+	if err != nil || published {
+		return err
+	}
+	for _, configured := range l.cfgMgr.Global().ReposSnapshot() {
+		if EffectiveRepoPrefix(l.cfgMgr, configured) != entry.Name ||
+			!pathkey.SamePathIdentity(pathkey.CanonicalPath(configured.Path), owner.RootPath) {
+			continue
+		}
+		if err := l.catalog.DeleteUnpublishedDedicatedGraph(ctx, binding); err != nil {
+			return err
+		}
+		l.logger.Warn("repaired unpublished configured repository owner",
+			zap.String("prefix", entry.Name), zap.String("old_root", owner.RootPath), zap.String("new_root", root))
+		return nil
+	}
+	return nil
+}
+
 // Seed brings the catalog in line with what the daemon already tracks.
 //
 // It is the migration path for an installation that predates the catalog and
@@ -4079,6 +4125,12 @@ func (l *CheckoutLifecycle) Seed(ctx context.Context) error {
 			}
 			if l.RepositoryAdmissionClosed(prefix) {
 				continue // Durable cleanup owns this stale configuration entry.
+			}
+			if err := l.repairLegacyConfiguredBinding(ctx, entry); err != nil {
+				seedErr := fmt.Errorf("repair configured owner %s: %w", abs, err)
+				errs = append(errs, seedErr)
+				recordErrs = append(recordErrs, seedErr)
+				continue
 			}
 			started = stageStarted("record_checkout", zap.String("prefix", prefix))
 			identity, err := l.recordCheckout(ctx, prefix, abs, TrackSourceConfig, true)

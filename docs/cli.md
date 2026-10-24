@@ -100,8 +100,10 @@ only the entry the CLI just added. Other daemon failures can leave a config-only
 entry for a later restart.
 
 Older configs can already contain collisions. At startup, Gortex keeps the
-existing corpus or catalog owner; without an owner, config order decides. It
-warns and skips the other entry without replacing the owner's config or corpus.
+live owner, or a configured catalog owner guarded by a base publication.
+Otherwise config order decides. A legacy catalog row that points at the other
+configured root is repaired without deleting corpus or generation payloads.
+Gortex warns and skips the other entry without replacing the owner's config or corpus.
 Give the skipped entry a unique `name` in the global config. Do not untrack the
 live owner just to resolve a duplicate name. If the owner's path no longer
 exists, inspect the untrack preview before confirming removal of its corpus.

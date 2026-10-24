@@ -84,3 +84,21 @@ func (c *Catalog) upsertDedicatedGraphIdentity(ctx context.Context, dedicated De
 	}
 	return err
 }
+
+// DeleteUnpublishedDedicatedGraph removes only a legacy identity row whose
+// exact binding still matches and has never acquired publication authority.
+// Corpus and generation payloads are not touched.
+func (c *Catalog) DeleteUnpublishedDedicatedGraph(ctx context.Context, expected DedicatedGraph) error {
+	err := c.withTx(ctx, func(tx *sql.Tx) error {
+		return execGuardedTx(ctx, tx, "unpublished dedicated graph", `DELETE FROM dedicated_graphs
+			WHERE graph_id=? AND COALESCE(owner_checkout_id,'')=? AND repo_prefix=? AND family_id=?
+			AND is_primary_base=? AND COALESCE(active_generation_id,0)=? AND state=?
+			AND NOT EXISTS (SELECT 1 FROM dedicated_base_publications WHERE graph_id=?)`,
+			expected.GraphID, expected.OwnerCheckoutID, expected.RepoPrefix, expected.FamilyID,
+			catalogBoolInt(expected.IsPrimaryBase), expected.ActiveGenerationID, expected.State, expected.GraphID)
+	})
+	if err == nil {
+		noteGenerationReferenceReleased(expected.ActiveGenerationID)
+	}
+	return err
+}

@@ -1,18 +1,17 @@
 package indexer
 
 import (
-	"context"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/config"
-	"github.com/zzet/gortex/internal/graphview"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/pathkey"
 )
 
-func TestConfiguredStaleCatalogOwner(t *testing.T) {
+func TestConfiguredStaleCatalogOwnerRefusesRebind(t *testing.T) {
 	for _, scenario := range []string{"offline-untrack", "implicit-auto-index", "rename-owner", "online-track"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newLifecycleFixture(t)
@@ -31,9 +30,6 @@ func TestConfiguredStaleCatalogOwner(t *testing.T) {
 			oldGraph, found, err := f.catalog.GetDedicatedGraph(t.Context(), GraphIDFor("src"))
 			require.NoError(t, err)
 			require.True(t, found)
-			_, published, err := f.catalog.DedicatedBasePublication(t.Context(), oldGraph.GraphID)
-			require.NoError(t, err)
-			t.Logf("old publication authority=%v", published)
 			f.cm.Global().Repos = []config.RepoEntry{entry}
 			if scenario == "rename-owner" {
 				f.cm.Global().Repos = []config.RepoEntry{{Path: old, Name: "src-old"}, entry}
@@ -43,34 +39,22 @@ func TestConfiguredStaleCatalogOwner(t *testing.T) {
 			if scenario == "online-track" {
 				result, err := f.lc.Register(t.Context(), entry, TrackSourceCLI)
 				require.NoError(t, err)
-				t.Logf("online catalog error=%v", result.CatalogErr)
-				require.NoError(t, result.CatalogErr)
+				require.ErrorIs(t, result.CatalogErr, store_sqlite.ErrCatalogStaleGuard)
 				f.restart()
 			}
 			entries := f.cm.Global().ReposSnapshot()
-			selected := entries
-			// Main dispatches config directly. The branch adds serial ownership selection.
-			if selector, ok := any(f.mi).(interface {
-				ResolveConfiguredRepos(context.Context, []config.RepoEntry) []config.RepoEntry
-			}); ok {
-				selected = selector.ResolveConfiguredRepos(t.Context(), entries)
-			}
-			require.Equal(t, entries, selected, "a stale owner must not hide configured roots")
+			selected := f.mi.ResolveConfiguredRepos(t.Context(), entries)
+			require.Equal(t, entries, selected, "stale catalog rows must not hide configured roots")
 			err = f.lc.Seed(t.Context())
-			t.Logf("seed error=%v", err)
-			if scenario == "rename-owner" {
-				require.ErrorIs(t, err, graphview.ErrRepositoryAdmissionClosed)
-			} else {
-				require.NoError(t, err)
-			}
+			require.ErrorIs(t, err, store_sqlite.ErrCatalogStaleGuard, "an unconfigured old owner needs explicit cleanup")
 			after, found, err := f.catalog.GetDedicatedGraph(t.Context(), oldGraph.GraphID)
 			require.NoError(t, err)
 			require.True(t, found)
 			checkout, found, err := f.catalog.GetCheckout(t.Context(), after.OwnerCheckoutID)
 			require.NoError(t, err)
 			require.True(t, found)
-			t.Logf("binding moved to replacement=%v", pathkey.SamePathIdentity(checkout.RootPath, pathkey.CanonicalPath(replacement)))
-			assert.True(t, pathkey.EqualPaths(pathkey.CanonicalPath(replacement), checkout.RootPath), "checkout root %q", checkout.RootPath)
+			assert.Equal(t, oldGraph, after, "runtime binding must not move a stale owner's row")
+			assert.True(t, pathkey.EqualPaths(pathkey.CanonicalPath(old), checkout.RootPath), "checkout root %q", checkout.RootPath)
 		})
 	}
 }
@@ -92,7 +76,7 @@ func TestSeedLegacyPrefixCollisionKeepsConfiguredOwner(t *testing.T) {
 	_, published, err := f.catalog.DedicatedBasePublication(t.Context(), binding.GraphID)
 	require.NoError(t, err)
 	require.False(t, published)
-	f.cm.Global().Repos = []config.RepoEntry{{Path: loser, Name: "src"}, {Path: owner, Name: "src"}}
+	f.cm.Global().Repos = []config.RepoEntry{{Path: owner, Name: "src"}, {Path: loser, Name: "src"}}
 	require.NoError(t, f.cm.Global().Save())
 	f.restart()
 	require.NoError(t, f.lc.Seed(t.Context()))

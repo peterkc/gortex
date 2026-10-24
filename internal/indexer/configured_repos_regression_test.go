@@ -14,6 +14,7 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/pathkey"
 	"github.com/zzet/gortex/internal/resolver"
 	"github.com/zzet/gortex/internal/search"
@@ -50,6 +51,7 @@ func TestConfiguredOwnerKeepsEntryOverrides(t *testing.T) {
 	ownerEntry := config.RepoEntry{Path: owner, Name: "src", Workspace: "owner-ws", Project: "owner-project", Exclude: []string{"owner-excluded.go"}}
 	_, err := f.lc.Register(t.Context(), ownerEntry, TrackSourceCLI)
 	require.NoError(t, err)
+	guardConfiguredOwner(t, f, "src")
 	f.cm.Global().Repos = []config.RepoEntry{
 		{Path: loser, Name: "src", Workspace: "loser-ws", Project: "loser-project", Exclude: []string{"loser-excluded.go"}},
 		ownerEntry,
@@ -85,6 +87,7 @@ func TestConfiguredOwnerCatalogReadErrorFallsBack(t *testing.T) {
 			entry := config.RepoEntry{Path: root, Name: "src"}
 			_, err := f.lc.Register(t.Context(), entry, TrackSourceCLI)
 			require.NoError(t, err)
+			guardConfiguredOwner(t, f, "src")
 			f.restart()
 			// Remove only the table read by this branch. The isolated fixture
 			// keeps the real catalog and produces an actual SQLite read error.
@@ -182,4 +185,174 @@ func TestConfiguredCollisionWarnsOnceAndLiveRulesDoNotResolveOwners(t *testing.T
 	logs.TakeAll()
 	mi.collectCrossWorkspaceRules()
 	require.Empty(t, logs.All(), "live rule collection must not select or warn about configured owners")
+}
+
+func TestConfiguredOwnerRejectsTrackBeforeWarmup(t *testing.T) {
+	for _, surface := range []string{"track", "register", "coordinated-recheck"} {
+		t.Run(surface, func(t *testing.T) {
+			f := newLifecycleFixture(t)
+			t.Cleanup(f.close)
+			owner, other := f.gitRepo("owner"), f.gitRepo("other")
+			writeFile(t, filepath.Join(owner, "owner.go"), "package owner\nfunc Kept() {}\n")
+			writeFile(t, filepath.Join(other, "other.go"), "package other\nfunc Rejected() {}\n")
+			result, err := f.lc.Register(t.Context(), config.RepoEntry{Path: owner, Name: "src"}, TrackSourceCLI)
+			require.NoError(t, err)
+			require.NoError(t, result.CatalogErr)
+			f.restart()
+			entry := config.RepoEntry{Path: other, Name: "src"}
+			var collision *PrefixCollisionError
+			switch surface {
+			case "track":
+				_, err = f.mi.TrackRepoCtx(t.Context(), entry)
+			case "register":
+				_, err = f.lc.Register(t.Context(), entry, TrackSourceCLI)
+			case "coordinated-recheck":
+				f.cm.Global().Repos = nil
+				prepared, prepErr := f.mi.prepareTrackRepo(entry)
+				require.NoError(t, prepErr)
+				require.NotNil(t, prepared)
+				f.cm.Global().Repos = []config.RepoEntry{{Path: owner, Name: "src"}}
+				_, err = f.mi.trackPreparedRepoSourceCtx(t.Context(), prepared, nil)
+			}
+			require.ErrorAs(t, err, &collision)
+			assert.True(t, pathkey.SamePathIdentity(pathkey.CanonicalPath(collision.ExistingPath), pathkey.CanonicalPath(owner)))
+			assert.NotEmpty(t, f.store.GetFileNodes("src/owner.go"))
+			assert.Empty(t, f.store.GetFileNodes("src/other.go"))
+		})
+	}
+}
+
+func TestConfiguredLegacyWrongBindingUpgrade(t *testing.T) {
+	for _, guard := range []string{"unpublished", "published", "live"} {
+		t.Run(guard, func(t *testing.T) {
+			f := newLifecycleFixture(t)
+			t.Cleanup(f.close)
+			owner, other := f.gitRepo("owner"), f.gitRepo("other")
+			writeFile(t, filepath.Join(owner, "owner.go"), "package owner\nfunc Kept() {}\n")
+			registered, err := f.lc.Register(t.Context(), config.RepoEntry{Path: owner, Name: "src"}, TrackSourceCLI)
+			require.NoError(t, err)
+			require.NoError(t, registered.CatalogErr)
+			// Simulate main's last Seed: its metadata points at the last config
+			// entry while the stored corpus still belongs to the first one.
+			_, err = f.lc.recordCheckout(t.Context(), "other", other, TrackSourceConfig, true)
+			require.NoError(t, err)
+			otherBinding, found, err := f.catalog.GetDedicatedGraph(t.Context(), GraphIDFor("other"))
+			require.NoError(t, err)
+			require.True(t, found)
+			binding, found, err := f.catalog.GetDedicatedGraph(t.Context(), GraphIDFor("src"))
+			require.NoError(t, err)
+			require.True(t, found)
+			require.NoError(t, f.catalog.DeleteDedicatedGraph(t.Context(), binding.GraphID))
+			require.NoError(t, f.catalog.DeleteDedicatedGraph(t.Context(), otherBinding.GraphID))
+			binding.OwnerCheckoutID, binding.FamilyID = otherBinding.OwnerCheckoutID, otherBinding.FamilyID
+			binding.ActiveGenerationID = 0
+			require.NoError(t, f.catalog.UpsertDedicatedGraph(t.Context(), binding))
+			f.cm.Global().Repos = []config.RepoEntry{{Path: owner, Name: "src"}, {Path: other, Name: "src"}}
+			require.NoError(t, f.cm.Global().Save())
+			if guard == "published" {
+				checkout, found, err := f.catalog.GetCheckout(t.Context(), binding.OwnerCheckoutID)
+				require.NoError(t, err)
+				require.True(t, found)
+				_, err = f.catalog.AcquireDedicatedBaseAuthority(t.Context(), store_sqlite.AcquireDedicatedBaseAuthorityRequest{
+					GraphID: binding.GraphID, Owner: store_sqlite.DedicatedBaseOwner{CheckoutID: checkout.CheckoutID, Incarnation: checkout.Incarnation}, Token: "guarded",
+				})
+				require.NoError(t, err)
+			}
+			f.restart()
+			if guard == "live" {
+				f.mi.repos["src"] = &RepoMetadata{RepoPrefix: "src", RootPath: other}
+			}
+			core, logs := observer.New(zap.WarnLevel)
+			f.lc.logger = zap.New(core)
+			selected := f.mi.ResolveConfiguredRepos(t.Context(), f.cm.Global().ReposSnapshot())
+			require.Len(t, selected, 1)
+			want := owner
+			if guard != "unpublished" {
+				want = other
+			}
+			require.True(t, pathkey.SamePathIdentity(want, selected[0].Path))
+			require.NoError(t, f.lc.Seed(t.Context()))
+			after, found, err := f.catalog.GetDedicatedGraph(t.Context(), binding.GraphID)
+			require.NoError(t, err)
+			require.True(t, found)
+			checkout, found, err := f.catalog.GetCheckout(t.Context(), after.OwnerCheckoutID)
+			require.NoError(t, err)
+			require.True(t, found)
+			assert.True(t, pathkey.SamePathIdentity(pathkey.CanonicalPath(want), checkout.RootPath))
+			assert.NotEmpty(t, f.store.GetFileNodes("src/owner.go"), "metadata repair must never purge corpus")
+			warnings := logs.FilterMessage("repaired unpublished configured repository owner").All()
+			if guard == "unpublished" {
+				require.Len(t, warnings, 1)
+				assert.Equal(t, "src", warnings[0].ContextMap()["prefix"])
+				assert.True(t, pathkey.SamePathIdentity(pathkey.CanonicalPath(other), warnings[0].ContextMap()["old_root"].(string)))
+				assert.True(t, pathkey.SamePathIdentity(pathkey.CanonicalPath(owner), warnings[0].ContextMap()["new_root"].(string)))
+			} else {
+				assert.Empty(t, warnings)
+			}
+		})
+	}
+}
+
+func TestDedicatedGraphBindingRejectsDifferentOwner(t *testing.T) {
+	f := newLifecycleFixture(t)
+	t.Cleanup(f.close)
+	owner, other := f.gitRepo("owner"), f.gitRepo("other")
+	for i, root := range []string{owner, other} {
+		name := []string{"src", "other"}[i]
+		_, err := f.lc.recordCheckout(t.Context(), name, root, TrackSourceConfig, true)
+		require.NoError(t, err)
+	}
+	first, found, err := f.catalog.GetDedicatedGraph(t.Context(), GraphIDFor("src"))
+	require.NoError(t, err)
+	require.True(t, found)
+	second, found, err := f.catalog.GetDedicatedGraph(t.Context(), GraphIDFor("other"))
+	require.NoError(t, err)
+	require.True(t, found)
+	require.NoError(t, f.catalog.DeleteDedicatedGraph(t.Context(), second.GraphID))
+	_, err = f.lc.bindDedicatedGraph(t.Context(), second.FamilyID, second.OwnerCheckoutID, "src")
+	assert.ErrorIs(t, err, store_sqlite.ErrCatalogStaleGuard)
+	after, found, err := f.catalog.GetDedicatedGraph(t.Context(), first.GraphID)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, first, after)
+}
+
+func guardConfiguredOwner(t *testing.T, f *lifecycleFixture, prefix string) {
+	t.Helper()
+	binding, found, err := f.catalog.GetDedicatedGraph(t.Context(), GraphIDFor(prefix))
+	require.NoError(t, err)
+	require.True(t, found)
+	owner, found, err := f.catalog.GetCheckout(t.Context(), binding.OwnerCheckoutID)
+	require.NoError(t, err)
+	require.True(t, found)
+	_, err = f.catalog.AcquireDedicatedBaseAuthority(t.Context(), store_sqlite.AcquireDedicatedBaseAuthorityRequest{
+		GraphID: binding.GraphID, Owner: store_sqlite.DedicatedBaseOwner{CheckoutID: owner.CheckoutID, Incarnation: owner.Incarnation}, Token: "configured-owner",
+	})
+	require.NoError(t, err)
+}
+
+func TestKnownFamiliesSweepKeepsUnloadedCollisionInstances(t *testing.T) {
+	f := newLifecycleFixture(t)
+	t.Cleanup(f.close)
+	var entries []config.RepoEntry
+	for _, family := range []string{"one", "two"} {
+		main := f.gitRepo(family)
+		linked := filepath.Join(t.TempDir(), "src")
+		runGit(t, main, "worktree", "add", "-q", "-b", "task", linked)
+		writeFile(t, filepath.Join(linked, ".gortex.yaml"), "workspace: team\n")
+		linked = pathkey.CanonicalExistingRoot(linked)
+		result, err := f.lc.Register(t.Context(), config.RepoEntry{Path: linked}, TrackSourceCLI)
+		require.NoError(t, err)
+		require.NoError(t, result.CatalogErr)
+		entries = append(entries, config.RepoEntry{Path: linked})
+	}
+	// Legacy config has no pinned instance names. Both entries declare
+	// src@team, while the catalog retains the second instance's hash suffix.
+	f.cm.Global().Repos = entries
+	require.NoError(t, f.cm.Global().Save())
+	f.restart()
+	require.Empty(t, f.mi.AllMetadata(), "neither owner has been loaded yet")
+	report, err := f.lc.Sweep(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, 2, report.Families, "both dedicated families need their janitor pass")
 }

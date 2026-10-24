@@ -2547,7 +2547,7 @@ func (mi *MultiIndexer) indexRepoRaw(repoPrefix string) (*IndexResult, error) {
 	// split: a repo is prefixed from its first index, and adding another is
 	// purely additive.
 	idx.SetRepoPrefix(repoPrefix)
-	entry := mi.configMgr.Global().FindRepoByPath(meta.RootPath)
+	entry := mi.configMgr.RepoPathLookup()(meta.RootPath)
 	idx.SetWorkspaceID(resolveWorkspaceID(entry, cfg, repoPrefix))
 	idx.SetProjectID(resolveProjectID(entry, cfg, repoPrefix))
 
@@ -2868,10 +2868,17 @@ type PrefixCollisionError struct {
 	Prefix       string
 	ExistingPath string
 	Path         string
+	OwnerMissing bool
+}
+
+// NewPrefixCollisionError samples owner availability once, outside formatting.
+func NewPrefixCollisionError(prefix, owner, root string) *PrefixCollisionError {
+	_, err := os.Stat(owner)
+	return &PrefixCollisionError{Prefix: prefix, ExistingPath: owner, Path: root, OwnerMissing: os.IsNotExist(err)}
 }
 
 func (e *PrefixCollisionError) Error() string {
-	if _, err := os.Stat(e.ExistingPath); os.IsNotExist(err) {
+	if e.OwnerMissing {
 		return fmt.Sprintf("repository prefix %q is already used by %s, which no longer exists; inspect `gortex untrack %s` before tracking %s again",
 			e.Prefix, e.ExistingPath, e.ExistingPath, e.Path)
 	}
@@ -2891,7 +2898,7 @@ func (mi *MultiIndexer) trackedLocked(prefix, path string) (bool, error) {
 	}
 	existing, ok := mi.repos[prefix]
 	if ok && existing != nil && !sameDirectory(existing.RootPath, path) {
-		return true, &PrefixCollisionError{Prefix: prefix, ExistingPath: existing.RootPath, Path: path}
+		return true, NewPrefixCollisionError(prefix, existing.RootPath, path)
 	}
 	return ok, nil
 }
@@ -2967,6 +2974,10 @@ func (mi *MultiIndexer) resolveTrackPrefix(entry *config.RepoEntry, absPath stri
 		}
 	}
 
+	// Configured owners can be absent from the live registry during warmup.
+	if mi.configuredPrefixCollision(prefix, absPath) != nil {
+		return prefix, mi.configMgr.GetRepoConfig(prefix)
+	}
 	// Re-check ownership before publishing the prepared snapshot.
 	mi.mu.Lock()
 	tracked, collision := mi.trackedLocked(prefix, absPath)
@@ -3107,6 +3118,9 @@ func (mi *MultiIndexer) prepareTrackRepo(entry config.RepoEntry) (*preparedTrack
 	}
 	hook := mi.onRepoTracked
 	mi.mu.RUnlock()
+	if err := mi.configuredPrefixCollision(prefix, absPath); err != nil {
+		return nil, err
+	}
 
 	if hook != nil {
 		hook(prefix, absPath)
@@ -3172,6 +3186,9 @@ func (mi *MultiIndexer) trackPreparedRepoSourceCtx(
 		mi.mu.RUnlock()
 		if exists {
 			return collisionErr
+		}
+		if err := mi.configuredPrefixCollision(prefix, absPath); err != nil {
+			return err
 		}
 		topologyChanged = true
 
@@ -3291,6 +3308,11 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 		return nil, nil
 	}
 
+	if collision := mi.configuredPrefixCollision(prefix, absPath); collision != nil {
+		mi.logCollision(collision)
+		return nil, nil
+	}
+
 	// Fall back to full TrackRepoCtx when we have no prior mtimes:
 	// there's nothing meaningful to reconcile against, and
 	// an incremental pass would treat every file as stale, producing
@@ -3336,6 +3358,10 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 		mi.mu.RUnlock()
 		if exists {
 			mi.logCollision(collisionErr)
+			return nil
+		}
+		if collision := mi.configuredPrefixCollision(prefix, absPath); collision != nil {
+			mi.logCollision(collision)
 			return nil
 		}
 		topologyChanged = true

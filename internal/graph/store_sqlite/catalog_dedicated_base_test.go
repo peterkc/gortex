@@ -2074,3 +2074,37 @@ func TestAdoptedHeadEpochTxNamesOnlyTheOwnersPublication(t *testing.T) {
 		t.Fatalf("an unsampled head = %d, want 0", got)
 	}
 }
+
+func TestDeleteUnpublishedDedicatedGraphGuardsAndPreservesPayload(t *testing.T) {
+	f := newDedicatedPublicationFixture(t)
+	ctx := context.Background()
+	f.claim(t, "preserved-generation", 0, 0)
+	f.store.AddNode(&graph.Node{ID: "repo/kept.go::Kept", Name: "Kept", Kind: graph.KindFunction, FilePath: "repo/kept.go", RepoPrefix: "repo"})
+	before := f.count(t)
+	if err := f.c.DeleteUnpublishedDedicatedGraph(ctx, f.graph); !errors.Is(err, ErrCatalogStaleGuard) {
+		t.Fatalf("published row removal: %v", err)
+	}
+	if err := f.c.DeleteDedicatedGraph(ctx, f.graph.GraphID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.c.UpsertDedicatedGraph(ctx, f.graph); err != nil {
+		t.Fatal(err)
+	}
+	stale := f.graph
+	stale.OwnerCheckoutID = "other"
+	if err := f.c.DeleteUnpublishedDedicatedGraph(ctx, stale); !errors.Is(err, ErrCatalogStaleGuard) {
+		t.Fatalf("stale owner removal: %v", err)
+	}
+	if err := f.c.DeleteUnpublishedDedicatedGraph(ctx, f.graph); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := f.c.GetDedicatedGraph(ctx, f.graph.GraphID); err != nil || found {
+		t.Fatalf("metadata remains: found=%v err=%v", found, err)
+	}
+	if got := f.count(t); got != before {
+		t.Fatalf("generation payload removed: %d -> %d", before, got)
+	}
+	if f.store.GetNode("repo/kept.go::Kept") == nil {
+		t.Fatal("corpus payload removed")
+	}
+}

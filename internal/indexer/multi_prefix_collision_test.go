@@ -387,3 +387,14 @@ func TestResolveConfiguredReposUsesOrderThenLiveOwner(t *testing.T) {
 	require.Len(t, selected, 1)
 	assert.Equal(t, "src", selected[0].Name, "an already-loaded root keeps its registered prefix")
 }
+
+func TestPrefixCollisionErrorKeepsOwnerAvailabilitySnapshot(t *testing.T) {
+	owner := t.TempDir()
+	collision := NewPrefixCollisionError("src", owner, t.TempDir())
+	before := collision.Error()
+	require.NoError(t, os.RemoveAll(owner))
+	assert.Equal(t, before, collision.Error(), "formatting must not consult the filesystem again")
+	missing := NewPrefixCollisionError("src", owner, t.TempDir())
+	assert.True(t, missing.OwnerMissing)
+	assert.Contains(t, missing.Error(), "no longer exists")
+}

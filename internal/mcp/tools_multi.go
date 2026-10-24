@@ -200,7 +200,7 @@ func (s *Server) handleTrackRepository(ctx context.Context, req mcp.CallToolRequ
 		if out.err != nil {
 			var collision *indexer.PrefixCollisionError
 			if errors.As(out.err, &collision) {
-				if _, err := os.Stat(collision.ExistingPath); os.IsNotExist(err) {
+				if collision.OwnerMissing {
 					return mcp.NewToolResultError(fmt.Sprintf(
 						"repository prefix %q is already used by %s, which no longer exists; inspect untrack_repository for that path before tracking %s again",
 						collision.Prefix, collision.ExistingPath, collision.Path)), nil
