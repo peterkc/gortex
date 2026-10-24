@@ -29,7 +29,14 @@ type CargoCrateLookup func(callerFile, crateName string) []CargoCrate
 func (cr *CrossRepoResolver) SetCargoCrateLookup(lookup CargoCrateLookup) { cr.cargoCrates = lookup }
 
 // SetCargoImportRetargetRepo refreshes marked bindings only after a provider file is added.
-func (cr *CrossRepoResolver) SetCargoImportRetargetRepo(repo string) { cr.cargoRetargetRepo = repo }
+func (cr *CrossRepoResolver) SetCargoImportRetargetRepo(repos ...string) {
+	cr.cargoRetargetRepos = make(map[string]bool, len(repos))
+	for _, repo := range repos {
+		if repo != "" {
+			cr.cargoRetargetRepos[repo] = true
+		}
+	}
+}
 
 func (cr *CrossRepoResolver) cargoImportTarget(e *graph.Edge, spec string) *graph.Node {
 	if cr.cargoCrates == nil || e.Kind != graph.EdgeImports || !strings.HasSuffix(e.FilePath, ".rs") {
@@ -102,14 +109,20 @@ func (cr *CrossRepoResolver) resolveCargoImports(ctx context.Context, edges iter
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		spec := cr.cargoImportSpec(e)
-		if spec == "" {
+		if e == nil || e.Kind != graph.EdgeImports || !strings.HasSuffix(e.FilePath, ".rs") {
 			continue
 		}
-		name, _, _ := strings.Cut(spec, "/")
-		if len(cr.cargoCrates(e.FilePath, name)) > 0 {
-			eligible = append(eligible, e)
+		spec := cr.cargoImportSpec(e)
+		if spec == "" && (!e.CrossRepo || !cr.cargoRetargetRepos[graph.RepoPrefixOfID(e.To)]) {
+			continue
 		}
+		if spec != "" {
+			name, _, _ := strings.Cut(spec, "/")
+			if len(cr.cargoCrates(e.FilePath, name)) == 0 {
+				continue
+			}
+		}
+		eligible = append(eligible, e)
 	}
 	// Close the light cursor before hydration or writes; retain metadata for
 	// only one bounded page, as in the tracked npm bridge.
@@ -149,7 +162,7 @@ func (cr *CrossRepoResolver) cargoImportSpec(e *graph.Edge) string {
 		return ""
 	}
 	target := e.To
-	if cr.cargoRetargetRepo != "" && e.CrossRepo && graph.RepoPrefixOfID(e.To) == cr.cargoRetargetRepo {
+	if e.CrossRepo && cr.cargoRetargetRepos[graph.RepoPrefixOfID(e.To)] {
 		target, _ = e.Meta[CargoImportStubMeta].(string)
 		target = strings.Replace(target, "unresolved::import::", "external::", 1)
 	}

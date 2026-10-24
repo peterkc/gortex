@@ -314,3 +314,15 @@ func (s *cargoImportReindexObserver) GetEdgeCandidates(endpoints []graph.EdgeEnd
 	}
 	return s.Store.GetEdgeCandidates(endpoints, sites)
 }
+
+func TestCargoAddedFileWithoutConsumersDoesNotRunGlobalResolve(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "consumer/src/lib.rs::run", Kind: graph.KindFunction, Name: "run", FilePath: "consumer/src/lib.rs", RepoPrefix: "consumer", Language: "rust"})
+	g.AddNode(&graph.Node{ID: "provider/src/new.rs::f", Kind: graph.KindFunction, Name: "f", FilePath: "provider/src/new.rs", RepoPrefix: "provider", Language: "rust"})
+	g.AddEdge(&graph.Edge{From: "consumer/src/lib.rs::run", To: "unresolved::f", Kind: graph.EdgeCalls, FilePath: "consumer/src/lib.rs"})
+	mi := &MultiIndexer{graph: g, logger: zap.New(core)}
+	mi.resolveIncrementalRepoMutation("provider", &IndexResult{}, &graph.MutationReceipt{Complete: true},
+		&reparsePendingEnrichmentBatch{cargoAddedFile: true})
+	require.Empty(t, logs.FilterMessage("cross-repo resolve: pass start").All())
+}

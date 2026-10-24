@@ -23,7 +23,7 @@ func (s *cargoRetargetWriteStore) ReindexEdges(batch []graph.EdgeReindex) {
 
 func TestCargoRetargetOnlyMarkedProviderImports(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
-		for _, scenario := range []string{"unresolved_marker", "external_marker", "unmarked", "other_provider", "already_correct", "disabled"} {
+		for _, scenario := range []string{"unresolved_marker", "external_marker", "unmarked", "other_provider", "already_correct", "disabled", "light_projection", "multiple_enabled", "nil_input", "wrong_kind"} {
 			t.Run(backend+"/"+scenario, func(t *testing.T) {
 				var native graph.Store = graph.New()
 				if backend == "sqlite" {
@@ -56,14 +56,26 @@ func TestCargoRetargetOnlyMarkedProviderImports(t *testing.T) {
 				g.AddEdge(edge)
 				cr := NewCrossRepo(g)
 				cr.SetCargoCrateLookup(func(string, string) []CargoCrate { return []CargoCrate{{Root: root, Name: "other_crate"}} })
-				if scenario != "disabled" {
+				if scenario == "multiple_enabled" {
+					cr.SetCargoImportRetargetRepo("other", "provider")
+				} else if scenario != "disabled" {
 					cr.SetCargoImportRetargetRepo("provider")
 				}
 				stats := &CrossRepoStats{ByRepo: map[string]int{}}
-				require.NoError(t, cr.resolveCargoImports(context.Background(), slices.Values([]*graph.Edge{edge}), stats))
+				edges := slices.Values([]*graph.Edge{edge})
+				if scenario == "light_projection" {
+					edges = graph.EdgesLightSeq(g, graph.EdgeImports)
+				} else if scenario == "nil_input" {
+					edges = slices.Values([]*graph.Edge{nil})
+				} else if scenario == "wrong_kind" {
+					projected := *edge
+					projected.Kind = graph.EdgeCalls
+					edges = slices.Values([]*graph.Edge{&projected})
+				}
+				require.NoError(t, cr.resolveCargoImports(context.Background(), edges, stats))
 				imports := outEdgesOfKind(g, file, graph.EdgeImports)
 				require.Len(t, imports, 1)
-				changed := scenario == "unresolved_marker" || scenario == "external_marker"
+				changed := scenario == "unresolved_marker" || scenario == "external_marker" || scenario == "light_projection" || scenario == "multiple_enabled"
 				if changed {
 					require.Equal(t, module, imports[0].To)
 					require.Equal(t, 1, g.writes)
@@ -75,6 +87,10 @@ func TestCargoRetargetOnlyMarkedProviderImports(t *testing.T) {
 					require.Equal(t, original, imports[0].Meta[CargoImportStubMeta])
 				}
 				priorWrites := g.writes
+				if scenario == "nil_input" || scenario == "wrong_kind" {
+					require.Zero(t, stats.Resolved)
+					return
+				}
 				require.NoError(t, cr.resolveCargoImports(context.Background(), slices.Values(imports), stats))
 				require.Equal(t, priorWrites, g.writes, "an unchanged native match must not reindex")
 			})

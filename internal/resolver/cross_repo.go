@@ -155,8 +155,8 @@ type CrossRepoResolver struct {
 	npmDep      NpmDependencyLookup
 	npmPackages NpmPackageLookup
 
-	cargoCrates       CargoCrateLookup
-	cargoRetargetRepo string
+	cargoCrates        CargoCrateLookup
+	cargoRetargetRepos map[string]bool
 
 	// pathAlias expands a JS/TS tsconfig/jsconfig path-alias / baseUrl
 	// import specifier to the repo-prefixed file stem it targets. Same

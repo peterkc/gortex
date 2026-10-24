@@ -511,7 +511,7 @@ func (mi *MultiIndexer) runCrossRepoResolve(reconcileContracts bool) {
 	}
 }
 
-func (mi *MultiIndexer) runCrossRepoResolveContext(ctx context.Context, reconcileContracts bool) error {
+func (mi *MultiIndexer) runCrossRepoResolveContext(ctx context.Context, reconcileContracts bool, cargoRetargetRepo ...string) error {
 	cr := mi.newCrossRepoResolver()
 	if cr == nil {
 		return nil
@@ -529,6 +529,7 @@ func (mi *MultiIndexer) runCrossRepoResolveContext(ctx context.Context, reconcil
 		}
 		mi.synthesizeDeferredGoModuleCalls(idx, edges)
 	}
+	cr.SetCargoImportRetargetRepo(cargoRetargetRepo...)
 	if _, err := cr.ResolveAllContext(ctx); err != nil {
 		return err
 	}
@@ -567,9 +568,7 @@ func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiersObserved(resolutionF
 	if cr == nil {
 		return
 	}
-	if len(cargoRetargetRepo) > 0 {
-		cr.SetCargoImportRetargetRepo(cargoRetargetRepo[0])
-	}
+	cr.SetCargoImportRetargetRepo(cargoRetargetRepo...)
 	cr.ResolveMutationFrontiersObserved(resolutionFiles, edgeSourceFiles, definitionFiles, observe)
 	mi.finishGoModuleCalls(cr)
 	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
