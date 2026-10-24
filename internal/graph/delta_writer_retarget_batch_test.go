@@ -337,3 +337,33 @@ func TestDeltaWriterRetargetPreservesRefreshedDestinationPayload(t *testing.T) {
 		}
 	}
 }
+
+func TestDeltaWriterReindexRepeatedOldIdentityInOrder(t *testing.T) {
+	for _, retarget := range []bool{false, true} {
+		for _, refresh := range []bool{false, true} {
+			t.Run(fmt.Sprintf("retarget=%t/refresh=%t", retarget, refresh), func(t *testing.T) {
+				edge := &Edge{From: "a::A", To: "b::X", Kind: EdgeCalls, FilePath: "a.go", Line: 10}
+				store, g := retargetBatchStore(true, edge)
+				first, last := cloneDeltaEdge(edge), cloneDeltaEdge(edge)
+				first.Origin, last.Origin = "first", "last"
+				if retarget {
+					last.To = "unresolved::Y"
+				}
+				receipts := store.(MutationReceiptStore)
+				token := receipts.BeginMutationReceipt()
+				store.ReindexEdges([]EdgeReindex{
+					{Edge: first, OldTo: edge.To, RefreshIdentity: refresh, OldFilePath: edge.FilePath, OldLine: edge.Line},
+					{Edge: last, OldTo: edge.To, RefreshIdentity: refresh, OldFilePath: edge.FilePath, OldLine: edge.Line},
+				})
+				receipt := receipts.EndMutationReceipt(token)
+				assert.True(t, receipt.Complete)
+				if retarget {
+					assert.Equal(t, []string{"unresolved::Y"}, receipt.TargetIDs)
+				} else {
+					assert.Empty(t, receipt.TargetIDs)
+				}
+				assertRetargetBatchLifecycle(t, store, g, last)
+			})
+		}
+	}
+}
