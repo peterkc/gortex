@@ -179,9 +179,8 @@ WHERE id IN (` + placeholders + `) AND repo_prefix = ? AND view_gen = ?
 	return nil
 }
 
-// ReplaceCloneCorpus atomically resets one repository's projection. It is the
-// full-shadow-drain sibling of BulkSetCloneCorpus; subsequent bounded chunks
-// append through BulkSetCloneCorpus.
+// ReplaceCloneCorpus atomically replaces one repository's projection and marks
+// it initialized, including an authoritative empty replacement.
 func (s *Store) ReplaceCloneCorpus(repoPrefix string, rows []graph.CloneCorpusRow) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -200,6 +199,29 @@ func (s *Store) ReplaceCloneCorpus(repoPrefix string, rows []graph.CloneCorpusRo
 		return err
 	}
 	if err := markCloneCorpusInitializedTx(tx, s.viewGen, repoPrefix); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ResetCloneCorpus clears a repository's projection and initialization marker
+// atomically before a replacement drain. A failed drain must not look like an
+// authoritative empty corpus on the next index.
+func (s *Store) ResetCloneCorpus(repoPrefix string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	tx, err := s.beginWrite()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.Exec(`DELETE FROM clone_shingles WHERE view_gen = ? AND repo_prefix = ?`, s.viewGen, repoPrefix); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE nodes SET clone_sig = NULL WHERE repo_prefix = ? AND view_gen = ? AND clone_sig IS NOT NULL`, repoPrefix, s.viewGen); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM clone_corpus_state WHERE view_gen = ? AND repo_prefix = ?`, s.viewGen, repoPrefix); err != nil {
 		return err
 	}
 	return tx.Commit()

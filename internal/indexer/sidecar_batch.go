@@ -101,7 +101,7 @@ func (b *parseSidecarBatch) persist(payload compactSidecarPayload) {
 // that drain would delete them when the shadow deferred clone finalization.
 func resetShadowCloneCorpus(disk graph.Store, repoPrefix string) error {
 	if writer, ok := disk.(graph.CloneCorpusRepoReplacer); ok {
-		if err := writer.ReplaceCloneCorpus(repoPrefix, nil); err != nil {
+		if err := writer.ResetCloneCorpus(repoPrefix); err != nil {
 			return fmt.Errorf("reset clone corpus: %w", err)
 		}
 	}
@@ -127,7 +127,15 @@ func persistShadowCompactSidecars(
 			return fmt.Errorf("reset constant values: %w", err)
 		}
 	}
-	return appendShadowCompactSidecars(shadow, disk, repoPrefix)
+	if err := appendShadowCompactSidecars(shadow, disk, repoPrefix); err != nil {
+		return err
+	}
+	if state, ok := disk.(graph.CloneCorpusInitialization); ok {
+		if err := state.MarkCloneCorpusInitialized(repoPrefix); err != nil {
+			return fmt.Errorf("mark shadow clone corpus initialized: %w", err)
+		}
+	}
+	return nil
 }
 
 // persistShadowCompactSidecarChunk appends one bounded streaming shadow to the
