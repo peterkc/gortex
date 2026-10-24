@@ -156,6 +156,7 @@ func goModuleCandidate(modules map[string]string, importPath string, candidates 
 	var match *graph.Node
 	longest := 0
 	ambiguous := false
+	priority := -1
 	for _, c := range candidates {
 		if (c.Language != "" && c.Language != "go") || (c.Kind != graph.KindFunction && c.Kind != graph.KindType && c.Kind != graph.KindInterface) {
 			continue // a package selector does not name a receiver method
@@ -168,14 +169,19 @@ func goModuleCandidate(modules map[string]string, importPath string, candidates 
 		if filePathDir(c.FilePath) != wantDir || !crossWorkspaceEligible(lookup, sourceWS, candidateWorkspaceID(c), importPath) {
 			continue
 		}
+		// Dedicated worktrees use <primary>@<admin>. Prefer a primary
+		// checkout, but still refuse ties between independent primaries.
+		rank := 0
+		if !strings.Contains(c.RepoPrefix, "@") {
+			rank = 1
+		}
+		if c.RepoPrefix == callerRepo {
+			rank = 2
+		}
 		switch {
-		case match == nil || len(module) > longest:
-			match, longest, ambiguous = c, len(module), false
-		case len(module) == longest && c.RepoPrefix == callerRepo && match.RepoPrefix != callerRepo:
-			match, ambiguous = c, false
-		case len(module) == longest && match.RepoPrefix == callerRepo && c.RepoPrefix != callerRepo:
-			continue
-		case len(module) == longest:
+		case match == nil || len(module) > longest || len(module) == longest && rank > priority:
+			match, longest, priority, ambiguous = c, len(module), rank, false
+		case len(module) == longest && rank == priority:
 			if c.RepoPrefix != match.RepoPrefix || filePathDir(c.FilePath) != filePathDir(match.FilePath) {
 				ambiguous = true
 			} else if c.ID < match.ID {
@@ -186,18 +192,7 @@ func goModuleCandidate(modules map[string]string, importPath string, candidates 
 	if ambiguous {
 		return nil
 	}
-	if match != nil {
-		return match
-	}
-	// Keep the base loose same-repo fallback only after module identity found nothing.
-	for _, c := range candidates {
-		if c.RepoPrefix == callerRepo && (c.Language == "" || c.Language == "go") &&
-			(c.Kind == graph.KindFunction || c.Kind == graph.KindMethod || c.Kind == graph.KindType || c.Kind == graph.KindInterface) &&
-			strings.HasSuffix(filePathDir(c.FilePath), "/"+lastPathComponent(importPath)) {
-			return c
-		}
-	}
-	return nil
+	return match
 }
 
 func bindGoModuleEdge(e *graph.Edge, match *graph.Node, callerRepo string) {

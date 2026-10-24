@@ -2637,7 +2637,6 @@ func (mi *MultiIndexer) indexRepoRaw(repoPrefix string) (*IndexResult, error) {
 	// Replace only the base handle's generation before re-indexing. A lone repo
 	// is stored prefixed from its first index, but immutable commit/dirty/ref
 	// payload generations may carry the same prefix and must remain intact.
-	restubGoModuleRepoIncoming(mi.graph, repoPrefix)
 
 	mi.configMgr.LoadWorkspaceConfig(repoPrefix, meta.RootPath)
 	cfg := mi.configMgr.GetRepoConfig(repoPrefix)
@@ -2671,6 +2670,7 @@ func (mi *MultiIndexer) indexRepoRaw(repoPrefix string) (*IndexResult, error) {
 			}
 		}
 	}
+	restubGoModuleRepoIncoming(mi.graph, repoPrefix)
 	evictRepoCurrentGeneration(mi.graph, repoPrefix)
 	result, err := idx.indexCtxRaw(WithIndexOrigin(context.Background(), "index_repo"), meta.RootPath)
 	if err != nil {
