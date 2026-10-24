@@ -12,6 +12,9 @@ import (
 // CargoImportStubMeta preserves the import's exact target before a tracked bind.
 const CargoImportStubMeta = "cargo_import_stub"
 
+// CargoCallStubMeta retains the extractor's function or method target before linking.
+const CargoCallStubMeta = "cargo_call_stub"
+
 // CargoCrate identifies a provider library and its exposed crate name.
 type CargoCrate struct {
 	Root string // graph-path library file
