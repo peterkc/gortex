@@ -818,8 +818,8 @@ func (g *Graph) reindexStoredEdges(batch []EdgeReindex) {
 			}
 			old.FilePath, old.Line = r.OldFilePath, r.OldLine
 		}
-		if _, duplicate := moving[old]; duplicate {
-			continue // The first row sent for an old identity wins.
+		if moving[old] {
+			continue // A preceding move already consumed this old identity.
 		}
 		if !r.RefreshIdentity {
 			stored := g.storedEdge(old)
