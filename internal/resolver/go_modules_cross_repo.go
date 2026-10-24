@@ -13,6 +13,10 @@ import (
 func (cr *CrossRepoResolver) SetGoModules(modules map[string]string) {
 	cr.goModules = maps.Clone(modules)
 	cr.goModulePaths = indexGoModulePaths(modules)
+	cr.goModuleRepos = make(map[string][]string)
+	for repo, module := range modules {
+		cr.goModuleRepos[module] = append(cr.goModuleRepos[module], repo)
+	}
 }
 
 func (cr *CrossRepoResolver) resolveGoExtern(e *graph.Edge, spec string, stats *CrossRepoStats) {
@@ -226,7 +230,7 @@ func (cr *CrossRepoResolver) goModuleIncomingEdgesBounded(nodesByFile map[string
 	synthetic := make(map[string]struct{})
 	for _, file := range definitionFiles {
 		for _, n := range nodesByFile[file] {
-			if n == nil || n.Language != "go" || n.Name == "" || (n.Kind != graph.KindFunction && n.Kind != graph.KindType && n.Kind != graph.KindInterface) {
+			if n == nil || n.Language != "go" || n.Name == "" || (n.Kind != graph.KindFunction && n.Kind != graph.KindType && n.Kind != graph.KindInterface && n.Kind != graph.KindFile) {
 				continue
 			}
 			module := cr.goModules[n.RepoPrefix]
@@ -235,6 +239,12 @@ func (cr *CrossRepoResolver) goModuleIncomingEdgesBounded(nodesByFile map[string
 				continue
 			}
 			spec := module + strings.TrimPrefix(dir, n.RepoPrefix) + "::" + n.Name
+			if n.Kind == graph.KindFile {
+				spec = module + strings.TrimPrefix(dir, n.RepoPrefix)
+				providers[spec] = append(providers[spec], n)
+				keys[graph.UnresolvedMarker+"import::"+spec] = struct{}{}
+				continue
+			}
 			providers[spec] = append(providers[spec], n)
 			keys[graph.UnresolvedMarker+"extern::"+spec] = struct{}{}
 			keys["dep::"+spec] = struct{}{}
@@ -271,7 +281,10 @@ func (cr *CrossRepoResolver) goModuleIncomingEdgesBounded(nodesByFile map[string
 			}
 			spec := goModuleEdgeSpec(e)
 			sep := strings.LastIndex(spec, "::")
-			if sep < 0 {
+			importPath := spec
+			if sep >= 0 {
+				importPath = spec[:sep]
+			} else if e.Kind != graph.EdgeImports {
 				continue
 			}
 			source, known := sources[e.From]
@@ -280,7 +293,7 @@ func (cr *CrossRepoResolver) goModuleIncomingEdgesBounded(nodesByFile map[string
 				sources[e.From] = source
 			}
 			for _, provider := range providers[spec] {
-				if crossWorkspaceEligible(cr.crossWorkspaceLookup, candidateWorkspaceID(source), candidateWorkspaceID(provider), spec[:sep]) {
+				if crossWorkspaceEligible(cr.crossWorkspaceLookup, candidateWorkspaceID(source), candidateWorkspaceID(provider), importPath) {
 					edges = append(edges, e)
 					break
 				}
@@ -518,7 +531,7 @@ func (cr *CrossRepoResolver) ResolveGoModuleIncomingForRepo(repo string) error {
 		ids = ids[:0]
 		return cr.ResolveDeferredGoModuleEdges(edges)
 	}
-	for n := range graph.RepoNodeIdentitiesSeq(cr.graph, []string{repo}, graph.KindFunction, graph.KindType, graph.KindInterface) {
+	for n := range graph.RepoNodeIdentitiesSeq(cr.graph, []string{repo}, graph.KindFunction, graph.KindType, graph.KindInterface, graph.KindFile) {
 		ids = append(ids, n.ID)
 		if len(ids) == externalCallMutationChunk {
 			if err := flush(); err != nil {
@@ -581,7 +594,7 @@ func (cr *CrossRepoResolver) recheckGoModuleBindings(ctx context.Context, previo
 		cr.resolveGoModuleEdgesLocked(edges, stats)
 		ids = ids[:0]
 	}
-	for n := range graph.RepoNodeIdentitiesSeq(cr.graph, repos, graph.KindFunction, graph.KindType, graph.KindInterface) {
+	for n := range graph.RepoNodeIdentitiesSeq(cr.graph, repos, graph.KindFunction, graph.KindType, graph.KindInterface, graph.KindFile) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}

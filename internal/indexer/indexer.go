@@ -5888,7 +5888,7 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) {
 			continue
 		}
 		evicted[n.ID] = struct{}{}
-		if n.Name != "" && graph.IsReferenceableSymbol(n.Kind) {
+		if n.Name != "" && (graph.IsReferenceableSymbol(n.Kind) || n.Kind == graph.KindFile) {
 			refIDs = append(refIDs, n.ID)
 		}
 	}
@@ -5901,12 +5901,12 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) {
 	inEdges := idx.graph.GetInEdgesByNodeIDs(refIDs)
 	var batch []graph.EdgeReindex
 	for _, n := range nodes {
-		if n == nil || n.Name == "" || !graph.IsReferenceableSymbol(n.Kind) {
+		if n == nil || n.Name == "" || !graph.IsReferenceableSymbol(n.Kind) && n.Kind != graph.KindFile {
 			continue
 		}
 		stub := graph.UnresolvedMarker + n.Name
 		for _, e := range inEdges[n.ID] {
-			if e == nil || !graph.IsResolvableRefEdge(e.Kind) {
+			if e == nil || !graph.IsResolvableRefEdge(e.Kind) && !(e.Kind == graph.EdgeImports && e.Meta["go_import"] != nil) {
 				continue
 			}
 			if _, fromEvicted := evicted[e.From]; fromEvicted {

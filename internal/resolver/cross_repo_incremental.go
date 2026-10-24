@@ -75,22 +75,33 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
 
+	budget := &graph.IncomingSourceBudget{}
+	importsByRepo := make(map[string][]string)
 	if len(definitionFiles) > 0 && len(cr.goModules) > 0 {
 		repos := make(map[string]bool)
 		for _, file := range definitionFiles {
 			if repo := graph.RepoPrefixOfID(file); cr.goModules[repo] != "" && !repos[repo] {
 				repos[repo] = true
-				if err := cr.restoreGoModuleImports(context.Background(), repo, stats); err != nil {
-					cr.logger.Error("cross-repo resolve: restore Go module imports", zap.Error(err))
+				ids := cr.goModuleImportIDs(repo)
+				admission.Keys += len(ids)
+				if err := budget.Charge(len(ids)); err != nil {
+					admission.Refused, admission.Refusal = true, err
+					admission.Dropped += len(ids)
+					break
 				}
+				admission.Inspected += len(ids)
+				importsByRepo[repo] = ids
 			}
 		}
 	}
 	if len(resolutionFiles) > 0 {
 		frontier := collectIncrementalFileFrontier(cr.graph, resolutionFiles, nil)
-		admission = CrossRepoIncomingAdmission{
-			IncomingSourceAdmission: frontier.incomingAdmission,
-			Refusal:                 frontier.incomingRefusal,
+		admission.Keys += frontier.incomingAdmission.Keys
+		admission.Inspected += frontier.incomingAdmission.Inspected
+		admission.Dropped += frontier.incomingAdmission.Dropped
+		admission.Limit = frontier.incomingAdmission.Limit
+		if frontier.incomingAdmission.Refused {
+			admission.Refused, admission.Refusal = true, frontier.incomingRefusal
 		}
 		logIncomingAdmissionRefusal(cr.logger, "cross_repo_preparation", len(frontier.stubKeys),
 			frontier.incomingAdmission, frontier.incomingRefusal)
@@ -127,9 +138,8 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 		_ = cr.resolveGoModuleImports(context.Background(), resolutionFiles, stats, counted)
 	}
 	if len(definitionFiles) > 0 && len(cr.goModules) > 0 && !admission.Refused {
-		budget := &graph.IncomingSourceBudget{}
-		if admission.Inspected > 0 {
-			if err := budget.Charge(admission.Inspected); err != nil {
+		if frontierInspected := admission.Inspected - (graph.MaxIncomingSourceCandidateRows - budget.Remaining()); frontierInspected > 0 {
+			if err := budget.Charge(frontierInspected); err != nil {
 				admission.Refused, admission.Refusal = true, err
 			}
 		}
@@ -142,6 +152,15 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 			admission.Dropped += fact.Dropped
 			admission.Refused, admission.Refusal = fact.Refused, err
 			logIncomingAdmissionRefusal(cr.logger, "go_module_incoming", fact.Keys, fact, err)
+			if !admission.Refused {
+				for repo, ids := range importsByRepo {
+					for start := 0; start < len(ids); start += externalCallMutationChunk {
+						if err := cr.restoreGoModuleImportBatch(context.Background(), repo, ids[start:min(start+externalCallMutationChunk, len(ids))], stats); err != nil {
+							cr.logger.Error("cross-repo resolve: restore Go module imports", zap.Error(err))
+						}
+					}
+				}
+			}
 			cr.resolveGoModuleEdgesLocked(edges, stats)
 		}
 	}
