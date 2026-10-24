@@ -594,7 +594,7 @@ func (mi *MultiIndexer) resolveIncrementalRepoMutationMode(
 		}
 		crossRepoFiles = appendUniqueSorted(crossRepoFiles, semanticFiles...)
 	}
-	if needed || len(semanticFiles) > 0 || batch != nil && (len(batch.npmConsumerFiles) > 0 || batch.cargoAddedFile || len(batch.cargoConsumerFiles) > 0) {
+	if needed || len(semanticFiles) > 0 || batch != nil && (len(batch.npmConsumerFiles) > 0 || len(crossRepoFiles) > 0 && (batch.cargoAddedFile || len(batch.cargoConsumerFiles) > 0)) {
 		if idx != nil {
 			idx.observeIncrementalCatchup("cross_repo", crossRepoFiles)
 		}
