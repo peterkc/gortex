@@ -793,7 +793,7 @@ func (dw *DeltaWriter) ReindexEdges(batch []EdgeReindex) {
 
 // reindexStoredEdges applies copied rows as one batch, so moving siblings free
 // their old keys together. Refreshes preserve exact receipts; retargets record
-// resolver work only when To or Kind changes, as in reindexEdge.
+// resolver work for winning retargets, not losing convergence candidates.
 func (g *Graph) reindexStoredEdges(batch []EdgeReindex) {
 	receiptActive := g.beginReceiptMutation()
 	if receiptActive {

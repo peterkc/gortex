@@ -758,7 +758,7 @@ func simulateSQLiteReindexSet(
 	for _, mutation := range mutations {
 		if mutation.oldKey == mutation.newRow.key {
 			if !moving[mutation.oldKey] {
-				// Stationary refreshes win over movers, in either batch order.
+				// Do not resurrect an identity that this batch moves away.
 				state[mutation.newRow.key] = mutation.newRow
 			}
 			continue

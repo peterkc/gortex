@@ -2987,13 +2987,10 @@ func (e *edgeIdentityError) Error() string {
 		e.edge.From + " -" + string(e.edge.Kind) + "-> " + e.edge.To
 }
 
-// ReindexEdge updates the inEdges index after an edge's To field has
-// been mutated (e.g., by the resolver changing "unresolved::X" to a
-// real target). oldTo is the previous value of e.To before mutation.
-//
-// Three sidecar entries change: the outEdgeIdx key for From (since the
-// edgeKey depends on To), the inEdgeIdx entry on the old target bucket
-// (removed), and the inEdgeIdx entry on the new target bucket (added).
+// ReindexEdge updates both adjacency indexes after e.To has been mutated.
+// oldTo is the previous value. It uses ReindexEdges' convergence rule: an
+// existing destination keeps its payload and the moving edge's slot is dropped.
+// The batch path locks every touched shard and advances the edge mutation revision.
 func (g *Graph) ReindexEdge(e *Edge, oldTo string) {
 	g.reindexEdge(e, oldTo, e.Kind)
 }
