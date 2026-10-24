@@ -983,7 +983,7 @@ func applyResolvedOutEdgesFromView(
 		edge.Origin = value.origin
 		edge.Tier = value.tier
 		applyReuseResolutionTag(edge, value.resolution)
-		applyReuseSemanticMeta(edge, value.semanticMeta)
+		applyReuseSemanticMeta(edge, value.semanticMeta, oldTo)
 		retargeted = append(retargeted, graph.EdgeReindex{Edge: edge, OldTo: oldTo})
 		reused++
 	}
@@ -1095,6 +1095,11 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 	carried, consumers := restubIncomingRefsFromView(idx.graph, stages, view)
 	if markerBatch != nil {
 		markerBatch.cargoConsumerFiles = appendUniqueSorted(markerBatch.cargoConsumerFiles, consumers...)
+		for _, stage := range stages {
+			if strings.HasSuffix(stage.graphPath, ".rs") && len(stage.priorNodes) == 0 {
+				markerBatch.cargoAddedFile = true
+			}
+		}
 	}
 	idx.applyLap("restub")
 	// The capability state of the files, read before the eviction below
@@ -1502,7 +1507,7 @@ func restubIncomingRefsFromView(
 				oldTo := edge.To
 				graph.StashRestubProvenance(edge)
 				edge.To = stub
-				if original, _ := edge.Meta[resolver.CargoCallStubMeta].(string); edge.Kind == graph.EdgeCalls && original != "" {
+				if original, _ := edge.Meta[resolver.CargoCallStubMeta].(string); edge.Kind == graph.EdgeCalls && edge.CrossRepo && original != "" {
 					edge.To, edge.CrossRepo, edge.ConfidenceLabel = original, false, ""
 				}
 				reindexes = append(reindexes, graph.EdgeReindex{Edge: edge, OldTo: oldTo})

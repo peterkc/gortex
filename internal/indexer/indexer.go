@@ -5923,7 +5923,7 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) []string {
 			// moved target leaves the stub honestly unresolved.
 			graph.StashRestubProvenance(e)
 			e.To = stub
-			if original, _ := e.Meta[resolver.CargoCallStubMeta].(string); e.Kind == graph.EdgeCalls && original != "" {
+			if original, _ := e.Meta[resolver.CargoCallStubMeta].(string); e.Kind == graph.EdgeCalls && e.CrossRepo && original != "" {
 				e.To, e.CrossRepo, e.ConfidenceLabel = original, false, ""
 			}
 			batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
