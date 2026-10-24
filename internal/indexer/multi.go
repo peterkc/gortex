@@ -2762,6 +2762,7 @@ func (mi *MultiIndexer) indexRepoRaw(repoPrefix string) (*IndexResult, error) {
 	if err := mi.postPublishGoModules(context.Background(), idx, false); err != nil {
 		mi.logger.Warn("post-publish Go module follow-up", zap.Error(err))
 	}
+	mi.runCrossRepoResolveFiles(mi.cargoConsumerFilesForRepo(repoPrefix))
 
 	mi.ReconcileContractEdges()
 
@@ -3407,6 +3408,7 @@ func (mi *MultiIndexer) trackPreparedRepoSourceCtx(
 		// repository's first registration, never a rewrite of an entry.
 		mi.markRepoRegistered(prefix, absPath)
 		mi.runCrossRepoResolveFiles(mi.npmConsumerFilesForRepo(prefix))
+		mi.runCrossRepoResolveFiles(mi.cargoConsumerFilesForRepo(prefix))
 
 		// Add to global config.
 		entry.Path = absPath
@@ -3714,8 +3716,10 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 				})
 			}
 		} else if result.FullRetrack {
+			result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, mi.cargoConsumerFilesForRepo(prefix)...)
 			if !batchMode.deferResolve {
 				mi.runCrossRepoResolveFiles(mi.npmConsumerFilesForRepo(prefix))
+				mi.runCrossRepoResolveFiles(result.CrossRepoResolveFiles)
 			}
 			if !batchMode.deferGlobalPasses {
 				if err := mi.postPublishGoModules(ctx, idx, false); err != nil {

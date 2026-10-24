@@ -3439,6 +3439,10 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 				var err error
 				shadowReplacementStarted = true
 				restubTrackedNpmRepoIncoming(diskTarget, idx.RepoPrefix())
+				parked := restubTrackedCargoRepoIncoming(diskTarget, idx.RepoPrefix())
+				if result != nil {
+					result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, parked...)
+				}
 				evictedNodes, evictedEdges, err = sqlite.EvictRepoForShadowReplacement(ctx, idx.RepoPrefix())
 				if err != nil {
 					retErr = fmt.Errorf("indexer: retire shadow replacement rows: %w", err)
@@ -5164,9 +5168,10 @@ func (idx *Indexer) indexFile(
 		// batch replacement by deleting its prior documents explicitly;
 		// canonical contracts follow the store's owner-retention decision.
 		idx.deleteSymbolFTS(oldFTSNodeIDs)
-		npmConsumers := idx.restubIncomingRefs(graphPath)
+		npmConsumers, cargoConsumers := idx.restubIncomingRefs(graphPath)
 		if markerBatch != nil {
 			markerBatch.npmConsumerFiles = appendUniqueSorted(markerBatch.npmConsumerFiles, npmConsumers...)
+			markerBatch.cargoConsumerFiles = appendUniqueSorted(markerBatch.cargoConsumerFiles, cargoConsumers...)
 		}
 		idx.graph.EvictFile(graphPath)
 	}
@@ -5922,10 +5927,10 @@ func (idx *Indexer) reresolveFileScopedRaw(filePath string) error {
 // agnostic: GetInEdges + ReindexEdges are the same Store primitives the
 // resolver uses, so this behaves identically on the in-memory and disk
 // stores.
-func (idx *Indexer) restubIncomingRefs(graphPath string) []string {
+func (idx *Indexer) restubIncomingRefs(graphPath string) ([]string, []string) {
 	nodes := idx.graph.GetFileNodes(graphPath)
 	if len(nodes) == 0 {
-		return nil
+		return nil, nil
 	}
 	evicted := make(map[string]struct{}, len(nodes))
 	refIDs := make([]string, 0, len(nodes))
@@ -5939,13 +5944,14 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) []string {
 		}
 	}
 	if len(refIDs) == 0 {
-		return nil
+		return nil, nil
 	}
 	// Fetch the whole changed file's incoming adjacency in one bounded store
 	// operation. On SQLite this is chunked under the parameter limit; more
 	// importantly, it avoids one transaction/query per definition in the file.
 	inEdges := idx.graph.GetInEdgesByNodeIDs(refIDs)
 	npmConsumers := restubTrackedNpmImportsFromView(idx.graph, evicted, inEdges)
+	consumers := restubTrackedCargoImportsFromView(idx.graph, evicted, inEdges)
 	var batch []graph.EdgeReindex
 	for _, n := range nodes {
 		if n == nil || n.Name == "" || !graph.IsReferenceableSymbol(n.Kind) && n.Kind != graph.KindFile {
@@ -5979,7 +5985,7 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) []string {
 	if len(batch) > 0 {
 		idx.graph.ReindexEdges(batch)
 	}
-	return npmConsumers
+	return npmConsumers, consumers
 }
 
 // embeddingDimsOrDefault returns the embedder's reported vector width,
@@ -7505,6 +7511,7 @@ func (idx *Indexer) incrementalReindexPathsMode(
 		capabilityPrior:     idx.takeCapabilityPrior(),
 	}
 	result.CrossRepoResolveFiles = appendUniqueSorted(nil, markerBatch.npmConsumerFiles...)
+	result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, markerBatch.cargoConsumerFiles...)
 	for _, path := range failedFiles {
 		result.Errors = append(result.Errors, IndexError{FilePath: path, Error: idx.fileIndexFailureError(path).Error()})
 	}

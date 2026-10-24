@@ -291,6 +291,7 @@ func (mi *MultiIndexer) purgeRepositoryPayload(
 ) (nodesRemoved, edgesRemoved int, err error) {
 	restubTrackedNpmRepoIncoming(mi.graph, repoPrefix)
 	parked := restubGoModuleRepoIncoming(mi.graph, repoPrefix)
+	restubTrackedCargoRepoIncoming(mi.graph, repoPrefix)
 	if purger, ok := mi.graph.(interface{ PurgeRepo(string) error }); ok {
 		if err := purger.PurgeRepo(repoPrefix); err != nil {
 			return 0, 0, fmt.Errorf("purge repository payload: %w", err)
