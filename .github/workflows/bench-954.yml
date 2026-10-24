@@ -1,0 +1,65 @@
+# Fork-only A/B benchmark for zzet/gortex#954. Do not merge.
+# Push this file alone on fork branch exp/bench-954 (based on fork main ce04b3e8),
+# with the main-compatible fixture at .github/bench/warmup_prefix_bench_test.go.
+# Set BRANCH_SHA to the final head of review/duplicate-prefix-error before pushing.
+name: bench-954
+on:
+  push:
+    branches: [exp/bench-954]
+permissions:
+  contents: read
+env:
+  MAIN_SHA: ce04b3e8e37d206841770129b30be0f22ee27ccc
+  BRANCH_SHA: cbbe4e99328cc67c49e6a297fb5bc73d2ecd1f44
+jobs:
+  ab:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: bench
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.MAIN_SHA }}
+          path: main
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.BRANCH_SHA }}
+          path: branch
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: main/go.mod
+          cache: false
+      - name: Add the main-compatible fixture
+        run: cp bench/.github/bench/warmup_prefix_bench_test.go main/internal/indexer/warmup_prefix_bench_test.go
+      - name: Build both test binaries (compile time stays out of the timings)
+        run: |
+          (cd main && go test -c -o "$RUNNER_TEMP/main.test" ./internal/indexer)
+          (cd branch && go test -c -o "$RUNNER_TEMP/branch.test" ./internal/indexer)
+      - name: Alternate main and branch, 5 rounds
+        shell: bash
+        run: |
+          for round in 1 2 3 4 5; do
+            for side in main branch; do
+              (cd "$side/internal/indexer" && "$RUNNER_TEMP/$side.test" \
+                -test.run '^$' -test.bench '^BenchmarkWarmupResolve200$' \
+                -test.benchmem -test.count=5 -test.benchtime=20x) | tee -a "$side.txt"
+            done
+          done
+      - name: benchstat
+        shell: bash
+        run: |
+          go run golang.org/x/perf/cmd/benchstat@v0.0.0-20260409210113-8e83ce0f7b1c main.txt branch.txt | tee benchstat.txt
+          cat benchstat.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bench-954-${{ matrix.os }}
+          path: |
+            main.txt
+            branch.txt
+            benchstat.txt
