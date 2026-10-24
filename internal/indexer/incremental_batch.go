@@ -1382,7 +1382,7 @@ func restubIncomingRefsFromView(
 						if stub := goModuleRestubTarget(edge, ""); stub != "" {
 							oldTo := edge.To
 							graph.StashRestubProvenance(edge)
-							edge.To, edge.CrossRepo = stub, false
+							edge.To, edge.CrossRepo, edge.ConfidenceLabel = stub, false, ""
 							reindexes = append(reindexes, graph.EdgeReindex{Edge: edge, OldTo: oldTo})
 						}
 					}
