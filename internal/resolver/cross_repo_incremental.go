@@ -65,35 +65,18 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 		return stats, admission
 	}
 
+	importBudget := &graph.IncomingSourceBudget{}
 	// Provider recovery needs the lazy seed before the pass lock is taken.
 	// Ordinary consumer frontiers keep local resolution ahead of the bridge.
 	if len(definitionFiles) > 0 {
-		if err := cr.resolveGoModuleImportSweep(context.Background(), stats); err != nil {
-			cr.logger.Error("cross-repo resolve: seed Go module imports", zap.Error(err))
+		if err := cr.resolveGoModuleImportSweep(context.Background(), stats, importBudget); err != nil {
+			cr.logger.Warn("cross-repo resolve: seed Go module imports deferred", zap.Error(err))
 		}
 	}
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
 
 	budget := &graph.IncomingSourceBudget{}
-	importsByRepo := make(map[string][]string)
-	if len(definitionFiles) > 0 && len(cr.goModules) > 0 {
-		repos := make(map[string]bool)
-		for _, file := range definitionFiles {
-			if repo := graph.RepoPrefixOfID(file); cr.goModules[repo] != "" && !repos[repo] {
-				repos[repo] = true
-				ids := cr.goModuleImportIDs(repo)
-				admission.Keys += len(ids)
-				if err := budget.Charge(len(ids)); err != nil {
-					admission.Refused, admission.Refusal = true, err
-					admission.Dropped += len(ids)
-					break
-				}
-				admission.Inspected += len(ids)
-				importsByRepo[repo] = ids
-			}
-		}
-	}
 	if len(resolutionFiles) > 0 {
 		frontier := collectIncrementalFileFrontier(cr.graph, resolutionFiles, nil)
 		admission.Keys += frontier.incomingAdmission.Keys
@@ -149,7 +132,7 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 		_ = cr.resolveGoModuleImports(context.Background(), resolutionFiles, stats, counted)
 	}
 	if len(definitionFiles) > 0 && len(cr.goModules) > 0 && !admission.Refused {
-		if frontierInspected := admission.Inspected - (graph.MaxIncomingSourceCandidateRows - budget.Remaining()); frontierInspected > 0 {
+		if frontierInspected := admission.Inspected; frontierInspected > 0 {
 			if err := budget.Charge(frontierInspected); err != nil {
 				admission.Refused, admission.Refusal = true, err
 			}
@@ -163,15 +146,6 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 			admission.Dropped += fact.Dropped
 			admission.Refused, admission.Refusal = fact.Refused, err
 			logIncomingAdmissionRefusal(cr.logger, "go_module_incoming", fact.Keys, fact, err)
-			if !admission.Refused {
-				for repo, ids := range importsByRepo {
-					for start := 0; start < len(ids); start += externalCallMutationChunk {
-						if err := cr.restoreGoModuleImportBatch(context.Background(), repo, ids[start:min(start+externalCallMutationChunk, len(ids))], stats); err != nil {
-							cr.logger.Error("cross-repo resolve: restore Go module imports", zap.Error(err))
-						}
-					}
-				}
-			}
 			cr.resolveGoModuleEdgesLocked(edges, stats)
 		}
 	}
@@ -182,6 +156,27 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 			cr.logger.Error("cross-repo resolve: retry Go module terminals", zap.Error(err))
 		}
 	}
+	// Import recovery has its own ceiling: a popular provider must not starve
+	// incoming calls or the revision-keyed call-terminal retry above.
+	repos := make(map[string]bool)
+	for _, file := range definitionFiles {
+		repo := graph.RepoPrefixOfID(file)
+		if cr.goModules[repo] == "" || repos[repo] {
+			continue
+		}
+		repos[repo] = true
+		ids := cr.goModuleImportIDs(repo)
+		if err := importBudget.Charge(len(ids)); err != nil {
+			cr.logger.Warn("cross-repo resolve: Go module imports deferred to full pass", zap.Error(err))
+			continue
+		}
+		for start := 0; start < len(ids); start += externalCallMutationChunk {
+			if err := cr.restoreGoModuleImportBatch(context.Background(), repo, ids[start:min(start+externalCallMutationChunk, len(ids))], stats); err != nil {
+				cr.logger.Error("cross-repo resolve: restore Go module imports", zap.Error(err))
+			}
+		}
+	}
+
 	DetectCrossRepoEdgesForMutationFiles(cr.graph, edgeSourceFiles, definitionFiles)
 	return stats, admission
 }
