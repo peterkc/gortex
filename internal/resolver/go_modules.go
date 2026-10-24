@@ -118,7 +118,7 @@ func (r *Resolver) resolveGoModuleExtern(e *graph.Edge, importPath, callerRepo s
 	if match == nil {
 		return false
 	}
-	bindGoModuleEdge(e, match, callerRepo, r.goModuleReplacements)
+	bindGoModuleEdge(e, match, callerRepo, r.goModules[callerRepo], r.goModuleReplacements)
 	stats.Resolved++
 	return true
 }
@@ -195,14 +195,16 @@ func goModuleCandidate(modules map[string]string, importPath string, candidates 
 	return match
 }
 
-func bindGoModuleEdge(e *graph.Edge, match *graph.Node, callerRepo string, replacements map[string][]GoModuleReplacement) {
+func bindGoModuleEdge(e *graph.Edge, match *graph.Node, callerRepo, ownModule string, replacements map[string][]GoModuleReplacement) {
 	e.CrossRepo = callerRepo != "" && match.RepoPrefix != "" && match.RepoPrefix != callerRepo
 	// Only foreign or replacement bindings depend on a module-map recheck.
 	spec := goModuleEdgeSpec(e)
 	if sep := strings.LastIndex(spec, "::"); sep >= 0 {
 		e.Meta = maps.Clone(e.Meta)
-		_, replaced := goModuleReplacementFor(replacements, callerRepo, spec[:sep])
-		if e.CrossRepo || replaced {
+		importPath := spec[:sep]
+		_, replaced := goModuleReplacementFor(replacements, callerRepo, importPath)
+		own := ownModule != "" && (importPath == ownModule || strings.HasPrefix(importPath, ownModule+"/"))
+		if e.CrossRepo || replaced || !own {
 			if e.Meta == nil {
 				e.Meta = make(map[string]any)
 			}
