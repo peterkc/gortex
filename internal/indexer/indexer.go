@@ -133,6 +133,8 @@ type IndexResult struct {
 	DerivedInvalidation DerivedInvalidationPlan `json:"derived_invalidation,omitempty"`
 	// Parked importers belong to cross-repo resolution, not this repo's derived plan.
 	CrossRepoResolveFiles []string `json:"cross_repo_resolve_files,omitempty"`
+	// CargoRetarget records a Rust file addition for the post-registration warm tail.
+	CargoRetarget bool `json:"cargo_retarget,omitempty"`
 
 	// mutationErr carries a point-operation compatibility error through the
 	// resolver/semantic/derived tail. It is intentionally unexported and never
@@ -7325,6 +7327,7 @@ func (idx *Indexer) incrementalReindexPathsMode(
 		capabilityPrior:     idx.takeCapabilityPrior(),
 	}
 	result.CrossRepoResolveFiles = appendUniqueSorted(nil, markerBatch.cargoConsumerFiles...)
+	result.CargoRetarget = markerBatch.cargoAddedFile
 	for _, path := range failedFiles {
 		result.Errors = append(result.Errors, IndexError{FilePath: path, Error: idx.fileIndexFailureError(path).Error()})
 	}
