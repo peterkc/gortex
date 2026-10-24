@@ -545,21 +545,24 @@ func (mi *MultiIndexer) runCrossRepoResolveContext(ctx context.Context, reconcil
 // for one coordinated mutation frontier. Its caller owns the repository lane
 // and global topology-writer gate, so the graph cannot expose a half-resolved
 // batch between same-repo, semantic, and cross-repository phases.
-func (mi *MultiIndexer) runCrossRepoResolveFiles(filePaths []string) {
-	mi.runCrossRepoResolveMutationFiles(filePaths, filePaths)
+func (mi *MultiIndexer) runCrossRepoResolveFiles(filePaths []string, cargoRetargetRepo ...string) {
+	mi.runCrossRepoResolveMutationFrontiers(filePaths, filePaths, filePaths, cargoRetargetRepo...)
 }
 
 func (mi *MultiIndexer) runCrossRepoResolveMutationFiles(resolutionFiles, materializationFiles []string) {
 	mi.runCrossRepoResolveMutationFrontiers(resolutionFiles, materializationFiles, materializationFiles)
 }
 
-func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiers(resolutionFiles, edgeSourceFiles, definitionFiles []string) {
+func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiers(resolutionFiles, edgeSourceFiles, definitionFiles []string, cargoRetargetRepo ...string) {
 	if len(resolutionFiles) == 0 && len(edgeSourceFiles) == 0 && len(definitionFiles) == 0 {
 		return
 	}
 	cr := mi.newCrossRepoResolver()
 	if cr == nil {
 		return
+	}
+	if len(cargoRetargetRepo) > 0 {
+		cr.SetCargoImportRetargetRepo(cargoRetargetRepo[0])
 	}
 	cr.ResolveMutationFrontiers(resolutionFiles, edgeSourceFiles, definitionFiles)
 	mi.finishGoModuleCalls(cr)
