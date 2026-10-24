@@ -5,6 +5,7 @@ import (
 	"iter"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -272,7 +273,12 @@ type goModuleEvictionCountingStore struct {
 }
 
 func (s *goModuleEvictionCountingStore) RepoNodeIdentitiesSeq(repos []string, kinds ...graph.NodeKind) iter.Seq[graph.RepoNodeIdentity] {
-	s.definitionScans++
+	// Count only the Go module restub's definition scan. The npm restub
+	// also scans an evicted repository, with a wider kind list that
+	// includes files, and it is expected to run for a JavaScript repo.
+	if slices.Equal(kinds, []graph.NodeKind{graph.KindFunction, graph.KindType, graph.KindInterface}) {
+		s.definitionScans++
+	}
 	return graph.RepoNodeIdentitiesSeq(s.Store, repos, kinds...)
 }
 
