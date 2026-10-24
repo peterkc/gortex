@@ -1710,12 +1710,16 @@ func (l *CheckoutLifecycle) ApplyReload(ctx context.Context) (ReloadResult, erro
 		// after reload is not a removal request, so do not mint a retirement.
 		checkout, err := l.checkoutForPrefix(ctx, prefix)
 		if err != nil {
-			return out, err
+			l.logger.Warn("reload: read checkout failed",
+				zap.String("prefix", prefix), zap.Error(err))
+			continue
 		}
 		if checkout != nil {
 			intents, err := l.catalog.ListTrackingIntents(ctx, checkout.CheckoutID)
 			if err != nil {
-				return out, err
+				l.logger.Warn("reload: read tracking intents failed",
+					zap.String("prefix", prefix), zap.Error(err))
+				continue
 			}
 			if len(intents) == 0 {
 				continue
