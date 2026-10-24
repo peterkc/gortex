@@ -1,0 +1,152 @@
+package indexer
+
+import (
+	"context"
+	"iter"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+
+	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/search"
+)
+
+func TestGoModuleCallerSaveHonorsUntrackedReplace(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, mode := range []string{"reindex", "point", "indexfile"} {
+			t.Run(backend+"/"+mode, func(t *testing.T) {
+				mi, g, repos := goModuleLifecycleFixture(t, backend)
+				writeFile(t, filepath.Join(repos[0].Path, "go.mod"), "module example.org/caller\nrequire example.org/library v1.0.0\nreplace example.org/library => "+filepath.ToSlash(repos[2].Path)+"\n")
+				for _, entry := range []config.RepoEntry{repos[1], repos[0]} {
+					if _, err := mi.TrackRepoCtx(t.Context(), entry); err != nil {
+						t.Fatal(err)
+					}
+				}
+				e := goModuleLifecycleCall(t, g)
+				require.Equal(t, "external-call::dep::example.org/library", e.To)
+				main := filepath.Join(repos[0].Path, "main.go")
+				writeFile(t, main, "package caller\nimport library \"example.org/library\"\nfunc Caller() { library.Hello(); _ = 1 }\n")
+				var err error
+				switch mode {
+				case "reindex":
+					_, err = mi.IncrementalReindexRepo("a", []string{main})
+				case "point":
+					_, err = mi.incrementalPointRepoRaw("a", main)
+				case "indexfile":
+					err = mi.GetIndexer("a").IndexFile(main)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				e = goModuleLifecycleCall(t, g)
+				t.Logf("after caller save: to=%s cross=%v origin=%s", e.To, e.CrossRepo, e.Origin)
+				require.Equal(t, "external-call::dep::example.org/library", e.To)
+			})
+		}
+	}
+}
+
+func TestGoModuleGoModSaveInvalidatesSnapshot(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, mode := range []string{"reindex", "point", "indexfile"} {
+			t.Run(backend+"/"+mode, func(t *testing.T) {
+				mi, g, repos := goModuleLifecycleFixture(t, backend)
+				for _, entry := range []config.RepoEntry{repos[1], repos[0]} {
+					_, err := mi.TrackRepoCtx(t.Context(), entry)
+					require.NoError(t, err)
+				}
+				require.Equal(t, "b/lib.go::Hello", goModuleLifecycleCall(t, g).To)
+				mi.goModuleSnapshot() // Warm the cache immediately before the manifest save.
+				manifest := filepath.Join(repos[1].Path, "go.mod")
+				writeFile(t, manifest, "module example.org/renamed\n")
+				var err error
+				if mode == "reindex" {
+					_, err = mi.IncrementalReindexRepo("b", []string{manifest})
+				} else if mode == "point" {
+					_, err = mi.incrementalPointRepoRaw("b", manifest)
+				} else {
+					err = mi.GetIndexer("b").IndexFile(manifest)
+				}
+				require.NoError(t, err)
+				require.Equal(t, "external-call::dep::example.org/library", goModuleLifecycleCall(t, g).To)
+			})
+		}
+	}
+}
+
+func TestGoModuleBatchHonorsUntrackedReplace(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			mi, g, repos := goModuleLifecycleFixture(t, backend)
+			writeFile(t, filepath.Join(repos[0].Path, "go.mod"), "module example.org/caller\nreplace example.org/library => "+filepath.ToSlash(repos[2].Path)+"\n")
+			mi.BeginBatch()
+			for _, entry := range []config.RepoEntry{repos[1], repos[0]} {
+				_, err := mi.TrackRepoCtx(t.Context(), entry)
+				require.NoError(t, err)
+			}
+			mi.EndBatch()
+			require.Contains(t, []string{"external-call::dep::example.org/library", "unresolved::extern::example.org/library::Hello"}, goModuleLifecycleCall(t, g).To)
+		})
+	}
+}
+
+type goModuleReviewScanStore struct {
+	goModulePublishScanCountingStore
+	definitions int
+}
+
+func (s *goModuleReviewScanStore) RepoNodeIdentitiesSeq(repos []string, kinds ...graph.NodeKind) iter.Seq[graph.RepoNodeIdentity] {
+	s.definitions++
+	return graph.RepoNodeIdentitiesSeq(s.Store, repos, kinds...)
+}
+
+func TestGoModuleRetrySkipsUnrelatedWorkspaceChanges(t *testing.T) {
+	for _, hasModule := range []bool{false, true} {
+		name := "non_go"
+		if hasModule {
+			name = "unrelated_config"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			lang, file := "javascript", "b/main.js"
+			if hasModule {
+				writeFile(t, filepath.Join(dir, "go.mod"), "module example.org/library\n")
+				lang, file = "go", "b/lib.go"
+			}
+			cm := newTestConfigManager(t)
+			cm.Global().Repos = []config.RepoEntry{{Name: "b", Path: dir}}
+			db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.sqlite"))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, db.Close()) })
+			g := &goModuleReviewScanStore{goModulePublishScanCountingStore: goModulePublishScanCountingStore{Store: db}}
+			g.AddNode(&graph.Node{ID: file + "::Hello", Name: "Hello", Kind: graph.KindFunction, RepoPrefix: "b", FilePath: file, Language: lang})
+			mi := NewMultiIndexer(g, newTestRegistry(), search.NewNull(), cm, zap.NewNop())
+			t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
+			cr := mi.newCrossRepoResolver()
+			require.NoError(t, cr.RetryGoModuleDeps(t.Context()))
+			if !hasModule {
+				assert.Zero(t, g.definitions, "a non-Go workspace must not seed a binding scan")
+				assert.Zero(t, g.scans, "a non-Go workspace must not sweep terminals")
+			} else {
+				require.Positive(t, g.definitions)
+				require.Equal(t, 1, g.scans)
+			}
+			_, generation := mi.goModuleSnapshot()
+			revision := cm.Revision()
+			cm.LoadWorkspaceConfig("b", dir)
+			require.Greater(t, cm.Revision(), revision)
+			_, after := mi.goModuleSnapshot()
+			assert.Equal(t, generation, after, "unrelated config must not change module generation")
+			g.scans, g.definitions = 0, 0
+			cr = mi.newCrossRepoResolver()
+			require.NoError(t, cr.RetryGoModuleDeps(t.Context()))
+			assert.Zero(t, g.scans, "unchanged module content must not sweep terminals")
+			assert.Zero(t, g.definitions, "unchanged module content must not recheck bindings")
+		})
+	}
+}
