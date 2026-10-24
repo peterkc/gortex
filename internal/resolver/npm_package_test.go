@@ -179,7 +179,6 @@ func TestCrossRepoTrackedNpmPackageProbeMemo(t *testing.T) {
 			for pass := 0; pass < 2; pass++ {
 				g.providerReads = 0
 				cr.ResolveAll()
-				t.Logf("pass=%d declared=%v provider GetNode calls=%d", pass, declared, g.providerReads)
 				if declared {
 					assert.Equal(t, 2*len(jsTSImportExts), g.providerReads)
 				} else {

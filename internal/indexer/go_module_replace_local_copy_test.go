@@ -56,17 +56,13 @@ func TestGoModuleReplaceAddedOverSameRepoCopyRechecks(t *testing.T) {
 				}
 			}
 			mi.RunGlobalResolve()
-			e := goModuleLifecycleCall(t, g)
-			t.Logf("before: to=%s cross=%v meta=%v", e.To, e.CrossRepo, e.Meta)
 			writeFile(t, manifest, "module example.org/caller\nreplace example.org/library => ./forks/library\n")
 			if _, err := mi.IncrementalReindexRepo("a", []string{manifest}); err != nil {
 				t.Fatal(err)
 			}
 			mi.RunGlobalResolve()
-			e = goModuleLifecycleCall(t, g)
-			t.Logf("after replace added: to=%s cross=%v meta=%v", e.To, e.CrossRepo, e.Meta)
+			e := goModuleLifecycleCall(t, g)
 			c := goModuleColdCall(t, backend, order)
-			t.Logf("cold: to=%s cross=%v meta=%v", c.To, c.CrossRepo, c.Meta)
 			if c.To != e.To {
 				t.Errorf("after the replace was added the call stays on %s; a cold index binds %s", e.To, c.To)
 			}

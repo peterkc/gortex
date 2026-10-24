@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -9,6 +10,8 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/parser/languages"
+	"github.com/zzet/gortex/internal/search"
 	"go.uber.org/zap"
 )
 
@@ -116,6 +119,73 @@ func TestNonNpmEvictionDoesNotHydrateIncoming(t *testing.T) {
 			evictRepoCurrentGeneration(g, "lib")
 			assert.Zero(t, g.incomingReads, "non-npm eviction must not hydrate incoming adjacency")
 			assert.Empty(t, g.GetOutEdges("other/a.go::run"))
+		})
+	}
+}
+
+func TestTrackedNpmConsumersResolveWithoutRelevantReceipt(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			var g graph.Store = graph.New()
+			if backend == "sqlite" {
+				db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.sqlite"))
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, db.Close()) })
+				g = db
+			}
+			provider, consumer := t.TempDir(), t.TempDir()
+			writePackageJSON(t, provider, `{"name":"p","exports":"./index.ts"}`)
+			writeWorkspaceFile(t, provider, "index.ts", "export function f() { return 42; }\n")
+			writePackageJSON(t, consumer, `{"name":"app","dependencies":{"p":"^1"}}`)
+			writeWorkspaceFile(t, consumer, "app.ts", "import { f } from 'p'; export function run() { return f(); }\n")
+			reg := newTestRegistry()
+			reg.Register(languages.NewTypeScriptExtractor())
+			mi := NewMultiIndexer(g, reg, search.NewNull(), newTestConfigManager(t), zap.NewNop())
+			t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
+			for _, entry := range []config.RepoEntry{
+				{Name: "lib", Path: provider, Workspace: "shared"},
+				{Name: "app", Path: consumer, Workspace: "shared"},
+			} {
+				_, err := mi.TrackRepoCtx(t.Context(), entry)
+				require.NoError(t, err)
+			}
+			call := func() *graph.Edge {
+				t.Helper()
+				var calls []*graph.Edge
+				for _, edge := range g.GetOutEdges("app/app.ts::run") {
+					if edge.Kind == graph.EdgeCalls {
+						calls = append(calls, edge)
+					}
+				}
+				require.Len(t, calls, 1)
+				return calls[0]
+			}
+			require.Equal(t, "lib/index.ts::f", call().To)
+			consumers := restubTrackedNpmImportsFromView(g, nil,
+				g.GetInEdgesByNodeIDs([]string{"lib/index.ts", "lib/index.ts::f"}))
+			require.Equal(t, []string{"app/app.ts"}, consumers)
+			require.Equal(t, "unresolved::f", call().To)
+
+			// The receipt describes provider-local work. Parked consumers still
+			// need their own cross-repo pass when that receipt needs no resolve.
+			result := &IndexResult{}
+			receipt := &graph.MutationReceipt{Complete: true}
+			_, needed, exact := incrementalResolutionFrontier(result, receipt)
+			require.False(t, needed)
+			require.True(t, exact)
+			mi.resolveIncrementalRepoMutation("lib", result, receipt,
+				&reparsePendingEnrichmentBatch{npmConsumerFiles: consumers})
+
+			assert.Equal(t, "lib/index.ts::f", call().To)
+			assert.True(t, call().CrossRepo)
+			var targets []string
+			for _, edge := range g.GetOutEdges("app/app.ts") {
+				if edge.Kind == graph.EdgeImports {
+					targets = append(targets, edge.To)
+					assert.True(t, edge.CrossRepo)
+				}
+			}
+			assert.ElementsMatch(t, []string{"lib/index.ts", "lib/index.ts::f"}, targets)
 		})
 	}
 }

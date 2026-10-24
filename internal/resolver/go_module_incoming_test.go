@@ -30,7 +30,6 @@ func TestGoModuleFullReindexIncomingUnbounded(t *testing.T) {
 				bound++
 			}
 		}
-		t.Logf("parked calls=%d err=%v bound after ResolveGoModuleIncomingForRepo=%d", n, err, bound)
 		if bound != n {
 			t.Errorf("full-reindex rebind left %d of %d calls parked with a nil error", n-bound, n)
 		}

@@ -142,12 +142,6 @@ func TestMultiIndexer_TrackedNpmPackage(t *testing.T) {
 			require.NoError(t, err)
 
 			require.NotNil(t, g.GetNode(wantFile+"::f"))
-			t.Logf("package-qualified nodes: %v", g.GetNodesByQualNames([]string{tc.packageName})[tc.packageName])
-			for _, n := range g.AllNodes() {
-				if n.FilePath == wantFile {
-					t.Logf("entry node: id=%s kind=%s qualName=%s", n.ID, n.Kind, n.QualName)
-				}
-			}
 			var importTargets []string
 			var calls int
 			for _, e := range g.AllEdges() {
@@ -157,11 +151,9 @@ func TestMultiIndexer_TrackedNpmPackage(t *testing.T) {
 				switch e.Kind {
 				case graph.EdgeImports:
 					importTargets = append(importTargets, e.To)
-					t.Logf("import: %s -> %s crossRepo=%v", e.From, e.To, e.CrossRepo)
 					assert.Equal(t, tc.resolves, e.CrossRepo)
 				case graph.EdgeCalls:
 					calls++
-					t.Logf("call: %s -> %s crossRepo=%v", e.From, e.To, e.CrossRepo)
 					if tc.resolves {
 						assert.Equal(t, wantFile+"::f", e.To)
 						assert.True(t, e.CrossRepo)
