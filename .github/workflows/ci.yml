@@ -14,19 +14,156 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test-partition:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: python3 -m unittest scripts/test_ci_test_partition.py
+
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      linux: ${{ steps.plan.outputs.linux }}
+      platform: ${{ steps.plan.outputs.platform }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The committed timing files are part of the key, so committing new
+      # ones starts a fresh cache instead of being shadowed by an old one.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ci-timings/
+          key: ci-timings-${{ hashFiles('scripts/ci-race-timings.json', 'scripts/ci-plain-timings.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ci-timings-${{ hashFiles('scripts/ci-race-timings.json', 'scripts/ci-plain-timings.json') }}-
+      - name: Plan time-balanced partitions
+        id: plan
+        run: python3 scripts/ci-test-partition.py --plan
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-timings-used
+          path: ci-timings/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
   test:
+    name: test (${{ matrix.os }}, ${{ matrix.go-version }}, ${{ matrix.partition }})
+    needs: plan
+    env:
+      TEST_OS: ${{ matrix.os }}
+      TEST_PARTITION: ${{ matrix.partition }}
+      TEST_SHARD_COUNT: ${{ matrix.shard_count }}
     runs-on: ${{ matrix.os }}
-    # Give store/indexer six and MCP three exhaustive top-level test shards so
-    # race/coverage runs fit within the existing package and job time limits.
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        go-version: ['1.27']
-        partition: [remaining, store-0, store-1, store-2, store-3, store-4, store-5, indexer-0, indexer-1, indexer-2, indexer-3, indexer-4, indexer-5, mcp-0, mcp-1, mcp-2]
+      matrix: ${{ fromJSON(needs.plan.outputs.linux) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ci-timings-used
+          path: ci-timings/
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Go cache paths
+        id: cache-paths
+        shell: bash
+        run: |
+          echo "build=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "mod=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.cache-paths.outputs.build }}
+            ${{ steps.cache-paths.outputs.mod }}
+          key: go-race-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-race-${{ runner.os }}-${{ hashFiles('go.sum') }}-
+            go-race-${{ runner.os }}-
+
+      - name: Build
+        run: go build -o gortex ./cmd/gortex/
+
+      - name: Test
+        id: test
+        # Below the job limit, so a slow shard fails this step instead of
+        # cancelling the job, and its passed tests are still recorded.
+        timeout-minutes: 52
+        shell: bash
+        env:
+          TEST_RACE: "true"
+          SAVE_TIMINGS: ${{ (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+        run: |
+          if [[ "$SAVE_TIMINGS" == true && "$TEST_SHARD_COUNT" != 0 ]]; then
+            python3 scripts/ci-test-partition.py 2>&1 | tee test-output.log
+          else
+            python3 scripts/ci-test-partition.py
+          fi
+
+      - name: Warm race cache for sharded packages
+        if: ${{ !cancelled() && matrix.partition == 'remaining' && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+        run: |
+          # The census builds without coverage; the shard tests build with it.
+          mkdir -p "$RUNNER_TEMP/race-warm" "$RUNNER_TEMP/race-warm-cover"
+          go test -race -c -o "$RUNNER_TEMP/race-warm/" ./internal/graph/store_sqlite ./internal/indexer ./internal/mcp
+          go test -race -cover -c -o "$RUNNER_TEMP/race-warm-cover/" ./internal/graph/store_sqlite ./internal/indexer ./internal/mcp
+
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ !cancelled() && matrix.partition == 'remaining' && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+        with:
+          path: |
+            ${{ steps.cache-paths.outputs.build }}
+            ${{ steps.cache-paths.outputs.mod }}
+          key: go-race-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+
+      - name: Upload coverage
+        if: matrix.os == 'ubuntu-latest'
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          files: coverage.out
+        continue-on-error: true
+
+      # A failed or timed-out shard still records the tests that passed.
+      - name: Write shard timings
+        if: ${{ !cancelled() && (steps.test.outcome == 'success' || steps.test.outcome == 'failure') && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && matrix.shard_count > 0 }}
+        shell: bash
+        env:
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+        run: python3 scripts/ci-test-partition.py --write-timings test-output.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() && (steps.test.outcome == 'success' || steps.test.outcome == 'failure') && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && matrix.shard_count > 0 }}
+        with:
+          name: ci-timings-${{ matrix.os }}-${{ matrix.partition }}
+          path: ci-shard-timings/*.json
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 7
+
+  test-platform:
+    name: test-platform (${{ matrix.os }}, ${{ matrix.go-version }}, ${{ matrix.partition }})
+    needs: plan
+    env:
+      TEST_OS: ${{ matrix.os }}
+      TEST_PARTITION: ${{ matrix.partition }}
+      TEST_SHARD_COUNT: ${{ matrix.shard_count }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.platform) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ci-timings-used
+          path: ci-timings/
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -35,17 +172,21 @@ jobs:
       - name: Build
         run: go build -o gortex ./cmd/gortex/
 
-      # Derive each platform's compiled census; assign every top-level case once.
-      # Linux and macOS retain race/coverage checks; Windows retains its
-      # normal verbose run, whose per-test timings expose slow fixtures.
+      # Per-run plain timings require Windows -v output.
       - name: Test
+        id: test
+        # Below the job limit, so a slow shard fails this step instead of
+        # cancelling the job, and its passed tests are still recorded.
+        timeout-minutes: 52
         shell: bash
         env:
-          TEST_PARTITION: ${{ matrix.partition }}
+          TEST_RACE: "false"
+          SAVE_TIMINGS: ${{ (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
           TEST_WINDOWS: ${{ matrix.os == 'windows-latest' }}
         run: |
-          if [[ "$TEST_WINDOWS" == true ]]; then
-            python - <<'PY_WINDOWS_TESTS'
+          run_tests() {
+            if [[ "$TEST_WINDOWS" == true ]]; then
+              python - <<'PY_WINDOWS_TESTS'
           import os
           from pathlib import Path
           import subprocess
@@ -57,16 +198,68 @@ jobs:
           print("Windows test GOTMPDIR:", scratch, flush=True)
           sys.exit(subprocess.call([sys.executable, "scripts/ci-test-partition.py"]))
           PY_WINDOWS_TESTS
+            else
+              python3 scripts/ci-test-partition.py
+            fi
+          }
+          if [[ "$SAVE_TIMINGS" == true && "$TEST_WINDOWS" == true && "$TEST_SHARD_COUNT" != 0 ]]; then
+            run_tests 2>&1 | tee test-output.log
           else
-            python3 scripts/ci-test-partition.py
+            run_tests
           fi
 
-      - name: Upload coverage
-        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.27'
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+      # A failed or timed-out shard still records the tests that passed.
+      - name: Write shard timings
+        if: ${{ !cancelled() && (steps.test.outcome == 'success' || steps.test.outcome == 'failure') && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && matrix.shard_count > 0 && matrix.os == 'windows-latest' }}
+        shell: bash
+        env:
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+        run: |
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            python scripts/ci-test-partition.py --write-timings test-output.log
+          else
+            python3 scripts/ci-test-partition.py --write-timings test-output.log
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() && (steps.test.outcome == 'success' || steps.test.outcome == 'failure') && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && matrix.shard_count > 0 && matrix.os == 'windows-latest' }}
         with:
-          files: coverage.out
-        continue-on-error: true
+          name: ci-timings-${{ matrix.os }}-${{ matrix.partition }}
+          path: ci-shard-timings/*.json
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 7
+
+  timings:
+    needs: [plan, test, test-platform]
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ci-timings-used
+          path: ci-timings/
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: ci-timings-*-*
+          merge-multiple: true
+          path: ci-shard-timings/
+      - name: Merge measured timings
+        run: python3 scripts/ci-test-partition.py --merge-timings
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ci-timings/
+          key: ci-timings-${{ hashFiles('scripts/ci-race-timings.json', 'scripts/ci-plain-timings.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-timings-merged
+          overwrite: true
+          retention-days: 30
+          # Copy these files into scripts/ to update the committed fallback.
+          path: |
+            ci-timings/ci-race-timings.json
+            ci-timings/ci-plain-timings.json
 
   build-linux-static:
     # The linux release ships a statically linked binary so it runs on any
