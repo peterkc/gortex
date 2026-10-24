@@ -1245,3 +1245,38 @@ func TestCheckoutLifecycleReloadKeepsImplicitLiveRepo(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, pending)
 }
+
+func TestCheckoutLifecycleReloadKeepsNonGitImplicitLiveRepo(t *testing.T) {
+	f := newLifecycleFixture(t)
+	t.Cleanup(f.close)
+	root := filepath.Join(t.TempDir(), "implicit")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	writeFile(t, filepath.Join(root, "lib.go"), "package lib\nfunc Kept() {}\n")
+	_, err := f.mi.TrackRepoCtx(t.Context(), config.RepoEntry{Path: root, Name: "implicit"})
+	require.NoError(t, err)
+	require.NoError(t, f.lc.RecordImplicit(t.Context(), root))
+	before := f.store.GetFileNodes("implicit/lib.go")
+	require.NotEmpty(t, before)
+	f.cm.Global().Repos = nil
+	require.NoError(t, f.cm.Global().Save())
+	require.NoError(t, f.cm.Reload())
+	out, err := f.lc.ApplyReload(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, out.Removed, "an implicit non-Git root is still live")
+	require.Zero(t, out.Pending)
+	require.NotNil(t, f.mi.GetMetadata("implicit"))
+	require.Equal(t, before, f.store.GetFileNodes("implicit/lib.go"))
+	// Explicit tracking supersedes the observation. A later config removal must
+	// still take the normal non-catalog teardown path.
+	require.NoError(t, f.cm.Global().AddRepo(config.RepoEntry{Path: root, Name: "implicit"}))
+	_, err = f.lc.Register(t.Context(), config.RepoEntry{Path: root, Name: "implicit"}, TrackSourceCLI)
+	require.NoError(t, err)
+	require.NoError(t, f.cm.Global().RemoveRepo(root))
+	require.NoError(t, f.cm.Global().Save())
+	require.NoError(t, f.cm.Reload())
+	removed, err := f.lc.ApplyReload(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, removed.Removed)
+	require.Nil(t, f.mi.GetMetadata("implicit"))
+	require.Empty(t, f.store.GetFileNodes("implicit/lib.go"))
+}
