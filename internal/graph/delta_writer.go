@@ -800,7 +800,7 @@ func (g *Graph) reindexStoredEdges(batch []EdgeReindex) {
 		defer g.endReceiptMutation()
 	}
 	prepared := make([]EdgeReindex, 0, len(batch))
-	seen := make(map[edgeKey]struct{}, len(batch))
+	moving := make(map[edgeKey]bool, len(batch))
 	for _, r := range batch {
 		if r.Edge == nil {
 			continue
@@ -817,7 +817,7 @@ func (g *Graph) reindexStoredEdges(batch []EdgeReindex) {
 			}
 			old.FilePath, old.Line = r.OldFilePath, r.OldLine
 		}
-		if _, duplicate := seen[old]; duplicate {
+		if _, duplicate := moving[old]; duplicate {
 			continue // The first row sent for an old identity wins.
 		}
 		if !r.RefreshIdentity {
@@ -835,9 +835,22 @@ func (g *Graph) reindexStoredEdges(batch []EdgeReindex) {
 				continue
 			}
 		}
-		g.recordReindexedEdgeForReceipts(r.Edge)
 		prepared = append(prepared, r)
-		seen[old] = struct{}{}
+		moving[old] = old != keyOf(r.Edge)
+	}
+	for i, r := range prepared {
+		if !r.RefreshIdentity {
+			if !moving[keyOf(r.Edge)] {
+				if existing := g.storedEdge(keyOf(r.Edge)); existing != nil {
+					// Like SQLite's INSERT OR IGNORE, a retarget onto a
+					// stationary destination keeps its payload and adds no
+					// resolver work. The old identity still has to be removed.
+					prepared[i].Edge = cloneDeltaEdge(existing)
+					continue
+				}
+			}
+		}
+		g.recordReindexedEdgeForReceipts(r.Edge)
 	}
 	g.reindexEdges(prepared)
 }

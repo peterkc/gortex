@@ -256,3 +256,38 @@ func TestDeltaWriterReindexDuplicateOldIdentitySameTarget(t *testing.T) {
 		})
 	}
 }
+
+func TestDeltaWriterRetargetPreservesExistingDestinationPayload(t *testing.T) {
+	for _, target := range []string{"b::Y", "unresolved::Y"} {
+		t.Run(target, func(t *testing.T) {
+			existing := &Edge{From: "a::A", To: target, Kind: EdgeReads, FilePath: "a.go", Line: 10,
+				Confidence: 0.7, ConfidenceLabel: "INFERRED", Origin: "ast_resolved"}
+			candidate := cloneDeltaEdge(existing)
+			candidate.To = "unresolved::valueref::Y"
+			if IsUnresolvedTarget(target) {
+				candidate.To = "b::X"
+			}
+			candidate.ConfidenceLabel = ""
+			candidate.Meta = map[string]any{"synthesized_by": "value-ref"}
+			store, g := retargetBatchStore(true, existing, candidate)
+			dw := store.(*DeltaWriter)
+			updated := cloneDeltaEdge(candidate)
+			updated.To = target
+			token := dw.BeginMutationReceipt()
+			batch := []EdgeReindex{{Edge: updated, OldTo: candidate.To}}
+			if !IsUnresolvedTarget(target) {
+				batch = append(batch, EdgeReindex{Edge: cloneDeltaEdge(existing), OldTo: target,
+					OldFilePath: existing.FilePath, OldLine: existing.Line, RefreshIdentity: true})
+			}
+			dw.ReindexEdges(batch)
+			assert.Equal(t, MutationReceipt{Complete: true}, dw.EndMutationReceipt(token),
+				"an existing destination creates no new resolver work")
+			assert.Empty(t, dw.GetInEdges(candidate.To))
+			out, in := g.GetOutEdges(existing.From), g.GetInEdges(target)
+			require.Len(t, out, 1)
+			require.Len(t, in, 1)
+			assert.Same(t, out[0], in[0])
+			assertRetargetBatchLifecycle(t, dw, g, existing)
+		})
+	}
+}
