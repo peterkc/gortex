@@ -18,7 +18,7 @@ env:
   GOMAXPROCS: 2
   GOTOOLCHAIN: local
   MAIN_SHA: 57faeca2fe4d742acb8f58da596529a2710c8e09
-  BRANCH_SHA: ${{ inputs.head_sha || 'c46d57e5f58ec05c1d6e2c4b0a274672f76181c9' }}
+  BRANCH_SHA: ${{ inputs.head_sha || 'bbd58affd1dd726bdc4d369ffb9916d2c64cec01' }}
 jobs:
   ab:
     if: github.repository == 'peterkc/gortex'
@@ -63,10 +63,11 @@ jobs:
             (cd "$side" && go test -p=1 -c -o "$RUNNER_TEMP/$side-indexer.test" ./internal/indexer) 2>&1 | tee "$side-indexer-build.log"
             (cd "$side" && go test -p=1 -c -o "$RUNNER_TEMP/$side-daemon.test" ./cmd/gortex) 2>&1 | tee "$side-daemon-build.log"
           done
-      - name: Alternate baseline and final head, 6 rounds
+      - name: Alternate baseline and final head, 6 rounds, order flipped each round
         run: |
           for round in 1 2 3 4 5 6; do
-            for side in main branch; do
+            if [ $((round % 2)) -eq 1 ]; then order="main branch"; else order="branch main"; fi
+            for side in $order; do
               echo "Round $round: $side indexer" | tee -a "$side.txt"
               (cd "$side/internal/indexer" && "$RUNNER_TEMP/$side-indexer.test" \
                 -test.run '^$' -test.bench '^BenchmarkPrefix(ReconcileRepo|CallChangingSave)$' \
