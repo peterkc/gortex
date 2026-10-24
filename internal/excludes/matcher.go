@@ -251,10 +251,10 @@ func (m *Matcher) MatchRelEither(relPath string) bool {
 	if rel == "" || rel == "." {
 		return false
 	}
-	if (m.includes != nil || len(m.literalIncludes) > 0) && (m.IncludesRel(rel) || m.IncludesRel(rel+"/")) {
+	if (!m.hasNegation || !m.checkUnmatchedParents) && !m.couldMatch(rel) {
 		return false
 	}
-	if (!m.hasNegation || !m.checkUnmatchedParents) && !m.couldMatch(rel) {
+	if (m.includes != nil || len(m.literalIncludes) > 0) && (m.IncludesRel(rel) || m.IncludesRel(rel+"/")) {
 		return false
 	}
 	matched, ip := m.ign.MatchesPathHow(rel)
@@ -374,10 +374,10 @@ func (m *Matcher) ExplainAbsDirInOpenDir(absPath, root string, isDir bool) (bool
 	if isDir {
 		rel += "/"
 	}
-	if m.IncludesRel(rel) {
+	if !m.couldMatch(rel) {
 		return false, ""
 	}
-	if !m.couldMatch(rel) {
+	if m.IncludesRel(rel) {
 		return false, ""
 	}
 	ign := m.ign

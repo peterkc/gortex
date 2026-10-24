@@ -55,7 +55,7 @@ func (m *Matcher) IncludesRel(rel string) bool {
 	if m.includesLiteral(rel) {
 		return true
 	}
-	if m.includes == nil {
+	if m.includes == nil || !m.includes.couldMatch(rel) {
 		return false
 	}
 	for i := range rel {

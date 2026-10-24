@@ -150,3 +150,32 @@ func TestMatchRelEitherDirectoryFormBoundaries(t *testing.T) {
 		}
 	}
 }
+
+func TestMatcherUnrelatedIncludeSkipsCompiledMatchers(t *testing.T) {
+	const rel = "src/a/b/c/d/e/f/g.go"
+	root := t.TempDir()
+	for _, surface := range []string{"walk", "watcher", "include"} {
+		t.Run(surface, func(t *testing.T) {
+			m := NewWithIncludes(Builtin, []string{"*.proto"})
+			// A nil compiled matcher panics if a prefilter miss evaluates it.
+			// Keep the include prefilter open when testing the outer prefilter,
+			// so neither guard can conceal a regression in the other.
+			m.includes.dirs, m.includes.ign = nil, nil
+			if surface != "include" {
+				m.includes.requiredLiterals = nil
+			}
+			var included, excluded bool
+			switch surface {
+			case "walk":
+				excluded, _ = m.ExplainAbsDirInOpenDir(filepath.Join(root, filepath.FromSlash(rel)), root, false)
+			case "watcher":
+				excluded = m.MatchRelEither(rel)
+			case "include":
+				included = m.IncludesRel(rel)
+			}
+			if included || excluded {
+				t.Fatal("unrelated include and exclude rules must not match")
+			}
+		})
+	}
+}
