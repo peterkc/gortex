@@ -397,7 +397,7 @@ func (cr *CrossRepoResolver) ResolveAllContext(ctx context.Context) (*CrossRepoS
 	cr.mu.Lock()
 	clear(cr.goModuleImportState().packages)
 	cr.mu.Unlock()
-	if err := cr.resolveGoModuleImportSweep(ctx, stats, nil); err != nil {
+	if err := cr.resolveGoModuleImportSweep(ctx, stats); err != nil {
 		return stats, err
 	}
 	cr.mu.Lock()
