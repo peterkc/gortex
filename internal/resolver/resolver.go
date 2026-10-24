@@ -4199,7 +4199,7 @@ func (r *Resolver) resolveExtern(e *graph.Edge, spec string, stats *ResolveStats
 	// the caller's repo prefix (see internal/graph/stub.go) so two repos
 	// pinned to different Go SDK versions get distinct fmt::Errorf nodes
 	// instead of one shared, version-conflated terminal.
-	if isStdlibLike(importPath) {
+	if isStdlibLike(importPath) && !trackedImport {
 		e.To = graph.StubID(r.stubRepoPrefix(e), graph.StubKindStdlib, importPath, symbol)
 	} else {
 		e.To = "dep::" + importPath + "::" + symbol

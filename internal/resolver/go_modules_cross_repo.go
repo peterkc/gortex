@@ -23,7 +23,7 @@ func (cr *CrossRepoResolver) resolveGoExtern(e *graph.Edge, spec string, stats *
 	}
 	match := cr.goModuleCandidate(spec[:sep], cr.cachedFindNodesByName(spec[sep+2:]), cr.callerRepoPrefix(e), cr.callerWorkspaceID(e))
 	if match == nil {
-		if isStdlibLike(spec[:sep]) {
+		if isStdlibLike(spec[:sep]) && !trackedGoImport(cr.goModulePaths, spec[:sep]) {
 			e.To = graph.StubID(cr.callerRepoPrefix(e), graph.StubKindStdlib, spec[:sep], spec[sep+2:])
 		} else {
 			e.To = "dep::" + spec
@@ -71,9 +71,18 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 	state.mu.Lock()
 	previous := maps.Clone(state.modules)
 	seedBindings := !state.complete
+	if seedBindings && len(cr.goModules) == 0 {
+		seedBindings = false
+		for _, repo := range cr.graph.RepoPrefixes() {
+			if len(graph.ReadRepoFilePaths(cr.graph, repo, "", []string{"go"}, nil)) > 0 {
+				seedBindings = true // persisted bindings survive removal of every go.mod
+				break
+			}
+		}
+	}
 	changedReplacements := !maps.EqualFunc(state.replacements, cr.goModuleReplacements, slices.Equal[[]GoModuleReplacement])
 	state.mu.Unlock()
-	if seedBindings || changedReplacements || !maps.Equal(previous, cr.goModules) {
+	if seedBindings || (changedReplacements && len(cr.goModules) > 0) || !maps.Equal(previous, cr.goModules) {
 		if seedBindings || changedReplacements {
 			previous = nil
 		}
@@ -96,8 +105,9 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 	cr.resolveGoModuleEdgesLocked(deferred, stats)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if state.complete && len(state.modules) == 0 && len(cr.goModules) == 0 && !changedReplacements {
-		state.revision = cr.goModuleRevision
+	if len(cr.goModules) == 0 {
+		state.modules, state.revision, state.complete = maps.Clone(cr.goModules), cr.goModuleRevision, true
+		state.replacements = maps.Clone(cr.goModuleReplacements)
 		return nil
 	}
 	if state.complete && state.revision == cr.goModuleRevision && maps.Equal(state.modules, cr.goModules) && !changedReplacements {
@@ -233,9 +243,16 @@ func (cr *CrossRepoResolver) goModuleIncomingEdgesBounded(nodesByFile map[string
 	}
 	var edges []*graph.Edge
 	sources := make(map[string]*graph.Node)
-	incomingByID, fact, err := graph.AdmitIncomingRowsBounded(context.Background(), cr.graph.GetInEdgesByNodeIDs, ids, budget)
-	if err != nil {
-		return nil, fact, err
+	var incomingByID map[string][]*graph.Edge
+	var fact graph.IncomingSourceAdmission
+	if budget == nil {
+		incomingByID = cr.graph.GetInEdgesByNodeIDs(ids)
+	} else {
+		var err error
+		incomingByID, fact, err = graph.AdmitIncomingRowsBounded(context.Background(), cr.graph.GetInEdgesByNodeIDs, ids, budget)
+		if err != nil {
+			return nil, fact, err
+		}
 	}
 	for _, incoming := range incomingByID {
 		for _, e := range incoming {
@@ -377,7 +394,7 @@ func (cr *CrossRepoResolver) resolveGoModuleEdgesLocked(edges []*graph.Edge, sta
 				continue
 			}
 			copy.CrossRepo, copy.Confidence, copy.ConfidenceLabel, copy.Origin, copy.Tier = false, 0, "", "", ""
-			if isStdlibLike(spec[:sep]) {
+			if isStdlibLike(spec[:sep]) && !trackedGoImport(cr.goModulePaths, spec[:sep]) {
 				copy.To = graph.StubID(caller, graph.StubKindStdlib, spec[:sep], spec[sep+2:])
 			} else {
 				copy.To = "dep::" + spec
