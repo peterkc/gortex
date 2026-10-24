@@ -36,7 +36,7 @@ func TestPruneDir_GitParentRuleAgreement(t *testing.T) {
 			}
 			t.Run(tc.name+"/"+mode, func(t *testing.T) {
 				root := t.TempDir()
-				for _, rel := range []string{"dir/keep.go", "dir/keep/deep.go", "dir/drop/drop.go", "open/a.go", "gen/keep/deep.go", "agent/skills/deep.go"} {
+				for _, rel := range []string{"dir/keep.go", "dir/keep/deep.go", "dir/drop/drop.go", "open/a.go", "gen/keep/deep.go", "agent/skills/deep.go", "node_modules/pkg/deep.go"} {
 					writeExcludeFixture(t, filepath.Join(root, rel), "package fixture\n")
 				}
 				// This file cannot reopen dir/ when the parent itself is excluded.
@@ -49,7 +49,11 @@ func TestPruneDir_GitParentRuleAgreement(t *testing.T) {
 					patterns = strings.Split(tc.rules, "\n")
 				}
 				idx := newAdmissionTestIndexer(t, root, patterns...)
-				w, err := NewWatcher(idx, config.WatchConfig{Exclude: patterns}, zap.NewNop())
+				watchPatterns := patterns
+				if !perFolder {
+					watchPatterns = idx.config.Exclude
+				}
+				w, err := NewWatcher(idx, config.WatchConfig{Exclude: watchPatterns}, zap.NewNop())
 				require.NoError(t, err)
 				filter := &watcherExcludeFilter{w: w}
 				expectedFiles := map[string]bool{}

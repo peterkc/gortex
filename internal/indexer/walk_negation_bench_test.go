@@ -15,15 +15,18 @@ import (
 	"github.com/zzet/gortex/internal/parser/languages"
 )
 
+var walkNegationPatterns = []string{"!node_modules/", "node_modules/**", "!node_modules/*/", "node_modules/*/*", "!*.proto"}
+
 // BenchmarkWalkDiskNegation times one full walk of a repository with an
-// excluded dependency tree, with and without a wildcard negation that can
-// match files inside it.
+// excluded dependency tree, with and without reopened parents and a wildcard
+// negation that matches protocol files inside it.
 func BenchmarkWalkDiskNegation(b *testing.B) {
 	root := b.TempDir()
 	for i := range 100 {
 		writeBenchFile(b, filepath.Join(root, "src", fmt.Sprintf("f%03d.go", i)), []byte("package src\n"))
 	}
 	for p := range 50 {
+		writeBenchFile(b, filepath.Join(root, "node_modules", fmt.Sprintf("pkg%02d", p), "schema.proto"), []byte("syntax = \"proto3\";\n"))
 		for f := range 40 {
 			writeBenchFile(b, filepath.Join(root, "node_modules", fmt.Sprintf("pkg%02d", p), "lib", fmt.Sprintf("m%02d.js", f)), []byte("module.exports = {}\n"))
 		}
@@ -33,7 +36,7 @@ func BenchmarkWalkDiskNegation(b *testing.B) {
 		extra []string
 	}{
 		{"without_negation", nil},
-		{"with_wildcard_negation", []string{"!*.proto"}},
+		{"with_wildcard_negation", walkNegationPatterns},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			reg := parser.NewRegistry()

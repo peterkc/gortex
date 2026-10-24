@@ -12,7 +12,7 @@ package excludes
 // Negations in global, RepoEntry or workspace excludes can reopen a folder,
 // but cannot reach through an excluded parent. Workspace include: literal
 // paths override these layers and keep their ancestors open. Git metadata
-// and non-MCP agent state remain hard-excluded.
+// and non-MCP state under .claude/ and .kiro/ remain hard-excluded.
 var Builtin = []string{
 	// Version-control metadata can contain huge object stores and working-copy
 	// state. Prune all common VCS directories before the walker descends.

@@ -37,7 +37,9 @@ func (idx *Indexer) CurrentSourceSearchFiles(ctx context.Context, root string, a
 	})
 	matcher := idx.excludeMatcher()
 	if patterns != nil {
+		idx.excludeMu.Lock()
 		matcher = idx.newExcludeMatcher(patterns)
+		idx.excludeMu.Unlock()
 	}
 	content := idx.newContentAdmissionGate()
 	untracked := idx.newUntrackedAssetGate(ctx, root)
@@ -114,7 +116,9 @@ func sourceSearchExcluded(matcher *excludes.Matcher, ignores *excludes.Hierarchi
 func (idx *Indexer) AdmitSourceSearchBuffer(ctx context.Context, root, path string, content []byte, patterns []string) bool {
 	matcher := idx.excludeMatcher()
 	if patterns != nil {
+		idx.excludeMu.Lock()
 		matcher = idx.newExcludeMatcher(patterns)
+		idx.excludeMu.Unlock()
 	}
 	if sourceSearchExcluded(matcher, excludes.NewHierarchicalWithDiagnostics(root, dirIgnoreFiles, func(dir string, m *excludes.Matcher) {
 		idx.warnExcludedNegationsAt(m, dir)

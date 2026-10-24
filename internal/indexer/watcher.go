@@ -162,6 +162,8 @@ type Watcher struct {
 	// currentExcludePatterns is installed by MultiWatcher for its configured
 	// repository. ConfigManager returns immutable, shared policy snapshots.
 	currentExcludePatterns func() []string
+	currentIncludePatterns func() []string
+	excludePolicyIncludes  []string
 	excludePolicyMu        sync.Mutex
 	excludePolicyPatterns  []string
 	excludePolicyMatcher   *excludes.Matcher
@@ -3277,10 +3279,12 @@ func (w *Watcher) currentExcludeMatcher() *excludes.Matcher {
 	}
 	w.excludePolicyMu.Lock()
 	patterns := w.currentExcludePatterns()
-	changed := !sameImmutableExcludeSnapshot(w.excludePolicyPatterns, patterns)
+	includes := w.currentIncludePatterns()
+	changed := !sameImmutableExcludeSnapshot(w.excludePolicyPatterns, patterns) || !sameImmutableExcludeSnapshot(w.excludePolicyIncludes, includes)
 	if changed {
 		w.excludePolicyPatterns = patterns
-		w.excludePolicyMatcher = excludes.NewWithIncludes(effectiveExcludePatterns(patterns), w.config.Include)
+		w.excludePolicyIncludes = includes
+		w.excludePolicyMatcher = excludes.NewWithIncludes(effectiveExcludePatterns(patterns), includes)
 	}
 	m := w.excludePolicyMatcher
 	w.excludePolicyMu.Unlock()

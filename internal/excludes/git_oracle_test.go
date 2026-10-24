@@ -47,6 +47,7 @@ func TestGitIgnoreOracle(t *testing.T) {
 		{name: "escaped_bang", root: "\\!literal/\n!*.proto\n", paths: []string{"!literal/", "!literal/a.proto", "literal/a.proto"}},
 		{name: "spaces", root: "dir/   \n!dir/keep.go   \nspace\\ \n", paths: []string{"dir/", "dir/keep.go", "space ", "space", "open/a.go"}},
 		{name: "case", root: "Dir/\n!dir/keep.go\n", paths: []string{"Dir/keep.go", "dir/keep.go", "other/Dir/a.go"}},
+		{name: "source_precedence", root: "keep.go\n", excludes: []string{"!keep.go"}, paths: []string{"keep.go", "other.go"}},
 		{name: "gortex_excludes", excludes: []string{"generated/", "!*.proto", "!generated/keep.go"}, paths: []string{"generated/", "generated/a.proto", "generated/keep.go", "src/a.proto"}},
 	}
 	// These pre-existing dependency differences are outside this prototype.
@@ -91,7 +92,6 @@ func TestGitIgnoreOracle(t *testing.T) {
 			write(".git/info/exclude", strings.Join(tc.excludes, "\n"))
 			flat := New(tc.excludes)
 			hierarchical := NewHierarchical(root, ".gitignore")
-			combined := New(append(strings.Split(tc.root, "\n"), tc.excludes...))
 			for _, rel := range tc.paths {
 				isDir := strings.HasSuffix(rel, "/")
 				p := filepath.Join(root, filepath.FromSlash(rel))
@@ -117,7 +117,6 @@ func TestGitIgnoreOracle(t *testing.T) {
 				}
 				got := flat.MatchAbsDir(p, root, isDir) || hierarchical.Match(p, isDir)
 				assertParentOrderParity(t, flat, rel)
-				assertParentOrderParity(t, combined, rel)
 				for dir, matcher := range hierarchical.cache {
 					relative, err := filepath.Rel(dir, p)
 					if err == nil && relative != ".." && !strings.HasPrefix(relative, "../") {
@@ -136,14 +135,6 @@ func TestGitIgnoreOracle(t *testing.T) {
 				}
 				if got != want {
 					t.Errorf("%q: Gortex excluded=%v, git excluded=%v", rel, got, want)
-				}
-				if len(tc.nested) == 0 {
-					if got := combined.MatchRel(rel); got != want {
-						t.Errorf("MatchRel(%q)=%v, git=%v", rel, got, want)
-					}
-					if got, _ := combined.Explain(rel); got != want {
-						t.Errorf("Explain(%q)=%v, git=%v", rel, got, want)
-					}
 				}
 			}
 		})

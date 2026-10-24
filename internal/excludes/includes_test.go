@@ -46,3 +46,13 @@ func TestIncludeBasenameOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestParentLimitedIncludesAnchoredOnly(t *testing.T) {
+	m := NewWithIncludes(Builtin, []string{"vendor/acme/keep.go", "/src/"})
+	if got := m.ParentLimitedIncludes(); len(got) != 0 {
+		t.Fatalf("anchored literals have no parent-limited patterns: %v", got)
+	}
+	if !m.IncludesRel("vendor/acme/keep.go") {
+		t.Fatal("literal include lost")
+	}
+}

@@ -375,6 +375,17 @@ func (cm *ConfigManager) EffectiveExclude(repoPrefix string) []string {
 	return cm.effectiveExcludeForRoot(repoPrefix, "")
 }
 
+// EffectiveInclude returns the workspace's shared immutable force-includes.
+// Workspace configs are replaced, never mutated in place.
+func (cm *ConfigManager) EffectiveInclude(repoPrefix string) []string {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	if ws := cm.workspace[repoPrefix]; ws != nil {
+		return ws.Include[:len(ws.Include):len(ws.Include)]
+	}
+	return nil
+}
+
 // EffectiveExcludeForRoot keeps configured repository layers while reading
 // the gitignore layer from a selected checkout's root. This scoped proof path
 // reads ignore bytes afresh, including edits that preserve size and mtime.

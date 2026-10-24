@@ -6701,13 +6701,14 @@ func sameImmutableExcludeSnapshot(a, b []string) bool {
 
 // refreshEffectiveExcludePatterns consumes ConfigManager's immutable snapshot
 // after repository mutation admission. Steady-state passes retain their matcher.
-func (idx *Indexer) refreshEffectiveExcludePatterns(patterns []string) {
+func (idx *Indexer) refreshEffectiveExcludePatterns(patterns, includes []string) {
 	idx.excludeMu.Lock()
 	defer idx.excludeMu.Unlock()
-	if sameImmutableExcludeSnapshot(idx.config.Exclude, patterns) {
+	if sameImmutableExcludeSnapshot(idx.config.Exclude, patterns) && sameImmutableExcludeSnapshot(idx.config.Include, includes) {
 		return
 	}
 	idx.config.Exclude = patterns
+	idx.config.Include = includes
 	idx.excludes.Store(idx.newExcludeMatcher(patterns))
 }
 
