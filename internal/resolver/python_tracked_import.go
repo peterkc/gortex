@@ -9,6 +9,12 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
+// PythonImportStubMeta preserves the import's exact target before a tracked bind.
+const PythonImportStubMeta = "python_import_stub"
+
+// PythonCallStubMeta retains the exact function, method or module-qualified call target.
+const PythonCallStubMeta = "python_call_stub"
+
 // PythonPackageLookup exposes only indexed tops from declared tracked
 // distributions. The indexer owns manifest I/O and consumer-local checks.
 type PythonPackageLookup struct {
@@ -123,10 +129,11 @@ func (cr *CrossRepoResolver) trackedPythonImportEdges() iter.Seq[*graph.Edge] {
 	return slices.Values(edges)
 }
 
-// Retry only import/file edges; never reconsider working links.
-func (cr *CrossRepoResolver) resolveTrackedPythonImports(ctx context.Context, edges iter.Seq[*graph.Edge], stats *CrossRepoStats) error {
+// Retry only import/file edges; never reconsider working links. Full passes
+// stream reopened calls later; scoped passes collect them for their pending list.
+func (cr *CrossRepoResolver) resolveTrackedPythonImports(ctx context.Context, edges iter.Seq[*graph.Edge], stats *CrossRepoStats, captureCalls bool) (reopened []*graph.Edge, err error) {
 	if cr.pythonPackages == nil {
-		return ctx.Err()
+		return reopened, ctx.Err()
 	}
 	next, stop := iter.Pull(edges)
 	defer stop()
@@ -135,7 +142,7 @@ func (cr *CrossRepoResolver) resolveTrackedPythonImports(ctx context.Context, ed
 		page := make([]*graph.Edge, 0, resolvePendingPageRows)
 		for len(page) < resolvePendingPageRows {
 			if err := ctx.Err(); err != nil {
-				return err
+				return reopened, err
 			}
 			e, ok := next()
 			if !ok {
@@ -148,7 +155,7 @@ func (cr *CrossRepoResolver) resolveTrackedPythonImports(ctx context.Context, ed
 			if lookup == nil {
 				lookup = cr.pythonPackages()
 				if lookup == nil {
-					return ctx.Err()
+					return reopened, ctx.Err()
 				}
 			}
 			if lookup.HasTop(top) {
@@ -156,10 +163,10 @@ func (cr *CrossRepoResolver) resolveTrackedPythonImports(ctx context.Context, ed
 			}
 		}
 		if err := ctx.Err(); err != nil {
-			return err
+			return reopened, err
 		}
 		if len(page) == 0 {
-			return nil
+			return reopened, nil
 		}
 		nodes := map[string]*graph.Node{}
 		sites := make([]graph.EdgeSite, 0, len(page))
@@ -193,6 +200,10 @@ func (cr *CrossRepoResolver) resolveTrackedPythonImports(ctx context.Context, ed
 					continue
 				}
 				old := e.To
+				if e.Meta == nil {
+					e.Meta = make(map[string]any)
+				}
+				e.Meta[PythonImportStubMeta], e.Meta["python_import"] = old, spec
 				e.To, e.CrossRepo = match.ID, true
 				batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: old})
 				projected.To, projected.CrossRepo = e.To, e.CrossRepo
@@ -203,6 +214,56 @@ func (cr *CrossRepoResolver) resolveTrackedPythonImports(ctx context.Context, ed
 		}
 		if len(batch) > 0 {
 			cr.graph.ReindexEdges(batch)
+			calls := cr.restubCallsForLinkedPythonImports(batch)
+			if captureCalls {
+				reopened = append(reopened, calls...)
+			}
 		}
 	}
+}
+
+// Reopen only synthesized calls backed by an import this bridge just linked.
+func (cr *CrossRepoResolver) restubCallsForLinkedPythonImports(changes []graph.EdgeReindex) []*graph.Edge {
+	specs := make(map[string][]string)
+	var files []string
+	for _, change := range changes {
+		spec, _ := change.Edge.Meta["python_import"].(string)
+		if stub, _ := change.Edge.Meta[PythonImportStubMeta].(string); stub == "" || spec == "" || !change.Edge.CrossRepo {
+			continue
+		}
+		file := change.Edge.FilePath
+		if _, seen := specs[file]; !seen {
+			files = append(files, file)
+		}
+		specs[file] = append(specs[file], spec)
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	var reopened []*graph.Edge
+	var batch []graph.EdgeReindex
+	for row := range graph.EdgesInScopeSeq(cr.graph, nil, files, graph.EdgeCalls) {
+		call := row.Edge
+		if call == nil {
+			continue
+		}
+		for _, spec := range specs[call.FilePath] {
+			original, _ := call.Meta[PythonCallStubMeta].(string)
+			target := externalCallPrefix + "dep::" + spec
+			if original == "" || (call.To != target && !strings.HasPrefix(call.To, target+".")) {
+				continue
+			}
+			old := call.To
+			graph.StashRestubProvenance(call)
+			delete(call.Meta, "external_call")
+			call.To, call.CrossRepo, call.ConfidenceLabel = original, false, ""
+			reopened = append(reopened, call)
+			batch = append(batch, graph.EdgeReindex{Edge: call, OldTo: old})
+			break
+		}
+	}
+	if len(batch) > 0 {
+		cr.graph.ReindexEdges(batch)
+	}
+	return reopened
 }

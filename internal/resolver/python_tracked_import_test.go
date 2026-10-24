@@ -38,11 +38,14 @@ func TestTrackedPythonImportRetry(t *testing.T) {
 			require.Len(t, imports, 1)
 			if target == "local.py" {
 				require.Equal(t, target, imports[0].To)
+				require.NotContains(t, imports[0].Meta, PythonImportStubMeta)
 				return
 			}
 			require.Equal(t, "provider/src/PIL/image.py", imports[0].To)
 			require.True(t, imports[0].CrossRepo)
 			require.Equal(t, "metadata", imports[0].Meta["keep"])
+			require.Equal(t, target, imports[0].Meta[PythonImportStubMeta])
+			require.Equal(t, "PIL.image", imports[0].Meta["python_import"])
 		})
 	}
 }
@@ -118,7 +121,9 @@ func (s *pythonImportPageStore) GetNode(id string) *graph.Node {
 }
 
 func (s *pythonImportPageStore) GetNodesByIDs(ids []string) map[string]*graph.Node {
-	s.callerBatches = append(s.callerBatches, len(ids))
+	if len(ids) > 0 { // Empty scoped-call projections perform no node hydration.
+		s.callerBatches = append(s.callerBatches, len(ids))
+	}
 	return s.Store.GetNodesByIDs(ids)
 }
 
