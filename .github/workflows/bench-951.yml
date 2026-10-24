@@ -1,0 +1,72 @@
+# Fork-only A/B benchmark for zzet/gortex#951. Do not merge.
+# Compares upstream main with the #951 head on the same runner, alternating order.
+name: bench-951
+on:
+  push:
+    branches: [exp/bench-951]
+permissions:
+  contents: read
+env:
+  MAIN_SHA: 57faeca2fe4d742acb8f58da596529a2710c8e09
+  BRANCH_SHA: 6d5149ae1f3cf4692d5b935ef3214ba88ccaadbb
+  GOMAXPROCS: '2'
+  GOFLAGS: '-p=1'
+jobs:
+  ab:
+    if: github.repository == 'peterkc/gortex'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.MAIN_SHA }}
+          path: main
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.BRANCH_SHA }}
+          path: branch
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: main/go.mod
+          cache: false
+      - name: Copy the branch's benchmark fixtures to main and build both test binaries (not timed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C main rev-parse HEAD > revisions.txt
+          git -C branch rev-parse HEAD >> revisions.txt
+          go version >> revisions.txt
+          cp branch/internal/indexer/walk_negation_bench_test.go main/internal/indexer/
+          cp branch/internal/indexer/watcher_exclusion_bench_test.go main/internal/indexer/
+          for side in main branch; do
+            (cd "$side" && go test -p=1 -c -o "$RUNNER_TEMP/$side.test" ./internal/indexer)
+          done
+      - name: Run A and B six times each, alternating order
+        timeout-minutes: 35
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > main.txt; : > branch.txt
+          for round in 1 2 3 4 5 6; do
+            if [ $((round % 2)) -eq 1 ]; then order="main branch"; else order="branch main"; fi
+            for side in $order; do
+              (cd "$side/internal/indexer" && "$RUNNER_TEMP/$side.test" \
+                -test.run '^$' -test.bench '^Benchmark(WalkDiskNegation|WatcherExclusion)$' \
+                -test.benchmem -test.count=1 -test.benchtime=1s -test.timeout=10m) | tee -a "$side.txt"
+            done
+          done
+      - name: Compare timings
+        shell: bash
+        run: |
+          set -euo pipefail
+          go run golang.org/x/perf/cmd/benchstat@v0.0.0-20260409210113-8e83ce0f7b1c main.txt branch.txt | tee benchstat.txt
+          cat benchstat.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: bench-951-ubuntu-24.04-arm
+          path: |
+            main.txt
+            branch.txt
+            benchstat.txt
+            revisions.txt
