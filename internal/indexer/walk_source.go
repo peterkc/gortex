@@ -120,8 +120,13 @@ func (idx *Indexer) admitScopedWalkFile(root, absPath string) bool {
 // (every .git folder among them) and leaves file admission to fn.
 func (idx *Indexer) walkDisk(root, scope string, fn fs.WalkDirFunc) error {
 	return filepath.WalkDir(scope, func(path string, d fs.DirEntry, err error) error {
-		if err == nil && d.IsDir() && idx.shouldPruneDir(path, root) {
-			return filepath.SkipDir
+		if err == nil && d.IsDir() {
+			// The scope may start below an excluded ancestor. Check it in
+			// full; descendants have open parents proved by this walk.
+			rules := pathExclusionRules{flat: idx.excludeMatcher(), perFolder: idx.perFolderIgnores(root), parentsOpen: path != scope}
+			if rules.match(path, root, true) {
+				return filepath.SkipDir
+			}
 		}
 		return fn(path, d, err)
 	})

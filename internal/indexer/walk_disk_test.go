@@ -21,7 +21,7 @@ import (
 func TestWalkDisk_PrunesDirectories(t *testing.T) {
 	root := t.TempDir()
 	for _, path := range []string{
-		"gen/drop.go", "gen/keep.go", "plain/a.go", "vendor/x.go",
+		"gen/drop.go", "gen/keep.go", "gen/child/a.go", "plain/a.go", "vendor/x.go",
 		"sub/drop/x.go", "sub/keep.go",
 	} {
 		writeExcludeFixture(t, filepath.Join(root, filepath.FromSlash(path)), "package sample\n")
@@ -49,9 +49,14 @@ func TestWalkDisk_PrunesDirectories(t *testing.T) {
 			scope: "vendor",
 			want:  nil,
 		},
+		{
+			name:  "inside_pruned_scope",
+			scope: "gen/child",
+			want:  nil,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			idx := newAdmissionTestIndexer(t, root, "gen/", "!gen/keep.go", "sub/drop/")
+			idx := newAdmissionTestIndexer(t, root, "gen/", "!gen/keep.go", "!gen/child/", "sub/drop/")
 			var visited []string
 			err := idx.walkDisk(root, filepath.Join(root, tc.scope), func(path string, d fs.DirEntry, err error) error {
 				require.NoError(t, err)
@@ -386,5 +391,46 @@ func TestExcludeMatcher_SkipsOpenParentWarnings(t *testing.T) {
 			idx.excludeMatcher()
 			require.Zero(t, logs.Len())
 		})
+	}
+}
+
+func TestWalkDiskOpenParentsDifferential(t *testing.T) {
+	root := t.TempDir()
+	for _, rel := range []string{
+		"src/main.go", "node_modules/pkg/schema.proto", "node_modules/pkg/lib/a.js",
+		"gen/keep/a.go", "gen/drop/a.go", "sub/gen/keep/a.go", "sub/gen/drop/a.go",
+		"vendor/acme/lib/a.go", "vendor/other/a.go", ".git/objects/x", ".claude/mcp.json", ".claude/worktrees/x/a.go",
+	} {
+		writeExcludeFixture(t, filepath.Join(root, rel), "fixture\n")
+	}
+	writeExcludeFixture(t, filepath.Join(root, "sub", ".gortexignore"), "gen/*\n!gen/keep/\n")
+	for _, patterns := range [][]string{
+		nil, {"!*.proto"}, walkNegationPatterns,
+		{"gen/*", "!gen/keep/"}, {"gen/", "!gen/keep/"},
+		{"/**", "!src/"}, {"gen/**/", "!gen/keep/"},
+	} {
+		for _, includes := range [][]string{nil, {"*.proto"}, {"vendor/acme/lib/"}, {"gen*/"}} {
+			idx := newAdmissionTestIndexer(t, root, patterns...)
+			idx.SetIgnorePatterns(idx.config.Exclude, includes)
+			for _, scope := range []string{root, filepath.Join(root, "gen"), filepath.Join(root, "gen/keep"), filepath.Join(root, "node_modules/pkg"), filepath.Join(root, "sub")} {
+				var got, want []string
+				err := idx.walkDisk(root, scope, func(path string, d fs.DirEntry, err error) error {
+					require.NoError(t, err)
+					got = append(got, path)
+					return nil
+				})
+				require.NoError(t, err)
+				err = filepath.WalkDir(scope, func(path string, d fs.DirEntry, err error) error {
+					require.NoError(t, err)
+					if d.IsDir() && idx.shouldPruneDir(path, root) {
+						return filepath.SkipDir
+					}
+					want = append(want, path)
+					return nil
+				})
+				require.NoError(t, err)
+				require.Equal(t, want, got, "patterns=%q includes=%q scope=%s", patterns, includes, scope)
+			}
+		}
 	}
 }
