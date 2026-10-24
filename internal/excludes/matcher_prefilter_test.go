@@ -117,3 +117,36 @@ func TestMatcherNoNegationPrefilterDifferential(t *testing.T) {
 		}
 	}
 }
+
+func TestMatchRelEitherNoNegationSkipsDirectoryPass(t *testing.T) {
+	for _, tc := range []struct{ pattern, path string }{
+		{"node_modules/", "src/node_modules/pkg/deep/index.js"},
+		{"*.log", "src/deep/build.log"}, {"out*", "out/file.go"},
+	} {
+		m := New([]string{tc.pattern})
+		if !m.MatchRel(tc.path) || !m.MatchRel(tc.path+"/") {
+			t.Fatal("invalid fixture")
+		}
+		// A sentinel miss makes a redundant second pass observable.
+		m.dirs = New(nil).dirs
+		if !m.MatchRelEither(tc.path) {
+			t.Errorf("%q: equivalent directory form was queried again", tc.pattern)
+		}
+	}
+}
+
+func TestMatchRelEitherDirectoryFormBoundaries(t *testing.T) {
+	for _, patterns := range [][]string{
+		{"gen/"}, {"gen//"}, {"gen/**"}, {"gen/**/"},
+		{"*.log", "gen/**"}, {"gen/", "!keep.go"},
+		{"gen/", "!gen/"}, {"/**", "!keep.go"},
+	} {
+		m := New(patterns)
+		for _, path := range []string{"gen", "gen/a.go", "sub/gen", "sub/gen/a.go", "a.log", "keep.go"} {
+			want := m.MatchRel(path) && m.MatchRel(path+"/")
+			if got := m.MatchRelEither(path); got != want {
+				t.Errorf("%q %q: got %v want %v", patterns, path, got, want)
+			}
+		}
+	}
+}

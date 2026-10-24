@@ -261,7 +261,19 @@ func (m *Matcher) MatchRelEither(relPath string) bool {
 	if m.hasNegation && (ip != nil || m.checkUnmatchedParents) && m.excludesParent(rel) {
 		return true
 	}
-	return matched && m.dirs.MatchesPath(rel)
+	if !matched {
+		return false
+	}
+	if !m.hasNegation && ip != nil {
+		// A matched file already crossed a directory-only marker. Only a
+		// terminal /** (or repeated slash) can change this positive verdict
+		// in the directory form; ordinary default rules need no second pass.
+		line := strings.TrimSuffix(m.patterns[ip.LineNo-1], "/")
+		if !strings.HasSuffix(line, "/") && !strings.HasSuffix(line, "/**") {
+			return true
+		}
+	}
+	return m.dirs.MatchesPath(rel)
 }
 
 // Explain reports whether a repo-root-relative path is excluded and, when
