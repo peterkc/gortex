@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/daemon"
+	"github.com/zzet/gortex/internal/gitstate"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/pathkey"
 	"github.com/zzet/gortex/internal/progress"
@@ -100,6 +102,39 @@ func declaredWorkspace(repoPath string) string {
 	return cfg.Workspace
 }
 
+// configuredWorktreePrefix mirrors the daemon's admin-name rule when the
+// family's primary checkout is in config. Explicit and workspace names keep
+// their existing precedence.
+func configuredWorktreePrefix(root string, entries []config.RepoEntry, owners map[string]string) string {
+	info := indexer.ResolveWorktree(root)
+	if !info.IsWorktree {
+		return ""
+	}
+	var base string
+	for _, entry := range entries {
+		if pathkey.SamePathIdentity(pathkey.CanonicalPath(entry.Path), pathkey.CanonicalPath(info.MainRepoPath)) {
+			base = config.ResolvePrefix(entry)
+			break
+		}
+	}
+	if base == "" {
+		return ""
+	}
+	inv, err := gitstate.Inventory(context.Background(), root)
+	if err != nil {
+		return ""
+	}
+	for _, record := range inv.Records {
+		if pathkey.SamePathIdentity(pathkey.CanonicalPath(record.Path), root) {
+			return indexer.DedicatedWorktreePrefix(base, record.AdminName, root, func(prefix string) (string, bool) {
+				owner, held := owners[prefix]
+				return pathkey.CanonicalPath(owner), held
+			})
+		}
+	}
+	return ""
+}
+
 func runTrack(cmd *cobra.Command, args []string) error {
 	rawPath := args[0]
 	w := cmd.ErrOrStderr()
@@ -181,6 +216,8 @@ func runTrack(cmd *cobra.Command, args []string) error {
 					prefix = indexer.WorktreeInstanceCollisionName(name, absPath)
 				}
 				entry.Name = prefix
+			} else if name := configuredWorktreePrefix(absPath, gc.Repos, owners); name != "" {
+				prefix, entry.Name = name, name
 			}
 		}
 		if owner, held := owners[prefix]; held && !pathkey.SamePathIdentity(pathkey.CanonicalPath(owner), absPath) {

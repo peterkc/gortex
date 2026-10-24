@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
@@ -87,6 +88,59 @@ func TestRunTrackSameWorkspaceWorktrees(t *testing.T) {
 				}
 				assert.True(t, found, "daemon must register the second worktree")
 			}
+		})
+	}
+}
+
+func TestRunTrackPlainLinkedWorktreeSameBasename(t *testing.T) {
+	for _, online := range []bool{false, true} {
+		t.Run(fmt.Sprint(online), func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("GORTEX_DAEMON_SOCKET", filepath.Join(t.TempDir(), "absent.sock"))
+			main := filepath.Join(t.TempDir(), "src")
+			linked := filepath.Join(t.TempDir(), "src")
+			require.NoError(t, os.MkdirAll(main, 0o755))
+			git := func(args ...string) {
+				t.Helper()
+				out, err := exec.Command("git", append([]string{"-C", main}, args...)...).CombinedOutput()
+				require.NoError(t, err, "%s", out)
+			}
+			git("init", "-q", "-b", "main")
+			git("-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "init")
+			git("worktree", "add", "-q", "-b", "linked", linked)
+			main, linked = pathkey.CanonicalExistingRoot(main), pathkey.CanonicalExistingRoot(linked)
+			gc, err := config.LoadGlobal()
+			require.NoError(t, err)
+			gc.Repos = []config.RepoEntry{{Path: main}}
+			require.NoError(t, gc.Save())
+			origWait, origName, origAs := trackWait, trackName, trackAsWorktree
+			origEnsure, origNotify := trackEnsureDaemonReadyFn, trackNotifyDaemonTrackFn
+			t.Cleanup(func() {
+				trackWait, trackName, trackAsWorktree = origWait, origName, origAs
+				trackEnsureDaemonReadyFn, trackNotifyDaemonTrackFn = origEnsure, origNotify
+			})
+			trackWait, trackName, trackAsWorktree = false, "", false
+			trackEnsureDaemonReadyFn = func(bool) daemonDecision {
+				if online {
+					return daemonReady
+				}
+				return daemonUnavailable
+			}
+			notified := false
+			trackNotifyDaemonTrackFn = func(path, name string, _ time.Time) error {
+				notified = true
+				assert.Equal(t, linked, path)
+				assert.Equal(t, "src@src", name)
+				return nil
+			}
+			cmd := &cobra.Command{}
+			cmd.SetErr(&bytes.Buffer{})
+			require.NoError(t, runTrack(cmd, []string{linked}))
+			gc, err = config.LoadGlobal()
+			require.NoError(t, err)
+			require.Len(t, gc.Repos, 2)
+			assert.Equal(t, "src@src", gc.Repos[1].Name)
+			assert.Equal(t, online, notified)
 		})
 	}
 }

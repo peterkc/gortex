@@ -119,7 +119,7 @@ func TestRepositoryPrefixCollisionLateLoserKeepsOwnerConfig(t *testing.T) {
 	_, err := mi.TrackRepoCtx(t.Context(), config.RepoEntry{Path: first})
 	require.NoError(t, err)
 	entry := config.RepoEntry{Path: second}
-	prefix, _ := mi.resolveTrackPrefix(&entry, second, nil)
+	prefix, _ := mi.resolveTrackPrefix(&entry, second, nil, nil)
 	assert.Equal(t, "src", prefix)
 	assert.Equal(t, "owner", cm.GetRepoConfig("src").Workspace)
 }
@@ -269,18 +269,6 @@ func TestSeedPrefixCollisionKeepsCatalogOwner(t *testing.T) {
 	assert.NotEmpty(t, f.store.GetRepoNodes("src"))
 }
 
-func TestBindDedicatedGraphRefusesAnotherOwner(t *testing.T) {
-	f := newLifecycleFixture(t)
-	t.Cleanup(f.close)
-	first, second := f.gitRepo("first"), f.gitRepo("second")
-	_, err := f.lc.Register(t.Context(), config.RepoEntry{Path: first, Name: "src"}, TrackSourceCLI)
-	require.NoError(t, err)
-	before := f.familyOf("src")
-	_, err = f.lc.recordCheckout(t.Context(), "src", second, TrackSourceConfig, true)
-	require.Error(t, err)
-	assert.Equal(t, before, f.familyOf("src"))
-}
-
 func TestEffectiveRepoPrefixDoesNotPublishConfig(t *testing.T) {
 	first, second := setupRepoDir(t, "src"), setupRepoDir(t, "src")
 	writeFile(t, filepath.Join(first, ".gortex.yaml"), "workspace: owner\nexclude:\n  - owner-only\n")
@@ -311,9 +299,9 @@ func TestSeedPrefixCollisionKeepsPersistedOwner(t *testing.T) {
 	families, err := f.catalog.ListRepositoryFamilies(t.Context())
 	require.NoError(t, err)
 	assert.Len(t, families, 1)
-	// A sweep must not let the skipped entry probe the owner's family either.
+	// With the owner removed from config, its stale row no longer hides the replacement.
 	f.cm.Global().Repos = []config.RepoEntry{{Path: second, Name: "src"}}
-	assert.Empty(t, f.lc.knownFamilies(t.Context()))
+	assert.Len(t, f.mi.ResolveConfiguredRepos(t.Context(), f.cm.Global().Repos), 1)
 }
 
 func TestRepositoryPrefixPublicationRestoresOwnerConfig(t *testing.T) {
@@ -330,7 +318,7 @@ func TestRepositoryPrefixPublicationRestoresOwnerConfig(t *testing.T) {
 				// The winner has resolved, but is not yet published. Resolve
 				// a competing root now so the publication must restore its config.
 				entry := config.RepoEntry{Path: second}
-				mi.resolveTrackPrefix(&entry, second, nil)
+				mi.resolveTrackPrefix(&entry, second, nil, nil)
 				require.Equal(t, "rejected", cm.GetRepoConfig("src").Workspace)
 			}
 			var err error

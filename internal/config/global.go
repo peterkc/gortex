@@ -231,6 +231,10 @@ func UnknownWorkspaceKeys(path string) []string {
 	if err != nil {
 		return nil
 	}
+	return unknownWorkspaceKeys(data)
+}
+
+func unknownWorkspaceKeys(data []byte) []string {
 	var raw map[string]any
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		return nil
@@ -486,6 +490,50 @@ func (gc *GlobalConfig) FindRepoByPath(root string) *RepoEntry {
 		}
 	}
 	return nil
+}
+
+// RepoPathLookup reads repository overrides from a fixed configuration snapshot.
+type RepoPathLookup func(root string) *RepoEntry
+
+// SnapshotRepoPaths canonicalizes configured roots once for a multi-repository pass.
+func (gc *GlobalConfig) SnapshotRepoPaths() RepoPathLookup {
+	return gc.snapshotRepoPaths(pathkey.CanonicalPath)
+}
+
+func (gc *GlobalConfig) snapshotRepoPaths(canonicalize func(string) string) RepoPathLookup {
+	type repoRoot struct {
+		path  string
+		entry RepoEntry
+	}
+	var roots []repoRoot
+	canonicalRoots := make(map[string]string)
+	if gc != nil {
+		for _, entry := range gc.ReposSnapshot() {
+			root := canonicalize(entry.Path)
+			canonicalRoots[entry.Path] = root
+			roots = append(roots, repoRoot{root, entry})
+		}
+		for _, project := range gc.Projects {
+			for _, entry := range project.Repos {
+				root := canonicalize(entry.Path)
+				canonicalRoots[entry.Path] = root
+				roots = append(roots, repoRoot{root, entry})
+			}
+		}
+	}
+	return func(root string) *RepoEntry {
+		if canonical, ok := canonicalRoots[root]; ok {
+			root = canonical
+		} else {
+			root = pathkey.CanonicalPath(root)
+		}
+		for i := range roots {
+			if pathkey.SamePathIdentity(roots[i].path, root) {
+				return &roots[i].entry
+			}
+		}
+		return gc.FindRepoByPath(root)
+	}
 }
 
 // checkDuplicatePrefixes returns errors for any duplicate Repo_Prefix values.
