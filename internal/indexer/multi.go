@@ -94,6 +94,7 @@ type MultiIndexer struct {
 	configMgr           *config.ConfigManager
 	logger              *zap.Logger
 	loggedCollisions    sync.Map
+	canonicalRoot       func(string) string
 	// newIndexer is instance-local so lifecycle tests can observe a constructor
 	// failure without publishing the candidate Indexer. Production instances set
 	// it to New; every per-repository construction flows through this factory.
@@ -2173,7 +2174,7 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 		}
 		identity, _ := DetectIdentity(absPath)
 		e := entry
-		prefix, cfg := mi.resolveTrackPrefix(&e, absPath, identity, configLookup)
+		prefix, cfg := mi.resolveTrackPrefix(&e, absPath, identity, configLookup, mi.configuredPrefixCheck())
 		// Two distinct checkouts can still land on the same derived prefix
 		// (e.g. two worktrees declaring the same workspace). resolveTrackPrefix
 		// only sees already-tracked repos, so guard against collisions within
@@ -2932,7 +2933,7 @@ func (mi *MultiIndexer) TrackRepo(entry config.RepoEntry) (*IndexResult, error) 
 // pins existing and family admin-name prefixes before reaching this fallback.
 // The prepared config is published only after live and configured ownership
 // checks succeed. A derived instance name is written back to entry for config.
-func (mi *MultiIndexer) resolveTrackPrefix(entry *config.RepoEntry, absPath string, identity *RepoIdentity, lookup config.RepoPathLookup) (string, *config.Config) {
+func (mi *MultiIndexer) resolveTrackPrefix(entry *config.RepoEntry, absPath string, identity *RepoIdentity, lookup config.RepoPathLookup, checkConfigured func(string, string) error) (string, *config.Config) {
 	base := config.ResolvePrefix(*entry)
 	if base == "" || base == "." {
 		if identity != nil {
@@ -2966,7 +2967,7 @@ func (mi *MultiIndexer) resolveTrackPrefix(entry *config.RepoEntry, absPath stri
 	}
 
 	// Configured owners can be absent from the live registry during warmup.
-	if mi.configuredPrefixCollision(prefix, absPath) != nil {
+	if checkConfigured(prefix, absPath) != nil {
 		return prefix, mi.configMgr.GetRepoConfig(prefix)
 	}
 	// Re-check ownership before publishing the prepared snapshot.
@@ -3045,11 +3046,12 @@ func (mi *MultiIndexer) trackRepoSourceCtx(
 // preparedTrackRepo carries one tracking attempt, not a namespace reservation
 // or an immutable configuration snapshot. It must not be cached across attempts.
 type preparedTrackRepo struct {
-	entry    config.RepoEntry
-	absPath  string
-	identity *RepoIdentity
-	prefix   string
-	cfg      *config.Config
+	entry           config.RepoEntry
+	absPath         string
+	identity        *RepoIdentity
+	prefix          string
+	cfg             *config.Config
+	checkConfigured func(string, string) error
 }
 
 // prepareTrackRepo resolves the existing pre-index inputs and runs the existing
@@ -3094,7 +3096,8 @@ func (mi *MultiIndexer) prepareTrackRepo(entry config.RepoEntry) (*preparedTrack
 	// slugs declared inside the repo (without it every repo would fall
 	// back to `workspace = repoPrefix`, making shared-workspace cross-repo
 	// matching impossible to express).
-	prefix, cfg := mi.resolveTrackPrefix(&entry, absPath, identity, nil)
+	checkConfigured := mi.configuredPrefixCheck()
+	prefix, cfg := mi.resolveTrackPrefix(&entry, absPath, identity, nil, checkConfigured)
 
 	// Check if already tracked. The prefix-keyed check catches the common
 	// case; the path scan additionally catches a case-only or Unicode
@@ -3109,7 +3112,7 @@ func (mi *MultiIndexer) prepareTrackRepo(entry config.RepoEntry) (*preparedTrack
 	}
 	hook := mi.onRepoTracked
 	mi.mu.RUnlock()
-	if err := mi.configuredPrefixCollision(prefix, absPath); err != nil {
+	if err := checkConfigured(prefix, absPath); err != nil {
 		return nil, err
 	}
 
@@ -3118,11 +3121,12 @@ func (mi *MultiIndexer) prepareTrackRepo(entry config.RepoEntry) (*preparedTrack
 	}
 
 	return &preparedTrackRepo{
-		entry:    entry,
-		absPath:  absPath,
-		identity: identity,
-		prefix:   prefix,
-		cfg:      cfg,
+		entry:           entry,
+		absPath:         absPath,
+		identity:        identity,
+		prefix:          prefix,
+		cfg:             cfg,
+		checkConfigured: checkConfigured,
 	}, nil
 }
 
@@ -3136,6 +3140,7 @@ func (mi *MultiIndexer) trackPreparedRepoSourceCtx(
 	identity := prepared.identity
 	prefix := prepared.prefix
 	cfg := prepared.cfg
+	checkConfigured := prepared.checkConfigured
 	var err error
 
 	// Every repo is prefixed, including the first one. There is no
@@ -3178,7 +3183,7 @@ func (mi *MultiIndexer) trackPreparedRepoSourceCtx(
 		if exists {
 			return collisionErr
 		}
-		if err := mi.configuredPrefixCollision(prefix, absPath); err != nil {
+		if err := checkConfigured(prefix, absPath); err != nil {
 			return err
 		}
 		topologyChanged = true
@@ -3284,7 +3289,8 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 	// TrackRepoCtx so a worktree instance keeps its derived prefix on the
 	// reconcile path too; config can change between sessions and warmup-
 	// time reconcile runs after a daemon restart.
-	prefix, cfg := mi.resolveTrackPrefix(&entry, absPath, identity, nil)
+	checkConfigured := mi.configuredPrefixCheck()
+	prefix, cfg := mi.resolveTrackPrefix(&entry, absPath, identity, nil, checkConfigured)
 	setupTiming.complete(nil, zap.String("prefix", prefix))
 
 	// Already tracked — nothing to do.
@@ -3299,7 +3305,7 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 		return nil, nil
 	}
 
-	if collision := mi.configuredPrefixCollision(prefix, absPath); collision != nil {
+	if collision := checkConfigured(prefix, absPath); collision != nil {
 		mi.logCollision(collision)
 		return nil, nil
 	}
@@ -3351,7 +3357,7 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 			mi.logCollision(collisionErr)
 			return nil
 		}
-		if collision := mi.configuredPrefixCollision(prefix, absPath); collision != nil {
+		if collision := checkConfigured(prefix, absPath); collision != nil {
 			mi.logCollision(collision)
 			return nil
 		}

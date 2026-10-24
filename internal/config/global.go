@@ -535,7 +535,25 @@ func (gc *GlobalConfig) repoEntriesLocked() []RepoEntry {
 	return entries
 }
 
+// RepoPathSnapshot shares canonical roots and entry lookups for one config revision.
+// Known roots need no filesystem work. Unknown roots use the caller's fallback.
+type RepoPathSnapshot struct {
+	Lookup         RepoPathLookup
+	canonicalRoots map[string]string
+}
+
+func (s *RepoPathSnapshot) CanonicalRoot(root string, canonicalize func(string) string) string {
+	if canonical, ok := s.canonicalRoots[root]; ok {
+		return canonical
+	}
+	return canonicalize(root)
+}
+
 func (gc *GlobalConfig) repoPathLookup(entries []RepoEntry, canonicalize func(string) string) RepoPathLookup {
+	return gc.repoPathSnapshot(entries, canonicalize).Lookup
+}
+
+func (gc *GlobalConfig) repoPathSnapshot(entries []RepoEntry, canonicalize func(string) string) *RepoPathSnapshot {
 	type repoRoot struct {
 		path  string
 		entry RepoEntry
@@ -561,7 +579,8 @@ func (gc *GlobalConfig) repoPathLookup(entries []RepoEntry, canonicalize func(st
 			roots[key] = append(roots[key], repoRoot{root, entry})
 		}
 	}
-	return func(root string) *RepoEntry {
+	snapshot := &RepoPathSnapshot{canonicalRoots: canonicalRoots}
+	snapshot.Lookup = func(root string) *RepoEntry {
 		if canonical, ok := canonicalRoots[root]; ok {
 			root = canonical
 		} else {
@@ -581,6 +600,7 @@ func (gc *GlobalConfig) repoPathLookup(entries []RepoEntry, canonicalize func(st
 		}
 		return nil
 	}
+	return snapshot
 }
 
 // checkDuplicatePrefixes returns errors for any duplicate Repo_Prefix values.

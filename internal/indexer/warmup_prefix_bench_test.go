@@ -37,7 +37,7 @@ func BenchmarkWarmupResolve200(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		lookup := cm.Global().SnapshotRepoPaths()
 		for _, entry := range entries {
-			_, _ = mi.resolveTrackPrefix(&entry, entry.Path, nil, lookup)
+			_, _ = mi.resolveTrackPrefix(&entry, entry.Path, nil, lookup, mi.configuredPrefixCheck())
 		}
 	}
 }

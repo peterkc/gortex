@@ -110,8 +110,8 @@ func TestPrepareWorkspaceConfigNilLookupReusesRootSnapshot(t *testing.T) {
 		require.Contains(t, cfg.Index.Exclude, "repo-only")
 		publish("src")
 	}
-	require.NotNil(t, cm.pathLookup, "daemon's nil-lookup path must populate the revision cache")
-	first := cm.pathLookup(root)
+	require.NotNil(t, cm.pathSnapshot, "daemon's nil-lookup path must populate the revision cache")
+	first := cm.pathSnapshot.Lookup(root)
 	_, _ = cm.PrepareWorkspaceConfig("src", root, nil)
-	require.Same(t, first, cm.pathLookup(root))
+	require.Same(t, first, cm.pathSnapshot.Lookup(root))
 }

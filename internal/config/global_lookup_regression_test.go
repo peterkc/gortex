@@ -79,3 +79,32 @@ func TestSnapshotRepoPathsMissUsesCurrentConfig(t *testing.T) {
 	assert.Equal(t, gc.FindRepoByPath(added), lookup(added))
 	assert.Equal(t, "added-during-pass", lookup(added).Name)
 }
+
+func TestRepoPathSnapshotReusesCanonicalRoots(t *testing.T) {
+	root := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	require.NoError(t, os.Symlink(root, alias))
+	gc := &GlobalConfig{Repos: []RepoEntry{{Path: alias, Name: "src"}}}
+	calls := 0
+	canonicalize := func(path string) string { calls++; return pathkey.CanonicalPath(path) }
+	snapshot := gc.repoPathSnapshot(gc.ReposSnapshot(), canonicalize)
+	require.Equal(t, 1, calls)
+	canonical := pathkey.CanonicalPath(root)
+	for range 3 {
+		require.Equal(t, canonical, snapshot.CanonicalRoot(alias, canonicalize))
+		require.Equal(t, canonical, snapshot.CanonicalRoot(canonical, canonicalize))
+		require.Equal(t, "src", snapshot.Lookup(alias).Name)
+	}
+	require.Equal(t, 1, calls, "both configured and canonical spellings reuse one canonicalization per revision")
+	cm, err := NewConfigManager(filepath.Join(t.TempDir(), "config.yaml"))
+	require.NoError(t, err)
+	require.NoError(t, cm.Global().AddRepo(gc.Repos[0]))
+	first := cm.RepoPathSnapshot()
+	require.Same(t, first, cm.RepoPathSnapshot())
+	cm.LoadWorkspaceConfig("src", root)
+	require.Same(t, first, cm.RepoPathSnapshot(), "workspace publication is not a repository revision")
+	require.NoError(t, cm.Global().Save())
+	require.NotSame(t, first, cm.RepoPathSnapshot())
+	require.NoError(t, cm.Reload())
+	require.NotSame(t, first, cm.RepoPathSnapshot())
+}

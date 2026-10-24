@@ -62,7 +62,7 @@ func TestResolveTrackPrefixUsesOneWorkspaceSnapshot(t *testing.T) {
 		done <- err
 	}()
 	entry := config.RepoEntry{Path: root}
-	prefix, cfg := mi.resolveTrackPrefix(&entry, root, nil, nil)
+	prefix, cfg := mi.resolveTrackPrefix(&entry, root, nil, nil, mi.configuredPrefixCheck())
 	select {
 	case err := <-done:
 		require.NoError(t, err)

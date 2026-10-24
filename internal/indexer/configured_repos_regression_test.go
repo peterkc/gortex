@@ -208,10 +208,12 @@ func TestConfiguredOwnerRejectsTrackBeforeWarmup(t *testing.T) {
 				_, err = f.lc.Register(t.Context(), entry, TrackSourceCLI)
 			case "coordinated-recheck":
 				f.cm.Global().Repos = nil
+				require.NoError(t, f.cm.Global().Save())
 				prepared, prepErr := f.mi.prepareTrackRepo(entry)
 				require.NoError(t, prepErr)
 				require.NotNil(t, prepared)
 				f.cm.Global().Repos = []config.RepoEntry{{Path: owner, Name: "src"}}
+				require.NoError(t, f.cm.Global().Save())
 				_, err = f.mi.trackPreparedRepoSourceCtx(t.Context(), prepared, nil)
 			}
 			require.ErrorAs(t, err, &collision)
@@ -297,6 +299,8 @@ func TestDedicatedGraphBindingRejectsDifferentOwner(t *testing.T) {
 	f := newLifecycleFixture(t)
 	t.Cleanup(f.close)
 	owner, other := f.gitRepo("owner"), f.gitRepo("other")
+	require.NoError(t, f.cm.Global().AddRepo(config.RepoEntry{Path: owner, Name: "src"}))
+	require.NoError(t, f.cm.Global().Save())
 	for i, root := range []string{owner, other} {
 		name := []string{"src", "other"}[i]
 		_, err := f.lc.recordCheckout(t.Context(), name, root, TrackSourceConfig, true)
@@ -355,4 +359,57 @@ func TestKnownFamiliesSweepKeepsUnloadedCollisionInstances(t *testing.T) {
 	report, err := f.lc.Sweep(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, 2, report.Families, "both dedicated families need their janitor pass")
+}
+
+func TestConfiguredWorktreeReconcileCanonicalizesRootsOnce(t *testing.T) {
+	f := newLifecycleFixture(t)
+	t.Cleanup(f.close)
+	main := f.gitRepo("proj")
+	worktrees := []string{f.worktreeOf(main, "one"), f.worktreeOf(main, "two")}
+	entries := []config.RepoEntry{{Path: main}}
+	prior := make(map[string]map[string]int64)
+	for _, root := range worktrees {
+		entries = append(entries, config.RepoEntry{Path: root, Name: "proj@" + filepath.Base(root)})
+	}
+	f.cm.Global().Repos = entries
+	require.NoError(t, f.cm.Global().Save())
+	for _, entry := range entries {
+		_, err := f.mi.TrackRepoCtx(t.Context(), entry)
+		require.NoError(t, err)
+		prior[entry.Path] = f.mi.GetMetadata(config.ResolvePrefix(entry)).FileMtimes
+	}
+	f.restart()
+	calls := 0
+	f.mi.canonicalRoot = func(root string) string { calls++; return pathkey.CanonicalPath(root) }
+	f.mi.BeginBatch()
+	defer f.mi.EndBatch()
+	for _, entry := range entries {
+		before := calls
+		_, err := f.mi.ReconcileRepoCtx(t.Context(), entry, prior[entry.Path])
+		require.NoError(t, err)
+		require.Equal(t, before, calls, "warm reconcile must reuse the per-revision canonical roots, including live family members")
+	}
+	require.Len(t, f.mi.AllMetadata(), len(entries))
+}
+
+func TestConfiguredPrefixCheckReusesResolutionUntilConfigChanges(t *testing.T) {
+	f := newLifecycleFixture(t)
+	t.Cleanup(f.close)
+	owner, first, second := f.gitRepo("owner"), f.gitRepo("first"), f.gitRepo("second")
+	_, err := f.mi.TrackRepoCtx(t.Context(), config.RepoEntry{Path: owner, Name: "src"})
+	require.NoError(t, err)
+	f.cm.Global().Repos = []config.RepoEntry{{Path: first, Name: "src"}, {Path: second, Name: "src"}}
+	require.NoError(t, f.cm.Global().Save())
+	calls := 0
+	f.mi.canonicalRoot = func(root string) string { calls++; return pathkey.CanonicalPath(root) }
+	check := f.mi.configuredPrefixCheck()
+	require.NoError(t, check("src", second))
+	firstCalls := calls
+	require.Positive(t, firstCalls, "the non-configured live owner must be resolved")
+	require.NoError(t, check("src", second))
+	require.NoError(t, check("src", second))
+	require.Equal(t, firstCalls, calls, "publication and coordinated rechecks reuse the same resolution")
+	require.NoError(t, f.cm.Global().Save())
+	require.NoError(t, check("src", second))
+	require.Greater(t, calls, firstCalls, "a repository revision requires a fresh ownership decision")
 }

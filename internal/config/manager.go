@@ -43,7 +43,7 @@ type ConfigManager struct {
 	lookupMu       sync.Mutex
 	lookupGlobal   *GlobalConfig
 	lookupRevision uint64
-	pathLookup     RepoPathLookup
+	pathSnapshot   *RepoPathSnapshot
 }
 
 // NewConfigManager creates a ConfigManager by loading the GlobalConfig
@@ -77,19 +77,28 @@ func (cm *ConfigManager) RepoPathLookup() RepoPathLookup {
 }
 
 func (cm *ConfigManager) repoPathLookup(gc *GlobalConfig) RepoPathLookup {
+	return cm.repoPathSnapshot(gc).Lookup
+}
+
+// RepoPathSnapshot reuses canonical roots until the repository settings change.
+func (cm *ConfigManager) RepoPathSnapshot() *RepoPathSnapshot {
+	return cm.repoPathSnapshot(cm.Global())
+}
+
+func (cm *ConfigManager) repoPathSnapshot(gc *GlobalConfig) *RepoPathSnapshot {
 	cm.lookupMu.Lock()
 	defer cm.lookupMu.Unlock()
 	globalConfigMu.Lock()
 	revision := gc.repoRevision
-	if cm.lookupGlobal == gc && cm.lookupRevision == revision && cm.pathLookup != nil {
+	if cm.lookupGlobal == gc && cm.lookupRevision == revision && cm.pathSnapshot != nil {
 		globalConfigMu.Unlock()
-		return cm.pathLookup
+		return cm.pathSnapshot
 	}
 	entries := gc.repoEntriesLocked()
 	globalConfigMu.Unlock()
-	cm.pathLookup = gc.repoPathLookup(entries, pathkey.CanonicalPath)
+	cm.pathSnapshot = gc.repoPathSnapshot(entries, pathkey.CanonicalPath)
 	cm.lookupGlobal, cm.lookupRevision = gc, revision
-	return cm.pathLookup
+	return cm.pathSnapshot
 }
 
 // SetLogger sets the logger for the ConfigManager.

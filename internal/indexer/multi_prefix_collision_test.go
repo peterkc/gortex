@@ -119,7 +119,7 @@ func TestRepositoryPrefixCollisionLateLoserKeepsOwnerConfig(t *testing.T) {
 	_, err := mi.TrackRepoCtx(t.Context(), config.RepoEntry{Path: first})
 	require.NoError(t, err)
 	entry := config.RepoEntry{Path: second}
-	prefix, _ := mi.resolveTrackPrefix(&entry, second, nil, nil)
+	prefix, _ := mi.resolveTrackPrefix(&entry, second, nil, nil, mi.configuredPrefixCheck())
 	assert.Equal(t, "src", prefix)
 	assert.Equal(t, "owner", cm.GetRepoConfig("src").Workspace)
 }
@@ -325,7 +325,7 @@ func TestRepositoryPrefixPublicationRestoresOwnerConfig(t *testing.T) {
 				// The winner has resolved, but is not yet published. Resolve
 				// a competing root now so the publication must restore its config.
 				entry := config.RepoEntry{Path: second}
-				mi.resolveTrackPrefix(&entry, second, nil, nil)
+				mi.resolveTrackPrefix(&entry, second, nil, nil, mi.configuredPrefixCheck())
 				require.Equal(t, "rejected", cm.GetRepoConfig("src").Workspace)
 			}
 			var err error

@@ -28,7 +28,7 @@ func BenchmarkResolveTrackPrefixRegistryReaders(b *testing.B) {
 	go func() {
 		defer close(done)
 		entry := config.RepoEntry{Path: root, Name: "src"}
-		mi.resolveTrackPrefix(&entry, root, nil, nil)
+		mi.resolveTrackPrefix(&entry, root, nil, nil, mi.configuredPrefixCheck())
 		close(started)
 		for {
 			select {
@@ -36,7 +36,7 @@ func BenchmarkResolveTrackPrefixRegistryReaders(b *testing.B) {
 				return
 			default:
 				entry := config.RepoEntry{Path: root, Name: "src"}
-				mi.resolveTrackPrefix(&entry, root, nil, nil)
+				mi.resolveTrackPrefix(&entry, root, nil, nil, mi.configuredPrefixCheck())
 			}
 		}
 	}()

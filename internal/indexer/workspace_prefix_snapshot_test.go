@@ -51,7 +51,7 @@ func TestResolveTrackPrefixMalformedRekeyKeepsConfigConsistent(t *testing.T) {
 	cm.LoadWorkspaceConfig("src", root)
 	require.NoError(t, os.WriteFile(path, []byte("workspace: ["), 0o644))
 	entry := config.RepoEntry{Path: root, AsWorktree: true}
-	prefix, cfg := mi.resolveTrackPrefix(&entry, root, nil, nil)
+	prefix, cfg := mi.resolveTrackPrefix(&entry, root, nil, nil, mi.configuredPrefixCheck())
 	require.Equal(t, "src@team", prefix)
 	cached := cm.GetRepoConfig(prefix)
 	assert.Equal(t, cfg.Workspace, cached.Workspace)
