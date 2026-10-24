@@ -184,7 +184,7 @@ func (cm *ConfigManager) PrepareWorkspaceConfig(repoPrefix, repoPath string, loo
 	cfg := cm.repoConfig(repoPrefix, workspace, repoPath, lookup)
 	return cfg, func(prefix string) {
 		// Publish the same snapshot used to build cfg, even after a rekey.
-		cm.publishPreparedWorkspaceConfig(prefix, repoPath, workspace, true)
+		cm.publishPreparedWorkspaceConfig(prefix, repoPath, workspace, authoritative)
 	}
 }
 
@@ -268,7 +268,12 @@ func (cm *ConfigManager) publishPreparedWorkspaceConfig(repoPrefix, repoPath str
 	}
 	switch {
 	case !authoritative:
-		// Keep the last good parse.
+		// Keep the final prefix's last good parse. A newly derived prefix
+		// may inherit the same root's fallback when it has no parse yet.
+		if cm.workspace[repoPrefix] == nil && cfg != nil {
+			cm.workspace[repoPrefix] = cfg
+			changed = true
+		}
 	case cfg == nil:
 		if _, ok := cm.workspace[repoPrefix]; ok {
 			delete(cm.workspace, repoPrefix)
@@ -432,9 +437,6 @@ func (cm *ConfigManager) effectiveExcludeForRoot(repoPrefix, root string) []stri
 	repoPath := cm.workspacePaths[repoPrefix]
 	cm.mu.RUnlock()
 
-	if root != "" {
-		repoPath = root
-	}
 	return cm.effectiveExclude(repoPrefix, gc, ws, repoPath, root, nil)
 }
 
@@ -443,7 +445,7 @@ func (cm *ConfigManager) effectiveExclude(repoPrefix string, gc *GlobalConfig, w
 	var chain []gitignoreLayer
 	if respect && repoPath != "" {
 		if root != "" {
-			chain = gitignoreChain(repoPath)
+			chain = gitignoreChain(root)
 		} else {
 			chain = cm.excludeCache.chain(repoPath)
 		}

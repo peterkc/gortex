@@ -88,3 +88,28 @@ func TestSnapshotRepoPathsMissReturnsDetachedEntry(t *testing.T) {
 	assert.Equal(t, "late", entry.Name, "a returned snapshot entry must not alias a mutable live slice")
 	assert.Equal(t, "replacement", lookup(root).Name, "the next miss must see current config")
 }
+
+func TestEffectiveExcludeForRootKeepsRegisteredRepoOverrides(t *testing.T) {
+	registered, checkout := t.TempDir(), t.TempDir()
+	cm, err := NewConfigManager(filepath.Join(t.TempDir(), "global.yaml"))
+	require.NoError(t, err)
+	cm.Global().Repos = []RepoEntry{{Path: registered, Name: "src", Exclude: []string{"selected/secrets/**"}}}
+	cm.LoadWorkspaceConfig("src", registered)
+	require.NoError(t, os.WriteFile(filepath.Join(checkout, ".gitignore"), []byte("checkout-only\n"), 0o644))
+	patterns := cm.EffectiveExcludeForRoot("src", checkout)
+	assert.Contains(t, patterns, "selected/secrets/**")
+	assert.Contains(t, patterns, "checkout-only")
+}
+
+func TestPrepareWorkspaceConfigMalformedKeepsFinalPrefix(t *testing.T) {
+	root := t.TempDir()
+	cm, err := NewConfigManager(filepath.Join(t.TempDir(), "global.yaml"))
+	require.NoError(t, err)
+	path := filepath.Join(root, ".gortex.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("exclude: [kept]\n"), 0o644))
+	cm.LoadWorkspaceConfig("src@team", root)
+	require.NoError(t, os.WriteFile(path, []byte("workspace: ["), 0o644))
+	_, publish := cm.PrepareWorkspaceConfig("src", root, nil)
+	publish("src@team")
+	assert.Contains(t, cm.GetRepoConfig("src@team").Index.Exclude, "kept")
+}
