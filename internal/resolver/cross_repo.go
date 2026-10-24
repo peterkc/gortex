@@ -1201,7 +1201,7 @@ func (cr *CrossRepoResolver) resolveEdge(e *graph.Edge, stats *CrossRepoStats, b
 			}
 			return eligible, nil
 		}
-		if resolvePythonModuleExtern(e, module, symbol, callerRepo, &ResolveStats{}, find) {
+		if resolvePythonModuleExtern(e, module, symbol, callerRepo, &ResolveStats{}, find) || cr.resolvePythonPackageReExport(e, module, symbol) {
 			stats.Resolved++
 			if e.CrossRepo {
 				stats.CrossRepoEdges++

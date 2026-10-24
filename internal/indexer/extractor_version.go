@@ -40,6 +40,7 @@ var extractorVersions = map[string]int{
 	//   "go": 2,
 	"c":      generatedParserProjectionPolicyVersion, // generated parser projection covers all strictly detected table sizes
 	"php":    2,                                      // class/interface inheritance now emits typed structural edges
+	"python": 2,                                      // package relative from-imports retain exact re-export bindings
 	"csharp": 24,                                     // receiverless calls bound by a local function / delegate parameter / local carry local_shadow (was: partial / conditionally-compiled properties carry their recorded ownership span)
 	"scala":  2,                                      // explicitly instantiated generic calls emit call edges
 	"go":     4,                                      // zero-initialized local declarations exist before reads/assignments (was: generic instantiations are marked)
