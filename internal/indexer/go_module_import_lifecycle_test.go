@@ -149,7 +149,7 @@ func TestGoModuleImportParkBeforeEviction(t *testing.T) {
 					restubGoModuleRepoIncoming(g, "b")
 				} else if route == "deleted_batch" {
 					provider := g.GetNode("b/lib.go")
-					carried := restubIncomingRefsFromView(g,
+					carried, _ := restubIncomingRefsFromView(g,
 						[]*incrementalBatchStage{{graphPath: "b/lib.go", priorNodes: []*graph.Node{provider}}},
 						incrementalPriorView{inByNode: g.GetInEdgesByNodeIDs([]string{provider.ID})})
 					assert.Empty(t, carried, "a deleted file cannot carry a resolved target")
