@@ -244,7 +244,10 @@ func TestGoModuleUntrackRetainsOnlyParkedIdentities(t *testing.T) {
 				require.NoError(t, err)
 			}
 			parked := restubGoModuleRepoIncoming(g, "b")
-			require.Len(t, parked, 1)
+			require.ElementsMatch(t, []graph.EdgeIdentity{
+				{From: "a/main.go", To: "unresolved::import::example.org/library", Kind: graph.EdgeImports, FilePath: "a/main.go", Line: 2},
+				{From: "a/main.go::Caller", To: "unresolved::extern::example.org/library::Hello", Kind: graph.EdgeCalls, FilePath: "a/main.go", Line: 3},
+			}, parked, "both caller-owned references must survive and settle")
 			assert.IsType(t, []graph.EdgeIdentity{}, parked, "teardown must not retain full metadata-bearing edge objects")
 			g.EvictFile("b/lib.go")
 			require.NoError(t, mi.finalizeUntrackedGoModuleCalls(parked))
@@ -316,7 +319,10 @@ func TestGoModuleParkedLookupRejectsMismatchedRows(t *testing.T) {
 				require.NoError(t, err)
 			}
 			parked := restubGoModuleRepoIncoming(g, "b")
-			require.Len(t, parked, 1)
+			require.ElementsMatch(t, []graph.EdgeIdentity{
+				{From: "a/main.go", To: "unresolved::import::example.org/library", Kind: graph.EdgeImports, FilePath: "a/main.go", Line: 2},
+				{From: "a/main.go::Caller", To: "unresolved::extern::example.org/library::Hello", Kind: graph.EdgeCalls, FilePath: "a/main.go", Line: 3},
+			}, parked, "both caller-owned references must survive and settle")
 			require.NotEmpty(t, g.(graph.EdgeIdentityBatchFinder).FindEdgesByIdentities(parked), "parked row must exist before purge")
 			g.EvictFile("b/lib.go")
 			require.NotEmpty(t, g.(graph.EdgeIdentityBatchFinder).FindEdgesByIdentities(parked), "parked row must survive purge")

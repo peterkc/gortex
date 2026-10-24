@@ -708,7 +708,7 @@ func (mi *MultiIndexer) resolveDeferredGoModules(idx *Indexer) error {
 }
 
 func (mi *MultiIndexer) resolveIncomingGoModules(repo string) error {
-	if mi.graph == nil || len(mi.graph.RepoPrefixes()) < 2 || mi.trackedGoModules()[repo] == "" {
+	if mi.graph == nil || len(mi.graph.RepoPrefixes()) < 2 || len(mi.trackedGoModules()) == 0 {
 		return nil
 	}
 	cr := mi.newCrossRepoResolver()
