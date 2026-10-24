@@ -131,6 +131,9 @@ type IndexResult struct {
 	// incremental reconcile. A zero plan proves that no graph-wide derived
 	// pass is required; callers must not infer work merely from stale count.
 	DerivedInvalidation DerivedInvalidationPlan `json:"derived_invalidation,omitempty"`
+	// CrossRepoResolveFiles contains parked consumers outside this repository's
+	// derived frontier. Batch callers must include them in cross-repo resolution.
+	CrossRepoResolveFiles []string `json:"cross_repo_resolve_files,omitempty"`
 
 	// mutationErr carries a point-operation compatibility error through the
 	// resolver/semantic/derived tail. It is intentionally unexported and never
@@ -3417,6 +3420,7 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 			if sqlite, ok := diskTarget.(*store_sqlite.Store); ok && sqlite.SupportsShadowReplacementRetirement() {
 				var err error
 				shadowReplacementStarted = true
+				restubTrackedNpmRepoIncoming(diskTarget, idx.RepoPrefix())
 				evictedNodes, evictedEdges, err = sqlite.EvictRepoForShadowReplacement(ctx, idx.RepoPrefix())
 				if err != nil {
 					retErr = fmt.Errorf("indexer: retire shadow replacement rows: %w", err)
@@ -7344,6 +7348,7 @@ func (idx *Indexer) incrementalReindexPathsMode(
 		CountsCached:        countsCached,
 		capabilityPrior:     idx.takeCapabilityPrior(),
 	}
+	result.CrossRepoResolveFiles = appendUniqueSorted(nil, markerBatch.npmConsumerFiles...)
 	for _, path := range failedFiles {
 		result.Errors = append(result.Errors, IndexError{FilePath: path, Error: idx.fileIndexFailureError(path).Error()})
 	}

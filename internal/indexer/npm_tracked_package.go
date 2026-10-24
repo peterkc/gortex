@@ -24,6 +24,8 @@ func (mi *MultiIndexer) npmPackageLookup() resolver.NpmPackageLookup {
 		hasExports   bool
 		types        string
 		main         string
+
+		recognizedRoot bool
 	}
 	roots := map[string]string{}
 	workspaces := map[string]string{}
@@ -71,6 +73,12 @@ func (mi *MultiIndexer) npmPackageLookup() resolver.NpmPackageLookup {
 				if json.Unmarshal(src, &manifest) != nil || manifest.Name == "" {
 					continue
 				}
+				var conditions map[string]json.RawMessage
+				_ = json.Unmarshal(manifest.Exports, &conditions)
+				if root, ok := conditions["."]; ok {
+					conditions = nil
+					_ = json.Unmarshal(root, &conditions)
+				}
 				exports := parsePackageExports(src)
 				declared := declaredNpmExports(manifest.Exports)
 				// Keep unsupported and blocked keys in the target map so an
@@ -83,6 +91,8 @@ func (mi *MultiIndexer) npmPackageLookup() resolver.NpmPackageLookup {
 					}
 				}
 				packages[manifest.Name] = append(packages[manifest.Name], entry{
+					recognizedRoot: hasRecognizedNpmCondition(conditions),
+
 					dir: path.Join(prefix, dir), workspaceID: workspaces[prefix], exports: exports, declared: declared, typesExports: npmTypesExportTargets(manifest.Exports), arrayRoot: npmExportsArrayRoot(manifest.Exports), hasExports: hasPackageExports(manifest.Exports), types: manifest.Types, main: manifest.Main,
 				})
 			}
@@ -112,6 +122,9 @@ func (mi *MultiIndexer) npmPackageLookup() resolver.NpmPackageLookup {
 					continue
 				}
 				target = pkg.arrayRoot.target
+			}
+			if sub == "" && target == "" && pkg.recognizedRoot {
+				continue // A recognized null/empty root blocks legacy candidates.
 			}
 			// Root entries with unsupported conditions keep legacy candidates.
 			// A subpath must name its target; never invent a directory probe.

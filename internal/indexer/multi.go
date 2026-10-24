@@ -3449,8 +3449,13 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 					prefix: result.DerivedInvalidation,
 				})
 			}
-		} else if result.FullRetrack && !batchMode.deferGlobalPasses {
-			mi.ReconcileContractEdges()
+		} else if result.FullRetrack {
+			if !batchMode.deferResolve {
+				mi.runCrossRepoResolveFiles(mi.npmConsumerFilesForRepo(prefix))
+			}
+			if !batchMode.deferGlobalPasses {
+				mi.ReconcileContractEdges()
+			}
 		}
 
 		publishTiming.complete(nil)

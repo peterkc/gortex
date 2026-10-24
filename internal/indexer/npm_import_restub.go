@@ -129,33 +129,31 @@ func restubTrackedNpmImportsFromView(g graph.Store, evicted map[string]struct{},
 	return consumerFiles
 }
 
-// npmConsumerFilesForRepo finds parked imports whose package is claimed by this
-// provider. Used only after a full index or track; incremental saves carry their
-// exact parked consumer files directly from the restub step.
+// npmConsumerFilesForRepo finds parked imports claimed by this provider and
+// this repo's imports claimed by any tracked provider. Used after a full index
+// or track; incremental saves carry exact consumer files from the restub step.
 func (mi *MultiIndexer) npmConsumerFilesForRepo(repo string) []string {
 	lookup := mi.npmPackageLookup()
 	if lookup == nil {
 		return nil
 	}
 	files := make(map[string]struct{})
-	claims := make(map[string]bool)
+	claims := make(map[string]map[string]resolver.NpmPackageTarget)
 	for edge := range graph.EdgesLightSeq(mi.graph, graph.EdgeImports) {
 		if !strings.HasPrefix(edge.To, "external::") {
 			continue
 		}
 		spec, _, _ := strings.Cut(strings.TrimPrefix(edge.To, "external::"), "::")
-		claimed, known := claims[spec]
+		providers, known := claims[spec]
 		if !known {
-			for dir := range lookup(spec) {
-				if dir == repo || strings.HasPrefix(dir, repo+"/") {
-					claimed = true
-					break
-				}
-			}
-			claims[spec] = claimed
+			providers = lookup(spec)
+			claims[spec] = providers
 		}
-		if claimed {
-			files[edge.From] = struct{}{}
+		for dir := range providers {
+			if dir == repo || strings.HasPrefix(dir, repo+"/") || graph.RepoPrefixOfID(edge.From) == repo {
+				files[edge.From] = struct{}{}
+				break
+			}
 		}
 	}
 	return sortedStringKeys(files)
