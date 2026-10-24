@@ -53,10 +53,6 @@ func (cr *CrossRepoResolver) resolveGoModuleImports(ctx context.Context, files [
 				if match != nil {
 					copy.To = match.ID
 					copy.CrossRepo = caller != "" && match.RepoPrefix != caller
-					if match.RepoPrefix == caller {
-						delete(copy.Meta, "go_import")
-						delete(copy.Meta, "go_import_fallback")
-					}
 				} else {
 					copy.To, _ = copy.Meta["go_import_fallback"].(string)
 					if copy.To == "" || graph.IsUnresolvedTarget(copy.To) {
