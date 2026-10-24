@@ -397,9 +397,13 @@ func (cr *CrossRepoResolver) ResolveAllContext(ctx context.Context) (*CrossRepoS
 	// Whole-graph fallback has no exact provider frontier. Discard package
 	// projections even if the module revision's terminal retry is complete.
 	cr.mu.Lock()
-	clear(cr.goModuleImportState().packages)
+	if len(cr.goModules) > 0 || cr.goModuleRetry != nil {
+		state := cr.goModuleImportState()
+		clear(state.packages)
+		state.importsSeeded = false // A full pass must include newly published consumers.
+	}
 	cr.mu.Unlock()
-	if err := cr.resolveGoModuleImportSweep(ctx, stats); err != nil {
+	if err := cr.seedGoModuleImportRegistry(ctx); err != nil {
 		return stats, err
 	}
 	cr.mu.Lock()

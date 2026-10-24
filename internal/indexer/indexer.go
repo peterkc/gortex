@@ -5970,6 +5970,9 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) []string {
 			// moved target leaves the stub honestly unresolved.
 			graph.StashRestubProvenance(e)
 			e.To = goModuleRestubTarget(e, stub)
+			if e.Kind == graph.EdgeImports {
+				e.CrossRepo, e.ConfidenceLabel = false, ""
+			}
 			batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		}
 	}
