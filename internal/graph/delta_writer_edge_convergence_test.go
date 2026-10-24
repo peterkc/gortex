@@ -15,9 +15,10 @@ func TestDeltaWriterRefreshIdentityConvergenceSingleSlot(t *testing.T) {
 				base := New()
 				base.AddNode(&Node{ID: "a::A", RepoPrefix: "repo"})
 				base.AddNode(&Node{ID: "c::C", RepoPrefix: "repo"})
-				existing := &Edge{From: "a::A", To: target, Kind: EdgeCalls, FilePath: "a.go", Line: 3}
+				existing := &Edge{From: "a::A", To: target, Kind: EdgeCalls, FilePath: "a.go", Line: 3, Origin: "stationary"}
 				moving := *existing
 				moving.Line = 9
+				moving.Origin = "mover"
 				if moveSource {
 					moving.From = "c::C"
 				}
@@ -26,20 +27,17 @@ func TestDeltaWriterRefreshIdentityConvergenceSingleSlot(t *testing.T) {
 				dw := NewDeltaWriter(base, nil)
 				require.Len(t, dw.AllEdges(), 2)
 				token := dw.BeginMutationReceipt()
+				updated := cloneDeltaEdge(&moving)
+				updated.From, updated.Line = existing.From, existing.Line
 				dw.ReindexEdges([]EdgeReindex{{
-					Edge: cloneDeltaEdge(existing), OldFrom: moving.From, OldTo: moving.To,
+					Edge: updated, OldFrom: moving.From, OldTo: moving.To,
 					OldFilePath: moving.FilePath, OldLine: moving.Line, RefreshIdentity: true,
 				}})
 				receipt := dw.EndMutationReceipt(token)
 				assert.True(t, receipt.Complete, "delta refresh must preserve exact receipts")
-				if target == "unresolved::B" {
-					assert.Equal(t, []string{"a.go"}, receipt.ChangedFiles)
-					assert.Equal(t, []string{"a.go"}, receipt.UnresolvedFiles)
-				} else {
-					assert.Empty(t, receipt.UnresolvedFiles)
-					assert.Empty(t, receipt.ChangedFiles)
-				}
-				assert.Len(t, dw.GetOutEdges("a::A"), 1)
+				assert.Empty(t, receipt.UnresolvedFiles, "the stationary destination creates no resolver work")
+				assert.Empty(t, receipt.ChangedFiles)
+				assert.Equal(t, []*Edge{existing}, dw.GetOutEdges("a::A"))
 				assert.Len(t, dw.GetInEdges(target), 1)
 				assert.Len(t, dw.AllEdges(), 1, "cached outgoing slots must converge too")
 				assert.Empty(t, dw.GetOutEdges("c::C"))
