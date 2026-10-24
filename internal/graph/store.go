@@ -167,7 +167,9 @@ type Store interface {
 	// ReindexEdges frees moving stored identities before assigning destinations.
 	// A stationary destination keeps its payload, including a same-batch refresh;
 	// the first mover wins a fresh key. Repeated stationary updates apply in order.
-	// A later row can move an intermediate identity created by an earlier row.
+	// Simple intermediate chains are supported. Cross-store convergence is not
+	// guaranteed for distinct copied rows that converge at a fresh key and then
+	// move it again, or reuse a stored identity already moved by an earlier row.
 	// Losing candidates create no resolver receipt work. Disk backends may commit
 	// bounded chunks independently; the two-phase guarantee is per chunk, not
 	// across chunk boundaries. A loop of per-edge calls is not equivalent.
