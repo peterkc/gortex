@@ -131,6 +131,13 @@ type CrossRepoResolver struct {
 	// candidate is live by construction.
 	validateLiveness     bool
 	crossWorkspaceLookup CrossWorkspaceDepLookup
+	goModules            map[string]string
+	goModulePaths        goModulePathIndex
+	goModuleReplacements map[string][]GoModuleReplacement
+	goModuleRetry        *GoModuleDepRetry
+	goModuleRevision     uint64
+	goModuleDemotedMu    sync.Mutex
+	goModuleDemotedFiles map[string]struct{}
 	// npmAlias rewrites a JS/TS import specifier that matches an
 	// npm-alias dependency key in the importing file's nearest-
 	// ancestor package.json. Same contract as the field of the
@@ -269,14 +276,18 @@ func fileCandidateWorkspaceID(file graph.FileNodeIdentity) string {
 // (function/method calls — they don't carry an import path so the
 // only check is workspace-pair declaration).
 func (cr *CrossRepoResolver) crossWorkspaceEligible(sourceWS, targetWS, importPath string) bool {
+	return crossWorkspaceEligible(cr.crossWorkspaceLookup, sourceWS, targetWS, importPath)
+}
+
+func crossWorkspaceEligible(lookup CrossWorkspaceDepLookup, sourceWS, targetWS, importPath string) bool {
 	if sourceWS == targetWS {
 		return true
 	}
-	if cr.crossWorkspaceLookup == nil {
+	if lookup == nil {
 		// Legacy / unwired callers: no boundary enforcement.
 		return true
 	}
-	rules := cr.crossWorkspaceLookup(sourceWS)
+	rules := lookup(sourceWS)
 	for _, rule := range rules {
 		if rule.Workspace != targetWS {
 			continue
@@ -380,6 +391,9 @@ func (cr *CrossRepoResolver) ResolveAllContext(ctx context.Context) (*CrossRepoS
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
 	if err := ctx.Err(); err != nil {
+		return stats, err
+	}
+	if err := cr.retryGoModuleDeps(ctx, stats); err != nil {
 		return stats, err
 	}
 	// Fresh placeholder-source set per pass — same rationale as ResolveAll
@@ -1164,6 +1178,8 @@ func (cr *CrossRepoResolver) resolveEdge(e *graph.Edge, stats *CrossRepoStats, b
 	}
 
 	switch {
+	case strings.HasSuffix(e.FilePath, ".go") && strings.HasPrefix(target, "extern::"):
+		cr.resolveGoExtern(e, strings.TrimPrefix(target, "extern::"), stats)
 	case strings.HasPrefix(target, "import::"):
 		cr.resolveImport(e, strings.TrimPrefix(target, "import::"), stats)
 	case strings.HasPrefix(target, "*."):
@@ -1245,7 +1261,8 @@ func (cr *CrossRepoResolver) filterLiveReindex(batch []graph.EdgeReindex) []grap
 // placeholder rather than a concrete graph node (so the chunked path's
 // target-liveness guard must not treat its absence as an evicted candidate).
 func isSyntheticResolveTarget(to string) bool {
-	return strings.HasPrefix(to, "external::") || strings.HasPrefix(to, "extern::")
+	return strings.HasPrefix(to, "external::") || strings.HasPrefix(to, "extern::") ||
+		strings.HasPrefix(to, "dep::") || graph.IsStdlibStub(to)
 }
 
 // resolveChunkEnabled reports whether the global resolve passes process their

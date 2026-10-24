@@ -757,6 +757,7 @@ func New(g graph.Store, reg *parser.Registry, cfg config.IndexConfig, logger *za
 	// own package-manager workspace member. Same lazy-build rationale.
 	idx.resolver.SetWorkspaceMembership(idx.indexerWorkspaceMembership)
 	idx.resolver.SetGoPackageOwnershipInventoryFactory(idx.prepareGoPackageOwnership)
+	idx.resolver.SetGoModuleLookup(idx.ownGoModules)
 	idx.resolver.SetEvidenceScoping(cfg.ResolverEvidenceScopeEnabled())
 	return idx
 }
@@ -2763,6 +2764,9 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 				}
 			}
 			owner.mu.Unlock()
+			if err := owner.postPublishGoModules(ctx, current, false); err != nil {
+				owner.logger.Warn("post-publish Go module follow-up", zap.Error(err))
+			}
 		}
 		return nil
 	})
@@ -3342,6 +3346,7 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 		// resolution, …) for any backend that takes the shadow path.
 		if idx.resolver != nil {
 			idx.resolver.SetGraph(inMemShadow)
+			idx.resolver.SetDeferGoModuleMisses(true)
 		}
 		defer func() {
 			// Restore the durable graph and every shadow-routed sink even when a
@@ -3354,6 +3359,7 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 				idx.contractStateSink = nil
 				if idx.resolver != nil {
 					idx.resolver.SetGraph(diskTarget)
+					idx.resolver.SetDeferGoModuleMisses(false)
 				}
 				if deferredVectorPlan != nil {
 					deferredVectorPlan.Release()
@@ -3405,6 +3411,9 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 			// this handle's generation after the replacement parse succeeds and
 			// before its first disk write. Immutable payload generations sharing
 			// the prefix remain queryable through their catalog pointers.
+			if idx.repositoryMutationOwner != nil {
+				restubGoModuleRepoIncoming(diskTarget, idx.RepoPrefix())
+			}
 			var evictedNodes, evictedEdges int
 			if sqlite, ok := diskTarget.(*store_sqlite.Store); ok && sqlite.SupportsShadowReplacementRetirement() {
 				var err error
@@ -3617,6 +3626,7 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 			// ownership validation and every later incremental operation.
 			if idx.resolver != nil {
 				idx.resolver.SetGraph(diskTarget)
+				idx.resolver.SetDeferGoModuleMisses(false)
 			}
 			if deferredVectorPlan != nil {
 				if retErr == nil {
@@ -5912,7 +5922,7 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) {
 			// rebinds to the same target (idempotent re-parse); a deleted or
 			// moved target leaves the stub honestly unresolved.
 			graph.StashRestubProvenance(e)
-			e.To = stub
+			e.To = goModuleRestubTarget(e, stub)
 			batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		}
 	}
