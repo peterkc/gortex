@@ -1358,7 +1358,7 @@ func restubIncomingRefsFromView(
 	view incrementalPriorView,
 ) ([]*graph.Edge, []string, []string) {
 	evicted := structuralPriorIDs(stages)
-	consumers := restubTrackedCargoImportsFromView(g, evicted, view.inByNode)
+	consumers := restubTrackedCargoImportsFromView(g, evicted, view.inByNode, false)
 	reparsed := reparsedPaths(stages)
 	npmConsumers := restubTrackedNpmImportsFromView(g, evicted, view.inByNode)
 	var reindexes []graph.EdgeReindex
@@ -1524,6 +1524,9 @@ func restubIncomingRefsFromView(
 				edge.To = goModuleRestubTarget(edge, stub)
 				if edge.To != stub {
 					edge.CrossRepo, edge.ConfidenceLabel = false, ""
+				}
+				if original, _ := edge.Meta[resolver.CargoCallStubMeta].(string); edge.Kind == graph.EdgeCalls && original != "" {
+					edge.To, edge.CrossRepo, edge.ConfidenceLabel = original, false, ""
 				}
 				reindexes = append(reindexes, graph.EdgeReindex{Edge: edge, OldTo: oldTo})
 			}
@@ -2404,7 +2407,7 @@ func (idx *Indexer) evictFileIncrementalRaw(relPath string) forcedFileEviction {
 	// recover this file's records from a sibling's canonical scalar payload.
 	idx.ensureIncrementalContractRegistry()
 	var invalidation DerivedInvalidationPlan
-	nodesRemoved, edgesRemoved := idx.evictDeletedFilesBatched([]string{relPath}, &invalidation, nil)
+	nodesRemoved, edgesRemoved := idx.evictDeletedFilesBatched([]string{relPath}, &invalidation, batch)
 	graphPath := idx.prefixPath(relPath)
 	idx.removeIncrementalContractsForFile(graphPath, &invalidation)
 	invalidation.Files = appendUniqueSorted(invalidation.Files, dependencyFiles...)
