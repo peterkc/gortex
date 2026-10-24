@@ -102,6 +102,40 @@ func RunReindexConvergencePayload(t *testing.T, factory Factory) {
 
 // RunReindexMovingSiblings checks that a batch frees its old keys together.
 func RunReindexMovingSiblings(t *testing.T, factory Factory) {
+	for _, final := range []string{"X", "Z"} {
+		t.Run("intermediate_to_"+final, func(t *testing.T) {
+			s := factory(t)
+			original := graph.Edge{From: "caller", To: "X", Kind: graph.EdgeCalls,
+				FilePath: "a.go", Line: 10, Origin: "original", Confidence: 0.2}
+			s.AddEdge(&original)
+			intermediate := original
+			intermediate.To, intermediate.Origin = "Y", "intermediate"
+			last := original
+			last.To, last.Origin, last.Confidence = final, "last", 0.9
+			s.ReindexEdges([]graph.EdgeReindex{
+				{Edge: &intermediate, OldTo: "X"},
+				{Edge: &last, OldTo: "Y"},
+			})
+			for name, rows := range map[string][]*graph.Edge{
+				"all": s.AllEdges(), "out": s.GetOutEdges("caller"), "in": s.GetInEdges(final),
+			} {
+				if len(rows) != 1 || !reflect.DeepEqual(*rows[0], last) {
+					t.Errorf("%s rows = %+v, want only %+v", name, rows, last)
+				}
+			}
+			for _, target := range []string{"X", "Y", "Z"} {
+				if target != final && len(s.GetInEdges(target)) != 0 {
+					t.Errorf("dangling incoming rows at %s: %+v", target, s.GetInEdges(target))
+				}
+			}
+			if s.EdgeCount() != 1 {
+				t.Errorf("edge count = %d, want 1", s.EdgeCount())
+			}
+			if err := s.VerifyEdgeIdentities(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 	for _, shape := range []string{"target_chain", "target_swap", "line_chain"} {
 		for _, reverse := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/reverse=%t", shape, reverse), func(t *testing.T) {

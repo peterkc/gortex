@@ -768,6 +768,8 @@ func (g *Graph) reindexEdges(batch []EdgeReindex) []*Edge {
 		pos     int
 	}
 	pending := make([]pendingEdge, 0, len(batch))
+	created := make(map[edgeHash]int, len(batch))
+	moving := make(map[edgeHash]bool, len(batch))
 	var receiptRows map[edgeHash]*Edge
 	if g.mutationReceipts.activeCount.Load() != 0 {
 		receiptRows = make(map[edgeHash]*Edge)
@@ -793,6 +795,16 @@ func (g *Graph) reindexEdges(batch []EdgeReindex) []*Edge {
 		sFrom := g.shardFor(old.From)
 		pos, exists := sFrom.outEdgeIdx[old.From][oldKey]
 		if !exists || pos >= len(sFrom.outEdges[old.From]) {
+			if moving[oldKey] {
+				continue // A preceding move already consumed this stored identity.
+			}
+			if i, ok := created[oldKey]; ok {
+				// Fold an intermediate identity into its original outgoing slot.
+				delete(created, oldKey)
+				pending[i].updated = *e
+				created[hashEdgeKey(keyOf(e))] = i
+				continue
+			}
 			if !r.RefreshIdentity {
 				// Preserve the To-only path's incoming update for detached edges.
 				sTo := g.shardFor(old.To)
@@ -814,6 +826,11 @@ func (g *Graph) reindexEdges(batch []EdgeReindex) []*Edge {
 		}
 		// Free only the old key; the slot stays until the second phase.
 		delete(sFrom.outEdgeIdx[old.From], oldKey)
+		moving[oldKey] = true
+		newKey := hashEdgeKey(keyOf(e))
+		if _, exists := created[newKey]; !exists {
+			created[newKey] = len(pending)
+		}
 		pending = append(pending, pendingEdge{stored: stored, updated: *e, oldFrom: old.From, pos: pos})
 		sFrom.repoEdgeRemove(repoOf(sFrom, old.From), &old)
 		sTo := g.shardFor(old.To)
