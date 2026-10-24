@@ -199,6 +199,7 @@ type reparsePendingEnrichmentBatch struct {
 	readRepair  *ReadRepairObservation
 	// npmConsumerFiles are unchanged importers parked by this mutation.
 	npmConsumerFiles      []string
+	cargoConsumerFiles    []string
 	byFile                map[string]bool
 	deferResolverCatchup  bool
 	deferredAffectedFiles map[string]struct{}

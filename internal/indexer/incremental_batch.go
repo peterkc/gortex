@@ -164,7 +164,7 @@ func (idx *Indexer) reindexIncrementalFilesBatched(
 		zap.Int("deleted_files", len(deletedFiles)))
 	defer deleteTiming.abort()
 	deletion := markerBatch.publicationStamps().beginPatchLap(patchApply)
-	idx.evictDeletedFilesBatched(deletedFiles, &invalidation)
+	idx.evictDeletedFilesBatched(deletedFiles, &invalidation, markerBatch)
 	deletion.end()
 	deleteTiming.complete(nil)
 
@@ -1150,9 +1150,10 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 		markerBatch.recordDeferredPriorBindings(stagePriorBindings(idx.graph, stages, view))
 	}
 	idx.applyLap("prior_bindings")
-	carried, npmConsumers := restubIncomingRefsFromView(idx.graph, stages, view)
+	carried, npmConsumers, cargoConsumers := restubIncomingRefsFromView(idx.graph, stages, view)
 	if markerBatch != nil {
 		markerBatch.npmConsumerFiles = appendUniqueSorted(markerBatch.npmConsumerFiles, npmConsumers...)
+		markerBatch.cargoConsumerFiles = appendUniqueSorted(markerBatch.cargoConsumerFiles, cargoConsumers...)
 	}
 	idx.applyLap("restub")
 	// The capability state of the files, read before the eviction below
@@ -1410,8 +1411,9 @@ func restubIncomingRefsFromView(
 	g graph.Store,
 	stages []*incrementalBatchStage,
 	view incrementalPriorView,
-) ([]*graph.Edge, []string) {
+) ([]*graph.Edge, []string, []string) {
 	evicted := structuralPriorIDs(stages)
+	consumers := restubTrackedCargoImportsFromView(g, evicted, view.inByNode)
 	reparsed := reparsedPaths(stages)
 	npmConsumers := restubTrackedNpmImportsFromView(g, evicted, view.inByNode)
 	var reindexes []graph.EdgeReindex
@@ -1450,7 +1452,7 @@ func restubIncomingRefsFromView(
 					}
 				} else {
 					for _, edge := range view.inByNode[node.ID] {
-						if edge == nil || edge.Kind != graph.EdgeImports {
+						if edge == nil || edge.Kind != graph.EdgeImports || edge.To != node.ID {
 							continue
 						}
 						if _, sourceEvicted := evicted[edge.From]; sourceEvicted {
@@ -1592,7 +1594,7 @@ func restubIncomingRefsFromView(
 	if len(reindexes) > 0 {
 		g.ReindexEdges(reindexes)
 	}
-	return canonicalizeLegacyCarried(stages, evicted, carried), npmConsumers
+	return canonicalizeLegacyCarried(stages, evicted, carried), npmConsumers, consumers
 }
 
 // dataflowSourceSite is a reference's site: the file that records it and its
@@ -2465,7 +2467,7 @@ func (idx *Indexer) evictFileIncrementalRaw(relPath string) forcedFileEviction {
 	// recover this file's records from a sibling's canonical scalar payload.
 	idx.ensureIncrementalContractRegistry()
 	var invalidation DerivedInvalidationPlan
-	nodesRemoved, edgesRemoved := idx.evictDeletedFilesBatched([]string{relPath}, &invalidation)
+	nodesRemoved, edgesRemoved := idx.evictDeletedFilesBatched([]string{relPath}, &invalidation, nil)
 	graphPath := idx.prefixPath(relPath)
 	idx.removeIncrementalContractsForFile(graphPath, &invalidation)
 	invalidation.Files = appendUniqueSorted(invalidation.Files, dependencyFiles...)
@@ -2515,7 +2517,7 @@ func (idx *Indexer) removeIncrementalContractsForFile(graphPath string, plan *De
 	plan.ContractSymbolIDs = appendUniqueSorted(plan.ContractSymbolIDs, refresh.SymbolIDs...)
 }
 
-func (idx *Indexer) evictDeletedFilesBatched(deleted []string, plan *DerivedInvalidationPlan) (nodesRemoved, edgesRemoved int) {
+func (idx *Indexer) evictDeletedFilesBatched(deleted []string, plan *DerivedInvalidationPlan, markerBatch *reparsePendingEnrichmentBatch) (nodesRemoved, edgesRemoved int) {
 	if len(deleted) == 0 {
 		return 0, 0
 	}
@@ -2579,7 +2581,11 @@ func (idx *Indexer) evictDeletedFilesBatched(deleted []string, plan *DerivedInva
 		// carry therefore means a deletion stage stopped being conservative,
 		// which would destroy those edges with no compile error to show for
 		// it — so the assumption is checked, not just documented.
-		if carried, _ := restubIncomingRefsFromView(idx.graph, stages, view); len(carried) > 0 {
+		carried, _, consumers := restubIncomingRefsFromView(idx.graph, stages, view)
+		if markerBatch != nil {
+			markerBatch.cargoConsumerFiles = appendUniqueSorted(markerBatch.cargoConsumerFiles, consumers...)
+		}
+		if len(carried) > 0 {
 			idx.logger.Error("indexer: deletion restub carried in-edges with no re-state path",
 				zap.String("repo", idx.repoPrefix),
 				zap.Int("carried", len(carried)),

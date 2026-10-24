@@ -9,6 +9,9 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
+// CargoImportStubMeta preserves the import's exact target before a tracked bind.
+const CargoImportStubMeta = "cargo_import_stub"
+
 // CargoCrate identifies a provider library and its exposed crate name.
 type CargoCrate struct {
 	Root string // graph-path library file
@@ -152,6 +155,10 @@ func cargoImportSpec(e *graph.Edge) string {
 }
 
 func (cr *CrossRepoResolver) bindCargoImport(e *graph.Edge, node *graph.Node, stats *CrossRepoStats) {
+	if e.Meta == nil {
+		e.Meta = make(map[string]any)
+	}
+	e.Meta[CargoImportStubMeta] = e.To
 	e.To, e.CrossRepo = node.ID, true
 	clearEdgeTerminal(e)
 	stats.Resolved++

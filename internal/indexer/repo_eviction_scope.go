@@ -11,6 +11,7 @@ import (
 // Store eviction is the compatible fallback.
 func evictRepoCurrentGeneration(target graph.Store, repoPrefix string) (nodesRemoved, edgesRemoved int) {
 	restubTrackedNpmRepoIncoming(target, repoPrefix)
+	restubTrackedCargoRepoIncoming(target, repoPrefix)
 	if scoped, ok := target.(graph.CurrentGenerationRepoEvicter); ok {
 		return scoped.EvictRepoCurrentGeneration(repoPrefix)
 	}
