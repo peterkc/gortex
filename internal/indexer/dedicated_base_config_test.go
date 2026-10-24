@@ -381,7 +381,7 @@ func BenchmarkDedicatedBaseConfigSnapshot(b *testing.B) {
 // fields are later omitted. Include must also survive the frozen snapshot.
 func TestDedicatedBaseConfigExclusionSemanticsVersion(t *testing.T) {
 	cfg := config.IndexConfig{Exclude: []string{"node_modules/", "!*.proto"}, Include: []string{"vendor/acme/"}}
-	owned, got, err := snapshotDedicatedBaseConfig(cfg, "repo", "workspace", "project")
+	owned, _, err := snapshotDedicatedBaseConfig(cfg, "repo", "workspace", "project")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +390,7 @@ func TestDedicatedBaseConfigExclusionSemanticsVersion(t *testing.T) {
 	}
 	for _, include := range [][]string{cfg.Include, nil} {
 		cfg.Include = include
-		_, got, err = snapshotDedicatedBaseConfig(cfg, "repo", "workspace", "project")
+		_, got, err := snapshotDedicatedBaseConfig(cfg, "repo", "workspace", "project")
 		if err != nil {
 			t.Fatal(err)
 		}

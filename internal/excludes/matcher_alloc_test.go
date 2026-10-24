@@ -4,6 +4,7 @@ package excludes
 
 import (
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -54,8 +55,14 @@ func TestMatcherUnrelatedIncludeAllocs(t *testing.T) {
 					if tc.match() {
 						t.Fatal("unrelated path must remain admitted")
 					}
-					if allocs := testing.AllocsPerRun(100, func() { tc.match() }); allocs != 0 {
-						t.Errorf("unrelated include allocates %v times, want 0", allocs)
+					// On Windows the walk copies the relative path once to turn
+					// backslashes into slashes; the matching itself must not allocate.
+					want := 0.0
+					if runtime.GOOS == "windows" && tc.name == "walk" {
+						want = 1
+					}
+					if allocs := testing.AllocsPerRun(100, func() { tc.match() }); allocs > want {
+						t.Errorf("unrelated include allocates %v times, want at most %v", allocs, want)
 					}
 				})
 			}
