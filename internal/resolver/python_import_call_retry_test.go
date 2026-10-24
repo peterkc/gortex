@@ -37,10 +37,15 @@ func TestTrackedPythonImportReopensOnlyNewlyLinkedCalls(t *testing.T) {
 				{file, eligible, graph.EdgeReferences},
 				{"consumer/other.py", eligible, graph.EdgeCalls},
 				{"outsider/app.py", eligible, graph.EdgeCalls},
+				{file, "dep::PIL.image::f", graph.EdgeCalls},
+				{file, "dep::other::f", graph.EdgeCalls},
+				{file, "dep::PIL.image_extra::f", graph.EdgeCalls},
+				{file, "dep::PIL.image::f", graph.EdgeReferences},
 			} {
 				g.AddEdge(&graph.Edge{From: tc.file, FilePath: tc.file, To: tc.target, Kind: tc.kind, Line: i + 1, Meta: map[string]any{"external_call": true, PythonCallStubMeta: "unresolved::extern::PIL.image::f"}})
 			}
-			g.AddEdge(&graph.Edge{From: file, FilePath: file, To: eligible, Kind: graph.EdgeCalls, Line: 8})
+			g.AddEdge(&graph.Edge{From: file, FilePath: file, To: eligible, Kind: graph.EdgeCalls, Line: 12})
+			g.AddEdge(&graph.Edge{From: file, FilePath: file, To: "dep::PIL.image::f", Kind: graph.EdgeCalls, Line: 13})
 			linked := &graph.Edge{From: file, FilePath: file, To: "provider/src/PIL/image.py", Kind: graph.EdgeImports, CrossRepo: true,
 				Meta: map[string]any{PythonImportStubMeta: "module::pypi:PIL", "python_import": "PIL.image"}}
 			unmarked := &graph.Edge{From: "consumer/other.py", FilePath: "consumer/other.py", To: linked.To, Kind: graph.EdgeImports, CrossRepo: true,
@@ -49,13 +54,15 @@ func TestTrackedPythonImportReopensOnlyNewlyLinkedCalls(t *testing.T) {
 				Meta: linked.Meta}
 			cr := NewCrossRepo(g)
 			reopened := cr.restubCallsForLinkedPythonImports([]graph.EdgeReindex{{Edge: linked}, {Edge: unmarked}, {Edge: unlinked}})
-			require.Len(t, reopened, 1)
-			require.Equal(t, file, reopened[0].FilePath)
-			require.Equal(t, "unresolved::extern::PIL.image::f", reopened[0].To)
-			require.NotContains(t, reopened[0].Meta, "external_call")
+			require.Len(t, reopened, 2)
+			for _, call := range reopened {
+				require.Equal(t, file, call.FilePath)
+				require.Equal(t, "unresolved::extern::PIL.image::f", call.To)
+				require.NotContains(t, call.Meta, "external_call")
+			}
 			for _, edges := range g.GetOutEdgesByNodeIDs([]string{file, "consumer/other.py", "outsider/app.py"}) {
 				for _, edge := range edges {
-					if edge.Line != 1 {
+					if edge.Line != 1 && edge.Line != 8 {
 						require.NotEqual(t, "unresolved::extern::PIL.image::f", edge.To)
 					}
 				}
