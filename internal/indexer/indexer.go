@@ -757,6 +757,7 @@ func New(g graph.Store, reg *parser.Registry, cfg config.IndexConfig, logger *za
 	// own package-manager workspace member. Same lazy-build rationale.
 	idx.resolver.SetWorkspaceMembership(idx.indexerWorkspaceMembership)
 	idx.resolver.SetGoPackageOwnershipInventoryFactory(idx.prepareGoPackageOwnership)
+	idx.resolver.SetGoModuleLookup(idx.ownGoModules)
 	idx.resolver.SetEvidenceScoping(cfg.ResolverEvidenceScopeEnabled())
 	return idx
 }

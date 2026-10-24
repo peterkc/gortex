@@ -195,8 +195,14 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 // goModuleIncomingEdges probes only package-qualified placeholders owned by the
 // changed Go definitions. Bare-name frontier keys cannot find these imports.
 func (cr *CrossRepoResolver) goModuleIncomingEdges(nodesByFile map[string][]*graph.Node, definitionFiles []string) []*graph.Edge {
+	edges, fact, err := cr.goModuleIncomingEdgesBounded(nodesByFile, definitionFiles, nil)
+	logIncomingAdmissionRefusal(cr.logger, "go_module_incoming", fact.Keys, fact, err)
+	return edges
+}
+
+func (cr *CrossRepoResolver) goModuleIncomingEdgesBounded(nodesByFile map[string][]*graph.Node, definitionFiles []string, budget *graph.IncomingSourceBudget) ([]*graph.Edge, graph.IncomingSourceAdmission, error) {
 	if len(cr.goModules) == 0 {
-		return nil
+		return nil, graph.IncomingSourceAdmission{}, nil
 	}
 	keys := make(map[string]struct{})
 	providers := make(map[string][]*graph.Node)
@@ -227,7 +233,11 @@ func (cr *CrossRepoResolver) goModuleIncomingEdges(nodesByFile map[string][]*gra
 	}
 	var edges []*graph.Edge
 	sources := make(map[string]*graph.Node)
-	for _, incoming := range cr.graph.GetInEdgesByNodeIDs(ids) {
+	incomingByID, fact, err := graph.AdmitIncomingRowsBounded(context.Background(), cr.graph.GetInEdgesByNodeIDs, ids, budget)
+	if err != nil {
+		return nil, fact, err
+	}
+	for _, incoming := range incomingByID {
 		for _, e := range incoming {
 			if strings.HasPrefix(e.To, externalCallPrefix) {
 				target, _ := e.Meta["go_extern_target"].(string)
@@ -253,7 +263,7 @@ func (cr *CrossRepoResolver) goModuleIncomingEdges(nodesByFile map[string][]*gra
 			}
 		}
 	}
-	return edges
+	return edges, fact, nil
 }
 
 // applyGoModuleReindexes never publishes derived work for a dropped batch.
@@ -272,6 +282,21 @@ func (cr *CrossRepoResolver) applyGoModuleReindexes(batch []graph.EdgeReindex) b
 	}
 	cr.removeRetargetedGoModuleParallels(batch)
 	DetectCrossRepoEdgesForReindexes(cr.graph, batch)
+	// Provider restubs park returned-value sources on the bare symbol,
+	// while the call retains its package-qualified import, even as a terminal.
+	sourceReindexes := slices.Clone(batch)
+	for _, row := range batch {
+		if row.Edge.Kind != graph.EdgeCalls || isSyntheticResolveTarget(row.Edge.To) {
+			continue
+		}
+		spec := goModuleEdgeSpec(row.Edge)
+		if sep := strings.LastIndex(spec, "::"); sep >= 0 {
+			sourceReindexes = append(sourceReindexes, graph.EdgeReindex{
+				Edge: row.Edge, OldTo: graph.UnresolvedMarker + spec[sep+2:],
+			})
+		}
+	}
+	reconcilePlaceholderSources(cr.graph, nil, sourceReindexes)
 	for _, row := range batch {
 		cr.noteRetargetedCall(row.Edge)
 		cr.noteDemotedGoModuleCall(row.Edge)

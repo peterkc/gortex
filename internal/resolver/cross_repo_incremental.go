@@ -92,14 +92,31 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 			stats = cr.resolveScopedLocked(pending)
 		}
 	}
-	if len(definitionFiles) > 0 && len(cr.goModules) > 0 {
-		nodes := cr.graph.GetFileNodesByPaths(definitionFiles)
-		cr.resolveGoModuleEdgesLocked(cr.goModuleIncomingEdges(nodes, definitionFiles), stats)
+	if len(definitionFiles) > 0 && len(cr.goModules) > 0 && !admission.Refused {
+		budget := &graph.IncomingSourceBudget{}
+		if admission.Inspected > 0 {
+			if err := budget.Charge(admission.Inspected); err != nil {
+				admission.Refused, admission.Refusal = true, err
+			}
+		}
+		if !admission.Refused {
+			nodes := cr.graph.GetFileNodesByPaths(definitionFiles)
+			edges, fact, err := cr.goModuleIncomingEdgesBounded(nodes, definitionFiles, budget)
+			admission.Keys += fact.Keys
+			admission.Inspected += fact.Inspected
+			admission.Limit = fact.Limit
+			admission.Dropped += fact.Dropped
+			admission.Refused, admission.Refusal = fact.Refused, err
+			logIncomingAdmissionRefusal(cr.logger, "go_module_incoming", fact.Keys, fact, err)
+			cr.resolveGoModuleEdgesLocked(edges, stats)
+		}
 	}
 	// A newly tracked module also makes old dep/stdlib terminals eligible.
 	// This indexed sweep runs at most once per module/config revision.
-	if err := cr.retryGoModuleDeps(context.Background(), stats); err != nil {
-		cr.logger.Error("cross-repo resolve: retry Go module terminals", zap.Error(err))
+	if !admission.Refused {
+		if err := cr.retryGoModuleDeps(context.Background(), stats); err != nil {
+			cr.logger.Error("cross-repo resolve: retry Go module terminals", zap.Error(err))
+		}
 	}
 	DetectCrossRepoEdgesForMutationFiles(cr.graph, edgeSourceFiles, definitionFiles)
 	return stats, admission

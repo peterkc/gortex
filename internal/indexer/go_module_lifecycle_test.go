@@ -258,9 +258,10 @@ func TestGoModuleSameRepoIncremental(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.Len(t, calls(), 1)
-			// Match the upstream incremental behavior, not a qualified extern
-			// stub that only a cross-repository pass can discover.
-			assert.Equal(t, graph.UnresolvedMarker+"Hello", calls()[0].To)
+			// #806 preserves an unchanged local definition through a body save.
+			assert.Equal(t, "local/pkg/lib.go::Hello", calls()[0].To)
+			assert.False(t, calls()[0].CrossRepo)
+			assert.Zero(t, calls()[0].Confidence)
 		})
 	}
 }
