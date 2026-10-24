@@ -15,7 +15,7 @@ jobs:
   ab:
     if: github.repository == 'peterkc/gortex'
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 25
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -80,15 +80,19 @@ jobs:
             cp bench/.github/bench/cold_resolve_bench_test.go "$side/internal/indexer/cold_resolve_bench_test.go"
             (cd "$side" && go test -p=1 -c -o "$RUNNER_TEMP/$side.test" ./internal/indexer)
           done
-      - name: Run A then B once each (fresh graph and indexer)
-        timeout-minutes: 20
+      - name: Run A and B six times each, alternating order (fresh graph and indexer)
+        timeout-minutes: 40
         shell: bash
         run: |
           set -euo pipefail
-          for side in main branch; do
-            (cd "$side/internal/indexer" && "$RUNNER_TEMP/$side.test" \
-              -test.run '^$' -test.bench '^BenchmarkColdResolve945$' \
-              -test.benchmem -test.count=1 -test.benchtime=1x -test.timeout=9m) | tee "$side.txt"
+          : > main.txt; : > branch.txt
+          for round in 1 2 3 4 5 6; do
+            if [ $((round % 2)) -eq 1 ]; then order="main branch"; else order="branch main"; fi
+            for side in $order; do
+              (cd "$side/internal/indexer" && "$RUNNER_TEMP/$side.test" \
+                -test.run '^$' -test.bench '^BenchmarkColdResolve945$' \
+                -test.benchmem -test.count=1 -test.benchtime=1x -test.timeout=9m) | tee -a "$side.txt"
+            done
           done
       - name: Compare timings
         shell: bash
