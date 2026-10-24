@@ -522,7 +522,7 @@ func (cr *CrossRepoResolver) recheckGoModuleBindings(ctx context.Context, previo
 		var edges []*graph.Edge
 		for _, incoming := range cr.graph.GetInEdgesByNodeIDs(ids) {
 			for _, e := range incoming {
-				if !e.CrossRepo || e.Meta["go_import"] == nil || resolutionExempt(e) {
+				if e.Meta["go_import"] == nil || resolutionExempt(e) {
 					continue
 				}
 				edges = append(edges, e)
