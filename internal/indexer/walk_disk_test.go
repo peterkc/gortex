@@ -350,13 +350,15 @@ func TestExcludeMatcher_WarnsUnanchoredIncludes(t *testing.T) {
 	idx.excludeMatcher()
 	require.Equal(t, 1, logs.Len(), "inner-slash anchoring gets one notice")
 	idx.SetIgnorePatterns(nil, []string{"Pods/"})
-	require.Equal(t, 1, logs.Len(), "a basename literal with no proven blocked parent stays quiet")
+	require.Equal(t, 2, logs.Len(), "a basename literal gets a parent-rule Info notice")
 	idx.SetIgnorePatterns(nil, []string{"*.proto"})
-	require.Equal(t, 2, logs.Len())
+	require.Equal(t, 3, logs.Len())
 	require.Zero(t, logs.FilterLevelExact(zap.WarnLevel).Len())
 	require.Equal(t, "vendor/acme/", logs.All()[0].ContextMap()["pattern"])
-	require.Equal(t, "*.proto", logs.All()[1].ContextMap()["pattern"])
+	require.Equal(t, "Pods/", logs.All()[1].ContextMap()["pattern"])
+	require.Equal(t, "*.proto", logs.All()[2].ContextMap()["pattern"])
 	require.Contains(t, logs.All()[1].Message, "cannot reach through excluded ancestors")
+	require.Contains(t, logs.All()[2].Message, "cannot reach through excluded ancestors")
 }
 
 func TestExcludeMatcher_SkipsOpenParentWarnings(t *testing.T) {

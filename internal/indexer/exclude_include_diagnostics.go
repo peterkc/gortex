@@ -9,8 +9,8 @@ import (
 )
 
 // Include diagnostics use the user's line, never the matcher compiler's
-// inserted root anchor. Wildcards with no fixed parent get an informational
-// semantics notice, not a claim that an existing file is blocked.
+// inserted root anchor. Bare names and wildcards with no fixed parent get an
+// informational semantics notice, not a claim that an existing file is blocked.
 func (idx *Indexer) warnIncludes(m *excludes.Matcher) {
 	if idx.logger == nil {
 		return
@@ -49,8 +49,10 @@ func (idx *Indexer) warnIncludes(m *excludes.Matcher) {
 			if idx.firstReincludeWarning("", "include-anchor", raw) {
 				idx.logger.Info("indexer: include with an inner slash is now root-anchored; it no longer matches the same path below other folders", fields...)
 			}
-		} else if wildcard && idx.firstReincludeWarning("", "include-wildcard", raw) {
-			idx.logger.Info("indexer: wildcard includes can reopen matching folders only when their parents are open; they cannot reach through excluded ancestors", fields...)
+		} else if wildcard || (!strings.HasPrefix(p, "/") && !strings.Contains(body, "/")) {
+			if idx.firstReincludeWarning("", "include-parent-limited", raw) {
+				idx.logger.Info("indexer: bare-name and wildcard includes can reopen matching folders only when their parents are open; they cannot reach through excluded ancestors", fields...)
+			}
 		}
 	}
 }
