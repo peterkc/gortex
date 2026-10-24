@@ -28,6 +28,9 @@ type CargoCrateLookup func(callerFile, crateName string) []CargoCrate
 // SetCargoCrateLookup installs manifest evidence for Rust import/file edges.
 func (cr *CrossRepoResolver) SetCargoCrateLookup(lookup CargoCrateLookup) { cr.cargoCrates = lookup }
 
+// SetCargoImportRetargetRepo refreshes marked bindings only after a provider file is added.
+func (cr *CrossRepoResolver) SetCargoImportRetargetRepo(repo string) { cr.cargoRetargetRepo = repo }
+
 func (cr *CrossRepoResolver) cargoImportTarget(e *graph.Edge, spec string) *graph.Node {
 	if cr.cargoCrates == nil || e.Kind != graph.EdgeImports || !strings.HasSuffix(e.FilePath, ".rs") {
 		return nil
@@ -99,7 +102,7 @@ func (cr *CrossRepoResolver) resolveCargoImports(ctx context.Context, edges iter
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		spec := cargoImportSpec(e)
+		spec := cr.cargoImportSpec(e)
 		if spec == "" {
 			continue
 		}
@@ -126,7 +129,7 @@ func (cr *CrossRepoResolver) resolveCargoImports(ctx context.Context, edges iter
 				if e.To != projected.To {
 					continue
 				}
-				if node := cr.cargoImportTarget(e, cargoImportSpec(e)); node != nil {
+				if node := cr.cargoImportTarget(e, cr.cargoImportSpec(e)); node != nil && node.ID != e.To {
 					oldTo := e.To
 					cr.bindCargoImport(e, node, stats)
 					batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
@@ -141,11 +144,16 @@ func (cr *CrossRepoResolver) resolveCargoImports(ctx context.Context, edges iter
 	return ctx.Err()
 }
 
-func cargoImportSpec(e *graph.Edge) string {
+func (cr *CrossRepoResolver) cargoImportSpec(e *graph.Edge) string {
 	if e == nil || e.Kind != graph.EdgeImports || !strings.HasSuffix(e.FilePath, ".rs") {
 		return ""
 	}
-	spec, external := strings.CutPrefix(e.To, "external::")
+	target := e.To
+	if cr.cargoRetargetRepo != "" && e.CrossRepo && graph.RepoPrefixOfID(e.To) == cr.cargoRetargetRepo {
+		target, _ = e.Meta[CargoImportStubMeta].(string)
+		target = strings.Replace(target, "unresolved::import::", "external::", 1)
+	}
+	spec, external := strings.CutPrefix(target, "external::")
 	if !external {
 		return ""
 	}
@@ -161,7 +169,9 @@ func (cr *CrossRepoResolver) bindCargoImport(e *graph.Edge, node *graph.Node, st
 	if e.Meta == nil {
 		e.Meta = make(map[string]any)
 	}
-	e.Meta[CargoImportStubMeta] = e.To
+	if original, _ := e.Meta[CargoImportStubMeta].(string); original == "" {
+		e.Meta[CargoImportStubMeta] = e.To
+	}
 	e.To, e.CrossRepo = node.ID, true
 	clearEdgeTerminal(e)
 	stats.Resolved++

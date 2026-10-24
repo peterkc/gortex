@@ -2762,7 +2762,7 @@ func (mi *MultiIndexer) indexRepoRaw(repoPrefix string) (*IndexResult, error) {
 	if err := mi.postPublishGoModules(context.Background(), idx, false); err != nil {
 		mi.logger.Warn("post-publish Go module follow-up", zap.Error(err))
 	}
-	result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, mi.cargoConsumerFilesForRepo(repoPrefix)...)
+	result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, mi.cargoConsumerFilesForRepo(repoPrefix, false)...)
 	mi.runCrossRepoResolveFiles(result.CrossRepoResolveFiles)
 
 	mi.ReconcileContractEdges()
@@ -3410,7 +3410,7 @@ func (mi *MultiIndexer) trackPreparedRepoSourceCtx(
 		mi.markRepoRegistered(prefix, absPath)
 		mi.runCrossRepoResolveFiles(mi.npmConsumerFilesForRepo(prefix))
 		if !batchMode.deferResolve {
-			mi.runCrossRepoResolveFiles(mi.cargoConsumerFilesForRepo(prefix))
+			mi.runCrossRepoResolveFiles(mi.cargoConsumerFilesForRepo(prefix, false))
 		}
 
 		// Add to global config.
@@ -3719,7 +3719,7 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 				})
 			}
 		} else if result.FullRetrack {
-			result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, mi.cargoConsumerFilesForRepo(prefix)...)
+			result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, mi.cargoConsumerFilesForRepo(prefix, false)...)
 			if !batchMode.deferResolve {
 				mi.runCrossRepoResolveFiles(mi.npmConsumerFilesForRepo(prefix))
 				mi.runCrossRepoResolveFiles(result.CrossRepoResolveFiles)
