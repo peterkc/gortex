@@ -390,7 +390,7 @@ func (cr *CrossRepoResolver) ResolveAllContext(ctx context.Context) (*CrossRepoS
 	// Every exit applies the moves the pass deferred (a no-op after the
 	// normal flush below); it runs before the deferred unlock above.
 	defer cr.placeholderSrcIdx.applyDeferred(cr.graph)
-	if err := cr.resolveTrackedPythonImports(ctx, cr.trackedPythonImportEdges(), stats); err != nil {
+	if _, err := cr.resolveTrackedPythonImports(ctx, cr.trackedPythonImportEdges(), stats, false); err != nil {
 		return stats, err
 	}
 	// Share the master resolver's stable high-water/keyset stream. The cold
@@ -677,7 +677,19 @@ func (cr *CrossRepoResolver) ResolveForFile(repoPrefix, relPath string) *CrossRe
 // scopes. Caller holds cr.mu.
 func (cr *CrossRepoResolver) resolveScopedLocked(edges []*graph.Edge) *CrossRepoStats {
 	stats := &CrossRepoStats{ByRepo: make(map[string]int)}
-	_ = cr.resolveTrackedPythonImports(context.Background(), slices.Values(edges), stats)
+	reopened, _ := cr.resolveTrackedPythonImports(context.Background(), slices.Values(edges), stats, true)
+	if len(reopened) > 0 {
+		seen := make(map[*graph.Edge]bool, len(edges))
+		for _, edge := range edges {
+			seen[edge] = true
+		}
+		for _, edge := range reopened {
+			if !seen[edge] {
+				edges = append(edges, edge)
+				seen[edge] = true
+			}
+		}
+	}
 	pending := make([]*graph.Edge, 0, len(edges))
 	for _, edge := range edges {
 		if edge != nil && graph.IsUnresolvedTarget(edge.To) {
@@ -1174,6 +1186,30 @@ func (cr *CrossRepoResolver) resolveEdge(e *graph.Edge, stats *CrossRepoStats, b
 		cr.resolveImport(e, strings.TrimPrefix(target, "import::"), stats)
 	case strings.HasPrefix(target, "*."):
 		cr.resolveMethodCall(e, strings.TrimPrefix(target, "*."), stats)
+	case strings.HasPrefix(target, "extern::") && e.Kind == graph.EdgeCalls && cr.pythonPackages != nil && e.Meta[PythonCallStubMeta] == oldTo:
+		module, symbol, _ := strings.Cut(strings.TrimPrefix(target, "extern::"), "::")
+		callerRepo, callerWS := cr.callerRepoPrefix(e), cr.callerWorkspaceID(e)
+		reachable := cr.reachabilityChecker(e)
+		importedDirs := cr.importedDirsByFile[cr.callerFileID(e)]
+		find := func(name string) ([]*graph.Node, error) {
+			var eligible []*graph.Node
+			for _, node := range cr.scopedCandidates(e, name) {
+				_, imported := importedDirs[filePathDir(node.FilePath)]
+				if imported && reachable(node.RepoPrefix) && cr.crossWorkspaceEligible(callerWS, candidateWorkspaceID(node), module) {
+					eligible = append(eligible, node)
+				}
+			}
+			return eligible, nil
+		}
+		if resolvePythonModuleExtern(e, module, symbol, callerRepo, &ResolveStats{}, find) {
+			stats.Resolved++
+			if e.CrossRepo {
+				stats.CrossRepoEdges++
+				stats.ByRepo[graph.RepoPrefixOfID(e.To)]++
+			}
+		} else {
+			stats.Unresolved++
+		}
 	case e.Kind == graph.EdgeExtends || e.Kind == graph.EdgeImplements || e.Kind == graph.EdgeComposes:
 		// Type-hierarchy edges never resolve to a function/method.
 		// CrossRepoResolver has no type-only resolution path, and a
@@ -1195,6 +1231,14 @@ func (cr *CrossRepoResolver) resolveEdge(e *graph.Edge, stats *CrossRepoStats, b
 	}
 
 	if e.To != oldTo {
+		if e.Kind == graph.EdgeCalls && e.CrossRepo && cr.pythonPackages != nil && isPythonSourcePath(e.FilePath) {
+			if e.Meta == nil {
+				e.Meta = make(map[string]any)
+			}
+			if original, _ := e.Meta[PythonCallStubMeta].(string); original == "" {
+				e.Meta[PythonCallStubMeta] = oldTo
+			}
+		}
 		*batch = append(*batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		cr.noteRetargetedCall(e)
 	}
