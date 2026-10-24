@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -121,12 +122,28 @@ func configuredWorktreePrefix(root string, entries []config.RepoEntry, owners ma
 	if admin == "" || admin == gitstate.MainAdminName {
 		return ""
 	}
-	members := make(map[string]bool, len(inv.Records))
+	memberKey := func(root string) string {
+		if pathkey.CaseInsensitivePaths {
+			return strings.ToLower(root)
+		}
+		return root
+	}
+	members := make(map[string][]string, len(inv.Records))
 	for _, record := range inv.Records {
-		members[pathkey.CanonicalPath(record.Path)] = true
+		root := pathkey.CanonicalPath(record.Path)
+		key := memberKey(root)
+		members[key] = append(members[key], root)
 	}
 	for _, entry := range entries {
-		if !members[pathkey.CanonicalPath(entry.Path)] {
+		root := pathkey.CanonicalPath(entry.Path)
+		matched := false
+		for _, member := range members[memberKey(root)] {
+			if pathkey.SamePathIdentity(member, root) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
 			continue
 		}
 		if entry.Workspace == "" {

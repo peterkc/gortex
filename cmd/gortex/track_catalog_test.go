@@ -318,3 +318,28 @@ func TestConfiguredWorktreePrefixInventoriesOnce(t *testing.T) {
 		require.Equal(t, 1, calls, "inventory is per command, not per configured entry")
 	}
 }
+
+func TestConfiguredWorktreePrefixMatchesCaseAliases(t *testing.T) {
+	root := pathkey.CanonicalExistingRoot(t.TempDir())
+	main, linked := filepath.Join(root, "Family"), filepath.Join(root, "linked")
+	require.NoError(t, os.Mkdir(main, 0o755))
+	alias := filepath.Join(root, "family")
+	info, err := os.Stat(alias)
+	if os.IsNotExist(err) {
+		t.Skip("filesystem is case-sensitive")
+	}
+	require.NoError(t, err)
+	original, err := os.Stat(main)
+	require.NoError(t, err)
+	require.True(t, os.SameFile(original, info))
+	git := func(args ...string) {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", main}, args...)...).CombinedOutput()
+		require.NoError(t, err, "%s", out)
+	}
+	git("init", "-q", "-b", "main")
+	git("-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "init")
+	git("worktree", "add", "-q", "-b", "linked", linked)
+	got := configuredWorktreePrefix(linked, []config.RepoEntry{{Path: alias, Name: "chosen"}}, nil)
+	assert.Equal(t, "chosen@linked", got, "configured case aliases must retain the family's prefix")
+}
