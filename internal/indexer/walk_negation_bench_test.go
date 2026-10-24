@@ -36,7 +36,8 @@ func BenchmarkWalkDiskNegation(b *testing.B) {
 		extra []string
 	}{
 		{"without_negation", nil},
-		{"with_wildcard_negation", walkNegationPatterns},
+		{"with_wildcard_negation", []string{"!*.proto"}},
+		{"with_reopened_parents", walkNegationPatterns},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			reg := parser.NewRegistry()
@@ -58,5 +59,30 @@ func BenchmarkWalkDiskNegation(b *testing.B) {
 			}
 			b.ReportMetric(float64(entries), "entries/op")
 		})
+	}
+}
+
+func TestWalkNegationBenchmarkFixtures(t *testing.T) {
+	root := t.TempDir()
+	writeBenchFile(t, filepath.Join(root, "src", "a.go"), []byte("package src\n"))
+	writeBenchFile(t, filepath.Join(root, "node_modules", "pkg", "schema.proto"), []byte("syntax = \"proto3\";\n"))
+	writeBenchFile(t, filepath.Join(root, "node_modules", "pkg", "lib", "a.js"), []byte("module.exports = {}\n"))
+	for _, tc := range []struct {
+		extra   []string
+		entries int
+	}{
+		{nil, 3}, {[]string{"!*.proto"}, 3}, {walkNegationPatterns, 6},
+	} {
+		reg := parser.NewRegistry()
+		cfg := config.Default().Index
+		cfg.Exclude = append(append([]string{}, excludes.Builtin...), tc.extra...)
+		idx := New(graph.New(), reg, cfg, zap.NewNop())
+		entries := 0
+		if err := idx.walkDisk(root, root, func(string, fs.DirEntry, error) error { entries++; return nil }); err != nil {
+			t.Fatal(err)
+		}
+		if entries != tc.entries {
+			t.Errorf("%q: visited %d entries, want %d", tc.extra, entries, tc.entries)
+		}
 	}
 }
