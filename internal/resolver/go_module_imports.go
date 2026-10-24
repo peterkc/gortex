@@ -28,7 +28,7 @@ func (cr *CrossRepoResolver) resolveGoModuleImports(ctx context.Context, files [
 				if e.Kind != graph.EdgeImports {
 					continue
 				}
-				importPath := goModuleImportPath(e, nodes[path])
+				importPath := goModuleImportPath(e, nodes[path], outgoing[path])
 				if importPath == "" || !trackedGoImport(cr.goModulePaths, importPath) && e.Meta["go_import"] == nil {
 					continue
 				}
@@ -93,7 +93,7 @@ func (cr *CrossRepoResolver) resolveGoModuleImports(ctx context.Context, files [
 
 // A dep contract has lost the package suffix. Recover it from the retained
 // import statement, but never guess when several same-line imports fit.
-func goModuleImportPath(e *graph.Edge, nodes []*graph.Node) string {
+func goModuleImportPath(e *graph.Edge, nodes []*graph.Node, edges []*graph.Edge) string {
 	if path, ok := e.Meta["go_import"].(string); ok && path != "" {
 		return path
 	}
@@ -112,9 +112,17 @@ func goModuleImportPath(e *graph.Edge, nodes []*graph.Node) string {
 	if !dep || strings.Contains(module, "::") {
 		return ""
 	}
+	// Duplicate aliases share an import node, whose retained line is the last
+	// occurrence. Containment edges preserve every statement's source line.
+	contains := make(map[string]bool)
+	for _, link := range edges {
+		if link.Kind == graph.EdgeContains && link.From == e.From && link.Line == e.Line {
+			contains[link.To] = true
+		}
+	}
 	path := ""
 	for _, n := range nodes {
-		if n.Kind != graph.KindImport || n.Language != "go" || n.StartLine != e.Line {
+		if n.Kind != graph.KindImport || n.Language != "go" || (n.StartLine != e.Line && !contains[n.ID]) {
 			continue
 		}
 		candidate, _ := n.Meta["path"].(string)
@@ -424,7 +432,7 @@ func (cr *CrossRepoResolver) restoreGoModuleImportBatch(ctx context.Context, rep
 			if strings.HasPrefix(strings.TrimPrefix(target, externalCallPrefix), "dep::") && fileNodes == nil {
 				fileNodes = cr.graph.GetFileNodesByPaths(files)
 			}
-			if goModuleImportPath(e, fileNodes[n.FilePath]) == path {
+			if goModuleImportPath(e, fileNodes[n.FilePath], outgoing[n.FilePath]) == path {
 				present = true
 				break
 			}
