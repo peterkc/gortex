@@ -5898,7 +5898,7 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) []string {
 	// operation. On SQLite this is chunked under the parameter limit; more
 	// importantly, it avoids one transaction/query per definition in the file.
 	inEdges := idx.graph.GetInEdgesByNodeIDs(refIDs)
-	consumers := restubTrackedCargoImportsFromView(idx.graph, evicted, inEdges)
+	consumers := restubTrackedCargoImportsFromView(idx.graph, evicted, inEdges, false)
 	var batch []graph.EdgeReindex
 	for _, n := range nodes {
 		if n == nil || n.Name == "" || !graph.IsReferenceableSymbol(n.Kind) {
@@ -5923,6 +5923,9 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) []string {
 			// moved target leaves the stub honestly unresolved.
 			graph.StashRestubProvenance(e)
 			e.To = stub
+			if original, _ := e.Meta[resolver.CargoCallStubMeta].(string); e.Kind == graph.EdgeCalls && original != "" {
+				e.To, e.CrossRepo, e.ConfidenceLabel = original, false, ""
+			}
 			batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		}
 	}

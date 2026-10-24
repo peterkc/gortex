@@ -1197,6 +1197,12 @@ func (cr *CrossRepoResolver) resolveEdge(e *graph.Edge, stats *CrossRepoStats, b
 	}
 
 	if e.To != oldTo {
+		if e.Kind == graph.EdgeCalls && e.CrossRepo && cr.cargoCrates != nil && strings.HasSuffix(e.FilePath, ".rs") {
+			if e.Meta == nil {
+				e.Meta = make(map[string]any)
+			}
+			e.Meta[CargoCallStubMeta] = oldTo
+		}
 		*batch = append(*batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		cr.noteRetargetedCall(e)
 	}

@@ -1354,7 +1354,7 @@ func restubIncomingRefsFromView(
 	view incrementalPriorView,
 ) ([]*graph.Edge, []string) {
 	evicted := structuralPriorIDs(stages)
-	consumers := restubTrackedCargoImportsFromView(g, evicted, view.inByNode)
+	consumers := restubTrackedCargoImportsFromView(g, evicted, view.inByNode, false)
 	reparsed := reparsedPaths(stages)
 	var reindexes []graph.EdgeReindex
 	var carried []*graph.Edge
@@ -1502,6 +1502,9 @@ func restubIncomingRefsFromView(
 				oldTo := edge.To
 				graph.StashRestubProvenance(edge)
 				edge.To = stub
+				if original, _ := edge.Meta[resolver.CargoCallStubMeta].(string); edge.Kind == graph.EdgeCalls && original != "" {
+					edge.To, edge.CrossRepo, edge.ConfidenceLabel = original, false, ""
+				}
 				reindexes = append(reindexes, graph.EdgeReindex{Edge: edge, OldTo: oldTo})
 			}
 		}
@@ -2381,7 +2384,7 @@ func (idx *Indexer) evictFileIncrementalRaw(relPath string) forcedFileEviction {
 	// recover this file's records from a sibling's canonical scalar payload.
 	idx.ensureIncrementalContractRegistry()
 	var invalidation DerivedInvalidationPlan
-	nodesRemoved, edgesRemoved := idx.evictDeletedFilesBatched([]string{relPath}, &invalidation, nil)
+	nodesRemoved, edgesRemoved := idx.evictDeletedFilesBatched([]string{relPath}, &invalidation, batch)
 	graphPath := idx.prefixPath(relPath)
 	idx.removeIncrementalContractsForFile(graphPath, &invalidation)
 	invalidation.Files = appendUniqueSorted(invalidation.Files, dependencyFiles...)

@@ -1,8 +1,6 @@
 package indexer
 
 import (
-	"maps"
-	"slices"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -25,11 +23,12 @@ func restubTrackedCargoRepoIncoming(g graph.Store, repo string) []string {
 				}
 			}
 		}
-		files = appendUniqueSorted(files, restubTrackedCargoImportsFromView(g, evicted, incoming)...)
+		files = appendUniqueSorted(files, restubTrackedCargoImportsFromView(g, evicted, incoming, true)...)
 		ids = ids[:0]
 	}
-	for node := range graph.RepoNodeIdentitiesSeq(g, []string{repo}, graph.KindFile) {
-		if !strings.HasSuffix(node.ID, ".rs") {
+	for node := range graph.RepoNodeIdentitiesSeq(g, []string{repo}, graph.KindFile, graph.KindFunction, graph.KindMethod) {
+		file, _, _ := strings.Cut(node.ID, "::")
+		if !strings.HasSuffix(file, ".rs") {
 			continue
 		}
 		ids = append(ids, node.ID)
@@ -43,61 +42,42 @@ func restubTrackedCargoRepoIncoming(g graph.Store, repo string) []string {
 	return files
 }
 
-func restubTrackedCargoImportsFromView(g graph.Store, evicted map[string]struct{}, incoming map[string][]*graph.Edge) []string {
-	consumers := make(map[string]map[string]bool)
+func restubTrackedCargoImportsFromView(g graph.Store, evicted map[string]struct{}, incoming map[string][]*graph.Edge, parkCalls bool) []string {
+	consumers := make(map[string]struct{})
 	var batch []graph.EdgeReindex
 	for _, edges := range incoming {
 		for _, edge := range edges {
-			if edge == nil || edge.Kind != graph.EdgeImports {
+			if edge == nil || !edge.CrossRepo {
 				continue
 			}
-			stub, _ := edge.Meta[resolver.CargoImportStubMeta].(string)
+			key := resolver.CargoImportStubMeta
+			if edge.Kind == graph.EdgeCalls {
+				key = resolver.CargoCallStubMeta
+			} else if edge.Kind != graph.EdgeImports {
+				continue
+			}
+			stub, _ := edge.Meta[key].(string)
 			if _, gone := evicted[edge.From]; stub == "" || gone || edge.To == stub {
 				continue
 			}
-			if consumers[edge.FilePath] == nil {
-				consumers[edge.FilePath] = make(map[string]bool)
+			consumers[edge.FilePath] = struct{}{}
+			// Save paths keep the existing carry/restub decision and its dataflow sites.
+			if edge.Kind == graph.EdgeCalls && !parkCalls {
+				continue
 			}
-			consumers[edge.FilePath][graph.RepoPrefixOfID(edge.To)] = true
 			old := edge.To
+			if edge.Kind == graph.EdgeCalls {
+				graph.StashRestubProvenance(edge)
+				edge.ConfidenceLabel = ""
+			}
 			edge.To, edge.CrossRepo = stub, false
-			batch = append(batch, graph.EdgeReindex{Edge: edge, OldTo: old})
-		}
-	}
-	files := slices.Sorted(maps.Keys(consumers))
-	if len(files) == 0 {
-		return nil
-	}
-	var ids []string
-	for _, nodes := range g.GetFileNodesByPaths(files) {
-		for _, node := range nodes {
-			if node != nil {
-				ids = append(ids, node.ID)
-			}
-		}
-	}
-	for _, edges := range g.GetOutEdgesByNodeIDs(ids) {
-		for _, edge := range edges {
-			if edge == nil || edge.Kind != graph.EdgeCalls || !edge.CrossRepo || !consumers[edge.FilePath][graph.RepoPrefixOfID(edge.To)] {
-				continue
-			}
-			if _, gone := evicted[edge.From]; gone {
-				continue
-			}
-			old := edge.To
-			_, name, symbol := strings.Cut(old, "::")
-			if !symbol {
-				continue
-			}
-			graph.StashRestubProvenance(edge)
-			edge.To, edge.CrossRepo, edge.ConfidenceLabel = graph.UnresolvedMarker+name, false, ""
 			batch = append(batch, graph.EdgeReindex{Edge: edge, OldTo: old})
 		}
 	}
 	if len(batch) > 0 {
 		g.ReindexEdges(batch)
 	}
-	return files
+	return sortedStringKeys(consumers)
 }
 
 // Retry only parked imports claimed by this provider, or owned by this repo.
