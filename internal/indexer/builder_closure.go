@@ -1442,9 +1442,9 @@ func closureBareName(raw string) string {
 // manifest gate (declaresExternalNpmDep, read at resolver.go:4000 and applied
 // at :4033-4034) skips the cascade outright for a specifier the importer's
 // package.json declares a dependency of; the closure carries no manifest
-// lookup. The Go package-ownership gate (goImportCandidateGate.retainFile,
-// go_package_ownership.go:56-58, called first in `consider` at
-// resolver.go:4005-4007) is installed by the live indexer, not by this walk.
+// lookup. The Go package-ownership gate (goImportCandidateGate.ownership,
+// called first in resolveImport's `consider`, which rejects Different and
+// ranks Exact first) is installed by the live indexer, not by this walk.
 // Both residuals admit more than the resolver binds; neither can drop, and each
 // has a differential fixture.
 //
