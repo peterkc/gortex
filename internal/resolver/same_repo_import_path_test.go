@@ -124,3 +124,58 @@ func TestResolveImportSameRepoNoMatchKeepsToday(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveImportRepoRootPrefersMatchingPath(t *testing.T) {
+	for _, mode := range []string{"dir-index", "full-scan", "full-scan-reversed"} {
+		for _, ownership := range []string{"unknown", "certified-root", "no-root"} {
+			t.Run(mode+"/"+ownership, func(t *testing.T) {
+				g := graph.New()
+				g.AddNode(&graph.Node{
+					ID: "repo/app/main.go", Kind: graph.KindFile,
+					FilePath: "repo/app/main.go", Language: "go", RepoPrefix: "repo",
+				})
+				files := []graph.FileNodeIdentity{
+					{ID: "repo/root.go", FilePath: "repo/root.go", RepoPrefix: "repo"},
+					{ID: "repo/repo/pkg.go", FilePath: "repo/repo/pkg.go", RepoPrefix: "repo"},
+				}
+				if ownership == "no-root" {
+					files = files[1:]
+				}
+				for _, file := range files {
+					g.AddNode(&graph.Node{ID: file.ID, Kind: graph.KindFile,
+						FilePath: file.FilePath, Language: "go", RepoPrefix: "repo"})
+				}
+				if mode == "full-scan-reversed" && len(files) == 2 {
+					files[0], files[1] = files[1], files[0]
+				}
+				r := New(orderedImportFileStore{Store: g, files: files})
+				if mode == "dir-index" {
+					r.buildDirIndexes()
+				}
+				if ownership == "certified-root" {
+					r.SetGoPackageOwnership(func(candidate GoImportCandidate) GoPackageOwnershipResult {
+						if candidate.CandidateFilePath == "repo/root.go" {
+							return GoPackageOwnershipExact
+						}
+						return GoPackageOwnershipDifferent
+					})
+				}
+				e := &graph.Edge{From: "repo/app/main.go", To: "unresolved::import::repo",
+					Kind: graph.EdgeImports, FilePath: "repo/app/main.go", Line: 3}
+				stats := &ResolveStats{}
+				r.resolveImport(e, "repo", stats)
+				switch ownership {
+				case "unknown":
+					assert.Equal(t, "repo/repo/pkg.go", e.To)
+					assert.Equal(t, 1, stats.Resolved)
+				case "certified-root":
+					assert.Equal(t, "repo/root.go", e.To)
+					assert.Equal(t, 1, stats.Resolved)
+				case "no-root":
+					assert.Equal(t, "repo/repo/pkg.go", e.To)
+					assert.Equal(t, 1, stats.Resolved)
+				}
+			})
+		}
+	}
+}
