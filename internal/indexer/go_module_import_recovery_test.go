@@ -265,3 +265,51 @@ func goImportBindingRows(g graph.Store, file string) []string {
 	sort.Strings(rows)
 	return rows
 }
+
+func TestGoModuleImportDuplicateAliases(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, scope := range []string{"same_repo", "cross_repo"} {
+			t.Run(backend+"/"+scope, func(t *testing.T) {
+				mi, g, repos := goModuleLifecycleFixture(t, backend)
+				writeFile(t, filepath.Join(repos[0].Path, "go.mod"), "module example.org/caller\nrequire example.org/library v1.0.0\n")
+				provider, target, importPath := repos[1].Path, "b/sub/lib.go", "example.org/library/sub"
+				if scope == "same_repo" {
+					provider, target, importPath = repos[0].Path, "a/sub/lib.go", "example.org/caller/sub"
+				}
+				require.NoError(t, os.MkdirAll(filepath.Join(provider, "sub"), 0o755))
+				writeFile(t, filepath.Join(provider, "sub", "lib.go"), "package sub\nfunc Hello() {}\n")
+				writeFile(t, filepath.Join(repos[0].Path, "main.go"), "package caller\nimport (\n first \""+importPath+"\"\n second \""+importPath+"\"\n)\nfunc Caller() {\n first.Hello()\n second.Hello()\n}\n")
+				for _, entry := range []config.RepoEntry{repos[1], repos[0]} {
+					_, err := mi.TrackRepoCtx(t.Context(), entry)
+					require.NoError(t, err)
+				}
+				check := func() {
+					t.Helper()
+					var imports, calls []*graph.Edge
+					for _, edge := range g.GetOutEdges("a/main.go") {
+						if edge.Kind == graph.EdgeImports {
+							imports = append(imports, edge)
+						}
+					}
+					for _, edge := range g.GetOutEdges("a/main.go::Caller") {
+						if edge.Kind == graph.EdgeCalls {
+							calls = append(calls, edge)
+						}
+					}
+					require.Len(t, imports, 2, "line identity preserves both imports, as for same-repo aliases")
+					require.Len(t, calls, 2, "calls through both aliases must survive")
+					for _, edge := range imports {
+						assert.Equal(t, target, edge.To, "import line %d", edge.Line)
+						assert.Equal(t, scope == "cross_repo", edge.CrossRepo)
+					}
+					for _, edge := range calls {
+						assert.Equal(t, target+"::Hello", edge.To, "call line %d", edge.Line)
+					}
+				}
+				check()
+				mi.RunGlobalResolve()
+				check()
+			})
+		}
+	}
+}
