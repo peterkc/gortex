@@ -133,6 +133,7 @@ type CrossRepoResolver struct {
 	crossWorkspaceLookup CrossWorkspaceDepLookup
 	goModules            map[string]string
 	goModulePaths        goModulePathIndex
+	goModuleRepos        map[string][]string
 	goModuleReplacements map[string][]GoModuleReplacement
 	goModuleRetry        *GoModuleDepRetry
 	goModuleRevision     uint64
@@ -388,10 +389,23 @@ func (cr *CrossRepoResolver) ResolveAllContext(ctx context.Context) (*CrossRepoS
 	if err := ctx.Err(); err != nil {
 		return stats, err
 	}
+	// Whole-graph fallback has no exact provider frontier. Discard package
+	// projections even if the module revision's terminal retry is complete.
+	cr.mu.Lock()
+	clear(cr.goModuleImportState().packages)
+	cr.mu.Unlock()
+	if err := cr.resolveGoModuleImportSweep(ctx, stats); err != nil {
+		return stats, err
+	}
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return stats, err
+	}
+	for repo := range cr.goModules {
+		if err := cr.restoreGoModuleImports(ctx, repo, stats); err != nil {
+			return stats, err
+		}
 	}
 	if err := cr.retryGoModuleDeps(ctx, stats); err != nil {
 		return stats, err

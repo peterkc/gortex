@@ -1364,7 +1364,22 @@ func restubIncomingRefsFromView(
 				// path) survives its own reparse. The eviction deletes the
 				// row and no pass of this save re-derives it — the importer
 				// is not reparsed — so re-state it.
-				if _, survives := frontier.survivingIDs[node.ID]; survives || frontier.conservative {
+				if _, survives := frontier.survivingIDs[node.ID]; !survives && (!frontier.conservative || stage.result == nil) {
+					for _, edge := range view.inByNode[node.ID] {
+						if edge == nil || edge.Kind != graph.EdgeImports {
+							continue
+						}
+						if _, sourceEvicted := evicted[edge.From]; sourceEvicted {
+							continue
+						}
+						if stub := goModuleRestubTarget(edge, ""); stub != "" {
+							oldTo := edge.To
+							graph.StashRestubProvenance(edge)
+							edge.To, edge.CrossRepo = stub, false
+							reindexes = append(reindexes, graph.EdgeReindex{Edge: edge, OldTo: oldTo})
+						}
+					}
+				} else {
 					for _, edge := range view.inByNode[node.ID] {
 						if edge == nil || edge.Kind != graph.EdgeImports {
 							continue
