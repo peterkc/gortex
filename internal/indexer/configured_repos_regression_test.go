@@ -413,3 +413,26 @@ func TestConfiguredPrefixCheckReusesResolutionUntilConfigChanges(t *testing.T) {
 	require.NoError(t, check("src", second))
 	require.Greater(t, calls, firstCalls, "a repository revision requires a fresh ownership decision")
 }
+
+func TestConfiguredPrefixCheckKeysArguments(t *testing.T) {
+	for _, changed := range []string{"prefix", "root"} {
+		t.Run(changed, func(t *testing.T) {
+			f := newLifecycleFixture(t)
+			t.Cleanup(f.close)
+			owner, other := f.gitRepo("owner"), f.gitRepo("other")
+			f.cm.Global().Repos = []config.RepoEntry{{Path: owner, Name: "src"}}
+			require.NoError(t, f.cm.Global().Save())
+			check := f.mi.configuredPrefixCheck()
+			if changed == "prefix" {
+				require.NoError(t, check("unused", other))
+			} else {
+				require.NoError(t, check("src", owner))
+			}
+			var collision *PrefixCollisionError
+			require.ErrorAs(t, check("src", other), &collision)
+			assert.Equal(t, "src", collision.Prefix)
+			assert.Equal(t, owner, collision.ExistingPath)
+			require.NoError(t, check("src", owner), "a cached refusal must not reject its owner")
+		})
+	}
+}

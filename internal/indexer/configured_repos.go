@@ -159,15 +159,16 @@ func configuredRootKey(root string) string {
 // is checked separately under the registry lock at every admission boundary.
 func (mi *MultiIndexer) configuredPrefixCheck() func(string, string) error {
 	var snapshot *config.RepoPathSnapshot
+	var checkedPrefix, checkedRoot string
 	var collision error
 	return func(prefix, root string) error {
 		if mi.configMgr == nil {
 			return nil
 		}
 		current := mi.configMgr.RepoPathSnapshot()
-		if current != snapshot {
+		if current != snapshot || prefix != checkedPrefix || root != checkedRoot {
 			collision = mi.configuredPrefixCollision(prefix, root)
-			snapshot = current
+			snapshot, checkedPrefix, checkedRoot = current, prefix, root
 		}
 		return collision
 	}
