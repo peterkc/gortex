@@ -129,11 +129,97 @@ func TestDedicatedBindingKeepsConfiguredOrLiveOwner(t *testing.T) {
 				f.restart()
 			}
 			_, err = f.lc.recordCheckout(t.Context(), "src", replacement, TrackSourceCLI, false)
-			require.ErrorIs(t, err, store_sqlite.ErrCatalogStaleGuard)
+			if scenario == "configured-renamed" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, store_sqlite.ErrCatalogStaleGuard)
+			}
 			after, found, err := f.catalog.GetDedicatedGraph(t.Context(), before.GraphID)
 			require.NoError(t, err)
 			require.True(t, found)
-			assert.Equal(t, before.OwnerCheckoutID, after.OwnerCheckoutID)
+			if scenario == "configured-renamed" {
+				assert.NotEqual(t, before.OwnerCheckoutID, after.OwnerCheckoutID)
+			} else {
+				assert.Equal(t, before.OwnerCheckoutID, after.OwnerCheckoutID)
+			}
 		})
 	}
+}
+
+func TestConfiguredRenamedOwnerRebindsAcrossRestarts(t *testing.T) {
+	for _, order := range []string{"renamed-first", "replacement-first"} {
+		t.Run(order, func(t *testing.T) {
+			f := newLifecycleFixture(t)
+			t.Cleanup(f.close)
+			old, replacement := f.gitRepo("old"), f.gitRepo("replacement")
+			writeFile(t, filepath.Join(old, "owner.go"), "package old\nfunc Kept() {}\n")
+			result, err := f.lc.Register(t.Context(), config.RepoEntry{Path: old, Name: "src"}, TrackSourceCLI)
+			require.NoError(t, err)
+			require.NoError(t, result.CatalogErr)
+			entries := []config.RepoEntry{{Path: old, Name: "src-old"}, {Path: replacement, Name: "src"}}
+			if order == "replacement-first" {
+				entries[0], entries[1] = entries[1], entries[0]
+			}
+			f.cm.Global().Repos = entries
+			require.NoError(t, f.cm.Global().Save())
+			for restart := 0; restart < 2; restart++ {
+				f.restart()
+				require.NoError(t, f.lc.Seed(t.Context()))
+				if restart == 0 {
+					assert.NotEmpty(t, f.store.GetFileNodes("src/owner.go"), "Seed repairs metadata without deleting corpus")
+				}
+				for _, entry := range entries {
+					result, err := f.lc.Register(t.Context(), entry, TrackSourceConfig)
+					require.NoError(t, err)
+					require.NoError(t, result.CatalogErr)
+					assert.Equal(t, entry.Name, result.Prefix)
+					assert.True(t, pathkey.SamePathIdentity(entry.Path, f.mi.GetMetadata(entry.Name).RootPath))
+					binding, found, err := f.catalog.GetDedicatedGraph(t.Context(), GraphIDFor(entry.Name))
+					require.NoError(t, err)
+					require.True(t, found)
+					owner, found, err := f.catalog.GetCheckout(t.Context(), binding.OwnerCheckoutID)
+					require.NoError(t, err)
+					require.True(t, found)
+					assert.True(t, pathkey.SamePathIdentity(pathkey.CanonicalPath(entry.Path), owner.RootPath))
+				}
+			}
+		})
+	}
+}
+
+func TestDedicatedBindingReleasesOwnerLiveUnderAnotherPrefix(t *testing.T) {
+	f := newLifecycleFixture(t)
+	t.Cleanup(f.close)
+	old, replacement := f.gitRepo("old"), f.gitRepo("replacement")
+	_, err := f.lc.recordCheckout(t.Context(), "src", old, TrackSourceConfig, true)
+	require.NoError(t, err)
+	f.cm.Global().Repos = []config.RepoEntry{{Path: old, Name: "src-old"}, {Path: replacement, Name: "src"}}
+	require.NoError(t, f.cm.Global().Save())
+	f.restart()
+	_, err = f.mi.TrackRepoCtx(t.Context(), config.RepoEntry{Path: old, Name: "src-old"})
+	require.NoError(t, err)
+	_, err = f.lc.recordCheckout(t.Context(), "src", replacement, TrackSourceConfig, true)
+	require.NoError(t, err, "a live owner under another prefix does not own src")
+	_, err = f.lc.recordCheckout(t.Context(), "src-old", old, TrackSourceConfig, true)
+	require.NoError(t, err)
+	assert.NotEqual(t, f.familyOf("src").OwnerCheckoutID, f.familyOf("src-old").OwnerCheckoutID)
+}
+
+func TestDedicatedBindingRenameKeepsPublishedOwner(t *testing.T) {
+	f := newLifecycleFixture(t)
+	t.Cleanup(f.close)
+	old, replacement := f.gitRepo("old"), f.gitRepo("replacement")
+	_, err := f.lc.recordCheckout(t.Context(), "src", old, TrackSourceConfig, true)
+	require.NoError(t, err)
+	before := f.familyOf("src")
+	guardConfiguredOwner(t, f, "src")
+	f.cm.Global().Repos = []config.RepoEntry{{Path: old, Name: "src-old"}, {Path: replacement, Name: "src"}}
+	require.NoError(t, f.cm.Global().Save())
+	f.restart()
+	_, err = f.lc.recordCheckout(t.Context(), "src-old", old, TrackSourceConfig, true)
+	require.ErrorIs(t, err, store_sqlite.ErrCatalogStaleGuard)
+	assert.Equal(t, before, f.familyOf("src"))
+	_, found, err := f.catalog.GetDedicatedGraph(t.Context(), GraphIDFor("src-old"))
+	require.NoError(t, err)
+	assert.False(t, found)
 }

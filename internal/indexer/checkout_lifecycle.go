@@ -1107,9 +1107,8 @@ func (l *CheckoutLifecycle) claimDedicated(
 }
 
 // releaseUnconfiguredBinding removes only abandoned, unpublished identity
-// metadata. A configured or live checkout still owns its binding, even if it
-// is configured under a different name. The catalog guards publication and
-// the exact row against changes between this check and the deletion.
+// metadata. Configured and live owners are protected under the binding's prefix.
+// The catalog guards publication and the exact row against intervening changes.
 func (l *CheckoutLifecycle) releaseUnconfiguredBinding(ctx context.Context, binding store_sqlite.DedicatedGraph) error {
 	owner, found, err := l.catalog.GetCheckout(ctx, binding.OwnerCheckoutID)
 	if err != nil {
@@ -1119,15 +1118,15 @@ func (l *CheckoutLifecycle) releaseUnconfiguredBinding(ctx context.Context, bind
 		return fmt.Errorf("%w: dedicated graph %s has no known owner", store_sqlite.ErrCatalogStaleGuard, binding.GraphID)
 	}
 	root := pathkey.CanonicalPath(owner.RootPath)
-	for _, meta := range l.mi.AllMetadata() {
-		if meta != nil && (pathkey.SamePathIdentity(pathkey.CanonicalPath(meta.RootPath), root) || sameDirectory(meta.RootPath, root)) {
-			return fmt.Errorf("%w: dedicated graph %s has a live owner", store_sqlite.ErrCatalogStaleGuard, binding.GraphID)
-		}
+	if meta := l.mi.GetMetadata(binding.RepoPrefix); meta != nil &&
+		(pathkey.SamePathIdentity(pathkey.CanonicalPath(meta.RootPath), root) || sameDirectory(meta.RootPath, root)) {
+		return fmt.Errorf("%w: dedicated graph %s has a live owner", store_sqlite.ErrCatalogStaleGuard, binding.GraphID)
 	}
 	if l.cfgMgr == nil {
 		return fmt.Errorf("%w: configured owners are unavailable", store_sqlite.ErrCatalogStaleGuard)
 	}
-	if l.cfgMgr.RepoPathLookup()(root) != nil {
+	if configured := l.cfgMgr.RepoPathLookup()(root); configured != nil &&
+		EffectiveRepoPrefix(l.cfgMgr, *configured) == binding.RepoPrefix {
 		return fmt.Errorf("%w: dedicated graph %s has a configured owner", store_sqlite.ErrCatalogStaleGuard, binding.GraphID)
 	}
 	return l.catalog.DeleteUnpublishedDedicatedGraph(ctx, binding)
@@ -1154,6 +1153,24 @@ func (l *CheckoutLifecycle) bindDedicatedGraph(
 				"%w: checkout %s already owns dedicated graph %s in family %s",
 				store_sqlite.ErrCatalogStaleGuard, checkoutID, existing.GraphID, existing.FamilyID,
 			)
+		}
+		if existing.RepoPrefix != prefix && l.cfgMgr != nil {
+			owner, found, err := l.catalog.GetCheckout(ctx, checkoutID)
+			if err != nil {
+				return "", true, err
+			}
+			// Keep stable bindings across an unopposed rename, but not when
+			// config assigns the previous prefix to another checkout.
+			for _, entry := range l.cfgMgr.Global().ReposSnapshot() {
+				if !found || EffectiveRepoPrefix(l.cfgMgr, entry) != existing.RepoPrefix ||
+					pathkey.SamePathIdentity(pathkey.CanonicalPath(entry.Path), owner.RootPath) || sameDirectory(entry.Path, owner.RootPath) {
+					continue
+				}
+				if err := l.releaseUnconfiguredBinding(ctx, existing); err != nil {
+					return "", true, err
+				}
+				return "", false, nil
+			}
 		}
 		if err := l.RegisterRepositoryOwner(ctx, existing.GraphID); err != nil {
 			return "", true, err
