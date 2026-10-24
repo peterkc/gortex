@@ -540,6 +540,17 @@ func (gc *GlobalConfig) repoEntriesLocked() []RepoEntry {
 type RepoPathSnapshot struct {
 	Lookup         RepoPathLookup
 	canonicalRoots map[string]string
+	prefixCounts   map[string]int
+}
+
+// IsOnlyRepoForPrefix recognizes an unambiguous configured owner. Derived
+// instance prefixes still need the ownership resolver's workspace checks.
+func (s *RepoPathSnapshot) IsOnlyRepoForPrefix(prefix, root string) bool {
+	if strings.Contains(prefix, "@") || s.prefixCounts[prefix] != 1 {
+		return false
+	}
+	entry := s.Lookup(root)
+	return entry != nil && ResolvePrefix(*entry) == prefix
 }
 
 func (s *RepoPathSnapshot) CanonicalRoot(root string, canonicalize func(string) string) string {
@@ -570,8 +581,10 @@ func (gc *GlobalConfig) repoPathSnapshot(entries []RepoEntry, canonicalize func(
 	}
 	roots := make(map[string][]repoRoot)
 	canonicalRoots := make(map[string]string)
+	prefixCounts := make(map[string]int)
 	if gc != nil {
 		for _, entry := range entries {
+			prefixCounts[ResolvePrefix(entry)]++
 			root := canonicalize(entry.Path)
 			canonicalRoots[entry.Path] = root
 			canonicalRoots[root] = root
@@ -579,7 +592,7 @@ func (gc *GlobalConfig) repoPathSnapshot(entries []RepoEntry, canonicalize func(
 			roots[key] = append(roots[key], repoRoot{root, entry})
 		}
 	}
-	snapshot := &RepoPathSnapshot{canonicalRoots: canonicalRoots}
+	snapshot := &RepoPathSnapshot{canonicalRoots: canonicalRoots, prefixCounts: prefixCounts}
 	snapshot.Lookup = func(root string) *RepoEntry {
 		if canonical, ok := canonicalRoots[root]; ok {
 			root = canonical

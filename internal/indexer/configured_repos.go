@@ -124,6 +124,9 @@ func (mi *MultiIndexer) configuredPrefixCollision(prefix, root string) error {
 	if mi.configMgr == nil {
 		return nil
 	}
+	if mi.configMgr.RepoPathSnapshot().IsOnlyRepoForPrefix(prefix, root) {
+		return nil
+	}
 	var candidates []config.RepoEntry
 	for _, entry := range mi.configMgr.Global().ReposSnapshot() {
 		base := config.ResolvePrefix(entry)

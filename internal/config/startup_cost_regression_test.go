@@ -115,3 +115,27 @@ func TestPrepareWorkspaceConfigNilLookupReusesRootSnapshot(t *testing.T) {
 	_, _ = cm.PrepareWorkspaceConfig("src", root, nil)
 	require.Same(t, first, cm.pathSnapshot.Lookup(root))
 }
+
+func TestRepoPathSnapshotOnlyRepoForPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		entries []RepoEntry
+		prefix  string
+		root    string
+		want    bool
+	}{
+		{"unique", []RepoEntry{{Path: "/a/src"}}, "src", "/a/src", true},
+		{"explicit-name", []RepoEntry{{Path: "/a/src", Name: "chosen"}}, "chosen", "/a/src", true},
+		{"different-root", []RepoEntry{{Path: "/a/src"}}, "src", "/b/src", false},
+		{"different-prefix", []RepoEntry{{Path: "/a/src", Name: "chosen"}}, "src", "/a/src", false},
+		{"duplicate", []RepoEntry{{Path: "/a/src"}, {Path: "/b/src"}}, "src", "/a/src", false},
+		{"derived-instance", []RepoEntry{{Path: "/a/src"}, {Path: "/b/linked", Name: "src@team"}}, "src@team", "/b/linked", false},
+		{"missing", nil, "src", "/a/src", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gc := &GlobalConfig{}
+			snapshot := gc.repoPathSnapshot(tc.entries, func(root string) string { return root })
+			assert.Equal(t, tc.want, snapshot.IsOnlyRepoForPrefix(tc.prefix, tc.root))
+		})
+	}
+}
