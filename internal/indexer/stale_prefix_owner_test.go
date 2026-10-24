@@ -70,7 +70,7 @@ func TestConfiguredStaleCatalogOwner(t *testing.T) {
 			require.NoError(t, err)
 			require.True(t, found)
 			t.Logf("binding moved to replacement=%v", pathkey.SamePathIdentity(checkout.RootPath, pathkey.CanonicalPath(replacement)))
-			assert.Equal(t, pathkey.CanonicalPath(replacement), checkout.RootPath)
+			assert.True(t, pathkey.EqualPaths(pathkey.CanonicalPath(replacement), checkout.RootPath), "checkout root %q", checkout.RootPath)
 		})
 	}
 }

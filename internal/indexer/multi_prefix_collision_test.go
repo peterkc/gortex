@@ -246,7 +246,8 @@ func TestPromotionPrefixCollisionKeepsOtherCorpus(t *testing.T) {
 	require.NotNil(t, f.mi.GetMetadata(prefix), "collision must not purge the other root")
 	assert.Equal(t, other, f.mi.GetMetadata(prefix).RootPath)
 	assert.NotEmpty(t, f.store.GetRepoNodes(prefix))
-	assert.Equal(t, pathkey.CanonicalExistingRoot(other), f.checkoutOf(prefix).RootPath)
+	got := f.checkoutOf(prefix).RootPath
+	assert.True(t, pathkey.EqualPaths(pathkey.CanonicalExistingRoot(other), got), "checkout root %q", got)
 }
 
 func TestSeedPrefixCollisionKeepsCatalogOwner(t *testing.T) {
