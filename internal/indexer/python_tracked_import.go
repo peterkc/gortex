@@ -1,8 +1,7 @@
 package indexer
 
 import (
-	"os"
-	"path/filepath"
+	"path"
 	"regexp"
 	"strings"
 
@@ -35,7 +34,8 @@ func (mi *MultiIndexer) pythonPackageLookup() *resolver.PythonPackageLookup {
 		if meta == nil || meta.RootPath == "" {
 			continue
 		}
-		src, _ := readDiskFile(filepath.Join(meta.RootPath, "pyproject.toml"))
+		tree := mi.manifestTreeFor(repo, meta.RootPath)
+		src, _ := tree.readFile("pyproject.toml")
 		var manifest struct {
 			Project struct{ Name string } `toml:"project"`
 			Tool    struct {
@@ -62,9 +62,8 @@ func (mi *MultiIndexer) pythonPackageLookup() *resolver.PythonPackageLookup {
 				}
 			}
 		}
-		requirements, _ := filepath.Glob(filepath.Join(meta.RootPath, "requirements*.txt"))
-		for _, file := range requirements {
-			src, _ := readDiskFile(file)
+		for _, file := range tree.matchFiles("requirements*.txt") {
+			src, _ := tree.readFile(file)
 			specs = append(specs, modules.ParseRequirementsTxt(src)...)
 		}
 		for _, dep := range specs {
@@ -86,25 +85,19 @@ func (mi *MultiIndexer) pythonPackageLookup() *resolver.PythonPackageLookup {
 		if !declared {
 			continue
 		}
+		tree := mi.manifestTreeFor(repo, roots[repo].RootPath)
 		for _, dir := range []string{"", "src"} {
-			children, err := os.ReadDir(filepath.Join(roots[repo].RootPath, dir))
-			if err != nil {
-				continue
+			files := tree.matchFiles(path.Join(dir, "*.py"))
+			for _, pkg := range tree.matchDirs(path.Join(dir, "*")) {
+				files = append(files, pkg+"/__init__.py")
 			}
-			for _, child := range children {
-				name := child.Name()
-				if !child.IsDir() && !strings.HasSuffix(name, ".py") {
-					continue
-				}
+			for _, file := range files {
+				name := strings.TrimSuffix(strings.TrimPrefix(file, dir+"/"), "/__init__.py")
 				if dir == "" && pythonRootToolingFile(name) {
 					continue
 				}
 				top := strings.TrimSuffix(name, ".py")
-				file := filepath.ToSlash(filepath.Join(repo, dir, name))
-				if child.IsDir() {
-					file += "/__init__.py"
-				}
-				node := mi.graph.GetNode(file)
+				node := mi.graph.GetNode(repo + "/" + file)
 				if node == nil || node.Kind != graph.KindFile || node.RepoPrefix != repo {
 					continue
 				}

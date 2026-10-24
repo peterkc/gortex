@@ -3696,6 +3696,9 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 		// Parallel warmup deliberately defers both tails to its later workspace
 		// resolve/global phases. A full retrack already ran its own resolve/derived
 		// pipeline and only needs the existing cross-repository contract reconcile.
+		if batchMode.deferResolve && batch != nil {
+			result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, pythonConsumerFilesForAddedFiles(mi.graph, batch.pythonAddedFiles)...)
+		}
 		if !result.FullRetrack && !batchMode.deferResolve {
 			mi.resolveIncrementalRepoMutation(prefix, result, receipt, batch)
 			if !batchMode.deferGlobalPasses {
