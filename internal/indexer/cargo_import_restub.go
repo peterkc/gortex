@@ -45,7 +45,10 @@ func restubTrackedCargoRepoIncoming(g graph.Store, repo string) []string {
 func restubTrackedCargoImportsFromView(g graph.Store, evicted map[string]struct{}, incoming map[string][]*graph.Edge, parkCalls bool) []string {
 	consumers := make(map[string]struct{})
 	var batch []graph.EdgeReindex
-	for _, edges := range incoming {
+	for id, edges := range incoming {
+		if _, changing := evicted[id]; !parkCalls && !changing {
+			continue
+		}
 		for _, edge := range edges {
 			if edge == nil || !edge.CrossRepo {
 				continue

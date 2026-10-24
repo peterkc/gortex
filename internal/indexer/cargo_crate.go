@@ -1,7 +1,6 @@
 package indexer
 
 import (
-	"os"
 	"path"
 	"strings"
 	"sync"
@@ -16,8 +15,8 @@ func cargoTable(m map[string]any, key string) map[string]any {
 	return table
 }
 
-func readCargoManifest(root, dir string) map[string]any {
-	src, ok := readDiskFile(joinPath(root, path.Join(dir, "Cargo.toml")))
+func readCargoManifest(tree manifestTree, dir string) map[string]any {
+	src, ok := tree.readFile(path.Join(dir, "Cargo.toml"))
 	if !ok {
 		return nil
 	}
@@ -36,11 +35,12 @@ func (mi *MultiIndexer) cargoCrateLookup() resolver.CargoCrateLookup {
 		deps            map[string]string
 		imports         map[string][]resolver.CargoCrate
 	}
-	roots := map[string]string{}
+	roots := map[string]manifestTree{}
 	for prefix, meta := range mi.AllMetadata() {
 		if meta != nil && meta.RootPath != "" {
-			if _, err := os.Stat(joinPath(meta.RootPath, "Cargo.toml")); err == nil {
-				roots[prefix] = meta.RootPath
+			tree := mi.manifestTreeFor(prefix, meta.RootPath)
+			if tree.isFile("Cargo.toml") {
+				roots[prefix] = tree
 			}
 		}
 	}
@@ -54,21 +54,30 @@ func (mi *MultiIndexer) cargoCrateLookup() resolver.CargoCrateLookup {
 	var once sync.Once
 	return func(file, name string) []resolver.CargoCrate {
 		once.Do(func() {
-			for prefix, root := range roots {
-				manifest := readCargoManifest(root, ".")
-				src, _ := readDiskFile(joinPath(root, "Cargo.toml"))
+			for prefix, tree := range roots {
+				manifest := readCargoManifest(tree, ".")
+				src, _ := tree.readFile("Cargo.toml")
 				members, exclude := modules.ParseCargoWorkspace(src)
 				dirs := []string{"."}
-				for _, member := range modules.ResolveWorkspaceMembers(root, &modules.WorkspaceManifest{Ecosystem: modules.WorkspaceCargo, Patterns: members, Exclude: exclude}) {
-					if !path.IsAbs(member.Dir) && !hasDotDotSegment(member.Dir) {
-						dirs = append(dirs, member.Dir)
+				skip := map[string]bool{".": true}
+				for _, pattern := range exclude {
+					for _, dir := range tree.matchDirs(pattern) {
+						skip[dir] = true
+					}
+				}
+				for _, pattern := range members {
+					for _, dir := range tree.matchDirs(pattern) {
+						if !path.IsAbs(dir) && !hasDotDotSegment(dir) && !skip[dir] && tree.isFile(path.Join(dir, "Cargo.toml")) {
+							dirs = append(dirs, dir)
+							skip[dir] = true
+						}
 					}
 				}
 				inherited := cargoTable(cargoTable(manifest, "workspace"), "dependencies")
 				for _, dir := range dirs {
 					m := manifest
 					if dir != "." {
-						m = readCargoManifest(root, dir)
+						m = readCargoManifest(tree, dir)
 					}
 					if m == nil {
 						continue
@@ -146,7 +155,7 @@ func (mi *MultiIndexer) cargoCrateLookup() resolver.CargoCrateLookup {
 		defer ownerMu.Unlock()
 		var prefix string
 		for dir := path.Dir(file); dir != "."; dir = path.Dir(dir) {
-			if roots[dir] != "" {
+			if roots[dir] != nil {
 				prefix = dir
 				break
 			}
@@ -170,8 +179,7 @@ func (mi *MultiIndexer) cargoCrateLookup() resolver.CargoCrateLookup {
 			if dir == prefix {
 				rel = "."
 			}
-			_, err := os.Stat(joinPath(roots[prefix], path.Join(rel, "Cargo.toml")))
-			if !os.IsNotExist(err) || dir == prefix {
+			if roots[prefix].isFile(path.Join(rel, "Cargo.toml")) || dir == prefix {
 				break // Unknown, malformed, or unreadable manifest: no ownership evidence.
 			}
 		}
