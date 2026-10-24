@@ -147,3 +147,18 @@ func TestTrackRepositoryPrefixCollisionNamesMCPParameter(t *testing.T) {
 	require.Contains(t, text, "no longer exists")
 	require.Contains(t, text, "untrack_repository")
 }
+
+func TestTrackRepositoryConfiguredNameChangeRequiresConfigEdit(t *testing.T) {
+	srv, mi := newWorktreeMCPServer(t)
+	root := t.TempDir()
+	require.NoError(t, srv.configManager.Global().AddRepo(config.RepoEntry{Path: root, Name: "src"}))
+	require.NoError(t, srv.configManager.Global().Save())
+	req := mcplib.CallToolRequest{}
+	req.Params.Arguments = map[string]any{"path": root, "name": "other-src"}
+	res, err := srv.handleTrackRepository(t.Context(), req)
+	require.NoError(t, err)
+	require.True(t, res.IsError, "%+v", res.Content)
+	require.Contains(t, extractTextFromContent(t, res.Content), "already configured; set name: other-src")
+	require.Empty(t, mi.AllMetadata(), "refusal must precede indexing")
+	require.Equal(t, "src", srv.configManager.Global().FindRepoByPath(root).Name)
+}

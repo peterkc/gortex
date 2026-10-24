@@ -247,3 +247,38 @@ func TestUntrackConfiguredRootNeedsLoadedProof(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, before, after, "unknown loaded state must not bypass untrack preview")
 }
+
+func TestRunTrackConfiguredUnloadedKeepsName(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	root := pathkey.CanonicalExistingRoot(t.TempDir())
+	entries := []config.RepoEntry{{Path: root, Name: "mylib"}}
+	_, mi := startCatalogTrackDaemon(t, entries, nil)
+	oldName, oldWait, oldEnsure := trackName, trackWait, trackEnsureDaemonReadyFn
+	t.Cleanup(func() { trackName, trackWait, trackEnsureDaemonReadyFn = oldName, oldWait, oldEnsure })
+	trackName, trackWait = "", false
+	trackEnsureDaemonReadyFn = func(bool) daemonDecision { return daemonReady }
+	cmd := &cobra.Command{}
+	var output bytes.Buffer
+	cmd.SetErr(&output)
+	require.NoError(t, runTrack(cmd, []string{root}))
+	require.NotNil(t, mi.GetMetadata("mylib"), "configured name must be sent even before warmup loads it")
+	assert.Contains(t, output.String(), "mylib")
+	gc, err := config.LoadGlobal()
+	require.NoError(t, err)
+	assert.Equal(t, "mylib", gc.FindRepoByPath(root).Name)
+}
+
+func TestControllerTrackConfiguredNameChangeRequiresConfigEdit(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	root := pathkey.CanonicalExistingRoot(t.TempDir())
+	entries := []config.RepoEntry{{Path: root, Name: "src"}}
+	cm, mi := startCatalogTrackDaemon(t, entries, nil)
+	lc, err := indexer.NewCheckoutLifecycle(indexer.CheckoutLifecycleConfig{MultiIndexer: mi, ConfigManager: cm, Logger: zap.NewNop()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, lc.Close()) })
+	c := &realController{multiIndexer: mi, configManager: cm, lifecycle: lc, logger: zap.NewNop()}
+	_, err = c.Track(t.Context(), daemon.TrackParams{Path: root, Name: "other-src"})
+	require.ErrorContains(t, err, "already configured; set name: other-src")
+	assert.Empty(t, mi.AllMetadata(), "refusal must precede indexing")
+	assert.Equal(t, "src", cm.Global().FindRepoByPath(root).Name)
+}

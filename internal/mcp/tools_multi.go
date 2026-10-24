@@ -206,7 +206,7 @@ func (s *Server) handleTrackRepository(ctx context.Context, req mcp.CallToolRequ
 						collision.Prefix, collision.ExistingPath, collision.Path)), nil
 				}
 				return mcp.NewToolResultError(fmt.Sprintf(
-					"repository prefix %q is already used by %s; set the name parameter to a different prefix for %s",
+					"repository prefix %q is already used by %s; for a new path set the name parameter to a different prefix for %s; for an already configured path set name: in the global config and run `gortex daemon reload`",
 					collision.Prefix, collision.ExistingPath, collision.Path)), nil
 			}
 			return mcp.NewToolResultError(out.err.Error()), nil

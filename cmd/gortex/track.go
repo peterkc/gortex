@@ -184,11 +184,15 @@ func runTrack(cmd *cobra.Command, args []string) error {
 		}
 	}
 	var prefix string
+	daemonName := trackName
 	if already {
 		if entry := gc.FindRepoByPath(absPath); entry != nil && trackName != "" && trackName != config.ResolvePrefix(*entry) {
 			return fmt.Errorf("%s is already configured; set name: %s in the global config and run `gortex daemon reload`", absPath, trackName)
 		}
-		prefix = config.ResolvePrefix(config.RepoEntry{Path: absPath, Name: trackName})
+		if entry := gc.FindRepoByPath(absPath); entry != nil && daemonName == "" {
+			daemonName = entry.Name
+		}
+		prefix = config.ResolvePrefix(config.RepoEntry{Path: absPath, Name: daemonName})
 	} else {
 		owners := make(map[string]string, len(gc.Repos))
 		for _, existing := range gc.Repos {
@@ -248,7 +252,7 @@ func runTrack(cmd *cobra.Command, args []string) error {
 	if decision != daemonUnavailable {
 		notifyFn := trackNotifyDaemonTrackFn
 		notifyErr, notifyTimedOut := beforeTrackDeadline(waitDeadline, func() error {
-			return notifyFn(absPath, trackName, waitDeadline)
+			return notifyFn(absPath, daemonName, waitDeadline)
 		})
 		if notifyTimedOut || trackDeadlineExpired(waitDeadline) {
 			return trackWaitTimeoutError(absPath, trackWaitTimeout, "waiting for the daemon to accept the repository")

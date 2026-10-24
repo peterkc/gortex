@@ -738,6 +738,18 @@ func (l *CheckoutLifecycle) Register(
 	if err != nil {
 		return RegisterResult{}, fmt.Errorf("resolve path %s: %w", entry.Path, err)
 	}
+	// Existing config is the restart authority. Do not accept a rename that
+	// AddRepo would discard, and keep a pinned name when warmup has not loaded it.
+	if l.cfgMgr != nil {
+		if configured := l.cfgMgr.RepoPathLookup()(absPath); configured != nil {
+			if entry.Name != "" && entry.Name != config.ResolvePrefix(*configured) {
+				return RegisterResult{}, fmt.Errorf("%s is already configured; set name: %s in the global config and run `gortex daemon reload`", absPath, entry.Name)
+			}
+			if entry.Name == "" {
+				entry.Name = configured.Name
+			}
+		}
+	}
 	// One fan-out for the whole registration: the family reconciliation at the
 	// end drives the same cleanup hooks a sweep does, and each of them tells
 	// the sessions the tracked set moved.
