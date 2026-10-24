@@ -93,7 +93,10 @@ func New(patterns []string) *Matcher {
 	for i, p := range cleaned {
 		if strings.HasPrefix(p, "!") {
 			m.hasNegation = true
-			if literal := requiredLiteral(p[1:]); literal != "" {
+			// A line starting with "!!" compiles as a negation of a pattern
+			// that itself starts with "!", whose match does not need that
+			// literal, so it gets no prefilter literal.
+			if literal := requiredLiteral(p[1:]); literal != "" && !strings.HasPrefix(p[1:], "!") {
 				m.negationLiterals = append(m.negationLiterals, literal)
 			} else {
 				unfilteredNegation = true
@@ -261,7 +264,7 @@ func (m *Matcher) MatchRel(relPath string) bool {
 	if (!m.hasNegation || !m.checkUnmatchedParents) && !m.couldMatch(rel) {
 		return false
 	}
-	matched, _ := m.explainRel(rel)
+	matched, _ := m.explainRel(rel, false)
 	return matched
 }
 
@@ -319,13 +322,18 @@ func (m *Matcher) Explain(relPath string) (bool, string) {
 	if rel == "" || rel == "." {
 		return false, ""
 	}
-	return m.explainRel(rel)
+	return m.explainRel(rel, true)
 }
 
 // explainRel tests the final path first, then enforces the parent rule.
 // Without a positive match (even one later negated), ordinary patterns
 // cannot exclude a parent. Uncertain compiler forms retain the slow check.
-func (m *Matcher) explainRel(rel string) (bool, string) {
+//
+// When the final path matched and no negation line can match it, the last
+// matching line is positive and the parent pass cannot change the verdict;
+// it only picks which line explains it. withPattern keeps that pass for
+// Explain, and MatchRel skips it.
+func (m *Matcher) explainRel(rel string, withPattern bool) (bool, string) {
 	if m.IncludesRel(rel) {
 		return false, ""
 	}
@@ -336,7 +344,7 @@ func (m *Matcher) explainRel(rel string) (bool, string) {
 		ign = m.dirs
 	}
 	matched, ip := ign.MatchesPathHow(rel)
-	if m.hasNegation && (ip != nil || m.checkUnmatchedParents) {
+	if m.hasNegation && ((ip != nil && (withPattern || m.couldNegate(rel))) || m.checkUnmatchedParents) {
 		for i := 0; i < len(rel); i++ {
 			if rel[i] == '/' {
 				if matched, ip := m.dirs.MatchesPathHow(rel[:i]); matched && ((m.includes == nil && len(m.literalIncludes) == 0) || !m.IncludesRel(rel[:i]+"/")) {

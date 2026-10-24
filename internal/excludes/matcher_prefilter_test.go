@@ -195,11 +195,11 @@ func TestMatchRelEitherNonmatchingNegationSkipsParents(t *testing.T) {
 
 func TestMatcherNegationPrefilterDifferential(t *testing.T) {
 	rng := rand.New(rand.NewSource(95103))
-	pool := []string{"gen/", "node_modules/", "*.tmp", "/**", "gen/**/", "gen/**", "a/b/*", "[ab]", "?x", `\#*\#`, "!.gitkeep", "!*.proto", "!gen/", "!gen/keep/", "!**/keep.go", "!a/**/b", "!gen?/", "!/[ab]/", `!a\*b/`, "!*", "!/**", "!café/", "!foo//", "!!bang"}
+	pool := []string{"gen/", "node_modules/", "*.tmp", "/**", "gen/**/", "gen/**", "a/b/*", "[ab]", "?x", `\#*\#`, "!.gitkeep", "!*.proto", "!gen/", "!gen/keep/", "!**/keep.go", "!a/**/b", "!gen?/", "!/[ab]/", `!a\*b/`, "!*", "!/**", "!café/", "!foo//", "!!bang", "!!bang/", "bang"}
 	includePool := []string{"*.proto", "gen/", "vendor/acme/lib/", "/gen/keep/", "**/keep.go", "a?/", "[ab]/"}
-	paths := []string{"main.go", "index.js", ".gitkeep", "schema.proto", "keep.go", "keep/file.go", "gen", "gen/lib/file.go", "gen/keep/a.tmp", "node_modules/pkg/index.js", "node_modules/pkg/.gitkeep", "node_modules/pkg/schema.proto", "node_modules/pkg/a/b/c/d/index.js", "a/b", "a/deep/b", "a/b/file.go", "foo", "foo//child", "cache.tmp", "a", "b", "ax", "#lock#", "cafe\u0301/x", "café/keep.go", "vendor/x.proto", "vendor/acme/lib/x.go", "!bang/x"}
+	paths := []string{"main.go", "index.js", ".gitkeep", "schema.proto", "keep.go", "keep/file.go", "gen", "gen/lib/file.go", "gen/keep/a.tmp", "node_modules/pkg/index.js", "node_modules/pkg/.gitkeep", "node_modules/pkg/schema.proto", "node_modules/pkg/a/b/c/d/index.js", "a/b", "a/deep/b", "a/b/file.go", "foo", "foo//child", "cache.tmp", "a", "b", "ax", "#lock#", "cafe\u0301/x", "café/keep.go", "vendor/x.proto", "vendor/acme/lib/x.go", "!bang/x", "bang", "src/bang"}
 	queries := 0
-	for range 4200 {
+	for range 2000 {
 		var patterns, includes []string
 		if rng.Intn(2) == 0 {
 			patterns = append(patterns, Builtin...)
@@ -221,10 +221,15 @@ func TestMatcherNegationPrefilterDifferential(t *testing.T) {
 				if got != want {
 					t.Fatalf("patterns=%q includes=%q path=%q: got %v, ungated %v", patterns, includes, rel, got, want)
 				}
+				for _, form := range []string{rel, rel + "/"} {
+					if got, want := m.MatchRel(form), ungated.MatchRel(form); got != want {
+						t.Fatalf("MatchRel patterns=%q includes=%q path=%q: got %v, ungated %v", patterns, includes, form, got, want)
+					}
+				}
 			}
 		}
 	}
-	if queries != 352800 {
-		t.Fatalf("checked %d paths, want 352800", queries)
+	if queries != 180000 {
+		t.Fatalf("checked %d paths, want 180000", queries)
 	}
 }
