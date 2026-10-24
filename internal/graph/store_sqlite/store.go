@@ -2761,7 +2761,10 @@ var errReindexWriterGateContended = errors.New("store_sqlite: reindex writer gat
 // variable-safe VALUES relations, frees moving identities before choosing
 // destination payloads, and persists only the net final-state differences.
 // Stationary destinations keep their payloads (including same-batch refreshes);
-// the first mover wins a fresh key. Transactions hold at most 5000 entries.
+// the first mover wins a fresh key. Distinct copied rows that converge at a
+// fresh key and then move it again, or reuse an already-moved stored identity,
+// are not guaranteed to converge across stores (see graph.Store.ReindexEdges).
+// Transactions hold at most 5000 entries.
 // A chain or swap split across transactions can still lose one edge, as before;
 // it does not retain the losing mover's payload at a stationary destination.
 func (s *Store) ReindexEdges(batch []graph.EdgeReindex) {
