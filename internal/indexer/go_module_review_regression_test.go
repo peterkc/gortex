@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"iter"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -147,6 +148,122 @@ func TestGoModuleRetrySkipsUnrelatedWorkspaceChanges(t *testing.T) {
 			require.NoError(t, cr.RetryGoModuleDeps(t.Context()))
 			assert.Zero(t, g.scans, "unchanged module content must not sweep terminals")
 			assert.Zero(t, g.definitions, "unchanged module content must not recheck bindings")
+		})
+	}
+}
+
+func TestGoModuleCrossWorkspaceRuleAdded(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, trigger := range []string{"global", "providersave"} {
+			t.Run(backend+"/"+trigger, func(t *testing.T) {
+				mi, g, repos := goModuleLifecycleFixture(t, backend)
+				repos[0].Workspace, repos[1].Workspace = "w1", "w2"
+				other := filepath.Join(repos[1].Path, "other.go")
+				writeFile(t, other, "package library\nfunc Other() {}\n")
+				for _, entry := range []config.RepoEntry{repos[1], repos[0]} {
+					_, err := mi.TrackRepoCtx(t.Context(), entry)
+					require.NoError(t, err)
+				}
+				mi.RunGlobalResolve()
+				require.Equal(t, "external-call::dep::example.org/library", goModuleLifecycleCall(t, g).To)
+				writeFile(t, filepath.Join(repos[0].Path, ".gortex.yaml"), "workspace: w1\ncross_workspace_deps:\n  - workspace: w2\n    modules: [example.org/library]\n    mode: read-only\n")
+				mi.RefreshRepoConfigs()
+				if trigger == "global" {
+					mi.RunGlobalResolve()
+				} else {
+					writeFile(t, other, "package library\nfunc Other() { println(1) }\n")
+					_, err := mi.IncrementalReindexRepo("b", []string{other})
+					require.NoError(t, err)
+				}
+				edge := goModuleLifecycleCall(t, g)
+				assert.Equal(t, "b/lib.go::Hello", edge.To, "the new rule must bind the unchanged caller")
+				assert.True(t, edge.CrossRepo)
+			})
+		}
+	}
+}
+
+func TestGoModuleProviderRemovesSymbolFlags(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, mode := range []string{"point", "watcher"} {
+			t.Run(backend+"/"+mode, func(t *testing.T) {
+				mi, g, repos := goModuleLifecycleFixture(t, backend)
+				for _, entry := range []config.RepoEntry{repos[1], repos[0]} {
+					_, err := mi.TrackRepoCtx(t.Context(), entry)
+					require.NoError(t, err)
+				}
+				edge := goModuleLifecycleCall(t, g)
+				require.Equal(t, "b/lib.go::Hello", edge.To)
+				require.True(t, edge.CrossRepo)
+				lib := filepath.Join(repos[1].Path, "lib.go")
+				writeFile(t, lib, "package library\nfunc Other() {}\n")
+				var err error
+				if mode == "point" {
+					err = mi.GetIndexer("b").IndexFile(lib)
+				} else {
+					_, err = mi.incrementalPointRepoRaw("b", lib)
+				}
+				require.NoError(t, err)
+				edge = goModuleLifecycleCall(t, g)
+				assert.Equal(t, "external-call::dep::example.org/library", edge.To)
+				assert.False(t, edge.CrossRepo)
+				assert.Equal(t, 0.5, edge.Confidence)
+				assert.Equal(t, "INFERRED", edge.ConfidenceLabel)
+				assert.Equal(t, graph.OriginTextMatched, edge.Origin)
+				mi.RunGlobalResolve()
+				edge = goModuleLifecycleCall(t, g)
+				assert.Equal(t, "external-call::dep::example.org/library", edge.To)
+				assert.False(t, edge.CrossRepo)
+				assert.Equal(t, 0.5, edge.Confidence)
+				assert.Equal(t, "INFERRED", edge.ConfidenceLabel)
+				assert.Equal(t, graph.OriginTextMatched, edge.Origin)
+			})
+		}
+	}
+}
+
+func TestGoModuleInCheckoutReplaceRemoved(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			mi, g, repos := goModuleLifecycleFixture(t, backend)
+			caller := repos[0].Path
+			manifest := filepath.Join(caller, "go.mod")
+			writeFile(t, manifest, "module example.org/caller\nreplace example.org/library => ./third_party/library\n")
+			require.NoError(t, os.MkdirAll(filepath.Join(caller, "third_party", "library"), 0o755))
+			writeFile(t, filepath.Join(caller, "third_party", "library", "go.mod"), "module example.org/library\n")
+			writeFile(t, filepath.Join(caller, "third_party", "library", "lib.go"), "package library\nfunc Hello() {}\n")
+			for _, entry := range []config.RepoEntry{repos[1], repos[0]} {
+				_, err := mi.TrackRepoCtx(t.Context(), entry)
+				require.NoError(t, err)
+			}
+			mi.RunGlobalResolve()
+			edge := goModuleLifecycleCall(t, g)
+			require.Equal(t, "a/third_party/library/lib.go::Hello", edge.To)
+			require.False(t, edge.CrossRepo)
+			require.Equal(t, "example.org/library::Hello", edge.Meta["go_import"])
+			writeFile(t, manifest, "module example.org/caller\n")
+			_, err := mi.IncrementalReindexRepo("a", []string{manifest})
+			require.NoError(t, err)
+			mi.RunGlobalResolve()
+			edge = goModuleLifecycleCall(t, g)
+			assert.Equal(t, "b/lib.go::Hello", edge.To)
+			assert.True(t, edge.CrossRepo)
+			// A cold index of the same state must choose the same provider.
+			var coldGraph graph.Store = graph.New()
+			if backend == "sqlite" {
+				db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.sqlite"))
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, db.Close()) })
+				coldGraph = db
+			}
+			cold := NewMultiIndexer(coldGraph, newTestRegistry(), search.NewNull(), newTestConfigManager(t), zap.NewNop())
+			t.Cleanup(func() { require.NoError(t, cold.Close(context.Background())) })
+			for _, entry := range []config.RepoEntry{repos[1], repos[0]} {
+				_, err := cold.TrackRepoCtx(t.Context(), entry)
+				require.NoError(t, err)
+			}
+			cold.RunGlobalResolve()
+			assert.Equal(t, goModuleLifecycleCall(t, coldGraph).To, edge.To)
 		})
 	}
 }

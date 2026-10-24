@@ -110,6 +110,7 @@ type MultiIndexer struct {
 	goModuleCache        map[string]string
 	goModuleReplacements map[string][]resolver.GoModuleReplacement
 	goModuleFiles        map[string]goModuleFileStamp
+	goModuleRules        map[string][]resolver.CrossWorkspaceDepRule
 	goModuleRetry        resolver.GoModuleDepRetry
 
 	// pendingRepositoryUntracks is guarded by mu. Entries are installed before
@@ -2195,8 +2196,18 @@ func (mi *MultiIndexer) goModuleSnapshot() (map[string]string, uint64) {
 	sameReplacements := maps.EqualFunc(replacements, mi.goModuleReplacements, slices.Equal[[]resolver.GoModuleReplacement])
 	mi.goModuleReplacements = replacements
 	mi.goModuleFiles = files
+	sameRules := true
+	if mi.configMgr != nil && (mi.goModuleCache == nil || mi.goModuleRevision != revision || mi.goModuleRepoCount != count) {
+		rules, _ := mi.collectCrossWorkspaceRules()
+		sameRules = maps.EqualFunc(rules, mi.goModuleRules, func(a, b []resolver.CrossWorkspaceDepRule) bool {
+			return slices.EqualFunc(a, b, func(a, b resolver.CrossWorkspaceDepRule) bool {
+				return a.Workspace == b.Workspace && slices.Equal(a.Modules, b.Modules)
+			})
+		})
+		mi.goModuleRules = rules
+	}
 	mi.goModuleRevision, mi.goModuleRepoCount = revision, count
-	if mi.goModuleCache != nil && maps.Equal(modules, mi.goModuleCache) && sameReplacements {
+	if mi.goModuleCache != nil && maps.Equal(modules, mi.goModuleCache) && sameReplacements && sameRules {
 		return mi.goModuleCache, mi.goModuleGeneration
 	}
 	mi.goModuleCache = modules

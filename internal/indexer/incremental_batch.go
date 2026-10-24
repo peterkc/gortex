@@ -1502,6 +1502,9 @@ func restubIncomingRefsFromView(
 				oldTo := edge.To
 				graph.StashRestubProvenance(edge)
 				edge.To = goModuleRestubTarget(edge, stub)
+				if edge.To != stub {
+					edge.CrossRepo, edge.ConfidenceLabel = false, ""
+				}
 				reindexes = append(reindexes, graph.EdgeReindex{Edge: edge, OldTo: oldTo})
 			}
 		}
