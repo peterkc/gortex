@@ -820,20 +820,8 @@ func (g *Graph) reindexStoredEdges(batch []EdgeReindex) {
 		if moving[old] {
 			continue // A preceding move already consumed this old identity.
 		}
-		if !r.RefreshIdentity {
-			stored := g.storedEdge(old)
-			if stored == nil {
-				continue
-			}
-			if r.OldTo == r.Edge.To && oldKind == r.Edge.Kind {
-				// A same-key payload update changes no resolver frontier.
-				s := g.shardFor(r.Edge.From)
-				s.mu.Lock()
-				*stored = *r.Edge
-				s.mu.Unlock()
-				g.edgeMutGen.Add(1)
-				continue
-			}
+		if !r.RefreshIdentity && g.storedEdge(old) == nil {
+			continue
 		}
 		prepared = append(prepared, r)
 		moving[old] = old != keyOf(r.Edge)
