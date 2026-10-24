@@ -111,6 +111,11 @@ links concentrate on up to three seeded hub targets; the rest cycle through all
 targets. The edge is flagged
 cross-repository. Existing real cross edges are not changed.
 
+This synthetic linking is the default (`gen -synthetic-cross-repo=true`). With
+`-synthetic-cross-repo=false`, `gen` skips it and preserves the input edges.
+Neither repository nor tier manifests receive a new synthetic linking policy in
+that mode. Other derivation and workload rules remain unchanged.
+
 `MakeVector` creates 32 seeded clusters. Raw unit vectors come from SHA-256 blocks
 of `seed:id:block`, interpreted as signed 16-bit components. A vector mixes
 0.8 times its cluster center with 0.2 times node-specific noise, normalizes in

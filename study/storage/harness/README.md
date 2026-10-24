@@ -123,6 +123,12 @@ endpoints survive qualification and synthetic linking. These commands do not
 index repositories or start Gortex. Commas in source-entry fields are unsupported.
 Use new tier names to keep real-source tiers distinct from the derived baseline.
 
+Synthetic cross-repository call links are enabled by default, including with
+`-sources`. To preserve only the input cross-repository edges, add
+`-synthetic-cross-repo=false` to `gen`. This skips link injection and adds no
+synthetic cross-repository policy to the manifests. Existing source edges remain
+unchanged. Rebuild `bin/gen` after changing its source.
+
 ## Link one adapter binary
 
 Place an adapter in its own module, for example `study/storage/adapters/<name>/go.mod`:

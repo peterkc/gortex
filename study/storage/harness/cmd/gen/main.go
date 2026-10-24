@@ -20,6 +20,7 @@ func run() error {
 	out := flag.String("out", "", "tier directory")
 	count := flag.Int("repos", 1, "repository count")
 	seed := flag.Int64("seed", 20261022, "deterministic seed")
+	syntheticCrossRepo := flag.Bool("synthetic-cross-repo", true, "add deterministic synthetic cross-repository call links")
 	flag.Parse()
 	if *count < 1 || *count > 100 || *out == "" {
 		return fmt.Errorf("-repos must be 1..100 and -out is required")
@@ -64,7 +65,9 @@ func run() error {
 		ds[i] = d
 		ids[i] = repo
 	}
-	dataset.LinkCrossRepo(ds)
+	if *syntheticCrossRepo {
+		dataset.LinkCrossRepo(ds)
+	}
 	segments := map[string]adapter.Segment{}
 	for i, d := range ds {
 		if _, e := dataset.Write(filepath.Join(*out, ids[i]), d); e != nil {
@@ -94,7 +97,7 @@ func run() error {
 	meta.Origin = "tier"
 	meta.ParentRepo = ""
 	meta.DerivedFraction = 0
-	if len(ds) > 1 {
+	if len(ds) > 1 && *syntheticCrossRepo {
 		meta.CrossRepoPolicy = dataset.CrossRepoPolicy
 	}
 	if len(bases) > 1 {

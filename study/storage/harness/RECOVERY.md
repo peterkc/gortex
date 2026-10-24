@@ -20,8 +20,8 @@ The historical command ran from the directory containing `harness/`:
 find harness -type f -name '*.go' -o -name '*.md' | sort | xargs shasum -a 256 | shasum -a 256
 ```
 
-The current documentation changes that fingerprint. It must not be presented as
-an unchanged current-tree fingerprint.
+The post-recovery changes below alter that fingerprint. It must not be presented
+as an unchanged current-tree fingerprint.
 
 ## Source and method
 
@@ -39,7 +39,7 @@ local/global quality, and their tests are unchanged.
 
 ## File provenance
 
-These 28 files are exact restorations and remain byte-for-byte unchanged:
+These 28 files were exact restorations before the post-recovery changes below:
 
 - `FORMAT.md`
 - `adapter/adapter.go`
@@ -113,8 +113,8 @@ ok  	gxstudy/runner	2.480s
 ok  	gxstudy/workload	0.149s
 ```
 
-All 26 Go files and `go.mod` remain unchanged after verification. The root
-Gortex `go.mod` also remains unchanged. Root Gortex tests were not run.
+At recovery verification, all 26 Go files and `go.mod` remained unchanged. The
+root Gortex `go.mod` also remained unchanged. Root Gortex tests were not run.
 
 ## Limits
 
@@ -124,3 +124,24 @@ Gortex `go.mod` also remains unchanged. Root Gortex tests were not run.
 - Gortex localization and workspace memory were unavailable because its daemon
   was stopped. It was not started, tracked, indexed or administered.
 - Required package checks do not replace future corpus or adapter validation.
+
+## Post-recovery change: source-only cross-repository edges
+
+On 2026-10-24, the lead approved a minimal generator opt-out for public Batch B.
+`cmd/gen/main.go` now accepts `-synthetic-cross-repo=false`. The default remains
+true. The opt-out skips `LinkCrossRepo` and does not add its synthetic policy to
+the tier manifest. It does not change the link algorithm or adapter interfaces.
+`README.md` and `FORMAT.md` document the mode.
+
+The new `cmd/gen/main_test.go` uses two source exports with two owned crossings
+and 400 local calls. With the opt-out, all input edge records survive unchanged
+and both repository and tier metadata omit the synthetic policy. Default and
+explicit-on runs produce the same records and manifests, with six crossings.
+The source-only assertion failed on the old code (six rather than two crossings)
+and passed after the change. No existing test was deleted.
+
+`go vet -p=1 ./...` and `go test -p=1 ./...` passed in sequence with
+`GOMAXPROCS=2`, `GOWORK=off`, `GOTOOLCHAIN=local`, `GOFLAGS=-mod=readonly`, and
+memory level 78 before each. The root module and adapters were not changed.
+The current fingerprint is recorded outside this directory in the Batch B
+measurement evidence, so this recovery log does not contain its own hash.
