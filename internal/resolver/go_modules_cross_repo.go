@@ -32,7 +32,7 @@ func (cr *CrossRepoResolver) resolveGoExtern(e *graph.Edge, spec string, stats *
 		stats.Unresolved++
 		return
 	}
-	bindGoModuleEdge(e, match, cr.callerRepoPrefix(e), cr.goModuleReplacements)
+	bindGoModuleEdge(e, match, cr.callerRepoPrefix(e), cr.goModules[cr.callerRepoPrefix(e)], cr.goModuleReplacements)
 	stats.Resolved++
 	if e.CrossRepo {
 		stats.CrossRepoEdges++
@@ -178,7 +178,7 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 			original.Meta = maps.Clone(e.Meta)
 			originals[graph.EdgeIdentityFor(e)] = &original
 			oldTo := e.To
-			bindGoModuleEdge(e, match, caller, cr.goModuleReplacements)
+			bindGoModuleEdge(e, match, caller, cr.goModules[caller], cr.goModuleReplacements)
 			delete(e.Meta, "external_call")
 			delete(e.Meta, "go_extern_target")
 			batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
@@ -388,7 +388,7 @@ func (cr *CrossRepoResolver) resolveGoModuleEdgesLocked(edges []*graph.Edge, sta
 		copy.Meta = maps.Clone(e.Meta)
 		if match != nil {
 			targetRepos[match.ID] = match.RepoPrefix
-			bindGoModuleEdge(&copy, match, caller, cr.goModuleReplacements)
+			bindGoModuleEdge(&copy, match, caller, cr.goModules[caller], cr.goModuleReplacements)
 		} else {
 			if !graph.IsUnresolvedTarget(e.To) && e.Meta["go_import"] == nil {
 				continue
