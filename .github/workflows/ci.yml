@@ -99,7 +99,7 @@ jobs:
         shell: bash
         env:
           TEST_RACE: "true"
-          SAVE_TIMINGS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          SAVE_TIMINGS: ${{ (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
         run: |
           if [[ "$SAVE_TIMINGS" == true && "$TEST_SHARD_COUNT" != 0 ]]; then
             python3 scripts/ci-test-partition.py 2>&1 | tee test-output.log
@@ -108,7 +108,7 @@ jobs:
           fi
 
       - name: Warm race cache for sharded packages
-        if: ${{ !cancelled() && matrix.partition == 'remaining' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: ${{ !cancelled() && matrix.partition == 'remaining' && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
         run: |
           # The census builds without coverage; the shard tests build with it.
           mkdir -p "$RUNNER_TEMP/race-warm" "$RUNNER_TEMP/race-warm-cover"
@@ -116,7 +116,7 @@ jobs:
           go test -race -cover -c -o "$RUNNER_TEMP/race-warm-cover/" ./internal/graph/store_sqlite ./internal/indexer ./internal/mcp
 
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: ${{ !cancelled() && matrix.partition == 'remaining' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: ${{ !cancelled() && matrix.partition == 'remaining' && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
         with:
           path: |
             ${{ steps.cache-paths.outputs.build }}
@@ -132,13 +132,13 @@ jobs:
 
       # A failed or timed-out shard still records the tests that passed.
       - name: Write shard timings
-        if: ${{ !cancelled() && (steps.test.outcome == 'success' || steps.test.outcome == 'failure') && github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.shard_count > 0 }}
+        if: ${{ !cancelled() && (steps.test.outcome == 'success' || steps.test.outcome == 'failure') && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && matrix.shard_count > 0 }}
         shell: bash
         env:
           TEST_OUTCOME: ${{ steps.test.outcome }}
         run: python3 scripts/ci-test-partition.py --write-timings test-output.log
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: ${{ !cancelled() && (steps.test.outcome == 'success' || steps.test.outcome == 'failure') && github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.shard_count > 0 }}
+        if: ${{ !cancelled() && (steps.test.outcome == 'success' || steps.test.outcome == 'failure') && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && matrix.shard_count > 0 }}
         with:
           name: ci-timings-${{ matrix.os }}-${{ matrix.partition }}
           path: ci-shard-timings/*.json
@@ -181,7 +181,7 @@ jobs:
         shell: bash
         env:
           TEST_RACE: "false"
-          SAVE_TIMINGS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          SAVE_TIMINGS: ${{ (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
           TEST_WINDOWS: ${{ matrix.os == 'windows-latest' }}
         run: |
           run_tests() {
@@ -210,7 +210,7 @@ jobs:
 
       # A failed or timed-out shard still records the tests that passed.
       - name: Write shard timings
-        if: ${{ !cancelled() && (steps.test.outcome == 'success' || steps.test.outcome == 'failure') && github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.shard_count > 0 && matrix.os == 'windows-latest' }}
+        if: ${{ !cancelled() && (steps.test.outcome == 'success' || steps.test.outcome == 'failure') && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && matrix.shard_count > 0 && matrix.os == 'windows-latest' }}
         shell: bash
         env:
           TEST_OUTCOME: ${{ steps.test.outcome }}
@@ -221,7 +221,7 @@ jobs:
             python3 scripts/ci-test-partition.py --write-timings test-output.log
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: ${{ !cancelled() && (steps.test.outcome == 'success' || steps.test.outcome == 'failure') && github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.shard_count > 0 && matrix.os == 'windows-latest' }}
+        if: ${{ !cancelled() && (steps.test.outcome == 'success' || steps.test.outcome == 'failure') && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && matrix.shard_count > 0 && matrix.os == 'windows-latest' }}
         with:
           name: ci-timings-${{ matrix.os }}-${{ matrix.partition }}
           path: ci-shard-timings/*.json
@@ -231,7 +231,7 @@ jobs:
 
   timings:
     needs: [plan, test, test-platform]
-    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.result == 'success' }}
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
