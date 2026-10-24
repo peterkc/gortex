@@ -1096,6 +1096,33 @@ func (l *CheckoutLifecycle) claimDedicated(
 	return err
 }
 
+// releaseUnconfiguredBinding removes only abandoned, unpublished identity
+// metadata. A configured or live checkout still owns its binding, even if it
+// is configured under a different name. The catalog guards publication and
+// the exact row against changes between this check and the deletion.
+func (l *CheckoutLifecycle) releaseUnconfiguredBinding(ctx context.Context, binding store_sqlite.DedicatedGraph) error {
+	owner, found, err := l.catalog.GetCheckout(ctx, binding.OwnerCheckoutID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("%w: dedicated graph %s has no known owner", store_sqlite.ErrCatalogStaleGuard, binding.GraphID)
+	}
+	root := pathkey.CanonicalPath(owner.RootPath)
+	for _, meta := range l.mi.AllMetadata() {
+		if meta != nil && (pathkey.SamePathIdentity(pathkey.CanonicalPath(meta.RootPath), root) || sameDirectory(meta.RootPath, root)) {
+			return fmt.Errorf("%w: dedicated graph %s has a live owner", store_sqlite.ErrCatalogStaleGuard, binding.GraphID)
+		}
+	}
+	if l.cfgMgr == nil {
+		return fmt.Errorf("%w: configured owners are unavailable", store_sqlite.ErrCatalogStaleGuard)
+	}
+	if l.cfgMgr.RepoPathLookup()(root) != nil {
+		return fmt.Errorf("%w: dedicated graph %s has a configured owner", store_sqlite.ErrCatalogStaleGuard, binding.GraphID)
+	}
+	return l.catalog.DeleteUnpublishedDedicatedGraph(ctx, binding)
+}
+
 // bindDedicatedGraph binds a checkout to the repo prefix its nodes live
 // under. Only the first graph ever admitted to an empty family becomes its
 // primary automatically. A family that still owns independent dedicated
@@ -1140,8 +1167,9 @@ func (l *CheckoutLifecycle) bindDedicatedGraph(
 		return "", err
 	}
 	if found && (existing.OwnerCheckoutID != checkoutID || existing.FamilyID != familyID) {
-		return "", fmt.Errorf("%w: dedicated graph %s already belongs to checkout %s in family %s",
-			store_sqlite.ErrCatalogStaleGuard, graphID, existing.OwnerCheckoutID, existing.FamilyID)
+		if err := l.releaseUnconfiguredBinding(ctx, existing); err != nil {
+			return "", err
+		}
 	}
 	graphs, err := l.catalog.ListDedicatedGraphs(ctx, familyID)
 	if err != nil {
@@ -3972,7 +4000,8 @@ func (l *CheckoutLifecycle) walkDedicatedChain(
 // repairLegacyConfiguredBinding corrects main's pre-publication Seed upserts.
 // Config order is authoritative only when both roots remain configured and no
 // live owner or base publication protects the row. Delete metadata only; the
-// selected root reuses its stored corpus and binds normally below.
+// selected root binds normally below and reconcile brings the retained corpus
+// into agreement with that root.
 func (l *CheckoutLifecycle) repairLegacyConfiguredBinding(ctx context.Context, entry config.RepoEntry) error {
 	if l.catalog == nil || l.mi.GetMetadata(entry.Name) != nil {
 		return nil

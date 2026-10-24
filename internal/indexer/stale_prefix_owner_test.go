@@ -11,8 +11,8 @@ import (
 	"github.com/zzet/gortex/internal/pathkey"
 )
 
-func TestConfiguredStaleCatalogOwnerRefusesRebind(t *testing.T) {
-	for _, scenario := range []string{"offline-untrack", "implicit-auto-index", "rename-owner", "online-track"} {
+func TestConfiguredStaleCatalogOwnerRebindsWhenUnconfigured(t *testing.T) {
+	for _, scenario := range []string{"offline-untrack", "implicit-auto-index", "online-track"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newLifecycleFixture(t)
 			t.Cleanup(f.close)
@@ -31,30 +31,27 @@ func TestConfiguredStaleCatalogOwnerRefusesRebind(t *testing.T) {
 			require.NoError(t, err)
 			require.True(t, found)
 			f.cm.Global().Repos = []config.RepoEntry{entry}
-			if scenario == "rename-owner" {
-				f.cm.Global().Repos = []config.RepoEntry{{Path: old, Name: "src-old"}, entry}
-			}
 			require.NoError(t, f.cm.Global().Save())
 			f.restart()
 			if scenario == "online-track" {
 				result, err := f.lc.Register(t.Context(), entry, TrackSourceCLI)
 				require.NoError(t, err)
-				require.ErrorIs(t, result.CatalogErr, store_sqlite.ErrCatalogStaleGuard)
+				require.NoError(t, result.CatalogErr)
 				f.restart()
 			}
 			entries := f.cm.Global().ReposSnapshot()
 			selected := f.mi.ResolveConfiguredRepos(t.Context(), entries)
 			require.Equal(t, entries, selected, "stale catalog rows must not hide configured roots")
 			err = f.lc.Seed(t.Context())
-			require.ErrorIs(t, err, store_sqlite.ErrCatalogStaleGuard, "an unconfigured old owner needs explicit cleanup")
+			require.NoError(t, err, "an unconfigured, non-live, unpublished owner can be rebound")
 			after, found, err := f.catalog.GetDedicatedGraph(t.Context(), oldGraph.GraphID)
 			require.NoError(t, err)
 			require.True(t, found)
 			checkout, found, err := f.catalog.GetCheckout(t.Context(), after.OwnerCheckoutID)
 			require.NoError(t, err)
 			require.True(t, found)
-			assert.Equal(t, oldGraph, after, "runtime binding must not move a stale owner's row")
-			assert.True(t, pathkey.EqualPaths(pathkey.CanonicalPath(old), checkout.RootPath), "checkout root %q", checkout.RootPath)
+			assert.NotEqual(t, oldGraph.OwnerCheckoutID, after.OwnerCheckoutID)
+			assert.True(t, pathkey.EqualPaths(pathkey.CanonicalPath(replacement), checkout.RootPath), "checkout root %q", checkout.RootPath)
 		})
 	}
 }
@@ -102,4 +99,41 @@ func TestPlainLinkedWorktreeDaemonPrefix(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, result.CatalogErr)
 	assert.Equal(t, "src@src", result.Prefix)
+}
+
+func TestDedicatedBindingKeepsConfiguredOrLiveOwner(t *testing.T) {
+	for _, scenario := range []string{"configured", "configured-renamed", "live", "published"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newLifecycleFixture(t)
+			t.Cleanup(f.close)
+			old, replacement := f.gitRepo("old"), f.gitRepo("replacement")
+			result, err := f.lc.Register(t.Context(), config.RepoEntry{Path: old, Name: "src"}, TrackSourceCLI)
+			require.NoError(t, err)
+			require.NoError(t, result.CatalogErr)
+			before, found, err := f.catalog.GetDedicatedGraph(t.Context(), GraphIDFor("src"))
+			require.NoError(t, err)
+			require.True(t, found)
+			entries := []config.RepoEntry{{Path: replacement, Name: "src"}}
+			if scenario == "configured" {
+				entries = append(entries, config.RepoEntry{Path: old, Name: "src"})
+			}
+			if scenario == "configured-renamed" {
+				entries = append(entries, config.RepoEntry{Path: old, Name: "src-old"})
+			}
+			f.cm.Global().Repos = entries
+			require.NoError(t, f.cm.Global().Save())
+			if scenario == "published" {
+				guardConfiguredOwner(t, f, "src")
+			}
+			if scenario != "live" {
+				f.restart()
+			}
+			_, err = f.lc.recordCheckout(t.Context(), "src", replacement, TrackSourceCLI, false)
+			require.ErrorIs(t, err, store_sqlite.ErrCatalogStaleGuard)
+			after, found, err := f.catalog.GetDedicatedGraph(t.Context(), before.GraphID)
+			require.NoError(t, err)
+			require.True(t, found)
+			assert.Equal(t, before.OwnerCheckoutID, after.OwnerCheckoutID)
+		})
+	}
 }
