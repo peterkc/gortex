@@ -8,7 +8,7 @@ permissions:
   contents: read
 env:
   MAIN_SHA: ce04b3e8e37d206841770129b30be0f22ee27ccc
-  BRANCH_SHA: 72feeb4b03d0fb1426aebeff5b823b08662bdd15
+  BRANCH_SHA: 16c3f25794b829478ae151e821c3e1380d3f48c8
   GOMAXPROCS: '2'
   GOFLAGS: '-p=1'
 jobs:
