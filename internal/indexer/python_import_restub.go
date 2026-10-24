@@ -69,6 +69,25 @@ func restubTrackedPythonImportsFromView(g graph.Store, evicted map[string]struct
 				continue
 			}
 			old := edge.To
+			// A package edit can change a re-export without changing the old
+			// definition. Reopen its dependent calls when the import is restubbed.
+			if edge.Kind == graph.EdgeImports && strings.HasSuffix(old, "/__init__.py") {
+				for row := range graph.EdgesInScopeSeq(g, nil, []string{edge.FilePath}, graph.EdgeCalls) {
+					call := row.Edge
+					if call == nil || !call.CrossRepo || call.Meta[resolver.PythonReExportFileMeta] != old {
+						continue
+					}
+					original, _ := call.Meta[resolver.PythonCallStubMeta].(string)
+					if original == "" {
+						continue
+					}
+					previous := call.To
+					graph.StashRestubProvenance(call)
+					call.To, call.CrossRepo, call.ConfidenceLabel = original, false, ""
+					delete(call.Meta, resolver.PythonReExportFileMeta)
+					batch = append(batch, graph.EdgeReindex{Edge: call, OldTo: previous})
+				}
+			}
 			if edge.Kind == graph.EdgeCalls {
 				graph.StashRestubProvenance(edge)
 				edge.ConfidenceLabel = ""

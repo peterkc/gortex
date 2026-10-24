@@ -120,3 +120,34 @@ func TestPyResolveRelativeStem_CornerCases(t *testing.T) {
 			"filePath=%q dots=%d mod=%q", c.filePath, c.dots, c.mod)
 	}
 }
+
+func TestPythonPackageReExportMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name, file, source string
+		want               map[string]any
+	}{
+		{"plain and alias", "pkg/__init__.py", "from .impl import Plain, Original as Public\n", map[string]any{"Plain": "Plain", "Public": "Original"}},
+		{"ordinary module", "pkg/app.py", "from .impl import Plain\n", nil},
+		{"function local", "pkg/__init__.py", "def local():\n    from .impl import Plain\n", nil},
+		{"conditional", "pkg/__init__.py", "if flag:\n    from .impl import Plain\n", nil},
+		{"wildcard", "pkg/__init__.py", "from .impl import *\n", map[string]any{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := NewPythonExtractor().Extract(tc.file, []byte(tc.source))
+			require.NoError(t, err)
+			var imports []*graph.Edge
+			for _, edge := range result.Edges {
+				if edge.Kind == graph.EdgeImports {
+					imports = append(imports, edge)
+				}
+			}
+			require.Len(t, imports, 1)
+			if tc.want == nil {
+				require.NotContains(t, imports[0].Meta, "python_reexports")
+			} else {
+				require.Equal(t, tc.want, imports[0].Meta["python_reexports"])
+				require.Equal(t, "pkg/impl", imports[0].Meta["python_reexport_stem"])
+			}
+		})
+	}
+}

@@ -227,8 +227,14 @@ func TestStaleLangsDetection(t *testing.T) {
 			t.Errorf("persisted policy epoch = %d, want %d", got, postExtractionPolicyVersion)
 		}
 
+		if got := ExtractorVersionStaleLangs(snapshotJSON(t, nil, "python")); !reflect.DeepEqual(got, []string{"python"}) {
+			t.Errorf("snapshot without Python re-export evidence = %v, want [python]", got)
+		}
 		policySalt := "_post_extraction_policy@2"
-		for _, path := range []string{"model.py", "Model.java", "model.rb", "schema.ex"} {
+		if got, want := merkleSaltFor("model.py"), policySalt+"|python@2"; got != want {
+			t.Errorf("Python extractor salt = %q, want %q", got, want)
+		}
+		for _, path := range []string{"Model.java", "model.rb", "schema.ex"} {
 			if got := merkleSaltFor(path); got != policySalt {
 				t.Errorf("global policy salt for %s = %q, want %q", path, got, policySalt)
 			}
