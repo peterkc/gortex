@@ -185,3 +185,51 @@ func TestWildcardIncludeFolderSurfaces(t *testing.T) {
 		})
 	}
 }
+
+func TestWatcherExcludeMatcherIncludeOnlyRefresh(t *testing.T) {
+	patterns := []string{"vendor/"}
+	includes := []string(nil)
+	w := &Watcher{
+		stopping:               true, // No asynchronous reconcile is needed for a matcher-only check.
+		currentExcludePatterns: func() []string { return patterns },
+		currentIncludePatterns: func() []string { return includes },
+	}
+	before := w.currentExcludeMatcher()
+	require.True(t, before.MatchRel("vendor/keep.go"))
+	includes = []string{"vendor/keep.go"}
+	after := w.currentExcludeMatcher()
+	require.NotSame(t, before, after)
+	require.False(t, after.MatchRel("vendor/keep.go"))
+	require.Same(t, after, w.currentExcludeMatcher())
+	includes = nil
+	require.True(t, w.currentExcludeMatcher().MatchRel("vendor/keep.go"))
+}
+
+func TestWalkAdmissionUsesParentsOpen(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "closed/keep.go")
+	writeExcludeFixture(t, path, "package app\n")
+	idx := newAdmissionTestIndexer(t, root, "closed/", "!keep.go")
+	// This deliberately bypasses walkDisk. Its caller proof is the only
+	// reason the file gate may skip parents: explicit paths must not do so.
+	require.False(t, idx.admitWalkFileKnownType(root, path, -1, 0).admit)
+	require.True(t, idx.admitFileInOpenDir(root, path, -1, 0).admit)
+	idx.SetExcludePatterns([]string{"closed/", "keep.go"})
+	require.False(t, idx.admitFileInOpenDir(root, path, -1, 0).admit, "the final entry is still checked")
+}
+
+func TestSourceSearchMatcherReusesImmutableSnapshot(t *testing.T) {
+	root := t.TempDir()
+	idx := newAdmissionTestIndexer(t, root)
+	patterns := []string{"vendor/"}
+	before := idx.sourceSearchMatcher(patterns)
+	require.Same(t, before, idx.sourceSearchMatcher(patterns))
+	idx.SetIgnorePatterns(idx.config.Exclude, []string{"vendor/keep.go"})
+	after := idx.sourceSearchMatcher(patterns)
+	require.NotSame(t, before, after)
+	require.True(t, after.IncludesRel("vendor/keep.go"))
+	require.Same(t, after, idx.sourceSearchMatcher(patterns))
+	changed := []string{"vendor/", "*.go"}
+	require.NotSame(t, after, idx.sourceSearchMatcher(changed))
+	require.Same(t, idx.excludeMatcher(), idx.sourceSearchMatcher(nil))
+}

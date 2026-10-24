@@ -259,11 +259,15 @@ type Indexer struct {
 	// exclude list the Indexer was constructed with. excludeMu guards the
 	// build and the swap (and the config.Exclude read/write that goes with
 	// them); readers pay only the atomic load.
-	excludes      atomic.Pointer[excludes.Matcher]
-	excludeMu     sync.Mutex
-	dirIgnore     *excludes.Hierarchical
-	dirIgnoreOnce sync.Once
-	rootPath      string
+	excludes  atomic.Pointer[excludes.Matcher]
+	excludeMu sync.Mutex
+	// Source search may use a checkout-specific immutable exclude snapshot.
+	sourceSearchPatterns []string
+	sourceSearchIncludes []string
+	sourceSearchCompiled *excludes.Matcher
+	dirIgnore            *excludes.Hierarchical
+	dirIgnoreOnce        sync.Once
+	rootPath             string
 	// contentSrc is the optional immutable snapshot every content read
 	// goes through; nil reads the working tree with the os package. Held
 	// in an atomic pointer because reindex paths read it without a lock,

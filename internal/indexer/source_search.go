@@ -35,12 +35,7 @@ func (idx *Indexer) CurrentSourceSearchFiles(ctx context.Context, root string, a
 	ignores := excludes.NewHierarchicalWithDiagnostics(root, dirIgnoreFiles, func(dir string, m *excludes.Matcher) {
 		idx.warnExcludedNegationsAt(m, dir)
 	})
-	matcher := idx.excludeMatcher()
-	if patterns != nil {
-		idx.excludeMu.Lock()
-		matcher = idx.newExcludeMatcher(patterns)
-		idx.excludeMu.Unlock()
-	}
+	matcher := idx.sourceSearchMatcher(patterns)
 	content := idx.newContentAdmissionGate()
 	untracked := idx.newUntrackedAssetGate(ctx, root)
 	var files []string
@@ -62,15 +57,14 @@ func (idx *Indexer) CurrentSourceSearchFiles(ctx context.Context, root string, a
 			return filepath.SkipDir
 		}
 		if entry.IsDir() {
-			// The index walk's pruning rule: .git and agent-state folders
-			// close, and an excluded folder stays open only while a
-			// re-include might reach into it.
+			// Only an anchored literal include can keep an excluded
+			// ancestor open. Git metadata and agent state remain closed.
 			if shouldPruneDir(path, root, matcher, ignores) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if sourceSearchExcluded(matcher, ignores, root, path, false) || (allow != nil && !allow(filepath.ToSlash(rel))) {
+		if (pathExclusionRules{flat: matcher, perFolder: ignores, parentsOpen: true}).match(path, root, false) || (allow != nil && !allow(filepath.ToSlash(rel))) {
 			return nil
 		}
 		if pathguard.SymlinkEscapes(path, root) {
@@ -114,12 +108,7 @@ func sourceSearchExcluded(matcher *excludes.Matcher, ignores *excludes.Hierarchi
 
 // AdmitSourceSearchBuffer applies the same corpus policy to overlay-only files.
 func (idx *Indexer) AdmitSourceSearchBuffer(ctx context.Context, root, path string, content []byte, patterns []string) bool {
-	matcher := idx.excludeMatcher()
-	if patterns != nil {
-		idx.excludeMu.Lock()
-		matcher = idx.newExcludeMatcher(patterns)
-		idx.excludeMu.Unlock()
-	}
+	matcher := idx.sourceSearchMatcher(patterns)
 	if sourceSearchExcluded(matcher, excludes.NewHierarchicalWithDiagnostics(root, dirIgnoreFiles, func(dir string, m *excludes.Matcher) {
 		idx.warnExcludedNegationsAt(m, dir)
 	}), root, path, false) {
@@ -136,4 +125,20 @@ func (idx *Indexer) AdmitSourceSearchBuffer(ctx context.Context, root, path stri
 		return false
 	}
 	return true
+}
+
+func (idx *Indexer) sourceSearchMatcher(patterns []string) *excludes.Matcher {
+	if patterns == nil {
+		return idx.excludeMatcher()
+	}
+	idx.excludeMu.Lock()
+	defer idx.excludeMu.Unlock()
+	if idx.sourceSearchCompiled == nil ||
+		!sameImmutableExcludeSnapshot(idx.sourceSearchPatterns, patterns) ||
+		!sameImmutableExcludeSnapshot(idx.sourceSearchIncludes, idx.config.Include) {
+		idx.sourceSearchPatterns = patterns
+		idx.sourceSearchIncludes = idx.config.Include
+		idx.sourceSearchCompiled = idx.newExcludeMatcher(patterns)
+	}
+	return idx.sourceSearchCompiled
 }
