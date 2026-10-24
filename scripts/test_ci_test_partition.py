@@ -421,13 +421,33 @@ ok  \texample.org/b\t2.5s
         return planner.build_plan(race, plain, "1.27")
 
     def test_committed_timings_produce_ten_minute_layout(self):
+        # Expected counts come from the committed data, so refreshing the
+        # timing files needs no test edit.
         plan = self.committed_plan()
+        module = "github.com/zzet/gortex"
+
+        def smallest_count(path, family, paths):
+            timings = json.loads(path.read_text())[module + paths[family]]
+            total = sum(max(0.005, value) for value in timings.values())
+            return next((count for count in range(1, planner.MAX_SHARDS + 1)
+                         if total <= count * planner.TARGET_SECONDS),
+                        planner.MAX_SHARDS)
+
+        windows = {family: smallest_count(planner.PLAIN_TIMINGS_PATH, family,
+                                          planner.PLAIN_PACKAGES)
+                   for family in planner.FALLBACK_WINDOWS_SHARDS}
         expected = {
-            "ubuntu-latest": {"store": 8, "indexer": 16, "mcp": 4},
-            "windows-latest": {"indexer": 9},
-            "macos-latest": {"indexer": 3},
+            "ubuntu-latest": {
+                family: smallest_count(planner.RACE_TIMINGS_PATH, family,
+                                       planner.RACE_PACKAGES)
+                for family in planner.FALLBACK_RACE_SHARDS},
+            "windows-latest": windows,
+            "macos-latest": {family: min(3, count)
+                             for family, count in windows.items()},
         }
         rows = plan["linux"]["include"] + plan["platform"]["include"]
+        self.assertLessEqual(
+            sum(row["os"] == "macos-latest" for row in rows), 5)
         for platform, counts in expected.items():
             selected = [row for row in rows if row["os"] == platform]
             realized = {family: sum(row["partition"].startswith(family + "-")
@@ -660,6 +680,26 @@ ok  \texample.org/b\t2.5s
                     self.assertEqual(record["timings"], expected)
                     self.assertIs(record["complete"], False)
                     path.unlink()
+            # Windows runs a shard as several commands: an ok summary,
+            # then a later command that fails.
+            log.write_bytes(
+                b"--- PASS: TestA (1.25s)\r\n"
+                b"ok  \tgithub.com/zzet/gortex/internal/mcp\t1.5s\r\n"
+                b"=== RUN   TestB\r\n"
+                b"    --- PASS: TestB/sub (0.25s)\r\n"
+                b"--- FAIL: TestB (0.50s)\r\n"
+                b"--- PASS: TestC (2.00s)\r\n"
+                b"FAIL\tgithub.com/zzet/gortex/internal/mcp\t3.0s\r\n"
+                b"CI test partition failed: exit status 1\r\n")
+            with mock.patch.object(planner.sys, "argv", argv), \
+                    mock.patch.dict(planner.os.environ,
+                                    {"TEST_OS": "ubuntu-latest",
+                                     "TEST_OUTCOME": "failure"}):
+                planner.main()
+            record = json.loads(path.read_text())
+            self.assertEqual(record["timings"], {"TestA": 1.25, "TestC": 2.0})
+            self.assertIs(record["complete"], False)
+            path.unlink()
             log.write_bytes(b"--- FAIL: TestB (0.50s)\r\n")
             with mock.patch.object(planner.sys, "argv", argv), \
                     mock.patch.dict(planner.os.environ,
@@ -687,8 +727,13 @@ ok  \texample.org/b\t2.5s
     def test_timing_cache_attempt_keys_and_artifact_lifecycle(self):
         workflow = (Path(__file__).parents[1]
                     / ".github/workflows/ci.yml").read_text()
-        files = ("${{ hashFiles('scripts/ci-race-timings.json', "
-                 "'scripts/ci-plain-timings.json') }}")
+        paths = [Path("scripts") / path.name for path in (
+            planner.RACE_TIMINGS_PATH, planner.PLAIN_TIMINGS_PATH)]
+        for path in paths:
+            self.assertTrue((Path(__file__).parents[1] / path).is_file())
+        files = ("${{ hashFiles("
+                 + ", ".join(f"'{path.as_posix()}'" for path in paths)
+                 + ") }}")
         key = ("key: ci-timings-" + files
                + "-${{ github.run_id }}-${{ github.run_attempt }}")
         self.assertEqual(workflow.count(key), 2)

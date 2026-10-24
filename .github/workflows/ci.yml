@@ -93,6 +93,9 @@ jobs:
 
       - name: Test
         id: test
+        # Below the job limit, so a slow shard fails this step instead of
+        # cancelling the job, and its passed tests are still recorded.
+        timeout-minutes: 52
         shell: bash
         env:
           TEST_RACE: "true"
@@ -139,7 +142,7 @@ jobs:
         with:
           name: ci-timings-${{ matrix.os }}-${{ matrix.partition }}
           path: ci-shard-timings/*.json
-          if-no-files-found: warn
+          if-no-files-found: ignore
           overwrite: true
           retention-days: 7
 
@@ -172,6 +175,9 @@ jobs:
       # Per-run plain timings require Windows -v output.
       - name: Test
         id: test
+        # Below the job limit, so a slow shard fails this step instead of
+        # cancelling the job, and its passed tests are still recorded.
+        timeout-minutes: 52
         shell: bash
         env:
           TEST_RACE: "false"
@@ -219,7 +225,7 @@ jobs:
         with:
           name: ci-timings-${{ matrix.os }}-${{ matrix.partition }}
           path: ci-shard-timings/*.json
-          if-no-files-found: warn
+          if-no-files-found: ignore
           overwrite: true
           retention-days: 7
 
