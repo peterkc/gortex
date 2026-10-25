@@ -131,6 +131,11 @@ type IndexResult struct {
 	// incremental reconcile. A zero plan proves that no graph-wide derived
 	// pass is required; callers must not infer work merely from stale count.
 	DerivedInvalidation DerivedInvalidationPlan `json:"derived_invalidation,omitempty"`
+	// CrossRepoResolveFiles contains parked consumers outside this repository's
+	// derived frontier. Batch callers must include them in cross-repo resolution.
+	CrossRepoResolveFiles []string `json:"cross_repo_resolve_files,omitempty"`
+	// CargoRetarget records a Rust file addition for the post-registration warm tail.
+	CargoRetarget bool `json:"cargo_retarget,omitempty"`
 
 	// mutationErr carries a point-operation compatibility error through the
 	// resolver/semantic/derived tail. It is intentionally unexported and never
@@ -501,6 +506,9 @@ type Indexer struct {
 	contractCache   map[string]*contractCacheEntry
 	contractCacheMu sync.RWMutex
 
+	goModuleSourceMu    sync.Mutex
+	goModuleSourceCache map[string]goModuleSourceCacheEntry
+
 	// deferResolve, when set, makes IndexCtx skip the cross-cutting passes
 	// (per-repo ResolveAll / semantic enrichment / contract extraction +
 	// commit) so the multi-repo orchestrator can run them serially after
@@ -762,6 +770,7 @@ func New(g graph.Store, reg *parser.Registry, cfg config.IndexConfig, logger *za
 	// own package-manager workspace member. Same lazy-build rationale.
 	idx.resolver.SetWorkspaceMembership(idx.indexerWorkspaceMembership)
 	idx.resolver.SetGoPackageOwnershipInventoryFactory(idx.prepareGoPackageOwnership)
+	idx.resolver.SetGoModuleLookup(idx.ownGoModules)
 	idx.resolver.SetEvidenceScoping(cfg.ResolverEvidenceScopeEnabled())
 	return idx
 }
@@ -2768,6 +2777,9 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 				}
 			}
 			owner.mu.Unlock()
+			if err := owner.postPublishGoModules(ctx, current, false); err != nil {
+				owner.logger.Warn("post-publish Go module follow-up", zap.Error(err))
+			}
 		}
 		return nil
 	})
@@ -3351,6 +3363,7 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 		// resolution, …) for any backend that takes the shadow path.
 		if idx.resolver != nil {
 			idx.resolver.SetGraph(inMemShadow)
+			idx.resolver.SetDeferGoModuleMisses(true)
 		}
 		defer func() {
 			// Restore the durable graph and every shadow-routed sink even when a
@@ -3363,6 +3376,7 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 				idx.contractStateSink = nil
 				if idx.resolver != nil {
 					idx.resolver.SetGraph(diskTarget)
+					idx.resolver.SetDeferGoModuleMisses(false)
 				}
 				if deferredVectorPlan != nil {
 					deferredVectorPlan.Release()
@@ -3418,10 +3432,19 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 			// this handle's generation after the replacement parse succeeds and
 			// before its first disk write. Immutable payload generations sharing
 			// the prefix remain queryable through their catalog pointers.
+			if idx.repositoryMutationOwner != nil {
+				restubGoModuleRepoIncoming(diskTarget, idx.RepoPrefix())
+			}
 			var evictedNodes, evictedEdges int
 			if sqlite, ok := diskTarget.(*store_sqlite.Store); ok && sqlite.SupportsShadowReplacementRetirement() {
 				var err error
 				shadowReplacementStarted = true
+				restubTrackedNpmRepoIncoming(diskTarget, idx.RepoPrefix())
+				parked := restubTrackedCargoRepoIncoming(diskTarget, idx.RepoPrefix())
+				parked = appendUniqueSorted(parked, restubTrackedPythonRepoIncoming(diskTarget, idx.RepoPrefix())...)
+				if result != nil {
+					result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, parked...)
+				}
 				evictedNodes, evictedEdges, err = sqlite.EvictRepoForShadowReplacement(ctx, idx.RepoPrefix())
 				if err != nil {
 					retErr = fmt.Errorf("indexer: retire shadow replacement rows: %w", err)
@@ -3647,6 +3670,7 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 			// ownership validation and every later incremental operation.
 			if idx.resolver != nil {
 				idx.resolver.SetGraph(diskTarget)
+				idx.resolver.SetDeferGoModuleMisses(false)
 			}
 			if deferredVectorPlan != nil {
 				if retErr == nil {
@@ -5127,7 +5151,16 @@ func (idx *Indexer) indexFile(
 	// EvictFile removes the nodes (and their clone_sig) from the graph,
 	// so it must be captured before evictExisting runs.
 	var oldFuncIDs []string
+	var carriedGoImports []*graph.Edge
 	evictExisting := func() {
+		idx.invalidateGoModuleSourceStamp(relPath)
+		if strings.HasSuffix(graphPath, ".go") {
+			for _, e := range idx.graph.GetInEdges(graphPath) {
+				if e.Kind == graph.EdgeImports && !e.CrossRepo && e.Meta["go_import"] != nil && e.FilePath != graphPath {
+					carriedGoImports = append(carriedGoImports, e)
+				}
+			}
+		}
 		var oldFTSNodeIDs []string
 		for _, n := range idx.graph.GetFileNodes(graphPath) {
 			if n == nil {
@@ -5145,7 +5178,12 @@ func (idx *Indexer) indexFile(
 		// batch replacement by deleting its prior documents explicitly;
 		// canonical contracts follow the store's owner-retention decision.
 		idx.deleteSymbolFTS(oldFTSNodeIDs)
-		idx.restubIncomingRefs(graphPath)
+		npmConsumers, cargoConsumers, pythonConsumers := idx.restubIncomingRefs(graphPath)
+		if markerBatch != nil {
+			markerBatch.npmConsumerFiles = appendUniqueSorted(markerBatch.npmConsumerFiles, npmConsumers...)
+			markerBatch.cargoConsumerFiles = appendUniqueSorted(markerBatch.cargoConsumerFiles, cargoConsumers...)
+			markerBatch.pythonConsumerFiles = appendUniqueSorted(markerBatch.pythonConsumerFiles, pythonConsumers...)
+		}
 		idx.graph.EvictFile(graphPath)
 	}
 
@@ -5387,7 +5425,10 @@ func (idx *Indexer) indexFile(
 	// the node.
 	idx.replaceContentSections(graphPath, result.Nodes, false)
 
-	idx.graph.AddBatch(result.Nodes, result.Edges)
+	if _, survives := newNodeIDs[graphPath]; !survives {
+		carriedGoImports = nil
+	}
+	idx.graph.AddBatch(result.Nodes, append(result.Edges, carriedGoImports...))
 	idx.persistFileMeta(relPath, src, result)
 	idx.persistConstValues(result)
 	// No subsequent stage reads source bytes or the parse tree. Release both
@@ -5900,10 +5941,10 @@ func (idx *Indexer) reresolveFileScopedRaw(filePath string) error {
 // agnostic: GetInEdges + ReindexEdges are the same Store primitives the
 // resolver uses, so this behaves identically on the in-memory and disk
 // stores.
-func (idx *Indexer) restubIncomingRefs(graphPath string) {
+func (idx *Indexer) restubIncomingRefs(graphPath string) ([]string, []string, []string) {
 	nodes := idx.graph.GetFileNodes(graphPath)
 	if len(nodes) == 0 {
-		return
+		return nil, nil, nil
 	}
 	evicted := make(map[string]struct{}, len(nodes))
 	refIDs := make([]string, 0, len(nodes))
@@ -5912,29 +5953,38 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) {
 			continue
 		}
 		evicted[n.ID] = struct{}{}
-		if n.Name != "" && graph.IsReferenceableSymbol(n.Kind) {
+		if n.Kind == graph.KindFile || (n.Name != "" && graph.IsReferenceableSymbol(n.Kind)) {
 			refIDs = append(refIDs, n.ID)
 		}
 	}
 	if len(refIDs) == 0 {
-		return
+		return nil, nil, nil
 	}
 	// Fetch the whole changed file's incoming adjacency in one bounded store
 	// operation. On SQLite this is chunked under the parameter limit; more
 	// importantly, it avoids one transaction/query per definition in the file.
 	inEdges := idx.graph.GetInEdgesByNodeIDs(refIDs)
+	npmConsumers := restubTrackedNpmImportsFromView(idx.graph, evicted, inEdges)
+	cargoConsumers := restubTrackedCargoImportsFromView(idx.graph, evicted, inEdges, false)
+	pythonConsumers := restubTrackedPythonImportsFromView(idx.graph, evicted, inEdges, false)
 	var batch []graph.EdgeReindex
 	for _, n := range nodes {
-		if n == nil || n.Name == "" || !graph.IsReferenceableSymbol(n.Kind) {
+		if n == nil || n.Name == "" || !graph.IsReferenceableSymbol(n.Kind) && n.Kind != graph.KindFile {
 			continue
 		}
 		stub := graph.UnresolvedMarker + n.Name
 		for _, e := range inEdges[n.ID] {
-			if e == nil || !graph.IsResolvableRefEdge(e.Kind) {
+			if n.Kind == graph.KindFile && (e == nil || e.Kind != graph.EdgeImports || e.Meta["go_import"] == nil) {
+				continue
+			}
+			if e == nil || !graph.IsResolvableRefEdge(e.Kind) && (e.Kind != graph.EdgeImports || e.Meta["go_import"] == nil) {
 				continue
 			}
 			if _, fromEvicted := evicted[e.From]; fromEvicted {
 				continue // intra-file edge: the source is evicted too
+			}
+			if e.Kind == graph.EdgeImports && !e.CrossRepo && e.Meta["go_import"] != nil {
+				continue // The single-file save carries surviving local file imports.
 			}
 			if graph.IsUnresolvedTarget(e.To) {
 				continue // already a pending stub
@@ -5946,13 +5996,23 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) {
 			// rebinds to the same target (idempotent re-parse); a deleted or
 			// moved target leaves the stub honestly unresolved.
 			graph.StashRestubProvenance(e)
-			e.To = stub
+			e.To = goModuleRestubTarget(e, stub)
+			if e.Kind == graph.EdgeImports {
+				e.CrossRepo, e.ConfidenceLabel = false, ""
+			}
+			if original, _ := e.Meta[resolver.CargoCallStubMeta].(string); e.Kind == graph.EdgeCalls && e.CrossRepo && original != "" {
+				e.To, e.CrossRepo, e.ConfidenceLabel = original, false, ""
+			}
+			if original, _ := e.Meta[resolver.PythonCallStubMeta].(string); e.Kind == graph.EdgeCalls && e.CrossRepo && original != "" {
+				e.To, e.CrossRepo, e.ConfidenceLabel = original, false, ""
+			}
 			batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		}
 	}
 	if len(batch) > 0 {
 		idx.graph.ReindexEdges(batch)
 	}
+	return npmConsumers, cargoConsumers, pythonConsumers
 }
 
 // embeddingDimsOrDefault returns the embedder's reported vector width,
@@ -7477,6 +7537,10 @@ func (idx *Indexer) incrementalReindexPathsMode(
 		CountsCached:        countsCached,
 		capabilityPrior:     idx.takeCapabilityPrior(),
 	}
+	result.CrossRepoResolveFiles = appendUniqueSorted(nil, markerBatch.npmConsumerFiles...)
+	result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, markerBatch.cargoConsumerFiles...)
+	result.CargoRetarget = markerBatch.cargoAddedFile
+	result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, markerBatch.pythonConsumerFiles...)
 	for _, path := range failedFiles {
 		result.Errors = append(result.Errors, IndexError{FilePath: path, Error: idx.fileIndexFailureError(path).Error()})
 	}

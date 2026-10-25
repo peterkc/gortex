@@ -1,6 +1,13 @@
 package resolver
 
-import "github.com/zzet/gortex/internal/graph"
+import (
+	"context"
+	"strings"
+
+	"go.uber.org/zap"
+
+	"github.com/zzet/gortex/internal/graph"
+)
 
 // ResolveFilesAndIncoming runs one scoped cross-repository pass for a complete
 // mutation batch. The frontier contains unresolved edges emitted by the changed
@@ -58,21 +65,64 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 		return stats, admission
 	}
 
+	importBudget := &graph.IncomingSourceBudget{}
+	// Provider recovery needs the lazy seed before the pass lock is taken.
+	// Ordinary consumer frontiers keep local resolution ahead of the bridge.
+	if len(definitionFiles) > 0 {
+		if err := cr.seedGoModuleImportRegistry(context.Background()); err != nil {
+			cr.logger.Warn("cross-repo resolve: seed Go module imports deferred", zap.Error(err))
+		}
+	}
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
 
+	budget := &graph.IncomingSourceBudget{}
 	if len(resolutionFiles) > 0 {
 		frontier := collectIncrementalFileFrontier(cr.graph, resolutionFiles, nil)
-		admission = CrossRepoIncomingAdmission{
-			IncomingSourceAdmission: frontier.incomingAdmission,
-			Refusal:                 frontier.incomingRefusal,
+		admission.Keys += frontier.incomingAdmission.Keys
+		admission.Inspected += frontier.incomingAdmission.Inspected
+		admission.Dropped += frontier.incomingAdmission.Dropped
+		admission.Limit = frontier.incomingAdmission.Limit
+		if frontier.incomingAdmission.Refused {
+			admission.Refused, admission.Refusal = true, frontier.incomingRefusal
 		}
 		logIncomingAdmissionRefusal(cr.logger, "cross_repo_preparation", len(frontier.stubKeys),
 			frontier.incomingAdmission, frontier.incomingRefusal)
+		// Per-repo resolution has already made registry imports external.
+		// Keep outgoing imports for the tracked-package retry as well.
+		if cr.npmPackages != nil {
+			for _, edges := range frontier.outByNode {
+				for _, edge := range edges {
+					if trackedNpmImportSpec(edge) != "" {
+						frontier.pending = append(frontier.pending, edge)
+					}
+				}
+			}
+		}
+		// The per-repo pass has made missing Rust imports external already.
+		// Keep outgoing imports for the tracked-crate retry too.
+		if cr.cargoCrates != nil {
+			for _, edges := range frontier.outByNode {
+				for _, edge := range edges {
+					if cr.cargoImportSpec(edge) != "" {
+						frontier.pending = append(frontier.pending, edge)
+					}
+				}
+			}
+		}
+		if cr.pythonPackages != nil {
+			for _, edges := range frontier.outByNode {
+				for _, edge := range edges {
+					if trackedPythonImportSpec(edge) != "" {
+						frontier.pending = append(frontier.pending, edge)
+					}
+				}
+			}
+		}
 		pending := make([]*graph.Edge, 0, len(frontier.pending))
 		seen := make(map[graph.EdgeIdentity]struct{}, len(frontier.pending))
 		for _, edge := range frontier.pending {
-			if edge == nil || !graph.IsUnresolvedTarget(edge.To) {
+			if edge == nil || !graph.IsUnresolvedTarget(edge.To) && trackedNpmImportSpec(edge) == "" && cr.cargoImportSpec(edge) == "" && trackedPythonImportSpec(edge) == "" {
 				continue
 			}
 			identity := graph.EdgeIdentityFor(edge)
@@ -83,9 +133,74 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 			pending = append(pending, edge)
 		}
 		if len(pending) > 0 {
-			stats = cr.resolveScopedLocked(pending)
+			resolved := cr.resolveScopedLocked(pending)
+			stats.Resolved += resolved.Resolved
+			stats.Unresolved += resolved.Unresolved
+			stats.CrossRepoEdges += resolved.CrossRepoEdges
+			for repo, count := range resolved.ByRepo {
+				stats.ByRepo[repo] += count
+			}
+		}
+		// Preserve ordinary local-file resolution, but count each import only
+		// once if the module bridge subsequently lifts its dependency fallback.
+		counted := make(map[graph.EdgeIdentity]bool)
+		for _, e := range pending {
+			if e.Kind == graph.EdgeImports {
+				counted[graph.EdgeIdentityFor(e)] = !graph.IsUnresolvedTarget(e.To) && !strings.HasPrefix(e.To, "external::")
+			}
+		}
+		_ = cr.resolveGoModuleImports(context.Background(), resolutionFiles, stats, counted)
+	}
+	if len(definitionFiles) > 0 && len(cr.goModules) > 0 && !admission.Refused {
+		if frontierInspected := admission.Inspected; frontierInspected > 0 {
+			if err := budget.Charge(frontierInspected); err != nil {
+				admission.Refused, admission.Refusal = true, err
+			}
+		}
+		if !admission.Refused {
+			nodes := cr.graph.GetFileNodesByPaths(definitionFiles)
+			edges, fact, err := cr.goModuleIncomingEdgesBounded(nodes, definitionFiles, budget)
+			admission.Keys += fact.Keys
+			admission.Inspected += fact.Inspected
+			admission.Limit = fact.Limit
+			admission.Dropped += fact.Dropped
+			admission.Refused, admission.Refusal = fact.Refused, err
+			logIncomingAdmissionRefusal(cr.logger, "go_module_incoming", fact.Keys, fact, err)
+			cr.resolveGoModuleEdgesLocked(edges, stats)
 		}
 	}
+	// A newly tracked module also makes old dep/stdlib terminals eligible.
+	// This indexed sweep runs at most once per module/config revision.
+	if !admission.Refused {
+		if err := cr.retryGoModuleDeps(context.Background(), stats); err != nil {
+			cr.logger.Error("cross-repo resolve: retry Go module terminals", zap.Error(err))
+		}
+	}
+	// Import recovery has its own ceiling: a popular provider must not starve
+	// incoming calls or the revision-keyed call-terminal retry above.
+	repos := make(map[string]bool)
+	for _, file := range definitionFiles {
+		repo := graph.RepoPrefixOfID(file)
+		if cr.goModules[repo] == "" || repos[repo] {
+			continue
+		}
+		repos[repo] = true
+		ids := cr.goModuleImportIDs(repo)
+		if len(ids) > importBudget.Remaining() {
+			cr.logger.Warn("cross-repo resolve: Go module imports deferred to full pass", zap.Int("imports", len(ids)), zap.Int("remaining", importBudget.Remaining()))
+			continue
+		}
+		if err := importBudget.Charge(len(ids)); err != nil {
+			cr.logger.Warn("cross-repo resolve: Go module imports deferred to full pass", zap.Error(err))
+			continue
+		}
+		for start := 0; start < len(ids); start += externalCallMutationChunk {
+			if err := cr.restoreGoModuleImportBatch(context.Background(), repo, ids[start:min(start+externalCallMutationChunk, len(ids))], stats); err != nil {
+				cr.logger.Error("cross-repo resolve: restore Go module imports", zap.Error(err))
+			}
+		}
+	}
+
 	DetectCrossRepoEdgesForMutationFiles(cr.graph, edgeSourceFiles, definitionFiles)
 	return stats, admission
 }

@@ -227,10 +227,28 @@ func TestStaleLangsDetection(t *testing.T) {
 			t.Errorf("persisted policy epoch = %d, want %d", got, postExtractionPolicyVersion)
 		}
 
+		if got := ExtractorVersionStaleLangs(snapshotJSON(t, nil, "python")); !reflect.DeepEqual(got, []string{"python"}) {
+			t.Errorf("snapshot without Python re-export evidence = %v, want [python]", got)
+		}
 		policySalt := "_post_extraction_policy@2"
-		for _, path := range []string{"model.py", "Model.java", "model.rb", "model.ts", "schema.ex", "model.js"} {
+		if got, want := merkleSaltFor("model.py"), policySalt+"|python@2"; got != want {
+			t.Errorf("Python extractor salt = %q, want %q", got, want)
+		}
+		for _, path := range []string{"Model.java", "model.rb", "schema.ex"} {
 			if got := merkleSaltFor(path); got != policySalt {
 				t.Errorf("global policy salt for %s = %q, want %q", path, got, policySalt)
+			}
+		}
+		// Renamed per-binding JavaScript and TypeScript imports now persist
+		// import_alias Meta. Rows extracted before that keyed a renamed
+		// import by its original name, so stored files must re-extract once.
+		if got := ExtractorVersionStaleLangs(
+			snapshotJSON(t, map[string]int{"javascript": 1, "typescript": 1})); !reflect.DeepEqual(got, []string{"javascript", "typescript"}) {
+			t.Errorf("snapshot stored before import_alias = %v, want [javascript typescript]", got)
+		}
+		for path, want := range map[string]string{"model.js": policySalt + "|javascript@2", "model.ts": policySalt + "|typescript@2"} {
+			if got := merkleSaltFor(path); got != want {
+				t.Errorf("extractor salt for %s = %q, want %q", path, got, want)
 			}
 		}
 		if got, want := merkleSaltFor("model.go"), policySalt+"|go@4"; got != want {
