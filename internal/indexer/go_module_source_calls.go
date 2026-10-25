@@ -13,15 +13,16 @@ import (
 	"go.uber.org/zap"
 )
 
-// Cache source facts, not resolution decisions. Provider/config changes still
-// resolve the cloned calls again; unchanged caller bytes need no second parse.
-var readGoModuleCallerFile = os.ReadFile
-
+// goModuleSourceCacheEntry keeps source facts, not resolution decisions.
+// Matching size and mtime reuse those facts. If either differs, the digest
+// decides whether to reuse them.
 type goModuleSourceCacheEntry struct {
 	digest         [32]byte
 	edges          []*graph.Edge
 	size, modified int64
 }
+
+var readGoModuleCallerFile = os.ReadFile
 
 func cloneGoModuleSourceEdges(edges []*graph.Edge) []*graph.Edge {
 	out := make([]*graph.Edge, 0, len(edges))
