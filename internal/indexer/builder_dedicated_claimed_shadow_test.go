@@ -52,15 +52,21 @@ func TestClaimedPopulatedBaseShadowReplacementAdmitsCheckoutWriter(t *testing.T)
 	require.NoError(t, err)
 	entered := make(chan struct{})
 	var once sync.Once
-	// One 256-row chunk costs at least 1.28s; atomic eviction costs at least
-	// 5.115s after the first delete, above both the 2.25s and 3.75s bounds.
-	claimedShadowDeleteObserver.Store(&claimedShadowDeleteProbe{fire: func() { once.Do(func() { close(entered) }); time.Sleep(5 * time.Millisecond) }})
+	var deleted atomic.Int32
+	claimedShadowDeleteObserver.Store(&claimedShadowDeleteProbe{fire: func() {
+		if deleted.Add(1) == 1 {
+			once.Do(func() { close(entered) })
+			// Keep the first transaction open until the foreground writer is
+			// actually queued. The writer must run before a second delete chunk.
+			require.Eventually(t, builder.Store.WriteWanted, 5*time.Second, time.Millisecond)
+		}
+	}})
 	t.Cleanup(func() { claimedShadowDeleteObserver.Store(nil) })
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	type result struct {
 		err     error
-		elapsed time.Duration
+		deleted int32
 	}
 	wrote := make(chan result, 1)
 	t.Cleanup(func() {
@@ -78,11 +84,9 @@ func TestClaimedPopulatedBaseShadowReplacementAdmitsCheckoutWriter(t *testing.T)
 			wrote <- result{err: ctx.Err()}
 			return
 		}
-		start := time.Now()
 		err := foreground.AddBatchChecked([]*graph.Node{{ID: "foreground::Witness", Name: "Witness", Kind: graph.KindFunction, FilePath: "foreground::witness.go", RepoPrefix: "foreground"}}, nil)
-		wrote <- result{err: err, elapsed: time.Since(start)}
+		wrote <- result{err: err, deleted: deleted.Load()}
 	}()
-	start := time.Now()
 	id, report, err := builder.BuildClaimedDedicatedBase(ctx, ClaimedDedicatedBaseRequest{Claim: claim, RootPath: request.RootPath, WorkspaceID: request.WorkspaceID, ProjectID: request.ProjectID})
 	require.NoError(t, err)
 	require.Equal(t, claim.GenerationID, id)
@@ -95,7 +99,7 @@ func TestClaimedPopulatedBaseShadowReplacementAdmitsCheckoutWriter(t *testing.T)
 	}
 	wrote <- r
 	require.NoError(t, r.err)
-	require.Less(t, r.elapsed, testTimingSlack(750*time.Millisecond))
+	require.EqualValues(t, 256, r.deleted, "foreground writer did not run at the first delete-chunk release")
 	require.NotNil(t, foreground.GetNode("foreground::Witness"))
 	require.Equal(t, baseCount, builder.Store.AtGeneration(0).NodeCount())
 	published := builder.Store.AtGeneration(id)
@@ -109,5 +113,4 @@ func TestClaimedPopulatedBaseShadowReplacementAdmitsCheckoutWriter(t *testing.T)
 	drain := logs.FilterMessage("indexer: evicted stale generation rows before shadow drain").All()
 	require.Len(t, drain, 1)
 	require.Equal(t, claim.GenerationID, drain[0].ContextMap()["view_generation"])
-	t.Logf("actual claimed generation=%d old rows=%d build=%s foregroundSQL=%s", id, len(nodes), time.Since(start), r.elapsed)
 }

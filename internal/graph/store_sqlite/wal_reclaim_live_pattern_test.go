@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"math/rand"
 	"os"
@@ -311,95 +312,77 @@ func TestWALReclaimDelaysAMutationAtMostTheWriterHoldCap(t *testing.T) {
 			ckpt, err := openWALReclaimCheckpointDB(s.dbPath)
 			require.NoError(t, err)
 			defer ckpt.Close()
-			cfg := walReclaimConfig{thresholdBytes: tc.threshold, drainDeadline: 250 * time.Millisecond, truncateBudget: walReclaimTruncateBudget, readerWait: 3 * time.Second}
-
-			stop := make(chan struct{})
-			var maxWait, maxTotal atomic.Int64
-			var writes atomic.Int64
-			var writeErr atomic.Value
-			type mutationStages struct {
-				started                             time.Time
-				gate, begin, update, commit, unlock time.Duration
-				total                               time.Duration
+			cfg := walReclaimConfig{thresholdBytes: tc.threshold, drainDeadline: 250 * time.Millisecond, truncateBudget: walReclaimTruncateBudget, readerWait: time.Hour}
+			type waitingRound struct {
+				epoch uint64
+				older int
 			}
-			var worst mutationStages // The single producer is joined before reading.
-			writeObserved := func(k int) (stages mutationStages, err error) {
-				stages.started = time.Now()
-				stage := time.Now()
-				s.writeMu.Lock()
-				stages.gate = time.Since(stage)
-				defer func() {
-					stage = time.Now()
-					s.writeMu.Unlock()
-					stages.unlock = time.Since(stage)
-					stages.total = time.Since(stages.started)
-				}()
-				stage = time.Now()
-				tx, err := s.writerDB.Begin()
-				stages.begin = time.Since(stage)
-				if err != nil {
-					return stages, err
+			waiting := make(chan waitingRound, 1)
+			continueWait := make(chan struct{})
+			var releaseOnce, observeOnce sync.Once
+			releaseWait := func() { releaseOnce.Do(func() { close(continueWait) }) }
+			previous := walReclaimRoundObserver
+			walReclaimRoundObserver = func(stage string, epoch uint64, older int, err error) {
+				if stage == "full_wait_start" || stage == "partial_wait_start" {
+					observeOnce.Do(func() {
+						waiting <- waitingRound{epoch: epoch, older: older}
+						<-continueWait
+					})
 				}
-				stage = time.Now()
-				_, err = tx.Exec(`UPDATE wal_churn SET payload = randomblob(1024) WHERE id % 16 = ?`, k%16)
-				stages.update = time.Since(stage)
-				if err != nil {
-					_ = tx.Rollback()
-					return stages, err
+				if previous != nil {
+					previous(stage, epoch, older, err)
 				}
-				stage = time.Now()
-				err = tx.Commit()
-				stages.commit = time.Since(stage)
-				return stages, err
 			}
-			var wg sync.WaitGroup
-			wg.Add(1)
-			go func() { // a mutation stream
-				defer wg.Done()
-				for k := 0; ; k++ {
+			done := make(chan walReclaimResult, 1)
+			joined := false
+			go func() { done <- s.reclaimWALOnce(cfg, ckpt, path+"-wal") }()
+			defer func() {
+				_ = pinned.Rollback()
+				releaseWait()
+				if !joined {
 					select {
-					case <-stop:
-						return
-					default:
+					case <-done:
+					case <-time.After(8 * time.Second):
+						t.Error("reclaim did not stop after its reader and observer were released")
 					}
-					// This first gate acquisition is a probe. The actual mutation
-					// takes the gate again; log its stages separately.
-					start := time.Now()
-					s.writeMu.Lock()
-					gate := time.Since(start)
-					s.writeMu.Unlock()
-					observed, err := writeObserved(k)
-					if err != nil {
-						writeErr.Store(err)
-						return
-					}
-					if d := int64(gate); d > maxWait.Load() {
-						maxWait.Store(d)
-					}
-					if d := int64(time.Since(start)); d > maxTotal.Load() {
-						maxTotal.Store(d)
-					}
-					if observed.total > worst.total {
-						worst = observed
-					}
-					writes.Add(1)
-					time.Sleep(50 * time.Millisecond)
 				}
+				walReclaimRoundObserver = previous
 			}()
-			res := s.reclaimWALOnce(cfg, ckpt, path+"-wal")
-			close(stop)
-			wg.Wait()
-			t.Logf("actual mutation stages: started=%s second_gate=%s begin=%s update=%s commit=%s unlock=%s total=%s", worst.started.UTC().Format(time.RFC3339Nano), worst.gate, worst.begin, worst.update, worst.commit, worst.unlock, worst.total)
-			if err, _ := writeErr.Load().(error); err != nil {
-				t.Fatalf("a mutation failed during the reclaim: %v", err)
+			var round waitingRound
+			select {
+			case round = <-waiting:
+			case <-done:
+				joined = true
+				t.Fatal("reclaim returned without reaching its pinned-reader wait")
+			case <-time.After(8 * time.Second):
+				t.Fatal("reclaim never reached its pinned-reader wait")
 			}
-			t.Logf("outcome=%s reason=%q open_gate=%q writer_hold=%s writer_holds=%d max_probe_gate_wait=%s max_mutation=%s writes=%d", res.outcome, res.reason, res.openGateReport, res.writerHold, res.writerHolds, time.Duration(maxWait.Load()), time.Duration(maxTotal.Load()), writes.Load())
-			require.LessOrEqual(t, res.writerHold, walReclaimResetHold+testTimingSlack(50*time.Millisecond), "the writer was held past the short hold")
-			require.LessOrEqual(t, time.Duration(maxWait.Load()), walReclaimResetHold+testTimingSlack(50*time.Millisecond), "a mutation waited for the gate past the short hold")
-			require.Greater(t, writes.Load(), int64(10), "mutations kept flowing while the reclaim waited for the old reader")
-			if !tc.urgent {
-				require.Contains(t, res.openGateReport, "older_readers_outlasted_wait")
-				require.Less(t, time.Duration(maxTotal.Load()), testTimingSlack(500*time.Millisecond), "a non-urgent attempt must not hold a mutation")
+			require.Positive(t, round.older, "the wait must retain the pinned SQLite reader")
+			// Commit a finite mutation stream while that wait remains parked.
+			// This cannot pass if reclaim carries the writer into its reader wait.
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			for k := 0; k < 12; k++ {
+				release, err := s.HoldWriteGate(ctx)
+				require.NoError(t, err, "mutation queued behind a reader wait")
+				_, err = s.writerDB.ExecContext(ctx, `UPDATE wal_churn SET payload = ? WHERE id = 1`, fmt.Sprintf("foreground-%d", k))
+				release()
+				require.NoError(t, err)
+			}
+			require.Positive(t, s.readGate.olderCount(round.epoch), "mutations must commit before the pinned reader retires")
+			var payload string
+			require.NoError(t, s.db.QueryRowContext(ctx, `SELECT payload FROM wal_churn WHERE id = 1`).Scan(&payload))
+			require.Equal(t, "foreground-11", payload)
+			require.NoError(t, pinned.Rollback())
+			releaseWait()
+			select {
+			case res := <-done:
+				joined = true
+				require.Equal(t, tc.urgent, res.urgent)
+				require.Equal(t, walReclaimReset, res.outcome)
+				require.True(t, walLogIsReset(s.dbPath, path+"-wal"))
+			case <-time.After(8 * time.Second):
+				t.Fatal("reclaim did not finish after the reader retired")
 			}
 		})
 	}

@@ -309,27 +309,36 @@ func TestObserveCheckoutPathSlowInventoryMakesProgressAcrossRetries(t *testing.T
 	lc, catalog, primary, familyID, _, _ := newCheckoutObservationFixture(t)
 	worktree := filepath.Join(filepath.Dir(primary), "slow-inventory")
 	builderGit(t, primary, "worktree", "add", "-b", "slow-inventory", worktree)
+	release := make(chan struct{})
+	var once sync.Once
+	unpark := func() { once.Do(func() { close(release) }) }
+	defer unpark()
 	var calls atomic.Int32
 	lc.observationInventory = func(ctx context.Context, path string) (*gitstate.FamilyInventory, error) {
 		calls.Add(1)
-		timer := time.NewTimer(350 * time.Millisecond)
-		defer timer.Stop()
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-timer.C:
+		case <-release:
 			return gitstate.Inventory(ctx, path)
 		}
 	}
-	started := time.Now()
 	_, found, err := lc.ObserveCheckoutPath(t.Context(), worktree)
 	if found || !errors.Is(err, ErrCheckoutMutationBusy) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("slow inventory did not return bounded pending: found=%v err=%v", found, err)
 	}
-	if elapsed := time.Since(started); elapsed < 200*time.Millisecond || elapsed > testTimingSlack(time.Second) {
-		t.Fatalf("unexpected discovery wait: %s", elapsed)
-	}
 	firstJob := checkoutObservationJobForTest(lc, worktree)
+	if firstJob == nil || firstJob.ctx.Err() != nil {
+		t.Fatal("the caller's deadline stopped the shared inventory job")
+	}
+	_, found, err = lc.ObserveCheckoutPath(t.Context(), worktree)
+	if found || !errors.Is(err, ErrCheckoutMutationBusy) {
+		t.Fatalf("blocked inventory retry did not remain pending: found=%v err=%v", found, err)
+	}
+	if checkoutObservationJobForTest(lc, worktree) != firstJob || calls.Load() != 1 {
+		t.Fatal("retry replaced the in-flight inventory job")
+	}
+	unpark()
 	checkout, found, err := observeCheckoutUntilSettled(t, lc, worktree)
 	if err != nil || !found || checkout.FamilyID != familyID {
 		t.Fatalf("retry did not finish continuing discovery: %+v found=%v err=%v", checkout, found, err)

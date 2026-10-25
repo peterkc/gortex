@@ -4,8 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -20,6 +20,28 @@ func observeDelayedReclaimSync(t *testing.T, db *sql.DB, before func(int)) {
 	require.True(t, ok)
 	reclaimSyncStallState.Store(&reclaimSyncStall{tls: key, beforeSync: before})
 	t.Cleanup(func() { reclaimSyncStallState.Store(nil) })
+}
+
+type reclaimCopyReturnQueryer struct {
+	walCheckpointQueryer
+	pause func()
+}
+
+func (q reclaimCopyReturnQueryer) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	row := q.walCheckpointQueryer.QueryRowContext(ctx, query, args...)
+	q.pause()
+	return row
+}
+
+// Delay the Go handoff after the real checkpoint query. Inside synctest only
+// this timer advances fake time; actual SQLite I/O is not charged fake time.
+func pauseReclaimCopyReturn(t *testing.T, pause func()) {
+	t.Helper()
+	previous := walReclaimCreditPassiveQueryerObserver
+	walReclaimCreditPassiveQueryerObserver = func(_ context.Context, _ *Store, db *sql.DB) (walCheckpointQueryer, func()) {
+		return reclaimCopyReturnQueryer{walCheckpointQueryer: db, pause: pause}, nil
+	}
+	t.Cleanup(func() { walReclaimCreditPassiveQueryerObserver = previous })
 }
 
 func TestReclaimOperationCancellationJoinsSlowCheckpoint(t *testing.T) {
@@ -68,58 +90,54 @@ func TestReclaimSlowCopyCanResetWithinRemainingWriterCredit(t *testing.T) {
 	for _, kind := range []string{"pressure", "short"} {
 		t.Run(kind, func(t *testing.T) {
 			s, db := finalBackfillFixture(t)
-			var syncs atomic.Int64
-			observeDelayedReclaimSync(t, db, func(fileKind int) {
-				if fileKind == vfsFileWAL {
-					syncs.Add(1)
+			synctest.Test(t, func(t *testing.T) {
+				var copies int
+				pauseReclaimCopyReturn(t, func() {
+					copies++
 					time.Sleep(300 * time.Millisecond)
-				}
+				})
+				ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+				defer cancel()
+				res := &walReclaimResult{}
+				err := runFinalReclaimStep(ctx, kind, s, db, res)
+				require.NoError(t, err)
+				require.True(t, res.openGate, "joined durable copy never reached reset admission")
+				require.Positive(t, copies, "the real checkpoint return was not delayed")
+				require.LessOrEqual(t, res.writerHold, walReclaimPressureHold)
+				require.True(t, s.writeMu.TryLock(), "reset retained writer ownership")
+				s.writeMu.Unlock()
+				var payload string
+				require.NoError(t, s.db.QueryRow(`SELECT payload FROM wal_churn WHERE id = 1`).Scan(&payload))
+				require.Equal(t, "before", payload)
 			})
-			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-			defer cancel()
-			res := &walReclaimResult{}
-			started := time.Now()
-			err := runFinalReclaimStep(ctx, kind, s, db, res)
-			t.Logf("kind=%s joined_copy=%s max_writer_hold=%s reset=%t reason=%q err=%v", kind, time.Since(started), res.writerHold, res.openGate, res.reason, err)
-			require.NoError(t, err)
-			require.True(t, res.openGate, "joined durable copy never reached reset admission")
-			require.Positive(t, syncs.Load(), "the real WAL sync was not delayed")
-			require.LessOrEqual(t, res.writerHold, walReclaimPressureHold+testTimingSlack(10*time.Millisecond))
-			require.True(t, s.writeMu.TryLock(), "reset retained writer ownership")
-			s.writeMu.Unlock()
-			var payload string
-			require.NoError(t, s.db.QueryRow(`SELECT payload FROM wal_churn WHERE id = 1`).Scan(&payload))
-			require.Equal(t, "before", payload)
 		})
 	}
 }
 
 func TestReclaimReadmissionSharesAggregateCredit(t *testing.T) {
 	s, db := finalBackfillFixture(t)
-	observeDelayedReclaimSync(t, db, func(kind int) {
-		if kind == vfsFileWAL {
-			time.Sleep(300 * time.Millisecond)
-		}
+	synctest.Test(t, func(t *testing.T) {
+		pauseReclaimCopyReturn(t, func() { time.Sleep(300 * time.Millisecond) })
+		operation, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		s.writeMu.Lock()
+		writer := newWALReclaimWriterCredit(s, time.Now())
+		defer writer.release()
+		original, stop := context.WithTimeout(operation, 50*time.Millisecond)
+		defer stop()
+		_, err := writer.passive(original, operation, db, 25*time.Millisecond, false)
+		require.NoError(t, err)
+		require.True(t, writer.readmitted)
+		require.Equal(t, 25*time.Millisecond, writer.spent)
+		resetCtx := writer.resetContext(original)
+		deadline, bounded := resetCtx.Deadline()
+		require.True(t, bounded)
+		require.Equal(t, 50*time.Millisecond-writer.spent, time.Until(deadline), "readmission renewed a full allowance")
+		_, err = s.resetWALForReclaim(resetCtx)
+		require.NoError(t, err)
+		writer.release()
+		require.Equal(t, 25*time.Millisecond, writer.spent, "only the first fake-time slice consumed credit")
 	})
-	operation, cancel := context.WithTimeout(t.Context(), time.Second)
-	defer cancel()
-	s.writeMu.Lock()
-	writer := newWALReclaimWriterCredit(s, time.Now())
-	defer writer.release()
-	original, stop := context.WithTimeout(operation, 50*time.Millisecond)
-	defer stop()
-	_, err := writer.passive(original, operation, db, 25*time.Millisecond, false)
-	require.NoError(t, err)
-	require.True(t, writer.readmitted)
-	require.GreaterOrEqual(t, writer.spent, 20*time.Millisecond)
-	resetCtx := writer.resetContext(original)
-	deadline, bounded := resetCtx.Deadline()
-	require.True(t, bounded)
-	require.LessOrEqual(t, time.Until(deadline), 50*time.Millisecond-writer.spent+time.Millisecond, "readmission renewed a full allowance")
-	_, err = s.resetWALForReclaim(resetCtx)
-	require.NoError(t, err)
-	writer.release()
-	require.LessOrEqual(t, writer.spent, 50*time.Millisecond+testTimingSlack(10*time.Millisecond), "writer slices exceeded their aggregate allowance")
 }
 
 func TestReclaimReadmissionDoesNotReviveCancellationOrSpentCredit(t *testing.T) {

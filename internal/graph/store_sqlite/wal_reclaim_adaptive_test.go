@@ -2,10 +2,12 @@ package store_sqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -114,28 +116,32 @@ func TestWALAdaptiveCreditRefusesANewTailAfterTimerRelease(t *testing.T) {
 // fresh admission slice may use only its unused aggregate credit; a committed
 // foreground tail must still be refused by the current-frontier fence.
 func TestWALAdaptiveCreditRefusesCommittedTailAfterHoldExpiry(t *testing.T) {
-	assertAdaptiveCreditCommittedTailRefusal(t, 150*time.Millisecond)
+	s, db := finalBackfillFixture(t)
+	synctest.Test(t, func(t *testing.T) {
+		assertAdaptiveCreditCommittedTailRefusalOn(t, s, db, 150*time.Millisecond)
+	})
 }
 
 func assertAdaptiveCreditCommittedTailRefusal(t *testing.T, syncDelay time.Duration) {
 	t.Helper()
 	s, db := finalBackfillFixture(t)
+	assertAdaptiveCreditCommittedTailRefusalOn(t, s, db, syncDelay)
+}
+
+func assertAdaptiveCreditCommittedTailRefusalOn(t *testing.T, s *Store, db *sql.DB, syncDelay time.Duration) {
+	t.Helper()
 	budget := walReclaimResetHold + 40*time.Millisecond
 	copyCredit := budget - walReclaimResetHold/2
 	if syncDelay > 0 {
-		// Leave host slack for the real foreground commit after timer release.
-		// The injected uninterruptible sync still outlasts the original hold.
-		budget = walReclaimResetHold + testTimingSlack(50*time.Millisecond)
+		// Fake-time return delay outlasts the hold without charging real I/O.
 		copyCredit = walReclaimResetHold / 2
 		syncDelay += budget
 	}
 	var delayedSyncs atomic.Int64
 	if syncDelay > 0 {
-		observeDelayedReclaimSync(t, db, func(kind int) {
-			if kind == vfsFileWAL {
-				delayedSyncs.Add(1)
-				time.Sleep(syncDelay)
-			}
+		pauseReclaimCopyReturn(t, func() {
+			delayedSyncs.Add(1)
+			time.Sleep(syncDelay)
 		})
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
@@ -187,7 +193,7 @@ func assertAdaptiveCreditCommittedTailRefusal(t *testing.T, syncDelay time.Durat
 	// context may legitimately have expired before a fresh admission slice.
 	require.NotErrorIs(t, err, context.DeadlineExceeded)
 	if syncDelay > 0 {
-		require.Positive(t, delayedSyncs.Load(), "the controlled WAL sync was not exercised")
+		require.Positive(t, delayedSyncs.Load(), "the controlled checkpoint return was not exercised")
 		require.True(t, writer.readmitted, "the expired hold did not use unused credit for fresh admission")
 		require.NotNil(t, writer.resetCtx, "fresh admission did not retain its effective scope")
 	}

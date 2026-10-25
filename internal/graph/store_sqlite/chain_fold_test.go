@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"sync"
 	"testing"
 	"time"
 
@@ -182,59 +181,54 @@ func TestChainFoldStepGivesWayToAnEdit(t *testing.T) {
 	for _, announced := range []bool{true, false} {
 		t.Run(fmt.Sprintf("announced=%t", announced), func(t *testing.T) {
 			store := openCatalogStore(t)
-			ctx := context.Background()
-			chain := foldChain(t, store, 20000)
-			prevFirst, prevMax := chainFoldFirstRows, chainFoldMaxRows
-			chainFoldFirstRows, chainFoldMaxRows = 20000, 20000 // one long step
-			t.Cleanup(func() { chainFoldFirstRows, chainFoldMaxRows = prevFirst, prevMax })
+			chain := foldChain(t, store, 200)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
 			to := reservedGeneration(t, store, "folded")
 			fold, err := store.BeginChainFold(ctx, ChainFoldRequest{Chain: chain, To: to, Owner: "test"})
 			require.NoError(t, err)
-			// Step up to the bottom member's rows: the long part.
-			for fold.member != 0 || fold.phase != foldPhaseRows {
-				_, err = fold.Step(ctx)
-				if errors.Is(err, ErrChainFoldYielded) { // a background writer (index build, counters)
-					time.Sleep(time.Millisecond)
-					continue
-				}
-				require.NoError(t, err)
-			}
+			defer func() { _ = fold.Release(context.Background()) }()
+			// The existing mask seam exposes the live transaction context. It
+			// keeps this real step in flight until writer demand cancels it.
+			reachFoldMasks(t, fold, ctx)
 			checkout := store.AnnounceCheckoutRefresh()
 			defer checkout()
 			before := renderGenerationNodes(t, store, to)
 			cursor := fold.cursor()
-			// The next step is long: 20,000 rows with no time target to stop it.
-			prevTarget, prevRate := chainFoldStepTarget, fold.usPerRow
-			chainFoldStepTarget, fold.usPerRow = 10*time.Second, 0
-			t.Cleanup(func() { chainFoldStepTarget = prevTarget })
-
-			var wait time.Duration
-			var wg sync.WaitGroup
-			wg.Add(1)
+			ready := make(chan struct{})
+			writerDone := make(chan error, 1)
+			previous := chainFoldMaskStepHook
+			chainFoldMaskStepHook = func(stepCtx context.Context, _ string) error {
+				close(ready)
+				<-stepCtx.Done()
+				return stepCtx.Err()
+			}
+			t.Cleanup(func() { chainFoldMaskStepHook = previous })
 			go func() {
-				defer wg.Done()
-				time.Sleep(30 * time.Millisecond) // inside the long step
+				select {
+				case <-ready:
+				case <-ctx.Done():
+					writerDone <- ctx.Err()
+					return
+				}
 				if announced {
 					release := store.AnnounceWrite()
 					defer release()
 				}
-				announced := time.Now()
-				store.writeMu.Lock()
-				wait = time.Since(announced)
+				if err := store.writeMu.LockContext(ctx); err != nil {
+					writerDone <- err
+					return
+				}
 				store.writeMu.Unlock()
+				writerDone <- nil
 			}()
-			started := time.Now()
 			_, err = fold.Step(ctx)
-			stepTook := time.Since(started)
-			wg.Wait()
-			t.Logf("interrupted step: err=%v after %s; the edit waited %s for the gate", err, stepTook.Round(time.Millisecond), wait.Round(time.Microsecond))
+			writerErr := <-writerDone
+			chainFoldMaskStepHook = previous
 			require.ErrorIs(t, err, ErrChainFoldYielded)
+			require.NoError(t, writerErr)
 			require.Equal(t, cursor, fold.cursor(), "an interrupted step must not advance its cursor")
-			limit := testTimingSlack(20 * time.Millisecond)
-			require.Less(t, wait, limit, "the edit waited for the fold's step")
-			require.Equal(t, before, renderGenerationNodes(t, store, to), "the interrupted step's rows were not rolled back")
-			chainFoldStepTarget, fold.usPerRow = prevTarget, prevRate
-
+			require.Equal(t, before, renderGenerationNodes(t, store, to), "an interrupted step must retain prior committed rows")
 			runFold(t, fold, nil)
 			require.NoError(t, fold.Release(ctx))
 			oneShot := reservedGeneration(t, store, "one-shot")

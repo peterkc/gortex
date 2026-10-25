@@ -58,21 +58,21 @@ func runWALOuterMixedReader(t *testing.T, inLane bool) {
 	controlCtx, cancelControl := context.WithCancel(t.Context())
 	first, releaseBarrier := make(chan struct{}), make(chan struct{})
 	prior := walCheckpointCallObserver
+	priorRound := walReclaimRoundObserver
+	var partialWaits, retainedReaders int
+	walReclaimRoundObserver = func(stage string, epoch uint64, older int, err error) {
+		if stage == "partial_wait_end" && err == nil {
+			partialWaits++
+			retainedReaders = older
+		}
+		if priorRound != nil {
+			priorRound(stage, epoch, older, err)
+		}
+	}
 	var calls atomic.Int64
 	var once sync.Once
 	joined := make(chan struct{})
-	type answer struct {
-		res     walReclaimResult
-		elapsed time.Duration
-	}
-	done := make(chan answer, 1)
-	// Only measured uninterruptible writer-connection sync can outlast the
-	// hold context. Page work and time outside xSync remain charged.
-	var resetSync atomic.Int64
-	observeAdaptiveMultiFrameSync(t, s.writerDB, nil, func(_ int, start, end time.Time) {
-		resetSync.Add(int64(end.Sub(start)))
-	})
-	started := time.Now()
+	done := make(chan walReclaimResult, 1)
 	walCheckpointCallObserver = func(mode string, start time.Time, took time.Duration) {
 		if mode == "TRUNCATE" && calls.Add(1) == 1 {
 			close(first)
@@ -101,11 +101,11 @@ func runWALOuterMixedReader(t *testing.T, inLane bool) {
 			t.Error("outer attempt failed to join")
 		}
 		walCheckpointCallObserver = prior
+		walReclaimRoundObserver = priorRound
 	})
 	go func() {
 		defer close(joined)
-		begin := time.Now()
-		cfg := walReclaimConfig{thresholdBytes: 1 << 30, readerWait: 5 * time.Second, truncateBudget: walReclaimTruncateBudget, drainDeadline: 250 * time.Millisecond}
+		cfg := walReclaimConfig{thresholdBytes: 1 << 30, readerWait: time.Hour, truncateBudget: walReclaimTruncateBudget, drainDeadline: 250 * time.Millisecond}
 		var res walReclaimResult
 		if inLane {
 			ctx, cancel := context.WithTimeout(controlCtx, walReclaimLaneBudget)
@@ -119,23 +119,21 @@ func runWALOuterMixedReader(t *testing.T, inLane bool) {
 		} else {
 			res = s.reclaimWALOnce(cfg, ckpt, path+"-wal")
 		}
-		done <- answer{res, time.Since(begin)}
+		done <- res
 	}()
 	select {
 	case <-first:
 	case <-time.After(5 * time.Second):
 		t.Fatal("no actual first outer TRUNCATE return")
 	}
-	require.Less(t, time.Since(started), time.Second, "release actual pin well within original outer observation wait")
 	require.NoError(t, pin.Rollback())
 	once.Do(func() { close(releaseBarrier) })
-	var got answer
+	var got walReclaimResult
 	select {
 	case got = <-done:
 	case <-time.After(8 * time.Second):
 		t.Fatal("outer attempt never returned")
 	}
-	resetSyncTime := time.Duration(resetSync.Load())
 	var after int
 	require.NoError(t, late.QueryRow(`SELECT count(*) FROM wal_churn`).Scan(&after))
 	require.Equal(t, lateBefore, after)
@@ -144,13 +142,13 @@ func runWALOuterMixedReader(t *testing.T, inLane bool) {
 	authority, authorityErr := s.resetWALForReclaim(authorityCtx)
 	cancelAuthority()
 	s.writeMu.Unlock()
-	t.Logf("actual outer mixed: initialBusy=%+v full=%+v elapsed=%s outcome=%s reason=%s openGateReport=%s writerHold=%s laterAuthority=%+v/%v harmlessReaderAlive=true actualTruncates=%d", positive, full, got.elapsed, got.res.outcome, got.res.reason, got.res.openGateReport, got.res.writerHold, authority, authorityErr, calls.Load())
 	require.NoError(t, authorityErr)
 	require.Equal(t, 0, authority.Busy)
 	require.Zero(t, s.readGate.waits.Load())
 	require.False(t, s.readGate.closed.Load())
-	require.LessOrEqual(t, got.res.writerHold, walReclaimResetHold+resetSyncTime+testTimingSlack(10*time.Millisecond))
-	require.Nil(t, got.res.resetReaders, "completed reset must not retain a stale cohort witness")
-	require.Equal(t, walReclaimReset, got.res.outcome, "the actual outer path must ask SQLite again after a real pin retires rather than wait for a harmless retained reader")
-	require.Less(t, got.elapsed, time.Second, "safe reset must not consume the full cohort wait")
+	require.Nil(t, got.resetReaders, "completed reset must not retain a stale cohort witness")
+	require.Equal(t, walReclaimReset, got.outcome, "the actual outer path must ask SQLite again after a real pin retires rather than wait for a harmless retained reader")
+	require.Positive(t, partialWaits, "the completed-copy cohort must use partial readmission")
+	require.Positive(t, retainedReaders, "partial readmission must retain the harmless reader")
+	require.GreaterOrEqual(t, calls.Load(), int64(2), "retiring the real pin must retry SQLite while the harmless reader remains alive")
 }

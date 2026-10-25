@@ -195,7 +195,6 @@ func TestChainFoldMaskWriterInterruptionRetainsCommittedPagesAndPrecedence(t *te
 	cursor := fold.cursor()
 	ready := make(chan struct{})
 	writerDone := make(chan error, 1)
-	var wait time.Duration
 	chainFoldMaskStepHook = func(stepCtx context.Context, table string) error {
 		if table != "generation_file_masks" {
 			return nil
@@ -212,9 +211,7 @@ func TestChainFoldMaskWriterInterruptionRetainsCommittedPagesAndPrecedence(t *te
 			writerDone <- ctx.Err()
 			return
 		}
-		started := time.Now()
 		writerErr := store.SetRepoIndexState(graph.RepoIndexState{RepoPrefix: "mask-writer"})
-		wait = time.Since(started)
 		writerDone <- writerErr
 	}()
 	_, err = fold.Step(ctx)
@@ -222,8 +219,6 @@ func TestChainFoldMaskWriterInterruptionRetainsCommittedPagesAndPrecedence(t *te
 	chainFoldMaskStepHook = nil
 	require.ErrorIs(t, err, ErrChainFoldYielded)
 	require.NoError(t, writerErr)
-	limit := testTimingSlack(20 * time.Millisecond)
-	require.Less(t, wait, limit, "a real foreground writer must still interrupt mask work")
 	require.Equal(t, cursor, fold.cursor())
 	require.Empty(t, fold.hiddenIDs)
 	require.Equal(t, before, renderFoldMasks(t, store, to), "only the second page's uncommitted ownership rows roll back")

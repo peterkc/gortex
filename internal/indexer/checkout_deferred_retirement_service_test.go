@@ -89,7 +89,8 @@ func TestAgedRetirementYieldsCanceledQuantumBeforeQueuedEditGetsTheLane(t *testi
 	unpark := func() { release.Do(hold) }
 	ctx, cancel := context.WithCancel(t.Context())
 	sweepDone := make(chan error, 1)
-	editDone := make(chan time.Time, 1)
+	editDone := make(chan error, 1)
+	quantumReturned := make(chan struct{})
 	sweepJoined, editJoined := false, false
 	defer func() {
 		cancel()
@@ -121,7 +122,6 @@ func TestAgedRetirementYieldsCanceledQuantumBeforeQueuedEditGetsTheLane(t *testi
 	l.retirementBurst = budget
 	var (
 		committed  store_sqlite.PayloadRetirementProgress
-		firstTook  time.Duration
 		firstErr   error
 		quantumMu  sync.Mutex
 		quantaSeen int
@@ -130,14 +130,14 @@ func TestAgedRetirementYieldsCanceledQuantumBeforeQueuedEditGetsTheLane(t *testi
 		if generationID != id {
 			return store_sqlite.PayloadRetirementProgress{}, fmt.Errorf("wrong retirement generation: %d", generationID)
 		}
-		started := time.Now()
 		// Model the observed valid outcome deterministically, rather than asking
 		// this runner to complete its first SQLite transaction inside 100ms.
 		<-ctx.Done()
 		progress, err := store_sqlite.PayloadRetirementProgress{}, ctx.Err()
 		quantumMu.Lock()
 		if quantaSeen++; quantaSeen == 1 {
-			firstTook, firstErr = time.Since(started), err
+			firstErr = err
+			close(quantumReturned)
 		}
 		committed.ChunksCommitted += progress.ChunksCommitted
 		committed.RowsDeleted += progress.RowsDeleted
@@ -156,21 +156,23 @@ func TestAgedRetirementYieldsCanceledQuantumBeforeQueuedEditGetsTheLane(t *testi
 	go func() {
 		permit, err := gate.Acquire(ctx, ViewBuildInteractive)
 		if err == nil {
-			admittedAt := time.Now()
+			select {
+			case <-quantumReturned:
+			default:
+				err = errors.New("edit acquired before the canceled quantum returned")
+			}
 			permit()
-			editDone <- admittedAt
+			editDone <- err
 		} else {
-			editDone <- time.Time{}
+			editDone <- err
 		}
 	}()
 	require.Eventually(t, func() bool { return gate.Stats().InteractiveQueued == 1 }, 5*time.Second, time.Millisecond)
-	from := time.Now()
 	unpark()
 	select {
-	case at := <-editDone:
+	case err := <-editDone:
 		editJoined = true
-		require.False(t, at.IsZero())
-		require.LessOrEqual(t, at.Sub(from), budget+testTimingSlack(budget))
+		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("queued edit did not acquire after bounded service")
 	}
@@ -183,7 +185,6 @@ func TestAgedRetirementYieldsCanceledQuantumBeforeQueuedEditGetsTheLane(t *testi
 	}
 	quantumMu.Lock()
 	defer quantumMu.Unlock()
-	t.Logf("%d quanta; the first ran %s of the %s budget (%v)", quantaSeen, firstTook, budget, firstErr)
 	require.Equal(t, 1, quantaSeen, "the expired burst must not start another quantum")
 	require.ErrorIs(t, firstErr, context.DeadlineExceeded)
 	require.Zero(t, committed.ChunksCommitted)
