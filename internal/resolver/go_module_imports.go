@@ -234,7 +234,7 @@ func (cr *CrossRepoResolver) goModuleImportFileBatches(ctx context.Context, repo
 			if !ok || !strings.HasSuffix(file, ".go") || !trackedGoImport(cr.goModulePaths, path) || seen[file] {
 				continue
 			}
-			if module := cr.goModules[n.RepoPrefix]; module != "" && (path == module || strings.HasPrefix(path, module+"/")) {
+			if module := cr.goModules[n.RepoPrefix]; module != "" && cr.goModulePaths.longest(path) == module {
 				continue
 			}
 			seen[file] = true
@@ -300,7 +300,7 @@ func (cr *CrossRepoResolver) seedGoModuleImportRegistry(ctx context.Context) err
 		if !ok || !strings.HasSuffix(file, ".go") || !trackedGoImport(cr.goModulePaths, path) {
 			continue
 		}
-		if module := cr.goModules[n.RepoPrefix]; module != "" && (path == module || strings.HasPrefix(path, module+"/")) {
+		if module := cr.goModules[n.RepoPrefix]; module != "" && cr.goModulePaths.longest(path) == module {
 			continue
 		}
 		cr.rememberGoModuleImports([]*graph.Node{{ID: n.ID, RepoPrefix: n.RepoPrefix, Kind: graph.KindImport, Language: "go"}})
