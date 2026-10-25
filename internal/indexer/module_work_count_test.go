@@ -2,7 +2,9 @@ package indexer
 
 import (
 	"context"
+	"github.com/zzet/gortex/internal/parser/crashpool"
 	"iter"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -133,4 +135,33 @@ type goModuleUntrackScanStore struct{ *goModuleRetryScanStore }
 
 func (s *goModuleUntrackScanStore) PurgeRepo(repo string) error {
 	return s.Store.(interface{ PurgeRepo(string) error }).PurgeRepo(repo)
+}
+
+// Given an isolated caller indexer, when module recovery re-extracts its source,
+// then it uses the shared worker pool and never the parent-process extractor.
+func TestGoModuleSourceRecoveryUsesIsolatedExtraction(t *testing.T) {
+	mi, g, repos := goModuleLifecycleFixture(t, "memory")
+	writeFile(t, filepath.Join(repos[1].Path, "lib.go"), "package library\nfunc Other() {}\n")
+	for _, entry := range repos[:2] {
+		_, err := mi.TrackRepoCtx(t.Context(), entry)
+		require.NoError(t, err)
+	}
+	idx := mi.GetIndexer("a")
+	require.NotNil(t, idx)
+	ext, ok := mi.registry.GetByLanguage("go")
+	require.True(t, ok)
+	spy := &goModuleSourceExtractionSpy{Extractor: ext}
+	mi.registry.Register(spy)
+	pool, err := crashpool.NewPool(crashpool.Config{Argv: []string{os.Args[0]}, Env: []string{crashWorkerEnv + "=1"}, Workers: 1})
+	require.NoError(t, err)
+	idx.parsePool = pool
+	idx.parseQuar = crashpool.LoadQuarantine("")
+	idx.config.CrashIsolation = true
+	t.Setenv("GORTEX_PARSER_ISOLATION", "1")
+	idx.goModuleSourceCache = nil
+	writeFile(t, filepath.Join(repos[1].Path, "lib.go"), "package library\nfunc Hello() {}\n")
+	g.AddNode(&graph.Node{ID: "b/lib.go::Hello", Name: "Hello", Kind: graph.KindFunction, RepoPrefix: "b", FilePath: "b/lib.go", WorkspaceID: "shared", Language: "go"})
+	mi.runCrossRepoResolveFiles([]string{"b/lib.go"})
+	assert.Zero(t, spy.calls, "source recovery must use the isolated pool")
+	assert.Equal(t, []string{"b/lib.go::Hello"}, revisionCallTargets(g, "a/main.go::Caller", graph.EdgeCalls))
 }

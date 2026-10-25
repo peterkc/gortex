@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"crypto/sha256"
+	"github.com/zzet/gortex/internal/parser/crashpool"
 	"maps"
 	"os"
 	"path/filepath"
@@ -38,16 +39,24 @@ func (mi *MultiIndexer) finishGoModuleCalls(cr *resolver.CrossRepoResolver) {
 		}
 		rel := strings.TrimPrefix(file, prefix+"/")
 		abs := filepath.Join(idx.rootPath, filepath.FromSlash(rel))
+		parseLease, err := idx.acquireSharedParsePath(abs)
+		if err != nil {
+			mi.logger.Warn("admit Go module caller", zap.String("file", file), zap.Error(err))
+			continue
+		}
 		src, err := os.ReadFile(abs)
 		if err != nil {
 			mi.logger.Warn("read Go module caller", zap.String("file", file), zap.Error(err))
+			parseLease.Release()
 			continue
 		}
 		if idx.config.MaxFileSize > 0 && int64(len(src)) > idx.config.MaxFileSize {
+			parseLease.Release()
 			continue
 		}
 		ext, ok := idx.registry.GetByLanguage("go")
 		if !ok {
+			parseLease.Release()
 			continue
 		}
 		src = idx.transforms.run(rel, src)
@@ -57,13 +66,23 @@ func (mi *MultiIndexer) finishGoModuleCalls(cr *resolver.CrossRepoResolver) {
 		idx.goModuleSourceMu.Unlock()
 		if hit && cached.digest == digest {
 			cr.RestoreGoModuleSourceCalls(cloneGoModuleSourceEdges(cached.edges))
+			parseLease.Release()
 			continue
 		}
-		result, skipped, err := idx.extractFile(nil, nil, abs, rel, "go", ext, src)
+		var pool *crashpool.Pool
+		var quarantine *crashpool.Quarantine
+		if idx.crashIsolationEnabled() {
+			pool, quarantine = idx.sharedParsePool()
+		}
+		result, skipped, err := idx.extractFileWithRawLease(parseLease, pool, quarantine, abs, rel, "go", ext, src)
+		if quarantine != nil && quarantine.Len() > 0 {
+			_ = quarantine.Save()
+		}
 		if err != nil {
 			mi.logger.Warn("extract Go module caller", zap.String("file", file), zap.Error(err))
 		}
 		if result == nil {
+			parseLease.Release()
 			continue
 		}
 		if err == nil && !skipped {
@@ -77,6 +96,7 @@ func (mi *MultiIndexer) finishGoModuleCalls(cr *resolver.CrossRepoResolver) {
 			cr.RestoreGoModuleSourceCalls(result.Edges)
 		}
 		result.ReleaseTree()
+		parseLease.Release()
 	}
 	mi.synthesizeDemotedGoModuleCalls(cr.TakeDemotedGoModuleCallFiles())
 }
