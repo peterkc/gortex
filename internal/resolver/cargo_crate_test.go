@@ -19,7 +19,9 @@ func TestCargoImportUntrackedSkipsNodeReads(t *testing.T) {
 	cr := NewCrossRepo(g)
 	cr.SetCargoCrateLookup(func(_, _ string) []CargoCrate { return nil })
 	e := &graph.Edge{From: "app/src/lib.rs", To: "external::serde/Item", Kind: graph.EdgeImports, FilePath: "app/src/lib.rs"}
-	assert.Nil(t, cr.cargoImportTarget(e, "serde/Item"))
+	node, module := cr.cargoImportTarget(e, "serde/Item")
+	assert.Nil(t, node)
+	assert.Empty(t, module)
 	assert.Zero(t, g.getNodeCalls, "unknown crates must be rejected before caller node reads")
 }
 
@@ -222,4 +224,44 @@ func TestScopedCallerFileUsesWarmedNodeCache(t *testing.T) {
 	cr.resolveScopedLocked(edges)
 	// Then the batched cache, not one GetNode per edge, supplies caller placement.
 	require.Zero(t, g.getNodeCalls)
+}
+
+func TestCargoCallRequiresExactParentModule(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, spec := range []string{"other/sys/{open}", "other/sys/open", "other/util/sys/{open}", "other/util/sys/open", "other/util/{open}", "other/util/open"} {
+			t.Run(backend+"/"+spec, func(t *testing.T) {
+				// Given a missing sys module and decoys in its ancestor files.
+				g := goImportReviewStore(t, backend)
+				file, root, module := "consumer/src/lib.rs", "provider/src/lib.rs", "provider/src/util.rs"
+				for _, path := range []string{file, root, module} {
+					g.AddNode(&graph.Node{ID: path, FilePath: path, Kind: graph.KindFile, RepoPrefix: graph.RepoPrefixOfID(path), Language: "rust"})
+				}
+				for _, path := range []string{root, module} {
+					g.AddNode(&graph.Node{ID: path + "::open", FilePath: path, Name: "open", Kind: graph.KindFunction, RepoPrefix: "provider", Language: "rust"})
+				}
+				g.AddEdge(&graph.Edge{From: file, FilePath: file, To: "external::" + spec, Kind: graph.EdgeImports, Line: 1})
+				g.AddEdge(&graph.Edge{From: file, FilePath: file, To: "unresolved::open", Kind: graph.EdgeCalls, Line: 2})
+				cr := NewCrossRepo(g)
+				cr.SetCargoCrateLookup(func(string, string) []CargoCrate { return []CargoCrate{{Root: root, Name: "other"}} })
+				// When the import falls back to the nearest indexed module file.
+				_, err := cr.ResolveAllContext(t.Context())
+				require.NoError(t, err)
+				// Then only an exact parent module authorizes its member call.
+				imp := outEdgesOfKind(g, file, graph.EdgeImports)[0]
+				matched := "other::util"
+				if strings.HasPrefix(spec, "other/sys/") {
+					matched = "other"
+				}
+				require.Equal(t, matched, imp.Meta[CargoImportModuleMeta])
+				call := outEdgesOfKind(g, file, graph.EdgeCalls)[0]
+				if strings.Contains(spec, "/sys/") {
+					require.Equal(t, "unresolved::open", call.To)
+					require.False(t, call.CrossRepo)
+				} else {
+					require.Equal(t, module+"::open", call.To)
+					require.True(t, call.CrossRepo)
+				}
+			})
+		}
+	}
 }

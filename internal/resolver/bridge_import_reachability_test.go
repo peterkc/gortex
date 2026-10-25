@@ -89,9 +89,9 @@ func TestCargoCallsStayWithinImportedItem(t *testing.T) {
 					g.AddNode(&graph.Node{ID: path, FilePath: path, Kind: graph.KindFile, RepoPrefix: "provider", Language: "rust"})
 					g.AddNode(&graph.Node{ID: path + "::" + name, FilePath: path, Name: name, Kind: kind, RepoPrefix: "provider", Language: "rust", Meta: map[string]any{"receiver": "Foo"}})
 				}
-				g.AddEdge(&graph.Edge{From: file, FilePath: file, To: imported, Kind: graph.EdgeImports, Line: 1, CrossRepo: true, Meta: map[string]any{CargoImportStubMeta: "external::library/util/" + item}})
+				g.AddEdge(&graph.Edge{From: file, FilePath: file, To: imported, Kind: graph.EdgeImports, Line: 1, CrossRepo: true, Meta: map[string]any{CargoImportStubMeta: "external::library/util/" + item, CargoImportModuleMeta: "library::util"}})
 				if scenario == "ambiguous" {
-					g.AddEdge(&graph.Edge{From: file, FilePath: file, To: "provider/src/aaa.rs", Kind: graph.EdgeImports, Line: 2, CrossRepo: true, Meta: map[string]any{CargoImportStubMeta: "external::library/aaa/" + item}})
+					g.AddEdge(&graph.Edge{From: file, FilePath: file, To: "provider/src/aaa.rs", Kind: graph.EdgeImports, Line: 2, CrossRepo: true, Meta: map[string]any{CargoImportStubMeta: "external::library/aaa/" + item, CargoImportModuleMeta: "library::aaa"}})
 				}
 				g.AddEdge(&graph.Edge{From: file, FilePath: file, To: target, Kind: graph.EdgeCalls, Line: 3, Meta: meta})
 				_, err := NewCrossRepo(g).ResolveAllContext(t.Context())
@@ -201,7 +201,7 @@ func TestBridgeCandidatesLookupOncePerProvider(t *testing.T) {
 				marker := map[string]any{PythonImportStubMeta: "external::pkg.mod", "python_import": fmt.Sprintf("pkg.mod%d", i), "python_bindings": map[string]any{"Image": "Image"}}
 				if language == "rust" {
 					provider = fmt.Sprintf("provider/src/mod%d.rs", i)
-					marker = map[string]any{CargoImportStubMeta: "external::library/action"}
+					marker = map[string]any{CargoImportStubMeta: "external::library/action", CargoImportModuleMeta: "library"}
 				}
 				imports = append(imports, &graph.Edge{From: file, FilePath: file, To: provider, Meta: marker})
 				if i == 19 {

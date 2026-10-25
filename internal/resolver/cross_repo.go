@@ -1653,8 +1653,8 @@ func (cr *CrossRepoResolver) resolveImport(e *graph.Edge, importPath string, sta
 		// evidence fallbacks below before deciding that the import is ambiguous.
 	}
 
-	if node := cr.cargoImportTarget(e, importPath); node != nil {
-		cr.bindCargoImport(e, node, stats)
+	if node, module := cr.cargoImportTarget(e, importPath); node != nil {
+		cr.bindCargoImport(e, node, module, stats)
 		return
 	}
 
