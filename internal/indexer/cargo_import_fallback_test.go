@@ -61,7 +61,6 @@ func TestTrackedCargoNewModuleThroughFallback(t *testing.T) {
 			writeWorkspaceFile(t, provider, "src/extra.rs", "pub fn later() {}\n")
 			_, err = mi.IncrementalReindexRepo("provider", []string{filepath.Join(provider, "src/extra.rs")})
 			require.NoError(t, err)
-			t.Logf("transform calls=%d", calls.Load())
 			require.GreaterOrEqual(t, calls.Load(), int32(3), "fallback path must run")
 			require.NotNil(t, g.GetNode("provider/src/extra.rs"))
 
