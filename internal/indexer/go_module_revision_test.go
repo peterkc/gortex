@@ -123,3 +123,38 @@ func TestGoModuleUntrackSettlesColdEquivalent(t *testing.T) {
 		}
 	}
 }
+
+// Given a module-bound caller, when a provider is reparsed or loses its export,
+// then its settled payload has no restub handoff or stale binding markers.
+func TestGoModuleRestubPayloadColdEquivalent(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, mode := range []string{"rebind", "demote", "disabled"} {
+			t.Run(backend+"/"+mode, func(t *testing.T) {
+				mi, g, repos := goModuleLifecycleFixture(t, backend)
+				if mode == "disabled" {
+					writeFile(t, filepath.Join(repos[0].Path, ".gortex.yaml"), "index:\n  synthesize_external_calls: false\n")
+				}
+				for _, entry := range []config.RepoEntry{repos[1], repos[0]} {
+					_, err := mi.TrackRepoCtx(t.Context(), entry)
+					require.NoError(t, err)
+				}
+				src := "package library\nfunc Hello() { println(1) }\n"
+				if mode != "rebind" {
+					src = "package library\nfunc Other() {}\n"
+				}
+				writeFile(t, filepath.Join(repos[1].Path, "lib.go"), src)
+				require.NoError(t, mi.GetIndexer("b").IndexFile(filepath.Join(repos[1].Path, "lib.go")))
+				cold := revisionColdGraph(t, backend, repos[:2])
+				edge, want := goModuleLifecycleCall(t, g), goModuleLifecycleCall(t, cold)
+				require.Equal(t, want.To, edge.To)
+				for _, key := range []string{"restub_prev_to", "restub_prev_origin", "restub_prev_tier", "restub_prev_conf"} {
+					assert.NotContains(t, edge.Meta, key)
+				}
+				assert.Equal(t, want.Meta["go_import"], edge.Meta["go_import"])
+				assert.Equal(t, want.Meta["npm_import"], edge.Meta["npm_import"])
+				assert.Equal(t, want.Confidence, edge.Confidence)
+				assert.Equal(t, want.Origin, edge.Origin)
+			})
+		}
+	}
+}

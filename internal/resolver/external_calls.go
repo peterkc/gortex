@@ -233,6 +233,9 @@ func synthesizeExternalCalls(g graph.Store, collect externalCallCandidateSeq) in
 			if callerLang == "go" && strings.HasPrefix(oldTo, "dep::") {
 				e.Meta["go_extern_target"] = oldTo
 			}
+			graph.RestoreRestubProvenance(e)
+			delete(e.Meta, "go_import")
+			delete(e.Meta, "npm_import")
 			reindexes = append(reindexes, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		}
 		if len(nodes) > 0 {

@@ -222,6 +222,7 @@ func bindGoModuleEdge(e *graph.Edge, match *graph.Node, callerRepo, ownModule st
 		e.Origin = ""
 	}
 	clearEdgeTerminal(e)
+	graph.RestoreRestubProvenance(e)
 }
 
 // Index module paths once per snapshot; import lookups depend only on path depth.

@@ -29,6 +29,9 @@ func (cr *CrossRepoResolver) resolveGoExtern(e *graph.Edge, spec string, stats *
 			e.To = "dep::" + spec
 			cr.noteDemotedGoModuleCall(e)
 		}
+		graph.RestoreRestubProvenance(e)
+		delete(e.Meta, "go_import")
+		delete(e.Meta, "npm_import")
 		stats.Unresolved++
 		return
 	}
@@ -401,7 +404,11 @@ func (cr *CrossRepoResolver) resolveGoModuleEdgesLocked(edges []*graph.Edge, sta
 				copy.To = graph.StubID(caller, graph.StubKindStdlib, spec[:sep], spec[sep+2:])
 			} else {
 				copy.To = "dep::" + spec
+				cr.noteDemotedGoModuleCall(&copy)
 			}
+			graph.RestoreRestubProvenance(&copy)
+			delete(copy.Meta, "go_import")
+			delete(copy.Meta, "npm_import")
 		}
 		if copy.To == e.To {
 			continue
@@ -574,7 +581,7 @@ func (cr *CrossRepoResolver) goModuleCandidate(importPath string, candidates []*
 func (cr *CrossRepoResolver) removeRetargetedGoModuleParallels(batch []graph.EdgeReindex) {
 	var sites []graph.EdgeSite
 	for _, row := range batch {
-		if row.Edge.Meta["go_import"] == nil || row.OldTo == row.Edge.To {
+		if goModuleEdgeSpec(row.Edge) == "" || row.OldTo == row.Edge.To {
 			continue
 		}
 		if kind, ok := graph.CrossRepoKindFor(row.Edge.Kind); ok {
@@ -589,7 +596,7 @@ func (cr *CrossRepoResolver) removeRetargetedGoModuleParallels(batch []graph.Edg
 	for _, row := range batch {
 		e := row.Edge
 		kind, ok := graph.CrossRepoKindFor(e.Kind)
-		if !ok || e.Meta["go_import"] == nil || row.OldTo == e.To {
+		if !ok || goModuleEdgeSpec(e) == "" || row.OldTo == e.To {
 			continue
 		}
 		for _, parallel := range candidates.Site(e.From, e.Line, kind) {

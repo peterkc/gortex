@@ -31,11 +31,13 @@ func TestGoModuleConsumerSaveKeepsImportMarkerForRelink(t *testing.T) {
 				}
 				assert.Len(t, calls, 1, stage+": call must survive provider eviction")
 				for _, edge := range calls {
-					assert.Equal(t, "example.org/library::Hello", edge.Meta["go_import"], stage+": importer-owned marker must survive save/reuse")
 					if parked {
+						assert.Equal(t, "dep::example.org/library::Hello", edge.Meta["go_extern_target"], stage+": terminal keeps symbol identity")
+						assert.NotContains(t, edge.Meta, "go_import")
 						assert.NotEqual(t, "b/lib.go::Hello", edge.To, stage)
 						assert.False(t, edge.CrossRepo, stage)
 					} else {
+						assert.Equal(t, "example.org/library::Hello", edge.Meta["go_import"], stage+": bound import identity must survive save/reuse")
 						assert.Equal(t, "b/lib.go::Hello", edge.To, stage)
 						assert.True(t, edge.CrossRepo, stage)
 					}

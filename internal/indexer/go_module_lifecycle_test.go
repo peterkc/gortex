@@ -408,7 +408,12 @@ func TestGoModuleMissingProviderFiles(t *testing.T) {
 				edge := goModuleLifecycleCall(t, g)
 				assert.NotEqual(t, "b/lib.go::Hello", edge.To)
 				assert.Contains(t, edge.To, "example.org/library")
-				assert.Equal(t, "example.org/library::Hello", edge.Meta["go_import"])
+				if target, _ := edge.Meta["go_extern_target"].(string); target != "" {
+					assert.Equal(t, "dep::example.org/library::Hello", target)
+					assert.NotContains(t, edge.Meta, "go_import")
+				} else {
+					assert.Equal(t, "example.org/library::Hello", edge.Meta["go_import"])
+				}
 			})
 		}
 	}
