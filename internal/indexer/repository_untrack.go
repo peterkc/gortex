@@ -315,31 +315,8 @@ func (mi *MultiIndexer) finalizeUntrackedGoModuleCalls(parked []graph.EdgeIdenti
 		return nil
 	}
 	cr := mi.newCrossRepoResolver()
-	for start := 0; start < len(parked); start += 512 {
-		page := parked[start:min(start+512, len(parked))]
-		var edges []*graph.Edge
-		if finder, ok := mi.graph.(graph.EdgeIdentityBatchFinder); ok {
-			for _, e := range finder.FindEdgesByIdentities(page) {
-				edges = append(edges, e)
-			}
-		} else {
-			sites := make([]graph.EdgeSite, 0, len(page))
-			for _, id := range page {
-				sites = append(sites, graph.EdgeSite{From: id.From, Line: id.Line, Kind: id.Kind})
-			}
-			candidates := mi.graph.GetEdgeCandidates(nil, sites)
-			for _, id := range page {
-				for _, e := range candidates.Site(id.From, id.Line, id.Kind) {
-					if graph.EdgeIdentityFor(e) == id {
-						edges = append(edges, e)
-						break
-					}
-				}
-			}
-		}
-		if err := cr.ResolveDeferredGoModuleEdges(edges); err != nil {
-			return err
-		}
+	if err := cr.ResolveDeferredGoModuleEdgeIdentities(parked); err != nil {
+		return err
 	}
 	mi.finishGoModuleCalls(cr)
 	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())

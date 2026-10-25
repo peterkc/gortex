@@ -338,6 +338,23 @@ func (cr *CrossRepoResolver) ResolveDeferredGoModuleEdges(edges []*graph.Edge) e
 	return nil
 }
 
+// ResolveDeferredGoModuleEdgeIdentities refetches only current exact rows.
+// The shared lookup retains its optional-finder and wrapper fallback checks.
+func (cr *CrossRepoResolver) ResolveDeferredGoModuleEdgeIdentities(identities []graph.EdgeIdentity) error {
+	for start := 0; start < len(identities); start += 512 {
+		page := identities[start:min(start+512, len(identities))]
+		current := findFrameworkEdgesByIdentities(cr.graph, page)
+		edges := make([]*graph.Edge, 0, len(current))
+		for _, edge := range current {
+			edges = append(edges, edge)
+		}
+		if err := cr.ResolveDeferredGoModuleEdges(edges); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func goModuleEdgeSpec(e *graph.Edge) string {
 	if spec, ok := e.Meta["go_import"].(string); ok && spec != "" {
 		return spec

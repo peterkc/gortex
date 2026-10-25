@@ -303,3 +303,73 @@ func TestGoModuleSourceDigestChangeColdEquivalent(t *testing.T) {
 		})
 	}
 }
+
+// Given a stale identity lookup result, when teardown settles parked calls,
+// then a mismatched row must not be passed to the mutation writer.
+func TestGoModuleParkedLookupRejectsMismatchedRows(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			mi, g, repos := goModuleLifecycleFixture(t, backend)
+			for _, entry := range repos[:2] {
+				_, err := mi.TrackRepoCtx(t.Context(), entry)
+				require.NoError(t, err)
+			}
+			parked := restubGoModuleRepoIncoming(g, "b")
+			require.Len(t, parked, 1)
+			require.NotEmpty(t, g.(graph.EdgeIdentityBatchFinder).FindEdgesByIdentities(parked), "parked row must exist before purge")
+			g.EvictFile("b/lib.go")
+			require.NotEmpty(t, g.(graph.EdgeIdentityBatchFinder).FindEdgesByIdentities(parked), "parked row must survive purge")
+			wrapped := &goModuleMismatchedFinderStore{Store: g}
+			mi.graph = wrapped
+			require.NoError(t, mi.finalizeUntrackedGoModuleCalls(parked))
+			assert.Zero(t, wrapped.writes, "identity mismatch must not schedule an edge mutation")
+			assert.Zero(t, wrapped.lookups, "identity mismatch must be rejected before symbol lookup")
+		})
+	}
+}
+
+type goModuleMismatchedFinderStore struct {
+	graph.Store
+	writes  int
+	lookups int
+}
+
+func (s *goModuleMismatchedFinderStore) FindNodesByName(name string) []*graph.Node {
+	s.lookups++
+	return s.Store.FindNodesByName(name)
+}
+
+func (s *goModuleMismatchedFinderStore) FindEdgesByIdentities(ids []graph.EdgeIdentity) map[graph.EdgeIdentity]*graph.Edge {
+	out := make(map[graph.EdgeIdentity]*graph.Edge)
+	for id, e := range s.Store.(graph.EdgeIdentityBatchFinder).FindEdgesByIdentities(ids) {
+		_ = e
+		out[id] = &graph.Edge{From: id.From, To: "dep::example.org/library::Other", Kind: id.Kind, FilePath: id.FilePath, Line: id.Line, Meta: map[string]any{"go_import": "example.org/library::Hello"}}
+	}
+	return out
+}
+func (s *goModuleMismatchedFinderStore) ReindexEdges(rows []graph.EdgeReindex) {
+	s.writes += len(rows)
+	s.Store.ReindexEdges(rows)
+}
+
+// Given an intermediate Store wrapper that hides optional lookup APIs, when
+// parked identities are settled, then the shared fallback equals cold.
+func TestGoModuleParkedLookupWithoutFinder(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			mi, g, repos := goModuleLifecycleFixture(t, backend)
+			for _, entry := range repos[:2] {
+				_, err := mi.TrackRepoCtx(t.Context(), entry)
+				require.NoError(t, err)
+			}
+			parked := restubGoModuleRepoIncoming(g, "b")
+			g.EvictFile("b/lib.go")
+			mi.graph = &goModuleNoFinderStore{Store: g}
+			require.NoError(t, mi.finalizeUntrackedGoModuleCalls(parked))
+			cold := revisionColdGraph(t, backend, repos[:1])
+			assert.ElementsMatch(t, revisionCallTargets(cold, "a/main.go::Caller", graph.EdgeCalls), revisionCallTargets(g, "a/main.go::Caller", graph.EdgeCalls))
+		})
+	}
+}
+
+type goModuleNoFinderStore struct{ graph.Store }
