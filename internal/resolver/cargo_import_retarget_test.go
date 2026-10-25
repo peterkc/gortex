@@ -98,3 +98,32 @@ func TestCargoRetargetOnlyMarkedProviderImports(t *testing.T) {
 		}
 	}
 }
+
+func TestCargoRevisitedImportRestoresStubOnRefusal(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, reason := range []string{"undeclared", "ambiguous"} {
+			for _, stub := range []string{"external::other_crate/util", "unresolved::import::other_crate/util"} {
+				t.Run(backend+"/"+reason+"/"+stub, func(t *testing.T) {
+					g := goImportReviewStore(t, backend)
+					for _, file := range []string{"consumer/src/lib.rs", "provider/src/lib.rs", "provider/src/util.rs", "fork/src/lib.rs"} {
+						g.AddNode(&graph.Node{ID: file, FilePath: file, Kind: graph.KindFile, RepoPrefix: graph.RepoPrefixOfID(file), Language: "rust"})
+					}
+					g.AddEdge(&graph.Edge{From: "consumer/src/lib.rs", FilePath: "consumer/src/lib.rs", To: "provider/src/util.rs", Kind: graph.EdgeImports, Line: 1, CrossRepo: true, Meta: map[string]any{CargoImportStubMeta: stub}})
+					cr := NewCrossRepo(g)
+					cr.SetCargoImportRetargetRepo("provider")
+					cr.SetCargoCrateLookup(func(string, string) []CargoCrate {
+						if reason == "undeclared" {
+							return nil
+						}
+						return []CargoCrate{{Root: "provider/src/lib.rs", Name: "other_crate"}, {Root: "fork/src/lib.rs", Name: "other_crate"}}
+					})
+					require.NoError(t, cr.resolveCargoImports(t.Context(), graph.EdgesLightSeq(g, graph.EdgeImports), &CrossRepoStats{ByRepo: map[string]int{}}))
+					imports := outEdgesOfKind(g, "consumer/src/lib.rs", graph.EdgeImports)
+					require.Len(t, imports, 1)
+					require.Equal(t, stub, imports[0].To)
+					require.False(t, imports[0].CrossRepo)
+				})
+			}
+		}
+	}
+}
