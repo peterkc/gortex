@@ -1260,6 +1260,14 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func())
 		"elapsed_ms": time.Since(phaseStart).Milliseconds(),
 	})
 
+	// Seed module-derived edges before releasing base copies so committed
+	// bases include them. This runs after readiness and before watcher startup.
+	finishModuleSeed := startWarmupStep(logger, "go_module_seed")
+	if err := state.multiIndexer.SeedGoModuleDeps(ctx); err != nil {
+		logger.Warn("daemon: seed Go module retries", zap.Error(err))
+	}
+	finishModuleSeed()
+
 	// Committed-base publication starts HERE, after the readiness flip and
 	// after the batch's derived passes, and not in the dispatch that scheduled
 	// it. The dispatch runs upstream of markReady, so draining there would put
@@ -1276,14 +1284,6 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func())
 	// flip, the copy was taken mid-warmup and the base served none of those
 	// edges: every checkout reading it lost them, and every per-file delta
 	// over it re-derived them as new rows.
-	//
-	// This warmup already runs in the background. Seed persisted module
-	// bindings after readiness so the first watcher save never owns the scan.
-	finishModuleSeed := startWarmupStep(logger, "go_module_seed")
-	if err := state.multiIndexer.SeedGoModuleDeps(ctx); err != nil {
-		logger.Warn("daemon: seed Go module retries", zap.Error(err))
-	}
-	finishModuleSeed()
 
 	// Unconditional on purpose: a resolve that failed (resolveOK == false) or
 	// a caller that passed no markReady still gets its bases published —
