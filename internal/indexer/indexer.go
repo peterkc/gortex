@@ -4402,6 +4402,12 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 				idx.graph = streamingDisk
 				return nil, err
 			}
+			if chunkStart == 0 {
+				if err := resetShadowCloneCorpus(streamingDisk, idx.RepoPrefix()); err != nil {
+					idx.graph = streamingDisk
+					return nil, fmt.Errorf("indexer: reset streaming shadow clone corpus: %w", err)
+				}
+			}
 			// Flush the chunk to disk through the same explicit caps as the
 			// admitted whole-repository shadow. Node and edge buffers never
 			// overlap, and compact sidecars drain independently afterwards.
@@ -4450,6 +4456,11 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 		// After all chunks, idx.graph points at the disk store so
 		// the resolver and subpasses read/mutate the merged state.
 		idx.graph = streamingDisk
+		if state, ok := streamingDisk.(graph.CloneCorpusInitialization); ok {
+			if err := state.MarkCloneCorpusInitialized(idx.RepoPrefix()); err != nil {
+				return nil, fmt.Errorf("indexer: mark streaming clone corpus initialized: %w", err)
+			}
+		}
 	} else {
 		parseChunk(files)
 		if err := ctx.Err(); err != nil {
