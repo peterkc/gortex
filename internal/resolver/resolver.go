@@ -3552,6 +3552,7 @@ func (r *Resolver) runFileAttributionPassesLocked() {
 // matches runFileAttributionPassesLocked: bare-name binding runs before
 // builtin attribution so a local named `len` shadows the builtin.
 func (r *Resolver) runFileAttributionPassesForFileLocked(filePath string) {
+	r.attributePythonModuleImportsForFile(filePath)
 	r.rebindGoMethodReceiversForFile(filePath)
 	r.bindBareNameScopeRefsForFile(filePath)
 	r.bindDataflowCalleeRefsForFile(filePath)
