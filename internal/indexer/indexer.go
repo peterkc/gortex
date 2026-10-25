@@ -5157,8 +5157,16 @@ func (idx *Indexer) indexFile(
 	priorNodes, legacyIDs, legacyPath := idx.filePriorWithLegacy(graphPath, idx.graph.GetFileNodes(graphPath))
 	var legacyCarried []*graph.Edge
 	var oldFuncIDs []string
+	var carriedGoImports []*graph.Edge
 	evictExisting := func(result *parser.ExtractionResult) {
 		idx.invalidateGoModuleSourceStamp(relPath)
+		if strings.HasSuffix(graphPath, ".go") {
+			for _, e := range idx.graph.GetInEdges(graphPath) {
+				if e.Kind == graph.EdgeImports && !e.CrossRepo && e.Meta["go_import"] != nil && e.FilePath != graphPath {
+					carriedGoImports = append(carriedGoImports, e)
+				}
+			}
+		}
 		var oldFTSNodeIDs []string
 		for _, n := range priorNodes {
 			if n == nil {
@@ -5448,7 +5456,10 @@ func (idx *Indexer) indexFile(
 	// the node.
 	idx.replaceContentSections(graphPath, result.Nodes, false)
 
-	idx.graph.AddBatch(result.Nodes, append(result.Edges, legacyCarried...))
+	if _, survives := newNodeIDs[graphPath]; !survives {
+		carriedGoImports = nil
+	}
+	idx.graph.AddBatch(result.Nodes, append(append(result.Edges, legacyCarried...), carriedGoImports...))
 	idx.persistFileMeta(relPath, src, result)
 	idx.persistConstValues(result)
 	// No subsequent stage reads source bytes or the parse tree. Release both
@@ -5994,11 +6005,17 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) ([]string, []string, []
 		}
 		stub := graph.UnresolvedMarker + n.Name
 		for _, e := range inEdges[n.ID] {
+			if n.Kind == graph.KindFile && (e == nil || e.Kind != graph.EdgeImports || e.Meta["go_import"] == nil) {
+				continue
+			}
 			if e == nil || !graph.IsResolvableRefEdge(e.Kind) && (e.Kind != graph.EdgeImports || e.Meta["go_import"] == nil) {
 				continue
 			}
 			if _, fromEvicted := evicted[e.From]; fromEvicted {
 				continue // intra-file edge: the source is evicted too
+			}
+			if e.Kind == graph.EdgeImports && !e.CrossRepo && e.Meta["go_import"] != nil {
+				continue // The single-file save carries surviving local file imports.
 			}
 			if graph.IsUnresolvedTarget(e.To) {
 				continue // already a pending stub
