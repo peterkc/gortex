@@ -749,6 +749,8 @@ func (cr *CrossRepoResolver) resolveScopedLocked(edges []*graph.Edge) *CrossRepo
 		return stats
 	}
 
+	cr.warmLookupCache(pending)
+	defer cr.clearLookupCache()
 	cr.buildDirIndexes()
 	defer cr.clearDirIndexes()
 	cr.buildDepModuleIndex()
@@ -759,8 +761,6 @@ func (cr *CrossRepoResolver) resolveScopedLocked(edges []*graph.Edge) *CrossRepo
 	}
 	cr.buildReachableReposIndex(callerFiles)
 	defer cr.clearReachableReposIndex()
-	cr.warmLookupCache(pending)
-	defer cr.clearLookupCache()
 
 	var reindexBatch []graph.EdgeReindex
 	for _, edge := range pending {
