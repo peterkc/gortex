@@ -120,7 +120,7 @@ func TestGoModuleImportPopularProviderSave(t *testing.T) {
 					var edges []*graph.Edge
 					for i := 0; i < graph.MaxIncomingSourceCandidateRows+1; i++ {
 						f := fmt.Sprintf("a/filler%d.go", i)
-						nodes = append(nodes, &graph.Node{ID: f, Kind: graph.KindFile, FilePath: f, RepoPrefix: "a", Language: "go"}, &graph.Node{ID: f + "::import::example.org/library", Kind: graph.KindImport, FilePath: f, RepoPrefix: "a", Language: "go", StartLine: 2, Meta: map[string]any{"path": "example.org/library"}})
+						nodes = append(nodes, &graph.Node{ID: f, Kind: graph.KindFile, FilePath: f, RepoPrefix: "a", WorkspaceID: "shared", Language: "go"}, &graph.Node{ID: f + "::import::example.org/library", Kind: graph.KindImport, FilePath: f, RepoPrefix: "a", WorkspaceID: "shared", Language: "go", StartLine: 2, Meta: map[string]any{"path": "example.org/library"}})
 						edges = append(edges, &graph.Edge{From: f, To: "b/lib.go", Kind: graph.EdgeImports, FilePath: f, Line: 2, CrossRepo: true, Meta: map[string]any{"go_import": "example.org/library", "go_import_fallback": "dep::example.org/library"}})
 					}
 					store.AddBatch(nodes, edges)
@@ -134,6 +134,9 @@ func TestGoModuleImportPopularProviderSave(t *testing.T) {
 					require.NoError(t, err)
 				}
 				restored.RunGlobalResolve()
+				// Filler consumers share the tracked caller's workspace, so the full
+				// pass must keep their imports bound and the save over budget.
+				require.Greater(t, len(g.GetInEdges("b/lib.go")), graph.MaxIncomingSourceCandidateRows)
 				f := filepath.Join(b, "new.go")
 				writeFile(t, f, "package library\nfunc New() {}\n")
 				require.NoError(t, restored.GetIndexer("b").IndexFile(f))
