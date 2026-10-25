@@ -169,11 +169,17 @@ func stagePriorBindings(g graph.Store, stages []*incrementalBatchStage, view inc
 			if ambiguous || chosen == nil {
 				continue
 			}
+			meta := resolutionMetaAdded(chosen.edge.Meta, edge.Meta)
+			for _, key := range reuseBindingMetaKeys {
+				if _, kept := meta[key]; kept {
+					meta[key] = edge.To
+				}
+			}
 			out[resolver.PriorBindingKey(edge.From, edge.Kind, edge.Line, edge.To)] = resolver.PriorBinding{
 				To:         chosen.target,
 				Origin:     chosen.edge.Origin,
 				Confidence: chosen.edge.Confidence,
-				Meta:       resolutionMetaAdded(chosen.edge.Meta, edge.Meta),
+				Meta:       meta,
 			}
 		}
 	}
