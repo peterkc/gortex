@@ -870,6 +870,7 @@ func (cr *CrossRepoResolver) buildReachableReposIndex(callerFiles map[string]boo
 	cr.jsTSBindingsByFile = make(map[string]map[string]string)
 	cr.bridgeImportsByFile = make(map[string][]*graph.Edge)
 	cr.pythonLocalTypesByFile = make(map[string]map[string]bool)
+	var pythonFiles []string
 	// Materialise metadata-free import projections and batch-load only target
 	// placement fields. A per-edge point lookup here is a query round-trip per
 	// import on a disk backend, which under the cross-repo pass's import
@@ -957,13 +958,8 @@ func (cr *CrossRepoResolver) buildReachableReposIndex(callerFiles map[string]boo
 				cr.bridgeImportsByFile[e.From] = append(cr.bridgeImportsByFile[e.From], e)
 			}
 			if bindings, _ := e.Meta["python_bindings"].(map[string]any); isPythonSourcePath(e.FilePath) && e.Meta[PythonImportStubMeta] != nil && len(bindings) > 0 && cr.pythonLocalTypesByFile[e.From] == nil {
-				types := make(map[string]bool)
-				for _, node := range cr.graph.GetFileNodes(e.FilePath) {
-					if node.Kind == graph.KindType {
-						types[node.Name] = true
-					}
-				}
-				cr.pythonLocalTypesByFile[e.From] = types
+				cr.pythonLocalTypesByFile[e.From] = make(map[string]bool)
+				pythonFiles = append(pythonFiles, e.FilePath)
 			}
 			// A linked module file is not evidence for every symbol in its repo.
 			if npmLinked || e.Meta["go_import"] != nil || e.Meta[CargoImportStubMeta] != nil || e.Meta[PythonImportStubMeta] != nil {
@@ -975,6 +971,15 @@ func (cr *CrossRepoResolver) buildReachableReposIndex(callerFiles map[string]boo
 				idx[e.From] = set
 			}
 			set[to.RepoPrefix] = struct{}{}
+		}
+	}
+	if len(pythonFiles) > 0 {
+		for file, nodes := range cr.graph.GetFileNodesByPaths(pythonFiles) {
+			for _, node := range nodes {
+				if node.Kind == graph.KindType {
+					cr.pythonLocalTypesByFile[file][node.Name] = true
+				}
+			}
 		}
 	}
 	cr.reachableReposByFile = idx
