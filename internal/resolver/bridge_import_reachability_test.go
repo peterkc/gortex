@@ -170,13 +170,21 @@ func TestPythonMethodsStayWithinImportedType(t *testing.T) {
 
 type bridgeNameCountStore struct {
 	graph.Store
-	broad, scoped int
-	fileReads     int
+	broad, scoped  int
+	fileReads      int
+	fileBatchReads int
+	fileBatchPaths []string
 }
 
 func (s *bridgeNameCountStore) GetFileNodes(file string) []*graph.Node {
 	s.fileReads++
 	return s.Store.GetFileNodes(file)
+}
+
+func (s *bridgeNameCountStore) GetFileNodesByPaths(paths []string) map[string][]*graph.Node {
+	s.fileBatchReads++
+	s.fileBatchPaths = append(s.fileBatchPaths, paths...)
+	return s.Store.GetFileNodesByPaths(paths)
 }
 
 func (s *bridgeNameCountStore) FindNodesByName(name string) []*graph.Node {
@@ -260,6 +268,7 @@ func TestPythonReceiverTypesReadOncePerFilePerPass(t *testing.T) {
 				}
 				g.AddNode(&graph.Node{ID: provider + "::Image.show", Name: "show", FilePath: provider, Kind: graph.KindMethod, RepoPrefix: "provider", Language: "python", Meta: map[string]any{"receiver": "Image"}})
 				g.AddEdge(&graph.Edge{From: file, FilePath: file, To: provider, Kind: graph.EdgeImports, Line: 1, CrossRepo: true, Meta: map[string]any{PythonImportStubMeta: "external::pkg.image", "python_import": "pkg.image", "python_bindings": map[string]any{"Image": "Image"}}})
+				g.AddEdge(&graph.Edge{From: file, FilePath: file, To: provider, Kind: graph.EdgeImports, Line: 20, CrossRepo: true, Meta: map[string]any{PythonImportStubMeta: "external::pkg.image", "python_import": "pkg.image", "python_bindings": map[string]any{"Different": "Other"}}})
 				for i := 0; i < 8; i++ {
 					g.AddEdge(&graph.Edge{From: file, FilePath: file, To: "unresolved::*.show", Kind: graph.EdgeCalls, Line: i + 2, Meta: map[string]any{"receiver_type": "Image"}})
 				}
@@ -275,7 +284,9 @@ func TestPythonReceiverTypesReadOncePerFilePerPass(t *testing.T) {
 				// When a full or scoped pass resolves the calls.
 				resolve()
 				// Then local type names are read once, not once per edge.
-				require.Equal(t, 1, g.fileReads)
+				require.Zero(t, g.fileReads)
+				require.Equal(t, 1, g.fileBatchReads)
+				require.Len(t, g.fileBatchPaths, 1)
 				calls := outEdgesOfKind(g, file, graph.EdgeCalls)
 				require.Len(t, calls, 8)
 				for _, call := range calls {
@@ -292,9 +303,46 @@ func TestPythonReceiverTypesReadOncePerFilePerPass(t *testing.T) {
 				}
 				g.ReindexEdges(batch)
 				resolve()
-				require.Equal(t, 2, g.fileReads)
+				require.Zero(t, g.fileReads)
+				require.Equal(t, 2, g.fileBatchReads)
+				require.Len(t, g.fileBatchPaths, 2)
 				for _, call := range outEdgesOfKind(g, file, graph.EdgeCalls) {
 					require.Equal(t, "unresolved::*.show", call.To)
+				}
+			})
+		}
+	}
+}
+
+func TestPythonReceiverTypeSnapshotBatchesFiles(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, count := range []int{0, 6} {
+			t.Run(fmt.Sprintf("%s/files=%d", backend, count), func(t *testing.T) {
+				// Given several from-import callers and an unrelated wildcard importer.
+				g := &bridgeNameCountStore{Store: goImportReviewStore(t, backend)}
+				provider := "provider/pkg/image.py"
+				g.AddNode(&graph.Node{ID: provider, FilePath: provider, Kind: graph.KindFile, RepoPrefix: "provider", Language: "python"})
+				g.AddEdge(&graph.Edge{From: "consumer/wild.py", FilePath: "consumer/wild.py", To: provider, Kind: graph.EdgeImports, CrossRepo: true, Meta: map[string]any{PythonImportStubMeta: "external::pkg.image", "python_bindings": map[string]any{}}})
+				for i := 0; i < count; i++ {
+					file := fmt.Sprintf("consumer/caller%d.py", i)
+					g.AddNode(&graph.Node{ID: file, FilePath: file, Kind: graph.KindFile, RepoPrefix: "consumer", Language: "python"})
+					g.AddNode(&graph.Node{ID: file + "::Local", FilePath: file, Kind: graph.KindType, Name: "Local", RepoPrefix: "consumer", Language: "python"})
+					g.AddEdge(&graph.Edge{From: file, FilePath: file, To: provider, Kind: graph.EdgeImports, CrossRepo: true, Meta: map[string]any{PythonImportStubMeta: "external::pkg.image", "python_bindings": map[string]any{"Image": "Image"}}})
+				}
+				// When a full pass builds the import evidence index, with no typed-call filter.
+				cr := NewCrossRepo(g)
+				cr.buildReachableReposIndex(nil)
+				// Then qualifying files are fetched in one batch and no point reads.
+				require.Zero(t, g.fileReads)
+				expectedBatches := 0
+				if count > 0 {
+					expectedBatches = 1
+				}
+				require.Equal(t, expectedBatches, g.fileBatchReads)
+				require.Len(t, g.fileBatchPaths, count)
+				require.Len(t, cr.pythonLocalTypesByFile, count)
+				for _, types := range cr.pythonLocalTypesByFile {
+					require.True(t, types["Local"])
 				}
 			})
 		}
