@@ -70,7 +70,8 @@ func TestTrackedPythonImportLifecycle(t *testing.T) {
 					logger := zap.New(core)
 					mi := NewMultiIndexer(g, reg, search.NewNull(), cm, logger)
 					t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
-					if operation == "deferred_track" {
+					switch operation {
+					case "deferred_track":
 						_, err = mi.TrackRepoCtx(context.Background(), entries[0])
 						require.NoError(t, err)
 						mi.BeginParallelBatch()
@@ -83,12 +84,12 @@ func TestTrackedPythonImportLifecycle(t *testing.T) {
 						}
 						require.NoError(t, mi.RunPreEnrichResolveFiles(context.Background(), []string{"consumer/app.py", "provider/src/PIL/image.py", "provider/src/PIL/util.py"}, nil))
 						mi.EndBatch()
-					} else if operation == "track" {
+					case "track":
 						for _, entry := range gc.Repos {
 							_, err = mi.TrackRepoCtx(context.Background(), entry)
 							require.NoError(t, err)
 						}
-					} else {
+					default:
 						_, err = mi.IndexAll()
 						require.NoError(t, err)
 					}
