@@ -107,6 +107,11 @@ func (mi *MultiIndexer) untrackRepoCheckedRetainingAdmission(
 	topologyChanged := false
 	defer func() { finishTopologyMutation(topologyChanged) }()
 
+	mi.goModuleMu.Lock()
+	stamp := mi.goModuleFiles[repoPrefix]
+	hadGoModule := mi.goModuleCache[repoPrefix] != "" || stamp.modified != 0
+	mi.goModuleMu.Unlock()
+	goModuleAffected := hadGoModule || len(graph.ReadRepoFilePaths(mi.graph, repoPrefix, "", []string{"go"}, nil)) > 0
 	mi.mu.Lock()
 	state = mi.pendingRepositoryUntracks[repoPrefix]
 	if state == nil {
@@ -122,11 +127,12 @@ func (mi *MultiIndexer) untrackRepoCheckedRetainingAdmission(
 			return 0, 0, fmt.Errorf("indexer: repository teardown for %s lost its mutation lane", repoPrefix)
 		}
 		state = &repositoryUntrackState{
-			metadata:    meta,
-			indexer:     idx,
-			coordinator: coordinator,
-			contract:    mi.contractInvalidationPlanForRepo(idx),
-			finalize:    finalize,
+			metadata:         meta,
+			indexer:          idx,
+			coordinator:      coordinator,
+			contract:         mi.contractInvalidationPlanForRepo(idx),
+			finalize:         finalize,
+			goModuleAffected: goModuleAffected,
 		}
 		if mi.pendingRepositoryUntracks == nil {
 			mi.pendingRepositoryUntracks = make(map[string]*repositoryUntrackState)
@@ -214,13 +220,15 @@ func (mi *MultiIndexer) untrackRepoCheckedRetainingAdmission(
 	if !state.contract.Empty() {
 		mi.ReconcileContractEdgesForFrontier(state.contract)
 	}
-	mi.goModuleRetry.Invalidate()
-	cr := mi.newCrossRepoResolver()
-	if err := cr.RetryGoModuleDeps(ctx); err != nil {
-		return state.nodesRemoved, state.edgesRemoved, fmt.Errorf("settle Go module callers after untrack: %w", err)
+	if state.goModuleAffected {
+		mi.goModuleRetry.Invalidate()
+		cr := mi.newCrossRepoResolver()
+		if err := cr.RetryGoModuleDeps(ctx); err != nil {
+			return state.nodesRemoved, state.edgesRemoved, fmt.Errorf("settle Go module callers after untrack: %w", err)
+		}
+		mi.finishGoModuleCalls(cr)
+		mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 	}
-	mi.finishGoModuleCalls(cr)
-	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 
 	// A cleanup reservation wins atomically over continuation deletion and
 	// keeps this exact closed lane for lifecycle finalization.

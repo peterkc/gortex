@@ -103,3 +103,34 @@ func (s *goModuleSourceExtractionSpy) Extract(path string, src []byte) (*parser.
 	}
 	return s.Extractor.Extract(path, src)
 }
+
+// Given a Go workspace plus a JS-only repository, when the JS repo is removed,
+// then removal must not invalidate and reseed the Go terminal sweep.
+func TestNonGoUntrackSkipsModuleSweep(t *testing.T) {
+	db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	g := &goModuleUntrackScanStore{goModuleRetryScanStore: &goModuleRetryScanStore{goModulePublishScanCountingStore: goModulePublishScanCountingStore{Store: db}}}
+	cm := newTestConfigManager(t)
+	js, lib := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(js, "main.js"), "export function Hello() {}\n")
+	writeFile(t, filepath.Join(lib, "go.mod"), "module example.org/library\n")
+	writeFile(t, filepath.Join(lib, "lib.go"), "package library\nfunc Hello() {}\n")
+	mi := NewMultiIndexer(g, newTestRegistry(), search.NewNull(), cm, zap.NewNop())
+	t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
+	for _, entry := range []config.RepoEntry{{Name: "a", Path: js}, {Name: "b", Path: lib}} {
+		_, err := mi.TrackRepoCtx(t.Context(), entry)
+		require.NoError(t, err)
+	}
+	require.NoError(t, mi.SeedGoModuleDeps(t.Context()))
+	g.scans = 0
+	_, _, err = mi.UntrackRepoChecked(t.Context(), "a")
+	require.NoError(t, err)
+	assert.Zero(t, g.scans, "JS-only untrack must not rescan Go terminals")
+}
+
+type goModuleUntrackScanStore struct{ *goModuleRetryScanStore }
+
+func (s *goModuleUntrackScanStore) PurgeRepo(repo string) error {
+	return s.Store.(interface{ PurgeRepo(string) error }).PurgeRepo(repo)
+}
