@@ -5994,7 +5994,7 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) ([]string, []string, []
 		}
 		stub := graph.UnresolvedMarker + n.Name
 		for _, e := range inEdges[n.ID] {
-			if e == nil || !graph.IsResolvableRefEdge(e.Kind) && !(e.Kind == graph.EdgeImports && e.Meta["go_import"] != nil) {
+			if e == nil || !graph.IsResolvableRefEdge(e.Kind) && (e.Kind != graph.EdgeImports || e.Meta["go_import"] == nil) {
 				continue
 			}
 			if _, fromEvicted := evicted[e.From]; fromEvicted {
