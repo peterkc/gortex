@@ -503,6 +503,7 @@ func TestReconstructedMeasurementContractAnswer(t *testing.T) {
 		})
 	}
 	notTracked := "Error: the gortex daemon does not track /private/repo — add it with `gortex track /private/repo`\n"
+	loading := fmt.Sprintf("Error: the gortex daemon is still loading %s after a restart (parallel_parse, 15%%) — the repository is already tracked; retry shortly (or pass --loading-wait to wait for it)\n", issue767FixturePrefix)
 	incomplete := "Error: required_capability_incomplete: graph.contracts did not become complete within this request: context deadline exceeded; retry after 5s\n"
 	good0 := strings.ReplaceAll(good, "save-007", "save-000")
 	t.Run("command_streams", func(t *testing.T) {
@@ -517,6 +518,20 @@ func TestReconstructedMeasurementContractAnswer(t *testing.T) {
 			{name: "notice_only", stderr: notice, exit: 1},
 			{name: "not_tracked_stderr", stderr: notTracked, exit: 1, pending: true, unavailable: "startup repository not tracked before enrichment"},
 			{name: "not_tracked_after_enrichment", stderr: notTracked, exit: 1},
+			{name: "loading_stderr", stderr: loading, exit: 75, pending: true, unavailable: "startup repository loading before enrichment"},
+			{name: "notice_then_loading", stderr: notice + loading, exit: 75, pending: true, unavailable: "startup repository loading before enrichment"},
+			{name: "loading_any_phase_integer", stderr: strings.ReplaceAll(loading, "parallel_parse, 15%", "attach views (warm), 100%"), exit: 75, pending: true, unavailable: "startup repository loading before enrichment"},
+			{name: "loading_after_enrichment", stderr: loading, exit: 75},
+			{name: "loading_other_repo", stderr: strings.ReplaceAll(loading, issue767FixturePrefix, issue767FixturePrefix+"-other"), exit: 75, pending: true},
+			{name: "loading_extra_line", stderr: loading + "warning: something else\n", exit: 75, pending: true},
+			{name: "loading_extra_blank_line", stderr: loading + "\n", exit: 75, pending: true},
+			{name: "loading_padded_notice", stderr: " " + notice + loading, exit: 75, pending: true},
+			{name: "loading_wrong_exit", stderr: loading, exit: 1, pending: true},
+			{name: "loading_waited_form", stderr: strings.ReplaceAll(loading, ") —", "); still loading after waiting 30s —"), exit: 75, pending: true},
+			{name: "loading_stdout", stdout: loading, exit: 75, pending: true},
+			{name: "loading_with_stdout", stdout: good, stderr: loading, exit: 75, pending: true},
+			{name: "loading_noninteger", stderr: strings.ReplaceAll(loading, "15%", "15.5%"), exit: 75, pending: true},
+			{name: "loading_phase_carriage_return", stderr: strings.ReplaceAll(loading, "parallel_parse", "parallel\rparse"), exit: 75, pending: true},
 			{name: "incomplete_stderr", stderr: incomplete, exit: 1, unavailable: "required_capability_incomplete: context deadline exceeded", retry: "5s"},
 			{name: "notice_then_not_tracked", stderr: notice + notTracked, exit: 1, pending: true, unavailable: "startup repository not tracked before enrichment"},
 			{name: "notice_then_incomplete", stderr: notice + incomplete, exit: 1, unavailable: "required_capability_incomplete: context deadline exceeded", retry: "5s"},
@@ -554,15 +569,17 @@ func TestReconstructedMeasurementContractAnswer(t *testing.T) {
 		}
 	})
 	for _, tc := range []struct {
-		name, raw, commandError string
-		before, pass            bool
+		name, stdout, stderr, commandError string
+		before, pass                       bool
 	}{
-		{"startup_not_tracked", notTracked, "exit status 1", true, true},
-		{"post_enrichment_not_tracked", notTracked, "exit status 1", false, false},
-		{"other_repo_not_tracked", strings.ReplaceAll(notTracked, "/private/repo", "/other/repo"), "exit status 1", true, false},
-		{"transport_error_not_startup", notTracked, "signal: killed", true, false},
-		{"generic_exit_1", "Error: command failed\n", "exit status 1", true, false},
-		{"post_enrichment_typed_incomplete", incomplete, "exit status 1", false, false},
+		{"startup_not_tracked", notTracked, "", "exit status 1", true, true},
+		{"post_enrichment_not_tracked", notTracked, "", "exit status 1", false, false},
+		{"startup_loading", "", loading, "exit status 75", true, true},
+		{"post_enrichment_loading", "", loading, "exit status 75", false, false},
+		{"other_repo_not_tracked", strings.ReplaceAll(notTracked, "/private/repo", "/other/repo"), "", "exit status 1", true, false},
+		{"transport_error_not_startup", notTracked, "", "signal: killed", true, false},
+		{"generic_exit_1", "Error: command failed\n", "", "exit status 1", true, false},
+		{"post_enrichment_typed_incomplete", incomplete, "", "exit status 1", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			at := time.Unix(100, 0)
@@ -571,17 +588,20 @@ func TestReconstructedMeasurementContractAnswer(t *testing.T) {
 				first = at.Add(4 * time.Second)
 			}
 			owner := &reconstructedDemandOwner{records: []reconstructedDemand{
-				{Start: at, End: first, Response: tc.raw, Error: tc.commandError, DurationMS: 12},
+				{Start: at, End: first, Response: tc.stdout, Stderr: tc.stderr, Error: tc.commandError, DurationMS: 12},
 				{Start: at.Add(5 * time.Second), End: at.Add(6 * time.Second), Response: good0},
 			}}
 			d := &reconstructedDriver{f: &issue767Fixture{primary: "/private/repo"}, run: reconstructedRun{Workload: "R-Restart", Parameters: map[string]any{}}}
 			d.recordDemand(owner, at, at.Add(7*time.Second), nil, at.Add(3*time.Second))
 			firstRecord := owner.records[0]
-			if (d.run.Error == "") != tc.pass || firstRecord.Response != tc.raw || firstRecord.DurationMS != 12 || firstRecord.Available {
+			if (d.run.Error == "") != tc.pass || firstRecord.Response != tc.stdout || firstRecord.Stderr != tc.stderr || firstRecord.DurationMS != 12 || firstRecord.Available {
 				t.Fatalf("first=%+v run=%+v", firstRecord, d.run)
 			}
-			if tc.pass && (firstRecord.UnavailableReason == "" || firstRecord.Error != "" || !owner.records[1].Available || !owner.records[1].Route0) {
+			if tc.pass && (firstRecord.UnavailableReason == "" || firstRecord.Error != "" || !owner.records[1].Available || !owner.records[1].Route0 || d.run.ContractUnavailable != 1) {
 				t.Fatalf("records=%+v", owner.records)
+			}
+			if tc.stderr != "" && !tc.pass && (firstRecord.Error != tc.commandError || firstRecord.UnavailableReason != "" || d.run.ContractUnavailable != 0) {
+				t.Fatalf("loading refusal became unavailable data after enrichment: %+v run=%+v", firstRecord, d.run)
 			}
 		})
 	}
