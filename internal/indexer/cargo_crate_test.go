@@ -151,7 +151,6 @@ func TestMultiIndexer_CargoCrateImport(t *testing.T) {
 						continue
 					}
 					imports++
-					t.Logf("import %s -> %s crossRepo=%v", e.From, e.To, e.CrossRepo)
 					assert.Equal(t, resolves, e.CrossRepo)
 					if resolves {
 						assert.Equal(t, want, e.To)

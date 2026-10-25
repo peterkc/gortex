@@ -179,16 +179,16 @@ func TestGoModuleImportReplaceAddedLater(t *testing.T) {
 				_, err := mi.TrackRepoCtx(t.Context(), e)
 				require.NoError(t, err)
 			}
-			t.Logf("linked: %v call=%s", goImportRecoveryRows(g, "a/main.go"), goModuleLifecycleCall(t, g).To)
+			assert.Equal(t, "b/lib.go::Hello", goModuleLifecycleCall(t, g).To)
 			require.NoError(t, os.MkdirAll(filepath.Join(a, "third_party", "library"), 0o755))
 			vendored := filepath.Join(a, "third_party", "library", "lib.go")
 			writeFile(t, vendored, "package library\nfunc Hello() {}\n")
 			writeFile(t, manifest, "module example.org/caller\nrequire example.org/library v1.0.0\nreplace example.org/library => ./third_party/library\n")
 			_, err := mi.IncrementalReindexRepo("a", []string{manifest, vendored})
 			require.NoError(t, err)
-			t.Logf("after replace save: %v call=%s", goImportRecoveryRows(g, "a/main.go"), goModuleLifecycleCall(t, g).To)
+			assert.Equal(t, "a/third_party/library/lib.go::Hello", goModuleLifecycleCall(t, g).To)
 			mi.RunGlobalResolve()
-			t.Logf("after global: %v call=%s", goImportRecoveryRows(g, "a/main.go"), goModuleLifecycleCall(t, g).To)
+			assert.Equal(t, "a/third_party/library/lib.go::Hello", goModuleLifecycleCall(t, g).To)
 			var coldGraph graph.Store = graph.New()
 			if backend == "sqlite" {
 				db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "cold.sqlite"))
@@ -204,7 +204,7 @@ func TestGoModuleImportReplaceAddedLater(t *testing.T) {
 			}
 			cold.RunGlobalResolve()
 			require.Len(t, goImportRecoveryRows(coldGraph, "a/main.go"), 1)
-			t.Logf("cold: %v call=%s", goImportRecoveryRows(coldGraph, "a/main.go"), goModuleLifecycleCall(t, coldGraph).To)
+			assert.Equal(t, goModuleLifecycleCall(t, coldGraph).To, goModuleLifecycleCall(t, g).To)
 			// Retain retry metadata on the local row so removing replace can rebind it.
 			assert.Equal(t, goImportBindingRows(coldGraph, "a/main.go"), goImportBindingRows(g, "a/main.go"))
 		})
@@ -224,20 +224,20 @@ func TestGoModuleImportReplaceAddedThenRemoved(t *testing.T) {
 				_, err := mi.TrackRepoCtx(t.Context(), e)
 				require.NoError(t, err)
 			}
-			t.Logf("linked: %v call=%s", goImportRecoveryRows(g, "a/main.go"), goModuleLifecycleCall(t, g).To)
+			assert.Equal(t, "b/lib.go::Hello", goModuleLifecycleCall(t, g).To)
 			require.NoError(t, os.MkdirAll(filepath.Join(a, "third_party", "library"), 0o755))
 			vendored := filepath.Join(a, "third_party", "library", "lib.go")
 			writeFile(t, vendored, "package library\nfunc Hello() {}\n")
 			writeFile(t, manifest, plain+"replace example.org/library => ./third_party/library\n")
 			_, err := mi.IncrementalReindexRepo("a", []string{manifest, vendored})
 			require.NoError(t, err)
-			t.Logf("replace added: %v call=%s", goImportRecoveryRows(g, "a/main.go"), goModuleLifecycleCall(t, g).To)
+			assert.Equal(t, "a/third_party/library/lib.go::Hello", goModuleLifecycleCall(t, g).To)
 			writeFile(t, manifest, plain)
 			_, err = mi.IncrementalReindexRepo("a", []string{manifest})
 			require.NoError(t, err)
-			t.Logf("replace removed: %v call=%s", goImportRecoveryRows(g, "a/main.go"), goModuleLifecycleCall(t, g).To)
+			assert.Equal(t, "b/lib.go::Hello", goModuleLifecycleCall(t, g).To)
 			mi.RunGlobalResolve()
-			t.Logf("after global: %v call=%s", goImportRecoveryRows(g, "a/main.go"), goModuleLifecycleCall(t, g).To)
+			assert.Equal(t, "b/lib.go::Hello", goModuleLifecycleCall(t, g).To)
 			var coldGraph graph.Store = graph.New()
 			if backend == "sqlite" {
 				db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "cold.sqlite"))
@@ -252,7 +252,7 @@ func TestGoModuleImportReplaceAddedThenRemoved(t *testing.T) {
 				require.NoError(t, err)
 			}
 			cold.RunGlobalResolve()
-			t.Logf("cold: %v call=%s", goImportRecoveryRows(coldGraph, "a/main.go"), goModuleLifecycleCall(t, coldGraph).To)
+			assert.Equal(t, goModuleLifecycleCall(t, coldGraph).To, goModuleLifecycleCall(t, g).To)
 			assert.Equal(t, goImportRecoveryRows(coldGraph, "a/main.go"), goImportRecoveryRows(g, "a/main.go"))
 		})
 	}

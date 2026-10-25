@@ -70,7 +70,6 @@ func main() { lib.F() }
 					}
 				}
 				require.Len(t, imports, 1)
-				t.Logf("import target after track + global resolve: %s", imports[0].To)
 				assert.Equal(t, "provider/lib.go", imports[0].To)
 				assert.True(t, imports[0].CrossRepo)
 				contractID := "dep::example.com/lib"

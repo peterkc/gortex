@@ -288,7 +288,6 @@ func TestGoModuleImportWarmProviderEdit(t *testing.T) {
 			assert.True(t, edges[0].CrossRepo)
 			assert.Equal(t, 1, g.importScans)
 			assert.Equal(t, 4, g.importRows, "one tracked and three unrelated import identities")
-			t.Logf("lazy seed: global scans=%d, import identities visited=%d", g.importScans, g.importRows)
 			s.EvictFile("b/lib.go")
 			s.AddNode(&graph.Node{ID: "b/lib.go", Kind: graph.KindFile, FilePath: "b/lib.go", RepoPrefix: "b", Language: "go"})
 			if route == "mutation" {

@@ -27,11 +27,11 @@ func TestGoModuleImportTieBrokenByRename(t *testing.T) {
 				require.NoError(t, err)
 			}
 			mi.RunGlobalResolve()
-			t.Logf("tie: %v call=%s", goImportRecoveryRows(g, "a/main.go"), goModuleLifecycleCall(t, g).To)
+			assert.False(t, goModuleLifecycleCall(t, g).CrossRepo, "ambiguous modules must not bind")
 			manifest := filepath.Join(repos[2].Path, "go.mod")
 			writeFile(t, manifest, "module example.org/forked\n")
 			require.NoError(t, mi.GetIndexer("fork").IndexFile(manifest))
-			t.Logf("after rename: %v call=%s", goImportRecoveryRows(g, "a/main.go"), goModuleLifecycleCall(t, g).To)
+			assert.Equal(t, "b/lib.go::Hello", goModuleLifecycleCall(t, g).To)
 			var coldGraph graph.Store = graph.New()
 			if backend == "sqlite" {
 				db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "cold.sqlite"))
@@ -46,7 +46,7 @@ func TestGoModuleImportTieBrokenByRename(t *testing.T) {
 				require.NoError(t, err)
 			}
 			cold.RunGlobalResolve()
-			t.Logf("cold: %v call=%s", goImportRecoveryRows(coldGraph, "a/main.go"), goModuleLifecycleCall(t, coldGraph).To)
+			assert.Equal(t, goModuleLifecycleCall(t, coldGraph).To, goModuleLifecycleCall(t, g).To)
 			assert.Equal(t, goImportRecoveryRows(coldGraph, "a/main.go"), goImportRecoveryRows(g, "a/main.go"))
 		})
 	}
