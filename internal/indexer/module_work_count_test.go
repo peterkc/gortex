@@ -213,3 +213,60 @@ func TestGoModuleManifestOnlyUntrackRunsModuleSweep(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, g.scans, "a manifest-only repo must invalidate the module sweep")
 }
+
+// Given extractor output with local calls and non-call edges, when cached,
+// then only qualified module calls consume retained heap entries.
+func TestGoModuleSourceCacheRetainsOnlyModuleCalls(t *testing.T) {
+	edges := []*graph.Edge{
+		{Kind: graph.EdgeCalls, To: "dep::example.org/library::Hello"},
+		{Kind: graph.EdgeCalls, To: "unresolved::extern::example.org/library::World"},
+		{Kind: graph.EdgeCalls, To: "a/main.go::Local"},
+		{Kind: graph.EdgeImports, To: "dep::example.org/library::Hello"},
+	}
+	cached := cloneGoModuleSourceEdges(edges)
+	require.Len(t, cached, 2)
+	assert.Equal(t, edges[:2], cached)
+}
+
+// Given source facts retained by an indexer, when its file is explicitly
+// evicted, deleted or renamed, then the old relative-path entry is removed.
+func TestGoModuleSourceCacheEviction(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, mode := range []string{"forced", "delete", "rename"} {
+			t.Run(backend+"/"+mode, func(t *testing.T) {
+				mi, g, repos := goModuleLifecycleFixture(t, backend)
+				writeFile(t, filepath.Join(repos[1].Path, "lib.go"), "package library\nfunc Other(){}\n")
+				for _, entry := range repos[:2] {
+					_, err := mi.TrackRepoCtx(t.Context(), entry)
+					require.NoError(t, err)
+				}
+				mi.runCrossRepoResolveFiles([]string{"b/lib.go"})
+				idx := mi.GetIndexer("a")
+				require.Contains(t, idx.goModuleSourceCache, "main.go")
+				main := filepath.Join(repos[0].Path, "main.go")
+				switch mode {
+				case "forced":
+					idx.EvictFile(main)
+				case "delete":
+					require.NoError(t, os.Remove(main))
+					_, err := mi.IncrementalReindexRepo("a", []string{main})
+					require.NoError(t, err)
+				case "rename":
+					renamed := filepath.Join(repos[0].Path, "renamed.go")
+					require.NoError(t, os.Rename(main, renamed))
+					_, err := mi.IncrementalReindexRepo("a", []string{main, renamed})
+					require.NoError(t, err)
+				}
+				assert.NotContains(t, idx.goModuleSourceCache, "main.go")
+				if mode != "forced" {
+					cold := revisionColdGraph(t, backend, repos[:2])
+					caller := "a/main.go::Caller"
+					if mode == "rename" {
+						caller = "a/renamed.go::Caller"
+					}
+					assert.ElementsMatch(t, revisionCallTargets(cold, caller, graph.EdgeCalls), revisionCallTargets(g, caller, graph.EdgeCalls))
+				}
+			})
+		}
+	}
+}

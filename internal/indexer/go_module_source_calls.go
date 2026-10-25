@@ -23,6 +23,9 @@ type goModuleSourceCacheEntry struct {
 func cloneGoModuleSourceEdges(edges []*graph.Edge) []*graph.Edge {
 	out := make([]*graph.Edge, 0, len(edges))
 	for _, e := range edges {
+		if resolver.GoModuleCallSpec(e) == "" {
+			continue
+		}
 		c := *e
 		c.Meta = maps.Clone(e.Meta)
 		out = append(out, &c)

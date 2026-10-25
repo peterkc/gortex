@@ -666,6 +666,19 @@ func (cr *CrossRepoResolver) TakeGoModuleSourceFiles() []string {
 	return files
 }
 
+// GoModuleCallSpec returns the qualified package/symbol identity consumed by
+// source recovery, or empty for other extractor edges.
+func GoModuleCallSpec(e *graph.Edge) string {
+	if e == nil || e.Kind != graph.EdgeCalls {
+		return ""
+	}
+	spec := goModuleEdgeSpec(e)
+	if strings.LastIndex(spec, "::") < 0 {
+		return ""
+	}
+	return spec
+}
+
 // RestoreGoModuleSourceCalls restores calls lost by package-terminal convergence.
 // Missing calls at the same package/site return to the external-call tail.
 func (cr *CrossRepoResolver) RestoreGoModuleSourceCalls(edges []*graph.Edge) {
@@ -676,10 +689,7 @@ func (cr *CrossRepoResolver) RestoreGoModuleSourceCalls(edges []*graph.Edge) {
 	sources := make(map[string]*graph.Node)
 	identities := make(map[string]map[graph.EdgeIdentity]struct{})
 	for _, e := range edges {
-		if e == nil || e.Kind != graph.EdgeCalls {
-			continue
-		}
-		spec := goModuleEdgeSpec(e)
+		spec := GoModuleCallSpec(e)
 		sep := strings.LastIndex(spec, "::")
 		if sep < 0 {
 			continue

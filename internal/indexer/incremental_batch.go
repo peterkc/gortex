@@ -2439,6 +2439,11 @@ func (idx *Indexer) evictDeletedFilesBatched(deleted []string, plan *DerivedInva
 		return 0, 0
 	}
 	defer idx.flushFileIndexFailures()
+	idx.goModuleSourceMu.Lock()
+	for _, path := range deleted {
+		delete(idx.goModuleSourceCache, path)
+	}
+	idx.goModuleSourceMu.Unlock()
 	for _, path := range deleted {
 		idx.noteFileIndexFailure(filepath.Join(idx.rootPath, filepath.FromSlash(path)), nil)
 	}
