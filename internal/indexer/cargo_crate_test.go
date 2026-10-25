@@ -165,6 +165,9 @@ func TestMultiIndexer_CargoCrateImport(t *testing.T) {
 }
 
 func TestCargoCrateLookupNoManifest(t *testing.T) {
-	mi := &MultiIndexer{repos: map[string]*RepoMetadata{"plain": {RootPath: t.TempDir()}}}
-	assert.Nil(t, mi.cargoCrateLookup(), "no Cargo manifest must leave the retry disabled")
+	g := &cargoWarmScanStore{Store: graph.New()}
+	mi := &MultiIndexer{graph: g, repos: map[string]*RepoMetadata{"first": {RootPath: t.TempDir()}, "second": {RootPath: t.TempDir()}}}
+	assert.Nil(t, mi.cargoCrateLookup(), "a multi-repo workspace without Cargo roots must disable the retry")
+	require.Empty(t, mi.cargoConsumerFilesForRepo("first", false))
+	assert.Zero(t, g.lightScans, "no import scan is needed without Cargo roots")
 }
