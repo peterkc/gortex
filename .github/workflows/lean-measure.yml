@@ -25,29 +25,42 @@ jobs:
       check_binaries: ${{ steps.run.outputs.check_binaries }}
       repeats: ${{ steps.run.outputs.repeats }}
       sustained_io: ${{ steps.run.outputs.sustained_io }}
+      platforms: ${{ steps.run.outputs.platforms }}
+      workload_matrix: ${{ steps.run.outputs.workload_matrix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Read this run
         id: run
         run: |
           jq -e '
-            (.commits | has("main") and has("pr806") and has("base")) and
-            (.commits | keys - ["main", "pr806", "base", "trial", "e_control"] | length == 0) and
-            (.commits | (has("e_control") | not) or has("trial")) and
-            (.commits.main == "76c080e56da3547f2b464522fd6acbe0accaa25e") and
-            (.commits.pr806 == "944cd9c125ad6ac4094986493d66c7703b2a0cc8") and
-            (.commits.base == "9e9a842b2a023acc51ae5ba2cc7edf332160f128") and
-            ([.commits[] | type == "string" and test("^[0-9a-f]{40}$")] | all) and
+            (.commits | keys == ["main"]) and
+            (.commits.main == "015b3410db3fd79d49fc0d8934482f8f628ca1be") and
             (.workloads | sort == ["R-C2", "R-DE", "R-Fill", "R-Fresh", "R-Restart", "issue767-idle"]) and
-            (.repeats | type == "number" and . == floor and . >= 1 and . <= 3) and
+            (.profile_scenarios == ["cold-index", "edit-burst"]) and
+            ((.campaign == "smoke" and .platforms == ["ubuntu-24.04"] and .repeats == 1) or
+             (.campaign == "full" and .platforms == ["ubuntu-24.04", "macos-15"] and .repeats == 3)) and
             (.sustained_io == false) and (.note | type == "string")
           ' measure/run.json
           {
             echo "commits=$(jq -c .commits measure/run.json)"
-            echo "binaries=$(jq -c '.commits | if has("trial") then keys - ["main"] else keys end' measure/run.json)"
-            echo "check_binaries=$(jq -c '.commits | keys - ["pr806"]' measure/run.json)"
+            echo "binaries=$(jq -c '.commits | keys' measure/run.json)"
+            echo "check_binaries=$(jq -c '.commits | if keys == ["main"] then [] else keys - ["pr806"] end' measure/run.json)"
             echo "repeats=$(jq -c '[range(0; .repeats)]' measure/run.json)"
             echo "sustained_io=$(jq -c .sustained_io measure/run.json)"
+            echo "platforms=$(jq -c .platforms measure/run.json)"
+            echo "workload_matrix=$(jq -c '
+              . as $run |
+              [{name:"fill",workloads:["R-Fill"]},
+               {name:"changes",workloads:["R-C2","R-DE"]},
+               {name:"lifecycle",workloads:["R-Fresh","R-Restart","issue767-idle"]}] as $groups |
+              [.platforms[] as $os | range(0; $run.repeats) as $repeat | $groups[] as $group |
+               {os:$os,repeat:$repeat,group:$group,mode:"timing",
+                scenario:(if $run.campaign == "smoke" then
+                  (if $group.name == "changes" then "edit-burst" elif $group.name == "lifecycle" then "cold-index" else "" end)
+                  else "" end)}] +
+              [select(.campaign == "full") | .platforms[] as $os | .profile_scenarios[] as $scenario |
+               {os:$os,repeat:0,group:{name:$scenario,workloads:[]},mode:"profile",scenario:$scenario}]
+            ' measure/run.json)"
           } >> "$GITHUB_OUTPUT"
 
   build:
@@ -57,7 +70,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        os: ${{ fromJSON(needs.config.outputs.platforms) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Assert runner architecture and record machine
@@ -89,64 +102,6 @@ jobs:
           test "$(git rev-parse HEAD)" = "$(jq -r .commits.main ../measure/run.json)"
           mkdir -p ../binaries
           go build -o ../binaries/main ./cmd/gortex
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ fromJSON(needs.config.outputs.commits).pr806 }}
-          path: src-pr806
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: src-pr806/go.mod
-      - name: Build pr806
-        working-directory: src-pr806
-        run: |
-          test "$(git rev-parse HEAD)" = "$(jq -r .commits.pr806 ../measure/run.json)"
-          mkdir -p ../binaries
-          go build -o ../binaries/pr806 ./cmd/gortex
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ fromJSON(needs.config.outputs.commits).base }}
-          path: src-base
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: src-base/go.mod
-      - name: Build base
-        working-directory: src-base
-        run: |
-          test "$(git rev-parse HEAD)" = "$(jq -r .commits.base ../measure/run.json)"
-          mkdir -p ../binaries
-          go build -o ../binaries/base ./cmd/gortex
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: fromJSON(needs.config.outputs.commits).trial != null
-        with:
-          ref: ${{ fromJSON(needs.config.outputs.commits).trial }}
-          path: src-trial
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        if: fromJSON(needs.config.outputs.commits).trial != null
-        with:
-          go-version-file: src-trial/go.mod
-      - name: Build trial
-        if: fromJSON(needs.config.outputs.commits).trial != null
-        working-directory: src-trial
-        run: |
-          test "$(git rev-parse HEAD)" = "$(jq -r .commits.trial ../measure/run.json)"
-          mkdir -p ../binaries
-          go build -o ../binaries/trial ./cmd/gortex
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: fromJSON(needs.config.outputs.commits).e_control != null
-        with:
-          ref: ${{ fromJSON(needs.config.outputs.commits).e_control }}
-          path: src-e_control
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        if: fromJSON(needs.config.outputs.commits).e_control != null
-        with:
-          go-version-file: src-e_control/go.mod
-      - name: Build e_control
-        if: fromJSON(needs.config.outputs.commits).e_control != null
-        working-directory: src-e_control
-        run: |
-          test "$(git rev-parse HEAD)" = "$(jq -r .commits.e_control ../measure/run.json)"
-          mkdir -p ../binaries
-          go build -o ../binaries/e_control ./cmd/gortex
       - name: Record binary identities
         run: |
           cp results/machine.json binaries/machine.json
@@ -170,15 +125,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
-        repeat: ${{ fromJSON(needs.config.outputs.repeats) }}
-        group:
-          - name: fill
-            workloads: [R-Fill]
-          - name: changes
-            workloads: [R-C2, R-DE]
-          - name: lifecycle
-            workloads: [R-Fresh, R-Restart, issue767-idle]
+        include: ${{ fromJSON(needs.config.outputs.workload_matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -224,11 +171,13 @@ jobs:
           REPEAT: ${{ matrix.repeat }}
           BINARIES: ${{ needs.config.outputs.binaries }}
           WORKLOADS: ${{ toJSON(matrix.group.workloads) }}
+          PROFILE_SCENARIO: ${{ matrix.scenario }}
+          HARNESS_COMMIT: ${{ github.sha }}
         run: |
           while IFS='=' read -r key _value; do
             case "$key" in GORTEX_*|GX_*) unset "$key" ;; esac
           done < <(env)
-          jq -e 'type == "array" and length > 0' <<< "$WORKLOADS"
+          jq -e 'type == "array"' <<< "$WORKLOADS"
           for name in $(jq -r '.commits | keys[]' measure/run.json); do chmod +x "binaries/$name"; done
           cp binaries/identities.json results/identities.json
           go test -tags acceptance -run '^TestProcessSamplerResources' -count=1 -v \
@@ -239,7 +188,7 @@ jobs:
           done
           go test -tags acceptance -run '^TestReconstructed(Measurement|Scorer$|SearchSymbols$)' -count=1 -v \
             ./cmd/gortex | tee results/measurement-tests.log
-          for test in Deadlines SearchTimeout LoadSearchError ScorerSearchTimeout WarmupOrder Enrichment TerminalResult LoadNoReplay DemandOwner DemandGaps ContractAnswer JobEvidence ForcedPreparation ScorerErrors ScorerJobs RestartStarts PathSizes OversizedTerminal; do
+          for test in Deadlines SearchTimeout LoadSearchError ScorerSearchTimeout WarmupOrder Enrichment TerminalResult LoadNoReplay DemandOwner DemandGaps ContractAnswer JobEvidence ForcedPreparation ScorerErrors ScorerJobs RestartStarts PathSizes OversizedTerminal ProfileEndpoint ProfileMode ProfileBoundaries ProfileHTTP ProfileDelta ProfileLifecycle ProfileIdentity ProfileCommand Campaign; do
             grep -Eq "^--- PASS: TestReconstructedMeasurement${test} " results/measurement-tests.log
           done
           status=0
@@ -260,6 +209,7 @@ jobs:
                 issue767-idle) test_name=TestIssue767IdleIOIntegration ;;
                 *) echo "Unknown workload $workload" >&2; exit 1 ;;
               esac
+              export GORTEX_RECON_MODE=timing
               export GORTEX_RECON_TEST_BINARY="$binary" GORTEX_RECON_CORPUS="$PWD/corpus"
               export GORTEX_RECON_OUT="$PWD/results/$name.jsonl"
               export GORTEX_ISSUE767_TEST_BINARY="$binary"
@@ -289,6 +239,31 @@ jobs:
               rm -rf "results/$name/$workload"/*/cache/{go-build,go-mod} || echo "warning: Go cache cleanup incomplete for $name $workload" >&2
             done < <(jq -r '.[]' <<< "$WORKLOADS")
           done
+          if [[ -n "$PROFILE_SCENARIO" ]]; then
+            case "$PROFILE_SCENARIO" in
+              cold-index) test_name=TestReconstructedFresh ;;
+              edit-burst) test_name=TestReconstructedDE ;;
+              *) echo "Unknown profile scenario" >&2; exit 1 ;;
+            esac
+            binary="$PWD/binaries/main"
+            actual=$(shasum -a 256 "$binary" | cut -d ' ' -f 1)
+            test "$actual" = "$(jq -r '.[] | select(.binary == "main") | .sha256' binaries/identities.json)"
+            export GORTEX_RECON_MODE=profile GORTEX_RECON_PROFILE_SCENARIO="$PROFILE_SCENARIO"
+            export GORTEX_RECON_PROFILE_DIR="$PWD/profiles/$PROFILE_SCENARIO"
+            export GORTEX_RECON_BINARY_SHA256="$actual"
+            GORTEX_RECON_SOURCE_COMMIT=$(jq -r .commits.main measure/run.json)
+            export GORTEX_RECON_SOURCE_COMMIT
+            export GORTEX_RECON_HARNESS_COMMIT="$HARNESS_COMMIT"
+            export GORTEX_RECON_TEST_BINARY="$binary" GORTEX_RECON_CORPUS="$PWD/corpus"
+            export GORTEX_RECON_OUT="$PWD/results/profile-$PROFILE_SCENARIO.jsonl"
+            export GORTEX_ISSUE767_ARTIFACT_DIR="$PWD/results/profile-$PROFILE_SCENARIO"
+            mkdir -p profiles
+            if ! go test -tags acceptance -run "^${test_name}$" -count=1 -v \
+              -timeout=160m ./cmd/gortex | tee "results/profile-$PROFILE_SCENARIO.log"; then status=1; fi
+            if ! grep -Eq "^--- PASS: ${test_name} " "results/profile-$PROFILE_SCENARIO.log"; then status=1; fi
+            test -s "$GORTEX_RECON_PROFILE_DIR/capture.json"
+            jq -e '.error == null and (.captures | length > 0)' "$GORTEX_RECON_PROFILE_DIR/capture.json"
+          fi
           exit "$status"
       - name: Upload raw measurements and fixture logs
         if: always()
@@ -296,6 +271,15 @@ jobs:
         with:
           name: workloads-${{ matrix.os }}-${{ matrix.repeat }}-${{ matrix.group.name }}
           path: results
+          retention-days: 90
+
+      - name: Upload diagnostic profiles and exact symbolization binary
+        if: always() && matrix.scenario != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: profiles-${{ matrix.os }}-${{ matrix.scenario }}
+          path: profiles/${{ matrix.scenario }}
+          if-no-files-found: error
           retention-days: 90
 
   sustained-io:
@@ -364,13 +348,14 @@ jobs:
           retention-days: 90
 
   suite:
+    if: needs.config.outputs.check_binaries != '[]'
     needs: config
     runs-on: ${{ matrix.os }}
     timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        os: ${{ fromJSON(needs.config.outputs.platforms) }}
         binary: ${{ fromJSON(needs.config.outputs.check_binaries) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -453,7 +438,7 @@ jobs:
 
   compare-checks:
     needs: [config, suite]
-    if: always() && needs.config.result == 'success'
+    if: always() && needs.config.result == 'success' && needs.config.outputs.check_binaries != '[]'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -531,7 +516,7 @@ jobs:
           retention-days: 90
 
   export:
-    if: fromJSON(needs.config.outputs.commits).trial != null
+    if: needs.config.outputs.check_binaries != '[]' && fromJSON(needs.config.outputs.commits).trial != null
     needs: [config, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 120

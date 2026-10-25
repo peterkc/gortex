@@ -1,8 +1,6 @@
 {
   "commits": {
-    "main": "76c080e56da3547f2b464522fd6acbe0accaa25e",
-    "pr806": "944cd9c125ad6ac4094986493d66c7703b2a0cc8",
-    "base": "9e9a842b2a023acc51ae5ba2cc7edf332160f128"
+    "main": "015b3410db3fd79d49fc0d8934482f8f628ca1be"
   },
   "workloads": [
     "R-C2",
@@ -12,7 +10,15 @@
     "R-Restart",
     "issue767-idle"
   ],
-  "repeats": 3,
+  "repeats": 1,
   "sustained_io": false,
-  "note": "Phase 1 rebaseline (A3): three repeats, fixed harness, 1800 s warm-up/rebuild, three workload-group jobs per label, main, #806 and the common base."
+  "note": "Current-main smoke: one Linux repeat, all three timing groups, and separate cold-index/edit-burst diagnostic runs. Smoke values do not enter full-run medians.",
+  "campaign": "smoke",
+  "platforms": [
+    "ubuntu-24.04"
+  ],
+  "profile_scenarios": [
+    "cold-index",
+    "edit-burst"
+  ]
 }

@@ -58,6 +58,8 @@ type reconstructedRebuild struct {
 // One JSON line is one workload, binary and repeat. The workflow records the
 // binary/repeat identity in its artifact path; parameters state the workload.
 type reconstructedRun struct {
+	Mode         string                     `json:"mode,omitempty"`
+	Profiles     *reconstructedProfiles     `json:"profiles,omitempty"`
 	Label        string                     `json:"label"`
 	Workload     string                     `json:"workload"`
 	Parameters   map[string]any             `json:"parameters"`
@@ -155,6 +157,25 @@ func scoreReconstructed(run reconstructedRun) (reconstructedScore, error) {
 	}
 	if run.Error != "" {
 		score.Status, score.Reason = "fail", run.Error
+	}
+	if run.Mode == "profile" {
+		if run.Profiles == nil {
+			return score, errors.New("profile run missing capture manifest")
+		}
+		if run.Error != "" {
+			return score, nil
+		}
+		if run.Profiles.Error != "" {
+			return score, errors.New(run.Profiles.Error)
+		}
+		if err := run.Profiles.validate(); err != nil {
+			return score, err
+		}
+		score.Status, score.Reason = "diagnostic", "separate profile repeat; excluded from timing evidence"
+		return score, nil
+	}
+	if run.Profiles != nil {
+		return score, errors.New("timing run contains diagnostic profiles")
 	}
 	if run.PreparationInsufficient != "" && run.Error == "" {
 		score.Status, score.Reason = "insufficient", run.PreparationInsufficient

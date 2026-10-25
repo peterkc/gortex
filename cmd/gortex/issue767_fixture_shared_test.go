@@ -5,16 +5,21 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	_ "modernc.org/sqlite"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,6 +56,7 @@ type issue767Fixture struct {
 	env                                  []string
 	httpAddr                             string
 	goModCache                           string
+	profiles                             *reconstructedProfiles
 
 	// mu guards every field a concurrent reader may touch while the fixture
 	// starts, stops or restarts the child. The sustained harness samples the
@@ -185,7 +191,6 @@ func newIssue767FixtureWithCorpus(t *testing.T, binary string, corpus issue767Co
 		"HOME="+filepath.Join(root, "home"),
 		"GOCACHE="+filepath.Join(root, "cache", "go-build"), "GOMODCACHE="+f.goModCache, "GOPATH="+filepath.Join(root, "go"),
 		"XDG_CONFIG_HOME="+filepath.Join(root, "config"), "XDG_DATA_HOME="+filepath.Join(root, "data"), "XDG_CACHE_HOME="+filepath.Join(root, "cache"),
-		"GORTEX_DAEMON_PPROF_ADDR=127.0.0.1:0",
 		// Telemetry is off by default and dormant without an endpoint, but a
 		// measured run states it: the consent/rollup files under the private
 		// data dir are writes like any other.
@@ -347,6 +352,7 @@ func (f *issue767Fixture) lastResponse() string {
 
 func (f *issue767Fixture) start() {
 	f.t.Helper()
+	processStart := time.Now()
 	run := f.nextRun()
 	log, err := os.Create(f.logPathFor(run))
 	if err != nil {
@@ -391,6 +397,11 @@ func (f *issue767Fixture) start() {
 		f.mu.Unlock()
 		done <- err
 	}()
+	if f.profiles != nil {
+		if err := f.profiles.start(f.t.Context(), f.logPathFor(run), processStart); err != nil {
+			f.t.Fatal(err)
+		}
+	}
 	f.await("isolated daemon socket", time.Minute, func() bool {
 		select {
 		case err := <-done:
@@ -412,6 +423,11 @@ func (f *issue767Fixture) start() {
 }
 
 func (f *issue767Fixture) stop() {
+	if f.profiles != nil {
+		if err := f.profiles.finish(time.Now()); err != nil {
+			f.t.Errorf("diagnostic capture: %v", err)
+		}
+	}
 	cmd, done, cancel, log := f.takeChild()
 	if cancel != nil {
 		defer cancel()
@@ -1251,4 +1267,366 @@ func TestIssue767ReadGenerationsAcceptsAStoreThatNeverAllocatedAGeneration(t *te
 	if _, err := issue767ReadGenerations(t.Context(), broken); err == nil {
 		t.Fatal("a store with no view_generations table must fail the read, not report zero generations")
 	}
+}
+
+// Diagnostic runs own two capture goroutines. finish stops scheduling, joins
+// the last CPU window and heap request after taking end snapshots. The fixture
+// calls it before signalling its daemon, including on test cancellation.
+type reconstructedProfileCapture struct {
+	Kind  string    `json:"kind"`
+	File  string    `json:"file"`
+	Start time.Time `json:"request_start"`
+	End   time.Time `json:"request_end"`
+	Error string    `json:"error,omitempty"`
+}
+
+type reconstructedProfiles struct {
+	Dir          string                        `json:"-"`
+	Binary       string                        `json:"binary"`
+	SHA256       string                        `json:"binary_sha256"`
+	Source       string                        `json:"source_commit"`
+	Harness      string                        `json:"harness_commit"`
+	Scenario     string                        `json:"scenario"`
+	Endpoint     string                        `json:"endpoint"`
+	ProcessStart time.Time                     `json:"process_start"`
+	EndpointOpen time.Time                     `json:"endpoint_open"`
+	Start        time.Time                     `json:"scenario_start"`
+	End          time.Time                     `json:"scenario_end"`
+	Captures     []reconstructedProfileCapture `json:"captures"`
+	CPUGapsMS    []float64                     `json:"cpu_uncovered_gaps_ms"`
+	FinalTailMS  float64                       `json:"final_window_tail_ms"`
+	Coverage     string                        `json:"coverage"`
+	Error        string                        `json:"error,omitempty"`
+	Limits       string                        `json:"interpretation_limits"`
+	client       *http.Client
+	ctx          context.Context
+	stop         chan struct{}
+	done         sync.WaitGroup
+	once         sync.Once
+	mu           sync.Mutex
+}
+
+func reconstructedProfileMode(mode, scenario, workload, dir string) error {
+	if mode == "" || mode == "timing" {
+		if scenario != "" || dir != "" {
+			return errors.New("timing repeat requested diagnostic profiles")
+		}
+		return nil
+	}
+	if mode != "profile" || dir == "" || !((scenario == "cold-index" && workload == "R-Fresh") || (scenario == "edit-burst" && workload == "R-DE")) {
+		return errors.New("profile mode requires its scenario, workload and artifact directory")
+	}
+	return nil
+}
+
+func newReconstructedProfiles(binary, dir, scenario, hash, source, harness string) (*reconstructedProfiles, error) {
+	if scenario != "cold-index" && scenario != "edit-burst" {
+		return nil, errors.New("unknown profile scenario")
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(hash) || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(source) || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(harness) {
+		return nil, errors.New("missing binary hash or source/harness identity")
+	}
+	raw, err := os.ReadFile(binary)
+	if err != nil {
+		return nil, fmt.Errorf("profile binary: %w", err)
+	}
+	if fmt.Sprintf("%x", sha256.Sum256(raw)) != hash {
+		return nil, errors.New("profile binary hash mismatch")
+	}
+	if err := os.Mkdir(dir, 0700); err != nil {
+		return nil, fmt.Errorf("new profile directory: %w", err)
+	}
+	copy := filepath.Join(dir, "gortex")
+	if err := os.WriteFile(copy, raw, 0700); err != nil {
+		return nil, err
+	}
+	p := &reconstructedProfiles{Dir: dir, Binary: "gortex", SHA256: hash, Source: source, Harness: harness, Scenario: scenario,
+		Limits: "Sampled estimates; GC accounting may lag. Heap is retained memory, not allocation volume. Burst deltas can include background work; no forced GC or sampling changes.",
+		client: &http.Client{Transport: &http.Transport{}, Timeout: 75 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("pprof redirect refused") }}, stop: make(chan struct{})}
+	return p, nil
+}
+
+func reconstructedProfileEndpoint(log []byte) (string, time.Time, error) {
+	for _, line := range bytes.Split(log, []byte("\n")) {
+		var event struct {
+			Msg  string  `json:"msg"`
+			Addr string  `json:"addr"`
+			TS   float64 `json:"ts"`
+		}
+		if json.Unmarshal(line, &event) != nil || event.Msg != "daemon: pprof endpoint open" {
+			continue
+		}
+		host, port, err := net.SplitHostPort(event.Addr)
+		ip := net.ParseIP(host)
+		n, portErr := strconv.Atoi(port)
+		if err != nil || ip == nil || !ip.IsLoopback() || portErr != nil || n < 1 || n > 65535 || event.TS <= 0 {
+			return "", time.Time{}, errors.New("invalid bound pprof endpoint or log timestamp")
+		}
+		return "http://" + event.Addr, time.Unix(0, int64(event.TS*1e9)), nil
+	}
+	return "", time.Time{}, errors.New("missing bound pprof endpoint")
+}
+
+func (p *reconstructedProfiles) start(ctx context.Context, log string, processStart time.Time) error {
+	p.ctx, p.ProcessStart = ctx, processStart
+	deadline := time.Now().Add(time.Minute)
+	for {
+		raw, err := os.ReadFile(log)
+		if err != nil {
+			return err
+		}
+		p.Endpoint, p.EndpointOpen, err = reconstructedProfileEndpoint(raw)
+		if err == nil {
+			break
+		}
+		if !strings.HasPrefix(err.Error(), "missing bound") || !time.Now().Before(deadline) {
+			return err
+		}
+		if err := reconstructedWait(ctx, 10*time.Millisecond); err != nil {
+			return err
+		}
+	}
+	if p.Scenario == "cold-index" {
+		p.Start = processStart
+		p.Coverage = "CPU from pprof endpoint open to enrichment complete; pre-listener process/store setup uncovered"
+	} else {
+		// Preparation allocations do not belong to the burst. Both snapshots
+		// must succeed before the driver may start its first demand/save.
+		if err := p.capture("allocs", "allocs-baseline.pb.gz"); err != nil {
+			return err
+		}
+		if err := p.capture("heap", "heap-baseline.pb.gz"); err != nil {
+			return err
+		}
+		p.Start = time.Now()
+		p.Coverage = "edit burst; CPU request gaps and final-window tail recorded separately"
+	}
+	p.done.Add(2)
+	go func() {
+		defer p.done.Done()
+		for i := 0; ; i++ {
+			if err := p.capture("profile?seconds=60", fmt.Sprintf("cpu-%04d.pb.gz", i)); err != nil {
+				return
+			}
+			select {
+			case <-p.stop:
+				return
+			case <-ctx.Done():
+				return
+			default:
+			}
+		}
+	}()
+	go func() {
+		defer p.done.Done()
+		ticker := time.NewTicker(120 * time.Second)
+		defer ticker.Stop()
+		for i := 0; ; i++ {
+			select {
+			case <-p.stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			if err := p.capture("heap", fmt.Sprintf("heap-%04d.pb.gz", i)); err != nil {
+				return
+			}
+		}
+	}()
+	return nil
+}
+
+func (p *reconstructedProfiles) capture(kind, file string) (err error) {
+	c := reconstructedProfileCapture{Kind: kind, File: file, Start: time.Now()}
+	defer func() {
+		c.End = time.Now()
+		if err != nil {
+			c.Error = err.Error()
+		}
+		p.mu.Lock()
+		p.Captures = append(p.Captures, c)
+		p.mu.Unlock()
+	}()
+	request, err := http.NewRequestWithContext(p.ctx, http.MethodGet, p.Endpoint+"/debug/pprof/"+kind, nil)
+	if err != nil {
+		return err
+	}
+	response, err := p.client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("pprof %s: HTTP %d", kind, response.StatusCode)
+	}
+	raw, err := io.ReadAll(io.LimitReader(response.Body, (128<<20)+1))
+	if err != nil {
+		return err
+	}
+	if len(raw) == 0 || len(raw) > 128<<20 {
+		return errors.New("empty or oversized profile")
+	}
+	return os.WriteFile(filepath.Join(p.Dir, file), raw, 0600)
+}
+
+func (p *reconstructedProfiles) finish(end time.Time) error {
+	p.once.Do(func() {
+		p.End = end
+		close(p.stop)
+		if p.ctx == nil {
+			p.Error = "profile capture never started"
+			return
+		}
+		// Snapshot the boundary now, not after the final 60 s CPU tail.
+		err := errors.Join(p.capture("allocs", "allocs-end.pb.gz"), p.capture("heap", "heap-end.pb.gz"))
+		p.done.Wait() // Cancellation also unblocks HTTP; never stop the daemon first.
+		defer p.client.CloseIdleConnections()
+		err = errors.Join(err, p.validate())
+		if err == nil {
+			err = p.rank()
+		}
+		if err != nil {
+			p.Error = err.Error()
+		}
+		raw, marshalErr := json.MarshalIndent(p, "", "  ")
+		if marshalErr == nil {
+			marshalErr = os.WriteFile(filepath.Join(p.Dir, "capture.json"), raw, 0600)
+		}
+		if marshalErr != nil {
+			p.Error += "; manifest: " + marshalErr.Error()
+		}
+	})
+	if p.Error != "" {
+		return errors.New(p.Error)
+	}
+	return nil
+}
+
+func (p *reconstructedProfiles) validate() error {
+	if p.Endpoint == "" || p.EndpointOpen.IsZero() || p.ProcessStart.IsZero() || p.Start.IsZero() || !p.End.After(p.Start) {
+		return errors.New("missing profile endpoint or scenario boundary")
+	}
+	files := map[string]bool{}
+	var cpu []reconstructedProfileCapture
+	for _, c := range p.Captures {
+		if c.Error != "" {
+			return fmt.Errorf("profile %s: %s", c.File, c.Error)
+		}
+		if c.Start.IsZero() || !c.End.After(c.Start) {
+			return errors.New("missing capture boundary")
+		}
+		if strings.Contains(c.File, "-baseline.") && c.End.After(p.Start) {
+			return errors.New("baseline snapshot crosses burst start")
+		}
+		if strings.Contains(c.File, "-end.") && c.Start.Before(p.End) {
+			return errors.New("end snapshot precedes scenario end")
+		}
+		files[c.File] = true
+		if c.Kind == "profile?seconds=60" {
+			cpu = append(cpu, c)
+		}
+	}
+	if !files["heap-end.pb.gz"] || !files["allocs-end.pb.gz"] {
+		return errors.New("missing end heap/allocs snapshot")
+	}
+	if p.Scenario == "edit-burst" && (!files["heap-baseline.pb.gz"] || !files["allocs-baseline.pb.gz"]) {
+		return errors.New("missing R-DE baseline heap/allocs snapshot")
+	}
+	if len(cpu) == 0 {
+		return errors.New("no CPU windows")
+	}
+	sort.Slice(cpu, func(i, j int) bool { return cpu[i].Start.Before(cpu[j].Start) })
+	p.CPUGapsMS = nil
+	if !cpu[0].Start.Before(p.End) {
+		return errors.New("no CPU window during scenario")
+	}
+	previous := p.Start
+	for _, c := range cpu {
+		if c.Start.Before(previous) {
+			return errors.New("overlapping CPU windows")
+		}
+		p.CPUGapsMS = append(p.CPUGapsMS, c.Start.Sub(previous).Seconds()*1000)
+		previous = c.End
+	}
+	if previous.Before(p.End) {
+		return errors.New("missing final tail CPU window")
+	}
+	p.FinalTailMS = previous.Sub(p.End).Seconds() * 1000
+	return nil
+}
+
+// pprof's named numeric rows distinguish parsed, nonempty symbol evidence from
+// a header-only report, an unknown address, or successful execution alone.
+var reconstructedNamedProfileRow = regexp.MustCompile(`(?m)^\s*[0-9.]+[^\s]*\s+[0-9.]+%\s+[0-9.]+%\s+[0-9.]+[^\s]*\s+[0-9.]+%\s+([^\s]+)\s*$`)
+
+func (p *reconstructedProfiles) pprof(output string, args ...string) error {
+	ctx, cancel := context.WithTimeout(p.ctx, 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "go", append([]string{"tool", "pprof"}, args...)...)
+	cmd.Dir = p.Dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("pprof %s: %w: %s", output, err, stderr.String())
+	}
+	if stdout.Len() == 0 {
+		return errors.New("empty pprof output")
+	}
+	if strings.HasSuffix(output, ".txt") {
+		named := false
+		for _, row := range reconstructedNamedProfileRow.FindAllStringSubmatch(stdout.String(), -1) {
+			if row[1] != "<unknown>" && !strings.HasPrefix(row[1], "0x") {
+				named = true
+			}
+		}
+		if !named {
+			return fmt.Errorf("empty or unsymbolized profile ranking %s: %s", output, stderr.String())
+		}
+	}
+	return os.WriteFile(filepath.Join(p.Dir, output), stdout.Bytes(), 0600)
+}
+
+func (p *reconstructedProfiles) rank() error {
+	binary, err := os.ReadFile(filepath.Join(p.Dir, p.Binary))
+	if err != nil || fmt.Sprintf("%x", sha256.Sum256(binary)) != p.SHA256 {
+		return errors.New("missing or changed symbolization binary")
+	}
+	var cpu []string
+	for _, c := range p.Captures {
+		if err := p.pprof(c.File+".raw", "-raw", p.Binary, c.File); err != nil {
+			return err
+		}
+		if c.Kind == "profile?seconds=60" {
+			if err := p.pprof(c.File+".txt", "-top", "-nodecount=0", "-sample_index=cpu", p.Binary, c.File); err != nil {
+				return err
+			}
+			cpu = append(cpu, c.File)
+		}
+	}
+	if err := p.pprof("cpu-merged.pb.gz", append([]string{"-proto", p.Binary}, cpu...)...); err != nil {
+		return err
+	}
+	if err := p.pprof("cpu-top.txt", "-top", "-nodecount=0", "-sample_index=cpu", p.Binary, "cpu-merged.pb.gz"); err != nil {
+		return err
+	}
+	for _, c := range p.Captures {
+		if c.Kind == "heap" {
+			if err := p.pprof(c.File+".txt", "-top", "-nodecount=0", "-sample_index=inuse_space", p.Binary, c.File); err != nil {
+				return err
+			}
+		}
+	}
+	for _, sample := range []string{"alloc_space", "alloc_objects"} {
+		args := []string{"-top", "-nodecount=0", "-sample_index=" + sample}
+		if p.Scenario == "edit-burst" {
+			args = append(args, "-base=allocs-baseline.pb.gz")
+		}
+		args = append(args, p.Binary, "allocs-end.pb.gz")
+		if err := p.pprof(sample+"-top.txt", args...); err != nil {
+			return err
+		}
+	}
+	return nil
 }

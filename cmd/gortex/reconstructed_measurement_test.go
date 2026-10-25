@@ -3,12 +3,19 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"gopkg.in/yaml.v3"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -1002,5 +1009,549 @@ func TestReconstructedMeasurementPathSizes(t *testing.T) {
 	got := reconstructedPathSizes(map[string]string{"cache": dir, "missing": filepath.Join(dir, "absent")})
 	if got["cache"].(map[string]int64)["bytes"] != 3 || got["missing"].(map[string]string)["unavailable"] == "" {
 		t.Fatalf("sizes=%v", got)
+	}
+}
+
+// Minimal protobuf pprof fixture, not a second parser. Functions are named in
+// the profile so native pprof can rank it with the fake executable unchanged.
+func reconstructedProfileFixture(t *testing.T, preparation, burst int64) []byte {
+	t.Helper()
+	varint := func(v uint64) []byte { var b [10]byte; n := binary.PutUvarint(b[:], v); return b[:n] }
+	field := func(n int, v uint64) []byte { return append(varint(uint64(n<<3)), varint(v)...) }
+	message := func(n int, b []byte) []byte {
+		out := append(varint(uint64(n<<3|2)), varint(uint64(len(b)))...)
+		return append(out, b...)
+	}
+	stringsTable := []string{"", "samples", "count", "cpu", "nanoseconds", "alloc_objects", "alloc_space", "bytes", "inuse_objects", "inuse_space", "PreparationOnly", "BurstOnly", "fixture.go"}
+	var profile []byte
+	for _, pair := range [][2]uint64{{1, 2}, {3, 4}, {5, 2}, {6, 7}, {8, 2}, {9, 7}} {
+		profile = append(profile, message(1, append(field(1, pair[0]), field(2, pair[1])...))...)
+	}
+	for i, amount := range []int64{preparation, burst} {
+		if amount == 0 {
+			continue
+		}
+		sample := field(1, uint64(i+1))
+		for _, v := range []int64{amount, amount * 1000000, amount, amount * 100, amount, amount * 100} {
+			sample = append(sample, field(2, uint64(v))...)
+		}
+		profile = append(profile, message(2, sample)...)
+	}
+	for i := 0; i < 2; i++ {
+		line := append(field(1, uint64(i+1)), field(2, 10)...)
+		location := append(field(1, uint64(i+1)), message(4, line)...)
+		profile = append(profile, message(4, location)...)
+		function := append(field(1, uint64(i+1)), field(2, uint64(10+i))...)
+		function = append(function, field(3, uint64(10+i))...)
+		function = append(function, field(4, 12)...)
+		profile = append(profile, message(5, function)...)
+	}
+	for _, s := range stringsTable {
+		profile = append(profile, message(6, []byte(s))...)
+	}
+	profile = append(profile, field(9, uint64(time.Now().UnixNano()))...)
+	profile = append(profile, field(10, uint64(time.Second))...)
+	var buf bytes.Buffer
+	w := gzip.NewWriter(&buf)
+	if _, err := w.Write(profile); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func reconstructedTestProfiles(t *testing.T, scenario string) *reconstructedProfiles {
+	t.Helper()
+	binary := filepath.Join(t.TempDir(), "fake-binary")
+	raw := []byte("#!/bin/sh\nexit 0\n")
+	if err := os.WriteFile(binary, raw, 0700); err != nil {
+		t.Fatal(err)
+	}
+	p, err := newReconstructedProfiles(binary, filepath.Join(t.TempDir(), "profiles"), scenario, fmt.Sprintf("%x", sha256.Sum256(raw)), strings.Repeat("a", 40), strings.Repeat("b", 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.ctx = t.Context()
+	return p
+}
+
+func TestReconstructedMeasurementProfileEndpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw string
+		valid     bool
+	}{
+		{"bound", `{"msg":"daemon: pprof endpoint open","addr":"127.0.0.1:54321","ts":100}`, true},
+		{"IPv6", `{"msg":"daemon: pprof endpoint open","addr":"[::1]:54321","ts":100}`, true},
+		{"missing", "", false},
+		{"requested_not_bound", `{"msg":"daemon: pprof endpoint open","addr":"127.0.0.1:0","ts":100}`, false},
+		{"nonloopback", `{"msg":"daemon: pprof endpoint open","addr":"10.0.0.1:9999","ts":100}`, false},
+		{"timestamp", `{"msg":"daemon: pprof endpoint open","addr":"127.0.0.1:9999"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			endpoint, at, err := reconstructedProfileEndpoint([]byte(tc.raw))
+			if (err == nil) != tc.valid || (tc.valid && (endpoint == "" || at.IsZero())) {
+				t.Fatalf("endpoint=%q at=%s err=%v", endpoint, at, err)
+			}
+		})
+	}
+}
+
+func TestReconstructedMeasurementProfileMode(t *testing.T) {
+	for _, tc := range []struct {
+		mode, scenario, workload, dir string
+		valid                         bool
+	}{
+		{"timing", "", "R-Fresh", "", true}, {"", "", "R-DE", "", true},
+		{"profile", "cold-index", "R-Fresh", "out", true}, {"profile", "edit-burst", "R-DE", "out", true},
+		{"timing", "cold-index", "R-Fresh", "out", false}, {"", "", "R-DE", "out", false},
+		{"profile", "cold-index", "R-DE", "out", false}, {"profile", "", "R-Fresh", "out", false},
+	} {
+		if err := reconstructedProfileMode(tc.mode, tc.scenario, tc.workload, tc.dir); (err == nil) != tc.valid {
+			t.Fatalf("%+v: %v", tc, err)
+		}
+	}
+	run := reconstructedRun{Label: "reconstructed", Workload: "R-Fresh", Profiles: &reconstructedProfiles{}}
+	if _, err := scoreReconstructed(run); err == nil {
+		t.Fatal("timing row with profiles accepted")
+	}
+	run.Mode = "profile"
+	run.Profiles = nil
+	if _, err := scoreReconstructed(run); err == nil {
+		t.Fatal("profile row without manifest accepted")
+	}
+}
+
+func TestReconstructedMeasurementProfileBoundaries(t *testing.T) {
+	now := time.Unix(100, 0)
+	valid := func() *reconstructedProfiles {
+		return &reconstructedProfiles{Scenario: "edit-burst", Endpoint: "http://127.0.0.1:9", EndpointOpen: now, ProcessStart: now.Add(-time.Second), Start: now, End: now.Add(3 * time.Second), Captures: []reconstructedProfileCapture{
+			{Kind: "allocs", File: "allocs-baseline.pb.gz", Start: now.Add(-time.Second), End: now},
+			{Kind: "heap", File: "heap-baseline.pb.gz", Start: now.Add(-time.Second), End: now},
+			{Kind: "profile?seconds=60", File: "cpu-0", Start: now.Add(time.Millisecond), End: now.Add(2 * time.Second)},
+			{Kind: "profile?seconds=60", File: "cpu-1", Start: now.Add(2*time.Second + time.Millisecond), End: now.Add(4 * time.Second)},
+			{Kind: "allocs", File: "allocs-end.pb.gz", Start: now.Add(3 * time.Second), End: now.Add(4 * time.Second)},
+			{Kind: "heap", File: "heap-end.pb.gz", Start: now.Add(3 * time.Second), End: now.Add(4 * time.Second)},
+		}}
+	}
+	p := valid()
+	if err := p.validate(); err != nil || len(p.CPUGapsMS) != 2 || p.FinalTailMS != 1000 {
+		t.Fatalf("valid=%+v err=%v", p, err)
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*reconstructedProfiles)
+	}{
+		{"no_endpoint", func(p *reconstructedProfiles) { p.Endpoint = "" }},
+		{"no_boundary", func(p *reconstructedProfiles) { p.Start = time.Time{} }},
+		{"no_CPU", func(p *reconstructedProfiles) { p.Captures = append(p.Captures[:2], p.Captures[4:]...) }},
+		{"final_tail", func(p *reconstructedProfiles) { p.Captures[3].End = now.Add(2500 * time.Millisecond) }},
+		{"overlap", func(p *reconstructedProfiles) { p.Captures[3].Start = now.Add(time.Second) }},
+		{"failed_window", func(p *reconstructedProfiles) { p.Captures[2].Error = "HTTP 500" }},
+		{"no_allocs_baseline", func(p *reconstructedProfiles) { p.Captures[0].File = "wrong" }},
+		{"no_heap_baseline", func(p *reconstructedProfiles) { p.Captures[1].File = "wrong" }},
+		{"no_allocs_end", func(p *reconstructedProfiles) { p.Captures[4].File = "wrong" }},
+		{"no_heap_end", func(p *reconstructedProfiles) { p.Captures[5].File = "wrong" }},
+		{"late_baseline", func(p *reconstructedProfiles) { p.Captures[0].End = now.Add(time.Second) }},
+		{"early_end", func(p *reconstructedProfiles) { p.Captures[4].Start = now.Add(time.Second) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := valid()
+			tc.mutate(p)
+			if err := p.validate(); err == nil {
+				t.Fatal("incomplete capture accepted")
+			}
+		})
+	}
+}
+
+func TestReconstructedMeasurementProfileHTTP(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		status     int
+	}{{"empty", "", 200}, {"HTTP_failure", "failed", 500}} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+			p := reconstructedTestProfiles(t, "cold-index")
+			p.Endpoint = server.URL
+			if err := p.capture("heap", "heap-end.pb.gz"); err == nil {
+				t.Fatal("failed/empty profile accepted")
+			}
+			if len(p.Captures) != 1 || p.Captures[0].Error == "" {
+				t.Fatalf("missing failed capture: %+v", p.Captures)
+			}
+		})
+	}
+	t.Run("unreachable", func(t *testing.T) {
+		p := reconstructedTestProfiles(t, "cold-index")
+		server := httptest.NewServer(http.NotFoundHandler())
+		p.Endpoint = server.URL
+		server.Close()
+		if err := p.capture("heap", "heap.pb.gz"); err == nil {
+			t.Fatal("unreachable endpoint accepted")
+		}
+	})
+	t.Run("cancellation_joins", func(t *testing.T) {
+		entered, exited := make(chan struct{}), make(chan struct{})
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/debug/pprof/profile" {
+				close(entered)
+				<-r.Context().Done()
+				close(exited)
+			}
+		}))
+		defer server.Close()
+		p := reconstructedTestProfiles(t, "cold-index")
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		log := filepath.Join(t.TempDir(), "daemon.log")
+		raw := fmt.Sprintf(`{"msg":"daemon: pprof endpoint open","addr":%q,"ts":%f}`, strings.TrimPrefix(server.URL, "http://"), float64(time.Now().UnixNano())/1e9)
+		if err := os.WriteFile(log, []byte(raw), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.start(ctx, log, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		<-entered
+		// Hold one owned capture after cancellation so a dropped Wait cannot
+		// pass merely because the HTTP worker happened to exit first.
+		releaseOwner := make(chan struct{})
+		p.done.Add(1)
+		go func() { <-releaseOwner; p.done.Done() }()
+		cancel()
+		finished := make(chan error, 1)
+		go func() { finished <- p.finish(time.Now()) }()
+		select {
+		case err := <-finished:
+			close(releaseOwner)
+			t.Fatalf("finish returned before capture join: %v", err)
+		case <-time.After(time.Second):
+		}
+		close(releaseOwner)
+		if err := <-finished; err == nil {
+			t.Fatal("cancelled capture accepted")
+		}
+		select {
+		case <-exited:
+		case <-time.After(time.Second):
+			t.Fatal("cancelled HTTP capture did not release the server")
+		}
+	})
+}
+
+func TestReconstructedMeasurementProfileDelta(t *testing.T) {
+	p := reconstructedTestProfiles(t, "edit-burst")
+	baseline := reconstructedProfileFixture(t, 100000, 0)
+	end := reconstructedProfileFixture(t, 100000, 7)
+	for file, raw := range map[string][]byte{"allocs-baseline.pb.gz": baseline, "allocs-end.pb.gz": end} {
+		if err := os.WriteFile(filepath.Join(p.Dir, file), raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Test the production argument path, not a fixture-only subtraction.
+	p.Captures = []reconstructedProfileCapture{{Kind: "profile?seconds=60", File: "allocs-end.pb.gz"}, {Kind: "heap", File: "allocs-end.pb.gz"}}
+	if err := p.rank(); err != nil {
+		t.Fatal(err)
+	}
+	for _, sample := range []string{"alloc_space", "alloc_objects"} {
+		raw, err := os.ReadFile(filepath.Join(p.Dir, sample+"-top.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), "PreparationOnly") || !strings.Contains(string(raw), "BurstOnly") {
+			t.Fatalf("preparation-inclusive burst ranking: %s", raw)
+		}
+	}
+	// The falsifier really is preparation-dominant without the baseline.
+	if err := p.pprof("cumulative.txt", "-top", "-sample_index=alloc_space", p.Binary, "allocs-end.pb.gz"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(p.Dir, "cumulative.txt"))
+	if err != nil || !strings.Contains(string(raw), "PreparationOnly") {
+		t.Fatalf("fixture not falsifying: %s %v", raw, err)
+	}
+	for _, file := range []string{"gortex", "allocs-end.pb.gz"} {
+		raw, err := os.ReadFile(filepath.Join(p.Dir, file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(p.Dir, file), []byte("malformed"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.rank(); err == nil {
+			t.Fatalf("malformed %s accepted", file)
+		}
+		if err := os.WriteFile(filepath.Join(p.Dir, file), raw, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestReconstructedMeasurementProfileLifecycle(t *testing.T) {
+	for _, scenario := range []string{"cold-index", "edit-burst"} {
+		t.Run(scenario, func(t *testing.T) {
+			p := reconstructedTestProfiles(t, scenario)
+			cpuStarted, releaseCPU := make(chan struct{}), make(chan struct{})
+			var cpuCalls atomic.Int32
+			profile := reconstructedProfileFixture(t, 100, 3)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/debug/pprof/profile" {
+					if cpuCalls.Add(1) != 1 {
+						t.Error("overlapping/replayed CPU request")
+					}
+					close(cpuStarted)
+					<-releaseCPU
+				}
+				if r.URL.Path == "/debug/pprof/heap" && cpuCalls.Load() > 0 {
+					close(releaseCPU)
+				}
+				if cpuCalls.Load() == 0 {
+					_, _ = w.Write(reconstructedProfileFixture(t, 100, 0))
+					return
+				}
+				_, _ = w.Write(profile)
+			}))
+			defer server.Close()
+			log := filepath.Join(t.TempDir(), "daemon.log")
+			raw := fmt.Sprintf(`{"msg":"daemon: pprof endpoint open","addr":%q,"ts":%f}`, strings.TrimPrefix(server.URL, "http://"), float64(time.Now().UnixNano())/1e9)
+			if err := os.WriteFile(log, []byte(raw), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.start(t.Context(), log, time.Now().Add(-time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			<-cpuStarted
+			if err := p.finish(time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.finish(time.Now()); err != nil {
+				t.Fatal(err)
+			} // No second capture or shutdown race.
+			wantCaptures := 3
+			if scenario == "edit-burst" {
+				wantCaptures = 5
+			}
+			if cpuCalls.Load() != 1 || len(p.Captures) != wantCaptures {
+				t.Fatalf("calls=%d captures=%+v", cpuCalls.Load(), p.Captures)
+			}
+			if err := p.validate(); err != nil {
+				t.Fatal(err)
+			}
+			files := []string{"gortex", "capture.json", "cpu-merged.pb.gz", "cpu-top.txt", "heap-end.pb.gz", "allocs-end.pb.gz", "alloc_space-top.txt", "alloc_objects-top.txt"}
+			if scenario == "edit-burst" {
+				files = append(files, "heap-baseline.pb.gz", "allocs-baseline.pb.gz")
+			}
+			for _, file := range files {
+				info, err := os.Stat(filepath.Join(p.Dir, file))
+				if err != nil || info.Size() == 0 {
+					t.Fatalf("missing artifact %s: %v", file, err)
+				}
+			}
+		})
+	}
+}
+
+func TestReconstructedMeasurementProfileIdentity(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "binary")
+	raw := []byte("#!/bin/sh\nexit 0\n")
+	if err := os.WriteFile(binary, raw, 0700); err != nil {
+		t.Fatal(err)
+	}
+	hash := fmt.Sprintf("%x", sha256.Sum256(raw))
+	for _, tc := range []struct{ name, binary, hash string }{
+		{"missing_binary", binary + "missing", hash}, {"missing_hash", binary, ""}, {"wrong_hash", binary, strings.Repeat("0", 64)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "rejected")
+			if _, err := newReconstructedProfiles(tc.binary, dir, "cold-index", tc.hash, strings.Repeat("a", 40), strings.Repeat("b", 40)); err == nil {
+				t.Fatal("missing identity accepted")
+			}
+			if _, err := os.Stat(dir); !os.IsNotExist(err) {
+				t.Fatalf("rejected identity wrote artifacts: %v", err)
+			}
+		})
+	}
+}
+
+func TestReconstructedMeasurementCampaign(t *testing.T) {
+	root := filepath.Join("..", "..")
+	raw, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "lean-measure.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow struct {
+		Jobs map[string]struct {
+			If    string `yaml:"if"`
+			Steps []struct {
+				ID  string `yaml:"id"`
+				Run string `yaml:"run"`
+			} `yaml:"steps"`
+			Strategy struct {
+				Matrix map[string]any `yaml:"matrix"`
+			} `yaml:"strategy"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(raw, &workflow); err != nil {
+		t.Fatal(err)
+	}
+	var script string
+	for _, step := range workflow.Jobs["config"].Steps {
+		if step.ID == "run" {
+			script = step.Run
+		}
+	}
+	if script == "" {
+		t.Fatal("missing executable config projection")
+	}
+	for job, want := range map[string]string{
+		"suite":          "needs.config.outputs.check_binaries != '[]'",
+		"compare-checks": "always() && needs.config.result == 'success' && needs.config.outputs.check_binaries != '[]'",
+		"export":         "needs.config.outputs.check_binaries != '[]' && fromJSON(needs.config.outputs.commits).trial != null",
+	} {
+		if got := workflow.Jobs[job].If; got != want {
+			t.Fatalf("%s can run for main-only: if=%q want=%q", job, got, want)
+		}
+	}
+	if workflow.Jobs["config"].If != "github.repository == 'peterkc/gortex'" {
+		t.Fatal("fork-only guard changed")
+	}
+	if workflow.Jobs["workloads"].Strategy.Matrix["include"] != "${{ fromJSON(needs.config.outputs.workload_matrix) }}" {
+		t.Fatal("workloads do not use projected matrix")
+	}
+	configRaw, err := os.ReadFile(filepath.Join(root, "measure", "run.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var base map[string]any
+	if err := json.Unmarshal(configRaw, &base); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name      string
+		repeats   int
+		platforms []string
+		valid     bool
+	}{
+		{"smoke", 1, []string{"ubuntu-24.04"}, true},
+		{"full", 3, []string{"ubuntu-24.04", "macos-15"}, true},
+		{"smoke", 3, []string{"ubuntu-24.04"}, false},
+	} {
+		t.Run(fmt.Sprintf("%s_%d", tc.name, tc.repeats), func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.Mkdir(filepath.Join(dir, "measure"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			config := make(map[string]any, len(base))
+			for k, v := range base {
+				config[k] = v
+			}
+			config["campaign"], config["repeats"], config["platforms"] = tc.name, tc.repeats, tc.platforms
+			raw, err := json.Marshal(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "measure", "run.json"), raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			output := filepath.Join(dir, "outputs")
+			cmd := exec.CommandContext(t.Context(), "bash", "-e", "-o", "pipefail", "-c", script)
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(), "GITHUB_OUTPUT="+output)
+			log, err := cmd.CombinedOutput()
+			if !tc.valid {
+				if err == nil {
+					t.Fatal("invalid smoke configuration accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("config projection: %v\n%s", err, log)
+			}
+			raw, err = os.ReadFile(output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			outputs := map[string]string{}
+			for _, line := range strings.Split(string(raw), "\n") {
+				key, value, ok := strings.Cut(line, "=")
+				if ok {
+					outputs[key] = value
+				}
+			}
+			if outputs["binaries"] != `["main"]` || outputs["check_binaries"] != `[]` || outputs["sustained_io"] != "false" {
+				t.Fatalf("main-only selects comparator/suite: %s", raw)
+			}
+			var matrix []struct {
+				OS       string `json:"os"`
+				Mode     string `json:"mode"`
+				Scenario string `json:"scenario"`
+				Group    struct {
+					Name      string   `json:"name"`
+					Workloads []string `json:"workloads"`
+				} `json:"group"`
+			}
+			if err := json.Unmarshal([]byte(outputs["workload_matrix"]), &matrix); err != nil {
+				t.Fatal(err)
+			}
+			wantJobs, wantResults, wantProfiles := 3, 6, 2
+			if tc.name == "full" {
+				wantJobs, wantResults, wantProfiles = 22, 36, 4
+			}
+			results, profiles := 0, 0
+			counts := map[string]int{}
+			for _, row := range matrix {
+				results += len(row.Group.Workloads)
+				for _, w := range row.Group.Workloads {
+					counts[w]++
+				}
+				if row.Scenario != "" {
+					profiles++
+				}
+				if tc.name == "smoke" && row.OS != "ubuntu-24.04" {
+					t.Fatalf("smoke selected %s", row.OS)
+				}
+				if row.Mode == "profile" && len(row.Group.Workloads) != 0 {
+					t.Fatal("diagnostic job includes timing workloads")
+				}
+			}
+			if len(matrix) != wantJobs || results != wantResults || profiles != wantProfiles || len(counts) != 6 {
+				t.Fatalf("matrix=%+v results=%d profiles=%d counts=%v", matrix, results, profiles, counts)
+			}
+			for _, n := range counts {
+				if n != wantResults/6 {
+					t.Fatalf("missing workload repeat: %v", counts)
+				}
+			}
+		})
+	}
+}
+
+func TestReconstructedMeasurementProfileCommand(t *testing.T) {
+	for _, tc := range []struct{ name, script string }{
+		{"command_failure", "echo pprof-failed >&2; exit 2"},
+		{"empty", "exit 0"},
+		{"header_only", "echo 'Type: alloc_space'"},
+		{"unsymbolized", "echo '  100B 100% 100% 100B 100% 0x1234'"},
+		{"stderr_is_not_symbols", "echo '  100B 100% 100% 100B 100% NamedSymbol' >&2; echo 'Type: alloc_space'"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "go"), []byte("#!/bin/sh\n"+tc.script+"\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			p := reconstructedTestProfiles(t, "cold-index")
+			if err := p.pprof("rejected.txt", "-top", p.Binary, "profile.pb.gz"); err == nil {
+				t.Fatal("failed/empty/unsymbolized command accepted")
+			}
+			if _, err := os.Stat(filepath.Join(p.Dir, "rejected.txt")); !os.IsNotExist(err) {
+				t.Fatalf("invalid ranking published: %v", err)
+			}
+		})
 	}
 }

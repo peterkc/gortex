@@ -42,18 +42,26 @@ type reconstructedSymbol struct {
 }
 
 type reconstructedDriver struct {
-	f       *issue767Fixture
-	run     reconstructedRun
-	symbols []reconstructedSymbol
-	files   []string
-	fresh   reconstructedSymbol
-	started time.Time
+	f        *issue767Fixture
+	run      reconstructedRun
+	symbols  []reconstructedSymbol
+	files    []string
+	fresh    reconstructedSymbol
+	started  time.Time
+	profiles *reconstructedProfiles
 }
 
 func newReconstructedDriver(t *testing.T, workload string) *reconstructedDriver {
 	t.Helper()
+	mode, scenario, profileDir := os.Getenv("GORTEX_RECON_MODE"), os.Getenv("GORTEX_RECON_PROFILE_SCENARIO"), os.Getenv("GORTEX_RECON_PROFILE_DIR")
+	if err := reconstructedProfileMode(mode, scenario, workload, profileDir); err != nil {
+		t.Fatal(err)
+	}
 	binary, corpus := os.Getenv("GORTEX_RECON_TEST_BINARY"), os.Getenv("GORTEX_RECON_CORPUS")
 	if binary == "" || corpus == "" {
+		if mode == "profile" {
+			t.Fatal("profile run requires a binary and corpus")
+		}
 		t.Skip("set GORTEX_RECON_TEST_BINARY and GORTEX_RECON_CORPUS; reconstructed drivers run only in fork CI")
 	}
 	if os.Getenv("GORTEX_RECON_OUT") == "" {
@@ -85,6 +93,7 @@ func newReconstructedDriver(t *testing.T, workload string) *reconstructedDriver 
 		"Fresh_file_rule":   "lexicographically last non-test .go file outside testdata, byte order of repository-relative path",
 		"Fresh_symbol_rule": "first exported top-level declaration in source order",
 	}}}
+	d.run.Mode = mode
 	var opts []issue767FixtureOption
 	if workload == "R-Fill" {
 		opts = append(opts, issue767WithLoopbackHTTP)
@@ -177,6 +186,14 @@ func newReconstructedDriver(t *testing.T, workload string) *reconstructedDriver 
 	d.run.Parameters["search_symbols"] = d.symbols
 	d.run.Parameters["search_symbol_rule"] = "first 20 exported top-level names declared exactly once among .go files outside testdata (tests included), taken from sorted non-test paths, then source order"
 	d.run.Parameters["Fresh_file"], d.run.Parameters["Fresh_symbol"] = d.fresh.File, d.fresh.Name
+	if mode == "profile" {
+		d.profiles, err = newReconstructedProfiles(binary, profileDir, scenario, os.Getenv("GORTEX_RECON_BINARY_SHA256"), os.Getenv("GORTEX_RECON_SOURCE_COMMIT"), os.Getenv("GORTEX_RECON_HARNESS_COMMIT"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.f.env = append(d.f.env, "GORTEX_DAEMON_PPROF_ADDR=127.0.0.1:0")
+		d.run.Profiles = d.profiles
+	}
 	t.Cleanup(func() { d.finish(t) })
 	return d
 }
@@ -235,6 +252,12 @@ func reconstructedDeclarations(path string) ([]string, error) {
 }
 
 func (d *reconstructedDriver) finish(t *testing.T) {
+	if d.f.profiles != nil {
+		if err := d.f.profiles.finish(time.Now()); err != nil {
+			d.run.Error = "diagnostic capture: " + err.Error()
+			t.Error(d.run.Error)
+		}
+	}
 	if !d.f.stopAndJoin() {
 		d.run.Error = "fixture child did not join"
 	}
@@ -490,6 +513,20 @@ func TestReconstructedDE(t *testing.T) {
 	if !d.readyAndQuiet() {
 		return
 	}
+	if d.profiles != nil {
+		d.f.profiles = d.profiles
+		if err := d.profiles.start(t.Context(), d.f.logPath(), d.started); err != nil {
+			d.run.Error = err.Error()
+			t.Error(err)
+			return
+		}
+		defer func() {
+			if err := d.profiles.finish(time.Now()); err != nil {
+				d.run.Error = err.Error()
+				t.Error(err)
+			}
+		}()
+	}
 	results := make(chan reconstructedSample, 20)
 	var probes sync.WaitGroup
 	owner := &reconstructedDemandOwner{request: d.demand}
@@ -546,6 +583,13 @@ func TestReconstructedDE(t *testing.T) {
 	d.run.Parameters["DE_observed_route_write_times"] = routeSaveTimes
 	owner.collect()
 	end := time.Now()
+	if d.profiles != nil {
+		if err := d.profiles.finish(end); err != nil {
+			d.run.Error = err.Error()
+			t.Error(err)
+			return
+		}
+	}
 	evidence, err := reconstructedReadJobs(d.f.logPath(), measurementStart, end)
 	if err != nil {
 		d.run.Error = err.Error()
@@ -717,12 +761,20 @@ func reconstructedTerminalResult(status int, raw []byte) error {
 
 func TestReconstructedFresh(t *testing.T) {
 	d := newReconstructedDriver(t, "R-Fresh")
+	d.f.profiles = d.profiles
 	start := time.Now()
 	d.started = start
 	d.f.start()
 	d.run.Samples = append(d.run.Samples, d.probe(d.f.primary, d.fresh, issue767AsPrimary, start, reconstructedFreshTimeout, "fresh"))
 	if !d.awaitEnrichment() {
 		return
+	}
+	if d.profiles != nil {
+		if err := d.profiles.finish(time.Now()); err != nil {
+			d.run.Error = err.Error()
+			t.Error(err)
+			return
+		}
 	}
 	d.run.Parameters["full_preparation_ms"] = time.Since(start).Seconds() * 1000
 	size, err := reconstructedStoreBytes(d.f.store)
