@@ -71,13 +71,14 @@ type repositoryUntrackState struct {
 	finalize        func(*RepoMetadata) error
 
 	goModuleAffected bool
-	indexerClosed    bool
-	payloadPurged    bool
-	vectorPublished  bool
-	configFinalized  bool
-	completed        bool
-	nodesRemoved     int
-	edgesRemoved     int
+
+	indexerClosed   bool
+	payloadPurged   bool
+	vectorPublished bool
+	configFinalized bool
+	completed       bool
+	nodesRemoved    int
+	edgesRemoved    int
 }
 
 // MultiIndexer orchestrates indexing across multiple repositories.
