@@ -297,10 +297,15 @@ func (cr *CrossRepoResolver) resolvePythonImportedMethod(e *graph.Edge, target s
 	if receiver == "" {
 		return false
 	}
-	for _, node := range cr.cachedFindNodesByName(receiver) {
+	for _, node := range cr.graph.FindNodesByNameInRepo(receiver, cr.callerRepoPrefix(e)) {
 		if node.Kind == graph.KindType && node.RepoPrefix == graph.RepoPrefixOfID(e.From) {
 			return false
 		}
+	}
+	candidates := make(map[string][]*graph.Node)
+	name := strings.TrimPrefix(target, "*.")
+	for _, node := range cr.bridgeCandidates(e, map[string]bool{name: true}, false)[name] {
+		candidates[node.FilePath] = append(candidates[node.FilePath], node)
 	}
 	var match *graph.Node
 	for _, imp := range cr.bridgeImportsByFile[cr.callerFileID(e)] {
@@ -313,7 +318,7 @@ func (cr *CrossRepoResolver) resolvePythonImportedMethod(e *graph.Edge, target s
 		if imported == "" {
 			continue
 		}
-		for _, candidate := range cr.cachedFindNodesByName(strings.TrimPrefix(target, "*.")) {
+		for _, candidate := range candidates[imp.To] {
 			if candidate.Kind != graph.KindMethod || candidate.FilePath != imp.To || nodeReceiverType(candidate) != imported || !cr.crossWorkspaceEligible(cr.callerWorkspaceID(e), candidateWorkspaceID(candidate), spec) {
 				continue
 			}
