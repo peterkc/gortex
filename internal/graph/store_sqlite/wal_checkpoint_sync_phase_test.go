@@ -32,10 +32,7 @@ func TestCheckpointYieldDistinguishesBlockedSyncFromPageWork(t *testing.T) {
 	require.NoError(t, err)
 	attempt.copy.pausable.Store(true)
 	attempt.copy.walPath = s.dbPath + "-wal"
-	slack := 60 * time.Millisecond
-	if raceDetectorOn {
-		slack = 250 * time.Millisecond
-	}
+	slack := testTimingSlack(50 * time.Millisecond)
 	stopBound := walCheckpointCycleYieldPoll + slack // exact existing edit-cycle oracle
 	var releaseOnce sync.Once
 	unpark := func() { releaseOnce.Do(func() { close(release) }) }
@@ -322,10 +319,7 @@ func TestHeldCreditCheckpointMeasuresOnlyItsEnteredSync(t *testing.T) {
 	}
 	before := vfsIOMark()
 	cancel()
-	bound := walCheckpointCycleYieldPoll + 60*time.Millisecond
-	if raceDetectorOn {
-		bound = walCheckpointCycleYieldPoll + 250*time.Millisecond
-	}
+	bound := walCheckpointCycleYieldPoll + testTimingSlack(50*time.Millisecond)
 	select {
 	case <-done:
 		t.Fatal("held-copy SQL returned while its sync was parked")

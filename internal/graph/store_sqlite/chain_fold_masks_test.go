@@ -222,10 +222,7 @@ func TestChainFoldMaskWriterInterruptionRetainsCommittedPagesAndPrecedence(t *te
 	chainFoldMaskStepHook = nil
 	require.ErrorIs(t, err, ErrChainFoldYielded)
 	require.NoError(t, writerErr)
-	limit := 20 * time.Millisecond
-	if raceDetectorOn {
-		limit = 100 * time.Millisecond
-	}
+	limit := testTimingSlack(20 * time.Millisecond)
 	require.Less(t, wait, limit, "a real foreground writer must still interrupt mask work")
 	require.Equal(t, cursor, fold.cursor())
 	require.Empty(t, fold.hiddenIDs)

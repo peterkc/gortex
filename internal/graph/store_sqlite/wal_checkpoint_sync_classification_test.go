@@ -149,10 +149,7 @@ func TestCheckpointSyncClassificationDoesNotExemptActualPageWork(t *testing.T) {
 	lane.held.Store(true)
 	defer lane.held.Store(false)
 	editStart := time.Now()
-	slack := 60 * time.Millisecond
-	if raceDetectorOn {
-		slack = 250 * time.Millisecond
-	}
+	slack := testTimingSlack(50 * time.Millisecond)
 	// Only this negative control deliberately dispatches an unpaced direct
 	// checkpoint inside a simulated edit; no production policy is changed.
 	time.Sleep(slack + time.Millisecond)

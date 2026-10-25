@@ -268,9 +268,9 @@ func checkLongReaderContract(t *testing.T, s *Store, run longReaderRun, threshol
 		}
 	}
 	require.Positive(t, longGaps, "no long gap started over the threshold: the pattern did not exercise the reset")
-	require.LessOrEqual(t, run.maxGateWait, walReclaimResetHold+raceSlack(10*time.Millisecond),
+	require.LessOrEqual(t, run.maxGateWait, walReclaimResetHold+testTimingSlack(10*time.Millisecond),
 		"a write waited for the gate longer than one short hold")
-	require.LessOrEqual(t, stats.WriterHoldMax, walReclaimResetHold+raceSlack(10*time.Millisecond),
+	require.LessOrEqual(t, stats.WriterHoldMax, walReclaimResetHold+testTimingSlack(10*time.Millisecond),
 		"the reclaim held the writer longer than one short hold")
 	require.LessOrEqual(t, run.maxWAL, bound, "the log outgrew the threshold plus two bursts")
 	require.Zero(t, stats.PauseMax, "no reader may be paused")
@@ -394,12 +394,12 @@ func TestWALReclaimDelaysAMutationAtMostTheWriterHoldCap(t *testing.T) {
 				t.Fatalf("a mutation failed during the reclaim: %v", err)
 			}
 			t.Logf("outcome=%s reason=%q open_gate=%q writer_hold=%s writer_holds=%d max_probe_gate_wait=%s max_mutation=%s writes=%d", res.outcome, res.reason, res.openGateReport, res.writerHold, res.writerHolds, time.Duration(maxWait.Load()), time.Duration(maxTotal.Load()), writes.Load())
-			require.LessOrEqual(t, res.writerHold, walReclaimResetHold+raceSlack(50*time.Millisecond), "the writer was held past the short hold")
-			require.LessOrEqual(t, time.Duration(maxWait.Load()), walReclaimResetHold+raceSlack(50*time.Millisecond), "a mutation waited for the gate past the short hold")
+			require.LessOrEqual(t, res.writerHold, walReclaimResetHold+testTimingSlack(50*time.Millisecond), "the writer was held past the short hold")
+			require.LessOrEqual(t, time.Duration(maxWait.Load()), walReclaimResetHold+testTimingSlack(50*time.Millisecond), "a mutation waited for the gate past the short hold")
 			require.Greater(t, writes.Load(), int64(10), "mutations kept flowing while the reclaim waited for the old reader")
 			if !tc.urgent {
 				require.Contains(t, res.openGateReport, "older_readers_outlasted_wait")
-				require.Less(t, time.Duration(maxTotal.Load()), raceSlack(500*time.Millisecond), "a non-urgent attempt must not hold a mutation")
+				require.Less(t, time.Duration(maxTotal.Load()), testTimingSlack(500*time.Millisecond), "a non-urgent attempt must not hold a mutation")
 			}
 		})
 	}
@@ -589,7 +589,7 @@ func TestAReclaimHoldHandsTheWriterBackWhenTheLogIsNotReady(t *testing.T) {
 	t.Logf("outcome=%s reason=%q writer_holds=%d longest_hold=%s max_gate_wait=%s writes=%d", res.outcome, res.reason, res.writerHolds, res.writerHold, time.Duration(maxWait.Load()), writes.Load())
 	require.NotEqual(t, walReclaimReset, res.outcome, "precondition: the pinned reader keeps the log from a reset")
 	require.GreaterOrEqual(t, res.writerHolds, 1)
-	require.LessOrEqual(t, res.writerHold, walReclaimResetHold+raceSlack(10*time.Millisecond), "a hold outlasted its cap")
-	require.LessOrEqual(t, time.Duration(maxWait.Load()), walReclaimResetHold+raceSlack(10*time.Millisecond), "a write waited for the gate past one hold")
+	require.LessOrEqual(t, res.writerHold, walReclaimResetHold+testTimingSlack(10*time.Millisecond), "a hold outlasted its cap")
+	require.LessOrEqual(t, time.Duration(maxWait.Load()), walReclaimResetHold+testTimingSlack(10*time.Millisecond), "a write waited for the gate past one hold")
 	require.Greater(t, writes.Load(), int64(20), "writes kept flowing while the reclaim waited")
 }

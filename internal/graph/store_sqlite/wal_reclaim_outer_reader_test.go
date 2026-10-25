@@ -66,6 +66,12 @@ func runWALOuterMixedReader(t *testing.T, inLane bool) {
 		elapsed time.Duration
 	}
 	done := make(chan answer, 1)
+	// Only measured uninterruptible writer-connection sync can outlast the
+	// hold context. Page work and time outside xSync remain charged.
+	var resetSync atomic.Int64
+	observeAdaptiveMultiFrameSync(t, s.writerDB, nil, func(_ int, start, end time.Time) {
+		resetSync.Add(int64(end.Sub(start)))
+	})
 	started := time.Now()
 	walCheckpointCallObserver = func(mode string, start time.Time, took time.Duration) {
 		if mode == "TRUNCATE" && calls.Add(1) == 1 {
@@ -129,6 +135,7 @@ func runWALOuterMixedReader(t *testing.T, inLane bool) {
 	case <-time.After(8 * time.Second):
 		t.Fatal("outer attempt never returned")
 	}
+	resetSyncTime := time.Duration(resetSync.Load())
 	var after int
 	require.NoError(t, late.QueryRow(`SELECT count(*) FROM wal_churn`).Scan(&after))
 	require.Equal(t, lateBefore, after)
@@ -142,7 +149,7 @@ func runWALOuterMixedReader(t *testing.T, inLane bool) {
 	require.Equal(t, 0, authority.Busy)
 	require.Zero(t, s.readGate.waits.Load())
 	require.False(t, s.readGate.closed.Load())
-	require.LessOrEqual(t, got.res.writerHold, walReclaimResetHold+raceSlack(10*time.Millisecond))
+	require.LessOrEqual(t, got.res.writerHold, walReclaimResetHold+resetSyncTime+testTimingSlack(10*time.Millisecond))
 	require.Nil(t, got.res.resetReaders, "completed reset must not retain a stale cohort witness")
 	require.Equal(t, walReclaimReset, got.res.outcome, "the actual outer path must ask SQLite again after a real pin retires rather than wait for a harmless retained reader")
 	require.Less(t, got.elapsed, time.Second, "safe reset must not consume the full cohort wait")

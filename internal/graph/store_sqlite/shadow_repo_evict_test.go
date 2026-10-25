@@ -385,9 +385,9 @@ func TestShadowReplacementCompletesUnderUnrelatedWriters(t *testing.T) {
 	require.GreaterOrEqual(t, checkoutWrites.Load(), int32(2))
 	beforeBase, beforeCheckout := baseWrites.Load(), checkoutWrites.Load()
 	// This is an algorithm-completion fixture cap, not a foreground latency
-	// promise. Normal runs retain two seconds; race instrumentation gets the
-	// existing allowance while both checked producers must keep committing.
-	attempt, cancelAttempt := context.WithTimeout(t.Context(), raceSlack(2*time.Second))
+	// promise. Host and race slack allow slow fixture completion while both
+	// checked producers must keep committing.
+	attempt, cancelAttempt := context.WithTimeout(t.Context(), testTimingSlack(2*time.Second))
 	defer cancelAttempt()
 	start := time.Now()
 	n, e, err := s.EvictRepoForShadowReplacement(attempt, "shadow")

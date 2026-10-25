@@ -84,7 +84,7 @@ func TestReclaimSlowCopyCanResetWithinRemainingWriterCredit(t *testing.T) {
 			require.NoError(t, err)
 			require.True(t, res.openGate, "joined durable copy never reached reset admission")
 			require.Positive(t, syncs.Load(), "the real WAL sync was not delayed")
-			require.LessOrEqual(t, res.writerHold, walReclaimPressureHold+raceSlack(10*time.Millisecond))
+			require.LessOrEqual(t, res.writerHold, walReclaimPressureHold+testTimingSlack(10*time.Millisecond))
 			require.True(t, s.writeMu.TryLock(), "reset retained writer ownership")
 			s.writeMu.Unlock()
 			var payload string
@@ -119,7 +119,7 @@ func TestReclaimReadmissionSharesAggregateCredit(t *testing.T) {
 	_, err = s.resetWALForReclaim(resetCtx)
 	require.NoError(t, err)
 	writer.release()
-	require.LessOrEqual(t, writer.spent, 50*time.Millisecond+raceSlack(10*time.Millisecond), "writer slices exceeded their aggregate allowance")
+	require.LessOrEqual(t, writer.spent, 50*time.Millisecond+testTimingSlack(10*time.Millisecond), "writer slices exceeded their aggregate allowance")
 }
 
 func TestReclaimReadmissionDoesNotReviveCancellationOrSpentCredit(t *testing.T) {
