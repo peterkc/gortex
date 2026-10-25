@@ -126,6 +126,24 @@ the participating repositories' allow-lists. This keeps a repository from
 silently losing framework edges requested by a sibling while allowing a
 workspace where every repository opts out to avoid the scans entirely.
 
+### Tracked module imports
+
+- Go imports can link to a representative source file in a tracked module.
+  The longest matching root `go.mod` path selects the package. Ambiguous providers
+  stay unlinked. Local `replace` paths must point to indexed source files.
+- Rust `use` imports can link to a tracked library declared in `Cargo.toml`.
+  Dependency aliases, workspace dependencies, explicit workspace members and
+  `[lib]` names and paths are supported. Undeclared crates, ambiguous providers
+  and reserved names such as `std`, `core` and `crate` stay unlinked.
+- Python imports can link to a tracked distribution declared in `pyproject.toml`
+  or `requirements*.txt`. Root and `src/` layouts support modules and regular
+  packages. A local top-level package blocks a foreign link. Ambiguous providers,
+  undeclared distributions and Python stdlib imports stay unlinked.
+
+These import-file links do not make every symbol in the provider reachable.
+Calls still need an imported path or type. Versions and build configurations
+are not verified.
+
 ### Python package re-exports
 
 Calls through a declared, tracked Python distribution can follow one level of
@@ -502,9 +520,14 @@ Scoped tool responses carry a `scope_applied` meta field plus a one-line widen h
   - Entry lookup respects `exports` keys, wildcard subpaths and `null` blocks. It probes the selected `import`/`default` target first, then a `types` condition when that file is not indexed. Without `exports`, it tries `types`, `main` and directory indexes. Unsupported-condition subpaths never guess a directory target.
   - Bare calls use the caller file's named import binding, including its local alias, not another same-named function anywhere in the provider. A per-binding import links to a symbol marked public by the extractor; otherwise it stays at `external::<specifier>::<name>` with its `npm_import` marker and creates no call binding. Linked imports retain their specifier, survive provider eviction as external imports, and are rechecked by whole-graph resolution.
   - **Limits:** Build-output-only entries, such as `main` and `types` pointing into excluded `dist/`, stay external unless an indexed target is declared. Gortex does not infer `src/` from `dist/`. The importing repository's own packages, `npm:` aliases and workspace paths that escape the repository are not linked by this pass. Sibling dependencies declared with `file:`, `link:` or `portal:` are not supported. Default-import bare calls have no exact binding evidence yet and stay unresolved. After an upgrade, JavaScript and TypeScript files are re-extracted once (extractor version 2), so existing imports acquire the specifier and alias metadata; their links appear after that pass. Namespace member calls, CommonJS `require` calls and package re-exports are not linked by this npm import pass. Export targets without `./` are accepted leniently, as in workspace resolution, even though Node rejects them. Call binding is file-scoped: a parameter or local callable with the imported name can bind to the import.
+  - Go source imports can link to a representative indexed package file. The `go.mod` dependency contract remains separate. Linked imports retain their package identity across provider saves.
   - Go package-selector calls such as `library.Hello()` use tracked roots' `go.mod` module paths, not checkout names. An import of `example.org/library/sub` can bind to `<provider>/sub/file.go::Hello` even when the provider prefix is `b`.
   - Precise own-module, vendor and staging paths take priority. Otherwise the longest matching module path wins. A primary/non-worktree checkout wins a tie with dedicated worktree copies; ties between independent primary checkouts are refused. Cross-workspace calls still require the caller's `cross_workspace_deps` declaration.
   - A cross-repo module binding carries confidence `0.6` and origin `ast_inferred`. It is a source hint, not proof that the tracked checkout matches the required version. The edge retains its symbol-bearing import identity so provider edits and full reindexes can rebind it without editing the caller. Module-map changes re-check existing bindings.
-  - **Limits:** Only root `go.mod` identities are used; nested modules and `go.work` selection are not resolved. Required versions and module/version replacements are not verified. A local `replace` whose destination is untracked prevents module-path binding instead of selecting another checkout with the same module name. Tracked local replacements remain source hints, not full Go build-list resolution. Calls on values typed from another module, such as `client.Do()` for a `library.Client`, can remain `unresolved::*.Do`; receiver-type linking is not implemented here.
+  - **Limits:** Only each tracked root's `go.mod` identity is used. Separately tracked nested modules can win by longest path; nested manifests within one tracked root and `go.work` selection are not resolved. Required versions and module/version replacements are not verified. A local `replace` whose destination is untracked prevents module-path binding instead of selecting another checkout with the same module name. Tracked local replacements remain source hints, not full Go build-list resolution. Calls on values typed from another module, such as `client.Do()` for a `library.Client`, stay unresolved unless another pass has precise evidence. Importing the module alone does not enable name-only receiver binding.
+  - Rust `use` imports link to the declared provider's library root or module file. Dependency, dev-dependency, build-dependency and target tables are read. Calls bind only to a unique imported item or receiver in that file.
+  - **Cargo limits:** This is not Cargo build resolution. Versions, features and target conditions are not evaluated. Absolute or escaping library paths, conflicting aliases and multiple eligible providers are refused. Re-exports and untyped receivers are not inferred. Existing links are not always revisited after declaration or provider-set changes; reindex the provider to refresh them.
+  - Python distribution imports link only after a consumer declaration and a unique eligible provider match. Qualified calls use the linked module file. Typed methods also require a matching receiver in that file. Package calls can follow the one-level re-exports described above.
+  - **Python limits:** Distribution versions and arbitrary source layouts are not verified. Providers must expose indexed root or `src/` modules or regular packages. Namespace-only providers and dynamic imports are not linked. Local top-level names take priority, including namespace directories.
 - **Impact analysis** — `explain_change_impact`, `verify_change`, and `get_test_targets` follow cross-repo edges automatically, grouping results by repository.
 - **Shared repos** — the same repo can appear in multiple projects with different reference tags. It's indexed once and shared across projects.
