@@ -310,10 +310,8 @@ func (cr *CrossRepoResolver) resolvePythonImportedMethod(e *graph.Edge, target s
 	if len(imports) == 0 {
 		return false
 	}
-	for _, node := range cr.graph.GetFileNodes(file) {
-		if node.Kind == graph.KindType && node.Name == receiver {
-			return false
-		}
+	if cr.pythonLocalTypesByFile[file][receiver] {
+		return false
 	}
 	candidates := make(map[string][]*graph.Node)
 	name := strings.TrimPrefix(target, "*.")
