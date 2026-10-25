@@ -66,3 +66,34 @@ func TestCargoConsumerFrontierIncludesUnresolvedImportStubs(t *testing.T) {
 	mi := &MultiIndexer{graph: g, repos: map[string]*RepoMetadata{"provider": {RootPath: provider}, "consumer": {RootPath: consumer}}}
 	require.Equal(t, []string{"consumer/a.rs", "consumer/b.rs"}, mi.cargoConsumerFilesForRepo("provider", false))
 }
+
+func TestCargoRestubClearsMatchedModuleEvidence(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, mode := range []string{"untrack", "file_eviction"} {
+			t.Run(backend+"/"+mode, func(t *testing.T) {
+				// Given a tracked import with its previously matched module path.
+				g := cargoWarmStore(t, backend)
+				file, target, stub := "consumer/src/lib.rs", "provider/src/util.rs", "external::other_crate/util"
+				for _, path := range []string{file, target} {
+					g.AddNode(&graph.Node{ID: path, FilePath: path, Kind: graph.KindFile, RepoPrefix: graph.RepoPrefixOfID(path), Language: "rust"})
+				}
+				g.AddEdge(&graph.Edge{From: file, FilePath: file, To: target, Kind: graph.EdgeImports, Line: 1, CrossRepo: true, Meta: map[string]any{resolver.CargoImportStubMeta: stub, resolver.CargoImportModuleMeta: "other_crate::util"}})
+				// When untracking or file eviction restubs the import.
+				var consumers []string
+				if mode == "untrack" {
+					consumers = restubTrackedCargoRepoIncoming(g, "provider")
+				} else {
+					consumers = restubTrackedCargoImportsFromView(g, map[string]struct{}{target: {}}, g.GetInEdgesByNodeIDs([]string{target}), false)
+				}
+				// Then its persisted state has the stub, not matched-module evidence.
+				require.Equal(t, []string{file}, consumers)
+				imports := g.GetOutEdges(file)
+				require.Len(t, imports, 1)
+				require.Equal(t, stub, imports[0].To)
+				require.False(t, imports[0].CrossRepo)
+				require.NotContains(t, imports[0].Meta, resolver.CargoImportModuleMeta)
+				require.Equal(t, stub, imports[0].Meta[resolver.CargoImportStubMeta])
+			})
+		}
+	}
+}
