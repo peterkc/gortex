@@ -12,6 +12,9 @@ import (
 // CargoImportStubMeta preserves the import's exact target before a tracked bind.
 const CargoImportStubMeta = "cargo_import_stub"
 
+// CargoImportModuleMeta records the module path actually matched by file probing.
+const CargoImportModuleMeta = "cargo_import_module"
+
 // CargoCallStubMeta retains the extractor's function or method target before linking.
 const CargoCallStubMeta = "cargo_call_stub"
 
@@ -38,23 +41,23 @@ func (cr *CrossRepoResolver) SetCargoImportRetargetRepo(repos ...string) {
 	}
 }
 
-func (cr *CrossRepoResolver) cargoImportTarget(e *graph.Edge, spec string) *graph.Node {
+func (cr *CrossRepoResolver) cargoImportTarget(e *graph.Edge, spec string) (*graph.Node, string) {
 	if cr.cargoCrates == nil || e.Kind != graph.EdgeImports || !strings.HasSuffix(e.FilePath, ".rs") {
-		return nil
+		return nil, ""
 	}
 	segs := strings.Split(spec, "/")
 	switch segs[0] {
 	case "", "crate", "self", "super", "std", "core", "alloc":
-		return nil
+		return nil, ""
 	}
 	for _, seg := range segs {
 		if seg == ".." || seg == "." || seg == "" {
-			return nil
+			return nil, ""
 		}
 	}
 	crates := cr.cargoCrates(e.FilePath, segs[0])
 	if len(crates) == 0 {
-		return nil
+		return nil, ""
 	}
 	callerRepo, callerWS := cr.callerRepoPrefix(e), cr.callerWorkspaceID(e)
 	var root *graph.Node
@@ -64,18 +67,18 @@ func (cr *CrossRepoResolver) cargoImportTarget(e *graph.Edge, spec string) *grap
 			continue
 		}
 		if candidate.RepoPrefix == callerRepo {
-			return nil // same-repo resolution stays unchanged
+			return nil, "" // same-repo resolution stays unchanged
 		}
 		if !cr.crossWorkspaceEligible(callerWS, candidateWorkspaceID(candidate), crate.Name+strings.TrimPrefix(spec, segs[0])) {
 			continue
 		}
 		if root != nil {
-			return nil // two eligible providers, even if only one has the module
+			return nil, "" // two eligible providers, even if only one has the module
 		}
 		root = candidate
 	}
 	if root == nil {
-		return nil
+		return nil, ""
 	}
 	// Same longest-prefix module-file probes as resolveRustUseFile, anchored
 	// at the manifest's library root rather than a guessed src directory.
@@ -85,16 +88,16 @@ func (cr *CrossRepoResolver) cargoImportTarget(e *graph.Edge, spec string) *grap
 		for _, id := range []string{stem + ".rs", stem + "/mod.rs"} {
 			if node := cr.cachedGetNode(id); node != nil && node.Kind == graph.KindFile && node.Language == "rust" {
 				if found != nil {
-					return nil
+					return nil, ""
 				}
 				found = node
 			}
 		}
 		if found != nil {
-			return found
+			return found, strings.Join(segs[:n], "::")
 		}
 	}
-	return root // item or glob import from the crate itself
+	return root, segs[0] // item or glob import from the crate itself
 }
 
 // Per-repo resolution converts missing imports to external stubs. Retry just
@@ -142,11 +145,12 @@ func (cr *CrossRepoResolver) resolveCargoImports(ctx context.Context, edges iter
 				if e.To != projected.To {
 					continue
 				}
-				node := cr.cargoImportTarget(e, cr.cargoImportSpec(e))
+				node, module := cr.cargoImportTarget(e, cr.cargoImportSpec(e))
 				if node == nil && e.CrossRepo {
 					if stub, _ := e.Meta[CargoImportStubMeta].(string); stub != "" {
 						oldTo := e.To
 						e.To, e.CrossRepo = stub, false
+						delete(e.Meta, CargoImportModuleMeta)
 						clearEdgeTerminal(e)
 						batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 						projected.To, projected.CrossRepo = e.To, false
@@ -155,9 +159,15 @@ func (cr *CrossRepoResolver) resolveCargoImports(ctx context.Context, edges iter
 					}
 				} else if node != nil && node.ID != e.To {
 					oldTo := e.To
-					cr.bindCargoImport(e, node, stats)
+					cr.bindCargoImport(e, node, module, stats)
 					batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 					projected.To, projected.CrossRepo = e.To, e.CrossRepo
+				} else if node != nil && e.Meta[CargoImportModuleMeta] != module {
+					if e.Meta == nil {
+						e.Meta = make(map[string]any)
+					}
+					e.Meta[CargoImportModuleMeta] = module
+					batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: e.To})
 				}
 			}
 		}
@@ -189,13 +199,14 @@ func (cr *CrossRepoResolver) cargoImportSpec(e *graph.Edge) string {
 	return spec
 }
 
-func (cr *CrossRepoResolver) bindCargoImport(e *graph.Edge, node *graph.Node, stats *CrossRepoStats) {
+func (cr *CrossRepoResolver) bindCargoImport(e *graph.Edge, node *graph.Node, module string, stats *CrossRepoStats) {
 	if e.Meta == nil {
 		e.Meta = make(map[string]any)
 	}
 	if original, _ := e.Meta[CargoImportStubMeta].(string); original == "" {
 		e.Meta[CargoImportStubMeta] = e.To
 	}
+	e.Meta[CargoImportModuleMeta] = module
 	e.To, e.CrossRepo = node.ID, true
 	clearEdgeTerminal(e)
 	stats.Resolved++
@@ -240,16 +251,18 @@ func (cr *CrossRepoResolver) resolveCargoImportedCall(e *graph.Edge, target stri
 		spec := strings.TrimPrefix(strings.TrimPrefix(stub, "external::"), "unresolved::import::")
 		bindings := parseRustUseBindings(spec)
 		if strings.HasSuffix(spec, "/*") {
-			bindings = []rustUseBinding{{source: spec, local: "*"}}
+			bindings = []rustUseBinding{{source: normalizeRustUsePath(spec), local: "*"}}
 		}
 		groupBase, _, grouped := strings.Cut(normalizeRustUsePath(spec), "{")
 		groupBase = strings.TrimSuffix(groupBase, "::")
+		module, _ := imp.Meta[CargoImportModuleMeta].(string)
 		for _, binding := range bindings {
-			if grouped {
-				split := strings.LastIndex(binding.source, "::")
-				if split < 0 || binding.source[:split] != groupBase {
-					continue
-				}
+			split := strings.LastIndex(binding.source, "::")
+			if split < 0 || module == "" || binding.source[:split] != module {
+				continue
+			}
+			if grouped && binding.source[:split] != groupBase {
+				continue
 			}
 			item, local := rustUseBindingName(binding.source), binding.local
 			if imp.Alias != "" {
