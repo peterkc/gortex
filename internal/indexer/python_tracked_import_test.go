@@ -15,6 +15,7 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/parser/languages"
+	"github.com/zzet/gortex/internal/resolver"
 	"github.com/zzet/gortex/internal/search"
 )
 
@@ -330,4 +331,24 @@ func TestPythonAddedFileGateDoesNotBuildLookup(t *testing.T) {
 func TestPythonAddedFileNilGlobal(t *testing.T) {
 	mi := &MultiIndexer{graph: graph.New(), configMgr: &config.ConfigManager{}}
 	require.NotPanics(t, func() { require.Empty(t, mi.pythonAddedFileConsumers([]string{"solo/new.py"})) })
+}
+
+func TestPythonConsumerLookupFiltersAndDeduplicates(t *testing.T) {
+	g := graph.New()
+	for i, target := range []string{"external::known", "external::known.sub", "external::known", "external::unknown", "local/file.py", "module::python:os"} {
+		file := fmt.Sprintf("consumer/f%d.py", i)
+		g.AddEdge(&graph.Edge{From: file, FilePath: file, To: target, Kind: graph.EdgeImports})
+	}
+	calls := 0
+	lookup := &resolver.PythonPackageLookup{
+		HasTop: func(top string) bool { return top == "known" },
+		Providers: func(caller, top string) map[string][]graph.FileNodeIdentity {
+			calls++
+			require.Equal(t, "consumer", caller)
+			require.Equal(t, "known", top)
+			return map[string][]graph.FileNodeIdentity{"provider": {{ID: "provider/known.py"}}}
+		},
+	}
+	require.Equal(t, []string{"consumer/f0.py", "consumer/f1.py", "consumer/f2.py"}, pythonConsumerFilesForLookup(g, lookup, "provider"))
+	require.Equal(t, 1, calls, "provider lookup is per (caller, top), not per import")
 }
