@@ -227,23 +227,25 @@ func TestBridgeCandidatesLookupOncePerProvider(t *testing.T) {
 				require.True(t, cr.resolvePythonImportedMethod(e, target))
 			}
 			require.Zero(t, g.broad, "bridge lookups must not scan all repositories")
-			require.LessOrEqual(t, g.scoped, 2, "one provider lookup plus Python local-type check")
+			require.Equal(t, 1, g.scoped, "one provider lookup")
 		})
 	}
 }
 
 func TestPythonUnimportedReceiverAvoidsNameLookups(t *testing.T) {
-	// Given a Python file with no bridge import binding the receiver.
+	// Given a bridge import that binds a different name, not the call receiver.
 	g := &bridgeNameCountStore{Store: graph.New()}
 	file := "consumer/tests.py"
 	g.AddNode(&graph.Node{ID: file, FilePath: file, Kind: graph.KindFile, RepoPrefix: "consumer", Language: "python"})
 	cr := NewCrossRepo(g)
+	cr.bridgeImportsByFile = map[string][]*graph.Edge{file: {{From: file, FilePath: file, To: "provider/pkg/image.py", Meta: map[string]any{PythonImportStubMeta: "external::pkg.image", "python_import": "pkg.image", "python_bindings": map[string]any{"Different": "Image"}}}}}
 	edge := &graph.Edge{From: file, FilePath: file, Kind: graph.EdgeCalls, Meta: map[string]any{"receiver_type": "TestCase"}}
 	// When a typed method is considered by the tracked bridge.
 	require.False(t, cr.resolvePythonImportedMethod(edge, "*.assertEqual"))
-	// Then it performs no store name lookup.
+	// Then it performs no file-node or store name lookup.
 	require.Zero(t, g.broad)
 	require.Zero(t, g.scoped)
+	require.Zero(t, g.fileReads)
 }
 
 func TestPythonReceiverTypesReadOncePerFilePerPass(t *testing.T) {
