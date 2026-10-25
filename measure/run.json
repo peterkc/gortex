@@ -10,12 +10,13 @@
     "R-Restart",
     "issue767-idle"
   ],
-  "repeats": 1,
+  "repeats": 3,
   "sustained_io": false,
-  "note": "Current-main smoke: one Linux repeat, all three timing groups, and separate cold-index/edit-burst diagnostic runs. Smoke values do not enter full-run medians.",
-  "campaign": "smoke",
+  "note": "Current-main full rebaseline: three timing repeats on Linux and macOS, all three timing groups, plus one separate cold-index and edit-burst diagnostic run per platform. Profile runs do not enter timing medians.",
+  "campaign": "full",
   "platforms": [
-    "ubuntu-24.04"
+    "ubuntu-24.04",
+    "macos-15"
   ],
   "profile_scenarios": [
     "cold-index",
