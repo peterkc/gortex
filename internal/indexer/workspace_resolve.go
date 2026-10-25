@@ -541,7 +541,7 @@ func (mi *MultiIndexer) runCrossRepoResolveContext(ctx context.Context, reconcil
 	}
 	// Bounded by the calls this pass actually bound; the deferred
 	// fallback lane runs with no global test-edges pass behind it.
-	mi.synthesizeDemotedGoModuleCalls(cr.TakeDemotedGoModuleCallFiles())
+	mi.finishGoModuleCalls(cr)
 	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 	return nil
 }
@@ -567,7 +567,7 @@ func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiers(resolutionFiles, ed
 		return
 	}
 	cr.ResolveMutationFrontiers(resolutionFiles, edgeSourceFiles, definitionFiles)
-	mi.synthesizeDemotedGoModuleCalls(cr.TakeDemotedGoModuleCallFiles())
+	mi.finishGoModuleCalls(cr)
 	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 }
 
@@ -719,7 +719,7 @@ func (mi *MultiIndexer) resolveDeferredGoModules(idx *Indexer) error {
 		return err
 	}
 	mi.synthesizeDeferredGoModuleCalls(idx, edges)
-	mi.synthesizeDemotedGoModuleCalls(cr.TakeDemotedGoModuleCallFiles())
+	mi.finishGoModuleCalls(cr)
 	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 	return nil
 }
@@ -732,7 +732,7 @@ func (mi *MultiIndexer) resolveIncomingGoModules(repo string) error {
 	if err := cr.ResolveGoModuleIncomingForRepo(repo); err != nil {
 		return err
 	}
-	mi.synthesizeDemotedGoModuleCalls(cr.TakeDemotedGoModuleCallFiles())
+	mi.finishGoModuleCalls(cr)
 	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 	return nil
 }
@@ -756,7 +756,7 @@ func (mi *MultiIndexer) postPublishGoModules(ctx context.Context, idx *Indexer, 
 	if err := cr.RetryGoModuleDeps(ctx); err != nil {
 		return err
 	}
-	mi.synthesizeDemotedGoModuleCalls(cr.TakeDemotedGoModuleCallFiles())
+	mi.finishGoModuleCalls(cr)
 	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 	return nil
 }

@@ -158,6 +158,7 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 		if !tracked {
 			return true
 		}
+		cr.noteGoModuleSourceFile(e)
 		name := spec[sep+2:]
 		candidates, ok := names[name]
 		if !ok {
@@ -257,6 +258,7 @@ func (cr *CrossRepoResolver) goModuleIncomingEdgesBounded(nodesByFile map[string
 	for _, incoming := range incomingByID {
 		for _, e := range incoming {
 			if strings.HasPrefix(e.To, externalCallPrefix) {
+				cr.noteGoModuleSourceFile(e)
 				target, _ := e.Meta["go_extern_target"].(string)
 				if _, wanted := keys[target]; !wanted {
 					continue
@@ -368,6 +370,7 @@ func (cr *CrossRepoResolver) resolveGoModuleEdgesLocked(edges []*graph.Edge, sta
 		if sep < 0 {
 			continue
 		}
+		cr.noteGoModuleSourceFile(e)
 		source, known := sources[e.From]
 		if !known {
 			source = cr.cachedGetNode(e.From)
@@ -626,4 +629,65 @@ func (cr *CrossRepoResolver) TakeDemotedGoModuleCallFiles() []string {
 	cr.goModuleDemotedFiles = nil
 	slices.Sort(files)
 	return files
+}
+
+// Package terminals collapse calls at one site. Re-extract those caller files
+// when revisiting a tracked package, not just the one surviving symbol.
+func (cr *CrossRepoResolver) noteGoModuleSourceFile(e *graph.Edge) {
+	if !strings.HasPrefix(e.To, externalCallPrefix) || !strings.HasSuffix(e.FilePath, ".go") {
+		return
+	}
+	if cr.goModuleSourceFiles == nil {
+		cr.goModuleSourceFiles = make(map[string]struct{})
+	}
+	cr.goModuleSourceFiles[e.FilePath] = struct{}{}
+}
+
+func (cr *CrossRepoResolver) TakeGoModuleSourceFiles() []string {
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	files := slices.Sorted(maps.Keys(cr.goModuleSourceFiles))
+	cr.goModuleSourceFiles = nil
+	return files
+}
+
+// RestoreGoModuleSourceCalls adds only freshly extracted, now-bindable calls.
+// Existing identities and calls into unavailable packages remain untouched.
+func (cr *CrossRepoResolver) RestoreGoModuleSourceCalls(edges []*graph.Edge) {
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	var added []graph.EdgeReindex
+	for _, e := range edges {
+		if e == nil || e.Kind != graph.EdgeCalls {
+			continue
+		}
+		spec := goModuleEdgeSpec(e)
+		sep := strings.LastIndex(spec, "::")
+		if sep < 0 {
+			continue
+		}
+		source := cr.graph.GetNode(e.From)
+		if source == nil {
+			continue
+		}
+		match := cr.goModuleCandidate(spec[:sep], cr.graph.FindNodesByName(spec[sep+2:]), source.RepoPrefix, candidateWorkspaceID(source))
+		if match == nil {
+			continue
+		}
+		bindGoModuleEdge(e, match, source.RepoPrefix, cr.goModules[source.RepoPrefix], cr.goModuleReplacements)
+		exists := false
+		for _, live := range cr.graph.GetOutEdges(e.From) {
+			if graph.EdgeIdentityFor(live) == graph.EdgeIdentityFor(e) {
+				exists = true
+				break
+			}
+		}
+		if exists {
+			continue
+		}
+		cr.graph.AddEdge(e)
+		added = append(added, graph.EdgeReindex{Edge: e})
+		cr.noteRetargetedCall(e)
+	}
+	DetectCrossRepoEdgesForReindexes(cr.graph, added)
 }

@@ -140,6 +140,7 @@ type CrossRepoResolver struct {
 	goModuleRevision     uint64
 	goModuleDemotedMu    sync.Mutex
 	goModuleDemotedFiles map[string]struct{}
+	goModuleSourceFiles  map[string]struct{}
 	// npmAlias rewrites a JS/TS import specifier that matches an
 	// npm-alias dependency key in the importing file's nearest-
 	// ancestor package.json. Same contract as the field of the
