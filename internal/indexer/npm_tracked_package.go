@@ -3,7 +3,9 @@ package indexer
 import (
 	"bytes"
 	"encoding/json"
+	"maps"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -11,8 +13,8 @@ import (
 	"github.com/zzet/gortex/internal/resolver"
 )
 
-// npmPackageLookup lazily snapshots manifest evidence once per resolver. A new
-// resolver captures fresh roots and reads fresh manifests after edits or track/untrack.
+// npmPackageLookup gives each resolver an immutable manifest snapshot. Unchanged
+// roots, config and manifest/directory stamps share the previous lookup.
 func (mi *MultiIndexer) npmPackageLookup() resolver.NpmPackageLookup {
 	type entry struct {
 		dir          string
@@ -43,8 +45,25 @@ func (mi *MultiIndexer) npmPackageLookup() resolver.NpmPackageLookup {
 	}
 	packages := map[string][]entry{}
 	var once sync.Once
+	var lookup, cached resolver.NpmPackageLookup
 	build := func() {
+		mi.npmPackageMu.Lock()
+		defer mi.npmPackageMu.Unlock()
+		var revision uint64
+		if mi.configMgr != nil {
+			revision = mi.configMgr.Revision()
+		}
+		prior := mi.npmPackageCache
+		if prior != nil && prior.revision == revision && maps.Equal(prior.roots, roots) && maps.Equal(prior.workspaces, workspaces) && prior.unchanged() {
+			cached = prior.lookup
+			return
+		}
+		files := make(map[string]npmPackageFileStamp)
+		watch := func(file string) { files[file] = npmPackageStamp(file) }
 		for prefix, root := range roots {
+			watch(root)
+			watch(filepath.Join(root, "package.json"))
+			watch(filepath.Join(root, "pnpm-workspace.yaml"))
 			rootSrc, _ := readDiskFile(joinPath(root, "package.json"))
 			workspace := &modules.WorkspaceManifest{Ecosystem: modules.WorkspaceNPM, Patterns: modules.ParsePackageJSONWorkspaces(rootSrc)}
 			if len(workspace.Patterns) == 0 {
@@ -52,6 +71,7 @@ func (mi *MultiIndexer) npmPackageLookup() resolver.NpmPackageLookup {
 				workspace.Ecosystem = modules.WorkspacePnpm
 				workspace.Patterns = modules.ParsePnpmWorkspaceYAML(src)
 			}
+			watchNpmWorkspacePaths(root, workspace.Patterns, watch)
 			dirs := []string{"."}
 			for _, member := range modules.ResolveWorkspaceMembers(root, workspace) {
 				dirs = append(dirs, member.Dir)
@@ -97,9 +117,13 @@ func (mi *MultiIndexer) npmPackageLookup() resolver.NpmPackageLookup {
 				})
 			}
 		}
+		mi.npmPackageCache = &npmPackageSnapshot{revision: revision, roots: roots, workspaces: workspaces, files: files, lookup: lookup}
 	}
-	return func(specifier string) map[string]resolver.NpmPackageTarget {
+	lookup = func(specifier string) map[string]resolver.NpmPackageTarget {
 		once.Do(build)
+		if cached != nil {
+			return cached(specifier)
+		}
 		name, sub := splitPackageSpecifier(specifier)
 		if name == "" || hasDotDotSegment(sub) || len(packages[name]) == 0 {
 			return nil
@@ -148,6 +172,7 @@ func (mi *MultiIndexer) npmPackageLookup() resolver.NpmPackageLookup {
 		}
 		return targets
 	}
+	return lookup
 }
 
 // declaredNpmExports retains entry keys independently of supported conditions.

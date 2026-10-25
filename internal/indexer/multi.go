@@ -112,6 +112,8 @@ type MultiIndexer struct {
 	goModuleFiles        map[string]goModuleFileStamp
 	goModuleRules        map[string][]resolver.CrossWorkspaceDepRule
 	goModuleRetry        resolver.GoModuleDepRetry
+	npmPackageMu         sync.Mutex
+	npmPackageCache      *npmPackageSnapshot
 
 	// pendingRepositoryUntracks is guarded by mu. Entries are installed before
 	// a live repo is hidden and removed only after payload, vector, config, and
