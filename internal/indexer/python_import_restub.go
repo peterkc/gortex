@@ -174,3 +174,20 @@ func pythonConsumerFilesForAddedFiles(g graph.Store, files []string) []string {
 	}
 	return sortedStringKeys(consumers)
 }
+
+func (mi *MultiIndexer) pythonAddedFileConsumers(files []string) []string {
+	if len(files) == 0 {
+		return nil
+	}
+	// Warmup can publish a provider receipt before its configured consumers
+	// are registered. Preserve that frontier until the workspace pass.
+	warming := false
+	if mi.configMgr != nil {
+		configuredRepos := mi.configMgr.Global().Repos
+		warming = len(configuredRepos) > 1 && len(mi.AllMetadata()) < len(configuredRepos)
+	}
+	if !warming && mi.pythonPackageLookup() == nil {
+		return nil
+	}
+	return pythonConsumerFilesForAddedFiles(mi.graph, files)
+}
