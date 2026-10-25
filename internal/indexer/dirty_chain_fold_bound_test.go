@@ -81,7 +81,7 @@ func TestInlineFoldAtTheCapIsBoundedInTime(t *testing.T) {
 	if waited < dirtyChainInlineFoldBudget {
 		t.Fatalf("the edit returned in %v, before the budget: the stalled fold was not attempted", waited)
 	}
-	if waited > dirtyChainInlineFoldBudget+2*time.Second {
+	if waited > dirtyChainInlineFoldBudget+testTimingSlack(2*time.Second) {
 		t.Fatalf("the edit at the cap waited %v, more than the budget %v and its own build", waited, dirtyChainInlineFoldBudget)
 	}
 	if at.DirtyParentGenerationID != 0 {

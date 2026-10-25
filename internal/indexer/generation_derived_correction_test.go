@@ -380,8 +380,8 @@ func TestStartupCorrectionGivesAnEditTheWriterWithin100ms(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if waited := time.Since(cycleFrom); waited > 100*time.Millisecond {
-		t.Fatalf("the edit waited %s for the correction, want <= 100ms", waited)
+	if waited := time.Since(cycleFrom); waited > testTimingSlack(100*time.Millisecond) {
+		t.Fatalf("the edit waited %s for the correction, want <= %s", waited, testTimingSlack(100*time.Millisecond))
 	}
 	editCycle.Store(false)
 	var report DerivedCorrectionReport

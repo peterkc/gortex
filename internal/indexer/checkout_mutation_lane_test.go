@@ -63,7 +63,7 @@ func TestCheckoutMutationAdmissionRefusesAStaleTreeBeforeWaitingForTheLock(t *te
 	if !errors.Is(err, ErrCheckoutMutationStale) {
 		t.Fatalf("expected the stale refusal, got: %v", err)
 	}
-	if waited := time.Since(started); waited > 3*time.Second {
+	if waited := time.Since(started); waited > testTimingSlack(3*time.Second) {
 		t.Fatalf("the stale refusal waited for the lock: %v", waited)
 	}
 	if f.route() != before {

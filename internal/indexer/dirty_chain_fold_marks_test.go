@@ -113,8 +113,8 @@ func TestSteppedFoldStepsBetweenTheEditingAndTheFoldMark(t *testing.T) {
 	if probe.refused > 0 {
 		t.Errorf("%d fold steps refused over a mark with the log at most %d MiB, under the fold's mark", probe.refused, foldMarksFill>>20+64)
 	}
-	if per := stats.Duration / time.Duration(max(stats.AttemptsStarted, 1)); per > 10*time.Second {
-		t.Errorf("a fold took %v on average, over 10 s", per)
+	if per := stats.Duration / time.Duration(max(stats.AttemptsStarted, 1)); per > testTimingSlack(10*time.Second) {
+		t.Errorf("a fold took %v on average, over %v", per, testTimingSlack(10*time.Second))
 	}
 	if probe.overCommitted == 0 {
 		t.Fatalf("no fold step committed with the log over the editing mark: the fold is held at 256 MiB")

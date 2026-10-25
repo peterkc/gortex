@@ -39,9 +39,19 @@ func TestCheckoutLifecycleReconcileFamilyPersistsExpiredInaccessible(t *testing.
 
 	f.clock.advance(lifecycleGrace.AvailabilityGrace + time.Second)
 	expired, err := f.lc.ReconcileFamily(ctx, tracked.FamilyID)
-	require.NoError(t, err)
-	entry = checkoutReportByID(t, expired, tracked.CheckoutID)
-	assert.Equal(t, reconcile.ActionPrimaryClosureRetired, entry.Action)
+	if onlyRepositoryCleanupPending(err) && err != nil {
+		// Logical withdrawal precedes the cleanup worker's producer drain.
+		// Wait for its durable journal, not a second reconcile attempt.
+		require.Eventually(t, func() bool {
+			pending, err := f.lc.rec.RepositoryCleanupPending(ctx, tracked.GraphID, tracked.CheckoutID, tracked.Incarnation, tracked.FamilyID)
+			require.NoError(t, err)
+			return !pending
+		}, 5*time.Second, time.Millisecond)
+	} else {
+		require.NoError(t, err)
+		entry = checkoutReportByID(t, expired, tracked.CheckoutID)
+		assert.Equal(t, reconcile.ActionPrimaryClosureRetired, entry.Action)
+	}
 	assert.Nil(t, f.mi.GetMetadata("event-offline"))
 	assert.NotContains(t, f.configPaths(), root, "event-driven cleanup is persisted")
 }

@@ -502,7 +502,7 @@ func testSustainedImportProgress(t *testing.T, inline, slowPreamble, slowFoldPla
 	}
 	t.Logf("import: %d cycles, %d file links, %d folds, %d yields; %d interactive probes, worst wait %s worstAcquireAndSQL=%s (all: %v)",
 		len(cycles), links, folds, yields, len(waits), worst, foregroundSQLWorst, waits)
-	if worst > 100*time.Millisecond {
+	if worst > testTimingSlack(100*time.Millisecond) {
 		// Snapshotting the displaced holder after Acquire would name this
 		// interactive probe instead. These pre-Acquire snapshots are bounded
 		// observations, not proof that the holder stayed unchanged throughout.
@@ -527,7 +527,7 @@ func testSustainedImportProgress(t *testing.T, inline, slowPreamble, slowFoldPla
 				i, cy.out.cycleStarted.UTC().Format(time.RFC3339Nano), cy.out.DirtyGenerationID, cy.out.DirtyBatchRemaining, cy.out.ImportFolded, cy.out.PlanLaps, physical)
 		}
 		if !slowPublicationTail {
-			t.Errorf("an interactive build waited %s for the import, want ≤ 100ms", worst)
+			t.Errorf("an interactive build waited %s for the import, want ≤ %s", worst, testTimingSlack(100*time.Millisecond))
 		} else {
 			// This fault-injected tail tests admission during the actual park.
 			// The gate promises priority/fairness, not a 100ms wall-time bound

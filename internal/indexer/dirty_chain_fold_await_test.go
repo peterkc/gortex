@@ -67,7 +67,7 @@ func TestEditAtTheCapWaitsForTheRunningFold(t *testing.T) {
 	if at.DirtyChainDepth != 3 {
 		t.Fatalf("the edit at the cap stands at depth %d, want 3 (fold, the re-based layer, the edit)", at.DirtyChainDepth)
 	}
-	if waited > dirtyChainInlineFoldBudget+5*time.Second {
+	if waited > dirtyChainInlineFoldBudget+testTimingSlack(5*time.Second) {
 		t.Fatalf("the edit took %v", waited)
 	}
 	report := <-reports

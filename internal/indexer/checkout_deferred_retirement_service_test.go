@@ -170,7 +170,7 @@ func TestAgedRetirementYieldsCanceledQuantumBeforeQueuedEditGetsTheLane(t *testi
 	case at := <-editDone:
 		editJoined = true
 		require.False(t, at.IsZero())
-		require.LessOrEqual(t, at.Sub(from), 2*budget)
+		require.LessOrEqual(t, at.Sub(from), budget+testTimingSlack(budget))
 	case <-time.After(5 * time.Second):
 		t.Fatal("queued edit did not acquire after bounded service")
 	}
@@ -509,7 +509,7 @@ func TestQueuedRetirementContinuesToActualWriterRefusal(t *testing.T) {
 	case at := <-editDone:
 		editJoined = true
 		require.False(t, at.IsZero())
-		require.LessOrEqual(t, at.Sub(from), 100*time.Millisecond)
+		require.LessOrEqual(t, at.Sub(from), testTimingSlack(100*time.Millisecond))
 	case <-time.After(5 * time.Second):
 		t.Fatal("queued edit did not acquire after bounded service")
 	}

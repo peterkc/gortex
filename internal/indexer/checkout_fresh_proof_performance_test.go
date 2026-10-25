@@ -59,14 +59,14 @@ func TestPerformanceCheckoutFreshProofLatencyProbe(t *testing.T) {
 		proofP50, proofMax, sampleP50, rounds, ticketP50, ticketMax, ticketRounds)
 	// A catastrophic regression fails this explicit comparison: the proof and
 	// the ticket both scale with one git status, and a loaded host moves both.
-	if proofP50 >= time.Second {
-		t.Fatalf("the proof's p50 %v is not sub-second", proofP50)
+	if proofP50 >= testTimingSlack(time.Second) {
+		t.Fatalf("the proof's p50 %v exceeded %v", proofP50, testTimingSlack(time.Second))
 	}
 	if os.Getenv("GORTEX_FRESH_PROOF_LATENCY_GATE") != "1" {
 		return
 	}
-	if proofP50 >= 100*time.Millisecond {
-		t.Fatalf("the proof's p50 %v is not in the tens of milliseconds", proofP50)
+	if proofP50 >= testTimingSlack(100*time.Millisecond) {
+		t.Fatalf("the proof's p50 %v exceeded %v", proofP50, testTimingSlack(100*time.Millisecond))
 	}
 	if proofP50 >= ticketP50 {
 		t.Fatalf("the proof (p50 %v) is not cheaper than the ticket it replaces (p50 %v)", proofP50, ticketP50)

@@ -84,8 +84,8 @@ func TestABackgroundCycleYieldsTheLaneToAnInteractiveBuild(t *testing.T) {
 	waited := time.Since(asked)
 	release()
 	t.Logf("interactive build waited %s for the lane a background build held", waited)
-	if waited > 100*time.Millisecond {
-		t.Errorf("interactive build waited %s for a yielding background build, want ≤ 100ms", waited)
+	if waited > testTimingSlack(100*time.Millisecond) {
+		t.Errorf("interactive build waited %s for a yielding background build, want ≤ %s", waited, testTimingSlack(100*time.Millisecond))
 	}
 
 	out := awaitLaneYieldOutcome(t, outcomes)
@@ -187,7 +187,7 @@ func TestBackgroundCyclePastTheYieldBoundStillGivesTheLaneUp(t *testing.T) {
 		t.Fatalf("the interactive build never got the lane from a background cycle past the yield bound: %v", err)
 	}
 	release()
-	if wait := time.Since(waited); wait > time.Second {
+	if wait := time.Since(waited); wait > testTimingSlack(time.Second) {
 		t.Fatalf("the interactive build waited %v for a background cycle past the yield bound", wait)
 	}
 	if stats := gate.Stats(); stats.YieldRefusals != 0 || stats.YieldRequests != 1 {

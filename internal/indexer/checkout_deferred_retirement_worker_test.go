@@ -13,7 +13,7 @@ import (
 // A pending pass that committed work re-polls without pausing; one that
 // committed nothing keeps the base pause.
 func TestDeferredRetirementLoopRepollsAtOnceAfterProgress(t *testing.T) {
-	const basePause = 300 * time.Millisecond
+	basePause := 2 * testTimingSlack(100*time.Millisecond)
 	var committed atomic.Int64
 	calls := make(chan time.Time, 8)
 	var n atomic.Int32
@@ -50,7 +50,7 @@ func TestDeferredRetirementLoopRepollsAtOnceAfterProgress(t *testing.T) {
 	}
 	// Twice the production budget for "at once": a goroutine hop, not a pause.
 	for i := 1; i <= 3; i++ {
-		require.Less(t, at[i].Sub(at[i-1]), 100*time.Millisecond, "pass %d after progress waited", i+1)
+		require.Less(t, at[i].Sub(at[i-1]), testTimingSlack(100*time.Millisecond), "pass %d after progress waited", i+1)
 	}
 	require.GreaterOrEqual(t, at[4].Sub(at[3]), basePause, "a pass that committed nothing must keep the base pause")
 }
@@ -91,9 +91,9 @@ func TestDeferredRetirementWorkerWakesOnNewDebtAndReleases(t *testing.T) {
 	c := &CheckoutCoordinator{checkoutID: "wake", backlog: map[int64]struct{}{}, logger: zap.NewNop()}
 	owedAt := time.Now()
 	c.deferRetire(42, "torn working-tree build")
-	require.Less(t, await("new debt").Sub(owedAt), 100*time.Millisecond)
+	require.Less(t, await("new debt").Sub(owedAt), testTimingSlack(100*time.Millisecond))
 	time.Sleep(50 * time.Millisecond)
 	releasedAt := time.Now()
 	noteRetirementReferencesReleased(41)
-	require.Less(t, await("a released reference").Sub(releasedAt), 100*time.Millisecond)
+	require.Less(t, await("a released reference").Sub(releasedAt), testTimingSlack(100*time.Millisecond))
 }

@@ -85,7 +85,13 @@ func TestCheckpointAttemptObservesLateBuildLaneInstallation(t *testing.T) {
 			}
 			cleanup()
 			if yielding {
-				require.True(t, errors.Is(result, context.Canceled), "actual SQL must observe withdrawal after the uninterruptible sync returns")
+				// Cancellation can arrive after SQLite's final interrupt point. The
+				// completed call may succeed, but the attempt stays withdrawn and
+				// cannot dispatch another call after joining the stalled one.
+				require.True(t, result == nil || errors.Is(result, context.Canceled), "unexpected checkpoint result: %v", result)
+				require.ErrorIs(t, attempt.ctx.Err(), context.Canceled)
+				_, err := checkpointWALOnceOn(attempt.ctx, db, "PASSIVE")
+				require.ErrorIs(t, err, context.Canceled)
 			}
 		})
 	}

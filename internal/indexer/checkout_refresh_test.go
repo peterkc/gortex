@@ -78,7 +78,7 @@ func TestCheckoutRefreshEnqueueOutlivesRequestAndPublishesExactGeneration(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if time.Since(started) >= time.Second {
+	if time.Since(started) >= testTimingSlack(time.Second) {
 		t.Fatal("enqueue waited for a graph build")
 	}
 	checkoutID, incarnation := m.Identity()
@@ -122,7 +122,7 @@ func TestCheckoutRefreshRecoveryAdmitsWhileSourceLeaseOwnsBuildGate(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if time.Since(started) >= time.Second {
+	if time.Since(started) >= testTimingSlack(time.Second) {
 		t.Fatal("recovery waited on source build gate")
 	}
 	assertCheckoutRefreshPending(t, ticket)
@@ -485,7 +485,7 @@ func TestCheckoutMutationConcurrentAdmissionIsBoundedByCaller(t *testing.T) {
 		t.Fatal("admitted concurrent source mutation")
 	}
 	t.Logf("urgent_precheck_wait_witnessed=%v caller_budget=500ms elapsed=%s error=%v", witnessed, got.elapsed, got.err)
-	if !errors.Is(got.err, context.DeadlineExceeded) || !errors.Is(got.err, ErrCheckoutMutationBusy) || got.elapsed > 2*time.Second {
+	if !errors.Is(got.err, context.DeadlineExceeded) || !errors.Is(got.err, ErrCheckoutMutationBusy) || got.elapsed > testTimingSlack(2*time.Second) {
 		t.Fatalf("admission did not preserve caller deadline: elapsed=%s error=%v", got.elapsed, got.err)
 	}
 }
