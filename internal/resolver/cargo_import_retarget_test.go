@@ -63,11 +63,12 @@ func TestCargoRetargetOnlyMarkedProviderImports(t *testing.T) {
 				}
 				stats := &CrossRepoStats{ByRepo: map[string]int{}}
 				edges := slices.Values([]*graph.Edge{edge})
-				if scenario == "light_projection" {
+				switch scenario {
+				case "light_projection":
 					edges = graph.EdgesLightSeq(g, graph.EdgeImports)
-				} else if scenario == "nil_input" {
+				case "nil_input":
 					edges = slices.Values([]*graph.Edge{nil})
-				} else if scenario == "wrong_kind" {
+				case "wrong_kind":
 					projected := *edge
 					projected.Kind = graph.EdgeCalls
 					edges = slices.Values([]*graph.Edge{&projected})
