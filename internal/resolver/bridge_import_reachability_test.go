@@ -107,7 +107,7 @@ func TestCargoCallsStayWithinImportedItem(t *testing.T) {
 
 func TestPythonMethodsStayWithinImportedType(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
-		for _, scenario := range []string{"method", "foreign_type", "ambiguous"} {
+		for _, scenario := range []string{"method", "foreign_type", "ambiguous", "local_type", "alias", "unbound"} {
 			t.Run(backend+"/"+scenario, func(t *testing.T) {
 				var g graph.Store = graph.New()
 				if backend == "sqlite" {
@@ -122,11 +122,22 @@ func TestPythonMethodsStayWithinImportedType(t *testing.T) {
 					g.AddNode(&graph.Node{ID: provider, FilePath: provider, Kind: graph.KindFile, RepoPrefix: "provider", Language: "python"})
 					g.AddNode(&graph.Node{ID: provider + "::Image.show", FilePath: provider, Name: "show", Kind: graph.KindMethod, RepoPrefix: "provider", Language: "python", Meta: map[string]any{"receiver": "Image"}})
 				}
-				g.AddEdge(&graph.Edge{From: file, FilePath: file, To: "provider/pkg/image.py", Kind: graph.EdgeImports, Line: 1, CrossRepo: true, Meta: map[string]any{PythonImportStubMeta: "external::pkg.image", "python_import": "pkg.image"}})
+				g.AddEdge(&graph.Edge{From: file, FilePath: file, To: "provider/pkg/image.py", Kind: graph.EdgeImports, Line: 1, CrossRepo: true, Meta: map[string]any{PythonImportStubMeta: "external::pkg.image", "python_import": "pkg.image", "python_bindings": map[string]any{"Image": "Image"}}})
 				if scenario == "ambiguous" {
-					g.AddEdge(&graph.Edge{From: file, FilePath: file, To: "provider/pkg/aaa.py", Kind: graph.EdgeImports, Line: 2, CrossRepo: true, Meta: map[string]any{PythonImportStubMeta: "external::pkg.aaa", "python_import": "pkg.aaa"}})
+					g.AddEdge(&graph.Edge{From: file, FilePath: file, To: "provider/pkg/aaa.py", Kind: graph.EdgeImports, Line: 2, CrossRepo: true, Meta: map[string]any{PythonImportStubMeta: "external::pkg.aaa", "python_import": "pkg.aaa", "python_bindings": map[string]any{"Image": "Image"}}})
+				}
+				if scenario == "local_type" {
+					g.AddNode(&graph.Node{ID: file + "::Image", Name: "Image", FilePath: file, Kind: graph.KindType, RepoPrefix: "consumer", Language: "python"})
+				}
+				if scenario == "alias" || scenario == "unbound" {
+					imports := outEdgesOfKind(g, file, graph.EdgeImports)
+					imports[0].Meta["python_bindings"] = map[string]any{"Picture": "Image"}
+					g.ReindexEdges([]graph.EdgeReindex{{Edge: imports[0], OldTo: imports[0].To}})
 				}
 				receiver := "Image"
+				if scenario == "alias" {
+					receiver = "Picture"
+				}
 				if scenario == "foreign_type" {
 					receiver = "Foreign"
 				}
@@ -135,7 +146,7 @@ func TestPythonMethodsStayWithinImportedType(t *testing.T) {
 				require.NoError(t, err)
 				calls := outEdgesOfKind(g, file, graph.EdgeCalls)
 				require.Len(t, calls, 1)
-				if scenario == "method" {
+				if scenario == "method" || scenario == "alias" {
 					require.Equal(t, "provider/pkg/image.py::Image.show", calls[0].To)
 					require.True(t, calls[0].CrossRepo)
 				} else {
