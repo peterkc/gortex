@@ -55,6 +55,7 @@ type issue767Fixture struct {
 	binary, root, primary, linked, store string
 	env                                  []string
 	httpAddr                             string
+	profiled                             bool
 	goModCache                           string
 	profiles                             *reconstructedProfiles
 
@@ -112,9 +113,12 @@ var errIssue767CommandTimeout = errors.New("CLI context deadline exceeded")
 type issue767FixtureOptions struct {
 	reconcileInterval string
 	loopbackHTTP      bool
+	pprof             bool
 }
 
 func issue767WithLoopbackHTTP(o *issue767FixtureOptions) { o.loopbackHTTP = true }
+
+func issue767WithPProf(o *issue767FixtureOptions) { o.pprof = true }
 
 // issue767WithReconcileInterval sets GORTEX_RECONCILE_INTERVAL for the private
 // daemon. The empty string keeps the harness default (5s);
@@ -198,6 +202,10 @@ func newIssue767FixtureWithCorpus(t *testing.T, binary string, corpus issue767Co
 		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+filepath.Join(root, "gitconfig"), "GIT_TERMINAL_PROMPT=0", "GOWORK=off", "NO_COLOR=1", "CI=1")
 	if err := os.MkdirAll(filepath.Join(root, "home"), 0700); err != nil {
 		t.Fatal(err)
+	}
+	f.profiled = settings.pprof
+	if settings.pprof {
+		f.env = append(f.env, "GORTEX_DAEMON_PPROF_ADDR=127.0.0.1:0")
 	}
 	if settings.loopbackHTTP {
 		listener, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -358,10 +366,14 @@ func (f *issue767Fixture) start() {
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(f.t.Context())
+	parent := f.t.Context()
+	if f.profiled {
+		parent = context.WithoutCancel(parent)
+	}
+	ctx, cancel := context.WithCancel(parent)
 	if deadline, ok := f.t.Deadline(); ok {
 		cancel()
-		ctx, cancel = context.WithDeadline(f.t.Context(), deadline.Add(-time.Minute))
+		ctx, cancel = context.WithDeadline(parent, deadline.Add(-time.Minute))
 	}
 	args := []string{"daemon", "start", "--embeddings=false", "--backend", "sqlite", "--backend-path", f.store, "--no-progress"}
 	if f.httpAddr != "" {
@@ -398,7 +410,7 @@ func (f *issue767Fixture) start() {
 		done <- err
 	}()
 	if f.profiles != nil {
-		if err := f.profiles.start(f.t.Context(), f.logPathFor(run), processStart); err != nil {
+		if err := f.profiles.start(f.t.Context(), f.logPathFor(run), processStart, done); err != nil {
 			f.t.Fatal(err)
 		}
 	}
@@ -424,7 +436,10 @@ func (f *issue767Fixture) start() {
 
 func (f *issue767Fixture) stop() {
 	if f.profiles != nil {
-		if err := f.profiles.finish(time.Now()); err != nil {
+		f.profiles.mu.Lock()
+		finished := f.profiles.finished
+		f.profiles.mu.Unlock()
+		if err := f.profiles.finish(time.Now()); err != nil && !finished {
 			f.t.Errorf("diagnostic capture: %v", err)
 		}
 	}
@@ -1300,6 +1315,9 @@ type reconstructedProfiles struct {
 	Limits       string                        `json:"interpretation_limits"`
 	client       *http.Client
 	ctx          context.Context
+	cancel       context.CancelFunc
+	started      bool
+	finished     bool
 	stop         chan struct{}
 	done         sync.WaitGroup
 	once         sync.Once
@@ -1368,10 +1386,24 @@ func reconstructedProfileEndpoint(log []byte) (string, time.Time, error) {
 	return "", time.Time{}, errors.New("missing bound pprof endpoint")
 }
 
-func (p *reconstructedProfiles) start(ctx context.Context, log string, processStart time.Time) error {
-	p.ctx, p.ProcessStart = ctx, processStart
+func (p *reconstructedProfiles) start(ctx context.Context, log string, processStart time.Time, daemonDone chan error) error {
+	p.mu.Lock()
+	if p.started || p.finished {
+		p.mu.Unlock()
+		return errors.New("profile capture already started or finished")
+	}
+	p.started = true
+	p.mu.Unlock()
+	p.ctx, p.cancel = context.WithCancel(context.WithoutCancel(ctx))
+	p.ProcessStart = processStart
 	deadline := time.Now().Add(time.Minute)
 	for {
+		select {
+		case err := <-daemonDone:
+			daemonDone <- err // Preserve the fixture stop owner's join receipt.
+			return fmt.Errorf("isolated daemon exited during start: %v; log %s", err, log)
+		default:
+		}
 		raw, err := os.ReadFile(log)
 		if err != nil {
 			return err
@@ -1473,12 +1505,22 @@ func (p *reconstructedProfiles) capture(kind, file string) (err error) {
 
 func (p *reconstructedProfiles) finish(end time.Time) error {
 	p.once.Do(func() {
+		p.mu.Lock()
+		p.finished = true
+		p.mu.Unlock()
 		p.End = end
 		close(p.stop)
-		if p.ctx == nil {
+		if !p.started {
 			p.Error = "profile capture never started"
 			return
 		}
+		// Cleanup runs after t.Context is cancelled. Keep end snapshots and
+		// the owned last window alive, but bound their finish independently.
+		finishCtx, cancel := context.WithTimeout(context.WithoutCancel(p.ctx), 2*time.Minute)
+		defer cancel()
+		stopCancel := context.AfterFunc(finishCtx, p.cancel)
+		defer stopCancel()
+		defer p.cancel()
 		// Snapshot the boundary now, not after the final 60 s CPU tail.
 		err := errors.Join(p.capture("allocs", "allocs-end.pb.gz"), p.capture("heap", "heap-end.pb.gz"))
 		p.done.Wait() // Cancellation also unblocks HTTP; never stop the daemon first.
@@ -1595,13 +1637,7 @@ func (p *reconstructedProfiles) rank() error {
 	}
 	var cpu []string
 	for _, c := range p.Captures {
-		if err := p.pprof(c.File+".raw", "-raw", p.Binary, c.File); err != nil {
-			return err
-		}
 		if c.Kind == "profile?seconds=60" {
-			if err := p.pprof(c.File+".txt", "-top", "-nodecount=0", "-sample_index=cpu", p.Binary, c.File); err != nil {
-				return err
-			}
 			cpu = append(cpu, c.File)
 		}
 	}
@@ -1611,12 +1647,8 @@ func (p *reconstructedProfiles) rank() error {
 	if err := p.pprof("cpu-top.txt", "-top", "-nodecount=0", "-sample_index=cpu", p.Binary, "cpu-merged.pb.gz"); err != nil {
 		return err
 	}
-	for _, c := range p.Captures {
-		if c.Kind == "heap" {
-			if err := p.pprof(c.File+".txt", "-top", "-nodecount=0", "-sample_index=inuse_space", p.Binary, c.File); err != nil {
-				return err
-			}
-		}
+	if err := p.pprof("heap-end-top.txt", "-top", "-nodecount=0", "-sample_index=inuse_space", p.Binary, "heap-end.pb.gz"); err != nil {
+		return err
 	}
 	for _, sample := range []string{"alloc_space", "alloc_objects"} {
 		args := []string{"-top", "-nodecount=0", "-sample_index=" + sample}

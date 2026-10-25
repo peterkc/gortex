@@ -1112,14 +1112,41 @@ func TestReconstructedMeasurementProfileMode(t *testing.T) {
 			t.Fatalf("%+v: %v", tc, err)
 		}
 	}
-	run := reconstructedRun{Label: "reconstructed", Workload: "R-Fresh", Profiles: &reconstructedProfiles{}}
-	if _, err := scoreReconstructed(run); err == nil {
-		t.Fatal("timing row with profiles accepted")
-	}
-	run.Mode = "profile"
-	run.Profiles = nil
-	if _, err := scoreReconstructed(run); err == nil {
-		t.Fatal("profile row without manifest accepted")
+	now := time.Unix(100, 0)
+	manifest := &reconstructedProfiles{Scenario: "cold-index", Endpoint: "http://127.0.0.1:9", EndpointOpen: now, ProcessStart: now,
+		Start: now, End: now.Add(time.Second), Captures: []reconstructedProfileCapture{
+			{Kind: "profile?seconds=60", File: "cpu-0.pb.gz", Start: now, End: now.Add(2 * time.Second)},
+			{Kind: "heap", File: "heap-end.pb.gz", Start: now.Add(time.Second), End: now.Add(2 * time.Second)},
+			{Kind: "allocs", File: "allocs-end.pb.gz", Start: now.Add(time.Second), End: now.Add(2 * time.Second)},
+		}}
+	run := reconstructedRun{Label: "reconstructed", Workload: "R-Fresh", Samples: []reconstructedSample{{Kind: "fresh", Passed: true, DurationMS: 1, Start: now, End: now.Add(time.Millisecond)}}}
+	timing := run
+	timing.Profiles = manifest
+	missing := run
+	missing.Mode = "profile"
+	valid := missing
+	valid.Profiles = manifest
+	for _, tc := range []struct {
+		name                  string
+		run                   reconstructedRun
+		wantError, wantStatus string
+	}{
+		{"timing_mix", timing, "timing run contains diagnostic profiles", ""},
+		{"missing_manifest", missing, "profile run missing capture manifest", ""},
+		{"diagnostic", valid, "", "diagnostic"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			score, err := scoreReconstructed(tc.run)
+			if tc.wantError != "" {
+				if err == nil || err.Error() != tc.wantError {
+					t.Fatalf("error=%v want=%s", err, tc.wantError)
+				}
+				return
+			}
+			if err != nil || score.Status != tc.wantStatus {
+				t.Fatalf("score=%+v error=%v", score, err)
+			}
+		})
 	}
 }
 
@@ -1197,13 +1224,21 @@ func TestReconstructedMeasurementProfileHTTP(t *testing.T) {
 		}
 	})
 	t.Run("cancellation_joins", func(t *testing.T) {
-		entered, exited := make(chan struct{}), make(chan struct{})
+		entered, exited, releaseCPU := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		profile := reconstructedProfileFixture(t, 100, 3)
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/debug/pprof/profile" {
 				close(entered)
-				<-r.Context().Done()
+				select {
+				case <-releaseCPU:
+				case <-r.Context().Done():
+				}
 				close(exited)
 			}
+			if r.URL.Path == "/debug/pprof/heap" {
+				close(releaseCPU)
+			}
+			_, _ = w.Write(profile)
 		}))
 		defer server.Close()
 		p := reconstructedTestProfiles(t, "cold-index")
@@ -1214,7 +1249,7 @@ func TestReconstructedMeasurementProfileHTTP(t *testing.T) {
 		if err := os.WriteFile(log, []byte(raw), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if err := p.start(ctx, log, time.Now()); err != nil {
+		if err := p.start(ctx, log, time.Now(), nil); err != nil {
 			t.Fatal(err)
 		}
 		<-entered
@@ -1233,8 +1268,8 @@ func TestReconstructedMeasurementProfileHTTP(t *testing.T) {
 		case <-time.After(time.Second):
 		}
 		close(releaseOwner)
-		if err := <-finished; err == nil {
-			t.Fatal("cancelled capture accepted")
+		if err := <-finished; err != nil {
+			t.Fatalf("cancelled driver prevented end capture: %v", err)
 		}
 		select {
 		case <-exited:
@@ -1248,7 +1283,7 @@ func TestReconstructedMeasurementProfileDelta(t *testing.T) {
 	p := reconstructedTestProfiles(t, "edit-burst")
 	baseline := reconstructedProfileFixture(t, 100000, 0)
 	end := reconstructedProfileFixture(t, 100000, 7)
-	for file, raw := range map[string][]byte{"allocs-baseline.pb.gz": baseline, "allocs-end.pb.gz": end} {
+	for file, raw := range map[string][]byte{"allocs-baseline.pb.gz": baseline, "allocs-end.pb.gz": end, "heap-end.pb.gz": end} {
 		if err := os.WriteFile(filepath.Join(p.Dir, file), raw, 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -1322,7 +1357,7 @@ func TestReconstructedMeasurementProfileLifecycle(t *testing.T) {
 			if err := os.WriteFile(log, []byte(raw), 0600); err != nil {
 				t.Fatal(err)
 			}
-			if err := p.start(t.Context(), log, time.Now().Add(-time.Second)); err != nil {
+			if err := p.start(t.Context(), log, time.Now().Add(-time.Second), nil); err != nil {
 				t.Fatal(err)
 			}
 			<-cpuStarted
@@ -1422,6 +1457,32 @@ func TestReconstructedMeasurementCampaign(t *testing.T) {
 	}
 	if workflow.Jobs["workloads"].Strategy.Matrix["include"] != "${{ fromJSON(needs.config.outputs.workload_matrix) }}" {
 		t.Fatal("workloads do not use projected matrix")
+	}
+	var rowGuard string
+	for _, step := range workflow.Jobs["workloads"].Steps {
+		for _, line := range strings.Split(step.Run, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), `jq -e --arg mode "$ROW_MODE"`) {
+				rowGuard = strings.TrimSpace(line)
+			}
+		}
+	}
+	if rowGuard == "" {
+		t.Fatal("missing executable row guard")
+	}
+	for _, tc := range []struct {
+		mode, workloads string
+		valid           bool
+	}{
+		{"timing", `[]`, false}, {"profile", `[]`, true}, {"timing", `["R-Fresh"]`, true},
+	} {
+		t.Run("row_"+tc.mode+tc.workloads, func(t *testing.T) {
+			cmd := exec.CommandContext(t.Context(), "bash", "-e", "-o", "pipefail", "-c", rowGuard)
+			cmd.Env = append(os.Environ(), "ROW_MODE="+tc.mode, "WORKLOADS="+tc.workloads)
+			log, err := cmd.CombinedOutput()
+			if (err == nil) != tc.valid {
+				t.Fatalf("row guard accepted=%v want=%v: %s", err == nil, tc.valid, log)
+			}
+		})
 	}
 	configRaw, err := os.ReadFile(filepath.Join(root, "measure", "run.json"))
 	if err != nil {
@@ -1554,4 +1615,103 @@ func TestReconstructedMeasurementProfileCommand(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReconstructedMeasurementProfileErrors(t *testing.T) {
+	p := reconstructedTestProfiles(t, "cold-index")
+	finishErr := p.finish(time.Now())
+	if finishErr == nil {
+		t.Fatal("unstarted capture did not fail")
+	}
+	cause := "enrichment completion: context deadline exceeded"
+	run := reconstructedRun{Label: "reconstructed", Mode: "profile", Workload: "R-Fresh", Error: cause, Profiles: p}
+	if run.recordProfileError(finishErr) || run.Error != cause || run.ProfileError != finishErr.Error() {
+		t.Fatalf("driver cause replaced: %+v", run)
+	}
+	if run.recordProfileError(errors.New("later finish error")) || run.ProfileError != finishErr.Error() {
+		t.Fatal("repeated capture error reported/replaced")
+	}
+	if score, err := scoreReconstructed(run); err != nil || score.Status != "fail" || score.Reason != cause {
+		t.Fatalf("driver cause lost from score: %+v %v", score, err)
+	}
+	run.Error, run.ProfileError = "", ""
+	if !run.recordProfileError(finishErr) {
+		t.Fatal("capture-only error did not request a failure")
+	}
+	if score, err := scoreReconstructed(run); err != nil || score.Status != "fail" || score.Reason != "diagnostic capture: "+finishErr.Error() {
+		t.Fatalf("capture-only failure lost: %+v %v", score, err)
+	}
+	run.Workload = "R-DE"
+	run.ProfileError = ""
+	run.Parameters = map[string]any{"quiet_error": "context deadline exceeded"}
+	if score, err := scoreReconstructed(run); err != nil || score.Status != "insufficient" || score.Reason != "quiet did not arrive within 300 s: context deadline exceeded" {
+		t.Fatalf("quiet failure became a profile failure: %+v %v", score, err)
+	}
+	run.PreparationInsufficient = "contract attachment preparation unavailable"
+	if score, err := scoreReconstructed(run); err != nil || score.Status != "insufficient" || score.Reason != run.PreparationInsufficient {
+		t.Fatalf("preparation failure lost: %+v %v", score, err)
+	}
+}
+
+func TestReconstructedMeasurementProfileEnvironment(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("profile_%v", enabled), func(t *testing.T) {
+			var opts []issue767FixtureOption
+			if enabled {
+				opts = append(opts, issue767WithPProf)
+			}
+			f := newIssue767FixtureWithCorpus(t, "not-executed", issue767DefaultCorpus, opts...)
+			present := false
+			for _, entry := range f.env {
+				if strings.HasPrefix(entry, "GORTEX_DAEMON_PPROF_ADDR=") {
+					present = true
+				}
+			}
+			if present != enabled || f.profiled != enabled {
+				t.Fatalf("profile=%v listener=%v child lifetime=%v", enabled, present, f.profiled)
+			}
+		})
+	}
+}
+
+func TestReconstructedMeasurementProfileStart(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "daemon.log")
+	if err := os.WriteFile(log, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("daemon_exit", func(t *testing.T) {
+		p := reconstructedTestProfiles(t, "cold-index")
+		done := make(chan error, 1)
+		exitErr := errors.New("daemon crashed")
+		done <- exitErr
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+		defer cancel()
+		err := p.start(ctx, log, time.Now(), done)
+		defer p.cancel()
+		if err == nil || !strings.Contains(err.Error(), "isolated daemon exited during start: daemon crashed; log "+log) {
+			t.Fatalf("early exit lost: %v", err)
+		}
+		if err := <-done; err != exitErr {
+			t.Fatalf("join receipt consumed: %v", err)
+		}
+	})
+	t.Run("second_start", func(t *testing.T) {
+		p := reconstructedTestProfiles(t, "cold-index")
+		if err := p.start(t.Context(), log+".missing", time.Now(), nil); err == nil {
+			t.Fatal("missing startup log accepted")
+		}
+		defer p.cancel()
+		if err := p.start(t.Context(), log+".missing", time.Now(), nil); err == nil || err.Error() != "profile capture already started or finished" {
+			t.Fatalf("second start accepted: %v", err)
+		}
+	})
+	t.Run("after_finish", func(t *testing.T) {
+		p := reconstructedTestProfiles(t, "cold-index")
+		if err := p.finish(time.Now()); err == nil {
+			t.Fatal("unstarted finish did not fail")
+		}
+		if err := p.start(t.Context(), log+".missing", time.Now(), nil); err == nil || err.Error() != "profile capture already started or finished" {
+			t.Fatalf("start after finish accepted: %v", err)
+		}
+	})
 }

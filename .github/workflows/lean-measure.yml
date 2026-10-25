@@ -171,13 +171,14 @@ jobs:
           REPEAT: ${{ matrix.repeat }}
           BINARIES: ${{ needs.config.outputs.binaries }}
           WORKLOADS: ${{ toJSON(matrix.group.workloads) }}
+          ROW_MODE: ${{ matrix.mode }}
           PROFILE_SCENARIO: ${{ matrix.scenario }}
           HARNESS_COMMIT: ${{ github.sha }}
         run: |
           while IFS='=' read -r key _value; do
             case "$key" in GORTEX_*|GX_*) unset "$key" ;; esac
           done < <(env)
-          jq -e 'type == "array"' <<< "$WORKLOADS"
+          jq -e --arg mode "$ROW_MODE" 'type == "array" and (length > 0 or $mode == "profile")' <<< "$WORKLOADS"
           for name in $(jq -r '.commits | keys[]' measure/run.json); do chmod +x "binaries/$name"; done
           cp binaries/identities.json results/identities.json
           go test -tags acceptance -run '^TestProcessSamplerResources' -count=1 -v \
@@ -188,7 +189,7 @@ jobs:
           done
           go test -tags acceptance -run '^TestReconstructed(Measurement|Scorer$|SearchSymbols$)' -count=1 -v \
             ./cmd/gortex | tee results/measurement-tests.log
-          for test in Deadlines SearchTimeout LoadSearchError ScorerSearchTimeout WarmupOrder Enrichment TerminalResult LoadNoReplay DemandOwner DemandGaps ContractAnswer JobEvidence ForcedPreparation ScorerErrors ScorerJobs RestartStarts PathSizes OversizedTerminal ProfileEndpoint ProfileMode ProfileBoundaries ProfileHTTP ProfileDelta ProfileLifecycle ProfileIdentity ProfileCommand Campaign; do
+          for test in Deadlines SearchTimeout LoadSearchError ScorerSearchTimeout WarmupOrder Enrichment TerminalResult LoadNoReplay DemandOwner DemandGaps ContractAnswer JobEvidence ForcedPreparation ScorerErrors ScorerJobs RestartStarts PathSizes OversizedTerminal ProfileEndpoint ProfileMode ProfileBoundaries ProfileHTTP ProfileDelta ProfileLifecycle ProfileIdentity ProfileCommand ProfileErrors ProfileEnvironment ProfileStart Campaign; do
             grep -Eq "^--- PASS: TestReconstructedMeasurement${test} " results/measurement-tests.log
           done
           status=0
@@ -261,6 +262,18 @@ jobs:
             if ! go test -tags acceptance -run "^${test_name}$" -count=1 -v \
               -timeout=160m ./cmd/gortex | tee "results/profile-$PROFILE_SCENARIO.log"; then status=1; fi
             if ! grep -Eq "^--- PASS: ${test_name} " "results/profile-$PROFILE_SCENARIO.log"; then status=1; fi
+            find "results/profile-$PROFILE_SCENARIO" -maxdepth 2 -name 'store.sqlite*' -type f \
+              -exec stat -c '%n %s' {} + 2>/dev/null >> "results/profile-$PROFILE_SCENARIO/store-sizes.txt" ||
+              find "results/profile-$PROFILE_SCENARIO" -maxdepth 2 -name 'store.sqlite*' -type f \
+                -exec stat -f '%N %z' {} + >> "results/profile-$PROFILE_SCENARIO/store-sizes.txt"
+            find "results/profile-$PROFILE_SCENARIO" -maxdepth 2 \( -name 'store.sqlite*' -o -name repo -o -name 'linked*' \) \
+              -prune -exec rm -rf {} +
+            # A Go helper can outlive the daemon and still write here; a failed
+            # cleanup only leaves files in the upload, so warn and continue.
+            for cache in "results/profile-$PROFILE_SCENARIO"/*/cache/go-mod; do
+              if [[ -d "$cache" ]]; then chmod -R u+w "$cache" || echo "warning: go-mod cache chmod incomplete for $PROFILE_SCENARIO" >&2; fi
+            done
+            rm -rf "results/profile-$PROFILE_SCENARIO"/*/cache/{go-build,go-mod} || echo "warning: Go cache cleanup incomplete for $PROFILE_SCENARIO" >&2
             test -s "$GORTEX_RECON_PROFILE_DIR/capture.json"
             jq -e '.error == null and (.captures | length > 0)' "$GORTEX_RECON_PROFILE_DIR/capture.json"
           fi

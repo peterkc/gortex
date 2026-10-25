@@ -60,6 +60,7 @@ type reconstructedRebuild struct {
 type reconstructedRun struct {
 	Mode         string                     `json:"mode,omitempty"`
 	Profiles     *reconstructedProfiles     `json:"profiles,omitempty"`
+	ProfileError string                     `json:"profile_error,omitempty"`
 	Label        string                     `json:"label"`
 	Workload     string                     `json:"workload"`
 	Parameters   map[string]any             `json:"parameters"`
@@ -145,6 +146,16 @@ func reconstructedLoaded(sample reconstructedSample, rebuilds []reconstructedReb
 	return false
 }
 
+// recordProfileError retains the first capture error separately. It requests
+// one test failure only when there is no earlier driver error.
+func (run *reconstructedRun) recordProfileError(err error) bool {
+	if err == nil || run.ProfileError != "" {
+		return false
+	}
+	run.ProfileError = err.Error()
+	return run.Error == ""
+}
+
 func scoreReconstructed(run reconstructedRun) (reconstructedScore, error) {
 	score := reconstructedScore{Label: "reconstructed", Workload: run.Workload, Status: "pass", Job: "unsupported"}
 	if run.Label != "reconstructed" {
@@ -158,23 +169,7 @@ func scoreReconstructed(run reconstructedRun) (reconstructedScore, error) {
 	if run.Error != "" {
 		score.Status, score.Reason = "fail", run.Error
 	}
-	if run.Mode == "profile" {
-		if run.Profiles == nil {
-			return score, errors.New("profile run missing capture manifest")
-		}
-		if run.Error != "" {
-			return score, nil
-		}
-		if run.Profiles.Error != "" {
-			return score, errors.New(run.Profiles.Error)
-		}
-		if err := run.Profiles.validate(); err != nil {
-			return score, err
-		}
-		score.Status, score.Reason = "diagnostic", "separate profile repeat; excluded from timing evidence"
-		return score, nil
-	}
-	if run.Profiles != nil {
+	if run.Mode != "profile" && run.Profiles != nil {
 		return score, errors.New("timing run contains diagnostic profiles")
 	}
 	if run.PreparationInsufficient != "" && run.Error == "" {
@@ -183,6 +178,29 @@ func scoreReconstructed(run reconstructedRun) (reconstructedScore, error) {
 	}
 	if run.Workload != "R-Fresh" && !run.Quiet && run.Error == "" {
 		score.Status, score.Reason = "insufficient", "quiet did not arrive within 300 s"
+		if reason, ok := run.Parameters["quiet_error"].(string); run.Mode == "profile" && ok && reason != "" {
+			score.Reason += ": " + reason
+		}
+		return score, nil
+	}
+	if run.Mode == "profile" {
+		if run.Error != "" {
+			return score, nil
+		}
+		if run.ProfileError != "" {
+			score.Status, score.Reason = "fail", "diagnostic capture: "+run.ProfileError
+			return score, nil
+		}
+		if run.Profiles == nil {
+			return score, errors.New("profile run missing capture manifest")
+		}
+		if run.Profiles.Error != "" {
+			return score, errors.New(run.Profiles.Error)
+		}
+		if err := run.Profiles.validate(); err != nil {
+			return score, err
+		}
+		score.Status, score.Reason = "diagnostic", "separate profile repeat; excluded from timing evidence"
 		return score, nil
 	}
 	if len(run.Samples) == 0 {

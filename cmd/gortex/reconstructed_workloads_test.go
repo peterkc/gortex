@@ -95,6 +95,9 @@ func newReconstructedDriver(t *testing.T, workload string) *reconstructedDriver 
 	}}}
 	d.run.Mode = mode
 	var opts []issue767FixtureOption
+	if mode == "profile" {
+		opts = append(opts, issue767WithPProf)
+	}
 	if workload == "R-Fill" {
 		opts = append(opts, issue767WithLoopbackHTTP)
 	}
@@ -191,7 +194,6 @@ func newReconstructedDriver(t *testing.T, workload string) *reconstructedDriver 
 		if err != nil {
 			t.Fatal(err)
 		}
-		d.f.env = append(d.f.env, "GORTEX_DAEMON_PPROF_ADDR=127.0.0.1:0")
 		d.run.Profiles = d.profiles
 	}
 	t.Cleanup(func() { d.finish(t) })
@@ -253,9 +255,8 @@ func reconstructedDeclarations(path string) ([]string, error) {
 
 func (d *reconstructedDriver) finish(t *testing.T) {
 	if d.f.profiles != nil {
-		if err := d.f.profiles.finish(time.Now()); err != nil {
-			d.run.Error = "diagnostic capture: " + err.Error()
-			t.Error(d.run.Error)
+		if err := d.f.profiles.finish(time.Now()); d.run.recordProfileError(err) {
+			t.Errorf("diagnostic capture: %v", err)
 		}
 	}
 	if !d.f.stopAndJoin() {
@@ -515,17 +516,12 @@ func TestReconstructedDE(t *testing.T) {
 	}
 	if d.profiles != nil {
 		d.f.profiles = d.profiles
-		if err := d.profiles.start(t.Context(), d.f.logPath(), d.started); err != nil {
-			d.run.Error = err.Error()
-			t.Error(err)
+		if err := d.profiles.start(t.Context(), d.f.logPath(), d.started, d.f.done); err != nil {
+			if d.run.recordProfileError(err) {
+				t.Errorf("diagnostic capture: %v", err)
+			}
 			return
 		}
-		defer func() {
-			if err := d.profiles.finish(time.Now()); err != nil {
-				d.run.Error = err.Error()
-				t.Error(err)
-			}
-		}()
 	}
 	results := make(chan reconstructedSample, 20)
 	var probes sync.WaitGroup
@@ -585,8 +581,9 @@ func TestReconstructedDE(t *testing.T) {
 	end := time.Now()
 	if d.profiles != nil {
 		if err := d.profiles.finish(end); err != nil {
-			d.run.Error = err.Error()
-			t.Error(err)
+			if d.run.recordProfileError(err) {
+				t.Errorf("diagnostic capture: %v", err)
+			}
 			return
 		}
 	}
@@ -769,13 +766,6 @@ func TestReconstructedFresh(t *testing.T) {
 	if !d.awaitEnrichment() {
 		return
 	}
-	if d.profiles != nil {
-		if err := d.profiles.finish(time.Now()); err != nil {
-			d.run.Error = err.Error()
-			t.Error(err)
-			return
-		}
-	}
 	d.run.Parameters["full_preparation_ms"] = time.Since(start).Seconds() * 1000
 	size, err := reconstructedStoreBytes(d.f.store)
 	if err != nil {
@@ -783,6 +773,11 @@ func TestReconstructedFresh(t *testing.T) {
 		return
 	}
 	d.run.Parameters["settled_store_plus_wal_bytes"] = size
+	if d.profiles != nil {
+		if err := d.profiles.finish(time.Now()); d.run.recordProfileError(err) {
+			t.Errorf("diagnostic capture: %v", err)
+		}
+	}
 }
 
 func TestReconstructedRestart(t *testing.T) {
