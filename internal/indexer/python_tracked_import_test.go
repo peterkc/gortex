@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"context"
 	"fmt"
 	"iter"
 	"path/filepath"
@@ -288,4 +289,21 @@ func TestPythonConsumerLookupClosesImportCursor(t *testing.T) {
 			require.Equal(t, []string{"consumer/app.py"}, mi.pythonConsumerFilesForRepo("provider"))
 		})
 	}
+}
+
+func TestSingleRepoPythonAddedFileSkipsCrossRepoScan(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "app.py", "import missing\n")
+	g := &pythonLookupScanStore{Store: graph.New()}
+	reg := newTestRegistry()
+	reg.Register(languages.NewPythonExtractor())
+	mi := NewMultiIndexer(g, reg, search.NewNull(), newTestConfigManager(t), zap.NewNop())
+	t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
+	_, err := mi.TrackRepoCtx(t.Context(), config.RepoEntry{Path: root, Name: "solo", Workspace: "shared"})
+	require.NoError(t, err)
+	g.importScans = 0
+	writeWorkspaceFile(t, root, "missing.py", "pass\n")
+	_, err = mi.IncrementalReindexRepo("solo", []string{filepath.Join(root, "missing.py")})
+	require.NoError(t, err)
+	require.Zero(t, g.importScans, "a lone Python repo has no foreign provider to recover")
 }
