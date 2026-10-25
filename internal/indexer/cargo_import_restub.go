@@ -75,6 +75,9 @@ func restubTrackedCargoImportsFromView(g graph.Store, evicted map[string]struct{
 				graph.StashRestubProvenance(edge)
 				edge.ConfidenceLabel = ""
 			}
+			if edge.Kind == graph.EdgeImports {
+				delete(edge.Meta, resolver.CargoImportModuleMeta)
+			}
 			edge.To, edge.CrossRepo = stub, false
 			batch = append(batch, graph.EdgeReindex{Edge: edge, OldTo: old})
 		}
