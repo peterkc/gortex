@@ -186,7 +186,7 @@ func (mi *MultiIndexer) pythonAddedFileConsumers(files []string) []string {
 		configuredRepos := mi.configMgr.Global().Repos
 		warming = len(configuredRepos) > 1 && len(mi.AllMetadata()) < len(configuredRepos)
 	}
-	if !warming && mi.pythonPackageLookup() == nil {
+	if !warming && len(mi.AllMetadata()) < 2 {
 		return nil
 	}
 	return pythonConsumerFilesForAddedFiles(mi.graph, files)
