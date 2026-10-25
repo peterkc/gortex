@@ -121,7 +121,7 @@ func TestCargoRevisitedImportRestoresStubOnRefusal(t *testing.T) {
 					for _, file := range []string{"consumer/src/lib.rs", "provider/src/lib.rs", "provider/src/util.rs", "fork/src/lib.rs"} {
 						g.AddNode(&graph.Node{ID: file, FilePath: file, Kind: graph.KindFile, RepoPrefix: graph.RepoPrefixOfID(file), Language: "rust"})
 					}
-					g.AddEdge(&graph.Edge{From: "consumer/src/lib.rs", FilePath: "consumer/src/lib.rs", To: "provider/src/util.rs", Kind: graph.EdgeImports, Line: 1, CrossRepo: true, Meta: map[string]any{CargoImportStubMeta: stub}})
+					g.AddEdge(&graph.Edge{From: "consumer/src/lib.rs", FilePath: "consumer/src/lib.rs", To: "provider/src/util.rs", Kind: graph.EdgeImports, Line: 1, CrossRepo: true, Meta: map[string]any{CargoImportStubMeta: stub, CargoImportModuleMeta: "other_crate::util"}})
 					g.AddEdge(&graph.Edge{From: "consumer/src/lib.rs", FilePath: "consumer/src/lib.rs", To: "provider/src/util.rs::action", Kind: graph.EdgeCalls, Line: 2, CrossRepo: true, Meta: map[string]any{CargoCallStubMeta: "unresolved::action"}})
 					cr := NewCrossRepo(g)
 					cr.SetCargoImportRetargetRepo("provider")
@@ -137,6 +137,7 @@ func TestCargoRevisitedImportRestoresStubOnRefusal(t *testing.T) {
 					require.Len(t, imports, 1)
 					require.Equal(t, stub, imports[0].To)
 					require.False(t, imports[0].CrossRepo)
+					require.NotContains(t, imports[0].Meta, CargoImportModuleMeta)
 					calls := outEdgesOfKind(g, "consumer/src/lib.rs", graph.EdgeCalls)
 					require.Len(t, calls, 1)
 					require.Equal(t, "unresolved::action", calls[0].To, "warm call must equal a cold unbound call")
