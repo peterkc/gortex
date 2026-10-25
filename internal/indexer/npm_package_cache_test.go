@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"github.com/zzet/gortex/internal/graph"
 	"os"
 	"path/filepath"
 	"testing"
@@ -59,6 +60,60 @@ func TestNpmPackageLookupCachesManifestWork(t *testing.T) {
 			require.Positive(t, reads, "config revisions rebuild workspace placement")
 			mi.repos = map[string]*RepoMetadata{}
 			assert.Nil(t, mi.npmPackageLookup(), "removed roots cannot retain claims")
+		})
+	}
+}
+
+// Given cached package evidence, when an independent input changes without
+// changing the others, then a new pass matches cold and the old pass stays fixed.
+func TestNpmPackageSnapshotIndependentInvalidation(t *testing.T) {
+	for _, mode := range []string{"root_manifest", "pnpm_manifest", "one_root_removed", "workspace_id", "root_relocation"} {
+		t.Run(mode, func(t *testing.T) {
+			root, other := t.TempDir(), t.TempDir()
+			writePackageJSON(t, root, `{"name":"p","main":"index.ts"}`)
+			writePackageJSON(t, other, `{"name":"q","main":"index.ts"}`)
+			if mode == "pnpm_manifest" {
+				writePackageJSON(t, root, `{"name":"root"}`)
+				writeWorkspaceFile(t, root, "pnpm-workspace.yaml", "packages:\n  - 'packages/*'\n")
+				writePackageJSON(t, filepath.Join(root, "packages", "a"), `{"name":"p","main":"index.ts"}`)
+				writePackageJSON(t, filepath.Join(root, "other", "b"), `{"name":"p","main":"next.ts"}`)
+			}
+			cm := newTestConfigManager(t)
+			idx := newTestIndexer(graph.New())
+			t.Cleanup(idx.Close)
+			idx.SetWorkspaceID("before")
+			mi := &MultiIndexer{configMgr: cm, repos: map[string]*RepoMetadata{"lib": {RootPath: root}, "other": {RootPath: other}}, indexers: map[string]*Indexer{"lib": idx}}
+			first := mi.npmPackageLookup()
+			before := first("p")
+			require.NotEmpty(t, before)
+			firstQ := first("q")
+			require.NotEmpty(t, firstQ)
+			revision := cm.Revision()
+			switch mode {
+			case "root_manifest":
+				require.NoError(t, os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"name":"p","exports":"./changed.ts"}`), 0o600))
+			case "pnpm_manifest":
+				require.NoError(t, os.WriteFile(filepath.Join(root, "pnpm-workspace.yaml"), []byte("packages:\n  - 'other/*'\n"), 0o600))
+			case "one_root_removed":
+				delete(mi.repos, "other")
+			case "workspace_id":
+				idx.SetWorkspaceID("after")
+			case "root_relocation":
+				mi.repos["lib"].RootPath = other
+			}
+			require.Equal(t, revision, cm.Revision(), "each input must invalidate independently of config revision")
+			fresh := mi.npmPackageLookup()
+			cold := (&MultiIndexer{configMgr: cm, repos: mi.repos, indexers: mi.indexers}).npmPackageLookup()
+			assert.Equal(t, cold("p"), fresh("p"))
+			assert.Equal(t, cold("q"), fresh("q"))
+			assert.Equal(t, before, first("p"), "an active pass is immutable")
+			assert.Equal(t, firstQ, first("q"))
+			if mode == "one_root_removed" {
+				assert.Empty(t, fresh("q"))
+				require.NotEmpty(t, fresh("p"))
+			} else {
+				assert.NotEqual(t, before, fresh("p"))
+			}
 		})
 	}
 }
