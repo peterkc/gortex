@@ -297,7 +297,7 @@ func (mi *MultiIndexer) purgeRepositoryPayload(
 		if err := purger.PurgeRepo(repoPrefix); err != nil {
 			return 0, 0, fmt.Errorf("purge repository payload: %w", err)
 		}
-		if err := mi.finalizeUntrackedGoModuleCalls(parked); err != nil {
+		if err := mi.finalizeUntrackedGoModuleCalls(repoPrefix, parked); err != nil {
 			return 0, 0, err
 		}
 		if meta != nil {
@@ -307,16 +307,17 @@ func (mi *MultiIndexer) purgeRepositoryPayload(
 	}
 	nodesRemoved, edgesRemoved, err = evictRepoAllGenerations(mi.graph, repoPrefix)
 	if err == nil {
-		err = mi.finalizeUntrackedGoModuleCalls(parked)
+		err = mi.finalizeUntrackedGoModuleCalls(repoPrefix, parked)
 	}
 	return nodesRemoved, edgesRemoved, err
 }
 
-func (mi *MultiIndexer) finalizeUntrackedGoModuleCalls(parked []graph.EdgeIdentity) error {
+func (mi *MultiIndexer) finalizeUntrackedGoModuleCalls(removedRepo string, parked []graph.EdgeIdentity) error {
+	cr := mi.newCrossRepoResolver()
+	cr.InvalidateGoModulePackageRepo(removedRepo)
 	if len(parked) == 0 {
 		return nil
 	}
-	cr := mi.newCrossRepoResolver()
 	if err := cr.ResolveDeferredGoModuleEdgeIdentities(parked); err != nil {
 		return err
 	}
