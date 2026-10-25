@@ -326,3 +326,8 @@ func TestPythonAddedFileGateDoesNotBuildLookup(t *testing.T) {
 	require.Equal(t, []string{"consumer/app.py"}, mi.pythonAddedFileConsumers([]string{"provider/mylib.py"}))
 	require.Zero(t, g.nodeReads, "the added-file candidate gate must not build package lookup")
 }
+
+func TestPythonAddedFileNilGlobal(t *testing.T) {
+	mi := &MultiIndexer{graph: graph.New(), configMgr: &config.ConfigManager{}}
+	require.NotPanics(t, func() { require.Empty(t, mi.pythonAddedFileConsumers([]string{"solo/new.py"})) })
+}
