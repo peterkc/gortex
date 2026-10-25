@@ -1,0 +1,69 @@
+name: linux-build-v8
+
+# Fork-only, not for upstream: build the storage-study v8 commit for
+# linux/amd64 with the release's static-link flags (see .goreleaser.yml and
+# ci.yml build-linux-static), for the study's Linux pod. Checks out the
+# pinned commit itself, so the binary's vcs.revision is that commit.
+on:
+  push:
+    branches: [exp/linux-build-v8]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PIN: 21baab3b1781e06b3cf74851cad2444c843aaf4b
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 21baab3b1781e06b3cf74851cad2444c843aaf4b
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build with the release link flags
+        env:
+          CGO_ENABLED: "1"
+          CGO_CFLAGS: -O2 -g -fno-strict-aliasing
+          CGO_CXXFLAGS: -O2 -g -fno-strict-aliasing
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PIN"
+          date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          name="gortex-${PIN:0:8}-linux-amd64"
+          go build -tags netgo,osusergo,static_link \
+            -ldflags "-s -w -X main.version=v0.64.10-dev-storage -X main.commit=${PIN:0:8} -X main.date=$date -extldflags -static" \
+            -o "$name" ./cmd/gortex/
+          {
+            echo "commit: $PIN"
+            echo "built: $date"
+            echo "runner: $ImageOS $ImageVersion $(uname -m)"
+            go version
+            gcc --version | head -1
+            echo "env: CGO_ENABLED=1 CGO_CFLAGS='-O2 -g -fno-strict-aliasing' CGO_CXXFLAGS='-O2 -g -fno-strict-aliasing'"
+            echo "cmd: go build -tags netgo,osusergo,static_link -ldflags \"-s -w -X main.version=v0.64.10-dev-storage -X main.commit=${PIN:0:8} -X main.date=$date -extldflags -static\" ./cmd/gortex/"
+            file "$name"
+            sha256sum "$name"
+            go version -m "$name" | grep -E 'vcs.revision|vcs.modified|-tags|ldflags'
+          } | tee build-receipt.txt
+
+      - name: Verify the binary is self-contained
+        run: sh scripts/verify-static-elf.sh gortex-*-linux-amd64
+
+      - name: Run it on an older userland
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/$(ls gortex-*-linux-amd64):/gortex:ro" debian:11 /gortex version | tee -a build-receipt.txt
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gortex-v8-linux-amd64
+          path: |
+            gortex-*-linux-amd64
+            build-receipt.txt
+          if-no-files-found: error
