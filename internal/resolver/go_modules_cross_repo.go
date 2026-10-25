@@ -648,6 +648,14 @@ func (cr *CrossRepoResolver) noteGoModuleSourceFile(e *graph.Edge) {
 		cr.goModuleSourceFiles = make(map[string]struct{})
 	}
 	cr.goModuleSourceFiles[e.FilePath] = struct{}{}
+	if cr.goModuleSourceSites == nil {
+		cr.goModuleSourceSites = make(map[graph.EdgeSite]map[string]struct{})
+	}
+	site := graph.EdgeSite{From: e.From, Line: e.Line, Kind: e.Kind}
+	if cr.goModuleSourceSites[site] == nil {
+		cr.goModuleSourceSites[site] = make(map[string]struct{})
+	}
+	cr.goModuleSourceSites[site][e.To] = struct{}{}
 }
 
 func (cr *CrossRepoResolver) TakeGoModuleSourceFiles() []string {
@@ -658,8 +666,8 @@ func (cr *CrossRepoResolver) TakeGoModuleSourceFiles() []string {
 	return files
 }
 
-// RestoreGoModuleSourceCalls adds only freshly extracted, now-bindable calls.
-// Existing identities and calls into unavailable packages remain untouched.
+// RestoreGoModuleSourceCalls restores calls lost by package-terminal convergence.
+// Missing calls at the same package/site return to the external-call tail.
 func (cr *CrossRepoResolver) RestoreGoModuleSourceCalls(edges []*graph.Edge) {
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
@@ -678,13 +686,23 @@ func (cr *CrossRepoResolver) RestoreGoModuleSourceCalls(edges []*graph.Edge) {
 			continue
 		}
 		match := cr.goModuleCandidate(spec[:sep], cr.graph.FindNodesByName(spec[sep+2:]), source.RepoPrefix, candidateWorkspaceID(source))
+		terminal := externalCallPrefix + "dep::" + spec[:sep]
 		if match == nil {
-			continue
+			site := graph.EdgeSite{From: e.From, Line: e.Line, Kind: e.Kind}
+			if _, affected := cr.goModuleSourceSites[site][terminal]; !affected {
+				continue
+			}
+			e.To = "dep::" + spec
+		} else {
+			bindGoModuleEdge(e, match, source.RepoPrefix, cr.goModules[source.RepoPrefix], cr.goModuleReplacements)
 		}
-		bindGoModuleEdge(e, match, source.RepoPrefix, cr.goModules[source.RepoPrefix], cr.goModuleReplacements)
 		exists := false
 		for _, live := range cr.graph.GetOutEdges(e.From) {
-			if graph.EdgeIdentityFor(live) == graph.EdgeIdentityFor(e) {
+			identity := graph.EdgeIdentityFor(e)
+			if match == nil {
+				identity.To = terminal
+			}
+			if graph.EdgeIdentityFor(live) == graph.EdgeIdentityFor(e) || (match == nil && graph.EdgeIdentityFor(live) == identity) {
 				exists = true
 				break
 			}
@@ -693,6 +711,14 @@ func (cr *CrossRepoResolver) RestoreGoModuleSourceCalls(edges []*graph.Edge) {
 			continue
 		}
 		cr.graph.AddEdge(e)
+		if match == nil {
+			if e.Meta == nil {
+				e.Meta = make(map[string]any)
+			}
+			e.Meta["go_import"] = spec
+			cr.noteDemotedGoModuleCall(e)
+			delete(e.Meta, "go_import")
+		}
 		added = append(added, graph.EdgeReindex{Edge: e})
 		cr.noteRetargetedCall(e)
 	}

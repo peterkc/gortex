@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,13 +51,23 @@ func revisionCallTargets(g graph.Store, caller string, kind graph.EdgeKind) []st
 // then every call must match a cold index, independently of track order.
 func TestGoModuleSameLineCallsColdEquivalent(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
-		for _, mode := range []string{"provider_first", "caller_first", "rename_back", "retrack"} {
+		for _, mode := range []string{"provider_first", "caller_first", "rename_back", "retrack", "provider_first_mixed_first", "caller_first_mixed_first", "provider_first_mixed_last", "caller_first_mixed_last"} {
 			t.Run(backend+"/"+mode, func(t *testing.T) {
 				mi, g, repos := goModuleLifecycleFixture(t, backend)
 				writeFile(t, filepath.Join(repos[0].Path, "main.go"), "package caller\nimport library \"example.org/library\"\nfunc Caller() { library.Hello(library.World()) }\n")
 				writeFile(t, filepath.Join(repos[1].Path, "lib.go"), "package library\nfunc Hello(v int) {}\nfunc World() int { return 1 }\n")
+				expected := []string{"b/lib.go::Hello", "b/lib.go::World"}
+				if strings.Contains(mode, "mixed") {
+					bound := "Hello"
+					if strings.HasSuffix(mode, "last") {
+						bound = "World"
+					}
+					writeFile(t, filepath.Join(repos[0].Path, "main.go"), "package caller\nimport library \"example.org/library\"\nfunc Caller() { library."+bound+"(library.Missing()) }\n")
+					writeFile(t, filepath.Join(repos[1].Path, "lib.go"), "package library\nfunc "+bound+"(v int) {}\n")
+					expected = []string{"b/lib.go::" + bound, "external-call::dep::example.org/library"}
+				}
 				order := []config.RepoEntry{repos[1], repos[0]}
-				if mode == "caller_first" {
+				if strings.HasPrefix(mode, "caller_first") {
 					order[0], order[1] = order[1], order[0]
 				}
 				for _, entry := range order {
@@ -80,7 +91,6 @@ func TestGoModuleSameLineCallsColdEquivalent(t *testing.T) {
 					require.NoError(t, err)
 				}
 				cold := revisionColdGraph(t, backend, repos[:2])
-				expected := []string{"b/lib.go::Hello", "b/lib.go::World"}
 				require.ElementsMatch(t, expected, revisionCallTargets(cold, "a/main.go::Caller", graph.EdgeCalls))
 				assert.ElementsMatch(t, expected, revisionCallTargets(g, "a/main.go::Caller", graph.EdgeCalls))
 			})
