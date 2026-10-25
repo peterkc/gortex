@@ -316,3 +316,93 @@ func TestGoModuleImportDuplicateAliases(t *testing.T) {
 		}
 	}
 }
+
+func TestGoModuleReplacementFileSaveColdParity(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, route := range []string{"file", "batch", "fallback"} {
+			t.Run(backend+"/"+route, func(t *testing.T) {
+				mi, g, repos := goModuleLifecycleFixture(t, backend)
+				replacement := filepath.Join(repos[0].Path, "third_party", "library", "lib.go")
+				require.NoError(t, os.MkdirAll(filepath.Dir(replacement), 0o755))
+				writeFile(t, filepath.Join(repos[0].Path, "go.mod"), "module example.org/caller\nrequire example.org/library v1.0.0\nreplace example.org/library => ./third_party/library\n")
+				writeFile(t, filepath.Join(repos[0].Path, "main.go"), "package caller\nimport library \"example.org/library\"\nfunc Caller() { library.Hello() }\n")
+				writeFile(t, replacement, "package library\nfunc Hello() {}\n")
+				for _, entry := range repos {
+					_, err := mi.TrackRepoCtx(t.Context(), entry)
+					require.NoError(t, err)
+				}
+				// Reproduce a persisted same-repo binding emitted by the module bridge.
+				for _, imp := range g.GetOutEdges("a/main.go") {
+					if imp.Kind != graph.EdgeImports {
+						continue
+					}
+					imp.Meta = map[string]any{"go_import": "example.org/library", "go_import_fallback": "dep::example.org/library"}
+					g.ReindexEdges([]graph.EdgeReindex{{Edge: imp, OldTo: imp.To}})
+				}
+				rows := func(store graph.Store) []string {
+					var result []string
+					for _, imp := range store.GetOutEdges("a/main.go") {
+						if imp.Kind == graph.EdgeImports {
+							result = append(result, fmt.Sprintf("L%d %s cross=%v", imp.Line, imp.To, imp.CrossRepo))
+						}
+					}
+					sort.Strings(result)
+					return result
+				}
+				before := rows(g)
+				require.Len(t, before, 1)
+				require.Contains(t, before[0], "a/third_party/library/lib.go cross=false")
+				writeFile(t, replacement, "package library\nfunc Hello() { println(1) }\n")
+				if route == "fallback" {
+					require.NoError(t, mi.GetIndexer("a").indexFile(replacement, true, nil))
+				} else if route == "file" {
+					require.NoError(t, mi.GetIndexer("a").IndexFile(replacement))
+				} else {
+					_, err := mi.IncrementalReindexRepo("a", []string{replacement})
+					require.NoError(t, err)
+				}
+				var coldGraph graph.Store = graph.New()
+				if backend == "sqlite" {
+					db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "replacement-cold.sqlite"))
+					require.NoError(t, err)
+					t.Cleanup(func() { require.NoError(t, db.Close()) })
+					coldGraph = db
+				}
+				cold := NewMultiIndexer(coldGraph, newTestRegistry(), search.NewNull(), newTestConfigManager(t), zap.NewNop())
+				t.Cleanup(func() { require.NoError(t, cold.Close(context.Background())) })
+				for _, entry := range repos {
+					_, err := cold.TrackRepoCtx(t.Context(), entry)
+					require.NoError(t, err)
+				}
+				require.Equal(t, before, rows(coldGraph))
+				require.Equal(t, rows(coldGraph), rows(g), "provider save must match batch and cold imports")
+			})
+		}
+	}
+}
+
+func TestSingleFileRestubLeavesFileReferencesForEviction(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			var g graph.Store = graph.New()
+			if backend == "sqlite" {
+				db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.sqlite"))
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, db.Close()) })
+				g = db
+			}
+			file, page := "app/+page.server.ts", "app/+page.svelte"
+			g.AddNode(&graph.Node{ID: file, Name: "+page.server.ts", FilePath: file, Kind: graph.KindFile})
+			g.AddNode(&graph.Node{ID: page, Name: "+page.svelte", FilePath: page, Kind: graph.KindFile})
+			// SvelteKit load synthesis references the server file, not a named symbol.
+			g.AddEdge(&graph.Edge{From: page, To: file, FilePath: page, Kind: graph.EdgeReferences})
+			idx := &Indexer{graph: g}
+			idx.restubIncomingRefs(file)
+			refs := g.GetOutEdges(page)
+			require.Len(t, refs, 1)
+			require.Equal(t, file, refs[0].To, "file references must not become unresolvable name stubs")
+			g.EvictFile(file)
+			require.Empty(t, g.GetOutEdges(page))
+		})
+	}
+}
