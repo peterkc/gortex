@@ -108,10 +108,24 @@ def timing_jobs(timing: Path) -> list[Job]:
     return jobs
 
 
-def latency_jobs(ann: Path) -> list[Job]:
+def latency_jobs(ann: Path, generated: bool = False) -> list[Job]:
     jobs = []
-    for directory in dataset_dirs():
+    directories = ([WORK / f"generated-n{n}" for n in (10000, 100000)]
+                   if generated else dataset_dirs())
+    for directory in directories:
         label = directory.parent.name + "-" + directory.name
+        if generated:
+            prep = (str(ann), "-dataset", str(directory))
+            n = directory.name.removeprefix("generated-n")
+            for suffix, flags, artifact in (
+                ("generate", ("-phase", "generate", "-n", n),
+                 "input-receipt.json"),
+                ("int8", ("-phase", "int8-build"), "int8.bin"),
+                ("native", ("-phase", "build", "-m", "32"),
+                 "native-M32-f32-rep1/build.json"),
+            ):
+                jobs.append(Job(label + "-" + suffix, prep + flags,
+                                directory / artifact, "preparation"))
         base = (str(ann), "-dataset", str(directory), "-phase", "latency")
         methods = [("exact", 16, 512, 10, 1)]
         methods += [("int8", 16, 512, 128, workers) for workers in (1, 4, 8)]
@@ -119,6 +133,10 @@ def latency_jobs(ann: Path) -> list[Job]:
                     for method in ("f32", "i8") for m in (16, 32)
                     for ef in (512, 1024)
                     for k in ((10,) if method == "f32" else (50, 100, 200))]
+        if generated:
+            methods = [recipe for recipe in methods
+                       if recipe[0] in ("exact", "int8")
+                       or recipe == ("f32", 32, 1024, 10, 1)]
         for method, m, ef, k, workers in methods:
             flags = ("-method", method, "-m", str(m), "-ef", str(ef),
                      "-workers", str(workers))
@@ -258,10 +276,24 @@ def build(binary: Path, mode: Mode, native: Path) -> None:
                    cwd=ROOT, env=environment, check=True)
 
 
+def generated_input_sha(job: Job) -> str | None:
+    if "-n" in job.command:
+        return None
+    folder = Path(job.command[job.command.index("-dataset") + 1])
+    receipt = folder / "input-receipt.json"
+    fingerprints = json.loads(receipt.read_text())
+    for name in ("document.f32", "query.f32", "records.json",
+                 "query-records.json"):
+        if file_digest(folder / name) != fingerprints[name]["sha256"]:
+            raise RuntimeError("generated input hash drift")
+    return file_digest(receipt)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=("accuracy", "timing", "latency"))
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--generated", action="store_true")
     parser.add_argument("--native-dir", type=Path,
                         default=SCRATCH / "native/usearch")
     parser.add_argument("--run-id", default="run-1")
@@ -269,6 +301,8 @@ def main() -> None:
     parser.add_argument("--jobs-file", type=Path)
     args = parser.parse_args()
     mode = cast(Mode, args.mode)
+    if args.generated and mode != "latency":
+        parser.error("--generated is a latency-only input mode")
     if (not args.run_id or len(args.run_id) > 100
             or any(char not in "abcdefghijklmnopqrstuvwxyz"
                    "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
@@ -279,6 +313,8 @@ def main() -> None:
     architecture = "arm64" if platform.machine() in ("arm64", "aarch64") else (
         platform.machine()
     )
+    if sys.platform == "linux" and architecture in ("x86_64", "amd64"):
+        architecture = "amd64"
     binary = WORK / "bin" / (sys.platform + "-" + architecture) / (
         "timing" if mode == "timing" else "ann"
     )
@@ -288,7 +324,7 @@ def main() -> None:
         case "timing":
             jobs = timing_jobs(binary)
         case "latency":
-            jobs = latency_jobs(binary)
+            jobs = latency_jobs(binary, args.generated)
         case _:
             assert_never(mode)
     if args.jobs_file is not None:
@@ -316,8 +352,8 @@ def main() -> None:
                           + "/jobs.json"}))
         return
     if mode != "accuracy" and (sys.platform != "linux"
-                                   or architecture != "arm64"):
-        raise RuntimeError("timing waits for the cleared Linuxarm64 VM")
+                              or architecture not in ("arm64", "amd64")):
+        raise RuntimeError("timing requires a cleared Linux amd64/arm64 VM")
     temporary = SCRATCH / "cache/tmp"
     temporary.mkdir(parents=True, exist_ok=True)
     os.environ["TMPDIR"] = str(temporary)
@@ -340,18 +376,24 @@ def main() -> None:
                 if path.is_file():
                     native_files[name] = file_digest(path)
             configuration["native_files"] = native_files
-            configuration["input_receipts"] = {
+            configuration["input_receipts"] = {} if args.generated else {
                 str(path.relative_to(WORK)): file_digest(path)
                 for path in (directory / "input-receipt.json"
                              for directory in dataset_dirs())
             }
+        if args.generated:
+            configuration["generated_seed"] = 20261023
         source = hashlib.sha256(json.dumps(configuration, sort_keys=True)
                                 .encode()).hexdigest()
         completed = 0
         for job in jobs:
+            input_sha = generated_input_sha(job) if args.generated else None
             receipt_path = directory / (job.name + ".json")
             if receipt_path.exists():
                 prior = json.loads(receipt_path.read_text())
+                if (args.generated and prior.get("input_receipt_sha256")
+                        != input_sha):
+                    raise RuntimeError("generated receipt drift")
                 if (prior["source_fingerprint"] != source
                         and not compatible_prior(prior, configuration)):
                     raise RuntimeError("runner source drift; inspect evidence")
@@ -367,6 +409,8 @@ def main() -> None:
                 continue
             if job.artifact is not None and job.artifact.exists():
                 raise RuntimeError("unrecorded output exists; inspect first")
+            if args.generated and (directory / (job.name + ".log")).exists():
+                raise RuntimeError("incomplete generated job; inspect first")
             memory = None
             if mode == "accuracy" and sys.platform == "darwin":
                 memory = mac_memory_retry(directory, job.name)
@@ -395,6 +439,8 @@ def main() -> None:
                        "artifact_sha256": file_digest(job.artifact)
                        if job.artifact is not None and job.artifact.exists()
                        else None}
+            if args.generated:
+                receipt["input_receipt_sha256"] = input_sha
             temporary = receipt_path.with_suffix(".tmp")
             temporary.write_text(json.dumps(receipt, indent=2) + "\n")
             temporary.replace(receipt_path)

@@ -1,0 +1,4 @@
+github.com/unum-cloud/usearch/golang v0.0.0-20261018214748-7a4abfb20339 h1:K03nv75yZB9imHDZ6pwkYVZXI2WPWoWAoJvy1Nqy5IA=
+github.com/unum-cloud/usearch/golang v0.0.0-20261018214748-7a4abfb20339/go.mod h1:Yiy8rpzXHNHsn6DdcHk5cJyNRUBcQIsUjcugeiFuM6I=
+golang.org/x/sys v0.48.0 h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=
+golang.org/x/sys v0.48.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=

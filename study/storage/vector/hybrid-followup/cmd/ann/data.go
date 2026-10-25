@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -13,6 +14,7 @@ import (
 	"slices"
 
 	"golang.org/x/sys/unix"
+	"hybridfollowup/internal/quantindex"
 )
 
 const dimensions = 1024
@@ -308,4 +310,55 @@ func exactTruth(d metadata, documents, queries *matrix) (truthFile, error) {
 		result.Queries = append(result.Queries, truthQuery{qi, best, parents})
 	}
 	return result, nil
+}
+
+// Generated latency input uses the timing command's generator and held-out positions.
+func generateInputs(directory string, n int) (err error) {
+	if n < 10 || n > 1000000 {
+		return fmt.Errorf("generated row count outside 10..1000000")
+	}
+	if err = os.Mkdir(directory, 0755); err != nil {
+		return err
+	}
+	receipt := map[string]fingerprint{}
+	for _, name := range []string{"document", "query"} {
+		count, offset, recordsName := n, 0, "records.json"
+		if name == "query" {
+			count, offset, recordsName = 256, 1000000000, "query-records.json"
+		}
+		var f *os.File
+		path := filepath.Join(directory, name+".f32")
+		f, err = os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0444)
+		if err != nil {
+			return err
+		}
+		defer func() { err = errors.Join(err, f.Close()) }()
+		rows := make([]record, count)
+		for i := range count {
+			id := fmt.Sprintf("synthetic-%012d", i%n)
+			rows[i] = record{ID: id, Parent: id, Repo: "generated", Key: uint64(i)}
+			v := quantindex.SyntheticVector(20261023, i+offset, dimensions)
+			if err = binary.Write(f, binary.LittleEndian, v); err != nil {
+				return err
+			}
+		}
+		if err = f.Sync(); err != nil {
+			return err
+		}
+		if err = writeNewJSON(filepath.Join(directory, recordsName), rows); err != nil {
+			return err
+		}
+		for _, file := range []string{name + ".f32", recordsName} {
+			sha, hashErr := fileSHA(filepath.Join(directory, file))
+			if hashErr != nil {
+				return hashErr
+			}
+			info, statErr := os.Stat(filepath.Join(directory, file))
+			if statErr != nil {
+				return statErr
+			}
+			receipt[file] = fingerprint{sha, info.Size(), count, dimensions}
+		}
+	}
+	return writeNewJSON(filepath.Join(directory, "input-receipt.json"), receipt)
 }

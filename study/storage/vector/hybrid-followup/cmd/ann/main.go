@@ -38,6 +38,7 @@ func run() error {
 	}
 	dataRoot := filepath.Join(home, ".prime", "research", "gortex", "storage-architecture", "tmp", "vector", "hybrid-followup")
 	var o options
+	n := flag.Int("n", 0, "generated document count; phase generate only")
 	flag.StringVar(&o.Phase, "phase", "plan", "plan,inspect,truth,build,int8-build,query,latency")
 	flag.StringVar(&o.Directory, "dataset", filepath.Join(dataRoot, "real-100k-export", "beads"), "owned per-repository export")
 	flag.StringVar(&o.Method, "method", "f32", "f32,i8,int8,exact")
@@ -48,6 +49,9 @@ func run() error {
 	flag.IntVar(&o.Repeat, "repeat", 1, "insertion-order build1..5")
 	flag.IntVar(&o.Workers, "workers", 1, "int8 scan workers1,4,8")
 	flag.Parse()
+	if o.Phase == "generate" {
+		return generateInputs(o.Directory, *n)
+	}
 	if o.Phase == "plan" {
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{"heavy_started": false, "real_accuracy_queries": 1000, "native_m": []int{16, 32}, "search_ef": []int{512, 1024}, "repeats": 5, "i8_candidate_k": []int{50, 100, 200}, "i8_10k_repos": []string{"beads", "pi_agent_rust", "prime-agent"}, "ratio_definition": "paper Eq3; original cosine distances", "clearance": "parent required before truth/build/int8-build/query"})
 	}
