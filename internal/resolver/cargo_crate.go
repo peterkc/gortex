@@ -214,6 +214,23 @@ func (cr *CrossRepoResolver) resolveCargoImportedCall(e *graph.Edge, target stri
 	if owner, _, ok := strings.Cut(scoped, "::"); ok {
 		receiver = owner
 	}
+	names := map[string]bool{name: true}
+	for _, imp := range cr.bridgeImportsByFile[cr.callerFileID(e)] {
+		stub, _ := imp.Meta[CargoImportStubMeta].(string)
+		spec := strings.TrimPrefix(strings.TrimPrefix(stub, "external::"), "unresolved::import::")
+		for _, binding := range parseRustUseBindings(spec) {
+			if receiver == "" && (binding.local == name || imp.Alias == name) {
+				names[rustUseBindingName(binding.source)] = true
+			}
+		}
+	}
+	candidates := make(map[string]map[string][]*graph.Node)
+	for name, nodes := range cr.bridgeCandidates(e, names, false) {
+		candidates[name] = make(map[string][]*graph.Node)
+		for _, node := range nodes {
+			candidates[name][node.FilePath] = append(candidates[name][node.FilePath], node)
+		}
+	}
 	var match *graph.Node
 	for _, imp := range cr.bridgeImportsByFile[cr.callerFileID(e)] {
 		stub, _ := imp.Meta[CargoImportStubMeta].(string)
@@ -234,7 +251,7 @@ func (cr *CrossRepoResolver) resolveCargoImportedCall(e *graph.Edge, target stri
 			if receiver == "" && local == name {
 				lookupName = item
 			}
-			for _, candidate := range cr.cachedFindNodesByName(lookupName) {
+			for _, candidate := range candidates[lookupName][imp.To] {
 				if candidate.FilePath != imp.To || candidate.Language != "rust" || !cr.crossWorkspaceEligible(cr.callerWorkspaceID(e), candidateWorkspaceID(candidate), spec) {
 					continue
 				}

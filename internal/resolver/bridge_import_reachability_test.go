@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -155,5 +156,63 @@ func TestPythonMethodsStayWithinImportedType(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+type bridgeNameCountStore struct {
+	graph.Store
+	broad, scoped int
+}
+
+func (s *bridgeNameCountStore) FindNodesByName(name string) []*graph.Node {
+	s.broad++
+	return s.Store.FindNodesByName(name)
+}
+func (s *bridgeNameCountStore) FindNodesByNameInRepo(name, repo string) []*graph.Node {
+	s.scoped++
+	return s.Store.FindNodesByNameInRepo(name, repo)
+}
+func TestBridgeCandidatesLookupOncePerProvider(t *testing.T) {
+	for _, language := range []string{"rust", "python"} {
+		t.Run(language, func(t *testing.T) {
+			g := &bridgeNameCountStore{Store: graph.New()}
+			cr := NewCrossRepo(g)
+			file := "consumer/app.py"
+			name := "show"
+			target := "*.show"
+			if language == "rust" {
+				file = "consumer/src/lib.rs"
+				name = "action"
+				target = "action"
+			}
+			g.AddNode(&graph.Node{ID: file, FilePath: file, Kind: graph.KindFile, RepoPrefix: "consumer", Language: language})
+			var imports []*graph.Edge
+			for i := 0; i < 20; i++ {
+				provider := fmt.Sprintf("provider/pkg/mod%d.py", i)
+				marker := map[string]any{PythonImportStubMeta: "external::pkg.mod", "python_import": fmt.Sprintf("pkg.mod%d", i), "python_bindings": map[string]any{"Image": "Image"}}
+				if language == "rust" {
+					provider = fmt.Sprintf("provider/src/mod%d.rs", i)
+					marker = map[string]any{CargoImportStubMeta: "external::library/action"}
+				}
+				imports = append(imports, &graph.Edge{From: file, FilePath: file, To: provider, Meta: marker})
+				if i == 19 {
+					kind := graph.KindFunction
+					if language == "python" {
+						kind = graph.KindMethod
+					}
+					g.AddNode(&graph.Node{ID: provider + "::" + name, FilePath: provider, Name: name, Kind: kind, RepoPrefix: "provider", Language: language, Meta: map[string]any{"receiver": "Image"}})
+				}
+			}
+			cr.bridgeImportsByFile = map[string][]*graph.Edge{file: imports}
+			e := &graph.Edge{From: file, FilePath: file, Kind: graph.EdgeCalls, Meta: map[string]any{"receiver_type": "Image"}}
+			if language == "rust" {
+				delete(e.Meta, "receiver_type")
+				require.True(t, cr.resolveCargoImportedCall(e, target))
+			} else {
+				require.True(t, cr.resolvePythonImportedMethod(e, target))
+			}
+			require.Zero(t, g.broad, "bridge lookups must not scan all repositories")
+			require.LessOrEqual(t, g.scoped, 2, "one provider lookup plus Python local-type check")
+		})
 	}
 }

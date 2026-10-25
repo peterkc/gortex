@@ -1227,6 +1227,35 @@ func (cr *CrossRepoResolver) scopedCandidates(e *graph.Edge, name string) []*gra
 	return out
 }
 
+// bridgeCandidates loads each name once per relevant provider, not per import.
+func (cr *CrossRepoResolver) bridgeCandidates(e *graph.Edge, names map[string]bool, includeReachable bool) map[string][]*graph.Node {
+	repos := make(map[string]bool)
+	file := cr.callerFileID(e)
+	for _, imp := range cr.bridgeImportsByFile[file] {
+		repos[graph.RepoPrefixOfID(imp.To)] = true
+	}
+	if includeReachable {
+		repos[cr.callerRepoPrefix(e)] = true
+		for repo := range cr.reachableReposByFile[file] {
+			repos[repo] = true
+		}
+	}
+	result := make(map[string][]*graph.Node)
+	for name := range names {
+		for repo := range repos {
+			if repo == "" {
+				continue
+			}
+			if byRepo, ok := cr.nodesByNameRepo[name]; ok {
+				result[name] = append(result[name], byRepo[repo]...)
+			} else {
+				result[name] = append(result[name], cr.graph.FindNodesByNameInRepo(name, repo)...)
+			}
+		}
+	}
+	return result
+}
+
 // cachedGetNode consults the per-pass id cache first, falling through to
 // the store on a miss (positive-only: absence means "not pre-warmed").
 func (cr *CrossRepoResolver) cachedGetNode(id string) *graph.Node {
@@ -1307,8 +1336,9 @@ func (cr *CrossRepoResolver) resolveEdge(e *graph.Edge, stats *CrossRepoStats, b
 		reachable := cr.reachabilityChecker(e)
 		importedDirs := cr.importedDirsByFile[cr.callerFileID(e)]
 		find := func(name string) ([]*graph.Node, error) {
+			candidates := cr.bridgeCandidates(e, map[string]bool{name: true}, true)[name]
 			var eligible []*graph.Node
-			for _, node := range cr.cachedFindNodesByName(name) {
+			for _, node := range candidates {
 				if cr.linkedPythonCallCandidate(e, node, module) {
 					eligible = append(eligible, node)
 					continue
