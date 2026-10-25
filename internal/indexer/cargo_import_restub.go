@@ -87,32 +87,52 @@ func restubTrackedCargoImportsFromView(g graph.Store, evicted map[string]struct{
 
 // Retry parked imports; new Rust files can also retarget marked provider bindings.
 func (mi *MultiIndexer) cargoConsumerFilesForRepo(repo string, retargetBound bool) []string {
+	return mi.cargoConsumerFilesForRepos([]string{repo}, retargetBound)
+}
+
+func (mi *MultiIndexer) cargoConsumerFilesForRepos(repos []string, retargetBound bool) []string {
 	lookup := mi.cargoCrateLookup()
-	if lookup == nil {
+	if lookup == nil || len(repos) == 0 {
 		return nil
 	}
-	files := make(map[string]struct{})
-	edges := graph.EdgesLightSeq(mi.graph, graph.EdgeImports)
-	if retargetBound {
-		edges = mi.graph.EdgesByKind(graph.EdgeImports)
+	wanted := make(map[string]bool, len(repos))
+	for _, repo := range repos {
+		wanted[repo] = true
 	}
-	for edge := range edges {
+	files := make(map[string]struct{})
+	var sites []graph.EdgeSite
+	for edge := range graph.EdgesLightSeq(mi.graph, graph.EdgeImports) {
+		if !strings.HasSuffix(edge.FilePath, ".rs") {
+			continue
+		}
 		spec, external := strings.CutPrefix(edge.To, "external::")
 		if !external {
 			spec, external = strings.CutPrefix(edge.To, "unresolved::import::")
 		}
-		if !external || !strings.HasSuffix(edge.FilePath, ".rs") {
-			stub, _ := edge.Meta[resolver.CargoImportStubMeta].(string)
-			if retargetBound && stub != "" && edge.CrossRepo && strings.HasSuffix(edge.FilePath, ".rs") && graph.RepoPrefixOfID(edge.To) == repo {
-				files[edge.FilePath] = struct{}{}
+		if !external {
+			if retargetBound && edge.CrossRepo && wanted[graph.RepoPrefixOfID(edge.To)] {
+				sites = append(sites, graph.EdgeSite{From: edge.From, Line: edge.Line, Kind: graph.EdgeImports})
 			}
 			continue
 		}
 		name, _, _ := strings.Cut(spec, "/")
 		for _, crate := range lookup(edge.FilePath, name) {
-			if graph.RepoPrefixOfID(crate.Root) == repo || graph.RepoPrefixOfID(edge.From) == repo {
+			if wanted[graph.RepoPrefixOfID(crate.Root)] || wanted[graph.RepoPrefixOfID(edge.From)] {
 				files[edge.FilePath] = struct{}{}
 				break
+			}
+		}
+	}
+	// Close the light cursor before hydrating only marked-provider candidates.
+	for start := 0; start < len(sites); start += 512 {
+		page := sites[start:min(start+512, len(sites))]
+		full := mi.graph.GetEdgeCandidates(nil, page)
+		for _, site := range page {
+			for _, edge := range full.Site(site.From, site.Line, site.Kind) {
+				stub, _ := edge.Meta[resolver.CargoImportStubMeta].(string)
+				if stub != "" && edge.CrossRepo && wanted[graph.RepoPrefixOfID(edge.To)] && strings.HasSuffix(edge.FilePath, ".rs") {
+					files[edge.FilePath] = struct{}{}
+				}
 			}
 		}
 	}
@@ -136,8 +156,8 @@ func (mi *MultiIndexer) runWarmCargoResolve(ctx context.Context, files []string,
 	if full {
 		err = mi.runCrossRepoResolveContext(ctx, false, repos...)
 	} else {
-		for _, repo := range repos {
-			files = appendUniqueSorted(files, mi.cargoConsumerFilesForRepo(repo, true)...)
+		if len(repos) > 0 {
+			files = appendUniqueSorted(files, mi.cargoConsumerFilesForRepos(repos, true)...)
 		}
 		if err = context.Cause(ctx); err == nil {
 			mi.runCrossRepoResolveFiles(files, repos...)
