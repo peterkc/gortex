@@ -353,11 +353,12 @@ func TestGoModuleReplacementFileSaveColdParity(t *testing.T) {
 				require.Len(t, before, 1)
 				require.Contains(t, before[0], "a/third_party/library/lib.go cross=false")
 				writeFile(t, replacement, "package library\nfunc Hello() { println(1) }\n")
-				if route == "fallback" {
+				switch route {
+				case "fallback":
 					require.NoError(t, mi.GetIndexer("a").indexFile(replacement, true, nil))
-				} else if route == "file" {
+				case "file":
 					require.NoError(t, mi.GetIndexer("a").IndexFile(replacement))
-				} else {
+				default:
 					_, err := mi.IncrementalReindexRepo("a", []string{replacement})
 					require.NoError(t, err)
 				}
