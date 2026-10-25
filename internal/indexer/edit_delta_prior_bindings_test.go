@@ -13,6 +13,8 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/resolver"
 )
 
 // A save that shifts every later line of the file keeps the file's unchanged
@@ -80,4 +82,25 @@ func TestPriorBindingsCarryUnchangedReferencesAcrossAReparse(t *testing.T) {
 	fresh, _ := index(nil)
 	require.Equal(t, rows(fresh), rows(g), "the carried rows must equal a whole index of the edited tree")
 	require.Contains(t, strings.Join(rows(g), "\n"), "-calls-> "+builderRepoPrefix+"/p/a.go::Later", "the reference the edit made resolvable is bound")
+}
+
+func TestPriorBindingsKeepFreshBridgeCallSpelling(t *testing.T) {
+	for _, key := range []string{"cargo_call_stub", "python_call_stub"} {
+		t.Run(key, func(t *testing.T) {
+			g := graph.New()
+			caller := &graph.Node{ID: "app.py::run", Name: "run", FilePath: "app.py", Kind: graph.KindFunction, StartLine: 1}
+			provider := &graph.Node{ID: "provider.py::f", Name: "f", FilePath: "provider.py", Kind: graph.KindFunction}
+			prior := &graph.Edge{From: caller.ID, To: provider.ID, Kind: graph.EdgeCalls, FilePath: "app.py", Line: 2, CrossRepo: true, Meta: map[string]any{key: "unresolved::old.f", "keep": "metadata"}}
+			g.AddBatch([]*graph.Node{caller, provider}, []*graph.Edge{prior})
+			fresh := &graph.Edge{From: caller.ID, To: "unresolved::new.f", Kind: graph.EdgeCalls, FilePath: "app.py", Line: 2}
+			stage := &incrementalBatchStage{graphPath: "app.py", priorNodes: []*graph.Node{caller}, result: &parser.ExtractionResult{Nodes: []*graph.Node{caller}, Edges: []*graph.Edge{fresh}}, reuse: map[reuseKey]*reuseVal{}}
+			stages := []*incrementalBatchStage{stage}
+			carried := stagePriorBindings(g, stages, loadIncrementalPriorView(g, stages))
+			binding, ok := carried[resolver.PriorBindingKey(fresh.From, fresh.Kind, fresh.Line, fresh.To)]
+			require.True(t, ok, "the prior binding must carry")
+			require.Equal(t, fresh.To, binding.Meta[key])
+			require.Equal(t, "metadata", binding.Meta["keep"])
+			require.Equal(t, "unresolved::old.f", prior.Meta[key], "carry must not change prior metadata")
+		})
+	}
 }
