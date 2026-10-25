@@ -729,15 +729,16 @@ func (cr *CrossRepoResolver) RestoreGoModuleSourceCalls(edges []*graph.Edge) {
 			}
 		}
 		live[identity] = struct{}{}
-		cr.graph.AddEdge(e)
 		if match == nil {
-			if e.Meta == nil {
-				e.Meta = make(map[string]any)
+			demoted := *e
+			demoted.Meta = maps.Clone(e.Meta)
+			if demoted.Meta == nil {
+				demoted.Meta = make(map[string]any)
 			}
-			e.Meta["go_import"] = spec
-			cr.noteDemotedGoModuleCall(e)
-			delete(e.Meta, "go_import")
+			demoted.Meta["go_import"] = spec
+			cr.noteDemotedGoModuleCall(&demoted)
 		}
+		cr.graph.AddEdge(e)
 		added = append(added, graph.EdgeReindex{Edge: e})
 		cr.noteRetargetedCall(e)
 	}

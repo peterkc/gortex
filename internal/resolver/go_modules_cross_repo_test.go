@@ -992,3 +992,27 @@ func TestGoModuleIncomingRecoverySourceFiles(t *testing.T) {
 		}
 	}
 }
+
+// Given a restored unbindable source call with nil metadata, when it is added,
+// then neither backend may acquire a temporary demotion marker or an empty map.
+func TestGoModuleSourceDemotionPreservesNilMeta(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			var g graph.Store = graph.New()
+			if backend == "sqlite" {
+				db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "g.sqlite"))
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, db.Close()) })
+				g = db
+			}
+			g.AddNode(&graph.Node{ID: "a/main.go::Caller", Kind: graph.KindFunction, RepoPrefix: "a", FilePath: "a/main.go", Language: "go"})
+			cr := NewCrossRepo(g)
+			cr.noteGoModuleSourceFile(&graph.Edge{From: "a/main.go::Caller", To: externalCallPrefix + "dep::example.org/library", Kind: graph.EdgeCalls, FilePath: "a/main.go", Line: 3})
+			cr.RestoreGoModuleSourceCalls([]*graph.Edge{{From: "a/main.go::Caller", To: "dep::example.org/library::Missing", Kind: graph.EdgeCalls, FilePath: "a/main.go", Line: 3}})
+			edges := g.GetOutEdges("a/main.go::Caller")
+			require.Len(t, edges, 1)
+			assert.Nil(t, edges[0].Meta, "published source call must keep its original nil metadata")
+			assert.Equal(t, []string{"a/main.go"}, cr.TakeDemotedGoModuleCallFiles())
+		})
+	}
+}
