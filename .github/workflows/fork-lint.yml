@@ -1,0 +1,92 @@
+name: fork-lint
+
+# Fork-only (peterkc/gortex), not for upstream. Push lint/<branch> = a head H
+# plus this one commit to get the lint result for H without a full CI run.
+# H is this commit's parent; the job prints it in the log and job summary.
+on:
+  push:
+    branches: ['lint/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Head under test
+        id: head
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          head="$(git rev-parse HEAD^)"
+          base="$(git merge-base "$head" origin/main)"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "Head under test (H): $head"
+          echo "Merge-base with fork main: $base"
+          {
+            echo "### fork-lint for H = \`$head\`"
+            echo
+            echo "Branch \`${GITHUB_REF_NAME}\`. Merge-base with fork main: \`$base\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # Same pin and version as ci.yml's lint job, with no caps on repeated
+      # issues so every issue shows in one run.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        with:
+          version: v2.14.0
+          args: --timeout=10m --max-same-issues 0 --max-issues-per-linter 0
+
+      - name: go.mod is tidy
+        if: success() || failure()
+        run: |
+          set -euo pipefail
+          go mod tidy
+          if ! git diff --exit-code --stat go.mod go.sum; then
+            echo "FATAL: go.mod/go.sum are not tidy — run \`go mod tidy\` and commit the result" >&2
+            exit 1
+          fi
+
+      # The repo's convention is gofmt -s (make fmt), but main still has files
+      # that are not formatted. Fail only on new violations: a changed .go file
+      # that was gofmt -s clean at the merge-base, or a new file. Files that
+      # were already unformatted at the merge-base are listed as warnings, so
+      # nobody has to restyle code they did not change.
+      - name: gofmt -s on changed files (new violations only)
+        if: success() || failure()
+        env:
+          HEAD_UNDER_TEST: ${{ steps.head.outputs.head }}
+          BASE: ${{ steps.head.outputs.base }}
+        run: |
+          set -euo pipefail
+          fail=0
+          while IFS= read -r f; do
+            [[ -n "$f" ]] || continue
+            if [[ -z "$(git show "$HEAD_UNDER_TEST:$f" | gofmt -s -l)" ]]; then
+              continue
+            fi
+            if git cat-file -e "$BASE:$f" 2>/dev/null && [[ -n "$(git show "$BASE:$f" | gofmt -s -l)" ]]; then
+              echo "::warning file=$f::already not gofmt -s formatted at the merge-base; not counted"
+            else
+              echo "::error file=$f::not gofmt -s formatted; run gofmt -s -w $f"
+              git show "$HEAD_UNDER_TEST:$f" > "$RUNNER_TEMP/gofmt-check.go"
+              gofmt -s -d "$RUNNER_TEMP/gofmt-check.go" | head -40 || true
+              fail=1
+            fi
+          done < <(git diff --name-only --diff-filter=ACMR "$BASE" "$HEAD_UNDER_TEST" -- '*.go')
+          exit "$fail"
