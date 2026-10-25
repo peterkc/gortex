@@ -98,6 +98,9 @@ func (mi *MultiIndexer) cargoConsumerFilesForRepo(repo string, retargetBound boo
 	}
 	for edge := range edges {
 		spec, external := strings.CutPrefix(edge.To, "external::")
+		if !external {
+			spec, external = strings.CutPrefix(edge.To, "unresolved::import::")
+		}
 		if !external || !strings.HasSuffix(edge.FilePath, ".rs") {
 			stub, _ := edge.Meta[resolver.CargoImportStubMeta].(string)
 			if retargetBound && stub != "" && edge.CrossRepo && strings.HasSuffix(edge.FilePath, ".rs") && graph.RepoPrefixOfID(edge.To) == repo {
