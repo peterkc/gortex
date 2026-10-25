@@ -56,7 +56,7 @@ func TestTrackedBridgeImportsDoNotAuthorizeBareNames(t *testing.T) {
 
 func TestCargoCallsStayWithinImportedItem(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
-		for _, scenario := range []string{"function", "constructor", "method", "foreign_type", "ambiguous"} {
+		for _, scenario := range []string{"function", "glob", "constructor", "method", "foreign_type", "ambiguous"} {
 			t.Run(backend+"/"+scenario, func(t *testing.T) {
 				var g graph.Store = graph.New()
 				if backend == "sqlite" {
@@ -69,6 +69,10 @@ func TestCargoCallsStayWithinImportedItem(t *testing.T) {
 				g.AddNode(&graph.Node{ID: file, FilePath: file, Kind: graph.KindFile, RepoPrefix: "consumer", Language: "rust"})
 				kind, name, target, item := graph.KindFunction, "action", "unresolved::action", "action"
 				meta := map[string]any{}
+				// Given a glob use, the ordinary function call still needs exact file evidence.
+				if scenario == "glob" {
+					item = "*"
+				}
 				if scenario == "constructor" {
 					kind, name, target, item = graph.KindMethod, "new", "unresolved::new", "Foo"
 					meta["rust_path"] = "Foo::new"

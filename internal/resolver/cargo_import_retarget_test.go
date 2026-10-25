@@ -174,3 +174,42 @@ func TestCargoRefusedImportWarmMatchesCold(t *testing.T) {
 		}
 	}
 }
+
+func TestCargoRestubCallsPreservesUnrelatedLinks(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			// Given a revoked import and three marked calls with different binding evidence.
+			g := goImportReviewStore(t, backend)
+			file, target := "consumer/src/lib.rs", "provider/src/util.rs"
+			g.AddNode(&graph.Node{ID: file, FilePath: file, Kind: graph.KindFile, RepoPrefix: "consumer", Language: "rust"})
+			for _, row := range []struct {
+				to    string
+				cross bool
+				line  int
+			}{
+				{target + "::action", true, 1},
+				{"other/src/lib.rs::action", true, 2},
+				{target + "::local", false, 3},
+			} {
+				g.AddEdge(&graph.Edge{From: file, FilePath: file, Kind: graph.EdgeCalls, To: row.to, Line: row.line, CrossRepo: row.cross, Meta: map[string]any{CargoCallStubMeta: "unresolved::action"}})
+			}
+			// When only calls through the revoked target are restubbed.
+			reopened := NewCrossRepo(g).restubCargoImportCalls(file, target)
+			// Then the other provider and non-cross-repo call keep their links.
+			require.Len(t, reopened, 1)
+			for _, call := range outEdgesOfKind(g, file, graph.EdgeCalls) {
+				switch call.Line {
+				case 1:
+					require.Equal(t, "unresolved::action", call.To)
+					require.False(t, call.CrossRepo)
+				case 2:
+					require.Equal(t, "other/src/lib.rs::action", call.To)
+					require.True(t, call.CrossRepo)
+				case 3:
+					require.Equal(t, target+"::local", call.To)
+					require.False(t, call.CrossRepo)
+				}
+			}
+		})
+	}
+}
