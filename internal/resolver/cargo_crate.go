@@ -191,3 +191,58 @@ func (cr *CrossRepoResolver) bindCargoImport(e *graph.Edge, node *graph.Node, st
 	stats.CrossRepoEdges++
 	stats.ByRepo[node.RepoPrefix]++
 }
+
+// A tracked use authorizes only its item or receiver in the linked module file.
+func (cr *CrossRepoResolver) resolveCargoImportedCall(e *graph.Edge, target string) bool {
+	if e.Kind != graph.EdgeCalls || !strings.HasSuffix(e.FilePath, ".rs") {
+		return false
+	}
+	name := strings.TrimPrefix(target, "*.")
+	receiver := edgeReceiverType(e)
+	scoped, _ := e.Meta["rust_path"].(string)
+	if owner, _, ok := strings.Cut(scoped, "::"); ok {
+		receiver = owner
+	}
+	var match *graph.Node
+	for _, imp := range cr.bridgeImportsByFile[cr.callerFileID(e)] {
+		stub, _ := imp.Meta[CargoImportStubMeta].(string)
+		if stub == "" {
+			continue
+		}
+		spec := strings.TrimPrefix(strings.TrimPrefix(stub, "external::"), "unresolved::import::")
+		item := spec[strings.LastIndex(spec, "/")+1:]
+		local := item
+		if imp.Alias != "" {
+			local = imp.Alias
+		}
+		for _, candidate := range cr.cachedFindNodesByName(name) {
+			if candidate.FilePath != imp.To || candidate.Language != "rust" || !cr.crossWorkspaceEligible(cr.callerWorkspaceID(e), candidateWorkspaceID(candidate), spec) {
+				continue
+			}
+			switch candidate.Kind {
+			case graph.KindFunction:
+				if strings.HasPrefix(target, "*.") || receiver != "" || (item != "*" && local != name) {
+					continue
+				}
+			case graph.KindMethod:
+				if receiver == "" || receiver != local || nodeReceiverType(candidate) != item {
+					continue
+				}
+			default:
+				continue
+			}
+			if match != nil && match.ID != candidate.ID {
+				return false
+			}
+			match = candidate
+		}
+	}
+	if match == nil {
+		return false
+	}
+	e.To, e.CrossRepo = match.ID, true
+	if strings.HasPrefix(target, "*.") {
+		e.Confidence, e.Origin = 0.85, graph.OriginASTResolved
+	}
+	return true
+}

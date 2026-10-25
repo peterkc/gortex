@@ -111,8 +111,9 @@ type CrossRepoResolver struct {
 	// importedDirsByFile retains the package placement from those same import
 	// rows. A Go call the per-repo package guard refused must not regain a
 	// same-repo name-only binding just because the repository is reachable.
-	importedDirsByFile map[string]map[string]struct{}
-	jsTSBindingsByFile map[string]map[string]string
+	importedDirsByFile  map[string]map[string]struct{}
+	jsTSBindingsByFile  map[string]map[string]string
+	bridgeImportsByFile map[string][]*graph.Edge
 	// depModuleIndex bridges Go imports to dep::<module> contract
 	// nodes from the caller's go.mod. Same shape and rationale as
 	// the field of the same name on Resolver — see resolver.go for
@@ -861,6 +862,7 @@ func (cr *CrossRepoResolver) buildReachableReposIndex() {
 	idx := make(map[string]map[string]struct{})
 	dirs := make(map[string]map[string]struct{})
 	cr.jsTSBindingsByFile = make(map[string]map[string]string)
+	cr.bridgeImportsByFile = make(map[string][]*graph.Edge)
 	// Materialise metadata-free import projections and batch-load only target
 	// placement fields. A per-edge point lookup here is a query round-trip per
 	// import on a disk backend, which under the cross-repo pass's import
@@ -887,12 +889,12 @@ func (cr *CrossRepoResolver) buildReachableReposIndex() {
 		page := imports[start:min(start+resolvePendingPageRows, len(imports))]
 		var sites []graph.EdgeSite
 		for _, e := range page {
-			if e.CrossRepo && isJSTSPath(e.From) {
+			if e.CrossRepo && (isJSTSPath(e.From) || strings.HasSuffix(e.FilePath, ".go") || strings.HasSuffix(e.FilePath, ".rs") || isPythonSourcePath(e.FilePath)) {
 				sites = append(sites, graph.EdgeSite{From: e.From, Line: e.Line, Kind: graph.EdgeImports})
 			}
 		}
 		// Markers belong to the persisted import, including imports outside a
-		// scoped resolution frontier. Hydrate only cross-repo JS/TS imports.
+		// scoped resolution frontier. Hydrate only cross-repo imports.
 		full := cr.graph.GetEdgeCandidates(nil, sites)
 		for _, e := range page {
 			for _, candidate := range full.Site(e.From, e.Line, graph.EdgeImports) {
@@ -941,7 +943,11 @@ func (cr *CrossRepoResolver) buildReachableReposIndex() {
 					}
 				}
 			}
-			if npmLinked {
+			if e.Meta[CargoImportStubMeta] != nil || e.Meta[PythonImportStubMeta] != nil {
+				cr.bridgeImportsByFile[e.From] = append(cr.bridgeImportsByFile[e.From], e)
+			}
+			// A linked module file is not evidence for every symbol in its repo.
+			if npmLinked || e.Meta["go_import"] != nil || e.Meta[CargoImportStubMeta] != nil || e.Meta[PythonImportStubMeta] != nil {
 				continue
 			}
 			set := idx[e.From]
@@ -960,6 +966,7 @@ func (cr *CrossRepoResolver) clearReachableReposIndex() {
 	cr.reachableReposByFile = nil
 	cr.importedDirsByFile = nil
 	cr.jsTSBindingsByFile = nil
+	cr.bridgeImportsByFile = nil
 }
 
 // A package-guard refusal is stronger than the cross-repo pass's same-repo
@@ -1276,6 +1283,10 @@ func (cr *CrossRepoResolver) resolveEdge(e *graph.Edge, stats *CrossRepoStats, b
 	}
 
 	switch {
+	case cr.resolveCargoImportedCall(e, target) || cr.resolvePythonImportedMethod(e, target):
+		stats.Resolved++
+		stats.CrossRepoEdges++
+		stats.ByRepo[graph.RepoPrefixOfID(e.To)]++
 	case strings.HasSuffix(e.FilePath, ".go") && strings.HasPrefix(target, "extern::"):
 		cr.resolveGoExtern(e, strings.TrimPrefix(target, "extern::"), stats)
 	case strings.HasPrefix(target, "import::"):
@@ -1289,7 +1300,11 @@ func (cr *CrossRepoResolver) resolveEdge(e *graph.Edge, stats *CrossRepoStats, b
 		importedDirs := cr.importedDirsByFile[cr.callerFileID(e)]
 		find := func(name string) ([]*graph.Node, error) {
 			var eligible []*graph.Node
-			for _, node := range cr.scopedCandidates(e, name) {
+			for _, node := range cr.cachedFindNodesByName(name) {
+				if cr.linkedPythonCallCandidate(e, node, module) {
+					eligible = append(eligible, node)
+					continue
+				}
 				_, imported := importedDirs[filePathDir(node.FilePath)]
 				if imported && reachable(node.RepoPrefix) && cr.crossWorkspaceEligible(callerWS, candidateWorkspaceID(node), module) {
 					eligible = append(eligible, node)
