@@ -433,7 +433,7 @@ func (cr *CrossRepoResolver) ResolveAllContext(ctx context.Context) (*CrossRepoS
 	if err := cr.resolveTrackedNpmImports(ctx, graph.EdgesLightSeq(cr.graph, graph.EdgeImports), stats); err != nil {
 		return stats, err
 	}
-	if err := cr.resolveCargoImports(ctx, graph.EdgesLightSeq(cr.graph, graph.EdgeImports), stats); err != nil {
+	if _, err := cr.resolveCargoImports(ctx, graph.EdgesLightSeq(cr.graph, graph.EdgeImports), stats); err != nil {
 		return stats, err
 	}
 	if _, err := cr.resolveTrackedPythonImports(ctx, cr.trackedPythonImportEdges(), stats, false); err != nil {
@@ -724,8 +724,9 @@ func (cr *CrossRepoResolver) ResolveForFile(repoPrefix, relPath string) *CrossRe
 func (cr *CrossRepoResolver) resolveScopedLocked(edges []*graph.Edge) *CrossRepoStats {
 	stats := &CrossRepoStats{ByRepo: make(map[string]int)}
 	_ = cr.resolveTrackedNpmImports(context.Background(), slices.Values(edges), stats)
-	_ = cr.resolveCargoImports(context.Background(), slices.Values(edges), stats)
+	cargoReopened, _ := cr.resolveCargoImports(context.Background(), slices.Values(edges), stats)
 	reopened, _ := cr.resolveTrackedPythonImports(context.Background(), slices.Values(edges), stats, true)
+	reopened = append(reopened, cargoReopened...)
 	if len(reopened) > 0 {
 		seen := make(map[*graph.Edge]bool, len(edges))
 		for _, edge := range edges {
