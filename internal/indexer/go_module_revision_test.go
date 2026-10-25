@@ -198,3 +198,28 @@ func TestGoModuleParallelCallsColdEquivalent(t *testing.T) {
 		}
 	}
 }
+
+// Given a completed purge, when the control-plane finalizer cancels the request,
+// then the optional module tail must not report that removal failed.
+func TestGoModuleUntrackCancellationAfterFinalize(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			mi, g, repos := goModuleLifecycleFixture(t, backend)
+			for _, entry := range repos[:2] {
+				_, err := mi.TrackRepoCtx(t.Context(), entry)
+				require.NoError(t, err)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			finalized := false
+			_, _, err := mi.purgeRepoChecked(ctx, "b", func(*RepoMetadata) error { finalized = true; cancel(); return nil })
+			require.True(t, finalized)
+			require.NoError(t, err, "authoritative removal already completed")
+			assert.Nil(t, mi.GetMetadata("b"))
+			assert.Nil(t, g.GetNode("b/lib.go::Hello"))
+			mi.RunGlobalResolve()
+			cold := revisionColdGraph(t, backend, repos[:1])
+			assert.ElementsMatch(t, revisionCallTargets(cold, "a/main.go::Caller", graph.EdgeCalls), revisionCallTargets(g, "a/main.go::Caller", graph.EdgeCalls))
+		})
+	}
+}

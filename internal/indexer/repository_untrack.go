@@ -7,6 +7,7 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/reach"
 	"github.com/zzet/gortex/internal/search"
+	"go.uber.org/zap"
 )
 
 // UntrackRepoChecked hides and removes one live repository without changing
@@ -224,8 +225,12 @@ func (mi *MultiIndexer) untrackRepoCheckedRetainingAdmission(
 		mi.goModuleRetry.Invalidate()
 		cr := mi.newCrossRepoResolver()
 		if err := cr.RetryGoModuleDeps(ctx); err != nil {
-			return state.nodesRemoved, state.edgesRemoved, fmt.Errorf("settle Go module callers after untrack: %w", err)
+			// Removal and config finalization already committed. The invalidated
+			// retry state lets the next module pass finish this optional tail.
+			mi.logger.Warn("settle Go module callers after untrack deferred", zap.String("repo", repoPrefix), zap.Error(err))
 		}
+		// A canceled sweep can already have changed a bounded batch. Finish
+		// the source/parallel tails it recorded before dropping this pass.
 		mi.finishGoModuleCalls(cr)
 		mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 	}
