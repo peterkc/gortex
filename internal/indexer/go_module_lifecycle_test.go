@@ -120,8 +120,10 @@ func TestGoModuleMapRechecksBoundCalls(t *testing.T) {
 					require.NoError(t, err)
 				}
 				if mode != "fork_first" {
-					resolver.DetectCrossRepoEdges(g)
 					require.Equal(t, "b/lib.go::Hello", goModuleLifecycleCall(t, g).To)
+					assert.Equal(t, []string{"b/lib.go::Hello"}, revisionCallTargets(g, "a/main.go::Caller", graph.EdgeCrossRepoCalls), "tracking must materialize the parallel without a manual repair")
+					mi.RunGlobalResolve()
+					assert.Equal(t, []string{"b/lib.go::Hello"}, revisionCallTargets(g, "a/main.go::Caller", graph.EdgeCrossRepoCalls))
 				}
 				switch mode {
 				case "fork_last":

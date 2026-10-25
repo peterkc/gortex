@@ -743,6 +743,8 @@ func (mi *MultiIndexer) postPublishGoModules(ctx context.Context, idx *Indexer, 
 	if err := mi.resolveDeferredGoModules(idx); err != nil {
 		return err
 	}
+	// Cold shadows can bind before publication; those edges never reindex.
+	resolver.DetectCrossRepoEdgesForRepos(mi.graph, []string{idx.repoPrefix})
 	if idx.deferResolve.Load() {
 		return nil // the batch's shared pass owns resolution
 	}

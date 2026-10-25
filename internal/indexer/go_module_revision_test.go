@@ -158,3 +158,33 @@ func TestGoModuleRestubPayloadColdEquivalent(t *testing.T) {
 		}
 	}
 }
+
+// Given either live track order, when calls bind through the module map,
+// then the parallel call layer matches the cold index without manual detection.
+func TestGoModuleParallelCallsColdEquivalent(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, callerFirst := range []bool{false, true} {
+			name := "provider_first"
+			if callerFirst {
+				name = "caller_first"
+			}
+			t.Run(backend+"/"+name, func(t *testing.T) {
+				mi, g, repos := goModuleLifecycleFixture(t, backend)
+				order := []config.RepoEntry{repos[1], repos[0]}
+				if callerFirst {
+					order[0], order[1] = order[1], order[0]
+				}
+				for _, entry := range order {
+					_, err := mi.TrackRepoCtx(t.Context(), entry)
+					require.NoError(t, err)
+				}
+				cold := revisionColdGraph(t, backend, repos[:2])
+				want := revisionCallTargets(cold, "a/main.go::Caller", graph.EdgeCrossRepoCalls)
+				require.Equal(t, []string{"b/lib.go::Hello"}, want)
+				assert.Equal(t, want, revisionCallTargets(g, "a/main.go::Caller", graph.EdgeCrossRepoCalls))
+				mi.RunGlobalResolve()
+				assert.Equal(t, want, revisionCallTargets(g, "a/main.go::Caller", graph.EdgeCrossRepoCalls))
+			})
+		}
+	}
+}
