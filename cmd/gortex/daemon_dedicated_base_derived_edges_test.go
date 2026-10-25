@@ -78,11 +78,13 @@ func TestDaemonWarmupCommittedBaseCarriesTheDerivedEdges(t *testing.T) {
 	}
 	// The order itself, which the edge counts below observe only when the
 	// copy outruns the batch: the queue is released after end_batch.
-	endBatch, released := -1, -1
+	endBatch, released, moduleSeed := -1, -1, -1
 	for i, entry := range observed.All() {
 		switch {
 		case entry.Message == "daemon: warmup phase done" && entry.ContextMap()["phase"] == "end_batch":
 			endBatch = i
+		case entry.Message == "daemon: warmup step complete" && entry.ContextMap()["step"] == "go_module_seed":
+			moduleSeed = i
 		case entry.Message == "daemon: committed-base publication released" && released < 0:
 			released = i
 		}
@@ -92,6 +94,11 @@ func TestDaemonWarmupCommittedBaseCarriesTheDerivedEdges(t *testing.T) {
 	}
 	if released < endBatch {
 		t.Errorf("committed-base publication was released (log entry %d) before end_batch finished (log entry %d): a copy can be taken before the derived passes", released, endBatch)
+	}
+	// Given queued base copies, when module retry seeding adds derived edges,
+	// then seeding must finish before the copies are released.
+	if moduleSeed < 0 || moduleSeed > released {
+		t.Errorf("module seed (%d) must finish before publication release (%d)", moduleSeed, released)
 	}
 	store, ok := state.graph.(*store_sqlite.Store)
 	if !ok {

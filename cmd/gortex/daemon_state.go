@@ -1277,16 +1277,18 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func())
 	// edges: every checkout reading it lost them, and every per-file delta
 	// over it re-derived them as new rows.
 	//
+	// This warmup already runs in the background. Seed persisted module
+	// bindings after readiness so the first watcher save never owns the scan.
+	finishModuleSeed := startWarmupStep(logger, "go_module_seed")
+	if err := state.multiIndexer.SeedGoModuleDeps(ctx); err != nil {
+		logger.Warn("daemon: seed Go module retries", zap.Error(err))
+	}
+	finishModuleSeed()
+
 	// Unconditional on purpose: a resolve that failed (resolveOK == false) or
 	// a caller that passed no markReady still gets its bases published —
 	// readiness is what publication must not precede, not what it depends on.
 	state.basePublisher.BeginDraining()
-
-	// This warmup already runs in the background. Seed persisted module
-	// bindings after readiness so the first watcher save never owns the scan.
-	if err := state.multiIndexer.SeedGoModuleDeps(ctx); err != nil {
-		logger.Warn("daemon: seed Go module retries", zap.Error(err))
-	}
 
 	finishWatchers := startWarmupStep(logger, "watcher_start")
 	watchCfgs := make(map[string]config.WatchConfig)
