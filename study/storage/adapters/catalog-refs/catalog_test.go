@@ -235,3 +235,68 @@ func TestLinkedSetCheckpointViews(t *testing.T) {
 		}
 	}
 }
+
+// Only a one-entry, one-repeat correctness fixture; not study timing evidence.
+type benchmarkCatalogSpy struct {
+	adapter.Catalog
+	publish, sets, pins int
+}
+
+func (c *benchmarkCatalogSpy) Publish(ctx context.Context, repo string, next adapter.SegmentRef, old *adapter.SegmentRef) error {
+	c.publish++
+	return c.Catalog.Publish(ctx, repo, next, old)
+}
+func (c *benchmarkCatalogSpy) PublishSet(ctx context.Context, next, old adapter.View) error {
+	c.sets++
+	return c.Catalog.PublishSet(ctx, next, old)
+}
+func (c *benchmarkCatalogSpy) Pin(ctx context.Context, repos []string) (adapter.View, func(), error) {
+	c.pins++
+	return c.Catalog.Pin(ctx, repos)
+}
+func TestCatalogBenchmarkActualCandidate(t *testing.T) {
+	calls := 0
+	var spy *benchmarkCatalogSpy
+	tracked := func(dir string) (adapter.Catalog, error) {
+		calls++
+		cat, err := factory(dir)
+		if err != nil {
+			return nil, err
+		}
+		spy = &benchmarkCatalogSpy{Catalog: cat}
+		return spy, nil
+	}
+	out := filepath.Join(t.TempDir(), "micro")
+	if err := runner.RunCatalogBenchmark(backend{}, tracked, []string{"-candidate", candidate, "-entries", "1", "-repeats", "1", "-out", out}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || spy.publish != 1 || spy.sets != 2 || spy.pins != 1 {
+		t.Fatal("selected factory/methods were not invoked", calls, spy)
+	}
+	var result struct {
+		Success    bool                           `json:"success"`
+		Candidate  string                         `json:"candidate"`
+		Latency    map[string]runner.Distribution `json:"latency"`
+		Fixture    map[string]string              `json:"fixture_sha256"`
+		Recoveries []struct {
+			Candidate string `json:"candidate"`
+			Factory   string `json:"factory"`
+			PID       int    `json:"pid"`
+		} `json:"recoveries"`
+	}
+	if err := dataset.ReadJSON(filepath.Join(out, "result.json"), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Success || result.Candidate != candidate || len(result.Fixture) != 4 || len(result.Recoveries) != 1 {
+		t.Fatal("incomplete catalog result", result)
+	}
+	for _, op := range []string{"publish", "publish_set", "pin_resolve", "reopen_recover_pin_resolve"} {
+		if result.Latency[op].Count != 1 {
+			t.Fatal("missing actual call", op)
+		}
+	}
+	child := result.Recoveries[0]
+	if child.Candidate != candidate || child.Factory != "*main.catalog" || child.PID == os.Getpid() {
+		t.Fatal("wrong or uninvoked recovery candidate", child)
+	}
+}

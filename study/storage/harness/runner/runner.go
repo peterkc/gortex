@@ -211,6 +211,14 @@ func Main(b adapter.Backend, factory adapter.CatalogFactory) {
 	var err error
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "catalog-bench":
+			err = RunCatalogBenchmark(b, factory, os.Args[2:])
+		case "__catalog_bench_read":
+			if len(os.Args) != 3 {
+				err = fmt.Errorf("catalog recovery child requires request")
+			} else {
+				err = catalogReadChild(b.Name(), factory, os.Args[2])
+			}
 		case "__catalog_publish":
 			err = publishChild(factory, os.Args[2:])
 		case "__measure_run":
