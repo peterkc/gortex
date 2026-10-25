@@ -14,6 +14,7 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/resolver"
 	"github.com/zzet/gortex/internal/search"
 	"go.uber.org/zap"
 )
@@ -164,4 +165,23 @@ func TestGoModuleSourceRecoveryUsesIsolatedExtraction(t *testing.T) {
 	mi.runCrossRepoResolveFiles([]string{"b/lib.go"})
 	assert.Zero(t, spy.calls, "source recovery must use the isolated pool")
 	assert.Equal(t, []string{"b/lib.go::Hello"}, revisionCallTargets(g, "a/main.go::Caller", graph.EdgeCalls))
+}
+
+// Given a deferred batch publication, when its per-repo tail runs,
+// then the shared batch still owns cross-repo parallel materialization.
+func TestGoModuleDeferredPublishLeavesParallelsToBatch(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "a/main.go::Caller", RepoPrefix: "a", Kind: graph.KindFunction, FilePath: "a/main.go"})
+	g.AddNode(&graph.Node{ID: "b/lib.go::Hello", RepoPrefix: "b", Kind: graph.KindFunction, FilePath: "b/lib.go"})
+	g.AddEdge(&graph.Edge{From: "a/main.go::Caller", To: "b/lib.go::Hello", Kind: graph.EdgeCalls, FilePath: "a/main.go"})
+	mi := NewMultiIndexer(g, newTestRegistry(), search.NewNull(), newTestConfigManager(t), zap.NewNop())
+	t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
+	idx := newTestIndexer(g)
+	t.Cleanup(idx.Close)
+	idx.repoPrefix = "a"
+	idx.deferResolve.Store(true)
+	require.NoError(t, mi.postPublishGoModules(t.Context(), idx, false))
+	assert.Empty(t, revisionCallTargets(g, "a/main.go::Caller", graph.EdgeCrossRepoCalls))
+	resolver.DetectCrossRepoEdges(g)
+	assert.Equal(t, []string{"b/lib.go::Hello"}, revisionCallTargets(g, "a/main.go::Caller", graph.EdgeCrossRepoCalls))
 }
