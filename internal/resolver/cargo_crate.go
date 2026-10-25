@@ -242,7 +242,15 @@ func (cr *CrossRepoResolver) resolveCargoImportedCall(e *graph.Edge, target stri
 		if strings.HasSuffix(spec, "/*") {
 			bindings = []rustUseBinding{{source: spec, local: "*"}}
 		}
+		groupBase, _, grouped := strings.Cut(normalizeRustUsePath(spec), "{")
+		groupBase = strings.TrimSuffix(groupBase, "::")
 		for _, binding := range bindings {
+			if grouped {
+				split := strings.LastIndex(binding.source, "::")
+				if split < 0 || binding.source[:split] != groupBase {
+					continue
+				}
+			}
 			item, local := rustUseBindingName(binding.source), binding.local
 			if imp.Alias != "" {
 				local = imp.Alias

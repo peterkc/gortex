@@ -154,3 +154,54 @@ func TestScopedBridgeImportHydration(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 12, g.maxSites, "full passes retain corpus-wide import evidence")
 }
+
+func TestCargoGroupedUsesRejectNestedPathDecoys(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, spec := range []string{"other/util/{action, sub/helper}", "other/{util/action, net/fetch}", "other/{self, action}"} {
+			t.Run(backend+"/"+spec, func(t *testing.T) {
+				// Given a real nested item and a same-named decoy in the group's linked file.
+				g := goImportReviewStore(t, backend)
+				file, root, module := "consumer/src/lib.rs", "provider/src/lib.rs", "provider/src/util.rs"
+				paths := []string{file, root, module, "provider/src/util/sub.rs", "provider/src/net.rs"}
+				for _, path := range paths {
+					g.AddNode(&graph.Node{ID: path, FilePath: path, Kind: graph.KindFile, RepoPrefix: graph.RepoPrefixOfID(path), Language: "rust"})
+				}
+				decoy, name := module, "helper"
+				if strings.HasPrefix(spec, "other/{") {
+					decoy, name = root, "fetch"
+				}
+				if strings.Contains(spec, "{self,") {
+					name = "action"
+				}
+				for _, path := range []string{decoy, "provider/src/util/sub.rs", "provider/src/net.rs"} {
+					g.AddNode(&graph.Node{ID: path + "::" + name, FilePath: path, Name: name, Kind: graph.KindFunction, RepoPrefix: "provider", Language: "rust"})
+				}
+				g.AddNode(&graph.Node{ID: module + "::action", FilePath: module, Name: "action", Kind: graph.KindFunction, RepoPrefix: "provider", Language: "rust"})
+				g.AddEdge(&graph.Edge{From: file, FilePath: file, To: "external::" + spec, Kind: graph.EdgeImports, Line: 1})
+				g.AddEdge(&graph.Edge{From: file, FilePath: file, To: "unresolved::" + name, Kind: graph.EdgeCalls, Line: 2})
+				g.AddEdge(&graph.Edge{From: file, FilePath: file, To: "unresolved::action", Kind: graph.EdgeCalls, Line: 3})
+				cr := NewCrossRepo(g)
+				cr.SetCargoCrateLookup(func(string, string) []CargoCrate { return []CargoCrate{{Root: root, Name: "other"}} })
+				// When the tracked bridge resolves the grouped import and its calls.
+				_, err := cr.ResolveAllContext(t.Context())
+				require.NoError(t, err)
+				// Then the nested leaf never binds to a decoy in that file.
+				calls := outEdgesOfKind(g, file, graph.EdgeCalls)
+				require.Len(t, calls, 2)
+				for _, call := range calls {
+					if call.Line == 2 {
+						if strings.Contains(spec, "{self,") {
+							require.Equal(t, root+"::action", call.To)
+						} else {
+							require.Equal(t, "unresolved::"+name, call.To)
+							require.False(t, call.CrossRepo)
+						}
+					}
+					if call.Line == 3 && decoy == module {
+						require.Equal(t, module+"::action", call.To)
+					}
+				}
+			})
+		}
+	}
+}
