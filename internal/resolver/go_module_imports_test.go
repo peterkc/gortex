@@ -654,3 +654,32 @@ func TestGoModuleImportIncomingAdmissionRefused(t *testing.T) {
 		})
 	}
 }
+
+func TestGoModuleImportFallbackStatsAreUnresolved(t *testing.T) {
+	for _, target := range []string{"dep::example.org/lib", "external::example.org/lib"} {
+		for _, priorCount := range []string{"none", "unresolved", "resolved"} {
+			t.Run(target+"/"+priorCount, func(t *testing.T) {
+				g := graph.New()
+				old := &graph.Edge{From: "a/main.go", To: "b/lib.go", Kind: graph.EdgeImports, FilePath: "a/main.go", Line: 2}
+				g.AddEdge(old)
+				fresh := *old
+				fresh.To = target
+				stats := &CrossRepoStats{ByRepo: map[string]int{}}
+				counted := map[graph.EdgeIdentity]bool{}
+				if priorCount != "none" {
+					resolved := priorCount == "resolved"
+					counted[graph.EdgeIdentityFor(old)] = resolved
+					if resolved {
+						stats.Resolved = 1
+					} else {
+						stats.Unresolved = 1
+					}
+				}
+				NewCrossRepo(g).applyGoModuleImportReindexes([]graph.EdgeReindex{{Edge: &fresh, OldTo: old.To}}, stats, counted)
+				require.Zero(t, stats.Resolved)
+				require.Equal(t, 1, stats.Unresolved)
+				require.Zero(t, stats.CrossRepoEdges)
+			})
+		}
+	}
+}

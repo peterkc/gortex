@@ -205,11 +205,21 @@ func (cr *CrossRepoResolver) applyGoModuleImportReindexes(batch []graph.EdgeRein
 		original := graph.EdgeIdentityFor(row.Edge)
 		original.To = row.OldTo
 		resolved, alreadyCounted := counted[original]
-		if !alreadyCounted || !resolved {
-			stats.Resolved++
-		}
-		if alreadyCounted && !resolved {
-			stats.Unresolved--
+		nowResolved := !isSyntheticResolveTarget(row.Edge.To)
+		if nowResolved {
+			if !alreadyCounted || !resolved {
+				stats.Resolved++
+			}
+			if alreadyCounted && !resolved {
+				stats.Unresolved--
+			}
+		} else {
+			if !alreadyCounted || resolved {
+				stats.Unresolved++
+			}
+			if alreadyCounted && resolved {
+				stats.Resolved--
+			}
 		}
 		if row.Edge.CrossRepo {
 			stats.CrossRepoEdges++
