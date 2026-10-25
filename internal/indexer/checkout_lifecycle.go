@@ -416,8 +416,8 @@ type CheckoutLifecycle struct {
 	// catalog to observe.
 	baseAdoptionRelease func()
 
-	// transitionCtx owns promotion and demotion workers. Durable transition
-	// rows outlive request contexts; this context instead lives for exactly as
+	// transitionCtx owns promotion, demotion and seed index-healing workers.
+	// Durable transition rows outlive request contexts; this context lives as
 	// long as the lifecycle, so a disconnected caller cannot abandon work and
 	// daemon shutdown can still stop it deliberately.
 	transitionCtx     context.Context
@@ -4119,7 +4119,7 @@ func (l *CheckoutLifecycle) Seed(ctx context.Context) error {
 	// the racily clean state and healed in the background (dormant checkouts
 	// included; see healFamilyRacyIndexes).
 	for familyID := range seeded {
-		go l.healFamilyRacyIndexes(context.WithoutCancel(ctx), familyID)
+		l.startFamilyRacyIndexHeal(ctx, familyID)
 	}
 	reconcileStageStarted := time.Now()
 	reconciled := 0

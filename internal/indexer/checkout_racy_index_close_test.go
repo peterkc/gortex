@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/gitstate"
 )
 
@@ -106,5 +108,84 @@ func TestCoordinatorCloseJoinsItsStartTimeIndexHeal(t *testing.T) {
 	case <-c.racyHeal.done:
 	default:
 		t.Fatal("CloseContext returned before refresh completion")
+	}
+}
+
+func TestCheckoutLifecycleSeedHealersStopAndJoinOnClose(t *testing.T) {
+	f := newLifecycleFixture(t)
+	root := f.gitRepo("seed-heal-close")
+	require.NoError(t, f.cm.Global().AddRepo(config.RepoEntry{Path: root, Name: "seed-heal-close"}))
+	type requestKey struct{}
+	ctx, cancel := context.WithCancel(context.WithValue(t.Context(), requestKey{}, "seed-value"))
+	defer cancel()
+	entered := make(chan context.Context, 2)
+	canceled := make(chan struct{})
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	var releaseOnce sync.Once
+	old := racyIndexRefresh
+	racyIndexRefresh = func(ctx context.Context, _ *gitstate.DirtySampler) (gitstate.RacyIndexReport, gitstate.RacyIndexReport, bool, error) {
+		entered <- ctx
+		select {
+		case <-ctx.Done():
+			close(canceled)
+		case <-release:
+		}
+		<-release
+		close(finished)
+		return gitstate.RacyIndexReport{}, gitstate.RacyIndexReport{}, true, ctx.Err()
+	}
+	t.Cleanup(func() { racyIndexRefresh = old })
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(release) })
+		f.close()
+		select {
+		case <-finished:
+		case <-time.After(5 * time.Second):
+			t.Error("seed healer did not finish cleanup")
+		}
+	})
+	require.NoError(t, f.lc.Seed(ctx))
+	var healCtx context.Context
+	select {
+	case healCtx = <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Seed did not start a healer")
+	}
+	cancel()
+	require.NoError(t, healCtx.Err(), "caller cancellation must not stop the seed healer")
+	require.Equal(t, "seed-value", healCtx.Value(requestKey{}))
+	joined := make(chan error, 1)
+	go func() { joined <- f.lc.Close() }()
+	select {
+	case <-canceled:
+	case err := <-joined:
+		t.Fatalf("Close returned %v without canceling its seed healer", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not cancel its seed healer")
+	}
+	select {
+	case err := <-joined:
+		t.Fatalf("Close returned %v before the seed healer finished", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case err := <-joined:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not join the released healer")
+	}
+	select {
+	case <-finished:
+	default:
+		t.Fatal("Close returned before the refresh finished")
+	}
+	// A later Seed can fail because admission is closed, but must not refresh.
+	_ = f.lc.Seed(t.Context())
+	select {
+	case <-entered:
+		t.Fatal("Seed started a refresh after Close")
+	case <-time.After(100 * time.Millisecond):
 	}
 }

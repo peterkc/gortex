@@ -94,6 +94,26 @@ func (c *CheckoutCoordinator) awaitNoEdit(ctx context.Context, bound time.Durati
 	}
 }
 
+// startFamilyRacyIndexHeal uses the transition worker admission and join so
+// Close cancels and waits for seed-time Git writers as well as transitions.
+func (l *CheckoutLifecycle) startFamilyRacyIndexHeal(ctx context.Context, familyID string) {
+	l.transitionMu.Lock()
+	if l.transitionClosed {
+		l.transitionMu.Unlock()
+		return
+	}
+	healCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stop := context.AfterFunc(l.transitionCtx, cancel)
+	l.transitionWG.Add(1)
+	l.transitionMu.Unlock()
+	go func() {
+		defer l.transitionWG.Done()
+		defer cancel()
+		defer stop()
+		l.healFamilyRacyIndexes(healCtx, familyID)
+	}()
+}
+
 // healFamilyRacyIndexes refreshes the racily clean index of every ready
 // checkout the catalog knows for familyID, dormant ones included, once per
 // daemon start, in the background: a start resumes only routed checkouts'
