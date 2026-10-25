@@ -143,6 +143,12 @@ type pythonLookupScanStore struct {
 	graph.Store
 	globalScans int
 	importScans int
+	nodeReads   int
+}
+
+func (s *pythonLookupScanStore) GetNode(id string) *graph.Node {
+	s.nodeReads++
+	return s.Store.GetNode(id)
 }
 
 func (s *pythonLookupScanStore) FileNodeIdentitiesSeq(repos []string) iter.Seq[graph.FileNodeIdentity] {
@@ -306,4 +312,17 @@ func TestSingleRepoPythonAddedFileSkipsCrossRepoScan(t *testing.T) {
 	_, err = mi.IncrementalReindexRepo("solo", []string{filepath.Join(root, "missing.py")})
 	require.NoError(t, err)
 	require.Zero(t, g.importScans, "a lone Python repo has no foreign provider to recover")
+}
+
+func TestPythonAddedFileGateDoesNotBuildLookup(t *testing.T) {
+	provider, consumer := t.TempDir(), t.TempDir()
+	writeWorkspaceFile(t, provider, "pyproject.toml", "[project]\nname='library'\n")
+	writeWorkspaceFile(t, provider, "mylib.py", "")
+	writeWorkspaceFile(t, consumer, "pyproject.toml", "[project]\ndependencies=['library']\n")
+	g := &pythonLookupScanStore{Store: graph.New()}
+	g.AddNode(&graph.Node{ID: "provider/mylib.py", FilePath: "provider/mylib.py", Kind: graph.KindFile, RepoPrefix: "provider"})
+	g.AddEdge(&graph.Edge{From: "consumer/app.py", FilePath: "consumer/app.py", To: "external::mylib", Kind: graph.EdgeImports})
+	mi := &MultiIndexer{graph: g, repos: map[string]*RepoMetadata{"provider": {RootPath: provider}, "consumer": {RootPath: consumer}}}
+	require.Equal(t, []string{"consumer/app.py"}, mi.pythonAddedFileConsumers([]string{"provider/mylib.py"}))
+	require.Zero(t, g.nodeReads, "the added-file candidate gate must not build package lookup")
 }
