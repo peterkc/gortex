@@ -120,3 +120,38 @@ func TestGoModuleImportOversizedProviderDoesNotStarveNext(t *testing.T) {
 		})
 	}
 }
+
+func TestGoModuleNestedProviderFullAndWarmParity(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, route := range []string{"full", "frontier", "seed"} {
+			t.Run(backend+"/"+route, func(t *testing.T) {
+				g := goImportReviewStore(t, backend)
+				const file = "a/main.go"
+				const spec = "example.org/root/child/sub"
+				const id = file + "::import::" + spec
+				g.AddBatch([]*graph.Node{
+					{ID: file, Name: "main.go", FilePath: file, Kind: graph.KindFile, RepoPrefix: "a", Language: "go"},
+					{ID: id, Name: "sub", FilePath: file, StartLine: 2, Kind: graph.KindImport, RepoPrefix: "a", Language: "go", Meta: map[string]any{"path": spec}},
+					{ID: "b/sub/lib.go", Name: "lib.go", FilePath: "b/sub/lib.go", Kind: graph.KindFile, RepoPrefix: "b", Language: "go"},
+				}, []*graph.Edge{{From: file, To: "dep::example.org/root/child", FilePath: file, Line: 2, Kind: graph.EdgeImports}})
+				cr := NewCrossRepo(g)
+				cr.SetGoModules(map[string]string{"a": "example.org/root", "b": "example.org/root/child"})
+				if route == "seed" {
+					require.NoError(t, cr.seedGoModuleImportRegistry(t.Context()))
+					require.Contains(t, cr.goModuleRetry.imports["b"], id)
+					return
+				}
+				if route == "full" {
+					_, err := cr.ResolveAllContext(t.Context())
+					require.NoError(t, err)
+				} else {
+					cr.ResolveMutationFiles([]string{file}, nil)
+				}
+				imports := outEdgesOfKind(g, file, graph.EdgeImports)
+				require.Len(t, imports, 1)
+				require.Equal(t, "b/sub/lib.go", imports[0].To)
+				require.True(t, imports[0].CrossRepo)
+			})
+		}
+	}
+}
