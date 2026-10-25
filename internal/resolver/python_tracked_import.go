@@ -273,3 +273,49 @@ func (cr *CrossRepoResolver) restubCallsForLinkedPythonImports(changes []graph.E
 	}
 	return reopened
 }
+
+// Qualified Python calls use the exact linked import, not repo-wide reachability.
+func (cr *CrossRepoResolver) linkedPythonCallCandidate(e *graph.Edge, node *graph.Node, module string) bool {
+	for _, imp := range cr.bridgeImportsByFile[cr.callerFileID(e)] {
+		spec, _ := imp.Meta["python_import"].(string)
+		if imp.Meta[PythonImportStubMeta] == nil || spec == "" || (module != spec && !strings.HasPrefix(module, spec+".")) {
+			continue
+		}
+		if node.FilePath == imp.To && cr.crossWorkspaceEligible(cr.callerWorkspaceID(e), candidateWorkspaceID(node), spec) {
+			return true
+		}
+	}
+	return false
+}
+
+func (cr *CrossRepoResolver) resolvePythonImportedMethod(e *graph.Edge, target string) bool {
+	if e.Kind != graph.EdgeCalls || !isPythonSourcePath(e.FilePath) || !strings.HasPrefix(target, "*.") {
+		return false
+	}
+	receiver := edgeReceiverType(e)
+	if receiver == "" {
+		return false
+	}
+	var match *graph.Node
+	for _, imp := range cr.bridgeImportsByFile[cr.callerFileID(e)] {
+		spec, _ := imp.Meta["python_import"].(string)
+		if imp.Meta[PythonImportStubMeta] == nil || !pythonModuleFileMatches(imp.To, spec) {
+			continue
+		}
+		for _, candidate := range cr.cachedFindNodesByName(strings.TrimPrefix(target, "*.")) {
+			if candidate.Kind != graph.KindMethod || candidate.FilePath != imp.To || nodeReceiverType(candidate) != receiver || !cr.crossWorkspaceEligible(cr.callerWorkspaceID(e), candidateWorkspaceID(candidate), spec) {
+				continue
+			}
+			if match != nil && match.ID != candidate.ID {
+				return false
+			}
+			match = candidate
+		}
+	}
+	if match == nil {
+		return false
+	}
+	e.To, e.CrossRepo = match.ID, true
+	e.Confidence, e.Origin = 0.85, graph.OriginASTResolved
+	return true
+}
