@@ -62,9 +62,9 @@ func TestGoModuleSameLineCallsColdEquivalent(t *testing.T) {
 					if strings.HasSuffix(mode, "last") {
 						bound = "World"
 					}
-					writeFile(t, filepath.Join(repos[0].Path, "main.go"), "package caller\nimport library \"example.org/library\"\nfunc Caller() { library."+bound+"(library.Missing()) }\n")
+					writeFile(t, filepath.Join(repos[0].Path, "main.go"), "package caller\nimport (\"fmt\"; library \"example.org/library\"; untracked \"example.org/untracked\")\nfunc Caller() {\n library."+bound+"(library.Missing())\n fmt.Println(1)\n untracked.Do()\n}\n")
 					writeFile(t, filepath.Join(repos[1].Path, "lib.go"), "package library\nfunc "+bound+"(v int) {}\n")
-					expected = []string{"b/lib.go::" + bound, "external-call::dep::example.org/library"}
+					expected = []string{"b/lib.go::" + bound, "external-call::dep::example.org/library", graph.StubID("a", graph.StubKindStdlib, "fmt", "Println"), "external-call::dep::example.org/untracked"}
 				}
 				if strings.HasSuffix(mode, "save") {
 					writeFile(t, filepath.Join(repos[1].Path, "lib.go"), "package library\nfunc Other() {}\n")
