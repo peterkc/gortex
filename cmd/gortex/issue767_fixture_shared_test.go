@@ -414,9 +414,7 @@ func (f *issue767Fixture) start() {
 	}()
 	if f.profiles != nil {
 		if err := f.profiles.start(f.t.Context(), f.logPathFor(run), processStart, done); err != nil {
-			if errors.Is(err, errReconstructedProfileDaemonExit) {
-				f.startError = err.Error()
-			}
+			f.startError = err.Error()
 			f.t.Fatal(err)
 		}
 	}
@@ -1537,7 +1535,9 @@ func (p *reconstructedProfiles) finish(end time.Time, scenarioError string) erro
 			if p.ScenarioStatus != "failed" {
 				p.ScenarioStatus = "incomplete"
 			}
-			p.Error = "profile capture never started"
+			if scenarioError == "" {
+				p.Error = "profile capture never started"
+			}
 			return
 		}
 		// Cleanup runs after t.Context is cancelled. Keep end snapshots and
@@ -1563,6 +1563,24 @@ func (p *reconstructedProfiles) finish(end time.Time, scenarioError string) erro
 		}
 	})
 	if writeManifest {
+		hasCPU := false
+		for _, c := range p.Captures {
+			if c.Kind == "profile?seconds=60" && c.Error == "" {
+				hasCPU = true
+			}
+		}
+		if !hasCPU {
+			cause := p.ScenarioError
+			if cause == "" {
+				cause = p.Error
+			}
+			if cause == "" {
+				cause = "capture did not start"
+			}
+			p.Coverage = "no CPU captured: " + cause
+		} else if p.Error != "" {
+			p.Coverage = "CPU request windows recorded; capture failed: see error"
+		}
 		raw, marshalErr := json.MarshalIndent(p, "", "  ")
 		if marshalErr == nil {
 			marshalErr = os.WriteFile(filepath.Join(p.Dir, "capture.json"), raw, 0600)

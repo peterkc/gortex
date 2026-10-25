@@ -260,8 +260,8 @@ func (d *reconstructedDriver) finish(t *testing.T) {
 	if d.run.Mode == "profile" && d.run.Error == "" && d.run.ProfileError == "" && t.Failed() {
 		d.run.Error = "profile scenario failed; see test log"
 	}
-	if d.profiles != nil {
-		if err := d.profiles.finish(time.Now(), d.run.Error); d.run.recordProfileError(err) {
+	if d.f.profiles != nil {
+		if err := d.f.profiles.finish(time.Now(), d.run.Error); d.run.recordProfileError(err) {
 			t.Errorf("diagnostic capture: %v", err)
 		}
 	}
@@ -286,7 +286,7 @@ func (d *reconstructedDriver) finish(t *testing.T) {
 		if err != nil {
 			reason = d.run.Error
 		}
-		if d.profiles != nil {
+		if d.profiles != nil && (d.run.Error != "" || score.Status == "insufficient") {
 			d.run.recordProfileError(d.profiles.finish(time.Now(), reason))
 		}
 		if !t.Failed() {

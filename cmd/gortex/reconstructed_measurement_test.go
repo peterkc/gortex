@@ -1827,6 +1827,9 @@ func TestReconstructedMeasurementProfileScenario(t *testing.T) {
 		root := os.Getenv("GORTEX_RECON_SCENARIO_ROOT")
 		binary := filepath.Join(root, "fake-binary")
 		script := []byte("#!/bin/sh\nexit 7\n")
+		if scenario == "startup-invalid" {
+			script = []byte("#!/bin/sh\necho '{\"msg\":\"daemon: pprof endpoint open\",\"addr\":\"127.0.0.1:0\",\"ts\":100}'\nexec /bin/sleep 30\n")
+		}
 		if err := os.WriteFile(binary, script, 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -1836,7 +1839,7 @@ func TestReconstructedMeasurementProfileScenario(t *testing.T) {
 		}
 		f := &issue767Fixture{t: t, binary: binary, root: root, primary: root, store: filepath.Join(root, "store.sqlite"), env: os.Environ(), profiled: true, profiles: p}
 		d := &reconstructedDriver{f: f, profiles: p, started: time.Now(), run: reconstructedRun{Label: "reconstructed", Mode: "profile", Workload: "R-Fresh", Parameters: map[string]any{}}}
-		if scenario == "startup-fresh" {
+		if scenario == "startup-fresh" || scenario == "startup-invalid" {
 			t.Cleanup(func() { d.finish(t) })
 			f.start() // The private fake executable exits; no real daemon runs.
 			t.Fatal("exited fake daemon was accepted")
@@ -1856,8 +1859,19 @@ func TestReconstructedMeasurementProfileScenario(t *testing.T) {
 			}
 			return
 		}
+		if scenario == "quiet-miss" {
+			d.run.Workload = "R-DE"
+			p.Scenario = "edit-burst"
+			f.profiles = nil
+			d.run.Parameters["quiet_error"] = "context deadline exceeded"
+			t.Cleanup(func() { d.finish(t) })
+			return
+		}
 		cpuStarted, releaseCPU := make(chan struct{}), make(chan struct{})
 		profile := reconstructedProfileFixture(t, 100, 3)
+		if scenario == "capture-only" {
+			profile = []byte("invalid profile")
+		}
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/debug/pprof/profile" {
 				close(cpuStarted)
@@ -1868,6 +1882,9 @@ func TestReconstructedMeasurementProfileScenario(t *testing.T) {
 			}
 			if r.URL.Path == "/debug/pprof/heap" {
 				close(releaseCPU)
+			}
+			if scenario == "capture-http" {
+				w.WriteHeader(http.StatusInternalServerError)
 			}
 			_, _ = w.Write(profile)
 		}))
@@ -1881,14 +1898,16 @@ func TestReconstructedMeasurementProfileScenario(t *testing.T) {
 			t.Fatal(err)
 		}
 		<-cpuStarted
-		d.run.Error = "enrichment completion: context deadline exceeded"
+		if scenario == "enrichment-timeout" {
+			d.run.Error = "enrichment completion: context deadline exceeded"
+		}
 		return // Cleanup must finish capture but fail this profile test.
 	}
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, scenario := range []string{"enrichment-timeout", "startup-fresh", "startup-de"} {
+	for _, scenario := range []string{"enrichment-timeout", "capture-only", "capture-http", "quiet-miss", "startup-fresh", "startup-de", "startup-invalid"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := t.TempDir()
 			out := filepath.Join(root, "result.jsonl")
@@ -1906,12 +1925,32 @@ func TestReconstructedMeasurementProfileScenario(t *testing.T) {
 			if err := json.Unmarshal(raw, &row); err != nil {
 				t.Fatal(err)
 			}
-			want := "enrichment completion: context deadline exceeded"
+			want, wantStatus := "enrichment completion: context deadline exceeded", "fail"
 			if strings.HasPrefix(scenario, "startup-") {
 				want = "isolated daemon exited during start: exit status 7"
 			}
-			if !strings.HasPrefix(row.Error, want) || row.Score == nil || row.Score.Status != "fail" || row.Score.Reason != row.Error || !strings.Contains(string(log), row.Error) {
+			if scenario == "startup-invalid" {
+				want = "invalid bound pprof endpoint or log timestamp"
+			}
+			if scenario == "quiet-miss" {
+				want, wantStatus = "quiet did not arrive within 300 s: context deadline exceeded", "insufficient"
+			}
+			if row.Score == nil || row.Score.Status != wantStatus {
+				t.Fatalf("wrong profile score: %+v", row)
+			}
+			if strings.HasPrefix(scenario, "capture-") {
+				if row.Error != "" || row.ProfileError == "" || row.Score.Reason != "diagnostic capture: "+row.ProfileError {
+					t.Errorf("capture failure became a scenario failure: %+v", row)
+				}
+			} else if scenario == "quiet-miss" {
+				if row.Error != "" || row.ProfileError != "" || row.Score.Reason != want || strings.Contains(string(log), "profile capture never started") {
+					t.Errorf("quiet miss became a capture failure: %+v\n%s", row, log)
+				}
+			} else if !strings.HasPrefix(row.Error, want) || row.Score.Reason != row.Error {
 				t.Errorf("primary scenario cause lost: %+v\n%s", row, log)
+			}
+			if !strings.HasPrefix(scenario, "capture-") && !strings.Contains(string(log), want) {
+				t.Errorf("primary reason missing from test failure: %s", log)
 			}
 			var manifest reconstructedProfiles
 			raw, readErr = os.ReadFile(filepath.Join(root, "profiles", "capture.json"))
@@ -1921,14 +1960,33 @@ func TestReconstructedMeasurementProfileScenario(t *testing.T) {
 			if err := json.Unmarshal(raw, &manifest); err != nil {
 				t.Fatal(err)
 			}
-			if manifest.ScenarioStatus != "failed" || manifest.ScenarioError != row.Error || !strings.Contains(manifest.Coverage, "failed-scenario end") || strings.Contains(manifest.Coverage, "to enrichment complete") {
-				t.Errorf("failed scenario claimed completion: %s", raw)
+			if strings.HasPrefix(scenario, "capture-") {
+				if manifest.ScenarioStatus != "complete" || manifest.ScenarioError != "" || manifest.Error == "" || strings.Contains(manifest.Coverage, "failed-scenario") {
+					t.Errorf("capture-only manifest blames the scenario: %s", raw)
+				}
+				if scenario == "capture-http" && !strings.HasPrefix(manifest.Coverage, "no CPU captured: ") {
+					t.Errorf("failed HTTP request claimed CPU coverage: %s", raw)
+				}
+				if scenario == "capture-only" && !strings.HasPrefix(manifest.Coverage, "CPU request windows recorded;") {
+					t.Errorf("invalid CPU profile claimed sampled coverage: %s", raw)
+				}
+			} else {
+				if manifest.ScenarioStatus != "failed" || manifest.ScenarioError != row.Score.Reason {
+					t.Errorf("scenario outcome lost: %s", raw)
+				}
+				if strings.HasPrefix(scenario, "startup-") || scenario == "quiet-miss" {
+					if !strings.HasPrefix(manifest.Coverage, "no CPU captured: ") || !strings.Contains(manifest.Coverage, want) {
+						t.Errorf("uncaptured CPU coverage claimed: %s", raw)
+					}
+				} else if !strings.Contains(manifest.Coverage, "failed-scenario end") || strings.Contains(manifest.Coverage, "to enrichment complete") {
+					t.Errorf("failed scenario claimed completion: %s", raw)
+				}
 			}
-			if scenario == "enrichment-timeout" && manifest.Error != "" {
-				t.Errorf("fixture did not isolate a successful capture after driver failure: %s", raw)
+			if (scenario == "enrichment-timeout" || scenario == "quiet-miss") && manifest.Error != "" {
+				t.Errorf("unexpected capture failure: %s", raw)
 			}
-			if strings.HasPrefix(scenario, "startup-") && strings.Contains(row.ProfileError, "isolated daemon exited during start") {
-				t.Errorf("daemon exit was filed as a capture error: %+v", row)
+			if strings.HasPrefix(scenario, "startup-") && strings.Contains(row.ProfileError, want) {
+				t.Errorf("startup failure was filed as a capture error: %+v", row)
 			}
 			t.Logf("expected profile failure: %s", strings.TrimSpace(string(log)))
 		})
