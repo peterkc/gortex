@@ -16,8 +16,7 @@ func TestFileReceiptPagerFreezesHighWaterAndClosesRows(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	// InUse below must belong only to this pager. Startup/checkpoint and
 	// maintenance readers otherwise make the pool-wide count nondeterministic.
-	store.stopCheckpointLoop()
-	store.stopMaintenanceLane()
+	stopStoreBackgroundReaders(store)
 
 	require.NoError(t, store.BulkSetFileMtimes("repo", map[string]int64{
 		"a.go": 1,
@@ -87,8 +86,7 @@ func TestFileReceiptPagerUsesCanonicalSlashPathAndHandlesDeletedHighWater(t *tes
 	store, err := Open(filepath.Join(t.TempDir(), "receipts.sqlite"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
-	store.stopCheckpointLoop()
-	store.stopMaintenanceLane()
+	stopStoreBackgroundReaders(store)
 
 	require.NoError(t, store.BulkSetFileMtimes("repo", map[string]int64{
 		"nested/a.go": 1,

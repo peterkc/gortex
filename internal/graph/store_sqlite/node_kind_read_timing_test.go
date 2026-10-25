@@ -15,6 +15,7 @@ func TestNodeKindReadTimingParityAndConnectionReturn(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "timing.sqlite"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
+	stopStoreBackgroundReaders(s)
 	s.AddNode(&graph.Node{ID: "repo/f.go::N", Kind: graph.KindFunction, FilePath: "repo/f.go", RepoPrefix: "repo"})
 	ids := []string{"repo/f.go::N", "missing", "repo/f.go::N", ""}
 	expected, err := s.GetNodeKindsByIDsContext(t.Context(), ids)

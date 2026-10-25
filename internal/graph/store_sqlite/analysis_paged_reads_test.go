@@ -98,8 +98,7 @@ func TestAbandonedAnalysisReadReleasesItsSnapshot(t *testing.T) {
 	t.Cleanup(func() { nodesByKindsPageSize, deadCodePageSize = prevNodes, prevDead })
 	s, path := openTempStore(t)
 	// Only the analysis reader may use the pool during the handoff below.
-	s.stopCheckpointLoop()
-	s.stopMaintenanceLane()
+	stopStoreBackgroundReaders(s)
 	s.db.SetMaxOpenConns(1)
 	writeDeadCodeFixture(t, s, []int64{0}, 3000)
 	ckpt, err := openWALReclaimCheckpointDB(s.dbPath)

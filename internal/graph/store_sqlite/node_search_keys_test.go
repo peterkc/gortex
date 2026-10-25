@@ -28,6 +28,7 @@ func openNodeSearchKeyTestStore(tb testing.TB) *Store {
 
 func TestScanNodeSearchKeysUsesBoundedOrderedPagesAndClosesRows(t *testing.T) {
 	store := openNodeSearchKeyTestStore(t)
+	stopStoreBackgroundReaders(store)
 	for _, node := range []*graph.Node{
 		{ID: "c.go::Gamma", Kind: graph.KindFunction, Name: "Gamma", FilePath: "c.go"},
 		{ID: "a.go::Alpha", Kind: graph.KindMethod, Name: "Alpha", FilePath: "a.go"},

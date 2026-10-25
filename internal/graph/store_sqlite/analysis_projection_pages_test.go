@@ -21,9 +21,8 @@ func TestAnalysisProjectionParkedConsumerReleasesSnapshot(t *testing.T) {
 	for _, kind := range []string{"nodes", "edges"} {
 		t.Run(kind, func(t *testing.T) {
 			s, path := openTempStore(t)
-			s.stopCheckpointLoop()
+			stopStoreBackgroundReaders(s)
 			s = s.BindAnalysisPages().(*Store)
-			s.stopMaintenanceLane()
 			writeDeadCodeFixture(t, s, []int64{0}, 300)
 			ckpt, err := openWALReclaimCheckpointDB(s.dbPath)
 			require.NoError(t, err)
@@ -80,9 +79,8 @@ func TestAnalysisProjectionParkedConsumerReleasesSnapshot(t *testing.T) {
 // blocking callback. The second predicate call witnesses entry into park().
 func TestPacedLeidenReleasesSQLiteSnapshotWhileParked(t *testing.T) {
 	s, path := openTempStore(t)
-	s.stopCheckpointLoop()
+	stopStoreBackgroundReaders(s)
 	s = s.BindAnalysisPages().(*Store)
-	s.stopMaintenanceLane()
 	writeDeadCodeFixture(t, s, []int64{0}, 300)
 	ckpt, err := openWALReclaimCheckpointDB(s.dbPath)
 	require.NoError(t, err)
@@ -262,8 +260,7 @@ func TestAnalysisProjectionPageHandlePreservesGenerationAndContext(t *testing.T)
 
 func TestDefaultAnalysisProjectionKeepsSingleStatementSnapshot(t *testing.T) {
 	s, _ := openTempStore(t)
-	s.stopCheckpointLoop()
-	s.stopMaintenanceLane()
+	stopStoreBackgroundReaders(s)
 	writeDeadCodeFixture(t, s, []int64{0}, 90)
 	for range s.NodesLightSeq() {
 		require.Equal(t, 1, s.db.Stats().InUse)

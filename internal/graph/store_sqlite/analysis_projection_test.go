@@ -91,8 +91,7 @@ func TestEdgesLightSeqUsesSelectedGenerationKindPlan(t *testing.T) {
 
 func TestEdgesLightSeqKeepsGenerationAndScalarParity(t *testing.T) {
 	store, _ := openTempStore(t)
-	store.stopCheckpointLoop()
-	store.stopMaintenanceLane()
+	stopStoreBackgroundReaders(store)
 	for _, generation := range []int64{0, 1} {
 		handle := store.AtGeneration(generation)
 		require.NoError(t, handle.AddBatchChecked(nil, []*graph.Edge{

@@ -16,7 +16,7 @@ func rowCounterReaderReservationFixture(t *testing.T) *Store {
 	s, err := openPristine(t, filepath.Join(t.TempDir(), "reader-reservation.sqlite"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
-	s.stopCheckpointLoop()
+	stopStoreBackgroundReaders(s)
 	s.db.SetMaxOpenConns(4)
 	nodes, edges := rowCounterFixture("repo/a.go", 20)
 	s.AddBatch(nodes, edges)
