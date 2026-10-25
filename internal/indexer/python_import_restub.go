@@ -116,6 +116,8 @@ func (mi *MultiIndexer) pythonConsumerFilesForRepo(repo string) []string {
 		return nil
 	}
 	files := make(map[string]struct{})
+	type candidate struct{ caller, top, file string }
+	var candidates []candidate
 	for edge := range graph.EdgesLightSeq(mi.graph, graph.EdgeImports) {
 		if !strings.HasSuffix(edge.FilePath, ".py") {
 			continue
@@ -127,10 +129,13 @@ func (mi *MultiIndexer) pythonConsumerFilesForRepo(repo string) []string {
 				break
 			}
 		}
-		caller := graph.RepoPrefixOfID(edge.From)
-		for provider := range lookup.Providers(caller, top) {
-			if provider == repo || caller == repo {
-				files[edge.FilePath] = struct{}{}
+		candidates = append(candidates, candidate{graph.RepoPrefixOfID(edge.From), top, edge.FilePath})
+	}
+	// Providers may query the store; release the import cursor first.
+	for _, item := range candidates {
+		for provider := range lookup.Providers(item.caller, item.top) {
+			if provider == repo || item.caller == repo {
+				files[item.file] = struct{}{}
 				break
 			}
 		}
