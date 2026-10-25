@@ -38,10 +38,13 @@ func (mi *MultiIndexer) cargoCrateLookup() resolver.CargoCrateLookup {
 	roots := map[string]manifestTree{}
 	for prefix, meta := range mi.AllMetadata() {
 		if meta != nil && meta.RootPath != "" {
-			roots[prefix] = mi.manifestTreeFor(prefix, meta.RootPath)
+			tree := mi.manifestTreeFor(prefix, meta.RootPath)
+			if tree.isFile("Cargo.toml") {
+				roots[prefix] = tree
+			}
 		}
 	}
-	if len(roots) < 2 {
+	if len(roots) == 0 {
 		return nil
 	}
 	owners := map[string]*crate{}
@@ -52,10 +55,6 @@ func (mi *MultiIndexer) cargoCrateLookup() resolver.CargoCrateLookup {
 	return func(file, name string) []resolver.CargoCrate {
 		once.Do(func() {
 			for prefix, tree := range roots {
-				if !tree.isFile("Cargo.toml") {
-					delete(roots, prefix)
-					continue
-				}
 				manifest := readCargoManifest(tree, ".")
 				src, _ := tree.readFile("Cargo.toml")
 				members, exclude := modules.ParseCargoWorkspace(src)
