@@ -1156,7 +1156,7 @@ func reconstructedContractAnswer(raw []byte, state reconstructedContractState) (
 var reconstructedSlowNotice = regexp.MustCompile(`^\[gortex\] daemon did not answer within [0-9.]+[a-zµ]+ \(a track / reload / enrichment may be holding it\) — asking it anyway$`)
 
 // cli_repo_loading.go's non-TTY refusal names the fixture's configured repo prefix.
-var reconstructedLoadingRefusal = regexp.MustCompile(`^Error: the gortex daemon is still loading ` + regexp.QuoteMeta(issue767FixturePrefix) + ` after a restart \([^\r\n]*, -?[0-9]+%\) — the repository is already tracked; retry shortly \(or pass --loading-wait to wait for it\)$`)
+var reconstructedLoadingRefusal = regexp.MustCompile(`^Error: the gortex daemon is still loading ` + regexp.QuoteMeta(issue767FixturePrefix) + ` after a restart \([^\r\n]*, [0-9]+%\) — the repository is already tracked; retry shortly \(or pass --loading-wait to wait for it\)$`)
 
 func reconstructedWithoutSlowNotice(stderr string) string {
 	var kept []string

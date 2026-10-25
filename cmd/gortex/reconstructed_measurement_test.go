@@ -531,6 +531,7 @@ func TestReconstructedMeasurementContractAnswer(t *testing.T) {
 			{name: "loading_stdout", stdout: loading, exit: 75, pending: true},
 			{name: "loading_with_stdout", stdout: good, stderr: loading, exit: 75, pending: true},
 			{name: "loading_noninteger", stderr: strings.ReplaceAll(loading, "15%", "15.5%"), exit: 75, pending: true},
+			{name: "loading_negative_percent", stderr: strings.ReplaceAll(loading, "15%", "-1%"), exit: 75, pending: true},
 			{name: "loading_phase_carriage_return", stderr: strings.ReplaceAll(loading, "parallel_parse", "parallel\rparse"), exit: 75, pending: true},
 			{name: "incomplete_stderr", stderr: incomplete, exit: 1, unavailable: "required_capability_incomplete: context deadline exceeded", retry: "5s"},
 			{name: "notice_then_not_tracked", stderr: notice + notTracked, exit: 1, pending: true, unavailable: "startup repository not tracked before enrichment"},
