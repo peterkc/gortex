@@ -87,3 +87,39 @@ func TestGoModuleSameLineCallsColdEquivalent(t *testing.T) {
 		}
 	}
 }
+
+// Given a bound provider or a refused tie, when either untrack path removes it,
+// then surviving callers settle immediately to the cold graph without a save.
+func TestGoModuleUntrackSettlesColdEquivalent(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, mode := range []string{"untrack", "purge", "tie"} {
+			t.Run(backend+"/"+mode, func(t *testing.T) {
+				mi, g, repos := goModuleLifecycleFixture(t, backend)
+				order := []config.RepoEntry{repos[1], repos[0]}
+				if mode == "tie" {
+					order = append(order, repos[2])
+				}
+				for _, entry := range order {
+					_, err := mi.TrackRepoCtx(t.Context(), entry)
+					require.NoError(t, err)
+				}
+				if mode == "purge" {
+					_, _, err := mi.purgeRepoChecked(t.Context(), "b", nil)
+					require.NoError(t, err)
+				} else {
+					_, _, err := mi.UntrackRepoChecked(t.Context(), "b")
+					require.NoError(t, err)
+				}
+				coldRepos := repos[:1]
+				want := "external-call::dep::example.org/library"
+				if mode == "tie" {
+					coldRepos = []config.RepoEntry{repos[0], repos[2]}
+					want = "fork/lib.go::Hello"
+				}
+				cold := revisionColdGraph(t, backend, coldRepos)
+				require.Equal(t, want, goModuleLifecycleCall(t, cold).To)
+				assert.Equal(t, want, goModuleLifecycleCall(t, g).To)
+			})
+		}
+	}
+}

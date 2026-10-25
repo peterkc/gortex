@@ -91,7 +91,7 @@ func TestGoModuleProviderLifecycle(t *testing.T) {
 					require.NoError(t, err)
 					edge := goModuleLifecycleCall(t, g)
 					assert.NotEqual(t, "b/lib.go::Hello", edge.To)
-					assert.Zero(t, edge.Confidence)
+					assert.Equal(t, 0.5, edge.Confidence, "untrack settles the same package terminal as cold")
 					_, err = mi.TrackRepoCtx(t.Context(), repos[1])
 				}
 				require.NoError(t, err)

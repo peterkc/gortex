@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/reach"
 	"github.com/zzet/gortex/internal/search"
 )
@@ -213,6 +214,13 @@ func (mi *MultiIndexer) untrackRepoCheckedRetainingAdmission(
 	if !state.contract.Empty() {
 		mi.ReconcileContractEdgesForFrontier(state.contract)
 	}
+	mi.goModuleRetry.Invalidate()
+	cr := mi.newCrossRepoResolver()
+	if err := cr.RetryGoModuleDeps(ctx); err != nil {
+		return state.nodesRemoved, state.edgesRemoved, fmt.Errorf("settle Go module callers after untrack: %w", err)
+	}
+	mi.finishGoModuleCalls(cr)
+	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 
 	// A cleanup reservation wins atomically over continuation deletion and
 	// keeps this exact closed lane for lifecycle finalization.
@@ -268,15 +276,35 @@ func (mi *MultiIndexer) purgeRepositoryPayload(
 	repoPrefix string, meta *RepoMetadata,
 ) (nodesRemoved, edgesRemoved int, err error) {
 	restubTrackedNpmRepoIncoming(mi.graph, repoPrefix)
-	restubGoModuleRepoIncoming(mi.graph, repoPrefix)
+	parked := restubGoModuleRepoIncoming(mi.graph, repoPrefix)
 	if purger, ok := mi.graph.(interface{ PurgeRepo(string) error }); ok {
 		if err := purger.PurgeRepo(repoPrefix); err != nil {
 			return 0, 0, fmt.Errorf("purge repository payload: %w", err)
+		}
+		if err := mi.finalizeUntrackedGoModuleCalls(parked); err != nil {
+			return 0, 0, err
 		}
 		if meta != nil {
 			return meta.NodeCount, meta.EdgeCount, nil
 		}
 		return 0, 0, nil
 	}
-	return evictRepoAllGenerations(mi.graph, repoPrefix)
+	nodesRemoved, edgesRemoved, err = evictRepoAllGenerations(mi.graph, repoPrefix)
+	if err == nil {
+		err = mi.finalizeUntrackedGoModuleCalls(parked)
+	}
+	return nodesRemoved, edgesRemoved, err
+}
+
+func (mi *MultiIndexer) finalizeUntrackedGoModuleCalls(parked []*graph.Edge) error {
+	if len(parked) == 0 {
+		return nil
+	}
+	cr := mi.newCrossRepoResolver()
+	if err := cr.ResolveDeferredGoModuleEdges(parked); err != nil {
+		return err
+	}
+	mi.finishGoModuleCalls(cr)
+	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
+	return nil
 }

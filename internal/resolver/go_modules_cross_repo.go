@@ -691,3 +691,11 @@ func (cr *CrossRepoResolver) RestoreGoModuleSourceCalls(edges []*graph.Edge) {
 	}
 	DetectCrossRepoEdgesForReindexes(cr.graph, added)
 }
+
+// Invalidate schedules the module tail after a topology change without replacing
+// the shared state (and its mutex) while other passes can still reference it.
+func (state *GoModuleDepRetry) Invalidate() {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.complete = false
+}
