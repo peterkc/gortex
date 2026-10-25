@@ -49,3 +49,20 @@ func TestCargoRestubKeepsSameRepoCallsOnNativePath(t *testing.T) {
 		})
 	}
 }
+
+func TestCargoConsumerFrontierIncludesUnresolvedImportStubs(t *testing.T) {
+	provider, consumer := t.TempDir(), t.TempDir()
+	writeWorkspaceFile(t, provider, "Cargo.toml", "[package]\nname='library'\nversion='1.0.0'\n")
+	writeWorkspaceFile(t, consumer, "Cargo.toml", "[package]\nname='app'\nversion='1.0.0'\n[dependencies]\nlibrary='1'\n")
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "provider/src/lib.rs", FilePath: "provider/src/lib.rs", Kind: graph.KindFile, RepoPrefix: "provider", Language: "rust"})
+	for _, tc := range []struct{ file, target string }{
+		{"consumer/a.rs", "external::library/action"},
+		{"consumer/b.rs", "unresolved::import::library/action"},
+		{"consumer/c.rs", "unresolved::import::unknown/action"},
+	} {
+		g.AddEdge(&graph.Edge{From: tc.file, FilePath: tc.file, To: tc.target, Kind: graph.EdgeImports})
+	}
+	mi := &MultiIndexer{graph: g, repos: map[string]*RepoMetadata{"provider": {RootPath: provider}, "consumer": {RootPath: consumer}}}
+	require.Equal(t, []string{"consumer/a.rs", "consumer/b.rs"}, mi.cargoConsumerFilesForRepo("provider", false))
+}
