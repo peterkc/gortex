@@ -24,7 +24,7 @@ func (s *cargoRetargetWriteStore) ReindexEdges(batch []graph.EdgeReindex) {
 
 func TestCargoRetargetOnlyMarkedProviderImports(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
-		for _, scenario := range []string{"unresolved_marker", "external_marker", "unmarked", "other_provider", "already_correct", "disabled", "light_projection", "multiple_enabled", "nil_input", "wrong_kind"} {
+		for _, scenario := range []string{"unresolved_marker", "external_marker", "unmarked", "other_provider", "already_correct", "already_correct_legacy", "disabled", "light_projection", "multiple_enabled", "nil_input", "wrong_kind"} {
 			t.Run(backend+"/"+scenario, func(t *testing.T) {
 				var native graph.Store = graph.New()
 				if backend == "sqlite" {
@@ -50,8 +50,11 @@ func TestCargoRetargetOnlyMarkedProviderImports(t *testing.T) {
 				if scenario == "other_provider" {
 					edge.To = "other/src/lib.rs"
 				}
-				if scenario == "already_correct" {
+				if scenario == "already_correct" || scenario == "already_correct_legacy" {
 					edge.To = module
+					if scenario == "already_correct" {
+						edge.Meta[CargoImportModuleMeta] = "other_crate::util"
+					}
 				}
 				priorTarget := edge.To
 				g.AddEdge(edge)
@@ -78,7 +81,7 @@ func TestCargoRetargetOnlyMarkedProviderImports(t *testing.T) {
 				require.NoError(t, err)
 				imports := outEdgesOfKind(g, file, graph.EdgeImports)
 				require.Len(t, imports, 1)
-				changed := scenario == "unresolved_marker" || scenario == "external_marker" || scenario == "light_projection" || scenario == "multiple_enabled"
+				changed := scenario == "unresolved_marker" || scenario == "external_marker" || scenario == "light_projection" || scenario == "multiple_enabled" || scenario == "already_correct_legacy"
 				if changed {
 					require.Equal(t, module, imports[0].To)
 					require.Equal(t, 1, g.writes)
@@ -89,6 +92,13 @@ func TestCargoRetargetOnlyMarkedProviderImports(t *testing.T) {
 				if scenario != "unmarked" {
 					require.Equal(t, original, imports[0].Meta[CargoImportStubMeta])
 				}
+				if changed || scenario == "already_correct" {
+					require.Equal(t, "other_crate::util", imports[0].Meta[CargoImportModuleMeta])
+				}
+				if scenario == "already_correct_legacy" {
+					require.Zero(t, stats.Resolved, "refreshing metadata is not a new binding")
+				}
+
 				priorWrites := g.writes
 				if scenario == "nil_input" || scenario == "wrong_kind" {
 					require.Zero(t, stats.Resolved)
