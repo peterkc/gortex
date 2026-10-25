@@ -68,6 +68,7 @@ func TestTrackedNpmRepoParkingIsScoped(t *testing.T) {
 	for _, marked := range []bool{false, true} {
 		t.Run(map[bool]string{false: "not npm provider", true: "npm provider"}[marked], func(t *testing.T) {
 			g := graph.New()
+			g.AddNode(&graph.Node{ID: "lib/index.ts", Kind: graph.KindFile, FilePath: "lib/index.ts", Language: "typescript", RepoPrefix: "lib"})
 			g.AddNode(&graph.Node{ID: "lib/index.ts::f", Kind: graph.KindFunction, Name: "f", RepoPrefix: "lib"})
 			meta := map[string]any{}
 			if marked {

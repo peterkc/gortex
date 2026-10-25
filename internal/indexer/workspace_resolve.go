@@ -785,3 +785,18 @@ func (mi *MultiIndexer) synthesizeDemotedGoModuleCalls(files []string) {
 	}
 	resolver.SynthesizeExternalCallsForFiles(mi.graph, true, enabled)
 }
+
+// SeedGoModuleDeps warms the persisted-binding retry state. The daemon's
+// background warmup owns this call after readiness, before starting watchers.
+func (mi *MultiIndexer) SeedGoModuleDeps(ctx context.Context) error {
+	cr := mi.newCrossRepoResolver()
+	if cr == nil {
+		return nil
+	}
+	if err := cr.RetryGoModuleDeps(ctx); err != nil {
+		return err
+	}
+	mi.finishGoModuleCalls(cr)
+	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
+	return nil
+}

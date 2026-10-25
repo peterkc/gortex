@@ -1282,6 +1282,12 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func())
 	// readiness is what publication must not precede, not what it depends on.
 	state.basePublisher.BeginDraining()
 
+	// This warmup already runs in the background. Seed persisted module
+	// bindings after readiness so the first watcher save never owns the scan.
+	if err := state.multiIndexer.SeedGoModuleDeps(ctx); err != nil {
+		logger.Warn("daemon: seed Go module retries", zap.Error(err))
+	}
+
 	finishWatchers := startWarmupStep(logger, "watcher_start")
 	watchCfgs := make(map[string]config.WatchConfig)
 	for prefix := range state.multiIndexer.AllMetadata() {

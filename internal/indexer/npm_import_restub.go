@@ -10,7 +10,9 @@ import (
 // Park only npm-linked incoming imports and their calls before replacing or
 // removing a provider. Other references keep their existing eviction rules.
 func restubTrackedNpmRepoIncoming(g graph.Store, repo string) {
-	if repo == "" {
+	if repo == "" || len(graph.ReadRepoFilePaths(g, repo, "", nil, []string{
+		"js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts", "vue", "svelte", "astro",
+	})) == 0 {
 		return
 	}
 	var ids []string
