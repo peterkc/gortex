@@ -51,7 +51,7 @@ func revisionCallTargets(g graph.Store, caller string, kind graph.EdgeKind) []st
 // then every call must match a cold index, independently of track order.
 func TestGoModuleSameLineCallsColdEquivalent(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
-		for _, mode := range []string{"provider_first", "caller_first", "rename_back", "retrack", "provider_first_mixed_first", "caller_first_mixed_first", "provider_first_mixed_last", "caller_first_mixed_last"} {
+		for _, mode := range []string{"provider_first", "caller_first", "rename_back", "retrack", "provider_first_mixed_first", "caller_first_mixed_first", "provider_first_mixed_last", "caller_first_mixed_last", "provider_first_save", "caller_first_save"} {
 			t.Run(backend+"/"+mode, func(t *testing.T) {
 				mi, g, repos := goModuleLifecycleFixture(t, backend)
 				writeFile(t, filepath.Join(repos[0].Path, "main.go"), "package caller\nimport library \"example.org/library\"\nfunc Caller() { library.Hello(library.World()) }\n")
@@ -66,6 +66,9 @@ func TestGoModuleSameLineCallsColdEquivalent(t *testing.T) {
 					writeFile(t, filepath.Join(repos[1].Path, "lib.go"), "package library\nfunc "+bound+"(v int) {}\n")
 					expected = []string{"b/lib.go::" + bound, "external-call::dep::example.org/library"}
 				}
+				if strings.HasSuffix(mode, "save") {
+					writeFile(t, filepath.Join(repos[1].Path, "lib.go"), "package library\nfunc Other() {}\n")
+				}
 				order := []config.RepoEntry{repos[1], repos[0]}
 				if strings.HasPrefix(mode, "caller_first") {
 					order[0], order[1] = order[1], order[0]
@@ -73,6 +76,11 @@ func TestGoModuleSameLineCallsColdEquivalent(t *testing.T) {
 				for _, entry := range order {
 					_, err := mi.TrackRepoCtx(t.Context(), entry)
 					require.NoError(t, err)
+				}
+				if strings.HasSuffix(mode, "save") {
+					file := filepath.Join(repos[1].Path, "lib.go")
+					writeFile(t, file, "package library\nfunc Hello(v int) {}\nfunc World() int { return 1 }\n")
+					require.NoError(t, mi.GetIndexer("b").IndexFile(file))
 				}
 				if mode == "rename_back" {
 					manifest := filepath.Join(repos[1].Path, "go.mod")

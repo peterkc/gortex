@@ -960,3 +960,35 @@ func (s *goModuleSourceWorkStore) GetOutEdges(id string) []*graph.Edge {
 	s.outReads++
 	return s.Store.GetOutEdges(id)
 }
+
+// Given a converged terminal and newly available provider definitions, when
+// either module entry point probes it, then it must request source recovery.
+func TestGoModuleIncomingRecoverySourceFiles(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, mode := range []string{"incoming", "deferred"} {
+			t.Run(backend+"/"+mode, func(t *testing.T) {
+				var g graph.Store = graph.New()
+				if backend == "sqlite" {
+					db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "g.sqlite"))
+					require.NoError(t, err)
+					t.Cleanup(func() { require.NoError(t, db.Close()) })
+					g = db
+				}
+				caller := &graph.Node{ID: "a/main.go::Caller", Kind: graph.KindFunction, RepoPrefix: "a", FilePath: "a/main.go", WorkspaceID: "shared", Language: "go"}
+				provider := &graph.Node{ID: "b/lib.go::Hello", Name: "Hello", Kind: graph.KindFunction, RepoPrefix: "b", FilePath: "b/lib.go", WorkspaceID: "shared", Language: "go"}
+				g.AddNode(caller)
+				g.AddNode(provider)
+				e := &graph.Edge{From: caller.ID, To: externalCallPrefix + "dep::example.org/library", Kind: graph.EdgeCalls, FilePath: caller.FilePath, Line: 3, Meta: map[string]any{"go_extern_target": "dep::example.org/library::Hello"}}
+				g.AddEdge(e)
+				cr := NewCrossRepo(g)
+				cr.SetGoModules(map[string]string{"b": "example.org/library"})
+				if mode == "incoming" {
+					cr.goModuleIncomingEdges(map[string][]*graph.Node{"b/lib.go": {provider}}, []string{"b/lib.go"})
+				} else {
+					require.NoError(t, cr.ResolveDeferredGoModuleEdges([]*graph.Edge{e}))
+				}
+				assert.Equal(t, []string{"a/main.go"}, cr.TakeGoModuleSourceFiles(), "this entry point must retain the pre-bind terminal site")
+			})
+		}
+	}
+}
