@@ -46,9 +46,10 @@ func TestTrackedCargoImportLifecycle(t *testing.T) {
 					}
 					writeWorkspaceFile(t, consumer, "Cargo.toml", "[package]\nname = 'app'\nversion = '0.1.0'\n[dependencies]\nother-crate = '1'\n")
 					consumerSource := cargoLifecycleConsumer
-					if operation == "provider_gains_new_module" {
+					switch operation {
+					case "provider_gains_new_module":
 						consumerSource += "use other_crate::newmod::later;\npub fn after() { later(); }\n"
-					} else if operation == "provider_gains_empty_module" {
+					case "provider_gains_empty_module":
 						consumerSource += "use other_crate::newmod::*;\n"
 					}
 					writeWorkspaceFile(t, consumer, "src/lib.rs", consumerSource)
@@ -75,7 +76,8 @@ func TestTrackedCargoImportLifecycle(t *testing.T) {
 					logger := zap.New(core)
 					mi := NewMultiIndexer(g, reg, search.NewNull(), cm, logger)
 					t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
-					if operation == "deferred_track" {
+					switch operation {
+					case "deferred_track":
 						_, err = mi.TrackRepoCtx(context.Background(), entries[0])
 						require.NoError(t, err)
 						mi.BeginParallelBatch()
@@ -88,12 +90,12 @@ func TestTrackedCargoImportLifecycle(t *testing.T) {
 						}
 						require.NoError(t, mi.RunPreEnrichResolveFiles(context.Background(), []string{"consumer/src/lib.rs", "provider/src/lib.rs", "provider/src/util.rs"}, nil))
 						mi.EndBatch()
-					} else if operation == "track" {
+					case "track":
 						for _, entry := range gc.Repos {
 							_, err = mi.TrackRepoCtx(context.Background(), entry)
 							require.NoError(t, err)
 						}
-					} else {
+					default:
 						_, err = mi.IndexAll()
 						require.NoError(t, err)
 					}

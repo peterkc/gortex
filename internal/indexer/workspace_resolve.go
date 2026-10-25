@@ -555,10 +555,6 @@ func (mi *MultiIndexer) runCrossRepoResolveFiles(filePaths []string, cargoRetarg
 	mi.runCrossRepoResolveMutationFrontiers(filePaths, filePaths, filePaths, cargoRetargetRepo...)
 }
 
-func (mi *MultiIndexer) runCrossRepoResolveMutationFiles(resolutionFiles, materializationFiles []string) {
-	mi.runCrossRepoResolveMutationFrontiers(resolutionFiles, materializationFiles, materializationFiles)
-}
-
 func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiers(resolutionFiles, edgeSourceFiles, definitionFiles []string, cargoRetargetRepo ...string) {
 	mi.runCrossRepoResolveMutationFrontiersObserved(resolutionFiles, edgeSourceFiles, definitionFiles, nil, cargoRetargetRepo...)
 }

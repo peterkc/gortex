@@ -40,9 +40,10 @@ func TestTrackedPythonImportLifecycle(t *testing.T) {
 					writeWorkspaceFile(t, provider, "src/PIL/util.py", "def helper(): pass\n")
 					writeWorkspaceFile(t, consumer, "pyproject.toml", "[project]\ndependencies = ['pillow']\n")
 					consumerSource := pythonLifecycleConsumer
-					if operation == "provider_gains_new_module" {
+					switch operation {
+					case "provider_gains_new_module":
 						consumerSource += "\nfrom PIL.extra import later\ndef after(): return later()\n"
-					} else if operation == "provider_gains_empty_module" {
+					case "provider_gains_empty_module":
 						consumerSource += "\nimport PIL.extra\n"
 					}
 					writeWorkspaceFile(t, consumer, "app.py", consumerSource)
