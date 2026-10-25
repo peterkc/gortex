@@ -7,11 +7,13 @@ import (
 )
 
 func goModuleRestubTarget(e *graph.Edge, fallback string) string {
-	if spec, ok := e.Meta["go_import"].(string); ok && spec != "" && e.CrossRepo && strings.HasSuffix(e.FilePath, ".go") {
+	if spec, ok := e.Meta["go_import"].(string); ok && spec != "" && strings.HasSuffix(e.FilePath, ".go") {
 		if e.Kind == graph.EdgeImports {
 			return graph.UnresolvedMarker + "import::" + spec
 		}
-		return graph.UnresolvedMarker + "extern::" + spec
+		if e.CrossRepo {
+			return graph.UnresolvedMarker + "extern::" + spec
+		}
 	}
 	return fallback
 }
