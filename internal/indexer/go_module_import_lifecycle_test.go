@@ -145,15 +145,16 @@ func TestGoModuleImportParkBeforeEviction(t *testing.T) {
 					{ID: "a/main.go", Name: "main.go", Kind: graph.KindFile, FilePath: "a/main.go", RepoPrefix: "a", Language: "go"},
 					{ID: "b/lib.go", Name: "lib.go", Kind: graph.KindFile, FilePath: "b/lib.go", RepoPrefix: "b", Language: "go"},
 				}, []*graph.Edge{{From: "a/main.go", To: "b/lib.go", Kind: graph.EdgeImports, FilePath: "a/main.go", Line: 2, CrossRepo: true, Confidence: 0.6, ConfidenceLabel: "EXTRACTED", Origin: graph.OriginASTInferred, Meta: map[string]any{"go_import": "example.org/lib"}}})
-				if route == "repo" {
+				switch route {
+				case "repo":
 					restubGoModuleRepoIncoming(g, "b")
-				} else if route == "deleted_batch" {
+				case "deleted_batch":
 					provider := g.GetNode("b/lib.go")
 					carried, _, _, _ := restubIncomingRefsFromView(g,
 						[]*incrementalBatchStage{{graphPath: "b/lib.go", priorNodes: []*graph.Node{provider}}},
 						incrementalPriorView{inByNode: g.GetInEdgesByNodeIDs([]string{provider.ID})})
 					assert.Empty(t, carried, "a deleted file cannot carry a resolved target")
-				} else {
+				default:
 					idx := newTestIndexer(g)
 					idx.SetRepoPrefix("b")
 					t.Cleanup(idx.Close)
