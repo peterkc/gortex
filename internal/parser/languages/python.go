@@ -934,9 +934,11 @@ func (e *PythonExtractor) emitImport(m parser.QueryResult, filePath, fileID stri
 func (e *PythonExtractor) emitImportFrom(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, imports map[string]string) {
 	mod := m.Captures["import.module"]
 	pyEmitImportNode(filePath, fileID, mod.Text, "", mod.StartLine+1, result)
+	bindings := make(map[string]any)
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: "unresolved::import::" + mod.Text,
 		Kind: graph.EdgeImports, FilePath: filePath, Line: mod.StartLine + 1,
+		Meta: map[string]any{"python_bindings": bindings},
 	})
 
 	def, ok := m.Captures["importfrom.def"]
@@ -963,6 +965,7 @@ func (e *PythonExtractor) emitImportFrom(m parser.QueryResult, filePath, fileID 
 				continue
 			}
 			imports[name] = mod.Text + "." + name
+			bindings[name] = name
 		case "aliased_import":
 			var importedName, alias string
 			for j, _nc := 0, int(child.NamedChildCount()); j < _nc; j++ {
@@ -978,6 +981,7 @@ func (e *PythonExtractor) emitImportFrom(m parser.QueryResult, filePath, fileID 
 				continue
 			}
 			imports[alias] = mod.Text + "." + importedName
+			bindings[alias] = importedName
 		}
 	}
 }
