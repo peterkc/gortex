@@ -194,11 +194,14 @@ func TestCargoWarmRecoveryScansImportsOnce(t *testing.T) {
 	require.Equal(t, 1, g.lightScans, "all receipt repos must share one scan")
 }
 
-func TestCargoLookupDefersManifestProbesUntilUse(t *testing.T) {
+func TestCargoLookupDefersManifestReadsUntilUse(t *testing.T) {
 	provider, consumer := t.TempDir(), t.TempDir()
 	mi := &MultiIndexer{graph: graph.New(), repos: map[string]*RepoMetadata{"provider": {RootPath: provider}, "consumer": {RootPath: consumer}}}
+	for _, root := range []string{provider, consumer} {
+		writeWorkspaceFile(t, root, "Cargo.toml", "")
+	}
 	lookup := mi.cargoCrateLookup()
-	require.NotNil(t, lookup, "construction must not probe Cargo manifests")
+	require.NotNil(t, lookup, "construction may stat roots but must defer reading Cargo manifests")
 	writeWorkspaceFile(t, provider, "Cargo.toml", "[package]\nname='library'\nversion='1.0.0'\n")
 	writeWorkspaceFile(t, consumer, "Cargo.toml", "[package]\nname='app'\nversion='1.0.0'\n[dependencies]\nlibrary='1'\n")
 	providers := lookup("consumer/src/lib.rs", "library")
