@@ -33,6 +33,7 @@ import (
 var editDeltaAbsentCapabilities = map[string]string{
 	"graph.ExternalCallCandidateIterator": "read accelerator: external-call candidates fall back to the composed edge-kind scan, preserving delta masks",
 	"anonymous{ReindexEdgesApplied}":      "batch-drop receipt for persistent stores; DeltaWriter applies its reindexes locally and unconditionally through ReindexEdges",
+	"anonymous{ScanTestEdgeProjections}":  "paging accelerator: trackedPythonImportEdges falls back to the composed EdgesLightSeq/EdgesByKind import scan with the same eligibility filter, preserving delta masks",
 
 	"graph.ContractExtractionEdgeReader":                   "physical checked extraction adjacency; outgoingMetadataContext dispatches the composed DeltaWriter through its selected view rather than forwarding base-only rows",
 	"graph.OverlayLayerContractExtractionEdgeReader":       "physical ancestry-layer projection, not the composed delta; outgoingMetadataContext applies each selected layer and its masks explicitly",
