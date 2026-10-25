@@ -173,3 +173,35 @@ func TestGoModuleImportSeedCompletionAndCancellation(t *testing.T) {
 		})
 	}
 }
+
+func TestGoModuleImportRestoresEveryAliasStatement(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			g := goImportReviewStore(t, backend)
+			const file = "a/main.go"
+			const id = file + "::import::example.org/lib"
+			g.AddBatch([]*graph.Node{
+				{ID: file, FilePath: file, Kind: graph.KindFile, RepoPrefix: "a", Language: "go"},
+				{ID: id, FilePath: file, StartLine: 3, Kind: graph.KindImport, RepoPrefix: "a", Language: "go", Meta: map[string]any{"path": "example.org/lib"}},
+				{ID: "b/lib.go", FilePath: "b/lib.go", Kind: graph.KindFile, RepoPrefix: "b", Language: "go"},
+			}, []*graph.Edge{
+				{From: file, To: id, Kind: graph.EdgeContains, FilePath: file, Line: 2},
+				{From: file, To: id, Kind: graph.EdgeContains, FilePath: file, Line: 3},
+				{From: "other.go", To: id, Kind: graph.EdgeContains, FilePath: "other.go", Line: 4},
+				{From: file, To: "b/lib.go", Kind: graph.EdgeImports, FilePath: file, Line: 3, CrossRepo: true, Meta: map[string]any{"go_import": "example.org/lib"}},
+			})
+			cr := NewCrossRepo(g)
+			cr.SetGoModules(map[string]string{"a": "example.org/app", "b": "example.org/lib"})
+			for range 2 {
+				require.NoError(t, cr.restoreGoModuleImportBatch(t.Context(), "b", []string{id}, &CrossRepoStats{ByRepo: map[string]int{}}))
+			}
+			var lines []int
+			for _, edge := range outEdgesOfKind(g, file, graph.EdgeImports) {
+				require.Equal(t, "b/lib.go", edge.To)
+				lines = append(lines, edge.Line)
+			}
+			sort.Ints(lines)
+			require.Equal(t, []int{2, 3}, lines, "one import per retained statement, with no duplicates")
+		})
+	}
+}
