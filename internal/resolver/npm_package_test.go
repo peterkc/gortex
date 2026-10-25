@@ -127,9 +127,9 @@ func TestCrossRepoTrackedNpmPackageBoundaries(t *testing.T) {
 		{"own package missing index", "private", map[string]NpmPackageTarget{"app/packages/p": {Entries: []string{"app/packages/p/missing"}}, "one": {WorkspaceID: "shared", Entries: []string{"one/index.ts"}}}, "external::p::f"},
 		{"own root package", "private", map[string]NpmPackageTarget{"app": {Entries: []string{"app/missing"}}, "one": {WorkspaceID: "shared", Entries: []string{"one/index.ts"}}}, "external::p::f"},
 		{"same workspace ambiguous", "private", map[string]NpmPackageTarget{"one": {WorkspaceID: "shared", Entries: []string{"one/index.ts"}}, "two": {WorkspaceID: "shared", Entries: []string{"two/index.ts"}}}, "external::p::f"},
-		{"private symbol", "private", map[string]NpmPackageTarget{"one": {WorkspaceID: "shared", Entries: []string{"one/index.ts"}}}, "one/index.ts"},
+		{"private symbol", "private", map[string]NpmPackageTarget{"one": {WorkspaceID: "shared", Entries: []string{"one/index.ts"}}}, "external::p::f"},
 		{"public symbol", "public", map[string]NpmPackageTarget{"one": {WorkspaceID: "shared", Entries: []string{"one/index.ts"}}}, "one/index.ts::f"},
-		{"unknown visibility", "", map[string]NpmPackageTarget{"one": {WorkspaceID: "shared", Entries: []string{"one/index.ts"}}}, "one/index.ts"},
+		{"unknown visibility", "", map[string]NpmPackageTarget{"one": {WorkspaceID: "shared", Entries: []string{"one/index.ts"}}}, "external::p::f"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := graph.New()

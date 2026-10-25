@@ -94,9 +94,11 @@ func (cr *CrossRepoResolver) trackedNpmImport(callerRepo, callerWS, importPath s
 		return nil
 	}
 	if symbol != "" {
-		if exported := memo.getNode(cr, node.ID+"::"+symbol); exported != nil && exported.Meta["visibility"] == "public" {
-			node = exported
+		exported := memo.getNode(cr, node.ID+"::"+symbol)
+		if exported == nil || exported.Meta["visibility"] != "public" {
+			return nil
 		}
+		node = exported
 	}
 	return node
 }
@@ -246,9 +248,17 @@ func (cr *CrossRepoResolver) resolveTrackedNpmImport(e *graph.Edge, importPath s
 		callerRepo = from.RepoPrefix
 	}
 	callerWS := candidateWorkspaceID(from)
+	previousMarker, _ := e.Meta[NpmImportSpecifierMeta].(string)
 	var picked *graph.Node
 	if cr.eligibleTrackedNpmImport(e, importPath) {
 		picked = cr.trackedNpmImport(callerRepo, callerWS, importPath, memo)
+		module, _ := splitImportSpecSymbol(importPath)
+		if len(cr.npmPackages(module)) > 0 {
+			if e.Meta == nil {
+				e.Meta = make(map[string]any)
+			}
+			e.Meta[NpmImportSpecifierMeta] = importPath
+		}
 	}
 	if picked == nil {
 		if spec, _ := e.Meta[NpmImportSpecifierMeta].(string); spec != "" && e.To != "external::"+spec {
@@ -256,7 +266,8 @@ func (cr *CrossRepoResolver) resolveTrackedNpmImport(e *graph.Edge, importPath s
 			e.CrossRepo = false
 			return true
 		}
-		return false
+		marked, _ := e.Meta[NpmImportSpecifierMeta].(string)
+		return marked != previousMarker
 	}
 	if e.To == picked.ID {
 		return false

@@ -11,6 +11,7 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/search"
 	"go.uber.org/zap"
 )
@@ -26,7 +27,9 @@ func revisionColdGraph(t *testing.T, backend string, repos []config.RepoEntry) g
 	}
 	cm := newTestConfigManager(t)
 	cm.Global().Repos = repos
-	mi := NewMultiIndexer(g, newTestRegistry(), search.NewNull(), cm, zap.NewNop())
+	reg := newTestRegistry()
+	reg.Register(languages.NewTypeScriptExtractor())
+	mi := NewMultiIndexer(g, reg, search.NewNull(), cm, zap.NewNop())
 	t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
 	_, err := mi.IndexAll()
 	require.NoError(t, err)
