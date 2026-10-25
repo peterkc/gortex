@@ -87,3 +87,36 @@ func TestGoModuleImportLargeRestartSeed(t *testing.T) {
 		}
 	}
 }
+
+func TestGoModuleImportOversizedProviderDoesNotStarveNext(t *testing.T) {
+	for _, route := range []string{"frontier", "identity"} {
+		t.Run(route, func(t *testing.T) {
+			g := graph.New()
+			for _, file := range []string{"a-big/lib.go", "b-small/lib.go", "consumer/main.go"} {
+				g.AddNode(&graph.Node{ID: file, Name: "lib.go", FilePath: file, Kind: graph.KindFile, RepoPrefix: graph.RepoPrefixOfID(file), Language: "go"})
+			}
+			const id = "consumer/main.go::import::example.org/small"
+			g.AddNode(&graph.Node{ID: id, Name: "small", FilePath: "consumer/main.go", StartLine: 2, Kind: graph.KindImport, RepoPrefix: "consumer", Language: "go", Meta: map[string]any{"path": "example.org/small"}})
+			cr := NewCrossRepo(g)
+			modules := map[string]string{"a-big": "example.org/big", "b-small": "example.org/small", "consumer": "example.org/app"}
+			cr.SetGoModules(modules)
+			state := cr.goModuleImportState()
+			state.importsSeeded, state.complete = true, true
+			state.modules = modules
+			state.imports["a-big"] = make(map[string]struct{})
+			for i := 0; i <= graph.MaxIncomingSourceCandidateRows; i++ {
+				state.imports["a-big"][fmt.Sprintf("missing/%d", i)] = struct{}{}
+			}
+			state.imports["b-small"] = map[string]struct{}{id: {}}
+			if route == "frontier" {
+				_, admission := cr.ResolveMutationFrontiersBounded(nil, nil, []string{"a-big/lib.go", "b-small/lib.go"})
+				require.False(t, admission.Refused)
+			} else {
+				require.NoError(t, cr.recheckGoModuleBindings(t.Context(), nil, &CrossRepoStats{ByRepo: map[string]int{}}))
+			}
+			imports := outEdgesOfKind(g, "consumer/main.go", graph.EdgeImports)
+			require.Len(t, imports, 1, "the small provider must still restore its import")
+			require.Equal(t, "b-small/lib.go", imports[0].To)
+		})
+	}
+}

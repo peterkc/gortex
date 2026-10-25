@@ -665,6 +665,10 @@ func (cr *CrossRepoResolver) recheckGoModuleBindings(ctx context.Context, previo
 			continue
 		}
 		importIDs := cr.goModuleImportIDs(repo)
+		if len(importIDs) > importBudget.Remaining() {
+			cr.logger.Warn("Go module import identity recheck deferred to full pass", zap.Int("imports", len(importIDs)), zap.Int("remaining", importBudget.Remaining()))
+			continue
+		}
 		if err := importBudget.Charge(len(importIDs)); err != nil {
 			cr.logger.Warn("Go module import identity recheck deferred to full pass", zap.Error(err))
 			continue

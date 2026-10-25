@@ -201,6 +201,10 @@ func (cr *CrossRepoResolver) resolveMutationFrontiersBounded(resolutionFiles, ed
 		}
 		repos[repo] = true
 		ids := cr.goModuleImportIDs(repo)
+		if len(ids) > importBudget.Remaining() {
+			cr.logger.Warn("cross-repo resolve: Go module imports deferred to full pass", zap.Int("imports", len(ids)), zap.Int("remaining", importBudget.Remaining()))
+			continue
+		}
 		if err := importBudget.Charge(len(ids)); err != nil {
 			cr.logger.Warn("cross-repo resolve: Go module imports deferred to full pass", zap.Error(err))
 			continue
