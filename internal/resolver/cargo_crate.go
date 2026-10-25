@@ -221,31 +221,40 @@ func (cr *CrossRepoResolver) resolveCargoImportedCall(e *graph.Edge, target stri
 			continue
 		}
 		spec := strings.TrimPrefix(strings.TrimPrefix(stub, "external::"), "unresolved::import::")
-		item := spec[strings.LastIndex(spec, "/")+1:]
-		local := item
-		if imp.Alias != "" {
-			local = imp.Alias
+		bindings := parseRustUseBindings(spec)
+		if strings.HasSuffix(spec, "/*") {
+			bindings = []rustUseBinding{{source: spec, local: "*"}}
 		}
-		for _, candidate := range cr.cachedFindNodesByName(name) {
-			if candidate.FilePath != imp.To || candidate.Language != "rust" || !cr.crossWorkspaceEligible(cr.callerWorkspaceID(e), candidateWorkspaceID(candidate), spec) {
-				continue
+		for _, binding := range bindings {
+			item, local := rustUseBindingName(binding.source), binding.local
+			if imp.Alias != "" {
+				local = imp.Alias
 			}
-			switch candidate.Kind {
-			case graph.KindFunction:
-				if strings.HasPrefix(target, "*.") || receiver != "" || (item != "*" && local != name) {
+			lookupName := name
+			if receiver == "" && local == name {
+				lookupName = item
+			}
+			for _, candidate := range cr.cachedFindNodesByName(lookupName) {
+				if candidate.FilePath != imp.To || candidate.Language != "rust" || !cr.crossWorkspaceEligible(cr.callerWorkspaceID(e), candidateWorkspaceID(candidate), spec) {
 					continue
 				}
-			case graph.KindMethod:
-				if receiver == "" || receiver != local || nodeReceiverType(candidate) != item {
+				switch candidate.Kind {
+				case graph.KindFunction:
+					if strings.HasPrefix(target, "*.") || receiver != "" || (item != "*" && local != name) {
+						continue
+					}
+				case graph.KindMethod:
+					if receiver == "" || receiver != local || nodeReceiverType(candidate) != item {
+						continue
+					}
+				default:
 					continue
 				}
-			default:
-				continue
+				if match != nil && match.ID != candidate.ID {
+					return false
+				}
+				match = candidate
 			}
-			if match != nil && match.ID != candidate.ID {
-				return false
-			}
-			match = candidate
 		}
 	}
 	if match == nil {
