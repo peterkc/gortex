@@ -469,7 +469,7 @@ func (cr *CrossRepoResolver) ResolveAllContext(ctx context.Context) (*CrossRepoS
 	defer cr.clearDirIndexes()
 	cr.buildDepModuleIndex()
 	defer cr.clearDepModuleIndex()
-	cr.buildReachableReposIndex()
+	cr.buildReachableReposIndex(nil)
 	defer cr.clearReachableReposIndex()
 
 	if resolveHotCacheEnabled() {
@@ -753,7 +753,11 @@ func (cr *CrossRepoResolver) resolveScopedLocked(edges []*graph.Edge) *CrossRepo
 	defer cr.clearDirIndexes()
 	cr.buildDepModuleIndex()
 	defer cr.clearDepModuleIndex()
-	cr.buildReachableReposIndex()
+	callerFiles := make(map[string]bool)
+	for _, edge := range pending {
+		callerFiles[cr.callerFileID(edge)] = true
+	}
+	cr.buildReachableReposIndex(callerFiles)
 	defer cr.clearReachableReposIndex()
 	cr.warmLookupCache(pending)
 	defer cr.clearLookupCache()
@@ -859,7 +863,7 @@ func (cr *CrossRepoResolver) clearDirIndexes() {
 // resolves imports — including cross-repo imports, with a precise
 // import-path match — so by the time this index is built the import
 // graph is settled enough to be trustworthy evidence.
-func (cr *CrossRepoResolver) buildReachableReposIndex() {
+func (cr *CrossRepoResolver) buildReachableReposIndex(callerFiles map[string]bool) {
 	idx := make(map[string]map[string]struct{})
 	dirs := make(map[string]map[string]struct{})
 	cr.jsTSBindingsByFile = make(map[string]map[string]string)
@@ -871,6 +875,9 @@ func (cr *CrossRepoResolver) buildReachableReposIndex() {
 	var imports []*graph.Edge
 	ids := make(map[string]struct{})
 	for e := range graph.EdgesLightSeq(cr.graph, graph.EdgeImports) {
+		if callerFiles != nil && !callerFiles[e.From] {
+			continue
+		}
 		imports = append(imports, e)
 		if e.To != "" {
 			ids[e.To] = struct{}{}
@@ -894,8 +901,8 @@ func (cr *CrossRepoResolver) buildReachableReposIndex() {
 				sites = append(sites, graph.EdgeSite{From: e.From, Line: e.Line, Kind: graph.EdgeImports})
 			}
 		}
-		// Markers belong to the persisted import, including imports outside a
-		// scoped resolution frontier. Hydrate only cross-repo imports.
+		// Full passes retain every import; scoped passes load metadata only
+		// for the caller files represented by pending edges.
 		full := cr.graph.GetEdgeCandidates(nil, sites)
 		for _, e := range page {
 			for _, candidate := range full.Site(e.From, e.Line, graph.EdgeImports) {
