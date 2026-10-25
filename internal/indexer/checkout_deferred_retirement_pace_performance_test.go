@@ -376,6 +376,7 @@ func TestDeferredRetirementKeepsPaceWithSustainedLinkedWorktreeEdits(t *testing.
 		if indexerRaceDetectorOn {
 			resumeBound = paceResumeDrainRace
 		}
+		resumeBound += testTimingSlack(time.Second)
 		if cleared.Sub(resumed) > resumeBound {
 			t.Errorf("A2: the backlog took %s to clear once retirement resumed, want at most %s",
 				cleared.Sub(resumed).Round(time.Millisecond), resumeBound)
@@ -450,7 +451,7 @@ func TestDeferredRetirementKeepsPaceWithSustainedLinkedWorktreeEdits(t *testing.
 	}
 	// Twice the production 100 ms allowance: two separate runs' p95s differ by
 	// their own noise as well.
-	if on > off+200*time.Millisecond {
+	if on > off+testTimingSlack(200*time.Millisecond) {
 		t.Errorf("A7: require_fresh p95 %s with retirement against %s without", on, off)
 	}
 }

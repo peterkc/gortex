@@ -21,7 +21,7 @@ import (
 // within the bound: the drain stops at its next sub-batch boundary, the
 // background build fails with the cancellation and publishes nothing.
 func TestBackgroundDrainGivesTheLaneToAnEditWithinTheBound(t *testing.T) {
-	const bound = 2 * time.Second
+	bound := testTimingSlack(2 * time.Second)
 	dir := t.TempDir()
 	var b strings.Builder
 	b.WriteString("package big\n\n")

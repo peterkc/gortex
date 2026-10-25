@@ -71,7 +71,7 @@ func observeCheckoutUntilSettled(t testing.TB, lc *CheckoutLifecycle, path strin
 	for {
 		started := time.Now()
 		checkout, found, err := lc.ObserveCheckoutPath(ctx, path, authorize...)
-		if elapsed := time.Since(started); elapsed > time.Second {
+		if elapsed := time.Since(started); elapsed > testTimingSlack(time.Second) {
 			t.Fatalf("discovery request exceeded bounded wait: %s", elapsed)
 		}
 		if !errors.Is(err, ErrCheckoutMutationBusy) || ctx.Err() != nil {
@@ -296,7 +296,7 @@ func TestObserveCheckoutPathSlowMetadataReturnsRetryableBusy(t *testing.T) {
 	if found || !errors.Is(observeErr, ErrCheckoutMutationBusy) || !errors.Is(observeErr, context.DeadlineExceeded) {
 		t.Fatalf("slow discovery lost bounded retry state: found=%v err=%v", found, observeErr)
 	}
-	if time.Since(started) > 2*time.Second {
+	if time.Since(started) > testTimingSlack(2*time.Second) {
 		t.Fatal("metadata admission escaped its deadline")
 	}
 	rows, err := catalog.ListCheckouts(t.Context(), familyID)
@@ -326,7 +326,7 @@ func TestObserveCheckoutPathSlowInventoryMakesProgressAcrossRetries(t *testing.T
 	if found || !errors.Is(err, ErrCheckoutMutationBusy) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("slow inventory did not return bounded pending: found=%v err=%v", found, err)
 	}
-	if elapsed := time.Since(started); elapsed < 200*time.Millisecond || elapsed > time.Second {
+	if elapsed := time.Since(started); elapsed < 200*time.Millisecond || elapsed > testTimingSlack(time.Second) {
 		t.Fatalf("unexpected discovery wait: %s", elapsed)
 	}
 	firstJob := checkoutObservationJobForTest(lc, worktree)

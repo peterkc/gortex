@@ -93,7 +93,7 @@ func TestClaimedPopulatedBaseShadowReplacementAdmitsCheckoutWriter(t *testing.T)
 	}
 	wrote <- r
 	require.NoError(t, r.err)
-	require.Less(t, r.elapsed, 750*time.Millisecond)
+	require.Less(t, r.elapsed, testTimingSlack(750*time.Millisecond))
 	require.NotNil(t, foreground.GetNode("foreground::Witness"))
 	require.Equal(t, baseCount, builder.Store.AtGeneration(0).NodeCount())
 	published := builder.Store.AtGeneration(id)

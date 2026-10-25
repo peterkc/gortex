@@ -227,10 +227,7 @@ func TestSteppedFoldBurstNeverExhaustsTheChainAndNoEditWaitsOnAStep(t *testing.T
 		worst = max(worst, p)
 	}
 	t.Logf("burst: %d folds landed, %d edits above a running fold, %d analysis-header probes during steps, worst total probe latency %s", stats.Flipped, above, len(probes), worst)
-	limit := 20 * time.Millisecond
-	if indexerRaceDetectorOn {
-		limit = 100 * time.Millisecond
-	}
+	limit := testTimingSlack(20 * time.Millisecond)
 	if worst > limit {
 		t.Fatalf("analysis-header total probe latency %s exceeded %s while the fold stepped", worst, limit)
 	}

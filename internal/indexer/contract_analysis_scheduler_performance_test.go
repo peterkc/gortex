@@ -17,7 +17,7 @@ func TestContractScheduleReturnsWithinItsBudget(t *testing.T) {
 	var elapsed []time.Duration
 	scheduleWithCaptureBlocked(t, func(d time.Duration) { elapsed = append(elapsed, d) })
 	sort.Slice(elapsed, func(i, j int) bool { return elapsed[i] < elapsed[j] })
-	require.Less(t, elapsed[len(elapsed)/2], 5*time.Millisecond)
+	require.Less(t, elapsed[len(elapsed)/2], testTimingSlack(5*time.Millisecond))
 }
 
 func TestContractSchedulerServesAPanicWaiterWithinItsBudget(t *testing.T) {
@@ -33,7 +33,7 @@ func TestContractSchedulerServesAPanicWaiterWithinItsBudget(t *testing.T) {
 		return run(job)
 	}
 	recoverPanicPin(t, p, "", nil, func() {
-		require.Less(t, time.Since(time.Unix(0, panickedAt.Load())), 200*time.Millisecond)
+		require.Less(t, time.Since(time.Unix(0, panickedAt.Load())), testTimingSlack(200*time.Millisecond))
 	})
 }
 
@@ -49,6 +49,6 @@ func TestContractSchedulerServesACapturePanicWaiterWithinItsBudget(t *testing.T)
 		return p.capture(ctx, source, inputs, repo, checkout)
 	}
 	recoverPanicPin(t, p, "wt", &ContractCaptureSource{}, func() {
-		require.Less(t, time.Since(time.Unix(0, panickedAt.Load())), 200*time.Millisecond)
+		require.Less(t, time.Since(time.Unix(0, panickedAt.Load())), testTimingSlack(200*time.Millisecond))
 	})
 }

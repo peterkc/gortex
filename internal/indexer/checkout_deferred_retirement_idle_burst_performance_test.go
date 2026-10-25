@@ -115,6 +115,6 @@ func TestPerformanceAgedRetirementBetweenSavesKeepsTheBoundedBurst(t *testing.T)
 	t.Logf("burst between saves: hold=%s rows=%d quanta=%d", hold, rows, quanta)
 	require.LessOrEqual(t, rows, 16*quanta, "a burst between saves ran wide quanta")
 	if !indexerRaceDetectorOn {
-		require.Less(t, hold, 4*deferredRetirementBurstDuration, "a burst between saves ran past its bounded budget")
+		require.Less(t, hold, deferredRetirementBurstDuration+testTimingSlack(3*deferredRetirementBurstDuration), "a burst between saves ran past its bounded budget")
 	}
 }

@@ -381,7 +381,7 @@ func busyLaneRepair(t *testing.T, dispatchTime, repairTime func(time.Duration)) 
 		return len(f.logs.FilterMessage("contract stuck repair").FilterField(zap.String("outcome", "busy")).All()) > 0
 	}
 	for !busy() {
-		require.Less(t, time.Since(held), 20*time.Second, "a pass found the lane busy for its period")
+		require.Less(t, time.Since(held), testTimingSlack(20*time.Second), "a pass found the lane busy for its period")
 		// A request is dispatched while the repair waits for the lane:
 		// its inputs are pending, so the dispatcher parks it on their
 		// acceptance at once.

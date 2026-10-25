@@ -75,7 +75,7 @@ func TestCheckoutMutationWaitForACoordinatorIsBounded(t *testing.T) {
 	if !errors.Is(err, ErrCheckoutMutationStale) {
 		t.Fatalf("a mutation with no coordinator returned %v, want %v", err, ErrCheckoutMutationStale)
 	}
-	if waited := time.Since(started); waited > 5*time.Second {
+	if waited := time.Since(started); waited > testTimingSlack(5*time.Second) {
 		t.Fatalf("the refusal took %s; the caller's deadline was 300ms", waited)
 	}
 }

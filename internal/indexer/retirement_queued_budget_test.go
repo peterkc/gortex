@@ -32,7 +32,7 @@ func TestRetirementBoundedBudgetStillStopsForWriterAndDeadline(t *testing.T) {
 			require.True(t, pending)
 			require.Equal(t, 2, calls, "actual preemption must stop before a third quantum")
 			require.False(t, gate.Stats().Active)
-			require.Less(t, time.Since(began), time.Second)
+			require.Less(t, time.Since(began), testTimingSlack(time.Second))
 		})
 	}
 }

@@ -2,6 +2,7 @@ package store_sqlite
 
 import (
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"fmt"
@@ -304,7 +305,9 @@ func TestShadowReplacementCancelInvalidatesPriorProvenanceAndRetries(t *testing.
 	}})
 	shadowDeleteTrigger(t, s, "nodes", "OLD.id")
 	n, e, err := s.EvictRepoForShadowReplacement(ctx, "shadow")
-	require.True(t, errors.Is(err, context.Canceled), "%v", err)
+	// Commit may observe database/sql's automatic context rollback first.
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	require.True(t, errors.Is(err, context.Canceled) || errors.Is(err, sql.ErrTxDone), "unexpected cancellation result: %v", err)
 	require.Equal(t, 256, n)
 	require.Zero(t, e)
 	var states int

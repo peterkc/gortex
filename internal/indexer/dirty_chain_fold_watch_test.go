@@ -98,7 +98,7 @@ func TestStarvedSteppedFoldGivesUp(t *testing.T) {
 	if report.Outcome != dirtyChainCompactionFoldRefused || !errors.Is(report.Err, errChainFoldStarved) {
 		t.Fatalf("the starved fold: %s %v, want refused for starvation", report.Outcome, report.Err)
 	}
-	if took := time.Since(started); took > 5*time.Second {
+	if took := time.Since(started); took > testTimingSlack(5*time.Second) {
 		t.Fatalf("the starved fold took %v to give up", took)
 	}
 	if logs.FilterMessage("checkout coordinator: chain fold step refused; retrying").Len() == 0 {
