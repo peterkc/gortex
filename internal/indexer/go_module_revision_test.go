@@ -252,3 +252,27 @@ func TestGoModuleUntrackRetainsOnlyParkedIdentities(t *testing.T) {
 		})
 	}
 }
+
+// Given the only cross-workspace rule is declared by a JS-only repo, when that
+// repo is untracked, then the surviving Go caller must match cold refusal.
+func TestGoModuleUntrackRuleOnlyRepoColdEquivalent(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			mi, g, repos := goModuleLifecycleFixture(t, backend)
+			repos[0].Workspace, repos[1].Workspace = "w1", "w2"
+			root := t.TempDir()
+			writeFile(t, filepath.Join(root, "main.js"), "export function X() {}\n")
+			writeFile(t, filepath.Join(root, ".gortex.yaml"), "workspace: w1\ncross_workspace_deps:\n  - workspace: w2\n    modules: [example.org/library]\n    mode: read-only\n")
+			for _, entry := range []config.RepoEntry{{Name: "x", Path: root, Workspace: "w1"}, repos[1], repos[0]} {
+				_, err := mi.TrackRepoCtx(t.Context(), entry)
+				require.NoError(t, err)
+			}
+			require.Equal(t, "b/lib.go::Hello", goModuleLifecycleCall(t, g).To)
+			_, _, err := mi.UntrackRepoChecked(t.Context(), "x")
+			require.NoError(t, err)
+			cold := revisionColdGraph(t, backend, repos[:2])
+			require.Equal(t, "external-call::dep::example.org/library", goModuleLifecycleCall(t, cold).To)
+			assert.Equal(t, goModuleLifecycleCall(t, cold).To, goModuleLifecycleCall(t, g).To)
+		})
+	}
+}

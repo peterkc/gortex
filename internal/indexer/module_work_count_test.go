@@ -185,3 +185,31 @@ func TestGoModuleDeferredPublishLeavesParallelsToBatch(t *testing.T) {
 	resolver.DetectCrossRepoEdges(g)
 	assert.Equal(t, []string{"b/lib.go::Hello"}, revisionCallTargets(g, "a/main.go::Caller", graph.EdgeCrossRepoCalls))
 }
+
+// Given a go.mod snapshot with no Go files, when that repo is removed,
+// then the module tail still reseeds the surviving Go workspace.
+func TestGoModuleManifestOnlyUntrackRunsModuleSweep(t *testing.T) {
+	db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	g := &goModuleUntrackScanStore{goModuleRetryScanStore: &goModuleRetryScanStore{goModulePublishScanCountingStore: goModulePublishScanCountingStore{Store: db}}}
+	cm := newTestConfigManager(t)
+	empty, lib := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(empty, "go.mod"), "module example.org/empty\n")
+	writeFile(t, filepath.Join(lib, "go.mod"), "module example.org/library\n")
+	writeFile(t, filepath.Join(lib, "lib.go"), "package library\nfunc Hello() {}\n")
+	mi := NewMultiIndexer(g, newTestRegistry(), search.NewNull(), cm, zap.NewNop())
+	t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
+	for _, entry := range []config.RepoEntry{{Name: "empty", Path: empty}, {Name: "b", Path: lib}} {
+		_, err := mi.TrackRepoCtx(t.Context(), entry)
+		require.NoError(t, err)
+	}
+	require.NoError(t, mi.SeedGoModuleDeps(t.Context()))
+	// The snapshot, rather than a persisted Go file node, must carry this arm.
+	g.EvictFile("empty/go.mod")
+	require.Empty(t, graph.ReadRepoFilePaths(g, "empty", "", []string{"go"}, nil))
+	g.scans = 0
+	_, _, err = mi.UntrackRepoChecked(t.Context(), "empty")
+	require.NoError(t, err)
+	assert.Equal(t, 1, g.scans, "a manifest-only repo must invalidate the module sweep")
+}
