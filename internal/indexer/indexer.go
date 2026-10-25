@@ -496,8 +496,10 @@ type Indexer struct {
 	// extractContracts replays cache hits to skip the read + 8-extractor
 	// run for files that haven't changed since the last extraction —
 	// the dominant cost on repos with tens of thousands of source files.
-	contractCache   map[string]*contractCacheEntry
-	contractCacheMu sync.RWMutex
+	contractCache       map[string]*contractCacheEntry
+	contractCacheMu     sync.RWMutex
+	goModuleSourceMu    sync.Mutex
+	goModuleSourceCache map[string]goModuleSourceCacheEntry
 
 	// deferResolve, when set, makes IndexCtx skip the cross-cutting passes
 	// (per-repo ResolveAll / semantic enrichment / contract extraction +

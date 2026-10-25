@@ -1,6 +1,8 @@
 package indexer
 
 import (
+	"crypto/sha256"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,23 @@ import (
 	"github.com/zzet/gortex/internal/resolver"
 	"go.uber.org/zap"
 )
+
+// Cache source facts, not resolution decisions. Provider/config changes still
+// resolve the cloned calls again; unchanged caller bytes need no second parse.
+type goModuleSourceCacheEntry struct {
+	digest [32]byte
+	edges  []*graph.Edge
+}
+
+func cloneGoModuleSourceEdges(edges []*graph.Edge) []*graph.Edge {
+	out := make([]*graph.Edge, 0, len(edges))
+	for _, e := range edges {
+		c := *e
+		c.Meta = maps.Clone(e.Meta)
+		out = append(out, &c)
+	}
+	return out
+}
 
 func (mi *MultiIndexer) finishGoModuleCalls(cr *resolver.CrossRepoResolver) {
 	for _, file := range cr.TakeGoModuleSourceFiles() {
@@ -32,6 +51,14 @@ func (mi *MultiIndexer) finishGoModuleCalls(cr *resolver.CrossRepoResolver) {
 			continue
 		}
 		src = idx.transforms.run(rel, src)
+		digest := sha256.Sum256(src)
+		idx.goModuleSourceMu.Lock()
+		cached, hit := idx.goModuleSourceCache[rel]
+		idx.goModuleSourceMu.Unlock()
+		if hit && cached.digest == digest {
+			cr.RestoreGoModuleSourceCalls(cloneGoModuleSourceEdges(cached.edges))
+			continue
+		}
 		result, skipped, err := idx.extractFile(nil, nil, abs, rel, "go", ext, src)
 		if err != nil {
 			mi.logger.Warn("extract Go module caller", zap.String("file", file), zap.Error(err))
@@ -41,6 +68,12 @@ func (mi *MultiIndexer) finishGoModuleCalls(cr *resolver.CrossRepoResolver) {
 		}
 		if err == nil && !skipped {
 			idx.applyRepoPrefix(result.Nodes, result.Edges)
+			idx.goModuleSourceMu.Lock()
+			if idx.goModuleSourceCache == nil {
+				idx.goModuleSourceCache = make(map[string]goModuleSourceCacheEntry)
+			}
+			idx.goModuleSourceCache[rel] = goModuleSourceCacheEntry{digest: digest, edges: cloneGoModuleSourceEdges(result.Edges)}
+			idx.goModuleSourceMu.Unlock()
 			cr.RestoreGoModuleSourceCalls(result.Edges)
 		}
 		result.ReleaseTree()
