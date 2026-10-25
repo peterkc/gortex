@@ -183,8 +183,10 @@ func (mi *MultiIndexer) pythonAddedFileConsumers(files []string) []string {
 	// are registered. Preserve that frontier until the workspace pass.
 	warming := false
 	if mi.configMgr != nil {
-		configuredRepos := mi.configMgr.Global().Repos
-		warming = len(configuredRepos) > 1 && len(mi.AllMetadata()) < len(configuredRepos)
+		if global := mi.configMgr.Global(); global != nil {
+			configuredRepos := global.ReposSnapshot()
+			warming = len(configuredRepos) > 1 && len(mi.AllMetadata()) < len(configuredRepos)
+		}
 	}
 	if !warming && len(mi.AllMetadata()) < 2 {
 		return nil
