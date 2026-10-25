@@ -297,3 +297,40 @@ func TestGoModuleProviderSaveSkipsCachedSourceReads(t *testing.T) {
 	require.NoError(t, mi.GetIndexer("b").IndexFile(lib))
 	assert.Zero(t, reads, "unchanged caller stat must avoid source reads and transforms")
 }
+
+// Given a shared parse lease, when source reading fails or panics, then the
+// per-file recovery scope must return all admitted bytes without another parse.
+func TestGoModuleSourceRecoveryReleasesLease(t *testing.T) {
+	for _, mode := range []string{"read_error", "read_panic"} {
+		t.Run(mode, func(t *testing.T) {
+			mi, _, repos := goModuleLifecycleFixture(t, "memory")
+			writeFile(t, filepath.Join(repos[1].Path, "lib.go"), "package library\nfunc Other(){}\n")
+			for _, entry := range repos[:2] {
+				_, err := mi.TrackRepoCtx(t.Context(), entry)
+				require.NoError(t, err)
+			}
+			idx := mi.GetIndexer("a")
+			idx.goModuleSourceCache = nil
+			mi.SetSharedParseMemoryBudget(1 << 20)
+			original := readGoModuleCallerFile
+			readGoModuleCallerFile = func(string) ([]byte, error) {
+				if mode == "read_panic" {
+					panic("source read panic")
+				}
+				return nil, os.ErrPermission
+			}
+			t.Cleanup(func() { readGoModuleCallerFile = original })
+			recovered := false
+			func() {
+				defer func() { recovered = recover() != nil }()
+				mi.runCrossRepoResolveFiles([]string{"b/lib.go"})
+			}()
+			assert.Equal(t, mode == "read_panic", recovered)
+			budget := idx.parseAdmission.Load()
+			budget.mu.Lock()
+			used := budget.used
+			budget.mu.Unlock()
+			assert.Zero(t, used, "every exit must return the raw-source admission lease")
+		})
+	}
+}
