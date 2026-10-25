@@ -297,8 +297,21 @@ func (cr *CrossRepoResolver) resolvePythonImportedMethod(e *graph.Edge, target s
 	if receiver == "" {
 		return false
 	}
-	for _, node := range cr.graph.FindNodesByNameInRepo(receiver, cr.callerRepoPrefix(e)) {
-		if node.Kind == graph.KindType && node.RepoPrefix == graph.RepoPrefixOfID(e.From) {
+	file := cr.callerFileID(e)
+	var imports []*graph.Edge
+	for _, imp := range cr.bridgeImportsByFile[file] {
+		spec, _ := imp.Meta["python_import"].(string)
+		bindings, _ := imp.Meta["python_bindings"].(map[string]any)
+		imported, _ := bindings[receiver].(string)
+		if imported != "" && imp.Meta[PythonImportStubMeta] != nil && pythonModuleFileMatches(imp.To, spec) {
+			imports = append(imports, imp)
+		}
+	}
+	if len(imports) == 0 {
+		return false
+	}
+	for _, node := range cr.graph.GetFileNodes(file) {
+		if node.Kind == graph.KindType && node.Name == receiver {
 			return false
 		}
 	}
@@ -308,7 +321,7 @@ func (cr *CrossRepoResolver) resolvePythonImportedMethod(e *graph.Edge, target s
 		candidates[node.FilePath] = append(candidates[node.FilePath], node)
 	}
 	var match *graph.Node
-	for _, imp := range cr.bridgeImportsByFile[cr.callerFileID(e)] {
+	for _, imp := range imports {
 		spec, _ := imp.Meta["python_import"].(string)
 		if imp.Meta[PythonImportStubMeta] == nil || !pythonModuleFileMatches(imp.To, spec) {
 			continue
