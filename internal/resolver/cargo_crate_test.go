@@ -83,7 +83,8 @@ func TestCargoImportLightPaging(t *testing.T) {
 				return []CargoCrate{{Root: "lib/src/lib.rs", Name: "other_crate"}}
 			})
 			stats := &CrossRepoStats{ByRepo: map[string]int{}}
-			require.NoError(t, cr.resolveCargoImports(context.Background(), graph.EdgesLightSeq(g, graph.EdgeImports), stats))
+			_, err := cr.resolveCargoImports(context.Background(), graph.EdgesLightSeq(g, graph.EdgeImports), stats)
+			require.NoError(t, err)
 			assert.Zero(t, g.fullScans)
 			assert.Equal(t, 1, g.lightScans)
 			assert.Equal(t, 2, g.pages)

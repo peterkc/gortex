@@ -99,15 +99,15 @@ func (cr *CrossRepoResolver) cargoImportTarget(e *graph.Edge, spec string) *grap
 
 // Per-repo resolution converts missing imports to external stubs. Retry just
 // those Rust imports before the cross-repo unresolved pass builds reachability.
-func (cr *CrossRepoResolver) resolveCargoImports(ctx context.Context, edges iter.Seq[*graph.Edge], stats *CrossRepoStats) error {
+func (cr *CrossRepoResolver) resolveCargoImports(ctx context.Context, edges iter.Seq[*graph.Edge], stats *CrossRepoStats) (reopened []*graph.Edge, err error) {
 	if cr.cargoCrates == nil {
-		return ctx.Err()
+		return reopened, ctx.Err()
 	}
 	// Keep metadata out of the scan. Only declared, tracked crates need hydration.
 	var eligible []*graph.Edge
 	for e := range edges {
 		if err := ctx.Err(); err != nil {
-			return err
+			return reopened, err
 		}
 		if e == nil || e.Kind != graph.EdgeImports || !strings.HasSuffix(e.FilePath, ".rs") {
 			continue
@@ -128,7 +128,7 @@ func (cr *CrossRepoResolver) resolveCargoImports(ctx context.Context, edges iter
 	// only one bounded page, as in the tracked npm bridge.
 	for start := 0; start < len(eligible); start += resolvePendingPageRows {
 		if err := ctx.Err(); err != nil {
-			return err
+			return reopened, err
 		}
 		page := eligible[start:min(start+resolvePendingPageRows, len(eligible))]
 		sites := make([]graph.EdgeSite, 0, len(page))
@@ -151,6 +151,7 @@ func (cr *CrossRepoResolver) resolveCargoImports(ctx context.Context, edges iter
 						batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 						projected.To, projected.CrossRepo = e.To, false
 						stats.Unresolved++
+						reopened = append(reopened, cr.restubCargoImportCalls(e.FilePath, oldTo)...)
 					}
 				} else if node != nil && node.ID != e.To {
 					oldTo := e.To
@@ -164,7 +165,7 @@ func (cr *CrossRepoResolver) resolveCargoImports(ctx context.Context, edges iter
 			cr.graph.ReindexEdges(batch)
 		}
 	}
-	return ctx.Err()
+	return reopened, ctx.Err()
 }
 
 func (cr *CrossRepoResolver) cargoImportSpec(e *graph.Edge) string {
@@ -255,4 +256,30 @@ func (cr *CrossRepoResolver) resolveCargoImportedCall(e *graph.Edge, target stri
 		e.Confidence, e.Origin = 0.85, graph.OriginASTResolved
 	}
 	return true
+}
+
+// A refused import no longer authorizes calls through its former target file.
+func (cr *CrossRepoResolver) restubCargoImportCalls(file, target string) []*graph.Edge {
+	var batch []graph.EdgeReindex
+	var reopened []*graph.Edge
+	for row := range graph.EdgesInScopeSeq(cr.graph, nil, []string{file}, graph.EdgeCalls) {
+		call := row.Edge
+		if call == nil || !call.CrossRepo {
+			continue
+		}
+		original, _ := call.Meta[CargoCallStubMeta].(string)
+		if original == "" || !strings.HasPrefix(call.To, target+"::") {
+			continue
+		}
+		old := call.To
+		graph.StashRestubProvenance(call)
+		call.To, call.CrossRepo, call.ConfidenceLabel = original, false, ""
+		clearEdgeTerminal(call)
+		reopened = append(reopened, call)
+		batch = append(batch, graph.EdgeReindex{Edge: call, OldTo: old})
+	}
+	if len(batch) > 0 {
+		cr.graph.ReindexEdges(batch)
+	}
+	return reopened
 }
