@@ -205,3 +205,21 @@ func TestCargoGroupedUsesRejectNestedPathDecoys(t *testing.T) {
 		}
 	}
 }
+
+func TestScopedCallerFileUsesWarmedNodeCache(t *testing.T) {
+	// Given many pending edges with one caller node.
+	g := &resolverBatchCountingStore{Store: graph.New()}
+	file, caller := "app/file.go", "app/file.go::run"
+	g.AddNode(&graph.Node{ID: file, FilePath: file, Kind: graph.KindFile, RepoPrefix: "app", Language: "go"})
+	g.AddNode(&graph.Node{ID: caller, FilePath: file, Kind: graph.KindFunction, RepoPrefix: "app", Language: "go"})
+	var edges []*graph.Edge
+	for i := 0; i < 30; i++ {
+		edges = append(edges, &graph.Edge{From: caller, FilePath: file, To: "unresolved::missing", Kind: graph.EdgeCalls, Line: i + 1})
+	}
+	g.AddBatch(nil, edges)
+	// When the scoped resolver builds its pending caller-file set.
+	cr := NewCrossRepo(g)
+	cr.resolveScopedLocked(edges)
+	// Then the batched cache, not one GetNode per edge, supplies caller placement.
+	require.Zero(t, g.getNodeCalls)
+}
