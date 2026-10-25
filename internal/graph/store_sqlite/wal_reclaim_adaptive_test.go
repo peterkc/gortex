@@ -120,6 +120,15 @@ func TestWALAdaptiveCreditRefusesCommittedTailAfterHoldExpiry(t *testing.T) {
 func assertAdaptiveCreditCommittedTailRefusal(t *testing.T, syncDelay time.Duration) {
 	t.Helper()
 	s, db := finalBackfillFixture(t)
+	budget := walReclaimResetHold + 40*time.Millisecond
+	copyCredit := budget - walReclaimResetHold/2
+	if syncDelay > 0 {
+		// Leave host slack for the real foreground commit after timer release.
+		// The injected uninterruptible sync still outlasts the original hold.
+		budget = walReclaimResetHold + testTimingSlack(50*time.Millisecond)
+		copyCredit = walReclaimResetHold / 2
+		syncDelay += budget
+	}
 	var delayedSyncs atomic.Int64
 	if syncDelay > 0 {
 		observeDelayedReclaimSync(t, db, func(kind int) {
@@ -170,10 +179,9 @@ func assertAdaptiveCreditCommittedTailRefusal(t *testing.T, syncDelay time.Durat
 	defer writer.release()
 	// A declared longer slice is still subject to the same live-state fence.
 	// The real commit is forced after timer release, before readmission.
-	budget := walReclaimResetHold + 40*time.Millisecond
 	holdCtx, stop := context.WithTimeout(ctx, budget)
 	defer stop()
-	_, err := writer.passive(holdCtx, ctx, db, budget-walReclaimResetHold/2, false)
+	_, err := writer.passive(holdCtx, ctx, db, copyCredit, false)
 	require.ErrorIs(t, err, errWALReclaimReadersInFlight)
 	// The returned frontier-fence error is authoritative; the original hold
 	// context may legitimately have expired before a fresh admission slice.

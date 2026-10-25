@@ -211,7 +211,7 @@ func TestPerformanceHardCapStartsTheReclaimUnderAPermanentAnnouncement(t *testin
 	if churn.maxWAL.Load() > 2*hardCap {
 		t.Fatalf("the WAL reached %.1f MiB, past twice its hard cap", float64(churn.maxWAL.Load())/(1<<20))
 	}
-	if st.WriterHoldMax > walReclaimMaxWriterHold+raceSlack(250*time.Millisecond) {
+	if st.WriterHoldMax > walReclaimMaxWriterHold+testTimingSlack(250*time.Millisecond) {
 		t.Fatalf("a hard-cap run held the writer %s", st.WriterHoldMax)
 	}
 	if !strings.Contains(logs.String(), "reason=wal_hard_cap") {
@@ -287,7 +287,7 @@ func TestPerformanceWALReclaimBoundsWALUnderReaderChurn(t *testing.T) {
 	require.LessOrEqual(t, final, int64(walReclaimJournalLimit), "after reclaim the WAL is back within journal_size_limit")
 	require.LessOrEqual(t, churn.maxWAL.Load(), 2*mark,
 		"under the same churn the WAL stays within the last-resort mark plus one attempt's growth")
-	require.LessOrEqual(t, stats.WriterHoldMax, walReclaimMaxWriterHold+raceSlack(100*time.Millisecond))
+	require.LessOrEqual(t, stats.WriterHoldMax, walReclaimMaxWriterHold+testTimingSlack(100*time.Millisecond))
 	cfg := resolveWALReclaimConfig()
 	bound := cfg.drainDeadline + cfg.truncateBudget + 100*time.Millisecond
 	require.LessOrEqual(t, stats.PauseMax, bound, "gate closed longer than drain deadline + TRUNCATE budget")
@@ -664,12 +664,9 @@ func TestPerformanceWALReclaimUsesNoTimeInsideEditCycles(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	require.NoError(t, writeErr)
-	// Scheduling slack past the 20 ms lane poll; the race detector slows the
-	// checkpoint's interrupt checks several-fold, so its bound is wider.
-	slack := 60 * time.Millisecond
-	if raceDetectorOn {
-		slack = 250 * time.Millisecond
-	}
+	// Scheduling and I/O slack past the 20 ms lane poll, shared with the
+	// sync-classification controls.
+	slack := testTimingSlack(50 * time.Millisecond)
 	paused := func(k span) bool {
 		for _, p := range pausedPasses {
 			if !k.start.Before(p.start) && !k.end.After(p.end.Add(time.Millisecond)) {

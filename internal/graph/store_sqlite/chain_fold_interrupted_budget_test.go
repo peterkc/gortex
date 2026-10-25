@@ -114,10 +114,7 @@ func runChainFoldInterruptedPagesReduceOnlyAfterTransactionWork(t *testing.T, ch
 		// Ordinary CI proves the joined writer's real SQLite progress and the
 		// rolled-back page/cursor. Its scheduling latency belongs to performance.
 		if checkLatency {
-			limit := 20 * time.Millisecond
-			if raceDetectorOn {
-				limit = 100 * time.Millisecond
-			}
+			limit := testTimingSlack(20 * time.Millisecond)
 			require.Less(t, wait, limit, "the queued writer did not interrupt the page promptly")
 		}
 		t.Logf("interrupted SQLite mask page: rows=%d next=%d writer_wait=%s", budget, fold.stepRows(), wait)

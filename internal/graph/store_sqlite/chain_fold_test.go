@@ -230,10 +230,7 @@ func TestChainFoldStepGivesWayToAnEdit(t *testing.T) {
 			t.Logf("interrupted step: err=%v after %s; the edit waited %s for the gate", err, stepTook.Round(time.Millisecond), wait.Round(time.Microsecond))
 			require.ErrorIs(t, err, ErrChainFoldYielded)
 			require.Equal(t, cursor, fold.cursor(), "an interrupted step must not advance its cursor")
-			limit := 20 * time.Millisecond
-			if raceDetectorOn {
-				limit = 100 * time.Millisecond
-			}
+			limit := testTimingSlack(20 * time.Millisecond)
 			require.Less(t, wait, limit, "the edit waited for the fold's step")
 			require.Equal(t, before, renderGenerationNodes(t, store, to), "the interrupted step's rows were not rolled back")
 			chainFoldStepTarget, fold.usPerRow = prevTarget, prevRate
@@ -273,10 +270,7 @@ func TestChainFoldStepsAreSizedByTime(t *testing.T) {
 	t.Logf("step holds: %v (µs/row %.1f)", holds, fold.usPerRow)
 	late := holds[len(holds)/2:]
 	slices.Sort(late)
-	limit := 3 * chainFoldStepTarget
-	if raceDetectorOn {
-		limit = 10 * chainFoldStepTarget
-	}
+	limit := testTimingSlack(2 * chainFoldStepTarget)
 	require.Less(t, late[len(late)/2], limit, "steps are not sized to the target hold")
 }
 

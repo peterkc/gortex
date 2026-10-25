@@ -72,7 +72,7 @@ func TestCheckpointAttemptObservesLateBuildLaneInstallation(t *testing.T) {
 				select {
 				case <-attempt.ctx.Done():
 					t.Fatal("force/disabled policy was withdrawn")
-				case <-time.After(walCheckpointCycleYieldPoll + raceSlack(50*time.Millisecond)):
+				case <-time.After(walCheckpointCycleYieldPoll + testTimingSlack(50*time.Millisecond)):
 				}
 				once.Do(func() { close(release) })
 				select {

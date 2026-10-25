@@ -323,10 +323,7 @@ func TestPressureResetHoldsTheWriterAtMostItsCap(t *testing.T) {
 	wg.Wait()
 	t.Logf("slow pressure reset: err=%v reason=%q writer_hold=%s edit_wait=%s", err, res.reason, res.writerHold, wait)
 	require.ErrorIs(t, err, errWALPressureHold)
-	limit := walReclaimPressureHold + 20*time.Millisecond
-	if raceDetectorOn {
-		limit = walReclaimPressureHold + 100*time.Millisecond
-	}
+	limit := walReclaimPressureHold + testTimingSlack(20*time.Millisecond)
 	require.GreaterOrEqual(t, res.writerHold, walReclaimPressureHold-5*time.Millisecond, "precondition: the slow reset held the writer to the cap")
 	require.Less(t, res.writerHold, limit)
 	require.Greater(t, wait, time.Duration(0))
