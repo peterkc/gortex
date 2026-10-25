@@ -69,7 +69,11 @@ func TestBackgroundDrainGivesTheLaneToAnEditWithinTheBound(t *testing.T) {
 				granted <- struct{}{}
 				release()
 			}()
-			<-ctx.Done()
+			select {
+			case <-ctx.Done():
+			case <-time.After(5 * time.Second):
+				t.Error("background drain did not yield to the waiting edit")
+			}
 		}
 	}
 	t.Cleanup(func() { drainYieldRows, drainSubBatchHook = prevRows, prevHook })

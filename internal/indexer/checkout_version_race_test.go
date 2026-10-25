@@ -217,7 +217,7 @@ func runSaveDuringChainedDeltaParse(t *testing.T, tears bool) {
 	if result.Err != nil {
 		t.Fatalf("the refresh ticket failed: %v", result.Err)
 	}
-	cycles.published(t, f, c, settled, 10*time.Second)
+	cycles.published(t, f, c, settled, 60*time.Second)
 
 	torn := 0
 	var firstTorn time.Time

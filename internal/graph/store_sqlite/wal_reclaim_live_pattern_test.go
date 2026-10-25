@@ -278,22 +278,18 @@ func checkLongReaderContract(t *testing.T, s *Store, run longReaderRun, threshol
 	require.Contains(t, logs, "wal reclaimed stage=open_gate")
 }
 
-// A mutation arriving while a reclaim attempt runs is delayed at most one
-// short hold (walReclaimResetHold, 50 ms), even when an old reader never
-// leaves and the log is urgent: the wait for old readers holds no writer, and
-// each hold covers only the last backfill and the reset. Every write succeeds
-// — the store never turns the reclaim into a refused or empty write.
-func TestWALReclaimDelaysAMutationAtMostTheWriterHoldCap(t *testing.T) {
+// Reclaim keeps the writer free while its pinned-reader wait is parked.
+// Both urgency classes admit and commit mutations before the reader retires.
+// checkLongReaderContract separately checks the short writer-hold cap.
+func TestWALReclaimKeepsWriterFreeDuringParkedReaderWait(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		threshold int64
 		urgent    bool
 	}{
-		// Not urgent: the old-reader wait runs writer-free and the lane
-		// yields to the mutation stream at once.
+		// The ordinary threshold leaves the attempt non-urgent.
 		{name: "not_urgent", threshold: 1 << 30},
-		// Urgent: a hold does not yield to waiting mutations, but lasts at
-		// most walReclaimResetHold, and the reader wait runs without it.
+		// Urgency changes reset admission, not the writer-free reader wait.
 		{name: "urgent", threshold: 1 << 20, urgent: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -373,6 +369,7 @@ func TestWALReclaimDelaysAMutationAtMostTheWriterHoldCap(t *testing.T) {
 			var payload string
 			require.NoError(t, s.db.QueryRowContext(ctx, `SELECT payload FROM wal_churn WHERE id = 1`).Scan(&payload))
 			require.Equal(t, "foreground-11", payload)
+			// Retire the pin rather than exhaust the observation wait.
 			require.NoError(t, pinned.Rollback())
 			releaseWait()
 			select {

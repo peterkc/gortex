@@ -117,6 +117,7 @@ func TestWALAdaptiveCreditRefusesANewTailAfterTimerRelease(t *testing.T) {
 // foreground tail must still be refused by the current-frontier fence.
 func TestWALAdaptiveCreditRefusesCommittedTailAfterHoldExpiry(t *testing.T) {
 	s, db := finalBackfillFixture(t)
+	stopStoreBackgroundReaders(s)
 	synctest.Test(t, func(t *testing.T) {
 		assertAdaptiveCreditCommittedTailRefusalOn(t, s, db, 150*time.Millisecond)
 	})

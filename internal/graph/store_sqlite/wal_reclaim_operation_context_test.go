@@ -90,6 +90,7 @@ func TestReclaimSlowCopyCanResetWithinRemainingWriterCredit(t *testing.T) {
 	for _, kind := range []string{"pressure", "short"} {
 		t.Run(kind, func(t *testing.T) {
 			s, db := finalBackfillFixture(t)
+			stopStoreBackgroundReaders(s)
 			synctest.Test(t, func(t *testing.T) {
 				var copies int
 				pauseReclaimCopyReturn(t, func() {
@@ -116,6 +117,7 @@ func TestReclaimSlowCopyCanResetWithinRemainingWriterCredit(t *testing.T) {
 
 func TestReclaimReadmissionSharesAggregateCredit(t *testing.T) {
 	s, db := finalBackfillFixture(t)
+	stopStoreBackgroundReaders(s)
 	synctest.Test(t, func(t *testing.T) {
 		pauseReclaimCopyReturn(t, func() { time.Sleep(300 * time.Millisecond) })
 		operation, cancel := context.WithTimeout(t.Context(), time.Second)

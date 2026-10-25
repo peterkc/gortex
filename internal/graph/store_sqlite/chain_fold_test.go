@@ -174,9 +174,9 @@ func TestChainFoldInStepsEqualsTheOneShotFlatten(t *testing.T) {
 	require.NotEmpty(t, renderFoldFTS(t, store, stepped))
 }
 
-// A step gives way to an edit: an announced write interrupts the step in
-// flight, the gate is free within milliseconds, the step is rolled back, and
-// the fold continues to the same result.
+// A queued write interrupts a nonempty mask page. The step rolls its masks
+// and cursor back before releasing the writer, then the fold finishes equal
+// to the one-shot result.
 func TestChainFoldStepGivesWayToAnEdit(t *testing.T) {
 	for _, announced := range []bool{true, false} {
 		t.Run(fmt.Sprintf("announced=%t", announced), func(t *testing.T) {
@@ -191,9 +191,18 @@ func TestChainFoldStepGivesWayToAnEdit(t *testing.T) {
 			// The existing mask seam exposes the live transaction context. It
 			// keeps this real step in flight until writer demand cancels it.
 			reachFoldMasks(t, fold, ctx)
+			for fold.table < 5 {
+				_, err = fold.Step(ctx)
+				require.NoError(t, err)
+			}
+			require.Equal(t, foldPhaseMasks, fold.phase)
+			require.Equal(t, "generation_file_masks", foldMaskOperations[fold.table].table)
+			masks, err := store.AtGeneration(chain[fold.member]).FileMasksContext(ctx)
+			require.NoError(t, err)
+			require.NotEmpty(t, masks, "the interrupted page must have real mask writes to roll back")
 			checkout := store.AnnounceCheckoutRefresh()
 			defer checkout()
-			before := renderGenerationNodes(t, store, to)
+			before := renderFoldMasks(t, store, to)
 			cursor := fold.cursor()
 			ready := make(chan struct{})
 			writerDone := make(chan error, 1)
@@ -228,7 +237,7 @@ func TestChainFoldStepGivesWayToAnEdit(t *testing.T) {
 			require.ErrorIs(t, err, ErrChainFoldYielded)
 			require.NoError(t, writerErr)
 			require.Equal(t, cursor, fold.cursor(), "an interrupted step must not advance its cursor")
-			require.Equal(t, before, renderGenerationNodes(t, store, to), "an interrupted step must retain prior committed rows")
+			require.Equal(t, before, renderFoldMasks(t, store, to), "the interrupted mask page must roll back")
 			runFold(t, fold, nil)
 			require.NoError(t, fold.Release(ctx))
 			oneShot := reservedGeneration(t, store, "one-shot")
