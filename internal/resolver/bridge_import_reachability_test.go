@@ -108,7 +108,7 @@ func TestCargoCallsStayWithinImportedItem(t *testing.T) {
 
 func TestPythonMethodsStayWithinImportedType(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
-		for _, scenario := range []string{"method", "foreign_type", "ambiguous", "local_type", "alias", "unbound"} {
+		for _, scenario := range []string{"method", "foreign_type", "ambiguous", "local_type", "other_file_type", "alias", "unbound"} {
 			t.Run(backend+"/"+scenario, func(t *testing.T) {
 				var g graph.Store = graph.New()
 				if backend == "sqlite" {
@@ -127,8 +127,13 @@ func TestPythonMethodsStayWithinImportedType(t *testing.T) {
 				if scenario == "ambiguous" {
 					g.AddEdge(&graph.Edge{From: file, FilePath: file, To: "provider/pkg/aaa.py", Kind: graph.EdgeImports, Line: 2, CrossRepo: true, Meta: map[string]any{PythonImportStubMeta: "external::pkg.aaa", "python_import": "pkg.aaa", "python_bindings": map[string]any{"Image": "Image"}}})
 				}
-				if scenario == "local_type" {
-					g.AddNode(&graph.Node{ID: file + "::Image", Name: "Image", FilePath: file, Kind: graph.KindType, RepoPrefix: "consumer", Language: "python"})
+				// Given a same-named type, only a definition in this caller file shadows the import.
+				if scenario == "local_type" || scenario == "other_file_type" {
+					typeFile := file
+					if scenario == "other_file_type" {
+						typeFile = "consumer/other.py"
+					}
+					g.AddNode(&graph.Node{ID: typeFile + "::Image", Name: "Image", FilePath: typeFile, Kind: graph.KindType, RepoPrefix: "consumer", Language: "python"})
 				}
 				if scenario == "alias" || scenario == "unbound" {
 					imports := outEdgesOfKind(g, file, graph.EdgeImports)
@@ -147,7 +152,7 @@ func TestPythonMethodsStayWithinImportedType(t *testing.T) {
 				require.NoError(t, err)
 				calls := outEdgesOfKind(g, file, graph.EdgeCalls)
 				require.Len(t, calls, 1)
-				if scenario == "method" || scenario == "alias" {
+				if scenario == "method" || scenario == "alias" || scenario == "other_file_type" {
 					require.Equal(t, "provider/pkg/image.py::Image.show", calls[0].To)
 					require.True(t, calls[0].CrossRepo)
 				} else {
@@ -215,4 +220,18 @@ func TestBridgeCandidatesLookupOncePerProvider(t *testing.T) {
 			require.LessOrEqual(t, g.scoped, 2, "one provider lookup plus Python local-type check")
 		})
 	}
+}
+
+func TestPythonUnimportedReceiverAvoidsNameLookups(t *testing.T) {
+	// Given a Python file with no bridge import binding the receiver.
+	g := &bridgeNameCountStore{Store: graph.New()}
+	file := "consumer/tests.py"
+	g.AddNode(&graph.Node{ID: file, FilePath: file, Kind: graph.KindFile, RepoPrefix: "consumer", Language: "python"})
+	cr := NewCrossRepo(g)
+	edge := &graph.Edge{From: file, FilePath: file, Kind: graph.EdgeCalls, Meta: map[string]any{"receiver_type": "TestCase"}}
+	// When a typed method is considered by the tracked bridge.
+	require.False(t, cr.resolvePythonImportedMethod(edge, "*.assertEqual"))
+	// Then it performs no store name lookup.
+	require.Zero(t, g.broad)
+	require.Zero(t, g.scoped)
 }
