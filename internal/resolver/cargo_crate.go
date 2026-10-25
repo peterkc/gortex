@@ -118,7 +118,7 @@ func (cr *CrossRepoResolver) resolveCargoImports(ctx context.Context, edges iter
 		}
 		if spec != "" {
 			name, _, _ := strings.Cut(spec, "/")
-			if len(cr.cargoCrates(e.FilePath, name)) == 0 {
+			if len(cr.cargoCrates(e.FilePath, name)) == 0 && !e.CrossRepo {
 				continue
 			}
 		}
@@ -142,7 +142,17 @@ func (cr *CrossRepoResolver) resolveCargoImports(ctx context.Context, edges iter
 				if e.To != projected.To {
 					continue
 				}
-				if node := cr.cargoImportTarget(e, cr.cargoImportSpec(e)); node != nil && node.ID != e.To {
+				node := cr.cargoImportTarget(e, cr.cargoImportSpec(e))
+				if node == nil && e.CrossRepo {
+					if stub, _ := e.Meta[CargoImportStubMeta].(string); stub != "" {
+						oldTo := e.To
+						e.To, e.CrossRepo = stub, false
+						clearEdgeTerminal(e)
+						batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+						projected.To, projected.CrossRepo = e.To, false
+						stats.Unresolved++
+					}
+				} else if node != nil && node.ID != e.To {
 					oldTo := e.To
 					cr.bindCargoImport(e, node, stats)
 					batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
