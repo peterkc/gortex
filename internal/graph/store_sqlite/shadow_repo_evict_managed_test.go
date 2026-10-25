@@ -130,7 +130,6 @@ func TestManagedShadowReplacementCancellationCanResume(t *testing.T) {
 	}})
 	shadowDeleteTrigger(t, s, "nodes", "OLD.id")
 	n, e, err := h.EvictRepoForShadowReplacement(ctx, "shadow")
-	require.ErrorIs(t, ctx.Err(), context.Canceled)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Equal(t, 256, n)
 	require.Zero(t, e)

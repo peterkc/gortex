@@ -1011,7 +1011,7 @@ func TestALargeWorkingTreeChangeIsImportedFileByFileAndYieldsToAnInteractiveBuil
 	t.Logf("import: %d cycles, %d file links, %d folds, %d yields; %d interactive probes, worst wait %s (all: %v)",
 		len(cycles), links, folds, yields, len(waits), worst, waits)
 	if worst > testTimingSlack(100*time.Millisecond) {
-		t.Errorf("an interactive build waited %s for the import, want ≤ 100ms", worst)
+		t.Errorf("an interactive build waited %s for the import, want ≤ %s", worst, testTimingSlack(100*time.Millisecond))
 	}
 	if result := assertPropagationParity(t, f.store, routedStack(t, f, c), f.worktree, "import"); !result.ok() {
 		t.Errorf("the imported working tree differs from a clean index: %v", result.Diffs)

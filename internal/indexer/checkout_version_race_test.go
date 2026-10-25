@@ -220,7 +220,7 @@ func runSaveDuringChainedDeltaParse(t *testing.T, tears bool) {
 	took := cycles.published(t, f, c, settled, testTimingSlack(10*time.Second))
 	t.Logf("settled tree published %s after the mid-pass save", took)
 	if took > 5*time.Second {
-		t.Fatalf("the settled tree was published %s after the save, want within 5s", took)
+		t.Fatalf("the settled tree was published %s after the save, want within %s", took, 5*time.Second)
 	}
 
 	torn := 0
