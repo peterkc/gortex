@@ -36,6 +36,17 @@ func cloneGoModuleSourceEdges(edges []*graph.Edge) []*graph.Edge {
 	return out
 }
 
+// A successful replacement can change bytes without changing the stat.
+// Keep source facts, but make recovery validate them with the digest.
+func (idx *Indexer) invalidateGoModuleSourceStamp(rel string) {
+	idx.goModuleSourceMu.Lock()
+	defer idx.goModuleSourceMu.Unlock()
+	if cached, ok := idx.goModuleSourceCache[rel]; ok {
+		cached.size, cached.modified = 0, 0
+		idx.goModuleSourceCache[rel] = cached
+	}
+}
+
 func (mi *MultiIndexer) finishGoModuleCalls(cr *resolver.CrossRepoResolver) {
 	for _, file := range cr.TakeGoModuleSourceFiles() {
 		mi.restoreGoModuleSourceFile(cr, file)

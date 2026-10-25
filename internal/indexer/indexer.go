@@ -5140,6 +5140,7 @@ func (idx *Indexer) indexFile(
 	// so it must be captured before evictExisting runs.
 	var oldFuncIDs []string
 	evictExisting := func() {
+		idx.invalidateGoModuleSourceStamp(relPath)
 		var oldFTSNodeIDs []string
 		for _, n := range idx.graph.GetFileNodes(graphPath) {
 			if n == nil {
