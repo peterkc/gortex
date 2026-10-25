@@ -189,7 +189,7 @@ jobs:
           done
           go test -tags acceptance -run '^TestReconstructed(Measurement|Scorer$|SearchSymbols$)' -count=1 -v \
             ./cmd/gortex | tee results/measurement-tests.log
-          for test in Deadlines SearchTimeout LoadSearchError ScorerSearchTimeout WarmupOrder Enrichment TerminalResult LoadNoReplay DemandOwner DemandGaps ContractAnswer JobEvidence ForcedPreparation ScorerErrors ScorerJobs RestartStarts PathSizes OversizedTerminal ProfileEndpoint ProfileMode ProfileBoundaries ProfileHTTP ProfileDelta ProfileLifecycle ProfileIdentity ProfileCommand ProfileErrors ProfileEnvironment ProfileStart Campaign; do
+          for test in Deadlines SearchTimeout LoadSearchError ScorerSearchTimeout WarmupOrder Enrichment TerminalResult LoadNoReplay DemandOwner DemandGaps ContractAnswer JobEvidence ForcedPreparation ScorerErrors ScorerJobs RestartStarts PathSizes OversizedTerminal ProfileEndpoint ProfileMode ProfileBoundaries ProfileHTTP ProfileDelta ProfileLifecycle ProfileIdentity ProfileCommand ProfileErrors ProfileEnvironment ProfileStart ProfileScenario ProfileFinishDeadline Campaign; do
             grep -Eq "^--- PASS: TestReconstructedMeasurement${test} " results/measurement-tests.log
           done
           status=0
@@ -275,7 +275,8 @@ jobs:
             done
             rm -rf "results/profile-$PROFILE_SCENARIO"/*/cache/{go-build,go-mod} || echo "warning: Go cache cleanup incomplete for $PROFILE_SCENARIO" >&2
             test -s "$GORTEX_RECON_PROFILE_DIR/capture.json"
-            jq -e '.error == null and (.captures | length > 0)' "$GORTEX_RECON_PROFILE_DIR/capture.json"
+            jq -e '.error == null and .scenario_status == "complete" and .scenario_error == null and (.captures | length > 0)' "$GORTEX_RECON_PROFILE_DIR/capture.json"
+            jq -se 'length == 1 and .[0].mode == "profile" and .[0].score.status == "diagnostic"' "$GORTEX_RECON_OUT"
           fi
           exit "$status"
       - name: Upload raw measurements and fixture logs

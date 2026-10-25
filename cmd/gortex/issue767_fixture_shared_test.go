@@ -56,6 +56,7 @@ type issue767Fixture struct {
 	env                                  []string
 	httpAddr                             string
 	profiled                             bool
+	startError                           string
 	goModCache                           string
 	profiles                             *reconstructedProfiles
 
@@ -109,6 +110,8 @@ const issue767StopTimeout = 30 * time.Second
 const issue767SearchTimeout = 10 * time.Second
 
 var errIssue767CommandTimeout = errors.New("CLI context deadline exceeded")
+
+var errReconstructedProfileDaemonExit = errors.New("isolated daemon exited during start")
 
 type issue767FixtureOptions struct {
 	reconcileInterval string
@@ -411,6 +414,9 @@ func (f *issue767Fixture) start() {
 	}()
 	if f.profiles != nil {
 		if err := f.profiles.start(f.t.Context(), f.logPathFor(run), processStart, done); err != nil {
+			if errors.Is(err, errReconstructedProfileDaemonExit) {
+				f.startError = err.Error()
+			}
 			f.t.Fatal(err)
 		}
 	}
@@ -426,7 +432,8 @@ func (f *issue767Fixture) start() {
 			if log != nil {
 				_ = log.Close()
 			}
-			f.t.Fatalf("isolated daemon exited during start: %v; log %s", err, f.logPathFor(run))
+			f.startError = fmt.Sprintf("isolated daemon exited during start: %v; log %s", err, f.logPathFor(run))
+			f.t.Fatal(f.startError)
 		default:
 		}
 		_, err := f.tryCommand(5*time.Second, f.primary, "daemon", "status", "--no-progress")
@@ -439,7 +446,7 @@ func (f *issue767Fixture) stop() {
 		f.profiles.mu.Lock()
 		finished := f.profiles.finished
 		f.profiles.mu.Unlock()
-		if err := f.profiles.finish(time.Now()); err != nil && !finished {
+		if err := f.profiles.finish(time.Now(), f.profiles.ScenarioError); err != nil && !finished {
 			f.t.Errorf("diagnostic capture: %v", err)
 		}
 	}
@@ -1296,32 +1303,34 @@ type reconstructedProfileCapture struct {
 }
 
 type reconstructedProfiles struct {
-	Dir          string                        `json:"-"`
-	Binary       string                        `json:"binary"`
-	SHA256       string                        `json:"binary_sha256"`
-	Source       string                        `json:"source_commit"`
-	Harness      string                        `json:"harness_commit"`
-	Scenario     string                        `json:"scenario"`
-	Endpoint     string                        `json:"endpoint"`
-	ProcessStart time.Time                     `json:"process_start"`
-	EndpointOpen time.Time                     `json:"endpoint_open"`
-	Start        time.Time                     `json:"scenario_start"`
-	End          time.Time                     `json:"scenario_end"`
-	Captures     []reconstructedProfileCapture `json:"captures"`
-	CPUGapsMS    []float64                     `json:"cpu_uncovered_gaps_ms"`
-	FinalTailMS  float64                       `json:"final_window_tail_ms"`
-	Coverage     string                        `json:"coverage"`
-	Error        string                        `json:"error,omitempty"`
-	Limits       string                        `json:"interpretation_limits"`
-	client       *http.Client
-	ctx          context.Context
-	cancel       context.CancelFunc
-	started      bool
-	finished     bool
-	stop         chan struct{}
-	done         sync.WaitGroup
-	once         sync.Once
-	mu           sync.Mutex
+	Dir            string                        `json:"-"`
+	Binary         string                        `json:"binary"`
+	SHA256         string                        `json:"binary_sha256"`
+	Source         string                        `json:"source_commit"`
+	Harness        string                        `json:"harness_commit"`
+	Scenario       string                        `json:"scenario"`
+	ScenarioStatus string                        `json:"scenario_status"`
+	ScenarioError  string                        `json:"scenario_error,omitempty"`
+	Endpoint       string                        `json:"endpoint"`
+	ProcessStart   time.Time                     `json:"process_start"`
+	EndpointOpen   time.Time                     `json:"endpoint_open"`
+	Start          time.Time                     `json:"scenario_start"`
+	End            time.Time                     `json:"scenario_end"`
+	Captures       []reconstructedProfileCapture `json:"captures"`
+	CPUGapsMS      []float64                     `json:"cpu_uncovered_gaps_ms"`
+	FinalTailMS    float64                       `json:"final_window_tail_ms"`
+	Coverage       string                        `json:"coverage"`
+	Error          string                        `json:"error,omitempty"`
+	Limits         string                        `json:"interpretation_limits"`
+	client         *http.Client
+	ctx            context.Context
+	cancel         context.CancelFunc
+	started        bool
+	finished       bool
+	stop           chan struct{}
+	done           sync.WaitGroup
+	once           sync.Once
+	mu             sync.Mutex
 }
 
 func reconstructedProfileMode(mode, scenario, workload, dir string) error {
@@ -1401,7 +1410,7 @@ func (p *reconstructedProfiles) start(ctx context.Context, log string, processSt
 		select {
 		case err := <-daemonDone:
 			daemonDone <- err // Preserve the fixture stop owner's join receipt.
-			return fmt.Errorf("isolated daemon exited during start: %v; log %s", err, log)
+			return fmt.Errorf("%w: %v; log %s", errReconstructedProfileDaemonExit, err, log)
 		default:
 		}
 		raw, err := os.ReadFile(log)
@@ -1503,14 +1512,31 @@ func (p *reconstructedProfiles) capture(kind, file string) (err error) {
 	return os.WriteFile(filepath.Join(p.Dir, file), raw, 0600)
 }
 
-func (p *reconstructedProfiles) finish(end time.Time) error {
+func (p *reconstructedProfiles) finish(end time.Time, scenarioError string) error {
+	writeManifest := false
+	if scenarioError != "" && p.ScenarioError == "" {
+		p.ScenarioStatus, p.ScenarioError = "failed", scenarioError
+		if p.Scenario == "cold-index" {
+			p.Coverage = "CPU from pprof endpoint open to recorded failed-scenario end; see scenario_error"
+		} else {
+			p.Coverage = "CPU from burst start to recorded failed-scenario end; see scenario_error"
+		}
+		writeManifest = true
+	}
 	p.once.Do(func() {
+		writeManifest = true
+		if p.ScenarioStatus == "" {
+			p.ScenarioStatus = "complete"
+		}
 		p.mu.Lock()
 		p.finished = true
 		p.mu.Unlock()
 		p.End = end
 		close(p.stop)
 		if !p.started {
+			if p.ScenarioStatus != "failed" {
+				p.ScenarioStatus = "incomplete"
+			}
 			p.Error = "profile capture never started"
 			return
 		}
@@ -1524,6 +1550,9 @@ func (p *reconstructedProfiles) finish(end time.Time) error {
 		// Snapshot the boundary now, not after the final 60 s CPU tail.
 		err := errors.Join(p.capture("allocs", "allocs-end.pb.gz"), p.capture("heap", "heap-end.pb.gz"))
 		p.done.Wait() // Cancellation also unblocks HTTP; never stop the daemon first.
+		// The snapshot/join deadline must not consume the ranking budget.
+		stopCancel()
+		cancel() // Each ranking command keeps its separate 30 s bound.
 		defer p.client.CloseIdleConnections()
 		err = errors.Join(err, p.validate())
 		if err == nil {
@@ -1532,6 +1561,8 @@ func (p *reconstructedProfiles) finish(end time.Time) error {
 		if err != nil {
 			p.Error = err.Error()
 		}
+	})
+	if writeManifest {
 		raw, marshalErr := json.MarshalIndent(p, "", "  ")
 		if marshalErr == nil {
 			marshalErr = os.WriteFile(filepath.Join(p.Dir, "capture.json"), raw, 0600)
@@ -1539,7 +1570,7 @@ func (p *reconstructedProfiles) finish(end time.Time) error {
 		if marshalErr != nil {
 			p.Error += "; manifest: " + marshalErr.Error()
 		}
-	})
+	}
 	if p.Error != "" {
 		return errors.New(p.Error)
 	}
@@ -1604,7 +1635,7 @@ func (p *reconstructedProfiles) validate() error {
 var reconstructedNamedProfileRow = regexp.MustCompile(`(?m)^\s*[0-9.]+[^\s]*\s+[0-9.]+%\s+[0-9.]+%\s+[0-9.]+[^\s]*\s+[0-9.]+%\s+([^\s]+)\s*$`)
 
 func (p *reconstructedProfiles) pprof(output string, args ...string) error {
-	ctx, cancel := context.WithTimeout(p.ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(p.ctx), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", append([]string{"tool", "pprof"}, args...)...)
 	cmd.Dir = p.Dir

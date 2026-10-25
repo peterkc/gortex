@@ -254,8 +254,14 @@ func reconstructedDeclarations(path string) ([]string, error) {
 }
 
 func (d *reconstructedDriver) finish(t *testing.T) {
-	if d.f.profiles != nil {
-		if err := d.f.profiles.finish(time.Now()); d.run.recordProfileError(err) {
+	if d.run.Mode == "profile" && d.run.Error == "" && d.f.startError != "" {
+		d.run.Error = d.f.startError
+	}
+	if d.run.Mode == "profile" && d.run.Error == "" && d.run.ProfileError == "" && t.Failed() {
+		d.run.Error = "profile scenario failed; see test log"
+	}
+	if d.profiles != nil {
+		if err := d.profiles.finish(time.Now(), d.run.Error); d.run.recordProfileError(err) {
 			t.Errorf("diagnostic capture: %v", err)
 		}
 	}
@@ -274,6 +280,20 @@ func (d *reconstructedDriver) finish(t *testing.T) {
 		t.Errorf("reconstructed scorer: %v", err)
 	} else {
 		d.run.Score = &score
+	}
+	if d.run.Mode == "profile" && (err != nil || score.Status != "diagnostic") {
+		reason := score.Reason
+		if err != nil {
+			reason = d.run.Error
+		}
+		if d.profiles != nil {
+			d.run.recordProfileError(d.profiles.finish(time.Now(), reason))
+		}
+		if !t.Failed() {
+			t.Errorf("profile scenario: %s", reason)
+		} else {
+			t.Logf("profile scenario: %s", reason)
+		}
 	}
 	out, err := os.OpenFile(os.Getenv("GORTEX_RECON_OUT"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
@@ -509,15 +529,24 @@ func TestReconstructedC2(t *testing.T) {
 	sort.Slice(d.run.Samples, func(i, j int) bool { return d.run.Samples[i].Start.Before(d.run.Samples[j].Start) })
 }
 
+// A daemon exit belongs to the driver, not the capture-error side channel.
+func (d *reconstructedDriver) startProfiles() error {
+	d.f.profiles = d.profiles
+	err := d.profiles.start(d.f.t.Context(), d.f.logPath(), d.started, d.f.done)
+	if errors.Is(err, errReconstructedProfileDaemonExit) {
+		d.run.Error = err.Error()
+	}
+	return err
+}
+
 func TestReconstructedDE(t *testing.T) {
 	d := newReconstructedDriver(t, "R-DE")
 	if !d.readyAndQuiet() {
 		return
 	}
 	if d.profiles != nil {
-		d.f.profiles = d.profiles
-		if err := d.profiles.start(t.Context(), d.f.logPath(), d.started, d.f.done); err != nil {
-			if d.run.recordProfileError(err) {
+		if err := d.startProfiles(); err != nil {
+			if d.run.Error == "" && d.run.recordProfileError(err) {
 				t.Errorf("diagnostic capture: %v", err)
 			}
 			return
@@ -580,7 +609,7 @@ func TestReconstructedDE(t *testing.T) {
 	owner.collect()
 	end := time.Now()
 	if d.profiles != nil {
-		if err := d.profiles.finish(end); err != nil {
+		if err := d.profiles.finish(end, d.run.Error); err != nil {
 			if d.run.recordProfileError(err) {
 				t.Errorf("diagnostic capture: %v", err)
 			}
@@ -774,7 +803,7 @@ func TestReconstructedFresh(t *testing.T) {
 	}
 	d.run.Parameters["settled_store_plus_wal_bytes"] = size
 	if d.profiles != nil {
-		if err := d.profiles.finish(time.Now()); d.run.recordProfileError(err) {
+		if err := d.profiles.finish(time.Now(), d.run.Error); d.run.recordProfileError(err) {
 			t.Errorf("diagnostic capture: %v", err)
 		}
 	}

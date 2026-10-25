@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -1223,7 +1224,7 @@ func TestReconstructedMeasurementProfileHTTP(t *testing.T) {
 			t.Fatal("unreachable endpoint accepted")
 		}
 	})
-	t.Run("cancellation_joins", func(t *testing.T) {
+	t.Run("cancelled_parent_finishes_and_joins", func(t *testing.T) {
 		entered, exited, releaseCPU := make(chan struct{}), make(chan struct{}), make(chan struct{})
 		profile := reconstructedProfileFixture(t, 100, 3)
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1260,7 +1261,7 @@ func TestReconstructedMeasurementProfileHTTP(t *testing.T) {
 		go func() { <-releaseOwner; p.done.Done() }()
 		cancel()
 		finished := make(chan error, 1)
-		go func() { finished <- p.finish(time.Now()) }()
+		go func() { finished <- p.finish(time.Now(), "") }()
 		select {
 		case err := <-finished:
 			close(releaseOwner)
@@ -1274,7 +1275,7 @@ func TestReconstructedMeasurementProfileHTTP(t *testing.T) {
 		select {
 		case <-exited:
 		case <-time.After(time.Second):
-			t.Fatal("cancelled HTTP capture did not release the server")
+			t.Fatal("finished HTTP capture did not release the server")
 		}
 	})
 }
@@ -1361,10 +1362,10 @@ func TestReconstructedMeasurementProfileLifecycle(t *testing.T) {
 				t.Fatal(err)
 			}
 			<-cpuStarted
-			if err := p.finish(time.Now()); err != nil {
+			if err := p.finish(time.Now(), ""); err != nil {
 				t.Fatal(err)
 			}
-			if err := p.finish(time.Now()); err != nil {
+			if err := p.finish(time.Now(), ""); err != nil {
 				t.Fatal(err)
 			} // No second capture or shutdown race.
 			wantCaptures := 3
@@ -1377,6 +1378,9 @@ func TestReconstructedMeasurementProfileLifecycle(t *testing.T) {
 			if err := p.validate(); err != nil {
 				t.Fatal(err)
 			}
+			if p.ScenarioStatus != "complete" || p.ScenarioError != "" {
+				t.Fatalf("successful scenario outcome: %+v", p)
+			}
 			files := []string{"gortex", "capture.json", "cpu-merged.pb.gz", "cpu-top.txt", "heap-end.pb.gz", "allocs-end.pb.gz", "alloc_space-top.txt", "alloc_objects-top.txt"}
 			if scenario == "edit-burst" {
 				files = append(files, "heap-baseline.pb.gz", "allocs-baseline.pb.gz")
@@ -1387,6 +1391,22 @@ func TestReconstructedMeasurementProfileLifecycle(t *testing.T) {
 					t.Fatalf("missing artifact %s: %v", file, err)
 				}
 			}
+			end := p.End
+			if err := p.finish(time.Now(), "post-scenario driver failure"); err != nil {
+				t.Fatal(err)
+			}
+			manifestRaw, err := os.ReadFile(filepath.Join(p.Dir, "capture.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var manifest reconstructedProfiles
+			if err := json.Unmarshal(manifestRaw, &manifest); err != nil {
+				t.Fatal(err)
+			}
+			if manifest.ScenarioStatus != "failed" || manifest.ScenarioError != "post-scenario driver failure" || p.End != end || len(p.Captures) != wantCaptures {
+				t.Fatalf("late driver failure replayed capture or lost outcome: %s", manifestRaw)
+			}
+
 		})
 	}
 }
@@ -1481,6 +1501,35 @@ func TestReconstructedMeasurementCampaign(t *testing.T) {
 			log, err := cmd.CombinedOutput()
 			if (err == nil) != tc.valid {
 				t.Fatalf("row guard accepted=%v want=%v: %s", err == nil, tc.valid, log)
+			}
+		})
+	}
+	var profileGuard string
+	for _, step := range workflow.Jobs["workloads"].Steps {
+		for _, line := range strings.Split(step.Run, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "jq -se ") {
+				profileGuard = strings.TrimSpace(line)
+			}
+		}
+	}
+	if profileGuard == "" {
+		t.Fatal("missing executable profile-result guard")
+	}
+	for _, status := range []string{"diagnostic", "fail", "insufficient", "pass", ""} {
+		t.Run("profile_result_"+status, func(t *testing.T) {
+			out := filepath.Join(t.TempDir(), "profile.jsonl")
+			raw := []byte{}
+			if status != "" {
+				raw = []byte(fmt.Sprintf(`{"mode":"profile","score":{"status":%q}}`, status))
+			}
+			if err := os.WriteFile(out, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.CommandContext(t.Context(), "bash", "-e", "-o", "pipefail", "-c", profileGuard)
+			cmd.Env = append(os.Environ(), "GORTEX_RECON_OUT="+out)
+			log, err := cmd.CombinedOutput()
+			if (err == nil) != (status == "diagnostic") {
+				t.Fatalf("profile status %q accepted=%v: %s", status, err == nil, log)
 			}
 		})
 	}
@@ -1615,11 +1664,26 @@ func TestReconstructedMeasurementProfileCommand(t *testing.T) {
 			}
 		})
 	}
+	t.Run("ranking_outlives_capture_context", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "go"), []byte("#!/bin/sh\necho '  100B 100% 100% 100B 100% NamedSymbol'\n"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		p := reconstructedTestProfiles(t, "cold-index")
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		p.ctx = ctx
+		if err := p.pprof("independent-ranking.txt", "-top", p.Binary, "profile.pb.gz"); err != nil {
+			t.Fatalf("capture cancellation killed the ranking: %v", err)
+		}
+	})
+
 }
 
 func TestReconstructedMeasurementProfileErrors(t *testing.T) {
 	p := reconstructedTestProfiles(t, "cold-index")
-	finishErr := p.finish(time.Now())
+	finishErr := p.finish(time.Now(), "")
 	if finishErr == nil {
 		t.Fatal("unstarted capture did not fail")
 	}
@@ -1707,11 +1771,166 @@ func TestReconstructedMeasurementProfileStart(t *testing.T) {
 	})
 	t.Run("after_finish", func(t *testing.T) {
 		p := reconstructedTestProfiles(t, "cold-index")
-		if err := p.finish(time.Now()); err == nil {
+		if err := p.finish(time.Now(), ""); err == nil {
 			t.Fatal("unstarted finish did not fail")
 		}
 		if err := p.start(t.Context(), log+".missing", time.Now(), nil); err == nil || err.Error() != "profile capture already started or finished" {
 			t.Fatalf("start after finish accepted: %v", err)
 		}
 	})
+}
+
+// This native HTTP transport fake blocks on the request context. synctest
+// advances the real production timeout without a two-minute wall-clock wait.
+type reconstructedProfileRoundTrip func(*http.Request) (*http.Response, error)
+
+func (f reconstructedProfileRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestReconstructedMeasurementProfileFinishDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := reconstructedTestProfiles(t, "cold-index")
+		p.ctx, p.cancel = context.WithCancel(t.Context())
+		defer p.cancel()
+		p.started = true
+		p.Start = time.Now().Add(-time.Second)
+		p.EndpointOpen, p.ProcessStart = p.Start, p.Start
+		p.Endpoint = "http://127.0.0.1:9"
+		entered := make(chan struct{})
+		var requests, aborted atomic.Int32
+		p.client = &http.Client{Transport: reconstructedProfileRoundTrip(func(r *http.Request) (*http.Response, error) {
+			if requests.Add(1) == 1 {
+				close(entered)
+			}
+			<-r.Context().Done()
+			aborted.Add(1)
+			return nil, r.Context().Err()
+		})}
+		p.done.Add(1)
+		go func() { defer p.done.Done(); _ = p.capture("profile?seconds=60", "cpu-0000.pb.gz") }()
+		<-entered
+		start := time.Now()
+		err := p.finish(time.Now(), "")
+		synctest.Wait()
+		if err == nil || !errors.Is(p.ctx.Err(), context.Canceled) || time.Since(start) != 2*time.Minute {
+			t.Fatalf("hung capture did not hit finish deadline: elapsed=%s context=%v error=%v", time.Since(start), p.ctx.Err(), err)
+		}
+		if requests.Load() < 2 || aborted.Load() != requests.Load() {
+			t.Fatalf("finish returned without aborting/joining requests: entered=%d aborted=%d", requests.Load(), aborted.Load())
+		}
+	})
+}
+
+func TestReconstructedMeasurementProfileScenario(t *testing.T) {
+	if scenario := os.Getenv("GORTEX_RECON_SCENARIO_HELPER"); scenario != "" {
+		root := os.Getenv("GORTEX_RECON_SCENARIO_ROOT")
+		binary := filepath.Join(root, "fake-binary")
+		script := []byte("#!/bin/sh\nexit 7\n")
+		if err := os.WriteFile(binary, script, 0700); err != nil {
+			t.Fatal(err)
+		}
+		p, err := newReconstructedProfiles(binary, filepath.Join(root, "profiles"), "cold-index", fmt.Sprintf("%x", sha256.Sum256(script)), strings.Repeat("a", 40), strings.Repeat("b", 40))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := &issue767Fixture{t: t, binary: binary, root: root, primary: root, store: filepath.Join(root, "store.sqlite"), env: os.Environ(), profiled: true, profiles: p}
+		d := &reconstructedDriver{f: f, profiles: p, started: time.Now(), run: reconstructedRun{Label: "reconstructed", Mode: "profile", Workload: "R-Fresh", Parameters: map[string]any{}}}
+		if scenario == "startup-fresh" {
+			t.Cleanup(func() { d.finish(t) })
+			f.start() // The private fake executable exits; no real daemon runs.
+			t.Fatal("exited fake daemon was accepted")
+		}
+		if scenario == "startup-de" {
+			d.run.Workload = "R-DE"
+			d.run.Quiet = true
+			p.Scenario = "edit-burst"
+			f.done = make(chan error, 1)
+			f.done <- errors.New("exit status 7")
+			if err := os.WriteFile(f.logPath(), nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { d.finish(t) })
+			if err := d.startProfiles(); err == nil {
+				t.Fatal("exited daemon was accepted by burst driver")
+			}
+			return
+		}
+		cpuStarted, releaseCPU := make(chan struct{}), make(chan struct{})
+		profile := reconstructedProfileFixture(t, 100, 3)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/debug/pprof/profile" {
+				close(cpuStarted)
+				select {
+				case <-releaseCPU:
+				case <-r.Context().Done():
+				}
+			}
+			if r.URL.Path == "/debug/pprof/heap" {
+				close(releaseCPU)
+			}
+			_, _ = w.Write(profile)
+		}))
+		t.Cleanup(server.Close)
+		t.Cleanup(func() { d.finish(t) })
+		raw := fmt.Sprintf(`{"msg":"daemon: pprof endpoint open","addr":%q,"ts":%f}`, strings.TrimPrefix(server.URL, "http://"), float64(time.Now().UnixNano())/1e9)
+		if err := os.WriteFile(f.logPath(), []byte(raw), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.start(t.Context(), f.logPath(), time.Now(), nil); err != nil {
+			t.Fatal(err)
+		}
+		<-cpuStarted
+		d.run.Error = "enrichment completion: context deadline exceeded"
+		return // Cleanup must finish capture but fail this profile test.
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range []string{"enrichment-timeout", "startup-fresh", "startup-de"} {
+		t.Run(scenario, func(t *testing.T) {
+			root := t.TempDir()
+			out := filepath.Join(root, "result.jsonl")
+			cmd := exec.CommandContext(t.Context(), executable, "-test.run=^TestReconstructedMeasurementProfileScenario$", "-test.v", "-test.timeout=3m")
+			cmd.Env = append(os.Environ(), "GORTEX_RECON_SCENARIO_HELPER="+scenario, "GORTEX_RECON_SCENARIO_ROOT="+root, "GORTEX_RECON_OUT="+out)
+			log, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Errorf("failed profile scenario passed: %s", log)
+			}
+			var row reconstructedRun
+			raw, readErr := os.ReadFile(out)
+			if readErr != nil {
+				t.Fatalf("missing scenario row: %v\n%s", readErr, log)
+			}
+			if err := json.Unmarshal(raw, &row); err != nil {
+				t.Fatal(err)
+			}
+			want := "enrichment completion: context deadline exceeded"
+			if strings.HasPrefix(scenario, "startup-") {
+				want = "isolated daemon exited during start: exit status 7"
+			}
+			if !strings.HasPrefix(row.Error, want) || row.Score == nil || row.Score.Status != "fail" || row.Score.Reason != row.Error || !strings.Contains(string(log), row.Error) {
+				t.Errorf("primary scenario cause lost: %+v\n%s", row, log)
+			}
+			var manifest reconstructedProfiles
+			raw, readErr = os.ReadFile(filepath.Join(root, "profiles", "capture.json"))
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if err := json.Unmarshal(raw, &manifest); err != nil {
+				t.Fatal(err)
+			}
+			if manifest.ScenarioStatus != "failed" || manifest.ScenarioError != row.Error || !strings.Contains(manifest.Coverage, "failed-scenario end") || strings.Contains(manifest.Coverage, "to enrichment complete") {
+				t.Errorf("failed scenario claimed completion: %s", raw)
+			}
+			if scenario == "enrichment-timeout" && manifest.Error != "" {
+				t.Errorf("fixture did not isolate a successful capture after driver failure: %s", raw)
+			}
+			if strings.HasPrefix(scenario, "startup-") && strings.Contains(row.ProfileError, "isolated daemon exited during start") {
+				t.Errorf("daemon exit was filed as a capture error: %+v", row)
+			}
+			t.Logf("expected profile failure: %s", strings.TrimSpace(string(log)))
+		})
+	}
 }
