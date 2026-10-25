@@ -128,9 +128,15 @@ func TestNonGoUntrackSkipsModuleSweep(t *testing.T) {
 	}
 	require.NoError(t, mi.SeedGoModuleDeps(t.Context()))
 	g.scans = 0
+	mi.goModuleMu.Lock()
+	mi.goModuleChecked = time.Time{} // any module snapshot read would refresh this stamp
+	mi.goModuleMu.Unlock()
 	_, _, err = mi.UntrackRepoChecked(t.Context(), "a")
 	require.NoError(t, err)
 	assert.Zero(t, g.scans, "JS-only untrack must not rescan Go terminals")
+	mi.goModuleMu.Lock()
+	defer mi.goModuleMu.Unlock()
+	assert.True(t, mi.goModuleChecked.IsZero(), "untrack with nothing parked must not build a cross-repo resolver")
 }
 
 type goModuleUntrackScanStore struct{ *goModuleRetryScanStore }

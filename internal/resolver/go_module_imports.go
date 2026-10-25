@@ -377,17 +377,14 @@ func (cr *CrossRepoResolver) rememberGoModuleImports(nodes []*graph.Node) {
 	}
 }
 
-// InvalidateGoModulePackageRepo drops only a removed provider's file projection.
-// Package projections share the store resolve mutex, not the retry queue mutex.
-func (cr *CrossRepoResolver) InvalidateGoModulePackageRepo(repo string) {
-	if repo == "" {
+// InvalidatePackageRepo drops only a removed provider's file projection.
+// The caller holds the store resolve mutex, which guards package projections;
+// the retry queue mutex does not.
+func (r *GoModuleDepRetry) InvalidatePackageRepo(repo string) {
+	if r == nil || repo == "" {
 		return
 	}
-	cr.mu.Lock()
-	defer cr.mu.Unlock()
-	if cr.goModuleRetry != nil {
-		delete(cr.goModuleRetry.packages, repo)
-	}
+	delete(r.packages, repo)
 }
 
 // Only retained statements registered for this provider are probed on edits.
