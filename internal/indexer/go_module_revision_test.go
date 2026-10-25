@@ -223,3 +223,24 @@ func TestGoModuleUntrackCancellationAfterFinalize(t *testing.T) {
 		})
 	}
 }
+
+// Given parked incoming calls, when a provider is purged, then only their
+// compact identities are retained and settlement refetches current rows.
+func TestGoModuleUntrackRetainsOnlyParkedIdentities(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			mi, g, repos := goModuleLifecycleFixture(t, backend)
+			for _, entry := range repos[:2] {
+				_, err := mi.TrackRepoCtx(t.Context(), entry)
+				require.NoError(t, err)
+			}
+			parked := restubGoModuleRepoIncoming(g, "b")
+			require.Len(t, parked, 1)
+			assert.IsType(t, []graph.EdgeIdentity{}, parked, "teardown must not retain full metadata-bearing edge objects")
+			g.EvictFile("b/lib.go")
+			require.NoError(t, mi.finalizeUntrackedGoModuleCalls(parked))
+			cold := revisionColdGraph(t, backend, repos[:1])
+			assert.ElementsMatch(t, revisionCallTargets(cold, "a/main.go::Caller", graph.EdgeCalls), revisionCallTargets(g, "a/main.go::Caller", graph.EdgeCalls))
+		})
+	}
+}

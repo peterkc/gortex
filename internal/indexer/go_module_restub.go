@@ -15,11 +15,11 @@ func goModuleRestubTarget(e *graph.Edge, fallback string) string {
 
 // Park only module-bound incoming references from surviving callers before a
 // whole provider replacement/removal. Eviction otherwise deletes these edges.
-func restubGoModuleRepoIncoming(g graph.Store, repo string) []*graph.Edge {
+func restubGoModuleRepoIncoming(g graph.Store, repo string) []graph.EdgeIdentity {
 	if repo == "" || len(graph.ReadRepoFilePaths(g, repo, "", []string{"go"}, nil)) == 0 {
 		return nil // persisted Go files survive missing manifests and offline checkouts
 	}
-	var parked []*graph.Edge
+	var parked []graph.EdgeIdentity
 	var ids []string
 	flush := func() {
 		var batch []graph.EdgeReindex
@@ -37,7 +37,7 @@ func restubGoModuleRepoIncoming(g graph.Store, repo string) []*graph.Edge {
 				e.To = stub
 				e.CrossRepo, e.ConfidenceLabel = false, ""
 				batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
-				parked = append(parked, e)
+				parked = append(parked, graph.EdgeIdentityFor(e))
 			}
 		}
 		g.ReindexEdges(batch)
