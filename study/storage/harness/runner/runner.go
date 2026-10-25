@@ -3,6 +3,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -105,6 +106,23 @@ type Result struct {
 	PeakRSSBytes   int64                   `json:"peak_rss_bytes"`
 	Failures       []string                `json:"failures"`
 	Success        bool                    `json:"success"`
+	TimingOnly     bool                    `json:"timing_only,omitempty"`
+}
+
+// MarshalJSON leaves the full protocol unchanged and omits unrun timing phases.
+func (r Result) MarshalJSON() ([]byte, error) {
+	type result Result
+	if !r.TimingOnly {
+		return json.Marshal(result(r))
+	}
+	return json.Marshal(struct {
+		result
+		Delta         *BuildRecord      `json:"delta,omitempty"`
+		DeltaChecks   []workload.Check  `json:"delta_checks,omitempty"`
+		Concurrent    *ConcurrentResult `json:"concurrent,omitempty"`
+		Crash         []CrashTrial      `json:"crash,omitempty"`
+		SkippedPhases []string          `json:"skipped_phases"`
+	}{result: result(r), SkippedPhases: []string{"delta", "concurrent_readers", "commit_race", "crash_trials"}})
 }
 
 // ReferenceCatalog supplies the same atomic JSON reference catalog for all
@@ -155,6 +173,7 @@ type runRequest struct {
 	Run           int
 	Trials        int
 	SafetyTimeout time.Duration
+	TimingOnly    bool
 }
 
 // trackedBackend owns all refs produced by this run, including crash fixtures.
@@ -222,6 +241,7 @@ func RunCLI(b adapter.Backend, factory adapter.CatalogFactory) error {
 	runs := fs.Int("runs", 5, "measured fresh-process runs")
 	trials := fs.Int("crash-trials", 12, "hook trials plus this many external-time trials")
 	warm := fs.Bool("warmup", true, "discard one full fresh-process warm-up")
+	timingOnly := fs.Bool("timing-only", false, "time the base workload only; skip update and publication correctness phases")
 	safetyTimeout := fs.Duration("safety-timeout", defaultSafetyTimeout, "safety deadline for each commit-race check and crash child")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return err
@@ -260,7 +280,7 @@ func RunCLI(b adapter.Backend, factory adapter.CatalogFactory) error {
 	}
 	for run := first; run <= *runs; run++ {
 		path := filepath.Join(*out, fmt.Sprintf("request-%02d.json", run))
-		if err = dataset.WriteJSON(path, runRequest{Data: *data, Out: *out, Run: run, Trials: *trials, SafetyTimeout: *safetyTimeout}); err != nil {
+		if err = dataset.WriteJSON(path, runRequest{Data: *data, Out: *out, Run: run, Trials: *trials, SafetyTimeout: *safetyTimeout, TimingOnly: *timingOnly}); err != nil {
 			return err
 		}
 		cmd := exec.Command(exe, "__measure_run", path)
@@ -333,7 +353,7 @@ func runChild(original adapter.Backend, factory adapter.CatalogFactory, req runR
 	if e = os.MkdirAll(dir, 0755); e != nil {
 		return e
 	}
-	r := Result{PID: os.Getpid(), Adapter: original.Name(), Tier: filepath.Base(req.Data), Run: req.Run, Started: time.Now().Format(time.RFC3339), Uptime: strings.TrimSpace(string(load)), GoVersion: runtime.Version(), CPUs: runtime.NumCPU(), ManifestSHA256: digest, Capabilities: original.Capabilities(), Metrics: map[string]Distribution{}, ServerUsage: map[string]adapter.ResourceUsage{}, Failures: []string{}}
+	r := Result{TimingOnly: req.TimingOnly, PID: os.Getpid(), Adapter: original.Name(), Tier: filepath.Base(req.Data), Run: req.Run, Started: time.Now().Format(time.RFC3339), Uptime: strings.TrimSpace(string(load)), GoVersion: runtime.Version(), CPUs: runtime.NumCPU(), ManifestSHA256: digest, Capabilities: original.Capabilities(), Metrics: map[string]Distribution{}, ServerUsage: map[string]adapter.ResourceUsage{}, Failures: []string{}}
 	b := &trackedBackend{Backend: original}
 	hooks, server := original.(adapter.ServerHooks)
 	if server {
@@ -377,7 +397,11 @@ func runChild(original adapter.Backend, factory adapter.CatalogFactory, req runR
 			return e
 		}
 	} else {
-		if e = dataset.WriteJSON(filepath.Join(dir, "warmup-status.json"), map[string]any{"pid": r.PID, "success": r.Success, "failures": r.Failures}); e != nil {
+		status := map[string]any{"pid": r.PID, "success": r.Success, "failures": r.Failures}
+		if r.TimingOnly {
+			status["timing_only"] = true
+		}
+		if e = dataset.WriteJSON(filepath.Join(dir, "warmup-status.json"), status); e != nil {
 			return e
 		}
 	}
@@ -680,6 +704,9 @@ func runOnce(ctx context.Context, b *trackedBackend, factory adapter.CatalogFact
 	}
 	if e = resource(ctx, b.Backend, r, "queries"); e != nil {
 		return e
+	}
+	if r.TimingOnly {
+		return nil
 	}
 	change, e := MakeChange(ds[0])
 	if e != nil {

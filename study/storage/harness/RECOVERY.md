@@ -170,3 +170,29 @@ before the commands were 75 and 75. No root-module, adapter or race checks ran.
 The updated full Go/Markdown fingerprint is recorded outside the harness so this
 log does not hash itself. Gortex task localization and memory remained unavailable
 because the daemon was stopped; it was not started or administered.
+
+## Post-recovery change: base-workload timing mode
+
+On 2026-10-24, the lead approved one default-off runner option, `-timing-only`.
+It travels in the existing fresh-process request. The runner returns after base
+and optional-native queries, before constructing any delta. Build/seal, Opens,
+query warm-ups/checks, deferred closes and server cleanup remain. No reader,
+publication or crash algorithm changed. Timing JSON records the selected mode
+and explicit skipped phases, omitting unrun phase fields. Default result JSON
+is unchanged. `README.md` and `FORMAT.md` state that timing success cannot count
+as a correctness pass.
+
+`runner/timing_only_test.go` checks actual CLI request serialization, the default
+full protocol, retained base timings, absent/skipped phase fields, cleanup and
+unchanged default serialization. Removing only the early return made the timing
+subtest fail with `skipped phase executed delta`; restoring it passed. No test
+was deleted. No corpus, adapter or timing workload ran.
+
+The accepted focused check, `go vet -p=1 ./...` and `go test -p=1 ./...` passed
+with Go 1.27.1 and the explicit readonly/offline module environment above.
+Memory levels before them were 74, 75 and 75. An earlier tiny focused
+check also passed, but was not accepted as evidence because a revived kernel had
+reset its environment. The checks above ran after restoring `GOMAXPROCS=2` and
+the scratch cache/temp paths. Gortex localization/memory remained unavailable;
+the daemon was not started or administered. The updated fingerprint is recorded
+outside the harness.

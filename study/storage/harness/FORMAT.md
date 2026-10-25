@@ -236,3 +236,29 @@ Fresh-process request JSON stores `SafetyTimeout` as integer nanoseconds.
 A missing or zero field in an older saved request retains the 30-second default;
 negative values are rejected. The CLI rejects zero and negative durations before
 creating an output directory or starting a child.
+
+## Timing-only result mode
+
+`-timing-only` defaults to false. A true value travels in fresh-process request
+JSON as `TimingOnly`. A missing field in a saved request selects the unchanged
+full protocol. Timing mode stops after the base and optional-native query
+workloads, including their warm-ups and answer checks. Build/seal, first/warm
+Open, resource samples, segment closes and server cleanup still run.
+
+A timing-only result contains `timing_only: true` and this explicit list:
+
+```json
+"skipped_phases": ["delta", "concurrent_readers", "commit_race", "crash_trials"]
+```
+
+Its `delta`, `delta_checks`, `concurrent` and `crash` fields are absent; there is
+no `delta_build` metric. `success=true` means only that this selected base
+workload and cleanup succeeded. It MUST NOT stand in for a correctness pass.
+Correctness consumers must reject `timing_only=true` and require the full
+protocol's phase coverage. Base-workload answer checks do not prove update,
+publication, reader or crash correctness.
+
+With the option absent or false, the full protocol and its JSON fields remain
+unchanged. `timing_only` and `skipped_phases` are omitted in that mode. A discarded
+timing-only warm-up status also records `timing_only=true`; it is not a full
+protocol result.

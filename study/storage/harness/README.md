@@ -264,6 +264,22 @@ measurements. For a separately authorized large-corpus run, use
 `-safety-timeout 15m` if the default cannot cover those Opens. The concurrent
 reader handshake and minimum-sample timeouts remain fixed at 30 seconds.
 
+For separately authorized clean base-workload timings, add `-timing-only`:
+
+```sh
+"$GXH/bin/oracle" -data "$GXH/data/tier1" -out "$GXH/results/oracle-timing" \
+  -runs 3 -warmup=false -timing-only
+```
+
+This option defaults to false. It retains build/seal, first/warm Open, query
+warm-up, measured base and optional-native queries, validation and cleanup.
+It skips delta, concurrent readers, commit-race and crash trials. The result
+records `timing_only=true` and `skipped_phases`; unrun phase fields are absent.
+A successful timing-only result is not a correctness pass. Run and accept the
+full correctness protocol separately before using timings to compare adapters.
+The existing `-crash-trials` and `-safety-timeout` inputs must remain positive,
+but timing-only mode does not run the phases they control.
+
 Start servers and prepare native libraries before running.
 Run candidates sequentially with no other heavy study work. `uptime` records
 machine load before each child run; load is evidence, not a pass/fail threshold.
