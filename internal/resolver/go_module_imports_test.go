@@ -684,18 +684,15 @@ func TestGoModuleImportFallbackStatsAreUnresolved(t *testing.T) {
 	}
 }
 
-func TestInvalidateGoModulePackageRepoKeepsOtherProviders(t *testing.T) {
+func TestInvalidatePackageRepoKeepsOtherProviders(t *testing.T) {
 	// Given one shared retry object with independent provider projections.
 	state := &GoModuleDepRetry{complete: true, packages: map[string]map[string]graph.FileNodeIdentity{
 		"b": {"b": {ID: "b/lib.go", FilePath: "b/lib.go", RepoPrefix: "b"}},
 		"c": {"c": {ID: "c/lib.go", FilePath: "c/lib.go", RepoPrefix: "c"}},
 	}}
-	cr := NewCrossRepo(graph.New())
-	cr.SetGoModuleDepRetry(state, 1)
 	// When only C's projection is invalidated.
-	cr.InvalidateGoModulePackageRepo("c")
+	state.InvalidatePackageRepo("c")
 	// Then B's cached identity and the shared retry state are preserved.
-	require.Same(t, state, cr.goModuleRetry)
 	require.NotContains(t, state.packages, "c")
 	require.Equal(t, graph.FileNodeIdentity{ID: "b/lib.go", FilePath: "b/lib.go", RepoPrefix: "b"}, state.packages["b"]["b"])
 	require.True(t, state.complete, "package invalidation must not replace the terminal-sweep policy")

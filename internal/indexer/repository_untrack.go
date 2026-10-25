@@ -313,11 +313,15 @@ func (mi *MultiIndexer) purgeRepositoryPayload(
 }
 
 func (mi *MultiIndexer) finalizeUntrackedGoModuleCalls(removedRepo string, parked []graph.EdgeIdentity) error {
-	cr := mi.newCrossRepoResolver()
-	cr.InvalidateGoModulePackageRepo(removedRepo)
+	// A refused tie parks nothing, so drop the projection before the early return.
+	mu := mi.graph.ResolveMutex()
+	mu.Lock()
+	mi.goModuleRetry.InvalidatePackageRepo(removedRepo)
+	mu.Unlock()
 	if len(parked) == 0 {
 		return nil
 	}
+	cr := mi.newCrossRepoResolver()
 	if err := cr.ResolveDeferredGoModuleEdgeIdentities(parked); err != nil {
 		return err
 	}
