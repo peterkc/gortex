@@ -52,7 +52,9 @@ func TestClaimedPopulatedBaseShadowReplacementAdmitsCheckoutWriter(t *testing.T)
 	require.NoError(t, err)
 	entered := make(chan struct{})
 	var once sync.Once
-	claimedShadowDeleteObserver.Store(&claimedShadowDeleteProbe{fire: func() { once.Do(func() { close(entered) }); time.Sleep(time.Millisecond) }})
+	// One 256-row chunk costs at least 1.28s; atomic eviction costs at least
+	// 5.115s after the first delete, above both the 2.25s and 3.75s bounds.
+	claimedShadowDeleteObserver.Store(&claimedShadowDeleteProbe{fire: func() { once.Do(func() { close(entered) }); time.Sleep(5 * time.Millisecond) }})
 	t.Cleanup(func() { claimedShadowDeleteObserver.Store(nil) })
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
@@ -65,7 +67,7 @@ func TestClaimedPopulatedBaseShadowReplacementAdmitsCheckoutWriter(t *testing.T)
 		cancel()
 		select {
 		case <-wrote:
-		case <-time.After(5 * time.Second):
+		case <-time.After(testTimingSlack(5 * time.Second)):
 			t.Error("foreground writer did not join")
 		}
 	})
@@ -88,7 +90,7 @@ func TestClaimedPopulatedBaseShadowReplacementAdmitsCheckoutWriter(t *testing.T)
 	var r result
 	select {
 	case r = <-wrote:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testTimingSlack(5 * time.Second)):
 		t.Fatal("foreground writer did not complete")
 	}
 	wrote <- r

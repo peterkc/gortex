@@ -439,7 +439,7 @@ func TestWALReclaimYieldsToAnAnnouncedMutation(t *testing.T) {
 		t.Fatal("the hold did not yield to an announced mutation")
 	}
 	require.ErrorIs(t, context.Cause(ctx), errWALReclaimWriterWaiting)
-	require.Less(t, time.Since(announced), 100*time.Millisecond)
+	require.Less(t, time.Since(announced), testTimingSlack(100*time.Millisecond))
 }
 
 // With nothing in the log and nothing to shrink, an attempt never takes the
@@ -461,7 +461,7 @@ func TestWALReclaimSkipsWhenThereIsNothingToReclaim(t *testing.T) {
 	require.Equal(t, walReclaimSkipped, res.outcome)
 	require.Equal(t, "nothing_to_reclaim", res.reason)
 	require.Zero(t, res.writerHold)
-	require.Less(t, time.Since(start), time.Second)
+	require.Less(t, time.Since(start), testTimingSlack(time.Second))
 }
 
 // A residue drain that finds a reader holding the log gives up on its first

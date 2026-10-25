@@ -444,7 +444,7 @@ func TestCheckoutMutationConcurrentAdmissionIsBoundedByCaller(t *testing.T) {
 				if got.lease != nil {
 					got.lease.Close()
 				}
-			case <-time.After(2 * time.Second):
+			case <-time.After(testTimingSlack(2 * time.Second)):
 				t.Error("owned admission did not join after cancellation")
 			}
 		}
@@ -477,7 +477,7 @@ func TestCheckoutMutationConcurrentAdmissionIsBoundedByCaller(t *testing.T) {
 	select {
 	case got = <-done:
 		joined = true
-	case <-time.After(2 * time.Second):
+	case <-time.After(testTimingSlack(2 * time.Second)):
 		t.Fatal("admission did not return after its caller deadline")
 	}
 	if got.lease != nil {
@@ -485,7 +485,7 @@ func TestCheckoutMutationConcurrentAdmissionIsBoundedByCaller(t *testing.T) {
 		t.Fatal("admitted concurrent source mutation")
 	}
 	t.Logf("urgent_precheck_wait_witnessed=%v caller_budget=500ms elapsed=%s error=%v", witnessed, got.elapsed, got.err)
-	if !errors.Is(got.err, context.DeadlineExceeded) || !errors.Is(got.err, ErrCheckoutMutationBusy) || got.elapsed > testTimingSlack(2*time.Second) {
+	if !errors.Is(got.err, context.DeadlineExceeded) || !errors.Is(got.err, ErrCheckoutMutationBusy) || got.elapsed > 2*time.Second {
 		t.Fatalf("admission did not preserve caller deadline: elapsed=%s error=%v", got.elapsed, got.err)
 	}
 }

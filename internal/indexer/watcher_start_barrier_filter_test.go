@@ -64,7 +64,7 @@ func TestWatcherStartCompletesOnCanonicalGitRoot(t *testing.T) {
 	require.NoError(t, w.Start([]string{dir}))
 	t.Cleanup(func() { _ = w.Stop() })
 
-	require.Less(t, time.Since(start), testTimingSlack(startupBarrierTimeout()),
+	require.Less(t, time.Since(start), startupBarrierTimeout(),
 		"Start consumed the whole barrier budget — the handshake marker never came back")
 	require.Empty(t, w.DegradedReason(), "a healthy start must not report degradation")
 }

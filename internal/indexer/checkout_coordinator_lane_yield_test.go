@@ -187,7 +187,7 @@ func TestBackgroundCyclePastTheYieldBoundStillGivesTheLaneUp(t *testing.T) {
 		t.Fatalf("the interactive build never got the lane from a background cycle past the yield bound: %v", err)
 	}
 	release()
-	if wait := time.Since(waited); wait > testTimingSlack(time.Second) {
+	if wait := time.Since(waited); wait > time.Second {
 		t.Fatalf("the interactive build waited %v for a background cycle past the yield bound", wait)
 	}
 	if stats := gate.Stats(); stats.YieldRefusals != 0 || stats.YieldRequests != 1 {

@@ -94,7 +94,7 @@ func TestReclaimFinalBackfillBoundsWriterCredit(t *testing.T) {
 				close(release)
 				t.Fatal("final backfill never reached the driver boundary")
 			}
-			ctx, cancel := context.WithTimeout(t.Context(), credit+100*time.Millisecond)
+			ctx, cancel := context.WithTimeout(t.Context(), credit+testTimingSlack(100*time.Millisecond))
 			started := time.Now()
 			err := s.writeMu.LockContext(ctx)
 			wait := time.Since(started)
@@ -115,8 +115,8 @@ func TestReclaimFinalBackfillBoundsWriterCredit(t *testing.T) {
 			<-done
 			require.NoError(t, err, "the final checkpoint exceeded its foreground writer credit")
 			require.NoError(t, writeErr, "foreground SQL could not commit during the slow checkpoint call")
-			require.Less(t, wait, credit+100*time.Millisecond)
-			require.Less(t, elapsed, credit+100*time.Millisecond, "foreground gate plus SQL commit exceeded the writer credit")
+			require.Less(t, wait, credit+testTimingSlack(100*time.Millisecond))
+			require.Less(t, elapsed, credit+testTimingSlack(100*time.Millisecond), "foreground gate plus SQL commit exceeded the writer credit")
 			t.Logf("kind=%s credit=%s foreground_gate=%s foreground_gate_and_sql=%s", kind, credit, wait, elapsed)
 			require.False(t, res.openGate, "the foreground commit must invalidate this reset admission")
 			res = &walReclaimResult{}

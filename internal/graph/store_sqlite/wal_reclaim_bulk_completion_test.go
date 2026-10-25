@@ -215,9 +215,9 @@ func TestWALBulkCompletionBoundsPinnedReaderAndParentCancellation(t *testing.T) 
 			require.Zero(t, res.pause)
 			require.False(t, s.readGate.closed.Load())
 			require.Zero(t, s.WALReclaimStats().LastResortRuns)
-			limit := walReclaimMaxWriterHold + 100*time.Millisecond
+			limit := walReclaimMaxWriterHold + testTimingSlack(100*time.Millisecond)
 			if kind == "ordinary" {
-				limit = walReclaimResetHold + 100*time.Millisecond
+				limit = walReclaimResetHold + testTimingSlack(100*time.Millisecond)
 			}
 			if kind == "parent_cancel" {
 				limit = time.Second

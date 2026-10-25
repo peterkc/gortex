@@ -815,10 +815,10 @@ func waitForPromptTopologyCallback(t *testing.T, callbacks <-chan time.Time, sta
 	t.Helper()
 	select {
 	case observed := <-callbacks:
-		if elapsed := observed.Sub(started); elapsed > testTimingSlack(250*time.Millisecond) {
-			t.Fatalf("topology transition latency = %s, want <=%s with 10ms test cadence", elapsed, testTimingSlack(250*time.Millisecond))
+		if elapsed := observed.Sub(started); elapsed > 250*time.Millisecond {
+			t.Fatalf("topology transition latency = %s, want <=%s with 10ms test cadence", elapsed, 250*time.Millisecond)
 		}
-	case <-time.After(testTimingSlack(500 * time.Millisecond)):
+	case <-time.After(500 * time.Millisecond):
 		t.Fatal("topology probe did not publish the transition promptly")
 	}
 }

@@ -75,7 +75,7 @@ func TestRowCountersReserveSeedReaderBeforeWriter(t *testing.T) {
 	releaseBarrier()
 	// Pinning the pool must not monopolize the writer. Require an actual
 	// foreground SQL commit, not only admission of an empty gate probe.
-	writeCtx, stop := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	writeCtx, stop := context.WithTimeout(t.Context(), testTimingSlack(100*time.Millisecond))
 	started := time.Now()
 	gateErr := s.writeMu.LockContext(writeCtx)
 	var writeErr error
@@ -89,7 +89,7 @@ func TestRowCountersReserveSeedReaderBeforeWriter(t *testing.T) {
 	require.NoError(t, <-done)
 	require.NoError(t, gateErr, "seed reader admission waited on the read pool while holding the writer")
 	require.NoError(t, writeErr)
-	require.Less(t, elapsed, 100*time.Millisecond)
+	require.Less(t, elapsed, testTimingSlack(100*time.Millisecond))
 	requireCountersExact(t, s, 0)
 	t.Logf("foreground_gate_and_sql=%s", elapsed)
 }

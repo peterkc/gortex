@@ -14,7 +14,7 @@ import (
 func TestPerformanceALinkedWorktreeSaveIsPublishedWithoutAQuery(t *testing.T) {
 	took, quiet := linkedWorktreeSavePublication(t)
 	t.Logf("save published %s after the write (quiet window %s)", took, quiet)
-	if took > testTimingSlack(2*time.Second) {
+	if took > 2*time.Second {
 		t.Fatalf("save published %s after the write, want about the quiet window plus one build", took)
 	}
 }
@@ -74,7 +74,7 @@ func TestPerformanceAWorkingTreeWrittenEvery300msCoalescesWithoutFailedBuilds(t 
 	if admitted := abandoned + built; admitted >= writes {
 		t.Fatalf("%d admitted builds for %d writes: the changes were not coalesced", admitted, writes)
 	}
-	if took > testTimingSlack(2*time.Second) {
+	if took > 2*time.Second {
 		t.Fatalf("the final state was published %s after the last write, want about the quiet window plus one build", took)
 	}
 }

@@ -13,7 +13,7 @@ import (
 // found the lane busy takes it within 200 ms of its release; the test
 // allows twice that.
 func TestContractStuckRepairTakesAReleasedLaneWithinItsBudget(t *testing.T) {
-	busyLaneRepair(t, func(d time.Duration) { require.Less(t, d, testTimingSlack(time.Second)) }, func(d time.Duration) { require.LessOrEqual(t, d, testTimingSlack(2*200*time.Millisecond)) })
+	busyLaneRepair(t, func(d time.Duration) { require.Less(t, d, testTimingSlack(time.Second)) }, func(d time.Duration) { require.LessOrEqual(t, d, 2*200*time.Millisecond) })
 }
 
 func TestContractStuckReceiptRepairMeetsItsPeriodBudget(t *testing.T) {
