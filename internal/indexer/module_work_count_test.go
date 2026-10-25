@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -331,6 +332,46 @@ func TestGoModuleSourceRecoveryReleasesLease(t *testing.T) {
 			used := budget.used
 			budget.mu.Unlock()
 			assert.Zero(t, used, "every exit must return the raw-source admission lease")
+		})
+	}
+}
+
+// Given cached unchanged bytes, when only the caller mtime changes, then one
+// provider save reads once to refresh the stamp and the next save reads zero.
+func TestGoModuleSourceCacheRefreshesTouchedStamp(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			mi, _, repos := goModuleLifecycleFixture(t, backend)
+			main := filepath.Join(repos[0].Path, "main.go")
+			lib := filepath.Join(repos[1].Path, "lib.go")
+			writeFile(t, main, "package caller\nimport library \"example.org/library\"\nfunc Caller(){library.Hello(library.Missing())}\n")
+			writeFile(t, lib, "package library\nfunc Other(){}\n")
+			for _, entry := range repos[:2] {
+				_, err := mi.TrackRepoCtx(t.Context(), entry)
+				require.NoError(t, err)
+			}
+			mi.runCrossRepoResolveFiles([]string{"b/lib.go"})
+			require.Contains(t, mi.GetIndexer("a").goModuleSourceCache, "main.go")
+			info, err := os.Stat(main)
+			require.NoError(t, err)
+			stamp := info.ModTime().Add(2 * time.Second)
+			require.NoError(t, os.Chtimes(main, stamp, stamp))
+			original := readGoModuleCallerFile
+			reads := 0
+			readGoModuleCallerFile = func(path string) ([]byte, error) {
+				if path == main {
+					reads++
+				}
+				return original(path)
+			}
+			t.Cleanup(func() { readGoModuleCallerFile = original })
+			writeFile(t, lib, "package library\nfunc Other(){println(1)}\n")
+			require.NoError(t, mi.GetIndexer("b").IndexFile(lib))
+			assert.Equal(t, 1, reads, "new stamp with identical bytes must refresh once")
+			reads = 0
+			writeFile(t, lib, "package library\nfunc Other(){println(2)}\nfunc More(){}\n")
+			require.NoError(t, mi.GetIndexer("b").IndexFile(lib))
+			assert.Zero(t, reads, "the refreshed stamp must make the next provider save read-free")
 		})
 	}
 }

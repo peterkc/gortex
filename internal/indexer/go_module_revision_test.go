@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -373,3 +374,40 @@ func TestGoModuleParkedLookupWithoutFinder(t *testing.T) {
 }
 
 type goModuleNoFinderStore struct{ graph.Store }
+
+// Given cached source calls, when a same-size caller edit has a new explicit
+// mtime and the provider adds its symbol, then recovery must match cold.
+func TestGoModuleSameSizeSourceStampColdEquivalent(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			mi, g, repos := goModuleLifecycleFixture(t, backend)
+			main := filepath.Join(repos[0].Path, "main.go")
+			lib := filepath.Join(repos[1].Path, "lib.go")
+			before := "package caller\nimport library \"example.org/library\"\nfunc Caller(){ library.Hello(library.Missing()) }\n"
+			after := strings.Replace(before, "Missing", "Present", 1)
+			require.Equal(t, len(before), len(after))
+			writeFile(t, main, before)
+			writeFile(t, lib, "package library\nfunc Other() {}\n")
+			for _, entry := range repos[:2] {
+				_, err := mi.TrackRepoCtx(t.Context(), entry)
+				require.NoError(t, err)
+			}
+			mi.runCrossRepoResolveFiles([]string{"b/lib.go"})
+			require.Contains(t, mi.GetIndexer("a").goModuleSourceCache, "main.go")
+			info, err := os.Stat(main)
+			require.NoError(t, err)
+			writeFile(t, main, after)
+			stamp := info.ModTime().Add(2 * time.Second)
+			require.NoError(t, os.Chtimes(main, stamp, stamp))
+			changed, err := os.Stat(main)
+			require.NoError(t, err)
+			require.Equal(t, info.Size(), changed.Size())
+			require.NotEqual(t, info.ModTime().UnixNano(), changed.ModTime().UnixNano())
+			writeFile(t, lib, "package library\nfunc Present() int{return 1}\n")
+			require.NoError(t, mi.GetIndexer("b").IndexFile(lib))
+			cold := revisionColdGraph(t, backend, repos[:2])
+			require.ElementsMatch(t, []string{"external-call::dep::example.org/library", "b/lib.go::Present"}, revisionCallTargets(cold, "a/main.go::Caller", graph.EdgeCalls))
+			assert.ElementsMatch(t, revisionCallTargets(cold, "a/main.go::Caller", graph.EdgeCalls), revisionCallTargets(g, "a/main.go::Caller", graph.EdgeCalls))
+		})
+	}
+}
