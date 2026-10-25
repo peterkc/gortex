@@ -297,14 +297,24 @@ func (cr *CrossRepoResolver) resolvePythonImportedMethod(e *graph.Edge, target s
 	if receiver == "" {
 		return false
 	}
+	for _, node := range cr.cachedFindNodesByName(receiver) {
+		if node.Kind == graph.KindType && node.RepoPrefix == graph.RepoPrefixOfID(e.From) {
+			return false
+		}
+	}
 	var match *graph.Node
 	for _, imp := range cr.bridgeImportsByFile[cr.callerFileID(e)] {
 		spec, _ := imp.Meta["python_import"].(string)
 		if imp.Meta[PythonImportStubMeta] == nil || !pythonModuleFileMatches(imp.To, spec) {
 			continue
 		}
+		bindings, _ := imp.Meta["python_bindings"].(map[string]any)
+		imported, _ := bindings[receiver].(string)
+		if imported == "" {
+			continue
+		}
 		for _, candidate := range cr.cachedFindNodesByName(strings.TrimPrefix(target, "*.")) {
-			if candidate.Kind != graph.KindMethod || candidate.FilePath != imp.To || nodeReceiverType(candidate) != receiver || !cr.crossWorkspaceEligible(cr.callerWorkspaceID(e), candidateWorkspaceID(candidate), spec) {
+			if candidate.Kind != graph.KindMethod || candidate.FilePath != imp.To || nodeReceiverType(candidate) != imported || !cr.crossWorkspaceEligible(cr.callerWorkspaceID(e), candidateWorkspaceID(candidate), spec) {
 				continue
 			}
 			if match != nil && match.ID != candidate.ID {
