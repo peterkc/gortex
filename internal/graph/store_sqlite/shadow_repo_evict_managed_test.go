@@ -2,8 +2,6 @@ package store_sqlite
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -132,10 +130,8 @@ func TestManagedShadowReplacementCancellationCanResume(t *testing.T) {
 	}})
 	shadowDeleteTrigger(t, s, "nodes", "OLD.id")
 	n, e, err := h.EvictRepoForShadowReplacement(ctx, "shadow")
-	// database/sql may report its completed context rollback instead of the
-	// context error when cancellation races Commit. Both reject this chunk.
 	require.ErrorIs(t, ctx.Err(), context.Canceled)
-	require.True(t, errors.Is(err, context.Canceled) || errors.Is(err, sql.ErrTxDone), "unexpected cancellation result: %v", err)
+	require.ErrorIs(t, err, context.Canceled)
 	require.Equal(t, 256, n)
 	require.Zero(t, e)
 	shadowDeleteObserver.Store(nil)

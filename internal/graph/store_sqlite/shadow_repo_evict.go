@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -269,6 +270,9 @@ func (s *Store) shadowEvictStep(ctx context.Context, mutate func(*sql.Tx) (int, 
 		}
 	}
 	if err := tx.Commit(); err != nil {
+		if errors.Is(err, sql.ErrTxDone) && ctx.Err() != nil {
+			return 0, ctx.Err()
+		}
 		return 0, err
 	}
 	if invalidated {

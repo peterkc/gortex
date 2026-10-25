@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -305,9 +304,8 @@ func TestShadowReplacementCancelInvalidatesPriorProvenanceAndRetries(t *testing.
 	}})
 	shadowDeleteTrigger(t, s, "nodes", "OLD.id")
 	n, e, err := s.EvictRepoForShadowReplacement(ctx, "shadow")
-	// Commit may observe database/sql's automatic context rollback first.
 	require.ErrorIs(t, ctx.Err(), context.Canceled)
-	require.True(t, errors.Is(err, context.Canceled) || errors.Is(err, sql.ErrTxDone), "unexpected cancellation result: %v", err)
+	require.ErrorIs(t, err, context.Canceled)
 	require.Equal(t, 256, n)
 	require.Zero(t, e)
 	var states int
@@ -594,4 +592,34 @@ func TestShadowEndpointRevisionIgnoresPositiveWritesAndRollback(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, stats.updatedRows)
 	require.Equal(t, uint64(1), s.baseEdgeEndpointRevision.Load())
+}
+
+func TestShadowEvictStepNormalizesOnlyCanceledCompletedTransactions(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		name := "live"
+		if canceled {
+			name = "canceled"
+		}
+		t.Run(name, func(t *testing.T) {
+			s, _ := shadowEvictionFixture(t, 0)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			_, err := s.shadowEvictStep(ctx, func(tx *sql.Tx) (int, *sqliteMutationReceiptAccumulator, error) {
+				// Force the completed-rollback ordering before Commit, without
+				// depending on database/sql's rollback goroutine scheduling.
+				if err := tx.Rollback(); err != nil {
+					return 0, nil, err
+				}
+				if canceled {
+					cancel()
+				}
+				return 0, nil, nil
+			})
+			if canceled {
+				require.ErrorIs(t, err, context.Canceled)
+			} else {
+				require.ErrorIs(t, err, sql.ErrTxDone)
+			}
+		})
+	}
 }
