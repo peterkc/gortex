@@ -4,6 +4,7 @@ import (
 	"context"
 	"iter"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -103,5 +104,34 @@ func TestCargoImportLightPaging(t *testing.T) {
 				assert.Equal(t, "preserved", edge.Meta["marker"])
 			}
 		})
+	}
+}
+
+func TestCargoGroupedAliasedUses(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, use := range []string{"other_crate/util/{action, Other}", "other_crate/util/action as act"} {
+			t.Run(backend+"/"+use, func(t *testing.T) {
+				g := goImportReviewStore(t, backend)
+				file, provider := "consumer/src/lib.rs", "provider/src/util.rs"
+				for _, path := range []string{file, "provider/src/lib.rs", provider} {
+					g.AddNode(&graph.Node{ID: path, FilePath: path, Kind: graph.KindFile, RepoPrefix: graph.RepoPrefixOfID(path), Language: "rust"})
+				}
+				g.AddNode(&graph.Node{ID: provider + "::action", Name: "action", FilePath: provider, Kind: graph.KindFunction, RepoPrefix: "provider", Language: "rust"})
+				local := "action"
+				if strings.Contains(use, " as ") {
+					local = "act"
+				}
+				g.AddEdge(&graph.Edge{From: file, FilePath: file, To: "external::" + use, Kind: graph.EdgeImports, Line: 1})
+				g.AddEdge(&graph.Edge{From: file, FilePath: file, To: "unresolved::" + local, Kind: graph.EdgeCalls, Line: 2})
+				cr := NewCrossRepo(g)
+				cr.SetCargoCrateLookup(func(string, string) []CargoCrate {
+					return []CargoCrate{{Root: "provider/src/lib.rs", Name: "other_crate"}}
+				})
+				_, err := cr.ResolveAllContext(t.Context())
+				require.NoError(t, err)
+				require.Equal(t, provider, outEdgesOfKind(g, file, graph.EdgeImports)[0].To)
+				require.Equal(t, provider+"::action", outEdgesOfKind(g, file, graph.EdgeCalls)[0].To)
+			})
+		}
 	}
 }
