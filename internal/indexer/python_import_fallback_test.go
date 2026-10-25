@@ -62,7 +62,6 @@ func TestTrackedPythonNewModuleThroughFallback(t *testing.T) {
 			writeWorkspaceFile(t, provider, "src/PIL/extra.py", "def later(): pass\n")
 			_, err = mi.IncrementalReindexRepo("provider", []string{filepath.Join(provider, "src/PIL/extra.py")})
 			require.NoError(t, err)
-			t.Logf("transform calls=%d", calls.Load())
 			require.GreaterOrEqual(t, calls.Load(), int32(3), "fallback path must run")
 			require.NotNil(t, g.GetNode("provider/src/PIL/extra.py"))
 
