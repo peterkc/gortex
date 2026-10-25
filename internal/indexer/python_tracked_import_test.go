@@ -240,3 +240,52 @@ func TestPythonAddedFileConsumerFrontier(t *testing.T) {
 	require.Equal(t, []string{"consumer/a.py", "consumer/b.py", "consumer/c.py"}, pythonConsumerFilesForAddedFiles(g, []string{"provider/src/PIL/extra.py"}))
 	require.Equal(t, 1, g.importScans)
 }
+
+// A one-connection store cannot hydrate package identities under an open cursor.
+type pythonCursorGuardStore struct {
+	graph.Store
+	t          *testing.T
+	cursorOpen bool
+}
+
+func (s *pythonCursorGuardStore) EdgesLightSeq(kinds ...graph.EdgeKind) iter.Seq[*graph.Edge] {
+	return func(yield func(*graph.Edge) bool) {
+		s.cursorOpen = true
+		defer func() { s.cursorOpen = false }()
+		for edge := range graph.EdgesLightSeq(s.Store, kinds...) {
+			if !yield(edge) {
+				return
+			}
+		}
+	}
+}
+
+func (s *pythonCursorGuardStore) FileNodeIdentitiesSeq(repos []string) iter.Seq[graph.FileNodeIdentity] {
+	require.False(s.t, s.cursorOpen, "package lookup must not query while the import cursor is open")
+	return graph.FileNodeIdentitiesSeq(s.Store, repos)
+}
+
+func TestPythonConsumerLookupClosesImportCursor(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			var store graph.Store = graph.New()
+			if backend == "sqlite" {
+				db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.sqlite"))
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, db.Close()) })
+				store = db
+			}
+			g := &pythonCursorGuardStore{Store: store, t: t}
+			provider, consumer := t.TempDir(), t.TempDir()
+			writeWorkspaceFile(t, provider, "pyproject.toml", "[project]\nname = 'library'\n")
+			writeWorkspaceFile(t, provider, "mylib.py", "def f(): pass\n")
+			writeWorkspaceFile(t, consumer, "pyproject.toml", "[project]\ndependencies = ['library']\n")
+			for _, file := range []string{"provider/mylib.py", "consumer/app.py"} {
+				g.AddNode(&graph.Node{ID: file, FilePath: file, Kind: graph.KindFile, RepoPrefix: graph.RepoPrefixOfID(file), Language: "python"})
+			}
+			g.AddEdge(&graph.Edge{From: "consumer/app.py", FilePath: "consumer/app.py", To: "external::mylib", Kind: graph.EdgeImports})
+			mi := &MultiIndexer{graph: g, repos: map[string]*RepoMetadata{"provider": {RootPath: provider}, "consumer": {RootPath: consumer}}}
+			require.Equal(t, []string{"consumer/app.py"}, mi.pythonConsumerFilesForRepo("provider"))
+		})
+	}
+}
