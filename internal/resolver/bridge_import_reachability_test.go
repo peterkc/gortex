@@ -171,6 +171,12 @@ func TestPythonMethodsStayWithinImportedType(t *testing.T) {
 type bridgeNameCountStore struct {
 	graph.Store
 	broad, scoped int
+	fileReads     int
+}
+
+func (s *bridgeNameCountStore) GetFileNodes(file string) []*graph.Node {
+	s.fileReads++
+	return s.Store.GetFileNodes(file)
 }
 
 func (s *bridgeNameCountStore) FindNodesByName(name string) []*graph.Node {
@@ -238,4 +244,57 @@ func TestPythonUnimportedReceiverAvoidsNameLookups(t *testing.T) {
 	// Then it performs no store name lookup.
 	require.Zero(t, g.broad)
 	require.Zero(t, g.scoped)
+}
+
+func TestPythonReceiverTypesReadOncePerFilePerPass(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, scoped := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/scoped=%v", backend, scoped), func(t *testing.T) {
+				// Given eight calls on one imported receiver in a single file.
+				g := &bridgeNameCountStore{Store: goImportReviewStore(t, backend)}
+				file, provider := "consumer/app.py", "provider/pkg/image.py"
+				for _, path := range []string{file, provider} {
+					g.AddNode(&graph.Node{ID: path, FilePath: path, Kind: graph.KindFile, RepoPrefix: graph.RepoPrefixOfID(path), Language: "python"})
+				}
+				g.AddNode(&graph.Node{ID: provider + "::Image.show", Name: "show", FilePath: provider, Kind: graph.KindMethod, RepoPrefix: "provider", Language: "python", Meta: map[string]any{"receiver": "Image"}})
+				g.AddEdge(&graph.Edge{From: file, FilePath: file, To: provider, Kind: graph.EdgeImports, Line: 1, CrossRepo: true, Meta: map[string]any{PythonImportStubMeta: "external::pkg.image", "python_import": "pkg.image", "python_bindings": map[string]any{"Image": "Image"}}})
+				for i := 0; i < 8; i++ {
+					g.AddEdge(&graph.Edge{From: file, FilePath: file, To: "unresolved::*.show", Kind: graph.EdgeCalls, Line: i + 2, Meta: map[string]any{"receiver_type": "Image"}})
+				}
+				cr := NewCrossRepo(g)
+				resolve := func() {
+					if scoped {
+						cr.resolveScopedLocked(g.GetOutEdges(file))
+					} else {
+						_, err := cr.ResolveAllContext(t.Context())
+						require.NoError(t, err)
+					}
+				}
+				// When a full or scoped pass resolves the calls.
+				resolve()
+				// Then local type names are read once, not once per edge.
+				require.Equal(t, 1, g.fileReads)
+				calls := outEdgesOfKind(g, file, graph.EdgeCalls)
+				require.Len(t, calls, 8)
+				for _, call := range calls {
+					require.Equal(t, provider+"::Image.show", call.To)
+				}
+				// A later pass must refresh the snapshot after a same-file type is added.
+				g.AddNode(&graph.Node{ID: file + "::Image", Name: "Image", FilePath: file, Kind: graph.KindType, RepoPrefix: "consumer", Language: "python"})
+				var batch []graph.EdgeReindex
+				for _, call := range calls {
+					old := call.To
+					call.To = "unresolved::*.show"
+					call.CrossRepo = false
+					batch = append(batch, graph.EdgeReindex{Edge: call, OldTo: old})
+				}
+				g.ReindexEdges(batch)
+				resolve()
+				require.Equal(t, 2, g.fileReads)
+				for _, call := range outEdgesOfKind(g, file, graph.EdgeCalls) {
+					require.Equal(t, "unresolved::*.show", call.To)
+				}
+			})
+		}
+	}
 }
