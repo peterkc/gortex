@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -165,9 +166,20 @@ func TestMultiIndexer_CargoCrateImport(t *testing.T) {
 }
 
 func TestCargoCrateLookupNoManifest(t *testing.T) {
-	g := &cargoWarmScanStore{Store: graph.New()}
-	mi := &MultiIndexer{graph: g, repos: map[string]*RepoMetadata{"first": {RootPath: t.TempDir()}, "second": {RootPath: t.TempDir()}}}
-	assert.Nil(t, mi.cargoCrateLookup(), "a multi-repo workspace without Cargo roots must disable the retry")
-	require.Empty(t, mi.cargoConsumerFilesForRepo("first", false))
-	assert.Zero(t, g.lightScans, "no import scan is needed without Cargo roots")
+	for _, cargoRoots := range []int{0, 1} {
+		t.Run(fmt.Sprintf("cargo_roots=%d", cargoRoots), func(t *testing.T) {
+			// Given two repositories, with fewer than two Cargo roots.
+			first, second := t.TempDir(), t.TempDir()
+			if cargoRoots == 1 {
+				writeWorkspaceFile(t, first, "Cargo.toml", "[package]\nname='library'\n")
+			}
+			g := &cargoWarmScanStore{Store: graph.New()}
+			mi := &MultiIndexer{graph: g, repos: map[string]*RepoMetadata{"first": {RootPath: first}, "second": {RootPath: second}}}
+			// When cross-repo Cargo recovery is requested.
+			assert.Nil(t, mi.cargoCrateLookup(), "fewer than two Cargo roots cannot form a tracked bridge")
+			require.Empty(t, mi.cargoConsumerFilesForRepo("first", false))
+			// Then it performs no import scan.
+			assert.Zero(t, g.lightScans, "no cross-repo Cargo provider is possible")
+		})
+	}
 }

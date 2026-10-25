@@ -44,7 +44,7 @@ func (mi *MultiIndexer) cargoCrateLookup() resolver.CargoCrateLookup {
 			}
 		}
 	}
-	if len(roots) == 0 {
+	if len(roots) < 2 {
 		return nil
 	}
 	owners := map[string]*crate{}
