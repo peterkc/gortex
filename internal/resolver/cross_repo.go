@@ -111,9 +111,10 @@ type CrossRepoResolver struct {
 	// importedDirsByFile retains the package placement from those same import
 	// rows. A Go call the per-repo package guard refused must not regain a
 	// same-repo name-only binding just because the repository is reachable.
-	importedDirsByFile  map[string]map[string]struct{}
-	jsTSBindingsByFile  map[string]map[string]string
-	bridgeImportsByFile map[string][]*graph.Edge
+	importedDirsByFile     map[string]map[string]struct{}
+	jsTSBindingsByFile     map[string]map[string]string
+	bridgeImportsByFile    map[string][]*graph.Edge
+	pythonLocalTypesByFile map[string]map[string]bool
 	// depModuleIndex bridges Go imports to dep::<module> contract
 	// nodes from the caller's go.mod. Same shape and rationale as
 	// the field of the same name on Resolver — see resolver.go for
@@ -868,6 +869,7 @@ func (cr *CrossRepoResolver) buildReachableReposIndex(callerFiles map[string]boo
 	dirs := make(map[string]map[string]struct{})
 	cr.jsTSBindingsByFile = make(map[string]map[string]string)
 	cr.bridgeImportsByFile = make(map[string][]*graph.Edge)
+	cr.pythonLocalTypesByFile = make(map[string]map[string]bool)
 	// Materialise metadata-free import projections and batch-load only target
 	// placement fields. A per-edge point lookup here is a query round-trip per
 	// import on a disk backend, which under the cross-repo pass's import
@@ -954,6 +956,15 @@ func (cr *CrossRepoResolver) buildReachableReposIndex(callerFiles map[string]boo
 			if e.Meta[CargoImportStubMeta] != nil || e.Meta[PythonImportStubMeta] != nil {
 				cr.bridgeImportsByFile[e.From] = append(cr.bridgeImportsByFile[e.From], e)
 			}
+			if bindings, _ := e.Meta["python_bindings"].(map[string]any); isPythonSourcePath(e.FilePath) && e.Meta[PythonImportStubMeta] != nil && len(bindings) > 0 && cr.pythonLocalTypesByFile[e.From] == nil {
+				types := make(map[string]bool)
+				for _, node := range cr.graph.GetFileNodes(e.FilePath) {
+					if node.Kind == graph.KindType {
+						types[node.Name] = true
+					}
+				}
+				cr.pythonLocalTypesByFile[e.From] = types
+			}
 			// A linked module file is not evidence for every symbol in its repo.
 			if npmLinked || e.Meta["go_import"] != nil || e.Meta[CargoImportStubMeta] != nil || e.Meta[PythonImportStubMeta] != nil {
 				continue
@@ -975,6 +986,7 @@ func (cr *CrossRepoResolver) clearReachableReposIndex() {
 	cr.importedDirsByFile = nil
 	cr.jsTSBindingsByFile = nil
 	cr.bridgeImportsByFile = nil
+	cr.pythonLocalTypesByFile = nil
 }
 
 // A package-guard refusal is stronger than the cross-repo pass's same-repo
