@@ -177,3 +177,31 @@ func TestTrackedPythonScopedRetryVisitsEachCallOnce(t *testing.T) {
 	require.Equal(t, 2, stats.Resolved)
 	require.Zero(t, stats.Unresolved)
 }
+
+func TestTrackedPythonTopLevelCallReopensStdlibTerminal(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, terminal := range []string{"stdlib::mylib::f", "external-call::stdlib::mylib"} {
+			t.Run(backend+"/"+terminal, func(t *testing.T) {
+				g := goImportReviewStore(t, backend)
+				const file = "consumer/app.py"
+				const stub = "unresolved::extern::mylib::f"
+				g.AddNode(&graph.Node{ID: file, FilePath: file, Kind: graph.KindFile})
+				g.AddEdge(&graph.Edge{From: file, FilePath: file, Kind: graph.EdgeCalls, To: terminal, Line: 2, Meta: map[string]any{PythonCallStubMeta: stub, "external_call": true}})
+				g.AddEdge(&graph.Edge{From: file, FilePath: file, Kind: graph.EdgeCalls, To: "external-call::stdlib::other", Line: 3, Meta: map[string]any{PythonCallStubMeta: "unresolved::extern::other::f"}})
+				imp := &graph.Edge{From: file, FilePath: file, Kind: graph.EdgeImports, To: "provider/mylib.py", CrossRepo: true, Meta: map[string]any{PythonImportStubMeta: "external::mylib", "python_import": "mylib"}}
+				cr := NewCrossRepo(g)
+				reopened := cr.restubCallsForLinkedPythonImports([]graph.EdgeReindex{{Edge: imp}})
+				require.Len(t, reopened, 1)
+				require.Equal(t, stub, reopened[0].To)
+				require.NotContains(t, reopened[0].Meta, "external_call")
+				calls := outEdgesOfKind(g, file, graph.EdgeCalls)
+				require.Len(t, calls, 2)
+				for _, call := range calls {
+					if call.Line == 3 {
+						require.Equal(t, "external-call::stdlib::other", call.To)
+					}
+				}
+			})
+		}
+	}
+}

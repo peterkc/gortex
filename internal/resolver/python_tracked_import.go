@@ -252,9 +252,10 @@ func (cr *CrossRepoResolver) restubCallsForLinkedPythonImports(changes []graph.E
 			// Cold master resolution leaves dep:: terminals until externalization;
 			// incremental tracking has already synthesized external-call:: nodes.
 			callTarget := call.To
-			if ecosystem, module, ok := parseExternalCallTarget(callTarget); ok && ecosystem == "dep" {
-				callTarget = externalCallNodeID(ecosystem, module)
+			if ecosystem, module, ok := parseExternalCallTarget(callTarget); ok && (ecosystem == "dep" || ecosystem == "stdlib") {
+				callTarget = externalCallNodeID("dep", module)
 			}
+			callTarget = strings.Replace(callTarget, externalCallPrefix+"stdlib::", externalCallPrefix+"dep::", 1)
 			target := externalCallPrefix + "dep::" + spec
 			if original == "" || (callTarget != target && !strings.HasPrefix(callTarget, target+".")) {
 				continue
