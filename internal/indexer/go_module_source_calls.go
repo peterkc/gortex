@@ -15,9 +15,12 @@ import (
 
 // Cache source facts, not resolution decisions. Provider/config changes still
 // resolve the cloned calls again; unchanged caller bytes need no second parse.
+var readGoModuleCallerFile = os.ReadFile
+
 type goModuleSourceCacheEntry struct {
-	digest [32]byte
-	edges  []*graph.Edge
+	digest         [32]byte
+	edges          []*graph.Edge
+	size, modified int64
 }
 
 func cloneGoModuleSourceEdges(edges []*graph.Edge) []*graph.Edge {
@@ -42,12 +45,24 @@ func (mi *MultiIndexer) finishGoModuleCalls(cr *resolver.CrossRepoResolver) {
 		}
 		rel := strings.TrimPrefix(file, prefix+"/")
 		abs := filepath.Join(idx.rootPath, filepath.FromSlash(rel))
+		info, err := os.Stat(abs)
+		if err != nil {
+			mi.logger.Warn("stat Go module caller", zap.String("file", file), zap.Error(err))
+			continue
+		}
+		idx.goModuleSourceMu.Lock()
+		cached, hit := idx.goModuleSourceCache[rel]
+		idx.goModuleSourceMu.Unlock()
+		if hit && cached.size == info.Size() && cached.modified == info.ModTime().UnixNano() {
+			cr.RestoreGoModuleSourceCalls(cloneGoModuleSourceEdges(cached.edges))
+			continue
+		}
 		parseLease, err := idx.acquireSharedParsePath(abs)
 		if err != nil {
 			mi.logger.Warn("admit Go module caller", zap.String("file", file), zap.Error(err))
 			continue
 		}
-		src, err := os.ReadFile(abs)
+		src, err := readGoModuleCallerFile(abs)
 		if err != nil {
 			mi.logger.Warn("read Go module caller", zap.String("file", file), zap.Error(err))
 			parseLease.Release()
@@ -64,10 +79,11 @@ func (mi *MultiIndexer) finishGoModuleCalls(cr *resolver.CrossRepoResolver) {
 		}
 		src = idx.transforms.run(rel, src)
 		digest := sha256.Sum256(src)
-		idx.goModuleSourceMu.Lock()
-		cached, hit := idx.goModuleSourceCache[rel]
-		idx.goModuleSourceMu.Unlock()
 		if hit && cached.digest == digest {
+			cached.size, cached.modified = info.Size(), info.ModTime().UnixNano()
+			idx.goModuleSourceMu.Lock()
+			idx.goModuleSourceCache[rel] = cached
+			idx.goModuleSourceMu.Unlock()
 			cr.RestoreGoModuleSourceCalls(cloneGoModuleSourceEdges(cached.edges))
 			parseLease.Release()
 			continue
@@ -94,7 +110,7 @@ func (mi *MultiIndexer) finishGoModuleCalls(cr *resolver.CrossRepoResolver) {
 			if idx.goModuleSourceCache == nil {
 				idx.goModuleSourceCache = make(map[string]goModuleSourceCacheEntry)
 			}
-			idx.goModuleSourceCache[rel] = goModuleSourceCacheEntry{digest: digest, edges: cloneGoModuleSourceEdges(result.Edges)}
+			idx.goModuleSourceCache[rel] = goModuleSourceCacheEntry{digest: digest, edges: cloneGoModuleSourceEdges(result.Edges), size: info.Size(), modified: info.ModTime().UnixNano()}
 			idx.goModuleSourceMu.Unlock()
 			cr.RestoreGoModuleSourceCalls(result.Edges)
 		}

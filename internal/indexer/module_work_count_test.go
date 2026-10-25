@@ -270,3 +270,30 @@ func TestGoModuleSourceCacheEviction(t *testing.T) {
 		}
 	}
 }
+
+// Given cached unbindable callers, when a second provider IndexFile save keeps
+// the same definition set, then it reads zero unchanged caller files.
+func TestGoModuleProviderSaveSkipsCachedSourceReads(t *testing.T) {
+	mi, _, repos := goModuleLifecycleFixture(t, "memory")
+	lib := filepath.Join(repos[1].Path, "lib.go")
+	writeFile(t, lib, "package library\nfunc Other() {}\n")
+	for _, entry := range repos[:2] {
+		_, err := mi.TrackRepoCtx(t.Context(), entry)
+		require.NoError(t, err)
+	}
+	original := readGoModuleCallerFile
+	reads := 0
+	readGoModuleCallerFile = func(path string) ([]byte, error) {
+		if filepath.Base(path) == "main.go" {
+			reads++
+		}
+		return original(path)
+	}
+	t.Cleanup(func() { readGoModuleCallerFile = original })
+	writeFile(t, lib, "package library\nfunc Other(){println(1)}\n")
+	require.NoError(t, mi.GetIndexer("b").IndexFile(lib))
+	reads = 0
+	writeFile(t, lib, "package library\nfunc Other(){println(2)}\n")
+	require.NoError(t, mi.GetIndexer("b").IndexFile(lib))
+	assert.Zero(t, reads, "unchanged caller stat must avoid source reads and transforms")
+}
