@@ -538,7 +538,7 @@ func (mi *MultiIndexer) resolveIncrementalRepoMutationMode(
 	}
 	crossRepoFiles := appendUniqueSorted(nil, files...)
 	if result != nil && batch != nil {
-		result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, pythonConsumerFilesForAddedFiles(mi.graph, batch.pythonAddedFiles)...)
+		result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, mi.pythonAddedFileConsumers(batch.pythonAddedFiles)...)
 	}
 	cargoRetargetRepo := ""
 	if batch != nil {
