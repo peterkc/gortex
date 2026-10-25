@@ -931,3 +931,32 @@ func TestGoModuleExternDemotionFiles(t *testing.T) {
 	assert.ElementsMatch(t, want, cr.TakeDemotedGoModuleCallFiles(), "parallel workers must record every marked caller, and no unmarked caller")
 	assert.Empty(t, cr.TakeDemotedGoModuleCallFiles(), "draining is idempotent")
 }
+
+// Given repeated calls from one caller, when source recovery checks existing
+// bindings, then symbol lookup and identity reads happen once, not per call.
+func TestGoModuleSourceRecoveryWork(t *testing.T) {
+	g := &goModuleSourceWorkStore{goModuleNameCountingStore: goModuleNameCountingStore{Store: graph.New()}}
+	g.AddNode(&graph.Node{ID: "a/main.go::Caller", Name: "Caller", Kind: graph.KindFunction, RepoPrefix: "a", FilePath: "a/main.go", WorkspaceID: "shared", Language: "go"})
+	g.AddNode(&graph.Node{ID: "b/lib.go::Hello", Name: "Hello", Kind: graph.KindFunction, RepoPrefix: "b", FilePath: "b/lib.go", WorkspaceID: "shared", Language: "go"})
+	var extracted []*graph.Edge
+	for line := 1; line <= 32; line++ {
+		g.AddEdge(&graph.Edge{From: "a/main.go::Caller", To: "b/lib.go::Hello", Kind: graph.EdgeCalls, FilePath: "a/main.go", Line: line})
+		extracted = append(extracted, &graph.Edge{From: "a/main.go::Caller", To: "dep::example.org/library::Hello", Kind: graph.EdgeCalls, FilePath: "a/main.go", Line: line})
+	}
+	cr := NewCrossRepo(g)
+	cr.SetGoModules(map[string]string{"b": "example.org/library"})
+	cr.RestoreGoModuleSourceCalls(extracted)
+	assert.Equal(t, 1, g.lookups, "one lookup for one symbol")
+	assert.Equal(t, 1, g.outReads, "one identity read per caller")
+	assert.Len(t, g.Store.GetOutEdges("a/main.go::Caller"), 32)
+}
+
+type goModuleSourceWorkStore struct {
+	goModuleNameCountingStore
+	outReads int
+}
+
+func (s *goModuleSourceWorkStore) GetOutEdges(id string) []*graph.Edge {
+	s.outReads++
+	return s.Store.GetOutEdges(id)
+}

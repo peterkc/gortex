@@ -672,6 +672,9 @@ func (cr *CrossRepoResolver) RestoreGoModuleSourceCalls(edges []*graph.Edge) {
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
 	var added []graph.EdgeReindex
+	names := make(map[string][]*graph.Node)
+	sources := make(map[string]*graph.Node)
+	identities := make(map[string]map[graph.EdgeIdentity]struct{})
 	for _, e := range edges {
 		if e == nil || e.Kind != graph.EdgeCalls {
 			continue
@@ -681,11 +684,21 @@ func (cr *CrossRepoResolver) RestoreGoModuleSourceCalls(edges []*graph.Edge) {
 		if sep < 0 {
 			continue
 		}
-		source := cr.graph.GetNode(e.From)
+		source, known := sources[e.From]
+		if !known {
+			source = cr.graph.GetNode(e.From)
+			sources[e.From] = source
+		}
 		if source == nil {
 			continue
 		}
-		match := cr.goModuleCandidate(spec[:sep], cr.graph.FindNodesByName(spec[sep+2:]), source.RepoPrefix, candidateWorkspaceID(source))
+		name := spec[sep+2:]
+		candidates, known := names[name]
+		if !known {
+			candidates = cr.graph.FindNodesByName(name)
+			names[name] = candidates
+		}
+		match := cr.goModuleCandidate(spec[:sep], candidates, source.RepoPrefix, candidateWorkspaceID(source))
 		terminal := externalCallPrefix + "dep::" + spec[:sep]
 		if match == nil {
 			site := graph.EdgeSite{From: e.From, Line: e.Line, Kind: e.Kind}
@@ -696,20 +709,26 @@ func (cr *CrossRepoResolver) RestoreGoModuleSourceCalls(edges []*graph.Edge) {
 		} else {
 			bindGoModuleEdge(e, match, source.RepoPrefix, cr.goModules[source.RepoPrefix], cr.goModuleReplacements)
 		}
-		exists := false
-		for _, live := range cr.graph.GetOutEdges(e.From) {
-			identity := graph.EdgeIdentityFor(e)
-			if match == nil {
-				identity.To = terminal
+		live := identities[e.From]
+		if live == nil {
+			live = make(map[graph.EdgeIdentity]struct{})
+			for _, edge := range cr.graph.GetOutEdges(e.From) {
+				live[graph.EdgeIdentityFor(edge)] = struct{}{}
 			}
-			if graph.EdgeIdentityFor(live) == graph.EdgeIdentityFor(e) || (match == nil && graph.EdgeIdentityFor(live) == identity) {
-				exists = true
-				break
-			}
+			identities[e.From] = live
 		}
-		if exists {
+		identity := graph.EdgeIdentityFor(e)
+		if _, exists := live[identity]; exists {
 			continue
 		}
+		if match == nil {
+			terminalID := identity
+			terminalID.To = terminal
+			if _, exists := live[terminalID]; exists {
+				continue
+			}
+		}
+		live[identity] = struct{}{}
 		cr.graph.AddEdge(e)
 		if match == nil {
 			if e.Meta == nil {
