@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"context"
+	"fmt"
 	"iter"
 	"path/filepath"
 	"strings"
@@ -134,4 +135,22 @@ func TestCargoGroupedAliasedUses(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestScopedBridgeImportHydration(t *testing.T) {
+	g := &cargoPagingStore{Store: graph.New()}
+	for i := 0; i < 12; i++ {
+		file := fmt.Sprintf("app/%d.rs", i)
+		g.AddNode(&graph.Node{ID: file, FilePath: file, Kind: graph.KindFile, RepoPrefix: "app", Language: "rust"})
+		g.AddEdge(&graph.Edge{From: file, FilePath: file, To: "lib/src/lib.rs", Kind: graph.EdgeImports, Line: 1, CrossRepo: true, Meta: map[string]any{CargoImportStubMeta: "external::other/action"}})
+	}
+	g.AddNode(&graph.Node{ID: "lib/src/lib.rs", FilePath: "lib/src/lib.rs", Kind: graph.KindFile, RepoPrefix: "lib", Language: "rust"})
+	g.AddEdge(&graph.Edge{From: "app/0.rs", FilePath: "app/0.rs", To: "unresolved::action", Kind: graph.EdgeCalls, Line: 2})
+	cr := NewCrossRepo(g)
+	cr.ResolveForFile("app", "0.rs")
+	require.Equal(t, 1, g.maxSites, "only the pending caller's import metadata may be hydrated")
+	g.maxSites = 0
+	_, err := cr.ResolveAllContext(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 12, g.maxSites, "full passes retain corpus-wide import evidence")
 }
