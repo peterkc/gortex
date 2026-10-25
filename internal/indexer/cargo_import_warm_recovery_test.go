@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"fmt"
+	"iter"
 	"os"
 	"path/filepath"
 	"testing"
@@ -158,4 +159,51 @@ func TestCargoAddedFileFrontierOnlyMarkedProviderImports(t *testing.T) {
 	}}
 	require.Equal(t, []string{"consumer/marked.rs"}, mi.cargoConsumerFilesForRepo("provider", true))
 	require.Empty(t, mi.cargoConsumerFilesForRepo("provider", false))
+}
+
+type cargoWarmScanStore struct {
+	graph.Store
+	fullScans, lightScans int
+}
+
+func (s *cargoWarmScanStore) EdgesByKind(kind graph.EdgeKind) iter.Seq[*graph.Edge] {
+	if kind == graph.EdgeImports {
+		s.fullScans++
+	}
+	return s.Store.EdgesByKind(kind)
+}
+func (s *cargoWarmScanStore) EdgesLightSeq(kinds ...graph.EdgeKind) iter.Seq[*graph.Edge] {
+	if len(kinds) == 1 && kinds[0] == graph.EdgeImports {
+		s.lightScans++
+	}
+	return graph.EdgesLightSeq(s.Store, kinds...)
+}
+func TestCargoWarmRecoveryScansImportsOnce(t *testing.T) {
+	provider, consumer := t.TempDir(), t.TempDir()
+	for _, root := range []string{provider, consumer} {
+		writeWorkspaceFile(t, root, "Cargo.toml", "[package]\nname='library'\nversion='1.0.0'\n")
+	}
+	g := &cargoWarmScanStore{Store: graph.New()}
+	g.AddEdge(&graph.Edge{From: "unrelated/lib.rs", FilePath: "unrelated/lib.rs", To: "external::unknown/f", Kind: graph.EdgeImports})
+	mi := &MultiIndexer{graph: g, repos: map[string]*RepoMetadata{
+		"provider": {RootPath: provider, cargoRetarget: &IndexResult{CargoRetarget: true}},
+		"consumer": {RootPath: consumer, cargoRetarget: &IndexResult{CargoRetarget: true}},
+	}}
+	require.NoError(t, mi.runWarmCargoResolve(t.Context(), nil, false))
+	require.Zero(t, g.fullScans, "warm recovery must not read every import's metadata")
+	require.Equal(t, 1, g.lightScans, "all receipt repos must share one scan")
+}
+
+func TestCargoLookupDefersManifestProbesUntilUse(t *testing.T) {
+	provider, consumer := t.TempDir(), t.TempDir()
+	mi := &MultiIndexer{graph: graph.New(), repos: map[string]*RepoMetadata{"provider": {RootPath: provider}, "consumer": {RootPath: consumer}}}
+	lookup := mi.cargoCrateLookup()
+	require.NotNil(t, lookup, "construction must not probe Cargo manifests")
+	writeWorkspaceFile(t, provider, "Cargo.toml", "[package]\nname='library'\nversion='1.0.0'\n")
+	writeWorkspaceFile(t, consumer, "Cargo.toml", "[package]\nname='app'\nversion='1.0.0'\n[dependencies]\nlibrary='1'\n")
+	providers := lookup("consumer/src/lib.rs", "library")
+	require.Len(t, providers, 1)
+	require.Equal(t, "provider/src/lib.rs", providers[0].Root)
+	writeWorkspaceFile(t, consumer, "Cargo.toml", "[package]\nname='app'\nversion='1.0.0'\n")
+	require.Equal(t, providers, lookup("consumer/src/lib.rs", "library"), "one pass must retain one manifest snapshot")
 }
