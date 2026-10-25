@@ -38,6 +38,7 @@ var editDeltaAbsentCapabilities = map[string]string{
 	"anonymous{ReindexEdgesApplied}":      "batch-drop receipt for persistent stores; DeltaWriter applies its reindexes locally and unconditionally through ReindexEdges",
 	"anonymous{AddBatchChecked}":          "checked durable publication: DeltaWriter stages non-failing writes in its local work graph through AddBatch; its owner checks final layer publication, and forwarding this capability would bypass the delta",
 	"anonymous{WriteMark}":                "process/store write telemetry, not a graph capability: the per-save indexer and resolver receive the underlying store handle's sampler explicitly; a MultiIndexer without this optional sampler falls back to process-wide counters",
+	"anonymous{ScanTestEdgeProjections}":  "paging accelerator: trackedPythonImportEdges falls back to the composed EdgesLightSeq/EdgesByKind import scan with the same eligibility filter, preserving delta masks",
 
 	"graph.ContractExtractionEdgeReader":                   "physical checked extraction adjacency; outgoingMetadataContext dispatches the composed DeltaWriter through its selected view rather than forwarding base-only rows",
 	"graph.OverlayLayerContractExtractionEdgeReader":       "physical ancestry-layer projection, not the composed delta; outgoingMetadataContext applies each selected layer and its masks explicitly",
