@@ -47,9 +47,11 @@ var metaKeysRestatedOutsideTheFingerprint = map[string]string{
 	"role":                       "contracts pass (contract nodes)",
 	"symbol_id":                  "contracts pass (contract nodes)",
 	// External module stubs: the module scanner / external-call attribution.
-	"ecosystem":     "modules scanner / resolver external_call_attribution (module nodes)",
-	"import_path":   "modules scanner / resolver external_call_attribution (module nodes)",
-	"python_import": "resolver attributeNonGoModuleImports / resolveTrackedPythonImports (exact dotted import spelling)",
+	"ecosystem":   "modules scanner / resolver external_call_attribution (module nodes)",
+	"import_path": "modules scanner / resolver external_call_attribution (module nodes)",
+
+	// Python imports are restated by whole resolves, file saves, and tracked binding.
+	"python_import": "resolver attributeNonGoModuleImports / attributePythonModuleImportsForFiles / resolveTrackedPythonImports (exact dotted import spelling)",
 	// Test classification after extraction (test_edges.go).
 	"is_test":      "test pass (test_edges.go)",
 	"is_test_file": "test pass (test_edges.go)",
