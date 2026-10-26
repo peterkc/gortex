@@ -98,6 +98,28 @@ func (mi *MultiIndexer) cargoConsumerFilesForRepos(repos []string, retargetBound
 	if lookup == nil || len(repos) == 0 {
 		return nil
 	}
+	return mi.cargoConsumerFilesForLookup(repos, retargetBound, lookup)
+}
+
+func (mi *MultiIndexer) cargoAddedFileConsumers(repo string) []string {
+	snapshot := mi.cargoManifestSnapshot()
+	if snapshot.hasUnknownManifest() {
+		// Missing evidence must widen recovery, never discard a possible importer.
+		files := map[string]struct{}{}
+		for edge := range graph.EdgesLightSeq(mi.graph, graph.EdgeImports) {
+			if strings.HasSuffix(edge.FilePath, ".rs") {
+				files[edge.FilePath] = struct{}{}
+			}
+		}
+		return sortedStringKeys(files)
+	}
+	if !snapshot.cargoDeclared {
+		return nil
+	}
+	return mi.cargoConsumerFilesForLookup([]string{repo}, true, snapshot.cargo)
+}
+
+func (mi *MultiIndexer) cargoConsumerFilesForLookup(repos []string, retargetBound bool, lookup resolver.CargoCrateLookup) []string {
 	wanted := make(map[string]bool, len(repos))
 	for _, repo := range repos {
 		wanted[repo] = true

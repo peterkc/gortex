@@ -206,5 +206,14 @@ func (mi *MultiIndexer) pythonAddedFileConsumers(files []string) []string {
 	if !warming && len(mi.AllMetadata()) < 2 {
 		return nil
 	}
-	return pythonConsumerFilesForAddedFiles(mi.graph, files)
+	if !warming && !mi.pythonManifestSnapshot().declaresPythonBridge() {
+		return nil
+	}
+	eligible := make([]string, 0, len(files))
+	for _, file := range files {
+		if !resolver.IsPythonTestPackageFile(file, graph.RepoPrefixOfID(file)) {
+			eligible = append(eligible, file)
+		}
+	}
+	return pythonConsumerFilesForAddedFiles(mi.graph, eligible)
 }

@@ -53,6 +53,7 @@ type bridgeManifestSnapshot struct {
 	pythonBuilt   bool
 	pythonEntries map[string]*pythonManifestEntry
 	cargo         resolver.CargoCrateLookup
+	cargoDeclared bool
 }
 
 func (mi *MultiIndexer) newBridgeManifestSnapshot() *bridgeManifestSnapshot {
@@ -214,7 +215,7 @@ func (mi *MultiIndexer) cargoManifestSnapshot() *bridgeManifestSnapshot {
 	if mi.cargoPackageCache.matches(next) {
 		return mi.cargoPackageCache
 	}
-	next.cargo = mi.buildCargoCrateLookup(next.trees)
+	next.cargo, next.cargoDeclared = mi.buildCargoCrateLookup(next.trees)
 	mi.cargoPackageCache = next
 	return next
 }
@@ -245,4 +246,27 @@ func (mi *MultiIndexer) lazyCargoCrateLookup() resolver.CargoCrateLookup {
 		}
 		return lookup(file, name)
 	}
+}
+
+func (s *bridgeManifestSnapshot) hasUnknownManifest() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.unknown
+}
+
+func (s *bridgeManifestSnapshot) declaresPythonBridge() bool {
+	if s.hasUnknownManifest() {
+		return true
+	}
+	for provider, pkg := range s.pythonEntries {
+		if pkg.name == "" {
+			continue
+		}
+		for caller, consumer := range s.pythonEntries {
+			if caller != provider && consumer.deps[pkg.name] {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -604,7 +604,7 @@ func (mi *MultiIndexer) resolveIncrementalRepoMutationMode(
 		crossRepoFiles = appendUniqueSorted(crossRepoFiles, batch.npmConsumerFiles...)
 		crossRepoFiles = appendUniqueSorted(crossRepoFiles, batch.cargoConsumerFiles...)
 		if batch.cargoAddedFile {
-			crossRepoFiles = appendUniqueSorted(crossRepoFiles, mi.cargoConsumerFilesForRepo(repoPrefix, true)...)
+			crossRepoFiles = appendUniqueSorted(crossRepoFiles, mi.cargoAddedFileConsumers(repoPrefix)...)
 			cargoRetargetRepo = repoPrefix
 		}
 		crossRepoFiles = appendUniqueSorted(crossRepoFiles, batch.pythonConsumerFiles...)
