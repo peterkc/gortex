@@ -257,7 +257,10 @@ func Caller() { library.Hello(); child.Nested() }
 	}
 }
 
-func TestReadGoModModule(t *testing.T) {
+func TestGoModuleIdentities(t *testing.T) {
+	identity := func(root string) string {
+		return goModuleIdentities(readGoModuleInputs(map[string]string{"r": root}))["r"]
+	}
 	for _, source := range []string{
 		"module example.org/library\n",
 		"module\texample.org/library\n",
@@ -266,15 +269,15 @@ func TestReadGoModModule(t *testing.T) {
 		t.Run(source, func(t *testing.T) {
 			root := t.TempDir()
 			writeFile(t, filepath.Join(root, "go.mod"), source)
-			assert.Equal(t, "example.org/library", readGoModModule(root))
+			assert.Equal(t, "example.org/library", identity(root))
 		})
 	}
 	for _, source := range []string{"", "module", "module \"unterminated"} {
 		root := t.TempDir()
 		writeFile(t, filepath.Join(root, "go.mod"), source)
-		assert.Empty(t, readGoModModule(root))
+		assert.Empty(t, identity(root))
 	}
-	assert.Empty(t, readGoModModule(t.TempDir()))
+	assert.Empty(t, identity(t.TempDir()))
 }
 
 func TestTrackedGoModuleCacheRevision(t *testing.T) {

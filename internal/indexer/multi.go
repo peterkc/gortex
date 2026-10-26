@@ -2262,15 +2262,6 @@ func goModuleIdentities(inputs map[string]goModuleInput) map[string]string {
 	return modules
 }
 
-// readGoModModule reads the module path from a go.mod file.
-func readGoModModule(repoPath string) string {
-	data, err := readGoModuleFile(filepath.Join(repoPath, "go.mod"))
-	if err != nil {
-		return ""
-	}
-	return modfile.ModulePath(data)
-}
-
 // rebuildColdRefFacts seeds the durable resolved-reference sidecar once for
 // the complete successful repository set. The backend implementation is a
 // single set-oriented transaction; keeping the capability probe here avoids a
