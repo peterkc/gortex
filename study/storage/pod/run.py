@@ -30,7 +30,7 @@ import urllib.request
 from zoneinfo import ZoneInfo
 
 
-COMMIT = "e809c7332aea1639c34244560a0020dffd14ac0b"
+COMMIT = "79af1c58f352c4eb3670045e31df84a476df9b19"
 REPOSITORY = "https://github.com/peterkc/gortex.git"
 BRANCH = "study/storage-harness"
 GO_FILE = "go1.27.1.linux-amd64.tar.gz"
