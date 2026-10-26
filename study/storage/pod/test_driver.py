@@ -1118,7 +1118,9 @@ class ReviewFixTests(unittest.TestCase):
             argv.extend(["--" + option, str(path)])
         return argv
 
-    def test_root_user_refuses_before_host_or_process_effects(self):
+    def test_root_user_is_recorded_not_refused(self):
+        # Lead decision R2: the pod's SSH user is not under our control, and a
+        # refusal would lose the whole paid session; host.json records euid.
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
 
@@ -1129,14 +1131,16 @@ class ReviewFixTests(unittest.TestCase):
                 patch.object(sys, "argv", self.main_fixture(root)),
                 patch.object(driver, "Path", side_effect=local_path),
                 patch.object(driver.os, "geteuid", return_value=0),
-                patch.object(driver, "host_record") as host,
-                patch.object(driver, "Supervisor") as spawn,
+                patch.object(driver, "live_termination", return_value=(0, 1)),
+                patch.object(driver, "host_record", side_effect=(
+                    driver.ReviewRequired("host fixture reached"))),
+                patch.object(driver, "Supervisor"),
+                patch.object(driver.signal, "signal"),
+                patch.object(driver.signal, "setitimer"),
             ):
-                with self.assertRaisesRegex(driver.ReviewRequired, "UID 0"):
+                with self.assertRaisesRegex(driver.ReviewRequired,
+                                            "host fixture reached"):
                     driver.main()
-            host.assert_not_called()
-            spawn.assert_not_called()
-            self.assertFalse((root / "A9-handoff.json").exists())
 
     def test_uncaught_error_cannot_claim_a_clean_a9_handoff(self):
         with tempfile.TemporaryDirectory() as folder:
