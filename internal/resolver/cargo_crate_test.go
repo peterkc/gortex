@@ -265,3 +265,50 @@ func TestCargoCallRequiresExactParentModule(t *testing.T) {
 		}
 	}
 }
+
+func TestCargoAliasedCallsWorkspacePolicy(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, allowed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/allowed=%v", backend, allowed), func(t *testing.T) {
+				g := goImportReviewStore(t, backend)
+				for _, file := range []string{"consumer/src/lib.rs", "provider/src/lib.rs", "provider/src/util.rs"} {
+					ws := "private"
+					if strings.HasPrefix(file, "consumer/") {
+						ws = "shared"
+					}
+					g.AddNode(&graph.Node{ID: file, FilePath: file, Kind: graph.KindFile, RepoPrefix: graph.RepoPrefixOfID(file), WorkspaceID: ws, Language: "rust"})
+				}
+				g.AddNode(&graph.Node{ID: "provider/src/util.rs::helper", Name: "helper", FilePath: "provider/src/util.rs", Kind: graph.KindFunction, RepoPrefix: "provider", WorkspaceID: "private", Language: "rust"})
+				g.AddEdge(&graph.Edge{From: "consumer/src/lib.rs", FilePath: "consumer/src/lib.rs", To: "external::oc/util/helper", Kind: graph.EdgeImports, Line: 1})
+				g.AddEdge(&graph.Edge{From: "consumer/src/lib.rs", FilePath: "consumer/src/lib.rs", To: "unresolved::helper", Kind: graph.EdgeCalls, Line: 2})
+				cr := NewCrossRepo(g)
+				cr.SetCargoCrateLookup(func(_, alias string) []CargoCrate {
+					if alias != "oc" {
+						return nil
+					}
+					return []CargoCrate{{Root: "provider/src/lib.rs", Name: "other_crate"}}
+				})
+				module := "oc"
+				if allowed {
+					module = "other_crate"
+				}
+				cr.SetCrossWorkspaceDepLookup(func(string) []CrossWorkspaceDepRule {
+					return []CrossWorkspaceDepRule{{Workspace: "private", Modules: []string{module}}}
+				})
+				for pass := 0; pass < 2; pass++ {
+					_, err := cr.ResolveAllContext(t.Context())
+					require.NoError(t, err)
+					imports := outEdgesOfKind(g, "consumer/src/lib.rs", graph.EdgeImports)
+					require.Len(t, imports, 1)
+					require.Equal(t, allowed, imports[0].CrossRepo)
+					calls := outEdgesOfKind(g, "consumer/src/lib.rs", graph.EdgeCalls)
+					require.Len(t, calls, 1)
+					require.Equal(t, allowed, calls[0].CrossRepo)
+					if allowed {
+						require.Equal(t, "provider/src/util.rs::helper", calls[0].To)
+					}
+				}
+			})
+		}
+	}
+}
