@@ -1568,6 +1568,7 @@ func restubIncomingRefsFromView(
 				}
 				if original, _ := edge.Meta[resolver.PythonCallStubMeta].(string); edge.Kind == graph.EdgeCalls && edge.CrossRepo && original != "" {
 					edge.To, edge.CrossRepo, edge.ConfidenceLabel = original, false, ""
+					delete(edge.Meta, resolver.PythonReExportFileMeta)
 				}
 				reindexes = append(reindexes, graph.EdgeReindex{Edge: edge, OldTo: oldTo})
 			}
