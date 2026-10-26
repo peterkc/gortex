@@ -312,9 +312,7 @@ func (cr *CrossRepoResolver) resolveCargoImportedCall(e *graph.Edge, target stri
 		return false
 	}
 	e.To, e.CrossRepo = match.ID, true
-	if strings.HasPrefix(target, "*.") {
-		e.Confidence, e.Origin = 0.85, graph.OriginASTResolved
-	}
+	e.Confidence, e.Origin = 0.85, graph.OriginASTResolved
 	return true
 }
 
