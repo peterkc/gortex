@@ -67,3 +67,32 @@ func TestTrackedPythonSameLineImportIdentities(t *testing.T) {
 		})
 	}
 }
+
+func TestTrackedPythonSameLineCallsAfterConsumerFirst(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			provider, consumer := t.TempDir(), t.TempDir()
+			writeWorkspaceFile(t, provider, "pyproject.toml", "[project]\nname = 'dist'\n")
+			writeWorkspaceFile(t, provider, "pkg/__init__.py", "")
+			writeWorkspaceFile(t, provider, "pkg/image.py", "def f(): pass\ndef g(): pass\n")
+			writeWorkspaceFile(t, consumer, "pyproject.toml", "[project]\ndependencies = ['dist']\n")
+			writeWorkspaceFile(t, consumer, "app.py", "import pkg.image as image\ndef run():\n    image.f(); image.g()\n")
+			entries := []config.RepoEntry{{Path: consumer, Name: "consumer", Workspace: "shared"}, {Path: provider, Name: "provider", Workspace: "shared"}}
+			mi, g := newPythonBridgeIdentityIndexer(t, backend, nil)
+			_, err := mi.TrackRepoCtx(context.Background(), entries[0])
+			require.NoError(t, err)
+			require.True(t, mi.GetIndexer("consumer").externalCallSynthesisEnabled(), "exercise default synthesis policy")
+			_, err = mi.TrackRepoCtx(context.Background(), entries[1])
+			require.NoError(t, err)
+			want := []string{"provider/pkg/image.py::f", "provider/pkg/image.py::g"}
+			require.ElementsMatch(t, want, revisionCallTargets(g, "consumer/app.py::run", graph.EdgeCalls))
+			_, err = mi.IncrementalReindexRepo("provider", []string{filepath.Join(provider, "pkg/image.py")})
+			require.NoError(t, err)
+			require.ElementsMatch(t, want, revisionCallTargets(g, "consumer/app.py::run", graph.EdgeCalls))
+			cold, cg := newPythonBridgeIdentityIndexer(t, backend, entries)
+			_, err = cold.IndexAll()
+			require.NoError(t, err)
+			require.ElementsMatch(t, revisionCallTargets(cg, "consumer/app.py::run", graph.EdgeCalls), revisionCallTargets(g, "consumer/app.py::run", graph.EdgeCalls))
+		})
+	}
+}
