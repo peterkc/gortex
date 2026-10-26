@@ -189,6 +189,9 @@ func (cr *CrossRepoResolver) cargoImportSpec(e *graph.Edge) string {
 	}
 	spec, external := strings.CutPrefix(target, "external::")
 	if !external {
+		spec, external = strings.CutPrefix(target, "unresolved::import::")
+	}
+	if !external {
 		return ""
 	}
 	name, _, _ := strings.Cut(spec, "/")

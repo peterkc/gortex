@@ -312,3 +312,29 @@ func TestCargoAliasedCallsWorkspacePolicy(t *testing.T) {
 		}
 	}
 }
+
+func TestCargoUnresolvedImportAndCallSinglePass(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			g := goImportReviewStore(t, backend)
+			for _, file := range []string{"consumer/src/lib.rs", "provider/src/lib.rs", "provider/src/util.rs"} {
+				g.AddNode(&graph.Node{ID: file, FilePath: file, Kind: graph.KindFile, RepoPrefix: graph.RepoPrefixOfID(file), Language: "rust"})
+			}
+			g.AddNode(&graph.Node{ID: "provider/src/util.rs::helper", Name: "helper", FilePath: "provider/src/util.rs", Kind: graph.KindFunction, RepoPrefix: "provider", Language: "rust"})
+			g.AddEdge(&graph.Edge{From: "consumer/src/lib.rs", FilePath: "consumer/src/lib.rs", To: "unresolved::import::other_crate/util/helper", Kind: graph.EdgeImports, Line: 1})
+			g.AddEdge(&graph.Edge{From: "consumer/src/lib.rs", FilePath: "consumer/src/lib.rs", To: "unresolved::helper", Kind: graph.EdgeCalls, Line: 2})
+			cr := NewCrossRepo(g)
+			cr.SetCargoCrateLookup(func(string, string) []CargoCrate {
+				return []CargoCrate{{Root: "provider/src/lib.rs", Name: "other_crate"}}
+			})
+			for pass := 0; pass < 2; pass++ {
+				_, err := cr.ResolveAllContext(t.Context())
+				require.NoError(t, err)
+				rows := outEdgesOfKind(g, "consumer/src/lib.rs", graph.EdgeCalls)
+				require.Len(t, rows, 1)
+				require.Equal(t, "provider/src/util.rs::helper", rows[0].To)
+				require.True(t, rows[0].CrossRepo)
+			}
+		})
+	}
+}
