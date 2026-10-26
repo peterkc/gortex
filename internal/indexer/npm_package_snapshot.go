@@ -71,6 +71,9 @@ func (s *npmPackageSnapshot) unchanged() bool {
 // Watch every directory prefix of each supported workspace glob. New members,
 // including package.json added to an existing empty directory, invalidate it.
 // Glob expansion runs only on a rebuild, never on an unchanged resolver pass.
+// A prefix with glob syntax is not a path: Windows rejects it as an invalid
+// name, which would invalidate every pass. The parent listing and the watched
+// matches already cover it.
 func watchNpmWorkspacePaths(root string, patterns []string, watch func(string)) {
 	for _, pattern := range patterns {
 		if filepath.IsAbs(pattern) || hasDotDotSegment(pattern) {
@@ -78,8 +81,11 @@ func watchNpmWorkspacePaths(root string, patterns []string, watch func(string)) 
 		}
 		parts := strings.Split(filepath.ToSlash(strings.TrimSuffix(pattern, "/")), "/")
 		for depth := 1; depth <= len(parts); depth++ {
-			prefix := filepath.Join(root, filepath.FromSlash(strings.Join(parts[:depth], "/")))
-			watch(prefix)
+			rel := strings.Join(parts[:depth], "/")
+			prefix := filepath.Join(root, filepath.FromSlash(rel))
+			if !strings.ContainsAny(rel, `*?[\`) {
+				watch(prefix)
+			}
 			matches, _ := filepath.Glob(prefix)
 			for _, dir := range matches {
 				info, err := os.Stat(dir)

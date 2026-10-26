@@ -3,6 +3,7 @@ package indexer
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -93,4 +94,43 @@ func TestNpmPackageSnapshotRejectsFailedStamp(t *testing.T) {
 	const invalidPath = "\x00"
 	snapshot := npmPackageSnapshot{files: map[string]npmPackageFileStamp{invalidPath: npmPackageStamp(invalidPath)}}
 	require.False(t, snapshot.unchanged())
+}
+
+func TestNpmPackageSnapshotWatchesOnlyLiteralPaths(t *testing.T) {
+	for _, mode := range []string{"npm", "pnpm"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			if mode == "npm" {
+				writePackageJSON(t, root, `{"name":"root","workspaces":["packages/*","apps/*/web"]}`)
+			} else {
+				writePackageJSON(t, root, `{"name":"root"}`)
+				writeWorkspaceFile(t, root, "pnpm-workspace.yaml", "packages:\n  - 'packages/*'\n  - 'apps/*/web'\n")
+			}
+			writePackageJSON(t, filepath.Join(root, "packages", "a"), `{"name":"p","main":"index.ts"}`)
+			writePackageJSON(t, filepath.Join(root, "apps", "x", "web"), `{"name":"w","main":"index.ts"}`)
+			mi := &MultiIndexer{repos: map[string]*RepoMetadata{"lib": {RootPath: root}}}
+			first := mi.npmPackageLookup()
+			require.Contains(t, first("w"), "lib/apps/x/web")
+			// Given glob workspace patterns, when the snapshot is built, then it
+			// stamps real paths only: Windows rejects "*" in a path, and an
+			// invalid stamp would rebuild the lookup on every unchanged pass.
+			cached := mi.npmPackageCache
+			require.NotNil(t, cached)
+			for file, stamp := range cached.files {
+				assert.False(t, strings.ContainsAny(filepath.ToSlash(strings.TrimPrefix(file, root)), "*?["), "glob watched as a path: %s", file)
+				assert.True(t, stamp.valid, "invalid stamp: %s", file)
+			}
+			mi.npmPackageLookup()
+			assert.Same(t, cached, mi.npmPackageCache, "an unchanged pass reuses the snapshot")
+			// When a new member appears under a glob level, then the parent
+			// listings still invalidate the snapshot and match a cold lookup.
+			writePackageJSON(t, filepath.Join(root, "apps", "y", "web"), `{"name":"v","main":"index.ts"}`)
+			fresh := mi.npmPackageLookup()
+			require.Contains(t, fresh("v"), "lib/apps/y/web")
+			cold := (&MultiIndexer{repos: mi.repos}).npmPackageLookup()
+			assert.Equal(t, cold("v"), fresh("v"))
+			writePackageJSON(t, filepath.Join(root, "packages", "b"), `{"name":"q","main":"index.ts"}`)
+			require.Contains(t, mi.npmPackageLookup()("q"), "lib/packages/b")
+		})
+	}
 }
