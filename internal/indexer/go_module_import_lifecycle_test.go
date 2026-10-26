@@ -13,6 +13,7 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/resolver"
 	"github.com/zzet/gortex/internal/search"
 )
@@ -178,6 +179,62 @@ func TestGoModuleImportParkBeforeEviction(t *testing.T) {
 				require.Len(t, rows, 1)
 				assert.Equal(t, "b/lib.go", rows[0].To, "the exact incoming frontier must relink without a retained import statement")
 				assert.True(t, rows[0].CrossRepo)
+			})
+		}
+	}
+}
+
+// The optional asset capability makes the otherwise code-only Go language
+// exercise the content-admission return as well as the ordinary size cap.
+type goImportAdmissionExtractor struct{ parser.Extractor }
+
+func (goImportAdmissionExtractor) AssetClass() parser.AssetClass { return parser.AssetData }
+
+func TestGoModuleLocalImportSurvivesAdmissionSkip(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, mode := range []string{"size", "content", "normal"} {
+			t.Run(backend+"/"+mode, func(t *testing.T) {
+				root := t.TempDir()
+				writeWorkspaceFile(t, root, "main.go", "package p\n")
+				writeWorkspaceFile(t, root, "lib.go", "package p\nfunc F() {}\n")
+				var g graph.Store = graph.New()
+				if backend == "sqlite" {
+					db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.sqlite"))
+					require.NoError(t, err)
+					t.Cleanup(func() { require.NoError(t, db.Close()) })
+					g = db
+				}
+				idx := newTestIndexer(g)
+				_, err := idx.Index(root)
+				require.NoError(t, err)
+				g.AddEdge(&graph.Edge{From: "main.go", FilePath: "main.go", To: "lib.go", Kind: graph.EdgeImports, Line: 1, Origin: graph.OriginASTResolved, Confidence: 1, Meta: map[string]any{"go_import": "example.org/lib", "go_import_fallback": "external::example.org/lib"}})
+				if mode == "size" {
+					idx.config.MaxFileSize = 1
+				}
+				if mode == "content" {
+					ext, ok := idx.registry.GetByLanguage("go")
+					require.True(t, ok)
+					idx.registry.Register(goImportAdmissionExtractor{ext})
+					idx.config.Content.IndexData = false
+				}
+				for pass := 0; pass < 2; pass++ {
+					require.NoError(t, idx.IndexFileNoResolve(filepath.Join(root, "lib.go")))
+					var imports []*graph.Edge
+					for _, e := range g.GetOutEdges("main.go") {
+						if e.Kind == graph.EdgeImports {
+							imports = append(imports, e)
+						}
+					}
+					require.Len(t, imports, 1)
+					if mode == "normal" {
+						require.Equal(t, "lib.go", imports[0].To)
+					} else {
+						require.Equal(t, "unresolved::import::example.org/lib", imports[0].To)
+						require.False(t, imports[0].CrossRepo)
+						require.Empty(t, imports[0].Origin)
+						require.Zero(t, imports[0].Confidence)
+					}
+				}
 			})
 		}
 	}
