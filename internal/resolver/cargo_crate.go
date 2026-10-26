@@ -249,6 +249,16 @@ func (cr *CrossRepoResolver) resolveCargoImportedCall(e *graph.Edge, target stri
 			continue
 		}
 		spec := strings.TrimPrefix(strings.TrimPrefix(stub, "external::"), "unresolved::import::")
+		workspaceSpec := spec
+		if cr.cargoCrates != nil {
+			alias, _, _ := strings.Cut(spec, "/")
+			for _, crate := range cr.cargoCrates(imp.FilePath, alias) {
+				if graph.RepoPrefixOfID(crate.Root) == graph.RepoPrefixOfID(imp.To) {
+					workspaceSpec = crate.Name + strings.TrimPrefix(spec, alias)
+					break
+				}
+			}
+		}
 		bindings := parseRustUseBindings(spec)
 		if strings.HasSuffix(spec, "/*") {
 			bindings = []rustUseBinding{{source: normalizeRustUsePath(spec), local: "*"}}
@@ -273,7 +283,7 @@ func (cr *CrossRepoResolver) resolveCargoImportedCall(e *graph.Edge, target stri
 				lookupName = item
 			}
 			for _, candidate := range candidates[lookupName][imp.To] {
-				if candidate.FilePath != imp.To || candidate.Language != "rust" || !cr.crossWorkspaceEligible(cr.callerWorkspaceID(e), candidateWorkspaceID(candidate), spec) {
+				if candidate.FilePath != imp.To || candidate.Language != "rust" || !cr.crossWorkspaceEligible(cr.callerWorkspaceID(e), candidateWorkspaceID(candidate), workspaceSpec) {
 					continue
 				}
 				switch candidate.Kind {
