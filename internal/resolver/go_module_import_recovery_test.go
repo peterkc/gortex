@@ -84,7 +84,9 @@ func TestGoModuleImportBudgetDoesNotStarveCalls(t *testing.T) {
 					cr = resolver(g, state)
 					// When the import recovery exceeds its own ceiling, the call leg must still bind.
 					_, admission := cr.ResolveMutationFrontiersBounded(nil, nil, []string{"b/new/new.go"})
-					assert.False(t, admission.Refused, "import refusal is not a call admission refusal")
+					assert.True(t, admission.Refused, "deferred imports must be reported even while independent calls bind")
+					assert.Error(t, admission.Refusal)
+					assert.False(t, state.complete, "deferred import recovery remains retryable")
 					var calls []*graph.Edge
 					for _, e := range g.GetOutEdges("a/main.go::Caller") {
 						if e.Kind == graph.EdgeCalls {

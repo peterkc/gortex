@@ -110,7 +110,8 @@ func TestGoModuleImportOversizedProviderDoesNotStarveNext(t *testing.T) {
 			state.imports["b-small"] = map[string]struct{}{id: {}}
 			if route == "frontier" {
 				_, admission := cr.ResolveMutationFrontiersBounded(nil, nil, []string{"a-big/lib.go", "b-small/lib.go"})
-				require.False(t, admission.Refused)
+				require.True(t, admission.Refused)
+				require.Error(t, admission.Refusal)
 			} else {
 				require.NoError(t, cr.recheckGoModuleBindings(t.Context(), nil, &CrossRepoStats{ByRepo: map[string]int{}}))
 			}
@@ -151,6 +152,58 @@ func TestGoModuleNestedProviderFullAndWarmParity(t *testing.T) {
 				require.Len(t, imports, 1)
 				require.Equal(t, "b/sub/lib.go", imports[0].To)
 				require.True(t, imports[0].CrossRepo)
+			})
+		}
+	}
+}
+
+func TestGoModuleImportRecoveryBudgetRefusal(t *testing.T) {
+	old := newGoModuleImportRecoveryBudget
+	newGoModuleImportRecoveryBudget = func() *graph.IncomingSourceBudget {
+		b := &graph.IncomingSourceBudget{}
+		require.NoError(t, b.Charge(graph.MaxIncomingSourceCandidateRows-1))
+		return b
+	}
+	t.Cleanup(func() { newGoModuleImportRecoveryBudget = old })
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, route := range []string{"frontier", "identity"} {
+			t.Run(backend+"/"+route, func(t *testing.T) {
+				g := goImportReviewStore(t, backend)
+				g.AddNode(&graph.Node{ID: "provider/lib.go", Name: "lib.go", FilePath: "provider/lib.go", Kind: graph.KindFile, RepoPrefix: "provider", Language: "go"})
+				ids := map[string]struct{}{}
+				for i := 0; i < 2; i++ {
+					file := fmt.Sprintf("consumer/f%d.go", i)
+					id := file + "::import::example.org/lib"
+					ids[id] = struct{}{}
+					g.AddBatch([]*graph.Node{{ID: file, FilePath: file, Kind: graph.KindFile, RepoPrefix: "consumer", Language: "go"}, {ID: id, FilePath: file, StartLine: 1, Kind: graph.KindImport, RepoPrefix: "consumer", Language: "go", Meta: map[string]any{"path": "example.org/lib"}}}, []*graph.Edge{{From: file, FilePath: file, To: "dep::example.org/lib", Kind: graph.EdgeImports, Line: 1}})
+				}
+				cr := NewCrossRepo(g)
+				modules := map[string]string{"provider": "example.org/lib", "consumer": "example.org/app"}
+				cr.SetGoModules(modules)
+				state := cr.goModuleImportState()
+				state.importsSeeded = true
+				state.imports["provider"] = ids
+				state.complete = route == "frontier"
+				state.modules = modules
+				changed := "provider/lib.go"
+				if route == "identity" {
+					changed = "consumer/f0.go"
+				}
+				_, admission := cr.ResolveMutationFrontiersBounded(nil, nil, []string{changed})
+				require.True(t, admission.Refused)
+				require.Error(t, admission.Refusal)
+				require.GreaterOrEqual(t, admission.Dropped, 2)
+				require.False(t, state.complete)
+				// The explicit full pass is unbounded and repairs the deferred imports.
+				_, err := cr.ResolveAllContext(t.Context())
+				require.NoError(t, err)
+				for i := 0; i < 2; i++ {
+					rows := outEdgesOfKind(g, fmt.Sprintf("consumer/f%d.go", i), graph.EdgeImports)
+					require.Len(t, rows, 1)
+					require.Equal(t, "provider/lib.go", rows[0].To)
+				}
+				_, err = cr.ResolveAllContext(t.Context())
+				require.NoError(t, err)
 			})
 		}
 	}
