@@ -2186,27 +2186,22 @@ func (mi *MultiIndexer) goModuleSnapshot() (map[string]string, uint64) {
 			roots[prefix] = meta.RootPath
 		}
 	}
+	inputs := readGoModuleInputs(roots)
 	files := make(map[string]goModuleFileStamp, len(roots))
 	for prefix, root := range roots {
-		stamp := goModuleFileStamp{root: root}
-		manifest := filepath.Join(root, "go.mod")
-		info, err := os.Stat(manifest)
-		if os.IsNotExist(err) {
+		input := inputs[prefix]
+		stamp := goModuleFileStamp{root: root, valid: os.IsNotExist(input.err), present: !os.IsNotExist(input.err)}
+		if input.err == nil {
+			stamp.content = contentHashForSource(input.data)
 			stamp.valid = true
-		} else if err == nil {
-			stamp.size, stamp.modified = info.Size(), info.ModTime().UnixNano()
-			if src, err := readGoModuleFile(manifest); err == nil {
-				stamp.content = contentHashForSource(src)
-				stamp.valid = true
-			}
 		}
 		files[prefix] = stamp
 	}
 	if mi.goModuleCache != nil && mi.goModuleRevision == revision && mi.goModuleRepoCount == count && maps.EqualFunc(mi.goModuleFiles, files, func(a, b goModuleFileStamp) bool { return a.valid && a == b }) {
 		return mi.goModuleCache, mi.goModuleGeneration
 	}
-	modules := readTrackedGoModules(roots)
-	replacements := mi.readGoModuleReplacements(roots)
+	modules := goModuleIdentities(inputs)
+	replacements := mi.goModuleReplacementsFromInputs(roots, inputs)
 	sameReplacements := maps.EqualFunc(replacements, mi.goModuleReplacements, slices.Equal[[]resolver.GoModuleReplacement])
 	mi.goModuleReplacements = replacements
 	mi.goModuleFiles = files
@@ -2232,17 +2227,36 @@ func (mi *MultiIndexer) goModuleSnapshot() (map[string]string, uint64) {
 var readGoModuleFile = os.ReadFile
 
 type goModuleFileStamp struct {
-	root           string
-	size, modified int64
-	content        string
-	valid          bool
+	root, content string
+	valid         bool
+	present       bool // Unreadable inputs remain conservative teardown dependencies.
+}
+
+type goModuleInput struct {
+	data []byte
+	err  error
+}
+
+func readGoModuleInputs(roots map[string]string) map[string]goModuleInput {
+	inputs := make(map[string]goModuleInput, len(roots))
+	for prefix, root := range roots {
+		data, err := readGoModuleFile(filepath.Join(root, "go.mod"))
+		inputs[prefix] = goModuleInput{data: data, err: err}
+	}
+	return inputs
 }
 
 func readTrackedGoModules(roots map[string]string) map[string]string {
-	modules := make(map[string]string, len(roots))
-	for prefix, root := range roots {
-		if module := readGoModModule(root); module != "" {
-			modules[prefix] = module
+	return goModuleIdentities(readGoModuleInputs(roots))
+}
+
+func goModuleIdentities(inputs map[string]goModuleInput) map[string]string {
+	modules := make(map[string]string, len(inputs))
+	for prefix, input := range inputs {
+		if input.err == nil {
+			if module := modfile.ModulePath(input.data); module != "" {
+				modules[prefix] = module
+			}
 		}
 	}
 	return modules

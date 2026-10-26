@@ -126,11 +126,35 @@ func TestGoModuleContentStampReusesMixedRootSnapshot(t *testing.T) {
 	// snapshot check runs, then only the content-verification read is needed.
 	first, generation := mi.goModuleSnapshot()
 	require.Equal(t, map[string]string{"go": "example.org/library"}, first)
-	require.Equal(t, 3, reads[manifest], "initial verification, module identity, and replacement reads")
+	require.Equal(t, 1, reads[manifest], "verification, module identity, and replacements share one read")
 	clear(reads)
 	mi.goModuleChecked = time.Time{}
 	second, nextGeneration := mi.goModuleSnapshot()
 	assert.Equal(t, first, second)
 	assert.Equal(t, generation, nextGeneration)
-	assert.Equal(t, map[string]int{manifest: 1}, reads, "valid absence must not force module/replacement rebuild reads")
+	assert.Equal(t, map[string]int{manifest: 1, filepath.Join(nonGoRoot, "go.mod"): 1}, reads, "one read attempt per root per eligible check")
+}
+
+func TestGoModuleContentStampAndParsedEvidenceShareBytes(t *testing.T) {
+	root := t.TempDir()
+	x := []byte("module example.org/library\nreplace example.org/dep => example.org/other v1.2.3\n")
+	y := []byte("module example.org/renamed\n")
+	writeFile(t, filepath.Join(root, "go.mod"), string(x))
+	original := readGoModuleFile
+	reads := 0
+	readGoModuleFile = func(string) ([]byte, error) {
+		reads++
+		if reads == 1 {
+			return x, nil
+		}
+		return y, nil
+	}
+	t.Cleanup(func() { readGoModuleFile = original })
+	mi := &MultiIndexer{repos: map[string]*RepoMetadata{"lib": {RootPath: root}}, logger: zap.NewNop()}
+	modules, _ := mi.goModuleSnapshot()
+	assert.Equal(t, 1, reads, "one captured read must supply hash, identity and replacements")
+	assert.Equal(t, "example.org/library", modules["lib"])
+	assert.Equal(t, contentHashForSource(x), mi.goModuleFiles["lib"].content)
+	require.Len(t, mi.goModuleReplacements["lib"], 1)
+	assert.Equal(t, "example.org/dep", mi.goModuleReplacements["lib"][0].Module)
 }

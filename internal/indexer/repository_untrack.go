@@ -110,7 +110,7 @@ func (mi *MultiIndexer) untrackRepoCheckedRetainingAdmission(
 
 	mi.goModuleMu.Lock()
 	stamp := mi.goModuleFiles[repoPrefix]
-	hadGoModule := mi.goModuleCache[repoPrefix] != "" || stamp.modified != 0
+	hadGoModule := mi.goModuleCache[repoPrefix] != "" || stamp.present
 	mi.goModuleMu.Unlock()
 	hadRules := mi.configMgr != nil && len(mi.configMgr.GetRepoConfig(repoPrefix).CrossWorkspaceDeps) > 0
 	goModuleAffected := hadGoModule || hadRules || len(graph.ReadRepoFilePaths(mi.graph, repoPrefix, "", []string{"go"}, nil)) > 0

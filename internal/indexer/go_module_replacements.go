@@ -21,10 +21,15 @@ func (mi *MultiIndexer) trackedGoModuleReplacements() map[string][]resolver.GoMo
 }
 
 func (mi *MultiIndexer) readGoModuleReplacements(roots map[string]string) map[string][]resolver.GoModuleReplacement {
+	return mi.goModuleReplacementsFromInputs(roots, readGoModuleInputs(roots))
+}
+
+func (mi *MultiIndexer) goModuleReplacementsFromInputs(roots map[string]string, inputs map[string]goModuleInput) map[string][]resolver.GoModuleReplacement {
 	replacements := make(map[string][]resolver.GoModuleReplacement)
 	for repo, root := range roots {
 		filename := filepath.Join(root, "go.mod")
-		data, err := readGoModuleFile(filename)
+		input := inputs[repo]
+		data, err := input.data, input.err
 		if os.IsNotExist(err) {
 			continue
 		}
