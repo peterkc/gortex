@@ -121,7 +121,7 @@ func TestGoModuleProviderSkipsDoNotRunFullFallback(t *testing.T) {
 			for _, file := range []string{"provider/lib.go", "provider/lib.go", "consumer/f0.go"} {
 				require.NoError(t, mi.RunPreEnrichResolveFiles(context.Background(), []string{file}, nil))
 			}
-			require.Equal(t, 2, logs.FilterMessage("cross-repo resolve: Go module imports deferred to full pass").Len())
+			require.Equal(t, 2, logs.FilterMessage("cross-repo resolve: provider consumers stay stale until next full pass").Len())
 			require.Zero(t, logs.FilterMessage("Go module import identity recheck deferred to full pass").Len())
 			require.Zero(t, logs.FilterMessage("cross-repo resolve: completing deferred Go module imports").Len())
 			require.Zero(t, g.rechecks, "two provider saves and a third Go save must not recheck all repositories")
