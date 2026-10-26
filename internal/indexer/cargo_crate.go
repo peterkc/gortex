@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/pelletier/go-toml/v2"
+	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/modules"
 	"github.com/zzet/gortex/internal/resolver"
 )
@@ -30,7 +31,7 @@ func readCargoManifest(tree manifestTree, dir string) map[string]any {
 
 // cargoCrateLookup snapshots root/member manifests once per cross-repo pass.
 // Only explicit workspace member globs are expanded; Cargo is never executed.
-func (mi *MultiIndexer) buildCargoCrateLookup(trees map[string]manifestTree) resolver.CargoCrateLookup {
+func (mi *MultiIndexer) buildCargoCrateLookup(trees map[string]manifestTree) (resolver.CargoCrateLookup, bool) {
 	type crate struct {
 		dir, name, root string
 		deps            map[string]string
@@ -43,7 +44,7 @@ func (mi *MultiIndexer) buildCargoCrateLookup(trees map[string]manifestTree) res
 		}
 	}
 	if len(roots) < 2 {
-		return nil
+		return nil, false
 	}
 	owners := map[string]*crate{}
 	packages := map[string][]*crate{}
@@ -132,10 +133,14 @@ func (mi *MultiIndexer) buildCargoCrateLookup(trees map[string]manifestTree) res
 			}
 		}
 	}
+	declared := false
 	for _, owner := range owners {
 		owner.imports = map[string][]resolver.CargoCrate{}
 		for alias, pkg := range owner.deps {
 			for _, provider := range packages[pkg] {
+				if graph.RepoPrefixOfID(provider.root) != graph.RepoPrefixOfID(owner.dir) {
+					declared = true
+				}
 				name := provider.name
 				if alias != pkg {
 					name = strings.ReplaceAll(alias, "-", "_")
@@ -186,5 +191,5 @@ func (mi *MultiIndexer) buildCargoCrateLookup(trees map[string]manifestTree) res
 			return nil
 		}
 		return owner.imports[name]
-	}
+	}, declared
 }
