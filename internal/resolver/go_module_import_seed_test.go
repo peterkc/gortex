@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
@@ -284,5 +286,50 @@ func TestGoModuleManifestFrontiersRunRetry(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func TestGoModuleImportProviderBudgetOrder(t *testing.T) {
+	t.Cleanup(SetGoModuleImportRecoveryBudgetForTest(1))
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			g := goImportReviewStore(t, backend)
+			modules := map[string]string{"a-provider": "example.org/a", "b-provider": "example.org/b", "consumer": "example.org/app"}
+			cr := NewCrossRepo(g)
+			cr.SetGoModules(modules)
+			state := cr.goModuleImportState()
+			state.modules, state.complete, state.importsSeeded = modules, true, true
+			for i, repo := range []string{"a-provider", "b-provider"} {
+				file := fmt.Sprintf("consumer/f%d.go", i)
+				id := file + "::import::" + modules[repo]
+				g.AddBatch([]*graph.Node{
+					{ID: repo + "/lib.go", Name: "lib.go", FilePath: repo + "/lib.go", Kind: graph.KindFile, RepoPrefix: repo, Language: "go"},
+					{ID: file, FilePath: file, Kind: graph.KindFile, RepoPrefix: "consumer", Language: "go"},
+					{ID: id, FilePath: file, StartLine: 1, Kind: graph.KindImport, RepoPrefix: "consumer", Language: "go", Meta: map[string]any{"path": modules[repo]}},
+				}, []*graph.Edge{{From: file, FilePath: file, To: "dep::" + modules[repo], Kind: graph.EdgeImports, Line: 1}})
+				state.imports[repo] = map[string]struct{}{id: {}}
+			}
+			core, logs := observer.New(zap.WarnLevel)
+			cr.SetLogger(zap.New(core))
+			for range 8 {
+				for i, repo := range []string{"a-provider", "b-provider"} {
+					rows := outEdgesOfKind(g, fmt.Sprintf("consumer/f%d.go", i), graph.EdgeImports)
+					require.Len(t, rows, 1)
+					oldTo := rows[0].To
+					rows[0].To, rows[0].CrossRepo, rows[0].Meta = "dep::"+modules[repo], false, nil
+					g.ReindexEdges([]graph.EdgeReindex{{Edge: rows[0], OldTo: oldTo}})
+				}
+				stats, admission := cr.ResolveMutationFrontiersBounded(nil, nil, []string{"b-provider/lib.go", "a-provider/lib.go"})
+				require.False(t, admission.Refused)
+				require.True(t, state.complete)
+				require.Equal(t, 1, stats.Resolved)
+				require.Equal(t, "a-provider/lib.go", outEdgesOfKind(g, "consumer/f0.go", graph.EdgeImports)[0].To)
+				require.Equal(t, "dep::example.org/b", outEdgesOfKind(g, "consumer/f1.go", graph.EdgeImports)[0].To)
+				warnings := logs.TakeAll()
+				require.Len(t, warnings, 1)
+				require.Equal(t, "cross-repo resolve: provider consumers stay stale until next full pass", warnings[0].Message)
+				require.Equal(t, "b-provider", warnings[0].ContextMap()["repo"])
+			}
+		})
 	}
 }

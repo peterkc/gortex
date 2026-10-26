@@ -2,7 +2,9 @@ package resolver
 
 import (
 	"context"
+	"maps"
 	"path"
+	"slices"
 	"strings"
 
 	"go.uber.org/zap"
@@ -210,14 +212,14 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 	// Import recovery has its own ceiling: a popular provider must not starve
 	// incoming calls or the revision-keyed call-terminal retry above. A skipped
 	// provider stays stale until a full pass; it must not reopen the revision.
-	for repo := range providerRepos {
+	for _, repo := range slices.Sorted(maps.Keys(providerRepos)) {
 		ids := cr.goModuleImportIDs(repo)
 		if len(ids) > importBudget.Remaining() {
-			cr.logger.Warn("cross-repo resolve: Go module imports deferred to full pass", zap.Int("imports", len(ids)), zap.Int("remaining", importBudget.Remaining()))
+			cr.logger.Warn("cross-repo resolve: provider consumers stay stale until next full pass", zap.String("repo", repo), zap.Int("imports", len(ids)), zap.Int("remaining", importBudget.Remaining()))
 			continue
 		}
 		if err := importBudget.Charge(len(ids)); err != nil {
-			cr.logger.Warn("cross-repo resolve: Go module imports deferred to full pass", zap.Error(err))
+			cr.logger.Warn("cross-repo resolve: provider consumers stay stale until next full pass", zap.String("repo", repo), zap.Error(err))
 			continue
 		}
 		for start := 0; start < len(ids); start += externalCallMutationChunk {
