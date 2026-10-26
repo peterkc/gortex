@@ -4,6 +4,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/pelletier/go-toml/v2"
 	"github.com/zzet/gortex/internal/graph"
@@ -20,21 +21,17 @@ func normalizePythonDistribution(name string) string {
 // pythonPackageLookup is built only after a non-stdlib Python import is found.
 // Providers require indexed root/src modules or regular packages; consumers also
 // block foreign bindings with their own indexed namespace directories.
-func (mi *MultiIndexer) pythonPackageLookup() *resolver.PythonPackageLookup {
-	roots := mi.AllMetadata()
-	if len(roots) < 2 {
+type pythonManifestEntry struct {
+	name string
+	deps map[string]bool
+}
+
+func readPythonPackageEntries(trees map[string]manifestTree) map[string]*pythonManifestEntry {
+	if len(trees) < 2 {
 		return nil
 	}
-	type entry struct {
-		name string
-		deps map[string]bool
-	}
-	entries := map[string]*entry{}
-	for repo, meta := range roots {
-		if meta == nil || meta.RootPath == "" {
-			continue
-		}
-		tree := mi.manifestTreeFor(repo, meta.RootPath)
+	entries := map[string]*pythonManifestEntry{}
+	for repo, tree := range trees {
 		src, _ := tree.readFile("pyproject.toml")
 		var manifest struct {
 			Project struct{ Name string } `toml:"project"`
@@ -47,6 +44,7 @@ func (mi *MultiIndexer) pythonPackageLookup() *resolver.PythonPackageLookup {
 		}
 		// A malformed manifest supplies no identity or dependencies.
 		if len(src) > 0 && toml.Unmarshal(src, &manifest) != nil {
+			rejectBridgeManifest(tree)
 			continue
 		}
 		name := manifest.Project.Name
@@ -69,8 +67,12 @@ func (mi *MultiIndexer) pythonPackageLookup() *resolver.PythonPackageLookup {
 		for _, dep := range specs {
 			deps[normalizePythonDistribution(dep.Path)] = true
 		}
-		entries[repo] = &entry{name: normalizePythonDistribution(name), deps: deps}
+		entries[repo] = &pythonManifestEntry{name: normalizePythonDistribution(name), deps: deps}
 	}
+	return entries
+}
+
+func (mi *MultiIndexer) buildPythonPackageLookup(trees map[string]manifestTree, entries map[string]*pythonManifestEntry) *resolver.PythonPackageLookup {
 	// Only declared distributions can supply providers. Discover top-level names
 	// from their root/src directory entries, then probe exact indexed node IDs.
 	packages := map[string]map[string][]graph.FileNodeIdentity{}
@@ -85,7 +87,7 @@ func (mi *MultiIndexer) pythonPackageLookup() *resolver.PythonPackageLookup {
 		if !declared {
 			continue
 		}
-		tree := mi.manifestTreeFor(repo, roots[repo].RootPath)
+		tree := trees[repo]
 		for _, dir := range []string{"", "src"} {
 			files := tree.matchFiles(path.Join(dir, "*.py"))
 			for _, pkg := range tree.matchDirs(path.Join(dir, "*")) {
@@ -117,6 +119,7 @@ func (mi *MultiIndexer) pythonPackageLookup() *resolver.PythonPackageLookup {
 		return nil
 	}
 	localTops := map[string]map[string]bool{}
+	var localMu sync.Mutex
 	return &resolver.PythonPackageLookup{
 		HasTop: func(top string) bool { return len(packages[top]) > 0 },
 		Providers: func(caller, top string) map[string][]graph.FileNodeIdentity {
@@ -124,6 +127,8 @@ func (mi *MultiIndexer) pythonPackageLookup() *resolver.PythonPackageLookup {
 			if consumer == nil || len(packages[top]) == 0 {
 				return nil
 			}
+			localMu.Lock()
+			defer localMu.Unlock()
 			local, seen := localTops[caller]
 			if !seen {
 				local = map[string]bool{}

@@ -165,6 +165,9 @@ func (idx *Indexer) invalidateColdFileMtimes(paths []string) {
 	idx.mtimeMu.Lock()
 	idx.ensureFileMtimesWritableLocked()
 	for _, path := range paths {
+		if _, exists := idx.fileMtimes[path]; exists {
+			idx.fileSetRevision.Add(1)
+		}
 		delete(idx.fileMtimes, path)
 	}
 	idx.mtimeMu.Unlock()
@@ -195,6 +198,9 @@ func (idx *Indexer) publishColdFileMtimes(mtimes map[string]int64, authoritative
 		idx.mtimeMu.Lock()
 		idx.ensureFileMtimesWritableLocked()
 		for path, mtime := range mtimes {
+			if _, exists := idx.fileMtimes[path]; !exists {
+				idx.fileSetRevision.Add(1)
+			}
 			idx.fileMtimes[path] = mtime
 		}
 		idx.mtimeMu.Unlock()
