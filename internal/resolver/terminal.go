@@ -372,3 +372,59 @@ func (r *Resolver) reconcileTerminalStampsBulk(pending []*graph.Edge, counter gr
 	}
 	return changed, stamped, unstamped
 }
+
+// ReconcileBridgeCallerTerminals finishes a completed tracked-package mutation
+// using the full-pass policy for its affected marked calls. Callers must finish
+// bridge resolution first; refused/incomplete passes leave the calls retryable.
+func (r *Resolver) ReconcileBridgeCallerTerminals(files []string) {
+	if len(files) == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, counted := r.graph.(graph.NodeNameClassCounter)
+	_, memory := r.graph.(*graph.Graph)
+	if !counted && !memory {
+		return
+	} // Unknown adapters cannot certify absence.
+	var pending []*graph.Edge
+	for row := range graph.EdgesInScopeSeq(r.graph, nil, files, graph.EdgeCalls) {
+		edge := row.Edge
+		if edge == nil || !graph.IsUnresolvedTarget(edge.To) || (edge.Meta[CargoCallStubMeta] == nil && edge.Meta[PythonCallStubMeta] == nil) {
+			continue
+		}
+		if r.lspHelper != nil && r.lspHelper.SupportsPath(edge.FilePath) {
+			continue
+		}
+		pending = append(pending, edge)
+	}
+	var changed []*graph.Edge
+	if counter, ok := r.graph.(graph.NodeNameClassCounter); ok {
+		changed, _, _ = r.reconcileTerminalStampsBulk(pending, counter)
+	} else {
+		for _, edge := range pending {
+			reason, terminal := r.classifyTerminal(edge)
+			if terminal && !edgeTerminalFlag(edge) {
+				setEdgeTerminal(edge, reason)
+				changed = append(changed, edge)
+			} else if !terminal && edgeTerminalFlag(edge) {
+				clearEdgeTerminal(edge)
+				changed = append(changed, edge)
+			}
+		}
+	}
+	if len(changed) == 0 {
+		return
+	}
+	if p, ok := r.graph.(graph.EdgeTerminalStampPersister); ok {
+		p.PersistEdgeTerminalStamps(changed)
+	} else if p, ok := r.graph.(graph.EdgeMetaBatchPersister); ok {
+		p.PersistEdgeAttributesBatch(changed)
+	} else {
+		batch := make([]graph.EdgeReindex, 0, len(changed))
+		for _, edge := range changed {
+			batch = append(batch, graph.EdgeReindex{Edge: edge, OldTo: edge.To})
+		}
+		r.graph.ReindexEdges(batch)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -562,7 +563,24 @@ func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiers(resolutionFiles, ed
 		return
 	}
 	cr.SetCargoImportRetargetRepo(cargoRetargetRepo...)
-	cr.ResolveMutationFrontiers(resolutionFiles, edgeSourceFiles, definitionFiles)
+	var bridgeFiles []string
+	for _, file := range resolutionFiles {
+		if strings.HasSuffix(file, ".rs") || strings.HasSuffix(file, ".py") || strings.HasSuffix(file, ".pyi") {
+			bridgeFiles = append(bridgeFiles, file)
+		}
+	}
+	// Match cold ordering: tracked-provider refusal must remain authoritative
+	// after fallback has handled genuinely external calls.
+	if len(bridgeFiles) > 0 {
+		mi.runMasterResolveFiles(bridgeFiles, false)
+		mi.synthesizeDemotedGoModuleCalls(bridgeFiles)
+	}
+	_, admission := cr.ResolveMutationFrontiersBounded(resolutionFiles, edgeSourceFiles, definitionFiles)
+	if !admission.Refused && len(bridgeFiles) > 0 {
+		if master := mi.newMasterResolver(true); master != nil {
+			master.ReconcileBridgeCallerTerminals(bridgeFiles)
+		}
+	}
 	mi.finishGoModuleCalls(cr)
 	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 }
