@@ -6014,6 +6014,7 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) ([]string, []string, []
 			}
 			if original, _ := e.Meta[resolver.PythonCallStubMeta].(string); e.Kind == graph.EdgeCalls && e.CrossRepo && original != "" {
 				e.To, e.CrossRepo, e.ConfidenceLabel = original, false, ""
+				delete(e.Meta, resolver.PythonReExportFileMeta)
 			}
 			batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		}
