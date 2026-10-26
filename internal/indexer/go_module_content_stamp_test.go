@@ -78,7 +78,7 @@ func TestGoModuleSnapshotRejectsFailedInputs(t *testing.T) {
 
 func TestGoModuleSourceFailureDoesNotRestoreCachedCalls(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
-		for _, failure := range []string{"stat", "read"} {
+		for _, failure := range []string{"stat", "read", "size"} {
 			t.Run(backend+"/"+failure, func(t *testing.T) {
 				mi, g, repos := goModuleLifecycleFixture(t, backend)
 				writeFile(t, filepath.Join(repos[1].Path, "lib.go"), "package library\nfunc Other(){}\n")
@@ -97,8 +97,11 @@ func TestGoModuleSourceFailureDoesNotRestoreCachedCalls(t *testing.T) {
 				reads := 0
 				readGoModuleCallerFile = func(string) ([]byte, error) { reads++; return nil, os.ErrPermission }
 				t.Cleanup(func() { readGoModuleCallerFile = original })
-				if failure == "stat" {
+				switch failure {
+				case "stat":
 					require.NoError(t, os.Remove(main))
+				case "size":
+					mi.GetIndexer("a").config.MaxFileSize = 1
 				}
 				// A cached fact is not evidence for unreadable current source.
 				mi.restoreGoModuleSourceFile(cr, "a/main.go")

@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"context"
 	"crypto/sha256"
 	"github.com/zzet/gortex/internal/parser/crashpool"
 	"maps"
@@ -72,6 +73,9 @@ func (mi *MultiIndexer) restoreGoModuleSourceFile(cr *resolver.CrossRepoResolver
 		mi.logger.Warn("stat Go module caller", zap.String("file", file), zap.Error(err))
 		return
 	}
+	if idx.config.MaxFileSize > 0 && info.Size() > idx.config.MaxFileSize {
+		return
+	}
 	idx.goModuleSourceMu.Lock()
 	cached, hit := idx.goModuleSourceCache[rel]
 	idx.goModuleSourceMu.Unlock()
@@ -79,7 +83,7 @@ func (mi *MultiIndexer) restoreGoModuleSourceFile(cr *resolver.CrossRepoResolver
 		cr.RestoreGoModuleSourceCalls(cloneGoModuleSourceEdges(cached.edges))
 		return
 	}
-	parseLease, err := idx.acquireSharedParsePath(abs)
+	parseLease, err := acquireParseAdmission(context.Background(), info.Size(), 0, nil, idx.parseAdmission.Load())
 	if err != nil {
 		mi.logger.Warn("admit Go module caller", zap.String("file", file), zap.Error(err))
 		return
