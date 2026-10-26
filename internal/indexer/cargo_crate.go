@@ -138,7 +138,7 @@ func (mi *MultiIndexer) buildCargoCrateLookup(trees map[string]manifestTree) (re
 		owner.imports = map[string][]resolver.CargoCrate{}
 		for alias, pkg := range owner.deps {
 			for _, provider := range packages[pkg] {
-				if graph.RepoPrefixOfID(provider.root) != graph.RepoPrefixOfID(owner.dir) {
+				if graph.RepoPrefixOfID(provider.root) != graph.RepoPrefixOfID(owner.root) {
 					declared = true
 				}
 				name := provider.name
