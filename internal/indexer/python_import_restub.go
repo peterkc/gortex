@@ -186,16 +186,20 @@ func (mi *MultiIndexer) pythonAddedFileConsumers(files []string) []string {
 	if len(files) == 0 {
 		return nil
 	}
-	// Warmup can publish a provider receipt before its configured consumers
-	// are registered. Preserve that frontier until the workspace pass.
+	// A live warmup batch can publish provider additions before persisted
+	// consumers register. Raw config entries are not evidence of pending work.
+	metadata := mi.AllMetadata()
 	warming := false
-	if mi.configMgr != nil {
-		if global := mi.configMgr.Global(); global != nil {
-			configuredRepos := global.ReposSnapshot()
-			warming = len(configuredRepos) > 1 && len(mi.AllMetadata()) < len(configuredRepos)
+	mode := mi.currentBatchMode()
+	if mode.deferGlobalPasses {
+		for _, repo := range mi.graph.RepoPrefixes() {
+			if metadata[repo] == nil {
+				warming = true
+				break
+			}
 		}
 	}
-	if !warming && len(mi.AllMetadata()) < 2 {
+	if !warming && len(metadata) < 2 {
 		return nil
 	}
 	if !warming && !mi.pythonManifestSnapshot().declaresPythonBridge() {
