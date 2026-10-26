@@ -1,0 +1,40 @@
+{
+ "owner": "pi-gcp",
+ "mechanism": "Mac launchd one-shot",
+ "terminate_argv": [
+  "prime",
+  "pods",
+  "terminate",
+  "<pod-id>",
+  "--yes",
+  "--plain"
+ ],
+ "status_argv": [
+  "prime",
+  "pods",
+  "status",
+  "<pod-id>",
+  "-o",
+  "json"
+ ],
+ "time_origin": "created_at",
+ "existing_cli_login": true,
+ "no_api_key_on_pod": true,
+ "provider_ttl": false,
+ "backstop_minute": 710,
+ "awake": "caffeinate -i -m -s -t until deadline + 15 min; AC power required",
+ "live_receipt_fields": [
+  "awake",
+  "calendar_entry",
+  "created_at",
+  "deadline_pdt",
+  "existing_cli_login",
+  "install_time_pdt",
+  "job_label",
+  "launchctl_state",
+  "owner",
+  "plist_path",
+  "pod_id",
+  "setup_confirmed"
+ ]
+}
