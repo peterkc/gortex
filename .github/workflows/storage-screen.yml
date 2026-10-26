@@ -1,0 +1,83 @@
+name: Storage harness tiny Linux checks
+"on":
+  push:
+    branches: [study/storage-harness]
+    paths:
+      - study/storage/**
+      - .github/workflows/storage-screen.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: storage-harness-tiny-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  GOTOOLCHAIN: local
+  GOWORK: "off"
+  GOMAXPROCS: "2"
+  GOFLAGS: -mod=readonly
+  CGO_ENABLED: "1"
+jobs:
+  tiny-linux:
+    if: github.repository == 'peterkc/gortex' && github.ref == 'refs/heads/study/storage-harness'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: "1.27.1"
+          cache: false
+      - name: Bind source and isolated caches
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/storage/bin" "$RUNNER_TEMP/storage/tmp"
+          echo "GOCACHE=$RUNNER_TEMP/storage/go-build" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$RUNNER_TEMP/storage/go-mod" >> "$GITHUB_ENV"
+          echo "TMPDIR=$RUNNER_TEMP/storage/tmp" >> "$GITHUB_ENV"
+          echo "GOTMPDIR=$RUNNER_TEMP/storage/tmp" >> "$GITHUB_ENV"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/storage/ci-source.txt"
+          go version | tee -a "$RUNNER_TEMP/storage/ci-source.txt"
+          sha256sum study/storage/pod/run.py study/storage/pod/test_driver.py \
+            study/storage/onnx/main.go study/storage/onnx/main_test.go \
+            | tee -a "$RUNNER_TEMP/storage/ci-source.txt"
+      - name: Build the independent tiny-fixture tools
+        working-directory: study/storage/harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build -p=1 -o "$RUNNER_TEMP/storage/bin/oracle" ./cmd/oracle
+          go build -p=1 -o "$RUNNER_TEMP/storage/bin/gen" ./cmd/gen
+      - name: Check and build the catalog dispatch precedent
+        working-directory: study/storage/adapters/catalog-refs
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -p=1 ./...
+          go build -p=1 -o "$RUNNER_TEMP/storage/bin/catalog-refs" .
+      - name: Probe tests, vet and Linux build without a model or runtime library
+        working-directory: study/storage/onnx
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -l main.go main_test.go)"
+          go test -p=1 ./... 2>&1 | tee "$RUNNER_TEMP/storage/ci-probe.txt"
+          go vet -p=1 ./...
+          go build -p=1 -o "$RUNNER_TEMP/storage/bin/onnxprobe" .
+      - name: Actual controller and deadline rejection fixtures only
+        working-directory: study/storage/pod
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 --version | tee "$RUNNER_TEMP/storage/ci-driver.txt"
+          python3 -m unittest -v test_driver 2>&1 \
+            | tee -a "$RUNNER_TEMP/storage/ci-driver.txt"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: storage-tiny-${{ github.sha }}
+          path: ${{ runner.temp }}/storage/ci-*.txt
+          if-no-files-found: error

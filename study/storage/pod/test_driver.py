@@ -1,0 +1,826 @@
+"""Tiny controller fixtures. No study workload or model download."""
+import ast
+from copy import deepcopy
+from datetime import datetime
+from io import StringIO
+import json
+import os
+import signal
+import socket
+import sys
+import time
+from pathlib import Path
+from types import SimpleNamespace
+import tempfile
+import unittest
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
+
+import run as driver
+
+
+class FixtureSupervisor:
+    def __init__(self, root, modes, interrupt_at=None):
+        self.root = root
+        self.environment = {}
+        self.modes = modes
+        self.interrupt_at = interrupt_at
+        self.calls = []
+
+    def job_limit(self, name, now):
+        return 10000
+
+    def observe(self, groups):
+        pass
+
+    def close(self, owned):
+        pass
+
+    def start(self, args, directory, env, cwd):
+        self.calls.append(directory.name)
+        if len(self.calls) == self.interrupt_at:
+            raise driver.ReviewRequired("fixture interruption")
+        mode = self.modes[len(self.calls)-1]
+        adapter = Path(args[args.index("-data")-1]).name
+        job = driver.Job("screen", adapter, "tier10")
+        check = {"query_id": "q", "operation": "id", "status": "passed",
+                 "mismatch": False}
+        report = {
+            "adapter": adapter, "tier": "tier10", "run": 1,
+            "manifest_sha256": driver.digest(
+                self.root / "data/tier10/manifest.json"),
+            "success": mode == "pass", "builds": [{"repo": "fixture"}],
+            "checks": [check], "peak_rss_bytes": 1, "failures": [],
+            "metrics": {key: {"count": 1} for key in (
+                "build_seal", "open_first_no_cache_flush", "open_warm")},
+            "delta_checks": [{**check, "query_id": key}
+                             for key in driver.DELTA_IDS],
+            "concurrent": {
+                "commit_race_windows": {stage: 2 for stage in driver.STAGES},
+                "commit_race_minimum": 2, "new_samples_per_reader": [2]*8,
+                "after_publish": {"count": 16}, "checks": [check],
+            },
+            "crash": [{"ok": True, "killed": True, "mode": trial_mode,
+                       "checkpoint": stage}
+                      for trial_mode in ("checkpoint", "external-time")
+                      for stage in sorted(driver.STAGES) for _ in range(2)],
+        }
+        code = 0 if mode == "pass" else 1
+        if mode != "pass":
+            report["checks"] = [{**check, "status": "failed",
+                                  "mismatch": True, "detail": "named"}]
+            report["failures"] = ["q: named"]
+        if mode == "fatal":
+            report["failures"].append("loader fatal")
+        if mode == "incomplete":
+            report["crash"] = []
+        path = driver.result_path(self.root, job)
+        path.parent.mkdir()
+        driver.atomic_json(path, report)
+        driver.atomic_json(directory / "time.json", {
+            "exit_code": code, "elapsed_seconds": 1,
+            "user_seconds": 1, "system_seconds": 0, "max_rss_kib": 1,
+        })
+        (directory / "process.json").write_text("{}")
+        (directory / "rss.jsonl").write_text("{}\n")
+        (directory / "stdout-stderr.log").write_text("fixture")
+        process = SimpleNamespace(pid=100+len(self.calls),
+                                  poll=lambda: code, returncode=code)
+        return SimpleNamespace(process=process, started=0, peak_rss=0,
+                               deadline=10000)
+
+
+class DriverTests(unittest.TestCase):
+    def fixture(self, root):
+        (root / "jobs").mkdir()
+        data = root / "data/tier10"
+        data.mkdir(parents=True)
+        driver.atomic_json(data / "manifest.json", {"repos": ["fixture"]})
+        driver.atomic_json(data / "queries.json", [{"id": "q", "op": "id"}])
+        selected = [driver.Job("screen", name, "tier10")
+                    for name in ("sqlite-segment", "pebble-bleve")]
+        setup = {"identity": {"driver": "fixture", "runtime": {}},
+                 "artifacts": {"bin/"+j.adapter: "fixture" for j in selected},
+                 "runtime_libraries": {}}
+        return selected, setup, {p.name: driver.digest(p) for p in data.iterdir()}
+
+    def execute(self, supervisor, selected, setup, receipts):
+        with patch.object(driver, "process_groups", return_value={}), \
+                patch.object(driver, "memory_available", return_value=10**15), \
+                patch.object(driver.time, "monotonic", return_value=0), \
+                patch.object(driver.time, "sleep"):
+            driver.execute_stage(supervisor, selected, setup, 1, receipts)
+
+    def test_named_failure_continues_and_completed_resume_skips(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            selected, setup, before = self.fixture(root)
+            supervisor = FixtureSupervisor(root, ["named", "pass"])
+            receipts = []
+            self.execute(supervisor, selected, setup, receipts)
+            self.assertEqual([r["state"] for r in receipts],
+                             ["checks_failed", "pass"])
+            self.assertEqual(len(supervisor.calls), 2)
+            self.assertEqual(len(driver.eligible_timings(receipts)), 6)
+            resumed = FixtureSupervisor(root, [])
+            saved = []
+            self.execute(resumed, selected, setup, saved)
+            self.assertEqual(resumed.calls, [])
+            self.assertEqual(len(saved), 2)
+            self.assertEqual(before, {p.name: driver.digest(p)
+                                     for p in (root/"data/tier10").iterdir()})
+
+    def test_interruption_preserves_complete_and_refuses_partial(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            selected, setup, before = self.fixture(root)
+            supervisor = FixtureSupervisor(root, ["pass"], interrupt_at=2)
+            receipts = []
+            with self.assertRaisesRegex(driver.ReviewRequired, "interruption"):
+                self.execute(supervisor, selected, setup, receipts)
+            self.assertEqual(len(receipts), 1)
+            resumed = FixtureSupervisor(root, [])
+            saved = []
+            with self.assertRaisesRegex(driver.ReviewRequired, "incomplete attempt"):
+                self.execute(resumed, selected, setup, saved)
+            self.assertEqual(len(saved), 1)
+            self.assertEqual(resumed.calls, [])
+            self.assertEqual(before, {p.name: driver.digest(p)
+                                     for p in (root/"data/tier10").iterdir()})
+
+    def test_incomplete_and_fatal_results_stop_before_next_case(self):
+        for mode in ("incomplete", "fatal"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                selected, setup, before = self.fixture(root)
+                supervisor = FixtureSupervisor(root, [mode, "pass"])
+                with self.assertRaises(driver.ReviewRequired):
+                    self.execute(supervisor, selected, setup, [])
+                self.assertEqual(len(supervisor.calls), 1)
+                self.assertFalse((root/"jobs"/selected[0].name/"complete.json").exists())
+                self.assertEqual(before, {p.name: driver.digest(p)
+                                         for p in (root/"data/tier10").iterdir()})
+
+    def test_required_hybrid_recipe_rejections(self):
+        result = {"method": "f32", "phase": "latency", "queries": 256,
+                  "latency_ns": {"count": 256}, "M": 32, "ef_search": 1024}
+        native = {"native_version": "2.26.5", "config": {
+            "Connectivity": 32, "ExpansionAdd": 256, "Quantization": 1,
+            "Dimensions": 1024}}
+        driver.check_hybrid_recipe("f32", result, native)
+        for key, value in (("method", "exact"), ("M", 16), ("ef_search", 512)):
+            with self.subTest(key=key):
+                with self.assertRaises(driver.ReviewRequired):
+                    driver.check_hybrid_recipe("f32", {**result, key: value}, native)
+        wrong = deepcopy(native)
+        wrong["config"]["ExpansionAdd"] = 128
+        with self.assertRaises(driver.ReviewRequired):
+            driver.check_hybrid_recipe("f32", result, wrong)
+        driver.check_hybrid_recipe("int8", {**result, "method": "int8",
+            "candidate_k": 128, "required_file_components_bytes": {
+                "int8_with_original_f32": 1}})
+        with self.assertRaises(driver.ReviewRequired):
+            driver.check_hybrid_recipe("int8", {**result, "method": "int8",
+                "candidate_k": 128, "required_file_components_bytes": {
+                    "original_f32": 1}})
+
+
+class DeadlineContractTests(unittest.TestCase):
+    def procedure(self):
+        return {
+            "owner": "pi-gcp", "mechanism": "Mac launchd one-shot",
+            "terminate_argv": ["prime", "pods", "terminate", "<pod-id>",
+                               "--yes", "--plain"],
+            "status_argv": ["prime", "pods", "status", "<pod-id>",
+                            "-o", "json"],
+            "time_origin": "created_at",
+            "existing_cli_login": True, "no_api_key_on_pod": True,
+            "provider_ttl": False, "backstop_minute": 710,
+            "awake": "pi-gcp starts caffeinate -i -m -s -t until deadline+15m",
+            "live_receipt_fields": [
+                "job_label", "plist_path", "pod_id", "created_at",
+                "deadline_pdt", "calendar_entry", "install_time_pdt", "awake",
+                "launchctl_state", "setup_confirmed", "owner",
+                "existing_cli_login",
+            ],
+        }
+
+    def bindings(self, root=Path("/work")):
+        return {block: [{
+            "id": block + "-fixture", "argv": ["/usr/bin/true"],
+            "source_pin": "1" * 40, "config_pin": "2" * 64,
+            "input_pin": "3" * 64,
+            "receipt_path": str(root / "control" / (block + ".json")),
+            "minutes": 1, "owner": "fixture-only",
+        }] for block in driver.INPUT_BLOCKS}
+
+    def predecessors(self, block):
+        names = [row[0] for row in driver.BLOCKS]
+        return {name: "completed" for name in names[:names.index(block)]}
+
+    def live(self):
+        allocation = {
+            "pod_id": "fixture-only-pod", "job_label": "fixture-only-job",
+            "created_at": "2026-10-26T00:00:00-07:00",
+            "deadline_pdt": "2026-10-26T12:00:00-07:00",
+        }
+        receipt = {
+            "owner": "pi-gcp", "pod_id": allocation["pod_id"],
+            "job_label": allocation["job_label"],
+            "deadline_pdt": allocation["deadline_pdt"],
+            "setup_confirmed": True, "existing_cli_login": True,
+            "plist_path": (
+                "/fixture/Library/LaunchAgents/fixture-only-job.plist"),
+            "created_at": allocation["created_at"],
+            "calendar_entry": {
+                "Month": 10, "Day": 26, "Hour": 12, "Minute": 0},
+            "install_time_pdt": "2026-10-26T00:00:00-07:00",
+            "awake": {"caffeinate_pid": 12345,
+                      "flags": ["-i", "-m", "-s", "-t", "44100"],
+                      "end_time_pdt": "2026-10-26T12:15:00-07:00",
+                      "ac_power": True},
+            "launchctl_state": {"loaded": True, "disabled": False},
+        }
+        return allocation, receipt
+
+    def test_complete_no_pod_preflight_has_no_effects(self):
+        bindings = self.bindings()
+        before = deepcopy(bindings)
+        with (
+            patch.object(driver.subprocess, "Popen",
+                         side_effect=AssertionError),
+            patch.object(driver.urllib.request, "urlopen",
+                         side_effect=AssertionError),
+            patch.object(Path, "mkdir", side_effect=AssertionError),
+            patch.object(driver, "host_record", side_effect=AssertionError),
+        ):
+            result = driver.preflight(
+                bindings, driver.setup_recipe(),
+                self.procedure(), Path("/work"),
+            )
+        self.assertEqual(result["phase1"], "prepared-no-pod")
+        self.assertEqual(result["backstop_minute"], 710)
+        self.assertEqual(result["retrieval_deadline_minute"], 710)
+        self.assertEqual(result["blocks"][0]["jobs"][0]["owner"], "pi-gcp")
+        self.assertEqual(bindings, before)
+        expected = [
+            ("setup", 45, 0, 45), ("smoke", 25, 45, 70),
+            ("calibration", 15, 70, 85), ("storage", 150, 85, 235),
+            ("segment_timing", 120, 235, 355), ("catalog", 30, 355, 385),
+            ("hybrid", 45, 385, 430), ("model_a4", 160, 430, 590),
+            ("cpu_cost", 60, 590, 650), ("baseline_a7", 40, 650, 690),
+            ("retrieval", 30, 690, 720),
+        ]
+        self.assertEqual([
+            (b["id"], b["minutes"],
+             b["latest_start_minute"], b["deadline_minute"])
+            for b in result["blocks"]], expected)
+        self.assertEqual(sum(b["minutes"] for b in result["blocks"]), 720)
+        self.assertEqual([len(b["jobs"]) for b in result["blocks"]],
+                         [1, 1, 1, 12, 12, 15, 2, 1, 1, 1, 1])
+        self.assertEqual(result["blocks"][-1]["execution_scope"],
+                         "external-owner")
+        self.assertEqual(result["enforcement_entrypoint"],
+                         "study/storage/pod/run.py:main")
+
+    def test_actual_cli_preflight_needs_no_allocation_or_live_job(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            payloads = {
+                "bindings": self.bindings(),
+                "setup-recipe": driver.setup_recipe(),
+                "stop-procedure": self.procedure(),
+            }
+            argv = ["run.py", "--preflight"]
+            for option, payload in payloads.items():
+                path = root / (option + ".json")
+                path.write_text(json.dumps(payload))
+                argv.extend(["--" + option, str(path)])
+            output = StringIO()
+            with (
+                patch.object(sys, "argv", argv),
+                patch.object(sys, "stdout", output),
+                patch.object(driver.subprocess, "Popen",
+                             side_effect=AssertionError),
+                patch.object(driver.urllib.request, "urlopen",
+                             side_effect=AssertionError),
+                patch.object(driver, "host_record",
+                             side_effect=AssertionError),
+                patch.object(Path, "mkdir", side_effect=AssertionError),
+            ):
+                self.assertEqual(driver.main(), 0)
+            result = json.loads(output.getvalue())
+            self.assertEqual(result["phase1"], "prepared-no-pod")
+            self.assertEqual(result["backstop_minute"], 710)
+            self.assertEqual(result["driver_sha256"],
+                             driver.digest(Path(driver.__file__)))
+            self.assertEqual(sorted(p.name for p in root.iterdir()),
+                             ["bindings.json", "setup-recipe.json",
+                              "stop-procedure.json"])
+
+    def test_dry_run_keeps_nonexistent_workspace_absent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / "not-created"
+            output = StringIO()
+            with (
+                patch.object(sys, "argv", [
+                    "run.py", "--dry-run", "--root", str(root)]),
+                patch.object(sys, "stdout", output),
+                patch.object(driver.subprocess, "Popen",
+                             side_effect=AssertionError),
+                patch.object(driver.urllib.request, "urlopen",
+                             side_effect=AssertionError),
+                patch.object(driver, "host_record",
+                             side_effect=AssertionError),
+                patch.object(driver, "process_groups",
+                             side_effect=AssertionError),
+                patch.object(Path, "mkdir", side_effect=AssertionError),
+            ):
+                self.assertEqual(driver.main(), 0)
+            result = json.loads(output.getvalue())
+            self.assertFalse(root.exists())
+            self.assertFalse(result["creation_admitted"])
+            self.assertEqual(result["external_commands_executed"], 0)
+            self.assertEqual(len(result["absolute_schedule"]), 11)
+            self.assertEqual(result["mandatory_owner_bindings"],
+                             sorted(driver.INPUT_BLOCKS))
+
+    def test_each_missing_binding_or_field_names_the_limit(self):
+        for block in sorted(driver.INPUT_BLOCKS):
+            bindings = self.bindings()
+            del bindings[block]
+            with self.subTest(block=block), self.assertRaisesRegex(
+                    driver.ReviewRequired, block):
+                driver.preflight(bindings, driver.setup_recipe(),
+                                 self.procedure(), Path("/work"))
+            for field in ("argv", "source_pin", "config_pin", "input_pin",
+                          "receipt_path", "minutes", "owner"):
+                bindings = self.bindings()
+                del bindings[block][0][field]
+                with self.subTest(block=block, field=field), \
+                        self.assertRaisesRegex(driver.ReviewRequired,
+                                               block + ": missing " + field):
+                    driver.preflight(bindings, driver.setup_recipe(),
+                                     self.procedure(), Path("/work"))
+
+    def test_malformed_bindings_and_impossible_schedule_refuse(self):
+        mutations = [
+            ("minutes", 61), ("minutes", float("nan")), ("minutes", True),
+            ("argv", "not-an-argv"),
+            ("argv", ["/usr/bin/apt-get", "update"]),
+            ("argv", ["/usr/bin/sudo", "-n", "true"]),
+            ("source_pin", "unsealed"),
+            ("config_pin", "bad"), ("input_pin", "bad"),
+            ("receipt_path", "/work/../outside/result.json"),
+            ("id", "../../escape"), ("owner", ""),
+        ]
+        for key, value in mutations:
+            bindings = self.bindings()
+            bindings["cpu_cost"][0][key] = value
+            with self.subTest(key=key, value=value), \
+                    self.assertRaisesRegex(driver.ReviewRequired, "cpu_cost"):
+                driver.preflight(bindings, driver.setup_recipe(),
+                                 self.procedure(), Path("/work"))
+        bindings = self.bindings()
+        bindings["surprise"] = []
+        with self.assertRaisesRegex(driver.ReviewRequired, "unlisted"):
+            driver.preflight(bindings, driver.setup_recipe(),
+                             self.procedure(), Path("/work"))
+
+    def test_early_blocks_maxima_preserve_all_later_windows(self):
+        now = 0
+        outcomes = {}
+        for block, minutes, latest, deadline in driver.BLOCKS:
+            end = driver.block_limit(block, now, 0, 720 * 60, outcomes,
+                                     a3_live=False)
+            self.assertEqual(now, latest * 60)
+            self.assertEqual(end, deadline * 60)
+            self.assertEqual(end - now, minutes * 60)
+            outcomes[block] = "completed"
+            now = end
+        self.assertEqual(now, 720 * 60)
+
+    def test_early_start_does_not_borrow_and_clock_never_resets(self):
+        outcomes = self.predecessors("storage")
+        end = driver.block_limit("storage", 30 * 60, 0, 720 * 60,
+                                 outcomes, a3_live=False)
+        self.assertEqual(end, 180 * 60)
+        supervisor = object.__new__(driver.Supervisor)
+        supervisor.block_id = "storage"
+        supervisor.block_deadline = end
+        supervisor.job_minutes = {"first": 12.5, "second": 12.5}
+        first = supervisor.job_limit("first", 30 * 60)
+        second = supervisor.job_limit("second", end - 20)
+        self.assertEqual(first, 42.5 * 60 - driver.CLEANUP_RESERVE_SECONDS)
+        self.assertEqual(second, end - driver.CLEANUP_RESERVE_SECONDS)
+        self.assertEqual(supervisor.block_deadline, end)
+        with self.assertRaisesRegex(driver.DeadlineExceeded, "deadline"):
+            supervisor.job_limit("second", end)
+
+    def test_session_timing_keeps_the_completed_correctness_receipts(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            admission = driver.preflight(
+                self.bindings(root), driver.setup_recipe(),
+                self.procedure(), root,
+            )
+            supervisor = SimpleNamespace(
+                root=root, allocation={}, termination={}, zero=0,
+                hard_deadline=720 * 60, backstop_deadline=710 * 60,
+                stop_all=unittest.mock.Mock(),
+            )
+
+            def begin(block, outcomes):
+                supervisor.block_deadline = driver.block_limit(
+                    block["id"], 0, 0, 720 * 60, outcomes, a3_live=False)
+            supervisor.begin_block = begin
+            seen = []
+
+            def stage(owner, selected, setup, concurrency, receipts):
+                seen.append(receipts)
+                if selected[0].stage == "timing":
+                    self.assertEqual(len(receipts), 12)
+                    self.assertEqual(sum(
+                        row["identity"]["job"]["stage"] == "oracle"
+                        for row in receipts), 1)
+                for job in selected:
+                    receipts.append({
+                        "identity": {"job": driver.asdict(job)},
+                        "state": "pass",
+                    })
+            with (
+                patch.object(driver.time, "monotonic", return_value=0),
+                patch.object(driver.signal, "signal"),
+                patch.object(driver.signal, "setitimer"),
+                patch.object(driver, "prepare", return_value={}),
+                patch.object(driver, "execute_stage", side_effect=stage),
+                patch.object(driver, "run_catalog_hybrid"),
+                patch.object(driver, "binding_block", return_value="completed"),
+                patch.object(driver, "block_files", return_value={}),
+            ):
+                result = driver.execute_session(
+                    supervisor, admission, root / "inputs", {}, 1)
+            self.assertEqual(len(seen), 3)
+            self.assertIs(seen[0], seen[1])
+            self.assertIs(seen[1], seen[2])
+            self.assertEqual(len(seen[2]), 24)
+            self.assertEqual(result["acceptance"],
+                             "complete-pending-independent-deletion")
+
+    def test_guard_arms_earliest_active_job_without_resetting_block(self):
+        supervisor = object.__new__(driver.Supervisor)
+        supervisor.block_deadline = 1000
+        supervisor.active = [SimpleNamespace(deadline=100),
+                             SimpleNamespace(deadline=200)]
+        with patch.object(driver.time, "monotonic", return_value=10), \
+                patch.object(driver.signal, "setitimer") as timer:
+            supervisor.arm_guard()
+            timer.assert_called_with(signal.ITIMER_REAL, 90)
+            supervisor.active.pop(0)
+            supervisor.arm_guard()
+            timer.assert_called_with(signal.ITIMER_REAL, 190)
+            supervisor.active.clear()
+            supervisor.arm_guard()
+            timer.assert_called_with(signal.ITIMER_REAL, 979)
+        self.assertEqual(supervisor.block_deadline, 1000)
+
+    def test_late_launch_cpu_reserves_and_unclean_order_refuse(self):
+        for block, _, latest, _ in driver.BLOCKS[1:]:
+            with self.subTest(block=block), self.assertRaises(
+                    driver.DeadlineExceeded):
+                driver.block_limit(block, latest * 60 + 1, 0, 720 * 60,
+                                   self.predecessors(block), a3_live=False)
+        with self.assertRaisesRegex(driver.ReviewRequired, "predecessor"):
+            driver.block_limit("storage", 0, 0, 720 * 60, {}, a3_live=False)
+        with self.assertRaisesRegex(
+                driver.DeadlineExceeded, "70-minute reserve"):
+            driver.block_limit("cpu_cost", 650 * 60, 0, 720 * 60,
+                               self.predecessors("cpu_cost"), a3_live=False)
+        with self.assertRaisesRegex(driver.ReviewRequired, "A3 is still live"):
+            driver.block_limit("baseline_a7", 600 * 60, 0, 720 * 60,
+                               self.predecessors("baseline_a7"), a3_live=True)
+        for block in ("storage", "model_a4"):
+            outcomes = self.predecessors("cpu_cost")
+            outcomes[block] = "partial"
+            with self.subTest(block=block), self.assertRaisesRegex(
+                    driver.ReviewRequired, "cpu_cost: dependency " + block):
+                driver.block_limit("cpu_cost", 590 * 60, 0, 720 * 60,
+                                   outcomes, a3_live=False)
+        outcomes = self.predecessors("cpu_cost")
+        outcomes["model_a4"] = "dependency_blocked"
+        self.assertEqual(driver.block_limit(
+            "cpu_cost", 590 * 60, 0, 720 * 60, outcomes, a3_live=False),
+            650 * 60)
+
+    def test_backstop_is_separate_from_session_and_bounds_retrieval(self):
+        allocation, receipt = self.live()
+        allocation["deadline_pdt"] = "2026-10-26T11:50:00-07:00"
+        receipt["deadline_pdt"] = allocation["deadline_pdt"]
+        receipt["calendar_entry"] = {
+            "Month": 10, "Day": 26, "Hour": 11, "Minute": 50,
+        }
+        wall = driver.timestamp(allocation["created_at"], "fixture")
+        zero, backstop = driver.live_termination(allocation, receipt, wall + 1)
+        self.assertEqual(backstop - zero, 710 * 60)
+        # Plain values test the admitted supervisor window without prctl,
+        # a host probe, a subprocess, a pod or an actual launchd job.
+        supervisor = object.__new__(driver.Supervisor)
+        supervisor.zero = 0
+        supervisor.hard_deadline = 720 * 60
+        supervisor.backstop_deadline = 710 * 60
+        supervisor.active = []
+        with patch.object(driver.time, "monotonic", return_value=0):
+            supervisor.begin_block({"id": "setup", "jobs": []}, {})
+        self.assertEqual(supervisor.block_deadline, 45 * 60)
+        with patch.object(driver.time, "monotonic", return_value=690 * 60):
+            supervisor.begin_block(
+                {"id": "retrieval", "jobs": []},
+                self.predecessors("retrieval"),
+            )
+        self.assertEqual(supervisor.block_deadline, 710 * 60)
+        self.assertEqual(supervisor.block_deadline - 690 * 60, 20 * 60)
+        for minute, reason in ((689, "backstop cuts a measurement window"),
+                               (721, "backstop exceeds cap")):
+            procedure = {**self.procedure(), "backstop_minute": minute}
+            with self.subTest(prospective=minute), self.assertRaisesRegex(
+                    driver.ReviewRequired, reason):
+                driver.preflight(self.bindings(), driver.setup_recipe(),
+                                 procedure, Path("/work"))
+            end = wall + minute * 60
+            changed = {**allocation, "deadline_pdt": datetime.fromtimestamp(
+                end, ZoneInfo("America/Los_Angeles")).isoformat()}
+            live = {**receipt, "deadline_pdt": changed["deadline_pdt"]}
+            with self.subTest(live=minute), self.assertRaisesRegex(
+                    driver.ReviewRequired, reason):
+                driver.live_termination(changed, live, wall + 1)
+
+    def test_live_receipt_exact_binding_and_no_spawn_on_rejection(self):
+        allocation, receipt = self.live()
+        now = driver.timestamp(allocation["created_at"], "fixture") + 1
+        self.assertEqual(driver.live_termination(allocation, receipt, now),
+                         (now - 1, now - 1 + 720 * 60))
+        for key, wrong in (
+                ("pod_id", "another-pod"), ("job_label", "another-job"),
+                ("deadline_pdt", "2026-10-26T11:59:00-07:00"),
+                ("setup_confirmed", False), ("existing_cli_login", False),
+                ("awake", {}), ("owner", "another-owner")):
+            changed = {**receipt, key: wrong}
+            with self.subTest(key=key), self.assertRaisesRegex(
+                    driver.ReviewRequired, "A9/pi-gcp deletion"):
+                driver.live_termination(allocation, changed, now)
+        for missing in ({}, None):
+            with self.assertRaisesRegex(
+                    driver.ReviewRequired, "A9/pi-gcp deletion"):
+                driver.live_termination(allocation, missing, now)
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            supervisor = object.__new__(driver.Supervisor)
+            supervisor.allocation, supervisor.termination = allocation, {}
+            with patch.object(driver.time, "time", return_value=now), \
+                    patch.object(driver.subprocess, "Popen") as spawn:
+                with self.assertRaisesRegex(
+                    driver.ReviewRequired, "A9/pi-gcp deletion"):
+                    supervisor.start(["/usr/bin/true"], root, {}, root)
+                spawn.assert_not_called()
+                self.assertEqual(list(root.iterdir()), [])
+
+    def package_fixture(self, root, missing=None, config_only=None):
+        names = (
+            "build-essential", "cmake", "git", "ca-certificates", "curl",
+            "zstd", "pkg-config", "binutils", "file", "time", "util-linux",
+        )
+        versions = {name: "1.0-fixture" for name in names if name != missing}
+        version_log = root / "versions.txt"
+        state_log = root / "states.txt"
+        version_log.write_text("".join(
+            f"{name} {value}\n" for name, value in versions.items()))
+        state_log.write_text("".join(
+            f"{name} "
+            f"{'config-files' if name == config_only else 'installed'}\n"
+            for name in versions))
+        supervisor = SimpleNamespace(run=unittest.mock.Mock(
+            side_effect=[version_log, state_log]))
+        return supervisor, versions, names
+
+    def test_setup_only_queries_exact_package_versions_and_installation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            supervisor, expected, names = self.package_fixture(Path(folder))
+            self.assertEqual(driver.verify_package_versions(supervisor),
+                             expected)
+            calls = supervisor.run.call_args_list
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0].args[0], [
+                "dpkg-query", "-W", "-f", "${Package} ${Version}\n", *names])
+            self.assertEqual(calls[1].args[0], [
+                "dpkg-query", "-W", "-f",
+                "${Package} ${db:Status-Status}\n", *names])
+            for call in calls:
+                self.assertEqual(call.kwargs, {"accepted_exit_codes": (0, 1)})
+                self.assertNotIn("apt-get", call.args[0])
+                self.assertNotIn("sudo", call.args[0])
+
+    def test_setup_missing_or_config_only_package_refuses_by_name(self):
+        for field in ("missing", "config_only"):
+            with self.subTest(field=field), \
+                    tempfile.TemporaryDirectory() as folder:
+                supervisor, _, _ = self.package_fixture(
+                    Path(folder), **{field: "cmake"})
+                with self.assertRaisesRegex(driver.ReviewRequired, "cmake"):
+                    driver.verify_package_versions(supervisor)
+
+    def test_prepare_refuses_missing_package_before_download(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            control, inputs = root / "control", root / "inputs"
+            control.mkdir()
+            inputs.mkdir()
+            archive = inputs / "tier1.tar.zst"
+            archive.write_bytes(b"fixture")
+            expected = {"sha256": driver.digest(archive), "bytes": 7,
+                        "queries": 1}
+            (inputs / "tiers-summary.json").write_text(json.dumps({
+                "tier1": {"archive_sha256": expected["sha256"],
+                          "archive_bytes": 7, "queries": 1},
+            }))
+            supervisor, _, _ = self.package_fixture(control, missing="cmake")
+            supervisor.root = root
+            disk = SimpleNamespace(free=10**15,
+                                   _asdict=lambda: {"free": 10**15})
+            with (
+                patch.object(driver, "ARCHIVES", {"tier1": expected}),
+                patch.object(driver, "host_record", return_value={}),
+                patch.object(driver.shutil, "disk_usage", return_value=disk),
+                patch.object(driver, "download") as download,
+            ):
+                with self.assertRaisesRegex(driver.ReviewRequired, "cmake"):
+                    driver.prepare(supervisor, inputs, {},
+                                   driver.setup_recipe())
+                download.assert_not_called()
+            self.assertEqual(supervisor.run.call_count, 2)
+            self.assertFalse((root / "setup-complete.json").exists())
+
+    def test_driver_has_no_apt_or_sudo_argv_builder(self):
+        tree = ast.parse(Path(driver.__file__).read_text())
+        bad = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.List, ast.Tuple)):
+                for element in node.elts:
+                    if (isinstance(element, ast.Constant)
+                            and element.value in ("apt-get", "sudo")):
+                        bad.append((element.lineno, element.value))
+        self.assertEqual(bad, [])
+        allocation, receipt = self.live()
+        wall = driver.timestamp(allocation["created_at"], "fixture") + 1
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            supervisor = object.__new__(driver.Supervisor)
+            supervisor.allocation = allocation
+            supervisor.termination = receipt
+            with patch.object(driver.time, "time", return_value=wall), \
+                    patch.object(driver.subprocess, "Popen") as spawn:
+                for executable in ("apt-get", "/usr/bin/sudo"):
+                    with self.subTest(executable=executable), \
+                            self.assertRaisesRegex(driver.ReviewRequired,
+                                                   "pi-gcp owns SSH setup"):
+                        supervisor.start([executable], root, {}, root)
+                spawn.assert_not_called()
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_stop_receipt_requires_actual_pi_gcp_fields_and_state(self):
+        allocation, original = self.live()
+        wall = driver.timestamp(allocation["created_at"], "fixture") + 1
+        required = (
+            "job_label", "plist_path", "pod_id", "created_at", "deadline_pdt",
+            "calendar_entry", "install_time_pdt", "awake", "launchctl_state",
+            "setup_confirmed", "owner", "existing_cli_login",
+        )
+        for field in required:
+            receipt = deepcopy(original)
+            del receipt[field]
+            with self.subTest(missing=field), self.assertRaises(
+                    driver.ReviewRequired):
+                driver.live_termination(allocation, receipt, wall)
+        mutations = (
+            ("created_at", "2026-10-26T00:00:01-07:00"),
+            ("calendar_entry", {"Month": 10, "Day": 26,
+                                "Hour": 11, "Minute": 59}),
+            ("install_time_pdt", "2026-10-25T23:59:00-07:00"),
+            ("launchctl_state", {"loaded": False, "disabled": False}),
+            ("launchctl_state", {"loaded": True, "disabled": True}),
+        )
+        for field, value in mutations:
+            with self.subTest(malformed=field), self.assertRaises(
+                    driver.ReviewRequired):
+                driver.live_termination(allocation,
+                                        {**original, field: value}, wall)
+        for field, value in (("caffeinate_pid", 0), ("flags", ["-i"]),
+                             ("end_time_pdt", allocation["deadline_pdt"]),
+                             ("ac_power", "unknown")):
+            receipt = deepcopy(original)
+            receipt["awake"][field] = value
+            with self.subTest(awake=field), self.assertRaises(
+                    driver.ReviewRequired):
+                driver.live_termination(allocation, receipt, wall)
+        procedure = self.procedure()
+        for field, value in (("terminate_argv", ["prime", "pods", "terminate",
+                                                "<pod-id>"]),
+                             ("status_argv", ["prime", "pods", "status"]),
+                             ("time_origin", "allocated_at")):
+            with self.subTest(procedure=field), self.assertRaises(
+                    driver.ReviewRequired):
+                driver.validate_procedure({**procedure, field: value})
+
+    def test_recipe_rejects_before_package_manager_or_workspace_effect(self):
+        recipe = driver.setup_recipe()
+        driver.validate_recipe(recipe)
+        for mode in ("extra-package", "missing-package",
+                     "upgrade", "path", "owner"):
+            changed = deepcopy(recipe)
+            if mode == "extra-package":
+                changed["packages"].append("unlisted")
+            elif mode == "missing-package":
+                changed["packages"].pop()
+            elif mode == "upgrade":
+                changed["commands"][0] = "apt-get dist-upgrade"
+            elif mode == "path":
+                changed["allowed_system_paths"].append("/opt")
+            else:
+                changed["owner"] = ""
+            supervisor = SimpleNamespace(run=unittest.mock.Mock())
+            with (self.subTest(mode=mode),
+                  self.assertRaises(driver.ReviewRequired)):
+                driver.prepare(supervisor, Path("/not-created"), {}, changed)
+            supervisor.run.assert_not_called()
+
+    @unittest.skipUnless(
+        sys.platform == "linux", "Linux /proc and subreaper contract")
+    def test_nonreturner_whole_group_is_terminated_and_reaped(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "setup").mkdir()
+            allocation, receipt = self.live()
+            now_wall = (
+                driver.timestamp(allocation["created_at"], "fixture") + 1)
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.addCleanup(listener.close)
+            ready = root / "ready.sock"
+            listener.bind(str(ready))
+            listener.listen(2)
+            listener.settimeout(2)
+            previous_alarm = signal.getsignal(signal.SIGALRM)
+            self.addCleanup(signal.signal, signal.SIGALRM, previous_alarm)
+            self.addCleanup(signal.setitimer, signal.ITIMER_REAL, 0)
+            with patch.object(driver.time, "time", return_value=now_wall):
+                supervisor = driver.Supervisor(
+                    root, dict(os.environ), allocation=allocation,
+                    termination=receipt,
+                )
+                supervisor.block_id = "fixture-nonreturner"
+                start = time.monotonic()
+                supervisor.block_deadline = start + 15
+                supervisor.launch_deadline = start + 2
+                program = (
+                    "import os,signal,socket,sys; "
+                    "signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+                    "child=os.fork(); "
+                    "s=socket.socket(socket.AF_UNIX); "
+                    "s.connect(sys.argv[1]); "
+                    "s.sendall(str(os.getpid()).encode()); s.close(); "
+                    "signal.pause()"
+                )
+                try:
+                    with self.assertRaisesRegex(driver.DeadlineExceeded,
+                                                "absolute setup deadline"):
+                        supervisor.run(
+                            [sys.executable, "-c", program, str(ready)])
+                    pgid = driver.read_json(
+                        root / "setup/command-001/process.json")["pid"]
+                finally:
+                    supervisor.stop_all()
+                children = []
+                for _ in range(2):
+                    connection, _ = listener.accept()
+                    with connection:
+                        connection.settimeout(2)
+                        children.append(int(connection.recv(100)))
+                self.assertEqual(len(set(children)), 2)
+                self.assertIn(pgid, children)
+                self.assertEqual(supervisor.active, [])
+                self.assertEqual(supervisor.block_deadline, start + 15)
+                self.assertNotIn(pgid, driver.process_groups())
+                for pid in children:
+                    with self.assertRaises(ChildProcessError):
+                        os.waitpid(pid, os.WNOHANG)
+                self.assertLess(time.monotonic(), start + 15)
+                directory = root / "setup/command-001"
+                self.assertTrue((directory / "process.json").exists())
+                self.assertTrue((directory / "stdout-stderr.log").exists())
+                failure = driver.read_json(directory / "failure.json")
+                self.assertTrue(failure["whole_group_reaped"])
+                self.assertEqual(failure["state"], "partial")
+                self.assertLess(failure["exit_code"], 0)
+                self.assertFalse((directory / "complete.json").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()
