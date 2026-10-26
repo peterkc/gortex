@@ -27,7 +27,7 @@ func (cr *CrossRepoResolver) ResolveMutationFiles(resolutionFiles, materializati
 }
 
 // CrossRepoIncomingAdmission is one cross-repository mutation pass's bounded
-// incoming-stub admission: the completeness fact plus the typed refusal that
+// incoming-stub and Go-import admission: the completeness fact plus the typed refusal that
 // produced it (*graph.BoundedLocalizationLimitError, nil when nothing was
 // refused).
 //
@@ -65,7 +65,7 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 		return stats, admission
 	}
 
-	importBudget := &graph.IncomingSourceBudget{}
+	importBudget := newGoModuleImportRecoveryBudget()
 	// Provider recovery needs the lazy seed before the pass lock is taken.
 	// Ordinary consumer frontiers keep local resolution ahead of the bridge.
 	if len(definitionFiles) > 0 {
@@ -75,6 +75,7 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 	}
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
+	cr.goModuleImportsDeferred = 0
 
 	budget := &graph.IncomingSourceBudget{}
 	if len(resolutionFiles) > 0 {
@@ -187,10 +188,12 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 		repos[repo] = true
 		ids := cr.goModuleImportIDs(repo)
 		if len(ids) > importBudget.Remaining() {
+			cr.goModuleImportsDeferred += len(ids)
 			cr.logger.Warn("cross-repo resolve: Go module imports deferred to full pass", zap.Int("imports", len(ids)), zap.Int("remaining", importBudget.Remaining()))
 			continue
 		}
 		if err := importBudget.Charge(len(ids)); err != nil {
+			cr.goModuleImportsDeferred += len(ids)
 			cr.logger.Warn("cross-repo resolve: Go module imports deferred to full pass", zap.Error(err))
 			continue
 		}
@@ -201,6 +204,19 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 		}
 	}
 
+	if deferred := cr.goModuleImportsDeferred; deferred > 0 {
+		admission.Refused = true
+		admission.Dropped += deferred
+		admission.Limit = graph.MaxIncomingSourceCandidateRows
+		if admission.Refusal == nil {
+			admission.Refusal = &graph.BoundedLocalizationLimitError{Resource: "Go module import recovery", Limit: graph.MaxIncomingSourceCandidateRows}
+		}
+		if state := cr.goModuleRetry; state != nil {
+			state.mu.Lock()
+			state.complete = false
+			state.mu.Unlock()
+		}
+	}
 	DetectCrossRepoEdgesForMutationFiles(cr.graph, edgeSourceFiles, definitionFiles)
 	return stats, admission
 }
