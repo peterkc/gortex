@@ -551,10 +551,10 @@ func (mi *MultiIndexer) runCrossRepoResolveContext(ctx context.Context, reconcil
 // and global topology-writer gate, so the graph cannot expose a half-resolved
 // batch between same-repo, semantic, and cross-repository phases.
 func (mi *MultiIndexer) runCrossRepoResolveFiles(filePaths []string, cargoRetargetRepo ...string) {
-	mi.runCrossRepoResolveMutationFrontiers(filePaths, filePaths, filePaths, cargoRetargetRepo...)
+	mi.runCrossRepoResolveMutationFrontiers(filePaths, filePaths, filePaths, nil, cargoRetargetRepo...)
 }
 
-func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiers(resolutionFiles, edgeSourceFiles, definitionFiles []string, cargoRetargetRepo ...string) {
+func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiers(resolutionFiles, edgeSourceFiles, definitionFiles, masterResolvedFiles []string, cargoRetargetRepo ...string) {
 	if len(resolutionFiles) == 0 && len(edgeSourceFiles) == 0 && len(definitionFiles) == 0 {
 		return
 	}
@@ -571,8 +571,23 @@ func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiers(resolutionFiles, ed
 	}
 	// Match cold ordering: tracked-provider refusal must remain authoritative
 	// after fallback has handled genuinely external calls.
+	prepared := make(map[string]bool, len(masterResolvedFiles))
+	for _, file := range masterResolvedFiles {
+		prepared[file] = true
+	}
+	var outgoingFiles []string
+	for _, file := range bridgeFiles {
+		if !prepared[file] {
+			outgoingFiles = append(outgoingFiles, file)
+		}
+	}
+	if len(outgoingFiles) > 0 {
+		if master := mi.newMasterResolver(false); master != nil {
+			master.ResolveFilesOutgoing(outgoingFiles)
+			mi.reconcileRetargetedTestCalls(master.TakeRetargetedTestCallFiles())
+		}
+	}
 	if len(bridgeFiles) > 0 {
-		mi.runMasterResolveFiles(bridgeFiles, false)
 		mi.synthesizeDemotedGoModuleCalls(bridgeFiles)
 	}
 	_, admission := cr.ResolveMutationFrontiersBounded(resolutionFiles, edgeSourceFiles, definitionFiles)

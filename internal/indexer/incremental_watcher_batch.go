@@ -555,6 +555,7 @@ func (mi *MultiIndexer) resolveIncrementalRepoMutationMode(
 		crossRepoFiles = appendUniqueSorted(crossRepoFiles, result.DerivedInvalidation.Files...)
 	}
 	idx := mi.GetIndexer(repoPrefix)
+	var masterResolvedFiles []string
 	if needed && len(files) > 0 && idx != nil {
 		resolvedFiles := idx.runIncrementalResolutionCatchup(files, batch, func(frontier []string) {
 			if idx.incrementalResolveFilesHook != nil {
@@ -563,12 +564,14 @@ func (mi *MultiIndexer) resolveIncrementalRepoMutationMode(
 			}
 			mi.runMasterResolveFilesWithEvidence(frontier, false, idx.resolver)
 		})
+		masterResolvedFiles = resolvedFiles
 		crossRepoFiles = appendUniqueSorted(crossRepoFiles, resolvedFiles...)
 		if receipt != nil && receipt.Complete {
 			mi.runMasterResolveNames(vanishedReceiptNames(mi.graph, receipt))
 		}
 	} else if needed && len(files) > 0 {
 		mi.runMasterResolveFiles(files, false)
+		masterResolvedFiles = files
 		if receipt != nil && receipt.Complete {
 			mi.runMasterResolveNames(vanishedReceiptNames(mi.graph, receipt))
 		}
@@ -604,7 +607,7 @@ func (mi *MultiIndexer) resolveIncrementalRepoMutationMode(
 			idx.observeIncrementalCatchup("cross_repo", crossRepoFiles)
 		}
 		if len(crossRepoFiles) > 0 {
-			mi.runCrossRepoResolveFiles(crossRepoFiles, cargoRetargetRepo)
+			mi.runCrossRepoResolveMutationFrontiers(crossRepoFiles, crossRepoFiles, crossRepoFiles, masterResolvedFiles, cargoRetargetRepo)
 		} else {
 			mi.runCrossRepoResolve(false)
 		}
