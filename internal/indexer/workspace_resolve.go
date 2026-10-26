@@ -498,7 +498,7 @@ func (mi *MultiIndexer) newCrossRepoResolver() *resolver.CrossRepoResolver {
 	cr.SetNpmAliasResolver(mi.npmAliasResolver())
 	cr.SetNpmDependencyLookup(mi.npmDependencyLookup())
 	cr.SetNpmPackageLookup(mi.npmPackageLookup())
-	cr.SetCargoCrateLookup(mi.cargoCrateLookup())
+	cr.SetCargoCrateLookup(mi.lazyCargoCrateLookup())
 	if mi.IsMultiRepo() {
 		cr.SetPythonPackageLookup(mi.pythonPackageLookup)
 	}
