@@ -617,6 +617,7 @@ func (mi *MultiIndexer) resolveIncrementalRepoMutationMode(
 	if !needed || len(files) == 0 || idx == nil {
 		batch.publicationStamps().markSharedOptionalDisposition("patch_analysis", "resolution_catchup_not_entered")
 	}
+	var masterResolvedFiles []string
 	if needed && len(files) > 0 && idx != nil {
 		resolvedFiles := idx.runIncrementalResolutionCatchup(files, batch, func(frontier []string) {
 			if idx.incrementalResolveFilesHook != nil {
@@ -625,6 +626,7 @@ func (mi *MultiIndexer) resolveIncrementalRepoMutationMode(
 			}
 			mi.runMasterResolveFilesObserved(frontier, false, idx.resolver, batch.publicationStamps().mutationResolveMutexObserver())
 		})
+		masterResolvedFiles = resolvedFiles
 		crossRepoFiles = appendUniqueSorted(crossRepoFiles, resolvedFiles...)
 		if receipt != nil && receipt.Complete {
 			names := batch.publicationStamps().beginPatchLap(patchResolve)
@@ -637,6 +639,7 @@ func (mi *MultiIndexer) resolveIncrementalRepoMutationMode(
 		resolve := batch.publicationStamps().beginPatchLap(patchResolve)
 		mi.runMasterResolveFilesObserved(files, false, nil, batch.publicationStamps().mutationResolveMutexObserver())
 		resolve.end()
+		masterResolvedFiles = files
 		if receipt != nil && receipt.Complete {
 			names := batch.publicationStamps().beginPatchLap(patchResolve)
 			vanished := vanishedReceiptNames(mi.graph, receipt)
@@ -680,7 +683,7 @@ func (mi *MultiIndexer) resolveIncrementalRepoMutationMode(
 		}
 		cross := batch.publicationStamps().beginPatchLap(patchResolve)
 		if len(crossRepoFiles) > 0 {
-			mi.runCrossRepoResolveMutationFrontiersObserved(crossRepoFiles, crossRepoFiles, crossRepoFiles, batch.publicationStamps().mutationResolveMutexObserver(), cargoRetargetRepo)
+			mi.runCrossRepoResolveMutationFrontiersObserved(crossRepoFiles, crossRepoFiles, crossRepoFiles, masterResolvedFiles, batch.publicationStamps().mutationResolveMutexObserver(), cargoRetargetRepo)
 		} else {
 			wide = true
 			mi.runCrossRepoResolve(false)
