@@ -6,9 +6,13 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/parser/languages"
 )
 
 // metaKeysRestatedOutsideTheFingerprint names every node or edge metadata key
@@ -45,6 +49,9 @@ var metaKeysRestatedOutsideTheFingerprint = map[string]string{
 	// External module stubs: the module scanner / external-call attribution.
 	"ecosystem":   "modules scanner / resolver external_call_attribution (module nodes)",
 	"import_path": "modules scanner / resolver external_call_attribution (module nodes)",
+
+	// Python imports are restated by whole resolves, file saves, and tracked binding.
+	"python_import": "resolver attributeNonGoModuleImports / attributePythonModuleImportsForFiles / resolveTrackedPythonImports (exact dotted import spelling)",
 	// Test classification after extraction (test_edges.go).
 	"is_test":      "test pass (test_edges.go)",
 	"is_test_file": "test pass (test_edges.go)",
@@ -138,6 +145,61 @@ func TestEveryMetadataKeyIsFingerprintedOrRestated(t *testing.T) {
 			if len(missing) > 0 {
 				t.Errorf("metadata keys neither fingerprinted nor named with a restater: %v", missing)
 			}
+		})
+	}
+}
+
+func TestPythonImportSpellingEditColdEquivalent(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			openStore := func() graph.Store {
+				if backend == "memory" {
+					return graph.New()
+				}
+				db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.sqlite"))
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, db.Close()) })
+				return db
+			}
+			newIndexer := func(g graph.Store) *Indexer {
+				reg := newTestRegistry()
+				reg.Register(languages.NewPythonExtractor())
+				idx := New(g, reg, config.Default().Index, zap.NewNop())
+				idx.SetRepoPrefix("consumer")
+				t.Cleanup(idx.Close)
+				return idx
+			}
+			imports := func(g graph.Store) []*graph.Edge {
+				var out []*graph.Edge
+				for _, edge := range g.GetOutEdges("consumer/app.py") {
+					if edge.Kind == graph.EdgeImports {
+						out = append(out, edge)
+					}
+				}
+				require.Len(t, out, 1)
+				return out
+			}
+			// Given an attributed import with a stable local alias and module target.
+			root := t.TempDir()
+			file := filepath.Join(root, "app.py")
+			writeFile(t, file, "import pkg.mod as current\ndef run(): return current.open()\n")
+			warm := openStore()
+			idx := newIndexer(warm)
+			_, err := idx.Index(root)
+			require.NoError(t, err)
+			before := imports(warm)[0]
+			require.Equal(t, "pkg.mod", before.Meta["python_import"])
+			require.Equal(t, "module::pypi:pkg", before.To)
+			// When only the dotted module spelling changes, keeping the alias and top.
+			writeFile(t, file, "import pkg.other as current\ndef run(): return current.open()\n")
+			require.NoError(t, idx.IndexFile(file))
+			cold := openStore()
+			_, err = newIndexer(cold).Index(root)
+			require.NoError(t, err)
+			// Then the incremental edge, including python_import, equals a cold index.
+			require.Equal(t, "pkg.other", imports(warm)[0].Meta["python_import"])
+			require.Equal(t, "module::pypi:pkg", imports(warm)[0].To)
+			require.Equal(t, imports(cold), imports(warm))
 		})
 	}
 }

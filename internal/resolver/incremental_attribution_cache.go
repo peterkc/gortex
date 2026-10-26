@@ -107,6 +107,8 @@ func (r *Resolver) runFileAttributionPassesForFilesLocked(frontier incrementalFi
 	// before the builtin and external materialisation passes inspect them.
 	r.flushIncrementalAttributionReindexes()
 	legs.lap("flush")
+	r.attributePythonModuleImportsForFiles(frontier.paths)
+	legs.lap("python_modules")
 
 	if !r.graphHasLanguage("go") {
 		return

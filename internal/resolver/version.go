@@ -39,7 +39,9 @@ import (
 // Package-scoped same-receiver field fallback changes edges for an unchanged corpus.
 // Convergence winner payloads and surviving outgoing order change stored edges
 // for an unchanged corpus.
-const ResolutionSemanticsVersion = 4
+// Go module binding changes candidate order, cross-repo provenance and import identity.
+// Python import and call stubs add stored metadata required by tracked-package linking.
+const ResolutionSemanticsVersion = 6
 
 // resolverVersionDomain versions the ENCODING below, not the contract. Two
 // fingerprints that disagree about how the preimage is rendered must not be

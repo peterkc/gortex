@@ -290,6 +290,7 @@ func contractCoreUnprobedCapabilities() []contractCoreCapName {
 		{"EnrichmentStateStore", capOf[graph.EnrichmentStateStore]},
 		{"ExactEdgeBatchRemover", capOf[graph.ExactEdgeBatchRemover]},
 		{"ExistingNodeIDFinder", capOf[graph.ExistingNodeIDFinder]},
+		{"ExternalCallCandidateIterator", capOf[graph.ExternalCallCandidateIterator]},
 		{"ExternalCallCandidates", capOf[graph.ExternalCallCandidates]},
 		{"FileBatchEvicter", capOf[graph.FileBatchEvicter]},
 		{"FileIndexFailureReader", capOf[graph.FileIndexFailureReader]},

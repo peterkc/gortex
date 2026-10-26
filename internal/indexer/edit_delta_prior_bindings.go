@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -168,11 +169,17 @@ func stagePriorBindings(g graph.Store, stages []*incrementalBatchStage, view inc
 			if ambiguous || chosen == nil {
 				continue
 			}
+			meta := resolutionMetaAdded(chosen.edge.Meta, edge.Meta)
+			for _, key := range reuseBindingMetaKeys {
+				if _, kept := meta[key]; kept {
+					meta[key] = edge.To
+				}
+			}
 			out[resolver.PriorBindingKey(edge.From, edge.Kind, edge.Line, edge.To)] = resolver.PriorBinding{
 				To:         chosen.target,
 				Origin:     chosen.edge.Origin,
 				Confidence: chosen.edge.Confidence,
-				Meta:       resolutionMetaAdded(chosen.edge.Meta, edge.Meta),
+				Meta:       meta,
 			}
 		}
 	}
@@ -259,29 +266,43 @@ func pruneBuiltinReuse(reuse map[reuseKey]*reuseVal) {
 // edge (semantic.ConfirmEdge).
 var reuseSemanticMetaKeys = []string{"confirmed_from_origin", "semantic_source"}
 
-// reuseSemanticMeta is the confirmation provenance of a captured bind, nil when
-// it carries none. A confirmed bind's origin is LSP-grade, and a later
-// confirmation of an edge that already carries an LSP-grade origin leaves it
-// as it is, so a reuse that restored the origin without this provenance would
-// leave the edge different from the one a whole index confirms.
+// reuseBindingMetaKeys are importer-owned binding stubs a reused bind keeps
+// even without confirmation reuse; applyReuseSemanticMeta rewrites each to the
+// fresh call spelling.
+var reuseBindingMetaKeys = []string{"cargo_call_stub", "python_call_stub"}
+
+// reuseCarriedMetaKeys are importer-owned binding markers a reused bind keeps
+// verbatim, even when its confirmation provenance is dropped. go_import lets a
+// parked cross-module Go call relink when its provider returns.
+var reuseCarriedMetaKeys = []string{"go_import"}
+
+// reuseSemanticMeta is the confirmation provenance and binding markers of a
+// captured bind, nil when it carries none. A confirmed bind's origin is
+// LSP-grade, and a later confirmation of an edge that already carries an
+// LSP-grade origin leaves it as it is, so a reuse that restored the origin
+// without this provenance would leave the edge different from the one a whole
+// index confirms.
 func reuseSemanticMeta(edge *graph.Edge) map[string]any {
 	if edge == nil || len(edge.Meta) == 0 {
 		return nil
 	}
 	var out map[string]any
-	for _, key := range reuseSemanticMetaKeys {
-		if value, ok := edge.Meta[key]; ok {
-			if out == nil {
-				out = make(map[string]any, len(reuseSemanticMetaKeys))
+	for _, keys := range [][]string{reuseSemanticMetaKeys, reuseBindingMetaKeys, reuseCarriedMetaKeys} {
+		for _, key := range keys {
+			if value, ok := edge.Meta[key]; ok {
+				if out == nil {
+					out = make(map[string]any)
+				}
+				out[key] = value
 			}
-			out[key] = value
 		}
 	}
 	return out
 }
 
-// applyReuseSemanticMeta restores a reused bind's confirmation provenance.
-func applyReuseSemanticMeta(edge *graph.Edge, meta map[string]any) {
+// applyReuseSemanticMeta restores provenance, carried markers and the fresh
+// call spelling of binding stubs.
+func applyReuseSemanticMeta(edge *graph.Edge, meta map[string]any, originalTarget string) {
 	if len(meta) == 0 {
 		return
 	}
@@ -289,6 +310,9 @@ func applyReuseSemanticMeta(edge *graph.Edge, meta map[string]any) {
 		edge.Meta = make(map[string]any, len(meta))
 	}
 	for key, value := range meta {
+		if slices.Contains(reuseBindingMetaKeys, key) {
+			value = originalTarget // A name-level reuse can cover different call spellings.
+		}
 		edge.Meta[key] = value
 	}
 }
@@ -298,7 +322,9 @@ func applyReuseSemanticMeta(edge *graph.Edge, meta map[string]any) {
 func stripReuseSemanticMeta(reuse map[reuseKey]*reuseVal) {
 	for _, val := range reuse {
 		if val != nil {
-			val.semanticMeta = nil
+			for _, key := range reuseSemanticMetaKeys {
+				delete(val.semanticMeta, key)
+			}
 		}
 	}
 }

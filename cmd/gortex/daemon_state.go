@@ -316,15 +316,17 @@ type warmupTimings struct {
 // parallel reconcile pool. Any incomplete result fails closed to the existing
 // repo/global pipeline; an ordinary warm delta stays file-scoped end to end.
 type warmupDeltaFrontier struct {
-	mu    sync.Mutex
-	exact bool
-	plans map[string]indexer.DerivedInvalidationPlan
+	mu             sync.Mutex
+	exact          bool
+	plans          map[string]indexer.DerivedInvalidationPlan
+	crossRepoFiles map[string]struct{}
 }
 
 func newWarmupDeltaFrontier() *warmupDeltaFrontier {
 	return &warmupDeltaFrontier{
-		exact: true,
-		plans: make(map[string]indexer.DerivedInvalidationPlan),
+		exact:          true,
+		plans:          make(map[string]indexer.DerivedInvalidationPlan),
+		crossRepoFiles: make(map[string]struct{}),
 	}
 }
 
@@ -337,6 +339,13 @@ func (frontier *warmupDeltaFrontier) invalidate() {
 func (frontier *warmupDeltaFrontier) record(result *indexer.IndexResult) {
 	frontier.mu.Lock()
 	defer frontier.mu.Unlock()
+	if result != nil {
+		for _, file := range result.CrossRepoResolveFiles {
+			if file != "" {
+				frontier.crossRepoFiles[file] = struct{}{}
+			}
+		}
+	}
 	if result == nil || result.RepoPrefix == "" || result.FullRetrack || len(result.FailedFiles) > 0 {
 		frontier.exact = false
 		return
@@ -350,7 +359,10 @@ func (frontier *warmupDeltaFrontier) snapshot(changedRepos int, scopeUnknown boo
 	frontier.mu.Lock()
 	defer frontier.mu.Unlock()
 	plans := make(map[string]indexer.DerivedInvalidationPlan, len(frontier.plans))
-	fileSet := make(map[string]struct{})
+	fileSet := make(map[string]struct{}, len(frontier.crossRepoFiles))
+	for file := range frontier.crossRepoFiles {
+		fileSet[file] = struct{}{}
+	}
 	for prefix, plan := range frontier.plans {
 		plans[prefix] = plan
 		for _, file := range plan.Files {
@@ -1261,6 +1273,14 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func())
 		"elapsed_ms": time.Since(phaseStart).Milliseconds(),
 	})
 
+	// Seed module-derived edges before releasing base copies so committed
+	// bases include them. This runs after readiness and before watcher startup.
+	finishModuleSeed := startWarmupStep(logger, "go_module_seed")
+	if err := state.multiIndexer.SeedGoModuleDeps(ctx); err != nil {
+		logger.Warn("daemon: seed Go module retries", zap.Error(err))
+	}
+	finishModuleSeed()
+
 	// Committed-base publication starts HERE, after the readiness flip and
 	// after the batch's derived passes, and not in the dispatch that scheduled
 	// it. The dispatch runs upstream of markReady, so draining there would put
@@ -1277,7 +1297,7 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func())
 	// flip, the copy was taken mid-warmup and the base served none of those
 	// edges: every checkout reading it lost them, and every per-file delta
 	// over it re-derived them as new rows.
-	//
+
 	// Unconditional on purpose: a resolve that failed (resolveOK == false) or
 	// a caller that passed no markReady still gets its bases published —
 	// readiness is what publication must not precede, not what it depends on.

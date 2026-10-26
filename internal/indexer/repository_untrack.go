@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/reach"
 	"github.com/zzet/gortex/internal/search"
+	"go.uber.org/zap"
 )
 
 // UntrackRepoChecked hides and removes one live repository without changing
@@ -106,6 +108,12 @@ func (mi *MultiIndexer) untrackRepoCheckedRetainingAdmission(
 	topologyChanged := false
 	defer func() { finishTopologyMutation(topologyChanged) }()
 
+	mi.goModuleMu.Lock()
+	stamp := mi.goModuleFiles[repoPrefix]
+	hadGoModule := mi.goModuleCache[repoPrefix] != "" || stamp.modified != 0
+	mi.goModuleMu.Unlock()
+	hadRules := mi.configMgr != nil && len(mi.configMgr.GetRepoConfig(repoPrefix).CrossWorkspaceDeps) > 0
+	goModuleAffected := hadGoModule || hadRules || len(graph.ReadRepoFilePaths(mi.graph, repoPrefix, "", []string{"go"}, nil)) > 0
 	mi.mu.Lock()
 	state = mi.pendingRepositoryUntracks[repoPrefix]
 	if state == nil {
@@ -121,11 +129,12 @@ func (mi *MultiIndexer) untrackRepoCheckedRetainingAdmission(
 			return 0, 0, fmt.Errorf("indexer: repository teardown for %s lost its mutation lane", repoPrefix)
 		}
 		state = &repositoryUntrackState{
-			metadata:    meta,
-			indexer:     idx,
-			coordinator: coordinator,
-			contract:    mi.contractInvalidationPlanForRepo(idx),
-			finalize:    finalize,
+			metadata:         meta,
+			indexer:          idx,
+			coordinator:      coordinator,
+			contract:         mi.contractInvalidationPlanForRepo(idx),
+			finalize:         finalize,
+			goModuleAffected: goModuleAffected,
 		}
 		if mi.pendingRepositoryUntracks == nil {
 			mi.pendingRepositoryUntracks = make(map[string]*repositoryUntrackState)
@@ -213,6 +222,19 @@ func (mi *MultiIndexer) untrackRepoCheckedRetainingAdmission(
 	if !state.contract.Empty() {
 		mi.ReconcileContractEdgesForFrontier(state.contract)
 	}
+	if state.goModuleAffected {
+		mi.goModuleRetry.Invalidate()
+		cr := mi.newCrossRepoResolver()
+		if err := cr.RetryGoModuleDeps(ctx); err != nil {
+			// Removal and config finalization already committed. The invalidated
+			// retry state lets the next module pass finish this optional tail.
+			mi.logger.Warn("settle Go module callers after untrack deferred", zap.String("repo", repoPrefix), zap.Error(err))
+		}
+		// A canceled sweep can already have changed a bounded batch. Finish
+		// the source/parallel tails it recorded before dropping this pass.
+		mi.finishGoModuleCalls(cr)
+		mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
+	}
 
 	// A cleanup reservation wins atomically over continuation deletion and
 	// keeps this exact closed lane for lifecycle finalization.
@@ -267,14 +289,43 @@ func (mi *MultiIndexer) finalizeCompletedRepositoryUntrackConfig(
 func (mi *MultiIndexer) purgeRepositoryPayload(
 	repoPrefix string, meta *RepoMetadata,
 ) (nodesRemoved, edgesRemoved int, err error) {
+	restubTrackedNpmRepoIncoming(mi.graph, repoPrefix)
+	parked := restubGoModuleRepoIncoming(mi.graph, repoPrefix)
+	restubTrackedCargoRepoIncoming(mi.graph, repoPrefix)
+	restubTrackedPythonRepoIncoming(mi.graph, repoPrefix)
 	if purger, ok := mi.graph.(interface{ PurgeRepo(string) error }); ok {
 		if err := purger.PurgeRepo(repoPrefix); err != nil {
 			return 0, 0, fmt.Errorf("purge repository payload: %w", err)
+		}
+		if err := mi.finalizeUntrackedGoModuleCalls(repoPrefix, parked); err != nil {
+			return 0, 0, err
 		}
 		if meta != nil {
 			return meta.NodeCount, meta.EdgeCount, nil
 		}
 		return 0, 0, nil
 	}
-	return evictRepoAllGenerations(mi.graph, repoPrefix)
+	nodesRemoved, edgesRemoved, err = evictRepoAllGenerations(mi.graph, repoPrefix)
+	if err == nil {
+		err = mi.finalizeUntrackedGoModuleCalls(repoPrefix, parked)
+	}
+	return nodesRemoved, edgesRemoved, err
+}
+
+func (mi *MultiIndexer) finalizeUntrackedGoModuleCalls(removedRepo string, parked []graph.EdgeIdentity) error {
+	// A refused tie parks nothing, so drop the projection before the early return.
+	mu := mi.graph.ResolveMutex()
+	mu.Lock()
+	mi.goModuleRetry.InvalidatePackageRepo(removedRepo)
+	mu.Unlock()
+	if len(parked) == 0 {
+		return nil
+	}
+	cr := mi.newCrossRepoResolver()
+	if err := cr.ResolveDeferredGoModuleEdgeIdentities(parked); err != nil {
+		return err
+	}
+	mi.finishGoModuleCalls(cr)
+	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
+	return nil
 }
