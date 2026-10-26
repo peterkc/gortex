@@ -49,6 +49,10 @@ func (cr *CrossRepoResolver) resolveGoExtern(e *graph.Edge, spec string, stats *
 	}
 }
 
+var newGoModuleImportRecoveryBudget = func() *graph.IncomingSourceBudget {
+	return &graph.IncomingSourceBudget{}
+}
+
 // GoModuleDepRetry remembers the last completed legacy-terminal sweep for a
 // store's module/config revision. MultiIndexer shares it across pass objects.
 type GoModuleDepRetry struct {
@@ -120,7 +124,7 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 	cr.resolveGoModuleEdgesLocked(deferred, stats)
 	state.mu.Lock()
 	if len(cr.goModules) == 0 {
-		state.modules, state.revision, state.complete = maps.Clone(cr.goModules), cr.goModuleRevision, true
+		state.modules, state.revision, state.complete = maps.Clone(cr.goModules), cr.goModuleRevision, cr.goModuleImportsDeferred == 0
 		state.replacements = maps.Clone(cr.goModuleReplacements)
 		state.mu.Unlock()
 		return nil
@@ -225,7 +229,7 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	state.modules, state.revision, state.complete = maps.Clone(cr.goModules), cr.goModuleRevision, true
+	state.modules, state.revision, state.complete = maps.Clone(cr.goModules), cr.goModuleRevision, cr.goModuleImportsDeferred == 0
 	state.replacements = maps.Clone(cr.goModuleReplacements)
 	return nil
 }
@@ -517,6 +521,7 @@ func (cr *CrossRepoResolver) RetryGoModuleDeps(ctx context.Context) error {
 	if err := func() error {
 		cr.mu.Lock()
 		defer cr.mu.Unlock()
+		cr.goModuleImportsDeferred = 0
 		return cr.retryGoModuleDeps(ctx, stats)
 	}(); err != nil {
 		return err
@@ -659,17 +664,19 @@ func (cr *CrossRepoResolver) recheckGoModuleBindings(ctx context.Context, previo
 	}
 	// A changed module can make another provider's fallback imports bindable,
 	// even when that provider is outside the saved-file frontier.
-	importBudget := &graph.IncomingSourceBudget{}
+	importBudget := newGoModuleImportRecoveryBudget()
 	for _, repo := range repos {
 		if cr.goModules[repo] == "" {
 			continue
 		}
 		importIDs := cr.goModuleImportIDs(repo)
 		if len(importIDs) > importBudget.Remaining() {
+			cr.goModuleImportsDeferred += len(importIDs)
 			cr.logger.Warn("Go module import identity recheck deferred to full pass", zap.Int("imports", len(importIDs)), zap.Int("remaining", importBudget.Remaining()))
 			continue
 		}
 		if err := importBudget.Charge(len(importIDs)); err != nil {
+			cr.goModuleImportsDeferred += len(importIDs)
 			cr.logger.Warn("Go module import identity recheck deferred to full pass", zap.Error(err))
 			continue
 		}
