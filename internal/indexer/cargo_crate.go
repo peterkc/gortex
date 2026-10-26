@@ -29,8 +29,9 @@ func readCargoManifest(tree manifestTree, dir string) map[string]any {
 	return manifest
 }
 
-// cargoCrateLookup snapshots root/member manifests once per cross-repo pass.
-// Only explicit workspace member globs are expanded; Cargo is never executed.
+// buildCargoCrateLookup parses root/member manifests for one reusable snapshot.
+// bridgeManifestSnapshot owns cross-pass invalidation. Only explicit workspace
+// member globs are expanded; Cargo is never executed.
 func (mi *MultiIndexer) buildCargoCrateLookup(trees map[string]manifestTree) (resolver.CargoCrateLookup, bool) {
 	type crate struct {
 		dir, name, root string

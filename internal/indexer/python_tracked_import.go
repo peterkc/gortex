@@ -18,9 +18,8 @@ func normalizePythonDistribution(name string) string {
 	return pythonDistributionSeparators.ReplaceAllString(strings.ToLower(name), "-")
 }
 
-// pythonPackageLookup is built only after a non-stdlib Python import is found.
-// Providers require indexed root/src modules or regular packages; consumers also
-// block foreign bindings with their own indexed namespace directories.
+// pythonManifestEntry holds a distribution identity and declared dependencies.
+// Declaration admission reads these entries without discovering provider files.
 type pythonManifestEntry struct {
 	name string
 	deps map[string]bool
