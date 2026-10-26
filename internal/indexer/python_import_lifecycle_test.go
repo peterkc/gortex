@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -24,7 +25,7 @@ import (
 func TestTrackedPythonImportLifecycle(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
 		for _, providerFirst := range []bool{false, true} {
-			for _, operation := range []string{"consumer_save", "provider_save", "provider_save_util", "provider_save_lib_contract", "provider_delete_util_batched", "forced_evict_util", "delete_restore_util", "consumer_save_then_restore", "provider_gains_new_module", "provider_gains_empty_module", "consumer_full", "provider_full", "warm_full_retrack", "untrack_retrack", "no_change", "track", "deferred_track"} {
+			for _, operation := range []string{"consumer_save", "provider_save", "provider_save_util", "provider_save_lib_contract", "provider_delete_util_batched", "forced_evict_util", "delete_restore_util", "consumer_save_then_restore", "provider_gains_new_module", "provider_gains_empty_module", "consumer_full", "provider_full", "warm_full_retrack", "untrack_retrack", "rename_and_back", "untrack_only", "no_change", "track", "deferred_track"} {
 				if operation == "deferred_track" && providerFirst {
 					continue // This case starts with an already tracked consumer.
 				}
@@ -122,6 +123,19 @@ func TestTrackedPythonImportLifecycle(t *testing.T) {
 						}, calls)
 					}
 					assertImport()
+					initial := pythonLifecycleBindings(g, "")
+					initialMarkers := map[string]string{}
+					for _, node := range g.GetFileNodes("consumer/app.py") {
+						for _, edge := range g.GetOutEdges(node.ID) {
+							key := "python_call_stub"
+							if edge.Kind == graph.EdgeImports {
+								key = "python_import_stub"
+							}
+							if marker, ok := edge.Meta[key].(string); ok {
+								initialMarkers[fmt.Sprint(edge.Kind, edge.Line)] = marker
+							}
+						}
+					}
 					logs.TakeAll()
 					var scans *pythonLookupScanStore
 					if operation == "provider_save" {
@@ -168,7 +182,8 @@ func TestTrackedPythonImportLifecycle(t *testing.T) {
 							}
 						}
 						require.Len(t, parked, 1)
-						require.Equal(t, "unresolved::extern::PIL.util.helper::helper", parked[0].To)
+						require.Equal(t, "external-call::dep::PIL.util.helper", parked[0].To)
+						require.Equal(t, "unresolved::extern::PIL.util.helper::helper", parked[0].Meta["python_call_stub"])
 						require.False(t, parked[0].CrossRepo)
 						writeWorkspaceFile(t, provider, "src/PIL/util.py", "def helper(): pass\n")
 						_, err = mi.IncrementalReindexRepo("provider", []string{filepath.Join(provider, "src/PIL/util.py")})
@@ -229,12 +244,46 @@ func TestTrackedPythonImportLifecycle(t *testing.T) {
 						result, noChangeErr := mi.IncrementalReindexRepo("provider", nil)
 						require.NoError(t, noChangeErr)
 						require.Zero(t, result.StaleFileCount)
+					case "rename_and_back":
+						writeWorkspaceFile(t, provider, "src/PIL/util.py", "def helper_renamed(): pass\n")
+						_, err = mi.IncrementalReindexRepo("provider", []string{filepath.Join(provider, "src/PIL/util.py")})
+						require.NoError(t, err)
+						for _, edge := range g.GetOutEdges("consumer/app.py::run") {
+							if edge.Kind == graph.EdgeCalls && edge.Line == 10 {
+								require.False(t, edge.CrossRepo)
+								require.Equal(t, initialMarkers[fmt.Sprint(edge.Kind, edge.Line)], edge.Meta["python_call_stub"])
+							}
+						}
+						writeWorkspaceFile(t, provider, "src/PIL/util.py", "def helper(): pass\n")
+						_, err = mi.IncrementalReindexRepo("provider", []string{filepath.Join(provider, "src/PIL/util.py")})
+					case "untrack_only":
+						_, _, err = mi.UntrackRepoChecked(context.Background(), "provider")
 					case "untrack_retrack":
 						_, _, err = mi.UntrackRepoChecked(context.Background(), "provider")
 						require.NoError(t, err)
 						_, err = mi.TrackRepoCtx(context.Background(), entries[1])
 					}
 					require.NoError(t, err)
+					if operation == "rename_and_back" {
+						require.Equal(t, initial, pythonLifecycleBindings(g, ""))
+					}
+					if operation == "untrack_only" {
+						for _, node := range g.GetFileNodes("consumer/app.py") {
+							for _, edge := range g.GetOutEdges(node.ID) {
+								if edge.Kind != graph.EdgeImports && edge.Kind != graph.EdgeCalls {
+									continue
+								}
+								require.False(t, edge.CrossRepo)
+								require.False(t, strings.HasPrefix(edge.To, "provider/"))
+								key := "python_call_stub"
+								if edge.Kind == graph.EdgeImports {
+									key = "python_import_stub"
+								}
+								require.NotEmpty(t, initialMarkers[fmt.Sprint(edge.Kind, edge.Line)])
+								require.Equal(t, initialMarkers[fmt.Sprint(edge.Kind, edge.Line)], edge.Meta[key])
+							}
+						}
+					}
 					if scans != nil {
 						// The existing cross-repo pass scans imports once for reachability.
 						require.Equal(t, 1, scans.importScans, "ordinary saves must not add a Python consumer-frontier scan")
@@ -255,10 +304,11 @@ func TestTrackedPythonImportLifecycle(t *testing.T) {
 						require.Len(t, missingImport, 1)
 						require.Equal(t, "module::pypi:PIL", missingImport[0].To)
 						require.Equal(t, "PIL.util", missingImport[0].Meta["python_import"])
+						require.Equal(t, "module::pypi:PIL", missingImport[0].Meta["python_import_stub"])
 						require.False(t, missingImport[0].CrossRepo)
 						require.Len(t, missingCall, 1)
-						require.Equal(t, "unresolved::extern::PIL.util.helper::helper", missingCall[0].To)
-						require.Equal(t, missingCall[0].To, missingCall[0].Meta["python_call_stub"])
+						require.Equal(t, "external-call::dep::PIL.util.helper", missingCall[0].To)
+						require.Equal(t, "unresolved::extern::PIL.util.helper::helper", missingCall[0].Meta["python_call_stub"])
 						require.False(t, missingCall[0].CrossRepo)
 					}
 					var cold graph.Store = graph.New()
@@ -268,11 +318,16 @@ func TestTrackedPythonImportLifecycle(t *testing.T) {
 						t.Cleanup(func() { require.NoError(t, db.Close()) })
 						cold = db
 					}
-					coldIndexer := NewMultiIndexer(cold, reg, search.NewNull(), cm, zap.NewNop())
+					coldConfig := cm
+					if operation == "untrack_only" {
+						coldConfig = newTestConfigManager(t)
+						coldConfig.Global().Repos = []config.RepoEntry{entries[0]}
+					}
+					coldIndexer := NewMultiIndexer(cold, reg, search.NewNull(), coldConfig, zap.NewNop())
 					t.Cleanup(func() { require.NoError(t, coldIndexer.Close(context.Background())) })
 					_, err = coldIndexer.IndexAll()
 					require.NoError(t, err)
-					require.Equal(t, pythonLifecycleBindings(cold, missingUtil), pythonLifecycleBindings(g, missingUtil), "after %s", operation)
+					require.Equal(t, pythonLifecycleBindings(cold, operation), pythonLifecycleBindings(g, operation), "after %s", operation)
 					require.Empty(t, logs.FilterMessage("cross-repo resolve: pass start").All())
 					require.Empty(t, logs.FilterMessage("DEFERRED-TIMING master.ResolveAll").All())
 				})
@@ -284,20 +339,24 @@ func TestTrackedPythonImportLifecycle(t *testing.T) {
 const pythonLifecycleProvider = "class Image:\n    def show(self): pass\ndef f(): pass\n"
 const pythonLifecycleConsumer = "from PIL.image import Image\nfrom PIL.image import f\nimport PIL.image as image\nfrom PIL.util import helper\ndef run():\n    x = Image()\n    x.show()\n    f()\n    image.f()\n    helper()\n"
 
-func pythonLifecycleBindings(g graph.Store, missingUtil bool) []string {
+func pythonLifecycleBindings(g graph.Store, operation string) []string {
 	var bindings []string
 	for _, node := range g.GetFileNodes("consumer/app.py") {
 		for _, edge := range g.GetOutEdges(node.ID) {
-			if edge.Kind == graph.EdgeImports || edge.Kind == graph.EdgeCalls {
-				if missingUtil && (edge.Kind == graph.EdgeImports && edge.Line == 4 || edge.Kind == graph.EdgeCalls && edge.Line == 10) {
-					continue // These exact parked sites are asserted in the deletion case.
-				}
-				var stub any
-				if edge.Kind == graph.EdgeCalls {
-					stub = edge.Meta["python_call_stub"]
-				}
-				bindings = append(bindings, fmt.Sprintf("%s -%s-> %s cross=%v line=%d stub=%v", edge.From, edge.Kind, edge.To, edge.CrossRepo, edge.Line, stub))
+			if edge.Kind != graph.EdgeImports && edge.Kind != graph.EdgeCalls {
+				continue
 			}
+			copy := *edge
+			parked := operation == "untrack_only" || ((operation == "provider_delete_util_batched" || operation == "forced_evict_util") && ((edge.Kind == graph.EdgeImports && edge.Line == 4) || (edge.Kind == graph.EdgeCalls && edge.Line == 10)))
+			if parked && !edge.CrossRepo {
+				copy.Meta = maps.Clone(edge.Meta)
+				key := "python_call_stub"
+				if edge.Kind == graph.EdgeImports {
+					key = "python_import_stub"
+				}
+				delete(copy.Meta, key) // Historical parked identity is asserted separately.
+			}
+			bindings = append(bindings, builderRenderEdge(&copy))
 		}
 	}
 	slices.Sort(bindings)

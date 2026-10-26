@@ -189,7 +189,7 @@ func (mi *MultiIndexer) untrackRepoCheckedRetainingAdmission(
 	// retry does not repeat a completed destructive scan.
 	refresh := func(sw *search.Swappable) error {
 		if !state.payloadPurged {
-			removedNodes, removedEdges, purgeErr := mi.purgeRepositoryPayload(repoPrefix, state.metadata)
+			removedNodes, removedEdges, purgeErr := mi.purgeRepositoryPayload(repoPrefix, state.metadata, &state.bridgeConsumerFiles)
 			if purgeErr != nil {
 				return purgeErr
 			}
@@ -287,12 +287,16 @@ func (mi *MultiIndexer) finalizeCompletedRepositoryUntrackConfig(
 }
 
 func (mi *MultiIndexer) purgeRepositoryPayload(
-	repoPrefix string, meta *RepoMetadata,
+	repoPrefix string, meta *RepoMetadata, bridgeConsumers *[]string,
 ) (nodesRemoved, edgesRemoved int, err error) {
 	restubTrackedNpmRepoIncoming(mi.graph, repoPrefix)
 	parked := restubGoModuleRepoIncoming(mi.graph, repoPrefix)
-	restubTrackedCargoRepoIncoming(mi.graph, repoPrefix)
-	restubTrackedPythonRepoIncoming(mi.graph, repoPrefix)
+	var localConsumers []string
+	if bridgeConsumers == nil {
+		bridgeConsumers = &localConsumers
+	}
+	*bridgeConsumers = appendUniqueSorted(*bridgeConsumers, restubTrackedCargoRepoIncoming(mi.graph, repoPrefix)...)
+	*bridgeConsumers = appendUniqueSorted(*bridgeConsumers, restubTrackedPythonRepoIncoming(mi.graph, repoPrefix)...)
 	if purger, ok := mi.graph.(interface{ PurgeRepo(string) error }); ok {
 		if err := purger.PurgeRepo(repoPrefix); err != nil {
 			return 0, 0, fmt.Errorf("purge repository payload: %w", err)
@@ -300,6 +304,7 @@ func (mi *MultiIndexer) purgeRepositoryPayload(
 		if err := mi.finalizeUntrackedGoModuleCalls(repoPrefix, parked); err != nil {
 			return 0, 0, err
 		}
+		mi.finalizeUntrackedBridgeConsumers(*bridgeConsumers)
 		if meta != nil {
 			return meta.NodeCount, meta.EdgeCount, nil
 		}
@@ -308,6 +313,9 @@ func (mi *MultiIndexer) purgeRepositoryPayload(
 	nodesRemoved, edgesRemoved, err = evictRepoAllGenerations(mi.graph, repoPrefix)
 	if err == nil {
 		err = mi.finalizeUntrackedGoModuleCalls(repoPrefix, parked)
+		if err == nil {
+			mi.finalizeUntrackedBridgeConsumers(*bridgeConsumers)
+		}
 	}
 	return nodesRemoved, edgesRemoved, err
 }
@@ -328,4 +336,32 @@ func (mi *MultiIndexer) finalizeUntrackedGoModuleCalls(removedRepo string, parke
 	mi.finishGoModuleCalls(cr)
 	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 	return nil
+}
+
+// Removal must settle parked callers too; an immediate retrack used to hide
+// their unclassified terminals and unfinished provenance handoff.
+func (mi *MultiIndexer) finalizeUntrackedBridgeConsumers(files []string) {
+	if len(files) == 0 {
+		return
+	}
+	mi.runMasterResolveFiles(files, false)
+	mi.synthesizeDemotedGoModuleCalls(files) // Scoped synthesis honors each caller's config for every language.
+	if master := mi.newMasterResolver(true); master != nil {
+		master.ReconcileBridgeCallerTerminals(files)
+	}
+	mu := mi.graph.ResolveMutex()
+	mu.Lock()
+	defer mu.Unlock()
+	var batch []graph.EdgeReindex
+	for row := range graph.EdgesInScopeSeq(mi.graph, nil, files, graph.EdgeCalls) {
+		edge := row.Edge
+		if !graph.HasRestubProvenance(edge) {
+			continue
+		}
+		graph.RestoreRestubProvenance(edge)
+		batch = append(batch, graph.EdgeReindex{Edge: edge, OldTo: edge.To})
+	}
+	if len(batch) > 0 {
+		mi.graph.ReindexEdges(batch)
+	}
 }

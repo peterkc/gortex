@@ -63,6 +63,7 @@ func TestTrackedPythonPackageReExport(t *testing.T) {
 					require.Len(t, imports, 1)
 					require.Equal(t, "provider/src/itsdangerous/__init__.py", imports[0].To)
 					require.True(t, imports[0].CrossRepo)
+					external := "external-call::dep::itsdangerous.URLSafeTimedSerializer"
 					assertCall := func(target string, linked bool) {
 						t.Helper()
 						calls = nil
@@ -75,7 +76,11 @@ func TestTrackedPythonPackageReExport(t *testing.T) {
 						require.Equal(t, linked, calls[0].CrossRepo, "%#v", calls[0])
 						require.Equal(t, target, calls[0].To)
 						require.NotEmpty(t, calls[0].Meta["python_call_stub"])
-						require.NotContains(t, calls[0].Meta, "external_call")
+						if target == external {
+							require.Equal(t, true, calls[0].Meta["external_call"])
+						} else {
+							require.NotContains(t, calls[0].Meta, "external_call")
+						}
 					}
 					stub := "unresolved::extern::itsdangerous.URLSafeTimedSerializer::URLSafeTimedSerializer"
 					target := "provider/src/itsdangerous/url_safe.py::URLSafeTimedSerializer"
@@ -96,7 +101,8 @@ func TestTrackedPythonPackageReExport(t *testing.T) {
 					assertCall(target, true)
 					_, _, err = mi.UntrackRepoChecked(context.Background(), "provider")
 					require.NoError(t, err)
-					assertCall(stub, false)
+					// A fresh consumer-only IndexAll materializes this dependency call.
+					assertCall(external, false)
 					_, err = mi.TrackRepoCtx(context.Background(), config.RepoEntry{Path: provider, Name: "provider", Workspace: "shared"})
 					require.NoError(t, err)
 					assertCall(target, true)
@@ -197,6 +203,10 @@ func TestTrackedPythonPackageReExportColdPaths(t *testing.T) {
 								require.Equal(t, "provider/src/itsdangerous/__init__.py", call.Meta["python_reexport_file"])
 							}
 							require.Equal(t, expected, target, "call: %#v", call)
+							if ambiguous {
+								require.Equal(t, "unresolved::extern::itsdangerous.URLSafeTimedSerializer::URLSafeTimedSerializer", call.To)
+								require.NotContains(t, call.Meta, "external_call")
+							}
 							if mode == "incremental" {
 								incrementalTarget = target
 							} else {
