@@ -58,3 +58,61 @@ func TestPythonRestubIgnoresMetadataOnlyTargets(t *testing.T) {
 	require.Equal(t, target, edge.To)
 	require.True(t, edge.CrossRepo)
 }
+
+func TestPythonRestubClearsReExportEvidence(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, route := range []string{"point", "batch", "park"} {
+			t.Run(backend+"/"+route, func(t *testing.T) {
+				_, g := newPythonBridgeIdentityIndexer(t, backend, nil)
+				file, target := "consumer/app.py", "provider/pkg/mod.py"
+				caller := file + "::run"
+				g.AddNode(&graph.Node{ID: caller, Name: "run", FilePath: file, Kind: graph.KindFunction, RepoPrefix: "consumer", Language: "python"})
+				g.AddBatch([]*graph.Node{{ID: file, Name: "app.py", FilePath: file, Kind: graph.KindFile, RepoPrefix: "consumer", Language: "python"}, {ID: target, Name: "mod.py", FilePath: target, Kind: graph.KindFile, RepoPrefix: "provider", Language: "python"}, {ID: target + "::f", Name: "f", FilePath: target, Kind: graph.KindFunction, RepoPrefix: "provider", Language: "python"}}, nil)
+				imp := &graph.Edge{From: file, FilePath: file, To: target, Kind: graph.EdgeImports, CrossRepo: true, Line: 1, Meta: map[string]any{resolver.PythonImportStubMeta: "external::pkg.mod", "python_import": "pkg.mod"}}
+				linkedImport := *imp
+				g.AddEdge(imp)
+				stub := "unresolved::extern::pkg.mod::f"
+				g.AddEdge(&graph.Edge{From: caller, FilePath: file, To: stub, Kind: graph.EdgeCalls, Line: 2, Meta: map[string]any{resolver.PythonCallStubMeta: stub}})
+				resolve := func() {
+					cr := resolver.NewCrossRepo(g)
+					cr.SetPythonPackageLookup(func() *resolver.PythonPackageLookup { return nil })
+					cr.ResolveForFile("consumer", "app.py")
+				}
+				resolve()
+				resolve()
+				calls := func() []*graph.Edge {
+					var rows []*graph.Edge
+					for _, e := range g.GetOutEdges(caller) {
+						if e.Kind == graph.EdgeCalls {
+							rows = append(rows, e)
+						}
+					}
+					require.Len(t, rows, 1)
+					return rows
+				}
+				require.Equal(t, target+"::f", calls()[0].To)
+				cold := builderRenderEdges(calls())
+				call := calls()[0]
+				call.Meta[resolver.PythonReExportFileMeta] = "provider/pkg/__init__.py"
+				g.ReindexEdges([]graph.EdgeReindex{{Edge: call, OldTo: call.To}})
+				switch route {
+				case "point":
+					newTestIndexer(g).restubIncomingRefs(target)
+				case "batch":
+					stages := []*incrementalBatchStage{{graphPath: target, priorNodes: g.GetFileNodes(target)}}
+					restubIncomingRefsFromView(g, stages, loadIncrementalPriorView(g, stages))
+				case "park":
+					restubTrackedPythonRepoIncoming(g, "provider")
+				}
+				require.Equal(t, stub, calls()[0].To)
+				require.NotContains(t, calls()[0].Meta, resolver.PythonReExportFileMeta)
+				g.RemoveEdge(file, "external::pkg.mod", graph.EdgeImports)
+				g.AddEdge(&linkedImport)
+				resolve()
+				require.Equal(t, cold, builderRenderEdges(calls()))
+				resolve()
+				require.Equal(t, cold, builderRenderEdges(calls()))
+			})
+		}
+	}
+}
