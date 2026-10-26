@@ -170,7 +170,7 @@ func (s *goImportCountingStore) FileNodeIdentitiesSeq(repos []string) iter.Seq[g
 	return graph.FileNodeIdentitiesSeq(s.Store, repos)
 }
 func (s *goImportCountingStore) RepoNodeIdentitiesSeq(repos []string, kinds ...graph.NodeKind) iter.Seq[graph.RepoNodeIdentity] {
-	if len(kinds) == 4 {
+	if IsGoModuleBindingRecheckForTest(kinds) {
 		s.bindingRechecks++
 	}
 	return func(yield func(graph.RepoNodeIdentity) bool) {
@@ -756,4 +756,15 @@ func TestGoModuleImportUsesBatchedFileAndStatsNodes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGoModuleImportCounterExactBindingKinds(t *testing.T) {
+	g := &goImportCountingStore{Store: graph.New()}
+	for range g.RepoNodeIdentitiesSeq(nil, graph.KindFunction, graph.KindType, graph.KindInterface, graph.KindFile) {
+	}
+	require.Equal(t, 1, g.bindingRechecks)
+	g.bindingRechecks = 0
+	for range g.RepoNodeIdentitiesSeq(nil, graph.KindFunction, graph.KindType, graph.KindInterface, graph.KindImport) {
+	}
+	require.Zero(t, g.bindingRechecks, "four unrelated kinds must not count as the binding recheck")
 }

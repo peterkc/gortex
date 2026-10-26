@@ -28,7 +28,7 @@ type goDeferralStore struct {
 }
 
 func (s *goDeferralStore) RepoNodeIdentitiesSeq(repos []string, kinds ...graph.NodeKind) iter.Seq[graph.RepoNodeIdentity] {
-	if len(kinds) == 4 {
+	if resolver.IsGoModuleBindingRecheckForTest(kinds) {
 		s.rechecks++
 	}
 	if repos == nil && len(kinds) == 1 && kinds[0] == graph.KindImport {
@@ -129,4 +129,15 @@ func TestGoModuleProviderSkipsDoNotRunFullFallback(t *testing.T) {
 			requireGoDeferralImports(t, g)
 		})
 	}
+}
+
+func TestGoModuleDeferralCounterExactBindingKinds(t *testing.T) {
+	g := &goDeferralStore{Store: graph.New()}
+	for range g.RepoNodeIdentitiesSeq(nil, graph.KindFunction, graph.KindType, graph.KindInterface, graph.KindFile) {
+	}
+	require.Equal(t, 1, g.rechecks)
+	g.rechecks = 0
+	for range g.RepoNodeIdentitiesSeq(nil, graph.KindFunction, graph.KindType, graph.KindInterface, graph.KindImport) {
+	}
+	require.Zero(t, g.rechecks, "four unrelated kinds must not count as the binding recheck")
 }
