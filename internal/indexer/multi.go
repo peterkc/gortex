@@ -63,6 +63,8 @@ type RepoMetadata struct {
 // retries from repeating successful payload/vector phases and keeps the stable
 // mutation lane closed until every external side effect commits.
 type repositoryUntrackState struct {
+	bridgeConsumerFiles []string
+
 	retainAdmission bool
 	mu              sync.Mutex
 	metadata        *RepoMetadata
@@ -992,11 +994,9 @@ func (mi *MultiIndexer) newMasterResolver(useLSP bool) *resolver.Resolver {
 	}
 	master := resolver.New(mi.graph)
 	master.SetLogger(mi.logger)
-	// The master resolve is the only pass with whole-graph evidence, so it is
-	// the one allowed to durably flag terminally-unresolved edges (permanently
-	// external / stdlib / definition-less) that a later scoped warm resolve can
-	// skip. A scoped/file pass leaves the flag alone; only a full ResolveAll
-	// stamps and self-heals terminal state.
+	// Full resolution owns terminal stamps. Completed tracked-package catch-up
+	// may finish marked callers using the same global name-count proof through
+	// ReconcileBridgeCallerTerminals; ordinary file passes only carry stamps.
 	master.SetStampTerminal(true)
 	// The pre-enrichment queryability pass uses resolver-time LSP precision.
 	// The post-enrichment catch-up disables it because semantic providers just

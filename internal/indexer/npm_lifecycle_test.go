@@ -50,7 +50,7 @@ func TestTrackedNpmImportsSurviveEviction(t *testing.T) {
 					evictRepoCurrentGeneration(g, "lib")
 				case "untrack":
 					mi := &MultiIndexer{graph: g}
-					_, _, err := mi.purgeRepositoryPayload("lib", nil)
+					_, _, err := mi.purgeRepositoryPayload("lib", nil, nil)
 					require.NoError(t, err)
 				}
 				var targets []string

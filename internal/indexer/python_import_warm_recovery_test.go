@@ -93,7 +93,7 @@ func TestTrackedPythonWarmFileRecovery(t *testing.T) {
 						cold := pythonLocalStore(t, backend)
 						_, err = newMI(cold).IndexAll()
 						require.NoError(t, err)
-						require.Equal(t, pythonLifecycleBindings(cold, false), pythonLifecycleBindings(g, false))
+						require.Equal(t, pythonLifecycleBindings(cold, ""), pythonLifecycleBindings(g, ""))
 					})
 				}
 			}
