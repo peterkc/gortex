@@ -178,3 +178,45 @@ func pinGoModuleSourceClock(t *testing.T, at time.Time) {
 	goModuleSourceNow = func() time.Time { return at }
 	t.Cleanup(func() { goModuleSourceNow = original })
 }
+
+// Given a recovery that reads a caller before a save of that caller is known,
+// when it stores its result, then it keeps the facts but not the stat trust:
+// the next recovery reads again instead of reusing pre-save bytes.
+func TestGoModuleSourceStoreDropsTrustAfterConcurrentSave(t *testing.T) {
+	mi, _, repos := goModuleLifecycleFixture(t, "memory")
+	main := filepath.Join(repos[0].Path, "main.go")
+	now := time.Unix(1700000000, 0)
+	old := now.Add(-time.Hour)
+	require.NoError(t, os.Chtimes(main, old, old))
+	pinGoModuleSourceClock(t, now)
+	writeFile(t, filepath.Join(repos[1].Path, "lib.go"), "package library\nfunc Other(){}\n")
+	for _, entry := range repos[:2] {
+		_, err := mi.TrackRepoCtx(t.Context(), entry)
+		require.NoError(t, err)
+	}
+	mi.runCrossRepoResolveFiles([]string{"b/lib.go"})
+	idx := mi.GetIndexer("a")
+	require.Contains(t, idx.goModuleSourceCache, "main.go")
+	// Touch the stat so the next recovery verifies by reading.
+	touched := old.Add(-time.Hour)
+	require.NoError(t, os.Chtimes(main, touched, touched))
+	original := readGoModuleCallerFile
+	reads := 0
+	readGoModuleCallerFile = func(path string) ([]byte, error) {
+		reads++
+		src, err := original(path)
+		if reads == 1 {
+			idx.invalidateGoModuleSourceStamp("main.go") // a save lands during the read
+		}
+		return src, err
+	}
+	t.Cleanup(func() { readGoModuleCallerFile = original })
+	cr := mi.newCrossRepoResolver()
+	mi.restoreGoModuleSourceFile(cr, "a/main.go")
+	require.Equal(t, 1, reads)
+	assert.True(t, idx.goModuleSourceCache["main.go"].recordedAt.IsZero(), "a result read before a known save must not be trusted by stat")
+	mi.restoreGoModuleSourceFile(cr, "a/main.go")
+	assert.Equal(t, 2, reads, "the next recovery verifies content again")
+	mi.restoreGoModuleSourceFile(cr, "a/main.go")
+	assert.Equal(t, 2, reads, "an undisturbed verification restores stat trust")
+}

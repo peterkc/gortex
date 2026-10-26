@@ -48,13 +48,30 @@ func cloneGoModuleSourceEdges(edges []*graph.Edge) []*graph.Edge {
 }
 
 // Known saves must verify again even when an editor restores an old mtime.
+// The epoch also tells a recovery that read before this save not to trust its
+// stat when it stores its result.
 func (idx *Indexer) invalidateGoModuleSourceStamp(rel string) {
 	idx.goModuleSourceMu.Lock()
 	defer idx.goModuleSourceMu.Unlock()
+	idx.goModuleSourceEpoch++
 	if cached, ok := idx.goModuleSourceCache[rel]; ok {
 		cached.recordedAt = time.Time{}
 		idx.goModuleSourceCache[rel] = cached
 	}
+}
+
+// storeGoModuleSource keeps the facts but drops stat trust when a save was
+// invalidated after epoch was read, since the bytes may predate that save.
+func (idx *Indexer) storeGoModuleSource(rel string, entry goModuleSourceCacheEntry, epoch uint64) {
+	idx.goModuleSourceMu.Lock()
+	defer idx.goModuleSourceMu.Unlock()
+	if idx.goModuleSourceEpoch != epoch {
+		entry.recordedAt = time.Time{}
+	}
+	if idx.goModuleSourceCache == nil {
+		idx.goModuleSourceCache = make(map[string]goModuleSourceCacheEntry)
+	}
+	idx.goModuleSourceCache[rel] = entry
 }
 
 func (mi *MultiIndexer) finishGoModuleCalls(cr *resolver.CrossRepoResolver) {
@@ -82,6 +99,7 @@ func (mi *MultiIndexer) restoreGoModuleSourceFile(cr *resolver.CrossRepoResolver
 	}
 	idx.goModuleSourceMu.Lock()
 	cached, hit := idx.goModuleSourceCache[rel]
+	epoch := idx.goModuleSourceEpoch
 	idx.goModuleSourceMu.Unlock()
 	if hit && cached.size == info.Size() && cached.modified == info.ModTime().UnixNano() && info.ModTime().Before(cached.recordedAt.Add(-goModuleSourceRacyWindow)) {
 		cr.RestoreGoModuleSourceCalls(cloneGoModuleSourceEdges(cached.edges))
@@ -110,9 +128,7 @@ func (mi *MultiIndexer) restoreGoModuleSourceFile(cr *resolver.CrossRepoResolver
 	digest := sha256.Sum256(src)
 	if hit && cached.digest == digest {
 		cached.size, cached.modified, cached.recordedAt = info.Size(), info.ModTime().UnixNano(), recordedAt
-		idx.goModuleSourceMu.Lock()
-		idx.goModuleSourceCache[rel] = cached
-		idx.goModuleSourceMu.Unlock()
+		idx.storeGoModuleSource(rel, cached, epoch)
 		cr.RestoreGoModuleSourceCalls(cloneGoModuleSourceEdges(cached.edges))
 		return
 	}
@@ -133,12 +149,7 @@ func (mi *MultiIndexer) restoreGoModuleSourceFile(cr *resolver.CrossRepoResolver
 	}
 	if err == nil && !skipped {
 		idx.applyRepoPrefix(result.Nodes, result.Edges)
-		idx.goModuleSourceMu.Lock()
-		if idx.goModuleSourceCache == nil {
-			idx.goModuleSourceCache = make(map[string]goModuleSourceCacheEntry)
-		}
-		idx.goModuleSourceCache[rel] = goModuleSourceCacheEntry{digest: digest, edges: cloneGoModuleSourceEdges(result.Edges), size: info.Size(), modified: info.ModTime().UnixNano(), recordedAt: recordedAt}
-		idx.goModuleSourceMu.Unlock()
+		idx.storeGoModuleSource(rel, goModuleSourceCacheEntry{digest: digest, edges: cloneGoModuleSourceEdges(result.Edges), size: info.Size(), modified: info.ModTime().UnixNano(), recordedAt: recordedAt}, epoch)
 		cr.RestoreGoModuleSourceCalls(result.Edges)
 	}
 	result.ReleaseTree()
