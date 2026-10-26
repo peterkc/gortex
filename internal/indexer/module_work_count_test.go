@@ -273,35 +273,43 @@ func TestGoModuleSourceCacheEviction(t *testing.T) {
 }
 
 // Given cached unbindable callers, when a second provider IndexFile save keeps
-// the same definition set, then it reads once but reuses unchanged source facts.
+// the same definition set, then old-mtime source facts cost no read or parse.
 func TestGoModuleProviderSaveReusesCachedSourceFacts(t *testing.T) {
-	mi, _, repos := goModuleLifecycleFixture(t, "memory")
-	lib := filepath.Join(repos[1].Path, "lib.go")
-	writeFile(t, lib, "package library\nfunc Other() {}\n")
-	for _, entry := range repos[:2] {
-		_, err := mi.TrackRepoCtx(t.Context(), entry)
-		require.NoError(t, err)
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			mi, _, repos := goModuleLifecycleFixture(t, backend)
+			lib := filepath.Join(repos[1].Path, "lib.go")
+			main := filepath.Join(repos[0].Path, "main.go")
+			old := time.Now().Add(-time.Hour)
+			require.NoError(t, os.Chtimes(main, old, old))
+			writeFile(t, lib, "package library\nfunc Other() {}\n")
+			for _, entry := range repos[:2] {
+				_, err := mi.TrackRepoCtx(t.Context(), entry)
+				require.NoError(t, err)
+			}
+			original := readGoModuleCallerFile
+			reads := 0
+			readGoModuleCallerFile = func(path string) ([]byte, error) {
+				if filepath.Base(path) == "main.go" {
+					reads++
+				}
+				return original(path)
+			}
+			t.Cleanup(func() { readGoModuleCallerFile = original })
+			writeFile(t, lib, "package library\nfunc Other(){println(1)}\n")
+			require.NoError(t, mi.GetIndexer("b").IndexFile(lib))
+			assert.Zero(t, reads, "the first provider save must also trust unchanged old source")
+			ext, ok := mi.registry.GetByLanguage("go")
+			require.True(t, ok)
+			spy := &goModuleSourceExtractionSpy{Extractor: ext}
+			mi.registry.Register(spy)
+			reads = 0
+			writeFile(t, lib, "package library\nfunc Other(){println(2)}\n")
+			require.NoError(t, mi.GetIndexer("b").IndexFile(lib))
+			assert.Zero(t, reads, "unchanged old-mtime callers must reuse safely verified facts without a read")
+			assert.Zero(t, spy.calls, "identical content must not re-extract the caller")
+		})
 	}
-	original := readGoModuleCallerFile
-	reads := 0
-	readGoModuleCallerFile = func(path string) ([]byte, error) {
-		if filepath.Base(path) == "main.go" {
-			reads++
-		}
-		return original(path)
-	}
-	t.Cleanup(func() { readGoModuleCallerFile = original })
-	writeFile(t, lib, "package library\nfunc Other(){println(1)}\n")
-	require.NoError(t, mi.GetIndexer("b").IndexFile(lib))
-	ext, ok := mi.registry.GetByLanguage("go")
-	require.True(t, ok)
-	spy := &goModuleSourceExtractionSpy{Extractor: ext}
-	mi.registry.Register(spy)
-	reads = 0
-	writeFile(t, lib, "package library\nfunc Other(){println(2)}\n")
-	require.NoError(t, mi.GetIndexer("b").IndexFile(lib))
-	assert.Equal(t, 1, reads, "unchanged caller bytes must be verified before cached facts are reused")
-	assert.Zero(t, spy.calls, "identical content must not re-extract the caller")
 }
 
 // Given a shared parse lease, when source reading fails or panics, then the

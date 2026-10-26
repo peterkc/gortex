@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/resolver"
@@ -14,11 +15,17 @@ import (
 )
 
 // goModuleSourceCacheEntry keeps source facts, not resolution decisions.
-// Every recovery reads current bytes; only an equal digest reuses those facts.
+// Equal stats are trusted only when the recorded read was outside the racy window.
 type goModuleSourceCacheEntry struct {
-	digest [32]byte
-	edges  []*graph.Edge
+	digest         [32]byte
+	edges          []*graph.Edge
+	size, modified int64
+	recordedAt     time.Time
 }
+
+// FAT timestamps can cover two seconds (HFS+ one). Entries recorded within
+// that granularity must verify content even when size and mtime match.
+const goModuleSourceRacyWindow = 2 * time.Second
 
 var readGoModuleCallerFile = os.ReadFile
 
@@ -33,6 +40,16 @@ func cloneGoModuleSourceEdges(edges []*graph.Edge) []*graph.Edge {
 		out = append(out, &c)
 	}
 	return out
+}
+
+// Known saves must verify again even when an editor restores an old mtime.
+func (idx *Indexer) invalidateGoModuleSourceStamp(rel string) {
+	idx.goModuleSourceMu.Lock()
+	defer idx.goModuleSourceMu.Unlock()
+	if cached, ok := idx.goModuleSourceCache[rel]; ok {
+		cached.recordedAt = time.Time{}
+		idx.goModuleSourceCache[rel] = cached
+	}
 }
 
 func (mi *MultiIndexer) finishGoModuleCalls(cr *resolver.CrossRepoResolver) {
@@ -50,7 +67,7 @@ func (mi *MultiIndexer) restoreGoModuleSourceFile(cr *resolver.CrossRepoResolver
 	}
 	rel := strings.TrimPrefix(file, prefix+"/")
 	abs := filepath.Join(idx.rootPath, filepath.FromSlash(rel))
-	_, err := os.Stat(abs)
+	info, err := os.Stat(abs)
 	if err != nil {
 		mi.logger.Warn("stat Go module caller", zap.String("file", file), zap.Error(err))
 		return
@@ -58,12 +75,17 @@ func (mi *MultiIndexer) restoreGoModuleSourceFile(cr *resolver.CrossRepoResolver
 	idx.goModuleSourceMu.Lock()
 	cached, hit := idx.goModuleSourceCache[rel]
 	idx.goModuleSourceMu.Unlock()
+	if hit && cached.size == info.Size() && cached.modified == info.ModTime().UnixNano() && info.ModTime().Before(cached.recordedAt.Add(-goModuleSourceRacyWindow)) {
+		cr.RestoreGoModuleSourceCalls(cloneGoModuleSourceEdges(cached.edges))
+		return
+	}
 	parseLease, err := idx.acquireSharedParsePath(abs)
 	if err != nil {
 		mi.logger.Warn("admit Go module caller", zap.String("file", file), zap.Error(err))
 		return
 	}
 	defer parseLease.Release()
+	recordedAt := time.Now() // Record wall time before reading the bytes being verified.
 	src, err := readGoModuleCallerFile(abs)
 	if err != nil {
 		mi.logger.Warn("read Go module caller", zap.String("file", file), zap.Error(err))
@@ -79,6 +101,10 @@ func (mi *MultiIndexer) restoreGoModuleSourceFile(cr *resolver.CrossRepoResolver
 	src = idx.transforms.run(rel, src)
 	digest := sha256.Sum256(src)
 	if hit && cached.digest == digest {
+		cached.size, cached.modified, cached.recordedAt = info.Size(), info.ModTime().UnixNano(), recordedAt
+		idx.goModuleSourceMu.Lock()
+		idx.goModuleSourceCache[rel] = cached
+		idx.goModuleSourceMu.Unlock()
 		cr.RestoreGoModuleSourceCalls(cloneGoModuleSourceEdges(cached.edges))
 		return
 	}
@@ -103,7 +129,7 @@ func (mi *MultiIndexer) restoreGoModuleSourceFile(cr *resolver.CrossRepoResolver
 		if idx.goModuleSourceCache == nil {
 			idx.goModuleSourceCache = make(map[string]goModuleSourceCacheEntry)
 		}
-		idx.goModuleSourceCache[rel] = goModuleSourceCacheEntry{digest: digest, edges: cloneGoModuleSourceEdges(result.Edges)}
+		idx.goModuleSourceCache[rel] = goModuleSourceCacheEntry{digest: digest, edges: cloneGoModuleSourceEdges(result.Edges), size: info.Size(), modified: info.ModTime().UnixNano(), recordedAt: recordedAt}
 		idx.goModuleSourceMu.Unlock()
 		cr.RestoreGoModuleSourceCalls(result.Edges)
 	}

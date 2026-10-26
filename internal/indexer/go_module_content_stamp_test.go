@@ -26,6 +26,8 @@ func TestGoModuleSameStampSourceRecoveryColdEquivalent(t *testing.T) {
 			after := strings.Replace(before, "Missing", "Present", 1)
 			require.Equal(t, len(before), len(after))
 			writeFile(t, main, before)
+			recent := time.Now().Truncate(time.Second)
+			require.NoError(t, os.Chtimes(main, recent, recent))
 			writeFile(t, lib, "package library\nfunc Other() {}\n")
 			for _, entry := range repos[:2] {
 				_, err := mi.TrackRepoCtx(t.Context(), entry)
