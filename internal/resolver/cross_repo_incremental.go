@@ -204,6 +204,9 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 			cr.logger.Error("cross-repo resolve: retry Go module terminals", zap.Error(err))
 		}
 	}
+	if !goMutation {
+		cr.retryPendingGoModuleEdges(stats)
+	}
 	// Import recovery has its own ceiling: a popular provider must not starve
 	// incoming calls or the revision-keyed call-terminal retry above.
 	for repo := range providerRepos {
