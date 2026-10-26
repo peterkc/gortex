@@ -221,3 +221,50 @@ func TestGoModuleImportRecoveryBudgetRefusal(t *testing.T) {
 		}
 	}
 }
+
+func TestGoModuleImportUnrelatedMutationSkipsRecovery(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, file := range []string{"other/main.py", "other/main.ts", "provider/README.md", "provider/lib_test.go"} {
+			t.Run(backend+"/"+file, func(t *testing.T) {
+				g := &goImportCountingStore{Store: goImportReviewStore(t, backend)}
+				g.AddNode(&graph.Node{ID: file, Kind: graph.KindFile, FilePath: file, RepoPrefix: graph.RepoPrefixOfID(file)})
+				state := &GoModuleDepRetry{}
+				for i := 0; i < 2; i++ {
+					cr := NewCrossRepo(g)
+					cr.SetGoModules(map[string]string{"provider": "example.org/lib"})
+					cr.SetGoModuleDepRetry(state, 1)
+					packageView := map[string]graph.FileNodeIdentity{"provider/lib.go": {ID: "provider/lib.go", FilePath: "provider/lib.go", RepoPrefix: "provider"}}
+					cr.goModuleImportState().packages["provider"] = packageView
+					_, admission := cr.ResolveMutationFrontiersBounded(nil, nil, []string{file, file})
+					require.False(t, admission.Refused)
+					require.Zero(t, g.importScans, "non-production-Go mutations must not seed the import registry")
+					require.Equal(t, packageView, state.packages["provider"], "unrelated saves must not invalidate provider projections")
+				}
+			})
+		}
+	}
+}
+
+func TestGoModuleManifestFrontiersRunRetry(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, file := range []string{"provider/go.mod", "provider/go.sum", "provider/go.work", "provider/go.work.sum", "provider/vendor/modules.txt", "provider/nested/vendor/modules.txt"} {
+			for route := range 3 {
+				t.Run(fmt.Sprintf("%s/%s/frontier_%d", backend, file, route), func(t *testing.T) {
+					g := &goImportCountingStore{Store: goImportReviewStore(t, backend)}
+					state := &GoModuleDepRetry{}
+					frontiers := [3][]string{}
+					frontiers[route] = []string{file, file}
+					for range 2 {
+						cr := NewCrossRepo(g)
+						cr.SetGoModules(map[string]string{"provider": "example.org/lib"})
+						cr.SetGoModuleDepRetry(state, 1)
+						_, admission := cr.ResolveMutationFrontiersBounded(frontiers[0], frontiers[1], frontiers[2])
+						require.False(t, admission.Refused)
+						require.True(t, state.complete, "Go build-list input must enter revision retry")
+					}
+					require.Equal(t, 1, g.importScans, "manifest retry must seed imports once for revision recovery")
+				})
+			}
+		}
+	}
+}

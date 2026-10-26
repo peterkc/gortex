@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"context"
+	"path"
 	"strings"
 
 	"go.uber.org/zap"
@@ -66,10 +67,35 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 		return stats, admission
 	}
 
+	providerRepos := make(map[string]bool)
+	goMutation := false
+	goManifestMutation := false
+	for _, files := range [][]string{resolutionFiles, edgeSourceFiles} {
+		for _, file := range files {
+			if goModuleManifestPath(file) {
+				goManifestMutation = true
+				goMutation = true
+			}
+			if strings.HasSuffix(file, ".go") {
+				goMutation = true
+			}
+		}
+	}
+	for _, file := range definitionFiles {
+		if goModuleManifestPath(file) {
+			goManifestMutation = true
+			goMutation = true
+		}
+		repo := graph.RepoPrefixOfID(file)
+		if strings.HasSuffix(file, ".go") && !strings.HasSuffix(file, "_test.go") && cr.goModules[repo] != "" {
+			providerRepos[repo] = true
+			goMutation = true
+		}
+	}
 	importBudget := newGoModuleImportRecoveryBudget()
-	// Provider recovery needs the lazy seed before the pass lock is taken.
+	// Provider and build-list recovery need the seed before the pass lock.
 	// Ordinary consumer frontiers keep local resolution ahead of the bridge.
-	if len(definitionFiles) > 0 {
+	if len(providerRepos) > 0 || goManifestMutation {
 		if err := cr.seedGoModuleImportRegistry(context.Background()); err != nil {
 			cr.logger.Warn("cross-repo resolve: seed Go module imports deferred", zap.Error(err))
 		}
@@ -173,20 +199,14 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 	}
 	// A newly tracked module also makes old dep/stdlib terminals eligible.
 	// This indexed sweep runs at most once per module/config revision.
-	if !admission.Refused {
+	if goMutation && !admission.Refused {
 		if err := cr.retryGoModuleDeps(context.Background(), stats, false); err != nil {
 			cr.logger.Error("cross-repo resolve: retry Go module terminals", zap.Error(err))
 		}
 	}
 	// Import recovery has its own ceiling: a popular provider must not starve
 	// incoming calls or the revision-keyed call-terminal retry above.
-	repos := make(map[string]bool)
-	for _, file := range definitionFiles {
-		repo := graph.RepoPrefixOfID(file)
-		if cr.goModules[repo] == "" || repos[repo] {
-			continue
-		}
-		repos[repo] = true
+	for repo := range providerRepos {
 		ids := cr.goModuleImportIDs(repo)
 		if len(ids) > importBudget.Remaining() {
 			cr.goModuleImportsDeferred += len(ids)
@@ -238,4 +258,15 @@ func DetectCrossRepoEdgesForMutationFiles(g graph.Store, edgeSourceFiles, defini
 		return 0
 	}
 	return materializeCrossRepoCandidates(g, crossRepoCandidatesForMutationFiles(g, edgeSourceFiles, definitionFiles))
+}
+
+// Keep the Go build-list inputs aligned with the indexer's generation input
+// boundary. Source-only suffix checks miss workspace and vendor changes.
+func goModuleManifestPath(file string) bool {
+	file = strings.ReplaceAll(file, "\\", "/")
+	switch path.Base(file) {
+	case "go.mod", "go.sum", "go.work", "go.work.sum":
+		return true
+	}
+	return file == "vendor/modules.txt" || strings.HasSuffix(file, "/vendor/modules.txt")
 }
