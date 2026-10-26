@@ -1,0 +1,25 @@
+- name: D3 inference contracts on tiny NumPy fixtures only
+  shell: bash
+  env:
+    OPENBLAS_NUM_THREADS: "2"
+    OMP_NUM_THREADS: "2"
+    MKL_NUM_THREADS: "2"
+    UV_PYTHON: python3.12
+    UV_PYTHON_DOWNLOADS: never
+    UV_CACHE_DIR: ${{ runner.temp }}/storage/uv-cache
+  run: |
+    set -euo pipefail
+    uv="$RUNNER_TEMP/storage/evaluator-tools/uv-x86_64-unknown-linux-gnu/uv"
+    project="study/storage/pod-models"
+    "$uv" lock --project "$project"
+    "$uv" lock --check --project "$project"
+    cp "$project/uv.lock" "$RUNNER_TEMP/storage/ci-models-lock.txt"
+    "$uv" run --frozen --project "$project" python --version \
+      | tee "$RUNNER_TEMP/storage/ci-models.txt"
+    sha256sum "$project/pyproject.toml" "$project/uv.lock" \
+      "$project/run_models.py" "$project/test_models.py" \
+      study/storage/neon-eval/evaluate.py \
+      | tee -a "$RUNNER_TEMP/storage/ci-models.txt"
+    "$uv" run --frozen --project "$project" python -m unittest discover \
+      -s "$project" -p test_models.py -v 2>&1 \
+      | tee -a "$RUNNER_TEMP/storage/ci-models.txt"

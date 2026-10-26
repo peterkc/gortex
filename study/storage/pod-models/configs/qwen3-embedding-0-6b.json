@@ -1,0 +1,39 @@
+{
+  "schema": "pod-d3-model/v1",
+  "model": "qwen3-embedding-0-6b",
+  "inputs": {
+    "corp_.jsonl": {
+      "path": "data/evaluator/corp_.jsonl",
+      "sha256": "e40db9f4cad191854c672a4222f8faa0f8c2b25ed8136d3cc8b7fb7eaafc4887",
+      "rows": 31092
+    },
+    "qs_eq.jsonl": {
+      "path": "data/evaluator/qs_eq.jsonl",
+      "sha256": "c62560a8d080b9ae9efdcc41a7c05dc76e87894256d6a50c424ba5abca9933a7",
+      "rows": 1000
+    },
+    "docs_.jsonl": {
+      "path": "data/evaluator/docs_.jsonl",
+      "sha256": "555c48d42999399364ac6ee023d2a4b6aa71af9a6a30f2e03da6cfaa2cf31bb1",
+      "rows": 5000
+    },
+    "body_.jsonl": {
+      "path": "data/evaluator/body_.jsonl",
+      "sha256": "128bc20f9e8b9640668d48d783dd924e39c920edf13aeff3fc7b1908dd9b0e30",
+      "rows": 4842
+    },
+    "qrows_.jsonl": {
+      "path": "data/evaluator/qrows_.jsonl",
+      "sha256": "3315ad5265d3459491af01a568f2b442a4caaadaf238ca47c04e505541a1680f",
+      "rows": 333
+    }
+  },
+  "runner_sha256": "6637fd26ad1bfd99cc713187f3c9326f681a38ce4010a7d89bfbd58e3d87221c",
+  "evaluator_sha256": "43972a8a6d8b13133b70491343a5c33fface8bf8d4ca156cfefbd7997bd53a4b",
+  "calibration": {
+    "receipt": "/work/results/calibration/calibration-coderank/receipt.json",
+    "source_pin": "89b5aed457b25616b1345a82291c1cff1a1dd195",
+    "config_pin": "1fd49167243d0f5dd510bbc2d14c6b1576477660ee37f8aaae82f3805ac0050e",
+    "input_pin": "a9159f625bb67f720b35be9fe218262873a134c25fc47119b3886b4517e41966"
+  }
+}

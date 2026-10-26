@@ -1,0 +1,43 @@
+{
+  "schema": "cpu-cost/v1",
+  "model_revision": "3c4b60807d71f79b43f3c4363786d9493691f8b1",
+  "inputs": {
+    "data/cpu-cost/docs_.jsonl": "555c48d42999399364ac6ee023d2a4b6aa71af9a6a30f2e03da6cfaa2cf31bb1",
+    "data/cpu-cost/body_.jsonl": "128bc20f9e8b9640668d48d783dd924e39c920edf13aeff3fc7b1908dd9b0e30",
+    "data/cpu-cost/qrows_.jsonl": "3315ad5265d3459491af01a568f2b442a4caaadaf238ca47c04e505541a1680f",
+    "data/cpu-cost/tokenizer/tokenizer.json": "91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854",
+    "data/cpu-cost/tokenizer/tokenizer_config.json": "7809f768ee3614618b3f1b91dcbfab4f6a9d4b79fb1ad5d17feb65a7c1bb5b7a",
+    "data/cpu-cost/tokenizer/special_tokens_map.json": "5d5b662e421ea9fac075174bb0688ee0d9431699900b90662acd44b2a350503a",
+    "data/cpu-cost/tokenizer/vocab.txt": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
+    "data/cpu-cost/tokenizer/config.json": "5ff856a41d0f53ef2d74520627d464bd75c2efd8f26f381bd528654895c29b6c",
+    "data/cpu-cost/model/model.onnx": "76cd0054e173a5928b3de15bb31f806f995705d221b77db6b5150f10c8907333",
+    "data/cpu-cost/model/weights.bin": "bdb9f7182272f817aab9e8ceb88891f4fd104c35183f0c2420ac35808aa127af",
+    "data/cpu-cost/artifacts.json": "4a14ac7af4ba1f8b930052f0f3e39d1f956c9489f8f6dfbd7ecf5e008d8e7277"
+  },
+  "source_files": {
+    "checkout/study/storage/onnx/main.go": "7cef2a383214f4487e42d0e631d283b61effe68ed7cc5b3fc18467f22793c1d9",
+    "checkout/study/storage/onnx/go.mod": "c5a6d3391572769af698e1f995f7418583f17ca6481aeef34ef049bda94210cd",
+    "checkout/study/storage/onnx/go.sum": "1f13cb5a004a0525921f6b256901095cdd0d0ffd890b5f2a3e6e214ef1332263",
+    "control/pod-cost/cpu_cost.py": "e6db6ae40549f11089417072acf8b81290b9e21e40edffecbbdab6e8419796af",
+    "control/pod-cost/pyproject.toml": "8b8827ac6412ecab17182c27638e3b5e8543893312debb0923dff7d740aef05b",
+    "control/pod-cost/uv.lock": "LEAD"
+  },
+  "ort": {
+    "version": "1.31.0",
+    "url": "https://files.pythonhosted.org/packages/6c/44/1e9e762b95b7da0a8424913a1ed7c38cdaf88624a3c41ddba24ebac88bc9/onnxruntime-1.31.0-cp312-cp312-manylinux_2_28_x86_64.whl",
+    "sha256": "5e129d6c56abd53e659cb70f00a108d6824086470ff99c2e47a82e5786563db3",
+    "library_member": "onnxruntime/capi/libonnxruntime.so.1.31.0",
+    "member_sha256": "verify trusted wheel RECORD and record before Go load on pod"
+  },
+  "recipe": {
+    "pooling": "CLS then L2",
+    "query_prefix": "Represent this query for searching relevant code: ",
+    "padding": "right to longest; PAD and type ID 0; attention mask 0",
+    "batching": "first 200 fixed; remainder stable length order; max16; rows*width^2<=4000000 unless singleton; queries one per batch",
+    "reference": "Python ORT 1.31.0 first200 exact policy rows; intra16/inter1; no prepacking",
+    "measured_repeats": 3,
+    "warmup": "first200 correctness gate per thread/policy; fresh process",
+    "deadline": "driver aux/cpu-cost/process.json absolute_deadline minus30 seconds; no refresh",
+    "allocation": "remaining time divided among remaining planned cases; reduced repeats explicit"
+  }
+}

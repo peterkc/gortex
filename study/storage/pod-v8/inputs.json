@@ -1,0 +1,684 @@
+{
+  "K": {
+    "repositories": [
+      {
+        "label": "api",
+        "url": "https://github.com/kubernetes/api.git",
+        "tag": "kubernetes-1.37.1",
+        "commit": "49d8cea73ffde0afed23b7d69502e9cc883afa74"
+      },
+      {
+        "label": "apimachinery",
+        "url": "https://github.com/kubernetes/apimachinery.git",
+        "tag": "kubernetes-1.37.1",
+        "commit": "e3a4b17431f39b969054c2bcd520243dc7be59a7"
+      },
+      {
+        "label": "client-go",
+        "url": "https://github.com/kubernetes/client-go.git",
+        "tag": "kubernetes-1.37.1",
+        "commit": "066ed4ed59a957c7b6d02be537a20ff9dc33fda8"
+      },
+      {
+        "label": "apiserver",
+        "url": "https://github.com/kubernetes/apiserver.git",
+        "tag": "kubernetes-1.37.1",
+        "commit": "4fb3912e297aa00fef85917c9ef52e503fba1ae0"
+      },
+      {
+        "label": "component-base",
+        "url": "https://github.com/kubernetes/component-base.git",
+        "tag": "kubernetes-1.37.1",
+        "commit": "34e9194d5c7827c2867ad58c278e7bba05f3fff5"
+      },
+      {
+        "label": "apiextensions-apiserver",
+        "url": "https://github.com/kubernetes/apiextensions-apiserver.git",
+        "tag": "kubernetes-1.37.1",
+        "commit": "4cf2f06231a6c02733b5c37514098d903f56f754"
+      },
+      {
+        "label": "cli-runtime",
+        "url": "https://github.com/kubernetes/cli-runtime.git",
+        "tag": "kubernetes-1.37.1",
+        "commit": "19695eca11f0be24fe4cb33e0c7c30de7e16c23d"
+      },
+      {
+        "label": "kubectl",
+        "url": "https://github.com/kubernetes/kubectl.git",
+        "tag": "kubernetes-1.37.1",
+        "commit": "724ca978a8caf483279bf059a294b4a970a2efa1"
+      },
+      {
+        "label": "kube-aggregator",
+        "url": "https://github.com/kubernetes/kube-aggregator.git",
+        "tag": "kubernetes-1.37.1",
+        "commit": "e4b5f54e6cff131ba50ae2047706a57aa6d08c53"
+      },
+      {
+        "label": "controller-manager",
+        "url": "https://github.com/kubernetes/controller-manager.git",
+        "tag": "kubernetes-1.37.1",
+        "commit": "8f2a887f7a609446fe46fd41bd25459a95367dbf"
+      },
+      {
+        "label": "code-generator",
+        "url": "https://github.com/kubernetes/code-generator.git",
+        "tag": "kubernetes-1.37.1",
+        "commit": "b7ddad3048d289a57a0540a9011ff091038f3f25"
+      },
+      {
+        "label": "metrics",
+        "url": "https://github.com/kubernetes/metrics.git",
+        "tag": "kubernetes-1.37.1",
+        "commit": "0dbb5b986e22d45b8687347da28670e5ed6db1f3"
+      }
+    ],
+    "pairs": [
+      [
+        "api",
+        "apimachinery"
+      ],
+      [
+        "apiextensions-apiserver",
+        "api"
+      ],
+      [
+        "apiextensions-apiserver",
+        "apimachinery"
+      ],
+      [
+        "apiextensions-apiserver",
+        "apiserver"
+      ],
+      [
+        "apiextensions-apiserver",
+        "client-go"
+      ],
+      [
+        "apiextensions-apiserver",
+        "code-generator"
+      ],
+      [
+        "apiextensions-apiserver",
+        "component-base"
+      ],
+      [
+        "apiserver",
+        "api"
+      ],
+      [
+        "apiserver",
+        "apimachinery"
+      ],
+      [
+        "apiserver",
+        "client-go"
+      ],
+      [
+        "apiserver",
+        "component-base"
+      ],
+      [
+        "cli-runtime",
+        "api"
+      ],
+      [
+        "cli-runtime",
+        "apimachinery"
+      ],
+      [
+        "cli-runtime",
+        "client-go"
+      ],
+      [
+        "client-go",
+        "api"
+      ],
+      [
+        "client-go",
+        "apimachinery"
+      ],
+      [
+        "code-generator",
+        "api"
+      ],
+      [
+        "code-generator",
+        "apimachinery"
+      ],
+      [
+        "code-generator",
+        "client-go"
+      ],
+      [
+        "component-base",
+        "api"
+      ],
+      [
+        "component-base",
+        "apimachinery"
+      ],
+      [
+        "component-base",
+        "client-go"
+      ],
+      [
+        "controller-manager",
+        "api"
+      ],
+      [
+        "controller-manager",
+        "apimachinery"
+      ],
+      [
+        "controller-manager",
+        "apiserver"
+      ],
+      [
+        "controller-manager",
+        "client-go"
+      ],
+      [
+        "controller-manager",
+        "component-base"
+      ],
+      [
+        "kube-aggregator",
+        "api"
+      ],
+      [
+        "kube-aggregator",
+        "apimachinery"
+      ],
+      [
+        "kube-aggregator",
+        "apiserver"
+      ],
+      [
+        "kube-aggregator",
+        "client-go"
+      ],
+      [
+        "kube-aggregator",
+        "code-generator"
+      ],
+      [
+        "kube-aggregator",
+        "component-base"
+      ],
+      [
+        "kubectl",
+        "api"
+      ],
+      [
+        "kubectl",
+        "apimachinery"
+      ],
+      [
+        "kubectl",
+        "cli-runtime"
+      ],
+      [
+        "kubectl",
+        "client-go"
+      ],
+      [
+        "kubectl",
+        "component-base"
+      ],
+      [
+        "kubectl",
+        "metrics"
+      ],
+      [
+        "metrics",
+        "api"
+      ],
+      [
+        "metrics",
+        "apimachinery"
+      ],
+      [
+        "metrics",
+        "client-go"
+      ],
+      [
+        "metrics",
+        "code-generator"
+      ]
+    ],
+    "runtime_pairs": [],
+    "history": {
+      "v4": {
+        "nodes": 428605,
+        "edges": 2330822,
+        "files": 9394,
+        "file_index_failures": 0,
+        "co_change": 21322,
+        "edges_by_kind": {
+          "accesses_field": 49587,
+          "aliases": 901,
+          "annotated": 986,
+          "arg_of": 230857,
+          "calls": 342740,
+          "captures": 35858,
+          "co_change": 21322,
+          "composes": 4021,
+          "configures": 832,
+          "contains": 35555,
+          "cross_repo_calls": 35789,
+          "defines": 121979,
+          "depends_on": 257,
+          "depends_on_module": 16345,
+          "executes_process": 9,
+          "exposes": 225,
+          "extends": 965,
+          "implements": 63807,
+          "imports": 36737,
+          "instantiates": 58088,
+          "member_of": 267743,
+          "mounts": 317,
+          "overrides": 3898,
+          "param_of": 57435,
+          "reads": 238789,
+          "recvs": 720,
+          "references": 203756,
+          "returns": 51449,
+          "returns_to": 100540,
+          "semantically_related": 1550,
+          "sends": 92,
+          "similar_to": 33384,
+          "spawns": 602,
+          "tests": 42782,
+          "throws": 11123,
+          "typed_as": 55333,
+          "uses_env": 275,
+          "value_flow": 181770,
+          "writes": 22404
+        },
+        "owned_cross_total": 124211
+      },
+      "v5": {
+        "nodes": 428605,
+        "edges": 2330806,
+        "files": 9394,
+        "file_index_failures": 0,
+        "co_change": 21322,
+        "edges_by_kind": {
+          "accesses_field": 49587,
+          "aliases": 901,
+          "annotated": 986,
+          "arg_of": 230857,
+          "calls": 342740,
+          "captures": 35858,
+          "co_change": 21322,
+          "composes": 4021,
+          "configures": 832,
+          "contains": 35555,
+          "cross_repo_calls": 35789,
+          "defines": 121979,
+          "depends_on": 257,
+          "depends_on_module": 16345,
+          "executes_process": 9,
+          "exposes": 225,
+          "extends": 965,
+          "implements": 63807,
+          "imports": 36737,
+          "instantiates": 58088,
+          "member_of": 267743,
+          "mounts": 317,
+          "overrides": 3898,
+          "param_of": 57435,
+          "reads": 238789,
+          "recvs": 720,
+          "references": 203756,
+          "returns": 51449,
+          "returns_to": 100540,
+          "semantically_related": 1550,
+          "sends": 92,
+          "similar_to": 33384,
+          "spawns": 602,
+          "tests": 42766,
+          "throws": 11123,
+          "typed_as": 55333,
+          "uses_env": 275,
+          "value_flow": 181770,
+          "writes": 22404
+        },
+        "owned_cross_total": 124194
+      }
+    }
+  },
+  "P": {
+    "repositories": [
+      {
+        "label": "flask",
+        "url": "https://github.com/pallets/flask.git",
+        "tag": "3.1.3",
+        "commit": "22d924701a6ae2e4cd01e9a15bbaf3946094af65"
+      },
+      {
+        "label": "werkzeug",
+        "url": "https://github.com/pallets/werkzeug.git",
+        "tag": "3.1.9",
+        "commit": "6604c3b8784ecc7cf5ac0b7412d916989b4c7d45"
+      },
+      {
+        "label": "jinja",
+        "url": "https://github.com/pallets/jinja.git",
+        "tag": "3.1.6",
+        "commit": "15206881c006c79667fe5154fe80c01c65410679"
+      },
+      {
+        "label": "markupsafe",
+        "url": "https://github.com/pallets/markupsafe.git",
+        "tag": "3.0.4",
+        "commit": "ece26078ec168ebac69f02877238e68d4b376c91"
+      },
+      {
+        "label": "click",
+        "url": "https://github.com/pallets/click.git",
+        "tag": "8.5.0",
+        "commit": "8b19813f2bfca99f1018a587a8cf54fc959f2e5d"
+      },
+      {
+        "label": "itsdangerous",
+        "url": "https://github.com/pallets/itsdangerous.git",
+        "tag": "2.2.0",
+        "commit": "096c8d42545d3b68ea21a4f890fb2b2d8979c0bd"
+      }
+    ],
+    "pairs": [
+      [
+        "flask",
+        "click"
+      ],
+      [
+        "flask",
+        "itsdangerous"
+      ],
+      [
+        "flask",
+        "jinja"
+      ],
+      [
+        "flask",
+        "markupsafe"
+      ],
+      [
+        "flask",
+        "werkzeug"
+      ],
+      [
+        "itsdangerous",
+        "jinja"
+      ],
+      [
+        "itsdangerous",
+        "markupsafe"
+      ],
+      [
+        "jinja",
+        "click"
+      ],
+      [
+        "jinja",
+        "markupsafe"
+      ],
+      [
+        "werkzeug",
+        "markupsafe"
+      ]
+    ],
+    "runtime_pairs": [
+      [
+        "flask",
+        "click"
+      ],
+      [
+        "flask",
+        "itsdangerous"
+      ],
+      [
+        "flask",
+        "jinja"
+      ],
+      [
+        "flask",
+        "markupsafe"
+      ],
+      [
+        "flask",
+        "werkzeug"
+      ],
+      [
+        "jinja",
+        "markupsafe"
+      ],
+      [
+        "werkzeug",
+        "markupsafe"
+      ]
+    ],
+    "history": {
+      "v4": {
+        "nodes": 24318,
+        "edges": 99614,
+        "files": 726,
+        "file_index_failures": 0,
+        "co_change": 7406,
+        "edges_by_kind": {
+          "annotated": 2716,
+          "calls": 25944,
+          "co_change": 7406,
+          "contains": 3467,
+          "cross_repo_calls": 293,
+          "defines": 10285,
+          "depends_on_module": 1435,
+          "executes_process": 11,
+          "extends": 619,
+          "imports": 3486,
+          "instantiates": 3674,
+          "member_of": 4460,
+          "models_table": 1,
+          "overrides": 380,
+          "param_of": 8478,
+          "reads": 282,
+          "references": 5051,
+          "returns": 1175,
+          "semantically_related": 708,
+          "similar_to": 9572,
+          "spawns": 55,
+          "tests": 7299,
+          "throws": 503,
+          "typed_as": 2314
+        },
+        "owned_cross_total": 800
+      },
+      "v5": {
+        "nodes": 24318,
+        "edges": 99633,
+        "files": 726,
+        "file_index_failures": 0,
+        "co_change": 7406,
+        "edges_by_kind": {
+          "annotated": 2716,
+          "calls": 25944,
+          "co_change": 7406,
+          "contains": 3467,
+          "cross_repo_calls": 306,
+          "defines": 10285,
+          "depends_on_module": 1435,
+          "executes_process": 11,
+          "extends": 619,
+          "imports": 3486,
+          "instantiates": 3674,
+          "member_of": 4460,
+          "models_table": 1,
+          "overrides": 380,
+          "param_of": 8478,
+          "reads": 282,
+          "references": 5051,
+          "returns": 1175,
+          "semantically_related": 708,
+          "similar_to": 9572,
+          "spawns": 55,
+          "tests": 7305,
+          "throws": 503,
+          "typed_as": 2314
+        },
+        "owned_cross_total": 832
+      }
+    }
+  },
+  "R": {
+    "repositories": [
+      {
+        "label": "hyper",
+        "url": "https://github.com/hyperium/hyper.git",
+        "tag": "v1.12.0",
+        "commit": "7f67699ce32d717081deb7018b4da7d679277ac0"
+      },
+      {
+        "label": "http",
+        "url": "https://github.com/hyperium/http.git",
+        "tag": "v1.5.0",
+        "commit": "16fc9a7b840c2181e7f8b37397c107b0ffcd050d"
+      },
+      {
+        "label": "http-body",
+        "url": "https://github.com/hyperium/http-body.git",
+        "tag": "v1.1.0",
+        "commit": "3396328602f7b147ae7b13f022c2b94dff9434e3"
+      },
+      {
+        "label": "tokio",
+        "url": "https://github.com/tokio-rs/tokio.git",
+        "tag": "tokio-1.54.1",
+        "commit": "b53b2001ed2ccfd9b87e32a0c6da1a1eebdc80b8"
+      },
+      {
+        "label": "bytes",
+        "url": "https://github.com/tokio-rs/bytes.git",
+        "tag": "v1.12.1",
+        "commit": "76c0fbb54ed4336caf9d2311658a2f4a5627c21d"
+      }
+    ],
+    "pairs": [
+      [
+        "http",
+        "bytes"
+      ],
+      [
+        "http-body",
+        "bytes"
+      ],
+      [
+        "http-body",
+        "http"
+      ],
+      [
+        "http-body",
+        "tokio"
+      ],
+      [
+        "hyper",
+        "bytes"
+      ],
+      [
+        "hyper",
+        "http"
+      ],
+      [
+        "hyper",
+        "http-body"
+      ],
+      [
+        "hyper",
+        "tokio"
+      ],
+      [
+        "tokio",
+        "bytes"
+      ],
+      [
+        "tokio",
+        "http"
+      ]
+    ],
+    "runtime_pairs": [
+      [
+        "http",
+        "bytes"
+      ],
+      [
+        "http-body",
+        "bytes"
+      ],
+      [
+        "http-body",
+        "http"
+      ],
+      [
+        "http-body",
+        "tokio"
+      ],
+      [
+        "hyper",
+        "bytes"
+      ],
+      [
+        "hyper",
+        "http"
+      ],
+      [
+        "hyper",
+        "http-body"
+      ],
+      [
+        "hyper",
+        "tokio"
+      ],
+      [
+        "tokio",
+        "bytes"
+      ]
+    ],
+    "history": {
+      "v4": {
+        "nodes": 30434,
+        "edges": 226789,
+        "files": 1139,
+        "file_index_failures": 0,
+        "co_change": 9674,
+        "edges_by_kind": {
+          "annotated": 6920,
+          "calls": 77179,
+          "co_change": 9674,
+          "cross_repo_calls": 1935,
+          "defines": 17899,
+          "depends_on_module": 35,
+          "extends": 51,
+          "implements": 3282,
+          "imports": 6108,
+          "instantiates": 10293,
+          "member_of": 10849,
+          "overrides": 2639,
+          "package_workspace_member": 12,
+          "param_of": 7072,
+          "reads": 2259,
+          "references": 37293,
+          "returns": 4536,
+          "semantically_related": 256,
+          "similar_to": 4108,
+          "spawns": 2716,
+          "tests": 15582,
+          "throws": 509,
+          "typed_as": 5582
+        },
+        "owned_cross_total": 5230
+      }
+    }
+  }
+}

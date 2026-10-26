@@ -1,0 +1,26 @@
+[
+  {
+    "file": "torch-2.7.1.json",
+    "url": "https://pypi.org/pypi/torch/2.7.1/json",
+    "fetched_at_pdt": "2026-10-26T06:17:20.611515-07:00",
+    "sha256": "3380d159a9c522f299a24cd09f325f304a9c0ea92fb8965b30be7392f935403c"
+  },
+  {
+    "file": "transformers-4.51.3.json",
+    "url": "https://pypi.org/pypi/transformers/4.51.3/json",
+    "fetched_at_pdt": "2026-10-26T06:17:20.700516-07:00",
+    "sha256": "626cf5173b21a0541241450f048091c6bbe37e0e0bb7540aa6355782b301bb50"
+  },
+  {
+    "file": "sentence-transformers-4.1.0.json",
+    "url": "https://pypi.org/pypi/sentence-transformers/4.1.0/json",
+    "fetched_at_pdt": "2026-10-26T06:17:20.787572-07:00",
+    "sha256": "ca9727bc6bd690e8e77259c1be7c8dc5fc97be2caaae2876fded688ba47491bb"
+  },
+  {
+    "file": "torch-cu126.html",
+    "url": "https://download.pytorch.org/whl/cu126/torch/",
+    "fetched_at_pdt": "2026-10-26T06:17:20.851397-07:00",
+    "sha256": "3883ceffcb18ef907109261e6a061d167569fe9d8b4502dc669d4191fc19bc69"
+  }
+]

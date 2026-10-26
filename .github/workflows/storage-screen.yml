@@ -110,6 +110,65 @@ jobs:
             | tee -a "$RUNNER_TEMP/storage/ci-evaluator.txt"
           uv run --project research/gortex/storage-architecture/tmp/neon-eval python -m unittest discover -s research/gortex/storage-architecture/tmp/neon-eval -p test_evaluate.py -v 2>&1 \
             | tee -a "$RUNNER_TEMP/storage/ci-evaluator.txt"
+      - name: D3 inference contracts on tiny NumPy fixtures only
+        shell: bash
+        env:
+          OPENBLAS_NUM_THREADS: "2"
+          OMP_NUM_THREADS: "2"
+          MKL_NUM_THREADS: "2"
+          UV_PYTHON: python3.12
+          UV_PYTHON_DOWNLOADS: never
+          UV_CACHE_DIR: ${{ runner.temp }}/storage/uv-cache
+        run: |
+          set -euo pipefail
+          uv="$RUNNER_TEMP/storage/evaluator-tools/uv-x86_64-unknown-linux-gnu/uv"
+          project="study/storage/pod-models"
+          if test ! -f "$project/uv.lock"; then
+            "$uv" lock --project "$project"
+          fi
+          "$uv" lock --check --project "$project"
+          cp "$project/uv.lock" "$RUNNER_TEMP/storage/ci-models-lock.txt"
+          "$uv" run --frozen --project "$project" python --version \
+            | tee "$RUNNER_TEMP/storage/ci-models.txt"
+          sha256sum "$project/pyproject.toml" "$project/uv.lock" \
+            "$project/run_models.py" "$project/test_models.py" \
+            study/storage/neon-eval/evaluate.py \
+            | tee -a "$RUNNER_TEMP/storage/ci-models.txt"
+          "$uv" run --frozen --project "$project" python -m unittest discover \
+            -s "$project" -p test_models.py -v 2>&1 \
+            | tee -a "$RUNNER_TEMP/storage/ci-models.txt"
+      - name: Frozen-v8 tiny Linux fixtures without Gortex
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3.12 --version | tee "$RUNNER_TEMP/storage/ci-v8.txt"
+          python3.12 -m unittest discover -s study/storage/pod-v8 -p test_run.py -v 2>&1 \
+            | tee -a "$RUNNER_TEMP/storage/ci-v8.txt"
+      - name: CPU cost orchestration on tiny synthetic fixtures only
+        shell: bash
+        env:
+          OPENBLAS_NUM_THREADS: "2"
+          OMP_NUM_THREADS: "2"
+          MKL_NUM_THREADS: "2"
+          UV_PYTHON: python3.12
+          UV_PYTHON_DOWNLOADS: never
+          UV_CACHE_DIR: ${{ runner.temp }}/storage/uv-cache
+        run: |
+          set -euo pipefail
+          uv="$RUNNER_TEMP/storage/evaluator-tools/uv-x86_64-unknown-linux-gnu/uv"
+          project="$RUNNER_TEMP/storage/cpu-cost-project"
+          cp -R study/storage/pod-cost "$project"
+          if test ! -f "$project/uv.lock"; then
+            "$uv" lock --project "$project"
+          fi
+          "$uv" lock --check --project "$project"
+          cp "$project/uv.lock" "$RUNNER_TEMP/storage/ci-cpu-cost-lock.txt"
+          sha256sum "$project/pyproject.toml" "$project/uv.lock" \
+            "$project/cpu_cost.py" "$project/test_cpu_cost.py" \
+            | tee "$RUNNER_TEMP/storage/ci-cpu-cost.txt"
+          "$uv" run --frozen --project "$project" python -m unittest discover \
+            -s "$project" -p test_cpu_cost.py -v 2>&1 \
+            | tee -a "$RUNNER_TEMP/storage/ci-cpu-cost.txt"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
