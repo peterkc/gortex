@@ -41,6 +41,7 @@ import (
 // for an unchanged corpus.
 // Go module binding changes candidate order, cross-repo provenance and import identity.
 // Python import and call stubs add stored metadata required by tracked-package linking.
+// Same-line Python submodule imports retain distinct stored identities.
 const ResolutionSemanticsVersion = 6
 
 // resolverVersionDomain versions the ENCODING below, not the contract. Two
