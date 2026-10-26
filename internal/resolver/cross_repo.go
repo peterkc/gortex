@@ -1442,7 +1442,7 @@ func (cr *CrossRepoResolver) filterLiveReindex(batch []graph.EdgeReindex) []grap
 		sites = append(sites, graph.EdgeSite{
 			From: reindex.Edge.From, Line: reindex.Edge.Line, Kind: reindex.Edge.Kind,
 		})
-		if !isSyntheticResolveTarget(reindex.Edge.To) {
+		if reindex.Edge.To != reindex.OldTo && !isSyntheticResolveTarget(reindex.Edge.To) {
 			targetIDs = append(targetIDs, reindex.Edge.To)
 		}
 	}
@@ -1464,7 +1464,7 @@ func (cr *CrossRepoResolver) filterLiveReindex(batch []graph.EdgeReindex) []grap
 		if !live {
 			continue
 		}
-		if !isSyntheticResolveTarget(edge.To) && targets[edge.To] == nil {
+		if edge.To != reindex.OldTo && !isSyntheticResolveTarget(edge.To) && targets[edge.To] == nil {
 			edge.To = reindex.OldTo
 			continue
 		}
