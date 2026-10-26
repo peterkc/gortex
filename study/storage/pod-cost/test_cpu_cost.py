@@ -10,6 +10,8 @@ import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import cpu_cost as cost
 
@@ -284,6 +286,197 @@ class CostTests(unittest.TestCase):
             self.assertNotEqual(subprocess.run(argv, capture_output=True)
                                 .returncode, 0)
             self.assertFalse(receipt.exists())
+
+
+    def execute_fixture(self, root, prepare, probe=None, cases=None, *,
+                        clean=True):
+        config = root / "config.json"
+        config.write_text(json.dumps({"inputs": {}, "source_files": {},
+                                      "ort": {}, "recipe": {}}))
+        process = root / "aux/cpu-cost/process.json"
+        process.parent.mkdir(parents=True)
+        process.write_text(json.dumps({
+            "absolute_deadline": time.monotonic() + 600}))
+        library = root / "library.so"
+        library.write_bytes(b"fixture library bytes; never loaded")
+        member = SimpleNamespace(
+            name="libonnxruntime.so.1.31.0", hash=SimpleNamespace(
+                mode="sha256", value=cost.base64.urlsafe_b64encode(
+                    hashlib.sha256(library.read_bytes()).digest())
+                .decode().rstrip("=")))
+        distribution = SimpleNamespace(
+            version="1.31.0", files=[member],
+            locate_file=unittest.mock.Mock(return_value=library))
+        args = cost.argparse.Namespace(
+            root=root, config=config, receipt=root / "results/receipt.json",
+            source_pin="a"*40, config_pin=cost.digest(config),
+            input_pin=hashlib.sha256(b"{}").hexdigest())
+        with (
+            patch.dict(os.environ, dict(os.environ)),
+            patch.object(cost.importlib.metadata, "distribution",
+                         return_value=distribution),
+            patch.object(cost, "successor_check"),
+            patch.object(cost, "precompute", side_effect=prepare),
+            patch.object(cost, "probe", side_effect=probe),
+            patch.object(cost, "matrix", return_value=(
+                cases if cases is not None else cost.matrix())),
+            patch.object(cost, "reap_children", side_effect=(
+                cost.reap_children if clean else lambda: False)),
+        ):
+            code = cost.execute(args)
+        return code, json.loads(args.receipt.read_text()), json.loads(
+            (args.receipt.parent / "matrix.json").read_text())
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux runner contract")
+    def test_failed_worker_writes_partial_receipt_after_reaping(self):
+        programs = {
+            "crash": "raise SystemExit(7)",
+            "killed": "import os,signal; os.kill(os.getpid(),signal.SIGKILL)",
+            "reportless": "pass",
+            "malformed": "import pathlib,sys; "
+                         "pathlib.Path(sys.argv[1]).write_text('{')",
+            "timeout": "import signal; signal.pause()",
+        }
+        for mode, program in programs.items():
+            with self.subTest(mode=mode), \
+                    tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+
+                def prepare(root, output):
+                    command = [sys.executable, "-c", program,
+                               str(output / "worker.json")]
+                    try:
+                        return cost.completed_worker(
+                            command, output / "worker.json",
+                            time.monotonic() + (1 if mode == "timeout" else 5),
+                            root, os.environ)
+                    finally:
+                        self.assertTrue(cost.reap_children())
+
+                code, record, _ = self.execute_fixture(root, prepare)
+                self.assertEqual((code, record["exit_code"]), (1, 1))
+                self.assertEqual((record["state"], record["reason_code"]),
+                                 ("partial", "worker"))
+                self.assertTrue(record["clean_handoff"])
+                self.assertTrue(cost.reap_children())
+                for relative, expected in record["files"].items():
+                    self.assertEqual(cost.digest(root / relative), expected)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux runner contract")
+    def test_unverified_reaping_writes_unclean_partial_receipt(self):
+        with tempfile.TemporaryDirectory() as folder:
+            def reject(root, output):
+                raise cost.FatalWorker("fixture local failure")
+
+            code, record, _ = self.execute_fixture(Path(folder), reject,
+                                                   clean=False)
+            self.assertEqual(code, 1)
+            self.assertEqual(record["state"], "partial")
+            self.assertEqual(record["reason_code"], "process")
+            self.assertFalse(record["clean_handoff"])
+
+    def test_repeat_estimate_scales_gate_rows_without_scaling_load(self):
+        warm = {"load_seconds": 2, "seconds": 3, "completed_texts": 200}
+        measured = {"load_seconds": 2, "seconds": 75,
+                    "completed_texts": 5000}
+        self.assertEqual(cost.repeat_seconds(warm, 5000), 79)
+        self.assertEqual(cost.repeat_seconds(measured, 5000), 79)
+        self.assertEqual(warm["seconds"], 3)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux runner contract")
+    def test_native_guard_partial_report_is_not_a_worker_crash(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            tokens = root / "tokens.json"
+            tokens.write_text(json.dumps([{
+                "indices": [0, 1], "shape": [2, 1], "inputs": {
+                    "input_ids": [101, 101], "attention_mask": [1, 1],
+                    "token_type_ids": [0, 0]}}]))
+            report = {"runtime": "1.31.0", "disable_prepacking": True,
+                      "inter_op_threads": 1, "intra_op_threads": 8,
+                      "token_file_sha256": cost.digest(tokens),
+                      "status": "partial", "reason": "runner guard exceeded",
+                      "vectors": [[1.0]*768, None], "planned_texts": 2,
+                      "completed_texts": 1, "seconds": 1, "load_seconds": 0}
+            script = root / "onnxprobe"
+            script.write_text(
+                "#!/usr/bin/env python3\nimport json,pathlib,sys\n"
+                f"report=json.loads({json.dumps(json.dumps(report))})\n"
+                "p=pathlib.Path(sys.argv[sys.argv.index('-output')+1])\n"
+                "p.write_text(json.dumps(report))\nraise SystemExit(1)\n")
+            script.chmod(0o700)
+            args = cost.argparse.Namespace(root=root, library=root / "fake.so")
+            case = {"threads": 8, "corpus": "body", "cap": 512}
+            result = cost.probe(args, case, tokens, root / "partial.json",
+                                1, time.monotonic() + 5, os.environ)
+            self.assertEqual(result["status"], "partial")
+            self.assertEqual(result["completed_texts"], 1)
+            self.assertTrue(cost.reap_children())
+            script.write_text(script.read_text().replace(
+                "runner guard exceeded", "unknown stop"))
+            with self.assertRaises(cost.FatalWorker):
+                cost.probe(args, case, tokens, root / "bad.json",
+                           1, time.monotonic() + 5, os.environ)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux runner contract")
+    def test_guard_partial_continues_and_no_full_case_is_partial(self):
+        for outcome in ("completed", "partial", "admission-refused"):
+            all_partial = outcome == "partial"
+            with self.subTest(next_case=outcome), \
+                    tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                cases = cost.matrix()[:2]
+                vector = [1.0, *([0.0]*767)]
+                calls = []
+
+                def prepare(root, output):
+                    for suffix in (".json", "-gate.json"):
+                        (output / ("metadata-8192" + suffix)).write_text("[]")
+                    (output / "metadata-8192-reference.json").write_text(
+                        json.dumps({"status": "completed", "runtime": "1.31.0",
+                                    "intra_op_threads": 16,
+                                    "inter_op_threads": 1,
+                                    "token_sha256": cost.digest(
+                                        output / "metadata-8192-gate.json"),
+                                    "vectors": [vector]*200}))
+                    return {"metadata-8192": {"ids": list(range(400)),
+                                              "symbols": 400}}
+
+                def probe(args, case, tokens, output, repeat, end, env):
+                    calls.append((case["threads"], repeat))
+                    if outcome == "admission-refused" and case["threads"] == 2:
+                        raise cost.Skip("time", "absolute deadline; no spawn")
+                    partial = all_partial or (case["threads"] == 1 and repeat)
+                    planned = 200 if repeat == 0 else 400
+                    completed = 96 if partial else planned
+                    return {"status": "partial" if partial else "completed",
+                            "reason": ("runner guard exceeded"
+                                       if partial else ""),
+                            "runtime": "1.31.0",
+                            "intra_op_threads": case["threads"],
+                            "inter_op_threads": 1,
+                            "token_file_sha256": cost.digest(tokens),
+                            "planned_texts": planned,
+                            "completed_texts": completed,
+                            "vectors": [vector]*completed
+                            + [None]*(planned-completed),
+                            "seconds": 0.01, "load_seconds": 0.01,
+                            "minutes_per_10k_symbols": 1}
+
+                code, record, summary = self.execute_fixture(
+                    root, prepare, probe, cases)
+                self.assertEqual(code, 1)
+                self.assertEqual((record["state"], record["reason_code"]),
+                                 ("partial", "time"))
+                self.assertTrue(record["clean_handoff"])
+                self.assertIn((2, 0), calls)
+                self.assertEqual(summary["cases"][0]["status"], "partial")
+                self.assertEqual(summary["cases"][1]["status"],
+                                 "completed" if outcome == "completed"
+                                 else "partial")
+                self.assertEqual(summary["cases"][0]["actual_repeats"], 0)
+                self.assertEqual(summary["accepted_timings"],
+                                 outcome == "completed")
 
 
 if __name__ == "__main__":

@@ -90,11 +90,12 @@ rankings `dependency_blocked`. Successful calibration invokes the existing
 corpus-order ties, all hashes and full row counts. Its four metrics and every
 rank remain in the hashed score outputs. No target is imposed on D3 quality.
 
-Pre-output identity/data rejections publish no receipt and return nonzero.
-Handled compute/scorer failures retain a `failure.json` and `checks_failed`
-receipt with exit 1. The runner has no detached child: scorer calls are joined;
-the owning supervisor reaps the process group before accepting handoff. Other
-unexpected failures remain incomplete and cannot pass driver validation.
+Identity/data/import rejections write an exit-1 `partial` receipt with hashed
+failure evidence before returning. Handled compute/scorer failures also write
+`partial`, never success. The runner has no detached child: scorer calls are
+joined; the owning supervisor reaps the group before accepting handoff. An
+existing receipt is preserved. Unauthorized roots and escaping receipt paths
+refuse without outside writes; a receipt cannot be written to a forbidden path.
 
 ## Package choice and evidence
 
@@ -194,9 +195,9 @@ model compatibility, inference, GPU memory, runtime, cost and actual rankings
 are **not checked** here. Linux CI and the same authorized pod must supply them.
 No Go, daemon, pod, paid action, commit, push or other worker's file was touched.
 
-Final source sizes: `run_models.py` 348 lines;
-`test_models.py` 213 lines, 13 statically counted test methods.
-Final runner SHA256: `6637fd26ad1bfd99cc713187f3c9326f681a38ce4010a7d89bfbd58e3d87221c`.
+Current source sizes: `run_models.py` 385 lines;
+`test_models.py` 279 lines, 16 statically counted test methods.
+Current runner SHA256: `42938ecd2001ba8591a6160e4fa91519ac54fb66a7ff9abbfc588285a6095186`.
 Evaluator SHA256: `43972a8a6d8b13133b70491343a5c33fface8bf8d4ca156cfefbd7997bd53a4b`.
 Config hashes and binding arguments match by static comparison. The complete
 binding sums to 160 minutes. This comparison runs no project code or tests.
@@ -207,3 +208,25 @@ Receipt-path correction: application receipts live at
 `/work/results/calibration/calibration-coderank/receipt.json`; its config and
 identity pins are unchanged. All three model config hashes and binding argv
 were refreshed. Runner code and the NumPy-only CI step are unchanged.
+
+## B4 clean pre-compute failures
+
+Given a config, pin, input or import failure before model loading, when the
+runner returns, then it writes an exit-1 `partial` receipt with a short reason,
+`clean_handoff: true`, unchanged invocation pins and hashed failure evidence.
+There are no child processes to reap at that stage. Given an already published
+receipt, a refused invocation preserves its bytes rather than overwriting it.
+The CLI's Linux `/work` policy and path containment still refuse unauthorized
+writes. Calibration remains a separate dependency check, not a new model rank.
+
+The earlier missing-receipt behavior let the driver mistake block-local input
+errors for a session-ending failure. The fix records the actual failed block;
+it does not hide a failure or turn it into a pass. Tests cover malformed config,
+source/config/input pins, missing input, missing import and preserved receipts.
+They will run in Linux CI. Only syntax compilation runs on this Mac.
+
+B4 verification: py_compile exited 0 for both files. The source diff is
+48 added / 11 removed production lines. No tests ran under the Mac hold.
+The three model configs now bind the new runner hash; the lead must refresh
+those config pins in its binding before CI/source acceptance. The CLI and
+calibration behavior otherwise remain unchanged.

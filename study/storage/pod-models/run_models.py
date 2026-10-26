@@ -1,5 +1,8 @@
 """Pinned D3 fp32 inference and calibrated same-pod retrieval metrics."""
+from __future__ import annotations
+
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -10,10 +13,13 @@ from dataclasses import asdict
 from importlib.metadata import version
 from pathlib import Path
 
-import numpy as np
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "neon-eval"))
-import evaluate as ev
+IMPORT_FAILURE = ""
+try:
+    import numpy as np
+    import evaluate as ev
+except ImportError as error:
+    IMPORT_FAILURE = str(error)
 
 D3 = ("bge-large-en", "qwen3-embedding-0-6b", "gte-large-en")
 GTE_PAIR = ("Alibaba-NLP/gte-large-en-v1.5",
@@ -290,10 +296,10 @@ def compute(config: Mapping, rows: Mapping, args: argparse.Namespace,
     torch.cuda.empty_cache()
 
 
-def run(args: argparse.Namespace) -> int:
+def run_model(args: argparse.Namespace) -> int:
+    if IMPORT_FAILURE:
+        raise ImportError(IMPORT_FAILURE)
     root = args.root.resolve()
-    if root != Path("/work") or sys.platform != "linux":
-        raise ev.RunError("pod-only execution requires Linux and /work")
     config_path = ev.owned_path(str(args.config), root)
     if not ev.is_pin(args.source_pin, (40, 64)):
         raise ev.RunError("supply final source pin, not LEAD")
@@ -314,31 +320,62 @@ def run(args: argparse.Namespace) -> int:
     blocked = calibration(config, root)
     begin_output(output)
     code = 0
+    reason = {}
     state = "dependency_blocked" if blocked else "completed"
     try:
         compute(config, rows, args, output, blocked, time.monotonic())
     except (RuntimeError, OSError, ValueError, ev.RunError) as error:
         write_json(output / "failure.json", {"error": str(error)})
-        state, code = "checks_failed", 1
+        state, code = "partial", 1
+        reason = {"reason_code": "compute", "reason": str(error)}
     files = {str(p.relative_to(root)): ev.digest(p)
              for p in output.iterdir() if p.is_file()}
     write_json(receipt, {"source_pin": args.source_pin,
                          "config_pin": args.config_pin,
                          "input_pin": args.input_pin, "exit_code": code,
                          "state": state, "clean_handoff": True,
-                         "files": files})
+                         "files": files, **reason})
     return code
 
 
-def main() -> int:
+def run(args: argparse.Namespace) -> int:
+    try:
+        return run_model(args)
+    except Exception as error:
+        root = args.root.resolve()
+        receipt = args.receipt.resolve()
+        if receipt.exists():
+            raise
+        if not receipt.is_relative_to(root):
+            raise RuntimeError("receipt escapes declared root") from error
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        reason_code = "import" if isinstance(error, ImportError) else "input"
+        failure = receipt.with_suffix(".error.json")
+        write_json(failure, {"reason_code": reason_code, "reason": str(error)})
+        files = {str(p.relative_to(root)):
+                 hashlib.sha256(p.read_bytes()).hexdigest()
+                 for p in receipt.parent.iterdir() if p.is_file()}
+        write_json(receipt, {"source_pin": args.source_pin,
+                            "config_pin": args.config_pin,
+                            "input_pin": args.input_pin, "exit_code": 1,
+                            "state": "partial", "clean_handoff": True,
+                            "reason_code": reason_code, "reason": str(error),
+                            "files": files})
+        return 1
+
+
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     for flag in ("root", "config", "receipt"):
         parser.add_argument("--" + flag, type=Path, required=True)
     for flag in ("source-pin", "config-pin", "input-pin"):
         parser.add_argument("--" + flag, required=True)
+    args = parser.parse_args(argv)
     try:
-        return run(parser.parse_args())
-    except (ev.RunError, OSError, ValueError, KeyError) as error:
+        if args.root.resolve() != Path("/work") or sys.platform != "linux":
+            raise RuntimeError("pod-only execution requires Linux and /work")
+        return run(args)
+    except Exception as error:
         print(json.dumps({"state": "checks_failed", "error": str(error)}),
               file=sys.stderr)
         return 1

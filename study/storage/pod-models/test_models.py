@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from dataclasses import replace
 from pathlib import Path
 
@@ -204,9 +205,74 @@ class ModelTests(unittest.TestCase):
                 run.ev.owned_path("link/outside", root)
 
     def test_mac_or_non_work_execution_refuses_before_import(self):
-        args = argparse.Namespace(root=Path("/not-work"))
-        with self.assertRaisesRegex(run.ev.RunError, "pod-only"):
-            run.run(args)
+        argv = ["--root", "/not-work", "--config", "/missing", "--receipt",
+                "/not-work/receipt.json", "--source-pin", "a" * 40,
+                "--config-pin", "b" * 64, "--input-pin", "c" * 64]
+        self.assertEqual(run.main(argv), 1)
+
+    def assert_partial(self, args, expected_reason):
+        self.assertEqual(run.run(args), 1)
+        receipt = json.loads(args.receipt.read_text())
+        self.assertEqual(receipt["state"], "partial")
+        self.assertEqual(receipt["reason_code"], expected_reason)
+        self.assertTrue(receipt["reason"])
+        self.assertTrue(receipt["clean_handoff"])
+        self.assertEqual(receipt["exit_code"], 1)
+        self.assertEqual(receipt["source_pin"], args.source_pin)
+        self.assertEqual(receipt["config_pin"], args.config_pin)
+        self.assertEqual(receipt["input_pin"], args.input_pin)
+        self.assertTrue(receipt["files"])
+        for relative, expected in receipt["files"].items():
+            self.assertEqual(run.ev.digest(args.root / relative), expected)
+
+    def test_config_pin_and_input_errors_write_partial_receipts(self):
+        for failure in ("json", "source", "config", "input-pin", "input"):
+            with (self.subTest(failure=failure),
+                  tempfile.TemporaryDirectory() as directory):
+                root = Path(directory)
+                config_path = root / "config.json"
+                config = {"runner_sha256": run.ev.digest(Path(run.__file__)),
+                          "evaluator_sha256": run.ev.digest(
+                              Path(run.ev.__file__)),
+                          "model": "bge-large-en", "inputs": {
+                              "corp_.jsonl": {"path": "missing.jsonl",
+                                             "sha256": "a" * 64, "rows": 1}}}
+                config_path.write_text(json.dumps(config))
+                if failure == "json":
+                    config_path.write_text("{broken")
+                args = argparse.Namespace(
+                    root=root, config=config_path,
+                    receipt=root / "output" / "receipt.json",
+                    source_pin="invalid" if failure == "source" else "a" * 40,
+                    config_pin="b" * 64 if failure == "config" else
+                    run.ev.digest(config_path),
+                    input_pin="c" * 64 if failure == "input-pin" else
+                    run.ev.json_pin({"corp_.jsonl": "a" * 64}))
+                self.assert_partial(args, "input")
+
+    def test_import_error_writes_partial_without_model_stack(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = argparse.Namespace(root=root, config=root / "missing.json",
+                                      receipt=root / "output" / "receipt.json",
+                                      source_pin="a" * 40, config_pin="b" * 64,
+                                      input_pin="c" * 64)
+            with patch.object(run, "IMPORT_FAILURE", "missing numpy"):
+                self.assert_partial(args, "import")
+            self.assertNotIn("torch", sys.modules)
+
+    def test_existing_receipt_is_preserved_on_refused_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            receipt = root / "receipt.json"
+            receipt.write_bytes(b"original receipt")
+            args = argparse.Namespace(root=root, config=root / "missing.json",
+                                      receipt=receipt, source_pin="a" * 40,
+                                      config_pin="b" * 64, input_pin="c" * 64)
+            with self.assertRaises(FileNotFoundError):
+                run.run(args)
+            self.assertEqual(receipt.read_bytes(), b"original receipt")
+            self.assertEqual(list(root.iterdir()), [receipt])
 
 
 if __name__ == "__main__":

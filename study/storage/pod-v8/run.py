@@ -30,7 +30,11 @@ class Blocked(Rejected):
 
 
 class Unsafe(RuntimeError):
-    """Isolation, process or deadline failure: route directly to A9."""
+    """Isolation or unverified cleanup failure: route directly to A9."""
+
+
+class WorkFailed(RuntimeError):
+    """Block-local interruption; cleanup verification decides handoff."""
 
 
 def digest(path: Path) -> str:
@@ -155,9 +159,9 @@ class Attempt:
     def observe(self):
         now = time.time()
         if now >= self.deadline:
-            raise Unsafe("absolute work deadline; incomplete output")
+            raise WorkFailed("absolute work deadline; incomplete output")
         if self.daemon is not None and self.daemon.poll() is not None:
-            raise Unsafe("owned daemon exited unexpectedly")
+            raise WorkFailed("owned daemon exited unexpectedly")
         if self.daemon is not None and now - self.last_sample >= 5:
             status = Path(f"/proc/{self.daemon.pid}/status").read_text()
             rss = int(next(l.split()[1] for l in status.splitlines()
@@ -232,17 +236,18 @@ class Attempt:
         ready(status, self.daemon.pid, str(sock), [])
 
     def stop(self):
-        if self.daemon is None:
-            return
+        exceeded = False
         # Signal only our actual Popen child; never trust a foreign PID file.
-        self.daemon.terminate()
-        try:
-            self.daemon.wait(timeout=30)
-        except subprocess.TimeoutExpired as error:
-            self.daemon.kill()
-            self.daemon.wait(timeout=2)
-            raise Unsafe("daemon exceeded clean shutdown bound") from error
-        self.daemon = None
+        if self.daemon is not None:
+            if self.daemon.poll() is None:
+                self.daemon.terminate()
+            try:
+                self.daemon.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                self.daemon.kill()
+                self.daemon.wait(timeout=2)
+                exceeded = True
+            self.daemon = None
         for proc in Path("/proc").iterdir():
             try:
                 if (not proc.name.isdigit() or int(proc.name) == os.getpid()
@@ -263,6 +268,8 @@ class Attempt:
         if (Path(self.env["GORTEX_DAEMON_SOCKET"]).exists()
                 or Path(self.env["GORTEX_DAEMON_PIDFILE"]).exists()):
             raise Unsafe("owned socket/PID survived shutdown")
+        if exceeded:
+            raise Rejected("daemon exceeded graceful shutdown bound; reaped")
 
     def wait_ready(self, prefixes: Sequence[str]) -> dict:
         while True:
@@ -358,7 +365,61 @@ def run_set(attempt: Attempt, spec: Mapping, set_id: str,
 
 
 def interrupted(signum, frame):
-    raise Unsafe(f"interrupted by signal {signum}; no replay")
+    raise WorkFailed(f"interrupted by signal {signum}; no replay")
+
+
+def finish(root: Path, directory: Path, receipt: Path, identity: Mapping,
+           attempt: Attempt | None, outcome: Mapping) -> int:
+    result = {"clean_handoff": True, **identity, **outcome}
+    if attempt is not None:
+        try:
+            attempt.stop()
+        except Rejected as error:
+            result.update(state="checks_failed", exit_code=1,
+                          reason_code="time", reason=str(error))
+        except Exception as error:
+            result.update(state="partial", exit_code=1, clean_handoff=False,
+                          reason_code="cleanup", reason=str(error))
+    files = {}
+    try:
+        summary = receipt.with_name("outcome.json")
+        write(summary, result)
+        files[str(summary.relative_to(root))] = digest(summary)
+        for current, dirs, names in os.walk(directory):
+            dirs[:] = [d for d in dirs if d not in
+                       {"repos", "home", "config", "cache", "data", "state",
+                        "tmp"}]
+            for name in names:
+                path = Path(current) / name
+                if path.is_file():
+                    files[str(path.relative_to(root))] = digest(path)
+    except Exception as error:
+        result.update(state="partial", exit_code=1,
+                      reason_code="output", reason=str(error))
+    result["files"] = files
+    write(receipt, result)
+    return result["exit_code"]
+
+
+def failure(error: Exception) -> dict:
+    state, code = "partial", 1
+    if isinstance(error, Blocked):
+        state, code = "dependency_blocked", 0
+    elif isinstance(error, Rejected):
+        state = "checks_failed"
+    return {"state": state, "exit_code": code,
+            "reason_code": type(error).__name__, "reason": str(error),
+            "clean_handoff": not isinstance(error, Unsafe)}
+
+
+def claim_attempt(directory: Path, receipt: Path) -> bool:
+    if receipt.exists() or receipt.is_symlink():
+        return False
+    try:
+        directory.mkdir(exist_ok=False)
+    except FileExistsError:
+        return False
+    return True
 
 
 def main() -> int:
@@ -374,11 +435,14 @@ def main() -> int:
     receipt = inside(Path(args.receipt), Path("/work"))
     inside(directory, Path("/work"))
     # Existing attempts are never overwritten, including a partial attempt.
-    directory.mkdir(exist_ok=False)
-    write(directory / "attempt.json", identity)
-    state, clean, reason, code = "completed", True, "", 0
+    if not claim_attempt(directory, receipt):
+        return 1
     attempt = None
+    outcome = {"state": "completed", "exit_code": 0, "reason_code": "",
+               "reason": "", "source_build": BUILD,
+               "peak_rss_method": "daemon /proc VmRSS every 5s; lower bound"}
     try:
+        write(directory / "attempt.json", identity)
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, interrupted)
         allocation_path = Path("/work/control/allocation.json")
@@ -425,33 +489,11 @@ def main() -> int:
                 raise Rejected("frozen binary version mismatch")
             write(subdir / "environment.json", attempt.env)
             run_set(attempt, specs[set_id], set_id, identity)
-    except Blocked as error:
-        state, reason = "dependency_blocked", str(error)
-    except Rejected as error:
-        state, reason, code = "checks_failed", str(error), 1
-    except (Unsafe, OSError, ValueError, KeyError, sqlite3.Error) as error:
-        state, clean, reason, code = "checks_failed", False, str(error), 1
+    except Exception as error:
+        outcome.update(failure(error))
     finally:
-        if attempt is not None:
-            try:
-                attempt.stop()
-            except (Unsafe, OSError) as error:
-                clean, state, code = False, "checks_failed", 1
-                reason = str(error)
-        write(directory / "outcome.json", {"state": state, "reason": reason,
-              "clean_handoff": clean, "source_build": BUILD,
-              "peak_rss_method": "daemon /proc VmRSS every 5s; lower bound"})
-        files = {}
-        for current, dirs, names in os.walk(directory):
-            dirs[:] = [d for d in dirs if d not in
-                       {"repos", "home", "config", "cache", "data", "state",
-                        "tmp"}]
-            for name in names:
-                path = Path(current) / name
-                if path.is_file():
-                    files[str(path.relative_to("/work"))] = digest(path)
-        write(receipt, {**identity, "state": state, "clean_handoff": clean,
-              "exit_code": code, "reason": reason, "files": files})
+        code = finish(Path("/work"), directory, receipt, identity,
+                      attempt, outcome)
     return code
 
 

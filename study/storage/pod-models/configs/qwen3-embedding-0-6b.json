@@ -28,7 +28,7 @@
       "rows": 333
     }
   },
-  "runner_sha256": "6637fd26ad1bfd99cc713187f3c9326f681a38ce4010a7d89bfbd58e3d87221c",
+  "runner_sha256": "42938ecd2001ba8591a6160e4fa91519ac54fb66a7ff9abbfc588285a6095186",
   "evaluator_sha256": "43972a8a6d8b13133b70491343a5c33fface8bf8d4ca156cfefbd7997bd53a4b",
   "calibration": {
     "receipt": "/work/results/calibration/calibration-coderank/receipt.json",

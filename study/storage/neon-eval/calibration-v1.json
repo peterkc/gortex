@@ -1,0 +1,24 @@
+{
+  "schema": "retrieval-evaluator/v1",
+  "model": "coderank-reference",
+  "sample": "typescript-5000-metadata-333-queries",
+  "text_policy": "metadata",
+  "tie_policy": "descending-parent-ID",
+  "evaluator_sha256": "43972a8a6d8b13133b70491343a5c33fface8bf8d4ca156cfefbd7997bd53a4b",
+  "expected_r10_percent": "69.369",
+  "documents": {
+    "path": "/work/data/evaluator/docs_.jsonl",
+    "sha256": "555c48d42999399364ac6ee023d2a4b6aa71af9a6a30f2e03da6cfaa2cf31bb1",
+    "rows": 5000
+  },
+  "queries": {
+    "path": "/work/data/evaluator/qrows_.jsonl",
+    "sha256": "3315ad5265d3459491af01a568f2b442a4caaadaf238ca47c04e505541a1680f",
+    "rows": 333
+  },
+  "vectors": {
+    "path": "/work/data/evaluator/coderank-fp32-metadata.npy",
+    "sha256": "7fab16ef9c2e27b3948ca0197b1b60b5d9b4924bbfaacf1e847131c97a024636",
+    "rows": 5333
+  }
+}

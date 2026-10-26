@@ -164,7 +164,7 @@ class BoundaryTests(unittest.TestCase):
             run.mkdir()
             (run / "partial.log").write_text("incomplete")
             attempt = runner.Attempt(run, time.time() - 1)
-            with self.assertRaises(runner.Unsafe):
+            with self.assertRaises(runner.WorkFailed):
                 attempt.command([sys.executable, "-c", "raise Exception()"])
             self.assertEqual((run / "partial.log").read_text(), "incomplete")
             self.assertFalse((run / "command-1.log").exists())
@@ -202,6 +202,116 @@ class BoundaryTests(unittest.TestCase):
             self.addCleanup(attempt.daemon.wait)
             with self.assertRaisesRegex(runner.Unsafe, "owned process"):
                 attempt.stop()
+
+
+class PartialReceiptTests(unittest.TestCase):
+    def finish(self, root, attempt, reason):
+        receipt = root / "results/receipt.json"
+        outcome = runner.failure(reason)
+        code = runner.finish(root, root / "attempt", receipt,
+                             {"source_pin": "fixed"}, attempt, outcome)
+        self.assertEqual(code, 1)
+        result = json.loads(receipt.read_text())
+        self.assertEqual(result["state"], "partial")
+        self.assertEqual(result["source_pin"], "fixed")
+        self.assertEqual(result["exit_code"], 1)
+        for name, sha in result["files"].items():
+            self.assertEqual(runner.digest(root / name), sha)
+        self.assertIn("results/outcome.json", result["files"])
+        return result
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux lifecycle fixture")
+    def test_deadline_after_verified_stop_has_clean_partial_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            attempt = runner.Attempt(root / "attempt", time.time() - 1)
+            with self.assertRaises(runner.WorkFailed) as caught:
+                attempt.observe()
+            result = self.finish(root, attempt, caught.exception)
+            self.assertTrue(result["clean_handoff"])
+            self.assertEqual(result["reason_code"], "WorkFailed")
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux lifecycle fixture")
+    def test_exited_daemon_is_reaped_and_receipt_is_clean_partial(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            attempt = runner.Attempt(root / "attempt", time.time() + 30)
+            child = subprocess.Popen([sys.executable, "-c", "pass"],
+                                     env=attempt.env)
+            self.addCleanup(child.wait)
+            child.wait(timeout=5)
+            attempt.daemon = child
+            with self.assertRaises(runner.WorkFailed) as caught:
+                attempt.observe()
+            result = self.finish(root, attempt, caught.exception)
+            self.assertTrue(result["clean_handoff"])
+            self.assertIsNone(attempt.daemon)
+
+    def test_isolation_failure_stays_fatal_after_clean_no_process_stop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = self.finish(root, None, runner.Unsafe("wrong daemon"))
+            self.assertFalse(result["clean_handoff"])
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux lifecycle fixture")
+    def test_unverified_stop_writes_fatal_receipt_even_without_daemon(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            attempt = runner.Attempt(root / "attempt", time.time() + 30)
+            sock = Path(attempt.env["GORTEX_DAEMON_SOCKET"])
+            sock.touch()
+            result = self.finish(root, attempt, OSError("local failure"))
+            self.assertFalse(result["clean_handoff"])
+            self.assertEqual(result["reason_code"], "cleanup")
+            self.assertTrue(sock.exists())
+
+
+class FailureRoutingTests(unittest.TestCase):
+    def test_blocked_rejected_local_and_isolation_outcomes_stay_distinct(self):
+        for error, state, code, clean in (
+                (runner.Blocked("gate"), "dependency_blocked", 0, True),
+                (runner.Rejected("identity"), "checks_failed", 1, True),
+                (runner.WorkFailed("deadline"), "partial", 1, True),
+                (OSError("file"), "partial", 1, True),
+                (ValueError("data"), "partial", 1, True),
+                (KeyError("field"), "partial", 1, True),
+                (sqlite3.Error("query"), "partial", 1, True),
+                (runner.Unsafe("wrong daemon"), "partial", 1, False)):
+            with self.subTest(error=type(error).__name__):
+                result = runner.failure(error)
+                self.assertEqual(result["state"], state)
+                self.assertEqual(result["exit_code"], code)
+                self.assertEqual(result["clean_handoff"], clean)
+
+    def test_existing_attempt_or_receipt_is_byte_identical_after_refusal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory, receipt = root / "attempt", root / "receipt.json"
+            directory.mkdir()
+            (directory / "partial.log").write_bytes(b"original partial\x00")
+            (directory / "outcome.json").write_bytes(b"original outcome")
+            receipt.write_bytes(b"foreign receipt")
+            before = {str(p): p.read_bytes() for p in
+                      (directory / "partial.log", directory / "outcome.json",
+                       receipt)}
+            self.assertFalse(runner.claim_attempt(directory, receipt))
+            after = {name: Path(name).read_bytes() for name in before}
+            self.assertEqual(after, before)
+            self.assertFalse(runner.claim_attempt(root / "fresh", receipt))
+            self.assertFalse((root / "fresh").exists())
+            receipt.unlink()
+            self.assertFalse(runner.claim_attempt(directory, receipt))
+            self.assertFalse(receipt.exists())
+            self.assertEqual((directory / "partial.log").read_bytes(),
+                             b"original partial\x00")
+
+    def test_fresh_attempt_claim_does_not_write_a_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertTrue(runner.claim_attempt(root / "fresh",
+                                                 root / "receipt.json"))
+            self.assertEqual(list((root / "fresh").iterdir()), [])
+            self.assertFalse((root / "receipt.json").exists())
 
 
 if __name__ == "__main__":

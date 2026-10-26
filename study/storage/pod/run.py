@@ -16,6 +16,7 @@ import math
 import os
 from pathlib import Path, PurePosixPath
 import platform
+import re
 import shlex
 import shutil
 import signal
@@ -109,6 +110,10 @@ TIME_FORMAT = (
 
 class ReviewRequired(RuntimeError):
     """Stop without retrying or deleting evidence."""
+
+
+class FatalSession(ReviewRequired):
+    """Process, isolation or shared-resource failure; stop all blocks."""
 
 
 # Absolute allocation minutes. These are limits, not measured predictions.
@@ -215,12 +220,12 @@ def bound_jobs(root: Path) -> dict[str, list[dict]]:
                    "minutes": 45,
                    "receipt_path": str(root / "setup-complete.json")}],
         "storage": [{"id": job.name, "argv": command(job, root),
-                     "minutes": 150 / 12,
+                     "minutes": 150,
                      "receipt_path": str(
                          root / "jobs" / job.name / "complete.json")}
                     for job in jobs() if job.stage != "timing"],
         "segment_timing": [{"id": job.name, "argv": command(job, root),
-                            "minutes": 10,
+                            "minutes": 120,
                             "receipt_path": str(
                                 root / "jobs" / job.name / "complete.json")}
                            for job in jobs() if job.stage == "timing"],
@@ -268,7 +273,7 @@ def bound_jobs(root: Path) -> dict[str, list[dict]]:
 
 
 def preflight(bindings: Mapping, recipe: Mapping,
-              procedure: Mapping, root: Path) -> dict:
+              procedure: Mapping, root: Path, *, concurrency: int = 1) -> dict:
     """Validate prospective inputs without a pod, host probe or side effect."""
     validate_recipe(recipe)
     validate_procedure(procedure)
@@ -338,13 +343,16 @@ def preflight(bindings: Mapping, recipe: Mapping,
             or len(set(all_receipts)) != len(all_receipts)):
         raise ReviewRequired("bindings: duplicate job id or receipt_path")
     for block, minutes, _, _ in BLOCKS:
-        if sum(job["minutes"] for job in inventory[block]) > minutes:
+        if (block not in {"storage", "segment_timing"}
+                and sum(job["minutes"] for job in inventory[block]) > minutes):
             raise ReviewRequired(
                 f"{block}: job allocations exceed {minutes} minutes")
     return {
         "phase1": "prepared-no-pod", "source": COMMIT,
         "enforcement_entrypoint": "study/storage/pod/run.py:main",
         "enforcement_argv": ["python3", "/work/control/run.py", "--execute",
+                             "--root", "/work", "--inputs", "/work/inputs",
+                             "--concurrency", str(concurrency),
                              "--bindings", "/work/control/bindings.json",
                              "--setup-recipe",
                              "/work/control/setup-recipe.json",
@@ -371,8 +379,14 @@ def preflight(bindings: Mapping, recipe: Mapping,
 def timestamp(value: object, label: str) -> float:
     if not isinstance(value, str):
         raise ReviewRequired(f"{label}: missing timestamp")
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    fraction = re.fullmatch(
+        r"(.*[T ]\d{2}:\d{2}:\d{2})\.(\d+)([+-]\d{2}:\d{2})", normalized)
+    if fraction:
+        clock, digits, zone = fraction.groups()
+        normalized = f"{clock}.{digits[:6]:0<6}{zone}"
     try:
-        parsed = datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(normalized)
     except ValueError as error:
         raise ReviewRequired(f"{label}: malformed timestamp") from error
     if parsed.utcoffset() is None:
@@ -515,12 +529,15 @@ class Job:
 
 
 def jobs() -> tuple[Job, ...]:
+    priority = ("sqlite-segment", "pebble-bleve", "sqlite-vecflat",
+                "sqlite-usearch", "catalog-sqlite", "catalog-refs")
+    screen = (*priority, *(name for name in SCREEN if name not in priority))
     return (
         Job("oracle", "oracle", "tier10"),
-        *(Job("screen", name, "tier10") for name in SCREEN),
+        *(Job("screen", name, "tier10") for name in screen),
         *(Job("timing", name, tier, repeat)
-          for tier in ARCHIVES for name in FINALISTS
-          for repeat in range(1, 4)),
+          for repeat in range(1, 4)
+          for tier in ARCHIVES for name in FINALISTS),
     )
 
 
@@ -726,22 +743,29 @@ class Supervisor:
         signal.setitimer(signal.ITIMER_REAL,
                          max(0.000001, end - time.monotonic()))
 
-    def reap(self, groups: Mapping) -> None:
+    def reap(self) -> None:
+        """Reap owned children, including unseen adopted zombies."""
         for owned in self.active:
-            owned.process.poll()  # Popen owns the direct child's wait status.
-            for pid, start in groups.get(owned.process.pid, {}):
-                if pid == owned.process.pid or (pid, start) not in owned.known:
-                    continue
-                try:
-                    os.waitpid(pid, os.WNOHANG)
-                except ChildProcessError:
-                    # A live parent still owns this descendant; adoption is
-                    # complete only after that parent exits.
-                    continue
+            owned.process.poll()
+        while True:
+            try:
+                pid, status = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if pid == 0:
+                break
+            for owned in self.active:
+                if owned.process.pid == pid:
+                    # Preserve a direct child exit racing with poll().
+                    owned.process.returncode = (
+                        os.waitstatus_to_exitcode(status))
 
     def start(self, args: Sequence[str], directory: Path,
               environment: Mapping[str, str], cwd: Path) -> OwnedProcess:
-        live_termination(self.allocation, self.termination, time.time())
+        try:
+            live_termination(self.allocation, self.termination, time.time())
+        except Exception as error:
+            raise FatalSession(str(error)) from error
         if args and Path(args[0]).name in {"apt-get", "sudo"}:
             raise ReviewRequired(
                 "driver cannot run apt-get or sudo; pi-gcp owns SSH setup")
@@ -805,10 +829,10 @@ class Supervisor:
                 }) + "\n")
 
     def close(self, owned: OwnedProcess) -> None:
-        self.reap(process_groups())
+        self.reap()
         members = process_groups().get(owned.process.pid, {})
         if members:
-            raise ReviewRequired(
+            raise FatalSession(
                 "job exited with surviving session members; "
                 "A9/pi-gcp deletion")
         owned.log.close()
@@ -823,7 +847,7 @@ class Supervisor:
                 if not members:
                     continue
                 if not owned.known.intersection(members):
-                    raise ReviewRequired(
+                    raise FatalSession(
                         "unverified process identity; no kill; "
                         "A9/pi-gcp deletion"
                     )
@@ -834,14 +858,12 @@ class Supervisor:
                     continue
             deadline = time.monotonic() + CLEANUP_GRACE_SECONDS
             while time.monotonic() < deadline:
-                groups = process_groups()
-                self.reap(groups)
+                self.reap()
                 groups = process_groups()
                 if not any(groups.get(p.process.pid) for p in self.active):
                     break
                 time.sleep(0.1)
-        groups = process_groups()
-        self.reap(groups)
+        self.reap()
         groups = process_groups()
         survivors = [p.process.pid for p in self.active
                      if groups.get(p.process.pid)]
@@ -852,7 +874,7 @@ class Supervisor:
             else:
                 owned.process.wait(timeout=0)
         if survivors:
-            raise ReviewRequired(
+            raise FatalSession(
                 f"owned sessions remain: {survivors}; A9/pi-gcp deletion")
         self.active.clear()
 
@@ -988,6 +1010,32 @@ def verify_package_versions(supervisor: Supervisor) -> dict[str, str]:
     return versions
 
 
+def copy_tree(root: Path, source: Path, destination: Path) -> dict[str, str]:
+    if (source.is_symlink() or not source.is_dir()
+            or destination.exists() or destination.is_symlink()
+            or any(p.is_symlink() for path in (source, destination)
+                   for p in (path, *path.parents)
+                   if p.is_relative_to(root))):
+        raise ReviewRequired(f"setup copy refused: {source} -> {destination}")
+    files = {}
+    for directory, subdirs, names in os.walk(source, followlinks=False):
+        for name in (*subdirs, *names):
+            path = Path(directory) / name
+            if path.is_symlink() or not (path.is_dir() or path.is_file()):
+                raise ReviewRequired(
+                    f"setup copy refuses special path: {path}")
+            if path.is_file():
+                files[path.relative_to(source)] = digest(path)
+    shutil.copytree(source, destination)
+    artifacts = {}
+    for relative, expected in files.items():
+        target = destination / relative
+        if digest(target) != expected:
+            raise ReviewRequired(f"setup copied file changed: {target}")
+        artifacts[str(target.relative_to(root))] = expected
+    return artifacts
+
+
 def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping,
             recipe: Mapping) -> dict:
     validate_recipe(recipe)
@@ -1010,7 +1058,7 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping,
     if (root / "setup-started.json").exists():
         raise ReviewRequired("incomplete setup; operator review required")
     if not set(path.name for path in root.iterdir()) <= {
-            "driver.lock", "control", "inputs", "session.json"}:
+            "driver.lock", "control", "inputs", "session.json", "lost+found"}:
         raise ReviewRequired("new workspace permits only control/inputs/lock")
     if not inputs.resolve().is_relative_to(root.resolve()):
         raise ReviewRequired("pod inputs must be copied under /work")
@@ -1034,6 +1082,9 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping,
         (root / "cache" / name).mkdir()
     for name in ("config", "cache", "data", "state"):
         (root / "xdg" / name).mkdir()
+    copied = {}
+    for name in ("evaluator", "cpu-cost"):
+        copied.update(copy_tree(root, inputs / name, root / "data" / name))
     atomic_json(root / "host.json", {
         **host_record(), "disk": shutil.disk_usage(root)._asdict(),
     })
@@ -1078,6 +1129,9 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping,
     revision = supervisor.run(["git", "rev-parse", "HEAD"], cwd=checkout)
     if revision.read_text().strip() != COMMIT:
         raise ReviewRequired("source revision mismatch")
+    for name in ("neon-eval", "pod-models", "pod-cost"):
+        copied.update(copy_tree(root, checkout / "study/storage" / name,
+                                root / "control" / name))
     source_archive = root / "downloads" / "usearch-2.26.5.tar.gz"
     download(USEARCH_URL, source_archive, USEARCH_SHA, 128 * 1024 * 1024)
     extract(source_archive, root / "native", "USearch-2.26.5")
@@ -1177,6 +1231,7 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping,
                      uv, python, root / "python-runtime.json",
                      root / "setup-recipe.json", root / "setup-packages.json"]
     }
+    artifacts.update(copied)
     for tier in ARCHIVES:
         manifest_path = root / "data" / tier / "manifest.json"
         manifest = read_json(manifest_path)
@@ -1502,7 +1557,7 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
         groups = process_groups()
         supervisor.observe(groups)
         if memory_available() < MEMORY_RESERVE:
-            raise ReviewRequired("memory stop: MemAvailable below 16 GiB")
+            raise FatalSession("memory stop: MemAvailable below 16 GiB")
         for name, (job, owned, identity) in list(active.items()):
             code = owned.process.poll()
             if time.monotonic() >= owned.deadline:
@@ -1579,7 +1634,7 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
             need = projected_memory(job) + reserve + MEMORY_RESERVE
             if need > memory_available():
                 if not active:
-                    raise ReviewRequired(
+                    raise FatalSession(
                         f"insufficient free memory: {job.name}"
                     )
                 break
@@ -1738,17 +1793,17 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
     while owned.process.poll() is None:
         supervisor.observe(process_groups())
         if memory_available() < MEMORY_RESERVE:
-            raise ReviewRequired("auxiliary memory stop; A9 required")
+            raise FatalSession("auxiliary memory stop; A9 required")
         if time.monotonic() >= owned.deadline:
             raise DeadlineExceeded(f"{name}: absolute auxiliary deadline")
         time.sleep(5)
     supervisor.close(owned)
+    paths = output_files([directory, *validate(directory)])
     if owned.process.returncode not in accepted_exit_codes:
         raise ReviewRequired(f"auxiliary command failed: {name}")
-    paths = output_files([directory, *validate(directory)])
     for path in paths:
         if not path.resolve().is_relative_to(root):
-            raise ReviewRequired("auxiliary output escaped /work")
+            raise FatalSession("auxiliary output escaped /work")
     receipt = {"identity": identity, "correctness_pass": False,
                "exit_code": owned.process.returncode,
                "wall_seconds": time.monotonic()-owned.started,
@@ -1863,21 +1918,23 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
             return "dependency_blocked"
         path = Path(job["receipt_path"])
         if not path.resolve().is_relative_to(supervisor.root):
-            raise ReviewRequired(f"{block['id']}: receipt path escaped /work")
+            raise FatalSession(f"{block['id']}: receipt path escaped /work")
 
         def validate(directory: Path) -> list[Path]:
             receipt = read_json(path)
+            if not isinstance(receipt, Mapping):
+                raise ReviewRequired(f"{block['id']}: malformed receipt")
+            if receipt.get("clean_handoff") is not True:
+                raise FatalSession(
+                    f"{block['id']}: unclean receipt; A9 required")
             for key in ("source_pin", "config_pin", "input_pin"):
                 if receipt.get(key) != job[key]:
                     raise ReviewRequired(f"{block['id']}: receipt {key}")
             if receipt.get("state") not in {
-                    "completed", "checks_failed",
+                    "completed", "checks_failed", "partial",
                     "dependency_blocked", "skipped"}:
                 raise ReviewRequired(
                     f"{block['id']}: incomplete/fatal receipt")
-            if receipt.get("clean_handoff") is not True:
-                raise ReviewRequired(
-                    f"{block['id']}: unclean receipt; A9 required")
             if receipt["state"] == "skipped" and (
                     block["id"] != "cpu_cost" or receipt.get("reason_code")
                     not in {"check", "library", "gate", "time", "identity"}):
@@ -1904,9 +1961,11 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
         result = read_json(path)
         if (result.get("exit_code") != receipt["exit_code"]
                 or (receipt["exit_code"] == 1
-                    and result["state"] != "checks_failed")):
+                    and result["state"] not in {"checks_failed", "partial"})):
             raise ReviewRequired(f"{block['id']}: fatal exit/receipt mismatch")
         states.append(result["state"])
+    if "partial" in states:
+        return "partial"
     if "dependency_blocked" in states:
         return "dependency_blocked"
     if "checks_failed" in states:
@@ -1996,6 +2055,10 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
                 setup = prepare(
                     supervisor, inputs, identity, admission["setup_recipe"])
             elif block_id == "storage":
+                if any(not (root / "jobs" / job["id"] / "complete.json")
+                       .is_file() for job in block["jobs"]):
+                    raise ReviewRequired(
+                        "storage: partial receipts; no resume")
                 sdk = [read_json(root / "jobs" / job["id"] / "complete.json")
                        for job in block["jobs"]]
             signal.setitimer(signal.ITIMER_REAL, 0)
@@ -2005,7 +2068,8 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
         except DeadlineExceeded as error:
             state = {
                 "state": "skipped" if block_id == "cpu_cost" else "partial",
-                "reason": str(error), "files": {}, "clean_handoff": True,
+                "reason": str(error), "reason_code": "time",
+                "files": {}, "clean_handoff": True,
             }
             record["blocks"][block_id] = state
             outcomes[block_id] = state["state"]
@@ -2024,11 +2088,11 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
             atomic_json(path, record)
             continue
         if (block_id in {"segment_timing", "catalog", "hybrid"}
-                and outcomes.get("storage")
-                not in {"completed", "checks_failed"}):
+                and not any(row["identity"]["job"]["stage"] == "oracle"
+                            and row["state"] == "pass" for row in sdk)):
             record["blocks"][block_id] = {
                 "state": "dependency_blocked",
-                "reason": "required storage incomplete",
+                "reason": "required oracle incomplete",
                 "files": {}, "clean_handoff": True,
             }
             outcomes[block_id] = "dependency_blocked"
@@ -2058,10 +2122,12 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
                 run_catalog_hybrid(supervisor, sdk, block_id)
             else:
                 state = binding_block(supervisor, block)
-        except DeadlineExceeded as error:
+        except (FatalSession, MemoryError):
+            raise
+        except Exception as error:
             signal.setitimer(signal.ITIMER_REAL, 0)
-            supervisor.stop_all()
             state = "partial"
+            record["blocks"][block_id]["reason_code"] = type(error).__name__
             record["blocks"][block_id]["reason"] = str(error)
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
@@ -2074,14 +2140,21 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
             signal.setitimer(signal.ITIMER_REAL, remaining)
             try:
                 files = block_files(root, block)
-            except DeadlineExceeded:
+            except (FatalSession, MemoryError):
+                raise
+            except Exception as error:
                 state = "partial"
+                record["blocks"][block_id]["reason_code"] = "receipt"
                 record["blocks"][block_id]["reason"] = (
-                    "receipt collection deadline")
+                    f"receipt collection: {error}")
             finally:
                 signal.setitimer(signal.ITIMER_REAL, 0)
         else:
             state = "partial"
+        if state == "partial":
+            record["blocks"][block_id].setdefault("reason_code", "runner")
+            record["blocks"][block_id].setdefault(
+                "reason", "partial runner outcome; see job receipt")
         record["blocks"][block_id].update(
             state=state, files=files, clean_handoff=True,
             absolute_deadline=supervisor.block_deadline,
@@ -2103,7 +2176,7 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
 
 
 def interrupted(signum: int, frame: object) -> None:
-    raise ReviewRequired(f"interrupted by signal {signum}; no replay")
+    raise FatalSession(f"interrupted by signal {signum}; no replay")
 
 
 def main() -> int:
@@ -2120,7 +2193,7 @@ def main() -> int:
     parser.add_argument("--root", type=Path,
                         default=Path("/work"))
     parser.add_argument("--inputs", type=Path,
-                        default=Path(__file__).resolve().parent / "inputs")
+                        default=Path("/work/inputs"))
     parser.add_argument(
         "--concurrency", type=int, choices=(1, 2, 3), default=1,
     )
@@ -2162,7 +2235,7 @@ def main() -> int:
             raise ReviewRequired(f"preflight: missing {field_name}")
     admission = preflight(
         read_json(args.bindings), read_json(args.setup_recipe),
-        read_json(args.stop_procedure), root,
+        read_json(args.stop_procedure), root, concurrency=args.concurrency,
     )
     admission["driver_sha256"] = digest(Path(__file__))
     if args.preflight:
@@ -2171,6 +2244,8 @@ def main() -> int:
     if args.allocation is None or args.termination_receipt is None:
         raise ReviewRequired(
             "A9/pi-gcp deletion: missing live termination receipt")
+    if os.geteuid() == 0:
+        raise ReviewRequired("execution refuses effective UID 0")
     allocation = read_json(args.allocation)
     termination = read_json(args.termination_receipt)
     live_termination(allocation, termination, time.time())
@@ -2222,7 +2297,7 @@ def main() -> int:
                 signal.signal(sig, signal.SIG_IGN)
             try:
                 supervisor.stop_all()
-            except ReviewRequired as error:
+            except Exception as error:
                 atomic_json(root / "A9-handoff.json", {
                     "owner": "pi-gcp", "deletion_required": True,
                     "clean_handoff": False, "reason": str(error),
@@ -2230,12 +2305,12 @@ def main() -> int:
                 })
                 raise
             handoff = root / "A9-handoff.json"
-            if not handoff.exists():
-                atomic_json(handoff, {
-                    "owner": "pi-gcp", "deletion_required": True,
-                    "clean_handoff": True,
-                    "deadline_pdt": allocation["deadline_pdt"],
-                })
+            atomic_json(handoff, {
+                **(read_json(handoff) if handoff.exists() else {}),
+                "owner": "pi-gcp", "deletion_required": True,
+                "clean_handoff": sys.exc_info()[0] is None,
+                "deadline_pdt": allocation["deadline_pdt"],
+            })
     return 0
 
 

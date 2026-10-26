@@ -4,8 +4,9 @@
 
 Source preparation only. The lead owns review, CI, commits and pod acceptance.
 No tokenization, model/library loading, tests or measurements ran on the Mac.
-A1 and A2 remain accepted and closed. Only this directory and the `cpu_cost`
-binding are owned here. The total pod block is at most 60 minutes.
+A1 and A2 remain accepted and closed. This review round owns this directory
+and the adjacent driver folder. The lead owns all shared binding updates.
+The total pod block is at most 60 minutes.
 
 ## Given / When / Then (written before implementation)
 
@@ -25,7 +26,8 @@ binding are owned here. The total pod block is at most 60 minutes.
    explicit partial/skipped case and actual repeat count, not full coverage.
 5. Given missing or changed inputs/library/source/check receipts, when execution
    starts, then it records only a permitted identity/library/check skip and no
-   accepted timing. A fatal unexpected error remains fatal, not a clean skip.
+   accepted timing. A worker failure becomes partial after verified reaping,
+   not a skip. Unverified teardown requires an unclean handoff.
 6. Given an existing partial result directory, when the command is repeated,
    then it refuses replacement/replay and preserves all prior bytes. Only the
    parent driver may reuse verified complete receipts with matching identities.
@@ -54,18 +56,21 @@ binding are owned here. The total pod block is at most 60 minutes.
 - The driver's prospective and live admission remain authoritative. Do not
   allocate a pod or launch this binding from this preparation task.
 
-## Reviewed failure scenarios (before the repair)
+## Failure outcomes
 
-- Given a reference or probe that exits with an error, is killed, or finishes
-  without a complete report, when the runner receives the outcome, then it
-  raises a fatal worker error. No clean skip receipt is written; A9 owns cleanup.
-- Given a completed 200-row reference and Go report with valid matching inputs,
-  when one cosine is below 0.9999, then the recorded gate failure permits a skip.
-- Given a missing/hash-mismatched library, a recorded failed successor check,
-  refused time admission or recorded input/export mismatch, when the runner
-  records that clean outcome, then only the corresponding skip reason is used.
-- Given an invalid, partial or malformed worker report, when it is read, then
-  it cannot stand in for the full evidence required by any permitted skip.
+- A crashed, killed, timed-out, reportless or malformed reference/probe raises
+  `FatalWorker` locally. After reaping verification, the block writes a partial
+  receipt with a reason. It never changes that failure into a clean skip.
+- Native exit 1 is accepted only with a partial report naming the probe's
+  `runner guard exceeded` outcome, consistent row/vector counters, token hash
+  and runtime recipe. The case stays partial; the next case may run inside the
+  same deadline. It never becomes a complete repeat or a full-symbol cost.
+- A missing live child check or failed reaping verification writes an unclean
+  partial receipt. The driver owns full process-group verification and A9.
+- Complete matched cosine rejection, library identity failure, a recorded
+  normal successor-check failure, refused admission or recorded input/export
+  mismatch retain the five permitted skip codes. Missing required input/source
+  files and unexpected input/config/import errors instead remain partial.
 
 ## Runtime recipe and provenance
 
@@ -121,27 +126,27 @@ from a partial corpus or query-latency run.
 
 The existing driver remains the process-group owner. It starts job `cpu-cost`,
 then writes `/work/aux/cpu-cost/process.json`. The runner requires that receipt's
-absolute monotonic deadline; a missing receipt fails closed with identity skip.
+absolute monotonic deadline; a missing receipt gives a partial outcome.
 It does not start a new 60-minute clock. It subtracts 30 seconds for final
 hashing/receipt work. Dependency installation, hashing, native probe build,
 tokenization, references, warm-ups and measured repeats all remain inside the
 parent's single 60-minute job allocation. The parent's absolute guard is still
 authoritative if inline tokenization or finalization cannot return in time.
 
-Remaining time is divided among remaining planned cases. Probes receive both
-the native soft guard and a subprocess hard timeout. A native hard timeout
-kills/waits the direct child, preserves logs and raises a fatal worker error.
-It does not produce a clean skip receipt. Crashes, signal exits, missing reports,
-malformed reports and incomplete worker reports are fatal too. The driver's
-A9 path owns cleanup; planned-matrix.json alone is not a terminal result.
-No hidden retries. Parent group cleanup
-still detects/reaps descendants and refuses an unsafe handoff. Only complete, matching 200-row reference/Go reports with a cosine below
-0.9999 permit a gate skip. Invalid/nonfinite/missing vectors are fatal, not gate
-skips. A missing/hash-mismatched library, a recorded normal successor-check
-failure, refused time admission or recorded input/export mismatch permits the
-corresponding skip. Unknown worker outcomes never do. Case-level partial results are never
-full-corpus results. A partial/reduced matrix gives the driver's permitted
-`skipped/time` state; individual completed repeats remain in the raw evidence.
+Remaining time is divided among remaining planned cases. Each probe receives
+its native soft guard and a subprocess hard timeout. A hard timeout kills and
+waits for the direct worker. The runner then verifies its remaining children
+before writing the receipt. The driver separately verifies its private group,
+including adopted descendants. No failed process is retried.
+
+A native soft-guard partial case permits the next case when time remains. A
+reduced matrix, including zero completed cases, is partial with reason `time`,
+not skipped. A later admission refusal cannot erase that attempted partial
+outcome. Completed, gate-matched measured repeats remain explicit; the
+`accepted_timings` flag does not claim complete matrix coverage. The repeat
+estimate scales measured inference by planned rows / measured rows, but does
+not scale session-load time. The first estimate uses the 200-row gate; later
+estimates use the completed full repeat.
 
 `planned-matrix.json` is written first. Therefore even an interrupted setup has
 all 25 planned cases visible. Existing output directories are never replaced,
@@ -206,65 +211,34 @@ or tokenizer execution belongs in this step.
       | tee -a "$RUNNER_TEMP/storage/ci-cpu-cost.txt"
 ```
 
-## Phase-1 completion
+## Phase-1 review fixes
 
-The lead accepted the original 363/184-line size after restart and requested
-this failure-classification repair. The repair is written. It keeps worker
-fatal errors separate from the five permitted, recorded skip outcomes. The
-shared driver and binding were not edited. This is source preparation, not CI
-or pod acceptance.
+The current shared failure rule supersedes the prior fatal-to-A9 policy.
+`FatalWorker` remains a local exception name, not a session-stop classification.
+The original 16 tests remain. No test was deleted. The new cases cover:
 
-### Regression tests written for the repair
+- Worker crash, kill, timeout, missing report and malformed report each produce
+  a hashed partial receipt after reaping. Both reference/probe helper variants
+  remain covered by the earlier rejection tests.
+- Unverified reaping produces `clean_handoff: false` and a process reason.
+- A valid native soft-guard report is partial, not a worker crash; an unknown
+  partial reason still rejects the report.
+- A guard-partial case releases the next case. Zero completed cases and a
+  subsequent admission refusal stay partial/time, never completed or skipped.
+- Repeat admission scales inference by row count without scaling load time.
 
-- `test_fatal_worker_crash_even_with_completed_report`: reference/probe exit 7
-  remains fatal even if a completed-status JSON file already exists.
-- `test_fatal_worker_killed_or_timed_out_and_reaped`: reference/probe SIGKILL and
-  a hard timeout are fatal; the timed-out direct child is reaped.
-- `test_fatal_worker_reportless_success`: reference/probe exit 0 without a report
-  is fatal.
-- `test_fatal_worker_incomplete_or_malformed_report`: missing status, partial
-  status and malformed JSON cannot become clean skips.
-- `test_skip_gate_only_complete_matching_reports`: only a complete, matched
-  cosine rejection gives `gate`; missing reference vectors remain fatal.
-- `test_skip_library_missing_or_hash_mismatch`: missing or changed pinned bytes
-  give `library` without replacing the bytes.
-- `test_skip_check_has_complete_recorded_failure`: a normal failed successor
-  check writes a completed check record before giving `check`.
-- `test_skip_time_admission_refusal`: expired admission refuses launch and gives
-  `time`; a killed running worker is tested separately as fatal.
-- `test_skip_identity_receipt_and_partial_replay_refusal`: an input-config pin
-  mismatch gives a hashed clean `identity` receipt; replay still refuses.
+The exact method names are in `test_cpu_cost.py`. The lock pin now matches the
+committed `uv.lock`; the runner pin matches the saved source. The lead updates
+both config-pin occurrences in the shared binding, commits the fixes and runs
+Linux CI. No Mac test or model execution is authorized here. Runtime acceptance
+and the immutable checkout pin remain lead-owned.
 
-The original combined deadline test was split across the time-admission and
-fatal-kill/reaping tests. Its reaping coverage was retained, not deleted. The
-probe-flag test now expects a fatal recipe mismatch instead of an identity skip.
-The other original matrix/batch/row/cosine/symbol-cost cases remain unchanged.
+## Source-only verification
 
-### Remaining lead steps
-
-1. Review this repair and run the existing proposed tiny Linux CI step. No Mac
-   tests, tokenizer/model loads, Go execution or uv execution are permitted here.
-2. Retrieve/review `ci-cpu-cost-lock.txt` as `uv.lock`, verify it in CI, and fill
-   `source_files["control/pod-cost/uv.lock"]` with its SHA-256.
-3. Refresh the binding's two config-pin occurrences after these source/config
-   edits. This request was confined to `pod-cost/`, so the shared-hub binding
-   was deliberately NOT changed. The new config SHA-256 is computed below.
-4. Commit/review/pin the source and replace the binding's two source-pin `LEAD`
-   values. Stage the exact public inputs/control files and use only the accepted
-   driver's single-session admission. Actual library/reference/matrix work
-   remains pod-only inside the same 60-minute allocation.
-
-A1/A2 stay closed. No commit, workflow edit, pod action or paid action is part
-of this repair.
-
-### Repair verification
-
-- Runner: 413 lines. Tests: 290 lines, 16 methods.
-- Syntax only: Python 3.11.15, `-m py_compile cpu_cost.py
-  test_cpu_cost.py`, exit 0, empty output. Target Python 3.12 and
-  all runtime tests remain unrun locally.
-- New config SHA-256: `98c80908218b1fdb1e68a556e598fba1f76348e3248f26bc6d28ac73d95e942a`.
-  The runner source hash in the config matches the saved source.
-- No test was run. No dependency resolution, model/tokenizer/reference/probe
-  execution, Go build/test, Gortex call, pod action or publication occurred.
-- Final files remain uncommitted for lead review and Linux CI.
+- Production diff: 71 added + 18 removed = 89 changed lines against 792c1a97.
+- Runner: 466 lines. Tests: 483 lines, 21 methods (five new; 16 retained).
+- Python 3.11.15 py_compile passed with exit 0 and empty output. This is syntax
+  evidence only. Linux/Python 3.12 runtime checks remain unrun locally.
+- Config SHA-256: `7cd5b69612cd592a7ac25361946aa43ae91852800501ba4e8ba0710fcb435b94`.
+- Committed lock SHA-256: `b49f13da093039d0645f48916061ac28a67541f4f9e89e2d6f3d18364386be3d`.
+- No commit, push, shared binding edit, test, uv, Go build or model run occurred.

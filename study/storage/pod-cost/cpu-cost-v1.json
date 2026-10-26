@@ -18,9 +18,9 @@
     "checkout/study/storage/onnx/main.go": "7cef2a383214f4487e42d0e631d283b61effe68ed7cc5b3fc18467f22793c1d9",
     "checkout/study/storage/onnx/go.mod": "c5a6d3391572769af698e1f995f7418583f17ca6481aeef34ef049bda94210cd",
     "checkout/study/storage/onnx/go.sum": "1f13cb5a004a0525921f6b256901095cdd0d0ffd890b5f2a3e6e214ef1332263",
-    "control/pod-cost/cpu_cost.py": "e6db6ae40549f11089417072acf8b81290b9e21e40edffecbbdab6e8419796af",
+    "control/pod-cost/cpu_cost.py": "373ae89383d7d20338472ba6c0c2907d0a7e9a3cfdc9e7a3a94a4f92c658e308",
     "control/pod-cost/pyproject.toml": "8b8827ac6412ecab17182c27638e3b5e8543893312debb0923dff7d740aef05b",
-    "control/pod-cost/uv.lock": "LEAD"
+    "control/pod-cost/uv.lock": "b49f13da093039d0645f48916061ac28a67541f4f9e89e2d6f3d18364386be3d"
   },
   "ort": {
     "version": "1.31.0",

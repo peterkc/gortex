@@ -29,7 +29,7 @@ class Invalid:
 
 
 class FatalWorker(RuntimeError):
-    """Uncertain or incomplete worker outcome; no clean receipt."""
+    """Block-local worker failure; the receipt follows verified reaping."""
 
 
 class Skip(RuntimeError):
@@ -116,15 +116,17 @@ def child(argv: Sequence[str], log: Path, end: float,
 
 
 def completed_worker(argv: Sequence[str], output: Path, end: float,
-                     cwd: Path, env: Mapping[str, str]) -> dict:
+                     cwd: Path, env: Mapping[str, str], *,
+                     partial: bool = False) -> dict:
     code = child(argv, output.with_suffix(".log"), end, cwd, env)
-    if code != 0 or not output.is_file():
+    if code not in ((0, 1) if partial else (0,)) or not output.is_file():
         raise FatalWorker(f"worker exit {code}; complete report required")
     try:
         report = json.loads(output.read_text())
     except json.JSONDecodeError as error:
         raise FatalWorker("worker report is malformed") from error
-    if not isinstance(report, dict) or report.get("status") != "completed":
+    status = "partial" if code == 1 else "completed"
+    if not isinstance(report, dict) or report.get("status") != status:
         raise FatalWorker("worker report is incomplete")
     return report
 
@@ -248,13 +250,20 @@ def probe(args: argparse.Namespace, case: Mapping, tokens: Path,
             str(case["threads"]), "-corpus", case["corpus"], "-cap",
             str(case["cap"]), "-repeat", str(repeat), "-planned-repeats",
             "3", "-guard", f"{guard}s"]
-    report = completed_worker(argv, output, end, args.root, env)
+    report = completed_worker(argv, output, end, args.root, env, partial=True)
     required = {"runtime", "disable_prepacking", "inter_op_threads",
                 "intra_op_threads", "token_file_sha256", "vectors",
                 "planned_texts", "completed_texts", "seconds", "load_seconds"}
     if (not required <= report.keys()
-            or report["completed_texts"] != report["planned_texts"]
-            or len(report["vectors"]) != report["planned_texts"]):
+            or type(report["completed_texts"]) is not int
+            or not 0 <= report["completed_texts"] <= report["planned_texts"]
+            or len(report["vectors"]) != report["planned_texts"]
+            or sum(row is not None for row in report["vectors"])
+            != report["completed_texts"]
+            or (report["status"] == "completed" and
+                report["completed_texts"] != report["planned_texts"])
+            or (report["status"] == "partial" and
+                report.get("reason") != "runner guard exceeded")):
         raise FatalWorker("incomplete probe report")
     if (report["runtime"] != "1.31.0" or not report["disable_prepacking"]
             or report["inter_op_threads"] != 1
@@ -275,12 +284,27 @@ def repeat_metrics(report: Mapping, symbols: int, corpus: str) -> dict:
     return result
 
 
+def reap_children() -> bool:
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return True
+        if pid == 0:
+            return False
+
+
+def repeat_seconds(estimate: Mapping, planned_rows: int) -> float:
+    return (estimate["load_seconds"] + 2 + estimate["seconds"]
+            * planned_rows / estimate["completed_texts"])
+
+
 def execute(args: argparse.Namespace) -> int:
     root, output = args.root.resolve(), args.receipt.parent.resolve()
     if not output.is_relative_to(root) or output.exists():
         raise RuntimeError("escaped/existing output; preserve for lead")
     output.mkdir(parents=True)
-    cases, failure = matrix(), None
+    cases, failure, state = matrix(), None, "partial"
     save(output / "planned-matrix.json", cases)
     started = time.monotonic()
     env = {**os.environ, "TOKENIZERS_PARALLELISM": "false", "USE_TORCH": "0",
@@ -295,8 +319,9 @@ def execute(args: argparse.Namespace) -> int:
         for relative, expected in {**config["inputs"],
                                    **config["source_files"]}.items():
             path = (root / relative).resolve()
-            if (not path.is_relative_to(root) or not path.is_file()
-                    or digest(path) != expected):
+            if not path.is_file():
+                raise FatalWorker(f"missing input/source: {relative}")
+            if not path.is_relative_to(root) or digest(path) != expected:
                 raise Skip("identity", f"input/source mismatch: {relative}")
         input_pin = hashlib.sha256(json.dumps(
             config["inputs"], sort_keys=True, separators=(",", ":")
@@ -355,12 +380,17 @@ def execute(args: argparse.Namespace) -> int:
                                  case_end, root, env)
             warm = probe(args, case, gate_tokens,
                          output / f"warm-{position}.json", 0, case_end, env)
+            if warm["status"] == "partial":
+                case["reason"] = "time"
+                case["partial_warmup"] = repeat_metrics(
+                    warm, tokens[name]["symbols"], case["corpus"])
+                continue
             reference_data = json.loads(reference_path.read_text())
             gate = checked_gate(warm, reference_data, digest(gate_tokens))
             case["gate"], case["warmups"] = gate, 1
             for repeat in range(1, 4):
                 estimate = (case["repeats"][-1] if case["repeats"] else warm)
-                needed = estimate["load_seconds"] + estimate["seconds"] + 2
+                needed = repeat_seconds(estimate, len(tokens[name]["ids"]))
                 if time.monotonic() + needed >= case_end:
                     case["admission_refusal"] = {
                         "requested_seconds": needed,
@@ -371,30 +401,53 @@ def execute(args: argparse.Namespace) -> int:
                                repeat, case_end, env)
                 case["repeats"].append(repeat_metrics(
                     report, tokens[name]["symbols"], case["corpus"]))
-                case["actual_repeats"] += 1
-            case["status"] = ("completed" if len(case["repeats"]) == 3
+                case["actual_repeats"] += int(report["status"] == "completed")
+                if report["status"] == "partial":
+                    break
+            case["status"] = ("completed" if case["actual_repeats"] == 3
                               else "partial")
             case["reason"] = "" if case["status"] == "completed" else "time"
+        state = ("completed" if all(c["status"] == "completed" for c in cases)
+                 else "partial")
     except Skip as error:
+        state = ("partial" if error.code == "time" and any(
+            c["status"] == "partial" and c["reason"] == "time" for c in cases)
+                 else "skipped")
         failure = {"reason_code": error.code, "reason": str(error)}
         for case in cases:
             if case["status"] == "skipped" or case["reason"] == "in-progress":
                 case["reason"] = f"{error.code}: {error}"
+    except Exception as error:
+        failure = {"reason_code": "worker" if isinstance(error, FatalWorker)
+                   else "input", "reason": str(error)}
+        for case in cases:
+            if case["reason"] == "in-progress":
+                case["reason"] = str(error)
+            elif case["status"] == "skipped":
+                case["reason"] = "not admitted after block failure"
+    try:
+        clean = reap_children()
+    except OSError:
+        clean = False
+    if not clean:
+        state, failure = "partial", {"reason_code": "process",
+                                     "reason": "unverified child teardown"}
     summary = {"cases": cases, "failure": failure, "planned_repeats": 3,
                "cost_scope": "CPU-only Lambda node; precomputed tokens",
-               "accepted_timings": failure is None,
+               "accepted_timings": failure is None and any(
+                   c["actual_repeats"] for c in cases),
                "runner_seconds": time.monotonic() - started}
     save(output / "matrix.json", summary)
-    complete = all(c["status"] == "completed" for c in cases)
-    state = "completed" if complete and failure is None else "skipped"
     files = {str(p.relative_to(root)): digest(p) for p in output.iterdir()
              if p.is_file()}
-    save(args.receipt, {"state": state, "exit_code": 0, "clean_handoff": True,
+    code = 1 if state == "partial" else 0
+    save(args.receipt, {"state": state, "exit_code": code,
+         "clean_handoff": clean,
          "source_pin": args.source_pin, "config_pin": args.config_pin,
          "input_pin": args.input_pin, "files": files,
          **({} if state == "completed" else failure or
             {"reason_code": "time", "reason": "reduced coverage"})})
-    return 0
+    return code
 
 
 def main() -> int:

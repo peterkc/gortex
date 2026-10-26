@@ -634,6 +634,9 @@ class DeadlineContractTests(unittest.TestCase):
             control, inputs = root / "control", root / "inputs"
             control.mkdir()
             inputs.mkdir()
+            (inputs / "evaluator").mkdir()
+            (inputs / "cpu-cost").mkdir()
+            (root / "lost+found").mkdir()
             archive = inputs / "tier1.tar.zst"
             archive.write_bytes(b"fixture")
             expected = {"sha256": driver.digest(archive), "bytes": 7,
@@ -820,6 +823,344 @@ class DeadlineContractTests(unittest.TestCase):
                 self.assertEqual(failure["state"], "partial")
                 self.assertLess(failure["exit_code"], 0)
                 self.assertFalse((directory / "complete.json").exists())
+
+
+class ReviewFixTests(unittest.TestCase):
+    bindings = DeadlineContractTests.bindings
+    procedure = DeadlineContractTests.procedure
+    live = DeadlineContractTests.live
+    def session_fixture(self, root, mode):
+        (root / "aux").mkdir()
+        (root / "python-runtime.json").write_text("{}")
+        artifact = root / "result.txt"
+        artifact.write_text("tiny")
+        blocks = []
+        for name in ("smoke", "calibration"):
+            job = self.bindings(root)[name][0]
+            job["receipt_path"] = str(root / "results" / name / "receipt.json")
+            record = {k: job[k] for k in
+                      ("source_pin", "config_pin", "input_pin")}
+            selected = mode if name == "smoke" else "completed"
+            record.update(state="partial" if selected == "partial"
+                          else "completed",
+                          clean_handoff=selected != "unclean",
+                          exit_code=1 if selected == "partial" else 0,
+                          reason_code="worker", reason="fixture partial",
+                          files={"result.txt": driver.digest(artifact)})
+            program = (
+                "import json,pathlib,sys; p=pathlib.Path(sys.argv[1]); "
+                "p.parent.mkdir(parents=True); "
+                "mode=sys.argv[2]; record=json.loads(sys.argv[3]); "
+                "p.write_text('{' if mode=='malformed' else "
+                "json.dumps(record)) if mode!='missing' else None; "
+                "sys.exit(2 if mode=='exit2' else record['exit_code'])"
+            )
+            job["argv"] = [sys.executable, "-c", program,
+                           job["receipt_path"], selected, json.dumps(record)]
+            blocks.append({"id": name, "jobs": [job]})
+        owner = object.__new__(driver.Supervisor)
+        owner.root, owner.environment = root, dict(os.environ)
+        owner.active, owner.allocation, owner.termination = [], {}, {}
+        owner.zero, owner.backstop_deadline = time.monotonic(), float("inf")
+        owner.calls = []
+
+        def begin(block, outcomes):
+            owner.block_id = block["id"]
+            owner.block_deadline = time.monotonic() + 30
+            owner.launch_deadline = owner.block_deadline - 11
+            owner.job_minutes = {j["id"]: 1 for j in block["jobs"]}
+
+        def start(args, directory, environment, cwd):
+            owner.calls.append(directory.name)
+            process = driver.subprocess.Popen(
+                args, env=environment, cwd=cwd, start_new_session=True)
+            def stop():
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=3)
+
+            self.addCleanup(stop)
+            process.wait(timeout=3)
+            owned = driver.OwnedProcess(
+                process, directory, time.monotonic(), StringIO(),
+                deadline=owner.launch_deadline)
+            owner.active.append(owned)
+            return owned
+
+        owner.begin_block, owner.start = begin, start
+        return owner, {"blocks": blocks}
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux process fixture")
+    def test_block_local_receipt_failures_release_the_next_block(self):
+        for mode in ("missing", "exit2", "malformed", "partial"):
+            with self.subTest(mode=mode), \
+                    tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                owner, admission = self.session_fixture(root, mode)
+                self.addCleanup(owner.stop_all)
+                with patch.object(driver.signal, "signal"), \
+                        patch.object(driver.signal, "setitimer"):
+                    result = driver.execute_session(
+                        owner, admission, root / "inputs", {}, 1)
+                blocks = result["blocks"]
+                self.assertEqual(blocks["smoke"]["state"], "partial")
+                self.assertTrue(blocks["smoke"]["clean_handoff"])
+                self.assertTrue(blocks["smoke"]["reason"])
+                self.assertEqual(blocks["calibration"]["state"], "completed")
+                self.assertEqual(owner.calls,
+                                 ["smoke-fixture", "calibration-fixture"])
+                self.assertEqual(owner.active, [])
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux process fixture")
+    def test_unclean_receipt_and_survivor_stop_the_whole_session(self):
+        for mode in ("unclean", "survivor"):
+            with self.subTest(mode=mode), \
+                    tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                owner, admission = self.session_fixture(root, mode)
+                original = owner.close
+
+                def close(owned):
+                    if mode == "survivor":
+                        groups = {
+                            owned.process.pid: {(owned.process.pid, 1): 0}}
+                        with patch.object(driver, "process_groups",
+                                          return_value=groups):
+                            original(owned)
+                    else:
+                        original(owned)
+
+                owner.close = close
+                try:
+                    with patch.object(driver.signal, "signal"), \
+                            patch.object(driver.signal, "setitimer"), \
+                            self.assertRaises(driver.FatalSession):
+                        driver.execute_session(
+                            owner, admission, root / "inputs", {}, 1)
+                    self.assertEqual(owner.calls, ["smoke-fixture"])
+                    saved = driver.read_json(root / "session.json")
+                    self.assertNotIn("calibration", saved["blocks"])
+                finally:
+                    owner.stop_all()
+
+    def test_oracle_success_releases_passed_timing_after_screen_timeout(self):
+        for oracle_passed in (True, False):
+            with self.subTest(oracle=oracle_passed), \
+                    tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                admission = driver.preflight(
+                    self.bindings(root), driver.setup_recipe(),
+                    self.procedure(), root)
+                owner = SimpleNamespace(
+                    root=root, allocation={}, termination={}, zero=0,
+                    backstop_deadline=710 * 60, stop_all=unittest.mock.Mock())
+
+                def begin(block, outcomes):
+                    owner.block_deadline = driver.block_limit(
+                        block["id"], 0, 0, 720 * 60, outcomes, a3_live=False)
+
+                owner.begin_block = begin
+                timed = []
+
+                def stage(owner, selected, setup, concurrency, receipts):
+                    if selected[0].stage == "timing":
+                        timed.extend(selected)
+                        return
+                    if selected[0].stage == "oracle" and oracle_passed:
+                        receipts.append({"identity": {"job": driver.asdict(
+                            selected[0])}, "state": "pass"})
+                        return
+                    if oracle_passed:
+                        receipts.append({"identity": {"job": driver.asdict(
+                            selected[0])}, "state": "pass"})
+                    raise driver.DeadlineExceeded("fixture job timeout")
+
+                with (
+                    patch.object(driver.time, "monotonic", return_value=0),
+                    patch.object(driver.signal, "signal"),
+                    patch.object(driver.signal, "setitimer"),
+                    patch.object(driver, "prepare", return_value={}),
+                    patch.object(driver, "execute_stage", side_effect=stage),
+                    patch.object(driver, "run_catalog_hybrid") as dependent,
+                    patch.object(driver, "binding_block",
+                                 return_value="completed"),
+                    patch.object(driver, "block_files", return_value={}),
+                ):
+                    result = driver.execute_session(
+                        owner, admission, root / "inputs", {}, 1)
+                self.assertEqual(result["blocks"]["storage"]["state"],
+                                 "partial")
+                self.assertEqual(len(timed), 6 if oracle_passed else 0)
+                self.assertEqual(dependent.call_count,
+                                 2 if oracle_passed else 0)
+                self.assertEqual(result["blocks"]["segment_timing"]["state"],
+                                 "completed" if oracle_passed
+                                 else "dependency_blocked")
+
+    def test_priority_repeat_rounds_and_remaining_window_limits(self):
+        planned = driver.jobs()
+        self.assertEqual([j.adapter for j in planned[:7]], [
+            "oracle", "sqlite-segment", "pebble-bleve", "sqlite-vecflat",
+            "sqlite-usearch", "catalog-sqlite", "catalog-refs"])
+        timing = [j for j in planned if j.stage == "timing"]
+        self.assertEqual([j.repeat for j in timing], [1]*4 + [2]*4 + [3]*4)
+        inventory = driver.bound_jobs(Path("/work"))
+        for block, minutes in (("storage", 150), ("segment_timing", 120)):
+            owner = object.__new__(driver.Supervisor)
+            owner.block_id, owner.block_deadline = block, minutes * 60
+            owner.job_minutes = {
+                j["id"]: j["minutes"] for j in inventory[block]}
+            for now in (0, 60, minutes * 60 - 20):
+                self.assertEqual(owner.job_limit(
+                    inventory[block][0]["id"], now),
+                                 minutes * 60 - driver.CLEANUP_RESERVE_SECONDS)
+
+    def test_staging_hashes_and_missing_existing_or_symlink_rejection(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name in ("evaluator", "cpu-cost"):
+                source = root / "inputs" / name
+                source.mkdir(parents=True)
+                (source / "nested").mkdir()
+                (source / "nested/input.txt").write_text(name)
+                destination = root / "data" / name
+                hashes = driver.copy_tree(root, source, destination)
+                self.assertEqual(hashes, {
+                    f"data/{name}/nested/input.txt": driver.digest(
+                        source / "nested/input.txt")})
+                with self.assertRaises(driver.ReviewRequired):
+                    driver.copy_tree(root, source, destination)
+                (source / "link").symlink_to(source / "nested/input.txt")
+                target = root / "data" / (name + "-refused")
+                with self.assertRaises(driver.ReviewRequired):
+                    driver.copy_tree(root, source, target)
+                self.assertFalse(target.exists())
+            with self.assertRaisesRegex(driver.ReviewRequired, "missing"):
+                driver.copy_tree(root, root / "missing", root / "new")
+
+    def test_timestamp_normalization_and_full_enforcement_invocation(self):
+        base = driver.timestamp("2026-10-26T07:00:00Z", "fixture")
+        for digits in ("1", "12", "123", "1234", "12345", "123456",
+                       "1234567", "1234567890123456789"):
+            with self.subTest(digits=digits):
+                value = "2026-10-26T07:00:00." + digits
+                expected = base + int(digits[:6].ljust(6, "0")) / 1e6
+                self.assertAlmostEqual(
+                    driver.timestamp(value + "Z", "fixture"), expected,
+                    delta=1e-6)
+                self.assertEqual(driver.timestamp(value + "+00:00", "fixture"),
+                                 driver.timestamp(value + "Z", "fixture"))
+        for value in (None, "badZ", "2026-10-26T07:00:00"):
+            with self.assertRaises(driver.ReviewRequired):
+                driver.timestamp(value, "fixture")
+        allocation, receipt = self.live()
+        allocation["created_at"] = "2026-10-26T07:00:00.123456789Z"
+        receipt["created_at"] = allocation["created_at"]
+        receipt["install_time_pdt"] = "2026-10-26T00:00:01-07:00"
+        created = driver.timestamp(allocation["created_at"], "fixture")
+        self.assertEqual(driver.live_termination(
+            allocation, receipt, created + 2)[0], created)
+        result = driver.preflight(self.bindings(), driver.setup_recipe(),
+                                  self.procedure(), Path("/work"),
+                                  concurrency=3)
+        expected = ["python3", "/work/control/run.py", "--execute", "--root",
+                    "/work", "--inputs", "/work/inputs", "--concurrency", "3",
+                    "--bindings", "/work/control/bindings.json",
+                    "--setup-recipe",
+                    "/work/control/setup-recipe.json", "--stop-procedure",
+                    "/work/control/stop-procedure.json", "--allocation",
+                    "/work/control/allocation.json", "--termination-receipt",
+                    "/work/control/termination.json"]
+        self.assertEqual(result["enforcement_argv"], expected)
+
+    def test_reap_unknown_zombie_preserves_direct_child_status(self):
+        owner = object.__new__(driver.Supervisor)
+        process = SimpleNamespace(pid=42, returncode=None,
+                                  poll=unittest.mock.Mock())
+        owner.active = [SimpleNamespace(process=process)]
+        with patch.object(driver.os, "waitpid", side_effect=[
+                (99, 0), (42, 7 << 8), ChildProcessError()]) as wait:
+            owner.reap()
+        self.assertEqual(process.returncode, 7)
+        self.assertTrue(all(call.args == (-1, os.WNOHANG)
+                            for call in wait.call_args_list))
+
+    def test_partial_storage_resume_refuses_missing_receipts_cleanly(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            owner = SimpleNamespace(root=root, allocation={}, termination={},
+                                    zero=0, backstop_deadline=1000)
+            block = {"id": "storage", "jobs": [{"id": "missing"}]}
+            admission = {"blocks": [block]}
+            identity = {"configuration": admission, "setup": {},
+                        "allocation": {}, "termination": {}}
+            driver.atomic_json(root / "session.json", {
+                "identity": identity, "blocks": {"storage": {
+                    "state": "partial", "files": {}}}})
+            with patch.object(driver.time, "monotonic", return_value=0), \
+                    patch.object(driver.signal, "setitimer"), \
+                    self.assertRaisesRegex(driver.ReviewRequired,
+                                           "partial receipts; no resume"):
+                driver.execute_session(
+                    owner, admission, root / "inputs", {}, 1)
+
+
+    def main_fixture(self, root):
+        allocation, receipt = self.live()
+        payloads = {"bindings": self.bindings(root),
+                    "setup-recipe": driver.setup_recipe(),
+                    "stop-procedure": self.procedure(),
+                    "allocation": allocation, "termination-receipt": receipt}
+        argv = ["run.py", "--execute"]
+        for option, payload in payloads.items():
+            path = root / (option + ".json")
+            driver.atomic_json(path, payload)
+            argv.extend(["--" + option, str(path)])
+        return argv
+
+    def test_root_user_refuses_before_host_or_process_effects(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            with (
+                patch.object(sys, "argv", self.main_fixture(root)),
+                patch.object(driver.os, "geteuid", return_value=0),
+                patch.object(driver, "host_record") as host,
+                patch.object(driver, "Supervisor") as spawn,
+            ):
+                with self.assertRaisesRegex(driver.ReviewRequired, "UID 0"):
+                    driver.main()
+            host.assert_not_called()
+            spawn.assert_not_called()
+            self.assertFalse((root / "A9-handoff.json").exists())
+
+    def test_uncaught_error_cannot_claim_a_clean_a9_handoff(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            argv = self.main_fixture(root)
+            owner = SimpleNamespace(stop_all=unittest.mock.Mock())
+
+            def local_path(value):
+                return root if str(value) == "/work" else Path(value)
+
+            with (
+                patch.object(sys, "argv", argv),
+                patch.object(driver, "Path", side_effect=local_path),
+                patch.object(driver.os, "geteuid", return_value=1000),
+                patch.object(driver, "host_record", return_value={
+                    "kernel": "fixture", "cpuinfo": "", "affinity": []}),
+                patch.object(driver, "live_termination", return_value=(0, 1)),
+                patch.object(driver, "Supervisor", return_value=owner),
+                patch.object(driver.signal, "signal"),
+                patch.object(driver.signal, "setitimer"),
+                patch.object(driver, "execute_session",
+                             side_effect=ValueError("fixture uncaught")),
+                self.assertRaisesRegex(ValueError, "fixture uncaught"),
+            ):
+                driver.main()
+            result = driver.read_json(root / "A9-handoff.json")
+            self.assertFalse(result["clean_handoff"])
+            self.assertTrue(result["deletion_required"])
+            owner.stop_all.assert_called_once()
 
 
 if __name__ == "__main__":
