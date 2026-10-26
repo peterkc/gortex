@@ -959,8 +959,10 @@ func (mi *MultiIndexer) resolveDeferredMutations(receipt *graph.MutationReceipt,
 			return deferredResolveSkipped, true
 		}
 
+		var masterResolvedFiles []string
 		if receipt.ResolutionRelevant {
 			mi.runMasterResolveFiles(resolutionFiles, false)
+			masterResolvedFiles = resolutionFiles
 			// Evicted definitions' pending references live outside the file
 			// frontier (their name is no longer declared in any frontier
 			// file); rebind them by the names the receipt recorded that no
@@ -970,7 +972,7 @@ func (mi *MultiIndexer) resolveDeferredMutations(receipt *graph.MutationReceipt,
 		// Resolve only files that can create or bind unresolved edges. Resolved
 		// edge sources still materialise their cross_repo_* generation without
 		// repeating the substantially larger name-resolution frontier.
-		mi.runCrossRepoResolveMutationFrontiers(resolutionFiles, receipt.ChangedFiles, receipt.DefinitionFiles)
+		mi.runCrossRepoResolveMutationFrontiers(resolutionFiles, receipt.ChangedFiles, receipt.DefinitionFiles, masterResolvedFiles)
 		return deferredResolveExact, true
 	}
 	if !fallbackNeeded {
