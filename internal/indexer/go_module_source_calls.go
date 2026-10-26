@@ -30,6 +30,10 @@ const goModuleSourceRacyWindow = 2 * time.Second
 
 var readGoModuleCallerFile = os.ReadFile
 
+// goModuleSourceNow stamps the start of a verifying read. Tests pin it so each
+// case takes one branch of the racy-file rule regardless of runner speed.
+var goModuleSourceNow = time.Now
+
 func cloneGoModuleSourceEdges(edges []*graph.Edge) []*graph.Edge {
 	out := make([]*graph.Edge, 0, len(edges))
 	for _, e := range edges {
@@ -89,7 +93,7 @@ func (mi *MultiIndexer) restoreGoModuleSourceFile(cr *resolver.CrossRepoResolver
 		return
 	}
 	defer parseLease.Release()
-	recordedAt := time.Now() // Record wall time before reading the bytes being verified.
+	recordedAt := goModuleSourceNow() // Record wall time before reading the bytes being verified.
 	src, err := readGoModuleCallerFile(abs)
 	if err != nil {
 		mi.logger.Warn("read Go module caller", zap.String("file", file), zap.Error(err))

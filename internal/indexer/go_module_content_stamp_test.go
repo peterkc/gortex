@@ -26,8 +26,11 @@ func TestGoModuleSameStampSourceRecoveryColdEquivalent(t *testing.T) {
 			after := strings.Replace(before, "Missing", "Present", 1)
 			require.Equal(t, len(before), len(after))
 			writeFile(t, main, before)
-			recent := time.Now().Truncate(time.Second)
+			// The cache records its read at the file's own mtime, so the
+			// stat stays inside the racy window however slow the setup is.
+			recent := time.Unix(1700000000, 0)
 			require.NoError(t, os.Chtimes(main, recent, recent))
+			pinGoModuleSourceClock(t, recent)
 			writeFile(t, lib, "package library\nfunc Other() {}\n")
 			for _, entry := range repos[:2] {
 				_, err := mi.TrackRepoCtx(t.Context(), entry)
@@ -81,6 +84,12 @@ func TestGoModuleSourceFailureDoesNotRestoreCachedCalls(t *testing.T) {
 		for _, failure := range []string{"stat", "read", "size"} {
 			t.Run(backend+"/"+failure, func(t *testing.T) {
 				mi, g, repos := goModuleLifecycleFixture(t, backend)
+				main := filepath.Join(repos[0].Path, "main.go")
+				// Keep the caller's stat racy, so a cached fact can only be
+				// reused after a read, independent of runner speed.
+				recent := time.Unix(1700000000, 0)
+				require.NoError(t, os.Chtimes(main, recent, recent))
+				pinGoModuleSourceClock(t, recent)
 				writeFile(t, filepath.Join(repos[1].Path, "lib.go"), "package library\nfunc Other(){}\n")
 				for _, entry := range repos[:2] {
 					_, err := mi.TrackRepoCtx(t.Context(), entry)
@@ -92,7 +101,6 @@ func TestGoModuleSourceFailureDoesNotRestoreCachedCalls(t *testing.T) {
 				g.AddNode(&graph.Node{ID: "b/lib.go::Hello", Name: "Hello", Kind: graph.KindFunction, RepoPrefix: "b", FilePath: "b/lib.go", WorkspaceID: "shared", Language: "go"})
 				cr := mi.newCrossRepoResolver()
 				before := revisionCallTargets(g, "a/main.go::Caller", graph.EdgeCalls)
-				main := filepath.Join(repos[0].Path, "main.go")
 				original := readGoModuleCallerFile
 				reads := 0
 				readGoModuleCallerFile = func(string) ([]byte, error) { reads++; return nil, os.ErrPermission }
@@ -160,4 +168,13 @@ func TestGoModuleContentStampAndParsedEvidenceShareBytes(t *testing.T) {
 	assert.Equal(t, contentHashForSource(x), mi.goModuleFiles["lib"].content)
 	require.Len(t, mi.goModuleReplacements["lib"], 1)
 	assert.Equal(t, "example.org/dep", mi.goModuleReplacements["lib"][0].Module)
+}
+
+// pinGoModuleSourceClock records caller-cache reads at a fixed time, so each
+// test takes one branch of the racy-file rule regardless of runner speed.
+func pinGoModuleSourceClock(t *testing.T, at time.Time) {
+	t.Helper()
+	original := goModuleSourceNow
+	goModuleSourceNow = func() time.Time { return at }
+	t.Cleanup(func() { goModuleSourceNow = original })
 }

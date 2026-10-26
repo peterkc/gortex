@@ -435,9 +435,11 @@ func TestGoModuleSameStampCallerReindexColdEquivalent(t *testing.T) {
 				after := strings.Replace(before, "Missing", "Present", 1)
 				require.Equal(t, len(before), len(after))
 				writeFile(t, main, before)
-				stamp := time.Now().Truncate(time.Second)
+				now := time.Unix(1700000000, 0)
+				pinGoModuleSourceClock(t, now)
+				stamp := now // inside the racy window
 				if mode != "recent" {
-					stamp = time.Now().Add(-time.Hour)
+					stamp = now.Add(-time.Hour)
 				}
 				require.NoError(t, os.Chtimes(main, stamp, stamp))
 				writeFile(t, lib, "package library\nfunc Other(){}\n")
