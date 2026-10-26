@@ -626,7 +626,7 @@ func (mi *MultiIndexer) resolveIncrementalRepoMutationMode(
 			}
 			mi.runMasterResolveFilesObserved(frontier, false, idx.resolver, batch.publicationStamps().mutationResolveMutexObserver())
 		})
-		masterResolvedFiles = resolvedFiles
+		masterResolvedFiles = files
 		crossRepoFiles = appendUniqueSorted(crossRepoFiles, resolvedFiles...)
 		if receipt != nil && receipt.Complete {
 			names := batch.publicationStamps().beginPatchLap(patchResolve)
