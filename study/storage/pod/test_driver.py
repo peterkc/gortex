@@ -1121,8 +1121,13 @@ class ReviewFixTests(unittest.TestCase):
     def test_root_user_refuses_before_host_or_process_effects(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
+
+            def local_path(value):
+                return root if str(value) == "/work" else Path(value)
+
             with (
                 patch.object(sys, "argv", self.main_fixture(root)),
+                patch.object(driver, "Path", side_effect=local_path),
                 patch.object(driver.os, "geteuid", return_value=0),
                 patch.object(driver, "host_record") as host,
                 patch.object(driver, "Supervisor") as spawn,
