@@ -161,6 +161,7 @@ type goImportCountingStore struct {
 	fileScans, hydrated     int
 	edgeLoads               int
 	importScans, importRows int
+	bindingRechecks         int
 	afterBatch              func()
 }
 
@@ -169,6 +170,9 @@ func (s *goImportCountingStore) FileNodeIdentitiesSeq(repos []string) iter.Seq[g
 	return graph.FileNodeIdentitiesSeq(s.Store, repos)
 }
 func (s *goImportCountingStore) RepoNodeIdentitiesSeq(repos []string, kinds ...graph.NodeKind) iter.Seq[graph.RepoNodeIdentity] {
+	if len(kinds) == 4 {
+		s.bindingRechecks++
+	}
 	return func(yield func(graph.RepoNodeIdentity) bool) {
 		imports := len(kinds) == 1 && kinds[0] == graph.KindImport && repos == nil
 		if imports {
