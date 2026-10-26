@@ -114,6 +114,7 @@ type CrossRepoResolver struct {
 	importedDirsByFile     map[string]map[string]struct{}
 	jsTSBindingsByFile     map[string]map[string]string
 	bridgeImportsByFile    map[string][]*graph.Edge
+	pythonReexportsByFile  map[string][]*graph.Edge
 	pythonLocalTypesByFile map[string]map[string]bool
 	// depModuleIndex bridges Go imports to dep::<module> contract
 	// nodes from the caller's go.mod. Same shape and rationale as
@@ -871,6 +872,7 @@ func (cr *CrossRepoResolver) buildReachableReposIndex(callerFiles map[string]boo
 	dirs := make(map[string]map[string]struct{})
 	cr.jsTSBindingsByFile = make(map[string]map[string]string)
 	cr.bridgeImportsByFile = make(map[string][]*graph.Edge)
+	cr.pythonReexportsByFile = make(map[string][]*graph.Edge)
 	cr.pythonLocalTypesByFile = make(map[string]map[string]bool)
 	var pythonFiles []string
 	// Materialise metadata-free import projections and batch-load only target
@@ -993,6 +995,7 @@ func (cr *CrossRepoResolver) clearReachableReposIndex() {
 	cr.importedDirsByFile = nil
 	cr.jsTSBindingsByFile = nil
 	cr.bridgeImportsByFile = nil
+	cr.pythonReexportsByFile = nil
 	cr.pythonLocalTypesByFile = nil
 }
 

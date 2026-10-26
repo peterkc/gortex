@@ -15,7 +15,7 @@ func (cr *CrossRepoResolver) resolvePythonPackageReExport(e *graph.Edge, module,
 	callerWS := cr.callerWorkspaceID(e)
 	var match *graph.Node
 	packageFile := ""
-	for _, imp := range cr.graph.GetOutEdges(cr.callerFileID(e)) {
+	for _, imp := range cr.bridgeImportsByFile[cr.callerFileID(e)] {
 		if imp.Kind != graph.EdgeImports || !imp.CrossRepo || !strings.HasSuffix(imp.To, "/__init__.py") {
 			continue
 		}
@@ -38,7 +38,7 @@ func (cr *CrossRepoResolver) resolvePythonPackageReExport(e *graph.Edge, module,
 		if !pythonModuleFileMatches(pkg.FilePath, spec) {
 			continue
 		}
-		for _, reexport := range cr.graph.GetOutEdges(pkg.ID) {
+		for _, reexport := range cr.pythonPackageReexports(pkg.ID) {
 			if reexport.Kind != graph.EdgeImports {
 				continue
 			}
@@ -81,4 +81,21 @@ func (cr *CrossRepoResolver) resolvePythonPackageReExport(e *graph.Edge, module,
 	e.To, e.CrossRepo = match.ID, true
 	e.Meta[PythonReExportFileMeta] = packageFile
 	return true
+}
+
+func (cr *CrossRepoResolver) pythonPackageReexports(file string) []*graph.Edge {
+	if rows, seen := cr.pythonReexportsByFile[file]; seen {
+		return rows
+	}
+	var imports []*graph.Edge
+	for _, edge := range cr.graph.GetOutEdges(file) {
+		if edge.Kind == graph.EdgeImports {
+			imports = append(imports, edge)
+		}
+	}
+	if cr.pythonReexportsByFile == nil {
+		cr.pythonReexportsByFile = map[string][]*graph.Edge{}
+	}
+	cr.pythonReexportsByFile[file] = imports
+	return imports
 }
