@@ -109,19 +109,7 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 			return err
 		}
 	}
-	state.mu.Lock()
-	pending := state.pending
-	state.pending = nil
-	state.mu.Unlock()
-	var deferred []*graph.Edge
-	for _, edge := range pending {
-		deferred = append(deferred, edge)
-		if len(deferred) == externalCallMutationChunk {
-			cr.resolveGoModuleEdgesLocked(deferred, stats)
-			deferred = deferred[:0]
-		}
-	}
-	cr.resolveGoModuleEdgesLocked(deferred, stats)
+	cr.retryPendingGoModuleEdges(stats)
 	state.mu.Lock()
 	if len(cr.goModules) == 0 {
 		state.modules, state.revision, state.complete = maps.Clone(cr.goModules), cr.goModuleRevision, cr.goModuleImportsDeferred == 0
@@ -232,6 +220,28 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 	state.modules, state.revision, state.complete = maps.Clone(cr.goModules), cr.goModuleRevision, cr.goModuleImportsDeferred == 0
 	state.replacements = maps.Clone(cr.goModuleReplacements)
 	return nil
+}
+
+// retryPendingGoModuleEdges drains exact dropped batches without opening the
+// revision-wide registry seed or legacy binding sweep. The resolve mutex is held.
+func (cr *CrossRepoResolver) retryPendingGoModuleEdges(stats *CrossRepoStats) {
+	state := cr.goModuleRetry
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	pending := state.pending
+	state.pending = nil
+	state.mu.Unlock()
+	var deferred []*graph.Edge
+	for _, edge := range pending {
+		deferred = append(deferred, edge)
+		if len(deferred) == externalCallMutationChunk {
+			cr.resolveGoModuleEdgesLocked(deferred, stats)
+			deferred = deferred[:0]
+		}
+	}
+	cr.resolveGoModuleEdgesLocked(deferred, stats)
 }
 
 // goModuleIncomingEdges probes only package-qualified placeholders owned by the
