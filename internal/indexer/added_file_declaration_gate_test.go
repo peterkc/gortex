@@ -131,3 +131,26 @@ func TestAddedFileAfterDeclarationMatchesCold(t *testing.T) {
 		}
 	}
 }
+
+func TestCargoRootOwnWorkspaceDependencyIsNotBridge(t *testing.T) {
+	first, second := t.TempDir(), t.TempDir()
+	own := "[package]\nname='app'\n[workspace]\nmembers=['member']\n[dependencies]\nmember={path='member'}\n"
+	writeWorkspaceFile(t, first, "Cargo.toml", own)
+	writeWorkspaceFile(t, first, "member/Cargo.toml", "[package]\nname='member'\n")
+	writeWorkspaceFile(t, second, "Cargo.toml", "[package]\nname='other'\n")
+	g := &cargoWarmScanStore{Store: graph.New()}
+	g.AddEdge(&graph.Edge{From: "first/src/lib.rs", FilePath: "first/src/lib.rs", To: "external::other/extra", Kind: graph.EdgeImports})
+	mi := &MultiIndexer{graph: g, repos: map[string]*RepoMetadata{"first": {RootPath: first}, "second": {RootPath: second}}}
+	require.False(t, mi.cargoManifestSnapshot().cargoDeclared)
+	require.Empty(t, mi.cargoAddedFileConsumers("first"))
+	require.Zero(t, g.lightScans, "a local workspace dependency is not a tracked bridge")
+	writeWorkspaceFile(t, first, "Cargo.toml", own+"other='1'\n")
+	require.True(t, mi.cargoManifestSnapshot().cargoDeclared)
+	require.Equal(t, []string{"first/src/lib.rs"}, mi.cargoAddedFileConsumers("second"))
+	require.Equal(t, 1, g.lightScans)
+	writeWorkspaceFile(t, first, "Cargo.toml", own)
+	require.False(t, mi.cargoManifestSnapshot().cargoDeclared)
+	g.lightScans = 0
+	require.Empty(t, mi.cargoAddedFileConsumers("first"))
+	require.Zero(t, g.lightScans)
+}
