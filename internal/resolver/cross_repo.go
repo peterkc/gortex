@@ -133,18 +133,19 @@ type CrossRepoResolver struct {
 	// dangling edge). Off (the default, and the whole-pass-locked path) it is
 	// a no-op: nothing can mutate the graph mid-pass, so every edge and
 	// candidate is live by construction.
-	validateLiveness     bool
-	crossWorkspaceLookup CrossWorkspaceDepLookup
-	goModules            map[string]string
-	goModulePaths        goModulePathIndex
-	goModuleRepos        map[string][]string
-	goModuleReplacements map[string][]GoModuleReplacement
-	goModuleRetry        *GoModuleDepRetry
-	goModuleRevision     uint64
-	goModuleDemotedMu    sync.Mutex
-	goModuleDemotedFiles map[string]struct{}
-	goModuleSourceFiles  map[string]struct{}
-	goModuleSourceSites  map[graph.EdgeSite]map[string]struct{}
+	validateLiveness        bool
+	crossWorkspaceLookup    CrossWorkspaceDepLookup
+	goModules               map[string]string
+	goModulePaths           goModulePathIndex
+	goModuleRepos           map[string][]string
+	goModuleReplacements    map[string][]GoModuleReplacement
+	goModuleRetry           *GoModuleDepRetry
+	goModuleImportsDeferred int
+	goModuleRevision        uint64
+	goModuleDemotedMu       sync.Mutex
+	goModuleDemotedFiles    map[string]struct{}
+	goModuleSourceFiles     map[string]struct{}
+	goModuleSourceSites     map[graph.EdgeSite]map[string]struct{}
 	// npmAlias rewrites a JS/TS import specifier that matches an
 	// npm-alias dependency key in the importing file's nearest-
 	// ancestor package.json. Same contract as the field of the
@@ -417,6 +418,7 @@ func (cr *CrossRepoResolver) ResolveAllContext(ctx context.Context) (*CrossRepoS
 	if err := ctx.Err(); err != nil {
 		return stats, err
 	}
+	cr.goModuleImportsDeferred = 0
 	for repo := range cr.goModules {
 		if err := cr.restoreGoModuleImports(ctx, repo, stats); err != nil {
 			return stats, err
