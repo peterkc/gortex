@@ -977,6 +977,25 @@ func (cr *CrossRepoResolver) buildReachableReposIndex(callerFiles map[string]boo
 			set[to.RepoPrefix] = struct{}{}
 		}
 	}
+	// Publish package exports before ResolveAllContext starts its workers.
+	// The map and its edge slices are read-only until this index is cleared.
+	for _, imports := range cr.bridgeImportsByFile {
+		for _, imp := range imports {
+			if !imp.CrossRepo || !strings.HasSuffix(imp.To, "/__init__.py") {
+				continue
+			}
+			if _, seen := cr.pythonReexportsByFile[imp.To]; seen {
+				continue
+			}
+			var reexports []*graph.Edge
+			for _, edge := range cr.graph.GetOutEdges(imp.To) {
+				if edge.Kind == graph.EdgeImports {
+					reexports = append(reexports, edge)
+				}
+			}
+			cr.pythonReexportsByFile[imp.To] = reexports
+		}
+	}
 	if len(pythonFiles) > 0 {
 		for file, nodes := range cr.graph.GetFileNodesByPaths(pythonFiles) {
 			for _, node := range nodes {
