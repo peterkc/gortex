@@ -91,6 +91,7 @@ func restubTrackedPythonImportsFromView(g graph.Store, evicted map[string]struct
 					for _, prior := range incoming[previous] {
 						if prior != nil && prior.From == call.From && prior.Kind == call.Kind && prior.Line == call.Line && prior.To == previous {
 							prior.To, prior.CrossRepo, prior.ConfidenceLabel = call.To, false, ""
+							delete(prior.Meta, resolver.PythonReExportFileMeta)
 						}
 					}
 				}
@@ -98,6 +99,7 @@ func restubTrackedPythonImportsFromView(g graph.Store, evicted map[string]struct
 			if edge.Kind == graph.EdgeCalls {
 				graph.StashRestubProvenance(edge)
 				edge.ConfidenceLabel = ""
+				delete(edge.Meta, resolver.PythonReExportFileMeta)
 			}
 			edge.To, edge.CrossRepo = stub, false
 			batch = append(batch, graph.EdgeReindex{Edge: edge, OldTo: old})
