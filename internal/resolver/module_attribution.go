@@ -69,11 +69,13 @@ func (r *Resolver) attributePythonModuleImportsForFiles(files []string) {
 
 func (r *Resolver) attributeNonGoModuleImportEdges(imports, dependencies iter.Seq[*graph.Edge], fileLang map[string]string) {
 	type pendingEdge struct {
-		edge     *graph.Edge
-		oldTo    string
-		moduleID string
+		edge           *graph.Edge
+		oldTo          string
+		moduleID       string
+		targetIdentity graph.EdgeIdentity
 	}
 	var rewrites []pendingEdge
+	targetSites := make(map[graph.EdgeIdentity]int)
 	moduleSeeds := map[string]moduleSeed{}
 	dependsSeen := map[string]map[string]struct{}{} // fileID → set of moduleIDs
 
@@ -95,10 +97,15 @@ func (r *Resolver) attributeNonGoModuleImportEdges(imports, dependencies iter.Se
 		if !ok {
 			continue
 		}
+		projected := *e
+		projected.To = moduleID
+		identity := graph.EdgeIdentityFor(&projected)
+		targetSites[identity]++
 		rewrites = append(rewrites, pendingEdge{
-			edge:     e,
-			oldTo:    e.To,
-			moduleID: moduleID,
+			edge:           e,
+			oldTo:          e.To,
+			moduleID:       moduleID,
+			targetIdentity: identity,
 		})
 		moduleSeeds[moduleID] = moduleSeed{
 			id:       moduleID,
@@ -180,7 +187,11 @@ func (r *Resolver) attributeNonGoModuleImportEdges(imports, dependencies iter.Se
 			}
 			p.edge.Meta["python_import"] = strings.TrimPrefix(p.oldTo, "external::")
 		}
-		p.edge.To = p.moduleID
+		// Distinct Python spellings on one line must survive until tracked retry.
+		// Keep their external identities, while still recording module evidence.
+		if !strings.HasPrefix(p.moduleID, "module::pypi:") || targetSites[p.targetIdentity] == 1 {
+			p.edge.To = p.moduleID
+		}
 		p.edge.Origin = graph.OriginASTResolved
 		reindexBatch = append(reindexBatch, graph.EdgeReindex{Edge: p.edge, OldTo: p.oldTo})
 
