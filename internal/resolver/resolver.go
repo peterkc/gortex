@@ -2743,6 +2743,7 @@ func (r *Resolver) ResolveFileAndIncoming(filePath string) *ResolveStats {
 	r.resolveFileEdgesLocked(filePath, stats)
 	forwardDuration := time.Since(forwardStarted)
 	attributionStarted := time.Now()
+	r.attributePythonModuleImportsForFiles([]string{filePath})
 	r.runFileAttributionPassesForFileLocked(filePath)
 	attributionDuration := time.Since(attributionStarted)
 	incomingStarted := time.Now()
@@ -3296,6 +3297,7 @@ func startIncrementalPhase(logger *zap.Logger, phase string) func(...zap.Field) 
 // has built the per-pass indexes.
 func (r *Resolver) resolveFileLocked(filePath string, stats *ResolveStats) {
 	r.resolveFileEdgesLocked(filePath, stats)
+	r.attributePythonModuleImportsForFiles([]string{filePath})
 	r.runFileAttributionPassesForFileLocked(filePath)
 }
 
@@ -3552,7 +3554,6 @@ func (r *Resolver) runFileAttributionPassesLocked() {
 // matches runFileAttributionPassesLocked: bare-name binding runs before
 // builtin attribution so a local named `len` shadows the builtin.
 func (r *Resolver) runFileAttributionPassesForFileLocked(filePath string) {
-	r.attributePythonModuleImportsForFile(filePath)
 	r.rebindGoMethodReceiversForFile(filePath)
 	r.bindBareNameScopeRefsForFile(filePath)
 	r.bindDataflowCalleeRefsForFile(filePath)
