@@ -258,6 +258,14 @@ func synthesizeExternalCalls(g graph.Store, collect externalCallCandidateSeq) in
 				// edge on its bookkeeping-string terminal.
 				continue
 			}
+			// A later tracked Python provider needs every original symbol.
+			// Leave colliding calls on their distinct terminals rather than
+			// collapsing them onto the package-only synthetic node.
+			if stub, _ := e.Meta[PythonCallStubMeta].(string); stub != "" &&
+				((i > 0 && sameExternalCallDestination(pending[i-1], c)) ||
+					(i+1 < len(pending) && sameExternalCallDestination(c, pending[i+1]))) {
+				continue
+			}
 			if canDrop && last != nil && sameExternalCallDestination(*last, c) {
 				converged = append(converged, e)
 				continue
