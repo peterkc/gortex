@@ -298,6 +298,7 @@ func TestTrackedGoModuleCacheRevision(t *testing.T) {
 	cached, cachedGeneration := mi.goModuleSnapshot()
 	assert.Equal(t, "example.org/new", cached["b"], "root go.mod edits refresh without config reload")
 	assert.Greater(t, cachedGeneration, generation)
+	mi.goModuleChecked = time.Time{} // Exercise unchanged content after the throttle expires.
 	unchanged, unchangedGeneration := mi.goModuleSnapshot()
 	assert.Equal(t, cached, unchanged)
 	assert.Equal(t, cachedGeneration, unchangedGeneration)

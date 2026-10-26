@@ -810,9 +810,6 @@ func (idx *Indexer) commitIncrementalStages(
 	)
 
 	idx.applyLap("classify")
-	for _, stage := range stages {
-		idx.invalidateGoModuleSourceStamp(stage.relPath)
-	}
 	idx.replaceIncrementalContentBatch(stages)
 	idx.applyLap("content")
 

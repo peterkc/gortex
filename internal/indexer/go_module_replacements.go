@@ -24,7 +24,7 @@ func (mi *MultiIndexer) readGoModuleReplacements(roots map[string]string) map[st
 	replacements := make(map[string][]resolver.GoModuleReplacement)
 	for repo, root := range roots {
 		filename := filepath.Join(root, "go.mod")
-		data, err := os.ReadFile(filename)
+		data, err := readGoModuleFile(filename)
 		if os.IsNotExist(err) {
 			continue
 		}

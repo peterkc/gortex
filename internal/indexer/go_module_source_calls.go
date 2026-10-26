@@ -14,12 +14,10 @@ import (
 )
 
 // goModuleSourceCacheEntry keeps source facts, not resolution decisions.
-// Matching size and mtime reuse those facts. If either differs, the digest
-// decides whether to reuse them.
+// Every recovery reads current bytes; only an equal digest reuses those facts.
 type goModuleSourceCacheEntry struct {
-	digest         [32]byte
-	edges          []*graph.Edge
-	size, modified int64
+	digest [32]byte
+	edges  []*graph.Edge
 }
 
 var readGoModuleCallerFile = os.ReadFile
@@ -37,17 +35,6 @@ func cloneGoModuleSourceEdges(edges []*graph.Edge) []*graph.Edge {
 	return out
 }
 
-// A successful replacement can change bytes without changing the stat.
-// Keep source facts, but make recovery validate them with the digest.
-func (idx *Indexer) invalidateGoModuleSourceStamp(rel string) {
-	idx.goModuleSourceMu.Lock()
-	defer idx.goModuleSourceMu.Unlock()
-	if cached, ok := idx.goModuleSourceCache[rel]; ok {
-		cached.size, cached.modified = 0, 0
-		idx.goModuleSourceCache[rel] = cached
-	}
-}
-
 func (mi *MultiIndexer) finishGoModuleCalls(cr *resolver.CrossRepoResolver) {
 	for _, file := range cr.TakeGoModuleSourceFiles() {
 		mi.restoreGoModuleSourceFile(cr, file)
@@ -63,7 +50,7 @@ func (mi *MultiIndexer) restoreGoModuleSourceFile(cr *resolver.CrossRepoResolver
 	}
 	rel := strings.TrimPrefix(file, prefix+"/")
 	abs := filepath.Join(idx.rootPath, filepath.FromSlash(rel))
-	info, err := os.Stat(abs)
+	_, err := os.Stat(abs)
 	if err != nil {
 		mi.logger.Warn("stat Go module caller", zap.String("file", file), zap.Error(err))
 		return
@@ -71,10 +58,6 @@ func (mi *MultiIndexer) restoreGoModuleSourceFile(cr *resolver.CrossRepoResolver
 	idx.goModuleSourceMu.Lock()
 	cached, hit := idx.goModuleSourceCache[rel]
 	idx.goModuleSourceMu.Unlock()
-	if hit && cached.size == info.Size() && cached.modified == info.ModTime().UnixNano() {
-		cr.RestoreGoModuleSourceCalls(cloneGoModuleSourceEdges(cached.edges))
-		return
-	}
 	parseLease, err := idx.acquireSharedParsePath(abs)
 	if err != nil {
 		mi.logger.Warn("admit Go module caller", zap.String("file", file), zap.Error(err))
@@ -96,10 +79,6 @@ func (mi *MultiIndexer) restoreGoModuleSourceFile(cr *resolver.CrossRepoResolver
 	src = idx.transforms.run(rel, src)
 	digest := sha256.Sum256(src)
 	if hit && cached.digest == digest {
-		cached.size, cached.modified = info.Size(), info.ModTime().UnixNano()
-		idx.goModuleSourceMu.Lock()
-		idx.goModuleSourceCache[rel] = cached
-		idx.goModuleSourceMu.Unlock()
 		cr.RestoreGoModuleSourceCalls(cloneGoModuleSourceEdges(cached.edges))
 		return
 	}
@@ -124,7 +103,7 @@ func (mi *MultiIndexer) restoreGoModuleSourceFile(cr *resolver.CrossRepoResolver
 		if idx.goModuleSourceCache == nil {
 			idx.goModuleSourceCache = make(map[string]goModuleSourceCacheEntry)
 		}
-		idx.goModuleSourceCache[rel] = goModuleSourceCacheEntry{digest: digest, edges: cloneGoModuleSourceEdges(result.Edges), size: info.Size(), modified: info.ModTime().UnixNano()}
+		idx.goModuleSourceCache[rel] = goModuleSourceCacheEntry{digest: digest, edges: cloneGoModuleSourceEdges(result.Edges)}
 		idx.goModuleSourceMu.Unlock()
 		cr.RestoreGoModuleSourceCalls(result.Edges)
 	}

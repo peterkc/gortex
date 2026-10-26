@@ -2156,7 +2156,7 @@ func (idx *Indexer) installGoResolverContext() {
 }
 
 // trackedGoModules caches root identities by config revision and root go.mod
-// stat. Configured roots keep cold-shadow imports recognizable before publish.
+// content. Configured roots keep cold-shadow imports recognizable before publish.
 func (mi *MultiIndexer) trackedGoModules() map[string]string {
 	modules, _ := mi.goModuleSnapshot()
 	return modules
@@ -2189,12 +2189,20 @@ func (mi *MultiIndexer) goModuleSnapshot() (map[string]string, uint64) {
 	files := make(map[string]goModuleFileStamp, len(roots))
 	for prefix, root := range roots {
 		stamp := goModuleFileStamp{root: root}
-		if info, err := os.Stat(filepath.Join(root, "go.mod")); err == nil {
+		manifest := filepath.Join(root, "go.mod")
+		info, err := os.Stat(manifest)
+		if os.IsNotExist(err) {
+			stamp.valid = true
+		} else if err == nil {
 			stamp.size, stamp.modified = info.Size(), info.ModTime().UnixNano()
+			if src, err := readGoModuleFile(manifest); err == nil {
+				stamp.content = contentHashForSource(src)
+				stamp.valid = true
+			}
 		}
 		files[prefix] = stamp
 	}
-	if mi.goModuleCache != nil && mi.goModuleRevision == revision && mi.goModuleRepoCount == count && maps.Equal(mi.goModuleFiles, files) {
+	if mi.goModuleCache != nil && mi.goModuleRevision == revision && mi.goModuleRepoCount == count && maps.EqualFunc(mi.goModuleFiles, files, func(a, b goModuleFileStamp) bool { return a.valid && a == b }) {
 		return mi.goModuleCache, mi.goModuleGeneration
 	}
 	modules := readTrackedGoModules(roots)
@@ -2221,9 +2229,13 @@ func (mi *MultiIndexer) goModuleSnapshot() (map[string]string, uint64) {
 	return modules, mi.goModuleGeneration
 }
 
+var readGoModuleFile = os.ReadFile
+
 type goModuleFileStamp struct {
 	root           string
 	size, modified int64
+	content        string
+	valid          bool
 }
 
 func readTrackedGoModules(roots map[string]string) map[string]string {
@@ -2238,7 +2250,7 @@ func readTrackedGoModules(roots map[string]string) map[string]string {
 
 // readGoModModule reads the module path from a go.mod file.
 func readGoModModule(repoPath string) string {
-	data, err := os.ReadFile(filepath.Join(repoPath, "go.mod"))
+	data, err := readGoModuleFile(filepath.Join(repoPath, "go.mod"))
 	if err != nil {
 		return ""
 	}

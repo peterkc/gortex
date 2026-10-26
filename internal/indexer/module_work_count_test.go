@@ -273,8 +273,8 @@ func TestGoModuleSourceCacheEviction(t *testing.T) {
 }
 
 // Given cached unbindable callers, when a second provider IndexFile save keeps
-// the same definition set, then it reads zero unchanged caller files.
-func TestGoModuleProviderSaveSkipsCachedSourceReads(t *testing.T) {
+// the same definition set, then it reads once but reuses unchanged source facts.
+func TestGoModuleProviderSaveReusesCachedSourceFacts(t *testing.T) {
 	mi, _, repos := goModuleLifecycleFixture(t, "memory")
 	lib := filepath.Join(repos[1].Path, "lib.go")
 	writeFile(t, lib, "package library\nfunc Other() {}\n")
@@ -293,10 +293,15 @@ func TestGoModuleProviderSaveSkipsCachedSourceReads(t *testing.T) {
 	t.Cleanup(func() { readGoModuleCallerFile = original })
 	writeFile(t, lib, "package library\nfunc Other(){println(1)}\n")
 	require.NoError(t, mi.GetIndexer("b").IndexFile(lib))
+	ext, ok := mi.registry.GetByLanguage("go")
+	require.True(t, ok)
+	spy := &goModuleSourceExtractionSpy{Extractor: ext}
+	mi.registry.Register(spy)
 	reads = 0
 	writeFile(t, lib, "package library\nfunc Other(){println(2)}\n")
 	require.NoError(t, mi.GetIndexer("b").IndexFile(lib))
-	assert.Zero(t, reads, "unchanged caller stat must avoid source reads and transforms")
+	assert.Equal(t, 1, reads, "unchanged caller bytes must be verified before cached facts are reused")
+	assert.Zero(t, spy.calls, "identical content must not re-extract the caller")
 }
 
 // Given a shared parse lease, when source reading fails or panics, then the
@@ -336,9 +341,9 @@ func TestGoModuleSourceRecoveryReleasesLease(t *testing.T) {
 	}
 }
 
-// Given cached unchanged bytes, when only the caller mtime changes, then one
-// provider save reads once to refresh the stamp and the next save reads zero.
-func TestGoModuleSourceCacheRefreshesTouchedStamp(t *testing.T) {
+// Given cached unchanged bytes, when only the caller mtime changes, then
+// provider saves verify bytes each time but never re-parse the unchanged caller.
+func TestGoModuleSourceCacheVerifiesTouchedContent(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
 		t.Run(backend, func(t *testing.T) {
 			mi, _, repos := goModuleLifecycleFixture(t, backend)
@@ -368,10 +373,15 @@ func TestGoModuleSourceCacheRefreshesTouchedStamp(t *testing.T) {
 			writeFile(t, lib, "package library\nfunc Other(){println(1)}\n")
 			require.NoError(t, mi.GetIndexer("b").IndexFile(lib))
 			assert.Equal(t, 1, reads, "new stamp with identical bytes must refresh once")
+			ext, ok := mi.registry.GetByLanguage("go")
+			require.True(t, ok)
+			spy := &goModuleSourceExtractionSpy{Extractor: ext}
+			mi.registry.Register(spy)
 			reads = 0
 			writeFile(t, lib, "package library\nfunc Other(){println(2)}\nfunc More(){}\n")
 			require.NoError(t, mi.GetIndexer("b").IndexFile(lib))
-			assert.Zero(t, reads, "the refreshed stamp must make the next provider save read-free")
+			assert.Equal(t, 1, reads, "equal stat still requires content verification")
+			assert.Zero(t, spy.calls, "equal content must reuse source facts")
 		})
 	}
 }

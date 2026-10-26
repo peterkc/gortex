@@ -86,9 +86,19 @@ func TestGoModuleSameLineCallsColdEquivalent(t *testing.T) {
 				if mode == "rename_back" {
 					manifest := filepath.Join(repos[1].Path, "go.mod")
 					writeFile(t, manifest, "module example.org/renamed\n")
+					frozen := time.Unix(1700000000, 0)
+					require.NoError(t, os.Chtimes(manifest, frozen, frozen))
+					renamed, err := os.Stat(manifest)
+					require.NoError(t, err)
 					mi.goModuleChecked = time.Time{}
 					mi.RunGlobalResolve()
+					require.ElementsMatch(t, []string{"external-call::dep::example.org/library"}, revisionCallTargets(g, "a/main.go::Caller", graph.EdgeCalls))
 					writeFile(t, manifest, "module example.org/library\n")
+					require.NoError(t, os.Chtimes(manifest, renamed.ModTime(), renamed.ModTime()))
+					restored, err := os.Stat(manifest)
+					require.NoError(t, err)
+					require.Equal(t, renamed.Size(), restored.Size())
+					require.Equal(t, renamed.ModTime(), restored.ModTime())
 					mi.goModuleChecked = time.Time{}
 					mi.RunGlobalResolve()
 				}
