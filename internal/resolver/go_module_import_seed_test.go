@@ -110,8 +110,9 @@ func TestGoModuleImportOversizedProviderDoesNotStarveNext(t *testing.T) {
 			state.imports["b-small"] = map[string]struct{}{id: {}}
 			if route == "frontier" {
 				_, admission := cr.ResolveMutationFrontiersBounded(nil, nil, []string{"a-big/lib.go", "b-small/lib.go"})
-				require.True(t, admission.Refused)
-				require.Error(t, admission.Refusal)
+				require.False(t, admission.Refused)
+				require.NoError(t, admission.Refusal)
+				require.True(t, state.complete)
 			} else {
 				require.NoError(t, cr.recheckGoModuleBindings(t.Context(), nil, &CrossRepoStats{ByRepo: map[string]int{}}, false))
 			}
@@ -168,7 +169,7 @@ func TestGoModuleImportRecoveryBudgetRefusal(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
 		for _, route := range []string{"frontier", "identity"} {
 			t.Run(backend+"/"+route, func(t *testing.T) {
-				g := goImportReviewStore(t, backend)
+				g := &goImportCountingStore{Store: goImportReviewStore(t, backend)}
 				g.AddNode(&graph.Node{ID: "provider/lib.go", Name: "lib.go", FilePath: "provider/lib.go", Kind: graph.KindFile, RepoPrefix: "provider", Language: "go"})
 				ids := map[string]struct{}{}
 				for i := 0; i < 2; i++ {
@@ -189,12 +190,29 @@ func TestGoModuleImportRecoveryBudgetRefusal(t *testing.T) {
 				if route == "identity" {
 					changed = "consumer/f0.go"
 				}
-				_, admission := cr.ResolveMutationFrontiersBounded(nil, nil, []string{changed})
-				require.True(t, admission.Refused)
-				require.Error(t, admission.Refusal)
-				require.GreaterOrEqual(t, admission.Dropped, 2)
-				require.False(t, state.complete)
-				require.False(t, admission.IncomingRefused)
+				if route == "frontier" {
+					for _, file := range []string{changed, changed, "consumer/f0.go"} {
+						_, admission := cr.ResolveMutationFrontiersBounded(nil, nil, []string{file})
+						require.False(t, admission.Refused, "a provider skip must not request a full continuation")
+						require.NoError(t, admission.Refusal)
+						require.Zero(t, admission.Dropped)
+						require.True(t, state.complete, "a provider skip must not reopen the revision")
+					}
+					require.Zero(t, g.bindingRechecks, "two provider saves and a third Go save must not recheck all repositories")
+					for i := range 2 {
+						rows := outEdgesOfKind(g, fmt.Sprintf("consumer/f%d.go", i), graph.EdgeImports)
+						require.Len(t, rows, 1)
+						require.Equal(t, "dep::example.org/lib", rows[0].To, "provider skips preserve stale imports until a full pass")
+					}
+				} else {
+					_, admission := cr.ResolveMutationFrontiersBounded(nil, nil, []string{changed})
+					require.True(t, admission.Refused)
+					require.Error(t, admission.Refusal)
+					require.GreaterOrEqual(t, admission.Dropped, 2)
+					require.False(t, state.complete)
+					require.False(t, admission.IncomingRefused)
+					require.Equal(t, 1, g.bindingRechecks)
+				}
 				// The explicit full pass is unbounded and repairs the deferred imports.
 				_, err := cr.ResolveAllContext(t.Context())
 				require.NoError(t, err)
