@@ -424,7 +424,7 @@ func (cr *CrossRepoResolver) ResolveAllContext(ctx context.Context) (*CrossRepoS
 			return stats, err
 		}
 	}
-	if err := cr.retryGoModuleDeps(ctx, stats); err != nil {
+	if err := cr.retryGoModuleDeps(ctx, stats, true); err != nil {
 		return stats, err
 	}
 	// Fresh placeholder-source set per pass — same rationale as ResolveAll
