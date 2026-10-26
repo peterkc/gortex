@@ -611,6 +611,8 @@ func (cr *CrossRepoResolver) ResolveGoModuleIncomingForRepo(repo string) error {
 	return nil
 }
 
+var goModuleBindingRecheckKinds = []graph.NodeKind{graph.KindFunction, graph.KindType, graph.KindInterface, graph.KindFile}
+
 // Re-check only marked incoming calls into providers affected by identity edits.
 // The compact definition stream avoids loading a whole repo's nodes or edges.
 func (cr *CrossRepoResolver) recheckGoModuleBindings(ctx context.Context, previous map[string]string, stats *CrossRepoStats, importsRestored bool) error {
@@ -660,7 +662,7 @@ func (cr *CrossRepoResolver) recheckGoModuleBindings(ctx context.Context, previo
 		cr.resolveGoModuleEdgesLocked(edges, stats)
 		ids = ids[:0]
 	}
-	for n := range graph.RepoNodeIdentitiesSeq(cr.graph, repos, graph.KindFunction, graph.KindType, graph.KindInterface, graph.KindFile) {
+	for n := range graph.RepoNodeIdentitiesSeq(cr.graph, repos, goModuleBindingRecheckKinds...) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
