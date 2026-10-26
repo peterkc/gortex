@@ -338,3 +338,44 @@ func TestCargoUnresolvedImportAndCallSinglePass(t *testing.T) {
 		})
 	}
 }
+
+func TestCargoImportAuthorizedCallEvidence(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, mode := range []string{"function", "path_constructor", "wildcard_method"} {
+			t.Run(backend+"/"+mode, func(t *testing.T) {
+				g := goImportReviewStore(t, backend)
+				file, provider := "consumer/src/lib.rs", "provider/src/lib.rs"
+				for _, id := range []string{file, provider} {
+					g.AddNode(&graph.Node{ID: id, FilePath: id, Kind: graph.KindFile, RepoPrefix: graph.RepoPrefixOfID(id), Language: "rust"})
+				}
+				name, item, target, kind := "helper", "helper", "unresolved::helper", graph.KindFunction
+				meta := map[string]any{}
+				if mode != "function" {
+					item, kind = "Foo", graph.KindMethod
+					name = "new"
+					target = "unresolved::new"
+					meta["rust_path"] = "Foo::new"
+				}
+				if mode == "wildcard_method" {
+					name, target = "go", "unresolved::*.go"
+					delete(meta, "rust_path")
+					meta["receiver_type"] = "Foo"
+				}
+				g.AddNode(&graph.Node{ID: provider + "::" + name, Name: name, FilePath: provider, Kind: kind, RepoPrefix: "provider", Language: "rust", Meta: map[string]any{"receiver": "Foo"}})
+				g.AddEdge(&graph.Edge{From: file, FilePath: file, To: "external::other/" + item, Kind: graph.EdgeImports, Line: 1})
+				g.AddEdge(&graph.Edge{From: file, FilePath: file, To: target, Kind: graph.EdgeCalls, Line: 2, Meta: meta})
+				cr := NewCrossRepo(g)
+				cr.SetCargoCrateLookup(func(string, string) []CargoCrate { return []CargoCrate{{Root: provider, Name: "other"}} })
+				for pass := 0; pass < 2; pass++ {
+					_, err := cr.ResolveAllContext(t.Context())
+					require.NoError(t, err)
+					rows := outEdgesOfKind(g, file, graph.EdgeCalls)
+					require.Len(t, rows, 1)
+					require.Equal(t, provider+"::"+name, rows[0].To)
+					require.Equal(t, 0.85, rows[0].Confidence)
+					require.Equal(t, graph.OriginASTResolved, rows[0].Origin)
+				}
+			})
+		}
+	}
+}
