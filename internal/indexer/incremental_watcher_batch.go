@@ -564,7 +564,7 @@ func (mi *MultiIndexer) resolveIncrementalRepoMutationMode(
 			}
 			mi.runMasterResolveFilesWithEvidence(frontier, false, idx.resolver)
 		})
-		masterResolvedFiles = resolvedFiles
+		masterResolvedFiles = files
 		crossRepoFiles = appendUniqueSorted(crossRepoFiles, resolvedFiles...)
 		if receipt != nil && receipt.Complete {
 			mi.runMasterResolveNames(vanishedReceiptNames(mi.graph, receipt))
