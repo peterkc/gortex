@@ -8,7 +8,12 @@ import (
 	"github.com/zzet/gortex/internal/resolver"
 )
 
-type npmPackageFileStamp struct{ size, modified int64 }
+type npmPackageFileStamp struct {
+	size, modified int64
+	content        string
+	kind           os.FileMode
+	valid          bool
+}
 
 type npmPackageSnapshot struct {
 	revision          uint64
@@ -18,15 +23,45 @@ type npmPackageSnapshot struct {
 }
 
 func npmPackageStamp(file string) npmPackageFileStamp {
-	if info, err := os.Stat(file); err == nil {
-		return npmPackageFileStamp{info.Size(), info.ModTime().UnixNano()}
+	info, err := os.Stat(file)
+	if os.IsNotExist(err) {
+		return npmPackageFileStamp{valid: true}
 	}
-	return npmPackageFileStamp{}
+	if err != nil {
+		return npmPackageFileStamp{}
+	}
+	var content []byte
+	if info.IsDir() {
+		entries, err := os.ReadDir(file)
+		if err != nil {
+			return npmPackageFileStamp{}
+		}
+		for _, entry := range entries {
+			kind := entry.Type()
+			if kind&os.ModeSymlink != 0 {
+				if target, err := os.Stat(filepath.Join(file, entry.Name())); err == nil && target.IsDir() {
+					kind |= os.ModeDir
+				}
+			}
+			content = append(content, entry.Name()...)
+			content = append(content, 0)
+			content = append(content, kind.String()...)
+			content = append(content, 0)
+		}
+	} else {
+		content, err = os.ReadFile(file)
+		if err != nil {
+			return npmPackageFileStamp{}
+		}
+	}
+	return npmPackageFileStamp{size: info.Size(), modified: info.ModTime().UnixNano(), content: contentHashForSource(content), kind: info.Mode().Type(), valid: true}
 }
 
+// Size and mtime can collide on coarse clocks; compare bytes/listings without
+// reparsing manifests or expanding workspace globs on an unchanged pass.
 func (s *npmPackageSnapshot) unchanged() bool {
 	for file, stamp := range s.files {
-		if npmPackageStamp(file) != stamp {
+		if !stamp.valid || npmPackageStamp(file) != stamp {
 			return false
 		}
 	}

@@ -11,8 +11,8 @@ import (
 )
 
 // Given a cached npm/pnpm workspace, when new resolver passes retry imports,
-// then unchanged manifests cost no reads; manifest, member and config changes
-// rebuild once and produce the same targets as a cold lookup.
+// then freshness reads reuse parsed manifests; manifest, member and config
+// changes rebuild once and produce the same targets as a cold lookup.
 func TestNpmPackageLookupCachesManifestWork(t *testing.T) {
 	for _, mode := range []string{"npm", "pnpm"} {
 		t.Run(mode, func(t *testing.T) {
@@ -34,11 +34,13 @@ func TestNpmPackageLookupCachesManifestWork(t *testing.T) {
 			first := mi.npmPackageLookup()
 			require.Contains(t, first("p"), "lib/packages/a")
 			require.Positive(t, reads)
+			cached := mi.npmPackageCache
 			reads = 0
 			for range 3 {
 				assert.Equal(t, first("p"), mi.npmPackageLookup()("p"))
 			}
-			assert.Zero(t, reads, "unchanged resolver passes must reuse manifest/workspace evidence")
+			assert.Zero(t, reads, "unchanged passes must not request manifest/workspace decoding")
+			assert.Same(t, cached, mi.npmPackageCache, "freshness checks must reuse parsed evidence")
 			writePackageJSON(t, filepath.Join(root, "packages", "a"), `{"name":"renamed","main":"other.ts"}`)
 			fresh := mi.npmPackageLookup()
 			assert.Empty(t, fresh("p"))
