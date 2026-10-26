@@ -16,16 +16,8 @@ func restubTrackedCargoRepoIncoming(g graph.Store, repo string) []string {
 	}
 	var files, ids []string
 	flush := func() {
-		incoming := g.GetInEdgesByNodeIDs(ids)
-		evicted := make(map[string]struct{})
-		for _, edges := range incoming {
-			for _, edge := range edges {
-				if edge != nil && graph.RepoPrefixOfID(edge.From) == repo {
-					evicted[edge.From] = struct{}{}
-				}
-			}
-		}
-		files = appendUniqueSorted(files, restubTrackedCargoImportsFromView(g, evicted, incoming, true)...)
+		incoming := foreignBridgeIncoming(g, repo, ids)
+		files = appendUniqueSorted(files, restubTrackedCargoImportsFromView(g, nil, incoming, true)...)
 		ids = ids[:0]
 	}
 	for node := range graph.RepoNodeIdentitiesSeq(g, []string{repo}, graph.KindFile, graph.KindFunction, graph.KindMethod) {
