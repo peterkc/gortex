@@ -56,6 +56,11 @@ type bridgeManifestSnapshot struct {
 	cargoDeclared bool
 }
 
+// newBridgeManifestSnapshot captures config revision, repo roots and file-set
+// revisions before manifest reads. Parsed views survive resolver passes only
+// while these inputs and every watched size/mtime/mode stamp remain unchanged.
+// A positive stamp must be strictly older than stampedAt - manifestRacyWindow;
+// unknown evidence, source-backed trees and missing inventory owners forbid reuse.
 func (mi *MultiIndexer) newBridgeManifestSnapshot() *bridgeManifestSnapshot {
 	s := &bridgeManifestSnapshot{
 		roots: map[string]string{}, inventory: map[string]bridgeManifestInventory{},
@@ -197,6 +202,9 @@ func (mi *MultiIndexer) pythonManifestSnapshot() *bridgeManifestSnapshot {
 	return next
 }
 
+// pythonPackageLookup builds providers on first use of the reusable manifest
+// snapshot. Providers require indexed root/src modules or regular packages;
+// consumer-local indexed namespaces block foreign bindings.
 func (mi *MultiIndexer) pythonPackageLookup() *resolver.PythonPackageLookup {
 	snapshot := mi.pythonManifestSnapshot()
 	mi.bridgeManifestMu.Lock()
@@ -235,7 +243,8 @@ func (mi *MultiIndexer) cargoCrateLookup() resolver.CargoCrateLookup {
 	return mi.lazyCargoCrateLookup()
 }
 
-// Like npm, resolver construction does no Cargo work before the first use.
+// lazyCargoCrateLookup defers manifest parsing until the first lookup.
+// cargoCrateLookup performs cheap root-count admission before installing it.
 func (mi *MultiIndexer) lazyCargoCrateLookup() resolver.CargoCrateLookup {
 	var once sync.Once
 	var lookup resolver.CargoCrateLookup
