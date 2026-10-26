@@ -1,6 +1,10 @@
 package resolver
 
-import "github.com/zzet/gortex/internal/graph"
+import (
+	"slices"
+
+	"github.com/zzet/gortex/internal/graph"
+)
 
 // SetGoModuleImportRecoveryBudgetForTest changes only the bounded import budget.
 // External resolver tests use it to exercise the real indexer continuation.
@@ -14,4 +18,9 @@ func SetGoModuleImportRecoveryBudgetForTest(remaining int) (restore func()) {
 		return budget
 	}
 	return func() { newGoModuleImportRecoveryBudget = previous }
+}
+
+// IsGoModuleBindingRecheckForTest shares the production kind list with recorders.
+func IsGoModuleBindingRecheckForTest(kinds []graph.NodeKind) bool {
+	return slices.Equal(kinds, goModuleBindingRecheckKinds)
 }
