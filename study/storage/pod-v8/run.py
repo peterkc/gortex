@@ -251,6 +251,11 @@ class Attempt:
                 env = (proc / "environ").read_bytes().split(b"\0")
             except FileNotFoundError:
                 continue
+            except PermissionError:
+                # Only a non-dumpable process hides environ from its own
+                # uid. Our daemon tree runs no setuid binary, so it is not
+                # one of ours (seen with a CI runner helper process).
+                continue
             marker = ("GORTEX_DAEMON_SOCKET="
                       + self.env["GORTEX_DAEMON_SOCKET"]).encode()
             if marker in env:

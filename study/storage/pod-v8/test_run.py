@@ -187,6 +187,22 @@ class BoundaryTests(unittest.TestCase):
             self.assertIsNotNone(child.poll())
             self.assertTrue(Path(attempt.env["GORTEX_DAEMON_SOCKET"]).exists())
 
+    @unittest.skipUnless(sys.platform == "linux", "Linux lifecycle fixture")
+    def test_cleanup_refuses_surviving_owned_descendant(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            attempt = runner.Attempt(Path(tmp), time.time() + 30)
+            stray = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(20)"],
+                env=attempt.env)
+            self.addCleanup(stray.wait)
+            self.addCleanup(stray.kill)
+            attempt.daemon = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(20)"],
+                env=attempt.env)
+            self.addCleanup(attempt.daemon.wait)
+            with self.assertRaisesRegex(runner.Unsafe, "owned process"):
+                attempt.stop()
+
 
 if __name__ == "__main__":
     unittest.main()
