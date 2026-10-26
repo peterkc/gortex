@@ -58,6 +58,15 @@ func pythonModuleFileMatches(filePath, module string) bool {
 	return false
 }
 
+// IsPythonTestPackageFile identifies the supported root/src test packages,
+// relative to the provider rather than its repository alias.
+func IsPythonTestPackageFile(filePath, repoPrefix string) bool {
+	relative := strings.TrimPrefix(filePath, repoPrefix+"/")
+	relative = strings.TrimPrefix(relative, "src/")
+	top, _, nested := strings.Cut(relative, "/")
+	return nested && (top == "tests" || top == "test")
+}
+
 // resolvePythonModuleExtern resolves a Python caller's extern edge onto the
 // module-level function or class it imports. It tries the two readings of a
 // dotted import path in turn — the symbol defined in the module importPath
@@ -88,6 +97,9 @@ func resolvePythonModuleExtern(e *graph.Edge, importPath, symbol, callerRepo str
 		var match *graph.Node
 		ambiguous := false
 		for _, c := range candidates {
+			if c.RepoPrefix != callerRepo && IsPythonTestPackageFile(c.FilePath, c.RepoPrefix) {
+				continue
+			}
 			if c.Kind != graph.KindFunction && c.Kind != graph.KindType {
 				continue
 			}

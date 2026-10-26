@@ -97,6 +97,9 @@ func (mi *MultiIndexer) pythonPackageLookup() *resolver.PythonPackageLookup {
 					continue
 				}
 				top := strings.TrimSuffix(name, ".py")
+				if resolver.IsPythonTestPackageFile(file, "") {
+					continue // Root/src test packages are not provider exports.
+				}
 				node := mi.graph.GetNode(repo + "/" + file)
 				if node == nil || node.Kind != graph.KindFile || node.RepoPrefix != repo {
 					continue

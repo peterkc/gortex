@@ -352,3 +352,57 @@ func TestPythonConsumerLookupFiltersAndDeduplicates(t *testing.T) {
 	require.Equal(t, []string{"consumer/f0.py", "consumer/f1.py", "consumer/f2.py"}, pythonConsumerFilesForLookup(g, lookup, "provider"))
 	require.Equal(t, 1, calls, "provider lookup is per (caller, top), not per import")
 }
+
+func TestTrackedPythonProviderTestPackagesRefused(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, dir := range []string{"", "src/"} {
+			for _, top := range []string{"tests", "test"} {
+				for _, local := range []bool{false, true} {
+					t.Run(fmt.Sprintf("%s/%s%s/local=%v", backend, dir, top, local), func(t *testing.T) {
+						provider, consumer := t.TempDir(), t.TempDir()
+						providerAlias := "provider"
+						if dir == "src/" && top == "test" {
+							providerAlias = "tests"
+						}
+						writeWorkspaceFile(t, provider, "pyproject.toml", "[project]\nname = 'image-distribution'\n")
+						writeWorkspaceFile(t, provider, dir+top+"/__init__.py", "")
+						writeWorkspaceFile(t, provider, dir+top+"/helpers.py", "def f(): pass\n")
+						writeWorkspaceFile(t, provider, dir+"image.py", "def f(): pass\n")
+						writeWorkspaceFile(t, consumer, "pyproject.toml", "[project]\ndependencies = ['image-distribution']\n")
+						writeWorkspaceFile(t, consumer, "app.py", "import "+top+".helpers\nimport image\ndef run():\n    "+top+".helpers.f()\n")
+						if local {
+							writeWorkspaceFile(t, consumer, top+"/__init__.py", "")
+							writeWorkspaceFile(t, consumer, top+"/helpers.py", "def f(): pass\n")
+						}
+						mi, g := newPythonBridgeIdentityIndexer(t, backend, []config.RepoEntry{{Path: consumer, Name: "consumer", Workspace: "shared"}, {Path: provider, Name: providerAlias, Workspace: "shared"}})
+						_, err := mi.IndexAll()
+						require.NoError(t, err)
+						check := func() {
+							var targets []string
+							for _, e := range g.GetOutEdges("consumer/app.py") {
+								if e.Kind != graph.EdgeImports {
+									continue
+								}
+								targets = append(targets, e.To)
+								require.NotEqual(t, providerAlias+"/"+dir+top+"/helpers.py", e.To)
+								if e.To == providerAlias+"/"+dir+"image.py" {
+									require.True(t, e.CrossRepo)
+								}
+							}
+							require.Contains(t, targets, providerAlias+"/"+dir+"image.py")
+							if local {
+								require.Contains(t, revisionCallTargets(g, "consumer/app.py::run", graph.EdgeCalls), "consumer/"+top+"/helpers.py::f")
+							}
+							for _, e := range g.GetOutEdges("consumer/app.py::run") {
+								require.NotEqual(t, providerAlias+"/"+dir+top+"/helpers.py::f", e.To)
+							}
+						}
+						check()
+						require.NoError(t, mi.GetIndexer("consumer").IndexFile(filepath.Join(consumer, "app.py")))
+						check()
+					})
+				}
+			}
+		}
+	}
+}
