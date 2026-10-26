@@ -489,6 +489,7 @@ type Indexer struct {
 	parseErrors      []IndexError
 	fileMtimes       map[string]int64
 	fileMtimesShared bool
+	fileSetRevision  atomic.Uint64
 	// Any failed sidecar write can leave the durable keyset incomplete even
 	// while the immutable in-memory snapshot is current. Receipt paging must
 	// fall back to that snapshot until a full authoritative replace repairs it.
@@ -5691,6 +5692,9 @@ func (idx *Indexer) recordFileReadVersion(relPath, absPath string, version fileR
 func (idx *Indexer) recordFileMtimeValue(relPath string, mtime int64) {
 	idx.mtimeMu.Lock()
 	idx.ensureFileMtimesWritableLocked()
+	if _, exists := idx.fileMtimes[relPath]; !exists {
+		idx.fileSetRevision.Add(1)
+	}
 	idx.fileMtimes[relPath] = mtime
 	idx.mtimeMu.Unlock()
 	if w, ok := idx.graph.(graph.FileMtimeWriter); ok {
@@ -6979,6 +6983,7 @@ func (idx *Indexer) pruneDeletedFileMtimes(deleted []string) {
 func (idx *Indexer) SetFileMtimes(mtimes map[string]int64) {
 	idx.mtimeMu.Lock()
 	defer idx.mtimeMu.Unlock()
+	idx.fileSetRevision.Add(1)
 	idx.fileMtimes = make(map[string]int64, len(mtimes))
 	idx.fileMtimesShared = false
 	for k, v := range mtimes {

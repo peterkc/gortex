@@ -4,9 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/zzet/gortex/internal/resolver"
 )
+
+const manifestRacyWindow = 2 * time.Second
 
 type npmPackageFileStamp struct {
 	size, modified int64
