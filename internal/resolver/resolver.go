@@ -4133,6 +4133,10 @@ func (r *Resolver) resolveEdge(e *graph.Edge, stats *ResolveStats) (oldTo string
 			e.Meta[PythonCallStubMeta] = oldTo
 		}
 	}
+	if e.To != oldTo {
+		graph.RestoreRestubProvenance(e)
+		clearEdgeTerminal(e)
+	}
 	return oldTo, e.To != oldTo
 }
 

@@ -473,3 +473,109 @@ func BenchmarkRepositoryCleanupFailureRetry(b *testing.B) {
 		})
 	}
 }
+
+type bridgeRetryCleanupStore struct {
+	graph.Store
+	failed bool
+}
+
+func (s *bridgeRetryCleanupStore) PurgeRepo(prefix string) error {
+	if !s.failed {
+		s.failed = true
+		return errInjectedRepositoryPurge
+	}
+	_, _, err := evictRepoAllGenerations(s.Store, prefix)
+	return err
+}
+
+func (s *bridgeRetryCleanupStore) CountNodesByNameClass(names []string, kinds []graph.NodeKind) map[string]graph.NodeNameClassCount {
+	if counter, ok := s.Store.(graph.NodeNameClassCounter); ok {
+		return counter.CountNodesByNameClass(names, kinds)
+	}
+	allowed := map[graph.NodeKind]bool{}
+	for _, kind := range kinds {
+		allowed[kind] = true
+	}
+	out := map[string]graph.NodeNameClassCount{}
+	for _, name := range names {
+		count := graph.NodeNameClassCount{}
+		for _, node := range s.FindNodesByName(name) {
+			if graph.IsStub(node.ID) {
+				count.Stub++
+			} else if allowed[node.Kind] {
+				count.Real++
+			}
+		}
+		out[name] = count
+	}
+	return out
+}
+
+type bridgeUnknownCounterStore struct{ graph.Store }
+
+func (s *bridgeUnknownCounterStore) PurgeRepo(prefix string) error {
+	return s.Store.(interface{ PurgeRepo(string) error }).PurgeRepo(prefix)
+}
+
+type bridgeTerminalLSP struct{}
+
+func (bridgeTerminalLSP) SupportsPath(string) bool { return true }
+func (bridgeTerminalLSP) Definition(string, int, string) (string, int, bool) {
+	panic("terminal reconciliation must not call LSP")
+}
+
+func TestRepositoryCleanupRetainsBridgeCallersAcrossPurgeFailure(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, mode := range []string{"native_counter", "lsp_supported", "unknown_counter"} {
+			t.Run(backend+"/"+mode, func(t *testing.T) {
+				var base graph.Store = graph.New()
+				if backend == "sqlite" {
+					db, err := store_sqlite.Open(t.TempDir() + "/graph.sqlite")
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() {
+						if err := db.Close(); err != nil {
+							t.Error(err)
+						}
+					})
+					base = db
+				}
+				store := &bridgeRetryCleanupStore{Store: base}
+				source, target := "consumer/src/lib.rs::run", "provider/src/lib.rs::helper"
+				store.AddBatch([]*graph.Node{{ID: "consumer/src/lib.rs", Name: "lib.rs", FilePath: "consumer/src/lib.rs", Kind: graph.KindFile, RepoPrefix: "consumer", Language: "rust"}, {ID: source, Name: "run", FilePath: "consumer/src/lib.rs", Kind: graph.KindFunction, RepoPrefix: "consumer", Language: "rust"}, {ID: "provider/src/lib.rs", Name: "lib.rs", FilePath: "provider/src/lib.rs", Kind: graph.KindFile, RepoPrefix: "provider", Language: "rust"}, {ID: target, Name: "helper", FilePath: "provider/src/lib.rs", Kind: graph.KindFunction, RepoPrefix: "provider", Language: "rust"}}, []*graph.Edge{{From: source, FilePath: "consumer/src/lib.rs", To: target, Kind: graph.EdgeCalls, Line: 2, CrossRepo: true, Origin: graph.OriginASTResolved, Confidence: 0.85, Meta: map[string]any{"cargo_call_stub": "unresolved::helper"}}})
+				var activeStore graph.Store = store
+				if mode == "unknown_counter" {
+					activeStore = &bridgeUnknownCounterStore{Store: store}
+				}
+				mi := NewMultiIndexer(activeStore, newTestRegistry(), nil, newTestConfigManager(t), zap.NewNop())
+				if mode == "lsp_supported" {
+					mi.resolverLSPHelper = bridgeTerminalLSP{}
+				}
+				mi.repos["consumer"] = &RepoMetadata{RepoPrefix: "consumer", RootPath: t.TempDir()}
+				mi.repos["provider"] = &RepoMetadata{RepoPrefix: "provider", RootPath: t.TempDir()}
+				if _, _, err := mi.UntrackRepoChecked(t.Context(), "provider"); !errors.Is(err, errInjectedRepositoryPurge) {
+					t.Fatalf("first untrack = %v", err)
+				}
+				if _, _, err := mi.UntrackRepoChecked(t.Context(), "provider"); err != nil {
+					t.Fatal(err)
+				}
+				rows := store.GetOutEdges(source)
+				if len(rows) != 1 {
+					t.Fatalf("calls = %d", len(rows))
+				}
+				call := rows[0]
+				if call.To != "unresolved::helper" || call.CrossRepo || graph.HasRestubProvenance(call) || (call.Meta["resolve_terminal"] == true) != (mode == "native_counter") {
+					t.Fatalf("unsettled caller after purge retry: %s", builderRenderEdge(call))
+				}
+				settled := builderRenderEdge(call)
+				if _, _, err := mi.UntrackRepoChecked(t.Context(), "provider"); err != nil {
+					t.Fatal(err)
+				}
+				if got := builderRenderEdge(store.GetOutEdges(source)[0]); got != settled {
+					t.Fatalf("no-change untrack altered caller: %s", got)
+				}
+			})
+		}
+	}
+}

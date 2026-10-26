@@ -70,7 +70,7 @@ func TestTrackedPythonNewModuleThroughFallback(t *testing.T) {
 			t.Cleanup(func() { require.NoError(t, coldIndexer.Close(context.Background())) })
 			_, err = coldIndexer.IndexAll()
 			require.NoError(t, err)
-			require.Equal(t, pythonLifecycleBindings(cold, false), pythonLifecycleBindings(g, false))
+			require.Equal(t, pythonLifecycleBindings(cold, ""), pythonLifecycleBindings(g, ""))
 		})
 	}
 }

@@ -22,3 +22,9 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersObserved(resolutionFiles, e
 	stats, _ := cr.resolveMutationFrontiersBounded(resolutionFiles, edgeSourceFiles, definitionFiles, observe)
 	return stats
 }
+
+// ResolveMutationFrontiersBoundedObserved is ResolveMutationFrontiersObserved
+// plus the incoming leg's completeness fact (ResolveMutationFrontiersBounded).
+func (cr *CrossRepoResolver) ResolveMutationFrontiersBoundedObserved(resolutionFiles, edgeSourceFiles, definitionFiles []string, observe func(time.Time, time.Time)) (*CrossRepoStats, CrossRepoIncomingAdmission) {
+	return cr.resolveMutationFrontiersBounded(resolutionFiles, edgeSourceFiles, definitionFiles, observe)
+}

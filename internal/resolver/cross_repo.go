@@ -1399,7 +1399,12 @@ func (cr *CrossRepoResolver) resolveEdge(e *graph.Edge, stats *CrossRepoStats, b
 		}
 	}
 
+	stashed := graph.HasRestubProvenance(e)
+	if stashed {
+		graph.RestoreRestubProvenance(e)
+	}
 	if e.To != oldTo {
+		clearEdgeTerminal(e)
 		if e.Kind == graph.EdgeCalls && e.CrossRepo && cr.cargoCrates != nil && strings.HasSuffix(e.FilePath, ".rs") {
 			if e.Meta == nil {
 				e.Meta = make(map[string]any)
@@ -1416,6 +1421,8 @@ func (cr *CrossRepoResolver) resolveEdge(e *graph.Edge, stats *CrossRepoStats, b
 		}
 		*batch = append(*batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		cr.noteRetargetedCall(e)
+	} else if stashed {
+		*batch = append(*batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 	}
 }
 

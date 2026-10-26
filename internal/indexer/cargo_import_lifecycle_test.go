@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -24,7 +25,7 @@ import (
 func TestTrackedCargoImportLifecycle(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
 		for _, providerFirst := range []bool{false, true} {
-			for _, operation := range []string{"consumer_save", "provider_save", "provider_save_util", "provider_save_lib_contract", "provider_delete_util_batched", "forced_evict_util", "delete_restore_util", "consumer_save_then_restore", "provider_gains_new_module", "provider_gains_empty_module", "no_new_file_noop", "consumer_full", "provider_full", "warm_full_retrack", "untrack_retrack", "no_change", "track", "deferred_track"} {
+			for _, operation := range []string{"consumer_save", "provider_save", "provider_save_util", "provider_save_lib_contract", "provider_delete_util_batched", "forced_evict_util", "delete_restore_util", "consumer_save_then_restore", "provider_gains_new_module", "provider_gains_empty_module", "no_new_file_noop", "consumer_full", "provider_full", "warm_full_retrack", "untrack_retrack", "rename_and_back", "untrack_only", "no_change", "track", "deferred_track"} {
 				if operation == "deferred_track" && providerFirst {
 					continue // This case starts with an already tracked consumer.
 				}
@@ -127,6 +128,19 @@ func TestTrackedCargoImportLifecycle(t *testing.T) {
 						}, calls)
 					}
 					assertImport()
+					initial := cargoLifecycleBindings(g, "")
+					initialMarkers := map[string]string{}
+					for _, node := range g.GetFileNodes("consumer/src/lib.rs") {
+						for _, edge := range g.GetOutEdges(node.ID) {
+							key := "cargo_call_stub"
+							if edge.Kind == graph.EdgeImports {
+								key = "cargo_import_stub"
+							}
+							if marker, ok := edge.Meta[key].(string); ok {
+								initialMarkers[fmt.Sprint(edge.Kind, edge.Line)] = marker
+							}
+						}
+					}
 					logs.TakeAll()
 					switch operation {
 					case "consumer_save":
@@ -231,12 +245,46 @@ func TestTrackedCargoImportLifecycle(t *testing.T) {
 						result, noChangeErr := mi.IncrementalReindexRepo("provider", nil)
 						require.NoError(t, noChangeErr)
 						require.Zero(t, result.StaleFileCount)
+					case "rename_and_back":
+						writeWorkspaceFile(t, provider, "src/util.rs", "pub fn helper_renamed() {}\n")
+						_, err = mi.IncrementalReindexRepo("provider", []string{filepath.Join(provider, "src/util.rs")})
+						require.NoError(t, err)
+						for _, edge := range g.GetOutEdges("consumer/src/lib.rs::run") {
+							if edge.Kind == graph.EdgeCalls && edge.Line == 8 {
+								require.False(t, edge.CrossRepo)
+								require.Equal(t, initialMarkers[fmt.Sprint(edge.Kind, edge.Line)], edge.Meta["cargo_call_stub"])
+							}
+						}
+						writeWorkspaceFile(t, provider, "src/util.rs", "pub fn helper() {}\n")
+						_, err = mi.IncrementalReindexRepo("provider", []string{filepath.Join(provider, "src/util.rs")})
+					case "untrack_only":
+						_, _, err = mi.UntrackRepoChecked(context.Background(), "provider")
 					case "untrack_retrack":
 						_, _, err = mi.UntrackRepoChecked(context.Background(), "provider")
 						require.NoError(t, err)
 						_, err = mi.TrackRepoCtx(context.Background(), entries[1])
 					}
 					require.NoError(t, err)
+					if operation == "rename_and_back" {
+						require.Equal(t, initial, cargoLifecycleBindings(g, ""))
+					}
+					if operation == "untrack_only" {
+						for _, node := range g.GetFileNodes("consumer/src/lib.rs") {
+							for _, edge := range g.GetOutEdges(node.ID) {
+								if edge.Kind != graph.EdgeImports && edge.Kind != graph.EdgeCalls {
+									continue
+								}
+								require.False(t, edge.CrossRepo)
+								require.False(t, strings.HasPrefix(edge.To, "provider/"))
+								key := "cargo_call_stub"
+								if edge.Kind == graph.EdgeImports {
+									key = "cargo_import_stub"
+								}
+								require.NotEmpty(t, initialMarkers[fmt.Sprint(edge.Kind, edge.Line)])
+								require.Equal(t, initialMarkers[fmt.Sprint(edge.Kind, edge.Line)], edge.Meta[key])
+							}
+						}
+					}
 					if operation == "provider_delete_util_batched" || operation == "forced_evict_util" {
 						var parked []*graph.Edge
 						for _, edge := range g.GetOutEdges("consumer/src/lib.rs::run") {
@@ -256,7 +304,12 @@ func TestTrackedCargoImportLifecycle(t *testing.T) {
 						t.Cleanup(func() { require.NoError(t, db.Close()) })
 						cold = db
 					}
-					coldIndexer := NewMultiIndexer(cold, reg, search.NewNull(), cm, zap.NewNop())
+					coldConfig := cm
+					if operation == "untrack_only" {
+						coldConfig = newTestConfigManager(t)
+						coldConfig.Global().Repos = []config.RepoEntry{entries[0]}
+					}
+					coldIndexer := NewMultiIndexer(cold, reg, search.NewNull(), coldConfig, zap.NewNop())
 					t.Cleanup(func() { require.NoError(t, coldIndexer.Close(context.Background())) })
 					_, err = coldIndexer.IndexAll()
 					require.NoError(t, err)
@@ -276,16 +329,20 @@ func cargoLifecycleBindings(g graph.Store, operation string) []string {
 	var bindings []string
 	for _, node := range g.GetFileNodes("consumer/src/lib.rs") {
 		for _, edge := range g.GetOutEdges(node.ID) {
-			if edge.Kind == graph.EdgeImports || edge.Kind == graph.EdgeCalls {
-				var stub any
-				if edge.Kind == graph.EdgeCalls {
-					stub = edge.Meta["cargo_call_stub"]
-					if edge.Line == 8 && (operation == "provider_delete_util_batched" || operation == "forced_evict_util") {
-						stub = nil // Cold has no prior bind; the exact parked marker is asserted separately.
-					}
-				}
-				bindings = append(bindings, fmt.Sprintf("%s -%s-> %s cross=%v line=%d stub=%v", edge.From, edge.Kind, edge.To, edge.CrossRepo, edge.Line, stub))
+			if edge.Kind != graph.EdgeImports && edge.Kind != graph.EdgeCalls {
+				continue
 			}
+			copy := *edge
+			parked := operation == "untrack_only" || ((operation == "provider_delete_util_batched" || operation == "forced_evict_util") && ((edge.Kind == graph.EdgeImports && edge.Line == 3) || (edge.Kind == graph.EdgeCalls && edge.Line == 8)))
+			if parked && !edge.CrossRepo {
+				copy.Meta = maps.Clone(edge.Meta)
+				key := "cargo_call_stub"
+				if edge.Kind == graph.EdgeImports {
+					key = "cargo_import_stub"
+				}
+				delete(copy.Meta, key) // Historical parked identity is asserted separately.
+			}
+			bindings = append(bindings, builderRenderEdge(&copy))
 		}
 	}
 	slices.Sort(bindings)

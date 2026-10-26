@@ -294,7 +294,7 @@ func TestNonGoRepoEvictionSkipsModuleRestub(t *testing.T) {
 	g.AddNode(&graph.Node{ID: "js/main.js::Hello", RepoPrefix: "js", FilePath: "js/main.js", Kind: graph.KindFunction, Language: "javascript", Name: "Hello"})
 	mi := NewMultiIndexer(g, newTestRegistry(), search.NewNull(), newTestConfigManager(t), zap.NewNop())
 	t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
-	_, _, err := mi.purgeRepositoryPayload("js", &RepoMetadata{RootPath: t.TempDir()})
+	_, _, err := mi.purgeRepositoryPayload("js", &RepoMetadata{RootPath: t.TempDir()}, nil)
 	require.NoError(t, err)
 	assert.Zero(t, g.definitionScans, "non-Go eviction must not run the module incoming-edge scan")
 	assert.Nil(t, g.GetNode("js/main.js::Hello"))
