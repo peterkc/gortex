@@ -349,8 +349,8 @@ func TestGoModuleSourceRecoveryReleasesLease(t *testing.T) {
 	}
 }
 
-// Given cached unchanged bytes, when only the caller mtime changes, then
-// provider saves verify bytes each time but never re-parse the unchanged caller.
+// Given equal bytes with a touched old mtime, the first save verifies content;
+// later saves trust the refreshed safe stamp without reading or parsing.
 func TestGoModuleSourceCacheVerifiesTouchedContent(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
 		t.Run(backend, func(t *testing.T) {
@@ -365,9 +365,7 @@ func TestGoModuleSourceCacheVerifiesTouchedContent(t *testing.T) {
 			}
 			mi.runCrossRepoResolveFiles([]string{"b/lib.go"})
 			require.Contains(t, mi.GetIndexer("a").goModuleSourceCache, "main.go")
-			info, err := os.Stat(main)
-			require.NoError(t, err)
-			stamp := info.ModTime().Add(2 * time.Second)
+			stamp := time.Now().Add(-time.Hour)
 			require.NoError(t, os.Chtimes(main, stamp, stamp))
 			original := readGoModuleCallerFile
 			reads := 0
@@ -378,17 +376,18 @@ func TestGoModuleSourceCacheVerifiesTouchedContent(t *testing.T) {
 				return original(path)
 			}
 			t.Cleanup(func() { readGoModuleCallerFile = original })
-			writeFile(t, lib, "package library\nfunc Other(){println(1)}\n")
-			require.NoError(t, mi.GetIndexer("b").IndexFile(lib))
-			assert.Equal(t, 1, reads, "new stamp with identical bytes must refresh once")
 			ext, ok := mi.registry.GetByLanguage("go")
 			require.True(t, ok)
 			spy := &goModuleSourceExtractionSpy{Extractor: ext}
 			mi.registry.Register(spy)
+			writeFile(t, lib, "package library\nfunc Other(){println(1)}\n")
+			require.NoError(t, mi.GetIndexer("b").IndexFile(lib))
+			assert.Equal(t, 1, reads, "changed metadata requires one content verification")
+			assert.Zero(t, spy.calls, "the touched-mtime save must reuse equal-content source facts")
 			reads = 0
 			writeFile(t, lib, "package library\nfunc Other(){println(2)}\nfunc More(){}\n")
 			require.NoError(t, mi.GetIndexer("b").IndexFile(lib))
-			assert.Equal(t, 1, reads, "equal stat still requires content verification")
+			assert.Zero(t, reads, "verified old-mtime content is now outside the racy window")
 			assert.Zero(t, spy.calls, "equal content must reuse source facts")
 		})
 	}
