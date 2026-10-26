@@ -45,21 +45,25 @@ func (r *Resolver) attributeNonGoModuleImports() {
 	r.attributeNonGoModuleImportEdges(r.graph.EdgesByKind(graph.EdgeImports), graph.EdgesLightSeq(r.graph, graph.EdgeDependsOnModule), r.collectFileLanguages())
 }
 
-// Python saves reuse their preloaded file frontier, including dependency edges.
-func (r *Resolver) attributePythonModuleImportsForFile(file string) {
-	if !isPythonSourcePath(file) {
-		return
-	}
+// Python saves collect their cached frontier before flushing attribution writes.
+func (r *Resolver) attributePythonModuleImportsForFiles(files []string) {
 	languages := make(map[string]string)
-	for _, node := range r.incrementalFileNodes(file) {
-		if node.Kind == graph.KindFile && node.Language == "python" {
-			languages[node.ID] = node.Language
+	var edges []*graph.Edge
+	for _, file := range files {
+		if !isPythonSourcePath(file) {
+			continue
+		}
+		for _, node := range r.incrementalFileNodes(file) {
+			if node.Kind == graph.KindFile && node.Language == "python" {
+				languages[node.ID] = node.Language
+				edges = append(edges, r.fileOutEdges(file)...)
+				break
+			}
 		}
 	}
 	if len(languages) == 0 {
 		return
 	}
-	edges := r.fileOutEdges(file)
 	r.attributeNonGoModuleImportEdges(slices.Values(edges), slices.Values(edges), languages)
 }
 
