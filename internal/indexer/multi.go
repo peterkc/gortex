@@ -122,6 +122,9 @@ type MultiIndexer struct {
 	goModuleRetry        resolver.GoModuleDepRetry
 	npmPackageMu         sync.Mutex
 	npmPackageCache      *npmPackageSnapshot
+	bridgeManifestMu     sync.Mutex
+	pythonPackageCache   *bridgeManifestSnapshot
+	cargoPackageCache    *bridgeManifestSnapshot
 
 	// pendingRepositoryUntracks is guarded by mu. Entries are installed before
 	// a live repo is hidden and removed only after payload, vector, config, and

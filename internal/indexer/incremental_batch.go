@@ -1862,6 +1862,9 @@ func (idx *Indexer) recordFileReadVersionsBatched(receipts []fileReadReceipt) (f
 	idx.mtimeMu.Lock()
 	idx.ensureFileMtimesWritableLocked()
 	for path, mtime := range mtimes {
+		if _, exists := idx.fileMtimes[path]; !exists {
+			idx.fileSetRevision.Add(1)
+		}
 		idx.fileMtimes[path] = mtime
 	}
 	idx.mtimeMu.Unlock()
@@ -2568,6 +2571,9 @@ func (idx *Indexer) evictDeletedFilesBatched(deleted []string, plan *DerivedInva
 	idx.mtimeMu.Lock()
 	idx.ensureFileMtimesWritableLocked()
 	for _, relPath := range deleted {
+		if _, exists := idx.fileMtimes[relPath]; exists {
+			idx.fileSetRevision.Add(1)
+		}
 		delete(idx.fileMtimes, relPath)
 	}
 	idx.mtimeMu.Unlock()
