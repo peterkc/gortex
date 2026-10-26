@@ -113,7 +113,7 @@ func TestGoModuleImportOversizedProviderDoesNotStarveNext(t *testing.T) {
 				require.True(t, admission.Refused)
 				require.Error(t, admission.Refusal)
 			} else {
-				require.NoError(t, cr.recheckGoModuleBindings(t.Context(), nil, &CrossRepoStats{ByRepo: map[string]int{}}))
+				require.NoError(t, cr.recheckGoModuleBindings(t.Context(), nil, &CrossRepoStats{ByRepo: map[string]int{}}, false))
 			}
 			imports := outEdgesOfKind(g, "consumer/main.go", graph.EdgeImports)
 			require.Len(t, imports, 1, "the small provider must still restore its import")
@@ -194,9 +194,21 @@ func TestGoModuleImportRecoveryBudgetRefusal(t *testing.T) {
 				require.Error(t, admission.Refusal)
 				require.GreaterOrEqual(t, admission.Dropped, 2)
 				require.False(t, state.complete)
+				require.False(t, admission.IncomingRefused)
 				// The explicit full pass is unbounded and repairs the deferred imports.
 				_, err := cr.ResolveAllContext(t.Context())
 				require.NoError(t, err)
+				require.True(t, state.complete, "a full pass must finish the deferred revision")
+				for _, restart := range []bool{false, true} {
+					next := cr
+					if restart {
+						next = NewCrossRepo(g)
+						next.SetGoModules(modules)
+						next.SetGoModuleDepRetry(state, cr.goModuleRevision)
+					}
+					_, nextAdmission := next.ResolveMutationFrontiersBounded(nil, nil, []string{"consumer/f0.go"})
+					require.False(t, nextAdmission.Refused, "completed revision must not reopen its bounded recovery")
+				}
 				for i := 0; i < 2; i++ {
 					rows := outEdgesOfKind(g, fmt.Sprintf("consumer/f%d.go", i), graph.EdgeImports)
 					require.Len(t, rows, 1)
@@ -204,6 +216,7 @@ func TestGoModuleImportRecoveryBudgetRefusal(t *testing.T) {
 				}
 				_, err = cr.ResolveAllContext(t.Context())
 				require.NoError(t, err)
+				require.True(t, state.complete)
 			})
 		}
 	}
