@@ -76,7 +76,7 @@ func (cr *CrossRepoResolver) SetGoModuleDepRetry(state *GoModuleDepRetry, revisi
 
 // retryGoModuleDeps visits only external terminals, filters by tracked module
 // identity, and bounds mutation batches. Symbol lookup is memoized per batch.
-func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *CrossRepoStats) error {
+func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *CrossRepoStats, importsRestored bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -105,7 +105,7 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 		if seedBindings || changedReplacements {
 			previous = nil
 		}
-		if err := cr.recheckGoModuleBindings(ctx, previous, stats); err != nil {
+		if err := cr.recheckGoModuleBindings(ctx, previous, stats, importsRestored); err != nil {
 			return err
 		}
 	}
@@ -503,7 +503,7 @@ func (cr *CrossRepoResolver) RetryGoModuleDeps(ctx context.Context) error {
 		cr.mu.Lock()
 		defer cr.mu.Unlock()
 		cr.goModuleImportsDeferred = 0
-		return cr.retryGoModuleDeps(ctx, stats)
+		return cr.retryGoModuleDeps(ctx, stats, false)
 	}(); err != nil {
 		return err
 	}
@@ -584,7 +584,7 @@ func (cr *CrossRepoResolver) ResolveGoModuleIncomingForRepo(repo string) error {
 
 // Re-check only marked incoming calls into providers affected by identity edits.
 // The compact definition stream avoids loading a whole repo's nodes or edges.
-func (cr *CrossRepoResolver) recheckGoModuleBindings(ctx context.Context, previous map[string]string, stats *CrossRepoStats) error {
+func (cr *CrossRepoResolver) recheckGoModuleBindings(ctx context.Context, previous map[string]string, stats *CrossRepoStats, importsRestored bool) error {
 	changed := make(map[string]bool)
 	for repo, module := range previous {
 		if cr.goModules[repo] != module {
@@ -642,6 +642,9 @@ func (cr *CrossRepoResolver) recheckGoModuleBindings(ctx context.Context, previo
 	}
 	if len(ids) > 0 {
 		flush()
+	}
+	if importsRestored {
+		return ctx.Err()
 	}
 	// A changed module can make another provider's fallback imports bindable,
 	// even when that provider is outside the saved-file frontier.

@@ -567,7 +567,7 @@ func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiers(resolutionFiles, ed
 		mi.synthesizeDemotedGoModuleCalls(bridgeFiles)
 	}
 	_, admission := cr.ResolveMutationFrontiersBounded(resolutionFiles, edgeSourceFiles, definitionFiles)
-	if !admission.Refused && len(bridgeFiles) > 0 {
+	if !admission.IncomingRefused && len(bridgeFiles) > 0 {
 		if master := mi.newMasterResolver(true); master != nil {
 			master.ReconcileBridgeCallerTerminals(bridgeFiles)
 		}

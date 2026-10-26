@@ -38,7 +38,8 @@ func (cr *CrossRepoResolver) ResolveMutationFiles(resolutionFiles, materializati
 // one that refused to admit the incoming work it had.
 type CrossRepoIncomingAdmission struct {
 	graph.IncomingSourceAdmission
-	Refusal error
+	Refusal         error
+	IncomingRefused bool // Separates incoming proof from independent Go import recovery.
 }
 
 // ResolveMutationFrontiers preserves the distinct edge-source and changed-
@@ -173,7 +174,7 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 	// A newly tracked module also makes old dep/stdlib terminals eligible.
 	// This indexed sweep runs at most once per module/config revision.
 	if !admission.Refused {
-		if err := cr.retryGoModuleDeps(context.Background(), stats); err != nil {
+		if err := cr.retryGoModuleDeps(context.Background(), stats, false); err != nil {
 			cr.logger.Error("cross-repo resolve: retry Go module terminals", zap.Error(err))
 		}
 	}
@@ -204,6 +205,7 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 		}
 	}
 
+	admission.IncomingRefused = admission.Refused
 	if deferred := cr.goModuleImportsDeferred; deferred > 0 {
 		admission.Refused = true
 		admission.Dropped += deferred
