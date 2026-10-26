@@ -75,6 +75,41 @@ jobs:
           python3 --version | tee "$RUNNER_TEMP/storage/ci-driver.txt"
           python3 -m unittest -v test_driver 2>&1 \
             | tee -a "$RUNNER_TEMP/storage/ci-driver.txt"
+      - name: Exact evaluator entrypoint on tiny synthetic vectors only
+        shell: bash
+        env:
+          OPENBLAS_NUM_THREADS: "2"
+          OMP_NUM_THREADS: "2"
+          MKL_NUM_THREADS: "2"
+          UV_PYTHON: python3.12
+          UV_PYTHON_DOWNLOADS: never
+          UV_CACHE_DIR: ${{ runner.temp }}/storage/uv-cache
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/storage/evaluator-tools"
+          layout="$RUNNER_TEMP/storage/evaluator-layout"
+          project="research/gortex/storage-architecture/tmp/neon-eval"
+          mkdir -p "$tools" "$layout/$(dirname "$project")"
+          curl --fail --location --max-time 90 --max-filesize 67108864 \
+            https://github.com/astral-sh/uv/releases/download/0.13.5/uv-x86_64-unknown-linux-gnu.tar.gz \
+            -o "$tools/uv.tar.gz"
+          echo "f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f  $tools/uv.tar.gz" \
+            | sha256sum --check -
+          tar -xzf "$tools/uv.tar.gz" -C "$tools"
+          export PATH="$tools/uv-x86_64-unknown-linux-gnu:$PATH"
+          uv --version | tee "$RUNNER_TEMP/storage/ci-evaluator.txt"
+          cp -R study/storage/neon-eval "$layout/$project"
+          cd "$layout"
+          if test ! -f "$project/uv.lock"; then
+            uv lock --project "$project"
+          fi
+          uv lock --check --project "$project"
+          cp "$project/uv.lock" "$RUNNER_TEMP/storage/ci-evaluator-lock.txt"
+          sha256sum "$project/pyproject.toml" "$project/uv.lock" \
+            "$project/evaluate.py" "$project/test_evaluate.py" \
+            | tee -a "$RUNNER_TEMP/storage/ci-evaluator.txt"
+          uv run --project research/gortex/storage-architecture/tmp/neon-eval python -m unittest discover -s research/gortex/storage-architecture/tmp/neon-eval -p test_evaluate.py -v 2>&1 \
+            | tee -a "$RUNNER_TEMP/storage/ci-evaluator.txt"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
