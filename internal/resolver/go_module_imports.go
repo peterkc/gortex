@@ -452,6 +452,14 @@ func (cr *CrossRepoResolver) restoreGoModuleImportBatch(ctx context.Context, rep
 				if e.Kind != graph.EdgeImports || e.Line != line {
 					continue
 				}
+				// Any existing concrete Go-file binding owns this statement,
+				// including per-repo vendored bindings outside the module map.
+				boundPath, _ := e.Meta["go_import"].(string)
+				if (boundPath == "" || boundPath == path) && strings.HasSuffix(e.To, ".go") && !graph.IsUnresolvedTarget(e.To) &&
+					!isSyntheticResolveTarget(e.To) && !strings.HasPrefix(e.To, externalCallPrefix) {
+					present = true
+					break
+				}
 				target := graph.UnresolvedName(e.To)
 				if target == "" {
 					target = e.To
@@ -463,22 +471,7 @@ func (cr *CrossRepoResolver) restoreGoModuleImportBatch(ctx context.Context, rep
 					present = true
 					break
 				}
-				replacement, _ := goModuleReplacementFor(cr.goModuleReplacements, n.RepoPrefix, path)
-				if replacement.Directory != "" && graph.RepoPrefixOfID(e.To) == n.RepoPrefix &&
-					strings.HasSuffix(e.To, ".go") && filePathDir(e.To) == replacement.Directory {
-					present = true
-					break
-				}
-				// A longer module may own the bound package, even when this
-				// statement is also registered under the edited provider.
-				targetRepo := graph.RepoPrefixOfID(e.To)
-				targetModule := cr.goModules[targetRepo]
-				if strings.HasSuffix(e.To, ".go") && targetModule != "" &&
-					(path == targetModule || strings.HasPrefix(path, targetModule+"/")) &&
-					filePathDir(e.To) == targetRepo+strings.TrimPrefix(path, targetModule) {
-					present = true
-					break
-				}
+
 			}
 			if !present {
 				cr.graph.AddEdge(&graph.Edge{From: n.FilePath, To: "unresolved::import::" + path, Kind: graph.EdgeImports, FilePath: n.FilePath, Line: line})

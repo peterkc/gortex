@@ -697,3 +697,26 @@ func TestInvalidatePackageRepoKeepsOtherProviders(t *testing.T) {
 	require.Equal(t, graph.FileNodeIdentity{ID: "b/lib.go", FilePath: "b/lib.go", RepoPrefix: "b"}, state.packages["b"]["b"])
 	require.True(t, state.complete, "package invalidation must not replace the terminal-sweep policy")
 }
+
+func TestGoModuleImportRestorePreservesVendoredBinding(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			g := goImportReviewStore(t, backend)
+			for _, file := range []string{"consumer/main.go", "consumer/vendor/example.org/lib/lib.go", "provider/lib.go"} {
+				g.AddNode(&graph.Node{ID: file, FilePath: file, Kind: graph.KindFile, RepoPrefix: graph.RepoPrefixOfID(file), Language: "go"})
+			}
+			g.AddNode(&graph.Node{ID: "consumer/main.go::import::example.org/lib", FilePath: "consumer/main.go", StartLine: 2, Kind: graph.KindImport, RepoPrefix: "consumer", Language: "go", Meta: map[string]any{"path": "example.org/lib"}})
+			g.AddEdge(&graph.Edge{From: "consumer/main.go", FilePath: "consumer/main.go", To: "consumer/vendor/example.org/lib/lib.go", Kind: graph.EdgeImports, Line: 2, Origin: graph.OriginASTResolved})
+			cr := NewCrossRepo(g)
+			cr.SetGoModules(map[string]string{"provider": "example.org/lib"})
+			for pass := 0; pass < 2; pass++ {
+				_, err := cr.ResolveAllContext(t.Context())
+				require.NoError(t, err)
+				rows := outEdgesOfKind(g, "consumer/main.go", graph.EdgeImports)
+				require.Len(t, rows, 1)
+				require.Equal(t, "consumer/vendor/example.org/lib/lib.go", rows[0].To)
+				require.False(t, rows[0].CrossRepo)
+			}
+		})
+	}
+}
