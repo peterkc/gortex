@@ -5215,6 +5215,15 @@ func (idx *Indexer) indexFile(
 		}
 	}
 
+	parkCarriedGoImports := func() []*graph.Edge {
+		for _, e := range carriedGoImports {
+			graph.StashRestubProvenance(e)
+			e.To = goModuleRestubTarget(e, "")
+			e.CrossRepo, e.ConfidenceLabel = false, ""
+		}
+		return carriedGoImports
+	}
+
 	// A delta probe already owns a shared admission lease together with its
 	// transformed source and parse tree. Validate and consume that snapshot
 	// before acquiring another lease; acquiring first can self-deadlock when
@@ -5279,7 +5288,7 @@ func (idx *Indexer) indexFile(
 				}
 			}
 			evictExisting(result)
-			idx.graph.AddBatch([]*graph.Node{n}, nil)
+			idx.graph.AddBatch([]*graph.Node{n}, parkCarriedGoImports())
 			if !idx.recordFileReadVersion(mtimeKey, absPath, readVersion) {
 				return idx.fileIndexFailureError(absPath)
 			}
@@ -5303,7 +5312,7 @@ func (idx *Indexer) indexFile(
 				}
 			}
 			evictExisting(result)
-			idx.graph.AddBatch([]*graph.Node{n}, nil)
+			idx.graph.AddBatch([]*graph.Node{n}, parkCarriedGoImports())
 			if !idx.recordFileReadVersion(mtimeKey, absPath, readVersion) {
 				return idx.fileIndexFailureError(absPath)
 			}
