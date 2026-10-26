@@ -589,6 +589,12 @@ func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiers(resolutionFiles, ed
 	}
 	mi.finishGoModuleCalls(cr)
 	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
+	if admission.Refused && !admission.IncomingRefused {
+		// The bounded import retry cannot finish this revision. Reuse the
+		// full fallback before another mutation repeats its identity sweep.
+		mi.logger.Info("cross-repo resolve: completing deferred Go module imports")
+		mi.runCrossRepoResolve(false)
+	}
 }
 
 // crossWorkspaceLookup builds a resolver.CrossWorkspaceDepLookup from
