@@ -24,6 +24,17 @@ func (cr *CrossRepoResolver) resolveGoModuleImports(ctx context.Context, files [
 		var batch []graph.EdgeReindex
 		for _, path := range paths {
 			cr.rememberGoModuleImports(nodes[path])
+			var source *graph.Node
+			for _, node := range nodes[path] {
+				if node.Kind == graph.KindFile && node.ID == path {
+					source = node
+					break
+				}
+			}
+			caller := ""
+			if source != nil {
+				caller = source.RepoPrefix
+			}
 			for _, e := range outgoing[path] {
 				if e.Kind != graph.EdgeImports {
 					continue
@@ -31,11 +42,6 @@ func (cr *CrossRepoResolver) resolveGoModuleImports(ctx context.Context, files [
 				importPath := goModuleImportPath(e, nodes[path], outgoing[path])
 				if importPath == "" || !trackedGoImport(cr.goModulePaths, importPath) && e.Meta["go_import"] == nil {
 					continue
-				}
-				source := cr.graph.GetNode(e.From)
-				caller := ""
-				if source != nil {
-					caller = source.RepoPrefix
 				}
 				match := cr.goModuleImportCandidate(importPath, caller, candidateWorkspaceID(source))
 				if match != nil && match.ID == e.To || match == nil && e.Meta["go_import"] == nil {
@@ -201,6 +207,18 @@ func (cr *CrossRepoResolver) applyGoModuleImportReindexes(batch []graph.EdgeRein
 	if stats == nil {
 		return
 	}
+	targetIDs := make([]string, 0, len(batch))
+	seenTargets := make(map[string]bool)
+	for _, row := range batch {
+		if row.Edge.CrossRepo && !seenTargets[row.Edge.To] {
+			seenTargets[row.Edge.To] = true
+			targetIDs = append(targetIDs, row.Edge.To)
+		}
+	}
+	var targets map[string]*graph.Node
+	if len(targetIDs) > 0 {
+		targets = cr.graph.GetNodesByIDs(targetIDs)
+	}
 	for _, row := range batch {
 		original := graph.EdgeIdentityFor(row.Edge)
 		original.To = row.OldTo
@@ -223,7 +241,7 @@ func (cr *CrossRepoResolver) applyGoModuleImportReindexes(batch []graph.EdgeRein
 		}
 		if row.Edge.CrossRepo {
 			stats.CrossRepoEdges++
-			if target := cr.graph.GetNode(row.Edge.To); target != nil {
+			if target := targets[row.Edge.To]; target != nil {
 				stats.ByRepo[target.RepoPrefix]++
 			}
 		}

@@ -720,3 +720,36 @@ func TestGoModuleImportRestorePreservesVendoredBinding(t *testing.T) {
 		})
 	}
 }
+
+func TestGoModuleImportUsesBatchedFileAndStatsNodes(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			g := &resolverBatchCountingStore{Store: goImportReviewStore(t, backend)}
+			g.AddBatch([]*graph.Node{{ID: "consumer/main.go", FilePath: "consumer/main.go", Kind: graph.KindFile, RepoPrefix: "consumer", Language: "go"}, {ID: "provider/lib.go", FilePath: "provider/lib.go", Kind: graph.KindFile, RepoPrefix: "provider", Language: "go"}}, nil)
+			const count = 64
+			for i := 0; i < count; i++ {
+				g.AddEdge(&graph.Edge{From: "consumer/main.go", FilePath: "consumer/main.go", To: "external::example.org/lib", Kind: graph.EdgeImports, Line: i + 1})
+			}
+			cr := NewCrossRepo(g)
+			cr.SetGoModules(map[string]string{"provider": "example.org/lib"})
+			for pass := 0; pass < 2; pass++ {
+				g.getNodeCalls, g.getFileNodesByPathsCalls = 0, 0
+				stats := &CrossRepoStats{ByRepo: map[string]int{}}
+				require.NoError(t, cr.resolveGoModuleImports(t.Context(), []string{"consumer/main.go"}, stats, nil))
+				require.Zero(t, g.getNodeCalls, "reuse loaded caller files and batch statistics targets")
+				require.Equal(t, 1, g.getFileNodesByPathsCalls)
+				rows := outEdgesOfKind(g, "consumer/main.go", graph.EdgeImports)
+				require.Len(t, rows, count)
+				for _, e := range rows {
+					require.Equal(t, "provider/lib.go", e.To)
+				}
+				if pass == 0 {
+					require.Equal(t, count, stats.ByRepo["provider"])
+				} else {
+					require.Zero(t, stats.Resolved)
+					require.Empty(t, stats.ByRepo)
+				}
+			}
+		})
+	}
+}
