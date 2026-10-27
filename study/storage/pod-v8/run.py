@@ -57,7 +57,7 @@ def inside(path: Path, parent: Path) -> Path:
     return path
 
 
-def environment(directory: Path) -> dict[str, str]:
+def environment(directory: Path, *, mode: str) -> dict[str, str]:
     env = {key: str(directory / child) for key, child in (
         ("HOME", "home"), ("XDG_CONFIG_HOME", "config"),
         ("XDG_DATA_HOME", "data"), ("XDG_CACHE_HOME", "cache"),
@@ -65,7 +65,7 @@ def environment(directory: Path) -> dict[str, str]:
     env.update(PATH="/usr/bin:/bin", LANG="C.UTF-8", LC_ALL="C",
                GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1",
                GIT_TERMINAL_PROMPT="0", GIT_NO_LAZY_FETCH="1",
-               GOMAXPROCS="30")
+               GOMAXPROCS="16" if mode == "baseline_a7" else "30")
     for key, child in (("SOCKET", "d.sock"), ("PIDFILE", "d.pid"),
                        ("LOGFILE", "daemon.log"), ("STATEFILE", "d.json")):
         env["GORTEX_DAEMON_" + key] = str(directory / child)
@@ -145,9 +145,9 @@ def measure(db: sqlite3.Connection, spec: Mapping, set_id: str) -> dict:
 class Attempt:
     """Own one foreground daemon and all short-lived control clients."""
 
-    def __init__(self, directory: Path, deadline: float):
+    def __init__(self, directory: Path, deadline: float, *, mode: str):
         self.directory, self.deadline = directory, deadline
-        self.env = environment(directory)
+        self.env = environment(directory, mode=mode)
         self.daemon = None
         self.samples = []
         self.serial = 0
@@ -155,6 +155,10 @@ class Attempt:
         for key in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
                     "XDG_CACHE_HOME", "XDG_STATE_HOME", "TMPDIR"):
             Path(self.env[key]).mkdir(parents=True)
+        write(directory / "cpu.json", {
+            "cpu_set": sorted(os.sched_getaffinity(0)),
+            "GOMAXPROCS": self.env["GOMAXPROCS"],
+        })
 
     def observe(self):
         now = time.time()
@@ -484,7 +488,8 @@ def main() -> int:
         for set_id in ("PR" if args.mode == "smoke" else "KPR"):
             subdir = directory / set_id
             subdir.mkdir()
-            attempt = Attempt(subdir, min(deadline, time.time() + 45 * 60))
+            attempt = Attempt(subdir, min(deadline, time.time() + 45 * 60),
+                              mode=args.mode)
             if VERSION not in attempt.gx("version"):
                 raise Rejected("frozen binary version mismatch")
             write(subdir / "environment.json", attempt.env)

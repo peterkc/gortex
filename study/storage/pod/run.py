@@ -81,6 +81,7 @@ SCREEN = tuple(name for name in ADAPTERS if name != "libsql-segment")
 FINALISTS = ("sqlite-segment", "pebble-bleve")
 CATALOGS = ("catalog-sqlite", "catalog-refs", "catalog-bbolt",
             "catalog-pebble", "catalog-manifest")
+TIMING_BLOCKS = {"segment_timing", "catalog", "hybrid", "cpu_cost", "baseline_a7"}
 UV_VERSION = "0.13.5"
 UV_FILE = "uv-x86_64-unknown-linux-gnu.tar.gz"
 UV_SHA = "f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f"
@@ -672,7 +673,7 @@ class Supervisor:
 
     def __init__(self, root: Path, environment: Mapping[str, str], *,
                  allocation: Mapping, termination: Mapping,
-                 procedure: Mapping):
+                 procedure: Mapping, timing_cpu_set: Sequence[int]):
         wall, mono = time.time(), time.monotonic()
         allocated, deadline = live_termination(
             allocation, termination, wall, procedure=procedure)
@@ -681,6 +682,7 @@ class Supervisor:
         self.backstop_deadline = mono + (deadline - wall)
         self.allocation, self.termination = allocation, termination
         self.procedure = dict(procedure)
+        self.timing_cpu_set = sorted(timing_cpu_set)
         self.block_deadline = 0.0
         self.launch_deadline = 0.0
         self.block_id = "unbound"
@@ -759,6 +761,12 @@ class Supervisor:
             signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGHUP,
                                signal.SIGALRM},
         )
+        def prepare_child():
+            if self.block_id in TIMING_BLOCKS:
+                os.sched_setaffinity(0, self.timing_cpu_set)
+                if os.sched_getaffinity(0) != set(self.timing_cpu_set):
+                    raise ReviewRequired("host narrowed timing affinity")
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         try:
             try:
                 if time.monotonic() >= self.launch_deadline:
@@ -767,11 +775,9 @@ class Supervisor:
                 process = subprocess.Popen(
                     args, cwd=cwd, env=environment, stdout=log,
                     stderr=subprocess.STDOUT, start_new_session=True,
-                    preexec_fn=lambda: signal.pthread_sigmask(
-                        signal.SIG_SETMASK, previous_mask,
-                    ),
+                    preexec_fn=prepare_child,
                 )
-            except (OSError, DeadlineExceeded):
+            except (OSError, subprocess.SubprocessError, DeadlineExceeded):
                 log.close()
                 raise
             owned = OwnedProcess(
@@ -936,6 +942,44 @@ def extract(archive: Path, target: Path, prefix: str) -> None:
             destination.chmod(member.mode & 0o777)
 
 
+def timing_cpu_info(affinity: Sequence[int],
+                    topology: Mapping[int, Mapping[str, str]]) -> dict:
+    """Select eight physical cores, ordered by (package, core)."""
+    rows, groups = [], {}
+    try:
+        for cpu in sorted(affinity):
+            raw = topology[cpu]
+            ids = [raw[key] for key in ("physical_package_id", "core_id")]
+            siblings = raw["thread_siblings_list"]
+            if (not all(re.fullmatch(r"[0-9]+", value) for value in ids)
+                    or not re.fullmatch(
+                        r"[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*",
+                        siblings)):
+                raise ValueError("invalid topology field")
+            package, core = map(int, ids)
+            spans = [tuple(map(int, part.split("-")))
+                     for part in siblings.split(",")]
+            if any(span[0] > span[-1] for span in spans):
+                raise ValueError("reversed sibling range")
+            visible = [c for c in sorted(affinity)
+                       if any(span[0] <= c <= span[-1] for span in spans)]
+            groups.setdefault((package, core), []).append(cpu)
+            rows.append({"cpu": cpu, "physical_package_id": package,
+                         "core_id": core, "thread_siblings_list": siblings,
+                         "visible_siblings": visible})
+    except (KeyError, ValueError) as error:
+        raise ReviewRequired("missing/malformed CPU topology") from error
+    if any(row["visible_siblings"] != groups[
+            (row["physical_package_id"], row["core_id"])] for row in rows):
+        raise ReviewRequired("inconsistent CPU sibling topology")
+    cores = sorted(core for core, members in groups.items() if len(members) == 2)
+    if len(cores) < 8:
+        raise ReviewRequired("fewer than eight two-thread visible cores")
+    return {"timing_cpu_set": sorted(c for core in cores[:8]
+                                     for c in groups[core]),
+            "cpu_topology": rows}
+
+
 def host_record() -> dict:
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         raise ReviewRequired("execution requires Linux x86_64")
@@ -945,19 +989,28 @@ def host_record() -> dict:
     if (release.get("VERSION_ID", "").strip('"') != "22.04"
             or release.get("ID", "").strip('"') != "ubuntu"):
         raise ReviewRequired("execution requires Ubuntu 22.04 x86_64")
-    if len(os.sched_getaffinity(0)) < 30:
+    affinity = sorted(os.sched_getaffinity(0))
+    if len(affinity) < 30:
         raise ReviewRequired("fewer than 30 visible CPUs")
     meminfo = Path("/proc/meminfo").read_text()
     total = next(int(line.split()[1]) * 1024 for line in meminfo.splitlines()
                  if line.startswith("MemTotal:"))
     if total < 180 * GIB:
         raise ReviewRequired("less than 180 GiB visible RAM")
+    try:
+        topology = {cpu: {key: (Path("/sys/devices/system/cpu") /
+                    f"cpu{cpu}/topology" / key).read_text().strip()
+                    for key in ("core_id", "physical_package_id",
+                                "thread_siblings_list")} for cpu in affinity}
+    except (OSError, UnicodeError) as error:
+        raise ReviewRequired("cannot read CPU topology") from error
     return {
+        **timing_cpu_info(affinity, topology),
         "cpuinfo": Path("/proc/cpuinfo").read_text(),
         "meminfo": meminfo,
         "kernel": platform.release(), "platform": platform.platform(),
         "euid": os.geteuid(),
-        "affinity": sorted(os.sched_getaffinity(0)),
+        "affinity": affinity,
         "loadavg": list(os.getloadavg()), "os_release": release,
     }
 
@@ -1409,7 +1462,7 @@ def result_path(root: Path, job: Job) -> Path:
 
 
 def case_identity(job: Job, root: Path, setup: Mapping,
-                  gomaxprocs: int) -> dict:
+                  gomaxprocs: int, *, cpu_set: Sequence[int]) -> dict:
     return {
         "job": asdict(job), "source": COMMIT,
         "driver": setup["identity"]["driver"],
@@ -1417,6 +1470,7 @@ def case_identity(job: Job, root: Path, setup: Mapping,
                      for tier, record in ARCHIVES.items()},
         "binary": setup["artifacts"][f"bin/{job.adapter}"],
         "command": command(job, root), "GOMAXPROCS": gomaxprocs,
+        **({"cpu_set": sorted(cpu_set)} if job.stage == "timing" else {}),
         "runtime": setup["identity"]["runtime"],
         "runtime_libraries": setup["runtime_libraries"],
     }
@@ -1595,7 +1649,10 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
         while pending and len(active) < concurrency:
             job = pending[0]
             gomaxprocs = 30 if job.stage != "screen" else 30 // concurrency
-            identity = case_identity(job, root, setup, gomaxprocs)
+            if job.stage == "timing":
+                gomaxprocs = 16
+            identity = case_identity(job, root, setup, gomaxprocs, cpu_set=(
+                supervisor.timing_cpu_set if job.stage == "timing" else ()))
             directory = root / "jobs" / job.name
             if directory.exists():
                 if not (directory / "complete.json").exists():
@@ -1747,12 +1804,15 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
               accepted_exit_codes: Sequence[int] = (0,)) -> dict:
     root = supervisor.root
     directory = root / "aux" / name
-    env = {**supervisor.environment, "GOMAXPROCS": "30"}
+    timed = supervisor.block_id in TIMING_BLOCKS
+    env = {**supervisor.environment, "GOMAXPROCS": "16" if timed else "30"}
     working_directory = cwd or root / "checkout"
     identity = {"source": COMMIT, "command": list(args),
                 "cwd": str(working_directory),
                 "environment": env, "selected_jobs": list(selection),
                 "python_runtime": digest(root / "python-runtime.json")}
+    if timed:
+        identity["cpu_set"] = supervisor.timing_cpu_set
     if directory.exists():
         if not (directory / "complete.json").exists():
             raise ReviewRequired(f"incomplete auxiliary attempt: {name}")
@@ -2014,8 +2074,13 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
     signal.signal(signal.SIGALRM, alarm_expired)
     for block in admission["blocks"]:
         block_id = block["id"]
+        cpu_identity = ({"cpu_set": supervisor.timing_cpu_set}
+                        if block_id in TIMING_BLOCKS else {})
         saved = record["blocks"].get(block_id)
         if saved:
+            if (block_id in TIMING_BLOCKS
+                    and saved.get("cpu_set") != supervisor.timing_cpu_set):
+                raise ReviewRequired(f"{block_id}: timing CPU set changed")
             remaining = min(supervisor.zero + 690 * 60,
                             supervisor.backstop_deadline) - time.monotonic()
             if remaining <= 0:
@@ -2048,6 +2113,7 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
             supervisor.begin_block(block, outcomes)
         except DeadlineExceeded as error:
             state = {
+                **cpu_identity,
                 "state": "skipped" if block_id == "cpu_cost" else "partial",
                 "reason": str(error), "reason_code": "time",
                 "files": {}, "clean_handoff": True,
@@ -2062,7 +2128,8 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
         except ReviewRequired as error:
             if block_id != "cpu_cost":
                 raise
-            state = {"state": "dependency_blocked", "reason": str(error),
+            state = {**cpu_identity, "state": "dependency_blocked",
+                     "reason": str(error),
                      "files": {}, "clean_handoff": True}
             record["blocks"][block_id] = state
             outcomes[block_id] = state["state"]
@@ -2072,14 +2139,15 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
                 and not any(row["identity"]["job"]["stage"] == "oracle"
                             and row["state"] == "pass" for row in sdk)):
             record["blocks"][block_id] = {
-                "state": "dependency_blocked",
+                **cpu_identity, "state": "dependency_blocked",
                 "reason": "required oracle incomplete",
                 "files": {}, "clean_handoff": True,
             }
             outcomes[block_id] = "dependency_blocked"
             atomic_json(path, record)
             continue
-        record["blocks"][block_id] = {"state": "started", "files": {}}
+        record["blocks"][block_id] = {
+            **cpu_identity, "state": "started", "files": {}}
         atomic_json(path, record)
         signal.setitimer(signal.ITIMER_REAL, max(
             0.000001, supervisor.block_deadline - CLEANUP_RESERVE_SECONDS
@@ -2262,6 +2330,7 @@ def main() -> int:
             root, environment(root), allocation=allocation,
             termination=termination,
             procedure=admission["termination_procedure"],
+            timing_cpu_set=host["timing_cpu_set"],
         )
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             signal.signal(sig, interrupted)

@@ -3,6 +3,7 @@
 import copy
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -10,6 +11,8 @@ import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 HERE = Path(__file__).resolve().parent
@@ -163,7 +166,7 @@ class BoundaryTests(unittest.TestCase):
             run = root / "attempt"
             run.mkdir()
             (run / "partial.log").write_text("incomplete")
-            attempt = runner.Attempt(run, time.time() - 1)
+            attempt = runner.Attempt(run, time.time() - 1, mode="smoke")
             with self.assertRaises(runner.WorkFailed):
                 attempt.command([sys.executable, "-c", "raise Exception()"])
             self.assertEqual((run / "partial.log").read_text(), "incomplete")
@@ -175,7 +178,7 @@ class BoundaryTests(unittest.TestCase):
     def test_cleanup_reaps_owned_process_and_refuses_surviving_socket(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)
-            attempt = runner.Attempt(run, time.time() + 30)
+            attempt = runner.Attempt(run, time.time() + 30, mode="smoke")
             child = subprocess.Popen(
                 [sys.executable, "-c", "import time; time.sleep(20)"],
                 env=attempt.env)
@@ -190,7 +193,7 @@ class BoundaryTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "linux", "Linux lifecycle fixture")
     def test_cleanup_refuses_surviving_owned_descendant(self):
         with tempfile.TemporaryDirectory() as tmp:
-            attempt = runner.Attempt(Path(tmp), time.time() + 30)
+            attempt = runner.Attempt(Path(tmp), time.time() + 30, mode="smoke")
             stray = subprocess.Popen(
                 [sys.executable, "-c", "import time; time.sleep(20)"],
                 env=attempt.env)
@@ -224,7 +227,7 @@ class PartialReceiptTests(unittest.TestCase):
     def test_deadline_after_verified_stop_has_clean_partial_receipt(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            attempt = runner.Attempt(root / "attempt", time.time() - 1)
+            attempt = runner.Attempt(root / "attempt", time.time() - 1, mode="smoke")
             with self.assertRaises(runner.WorkFailed) as caught:
                 attempt.observe()
             result = self.finish(root, attempt, caught.exception)
@@ -235,7 +238,7 @@ class PartialReceiptTests(unittest.TestCase):
     def test_exited_daemon_is_reaped_and_receipt_is_clean_partial(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            attempt = runner.Attempt(root / "attempt", time.time() + 30)
+            attempt = runner.Attempt(root / "attempt", time.time() + 30, mode="smoke")
             child = subprocess.Popen([sys.executable, "-c", "pass"],
                                      env=attempt.env)
             self.addCleanup(child.wait)
@@ -257,7 +260,7 @@ class PartialReceiptTests(unittest.TestCase):
     def test_unverified_stop_writes_fatal_receipt_even_without_daemon(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            attempt = runner.Attempt(root / "attempt", time.time() + 30)
+            attempt = runner.Attempt(root / "attempt", time.time() + 30, mode="smoke")
             sock = Path(attempt.env["GORTEX_DAEMON_SOCKET"])
             sock.touch()
             result = self.finish(root, attempt, OSError("local failure"))
@@ -312,6 +315,104 @@ class FailureRoutingTests(unittest.TestCase):
                                                  root / "receipt.json"))
             self.assertEqual(list((root / "fresh").iterdir()), [])
             self.assertFalse((root / "receipt.json").exists())
+
+
+class TimingCpuTests(unittest.TestCase):
+    def test_baseline_environment_uses_16_and_smoke_is_unchanged(self):
+        """Given the existing mode, only A7 changes the whitelisted CPU value."""
+        root = Path("/fixture/P")
+        # Exact previous environment, including dictionary insertion order.
+        expected = {
+            "HOME": "/fixture/P/home", "XDG_CONFIG_HOME": "/fixture/P/config",
+            "XDG_DATA_HOME": "/fixture/P/data", "XDG_CACHE_HOME": "/fixture/P/cache",
+            "XDG_STATE_HOME": "/fixture/P/state", "TMPDIR": "/fixture/P/tmp",
+            "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C",
+            "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0", "GIT_NO_LAZY_FETCH": "1", "GOMAXPROCS": "30",
+            "GORTEX_DAEMON_SOCKET": "/fixture/P/d.sock",
+            "GORTEX_DAEMON_PIDFILE": "/fixture/P/d.pid",
+            "GORTEX_DAEMON_LOGFILE": "/fixture/P/daemon.log",
+            "GORTEX_DAEMON_STATEFILE": "/fixture/P/d.json",
+        }
+        with patch.dict(os.environ, {"GOMAXPROCS": "999", "UNRELATED": "not-copied"}):
+            smoke = runner.environment(root, mode="smoke")
+            baseline = runner.environment(root, mode="baseline_a7")
+        self.assertEqual(json.dumps(smoke).encode(), json.dumps(expected).encode())
+        self.assertEqual(baseline, {**expected, "GOMAXPROCS": "16"})
+
+    def test_clients_and_daemon_use_the_mode_environment(self):
+        """Given either mode, real command/start boundaries pass the same env."""
+        for mode, gomax in (("baseline_a7", "16"), ("smoke", "30")):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                with patch.object(runner.os, "sched_getaffinity", create=True,
+                                  return_value={2, 4}):
+                    attempt = runner.Attempt(root / "P", time.time() + 30,
+                                             mode=mode)
+                attempt.observe = unittest.mock.Mock()
+                daemon = SimpleNamespace(pid=4242, poll=lambda: None)
+                child = SimpleNamespace(returncode=0, poll=lambda: 0,
+                                        wait=unittest.mock.Mock(return_value=0))
+                sock = Path(attempt.env["GORTEX_DAEMON_SOCKET"])
+                status = {"pid": daemon.pid, "socket_path": str(sock),
+                          "version": runner.VERSION, "ready": True,
+                          "enrichment_complete": True,
+                          "enrichment": {"running": False}, "tracked_repos": [],
+                          "build_lane": {"active": False, "background_queued": 0,
+                                         "interactive_queued": 0}}
+                original_write = runner.write
+
+                def local_write(path, value):
+                    original_write(path, value)
+                    if path.name.endswith(".request.json"):
+                        answer = path.with_name(path.name.replace(
+                            ".request.json", ".go.json"))
+                        original_write(answer, {**value, "lead_go": True,
+                                                "pi_gortex_notified": True})
+
+                def local_path(value):
+                    return (root / "approvals" if str(value) == "/work/control/v8-go"
+                            else Path(value))
+
+                def spawn(argv, **kwargs):
+                    self.assertEqual(kwargs["env"], attempt.env)
+                    self.assertEqual(kwargs["env"]["GOMAXPROCS"], gomax)
+                    if argv[1:3] == ["daemon", "start"]:
+                        sock.touch()
+                        return daemon
+                    kwargs["stdout"].write(json.dumps(status)
+                                           if argv[1:3] == ["daemon", "status"]
+                                           else "client")
+                    return child
+
+                with patch.object(runner, "Path", side_effect=local_path), \
+                        patch.object(runner, "write", side_effect=local_write), \
+                        patch.object(runner.subprocess, "Popen", side_effect=spawn) as popen, \
+                        patch.object(runner.time, "sleep", side_effect=AssertionError):
+                    self.assertEqual(attempt.gx("version"), "client")
+                    attempt.start("initial", {})
+                self.assertEqual([call.args[0][1:3] for call in popen.call_args_list],
+                                 [["version"], ["daemon", "start"], ["daemon", "status"]])
+
+    def test_actual_affinity_and_gomax_metadata_are_hashed_in_receipt(self):
+        """Given either mode, receipts bind the observed, not assumed CPU set."""
+        for mode, gomax in (("baseline_a7", "16"), ("smoke", "30")):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                with patch.object(runner.os, "sched_getaffinity", create=True,
+                                  return_value={12, 4, 8}):
+                    attempt = runner.Attempt(root / "attempt/P", time.time() + 30,
+                                             mode=mode)
+                attempt.stop = unittest.mock.Mock()
+                receipt = root / "results/receipt.json"
+                self.assertEqual(runner.finish(root, root / "attempt", receipt,
+                    {}, attempt, {"state": "completed", "exit_code": 0}), 0)
+                result = json.loads(receipt.read_text())
+                metadata = root / "attempt/P/cpu.json"
+                self.assertEqual(json.loads(metadata.read_text()), {
+                    "cpu_set": [4, 8, 12], "GOMAXPROCS": gomax})
+                self.assertEqual(result["files"]["attempt/P/cpu.json"],
+                                 runner.digest(metadata))
 
 
 if __name__ == "__main__":

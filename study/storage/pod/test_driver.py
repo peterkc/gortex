@@ -424,7 +424,7 @@ class DeadlineContractTests(unittest.TestCase):
             supervisor = SimpleNamespace(
                 root=root, allocation={}, termination={}, zero=0,
                 hard_deadline=720 * 60, backstop_deadline=710 * 60,
-                stop_all=unittest.mock.Mock(),
+                stop_all=unittest.mock.Mock(), timing_cpu_set=list(range(16)),
             )
 
             def begin(block, outcomes):
@@ -749,6 +749,7 @@ class DeadlineContractTests(unittest.TestCase):
                 supervisor = driver.Supervisor(
                     root, dict(os.environ), allocation=allocation,
                     termination=receipt, procedure=self.procedure(),
+                    timing_cpu_set=sorted(os.sched_getaffinity(0)),
                 )
                 supervisor.block_id = "fixture-nonreturner"
                 start = time.monotonic()
@@ -1137,7 +1138,8 @@ class ReviewFixTests(unittest.TestCase):
                     self.procedure(), root)
                 owner = SimpleNamespace(
                     root=root, allocation={}, termination={}, zero=0,
-                    backstop_deadline=710 * 60, stop_all=unittest.mock.Mock())
+                    backstop_deadline=710 * 60, stop_all=unittest.mock.Mock(),
+                    timing_cpu_set=list(range(16)))
 
                 def begin(block, outcomes):
                     owner.block_deadline = driver.block_limit(
@@ -1340,7 +1342,8 @@ class ReviewFixTests(unittest.TestCase):
                 patch.object(driver, "Path", side_effect=local_path),
                 patch.object(driver.os, "geteuid", return_value=1000),
                 patch.object(driver, "host_record", return_value={
-                    "kernel": "fixture", "cpuinfo": "", "affinity": []}),
+                    "kernel": "fixture", "cpuinfo": "", "affinity": [],
+                    "timing_cpu_set": list(range(16))}),
                 patch.object(driver, "live_termination", return_value=(0, 1)),
                 patch.object(driver, "Supervisor", return_value=owner),
                 patch.object(driver.signal, "signal"),
@@ -1354,6 +1357,381 @@ class ReviewFixTests(unittest.TestCase):
             self.assertFalse(result["clean_handoff"])
             self.assertTrue(result["deletion_required"])
             owner.stop_all.assert_called_once()
+
+
+class TimingCpuTests(unittest.TestCase):
+    cpus = list(range(8)) + list(range(15, 23))
+
+    def topology(self, pairs=15, singles=0):
+        rows = {}
+        for core in range(pairs):
+            for cpu in (core, core + pairs):
+                rows[cpu] = {"core_id": str(core), "physical_package_id": "0",
+                             "thread_siblings_list": f"{core},{core+pairs}"}
+        for cpu in range(2*pairs, 2*pairs + singles):
+            rows[cpu] = {"core_id": str(cpu), "physical_package_id": "0",
+                         "thread_siblings_list": str(cpu)}
+        return rows
+
+    def host(self, root, topology):
+        files = {"etc/os-release": 'ID=ubuntu\nVERSION_ID="22.04"\n',
+                 "proc/meminfo": "MemTotal: 204472320 kB\n",
+                 "proc/cpuinfo": "fixture CPU"}
+        for cpu, fields in topology.items():
+            for key, value in fields.items():
+                files[f"sys/devices/system/cpu/cpu{cpu}/topology/{key}"] = value
+        for relative, value in files.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(value.encode() if isinstance(value, str) else value)
+        with (
+            patch.object(driver, "Path", side_effect=lambda p:
+                         root / str(p).lstrip("/")),
+            patch.object(driver.platform, "system", return_value="Linux"),
+            patch.object(driver.platform, "machine", return_value="x86_64"),
+            patch.object(driver.os, "sched_getaffinity", create=True,
+                         return_value=set(range(30))),
+            patch.object(driver.subprocess, "Popen") as spawn,
+            patch.object(driver.urllib.request, "urlopen") as download,
+        ):
+            try:
+                return driver.host_record()
+            finally:
+                spawn.assert_not_called()
+                download.assert_not_called()
+
+    def test_admission_selects_and_records_eight_paired_cores(self):
+        """Given 15 paired cores, admission records both threads of cores 0-7."""
+        with tempfile.TemporaryDirectory() as tmp:
+            host = self.host(Path(tmp), self.topology())
+        self.assertEqual(host["timing_cpu_set"], self.cpus)
+        self.assertEqual(host["affinity"], list(range(30)))
+        self.assertEqual(len(host["cpu_topology"]), 30)
+        self.assertEqual(host["cpu_topology"][15], {
+            "cpu": 15, "physical_package_id": 0, "core_id": 0,
+            "thread_siblings_list": "0,15", "visible_siblings": [0, 15]})
+
+    def test_admission_without_hyperthreads_refuses_before_work(self):
+        """Given 30 single-thread cores, admission refuses before spawning."""
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+                driver.ReviewRequired, "eight two-thread"):
+            self.host(Path(tmp), self.topology(pairs=0, singles=30))
+
+    def test_admission_with_only_seven_pairs_refuses_before_work(self):
+        """Given 30 visible CPUs but only seven pairs, admission refuses."""
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+                driver.ReviewRequired, "eight two-thread"):
+            self.host(Path(tmp), self.topology(pairs=7, singles=16))
+
+    def test_missing_or_malformed_topology_refuses_before_work(self):
+        """Given a missing/bad sysfs field, admission raises ReviewRequired."""
+        for key, value in (("core_id", None), ("core_id", "-1"),
+                           ("physical_package_id", "socket"),
+                           ("core_id", b"\xff"),
+                           ("thread_siblings_list", "15-0"),
+                           ("thread_siblings_list", "0,,15"),
+                           ("thread_siblings_list", "0,16")):
+            with self.subTest(field=key, value=value), \
+                    tempfile.TemporaryDirectory() as tmp:
+                topology = self.topology()
+                if value is None:
+                    del topology[0][key]
+                else:
+                    topology[0][key] = value
+                with self.assertRaises(driver.ReviewRequired):
+                    self.host(Path(tmp), topology)
+
+    def test_packages_ranges_and_invisible_siblings_are_resolved(self):
+        """Given repeated core IDs across packages, only visible pairs count."""
+        topology = self.topology()
+        for cpu, row in topology.items():
+            core = cpu % 15
+            row["physical_package_id"] = str(int(core >= 8))
+            row["core_id"] = str(core if core < 8 else core - 8)
+            row["thread_siblings_list"] += ",900-1000"
+        selected = driver.timing_cpu_info(list(range(30)), topology)
+        self.assertEqual(selected["timing_cpu_set"], self.cpus)
+        ranges = {cpu: {"core_id": str(cpu//2), "physical_package_id": "0",
+                       "thread_siblings_list": f"{2*(cpu//2)}-{2*(cpu//2)+1}"}
+                  for cpu in range(30)}
+        self.assertEqual(driver.timing_cpu_info(range(30), ranges)[
+            "timing_cpu_set"], list(range(16)))
+
+    def owner(self, root, block):
+        owner = object.__new__(driver.Supervisor)
+        owner.root, owner.environment = root, {"MARKER": "fixed"}
+        owner.block_id, owner.timing_cpu_set = block, list(self.cpus)
+        owner.allocation, owner.termination, owner.procedure = {}, {}, {}
+        owner.active, owner.job_minutes = [], {}
+        owner.block_deadline, owner.launch_deadline = 1000, 990
+        return owner
+
+    def capture_launch(self, owner, launch, *, timed, gomax):
+        """Run the real launch path; replace exec and kernel effects only."""
+        captured = {}
+
+        def spawn(*args, **kwargs):
+            affinity.assert_not_called()  # No parent-affinity mutation.
+            self.assertEqual(kwargs["env"]["GOMAXPROCS"], str(gomax))
+            kwargs["preexec_fn"]()
+            captured.update(kwargs)
+            raise OSError("captured spawn")
+
+        with (
+            patch.object(driver, "live_termination"),
+            patch.object(driver.time, "monotonic", return_value=0),
+            patch.object(driver, "process_groups", return_value={}),
+            patch.object(driver, "memory_available", return_value=10**15),
+            patch.object(driver.signal, "pthread_sigmask", return_value=set()),
+            patch.object(driver.os, "sched_setaffinity", create=True) as affinity,
+            patch.object(driver.os, "sched_getaffinity", create=True,
+                         return_value=set(self.cpus)) as get_affinity,
+            patch.object(driver.subprocess, "Popen", side_effect=spawn),
+        ):
+            with self.assertRaisesRegex(OSError, "captured spawn"):
+                launch()
+            if timed:
+                affinity.assert_called_once_with(0, self.cpus)
+                get_affinity.assert_called_once_with(0)
+            else:
+                affinity.assert_not_called()
+                get_affinity.assert_not_called()
+        self.assertTrue(captured["stdout"].closed)
+        self.assertTrue(captured["start_new_session"])
+
+    def test_narrowed_affinity_refuses_before_exec_and_closes_log(self):
+        """Given kernel narrowing, reject the launch rather than mislabel timing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            owner = self.owner(root, "baseline_a7")
+            captured = {}
+
+            def spawn(*args, **kwargs):
+                captured.update(kwargs)
+                try:
+                    kwargs["preexec_fn"]()
+                except driver.ReviewRequired as error:
+                    # Popen reports preexec failures as SubprocessError.
+                    raise driver.subprocess.SubprocessError("affinity preexec") from error
+                self.fail("narrowed affinity reached exec")
+
+            with patch.object(driver, "live_termination"), \
+                    patch.object(driver.time, "monotonic", return_value=0), \
+                    patch.object(driver.signal, "pthread_sigmask", return_value=set()), \
+                    patch.object(driver.os, "sched_setaffinity", create=True), \
+                    patch.object(driver.os, "sched_getaffinity", create=True,
+                                 return_value=set(self.cpus[:-1])), \
+                    patch.object(driver.subprocess, "Popen", side_effect=spawn), \
+                    self.assertRaisesRegex(driver.subprocess.SubprocessError,
+                                           "affinity preexec") as rejected:
+                owner.start(["fixture"], root, {"GOMAXPROCS": "16"}, root)
+            self.assertEqual(str(rejected.exception.__cause__),
+                             "host narrowed timing affinity")
+            self.assertTrue(captured["stdout"].closed)
+            self.assertEqual(owner.active, [])
+
+    def test_sdk_timing_and_unchanged_oracle_screen_launches(self):
+        """Given each SDK stage, affinity/env and identity match its scope."""
+        for stage, gomax in (("timing", 16), ("oracle", 30), ("screen", 15)):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "jobs").mkdir()
+                job = driver.Job(stage, "sqlite-segment", "tier10")
+                setup = {"identity": {"driver": "fixed", "runtime": {
+                    "affinity": list(range(30))}}, "runtime_libraries": {},
+                    "artifacts": {"bin/sqlite-segment": "binary"}}
+                owner = self.owner(root, "segment_timing" if stage == "timing"
+                                   else "storage")
+                owner.job_minutes = {job.name: 2}
+                self.capture_launch(owner, lambda: driver.execute_stage(
+                    owner, [job], setup, 2, []), timed=stage == "timing",
+                    gomax=gomax)
+                identity = driver.read_json(root / "jobs" / job.name /
+                                            "started.json")
+                if stage == "timing":
+                    self.assertEqual(identity["cpu_set"], self.cpus)
+                    self.assertEqual(identity["GOMAXPROCS"], 16)
+                else:
+                    expected = {"job": driver.asdict(job),
+                        "source": driver.COMMIT, "driver": "fixed",
+                        "archives": {tier: row["sha256"] for tier, row in
+                                     driver.ARCHIVES.items()}, "binary": "binary",
+                        "command": driver.command(job, root),
+                        "GOMAXPROCS": gomax,
+                        "runtime": setup["identity"]["runtime"],
+                        "runtime_libraries": {}}
+                    self.assertEqual(json.dumps(identity, sort_keys=True),
+                                     json.dumps(expected, sort_keys=True))
+
+    def test_auxiliary_and_binding_scopes_preserve_other_identities(self):
+        """Given every auxiliary scope, only timing work gets the CPU key."""
+        scopes = (("catalog", "catalog-bench"), ("hybrid", "hybrid-timing"),
+                  ("hybrid", "hybrid-latency"), ("cpu_cost", "cpu-cost"),
+                  ("baseline_a7", "baseline-a7"), ("smoke", "smoke"),
+                  ("calibration", "calibration"), ("model_a4", "model"))
+        for block, name in scopes:
+            with self.subTest(block=block, name=name), \
+                    tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "aux").mkdir()
+                (root / "python-runtime.json").write_text("{}")
+                owner = self.owner(root, block)
+                timed = block in {"catalog", "hybrid", "cpu_cost", "baseline_a7"}
+                self.capture_launch(owner, lambda: driver.auxiliary(
+                    owner, name, ["fixture"], lambda _: []),
+                    timed=timed, gomax=16 if timed else 30)
+                identity = driver.read_json(root / "aux" / name / "started.json")
+                if timed:
+                    self.assertEqual(identity["cpu_set"], self.cpus)
+                else:
+                    expected = {"source": driver.COMMIT, "command": ["fixture"],
+                        "cwd": str(root / "checkout"),
+                        "environment": {"MARKER": "fixed", "GOMAXPROCS": "30"},
+                        "selected_jobs": [], "python_runtime": driver.digest(
+                            root / "python-runtime.json")}
+                    self.assertEqual(json.dumps(identity, sort_keys=True),
+                                     json.dumps(expected, sort_keys=True))
+
+    def test_retrieval_stays_external_without_environment_or_launch_change(self):
+        """Given retrieval, the unchanged handoff does not start a workload."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            owner = self.owner(root, "retrieval")
+            owner.termination = {"termination_time": "fixed"}
+            block = {"id": "retrieval", "jobs": [{"id": "external"}]}
+            with patch.object(driver, "auxiliary") as aux, \
+                    patch.object(driver.subprocess, "Popen") as spawn:
+                self.assertEqual(driver.binding_block(owner, block),
+                                 "dependency_blocked")
+            aux.assert_not_called()
+            spawn.assert_not_called()
+            self.assertEqual(driver.read_json(root / "A9-handoff.json"), {
+                "state": "external-owner-required", "jobs": block["jobs"],
+                "owner": "pi-gcp", "termination_time": "fixed",
+                "no_credentials_on_vm": True})
+            self.assertEqual(owner.environment, {"MARKER": "fixed"})
+
+    def test_changed_cpu_set_refuses_case_and_auxiliary_resume(self):
+        """Given old timing receipts, a changed set refuses before exec."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = driver.Job("timing", "sqlite-segment", "tier10")
+            setup = {"identity": {"driver": "fixed", "runtime": {}},
+                     "artifacts": {"bin/sqlite-segment": "binary"},
+                     "runtime_libraries": {}}
+            identity = driver.case_identity(job, root, setup, 16,
+                                            cpu_set=list(range(16)))
+            directory = root / "jobs" / job.name
+            directory.mkdir(parents=True)
+            driver.atomic_json(directory / "complete.json", {
+                "identity": identity, "files": {}, "state": "pass"})
+            owner = self.owner(root, "segment_timing")
+            with patch.object(driver, "process_groups", return_value={}), \
+                    patch.object(driver, "memory_available", return_value=10**15), \
+                    patch.object(driver.subprocess, "Popen") as spawn, \
+                    self.assertRaisesRegex(driver.ReviewRequired,
+                                           "completed case identity changed"):
+                driver.execute_stage(owner, [job], setup, 1, [])
+            spawn.assert_not_called()
+            owner.block_id = "catalog"
+            (root / "python-runtime.json").write_text("{}")
+            directory = root / "aux/catalog"
+            directory.mkdir(parents=True)
+            old = {"source": driver.COMMIT, "command": ["fixture"],
+                   "cwd": str(root / "checkout"),
+                   "environment": {"MARKER": "fixed", "GOMAXPROCS": "16"},
+                   "selected_jobs": [], "python_runtime": driver.digest(
+                       root / "python-runtime.json"), "cpu_set": list(range(16))}
+            driver.atomic_json(directory / "complete.json", {
+                "identity": old, "files": {}})
+            with patch.object(driver.subprocess, "Popen") as spawn, \
+                    self.assertRaisesRegex(driver.ReviewRequired,
+                                           "auxiliary identity drift"):
+                driver.auxiliary(owner, "catalog", ["fixture"], lambda _: [])
+            spawn.assert_not_called()
+
+    def test_completed_timing_block_resume_checks_cpu_set(self):
+        """Given a whole saved timing block, only the same set can be reused."""
+        for block in ("segment_timing", "catalog", "hybrid", "cpu_cost", "baseline_a7"):
+            for cpu_set in (self.cpus, list(range(16)), None):
+                with self.subTest(block=block, cpu_set=cpu_set), \
+                        tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    owner = self.owner(root, block)
+                    owner.zero, owner.backstop_deadline = 0, 1000
+                    admission = {"blocks": [{"id": block, "jobs": []}]}
+                    identity = {"configuration": admission, "setup": {},
+                                "allocation": {}, "termination": {}}
+                    saved = {"state": "completed", "files": {}}
+                    if cpu_set is not None:
+                        saved["cpu_set"] = cpu_set
+                    driver.atomic_json(root / "session.json", {
+                        "identity": identity, "blocks": {block: saved}})
+                    with patch.object(driver.time, "monotonic", return_value=0), \
+                            patch.object(driver.signal, "signal"), \
+                            patch.object(driver.signal, "setitimer"), \
+                            patch.object(driver.subprocess, "Popen") as spawn:
+                        if cpu_set == self.cpus:
+                            result = driver.execute_session(
+                                owner, admission, root / "inputs", {}, 1)
+                            self.assertEqual(result["blocks"][block], saved)
+                        else:
+                            with self.assertRaisesRegex(driver.ReviewRequired,
+                                                       "timing CPU set changed"):
+                                driver.execute_session(
+                                    owner, admission, root / "inputs", {}, 1)
+                        spawn.assert_not_called()
+
+    def test_completed_timing_block_records_cpu_set(self):
+        """Given a new timing block, its completion binds the admitted set."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            owner = self.owner(root, "cpu_cost")
+            owner.zero, owner.backstop_deadline = 0, 1000
+            owner.begin_block = unittest.mock.Mock()
+            owner.stop_all = unittest.mock.Mock()
+            with patch.object(driver.time, "monotonic", return_value=0), \
+                    patch.object(driver.signal, "signal"), \
+                    patch.object(driver.signal, "setitimer"), \
+                    patch.object(driver, "binding_block", return_value="completed"), \
+                    patch.object(driver, "block_files", return_value={}):
+                result = driver.execute_session(owner, {"blocks": [
+                    {"id": "cpu_cost", "jobs": []}]}, root / "inputs", {}, 1)
+            self.assertEqual(result["blocks"]["cpu_cost"]["cpu_set"], self.cpus)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux sched affinity inheritance")
+    def test_python_grandchild_inherits_affinity_and_parent_stays_full(self):
+        """Given a tiny child/grandchild, both inherit while the parent does not."""
+        # CI need not have 16 CPUs: synthetic admission tests prove that count.
+        full = set(os.sched_getaffinity(0))
+        subset = sorted(full)[:2]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            owner = self.owner(root, "baseline_a7")
+            owner.timing_cpu_set = subset
+            owner.launch_deadline = time.monotonic() + 15
+            owner.observe, owner.arm_guard = unittest.mock.Mock(), unittest.mock.Mock()
+            code = ("import os,json,subprocess,sys; "
+                    "child=subprocess.check_output([sys.executable,'-c',"
+                    "'import os,json; print(json.dumps(sorted(os.sched_getaffinity(0))))']); "
+                    "print(json.dumps({'child':sorted(os.sched_getaffinity(0)),"
+                    "'grandchild':json.loads(child),'gomax':os.environ['GOMAXPROCS']}))")
+            with patch.object(driver, "live_termination"), \
+                    patch.object(driver, "process_groups", return_value={}):
+                owned = owner.start([sys.executable, "-c", code], root,
+                                    {**os.environ, "GOMAXPROCS": "16"}, root)
+            try:
+                self.assertEqual(owned.process.wait(timeout=5), 0)
+            finally:
+                if owned.process.poll() is None:
+                    owned.process.kill()
+                owned.process.wait(timeout=3)
+                owned.log.close()
+            result = driver.read_json(root / "stdout-stderr.log")
+            self.assertEqual(result["child"], subset)
+            self.assertEqual(result["grandchild"], subset)
+            self.assertEqual(result["gomax"], "16")
+            self.assertEqual(os.sched_getaffinity(0), full)
 
 
 if __name__ == "__main__":
