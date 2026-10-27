@@ -87,7 +87,7 @@ locally, add
 To run a package the way CI does, one worker process per CPU:
 
 ```bash
-TEST_RACE=true python3 scripts/ci-test-partition.py --partition mcp+store
+TEST_RACE=true go run ./scripts/ci-test --partition mcp+store
 ```
 
 ### Linting
@@ -123,8 +123,9 @@ go test -bench=. -benchmem ./internal/graph/
 Your PR has to get past all of these
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
 
-- the full test suite under `-race` with coverage on `ubuntu-latest`, and
-  without `-race` on `macos-latest` and `windows-latest`, as four jobs per OS
+- affected complete packages on PRs, and the full test suite on main/manual
+  runs, under `-race` with coverage on `ubuntu-24.04` and without `-race` on
+  `macos-latest` and `windows-latest`, as up to four jobs per OS
   (macOS still race-checks the indexer's watcher tests). A batch of tests or a
   package that fails while other tests share the runner is rerun once, whole
   and alone; if every test passes then, the job passes and flags the failure
@@ -135,6 +136,10 @@ Your PR has to get past all of these
 - golangci-lint
 - builds with the ONNX and GoMLX embedding tags
 - benchmarks for the parser, query, and graph packages
+
+See [CI test selection](docs/ci-testing.md) for full-suite fallbacks, the
+`ci:full` PR label, and the `CI_FULL_TESTS=true` repository rollback switch.
+CI/dependency changes and Dependabot PRs always run the full suite.
 
 Additional workflows cover security scanning, the install script, init smoke
 tests, and skill drift.

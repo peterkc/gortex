@@ -35,6 +35,7 @@ import (
 
 // RepoMetadata holds per-repo indexing state.
 type RepoMetadata struct {
+	cargoRetarget *IndexResult // warm receipt, guarded by MultiIndexer.mu
 	RepoPrefix    string
 	RootPath      string
 	Identity      *RepoIdentity
@@ -62,6 +63,8 @@ type RepoMetadata struct {
 // retries from repeating successful payload/vector phases and keeps the stable
 // mutation lane closed until every external side effect commits.
 type repositoryUntrackState struct {
+	bridgeConsumerFiles []string
+
 	retainAdmission bool
 	mu              sync.Mutex
 	metadata        *RepoMetadata
@@ -119,6 +122,9 @@ type MultiIndexer struct {
 	goModuleRetry        resolver.GoModuleDepRetry
 	npmPackageMu         sync.Mutex
 	npmPackageCache      *npmPackageSnapshot
+	bridgeManifestMu     sync.Mutex
+	pythonPackageCache   *bridgeManifestSnapshot
+	cargoPackageCache    *bridgeManifestSnapshot
 
 	// pendingRepositoryUntracks is guarded by mu. Entries are installed before
 	// a live repo is hidden and removed only after payload, vector, config, and
@@ -957,8 +963,10 @@ func (mi *MultiIndexer) resolveDeferredMutations(receipt *graph.MutationReceipt,
 			return deferredResolveSkipped, true
 		}
 
+		var masterResolvedFiles []string
 		if receipt.ResolutionRelevant {
 			mi.runMasterResolveFiles(resolutionFiles, false)
+			masterResolvedFiles = resolutionFiles
 			// Evicted definitions' pending references live outside the file
 			// frontier (their name is no longer declared in any frontier
 			// file); rebind them by the names the receipt recorded that no
@@ -968,7 +976,7 @@ func (mi *MultiIndexer) resolveDeferredMutations(receipt *graph.MutationReceipt,
 		// Resolve only files that can create or bind unresolved edges. Resolved
 		// edge sources still materialise their cross_repo_* generation without
 		// repeating the substantially larger name-resolution frontier.
-		mi.runCrossRepoResolveMutationFrontiers(resolutionFiles, receipt.ChangedFiles, receipt.DefinitionFiles)
+		mi.runCrossRepoResolveMutationFrontiers(resolutionFiles, receipt.ChangedFiles, receipt.DefinitionFiles, masterResolvedFiles)
 		return deferredResolveExact, true
 	}
 	if !fallbackNeeded {
@@ -991,11 +999,9 @@ func (mi *MultiIndexer) newMasterResolver(useLSP bool) *resolver.Resolver {
 	}
 	master := resolver.New(mi.graph)
 	master.SetLogger(mi.logger)
-	// The master resolve is the only pass with whole-graph evidence, so it is
-	// the one allowed to durably flag terminally-unresolved edges (permanently
-	// external / stdlib / definition-less) that a later scoped warm resolve can
-	// skip. A scoped/file pass leaves the flag alone; only a full ResolveAll
-	// stamps and self-heals terminal state.
+	// Full resolution owns terminal stamps. Completed tracked-package catch-up
+	// may finish marked callers using the same global name-count proof through
+	// ReconcileBridgeCallerTerminals; ordinary file passes only carry stamps.
 	master.SetStampTerminal(true)
 	// The pre-enrichment queryability pass uses resolver-time LSP precision.
 	// The post-enrichment catch-up disables it because semantic providers just
@@ -1186,7 +1192,7 @@ func (mi *MultiIndexer) RunPreEnrichResolve(ctx context.Context, scope map[strin
 	// Cross-repo references resolve here so a multi-repo workspace is fully
 	// resolved, not just within each repo. Whole-graph so inbound references
 	// from unchanged repos into the changed repos bind too.
-	return mi.runCrossRepoResolveContext(ctx, false)
+	return mi.runWarmCargoResolve(ctx, nil, true)
 }
 
 // RunPreEnrichResolveFiles preserves an exact warm-reconcile frontier through
@@ -1216,10 +1222,9 @@ func (mi *MultiIndexer) RunPreEnrichResolveFiles(ctx context.Context, files []st
 		return err
 	}
 	if resolutionAffected > 0 {
-		return mi.runCrossRepoResolveContext(ctx, false)
+		return mi.runWarmCargoResolve(ctx, nil, true)
 	}
-	mi.runCrossRepoResolveFiles(files)
-	return context.Cause(ctx)
+	return mi.runWarmCargoResolve(ctx, files, false)
 }
 
 func (mi *MultiIndexer) runDeferredGoModAll() {
@@ -2762,6 +2767,9 @@ func (mi *MultiIndexer) indexRepoRaw(repoPrefix string) (*IndexResult, error) {
 	if err := mi.postPublishGoModules(context.Background(), idx, false); err != nil {
 		mi.logger.Warn("post-publish Go module follow-up", zap.Error(err))
 	}
+	result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, mi.cargoConsumerFilesForRepo(repoPrefix, false)...)
+	result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, mi.pythonConsumerFilesForRepo(repoPrefix)...)
+	mi.runCrossRepoResolveFiles(result.CrossRepoResolveFiles)
 
 	mi.ReconcileContractEdges()
 
@@ -3407,6 +3415,10 @@ func (mi *MultiIndexer) trackPreparedRepoSourceCtx(
 		// repository's first registration, never a rewrite of an entry.
 		mi.markRepoRegistered(prefix, absPath)
 		mi.runCrossRepoResolveFiles(mi.npmConsumerFilesForRepo(prefix))
+		if !batchMode.deferResolve {
+			mi.runCrossRepoResolveFiles(mi.cargoConsumerFilesForRepo(prefix, false))
+			mi.runCrossRepoResolveFiles(mi.pythonConsumerFilesForRepo(prefix))
+		}
 
 		// Add to global config.
 		entry.Path = absPath
@@ -3672,6 +3684,9 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 			IsWorktree: isWorktree,
 		}
 		mi.indexers[prefix] = idx
+		if result.CargoRetarget {
+			mi.repos[prefix].cargoRetarget = result
+		}
 		mi.mu.Unlock()
 		installed = true
 		mi.markRepoRegistered(prefix, absPath)
@@ -3705,6 +3720,9 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 		// Parallel warmup deliberately defers both tails to its later workspace
 		// resolve/global phases. A full retrack already ran its own resolve/derived
 		// pipeline and only needs the existing cross-repository contract reconcile.
+		if batchMode.deferResolve && batch != nil {
+			result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, mi.pythonAddedFileConsumers(batch.pythonAddedFiles)...)
+		}
 		if !result.FullRetrack && !batchMode.deferResolve {
 			mi.resolveIncrementalRepoMutation(prefix, result, receipt, batch)
 			if !batchMode.deferGlobalPasses {
@@ -3714,8 +3732,11 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 				})
 			}
 		} else if result.FullRetrack {
+			result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, mi.cargoConsumerFilesForRepo(prefix, false)...)
+			result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, mi.pythonConsumerFilesForRepo(prefix)...)
 			if !batchMode.deferResolve {
 				mi.runCrossRepoResolveFiles(mi.npmConsumerFilesForRepo(prefix))
+				mi.runCrossRepoResolveFiles(result.CrossRepoResolveFiles)
 			}
 			if !batchMode.deferGlobalPasses {
 				if err := mi.postPublishGoModules(ctx, idx, false); err != nil {

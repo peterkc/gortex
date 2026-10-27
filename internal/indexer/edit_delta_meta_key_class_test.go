@@ -6,9 +6,13 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/parser/languages"
 )
 
 // metaKeysRestatedOutsideTheFingerprint names every node or edge metadata key
@@ -45,6 +49,16 @@ var metaKeysRestatedOutsideTheFingerprint = map[string]string{
 	// External module stubs: the module scanner / external-call attribution.
 	"ecosystem":   "modules scanner / resolver external_call_attribution (module nodes)",
 	"import_path": "modules scanner / resolver external_call_attribution (module nodes)",
+
+	// Python imports are restated by whole resolves, file saves, and tracked binding.
+	"python_import":        "resolver attributeNonGoModuleImports / attributePythonModuleImportsForFiles / resolveTrackedPythonImports (exact dotted import spelling)",
+	"cargo_import_stub":    "resolver bindCargoImport / restubTrackedCargoImportsFromView (exact pre-bind import target)",
+	"cargo_import_module":  "resolver bindCargoImport / resolveCargoImports (matched module; cleared by Cargo restub)",
+	"cargo_call_stub":      "resolver CrossRepoResolver.resolveEdge / reuseBindingMetaKeys carry (fresh call spelling)",
+	"python_import_stub":   "resolver resolveTrackedPythonImports / restubTrackedPythonImportsFromView (exact pre-bind target)",
+	"python_call_stub":     "resolver Resolver.resolveEdge / CrossRepoResolver.resolveEdge / reuseBindingMetaKeys carry",
+	"python_reexport_file": "resolver resolvePythonPackageReExport / resolutionMetaAdded prior-binding carry (cleared by Python restub)",
+	"go_import_fallback":   "resolver resolveGoModuleImports (original import target retained in copied Meta)",
 	// Test classification after extraction (test_edges.go).
 	"is_test":      "test pass (test_edges.go)",
 	"is_test_file": "test pass (test_edges.go)",
@@ -138,6 +152,100 @@ func TestEveryMetadataKeyIsFingerprintedOrRestated(t *testing.T) {
 			if len(missing) > 0 {
 				t.Errorf("metadata keys neither fingerprinted nor named with a restater: %v", missing)
 			}
+		})
+	}
+}
+
+func TestPythonImportSpellingEditColdEquivalent(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			openStore := func() graph.Store {
+				if backend == "memory" {
+					return graph.New()
+				}
+				db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.sqlite"))
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, db.Close()) })
+				return db
+			}
+			newIndexer := func(g graph.Store) *Indexer {
+				reg := newTestRegistry()
+				reg.Register(languages.NewPythonExtractor())
+				idx := New(g, reg, config.Default().Index, zap.NewNop())
+				idx.SetRepoPrefix("consumer")
+				t.Cleanup(idx.Close)
+				return idx
+			}
+			imports := func(g graph.Store) []*graph.Edge {
+				var out []*graph.Edge
+				for _, edge := range g.GetOutEdges("consumer/app.py") {
+					if edge.Kind == graph.EdgeImports {
+						out = append(out, edge)
+					}
+				}
+				require.Len(t, out, 1)
+				return out
+			}
+			// Given an attributed import with a stable local alias and module target.
+			root := t.TempDir()
+			file := filepath.Join(root, "app.py")
+			writeFile(t, file, "import pkg.mod as current\ndef run(): return current.open()\n")
+			warm := openStore()
+			idx := newIndexer(warm)
+			_, err := idx.Index(root)
+			require.NoError(t, err)
+			before := imports(warm)[0]
+			require.Equal(t, "pkg.mod", before.Meta["python_import"])
+			require.Equal(t, "module::pypi:pkg", before.To)
+			// When only the dotted module spelling changes, keeping the alias and top.
+			writeFile(t, file, "import pkg.other as current\ndef run(): return current.open()\n")
+			require.NoError(t, idx.IndexFile(file))
+			cold := openStore()
+			_, err = newIndexer(cold).Index(root)
+			require.NoError(t, err)
+			// Then the incremental edge, including python_import, equals a cold index.
+			require.Equal(t, "pkg.other", imports(warm)[0].Meta["python_import"])
+			require.Equal(t, "module::pypi:pkg", imports(warm)[0].To)
+			require.Equal(t, imports(cold), imports(warm))
+		})
+	}
+}
+
+func TestTrackedBridgeMetadataKeysHaveRestaters(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			provider, consumer := t.TempDir(), t.TempDir()
+			trees := map[string]map[string]string{
+				provider: {"go.mod": "module example.org/library\n", "lib.go": "package library\nfunc Hello() {}\n", "Cargo.toml": "[package]\nname='bridge-crate'\nversion='0.1.0'\n", "src/lib.rs": "pub fn helper() {}\n", "pyproject.toml": "[project]\nname='image-dist'\n", "pkg/__init__.py": "from .impl import Factory\n", "pkg/impl.py": "class Factory: pass\n"},
+				consumer: {"go.mod": "module example.org/caller\nrequire example.org/library v1.0.0\n", "main.go": "package caller\nimport library \"example.org/library\"\nfunc Run() { library.Hello() }\n", "Cargo.toml": "[package]\nname='consumer'\nversion='0.1.0'\n[dependencies]\nbridge-crate='1'\n", "src/lib.rs": "use bridge_crate::helper;\npub fn run() { helper(); }\n", "pyproject.toml": "[project]\ndependencies=['image-dist']\n", "app.py": "from pkg import Factory\ndef run(): return Factory()\n"},
+			}
+			for root, tree := range trees {
+				for file, source := range tree {
+					writeWorkspaceFile(t, root, file, source)
+				}
+			}
+			entries := []config.RepoEntry{{Path: consumer, Name: "consumer", Workspace: "shared"}, {Path: provider, Name: "provider", Workspace: "shared"}}
+			mi, g := newPythonBridgeIdentityIndexer(t, backend, entries)
+			mi.registry.Register(languages.NewRustExtractor())
+			_, err := mi.IndexAll()
+			require.NoError(t, err)
+			check := func() {
+				present := map[string]bool{}
+				for _, edge := range g.AllEdges() {
+					for key := range edge.Meta {
+						present[key] = true
+					}
+				}
+				for _, key := range []string{"cargo_import_stub", "cargo_import_module", "cargo_call_stub", "python_import_stub", "python_call_stub", "python_reexport_file", "go_import_fallback"} {
+					require.True(t, present[key], "fixture must exercise %s", key)
+					require.NotEmpty(t, metaKeysRestatedOutsideTheFingerprint[key], "missing bridge restater for %s", key)
+				}
+			}
+			check()
+			result, err := mi.IncrementalReindexRepo("consumer", nil)
+			require.NoError(t, err)
+			require.Zero(t, result.StaleFileCount)
+			check()
 		})
 	}
 }

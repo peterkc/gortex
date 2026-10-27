@@ -537,13 +537,25 @@ func (mi *MultiIndexer) resolveIncrementalRepoMutationMode(
 		batch.dropDeferredPriorBindings()
 	}
 	crossRepoFiles := appendUniqueSorted(nil, files...)
+	if result != nil && batch != nil {
+		result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, mi.pythonAddedFileConsumers(batch.pythonAddedFiles)...)
+	}
+	cargoRetargetRepo := ""
 	if batch != nil {
 		crossRepoFiles = appendUniqueSorted(crossRepoFiles, batch.npmConsumerFiles...)
+		crossRepoFiles = appendUniqueSorted(crossRepoFiles, batch.cargoConsumerFiles...)
+		if batch.cargoAddedFile {
+			crossRepoFiles = appendUniqueSorted(crossRepoFiles, mi.cargoAddedFileConsumers(repoPrefix)...)
+			cargoRetargetRepo = repoPrefix
+		}
+		crossRepoFiles = appendUniqueSorted(crossRepoFiles, batch.pythonConsumerFiles...)
 	}
 	if result != nil {
+		crossRepoFiles = appendUniqueSorted(crossRepoFiles, result.CrossRepoResolveFiles...)
 		crossRepoFiles = appendUniqueSorted(crossRepoFiles, result.DerivedInvalidation.Files...)
 	}
 	idx := mi.GetIndexer(repoPrefix)
+	var masterResolvedFiles []string
 	if needed && len(files) > 0 && idx != nil {
 		resolvedFiles := idx.runIncrementalResolutionCatchup(files, batch, func(frontier []string) {
 			if idx.incrementalResolveFilesHook != nil {
@@ -552,12 +564,14 @@ func (mi *MultiIndexer) resolveIncrementalRepoMutationMode(
 			}
 			mi.runMasterResolveFilesWithEvidence(frontier, false, idx.resolver)
 		})
+		masterResolvedFiles = files
 		crossRepoFiles = appendUniqueSorted(crossRepoFiles, resolvedFiles...)
 		if receipt != nil && receipt.Complete {
 			mi.runMasterResolveNames(vanishedReceiptNames(mi.graph, receipt))
 		}
 	} else if needed && len(files) > 0 {
 		mi.runMasterResolveFiles(files, false)
+		masterResolvedFiles = files
 		if receipt != nil && receipt.Complete {
 			mi.runMasterResolveNames(vanishedReceiptNames(mi.graph, receipt))
 		}
@@ -588,12 +602,12 @@ func (mi *MultiIndexer) resolveIncrementalRepoMutationMode(
 		}
 		crossRepoFiles = appendUniqueSorted(crossRepoFiles, semanticFiles...)
 	}
-	if needed || len(semanticFiles) > 0 || batch != nil && len(batch.npmConsumerFiles) > 0 {
+	if needed || len(semanticFiles) > 0 || result != nil && len(result.CrossRepoResolveFiles) > 0 || batch != nil && (len(batch.npmConsumerFiles) > 0 || len(batch.pythonConsumerFiles) > 0 || len(crossRepoFiles) > 0 && (batch.cargoAddedFile || len(batch.cargoConsumerFiles) > 0)) {
 		if idx != nil {
 			idx.observeIncrementalCatchup("cross_repo", crossRepoFiles)
 		}
 		if len(crossRepoFiles) > 0 {
-			mi.runCrossRepoResolveFiles(crossRepoFiles)
+			mi.runCrossRepoResolveMutationFrontiers(crossRepoFiles, crossRepoFiles, crossRepoFiles, masterResolvedFiles, cargoRetargetRepo)
 		} else {
 			mi.runCrossRepoResolve(false)
 		}

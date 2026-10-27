@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   # Run on the merged commit to verify the extended parser regression gate (#991).
   workflow_dispatch:
 
@@ -38,56 +39,77 @@ jobs:
       - name: Stress parser with release cgo flags
         run: go test -race -count=50 -timeout=50m ./internal/parser/...
 
-  test:
-    runs-on: ${{ matrix.os }}
-    # Each job compiles its packages once and runs their tests on one worker
-    # process per CPU (scripts/ci-test-partition.py), so four jobs per OS cover
-    # every test. Linux runs -race with coverage; macOS and Windows run the
-    # same tests without them, and macOS race-checks the indexer's watcher
-    # tests, which drive its FSEvents and kqueue backends.
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-latest, windows-latest]
-        partition: ["indexer:1/2", "indexer:2/2", "mcp+store", "rest"]
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+      mode: ${{ steps.select.outputs.mode }}
+      has_tests: ${{ steps.select.outputs.has_tests }}
+      empty_ok: ${{ steps.select.outputs.empty_ok }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          # Keyed apart from the build jobs' go.sum-only cache, which holds
-          # no -race objects for the Linux tests to reuse.
+      - name: Test selection and runner fixtures
+        run: go test -count=1 ./internal/citest
+      - name: Test workflow policy through the production gate
+        run: go test -count=1 ./scripts/ci-result
+      - name: Select complete packages or fall back to full
+        id: select
+        env:
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_FULL_TESTS: ${{ vars.CI_FULL_TESTS }}
+        run: go run ./scripts/ci-select --output test-selection.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-selection
+          path: test-selection.json
+
+  test:
+    needs: plan
+    if: needs.plan.outputs.has_tests == 'true'
+    runs-on: ${{ matrix.os }}
+    # Whole selected packages retain the existing census, batching, failure
+    # evidence and platform behavior. Full mode includes all twelve rows.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
           cache-dependency-path: |
             go.sum
             go.mod
-
-      # Linux's build jobs already build the binary.
-      - name: Build
-        if: matrix.partition == 'rest' && matrix.os != 'ubuntu-24.04'
-        run: go build -o gortex ./cmd/gortex/
-
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: test-selection
       - name: Test
         shell: bash
         env:
           TEST_PARTITION: ${{ matrix.partition }}
+          TEST_TARGET: ${{ matrix.os }}
           TEST_RACE: ${{ matrix.os == 'ubuntu-24.04' }}
           TEST_WINDOWS: ${{ matrix.os == 'windows-latest' }}
-        run: |
-          if [[ "$TEST_WINDOWS" == true ]]; then
-            python scripts/ci-test-partition.py
-          else
-            python3 scripts/ci-test-partition.py
-          fi
-
-      - name: Upload coverage
-        if: matrix.os == 'ubuntu-24.04'
+        run: go run ./scripts/ci-test --selection test-selection.json
+      - name: Upload full-suite coverage
+        if: matrix.os == 'ubuntu-24.04' && needs.plan.outputs.mode == 'full'
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: coverage.out
         continue-on-error: true
-
+      - name: Preserve partial coverage separately
+        if: matrix.os == 'ubuntu-24.04' && needs.plan.outputs.mode == 'affected'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: affected-coverage-${{ strategy.job-index }}
+          path: coverage.out
       - name: Upload test logs
         if: failure() || cancelled()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -95,6 +117,40 @@ jobs:
           name: test-logs-${{ matrix.os }}-${{ strategy.job-index }}
           path: ${{ runner.temp }}/gt/*/logs/
           retention-days: 7
+
+  build-native:
+    # build-onnx already builds default Linux; always build the other OSes.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go build -o gortex ./cmd/gortex/
+
+  smoke:
+    needs: plan
+    if: needs.plan.outputs.mode == 'affected'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Runtime handler/transport wiring is not fully described by imports.
+      # These existing integration tests supplement complete selected packages.
+      - name: Runtime integration smoke with race detection
+        run: >-
+          go test -race -count=1 -timeout=10m
+          -gcflags=modernc.org/sqlite/lib=-race=false
+          -gcflags=modernc.org/libc/...=-race=false
+          ./cmd/gortex/
+          -run '^(TestDaemon_EndToEnd_ToolHandlerCanReturnItsDispatchSlot|TestComposeWiresTheLeaseManagerIntoTheRESTSurface)$'
 
   build-linux-static:
     # The linux release ships a statically linked binary so it runs on any
@@ -159,7 +215,7 @@ jobs:
         run: sh scripts/check-cgo-flags.sh
 
       - name: CI test layout
-        run: python3 -m unittest scripts/test_ci_test_partition.py
+        run: go run ./scripts/ci-test --check-workflow .github/workflows/ci.yml
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
@@ -231,3 +287,19 @@ jobs:
 
       - name: Run benchmarks
         run: go test -run '^$' -bench=. -benchmem -count=1 -benchtime=1x -timeout=20m ./internal/parser/languages/ ./internal/query/ ./internal/graph/
+
+  ci-result:
+    name: CI result
+    if: always()
+    needs: [plan, test, smoke, build-native, lint, build-linux-static, build-onnx, benchmark, parser-stress]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false # This small tool needs only the standard library.
+      - name: Require the planned tests and all unchanged CI gates
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: go run ./scripts/ci-result

@@ -2743,6 +2743,7 @@ func (r *Resolver) ResolveFileAndIncoming(filePath string) *ResolveStats {
 	r.resolveFileEdgesLocked(filePath, stats)
 	forwardDuration := time.Since(forwardStarted)
 	attributionStarted := time.Now()
+	r.attributePythonModuleImportsForFiles([]string{filePath})
 	r.runFileAttributionPassesForFileLocked(filePath)
 	attributionDuration := time.Since(attributionStarted)
 	incomingStarted := time.Now()
@@ -3296,6 +3297,7 @@ func startIncrementalPhase(logger *zap.Logger, phase string) func(...zap.Field) 
 // has built the per-pass indexes.
 func (r *Resolver) resolveFileLocked(filePath string, stats *ResolveStats) {
 	r.resolveFileEdgesLocked(filePath, stats)
+	r.attributePythonModuleImportsForFiles([]string{filePath})
 	r.runFileAttributionPassesForFileLocked(filePath)
 }
 
@@ -4079,6 +4081,19 @@ func (r *Resolver) resolveEdge(e *graph.Edge, stats *ResolveStats) (oldTo string
 		}
 	}
 
+	// External terminals need their spelling before a later tracked import retry.
+	if e.To != oldTo && e.Kind == graph.EdgeCalls && isPythonSourcePath(e.FilePath) && (e.CrossRepo || isExternalCandidateTarget(e.To)) {
+		if e.Meta == nil {
+			e.Meta = make(map[string]any)
+		}
+		if original, _ := e.Meta[PythonCallStubMeta].(string); original == "" {
+			e.Meta[PythonCallStubMeta] = oldTo
+		}
+	}
+	if e.To != oldTo {
+		graph.RestoreRestubProvenance(e)
+		clearEdgeTerminal(e)
+	}
 	return oldTo, e.To != oldTo
 }
 

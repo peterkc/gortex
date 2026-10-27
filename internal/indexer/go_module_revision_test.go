@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -138,6 +139,14 @@ func TestGoModuleUntrackSettlesColdEquivalent(t *testing.T) {
 				cold := revisionColdGraph(t, backend, coldRepos)
 				require.Equal(t, want, goModuleLifecycleCall(t, cold).To)
 				assert.Equal(t, want, goModuleLifecycleCall(t, g).To)
+				// Import settlement must match cold immediately, without a global resolve.
+				wantImports := revisionCallTargets(cold, "a/main.go", graph.EdgeImports)
+				if mode != "tie" {
+					require.Equal(t, []string{"external::example.org/library"}, wantImports)
+				} else {
+					require.Equal(t, []string{"fork/lib.go"}, wantImports)
+				}
+				assert.ElementsMatch(t, wantImports, revisionCallTargets(g, "a/main.go", graph.EdgeImports))
 			})
 		}
 	}
@@ -244,10 +253,13 @@ func TestGoModuleUntrackRetainsOnlyParkedIdentities(t *testing.T) {
 				require.NoError(t, err)
 			}
 			parked := restubGoModuleRepoIncoming(g, "b")
-			require.Len(t, parked, 1)
+			require.ElementsMatch(t, []graph.EdgeIdentity{
+				{From: "a/main.go", To: "unresolved::import::example.org/library", Kind: graph.EdgeImports, FilePath: "a/main.go", Line: 2},
+				{From: "a/main.go::Caller", To: "unresolved::extern::example.org/library::Hello", Kind: graph.EdgeCalls, FilePath: "a/main.go", Line: 3},
+			}, parked, "both caller-owned references must survive and settle")
 			assert.IsType(t, []graph.EdgeIdentity{}, parked, "teardown must not retain full metadata-bearing edge objects")
 			g.EvictFile("b/lib.go")
-			require.NoError(t, mi.finalizeUntrackedGoModuleCalls(parked))
+			require.NoError(t, mi.finalizeUntrackedGoModuleCalls("b", parked))
 			cold := revisionColdGraph(t, backend, repos[:1])
 			assert.ElementsMatch(t, revisionCallTargets(cold, "a/main.go::Caller", graph.EdgeCalls), revisionCallTargets(g, "a/main.go::Caller", graph.EdgeCalls))
 		})
@@ -316,13 +328,16 @@ func TestGoModuleParkedLookupRejectsMismatchedRows(t *testing.T) {
 				require.NoError(t, err)
 			}
 			parked := restubGoModuleRepoIncoming(g, "b")
-			require.Len(t, parked, 1)
+			require.ElementsMatch(t, []graph.EdgeIdentity{
+				{From: "a/main.go", To: "unresolved::import::example.org/library", Kind: graph.EdgeImports, FilePath: "a/main.go", Line: 2},
+				{From: "a/main.go::Caller", To: "unresolved::extern::example.org/library::Hello", Kind: graph.EdgeCalls, FilePath: "a/main.go", Line: 3},
+			}, parked, "both caller-owned references must survive and settle")
 			require.NotEmpty(t, g.(graph.EdgeIdentityBatchFinder).FindEdgesByIdentities(parked), "parked row must exist before purge")
 			g.EvictFile("b/lib.go")
 			require.NotEmpty(t, g.(graph.EdgeIdentityBatchFinder).FindEdgesByIdentities(parked), "parked row must survive purge")
 			wrapped := &goModuleMismatchedFinderStore{Store: g}
 			mi.graph = wrapped
-			require.NoError(t, mi.finalizeUntrackedGoModuleCalls(parked))
+			require.NoError(t, mi.finalizeUntrackedGoModuleCalls("b", parked))
 			assert.Zero(t, wrapped.writes, "identity mismatch must not schedule an edge mutation")
 			assert.Zero(t, wrapped.lookups, "identity mismatch must be rejected before symbol lookup")
 		})
@@ -366,7 +381,7 @@ func TestGoModuleParkedLookupWithoutFinder(t *testing.T) {
 			parked := restubGoModuleRepoIncoming(g, "b")
 			g.EvictFile("b/lib.go")
 			mi.graph = &goModuleNoFinderStore{Store: g}
-			require.NoError(t, mi.finalizeUntrackedGoModuleCalls(parked))
+			require.NoError(t, mi.finalizeUntrackedGoModuleCalls("b", parked))
 			cold := revisionColdGraph(t, backend, repos[:1])
 			assert.ElementsMatch(t, revisionCallTargets(cold, "a/main.go::Caller", graph.EdgeCalls), revisionCallTargets(g, "a/main.go::Caller", graph.EdgeCalls))
 		})
@@ -445,6 +460,44 @@ func TestGoModuleSameStampCallerReindexColdEquivalent(t *testing.T) {
 			cold := revisionColdGraph(t, backend, repos[:2])
 			require.ElementsMatch(t, []string{"external-call::dep::example.org/library", "b/lib.go::Present"}, revisionCallTargets(cold, "a/main.go::Caller", graph.EdgeCalls))
 			assert.ElementsMatch(t, revisionCallTargets(cold, "a/main.go::Caller", graph.EdgeCalls), revisionCallTargets(g, "a/main.go::Caller", graph.EdgeCalls))
+		})
+	}
+}
+
+// Given A imports B and an unrelated C is tracked, when C is untracked,
+// then A's resolved import and B's package projection remain unchanged.
+func TestGoModuleUntrackUnrelatedRepoKeepsImport(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			mi, g, repos := goModuleLifecycleFixture(t, backend)
+			third := t.TempDir()
+			writeFile(t, filepath.Join(third, "go.mod"), "module example.org/unrelated\n")
+			writeFile(t, filepath.Join(third, "lib.go"), "package unrelated\nfunc Other() {}\n")
+			for _, entry := range append(repos[:2], config.RepoEntry{Path: third, Name: "c", Workspace: "shared"}) {
+				_, err := mi.TrackRepoCtx(t.Context(), entry)
+				require.NoError(t, err)
+			}
+			imports := g.GetOutEdges("a/main.go")
+			var before *graph.Edge
+			for _, edge := range imports {
+				if edge.Kind == graph.EdgeImports {
+					copy := *edge
+					copy.Meta = maps.Clone(edge.Meta)
+					before = &copy
+				}
+			}
+			require.NotNil(t, before)
+			require.Equal(t, "b/lib.go", before.To)
+			require.True(t, before.CrossRepo)
+			_, _, err := mi.UntrackRepoChecked(t.Context(), "c")
+			require.NoError(t, err)
+			for _, edge := range g.GetOutEdges("a/main.go") {
+				if edge.Kind == graph.EdgeImports {
+					require.Equal(t, *before, *edge)
+				}
+			}
+			require.Equal(t, []string{"b/lib.go"}, revisionCallTargets(g, "a/main.go", graph.EdgeImports))
+			require.Equal(t, "b/lib.go::Hello", goModuleLifecycleCall(t, g).To)
 		})
 	}
 }

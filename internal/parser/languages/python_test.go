@@ -515,3 +515,11 @@ func pyNodeIDs(nodes []*graph.Node) []string {
 	}
 	return out
 }
+
+func TestPyExtractor_ImportedReceiverBindings(t *testing.T) {
+	result, err := NewPythonExtractor().Extract("app.py", []byte("from pkg.image import Image as Picture, Other\n"))
+	require.NoError(t, err)
+	imports := edgesOfKind(result.Edges, graph.EdgeImports)
+	require.Len(t, imports, 1)
+	require.Equal(t, map[string]any{"Picture": "Image", "Other": "Other"}, imports[0].Meta["python_bindings"])
+}

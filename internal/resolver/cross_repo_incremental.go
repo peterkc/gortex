@@ -2,6 +2,10 @@ package resolver
 
 import (
 	"context"
+	"maps"
+	"path"
+	"slices"
+	"strings"
 
 	"go.uber.org/zap"
 
@@ -26,7 +30,7 @@ func (cr *CrossRepoResolver) ResolveMutationFiles(resolutionFiles, materializati
 }
 
 // CrossRepoIncomingAdmission is one cross-repository mutation pass's bounded
-// incoming-stub admission: the completeness fact plus the typed refusal that
+// incoming-stub and Go-import admission: the completeness fact plus the typed refusal that
 // produced it (*graph.BoundedLocalizationLimitError, nil when nothing was
 // refused).
 //
@@ -37,7 +41,8 @@ func (cr *CrossRepoResolver) ResolveMutationFiles(resolutionFiles, materializati
 // one that refused to admit the incoming work it had.
 type CrossRepoIncomingAdmission struct {
 	graph.IncomingSourceAdmission
-	Refusal error
+	Refusal         error
+	IncomingRefused bool // Separates incoming proof from independent Go import recovery.
 }
 
 // ResolveMutationFrontiers preserves the distinct edge-source and changed-
@@ -64,14 +69,52 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 		return stats, admission
 	}
 
+	providerRepos := make(map[string]bool)
+	goMutation := false
+	goManifestMutation := false
+	for _, files := range [][]string{resolutionFiles, edgeSourceFiles} {
+		for _, file := range files {
+			if goModuleManifestPath(file) {
+				goManifestMutation = true
+				goMutation = true
+			}
+			if strings.HasSuffix(file, ".go") {
+				goMutation = true
+			}
+		}
+	}
+	for _, file := range definitionFiles {
+		if goModuleManifestPath(file) {
+			goManifestMutation = true
+			goMutation = true
+		}
+		repo := graph.RepoPrefixOfID(file)
+		if strings.HasSuffix(file, ".go") && !strings.HasSuffix(file, "_test.go") && cr.goModules[repo] != "" {
+			providerRepos[repo] = true
+			goMutation = true
+		}
+	}
+	importBudget := newGoModuleImportRecoveryBudget()
+	// Provider and build-list recovery need the seed before the pass lock.
+	// Ordinary consumer frontiers keep local resolution ahead of the bridge.
+	if len(providerRepos) > 0 || goManifestMutation {
+		if err := cr.seedGoModuleImportRegistry(context.Background()); err != nil {
+			cr.logger.Warn("cross-repo resolve: seed Go module imports deferred", zap.Error(err))
+		}
+	}
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
+	cr.goModuleImportsDeferred = 0
 
+	budget := &graph.IncomingSourceBudget{}
 	if len(resolutionFiles) > 0 {
 		frontier := collectIncrementalFileFrontier(cr.graph, resolutionFiles, nil)
-		admission = CrossRepoIncomingAdmission{
-			IncomingSourceAdmission: frontier.incomingAdmission,
-			Refusal:                 frontier.incomingRefusal,
+		admission.Keys += frontier.incomingAdmission.Keys
+		admission.Inspected += frontier.incomingAdmission.Inspected
+		admission.Dropped += frontier.incomingAdmission.Dropped
+		admission.Limit = frontier.incomingAdmission.Limit
+		if frontier.incomingAdmission.Refused {
+			admission.Refused, admission.Refusal = true, frontier.incomingRefusal
 		}
 		logIncomingAdmissionRefusal(cr.logger, "cross_repo_preparation", len(frontier.stubKeys),
 			frontier.incomingAdmission, frontier.incomingRefusal)
@@ -86,10 +129,30 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 				}
 			}
 		}
+		// The per-repo pass has made missing Rust imports external already.
+		// Keep outgoing imports for the tracked-crate retry too.
+		if cr.cargoCrates != nil {
+			for _, edges := range frontier.outByNode {
+				for _, edge := range edges {
+					if cr.cargoImportSpec(edge) != "" {
+						frontier.pending = append(frontier.pending, edge)
+					}
+				}
+			}
+		}
+		if cr.pythonPackages != nil {
+			for _, edges := range frontier.outByNode {
+				for _, edge := range edges {
+					if trackedPythonImportSpec(edge) != "" {
+						frontier.pending = append(frontier.pending, edge)
+					}
+				}
+			}
+		}
 		pending := make([]*graph.Edge, 0, len(frontier.pending))
 		seen := make(map[graph.EdgeIdentity]struct{}, len(frontier.pending))
 		for _, edge := range frontier.pending {
-			if edge == nil || !graph.IsUnresolvedTarget(edge.To) && trackedNpmImportSpec(edge) == "" {
+			if edge == nil || !graph.IsUnresolvedTarget(edge.To) && trackedNpmImportSpec(edge) == "" && cr.cargoImportSpec(edge) == "" && trackedPythonImportSpec(edge) == "" {
 				continue
 			}
 			identity := graph.EdgeIdentityFor(edge)
@@ -100,13 +163,27 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 			pending = append(pending, edge)
 		}
 		if len(pending) > 0 {
-			stats = cr.resolveScopedLocked(pending)
+			resolved := cr.resolveScopedLocked(pending)
+			stats.Resolved += resolved.Resolved
+			stats.Unresolved += resolved.Unresolved
+			stats.CrossRepoEdges += resolved.CrossRepoEdges
+			for repo, count := range resolved.ByRepo {
+				stats.ByRepo[repo] += count
+			}
 		}
+		// Preserve ordinary local-file resolution, but count each import only
+		// once if the module bridge subsequently lifts its dependency fallback.
+		counted := make(map[graph.EdgeIdentity]bool)
+		for _, e := range pending {
+			if e.Kind == graph.EdgeImports {
+				counted[graph.EdgeIdentityFor(e)] = !graph.IsUnresolvedTarget(e.To) && !strings.HasPrefix(e.To, "external::")
+			}
+		}
+		_ = cr.resolveGoModuleImports(context.Background(), resolutionFiles, stats, counted)
 	}
 	if len(definitionFiles) > 0 && len(cr.goModules) > 0 && !admission.Refused {
-		budget := &graph.IncomingSourceBudget{}
-		if admission.Inspected > 0 {
-			if err := budget.Charge(admission.Inspected); err != nil {
+		if frontierInspected := admission.Inspected; frontierInspected > 0 {
+			if err := budget.Charge(frontierInspected); err != nil {
 				admission.Refused, admission.Refusal = true, err
 			}
 		}
@@ -124,9 +201,46 @@ func (cr *CrossRepoResolver) ResolveMutationFrontiersBounded(resolutionFiles, ed
 	}
 	// A newly tracked module also makes old dep/stdlib terminals eligible.
 	// This indexed sweep runs at most once per module/config revision.
-	if !admission.Refused {
-		if err := cr.retryGoModuleDeps(context.Background(), stats); err != nil {
+	if goMutation && !admission.Refused {
+		if err := cr.retryGoModuleDeps(context.Background(), stats, false); err != nil {
 			cr.logger.Error("cross-repo resolve: retry Go module terminals", zap.Error(err))
+		}
+	}
+	if !goMutation {
+		cr.retryPendingGoModuleEdges(stats)
+	}
+	// Import recovery has its own ceiling: a popular provider must not starve
+	// incoming calls or the revision-keyed call-terminal retry above. A skipped
+	// provider stays stale until a full pass; it must not reopen the revision.
+	for _, repo := range slices.Sorted(maps.Keys(providerRepos)) {
+		ids := cr.goModuleImportIDs(repo)
+		if len(ids) > importBudget.Remaining() {
+			cr.logger.Warn("cross-repo resolve: provider consumers stay stale until next full pass", zap.String("repo", repo), zap.Int("imports", len(ids)), zap.Int("remaining", importBudget.Remaining()))
+			continue
+		}
+		if err := importBudget.Charge(len(ids)); err != nil {
+			cr.logger.Warn("cross-repo resolve: provider consumers stay stale until next full pass", zap.String("repo", repo), zap.Error(err))
+			continue
+		}
+		for start := 0; start < len(ids); start += externalCallMutationChunk {
+			if err := cr.restoreGoModuleImportBatch(context.Background(), repo, ids[start:min(start+externalCallMutationChunk, len(ids))], stats); err != nil {
+				cr.logger.Error("cross-repo resolve: restore Go module imports", zap.Error(err))
+			}
+		}
+	}
+
+	admission.IncomingRefused = admission.Refused
+	if deferred := cr.goModuleImportsDeferred; deferred > 0 {
+		admission.Refused = true
+		admission.Dropped += deferred
+		admission.Limit = graph.MaxIncomingSourceCandidateRows
+		if admission.Refusal == nil {
+			admission.Refusal = &graph.BoundedLocalizationLimitError{Resource: "Go module import recovery", Limit: graph.MaxIncomingSourceCandidateRows}
+		}
+		if state := cr.goModuleRetry; state != nil {
+			state.mu.Lock()
+			state.complete = false
+			state.mu.Unlock()
 		}
 	}
 	DetectCrossRepoEdgesForMutationFiles(cr.graph, edgeSourceFiles, definitionFiles)
@@ -148,4 +262,15 @@ func DetectCrossRepoEdgesForMutationFiles(g graph.Store, edgeSourceFiles, defini
 		return 0
 	}
 	return materializeCrossRepoCandidates(g, crossRepoCandidatesForMutationFiles(g, edgeSourceFiles, definitionFiles))
+}
+
+// Keep the Go build-list inputs aligned with the indexer's generation input
+// boundary. Source-only suffix checks miss workspace and vendor changes.
+func goModuleManifestPath(file string) bool {
+	file = strings.ReplaceAll(file, "\\", "/")
+	switch path.Base(file) {
+	case "go.mod", "go.sum", "go.work", "go.work.sum":
+		return true
+	}
+	return file == "vendor/modules.txt" || strings.HasSuffix(file, "/vendor/modules.txt")
 }
