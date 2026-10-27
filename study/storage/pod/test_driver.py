@@ -1389,6 +1389,10 @@ class TimingCpuTests(unittest.TestCase):
                          root / str(p).lstrip("/")),
             patch.object(driver.platform, "system", return_value="Linux"),
             patch.object(driver.platform, "machine", return_value="x86_64"),
+            # platform.platform() would run `uname -p` through the Popen
+            # mock below; fixed values keep the host record subprocess-free.
+            patch.object(driver.platform, "release", return_value="fixture"),
+            patch.object(driver.platform, "platform", return_value="fixture"),
             patch.object(driver.os, "sched_getaffinity", create=True,
                          return_value=set(range(30))),
             patch.object(driver.subprocess, "Popen") as spawn,
@@ -1576,6 +1580,7 @@ class TimingCpuTests(unittest.TestCase):
                 (root / "aux").mkdir()
                 (root / "python-runtime.json").write_text("{}")
                 owner = self.owner(root, block)
+                owner.job_minutes = {name: 2}
                 timed = block in {"catalog", "hybrid", "cpu_cost", "baseline_a7"}
                 self.capture_launch(owner, lambda: driver.auxiliary(
                     owner, name, ["fixture"], lambda _: []),
