@@ -1,3 +1,96 @@
+# GCE driver adaptation (2026-10-27)
+
+Source preparation only. This section supersedes the earlier Prime/launchd
+references retained below as historical phase-1 evidence. The lead owns the
+amended-plan approval, fork CI, commit/pin and VM admission. This task made no VM or cloud API calls.
+
+## Current contract
+
+- The procedure requires pi-gcp, GCE max-run-duration DELETE, provider TTL,
+  TERMINATE maintenance, no VM credentials and exactly 710 duration minutes.
+  Backstop minutes remain finite and within 690..720. Unknown fields reject.
+- Allocation has exactly name, zone, project, id and created_at. The normalized
+  receipt has exactly 24 fields, including provider duration seconds, boot disk
+  name/type/size and source image. It binds the VM identity and creation time.
+- Project is peterkc-dev. Status is RUNNING. Provisioning is STANDARD. The boot
+  disk is 700 GB pd-balanced with auto-delete. Service accounts are an empty
+  list. Login/UID/GPU and the firewall rule remain recorded; no GPU name pin
+  or cloud/SSH operation is added. The image must contain the approved family
+  name common-cu129-ubuntu-2204-nvidia-580, including resolved image names.
+- Whole-second aware timestamps use parse_time. TTL equals last_start_time
+  plus 710 minutes within 60 seconds. The absolute termination interval is
+  created_at + 710:00 through +719:30, inclusive. Start later than +9:30 also
+  rejects: otherwise the 60-second tolerance could conceal a late start.
+- live_termination takes the validated procedure explicitly. The supervisor
+  copies it and rechecks the live receipt before each spawn. Its deadline is
+  the earlier of created_at + backstop_minute and provider termination_time.
+  Every block respects that bound; the session's 720-minute ceiling remains.
+- A9 handoffs record termination_time, not the removed deadline_pdt field.
+  Launchd, plist/calendar, awake/caffeinate and Prime CLI requirements are gone.
+  The server TTL, DELETE action, disk auto-delete and absolute bounds replace
+  those safeguards. pi-gcp still owns VM/disk/firewall deletion readback.
+
+## Tests authored, not run
+
+Existing bindings, recipe, scheduling and process tests remain. Twenty
+new methods cover the GCE procedure and receipt rejection paths:
+
+- `test_gce_allocation_shape_and_project_refuse`
+- `test_gce_backstop_outside_bounds_refuses`
+- `test_gce_credentials_present_refuses`
+- `test_gce_exact_termination_boundaries_pass`
+- `test_gce_extra_procedure_field_refuses`
+- `test_gce_late_start_cannot_hide_inside_ttl_tolerance`
+- `test_gce_missing_procedure_field_refuses`
+- `test_gce_old_launchd_procedure_refuses`
+- `test_gce_procedure_passes_preflight`
+- `test_gce_provider_ttl_false_refuses`
+- `test_gce_remaining_pinned_procedure_fields_refuse`
+- `test_gce_service_account_present_refuses`
+- `test_gce_status_not_running_refuses`
+- `test_gce_stop_action_refuses`
+- `test_gce_termination_709_minutes_59_seconds_refuses`
+- `test_gce_termination_719_minutes_31_seconds_refuses`
+- `test_gce_wrong_boot_disk_size_refuses`
+- `test_gce_wrong_boot_disk_type_refuses`
+- `test_gce_wrong_mechanism_refuses`
+- `test_gce_wrong_source_image_refuses`
+
+No baseline test method was deleted. Two initial, uncommitted 720/709-minute
+cases were replaced by the required 719:31 and 709:59 cases after the lead
+tightened the bounds. These existing methods were updated:
+
+- test_backstop_is_separate_from_session_and_bounds_retrieval retains the
+  720-minute versus earlier-backstop distinction. GCE TTL replaces launchd
+  calendar data, and it checks a provider bound earlier than client backstop.
+- test_live_receipt_exact_binding_and_no_spawn_on_rejection retains exact
+  identity and no-spawn rejection, now using GCE VM fields.
+- test_stop_receipt_requires_actual_pi_gcp_fields_and_state retains exhaustive
+  missing-field rejection and policy/type failures. Its obsolete plist,
+  calendar, caffeinate and launchctl cases are replaced by GCE receipt cases.
+- test_timestamp_normalization_and_full_enforcement_invocation retains generic
+  ISO fraction/Z parsing and the complete argv. A fractional live allocation
+  now rejects because the GCE receipt contract requires whole seconds.
+- Existing live/start fixtures now pass the explicit procedure dependency.
+  No other preflight input contract is changed.
+
+## Verification
+
+Python 3.11.15 py_compile of run.py and test_driver.py passed, exit 0 with
+empty output. Python 3.10 grammar parsing passed. These are syntax checks only.
+Runtime/unit tests and provider behavior are unrun locally under the Mac hold;
+Linux CI is required.
+The production Python diff is 81 added + 105 removed = 186 changed lines against
+25b8dc6e. The control JSON diff is reported separately from executable code.
+
+- `study/storage/pod/run.py`: `b8386bc5fe79a2f554eca8ab45a9d5c522ed6cfc3d07d4fe2e374e6a7c13e714`
+- `study/storage/pod/test_driver.py`: `6c02e2f4ff511d1643424e4c3fbf6a16a2e647058097c5d59b336b5f0249ddc5`
+- `study/storage/pod/control/stop-procedure.json`: `cdcd4545f3c250bc76106a306eb4681ee03d9113fef3640b5693045859112c7e`
+
+---
+
+# Earlier phase-1 evidence (historical)
+
 # Phase-1 driver review fixes
 
 Source edits only. The lead owns Linux CI, shared bindings, checkout pins,

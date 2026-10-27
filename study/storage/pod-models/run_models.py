@@ -221,6 +221,12 @@ def embed(rows: Sequence[Mapping], prefix: str, model, tokenizer,
     return restore_order(groups, batch_vectors), stats
 
 
+def require_t4(name: str | None) -> str:
+    if name is None or "T4" not in name.split():
+        raise ev.RunError("required T4 GPU unavailable")
+    return name
+
+
 def compute(config: Mapping, rows: Mapping, args: argparse.Namespace,
             output: Path, blocked: str, started: float) -> None:
     root = args.root.resolve()
@@ -230,9 +236,8 @@ def compute(config: Mapping, rows: Mapping, args: argparse.Namespace,
     import torch
     from transformers import AutoModel, AutoTokenizer
 
-    if (not torch.cuda.is_available()
-            or "A10" not in torch.cuda.get_device_name().split()):
-        raise ev.RunError("required A10 GPU unavailable")
+    device_name = require_t4(torch.cuda.get_device_name()
+                             if torch.cuda.is_available() else None)
     torch.set_num_threads(2)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
@@ -279,9 +284,11 @@ def compute(config: Mapping, rows: Mapping, args: argparse.Namespace,
     write_json(output / "runtime.json", {
         "model": asdict(recipe), "variant": "fp32", "inputs": config["inputs"],
         "inference": inference, "load_seconds": load_seconds,
-        "total_seconds": seconds, "cost_usd": seconds / 3600 * 1.29,
-        "cost_basis": "model wall time at $1.29/hour; excludes uv setup",
-        "gpu": torch.cuda.get_device_name(),
+        "total_seconds": seconds,
+        "cost_usd": (seconds / 3600 * args.hourly_usd
+                     if args.hourly_usd is not None else None),
+        "cost_basis": "bound hourly rate; model wall time; excludes uv setup",
+        "gpu": device_name,
         "cuda_runtime": torch.version.cuda,
         "cudnn_version": torch.backends.cudnn.version(),
         "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
@@ -370,7 +377,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.add_argument("--" + flag, type=Path, required=True)
     for flag in ("source-pin", "config-pin", "input-pin"):
         parser.add_argument("--" + flag, required=True)
+    parser.add_argument("--hourly-usd", type=float)
     args = parser.parse_args(argv)
+    if args.hourly_usd is not None and not 0 <= args.hourly_usd < float("inf"):
+        parser.error("--hourly-usd must be finite and nonnegative")
     try:
         if args.root.resolve() != Path("/work") or sys.platform != "linux":
             raise RuntimeError("pod-only execution requires Linux and /work")

@@ -1,7 +1,6 @@
 """Tiny controller fixtures. No study workload or model download."""
 import ast
 from copy import deepcopy
-from datetime import datetime
 from io import StringIO
 import json
 import os
@@ -14,7 +13,6 @@ from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest.mock import patch
-from zoneinfo import ZoneInfo
 
 import run as driver
 
@@ -188,20 +186,19 @@ class DriverTests(unittest.TestCase):
 class DeadlineContractTests(unittest.TestCase):
     def procedure(self):
         return {
-            "owner": "pi-gcp", "mechanism": "Mac launchd one-shot",
-            "terminate_argv": ["prime", "pods", "terminate", "<pod-id>",
-                               "--yes", "--plain"],
-            "status_argv": ["prime", "pods", "status", "<pod-id>",
-                            "-o", "json"],
-            "time_origin": "created_at",
-            "existing_cli_login": True, "no_api_key_on_pod": True,
-            "provider_ttl": False, "backstop_minute": 710,
-            "awake": "pi-gcp starts caffeinate -i -m -s -t until deadline+15m",
+            "owner": "pi-gcp", "mechanism": "GCE max-run-duration DELETE",
+            "provider_ttl": True, "termination_action": "DELETE",
+            "on_host_maintenance": "TERMINATE", "time_origin": "created_at",
+            "no_credentials_on_vm": True, "max_run_duration_minutes": 710,
+            "backstop_minute": 710,
             "live_receipt_fields": [
-                "job_label", "plist_path", "pod_id", "created_at",
-                "deadline_pdt", "calendar_entry", "install_time_pdt", "awake",
-                "launchctl_state", "setup_confirmed", "owner",
-                "existing_cli_login",
+                "name", "zone", "project", "id", "status", "creation_time",
+                "last_start_time", "termination_time", "provisioning_model",
+                "instance_termination_action", "on_host_maintenance",
+                "boot_disk_auto_delete", "service_accounts", "login_user",
+                "uid", "gpu", "setup_confirmed", "owner", "firewall_rule",
+                "max_run_duration_seconds", "boot_disk_name", "boot_disk_type",
+                "boot_disk_size_gb", "source_image",
             ],
         }
 
@@ -220,26 +217,26 @@ class DeadlineContractTests(unittest.TestCase):
 
     def live(self):
         allocation = {
-            "pod_id": "fixture-only-pod", "job_label": "fixture-only-job",
-            "created_at": "2026-10-26T00:00:00-07:00",
-            "deadline_pdt": "2026-10-26T12:00:00-07:00",
+            "name": "fixture-vm", "zone": "us-west1-b",
+            "project": "peterkc-dev",
+            "id": "12345", "created_at": "2026-10-26T00:00:00-07:00",
         }
         receipt = {
-            "owner": "pi-gcp", "pod_id": allocation["pod_id"],
-            "job_label": allocation["job_label"],
-            "deadline_pdt": allocation["deadline_pdt"],
-            "setup_confirmed": True, "existing_cli_login": True,
-            "plist_path": (
-                "/fixture/Library/LaunchAgents/fixture-only-job.plist"),
-            "created_at": allocation["created_at"],
-            "calendar_entry": {
-                "Month": 10, "Day": 26, "Hour": 12, "Minute": 0},
-            "install_time_pdt": "2026-10-26T00:00:00-07:00",
-            "awake": {"caffeinate_pid": 12345,
-                      "flags": ["-i", "-m", "-s", "-t", "44100"],
-                      "end_time_pdt": "2026-10-26T12:15:00-07:00",
-                      "ac_power": True},
-            "launchctl_state": {"loaded": True, "disabled": False},
+            **{k: allocation[k] for k in ("name", "zone", "project", "id")},
+            "owner": "pi-gcp", "status": "RUNNING", "setup_confirmed": True,
+            "creation_time": allocation["created_at"],
+            "last_start_time": allocation["created_at"],
+            "termination_time": "2026-10-26T11:50:00-07:00",
+            "provisioning_model": "STANDARD",
+            "instance_termination_action": "DELETE",
+            "on_host_maintenance": "TERMINATE", "boot_disk_auto_delete": True,
+            "service_accounts": [], "login_user": "peterkc", "uid": 1000,
+            "gpu": "recorded-fixture-gpu", "max_run_duration_seconds": 42600,
+            "boot_disk_name": "fixture-boot", "boot_disk_type": "pd-balanced",
+            "boot_disk_size_gb": 700,
+            "source_image": "common-cu129-ubuntu-2204-nvidia-580-v20261019",
+            "firewall_rule": {"name": "fixture-ssh",
+                              "source_range": "127.0.0.1/32"},
         }
         return allocation, receipt
 
@@ -513,17 +510,12 @@ class DeadlineContractTests(unittest.TestCase):
             650 * 60)
 
     def test_backstop_is_separate_from_session_and_bounds_retrieval(self):
+        # Given GCE TTL and a shorter client backstop, use the earlier bound.
         allocation, receipt = self.live()
-        allocation["deadline_pdt"] = "2026-10-26T11:50:00-07:00"
-        receipt["deadline_pdt"] = allocation["deadline_pdt"]
-        receipt["calendar_entry"] = {
-            "Month": 10, "Day": 26, "Hour": 11, "Minute": 50,
-        }
         wall = driver.timestamp(allocation["created_at"], "fixture")
-        zero, backstop = driver.live_termination(allocation, receipt, wall + 1)
+        zero, backstop = driver.live_termination(
+            allocation, receipt, wall + 1, procedure=self.procedure())
         self.assertEqual(backstop - zero, 710 * 60)
-        # Plain values test the admitted supervisor window without prctl,
-        # a host probe, a subprocess, a pod or an actual launchd job.
         supervisor = object.__new__(driver.Supervisor)
         supervisor.zero = 0
         supervisor.hard_deadline = 720 * 60
@@ -535,51 +527,45 @@ class DeadlineContractTests(unittest.TestCase):
         with patch.object(driver.time, "monotonic", return_value=690 * 60):
             supervisor.begin_block(
                 {"id": "retrieval", "jobs": []},
-                self.predecessors("retrieval"),
-            )
+                self.predecessors("retrieval"))
         self.assertEqual(supervisor.block_deadline, 710 * 60)
-        self.assertEqual(supervisor.block_deadline - 690 * 60, 20 * 60)
-        for minute, reason in ((689, "backstop cuts a measurement window"),
-                               (721, "backstop exceeds cap")):
-            procedure = {**self.procedure(), "backstop_minute": minute}
-            with self.subTest(prospective=minute), self.assertRaisesRegex(
-                    driver.ReviewRequired, reason):
-                driver.preflight(self.bindings(), driver.setup_recipe(),
-                                 procedure, Path("/work"))
-            end = wall + minute * 60
-            changed = {**allocation, "deadline_pdt": datetime.fromtimestamp(
-                end, ZoneInfo("America/Los_Angeles")).isoformat()}
-            live = {**receipt, "deadline_pdt": changed["deadline_pdt"]}
-            with self.subTest(live=minute), self.assertRaisesRegex(
-                    driver.ReviewRequired, reason):
-                driver.live_termination(changed, live, wall + 1)
+        shorter = {**self.procedure(), "backstop_minute": 720}
+        _, earlier = driver.live_termination(
+            allocation, receipt, wall + 1, procedure=shorter)
+        self.assertEqual(earlier - zero, 710 * 60)
+        supervisor.backstop_deadline = 689 * 60
+        with patch.object(driver.time, "monotonic", return_value=650 * 60):
+            supervisor.begin_block(
+                {"id": "baseline_a7", "jobs": []},
+                self.predecessors("baseline_a7"))
+        self.assertEqual(supervisor.block_deadline, 689 * 60)
 
     def test_live_receipt_exact_binding_and_no_spawn_on_rejection(self):
         allocation, receipt = self.live()
         now = driver.timestamp(allocation["created_at"], "fixture") + 1
-        self.assertEqual(driver.live_termination(allocation, receipt, now),
-                         (now - 1, now - 1 + 720 * 60))
-        for key, wrong in (
-                ("pod_id", "another-pod"), ("job_label", "another-job"),
-                ("deadline_pdt", "2026-10-26T11:59:00-07:00"),
-                ("setup_confirmed", False), ("existing_cli_login", False),
-                ("awake", {}), ("owner", "another-owner")):
-            changed = {**receipt, key: wrong}
+        self.assertEqual(driver.live_termination(
+            allocation, receipt, now, procedure=self.procedure()),
+            (now - 1, now - 1 + 710 * 60))
+        for key, wrong in (("name", "another-vm"), ("zone", "another-zone"),
+                           ("project", "another-project"), ("id", "999"),
+                           ("setup_confirmed", False), ("owner", "other")):
             with self.subTest(key=key), self.assertRaisesRegex(
                     driver.ReviewRequired, "A9/pi-gcp deletion"):
-                driver.live_termination(allocation, changed, now)
+                driver.live_termination(allocation, {**receipt, key: wrong},
+                                        now, procedure=self.procedure())
         for missing in ({}, None):
-            with self.assertRaisesRegex(
-                    driver.ReviewRequired, "A9/pi-gcp deletion"):
-                driver.live_termination(allocation, missing, now)
+            with self.assertRaisesRegex(driver.ReviewRequired, "A9/pi-gcp"):
+                driver.live_termination(allocation, missing, now,
+                                        procedure=self.procedure())
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             supervisor = object.__new__(driver.Supervisor)
             supervisor.allocation, supervisor.termination = allocation, {}
+            supervisor.procedure = self.procedure()
             with patch.object(driver.time, "time", return_value=now), \
                     patch.object(driver.subprocess, "Popen") as spawn:
-                with self.assertRaisesRegex(
-                    driver.ReviewRequired, "A9/pi-gcp deletion"):
+                with self.assertRaisesRegex(driver.ReviewRequired,
+                                            "A9/pi-gcp"):
                     supervisor.start(["/usr/bin/true"], root, {}, root)
                 spawn.assert_not_called()
                 self.assertEqual(list(root.iterdir()), [])
@@ -679,6 +665,7 @@ class DeadlineContractTests(unittest.TestCase):
             supervisor = object.__new__(driver.Supervisor)
             supervisor.allocation = allocation
             supervisor.termination = receipt
+            supervisor.procedure = self.procedure()
             with patch.object(driver.time, "time", return_value=wall), \
                     patch.object(driver.subprocess, "Popen") as spawn:
                 for executable in ("apt-get", "/usr/bin/sudo"):
@@ -692,46 +679,31 @@ class DeadlineContractTests(unittest.TestCase):
     def test_stop_receipt_requires_actual_pi_gcp_fields_and_state(self):
         allocation, original = self.live()
         wall = driver.timestamp(allocation["created_at"], "fixture") + 1
-        required = (
-            "job_label", "plist_path", "pod_id", "created_at", "deadline_pdt",
-            "calendar_entry", "install_time_pdt", "awake", "launchctl_state",
-            "setup_confirmed", "owner", "existing_cli_login",
-        )
-        for field in required:
+        for field in original:
             receipt = deepcopy(original)
             del receipt[field]
             with self.subTest(missing=field), self.assertRaises(
                     driver.ReviewRequired):
-                driver.live_termination(allocation, receipt, wall)
-        mutations = (
-            ("created_at", "2026-10-26T00:00:01-07:00"),
-            ("calendar_entry", {"Month": 10, "Day": 26,
-                                "Hour": 11, "Minute": 59}),
-            ("install_time_pdt", "2026-10-25T23:59:00-07:00"),
-            ("launchctl_state", {"loaded": False, "disabled": False}),
-            ("launchctl_state", {"loaded": True, "disabled": True}),
-        )
-        for field, value in mutations:
-            with self.subTest(malformed=field), self.assertRaises(
+                driver.live_termination(allocation, receipt, wall,
+                                        procedure=self.procedure())
+        for field, value in (
+                ("creation_time", "2026-10-26T00:00:01-07:00"),
+                ("max_run_duration_seconds", 42599),
+                ("max_run_duration_seconds", "42600"),
+                ("provisioning_model", "SPOT"),
+                ("instance_termination_action", "STOP"),
+                ("on_host_maintenance", "MIGRATE"),
+                ("boot_disk_auto_delete", False),
+                ("service_accounts", {}), ("uid", True), ("uid", -1),
+                ("login_user", ""), ("gpu", ""), ("firewall_rule", {}),
+                ("boot_disk_name", ""), ("boot_disk_size_gb", 700.0),
+                ("source_image", None),
+                ("unexpected", "extra"),
+                ("last_start_time", "2026-10-26T00:00:00.1-07:00")):
+            with self.subTest(field=field, value=value), self.assertRaises(
                     driver.ReviewRequired):
-                driver.live_termination(allocation,
-                                        {**original, field: value}, wall)
-        for field, value in (("caffeinate_pid", 0), ("flags", ["-i"]),
-                             ("end_time_pdt", allocation["deadline_pdt"]),
-                             ("ac_power", "unknown")):
-            receipt = deepcopy(original)
-            receipt["awake"][field] = value
-            with self.subTest(awake=field), self.assertRaises(
-                    driver.ReviewRequired):
-                driver.live_termination(allocation, receipt, wall)
-        procedure = self.procedure()
-        for field, value in (("terminate_argv", ["prime", "pods", "terminate",
-                                                "<pod-id>"]),
-                             ("status_argv", ["prime", "pods", "status"]),
-                             ("time_origin", "allocated_at")):
-            with self.subTest(procedure=field), self.assertRaises(
-                    driver.ReviewRequired):
-                driver.validate_procedure({**procedure, field: value})
+                driver.live_termination(allocation, {**original, field: value},
+                                        wall, procedure=self.procedure())
 
     def test_recipe_rejects_before_package_manager_or_workspace_effect(self):
         recipe = driver.setup_recipe()
@@ -776,7 +748,7 @@ class DeadlineContractTests(unittest.TestCase):
             with patch.object(driver.time, "time", return_value=now_wall):
                 supervisor = driver.Supervisor(
                     root, dict(os.environ), allocation=allocation,
-                    termination=receipt,
+                    termination=receipt, procedure=self.procedure(),
                 )
                 supervisor.block_id = "fixture-nonreturner"
                 start = time.monotonic()
@@ -823,6 +795,218 @@ class DeadlineContractTests(unittest.TestCase):
                 self.assertEqual(failure["state"], "partial")
                 self.assertLess(failure["exit_code"], 0)
                 self.assertFalse((directory / "complete.json").exists())
+
+
+    def test_gce_procedure_passes_preflight(self):
+        """Given GCE controls, preflight keeps the exact TTL contract."""
+        result = driver.preflight(self.bindings(), driver.setup_recipe(),
+                                  self.procedure(), Path("/work"))
+        self.assertEqual(result["termination_procedure"], self.procedure())
+        self.assertEqual(result["backstop_minute"], 710)
+
+    def test_gce_wrong_mechanism_refuses(self):
+        """Given a different stop mechanism, preflight refuses it."""
+        with self.assertRaises(driver.ReviewRequired):
+            driver.preflight(self.bindings(), driver.setup_recipe(),
+                             {**self.procedure(), "mechanism": "launchd"},
+                             Path("/work"))
+
+    def test_gce_provider_ttl_false_refuses(self):
+        """Given no provider TTL, preflight refuses workload admission."""
+        with self.assertRaises(driver.ReviewRequired):
+            driver.preflight(self.bindings(), driver.setup_recipe(),
+                             {**self.procedure(), "provider_ttl": False},
+                             Path("/work"))
+
+    def test_gce_stop_action_refuses(self):
+        """Given STOP instead of DELETE, preflight refuses the procedure."""
+        with self.assertRaises(driver.ReviewRequired):
+            driver.preflight(self.bindings(), driver.setup_recipe(),
+                             {**self.procedure(),
+                              "termination_action": "STOP"},
+                             Path("/work"))
+
+    def test_gce_credentials_present_refuses(self):
+        """Given credentials on the VM, preflight refuses the procedure."""
+        with self.assertRaises(driver.ReviewRequired):
+            driver.preflight(self.bindings(), driver.setup_recipe(),
+                             {**self.procedure(),
+                              "no_credentials_on_vm": False},
+                             Path("/work"))
+
+    def test_gce_missing_procedure_field_refuses(self):
+        """Given any missing procedure field, preflight refuses it."""
+        for field in self.procedure():
+            changed = self.procedure()
+            del changed[field]
+            with self.subTest(field=field), self.assertRaises(
+                    driver.ReviewRequired):
+                driver.preflight(self.bindings(), driver.setup_recipe(),
+                                 changed, Path("/work"))
+
+    def test_gce_extra_procedure_field_refuses(self):
+        """Given an unlisted procedure field, preflight refuses it."""
+        with self.assertRaises(driver.ReviewRequired):
+            driver.preflight(self.bindings(), driver.setup_recipe(),
+                             {**self.procedure(), "extra": True},
+                             Path("/work"))
+
+    def test_gce_backstop_outside_bounds_refuses(self):
+        """Given an invalid backstop, preflight preserves the time bounds."""
+        for minute in (689, 721, True, float("nan"), float("inf")):
+            with self.subTest(minute=minute), self.assertRaises(
+                    driver.ReviewRequired):
+                driver.preflight(self.bindings(), driver.setup_recipe(),
+                                 {**self.procedure(),
+                                  "backstop_minute": minute},
+                                 Path("/work"))
+
+    def test_gce_remaining_pinned_procedure_fields_refuse(self):
+        """Given changed owner, duration or policy, preflight refuses it."""
+        mutations = (("owner", "other"), ("max_run_duration_minutes", 711),
+                     ("max_run_duration_minutes", 710.0),
+                     ("on_host_maintenance", "MIGRATE"),
+                     ("time_origin", "last_start_time"),
+                     ("live_receipt_fields", []))
+        for field, value in mutations:
+            with self.subTest(field=field), self.assertRaises(
+                    driver.ReviewRequired):
+                driver.preflight(self.bindings(), driver.setup_recipe(),
+                                 {**self.procedure(), field: value},
+                                 Path("/work"))
+
+    def test_gce_service_account_present_refuses(self):
+        """Given a service account on the VM, the live receipt rejects."""
+        allocation, receipt = self.live()
+        receipt["service_accounts"] = [{"email": "fixture@example.invalid"}]
+        now = driver.timestamp(allocation["created_at"], "fixture") + 1
+        with self.assertRaisesRegex(driver.ReviewRequired, "service_accounts"):
+            driver.live_termination(allocation, receipt, now,
+                                    procedure=self.procedure())
+
+    def test_gce_status_not_running_refuses(self):
+        """Given a stopped VM, its former TTL cannot admit new work."""
+        allocation, receipt = self.live()
+        receipt["status"] = "TERMINATED"
+        now = driver.timestamp(allocation["created_at"], "fixture") + 1
+        with self.assertRaisesRegex(driver.ReviewRequired, "status"):
+            driver.live_termination(allocation, receipt, now,
+                                    procedure=self.procedure())
+
+    def test_gce_old_launchd_procedure_refuses(self):
+        """Given the previous launchd procedure, preflight rejects it."""
+        old = {
+            "owner": "pi-gcp", "mechanism": "Mac launchd one-shot",
+            "terminate_argv": ["prime", "pods", "terminate", "<pod-id>",
+                               "--yes", "--plain"],
+            "status_argv": ["prime", "pods", "status", "<pod-id>",
+                            "-o", "json"],
+            "time_origin": "created_at", "existing_cli_login": True,
+            "no_api_key_on_pod": True, "provider_ttl": False,
+            "backstop_minute": 710, "awake": "caffeinate fixture",
+            "live_receipt_fields": [
+                "job_label", "plist_path", "pod_id", "created_at",
+                "deadline_pdt",
+                "calendar_entry", "install_time_pdt", "awake",
+                "launchctl_state",
+                "setup_confirmed", "owner", "existing_cli_login"],
+        }
+        with self.assertRaises(driver.ReviewRequired):
+            driver.preflight(self.bindings(), driver.setup_recipe(), old,
+                             Path("/work"))
+
+
+    def test_gce_allocation_shape_and_project_refuse(self):
+        """Given missing/extra identity or another project, reject it."""
+        allocation, receipt = self.live()
+        now = driver.timestamp(allocation["created_at"], "fixture") + 1
+        for field in allocation:
+            changed = {k: v for k, v in allocation.items() if k != field}
+            with self.subTest(missing=field), self.assertRaises(
+                    driver.ReviewRequired):
+                driver.live_termination(changed, receipt, now,
+                                        procedure=self.procedure())
+        for changed in ({**allocation, "pod_id": "old-field"},
+                        {**allocation, "project": "another-project"}):
+            with self.assertRaises(driver.ReviewRequired):
+                driver.live_termination(changed, receipt, now,
+                                        procedure=self.procedure())
+
+    def test_gce_wrong_boot_disk_type_refuses(self):
+        """Given a different disk type, workload admission rejects it."""
+        allocation, receipt = self.live()
+        receipt["boot_disk_type"] = "pd-standard"
+        now = driver.timestamp(allocation["created_at"], "fixture") + 1
+        with self.assertRaisesRegex(driver.ReviewRequired, "boot_disk_type"):
+            driver.live_termination(allocation, receipt, now,
+                                    procedure=self.procedure())
+
+    def test_gce_wrong_boot_disk_size_refuses(self):
+        """Given a different disk size, workload admission rejects it."""
+        allocation, receipt = self.live()
+        receipt["boot_disk_size_gb"] = 699
+        now = driver.timestamp(allocation["created_at"], "fixture") + 1
+        with self.assertRaisesRegex(driver.ReviewRequired,
+                                    "boot_disk_size_gb"):
+            driver.live_termination(allocation, receipt, now,
+                                    procedure=self.procedure())
+
+    def test_gce_wrong_source_image_refuses(self):
+        """Given another image family, workload admission rejects it."""
+        allocation, receipt = self.live()
+        receipt["source_image"] = "another-image-family"
+        now = driver.timestamp(allocation["created_at"], "fixture") + 1
+        with self.assertRaisesRegex(driver.ReviewRequired, "source_image"):
+            driver.live_termination(allocation, receipt, now,
+                                    procedure=self.procedure())
+
+    def test_gce_termination_719_minutes_31_seconds_refuses(self):
+        """Given relative TTL past 719:30, absolute admission rejects."""
+        allocation, receipt = self.live()
+        receipt["last_start_time"] = "2026-10-26T00:09:30-07:00"
+        receipt["termination_time"] = "2026-10-26T11:59:31-07:00"
+        now = driver.timestamp("2026-10-26T00:10:00-07:00", "fixture")
+        with self.assertRaisesRegex(driver.ReviewRequired, "outside cap"):
+            driver.live_termination(allocation, receipt, now,
+                                    procedure=self.procedure())
+
+    def test_gce_termination_709_minutes_59_seconds_refuses(self):
+        """Given a stop one second before 710:00, admission rejects it."""
+        allocation, receipt = self.live()
+        receipt["termination_time"] = "2026-10-26T11:49:59-07:00"
+        now = driver.timestamp(allocation["created_at"], "fixture") + 1
+        with self.assertRaisesRegex(driver.ReviewRequired, "outside cap"):
+            driver.live_termination(allocation, receipt, now,
+                                    procedure=self.procedure())
+
+    def test_gce_exact_termination_boundaries_pass(self):
+        """Given 710:00 or 719:30 with valid relative TTL, admission passes."""
+        allocation, original = self.live()
+        zero = driver.timestamp(allocation["created_at"], "fixture")
+        for start, stop in (("00:00:00", "11:50:00"),
+                            ("00:09:30", "11:59:30")):
+            receipt = {**original,
+                       "last_start_time": f"2026-10-26T{start}-07:00",
+                       "termination_time": f"2026-10-26T{stop}-07:00"}
+            if stop == "11:59:30":
+                receipt["source_image"] = (
+                    "https://compute.googleapis.com/projects/image-project/"
+                    "global/images/"
+                    "common-cu129-ubuntu-2204-nvidia-580-v20261019")
+            with self.subTest(stop=stop):
+                self.assertEqual(driver.live_termination(
+                    allocation, receipt, zero + 600,
+                    procedure=self.procedure()), (zero, zero + 710 * 60))
+
+    def test_gce_late_start_cannot_hide_inside_ttl_tolerance(self):
+        """Given a late start, the 60-second TTL tolerance cannot admit it."""
+        allocation, receipt = self.live()
+        receipt["last_start_time"] = "2026-10-26T00:10:00-07:00"
+        receipt["termination_time"] = "2026-10-26T11:59:30-07:00"
+        now = driver.timestamp("2026-10-26T00:10:01-07:00", "fixture")
+        with self.assertRaisesRegex(driver.ReviewRequired, "outside cap"):
+            driver.live_termination(allocation, receipt, now,
+                                    procedure=self.procedure())
 
 
 class ReviewFixTests(unittest.TestCase):
@@ -1055,11 +1239,11 @@ class ReviewFixTests(unittest.TestCase):
                 driver.timestamp(value, "fixture")
         allocation, receipt = self.live()
         allocation["created_at"] = "2026-10-26T07:00:00.123456789Z"
-        receipt["created_at"] = allocation["created_at"]
-        receipt["install_time_pdt"] = "2026-10-26T00:00:01-07:00"
+        receipt["creation_time"] = allocation["created_at"]
         created = driver.timestamp(allocation["created_at"], "fixture")
-        self.assertEqual(driver.live_termination(
-            allocation, receipt, created + 2)[0], created)
+        with self.assertRaisesRegex(driver.ReviewRequired, "whole seconds"):
+            driver.live_termination(allocation, receipt, created + 2,
+                                    procedure=self.procedure())
         result = driver.preflight(self.bindings(), driver.setup_recipe(),
                                   self.procedure(), Path("/work"),
                                   concurrency=3)

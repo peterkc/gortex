@@ -75,10 +75,11 @@ up to its documented 32,768-token cap. No adaptive cap, quantization, fallback
 model, mixed precision, retries or instruction tuning is used.
 
 GPU/runtime output records total model seconds, model-load seconds, CUDA runtime,
-cuDNN, library versions, A10 device name and PyTorch peak allocated/reserved GPU
+cuDNN, library versions, T4 device name and PyTorch peak allocated/reserved GPU
 bytes. These are framework allocator peaks, not a claim about total device or
-host RAM. Cost is model wall time at $1.29/hour and excludes uv setup and input
-validation. Driver receipts retain whole-job time/cost, including environment
+host RAM. Cost uses model wall time and the binding's `--hourly-usd` rate. Without a
+bound rate, `cost_usd` is null rather than an assumed price. Cost excludes uv
+setup and input validation. Driver receipts retain whole-job time/cost, including environment
 setup. Actual driver compatibility and performance remain unverified; missing
 GPU/driver support fails visibly, without installing or changing a driver.
 
@@ -195,9 +196,9 @@ model compatibility, inference, GPU memory, runtime, cost and actual rankings
 are **not checked** here. Linux CI and the same authorized pod must supply them.
 No Go, daemon, pod, paid action, commit, push or other worker's file was touched.
 
-Current source sizes: `run_models.py` 385 lines;
-`test_models.py` 279 lines, 16 statically counted test methods.
-Current runner SHA256: `42938ecd2001ba8591a6160e4fa91519ac54fb66a7ff9abbfc588285a6095186`.
+Current source sizes: `run_models.py` 395 lines;
+`test_models.py` 301 lines, 18 statically counted test methods.
+Current runner SHA256: `b4bc1a3c3d47533dd1503794c7a23dab53310041fb1d28244817c82c48929c4f`.
 Evaluator SHA256: `43972a8a6d8b13133b70491343a5c33fface8bf8d4ca156cfefbd7997bd53a4b`.
 Config hashes and binding arguments match by static comparison. The complete
 binding sums to 160 minutes. This comparison runs no project code or tests.
@@ -230,3 +231,17 @@ B4 verification: py_compile exited 0 for both files. The source diff is
 The three model configs now bind the new runner hash; the lead must refresh
 those config pins in its binding before CI/source acceptance. The CLI and
 calibration behavior otherwise remain unchanged.
+
+## GCE T4 venue change
+
+The approved venue now uses one NVIDIA T4. Given a device name containing the
+exact `T4` token, the runner accepts it and records the name. Given no GPU,
+A10-only, A100 or T40, it refuses before tokenizer/model loading. Tiny tests
+cover those cases without importing torch or downloading a model.
+
+The fp32 recipe, TF32-off settings, batches, three 40/60/60-minute allocations,
+vector sets, metrics and calibration checks are unchanged. The binding supplies
+cost through optional `--hourly-usd`; no $1.29 or A10 price remains in source.
+An omitted rate produces null cost, not a fabricated GCE charge. The lead owns
+adding the approved rate to binding argv. Tests are written but not run on the
+held Mac. Only syntax compilation and file hashing are performed here.

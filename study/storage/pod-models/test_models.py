@@ -4,7 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from dataclasses import replace
 from pathlib import Path
 
@@ -14,6 +14,28 @@ import run_models as run
 
 
 class ModelTests(unittest.TestCase):
+    def test_t4_device_name_is_accepted(self):
+        self.assertEqual(run.require_t4("Tesla T4"), "Tesla T4")
+        self.assertEqual(run.require_t4("NVIDIA T4"), "NVIDIA T4")
+
+    def test_other_or_missing_gpu_refuses_before_model_load(self):
+        for name in ("NVIDIA A10", "NVIDIA A100", "Tesla T40", None):
+            with self.subTest(name=name):
+                torch = Mock()
+                torch.cuda.is_available.return_value = name is not None
+                torch.cuda.get_device_name.return_value = name
+                transformers = Mock()
+                args = argparse.Namespace(root=Path("/work"))
+                with patch.dict(sys.modules, {"torch": torch,
+                                "transformers": transformers}):
+                    with self.assertRaisesRegex(run.ev.RunError, "T4"):
+                        run.compute({"model": "bge-large-en"}, {}, args,
+                                    Path("/unused"), "", 0)
+                transformers.AutoModel.from_pretrained.assert_not_called()
+                transformers.AutoTokenizer.from_pretrained.assert_not_called()
+                if name is None:
+                    torch.cuda.get_device_name.assert_not_called()
+
     def test_import_does_not_load_the_model_stack(self):
         self.assertNotIn("torch", sys.modules)
         self.assertNotIn("transformers", sys.modules)

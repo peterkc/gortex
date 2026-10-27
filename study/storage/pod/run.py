@@ -27,7 +27,6 @@ import tarfile
 import time
 from typing import BinaryIO, Literal
 import urllib.request
-from zoneinfo import ZoneInfo
 
 
 COMMIT = "79af1c58f352c4eb3670045e31df84a476df9b19"
@@ -108,6 +107,17 @@ TIME_FORMAT = (
 )
 
 
+GCE_RECEIPT_FIELDS = frozenset({
+    "name", "zone", "project", "id", "status", "creation_time",
+    "last_start_time", "termination_time", "provisioning_model",
+    "instance_termination_action", "on_host_maintenance",
+    "boot_disk_auto_delete",
+    "service_accounts", "login_user", "uid", "gpu", "setup_confirmed", "owner",
+    "firewall_rule", "max_run_duration_seconds", "boot_disk_name",
+    "boot_disk_type", "boot_disk_size_gb", "source_image",
+})
+
+
 class ReviewRequired(RuntimeError):
     """Stop without retrying or deleting evidence."""
 
@@ -168,18 +178,18 @@ def validate_procedure(procedure: Mapping) -> None:
     if not isinstance(procedure, Mapping):
         raise ReviewRequired("termination procedure: malformed")
     required = {
-        "owner": "pi-gcp", "mechanism": "Mac launchd one-shot",
-        "terminate_argv": ["prime", "pods", "terminate", "<pod-id>",
-                           "--yes", "--plain"],
-        "status_argv": ["prime", "pods", "status", "<pod-id>", "-o", "json"],
-        "time_origin": "created_at",
-        "existing_cli_login": True, "no_api_key_on_pod": True,
-        "provider_ttl": False,
+        "owner": "pi-gcp", "mechanism": "GCE max-run-duration DELETE",
+        "provider_ttl": True, "termination_action": "DELETE",
+        "on_host_maintenance": "TERMINATE", "time_origin": "created_at",
+        "no_credentials_on_vm": True, "max_run_duration_minutes": 710,
     }
     for key, value in required.items():
         if (type(procedure.get(key)) is not type(value)
                 or procedure[key] != value):
             raise ReviewRequired(f"termination procedure: {key}")
+    if set(procedure) != set(required) | {
+            "backstop_minute", "live_receipt_fields"}:
+        raise ReviewRequired("termination procedure: missing/extra field")
     backstop = procedure.get("backstop_minute")
     if type(backstop) not in (int, float) or not math.isfinite(backstop):
         raise ReviewRequired("termination procedure: missing backstop_minute")
@@ -187,18 +197,11 @@ def validate_procedure(procedure: Mapping) -> None:
         raise ReviewRequired("backstop cuts a measurement window")
     if backstop > 720:
         raise ReviewRequired("backstop exceeds cap")
-    awake = procedure.get("awake")
-    if not isinstance(awake, str) or not awake.strip():
-        raise ReviewRequired("termination procedure: awake")
-    fields = {
-        "job_label", "plist_path", "pod_id", "created_at", "deadline_pdt",
-        "calendar_entry", "install_time_pdt", "awake", "launchctl_state",
-        "setup_confirmed", "owner", "existing_cli_login",
-    }
     provided = procedure.get("live_receipt_fields")
     if (not isinstance(provided, list)
             or any(not isinstance(field, str) for field in provided)
-            or len(provided) != len(fields) or set(provided) != fields):
+            or len(provided) != len(GCE_RECEIPT_FIELDS)
+            or set(provided) != GCE_RECEIPT_FIELDS):
         raise ReviewRequired("termination procedure: live_receipt_fields")
 
 
@@ -400,90 +403,60 @@ def parse_time(value: object, label: str) -> datetime:
 
 
 def live_termination(allocation: Mapping, receipt: Mapping,
-                     now_wall: float) -> tuple[float, float]:
+                     now_wall: float, *,
+                     procedure: Mapping) -> tuple[float, float]:
     if not isinstance(allocation, Mapping) or not isinstance(receipt, Mapping):
         raise ReviewRequired(
             "A9/pi-gcp deletion: missing/malformed live receipt")
-    pod = allocation.get("pod_id")
-    if not isinstance(pod, str) or not pod:
-        raise ReviewRequired("A9/pi-gcp deletion: allocation pod_id missing")
-    if (not isinstance(allocation.get("job_label"), str)
-            or not allocation["job_label"].strip()):
-        raise ReviewRequired(
-            "A9/pi-gcp deletion: allocation job_label missing")
-    zero = timestamp(allocation.get("created_at"),
-                     "A9/pi-gcp allocation.created_at")
-    deadline = timestamp(allocation.get("deadline_pdt"), "backstop deadline")
-    if deadline < zero + 690 * 60:
-        raise ReviewRequired(
-            "A9/pi-gcp deletion: backstop cuts a measurement window")
-    if deadline > zero + 720 * 60:
-        raise ReviewRequired("A9/pi-gcp deletion: backstop exceeds cap")
-    if not zero <= now_wall < deadline:
-        raise ReviewRequired("A9/pi-gcp deletion: absolute backstop expired")
+    if (set(allocation) != {"name", "zone", "project", "id", "created_at"}
+            or set(receipt) != GCE_RECEIPT_FIELDS):
+        raise ReviewRequired("A9/pi-gcp deletion: allocation/receipt fields")
+    for key in ("name", "zone", "project", "id"):
+        if not isinstance(allocation[key], str) or not allocation[key].strip():
+            raise ReviewRequired(f"A9/pi-gcp deletion: allocation {key}")
+    if allocation["project"] != "peterkc-dev":
+        raise ReviewRequired("A9/pi-gcp deletion: project")
     expected = {
-        "owner": "pi-gcp", "pod_id": pod, "setup_confirmed": True,
-        "existing_cli_login": True, "created_at": allocation["created_at"],
-        "deadline_pdt": allocation.get("deadline_pdt"),
-        "job_label": allocation.get("job_label"),
+        **{key: allocation[key] for key in ("name", "zone", "project", "id")},
+        "creation_time": allocation["created_at"], "owner": "pi-gcp",
+        "setup_confirmed": True, "status": "RUNNING",
+        "provisioning_model": "STANDARD",
+        "instance_termination_action": "DELETE",
+        "on_host_maintenance": "TERMINATE", "boot_disk_auto_delete": True,
+        "boot_disk_type": "pd-balanced", "boot_disk_size_gb": 700,
+        "service_accounts": [],
+        "max_run_duration_seconds": procedure["max_run_duration_minutes"] * 60,
     }
     for key, value in expected.items():
-        if (not value or type(receipt.get(key)) is not type(value)
-                or receipt[key] != value):
+        if type(receipt[key]) is not type(value) or receipt[key] != value:
             raise ReviewRequired(f"A9/pi-gcp deletion: termination {key}")
-    plist = receipt.get("plist_path")
-    if not isinstance(plist, str) or not plist.strip():
-        raise ReviewRequired("A9/pi-gcp deletion: plist_path")
-    zone = ZoneInfo("America/Los_Angeles")
-    local = datetime.fromtimestamp(deadline, zone)
-    received = parse_time(receipt["deadline_pdt"],
-                          "A9/pi-gcp deletion: deadline_pdt")
-    if received.utcoffset() != local.utcoffset():
+    for key in ("login_user", "gpu", "boot_disk_name", "source_image"):
+        if not isinstance(receipt[key], str) or not receipt[key].strip():
+            raise ReviewRequired(f"A9/pi-gcp deletion: {key}")
+    if (type(receipt["uid"]) is not int or receipt["uid"] < 0
+            or not isinstance(receipt["firewall_rule"], (str, Mapping))
+            or not receipt["firewall_rule"]):
+        raise ReviewRequired("A9/pi-gcp deletion: uid/firewall_rule")
+    if "common-cu129-ubuntu-2204-nvidia-580" not in receipt["source_image"]:
+        raise ReviewRequired("A9/pi-gcp deletion: source_image")
+    clocks = {}
+    for key in ("creation_time", "last_start_time", "termination_time"):
+        parsed = parse_time(receipt[key], f"A9/pi-gcp deletion: {key}")
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+                            r"(?:Z|[+-]\d{2}:\d{2})", receipt[key]):
+            raise ReviewRequired(f"A9/pi-gcp deletion: {key} whole seconds")
+        clocks[key] = parsed.timestamp()
+    zero = clocks["creation_time"]
+    start, stop = clocks["last_start_time"], clocks["termination_time"]
+    deadline = zero + procedure["backstop_minute"] * 60
+    if (abs(stop - start - receipt["max_run_duration_seconds"]) > 60
+            or stop < zero + 710 * 60 or stop > zero + 719 * 60 + 30
+            or start > zero + 9 * 60 + 30):
         raise ReviewRequired(
-            "A9/pi-gcp deletion: deadline must use local PDT/PST")
-    expected_calendar = {"Month": local.month, "Day": local.day,
-                         "Hour": local.hour, "Minute": local.minute}
-    calendar = receipt.get("calendar_entry")
-    if (not isinstance(calendar, Mapping)
-            or set(calendar) != set(expected_calendar)
-            or any(type(calendar[key]) is not int
-                   or calendar[key] != value
-                   for key, value in expected_calendar.items())
-            or local.second or local.microsecond):
-        raise ReviewRequired("A9/pi-gcp deletion: calendar_entry")
-    installed = timestamp(receipt.get("install_time_pdt"),
-                          "A9/pi-gcp install_time_pdt")
-    if not zero <= installed <= now_wall:
-        raise ReviewRequired("A9/pi-gcp deletion: install_time_pdt")
-    awake = receipt.get("awake")
-    if not isinstance(awake, Mapping):
-        raise ReviewRequired("A9/pi-gcp deletion: awake")
-    pid = awake.get("caffeinate_pid")
-    if type(pid) is not int or pid <= 0:
-        raise ReviewRequired("A9/pi-gcp deletion: awake.caffeinate_pid")
-    flags = awake.get("flags")
-    if (not isinstance(flags, list) or len(flags) != 5
-            or flags[:4] != ["-i", "-m", "-s", "-t"]
-            or not isinstance(flags[4], str) or not flags[4].isdecimal()
-            or int(flags[4]) <= 0):
-        raise ReviewRequired("A9/pi-gcp deletion: awake.flags")
-    end = timestamp(awake.get("end_time_pdt"),
-                    "A9/pi-gcp awake.end_time_pdt")
-    if end < deadline + 15 * 60:
-        raise ReviewRequired("A9/pi-gcp deletion: awake.end_time_pdt")
-    if type(awake.get("ac_power")) is not bool:
-        raise ReviewRequired("A9/pi-gcp deletion: awake.ac_power")
-    for field, value in (("install_time_pdt", installed),
-                         ("awake.end_time_pdt", end)):
-        text = (receipt["install_time_pdt"] if field == "install_time_pdt"
-                else awake["end_time_pdt"])
-        if (parse_time(text, f"A9/pi-gcp deletion: {field}").utcoffset()
-                != datetime.fromtimestamp(value, zone).utcoffset()):
-            raise ReviewRequired(f"A9/pi-gcp deletion: {field} timezone")
-    state = receipt.get("launchctl_state")
-    if (not isinstance(state, Mapping) or state.get("loaded") is not True
-            or state.get("disabled") is not False):
-        raise ReviewRequired("A9/pi-gcp deletion: launchctl_state")
+            "A9/pi-gcp deletion: termination_time outside cap")
+    deadline = min(deadline, stop)
+    if not zero <= now_wall < deadline or start > now_wall:
+        raise ReviewRequired("A9/pi-gcp deletion: absolute backstop expired")
     return zero, deadline
 
 
@@ -698,13 +671,16 @@ class Supervisor:
     """Sole owner of subprocess sessions, receipts and bounded shutdown."""
 
     def __init__(self, root: Path, environment: Mapping[str, str], *,
-                 allocation: Mapping, termination: Mapping):
+                 allocation: Mapping, termination: Mapping,
+                 procedure: Mapping):
         wall, mono = time.time(), time.monotonic()
-        allocated, deadline = live_termination(allocation, termination, wall)
+        allocated, deadline = live_termination(
+            allocation, termination, wall, procedure=procedure)
         self.zero = mono - (wall - allocated)
         self.hard_deadline = self.zero + 720 * 60
         self.backstop_deadline = mono + (deadline - wall)
         self.allocation, self.termination = allocation, termination
+        self.procedure = dict(procedure)
         self.block_deadline = 0.0
         self.launch_deadline = 0.0
         self.block_id = "unbound"
@@ -725,10 +701,7 @@ class Supervisor:
             self.block_id, time.monotonic(), self.zero, self.hard_deadline,
             outcomes, a3_live=bool(self.active),
         )
-        if self.block_id == "retrieval":
-            self.block_deadline = min(
-                self.block_deadline, self.backstop_deadline,
-            )
+        self.block_deadline = min(self.block_deadline, self.backstop_deadline)
         self.launch_deadline = self.block_deadline - CLEANUP_RESERVE_SECONDS
         self.job_minutes = {job["id"]: job["minutes"] for job in block["jobs"]}
 
@@ -769,7 +742,8 @@ class Supervisor:
     def start(self, args: Sequence[str], directory: Path,
               environment: Mapping[str, str], cwd: Path) -> OwnedProcess:
         try:
-            live_termination(self.allocation, self.termination, time.time())
+            live_termination(self.allocation, self.termination, time.time(),
+                             procedure=self.procedure)
         except Exception as error:
             raise FatalSession(str(error)) from error
         if args and Path(args[0]).name in {"apt-get", "sudo"}:
@@ -1919,8 +1893,8 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
             atomic_json(supervisor.root / "A9-handoff.json", {
                 "state": "external-owner-required", "jobs": block["jobs"],
                 "owner": "pi-gcp",
-                "deadline_pdt": supervisor.allocation["deadline_pdt"],
-                "no_prime_api_key_on_pod": True,
+                "termination_time": supervisor.termination["termination_time"],
+                "no_credentials_on_vm": True,
             })
             return "dependency_blocked"
         path = Path(job["receipt_path"])
@@ -2253,7 +2227,8 @@ def main() -> int:
             "A9/pi-gcp deletion: missing live termination receipt")
     allocation = read_json(args.allocation)
     termination = read_json(args.termination_receipt)
-    live_termination(allocation, termination, time.time())
+    live_termination(allocation, termination, time.time(),
+                     procedure=admission["termination_procedure"])
     if root != Path("/work"):
         raise ReviewRequired("execution requires the dedicated /work root")
     host = host_record()
@@ -2286,6 +2261,7 @@ def main() -> int:
         supervisor = Supervisor(
             root, environment(root), allocation=allocation,
             termination=termination,
+            procedure=admission["termination_procedure"],
         )
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             signal.signal(sig, interrupted)
@@ -2306,7 +2282,7 @@ def main() -> int:
                 atomic_json(root / "A9-handoff.json", {
                     "owner": "pi-gcp", "deletion_required": True,
                     "clean_handoff": False, "reason": str(error),
-                    "deadline_pdt": allocation["deadline_pdt"],
+                    "termination_time": termination["termination_time"],
                 })
                 raise
             handoff = root / "A9-handoff.json"
@@ -2314,7 +2290,7 @@ def main() -> int:
                 **(read_json(handoff) if handoff.exists() else {}),
                 "owner": "pi-gcp", "deletion_required": True,
                 "clean_handoff": sys.exc_info()[0] is None,
-                "deadline_pdt": allocation["deadline_pdt"],
+                "termination_time": termination["termination_time"],
             })
     return 0
 
