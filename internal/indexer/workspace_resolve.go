@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -488,6 +489,10 @@ func (mi *MultiIndexer) newCrossRepoResolver() *resolver.CrossRepoResolver {
 	cr.SetNpmAliasResolver(mi.npmAliasResolver())
 	cr.SetNpmDependencyLookup(mi.npmDependencyLookup())
 	cr.SetNpmPackageLookup(mi.npmPackageLookup())
+	cr.SetCargoCrateLookup(mi.cargoCrateLookup())
+	if mi.IsMultiRepo() {
+		cr.SetPythonPackageLookup(mi.pythonPackageLookup)
+	}
 	cr.SetPathAliasResolver(mi.pathAliasResolver())
 	cr.SetWorkspaceMembership(mi.workspaceMembershipResolver())
 	mi.applyRemoteStitch(cr)
@@ -500,7 +505,7 @@ func (mi *MultiIndexer) runCrossRepoResolve(reconcileContracts bool) {
 	}
 }
 
-func (mi *MultiIndexer) runCrossRepoResolveContext(ctx context.Context, reconcileContracts bool) error {
+func (mi *MultiIndexer) runCrossRepoResolveContext(ctx context.Context, reconcileContracts bool, cargoRetargetRepo ...string) error {
 	cr := mi.newCrossRepoResolver()
 	if cr == nil {
 		return nil
@@ -518,6 +523,7 @@ func (mi *MultiIndexer) runCrossRepoResolveContext(ctx context.Context, reconcil
 		}
 		mi.synthesizeDeferredGoModuleCalls(idx, edges)
 	}
+	cr.SetCargoImportRetargetRepo(cargoRetargetRepo...)
 	if _, err := cr.ResolveAllContext(ctx); err != nil {
 		return err
 	}
@@ -535,15 +541,11 @@ func (mi *MultiIndexer) runCrossRepoResolveContext(ctx context.Context, reconcil
 // for one coordinated mutation frontier. Its caller owns the repository lane
 // and global topology-writer gate, so the graph cannot expose a half-resolved
 // batch between same-repo, semantic, and cross-repository phases.
-func (mi *MultiIndexer) runCrossRepoResolveFiles(filePaths []string) {
-	mi.runCrossRepoResolveMutationFiles(filePaths, filePaths)
+func (mi *MultiIndexer) runCrossRepoResolveFiles(filePaths []string, cargoRetargetRepo ...string) {
+	mi.runCrossRepoResolveMutationFrontiers(filePaths, filePaths, filePaths, nil, cargoRetargetRepo...)
 }
 
-func (mi *MultiIndexer) runCrossRepoResolveMutationFiles(resolutionFiles, materializationFiles []string) {
-	mi.runCrossRepoResolveMutationFrontiers(resolutionFiles, materializationFiles, materializationFiles)
-}
-
-func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiers(resolutionFiles, edgeSourceFiles, definitionFiles []string) {
+func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiers(resolutionFiles, edgeSourceFiles, definitionFiles, masterResolvedFiles []string, cargoRetargetRepo ...string) {
 	if len(resolutionFiles) == 0 && len(edgeSourceFiles) == 0 && len(definitionFiles) == 0 {
 		return
 	}
@@ -551,9 +553,48 @@ func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiers(resolutionFiles, ed
 	if cr == nil {
 		return
 	}
-	cr.ResolveMutationFrontiers(resolutionFiles, edgeSourceFiles, definitionFiles)
+	cr.SetCargoImportRetargetRepo(cargoRetargetRepo...)
+	var bridgeFiles []string
+	for _, file := range resolutionFiles {
+		if strings.HasSuffix(file, ".rs") || strings.HasSuffix(file, ".py") || strings.HasSuffix(file, ".pyi") {
+			bridgeFiles = append(bridgeFiles, file)
+		}
+	}
+	// Match cold ordering: tracked-provider refusal must remain authoritative
+	// after fallback has handled genuinely external calls.
+	prepared := make(map[string]bool, len(masterResolvedFiles))
+	for _, file := range masterResolvedFiles {
+		prepared[file] = true
+	}
+	var outgoingFiles []string
+	for _, file := range bridgeFiles {
+		if !prepared[file] {
+			outgoingFiles = append(outgoingFiles, file)
+		}
+	}
+	if len(outgoingFiles) > 0 {
+		if master := mi.newMasterResolver(false); master != nil {
+			master.ResolveFilesOutgoing(outgoingFiles)
+			mi.reconcileRetargetedTestCalls(master.TakeRetargetedTestCallFiles())
+		}
+	}
+	if len(bridgeFiles) > 0 {
+		mi.synthesizeDemotedGoModuleCalls(bridgeFiles)
+	}
+	_, admission := cr.ResolveMutationFrontiersBounded(resolutionFiles, edgeSourceFiles, definitionFiles)
+	if !admission.IncomingRefused && len(bridgeFiles) > 0 {
+		if master := mi.newMasterResolver(true); master != nil {
+			master.ReconcileBridgeCallerTerminals(bridgeFiles)
+		}
+	}
 	mi.finishGoModuleCalls(cr)
 	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
+	if admission.Refused && !admission.IncomingRefused {
+		// The bounded import retry cannot finish this revision. Reuse the
+		// full fallback before another mutation repeats its identity sweep.
+		mi.logger.Info("cross-repo resolve: completing deferred Go module imports")
+		mi.runCrossRepoResolve(false)
+	}
 }
 
 // crossWorkspaceLookup builds a resolver.CrossWorkspaceDepLookup from
@@ -699,7 +740,7 @@ func (mi *MultiIndexer) resolveDeferredGoModules(idx *Indexer) error {
 }
 
 func (mi *MultiIndexer) resolveIncomingGoModules(repo string) error {
-	if mi.graph == nil || len(mi.graph.RepoPrefixes()) < 2 || mi.trackedGoModules()[repo] == "" {
+	if mi.graph == nil || len(mi.graph.RepoPrefixes()) < 2 || len(mi.trackedGoModules()) == 0 {
 		return nil
 	}
 	cr := mi.newCrossRepoResolver()

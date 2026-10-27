@@ -1,6 +1,8 @@
 package resolver
 
 import (
+	"iter"
+	"slices"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -40,18 +42,45 @@ func (r *Resolver) attributeNonGoModuleImports() {
 	if !r.graphHasLanguage("python") && !r.graphHasLanguage("dart") {
 		return
 	}
-	fileLang := r.collectFileLanguages()
+	r.attributeNonGoModuleImportEdges(r.graph.EdgesByKind(graph.EdgeImports), graph.EdgesLightSeq(r.graph, graph.EdgeDependsOnModule), r.collectFileLanguages())
+}
+
+// Python saves collect their cached frontier before flushing attribution writes.
+func (r *Resolver) attributePythonModuleImportsForFiles(files []string) {
+	languages := make(map[string]string)
+	var edges []*graph.Edge
+	for _, file := range files {
+		if !isPythonSourcePath(file) {
+			continue
+		}
+		for _, node := range r.incrementalFileNodes(file) {
+			if node.Kind == graph.KindFile && node.Language == "python" {
+				languages[node.ID] = node.Language
+				edges = append(edges, r.fileOutEdges(file)...)
+				break
+			}
+		}
+	}
+	if len(languages) == 0 {
+		return
+	}
+	r.attributeNonGoModuleImportEdges(slices.Values(edges), slices.Values(edges), languages)
+}
+
+func (r *Resolver) attributeNonGoModuleImportEdges(imports, dependencies iter.Seq[*graph.Edge], fileLang map[string]string) {
 	type pendingEdge struct {
-		edge     *graph.Edge
-		oldTo    string
-		moduleID string
+		edge           *graph.Edge
+		oldTo          string
+		moduleID       string
+		targetIdentity graph.EdgeIdentity
 	}
 	var rewrites []pendingEdge
+	targetSites := make(map[graph.EdgeIdentity]int)
 	moduleSeeds := map[string]moduleSeed{}
 	dependsSeen := map[string]map[string]struct{}{} // fileID → set of moduleIDs
 
-	for e := range r.graph.EdgesByKind(graph.EdgeImports) {
-		if !strings.HasPrefix(e.To, "external::") {
+	for e := range imports {
+		if e.Kind != graph.EdgeImports || !strings.HasPrefix(e.To, "external::") {
 			continue
 		}
 		// Scoped warm pass: an unchanged repo's external imports were already
@@ -68,10 +97,15 @@ func (r *Resolver) attributeNonGoModuleImports() {
 		if !ok {
 			continue
 		}
+		projected := *e
+		projected.To = moduleID
+		identity := graph.EdgeIdentityFor(&projected)
+		targetSites[identity]++
 		rewrites = append(rewrites, pendingEdge{
-			edge:     e,
-			oldTo:    e.To,
-			moduleID: moduleID,
+			edge:           e,
+			oldTo:          e.To,
+			moduleID:       moduleID,
+			targetIdentity: identity,
 		})
 		moduleSeeds[moduleID] = moduleSeed{
 			id:       moduleID,
@@ -120,7 +154,10 @@ func (r *Resolver) attributeNonGoModuleImports() {
 	// read on every backend, plus a Go-side map build that turns
 	// the per-rewrite check into a constant-time lookup.
 	existingDepends := make(map[string]map[string]struct{})
-	for e := range graph.EdgesLightSeq(r.graph, graph.EdgeDependsOnModule) {
+	for e := range dependencies {
+		if e.Kind != graph.EdgeDependsOnModule {
+			continue
+		}
 		// Only the rewrites' own callers (in scope) are queried below, so a
 		// scoped pass needs the dedupe index for just those repos.
 		if !r.edgeFromInScope(e.From) {
@@ -144,7 +181,17 @@ func (r *Resolver) attributeNonGoModuleImports() {
 	}
 	dependsBatch := make([]*graph.Edge, 0, dependsBatchCapacity)
 	for _, p := range rewrites {
-		p.edge.To = p.moduleID
+		if strings.HasPrefix(p.moduleID, "module::pypi:") {
+			if p.edge.Meta == nil {
+				p.edge.Meta = map[string]any{}
+			}
+			p.edge.Meta["python_import"] = strings.TrimPrefix(p.oldTo, "external::")
+		}
+		// Distinct Python spellings on one line must survive until tracked retry.
+		// Keep their external identities, while still recording module evidence.
+		if !strings.HasPrefix(p.moduleID, "module::pypi:") || targetSites[p.targetIdentity] == 1 {
+			p.edge.To = p.moduleID
+		}
 		p.edge.Origin = graph.OriginASTResolved
 		reindexBatch = append(reindexBatch, graph.EdgeReindex{Edge: p.edge, OldTo: p.oldTo})
 

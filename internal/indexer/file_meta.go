@@ -197,6 +197,10 @@ const reparsePendingEnrichmentBatchSize = 256
 type reparsePendingEnrichmentBatch struct {
 	// npmConsumerFiles are unchanged importers parked by this mutation.
 	npmConsumerFiles      []string
+	cargoAddedFile        bool
+	cargoConsumerFiles    []string
+	pythonConsumerFiles   []string
+	pythonAddedFiles      []string
 	byFile                map[string]bool
 	deferResolverCatchup  bool
 	deferredAffectedFiles map[string]struct{}

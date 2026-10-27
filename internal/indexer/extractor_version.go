@@ -49,6 +49,7 @@ var extractorVersions = map[string]int{
 	"julia":      3,                                      // callee and macro decoding from CST children (chained/parametric callees, Base.@time, Base.:(==)), macro/operator exports, member_of for module consts and nested modules, @doc and public metadata (was: bespoke tree-sitter extractor replaced the regex extractor)
 	"javascript": 2,                                      // renamed per-binding imports persist import_alias Meta; older rows keyed a renamed import by its original name
 	"typescript": 2,                                      // renamed per-binding imports persist import_alias Meta; older rows keyed a renamed import by its original name
+	"python":     2,                                      // package relative from-imports retain exact re-export bindings; from-imports retain python_bindings
 }
 
 // extractorSaltExtLang maps a lower-case file extension to the language
