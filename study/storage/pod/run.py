@@ -29,7 +29,7 @@ from typing import BinaryIO, Literal
 import urllib.request
 
 
-COMMIT = "c56bd1d3d9ad9778335e0d3c3dbe60df91e62bf0"
+COMMIT = "5bab54d2dd8b7165f7b813f9644857f694e28ede"
 REPOSITORY = "https://github.com/peterkc/gortex.git"
 BRANCH = "study/storage-harness"
 GO_FILE = "go1.27.1.linux-amd64.tar.gz"
