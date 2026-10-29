@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
-"""Prepare/run the pinned public storage study. Python 3.10+, stdlib only."""
+#!/usr/bin/false
+"""Storage study: 3.10+ fixtures; pinned CPython 3.14.7 native launcher."""
 
 from __future__ import annotations
 
@@ -8,11 +8,14 @@ from collections import Counter, deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from functools import cache
 import ctypes
+import errno
 import hashlib
 import json
 import math
 import os
+import platform
 from pathlib import Path, PurePosixPath
 import re
 import shlex
@@ -20,6 +23,7 @@ import shutil
 import signal
 import statistics
 import subprocess
+import sys
 import tarfile
 import time
 from typing import BinaryIO, Literal
@@ -88,10 +92,14 @@ DELTA_IDS = {
     "delta-renamed-out", "delta-added-in", "delta-dangling-in",
     "delta-symbol", "delta-content", "delta-vector",
 }
-TIME_FORMAT = (
-    '{"elapsed_seconds":%e,"user_seconds":%U,"system_seconds":%S,'
-    '"max_rss_kib":%M,"exit_code":%x}'
-)
+WINDOW_CLEANUP_SECONDS = 15 * 60
+CASE_MINUTES = {"setup": 120, "smoke": 60, "evaluator": 30, "oracle": 30,
+                "screen": 30, "segment": 45, "catalog": 15, "hybrid": 60,
+                "coderank": 60, "baseline": 45}
+BLOCK_KINDS = {"setup": "setup", "smoke": "smoke", "calibration": "evaluator",
+               "segment_timing": "segment", "catalog": "catalog",
+               "hybrid": "hybrid", "cpu_cost": "coderank",
+               "baseline_a7": "baseline"}
 
 
 class ReviewRequired(RuntimeError):
@@ -127,15 +135,15 @@ def owned_path(value: object, root: Path) -> bool:
 def bound_jobs(root: Path) -> dict[str, list[dict]]:
     result = {
         "setup": [{"id": "setup", "argv": ["run.py:prepare", str(root)],
-                   "minutes": 45,
+                   "minutes": 120,
                    "receipt_path": str(root / "setup-complete.json")}],
         "storage": [{"id": job.name, "argv": command(job, root),
-                     "minutes": 150,
+                     "minutes": 30,
                      "receipt_path": str(
                          root / "jobs" / job.name / "complete.json")}
                     for job in jobs() if job.stage != "timing"],
         "segment_timing": [{"id": job.name, "argv": command(job, root),
-                            "minutes": 120,
+                            "minutes": 45,
                             "receipt_path": str(
                                 root / "jobs" / job.name / "complete.json")}
                            for job in jobs() if job.stage == "timing"],
@@ -146,7 +154,7 @@ def bound_jobs(root: Path) -> dict[str, list[dict]]:
             name = f"catalog-{candidate}-n{entries}"
             out = root / "aux" / name / "output"
             result["catalog"].append({
-                "id": name, "minutes": 2,
+                "id": name, "minutes": 15,
                 "argv": [str(root / "bin" / candidate), "catalog-bench",
                          "-candidate", candidate, "-entries", str(entries),
                          "-repeats", "30", "-seed", "20261025",
@@ -163,7 +171,7 @@ def bound_jobs(root: Path) -> dict[str, list[dict]]:
         if mode == "latency":
             argv += ["--generated", "--native-dir", str(root / "native")]
         result["hybrid"].append({
-            "id": name, "minutes": 22.5, "argv": argv,
+            "id": name, "minutes": 60, "argv": argv,
             "selected_jobs": hybrid_names(mode),
             "receipt_path": str(root / "aux" / name / "complete.json"),
         })
@@ -356,26 +364,212 @@ def atomic_json(path: Path, value: object) -> None:
         os.close(descriptor)
 
 
-def memory_available() -> int:
-    fields = dict(line.split(":", 1) for line in
-                  Path("/proc/meminfo").read_text().splitlines())
-    return int(fields["MemAvailable"].split()[0]) * 1024
+def native_output(args: Sequence[str], env: Mapping[str, str], *,
+                  absent_ok: bool = False) -> str:
+    try:
+        result = subprocess.run(args, env=env, capture_output=True, text=True,
+                                timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise FatalSession(f"native probe failed: {args[0]}") from error
+    allowed = {0, 1} if absent_ok else {0}
+    if (result.stderr or result.returncode not in allowed
+            or (result.returncode == 1 and result.stdout)):
+        raise FatalSession(f"unverified native probe: {args[0]}")
+    return result.stdout
 
 
-def process_groups() -> dict[int, dict[tuple[int, int], int]]:
-    """PGID -> {(PID, start ticks): RSS bytes}; tolerate exiting processes."""
-    groups: dict[int, dict[tuple[int, int], int]] = {}
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdecimal():
-            continue
-        try:
-            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
-            pgid, start = int(fields[2]), int(fields[19])
-            rss = int(fields[21]) * os.sysconf("SC_PAGE_SIZE")
-            groups.setdefault(pgid, {})[(int(entry.name), start)] = rss
-        except (FileNotFoundError, ProcessLookupError):
-            continue
-    return groups
+def parse_vm_stat(output: str) -> dict[str, int]:
+    page_size = re.findall(r"page size of ([0-9]+) bytes", output)
+    pairs = re.findall(r"^([^:\n]+):\s+([0-9]+)\.$", output, re.MULTILINE)
+    fields = dict(pairs)
+    if len(page_size) != 1 or len(fields) != len(pairs):
+        raise FatalSession("unrecognized vm_stat measurement")
+    try:
+        # Free + inactive + speculative; purgeable is not added twice.
+        available = sum(int(fields[k]) for k in (
+            "Pages free", "Pages inactive", "Pages speculative"))
+        return {"available_bytes": available * int(page_size[0]),
+                "swapouts": int(fields["Swapouts"])}
+    except KeyError as error:
+        raise FatalSession("incomplete vm_stat measurement") from error
+
+
+def native_resources(env: Mapping[str, str]) -> dict:
+    sample = parse_vm_stat(native_output(["/usr/bin/vm_stat"], env))
+    sample["level"] = int(native_output(
+        ["/usr/sbin/sysctl", "-n", "kern.memorystatus_level"], env))
+    sample["load1"] = os.getloadavg()[0]
+    sample["ac_power"] = native_output(
+        ["/usr/bin/pmset", "-g", "batt"], env).splitlines()[0] == (
+            "Now drawing from 'AC Power'")
+    return sample
+
+
+def resource_limit(sample: Mapping, peak: int, previous_swapouts: int,
+                   *, timing: bool, admission: bool) -> None:
+    if (not math.isfinite(sample["load1"]) or sample["load1"] < 0
+            or any(type(sample[k]) is not int or sample[k] < 0
+                   for k in ("level", "swapouts", "available_bytes"))
+            or sample["level"] > 100
+            or sample["level"] < (30 if admission else 25)
+            or sample["swapouts"] != previous_swapouts
+            or sample["available_bytes"] < MEMORY_RESERVE + peak
+            or not sample["ac_power"]):
+        raise FatalSession("native memory/swap/AC stop")
+    if admission and timing and sample["load1"] > 2.0:
+        raise DeadlineExceeded("timing not-started: load1 exceeds 2.0")
+
+
+class DarwinUsage(ctypes.Structure):
+    # SDK sys/resource.h rusage_info_v0; libproc.h proc_pid_rusage.
+    _fields_ = [("uuid", ctypes.c_uint8 * 16)] + [
+        (name, ctypes.c_uint64) for name in (
+            "user_time", "system_time", "pkg_idle_wkups", "interrupt_wkups",
+            "pageins", "wired_size", "resident_size", "phys_footprint",
+            "proc_start_abstime", "proc_exit_abstime")]
+
+
+@cache
+def libproc() -> ctypes.CDLL:
+    library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    library.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int,
+                                      ctypes.c_void_p]
+    library.proc_pid_rusage.restype = ctypes.c_int
+    return library
+
+
+def darwin_usage(pid: int) -> DarwinUsage | None:
+    if sys.platform != "darwin":
+        raise FatalSession("Darwin ownership required; no fallback")
+    library = libproc()
+    usage = DarwinUsage()
+    if library.proc_pid_rusage(pid, 0, ctypes.byref(usage)) != 0:
+        if ctypes.get_errno() in {errno.ESRCH, errno.ENOENT}:
+            return None
+        raise FatalSession(f"unverified Darwin process identity: {pid}")
+    if not usage.proc_start_abstime:
+        raise FatalSession(f"missing Darwin process birth: {pid}")
+    return usage
+
+
+def process_groups(env: Mapping[str, str],
+                   owned: Sequence[OwnedProcess]) -> dict:
+    """Owned PGID -> {(PID, birth): RSS bytes}; None is unproved."""
+    if sys.platform != "darwin":
+        raise FatalSession("Darwin ownership required; no fallback")
+    try:
+        groups: dict = {}
+        pgids = {entry.process.pid for entry in owned}
+        for line in native_output(["/bin/ps", "-A", "-o", "pid=,pgid="], env
+                                  ).splitlines():
+            pid, pgid = (int(field) for field in line.split())
+            if pgid not in pgids:
+                continue
+            try:
+                usage = darwin_usage(pid)
+            except FatalSession:
+                groups[pgid] = None
+                continue
+            if usage is not None and groups.get(pgid, {}) is not None:
+                members = groups.setdefault(pgid, {})
+                members[(pid, usage.proc_start_abstime)] = usage.resident_size
+        return groups
+    except (OSError, ValueError, TypeError) as error:
+        raise FatalSession("Darwin process table unverified") from error
+
+
+def daemon_off(config: Mapping, env: Mapping[str, str]) -> None:
+    # Read only the v2 bare fields. Never evaluate the notes object.
+    if config["schema"] != "installed-daemon-identities/v2":
+        raise FatalSession("unsupported installed-daemon identity schema")
+    job = config["launchd"]
+    if job["service_target"] != job["domain"] + "/" + job["label"]:
+        raise FatalSession("ambiguous launchd identity")
+    paths = [config[k] for k in (
+        "plist_path", "stop_marker_path", "socket_path")]
+    paths.append(config["executable"]["path"])
+    if (any(not isinstance(p, str) or not Path(p).is_absolute()
+            or any(ord(c) < 32 for c in p) for p in paths)
+            or not config["tcp_listeners"]
+            or not isinstance(config["executable"]["argv"], list)
+            or not config["executable"]["argv"]):
+        raise FatalSession("incomplete bare daemon identities")
+    executable = Path(config["executable"]["path"]).resolve()
+    if (Path(config["executable"]["argv"][0]).resolve() != executable
+            or Path(config["executable"]["path"]).is_symlink() is not
+            config["executable"]["is_symlink"]):
+        raise FatalSession("ambiguous installed executable identity")
+    commands = native_output(["/bin/ps", "-A", "-ww", "-o", "command="], env)
+    if " ".join(config["executable"]["argv"]) in commands.splitlines():
+        raise FatalSession("installed daemon command is running")
+    texts = native_output(["/usr/sbin/lsof", "-nP", "-d", "txt", "-Fn"], env,
+                          absent_ok=True)
+    if any(Path(line[1:].removesuffix(" (deleted)")).resolve() == executable
+           for line in texts.splitlines() if line.startswith("n/")):
+        raise FatalSession("installed executable is running")
+    result = subprocess.run(
+        ["/bin/launchctl", "print", job["service_target"]], env=env,
+        capture_output=True, text=True, timeout=5, check=False)
+    absent = f'Could not find service "{job["label"]}" in domain '
+    if result.returncode == 0 or absent not in result.stderr:
+        raise FatalSession("launchd job loaded or off-state unverified")
+    if not Path(config["stop_marker_path"]).is_file():
+        raise FatalSession("owner stop-intent marker missing")
+    sockets = native_output(["/usr/sbin/lsof", "-nP", "-U", "-Fn"], env,
+                            absent_ok=True)
+    socket = Path(config["socket_path"]).resolve()
+    if any(str(socket) in line[1:]
+           or (line.startswith("n/") and Path(line[1:]).resolve() == socket)
+           for line in sockets.splitlines() if line.startswith("n")):
+        raise FatalSession("installed socket has a live holder")
+    for endpoint in config["tcp_listeners"]:
+        selector = f'TCP@{endpoint["host"]}:{endpoint["port"]}'
+        if native_output(["/usr/sbin/lsof", "-nP", "-a", "-i" + selector,
+                          "-sTCP:LISTEN", "-Fp"], env, absent_ok=True):
+            raise FatalSession("installed TCP endpoint has a listener")
+
+
+def window_limit(go: Mapping, manifest_sha: str, now: float) -> float:
+    required = {"schema", "window_id", "input_manifest_sha256", "start", "end",
+                "user_go", "migration_complete", "owner_stop_confirmed",
+                "awake", "thermal_safe", "background_quiet"}
+    if not required <= go.keys():
+        raise FatalSession("incomplete current window go")
+    if (go["schema"] != "mac-window-go/v1"
+            or not isinstance(go["window_id"], str) or not go["window_id"]
+            or go["input_manifest_sha256"] != manifest_sha
+            or not all(go[k] is True for k in (
+                "user_go", "migration_complete", "owner_stop_confirmed",
+                "awake", "thermal_safe", "background_quiet"))):
+        raise FatalSession("missing current window/migration/owner go")
+    start, end = parse_time(go["start"]), parse_time(go["end"])
+    if not start <= now < end - WINDOW_CLEANUP_SECONDS:
+        raise DeadlineExceeded("outside current window or cleanup reserve")
+    return end - WINDOW_CLEANUP_SECONDS - now
+
+
+def launcher_limit(expected: Mapping, executable: Path,
+                   version: Sequence[int], sha256: str) -> None:
+    if (tuple(version) != (3, 14, 7) or expected["version"] != list(version)
+            or executable.resolve() != Path(expected["path"])
+            or sha256 != expected["sha256"]):
+        raise FatalSession("use the explicitly pinned CPython 3.14.7 launcher")
+
+
+def bsd_time(output: str, code: int) -> dict:
+    pairs = re.findall(r"^(real|user|sys) ([0-9]+(?:\.[0-9]+)?)$", output,
+                       re.MULTILINE)
+    rss = re.findall(r"^\s*([0-9]+)\s+maximum resident set size$", output,
+                     re.MULTILINE)
+    fields = dict(pairs)
+    if (len(pairs) != 3 or set(fields) != {"real", "user", "sys"}
+            or len(rss) != 1):
+        raise FatalSession("unrecognized BSD time receipt")
+    return {"elapsed_seconds": float(fields["real"]),
+            "user_seconds": float(fields["user"]),
+            "system_seconds": float(fields["sys"]),
+            "max_rss_bytes": int(rss[0]), "exit_code": code,
+            "rss_scope": "Darwin ru_maxrss bytes, not simultaneous group sum"}
 
 
 @dataclass(slots=True)
@@ -392,31 +586,116 @@ class OwnedProcess:
 class Supervisor:
     """Sole owner of subprocess sessions, receipts and bounded shutdown."""
 
-    def __init__(self, root: Path, environment: Mapping[str, str]):
-        self.block_deadline = 0.0
-        self.launch_deadline = 0.0
+    def __init__(self, root: Path, environment: Mapping[str, str],
+                 admission: Mapping):
+        self.block_deadline = self.launch_deadline = 0.0
         self.block_id = "unbound"
         self.job_minutes: dict[str, float] = {}
-        signal.signal(signal.SIGALRM, alarm_expired)
-        # Adopt orphaned descendants so PID 1 is not our reaping mechanism.
-        libc = ctypes.CDLL(None, use_errno=True)
-        if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
-            raise ReviewRequired("cannot own descendant reaping; A9 required")
-        self.root = root
-        self.environment = dict(environment)
+        self.root, self.environment = root.resolve(), dict(environment)
         self.active: list[OwnedProcess] = []
         self.serial = 0
+        self.native_identity = {
+            "input_manifest_sha256": admission["input_manifest_sha256"],
+            "daemon_off_identities_sha256": admission["identities_sha256"],
+            "launcher": dict(admission["launcher"]),
+        }
+        if admission["d11_limits"] != {
+                "admission_level": 30, "stop_level": 25,
+                "memory_reserve_bytes": MEMORY_RESERVE,
+                "timing_load1_max": 2.0,
+                "swap_observation_seconds": 30}:
+            raise FatalSession("D11 limits differ from the approved policy")
+        launcher_limit(admission["launcher"], Path(sys.executable),
+                       sys.version_info[:3], digest(Path(sys.executable)))
+        if (sys.implementation.name != "cpython" or sys.platform != "darwin"
+                or platform.machine() != "arm64"):
+            raise FatalSession("pinned CPython on darwin-arm64 required")
+        self.go_file = Path(admission["window_file"])
+        self.go_sha = digest(self.go_file)
+        self.off_file = Path(admission["identities_file"])
+        self.off = read_json(self.off_file)
+        self.case: Mapping = {}
+        self.swapouts: int | None = None
+        self.current_rss = 0
+        self.permissions()
+        host = native_output([
+            "/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string", "hw.memsize",
+            "hw.perflevel0.physicalcpu", "hw.perflevel1.physicalcpu",
+            "hw.logicalcpu"], self.environment).splitlines()
+        if host != ["Apple M1 Max", str(64 * GIB), "8", "2", "10"]:
+            raise FatalSession("unverified M1 Max 64-GiB/8P+2E host")
+        self.native_identity["host"] = host
+        signal.signal(signal.SIGALRM, alarm_expired)
+
+    def permissions(self, *, full: bool = True) -> float:
+        if (digest(self.go_file) != self.go_sha
+                or digest(self.off_file) != self.native_identity[
+                    "daemon_off_identities_sha256"]):
+            raise FatalSession("window go or daemon identities changed")
+        if not full and time.monotonic() < self.next_d12_check:
+            return self.block_deadline - time.monotonic()
+        go = read_json(self.go_file)
+        remaining = window_limit(
+            go, self.native_identity["input_manifest_sha256"], time.time())
+        daemon_off(self.off, self.environment)
+        self.next_d12_check = time.monotonic() + 60
+        self.window = {"id": go["window_id"], "go_sha256": self.go_sha,
+                       "start": go["start"], "end": go["end"]}
+        return remaining
+
+    def guard(self, *, admission: bool = False) -> None:
+        try:
+            self.permissions(full=admission)
+            sample = native_resources(self.environment)
+            previous = sample["swapouts"] if self.swapouts is None else (
+                self.swapouts)
+            peak = max(0, self.case.get("estimated_peak_bytes", 0)
+                       - (self.current_rss if self.active else 0))
+            peak = peak if admission else 0
+            resource_limit(sample, peak, previous,
+                           timing=self.block_id in TIMING_BLOCKS,
+                           admission=admission)
+            self.swapouts, self.sample = sample["swapouts"], sample
+        except ReviewRequired:
+            self.stop_all()
+            raise
+        except (OSError, ValueError, KeyError, TypeError, IndexError,
+                subprocess.SubprocessError) as error:
+            self.stop_all()
+            raise FatalSession("native admission unverified") from error
 
     def begin_block(self, block: Mapping, outcomes: Mapping[str, str]) -> None:
         self.block_id = block["id"]
-        self.job_minutes = {job["id"]: job["minutes"] for job in block["jobs"]}
+        self.block_deadline = time.monotonic() + self.permissions()
+        self.job_minutes = {}
+        self.job_bindings = {job["id"]: dict(job) for job in block["jobs"]}
+        for job in block["jobs"]:
+            kind = job["kind"]
+            expected = ({j.name: j.stage for j in jobs()}[job["id"]]
+                        if self.block_id == "storage" else
+                        BLOCK_KINDS[self.block_id])
+            if (type(job["minutes"]) not in (int, float)
+                    or not math.isfinite(job["minutes"]) or job["minutes"] <= 0
+                    or kind != expected or any(type(job[k]) is not int
+                    or job[k] <= 0 for k in (
+                        "estimated_peak_bytes", "gomaxprocs"))
+                    or (kind == "setup" and job["gomaxprocs"] != 2)):
+                raise FatalSession("unbound case kind/memory/runtime profile")
+            self.job_minutes[job["id"]] = min(
+                job["minutes"], CASE_MINUTES[kind])
+        if self.block_id == "setup":
+            self.job_limit("setup", time.monotonic())
 
     def job_limit(self, name: str, now: float) -> float:
-        if name not in self.job_minutes:
-            raise ReviewRequired(f"{self.block_id}: unlisted job {name}")
+        if name not in self.job_minutes or self.active:
+            raise FatalSession(f"{self.block_id}: unlisted or competing case")
+        duration = self.job_minutes[name] * 60
+        if duration > self.block_deadline - now:
+            raise DeadlineExceeded(f"{name}: window too short; not-started")
+        self.case = self.job_bindings[name]
         self.launch_deadline = min(
             self.block_deadline - CLEANUP_RESERVE_SECONDS,
-            now + self.job_minutes[name] * 60 - CLEANUP_RESERVE_SECONDS,
+            now + duration - CLEANUP_RESERVE_SECONDS,
         )
         if now >= self.launch_deadline:
             raise DeadlineExceeded(f"{self.block_id}/{name}: job deadline")
@@ -429,7 +708,7 @@ class Supervisor:
                          max(0.000001, end - time.monotonic()))
 
     def reap(self) -> None:
-        """Reap owned children, including unseen adopted zombies."""
+        """Reap direct children; preserve statuses racing with poll()."""
         for owned in self.active:
             owned.process.poll()
         while True:
@@ -447,6 +726,16 @@ class Supervisor:
 
     def start(self, args: Sequence[str], directory: Path,
               environment: Mapping[str, str], cwd: Path) -> OwnedProcess:
+        if environment["GOMAXPROCS"] != str(self.case["gomaxprocs"]):
+            raise FatalSession("unbound effective GOMAXPROCS")
+        self.guard(admission=True)
+        observation_end = time.monotonic() + 30
+        while time.monotonic() < observation_end:
+            time.sleep(max(0, min(5, observation_end - time.monotonic())))
+            self.guard()
+            if time.monotonic() >= self.launch_deadline:
+                raise DeadlineExceeded("admission reached case deadline")
+        self.guard(admission=True)
         if time.monotonic() >= self.launch_deadline:
             raise DeadlineExceeded(
                 f"{self.block_id}: absolute deadline; no spawn")
@@ -464,12 +753,16 @@ class Supervisor:
                 if time.monotonic() >= self.launch_deadline:
                     raise DeadlineExceeded(
                         f"{self.block_id}: expired before spawn")
+                if digest(self.go_file) != self.go_sha:
+                    raise FatalSession("go changed before spawn")
+                window_limit(read_json(self.go_file), self.native_identity[
+                    "input_manifest_sha256"], time.time())
                 process = subprocess.Popen(
                     args, cwd=cwd, env=environment, stdout=log,
                     stderr=subprocess.STDOUT, start_new_session=True,
                     preexec_fn=prepare_child,
                 )
-            except (OSError, subprocess.SubprocessError, DeadlineExceeded):
+            except (OSError, subprocess.SubprocessError, ReviewRequired):
                 log.close()
                 raise
             owned = OwnedProcess(
@@ -477,56 +770,74 @@ class Supervisor:
                 deadline=self.launch_deadline,
             )
             self.active.append(owned)
-            self.observe(process_groups())
-            atomic_json(directory / "process.json", {
-                "pid": process.pid, "pgid": process.pid,
-                "boot_id": Path(
-                    "/proc/sys/kernel/random/boot_id"
-                ).read_text(),
-                "known_pid_start_ticks": sorted(owned.known),
-                "command": list(args), "cwd": str(cwd),
-                "absolute_deadline": owned.deadline,
-            })
+            usage = darwin_usage(process.pid)
+            if usage is None:
+                raise FatalSession("new child birth identity unavailable")
+            owned.known.add((process.pid, usage.proc_start_abstime))
             self.arm_guard()
-            return owned
+        except (ReviewRequired, OSError):
+            self.stop_all()
+            raise
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        atomic_json(directory / "process.json", {
+            "pid": process.pid, "pgid": process.pid,
+            "identity_kind": "darwin-rusage-v0-start-abstime",
+            "known_pid_birth": sorted(owned.known),
+            "native": self.native_identity, "window": self.window,
+            "resources": self.sample,
+            "command": list(args), "cwd": str(cwd),
+            "absolute_deadline": owned.deadline,
+        })
+        self.observe(process_groups(self.environment, self.active))
+        return owned
 
     def observe(self, groups: Mapping) -> None:
+        self.current_rss = 0
         for owned in self.active:
             members = groups.get(owned.process.pid, {})
+            if (members is None or (members and (
+                    (owned.known and not owned.known.intersection(members))
+                    or (not owned.known and not any(
+                        pid == owned.process.pid for pid, _ in members))))):
+                self.stop_all()
+                raise FatalSession("unverified group identity; no adoption")
             owned.known.update(members)
-            rss = sum(members.values())
+            self.current_rss += sum(members.values())
+        self.guard()
+        for owned in self.active:
+            rss = sum(groups.get(owned.process.pid, {}).values())
             owned.peak_rss = max(owned.peak_rss, rss)
             with (owned.directory / "rss.jsonl").open("a") as stream:
                 stream.write(json.dumps({
                     "elapsed_seconds": time.monotonic() - owned.started,
-                    "group_rss_bytes": rss,
-                    "mem_available_bytes": memory_available(),
-                    "loadavg": list(os.getloadavg()),
+                    "group_rss_bytes": rss, **self.sample,
                 }) + "\n")
 
     def close(self, owned: OwnedProcess) -> None:
         self.reap()
-        members = process_groups().get(owned.process.pid, {})
-        if members:
-            raise FatalSession(
-                "job exited with surviving session members")
+        groups = process_groups(self.environment, self.active)
+        members = groups.get(owned.process.pid, {})
+        if members is None or members:
+            raise FatalSession("job exited with unproved/surviving members")
         owned.log.close()
         self.active.remove(owned)
         self.arm_guard()
 
     def stop_all(self) -> None:
+        if not self.active:
+            return
+        uncertain = set()
         for sig in (signal.SIGTERM, signal.SIGKILL):
-            groups = process_groups()
+            groups = process_groups(self.environment, self.active)
             for owned in self.active:
                 members = groups.get(owned.process.pid, {})
+                if members is None or (members and not
+                                       owned.known.intersection(members)):
+                    uncertain.add(owned.process.pid)
+                    continue
                 if not members:
                     continue
-                if not owned.known.intersection(members):
-                    raise FatalSession(
-                        "unverified process identity; no kill"
-                    )
                 owned.known.update(members)
                 try:
                     os.killpg(owned.process.pid, sig)
@@ -535,24 +846,25 @@ class Supervisor:
             deadline = time.monotonic() + CLEANUP_GRACE_SECONDS
             while time.monotonic() < deadline:
                 self.reap()
-                groups = process_groups()
-                if not any(groups.get(p.process.pid) for p in self.active):
+                groups = process_groups(self.environment, self.active)
+                if not any(groups.get(p.process.pid) or p.process.pid in
+                           uncertain for p in self.active):
                     break
                 time.sleep(0.1)
         self.reap()
-        groups = process_groups()
+        groups = process_groups(self.environment, self.active)
         survivors = [p.process.pid for p in self.active
-                     if groups.get(p.process.pid)]
+                     if groups.get(p.process.pid)
+                     or p.process.pid in uncertain]
         for owned in self.active:
             owned.log.close()
             if owned.process.poll() is None:
                 survivors.append(owned.process.pid)
             else:
                 owned.process.wait(timeout=0)
+        self.active = [p for p in self.active if p.process.pid in survivors]
         if survivors:
-            raise FatalSession(
-                f"owned sessions remain: {survivors}")
-        self.active.clear()
+            raise FatalSession(f"unproved or surviving sessions: {survivors}")
 
     def run(self, args: Sequence[str], *, cwd: Path | None = None,
             env: Mapping[str, str] | None = None,
@@ -564,9 +876,17 @@ class Supervisor:
             args, directory, env or self.environment, cwd or self.root,
         )
         try:
-            status = owned.process.wait(
-                timeout=max(0, owned.deadline - time.monotonic()),
-            )
+            while owned.process.poll() is None:
+                self.observe(process_groups(self.environment, self.active))
+                remaining = owned.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise DeadlineExceeded("absolute setup deadline")
+                time.sleep(min(5, remaining))
+            status = owned.process.returncode
+        except FatalSession:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            self.stop_all()
+            raise
         except (subprocess.TimeoutExpired, DeadlineExceeded) as error:
             signal.setitimer(signal.ITIMER_REAL, 0)
             self.stop_all()
@@ -1105,14 +1425,14 @@ def eligible_timings(receipts: Sequence[Mapping]) -> list[Job]:
 def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
                   setup: Mapping, concurrency: int,
                   receipts: list[dict]) -> None:
+    if concurrency != 1:
+        raise FatalSession("whole-Mac correctness/timing cases must be serial")
     root = supervisor.root
     pending = deque(selected)
     active: dict[str, tuple[Job, OwnedProcess, dict]] = {}
     while pending or active:
-        groups = process_groups()
+        groups = process_groups(supervisor.environment, supervisor.active)
         supervisor.observe(groups)
-        if memory_available() < MEMORY_RESERVE:
-            raise FatalSession("memory stop: MemAvailable below 16 GiB")
         for name, (job, owned, identity) in list(active.items()):
             code = owned.process.poll()
             if time.monotonic() >= owned.deadline:
@@ -1123,7 +1443,9 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
             supervisor.close(owned)
             path = result_path(root, job)
             report = read_json(path)
-            timing = read_json(directory / "time.json")
+            timing = bsd_time(
+                (directory / "native-time.txt").read_text(), code)
+            atomic_json(directory / "time.json", timing)
             if timing["exit_code"] != code:
                 raise ReviewRequired("time receipt/exit disagreement")
             manifest_path = root / "data" / job.tier / "manifest.json"
@@ -1146,7 +1468,7 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
                 "system_seconds": timing["system_seconds"],
                 "peak_rss_bytes": max(
                     report["peak_rss_bytes"], owned.peak_rss,
-                    timing["max_rss_kib"] * 1024,
+                    timing["max_rss_bytes"],
                 ),
                 "sampled_group_peak_is_lower_bound": True,
                 "metrics": report["metrics"],
@@ -1168,9 +1490,7 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
                 raise ReviewRequired("reference oracle did not pass")
         while pending and len(active) < concurrency:
             job = pending[0]
-            gomaxprocs = 30 if job.stage != "screen" else 30 // concurrency
-            if job.stage == "timing":
-                gomaxprocs = 16
+            gomaxprocs = supervisor.job_bindings[job.name]["gomaxprocs"]
             identity = case_identity(job, root, setup, gomaxprocs)
             directory = root / "jobs" / job.name
             if directory.exists():
@@ -1183,30 +1503,18 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
                     raise ReviewRequired("saved reference oracle did not pass")
                 print(job.name, "validated receipt; skipped", flush=True)
                 continue
-            reserve = sum(
-                max(0, projected_memory(old_job)
-                    - sum(groups.get(owned.process.pid, {}).values()))
-                for old_job, owned, _ in active.values()
-            )
-            need = projected_memory(job) + reserve + MEMORY_RESERVE
-            if need > memory_available():
-                if not active:
-                    raise FatalSession(
-                        f"insufficient free memory: {job.name}"
-                    )
-                break
             directory.mkdir()
             atomic_json(directory / "started.json", identity)
             env = {**supervisor.environment, "GOMAXPROCS": str(gomaxprocs)}
             supervisor.job_limit(job.name, time.monotonic())
             owned = supervisor.start([
-                "/usr/bin/time", "-q", "-f", TIME_FORMAT, "-o",
-                str(directory / "time.json"), *command(job, root),
+                "/usr/bin/time", "-p", "-l", "-o",
+                str(directory / "native-time.txt"), *command(job, root),
             ], directory, env, root)
             active[job.name] = (job, owned, identity)
             pending.popleft()
             # Refresh after launch; reserve the new job's pending RSS growth.
-            groups = process_groups()
+            groups = process_groups(supervisor.environment, supervisor.active)
         if active:
             time.sleep(5)
     summary(root, receipts)
@@ -1323,8 +1631,8 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
               accepted_exit_codes: Sequence[int] = (0,)) -> dict:
     root = supervisor.root
     directory = root / "aux" / name
-    timed = supervisor.block_id in TIMING_BLOCKS
-    env = {**supervisor.environment, "GOMAXPROCS": "16" if timed else "30"}
+    env = {**supervisor.environment,
+           "GOMAXPROCS": str(supervisor.job_bindings[name]["gomaxprocs"])}
     working_directory = cwd or root / "checkout"
     identity = {"source": COMMIT, "command": list(args),
                 "cwd": str(working_directory),
@@ -1349,9 +1657,8 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
     supervisor.job_limit(name, time.monotonic())
     owned = supervisor.start(args, directory, env, working_directory)
     while owned.process.poll() is None:
-        supervisor.observe(process_groups())
-        if memory_available() < MEMORY_RESERVE:
-            raise FatalSession("auxiliary memory stop; A9 required")
+        supervisor.observe(process_groups(supervisor.environment,
+                                          supervisor.active))
         if time.monotonic() >= owned.deadline:
             raise DeadlineExceeded(f"{name}: absolute auxiliary deadline")
         time.sleep(5)
@@ -1565,6 +1872,7 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
     path = root / "session.json"
     session_identity = {
         "configuration": dict(admission), "setup": dict(identity),
+        "native": supervisor.native_identity,
     }
     record = {"identity": session_identity, "blocks": {}}
     if path.exists():
@@ -1606,7 +1914,7 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
             supervisor.begin_block(block, outcomes)
         except DeadlineExceeded as error:
             state = {
-                "state": "skipped" if block_id == "cpu_cost" else "partial",
+                "state": "partial",
                 "reason": str(error), "reason_code": "time",
                 "files": {}, "clean_handoff": True,
             }
@@ -1617,6 +1925,9 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
                 raise ReviewRequired(
                     "setup: no time") from error
             continue
+        except FatalSession:
+            supervisor.stop_all()
+            raise
         except ReviewRequired as error:
             if block_id != "cpu_cost":
                 raise
@@ -1663,7 +1974,14 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
                 run_catalog_hybrid(supervisor, sdk, block_id)
             else:
                 state = binding_block(supervisor, block)
-        except (FatalSession, MemoryError):
+        except (FatalSession, MemoryError) as error:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            try:
+                record["blocks"][block_id].update(
+                    terminal="fatal", reason=str(error))
+                atomic_json(path, record)
+            finally:
+                supervisor.stop_all()
             raise
         except Exception as error:
             signal.setitimer(signal.ITIMER_REAL, 0)
