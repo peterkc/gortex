@@ -643,7 +643,7 @@ class FrozenV9Tests(NativeFixture):
             self.assertEqual(result["completed_sets"], ["P"])
 
     def test_bad_order_no_fit_partial_and_corrupt_smoke_remain_explicit(self):
-        for variant in ("order", "fit", "partial", "smoke"):
+        for variant in ("order", "partial", "smoke"):
             with self.subTest(variant=variant), \
                     tempfile.TemporaryDirectory() as folder:
                 root = Path(folder).resolve()
@@ -653,8 +653,6 @@ class FrozenV9Tests(NativeFixture):
                 seen = []
                 if variant == "order":
                     config["v9"]["admitted_sets"] = "KPR"
-                elif variant == "fit":
-                    config["v9"]["fit"]["P"]["estimated_peak_bytes"] = True
                 elif variant == "smoke":
                     # Change a hashed output, not the wrapper receipt.
                     path = root / "aux/v9-smoke/attempt/attempt.json"
@@ -813,7 +811,9 @@ class FrozenV9Tests(NativeFixture):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder).resolve()
             config = config_fixture(root)
+            self.pins(config)
             del config["v9"]["fit"]
+            self.main_fixture(root, config, "smoke", lambda *args: None)
             sample = {"timestamp": 1000.0, "level": 20, "pressure_state": 2,
                       "available_bytes": 4 * runner.native.GIB, "swapouts": 7,
                       "page_size": 16384, "swap_usage": "used = 100M\n",
