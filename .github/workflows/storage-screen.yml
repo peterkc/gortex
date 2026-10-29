@@ -88,12 +88,7 @@ jobs:
           "$py" --version | tee "$RUNNER_TEMP/storage/ci-driver-py310.txt"
           "$py" -m unittest -v test_driver 2>&1 \
             | tee -a "$RUNNER_TEMP/storage/ci-driver-py310.txt"
-          "$py" run.py --preflight --root /work --inputs /work/inputs \
-            --bindings control/bindings.json \
-            --setup-recipe control/setup-recipe.json \
-            --stop-procedure control/stop-procedure.json \
-            > "$RUNNER_TEMP/storage/ci-preflight.json"
-          sha256sum control/*.json run.py | tee -a "$RUNNER_TEMP/storage/ci-preflight.txt"
+          sha256sum run.py | tee -a "$RUNNER_TEMP/storage/ci-driver-py310.txt"
       - name: Exact evaluator entrypoint on tiny synthetic vectors only
         shell: bash
         env:

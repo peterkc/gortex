@@ -9,20 +9,17 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 import ctypes
-import fcntl
 import hashlib
 import json
 import math
 import os
 from pathlib import Path, PurePosixPath
-import platform
 import re
 import shlex
 import shutil
 import signal
 import statistics
 import subprocess
-import sys
 import tarfile
 import time
 from typing import BinaryIO, Literal
@@ -32,8 +29,6 @@ import urllib.request
 COMMIT = "5bab54d2dd8b7165f7b813f9644857f694e28ede"
 REPOSITORY = "https://github.com/peterkc/gortex.git"
 BRANCH = "study/storage-harness"
-GO_FILE = "go1.27.1.linux-amd64.tar.gz"
-GO_SHA = "63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445"
 USEARCH_SHA = (
     "96f1ed59f32303e612b2e72c393475696743b49e0832d33e65ad97aacf61d655"
 )
@@ -43,7 +38,6 @@ USEARCH_URL = (
 GIB = 1024 ** 3
 MEMORY_RESERVE = 16 * GIB
 NODE_SCALE = 423567 / 81179
-QUERY_SCALE = 811 / 694
 ARCHIVES = {
     "tier1": {
         "sha256": (
@@ -82,15 +76,7 @@ FINALISTS = ("sqlite-segment", "pebble-bleve")
 CATALOGS = ("catalog-sqlite", "catalog-refs", "catalog-bbolt",
             "catalog-pebble", "catalog-manifest")
 TIMING_BLOCKS = {"segment_timing", "catalog", "hybrid", "cpu_cost", "baseline_a7"}
-UV_VERSION = "0.13.5"
-UV_FILE = "uv-x86_64-unknown-linux-gnu.tar.gz"
-UV_SHA = "f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f"
 PYTHON_KEY = "cpython-3.12.15-linux-x86_64-gnu"
-PYTHON_SHA = "6d7521138fd33afddc1ccd08abb007d9a2829e38117c2576f9efdc0ec73ce772"
-# Sum of existing build/Open/query metric means*counts, not CLI wall time.
-TIMED_LOWER_BOUND = (
-    9.903676664 + 38.168377211
-)
 STAGES = {
     "before-write", "after-write", "after-sync", "before-rename",
     "after-rename", "after-dirsync",
@@ -108,17 +94,6 @@ TIME_FORMAT = (
 )
 
 
-GCE_RECEIPT_FIELDS = frozenset({
-    "name", "zone", "project", "id", "status", "creation_time",
-    "last_start_time", "termination_time", "provisioning_model",
-    "instance_termination_action", "on_host_maintenance",
-    "boot_disk_auto_delete",
-    "service_accounts", "login_user", "uid", "gpu", "setup_confirmed", "owner",
-    "firewall_rule", "max_run_duration_seconds", "boot_disk_name",
-    "boot_disk_type", "boot_disk_size_gb", "source_image",
-})
-
-
 class ReviewRequired(RuntimeError):
     """Stop without retrying or deleting evidence."""
 
@@ -127,83 +102,14 @@ class FatalSession(ReviewRequired):
     """Process, isolation or shared-resource failure; stop all blocks."""
 
 
-# Absolute allocation minutes. These are limits, not measured predictions.
-BLOCKS = (
-    ("setup", 45, 0, 45), ("smoke", 25, 45, 70),
-    ("calibration", 15, 70, 85), ("storage", 150, 85, 235),
-    ("segment_timing", 120, 235, 355), ("catalog", 30, 355, 385),
-    ("hybrid", 45, 385, 430), ("model_a4", 160, 430, 590),
-    ("cpu_cost", 60, 590, 650), ("baseline_a7", 40, 650, 690),
-    ("retrieval", 30, 690, 720),
-)
-INPUT_BLOCKS = frozenset({"smoke", "calibration", "model_a4", "cpu_cost",
-                          "baseline_a7", "retrieval"})
-APT_PACKAGES = (
-    "build-essential", "cmake", "git", "ca-certificates", "curl", "zstd",
-    "pkg-config", "binutils", "file", "time", "util-linux",
-)
-APT_PATHS = (
-    "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/var/lib/apt",
-    "/var/lib/dpkg", "/var/cache/apt", "/var/log",
-)
+INPUT_BLOCKS = frozenset({"smoke", "calibration", "cpu_cost",
+                          "baseline_a7"})
 CLEANUP_GRACE_SECONDS = 5.0
 CLEANUP_RESERVE_SECONDS = 2 * CLEANUP_GRACE_SECONDS + 1
 
 
 class DeadlineExceeded(ReviewRequired):
     """The owned work must stop; acceptance remains incomplete."""
-
-
-def setup_recipe() -> dict:
-    return {
-        "owner": "pi-gcp", "host": "single-authorized-disposable-pod",
-        "privilege": "root-or-sudo-n", "packages": list(APT_PACKAGES),
-        "commands": ["apt-get update",
-                     "apt-get install -y " + " ".join(APT_PACKAGES)],
-        "allowed_system_paths": list(APT_PATHS),
-        "dependencies": "package-manager-resolved-only",
-        "study_root": "/work",
-    }
-
-
-def validate_recipe(recipe: Mapping) -> None:
-    if not isinstance(recipe, Mapping):
-        raise ReviewRequired("setup: malformed recipe")
-    if recipe.get("owner") != "pi-gcp":
-        raise ReviewRequired("setup: owner must be pi-gcp")
-    if dict(recipe) != setup_recipe():
-        raise ReviewRequired("setup: unlisted package, command or effect path")
-
-
-def validate_procedure(procedure: Mapping) -> None:
-    if not isinstance(procedure, Mapping):
-        raise ReviewRequired("termination procedure: malformed")
-    required = {
-        "owner": "pi-gcp", "mechanism": "GCE max-run-duration DELETE",
-        "provider_ttl": True, "termination_action": "DELETE",
-        "on_host_maintenance": "TERMINATE", "time_origin": "created_at",
-        "no_credentials_on_vm": True, "max_run_duration_minutes": 710,
-    }
-    for key, value in required.items():
-        if (type(procedure.get(key)) is not type(value)
-                or procedure[key] != value):
-            raise ReviewRequired(f"termination procedure: {key}")
-    if set(procedure) != set(required) | {
-            "backstop_minute", "live_receipt_fields"}:
-        raise ReviewRequired("termination procedure: missing/extra field")
-    backstop = procedure.get("backstop_minute")
-    if type(backstop) not in (int, float) or not math.isfinite(backstop):
-        raise ReviewRequired("termination procedure: missing backstop_minute")
-    if backstop < 690:
-        raise ReviewRequired("backstop cuts a measurement window")
-    if backstop > 720:
-        raise ReviewRequired("backstop exceeds cap")
-    provided = procedure.get("live_receipt_fields")
-    if (not isinstance(provided, list)
-            or any(not isinstance(field, str) for field in provided)
-            or len(provided) != len(GCE_RECEIPT_FIELDS)
-            or set(provided) != GCE_RECEIPT_FIELDS):
-        raise ReviewRequired("termination procedure: live_receipt_fields")
 
 
 def sha_pin(value: object, lengths: tuple[int, ...]) -> bool:
@@ -276,11 +182,8 @@ def bound_jobs(root: Path) -> dict[str, list[dict]]:
     return result
 
 
-def preflight(bindings: Mapping, recipe: Mapping,
-              procedure: Mapping, root: Path, *, concurrency: int = 1) -> dict:
+def preflight(bindings: Mapping, root: Path) -> dict:
     """Validate prospective inputs without a pod, host probe or side effect."""
-    validate_recipe(recipe)
-    validate_procedure(procedure)
     if not isinstance(bindings, Mapping):
         raise ReviewRequired("bindings: malformed object")
     if set(bindings) != INPUT_BLOCKS:
@@ -288,7 +191,6 @@ def preflight(bindings: Mapping, recipe: Mapping,
         extra = sorted(set(bindings) - INPUT_BLOCKS)
         raise ReviewRequired(f"bindings: missing {missing}; unlisted {extra}")
     inventory = bound_jobs(root)
-    inventory["setup"][0]["owner"] = recipe["owner"]
     for block in sorted(INPUT_BLOCKS):
         entries = bindings[block]
         if not isinstance(entries, list) or not entries:
@@ -318,21 +220,12 @@ def preflight(bindings: Mapping, recipe: Mapping,
                     or any(not isinstance(arg, str) or not arg
                            or any(ord(c) < 32 for c in arg) for arg in argv)):
                 raise ReviewRequired(f"{block}: malformed argv")
-            if (block != "retrieval"
-                    and Path(argv[0]).name in {"apt-get", "sudo"}):
-                raise ReviewRequired(f"{block}: forbidden setup-owner command")
             for key, lengths in (("source_pin", (40, 64)),
                                  ("config_pin", (64,)), ("input_pin", (64,))):
                 if not sha_pin(entry[key], lengths):
                     raise ReviewRequired(f"{block}: malformed {key}")
-            if (block != "retrieval"
-                    and not owned_path(entry["receipt_path"], root)):
+            if not owned_path(entry["receipt_path"], root):
                 raise ReviewRequired(f"{block}: malformed receipt_path")
-            if block == "retrieval" and (
-                    not isinstance(entry["receipt_path"], str)
-                    or not entry["receipt_path"]
-                    or any(ord(c) < 32 for c in entry["receipt_path"])):
-                raise ReviewRequired("retrieval: malformed receipt_path")
             minutes = entry["minutes"]
             if (type(minutes) not in (int, float) or not math.isfinite(minutes)
                     or minutes * 60 <= CLEANUP_RESERVE_SECONDS):
@@ -346,37 +239,9 @@ def preflight(bindings: Mapping, recipe: Mapping,
     if (len(set(all_ids)) != len(all_ids)
             or len(set(all_receipts)) != len(all_receipts)):
         raise ReviewRequired("bindings: duplicate job id or receipt_path")
-    for block, minutes, _, _ in BLOCKS:
-        if (block not in {"storage", "segment_timing"}
-                and sum(job["minutes"] for job in inventory[block]) > minutes):
-            raise ReviewRequired(
-                f"{block}: job allocations exceed {minutes} minutes")
     return {
         "phase1": "prepared-no-pod", "source": COMMIT,
         "enforcement_entrypoint": "study/storage/pod/run.py:main",
-        "enforcement_argv": ["python3", "/work/control/run.py", "--execute",
-                             "--root", "/work", "--inputs", "/work/inputs",
-                             "--concurrency", str(concurrency),
-                             "--bindings", "/work/control/bindings.json",
-                             "--setup-recipe",
-                             "/work/control/setup-recipe.json",
-                             "--stop-procedure",
-                             "/work/control/stop-procedure.json",
-                             "--allocation", "/work/control/allocation.json",
-                             "--termination-receipt",
-                             "/work/control/termination.json"],
-        "cleanup_reserve_seconds": CLEANUP_RESERVE_SECONDS,
-        "blocks": [{"id": block, "minutes": minutes,
-                    "latest_start_minute": latest, "deadline_minute": deadline,
-                    "jobs": inventory[block],
-                    "execution_scope": (
-                        "external-owner" if block == "retrieval" else "pod")}
-                   for block, minutes, latest, deadline in BLOCKS],
-        "setup_recipe": dict(recipe), "termination_procedure": dict(procedure),
-        "deletion_owner": "pi-gcp", "total_minutes": 720,
-        "measurement_deadline_minute": 690,
-        "backstop_minute": procedure["backstop_minute"],
-        "retrieval_deadline_minute": min(720, procedure["backstop_minute"]),
     }
 
 
@@ -401,99 +266,6 @@ def parse_time(value: object, label: str) -> datetime:
     if parsed.utcoffset() is None:
         raise ReviewRequired(f"{label}: timezone required")
     return parsed
-
-
-def live_termination(allocation: Mapping, receipt: Mapping,
-                     now_wall: float, *,
-                     procedure: Mapping) -> tuple[float, float]:
-    if not isinstance(allocation, Mapping) or not isinstance(receipt, Mapping):
-        raise ReviewRequired(
-            "A9/pi-gcp deletion: missing/malformed live receipt")
-    if (set(allocation) != {"name", "zone", "project", "id", "created_at"}
-            or set(receipt) != GCE_RECEIPT_FIELDS):
-        raise ReviewRequired("A9/pi-gcp deletion: allocation/receipt fields")
-    for key in ("name", "zone", "project", "id"):
-        if not isinstance(allocation[key], str) or not allocation[key].strip():
-            raise ReviewRequired(f"A9/pi-gcp deletion: allocation {key}")
-    if allocation["project"] != "peterkc-dev":
-        raise ReviewRequired("A9/pi-gcp deletion: project")
-    expected = {
-        **{key: allocation[key] for key in ("name", "zone", "project", "id")},
-        "creation_time": allocation["created_at"], "owner": "pi-gcp",
-        "setup_confirmed": True, "status": "RUNNING",
-        "provisioning_model": "STANDARD",
-        "instance_termination_action": "DELETE",
-        "on_host_maintenance": "TERMINATE", "boot_disk_auto_delete": True,
-        "boot_disk_type": "pd-balanced", "boot_disk_size_gb": 700,
-        "service_accounts": [],
-        "max_run_duration_seconds": procedure["max_run_duration_minutes"] * 60,
-    }
-    for key, value in expected.items():
-        if type(receipt[key]) is not type(value) or receipt[key] != value:
-            raise ReviewRequired(f"A9/pi-gcp deletion: termination {key}")
-    for key in ("login_user", "gpu", "boot_disk_name", "source_image"):
-        if not isinstance(receipt[key], str) or not receipt[key].strip():
-            raise ReviewRequired(f"A9/pi-gcp deletion: {key}")
-    if (type(receipt["uid"]) is not int or receipt["uid"] < 0
-            or not isinstance(receipt["firewall_rule"], (str, Mapping))
-            or not receipt["firewall_rule"]):
-        raise ReviewRequired("A9/pi-gcp deletion: uid/firewall_rule")
-    if "common-cu129-ubuntu-2204-nvidia-580" not in receipt["source_image"]:
-        raise ReviewRequired("A9/pi-gcp deletion: source_image")
-    clocks = {}
-    for key in ("creation_time", "last_start_time", "termination_time"):
-        parsed = parse_time(receipt[key], f"A9/pi-gcp deletion: {key}")
-        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
-                            r"(?:Z|[+-]\d{2}:\d{2})", receipt[key]):
-            raise ReviewRequired(f"A9/pi-gcp deletion: {key} whole seconds")
-        clocks[key] = parsed.timestamp()
-    zero = clocks["creation_time"]
-    start, stop = clocks["last_start_time"], clocks["termination_time"]
-    deadline = zero + procedure["backstop_minute"] * 60
-    if (abs(stop - start - receipt["max_run_duration_seconds"]) > 60
-            or stop < zero + 710 * 60 or stop > zero + 719 * 60 + 30
-            or start > zero + 9 * 60 + 30):
-        raise ReviewRequired(
-            "A9/pi-gcp deletion: termination_time outside cap")
-    deadline = min(deadline, stop)
-    if not zero <= now_wall < deadline or start > now_wall:
-        raise ReviewRequired("A9/pi-gcp deletion: absolute backstop expired")
-    return zero, deadline
-
-
-def block_limit(block: str, now: float, zero: float, hard: float,
-                outcomes: Mapping[str, str], *, a3_live: bool) -> float:
-    position = next(i for i, row in enumerate(BLOCKS) if row[0] == block)
-    _, allocation, latest, deadline = BLOCKS[position]
-    for previous, _, _, _ in BLOCKS[:position]:
-        if outcomes.get(previous) not in {
-                "completed", "checks_failed", "dependency_blocked",
-                "partial", "skipped"}:
-            raise ReviewRequired(
-                f"{block}: predecessor {previous} has no clean handoff")
-    if block == "cpu_cost":
-        if hard - now <= 70 * 60:
-            raise DeadlineExceeded(
-                "cpu_cost: preserve A7/deletion 70-minute reserve")
-        for required in ("storage", "segment_timing", "catalog", "hybrid"):
-            if outcomes.get(required) not in {"completed", "checks_failed"}:
-                raise ReviewRequired(f"cpu_cost: dependency {required}")
-        if outcomes.get("model_a4") not in {"completed", "dependency_blocked"}:
-            raise ReviewRequired("cpu_cost: dependency model_a4")
-    if block == "baseline_a7" and a3_live:
-        raise ReviewRequired("baseline_a7: A3 is still live; A9 required")
-    if block != "setup" and now > zero + latest * 60:
-        raise DeadlineExceeded(f"{block}: latest start T+{latest} exceeded")
-    # Setup includes startup from allocation; it never restarts a 45m clock.
-    start = zero if block == "setup" else now
-    later = sum(row[1] for row in BLOCKS[position + 1:]) * 60
-    end = min(start + allocation * 60, zero + deadline * 60, hard - later)
-    if end - now <= CLEANUP_RESERVE_SECONDS:
-        raise DeadlineExceeded(
-            f"{block}: no work time before absolute deadline")
-    if block == "cpu_cost" and end - now < allocation * 60:
-        raise DeadlineExceeded("cpu_cost: insufficient complete CPU window")
-    return end
 
 
 @dataclass(frozen=True, slots=True)
@@ -536,57 +308,6 @@ def command(job: Job, root: Path) -> list[str]:
 def projected_memory(job: Job) -> int:
     scale = NODE_SCALE if job.tier == "tier10" else 1
     return math.ceil(OBSERVED[job.adapter][1] * scale * 1.3)
-
-
-def schedule_minutes(concurrency: int, scale: float) -> float:
-    """No CPU speedup; FIFO simulation, 180 GiB initially available."""
-    pending = deque(SCREEN)
-    active: list[tuple[float, int]] = []
-    elapsed = 0.0
-    capacity = 180 * GIB - MEMORY_RESERVE
-    while pending or active:
-        while pending and len(active) < concurrency:
-            name = pending[0]
-            need = projected_memory(Job("screen", name, "tier10"))
-            if sum(memory for _, memory in active) + need > capacity:
-                break
-            pending.popleft()
-            active.append((elapsed + OBSERVED[name][0] * scale, need))
-        if not active:
-            raise ReviewRequired("estimate cannot admit a correctness case")
-        elapsed = min(end for end, _ in active)
-        active = [(end, memory) for end, memory in active if end > elapsed]
-    return elapsed / 60
-
-
-def estimates() -> dict:
-    lower = 3 * TIMED_LOWER_BOUND * (1 + NODE_SCALE) / 60
-    rows = []
-    for concurrency in (1, 2, 3):
-        for label, scale in (
-            ("node-scaled", NODE_SCALE),
-            ("node-and-query-scaled", NODE_SCALE * QUERY_SCALE),
-        ):
-            oracle = OBSERVED["oracle"][0] * scale / 60
-            screen = schedule_minutes(concurrency, scale)
-            rows.append({
-                "concurrency": concurrency, "model": label,
-                "setup_minutes_assumed": 45, "oracle_minutes": oracle,
-                "screen_minutes": screen,
-                "timing_minutes_assumed": [2 * lower, 3 * lower],
-                "total_hours_assumed": [
-                    (45 + oracle + screen + factor * lower) / 60
-                    for factor in (2, 3)
-                ],
-            })
-    return {
-        "node_scale": NODE_SCALE, "query_scale": QUERY_SCALE,
-        "timing_raw_metric_lower_bound_minutes": lower,
-        "timing_overhead_multiplier_assumed": [2, 3],
-        "linux_or_timing_only_measurement": False, "models": rows,
-        "scope": "SDK only; catalog/hybrid setup and timing are not measured",
-        "complete_A1_upper_bound": False,
-    }
 
 
 def digest(path: Path) -> str:
@@ -671,18 +392,7 @@ class OwnedProcess:
 class Supervisor:
     """Sole owner of subprocess sessions, receipts and bounded shutdown."""
 
-    def __init__(self, root: Path, environment: Mapping[str, str], *,
-                 allocation: Mapping, termination: Mapping,
-                 procedure: Mapping, timing_cpu_set: Sequence[int]):
-        wall, mono = time.time(), time.monotonic()
-        allocated, deadline = live_termination(
-            allocation, termination, wall, procedure=procedure)
-        self.zero = mono - (wall - allocated)
-        self.hard_deadline = self.zero + 720 * 60
-        self.backstop_deadline = mono + (deadline - wall)
-        self.allocation, self.termination = allocation, termination
-        self.procedure = dict(procedure)
-        self.timing_cpu_set = sorted(timing_cpu_set)
+    def __init__(self, root: Path, environment: Mapping[str, str]):
         self.block_deadline = 0.0
         self.launch_deadline = 0.0
         self.block_id = "unbound"
@@ -699,12 +409,6 @@ class Supervisor:
 
     def begin_block(self, block: Mapping, outcomes: Mapping[str, str]) -> None:
         self.block_id = block["id"]
-        self.block_deadline = block_limit(
-            self.block_id, time.monotonic(), self.zero, self.hard_deadline,
-            outcomes, a3_live=bool(self.active),
-        )
-        self.block_deadline = min(self.block_deadline, self.backstop_deadline)
-        self.launch_deadline = self.block_deadline - CLEANUP_RESERVE_SECONDS
         self.job_minutes = {job["id"]: job["minutes"] for job in block["jobs"]}
 
     def job_limit(self, name: str, now: float) -> float:
@@ -743,14 +447,6 @@ class Supervisor:
 
     def start(self, args: Sequence[str], directory: Path,
               environment: Mapping[str, str], cwd: Path) -> OwnedProcess:
-        try:
-            live_termination(self.allocation, self.termination, time.time(),
-                             procedure=self.procedure)
-        except Exception as error:
-            raise FatalSession(str(error)) from error
-        if args and Path(args[0]).name in {"apt-get", "sudo"}:
-            raise ReviewRequired(
-                "driver cannot run apt-get or sudo; pi-gcp owns SSH setup")
         if time.monotonic() >= self.launch_deadline:
             raise DeadlineExceeded(
                 f"{self.block_id}: absolute deadline; no spawn")
@@ -762,10 +458,6 @@ class Supervisor:
                                signal.SIGALRM},
         )
         def prepare_child():
-            if self.block_id in TIMING_BLOCKS:
-                os.sched_setaffinity(0, self.timing_cpu_set)
-                if os.sched_getaffinity(0) != set(self.timing_cpu_set):
-                    raise ReviewRequired("host narrowed timing affinity")
             signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         try:
             try:
@@ -819,8 +511,7 @@ class Supervisor:
         members = process_groups().get(owned.process.pid, {})
         if members:
             raise FatalSession(
-                "job exited with surviving session members; "
-                "A9/pi-gcp deletion")
+                "job exited with surviving session members")
         owned.log.close()
         self.active.remove(owned)
         self.arm_guard()
@@ -834,8 +525,7 @@ class Supervisor:
                     continue
                 if not owned.known.intersection(members):
                     raise FatalSession(
-                        "unverified process identity; no kill; "
-                        "A9/pi-gcp deletion"
+                        "unverified process identity; no kill"
                     )
                 owned.known.update(members)
                 try:
@@ -861,7 +551,7 @@ class Supervisor:
                 owned.process.wait(timeout=0)
         if survivors:
             raise FatalSession(
-                f"owned sessions remain: {survivors}; A9/pi-gcp deletion")
+                f"owned sessions remain: {survivors}")
         self.active.clear()
 
     def run(self, args: Sequence[str], *, cwd: Path | None = None,
@@ -942,108 +632,6 @@ def extract(archive: Path, target: Path, prefix: str) -> None:
             destination.chmod(member.mode & 0o777)
 
 
-def timing_cpu_info(affinity: Sequence[int],
-                    topology: Mapping[int, Mapping[str, str]]) -> dict:
-    """Select eight physical cores, ordered by (package, core)."""
-    rows, groups = [], {}
-    try:
-        for cpu in sorted(affinity):
-            raw = topology[cpu]
-            ids = [raw[key] for key in ("physical_package_id", "core_id")]
-            siblings = raw["thread_siblings_list"]
-            if (not all(re.fullmatch(r"[0-9]+", value) for value in ids)
-                    or not re.fullmatch(
-                        r"[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*",
-                        siblings)):
-                raise ValueError("invalid topology field")
-            package, core = map(int, ids)
-            spans = [tuple(map(int, part.split("-")))
-                     for part in siblings.split(",")]
-            if any(span[0] > span[-1] for span in spans):
-                raise ValueError("reversed sibling range")
-            visible = [c for c in sorted(affinity)
-                       if any(span[0] <= c <= span[-1] for span in spans)]
-            groups.setdefault((package, core), []).append(cpu)
-            rows.append({"cpu": cpu, "physical_package_id": package,
-                         "core_id": core, "thread_siblings_list": siblings,
-                         "visible_siblings": visible})
-    except (KeyError, ValueError) as error:
-        raise ReviewRequired("missing/malformed CPU topology") from error
-    if any(row["visible_siblings"] != groups[
-            (row["physical_package_id"], row["core_id"])] for row in rows):
-        raise ReviewRequired("inconsistent CPU sibling topology")
-    cores = sorted(core for core, members in groups.items() if len(members) == 2)
-    if len(cores) < 8:
-        raise ReviewRequired("fewer than eight two-thread visible cores")
-    return {"timing_cpu_set": sorted(c for core in cores[:8]
-                                     for c in groups[core]),
-            "cpu_topology": rows}
-
-
-def host_record() -> dict:
-    if platform.system() != "Linux" or platform.machine() != "x86_64":
-        raise ReviewRequired("execution requires Linux x86_64")
-    release = dict(line.split("=", 1) for line in
-                   Path("/etc/os-release").read_text().splitlines()
-                   if "=" in line)
-    if (release.get("VERSION_ID", "").strip('"') != "22.04"
-            or release.get("ID", "").strip('"') != "ubuntu"):
-        raise ReviewRequired("execution requires Ubuntu 22.04 x86_64")
-    affinity = sorted(os.sched_getaffinity(0))
-    if len(affinity) < 30:
-        raise ReviewRequired("fewer than 30 visible CPUs")
-    meminfo = Path("/proc/meminfo").read_text()
-    total = next(int(line.split()[1]) * 1024 for line in meminfo.splitlines()
-                 if line.startswith("MemTotal:"))
-    if total < 180 * GIB:
-        raise ReviewRequired("less than 180 GiB visible RAM")
-    try:
-        topology = {cpu: {key: (Path("/sys/devices/system/cpu") /
-                    f"cpu{cpu}/topology" / key).read_text().strip()
-                    for key in ("core_id", "physical_package_id",
-                                "thread_siblings_list")} for cpu in affinity}
-    except (OSError, UnicodeError) as error:
-        raise ReviewRequired("cannot read CPU topology") from error
-    return {
-        **timing_cpu_info(affinity, topology),
-        "cpuinfo": Path("/proc/cpuinfo").read_text(),
-        "meminfo": meminfo,
-        "kernel": platform.release(), "platform": platform.platform(),
-        "euid": os.geteuid(),
-        "affinity": affinity,
-        "loadavg": list(os.getloadavg()), "os_release": release,
-    }
-
-
-def verify_package_versions(supervisor: Supervisor) -> dict[str, str]:
-    """Read package metadata; pi-gcp owns all installation over SSH."""
-    parsed = []
-    malformed = False
-    for field in ("${Version}", "${db:Status-Status}"):
-        log = supervisor.run([
-            "dpkg-query", "-W", "-f", "${Package} " + field + "\n",
-            *APT_PACKAGES,
-        ], accepted_exit_codes=(0, 1))
-        rows = {}
-        for line in log.read_text().splitlines():
-            values = line.split()
-            if (len(values) != 2 or values[0] not in APT_PACKAGES
-                    or values[0] in rows):
-                malformed = True
-                continue
-            rows[values[0]] = values[1]
-        parsed.append(rows)
-    versions, states = parsed
-    for package in APT_PACKAGES:
-        if package not in versions or package not in states:
-            raise ReviewRequired(f"setup: missing required package {package}")
-        if states[package] != "installed":
-            raise ReviewRequired(f"setup: package not installed: {package}")
-    if malformed:
-        raise ReviewRequired("setup: malformed dpkg-query output")
-    return versions
-
-
 def copy_tree(root: Path, source: Path, destination: Path) -> dict[str, str]:
     if (source.is_symlink() or not source.is_dir()
             or destination.exists() or destination.is_symlink()
@@ -1070,9 +658,7 @@ def copy_tree(root: Path, source: Path, destination: Path) -> dict[str, str]:
     return artifacts
 
 
-def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping,
-            recipe: Mapping) -> dict:
-    validate_recipe(recipe)
+def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping) -> dict:
     root = supervisor.root
     complete = root / "setup-complete.json"
     if complete.exists():
@@ -1096,8 +682,6 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping,
         raise ReviewRequired("new workspace permits only control/inputs/lock")
     if not inputs.resolve().is_relative_to(root.resolve()):
         raise ReviewRequired("pod inputs must be copied under /work")
-    if shutil.disk_usage(root).free < 500 * GIB:
-        raise ReviewRequired("require at least 500 GiB free study disk")
     metadata = read_json(inputs / "tiers-summary.json")
     for tier, expected in ARCHIVES.items():
         provided = metadata[tier]
@@ -1119,36 +703,6 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping,
     copied = {}
     for name in ("evaluator", "cpu-cost"):
         copied.update(copy_tree(root, inputs / name, root / "data" / name))
-    atomic_json(root / "host.json", {
-        **host_record(), "disk": shutil.disk_usage(root)._asdict(),
-    })
-    atomic_json(root / "setup-recipe.json", dict(recipe))
-    package_versions = verify_package_versions(supervisor)
-    atomic_json(root / "setup-packages.json", {
-        "owner": "pi-gcp", "versions": package_versions,
-        "verification": "read-only dpkg-query; no installation by driver",
-    })
-    go_archive = root / "downloads" / GO_FILE
-    download("https://go.dev/dl/" + GO_FILE, go_archive, GO_SHA, 70553950)
-    extract(go_archive, root / "toolchain", "go")
-    uv_archive = root / "downloads" / UV_FILE
-    download(f"https://github.com/astral-sh/uv/releases/download/"
-             f"{UV_VERSION}/{UV_FILE}", uv_archive, UV_SHA, 64 * 1024**2)
-    extract(uv_archive, root / "toolchain", "uv-x86_64-unknown-linux-gnu")
-    uv = root / "toolchain/uv-x86_64-unknown-linux-gnu/uv"
-    supervisor.run([str(uv), "--no-config", "python", "install", PYTHON_KEY,
-                    "--install-dir", str(root / "python"), "--no-bin"])
-    python = root / "python" / PYTHON_KEY / "bin/python3.12"
-    version = supervisor.run([str(python), "--version"]).read_text().strip()
-    if version != "Python 3.12.15" or not python.resolve().is_relative_to(root):
-        raise ReviewRequired("managed Python version/path mismatch")
-    atomic_json(root / "python-runtime.json", {
-        "uv_version": UV_VERSION, "uv_archive_sha256": UV_SHA,
-        "python_key": PYTHON_KEY, "python_archive_sha256": PYTHON_SHA,
-        "version": version, "executable_sha256": digest(python),
-        "metadata_source": "astral-sh/uv@0.13.5:"
-        "crates/uv-python-managed/download-metadata.json",
-    })
     tool_versions = {}
     for tool in ("go", "cmake", "c++", "git", "/usr/bin/time"):
         option = "version" if tool == "go" else "--version"
@@ -1163,7 +717,7 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping,
     revision = supervisor.run(["git", "rev-parse", "HEAD"], cwd=checkout)
     if revision.read_text().strip() != COMMIT:
         raise ReviewRequired("source revision mismatch")
-    for name in ("neon-eval", "pod-models", "pod-cost"):
+    for name in ("neon-eval", "pod-cost"):
         copied.update(copy_tree(root, checkout / "study/storage" / name,
                                 root / "control" / name))
     source_archive = root / "downloads" / "usearch-2.26.5.tar.gz"
@@ -1207,42 +761,13 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping,
         } else "0"
         if name == "sqlite-usearch":
             env["CGO_CFLAGS"] = f"-I{native}"
-            env["CGO_LDFLAGS"] = (
-                f"-L{native} -Wl,-rpath,{native} -lstdc++ -lm -pthread"
-            )
         binary = root / "bin" / name
         supervisor.run([
             "go", "build", "-p=1", "-o", str(binary), target,
         ], cwd=directory, env=env)
         description = supervisor.run(["file", str(binary)]).read_text()
-        headers = supervisor.run([
-            "readelf", "--program-headers", "--wide", str(binary),
-        ]).read_text()
-        dynamic = supervisor.run(["readelf", "-d", str(binary)]).read_text()
-        interpreter = any(line.split()[:1] == ["INTERP"]
-                          for line in headers.splitlines())
-        needed = [line for line in dynamic.splitlines()
-                  if "(NEEDED)" in line]
-        dependencies = ""
-        if interpreter or needed:
-            dependencies = supervisor.run(["ldd", str(binary)]).read_text()
-            if "=> not found" in dependencies:
-                raise ReviewRequired(f"missing runtime library: {name}")
-            for line in dependencies.splitlines():
-                fields = line.split()
-                library_path = None
-                if len(fields) >= 3 and fields[1] == "=>":
-                    library_path = fields[2]
-                elif fields and fields[0].startswith("/"):
-                    library_path = fields[0]
-                if library_path and library_path.startswith("/"):
-                    runtime_libraries[library_path] = digest(
-                        Path(library_path)
-                    )
         linking[name] = {
-            "file": description, "program_headers": headers,
-            "dynamic_section": dynamic, "ldd": dependencies,
-            "fully_static_elf": not interpreter and not needed,
+            "file": description,
             "usearch_static_c_archive": name == "sqlite-usearch",
             "build_environment": env,
         }
@@ -1260,10 +785,7 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping,
         str(path.relative_to(root)): digest(path)
         for path in [*sorted((root / "bin").iterdir()),
                      native / "libusearch_c.a", native / "usearch.h",
-                     root / "toolchain" / "go" / "bin" / "go",
-                     root / "linking.json", root / "tool-versions.json",
-                     uv, python, root / "python-runtime.json",
-                     root / "setup-recipe.json", root / "setup-packages.json"]
+                     root / "linking.json", root / "tool-versions.json"]
     }
     artifacts.update(copied)
     for tier in ARCHIVES:
@@ -1278,7 +800,6 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping,
     receipt = {
         "identity": dict(identity), "artifacts": artifacts,
         "runtime_libraries": runtime_libraries,
-        "package_versions": package_versions, "setup_owner": "pi-gcp",
     }
     atomic_json(complete, receipt)
     return receipt
@@ -1443,7 +964,7 @@ def environment(root: Path) -> dict[str, str]:
         "XDG_STATE_HOME": str(root / "xdg/state"),
         "HF_HOME": str(root / "cache/hf"),
         "UV_CACHE_DIR": str(root / "cache/uv"),
-        "DEBIAN_FRONTEND": "noninteractive", "GIT_TERMINAL_PROMPT": "0",
+        "GIT_TERMINAL_PROMPT": "0",
         "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
         "GOTOOLCHAIN": "local", "GOENV": "off", "GOWORK": "off",
         "GOMAXPROCS": "2",
@@ -1462,7 +983,7 @@ def result_path(root: Path, job: Job) -> Path:
 
 
 def case_identity(job: Job, root: Path, setup: Mapping,
-                  gomaxprocs: int, *, cpu_set: Sequence[int]) -> dict:
+                  gomaxprocs: int) -> dict:
     return {
         "job": asdict(job), "source": COMMIT,
         "driver": setup["identity"]["driver"],
@@ -1470,7 +991,6 @@ def case_identity(job: Job, root: Path, setup: Mapping,
                      for tier, record in ARCHIVES.items()},
         "binary": setup["artifacts"][f"bin/{job.adapter}"],
         "command": command(job, root), "GOMAXPROCS": gomaxprocs,
-        **({"cpu_set": sorted(cpu_set)} if job.stage == "timing" else {}),
         "runtime": setup["identity"]["runtime"],
         "runtime_libraries": setup["runtime_libraries"],
     }
@@ -1542,7 +1062,7 @@ def summary(root: Path, receipts: Sequence[Mapping]) -> None:
         "source": COMMIT, "jobs_expected": len(jobs()),
         "scope": "SDK correctness/segment timing; auxiliary in aux-summary.json",
         "jobs_completed": len(receipts), "cases": list(receipts),
-        "timing_medians": medians, "estimates": estimates(),
+        "timing_medians": medians,
     })
     table = [
         "| Stage | Tier | Adapter | Repeat | Result | Wall s | Peak GiB |",
@@ -1651,8 +1171,7 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
             gomaxprocs = 30 if job.stage != "screen" else 30 // concurrency
             if job.stage == "timing":
                 gomaxprocs = 16
-            identity = case_identity(job, root, setup, gomaxprocs, cpu_set=(
-                supervisor.timing_cpu_set if job.stage == "timing" else ()))
+            identity = case_identity(job, root, setup, gomaxprocs)
             directory = root / "jobs" / job.name
             if directory.exists():
                 if not (directory / "complete.json").exists():
@@ -1811,8 +1330,6 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
                 "cwd": str(working_directory),
                 "environment": env, "selected_jobs": list(selection),
                 "python_runtime": digest(root / "python-runtime.json")}
-    if timed:
-        identity["cpu_set"] = supervisor.timing_cpu_set
     if directory.exists():
         if not (directory / "complete.json").exists():
             raise ReviewRequired(f"incomplete auxiliary attempt: {name}")
@@ -1948,15 +1465,6 @@ def run_catalog_hybrid(supervisor: Supervisor,
 def binding_block(supervisor: Supervisor, block: Mapping) -> str:
     states = []
     for job in block["jobs"]:
-        if block["id"] == "retrieval":
-            # Deletion uses pi-gcp's existing login on the Mac, never the pod.
-            atomic_json(supervisor.root / "A9-handoff.json", {
-                "state": "external-owner-required", "jobs": block["jobs"],
-                "owner": "pi-gcp",
-                "termination_time": supervisor.termination["termination_time"],
-                "no_credentials_on_vm": True,
-            })
-            return "dependency_blocked"
         path = Path(job["receipt_path"])
         if not path.resolve().is_relative_to(supervisor.root):
             raise FatalSession(f"{block['id']}: receipt path escaped /work")
@@ -2018,9 +1526,6 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
 
 def block_files(root: Path, block: Mapping) -> dict[str, str]:
     paths = {}
-    if block["id"] == "retrieval":
-        # Its authoritative receipt belongs to the external owner.
-        return paths
     for job in block["jobs"]:
         path = Path(job["receipt_path"])
         if not path.exists():
@@ -2060,8 +1565,6 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
     path = root / "session.json"
     session_identity = {
         "configuration": dict(admission), "setup": dict(identity),
-        "allocation": dict(supervisor.allocation),
-        "termination": dict(supervisor.termination),
     }
     record = {"identity": session_identity, "blocks": {}}
     if path.exists():
@@ -2074,18 +1577,8 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
     signal.signal(signal.SIGALRM, alarm_expired)
     for block in admission["blocks"]:
         block_id = block["id"]
-        cpu_identity = ({"cpu_set": supervisor.timing_cpu_set}
-                        if block_id in TIMING_BLOCKS else {})
         saved = record["blocks"].get(block_id)
         if saved:
-            if (block_id in TIMING_BLOCKS
-                    and saved.get("cpu_set") != supervisor.timing_cpu_set):
-                raise ReviewRequired(f"{block_id}: timing CPU set changed")
-            remaining = min(supervisor.zero + 690 * 60,
-                            supervisor.backstop_deadline) - time.monotonic()
-            if remaining <= 0:
-                raise DeadlineExceeded("resume cutoff T+690; A9 required")
-            signal.setitimer(signal.ITIMER_REAL, remaining)
             if saved["state"] == "started":
                 raise ReviewRequired(
                     f"{block_id}: incomplete attempt; no replay")
@@ -2099,7 +1592,7 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
                 raise ReviewRequired("setup incomplete; A9 required")
             if block_id == "setup":
                 setup = prepare(
-                    supervisor, inputs, identity, admission["setup_recipe"])
+                    supervisor, inputs, identity)
             elif block_id == "storage":
                 if any(not (root / "jobs" / job["id"] / "complete.json")
                        .is_file() for job in block["jobs"]):
@@ -2113,7 +1606,6 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
             supervisor.begin_block(block, outcomes)
         except DeadlineExceeded as error:
             state = {
-                **cpu_identity,
                 "state": "skipped" if block_id == "cpu_cost" else "partial",
                 "reason": str(error), "reason_code": "time",
                 "files": {}, "clean_handoff": True,
@@ -2123,12 +1615,12 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
             atomic_json(path, record)
             if block_id == "setup":
                 raise ReviewRequired(
-                    "setup: no time; A9/pi-gcp deletion required") from error
+                    "setup: no time") from error
             continue
         except ReviewRequired as error:
             if block_id != "cpu_cost":
                 raise
-            state = {**cpu_identity, "state": "dependency_blocked",
+            state = {"state": "dependency_blocked",
                      "reason": str(error),
                      "files": {}, "clean_handoff": True}
             record["blocks"][block_id] = state
@@ -2139,7 +1631,7 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
                 and not any(row["identity"]["job"]["stage"] == "oracle"
                             and row["state"] == "pass" for row in sdk)):
             record["blocks"][block_id] = {
-                **cpu_identity, "state": "dependency_blocked",
+                "state": "dependency_blocked",
                 "reason": "required oracle incomplete",
                 "files": {}, "clean_handoff": True,
             }
@@ -2147,7 +1639,7 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
             atomic_json(path, record)
             continue
         record["blocks"][block_id] = {
-            **cpu_identity, "state": "started", "files": {}}
+            "state": "started", "files": {}}
         atomic_json(path, record)
         signal.setitimer(signal.ITIMER_REAL, max(
             0.000001, supervisor.block_deadline - CLEANUP_RESERVE_SECONDS
@@ -2157,7 +1649,7 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
             state = "completed"
             if block_id == "setup":
                 setup = prepare(
-                    supervisor, inputs, identity, admission["setup_recipe"])
+                    supervisor, inputs, identity)
             elif block_id == "storage":
                 planned = jobs()
                 execute_stage(supervisor, planned[:1], setup, 1, sdk)
@@ -2181,7 +1673,7 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
         # Any uncertain process/isolation failure propagates instead of
-        # releasing an independent block. No work continues after minute 690.
+        # releasing an independent block.
         supervisor.stop_all()
         files = {}
         remaining = supervisor.block_deadline - time.monotonic()
@@ -2212,42 +1704,22 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
         atomic_json(path, record)
         if block_id == "setup" and state != "completed":
             raise ReviewRequired(
-                "setup incomplete; A9/pi-gcp deletion required")
-    record["acceptance"] = (
-        "complete-pending-independent-deletion"
-        if all(outcomes.get(block) in {"completed", "checks_failed"}
-               for block, _, _, _ in BLOCKS
-               if block not in {"cpu_cost", "retrieval"})
-        else "blocked-incomplete-required-evidence"
-    )
+                "setup incomplete")
     atomic_json(path, record)
     return record
-
-
-def interrupted(signum: int, frame: object) -> None:
-    raise FatalSession(f"interrupted by signal {signum}; no replay")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
-    mode.add_argument("--execute", action="store_true")
-    mode.add_argument("--preflight", action="store_true")
-    parser.add_argument("--bindings", type=Path)
-    parser.add_argument("--setup-recipe", type=Path)
-    parser.add_argument("--stop-procedure", type=Path)
-    parser.add_argument("--allocation", type=Path)
-    parser.add_argument("--termination-receipt", type=Path)
     parser.add_argument("--root", type=Path,
                         default=Path("/work"))
-    parser.add_argument("--inputs", type=Path,
-                        default=Path("/work/inputs"))
     parser.add_argument(
         "--concurrency", type=int, choices=(1, 2, 3), default=1,
     )
     args = parser.parse_args()
-    root, inputs = args.root.absolute(), args.inputs.absolute()
+    root = args.root.absolute()
     planned = jobs()
     if args.dry_run:
         # Return before any directory write, subprocess, network or host probe.
@@ -2261,106 +1733,21 @@ def main() -> int:
             "dry_run": True, "external_commands_executed": 0,
             "network_requests": 0, "directories_written": 0,
             "pure_contract_checks": dry_run_contract_checks(),
-            "source": COMMIT, "go_archive": GO_FILE,
+            "source": COMMIT,
             "archives": ARCHIVES, "adapters_built": ADAPTERS,
             "correctness_concurrency": args.concurrency,
             "timing_concurrency": 1, "source_branch": BRANCH,
             "jobs": [{**asdict(job), "command": shlex.join(command(job, root)),
                       "admission_peak_gib": projected_memory(job) / GIB}
                      for job in planned],
-            "estimates": estimates(),
-            "absolute_schedule": BLOCKS,
             "mandatory_owner_bindings": sorted(INPUT_BLOCKS),
             "creation_admitted": False,
             "auxiliary": {"catalog_blocks": 15,
                           "hybrid_selected_jobs": {mode: hybrid_names(mode)
                                                    for mode in ("timing", "latency")},
-                          "optional_1M": "skipped", "uv": UV_VERSION,
-                          "managed_python": PYTHON_KEY},
+                          "optional_1M": "skipped"},
         }, indent=2))
         return 0
-    for field_name in ("bindings", "setup_recipe", "stop_procedure"):
-        if getattr(args, field_name) is None:
-            raise ReviewRequired(f"preflight: missing {field_name}")
-    admission = preflight(
-        read_json(args.bindings), read_json(args.setup_recipe),
-        read_json(args.stop_procedure), root, concurrency=args.concurrency,
-    )
-    admission["driver_sha256"] = digest(Path(__file__))
-    if args.preflight:
-        print(json.dumps(admission, indent=2))
-        return 0
-    if args.allocation is None or args.termination_receipt is None:
-        raise ReviewRequired(
-            "A9/pi-gcp deletion: missing live termination receipt")
-    allocation = read_json(args.allocation)
-    termination = read_json(args.termination_receipt)
-    live_termination(allocation, termination, time.time(),
-                     procedure=admission["termination_procedure"])
-    if root != Path("/work"):
-        raise ReviewRequired("execution requires the dedicated /work root")
-    host = host_record()
-    if root.is_symlink():
-        raise ReviewRequired("workspace must not be a symlink")
-    root.mkdir(parents=True, exist_ok=True)
-    with (root / "driver.lock").open("a+") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise ReviewRequired(
-                "another driver owns this workspace"
-            ) from error
-        identity = {
-            "source": COMMIT, "driver": digest(Path(__file__)),
-            "archives": ARCHIVES,
-            "runtime": {
-                "python": platform.python_version(), "kernel": host["kernel"],
-                "cpu_identity": sorted({
-                    line.strip() for line in host["cpuinfo"].splitlines()
-                    if line.split(":", 1)[0].strip() in {
-                        "vendor_id", "cpu family", "model", "model name",
-                        "stepping", "microcode", "flags",
-                    }
-                }),
-                "affinity": host["affinity"],
-                "correctness_concurrency": args.concurrency,
-            },
-        }
-        supervisor = Supervisor(
-            root, environment(root), allocation=allocation,
-            termination=termination,
-            procedure=admission["termination_procedure"],
-            timing_cpu_set=host["timing_cpu_set"],
-        )
-        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-            signal.signal(sig, interrupted)
-        try:
-            result = execute_session(
-                supervisor, admission, inputs, identity, args.concurrency,
-            )
-            print(result["acceptance"], flush=True)
-            if result["acceptance"] == "blocked-incomplete-required-evidence":
-                return 2
-        finally:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-                signal.signal(sig, signal.SIG_IGN)
-            try:
-                supervisor.stop_all()
-            except Exception as error:
-                atomic_json(root / "A9-handoff.json", {
-                    "owner": "pi-gcp", "deletion_required": True,
-                    "clean_handoff": False, "reason": str(error),
-                    "termination_time": termination["termination_time"],
-                })
-                raise
-            handoff = root / "A9-handoff.json"
-            atomic_json(handoff, {
-                **(read_json(handoff) if handoff.exists() else {}),
-                "owner": "pi-gcp", "deletion_required": True,
-                "clean_handoff": sys.exc_info()[0] is None,
-                "termination_time": termination["termination_time"],
-            })
     return 0
 
 
