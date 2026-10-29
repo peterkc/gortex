@@ -833,11 +833,12 @@ class FrozenV9Tests(NativeFixture):
                     root, config, "baseline_a7", run_set)
             self.assertEqual((code, result["state"], seen),
                              (0, "completed", ["P"]))
-            admission = [root / rel for rel in result["files"]
+            job_root = root / "aux/v9-baseline-P"
+            admission = [job_root / rel for rel in result["files"]
                          if rel.endswith("P-admission.json")]
             self.assertEqual(len(admission), 1)
             self.assertEqual(runner.native.read_json(admission[0]), sample)
-            recorded = [root / rel for rel in result["files"]
+            recorded = [job_root / rel for rel in result["files"]
                         if rel.endswith("resources.json")]
             self.assertEqual(len(recorded), 1)
             self.assertTrue(sample.keys() <= runner.native.read_json(
