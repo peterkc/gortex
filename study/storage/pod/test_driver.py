@@ -275,6 +275,35 @@ class DriverTests(unittest.TestCase):
                 "candidate_k": 128, "required_file_components_bytes": {
                     "original_f32": 1}})
 
+    def test_worker_json_keeps_expected_output_errors_local(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "receipt.json"
+            for mode in ("missing", "malformed"):
+                with self.subTest(mode=mode):
+                    if mode == "malformed":
+                        path.write_text("{")
+                    with self.assertRaises(driver.ReviewRequired) as raised:
+                        driver.worker_json(path, "worker-fixture")
+                    self.assertNotIsInstance(
+                        raised.exception, driver.FatalSession)
+                    self.assertIn("worker-fixture", str(raised.exception))
+                    self.assertIn("missing or malformed",
+                                  str(raised.exception))
+                    expected = (FileNotFoundError if mode == "missing" else
+                                json.JSONDecodeError)
+                    self.assertIsInstance(raised.exception.__cause__, expected)
+            path.write_text('{"state": "completed"}')
+            self.assertEqual(driver.worker_json(path, "worker-fixture"),
+                             {"state": "completed"})
+            for kind in (AttributeError, TypeError, PermissionError, OSError):
+                with self.subTest(error=kind.__name__):
+                    failure = kind("synthetic unexpected read error")
+                    with (patch.object(driver, "read_json",
+                                       side_effect=failure),
+                          self.assertRaises(kind) as raised):
+                        driver.worker_json(path, "worker-fixture")
+                    self.assertIs(raised.exception, failure)
+
 
 class DeadlineContractTests(unittest.TestCase):
 

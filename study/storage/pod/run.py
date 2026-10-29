@@ -361,6 +361,13 @@ def read_json(path: Path) -> object:
         )
 
 
+def worker_json(path: Path, label: str) -> object:
+    try:
+        return read_json(path)
+    except (FileNotFoundError, ValueError) as error:
+        raise ReviewRequired(f"{label}: missing or malformed JSON") from error
+
+
 def atomic_json(path: Path, value: object) -> None:
     temporary = path.with_name(path.name + ".tmp")
     with temporary.open("x", encoding="utf-8") as stream:
@@ -1642,7 +1649,7 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
             directory = root / "jobs" / name
             supervisor.close(owned)
             path = result_path(root, job)
-            report = read_json(path)
+            report = worker_json(path, name)
             timing = bsd_time(
                 (directory / "native-time.txt").read_text(), code)
             atomic_json(directory / "time.json", timing)
@@ -1903,7 +1910,7 @@ def hybrid_outputs(root: Path, mode: str) -> list[Path]:
     work = work / "vector/hybrid-followup"
     runs = work / "runs" / mode / ("pod-A1-" + mode)
     for name, expected_command in hybrid_commands(root, mode).items():
-        receipt = read_json(runs / (name + ".json"))
+        receipt = worker_json(runs / (name + ".json"), name)
         if tuple(receipt.get("command", ())) != expected_command:
             raise ReviewRequired("hybrid selected recipe/command substitution")
         if (receipt.get("exit_code") != 0 or receipt.get("platform") != "linux"
@@ -1928,12 +1935,14 @@ def hybrid_outputs(root: Path, mode: str) -> list[Path]:
             folder = Path(flags["-dataset"])
             native = None
             if flags["-method"] == "f32":
-                native = read_json(folder / "native-M32-f32-rep1/build.json")
+                native = worker_json(
+                    folder / "native-M32-f32-rep1/build.json", name)
             check_hybrid_recipe(flags["-method"], result, native)
+            inputs = worker_json(folder / "input-receipt.json", name)
             if (receipt.get("input_receipt_sha256")
                     != digest(folder / "input-receipt.json")):
                 raise ReviewRequired("generated input receipt mismatch")
-            for file, fp in read_json(folder / "input-receipt.json").items():
+            for file, fp in inputs.items():
                 if file not in {"document.f32", "query.f32", "records.json",
                                 "query-records.json"}:
                     raise ReviewRequired("unexpected generated input path")
@@ -1962,7 +1971,7 @@ def run_catalog_hybrid(supervisor: Supervisor,
                     "-candidate", candidate, "-entries", str(entries),
                     "-repeats", "30", "-seed", "20261025", "-out", str(out)]
             def validate(directory: Path) -> list[Path]:
-                check_catalog_report(read_json(directory / "output/result.json"),
+                check_catalog_report(worker_json(out / "result.json", name),
                                      candidate, entries)
                 return []
             receipts.append(auxiliary(supervisor, name, args, validate))
@@ -1995,7 +2004,7 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
             raise FatalSession(f"{block['id']}: receipt path escaped /work")
 
         def validate(directory: Path) -> list[Path]:
-            receipt = read_json(path)
+            receipt = worker_json(path, job["id"])
             if not isinstance(receipt, Mapping):
                 raise ReviewRequired(f"{block['id']}: malformed receipt")
             if receipt.get("clean_handoff") is not True:
@@ -2036,7 +2045,7 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
         if receipt.get("state") == "budget_exceeded":
             states.append("partial")
             continue
-        result = read_json(path)
+        result = worker_json(path, job["id"])
         if (result.get("exit_code") != receipt["exit_code"]
                 or (receipt["exit_code"] == 1
                     and result["state"] not in {"checks_failed", "partial"})):
