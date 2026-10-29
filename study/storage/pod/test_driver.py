@@ -24,16 +24,31 @@ def fixture_process(pid, code=None):
     return process
 
 
+def fixture_manifest(root, paths=(), jobs=None, homebrew=None):
+    path = root / "control" / "fixture-inputs.json"
+    path.parent.mkdir(exist_ok=True)
+    files = {str(p.resolve()): driver.digest(p) for p in paths}
+    driver.atomic_json(path, {
+        "schema": "storage-inputs/v1", "source": driver.COMMIT,
+        "files": files,
+        "jobs": jobs if jobs is not None else {"*": list(files)},
+        "homebrew": homebrew if homebrew is not None else {}})
+    return path
+
+
 def fixture_owner(root):
     owner = object.__new__(driver.Supervisor)
-    owner.root, owner.environment = root, {}
+    owner.root, owner.environment, owner.scratch = root, {}, root
+    owner.manifest_file = fixture_manifest(root)
+    owner.bad_jobs, owner.window = set(), {"id": "fixture-window"}
     owner.active, owner.serial = [], 0
     owner.block_id = "fixture"
     owner.block_deadline = owner.launch_deadline = 10000
     owner.job_minutes, owner.job_bindings = {}, {}
     owner.case, owner.current_rss, owner.swapouts = {}, 0, None
-    owner.native_identity = {"input_manifest_sha256": "1" * 64,
-                             "daemon_off_identities_sha256": "2" * 64}
+    owner.native_identity = {
+        "input_manifest_sha256": driver.digest(owner.manifest_file),
+        "daemon_off_identities_sha256": "2" * 64}
     owner.sample = {"level": 30, "available_bytes": 64 * driver.GIB,
                     "swapouts": 7, "load1": 1.0, "ac_power": True}
     return owner
@@ -43,10 +58,24 @@ class FixtureSupervisor:
     def __init__(self, root, modes, interrupt_at=None):
         self.root = root
         self.environment = {}
-        self.active = []
+        self.active, self.bad_jobs = [], set()
+        self.scratch, self.window = root, {"id": "fixture-window"}
+        self.manifest_file = root / "control/fixture-inputs.json"
+        if not self.manifest_file.exists():
+            self.manifest_file = fixture_manifest(root)
+        self.native_identity = {
+            "input_manifest_sha256": driver.digest(self.manifest_file),
+            "daemon_off_identities_sha256": "2" * 64}
+        self.block_deadline = 10000
         self.modes = modes
         self.interrupt_at = interrupt_at
         self.calls = []
+
+    def begin_block(self, block, outcomes):
+        self.job_bindings = {job["id"]: dict(job) for job in block["jobs"]}
+
+    def stop_all(self):
+        pass
 
     def job_limit(self, name, now):
         return 10000
@@ -119,7 +148,11 @@ class DriverTests(unittest.TestCase):
         driver.atomic_json(data / "queries.json", [{"id": "q", "op": "id"}])
         selected = [driver.Job("screen", name, "tier10")
                     for name in ("sqlite-segment", "pebble-bleve")]
-        setup = {"identity": {"driver": "fixture", "runtime": {}},
+        input_manifest = fixture_manifest(root, [data / "manifest.json",
+                                                 data / "queries.json"])
+        setup = {"identity": {"driver": "fixture", "runtime": {},
+                              "input_manifest_sha256": driver.digest(
+                                  input_manifest)},
                  "artifacts": {"bin/"+j.adapter: "fixture" for j in selected},
                  "runtime_libraries": {}}
         return selected, setup, {p.name: driver.digest(p) for p in data.iterdir()}
@@ -152,7 +185,7 @@ class DriverTests(unittest.TestCase):
             self.assertEqual(before, {p.name: driver.digest(p)
                                      for p in (root/"data/tier10").iterdir()})
 
-    def test_interruption_preserves_complete_and_refuses_partial(self):
+    def test_interruption_reuses_complete_and_restarts_partial(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             selected, setup, before = self.fixture(root)
@@ -161,14 +194,31 @@ class DriverTests(unittest.TestCase):
             with self.assertRaisesRegex(driver.ReviewRequired, "interruption"):
                 self.execute(supervisor, selected, setup, receipts)
             self.assertEqual(len(receipts), 1)
-            resumed = FixtureSupervisor(root, [])
+            partial = root / "jobs" / selected[1].name
+            old_attempt = driver.read_json(partial / "attempt.json")
+            (partial / "old-samples.json").write_text("[1,2,3]")
+            resumed = FixtureSupervisor(root, ["pass"])
+            resumed.window = {"id": "next-window"}
             saved = []
-            with self.assertRaisesRegex(driver.ReviewRequired, "incomplete attempt"):
-                self.execute(resumed, selected, setup, saved)
-            self.assertEqual(len(saved), 1)
-            self.assertEqual(resumed.calls, [])
+            self.execute(resumed, selected, setup, saved)
+            self.assertEqual(resumed.calls, [selected[1].name])
+            self.assertEqual(len(saved), 2)
+            archive = list((root / "attempts/jobs" /
+                            selected[1].name).iterdir())
+            self.assertEqual(len(archive), 1)
+            self.assertEqual((archive[0] / "old-samples.json").read_text(),
+                             "[1,2,3]")
+            self.assertEqual(driver.read_json(archive[0] / "attempt.json"),
+                             old_attempt)
+            self.assertFalse((partial / "old-samples.json").exists())
+            self.assertNotEqual(saved[1]["attempt"]["attempt_id"],
+                                old_attempt["attempt_id"])
+            self.assertEqual([r["attempt"]["window_id"] for r in saved],
+                             ["fixture-window", "next-window"])
+            self.assertIn("native-time.txt", saved[1]["files"])
             self.assertEqual(before, {p.name: driver.digest(p)
-                                     for p in (root/"data/tier10").iterdir()})
+                                     for p in (root / "data/tier10")
+                                     .iterdir()})
 
     def test_incomplete_and_fatal_results_stop_before_next_case(self):
         for mode in ("incomplete", "fatal"):
@@ -348,7 +398,9 @@ class DeadlineContractTests(unittest.TestCase):
                 for block, entries in driver.bound_jobs(root).items()
             ]}
             supervisor = SimpleNamespace(
-                root=root, stop_all=unittest.mock.Mock(), native_identity={},
+                root=root, stop_all=unittest.mock.Mock(),
+                native_identity={}, scratch=root,
+                manifest_file=fixture_manifest(root),
             )
 
             def begin(block, outcomes):
@@ -497,7 +549,8 @@ class ReviewFixTests(unittest.TestCase):
                           files={"result.txt": driver.digest(artifact)})
             program = (
                 "import json,pathlib,sys; p=pathlib.Path(sys.argv[1]); "
-                "p.parent.mkdir(parents=True); "
+                "p.parent.mkdir(parents=True, exist_ok=True); "
+                "pathlib.Path('result.txt').write_text('tiny'); "
                 "mode=sys.argv[2]; record=json.loads(sys.argv[3]); "
                 "p.write_text('{' if mode=='malformed' else "
                 "json.dumps(record)) if mode!='missing' else None; "
@@ -507,7 +560,7 @@ class ReviewFixTests(unittest.TestCase):
                            job["receipt_path"], selected, json.dumps(record)]
             blocks.append({"id": name, "jobs": [job]})
         owner = fixture_owner(root)
-        owner.environment = dict(os.environ)
+        owner.environment = driver.environment(root)
         owner.guard = unittest.mock.Mock()
         owner.calls = []
         groups_patch = patch.object(driver, "process_groups", return_value={})
@@ -602,8 +655,8 @@ class ReviewFixTests(unittest.TestCase):
                     for block, entries in driver.bound_jobs(root).items()
                 ]}
                 owner = SimpleNamespace(
-                    root=root, stop_all=unittest.mock.Mock(),
-                    native_identity={})
+                    root=root, stop_all=unittest.mock.Mock(), scratch=root,
+                    native_identity={}, manifest_file=fixture_manifest(root))
 
                 def begin(block, outcomes):
                     owner.block_deadline = 1000
@@ -720,31 +773,50 @@ class ReviewFixTests(unittest.TestCase):
         self.assertTrue(all(call.args == (-1, os.WNOHANG)
                             for call in wait.call_args_list))
 
-    def test_partial_storage_resume_refuses_missing_receipts_cleanly(self):
+    def test_partial_storage_resume_preserves_complete_jobs(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            owner = fixture_owner(root)
-            block = {"id": "storage", "jobs": [{"id": "missing"}]}
-            admission = {"blocks": [block]}
-            identity = {"configuration": admission, "setup": {},
-                        "native": owner.native_identity}
+            cases = DriverTests()
+            selected, setup, before = cases.fixture(root)
+            first = FixtureSupervisor(root, ["pass"], interrupt_at=2)
+            completed = []
+            with self.assertRaises(driver.ReviewRequired):
+                cases.execute(first, selected, setup, completed)
+            jobs = [{"id": job.name, "gomaxprocs": 10,
+                     "receipt_path": str(root / "jobs" / job.name /
+                                         "complete.json")} for job in selected]
+            blocks = [{"id": "setup", "jobs": []},
+                      {"id": "storage", "jobs": jobs}]
+            admission = {"blocks": blocks}
             driver.atomic_json(root / "session.json", {
-                "identity": identity, "blocks": {"storage": {
-                    "state": "partial", "files": {}}}})
-            with patch.object(driver.time, "monotonic", return_value=0), \
-                    patch.object(driver.signal, "signal"), \
-                    patch.object(driver.signal, "setitimer"), \
-                    self.assertRaisesRegex(driver.ReviewRequired,
-                                           "partial receipts; no resume"):
-                driver.execute_session(
-                    owner, admission, root / "inputs", {}, 1)
+                "identity": {"configuration": admission,
+                             "setup": setup["identity"],
+                             "native": first.native_identity},
+                "blocks": {"setup": {"state": "completed", "files": {}},
+                           "storage": {"state": "partial", "files": {}}}})
+            resumed = FixtureSupervisor(root, ["pass"])
+            resumed.window = {"id": "resumed-window"}
+            with (patch.object(driver, "prepare", return_value=setup),
+                  patch.object(driver, "jobs", return_value=selected),
+                  patch.object(driver, "process_groups", return_value={}),
+                  patch.object(driver.time, "monotonic", return_value=0),
+                  patch.object(driver.time, "sleep"),
+                  patch.object(driver.signal, "signal"),
+                  patch.object(driver.signal, "setitimer")):
+                result = driver.execute_session(
+                    resumed, admission, root / "inputs", setup["identity"], 1)
+            self.assertEqual(result["blocks"]["storage"]["state"], "completed")
+            self.assertEqual(resumed.calls, [selected[1].name])
+            self.assertEqual(before, {p.name: driver.digest(p)
+                                     for p in (root / "data/tier10")
+                                     .iterdir()})
 
 
 
 class NativeAdmissionTests(unittest.TestCase):
-    def go(self):
+    def go(self, manifest_sha="1" * 64):
         return {"schema": "mac-window-go/v1", "window_id": "fixture-window",
-                "input_manifest_sha256": "1" * 64,
+                "input_manifest_sha256": manifest_sha,
                 "start": "1970-01-01T00:00:00+00:00",
                 "end": "1970-01-01T04:00:00+00:00",
                 **{key: True for key in (
@@ -944,7 +1016,8 @@ class NativeAdmissionTests(unittest.TestCase):
             root = Path(folder)
             owner = fixture_owner(root)
             owner.go_file, owner.off_file = root / "go.json", root / "off.json"
-            owner.go_file.write_text(json.dumps(self.go()))
+            owner.go_file.write_text(json.dumps(self.go(
+                owner.native_identity["input_manifest_sha256"])))
             owner.off = self.identities(root)
             owner.off_file.write_text(json.dumps(owner.off))
             owner.go_sha = driver.digest(owner.go_file)
@@ -1110,12 +1183,16 @@ class NativeAdmissionTests(unittest.TestCase):
             go_file = root / "go.json"
             identities = self.identities(root)
             driver.atomic_json(identities_file, identities)
-            driver.atomic_json(go_file, self.go())
+            manifest_file = fixture_manifest(root)
+            manifest_sha = driver.digest(manifest_file)
+            driver.atomic_json(go_file, self.go(manifest_sha))
             config = {
+                "scratch_root": str(root),
+                "manifest_file": str(manifest_file),
                 "window_file": str(go_file),
                 "identities_file": str(identities_file),
                 "identities_sha256": driver.digest(identities_file),
-                "input_manifest_sha256": "1" * 64,
+                "input_manifest_sha256": manifest_sha,
                 "d11_limits": {"admission_level": 30, "stop_level": 25,
                                "memory_reserve_bytes": driver.MEMORY_RESERVE,
                                "timing_load1_max": 2.0,
@@ -1156,8 +1233,10 @@ class NativeAdmissionTests(unittest.TestCase):
                 directory = root / "case"
                 directory.mkdir()
                 owner = fixture_owner(root)
+                env = {**driver.environment(root), "GOMAXPROCS": "10"}
                 owner.go_file = root / "go.json"
-                driver.atomic_json(owner.go_file, self.go())
+                driver.atomic_json(owner.go_file, self.go(
+                    owner.native_identity["input_manifest_sha256"]))
                 owner.go_sha = driver.digest(owner.go_file)
                 owner.window = {"id": "fixture-window"}
                 owner.case = {"gomaxprocs": 10}
@@ -1173,7 +1252,8 @@ class NativeAdmissionTests(unittest.TestCase):
                 def guard(*, admission=False):
                     checks.append(admission)
                     if revoke and admission and checks.count(True) == 2:
-                        changed = self.go()
+                        changed = self.go(
+                            owner.native_identity["input_manifest_sha256"])
                         changed["user_go"] = False
                         owner.go_file.write_text(json.dumps(changed))
 
@@ -1207,13 +1287,13 @@ class NativeAdmissionTests(unittest.TestCase):
                     if revoke:
                         with self.assertRaises(driver.FatalSession):
                             owner.start(["/fixture/private-binary"], directory,
-                                        {"GOMAXPROCS": "10"}, root)
+                                        env, root)
                         spawn.assert_not_called()
                         self.assertTrue(log.closed)
                     else:
                         owned = owner.start(
                             ["/fixture/private-binary"], directory,
-                            {"GOMAXPROCS": "10"}, root)
+                            env, root)
                         self.assertEqual(owned.known, {(8500, 123456789)})
                         self.assertTrue(spawn.call_args.kwargs[
                             "start_new_session"])
@@ -1263,6 +1343,428 @@ class NativeAdmissionTests(unittest.TestCase):
                 self.assertRaises(driver.FatalSession):
             owner.guard(admission=True)
         self.assertEqual(owner.active, [])
+
+
+class DurabilityTests(unittest.TestCase):
+    def sdk_session(self, root):
+        cases = DriverTests()
+        selected, setup, _ = cases.fixture(root)
+        owner = FixtureSupervisor(root, ["pass", "pass"])
+        receipts = []
+        cases.execute(owner, selected, setup, receipts)
+        blocks = [{"id": "setup", "jobs": []}, {"id": "storage", "jobs": [
+            {"id": job.name, "gomaxprocs": 10,
+             "receipt_path": str(root / "jobs" / job.name / "complete.json")}
+            for job in selected]}]
+        admission = {"blocks": blocks}
+        driver.atomic_json(root / "session.json", {
+            "identity": {"configuration": admission,
+                         "setup": setup["identity"],
+                         "native": owner.native_identity},
+            "blocks": {"setup": {"state": "completed", "files": {}},
+                       "storage": {"state": "completed", "files":
+                                   driver.block_files(root, blocks[1])}}})
+        return selected, setup, admission, receipts
+
+    def resume_sdk(self, owner, selected, setup, admission):
+        with (patch.object(driver, "prepare", return_value=setup),
+              patch.object(driver, "jobs", return_value=selected),
+              patch.object(driver, "process_groups", return_value={}),
+              patch.object(driver.time, "monotonic", return_value=0),
+              patch.object(driver.time, "sleep"),
+              patch.object(driver.signal, "signal"),
+              patch.object(driver.signal, "setitimer")):
+            return driver.execute_session(
+                owner, admission, owner.root / "inputs", setup["identity"], 1)
+
+    def test_start_and_resume_hash_every_input_and_scope_missing_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            owner = fixture_owner(root)
+            common, optional = root / "source", root / "model"
+            common.write_text("source")
+            optional.write_text("model")
+            owner.manifest_file = fixture_manifest(root, [common, optional], {
+                "*": [str(common)], "cpu-fixture": [str(optional)]})
+            owner.native_identity["input_manifest_sha256"] = driver.digest(
+                owner.manifest_file)
+            with (patch.object(driver.signal, "signal"),
+                  patch.object(driver.signal, "setitimer"),
+                  patch.object(driver, "digest",
+                               wraps=driver.digest) as hashes):
+                driver.execute_session(owner, {"blocks": []}, root, {}, 1)
+                optional.write_text("changed")
+                driver.execute_session(owner, {"blocks": []}, root, {}, 1)
+                for path in (common, optional):
+                    self.assertEqual(sum(c.args[0] == path for c in
+                                         hashes.call_args_list), 2)
+            self.assertEqual(owner.bad_jobs, {"cpu-fixture"})
+            owner.job_minutes = {"independent": 1, "cpu-fixture": 1}
+            owner.job_bindings = {name: {"gomaxprocs": 1}
+                                  for name in owner.job_minutes}
+            owner.job_limit("independent", 0)
+            with self.assertRaisesRegex(driver.ReviewRequired,
+                                        "required input"):
+                owner.job_limit("cpu-fixture", 0)
+            optional.unlink()
+            self.assertEqual(driver.bad_jobs(owner.manifest_file, root),
+                             {"cpu-fixture"})
+            common.write_text("changed")
+            with patch.object(driver.signal, "signal"), \
+                    self.assertRaisesRegex(driver.ReviewRequired,
+                                           "common input"):
+                driver.execute_session(owner, {"blocks": []}, root, {}, 1)
+
+    def test_manifest_schema_aliases_and_exact_managed_tool_exception(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            local = root / "input"
+            local.write_text("tiny")
+            path = fixture_manifest(root, [local])
+            original = driver.read_json(path)
+            for changed in ({**original, "source": "0" * 40},
+                            {**original, "schema": "unknown"},
+                            {**original, "jobs": {"x": ["unlisted"]}}):
+                with self.subTest(changed=changed):
+                    driver.atomic_json(path, changed)
+                    with self.assertRaises(driver.ReviewRequired):
+                        driver.bad_jobs(path, root)
+            alias = root / "alias"
+            alias.symlink_to(local)
+            driver.atomic_json(path, {**original, "files": {str(alias):
+                                     driver.digest(local)}})
+            with self.assertRaises(driver.ReviewRequired):
+                driver.bad_jobs(path, root)
+            tool = Path("/opt/homebrew/Cellar/example/1.0/bin/tool")
+            sha = "1" * 64
+            managed = {"schema": "storage-inputs/v1", "source": driver.COMMIT,
+                       "files": {str(tool): sha}, "jobs": {"*": [str(tool)]},
+                       "homebrew": {str(tool): {"formula": "example",
+                                    "version": "1.0", "installed_at":
+                                    "2026-10-01T00:00:00+00:00"}}}
+            driver.atomic_json(path, managed)
+            original_file = Path.is_file
+            with (patch.object(Path, "is_file", autospec=True,
+                               side_effect=lambda p: p == tool or
+                               original_file(p)),
+                  patch.object(driver, "digest", return_value=sha)):
+                self.assertEqual(driver.bad_jobs(path, root), set())
+                sibling = tool.parent / "unlisted"
+                driver.atomic_json(path, {**managed, "files": {
+                    str(tool): sha, str(sibling): sha}})
+                with self.assertRaises(driver.FatalSession):
+                    driver.bad_jobs(path, root)
+
+    def test_runtime_path_escapes_refuse_before_admission_or_spawn(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            owner = fixture_owner(root)
+            owner.case = {"gomaxprocs": 1}
+            owner.guard = unittest.mock.Mock()
+            directory = root / "job"
+            directory.mkdir()
+            alias = root / "alias"
+            alias.symlink_to(directory, target_is_directory=True)
+            for value in (Path("/tmp/unsafe"), Path("/private/tmp/unsafe"),
+                          root / ".." / "escape", alias):
+                with self.subTest(value=value), self.assertRaises(
+                        driver.FatalSession):
+                    driver.persistent_path(value, root)
+            for key in ("HOME", "XDG_CACHE_HOME", "TMPDIR", "TMP", "TEMP",
+                        "PYTHONPYCACHEPREFIX", "PYTHONUSERBASE"):
+                env = {**driver.environment(root), "GOMAXPROCS": "1",
+                       key: "/tmp/unsafe"}
+                with self.subTest(key=key), \
+                        patch.object(driver.subprocess, "Popen") as spawn, \
+                        self.assertRaises(driver.FatalSession):
+                    owner.start(["fixture"], directory, env, root)
+                spawn.assert_not_called()
+            owner.guard.assert_not_called()
+
+    def test_completed_block_output_drift_restarts_only_damaged_job(self):
+        for damage in ("raw-time", "missing-receipt", "torn-receipt"):
+            with self.subTest(damage=damage), \
+                    tempfile.TemporaryDirectory() as folder:
+                root = Path(folder).resolve()
+                selected, setup, admission, old = self.sdk_session(root)
+                damaged = root / "jobs" / selected[1].name
+                if damage == "raw-time":
+                    (damaged / "native-time.txt").write_text("changed")
+                elif damage == "missing-receipt":
+                    (damaged / "complete.json").unlink()
+                else:
+                    (damaged / "complete.json").write_text("{")
+                owner = FixtureSupervisor(root, ["pass"])
+                owner.window = {"id": "resumed-window"}
+                result = self.resume_sdk(owner, selected, setup, admission)
+                self.assertEqual(result["blocks"]["storage"]["state"],
+                                 "completed")
+                self.assertEqual(owner.calls, [selected[1].name])
+                current = driver.read_json(damaged / "complete.json")
+                self.assertNotEqual(current["attempt"]["attempt_id"],
+                                    old[1]["attempt"]["attempt_id"])
+                self.assertIn("native-time.txt", current["files"])
+                preserved = driver.read_json(root / "jobs" / selected[0].name /
+                                             "complete.json")
+                self.assertEqual(preserved, old[0])
+                self.assertEqual(len(list((root / "attempts/jobs" /
+                                           selected[1].name).iterdir())), 1)
+
+    def test_new_run_internal_receipts_ignore_old_output_addresses(self):
+        with tempfile.TemporaryDirectory() as folder:
+            scratch = Path(folder).resolve()
+            first, rerun = scratch / "first", scratch / "rerun"
+            first.mkdir()
+            rerun.mkdir()
+            _, _, old_config, _ = self.sdk_session(first)
+            selected, _, _, _ = self.sdk_session(rerun)
+            before = driver.digest(first / "session.json")
+            files = driver.block_files(rerun, old_config["blocks"][1])
+            self.assertIn("jobs/" + selected[0].name + "/complete.json", files)
+            self.assertTrue(all((rerun / name).is_file() for name in files))
+            self.assertEqual(driver.digest(first / "session.json"), before)
+
+    def test_full_job_identity_change_creates_a_retained_new_attempt(self):
+        for field in ("driver", "runtime", "input_manifest_sha256", "recipe"):
+            with self.subTest(field=field), \
+                    tempfile.TemporaryDirectory() as folder:
+                root = Path(folder).resolve()
+                cases = DriverTests()
+                selected, setup, _ = cases.fixture(root)
+                selected = selected[:1]
+                old_owner = FixtureSupervisor(root, ["pass"])
+                old = []
+                cases.execute(old_owner, selected, setup, old)
+                changed = deepcopy(setup)
+                changed["identity"][field] = "changed"
+                owner = FixtureSupervisor(root, ["pass"])
+                new = []
+                cases.execute(owner, selected, changed, new)
+                self.assertEqual(owner.calls, [selected[0].name])
+                self.assertNotEqual(new[0]["identity"], old[0]["identity"])
+                self.assertNotEqual(new[0]["attempt"]["attempt_id"],
+                                    old[0]["attempt"]["attempt_id"])
+                archive = list((root / "attempts/jobs" /
+                                selected[0].name).iterdir())
+                preserved = driver.read_json(archive[0] / "complete.json")
+                self.assertEqual(preserved, old[0])
+
+    def test_binding_resume_keeps_complete_and_restarts_partial(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            cases = ReviewFixTests()
+            self.addCleanup(lambda: self.assertTrue(cases.doCleanups()))
+            owner, admission = cases.session_fixture(root, "partial")
+            self.addCleanup(owner.stop_all)
+            owner.window = {"id": "first-window"}
+            with patch.object(driver.signal, "signal"), \
+                    patch.object(driver.signal, "setitimer"):
+                first = driver.execute_session(owner, admission,
+                                               root / "inputs", {}, 1)
+                second = driver.execute_session(owner, admission,
+                                                root / "inputs", {}, 1)
+            self.assertEqual(first["blocks"]["smoke"]["state"], "partial")
+            self.assertEqual(second["blocks"]["smoke"]["state"], "partial")
+            self.assertEqual(owner.calls, ["smoke-fixture",
+                                          "calibration-fixture",
+                                          "smoke-fixture"])
+            archive = list((root / "attempts/aux/smoke-fixture").iterdir())
+            self.assertEqual(len(archive), 1)
+            self.assertTrue((archive[0] / "partial-complete.json").is_file())
+            complete = root / "aux/calibration-fixture/complete.json"
+            self.assertIn(str(complete.relative_to(root)),
+                          second["blocks"]["calibration"]["files"])
+            window_id = driver.read_json(complete)["attempt"]["window_id"]
+            self.assertEqual(window_id, "first-window")
+
+    def test_fatal_cache_proof_never_becomes_a_partial_retry(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            directory = root / "jobs/case"
+            directory.mkdir(parents=True)
+            verify = unittest.mock.Mock(
+                side_effect=driver.FatalSession("unsafe proof"))
+            with self.assertRaisesRegex(driver.FatalSession, "unsafe proof"):
+                driver.reusable(directory, verify)
+            self.assertFalse((directory / "partial.json").exists())
+            self.assertFalse((root / "attempts").exists())
+
+    def test_interrupted_setup_retention_and_fatal_stop(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            owner = fixture_owner(root)
+            (root / "setup").mkdir()
+            (root / "setup/log").write_text("interrupted")
+            (root / "setup-started.json").write_text("{}")
+            with self.assertRaisesRegex(FileNotFoundError, "tiers-summary"):
+                driver.prepare(owner, root / "missing-inputs", {})
+            archive = list((root / "attempts/setup").iterdir())
+            self.assertEqual(len(archive), 1)
+            self.assertEqual((archive[0] / "setup/log").read_text(),
+                             "interrupted")
+            self.assertFalse((root / "setup").exists())
+            admission = {"blocks": [{"id": "smoke", "jobs": []}]}
+            driver.atomic_json(root / "session.json", {
+                "identity": {"configuration": admission, "setup": {},
+                             "native": owner.native_identity},
+                "blocks": {"smoke": {"state": "started",
+                                     "terminal": "fatal", "files": {}}}})
+            owner.begin_block = unittest.mock.Mock()
+            with patch.object(driver.signal, "signal"), \
+                    self.assertRaisesRegex(driver.FatalSession, "diagnosis"):
+                driver.execute_session(owner, admission, root, {}, 1)
+            owner.begin_block.assert_not_called()
+
+
+class NativeEntryTests(unittest.TestCase):
+    def inputs(self, scratch):
+        control = scratch / "control"
+        control.mkdir()
+        inputs = scratch / "inputs"
+        inputs.mkdir()
+        data, launcher, staged = inputs / "data", scratch / "python", (
+            scratch / "driver.py")
+        data.write_text("tiny input")
+        launcher.write_text("fixture launcher")
+        staged.write_text("fixture driver")
+        config_path = control / "config.json"
+        manifest = control / "inputs.json"
+        identities, go = control / "identities.json", control / "go.json"
+        driver.atomic_json(identities,
+                           NativeAdmissionTests().identities(scratch))
+        config = {"scratch_root": str(scratch), "inputs": str(inputs),
+                  "manifest_file": str(manifest), "window_file": str(go),
+                  "identities_file": str(identities),
+                  "identities_sha256": driver.digest(identities),
+                  "d11_limits": {"admission_level": 30, "stop_level": 25,
+                                 "memory_reserve_bytes": driver.MEMORY_RESERVE,
+                                 "timing_load1_max": 2.0,
+                                 "swap_observation_seconds": 30},
+                  "launcher": {"path": str(launcher), "version": [3, 14, 7],
+                               "sha256": driver.digest(launcher)},
+                  "blocks": []}
+        driver.atomic_json(config_path, config)
+        files = {str(p): driver.digest(p) for p in (
+            data, launcher, staged, config_path, identities)}
+        driver.atomic_json(manifest, {
+            "schema": "storage-inputs/v1", "source": driver.COMMIT,
+            "files": files, "jobs": {"*": list(files)}, "homebrew": {}})
+        driver.atomic_json(go, NativeAdmissionTests().go(
+            driver.digest(manifest)))
+        return config_path, manifest, staged
+
+    def test_new_run_ids_same_pins_and_finally_without_go(self):
+        with tempfile.TemporaryDirectory() as folder:
+            scratch = Path(folder).resolve()
+            config_path, manifest, staged = self.inputs(scratch)
+            baseline = driver.digest(manifest)
+            owners, observed = [], []
+            real_session = driver.execute_session
+
+            def owner(root, env, config):
+                record = SimpleNamespace(
+                    root=root, environment=env, scratch=scratch,
+                    manifest_file=manifest, window={"id": "fixture-window"},
+                    go_file=Path(config["window_file"]),
+                    native_identity={"input_manifest_sha256": config[
+                        "input_manifest_sha256"],
+                        "launcher": config["launcher"],
+                        "daemon_off_identities_sha256": config[
+                            "identities_sha256"],
+                        "host": ["fixture", str(64 * driver.GIB),
+                                 "8", "2", "10"]},
+                    stop_all=unittest.mock.Mock())
+                owners.append(record)
+                return record
+
+            def session(record, config, inputs, identity, concurrency):
+                observed.append((config["input_manifest_sha256"],
+                                 driver.COMMIT))
+                real_session(record, config, inputs, identity, concurrency)
+                output = record.root / "jobs" / "case" / "native-time.txt"
+                if not output.exists():
+                    output.parent.mkdir(parents=True)
+                    output.write_text("raw native time")
+                if record.root.name == "interrupted":
+                    derived = record.root / "data/partial.json"
+                    derived.parent.mkdir()
+                    derived.write_text("partial derived artifact")
+                    record.go_file.write_text("revoked")
+                    raise KeyboardInterrupt()
+
+            with (patch.object(driver, "__file__", str(staged)),
+                  patch.object(driver, "Supervisor", side_effect=owner),
+                  patch.object(driver, "execute_session", side_effect=session),
+                  patch.object(driver.signal, "signal"),
+                  patch.object(driver.signal, "setitimer"),
+                  patch.object(driver.subprocess, "Popen") as spawn):
+                for mode, run_id in (("--native", "original"),
+                                     ("--resume", "original"),
+                                     ("--native", "rerun"),
+                                     ("--native", "interrupted")):
+                    root = scratch / "mac-run" / run_id
+                    argv = ["run.py", mode, str(config_path),
+                            "--root", str(root)]
+                    with patch.object(sys, "argv", argv):
+                        if run_id == "interrupted":
+                            with self.assertRaises(KeyboardInterrupt):
+                                driver.main()
+                        else:
+                            self.assertEqual(driver.main(), 0)
+                    checkpoint = driver.read_json(root / "checkpoint.json")
+                    self.assertEqual(checkpoint["run_id"], run_id)
+                    self.assertEqual(checkpoint["files"][
+                        "jobs/case/native-time.txt"], driver.digest(
+                            root / "jobs/case/native-time.txt"))
+                    if run_id == "interrupted":
+                        self.assertEqual(checkpoint["files"][
+                            "data/partial.json"], driver.digest(
+                                root / "data/partial.json"))
+                spawn.assert_not_called()
+            self.assertEqual(observed, [(baseline, driver.COMMIT)] * 4)
+            self.assertEqual(driver.digest(manifest), baseline)
+            for record in owners:
+                record.stop_all.assert_called_once_with()
+            first = scratch / "mac-run/original"
+            before = driver.digest(first / "checkpoint.json")
+            with (patch.object(driver, "__file__", str(staged)),
+                  patch.object(driver, "Supervisor") as constructor,
+                  patch.object(sys, "argv", ["run.py", "--native",
+                                             str(config_path), "--root",
+                                             str(first)]),
+                  self.assertRaisesRegex(driver.ReviewRequired, "run-id")):
+                driver.main()
+            constructor.assert_not_called()
+            self.assertEqual(driver.digest(first / "checkpoint.json"), before)
+
+    def test_unlisted_or_unbound_inputs_refuse_before_creation(self):
+        for damage in ("unlisted", "unbound", "parallel", "alias"):
+            with self.subTest(damage=damage), \
+                    tempfile.TemporaryDirectory() as folder:
+                scratch = Path(folder).resolve()
+                config, manifest, staged = self.inputs(scratch)
+                document = driver.read_json(manifest)
+                if damage == "unlisted":
+                    document["files"].pop(str(scratch / "inputs/data"))
+                elif damage == "unbound":
+                    document["jobs"]["*"].remove(str(staged))
+                elif damage == "alias":
+                    target = scratch / "other-inputs"
+                    target.mkdir()
+                    (scratch / "inputs/alias").symlink_to(
+                        target, target_is_directory=True)
+                driver.atomic_json(manifest, document)
+                root = scratch / "mac-run/rejected"
+                argv = ["run.py", "--native", str(config), "--root", str(root)]
+                if damage == "parallel":
+                    argv.extend(["--concurrency", "2"])
+                with (patch.object(driver, "__file__", str(staged)),
+                      patch.object(driver, "Supervisor") as constructor,
+                      patch.object(sys, "argv", argv),
+                      self.assertRaises(driver.ReviewRequired)):
+                    driver.main()
+                constructor.assert_not_called()
+                self.assertFalse(root.exists())
 
 
 if __name__ == "__main__":

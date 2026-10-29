@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from functools import cache
 import ctypes
+import fcntl
 import errno
 import hashlib
 import json
@@ -28,6 +29,7 @@ import tarfile
 import time
 from typing import BinaryIO, Literal
 import urllib.request
+import uuid
 
 
 COMMIT = "5bab54d2dd8b7165f7b813f9644857f694e28ede"
@@ -592,7 +594,12 @@ class Supervisor:
         self.block_deadline = self.launch_deadline = 0.0
         self.block_id = "unbound"
         self.job_minutes: dict[str, float] = {}
-        self.root, self.environment = root.resolve(), dict(environment)
+        self.scratch = persistent_path(admission["scratch_root"],
+                                       Path(admission["scratch_root"]))
+        self.manifest_file = persistent_path(
+            admission["manifest_file"], self.scratch)
+        self.root = persistent_path(root, self.scratch)
+        self.environment = dict(environment)
         self.active: list[OwnedProcess] = []
         self.serial = 0
         self.native_identity = {
@@ -611,9 +618,10 @@ class Supervisor:
         if (sys.implementation.name != "cpython" or sys.platform != "darwin"
                 or platform.machine() != "arm64"):
             raise FatalSession("pinned CPython on darwin-arm64 required")
-        self.go_file = Path(admission["window_file"])
+        self.go_file = persistent_path(admission["window_file"], self.scratch)
         self.go_sha = digest(self.go_file)
-        self.off_file = Path(admission["identities_file"])
+        self.off_file = persistent_path(
+            admission["identities_file"], self.scratch)
         self.off = read_json(self.off_file)
         self.case: Mapping = {}
         self.swapouts: int | None = None
@@ -629,7 +637,8 @@ class Supervisor:
         signal.signal(signal.SIGALRM, alarm_expired)
 
     def permissions(self, *, full: bool = True) -> float:
-        if (digest(self.go_file) != self.go_sha
+        if (digest(self.manifest_file) != self.native_identity[
+                "input_manifest_sha256"] or digest(self.go_file) != self.go_sha
                 or digest(self.off_file) != self.native_identity[
                     "daemon_off_identities_sha256"]):
             raise FatalSession("window go or daemon identities changed")
@@ -688,6 +697,8 @@ class Supervisor:
             self.job_limit("setup", time.monotonic())
 
     def job_limit(self, name: str, now: float) -> float:
+        if "*" in self.bad_jobs or name in self.bad_jobs:
+            raise ReviewRequired(f"{name}: required input missing/changed")
         if name not in self.job_minutes or self.active:
             raise FatalSession(f"{self.block_id}: unlisted or competing case")
         duration = self.job_minutes[name] * 60
@@ -729,6 +740,12 @@ class Supervisor:
               environment: Mapping[str, str], cwd: Path) -> OwnedProcess:
         if environment["GOMAXPROCS"] != str(self.case["gomaxprocs"]):
             raise FatalSession("unbound effective GOMAXPROCS")
+        for path in (directory, cwd, *[environment[k] for k in (
+                "HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
+                "XDG_STATE_HOME", "TMPDIR", "TMP", "TEMP", "GOTMPDIR",
+                "GOCACHE", "GOMODCACHE", "UV_CACHE_DIR", "HF_HOME",
+                "PYTHONPYCACHEPREFIX", "PYTHONUSERBASE")]):
+            persistent_path(path, self.scratch)
         self.guard(admission=True)
         observation_end = time.monotonic() + 30
         while time.monotonic() < observation_end:
@@ -908,6 +925,83 @@ class Supervisor:
         return log
 
 
+def persistent_path(value: str | Path, root: Path) -> Path:
+    path = Path(value).resolve()
+    if (not Path(value).is_absolute() or path != Path(value).absolute()
+            or ".." in Path(value).parts
+            or any(path.is_relative_to(Path(p)) for p in
+                   ("/tmp", "/private/tmp"))
+            or not path.is_relative_to(root.resolve())):
+        raise FatalSession("runtime path escaped persistent scratch")
+    return path
+
+
+def bad_jobs(path: Path, scratch: Path) -> set[str]:
+    manifest = read_json(path)
+    if (not isinstance(manifest, dict) or set(manifest) != {
+            "schema", "source", "files", "jobs", "homebrew"}
+            or manifest["schema"] != "storage-inputs/v1"
+            or manifest["source"] != COMMIT
+            or any(not isinstance(manifest[k], dict)
+                   for k in ("files", "jobs", "homebrew"))):
+        raise ReviewRequired("input manifest schema/source")
+    files, bad = manifest["files"], set()
+    if set(manifest["homebrew"]) - files.keys():
+        raise ReviewRequired("unlisted managed file")
+    for name, expected in files.items():
+        target = Path(name).resolve()
+        if str(target) != name or not sha_pin(expected, (64,)):
+            raise ReviewRequired("aliased input or invalid hash")
+        if name in manifest["homebrew"]:
+            tool = manifest["homebrew"][name]
+            if (not isinstance(tool, dict) or set(tool) != {
+                    "formula", "version", "installed_at"} or any(
+                    not isinstance(v, str) or not v or "/" in v
+                    or v in {".", ".."} for v in (
+                        tool["formula"], tool["version"]))):
+                raise ReviewRequired("unnamed managed tool")
+            timestamp(tool["installed_at"], "Homebrew install")
+            persistent_path(target, Path("/opt/homebrew/Cellar") /
+                            tool["formula"] / tool["version"])
+        else:
+            persistent_path(target, scratch)
+        if not target.is_file() or digest(target) != expected:
+            bad.add(name)
+    for names in manifest["jobs"].values():
+        if (not isinstance(names, list) or any(
+                not isinstance(name, str) for name in names)
+                or not set(names) <= files.keys()):
+            raise ReviewRequired("unlisted job input")
+    return {job for job, names in manifest["jobs"].items()
+            if bad.intersection(names)}
+
+
+def reusable(directory: Path, verify: Callable[[], dict]) -> dict | None:
+    persistent_path(directory, directory.parents[1])
+    try:
+        return verify()
+    except FatalSession:
+        raise
+    except (ReviewRequired, OSError, KeyError, TypeError, ValueError) as error:
+        atomic_json(directory / "partial.json", {
+            "state": "partial", "reason": str(error)})
+        return None
+
+
+def new_attempt(supervisor: Supervisor, directory: Path) -> None:
+    root = supervisor.root
+    persistent_path(directory, root)
+    if directory.exists():
+        previous = root / "attempts" / directory.parent.name / directory.name
+        previous.mkdir(parents=True, exist_ok=True)
+        directory.rename(previous / uuid.uuid4().hex)
+    directory.mkdir()
+    atomic_json(directory / "attempt.json", {
+        "run_id": root.name, "job_id": directory.name,
+        "attempt_id": uuid.uuid4().hex,
+        "window_id": supervisor.window["id"]})
+
+
 def download(url: str, path: Path, sha256: str, limit: int) -> None:
     with urllib.request.urlopen(url, timeout=120) as response:
         with path.open("xb") as stream:
@@ -997,11 +1091,21 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping) -> dict:
             raise ReviewRequired("checkout no longer has the detached pin")
         return receipt
     if (root / "setup-started.json").exists():
-        raise ReviewRequired("incomplete setup; operator review required")
+        previous = root / "attempts" / "setup" / uuid.uuid4().hex
+        previous.mkdir(parents=True)
+        for path in root.iterdir():
+            if path.name not in {"control", "inputs", "driver.lock",
+                                 "session.json", "python-runtime.json",
+                                 "checkpoint.json", "attempts"}:
+                path.rename(previous / path.name)
+        for source in (root / "control/neon-eval", root / "control/pod-cost"):
+            if source.exists():
+                source.rename(previous / source.name)
     if not set(path.name for path in root.iterdir()) <= {
-            "driver.lock", "control", "inputs", "session.json", "lost+found"}:
+            "driver.lock", "control", "inputs", "session.json", "lost+found",
+            "python-runtime.json", "attempts", "checkpoint.json"}:
         raise ReviewRequired("new workspace permits only control/inputs/lock")
-    if not inputs.resolve().is_relative_to(root.resolve()):
+    if not inputs.resolve().is_relative_to(supervisor.scratch):
         raise ReviewRequired("pod inputs must be copied under /work")
     metadata = read_json(inputs / "tiers-summary.json")
     for tier, expected in ARCHIVES.items():
@@ -1120,6 +1224,7 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping) -> dict:
         artifacts[str(manifest_path.relative_to(root))] = digest(manifest_path)
     receipt = {
         "identity": dict(identity), "artifacts": artifacts,
+        "window_id": supervisor.window["id"],
         "runtime_libraries": runtime_libraries,
     }
     atomic_json(complete, receipt)
@@ -1293,6 +1398,9 @@ def environment(root: Path) -> dict[str, str]:
         "GOSUMDB": "sum.golang.org",
         "GOCACHE": str(root / "cache" / "go-build"),
         "GOMODCACHE": str(root / "cache" / "go-mod"),
+        "TMP": str(root / "cache/tmp"), "TEMP": str(root / "cache/tmp"),
+        "PYTHONPYCACHEPREFIX": str(root / "cache/pycache"),
+        "PYTHONUSERBASE": str(root / "python"),
         "TMPDIR": str(root / "cache" / "tmp"),
         "GOTMPDIR": str(root / "cache" / "tmp"),
     }
@@ -1314,6 +1422,7 @@ def case_identity(job: Job, root: Path, setup: Mapping,
         "command": command(job, root), "GOMAXPROCS": gomaxprocs,
         "runtime": setup["identity"]["runtime"],
         "runtime_libraries": setup["runtime_libraries"],
+        "setup_identity": dict(setup["identity"]),
     }
 
 
@@ -1323,7 +1432,7 @@ def finished_case(root: Path, job: Job, expected: Mapping) -> dict:
     if receipt["identity"] != expected:
         raise ReviewRequired(f"completed case identity changed: {job.name}")
     for relative, sha256 in receipt["files"].items():
-        if digest(directory / relative) != sha256:
+        if digest(persistent_path(directory / relative, directory)) != sha256:
             raise ReviewRequired(
                 f"completed case artifact changed: {job.name}"
             )
@@ -1460,6 +1569,7 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
                 raise ReviewRequired(f"{name}: {verdict.reason}")
             receipt = {
                 "identity": identity, "state": verdict.state,
+                "attempt": read_json(directory / "attempt.json"),
                 "correctness_pass": (
                     job.stage != "timing" and verdict.state == "pass"
                 ),
@@ -1476,7 +1586,9 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
                 "failed_checks": report["failures"],
                 "files": {
                     str(p.relative_to(directory)): digest(p)
-                    for p in (path, directory / "time.json",
+                    for p in (path, directory / "native-time.txt",
+                              directory / "attempt.json",
+                              directory / "time.json",
                               directory / "process.json",
                               directory / "rss.jsonl",
                               directory / "stdout-stderr.log")
@@ -1492,19 +1604,19 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
         while pending and len(active) < concurrency:
             job = pending[0]
             gomaxprocs = supervisor.job_bindings[job.name]["gomaxprocs"]
-            identity = case_identity(job, root, setup, gomaxprocs)
+            identity = {**case_identity(job, root, setup, gomaxprocs),
+                        "inputs_verified": job.name not in supervisor.bad_jobs}
             directory = root / "jobs" / job.name
-            if directory.exists():
-                if not (directory / "complete.json").exists():
-                    raise ReviewRequired(f"incomplete attempt: {job.name}")
-                receipt = finished_case(root, job, identity)
+            receipt = reusable(directory, lambda: finished_case(
+                root, job, identity)) if directory.exists() else None
+            if receipt is not None:
                 receipts.append(receipt)
                 pending.popleft()
                 if job.stage == "oracle" and receipt["state"] != "pass":
                     raise ReviewRequired("saved reference oracle did not pass")
                 print(job.name, "validated receipt; skipped", flush=True)
                 continue
-            directory.mkdir()
+            new_attempt(supervisor, directory)
             atomic_json(directory / "started.json", identity)
             env = {**supervisor.environment, "GOMAXPROCS": str(gomaxprocs)}
             supervisor.job_limit(job.name, time.monotonic())
@@ -1636,12 +1748,11 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
            "GOMAXPROCS": str(supervisor.job_bindings[name]["gomaxprocs"])}
     working_directory = cwd or root / "checkout"
     identity = {"source": COMMIT, "command": list(args),
+                "inputs_verified": name not in supervisor.bad_jobs,
                 "cwd": str(working_directory),
                 "environment": env, "selected_jobs": list(selection),
                 "python_runtime": digest(root / "python-runtime.json")}
-    if directory.exists():
-        if not (directory / "complete.json").exists():
-            raise ReviewRequired(f"incomplete auxiliary attempt: {name}")
+    def verify_cached():
         receipt = read_json(directory / "complete.json")
         if receipt["identity"] != identity:
             raise ReviewRequired("auxiliary identity drift")
@@ -1651,7 +1762,10 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
                 raise ReviewRequired("auxiliary output drift")
         validate(directory)
         return receipt
-    directory.mkdir()
+    cached = reusable(directory, verify_cached) if directory.exists() else None
+    if cached is not None:
+        return cached
+    new_attempt(supervisor, directory)
     atomic_json(directory / "started.json", identity)
     if selection:
         atomic_json(directory / "selected-jobs.json", list(selection))
@@ -1671,6 +1785,7 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
         if not path.resolve().is_relative_to(root):
             raise FatalSession("auxiliary output escaped /work")
     receipt = {"identity": identity, "correctness_pass": False,
+               "attempt": read_json(directory / "attempt.json"),
                "exit_code": owned.process.returncode,
                "wall_seconds": time.monotonic()-owned.started,
                "sampled_group_peak_rss_bytes_lower_bound": owned.peak_rss,
@@ -1773,7 +1888,8 @@ def run_catalog_hybrid(supervisor: Supervisor,
 def binding_block(supervisor: Supervisor, block: Mapping) -> str:
     states = []
     for job in block["jobs"]:
-        path = Path(job["receipt_path"])
+        directory = supervisor.root / "aux" / job["id"]
+        path = directory / "receipt.json"
         if not path.resolve().is_relative_to(supervisor.root):
             raise FatalSession(f"{block['id']}: receipt path escaped /work")
 
@@ -1801,9 +1917,9 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
             if not isinstance(files, dict) or not files:
                 raise ReviewRequired(f"{block['id']}: missing result files")
             for relative, expected in files.items():
-                output = supervisor.root / relative
-                if (not owned_path(str(output), supervisor.root)
-                        or not output.resolve().is_relative_to(supervisor.root)
+                output = directory / relative
+                if (not owned_path(str(output), directory)
+                        or not output.resolve().is_relative_to(directory)
                         or not sha_pin(expected, (64,))
                         or digest(output) != expected):
                     raise ReviewRequired(
@@ -1812,14 +1928,18 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
             return paths
 
         receipt = auxiliary(
-            supervisor, job["id"], job["argv"], validate,
-            cwd=supervisor.root, accepted_exit_codes=(0, 1),
+            supervisor, job["id"], [str(path) if arg == job["receipt_path"]
+                                    else arg for arg in job["argv"]], validate,
+            cwd=directory, accepted_exit_codes=(0, 1),
         )
         result = read_json(path)
         if (result.get("exit_code") != receipt["exit_code"]
                 or (receipt["exit_code"] == 1
                     and result["state"] not in {"checks_failed", "partial"})):
             raise ReviewRequired(f"{block['id']}: fatal exit/receipt mismatch")
+        if result["state"] in {"partial", "dependency_blocked", "skipped"}:
+            (directory / "complete.json").rename(
+                directory / "partial-complete.json")
         states.append(result["state"])
     if "partial" in states:
         return "partial"
@@ -1835,7 +1955,9 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
 def block_files(root: Path, block: Mapping) -> dict[str, str]:
     paths = {}
     for job in block["jobs"]:
-        path = Path(job["receipt_path"])
+        path = (root / "setup-complete.json" if block["id"] == "setup" else
+                root / ("jobs" if block["id"] in {"storage", "segment_timing"}
+                        else "aux") / job["id"] / "complete.json")
         if not path.exists():
             continue  # Measured correctness rejection can omit dependent jobs.
         paths[str(path.relative_to(root))] = digest(path)
@@ -1869,6 +1991,10 @@ def alarm_expired(signum: int, frame: object) -> None:
 
 def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
                     identity: Mapping, concurrency: int) -> dict:
+    supervisor.bad_jobs = bad_jobs(supervisor.manifest_file,
+                                   supervisor.scratch)
+    if "*" in supervisor.bad_jobs:
+        raise ReviewRequired("common input missing/changed")
     root = supervisor.root
     path = root / "session.json"
     session_identity = {
@@ -1887,15 +2013,15 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
     for block in admission["blocks"]:
         block_id = block["id"]
         saved = record["blocks"].get(block_id)
-        if saved:
-            if saved["state"] == "started":
-                raise ReviewRequired(
-                    f"{block_id}: incomplete attempt; no replay")
-            for relative, expected in saved["files"].items():
-                target = root / relative
-                if (not target.resolve().is_relative_to(root)
-                        or digest(target) != expected):
-                    raise ReviewRequired(f"{block_id}: completed output drift")
+        if saved and saved.get("terminal") == "fatal":
+            raise FatalSession("known fatal attempt needs diagnosis")
+        if (saved and saved["state"] in {"completed", "checks_failed"}
+                and not any(j["id"] in supervisor.bad_jobs
+                            for j in block["jobs"])
+                and all((root / relative).resolve().is_relative_to(root)
+                        and (root / relative).is_file()
+                        and digest(root / relative) == expected
+                        for relative, expected in saved["files"].items())):
             outcomes[block_id] = saved["state"]
             if block_id == "setup" and saved["state"] != "completed":
                 raise ReviewRequired("setup incomplete; A9 required")
@@ -2032,6 +2158,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--native", type=Path, metavar="CONFIG")
+    mode.add_argument("--resume", type=Path, metavar="CONFIG")
     parser.add_argument("--root", type=Path,
                         default=Path("/work"))
     parser.add_argument(
@@ -2067,6 +2195,48 @@ def main() -> int:
                           "optional_1M": "skipped"},
         }, indent=2))
         return 0
+    config_path = args.native or args.resume
+    config = read_json(config_path)
+    scratch = persistent_path(config["scratch_root"],
+                              Path(config["scratch_root"]))
+    root = persistent_path(args.root, scratch)
+    if root.parent != scratch / "mac-run" or args.concurrency != 1:
+        raise ReviewRequired("serial run-id below scratch/mac-run required")
+    inputs = persistent_path(config["inputs"], scratch)
+    manifest_path = persistent_path(config["manifest_file"], scratch)
+    config["input_manifest_sha256"] = digest(manifest_path)
+    manifest = read_json(manifest_path)
+    required = {str(Path(__file__).resolve()), str(config_path.resolve()),
+                config["launcher"]["path"]}
+    if not required <= set(manifest["jobs"].get("*", [])):
+        raise ReviewRequired("unbound common driver/config/launcher")
+    required.update(str(Path(d) / f) for d, dirs, names in os.walk(inputs)
+                    for f in (*names, *(n for n in dirs
+                                        if (Path(d) / n).is_symlink())))
+    if not required <= manifest["files"].keys():
+        raise ReviewRequired("unmanifested input/config/driver/launcher")
+    if root.exists() != bool(args.resume):
+        raise ReviewRequired("new run-id or explicit resume required")
+    root.mkdir(parents=True, exist_ok=bool(args.resume))
+    with (root / "driver.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        owner = Supervisor(root, environment(root), config)
+        atomic_json(root / "python-runtime.json", owner.native_identity)
+        identity = {"driver": digest(Path(__file__)),
+                    "runtime": owner.native_identity}
+        try:
+            execute_session(owner, config, inputs, identity, 1)
+        finally:
+            try:
+                owner.stop_all()
+            finally:
+                paths = output_files([root / name for name in (
+                    "attempts", "jobs", "aux", "setup", "data", "native",
+                    "bin", "downloads", "linking.json", "tool-versions.json")
+                    if (root / name).exists()])
+                atomic_json(root / "checkpoint.json", {
+                    "run_id": root.name, "files": {
+                        str(p.relative_to(root)): digest(p) for p in paths}})
     return 0
 
 
