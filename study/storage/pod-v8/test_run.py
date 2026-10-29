@@ -1,4 +1,4 @@
-"""Tiny Linux fixtures only. Never launch Gortex or load real corpora."""
+"""Tiny native fixtures. Never launch Gortex or load corpora."""
 
 import copy
 import importlib.util
@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 
 HERE = Path(__file__).resolve().parent
-SPEC = importlib.util.spec_from_file_location("v8_runner", HERE / "run.py")
+SPEC = importlib.util.spec_from_file_location("v9_runner", HERE / "run.py")
 runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runner)
 
@@ -52,6 +52,64 @@ def fixture():
     return db, spec
 
 
+def config_fixture(root):
+    root = root.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    control = root / "control"
+    control.mkdir(exist_ok=True)
+    binary, receipt, linkage = [control / name for name in (
+        "gortex-1ef632d2", "receipt.json", "linkage.json")]
+    binary.write_bytes(b"synthetic binary, never executed")
+    runner.write(receipt, {"schema": "synthetic-d6", "receipt_text":
+                          "untrusted prose; never interpreted"})
+    receipt_sha, binary_sha = runner.digest(receipt), runner.digest(binary)
+    runner.write(linkage, {
+        "receipt_sha256": receipt_sha, "binary_sha256": binary_sha,
+        "architecture": "arm64", "linked_libraries": ["/usr/lib/libSystem"]})
+    manifest = control / "manifest.json"
+    files = {str(p): runner.digest(p) for p in (receipt, binary, linkage)}
+    runner.write(manifest, {"files": files, "jobs": {"*": list(files)}})
+    runner.write(control / "identities.json", {})
+    window = control / "window.json"
+    runner.write(window, {
+        "schema": "mac-window-go/v1", "window_id": "synthetic-window",
+        "input_manifest_sha256": runner.digest(manifest),
+        "start": "2020-01-01T00:00:00+00:00",
+        "end": "2100-01-01T00:00:00+00:00", **{k: True for k in (
+            "user_go", "migration_complete", "owner_stop_confirmed",
+            "awake", "thermal_safe", "background_quiet")}})
+    return {"scratch_root": str(root), "inputs": str(root / "inputs"),
+            "manifest_file": str(manifest), "window_file": str(window),
+            "identities_file": str(control / "identities.json"), "v9": {
+                "receipt": str(receipt), "binary": str(binary),
+                "linkage_file": str(linkage), "admitted_sets": "P",
+                "smoke_receipt": str(root / "aux/v9-smoke/receipt.json"),
+                "fit": {s: {"estimated_peak_bytes": 1} for s in "PRK"}}}
+
+
+def attempt_fixture(directory, deadline, *, mode):
+    config = config_fixture(directory)
+    attempt = runner.Attempt(directory, deadline, mode=mode,
+                             root=directory, config=config)
+    attempt.birth = 123
+    return attempt
+
+
+class NativeFixture(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        for target, value in (
+                ("native_output", ""), ("daemon_off", None),
+                ("native_resources", {"level": 30, "swapouts": 0,
+                    "available_bytes": 64 * runner.native.GIB,
+                    "load1": 1.0, "ac_power": True}),
+                ("darwin_usage", SimpleNamespace(
+                    proc_start_abstime=123, resident_size=2048))):
+            mocked = patch.object(runner.native, target, return_value=value)
+            mocked.start()
+            self.addCleanup(mocked.stop)
+
+
 class EvidenceTests(unittest.TestCase):
     def test_exact_current_generation_and_hand_counted_bridges(self):
         db, spec = fixture()
@@ -71,7 +129,7 @@ class EvidenceTests(unittest.TestCase):
             {"source": "b", "target": "a", "runtime": False,
              "imports": 0, "calls": 0}])
         self.assertEqual(got["differences"], {
-            "v4": {"edges": {"historical": 2, "v8": 3}}, "v5": {}})
+            "v4": {"edges": {"historical": 2, "v9": 3}}, "v5": {}})
         self.assertEqual(spec, original)
 
     def test_same_count_wrong_nodes_is_not_coverage(self):
@@ -118,7 +176,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertNotIn("v5", specs["R"]["history"])
 
 
-class BoundaryTests(unittest.TestCase):
+class BoundaryTests(NativeFixture):
     def test_approval_matches_nonce_paths_pins_and_notice(self):
         request = {"nonce": "one", "phase": "restart", "build": runner.BUILD,
                    "paths": {"HOME": "/work/smoke/P/home"}}
@@ -166,7 +224,7 @@ class BoundaryTests(unittest.TestCase):
             run = root / "attempt"
             run.mkdir()
             (run / "partial.log").write_text("incomplete")
-            attempt = runner.Attempt(run, time.time() - 1, mode="smoke")
+            attempt = attempt_fixture(run, time.time() - 1, mode="smoke")
             with self.assertRaises(runner.WorkFailed):
                 attempt.command([sys.executable, "-c", "raise Exception()"])
             self.assertEqual((run / "partial.log").read_text(), "incomplete")
@@ -174,11 +232,10 @@ class BoundaryTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 run.mkdir(exist_ok=False)
 
-    @unittest.skipUnless(sys.platform == "linux", "Linux lifecycle fixture")
     def test_cleanup_reaps_owned_process_and_refuses_surviving_socket(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)
-            attempt = runner.Attempt(run, time.time() + 30, mode="smoke")
+            attempt = attempt_fixture(run, time.time() + 30, mode="smoke")
             child = subprocess.Popen(
                 [sys.executable, "-c", "import time; time.sleep(20)"],
                 env=attempt.env)
@@ -190,24 +247,23 @@ class BoundaryTests(unittest.TestCase):
             self.assertIsNotNone(child.poll())
             self.assertTrue(Path(attempt.env["GORTEX_DAEMON_SOCKET"]).exists())
 
-    @unittest.skipUnless(sys.platform == "linux", "Linux lifecycle fixture")
     def test_cleanup_refuses_surviving_owned_descendant(self):
         with tempfile.TemporaryDirectory() as tmp:
-            attempt = runner.Attempt(Path(tmp), time.time() + 30, mode="smoke")
-            stray = subprocess.Popen(
-                [sys.executable, "-c", "import time; time.sleep(20)"],
-                env=attempt.env)
-            self.addCleanup(stray.wait)
-            self.addCleanup(stray.kill)
-            attempt.daemon = subprocess.Popen(
-                [sys.executable, "-c", "import time; time.sleep(20)"],
-                env=attempt.env)
-            self.addCleanup(attempt.daemon.wait)
-            with self.assertRaisesRegex(runner.Unsafe, "owned process"):
-                attempt.stop()
+            attempt = attempt_fixture(Path(tmp), time.time() + 30,
+                                      mode="smoke")
+            child = SimpleNamespace(poll=lambda: 0,
+                                    wait=unittest.mock.Mock(),
+                                    terminate=unittest.mock.Mock())
+            attempt.daemon = child
+            with patch.object(runner.native, "native_output", return_value=(
+                    "p9501\nn" + str(attempt.binary) + " (deleted)\n")):
+                with self.assertRaisesRegex(runner.Unsafe, "process survived"):
+                    attempt.stop()
+            child.wait.assert_called_once_with(timeout=30)
+            child.terminate.assert_not_called()
 
 
-class PartialReceiptTests(unittest.TestCase):
+class PartialReceiptTests(NativeFixture):
     def finish(self, root, attempt, reason):
         receipt = root / "results/receipt.json"
         outcome = runner.failure(reason)
@@ -223,22 +279,22 @@ class PartialReceiptTests(unittest.TestCase):
         self.assertIn("results/outcome.json", result["files"])
         return result
 
-    @unittest.skipUnless(sys.platform == "linux", "Linux lifecycle fixture")
     def test_deadline_after_verified_stop_has_clean_partial_receipt(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            attempt = runner.Attempt(root / "attempt", time.time() - 1, mode="smoke")
+            attempt = attempt_fixture(root / "attempt", time.time() - 1,
+                                      mode="smoke")
             with self.assertRaises(runner.WorkFailed) as caught:
                 attempt.observe()
             result = self.finish(root, attempt, caught.exception)
             self.assertTrue(result["clean_handoff"])
             self.assertEqual(result["reason_code"], "WorkFailed")
 
-    @unittest.skipUnless(sys.platform == "linux", "Linux lifecycle fixture")
     def test_exited_daemon_is_reaped_and_receipt_is_clean_partial(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            attempt = runner.Attempt(root / "attempt", time.time() + 30, mode="smoke")
+            attempt = attempt_fixture(root / "attempt", time.time() + 30,
+                                      mode="smoke")
             child = subprocess.Popen([sys.executable, "-c", "pass"],
                                      env=attempt.env)
             self.addCleanup(child.wait)
@@ -256,11 +312,11 @@ class PartialReceiptTests(unittest.TestCase):
             result = self.finish(root, None, runner.Unsafe("wrong daemon"))
             self.assertFalse(result["clean_handoff"])
 
-    @unittest.skipUnless(sys.platform == "linux", "Linux lifecycle fixture")
     def test_unverified_stop_writes_fatal_receipt_even_without_daemon(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            attempt = runner.Attempt(root / "attempt", time.time() + 30, mode="smoke")
+            attempt = attempt_fixture(root / "attempt", time.time() + 30,
+                                      mode="smoke")
             sock = Path(attempt.env["GORTEX_DAEMON_SOCKET"])
             sock.touch()
             result = self.finish(root, attempt, OSError("local failure"))
@@ -317,18 +373,20 @@ class FailureRoutingTests(unittest.TestCase):
             self.assertFalse((root / "receipt.json").exists())
 
 
-class TimingCpuTests(unittest.TestCase):
-    def test_baseline_environment_uses_16_and_smoke_is_unchanged(self):
-        """Given the existing mode, only A7 changes the whitelisted CPU value."""
+class TimingCpuTests(NativeFixture):
+    def test_native_environment_uses_explicit_10_and_persistent_temp(self):
+        """Both modes use explicit CPU and isolated temporary roots."""
         root = Path("/fixture/P")
-        # Exact previous environment, including dictionary insertion order.
+        # Native settings are explicit, not inherited.
         expected = {
             "HOME": "/fixture/P/home", "XDG_CONFIG_HOME": "/fixture/P/config",
             "XDG_DATA_HOME": "/fixture/P/data", "XDG_CACHE_HOME": "/fixture/P/cache",
             "XDG_STATE_HOME": "/fixture/P/state", "TMPDIR": "/fixture/P/tmp",
+            "TMP": "/fixture/P/tmp", "TEMP": "/fixture/P/tmp",
             "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C",
             "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_TERMINAL_PROMPT": "0", "GIT_NO_LAZY_FETCH": "1", "GOMAXPROCS": "30",
+            "GIT_TERMINAL_PROMPT": "0", "GIT_NO_LAZY_FETCH": "1",
+            "GOMAXPROCS": "10",
             "GORTEX_DAEMON_SOCKET": "/fixture/P/d.sock",
             "GORTEX_DAEMON_PIDFILE": "/fixture/P/d.pid",
             "GORTEX_DAEMON_LOGFILE": "/fixture/P/daemon.log",
@@ -338,17 +396,15 @@ class TimingCpuTests(unittest.TestCase):
             smoke = runner.environment(root, mode="smoke")
             baseline = runner.environment(root, mode="baseline_a7")
         self.assertEqual(json.dumps(smoke).encode(), json.dumps(expected).encode())
-        self.assertEqual(baseline, {**expected, "GOMAXPROCS": "16"})
+        self.assertEqual(baseline, expected)
 
     def test_clients_and_daemon_use_the_mode_environment(self):
         """Given either mode, real command/start boundaries pass the same env."""
-        for mode, gomax in (("baseline_a7", "16"), ("smoke", "30")):
+        for mode, gomax in (("baseline_a7", "10"), ("smoke", "10")):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                with patch.object(runner.os, "sched_getaffinity", create=True,
-                                  return_value={2, 4}):
-                    attempt = runner.Attempt(root / "P", time.time() + 30,
-                                             mode=mode)
+                attempt = attempt_fixture(root / "P", time.time() + 30,
+                                          mode=mode)
                 attempt.observe = unittest.mock.Mock()
                 daemon = SimpleNamespace(pid=4242, poll=lambda: None)
                 child = SimpleNamespace(returncode=0, poll=lambda: 0,
@@ -370,14 +426,12 @@ class TimingCpuTests(unittest.TestCase):
                         original_write(answer, {**value, "lead_go": True,
                                                 "pi_gortex_notified": True})
 
-                def local_path(value):
-                    return (root / "approvals" if str(value) == "/work/control/v8-go"
-                            else Path(value))
-
                 def spawn(argv, **kwargs):
                     self.assertEqual(kwargs["env"], attempt.env)
                     self.assertEqual(kwargs["env"]["GOMAXPROCS"], gomax)
                     if argv[1:3] == ["daemon", "start"]:
+                        runner.native.daemon_off.assert_called_with(
+                            {}, attempt.env)
                         sock.touch()
                         return daemon
                     kwargs["stdout"].write(json.dumps(status)
@@ -385,8 +439,7 @@ class TimingCpuTests(unittest.TestCase):
                                            else "client")
                     return child
 
-                with patch.object(runner, "Path", side_effect=local_path), \
-                        patch.object(runner, "write", side_effect=local_write), \
+                with patch.object(runner, "write", side_effect=local_write), \
                         patch.object(runner.subprocess, "Popen", side_effect=spawn) as popen, \
                         patch.object(runner.time, "sleep", side_effect=AssertionError):
                     self.assertEqual(attempt.gx("version"), "client")
@@ -394,15 +447,13 @@ class TimingCpuTests(unittest.TestCase):
                 self.assertEqual([call.args[0][1:3] for call in popen.call_args_list],
                                  [["version"], ["daemon", "start"], ["daemon", "status"]])
 
-    def test_actual_affinity_and_gomax_metadata_are_hashed_in_receipt(self):
-        """Given either mode, receipts bind the observed, not assumed CPU set."""
-        for mode, gomax in (("baseline_a7", "16"), ("smoke", "30")):
+    def test_native_cpu_scope_and_gomax_metadata_are_hashed_in_receipt(self):
+        """Bind native CPU scope without claiming Linux affinity."""
+        for mode, gomax in (("baseline_a7", "10"), ("smoke", "10")):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                with patch.object(runner.os, "sched_getaffinity", create=True,
-                                  return_value={12, 4, 8}):
-                    attempt = runner.Attempt(root / "attempt/P", time.time() + 30,
-                                             mode=mode)
+                attempt = attempt_fixture(root / "attempt/P",
+                                          time.time() + 30, mode=mode)
                 attempt.stop = unittest.mock.Mock()
                 receipt = root / "results/receipt.json"
                 self.assertEqual(runner.finish(root, root / "attempt", receipt,
@@ -410,9 +461,346 @@ class TimingCpuTests(unittest.TestCase):
                 result = json.loads(receipt.read_text())
                 metadata = root / "attempt/P/cpu.json"
                 self.assertEqual(json.loads(metadata.read_text()), {
-                    "cpu_set": [4, 8, 12], "GOMAXPROCS": gomax})
+                    "cpu_scope": "M1 Max 8P+2E; no affinity claim",
+                    "GOMAXPROCS": gomax})
                 self.assertEqual(result["files"]["attempt/P/cpu.json"],
                                  runner.digest(metadata))
+
+
+class FrozenV9Tests(NativeFixture):
+    def pins(self, config):
+        receipt = Path(config["v9"]["receipt"])
+        binary = Path(config["v9"]["binary"])
+        for name, value in (("D6_SHA", runner.digest(receipt)),
+                            ("SHA", runner.digest(binary))):
+            mocked = patch.object(runner, name, value)
+            mocked.start()
+            self.addCleanup(mocked.stop)
+
+    def probe(self, argv, env):
+        if argv[0] == "/usr/bin/lipo":
+            return "arm64\n"
+        if argv[0] == "/usr/bin/otool":
+            return argv[-1] + ":\n\t/usr/lib/libSystem\n"
+        if argv[1:] == ["version"]:
+            return "gortex " + runner.VERSION + "\n"
+        self.fail("unexpected staging probe")
+
+    def main_fixture(self, root, config, mode, run_set):
+        config_path = root / "control/native.json"
+        runner.write(config_path, config)
+        job = ("v9-smoke" if mode == "smoke" else
+               "v9-baseline-" + config["v9"]["admitted_sets"])
+        receipt = root / "aux" / job / "receipt.json"
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        argv = ["run.py", mode, "--root", str(root), "--native-config",
+                str(config_path), "--receipt", str(receipt), "--source-pin",
+                "a" * 40, "--config-pin", runner.digest(HERE / "run.py"),
+                "--input-pin", runner.digest(HERE / "inputs.json")]
+        with (patch.object(sys, "argv", argv),
+              patch.object(runner.native, "native_output",
+                           side_effect=self.probe),
+              patch.object(runner, "run_set", side_effect=run_set),
+              patch.object(runner.Attempt, "stop")):
+            code = runner.main()
+        return code, json.loads(receipt.read_text())
+
+    def test_exact_d6_and_manifest_binding_precede_binary_calls(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            config = config_fixture(root)
+            self.pins(config)
+            original = copy.deepcopy(config)
+            with patch.object(runner.native, "native_output",
+                              side_effect=self.probe) as probe:
+                got = runner.frozen(config, {}, "v9-smoke")
+                self.assertEqual(got, {
+                    "receipt_sha256": runner.D6_SHA,
+                    "binary_sha256": runner.SHA,
+                    "linkage_sha256": runner.digest(Path(
+                        config["v9"]["linkage_file"]))})
+                self.assertEqual(probe.call_count, 3)
+            self.assertEqual(config, original)
+            receipt = Path(config["v9"]["receipt"])
+            receipt.write_text(receipt.read_text() + " ")
+            with patch.object(runner.native, "native_output") as probe:
+                with self.assertRaisesRegex(runner.Blocked, "staged identity"):
+                    runner.frozen(config, {}, "v9-smoke")
+                probe.assert_not_called()
+            self.assertFalse((root / "v9").exists())
+
+    def test_missing_unbound_or_changed_inputs_never_launch_a_daemon(self):
+        for change in ("missing", "unbound", "binary", "linkage"):
+            with self.subTest(change=change), \
+                    tempfile.TemporaryDirectory() as folder:
+                root = Path(folder).resolve()
+                config = config_fixture(root)
+                self.pins(config)
+                linkage = Path(config["v9"]["linkage_file"])
+                if change == "missing":
+                    linkage.unlink()
+                elif change == "binary":
+                    Path(config["v9"]["binary"]).write_text("wrong build")
+                elif change == "linkage":
+                    linkage.write_text("{}")
+                else:
+                    manifest = Path(config["manifest_file"])
+                    record = runner.native.read_json(manifest)
+                    record["jobs"] = {"other-job": record["jobs"]["*"]}
+                    runner.write(manifest, record)
+                with (patch.object(runner.native, "native_output") as probe,
+                      patch.object(runner.subprocess, "Popen") as spawn):
+                    with self.assertRaises(runner.Blocked):
+                        runner.frozen(config, {}, "v9-smoke")
+                    probe.assert_not_called()
+                    spawn.assert_not_called()
+
+    def test_recorded_architecture_linkage_and_exact_version_must_match(self):
+        for changed in ("architecture", "linked_libraries", "version",
+                        "empty_version", "probe"):
+            with self.subTest(changed=changed), \
+                    tempfile.TemporaryDirectory() as folder:
+                root = Path(folder).resolve()
+                config = config_fixture(root)
+                self.pins(config)
+
+                def wrong_probe(argv, env):
+                    if changed == "probe":
+                        raise runner.native.FatalSession("probe stderr")
+                    value = self.probe(argv, env)
+                    if changed == "empty_version" and argv[1:] == ["version"]:
+                        return ""
+                    if ((changed == "architecture" and
+                         argv[0].endswith("lipo"))
+                            or (changed == "linked_libraries" and
+                                argv[0].endswith("otool"))
+                            or (changed == "version" and
+                                argv[1:] == ["version"])):
+                        return "wrong\n"
+                    return value
+
+                with (patch.object(runner.native, "native_output",
+                                   side_effect=wrong_probe),
+                      self.assertRaises(runner.Blocked)):
+                    runner.frozen(config, {}, "v9-smoke")
+
+    def test_smoke_then_fit_selected_baseline_uses_k9_not_k12(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            config = config_fixture(root)
+            self.pins(config)
+            seen = []
+            original = (HERE / "inputs.json").read_bytes()
+
+            def run_set(attempt, spec, set_id, identity):
+                seen.append(set_id)
+                if set_id == "K":
+                    self.assertEqual({r["label"] for r in
+                                      spec["repositories"]}, runner.K9)
+                    self.assertEqual(len(spec["repositories"]), 9)
+                    self.assertEqual(spec["history"], {})
+                    self.assertTrue(all(set(p) <= runner.K9 for p in
+                                        spec["pairs"]))
+
+            code, smoke = self.main_fixture(root, config, "smoke", run_set)
+            self.assertEqual((code, seen), (0, ["P", "R"]))
+            self.assertTrue(smoke["clean_handoff"])
+            self.assertEqual(smoke["completed_sets"], ["P", "R"])
+            selected = {}
+            for set_id in "PRK":
+                config["v9"]["admitted_sets"] = set_id
+                code, baseline = self.main_fixture(
+                    root, config, "baseline_a7", run_set)
+                self.assertEqual(code, 0)
+                self.assertEqual(baseline["completed_sets"], [set_id])
+                selected.update(baseline["selected"])
+            self.assertEqual(seen, ["P", "R", "P", "R", "K"])
+            self.assertEqual(selected, {"P": "P6", "R": "R5", "K": "K9"})
+            self.assertEqual((HERE / "inputs.json").read_bytes(), original)
+            path = root / "aux/v9-baseline-K/receipt.json"
+            before = path.read_bytes()
+            with patch.object(runner.subprocess, "Popen") as spawn:
+                self.assertEqual(self.main_fixture(
+                    root, config, "baseline_a7", run_set)[0], 1)
+                spawn.assert_not_called()
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_single_set_receipt_discloses_other_unmeasured_sets(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            config = config_fixture(root)
+            self.pins(config)
+            self.main_fixture(root, config, "smoke", lambda *args: None)
+            del config["v9"]["fit"]["K"]
+            code, result = self.main_fixture(root, config, "baseline_a7",
+                                             lambda *args: None)
+            self.assertEqual(code, 0)
+            self.assertEqual(result["selected"], {"P": "P6"})
+            self.assertEqual(result["omitted"], ["R", "K"])
+            self.assertEqual(result["completed_sets"], ["P"])
+
+    def test_bad_order_no_fit_partial_and_corrupt_smoke_remain_explicit(self):
+        for variant in ("order", "fit", "partial", "smoke"):
+            with self.subTest(variant=variant), \
+                    tempfile.TemporaryDirectory() as folder:
+                root = Path(folder).resolve()
+                config = config_fixture(root)
+                self.pins(config)
+                self.main_fixture(root, config, "smoke", lambda *args: None)
+                seen = []
+                if variant == "order":
+                    config["v9"]["admitted_sets"] = "KPR"
+                elif variant == "fit":
+                    config["v9"]["fit"]["P"]["estimated_peak_bytes"] = True
+                elif variant == "smoke":
+                    # Change a hashed output, not the wrapper receipt.
+                    path = root / "aux/v9-smoke/attempt/attempt.json"
+                    path.write_text("changed")
+
+                def run_set(attempt, spec, set_id, identity):
+                    seen.append(set_id)
+                    if set_id == "R":
+                        raise runner.WorkFailed("interrupted set")
+
+                if variant == "partial":
+                    self.main_fixture(root, config, "baseline_a7", run_set)
+                    complete = root / "aux/v9-baseline-P/receipt.json"
+                    prior = complete.read_bytes()
+                    config["v9"]["admitted_sets"] = "R"
+                code, result = self.main_fixture(
+                    root, config, "baseline_a7", run_set)
+                self.assertNotEqual(result["state"], "completed")
+                if variant == "partial":
+                    self.assertEqual((code, seen), (1, ["P", "R"]))
+                    self.assertEqual(result["completed_sets"], [])
+                    self.assertEqual(complete.read_bytes(), prior)
+                    self.assertTrue(result["clean_handoff"])
+                else:
+                    self.assertEqual(seen, [])
+                self.assertNotEqual(result.get("completed_sets"),
+                                    ["P", "R", "K"])
+
+    def test_daemon_rss_uses_birth_and_bytes_at_five_second_cadence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            attempt = attempt_fixture(Path(folder), time.time() + 30,
+                                      mode="smoke")
+            attempt.daemon = SimpleNamespace(pid=9501, poll=lambda: None)
+            start = time.time()
+            with (patch.object(runner.time, "time", return_value=start),
+                  patch.object(runner.native, "darwin_usage", return_value=(
+                      SimpleNamespace(proc_start_abstime=123,
+                                      resident_size=4096))) as usage):
+                attempt.observe()
+                attempt.observe()
+                self.assertEqual(usage.call_count, 1)
+                self.assertEqual(attempt.samples[0]["rss_bytes"], 4096)
+                self.assertNotIn("rss_kib", attempt.samples[0])
+            with (patch.object(runner.time, "time", return_value=start + 5),
+                  patch.object(runner.native, "darwin_usage", return_value=(
+                      SimpleNamespace(proc_start_abstime=999,
+                                      resident_size=4096))),
+                  self.assertRaisesRegex(runner.Unsafe, "birth")):
+                attempt.observe()
+            self.assertEqual(len(attempt.samples), 1)
+
+    def test_revoked_go_stops_new_work_but_not_cleanup(self):
+        with tempfile.TemporaryDirectory() as folder:
+            attempt = attempt_fixture(Path(folder), time.time() + 30,
+                                      mode="smoke")
+            window = Path(attempt.config["window_file"])
+            value = runner.native.read_json(window)
+            value["user_go"] = False
+            runner.write(window, value)
+            with (patch.object(runner.subprocess, "Popen") as spawn,
+                  self.assertRaises(runner.native.FatalSession)):
+                attempt.command(["never-launch"])
+            spawn.assert_not_called()
+            attempt.stop()
+            self.assertFalse(runner.failure(runner.native.FatalSession(
+                "installed daemon returned"))["clean_handoff"])
+
+    def test_fresh_tracks_one_restart_and_at_most_one_analysis(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            directory = root / "attempt/P"
+            directory.mkdir(parents=True)
+            log = directory / "daemon.log"
+            spec = {"repositories": [
+                {"label": name, "tag": "v1", "commit": "a" * 40}
+                for name in ("a", "b")]}
+            calls, phases, snapshots = [], [], []
+
+            def command(argv):
+                calls.append(list(argv))
+                if argv[:2] == ["git", "clone"]:
+                    (Path(argv[-1]) / ".git/info").mkdir(parents=True)
+                if "rev-parse" in argv:
+                    return ("false" if argv[-1] == "--is-shallow-repository"
+                            else "a" * 40)
+                return ""
+
+            def start(phase, identity):
+                phases.append(phase)
+                with log.open("a") as output:
+                    output.write(json.dumps({
+                        "msg": "daemon: warmup summary"}) + "\n")
+
+            def gx(*args):
+                calls.append(list(args))
+                if args[:2] == ("call", "get_communities"):
+                    with log.open("a") as output:
+                        output.write('{"msg":"mcp: analysis pass complete"}\n')
+
+            def snapshot(label, spec, set_id):
+                snapshots.append(label)
+                return {"active_covers_all_current_nodes":
+                        label != "after-warmup", "file_index_failures": 0,
+                        "coverage": [{"runtime": True, "imports": 1,
+                                      "calls": 1}]}
+
+            attempt = SimpleNamespace(
+                directory=directory, config={"inputs": str(root / "inputs")},
+                command=command, gx=gx, start=start,
+                stop=unittest.mock.Mock(), snapshot=snapshot,
+                wait_ready=unittest.mock.Mock(), observe=unittest.mock.Mock())
+            runner.run_set(attempt, spec, "P", {})
+            self.assertEqual(phases, ["start", "restart"])
+            self.assertEqual([c[3] for c in calls if c[0] == "track"],
+                             ["P-a", "P-b"])
+            self.assertEqual(sum(c[:2] == ["call", "get_communities"]
+                                 for c in calls), 1)
+            self.assertEqual(snapshots, ["before-restart", "after-warmup",
+                                         "after-analysis", "final"])
+            self.assertEqual(attempt.stop.call_count, 2)
+            self.assertFalse(any(c[0] in {"export", "edit", "update"}
+                                 for c in calls))
+
+    def test_cleanup_checks_private_binary_and_socket_not_installed_name(self):
+        with tempfile.TemporaryDirectory() as folder:
+            attempt = attempt_fixture(Path(folder), time.time() + 30,
+                                      mode="smoke")
+            installed = "/installed/gortex"
+            with patch.object(runner.native, "native_output", side_effect=[
+                    "n" + installed + "\n", "", ""]):
+                attempt.stop()
+            with (patch.object(runner.native, "native_output", side_effect=[
+                    "", "n" + attempt.env["GORTEX_DAEMON_SOCKET"] + "\n"]),
+                  self.assertRaisesRegex(runner.Unsafe, "socket holder")):
+                attempt.stop()
+            marker = "GORTEX_DAEMON_SOCKET=" + attempt.env[
+                "GORTEX_DAEMON_SOCKET"]
+            with patch.object(runner.native, "native_output", side_effect=[
+                    "", "", "unknown-child " + marker]) as native:
+                with self.assertRaisesRegex(runner.Unsafe, "marker process"):
+                    attempt.stop()
+                self.assertEqual(native.call_args.args[1], {})
+                self.assertEqual(native.call_args.args[0], [
+                    "/bin/ps", "-Eww", "-U", str(os.getuid()),
+                    "-o", "command="])
+            with (patch.object(runner.native, "native_output", side_effect=(
+                    runner.native.FatalSession("ownership unverified"))),
+                  self.assertRaises(runner.native.FatalSession)):
+                attempt.stop()
 
 
 if __name__ == "__main__":

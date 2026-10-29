@@ -1608,6 +1608,39 @@ class DurabilityTests(unittest.TestCase):
             self.assertFalse((directory / "partial.json").exists())
             self.assertFalse((root / "attempts").exists())
 
+    def test_setup_binds_bsd_time_without_a_version_invocation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            owner = fixture_owner(root)
+            inputs = root / "inputs"
+            inputs.mkdir()
+            (inputs / "tiers-summary.json").write_text("{}")
+            owner.run = unittest.mock.Mock(
+                return_value=SimpleNamespace(read_text=lambda: "version"))
+            original_digest = driver.digest
+
+            def setup_digest(path):
+                if path == Path("/usr/bin/time"):
+                    return "3" * 64
+                return original_digest(path)
+
+            with (patch.object(driver, "ARCHIVES", {}),
+                  patch.object(driver, "copy_tree", return_value={}),
+                  patch.object(driver, "digest", side_effect=setup_digest),
+                  patch.object(owner, "run", side_effect=[
+                      SimpleNamespace(read_text=lambda: "version") for _ in
+                      range(4)] + [RuntimeError("stop before source clone")])
+                  as run):
+                with self.assertRaisesRegex(RuntimeError, "source clone"):
+                    driver.prepare(owner, inputs, {})
+            versions = driver.read_json(root / "tool-versions.json")
+            self.assertEqual(versions["/usr/bin/time"], {
+                "path": "/usr/bin/time", "sha256": "3" * 64})
+            self.assertEqual([call.args[0] for call in
+                              run.call_args_list[:4]], [
+                ["go", "version"], ["cmake", "--version"],
+                ["c++", "--version"], ["git", "--version"]])
+
     def test_interrupted_setup_retention_and_fatal_stop(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder).resolve()

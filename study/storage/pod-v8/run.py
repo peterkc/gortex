@@ -1,24 +1,33 @@
 #!/usr/bin/env python3
-"""Frozen v8 fresh-store attempts. Linux Python 3.12; stdlib only."""
+"""Frozen v9 fresh-store attempts on Darwin; stdlib only."""
 
 import argparse
 from collections.abc import Mapping, Sequence
-from datetime import datetime
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import signal
 import sqlite3
 import subprocess
+import sys
 import time
 import uuid
 
 
-BUILD = "21baab3b1781e06b3cf74851cad2444c843aaf4b"
-VERSION = "v0.64.10-dev-storage+21baab3b"
-BINARY = Path("/work/inputs/v8/gortex-21baab3b-linux-amd64")
-SHA = "e8c29b5dfcfcae46db8b40d05e2ea00fd6543e418c36529dfccdf6d76c3b5c5d"
+SPEC = importlib.util.spec_from_file_location(
+    "storage_native_driver", Path(__file__).parents[1] / "pod/run.py")
+native = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = native
+SPEC.loader.exec_module(native)
+BUILD = "1ef632d25f179d63a8f0d5039ddc09ef2a25a63b"
+VERSION = "v0.64.11-dev-storage+1ef632d2"
+SHA = "b7f8061fc441d5070b2b07e39e2b0d8103b97bdc7b242639bd3dcf46d942c4c2"
+D6_SHA = "038316fd85301a6bb2cd3a6e809e92c04683db0984be413a8c177a87bfe49b9a"
+K9 = {"apimachinery", "apiextensions-apiserver", "code-generator", "kubectl",
+      "component-base", "kube-aggregator", "metrics", "cli-runtime",
+      "controller-manager"}
 
 
 class Rejected(RuntimeError):
@@ -50,26 +59,67 @@ def write(path: Path, value: object) -> None:
 
 
 def inside(path: Path, parent: Path) -> Path:
-    if not path.is_absolute() or not path.resolve().is_relative_to(parent):
-        raise Unsafe(f"path escapes {parent}: {path}")
-    if any(part.is_symlink() for part in (path, *path.parents)):
-        raise Unsafe(f"symlinked path: {path}")
-    return path
+    try:
+        return native.persistent_path(path, parent)
+    except native.FatalSession as error:
+        raise Unsafe(str(error)) from error
 
 
 def environment(directory: Path, *, mode: str) -> dict[str, str]:
     env = {key: str(directory / child) for key, child in (
         ("HOME", "home"), ("XDG_CONFIG_HOME", "config"),
         ("XDG_DATA_HOME", "data"), ("XDG_CACHE_HOME", "cache"),
-        ("XDG_STATE_HOME", "state"), ("TMPDIR", "tmp"))}
+        ("XDG_STATE_HOME", "state"), ("TMPDIR", "tmp"),
+        ("TMP", "tmp"), ("TEMP", "tmp"))}
     env.update(PATH="/usr/bin:/bin", LANG="C.UTF-8", LC_ALL="C",
                GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1",
                GIT_TERMINAL_PROMPT="0", GIT_NO_LAZY_FETCH="1",
-               GOMAXPROCS="16" if mode == "baseline_a7" else "30")
+               GOMAXPROCS="10")
     for key, child in (("SOCKET", "d.sock"), ("PIDFILE", "d.pid"),
                        ("LOGFILE", "daemon.log"), ("STATEFILE", "d.json")):
         env["GORTEX_DAEMON_" + key] = str(directory / child)
     return env
+
+
+def frozen(config: Mapping, env: Mapping, job: str) -> dict:
+    scratch, spec = Path(config["scratch_root"]), config["v9"]
+    paths = [inside(Path(spec[key]), scratch) for key in
+             ("receipt", "binary", "linkage_file")]
+    if any(not p.is_file() for p in paths):
+        raise Blocked("v9 staging/receipt/linkage record missing")
+    receipt, binary, linkage = paths
+    manifest = native.read_json(Path(config["manifest_file"]))
+    required = {str(p) for p in paths}
+    if (not required <= set(manifest["jobs"].get("*", [])) |
+            set(manifest["jobs"].get(job, [])) or any(
+            manifest["files"].get(str(p)) != digest(p) for p in paths)
+            or digest(receipt) != D6_SHA or digest(binary) != SHA):
+        raise Blocked("unbound or mismatched v9 staged identity")
+
+    def probe(argv):
+        try:
+            return native.native_output(argv, env)
+        except native.FatalSession as error:
+            raise Blocked("v9 staging probe unverified") from error
+
+    record = native.read_json(linkage)
+    if not isinstance(record, dict) or not {"receipt_sha256", "binary_sha256",
+            "architecture", "linked_libraries"} <= record.keys():
+        raise Blocked("incomplete v9 architecture/linkage record")
+    if (record["receipt_sha256"] != D6_SHA
+            or record["binary_sha256"] != SHA
+            or record["architecture"] != "arm64"
+            or not record["linked_libraries"]
+            or probe(["/usr/bin/lipo", "-archs", str(binary)]).strip()
+            != "arm64"
+            or [l.strip() for l in probe(
+                ["/usr/bin/otool", "-L", str(binary)]).splitlines()[1:]]
+            != record["linked_libraries"]
+            or probe([str(binary), "version"]).splitlines()[:1]
+            != ["gortex " + VERSION]):
+        raise Blocked("v9 recorded architecture/linkage/version mismatch")
+    return {"receipt_sha256": D6_SHA, "binary_sha256": SHA,
+            "linkage_sha256": digest(linkage)}
 
 
 def go_matches(request: Mapping, answer: Mapping) -> bool:
@@ -136,7 +186,7 @@ def measure(db: sqlite3.Connection, spec: Mapping, set_id: str) -> dict:
                  in counts["nodes_by_repo"] for r in spec["repositories"]))
     counts["active_covers_all_current_nodes"] = exact
     counts["differences"] = {
-        version: {key: {"historical": value, "v8": counts[key]}
+        version: {key: {"historical": value, "v9": counts[key]}
                   for key, value in previous.items() if counts[key] != value}
         for version, previous in spec["history"].items()}
     return counts
@@ -145,9 +195,17 @@ def measure(db: sqlite3.Connection, spec: Mapping, set_id: str) -> dict:
 class Attempt:
     """Own one foreground daemon and all short-lived control clients."""
 
-    def __init__(self, directory: Path, deadline: float, *, mode: str):
+    def __init__(self, directory: Path, deadline: float, *, mode: str,
+                 root: Path, config: Mapping):
         self.directory, self.deadline = directory, deadline
+        self.root, self.config, self.birth = root, config, None
+        self.binary = inside(Path(config["v9"]["binary"]),
+                             Path(config["scratch_root"]))
+        inside(directory, root)
         self.env = environment(directory, mode=mode)
+        (root / "v9").mkdir(exist_ok=True)
+        self.env["GORTEX_DAEMON_SOCKET"] = str(root / "v9" /
+                                           (directory.name + ".sock"))
         self.daemon = None
         self.samples = []
         self.serial = 0
@@ -156,22 +214,24 @@ class Attempt:
                     "XDG_CACHE_HOME", "XDG_STATE_HOME", "TMPDIR"):
             Path(self.env[key]).mkdir(parents=True)
         write(directory / "cpu.json", {
-            "cpu_set": sorted(os.sched_getaffinity(0)),
+            "cpu_scope": "M1 Max 8P+2E; no affinity claim",
             "GOMAXPROCS": self.env["GOMAXPROCS"],
         })
 
     def observe(self):
         now = time.time()
+        native.window_limit(native.read_json(Path(self.config["window_file"])),
+                            digest(Path(self.config["manifest_file"])), now)
         if now >= self.deadline:
             raise WorkFailed("absolute work deadline; incomplete output")
         if self.daemon is not None and self.daemon.poll() is not None:
             raise WorkFailed("owned daemon exited unexpectedly")
         if self.daemon is not None and now - self.last_sample >= 5:
-            status = Path(f"/proc/{self.daemon.pid}/status").read_text()
-            rss = int(next(l.split()[1] for l in status.splitlines()
-                           if l.startswith("VmRSS:")))
+            usage = native.darwin_usage(self.daemon.pid)
+            if usage is None or usage.proc_start_abstime != self.birth:
+                raise Unsafe("private daemon birth changed or unverified")
             self.samples.append({"time": now, "pid": self.daemon.pid,
-                                 "rss_kib": rss,
+                                 "rss_bytes": usage.resident_size,
                                  "load": os.getloadavg()})
             write(self.directory / "rss.json", self.samples)
             self.last_sample = now
@@ -199,7 +259,7 @@ class Attempt:
         return path.read_text()
 
     def gx(self, *args):
-        return self.command([str(BINARY), *args])
+        return self.command([str(self.binary), *args])
 
     def start(self, phase: str, identity: Mapping):
         sock = Path(self.env["GORTEX_DAEMON_SOCKET"])
@@ -209,10 +269,11 @@ class Attempt:
         request = {**identity, "phase": phase, "nonce": uuid.uuid4().hex,
                    "set": self.directory.name, "version": VERSION,
                    "resolver_semantics": 6,
-                   "paths": self.env, "binary": str(BINARY), "build": BUILD,
+                   "paths": self.env, "binary": str(self.binary),
+                   "build": BUILD,
                    "binary_sha256": SHA, "deadline": self.deadline}
-        base = Path("/work/control/v8-go") / (
-            f"{self.directory.parent.name}-{self.directory.name}-{phase}")
+        base = self.root / "control/v9-go" / (
+            f"{self.directory.parent.name}-{phase}-{request['nonce']}")
         request_path = base.with_suffix(".request.json")
         answer_path = base.with_suffix(".go.json")
         if request_path.exists() or answer_path.exists():
@@ -222,17 +283,26 @@ class Attempt:
             if time.time() >= self.deadline:
                 raise Blocked("no lead go within block deadline")
             time.sleep(0.2)
-        if not go_matches(request, json.loads(answer_path.read_text())):
+        answer = json.loads(answer_path.read_text())
+        if not go_matches(request, answer):
             raise Blocked("approval mismatch")
+        write(self.directory / (phase + "-go.json"),
+              {"request": request, "answer": answer})
         self.observe()
+        native.daemon_off(native.read_json(Path(
+            self.config["identities_file"])), self.env)
         log = self.directory / "daemon.log"
         with log.open("a") as output:
             self.daemon = subprocess.Popen(
-                [str(BINARY), "daemon", "start", "--backend", "sqlite",
+                [str(self.binary), "daemon", "start", "--backend", "sqlite",
                  "--backend-path", str(self.directory / "store.sqlite"),
                  "--embeddings=false", "--no-progress"], env=self.env,
                 cwd=self.directory,
                 stdout=output, stderr=subprocess.STDOUT)
+        usage = native.darwin_usage(self.daemon.pid)
+        if usage is None:
+            raise Unsafe("missing private daemon birth")
+        self.birth = usage.proc_start_abstime
         while not sock.exists():
             self.observe()
             time.sleep(0.2)
@@ -252,23 +322,21 @@ class Attempt:
                 self.daemon.wait(timeout=2)
                 exceeded = True
             self.daemon = None
-        for proc in Path("/proc").iterdir():
-            try:
-                if (not proc.name.isdigit() or int(proc.name) == os.getpid()
-                        or proc.stat().st_uid != os.getuid()):
-                    continue
-                env = (proc / "environ").read_bytes().split(b"\0")
-            except FileNotFoundError:
-                continue
-            except PermissionError:
-                # Only a non-dumpable process hides environ from its own
-                # uid. Our daemon tree runs no setuid binary, so it is not
-                # one of ours (seen with a CI runner helper process).
-                continue
-            marker = ("GORTEX_DAEMON_SOCKET="
-                      + self.env["GORTEX_DAEMON_SOCKET"]).encode()
-            if marker in env:
-                raise Unsafe(f"owned process survived: {proc.name}")
+        texts = native.native_output(
+            ["/usr/sbin/lsof", "-nP", "-d", "txt", "-Fn"], self.env,
+            absent_ok=True)
+        if any(Path(line[1:].removesuffix(" (deleted)")).resolve()
+               == self.binary for line in texts.splitlines()
+               if line.startswith("n/")):
+            raise Unsafe("private binary process survived shutdown")
+        sockets = native.native_output(
+            ["/usr/sbin/lsof", "-nP", "-U", "-Fn"], self.env, absent_ok=True)
+        if self.env["GORTEX_DAEMON_SOCKET"] in sockets:
+            raise Unsafe("private socket holder survived shutdown")
+        envs = native.native_output(
+            ["/bin/ps", "-Eww", "-U", str(os.getuid()), "-o", "command="], {})
+        if f"GORTEX_DAEMON_SOCKET={self.env['GORTEX_DAEMON_SOCKET']}" in envs:
+            raise Unsafe("private marker process survived shutdown")
         if (Path(self.env["GORTEX_DAEMON_SOCKET"]).exists()
                 or Path(self.env["GORTEX_DAEMON_PIDFILE"]).exists()):
             raise Unsafe("owned socket/PID survived shutdown")
@@ -302,8 +370,8 @@ def run_set(attempt: Attempt, spec: Mapping, set_id: str,
             identity: Mapping) -> None:
     repos = []
     for record in spec["repositories"]:
-        source = inside(Path("/work/inputs/batch-b") / set_id
-                        / record["label"], Path("/work/inputs/batch-b"))
+        inputs = Path(attempt.config["inputs"]) / "batch-b"
+        source = inside(inputs / set_id / record["label"], inputs)
         target = attempt.directory / "repos" / record["label"]
         attempt.command(["git", "clone", "--no-hardlinks", str(source),
                          str(target)])
@@ -413,7 +481,8 @@ def failure(error: Exception) -> dict:
         state = "checks_failed"
     return {"state": state, "exit_code": code,
             "reason_code": type(error).__name__, "reason": str(error),
-            "clean_handoff": not isinstance(error, Unsafe)}
+            "clean_handoff": not isinstance(error, (
+                Unsafe, native.FatalSession))}
 
 
 def claim_attempt(directory: Path, receipt: Path) -> bool:
@@ -429,35 +498,33 @@ def claim_attempt(directory: Path, receipt: Path) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=("smoke", "baseline_a7"))
-    for field in ("source-pin", "config-pin", "input-pin", "receipt"):
+    for field in ("source-pin", "config-pin", "input-pin", "receipt",
+                  "root", "native-config"):
         parser.add_argument("--" + field, required=True)
     args = parser.parse_args()
     identity = {k: getattr(args, k) for k in
                 ("source_pin", "config_pin", "input_pin")}
-    directory = Path("/work/smoke" if args.mode == "smoke"
-                     else "/work/baseline")
-    receipt = inside(Path(args.receipt), Path("/work"))
-    inside(directory, Path("/work"))
+    config = json.loads(Path(args.native_config).read_text())
+    root = inside(Path(args.root), Path(config["scratch_root"]))
+    receipt = inside(Path(args.receipt), root)
+    directory = receipt.parent / "attempt"
     # Existing attempts are never overwritten, including a partial attempt.
     if not claim_attempt(directory, receipt):
         return 1
     attempt = None
     outcome = {"state": "completed", "exit_code": 0, "reason_code": "",
                "reason": "", "source_build": BUILD,
-               "peak_rss_method": "daemon /proc VmRSS every 5s; lower bound"}
+               "peak_rss_method": "Darwin daemon RSS every 5s; lower bound"}
     try:
         write(directory / "attempt.json", identity)
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, interrupted)
-        allocation_path = Path("/work/control/allocation.json")
-        allocation = json.loads(allocation_path.read_text())
-        zero = datetime.fromisoformat(allocation["created_at"]).timestamp()
-        minutes, latest, end = ((25, 45, 70) if args.mode == "smoke"
-                                else (40, 650, 690))
         now = time.time()
-        if now > zero + latest * 60:
-            raise Blocked("latest-start deadline passed")
-        deadline = min(now + minutes * 60, zero + end * 60) - 60
+        go = native.read_json(Path(config["window_file"]))
+        remaining = native.window_limit(
+            go, digest(Path(config["manifest_file"])), now)
+        deadline = now + min(remaining, native.CASE_MINUTES[
+            "smoke" if args.mode == "smoke" else "baseline"] * 60) - 60
         spec_path = Path(__file__).with_name("inputs.json")
         if digest(spec_path) != args.input_pin:
             raise Rejected("input manifest hash mismatch")
@@ -473,31 +540,54 @@ def main() -> int:
             if any(not label or "/" in label or label in (".", "..")
                    for label in labels):
                 raise Rejected("unsafe inventory member")
-        if not BINARY.is_file():
-            raise Rejected("frozen Linux binary missing")
-        if digest(inside(BINARY, Path("/work/inputs"))) != SHA:
-            raise Rejected("frozen binary SHA-256 mismatch")
+        identity["v9"] = frozen(config, environment(directory, mode=args.mode),
+                                receipt.parent.name)
         if args.mode == "baseline_a7":
-            smoke_path = Path("/work/results/smoke/v8-smoke/receipt.json")
+            smoke_path = inside(Path(config["v9"]["smoke_receipt"]), root)
             if not smoke_path.is_file():
-                raise Blocked("v8 smoke receipt missing")
+                raise Blocked("v9 smoke receipt missing")
             smoke = json.loads(smoke_path.read_text())
             if (smoke["state"] != "completed" or not smoke["clean_handoff"]
-                    or any(smoke.get(k) != v for k, v in identity.items())):
-                raise Blocked("v8 smoke incomplete")
-        for set_id in ("PR" if args.mode == "smoke" else "KPR"):
+                    or any(smoke.get(k) != v for k, v in identity.items())
+                    or not smoke["files"] or any(
+                        digest(inside(smoke_path.parent / p,
+                                      smoke_path.parent)) != sha
+                        for p, sha in smoke["files"].items())):
+                raise Blocked("v9 smoke incomplete")
+        specs["K"] = {**specs["K"], "history": {},
+                      "repositories": [r for r in specs["K"]["repositories"]
+                                       if r["label"] in K9],
+                      **{key: [pair for pair in specs["K"][key]
+                               if set(pair) <= K9]
+                         for key in ("pairs", "runtime_pairs")}}
+        selected = ("PR" if args.mode == "smoke" else
+                    config["v9"]["admitted_sets"])
+        if selected not in ("P", "R", "K") and args.mode != "smoke":
+            raise Blocked("one fit-admitted baseline set per job required")
+        outcome["selected"] = {s: "P6" if s == "P" else "R5" if s == "R"
+                               else "K9" for s in selected}
+        outcome["omitted"] = [s for s in "PRK" if s not in selected]
+        outcome["completed_sets"] = []
+        for set_id in selected:
+            peak = config["v9"]["fit"][set_id]["estimated_peak_bytes"]
+            if type(peak) is not int or peak <= 0:
+                raise Blocked("missing predeclared set fit estimate")
+            sample = native.native_resources(environment(directory,
+                                                          mode=args.mode))
+            native.resource_limit(sample, peak, sample["swapouts"],
+                                  timing=args.mode == "baseline_a7",
+                                  admission=True)
             subdir = directory / set_id
             subdir.mkdir()
             attempt = Attempt(subdir, min(deadline, time.time() + 45 * 60),
-                              mode=args.mode)
-            if VERSION not in attempt.gx("version"):
-                raise Rejected("frozen binary version mismatch")
+                              mode=args.mode, root=root, config=config)
             write(subdir / "environment.json", attempt.env)
             run_set(attempt, specs[set_id], set_id, identity)
+            outcome["completed_sets"].append(set_id)
     except Exception as error:
         outcome.update(failure(error))
     finally:
-        code = finish(Path("/work"), directory, receipt, identity,
+        code = finish(receipt.parent, directory, receipt, identity,
                       attempt, outcome)
     return code
 

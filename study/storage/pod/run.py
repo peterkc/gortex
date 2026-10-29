@@ -1129,9 +1129,11 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping) -> dict:
     for name in ("evaluator", "cpu-cost"):
         copied.update(copy_tree(root, inputs / name, root / "data" / name))
     tool_versions = {}
-    for tool in ("go", "cmake", "c++", "git", "/usr/bin/time"):
+    for tool in ("go", "cmake", "c++", "git"):
         option = "version" if tool == "go" else "--version"
         tool_versions[tool] = supervisor.run([tool, option]).read_text()
+    tool_versions["/usr/bin/time"] = {
+        "path": "/usr/bin/time", "sha256": digest(Path("/usr/bin/time"))}
     atomic_json(root / "tool-versions.json", tool_versions)
     checkout = root / "checkout"
     supervisor.run([
