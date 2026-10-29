@@ -542,7 +542,8 @@ def window_limit(go: Mapping, manifest_sha: str, now: float) -> float:
                 "user_go", "migration_complete", "owner_stop_confirmed",
                 "awake", "thermal_safe", "background_quiet"))):
         raise FatalSession("missing current window/migration/owner go")
-    start, end = parse_time(go["start"]), parse_time(go["end"])
+    start = timestamp(go["start"], "window start")
+    end = timestamp(go["end"], "window end")
     if not start <= now < end - WINDOW_CLEANUP_SECONDS:
         raise DeadlineExceeded("outside current window or cleanup reserve")
     return end - WINDOW_CLEANUP_SECONDS - now

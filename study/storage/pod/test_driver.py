@@ -482,6 +482,9 @@ class ReviewFixTests(unittest.TestCase):
         blocks = []
         for name in ("smoke", "calibration"):
             job = self.bindings(root)[name][0]
+            job.update(minutes=(driver.CLEANUP_RESERVE_SECONDS + 3) / 60,
+                       kind=driver.BLOCK_KINDS[name],
+                       estimated_peak_bytes=driver.GIB, gomaxprocs=10)
             job["receipt_path"] = str(root / "results" / name / "receipt.json")
             record = {k: job[k] for k in
                       ("source_pin", "config_pin", "input_pin")}
@@ -515,9 +518,8 @@ class ReviewFixTests(unittest.TestCase):
             owner.block_id = block["id"]
             owner.block_deadline = time.monotonic() + 30
             owner.launch_deadline = owner.block_deadline - 11
-            owner.job_minutes = {j["id"]: 0.1 for j in block["jobs"]}
-            owner.job_bindings = {j["id"]: {"gomaxprocs": 10}
-                                  for j in block["jobs"]}
+            owner.job_minutes = {j["id"]: j["minutes"] for j in block["jobs"]}
+            owner.job_bindings = {j["id"]: dict(j) for j in block["jobs"]}
 
         def start(args, directory, environment, cwd):
             owner.calls.append(directory.name)
@@ -721,14 +723,16 @@ class ReviewFixTests(unittest.TestCase):
     def test_partial_storage_resume_refuses_missing_receipts_cleanly(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            owner = SimpleNamespace(root=root)
+            owner = fixture_owner(root)
             block = {"id": "storage", "jobs": [{"id": "missing"}]}
             admission = {"blocks": [block]}
-            identity = {"configuration": admission, "setup": {}}
+            identity = {"configuration": admission, "setup": {},
+                        "native": owner.native_identity}
             driver.atomic_json(root / "session.json", {
                 "identity": identity, "blocks": {"storage": {
                     "state": "partial", "files": {}}}})
             with patch.object(driver.time, "monotonic", return_value=0), \
+                    patch.object(driver.signal, "signal"), \
                     patch.object(driver.signal, "setitimer"), \
                     self.assertRaisesRegex(driver.ReviewRequired,
                                            "partial receipts; no resume"):
