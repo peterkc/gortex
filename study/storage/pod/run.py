@@ -42,7 +42,10 @@ USEARCH_URL = (
     "https://codeload.github.com/unum-cloud/USearch/tar.gz/refs/tags/v2.26.5"
 )
 GIB = 1024 ** 3
-MEMORY_RESERVE = 16 * GIB
+MEMORY_MINIMUM = 4 * GIB
+CANDIDATE_BUDGET = 8 * GIB
+ORACLE_BUDGET = 24 * GIB
+SWAP_GROWTH_LIMIT = 512 * 1024 * 1024
 NODE_SCALE = 423567 / 81179
 ARCHIVES = {
     "tier1": {
@@ -81,7 +84,6 @@ SCREEN = tuple(name for name in ADAPTERS if name != "libsql-segment")
 FINALISTS = ("sqlite-segment", "pebble-bleve")
 CATALOGS = ("catalog-sqlite", "catalog-refs", "catalog-bbolt",
             "catalog-pebble", "catalog-manifest")
-TIMING_BLOCKS = {"segment_timing", "catalog", "hybrid", "cpu_cost", "baseline_a7"}
 PYTHON_KEY = "cpython-3.12.15-linux-x86_64-gnu"
 STAGES = {
     "before-write", "after-write", "after-sync", "before-rename",
@@ -116,6 +118,14 @@ INPUT_BLOCKS = frozenset({"smoke", "calibration", "cpu_cost",
                           "baseline_a7"})
 CLEANUP_GRACE_SECONDS = 5.0
 CLEANUP_RESERVE_SECONDS = 2 * CLEANUP_GRACE_SECONDS + 1
+
+
+class BudgetExceeded(ReviewRequired):
+    reason_code = "budget-exceeded"
+
+    def __init__(self, peak: int, budget: int):
+        self.observed_peak_bytes = peak
+        super().__init__(f"budget-exceeded: peak {peak}, budget {budget}")
 
 
 class DeadlineExceeded(ReviewRequired):
@@ -295,7 +305,7 @@ def jobs() -> tuple[Job, ...]:
                 "sqlite-usearch", "catalog-sqlite", "catalog-refs")
     screen = (*priority, *(name for name in SCREEN if name not in priority))
     return (
-        Job("oracle", "oracle", "tier10"),
+        *(Job("oracle", "oracle", tier) for tier in ARCHIVES),
         *(Job("screen", name, "tier10") for name in screen),
         *(Job("timing", name, tier, repeat)
           for repeat in range(1, 4)
@@ -391,35 +401,54 @@ def parse_vm_stat(output: str) -> dict[str, int]:
         available = sum(int(fields[k]) for k in (
             "Pages free", "Pages inactive", "Pages speculative"))
         return {"available_bytes": available * int(page_size[0]),
-                "swapouts": int(fields["Swapouts"])}
+                "swapouts": int(fields["Swapouts"]),
+                "page_size": int(page_size[0])}
     except KeyError as error:
         raise FatalSession("incomplete vm_stat measurement") from error
 
 
 def native_resources(env: Mapping[str, str]) -> dict:
-    sample = parse_vm_stat(native_output(["/usr/bin/vm_stat"], env))
-    sample["level"] = int(native_output(
-        ["/usr/sbin/sysctl", "-n", "kern.memorystatus_level"], env))
-    sample["load1"] = os.getloadavg()[0]
-    sample["ac_power"] = native_output(
-        ["/usr/bin/pmset", "-g", "batt"], env).splitlines()[0] == (
-            "Now drawing from 'AC Power'")
-    return sample
+    try:
+        sample = parse_vm_stat(native_output(["/usr/bin/vm_stat"], env))
+        for key, name in (("level", "kern.memorystatus_level"),
+                ("pressure_state", "kern.memorystatus_vm_pressure_level")):
+            sample[key] = int(native_output(
+                ["/usr/sbin/sysctl", "-n", name], env))
+        sample.update(timestamp=time.time(), **dict(zip(
+            ("load1", "load5", "load15"), os.getloadavg())))
+        sample["swap_usage"] = native_output(
+            ["/usr/sbin/sysctl", "-n", "vm.swapusage"], env)
+        sample["ac_power"] = native_output(
+            ["/usr/bin/pmset", "-g", "batt"], env).splitlines()[:1] == [
+                "Now drawing from 'AC Power'"]
+        return sample
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise FatalSession("required native telemetry unavailable") from error
 
 
 def resource_limit(sample: Mapping, peak: int, previous_swapouts: int,
-                   *, timing: bool, admission: bool) -> None:
-    if (not math.isfinite(sample["load1"]) or sample["load1"] < 0
-            or any(type(sample[k]) is not int or sample[k] < 0
-                   for k in ("level", "swapouts", "available_bytes"))
-            or sample["level"] > 100
-            or sample["level"] < (30 if admission else 25)
-            or sample["swapouts"] != previous_swapouts
-            or sample["available_bytes"] < MEMORY_RESERVE + peak
-            or not sample["ac_power"]):
-        raise FatalSession("native memory/swap/AC stop")
-    if admission and timing and sample["load1"] > 2.0:
-        raise DeadlineExceeded("timing not-started: load1 exceeds 2.0")
+                   *, admission: bool, oracle: bool = False) -> None:
+    try:
+        invalid = (any(not math.isfinite(sample[k]) or sample[k] < 0 for k in
+                       ("timestamp", "load1", "load5", "load15"))
+            or any(type(sample[k]) is not int or sample[k] < 0 for k in
+                   ("level", "swapouts", "page_size", "available_bytes",
+                    "pressure_state"))
+            or not isinstance(sample["swap_usage"], str)
+            or not sample["swap_usage"].strip() or sample["level"] > 100
+            or sample["level"] < 20 or sample["pressure_state"] not in (1, 2)
+            or sample["page_size"] <= 0
+            or sample["swapouts"] < previous_swapouts
+            or (sample["swapouts"] - previous_swapouts) * sample["page_size"]
+            > SWAP_GROWTH_LIMIT or sample["available_bytes"] < MEMORY_MINIMUM
+            or sample["ac_power"] is not True)
+    except (ValueError, KeyError, TypeError) as error:
+        raise FatalSession("required native telemetry unavailable") from error
+    if invalid:
+        raise FatalSession("native pressure/memory/swap/AC stop")
+    if (oracle and admission
+            and sample["available_bytes"] < peak + MEMORY_MINIMUM):
+        raise ReviewRequired("oracle estimate plus minimum does not fit")
 
 
 class DarwinUsage(ctypes.Structure):
@@ -534,7 +563,7 @@ def daemon_off(config: Mapping, env: Mapping[str, str]) -> None:
 def window_limit(go: Mapping, manifest_sha: str, now: float) -> float:
     required = {"schema", "window_id", "input_manifest_sha256", "start", "end",
                 "user_go", "migration_complete", "owner_stop_confirmed",
-                "awake", "thermal_safe", "background_quiet"}
+                "awake", "thermal_safe"}
     if not required <= go.keys():
         raise FatalSession("incomplete current window go")
     if (go["schema"] != "mac-window-go/v1"
@@ -542,7 +571,7 @@ def window_limit(go: Mapping, manifest_sha: str, now: float) -> float:
             or go["input_manifest_sha256"] != manifest_sha
             or not all(go[k] is True for k in (
                 "user_go", "migration_complete", "owner_stop_confirmed",
-                "awake", "thermal_safe", "background_quiet"))):
+                "awake", "thermal_safe"))):
         raise FatalSession("missing current window/migration/owner go")
     start = timestamp(go["start"], "window start")
     end = timestamp(go["end"], "window end")
@@ -608,10 +637,10 @@ class Supervisor:
             "launcher": dict(admission["launcher"]),
         }
         if admission["d11_limits"] != {
-                "admission_level": 30, "stop_level": 25,
-                "memory_reserve_bytes": MEMORY_RESERVE,
-                "timing_load1_max": 2.0,
-                "swap_observation_seconds": 30}:
+                "minimum_level": 20, "available_minimum_bytes": MEMORY_MINIMUM,
+                "candidate_budget_bytes": CANDIDATE_BUDGET,
+                "oracle_budget_bytes": ORACLE_BUDGET,
+                "swap_growth_bytes": SWAP_GROWTH_LIMIT}:
             raise FatalSession("D11 limits differ from the approved policy")
         launcher_limit(admission["launcher"], Path(sys.executable),
                        sys.version_info[:3], digest(Path(sys.executable)))
@@ -650,22 +679,31 @@ class Supervisor:
         daemon_off(self.off, self.environment)
         self.next_d12_check = time.monotonic() + 60
         self.window = {"id": go["window_id"], "go_sha256": self.go_sha,
-                       "start": go["start"], "end": go["end"]}
+                       "start": go["start"], "end": go["end"],
+                       "oracle_go": go.get("oracle_go", [])}
         return remaining
 
     def guard(self, *, admission: bool = False) -> None:
         try:
             self.permissions(full=admission)
             sample = native_resources(self.environment)
-            previous = sample["swapouts"] if self.swapouts is None else (
-                self.swapouts)
-            peak = max(0, self.case.get("estimated_peak_bytes", 0)
-                       - (self.current_rss if self.active else 0))
-            peak = peak if admission else 0
-            resource_limit(sample, peak, previous,
-                           timing=self.block_id in TIMING_BLOCKS,
-                           admission=admission)
-            self.swapouts, self.sample = sample["swapouts"], sample
+            if self.swapouts is None:
+                self.swapouts = sample["swapouts"]
+            sample.update(block_id=self.block_id, window_id=self.window["id"],
+                          owned_rss_bytes=self.current_rss,
+                          job_id=self.case.get("id"),
+                          swapouts_start=self.swapouts,
+                          rss_scope="PGID RSS sum; shared pages per PID")
+            path = persistent_path(self.root / "resources.jsonl", self.root)
+            with path.open("a") as stream:
+                stream.write(json.dumps(sample) + "\n")
+            previous = getattr(self, "sample", sample)
+            self.sample = sample
+            if sample["swapouts"] < previous["swapouts"]:
+                raise FatalSession("native swapout counter reset")
+            resource_limit(sample, self.case.get("estimated_peak_bytes", 0),
+                           self.swapouts, admission=admission,
+                           oracle=self.case.get("kind") == "oracle")
         except ReviewRequired:
             self.stop_all()
             raise
@@ -705,6 +743,11 @@ class Supervisor:
         if duration > self.block_deadline - now:
             raise DeadlineExceeded(f"{name}: window too short; not-started")
         self.case = self.job_bindings[name]
+        if (self.case["kind"] == "oracle" and (not isinstance(
+                self.window.get("oracle_go", []), list)
+                or name not in self.window.get("oracle_go", []))):
+            raise ReviewRequired("current-session oracle go required")
+        self.swapouts, self.current_rss = None, 0
         self.launch_deadline = min(
             self.block_deadline - CLEANUP_RESERVE_SECONDS,
             now + duration - CLEANUP_RESERVE_SECONDS,
@@ -831,6 +874,17 @@ class Supervisor:
                     "elapsed_seconds": time.monotonic() - owned.started,
                     "group_rss_bytes": rss, **self.sample,
                 }) + "\n")
+
+        budget = (ORACLE_BUDGET if self.case.get("kind") == "oracle"
+                  else CANDIDATE_BUDGET)
+        if self.current_rss > budget:
+            for owned in self.active:
+                atomic_json(owned.directory / "budget-exceeded.json", {
+                    "state": "partial",
+                    "observed_peak_bytes": self.current_rss,
+                    "budget_bytes": budget})
+            self.stop_all()
+            raise BudgetExceeded(self.current_rss, budget)
 
     def close(self, owned: OwnedProcess) -> None:
         self.reap()
@@ -978,11 +1032,17 @@ def bad_jobs(path: Path, scratch: Path) -> set[str]:
 
 def reusable(directory: Path, verify: Callable[[], dict]) -> dict | None:
     persistent_path(directory, directory.parents[1])
+    budget = (directory / "budget-exceeded.json").is_file()
     try:
+        budget = budget or ((directory / "complete.json").is_file()
+            and read_json(directory / "complete.json").get("state")
+            == "budget_exceeded")
         return verify()
     except FatalSession:
         raise
     except (ReviewRequired, OSError, KeyError, TypeError, ValueError) as error:
+        if budget:
+            raise
         atomic_json(directory / "partial.json", {
             "state": "partial", "reason": str(error)})
         return None
@@ -1103,7 +1163,8 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping) -> dict:
                 source.rename(previous / source.name)
     if not set(path.name for path in root.iterdir()) <= {
             "driver.lock", "control", "inputs", "session.json", "lost+found",
-            "python-runtime.json", "attempts", "checkpoint.json"}:
+            "python-runtime.json", "attempts", "checkpoint.json",
+            "resources.jsonl"}:
         raise ReviewRequired("new workspace permits only control/inputs/lock")
     if not inputs.resolve().is_relative_to(supervisor.scratch):
         raise ReviewRequired("pod inputs must be copied under /work")
@@ -1438,6 +1499,8 @@ def finished_case(root: Path, job: Job, expected: Mapping) -> dict:
             raise ReviewRequired(
                 f"completed case artifact changed: {job.name}"
             )
+    if receipt["state"] == "budget_exceeded":
+        return receipt
     report = read_json(result_path(root, job))
     verdict = check_result(
         report, job, receipt["exit_code"],
@@ -1534,17 +1597,42 @@ def eligible_timings(receipts: Sequence[Mapping]) -> list[Job]:
             if job.stage == "timing" and job.adapter in passed]
 
 
+def budget_receipt(supervisor: Supervisor, directory: Path, base: Path,
+                   error: BudgetExceeded) -> dict:
+    supervisor.arm_guard()
+    sample = json.loads((directory / "rss.jsonl").read_text().splitlines()[-1])
+    receipt = {"identity": read_json(directory / "started.json"),
+               "attempt": read_json(directory / "attempt.json"),
+               "state": "budget_exceeded", "reason_code": error.reason_code,
+               "observed_peak_bytes": error.observed_peak_bytes,
+               "peak_rss_bytes": error.observed_peak_bytes,
+               "wall_seconds": sample["elapsed_seconds"],
+               "files": {str(p.relative_to(base)): digest(
+                   persistent_path(p, supervisor.root))
+                   for p in output_files([directory])}}
+    atomic_json(directory / "complete.json", receipt)
+    return receipt
+
+
 def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
                   setup: Mapping, concurrency: int,
                   receipts: list[dict]) -> None:
     if concurrency != 1:
         raise FatalSession("whole-Mac correctness/timing cases must be serial")
     root = supervisor.root
+    if not supervisor.active:
+        supervisor.swapouts = None
     pending = deque(selected)
     active: dict[str, tuple[Job, OwnedProcess, dict]] = {}
     while pending or active:
         groups = process_groups(supervisor.environment, supervisor.active)
-        supervisor.observe(groups)
+        try:
+            supervisor.observe(groups)
+        except BudgetExceeded as error:
+            _, owned, _ = next(iter(active.values()))
+            receipts.append(budget_receipt(
+                supervisor, owned.directory, owned.directory, error))
+            active.clear()
         for name, (job, owned, identity) in list(active.items()):
             code = owned.process.poll()
             if time.monotonic() >= owned.deadline:
@@ -1614,7 +1702,8 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
             if receipt is not None:
                 receipts.append(receipt)
                 pending.popleft()
-                if job.stage == "oracle" and receipt["state"] != "pass":
+                if (job.stage == "oracle" and receipt["state"] not in {
+                        "pass", "budget_exceeded"}):
                     raise ReviewRequired("saved reference oracle did not pass")
                 print(job.name, "validated receipt; skipped", flush=True)
                 continue
@@ -1622,10 +1711,16 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
             atomic_json(directory / "started.json", identity)
             env = {**supervisor.environment, "GOMAXPROCS": str(gomaxprocs)}
             supervisor.job_limit(job.name, time.monotonic())
-            owned = supervisor.start([
-                "/usr/bin/time", "-p", "-l", "-o",
-                str(directory / "native-time.txt"), *command(job, root),
-            ], directory, env, root)
+            try:
+                owned = supervisor.start([
+                    "/usr/bin/time", "-p", "-l", "-o",
+                    str(directory / "native-time.txt"), *command(job, root),
+                ], directory, env, root)
+            except BudgetExceeded as error:
+                receipts.append(budget_receipt(
+                    supervisor, directory, directory, error))
+                pending.popleft()
+                continue
             active[job.name] = (job, owned, identity)
             pending.popleft()
             # Refresh after launch; reserve the new job's pending RSS growth.
@@ -1762,7 +1857,8 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
             path = root / relative
             if not path.resolve().is_relative_to(root) or digest(path) != sha:
                 raise ReviewRequired("auxiliary output drift")
-        validate(directory)
+        if receipt.get("state") != "budget_exceeded":
+            validate(directory)
         return receipt
     cached = reusable(directory, verify_cached) if directory.exists() else None
     if cached is not None:
@@ -1772,14 +1868,17 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
     if selection:
         atomic_json(directory / "selected-jobs.json", list(selection))
     supervisor.job_limit(name, time.monotonic())
-    owned = supervisor.start(args, directory, env, working_directory)
-    while owned.process.poll() is None:
-        supervisor.observe(process_groups(supervisor.environment,
-                                          supervisor.active))
-        if time.monotonic() >= owned.deadline:
-            raise DeadlineExceeded(f"{name}: absolute auxiliary deadline")
-        time.sleep(5)
-    supervisor.close(owned)
+    try:
+        owned = supervisor.start(args, directory, env, working_directory)
+        while owned.process.poll() is None:
+            supervisor.observe(process_groups(supervisor.environment,
+                                              supervisor.active))
+            if time.monotonic() >= owned.deadline:
+                raise DeadlineExceeded(f"{name}: absolute auxiliary deadline")
+            time.sleep(5)
+        supervisor.close(owned)
+    except BudgetExceeded as error:
+        return budget_receipt(supervisor, directory, root, error)
     paths = output_files([directory, *validate(directory)])
     if owned.process.returncode not in accepted_exit_codes:
         raise ReviewRequired(f"auxiliary command failed: {name}")
@@ -1934,6 +2033,9 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
                                     else arg for arg in job["argv"]], validate,
             cwd=directory, accepted_exit_codes=(0, 1),
         )
+        if receipt.get("state") == "budget_exceeded":
+            states.append("partial")
+            continue
         result = read_json(path)
         if (result.get("exit_code") != receipt["exit_code"]
                 or (receipt["exit_code"] == 1
@@ -2017,6 +2119,9 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
         saved = record["blocks"].get(block_id)
         if saved and saved.get("terminal") == "fatal":
             raise FatalSession("known fatal attempt needs diagnosis")
+        if saved and saved.get("reason_code") == "budget-exceeded":
+            outcomes[block_id] = "partial"
+            continue  # Retain the result; never blind-retry a known overrun.
         if (saved and saved["state"] in {"completed", "checks_failed"}
                 and not any(j["id"] in supervisor.bad_jobs
                             for j in block["jobs"])
@@ -2092,9 +2197,10 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
                     supervisor, inputs, identity)
             elif block_id == "storage":
                 planned = jobs()
-                execute_stage(supervisor, planned[:1], setup, 1, sdk)
-                execute_stage(
-                    supervisor, planned[1:12], setup, concurrency, sdk)
+                execute_stage(supervisor, [j for j in planned
+                    if j.stage == "oracle"], setup, 1, sdk)
+                execute_stage(supervisor, [j for j in planned
+                    if j.stage == "screen"], setup, concurrency, sdk)
                 if any(row["state"] == "checks_failed" for row in sdk):
                     state = "checks_failed"
             elif block_id == "segment_timing":
@@ -2115,8 +2221,11 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
         except Exception as error:
             signal.setitimer(signal.ITIMER_REAL, 0)
             state = "partial"
-            record["blocks"][block_id]["reason_code"] = type(error).__name__
-            record["blocks"][block_id]["reason"] = str(error)
+            record["blocks"][block_id].update(
+                reason_code=getattr(
+                    error, "reason_code", type(error).__name__),
+                reason=str(error), observed_peak_bytes=getattr(
+                    error, "observed_peak_bytes", None))
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
         # Any uncertain process/isolation failure propagates instead of
@@ -2234,7 +2343,8 @@ def main() -> int:
             finally:
                 paths = output_files([root / name for name in (
                     "attempts", "jobs", "aux", "setup", "data", "native",
-                    "bin", "downloads", "linking.json", "tool-versions.json")
+                    "bin", "downloads", "linking.json", "tool-versions.json",
+                    "resources.jsonl")
                     if (root / name).exists()])
                 atomic_json(root / "checkpoint.json", {
                     "run_id": root.name, "files": {

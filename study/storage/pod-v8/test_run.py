@@ -87,10 +87,10 @@ def config_fixture(root):
                 "fit": {s: {"estimated_peak_bytes": 1} for s in "PRK"}}}
 
 
-def attempt_fixture(directory, deadline, *, mode):
+def attempt_fixture(directory, deadline, *, mode, swapouts=0):
     config = config_fixture(directory)
     attempt = runner.Attempt(directory, deadline, mode=mode,
-                             root=directory, config=config)
+                             root=directory, config=config, swapouts=swapouts)
     attempt.birth = 123
     return attempt
 
@@ -100,9 +100,12 @@ class NativeFixture(unittest.TestCase):
         super().setUp()
         for target, value in (
                 ("native_output", ""), ("daemon_off", None),
-                ("native_resources", {"level": 30, "swapouts": 0,
+                ("native_resources", {"timestamp": 1000.0, "level": 30,
+                    "pressure_state": 1, "swapouts": 0, "page_size": 16384,
+                    "swap_usage": "total = 1G used = 100M\n",
                     "available_bytes": 64 * runner.native.GIB,
-                    "load1": 1.0, "ac_power": True}),
+                    "load1": 1.0, "load5": 1.0, "load15": 1.0,
+                    "ac_power": True}),
                 ("darwin_usage", SimpleNamespace(
                     proc_start_abstime=123, resident_size=2048))):
             mocked = patch.object(runner.native, target, return_value=value)
@@ -701,7 +704,11 @@ class FrozenV9Tests(NativeFixture):
                                       resident_size=4096))),
                   self.assertRaisesRegex(runner.Unsafe, "birth")):
                 attempt.observe()
-            self.assertEqual(len(attempt.samples), 1)
+            self.assertEqual(len(attempt.samples), 2)
+            self.assertIsNone(attempt.samples[-1]["pid"])
+            self.assertEqual(attempt.samples[-1]["rss_bytes"], 0)
+            self.assertEqual(len(runner.native.read_json(
+                attempt.directory / "rss.json")), 1)
 
     def test_revoked_go_stops_new_work_but_not_cleanup(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -801,6 +808,109 @@ class FrozenV9Tests(NativeFixture):
                     runner.native.FatalSession("ownership unverified"))),
                   self.assertRaises(runner.native.FatalSession)):
                 attempt.stop()
+
+    def test_main_candidate_admission_has_no_fit_or_load_refusal(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            config = config_fixture(root)
+            del config["v9"]["fit"]
+            sample = {"timestamp": 1000.0, "level": 20, "pressure_state": 2,
+                      "available_bytes": 4 * runner.native.GIB, "swapouts": 7,
+                      "page_size": 16384, "swap_usage": "used = 100M\n",
+                      "load1": 18.0, "load5": 17.0, "load15": 16.0,
+                      "ac_power": True}
+            seen = []
+
+            def run_set(attempt, spec, set_id, identity):
+                seen.append(set_id)
+                self.assertEqual(attempt.swapouts, 7)
+                attempt.observe()
+                runner.write(attempt.directory / "fixture.json", {"ok": True})
+
+            with patch.object(runner.native, "native_resources",
+                              side_effect=lambda env: dict(sample)):
+                code, result = self.main_fixture(
+                    root, config, "baseline_a7", run_set)
+            self.assertEqual((code, result["state"], seen),
+                             (0, "completed", ["P"]))
+            admission = [root / rel for rel in result["files"]
+                         if rel.endswith("P-admission.json")]
+            self.assertEqual(len(admission), 1)
+            self.assertEqual(runner.native.read_json(admission[0]), sample)
+            recorded = [root / rel for rel in result["files"]
+                        if rel.endswith("resources.json")]
+            self.assertEqual(len(recorded), 1)
+            self.assertTrue(sample.keys() <= runner.native.read_json(
+                recorded[0])[0].keys())
+
+    def test_full_samples_and_swap_baseline_survive_restart(self):
+        with tempfile.TemporaryDirectory() as folder:
+            attempt = attempt_fixture(Path(folder).resolve(), time.time() + 30,
+                                      mode="baseline_a7", swapouts=7)
+            daemon = SimpleNamespace(pid=9501, poll=lambda: None)
+            attempt.daemon = daemon
+            start = time.time()
+            pages = (512 * 1024 * 1024) // 16384
+            counts = [7, 7 + pages // 2, 7 + pages, 8 + pages]
+            samples = [{"timestamp": start + i * 5, "level": 20,
+                        "pressure_state": 1,
+                        "available_bytes": 4 * runner.native.GIB,
+                        "swapouts": count, "page_size": 16384,
+                        "swap_usage": "used = 100M\n", "load1": 18.0,
+                        "load5": 17.0, "load15": 16.0, "ac_power": True}
+                       for i, count in enumerate(counts)]
+            with patch.object(runner.native, "native_resources",
+                              side_effect=samples):
+                for i in range(3):
+                    if i == 2:
+                        attempt.daemon = None
+                    with patch.object(runner.time, "time",
+                                      return_value=start + i * 5):
+                        attempt.observe()
+                attempt.daemon = daemon
+                with (patch.object(runner.time, "time",
+                                   return_value=start + 15),
+                      self.assertRaises(runner.native.FatalSession)):
+                    attempt.observe()
+            self.assertEqual(attempt.swapouts, 7)
+            rows = runner.native.read_json(
+                attempt.directory / "resources.json")
+            self.assertEqual([r["swapouts"] for r in rows], counts)
+            self.assertTrue(all(samples[0].keys() <= r.keys() for r in rows))
+            self.assertEqual([r["pid"] for r in attempt.samples],
+                             [9501, 9501, None, None])
+            self.assertEqual(runner.failure(runner.native.BudgetExceeded(
+                8 * runner.native.GIB + 1,
+                8 * runner.native.GIB))["reason_code"],
+                "budget-exceeded")
+
+    def test_counter_reset_above_block_baseline_retains_unsafe_sample(self):
+        with tempfile.TemporaryDirectory() as folder:
+            attempt = attempt_fixture(Path(folder).resolve(), time.time() + 30,
+                                      mode="smoke")
+            sample = {"timestamp": 1000.0, "level": 30, "pressure_state": 1,
+                      "available_bytes": 64 * runner.native.GIB,
+                      "page_size": 16384, "swap_usage": "used = 100M\n",
+                      "load1": 18.0, "load5": 17.0, "load15": 16.0,
+                      "ac_power": True}
+            start = time.time()
+            with patch.object(runner.native, "native_resources", side_effect=[
+                    {**sample, "swapouts": n} for n in (0, 100, 99)]):
+                for i in range(2):
+                    with patch.object(runner.time, "time",
+                                      return_value=start + i * 5):
+                        attempt.observe()
+                with (patch.object(runner.time, "time",
+                                   return_value=start + 10),
+                      self.assertRaisesRegex(runner.native.FatalSession,
+                                             "reset")):
+                    attempt.observe()
+            rows = runner.native.read_json(
+                attempt.directory / "resources.json")
+            self.assertEqual([r["swapouts"] for r in rows], [0, 100, 99])
+            self.assertIsNone(rows[-1]["pid"])
+            self.assertFalse(runner.failure(runner.native.FatalSession(
+                "native swapout counter reset"))["clean_handoff"])
 
 
 if __name__ == "__main__":

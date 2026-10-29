@@ -196,7 +196,7 @@ class Attempt:
     """Own one foreground daemon and all short-lived control clients."""
 
     def __init__(self, directory: Path, deadline: float, *, mode: str,
-                 root: Path, config: Mapping):
+                 root: Path, config: Mapping, swapouts: int):
         self.directory, self.deadline = directory, deadline
         self.root, self.config, self.birth = root, config, None
         self.binary = inside(Path(config["v9"]["binary"]),
@@ -209,7 +209,7 @@ class Attempt:
         self.daemon = None
         self.samples = []
         self.serial = 0
-        self.last_sample = 0.0
+        self.last_sample, self.swapouts = 0.0, swapouts
         for key in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
                     "XDG_CACHE_HOME", "XDG_STATE_HOME", "TMPDIR"):
             Path(self.env[key]).mkdir(parents=True)
@@ -226,14 +226,22 @@ class Attempt:
             raise WorkFailed("absolute work deadline; incomplete output")
         if self.daemon is not None and self.daemon.poll() is not None:
             raise WorkFailed("owned daemon exited unexpectedly")
-        if self.daemon is not None and now - self.last_sample >= 5:
-            usage = native.darwin_usage(self.daemon.pid)
-            if usage is None or usage.proc_start_abstime != self.birth:
-                raise Unsafe("private daemon birth changed or unverified")
-            self.samples.append({"time": now, "pid": self.daemon.pid,
-                                 "rss_bytes": usage.resident_size,
-                                 "load": os.getloadavg()})
-            write(self.directory / "rss.json", self.samples)
+        if not self.samples or now - self.last_sample >= 5:
+            sample = native.native_resources(self.env)
+            self.samples.append({**sample, "time": now,
+                                 "pid": None, "rss_bytes": 0})
+            write(self.directory / "resources.json", self.samples)
+            if len(self.samples) > 1 and (
+                    sample["swapouts"] < self.samples[-2]["swapouts"]):
+                raise native.FatalSession("native swapout counter reset")
+            native.resource_limit(sample, 0, self.swapouts, admission=False)
+            if self.daemon is not None:
+                usage = native.darwin_usage(self.daemon.pid)
+                if usage is None or usage.proc_start_abstime != self.birth:
+                    raise Unsafe("private daemon birth changed or unverified")
+                self.samples[-1].update(pid=self.daemon.pid,
+                                        rss_bytes=usage.resident_size)
+                write(self.directory / "rss.json", self.samples)
             self.last_sample = now
 
     def command(self, argv: Sequence[str]) -> str:
@@ -480,7 +488,8 @@ def failure(error: Exception) -> dict:
     elif isinstance(error, Rejected):
         state = "checks_failed"
     return {"state": state, "exit_code": code,
-            "reason_code": type(error).__name__, "reason": str(error),
+            "reason_code": getattr(error, "reason_code", type(error).__name__),
+            "reason": str(error),
             "clean_handoff": not isinstance(error, (
                 Unsafe, native.FatalSession))}
 
@@ -569,18 +578,16 @@ def main() -> int:
         outcome["omitted"] = [s for s in "PRK" if s not in selected]
         outcome["completed_sets"] = []
         for set_id in selected:
-            peak = config["v9"]["fit"][set_id]["estimated_peak_bytes"]
-            if type(peak) is not int or peak <= 0:
-                raise Blocked("missing predeclared set fit estimate")
             sample = native.native_resources(environment(directory,
                                                           mode=args.mode))
-            native.resource_limit(sample, peak, sample["swapouts"],
-                                  timing=args.mode == "baseline_a7",
+            write(directory / f"{set_id}-admission.json", sample)
+            native.resource_limit(sample, 0, sample["swapouts"],
                                   admission=True)
             subdir = directory / set_id
             subdir.mkdir()
             attempt = Attempt(subdir, min(deadline, time.time() + 45 * 60),
-                              mode=args.mode, root=root, config=config)
+                              mode=args.mode, root=root, config=config,
+                              swapouts=sample["swapouts"])
             write(subdir / "environment.json", attempt.env)
             run_set(attempt, specs[set_id], set_id, identity)
             outcome["completed_sets"].append(set_id)

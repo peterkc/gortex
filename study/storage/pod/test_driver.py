@@ -36,6 +36,25 @@ def fixture_manifest(root, paths=(), jobs=None, homebrew=None):
     return path
 
 
+def fixture_resources(**changes):
+    return {"timestamp": 1000.0, "level": 30, "pressure_state": 1,
+            "available_bytes": 64 * driver.GIB, "swapouts": 7,
+            "page_size": 16384, "swap_usage": "total = 1G used = 100M\n",
+            "load1": 1.0, "load5": 1.0, "load15": 1.0,
+            "ac_power": True, **changes}
+
+
+def fixture_budget_stop(directory):
+    peak = 8 * driver.GIB + 1
+    driver.atomic_json(directory / "budget-exceeded.json", {
+        "state": "partial", "observed_peak_bytes": peak,
+        "budget_bytes": 8 * driver.GIB})
+    (directory / "rss.jsonl").write_text(json.dumps({
+        **fixture_resources(), "elapsed_seconds": 1.25,
+        "group_rss_bytes": peak}) + "\n")
+    return driver.BudgetExceeded(peak, 8 * driver.GIB)
+
+
 def fixture_owner(root):
     owner = object.__new__(driver.Supervisor)
     owner.root, owner.environment, owner.scratch = root, {}, root
@@ -49,8 +68,7 @@ def fixture_owner(root):
     owner.native_identity = {
         "input_manifest_sha256": driver.digest(owner.manifest_file),
         "daemon_off_identities_sha256": "2" * 64}
-    owner.sample = {"level": 30, "available_bytes": 64 * driver.GIB,
-                    "swapouts": 7, "load1": 1.0, "ac_power": True}
+    owner.sample = fixture_resources()
     return owner
 
 
@@ -131,7 +149,8 @@ class FixtureSupervisor:
             "real 1.00\nuser 1.00\nsys 0.00\n"
             "1024 maximum resident set size\n")
         (directory / "process.json").write_text("{}")
-        (directory / "rss.jsonl").write_text("{}\n")
+        (directory / "rss.jsonl").write_text(
+            json.dumps(fixture_resources()) + "\n")
         (directory / "stdout-stderr.log").write_text("fixture")
         process = SimpleNamespace(pid=100+len(self.calls),
                                   poll=lambda: code, returncode=code)
@@ -380,7 +399,8 @@ class DeadlineContractTests(unittest.TestCase):
         supervisor.block_id = "storage"
         supervisor.block_deadline = end
         supervisor.job_minutes = {"first": 12.5, "second": 12.5}
-        supervisor.job_bindings = {"first": {}, "second": {}}
+        supervisor.job_bindings = {name: {"kind": "screen"}
+                                   for name in ("first", "second")}
         supervisor.active = []
         supervisor.bad_jobs = set()  # Inputs verified for this deadline test.
         first = supervisor.job_limit("first", 30 * 60)
@@ -412,10 +432,10 @@ class DeadlineContractTests(unittest.TestCase):
             def stage(owner, selected, setup, concurrency, receipts):
                 seen.append(receipts)
                 if selected[0].stage == "timing":
-                    self.assertEqual(len(receipts), 12)
+                    self.assertEqual(len(receipts), 13)
                     self.assertEqual(sum(
                         row["identity"]["job"]["stage"] == "oracle"
-                        for row in receipts), 1)
+                        for row in receipts), 2)
                 for job in selected:
                     receipts.append({
                         "identity": {"job": driver.asdict(job)},
@@ -436,7 +456,7 @@ class DeadlineContractTests(unittest.TestCase):
             self.assertEqual(len(seen), 3)
             self.assertIs(seen[0], seen[1])
             self.assertIs(seen[1], seen[2])
-            self.assertEqual(len(seen[2]), 24)
+            self.assertEqual(len(seen[2]), 25)
 
     def test_guard_arms_earliest_active_job_without_resetting_block(self):
         supervisor = object.__new__(driver.Supervisor)
@@ -670,8 +690,8 @@ class ReviewFixTests(unittest.TestCase):
                         timed.extend(selected)
                         return
                     if selected[0].stage == "oracle" and oracle_passed:
-                        receipts.append({"identity": {"job": driver.asdict(
-                            selected[0])}, "state": "pass"})
+                        receipts.extend({"identity": {"job": driver.asdict(j)},
+                                         "state": "pass"} for j in selected)
                         return
                     if oracle_passed:
                         receipts.append({"identity": {"job": driver.asdict(
@@ -702,9 +722,10 @@ class ReviewFixTests(unittest.TestCase):
 
     def test_priority_repeat_rounds_and_remaining_window_limits(self):
         planned = driver.jobs()
-        self.assertEqual([j.adapter for j in planned[:7]], [
-            "oracle", "sqlite-segment", "pebble-bleve", "sqlite-vecflat",
-            "sqlite-usearch", "catalog-sqlite", "catalog-refs"])
+        self.assertEqual([j.adapter for j in planned[:8]], [
+            "oracle", "oracle", "sqlite-segment", "pebble-bleve",
+            "sqlite-vecflat", "sqlite-usearch", "catalog-sqlite",
+            "catalog-refs"])
         timing = [j for j in planned if j.stage == "timing"]
         self.assertEqual([j.repeat for j in timing], [1]*4 + [2]*4 + [3]*4)
         temporary = tempfile.TemporaryDirectory()
@@ -716,7 +737,8 @@ class ReviewFixTests(unittest.TestCase):
             owner.block_id, owner.block_deadline = block, 120 * 60
             owner.job_minutes = {
                 j["id"]: j["minutes"] for j in inventory[block]}
-            owner.job_bindings = {j["id"]: {} for j in inventory[block]}
+            owner.job_bindings = {j["id"]: dict(j) for j in inventory[block]}
+            owner.window["oracle_go"] = list(owner.job_bindings)
             self.assertTrue(all(j["minutes"] == minutes
                                 for j in inventory[block]))
             for now in (0, 60):
@@ -825,7 +847,7 @@ class NativeAdmissionTests(unittest.TestCase):
                 "end": "1970-01-01T04:00:00+00:00",
                 **{key: True for key in (
                     "user_go", "migration_complete", "owner_stop_confirmed",
-                    "awake", "thermal_safe", "background_quiet")}}
+                    "awake", "thermal_safe")}}
 
     def identities(self, root):
         return {"schema": "installed-daemon-identities/v2",
@@ -847,12 +869,14 @@ class NativeAdmissionTests(unittest.TestCase):
         before = deepcopy(go)
         self.assertEqual(driver.window_limit(go, "1" * 64, 1000), 12500)
         self.assertEqual(go, before)
+        self.assertEqual(driver.window_limit(
+            {**go, "background_quiet": False}, "1" * 64, 1000), 12500)
         for now in (-1, 13500, 14400):
             with self.subTest(now=now), self.assertRaises(
                     driver.DeadlineExceeded):
                 driver.window_limit(go, "1" * 64, now)
         for key in ("user_go", "migration_complete", "owner_stop_confirmed",
-                    "awake", "thermal_safe", "background_quiet"):
+                    "awake", "thermal_safe"):
             with self.subTest(key=key), self.assertRaises(driver.FatalSession):
                 driver.window_limit({**go, key: False}, "1" * 64, 1000)
         for changed in ({**go, "schema": "unknown"},
@@ -880,34 +904,41 @@ class NativeAdmissionTests(unittest.TestCase):
                "Pages free: 10.\nPages inactive: 20.\n"
                "Pages speculative: 30.\nPages purgeable: 20.\nSwapouts: 7.\n")
         self.assertEqual(driver.parse_vm_stat(raw),
-                         {"available_bytes": 60 * 16384, "swapouts": 7})
+                         {"available_bytes": 60 * 16384, "swapouts": 7,
+                          "page_size": 16384})
         for bad in (raw + "Swapouts: 7.\n", raw.replace("Swapouts: 7.\n", ""),
                     raw.replace("16384 bytes", "unknown bytes")):
             with self.assertRaises(driver.FatalSession):
                 driver.parse_vm_stat(bad)
 
-    def test_d11_boundaries_and_no_correctness_load_ceiling(self):
-        peak = 3 * driver.GIB
-        sample = {"level": 30, "swapouts": 7, "load1": 2.0,
-                  "available_bytes": peak + driver.MEMORY_RESERVE,
-                  "ac_power": True}
-        driver.resource_limit(sample, peak, 7, timing=True, admission=True)
-        driver.resource_limit({**sample, "load1": 10.0}, peak, 7,
-                              timing=False, admission=True)
-        with self.assertRaises(driver.DeadlineExceeded):
-            driver.resource_limit({**sample, "load1": 2.01}, peak, 7,
-                                  timing=True, admission=True)
-        for key, value in (("level", 29), ("swapouts", 8),
-                           ("available_bytes", sample["available_bytes"] - 1),
-                           ("ac_power", False), ("load1", float("nan"))):
-            with self.subTest(key=key), self.assertRaises(driver.FatalSession):
-                driver.resource_limit({**sample, key: value}, peak, 7,
-                                      timing=False, admission=True)
-        driver.resource_limit({**sample, "level": 25}, 0, 7,
-                              timing=False, admission=False)
-        with self.assertRaises(driver.FatalSession):
-            driver.resource_limit({**sample, "level": 24}, 0, 7,
-                                  timing=False, admission=False)
+    def test_d11_boundaries_allow_load_swap_and_candidate_estimate(self):
+        sample = fixture_resources(level=20, pressure_state=2, load1=18.0,
+                                   load5=17.0, load15=16.0,
+                                   available_bytes=4 * driver.GIB)
+        for admission in (True, False):
+            driver.resource_limit(sample, 64 * driver.GIB, 7,
+                                  admission=admission)
+        pages = (512 * 1024 * 1024) // sample["page_size"]
+        driver.resource_limit({**sample, "swapouts": 7 + pages}, 0, 7,
+                              admission=True)
+        invalid = (("level", 19), ("level", 101), ("pressure_state", 4),
+                   ("pressure_state", 0), ("pressure_state", "normal"),
+                   ("swapouts", 6), ("swapouts", 8 + pages),
+                   ("available_bytes", 4 * driver.GIB - 1),
+                   ("ac_power", False), ("page_size", 0),
+                   ("page_size", True), ("swap_usage", ""),
+                   ("load5", float("nan")), ("load15", -1))
+        for key, value in invalid:
+            with self.subTest(key=key, value=value), self.assertRaises(
+                    driver.FatalSession):
+                driver.resource_limit({**sample, key: value}, 0, 7,
+                                      admission=True)
+        for missing in sample:
+            incomplete = {k: v for k, v in sample.items() if k != missing}
+            with self.subTest(missing=missing), self.assertRaises(
+                    driver.FatalSession):
+                driver.resource_limit(incomplete, 0, 7,
+                                      admission=False)
 
     def test_all_d12_signals_aliases_and_unknown_probe_errors(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -1124,9 +1155,10 @@ class NativeAdmissionTests(unittest.TestCase):
                     owner.permissions.side_effect = driver.DeadlineExceeded(
                         "current user window expired")
                 elif failure == "memory":
-                    sample["level"] = 24
+                    sample["level"] = 19
                 else:
-                    sample["swapouts"] = 8
+                    sample["swapouts"] = 8 + (
+                        driver.SWAP_GROWTH_LIMIT // sample["page_size"])
                 live = {8400: {(8400, 10): 1}}
                 error_type = (driver.DeadlineExceeded if failure == "expired"
                               else driver.FatalSession)
@@ -1162,23 +1194,26 @@ class NativeAdmissionTests(unittest.TestCase):
             with self.assertRaises(driver.FatalSession):
                 driver.bsd_time(bad, 0)
 
-    def test_high_load_cpu_block_is_partial_not_skipped(self):
+    def test_high_load_cpu_block_is_admitted_not_skipped(self):
         with tempfile.TemporaryDirectory() as folder:
             owner = fixture_owner(Path(folder))
-            owner.start = unittest.mock.Mock()
 
             def begin(block, outcomes):
-                driver.resource_limit({**owner.sample, "load1": 2.01}, 0, 7,
-                                      timing=True, admission=True)
+                driver.resource_limit({**owner.sample, "load1": 18.0}, 0, 7,
+                                      admission=True)
 
             owner.begin_block = begin
-            with patch.object(driver.signal, "signal"), \
-                    patch.object(driver.signal, "setitimer"):
+            with (patch.object(driver.signal, "signal"),
+                  patch.object(driver.signal, "setitimer"),
+                  patch.object(driver.time, "monotonic", return_value=0),
+                  patch.object(driver, "binding_block",
+                               return_value="completed") as work):
                 result = driver.execute_session(
                     owner, {"blocks": [{"id": "cpu_cost", "jobs": []}]},
                     owner.root / "inputs", {}, 1)
-            self.assertEqual(result["blocks"]["cpu_cost"]["state"], "partial")
-            owner.start.assert_not_called()
+            self.assertEqual(result["blocks"]["cpu_cost"]["state"],
+                             "completed")
+            work.assert_called_once()
 
     def test_constructor_wiring_binds_config_hash_and_detects_drift(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -1189,7 +1224,8 @@ class NativeAdmissionTests(unittest.TestCase):
             driver.atomic_json(identities_file, identities)
             manifest_file = fixture_manifest(root)
             manifest_sha = driver.digest(manifest_file)
-            driver.atomic_json(go_file, self.go(manifest_sha))
+            go = {**self.go(manifest_sha), "oracle_go": ["oracle-fixture"]}
+            driver.atomic_json(go_file, go)
             config = {
                 "scratch_root": str(root),
                 "manifest_file": str(manifest_file),
@@ -1197,10 +1233,11 @@ class NativeAdmissionTests(unittest.TestCase):
                 "identities_file": str(identities_file),
                 "identities_sha256": driver.digest(identities_file),
                 "input_manifest_sha256": manifest_sha,
-                "d11_limits": {"admission_level": 30, "stop_level": 25,
-                               "memory_reserve_bytes": driver.MEMORY_RESERVE,
-                               "timing_load1_max": 2.0,
-                               "swap_observation_seconds": 30},
+                "d11_limits": {"minimum_level": 20,
+                               "available_minimum_bytes": 4 * driver.GIB,
+                               "candidate_budget_bytes": 8 * driver.GIB,
+                               "oracle_budget_bytes": 24 * driver.GIB,
+                               "swap_growth_bytes": 512 * 1024 * 1024},
                 "launcher": {"path": str(Path(sys.executable).resolve()),
                              "version": [3, 14, 7],
                              "sha256": driver.digest(Path(sys.executable))}}
@@ -1216,8 +1253,9 @@ class NativeAdmissionTests(unittest.TestCase):
                   patch.object(driver, "native_output", return_value=(
                       f"Apple M1 Max\n{64 * driver.GIB}\n8\n2\n10\n"))):
                 owner = driver.Supervisor(root, {}, config)
+                self.assertEqual(owner.window["oracle_go"], ["oracle-fixture"])
                 owner.job_minutes = {"first": 1}
-                owner.job_bindings = {"first": {}}
+                owner.job_bindings = {"first": {"kind": "screen"}}
                 owner.block_deadline = 600
                 self.assertEqual(owner.bad_jobs, {"*"})
                 with self.assertRaisesRegex(driver.ReviewRequired,
@@ -1329,6 +1367,7 @@ class NativeAdmissionTests(unittest.TestCase):
         owner = fixture_owner(Path(temporary.name).resolve())
         owner.permissions = unittest.mock.Mock(return_value=12500)
         selected = driver.jobs()[:2]
+        owner.window["oracle_go"] = [job.name for job in selected]
         records = [{"id": job.name, "kind": job.stage, "minutes": 999,
                     "estimated_peak_bytes": driver.GIB, "gomaxprocs": 10}
                    for job in selected]
@@ -1349,19 +1388,442 @@ class NativeAdmissionTests(unittest.TestCase):
                     self.assertRaises(driver.FatalSession):
                 owner.begin_block({"id": "storage", "jobs": bad}, {})
 
-    def test_completed_case_rss_does_not_lower_next_admission_estimate(self):
+    def test_completed_case_rss_does_not_lower_oracle_admission_estimate(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         owner = fixture_owner(Path(temporary.name).resolve())
         owner.permissions = unittest.mock.Mock(return_value=1000)
-        owner.case = {"estimated_peak_bytes": 3 * driver.GIB}
+        owner.case = {"kind": "oracle",
+                      "estimated_peak_bytes": 3 * driver.GIB}
         owner.current_rss = 10 * driver.GIB  # Previous case is inactive.
         sample = {**owner.sample, "available_bytes":
-                  3 * driver.GIB + driver.MEMORY_RESERVE - 1}
+                  3 * driver.GIB + driver.MEMORY_MINIMUM - 1}
         with patch.object(driver, "native_resources", return_value=sample), \
-                self.assertRaises(driver.FatalSession):
+                self.assertRaises(driver.ReviewRequired):
             owner.guard(admission=True)
         self.assertEqual(owner.active, [])
+
+    def test_native_sampler_records_pressure_loads_and_swapusage(self):
+        vm = ("Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+              "Pages free: 10.\nPages inactive: 20.\n"
+              "Pages speculative: 30.\nSwapouts: 7.\n")
+        swap = "total = 2048.00M used = 100.25M free = 1947.75M\n"
+        outputs = {("/usr/bin/vm_stat",): vm,
+            ("/usr/sbin/sysctl", "-n", "kern.memorystatus_level"): "20\n",
+            ("/usr/sbin/sysctl", "-n",
+             "kern.memorystatus_vm_pressure_level"): "2\n",
+            ("/usr/sbin/sysctl", "-n", "vm.swapusage"): swap,
+            ("/usr/bin/pmset", "-g", "batt"): "Now drawing from 'AC Power'\n"}
+        with (patch.object(driver, "native_output",
+                           side_effect=lambda args, env: outputs[tuple(args)]),
+              patch.object(driver.os, "getloadavg", return_value=(18, 17, 16)),
+              patch.object(driver.time, "time", return_value=1000)):
+            sample = driver.native_resources({})
+            self.assertEqual(set(sample), set(fixture_resources()))
+            self.assertEqual([sample[k] for k in ("load1", "load5", "load15")],
+                             [18, 17, 16])
+            self.assertEqual((sample["level"], sample["pressure_state"]),
+                             (20, 2))
+            self.assertEqual(sample["swap_usage"], swap)
+            self.assertEqual((sample["timestamp"], sample["page_size"]),
+                             (1000, 16384))
+            outputs[("/usr/sbin/sysctl", "-n",
+                     "kern.memorystatus_vm_pressure_level")] = "unknown"
+            with self.assertRaises(driver.FatalSession):
+                driver.native_resources({})
+        with patch.object(driver, "native_output", side_effect=OSError), \
+                self.assertRaises(driver.FatalSession):
+            driver.native_resources({})
+
+    def test_guard_retains_cumulative_baseline_and_the_stopping_sample(self):
+        with tempfile.TemporaryDirectory() as folder:
+            owner = fixture_owner(Path(folder).resolve())
+            owner.permissions = unittest.mock.Mock(return_value=1000)
+            owner.case = {"kind": "screen",
+                          "estimated_peak_bytes": 64 * driver.GIB}
+            pages = driver.SWAP_GROWTH_LIMIT // 16384
+            values = [7, 7 + pages // 2, 7 + pages, 8 + pages]
+            samples = [fixture_resources(swapouts=n, load1=18.0)
+                       for n in values]
+            with patch.object(driver, "native_resources", side_effect=samples):
+                owner.guard(admission=True)
+                owner.guard()
+                owner.guard()
+                with self.assertRaises(driver.FatalSession):
+                    owner.guard()
+            self.assertEqual(owner.swapouts, 7)
+            rows = [json.loads(line) for line in
+                    (owner.root / "resources.jsonl").read_text().splitlines()]
+            self.assertEqual([r["swapouts"] for r in rows], values)
+            self.assertEqual([r["swapouts_start"] for r in rows], [7] * 4)
+            self.assertTrue(all(set(fixture_resources()) <= r.keys()
+                                for r in rows))
+            self.assertTrue(all(r["window_id"] == "fixture-window"
+                                for r in rows))
+
+    def test_guard_rejects_counter_decrease_even_above_zero_baseline(self):
+        for start in (0, 7):
+            with self.subTest(start=start), \
+                    tempfile.TemporaryDirectory() as folder:
+                owner = fixture_owner(Path(folder).resolve())
+                owner.sample = fixture_resources(swapouts=start)
+                owner.permissions = unittest.mock.Mock(return_value=1000)
+                samples = [fixture_resources(swapouts=n)
+                           for n in (start, start + 100, start + 99)]
+                with patch.object(driver, "native_resources",
+                                  side_effect=samples):
+                    owner.guard()
+                    owner.guard()
+                    with self.assertRaisesRegex(driver.FatalSession, "reset"):
+                        owner.guard()
+                rows = [json.loads(line) for line in
+                        (owner.root / "resources.jsonl").read_text()
+                        .splitlines()]
+                self.assertEqual(rows[-1]["swapouts"], start + 99)
+
+    def test_owned_aggregate_candidate_and_oracle_budgets_stop_and_reap(self):
+        for kind, budget in (("screen", 8 * driver.GIB),
+                             ("oracle", 24 * driver.GIB)):
+            with self.subTest(kind=kind), \
+                    tempfile.TemporaryDirectory() as folder:
+                owner = fixture_owner(Path(folder).resolve())
+                owner.permissions = unittest.mock.Mock(return_value=1000)
+                owner.case = {"kind": kind}
+                process = fixture_process(8400)
+                owned = driver.OwnedProcess(process, owner.root, 0,
+                    StringIO(), known={(8400, 10)})
+                owner.active = [owned]
+                live = {8400: {(8400, 10): budget // 2,
+                               (8401, 11): budget // 2}}
+
+                def kill(pgid, sig):
+                    self.assertEqual(pgid, 8400)
+                    live.clear()
+                    process.returncode = -int(sig)
+
+                with (patch.object(driver, "native_resources",
+                          side_effect=lambda env: fixture_resources()),
+                      patch.object(driver, "process_groups",
+                          side_effect=lambda env, active: deepcopy(live)),
+                      patch.object(driver.os, "killpg",
+                                   side_effect=kill) as kills,
+                      patch.object(driver.os, "waitpid",
+                                   side_effect=ChildProcessError)):
+                    owner.observe(deepcopy(live))
+                    self.assertEqual(owned.peak_rss, budget)
+                    self.assertEqual(kills.call_count, 0)
+                    live[8400][(8401, 11)] += 1
+                    with self.assertRaises(driver.BudgetExceeded) as caught:
+                        owner.observe(deepcopy(live))
+                self.assertEqual(caught.exception.reason_code,
+                                 "budget-exceeded")
+                self.assertEqual(caught.exception.observed_peak_bytes,
+                                 budget + 1)
+                self.assertEqual(owner.active, [])
+                process.wait.assert_called_once_with(timeout=0)
+                self.assertTrue(owned.log.closed)
+                self.assertEqual(owned.peak_rss, budget + 1)
+                raw = driver.read_json(owner.root / "budget-exceeded.json")
+                self.assertEqual(raw, {"state": "partial",
+                                      "budget_bytes": budget,
+                                      "observed_peak_bytes": budget + 1})
+                rows = [json.loads(line) for line in
+                        (owner.root / "rss.jsonl").read_text().splitlines()]
+                self.assertEqual(rows[-1]["group_rss_bytes"], budget + 1)
+                self.assertTrue(set(fixture_resources()) <= rows[-1].keys())
+                self.assertEqual(rows[-1]["rss_scope"],
+                                 "PGID RSS sum; shared pages per PID")
+
+    def test_unhandled_budget_preserves_independent_blocks_without_retry(self):
+        with tempfile.TemporaryDirectory() as folder:
+            owner = fixture_owner(Path(folder).resolve())
+            owner.begin_block = unittest.mock.Mock()
+            config = {"blocks": [{"id": block, "jobs": []}
+                                 for block in ("cpu_cost", "baseline_a7")]}
+            peak = 8 * driver.GIB + 1
+            with (patch.object(driver.time, "monotonic", return_value=0),
+                  patch.object(driver.signal, "signal"),
+                  patch.object(driver.signal, "setitimer"),
+                  patch.object(driver, "binding_block", side_effect=[
+                      driver.BudgetExceeded(peak, 8 * driver.GIB),
+                      "completed"])
+                  as work):
+                result = driver.execute_session(
+                    owner, config, owner.root, {}, 1)
+            partial = result["blocks"]["cpu_cost"]
+            self.assertEqual(partial["state"], "partial")
+            self.assertEqual(partial["reason_code"], "budget-exceeded")
+            self.assertEqual(partial["observed_peak_bytes"], peak)
+            self.assertTrue(partial["clean_handoff"])
+            self.assertEqual(result["blocks"]["baseline_a7"]["state"],
+                             "completed")
+            self.assertEqual(work.call_count, 2)
+            with (patch.object(driver.signal, "signal"),
+                  patch.object(driver.signal, "setitimer"),
+                  patch.object(driver, "binding_block") as later):
+                resumed = driver.execute_session(
+                    owner, config, owner.root, {}, 1)
+            later.assert_not_called()
+            self.assertEqual(resumed, result)
+            result["blocks"]["cpu_cost"]["terminal"] = "fatal"
+            driver.atomic_json(owner.root / "session.json", result)
+            with patch.object(driver.signal, "signal"), self.assertRaises(
+                    driver.FatalSession):
+                driver.execute_session(owner, config, owner.root, {}, 1)
+
+    def test_oracle_jobs_fit_and_permission_belong_to_current_window(self):
+        selected = [j for j in driver.jobs() if j.stage == "oracle"]
+        self.assertEqual([j.tier for j in selected], ["tier1", "tier10"])
+        self.assertEqual(len({j.name for j in selected}), 2)
+        sample = fixture_resources(available_bytes=7 * driver.GIB)
+        driver.resource_limit(sample, 3 * driver.GIB, 7,
+                              admission=True, oracle=True)
+        with self.assertRaisesRegex(driver.ReviewRequired, "oracle estimate"):
+            driver.resource_limit(
+                {**sample, "available_bytes": 7 * driver.GIB - 1},
+                3 * driver.GIB, 7, admission=True, oracle=True)
+        with tempfile.TemporaryDirectory() as folder:
+            owner = fixture_owner(Path(folder).resolve())
+            owner.job_minutes = {j.name: 30 for j in selected}
+            owner.job_bindings = {j.name: {"kind": "oracle", "oracle_go": True}
+                                  for j in selected}
+            for go in (None, True, selected[0].name, [selected[1].name]):
+                owner.window = {"id": "new", "oracle_go": go}
+                with self.subTest(go=go), self.assertRaisesRegex(
+                        driver.ReviewRequired, "current-session oracle"):
+                    owner.job_limit(selected[0].name, 0)
+            owner.window["oracle_go"] = [j.name for j in selected]
+            for job in selected:
+                owner.swapouts, owner.current_rss = 99, 8 * driver.GIB + 1
+                owner.job_limit(job.name, 0)
+                self.assertIsNone(owner.swapouts)
+                self.assertEqual(owner.current_rss, 0)
+            owner.window = {"id": "newer", "oracle_go": []}
+            with self.assertRaises(driver.ReviewRequired):
+                owner.job_limit(selected[0].name, 0)
+
+    def test_verified_complete_oracle_reuses_without_new_measurement_go(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            _, setup, _ = DriverTests().fixture(root)
+            job = driver.Job("oracle", "oracle", "tier10")
+            setup["artifacts"]["bin/oracle"] = "fixture"
+            owner = FixtureSupervisor(root, ["pass"])
+            owner.window["oracle_go"] = [job.name]
+            owner.job_minutes = {job.name: 30}
+            owner.job_bindings = {job.name: {"kind": "oracle",
+                                            "gomaxprocs": 10}}
+            owner.job_limit = unittest.mock.Mock(side_effect=lambda name, now:
+                driver.Supervisor.job_limit(owner, name, now))
+            original = owner.start
+
+            def start(args, directory, env, cwd):
+                fake = driver.result_path(root, driver.Job(
+                    "screen", "oracle", "tier10"))
+                fake.parent.parent.mkdir(exist_ok=True)
+                owned = original(args, directory, env, cwd)
+                target = driver.result_path(root, job)
+                target.parent.mkdir()
+                fake.rename(target)
+                return owned
+
+            owner.start = unittest.mock.Mock(side_effect=start)
+            with (patch.object(driver, "process_groups", return_value={}),
+                  patch.object(driver.time, "monotonic", return_value=0),
+                  patch.object(driver.time, "sleep")):
+                receipts = []
+                driver.execute_stage(owner, [job], setup, 1, receipts)
+                self.assertEqual(owner.start.call_count, 1)
+                complete = root / "jobs" / job.name / "complete.json"
+                before = complete.read_bytes()
+                owner.window = {"id": "new-window", "oracle_go": []}
+                owner.job_limit.reset_mock()
+                reused = []
+                driver.execute_stage(owner, [job], setup, 1, reused)
+                self.assertEqual(reused, receipts)
+                self.assertEqual(complete.read_bytes(), before)
+                owner.job_limit.assert_not_called()
+                self.assertEqual(owner.start.call_count, 1)
+                (complete.parent / "native-time.txt").write_text("changed")
+                with self.assertRaisesRegex(driver.ReviewRequired,
+                                            "current-session oracle"):
+                    driver.execute_stage(owner, [job], setup, 1, [])
+                self.assertEqual(owner.start.call_count, 1)
+
+
+    def test_budgeted_sdk_job_continues_and_both_receipts_reuse(self):
+        for point in ("start", "observe"):
+            with self.subTest(point=point), \
+                    tempfile.TemporaryDirectory() as folder:
+                root = Path(folder).resolve()
+                selected, setup, _ = DriverTests().fixture(root)
+                owner = FixtureSupervisor(root, ["pass", "pass"])
+                owner.stop_all = unittest.mock.Mock()
+                owner.arm_guard = unittest.mock.Mock()
+                original = owner.start
+                armed = []
+
+                def start(args, directory, env, cwd):
+                    owned = original(args, directory, env, cwd)
+                    if directory.name == selected[0].name:
+                        error = fixture_budget_stop(directory)
+                        if point == "start":
+                            raise error
+                        armed.append(error)
+                    return owned
+
+                def observe(groups):
+                    if armed:
+                        raise armed.pop()
+
+                owner.start = unittest.mock.Mock(side_effect=start)
+                owner.observe = observe
+                config = {"blocks": [
+                    {"id": "setup", "jobs": []},
+                    {"id": "storage", "jobs": [
+                        {"id": j.name, "kind": j.stage, "gomaxprocs": 10,
+                         "minutes": 30} for j in selected]}]}
+                with (patch.object(driver, "prepare", return_value=setup),
+                      patch.object(driver, "jobs", return_value=selected),
+                      patch.object(driver, "process_groups", return_value={}),
+                      patch.object(driver.time, "monotonic", return_value=0),
+                      patch.object(driver.time, "sleep"),
+                      patch.object(driver.signal, "signal"),
+                      patch.object(driver.signal, "setitimer")):
+                    record = driver.execute_session(
+                        owner, config, root, setup["identity"], 1)
+                    self.assertEqual(owner.calls, [j.name for j in selected])
+                    complete = [root / "jobs" / j.name / "complete.json"
+                                for j in selected]
+                    rows = [driver.read_json(path) for path in complete]
+                    self.assertEqual([r["state"] for r in rows],
+                                     ["budget_exceeded", "pass"])
+                    self.assertEqual(rows[0]["observed_peak_bytes"],
+                                     8 * driver.GIB + 1)
+                    self.assertEqual(rows[0]["reason_code"], "budget-exceeded")
+                    self.assertTrue(rows[0]["files"])
+                    before = [path.read_bytes() for path in complete]
+                    self.assertEqual(record["blocks"]["storage"]["state"],
+                                     "completed")
+                    # Verify per-job receipts on resume.
+                    record["blocks"]["storage"]["state"] = "partial"
+                    driver.atomic_json(root / "session.json", record)
+                    owner.start.reset_mock()
+                    resumed = driver.execute_session(
+                        owner, config, root, setup["identity"], 1)
+                    owner.start.assert_not_called()
+                    self.assertEqual(resumed["blocks"]["storage"]["state"],
+                                     "completed")
+                    self.assertEqual([p.read_bytes() for p in complete],
+                                     before)
+                    raw = complete[0].parent / "rss.jsonl"
+                    original_raw = raw.read_bytes()
+                    raw.write_text("changed")
+                    with self.assertRaises(driver.ReviewRequired):
+                        driver.execute_stage(owner, selected[:1], setup, 1, [])
+                    owner.start.assert_not_called()
+                    raw.write_bytes(original_raw)
+                    # A budget marker prevents a blind retry.
+                    complete[0].unlink()
+                    with self.assertRaises(OSError):
+                        driver.execute_stage(owner, selected[:1], setup, 1, [])
+                    owner.start.assert_not_called()
+
+    def test_auxiliary_budget_continues_binding_jobs_and_reuses_cache(self):
+        for point in ("start", "observe"):
+            with self.subTest(point=point), \
+                    tempfile.TemporaryDirectory() as folder:
+                root = Path(folder).resolve()
+                driver.atomic_json(root / "python-runtime.json", {})
+                owner = FixtureSupervisor(root, [])
+                owner.stop_all = unittest.mock.Mock()
+                owner.arm_guard = unittest.mock.Mock()
+                armed = []
+                jobs = [{"id": name, "kind": "smoke", "gomaxprocs": 10,
+                         "argv": ["fixture"], "receipt_path": "unused",
+                         "source_pin": "1" * 40, "config_pin": "2" * 64,
+                         "input_pin": "3" * 64}
+                        for name in ("first", "second")]
+                owner.job_bindings = {j["id"]: j for j in jobs}
+
+                def start(args, directory, env, cwd):
+                    owner.calls.append(directory.name)
+                    (directory / "stdout-stderr.log").write_text("fixture")
+                    if directory.name == "first":
+                        error = fixture_budget_stop(directory)
+                        if point == "start":
+                            raise error
+                        armed.append(error)
+                    else:
+                        data = directory / "data.json"
+                        driver.atomic_json(data, {"ok": True})
+                        driver.atomic_json(directory / "receipt.json", {
+                            "state": "completed", "exit_code": 0,
+                            "clean_handoff": True, "source_pin": "1" * 40,
+                            "config_pin": "2" * 64, "input_pin": "3" * 64,
+                            "files": {"data.json": driver.digest(data)}})
+                    return SimpleNamespace(process=fixture_process(
+                        9000 + len(owner.calls),
+                        None if directory.name == "first" else 0),
+                        started=0, peak_rss=1, deadline=10000)
+
+                def observe(groups):
+                    if armed:
+                        raise armed.pop()
+
+                owner.start = unittest.mock.Mock(side_effect=start)
+                owner.observe = observe
+                block = {"id": "smoke", "jobs": jobs}
+                with (patch.object(driver, "process_groups", return_value={}),
+                      patch.object(driver.time, "monotonic", return_value=0),
+                      patch.object(driver.time, "sleep")):
+                    self.assertEqual(driver.binding_block(owner, block),
+                                     "partial")
+                    self.assertEqual(owner.calls, ["first", "second"])
+                    first = root / "aux/first/complete.json"
+                    receipt = driver.read_json(first)
+                    self.assertEqual(receipt["state"], "budget_exceeded")
+                    self.assertEqual(receipt["observed_peak_bytes"],
+                                     8 * driver.GIB + 1)
+                    self.assertTrue(all(name.startswith("aux/first/")
+                                        for name in receipt["files"]))
+                    self.assertFalse(
+                        (root / "aux/first/receipt.json").exists())
+                    before = first.read_bytes()
+                    owner.start.reset_mock()
+                    self.assertEqual(driver.binding_block(owner, block),
+                                     "partial")
+                    owner.start.assert_not_called()
+                    self.assertEqual(first.read_bytes(), before)
+                    raw = root / "aux/first/rss.jsonl"
+                    raw.write_text("changed")
+                    with self.assertRaises(driver.ReviewRequired):
+                        driver.binding_block(owner, block)
+                    owner.start.assert_not_called()
+
+    def test_host_fatal_is_not_absorbed_by_per_job_budget_handlers(self):
+        for executor in ("sdk", "auxiliary"):
+            with self.subTest(executor=executor), \
+                    tempfile.TemporaryDirectory() as folder:
+                root = Path(folder).resolve()
+                selected, setup, _ = DriverTests().fixture(root)
+                driver.atomic_json(root / "python-runtime.json", {})
+                owner = FixtureSupervisor(root, [])
+                owner.start = unittest.mock.Mock(
+                    side_effect=driver.FatalSession("critical host pressure"))
+                owner.job_bindings = {j.name: {"gomaxprocs": 10}
+                                      for j in selected}
+                with (patch.object(driver, "process_groups", return_value={}),
+                      patch.object(driver.time, "monotonic", return_value=0),
+                      self.assertRaises(driver.FatalSession)):
+                    if executor == "sdk":
+                        driver.execute_stage(owner, selected, setup, 1, [])
+                    else:
+                        driver.auxiliary(owner, selected[0].name,
+                                         ["fixture"], lambda _: [])
+                owner.start.assert_called_once()
+                self.assertFalse(list(root.glob("jobs/*/complete.json")))
+                self.assertFalse(list(root.glob("aux/*/complete.json")))
 
 
 class DurabilityTests(unittest.TestCase):
@@ -1419,7 +1881,7 @@ class DurabilityTests(unittest.TestCase):
                                          hashes.call_args_list), 2)
             self.assertEqual(owner.bad_jobs, {"cpu-fixture"})
             owner.job_minutes = {"independent": 1, "cpu-fixture": 1}
-            owner.job_bindings = {name: {"gomaxprocs": 1}
+            owner.job_bindings = {name: {"gomaxprocs": 1, "kind": "coderank"}
                                   for name in owner.job_minutes}
             owner.job_limit("independent", 0)
             with self.assertRaisesRegex(driver.ReviewRequired,
@@ -1688,10 +2150,11 @@ class NativeEntryTests(unittest.TestCase):
                   "manifest_file": str(manifest), "window_file": str(go),
                   "identities_file": str(identities),
                   "identities_sha256": driver.digest(identities),
-                  "d11_limits": {"admission_level": 30, "stop_level": 25,
-                                 "memory_reserve_bytes": driver.MEMORY_RESERVE,
-                                 "timing_load1_max": 2.0,
-                                 "swap_observation_seconds": 30},
+                  "d11_limits": {"minimum_level": 20,
+                                 "available_minimum_bytes": 4 * driver.GIB,
+                                 "candidate_budget_bytes": 8 * driver.GIB,
+                                 "oracle_budget_bytes": 24 * driver.GIB,
+                                 "swap_growth_bytes": 512 * 1024 * 1024},
                   "launcher": {"path": str(launcher), "version": [3, 14, 7],
                                "sha256": driver.digest(launcher)},
                   "blocks": []}
