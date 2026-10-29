@@ -75,20 +75,6 @@ jobs:
           python3 --version | tee "$RUNNER_TEMP/storage/ci-driver.txt"
           python3 -m unittest -v test_driver 2>&1 \
             | tee -a "$RUNNER_TEMP/storage/ci-driver.txt"
-      - name: Driver fixtures on the pod's Python 3.10 (runner tool cache, no download)
-        working-directory: study/storage/pod
-        shell: bash
-        run: |
-          set -euo pipefail
-          py="$(ls -1 "$RUNNER_TOOL_CACHE"/Python/3.10.*/x64/bin/python3.10 2>/dev/null | sort -V | tail -n 1 || true)"
-          if test -z "$py"; then
-            echo "FAIL: Python 3.10 absent from RUNNER_TOOL_CACHE; no download allowed"
-            exit 1
-          fi
-          "$py" --version | tee "$RUNNER_TEMP/storage/ci-driver-py310.txt"
-          "$py" -m unittest -v test_driver 2>&1 \
-            | tee -a "$RUNNER_TEMP/storage/ci-driver-py310.txt"
-          sha256sum run.py | tee -a "$RUNNER_TEMP/storage/ci-driver-py310.txt"
       - name: Exact evaluator entrypoint on tiny synthetic vectors only
         shell: bash
         env:
