@@ -382,6 +382,7 @@ class DeadlineContractTests(unittest.TestCase):
         supervisor.job_minutes = {"first": 12.5, "second": 12.5}
         supervisor.job_bindings = {"first": {}, "second": {}}
         supervisor.active = []
+        supervisor.bad_jobs = set()  # Inputs verified for this deadline test.
         first = supervisor.job_limit("first", 30 * 60)
         self.assertEqual(first, 42.5 * 60 - driver.CLEANUP_RESERVE_SECONDS)
         for now in (end - 20, end):
@@ -706,9 +707,12 @@ class ReviewFixTests(unittest.TestCase):
             "sqlite-usearch", "catalog-sqlite", "catalog-refs"])
         timing = [j for j in planned if j.stage == "timing"]
         self.assertEqual([j.repeat for j in timing], [1]*4 + [2]*4 + [3]*4)
-        inventory = driver.bound_jobs(Path("/work"))
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        inventory = driver.bound_jobs(root)
         for block, minutes in (("storage", 30), ("segment_timing", 45)):
-            owner = fixture_owner(Path("/fixture"))
+            owner = fixture_owner(root)
             owner.block_id, owner.block_deadline = block, 120 * 60
             owner.job_minutes = {
                 j["id"]: j["minutes"] for j in inventory[block]}
@@ -1212,6 +1216,17 @@ class NativeAdmissionTests(unittest.TestCase):
                   patch.object(driver, "native_output", return_value=(
                       f"Apple M1 Max\n{64 * driver.GIB}\n8\n2\n10\n"))):
                 owner = driver.Supervisor(root, {}, config)
+                owner.job_minutes = {"first": 1}
+                owner.job_bindings = {"first": {}}
+                owner.block_deadline = 600
+                self.assertEqual(owner.bad_jobs, {"*"})
+                with self.assertRaisesRegex(driver.ReviewRequired,
+                                            "required input"):
+                    owner.job_limit("first", 0)
+                self.assertEqual(owner.launch_deadline, 0)
+                owner.bad_jobs = driver.bad_jobs(manifest_file, root)
+                self.assertEqual(owner.job_limit("first", 0),
+                                 60 - driver.CLEANUP_RESERVE_SECONDS)
                 self.assertEqual(owner.native_identity[
                     "daemon_off_identities_sha256"],
                     config["identities_sha256"])
@@ -1309,7 +1324,9 @@ class NativeAdmissionTests(unittest.TestCase):
                 self.assertEqual(masks[-1], signal.SIG_SETMASK)
 
     def test_per_case_caps_do_not_become_a_storage_group_timeout(self):
-        owner = fixture_owner(Path("/fixture"))
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        owner = fixture_owner(Path(temporary.name).resolve())
         owner.permissions = unittest.mock.Mock(return_value=12500)
         selected = driver.jobs()[:2]
         records = [{"id": job.name, "kind": job.stage, "minutes": 999,
@@ -1333,7 +1350,9 @@ class NativeAdmissionTests(unittest.TestCase):
                 owner.begin_block({"id": "storage", "jobs": bad}, {})
 
     def test_completed_case_rss_does_not_lower_next_admission_estimate(self):
-        owner = fixture_owner(Path("/fixture"))
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        owner = fixture_owner(Path(temporary.name).resolve())
         owner.permissions = unittest.mock.Mock(return_value=1000)
         owner.case = {"estimated_peak_bytes": 3 * driver.GIB}
         owner.current_rss = 10 * driver.GIB  # Previous case is inactive.

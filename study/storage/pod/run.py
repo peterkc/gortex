@@ -599,7 +599,7 @@ class Supervisor:
         self.manifest_file = persistent_path(
             admission["manifest_file"], self.scratch)
         self.root = persistent_path(root, self.scratch)
-        self.environment = dict(environment)
+        self.environment, self.bad_jobs = dict(environment), {"*"}
         self.active: list[OwnedProcess] = []
         self.serial = 0
         self.native_identity = {
