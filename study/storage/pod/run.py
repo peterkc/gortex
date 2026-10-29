@@ -1055,7 +1055,7 @@ def new_attempt(supervisor: Supervisor, directory: Path) -> None:
         previous = root / "attempts" / directory.parent.name / directory.name
         previous.mkdir(parents=True, exist_ok=True)
         directory.rename(previous / uuid.uuid4().hex)
-    directory.mkdir()
+    directory.mkdir(parents=True)
     atomic_json(directory / "attempt.json", {
         "run_id": root.name, "job_id": directory.name,
         "attempt_id": uuid.uuid4().hex,
@@ -2226,6 +2226,13 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
                     error, "reason_code", type(error).__name__),
                 reason=str(error), observed_peak_bytes=getattr(
                     error, "observed_peak_bytes", None))
+            if not isinstance(error, ReviewRequired):
+                record["blocks"][block_id]["terminal"] = "fatal"
+                try:
+                    atomic_json(path, record)
+                finally:
+                    supervisor.stop_all()
+                raise
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
         # Any uncertain process/isolation failure propagates instead of
@@ -2281,7 +2288,7 @@ def main() -> int:
     planned = jobs()
     if args.dry_run:
         # Return before any directory write, subprocess, network or host probe.
-        if (len(planned) != 24
+        if (len(planned) != 25
                 or sum(j.stage == "timing" for j in planned) != 12
                 or any(j.adapter == "libsql-segment" for j in planned)
                 or any(("-timing-only" in command(j, root))

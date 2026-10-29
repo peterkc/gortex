@@ -154,8 +154,8 @@ class FixtureSupervisor:
         (directory / "stdout-stderr.log").write_text("fixture")
         process = SimpleNamespace(pid=100+len(self.calls),
                                   poll=lambda: code, returncode=code)
-        return SimpleNamespace(process=process, started=0, peak_rss=0,
-                               deadline=10000)
+        return SimpleNamespace(process=process, directory=directory,
+                               started=0, peak_rss=0, deadline=10000)
 
 
 class DriverTests(unittest.TestCase):
@@ -325,6 +325,9 @@ class DeadlineContractTests(unittest.TestCase):
             ):
                 self.assertEqual(driver.main(), 0)
             result = json.loads(output.getvalue())
+            self.assertEqual(len(result["jobs"]), 25)
+            self.assertEqual(sum(j["stage"] == "oracle"
+                                 for j in result["jobs"]), 2)
             self.assertFalse(root.exists())
             self.assertFalse(result["creation_admitted"])
             self.assertEqual(result["external_commands_executed"], 0)
@@ -737,7 +740,11 @@ class ReviewFixTests(unittest.TestCase):
             owner.block_id, owner.block_deadline = block, 120 * 60
             owner.job_minutes = {
                 j["id"]: j["minutes"] for j in inventory[block]}
-            owner.job_bindings = {j["id"]: dict(j) for j in inventory[block]}
+            kinds = {job.name: job.stage for job in planned}
+            owner.job_bindings = {j["id"]: {
+                **j, "kind": kinds[j["id"]] if block == "storage" else
+                driver.BLOCK_KINDS[block], "estimated_peak_bytes": driver.GIB,
+                "gomaxprocs": 10} for j in inventory[block]}
             owner.window["oracle_go"] = list(owner.job_bindings)
             self.assertTrue(all(j["minutes"] == minutes
                                 for j in inventory[block]))
@@ -1665,6 +1672,7 @@ class NativeAdmissionTests(unittest.TestCase):
 
                 def start(args, directory, env, cwd):
                     owned = original(args, directory, env, cwd)
+                    self.assertEqual(owned.directory, directory)
                     if directory.name == selected[0].name:
                         error = fixture_budget_stop(directory)
                         if point == "start":
@@ -1692,7 +1700,8 @@ class NativeAdmissionTests(unittest.TestCase):
                       patch.object(driver.signal, "setitimer")):
                     record = driver.execute_session(
                         owner, config, root, setup["identity"], 1)
-                    self.assertEqual(owner.calls, [j.name for j in selected])
+                    self.assertEqual(owner.calls, [j.name for j in selected],
+                                     record["blocks"]["storage"])
                     complete = [root / "jobs" / j.name / "complete.json"
                                 for j in selected]
                     rows = [driver.read_json(path) for path in complete]
@@ -1734,6 +1743,7 @@ class NativeAdmissionTests(unittest.TestCase):
             with self.subTest(point=point), \
                     tempfile.TemporaryDirectory() as folder:
                 root = Path(folder).resolve()
+                self.assertFalse((root / "aux").exists())
                 driver.atomic_json(root / "python-runtime.json", {})
                 owner = FixtureSupervisor(root, [])
                 owner.stop_all = unittest.mock.Mock()
@@ -1824,6 +1834,50 @@ class NativeAdmissionTests(unittest.TestCase):
                 owner.start.assert_called_once()
                 self.assertFalse(list(root.glob("jobs/*/complete.json")))
                 self.assertFalse(list(root.glob("aux/*/complete.json")))
+
+    def test_unexpected_error_is_terminal_and_cannot_hide_later_work(self):
+        for writable in (True, False):
+            with self.subTest(writable=writable), \
+                    tempfile.TemporaryDirectory() as folder:
+                owner = fixture_owner(Path(folder).resolve())
+                owner.begin_block = unittest.mock.Mock()
+                owner.stop_all = unittest.mock.Mock()
+                config = {"blocks": [{"id": block, "jobs": []}
+                                     for block in ("cpu_cost", "baseline_a7")]}
+                original = driver.atomic_json
+
+                def save(path, value):
+                    if (not writable and value.get("blocks", {}).get(
+                            "cpu_cost", {}).get("terminal") == "fatal"):
+                        raise OSError("synthetic receipt write failure")
+                    return original(path, value)
+
+                expected = AttributeError if writable else OSError
+                with (patch.object(driver.signal, "signal"),
+                      patch.object(driver.signal, "setitimer"),
+                      patch.object(driver.time, "monotonic", return_value=0),
+                      patch.object(driver, "atomic_json", side_effect=save),
+                      patch.object(driver, "binding_block", side_effect=(
+                          AttributeError("synthetic missing directory")))
+                      as work,
+                      self.assertRaises(expected)):
+                    driver.execute_session(owner, config, owner.root, {}, 1)
+                owner.stop_all.assert_called_once()
+                work.assert_called_once()
+                saved = driver.read_json(owner.root / "session.json")
+                self.assertNotIn("baseline_a7", saved["blocks"])
+                if writable:
+                    failed = saved["blocks"]["cpu_cost"]
+                    self.assertEqual(failed["terminal"], "fatal")
+                    self.assertNotEqual(failed["state"], "partial")
+                    self.assertEqual(failed["reason_code"], "AttributeError")
+                    self.assertIn("missing directory", failed["reason"])
+                    owner.begin_block.reset_mock()
+                    with (patch.object(driver.signal, "signal"),
+                          self.assertRaises(driver.FatalSession)):
+                        driver.execute_session(
+                            owner, config, owner.root, {}, 1)
+                    owner.begin_block.assert_not_called()
 
 
 class DurabilityTests(unittest.TestCase):
