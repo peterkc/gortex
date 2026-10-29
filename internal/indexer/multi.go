@@ -1071,18 +1071,18 @@ func (mi *MultiIndexer) runMasterResolveHookedContext(ctx context.Context, scope
 	return err
 }
 
-func (mi *MultiIndexer) runMasterResolveFiles(files []string, useLSP bool) {
-	mi.runMasterResolveFilesWithEvidence(files, useLSP, nil)
+func (mi *MultiIndexer) runMasterResolveFiles(files []string, useLSP bool) *resolver.ResolveStats {
+	return mi.runMasterResolveFilesWithEvidence(files, useLSP, nil)
 }
 
 // runMasterResolveFilesWithEvidence is runMasterResolveFiles for a repository
 // mutation's catch-up: evidence, when non-nil, is the repository's resolver
 // holding the mutation's pre-eviction evidence (resolveWithDeferredEvidence),
 // which the master resolver inherits for this one resolve.
-func (mi *MultiIndexer) runMasterResolveFilesWithEvidence(files []string, useLSP bool, evidence *resolver.Resolver) {
+func (mi *MultiIndexer) runMasterResolveFilesWithEvidence(files []string, useLSP bool, evidence *resolver.Resolver) *resolver.ResolveStats {
 	master := mi.newMasterResolver(useLSP)
 	if master == nil {
-		return
+		return nil
 	}
 	master.InheritIncrementalEvidence(evidence)
 	mt := time.Now()
@@ -1094,6 +1094,7 @@ func (mi *MultiIndexer) runMasterResolveFilesWithEvidence(files []string, useLSP
 		zap.Int("pending_scanned", stats.PendingBefore),
 		zap.Int("pending_admitted", stats.PendingAfter))
 	mi.reconcileRetargetedTestCalls(master.TakeRetargetedTestCallFiles())
+	return stats
 }
 
 // reconcileRetargetedTestCalls re-runs the scoped test projection over the
@@ -1198,7 +1199,12 @@ func (mi *MultiIndexer) RunPreEnrichResolveFiles(ctx context.Context, files []st
 		return err
 	}
 	if len(files) > 0 {
-		mi.runMasterResolveFiles(files, true)
+		stats := mi.runMasterResolveFiles(files, true)
+		if stats != nil && stats.IncomingAdmissionRefused {
+			return &graph.BoundedLocalizationLimitError{
+				Resource: "warmup incoming-source candidates", Limit: stats.IncomingAdmissionLimit,
+			}
+		}
 	}
 	if err := context.Cause(ctx); err != nil {
 		return err
@@ -1218,7 +1224,13 @@ func (mi *MultiIndexer) RunPreEnrichResolveFiles(ctx context.Context, files []st
 	if resolutionAffected > 0 {
 		return mi.runCrossRepoResolveContext(ctx, false)
 	}
-	mi.runCrossRepoResolveFiles(files)
+	if cr := mi.newCrossRepoResolver(); cr != nil {
+		_, admission := cr.ResolveMutationFrontiersBounded(files, files, files)
+		mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
+		if admission.Refusal != nil {
+			return admission.Refusal
+		}
+	}
 	return context.Cause(ctx)
 }
 

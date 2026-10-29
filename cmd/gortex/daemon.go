@@ -719,18 +719,7 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 			state.mcpServer.PrewarmCoChange()
 		}
 		elapsed := time.Since(start)
-		controller.MarkEnriched(elapsed)
-		// The warmup tail is done, so the view builds that were competing with
-		// it are admitted. Every coordinator holding a cycle and every ref-view
-		// build parked on a claim starts here, without being asked again.
-		viewBuilds.Open()
-		logger.Info("daemon: enrichment complete", zap.Duration("warmup", elapsed))
-		publishReadinessPhase(state, "enrichment_complete", true, map[string]any{
-			"enriched":       true,
-			"warmup_seconds": int64(elapsed.Seconds()),
-			"warmup_ms":      elapsed.Milliseconds(),
-		})
-		logWarmupSummary(logger, warmup, queryableElapsed, elapsed)
+		publishWarmupCompletion(state, controller, logger, viewBuilds, warmup, queryableElapsed, elapsed)
 		// Audit repo ownership once the graph has settled. Runs here, after
 		// every reconcile and derived pass, so it observes the state the
 		// daemon will actually serve rather than a mid-warmup transient.
@@ -745,6 +734,40 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	}()
 
 	return srv.Serve()
+}
+
+// publishWarmupCompletion updates the controller and publishes the final warmup outcome.
+func publishWarmupCompletion(state *daemonState, controller *realController, logger *zap.Logger, viewBuilds *indexer.ViewBuildGate, warmup *warmupTimings, queryable, elapsed time.Duration) {
+	if warmup.resolveErr != nil {
+		// Preserve MarkEnriched's usable-daemon fallback without claiming
+		// enrichment, even when the resolver skipped compute-ready.
+		controller.ready.Store(true)
+		// The warmup tail has joined even on failure; release queued builds
+		// without claiming that enrichment completed successfully.
+		viewBuilds.Open()
+		logger.Warn("daemon: warmup incomplete", zap.Error(warmup.resolveErr), zap.Duration("warmup", elapsed))
+		publishReadinessPhase(state, "warmup_incomplete", true, map[string]any{
+			"enriched":       false,
+			"warmup_seconds": int64(elapsed.Seconds()),
+			"warmup_ms":      elapsed.Milliseconds(),
+			// Keep storage details in the daemon log, not the readiness channel.
+			"error": "pre-enrichment resolve failed; check the daemon log",
+		})
+		logWarmupSummary(logger, warmup, queryable, elapsed)
+		return
+	}
+	controller.MarkEnriched(elapsed)
+	// The warmup tail is done, so the view builds that were competing with
+	// it are admitted. Every coordinator holding a cycle and every ref-view
+	// build parked on a claim starts here, without being asked again.
+	viewBuilds.Open()
+	logger.Info("daemon: enrichment complete", zap.Duration("warmup", elapsed))
+	publishReadinessPhase(state, "enrichment_complete", true, map[string]any{
+		"enriched":       true,
+		"warmup_seconds": int64(elapsed.Seconds()),
+		"warmup_ms":      elapsed.Milliseconds(),
+	})
+	logWarmupSummary(logger, warmup, queryable, elapsed)
 }
 
 // installDaemonTeardown wires one once-guarded teardown into both of the

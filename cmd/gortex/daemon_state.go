@@ -287,6 +287,7 @@ func boundedStartupError(err error) string {
 // already compute — those logs stay untouched; this just also keeps the
 // values around instead of discarding them.
 type warmupTimings struct {
+	resolveErr        error
 	prelude           time.Duration
 	prepareResolve    time.Duration
 	contractRehydrate time.Duration
@@ -1042,6 +1043,7 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func())
 				zap.Any("timing", state.lspRouter.TimingStats().Sub(lspBefore)))
 		}
 		if resolveErr != nil {
+			timings.resolveErr = resolveErr
 			resolveOK = false
 			exactWarmDelta = false
 			scopeUnknown.Store(true)
