@@ -4338,13 +4338,15 @@ class HybridGroupTests(unittest.TestCase):
             j["id"].startswith(f"n{n}-d{dimensions}-w"))]
         self.assertEqual(len(cases), 6 if mode == "latency" else 9)
         directory = Path(cases[0]["receipt_path"]).parents[1]
-        identity = {"reference": "exact-F32" if mode == "latency" else None,
+        identity = {"reference": "exact-F32" if mode == "latency" else "w1",
             "operation": "hybrid-" + mode,
             "input": "fixture-generated-input", "recipe": "int8/global128",
             "source": "fixture-source", "config": "fixture-config",
             "pairs": {"B": [[0, 1], [2, 3], [4, 5]]}
-            if mode == "latency" else {},
-            "ratio": "B/A" if mode == "latency" else None,
+            if mode == "latency" else {
+                "w4": [[0, 1], [3, 4], [6, 7]],
+                "w8": [[0, 2], [3, 5], [6, 8]]},
+            "ratio": "B/A" if mode == "latency" else "candidate/reference",
             "samples": [owner.job_bindings[j["id"]] for j in cases]}
 
         def samples(attempt, check_only=False):
