@@ -2043,14 +2043,14 @@ def unit_partial(supervisor: Supervisor, directory: Path, base: Path,
 def execute_cases(supervisor: Supervisor, selected: Sequence[Job],
                   setup: Mapping, receipts: list[dict],
                   attempt: Mapping | None = None) -> None:
-    for job in selected:
+    cohorts = [selected] if attempt is not None else [[j] for j in selected]
+    for cohort in cohorts:
         try:
-            execute_stage(supervisor, [job], setup, receipts, attempt)
+            execute_stage(supervisor, cohort, setup, receipts, attempt)
         except UnitMaximum:
+            job = next(j for j in cohort if j.name == supervisor.case["id"])
             directory = case_directory(supervisor.root, job)
             receipts.append(unit_partial(supervisor, directory, directory))
-            if attempt is not None:
-                return
 
 
 def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
@@ -2098,7 +2098,7 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
             groups.append(expected)
             summary(root, receipts, groups)
         return
-    if not supervisor.active and (attempt is None or not receipts):
+    if not supervisor.active:
         supervisor.swapouts = None
     pending = deque(selected)
     active: dict[str, tuple[Job, OwnedProcess, dict]] = {}
