@@ -98,6 +98,8 @@ DELTA_IDS = {
 WINDOW_CLEANUP_SECONDS = 15 * 60
 CASE_MINUTES = {"setup": 120, "smoke": 60, "evaluator": 30, "oracle": 30,
                 "screen": 30, "segment": 45, "catalog": 15, "hybrid": 60,
+                ("hybrid", "hybrid-timing"): 120,
+                ("hybrid", "hybrid-latency"): 120,
                 "coderank": 60, "baseline": 45}
 BLOCK_KINDS = {"setup": "setup", "smoke": "smoke", "calibration": "evaluator",
                "segment_timing": "segment", "catalog": "catalog",
@@ -181,8 +183,9 @@ def bound_jobs(root: Path) -> dict[str, list[dict]]:
                 "--output-dir", str(directory)]
         if mode == "latency":
             argv += ["--generated", "--native-dir", str(root / "native")]
+        minutes = 120 if name == "hybrid-" + mode else 60
         result["hybrid"].append({
-            "id": name, "minutes": 60, "argv": argv,
+            "id": name, "minutes": minutes, "argv": argv,
             "selected_jobs": selected,
             "receipt_path": str(directory / "complete.json"),
         })
@@ -741,7 +744,8 @@ class Supervisor:
                     or (kind == "setup" and job["gomaxprocs"] != 2)):
                 raise FatalSession("unbound case kind/memory/runtime profile")
             self.job_minutes[job["id"]] = min(
-                job["minutes"], CASE_MINUTES[kind])
+                job["minutes"], CASE_MINUTES.get((kind, job["id"]),
+                                               CASE_MINUTES[kind]))
         if self.block_id == "setup":
             self.job_limit("setup", time.monotonic())
 
@@ -751,6 +755,10 @@ class Supervisor:
         if name not in self.job_minutes or self.active:
             raise FatalSession(f"{self.block_id}: unlisted or competing case")
         duration = self.job_minutes[name] * 60
+        if hasattr(self, "group_deadline"):
+            maximum = CASE_MINUTES[BLOCK_KINDS[self.block_id]] * 60
+            self.group_deadline = min(self.group_deadline, now + maximum)
+            duration = min(duration, self.group_deadline - now)
         if duration > self.block_deadline - now:
             raise DeadlineExceeded(f"{name}: window too short; not-started")
         self.case = self.job_bindings[name]
@@ -770,6 +778,8 @@ class Supervisor:
     def arm_guard(self) -> None:
         end = min([self.block_deadline - CLEANUP_RESERVE_SECONDS,
                    *(owned.deadline for owned in self.active)])
+        group = getattr(self, "group_deadline", math.inf)
+        end = min(end, group - CLEANUP_RESERVE_SECONDS)
         signal.setitimer(signal.ITIMER_REAL,
                          max(0.000001, end - time.monotonic()))
 
@@ -2186,17 +2196,23 @@ def comparison_group(supervisor: Supervisor, name: str, identity: Mapping,
         new_attempt(supervisor, folder)
         atomic_json(folder / "started.json", identity)
         attempt = read_json(folder / "attempt.json")
-        supervisor.swapouts = None
-        rows = samples(attempt)
-        states = {r["state"] for r in rows}
-        state = ("budget_exceeded" if "budget_exceeded" in states else
-                 "checks_failed" if states != {"pass"} else "pass")
-        paths = output_files([folder]) + list(folder.glob("*/complete.json"))
-        cached = verify({"identity": identity, "state": state, "samples": rows,
-                         "attempt": attempt, "files": {
-                             str(p.relative_to(root)): digest(p)
-                             for p in paths}})
-        atomic_json(folder / "complete.json", cached)
+        supervisor.swapouts, supervisor.group_deadline = None, math.inf
+        try:
+            rows = samples(attempt)
+            states = {r["state"] for r in rows}
+            state = ("budget_exceeded" if "budget_exceeded" in states else
+                     "checks_failed" if states != {"pass"} else "pass")
+            paths = output_files([folder, *folder.glob("*/complete.json")])
+            cached = verify({"identity": identity, "state": state,
+                             "samples": rows, "attempt": attempt, "files": {
+                                 str(p.relative_to(root)): digest(p)
+                                 for p in paths}})
+            if time.monotonic() >= supervisor.launch_deadline:
+                raise DeadlineExceeded(f"{name}: group deadline")
+            atomic_json(folder / "complete.json", cached)
+        finally:
+            del supervisor.group_deadline
+            supervisor.arm_guard()
     ratios = []
     if cached["state"] == "pass":
         for label, pairs in identity["pairs"].items():

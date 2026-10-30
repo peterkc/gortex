@@ -3007,7 +3007,7 @@ class NativeEntryTests(unittest.TestCase):
 
 class HybridGroupTests(unittest.TestCase):
     def owner(self, root, *, window="hybrid-window-1", stop=None, budget=None,
-              swap_step=0):
+              swap_step=0, clock_step=100):
         owner = fixture_owner(root)
         owner.window = {"id": window}
         owner.block_id, owner.block_deadline = "hybrid", 100000
@@ -3015,7 +3015,8 @@ class HybridGroupTests(unittest.TestCase):
             **job, "kind": "hybrid", "gomaxprocs": 10,
             "estimated_peak_bytes": driver.GIB}
             for job in driver.bound_jobs(root)["hybrid"]}
-        owner.job_minutes = {name: 60 for name in owner.job_bindings}
+        owner.job_minutes = {name: job["minutes"]
+                             for name, job in owner.job_bindings.items()}
         owner.calls, owner.clocks, owner.baselines = [], [], []
         owner.clock, owner.counter = [0.0], 10000
         owner.arm_guard = unittest.mock.Mock()
@@ -3122,7 +3123,7 @@ class HybridGroupTests(unittest.TestCase):
                     driver.atomic_json(directory / (sample + ".result.json"),
                                        result)
             started = owner.clock[0]
-            owner.clock[0] += 100
+            owner.clock[0] += clock_step
             return SimpleNamespace(process=fixture_process(123, 0),
                 directory=directory, started=started, peak_rss=1024,
                 deadline=owner.launch_deadline)
@@ -3130,16 +3131,21 @@ class HybridGroupTests(unittest.TestCase):
         owner.start = start
         return owner
 
-    def group(self, owner, n=10000):
+    def group(self, owner, n=10000, mode="latency", dimensions=384):
         profiles = driver.bound_jobs(owner.root)["hybrid"]
-        cases = [j for j in profiles if f"generated-n{n}-int8-" in j["id"]
-                 and "-w1-" in j["id"]]
-        self.assertEqual(len(cases), 6)
+        cases = [j for j in profiles if (
+            f"generated-n{n}-int8-" in j["id"] and "-w1-" in j["id"]
+            if mode == "latency" else
+            j["id"].startswith(f"n{n}-d{dimensions}-w"))]
+        self.assertEqual(len(cases), 6 if mode == "latency" else 9)
         directory = Path(cases[0]["receipt_path"]).parents[1]
-        identity = {"reference": "exact-F32", "operation": "hybrid-latency",
+        identity = {"reference": "exact-F32" if mode == "latency" else None,
+            "operation": "hybrid-" + mode,
             "input": "fixture-generated-input", "recipe": "int8/global128",
             "source": "fixture-source", "config": "fixture-config",
-            "pairs": {"B": [[0, 1], [2, 3], [4, 5]]}, "ratio": "B/A",
+            "pairs": {"B": [[0, 1], [2, 3], [4, 5]]}
+            if mode == "latency" else {},
+            "ratio": "B/A" if mode == "latency" else None,
             "samples": [owner.job_bindings[j["id"]] for j in cases]}
 
         def samples(attempt, check_only=False):
@@ -3148,7 +3154,7 @@ class HybridGroupTests(unittest.TestCase):
                 folder = Path(job["receipt_path"]).parent
                 row = driver.auxiliary(owner, job["id"], job["argv"],
                     lambda _, j=job, d=folder: driver.hybrid_outputs(
-                        owner.root, "latency", j["selected_jobs"], d,
+                        owner.root, mode, j["selected_jobs"], d,
                         {"source": "fixture-source",
                          "go_version": "fixture-go", "native_files": {}}),
                     selection=job["selected_jobs"], directory=folder,
@@ -3161,12 +3167,17 @@ class HybridGroupTests(unittest.TestCase):
 
         return directory, identity, samples
 
-    def run_group(self, owner, *, n=10000):
-        directory, identity, samples = self.group(owner, n)
+    def run_group(self, owner, *, n=10000, mode="latency", dimensions=384,
+                  before_first=0):
+        directory, identity, samples = self.group(owner, n, mode, dimensions)
+        def load(attempt, check_only=False):
+            if not check_only:
+                owner.clock[0] += before_first
+            return samples(attempt, check_only=check_only)
         with patch.object(driver.time, "monotonic",
                           side_effect=lambda: owner.clock[0]):
             return driver.comparison_group(owner, directory.name,
-                                           identity, samples)
+                                           identity, load)
 
     def rehash(self, root, directory):
         for path in directory.glob("*/complete.json"):
@@ -3415,20 +3426,61 @@ class HybridGroupTests(unittest.TestCase):
                     self.assertEqual(resumed.calls, [])
             self.assertFalse((root / "attempts").exists())
 
-    def test_per_sample_clocks_and_one_group_swapouts_baseline(self):
-        with tempfile.TemporaryDirectory() as f:
-            root = Path(f).resolve()
-            owner = self.owner(root, swap_step=4096)
-            self.run_group(owner)
-            self.assertEqual(owner.baselines, [None] + [10000] * 5)
-            self.assertEqual(owner.clocks, [(i * 100, i * 100 + 2700)
-                                           for i in range(6)])
+    def test_one_group_clock_and_one_group_swapouts_baseline(self):
+        self.assertEqual(driver.CASE_MINUTES["hybrid"], 60)
+        self.assertEqual(driver.WINDOW_CLEANUP_SECONDS, 15 * 60)
+        for mode, count in (("latency", 6), ("timing", 9)):
+            for stop_reserve in (11, 21):
+                with self.subTest(mode=mode, stop=stop_reserve), \
+                        tempfile.TemporaryDirectory() as f, \
+                        patch.object(driver, "CLEANUP_RESERVE_SECONDS",
+                                     stop_reserve):
+                    root = Path(f).resolve()
+                    owner = self.owner(root, swap_step=4096)
+                    sha = owner.native_identity["input_manifest_sha256"]
+                    go = NativeAdmissionTests().go(sha)
+                    go["window_id"] = owner.window["id"]
+                    owner.block_deadline = driver.window_limit(go, sha, 1000)
+                    self.assertEqual(owner.block_deadline,
+                                     4 * 3600 - 1000 - 15 * 60)
+                    proof = self.run_group(owner, mode=mode, before_first=200)
+                    end = 200 + 60 * 60 - stop_reserve
+                    self.assertEqual(owner.clocks, [
+                        (200 + i * 100, end) for i in range(count)])
+                    self.assertEqual(owner.baselines,
+                                     [None] + [10000] * (count - 1))
+                    self.assertEqual([end - start for start, end
+                                      in owner.clocks], [
+                        60 * 60 - stop_reserve - i * 100
+                        for i in range(count)])
+                    self.assertFalse(hasattr(owner, "group_deadline"))
+                    owner.clock[0] = 10**9
+                    owner.window = {"id": "later-window"}
+                    owner.start = unittest.mock.Mock(
+                        side_effect=AssertionError("cached group respawned"))
+                    self.assertEqual(self.run_group(owner, mode=mode), proof)
+                    owner.start.assert_not_called()
+                    owner.arm_guard.assert_called_once()
+                    self.assertFalse(hasattr(owner, "group_deadline"))
         with tempfile.TemporaryDirectory() as f:
             owner = self.owner(Path(f).resolve())
-            owner.block_deadline = 3599
+            owner.block_deadline = 60 * 60 - 1
             with self.assertRaises(driver.DeadlineExceeded):
                 self.run_group(owner)
             self.assertEqual(owner.calls, [])
+            self.assertFalse(hasattr(owner, "group_deadline"))
+        with tempfile.TemporaryDirectory() as f:
+            owner = self.owner(Path(f).resolve())
+            sha = owner.native_identity["input_manifest_sha256"]
+            go = NativeAdmissionTests().go(sha)
+            go["end"] = "1970-01-01T01:15:00+00:00"
+            go["window_id"] = owner.window["id"]
+            owner.block_deadline = driver.window_limit(go, sha, 0)
+            self.assertEqual(owner.block_deadline, 60 * 60)
+            self.run_group(owner)
+            self.assertEqual(owner.clocks, [
+                (i * 100, 60 * 60 - driver.CLEANUP_RESERVE_SECONDS)
+                for i in range(6)])
         for step in (8192, -1):
             with self.subTest(step=step), tempfile.TemporaryDirectory() as f:
                 root = Path(f).resolve()
@@ -3438,6 +3490,147 @@ class HybridGroupTests(unittest.TestCase):
                 directory, _, _ = self.group(owner)
                 self.assertFalse((directory / "complete.json").exists())
                 self.assertEqual(len(owner.calls), 5 if step == 8192 else 1)
+                self.assertFalse(hasattr(owner, "group_deadline"))
+
+    def test_group_expiry_stops_samples_and_clears_clock(self):
+        for mode in ("latency", "timing"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as f:
+                root = Path(f).resolve()
+                owner = self.owner(root, clock_step=1201)
+                with self.assertRaises(driver.DeadlineExceeded):
+                    self.run_group(owner, mode=mode)
+                directory, _, _ = self.group(owner, mode=mode)
+                self.assertEqual(len(owner.calls), 3)
+                self.assertGreater(owner.clock[0], 60 * 60)
+                self.assertFalse((directory / "complete.json").exists())
+                self.assertFalse(hasattr(owner, "group_deadline"))
+                self.assertEqual(len(list(directory.glob("*/complete.json"))),
+                                 3)
+                now = owner.clock[0]
+                self.assertEqual(owner.job_limit("hybrid-latency", now),
+                                 now + 120 * 60 -
+                                 driver.CLEANUP_RESERVE_SECONDS)
+
+    def test_group_clock_clears_on_unexpected_sample_error(self):
+        with tempfile.TemporaryDirectory() as f:
+            root = Path(f).resolve()
+            owner = self.owner(root)
+            with patch.object(driver, "hybrid_outputs",
+                              side_effect=KeyError("fixture bug")):
+                with self.assertRaisesRegex(KeyError, "fixture bug"):
+                    self.run_group(owner)
+            self.assertEqual(len(owner.calls), 1)
+            self.assertFalse(hasattr(owner, "group_deadline"))
+            self.assertEqual(owner.job_limit("hybrid-timing", owner.clock[0]),
+                             owner.clock[0] + 120 * 60 -
+                             driver.CLEANUP_RESERVE_SECONDS)
+
+    def test_preparation_caps_preserve_runtime_and_other_job_limits(self):
+        with tempfile.TemporaryDirectory() as f:
+            root = Path(f).resolve()
+            owner = self.owner(root)
+            preparations = {"hybrid-timing", "hybrid-latency"}
+            for name, job in owner.job_bindings.items():
+                self.assertEqual(job["minutes"],
+                                 120 if name in preparations else 60)
+            profiles = [{**job, "minutes": 1000}
+                        for job in owner.job_bindings.values()]
+            owner.permissions = unittest.mock.Mock(return_value=100000)
+            with patch.object(driver.time, "monotonic", return_value=0):
+                owner.begin_block({"id": "hybrid", "jobs": profiles}, {})
+                for name, job in owner.job_bindings.items():
+                    minutes = 120 if name in preparations else 60
+                    self.assertEqual(owner.job_minutes[name], minutes)
+                    self.assertEqual(job["kind"], "hybrid")
+                    self.assertEqual(job["gomaxprocs"], 10)
+                    self.assertEqual(owner.job_limit(name, 0),
+                                     minutes * 60 -
+                                     driver.CLEANUP_RESERVE_SECONDS)
+                job = {**profiles[0], "kind": "smoke"}
+                owner.begin_block({"id": "smoke", "jobs": [job]}, {})
+                self.assertEqual(owner.job_minutes[job["id"]], 60)
+                job = {**profiles[0], "kind": "segment"}
+                owner.begin_block({"id": "segment_timing", "jobs": [job]}, {})
+                self.assertEqual(owner.job_minutes[job["id"]], 45)
+                self.assertFalse(hasattr(owner, "group_deadline"))
+
+    def test_group_timeout_records_time_partial_in_session(self):
+        with tempfile.TemporaryDirectory() as f:
+            root = Path(f).resolve()
+            owner = self.owner(root, clock_step=1000)
+            owner.permissions = unittest.mock.Mock(return_value=100000)
+            profiles = list(owner.job_bindings.values())
+            admission = {"blocks": [{"id": "storage", "jobs": []},
+                                     {"id": "hybrid", "jobs": profiles}]}
+            def oracle(owner, selected, setup, concurrency, rows):
+                rows.append({"identity": {"job": {"stage": "oracle"}},
+                             "state": "pass"})
+            with patch.object(driver.time, "monotonic",
+                              side_effect=lambda: owner.clock[0]), \
+                    patch.object(driver, "execute_stage",
+                                 side_effect=oracle), \
+                    patch.object(driver.signal, "signal"), \
+                    patch.object(driver.signal, "setitimer"):
+                result = driver.execute_session(owner, admission, root, {}, 1)
+            block = result["blocks"]["hybrid"]
+            self.assertEqual(block["state"], "partial")
+            self.assertEqual(block["reason_code"], "DeadlineExceeded")
+            self.assertEqual(len(owner.calls), 5)
+            self.assertFalse(hasattr(owner, "group_deadline"))
+            self.assertFalse((root / "aux/n10000-d384/complete.json").exists())
+            self.assertFalse((root / "hybrid-summary.json").exists())
+            self.assertEqual(driver.read_json(root / "session.json"), result)
+
+    def test_late_group_proof_records_time_partial_not_complete(self):
+        with tempfile.TemporaryDirectory() as f:
+            root = Path(f).resolve()
+            owner = self.owner(root, clock_step=500)
+            owner.permissions = unittest.mock.Mock(return_value=100000)
+            directory, identity, samples = self.group(owner)
+            starts, rearmed = [], []
+            def late_proof(attempt, check_only=False):
+                rows = samples(attempt, check_only=check_only)
+                if check_only:
+                    self.assertEqual(len(owner.calls), 6)
+                    self.assertLess(owner.clock[0], 60 * 60)
+                    driver.Supervisor.arm_guard(owner)
+                    self.assertEqual(timer.call_args.args[1],
+                                     60 * 60 - owner.clock[0] -
+                                     driver.CLEANUP_RESERVE_SECONDS)
+                    starts.append(owner.clock[0])
+                    owner.clock[0] = 60 * 60 + 1
+                return rows
+            def run(owner, sdk, block):
+                driver.comparison_group(owner, directory.name,
+                                        identity, late_proof)
+            def rearm():
+                driver.Supervisor.arm_guard(owner)
+                rearmed.append(timer.call_args.args[1])
+            owner.arm_guard = rearm
+            def oracle(owner, selected, setup, concurrency, rows):
+                rows.append({"identity": {"job": {"stage": "oracle"}},
+                             "state": "pass"})
+            admission = {"blocks": [{"id": "storage", "jobs": []}, {
+                "id": "hybrid", "jobs": list(owner.job_bindings.values())}]}
+            with patch.object(driver.time, "monotonic",
+                              side_effect=lambda: owner.clock[0]), \
+                    patch.object(driver, "execute_stage",
+                                 side_effect=oracle), \
+                    patch.object(driver, "run_catalog_hybrid",
+                                 side_effect=run), \
+                    patch.object(driver.signal, "signal"), \
+                    patch.object(driver.signal, "setitimer") as timer:
+                result = driver.execute_session(owner, admission, root, {}, 1)
+            block = result["blocks"]["hybrid"]
+            self.assertEqual(starts, [3000])
+            self.assertEqual(block["state"], "partial")
+            self.assertEqual(block["reason_code"], "DeadlineExceeded")
+            self.assertFalse((directory / "complete.json").exists())
+            self.assertEqual(len(list(directory.glob("*/complete.json"))), 6)
+            self.assertFalse(hasattr(owner, "group_deadline"))
+            self.assertEqual(rearmed, [100000 - 3601 -
+                                      driver.CLEANUP_RESERVE_SECONDS])
+            self.assertEqual(driver.read_json(root / "session.json"), result)
 
     def test_sample_hashes_own_dataset_and_preparation_hashes_both(self):
         for n, other in ((10000, 100000), (100000, 10000)):
