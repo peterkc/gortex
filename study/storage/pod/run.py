@@ -2048,8 +2048,8 @@ def execute_cases(supervisor: Supervisor, selected: Sequence[Job],
         try:
             execute_stage(supervisor, cohort, setup, receipts, attempt)
         except UnitMaximum:
-            job = next(j for j in cohort if j.name == supervisor.case["id"])
-            directory = case_directory(supervisor.root, job)
+            directory = case_directory(supervisor.root,
+                                       supervisor.current_job)
             receipts.append(unit_partial(supervisor, directory, directory))
 
 
@@ -2173,7 +2173,7 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
             if job.stage == "oracle" and verdict.state != "pass":
                 raise ReviewRequired("reference oracle did not pass")
         while pending and not active:
-            job = pending[0]
+            job = supervisor.current_job = pending[0]
             gomaxprocs = supervisor.job_bindings[job.name]["gomaxprocs"]
             identity = {**case_identity(job, root, setup, gomaxprocs),
                         "inputs_verified": job.name not in supervisor.bad_jobs}
