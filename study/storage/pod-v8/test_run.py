@@ -98,6 +98,11 @@ def attempt_fixture(directory, deadline, *, mode, swapouts=0):
 class NativeFixture(unittest.TestCase):
     def setUp(self):
         super().setUp()
+        self.bound_tool = runner.native.external_tool
+        tool = patch.object(runner.native, "external_tool",
+                            side_effect=lambda name, env: name)
+        tool.start()
+        self.addCleanup(tool.stop)
         for target, value in (
                 ("native_output", ""), ("daemon_off", None),
                 ("native_resources", {"timestamp": 1000.0, "level": 30,
@@ -516,6 +521,36 @@ class TimingCpuTests(NativeFixture):
 
 
 class FrozenV9Tests(NativeFixture):
+    def test_command_maps_the_bound_absolute_d6_binary(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            attempt = attempt_fixture(root, time.time() + 30, mode="smoke")
+            path = Path(attempt.config["manifest_file"])
+            manifest = runner.native.read_json(path)
+            manifest["tools"] = {}
+            runner.write(path, manifest)
+            binary = str(attempt.binary)
+            self.assertEqual(manifest["files"][binary],
+                             runner.digest(attempt.binary))
+            attempt.env.update(STUDY_MANIFEST=str(path),
+                               STUDY_MANIFEST_SHA=runner.digest(path))
+            process = SimpleNamespace(poll=lambda: 0, returncode=0,
+                                      wait=unittest.mock.Mock())
+            with (patch.object(attempt, "observe"),
+                  patch.object(runner.native, "external_tool",
+                               wraps=self.bound_tool) as tool,
+                  patch.object(runner.subprocess, "Popen",
+                               return_value=process) as spawn):
+                self.assertEqual(attempt.command([binary, "version"]), "")
+                tool.assert_called_once_with(binary, attempt.env)
+                self.assertEqual(spawn.call_args.args[0], [binary, "version"])
+                manifest["files"].pop(binary)
+                runner.write(path, manifest)
+                attempt.env["STUDY_MANIFEST_SHA"] = runner.digest(path)
+                with self.assertRaises(runner.native.ReviewRequired):
+                    attempt.command([binary, "version"])
+                self.assertEqual(spawn.call_count, 1)
+
     def pins(self, config):
         receipt = Path(config["v9"]["receipt"])
         binary = Path(config["v9"]["binary"])

@@ -245,6 +245,7 @@ class Attempt:
 
     def command(self, argv: Sequence[str]) -> str:
         self.observe()
+        argv = [native.external_tool(argv[0], self.env), *argv[1:]]
         self.serial += 1
         path = self.directory / f"command-{self.serial}.log"
         start = time.time()

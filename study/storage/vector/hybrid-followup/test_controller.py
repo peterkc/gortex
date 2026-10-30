@@ -14,6 +14,12 @@ import run
 
 
 class ControllerTests(unittest.TestCase):
+    def setUp(self):
+        tool = patch.object(run, "external_tool",
+                            side_effect=lambda name: "/fixture/" + name)
+        tool.start()
+        self.addCleanup(tool.stop)
+
     def test_real_plan_and_required_generated_recipes(self):
         self.assertEqual(len(run.latency_jobs(Path("ann"))), 240)
         jobs = run.latency_jobs(Path("ann"), generated=True)
@@ -245,6 +251,36 @@ class ControllerTests(unittest.TestCase):
             (root / "document.f32").write_bytes(b"wrong")
             with self.assertRaisesRegex(RuntimeError, "input hash drift"):
                 run.generated_input_sha(job)
+
+
+
+
+class BoundToolTests(unittest.TestCase):
+    def test_build_uses_manifest_go_not_path_or_which(self):
+        import os
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            go = root / "go"
+            go.write_bytes(b"fixture Go; not executed")
+            manifest = root / "inputs.json"
+            manifest.write_text(json.dumps({"tools": {"go": str(go)},
+                "files": {str(go): run.file_digest(go)}}))
+            with (patch.dict(os.environ, {"PATH": "/unusable",
+                      "STUDY_MANIFEST": str(manifest),
+                      "STUDY_MANIFEST_SHA": run.file_digest(manifest)}),
+                  patch.object(run, "SCRATCH", root),
+                  patch.object(run.shutil, "which",
+                               side_effect=AssertionError),
+                  patch.object(run.subprocess, "run") as spawn):
+                run.build(root / "bin/timing", "timing", root / "native")
+                self.assertEqual(spawn.call_args.args[0][0], str(go))
+                self.assertEqual(spawn.call_args.kwargs["env"]["GOMAXPROCS"],
+                                 "2")
+                self.assertIn("-p=1", spawn.call_args.args[0])
+                go.write_bytes(b"drift")
+                with self.assertRaisesRegex(RuntimeError, "unbound"):
+                    run.build(root / "bin/again", "timing", root / "native")
+                self.assertEqual(spawn.call_count, 1)
 
 
 if __name__ == "__main__":

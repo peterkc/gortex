@@ -46,6 +46,18 @@ class Skip(RuntimeError):
         self.code = code
 
 
+def external_tool(name: str) -> str:
+    path = Path(os.environ["STUDY_MANIFEST"])
+    if digest(path) != os.environ["STUDY_MANIFEST_SHA"]:
+        raise RuntimeError("tool manifest changed")
+    manifest = json.loads(path.read_text())
+    tool = Path(manifest["tools"][name])
+    if (not tool.is_absolute() or tool.resolve() != tool
+            or digest(tool) != manifest["files"].get(str(tool))):
+        raise RuntimeError("unbound or changed external tool")
+    return str(tool)
+
+
 def digest(path: Path) -> str:
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
@@ -382,7 +394,7 @@ def execute(args: argparse.Namespace) -> int:
         save(output / "library.json", {"path": str(args.library),
              "sha256": expected, "wheel": config["ort"]})
         successor_check(
-            [str(root / "toolchain/go/bin/go"), "build", "-p=1", "-o",
+            [external_tool("go"), "build", "-p=1", "-o",
              str(output / "onnxprobe"), "."], output / "build.log", end,
             root / "checkout/study/storage/onnx", env)
         setup = time.monotonic()

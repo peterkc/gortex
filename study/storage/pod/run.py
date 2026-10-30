@@ -46,7 +46,7 @@ MEMORY_MINIMUM = 4 * GIB
 CANDIDATE_BUDGET = 8 * GIB
 ORACLE_BUDGET = 24 * GIB
 SWAP_GROWTH_LIMIT = 512 * 1024 * 1024
-NODE_SCALE = 423567 / 81179
+NODE_SCALE = 82088 / 81179
 ARCHIVES = {
     "tier1": {
         "sha256": (
@@ -55,13 +55,14 @@ ARCHIVES = {
         "bytes": 36857489,
         "queries": 694,
     },
-    "tier10": {
-        "sha256": (
-            "5f2158772b3ebba975935d38cf06c52aab6a9dacc382bb3c31e08a090bd61c2c"
-        ),
-        "bytes": 143185077,
-        "queries": 811,
-    },
+    "tier10": None,
+}
+TIER10 = {
+    "K-apimachinery": 35290, "K-component-base": 7504,
+    "K-kube-aggregator": 6145, "K-metrics": 4930,
+    "K-cli-runtime": 3979, "K-controller-manager": 1059,
+    "P-flask": 4453, "P-click": 7315,
+    "P-werkzeug": 6658, "P-jinja": 4755,
 }
 # Observed full-protocol Mac seconds / max(native, sampled-group) RSS bytes.
 OBSERVED = {
@@ -391,8 +392,23 @@ def atomic_json(path: Path, value: object) -> None:
         os.close(descriptor)
 
 
+def external_tool(name: str, env: Mapping[str, str]) -> str:
+    path = Path(env.get("STUDY_MANIFEST") or os.environ["STUDY_MANIFEST"])
+    pin = env.get("STUDY_MANIFEST_SHA") or os.environ["STUDY_MANIFEST_SHA"]
+    if digest(path) != pin:
+        raise ReviewRequired("tool manifest changed")
+    manifest = read_json(path)
+    tool = Path(name if name in manifest["files"] else
+                manifest["tools"].get(Path(name).name, name))
+    if (not tool.is_absolute() or tool.resolve() != tool
+            or digest(tool) != manifest["files"].get(str(tool))):
+        raise ReviewRequired("unbound or changed external tool")
+    return str(tool)
+
+
 def native_output(args: Sequence[str], env: Mapping[str, str], *,
                   absent_ok: bool = False) -> str:
+    args = [external_tool(args[0], env), *args[1:]]
     try:
         result = subprocess.run(args, env=env, capture_output=True, text=True,
                                 timeout=5, check=False)
@@ -556,7 +572,8 @@ def daemon_off(config: Mapping, env: Mapping[str, str]) -> None:
            for line in texts.splitlines() if line.startswith("n/")):
         raise FatalSession("installed executable is running")
     result = subprocess.run(
-        ["/bin/launchctl", "print", job["service_target"]], env=env,
+        [external_tool("launchctl", env), "print", job["service_target"]],
+        env=env,
         capture_output=True, text=True, timeout=5, check=False)
     absent = f'Could not find service "{job["label"]}" in domain '
     if result.returncode == 0 or absent not in result.stderr:
@@ -756,6 +773,8 @@ class Supervisor:
             self.job_minutes[job["id"]] = min(
                 job["minutes"], CASE_MINUTES.get((kind, job["id"]),
                                                CASE_MINUTES[kind]))
+        if self.block_id != "setup":
+            self.binding = setup_binding(self.root, self.setup)
         if self.block_id == "setup":
             self.job_limit("setup", time.monotonic())
 
@@ -850,6 +869,11 @@ class Supervisor:
                     raise DeadlineExceeded("go changed before spawn")
                 window_limit(read_json(self.go_file), self.native_identity[
                     "input_manifest_sha256"], time.time())
+                tools = read_json(self.manifest_file).get("tools", {})
+                if (not Path(args[0]).is_absolute()
+                        or args[0] in read_json(self.manifest_file)["files"]
+                        or Path(args[0]).name in tools):
+                    args = [external_tool(args[0], environment), *args[1:]]
                 process = subprocess.Popen(
                     args, cwd=cwd, env=environment, stdout=log,
                     stderr=subprocess.STDOUT, start_new_session=True,
@@ -1028,13 +1052,20 @@ def persistent_path(value: str | Path, root: Path) -> Path:
 def bad_jobs(path: Path, scratch: Path) -> set[str]:
     manifest = read_json(path)
     if (not isinstance(manifest, dict) or set(manifest) != {
-            "schema", "source", "files", "jobs", "homebrew"}
+            "schema", "source", "files", "jobs", "homebrew"
+            } | ({"tools"} if "tools" in manifest else set())
             or manifest["schema"] != "storage-inputs/v1"
             or manifest["source"] != COMMIT
             or any(not isinstance(manifest[k], dict)
                    for k in ("files", "jobs", "homebrew"))):
         raise ReviewRequired("input manifest schema/source")
     files, bad = manifest["files"], set()
+    tools = manifest.get("tools", {})
+    if (not isinstance(tools, dict) or any(
+            not isinstance(k, str) or not isinstance(v, str)
+            for k, v in tools.items()) or not set(tools.values()) <= set(
+                manifest["jobs"].get("*", []))):
+        raise ReviewRequired("unbound external tool roles")
     if set(manifest["homebrew"]) - files.keys():
         raise ReviewRequired("unlisted managed file")
     for name, expected in files.items():
@@ -1052,7 +1083,10 @@ def bad_jobs(path: Path, scratch: Path) -> set[str]:
             timestamp(tool["installed_at"], "Homebrew install")
             persistent_path(target, Path("/opt/homebrew/Cellar") /
                             tool["formula"] / tool["version"])
-        else:
+        elif not (name in tools.values() and any(
+                target.is_relative_to(Path(root).resolve()) for root in (
+                    "/usr/bin", "/usr/sbin", "/bin", "/sbin",
+                    "/Library/Developer/CommandLineTools"))):
             persistent_path(target, scratch)
         if not target.is_file() or digest(target) != expected:
             bad.add(name)
@@ -1189,6 +1223,54 @@ def copy_tree(root: Path, source: Path, destination: Path) -> dict[str, str]:
     return artifacts
 
 
+def generate_tier10(supervisor: Supervisor, inputs: Path) -> None:
+    root = supervisor.root
+    pins = read_json(supervisor.manifest_file)["files"]
+    sources = []
+    for name, nodes in TIER10.items():
+        source = inputs / "exports" / (name[0] + "-v4") / name
+        path = source / "manifest.json"
+        manifest = read_json(path)
+        if (digest(path) != pins.get(str(path)) or (
+                manifest["repo"], manifest["namespace"], manifest["origin"],
+                manifest["generator_version"], manifest["seed"],
+                manifest["counts"]["nodes"]) != (
+                    name, name, "real", "gxstudy-v2", 20261022, nodes)):
+            raise ReviewRequired("unsealed or wrong tier10 source")
+        for relative, expected in manifest["sha256"].items():
+            file = persistent_path(source / relative, source)
+            if pins.get(str(file)) != expected or digest(file) != expected:
+                raise ReviewRequired("tier10 source checksum mismatch")
+        sources.append(str(source))
+    argv = [str(root / "bin/gen"), "-sources", ",".join(sources),
+            "-repos", "10", "-seed", "20261022",
+            "-synthetic-cross-repo=false", "-out", str(root / "data/tier10")]
+    atomic_json(root / "generation.json", {
+        "route": "local-mac-setup", "argv": argv,
+    })
+    supervisor.run(argv)
+    archive = root / "downloads/tier10.tar"
+    with tarfile.open(archive, "w") as output:
+        output.add(root / "data/tier10", arcname="tier10")
+    supervisor.run(["zstd", "--output", str(archive) + ".zst", str(archive)])
+
+
+def setup_binding(root: Path, setup: Mapping) -> Mapping:
+    archives, artifacts = setup.get("archives", {}), setup["artifacts"]
+    path = root / "archives.json"
+    if (set(archives) != set(ARCHIVES) or read_json(path) != archives
+            or digest(path) != artifacts.get("archives.json")):
+        raise ReviewRequired("missing or changed setup archive binding")
+    for record in archives.values():
+        if digest(Path(record["path"])) != record["sha256"]:
+            raise ReviewRequired("setup archive changed")
+    binaries = {p: h for p, h in artifacts.items() if p.startswith("bin/")}
+    for relative, expected in binaries.items():
+        if digest(root / relative) != expected:
+            raise ReviewRequired("setup binary changed")
+    return {"archives": archives, "binaries": binaries}
+
+
 def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping) -> dict:
     root = supervisor.root
     complete = root / "setup-complete.json"
@@ -1202,6 +1284,8 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping) -> dict:
         for path, expected in receipt["runtime_libraries"].items():
             if digest(Path(path)) != expected:
                 raise ReviewRequired(f"runtime library changed: {path}")
+        setup_binding(root, receipt)
+        supervisor.setup = receipt
         head = (root / "checkout" / ".git" / "HEAD").read_text().strip()
         if head != COMMIT:
             raise ReviewRequired("checkout no longer has the detached pin")
@@ -1225,7 +1309,7 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping) -> dict:
     if not inputs.resolve().is_relative_to(supervisor.scratch):
         raise ReviewRequired("pod inputs must be copied under /work")
     metadata = read_json(inputs / "tiers-summary.json")
-    for tier, expected in ARCHIVES.items():
+    for tier, expected in (("tier1", ARCHIVES["tier1"]),):
         provided = metadata[tier]
         archive = inputs / f"{tier}.tar.zst"
         if (provided["archive_sha256"] != expected["sha256"]
@@ -1245,12 +1329,15 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping) -> dict:
     copied = {}
     for name in ("evaluator", "cpu-cost"):
         copied.update(copy_tree(root, inputs / name, root / "data" / name))
-    tool_versions = {}
+    tool_versions = {name: {
+        "path": external_tool(name, supervisor.environment),
+        "sha256": digest(Path(path))}
+        for name, path in read_json(
+            supervisor.manifest_file)["tools"].items()}
     for tool in ("go", "cmake", "c++", "git"):
         option = "version" if tool == "go" else "--version"
-        tool_versions[tool] = supervisor.run([tool, option]).read_text()
-    tool_versions["/usr/bin/time"] = {
-        "path": "/usr/bin/time", "sha256": digest(Path("/usr/bin/time"))}
+        tool_versions[tool]["version"] = supervisor.run(
+            [external_tool(tool, supervisor.environment), option]).read_text()
     atomic_json(root / "tool-versions.json", tool_versions)
     checkout = root / "checkout"
     supervisor.run([
@@ -1276,6 +1363,10 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping) -> dict:
         "-DUSEARCH_BUILD_TEST_CPP=OFF", "-DUSEARCH_BUILD_BENCH_CPP=OFF",
         "-DUSEARCH_BUILD_TEST_C=OFF", "-DUSEARCH_USE_NUMKONG=OFF",
         "-DUSEARCH_USE_OPENMP=OFF",
+        "-DCMAKE_C_COMPILER=" + supervisor.environment["CC"],
+        "-DCMAKE_CXX_COMPILER=" + supervisor.environment["CXX"],
+        "-DCMAKE_MAKE_PROGRAM=" + external_tool(
+            "make", supervisor.environment),
     ])
     supervisor.run([
         "cmake", "--build", str(build), "--target", "usearch_static_c",
@@ -1317,7 +1408,7 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping) -> dict:
         }
     atomic_json(root / "linking.json", linking)
     supervisor.run(["git", "diff", "--exit-code"], cwd=checkout)
-    for tier in ARCHIVES:
+    for tier in ("tier1",):
         archive = inputs / f"{tier}.tar.zst"
         unpacked = root / "downloads" / f"{tier}.tar"
         # Keep decompression separate from extraction and preserve the input.
@@ -1325,6 +1416,7 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping) -> dict:
             "zstd", "--decompress", "--output", str(unpacked), str(archive),
         ])
         extract(unpacked, root / "data", tier)
+    generate_tier10(supervisor, inputs)
     artifacts = {
         str(path.relative_to(root)): digest(path)
         for path in [*sorted((root / "bin").iterdir()),
@@ -1332,21 +1424,43 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping) -> dict:
                      root / "linking.json", root / "tool-versions.json"]
     }
     artifacts.update(copied)
+    archives = {}
     for tier in ARCHIVES:
         manifest_path = root / "data" / tier / "manifest.json"
         manifest = read_json(manifest_path)
+        expected_repos = ["K-client-go"] if tier == "tier1" else list(TIER10)
+        nodes = 81179 if tier == "tier1" else 82088
+        queries = read_json(root / "data" / tier / "queries.json")
+        expected = read_json(root / "data" / tier / "expected.json")
+        ids = [query["id"] for query in queries]
+        if (manifest["repos"] != expected_repos
+                or manifest["counts"]["nodes"] != nodes
+                or manifest.get("cross_repo_policy")
+                or not ids or len(ids) != len(set(ids))
+                or [answer["query_id"] for answer in expected] != ids):
+            raise ReviewRequired("tier repositories/count/query mismatch")
+        archive = (inputs / "tier1.tar.zst" if tier == "tier1"
+                   else root / "downloads/tier10.tar.zst")
+        archives[tier] = {"path": str(archive), "sha256": digest(archive),
+                          "bytes": archive.stat().st_size, "queries": len(ids)}
         for relative, expected in manifest["sha256"].items():
             path = root / "data" / tier / relative
             if digest(path) != expected:
                 raise ReviewRequired(f"sealed tier checksum mismatch: {tier}")
             artifacts[str(path.relative_to(root))] = expected
         artifacts[str(manifest_path.relative_to(root))] = digest(manifest_path)
+    atomic_json(root / "archives.json", archives)
+    artifacts["archives.json"] = digest(root / "archives.json")
+    artifacts["generation.json"] = digest(root / "generation.json")
     receipt = {
+        "archives": archives,
         "identity": dict(identity), "artifacts": artifacts,
         "window_id": supervisor.window["id"],
         "runtime_libraries": runtime_libraries,
     }
     atomic_json(complete, receipt)
+    setup_binding(root, receipt)
+    supervisor.setup = receipt
     return receipt
 
 
@@ -1535,8 +1649,9 @@ def case_identity(job: Job, root: Path, setup: Mapping,
     return {
         "job": asdict(job), "source": COMMIT,
         "driver": setup["identity"]["driver"],
-        "archives": {tier: record["sha256"]
-                     for tier, record in ARCHIVES.items()},
+        "archives": setup["archives"],
+        "binaries": {p: h for p, h in setup["artifacts"].items()
+                     if p.startswith("bin/")},
         "binary": setup["artifacts"][f"bin/{job.adapter}"],
         "command": command(job, root), "GOMAXPROCS": gomaxprocs,
         "runtime": setup["identity"]["runtime"],
@@ -2079,6 +2194,7 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
            "GOMAXPROCS": str(supervisor.job_bindings[name]["gomaxprocs"])}
     working_directory = cwd or root / "checkout"
     identity = {"source": COMMIT, "command": list(args),
+                **supervisor.binding,
                 "inputs_verified": name not in supervisor.bad_jobs,
                 "cwd": str(working_directory),
                 "environment": env, "selected_jobs": list(selection),
@@ -2759,6 +2875,8 @@ def main() -> int:
     manifest = read_json(manifest_path)
     required = {str(Path(__file__).resolve()), str(config_path.resolve()),
                 config["launcher"]["path"]}
+    required.update(j["argv"][0] for b in config["blocks"]
+                    for j in b["jobs"] if "argv" in j)
     if not required <= set(manifest["jobs"].get("*", [])):
         raise ReviewRequired("unbound common driver/config/launcher")
     required.update(str(Path(d) / f) for d, dirs, names in os.walk(inputs)
@@ -2766,12 +2884,21 @@ def main() -> int:
                                         if (Path(d) / n).is_symlink())))
     if not required <= manifest["files"].keys():
         raise ReviewRequired("unmanifested input/config/driver/launcher")
+    tools = manifest["tools"]
+    if not set("go cmake c++ cc make git file zstd time ps lsof sysctl "
+               "vm_stat pmset launchctl lipo otool".split()) <= tools.keys():
+        raise ReviewRequired("required external tool binding missing")
+    if "*" in bad_jobs(manifest_path, scratch):
+        raise ReviewRequired("common input/tool hash mismatch")
+    env = {**environment(root), "STUDY_MANIFEST": str(manifest_path),
+           "STUDY_MANIFEST_SHA": config["input_manifest_sha256"]}
+    env.update(CC=external_tool("cc", env), CXX=external_tool("c++", env))
     if root.exists() != bool(args.resume):
         raise ReviewRequired("new run-id or explicit resume required")
     root.mkdir(parents=True, exist_ok=bool(args.resume))
     with (root / "driver.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        owner = Supervisor(root, environment(root), config)
+        owner = Supervisor(root, env, config)
         atomic_json(root / "python-runtime.json", owner.native_identity)
         identity = {"driver": digest(Path(__file__)),
                     "runtime": owner.native_identity}

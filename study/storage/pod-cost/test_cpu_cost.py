@@ -394,6 +394,8 @@ class CostTests(unittest.TestCase):
             patch.object(cost.importlib.metadata, "distribution",
                          return_value=distribution),
             patch.object(cost, "successor_check"),
+            patch.object(cost, "external_tool",
+                         return_value=str(root / "fixture-go")),
             patch.object(cost, "precompute", side_effect=prepare),
             patch.object(cost, "probe", side_effect=probe),
             patch.object(cost, "matrix", return_value=(
@@ -643,6 +645,29 @@ class CostTests(unittest.TestCase):
                 self.assertEqual(summary["cases"][0]["actual_repeats"], 0)
                 self.assertEqual(summary["accepted_timings"],
                                  outcome == "completed")
+
+
+
+
+class BoundGoTests(unittest.TestCase):
+    def test_common_manifest_go_is_absolute_and_hash_bound_without_path(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            go = root / "go"
+            go.write_bytes(b"fixture Go; not executed")
+            manifest = root / "inputs.json"
+            manifest.write_text(json.dumps({"tools": {"go": str(go)},
+                "files": {str(go): cost.digest(go)}}))
+            with patch.dict(os.environ, {"PATH": "/unusable",
+                    "STUDY_MANIFEST": str(manifest),
+                    "STUDY_MANIFEST_SHA": cost.digest(manifest)}):
+                self.assertEqual(cost.external_tool("go"), str(go))
+                go.write_bytes(b"changed")
+                with self.assertRaisesRegex(RuntimeError, "unbound"):
+                    cost.external_tool("go")
+                manifest.write_text("{}")
+                with self.assertRaisesRegex(RuntimeError, "manifest"):
+                    cost.external_tool("go")
 
 
 if __name__ == "__main__":

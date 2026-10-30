@@ -189,6 +189,7 @@ def mac_memory_gate(path: Path) -> dict:
     for command in (["sysctl", "kern.memorystatus_level"],
                     ["vm_stat", "-c", "2", "30"],
                     ["sysctl", "kern.memorystatus_level"]):
+        command[0] = external_tool(command[0])
         outputs.append(subprocess.check_output(command, text=True))
     output = "".join(outputs)
     reading = {**parse_mac_memory(output), "raw": output}
@@ -212,7 +213,7 @@ def mac_memory_retry(directory: Path, name: str) -> dict:
                 raise
             # Observe the full five-minute interval instead of polling.
             output = subprocess.check_output(
-                ["vm_stat", "-c", "2", "300"], text=True)
+                [external_tool("vm_stat"), "-c", "2", "300"], text=True)
             (directory / (name + f"-wait-{window_id}-a{attempt}.log"
                           )).write_text(output)
     raise AssertionError("memory retry loop did not terminate")
@@ -245,9 +246,19 @@ def runtime_paths() -> list[Path]:
     return paths
 
 
+def external_tool(name: str) -> str:
+    path = Path(os.environ["STUDY_MANIFEST"])
+    if file_digest(path) != os.environ["STUDY_MANIFEST_SHA"]:
+        raise RuntimeError("tool manifest changed")
+    manifest = json.loads(path.read_text())
+    tool = Path(manifest["tools"][name])
+    if (not tool.is_absolute() or tool.resolve() != tool
+            or file_digest(tool) != manifest["files"].get(str(tool))):
+        raise RuntimeError("unbound or changed external tool")
+    return str(tool)
+
+
 def build(binary: Path, mode: Mode, native: Path) -> None:
-    if shutil.which("go") is None:
-        raise RuntimeError("Go1.27.1 is required; no toolchain is installed")
     environment = dict(os.environ)
     environment["GOMAXPROCS"] = "2"
     environment["GOTOOLCHAIN"] = "local"
@@ -279,7 +290,8 @@ def build(binary: Path, mode: Mode, native: Path) -> None:
         environment["CGO_ENABLED"] = "0"
     binary.parent.mkdir(parents=True, exist_ok=True)
     package = "./cmd/timing" if mode == "timing" else "./cmd/ann"
-    subprocess.run(["go", "build", "-p=1", "-o", str(binary), package],
+    subprocess.run([external_tool("go"), "build", "-p=1",
+                    "-o", str(binary), package],
                    cwd=ROOT, env=environment, check=True)
 
 
@@ -388,7 +400,8 @@ def main() -> None:
         build(binary, mode, args.native_dir.resolve())
         configuration = {"source": source_fingerprint(),
                          "go_version": subprocess.check_output(
-                             ["go", "version"], text=True).strip(),
+                             [external_tool("go"), "version"],
+                             text=True).strip(),
                          "cpu_count": os.cpu_count(),
                          "runtime_environment": {
                          key: os.environ.get(key) for key in

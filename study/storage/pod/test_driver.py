@@ -55,7 +55,54 @@ def fixture_budget_stop(directory):
     return driver.BudgetExceeded(peak, 8 * driver.GIB)
 
 
-def fixture_owner(root):
+def fixture_tools(root):
+    root = root.resolve()
+    directory = root / "control/tools"
+    directory.mkdir(parents=True, exist_ok=True)
+    tools = {}
+    for name in ("go cmake c++ cc make git file zstd time ps lsof sysctl "
+                 "vm_stat pmset launchctl lipo otool").split():
+        path = directory / name
+        path.write_bytes(("fixture tool " + name).encode())
+        tools[name] = str(path)
+    manifest = fixture_manifest(root, [Path(p) for p in tools.values()])
+    record = driver.read_json(manifest)
+    record["tools"] = tools
+    driver.atomic_json(manifest, record)
+    env = {"PATH": "/no-path", "STUDY_MANIFEST": str(manifest),
+           "STUDY_MANIFEST_SHA": driver.digest(manifest),
+           "CC": tools["cc"], "CXX": tools["c++"]}
+    return manifest, tools, env
+
+
+def fixture_setup(root, setup=None):
+    complete = root / "setup-complete.json"
+    if setup is None and complete.exists():
+        return driver.read_json(complete)
+    setup = setup if setup is not None else {
+        "identity": {"driver": "fixture", "runtime": {}},
+        "artifacts": {}, "runtime_libraries": {}}
+    (root / "bin").mkdir(exist_ok=True)
+    for name in {*driver.ADAPTERS, "gen", "oracle"}:
+        path = root / "bin" / name
+        if not path.exists():
+            path.write_bytes(b"fixture binary; never executed")
+        setup["artifacts"]["bin/" + name] = driver.digest(path)
+    archives = {}
+    for tier in driver.ARCHIVES:
+        path = root / (tier + "-fixture.archive")
+        if not path.exists():
+            path.write_bytes(b"tiny fixture archive; not study data")
+        archives[tier] = {"path": str(path), "sha256": driver.digest(path),
+                          "bytes": path.stat().st_size, "queries": 1}
+    driver.atomic_json(root / "archives.json", archives)
+    setup.update(archives=archives)
+    setup["artifacts"]["archives.json"] = driver.digest(root / "archives.json")
+    driver.atomic_json(complete, setup)
+    return setup
+
+
+def fixture_owner(root, *, setup=True):
     owner = object.__new__(driver.Supervisor)
     owner.root, owner.environment, owner.scratch = root, {}, root
     owner.manifest_file = fixture_manifest(root)
@@ -69,12 +116,17 @@ def fixture_owner(root):
         "input_manifest_sha256": driver.digest(owner.manifest_file),
         "daemon_off_identities_sha256": "2" * 64}
     owner.sample = fixture_resources()
+    if setup:
+        owner.setup = fixture_setup(root)
+        owner.binding = driver.setup_binding(root, owner.setup)
     return owner
 
 
 class FixtureSupervisor:
     def __init__(self, root, modes, interrupt_at=None):
         self.root = root
+        self.setup = fixture_setup(root)
+        self.binding = driver.setup_binding(root, self.setup)
         self.environment = {}
         self.active, self.bad_jobs = [], set()
         self.scratch, self.window = root, {"id": "fixture-window"}
@@ -183,6 +235,7 @@ def fixture_references(root):
     setup = {"identity": {"driver": "fixture", "runtime": {},
                          "input_manifest_sha256": driver.digest(manifest)},
              "artifacts": {"bin/oracle": "fixture"}, "runtime_libraries": {}}
+    fixture_setup(root, setup)
     owner = FixtureSupervisor(root, ["pass", "pass"])
     receipts = []
     for tier in driver.ARCHIVES:
@@ -228,6 +281,7 @@ class DriverTests(unittest.TestCase):
                                   input_manifest)},
                  "artifacts": {"bin/"+j.adapter: "fixture" for j in selected},
                  "runtime_libraries": {}}
+        fixture_setup(root, setup)
         return selected, setup, {p.name: driver.digest(p) for p in data.iterdir()}
 
     def execute(self, supervisor, selected, setup, receipts):
@@ -535,8 +589,8 @@ class TimingGroupTests(unittest.TestCase):
 
     def fixture(self, root):
         _, setup, references = fixture_references(root)
-        setup["artifacts"].update({"bin/" + name: "fixture"
-                                   for name in driver.FINALISTS})
+        setup["artifacts"].update({"bin/" + name: driver.digest(
+            root / "bin" / name) for name in driver.FINALISTS})
         selected = [j for j in driver.jobs() if j.stage == "timing"
                     and j.tier == "tier1"]
         return self.owner(root), setup, selected, references
@@ -1532,6 +1586,13 @@ class ReviewFixTests(unittest.TestCase):
 
 
 class NativeAdmissionTests(unittest.TestCase):
+    def setUp(self):
+        self.bound_tool = driver.external_tool
+        tool = patch.object(driver, "external_tool",
+                            side_effect=lambda name, env: name)
+        tool.start()
+        self.addCleanup(tool.stop)
+
     def go(self, manifest_sha="1" * 64):
         return {"schema": "mac-window-go/v1", "window_id": "fixture-window",
                 "input_manifest_sha256": manifest_sha,
@@ -1984,14 +2045,22 @@ class NativeAdmissionTests(unittest.TestCase):
                 self.assertEqual(off.call_count, 1)
 
     def test_start_observes_30s_and_rechecks_go_before_spawn(self):
-        for revoke in (False, True):
-            with self.subTest(revoke=revoke), \
+        for revoke, bound in ((False, False), (True, False),
+                              (False, True), (True, True)):
+            with self.subTest(revoke=revoke, bound=bound), \
                     tempfile.TemporaryDirectory() as folder:
                 root = Path(folder)
                 directory = root / "case"
                 directory.mkdir()
                 owner = fixture_owner(root)
                 env = {**driver.environment(root), "GOMAXPROCS": "10"}
+                tools = {}
+                if bound:
+                    owner.manifest_file, tools, tool_env = fixture_tools(root)
+                    env.update(tool_env)
+                    owner.native_identity["input_manifest_sha256"] = (
+                        driver.digest(owner.manifest_file))
+                argv = ["go"] if bound else ["/fixture/private-binary"]
                 owner.go_file = root / "go.json"
                 driver.atomic_json(owner.go_file, self.go(
                     owner.native_identity["input_manifest_sha256"]))
@@ -2029,7 +2098,9 @@ class NativeAdmissionTests(unittest.TestCase):
                     return original_open(path, mode, *args, **kwargs)
 
                 owner.guard = guard
-                with (patch.object(driver.time, "monotonic",
+                with (patch.object(driver, "external_tool",
+                                   wraps=self.bound_tool),
+                      patch.object(driver.time, "monotonic",
                                    side_effect=lambda: clock[0]),
                       patch.object(driver.time, "sleep", side_effect=sleep),
                       patch.object(driver.time, "time", return_value=1000),
@@ -2044,15 +2115,17 @@ class NativeAdmissionTests(unittest.TestCase):
                                    return_value=process) as spawn):
                     if revoke:
                         with self.assertRaises(driver.DeadlineExceeded):
-                            owner.start(["/fixture/private-binary"], directory,
+                            owner.start(argv, directory,
                                         env, root)
                         spawn.assert_not_called()
                         self.assertTrue(log.closed)
                     else:
                         owned = owner.start(
-                            ["/fixture/private-binary"], directory,
+                            argv, directory,
                             env, root)
                         self.assertEqual(owned.known, {(8500, 123456789)})
+                        self.assertEqual(spawn.call_args.args[0][0],
+                            tools["go"] if bound else argv[0])
                         self.assertTrue(spawn.call_args.kwargs[
                             "start_new_session"])
                         receipt = driver.read_json(directory / "process.json")
@@ -2312,7 +2385,8 @@ class NativeAdmissionTests(unittest.TestCase):
             root = Path(folder).resolve()
             _, setup, _ = DriverTests().fixture(root)
             job = driver.Job("oracle", "oracle", "tier10")
-            setup["artifacts"]["bin/oracle"] = "fixture"
+            setup["artifacts"]["bin/oracle"] = driver.digest(
+                root / "bin/oracle")
             owner = FixtureSupervisor(root, ["pass"])
             owner.window["oracle_go"] = [job.name]
             owner.job_minutes = {job.name: 30}
@@ -2906,22 +2980,18 @@ class DurabilityTests(unittest.TestCase):
     def test_setup_binds_bsd_time_without_a_version_invocation(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder).resolve()
-            owner = fixture_owner(root)
+            owner = fixture_owner(root, setup=False)
+            owner.manifest_file, tools, owner.environment = fixture_tools(root)
             inputs = root / "inputs"
             inputs.mkdir()
-            (inputs / "tiers-summary.json").write_text("{}")
-            owner.run = unittest.mock.Mock(
-                return_value=SimpleNamespace(read_text=lambda: "version"))
-            original_digest = driver.digest
-
-            def setup_digest(path):
-                if path == Path("/usr/bin/time"):
-                    return "3" * 64
-                return original_digest(path)
-
-            with (patch.object(driver, "ARCHIVES", {}),
+            archive = inputs / "tier1.tar.zst"
+            archive.write_bytes(b"fixture")
+            pin = {"sha256": driver.digest(archive), "bytes": 7, "queries": 1}
+            driver.atomic_json(inputs / "tiers-summary.json", {"tier1": {
+                "archive_sha256": pin["sha256"], "archive_bytes": 7,
+                "queries": 1}})
+            with (patch.object(driver, "ARCHIVES", {"tier1": pin}),
                   patch.object(driver, "copy_tree", return_value={}),
-                  patch.object(driver, "digest", side_effect=setup_digest),
                   patch.object(owner, "run", side_effect=[
                       SimpleNamespace(read_text=lambda: "version") for _ in
                       range(4)] + [RuntimeError("stop before source clone")])
@@ -2929,17 +2999,19 @@ class DurabilityTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "source clone"):
                     driver.prepare(owner, inputs, {})
             versions = driver.read_json(root / "tool-versions.json")
-            self.assertEqual(versions["/usr/bin/time"], {
-                "path": "/usr/bin/time", "sha256": "3" * 64})
+            self.assertEqual(versions["time"], {
+                "path": tools["time"],
+                "sha256": driver.digest(Path(tools["time"]))})
             self.assertEqual([call.args[0] for call in
                               run.call_args_list[:4]], [
-                ["go", "version"], ["cmake", "--version"],
-                ["c++", "--version"], ["git", "--version"]])
+                [tools["go"], "version"], [tools["cmake"], "--version"],
+                [tools["c++"], "--version"], [tools["git"], "--version"]])
+
 
     def test_interrupted_setup_retention_and_fatal_stop(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder).resolve()
-            owner = fixture_owner(root)
+            owner = fixture_owner(root, setup=False)
             (root / "setup").mkdir()
             (root / "setup/log").write_text("interrupted")
             (root / "setup-started.json").write_text("{}")
@@ -3673,9 +3745,16 @@ class NativeEntryTests(unittest.TestCase):
         driver.atomic_json(config_path, config)
         files = {str(p): driver.digest(p) for p in (
             data, launcher, staged, config_path, identities)}
+        tool = scratch / "tool"
+        tool.write_bytes(b"fixture tool; never executed")
+        files[str(tool)] = driver.digest(tool)
+        tools = dict.fromkeys(("go cmake c++ cc make git file zstd time ps "
+            "lsof sysctl vm_stat pmset launchctl lipo otool").split(),
+            str(tool))
         driver.atomic_json(manifest, {
             "schema": "storage-inputs/v1", "source": driver.COMMIT,
-            "files": files, "jobs": {"*": list(files)}, "homebrew": {}})
+            "files": files, "jobs": {"*": list(files)}, "homebrew": {},
+            "tools": tools})
         driver.atomic_json(go, NativeAdmissionTests().go(
             driver.digest(manifest)))
         return config_path, manifest, staged
@@ -3792,6 +3871,29 @@ class NativeEntryTests(unittest.TestCase):
                     driver.main()
                 constructor.assert_not_called()
                 self.assertFalse(root.exists())
+
+    def test_unbound_configured_executable_refuses_before_native_owner(self):
+        with tempfile.TemporaryDirectory() as folder:
+            scratch = Path(folder).resolve()
+            config, manifest, staged = self.inputs(scratch)
+            value = driver.read_json(config)
+            value["blocks"] = [{"id": "smoke", "jobs": [{
+                "id": "fixture", "argv": [str(scratch / "unbound")]}]}]
+            driver.atomic_json(config, value)
+            record = driver.read_json(manifest)
+            record["files"][str(config)] = driver.digest(config)
+            driver.atomic_json(manifest, record)
+            root = scratch / "mac-run/unbound-executable"
+            with (patch.object(driver, "__file__", str(staged)),
+                  patch.object(driver.sys, "argv", ["run.py", "--native",
+                      str(config), "--root", str(root)]),
+                  patch.object(driver, "Supervisor") as owner,
+                  self.assertRaisesRegex(driver.ReviewRequired,
+                                         "unbound common")):
+                driver.main()
+            owner.assert_not_called()
+            self.assertFalse(root.exists())
+
 
 
 
@@ -5227,6 +5329,240 @@ class MacHybridCallerTests(unittest.TestCase):
         self.assertNotIn('int(C.memory_level()) < 30', source)
         self.assertNotIn('int(C.memory_level()) < 25', source)
         self.assertIn('checkedRSS(uint64(C.current_rss()),', source)
+
+
+
+
+class DatasetBindingTests(unittest.TestCase):
+    """Producer stubs test bindings, not real corpus generation."""
+
+    def setup_fixture(self, root, *, nodes=82088, tier1_nodes=81179,
+                      repositories=None, bad_answers=False):
+        owner = fixture_owner(root, setup=False)
+        owner.manifest_file, tools, owner.environment = fixture_tools(root)
+        inputs = root / "inputs"
+        inputs.mkdir()
+        archive = inputs / "tier1.tar.zst"
+        archive.write_bytes(b"fixture archive")
+        pin = {"sha256": driver.digest(archive),
+               "bytes": archive.stat().st_size, "queries": 1}
+        driver.atomic_json(inputs / "tiers-summary.json", {"tier1": {
+            "archive_sha256": pin["sha256"],
+            "archive_bytes": pin["bytes"], "queries": 1}})
+        manifest = driver.read_json(owner.manifest_file)
+        for name, count in driver.TIER10.items():
+            source = inputs / "exports" / (name[0] + "-v4") / name
+            source.mkdir(parents=True)
+            checksums = {}
+            for filename in ("nodes.jsonl", "edges.jsonl", "files.jsonl",
+                             "symbols.jsonl", "content.jsonl", "vectors.bin"):
+                path = source / filename
+                path.write_bytes(b"tiny sealed producer fixture")
+                checksums[filename] = driver.digest(path)
+                manifest["files"][str(path)] = driver.digest(path)
+            path = source / "manifest.json"
+            driver.atomic_json(path, {"repo": name, "namespace": name,
+                "origin": "real", "generator_version": "gxstudy-v2",
+                "seed": 20261022, "counts": {"nodes": count},
+                "sha256": checksums})
+            manifest["files"][str(path)] = driver.digest(path)
+        manifest["jobs"]["*"] = list(manifest["files"])
+        driver.atomic_json(owner.manifest_file, manifest)
+        owner.environment["STUDY_MANIFEST_SHA"] = driver.digest(
+            owner.manifest_file)
+        owner.calls = []
+
+        def dataset(tier, count, repos):
+            directory = root / "data" / tier
+            directory.mkdir(parents=True)
+            driver.atomic_json(directory / "queries.json", [{"id": "q"}])
+            driver.atomic_json(directory / "expected.json", [{
+                "query_id": "bad" if bad_answers and tier == "tier10"
+                else "q"}])
+            driver.atomic_json(directory / "manifest.json", {
+                "repos": repos, "counts": {"nodes": count},
+                "sha256": {name: driver.digest(directory / name) for name in
+                            ("queries.json", "expected.json")}})
+
+        def extract(archive, destination, prefix):
+            if prefix == "tier1":
+                dataset("tier1", tier1_nodes, ["K-client-go"])
+            else:
+                path = destination / prefix / "c/usearch.h"
+                path.parent.mkdir(parents=True)
+                path.write_bytes(b"header")
+
+        def run(args, **options):
+            owner.calls.append(list(args))
+            if args[:2] == ["git", "clone"]:
+                path = Path(args[-1]) / ".git/HEAD"
+                path.parent.mkdir(parents=True)
+                path.write_text(driver.COMMIT)
+            if args[:2] == ["cmake", "--build"]:
+                path = root / "native/build/libusearch_static_c.a"
+                path.parent.mkdir(parents=True)
+                path.write_bytes(b"static library")
+            if args[:2] == ["go", "build"]:
+                Path(args[args.index("-o") + 1]).write_bytes(b"binary")
+            if args[0] == str(root / "bin/gen"):
+                self.assertEqual(args[args.index("-repos") + 1], "10")
+                self.assertIn("-synthetic-cross-repo=false", args)
+                self.assertEqual(args[args.index("-seed") + 1], "20261022")
+                self.assertEqual(len(args[args.index("-sources") + 1]
+                                     .split(",")), 10)
+                self.assertEqual(driver.read_json(root / "generation.json")
+                                 ["route"], "local-mac-setup")
+                dataset("tier10", nodes, list(driver.TIER10) if
+                        repositories is None else repositories)
+            if args[0] == "zstd":
+                Path(args[args.index("--output") + 1]).write_bytes(b"archive")
+            log = root / "setup" / ("log-" + str(len(owner.calls)))
+            log.write_text(driver.COMMIT if args[:2] == ["git", "rev-parse"]
+                           else "fixture version")
+            return log
+
+        owner.run = run
+        owner.window = {"id": "fixture"}
+        patches = (patch.object(driver, "ARCHIVES", {
+            "tier1": pin, "tier10": None}),
+            patch.object(driver, "download"),
+            patch.object(driver, "extract", side_effect=extract),
+            patch.object(driver, "copy_tree", return_value={}))
+        return owner, inputs, patches
+
+    def prepare_fixture(self, root, **options):
+        from contextlib import ExitStack
+        owner, inputs, patches = self.setup_fixture(root, **options)
+        with ExitStack() as context:
+            for item in patches:
+                context.enter_context(item)
+            setup = driver.prepare(owner, inputs, {"driver": "fixture",
+                                                     "runtime": {}})
+        return owner, inputs, setup
+
+    def test_generated_binding_is_carried_and_resume_hashes_outputs(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            owner, inputs, setup = self.prepare_fixture(root)
+            record = setup["archives"]["tier10"]
+            self.assertEqual(record["queries"], 1)
+            self.assertEqual(record["sha256"], driver.digest(
+                Path(record["path"])))
+            self.assertNotEqual(record["sha256"],
+                "5f2158772b3ebba975935d38cf06c52aab"
+                "6a9dacc382bb3c31e08a090bd61c2c"
+            )
+            job = driver.Job("oracle", "oracle", "tier10")
+            identity = driver.case_identity(job, root, setup, 10)
+            self.assertEqual(identity["archives"], setup["archives"])
+            self.assertEqual(identity["binaries"]["bin/gen"],
+                             setup["artifacts"]["bin/gen"])
+            with patch.object(owner, "run") as spawn:
+                self.assertEqual(driver.prepare(owner, inputs,
+                    setup["identity"]), setup)
+                spawn.assert_not_called()
+            Path(record["path"]).write_bytes(b"drift")
+            with self.assertRaises(driver.ReviewRequired):
+                driver.prepare(owner, inputs, setup["identity"])
+
+    def test_superseded_and_mismatched_counts_never_bind(self):
+        for options in ({"nodes": 423567}, {"nodes": 82087},
+                        {"tier1_nodes": 81178}, {"bad_answers": True},
+                        {"repositories": ["K-client-go"]}):
+            with (self.subTest(options=options),
+                  tempfile.TemporaryDirectory() as folder):
+                root = Path(folder).resolve()
+                with self.assertRaisesRegex(driver.ReviewRequired,
+                                            "repositories/count/query"):
+                    self.prepare_fixture(root, **options)
+                self.assertFalse((root / "setup-complete.json").exists())
+                self.assertFalse((root / "archives.json").exists())
+
+    def test_setup_drift_refuses_at_next_block_before_spawn(self):
+        for damage in ("missing", "metadata", "archive", "binary"):
+            with (self.subTest(damage=damage),
+                  tempfile.TemporaryDirectory() as folder):
+                root = Path(folder)
+                selected, setup, _ = DriverTests().fixture(root)
+                owner = fixture_owner(root)
+                owner.setup = setup
+                with patch.object(owner, "permissions", return_value=10000):
+                    owner.begin_block({"id": "smoke", "jobs": []}, {})
+                if damage == "missing":
+                    setup.pop("archives")
+                elif damage == "metadata":
+                    setup["archives"]["tier10"]["queries"] += 1
+                elif damage == "archive":
+                    Path(setup["archives"]["tier10"]["path"]).write_bytes(b"x")
+                else:
+                    (root / "bin" / selected[0].adapter).write_bytes(b"x")
+                with (patch.object(owner, "permissions", return_value=10000),
+                      patch.object(driver.subprocess, "Popen") as spawn,
+                      self.assertRaises(driver.ReviewRequired)):
+                    owner.begin_block({"id": "calibration", "jobs": []}, {})
+                spawn.assert_not_called()
+
+    def test_case_and_auxiliary_carry_values_without_payload_hashing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            selected, setup, _ = DriverTests().fixture(root)
+            owner = fixture_owner(root)
+            owner.environment = driver.environment(root)
+            owner.job_bindings = {"fixture": {"gomaxprocs": 10}}
+            (root / "python-runtime.json").write_text("{}")
+            with patch.object(driver, "digest") as hashes:
+                identity = driver.case_identity(selected[0], root, setup, 10)
+                self.assertEqual(identity["archives"], setup["archives"])
+                self.assertEqual(identity["binary"], setup["artifacts"][
+                    "bin/" + selected[0].adapter])
+                hashes.assert_not_called()
+            owner.job_limit = unittest.mock.Mock()
+            with (patch.object(driver, "setup_binding",
+                               side_effect=AssertionError("case rehash")),
+                  patch.object(driver, "digest",
+                               wraps=driver.digest) as hashes,
+                  patch.object(owner, "start", side_effect=(
+                      driver.DeadlineExceeded("fixture; no study spawn"))),
+                  self.assertRaises(driver.DeadlineExceeded)):
+                driver.auxiliary(owner, "fixture", ["/fixture/program"],
+                                 lambda _: ())
+            payloads = {Path(r["path"]) for r in setup["archives"].values()}
+            payloads.update(root / p for p in setup["artifacts"]
+                            if p.startswith("bin/"))
+            self.assertFalse(any(call.args[0] in payloads for call in
+                                 hashes.call_args_list))
+            started = driver.read_json(root / "aux/fixture/started.json")
+            self.assertEqual(started["archives"], owner.binding["archives"])
+
+
+
+class ExternalToolBindingTests(unittest.TestCase):
+    def test_absolute_hash_bound_tools_ignore_path_and_reject_drift(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            manifest, tools, env = fixture_tools(root)
+            with patch.dict(os.environ, {"PATH": "/missing"}):
+                self.assertEqual(driver.bad_jobs(manifest, root), set())
+                for name, path in tools.items():
+                    self.assertEqual(driver.external_tool(name, env), path)
+                output = SimpleNamespace(returncode=0, stdout="ok", stderr="")
+                with patch.object(driver.subprocess, "run",
+                                  return_value=output) as spawn:
+                    self.assertEqual(driver.native_output(
+                        ["/usr/sbin/sysctl", "-n", "fixture"], env), "ok")
+                    self.assertEqual(spawn.call_args.args[0][0],
+                                     tools["sysctl"])
+                Path(tools["go"]).write_bytes(b"changed")
+                with self.assertRaises(driver.ReviewRequired):
+                    driver.external_tool("go", env)
+            alias = root / "go-alias"
+            alias.symlink_to(tools["go"])
+            record = driver.read_json(manifest)
+            record["tools"]["go"] = str(alias)
+            driver.atomic_json(manifest, record)
+            env["STUDY_MANIFEST_SHA"] = driver.digest(manifest)
+            with self.assertRaises(driver.ReviewRequired):
+                driver.external_tool("go", env)
 
 
 if __name__ == "__main__":
