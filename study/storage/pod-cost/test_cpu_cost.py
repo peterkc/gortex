@@ -16,6 +16,10 @@ from unittest.mock import patch
 import cpu_cost as cost
 
 
+MAC_WHEEL = ("aaab9b3af536b06ca27ab5e35e3d429c9"
+             "7457ce76cf298af103f687e8b9975c0")
+
+
 class CostTests(unittest.TestCase):
     def test_complete_matrix(self):
         cases = cost.matrix()
@@ -289,30 +293,39 @@ class CostTests(unittest.TestCase):
 
 
     def execute_fixture(self, root, prepare, probe=None, cases=None, *,
-                        clean=True):
+                        clean=True, wheel_pin=MAC_WHEEL,
+                        member_names=("libonnxruntime.1.31.0.dylib",),
+                        version="1.31.0", platform_name="darwin",
+                        machine="arm64", controller_output=False):
         config = root / "config.json"
         config.write_text(json.dumps({"inputs": {}, "source_files": {},
-                                      "ort": {}, "recipe": {}}))
+                                      "ort": {"sha256": wheel_pin},
+                                      "recipe": {}}))
         process = root / "aux/cpu-cost/process.json"
         process.parent.mkdir(parents=True)
         process.write_text(json.dumps({
             "absolute_deadline": time.monotonic() + 600}))
-        library = root / "library.so"
+        library = root / "library.dylib"
         library.write_bytes(b"fixture library bytes; never loaded")
-        member = SimpleNamespace(
-            name="libonnxruntime.so.1.31.0", hash=SimpleNamespace(
+        members = [SimpleNamespace(
+            name=name, hash=SimpleNamespace(
                 mode="sha256", value=cost.base64.urlsafe_b64encode(
                     hashlib.sha256(library.read_bytes()).digest())
-                .decode().rstrip("=")))
+                .decode().rstrip("="))) for name in member_names]
         distribution = SimpleNamespace(
-            version="1.31.0", files=[member],
+            version=version, files=members,
             locate_file=unittest.mock.Mock(return_value=library))
+        receipt = (process.parent / "output/receipt.json" if controller_output
+                   else root / "results/receipt.json")
         args = cost.argparse.Namespace(
-            root=root, config=config, receipt=root / "results/receipt.json",
+            root=root, config=config, receipt=receipt,
             source_pin="a"*40, config_pin=cost.digest(config),
             input_pin=hashlib.sha256(b"{}").hexdigest())
         with (
             patch.dict(os.environ, dict(os.environ)),
+            patch.object(cost, "sys", SimpleNamespace(
+                platform=platform_name, executable=sys.executable)),
+            patch.object(cost.platform, "machine", return_value=machine),
             patch.object(cost.importlib.metadata, "distribution",
                          return_value=distribution),
             patch.object(cost, "successor_check"),
@@ -326,6 +339,87 @@ class CostTests(unittest.TestCase):
             code = cost.execute(args)
         return code, json.loads(args.receipt.read_text()), json.loads(
             (args.receipt.parent / "matrix.json").read_text())
+
+    def test_mac_wheel_and_unique_record_route_before_native_work(self):
+        cases = (
+            ({"wheel_pin": "0" * 64}, "pinned Mac ORT wheel required"),
+            ({"member_names": ()}, "shared library unavailable"),
+            ({"member_names": ("libonnxruntime.so.1.31.0",)},
+             "shared library unavailable"),
+            ({"member_names": ("libonnxruntime.1.31.0.dylib",
+                               "libonnxruntime.dylib")},
+             "shared library unavailable"),
+            ({"version": "1.30.0"}, "shared library unavailable"),
+        )
+        for options, reason in cases:
+            with self.subTest(options=options), \
+                    tempfile.TemporaryDirectory() as folder:
+                prepare = unittest.mock.Mock()
+                code, receipt, matrix = self.execute_fixture(
+                    Path(folder), prepare, **options)
+                prepare.assert_not_called()
+                self.assertEqual(code, 0)
+                self.assertEqual(receipt["state"], "skipped")
+                self.assertEqual(receipt["reason_code"], "library")
+                self.assertIn(reason, receipt["reason"])
+                self.assertFalse(matrix["accepted_timings"])
+                library = Path(folder) / "results/library.json"
+                self.assertFalse(library.exists())
+        with tempfile.TemporaryDirectory() as folder:
+            def stop_after_library(root, output):
+                raise cost.Skip("check", "fixture: library bound, no model")
+
+            code, receipt, matrix = self.execute_fixture(
+                Path(folder), stop_after_library)
+            self.assertEqual((code, receipt["state"], receipt["reason_code"]),
+                             (0, "skipped", "check"))
+            library = json.loads((Path(folder) / "results/library.json")
+                                 .read_text())
+            self.assertEqual(library["sha256"],
+                             cost.digest(Path(folder) / "library.dylib"))
+            self.assertEqual(library["wheel"]["sha256"], MAC_WHEEL)
+            self.assertFalse(matrix["accepted_timings"])
+
+    def test_controller_metadata_directory_keeps_fresh_worker_output(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+
+            def stop(root, output):
+                self.assertEqual(output, root / "aux/cpu-cost/output")
+                self.assertTrue((output.parent / "process.json").is_file())
+                raise cost.Skip("check", "fixture no native work")
+
+            code, receipt, matrix = self.execute_fixture(
+                root, stop, controller_output=True)
+            self.assertEqual((code, receipt["state"], receipt["reason_code"]),
+                             (0, "skipped", "check"))
+            self.assertFalse(matrix["accepted_timings"])
+            for relative, sha in receipt["files"].items():
+                self.assertTrue(relative.startswith("aux/cpu-cost/output/"))
+                self.assertEqual(cost.digest(root / relative), sha)
+
+    def test_mac_only_admission_and_unexpected_error_is_fatal(self):
+        for options in ({"platform_name": "linux", "machine": "x86_64"},
+                        {"machine": "x86_64"}):
+            with self.subTest(options=options), \
+                    tempfile.TemporaryDirectory() as folder:
+                prepare = unittest.mock.Mock()
+                code, receipt, matrix = self.execute_fixture(
+                    Path(folder), prepare, **options)
+                prepare.assert_not_called()
+                self.assertEqual((code, receipt["state"]), (1, "partial"))
+                self.assertIn("only Darwin arm64", receipt["reason"])
+                self.assertFalse(matrix["accepted_timings"])
+        with tempfile.TemporaryDirectory() as folder:
+            def bug(root, output):
+                raise TypeError("fixture unexpected error")
+
+            code, receipt, matrix = self.execute_fixture(Path(folder), bug)
+            self.assertEqual((code, receipt["state"], receipt["reason_code"]),
+                             (1, "fatal", "unexpected"))
+            self.assertEqual(receipt["reason"], "fixture unexpected error")
+            self.assertTrue(receipt["clean_handoff"])
+            self.assertFalse(matrix["accepted_timings"])
 
     @unittest.skipUnless(sys.platform == "linux", "Linux runner contract")
     def test_failed_worker_writes_partial_receipt_after_reaping(self):

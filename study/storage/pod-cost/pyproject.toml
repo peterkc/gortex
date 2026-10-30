@@ -7,7 +7,7 @@ dependencies = [
   "transformers==4.45.1",
   "tokenizers==0.20.3",
   "huggingface-hub==0.36.2",
-  "onnxruntime @ https://files.pythonhosted.org/packages/6c/44/1e9e762b95b7da0a8424913a1ed7c38cdaf88624a3c41ddba24ebac88bc9/onnxruntime-1.31.0-cp312-cp312-manylinux_2_28_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "onnxruntime @ https://files.pythonhosted.org/packages/b3/bd/2ac094311163b803e3626c3937461d6900934bd56cca7601f6150ff860c3/onnxruntime-1.31.0-cp312-cp312-macosx_14_0_arm64.whl ; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
 [tool.uv]

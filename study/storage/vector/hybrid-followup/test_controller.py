@@ -27,18 +27,26 @@ class ControllerTests(unittest.TestCase):
         class Admitted(Exception):
             pass
         for platform, machine, admitted in (
-            ("linux", "x86_64", True), ("linux", "amd64", True),
-            ("linux", "arm64", True), ("linux", "aarch64", True),
-            ("darwin", "arm64", False), ("darwin", "x86_64", False),
+            ("linux", "x86_64", False), ("linux", "amd64", False),
+            ("linux", "arm64", False), ("linux", "aarch64", False),
+            ("darwin", "arm64", True), ("darwin", "x86_64", False),
         ):
             with self.subTest(platform=platform, machine=machine):
                 with tempfile.TemporaryDirectory() as folder:
+                    native = Path(folder) / "native"
+                    native.mkdir()
+                    (native / "usearch.h").write_bytes(b"fixture")
+                    (native / "libusearch_c.dylib").write_bytes(b"fixture")
                     with patch.object(run, "WORK", Path(folder)), \
                             patch.object(run.sys, "platform", platform), \
-                            patch.object(run.platform, "machine", return_value=machine), \
-                            patch.object(run.sys, "argv", ["run.py", "latency", "--generated", "--execute"]), \
+                            patch.object(run.platform, "machine",
+                                         return_value=machine), \
+                            patch.object(run.sys, "argv", ["run.py", "latency",
+                                "--generated", "--execute", "--native-dir",
+                                str(native)]), \
                             patch.object(run, "build", side_effect=Admitted) as build:
-                        with self.assertRaises(Admitted if admitted else RuntimeError):
+                        error = Admitted if admitted else SystemExit
+                        with self.assertRaises(error):
                             run.main()
                         self.assertEqual(build.called, admitted)
 

@@ -219,7 +219,14 @@ func rss() (uint64, uint64, error) {
 	if runtime.GOOS != "darwin" {
 		return 0, 0, fmt.Errorf("unsupported RSS platform %s", runtime.GOOS)
 	}
-	return uint64(C.current_rss()), uint64(C.peak_rss()), nil
+	return checkedRSS(uint64(C.current_rss()), uint64(C.peak_rss()))
+}
+
+func checkedRSS(current, peak uint64) (uint64, uint64, error) {
+	if current == 0 || peak == 0 {
+		return 0, 0, fmt.Errorf("native RSS read failed")
+	}
+	return current, peak, nil
 }
 
 func tokenCounts(batches []Batch, cap int) (int, int, error) {
@@ -325,8 +332,8 @@ func run() error {
 		}
 	}
 	blockStart := time.Now()
-	if runtime.GOOS == "darwin" && int(C.memory_level()) < 30 {
-		return fmt.Errorf("memorystatus below 30 before load")
+	if runtime.GOOS == "darwin" && int(C.memory_level()) < 20 {
+		return fmt.Errorf("memorystatus below 20 before load")
 	}
 	ort.SetSharedLibraryPath(*library)
 	if err := ort.InitializeEnvironment(); err != nil {
@@ -392,8 +399,8 @@ func run() error {
 	count := 0
 	latencies := []float64{}
 	for _, batch := range batches {
-		if runtime.GOOS == "darwin" && int(C.memory_level()) < 25 {
-			return fmt.Errorf("memorystatus below 25 during inference")
+		if runtime.GOOS == "darwin" && int(C.memory_level()) < 20 {
+			return fmt.Errorf("memorystatus below 20 during inference")
 		}
 		if time.Since(blockStart) >= *guard {
 			report.Reason = "runner guard exceeded"

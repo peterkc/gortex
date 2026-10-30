@@ -3003,5 +3003,275 @@ class NativeEntryTests(unittest.TestCase):
                 self.assertFalse(root.exists())
 
 
+
+class MacHybridCallerTests(unittest.TestCase):
+    def load_child(self):
+        import importlib.util
+        path = (Path(__file__).resolve().parents[1]
+                / "vector/hybrid-followup/run.py")
+        spec = importlib.util.spec_from_file_location("hybrid_fixture", path)
+        module = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {spec.name: module}):
+            spec.loader.exec_module(module)
+        return module
+
+    def test_mac_commands_use_pinned_controller_and_darwin_binaries(self):
+        root = Path("/fixture-root")
+        jobs = driver.bound_jobs(root)["hybrid"]
+        self.assertEqual(len(jobs), 2)
+        for job in jobs:
+            self.assertEqual(job["argv"][0],
+                             str(Path(sys.executable).resolve()))
+            self.assertEqual(job["argv"][1], "-B")
+        for mode, count in (("timing", 40), ("latency", 36)):
+            commands = driver.hybrid_commands(root, mode)
+            self.assertEqual(len(commands), count)
+            self.assertTrue(all("/bin/darwin-arm64/" in cmd[0]
+                                for cmd in commands.values()))
+        self.assertEqual(driver.hybrid_names("timing"),
+                         list(driver.hybrid_commands(Path("/work"), "timing")))
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            with patch.object(driver, "auxiliary", return_value={}) as launch:
+                driver.run_catalog_hybrid(SimpleNamespace(root=root), [],
+                                          "hybrid")
+            expected = driver.bound_jobs(root)["hybrid"]
+            self.assertEqual(len(launch.call_args_list), len(expected))
+            for call, job in zip(launch.call_args_list, expected):
+                self.assertEqual(call.args[1], job["id"])
+                self.assertEqual(call.args[2], job["argv"])
+                self.assertEqual(call.kwargs["selection"],
+                                 job["selected_jobs"])
+
+    def test_unsupported_inputs_refuse_before_build_or_sample(self):
+        child = self.load_child()
+        cases = (
+            ("linux", "x86_64", ["timing"], "n10000-d384-w1-rep1"),
+            ("darwin", "x86_64", ["timing"], "n10000-d384-w1-rep1"),
+            ("darwin", "arm64", ["timing"], "n1000000-d384-w1-rep1"),
+            ("darwin", "arm64", ["timing"], "n10000-d512-w1-rep1"),
+            ("darwin", "arm64", ["latency"], None),
+            ("darwin", "arm64", ["latency", "--generated"], None),
+            ("darwin", "arm64", [], None),
+        )
+        for platform_name, machine, mode, selected in cases:
+            with self.subTest(platform=platform_name, machine=machine,
+                              mode=mode, selected=selected), \
+                    tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                selection = root / "selected.json"
+                selection.write_text(json.dumps([selected]))
+                argv = ["run.py", *mode, "--execute", "--native-dir",
+                        str(root / "absent-native")]
+                if selected:
+                    argv += ["--jobs-file", str(selection)]
+                with (patch.object(child, "WORK", root / "work"),
+                      patch.object(child.sys, "platform", platform_name),
+                      patch.object(child.platform, "machine",
+                                   return_value=machine),
+                      patch.object(child.sys, "argv", argv),
+                      patch.object(child, "build") as build,
+                      patch.object(child.subprocess, "run") as execute,
+                      patch.object(child.importlib.util,
+                                   "spec_from_file_location") as telemetry,
+                      patch("sys.stderr", StringIO())):
+                    with self.assertRaises(SystemExit):
+                        child.main()
+                    build.assert_not_called()
+                    execute.assert_not_called()
+                    telemetry.assert_not_called()
+                    self.assertFalse((root / "work").exists())
+
+    def test_high_load_records_complete_d11_without_comparison_claim(self):
+        child = self.load_child()
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            work = (root / "home/.prime/research/gortex/storage-architecture"
+                    / "tmp/vector/hybrid-followup")
+            name = "n10000-d384-w1-rep1"
+            selection = root / "selected.json"
+            selection.write_text(json.dumps([name]))
+            before = fixture_resources(level=20, pressure_state=2,
+                available_bytes=4 * driver.GIB, load1=20, load5=17, load15=16)
+            after = {**before, "timestamp": 1001, "load1": 22,
+                     "swapouts": before["swapouts"] + 32768}
+            sample = unittest.mock.Mock(side_effect=[before, after])
+            telemetry = SimpleNamespace(native_resources=sample)
+            spec = SimpleNamespace(name="storage_telemetry",
+                loader=SimpleNamespace(exec_module=unittest.mock.Mock()))
+            expected = driver.hybrid_commands(root, "timing")[name]
+            result = {"queries": 256, "n": 10000, "dimensions": 384,
+                      "workers": 1, "candidate_pool":
+                      "global quantized top128, then original F32 rerank"}
+
+            def execute(command, **options):
+                self.assertEqual(command, expected)
+                job = next(j for j in child.timing_jobs(Path(command[0]))
+                           if j.name == name)
+                job.artifact.parent.mkdir(parents=True)
+                job.artifact.write_text(json.dumps(result))
+                return SimpleNamespace(returncode=0)
+
+            with (patch.object(child, "WORK", work),
+                  patch.object(child, "SCRATCH", root / "scratch"),
+                  patch.object(child.sys, "platform", "darwin"),
+                  patch.object(child.platform, "machine",
+                               return_value="arm64"),
+                  patch.object(child.sys, "argv", ["run.py", "timing",
+                      "--execute", "--run-id", "pod-A1-timing",
+                      "--jobs-file", str(selection)]),
+                  patch.object(child, "build") as build,
+                  patch.object(child, "source_fingerprint",
+                               return_value="pin"),
+                  patch.object(child.subprocess, "check_output",
+                               return_value="go1.27.1 darwin/arm64"),
+                  patch.object(child.subprocess, "run", side_effect=execute),
+                  patch.object(child.importlib.util, "spec_from_file_location",
+                               return_value=spec),
+                  patch.object(child.importlib.util, "module_from_spec",
+                               return_value=telemetry),
+                  patch.dict(sys.modules), patch.dict(os.environ),
+                  patch("sys.stdout", StringIO())):
+                child.main()
+                build.assert_called_once()
+                self.assertEqual(sample.call_count, 2)
+            path = work / "runs/timing/pod-A1-timing" / (name + ".json")
+            receipt = json.loads(path.read_text())
+            self.assertEqual(receipt["resource_before"], before)
+            self.assertEqual(receipt["resource_after"], after)
+            self.assertFalse(receipt["valid_timing_comparison"])
+            self.assertNotIn("timing_clean", receipt)
+            with patch.object(driver, "hybrid_commands",
+                              return_value={name: expected}):
+                paths = driver.hybrid_outputs(root, "timing")
+                self.assertEqual(paths[1], work / "bin/darwin-arm64/timing")
+                for phase in ("resource_before", "resource_after"):
+                    for key in before:
+                        changed = deepcopy(receipt)
+                        del changed[phase][key]
+                        path.write_text(json.dumps(changed))
+                        with self.subTest(phase=phase, key=key):
+                            with self.assertRaises(driver.ReviewRequired):
+                                driver.hybrid_outputs(root, "timing")
+                for field, value in (("platform", "linux"),
+                                     ("architecture", "amd64")):
+                    path.write_text(json.dumps({**receipt, field: value}))
+                    with self.assertRaises(driver.ReviewRequired):
+                        driver.hybrid_outputs(root, "timing")
+
+    def test_unexpected_cost_worker_receipt_is_fatal(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            directory = root / "aux/cpu-cost"
+            (directory / "output").mkdir(parents=True)
+            job = {"id": "cpu-cost", "argv": ["fixture"],
+                   "receipt_path": "unused", "source_pin": "1" * 40,
+                   "config_pin": "2" * 64, "input_pin": "3" * 64}
+            driver.atomic_json(directory / "output/receipt.json", {
+                **{k: job[k] for k in
+                   ("source_pin", "config_pin", "input_pin")},
+                "clean_handoff": True, "state": "fatal", "exit_code": 1,
+                "reason_code": "unexpected", "reason": "fixture bug"})
+
+            def auxiliary(owner, name, args, validate, **options):
+                return validate(directory)
+
+            with patch.object(driver, "auxiliary", side_effect=auxiliary):
+                with self.assertRaises(driver.FatalSession):
+                    driver.binding_block(SimpleNamespace(root=root),
+                        {"id": "cpu_cost", "jobs": [job]})
+            self.assertFalse((directory / "complete.json").exists())
+
+    def test_unexpected_cost_error_and_unclean_teardown_stay_fatal(self):
+        import importlib.util
+        source = Path(__file__).resolve().parents[1] / "pod-cost"
+        with patch.dict(sys.modules):
+            modules = []
+            for name, path in (("cpu_cost", source / "cpu_cost.py"),
+                               ("cost_fixture", source / "test_cpu_cost.py")):
+                spec = importlib.util.spec_from_file_location(name, path)
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[name] = module
+                spec.loader.exec_module(module)
+                modules.append(module)
+            fixture = modules[1].CostTests()
+            with tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+
+                def bug(root, output):
+                    raise TypeError("fixture unexpected before teardown")
+
+                code, receipt, matrix = fixture.execute_fixture(
+                    root, bug, clean=False, controller_output=True)
+                self.assertEqual((code, receipt["state"]), (1, "fatal"))
+                self.assertEqual(receipt["reason_code"], "unexpected")
+                self.assertEqual(receipt["reason"],
+                                 "fixture unexpected before teardown")
+                self.assertEqual(receipt["teardown"], "unverified")
+                self.assertFalse(receipt["clean_handoff"])
+                self.assertEqual(matrix["failure"]["teardown"], "unverified")
+                self.assertFalse(matrix["accepted_timings"])
+                directory = root / "aux/cpu-cost"
+                path = directory / "output/receipt.json"
+                job = {"id": "cpu-cost", "argv": ["fixture", str(path)],
+                       "receipt_path": str(path), **{k: receipt[k] for k in
+                       ("source_pin", "config_pin", "input_pin")}}
+
+                def auxiliary(owner, name, args, validate, **options):
+                    return validate(directory)
+
+                with patch.object(driver, "auxiliary", side_effect=auxiliary):
+                    with self.assertRaises(driver.FatalSession):
+                        driver.binding_block(SimpleNamespace(root=root),
+                            {"id": "cpu_cost", "jobs": [job]})
+                self.assertFalse((directory / "complete.json").exists())
+
+    def test_cost_worker_uses_fresh_output_and_root_relative_proof(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            directory = root / "aux/cpu-cost"
+            job = {"id": "cpu-cost", "argv": ["fixture", "--receipt", "old"],
+                   "receipt_path": "old", "source_pin": "1" * 40,
+                   "config_pin": "2" * 64, "input_pin": "3" * 64}
+
+            def auxiliary(owner, name, args, validate, **options):
+                directory.mkdir(parents=True)
+                path = directory / "output/receipt.json"
+                self.assertEqual(args, ["fixture", "--receipt", str(path)])
+                self.assertFalse(path.parent.exists())
+                path.parent.mkdir()
+                data = path.parent / "matrix.json"
+                driver.atomic_json(data, {"accepted_timings": False})
+                driver.atomic_json(path, {
+                    **{k: job[k] for k in
+                       ("source_pin", "config_pin", "input_pin")},
+                    "clean_handoff": True, "state": "completed",
+                    "exit_code": 0, "files": {
+                        str(data.relative_to(root)): driver.digest(data)}})
+                self.assertEqual(validate(directory), [path, data])
+                changed = driver.read_json(path)
+                changed["files"] = {"../../outside": "0" * 64}
+                driver.atomic_json(path, changed)
+                with self.assertRaises(driver.ReviewRequired):
+                    validate(directory)
+                changed["files"] = {
+                    str(data.relative_to(root)): driver.digest(data)}
+                driver.atomic_json(path, changed)
+                return {"exit_code": 0}
+
+            with patch.object(driver, "auxiliary", side_effect=auxiliary):
+                self.assertEqual(driver.binding_block(
+                    SimpleNamespace(root=root),
+                    {"id": "cpu_cost", "jobs": [job]}), "completed")
+
+    def test_probe_source_uses_floor_20_and_checked_native_rss(self):
+        path = Path(__file__).resolve().parents[1] / "onnx/main.go"
+        source = path.read_text()
+        self.assertEqual(source.count('int(C.memory_level()) < 20'), 2)
+        self.assertNotIn('int(C.memory_level()) < 30', source)
+        self.assertNotIn('int(C.memory_level()) < 25', source)
+        self.assertIn('checkedRSS(uint64(C.current_rss()),', source)
+
+
 if __name__ == "__main__":
     unittest.main()

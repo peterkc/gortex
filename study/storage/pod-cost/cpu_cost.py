@@ -1,4 +1,4 @@
-"""Bounded Linux CodeRank CPU study; the parent driver owns admission."""
+"""Bounded Mac CodeRank CPU study; the parent driver owns admission."""
 import argparse
 import base64
 import hashlib
@@ -335,14 +335,19 @@ def execute(args: argparse.Namespace) -> int:
         end = process["absolute_deadline"] - 30
         if not math.isfinite(end) or end <= time.monotonic():
             raise Skip("time", "no time before absolute driver deadline")
-        if sys.platform != "linux" or platform.machine() != "x86_64":
-            raise FatalWorker("only Linux x86_64 is admitted")
+        if sys.platform != "darwin" or platform.machine() != "arm64":
+            raise FatalWorker("only Darwin arm64 is admitted")
+        if config["ort"]["sha256"] != (
+                "aaab9b3af536b06ca27ab5e35e3d429c9"
+                "7457ce76cf298af103f687e8b9975c0"):
+            raise Skip("library", "pinned Mac ORT wheel required")
         try:
             distribution = importlib.metadata.distribution("onnxruntime")
         except importlib.metadata.PackageNotFoundError as error:
             raise Skip("library", "ORT package unavailable") from error
         libraries = [p for p in (distribution.files or ())
-                     if p.name == "libonnxruntime.so.1.31.0"]
+                     if p.name.startswith("libonnxruntime.")
+                     and p.name.endswith(".dylib")]
         if distribution.version != "1.31.0" or len(libraries) != 1:
             raise Skip("library", "ORT 1.31.0 shared library unavailable")
         entry = libraries[0]
@@ -418,8 +423,9 @@ def execute(args: argparse.Namespace) -> int:
             if case["status"] == "skipped" or case["reason"] == "in-progress":
                 case["reason"] = f"{error.code}: {error}"
     except Exception as error:
+        state = "partial" if isinstance(error, FatalWorker) else "fatal"
         failure = {"reason_code": "worker" if isinstance(error, FatalWorker)
-                   else "input", "reason": str(error)}
+                   else "unexpected", "reason": str(error)}
         for case in cases:
             if case["reason"] == "in-progress":
                 case["reason"] = str(error)
@@ -429,18 +435,20 @@ def execute(args: argparse.Namespace) -> int:
         clean = reap_children()
     except OSError:
         clean = False
-    if not clean:
+    if not clean and state == "fatal":
+        failure["teardown"] = "unverified"
+    if not clean and state != "fatal":
         state, failure = "partial", {"reason_code": "process",
                                      "reason": "unverified child teardown"}
     summary = {"cases": cases, "failure": failure, "planned_repeats": 3,
-               "cost_scope": "CPU-only Lambda node; precomputed tokens",
+               "cost_scope": "M1 Max CPU; precomputed tokens",
                "accepted_timings": failure is None and any(
                    c["actual_repeats"] for c in cases),
                "runner_seconds": time.monotonic() - started}
     save(output / "matrix.json", summary)
     files = {str(p.relative_to(root)): digest(p) for p in output.iterdir()
              if p.is_file()}
-    code = 1 if state == "partial" else 0
+    code = 1 if state in {"partial", "fatal"} else 0
     save(args.receipt, {"state": state, "exit_code": code,
          "clean_handoff": clean,
          "source_pin": args.source_pin, "config_pin": args.config_pin,

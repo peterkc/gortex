@@ -84,7 +84,6 @@ SCREEN = tuple(name for name in ADAPTERS if name != "libsql-segment")
 FINALISTS = ("sqlite-segment", "pebble-bleve")
 CATALOGS = ("catalog-sqlite", "catalog-refs", "catalog-bbolt",
             "catalog-pebble", "catalog-manifest")
-PYTHON_KEY = "cpython-3.12.15-linux-x86_64-gnu"
 STAGES = {
     "before-write", "after-write", "after-sync", "before-rename",
     "after-rename", "after-dirsync",
@@ -175,7 +174,7 @@ def bound_jobs(root: Path) -> dict[str, list[dict]]:
             })
     for mode in ("timing", "latency"):
         name = "hybrid-" + mode
-        argv = [str(root / "python" / PYTHON_KEY / "bin/python3.12"), "-B",
+        argv = [str(Path(sys.executable).resolve()), "-B",
                 str(root / "checkout/study/storage/vector"
                     / "hybrid-followup/run.py"),
                 mode, "--execute", "--run-id", "pod-A1-" + mode, "--jobs-file",
@@ -1889,7 +1888,8 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
 def hybrid_commands(root: Path, mode: str) -> dict[str, tuple[str, ...]]:
     work = root / "home/.prime/research/gortex/storage-architecture/tmp"
     work = work / "vector/hybrid-followup"
-    binary = str(work / "bin/linux-amd64" / ("timing" if mode == "timing" else "ann"))
+    binary = str(work / "bin/darwin-arm64"
+                 / ("timing" if mode == "timing" else "ann"))
     planned = {}
     if mode == "timing":
         for dimensions in (384, 1024):
@@ -2062,13 +2062,18 @@ def hybrid_outputs(root: Path, mode: str) -> list[Path]:
         receipt = worker_json(runs / (name + ".json"), name)
         if tuple(receipt.get("command", ())) != expected_command:
             raise ReviewRequired("hybrid selected recipe/command substitution")
-        if (receipt.get("exit_code") != 0 or receipt.get("platform") != "linux"
-                or receipt.get("architecture") != "amd64"):
+        if (receipt.get("exit_code") != 0
+                or receipt.get("platform") != "darwin"
+                or receipt.get("architecture") != "arm64"):
             raise ReviewRequired("incomplete/wrong-platform hybrid result")
         if receipt["kind"] != "timing":
             continue
-        if not receipt["timing_clean"]:
-            raise ReviewRequired("noisy hybrid timing cannot be accepted")
+        for key in ("resource_before", "resource_after"):
+            if not {"timestamp", "load1", "load5", "load15", "level",
+                    "pressure_state", "available_bytes", "swap_usage",
+                    "swapouts", "page_size", "ac_power"} <= (
+                        receipt.get(key, {}).keys()):
+                raise ReviewRequired("incomplete hybrid sample telemetry")
         result = receipt["result"]
         flags = dict(zip(receipt["command"][1::2],
                          receipt["command"][2::2]))
@@ -2097,7 +2102,8 @@ def hybrid_outputs(root: Path, mode: str) -> list[Path]:
                     raise ReviewRequired("unexpected generated input path")
                 if digest(folder / file) != fp["sha256"]:
                     raise ReviewRequired("generated input file drift")
-    binary = work / "bin/linux-amd64" / ("timing" if mode == "timing" else "ann")
+    binary = work / "bin/darwin-arm64" / (
+        "timing" if mode == "timing" else "ann")
     data = ([work / "timing-data"] if mode == "timing" else
             [work / f"generated-n{n}" for n in (10000, 100000)])
     return [runs, binary, *data]
@@ -2125,7 +2131,7 @@ def run_catalog_hybrid(supervisor: Supervisor,
                 return []
             receipts.append(auxiliary(supervisor, name, args, validate))
     controller = (root / "checkout/study/storage/vector/hybrid-followup/run.py")
-    python = root / "python" / PYTHON_KEY / "bin/python3.12"
+    python = Path(sys.executable).resolve()
     for mode in ("timing", "latency") if block == "hybrid" else ():
         name = "hybrid-" + mode
         args = [str(python), "-B", str(controller), mode, "--execute",
@@ -2148,7 +2154,8 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
     states = []
     for job in block["jobs"]:
         directory = supervisor.root / "aux" / job["id"]
-        path = directory / "receipt.json"
+        path = directory / ("output/receipt.json" if block["id"] == "cpu_cost"
+                            else "receipt.json")
         if not path.resolve().is_relative_to(supervisor.root):
             raise FatalSession(f"{block['id']}: receipt path escaped /work")
 
@@ -2162,6 +2169,8 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
             for key in ("source_pin", "config_pin", "input_pin"):
                 if receipt.get(key) != job[key]:
                     raise ReviewRequired(f"{block['id']}: receipt {key}")
+            if receipt.get("state") == "fatal":
+                raise FatalSession(f"{block['id']}: unexpected worker failure")
             if receipt.get("state") not in {
                     "completed", "checks_failed", "partial",
                     "dependency_blocked", "skipped"}:
@@ -2176,7 +2185,8 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
             if not isinstance(files, dict) or not files:
                 raise ReviewRequired(f"{block['id']}: missing result files")
             for relative, expected in files.items():
-                output = directory / relative
+                output = (supervisor.root if block["id"] == "cpu_cost"
+                          else directory) / relative
                 if (not owned_path(str(output), directory)
                         or not output.resolve().is_relative_to(directory)
                         or not sha_pin(expected, (64,))

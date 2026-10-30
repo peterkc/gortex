@@ -40,6 +40,23 @@ func TestMaskedMeanPooling(t *testing.T) {
 	}
 }
 
+func TestCheckedNativeRSSReadFailures(t *testing.T) {
+	for _, sample := range [][2]uint64{{0, 0}, {0, 1}, {1, 0}} {
+		current, peak, err := checkedRSS(sample[0], sample[1])
+		if err == nil || current != 0 || peak != 0 {
+			t.Fatalf("accepted failed native read %v: %d %d %v",
+				sample, current, peak, err)
+		}
+	}
+	for _, sample := range [][2]uint64{{1, 1}, {128, 256}} {
+		current, peak, err := checkedRSS(sample[0], sample[1])
+		if err != nil || current != sample[0] || peak != sample[1] {
+			t.Fatalf("changed native bytes %v: %d %d %v",
+				sample, current, peak, err)
+		}
+	}
+}
+
 func TestProcRSSBytesAndRejections(t *testing.T) {
 	current, peak, err := procRSS("Name: probe\nVmRSS: 12 kB\nVmHWM: 20 kB\n")
 	if err != nil || current != 12288 || peak != 20480 {

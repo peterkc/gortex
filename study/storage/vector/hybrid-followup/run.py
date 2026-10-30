@@ -3,6 +3,7 @@
 import argparse
 from dataclasses import dataclass
 import hashlib
+import importlib.util
 import fcntl
 import json
 import os
@@ -336,6 +337,22 @@ def main() -> None:
                 or any(name not in by_name for name in names)):
             parser.error("jobs-file must list unique exact planned job names")
         jobs = [by_name[name] for name in names]
+    telemetry = None
+    if args.execute and mode != "accuracy":
+        if (sys.platform != "darwin" or architecture != "arm64"
+                or (mode == "latency" and not args.generated)
+                or not jobs or any("1000000" in job.command for job in jobs)):
+            parser.error("selected generated darwin-arm64 recipes required")
+        if mode == "latency" and not (
+                (args.native_dir / "usearch.h").is_file() and any(
+                    (args.native_dir / name).is_file()
+                    for name in ("libusearch_c.a", "libusearch_c.dylib"))):
+            parser.error("missing pinned native header/library")
+        spec = importlib.util.spec_from_file_location(
+            "storage_telemetry", ROOT.parents[1] / "pod/run.py")
+        telemetry = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = telemetry
+        spec.loader.exec_module(telemetry)
     directory = WORK / "runs" / mode / args.run_id
     directory.mkdir(parents=True, exist_ok=True)
     plan = [{"name": job.name, "command": job.command, "kind": job.kind,
@@ -351,9 +368,6 @@ def main() -> None:
                           "plan": str(directory.relative_to(WORK))
                           + "/jobs.json"}))
         return
-    if mode != "accuracy" and (sys.platform != "linux"
-                              or architecture not in ("arm64", "amd64")):
-        raise RuntimeError("timing requires a cleared Linux amd64/arm64 VM")
     temporary = SCRATCH / "cache/tmp"
     temporary.mkdir(parents=True, exist_ok=True)
     os.environ["TMPDIR"] = str(temporary)
@@ -404,8 +418,9 @@ def main() -> None:
                         raise RuntimeError("recorded output drift")
                 if prior["exit_code"] != 0:
                     raise RuntimeError("failed job retained; inspect log")
-                if job.kind == "timing" and not prior["timing_clean"]:
-                    raise RuntimeError("noisy block retained; inspect log")
+                if job.kind == "timing" and not all(key in prior for key in
+                        ("resource_before", "resource_after")):
+                    raise RuntimeError("missing retained timing telemetry")
                 continue
             if job.artifact is not None and job.artifact.exists():
                 raise RuntimeError("unrecorded output exists; inspect first")
@@ -414,23 +429,24 @@ def main() -> None:
             memory = None
             if mode == "accuracy" and sys.platform == "darwin":
                 memory = mac_memory_retry(directory, job.name)
-            before = os.getloadavg()[0]
-            if job.kind == "timing" and before >= 15:
-                raise RuntimeError("load1 >=15 before timing; no work started")
+            before = (telemetry.native_resources(os.environ) if telemetry
+                      else {"load1": os.getloadavg()[0]})
             start = time.perf_counter()
             with (directory / (job.name + ".log")).open("w") as log:
                 result = subprocess.run(job.command, cwd=ROOT, stdout=log,
                                         stderr=subprocess.STDOUT, check=False)
-            after = os.getloadavg()[0]
+            after = (telemetry.native_resources(os.environ) if telemetry
+                     else {"load1": os.getloadavg()[0]})
             measured = None
             if result.returncode == 0 and job.kind == "timing":
                 result_path = job.artifact or (directory / (job.name + ".log"))
                 measured = json.loads(result_path.read_text())
             receipt = {"command": job.command, "exit_code": result.returncode,
                        "seconds": time.perf_counter() - start,
-                       "load1_before": before, "load1_after": after,
-                       "timing_clean": job.kind == "timing"
-                       and before < 15 and after < 15,
+                       "load1_before": before["load1"],
+                       "load1_after": after["load1"],
+                       "resource_before": before, "resource_after": after,
+                       "valid_timing_comparison": False,
                        "source_fingerprint": source,
                        "configuration": configuration,
                        "platform": sys.platform,
@@ -447,8 +463,6 @@ def main() -> None:
             print(json.dumps({"job": job.name, **receipt}), flush=True)
             if result.returncode:
                 raise RuntimeError("job failed; inspect log")
-            if job.kind == "timing" and not receipt["timing_clean"]:
-                raise RuntimeError("noisy timing block; matrix stopped")
             completed += 1
             if args.limit and completed >= args.limit:
                 break
