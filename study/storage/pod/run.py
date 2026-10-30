@@ -434,15 +434,28 @@ def external_tool(name: str, env: Mapping[str, str]) -> str:
 
 
 def native_output(args: Sequence[str], env: Mapping[str, str], *,
-                  absent_ok: bool = False) -> str:
+                  absent_ok: bool = False, probes: list | None = None,
+                  missing_service: str | None = None) -> str:
     args = [external_tool(args[0], env), *args[1:]]
+    record = {"argv": args, "started": time.monotonic()}
+    if probes is not None:
+        probes.append(record)
     try:
         result = subprocess.run(args, env=env, capture_output=True, text=True,
                                 timeout=5, check=False)
     except (OSError, subprocess.SubprocessError) as error:
+        record.update(error=repr(error),
+                      stderr=str(getattr(error, "stderr", "")))
         raise FatalSession(f"native probe failed: {args[0]}") from error
+    finally:
+        record["seconds"] = time.monotonic() - record.pop("started")
+    record.update(returncode=result.returncode, stderr=result.stderr,
+                  stdout_present=bool(result.stdout))
     allowed = {0, 1} if absent_ok else {0}
-    if (result.stderr or result.returncode not in allowed
+    if missing_service is not None:
+        if result.returncode == 0 or missing_service not in result.stderr:
+            raise FatalSession("launchd job loaded or off-state unverified")
+    elif (result.stderr or result.returncode not in allowed
             or (result.returncode == 1 and result.stdout)):
         raise FatalSession(f"unverified native probe: {args[0]}")
     return result.stdout
@@ -569,7 +582,8 @@ def process_groups(env: Mapping[str, str],
         raise FatalSession("Darwin process table unverified") from error
 
 
-def daemon_off(config: Mapping, env: Mapping[str, str]) -> None:
+def daemon_off(config: Mapping, env: Mapping[str, str],
+               probes: list | None = None) -> None:
     # Read only the v2 bare fields. Never evaluate the notes object.
     if config["schema"] != "installed-daemon-identities/v2":
         raise FatalSession("unsupported installed-daemon identity schema")
@@ -590,34 +604,47 @@ def daemon_off(config: Mapping, env: Mapping[str, str]) -> None:
             or Path(config["executable"]["path"]).is_symlink() is not
             config["executable"]["is_symlink"]):
         raise FatalSession("ambiguous installed executable identity")
-    commands = native_output(["/bin/ps", "-A", "-ww", "-o", "command="], env)
+    commands = native_output(["/bin/ps", "-A", "-ww", "-o", "command="], env,
+                             probes=probes)
     if " ".join(config["executable"]["argv"]) in commands.splitlines():
         raise FatalSession("installed daemon command is running")
-    texts = native_output(["/usr/sbin/lsof", "-nP", "-d", "txt", "-Fn"], env,
-                          absent_ok=True)
+    texts = native_output(["/usr/sbin/lsof", "-nP", "-w", "-a", "-d", "txt",
+                           "-Fn", "--", str(executable)], env, absent_ok=True,
+                          probes=probes)
     if any(Path(line[1:].removesuffix(" (deleted)")).resolve() == executable
            for line in texts.splitlines() if line.startswith("n/")):
         raise FatalSession("installed executable is running")
-    result = subprocess.run(
-        [external_tool("launchctl", env), "print", job["service_target"]],
-        env=env,
-        capture_output=True, text=True, timeout=5, check=False)
-    absent = f'Could not find service "{job["label"]}" in domain '
-    if result.returncode == 0 or absent not in result.stderr:
-        raise FatalSession("launchd job loaded or off-state unverified")
+    native_output(["launchctl", "print", job["service_target"]], env,
+                  missing_service=(
+                      f'Could not find service "{job["label"]}" in domain '),
+                  probes=probes)
     if not Path(config["stop_marker_path"]).is_file():
         raise FatalSession("owner stop-intent marker missing")
-    sockets = native_output(["/usr/sbin/lsof", "-nP", "-U", "-Fn"], env,
-                            absent_ok=True)
     socket = Path(config["socket_path"]).resolve()
+    socket_paths = []
+    for name in dict.fromkeys((config["socket_path"], str(socket))):
+        try:
+            Path(name).stat()
+        except FileNotFoundError:
+            continue
+        socket_paths.append(name)
+    args = ["/usr/sbin/lsof", "-nP", "-w", "-a", "-U", "-Fn", "--",
+            *socket_paths]
+    sockets = ""
+    if socket_paths:
+        sockets = native_output(args, env, absent_ok=True, probes=probes)
+    elif probes is not None:
+        probes.append({"argv": args, "skipped": "socket path absent",
+                       "seconds": 0})
     if any(str(socket) in line[1:]
            or (line.startswith("n/") and Path(line[1:]).resolve() == socket)
            for line in sockets.splitlines() if line.startswith("n")):
         raise FatalSession("installed socket has a live holder")
     for endpoint in config["tcp_listeners"]:
         selector = f'TCP@{endpoint["host"]}:{endpoint["port"]}'
-        if native_output(["/usr/sbin/lsof", "-nP", "-a", "-i" + selector,
-                          "-sTCP:LISTEN", "-Fp"], env, absent_ok=True):
+        if native_output(["/usr/sbin/lsof", "-nP", "-w", "-a", "-i" + selector,
+                          "-sTCP:LISTEN", "-Fp"], env, absent_ok=True,
+                         probes=probes):
             raise FatalSession("installed TCP endpoint has a listener")
 
 
@@ -744,7 +771,17 @@ class Supervisor:
             return self.block_deadline - time.monotonic()
         remaining = window_limit(
             go, self.native_identity["input_manifest_sha256"], time.time())
-        daemon_off(self.off, self.environment)
+        probes, ok = [], False
+        try:
+            daemon_off(self.off, self.environment, probes)
+            ok = True
+        finally:
+            path = persistent_path(self.root / "resources.jsonl", self.root)
+            with path.open("a") as stream:
+                stream.write(json.dumps({"record_type": "d12-probes",
+                    "block_id": self.block_id, "window_id": go["window_id"],
+                    "probes": probes,
+                    "refusal": "" if ok else str(sys.exception())}) + "\n")
         self.next_d12_check = time.monotonic() + 60
         self.window = {"id": go["window_id"], "go_sha256": self.go_sha,
                        "start": go["start"], "end": go["end"],

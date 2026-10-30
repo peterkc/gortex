@@ -1766,11 +1766,15 @@ class NativeAdmissionTests(unittest.TestCase):
             marker.touch()
             binary = Path(config["executable"]["path"])
             binary.touch()
+            socket = Path(config["socket_path"])
+            socket.touch()
+            seen = []
             alias = root / "alias-to-installed"
             alias.symlink_to(binary)
             state = ["off"]
 
             def probe(args, **kwargs):
+                seen.append(args)
                 self.assertNotIn("shell", kwargs)
                 self.assertEqual(kwargs["timeout"], 5)
                 output, error, code = "", "", 0
@@ -1786,17 +1790,33 @@ class NativeAdmissionTests(unittest.TestCase):
                     if state[0] == "argv":
                         output = " ".join(config["executable"]["argv"]) + "\n"
                 elif "-d" in args:
+                    self.assertEqual(args, ["/usr/sbin/lsof", "-nP", "-w",
+                        "-a", "-d", "txt", "-Fn", "--", str(binary.resolve())])
                     if state[0] == "alias":
                         output = f"p7201\nftxt\nn{alias}\n"
                 elif "-U" in args:
+                    selected = [config["socket_path"]]
+                    canonical = str(Path(config["socket_path"]).resolve())
+                    if canonical != selected[0]:
+                        selected.append(canonical)
+                    self.assertEqual(args, ["/usr/sbin/lsof", "-nP", "-w",
+                        "-a", "-U", "-Fn", "--", *selected])
                     if state[0] == "socket":
                         output = "p7202\nf3\nn" + config["socket_path"] + "\n"
+                    elif state[0] == "socket-status":
+                        socket.unlink()
+                        error = f"lsof: status error on {socket}: missing path"
                 elif state[0] == "tcp1" and "-iTCP@127.0.0.1:59101" in args:
                     output = "p7203\n"
                 elif state[0] == "tcp2" and "-iTCP@127.0.0.1:59102" in args:
                     output = "p7204\n"
-                if args[0] == "/usr/sbin/lsof" and not output:
-                    code = 1
+                if args[0] == "/usr/sbin/lsof":
+                    self.assertIn("-w", args)
+                    self.assertIn("-a", args)
+                    self.assertTrue("--" in args or any(
+                        arg.startswith("-iTCP@127.0.0.1:") for arg in args))
+                    if not output:
+                        code = 1
                 return SimpleNamespace(returncode=code, stdout=output,
                                        stderr=error)
 
@@ -1804,13 +1824,55 @@ class NativeAdmissionTests(unittest.TestCase):
                     lambda name, env: "/bin/launchctl" if name == "launchctl"
                     else name)),
                   patch.object(driver.subprocess, "run", side_effect=probe)):
-                driver.daemon_off(config, {})
+                probes = []
+                driver.daemon_off(config, {}, probes)
+                self.assertEqual(len(probes), 6)
+                self.assertTrue(all(p["seconds"] >= 0 for p in probes))
+                self.assertEqual(probes[2]["returncode"], 113)
+                self.assertIn('Could not find service "test.fixture"',
+                              probes[2]["stderr"])
+                self.assertTrue(all({"argv", "seconds", "returncode",
+                                     "stderr", "stdout_present"} <= p.keys()
+                                    for p in probes))
                 for unsafe in ("argv", "alias", "job", "unknown", "socket",
                                "tcp1", "tcp2"):
                     state[0] = unsafe
                     with self.subTest(signal=unsafe), self.assertRaises(
                             driver.FatalSession):
                         driver.daemon_off(config, {})
+                state[0] = "off"
+                socket.unlink()
+                probes = []
+                seen.clear()
+                driver.daemon_off(config, {}, probes)
+                self.assertEqual(len(probes), 6)
+                self.assertFalse(any("-U" in args for args in seen))
+                self.assertEqual(probes[3], {"argv": ["/usr/sbin/lsof", "-nP",
+                    "-w", "-a", "-U", "-Fn", "--"],
+                    "skipped": "socket path absent", "seconds": 0})
+                self.assertEqual([Path(args[0]).name for args in seen],
+                    ["ps", "lsof", "launchctl", "lsof", "lsof"])
+                self.assertEqual(sum(any(a.startswith("-iTCP@") for a in args)
+                                     for args in seen), 2)
+                socket.touch()
+                configured = config["socket_path"]
+                config["socket_path"] = str(socket.resolve())
+                seen.clear()
+                driver.daemon_off(config, {})
+                self.assertEqual(next(args for args in seen if "-U" in args),
+                    ["/usr/sbin/lsof", "-nP", "-w", "-a", "-U", "-Fn", "--",
+                     config["socket_path"]])
+                config["socket_path"] = configured
+                state[0] = "socket-status"
+                probes = []
+                seen.clear()
+                with self.assertRaisesRegex(driver.FatalSession,
+                                            "unverified native probe"):
+                    driver.daemon_off(config, {}, probes)
+                self.assertEqual(sum("-U" in args for args in seen), 1)
+                self.assertIn("status error", probes[-1]["stderr"])
+                self.assertEqual(probes[-1]["returncode"], 1)
+                self.assertFalse(socket.exists())
                 state[0] = "off"
                 marker.unlink()
                 with self.assertRaises(driver.FatalSession):
@@ -1828,6 +1890,129 @@ class NativeAdmissionTests(unittest.TestCase):
                 SimpleNamespace(returncode=1, stdout="", stderr=""))):
             self.assertEqual(driver.native_output(
                 ["/fixture/lsof"], {}, absent_ok=True), "")
+
+    def test_native_probe_durations_include_refusals_and_native_errors(self):
+        for code, output, error in ((0, "ok", ""), (1, "", ""),
+                                    (1, "partial", ""), (0, "", "warning"),
+                                    (2, "", "permission denied")):
+            with self.subTest(code=code, output=output, stderr=error):
+                probes = []
+                result = SimpleNamespace(returncode=code, stdout=output,
+                                         stderr=error)
+                with (patch.object(driver.subprocess, "run",
+                                   return_value=result) as run,
+                      patch.object(driver.time, "monotonic",
+                                   side_effect=[10, 12.5])):
+                    if error or code == 2 or (code == 1 and output):
+                        with self.assertRaises(driver.FatalSession):
+                            driver.native_output(["/fixture/lsof"], {},
+                                absent_ok=True, probes=probes)
+                    else:
+                        self.assertEqual(driver.native_output(
+                            ["/fixture/lsof"], {}, absent_ok=True,
+                            probes=probes), output)
+                self.assertEqual(probes, [{"argv": ["/fixture/lsof"],
+                    "seconds": 2.5, "returncode": code, "stderr": error,
+                    "stdout_present": bool(output)}])
+                self.assertEqual(run.call_args.kwargs["timeout"], 5)
+                self.assertNotIn("shell", run.call_args.kwargs)
+        errors = [OSError("probe denied"), driver.subprocess.TimeoutExpired(
+            ["/fixture/launchctl"], 5, stderr=b"timed warning")]
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                probes = []
+                with (patch.object(driver.subprocess, "run",
+                                   side_effect=error),
+                      patch.object(driver.time, "monotonic",
+                                   side_effect=[10, 12.5]),
+                      self.assertRaises(driver.FatalSession) as caught):
+                    driver.native_output(["/fixture/launchctl"], {},
+                                         probes=probes)
+                self.assertIs(caught.exception.__cause__, error)
+                self.assertEqual(probes, [{"argv": ["/fixture/launchctl"],
+                    "seconds": 2.5, "error": repr(error),
+                    "stderr": str(getattr(error, "stderr", ""))}])
+                self.assertIsInstance(json.dumps(probes), str)
+
+    def test_d12_probe_evidence_survives_before_resource_sampling(self):
+        for mode in ("off", "warning", "partial", "timeout", "launchctl",
+                     "identity"):
+            with (self.subTest(mode=mode),
+                  tempfile.TemporaryDirectory() as folder):
+                root = Path(folder).resolve()
+                owner = fixture_owner(root, setup=False)
+                owner.go_file = root / "go.json"
+                owner.off_file = root / "off.json"
+                owner.off = self.identities(root)
+                driver.atomic_json(owner.off_file, owner.off)
+                owner.native_identity["daemon_off_identities_sha256"] = (
+                    driver.digest(owner.off_file))
+                driver.atomic_json(owner.go_file, self.go(
+                    owner.native_identity["input_manifest_sha256"]))
+                owner.go_sha = driver.digest(owner.go_file)
+                owner.stop_all = unittest.mock.Mock()
+                result = SimpleNamespace(returncode=1,
+                    stdout="partial" if mode == "partial" else "",
+                    stderr="warning" if mode in ("warning", "launchctl")
+                    else "")
+
+                def off(config, env, probes):
+                    self.assertEqual(config, owner.off)
+                    if mode == "identity":
+                        raise driver.FatalSession("unverified identity")
+                    name = "launchctl" if mode == "launchctl" else "lsof"
+                    driver.native_output(["/fixture/" + name], env,
+                        absent_ok=True, probes=probes,
+                        missing_service="missing fixture service" if mode ==
+                        "launchctl" else None)
+
+                error = driver.subprocess.TimeoutExpired("/fixture/lsof", 5)
+                with (patch.object(driver, "daemon_off", side_effect=off),
+                      patch.object(driver.subprocess, "run",
+                          return_value=result,
+                          side_effect=error if mode == "timeout" else None),
+                      patch.object(driver.time, "time", return_value=1000),
+                      patch.object(driver.time, "monotonic", return_value=10),
+                      patch.object(driver, "native_resources",
+                                   return_value=owner.sample) as resources):
+                    if mode == "off":
+                        try:
+                            raise RuntimeError("already-handled outer error")
+                        except RuntimeError:
+                            owner.guard(admission=True)
+                        resources.assert_called_once()
+                        owner.stop_all.assert_not_called()
+                    else:
+                        with self.assertRaises(driver.FatalSession):
+                            owner.guard(admission=True)
+                        resources.assert_not_called()
+                        owner.stop_all.assert_called_once()
+                rows = [json.loads(line) for line in
+                        (root / "resources.jsonl").read_text().splitlines()]
+                self.assertEqual(len(rows), 2 if mode == "off" else 1)
+                row = rows[0]
+                self.assertEqual(row["record_type"], "d12-probes")
+                self.assertEqual(row["window_id"], "fixture-window")
+                self.assertEqual(row["block_id"], "fixture")
+                self.assertEqual(bool(row["refusal"]), mode != "off")
+                if mode == "identity":
+                    self.assertEqual(row["probes"], [])
+                    self.assertIn("unverified identity", row["refusal"])
+                else:
+                    self.assertEqual(len(row["probes"]), 1)
+                    self.assertEqual(row["probes"][0]["seconds"], 0)
+                    self.assertEqual(row["probes"][0]["argv"],
+                        ["/fixture/launchctl" if mode == "launchctl" else
+                         "/fixture/lsof"])
+                    if mode == "timeout":
+                        self.assertIn("TimeoutExpired",
+                                      row["probes"][0]["error"])
+                    else:
+                        self.assertEqual(row["probes"][0]["returncode"], 1)
+                        self.assertEqual(row["probes"][0]["stderr"],
+                                         result.stderr)
+                        self.assertEqual(row["probes"][0]["stdout_present"],
+                                         mode == "partial")
 
     def test_darwin_birth_rss_abi_gone_and_unknown_identity(self):
         def usage(pid, flavor, pointer):
@@ -2101,7 +2286,7 @@ class NativeAdmissionTests(unittest.TestCase):
                 launcher.assert_called_once_with(
                     config["launcher"], Path(sys.executable),
                     sys.version_info[:3], driver.digest(Path(sys.executable)))
-                off.assert_called_once_with(identities, {})
+                off.assert_called_once_with(identities, {}, [])
                 identities_file.write_text(identities_file.read_text() + " ")
                 with self.assertRaises(driver.FatalSession):
                     owner.permissions()
@@ -2200,6 +2385,7 @@ class NativeAdmissionTests(unittest.TestCase):
                         owner.active.clear()
                 self.assertEqual(clock[0], 30)
                 self.assertEqual(checks[:8], [True] + [False] * 6 + [True])
+                self.assertEqual(checks.count(True), 2)
                 self.assertEqual(masks[-1], signal.SIG_SETMASK)
 
     def test_per_case_caps_do_not_become_a_storage_group_timeout(self):
