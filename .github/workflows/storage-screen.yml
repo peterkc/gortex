@@ -83,6 +83,20 @@ jobs:
           "$py" --version | tee "$RUNNER_TEMP/storage/ci-driver.txt"
           "$py" -B -m unittest -v test_driver 2>&1 \
             | tee -a "$RUNNER_TEMP/storage/ci-driver.txt"
+      - name: Hybrid vector controller fixtures only
+        working-directory: study/storage/vector/hybrid-followup
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The driver launches this controller with its own interpreter.
+          py="$(ls -1 "$RUNNER_TOOL_CACHE"/Python/3.14.*/x64/bin/python3.14 2>/dev/null | sort -V | tail -n 1 || true)"
+          if test -z "$py"; then
+            echo "FAIL: Python 3.14 absent from RUNNER_TOOL_CACHE; no download allowed"
+            exit 1
+          fi
+          "$py" --version | tee "$RUNNER_TEMP/storage/ci-hybrid.txt"
+          "$py" -B -m unittest -v test_controller 2>&1 \
+            | tee -a "$RUNNER_TEMP/storage/ci-hybrid.txt"
       - name: Exact evaluator entrypoint on tiny synthetic vectors only
         shell: bash
         env:
