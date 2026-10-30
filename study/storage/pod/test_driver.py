@@ -1567,7 +1567,9 @@ class NativeAdmissionTests(unittest.TestCase):
             with self.subTest(now=now), self.assertRaises(
                     driver.DeadlineExceeded):
                 driver.window_limit(go, "1" * 64, now)
-        for key in ("user_go", "migration_complete", "owner_stop_confirmed",
+        with self.assertRaises(driver.DeadlineExceeded):
+            driver.window_limit({**go, "user_go": False}, "1" * 64, 1000)
+        for key in ("migration_complete", "owner_stop_confirmed",
                     "awake", "thermal_safe"):
             with self.subTest(key=key), self.assertRaises(driver.FatalSession):
                 driver.window_limit({**go, key: False}, "1" * 64, 1000)
@@ -1617,7 +1619,7 @@ class NativeAdmissionTests(unittest.TestCase):
                    ("pressure_state", 0), ("pressure_state", "normal"),
                    ("swapouts", 6), ("swapouts", 8 + pages),
                    ("available_bytes", 4 * driver.GIB - 1),
-                   ("ac_power", False), ("page_size", 0),
+                   ("ac_power", None), ("page_size", 0),
                    ("page_size", True), ("swap_usage", ""),
                    ("load5", float("nan")), ("load15", -1))
         for key, value in invalid:
@@ -1625,6 +1627,9 @@ class NativeAdmissionTests(unittest.TestCase):
                     driver.FatalSession):
                 driver.resource_limit({**sample, key: value}, 0, 7,
                                       admission=True)
+        with self.assertRaises(driver.DeadlineExceeded):
+            driver.resource_limit({**sample, "ac_power": False}, 0, 7,
+                                  admission=True)
         for missing in sample:
             incomplete = {k: v for k, v in sample.items() if k != missing}
             with self.subTest(missing=missing), self.assertRaises(
@@ -1779,8 +1784,13 @@ class NativeAdmissionTests(unittest.TestCase):
                 for path in (owner.go_file, owner.off_file):
                     original = path.read_text()
                     path.write_text(original + "\n")
-                    with self.assertRaisesRegex(driver.FatalSession,
-                                                "identities changed"):
+                    expected = (driver.DeadlineExceeded
+                                if path == owner.go_file
+                                else driver.FatalSession)
+                    reason = ("current window go changed"
+                              if path == owner.go_file
+                              else "identities changed")
+                    with self.assertRaisesRegex(expected, reason):
                         owner.permissions(full=False)
                     path.write_text(original)
                 self.assertEqual(daemon_checks.call_count, 2)
@@ -1829,7 +1839,7 @@ class NativeAdmissionTests(unittest.TestCase):
             self.assertTrue(all(log.closed for log in logs))
 
     def test_live_guard_cleans_after_revocation_or_resource_loss(self):
-        for failure in ("revoked", "expired", "memory", "swap"):
+        for failure in ("revoked", "expired", "ac", "memory", "swap"):
             with self.subTest(failure=failure), \
                     tempfile.TemporaryDirectory() as folder:
                 owner = fixture_owner(Path(folder))
@@ -1841,18 +1851,21 @@ class NativeAdmissionTests(unittest.TestCase):
                 owner.permissions = unittest.mock.Mock(return_value=1000)
                 sample = dict(owner.sample)
                 if failure == "revoked":
-                    owner.permissions.side_effect = driver.FatalSession(
+                    owner.permissions.side_effect = driver.DeadlineExceeded(
                         "current user go revoked")
                 elif failure == "expired":
                     owner.permissions.side_effect = driver.DeadlineExceeded(
                         "current user window expired")
+                elif failure == "ac":
+                    sample["ac_power"] = False
                 elif failure == "memory":
                     sample["level"] = 19
                 else:
                     sample["swapouts"] = 8 + (
                         driver.SWAP_GROWTH_LIMIT // sample["page_size"])
                 live = {8400: {(8400, 10): 1}}
-                error_type = (driver.DeadlineExceeded if failure == "expired"
+                error_type = (driver.DeadlineExceeded
+                              if failure in {"revoked", "expired", "ac"}
                               else driver.FatalSession)
 
                 def kill(pgid, sig):
@@ -2030,7 +2043,7 @@ class NativeAdmissionTests(unittest.TestCase):
                       patch.object(driver.subprocess, "Popen",
                                    return_value=process) as spawn):
                     if revoke:
-                        with self.assertRaises(driver.FatalSession):
+                        with self.assertRaises(driver.DeadlineExceeded):
                             owner.start(["/fixture/private-binary"], directory,
                                         env, root)
                         spawn.assert_not_called()
@@ -2924,6 +2937,230 @@ class DurabilityTests(unittest.TestCase):
                     self.assertRaisesRegex(driver.FatalSession, "diagnosis"):
                 driver.execute_session(owner, admission, root, {}, 1)
             owner.begin_block.assert_not_called()
+
+
+class FailureBoundaryTests(unittest.TestCase):
+    def test_unknown_cache_errors_propagate_in_both_modes_without_writes(self):
+        for strict in (False, True):
+            for error in (KeyError("bug"), TypeError("bug"), ValueError("bug"),
+                          PermissionError("unknown I/O")):
+                with (self.subTest(strict=strict, error=type(error).__name__),
+                      tempfile.TemporaryDirectory() as folder):
+                    root = Path(folder).resolve()
+                    directory = root / "jobs/case"
+                    directory.mkdir(parents=True)
+                    verify = unittest.mock.Mock(side_effect=error)
+                    with self.assertRaises(type(error)) as caught:
+                        driver.reusable(directory, verify, strict=strict)
+                    self.assertIs(caught.exception, error)
+                    self.assertEqual(list(directory.iterdir()), [])
+                    self.assertFalse((root / "attempts").exists())
+
+    def test_expected_cache_misses_still_allow_fresh_work(self):
+        for strict in (False, True):
+            for error in (driver.ReviewRequired("proof"),
+                          FileNotFoundError("missing")):
+                with (self.subTest(strict=strict, error=type(error).__name__),
+                      tempfile.TemporaryDirectory() as folder):
+                    directory = Path(folder).resolve() / "jobs/case"
+                    directory.mkdir(parents=True)
+                    self.assertIsNone(driver.reusable(directory,
+                        unittest.mock.Mock(side_effect=error), strict=strict))
+                    self.assertEqual(driver.read_json(
+                        directory / "partial.json")["state"], "partial")
+
+    def test_collector_bugs_are_persisted_fatal_and_never_resume(self):
+        for error in (TypeError("collector bug"), MemoryError("collector OOM"),
+                      driver.FatalSession("collector drift")):
+            with (self.subTest(error=type(error).__name__),
+                  tempfile.TemporaryDirectory() as folder):
+                root = Path(folder).resolve()
+                owner = fixture_owner(root)
+                owner.begin_block = unittest.mock.Mock()
+                owner.stop_all = unittest.mock.Mock()
+                blocks = [{"id": "smoke", "jobs": []},
+                          {"id": "calibration", "jobs": []}]
+                with (patch.object(driver.signal, "signal"),
+                      patch.object(driver.signal, "setitimer"),
+                      patch.object(driver.time, "monotonic", return_value=0),
+                      patch.object(driver, "binding_block",
+                                   return_value="completed") as work,
+                      patch.object(driver, "block_files", side_effect=error)):
+                    with self.assertRaises(type(error)):
+                        driver.execute_session(owner, {"blocks": blocks},
+                                               root, {}, 1)
+                    work.assert_called_once_with(owner, blocks[0])
+                    saved = driver.read_json(root / "session.json")
+                    self.assertEqual(saved["blocks"]["smoke"]["terminal"],
+                                     "fatal")
+                    self.assertNotIn("calibration", saved["blocks"])
+                    owner.begin_block.reset_mock()
+                    work.reset_mock()
+                    with self.assertRaises(driver.FatalSession):
+                        driver.execute_session(owner, {"blocks": blocks},
+                                               root, {}, 1)
+                    owner.begin_block.assert_not_called()
+                    work.assert_not_called()
+
+    def test_expected_collector_rejections_remain_block_local(self):
+        for error, reason in ((driver.ReviewRequired("proof"), "receipt"),
+                              (driver.DeadlineExceeded("clock"), "time")):
+            with (self.subTest(reason=reason),
+                  tempfile.TemporaryDirectory() as folder):
+                root = Path(folder).resolve()
+                owner = fixture_owner(root)
+                owner.begin_block = unittest.mock.Mock()
+                owner.stop_all = unittest.mock.Mock()
+                admission = {"blocks": [{"id": "smoke", "jobs": []},
+                                        {"id": "calibration", "jobs": []}]}
+                with (patch.object(driver.signal, "signal"),
+                      patch.object(driver.signal, "setitimer"),
+                      patch.object(driver.time, "monotonic", return_value=0),
+                      patch.object(driver, "binding_block",
+                                   return_value="completed"),
+                      patch.object(driver, "block_files", side_effect=[error,
+                                                                     {}])):
+                    result = driver.execute_session(owner, admission,
+                                                    root, {}, 1)
+                first, second = (result["blocks"][name]
+                                 for name in ("smoke", "calibration"))
+                self.assertEqual((first["state"], first["reason_code"]),
+                                 ("partial", reason))
+                self.assertNotIn("terminal", first)
+                self.assertEqual(second["state"], "completed")
+
+    def test_removed_go_is_time_like_but_identity_change_is_fatal(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            owner = fixture_owner(root)
+            owner.go_file, owner.off_file = root / "go.json", root / "off.json"
+            owner.off = {}
+            driver.atomic_json(owner.off_file, owner.off)
+            owner.native_identity["daemon_off_identities_sha256"] = (
+                driver.digest(owner.off_file))
+            go = NativeAdmissionTests().go(
+                owner.native_identity["input_manifest_sha256"])
+            driver.atomic_json(owner.go_file, go)
+            owner.go_sha = driver.digest(owner.go_file)
+            with (patch.object(driver, "daemon_off"),
+                  patch.object(driver.time, "time", return_value=1000)):
+                owner.permissions()
+                owner.go_file.unlink()
+                with self.assertRaises(driver.DeadlineExceeded):
+                    owner.permissions()
+                driver.atomic_json(owner.go_file, {**go, "window_id": "new"})
+                owner.go_sha = driver.digest(owner.go_file)
+                owner.permissions()
+                self.assertEqual(owner.window["id"], "new")
+                owner.off_file.write_text("changed")
+                with self.assertRaises(driver.FatalSession):
+                    owner.permissions()
+
+    def test_exhausted_receipt_deadline_is_time_and_can_resume(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            owner = fixture_owner(root)
+            owner.begin_block = unittest.mock.Mock()
+            owner.stop_all = unittest.mock.Mock()
+            admission = {"blocks": [{"id": "smoke", "jobs": []}]}
+            with (patch.object(driver.signal, "signal"),
+                  patch.object(driver.signal, "setitimer"),
+                  patch.object(driver.time, "monotonic",
+                               side_effect=[0, 10000, 0, 0]),
+                  patch.object(driver, "binding_block",
+                               return_value="completed") as work,
+                  patch.object(driver, "block_files", return_value={})):
+                first = driver.execute_session(owner, admission, root, {}, 1)
+                self.assertEqual(first["blocks"]["smoke"]["reason_code"],
+                                 "time")
+                owner.window = {"id": "new-go"}
+                second = driver.execute_session(owner, admission, root, {}, 1)
+            self.assertEqual(second["blocks"]["smoke"]["state"], "completed")
+            self.assertEqual(work.call_count, 2)
+
+    def test_later_time_stop_preserves_a_known_worker_partial(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            jobs = [{"id": name, "argv": [], "receipt_path": "unused",
+                     **{key: "a" * 64 for key in
+                        ("source_pin", "config_pin", "input_pin")}}
+                    for name in ("known", "timed")]
+            def auxiliary(owner, name, argv, validate, **options):
+                directory = root / "aux" / name
+                directory.mkdir(parents=True)
+                data = directory / "raw.json"
+                data.write_bytes(b"evidence")
+                driver.atomic_json(directory / "receipt.json", {
+                    **{key: "a" * 64 for key in
+                       ("source_pin", "config_pin", "input_pin")},
+                    "state": "partial", "exit_code": 1,
+                    "reason_code": "worker" if name == "known" else "time",
+                    "clean_handoff": True,
+                    "files": {data.name: driver.digest(data)}})
+                validate(directory)
+                result = {"exit_code": 1, "state": "pass"}
+                driver.atomic_json(directory / "complete.json", result)
+                return result
+            with patch.object(driver, "auxiliary", side_effect=auxiliary):
+                self.assertEqual(driver.binding_block(
+                    SimpleNamespace(root=root),
+                    {"id": "smoke", "jobs": jobs}), "partial")
+            for name in ("known", "timed"):
+                self.assertTrue((root / "aux" / name /
+                                 "partial-complete.json").is_file())
+
+    def test_verified_worker_time_receipt_remains_resumable(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            directory = root / "aux/worker"
+            directory.mkdir(parents=True)
+            data = directory / "raw.json"
+            data.write_bytes(b"time evidence")
+            path = directory / "receipt.json"
+            pins = {name: "a" * 64 for name in
+                    ("source_pin", "config_pin", "input_pin")}
+            driver.atomic_json(path, {**pins, "state": "partial",
+                "reason_code": "time", "exit_code": 1, "clean_handoff": True,
+                "files": {data.name: driver.digest(data)}})
+            before = path.read_bytes()
+            def auxiliary(owner, name, argv, validate, **options):
+                validate(directory)
+                result = {"state": "pass", "exit_code": 1}
+                driver.atomic_json(directory / "complete.json", result)
+                return result
+            job = {"id": "worker", "argv": [], "receipt_path": str(path),
+                   **pins}
+            with (patch.object(driver, "auxiliary", side_effect=auxiliary),
+                  self.assertRaises(driver.DeadlineExceeded)):
+                driver.binding_block(SimpleNamespace(root=root),
+                                     {"id": "smoke", "jobs": [job]})
+            self.assertEqual(path.read_bytes(), before)
+            self.assertTrue((directory / "partial-complete.json").is_file())
+            self.assertFalse((directory / "complete.json").exists())
+
+    def test_time_partial_resumes_after_owned_stop_in_a_new_window(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            owner = fixture_owner(root)
+            owner.begin_block = unittest.mock.Mock()
+            owner.stop_all = unittest.mock.Mock()
+            admission = {"blocks": [{"id": "smoke", "jobs": []}]}
+            with (patch.object(driver.signal, "signal"),
+                  patch.object(driver.signal, "setitimer"),
+                  patch.object(driver.time, "monotonic", return_value=0),
+                  patch.object(driver, "block_files", return_value={}),
+                  patch.object(driver, "binding_block", side_effect=[
+                      driver.DeadlineExceeded("AC/go stop"), "completed"])):
+                first = driver.execute_session(owner, admission, root, {}, 1)
+                self.assertEqual(first["blocks"]["smoke"]["reason_code"],
+                                 "time")
+                self.assertNotIn("terminal", first["blocks"]["smoke"])
+                owner.stop_all.assert_called_once()
+                owner.window = {"id": "new-go"}
+                second = driver.execute_session(owner, admission, root, {}, 1)
+            self.assertEqual(second["blocks"]["smoke"]["state"], "completed")
+            self.assertEqual(owner.begin_block.call_count, 2)
+            self.assertEqual(owner.stop_all.call_count, 2)
 
 
 class KnownOutcomeTests(unittest.TestCase):
@@ -4566,7 +4803,7 @@ class CatalogGroupTests(unittest.TestCase):
                       patch.object(driver.subprocess, "Popen",
                                    return_value=process) as spawn):
                     if revoke:
-                        with self.assertRaises(driver.FatalSession):
+                        with self.assertRaises(driver.DeadlineExceeded):
                             owner.start(["/fixture/catalog"], directory,
                                         env, root)
                         spawn.assert_not_called()

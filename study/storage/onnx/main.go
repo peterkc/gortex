@@ -36,6 +36,7 @@ import "C"
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"math"
@@ -50,6 +51,8 @@ import (
 
 	ort "github.com/yalue/onnxruntime_go"
 )
+
+var errHostStop = errors.New("memorystatus below 20 or unavailable")
 
 type Batch struct {
 	Indices []int              `json:"indices"`
@@ -333,7 +336,7 @@ func run() error {
 	}
 	blockStart := time.Now()
 	if runtime.GOOS == "darwin" && int(C.memory_level()) < 20 {
-		return fmt.Errorf("memorystatus below 20 before load")
+		return fmt.Errorf("before load: %w", errHostStop)
 	}
 	ort.SetSharedLibraryPath(*library)
 	if err := ort.InitializeEnvironment(); err != nil {
@@ -400,7 +403,7 @@ func run() error {
 	latencies := []float64{}
 	for _, batch := range batches {
 		if runtime.GOOS == "darwin" && int(C.memory_level()) < 20 {
-			return fmt.Errorf("memorystatus below 20 during inference")
+			return fmt.Errorf("during inference: %w", errHostStop)
 		}
 		if time.Since(blockStart) >= *guard {
 			report.Reason = "runner guard exceeded"
@@ -461,9 +464,16 @@ func run() error {
 	return nil
 }
 
+func errorExitCode(err error) int {
+	if errors.Is(err, errHostStop) {
+		return 78
+	}
+	return 1
+}
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		os.Exit(errorExitCode(err))
 	}
 }

@@ -53,9 +53,7 @@ def digest(path: Path) -> str:
 
 def write(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2) + "\n")
-    temporary.replace(path)
+    native.atomic_json(path, value)
 
 
 def inside(path: Path, parent: Path) -> Path:
@@ -223,7 +221,8 @@ class Attempt:
         native.window_limit(native.read_json(Path(self.config["window_file"])),
                             digest(Path(self.config["manifest_file"])), now)
         if now >= self.deadline:
-            raise WorkFailed("absolute work deadline; incomplete output")
+            raise native.DeadlineExceeded(
+                "absolute work deadline; incomplete output")
         if self.daemon is not None and self.daemon.poll() is not None:
             raise WorkFailed("owned daemon exited unexpectedly")
         if not self.samples or now - self.last_sample >= 5:
@@ -451,14 +450,17 @@ def interrupted(signum, frame):
 def finish(root: Path, directory: Path, receipt: Path, identity: Mapping,
            attempt: Attempt | None, outcome: Mapping) -> int:
     result = {"clean_handoff": True, **identity, **outcome}
+    if result["state"] == "fatal":
+        result["initial_failure"] = dict(outcome)
     if attempt is not None:
         try:
             attempt.stop()
         except Rejected as error:
-            result.update(state="checks_failed", exit_code=1,
-                          reason_code="time", reason=str(error))
+            if result["state"] != "fatal":
+                result.update(state="checks_failed", exit_code=1,
+                              reason_code="cleanup", reason=str(error))
         except Exception as error:
-            result.update(state="partial", exit_code=1, clean_handoff=False,
+            result.update(state="fatal", exit_code=1, clean_handoff=False,
                           reason_code="cleanup", reason=str(error))
     files = {}
     try:
@@ -474,7 +476,7 @@ def finish(root: Path, directory: Path, receipt: Path, identity: Mapping,
                 if path.is_file():
                     files[str(path.relative_to(root))] = digest(path)
     except Exception as error:
-        result.update(state="partial", exit_code=1,
+        result.update(state="fatal", exit_code=1, clean_handoff=False,
                       reason_code="output", reason=str(error))
     result["files"] = files
     write(receipt, result)
@@ -482,16 +484,17 @@ def finish(root: Path, directory: Path, receipt: Path, identity: Mapping,
 
 
 def failure(error: Exception) -> dict:
-    state, code = "partial", 1
+    state, code = "fatal", 1
     if isinstance(error, Blocked):
         state, code = "dependency_blocked", 0
     elif isinstance(error, Rejected):
         state = "checks_failed"
+    elif isinstance(error, (WorkFailed, native.DeadlineExceeded)):
+        state = "partial"
     return {"state": state, "exit_code": code,
             "reason_code": getattr(error, "reason_code", type(error).__name__),
             "reason": str(error),
-            "clean_handoff": not isinstance(error, (
-                Unsafe, native.FatalSession))}
+            "clean_handoff": state != "fatal"}
 
 
 def claim_attempt(directory: Path, receipt: Path) -> bool:

@@ -228,7 +228,7 @@ class BoundaryTests(NativeFixture):
             run.mkdir()
             (run / "partial.log").write_text("incomplete")
             attempt = attempt_fixture(run, time.time() - 1, mode="smoke")
-            with self.assertRaises(runner.WorkFailed):
+            with self.assertRaises(runner.native.DeadlineExceeded):
                 attempt.command([sys.executable, "-c", "raise Exception()"])
             self.assertEqual((run / "partial.log").read_text(), "incomplete")
             self.assertFalse((run / "command-1.log").exists())
@@ -267,14 +267,14 @@ class BoundaryTests(NativeFixture):
 
 
 class PartialReceiptTests(NativeFixture):
-    def finish(self, root, attempt, reason):
+    def finish(self, root, attempt, reason, *, state="partial"):
         receipt = root / "results/receipt.json"
         outcome = runner.failure(reason)
         code = runner.finish(root, root / "attempt", receipt,
                              {"source_pin": "fixed"}, attempt, outcome)
         self.assertEqual(code, 1)
         result = json.loads(receipt.read_text())
-        self.assertEqual(result["state"], "partial")
+        self.assertEqual(result["state"], state)
         self.assertEqual(result["source_pin"], "fixed")
         self.assertEqual(result["exit_code"], 1)
         for name, sha in result["files"].items():
@@ -287,11 +287,11 @@ class PartialReceiptTests(NativeFixture):
             root = Path(tmp)
             attempt = attempt_fixture(root / "attempt", time.time() - 1,
                                       mode="smoke")
-            with self.assertRaises(runner.WorkFailed) as caught:
+            with self.assertRaises(runner.native.DeadlineExceeded) as caught:
                 attempt.observe()
             result = self.finish(root, attempt, caught.exception)
             self.assertTrue(result["clean_handoff"])
-            self.assertEqual(result["reason_code"], "WorkFailed")
+            self.assertEqual(result["reason_code"], "time")
 
     def test_exited_daemon_is_reaped_and_receipt_is_clean_partial(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -312,7 +312,8 @@ class PartialReceiptTests(NativeFixture):
     def test_isolation_failure_stays_fatal_after_clean_no_process_stop(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            result = self.finish(root, None, runner.Unsafe("wrong daemon"))
+            result = self.finish(root, None, runner.Unsafe("wrong daemon"),
+                                 state="fatal")
             self.assertFalse(result["clean_handoff"])
 
     def test_unverified_stop_writes_fatal_receipt_even_without_daemon(self):
@@ -322,10 +323,51 @@ class PartialReceiptTests(NativeFixture):
                                       mode="smoke")
             sock = Path(attempt.env["GORTEX_DAEMON_SOCKET"])
             sock.touch()
-            result = self.finish(root, attempt, OSError("local failure"))
+            result = self.finish(root, attempt, OSError("local failure"),
+                                 state="fatal")
             self.assertFalse(result["clean_handoff"])
             self.assertEqual(result["reason_code"], "cleanup")
             self.assertTrue(sock.exists())
+
+    def test_fatal_cause_survives_expected_and_unexpected_cleanup(self):
+        for cleanup in (runner.Rejected("slow reap"), OSError("reap bug")):
+            with (self.subTest(cleanup=type(cleanup).__name__),
+                  tempfile.TemporaryDirectory() as folder):
+                root = Path(folder)
+                attempt = attempt_fixture(root / "attempt", time.time() + 30,
+                                          mode="smoke")
+                original = runner.failure(TypeError("original bug"))
+                with patch.object(attempt, "stop", side_effect=cleanup):
+                    path = root / "results/receipt.json"
+                    self.assertEqual(runner.finish(
+                        root, root / "attempt", path, {}, attempt,
+                        original), 1)
+                result = runner.native.read_json(path)
+                self.assertEqual(result["state"], "fatal")
+                self.assertFalse(result["clean_handoff"])
+                self.assertEqual(result["initial_failure"], original)
+
+    def test_output_collection_bug_publishes_fatal_unclean_receipt(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "attempt").mkdir()
+            path = root / "results/receipt.json"
+            with patch.object(runner.os, "walk", side_effect=TypeError("bug")):
+                self.assertEqual(runner.finish(
+                    root, root / "attempt", path, {}, None,
+                    {"state": "completed", "exit_code": 0}), 1)
+            result = runner.native.read_json(path)
+            self.assertEqual((result["state"], result["reason_code"]),
+                             ("fatal", "output"))
+            self.assertFalse(result["clean_handoff"])
+
+    def test_writer_uses_the_native_atomic_publication_boundary(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "nested/receipt.json"
+            with patch.object(runner.native, "atomic_json") as publish:
+                runner.write(path, {"state": "partial"})
+            self.assertTrue(path.parent.is_dir())
+            publish.assert_called_once_with(path, {"state": "partial"})
 
 
 class FailureRoutingTests(unittest.TestCase):
@@ -334,11 +376,14 @@ class FailureRoutingTests(unittest.TestCase):
                 (runner.Blocked("gate"), "dependency_blocked", 0, True),
                 (runner.Rejected("identity"), "checks_failed", 1, True),
                 (runner.WorkFailed("deadline"), "partial", 1, True),
-                (OSError("file"), "partial", 1, True),
-                (ValueError("data"), "partial", 1, True),
-                (KeyError("field"), "partial", 1, True),
-                (sqlite3.Error("query"), "partial", 1, True),
-                (runner.Unsafe("wrong daemon"), "partial", 1, False)):
+                (OSError("file"), "fatal", 1, False),
+                (ValueError("data"), "fatal", 1, False),
+                (KeyError("field"), "fatal", 1, False),
+                (sqlite3.Error("query"), "fatal", 1, False),
+                (runner.native.DeadlineExceeded("time"), "partial", 1, True),
+                (TypeError("bug"), "fatal", 1, False),
+                (json.JSONDecodeError("bad", "{", 0), "fatal", 1, False),
+                (runner.Unsafe("wrong daemon"), "fatal", 1, False)):
             with self.subTest(error=type(error).__name__):
                 result = runner.failure(error)
                 self.assertEqual(result["state"], state)
@@ -717,7 +762,7 @@ class FrozenV9Tests(NativeFixture):
             value["user_go"] = False
             runner.write(window, value)
             with (patch.object(runner.subprocess, "Popen") as spawn,
-                  self.assertRaises(runner.native.FatalSession)):
+                  self.assertRaises(runner.native.DeadlineExceeded)):
                 attempt.command(["never-launch"])
             spawn.assert_not_called()
             attempt.stop()

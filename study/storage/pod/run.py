@@ -456,11 +456,13 @@ def resource_limit(sample: Mapping, peak: int, previous_swapouts: int,
             or sample["swapouts"] < previous_swapouts
             or (sample["swapouts"] - previous_swapouts) * sample["page_size"]
             > SWAP_GROWTH_LIMIT or sample["available_bytes"] < MEMORY_MINIMUM
-            or sample["ac_power"] is not True)
+            or type(sample["ac_power"]) is not bool)
     except (ValueError, KeyError, TypeError) as error:
         raise FatalSession("required native telemetry unavailable") from error
     if invalid:
         raise FatalSession("native pressure/memory/swap/AC stop")
+    if sample["ac_power"] is False:
+        raise DeadlineExceeded("AC power lost")
     if (oracle and admission
             and sample["available_bytes"] < peak + MEMORY_MINIMUM):
         raise ReviewRequired("oracle estimate plus minimum does not fit")
@@ -584,10 +586,13 @@ def window_limit(go: Mapping, manifest_sha: str, now: float) -> float:
     if (go["schema"] != "mac-window-go/v1"
             or not isinstance(go["window_id"], str) or not go["window_id"]
             or go["input_manifest_sha256"] != manifest_sha
+            or type(go["user_go"]) is not bool
             or not all(go[k] is True for k in (
-                "user_go", "migration_complete", "owner_stop_confirmed",
+                "migration_complete", "owner_stop_confirmed",
                 "awake", "thermal_safe"))):
         raise FatalSession("missing current window/migration/owner go")
+    if go["user_go"] is False:
+        raise DeadlineExceeded("current window go revoked")
     start = timestamp(go["start"], "window start")
     end = timestamp(go["end"], "window end")
     if not start <= now < end - WINDOW_CLEANUP_SECONDS:
@@ -682,10 +687,14 @@ class Supervisor:
 
     def permissions(self, *, full: bool = True) -> float:
         if (digest(self.manifest_file) != self.native_identity[
-                "input_manifest_sha256"] or digest(self.go_file) != self.go_sha
-                or digest(self.off_file) != self.native_identity[
-                    "daemon_off_identities_sha256"]):
-            raise FatalSession("window go or daemon identities changed")
+                "input_manifest_sha256"] or digest(self.off_file)
+                != self.native_identity["daemon_off_identities_sha256"]):
+            raise FatalSession("manifest or daemon identities changed")
+        try:
+            if digest(self.go_file) != self.go_sha:
+                raise DeadlineExceeded("current window go changed")
+        except FileNotFoundError as error:
+            raise DeadlineExceeded("current window go removed") from error
         if not full and time.monotonic() < self.next_d12_check:
             return self.block_deadline - time.monotonic()
         go = read_json(self.go_file)
@@ -1084,9 +1093,8 @@ def reusable(directory: Path, verify: Callable[[], dict], *,
         return verify()
     except (FatalSession, DeadlineExceeded):
         raise
-    except (ReviewRequired, OSError, KeyError, TypeError, ValueError) as error:
-        if budget or (strict and not isinstance(error, (
-                ReviewRequired, FileNotFoundError))):
+    except (ReviewRequired, FileNotFoundError) as error:
+        if budget:
             raise
         if not partial.exists():
             atomic_json(partial, {"state": "partial", "reason": str(error)})
@@ -2434,6 +2442,10 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
         if result["state"] in {"partial", "dependency_blocked", "skipped"}:
             (directory / "complete.json").rename(
                 directory / "partial-complete.json")
+        if (result["state"] == "partial"
+                and result.get("reason_code") == "time"
+                and "partial" not in states):
+            raise DeadlineExceeded(f"{job['id']}: worker time interruption")
         states.append(result["state"])
     if "partial" in states:
         return "partial"
@@ -2652,17 +2664,27 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
             signal.setitimer(signal.ITIMER_REAL, remaining)
             try:
                 files = block_files(root, block)
-            except (FatalSession, MemoryError):
+            except (FatalSession, MemoryError) as error:
+                record["blocks"][block_id].update(
+                    terminal="fatal", reason=str(error))
+                atomic_json(path, record)
                 raise
-            except Exception as error:
+            except ReviewRequired as error:
                 state = "partial"
-                record["blocks"][block_id]["reason_code"] = "receipt"
+                record["blocks"][block_id]["reason_code"] = getattr(
+                    error, "reason_code", "receipt")
                 record["blocks"][block_id]["reason"] = (
                     f"receipt collection: {error}")
+            except Exception as error:
+                record["blocks"][block_id].update(
+                    terminal="fatal", reason=str(error))
+                atomic_json(path, record)
+                raise
             finally:
                 signal.setitimer(signal.ITIMER_REAL, 0)
         else:
             state = "partial"
+            record["blocks"][block_id].setdefault("reason_code", "time")
         if state == "partial":
             record["blocks"][block_id].setdefault("reason_code", "runner")
             record["blocks"][block_id].setdefault(

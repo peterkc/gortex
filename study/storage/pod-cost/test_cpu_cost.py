@@ -21,6 +21,70 @@ MAC_WHEEL = ("aaab9b3af536b06ca27ab5e35e3d429c9"
 
 
 class CostTests(unittest.TestCase):
+    def test_host_stop_and_expected_gate_receipts_remain_distinct(self):
+        for error, state, reason, clean in (
+                (cost.HostSafetyStop("memory"), "fatal", "host-stop", False),
+                (cost.GateFailure("recipe"), "partial", "gate", True)):
+            with (self.subTest(error=type(error).__name__),
+                  tempfile.TemporaryDirectory() as folder):
+                def prepare(root, output):
+                    raise error
+                code, record, matrix = self.execute_fixture(
+                    Path(folder), prepare)
+                self.assertEqual((code, record["exit_code"]), (1, 1))
+                self.assertEqual((record["state"], record["reason_code"],
+                                  record["clean_handoff"]),
+                                 (state, reason, clean))
+                self.assertFalse(matrix["accepted_timings"])
+
+    def test_exit_78_is_host_stop_even_without_a_worker_report(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            with (patch.object(cost, "child", return_value=78),
+                  self.assertRaises(cost.HostSafetyStop) as caught):
+                cost.completed_worker(["probe"], root / "missing.json", 10,
+                                      root, {})
+            self.assertEqual(caught.exception.reason_code, "host-stop")
+
+    def test_atomic_receipt_syncs_and_preserves_existing_data(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "receipt.json"
+            trace = []
+            sync, replace = cost.os.fsync, cost.os.replace
+            def synced(fd):
+                trace.append("fsync")
+                sync(fd)
+            def published(source, target):
+                self.assertEqual(json.loads(source.read_text()), {"a": 1})
+                trace.append("replace")
+                replace(source, target)
+            with (patch.object(cost.os, "fsync", side_effect=synced),
+                  patch.object(cost.os, "replace", side_effect=published)):
+                cost.save(path, {"a": 1})
+            self.assertEqual(trace, ["fsync", "replace", "fsync"])
+            before = path.read_bytes()
+            with self.assertRaises(FileExistsError):
+                cost.save(path, {"a": 2})
+            self.assertEqual(path.read_bytes(), before)
+            alias = path.with_name("alias.json")
+            alias.symlink_to(path)
+            with self.assertRaises(FileExistsError):
+                cost.save(alias, {"a": 3})
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_failed_receipt_sync_keeps_only_the_claimed_temp(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "receipt.json"
+            with (patch.object(cost.os, "fsync", side_effect=OSError("sync")),
+                  self.assertRaisesRegex(OSError, "sync")):
+                cost.save(path, {"a": 1})
+            self.assertFalse(path.exists())
+            temporary = path.with_name(path.name + ".tmp")
+            before = temporary.read_bytes()
+            with self.assertRaises(FileExistsError):
+                cost.save(path, {"a": 2})
+            self.assertEqual(temporary.read_bytes(), before)
+
     def test_complete_matrix(self):
         cases = cost.matrix()
         self.assertEqual(len(cases), 25)
@@ -113,7 +177,7 @@ class CostTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, "time")
             self.assertFalse((root / "none.log").exists())
 
-    def test_skip_gate_only_complete_matching_reports(self):
+    def test_named_gate_rejects_nonmatching_reports_and_cosines(self):
         warm = {"status": "completed", "token_file_sha256": "a" * 64,
                 "vectors": [[1.0, *([0.0] * 767)] for _ in range(200)]}
         reference = {"status": "completed", "token_sha256": "a" * 64,
@@ -121,9 +185,9 @@ class CostTests(unittest.TestCase):
                      "inter_op_threads": 1,
                      "vectors": copy.deepcopy(warm["vectors"])}
         warm["vectors"][-1][0] = -1
-        with self.assertRaises(cost.Skip) as caught:
+        with self.assertRaises(cost.GateFailure) as caught:
             cost.checked_gate(warm, reference, "a" * 64)
-        self.assertEqual(caught.exception.code, "gate")
+        self.assertEqual(caught.exception.reason_code, "gate")
         with self.assertRaises(cost.FatalWorker):
             cost.checked_gate(warm, {**reference, "vectors": []}, "a" * 64)
 
@@ -189,9 +253,10 @@ class CostTests(unittest.TestCase):
             command = [sys.executable, "-c", "import os,signal; "
                        "open('pid','w').write(str(os.getpid())); "
                        "signal.pause()"]
-            with self.assertRaises(cost.FatalWorker):
+            with self.assertRaises(cost.Skip) as caught:
                 cost.child(command, root / "timeout.log",
                            time.monotonic() + 1, root, os.environ)
+            self.assertEqual(caught.exception.code, "time")
             with self.assertRaises(ProcessLookupError):
                 os.kill(int((root / "pid").read_text()), 0)
 
@@ -418,11 +483,11 @@ class CostTests(unittest.TestCase):
             self.assertEqual((code, receipt["state"], receipt["reason_code"]),
                              (1, "fatal", "unexpected"))
             self.assertEqual(receipt["reason"], "fixture unexpected error")
-            self.assertTrue(receipt["clean_handoff"])
+            self.assertFalse(receipt["clean_handoff"])
             self.assertFalse(matrix["accepted_timings"])
 
     @unittest.skipUnless(sys.platform == "linux", "Linux runner contract")
-    def test_failed_worker_writes_partial_receipt_after_reaping(self):
+    def test_worker_failures_and_deadlines_have_distinct_receipts(self):
         programs = {
             "crash": "raise SystemExit(7)",
             "killed": "import os,signal; os.kill(os.getpid(),signal.SIGKILL)",
@@ -448,26 +513,33 @@ class CostTests(unittest.TestCase):
                         self.assertTrue(cost.reap_children())
 
                 code, record, _ = self.execute_fixture(root, prepare)
-                self.assertEqual((code, record["exit_code"]), (1, 1))
-                self.assertEqual((record["state"], record["reason_code"]),
-                                 ("partial", "worker"))
-                self.assertTrue(record["clean_handoff"])
+                expected = ((0, "skipped", "time", True) if mode == "timeout"
+                            else (1, "fatal", "unexpected", False))
+                self.assertEqual((code, record["state"], record["reason_code"],
+                                  record["clean_handoff"]), expected)
+                self.assertEqual(record["exit_code"], code)
                 self.assertTrue(cost.reap_children())
                 for relative, expected in record["files"].items():
                     self.assertEqual(cost.digest(root / relative), expected)
 
     @unittest.skipUnless(sys.platform == "linux", "Linux runner contract")
-    def test_unverified_reaping_writes_unclean_partial_receipt(self):
-        with tempfile.TemporaryDirectory() as folder:
-            def reject(root, output):
-                raise cost.FatalWorker("fixture local failure")
-
-            code, record, _ = self.execute_fixture(Path(folder), reject,
-                                                   clean=False)
-            self.assertEqual(code, 1)
-            self.assertEqual(record["state"], "partial")
-            self.assertEqual(record["reason_code"], "process")
-            self.assertFalse(record["clean_handoff"])
+    def test_unverified_reaping_preserves_expected_and_fatal_causes(self):
+        for error, state, reason in (
+                (cost.GateFailure("gate"), "partial", "process"),
+                (cost.FatalWorker("crash"), "fatal", "unexpected")):
+            with (self.subTest(error=type(error).__name__),
+                  tempfile.TemporaryDirectory() as folder):
+                def reject(root, output):
+                    raise error
+                code, record, _ = self.execute_fixture(Path(folder), reject,
+                                                       clean=False)
+                self.assertEqual(code, 1)
+                self.assertEqual(record["state"], state)
+                self.assertEqual(record["reason_code"], reason)
+                self.assertFalse(record["clean_handoff"])
+                if state == "fatal":
+                    self.assertEqual(record["reason"], "crash")
+                    self.assertEqual(record["teardown"], "unverified")
 
     def test_repeat_estimate_scales_gate_rows_without_scaling_load(self):
         warm = {"load_seconds": 2, "seconds": 3, "completed_texts": 200}

@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -210,5 +212,24 @@ func TestLinuxRSSUsesProc(t *testing.T) {
 	current, peak, err := rss()
 	if err != nil || current == 0 || peak < current {
 		t.Fatalf("Linux current=%d peak=%d error=%v", current, peak, err)
+	}
+}
+
+func TestHostStopUsesDistinctExitCode(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"host", errHostStop, 78},
+		{"wrapped", fmt.Errorf("load: %w", errHostStop), 78},
+		{"ordinary", errors.New("probe failed"), 1},
+		{"same text", fmt.Errorf("%s", errHostStop), 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := errorExitCode(tc.err); got != tc.want {
+				t.Fatalf("exit code %d, want %d", got, tc.want)
+			}
+		})
 	}
 }

@@ -29,7 +29,15 @@ class Invalid:
 
 
 class FatalWorker(RuntimeError):
-    """Block-local worker failure; the receipt follows verified reaping."""
+    """Unexpected worker failure; the parent must stop the session."""
+
+
+class GateFailure(FatalWorker):
+    reason_code = "gate"
+
+
+class HostSafetyStop(FatalWorker):
+    reason_code = "host-stop"
 
 
 class Skip(RuntimeError):
@@ -44,9 +52,20 @@ def digest(path: Path) -> str:
 
 
 def save(path: Path, value: object) -> None:
-    with path.open("x") as stream:
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("x") as stream:
+        if path.exists() or path.is_symlink():
+            raise FileExistsError(path)
         json.dump(value, stream, allow_nan=False)
         stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+    descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def matrix() -> list[dict]:
@@ -112,13 +131,15 @@ def child(argv: Sequence[str], log: Path, end: float,
                                   stderr=subprocess.STDOUT,
                                   timeout=remaining).returncode
         except subprocess.TimeoutExpired as error:
-            raise FatalWorker("child killed/reaped at deadline") from error
+            raise Skip("time", "child killed/reaped at deadline") from error
 
 
 def completed_worker(argv: Sequence[str], output: Path, end: float,
                      cwd: Path, env: Mapping[str, str], *,
                      partial: bool = False) -> dict:
     code = child(argv, output.with_suffix(".log"), end, cwd, env)
+    if code == 78:
+        raise HostSafetyStop("native probe host-safety stop")
     if code not in ((0, 1) if partial else (0,)) or not output.is_file():
         raise FatalWorker(f"worker exit {code}; complete report required")
     try:
@@ -156,19 +177,19 @@ def checked_gate(warm: Mapping, reference: Mapping, token_sha: str) -> dict:
             or len(reference["vectors"]) != 200
             or any(len(row) != 768 for row in
                    [*warm["vectors"], *reference["vectors"]])):
-        raise FatalWorker("invalid or incomplete 200-row gate report")
+        raise GateFailure("invalid or incomplete 200-row gate report")
     if (reference["runtime"] != "1.31.0"
             or reference["intra_op_threads"] != 16
             or reference["inter_op_threads"] != 1):
-        raise FatalWorker("reference runtime/recipe mismatch")
+        raise GateFailure("reference runtime/recipe mismatch")
     if (reference["token_sha256"] != token_sha
             or warm["token_file_sha256"] != token_sha):
         raise Skip("identity", "recorded gate token identity mismatch")
     gate = cosine_gate(warm["vectors"], reference["vectors"])
     if isinstance(gate, Invalid):
-        raise FatalWorker(gate.reason)
+        raise GateFailure(gate.reason)
     if not gate["passed"]:
-        raise Skip("gate", "recorded per-input cosine below 0.9999")
+        raise GateFailure("recorded per-input cosine below 0.9999")
     return gate
 
 
@@ -268,7 +289,7 @@ def probe(args: argparse.Namespace, case: Mapping, tokens: Path,
     if (report["runtime"] != "1.31.0" or not report["disable_prepacking"]
             or report["inter_op_threads"] != 1
             or report["intra_op_threads"] != case["threads"]):
-        raise FatalWorker("probe runtime/recipe mismatch")
+        raise GateFailure("probe runtime/recipe mismatch")
     if report["token_file_sha256"] != digest(tokens):
         raise Skip("identity", "recorded probe token identity mismatch")
     return report
@@ -320,7 +341,7 @@ def execute(args: argparse.Namespace) -> int:
                                    **config["source_files"]}.items():
             path = (root / relative).resolve()
             if not path.is_file():
-                raise FatalWorker(f"missing input/source: {relative}")
+                raise Skip("identity", f"missing input/source: {relative}")
             if not path.is_relative_to(root) or digest(path) != expected:
                 raise Skip("identity", f"input/source mismatch: {relative}")
         input_pin = hashlib.sha256(json.dumps(
@@ -336,7 +357,7 @@ def execute(args: argparse.Namespace) -> int:
         if not math.isfinite(end) or end <= time.monotonic():
             raise Skip("time", "no time before absolute driver deadline")
         if sys.platform != "darwin" or platform.machine() != "arm64":
-            raise FatalWorker("only Darwin arm64 is admitted")
+            raise GateFailure("only Darwin arm64 is admitted")
         if config["ort"]["sha256"] != (
                 "aaab9b3af536b06ca27ab5e35e3d429c9"
                 "7457ce76cf298af103f687e8b9975c0"):
@@ -423,9 +444,9 @@ def execute(args: argparse.Namespace) -> int:
             if case["status"] == "skipped" or case["reason"] == "in-progress":
                 case["reason"] = f"{error.code}: {error}"
     except Exception as error:
-        state = "partial" if isinstance(error, FatalWorker) else "fatal"
-        failure = {"reason_code": "worker" if isinstance(error, FatalWorker)
-                   else "unexpected", "reason": str(error)}
+        state = "partial" if isinstance(error, GateFailure) else "fatal"
+        failure = {"reason_code": getattr(error, "reason_code", "unexpected"),
+                   "reason": str(error)}
         for case in cases:
             if case["reason"] == "in-progress":
                 case["reason"] = str(error)
@@ -450,7 +471,7 @@ def execute(args: argparse.Namespace) -> int:
              if p.is_file()}
     code = 1 if state in {"partial", "fatal"} else 0
     save(args.receipt, {"state": state, "exit_code": code,
-         "clean_handoff": clean,
+         "clean_handoff": clean and state != "fatal",
          "source_pin": args.source_pin, "config_pin": args.config_pin,
          "input_pin": args.input_pin, "files": files,
          **({} if state == "completed" else failure or
