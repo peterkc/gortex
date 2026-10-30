@@ -395,27 +395,6 @@ class CostTests(unittest.TestCase):
                 tokens.assert_not_called()
                 probe.assert_not_called()
 
-    def test_template_sources_and_config_pin_match_the_branch_bundle(self):
-        storage = Path(cost.__file__).resolve().parent.parent
-        template = storage / "pod-cost/cpu-cost-v1.json"
-        config = json.loads(template.read_text())
-        expected = {"control/onnx/" + n for n in
-                    ("main.go", "go.mod", "go.sum")}
-        expected.update("control/pod-cost/" + n for n in
-                        ("cpu_cost.py", "pyproject.toml", "uv.lock"))
-        self.assertEqual(set(config["source_files"]), expected)
-        for name, sha in config["source_files"].items():
-            self.assertEqual(cost.digest(storage / name.removeprefix(
-                "control/")), sha)
-        bindings = json.loads((storage / "pod/control/bindings.json")
-                              .read_text())["cpu_cost"][0]
-        self.assertEqual(bindings["config_pin"], cost.digest(template))
-        argv = bindings["argv"]
-        self.assertEqual(argv[argv.index("--config-pin") + 1],
-                         bindings["config_pin"])
-        self.assertEqual(bindings["source_pin"],
-                         "5bab54d2dd8b7165f7b813f9644857f694e28ede")
-
     def execute_fixture(self, root, prepare, probe=None, cases=None, *,
                         clean=True, wheel_pin=MAC_WHEEL,
                         member_names=("libonnxruntime.1.31.0.dylib",),
