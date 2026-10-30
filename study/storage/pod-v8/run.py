@@ -72,7 +72,7 @@ def environment(directory: Path, *, mode: str) -> dict[str, str]:
     env.update(PATH="/usr/bin:/bin", LANG="C.UTF-8", LC_ALL="C",
                GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1",
                GIT_TERMINAL_PROMPT="0", GIT_NO_LAZY_FETCH="1",
-               GOMAXPROCS="10")
+               GOMAXPROCS=os.environ["GOMAXPROCS"])
     for key, child in (("SOCKET", "d.sock"), ("PIDFILE", "d.pid"),
                        ("LOGFILE", "daemon.log"), ("STATEFILE", "d.json")):
         env["GORTEX_DAEMON_" + key] = str(directory / child)

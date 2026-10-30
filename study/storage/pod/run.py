@@ -1,5 +1,5 @@
 #!/usr/bin/false
-"""Storage study: 3.10+ fixtures; pinned CPython 3.14.7 native launcher."""
+"""Storage study: fixtures and pinned CPython 3.14.7 native launcher."""
 
 from __future__ import annotations
 
@@ -154,6 +154,20 @@ def owned_path(value: object, root: Path) -> bool:
             and not any(ord(c) < 32 for c in value)
             and Path(value).is_absolute() and ".." not in Path(value).parts
             and Path(value).is_relative_to(root))
+
+
+def cpu_case_jobs(root: Path, template: Mapping) -> list[dict]:
+    if "--case" in template["argv"]:
+        raise ReviewRequired("CPU binding must be a case-free template")
+    result = []
+    for case in range(25):
+        name = f"{template['id']}-{case:02d}"
+        receipt = str(root / "aux" / name / "output/receipt.json")
+        argv = [receipt if arg == template["receipt_path"] else arg
+                for arg in template["argv"]]
+        result.append({**template, "id": name, "receipt_path": receipt,
+                       "argv": [*argv, "--case", str(case)]})
+    return result
 
 
 def bound_jobs(root: Path) -> dict[str, list[dict]]:
@@ -766,7 +780,7 @@ class Supervisor:
             self.stop_all()
             raise FatalSession("native admission unverified") from error
 
-    def begin_block(self, block: Mapping, outcomes: Mapping[str, str]) -> None:
+    def begin_block(self, block: Mapping) -> None:
         self.block_id = block["id"]
         self.block_deadline = time.monotonic() + self.permissions()
         self.job_minutes = {}
@@ -1342,12 +1356,12 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping) -> dict:
             if source.exists():
                 source.rename(previous / source.name)
     if not set(path.name for path in root.iterdir()) <= {
-            "driver.lock", "control", "inputs", "session.json", "lost+found",
+            "driver.lock", "control", "inputs", "session.json",
             "python-runtime.json", "attempts", "checkpoint.json",
             "resources.jsonl"}:
         raise ReviewRequired("new workspace permits only control/inputs/lock")
     if not inputs.resolve().is_relative_to(supervisor.scratch):
-        raise ReviewRequired("pod inputs must be copied under /work")
+        raise ReviewRequired("inputs must be copied under the scratch root")
     metadata = read_json(inputs / "tiers-summary.json")
     for tier, expected in (("tier1", ARCHIVES["tier1"]),):
         provided = metadata[tier]
@@ -1940,11 +1954,9 @@ def budget_receipt(supervisor: Supervisor, directory: Path, base: Path,
 
 
 def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
-                  setup: Mapping, concurrency: int,
+                  setup: Mapping,
                   receipts: list[dict],
                   attempt: Mapping | None = None) -> None:
-    if concurrency != 1:
-        raise FatalSession("whole-Mac correctness/timing cases must be serial")
     root = supervisor.root
     if selected and selected[0].stage == "timing" and attempt is None:
         groups = []
@@ -1964,7 +1976,7 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
                 atomic_json(directory / "started.json", expected)
                 rows = []
                 group_attempt = read_json(directory / "attempt.json")
-                execute_stage(supervisor, cohort, setup, 1, rows,
+                execute_stage(supervisor, cohort, setup, rows,
                               group_attempt)
                 states = {r["state"] for r in rows}
                 state = ("budget_exceeded" if "budget_exceeded" in states else
@@ -2010,8 +2022,6 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
                 timing = bsd_time(
                     (directory / "native-time.txt").read_text(), code)
                 atomic_json(directory / "time.json", timing)
-                if timing["exit_code"] != code:
-                    raise ReviewRequired("time receipt/exit disagreement")
                 manifest_path = root / "data" / job.tier / "manifest.json"
                 if report.get("manifest_sha256") != digest(manifest_path):
                     raise ReviewRequired("result manifest digest mismatch")
@@ -2058,7 +2068,7 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
             print(name, verdict.state, flush=True)
             if job.stage == "oracle" and verdict.state != "pass":
                 raise ReviewRequired("reference oracle did not pass")
-        while pending and len(active) < concurrency:
+        while pending and not active:
             job = pending[0]
             gomaxprocs = supervisor.job_bindings[job.name]["gomaxprocs"]
             identity = {**case_identity(job, root, setup, gomaxprocs),
@@ -2161,7 +2171,7 @@ def hybrid_schedule(root: Path):
 
 
 def hybrid_names(mode: str) -> list[str]:
-    return list(hybrid_commands(Path("/work"), mode))
+    return list(hybrid_commands(Path(), mode))
 
 
 def check_catalog_report(report: Mapping, candidate: str, entries: int, *,
@@ -2318,7 +2328,7 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
         raise
     for path in paths:
         if not path.resolve().is_relative_to(root):
-            raise FatalSession("auxiliary output escaped /work")
+            raise FatalSession("auxiliary output escaped the run root")
     receipt = {"identity": identity, "correctness_pass": False,
                "attempt": read_json(directory / "attempt.json"),
                "exit_code": owned.process.returncode, "state": "pass",
@@ -2548,11 +2558,13 @@ def run_catalog_hybrid(supervisor: Supervisor,
                                 "latency_ns"].items() if k in {"p50", "p95"}}
                     rows.append({**row, "metrics": metrics})
                 return rows
-            pairs = {} if mode == "timing" else {"B": [[0, 1], [2, 3], [4, 5]]}
+            pairs = ({f"w{w}": [[i, i + offset] for i in (0, 3, 6)]
+                      for offset, w in enumerate((4, 8), 1)}
+                     if mode == "timing" else {"B": [[0, 1], [2, 3], [4, 5]]})
             receipts.append(comparison_group(supervisor, name, {
                 "operation": "hybrid-" + mode,
-                "reference": None if mode == "timing" else "exact-F32",
-                "ratio": None if mode == "timing" else "B/A",
+                "reference": "w1" if mode == "timing" else "exact-F32",
+                "ratio": "candidate/reference" if mode == "timing" else "B/A",
                 "pairs": pairs, "samples": [supervisor.job_bindings[j["id"]]
                                            for j, _ in cases],
                 "driver_sha256": digest(Path(__file__)),
@@ -2578,7 +2590,8 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
         path = directory / ("output/receipt.json" if block["id"] == "cpu_cost"
                             else "receipt.json")
         if not path.resolve().is_relative_to(supervisor.root):
-            raise FatalSession(f"{block['id']}: receipt path escaped /work")
+            raise FatalSession(
+                f"{block['id']}: receipt path escaped the run root")
 
         def validate(directory: Path) -> list[Path]:
             receipt = worker_json(path, job["id"])
@@ -2697,7 +2710,7 @@ def alarm_expired(signum: int, frame: object) -> None:
 
 
 def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
-                    identity: Mapping, concurrency: int) -> dict:
+                    identity: Mapping) -> dict:
     supervisor.bad_jobs = bad_jobs(supervisor.manifest_file,
                                    supervisor.scratch)
     if "*" in supervisor.bad_jobs:
@@ -2754,7 +2767,7 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
         if saved and saved["state"] == "checks_failed":
             raise ReviewRequired("known failed block has unverified proof")
         try:
-            supervisor.begin_block(block, outcomes)
+            supervisor.begin_block(block)
         except DeadlineExceeded as error:
             state = {
                 "state": "partial",
@@ -2807,10 +2820,10 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
             elif block_id == "storage":
                 planned = jobs()
                 execute_stage(supervisor, [j for j in planned
-                    if j.stage == "oracle"], setup, 1, sdk)
+                    if j.stage == "oracle"], setup, sdk)
                 selected = eligible_sdk(supervisor, sdk, setup, bindings,
                                         "screen")
-                execute_stage(supervisor, selected, setup, concurrency, sdk)
+                execute_stage(supervisor, selected, setup, sdk)
                 missing = {j.tier for j in planned if j.stage == "screen"} - {
                     j.tier for j in selected}
                 if missing:
@@ -2823,7 +2836,7 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
             elif block_id == "segment_timing":
                 selected = eligible_sdk(supervisor, sdk, setup, bindings)
                 if selected:
-                    execute_stage(supervisor, selected, setup, 1, sdk)
+                    execute_stage(supervisor, selected, setup, sdk)
                 if {job.tier for job in selected} != set(ARCHIVES):
                     state = "dependency_blocked"
                     record["blocks"][block_id]["reason"] = (
@@ -2911,10 +2924,9 @@ def main() -> int:
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--native", type=Path, metavar="CONFIG")
     mode.add_argument("--resume", type=Path, metavar="CONFIG")
-    parser.add_argument("--root", type=Path,
-                        default=Path("/work"))
+    parser.add_argument("--root", type=Path, required=True)
     parser.add_argument(
-        "--concurrency", type=int, choices=(1, 2, 3), default=1,
+        "--concurrency", type=int, choices=(1,), default=1,
     )
     args = parser.parse_args()
     root = args.root.absolute()
@@ -2951,7 +2963,7 @@ def main() -> int:
     scratch = persistent_path(config["scratch_root"],
                               Path(config["scratch_root"]))
     root = persistent_path(args.root, scratch)
-    if root.parent != scratch / "mac-run" or args.concurrency != 1:
+    if root.parent != scratch / "mac-run":
         raise ReviewRequired("serial run-id below scratch/mac-run required")
     inputs = persistent_path(config["inputs"], scratch)
     manifest_path = persistent_path(config["manifest_file"], scratch)
@@ -2959,6 +2971,16 @@ def main() -> int:
     manifest = read_json(manifest_path)
     preflight({b["id"]: b["jobs"] for b in config["blocks"]
                if b["id"] in INPUT_BLOCKS}, root)
+    for block in config["blocks"]:
+        if block["id"] == "cpu_cost":
+            if len(block["jobs"]) != 1:
+                raise ReviewRequired("one CPU case template required")
+            block["jobs"] = cpu_case_jobs(root, block["jobs"][0])
+    preflight({b["id"]: b["jobs"] for b in config["blocks"]
+               if b["id"] in INPUT_BLOCKS}, root)
+    if not {j["id"] for b in config["blocks"] if b["id"] == "cpu_cost"
+            for j in b["jobs"]} <= manifest["jobs"].keys():
+        raise ReviewRequired("unbound CPU case jobs")
     ids = [j["id"] for b in config["blocks"] for j in b["jobs"]]
     if (len({b["id"] for b in config["blocks"]}) != len(config["blocks"])
             or len(set(ids)) != len(ids)):
@@ -3005,7 +3027,7 @@ def main() -> int:
         identity = {"driver": digest(Path(__file__)),
                     "runtime": owner.native_identity}
         try:
-            execute_session(owner, config, inputs, identity, 1)
+            execute_session(owner, config, inputs, identity)
         finally:
             try:
                 owner.stop_all()

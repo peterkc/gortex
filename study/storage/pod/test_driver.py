@@ -156,9 +156,9 @@ def fixture_owner(root, *, setup=True):
                 root, owner.setup, owner.manifest_file)
         real_begin_block = owner.begin_block
 
-        def begin_block(block, outcomes):
+        def begin_block(block):
             with patch.object(driver, "__file__", str(owner.control_source)):
-                return real_begin_block(block, outcomes)
+                return real_begin_block(block)
 
         owner.begin_block = begin_block
     return owner
@@ -185,7 +185,7 @@ class FixtureSupervisor:
         self.calls = []
         self.swapouts = None
 
-    def begin_block(self, block, outcomes):
+    def begin_block(self, block):
         self.job_bindings = {job["id"]: dict(job) for job in block["jobs"]}
 
     def stop_all(self):
@@ -338,7 +338,7 @@ class DriverTests(unittest.TestCase):
                 patch.object(driver, "native_resources"), \
                 patch.object(driver.time, "monotonic", return_value=0), \
                 patch.object(driver.time, "sleep"):
-            driver.execute_stage(supervisor, selected, setup, 1, receipts)
+            driver.execute_stage(supervisor, selected, setup, receipts)
 
     def test_named_failure_continues_and_completed_resume_skips(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -538,7 +538,7 @@ class DriverTests(unittest.TestCase):
                         {"id": "segment_timing", "jobs": []}]}
                     timed = []
 
-                    def stage(owner, chosen, setup, concurrency, receipts):
+                    def stage(owner, chosen, setup, receipts):
                         if chosen[0].stage == "timing":
                             timed.extend(chosen)
                         else:
@@ -555,7 +555,7 @@ class DriverTests(unittest.TestCase):
                           patch.object(driver, "block_files",
                                        return_value={})):
                         session = driver.execute_session(
-                            owner, admission, root / "inputs", {}, 1)
+                            owner, admission, root / "inputs", {})
                     self.assertEqual({j.tier for j in timed}, expected)
                     state = session["blocks"]["segment_timing"]["state"]
                     self.assertEqual(state, "completed" if mode == "valid" else
@@ -648,7 +648,7 @@ class TimingGroupTests(unittest.TestCase):
         with (patch.object(driver, "process_groups", return_value={}),
               patch.object(driver.time, "sleep"),
               patch.object(driver.time, "monotonic", side_effect=now)):
-            driver.execute_stage(owner, selected, setup, 1, rows)
+            driver.execute_stage(owner, selected, setup, rows)
         return rows
 
     def group_path(self, root):
@@ -1127,7 +1127,8 @@ class DeadlineContractTests(unittest.TestCase):
         for options in cases:
             with (
                 self.subTest(options=options),
-                patch.object(sys, "argv", ["run.py", *options]),
+                patch.object(sys, "argv", ["run.py", *options,
+                                           "--root", "/fixture/run"]),
                 patch.object(sys, "stderr", StringIO()),
                 patch.object(driver.subprocess, "Popen",
                              side_effect=AssertionError),
@@ -1212,12 +1213,12 @@ class DeadlineContractTests(unittest.TestCase):
                 manifest_file=fixture_manifest(root),
             )
 
-            def begin(block, outcomes):
+            def begin(block):
                 supervisor.block_deadline = 1000
             supervisor.begin_block = begin
             seen = []
 
-            def stage(owner, selected, setup, concurrency, receipts):
+            def stage(owner, selected, setup, receipts):
                 seen.append(receipts)
                 if selected[0].stage == "timing":
                     self.assertEqual(len(receipts), 13)
@@ -1244,7 +1245,7 @@ class DeadlineContractTests(unittest.TestCase):
                 patch.object(driver, "block_files", return_value={}),
             ):
                 result = driver.execute_session(
-                    supervisor, admission, root / "inputs", {}, 1)
+                    supervisor, admission, root / "inputs", {})
             self.assertEqual(len(seen), 3)
             self.assertIs(seen[0], seen[1])
             self.assertIs(seen[1], seen[2])
@@ -1380,7 +1381,7 @@ class ReviewFixTests(unittest.TestCase):
         groups_patch.start()
         self.addCleanup(groups_patch.stop)
 
-        def begin(block, outcomes):
+        def begin(block):
             owner.block_id = block["id"]
             owner.block_deadline = time.monotonic() + 30
             owner.launch_deadline = owner.block_deadline - 11
@@ -1417,7 +1418,7 @@ class ReviewFixTests(unittest.TestCase):
                 with patch.object(driver.signal, "signal"), \
                         patch.object(driver.signal, "setitimer"):
                     result = driver.execute_session(
-                        owner, admission, root / "inputs", {}, 1)
+                        owner, admission, root / "inputs", {})
                 blocks = result["blocks"]
                 self.assertEqual(blocks["smoke"]["state"], "partial")
                 self.assertTrue(blocks["smoke"]["clean_handoff"])
@@ -1451,7 +1452,7 @@ class ReviewFixTests(unittest.TestCase):
                             patch.object(driver.signal, "setitimer"), \
                             self.assertRaises(driver.FatalSession):
                         driver.execute_session(
-                            owner, admission, root / "inputs", {}, 1)
+                            owner, admission, root / "inputs", {})
                     self.assertEqual(owner.calls, ["smoke-fixture"])
                     saved = driver.read_json(root / "session.json")
                     self.assertNotIn("calibration", saved["blocks"])
@@ -1471,13 +1472,13 @@ class ReviewFixTests(unittest.TestCase):
                     root=root, stop_all=unittest.mock.Mock(), scratch=root,
                     native_identity={}, manifest_file=fixture_manifest(root))
 
-                def begin(block, outcomes):
+                def begin(block):
                     owner.block_deadline = 1000
 
                 owner.begin_block = begin
                 timed = []
 
-                def stage(owner, selected, setup, concurrency, receipts):
+                def stage(owner, selected, setup, receipts):
                     if selected[0].stage == "timing":
                         timed.extend(selected)
                         return
@@ -1508,7 +1509,7 @@ class ReviewFixTests(unittest.TestCase):
                     patch.object(driver, "block_files", return_value={}),
                 ):
                     result = driver.execute_session(
-                        owner, admission, root / "inputs", {}, 1)
+                        owner, admission, root / "inputs", {})
                 self.assertEqual(result["blocks"]["storage"]["state"],
                                  "partial")
                 self.assertEqual(len(timed), 6 if oracle_passed else 0)
@@ -1635,7 +1636,7 @@ class ReviewFixTests(unittest.TestCase):
                   patch.object(driver.signal, "signal"),
                   patch.object(driver.signal, "setitimer")):
                 result = driver.execute_session(
-                    resumed, admission, root / "inputs", setup["identity"], 1)
+                    resumed, admission, root / "inputs", setup["identity"])
             self.assertEqual(result["blocks"]["storage"]["state"], "completed")
             self.assertEqual(resumed.calls, [selected[1].name])
             self.assertEqual(before, {p.name: driver.digest(p)
@@ -2026,7 +2027,7 @@ class NativeAdmissionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             owner = fixture_owner(Path(folder))
 
-            def begin(block, outcomes):
+            def begin(block):
                 driver.resource_limit({**owner.sample, "load1": 18.0}, 0, 7,
                                       admission=True)
 
@@ -2038,7 +2039,7 @@ class NativeAdmissionTests(unittest.TestCase):
                                return_value="completed") as work):
                 result = driver.execute_session(
                     owner, {"blocks": [{"id": "cpu_cost", "jobs": []}]},
-                    owner.root / "inputs", {}, 1)
+                    owner.root / "inputs", {})
             self.assertEqual(result["blocks"]["cpu_cost"]["state"],
                              "completed")
             work.assert_called_once()
@@ -2213,7 +2214,7 @@ class NativeAdmissionTests(unittest.TestCase):
                    for job in selected]
         before = deepcopy(records)
         with patch.object(driver.time, "monotonic", return_value=0):
-            owner.begin_block({"id": "storage", "jobs": records}, {})
+            owner.begin_block({"id": "storage", "jobs": records})
         self.assertEqual(owner.block_deadline, 12500)
         self.assertEqual(owner.job_minutes, {job.name: 30 for job in selected})
         self.assertEqual(owner.job_limit(selected[0].name, 0), 1789)
@@ -2226,7 +2227,7 @@ class NativeAdmissionTests(unittest.TestCase):
             bad = [{**records[0], key: value}]
             with patch.object(driver.time, "monotonic", return_value=0), \
                     self.assertRaises(driver.FatalSession):
-                owner.begin_block({"id": "storage", "jobs": bad}, {})
+                owner.begin_block({"id": "storage", "jobs": bad})
 
     def test_completed_case_rss_does_not_lower_oracle_admission_estimate(self):
         temporary = tempfile.TemporaryDirectory()
@@ -2389,7 +2390,7 @@ class NativeAdmissionTests(unittest.TestCase):
                       "completed"])
                   as work):
                 result = driver.execute_session(
-                    owner, config, owner.root, {}, 1)
+                    owner, config, owner.root, {})
             partial = result["blocks"]["cpu_cost"]
             self.assertEqual(partial["state"], "partial")
             self.assertEqual(partial["reason_code"], "budget-exceeded")
@@ -2402,14 +2403,14 @@ class NativeAdmissionTests(unittest.TestCase):
                   patch.object(driver.signal, "setitimer"),
                   patch.object(driver, "binding_block") as later):
                 resumed = driver.execute_session(
-                    owner, config, owner.root, {}, 1)
+                    owner, config, owner.root, {})
             later.assert_not_called()
             self.assertEqual(resumed, result)
             result["blocks"]["cpu_cost"]["terminal"] = "fatal"
             driver.atomic_json(owner.root / "session.json", result)
             with patch.object(driver.signal, "signal"), self.assertRaises(
                     driver.FatalSession):
-                driver.execute_session(owner, config, owner.root, {}, 1)
+                driver.execute_session(owner, config, owner.root, {})
 
     def test_oracle_jobs_fit_and_permission_belong_to_current_window(self):
         selected = [j for j in driver.jobs() if j.stage == "oracle"]
@@ -2473,14 +2474,14 @@ class NativeAdmissionTests(unittest.TestCase):
                   patch.object(driver.time, "monotonic", return_value=0),
                   patch.object(driver.time, "sleep")):
                 receipts = []
-                driver.execute_stage(owner, [job], setup, 1, receipts)
+                driver.execute_stage(owner, [job], setup, receipts)
                 self.assertEqual(owner.start.call_count, 1)
                 complete = root / "jobs" / job.name / "complete.json"
                 before = complete.read_bytes()
                 owner.window = {"id": "new-window", "oracle_go": []}
                 owner.job_limit.reset_mock()
                 reused = []
-                driver.execute_stage(owner, [job], setup, 1, reused)
+                driver.execute_stage(owner, [job], setup, reused)
                 self.assertEqual(reused, receipts)
                 self.assertEqual(complete.read_bytes(), before)
                 owner.job_limit.assert_not_called()
@@ -2488,7 +2489,7 @@ class NativeAdmissionTests(unittest.TestCase):
                 (complete.parent / "native-time.txt").write_text("changed")
                 with self.assertRaisesRegex(driver.ReviewRequired,
                                             "current-session oracle"):
-                    driver.execute_stage(owner, [job], setup, 1, [])
+                    driver.execute_stage(owner, [job], setup, [])
                 self.assertEqual(owner.start.call_count, 1)
 
 
@@ -2537,7 +2538,7 @@ class NativeAdmissionTests(unittest.TestCase):
                       patch.object(driver.signal, "signal"),
                       patch.object(driver.signal, "setitimer")):
                     record = driver.execute_session(
-                        owner, config, root, setup["identity"], 1)
+                        owner, config, root, setup["identity"])
                     self.assertEqual(owner.calls, [j.name for j in selected],
                                      record["blocks"]["storage"])
                     complete = [root / "jobs" / j.name / "complete.json"
@@ -2558,7 +2559,7 @@ class NativeAdmissionTests(unittest.TestCase):
                     driver.atomic_json(root / "session.json", record)
                     owner.start.reset_mock()
                     resumed = driver.execute_session(
-                        owner, config, root, setup["identity"], 1)
+                        owner, config, root, setup["identity"])
                     owner.start.assert_not_called()
                     self.assertEqual(resumed["blocks"]["storage"]["state"],
                                      "completed")
@@ -2568,13 +2569,13 @@ class NativeAdmissionTests(unittest.TestCase):
                     original_raw = raw.read_bytes()
                     raw.write_text("changed")
                     with self.assertRaises(driver.ReviewRequired):
-                        driver.execute_stage(owner, selected[:1], setup, 1, [])
+                        driver.execute_stage(owner, selected[:1], setup, [])
                     owner.start.assert_not_called()
                     raw.write_bytes(original_raw)
                     # A budget marker prevents a blind retry.
                     complete[0].unlink()
                     with self.assertRaises(OSError):
-                        driver.execute_stage(owner, selected[:1], setup, 1, [])
+                        driver.execute_stage(owner, selected[:1], setup, [])
                     owner.start.assert_not_called()
 
     def test_auxiliary_budget_continues_binding_jobs_and_reuses_cache(self):
@@ -2666,7 +2667,7 @@ class NativeAdmissionTests(unittest.TestCase):
                       patch.object(driver.time, "monotonic", return_value=0),
                       self.assertRaises(driver.FatalSession)):
                     if executor == "sdk":
-                        driver.execute_stage(owner, selected, setup, 1, [])
+                        driver.execute_stage(owner, selected, setup, [])
                     else:
                         driver.auxiliary(owner, selected[0].name,
                                          ["fixture"], lambda _: [])
@@ -2700,7 +2701,7 @@ class NativeAdmissionTests(unittest.TestCase):
                           AttributeError("synthetic missing directory")))
                       as work,
                       self.assertRaises(expected)):
-                    driver.execute_session(owner, config, owner.root, {}, 1)
+                    driver.execute_session(owner, config, owner.root, {})
                 owner.stop_all.assert_called_once()
                 work.assert_called_once()
                 saved = driver.read_json(owner.root / "session.json")
@@ -2715,7 +2716,7 @@ class NativeAdmissionTests(unittest.TestCase):
                     with (patch.object(driver.signal, "signal"),
                           self.assertRaises(driver.FatalSession)):
                         driver.execute_session(
-                            owner, config, owner.root, {}, 1)
+                            owner, config, owner.root, {})
                     owner.begin_block.assert_not_called()
 
 
@@ -2753,7 +2754,7 @@ class DurabilityTests(unittest.TestCase):
               patch.object(driver.signal, "signal"),
               patch.object(driver.signal, "setitimer")):
             return driver.execute_session(
-                owner, admission, owner.root / "inputs", setup["identity"], 1)
+                owner, admission, owner.root / "inputs", setup["identity"])
 
     def test_start_and_resume_hash_every_input_and_scope_missing_files(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -2770,9 +2771,9 @@ class DurabilityTests(unittest.TestCase):
                   patch.object(driver.signal, "setitimer"),
                   patch.object(driver, "digest",
                                wraps=driver.digest) as hashes):
-                driver.execute_session(owner, {"blocks": []}, root, {}, 1)
+                driver.execute_session(owner, {"blocks": []}, root, {})
                 optional.write_text("changed")
-                driver.execute_session(owner, {"blocks": []}, root, {}, 1)
+                driver.execute_session(owner, {"blocks": []}, root, {})
                 for path in (common, optional):
                     self.assertEqual(sum(c.args[0] == path for c in
                                          hashes.call_args_list), 2)
@@ -2791,7 +2792,7 @@ class DurabilityTests(unittest.TestCase):
             with patch.object(driver.signal, "signal"), \
                     self.assertRaisesRegex(driver.ReviewRequired,
                                            "common input"):
-                driver.execute_session(owner, {"blocks": []}, root, {}, 1)
+                driver.execute_session(owner, {"blocks": []}, root, {})
 
     def test_manifest_schema_aliases_and_exact_managed_tool_exception(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -2962,7 +2963,7 @@ class DurabilityTests(unittest.TestCase):
             with (patch.object(driver.signal, "signal"),
                   patch.object(driver.signal, "setitimer")):
                 first = driver.execute_session(owner, admission,
-                                               root / "inputs", {}, 1)
+                                               root / "inputs", {})
                 self.assertTrue((root /
                     "aux/smoke-fixture/partial-complete.json").is_file())
                 paths = driver.output_files([root / "aux"])
@@ -2973,7 +2974,7 @@ class DurabilityTests(unittest.TestCase):
                 with patch.object(owner, "begin_block",
                                   wraps=owner.begin_block) as begin:
                     second = driver.execute_session(owner, admission,
-                                                    root / "inputs", {}, 1)
+                                                    root / "inputs", {})
                 begin.assert_not_called()
                 self.assertEqual(second, first)
             self.assertEqual(first["blocks"]["smoke"]["state"], "partial")
@@ -3011,14 +3012,14 @@ class DurabilityTests(unittest.TestCase):
             with (patch.object(driver.signal, "signal"),
                   patch.object(driver.signal, "setitimer")):
                 first = driver.execute_session(owner, admission,
-                                               root / "inputs", {}, 1)
+                                               root / "inputs", {})
                 directory = root / "aux/smoke-fixture"
                 self.assertFalse((directory / "partial.json").exists())
                 saved = {str(p.relative_to(directory)): p.read_bytes()
                          for p in driver.output_files([directory])}
                 owner.window = {"id": "new-go-window"}
                 second = driver.execute_session(owner, admission,
-                                                root / "inputs", {}, 1)
+                                                root / "inputs", {})
             self.assertEqual(first["blocks"]["smoke"]["reason_code"], "time")
             self.assertEqual(second["blocks"]["smoke"]["state"], "completed")
             self.assertEqual(owner.calls, ["smoke-fixture",
@@ -3112,7 +3113,7 @@ class DurabilityTests(unittest.TestCase):
             owner.begin_block = unittest.mock.Mock()
             with patch.object(driver.signal, "signal"), \
                     self.assertRaisesRegex(driver.FatalSession, "diagnosis"):
-                driver.execute_session(owner, admission, root, {}, 1)
+                driver.execute_session(owner, admission, root, {})
             owner.begin_block.assert_not_called()
 
 
@@ -3275,7 +3276,7 @@ class FailureBoundaryTests(unittest.TestCase):
                       patch.object(driver, "block_files", side_effect=error)):
                     with self.assertRaises(type(error)):
                         driver.execute_session(owner, {"blocks": blocks},
-                                               root, {}, 1)
+                                               root, {})
                     work.assert_called_once_with(owner, blocks[0])
                     saved = driver.read_json(root / "session.json")
                     self.assertEqual(saved["blocks"]["smoke"]["terminal"],
@@ -3285,7 +3286,7 @@ class FailureBoundaryTests(unittest.TestCase):
                     work.reset_mock()
                     with self.assertRaises(driver.FatalSession):
                         driver.execute_session(owner, {"blocks": blocks},
-                                               root, {}, 1)
+                                               root, {})
                     owner.begin_block.assert_not_called()
                     work.assert_not_called()
 
@@ -3308,7 +3309,7 @@ class FailureBoundaryTests(unittest.TestCase):
                       patch.object(driver, "block_files", side_effect=[error,
                                                                      {}])):
                     result = driver.execute_session(owner, admission,
-                                                    root, {}, 1)
+                                                    root, {})
                 first, second = (result["blocks"][name]
                                  for name in ("smoke", "calibration"))
                 self.assertEqual((first["state"], first["reason_code"]),
@@ -3357,11 +3358,11 @@ class FailureBoundaryTests(unittest.TestCase):
                   patch.object(driver, "binding_block",
                                return_value="completed") as work,
                   patch.object(driver, "block_files", return_value={})):
-                first = driver.execute_session(owner, admission, root, {}, 1)
+                first = driver.execute_session(owner, admission, root, {})
                 self.assertEqual(first["blocks"]["smoke"]["reason_code"],
                                  "time")
                 owner.window = {"id": "new-go"}
-                second = driver.execute_session(owner, admission, root, {}, 1)
+                second = driver.execute_session(owner, admission, root, {})
             self.assertEqual(second["blocks"]["smoke"]["state"], "completed")
             self.assertEqual(work.call_count, 2)
 
@@ -3438,13 +3439,13 @@ class FailureBoundaryTests(unittest.TestCase):
                   patch.object(driver, "block_files", return_value={}),
                   patch.object(driver, "binding_block", side_effect=[
                       driver.DeadlineExceeded("AC/go stop"), "completed"])):
-                first = driver.execute_session(owner, admission, root, {}, 1)
+                first = driver.execute_session(owner, admission, root, {})
                 self.assertEqual(first["blocks"]["smoke"]["reason_code"],
                                  "time")
                 self.assertNotIn("terminal", first["blocks"]["smoke"])
                 owner.stop_all.assert_called_once()
                 owner.window = {"id": "new-go"}
-                second = driver.execute_session(owner, admission, root, {}, 1)
+                second = driver.execute_session(owner, admission, root, {})
             self.assertEqual(second["blocks"]["smoke"]["state"], "completed")
             self.assertEqual(owner.begin_block.call_count, 2)
             self.assertEqual(owner.stop_all.call_count, 2)
@@ -3475,8 +3476,8 @@ class KnownOutcomeTests(unittest.TestCase):
                         "files": {}}}})
             begun = []
 
-            def begin(block, outcomes):
-                begun.append((block["id"], dict(outcomes)))
+            def begin(block):
+                begun.append(block["id"])
                 owner.block_id = block["id"]
 
             owner.begin_block = begin
@@ -3486,8 +3487,8 @@ class KnownOutcomeTests(unittest.TestCase):
                   patch.object(driver, "binding_block",
                                return_value="completed") as work,
                   patch.object(driver, "block_files", return_value={})):
-                result = driver.execute_session(owner, admission, root, {}, 1)
-            self.assertEqual(begun, [("calibration", {"smoke": "partial"})])
+                result = driver.execute_session(owner, admission, root, {})
+            self.assertEqual(begun, ["calibration"])
             work.assert_called_once_with(owner, blocks[1])
             owner.start.assert_not_called()
             self.assertEqual(result["blocks"]["smoke"], saved)
@@ -3513,10 +3514,10 @@ class KnownOutcomeTests(unittest.TestCase):
                 {"id": "segment_timing", "jobs": []}]}
             phase, stages = 1, []
 
-            def begin(block, outcomes):
+            def begin(block):
                 owner.block_id = block["id"]
 
-            def stage(supervisor, selected, setup, concurrency, rows):
+            def stage(supervisor, selected, setup, rows):
                 if not selected:
                     return
                 kind = selected[0].stage
@@ -3540,7 +3541,7 @@ class KnownOutcomeTests(unittest.TestCase):
                   patch.object(driver.signal, "signal"),
                   patch.object(driver.signal, "setitimer")):
                 owner.window = {"id": "first-window"}
-                first = driver.execute_session(owner, admission, root, {}, 1)
+                first = driver.execute_session(owner, admission, root, {})
                 self.assertEqual(first["blocks"]["storage"]["state"],
                                  "partial")
                 self.assertEqual(first["blocks"]["storage"]["reason_code"],
@@ -3551,7 +3552,7 @@ class KnownOutcomeTests(unittest.TestCase):
                 eligible.assert_not_called()
                 phase = 2
                 owner.window = {"id": "new-go-window"}
-                second = driver.execute_session(owner, admission, root, {}, 1)
+                second = driver.execute_session(owner, admission, root, {})
             self.assertEqual(second["blocks"]["storage"]["state"], "completed")
             self.assertEqual(second["blocks"]["segment_timing"]["state"],
                              "completed")
@@ -3776,7 +3777,7 @@ class KnownOutcomeTests(unittest.TestCase):
                       patch.object(driver, "block_files", return_value={})):
                     if resumable:
                         result = driver.execute_session(
-                            owner, admission, root, {}, 1)
+                            owner, admission, root, {})
                         self.assertEqual(result["blocks"]["smoke"]["state"],
                                          "completed")
                         owner.begin_block.assert_called_once()
@@ -3788,16 +3789,98 @@ class KnownOutcomeTests(unittest.TestCase):
                             with self.assertRaisesRegex(driver.ReviewRequired,
                                                         "known .*block"):
                                 driver.execute_session(
-                                    owner, admission, root, {}, 1)
+                                    owner, admission, root, {})
                         else:
                             result = driver.execute_session(
-                                owner, admission, root, {}, 1)
+                                owner, admission, root, {})
                             self.assertEqual(result["blocks"]["smoke"], saved)
                             self.assertEqual(
                                 result["blocks"]["smoke"]["state"], "partial")
                         owner.begin_block.assert_not_called()
                         work.assert_not_called()
                         self.assertEqual(path.read_bytes(), before)
+
+
+class CodeRankCaseTests(unittest.TestCase):
+    def test_explicit_root_is_required_before_any_effect(self):
+        with (patch.object(sys, "argv", ["run.py", "--dry-run"]),
+              patch.object(sys, "stderr", StringIO()),
+              patch.object(driver.subprocess, "Popen") as spawn,
+              patch.object(driver, "process_groups") as inspect,
+              patch.object(Path, "mkdir") as create,
+              self.assertRaises(SystemExit) as rejected):
+            driver.main()
+        self.assertEqual(rejected.exception.code, 2)
+        spawn.assert_not_called()
+        inspect.assert_not_called()
+        create.assert_not_called()
+
+    def test_all_cases_have_independent_bound_jobs_and_deadlines(self):
+        root = Path("/fixture/run")
+        template = DeadlineContractTests().bindings(root)["cpu_cost"][0]
+        template["minutes"] = 60
+        template["argv"] += ["--receipt", template["receipt_path"]]
+        before = deepcopy(template)
+        cases = driver.cpu_case_jobs(root, template)
+        self.assertEqual(template, before)
+        self.assertEqual(len(cases), 25)
+        self.assertEqual(len({j["id"] for j in cases}), 25)
+        self.assertEqual(len({j["receipt_path"] for j in cases}), 25)
+        self.assertEqual([j["argv"][-2:] for j in cases],
+                         [["--case", str(i)] for i in range(25)])
+        owner = SimpleNamespace()
+        owner.root, owner.block_id = root, "setup"
+        owner.permissions = lambda: 100000
+        owner.setup = {}
+        owner.manifest_file = root / "manifest.json"
+        with patch.object(driver, "setup_binding", return_value={}):
+            driver.Supervisor.begin_block(
+                owner, {"id": "cpu_cost", "jobs": cases})
+        self.assertEqual(set(owner.job_minutes.values()), {60})
+        for job in cases:
+            self.assertEqual(job["config_pin"], template["config_pin"])
+            self.assertEqual(job["input_pin"], template["input_pin"])
+            self.assertEqual(job["argv"][job["argv"].index("--receipt") + 1],
+                             job["receipt_path"])
+            self.assertTrue(Path(job["receipt_path"]).is_relative_to(root))
+
+    def test_selected_template_and_unbound_case_ids_refuse_before_owner(self):
+        root = Path("/fixture/run")
+        template = DeadlineContractTests().bindings(root)["cpu_cost"][0]
+        with self.assertRaisesRegex(driver.ReviewRequired, "case-free"):
+            driver.cpu_case_jobs(root, {**template,
+                "argv": [*template["argv"], "--case", "0"]})
+        for damage in ("missing-case", "preselected", "extra-template"):
+            with self.subTest(damage=damage), \
+                    tempfile.TemporaryDirectory() as folder:
+                scratch = Path(folder).resolve()
+                config, manifest, staged = NativeEntryTests().inputs(scratch)
+                value = driver.read_json(config)
+                cpu = next(b for b in value["blocks"]
+                           if b["id"] == "cpu_cost")
+                document = driver.read_json(manifest)
+                if damage == "missing-case":
+                    document["jobs"].pop(cpu["jobs"][0]["id"] + "-24")
+                elif damage == "preselected":
+                    cpu["jobs"][0]["argv"] += ["--case", "0"]
+                else:
+                    duplicate = {**deepcopy(cpu["jobs"][0]), "id": "other"}
+                    duplicate["receipt_path"] += "-other"
+                    cpu["jobs"].append(duplicate)
+                driver.atomic_json(config, value)
+                document["files"][str(config)] = driver.digest(config)
+                driver.atomic_json(manifest, document)
+                run = scratch / "mac-run/original"
+                with (patch.object(driver, "__file__", str(staged)),
+                      patch.object(driver, "Supervisor") as owner,
+                      patch.object(driver.subprocess, "Popen") as spawn,
+                      patch.object(sys, "argv", ["run.py", "--native",
+                          str(config), "--root", str(run)]),
+                      self.assertRaises(driver.ReviewRequired)):
+                    driver.main()
+                owner.assert_not_called()
+                spawn.assert_not_called()
+                self.assertFalse(run.exists())
 
 
 class NativeEntryTests(unittest.TestCase):
@@ -3848,7 +3931,11 @@ class NativeEntryTests(unittest.TestCase):
             str(tool))
         driver.atomic_json(manifest, {
             "schema": "storage-inputs/v1", "source": driver.COMMIT,
-            "files": files, "jobs": {"*": list(files)}, "homebrew": {},
+            "files": files, "jobs": {"*": list(files), **{
+                job["id"]: list(files) for block in config["blocks"]
+                if block["id"] == "cpu_cost" for job in driver.cpu_case_jobs(
+                    scratch / "mac-run" / run_id, block["jobs"][0])}},
+            "homebrew": {},
             "tools": tools})
         driver.atomic_json(go, NativeAdmissionTests().go(
             driver.digest(manifest)))
@@ -3904,11 +3991,11 @@ class NativeEntryTests(unittest.TestCase):
                 owners.append(record)
                 return record
 
-            def session(record, config, inputs, identity, concurrency):
+            def session(record, config, inputs, identity):
                 observed.append((config["input_manifest_sha256"],
                                  driver.COMMIT))
                 real_session(record, {**config, "blocks": []}, inputs,
-                             identity, concurrency)
+                             identity)
                 output = record.root / "jobs" / "case" / "native-time.txt"
                 if not output.exists():
                     output.parent.mkdir(parents=True)
@@ -3989,7 +4076,8 @@ class NativeEntryTests(unittest.TestCase):
                 with (patch.object(driver, "__file__", str(staged)),
                       patch.object(driver, "Supervisor") as constructor,
                       patch.object(sys, "argv", argv),
-                      self.assertRaises(driver.ReviewRequired)):
+                      self.assertRaises(SystemExit if damage == "parallel"
+                                        else driver.ReviewRequired)):
                     driver.main()
                 constructor.assert_not_called()
                 self.assertFalse(root.exists())
@@ -4652,7 +4740,7 @@ class HybridGroupTests(unittest.TestCase):
                         for job in owner.job_bindings.values()]
             owner.permissions = unittest.mock.Mock(return_value=100000)
             with patch.object(driver.time, "monotonic", return_value=0):
-                owner.begin_block({"id": "hybrid", "jobs": profiles}, {})
+                owner.begin_block({"id": "hybrid", "jobs": profiles})
                 for name, job in owner.job_bindings.items():
                     minutes = 120 if name in preparations else 60
                     self.assertEqual(owner.job_minutes[name], minutes)
@@ -4662,10 +4750,10 @@ class HybridGroupTests(unittest.TestCase):
                                      minutes * 60 -
                                      driver.CLEANUP_RESERVE_SECONDS)
                 job = {**profiles[0], "kind": "smoke"}
-                owner.begin_block({"id": "smoke", "jobs": [job]}, {})
+                owner.begin_block({"id": "smoke", "jobs": [job]})
                 self.assertEqual(owner.job_minutes[job["id"]], 60)
                 job = {**profiles[0], "kind": "segment"}
-                owner.begin_block({"id": "segment_timing", "jobs": [job]}, {})
+                owner.begin_block({"id": "segment_timing", "jobs": [job]})
                 self.assertEqual(owner.job_minutes[job["id"]], 45)
                 self.assertFalse(hasattr(owner, "group_deadline"))
 
@@ -4677,7 +4765,7 @@ class HybridGroupTests(unittest.TestCase):
             profiles = list(owner.job_bindings.values())
             admission = {"blocks": [{"id": "storage", "jobs": []},
                                      {"id": "hybrid", "jobs": profiles}]}
-            def oracle(owner, selected, setup, concurrency, rows):
+            def oracle(owner, selected, setup, rows):
                 rows.append({"identity": {"job": {"stage": "oracle"}},
                              "state": "pass"})
             with patch.object(driver.time, "monotonic",
@@ -4686,7 +4774,7 @@ class HybridGroupTests(unittest.TestCase):
                                  side_effect=oracle), \
                     patch.object(driver.signal, "signal"), \
                     patch.object(driver.signal, "setitimer"):
-                result = driver.execute_session(owner, admission, root, {}, 1)
+                result = driver.execute_session(owner, admission, root, {})
             block = result["blocks"]["hybrid"]
             self.assertEqual(block["state"], "partial")
             self.assertEqual(block["reason_code"], "time")
@@ -4722,7 +4810,7 @@ class HybridGroupTests(unittest.TestCase):
                 driver.Supervisor.arm_guard(owner)
                 rearmed.append(timer.call_args.args[1])
             owner.arm_guard = rearm
-            def oracle(owner, selected, setup, concurrency, rows):
+            def oracle(owner, selected, setup, rows):
                 rows.append({"identity": {"job": {"stage": "oracle"}},
                              "state": "pass"})
             admission = {"blocks": [{"id": "storage", "jobs": []}, {
@@ -4735,7 +4823,7 @@ class HybridGroupTests(unittest.TestCase):
                                  side_effect=run), \
                     patch.object(driver.signal, "signal"), \
                     patch.object(driver.signal, "setitimer") as timer:
-                result = driver.execute_session(owner, admission, root, {}, 1)
+                result = driver.execute_session(owner, admission, root, {})
             block = result["blocks"]["hybrid"]
             self.assertEqual(starts, [3000])
             self.assertEqual(block["state"], "partial")
@@ -4810,9 +4898,27 @@ class HybridGroupTests(unittest.TestCase):
                 if group["identity"]["operation"] == "hybrid-timing":
                     self.assertEqual([int(j["id"].split("-w")[1][0])
                                       for j in cases], [1, 4, 8] * 3)
-                    self.assertIsNone(group["identity"]["reference"])
-                    self.assertIsNone(group["identity"]["ratio"])
-                    self.assertEqual(group["paired_ratios"]["operations"], [])
+                    self.assertEqual(group["identity"]["reference"], "w1")
+                    self.assertEqual(group["identity"]["ratio"],
+                                     "candidate/reference")
+                    expected = {"w4": [[0, 1], [3, 4], [6, 7]],
+                                "w8": [[0, 2], [3, 5], [6, 8]]}
+                    self.assertEqual(group["identity"]["pairs"], expected)
+                    ratios = group["paired_ratios"]["operations"]
+                    self.assertEqual(len(ratios), 4)
+                    self.assertEqual({r["candidate"] for r in ratios},
+                                     {"w4", "w8"})
+                    for row in ratios:
+                        self.assertEqual(row["pair_count"], 3)
+                        metric = row["metric"]
+                        samples = group["samples"]
+                        values = [samples[b]["metrics"][metric] /
+                                  samples[a]["metrics"][metric]
+                                  for a, b in expected[row["candidate"]]]
+                        self.assertEqual(row["pairs"], values)
+                        self.assertEqual(row["min"], min(values))
+                        self.assertEqual(row["max"], max(values))
+                        self.assertEqual(row["median"], sorted(values)[1])
                 else:
                     self.assertEqual(group["identity"]["reference"],
                                      "exact-F32")
@@ -5341,7 +5447,7 @@ class CatalogGroupTests(unittest.TestCase):
                 with (patch.object(driver.signal, "signal"),
                       patch.object(driver.signal, "setitimer")):
                     result = driver.execute_session(resumed, admission,
-                                                    root, {}, 1)
+                                                    root, {})
                 self.assertEqual(result["blocks"]["catalog"]["state"],
                                  "checks_failed")
                 self.assertEqual(resumed.calls, [])
@@ -5351,7 +5457,7 @@ class CatalogGroupTests(unittest.TestCase):
                       patch.object(driver.signal, "setitimer"),
                       self.assertRaisesRegex(driver.ReviewRequired,
                           "known failed block has unverified proof")):
-                    driver.execute_session(resumed, admission, root, {}, 1)
+                    driver.execute_session(resumed, admission, root, {})
                 self.assertEqual(resumed.calls, [])
                 resumed.begin_block.assert_not_called()
 
@@ -5412,7 +5518,7 @@ class CatalogGroupTests(unittest.TestCase):
                       patch.object(driver.signal, "signal"),
                       patch.object(driver.signal, "setitimer")):
                     return driver.execute_session(owner, admission,
-                                                  root, {}, 1)
+                                                  root, {})
             stopped = session(first)
             self.assertEqual(stopped["blocks"]["catalog"]["state"], "partial")
             self.assertEqual(stopped["blocks"]["catalog"]["reason_code"],
@@ -5857,7 +5963,7 @@ class ControlBundleTests(unittest.TestCase):
                         if boundary == "resume":
                             driver.prepare(owner, inputs, setup["identity"])
                         else:
-                            owner.begin_block({"id": "smoke", "jobs": []}, {})
+                            owner.begin_block({"id": "smoke", "jobs": []})
                     run.assert_not_called()
                     spawn.assert_not_called()
                     self.assertEqual(
@@ -6072,7 +6178,7 @@ class DatasetBindingTests(unittest.TestCase):
                 owner = fixture_owner(root)
                 setup = owner.setup
                 with patch.object(owner, "permissions", return_value=10000):
-                    owner.begin_block({"id": "smoke", "jobs": []}, {})
+                    owner.begin_block({"id": "smoke", "jobs": []})
                 if damage == "missing":
                     setup.pop("archives")
                 elif damage == "metadata":
@@ -6084,7 +6190,7 @@ class DatasetBindingTests(unittest.TestCase):
                 with (patch.object(owner, "permissions", return_value=10000),
                       patch.object(driver.subprocess, "Popen") as spawn,
                       self.assertRaises(driver.ReviewRequired)):
-                    owner.begin_block({"id": "calibration", "jobs": []}, {})
+                    owner.begin_block({"id": "calibration", "jobs": []})
                 spawn.assert_not_called()
 
     def test_case_and_auxiliary_carry_values_without_payload_hashing(self):
@@ -6218,10 +6324,10 @@ class ScreenReferenceTests(unittest.TestCase):
                     {"id": "catalog", "jobs": []},
                     {"id": "hybrid", "jobs": []}]}
                 launched = []
-                def begin(block, outcomes):
+                def begin(block):
                     owner.block_id = block["id"]
                     owner.block_deadline = 10000
-                def stage(supervisor, selected, prepared, concurrency, sdk):
+                def stage(supervisor, selected, prepared, sdk):
                     for job in selected:
                         if job.stage == "oracle":
                             sdk.append(driver.read_json(
@@ -6245,7 +6351,7 @@ class ScreenReferenceTests(unittest.TestCase):
                       patch.object(driver.signal, "setitimer"),
                       patch.object(driver.subprocess, "Popen") as spawn):
                     result = driver.execute_session(owner, admission,
-                                                    root, {}, 1)
+                                                    root, {})
                 self.assertEqual(launched, [j for j in screens
                                            if j.tier in accepted])
                 self.assertEqual(result["blocks"]["storage"]["state"],

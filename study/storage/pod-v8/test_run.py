@@ -87,10 +87,13 @@ def config_fixture(root):
                 "fit": {s: {"estimated_peak_bytes": 1} for s in "PRK"}}}
 
 
-def attempt_fixture(directory, deadline, *, mode, swapouts=0):
+def attempt_fixture(directory, deadline, *, mode, swapouts=0,
+                    gomaxprocs="10"):
     config = config_fixture(directory)
-    attempt = runner.Attempt(directory, deadline, mode=mode,
-                             root=directory, config=config, swapouts=swapouts)
+    with patch.dict(os.environ, {"GOMAXPROCS": gomaxprocs}):
+        attempt = runner.Attempt(directory, deadline, mode=mode,
+                                 root=directory, config=config,
+                                 swapouts=swapouts)
     attempt.birth = 123
     return attempt
 
@@ -427,10 +430,15 @@ class FailureRoutingTests(unittest.TestCase):
 
 
 class TimingCpuTests(NativeFixture):
-    def test_native_environment_uses_explicit_10_and_persistent_temp(self):
+    def test_unbound_gomax_refuses_without_a_default(self):
+        with (patch.dict(os.environ, {}, clear=True),
+              self.assertRaises(KeyError)):
+            runner.environment(Path("/fixture/P"), mode="smoke")
+
+    def test_native_environment_uses_bound_gomax_and_persistent_temp(self):
         """Both modes use explicit CPU and isolated temporary roots."""
         root = Path("/fixture/P")
-        # Native settings are explicit, not inherited.
+        # Only the bound CPU limit is inherited.
         expected = {
             "HOME": "/fixture/P/home", "XDG_CONFIG_HOME": "/fixture/P/config",
             "XDG_DATA_HOME": "/fixture/P/data", "XDG_CACHE_HOME": "/fixture/P/cache",
@@ -439,7 +447,7 @@ class TimingCpuTests(NativeFixture):
             "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C",
             "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_TERMINAL_PROMPT": "0", "GIT_NO_LAZY_FETCH": "1",
-            "GOMAXPROCS": "10",
+            "GOMAXPROCS": "999",
             "GORTEX_DAEMON_SOCKET": "/fixture/P/d.sock",
             "GORTEX_DAEMON_PIDFILE": "/fixture/P/d.pid",
             "GORTEX_DAEMON_LOGFILE": "/fixture/P/daemon.log",
@@ -453,11 +461,11 @@ class TimingCpuTests(NativeFixture):
 
     def test_clients_and_daemon_use_the_mode_environment(self):
         """Given either mode, real command/start boundaries pass the same env."""
-        for mode, gomax in (("baseline_a7", "10"), ("smoke", "10")):
+        for mode, gomax in (("baseline_a7", "4"), ("smoke", "2")):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 attempt = attempt_fixture(root / "P", time.time() + 30,
-                                          mode=mode)
+                                          mode=mode, gomaxprocs=gomax)
                 attempt.observe = unittest.mock.Mock()
                 daemon = SimpleNamespace(pid=4242, poll=lambda: None)
                 child = SimpleNamespace(returncode=0, poll=lambda: 0,
@@ -580,7 +588,8 @@ class FrozenV9Tests(NativeFixture):
                 str(config_path), "--receipt", str(receipt), "--source-pin",
                 "a" * 40, "--config-pin", runner.digest(HERE / "run.py"),
                 "--input-pin", runner.digest(HERE / "inputs.json")]
-        with (patch.object(sys, "argv", argv),
+        with (patch.dict(os.environ, {"GOMAXPROCS": "10"}),
+              patch.object(sys, "argv", argv),
               patch.object(runner.native, "native_output",
                            side_effect=self.probe),
               patch.object(runner, "run_set", side_effect=run_set),

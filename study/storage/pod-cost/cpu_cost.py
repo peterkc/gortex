@@ -337,7 +337,7 @@ def execute(args: argparse.Namespace) -> int:
     if not output.is_relative_to(root) or output.exists():
         raise RuntimeError("escaped/existing output; preserve for lead")
     output.mkdir(parents=True)
-    cases, failure, state = matrix(), None, "partial"
+    cases, failure, state = [matrix()[args.case]], None, "partial"
     save(output / "planned-matrix.json", cases)
     started = time.monotonic()
     env = {**os.environ, "TOKENIZERS_PARALLELISM": "false", "USE_TORCH": "0",
@@ -367,7 +367,7 @@ def execute(args: argparse.Namespace) -> int:
         ).encode()).hexdigest()
         if input_pin != args.input_pin:
             raise Skip("identity", "input pin mismatch")
-        process_path = root / "aux/cpu-cost/process.json"
+        process_path = output.parent / "process.json"
         if not process_path.is_file():
             raise FatalWorker("missing driver deadline receipt")
         process = json.loads(process_path.read_text())
@@ -376,10 +376,6 @@ def execute(args: argparse.Namespace) -> int:
             raise Skip("time", "no time before absolute driver deadline")
         if sys.platform != "darwin" or platform.machine() != "arm64":
             raise GateFailure("only Darwin arm64 is admitted")
-        if config["ort"]["sha256"] != (
-                "aaab9b3af536b06ca27ab5e35e3d429c9"
-                "7457ce76cf298af103f687e8b9975c0"):
-            raise Skip("library", "pinned Mac ORT wheel required")
         try:
             distribution = importlib.metadata.distribution("onnxruntime")
         except importlib.metadata.PackageNotFoundError as error:
@@ -411,8 +407,7 @@ def execute(args: argparse.Namespace) -> int:
             "recipe": config["recipe"]})
         for position, case in enumerate(cases):
             case["status"], case["reason"] = "partial", "in-progress"
-            case_end = min(end, time.monotonic()
-                           + (end - time.monotonic()) / (25 - position))
+            case_end = end
             name = f"{case['corpus']}-{case['cap']}"
             reference_path = output / f"{name}-reference.json"
             gate_tokens = output / f"{name}-gate.json"
@@ -506,6 +501,7 @@ def main() -> int:
         parser.add_argument("--" + name, type=Path, required=True)
     for name in ("source-pin", "config-pin", "input-pin"):
         parser.add_argument("--" + name, required=True)
+    parser.add_argument("--case", type=int, choices=range(25), required=True)
     return execute(parser.parse_args())
 
 

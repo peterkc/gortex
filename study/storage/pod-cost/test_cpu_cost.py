@@ -376,7 +376,7 @@ class CostTests(unittest.TestCase):
                 config.write_text(json.dumps({"inputs": {},
                     "source_files": sources, "ort": {}, "recipe": {}}))
                 args = cost.argparse.Namespace(
-                    root=root, config=config,
+                    root=root, config=config, case=0,
                     receipt=root / "results/receipt.json",
                     source_pin="a" * 40, config_pin=cost.digest(config),
                     input_pin=hashlib.sha256(b"{}").hexdigest())
@@ -396,7 +396,8 @@ class CostTests(unittest.TestCase):
                 probe.assert_not_called()
 
     def execute_fixture(self, root, prepare, probe=None, cases=None, *,
-                        clean=True, wheel_pin=MAC_WHEEL,
+                        clean=True, wheel_pin=MAC_WHEEL, case=0,
+                        tamper_config=False,
                         member_names=("libonnxruntime.1.31.0.dylib",),
                         version="1.31.0", platform_name="darwin",
                         machine="arm64", controller_output=False):
@@ -404,8 +405,10 @@ class CostTests(unittest.TestCase):
         config.write_text(json.dumps({"inputs": {}, "source_files": {},
                                       "ort": {"sha256": wheel_pin},
                                       "recipe": {}}))
-        process = root / "aux/cpu-cost/process.json"
-        process.parent.mkdir(parents=True)
+        receipt = (root / "aux/cpu-cost/output/receipt.json"
+                   if controller_output else root / "results/receipt.json")
+        process = receipt.parent.parent / "process.json"
+        process.parent.mkdir(parents=True, exist_ok=True)
         process.write_text(json.dumps({
             "absolute_deadline": time.monotonic() + 600}))
         library = root / "library.dylib"
@@ -418,12 +421,14 @@ class CostTests(unittest.TestCase):
         distribution = SimpleNamespace(
             version=version, files=members,
             locate_file=unittest.mock.Mock(return_value=library))
-        receipt = (process.parent / "output/receipt.json" if controller_output
-                   else root / "results/receipt.json")
         args = cost.argparse.Namespace(
-            root=root, config=config, receipt=receipt,
+            root=root, config=config, receipt=receipt, case=case,
             source_pin="a"*40, config_pin=cost.digest(config),
             input_pin=hashlib.sha256(b"{}").hexdigest())
+        if tamper_config:
+            value = json.loads(config.read_text())
+            value["ort"]["sha256"] = "0" * 64
+            config.write_text(json.dumps(value))
         with (
             patch.dict(os.environ, dict(os.environ)),
             patch.object(cost, "__file__", str(
@@ -447,9 +452,40 @@ class CostTests(unittest.TestCase):
         return code, json.loads(args.receipt.read_text()), json.loads(
             (args.receipt.parent / "matrix.json").read_text())
 
+    def test_config_pin_carries_wheel_metadata_protection(self):
+        with tempfile.TemporaryDirectory() as folder:
+            prepare = unittest.mock.Mock()
+            code, receipt, summary = self.execute_fixture(
+                Path(folder), prepare, tamper_config=True)
+            self.assertEqual(code, 0)
+            self.assertEqual(receipt["state"], "skipped")
+            self.assertEqual(receipt["reason_code"], "identity")
+            self.assertIn("config pin mismatch", receipt["reason"])
+            self.assertFalse(summary["accepted_timings"])
+            prepare.assert_not_called()
+
+    def test_cli_requires_one_valid_case_before_execute(self):
+        base = ["cpu_cost.py", "--root", "/fixture/run", "--config",
+                "/fixture/config", "--receipt", "/fixture/receipt"]
+        for key in ("source-pin", "config-pin", "input-pin"):
+            base += ["--" + key, "a" * 64]
+        for selector in ([], ["--case", "-1"], ["--case", "25"],
+                         ["--case", "wrong"]):
+            with (self.subTest(selector=selector),
+                  patch.object(cost.sys, "argv", base + selector),
+                  patch.object(cost, "execute") as run,
+                  self.assertRaises(SystemExit)):
+                cost.main()
+            run.assert_not_called()
+        for case in range(25):
+            with (self.subTest(case=case),
+                  patch.object(cost.sys, "argv", base + ["--case", str(case)]),
+                  patch.object(cost, "execute", return_value=0) as run):
+                self.assertEqual(cost.main(), 0)
+                self.assertEqual(run.call_args.args[0].case, case)
+
     def test_mac_wheel_and_unique_record_route_before_native_work(self):
         cases = (
-            ({"wheel_pin": "0" * 64}, "pinned Mac ORT wheel required"),
             ({"member_names": ()}, "shared library unavailable"),
             ({"member_names": ("libonnxruntime.so.1.31.0",)},
              "shared library unavailable"),
@@ -627,7 +663,7 @@ class CostTests(unittest.TestCase):
                            1, time.monotonic() + 5, os.environ)
 
     @unittest.skipUnless(sys.platform == "linux", "Linux runner contract")
-    def test_guard_partial_continues_and_no_full_case_is_partial(self):
+    def test_independent_case_jobs_keep_partial_and_completed_coverage(self):
         for outcome in ("completed", "partial", "admission-refused"):
             all_partial = outcome == "partial"
             with self.subTest(next_case=outcome), \
@@ -652,6 +688,9 @@ class CostTests(unittest.TestCase):
 
                 def probe(args, case, tokens, output, repeat, end, env):
                     calls.append((case["threads"], repeat))
+                    deadline = json.loads((args.receipt.parent.parent /
+                        "process.json").read_text())["absolute_deadline"]
+                    self.assertEqual(end, deadline - 30)
                     if outcome == "admission-refused" and case["threads"] == 2:
                         raise cost.Skip("time", "absolute deadline; no spawn")
                     partial = all_partial or (case["threads"] == 1 and repeat)
@@ -671,8 +710,21 @@ class CostTests(unittest.TestCase):
                             "seconds": 0.01, "load_seconds": 0.01,
                             "minutes_per_10k_symbols": 1}
 
-                code, record, summary = self.execute_fixture(
-                    root, prepare, probe, cases)
+                results = []
+                for selected in (0, 1):
+                    job_root = root / f"case-{selected}"
+                    job_root.mkdir()
+                    result = self.execute_fixture(
+                        job_root, prepare, probe, cases, case=selected)
+                    self.assertEqual(len(result[2]["cases"]), 1)
+                    self.assertEqual(result[2]["cases"][0]["threads"],
+                                     cases[selected]["threads"])
+                    results.append(result)
+                code, record, first = results[0]
+                summary = {"cases": [r[2]["cases"][0] for r in results],
+                           "accepted_timings": any(
+                               r[2]["accepted_timings"] for r in results)}
+                self.assertTrue(all(r[1]["clean_handoff"] for r in results))
                 self.assertEqual(code, 1)
                 self.assertEqual((record["state"], record["reason_code"]),
                                  ("partial", "time"))
