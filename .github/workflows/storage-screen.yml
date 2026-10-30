@@ -97,6 +97,16 @@ jobs:
           "$py" --version | tee "$RUNNER_TEMP/storage/ci-hybrid.txt"
           "$py" -B -m unittest -v test_controller 2>&1 \
             | tee -a "$RUNNER_TEMP/storage/ci-hybrid.txt"
+      - name: Hybrid vector timing command tests without cgo
+        working-directory: study/storage/vector/hybrid-followup
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -l cmd/timing)"
+          go test -p=1 -v ./cmd/timing 2>&1 \
+            | tee "$RUNNER_TEMP/storage/ci-hybrid-go.txt"
       - name: Exact evaluator entrypoint on tiny synthetic vectors only
         shell: bash
         env:
