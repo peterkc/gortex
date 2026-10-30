@@ -131,6 +131,7 @@ class BudgetExceeded(ReviewRequired):
 
 class DeadlineExceeded(ReviewRequired):
     """The owned work must stop; acceptance remains incomplete."""
+    reason_code = "time"
 
 
 def sha_pin(value: object, lengths: tuple[int, ...]) -> bool:
@@ -1052,14 +1053,27 @@ def bad_jobs(path: Path, scratch: Path) -> set[str]:
             if bad.intersection(names)}
 
 
+def failed_output(directory: Path, error: ReviewRequired) -> None:
+    if isinstance(error, (DeadlineExceeded, BudgetExceeded)):
+        return
+    path = persistent_path(directory / "partial.json", directory)
+    if not path.exists():
+        atomic_json(path, {
+            "state": "fatal" if isinstance(error, FatalSession)
+            else "checks_failed", "reason": str(error)})
+
+
 def reusable(directory: Path, verify: Callable[[], dict], *,
              strict: bool = False) -> dict | None:
     persistent_path(directory, directory.parents[1])
     budget = (directory / "budget-exceeded.json").is_file()
+    partial = persistent_path(directory / "partial.json", directory)
+    if partial.exists() and read_json(partial).get("state") != "partial":
+        raise ReviewRequired("known negative outcome needs diagnosis")
     try:
         budget = budget or ((directory / "complete.json").is_file()
             and read_json(directory / "complete.json").get("state")
-            == "budget_exceeded")
+            != "pass")
         if strict:
             budget = budget or any(directory.glob("*/budget-exceeded.json"))
             budget = budget or any(read_json(p).get("state") != "pass"
@@ -1068,14 +1082,14 @@ def reusable(directory: Path, verify: Callable[[], dict], *,
                           *directory.glob("*/partial.json"))
                 if p.is_file())
         return verify()
-    except FatalSession:
+    except (FatalSession, DeadlineExceeded):
         raise
     except (ReviewRequired, OSError, KeyError, TypeError, ValueError) as error:
         if budget or (strict and not isinstance(error, (
                 ReviewRequired, FileNotFoundError))):
             raise
-        atomic_json(directory / "partial.json", {
-            "state": "partial", "reason": str(error)})
+        if not partial.exists():
+            atomic_json(partial, {"state": "partial", "reason": str(error)})
         return None
 
 
@@ -1810,22 +1824,26 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
                 continue
             directory = owned.directory
             supervisor.close(owned)
-            path = result_path(root, job)
-            report = worker_json(path, name)
-            timing = bsd_time(
-                (directory / "native-time.txt").read_text(), code)
-            atomic_json(directory / "time.json", timing)
-            if timing["exit_code"] != code:
-                raise ReviewRequired("time receipt/exit disagreement")
-            manifest_path = root / "data" / job.tier / "manifest.json"
-            if report.get("manifest_sha256") != digest(manifest_path):
-                raise ReviewRequired("result manifest digest mismatch")
-            verdict = check_result(
-                report, job, code, read_json(manifest_path),
-                read_json(root / "data" / job.tier / "queries.json"),
-            )
-            if verdict.state == "stop":
-                raise ReviewRequired(f"{name}: {verdict.reason}")
+            try:
+                path = result_path(root, job)
+                report = worker_json(path, name)
+                timing = bsd_time(
+                    (directory / "native-time.txt").read_text(), code)
+                atomic_json(directory / "time.json", timing)
+                if timing["exit_code"] != code:
+                    raise ReviewRequired("time receipt/exit disagreement")
+                manifest_path = root / "data" / job.tier / "manifest.json"
+                if report.get("manifest_sha256") != digest(manifest_path):
+                    raise ReviewRequired("result manifest digest mismatch")
+                verdict = check_result(
+                    report, job, code, read_json(manifest_path),
+                    read_json(root / "data" / job.tier / "queries.json"),
+                )
+                if verdict.state == "stop":
+                    raise ReviewRequired(f"{name}: {verdict.reason}")
+            except ReviewRequired as error:
+                failed_output(directory, error)
+                raise
             receipt = {
                 "identity": identity, "state": verdict.state,
                 "attempt": read_json(directory / "attempt.json"),
@@ -1884,10 +1902,10 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
             atomic_json(directory / "started.json", identity)
             env = {**supervisor.environment, "GOMAXPROCS": str(gomaxprocs)}
             baseline = supervisor.swapouts
-            supervisor.job_limit(job.name, time.monotonic())
-            if attempt is not None:
-                supervisor.swapouts = baseline
             try:
+                supervisor.job_limit(job.name, time.monotonic())
+                if attempt is not None:
+                    supervisor.swapouts = baseline
                 owned = supervisor.start([
                     "/usr/bin/time", "-p", "-l", "-o",
                     str(directory / "native-time.txt"), *command(job, root),
@@ -1897,6 +1915,9 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
                     supervisor, directory, directory, error))
                 pending.popleft()
                 continue
+            except ReviewRequired as error:
+                failed_output(directory, error)
+                raise
             active[job.name] = (job, owned, identity)
             pending.popleft()
             # Refresh after launch; reserve the new job's pending RSS growth.
@@ -2087,10 +2108,10 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
     if selection:
         atomic_json(directory / "selected-jobs.json", list(selection))
     baseline = supervisor.swapouts
-    supervisor.job_limit(name, time.monotonic())
-    if attempt is not None:
-        supervisor.swapouts = baseline
     try:
+        supervisor.job_limit(name, time.monotonic())
+        if attempt is not None:
+            supervisor.swapouts = baseline
         owned = supervisor.start(args, directory, env, working_directory)
         while owned.process.poll() is None:
             supervisor.observe(process_groups(supervisor.environment,
@@ -2104,13 +2125,15 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
             atomic_json(directory / "resources-after.json", supervisor.sample)
     except BudgetExceeded as error:
         return budget_receipt(supervisor, directory, root, error)
+    except ReviewRequired as error:
+        failed_output(directory, error)
+        raise
     try:
         paths = output_files([directory, *validate(directory)])
         if owned.process.returncode not in accepted_exit_codes:
             raise ReviewRequired(f"auxiliary command failed: {name}")
     except ReviewRequired as error:
-        atomic_json(directory / "partial.json", {
-            "state": "checks_failed", "reason": str(error)})
+        failed_output(directory, error)
         raise
     for path in paths:
         if not path.resolve().is_relative_to(root):
@@ -2494,9 +2517,11 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
         saved = record["blocks"].get(block_id)
         if saved and saved.get("terminal") == "fatal":
             raise FatalSession("known fatal attempt needs diagnosis")
-        if saved and saved.get("reason_code") == "budget-exceeded":
+        if saved and (saved.get("reason_code") == "budget-exceeded" or (
+                saved["state"] == "partial"
+                and saved.get("reason_code") != "time")):
             outcomes[block_id] = "partial"
-            continue  # Retain the result; never blind-retry a known overrun.
+            continue  # Do not retry a known negative.
         if (saved and saved["state"] in {"completed", "checks_failed"}
                 and not any(j["id"] in supervisor.bad_jobs
                             for j in block["jobs"])
@@ -2519,6 +2544,8 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
                        for job in block["jobs"]]
             signal.setitimer(signal.ITIMER_REAL, 0)
             continue
+        if saved and saved["state"] == "checks_failed":
+            raise ReviewRequired("known failed block has unverified proof")
         try:
             supervisor.begin_block(block, outcomes)
         except DeadlineExceeded as error:
