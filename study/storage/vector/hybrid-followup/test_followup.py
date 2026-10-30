@@ -72,7 +72,9 @@ class FollowupTests(unittest.TestCase):
             runner.parse_mac_memory(output.replace("2 20 0\n", ""))
 
     def test_memory_retry_waits_then_recovers(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with (tempfile.TemporaryDirectory() as directory,
+              patch.object(runner, "external_tool", side_effect=lambda name:
+                           {"vm_stat": "/fixture/vm_stat"}[name])):
             with patch.object(runner, "mac_memory_gate", side_effect=[
                 RuntimeError("Mac memory rule failed; accuracy stopped"),
                 {"passes": True},
@@ -84,12 +86,14 @@ class FollowupTests(unittest.TestCase):
                 self.assertTrue(result["passes"])
                 self.assertEqual(sample.call_count, 2)
                 wait.assert_called_once_with(
-                    ["vm_stat", "-c", "2", "300"], text=True)
+                    ["/fixture/vm_stat", "-c", "2", "300"], text=True)
                 waits = list(Path(directory).glob("*wait*.log"))
                 self.assertEqual(len(waits), 1)
 
     def test_memory_retry_stops_after_six_waits(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with (tempfile.TemporaryDirectory() as directory,
+              patch.object(runner, "external_tool", side_effect=lambda name:
+                           {"vm_stat": "/fixture/vm_stat"}[name])):
             with patch.object(runner, "mac_memory_gate", side_effect=
                               RuntimeError("Mac memory rule failed; "
                                            "accuracy stopped")) as sample:

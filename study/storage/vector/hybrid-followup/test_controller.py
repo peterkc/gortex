@@ -193,8 +193,9 @@ class ControllerTests(unittest.TestCase):
                 "global quantized top128, then original F32 rerank",
                 "latency_ns": {"count": 256, "p50": 100, "p95": 200}}
             builds, trials = [], []
+            bound_go = "/fixture/go"
             def execute(command, **options):
-                if command[:2] == ["go", "build"]:
+                if command[:2] == [bound_go, "build"]:
                     builds.append(dict(options["env"]))
                     self.assertIn("-p=1", command)
                     binary = Path(command[command.index("-o") + 1])
@@ -213,8 +214,8 @@ class ControllerTests(unittest.TestCase):
                   patch.object(run.sys, "argv", ["run.py", "timing",
                       "--execute", "--jobs-file", str(selected),
                       "--output-dir", str(output)]),
-                  patch.object(run.shutil, "which",
-                               return_value="/fixture/go"),
+                  patch.object(run, "external_tool",
+                               return_value=bound_go),
                   patch.object(run, "source_fingerprint", return_value="pin"),
                   patch.object(run.subprocess, "check_output",
                                return_value="go1.27.1 darwin/arm64"),

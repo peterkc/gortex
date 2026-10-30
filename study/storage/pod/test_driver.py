@@ -1740,7 +1740,10 @@ class NativeAdmissionTests(unittest.TestCase):
                 return SimpleNamespace(returncode=code, stdout=output,
                                        stderr=error)
 
-            with patch.object(driver.subprocess, "run", side_effect=probe):
+            with (patch.object(driver, "external_tool", side_effect=(
+                    lambda name, env: "/bin/launchctl" if name == "launchctl"
+                    else name)),
+                  patch.object(driver.subprocess, "run", side_effect=probe)):
                 driver.daemon_off(config, {})
                 for unsafe in ("argv", "alias", "job", "unknown", "socket",
                                "tcp1", "tcp2"):
@@ -5143,6 +5146,7 @@ class MacHybridCallerTests(unittest.TestCase):
         child = self.load_child()
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
+            _, tools, tool_env = fixture_tools(root)
             work = (root / "home/.prime/research/gortex/storage-architecture"
                     / "tmp/vector/hybrid-followup")
             name = "n10000-d384-w1-rep1"
@@ -5181,17 +5185,20 @@ class MacHybridCallerTests(unittest.TestCase):
                   patch.object(child, "build") as build,
                   patch.object(child, "source_fingerprint",
                                return_value="pin"),
-                  patch.object(child.subprocess, "check_output",
-                               return_value="go1.27.1 darwin/arm64"),
+                  patch.object(
+                      child.subprocess, "check_output",
+                      return_value="go1.27.1 darwin/arm64") as version,
                   patch.object(child.subprocess, "run", side_effect=execute),
                   patch.object(child.importlib.util, "spec_from_file_location",
                                return_value=spec),
                   patch.object(child.importlib.util, "module_from_spec",
                                return_value=telemetry),
-                  patch.dict(sys.modules), patch.dict(os.environ),
+                  patch.dict(sys.modules), patch.dict(os.environ, tool_env),
                   patch("sys.stdout", StringIO())):
                 child.main()
                 build.assert_called_once()
+                version.assert_called_once_with([tools["go"], "version"],
+                                                text=True)
                 self.assertEqual(sample.call_count, 2)
             path = work / "runs/timing/pod-A1-timing" / (name + ".json")
             receipt = json.loads(path.read_text())
