@@ -84,6 +84,8 @@ jobs:
           "$py" -B -m unittest -v test_driver 2>&1 \
             | tee -a "$RUNNER_TEMP/storage/ci-driver.txt"
       - name: Hybrid vector controller fixtures only
+        # Independent of the driver step; report it even after a failure.
+        if: ${{ !cancelled() }}
         working-directory: study/storage/vector/hybrid-followup
         shell: bash
         run: |
@@ -98,6 +100,8 @@ jobs:
           "$py" -B -m unittest -v test_controller 2>&1 \
             | tee -a "$RUNNER_TEMP/storage/ci-hybrid.txt"
       - name: Hybrid vector timing command tests without cgo
+        # Independent of the driver step; report it even after a failure.
+        if: ${{ !cancelled() }}
         working-directory: study/storage/vector/hybrid-followup
         shell: bash
         env:
@@ -108,6 +112,8 @@ jobs:
           go test -p=1 -v ./cmd/timing 2>&1 \
             | tee "$RUNNER_TEMP/storage/ci-hybrid-go.txt"
       - name: Exact evaluator entrypoint on tiny synthetic vectors only
+        # Independent of the driver step; report it even after a failure.
+        if: ${{ !cancelled() }}
         shell: bash
         env:
           OPENBLAS_NUM_THREADS: "2"
@@ -143,6 +149,8 @@ jobs:
           uv run --project research/gortex/storage-architecture/tmp/neon-eval python -m unittest discover -s research/gortex/storage-architecture/tmp/neon-eval -p test_evaluate.py -v 2>&1 \
             | tee -a "$RUNNER_TEMP/storage/ci-evaluator.txt"
       - name: D3 inference contracts on tiny NumPy fixtures only
+        # Independent of the driver step; report it even after a failure.
+        if: ${{ !cancelled() }}
         shell: bash
         env:
           OPENBLAS_NUM_THREADS: "2"
@@ -170,6 +178,8 @@ jobs:
             -s "$project" -p test_models.py -v 2>&1 \
             | tee -a "$RUNNER_TEMP/storage/ci-models.txt"
       - name: Frozen-v8 tiny Linux fixtures without Gortex
+        # Independent of the driver step; report it even after a failure.
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -177,6 +187,8 @@ jobs:
           python3.12 -m unittest discover -s study/storage/pod-v8 -p test_run.py -v 2>&1 \
             | tee -a "$RUNNER_TEMP/storage/ci-v8.txt"
       - name: CPU cost orchestration on tiny synthetic fixtures only
+        # Independent of the driver step; report it even after a failure.
+        if: ${{ !cancelled() }}
         shell: bash
         env:
           OPENBLAS_NUM_THREADS: "2"
@@ -202,6 +214,8 @@ jobs:
             -s "$project" -p test_cpu_cost.py -v 2>&1 \
             | tee -a "$RUNNER_TEMP/storage/ci-cpu-cost.txt"
       - name: Hybrid vector job plans and helpers on tiny fixtures only
+        # Independent of the driver step; report it even after a failure.
+        if: ${{ !cancelled() }}
         shell: bash
         env:
           OPENBLAS_NUM_THREADS: "2"
