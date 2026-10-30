@@ -3723,6 +3723,447 @@ class HybridGroupTests(unittest.TestCase):
                 self.assertIn(str(path.relative_to(root)), files)
 
 
+class CatalogGroupTests(unittest.TestCase):
+    operations = ("publish", "publish_set", "pin_resolve",
+                  "reopen_recover_pin_resolve")
+
+    def report(self, candidate, entries, *, repeats=1, pair=0, factor=1):
+        return {"success": True, "candidate": candidate, "entries": entries,
+            "repeats": repeats, "seed": 20261025,
+            "fixture_sha256": {f"fixture-{i}": f"{i:064x}"
+                               for i in range(4 * entries)},
+            "latency": {op: {"count": repeats,
+                "p50_ns": 100 * (pair + 1) * (i + 1) * factor}
+                for i, op in enumerate(self.operations)},
+            "recoveries": [{"candidate": candidate, "pid": 123,
+                "factory": "*main.catalog", "ns": 100}
+                for _ in range(repeats)],
+            "footprints": [{"files": 1, "bytes": 16}
+                           for _ in range(repeats)]}
+
+    def owner(self, root, *, window="catalog-window-1", stop=None,
+              budget=None, change=None, clock_step=1, swap_step=256):
+        owner = fixture_owner(root)
+        owner.window = {"id": window}
+        owner.block_id, owner.block_deadline = "catalog", 100000
+        owner.job_bindings = {j["id"]: {**j, "kind": "catalog",
+            "gomaxprocs": 10, "estimated_peak_bytes": driver.GIB}
+            for j in driver.bound_jobs(root)["catalog"]}
+        owner.job_minutes = {name: j["minutes"]
+                             for name, j in owner.job_bindings.items()}
+        owner.clock, owner.counter = [0.0], 10000
+        owner.calls, owner.clocks, owner.baselines = [], [], []
+        owner.permissions = unittest.mock.Mock(return_value=100000)
+        owner.arm_guard = unittest.mock.Mock()
+        owner.close = unittest.mock.Mock()
+        owner.stop_all = unittest.mock.Mock()
+        driver.atomic_json(root / "python-runtime.json", {"fixture": True})
+
+        def start(args, directory, env, cwd):
+            owner.calls.append((directory.parent.name, directory.name))
+            if len(owner.calls) == stop:
+                raise driver.DeadlineExceeded("fixture interruption")
+            declared = driver.read_json(directory.parent / "started.json")
+            case = next(c for c in declared["samples"]
+                        if c["id"] == directory.name)
+            self.assertEqual(case["binding"], owner.case["id"])
+            self.assertEqual(declared["reference"], "catalog-sqlite")
+            self.assertEqual(declared["ratio"], "B/A")
+            self.assertEqual(args[:-1], owner.case["argv"][:-1])
+            self.assertEqual(args[-1], str(directory / "output"))
+            flags = dict(zip(args[2::2], args[3::2]))
+            self.assertEqual(flags["-candidate"], case["candidate"])
+            self.assertEqual(flags["-repeats"], "1")
+            self.assertEqual(flags["-seed"], "20261025")
+            self.assertEqual(env["GOMAXPROCS"], "10")
+            self.assertEqual(driver.read_json(directory / "attempt.json"),
+                             driver.read_json(directory.parent /
+                                              "attempt.json"))
+            self.assertFalse((directory.parent / "complete.json").exists())
+            owner.baselines.append(owner.swapouts)
+            owner.guard(admission=True)
+            before = dict(owner.sample)
+            owner.clocks.append((directory.parent.name, owner.clock[0],
+                                 owner.launch_deadline))
+            owner.counter += swap_step
+            driver.atomic_json(directory / "process.json", {
+                "window": dict(owner.window), "command": args,
+                "resources": before})
+            (directory / "rss.jsonl").write_text('{"peak": 1024}\n')
+            (directory / "stdout-stderr.log").write_text("fixture")
+            if len(owner.calls) == budget:
+                raise fixture_budget_stop(directory)
+            pair = int(directory.name[1:]) - 1
+            factor = pair + 2 if directory.name.startswith("B") else 1
+            raw = self.report(flags["-candidate"], int(flags["-entries"]),
+                              pair=pair, factor=factor)
+            if change is not None:
+                change(raw, directory.name)
+            out = directory / "output"
+            out.mkdir()
+            (out / "catalog.fixture").write_text(flags["-candidate"])
+            driver.atomic_json(out / "result.json", raw)
+            started = owner.clock[0]
+            owner.clock[0] += clock_step
+            return SimpleNamespace(process=fixture_process(123, 0),
+                directory=directory, started=started, peak_rss=1024,
+                deadline=owner.launch_deadline)
+        owner.start = start
+        return owner
+
+    def run_catalog(self, owner, candidates=None):
+        selected = driver.CATALOGS if candidates is None else candidates
+        sdk = [{"identity": {"job": {"stage": "screen", "adapter": name}},
+                "state": "pass"} for name in selected]
+        def resources(env):
+            return fixture_resources(timestamp=1000 + owner.clock[0],
+                swapouts=owner.counter, level=20, load1=25, load5=24,
+                load15=23)
+        with patch.object(driver.time, "monotonic",
+                          side_effect=lambda: owner.clock[0]), \
+                patch.object(driver, "native_resources",
+                             side_effect=resources):
+            driver.run_catalog_hybrid(owner, sdk, "catalog")
+        return driver.read_json(owner.root / "catalog-summary.json")
+
+    def test_full_catalog_matrix_counts_ratios_and_reference_extras(self):
+        with tempfile.TemporaryDirectory() as f:
+            root = Path(f).resolve()
+            owner = self.owner(root)
+            summary = self.run_catalog(owner)
+            groups = summary["blocks"]
+            self.assertEqual(len(groups), 12)
+            self.assertEqual(len(owner.calls), 720)
+            self.assertEqual(len(set(owner.calls)), 720)
+            self.assertEqual(summary["reference_trials"], 360)
+            self.assertEqual(summary["reference_extras"], 270)
+            self.assertEqual(summary["data_scope"],
+                             "catalog-only sealed manifests")
+            methods = {name: 0 for name in driver.CATALOGS}
+            coverage = set()
+            for group in groups:
+                identity = group["identity"]
+                cases, rows = identity["samples"], group["samples"]
+                candidate = cases[1]["candidate"]
+                coverage.add((candidate, identity["entries"]))
+                self.assertEqual(identity["reference"], "catalog-sqlite")
+                self.assertEqual(identity["ratio"], "B/A")
+                self.assertEqual([c["candidate"] for c in cases],
+                                 ["catalog-sqlite", candidate] * 30)
+                self.assertEqual([c["id"] for c in cases], [
+                    f"{role}{i:02d}" for i in range(1, 31)
+                    for role in ("A", "B")])
+                self.assertEqual(len(rows), 60)
+                self.assertTrue(group["valid_timing_comparison"])
+                ratios = group["paired_ratios"]["operations"]
+                self.assertEqual({r["metric"] for r in ratios},
+                                 set(self.operations))
+                self.assertEqual(len(ratios), 4)
+                for ratio in ratios:
+                    self.assertEqual(ratio["pairs"], list(range(2, 32)))
+                    self.assertEqual(ratio["pair_count"], 30)
+                    self.assertEqual((ratio["median"], ratio["min"],
+                                      ratio["max"]), (16.5, 2, 31))
+                folder = root / "aux" / group["attempt"]["job_id"]
+                clocks = [(start, end) for name, start, end in owner.clocks
+                          if name == folder.name]
+                self.assertEqual(len(clocks), 60)
+                end = clocks[0][0] + 15 * 60 - driver.CLEANUP_RESERVE_SECONDS
+                self.assertEqual([deadline for _, deadline in clocks],
+                                 [end] * 60)
+                baselines = []
+                for case, row in zip(cases, rows):
+                    methods[case["candidate"]] += 1
+                    directory = folder / case["id"]
+                    raw = driver.read_json(directory / "output/result.json")
+                    self.assertEqual(raw["repeats"], 1)
+                    self.assertEqual({v["count"] for v in
+                                      raw["latency"].values()}, {1})
+                    self.assertEqual(len(raw["recoveries"]), 1)
+                    self.assertEqual(raw["recoveries"][0]["candidate"],
+                                     case["candidate"])
+                    before = driver.read_json(directory / "process.json")[
+                        "resources"]
+                    after_path = directory / "resources-after.json"
+                    after = driver.read_json(after_path)
+                    self.assertIn(str(after_path.relative_to(root)),
+                                  row["files"])
+                    for sample in (before, after):
+                        self.assertTrue(set(fixture_resources()) <=
+                                        sample.keys())
+                        self.assertEqual(sample["load1"], 25)
+                        self.assertIs(sample["ac_power"], True)
+                        baselines.append(sample["swapouts_start"])
+                    self.assertGreaterEqual(after["timestamp"],
+                                            before["timestamp"])
+                    self.assertEqual(after["swapouts"] - before["swapouts"],
+                                     256)
+                self.assertEqual(len(set(baselines)), 1)
+            self.assertEqual(methods["catalog-sqlite"], 360)
+            self.assertTrue(all(methods[c] == 90 for c in driver.CATALOGS[1:]))
+            self.assertEqual(coverage, {(c, n) for c in driver.CATALOGS[1:]
+                                       for n in (1, 10, 100)})
+            files = driver.block_files(root, {"id": "catalog",
+                "jobs": list(owner.job_bindings.values())})
+            for group in groups:
+                self.assertIn(str((root / "aux" / group["attempt"]["job_id"]
+                                   / "complete.json").relative_to(root)),
+                                 files)
+            self.assertFalse(hasattr(owner, "group_deadline"))
+
+    def test_catalog_factory_trial_and_input_refusals_do_not_retry(self):
+        for failure in ("candidate", "missing-call", "nil-factory", "no-op",
+                        "operation", "count-30", "boolean-count", "nonnumeric",
+                        "footprint", "unmatched", "boolean-repeat"):
+            with self.subTest(failure=failure), \
+                    tempfile.TemporaryDirectory() as f:
+                root = Path(f).resolve()
+                def change(raw, role):
+                    if failure == "candidate":
+                        raw["candidate"] = "catalog-substitute"
+                    elif failure == "missing-call":
+                        raw["recoveries"] = []
+                    elif failure == "nil-factory":
+                        raw["recoveries"][0]["factory"] = "<nil>"
+                    elif failure == "no-op":
+                        raw["recoveries"][0]["ns"] = 0
+                    elif failure == "operation":
+                        raw["latency"]["publish_set"]["count"] = 0
+                    elif failure == "count-30":
+                        raw["repeats"] = 30
+                    elif failure == "boolean-count":
+                        raw["latency"]["publish"]["count"] = True
+                    elif failure == "nonnumeric":
+                        raw["latency"]["publish"]["p50_ns"] = "NaN"
+                    elif failure == "footprint":
+                        raw["footprints"][0]["bytes"] = 0
+                    elif failure == "unmatched" and role.startswith("B"):
+                        raw["fixture_sha256"]["fixture-0"] = "f" * 64
+                    elif failure == "boolean-repeat":
+                        raw["repeats"] = True
+                owner = self.owner(root, change=change)
+                eligible = driver.CATALOGS[:2]
+                with self.assertRaises(driver.ReviewRequired):
+                    self.run_catalog(owner, eligible)
+                self.assertEqual(len(owner.calls),
+                                 2 if failure == "unmatched" else 1)
+                folder = root / "aux/catalog-catalog-refs-n1"
+                partial = list(folder.glob("*/partial.json"))
+                self.assertEqual(len(partial), 1)
+                self.assertEqual(driver.read_json(partial[0])["state"],
+                                 "checks_failed")
+                self.assertFalse((folder / "complete.json").exists())
+                saved = {str(p.relative_to(folder)): p.read_bytes()
+                         for p in driver.output_files([folder])}
+                resumed = self.owner(root, window="catalog-window-2")
+                with self.assertRaises((driver.ReviewRequired,
+                                        FileNotFoundError)):
+                    self.run_catalog(resumed, eligible)
+                self.assertEqual(resumed.calls, [])
+                self.assertFalse((root / "attempts").exists())
+                self.assertEqual(saved, {str(p.relative_to(folder)):
+                    p.read_bytes() for p in driver.output_files([folder])})
+
+    def test_fixed_catalog_reference_is_required_before_any_trial(self):
+        for eligible in ((), driver.CATALOGS[1:]):
+            with self.subTest(eligible=eligible), \
+                    tempfile.TemporaryDirectory() as f:
+                owner = self.owner(Path(f).resolve())
+                with self.assertRaisesRegex(driver.ReviewRequired,
+                                            "fixed catalog reference"):
+                    self.run_catalog(owner, eligible)
+                self.assertEqual(owner.calls, [])
+                self.assertFalse((owner.root / "aux").exists())
+        raw = self.report("catalog-sqlite", 1, repeats=30)
+        self.assertEqual(set(driver.check_catalog_report(
+            raw, "catalog-sqlite", 1)), set(self.operations))
+        with self.assertRaises(driver.ReviewRequired):
+            driver.check_catalog_report(self.report("catalog-sqlite", 1),
+                                        "catalog-sqlite", 1)
+        for value in (0, float("nan"), float("inf")):
+            raw = self.report("catalog-sqlite", 1)
+            raw["latency"]["publish"]["p50_ns"] = value
+            with self.subTest(value=value), \
+                    self.assertRaises(driver.ReviewRequired):
+                driver.check_catalog_report(raw, "catalog-sqlite", 1,
+                                            repeats=1)
+
+    def test_catalog_interruption_restarts_group_and_complete_reuses(self):
+        with tempfile.TemporaryDirectory() as f:
+            root = Path(f).resolve()
+            eligible = driver.CATALOGS[:2]
+            interrupted = self.owner(root, stop=2)
+            with self.assertRaises(driver.DeadlineExceeded):
+                self.run_catalog(interrupted, eligible)
+            folder = root / "aux/catalog-catalog-refs-n1"
+            old_attempt = driver.read_json(folder / "attempt.json")
+            saved = {str(p.relative_to(folder)): p.read_bytes() for p in [
+                *driver.output_files([folder]),
+                *folder.glob("*/complete.json")]}
+            restarted = self.owner(root, window="catalog-window-2")
+            proof = self.run_catalog(restarted, eligible)
+            self.assertEqual(len(restarted.calls), 180)
+            self.assertEqual(proof["reference_trials"], 90)
+            self.assertEqual(proof["reference_extras"], 0)
+            archive = list((root / "attempts/aux" / folder.name).iterdir())
+            self.assertEqual(len(archive), 1)
+            for name, content in saved.items():
+                self.assertEqual((archive[0] / name).read_bytes(), content)
+            attempt = proof["blocks"][0]["attempt"]
+            self.assertNotEqual(attempt["attempt_id"],
+                                old_attempt["attempt_id"])
+            self.assertEqual(attempt["window_id"], "catalog-window-2")
+            final = self.owner(root, window="catalog-window-3")
+            final.clock[0], final.block_deadline = 10**9, 10**9 + 100000
+            self.assertEqual(self.run_catalog(final, eligible), proof)
+            self.assertEqual(final.calls, [])
+            final.permissions.assert_not_called()
+            self.assertFalse(hasattr(final, "group_deadline"))
+
+    def test_catalog_time_swap_and_counter_reset_leave_no_complete_group(self):
+        for failure, step, swap, calls in (("time", 20, 0, 45),
+                ("swap", 1, 1024, 33), ("counter", 1, -1, 1)):
+            with self.subTest(failure=failure), \
+                    tempfile.TemporaryDirectory() as f:
+                root = Path(f).resolve()
+                owner = self.owner(root, clock_step=step, swap_step=swap)
+                expected = (driver.DeadlineExceeded if failure == "time"
+                            else driver.FatalSession)
+                with self.assertRaises(expected):
+                    self.run_catalog(owner, driver.CATALOGS[:2])
+                self.assertEqual(len(owner.calls), calls)
+                self.assertFalse((root / "aux/catalog-catalog-refs-n1"
+                                  / "complete.json").exists())
+                self.assertFalse((root / "catalog-summary.json").exists())
+                self.assertFalse(hasattr(owner, "group_deadline"))
+        with tempfile.TemporaryDirectory() as f:
+            owner = self.owner(Path(f).resolve())
+            owner.block_deadline = 15 * 60 - 1
+            with self.assertRaises(driver.DeadlineExceeded):
+                self.run_catalog(owner, driver.CATALOGS[:2])
+            self.assertEqual(owner.calls, [])
+
+    def test_catalog_budget_negative_reuses_without_ratios_or_retry(self):
+        with tempfile.TemporaryDirectory() as f:
+            root = Path(f).resolve()
+            owner = self.owner(root, budget=1)
+            proof = self.run_catalog(owner, driver.CATALOGS[:2])
+            negative = proof["blocks"][0]
+            self.assertEqual(negative["state"], "budget_exceeded")
+            self.assertFalse(negative["valid_timing_comparison"])
+            self.assertEqual(negative["paired_ratios"]["operations"], [])
+            self.assertEqual(proof["reference_trials"], 89)
+            resumed = self.owner(root, window="catalog-window-2")
+            self.assertEqual(self.run_catalog(resumed, driver.CATALOGS[:2]),
+                             proof)
+            self.assertEqual(resumed.calls, [])
+
+    def test_missing_post_sample_invalidates_whole_group_proof(self):
+        with tempfile.TemporaryDirectory() as f:
+            root = Path(f).resolve()
+            owner = self.owner(root)
+            self.run_catalog(owner, driver.CATALOGS[:2])
+            folder = root / "aux/catalog-catalog-refs-n1"
+            complete = folder / "complete.json"
+            group = driver.read_json(complete)
+            leaf_path = folder / "A01/complete.json"
+            leaf = driver.read_json(leaf_path)
+            missing = folder / "A01/resources-after.json"
+            relative = str(missing.relative_to(root))
+            missing.unlink()
+            leaf["files"].pop(relative)
+            leaf["file_bytes"].pop(relative)
+            driver.atomic_json(leaf_path, leaf)
+            group["files"].pop(relative)
+            group["files"][str(leaf_path.relative_to(root))] = driver.digest(
+                leaf_path)
+            group["samples"][0] = {**leaf,
+                                  "metrics": group["samples"][0]["metrics"]}
+            driver.atomic_json(complete, group)
+            resumed = self.owner(root, window="catalog-window-2")
+            proof = self.run_catalog(resumed, driver.CATALOGS[:2])
+            self.assertEqual(len(resumed.calls), 60)
+            self.assertEqual({name for name, _ in resumed.calls},
+                             {folder.name})
+            self.assertTrue(proof["blocks"][0]["valid_timing_comparison"])
+            self.assertNotEqual(group["attempt"]["attempt_id"],
+                                proof["blocks"][0]["attempt"]["attempt_id"])
+            self.assertEqual(len(list((root / "attempts/aux" /
+                                      folder.name).iterdir())), 1)
+
+    def test_catalog_observation_is_once_but_checks_precede_every_spawn(self):
+        for block, baseline, duration, revoke in (
+                ("catalog", None, 30, False),
+                ("catalog", 10000, 0, False),
+                ("catalog", 10000, 0, True),
+                ("hybrid", 10000, 30, False),
+                ("segment_timing", 10000, 30, False)):
+            with self.subTest(block=block, baseline=baseline, revoke=revoke), \
+                    tempfile.TemporaryDirectory() as f:
+                root = Path(f).resolve()
+                directory = root / "case"
+                directory.mkdir()
+                owner = fixture_owner(root)
+                env = {**driver.environment(root), "GOMAXPROCS": "10"}
+                owner.go_file = root / "go.json"
+                go = NativeAdmissionTests().go(
+                    owner.native_identity["input_manifest_sha256"])
+                driver.atomic_json(owner.go_file, go)
+                owner.go_sha = driver.digest(owner.go_file)
+                owner.block_id, owner.swapouts = block, baseline
+                owner.case = {"gomaxprocs": 10}
+                owner.stop_all = unittest.mock.Mock()
+                clock, checks = [0.0], []
+                process = fixture_process(8500)
+                log = StringIO()
+                original_open = Path.open
+                def sleep(seconds):
+                    clock[0] += seconds
+                def guard(*, admission=False):
+                    checks.append(admission)
+                    if revoke and admission and checks.count(True) == 2:
+                        driver.atomic_json(owner.go_file,
+                                           {**go, "user_go": False})
+                def open_file(path, mode="r", *args, **kwargs):
+                    if path.name == "stdout-stderr.log":
+                        return log
+                    return original_open(path, mode, *args, **kwargs)
+                owner.guard = guard
+                with (patch.object(driver.time, "monotonic",
+                                   side_effect=lambda: clock[0]),
+                      patch.object(driver.time, "sleep", side_effect=sleep),
+                      patch.object(driver.time, "time", return_value=1000),
+                      patch.object(driver.signal, "pthread_sigmask",
+                                   return_value=set()),
+                      patch.object(driver.signal, "setitimer"),
+                      patch.object(driver, "darwin_usage",
+                                   return_value=SimpleNamespace(
+                                       proc_start_abstime=123)),
+                      patch.object(driver, "process_groups", return_value={
+                          8500: {(8500, 123): 8192}}),
+                      patch.object(driver.os, "waitpid",
+                                   side_effect=ChildProcessError),
+                      patch.object(Path, "open", new=open_file),
+                      patch.object(driver.subprocess, "Popen",
+                                   return_value=process) as spawn):
+                    if revoke:
+                        with self.assertRaises(driver.FatalSession):
+                            owner.start(["/fixture/catalog"], directory,
+                                        env, root)
+                        spawn.assert_not_called()
+                    else:
+                        owned = owner.start(["/fixture/catalog"], directory,
+                                            env, root)
+                        spawn.assert_called_once()
+                        owned.log.close()
+                        owner.active.clear()
+                self.assertEqual(clock[0], duration)
+                self.assertEqual(checks.count(True), 2)
+                self.assertEqual(checks[:8] if duration else checks[:2],
+                                 [True] + [False] * 6 + [True]
+                                 if duration else [True, True])
+
+
 class MacHybridCallerTests(unittest.TestCase):
     def load_child(self):
         import importlib.util

@@ -158,6 +158,78 @@ class ControllerTests(unittest.TestCase):
                     self.assertEqual(go.call_count, 2)
                     self.assertFalse(unused.exists())
 
+    def test_build_environment_is_two_and_runtime_keeps_its_binding(self):
+        from io import StringIO
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            work, scratch = root / "work", root / "scratch"
+            data = work / "timing-data"
+            data.mkdir(parents=True)
+            (data / "int8-n10000-d384.bin").write_bytes(b"immutable")
+            name = "n10000-d384-w1-rep1"
+            selected = root / "selected.json"
+            selected.write_text(json.dumps([name]))
+            output = root / "attempt/sample"
+            sample = {"timestamp": 1, "load1": 20, "load5": 18,
+                "load15": 17, "level": 20, "pressure_state": 1,
+                "available_bytes": 4 * 1024**3, "swapouts": 10000,
+                "page_size": 16384, "swap_usage": "used = 100M",
+                "ac_power": True}
+            telemetry = SimpleNamespace(native_resources=Mock(
+                side_effect=lambda _: dict(sample)))
+            spec = SimpleNamespace(name="storage_telemetry",
+                loader=SimpleNamespace(exec_module=Mock()))
+            result = {"queries": 256, "n": 10000, "dimensions": 384,
+                "workers": 1, "candidate_pool":
+                "global quantized top128, then original F32 rerank",
+                "latency_ns": {"count": 256, "p50": 100, "p95": 200}}
+            builds, trials = [], []
+            def execute(command, **options):
+                if command[:2] == ["go", "build"]:
+                    builds.append(dict(options["env"]))
+                    self.assertIn("-p=1", command)
+                    binary = Path(command[command.index("-o") + 1])
+                    binary.write_bytes(b"fixture-binary")
+                else:
+                    self.assertNotIn("env", options)
+                    trials.append(run.os.environ["GOMAXPROCS"])
+                    path = Path(command[command.index("-output") + 1])
+                    with path.open("x") as stream:
+                        json.dump(result, stream)
+                return SimpleNamespace(returncode=0)
+            with (patch.object(run, "WORK", work),
+                  patch.object(run, "SCRATCH", scratch),
+                  patch.object(run.sys, "platform", "darwin"),
+                  patch.object(run.platform, "machine", return_value="arm64"),
+                  patch.object(run.sys, "argv", ["run.py", "timing",
+                      "--execute", "--jobs-file", str(selected),
+                      "--output-dir", str(output)]),
+                  patch.object(run.shutil, "which",
+                               return_value="/fixture/go"),
+                  patch.object(run, "source_fingerprint", return_value="pin"),
+                  patch.object(run.subprocess, "check_output",
+                               return_value="go1.27.1 darwin/arm64"),
+                  patch.object(run.subprocess, "run", side_effect=execute),
+                  patch.object(run.importlib.util, "spec_from_file_location",
+                               return_value=spec),
+                  patch.object(run.importlib.util, "module_from_spec",
+                               return_value=telemetry),
+                  patch.dict(run.sys.modules),
+                  patch.dict(run.os.environ, {"GOMAXPROCS": "10"}),
+                  patch("sys.stdout", StringIO())):
+                run.main()
+                self.assertEqual(run.os.environ["GOMAXPROCS"], "10")
+            self.assertEqual(len(builds), 1)
+            self.assertEqual(builds[0]["GOMAXPROCS"], "2")
+            self.assertEqual(builds[0]["GOTOOLCHAIN"], "local")
+            self.assertEqual(trials, ["10"])
+            receipt = json.loads((output / (name + ".json")).read_text())
+            self.assertEqual(receipt["configuration"]["runtime_environment"][
+                "GOMAXPROCS"], "10")
+
     def test_generated_hash_drift(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

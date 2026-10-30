@@ -170,7 +170,7 @@ def bound_jobs(root: Path) -> dict[str, list[dict]]:
                 "id": name, "minutes": 15,
                 "argv": [str(root / "bin" / candidate), "catalog-bench",
                          "-candidate", candidate, "-entries", str(entries),
-                         "-repeats", "30", "-seed", "20261025",
+                         "-repeats", "1", "-seed", "20261025",
                          "-out", str(out)],
                 "receipt_path": str(out.parent / "complete.json"),
             })
@@ -810,8 +810,9 @@ class Supervisor:
                 "GOCACHE", "GOMODCACHE", "UV_CACHE_DIR", "HF_HOME",
                 "PYTHONPYCACHEPREFIX", "PYTHONUSERBASE")]):
             persistent_path(path, self.scratch)
+        observe = self.block_id != "catalog" or self.swapouts is None
         self.guard(admission=True)
-        observation_end = time.monotonic() + 30
+        observation_end = time.monotonic() + (30 if observe else 0)
         while time.monotonic() < observation_end:
             time.sleep(max(0, min(5, observation_end - time.monotonic())))
             self.guard()
@@ -1962,19 +1963,28 @@ def hybrid_names(mode: str) -> list[str]:
     return list(hybrid_commands(Path("/work"), mode))
 
 
-def check_catalog_report(report: Mapping, candidate: str, entries: int) -> None:
+def check_catalog_report(report: Mapping, candidate: str, entries: int, *,
+                         repeats: int = 30) -> dict[str, float]:
     if (report.get("success") is not True
             or report.get("candidate") != candidate
             or report.get("entries") != entries
-            or report.get("repeats") != 30
+            or type(report.get("repeats")) is not int
+            or report["repeats"] != repeats
             or len(report.get("fixture_sha256", {})) != 4 * entries
-            or len(report.get("footprints", [])) != 30
-            or len(report.get("recoveries", [])) != 30):
+            or len(report.get("footprints", [])) != repeats
+            or len(report.get("recoveries", [])) != repeats):
         raise ReviewRequired("incomplete/wrong catalog micro-benchmark")
+    metrics = {}
     for op in ("publish", "publish_set", "pin_resolve",
                "reopen_recover_pin_resolve"):
-        if report.get("latency", {}).get(op, {}).get("count") != 30:
-            raise ReviewRequired("catalog operation was not measured 30 times")
+        latency = report.get("latency", {}).get(op, {})
+        value = latency.get("p50_ns")
+        if (type(latency.get("count")) is not int
+                or latency["count"] != repeats
+                or type(value) not in (int, float)
+                or not math.isfinite(value) or value <= 0):
+            raise ReviewRequired("missing/invalid catalog operation samples")
+        metrics[op] = value
     for row in report["recoveries"]:
         if (row.get("candidate") != candidate or row.get("pid", 0) <= 0
                 or row.get("factory") != "*main.catalog"
@@ -1983,6 +1993,7 @@ def check_catalog_report(report: Mapping, candidate: str, entries: int) -> None:
     if any(row.get("files", 0) <= 0 or row.get("bytes", 0) <= 0
            for row in report["footprints"]):
         raise ReviewRequired("missing catalog footprint")
+    return dict(sorted(metrics.items()))
 
 
 def check_hybrid_recipe(method: str, result: Mapping,
@@ -2088,6 +2099,9 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
                 raise DeadlineExceeded(f"{name}: absolute auxiliary deadline")
             time.sleep(5)
         supervisor.close(owned)
+        if supervisor.block_id == "catalog":
+            supervisor.guard()
+            atomic_json(directory / "resources-after.json", supervisor.sample)
     except BudgetExceeded as error:
         return budget_receipt(supervisor, directory, root, error)
     try:
@@ -2235,21 +2249,54 @@ def run_catalog_hybrid(supervisor: Supervisor,
     passed = {row["identity"]["job"]["adapter"] for row in sdk
               if row["identity"]["job"]["stage"] == "screen"
               and row["state"] == "pass"}
-    receipts = []
-    for candidate in CATALOGS if block == "catalog" else ():
+    receipts, coverage = [], {}
+    if block == "catalog" and "catalog-sqlite" not in passed:
+        raise ReviewRequired("fixed catalog reference correctness incomplete")
+    for candidate in CATALOGS[1:] if block == "catalog" else ():
         if candidate not in passed:
             continue
         for entries in (1, 10, 100):
             name = f"catalog-{candidate}-n{entries}"
-            out = root / "aux" / name / "output"
-            args = [str(root / "bin" / candidate), "catalog-bench",
-                    "-candidate", candidate, "-entries", str(entries),
-                    "-repeats", "30", "-seed", "20261025", "-out", str(out)]
-            def validate(directory: Path) -> list[Path]:
-                check_catalog_report(worker_json(out / "result.json", name),
-                                     candidate, entries)
-                return []
-            receipts.append(auxiliary(supervisor, name, args, validate))
+            cases = [{"id": f"{role}{i + 1:02d}", "candidate": method,
+                      "binding": f"catalog-{method}-n{entries}"}
+                     for i in range(30) for role, method in
+                     (("A", "catalog-sqlite"), ("B", candidate))]
+            def samples(attempt, *, check_only=False):
+                rows, fixtures = [], {}
+                for case in cases:
+                    folder = root / "aux" / name / case["id"]
+                    out = folder / "output"
+                    method = case["candidate"]
+                    args = [str(root / "bin" / method), "catalog-bench",
+                            "-candidate", method, "-entries", str(entries),
+                            "-repeats", "1", "-seed", "20261025",
+                            "-out", str(out)]
+                    metrics = {}
+                    def validate(directory):
+                        raw = worker_json(out / "result.json", method)
+                        metrics.update(check_catalog_report(
+                            raw, method, entries, repeats=1))
+                        if fixtures and fixtures != raw["fixture_sha256"]:
+                            raise ReviewRequired("unmatched catalog fixtures")
+                        fixtures.update(raw["fixture_sha256"])
+                        return [directory / "resources-after.json"]
+                    row = auxiliary(supervisor, case["binding"], args,
+                        validate, directory=folder, attempt=attempt,
+                        check_only=check_only)
+                    rows.append({**row, "metrics": metrics})
+                return rows
+            receipts.append(comparison_group(supervisor, name, {
+                "operation": "catalog", "reference": "catalog-sqlite",
+                "ratio": "B/A", "entries": entries, "seed": 20261025,
+                "pairs": {candidate: [[i, i + 1] for i in range(0, 60, 2)]},
+                "samples": cases, "driver_sha256": digest(Path(__file__)),
+                "bindings": [supervisor.job_bindings[key] for key in
+                    (f"catalog-catalog-sqlite-n{entries}", name)]}, samples))
+    if block == "catalog":
+        references = sum(row["state"] == "pass" for group in receipts
+                         for row in group["samples"][::2])
+        coverage = {"reference_trials": references,
+                    "reference_extras": max(0, references - 90)}
     profiles = bound_jobs(root)["hybrid"] if block == "hybrid" else []
     for mode in ("timing", "latency") if profiles else ():
         cohort = [(job, Path(job["receipt_path"]).parent) for job in profiles
@@ -2293,10 +2340,12 @@ def run_catalog_hybrid(supervisor: Supervisor,
                 "preparation": digest(Path(preparation["receipt_path"])),
                 "configuration": config}, samples))
     atomic_json(root / (block + "-summary.json"), {
-        "source": COMMIT, "blocks": receipts,
+        "source": COMMIT, "blocks": receipts, **coverage,
         "skipped_catalogs_failed_correctness": sorted(set(CATALOGS)-passed),
         "skipped_optional": ["1M exact/int8 timing and generated latency"],
-        "data_scope": "generated vectors; bypass segment adapters; no real-vector timing",
+        "data_scope": ("catalog-only sealed manifests" if block == "catalog"
+                       else "generated vectors; bypass segment adapters; "
+                            "no real-vector timing"),
     })
 
 

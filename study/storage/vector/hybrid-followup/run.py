@@ -249,6 +249,7 @@ def build(binary: Path, mode: Mode, native: Path) -> None:
     if shutil.which("go") is None:
         raise RuntimeError("Go1.27.1 is required; no toolchain is installed")
     environment = dict(os.environ)
+    environment["GOMAXPROCS"] = "2"
     environment["GOTOOLCHAIN"] = "local"
     environment["GOWORK"] = "off"
     for key, suffix in (("GOCACHE", "cache/go-build"),
