@@ -6765,7 +6765,8 @@ class DatasetBindingTests(unittest.TestCase):
     """Producer stubs test bindings, not real corpus generation."""
 
     def setup_fixture(self, root, *, nodes=82088, tier1_nodes=81179,
-                      repositories=None, bad_answers=False):
+                      repositories=None, bad_answers=False, edges=None,
+                      node_ids=None):
         owner = fixture_owner(root, setup=False)
         owner.manifest_file, tools, owner.environment = fixture_tools(root)
         inputs = root / "inputs"
@@ -6849,6 +6850,15 @@ class DatasetBindingTests(unittest.TestCase):
                                  ["route"], "local-mac-setup")
                 dataset("tier10", nodes, list(driver.TIER10) if
                         repositories is None else repositories)
+                for name in driver.TIER10:
+                    directory = root / "data/tier10" / name
+                    directory.mkdir()
+                    identifier = (node_ids or {}).get(name, name + "::node")
+                    (directory / "nodes.jsonl").write_text(
+                        json.dumps({"id": identifier}) + "\n")
+                    (directory / "edges.jsonl").write_text("".join(
+                        json.dumps(edge) + "\n"
+                        for edge in (edges or {}).get(name, ())))
             if args[0] == "zstd":
                 Path(args[args.index("--output") + 1]).write_bytes(b"archive")
             log = root / "setup" / ("log-" + str(len(owner.calls)))
@@ -6909,6 +6919,101 @@ class DatasetBindingTests(unittest.TestCase):
             with (patch.object(driver, "__file__", str(owner.control_source)),
                   self.assertRaises(driver.ReviewRequired)):
                 driver.prepare(owner, inputs, setup["identity"])
+
+    def test_generated_counts_allow_same_group_and_dangling_targets(self):
+        go = [name for name in driver.TIER10 if name.startswith("K-")]
+        pallets = [name for name in driver.TIER10 if name.startswith("P-")]
+        for dangling in (False, True):
+            with self.subTest(dangling=dangling), \
+                    tempfile.TemporaryDirectory() as folder:
+                root = Path(folder).resolve()
+                edges = {go[0]: [{"from": go[0] + "::node",
+                                  "to": go[1] + "::node", "cross_repo": True}],
+                         pallets[0]: [{"from": pallets[0] + "::node",
+                            "to": pallets[1] + "::node", "cross_repo": True}]}
+                if dangling:
+                    edges[go[0]] += [
+                        {"from": go[0] + "::node", "to": target,
+                         "cross_repo": False}
+                        for target in (go[1] + "::missing",
+                                       "K-unselected::missing", "K")]
+                owner, inputs, setup = self.prepare_fixture(root, edges=edges)
+                result = driver.read_json(root / "generation.json")
+                expected = dict.fromkeys(driver.TIER10, 0)
+                expected[go[0]] = 3 if dangling else 0
+                self.assertEqual(result["dangling_targets"], expected)
+                self.assertEqual(result["dangling_targets_total"],
+                                 3 if dangling else 0)
+                self.assertEqual(result["cross_group_edges"],
+                                 dict.fromkeys(driver.TIER10, 0))
+                self.assertEqual(result["cross_group_edges_total"], 0)
+                self.assertEqual(result["route"], "local-mac-setup")
+                self.assertIn("-synthetic-cross-repo=false", result["argv"])
+                self.assertTrue((root / "downloads/tier10.tar").is_file())
+                self.assertTrue((root / "downloads/tier10.tar.zst").is_file())
+                self.assertEqual(setup["archives"]["tier10"]["queries"], 1)
+
+    def test_generated_cross_group_edges_refuse_before_archive_with_all_counts(
+            self):
+        from contextlib import ExitStack
+        go = [name for name in driver.TIER10 if name.startswith("K-")]
+        pallets = [name for name in driver.TIER10 if name.startswith("P-")]
+        for bare in (False, True):
+            with self.subTest(bare=bare), tempfile.TemporaryDirectory() as f:
+                root = Path(f).resolve()
+                ids = ({go[0]: "bare-go", pallets[0]: "bare-pallets"}
+                       if bare else {})
+                source = ids.get(go[0], go[0] + "::node")
+                target = ids.get(pallets[0], pallets[0] + "::node")
+                edges = {go[0]: [
+                    {"from": source, "to": target, "cross_repo": False},
+                    {"from": source, "to": "P-unselected::missing",
+                     "cross_repo": False}],
+                    pallets[0]: [{"from": target, "to": source,
+                                  "cross_repo": False}]}
+                owner, inputs, patches = self.setup_fixture(
+                    root, edges=edges, node_ids=ids)
+                with ExitStack() as context:
+                    for item in patches:
+                        context.enter_context(item)
+                    with self.assertRaisesRegex(driver.ReviewRequired,
+                                                "cross-group edge"):
+                        driver.prepare(owner, inputs, {"driver": "fixture",
+                                                       "runtime": {}})
+                result = driver.read_json(root / "generation.json")
+                expected = dict.fromkeys(driver.TIER10, 0)
+                expected[go[0]], expected[pallets[0]] = 2, 1
+                self.assertEqual(result["cross_group_edges"], expected)
+                self.assertEqual(result["cross_group_edges_total"], 3)
+                dangling = dict.fromkeys(driver.TIER10, 0)
+                dangling[go[0]] = 1
+                self.assertEqual(result["dangling_targets"], dangling)
+                self.assertEqual(result["dangling_targets_total"], 1)
+                self.assertEqual(result["route"], "local-mac-setup")
+                self.assertFalse((root / "downloads/tier10.tar").exists())
+                self.assertFalse((root / "downloads/tier10.tar.zst").exists())
+                self.assertFalse((root / "setup-complete.json").exists())
+                self.assertFalse(any(call[0] == "zstd" and
+                    str(root / "downloads/tier10.tar.zst") in call
+                    for call in owner.calls))
+
+    def test_duplicate_generated_node_identity_refuses_before_archive(self):
+        from contextlib import ExitStack
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            names = list(driver.TIER10)
+            owner, inputs, patches = self.setup_fixture(root, node_ids={
+                names[0]: "ambiguous", names[-1]: "ambiguous"})
+            with ExitStack() as context:
+                for item in patches:
+                    context.enter_context(item)
+                with self.assertRaisesRegex(driver.ReviewRequired,
+                                            "ambiguous generated node"):
+                    driver.prepare(owner, inputs, {"driver": "fixture",
+                                                   "runtime": {}})
+            self.assertFalse((root / "downloads/tier10.tar").exists())
+            self.assertFalse((root / "downloads/tier10.tar.zst").exists())
+            self.assertFalse((root / "setup-complete.json").exists())
 
     def test_superseded_and_mismatched_counts_never_bind(self):
         for options in ({"nodes": 423567}, {"nodes": 82087},

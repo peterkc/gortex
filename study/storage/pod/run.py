@@ -1335,6 +1335,35 @@ def generate_tier10(supervisor: Supervisor, inputs: Path) -> None:
         "route": "local-mac-setup", "argv": argv,
     })
     supervisor.run(argv)
+    tier = root / "data/tier10"
+    groups = {}
+    for name in TIER10:
+        with (tier / name / "nodes.jsonl").open() as stream:
+            for line in stream:
+                identifier = json.loads(line)["id"]
+                if identifier in groups:
+                    raise ReviewRequired("ambiguous generated node identity")
+                groups[identifier] = name[0]
+    dangling, forbidden = {}, {}
+    for name in TIER10:
+        dangling[name], forbidden[name] = 0, 0
+        with (tier / name / "edges.jsonl").open() as stream:
+            for line in stream:
+                edge = json.loads(line)
+                source = groups.get(edge["from"],
+                    edge["from"].rpartition("::")[0].partition("-")[0])
+                target = groups.get(edge["to"],
+                    edge["to"].rpartition("::")[0].partition("-")[0])
+                forbidden[name] += {source, target} == {"K", "P"}
+                dangling[name] += edge["to"] not in groups
+    generation = read_json(root / "generation.json")
+    generation.update(dangling_targets=dangling,
+                      dangling_targets_total=sum(dangling.values()),
+                      cross_group_edges=forbidden,
+                      cross_group_edges_total=sum(forbidden.values()))
+    atomic_json(root / "generation.json", generation)
+    if any(forbidden.values()):
+        raise ReviewRequired("generated Go/Pallets cross-group edge")
     archive = root / "downloads/tier10.tar"
     with tarfile.open(archive, "w") as output:
         output.add(root / "data/tier10", arcname="tier10")
