@@ -3436,7 +3436,9 @@ class HybridGroupTests(unittest.TestCase):
                         patch.object(driver, "CLEANUP_RESERVE_SECONDS",
                                      stop_reserve):
                     root = Path(f).resolve()
-                    owner = self.owner(root, swap_step=4096)
+                    page_size = fixture_resources()["page_size"]
+                    step = (384 * 1024**2) // (count * page_size)
+                    owner = self.owner(root, swap_step=step)
                     sha = owner.native_identity["input_manifest_sha256"]
                     go = NativeAdmissionTests().go(sha)
                     go["window_id"] = owner.window["id"]
@@ -3449,6 +3451,9 @@ class HybridGroupTests(unittest.TestCase):
                         (200 + i * 100, end) for i in range(count)])
                     self.assertEqual(owner.baselines,
                                      [None] + [10000] * (count - 1))
+                    self.assertEqual(owner.counter - 10000, count * step)
+                    self.assertLessEqual((owner.counter - 10000) * page_size,
+                                         384 * 1024**2)
                     self.assertEqual([end - start for start, end
                                       in owner.clocks], [
                         60 * 60 - stop_reserve - i * 100
