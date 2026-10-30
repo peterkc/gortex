@@ -134,6 +134,8 @@ type IndexResult struct {
 	// CrossRepoResolveFiles contains parked consumers outside this repository's
 	// derived frontier. Batch callers must include them in cross-repo resolution.
 	CrossRepoResolveFiles []string `json:"cross_repo_resolve_files,omitempty"`
+	// CargoRetarget records a Rust file addition for the post-registration warm tail.
+	CargoRetarget bool `json:"cargo_retarget,omitempty"`
 
 	// mutationErr carries a point-operation compatibility error through the
 	// resolver/semantic/derived tail. It is intentionally unexported and never
@@ -487,6 +489,7 @@ type Indexer struct {
 	parseErrors      []IndexError
 	fileMtimes       map[string]int64
 	fileMtimesShared bool
+	fileSetRevision  atomic.Uint64
 	// Any failed sidecar write can leave the durable keyset incomplete even
 	// while the immutable in-memory snapshot is current. Receipt paging must
 	// fall back to that snapshot until a full authoritative replace repairs it.
@@ -3442,6 +3445,11 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 				var err error
 				shadowReplacementStarted = true
 				restubTrackedNpmRepoIncoming(diskTarget, idx.RepoPrefix())
+				parked := restubTrackedCargoRepoIncoming(diskTarget, idx.RepoPrefix())
+				parked = appendUniqueSorted(parked, restubTrackedPythonRepoIncoming(diskTarget, idx.RepoPrefix())...)
+				if result != nil {
+					result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, parked...)
+				}
 				evictedNodes, evictedEdges, err = sqlite.EvictRepoForShadowReplacement(ctx, idx.RepoPrefix())
 				if err != nil {
 					retErr = fmt.Errorf("indexer: retire shadow replacement rows: %w", err)
@@ -5150,8 +5158,16 @@ func (idx *Indexer) indexFile(
 	priorNodes, legacyIDs, legacyPath := idx.filePriorWithLegacy(graphPath, idx.graph.GetFileNodes(graphPath))
 	var legacyCarried []*graph.Edge
 	var oldFuncIDs []string
+	var carriedGoImports []*graph.Edge
 	evictExisting := func(result *parser.ExtractionResult) {
 		idx.invalidateGoModuleSourceStamp(relPath)
+		if strings.HasSuffix(graphPath, ".go") {
+			for _, e := range idx.graph.GetInEdges(graphPath) {
+				if e.Kind == graph.EdgeImports && !e.CrossRepo && e.Meta["go_import"] != nil && e.FilePath != graphPath {
+					carriedGoImports = append(carriedGoImports, e)
+				}
+			}
+		}
 		var oldFTSNodeIDs []string
 		for _, n := range priorNodes {
 			if n == nil {
@@ -5169,9 +5185,9 @@ func (idx *Indexer) indexFile(
 		// batch replacement by deleting its prior documents explicitly;
 		// canonical contracts follow the store's owner-retention decision.
 		idx.deleteSymbolFTS(oldFTSNodeIDs)
-		var npmConsumers []string
+		var npmConsumers, cargoConsumers, pythonConsumers []string
 		if len(legacyIDs) == 0 {
-			npmConsumers = idx.restubIncomingRefs(graphPath)
+			npmConsumers, cargoConsumers, pythonConsumers = idx.restubIncomingRefs(graphPath)
 		} else {
 			// Extraction is still unprefixed here. Build only the identity surface
 			// needed by the same incoming frontier used by the structural batch.
@@ -5186,16 +5202,27 @@ func (idx *Indexer) indexFile(
 			}
 			stage := &incrementalBatchStage{graphPath: graphPath, legacyPath: legacyPath, priorNodes: priorNodes, result: fresh}
 			stages := []*incrementalBatchStage{stage}
-			legacyCarried, npmConsumers = restubIncomingRefsFromView(idx.graph, stages, loadIncrementalPriorView(idx.graph, stages))
+			legacyCarried, npmConsumers, cargoConsumers, pythonConsumers = restubIncomingRefsFromView(idx.graph, stages, loadIncrementalPriorView(idx.graph, stages))
 		}
 		if markerBatch != nil {
 			markerBatch.npmConsumerFiles = appendUniqueSorted(markerBatch.npmConsumerFiles, npmConsumers...)
+			markerBatch.cargoConsumerFiles = appendUniqueSorted(markerBatch.cargoConsumerFiles, cargoConsumers...)
+			markerBatch.pythonConsumerFiles = appendUniqueSorted(markerBatch.pythonConsumerFiles, pythonConsumers...)
 		}
 		if len(legacyIDs) == 0 {
 			idx.graph.EvictFile(graphPath)
 		} else {
 			idx.evictFileIdentities([]string{graphPath}, legacyIDs, []string{legacyPath})
 		}
+	}
+
+	parkCarriedGoImports := func() []*graph.Edge {
+		for _, e := range carriedGoImports {
+			graph.StashRestubProvenance(e)
+			e.To = goModuleRestubTarget(e, "")
+			e.CrossRepo, e.ConfidenceLabel = false, ""
+		}
+		return carriedGoImports
 	}
 
 	// A delta probe already owns a shared admission lease together with its
@@ -5262,7 +5289,7 @@ func (idx *Indexer) indexFile(
 				}
 			}
 			evictExisting(result)
-			idx.graph.AddBatch([]*graph.Node{n}, nil)
+			idx.graph.AddBatch([]*graph.Node{n}, parkCarriedGoImports())
 			if !idx.recordFileReadVersion(mtimeKey, absPath, readVersion) {
 				return idx.fileIndexFailureError(absPath)
 			}
@@ -5286,7 +5313,7 @@ func (idx *Indexer) indexFile(
 				}
 			}
 			evictExisting(result)
-			idx.graph.AddBatch([]*graph.Node{n}, nil)
+			idx.graph.AddBatch([]*graph.Node{n}, parkCarriedGoImports())
 			if !idx.recordFileReadVersion(mtimeKey, absPath, readVersion) {
 				return idx.fileIndexFailureError(absPath)
 			}
@@ -5439,7 +5466,10 @@ func (idx *Indexer) indexFile(
 	// the node.
 	idx.replaceContentSections(graphPath, result.Nodes, false)
 
-	idx.graph.AddBatch(result.Nodes, append(result.Edges, legacyCarried...))
+	if _, survives := newNodeIDs[graphPath]; !survives {
+		carriedGoImports = nil
+	}
+	idx.graph.AddBatch(result.Nodes, append(append(result.Edges, legacyCarried...), carriedGoImports...))
 	idx.persistFileMeta(relPath, src, result)
 	idx.persistConstValues(result)
 	// No subsequent stage reads source bytes or the parse tree. Release both
@@ -5693,6 +5723,9 @@ func (idx *Indexer) recordFileReadVersion(relPath, absPath string, version fileR
 func (idx *Indexer) recordFileMtimeValue(relPath string, mtime int64) {
 	idx.mtimeMu.Lock()
 	idx.ensureFileMtimesWritableLocked()
+	if _, exists := idx.fileMtimes[relPath]; !exists {
+		idx.fileSetRevision.Add(1)
+	}
 	idx.fileMtimes[relPath] = mtime
 	idx.mtimeMu.Unlock()
 	if w, ok := idx.graph.(graph.FileMtimeWriter); ok {
@@ -5952,10 +5985,10 @@ func (idx *Indexer) reresolveFileScopedRaw(filePath string) error {
 // agnostic: GetInEdges + ReindexEdges are the same Store primitives the
 // resolver uses, so this behaves identically on the in-memory and disk
 // stores.
-func (idx *Indexer) restubIncomingRefs(graphPath string) []string {
+func (idx *Indexer) restubIncomingRefs(graphPath string) ([]string, []string, []string) {
 	nodes := idx.graph.GetFileNodes(graphPath)
 	if len(nodes) == 0 {
-		return nil
+		return nil, nil, nil
 	}
 	evicted := make(map[string]struct{}, len(nodes))
 	refIDs := make([]string, 0, len(nodes))
@@ -5969,25 +6002,33 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) []string {
 		}
 	}
 	if len(refIDs) == 0 {
-		return nil
+		return nil, nil, nil
 	}
 	// Fetch the whole changed file's incoming adjacency in one bounded store
 	// operation. On SQLite this is chunked under the parameter limit; more
 	// importantly, it avoids one transaction/query per definition in the file.
 	inEdges := idx.graph.GetInEdgesByNodeIDs(refIDs)
 	npmConsumers := restubTrackedNpmImportsFromView(idx.graph, evicted, inEdges)
+	cargoConsumers := restubTrackedCargoImportsFromView(idx.graph, evicted, inEdges, false)
+	pythonConsumers := restubTrackedPythonImportsFromView(idx.graph, evicted, inEdges, false)
 	var batch []graph.EdgeReindex
 	for _, n := range nodes {
-		if n == nil || n.Name == "" || !graph.IsReferenceableSymbol(n.Kind) {
+		if n == nil || n.Name == "" || !graph.IsReferenceableSymbol(n.Kind) && n.Kind != graph.KindFile {
 			continue
 		}
 		stub := graph.UnresolvedMarker + n.Name
 		for _, e := range inEdges[n.ID] {
-			if e == nil || !graph.IsResolvableRefEdge(e.Kind) {
+			if n.Kind == graph.KindFile && (e == nil || e.Kind != graph.EdgeImports || e.Meta["go_import"] == nil) {
+				continue
+			}
+			if e == nil || !graph.IsResolvableRefEdge(e.Kind) && (e.Kind != graph.EdgeImports || e.Meta["go_import"] == nil) {
 				continue
 			}
 			if _, fromEvicted := evicted[e.From]; fromEvicted {
 				continue // intra-file edge: the source is evicted too
+			}
+			if e.Kind == graph.EdgeImports && !e.CrossRepo && e.Meta["go_import"] != nil {
+				continue // The single-file save carries surviving local file imports.
 			}
 			if graph.IsUnresolvedTarget(e.To) {
 				continue // already a pending stub
@@ -6000,13 +6041,23 @@ func (idx *Indexer) restubIncomingRefs(graphPath string) []string {
 			// moved target leaves the stub honestly unresolved.
 			graph.StashRestubProvenance(e)
 			e.To = goModuleRestubTarget(e, stub)
+			if e.Kind == graph.EdgeImports {
+				e.CrossRepo, e.ConfidenceLabel = false, ""
+			}
+			if original, _ := e.Meta[resolver.CargoCallStubMeta].(string); e.Kind == graph.EdgeCalls && e.CrossRepo && original != "" {
+				e.To, e.CrossRepo, e.ConfidenceLabel = original, false, ""
+			}
+			if original, _ := e.Meta[resolver.PythonCallStubMeta].(string); e.Kind == graph.EdgeCalls && e.CrossRepo && original != "" {
+				e.To, e.CrossRepo, e.ConfidenceLabel = original, false, ""
+				delete(e.Meta, resolver.PythonReExportFileMeta)
+			}
 			batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		}
 	}
 	if len(batch) > 0 {
 		idx.graph.ReindexEdges(batch)
 	}
-	return npmConsumers
+	return npmConsumers, cargoConsumers, pythonConsumers
 }
 
 // embeddingDimsOrDefault returns the embedder's reported vector width,
@@ -6963,6 +7014,7 @@ func (idx *Indexer) pruneDeletedFileMtimes(deleted []string) {
 func (idx *Indexer) SetFileMtimes(mtimes map[string]int64) {
 	idx.mtimeMu.Lock()
 	defer idx.mtimeMu.Unlock()
+	idx.fileSetRevision.Add(1)
 	idx.fileMtimes = make(map[string]int64, len(mtimes))
 	idx.fileMtimesShared = false
 	for k, v := range mtimes {
@@ -7534,6 +7586,9 @@ func (idx *Indexer) incrementalReindexPathsMode(
 		capabilityPrior:     idx.takeCapabilityPrior(),
 	}
 	result.CrossRepoResolveFiles = appendUniqueSorted(nil, markerBatch.npmConsumerFiles...)
+	result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, markerBatch.cargoConsumerFiles...)
+	result.CargoRetarget = markerBatch.cargoAddedFile
+	result.CrossRepoResolveFiles = appendUniqueSorted(result.CrossRepoResolveFiles, markerBatch.pythonConsumerFiles...)
 	for _, path := range failedFiles {
 		result.Errors = append(result.Errors, IndexError{FilePath: path, Error: idx.fileIndexFailureError(path).Error()})
 	}

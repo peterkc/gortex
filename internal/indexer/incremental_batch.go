@@ -158,7 +158,7 @@ func (idx *Indexer) reindexIncrementalFilesBatched(
 	deleteTiming := idx.startReconcilePhase(idx.logger, idx.repoPrefix, "graph_delete",
 		zap.Int("deleted_files", len(deletedFiles)))
 	defer deleteTiming.abort()
-	idx.evictDeletedFilesBatched(deletedFiles, &invalidation)
+	idx.evictDeletedFilesBatched(deletedFiles, &invalidation, markerBatch)
 	deleteTiming.complete(nil)
 
 	passPlan, reparsed, failed, versionChanged := idx.reindexIncrementalStalePass(
@@ -518,6 +518,12 @@ func (idx *Indexer) reindexIncrementalFallback(
 	resolve := markerBatch == nil || !markerBatch.deferResolverCatchup
 	if err := idx.indexFile(fallback.filePath, resolve, markerBatch); err != nil {
 		return err
+	}
+	if markerBatch != nil && len(fallback.priorNodes) == 0 && strings.HasSuffix(fallback.graphPath, ".rs") {
+		markerBatch.cargoAddedFile = true
+	}
+	if markerBatch != nil && len(fallback.priorNodes) == 0 && strings.HasSuffix(fallback.graphPath, ".py") {
+		markerBatch.pythonAddedFiles = append(markerBatch.pythonAddedFiles, fallback.graphPath)
 	}
 	freshNodes := idx.graph.GetFileNodesByPaths([]string{fallback.graphPath})[fallback.graphPath]
 	freshDerived := storedDerivedFingerprints(freshNodes)
@@ -996,7 +1002,7 @@ func applyResolvedOutEdgesFromView(
 		edge.Origin = value.origin
 		edge.Tier = value.tier
 		applyReuseResolutionTag(edge, value.resolution)
-		applyReuseSemanticMeta(edge, value.semanticMeta)
+		applyReuseSemanticMeta(edge, value.semanticMeta, oldTo)
 		retargeted = append(retargeted, graph.EdgeReindex{Edge: edge, OldTo: oldTo})
 		reused++
 	}
@@ -1081,6 +1087,9 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 	var edges []*graph.Edge
 	var priorPending []*graph.Edge
 	for _, stage := range stages {
+		if markerBatch != nil && len(stage.priorNodes) == 0 && strings.HasSuffix(stage.graphPath, ".py") {
+			markerBatch.pythonAddedFiles = append(markerBatch.pythonAddedFiles, stage.graphPath)
+		}
 		paths = append(paths, stage.graphPath)
 		legacyIDs = append(legacyIDs, stage.legacyIDs...)
 		if stage.legacyPath != "" {
@@ -1110,9 +1119,16 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 		markerBatch.recordDeferredPriorBindings(stagePriorBindings(idx.graph, stages, view))
 	}
 	idx.applyLap("prior_bindings")
-	carried, npmConsumers := restubIncomingRefsFromView(idx.graph, stages, view)
+	carried, npmConsumers, cargoConsumers, pythonConsumers := restubIncomingRefsFromView(idx.graph, stages, view)
 	if markerBatch != nil {
+		markerBatch.pythonConsumerFiles = appendUniqueSorted(markerBatch.pythonConsumerFiles, pythonConsumers...)
 		markerBatch.npmConsumerFiles = appendUniqueSorted(markerBatch.npmConsumerFiles, npmConsumers...)
+		markerBatch.cargoConsumerFiles = appendUniqueSorted(markerBatch.cargoConsumerFiles, cargoConsumers...)
+		for _, stage := range stages {
+			if strings.HasSuffix(stage.graphPath, ".rs") && len(stage.priorNodes) == 0 {
+				markerBatch.cargoAddedFile = true
+			}
+		}
 	}
 	idx.applyLap("restub")
 	// The capability state of the files, read before the eviction below
@@ -1370,8 +1386,10 @@ func restubIncomingRefsFromView(
 	g graph.Store,
 	stages []*incrementalBatchStage,
 	view incrementalPriorView,
-) ([]*graph.Edge, []string) {
+) ([]*graph.Edge, []string, []string, []string) {
 	evicted := structuralPriorIDs(stages)
+	cargoConsumers := restubTrackedCargoImportsFromView(g, evicted, view.inByNode, false)
+	pythonConsumers := restubTrackedPythonImportsFromView(g, evicted, view.inByNode, false)
 	reparsed := reparsedPaths(stages)
 	npmConsumers := restubTrackedNpmImportsFromView(g, evicted, view.inByNode)
 	var reindexes []graph.EdgeReindex
@@ -1393,9 +1411,24 @@ func restubIncomingRefsFromView(
 				// path) survives its own reparse. The eviction deletes the
 				// row and no pass of this save re-derives it — the importer
 				// is not reparsed — so re-state it.
-				if _, survives := frontier.survivingIDs[node.ID]; survives || frontier.conservative {
+				if _, survives := frontier.survivingIDs[node.ID]; !survives && (!frontier.conservative || stage.result == nil) {
 					for _, edge := range view.inByNode[node.ID] {
-						if edge == nil || edge.Kind != graph.EdgeImports {
+						if edge == nil || edge.Kind != graph.EdgeImports || edge.To != node.ID {
+							continue
+						}
+						if _, sourceEvicted := evicted[edge.From]; sourceEvicted {
+							continue
+						}
+						if stub := goModuleRestubTarget(edge, ""); stub != "" {
+							oldTo := edge.To
+							graph.StashRestubProvenance(edge)
+							edge.To, edge.CrossRepo, edge.ConfidenceLabel = stub, false, ""
+							reindexes = append(reindexes, graph.EdgeReindex{Edge: edge, OldTo: oldTo})
+						}
+					}
+				} else {
+					for _, edge := range view.inByNode[node.ID] {
+						if edge == nil || edge.Kind != graph.EdgeImports || edge.To != node.ID {
 							continue
 						}
 						if _, sourceEvicted := evicted[edge.From]; sourceEvicted {
@@ -1530,6 +1563,13 @@ func restubIncomingRefsFromView(
 				if edge.To != stub {
 					edge.CrossRepo, edge.ConfidenceLabel = false, ""
 				}
+				if original, _ := edge.Meta[resolver.CargoCallStubMeta].(string); edge.Kind == graph.EdgeCalls && edge.CrossRepo && original != "" {
+					edge.To, edge.CrossRepo, edge.ConfidenceLabel = original, false, ""
+				}
+				if original, _ := edge.Meta[resolver.PythonCallStubMeta].(string); edge.Kind == graph.EdgeCalls && edge.CrossRepo && original != "" {
+					edge.To, edge.CrossRepo, edge.ConfidenceLabel = original, false, ""
+					delete(edge.Meta, resolver.PythonReExportFileMeta)
+				}
 				reindexes = append(reindexes, graph.EdgeReindex{Edge: edge, OldTo: oldTo})
 			}
 		}
@@ -1537,7 +1577,7 @@ func restubIncomingRefsFromView(
 	if len(reindexes) > 0 {
 		g.ReindexEdges(reindexes)
 	}
-	return canonicalizeLegacyCarried(stages, evicted, carried), npmConsumers
+	return canonicalizeLegacyCarried(stages, evicted, carried), npmConsumers, cargoConsumers, pythonConsumers
 }
 
 // dataflowSourceSite is a reference's site: the file that records it and its
@@ -1844,6 +1884,9 @@ func (idx *Indexer) recordFileReadVersionsBatched(receipts []fileReadReceipt) (f
 	idx.mtimeMu.Lock()
 	idx.ensureFileMtimesWritableLocked()
 	for path, mtime := range mtimes {
+		if _, exists := idx.fileMtimes[path]; !exists {
+			idx.fileSetRevision.Add(1)
+		}
 		idx.fileMtimes[path] = mtime
 	}
 	idx.mtimeMu.Unlock()
@@ -2410,7 +2453,7 @@ func (idx *Indexer) evictFileIncrementalRaw(relPath string) forcedFileEviction {
 	// recover this file's records from a sibling's canonical scalar payload.
 	idx.ensureIncrementalContractRegistry()
 	var invalidation DerivedInvalidationPlan
-	nodesRemoved, edgesRemoved := idx.evictDeletedFilesBatched([]string{relPath}, &invalidation)
+	nodesRemoved, edgesRemoved := idx.evictDeletedFilesBatched([]string{relPath}, &invalidation, batch)
 	graphPath := idx.prefixPath(relPath)
 	idx.removeIncrementalContractsForFile(graphPath, &invalidation)
 	invalidation.Files = appendUniqueSorted(invalidation.Files, dependencyFiles...)
@@ -2460,7 +2503,7 @@ func (idx *Indexer) removeIncrementalContractsForFile(graphPath string, plan *De
 	plan.ContractSymbolIDs = appendUniqueSorted(plan.ContractSymbolIDs, refresh.SymbolIDs...)
 }
 
-func (idx *Indexer) evictDeletedFilesBatched(deleted []string, plan *DerivedInvalidationPlan) (nodesRemoved, edgesRemoved int) {
+func (idx *Indexer) evictDeletedFilesBatched(deleted []string, plan *DerivedInvalidationPlan, markerBatch *reparsePendingEnrichmentBatch) (nodesRemoved, edgesRemoved int) {
 	if len(deleted) == 0 {
 		return 0, 0
 	}
@@ -2524,7 +2567,12 @@ func (idx *Indexer) evictDeletedFilesBatched(deleted []string, plan *DerivedInva
 		// carry therefore means a deletion stage stopped being conservative,
 		// which would destroy those edges with no compile error to show for
 		// it — so the assumption is checked, not just documented.
-		if carried, _ := restubIncomingRefsFromView(idx.graph, stages, view); len(carried) > 0 {
+		carried, _, cargoConsumers, pythonConsumers := restubIncomingRefsFromView(idx.graph, stages, view)
+		if markerBatch != nil {
+			markerBatch.cargoConsumerFiles = appendUniqueSorted(markerBatch.cargoConsumerFiles, cargoConsumers...)
+			markerBatch.pythonConsumerFiles = appendUniqueSorted(markerBatch.pythonConsumerFiles, pythonConsumers...)
+		}
+		if len(carried) > 0 {
 			idx.logger.Error("indexer: deletion restub carried in-edges with no re-state path",
 				zap.String("repo", idx.repoPrefix),
 				zap.Int("carried", len(carried)),
@@ -2546,6 +2594,9 @@ func (idx *Indexer) evictDeletedFilesBatched(deleted []string, plan *DerivedInva
 	idx.mtimeMu.Lock()
 	idx.ensureFileMtimesWritableLocked()
 	for _, relPath := range deleted {
+		if _, exists := idx.fileMtimes[relPath]; exists {
+			idx.fileSetRevision.Add(1)
+		}
 		delete(idx.fileMtimes, relPath)
 	}
 	idx.mtimeMu.Unlock()

@@ -38,18 +38,19 @@ func TestTrackedNpmImportsSurviveEviction(t *testing.T) {
 				switch mode {
 				case "file":
 					idx := New(g, newTestRegistry(), config.IndexConfig{}, zap.NewNop())
-					assert.Equal(t, []string{"app/a.ts"}, idx.restubIncomingRefs("lib/index.ts"))
+					consumers, _, _ := idx.restubIncomingRefs("lib/index.ts")
+					assert.Equal(t, []string{"app/a.ts"}, consumers)
 					g.EvictFile("lib/index.ts")
 				case "batch":
 					stages := []*incrementalBatchStage{{graphPath: "lib/index.ts", priorNodes: nodes}}
-					_, consumers := restubIncomingRefsFromView(g, stages, loadIncrementalPriorView(g, stages))
+					_, consumers, _, _ := restubIncomingRefsFromView(g, stages, loadIncrementalPriorView(g, stages))
 					assert.Equal(t, []string{"app/a.ts"}, consumers)
 					g.EvictFile("lib/index.ts")
 				case "replace":
 					evictRepoCurrentGeneration(g, "lib")
 				case "untrack":
 					mi := &MultiIndexer{graph: g}
-					_, _, err := mi.purgeRepositoryPayload("lib", nil)
+					_, _, err := mi.purgeRepositoryPayload("lib", nil, nil)
 					require.NoError(t, err)
 				}
 				var targets []string

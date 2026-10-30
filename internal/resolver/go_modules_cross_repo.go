@@ -7,12 +7,18 @@ import (
 	"strings"
 	"sync"
 
+	"go.uber.org/zap"
+
 	"github.com/zzet/gortex/internal/graph"
 )
 
 func (cr *CrossRepoResolver) SetGoModules(modules map[string]string) {
 	cr.goModules = maps.Clone(modules)
 	cr.goModulePaths = indexGoModulePaths(modules)
+	cr.goModuleRepos = make(map[string][]string)
+	for repo, module := range modules {
+		cr.goModuleRepos[module] = append(cr.goModuleRepos[module], repo)
+	}
 }
 
 func (cr *CrossRepoResolver) resolveGoExtern(e *graph.Edge, spec string, stats *CrossRepoStats) {
@@ -43,6 +49,10 @@ func (cr *CrossRepoResolver) resolveGoExtern(e *graph.Edge, spec string, stats *
 	}
 }
 
+var newGoModuleImportRecoveryBudget = func() *graph.IncomingSourceBudget {
+	return &graph.IncomingSourceBudget{}
+}
+
 // GoModuleDepRetry remembers the last completed legacy-terminal sweep for a
 // store's module/config revision. MultiIndexer shares it across pass objects.
 type GoModuleDepRetry struct {
@@ -52,6 +62,12 @@ type GoModuleDepRetry struct {
 	revision     uint64
 	complete     bool
 	pending      map[graph.EdgeIdentity]*graph.Edge
+	// These compact import indexes are protected by the store resolve mutex.
+	packageModules  map[string]string
+	packageRevision uint64
+	packages        map[string]map[string]graph.FileNodeIdentity
+	imports         map[string]map[string]struct{}
+	importsSeeded   bool
 }
 
 func (cr *CrossRepoResolver) SetGoModuleDepRetry(state *GoModuleDepRetry, revision uint64) {
@@ -60,7 +76,7 @@ func (cr *CrossRepoResolver) SetGoModuleDepRetry(state *GoModuleDepRetry, revisi
 
 // retryGoModuleDeps visits only external terminals, filters by tracked module
 // identity, and bounds mutation batches. Symbol lookup is memoized per batch.
-func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *CrossRepoStats) error {
+func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *CrossRepoStats, importsRestored bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -89,31 +105,21 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 		if seedBindings || changedReplacements {
 			previous = nil
 		}
-		if err := cr.recheckGoModuleBindings(ctx, previous, stats); err != nil {
+		if err := cr.recheckGoModuleBindings(ctx, previous, stats, importsRestored); err != nil {
 			return err
 		}
 	}
+	cr.retryPendingGoModuleEdges(stats)
 	state.mu.Lock()
-	pending := state.pending
-	state.pending = nil
-	state.mu.Unlock()
-	var deferred []*graph.Edge
-	for _, edge := range pending {
-		deferred = append(deferred, edge)
-		if len(deferred) == externalCallMutationChunk {
-			cr.resolveGoModuleEdgesLocked(deferred, stats)
-			deferred = deferred[:0]
-		}
-	}
-	cr.resolveGoModuleEdgesLocked(deferred, stats)
-	state.mu.Lock()
-	defer state.mu.Unlock()
 	if len(cr.goModules) == 0 {
-		state.modules, state.revision, state.complete = maps.Clone(cr.goModules), cr.goModuleRevision, true
+		state.modules, state.revision, state.complete = maps.Clone(cr.goModules), cr.goModuleRevision, cr.goModuleImportsDeferred == 0
 		state.replacements = maps.Clone(cr.goModuleReplacements)
+		state.mu.Unlock()
 		return nil
 	}
-	if state.complete && state.revision == cr.goModuleRevision && maps.Equal(state.modules, cr.goModules) && !changedReplacements {
+	complete := state.complete && state.revision == cr.goModuleRevision && maps.Equal(state.modules, cr.goModules) && !changedReplacements
+	state.mu.Unlock()
+	if complete {
 		return nil
 	}
 	var batch []graph.EdgeReindex
@@ -126,10 +132,7 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 		if len(batch) > 0 {
 			if !cr.applyGoModuleReindexes(batch) {
 				cr.logger.Warn("Go module terminal batch dropped; queued for a later module pass")
-				if state.pending == nil {
-					state.pending = make(map[graph.EdgeIdentity]*graph.Edge)
-				}
-				maps.Copy(state.pending, originals)
+				cr.queueGoModuleEdges(originals)
 			}
 			batch = nil
 			clear(originals)
@@ -212,9 +215,33 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	state.modules, state.revision, state.complete = maps.Clone(cr.goModules), cr.goModuleRevision, true
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.modules, state.revision, state.complete = maps.Clone(cr.goModules), cr.goModuleRevision, cr.goModuleImportsDeferred == 0
 	state.replacements = maps.Clone(cr.goModuleReplacements)
 	return nil
+}
+
+// retryPendingGoModuleEdges drains exact dropped batches without opening the
+// revision-wide registry seed or legacy binding sweep. The resolve mutex is held.
+func (cr *CrossRepoResolver) retryPendingGoModuleEdges(stats *CrossRepoStats) {
+	state := cr.goModuleRetry
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	pending := state.pending
+	state.pending = nil
+	state.mu.Unlock()
+	var deferred []*graph.Edge
+	for _, edge := range pending {
+		deferred = append(deferred, edge)
+		if len(deferred) == externalCallMutationChunk {
+			cr.resolveGoModuleEdgesLocked(deferred, stats)
+			deferred = deferred[:0]
+		}
+	}
+	cr.resolveGoModuleEdgesLocked(deferred, stats)
 }
 
 // goModuleIncomingEdges probes only package-qualified placeholders owned by the
@@ -234,7 +261,7 @@ func (cr *CrossRepoResolver) goModuleIncomingEdgesBounded(nodesByFile map[string
 	synthetic := make(map[string][]*graph.Node)
 	for _, file := range definitionFiles {
 		for _, n := range nodesByFile[file] {
-			if n == nil || n.Language != "go" || n.Name == "" || (n.Kind != graph.KindFunction && n.Kind != graph.KindType && n.Kind != graph.KindInterface) {
+			if n == nil || n.Language != "go" || n.Name == "" || (n.Kind != graph.KindFunction && n.Kind != graph.KindType && n.Kind != graph.KindInterface && n.Kind != graph.KindFile) {
 				continue
 			}
 			module := cr.goModules[n.RepoPrefix]
@@ -243,6 +270,12 @@ func (cr *CrossRepoResolver) goModuleIncomingEdgesBounded(nodesByFile map[string
 				continue
 			}
 			spec := module + strings.TrimPrefix(dir, n.RepoPrefix) + "::" + n.Name
+			if n.Kind == graph.KindFile {
+				spec = module + strings.TrimPrefix(dir, n.RepoPrefix)
+				providers[spec] = append(providers[spec], n)
+				keys[graph.UnresolvedMarker+"import::"+spec] = struct{}{}
+				continue
+			}
 			providers[spec] = append(providers[spec], n)
 			keys[graph.UnresolvedMarker+"extern::"+spec] = struct{}{}
 			keys["dep::"+spec] = struct{}{}
@@ -292,12 +325,15 @@ func (cr *CrossRepoResolver) goModuleIncomingEdgesBounded(nodesByFile map[string
 			}
 			spec := goModuleEdgeSpec(e)
 			sep := strings.LastIndex(spec, "::")
-			if sep < 0 {
+			importPath := spec
+			if sep >= 0 {
+				importPath = spec[:sep]
+			} else if e.Kind != graph.EdgeImports {
 				continue
 			}
 			source := sourceOf(e.From)
 			for _, provider := range providers[spec] {
-				if crossWorkspaceEligible(cr.crossWorkspaceLookup, candidateWorkspaceID(source), candidateWorkspaceID(provider), spec[:sep]) {
+				if crossWorkspaceEligible(cr.crossWorkspaceLookup, candidateWorkspaceID(source), candidateWorkspaceID(provider), importPath) {
 					edges = append(edges, e)
 					break
 				}
@@ -395,6 +431,17 @@ func goModuleEdgeSpec(e *graph.Edge) string {
 }
 
 func (cr *CrossRepoResolver) resolveGoModuleEdgesLocked(edges []*graph.Edge, stats *CrossRepoStats) {
+	var importFiles []string
+	seenImports := make(map[string]bool)
+	for _, e := range edges {
+		if e != nil && e.Kind == graph.EdgeImports && !seenImports[e.FilePath] {
+			seenImports[e.FilePath] = true
+			importFiles = append(importFiles, e.FilePath)
+		}
+	}
+	if len(importFiles) > 0 {
+		_ = cr.resolveGoModuleImports(context.Background(), importFiles, stats, nil)
+	}
 	var batch []graph.EdgeReindex
 	names := make(map[[2]string][]*graph.Node)
 	sources := make(map[string]*graph.Node)
@@ -459,15 +506,7 @@ func (cr *CrossRepoResolver) resolveGoModuleEdgesLocked(edges []*graph.Edge, sta
 	batch = cr.filterLiveReindex(batch)
 	if !cr.applyGoModuleReindexes(batch) {
 		cr.logger.Warn("Go module rebind batch dropped; queued for a later module pass")
-		if cr.goModuleRetry == nil {
-			cr.goModuleRetry = &GoModuleDepRetry{}
-		}
-		cr.goModuleRetry.mu.Lock()
-		if cr.goModuleRetry.pending == nil {
-			cr.goModuleRetry.pending = make(map[graph.EdgeIdentity]*graph.Edge)
-		}
-		maps.Copy(cr.goModuleRetry.pending, originals)
-		cr.goModuleRetry.mu.Unlock()
+		cr.queueGoModuleEdges(originals)
 		return
 	}
 	if stats == nil {
@@ -488,15 +527,55 @@ func (cr *CrossRepoResolver) resolveGoModuleEdgesLocked(edges []*graph.Edge, sta
 
 // RetryGoModuleDeps is the revision-keyed migration used after publishing a module.
 func (cr *CrossRepoResolver) RetryGoModuleDeps(ctx context.Context) error {
-	cr.mu.Lock()
-	defer cr.mu.Unlock()
-	return cr.retryGoModuleDeps(ctx, &CrossRepoStats{ByRepo: make(map[string]int)})
+	stats := &CrossRepoStats{ByRepo: make(map[string]int)}
+	if err := func() error {
+		cr.mu.Lock()
+		defer cr.mu.Unlock()
+		cr.goModuleImportsDeferred = 0
+		return cr.retryGoModuleDeps(ctx, stats, false)
+	}(); err != nil {
+		return err
+	}
+	return cr.resolveGoModuleImportSweep(ctx, stats)
 }
 
-// ResolveGoModuleIncomingForRepo probes exact targets for the provider's definitions.
-// Reindexing has no changed-symbol receipt, so stream only its definition IDs and
-// hydrate at most one batch; never load the repository's nodes or edges as a set.
+// ResolveGoModuleIncomingForRepo probes the provider's definitions and retained
+// consumer import statements. Stream identities and hydrate at most one batch;
+// never load the repository's nodes or edges as a set.
 func (cr *CrossRepoResolver) ResolveGoModuleIncomingForRepo(repo string) error {
+	if len(cr.goModules) == 0 {
+		return nil
+	}
+	if err := cr.resolveGoModuleImportSweep(context.Background(), nil); err != nil {
+		return err
+	}
+	if cr.goModules[repo] != "" && len(cr.graph.RepoPrefixes()) >= 2 {
+		var importIDs []string
+		func() {
+			cr.mu.Lock()
+			defer cr.mu.Unlock()
+			importIDs = cr.goModuleImportIDs(repo)
+		}()
+		for start := 0; start < len(importIDs); start += externalCallMutationChunk {
+			if err := func() error {
+				cr.mu.Lock()
+				defer cr.mu.Unlock()
+				return cr.restoreGoModuleImportBatch(context.Background(), repo, importIDs[start:min(start+externalCallMutationChunk, len(importIDs))], nil)
+			}(); err != nil {
+				return err
+			}
+		}
+	}
+	for files, err := range cr.goModuleImportFileBatches(context.Background(), []string{repo}) {
+		if err != nil {
+			return err
+		}
+		func() {
+			cr.mu.Lock()
+			defer cr.mu.Unlock()
+			_ = cr.resolveGoModuleImports(context.Background(), files, nil, nil)
+		}()
+	}
 	if cr.goModules[repo] == "" {
 		return nil
 	}
@@ -518,7 +597,7 @@ func (cr *CrossRepoResolver) ResolveGoModuleIncomingForRepo(repo string) error {
 		ids = ids[:0]
 		return cr.ResolveDeferredGoModuleEdges(edges)
 	}
-	for n := range graph.RepoNodeIdentitiesSeq(cr.graph, []string{repo}, graph.KindFunction, graph.KindType, graph.KindInterface) {
+	for n := range graph.RepoNodeIdentitiesSeq(cr.graph, []string{repo}, graph.KindFunction, graph.KindType, graph.KindInterface, graph.KindFile) {
 		ids = append(ids, n.ID)
 		if len(ids) == externalCallMutationChunk {
 			if err := flush(); err != nil {
@@ -532,9 +611,11 @@ func (cr *CrossRepoResolver) ResolveGoModuleIncomingForRepo(repo string) error {
 	return nil
 }
 
+var goModuleBindingRecheckKinds = []graph.NodeKind{graph.KindFunction, graph.KindType, graph.KindInterface, graph.KindFile}
+
 // Re-check only marked incoming calls into providers affected by identity edits.
 // The compact definition stream avoids loading a whole repo's nodes or edges.
-func (cr *CrossRepoResolver) recheckGoModuleBindings(ctx context.Context, previous map[string]string, stats *CrossRepoStats) error {
+func (cr *CrossRepoResolver) recheckGoModuleBindings(ctx context.Context, previous map[string]string, stats *CrossRepoStats, importsRestored bool) error {
 	changed := make(map[string]bool)
 	for repo, module := range previous {
 		if cr.goModules[repo] != module {
@@ -581,7 +662,7 @@ func (cr *CrossRepoResolver) recheckGoModuleBindings(ctx context.Context, previo
 		cr.resolveGoModuleEdgesLocked(edges, stats)
 		ids = ids[:0]
 	}
-	for n := range graph.RepoNodeIdentitiesSeq(cr.graph, repos, graph.KindFunction, graph.KindType, graph.KindInterface) {
+	for n := range graph.RepoNodeIdentitiesSeq(cr.graph, repos, goModuleBindingRecheckKinds...) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -592,6 +673,33 @@ func (cr *CrossRepoResolver) recheckGoModuleBindings(ctx context.Context, previo
 	}
 	if len(ids) > 0 {
 		flush()
+	}
+	if importsRestored {
+		return ctx.Err()
+	}
+	// A changed module can make another provider's fallback imports bindable,
+	// even when that provider is outside the saved-file frontier.
+	importBudget := newGoModuleImportRecoveryBudget()
+	for _, repo := range repos {
+		if cr.goModules[repo] == "" {
+			continue
+		}
+		importIDs := cr.goModuleImportIDs(repo)
+		if len(importIDs) > importBudget.Remaining() {
+			cr.goModuleImportsDeferred += len(importIDs)
+			cr.logger.Warn("Go module import identity recheck deferred to full pass", zap.Int("imports", len(importIDs)), zap.Int("remaining", importBudget.Remaining()))
+			continue
+		}
+		if err := importBudget.Charge(len(importIDs)); err != nil {
+			cr.goModuleImportsDeferred += len(importIDs)
+			cr.logger.Warn("Go module import identity recheck deferred to full pass", zap.Error(err))
+			continue
+		}
+		for start := 0; start < len(importIDs); start += externalCallMutationChunk {
+			if err := cr.restoreGoModuleImportBatch(ctx, repo, importIDs[start:min(start+externalCallMutationChunk, len(importIDs))], stats); err != nil {
+				return err
+			}
+		}
 	}
 	return ctx.Err()
 }
@@ -866,4 +974,17 @@ func (state *GoModuleDepRetry) Invalidate() {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	state.complete = false
+}
+
+func (cr *CrossRepoResolver) queueGoModuleEdges(originals map[graph.EdgeIdentity]*graph.Edge) {
+	if cr.goModuleRetry == nil {
+		cr.goModuleRetry = &GoModuleDepRetry{}
+	}
+	state := cr.goModuleRetry
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.pending == nil {
+		state.pending = make(map[graph.EdgeIdentity]*graph.Edge)
+	}
+	maps.Copy(state.pending, originals)
 }

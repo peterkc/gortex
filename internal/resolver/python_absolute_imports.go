@@ -58,6 +58,15 @@ func pythonModuleFileMatches(filePath, module string) bool {
 	return false
 }
 
+// IsPythonTestPackageFile identifies the supported root/src test packages,
+// relative to the provider rather than its repository alias.
+func IsPythonTestPackageFile(filePath, repoPrefix string) bool {
+	relative := strings.TrimPrefix(filePath, repoPrefix+"/")
+	relative = strings.TrimPrefix(relative, "src/")
+	top, _, nested := strings.Cut(relative, "/")
+	return nested && (top == "tests" || top == "test")
+}
+
 // resolvePythonModuleExtern resolves a Python caller's extern edge onto the
 // module-level function or class it imports. It tries the two readings of a
 // dotted import path in turn — the symbol defined in the module importPath
@@ -66,6 +75,12 @@ func pythonModuleFileMatches(filePath, module string) bool {
 // ambiguous layout keeps the previous behaviour. Methods never match: an
 // import binds module attributes, not class members.
 func (r *Resolver) resolvePythonModuleExtern(e *graph.Edge, importPath, symbol, callerRepo string, stats *ResolveStats) bool {
+	return resolvePythonModuleExtern(e, importPath, symbol, callerRepo, stats, func(name string) ([]*graph.Node, error) {
+		return r.cachedFindExternNodesByName(name, e)
+	})
+}
+
+func resolvePythonModuleExtern(e *graph.Edge, importPath, symbol, callerRepo string, stats *ResolveStats, find func(string) ([]*graph.Node, error)) bool {
 	if !isPythonSourcePath(e.FilePath) || !isDottedPythonModule(importPath) {
 		return false
 	}
@@ -75,13 +90,16 @@ func (r *Resolver) resolvePythonModuleExtern(e *graph.Edge, importPath, symbol, 
 		readings = append(readings, reading{importPath[:len(importPath)-len(name)-1], name})
 	}
 	for _, rd := range readings {
-		candidates, err := r.cachedFindExternNodesByName(rd.name, e)
+		candidates, err := find(rd.name)
 		if err != nil {
 			return false
 		}
 		var match *graph.Node
 		ambiguous := false
 		for _, c := range candidates {
+			if c.RepoPrefix != callerRepo && IsPythonTestPackageFile(c.FilePath, c.RepoPrefix) {
+				continue
+			}
 			if c.Kind != graph.KindFunction && c.Kind != graph.KindType {
 				continue
 			}

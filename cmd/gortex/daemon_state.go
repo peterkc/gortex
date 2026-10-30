@@ -367,6 +367,13 @@ func (frontier *warmupDeltaFrontier) invalidate() {
 func (frontier *warmupDeltaFrontier) record(result *indexer.IndexResult) {
 	frontier.mu.Lock()
 	defer frontier.mu.Unlock()
+	if result != nil {
+		for _, file := range result.CrossRepoResolveFiles {
+			if file != "" {
+				frontier.crossRepoFiles[file] = struct{}{}
+			}
+		}
+	}
 	if result == nil || result.RepoPrefix == "" || result.FullRetrack || len(result.FailedFiles) > 0 {
 		frontier.exact = false
 		return
@@ -374,11 +381,6 @@ func (frontier *warmupDeltaFrontier) record(result *indexer.IndexResult) {
 	plan := frontier.plans[result.RepoPrefix]
 	plan.Merge(result.DerivedInvalidation)
 	frontier.plans[result.RepoPrefix] = plan
-	for _, file := range result.CrossRepoResolveFiles {
-		if file != "" {
-			frontier.crossRepoFiles[file] = struct{}{}
-		}
-	}
 }
 
 func (frontier *warmupDeltaFrontier) snapshot(changedRepos int, scopeUnknown bool) (map[string]indexer.DerivedInvalidationPlan, []string, bool) {
