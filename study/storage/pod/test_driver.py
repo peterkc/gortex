@@ -223,18 +223,20 @@ class FixtureSupervisor:
                                started=0, peak_rss=0, deadline=10000)
 
 
-def fixture_references(root):
+def fixture_references(root, setup=None):
     paths = []
     for tier in driver.ARCHIVES:
         data = root / "data" / tier
-        data.mkdir(parents=True)
+        data.mkdir(parents=True, exist_ok=True)
         driver.atomic_json(data / "manifest.json", {"repos": ["fixture"]})
         driver.atomic_json(data / "queries.json", [{"id": "q", "op": "id"}])
         paths.extend((data / "manifest.json", data / "queries.json"))
     manifest = fixture_manifest(root, paths)
-    setup = {"identity": {"driver": "fixture", "runtime": {},
-                         "input_manifest_sha256": driver.digest(manifest)},
-             "artifacts": {"bin/oracle": "fixture"}, "runtime_libraries": {}}
+    if setup is None:
+        setup = {"identity": {"driver": "fixture", "runtime": {}},
+                 "artifacts": {"bin/oracle": "fixture"},
+                 "runtime_libraries": {}}
+    setup["identity"]["input_manifest_sha256"] = driver.digest(manifest)
     fixture_setup(root, setup)
     owner = FixtureSupervisor(root, ["pass", "pass"])
     receipts = []
@@ -303,7 +305,7 @@ class DriverTests(unittest.TestCase):
             self.assertEqual([r["state"] for r in receipts],
                              ["checks_failed", "pass"])
             self.assertEqual(len(supervisor.calls), 2)
-            self.assertEqual(driver.eligible_timings(
+            self.assertEqual(driver.eligible_sdk(
                 supervisor, receipts, setup, {}), [])
             resumed = FixtureSupervisor(root, [])
             saved = []
@@ -473,7 +475,7 @@ class DriverTests(unittest.TestCase):
                     "screen", name, "tier10"))}, "state": "pass"}
                     for name in driver.FINALISTS]
                 before = complete.read_bytes() if complete.exists() else None
-                selected = driver.eligible_timings(
+                selected = driver.eligible_sdk(
                     owner, [*references, *screens], setup, bindings)
                 expected = (set(driver.ARCHIVES) if mode == "valid" else
                             {"tier10"})
@@ -531,13 +533,13 @@ class DriverTests(unittest.TestCase):
                     with (patch.object(driver, "finished_case",
                                        side_effect=failure),
                           self.assertRaises(type(failure)) as raised):
-                        driver.eligible_timings(owner, references, setup,
+                        driver.eligible_sdk(owner, references, setup,
                                                 bindings)
                     self.assertIs(raised.exception, failure)
             complete = root / "jobs" / job.name / "complete.json"
             complete.write_text("{")
             with self.assertRaises(json.JSONDecodeError):
-                driver.eligible_timings(owner, references, setup, bindings)
+                driver.eligible_sdk(owner, references, setup, bindings)
 
     def test_individual_timing_rows_never_validate_a_comparison(self):
         for mode in ("partial", "budget", "other-window", "all-individual"):
@@ -630,7 +632,7 @@ class TimingGroupTests(unittest.TestCase):
             screens = [{"identity": {"job": driver.asdict(driver.Job(
                 "screen", name, "tier10"))}, "state": "pass"}
                 for name in driver.FINALISTS]
-            eligible = driver.eligible_timings(
+            eligible = driver.eligible_sdk(
                 owner, references + screens, setup,
                 {driver.Job("oracle", "oracle", t).name: {"gomaxprocs": 10}
                  for t in driver.ARCHIVES})
@@ -1018,6 +1020,8 @@ class DeadlineContractTests(unittest.TestCase):
             "input_pin": "3" * 64,
             "receipt_path": str(root / "control" / (block + ".json")),
             "minutes": 1, "owner": "fixture-only",
+            "kind": driver.BLOCK_KINDS[block],
+            "estimated_peak_bytes": driver.GIB, "gomaxprocs": 10,
         }] for block in driver.INPUT_BLOCKS}
 
 
@@ -1100,7 +1104,8 @@ class DeadlineContractTests(unittest.TestCase):
                     driver.ReviewRequired, block):
                 driver.preflight(bindings, Path("/work"))
             for field in ("argv", "source_pin", "config_pin", "input_pin",
-                          "receipt_path", "minutes", "owner"):
+                          "receipt_path", "minutes", "owner", "id", "kind",
+                          "estimated_peak_bytes", "gomaxprocs"):
                 bindings = self.bindings()
                 del bindings[block][0][field]
                 with self.subTest(block=block, field=field), \
@@ -1116,6 +1121,8 @@ class DeadlineContractTests(unittest.TestCase):
             ("config_pin", "bad"), ("input_pin", "bad"),
             ("receipt_path", "/work/../outside/result.json"),
             ("id", "../../escape"), ("owner", ""),
+            ("kind", "oracle"), ("gomaxprocs", True),
+            ("estimated_peak_bytes", -1),
         ]
         for key, value in mutations:
             bindings = self.bindings()
@@ -1183,9 +1190,11 @@ class DeadlineContractTests(unittest.TestCase):
                 patch.object(driver.signal, "setitimer"),
                 patch.object(driver, "prepare", return_value={}),
                 patch.object(driver, "execute_stage", side_effect=stage),
-                patch.object(driver, "eligible_timings", return_value=[
-                    j for j in driver.jobs() if j.stage == "timing"]),
-                patch.object(driver, "run_catalog_hybrid"),
+                patch.object(driver, "eligible_sdk", side_effect=
+                    lambda owner, rows, setup, bindings, stage="timing": [
+                        j for j in driver.jobs() if j.stage == stage]),
+                patch.object(driver, "run_catalog_hybrid",
+                             return_value="completed"),
                 patch.object(driver, "binding_block", return_value="completed"),
                 patch.object(driver, "block_files", return_value={}),
             ):
@@ -1442,10 +1451,13 @@ class ReviewFixTests(unittest.TestCase):
                     patch.object(driver.signal, "setitimer"),
                     patch.object(driver, "prepare", return_value={}),
                     patch.object(driver, "execute_stage", side_effect=stage),
-                    patch.object(driver, "eligible_timings", return_value=[
-                        j for j in driver.jobs() if j.stage == "timing"
-                        and j.adapter == driver.FINALISTS[0]]),
-                    patch.object(driver, "run_catalog_hybrid") as dependent,
+                    patch.object(driver, "eligible_sdk", side_effect=
+                        lambda owner, rows, setup, bindings, stage="timing": [
+                            j for j in driver.jobs() if j.stage == stage and
+                            (stage == "screen" or
+                             j.adapter == driver.FINALISTS[0])]),
+                    patch.object(driver, "run_catalog_hybrid",
+                                 return_value="completed") as dependent,
                     patch.object(driver, "binding_block",
                                  return_value="completed"),
                     patch.object(driver, "block_files", return_value={}),
@@ -1455,8 +1467,7 @@ class ReviewFixTests(unittest.TestCase):
                 self.assertEqual(result["blocks"]["storage"]["state"],
                                  "partial")
                 self.assertEqual(len(timed), 6 if oracle_passed else 0)
-                self.assertEqual(dependent.call_count,
-                                 2 if oracle_passed else 0)
+                self.assertEqual(dependent.call_count, 2)
                 self.assertEqual(result["blocks"]["segment_timing"]["state"],
                                  "completed" if oracle_passed
                                  else "dependency_blocked")
@@ -1549,6 +1560,7 @@ class ReviewFixTests(unittest.TestCase):
             root = Path(folder)
             cases = DriverTests()
             selected, setup, before = cases.fixture(root)
+            _, setup, _ = fixture_references(root, setup)
             first = FixtureSupervisor(root, ["pass"], interrupt_at=2)
             completed = []
             with self.assertRaises(driver.DeadlineExceeded):
@@ -1556,6 +1568,8 @@ class ReviewFixTests(unittest.TestCase):
             jobs = [{"id": job.name, "gomaxprocs": 10,
                      "receipt_path": str(root / "jobs" / job.name /
                                          "complete.json")} for job in selected]
+            jobs.extend({"id": driver.Job("oracle", "oracle", t).name,
+                         "gomaxprocs": 10} for t in driver.ARCHIVES)
             blocks = [{"id": "setup", "jobs": []},
                       {"id": "storage", "jobs": jobs}]
             admission = {"blocks": blocks}
@@ -3427,9 +3441,11 @@ class KnownOutcomeTests(unittest.TestCase):
                        for tier in driver.ARCHIVES]
             timing = [driver.Job("timing", driver.FINALISTS[0], tier, 1)
                       for tier in driver.ARCHIVES]
+            screens = [driver.Job("screen", driver.FINALISTS[0], tier)
+                       for tier in driver.ARCHIVES]
             admission = {"blocks": [
                 {"id": "storage", "jobs": [{"id": job.name}
-                                            for job in oracles]},
+                                            for job in oracles + screens]},
                 {"id": "segment_timing", "jobs": []}]}
             phase, stages = 1, []
 
@@ -3449,10 +3465,12 @@ class KnownOutcomeTests(unittest.TestCase):
                                 for job in selected)
 
             owner.begin_block = begin
-            with (patch.object(driver, "jobs", return_value=oracles + timing),
+            with (patch.object(driver, "jobs",
+                               return_value=oracles + screens + timing),
                   patch.object(driver, "execute_stage", side_effect=stage),
-                  patch.object(driver, "eligible_timings",
-                               return_value=timing) as eligible,
+                  patch.object(driver, "eligible_sdk",
+                               side_effect=lambda *args: screens
+                               if len(args) == 5 else timing) as eligible,
                   patch.object(driver, "block_files", return_value={}),
                   patch.object(driver.time, "monotonic", return_value=0),
                   patch.object(driver.signal, "signal"),
@@ -3474,8 +3492,9 @@ class KnownOutcomeTests(unittest.TestCase):
             self.assertEqual(second["blocks"]["segment_timing"]["state"],
                              "completed")
             self.assertEqual(stages, [(1, "oracle"), (2, "oracle"),
-                                      (2, "timing")])
-            eligible.assert_called_once()
+                                      (2, "screen"), (2, "timing")])
+            self.assertEqual(eligible.call_count, 2)
+            self.assertEqual(eligible.call_args_list[0].args[-1], "screen")
             self.assertEqual(driver.read_json(root / "session.json"), second)
 
     def test_storage_raw_rejections_are_saved_without_a_retry(self):
@@ -3718,7 +3737,7 @@ class KnownOutcomeTests(unittest.TestCase):
 
 
 class NativeEntryTests(unittest.TestCase):
-    def inputs(self, scratch):
+    def inputs(self, scratch, run_id="original"):
         control = scratch / "control"
         control.mkdir()
         inputs = scratch / "inputs"
@@ -3744,7 +3763,10 @@ class NativeEntryTests(unittest.TestCase):
                                  "swap_growth_bytes": 512 * 1024 * 1024},
                   "launcher": {"path": str(launcher), "version": [3, 14, 7],
                                "sha256": driver.digest(launcher)},
-                  "blocks": []}
+                  "blocks": [{"id": block, "jobs": [
+                      {**job, "argv": [str(launcher)]} for job in entries]}
+                      for block, entries in DeadlineContractTests().bindings(
+                          scratch / "mac-run" / run_id).items()]}
         driver.atomic_json(config_path, config)
         files = {str(p): driver.digest(p) for p in (
             data, launcher, staged, config_path, identities)}
@@ -3766,6 +3788,24 @@ class NativeEntryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             scratch = Path(folder).resolve()
             config_path, manifest, staged = self.inputs(scratch)
+            configs = {"original": config_path}
+            base = driver.read_json(config_path)
+            document = driver.read_json(manifest)
+            for run_id in ("rerun", "interrupted"):
+                config = deepcopy(base)
+                config["blocks"] = [{"id": block, "jobs": [
+                    {**job, "argv": [base["launcher"]["path"]]}
+                    for job in entries]} for block, entries in
+                    DeadlineContractTests().bindings(
+                        scratch / "mac-run" / run_id).items()]
+                path = config_path.with_name(run_id + ".json")
+                driver.atomic_json(path, config)
+                document["files"][str(path)] = driver.digest(path)
+                document["jobs"]["*"].append(str(path))
+                configs[run_id] = path
+            driver.atomic_json(manifest, document)
+            driver.atomic_json(Path(base["window_file"]),
+                NativeAdmissionTests().go(driver.digest(manifest)))
             baseline = driver.digest(manifest)
             owners, observed = [], []
             real_session = driver.execute_session
@@ -3789,7 +3829,8 @@ class NativeEntryTests(unittest.TestCase):
             def session(record, config, inputs, identity, concurrency):
                 observed.append((config["input_manifest_sha256"],
                                  driver.COMMIT))
-                real_session(record, config, inputs, identity, concurrency)
+                real_session(record, {**config, "blocks": []}, inputs,
+                             identity, concurrency)
                 output = record.root / "jobs" / "case" / "native-time.txt"
                 if not output.exists():
                     output.parent.mkdir(parents=True)
@@ -3812,7 +3853,7 @@ class NativeEntryTests(unittest.TestCase):
                                      ("--native", "rerun"),
                                      ("--native", "interrupted")):
                     root = scratch / "mac-run" / run_id
-                    argv = ["run.py", mode, str(config_path),
+                    argv = ["run.py", mode, str(configs[run_id]),
                             "--root", str(root)]
                     with patch.object(sys, "argv", argv):
                         if run_id == "interrupted":
@@ -3851,7 +3892,7 @@ class NativeEntryTests(unittest.TestCase):
             with self.subTest(damage=damage), \
                     tempfile.TemporaryDirectory() as folder:
                 scratch = Path(folder).resolve()
-                config, manifest, staged = self.inputs(scratch)
+                config, manifest, staged = self.inputs(scratch, "rejected")
                 document = driver.read_json(manifest)
                 if damage == "unlisted":
                     document["files"].pop(str(scratch / "inputs/data"))
@@ -3878,10 +3919,10 @@ class NativeEntryTests(unittest.TestCase):
     def test_unbound_configured_executable_refuses_before_native_owner(self):
         with tempfile.TemporaryDirectory() as folder:
             scratch = Path(folder).resolve()
-            config, manifest, staged = self.inputs(scratch)
+            config, manifest, staged = self.inputs(
+                scratch, "unbound-executable")
             value = driver.read_json(config)
-            value["blocks"] = [{"id": "smoke", "jobs": [{
-                "id": "fixture", "argv": [str(scratch / "unbound")]}]}]
+            value["blocks"][0]["jobs"][0]["argv"] = [str(scratch / "unbound")]
             driver.atomic_json(config, value)
             record = driver.read_json(manifest)
             record["files"][str(config)] = driver.digest(config)
@@ -3896,6 +3937,63 @@ class NativeEntryTests(unittest.TestCase):
                 driver.main()
             owner.assert_not_called()
             self.assertFalse(root.exists())
+
+    def test_actual_native_bindings_refuse_before_any_effect(self):
+        for damage in ("missing-block", "duplicate-block", "duplicate-job",
+                       "missing-id", "pin", "argv", "receipt", "owner",
+                       "kind", "peak", "gomax", "extra-field"):
+            with self.subTest(damage=damage), \
+                    tempfile.TemporaryDirectory() as folder:
+                scratch = Path(folder).resolve()
+                config, manifest, staged = self.inputs(scratch, "bindings")
+                value = driver.read_json(config)
+                job = value["blocks"][0]["jobs"][0]
+                if damage == "missing-block":
+                    value["blocks"].pop()
+                elif damage == "duplicate-block":
+                    value["blocks"].append(deepcopy(value["blocks"][0]))
+                    value["blocks"][-1]["jobs"][0]["id"] = "another-job"
+                elif damage == "duplicate-job":
+                    value["blocks"][1]["jobs"][0]["id"] = job["id"]
+                elif damage == "missing-id":
+                    del job["id"]
+                elif damage == "pin":
+                    job["source_pin"] = "not-a-pin"
+                elif damage == "argv":
+                    job["argv"] = "not-an-argv"
+                elif damage == "receipt":
+                    job["receipt_path"] = str(scratch / "outside.json")
+                elif damage == "owner":
+                    job["owner"] = ""
+                elif damage == "kind":
+                    job["kind"] = "oracle"
+                elif damage == "peak":
+                    job["estimated_peak_bytes"] = -1
+                elif damage == "gomax":
+                    job["gomaxprocs"] = True
+                else:
+                    job["surprise"] = "not-bound"
+                driver.atomic_json(config, value)
+                document = driver.read_json(manifest)
+                document["files"][str(config)] = driver.digest(config)
+                driver.atomic_json(manifest, document)
+                root = scratch / "mac-run/bindings"
+                with (patch.object(driver, "__file__", str(staged)),
+                      patch.object(driver, "environment",
+                                   side_effect=AssertionError) as env,
+                      patch.object(driver.subprocess, "Popen") as spawn,
+                      patch.object(driver, "Supervisor") as owner,
+                      patch.object(Path, "mkdir",
+                                   side_effect=AssertionError) as mkdir,
+                      patch.object(sys, "argv", ["run.py", "--native",
+                          str(config), "--root", str(root)]),
+                      self.assertRaises(driver.ReviewRequired)):
+                    driver.main()
+                owner.assert_not_called()
+                spawn.assert_not_called()
+                env.assert_not_called()
+                mkdir.assert_not_called()
+                self.assertFalse(root.exists())
 
 
 
@@ -4708,8 +4806,6 @@ class CatalogGroupTests(unittest.TestCase):
 
     def run_catalog(self, owner, candidates=None):
         selected = driver.CATALOGS if candidates is None else candidates
-        sdk = [{"identity": {"job": {"stage": "screen", "adapter": name}},
-                "state": "pass"} for name in selected]
         def resources(env):
             return fixture_resources(timestamp=1000 + owner.clock[0],
                 swapouts=owner.counter, level=20, load1=25, load5=24,
@@ -4717,8 +4813,9 @@ class CatalogGroupTests(unittest.TestCase):
         with patch.object(driver.time, "monotonic",
                           side_effect=lambda: owner.clock[0]), \
                 patch.object(driver, "native_resources",
-                             side_effect=resources):
-            driver.run_catalog_hybrid(owner, sdk, "catalog")
+                             side_effect=resources), \
+                patch.object(driver, "CATALOGS", tuple(selected)):
+            owner.outcome = driver.run_catalog_hybrid(owner, [], "catalog")
         return driver.read_json(owner.root / "catalog-summary.json")
 
     def test_full_catalog_matrix_counts_ratios_and_reference_extras(self):
@@ -4726,6 +4823,9 @@ class CatalogGroupTests(unittest.TestCase):
             root = Path(f).resolve()
             owner = self.owner(root)
             summary = self.run_catalog(owner)
+            self.assertEqual(owner.outcome, "completed")
+            self.assertEqual(summary["failed_catalog_checks"], {})
+            self.assertEqual(summary["blocked_catalog_sizes"], [])
             groups = summary["blocks"]
             self.assertEqual(len(groups), 12)
             self.assertEqual(len(owner.calls), 720)
@@ -4838,37 +4938,40 @@ class CatalogGroupTests(unittest.TestCase):
                         raw["repeats"] = True
                 owner = self.owner(root, change=change)
                 eligible = driver.CATALOGS[:2]
-                with self.assertRaises(driver.ReviewRequired):
-                    self.run_catalog(owner, eligible)
+                report = self.run_catalog(owner, eligible)
+                self.assertEqual(owner.outcome, "checks_failed")
+                self.assertEqual(report["blocked_catalog_sizes"],
+                                 [] if failure == "unmatched" else
+                                 [1, 10, 100])
+                self.assertTrue(all(not g["valid_timing_comparison"]
+                                    for g in report["blocks"]))
+                self.assertTrue(all(g["samples"][-1]["metrics"] == {}
+                                    for g in report["blocks"]))
+                self.assertEqual(len(report["failed_catalog_checks"]), 3)
                 self.assertEqual(len(owner.calls),
-                                 2 if failure == "unmatched" else 1)
+                                 6 if failure == "unmatched" else 3)
                 folder = root / "aux/catalog-catalog-refs-n1"
                 partial = list(folder.glob("*/partial.json"))
                 self.assertEqual(len(partial), 1)
                 self.assertEqual(driver.read_json(partial[0])["state"],
                                  "checks_failed")
-                self.assertFalse((folder / "complete.json").exists())
+                self.assertTrue((folder / "complete.json").exists())
+                self.assertEqual(driver.read_json(folder / "complete.json")[
+                    "state"], "checks_failed")
                 saved = {str(p.relative_to(folder)): p.read_bytes()
-                         for p in driver.output_files([folder])}
+                         for p in [*driver.output_files([folder]),
+                                   folder / "complete.json",
+                                   *folder.glob("*/complete.json")]}
                 resumed = self.owner(root, window="catalog-window-2")
-                with self.assertRaises((driver.ReviewRequired,
-                                        FileNotFoundError)):
-                    self.run_catalog(resumed, eligible)
+                self.assertEqual(self.run_catalog(resumed, eligible), report)
                 self.assertEqual(resumed.calls, [])
                 self.assertFalse((root / "attempts").exists())
                 self.assertEqual(saved, {str(p.relative_to(folder)):
-                    p.read_bytes() for p in driver.output_files([folder])})
+                    p.read_bytes() for p in [*driver.output_files([folder]),
+                        folder / "complete.json",
+                        *folder.glob("*/complete.json")]})
 
-    def test_fixed_catalog_reference_is_required_before_any_trial(self):
-        for eligible in ((), driver.CATALOGS[1:]):
-            with self.subTest(eligible=eligible), \
-                    tempfile.TemporaryDirectory() as f:
-                owner = self.owner(Path(f).resolve())
-                with self.assertRaisesRegex(driver.ReviewRequired,
-                                            "fixed catalog reference"):
-                    self.run_catalog(owner, eligible)
-                self.assertEqual(owner.calls, [])
-                self.assertFalse((owner.root / "aux").exists())
+    def test_catalog_own_checks_reject_missing_metrics_or_repeats(self):
         raw = self.report("catalog-sqlite", 1, repeats=30)
         self.assertEqual(set(driver.check_catalog_report(
             raw, "catalog-sqlite", 1)), set(self.operations))
@@ -4938,7 +5041,7 @@ class CatalogGroupTests(unittest.TestCase):
                 self.run_catalog(owner, driver.CATALOGS[:2])
             self.assertEqual(owner.calls, [])
 
-    def test_catalog_budget_negative_reuses_without_ratios_or_retry(self):
+    def test_catalog_budget_blocks_size_without_ratios_or_retry(self):
         with tempfile.TemporaryDirectory() as f:
             root = Path(f).resolve()
             owner = self.owner(root, budget=1)
@@ -4947,7 +5050,17 @@ class CatalogGroupTests(unittest.TestCase):
             self.assertEqual(negative["state"], "budget_exceeded")
             self.assertFalse(negative["valid_timing_comparison"])
             self.assertEqual(negative["paired_ratios"]["operations"], [])
-            self.assertEqual(proof["reference_trials"], 89)
+            self.assertEqual(proof["reference_trials"], 60)
+            self.assertEqual(proof["reference_extras"], 0)
+            self.assertEqual(proof["blocked_catalog_sizes"], [1])
+            self.assertEqual(proof["failed_catalog_checks"][
+                "catalog-catalog-sqlite-n1"], "budget_exceeded")
+            self.assertEqual(len(owner.calls), 121)
+            self.assertEqual(owner.calls[0],
+                             ("catalog-catalog-refs-n1", "A01"))
+            self.assertTrue((root / "aux/catalog-catalog-refs-n1"
+                             / "complete.json").exists())
+            self.assertEqual(len(negative["samples"]), 1)
             resumed = self.owner(root, window="catalog-window-2")
             self.assertEqual(self.run_catalog(resumed, driver.CATALOGS[:2]),
                              proof)
@@ -5057,6 +5170,198 @@ class CatalogGroupTests(unittest.TestCase):
                 self.assertEqual(checks[:8] if duration else checks[:2],
                                  [True] + [False] * 6 + [True]
                                  if duration else [True, True])
+
+    def test_own_factory_failure_blocks_only_the_affected_size(self):
+        for method in ("catalog-sqlite", "catalog-refs"):
+            with self.subTest(method=method), \
+                    tempfile.TemporaryDirectory() as folder:
+                root = Path(folder).resolve()
+                def change(raw, role):
+                    if raw["candidate"] == method and raw["entries"] == 10:
+                        raw["recoveries"][0]["factory"] = "<nil>"
+                owner = self.owner(root, change=change)
+                report = self.run_catalog(owner, driver.CATALOGS[:3])
+                self.assertEqual(owner.outcome, "checks_failed")
+                self.assertEqual(set(report["failed_catalog_checks"]),
+                                 {f"catalog-{method}-n10"})
+                self.assertEqual(report["blocked_catalog_sizes"],
+                                 [10] if method == "catalog-sqlite" else [])
+                self.assertEqual(len(owner.calls),
+                                 241 if method == "catalog-sqlite" else 302)
+                self.assertEqual(report["reference_trials"],
+                                 120 if method == "catalog-sqlite" else 151)
+                self.assertEqual(report["reference_extras"],
+                                 60 if method == "catalog-sqlite" else 61)
+                negative = next(g for g in report["blocks"]
+                                if g["state"] != "pass")
+                self.assertFalse(negative["valid_timing_comparison"])
+                self.assertEqual(negative["paired_ratios"]["operations"], [])
+                self.assertEqual(len(negative["samples"]),
+                                 1 if method == "catalog-sqlite" else 2)
+                self.assertEqual({g["identity"]["entries"] for g in
+                    report["blocks"] if g["state"] == "pass"},
+                    {1, 100} if method == "catalog-sqlite" else {1, 10, 100})
+                if method == "catalog-sqlite":
+                    self.assertEqual([c for c in owner.calls
+                                      if c[0].endswith("-n10")],
+                                     [("catalog-catalog-refs-n10", "A01")])
+                admission = {"blocks": [{"id": "catalog", "jobs": list(
+                    owner.job_bindings.values())}]}
+                files = driver.block_files(root, admission["blocks"][0])
+                raw = root / "aux/catalog-catalog-refs-n10" / (
+                    "A01" if method == "catalog-sqlite" else "B01") / (
+                    "output/result.json")
+                self.assertEqual(files[str(raw.relative_to(root))],
+                                 driver.digest(raw))
+                driver.atomic_json(root / "session.json", {
+                    "identity": {"configuration": admission, "setup": {},
+                                 "native": owner.native_identity},
+                    "blocks": {"catalog": {"state": "checks_failed",
+                                          "files": files}}})
+                resumed = self.owner(root, window="second-window")
+                resumed.begin_block = unittest.mock.Mock(
+                    side_effect=AssertionError("known own-check failure"))
+                with (patch.object(driver.signal, "signal"),
+                      patch.object(driver.signal, "setitimer")):
+                    result = driver.execute_session(resumed, admission,
+                                                    root, {}, 1)
+                self.assertEqual(result["blocks"]["catalog"]["state"],
+                                 "checks_failed")
+                self.assertEqual(resumed.calls, [])
+                resumed.begin_block.assert_not_called()
+                raw.write_text("changed rejected proof")
+                with (patch.object(driver.signal, "signal"),
+                      patch.object(driver.signal, "setitimer"),
+                      self.assertRaisesRegex(driver.ReviewRequired,
+                          "known failed block has unverified proof")):
+                    driver.execute_session(resumed, admission, root, {}, 1)
+                self.assertEqual(resumed.calls, [])
+                resumed.begin_block.assert_not_called()
+
+    def test_unknown_own_verifier_bug_stops_instead_of_skipping_a_size(self):
+        with tempfile.TemporaryDirectory() as folder:
+            owner = self.owner(Path(folder).resolve())
+            with (patch.object(driver, "check_catalog_report",
+                               side_effect=RuntimeError("verifier bug")),
+                  self.assertRaisesRegex(RuntimeError, "verifier bug")):
+                self.run_catalog(owner, driver.CATALOGS[:2])
+            self.assertEqual(owner.calls,
+                             [("catalog-catalog-refs-n1", "A01")])
+            self.assertFalse((owner.root / "catalog-summary.json").exists())
+
+    def test_incomplete_catalog_artifact_escape_refuses_before_hashing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder).resolve()
+            root = base / "run"
+            root.mkdir()
+            outside = base / "not-owned.txt"
+            outside.write_text("private synthetic fixture")
+            owner = self.owner(root, stop=2)
+            with self.assertRaises(driver.DeadlineExceeded):
+                self.run_catalog(owner, driver.CATALOGS[:2])
+            alias = root / "aux/catalog-catalog-refs-n1/unexpected-file"
+            alias.symlink_to(outside)
+            digest = driver.digest
+            def guarded(path):
+                if Path(path).resolve() == outside:
+                    raise AssertionError("outside bytes must not be read")
+                return digest(path)
+            with (patch.object(driver, "digest", side_effect=guarded),
+                  self.assertRaises(driver.ReviewRequired)):
+                driver.block_files(root, {"id": "catalog", "jobs": list(
+                    owner.job_bindings.values())})
+            self.assertEqual(outside.read_text(), "private synthetic fixture")
+
+    def test_failed_group_reuses_after_later_catalog_time_interruption(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            candidates = driver.CATALOGS[:3]
+            def change(raw, role):
+                if raw["candidate"] == "catalog-refs" and raw["entries"] == 1:
+                    raw["recoveries"][0]["factory"] = "<nil>"
+            first = self.owner(root, stop=3, change=change)
+            admission = {"blocks": [{"id": "catalog", "jobs": list(
+                first.job_bindings.values())}]}
+            def session(owner):
+                def resources(env):
+                    return fixture_resources(timestamp=1000 + owner.clock[0],
+                        swapouts=owner.counter, level=20, load1=25,
+                        load5=24, load15=23)
+                with (patch.object(driver, "CATALOGS", candidates),
+                      patch.object(driver.time, "monotonic",
+                                   side_effect=lambda: owner.clock[0]),
+                      patch.object(driver, "native_resources",
+                                   side_effect=resources),
+                      patch.object(driver.signal, "signal"),
+                      patch.object(driver.signal, "setitimer")):
+                    return driver.execute_session(owner, admission,
+                                                  root, {}, 1)
+            stopped = session(first)
+            self.assertEqual(stopped["blocks"]["catalog"]["state"], "partial")
+            self.assertEqual(stopped["blocks"]["catalog"]["reason_code"],
+                             "time")
+            self.assertEqual(first.calls, [("catalog-catalog-refs-n1", "A01"),
+                ("catalog-catalog-refs-n1", "B01"),
+                ("catalog-catalog-refs-n10", "A01")])
+            negative = root / "aux/catalog-catalog-refs-n1"
+            proof = driver.read_json(negative / "complete.json")
+            self.assertEqual(proof["state"], "checks_failed")
+            self.assertEqual([r["state"] for r in proof["samples"]],
+                             ["pass", "checks_failed"])
+            self.assertEqual(proof["samples"][-1]["metrics"], {})
+            self.assertEqual(proof["attempt"]["window_id"], "catalog-window-1")
+            self.assertIn(str((negative / "complete.json").relative_to(root)),
+                          stopped["blocks"]["catalog"]["files"])
+            saved = {str(p.relative_to(negative)): p.read_bytes() for p in [
+                *driver.output_files([negative]), negative / "complete.json",
+                *negative.glob("*/complete.json")]}
+            resumed = self.owner(root, window="catalog-window-2",
+                                 change=change)
+            result = session(resumed)
+            self.assertEqual(result["blocks"]["catalog"]["state"],
+                             "checks_failed")
+            self.assertEqual(len(resumed.calls), 300)
+            self.assertFalse(any(name == negative.name
+                                 for name, _ in resumed.calls))
+            self.assertEqual({name for name, _ in resumed.calls}, {
+                "catalog-catalog-refs-n10", "catalog-catalog-refs-n100",
+                "catalog-catalog-bbolt-n1", "catalog-catalog-bbolt-n10",
+                "catalog-catalog-bbolt-n100"})
+            self.assertEqual(saved, {
+                str(p.relative_to(negative)): p.read_bytes()
+                for p in [*driver.output_files([negative]),
+                    negative / "complete.json",
+                    *negative.glob("*/complete.json")]})
+            self.assertFalse((root / "attempts/aux" / negative.name).exists())
+            report = driver.read_json(root / "catalog-summary.json")
+            self.assertEqual(len(report["blocks"]), 6)
+            self.assertEqual(report["reference_trials"], 151)
+            self.assertEqual(report["reference_extras"], 61)
+            self.assertEqual(set(report["failed_catalog_checks"]),
+                             {"catalog-catalog-refs-n1"})
+            self.assertEqual(report["blocked_catalog_sizes"], [])
+            self.assertTrue(all(g["valid_timing_comparison"]
+                                for g in report["blocks"][1:]))
+
+    def test_short_pass_or_empty_negative_cannot_complete_a_group(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            def change(raw, role):
+                if role.startswith("B"):
+                    raw["recoveries"][0]["factory"] = "<nil>"
+            owner = self.owner(root, stop=3, change=change)
+            with self.assertRaises(driver.DeadlineExceeded):
+                self.run_catalog(owner, driver.CATALOGS[:2])
+            directory = root / "aux/catalog-catalog-refs-n1"
+            receipt = driver.read_json(directory / "complete.json")
+            for state, rows in (("pass", receipt["samples"][:1]),
+                                ("checks_failed", [])):
+                with self.subTest(state=state, count=len(rows)), \
+                        self.assertRaises(driver.ReviewRequired):
+                    driver.finished_group(root, receipt["identity"], {
+                        **receipt, "state": state, "samples": rows},
+                        projection=(directory,
+                            lambda attempt, check_only: rows))
 
 
 class MacHybridCallerTests(unittest.TestCase):
@@ -5570,6 +5875,116 @@ class ExternalToolBindingTests(unittest.TestCase):
             env["STUDY_MANIFEST_SHA"] = driver.digest(manifest)
             with self.assertRaises(driver.ReviewRequired):
                 driver.external_tool("go", env)
+
+
+class ScreenReferenceTests(unittest.TestCase):
+    def oracle_bindings(self):
+        return {driver.Job("oracle", "oracle", t).name: {"gomaxprocs": 10}
+                for t in driver.ARCHIVES}
+
+    def test_each_screen_requires_its_verified_same_tier_proof(self):
+        for damage in (None, "budget", "correctness", "manifest", "missing"):
+            with self.subTest(damage=damage), \
+                    tempfile.TemporaryDirectory() as folder:
+                root = Path(folder).resolve()
+                owner, setup, rows = fixture_references(root)
+                oracle = driver.Job("oracle", "oracle", "tier10")
+                path = driver.case_directory(root, oracle) / "complete.json"
+                receipt = driver.read_json(path)
+                if damage == "budget":
+                    receipt["state"] = "budget_exceeded"
+                    receipt["correctness_pass"] = False
+                elif damage == "correctness":
+                    receipt["correctness_pass"] = False
+                elif damage == "manifest":
+                    output = driver.result_path(root, oracle)
+                    report = driver.read_json(output)
+                    report["manifest_sha256"] = "0" * 64
+                    driver.atomic_json(output, report)
+                    receipt["files"][str(output.relative_to(path.parent))] = (
+                        driver.digest(output))
+                if damage == "missing":
+                    path.unlink()
+                else:
+                    driver.atomic_json(path, receipt)
+                screens = [driver.Job("screen", driver.FINALISTS[0], t)
+                           for t in driver.ARCHIVES]
+                before = path.read_bytes() if path.exists() else None
+                with (patch.object(driver, "jobs", return_value=screens),
+                      patch.object(owner, "start",
+                                   side_effect=AssertionError) as spawn):
+                    selected = driver.eligible_sdk(
+                        owner, rows, setup, self.oracle_bindings(), "screen")
+                self.assertEqual(selected, screens if damage is None else
+                                 [screens[0]])
+                spawn.assert_not_called()
+                self.assertEqual(path.read_bytes() if path.exists() else None,
+                                 before)
+
+    def test_blocked_screen_keeps_independent_tier_catalog_and_hybrid(self):
+        for accepted in ({"tier1"}, set()):
+            with self.subTest(accepted=accepted), \
+                    tempfile.TemporaryDirectory() as folder:
+                root = Path(folder).resolve()
+                owner, setup, rows = fixture_references(root)
+                oracles = [driver.Job("oracle", "oracle", t)
+                           for t in driver.ARCHIVES]
+                screens = [driver.Job("screen", driver.FINALISTS[0], t)
+                           for t in driver.ARCHIVES]
+                for oracle in oracles:
+                    if oracle.tier not in accepted:
+                        path = driver.case_directory(root, oracle) / (
+                            "complete.json")
+                        receipt = driver.read_json(path)
+                        receipt.update(state="budget_exceeded",
+                                       correctness_pass=False)
+                        driver.atomic_json(path, receipt)
+                admission = {"blocks": [{"id": "setup", "jobs": []}, {
+                    "id": "storage", "jobs": [{"id": j.name,
+                    "gomaxprocs": 10} for j in oracles + screens]},
+                    {"id": "catalog", "jobs": []},
+                    {"id": "hybrid", "jobs": []}]}
+                launched = []
+                def begin(block, outcomes):
+                    owner.block_id = block["id"]
+                    owner.block_deadline = 10000
+                def stage(supervisor, selected, prepared, concurrency, sdk):
+                    for job in selected:
+                        if job.stage == "oracle":
+                            sdk.append(driver.read_json(
+                                driver.case_directory(root, job) /
+                                "complete.json"))
+                        else:
+                            launched.append(job)
+                            sdk.append({"identity": {
+                                "job": driver.asdict(job)}, "state": "pass"})
+                owner.begin_block = begin
+                owner.stop_all = unittest.mock.Mock()
+                with (patch.object(driver, "jobs", return_value=tuple(
+                          oracles + screens)),
+                      patch.object(driver, "prepare", return_value=setup),
+                      patch.object(driver, "execute_stage", side_effect=stage),
+                      patch.object(driver, "run_catalog_hybrid",
+                                   return_value="completed") as independent,
+                      patch.object(driver, "block_files", return_value={}),
+                      patch.object(driver.time, "monotonic", return_value=0),
+                      patch.object(driver.signal, "signal"),
+                      patch.object(driver.signal, "setitimer"),
+                      patch.object(driver.subprocess, "Popen") as spawn):
+                    result = driver.execute_session(owner, admission,
+                                                    root, {}, 1)
+                self.assertEqual(launched, [j for j in screens
+                                           if j.tier in accepted])
+                self.assertEqual(result["blocks"]["storage"]["state"],
+                                 "dependency_blocked")
+                self.assertIn("tier10", result["blocks"]["storage"]["reason"])
+                self.assertEqual([c.args[-1]
+                                  for c in independent.call_args_list],
+                                 ["catalog", "hybrid"])
+                for block in ("catalog", "hybrid"):
+                    self.assertEqual(result["blocks"][block]["state"],
+                                     "completed")
+                spawn.assert_not_called()
 
 
 if __name__ == "__main__":

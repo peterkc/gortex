@@ -112,6 +112,7 @@ class ReviewRequired(RuntimeError):
     """Stop without retrying or deleting evidence."""
 
 
+
 class FatalSession(ReviewRequired):
     """Process, isolation or shared-resource failure; stop all blocks."""
 
@@ -214,7 +215,7 @@ def preflight(bindings: Mapping, root: Path) -> dict:
         missing = sorted(INPUT_BLOCKS - set(bindings))
         extra = sorted(set(bindings) - INPUT_BLOCKS)
         raise ReviewRequired(f"bindings: missing {missing}; unlisted {extra}")
-    inventory = bound_jobs(root)
+    inventory = {}
     for block in sorted(INPUT_BLOCKS):
         entries = bindings[block]
         if not isinstance(entries, list) or not entries:
@@ -225,7 +226,8 @@ def preflight(bindings: Mapping, root: Path) -> dict:
         seen = set()
         for entry in inventory[block]:
             fields = {"id", "argv", "source_pin", "config_pin", "input_pin",
-                      "receipt_path", "minutes", "owner"}
+                      "receipt_path", "minutes", "owner", "kind",
+                      "estimated_peak_bytes", "gomaxprocs"}
             if set(entry) - fields:
                 raise ReviewRequired(f"{block}: unlisted binding field")
             for key in sorted(fields):
@@ -239,6 +241,10 @@ def preflight(bindings: Mapping, root: Path) -> dict:
                     or entry["id"] in seen):
                 raise ReviewRequired(f"{block}: malformed or duplicate id")
             seen.add(entry["id"])
+            if (entry["kind"] != BLOCK_KINDS[block] or any(
+                    type(entry[k]) is not int or entry[k] <= 0
+                    for k in ("estimated_peak_bytes", "gomaxprocs"))):
+                raise ReviewRequired(f"{block}: malformed native profile")
             argv = entry["argv"]
             if (not isinstance(argv, list) or not argv
                     or any(not isinstance(arg, str) or not arg
@@ -1728,8 +1734,12 @@ def finished_group(root: Path, expected: Mapping,
              not required <= row["files"].keys()) or
                 f"{job.name}/complete.json" not in receipt["files"]):
             raise ReviewRequired("timing group output coverage incomplete")
+    count = len(expected["samples"]) if projection else 6
     if (receipt["samples"] != samples
-            or len(samples) != (len(expected["samples"]) if projection else 6)
+            or not 0 < len(samples) <= count
+            or (len(samples) < count and (not projection or
+                samples[-1]["state"] not in {
+                    "checks_failed", "budget_exceeded"}))
             or not receipt["attempt"]["window_id"]
             or not receipt["attempt"]["attempt_id"]
             or any(row["attempt"] != receipt["attempt"] for row in samples)
@@ -1835,8 +1845,10 @@ def summary(root: Path, receipts: Sequence[Mapping],
     os.replace(temporary, root / "summary.md")
 
 
-def eligible_timings(supervisor: Supervisor, receipts: Sequence[Mapping],
-                     setup: Mapping, bindings: Mapping) -> list[Job]:
+
+def eligible_sdk(supervisor: Supervisor, receipts: Sequence[Mapping],
+                 setup: Mapping, bindings: Mapping,
+                 stage: Literal["screen", "timing"] = "timing") -> list[Job]:
     root, references = supervisor.root, set()
     for tier in ARCHIVES:
         oracle = Job("oracle", "oracle", tier)
@@ -1853,7 +1865,7 @@ def eligible_timings(supervisor: Supervisor, receipts: Sequence[Mapping],
                     and report.get("manifest_sha256") == digest(
                         root / "data" / tier / "manifest.json")):
                 references.add(tier)
-        except FatalSession:
+        except (FatalSession, DeadlineExceeded):
             raise
         except FileNotFoundError as error:
             if error.filename != str(root / "jobs" / oracle.name /
@@ -1864,8 +1876,9 @@ def eligible_timings(supervisor: Supervisor, receipts: Sequence[Mapping],
     passed = {row["identity"]["job"]["adapter"] for row in receipts
               if row["identity"]["job"]["stage"] == "screen"
               and row["state"] == "pass"}
-    return [job for job in jobs() if job.stage == "timing"
-            and job.adapter in passed and job.tier in references]
+    return [job for job in jobs() if job.stage == stage
+            and (stage == "screen" or job.adapter in passed)
+            and job.tier in references]
 
 
 def budget_receipt(supervisor: Supervisor, directory: Path, base: Path,
@@ -2213,7 +2226,7 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
         if attempt is not None and read_json(directory / "process.json")[
                 "window"]["id"] != attempt["window_id"]:
             raise ReviewRequired("auxiliary process window changed")
-        if receipt.get("state") != "budget_exceeded":
+        if receipt.get("state") not in {"budget_exceeded", "checks_failed"}:
             paths = validate(directory)
             required = {str(p.relative_to(root)) for p in
                         output_files([directory, *paths])}
@@ -2394,19 +2407,14 @@ def comparison_group(supervisor: Supervisor, name: str, identity: Mapping,
 
 
 def run_catalog_hybrid(supervisor: Supervisor,
-                       sdk: Sequence[Mapping], block: str) -> None:
+                       sdk: Sequence[Mapping], block: str) -> str:
     root = supervisor.root
-    passed = {row["identity"]["job"]["adapter"] for row in sdk
-              if row["identity"]["job"]["stage"] == "screen"
-              and row["state"] == "pass"}
-    receipts, coverage = [], {}
-    if block == "catalog" and "catalog-sqlite" not in passed:
-        raise ReviewRequired("fixed catalog reference correctness incomplete")
+    receipts, coverage, failed = [], {}, {}
     for candidate in CATALOGS[1:] if block == "catalog" else ():
-        if candidate not in passed:
-            continue
         for entries in (1, 10, 100):
             name = f"catalog-{candidate}-n{entries}"
+            if f"catalog-catalog-sqlite-n{entries}" in failed:
+                continue
             cases = [{"id": f"{role}{i + 1:02d}", "candidate": method,
                       "binding": f"catalog-{method}-n{entries}"}
                      for i in range(30) for role, method in
@@ -2430,10 +2438,29 @@ def run_catalog_hybrid(supervisor: Supervisor,
                             raise ReviewRequired("unmatched catalog fixtures")
                         fixtures.update(raw["fixture_sha256"])
                         return [directory / "resources-after.json"]
-                    row = auxiliary(supervisor, case["binding"], args,
-                        validate, directory=folder, attempt=attempt,
-                        check_only=check_only)
-                    rows.append({**row, "metrics": metrics})
+                    try:
+                        row = auxiliary(supervisor, case["binding"], args,
+                            validate, directory=folder, attempt=attempt,
+                            check_only=check_only)
+                    except (FatalSession, DeadlineExceeded):
+                        raise
+                    except ReviewRequired as error:
+                        if (check_only or not
+                                (folder / "process.json").is_file()):
+                            raise
+                        row = {"identity": read_json(folder / "started.json"),
+                               "attempt": attempt, "state": "checks_failed",
+                               "reason": str(error), "correctness_pass": False,
+                               "files": {str(p.relative_to(root)): digest(
+                                   persistent_path(p, root))
+                                   for p in output_files([folder])}}
+                        atomic_json(folder / "complete.json", row)
+                    rows.append({**row, "metrics": metrics
+                                 if row["state"] == "pass" else {}})
+                    if row["state"] != "pass":
+                        failed[case["binding"]] = row.get(
+                            "reason", row["state"])
+                        break
                 return rows
             receipts.append(comparison_group(supervisor, name, {
                 "operation": "catalog", "reference": "catalog-sqlite",
@@ -2443,10 +2470,11 @@ def run_catalog_hybrid(supervisor: Supervisor,
                 "bindings": [supervisor.job_bindings[key] for key in
                     (f"catalog-catalog-sqlite-n{entries}", name)]}, samples))
     if block == "catalog":
-        references = sum(row["state"] == "pass" for group in receipts
-                         for row in group["samples"][::2])
-        coverage = {"reference_trials": references,
-                    "reference_extras": max(0, references - 90)}
+        refs = Counter(g["identity"]["entries"] for g in receipts
+                       for r in g["samples"][::2] if r["state"] == "pass")
+        coverage = {"reference_trials": sum(refs.values()),
+                    "reference_extras": sum(max(0, n - 30)
+                                            for n in refs.values())}
     profiles = bound_jobs(root)["hybrid"] if block == "hybrid" else []
     for mode in ("timing", "latency") if profiles else ():
         cohort = [(job, Path(job["receipt_path"]).parent) for job in profiles
@@ -2491,12 +2519,15 @@ def run_catalog_hybrid(supervisor: Supervisor,
                 "configuration": config}, samples))
     atomic_json(root / (block + "-summary.json"), {
         "source": COMMIT, "blocks": receipts, **coverage,
-        "skipped_catalogs_failed_correctness": sorted(set(CATALOGS)-passed),
+        "failed_catalog_checks": failed,
+        "blocked_catalog_sizes": [n for n in (1, 10, 100)
+                                  if f"catalog-catalog-sqlite-n{n}" in failed],
         "skipped_optional": ["1M exact/int8 timing and generated latency"],
         "data_scope": ("catalog-only sealed manifests" if block == "catalog"
                        else "generated vectors; bypass segment adapters; "
                             "no real-vector timing"),
     })
+    return "checks_failed" if failed else "completed"
 
 
 def binding_block(supervisor: Supervisor, block: Mapping) -> str:
@@ -2590,6 +2621,10 @@ def block_files(root: Path, block: Mapping) -> dict[str, str]:
             if path.parent.parent != root / "aux":
                 path = path.parents[1] / "complete.json"
         if not path.exists():
+            if block["id"] == "catalog" and path.parent.exists():
+                paths.update({str(p.relative_to(root)): digest(
+                    persistent_path(p, root))
+                    for p in output_files([path.parent])})
             continue  # Measured correctness rejection can omit dependent jobs.
         paths[str(path.relative_to(root))] = digest(path)
         receipt = read_json(path)
@@ -2705,7 +2740,7 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
             outcomes[block_id] = state["state"]
             atomic_json(path, record)
             continue
-        if (block_id in {"segment_timing", "catalog", "hybrid"}
+        if (block_id == "segment_timing"
                 and not any(row["identity"]["job"]["stage"] == "oracle"
                             and row["state"] == "pass" for row in sdk)):
             record["blocks"][block_id] = {
@@ -2732,12 +2767,20 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
                 planned = jobs()
                 execute_stage(supervisor, [j for j in planned
                     if j.stage == "oracle"], setup, 1, sdk)
-                execute_stage(supervisor, [j for j in planned
-                    if j.stage == "screen"], setup, concurrency, sdk)
-                if any(row["state"] == "checks_failed" for row in sdk):
+                selected = eligible_sdk(supervisor, sdk, setup, bindings,
+                                        "screen")
+                execute_stage(supervisor, selected, setup, concurrency, sdk)
+                missing = {j.tier for j in planned if j.stage == "screen"} - {
+                    j.tier for j in selected}
+                if missing:
+                    state = "dependency_blocked"
+                    record["blocks"][block_id]["reason"] = (
+                        "screen oracle incomplete: "
+                        + ", ".join(sorted(missing)))
+                elif any(row["state"] == "checks_failed" for row in sdk):
                     state = "checks_failed"
             elif block_id == "segment_timing":
-                selected = eligible_timings(supervisor, sdk, setup, bindings)
+                selected = eligible_sdk(supervisor, sdk, setup, bindings)
                 if selected:
                     execute_stage(supervisor, selected, setup, 1, sdk)
                 if {job.tier for job in selected} != set(ARCHIVES):
@@ -2745,7 +2788,7 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
                     record["blocks"][block_id]["reason"] = (
                         "matching-tier reference/correctness incomplete")
             elif block_id in {"catalog", "hybrid"}:
-                run_catalog_hybrid(supervisor, sdk, block_id)
+                state = run_catalog_hybrid(supervisor, sdk, block_id)
             else:
                 state = binding_block(supervisor, block)
         except (FatalSession, MemoryError) as error:
@@ -2873,6 +2916,12 @@ def main() -> int:
     manifest_path = persistent_path(config["manifest_file"], scratch)
     config["input_manifest_sha256"] = digest(manifest_path)
     manifest = read_json(manifest_path)
+    preflight({b["id"]: b["jobs"] for b in config["blocks"]
+               if b["id"] in INPUT_BLOCKS}, root)
+    ids = [j["id"] for b in config["blocks"] for j in b["jobs"]]
+    if (len({b["id"] for b in config["blocks"]}) != len(config["blocks"])
+            or len(set(ids)) != len(ids)):
+        raise ReviewRequired("duplicate block or job id")
     required = {str(Path(__file__).resolve()), str(config_path.resolve()),
                 config["launcher"]["path"]}
     required.update(j["argv"][0] for b in config["blocks"]
