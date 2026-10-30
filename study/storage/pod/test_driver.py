@@ -2399,8 +2399,9 @@ class NativeAdmissionTests(unittest.TestCase):
                     before = [path.read_bytes() for path in complete]
                     self.assertEqual(record["blocks"]["storage"]["state"],
                                      "completed")
-                    # Verify per-job receipts on resume.
-                    record["blocks"]["storage"]["state"] = "partial"
+                    # Verify per-job receipts after a time interruption.
+                    record["blocks"]["storage"].update(
+                        state="partial", reason_code="time")
                     driver.atomic_json(root / "session.json", record)
                     owner.start.reset_mock()
                     resumed = driver.execute_session(
