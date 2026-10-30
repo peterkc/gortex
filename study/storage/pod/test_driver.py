@@ -85,6 +85,7 @@ class FixtureSupervisor:
             "input_manifest_sha256": driver.digest(self.manifest_file),
             "daemon_off_identities_sha256": "2" * 64}
         self.block_deadline = 10000
+        self.block_id = "unbound"  # as Supervisor.__init__ sets it
         self.modes = modes
         self.interrupt_at = interrupt_at
         self.calls = []
