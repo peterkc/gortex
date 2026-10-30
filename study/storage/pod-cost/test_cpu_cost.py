@@ -737,6 +737,12 @@ class CostTests(unittest.TestCase):
                 self.assertEqual(summary["cases"][0]["actual_repeats"], 0)
                 self.assertEqual(summary["accepted_timings"],
                                  outcome == "completed")
+                if outcome == "admission-refused":
+                    self.assertEqual((results[1][1]["state"],
+                                      results[1][1]["reason_code"]),
+                                     ("partial", "time"))
+                    self.assertEqual(results[1][2]["cases"][0][
+                        "actual_repeats"], 0)
 
 
 

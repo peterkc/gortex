@@ -144,6 +144,11 @@ class DeadlineExceeded(ReviewRequired):
     reason_code = "time"
 
 
+class NotStarted(ReviewRequired):
+    """Admission refused before the owned workload starts."""
+    reason_code = "not-started"
+
+
 def sha_pin(value: object, lengths: tuple[int, ...]) -> bool:
     return (isinstance(value, str) and len(value) in lengths
             and all(c in "0123456789abcdef" for c in value))
@@ -521,7 +526,7 @@ def resource_limit(sample: Mapping, peak: int, previous_swapouts: int,
         raise DeadlineExceeded("AC power lost")
     if (oracle and admission
             and sample["available_bytes"] < peak + MEMORY_MINIMUM):
-        raise ReviewRequired("oracle estimate plus minimum does not fit")
+        raise NotStarted("oracle estimate plus minimum does not fit")
 
 
 class DarwinUsage(ctypes.Structure):
@@ -859,7 +864,7 @@ class Supervisor:
         if (self.case["kind"] == "oracle" and (not isinstance(
                 self.window.get("oracle_go", []), list)
                 or name not in self.window.get("oracle_go", []))):
-            raise ReviewRequired("current-session oracle go required")
+            raise NotStarted("current-session oracle go required")
         self.swapouts, self.current_rss = None, 0
         self.launch_deadline = min(
             self.block_deadline - CLEANUP_RESERVE_SECONDS,
@@ -1165,7 +1170,7 @@ def bad_jobs(path: Path, scratch: Path) -> set[str]:
 
 
 def failed_output(directory: Path, error: ReviewRequired) -> None:
-    if isinstance(error, (DeadlineExceeded, BudgetExceeded)):
+    if isinstance(error, (DeadlineExceeded, BudgetExceeded, NotStarted)):
         return
     path = persistent_path(directory / "partial.json", directory)
     if not path.exists():
@@ -1179,8 +1184,10 @@ def reusable(directory: Path, verify: Callable[[], dict], *,
     persistent_path(directory, directory.parents[1])
     budget = (directory / "budget-exceeded.json").is_file()
     partial = persistent_path(directory / "partial.json", directory)
-    if partial.exists() and read_json(partial).get("state") != "partial":
-        raise ReviewRequired("known negative outcome needs diagnosis")
+    if partial.exists():
+        saved = read_json(partial)
+        if saved.get("state") != "partial" or saved.get("resumable") is False:
+            raise ReviewRequired("known negative outcome needs diagnosis")
     try:
         budget = budget or ((directory / "complete.json").is_file()
             and read_json(directory / "complete.json").get("state")
@@ -2681,6 +2688,12 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
                     and result["state"] not in {"checks_failed", "partial"})):
             raise ReviewRequired(f"{block['id']}: fatal exit/receipt mismatch")
         if result["state"] in {"partial", "dependency_blocked", "skipped"}:
+            if result["state"] in {"partial", "skipped"}:
+                atomic_json(directory / "partial.json", {
+                    "state": result["state"],
+                    "resumable": result["state"] == "partial"
+                    and result.get("reason_code") == "time",
+                    "reason_code": result.get("reason_code", "worker")})
             (directory / "complete.json").rename(
                 directory / "partial-complete.json")
         if (result["state"] == "partial"
@@ -2776,7 +2789,7 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
             raise FatalSession("known fatal attempt needs diagnosis")
         if saved and (saved.get("reason_code") == "budget-exceeded" or (
                 saved["state"] == "partial"
-                and saved.get("reason_code") != "time")):
+                and saved.get("reason_code") not in {"time", "not-started"})):
             outcomes[block_id] = "partial"
             continue  # Do not retry a known negative.
         if (saved and saved["state"] in {"completed", "checks_failed"}

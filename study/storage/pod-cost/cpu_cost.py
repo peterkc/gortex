@@ -450,7 +450,8 @@ def execute(args: argparse.Namespace) -> int:
                  else "partial")
     except Skip as error:
         state = ("partial" if error.code == "time" and any(
-            c["status"] == "partial" and c["reason"] == "time" for c in cases)
+            c["status"] == "partial" and c["reason"] in {"time", "in-progress"}
+            for c in cases)
                  else "skipped")
         failure = {"reason_code": error.code, "reason": str(error)}
         for case in cases:

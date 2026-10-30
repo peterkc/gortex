@@ -2628,6 +2628,11 @@ class NativeAdmissionTests(unittest.TestCase):
             owner.window = {"id": "newer", "oracle_go": []}
             with self.assertRaises(driver.ReviewRequired):
                 owner.job_limit(selected[0].name, 0)
+            owner.bad_jobs = {selected[0].name}
+            with self.assertRaisesRegex(driver.ReviewRequired,
+                                        "required input") as changed:
+                owner.job_limit(selected[0].name, 0)
+            self.assertNotIsInstance(changed.exception, driver.NotStarted)
 
     def test_verified_complete_oracle_reuses_without_new_measurement_go(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -3175,6 +3180,94 @@ class DurabilityTests(unittest.TestCase):
             self.assertEqual(driver.read_json(complete)["attempt"][
                 "window_id"], "first-window")
 
+    def test_worker_negatives_cannot_rerun_after_a_block_time_resume(self):
+        for state in ("skipped", "partial"):
+            with (self.subTest(state=state),
+                  tempfile.TemporaryDirectory() as folder):
+                root = Path(folder).resolve()
+                cases = ReviewFixTests()
+                self.addCleanup(lambda cases=cases: self.assertTrue(
+                    cases.doCleanups()))
+                owner, admission = cases.session_fixture(root, "partial")
+                self.addCleanup(owner.stop_all)
+                block = admission["blocks"][0]
+                job = block["jobs"][0]
+                record = json.loads(job["argv"][-1])
+                record.update(state=state, exit_code=int(state == "partial"),
+                              reason_code="identity" if state == "skipped"
+                              else "worker")
+                if state == "skipped":
+                    block["id"] = "cpu_cost"
+                    job["kind"] = driver.BLOCK_KINDS["cpu_cost"]
+                    record["files"] = {
+                        "aux/" + job["id"] + "/result.txt":
+                        driver.digest(root / "result.txt")}
+                job["argv"][-1] = json.dumps(record)
+                owner.window = {"id": "first"}
+                with (patch.object(driver.signal, "signal"),
+                      patch.object(driver.signal, "setitimer")):
+                    driver.execute_session(owner, admission, root, {})
+                    directory = root / "aux" / job["id"]
+                    marker = driver.read_json(directory / "partial.json")
+                    self.assertEqual(marker["state"], state)
+                    self.assertIs(marker["resumable"], False)
+                    before = {p: p.read_bytes() for p in
+                              driver.output_files([directory])}
+                    saved = driver.read_json(root / "session.json")
+                    saved["blocks"][block["id"]].update(
+                        state="partial", reason_code="time")
+                    driver.atomic_json(root / "session.json", saved)
+                    owner.window = {"id": "later"}
+                    driver.execute_session(owner, admission, root, {})
+                self.assertEqual(owner.calls, [job["id"],
+                                               "calibration-fixture"])
+                self.assertFalse((root / "attempts").exists())
+                self.assertEqual({p: p.read_bytes() for p in before}, before)
+
+    def test_v9_dependency_gate_reenters_after_smoke_becomes_ready(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            cases = ReviewFixTests()
+            self.addCleanup(lambda: self.assertTrue(cases.doCleanups()))
+            owner, admission = cases.session_fixture(root, "partial")
+            self.addCleanup(owner.stop_all)
+            block = admission["blocks"][0]
+            block["id"] = "baseline_a7"
+            job = block["jobs"][0]
+            job["kind"] = driver.BLOCK_KINDS["baseline_a7"]
+            ready = root / "smoke-ready.json"
+            gate = (
+                f"ready=pathlib.Path({str(ready)!r}).is_file(); "
+                "record.update(state='completed' if ready else "
+                "'dependency_blocked', exit_code=0, "
+                "reason_code='' if ready else 'Blocked'); "
+            )
+            anchor = "record=json.loads(sys.argv[3]); "
+            self.assertEqual(job["argv"][2].count(anchor), 1)
+            job["argv"][2] = job["argv"][2].replace(anchor, anchor + gate)
+            owner.window = {"id": "first"}
+            with (patch.object(driver.signal, "signal"),
+                  patch.object(driver.signal, "setitimer")):
+                first = driver.execute_session(owner, admission, root, {})
+                directory = root / "aux" / job["id"]
+                self.assertEqual(first["blocks"]["baseline_a7"]["state"],
+                                 "dependency_blocked")
+                self.assertFalse((directory / "partial.json").exists())
+                previous = (directory / "partial-complete.json").read_bytes()
+                ready.write_text("{}")
+                owner.window = {"id": "later"}
+                second = driver.execute_session(owner, admission, root, {})
+            self.assertEqual(second["blocks"]["baseline_a7"]["state"],
+                             "completed")
+            self.assertEqual(owner.calls, [job["id"], "calibration-fixture",
+                                           job["id"]])
+            archives = list((root / "attempts/aux" / job["id"]).iterdir())
+            self.assertEqual(len(archives), 1)
+            self.assertEqual(
+                (archives[0] / "partial-complete.json").read_bytes(), previous)
+            self.assertFalse((directory / "partial.json").exists())
+            self.assertTrue((directory / "complete.json").is_file())
+
     def test_binding_time_partial_restarts_only_with_a_new_attempt(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder).resolve()
@@ -3611,6 +3704,8 @@ class FailureBoundaryTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), before)
             self.assertTrue((directory / "partial-complete.json").is_file())
             self.assertFalse((directory / "complete.json").exists())
+            self.assertIs(driver.read_json(directory / "partial.json")[
+                "resumable"], True)
 
     def test_time_partial_resumes_after_owned_stop_in_a_new_window(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -3748,6 +3843,70 @@ class KnownOutcomeTests(unittest.TestCase):
             self.assertEqual(eligible.call_args_list[0].args[-1], "screen")
             self.assertEqual(driver.read_json(root / "session.json"), second)
 
+    def test_oracle_admission_refusals_resume_both_tiers_in_later_window(self):
+        for refusal in ("oracle-go", "oracle-fit"):
+            with (self.subTest(refusal=refusal),
+                  tempfile.TemporaryDirectory() as folder):
+                root = Path(folder).resolve()
+                owner = fixture_owner(root)
+                owner.stop_all = unittest.mock.Mock()
+                oracles = [driver.Job("oracle", "oracle", tier)
+                           for tier in driver.ARCHIVES]
+                names = [job.name for job in oracles]
+                owner.job_minutes = dict.fromkeys(names, 30)
+                owner.job_bindings = {name: {"kind": "oracle"}
+                                      for name in names}
+                admission = {"blocks": [{"id": "storage", "jobs": [
+                    {"id": name} for name in names]}]}
+                phase, ran = 1, []
+                owner.begin_block = lambda block: setattr(
+                    owner, "block_id", block["id"])
+
+                def stage(supervisor, selected, setup, rows):
+                    for job in selected:
+                        directory = root / "jobs" / job.name
+                        directory.mkdir(parents=True, exist_ok=True)
+                        try:
+                            owner.job_limit(job.name, 0)
+                            available = (6 if phase == 1 and refusal ==
+                                         "oracle-fit" else 7) * driver.GIB
+                            driver.resource_limit(fixture_resources(
+                                available_bytes=available), 3 * driver.GIB, 7,
+                                admission=True, oracle=True)
+                        except driver.ReviewRequired as error:
+                            driver.failed_output(directory, error)
+                            raise
+                        ran.append((phase, job.name))
+                        rows.append({"identity": {"job": driver.asdict(job)},
+                                     "state": "pass",
+                                     "correctness_pass": True})
+
+                with (patch.object(driver, "jobs", return_value=oracles),
+                      patch.object(driver, "execute_stage", side_effect=stage),
+                      patch.object(driver, "eligible_sdk", return_value=[]),
+                      patch.object(driver, "block_files", return_value={}),
+                      patch.object(driver.time, "monotonic", return_value=0),
+                      patch.object(driver.signal, "signal"),
+                      patch.object(driver.signal, "setitimer")):
+                    owner.window = {"id": "first", "oracle_go":
+                                    [] if refusal == "oracle-go" else names}
+                    first = driver.execute_session(owner, admission, root, {})
+                    self.assertEqual(first["blocks"]["storage"]["reason_code"],
+                                     "not-started")
+                    self.assertEqual(first["blocks"]["storage"]["state"],
+                                     "partial")
+                    self.assertEqual(ran, [])
+                    self.assertFalse(any((root / "jobs" / name /
+                        "partial.json").exists() for name in names))
+                    phase = 2
+                    owner.window = {"id": "later", "oracle_go": names}
+                    second = driver.execute_session(owner, admission, root, {})
+                self.assertEqual(second["blocks"]["storage"]["state"],
+                                 "completed")
+                self.assertEqual(ran, [(2, name) for name in names])
+                self.assertEqual(driver.read_json(root / "session.json"),
+                                 second)
+
     def test_storage_raw_rejections_are_saved_without_a_retry(self):
         for damage in ("missing", "malformed", "manifest"):
             with (self.subTest(damage=damage),
@@ -3849,6 +4008,7 @@ class KnownOutcomeTests(unittest.TestCase):
                 "state": "checks_failed", "reason": "first"})
             path.unlink()
             for error in (driver.DeadlineExceeded("time"),
+                          driver.NotStarted("oracle not admitted"),
                           driver.BudgetExceeded(2, 1)):
                 driver.failed_output(directory, error)
                 self.assertFalse(path.exists())
@@ -3934,7 +4094,8 @@ class KnownOutcomeTests(unittest.TestCase):
                  ("dependency_blocked", None, True),
                  ("skipped", "gate", True),
                  ("checks_failed", None, False),
-                 ("started", None, True), ("partial", "time", True))
+                 ("started", None, True), ("partial", "time", True),
+                 ("partial", "not-started", True))
         for state, reason, resumable in cases:
             with (self.subTest(state=state, reason=reason),
                   tempfile.TemporaryDirectory() as folder):
