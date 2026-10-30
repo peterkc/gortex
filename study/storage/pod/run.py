@@ -1529,12 +1529,8 @@ def summary(root: Path, receipts: Sequence[Mapping]) -> None:
                      and row["identity"]["job"]["adapter"] == adapter]
             if len(group) != 3:
                 continue
-            screen_passed = any(
-                row["identity"]["job"]["stage"] == "screen"
-                and row["identity"]["job"]["adapter"] == adapter
-                and row["state"] == "pass" for row in receipts
-            )
-            valid = screen_passed and all(r["state"] == "pass" for r in group)
+            # Individual samples do not prove a complete group.
+            valid = False
             metrics = {}
             if valid:
                 operations = set(group[0]["metrics"])
@@ -1596,12 +1592,37 @@ def summary(root: Path, receipts: Sequence[Mapping]) -> None:
     os.replace(temporary, root / "summary.md")
 
 
-def eligible_timings(receipts: Sequence[Mapping]) -> list[Job]:
+def eligible_timings(supervisor: Supervisor, receipts: Sequence[Mapping],
+                     setup: Mapping, bindings: Mapping) -> list[Job]:
+    root, references = supervisor.root, set()
+    for tier in ARCHIVES:
+        oracle = Job("oracle", "oracle", tier)
+        if oracle.name not in bindings or oracle.name in supervisor.bad_jobs:
+            continue
+        gomaxprocs = bindings[oracle.name]["gomaxprocs"]
+        expected = {**case_identity(oracle, root, setup, gomaxprocs),
+                    "inputs_verified": True}
+        try:
+            report = worker_json(result_path(root, oracle), oracle.name)
+            receipt = finished_case(root, oracle, expected)
+            if (receipt["state"] == "pass"
+                    and receipt.get("correctness_pass") is True
+                    and report.get("manifest_sha256") == digest(
+                        root / "data" / tier / "manifest.json")):
+                references.add(tier)
+        except FatalSession:
+            raise
+        except FileNotFoundError as error:
+            if error.filename != str(root / "jobs" / oracle.name /
+                                     "complete.json"):
+                raise
+        except ReviewRequired:
+            continue
     passed = {row["identity"]["job"]["adapter"] for row in receipts
               if row["identity"]["job"]["stage"] == "screen"
               and row["state"] == "pass"}
-    return [job for job in jobs()
-            if job.stage == "timing" and job.adapter in passed]
+    return [job for job in jobs() if job.stage == "timing"
+            and job.adapter in passed and job.tier in references]
 
 
 def budget_receipt(supervisor: Supervisor, directory: Path, base: Path,
@@ -2122,6 +2143,8 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
     outcomes = {}
     sdk = []
     setup = None
+    bindings = {job["id"]: job for block in admission["blocks"]
+                if block["id"] == "storage" for job in block["jobs"]}
     signal.signal(signal.SIGALRM, alarm_expired)
     for block in admission["blocks"]:
         block_id = block["id"]
@@ -2213,7 +2236,13 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
                 if any(row["state"] == "checks_failed" for row in sdk):
                     state = "checks_failed"
             elif block_id == "segment_timing":
-                execute_stage(supervisor, eligible_timings(sdk), setup, 1, sdk)
+                selected = eligible_timings(supervisor, sdk, setup, bindings)
+                if selected:
+                    execute_stage(supervisor, selected, setup, 1, sdk)
+                if {job.tier for job in selected} != set(ARCHIVES):
+                    state = "dependency_blocked"
+                    record["blocks"][block_id]["reason"] = (
+                        "matching-tier reference/correctness incomplete")
             elif block_id in {"catalog", "hybrid"}:
                 run_catalog_hybrid(supervisor, sdk, block_id)
             else:

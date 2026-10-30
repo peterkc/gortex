@@ -158,6 +158,47 @@ class FixtureSupervisor:
                                started=0, peak_rss=0, deadline=10000)
 
 
+def fixture_references(root):
+    paths = []
+    for tier in driver.ARCHIVES:
+        data = root / "data" / tier
+        data.mkdir(parents=True)
+        driver.atomic_json(data / "manifest.json", {"repos": ["fixture"]})
+        driver.atomic_json(data / "queries.json", [{"id": "q", "op": "id"}])
+        paths.extend((data / "manifest.json", data / "queries.json"))
+    manifest = fixture_manifest(root, paths)
+    setup = {"identity": {"driver": "fixture", "runtime": {},
+                         "input_manifest_sha256": driver.digest(manifest)},
+             "artifacts": {"bin/oracle": "fixture"}, "runtime_libraries": {}}
+    owner = FixtureSupervisor(root, ["pass", "pass"])
+    receipts = []
+    for tier in driver.ARCHIVES:
+        job = driver.Job("oracle", "oracle", tier)
+        directory = root / "jobs" / job.name
+        fake = driver.result_path(
+            root, driver.Job("screen", "oracle", "tier10"))
+        fake.parent.parent.mkdir(parents=True, exist_ok=True)
+        driver.new_attempt(owner, directory)
+        owner.start(driver.command(job, root), directory, {}, root)
+        report = driver.read_json(fake)
+        report.update(tier=tier, manifest_sha256=driver.digest(
+            root / "data" / tier / "manifest.json"))
+        fake.parent.rename(directory / "output")
+        old = directory / "output" / fake.name
+        target = driver.result_path(root, job)
+        if old != target:
+            old.rename(target)
+        driver.atomic_json(target, report)
+        receipt = {"identity": {**driver.case_identity(job, root, setup, 10),
+                               "inputs_verified": True}, "state": "pass",
+                   "correctness_pass": True, "exit_code": 0,
+                   "files": {str(p.relative_to(directory)): driver.digest(p)
+                             for p in driver.output_files([directory])}}
+        driver.atomic_json(directory / "complete.json", receipt)
+        receipts.append(receipt)
+    return owner, setup, receipts
+
+
 class DriverTests(unittest.TestCase):
     def fixture(self, root):
         (root / "jobs").mkdir()
@@ -195,7 +236,8 @@ class DriverTests(unittest.TestCase):
             self.assertEqual([r["state"] for r in receipts],
                              ["checks_failed", "pass"])
             self.assertEqual(len(supervisor.calls), 2)
-            self.assertEqual(len(driver.eligible_timings(receipts)), 6)
+            self.assertEqual(driver.eligible_timings(
+                supervisor, receipts, setup, {}), [])
             resumed = FixtureSupervisor(root, [])
             saved = []
             self.execute(resumed, selected, setup, saved)
@@ -303,6 +345,149 @@ class DriverTests(unittest.TestCase):
                           self.assertRaises(kind) as raised):
                         driver.worker_json(path, "worker-fixture")
                     self.assertIs(raised.exception, failure)
+
+    def test_timing_needs_its_exact_verified_reference(self):
+        for mode in ("valid", "missing", "report-missing", "budget",
+                     "manifest", "identity", "hash", "malformed", "input",
+                     "gomax"):
+            with self.subTest(mode=mode), \
+                    tempfile.TemporaryDirectory() as folder:
+                root = Path(folder).resolve()
+                owner, setup, references = fixture_references(root)
+                job = driver.Job("oracle", "oracle", "tier1")
+                complete = root / "jobs" / job.name / "complete.json"
+                saved = driver.read_json(complete)
+                bindings = {driver.Job("oracle", "oracle", tier).name:
+                            {"gomaxprocs": 10} for tier in driver.ARCHIVES}
+                if mode == "missing":
+                    complete.unlink()
+                elif mode == "malformed":
+                    path = driver.result_path(root, job)
+                    path.write_text("{")
+                    saved["files"][str(path.relative_to(complete.parent))] = (
+                        driver.digest(path))
+                    driver.atomic_json(complete, saved)
+                elif mode == "report-missing":
+                    driver.result_path(root, job).unlink()
+                elif mode == "input":
+                    owner.bad_jobs.add(job.name)
+                elif mode == "gomax":
+                    bindings[job.name]["gomaxprocs"] = 2
+                else:
+                    if mode == "budget":
+                        saved["state"] = "budget_exceeded"
+                    elif mode == "identity":
+                        saved["identity"]["job"]["tier"] = "tier10"
+                    elif mode in {"hash", "manifest"}:
+                        path = driver.result_path(root, job)
+                        report = driver.read_json(path)
+                        report["manifest_sha256"] = "0" * 64
+                        driver.atomic_json(path, report)
+                        if mode == "manifest":
+                            saved["files"][str(path.relative_to(
+                                complete.parent))] = driver.digest(path)
+                    driver.atomic_json(complete, saved)
+                screens = [{"identity": {"job": driver.asdict(driver.Job(
+                    "screen", name, "tier10"))}, "state": "pass"}
+                    for name in driver.FINALISTS]
+                before = complete.read_bytes() if complete.exists() else None
+                selected = driver.eligible_timings(
+                    owner, [*references, *screens], setup, bindings)
+                expected = (set(driver.ARCHIVES) if mode == "valid" else
+                            {"tier10"})
+                self.assertEqual({j.tier for j in selected}, expected)
+                self.assertEqual(len(selected), 12 if mode == "valid" else 6)
+                self.assertEqual(complete.read_bytes() if complete.exists()
+                                 else None, before)
+                if mode in {"valid", "missing"}:
+                    owner.stop_all = unittest.mock.Mock()
+                    admission = {"blocks": [
+                        {"id": "setup", "jobs": []},
+                        {"id": "storage", "jobs": [
+                            {"id": name, **profile}
+                            for name, profile in bindings.items()]},
+                        {"id": "segment_timing", "jobs": []}]}
+                    timed = []
+
+                    def stage(owner, chosen, setup, concurrency, receipts):
+                        if chosen[0].stage == "timing":
+                            timed.extend(chosen)
+                        else:
+                            receipts.extend(references if chosen[0].stage == (
+                                "oracle") else screens)
+
+                    with (patch.object(driver.signal, "signal"),
+                          patch.object(driver.signal, "setitimer"),
+                          patch.object(driver.time, "monotonic",
+                                       return_value=0),
+                          patch.object(driver, "prepare", return_value=setup),
+                          patch.object(driver, "execute_stage",
+                                       side_effect=stage),
+                          patch.object(driver, "block_files",
+                                       return_value={})):
+                        session = driver.execute_session(
+                            owner, admission, root / "inputs", {}, 1)
+                    self.assertEqual({j.tier for j in timed}, expected)
+                    state = session["blocks"]["segment_timing"]["state"]
+                    self.assertEqual(state, "completed" if mode == "valid" else
+                                     "dependency_blocked")
+
+    def test_reference_proof_bugs_do_not_become_missing_dependencies(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            owner, setup, references = fixture_references(root)
+            bindings = {driver.Job("oracle", "oracle", tier).name:
+                        {"gomaxprocs": 10} for tier in driver.ARCHIVES}
+            job = driver.Job("oracle", "oracle", "tier1")
+            artifact = root / "jobs" / job.name / "native-time.txt"
+            failures = (TypeError("synthetic proof bug"),
+                        PermissionError("synthetic proof bug"),
+                        FileNotFoundError(2, "synthetic proof bug",
+                                          str(artifact)))
+            for failure in failures:
+                with self.subTest(error=type(failure).__name__):
+                    with (patch.object(driver, "finished_case",
+                                       side_effect=failure),
+                          self.assertRaises(type(failure)) as raised):
+                        driver.eligible_timings(owner, references, setup,
+                                                bindings)
+                    self.assertIs(raised.exception, failure)
+            complete = root / "jobs" / job.name / "complete.json"
+            complete.write_text("{")
+            with self.assertRaises(json.JSONDecodeError):
+                driver.eligible_timings(owner, references, setup, bindings)
+
+    def test_individual_timing_rows_never_validate_a_comparison(self):
+        for mode in ("partial", "budget", "other-window", "all-individual"):
+            with self.subTest(mode=mode), \
+                    tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                rows = [{"identity": {"job": driver.asdict(driver.Job(
+                    "screen", name, "tier10"))}, "state": "pass",
+                    "wall_seconds": 1, "peak_rss_bytes": 1}
+                    for name in driver.FINALISTS]
+                for repeat in range(1, 4):
+                    for name in driver.FINALISTS:
+                        if mode == "partial" and repeat == 3 and name == (
+                                driver.FINALISTS[1]):
+                            continue
+                        rows.append({"identity": {"job": driver.asdict(
+                            driver.Job("timing", name, "tier10", repeat))},
+                            "attempt": {"window_id": "other" if mode == (
+                                "other-window") and name == driver.FINALISTS[1]
+                                else "current"}, "state": "budget_exceeded"
+                            if mode == "budget" and name == driver.FINALISTS[1]
+                            else "pass", "wall_seconds": 1,
+                            "peak_rss_bytes": 1, "metrics": {}})
+                driver.summary(root, rows)
+                medians = driver.read_json(root / "summary.json")[
+                    "timing_medians"]
+                self.assertTrue(medians)
+                self.assertTrue(all(row["valid_timing_comparison"] is False
+                                    for row in medians))
+                self.assertTrue(all(row["wall_seconds"] is None
+                                    and row["metrics"] == {}
+                                    for row in medians))
 
 
 class DeadlineContractTests(unittest.TestCase):
@@ -479,6 +664,8 @@ class DeadlineContractTests(unittest.TestCase):
                 patch.object(driver.signal, "setitimer"),
                 patch.object(driver, "prepare", return_value={}),
                 patch.object(driver, "execute_stage", side_effect=stage),
+                patch.object(driver, "eligible_timings", return_value=[
+                    j for j in driver.jobs() if j.stage == "timing"]),
                 patch.object(driver, "run_catalog_hybrid"),
                 patch.object(driver, "binding_block", return_value="completed"),
                 patch.object(driver, "block_files", return_value={}),
@@ -736,6 +923,9 @@ class ReviewFixTests(unittest.TestCase):
                     patch.object(driver.signal, "setitimer"),
                     patch.object(driver, "prepare", return_value={}),
                     patch.object(driver, "execute_stage", side_effect=stage),
+                    patch.object(driver, "eligible_timings", return_value=[
+                        j for j in driver.jobs() if j.stage == "timing"
+                        and j.adapter == driver.FINALISTS[0]]),
                     patch.object(driver, "run_catalog_hybrid") as dependent,
                     patch.object(driver, "binding_block",
                                  return_value="completed"),
