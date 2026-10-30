@@ -8,7 +8,7 @@ from collections import Counter, deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from functools import cache
+from functools import cache, partial
 import ctypes
 import fcntl
 import errno
@@ -142,6 +142,10 @@ class BudgetExceeded(ReviewRequired):
 class DeadlineExceeded(ReviewRequired):
     """The owned work must stop; acceptance remains incomplete."""
     reason_code = "time"
+
+
+class UnitMaximum(DeadlineExceeded):
+    reason_code = "unit-maximum"
 
 
 class NotStarted(ReviewRequired):
@@ -870,8 +874,11 @@ class Supervisor:
             self.block_deadline - CLEANUP_RESERVE_SECONDS,
             now + duration - CLEANUP_RESERVE_SECONDS,
         )
+        self.deadline_error = (UnitMaximum if self.launch_deadline <
+            self.block_deadline - CLEANUP_RESERVE_SECONDS else DeadlineExceeded
+        )
         if now >= self.launch_deadline:
-            raise DeadlineExceeded(f"{self.block_id}/{name}: job deadline")
+            raise self.deadline_error(f"{self.block_id}/{name}: job deadline")
         return self.launch_deadline
 
     def arm_guard(self) -> None:
@@ -879,6 +886,9 @@ class Supervisor:
                    *(owned.deadline for owned in self.active)])
         group = getattr(self, "group_deadline", math.inf)
         end = min(end, group - CLEANUP_RESERVE_SECONDS)
+        signal.signal(signal.SIGALRM, partial(alarm_expired, error=(
+            UnitMaximum if end < self.block_deadline - CLEANUP_RESERVE_SECONDS
+            else DeadlineExceeded)))
         signal.setitimer(signal.ITIMER_REAL,
                          max(0.000001, end - time.monotonic()))
 
@@ -916,10 +926,10 @@ class Supervisor:
             time.sleep(max(0, min(5, observation_end - time.monotonic())))
             self.guard()
             if time.monotonic() >= self.launch_deadline:
-                raise DeadlineExceeded("admission reached case deadline")
+                raise self.deadline_error("admission reached case deadline")
         self.guard(admission=True)
         if time.monotonic() >= self.launch_deadline:
-            raise DeadlineExceeded(
+            raise self.deadline_error(
                 f"{self.block_id}: absolute deadline; no spawn")
         log = (directory / "stdout-stderr.log").open("xb")
         # This controller has one thread. Defer interruption until ownership
@@ -933,7 +943,7 @@ class Supervisor:
         try:
             try:
                 if time.monotonic() >= self.launch_deadline:
-                    raise DeadlineExceeded(
+                    raise self.deadline_error(
                         f"{self.block_id}: expired before spawn")
                 if digest(self.go_file) != self.go_sha:
                     raise DeadlineExceeded("go changed before spawn")
@@ -966,6 +976,7 @@ class Supervisor:
             owned.known.add((process.pid, usage.proc_start_abstime))
             self.arm_guard()
         except (ReviewRequired, OSError):
+            signal.setitimer(signal.ITIMER_REAL, 0)
             self.stop_all()
             raise
         finally:
@@ -978,6 +989,7 @@ class Supervisor:
             "resources": self.sample,
             "command": list(args), "cwd": str(cwd),
             "absolute_deadline": owned.deadline,
+            "deadline_reason_code": self.deadline_error.reason_code,
         })
         self.observe(process_groups(self.environment, self.active))
         return owned
@@ -1081,7 +1093,7 @@ class Supervisor:
                 self.observe(process_groups(self.environment, self.active))
                 remaining = owned.deadline - time.monotonic()
                 if remaining <= 0:
-                    raise DeadlineExceeded("absolute setup deadline")
+                    raise self.deadline_error("absolute setup deadline")
                 time.sleep(min(5, remaining))
             status = owned.process.returncode
         except FatalSession:
@@ -1097,6 +1109,8 @@ class Supervisor:
                 "exit_code": owned.process.returncode,
                 "whole_group_reaped": True,
             })
+            if isinstance(error, DeadlineExceeded):
+                raise
             raise DeadlineExceeded(
                 f"{self.block_id}: absolute setup deadline"
             ) from error
@@ -1775,7 +1789,9 @@ def finished_case(root: Path, job: Job, expected: Mapping) -> dict:
             raise ReviewRequired(
                 f"completed case artifact changed: {job.name}"
             )
-    if receipt["state"] == "budget_exceeded":
+    if receipt["state"] == "budget_exceeded" or (
+            receipt["state"] == "partial"
+            and receipt.get("reason_code") == "unit-maximum"):
         return receipt
     report = read_json(result_path(root, job))
     verdict = check_result(
@@ -1816,6 +1832,11 @@ def finished_group(root: Path, expected: Mapping,
         base = root if projection else directory
         if digest(persistent_path(base / relative, base)) != sha:
             raise ReviewRequired("timing group artifact changed")
+    if receipt.get("reason_code") == "unit-maximum":
+        if (receipt["state"] != "partial" or receipt["attempt"] !=
+                read_json(directory / "attempt.json")):
+            raise ReviewRequired("unit maximum attempt changed")
+        return receipt
     samples = (projection[1](receipt["attempt"], check_only=True) if projection
                else [finished_case(root, Job(**case["job"]), case)
                      for case in expected["samples"]])
@@ -1829,7 +1850,7 @@ def finished_group(root: Path, expected: Mapping,
         required = {"attempt.json", "native-time.txt", "time.json",
                     "process.json", "rss.jsonl", "stdout-stderr.log",
                     "output/" + result_path(root, job).name}
-        if ((row["state"] != "budget_exceeded" and
+        if ((row["state"] not in {"budget_exceeded", "partial"} and
              not required <= row["files"].keys()) or
                 f"{job.name}/complete.json" not in receipt["files"]):
             raise ReviewRequired("timing group output coverage incomplete")
@@ -1846,6 +1867,7 @@ def finished_group(root: Path, expected: Mapping,
         raise ReviewRequired("timing group order/attempt/window changed")
     states = {r["state"] for r in samples}
     state = ("budget_exceeded" if "budget_exceeded" in states else
+             "partial" if "partial" in states else
              "checks_failed" if states != {"pass"} else "pass")
     if state == "pass" and any(set(r["metrics"]) != set(samples[0]["metrics"])
                                for r in samples):
@@ -1997,6 +2019,40 @@ def budget_receipt(supervisor: Supervisor, directory: Path, base: Path,
     return receipt
 
 
+def unit_partial(supervisor: Supervisor, directory: Path, base: Path,
+                 samples: Sequence[Mapping] = ()) -> dict:
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    elapsed = max((time.monotonic() - p.started for p in supervisor.active),
+                  default=0)
+    peak = max((p.peak_rss for p in supervisor.active), default=0)
+    supervisor.stop_all()
+    if not hasattr(supervisor, "group_deadline"):
+        supervisor.arm_guard()
+    receipt = {"identity": read_json(directory / "started.json"),
+               "attempt": read_json(directory / "attempt.json"),
+               "state": "partial", "reason_code": "unit-maximum",
+               "resumable": False, "samples": list(samples),
+               "wall_seconds": elapsed, "peak_rss_bytes": peak,
+               "files": {str(p.relative_to(base)): digest(
+                   persistent_path(p, supervisor.root)) for p in output_files(
+                       [directory, *directory.glob("*/complete.json")])}}
+    atomic_json(directory / "complete.json", receipt)
+    return receipt
+
+
+def execute_cases(supervisor: Supervisor, selected: Sequence[Job],
+                  setup: Mapping, receipts: list[dict],
+                  attempt: Mapping | None = None) -> None:
+    for job in selected:
+        try:
+            execute_stage(supervisor, [job], setup, receipts, attempt)
+        except UnitMaximum:
+            directory = case_directory(supervisor.root, job)
+            receipts.append(unit_partial(supervisor, directory, directory))
+            if attempt is not None:
+                return
+
+
 def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
                   setup: Mapping,
                   receipts: list[dict],
@@ -2020,13 +2076,16 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
                 atomic_json(directory / "started.json", expected)
                 rows = []
                 group_attempt = read_json(directory / "attempt.json")
-                execute_stage(supervisor, cohort, setup, rows,
+                execute_cases(supervisor, cohort, setup, rows,
                               group_attempt)
                 states = {r["state"] for r in rows}
                 state = ("budget_exceeded" if "budget_exceeded" in states else
+                         "partial" if "partial" in states else
                          "checks_failed" if states != {"pass"} else "pass")
                 cached = finished_group(root, expected, {
                     "identity": expected, "state": state, "samples": rows,
+                    "reason_code": ("unit-maximum" if state == "partial"
+                                    else ""),
                     "attempt": group_attempt, "files": {
                         str(p.relative_to(directory)): digest(p)
                         for p in [directory / "attempt.json",
@@ -2039,7 +2098,7 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
             groups.append(expected)
             summary(root, receipts, groups)
         return
-    if not supervisor.active:
+    if not supervisor.active and (attempt is None or not receipts):
         supervisor.swapouts = None
     pending = deque(selected)
     active: dict[str, tuple[Job, OwnedProcess, dict]] = {}
@@ -2055,7 +2114,8 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
         for name, (job, owned, identity) in list(active.items()):
             code = owned.process.poll()
             if time.monotonic() >= owned.deadline:
-                raise DeadlineExceeded(f"{job.stage}/{name}: job deadline")
+                raise supervisor.deadline_error(
+                    f"{job.stage}/{name}: job deadline")
             if code is None:
                 continue
             directory = owned.directory
@@ -2124,7 +2184,7 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
                 receipts.append(receipt)
                 pending.popleft()
                 if (job.stage == "oracle" and receipt["state"] not in {
-                        "pass", "budget_exceeded"}):
+                        "pass", "budget_exceeded", "partial"}):
                     raise ReviewRequired("saved reference oracle did not pass")
                 print(job.name, "validated receipt; skipped", flush=True)
                 continue
@@ -2321,7 +2381,8 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
         if attempt is not None and read_json(directory / "process.json")[
                 "window"]["id"] != attempt["window_id"]:
             raise ReviewRequired("auxiliary process window changed")
-        if receipt.get("state") not in {"budget_exceeded", "checks_failed"}:
+        if (receipt.get("reason_code") != "unit-maximum" and receipt.get(
+                "state") not in {"budget_exceeded", "checks_failed"}):
             paths = validate(directory)
             required = {str(p.relative_to(root)) for p in
                         output_files([directory, *paths])}
@@ -2352,7 +2413,8 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
             supervisor.observe(process_groups(supervisor.environment,
                                               supervisor.active))
             if time.monotonic() >= owned.deadline:
-                raise DeadlineExceeded(f"{name}: absolute auxiliary deadline")
+                raise supervisor.deadline_error(
+                    f"{name}: absolute auxiliary deadline")
             time.sleep(5)
         supervisor.close(owned)
         if supervisor.block_id == "catalog":
@@ -2360,6 +2422,10 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
             atomic_json(directory / "resources-after.json", supervisor.sample)
     except BudgetExceeded as error:
         return budget_receipt(supervisor, directory, root, error)
+    except UnitMaximum:
+        if hasattr(supervisor, "group_deadline"):
+            raise
+        return unit_partial(supervisor, directory, root)
     except ReviewRequired as error:
         failed_output(directory, error)
         raise
@@ -2469,6 +2535,7 @@ def comparison_group(supervisor: Supervisor, name: str, identity: Mapping,
         atomic_json(folder / "started.json", identity)
         attempt = read_json(folder / "attempt.json")
         supervisor.swapouts, supervisor.group_deadline = None, math.inf
+        rows = []
         try:
             rows = samples(attempt)
             states = {r["state"] for r in rows}
@@ -2480,8 +2547,11 @@ def comparison_group(supervisor: Supervisor, name: str, identity: Mapping,
                                  str(p.relative_to(root)): digest(p)
                                  for p in paths}})
             if time.monotonic() >= supervisor.launch_deadline:
-                raise DeadlineExceeded(f"{name}: group deadline")
+                raise supervisor.deadline_error(f"{name}: group deadline")
             atomic_json(folder / "complete.json", cached)
+        except UnitMaximum as error:
+            cached = unit_partial(supervisor, folder, root,
+                                  getattr(error, "samples", rows))
         finally:
             del supervisor.group_deadline
             supervisor.arm_guard()
@@ -2537,6 +2607,9 @@ def run_catalog_hybrid(supervisor: Supervisor,
                         row = auxiliary(supervisor, case["binding"], args,
                             validate, directory=folder, attempt=attempt,
                             check_only=check_only)
+                    except UnitMaximum as error:
+                        error.samples = rows
+                        raise
                     except (FatalSession, DeadlineExceeded):
                         raise
                     except ReviewRequired as error:
@@ -2595,7 +2668,11 @@ def run_catalog_hybrid(supervisor: Supervisor,
             def samples(attempt, check_only=False):
                 rows = []
                 for job, directory in cases:
-                    row = run(job, directory, attempt, check_only, config)
+                    try:
+                        row = run(job, directory, attempt, check_only, config)
+                    except UnitMaximum as error:
+                        error.samples = rows
+                        raise
                     metrics = {} if row["state"] != "pass" else {
                         k: v for k, v in worker_json(directory / (
                             job["id"] + ".json"), job["id"])["result"][
@@ -2624,7 +2701,8 @@ def run_catalog_hybrid(supervisor: Supervisor,
                        else "generated vectors; bypass segment adapters; "
                             "no real-vector timing"),
     })
-    return "checks_failed" if failed else "completed"
+    return ("partial" if any(r["state"] == "partial" for r in receipts) else
+            "checks_failed" if failed else "completed")
 
 
 def binding_block(supervisor: Supervisor, block: Mapping) -> str:
@@ -2674,6 +2752,11 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
                 paths.append(output)
             return paths
 
+        marker = directory / "partial.json"
+        if marker.is_file() and read_json(marker).get(
+                "reason_code") == "unit-maximum":
+            states.append("unit-maximum")
+            continue
         receipt = auxiliary(
             supervisor, job["id"], [str(path) if arg == job["receipt_path"]
                                     else arg for arg in job["argv"]], validate,
@@ -2682,11 +2765,20 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
         if receipt.get("state") == "budget_exceeded":
             states.append("partial")
             continue
+        if receipt.get("reason_code") == "unit-maximum":
+            states.append("unit-maximum")
+            continue
         result = worker_json(path, job["id"])
         if (result.get("exit_code") != receipt["exit_code"]
                 or (receipt["exit_code"] == 1
                     and result["state"] not in {"checks_failed", "partial"})):
             raise ReviewRequired(f"{block['id']}: fatal exit/receipt mismatch")
+        if (result.get("reason_code") == "time" and (
+                (block["id"] == "cpu_cost" and read_json(
+                    directory / "process.json")["deadline_reason_code"] ==
+                 "unit-maximum") or result.get("deadline_origin") == "unit")):
+            result = {**result, "state": "partial",
+                      "reason_code": "unit-maximum"}
         if result["state"] in {"partial", "dependency_blocked", "skipped"}:
             if result["state"] in {"partial", "skipped"}:
                 atomic_json(directory / "partial.json", {
@@ -2700,8 +2792,9 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
                 and result.get("reason_code") == "time"
                 and "partial" not in states):
             raise DeadlineExceeded(f"{job['id']}: worker time interruption")
-        states.append(result["state"])
-    if "partial" in states:
+        states.append("unit-maximum" if result.get("reason_code") ==
+                      "unit-maximum" else result["state"])
+    if "partial" in states or "unit-maximum" in states:
         return "partial"
     if "dependency_blocked" in states:
         return "dependency_blocked"
@@ -2755,8 +2848,9 @@ def block_files(root: Path, block: Mapping) -> dict[str, str]:
     return paths
 
 
-def alarm_expired(signum: int, frame: object) -> None:
-    raise DeadlineExceeded("absolute block guard expired")
+def alarm_expired(signum: int, frame: object, *,
+                  error: type[DeadlineExceeded] = DeadlineExceeded) -> None:
+    raise error("absolute bound guard expired")
 
 
 def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
@@ -2869,11 +2963,11 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
                     supervisor, inputs, identity)
             elif block_id == "storage":
                 planned = jobs()
-                execute_stage(supervisor, [j for j in planned
+                execute_cases(supervisor, [j for j in planned
                     if j.stage == "oracle"], setup, sdk)
                 selected = eligible_sdk(supervisor, sdk, setup, bindings,
                                         "screen")
-                execute_stage(supervisor, selected, setup, sdk)
+                execute_cases(supervisor, selected, setup, sdk)
                 missing = {j.tier for j in planned if j.stage == "screen"} - {
                     j.tier for j in selected}
                 if missing:
@@ -2927,6 +3021,7 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
         files = {}
         remaining = supervisor.block_deadline - time.monotonic()
         if remaining > 0:
+            signal.signal(signal.SIGALRM, alarm_expired)
             signal.setitimer(signal.ITIMER_REAL, remaining)
             try:
                 files = block_files(root, block)

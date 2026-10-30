@@ -300,6 +300,7 @@ class PartialReceiptTests(NativeFixture):
             result = self.finish(root, attempt, caught.exception)
             self.assertTrue(result["clean_handoff"])
             self.assertEqual(result["reason_code"], "time")
+            self.assertEqual(result["deadline_origin"], "unit")
 
     def test_exited_daemon_is_reaped_and_receipt_is_clean_partial(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -717,6 +718,39 @@ class FrozenV9Tests(NativeFixture):
                 spawn.assert_not_called()
             self.assertEqual(path.read_bytes(), before)
 
+    def test_combined_work_deadline_keeps_its_actual_bound_origin(self):
+        for origin, minutes in (("unit", 120), ("window", 20)):
+            with self.subTest(origin=origin), \
+                    tempfile.TemporaryDirectory() as folder:
+                root = Path(folder).resolve()
+                config = config_fixture(root)
+                self.pins(config)
+                now = 1800000000
+                window = Path(config["window_file"])
+                go = runner.native.read_json(window)
+                end = now + runner.native.WINDOW_CLEANUP_SECONDS + minutes * 60
+                go["end"] = time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
+                                           time.gmtime(end))
+                runner.write(window, go)
+                seen = []
+
+                def expire(attempt, spec, set_id, identity):
+                    seen.append(attempt.deadline_origin)
+                    with patch.object(runner.time, "time",
+                                      return_value=attempt.deadline + 1):
+                        attempt.observe()
+
+                with patch.object(runner.time, "time", return_value=now):
+                    code, result = self.main_fixture(root, config, "smoke",
+                                                     expire)
+                self.assertEqual(code, 1)
+                self.assertEqual(seen, [origin])
+                self.assertEqual(result["state"], "partial")
+                self.assertEqual(result["reason_code"], "time")
+                self.assertEqual(result["deadline_origin"], origin)
+                self.assertTrue(result["clean_handoff"])
+                self.assertEqual(result["completed_sets"], [])
+
     def test_single_set_receipt_discloses_other_unmeasured_sets(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder).resolve()
@@ -806,9 +840,12 @@ class FrozenV9Tests(NativeFixture):
             value["user_go"] = False
             runner.write(window, value)
             with (patch.object(runner.subprocess, "Popen") as spawn,
-                  self.assertRaises(runner.native.DeadlineExceeded)):
+                  self.assertRaises(runner.native.DeadlineExceeded) as caught):
                 attempt.command(["never-launch"])
             spawn.assert_not_called()
+            outcome = runner.failure(caught.exception)
+            self.assertEqual(outcome["reason_code"], "time")
+            self.assertIsNone(outcome["deadline_origin"])
             attempt.stop()
             self.assertFalse(runner.failure(runner.native.FatalSession(
                 "installed daemon returned"))["clean_handoff"])

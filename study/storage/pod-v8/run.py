@@ -196,6 +196,7 @@ class Attempt:
     def __init__(self, directory: Path, deadline: float, *, mode: str,
                  root: Path, config: Mapping, swapouts: int):
         self.directory, self.deadline = directory, deadline
+        self.deadline_origin = "unit"
         self.root, self.config, self.birth = root, config, None
         self.binary = inside(Path(config["v9"]["binary"]),
                              Path(config["scratch_root"]))
@@ -221,8 +222,9 @@ class Attempt:
         native.window_limit(native.read_json(Path(self.config["window_file"])),
                             digest(Path(self.config["manifest_file"])), now)
         if now >= self.deadline:
-            raise native.DeadlineExceeded(
-                "absolute work deadline; incomplete output")
+            error = native.DeadlineExceeded("absolute work deadline")
+            error.deadline_origin = self.deadline_origin
+            raise error
         if self.daemon is not None and self.daemon.poll() is not None:
             raise WorkFailed("owned daemon exited unexpectedly")
         if not self.samples or now - self.last_sample >= 5:
@@ -495,6 +497,7 @@ def failure(error: Exception) -> dict:
     return {"state": state, "exit_code": code,
             "reason_code": getattr(error, "reason_code", type(error).__name__),
             "reason": str(error),
+            "deadline_origin": getattr(error, "deadline_origin", None),
             "clean_handoff": state != "fatal"}
 
 
@@ -592,6 +595,10 @@ def main() -> int:
             attempt = Attempt(subdir, min(deadline, time.time() + 45 * 60),
                               mode=args.mode, root=root, config=config,
                               swapouts=sample["swapouts"])
+            attempt.deadline_origin = (
+                "window" if attempt.deadline == deadline and remaining <=
+                native.CASE_MINUTES[native.BLOCK_KINDS[args.mode]] * 60
+                else "unit")
             write(subdir / "environment.json", attempt.env)
             run_set(attempt, specs[set_id], set_id, identity)
             outcome["completed_sets"].append(set_id)
