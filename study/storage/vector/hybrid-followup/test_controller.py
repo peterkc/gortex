@@ -5,6 +5,10 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+# pod/run.py, the controller's telemetry module, imports urllib.request,
+# which loads the macOS-only _scproxy when sys.platform is "darwin". Load it
+# under the real platform before tests fake sys.platform.
+import urllib.request  # noqa: F401
 
 import run
 
