@@ -41,6 +41,14 @@ USEARCH_SHA = (
 USEARCH_URL = (
     "https://codeload.github.com/unum-cloud/USearch/tar.gz/refs/tags/v2.26.5"
 )
+CONTROL_TREES = {
+    "pod-cost": ("cpu_cost.py", "pyproject.toml", "uv.lock",
+                 "cpu-cost-v1.json"),
+    "onnx": ("main.go", "go.mod", "go.sum"),
+    "vector/hybrid-followup": ("run.py", "go.mod", "go.sum",
+                               "cmd/ann/main.go", "cmd/timing/main.go"),
+    "pod": ("run.py",),
+}
 GIB = 1024 ** 3
 MEMORY_MINIMUM = 4 * GIB
 CANDIDATE_BUDGET = 8 * GIB
@@ -179,8 +187,7 @@ def bound_jobs(root: Path) -> dict[str, list[dict]]:
             })
     for mode, name, selected, directory in hybrid_schedule(root):
         argv = [str(Path(sys.executable).resolve()), "-B",
-                str(root / "checkout/study/storage/vector"
-                    / "hybrid-followup/run.py"),
+                str(root / "control/vector/hybrid-followup/run.py"),
                 mode, "--execute", "--run-id", "pod-A1-" + mode, "--jobs-file",
                 str(directory / "selected-jobs.json"),
                 "--output-dir", str(directory)]
@@ -780,7 +787,8 @@ class Supervisor:
                 job["minutes"], CASE_MINUTES.get((kind, job["id"]),
                                                CASE_MINUTES[kind]))
         if self.block_id != "setup":
-            self.binding = setup_binding(self.root, self.setup)
+            self.binding = setup_binding(
+                self.root, self.setup, self.manifest_file)
         if self.block_id == "setup":
             self.job_limit("setup", time.monotonic())
 
@@ -1261,7 +1269,27 @@ def generate_tier10(supervisor: Supervisor, inputs: Path) -> None:
     supervisor.run(["zstd", "--output", str(archive) + ".zst", str(archive)])
 
 
-def setup_binding(root: Path, setup: Mapping) -> Mapping:
+def control_binding(root: Path, manifest_file: Path) -> dict[str, str]:
+    storage = Path(__file__).resolve().parents[1]
+    if storage.is_relative_to(root / "checkout"):
+        raise ReviewRequired("frozen-checkout controls refused")
+    paths = []
+    for name, required in CONTROL_TREES.items():
+        directory = storage / name
+        if any(not (directory / leaf).is_file() for leaf in required):
+            raise ReviewRequired(f"incomplete branch controls: {name}")
+        for base, dirs, names in os.walk(directory):
+            paths.extend(Path(base) / n for n in names)
+            paths.extend(Path(base) / n for n in dirs
+                         if (Path(base) / n).is_symlink())
+    manifest = read_json(manifest_file)
+    if not {str(p) for p in paths} <= set(manifest["jobs"].get("*", [])):
+        raise ReviewRequired("unbound common branch controls")
+    return {str(Path("control") / p.relative_to(storage)):
+            manifest["files"][str(p)] for p in paths}
+
+
+def setup_binding(root: Path, setup: Mapping, manifest_file: Path) -> Mapping:
     archives, artifacts = setup.get("archives", {}), setup["artifacts"]
     path = root / "archives.json"
     if (set(archives) != set(ARCHIVES) or read_json(path) != archives
@@ -1274,6 +1302,11 @@ def setup_binding(root: Path, setup: Mapping) -> Mapping:
     for relative, expected in binaries.items():
         if digest(root / relative) != expected:
             raise ReviewRequired("setup binary changed")
+    controls = control_binding(root, manifest_file)
+    for relative, expected in controls.items():
+        if (artifacts.get(relative) != expected
+                or digest(root / relative) != expected):
+            raise ReviewRequired("setup branch control changed")
     return {"archives": archives, "binaries": binaries}
 
 
@@ -1290,7 +1323,7 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping) -> dict:
         for path, expected in receipt["runtime_libraries"].items():
             if digest(Path(path)) != expected:
                 raise ReviewRequired(f"runtime library changed: {path}")
-        setup_binding(root, receipt)
+        setup_binding(root, receipt, supervisor.manifest_file)
         supervisor.setup = receipt
         head = (root / "checkout" / ".git" / "HEAD").read_text().strip()
         if head != COMMIT:
@@ -1304,7 +1337,8 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping) -> dict:
                                  "session.json", "python-runtime.json",
                                  "checkpoint.json", "attempts"}:
                 path.rename(previous / path.name)
-        for source in (root / "control/neon-eval", root / "control/pod-cost"):
+        for source in (root / "control" / name
+                       for name in ("neon-eval", *CONTROL_TREES)):
             if source.exists():
                 source.rename(previous / source.name)
     if not set(path.name for path in root.iterdir()) <= {
@@ -1354,9 +1388,16 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping) -> dict:
     revision = supervisor.run(["git", "rev-parse", "HEAD"], cwd=checkout)
     if revision.read_text().strip() != COMMIT:
         raise ReviewRequired("source revision mismatch")
-    for name in ("neon-eval", "pod-cost"):
+    for name in ("neon-eval",):
         copied.update(copy_tree(root, checkout / "study/storage" / name,
                                 root / "control" / name))
+    controls = {}
+    for name in CONTROL_TREES:
+        controls.update(copy_tree(root, Path(__file__).resolve().parents[1]
+                                  / name, root / "control" / name))
+    if controls != control_binding(root, supervisor.manifest_file):
+        raise ReviewRequired("copied branch control binding changed")
+    copied.update(controls)
     source_archive = root / "downloads" / "usearch-2.26.5.tar.gz"
     download(USEARCH_URL, source_archive, USEARCH_SHA, 128 * 1024 * 1024)
     extract(source_archive, root / "native", "USearch-2.26.5")
@@ -1465,7 +1506,7 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping) -> dict:
         "runtime_libraries": runtime_libraries,
     }
     atomic_json(complete, receipt)
-    setup_binding(root, receipt)
+    setup_binding(root, receipt, supervisor.manifest_file)
     supervisor.setup = receipt
     return receipt
 
@@ -2939,6 +2980,18 @@ def main() -> int:
         raise ReviewRequired("required external tool binding missing")
     if "*" in bad_jobs(manifest_path, scratch):
         raise ReviewRequired("common input/tool hash mismatch")
+    control_binding(root, manifest_path)
+    for block in config["blocks"]:
+        if block["id"] == "cpu_cost":
+            for job in block["jobs"]:
+                argv = job["argv"]
+                project = root / "control/pod-cost"
+                targets = {"python": str(project / "cpu_cost.py"),
+                           "--project": str(project)}
+                if any(flag not in argv or
+                       argv[argv.index(flag) + 1:][:1] != [target]
+                       for flag, target in targets.items()):
+                    raise ReviewRequired("unbound CPU controller path")
     env = {**environment(root), "STUDY_MANIFEST": str(manifest_path),
            "STUDY_MANIFEST_SHA": config["input_manifest_sha256"]}
     env.update(CC=external_tool("cc", env), CXX=external_tool("c++", env))

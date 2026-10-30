@@ -349,6 +349,12 @@ def execute(args: argparse.Namespace) -> int:
         config = json.loads(args.config.read_text())
         if digest(args.config) != args.config_pin:
             raise Skip("identity", "config pin mismatch")
+        controller = root / "control/pod-cost/cpu_cost.py"
+        if Path(__file__).resolve() != controller:
+            raise Skip("identity", "frozen CPU controller refused")
+        if any(not (root / p).resolve().is_relative_to(root / "control")
+               for p in config["source_files"]):
+            raise Skip("identity", "frozen CPU source binding refused")
         for relative, expected in {**config["inputs"],
                                    **config["source_files"]}.items():
             path = (root / relative).resolve()
@@ -396,7 +402,7 @@ def execute(args: argparse.Namespace) -> int:
         successor_check(
             [external_tool("go"), "build", "-p=1", "-o",
              str(output / "onnxprobe"), "."], output / "build.log", end,
-            root / "checkout/study/storage/onnx", env)
+            root / "control/onnx", env)
         setup = time.monotonic()
         tokens = precompute(root, output)
         save(output / "tokens-manifest.json", {

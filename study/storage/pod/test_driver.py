@@ -102,10 +102,28 @@ def fixture_setup(root, setup=None):
     return setup
 
 
+def fixture_control_sources(root):
+    storage = root.resolve() / "control/source/study/storage"
+    paths = []
+    for part, leaves in driver.CONTROL_TREES.items():
+        for leaf in leaves:
+            path = storage / part / leaf
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes((part + "/" + leaf).encode())
+            paths.append(path)
+    extra = storage / "vector/hybrid-followup/internal/fixture.go"
+    extra.parent.mkdir(parents=True, exist_ok=True)
+    extra.write_bytes(b"package fixture // bound whole-tree fixture")
+    paths.append(extra)
+    return storage / "pod/run.py", {str(p): driver.digest(p) for p in paths}
+
+
 def fixture_owner(root, *, setup=True):
     owner = object.__new__(driver.Supervisor)
     owner.root, owner.environment, owner.scratch = root, {}, root
-    owner.manifest_file = fixture_manifest(root)
+    owner.manifest_file = root / "control/fixture-inputs.json"
+    if not owner.manifest_file.exists():
+        owner.manifest_file = fixture_manifest(root)
     owner.bad_jobs, owner.window = set(), {"id": "fixture-window"}
     owner.active, owner.serial = [], 0
     owner.block_id = "fixture"
@@ -118,15 +136,39 @@ def fixture_owner(root, *, setup=True):
     owner.sample = fixture_resources()
     if setup:
         owner.setup = fixture_setup(root)
-        owner.binding = driver.setup_binding(root, owner.setup)
+        owner.control_source, files = fixture_control_sources(root)
+        storage = owner.control_source.parent.parent
+        for name, expected in files.items():
+            target = root / "control" / Path(name).relative_to(storage)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(Path(name).read_bytes())
+            owner.setup["artifacts"][str(target.relative_to(root))] = expected
+        manifest = driver.read_json(owner.manifest_file)
+        manifest["files"].update(files)
+        manifest["jobs"]["*"] = list(dict.fromkeys(
+            manifest["jobs"]["*"] + list(files)))
+        driver.atomic_json(owner.manifest_file, manifest)
+        driver.atomic_json(root / "setup-complete.json", owner.setup)
+        owner.native_identity["input_manifest_sha256"] = driver.digest(
+            owner.manifest_file)
+        with patch.object(driver, "__file__", str(owner.control_source)):
+            owner.binding = driver.setup_binding(
+                root, owner.setup, owner.manifest_file)
+        real_begin_block = owner.begin_block
+
+        def begin_block(block, outcomes):
+            with patch.object(driver, "__file__", str(owner.control_source)):
+                return real_begin_block(block, outcomes)
+
+        owner.begin_block = begin_block
     return owner
 
 
 class FixtureSupervisor:
     def __init__(self, root, modes, interrupt_at=None):
         self.root = root
-        self.setup = fixture_setup(root)
-        self.binding = driver.setup_binding(root, self.setup)
+        prepared = fixture_owner(root)
+        self.setup, self.binding = prepared.setup, prepared.binding
         self.environment = {}
         self.active, self.bad_jobs = [], set()
         self.scratch, self.window = root, {"id": "fixture-window"}
@@ -231,7 +273,8 @@ def fixture_references(root, setup=None):
         driver.atomic_json(data / "manifest.json", {"repos": ["fixture"]})
         driver.atomic_json(data / "queries.json", [{"id": "q", "op": "id"}])
         paths.extend((data / "manifest.json", data / "queries.json"))
-    manifest = fixture_manifest(root, paths)
+    _, controls = fixture_control_sources(root)
+    manifest = fixture_manifest(root, [*paths, *(Path(p) for p in controls)])
     if setup is None:
         setup = {"identity": {"driver": "fixture", "runtime": {}},
                  "artifacts": {"bin/oracle": "fixture"},
@@ -276,8 +319,10 @@ class DriverTests(unittest.TestCase):
         driver.atomic_json(data / "queries.json", [{"id": "q", "op": "id"}])
         selected = [driver.Job("screen", name, "tier10")
                     for name in ("sqlite-segment", "pebble-bleve")]
-        input_manifest = fixture_manifest(root, [data / "manifest.json",
-                                                 data / "queries.json"])
+        _, controls = fixture_control_sources(root)
+        input_manifest = fixture_manifest(root, [
+            data / "manifest.json", data / "queries.json",
+            *(Path(p) for p in controls)])
         setup = {"identity": {"driver": "fixture", "runtime": {},
                               "input_manifest_sha256": driver.digest(
                                   input_manifest)},
@@ -3040,6 +3085,13 @@ class DurabilityTests(unittest.TestCase):
             (root / "setup").mkdir()
             (root / "setup/log").write_text("interrupted")
             (root / "setup-started.json").write_text("{}")
+            old_controls = {}
+            for name in ("neon-eval", *driver.CONTROL_TREES):
+                directory = root / "control" / name
+                directory.mkdir(parents=True)
+                path = directory / "retained.txt"
+                path.write_text(name)
+                old_controls[directory] = name
             with self.assertRaisesRegex(FileNotFoundError, "tiers-summary"):
                 driver.prepare(owner, root / "missing-inputs", {})
             archive = list((root / "attempts/setup").iterdir())
@@ -3047,6 +3099,10 @@ class DurabilityTests(unittest.TestCase):
             self.assertEqual((archive[0] / "setup/log").read_text(),
                              "interrupted")
             self.assertFalse((root / "setup").exists())
+            for directory, name in old_controls.items():
+                self.assertFalse(directory.exists())
+                self.assertEqual((archive[0] / directory.name /
+                                  "retained.txt").read_text(), name)
             admission = {"blocks": [{"id": "smoke", "jobs": []}]}
             driver.atomic_json(root / "session.json", {
                 "identity": {"configuration": admission, "setup": {},
@@ -3750,11 +3806,10 @@ class NativeEntryTests(unittest.TestCase):
         control.mkdir()
         inputs = scratch / "inputs"
         inputs.mkdir()
-        data, launcher, staged = inputs / "data", scratch / "python", (
-            scratch / "driver.py")
+        staged, sources = fixture_control_sources(scratch)
+        data, launcher = inputs / "data", scratch / "python"
         data.write_text("tiny input")
         launcher.write_text("fixture launcher")
-        staged.write_text("fixture driver")
         config_path = control / "config.json"
         manifest = control / "inputs.json"
         identities, go = control / "identities.json", control / "go.json"
@@ -3775,12 +3830,19 @@ class NativeEntryTests(unittest.TestCase):
                       {**job, "argv": [str(launcher)]} for job in entries]}
                       for block, entries in DeadlineContractTests().bindings(
                           scratch / "mac-run" / run_id).items()]}
+        for block in config["blocks"]:
+            if block["id"] == "cpu_cost":
+                project = scratch / "mac-run" / run_id / "control/pod-cost"
+                for job in block["jobs"]:
+                    job["argv"] += ["--project", str(project), "python",
+                                    str(project / "cpu_cost.py")]
         driver.atomic_json(config_path, config)
         files = {str(p): driver.digest(p) for p in (
             data, launcher, staged, config_path, identities)}
         tool = scratch / "tool"
         tool.write_bytes(b"fixture tool; never executed")
         files[str(tool)] = driver.digest(tool)
+        files.update(sources)
         tools = dict.fromkeys(("go cmake c++ cc make git file zstd time ps "
             "lsof sysctl vm_stat pmset launchctl lipo otool").split(),
             str(tool))
@@ -3806,6 +3868,14 @@ class NativeEntryTests(unittest.TestCase):
                     for job in entries]} for block, entries in
                     DeadlineContractTests().bindings(
                         scratch / "mac-run" / run_id).items()]
+                for block in config["blocks"]:
+                    if block["id"] == "cpu_cost":
+                        project = scratch / "mac-run" / run_id
+                        project = project / "control/pod-cost"
+                        for job in block["jobs"]:
+                            job["argv"] += ["--project", str(project),
+                                            "python", str(project /
+                                                          "cpu_cost.py")]
                 path = config_path.with_name(run_id + ".json")
                 driver.atomic_json(path, config)
                 document["files"][str(path)] = driver.digest(path)
@@ -3945,6 +4015,45 @@ class NativeEntryTests(unittest.TestCase):
                 driver.main()
             owner.assert_not_called()
             self.assertFalse(root.exists())
+
+    def test_frozen_cpu_script_and_project_refuse_before_creation(self):
+        for flag in ("python", "--project", "missing-python",
+                     "missing-project"):
+            with (self.subTest(flag=flag),
+                  tempfile.TemporaryDirectory() as folder):
+                scratch = Path(folder).resolve()
+                config, manifest, staged = self.inputs(scratch, "frozen")
+                root = scratch / "mac-run/frozen"
+                value = driver.read_json(config)
+                cpu = next(b for b in value["blocks"]
+                           if b["id"] == "cpu_cost")["jobs"][0]["argv"]
+                role = flag.removeprefix("missing-")
+                position = cpu.index(role)
+                if flag.startswith("missing-"):
+                    del cpu[position:position + 2]
+                else:
+                    cpu[position + 1] = str(root / "checkout/study/storage"
+                        / ("pod-cost/cpu_cost.py" if flag == "python"
+                           else "pod-cost"))
+                driver.atomic_json(config, value)
+                document = driver.read_json(manifest)
+                document["files"][str(config)] = driver.digest(config)
+                driver.atomic_json(manifest, document)
+                with (patch.object(driver, "__file__", str(staged)),
+                      patch.object(driver, "environment") as env,
+                      patch.object(driver.subprocess, "Popen") as spawn,
+                      patch.object(driver, "Supervisor") as owner,
+                      patch.object(Path, "mkdir") as mkdir,
+                      patch.object(sys, "argv", ["run.py", "--native",
+                          str(config), "--root", str(root)]),
+                      self.assertRaisesRegex(driver.ReviewRequired,
+                                             "CPU controller")):
+                    driver.main()
+                env.assert_not_called()
+                spawn.assert_not_called()
+                owner.assert_not_called()
+                mkdir.assert_not_called()
+                self.assertFalse(root.exists())
 
     def test_actual_native_bindings_refuse_before_any_effect(self):
         for damage in ("missing-block", "duplicate-block", "duplicate-job",
@@ -5653,6 +5762,124 @@ class MacHybridCallerTests(unittest.TestCase):
 
 
 
+class ControlBundleTests(unittest.TestCase):
+    def test_repeated_supervisors_preserve_bound_input_identity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            _, setup, _ = DriverTests().fixture(root)
+            first = FixtureSupervisor(root, [])
+            manifest = first.manifest_file.read_bytes()
+            complete = (root / "setup-complete.json").read_bytes()
+            second = FixtureSupervisor(root, [])
+            self.assertEqual(second.manifest_file.read_bytes(), manifest)
+            self.assertEqual((root / "setup-complete.json").read_bytes(),
+                             complete)
+            self.assertEqual(second.native_identity, first.native_identity)
+            self.assertEqual(second.binding, first.binding)
+            self.assertEqual(setup["identity"]["input_manifest_sha256"],
+                             driver.digest(second.manifest_file))
+
+    def test_copy_resume_and_hybrid_commands_use_the_whole_branch_bundle(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            owner, inputs, setup = DatasetBindingTests().prepare_fixture(root)
+            with patch.object(driver, "__file__", str(owner.control_source)):
+                expected = driver.control_binding(root, owner.manifest_file)
+                self.assertEqual({p: h for p, h in setup["artifacts"].items()
+                                  if p.startswith("control/")}, expected)
+                self.assertIn("control/vector/hybrid-followup/internal/"
+                              "fixture.go", expected)
+                self.assertTrue(all(driver.digest(root / p) == h
+                                    for p, h in expected.items()))
+                self.assertTrue(owner.build_directories)
+                self.assertTrue(all(p.is_relative_to(root / "checkout")
+                                    for p in owner.build_directories))
+                self.assertEqual((root / "checkout/.git/HEAD").read_text(),
+                                 driver.COMMIT)
+                before = {p: (root / p).read_bytes() for p in expected}
+                with patch.object(owner, "run") as spawn:
+                    self.assertEqual(driver.prepare(
+                        owner, inputs, setup["identity"]), setup)
+                    spawn.assert_not_called()
+                self.assertEqual(
+                    {p: (root / p).read_bytes() for p in expected}, before)
+            for job in driver.bound_jobs(root)["hybrid"]:
+                self.assertEqual(job["argv"][2], str(
+                    root / "control/vector/hybrid-followup/run.py"))
+
+    def test_control_damage_or_dropped_binding_never_restarts_work(self):
+        for damage in ("bytes", "missing", "binding"):
+            for boundary in ("resume", "block"):
+                with (self.subTest(damage=damage, boundary=boundary),
+                      tempfile.TemporaryDirectory() as folder):
+                    root = Path(folder).resolve()
+                    owner, inputs, setup = (
+                        DatasetBindingTests().prepare_fixture(root))
+                    relative = ("control/vector/hybrid-followup/internal/"
+                                "fixture.go")
+                    target = root / relative
+                    if damage == "bytes":
+                        target.write_bytes(b"changed control")
+                    elif damage == "missing":
+                        target.unlink()
+                    else:
+                        setup["artifacts"].pop(relative)
+                        driver.atomic_json(root / "setup-complete.json", setup)
+                    saved = (root / "setup-complete.json").read_bytes()
+                    before = target.read_bytes() if target.exists() else None
+                    with (patch.object(driver, "__file__", str(
+                              owner.control_source)),
+                          patch.object(owner, "permissions", return_value=99),
+                          patch.object(owner, "run") as run,
+                          patch.object(driver.subprocess, "Popen") as spawn,
+                          self.assertRaises((driver.ReviewRequired, OSError))):
+                        if boundary == "resume":
+                            driver.prepare(owner, inputs, setup["identity"])
+                        else:
+                            owner.begin_block({"id": "smoke", "jobs": []}, {})
+                    run.assert_not_called()
+                    spawn.assert_not_called()
+                    self.assertEqual(
+                        (root / "setup-complete.json").read_bytes(), saved)
+                    self.assertEqual(target.read_bytes() if target.exists()
+                                     else None, before)
+
+    def test_missing_unbound_aliased_and_frozen_sources_refuse(self):
+        for damage in ("missing", "unbound", "alias", "frozen"):
+            with (self.subTest(damage=damage),
+                  tempfile.TemporaryDirectory() as folder):
+                root = Path(folder).resolve()
+                owner = fixture_owner(root)
+                script = owner.control_source
+                source = script.parent.parent / "onnx/main.go"
+                manifest = driver.read_json(owner.manifest_file)
+                if damage == "missing":
+                    source.unlink()
+                elif damage == "unbound":
+                    manifest["jobs"]["*"].remove(str(source))
+                    driver.atomic_json(owner.manifest_file, manifest)
+                elif damage == "alias":
+                    actual = source.with_name("actual.go")
+                    source.rename(actual)
+                    source.symlink_to(actual)
+                else:
+                    script = root / "checkout/study/storage/pod/run.py"
+                with (patch.object(driver, "__file__", str(script)),
+                      patch.object(driver.subprocess, "Popen") as spawn,
+                      self.assertRaises(driver.ReviewRequired)):
+                    driver.bad_jobs(owner.manifest_file, root)
+                    driver.control_binding(root, owner.manifest_file)
+                spawn.assert_not_called()
+
+    def test_changed_common_source_revokes_the_manifest(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            owner = fixture_owner(root)
+            source = owner.control_source.parent.parent / "onnx/main.go"
+            source.write_bytes(b"changed common source")
+            self.assertEqual(driver.bad_jobs(owner.manifest_file, root), {"*"})
+
+
 class DatasetBindingTests(unittest.TestCase):
     """Producer stubs test bindings, not real corpus generation."""
 
@@ -5690,7 +5917,13 @@ class DatasetBindingTests(unittest.TestCase):
         driver.atomic_json(owner.manifest_file, manifest)
         owner.environment["STUDY_MANIFEST_SHA"] = driver.digest(
             owner.manifest_file)
-        owner.calls = []
+        owner.control_source, controls = fixture_control_sources(root)
+        manifest["files"].update(controls)
+        manifest["jobs"]["*"] = list(manifest["files"])
+        driver.atomic_json(owner.manifest_file, manifest)
+        owner.environment["STUDY_MANIFEST_SHA"] = driver.digest(
+            owner.manifest_file)
+        owner.calls, owner.build_directories = [], []
 
         def dataset(tier, count, repos):
             directory = root / "data" / tier
@@ -5723,6 +5956,7 @@ class DatasetBindingTests(unittest.TestCase):
                 path.parent.mkdir(parents=True)
                 path.write_bytes(b"static library")
             if args[:2] == ["go", "build"]:
+                owner.build_directories.append(options["cwd"])
                 Path(args[args.index("-o") + 1]).write_bytes(b"binary")
             if args[0] == str(root / "bin/gen"):
                 self.assertEqual(args[args.index("-repos") + 1], "10")
@@ -5743,11 +5977,19 @@ class DatasetBindingTests(unittest.TestCase):
 
         owner.run = run
         owner.window = {"id": "fixture"}
-        patches = (patch.object(driver, "ARCHIVES", {
+        real_copy = driver.copy_tree
+
+        def copy(root, source, destination):
+            if source.is_relative_to(owner.control_source.parent.parent):
+                return real_copy(root, source, destination)
+            return {}
+
+        patches = (patch.object(driver, "__file__", str(owner.control_source)),
+            patch.object(driver, "ARCHIVES", {
             "tier1": pin, "tier10": None}),
             patch.object(driver, "download"),
             patch.object(driver, "extract", side_effect=extract),
-            patch.object(driver, "copy_tree", return_value={}))
+            patch.object(driver, "copy_tree", side_effect=copy))
         return owner, inputs, patches
 
     def prepare_fixture(self, root, **options):
@@ -5777,12 +6019,14 @@ class DatasetBindingTests(unittest.TestCase):
             self.assertEqual(identity["archives"], setup["archives"])
             self.assertEqual(identity["binaries"]["bin/gen"],
                              setup["artifacts"]["bin/gen"])
-            with patch.object(owner, "run") as spawn:
+            with (patch.object(driver, "__file__", str(owner.control_source)),
+                  patch.object(owner, "run") as spawn):
                 self.assertEqual(driver.prepare(owner, inputs,
                     setup["identity"]), setup)
                 spawn.assert_not_called()
             Path(record["path"]).write_bytes(b"drift")
-            with self.assertRaises(driver.ReviewRequired):
+            with (patch.object(driver, "__file__", str(owner.control_source)),
+                  self.assertRaises(driver.ReviewRequired)):
                 driver.prepare(owner, inputs, setup["identity"])
 
     def test_superseded_and_mismatched_counts_never_bind(self):
@@ -5805,7 +6049,7 @@ class DatasetBindingTests(unittest.TestCase):
                 root = Path(folder)
                 selected, setup, _ = DriverTests().fixture(root)
                 owner = fixture_owner(root)
-                owner.setup = setup
+                setup = owner.setup
                 with patch.object(owner, "permissions", return_value=10000):
                     owner.begin_block({"id": "smoke", "jobs": []}, {})
                 if damage == "missing":

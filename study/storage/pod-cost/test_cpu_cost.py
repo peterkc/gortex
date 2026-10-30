@@ -357,6 +357,65 @@ class CostTests(unittest.TestCase):
             self.assertFalse(receipt.exists())
 
 
+    def test_frozen_controller_and_source_bindings_refuse_before_work(self):
+        for damage in ("controller", "source"):
+            with (self.subTest(damage=damage),
+                  tempfile.TemporaryDirectory() as folder):
+                root = Path(folder).resolve()
+                controller = root / "control/pod-cost/cpu_cost.py"
+                frozen = root / "checkout/study/storage/onnx/main.go"
+                frozen.parent.mkdir(parents=True)
+                frozen.write_bytes(b"frozen source")
+                old_controller = root / "checkout/study/storage/pod-cost"
+                old_controller.mkdir()
+                old_controller = old_controller / "cpu_cost.py"
+                old_controller.write_bytes(b"frozen controller")
+                sources = ({"checkout/study/storage/onnx/main.go":
+                            cost.digest(frozen)} if damage == "source" else {})
+                config = root / "config.json"
+                config.write_text(json.dumps({"inputs": {},
+                    "source_files": sources, "ort": {}, "recipe": {}}))
+                args = cost.argparse.Namespace(
+                    root=root, config=config,
+                    receipt=root / "results/receipt.json",
+                    source_pin="a" * 40, config_pin=cost.digest(config),
+                    input_pin=hashlib.sha256(b"{}").hexdigest())
+                location = (old_controller if damage == "controller"
+                            else controller)
+                with (patch.object(cost, "__file__", str(location)),
+                      patch.object(cost, "successor_check") as build,
+                      patch.object(cost, "precompute") as tokens,
+                      patch.object(cost, "probe") as probe):
+                    self.assertEqual(cost.execute(args), 0)
+                record = json.loads(args.receipt.read_text())
+                self.assertEqual((record["state"], record["reason_code"]),
+                                 ("skipped", "identity"))
+                self.assertTrue(record["clean_handoff"])
+                build.assert_not_called()
+                tokens.assert_not_called()
+                probe.assert_not_called()
+
+    def test_template_sources_and_config_pin_match_the_branch_bundle(self):
+        storage = Path(cost.__file__).resolve().parent.parent
+        template = storage / "pod-cost/cpu-cost-v1.json"
+        config = json.loads(template.read_text())
+        expected = {"control/onnx/" + n for n in
+                    ("main.go", "go.mod", "go.sum")}
+        expected.update("control/pod-cost/" + n for n in
+                        ("cpu_cost.py", "pyproject.toml", "uv.lock"))
+        self.assertEqual(set(config["source_files"]), expected)
+        for name, sha in config["source_files"].items():
+            self.assertEqual(cost.digest(storage / name.removeprefix(
+                "control/")), sha)
+        bindings = json.loads((storage / "pod/control/bindings.json")
+                              .read_text())["cpu_cost"][0]
+        self.assertEqual(bindings["config_pin"], cost.digest(template))
+        argv = bindings["argv"]
+        self.assertEqual(argv[argv.index("--config-pin") + 1],
+                         bindings["config_pin"])
+        self.assertEqual(bindings["source_pin"],
+                         "5bab54d2dd8b7165f7b813f9644857f694e28ede")
+
     def execute_fixture(self, root, prepare, probe=None, cases=None, *,
                         clean=True, wheel_pin=MAC_WHEEL,
                         member_names=("libonnxruntime.1.31.0.dylib",),
@@ -388,6 +447,8 @@ class CostTests(unittest.TestCase):
             input_pin=hashlib.sha256(b"{}").hexdigest())
         with (
             patch.dict(os.environ, dict(os.environ)),
+            patch.object(cost, "__file__", str(
+                root / "control/pod-cost/cpu_cost.py")),
             patch.object(cost, "sys", SimpleNamespace(
                 platform=platform_name, executable=sys.executable)),
             patch.object(cost.platform, "machine", return_value=machine),
