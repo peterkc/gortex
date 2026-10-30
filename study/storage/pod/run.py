@@ -157,7 +157,7 @@ def bound_jobs(root: Path) -> dict[str, list[dict]]:
         "segment_timing": [{"id": job.name, "argv": command(job, root),
                             "minutes": 45,
                             "receipt_path": str(
-                                root / "jobs" / job.name / "complete.json")}
+                                case_directory(root, job) / "complete.json")}
                            for job in jobs() if job.stage == "timing"],
         "catalog": [], "hybrid": [],
     }
@@ -313,11 +313,16 @@ def jobs() -> tuple[Job, ...]:
     )
 
 
+def case_directory(root: Path, job: Job) -> Path:
+    group = f"timing-{job.tier}" if job.stage == "timing" else ""
+    return root / "jobs" / group / job.name
+
+
 def command(job: Job, root: Path) -> list[str]:
     args = [
         str(root / "bin" / job.adapter), "-data",
         str(root / "data" / job.tier), "-out",
-        str(root / "jobs" / job.name / "output"), "-runs", "1",
+        str(case_directory(root, job) / "output"), "-runs", "1",
         "-warmup=false", "-crash-trials", "12", "-safety-timeout", "15m",
     ]
     if job.stage == "timing":
@@ -1037,18 +1042,26 @@ def bad_jobs(path: Path, scratch: Path) -> set[str]:
             if bad.intersection(names)}
 
 
-def reusable(directory: Path, verify: Callable[[], dict]) -> dict | None:
+def reusable(directory: Path, verify: Callable[[], dict], *,
+             strict: bool = False) -> dict | None:
     persistent_path(directory, directory.parents[1])
     budget = (directory / "budget-exceeded.json").is_file()
     try:
         budget = budget or ((directory / "complete.json").is_file()
             and read_json(directory / "complete.json").get("state")
             == "budget_exceeded")
+        if strict:
+            budget = budget or any(directory.glob("*/budget-exceeded.json"))
+            budget = budget or any(read_json(p).get("state") != "pass"
+                for p in (directory / "complete.json",
+                          *directory.glob("*/complete.json"))
+                if p.is_file())
         return verify()
     except FatalSession:
         raise
     except (ReviewRequired, OSError, KeyError, TypeError, ValueError) as error:
-        if budget:
+        if budget or (strict and not isinstance(error, (
+                ReviewRequired, FileNotFoundError))):
             raise
         atomic_json(directory / "partial.json", {
             "state": "partial", "reason": str(error)})
@@ -1477,7 +1490,7 @@ def environment(root: Path) -> dict[str, str]:
 
 
 def result_path(root: Path, job: Job) -> Path:
-    return (root / "jobs" / job.name / "output"
+    return (case_directory(root, job) / "output"
             / f"{job.adapter}-{job.tier}-01.json")
 
 
@@ -1497,7 +1510,7 @@ def case_identity(job: Job, root: Path, setup: Mapping,
 
 
 def finished_case(root: Path, job: Job, expected: Mapping) -> dict:
-    directory = root / "jobs" / job.name
+    directory = case_directory(root, job)
     receipt = read_json(directory / "complete.json")
     if receipt["identity"] != expected:
         raise ReviewRequired(f"completed case identity changed: {job.name}")
@@ -1519,7 +1532,63 @@ def finished_case(root: Path, job: Job, expected: Mapping) -> dict:
     return receipt
 
 
-def summary(root: Path, receipts: Sequence[Mapping]) -> None:
+def timing_identity(supervisor: Supervisor, tier: str, setup: Mapping) -> dict:
+    root = supervisor.root
+    return {"tier": tier, "pair": list(FINALISTS), "reference": FINALISTS[0],
+            "ratio": "B/A", "operation": "segment-sdk",
+            "inputs": {name: digest(root / "data" / tier / name)
+                       for name in ("manifest.json", "queries.json")},
+            "oracle": digest(root / "jobs" / Job(
+                "oracle", "oracle", tier).name / "complete.json"),
+            "samples": [{**case_identity(job, root, setup,
+                supervisor.job_bindings[job.name]["gomaxprocs"]),
+                "inputs_verified": job.name not in supervisor.bad_jobs}
+                for job in jobs()
+                if job.stage == "timing" and job.tier == tier]}
+
+
+def finished_group(root: Path, expected: Mapping,
+                   receipt: dict | None = None) -> dict:
+    directory = root / "jobs" / f"timing-{expected['tier']}"
+    if receipt is None:
+        receipt = read_json(directory / "complete.json")
+    if (receipt["identity"] != expected
+            or read_json(directory / "started.json") != expected):
+        raise ReviewRequired("timing group identity changed")
+    for relative, sha in receipt["files"].items():
+        if digest(persistent_path(directory / relative, directory)) != sha:
+            raise ReviewRequired("timing group artifact changed")
+    samples = [finished_case(root, Job(**case["job"]), case)
+               for case in expected["samples"]]
+    for case, row in zip(expected["samples"], samples):
+        job = Job(**case["job"])
+        required = {"attempt.json", "native-time.txt", "time.json",
+                    "process.json", "rss.jsonl", "stdout-stderr.log",
+                    "output/" + result_path(root, job).name}
+        if ((row["state"] != "budget_exceeded" and
+             not required <= row["files"].keys()) or
+                f"{job.name}/complete.json" not in receipt["files"]):
+            raise ReviewRequired("timing group output coverage incomplete")
+    if (receipt["samples"] != samples or len(samples) != 6
+            or not receipt["attempt"]["window_id"]
+            or not receipt["attempt"]["attempt_id"]
+            or any(row["attempt"] != receipt["attempt"] for row in samples)
+            or receipt["attempt"] != read_json(directory / "attempt.json")):
+        raise ReviewRequired("timing group order/attempt/window changed")
+    states = {r["state"] for r in samples}
+    state = ("budget_exceeded" if "budget_exceeded" in states else
+             "checks_failed" if states != {"pass"} else "pass")
+    if state == "pass" and any(set(r["metrics"]) != set(samples[0]["metrics"])
+                               for r in samples):
+        raise ReviewRequired("timing group operation coverage changed")
+    if receipt["state"] != state:
+        raise ReviewRequired("timing group outcome changed")
+    return receipt
+
+
+def summary(root: Path, receipts: Sequence[Mapping],
+            groups: Sequence[Mapping] = ()) -> None:
+    verified = {g["tier"]: finished_group(root, g) for g in groups}
     medians = []
     for tier in ARCHIVES:
         for adapter in FINALISTS:
@@ -1529,8 +1598,8 @@ def summary(root: Path, receipts: Sequence[Mapping]) -> None:
                      and row["identity"]["job"]["adapter"] == adapter]
             if len(group) != 3:
                 continue
-            # Individual samples do not prove a complete group.
-            valid = False
+            valid = (tier in verified and verified[tier]["state"] == "pass" and
+                     all(row in verified[tier]["samples"] for row in group))
             metrics = {}
             if valid:
                 operations = set(group[0]["metrics"])
@@ -1556,7 +1625,21 @@ def summary(root: Path, receipts: Sequence[Mapping]) -> None:
                 else None,
                 "metrics": metrics,
             })
+    ratios = []
+    for tier, proof in verified.items():
+        if proof["state"] != "pass":
+            continue
+        samples = proof["samples"]
+        for operation in samples[0]["metrics"]:
+            values = [b["metrics"][operation]["mean_ns"] /
+                      a["metrics"][operation]["mean_ns"]
+                      for a, b in zip(samples[::2], samples[1::2])]
+            ratios.append({"tier": tier, "operation": operation,
+                           "pairs": values, "pair_count": len(values),
+                           "median": statistics.median(values),
+                           "min": min(values), "max": max(values)})
     atomic_json(root / "summary.json", {
+        "paired_ratios": {"orientation": "B/A", "operations": ratios},
         "source": COMMIT, "jobs_expected": len(jobs()),
         "scope": "SDK correctness/segment timing; auxiliary in aux-summary.json",
         "jobs_completed": len(receipts), "cases": list(receipts),
@@ -1644,10 +1727,48 @@ def budget_receipt(supervisor: Supervisor, directory: Path, base: Path,
 
 def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
                   setup: Mapping, concurrency: int,
-                  receipts: list[dict]) -> None:
+                  receipts: list[dict],
+                  attempt: Mapping | None = None) -> None:
     if concurrency != 1:
         raise FatalSession("whole-Mac correctness/timing cases must be serial")
     root = supervisor.root
+    if selected and selected[0].stage == "timing" and attempt is None:
+        groups = []
+        for tier in ARCHIVES:
+            cohort = [j for j in selected if j.tier == tier]
+            if not cohort:
+                continue
+            expected = timing_identity(supervisor, tier, setup)
+            if [asdict(j) for j in cohort] != [c["job"] for c in
+                                               expected["samples"]]:
+                raise ReviewRequired("incomplete or unordered timing group")
+            directory = root / "jobs" / f"timing-{tier}"
+            cached = reusable(directory, lambda: finished_group(
+                root, expected), strict=True) if directory.exists() else None
+            if cached is None:
+                new_attempt(supervisor, directory)
+                atomic_json(directory / "started.json", expected)
+                rows = []
+                group_attempt = read_json(directory / "attempt.json")
+                execute_stage(supervisor, cohort, setup, 1, rows,
+                              group_attempt)
+                states = {r["state"] for r in rows}
+                state = ("budget_exceeded" if "budget_exceeded" in states else
+                         "checks_failed" if states != {"pass"} else "pass")
+                cached = finished_group(root, expected, {
+                    "identity": expected, "state": state, "samples": rows,
+                    "attempt": group_attempt, "files": {
+                        str(p.relative_to(directory)): digest(p)
+                        for p in [directory / "attempt.json",
+                                  directory / "started.json", *(
+                            case_directory(root, j) / name
+                            for j, row in zip(cohort, rows)
+                            for name in (*row["files"], "complete.json"))]}})
+                atomic_json(directory / "complete.json", cached)
+            receipts.extend(cached["samples"])
+            groups.append(expected)
+            summary(root, receipts, groups)
+        return
     if not supervisor.active:
         supervisor.swapouts = None
     pending = deque(selected)
@@ -1667,7 +1788,7 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
                 raise DeadlineExceeded(f"{job.stage}/{name}: job deadline")
             if code is None:
                 continue
-            directory = root / "jobs" / name
+            directory = owned.directory
             supervisor.close(owned)
             path = result_path(root, job)
             report = worker_json(path, name)
@@ -1724,9 +1845,9 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
             gomaxprocs = supervisor.job_bindings[job.name]["gomaxprocs"]
             identity = {**case_identity(job, root, setup, gomaxprocs),
                         "inputs_verified": job.name not in supervisor.bad_jobs}
-            directory = root / "jobs" / job.name
-            receipt = reusable(directory, lambda: finished_case(
-                root, job, identity)) if directory.exists() else None
+            directory = case_directory(root, job)
+            receipt = (reusable(directory, lambda: finished_case(root, job,
+                identity)) if attempt is None and directory.exists() else None)
             if receipt is not None:
                 receipts.append(receipt)
                 pending.popleft()
@@ -1735,10 +1856,17 @@ def execute_stage(supervisor: Supervisor, selected: Sequence[Job],
                     raise ReviewRequired("saved reference oracle did not pass")
                 print(job.name, "validated receipt; skipped", flush=True)
                 continue
-            new_attempt(supervisor, directory)
+            if attempt is None:
+                new_attempt(supervisor, directory)
+            else:
+                directory.mkdir()
+                atomic_json(directory / "attempt.json", dict(attempt))
             atomic_json(directory / "started.json", identity)
             env = {**supervisor.environment, "GOMAXPROCS": str(gomaxprocs)}
+            baseline = supervisor.swapouts
             supervisor.job_limit(job.name, time.monotonic())
+            if attempt is not None:
+                supervisor.swapouts = baseline
             try:
                 owned = supervisor.start([
                     "/usr/bin/time", "-p", "-l", "-o",
@@ -2092,6 +2220,8 @@ def block_files(root: Path, block: Mapping) -> dict[str, str]:
         path = (root / "setup-complete.json" if block["id"] == "setup" else
                 root / ("jobs" if block["id"] in {"storage", "segment_timing"}
                         else "aux") / job["id"] / "complete.json")
+        if block["id"] == "segment_timing":
+            path = Path(job["receipt_path"]).parents[1] / "complete.json"
         if not path.exists():
             continue  # Measured correctness rejection can omit dependent jobs.
         paths[str(path.relative_to(root))] = digest(path)

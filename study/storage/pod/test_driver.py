@@ -111,12 +111,14 @@ class FixtureSupervisor:
         mode = self.modes[len(self.calls)-1]
         adapter = Path(args[args.index("-data")-1]).name
         job = driver.Job("screen", adapter, "tier10")
+        if "-timing-only" in args:
+            job = next(j for j in driver.jobs() if j.name == directory.name)
         check = {"query_id": "q", "operation": "id", "status": "passed",
                  "mismatch": False}
         report = {
-            "adapter": adapter, "tier": "tier10", "run": 1,
+            "adapter": adapter, "tier": job.tier, "run": 1,
             "manifest_sha256": driver.digest(
-                self.root / "data/tier10/manifest.json"),
+                self.root / "data" / job.tier / "manifest.json"),
             "success": mode == "pass", "builds": [{"repo": "fixture"}],
             "checks": [check], "peak_rss_bytes": 1, "failures": [],
             "metrics": {key: {"count": 1} for key in (
@@ -142,6 +144,15 @@ class FixtureSupervisor:
             report["failures"].append("loader fatal")
         if mode == "incomplete":
             report["crash"] = []
+        if job.stage == "timing":
+            report.update(timing_only=True, skipped_phases=driver.SKIPPED)
+            for key in ("delta_checks", "concurrent", "crash"):
+                del report[key]
+            value = job.repeat * 100 * (
+                job.repeat + 1 if adapter == driver.FINALISTS[1] else 1)
+            for metric in report["metrics"].values():
+                metric.update({key: value for key in
+                               ("p50_ns", "p95_ns", "p99_ns", "mean_ns")})
         path = driver.result_path(self.root, job)
         path.parent.mkdir()
         driver.atomic_json(path, report)
@@ -488,6 +499,443 @@ class DriverTests(unittest.TestCase):
                 self.assertTrue(all(row["wall_seconds"] is None
                                     and row["metrics"] == {}
                                     for row in medians))
+
+
+class TimingGroupTests(unittest.TestCase):
+    def owner(self, root, modes=None, *, window="group-window-1", stop=None):
+        owner = FixtureSupervisor(root, modes if modes is not None else
+                                  ["pass"] * 6, interrupt_at=stop)
+        owner.window = {"id": window}
+        owner.block_id, owner.block_deadline = "segment_timing", 40000
+        owner.case, owner.current_rss = {}, 0
+        owner.arm_guard = unittest.mock.Mock()
+        owner.job_bindings = {j["id"]: {
+            **j, "kind": driver.BLOCK_KINDS["segment_timing"],
+            "estimated_peak_bytes": driver.GIB, "gomaxprocs": 10}
+            for j in driver.bound_jobs(root)["segment_timing"]}
+        owner.job_minutes = {name: 45 for name in owner.job_bindings}
+        return owner
+
+    def fixture(self, root):
+        _, setup, references = fixture_references(root)
+        setup["artifacts"].update({"bin/" + name: "fixture"
+                                   for name in driver.FINALISTS})
+        selected = [j for j in driver.jobs() if j.stage == "timing"
+                    and j.tier == "tier1"]
+        return self.owner(root), setup, selected, references
+
+    def run_group(self, owner, setup, selected, *, clock=None):
+        rows = []
+        now = lambda: 0 if clock is None else clock[0]
+        with (patch.object(driver, "process_groups", return_value={}),
+              patch.object(driver.time, "sleep"),
+              patch.object(driver.time, "monotonic", side_effect=now)):
+            driver.execute_stage(owner, selected, setup, 1, rows)
+        return rows
+
+    def group_path(self, root):
+        return root / "jobs/timing-tier1"
+
+    def rewrite_sample(self, root, job, change):
+        directory = self.group_path(root)
+        case = driver.case_directory(root, job)
+        row = driver.read_json(case / "complete.json")
+        change(row, case)
+        row["files"] = {name: driver.digest(case / name)
+                        for name in row["files"]}
+        driver.atomic_json(case / "complete.json", row)
+        receipt = driver.read_json(directory / "complete.json")
+        names = [j.name for j in driver.jobs()
+                 if j.stage == "timing" and j.tier == job.tier]
+        receipt["samples"][names.index(job.name)] = row
+        receipt["files"] = {name: driver.digest(directory / name)
+                            for name in receipt["files"]}
+        driver.atomic_json(directory / "complete.json", receipt)
+
+    def test_fresh_group_predeclares_order_and_proves_all_outputs(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            owner, setup, selected, references = self.fixture(root)
+            screens = [{"identity": {"job": driver.asdict(driver.Job(
+                "screen", name, "tier10"))}, "state": "pass"}
+                for name in driver.FINALISTS]
+            eligible = driver.eligible_timings(
+                owner, references + screens, setup,
+                {driver.Job("oracle", "oracle", t).name: {"gomaxprocs": 10}
+                 for t in driver.ARCHIVES})
+            self.assertEqual(selected, [j for j in eligible
+                                        if j.tier == "tier1"])
+            start = owner.start
+            declared = []
+
+            def spawn(args, directory, env, cwd):
+                group = self.group_path(root)
+                self.assertFalse((group / "complete.json").exists())
+                declaration = driver.read_json(group / "started.json")
+                attempt = driver.read_json(group / "attempt.json")
+                self.assertEqual(driver.read_json(directory / "attempt.json"),
+                                 attempt)
+                self.assertEqual(attempt["window_id"], owner.window["id"])
+                declared.append(declaration)
+                return start(args, directory, env, cwd)
+
+            owner.start = spawn
+            rows = self.run_group(owner, setup, selected)
+            self.assertEqual(owner.calls, [j.name for j in selected])
+            self.assertEqual([j.adapter for j in selected],
+                             list(driver.FINALISTS) * 3)
+            expected = driver.timing_identity(owner, "tier1", setup)
+            self.assertEqual(declared, [expected] * 6)
+            self.assertEqual(expected["pair"], list(driver.FINALISTS))
+            self.assertEqual(expected["reference"], driver.FINALISTS[0])
+            self.assertEqual(expected["ratio"], "B/A")
+            self.assertEqual(expected["operation"], "segment-sdk")
+            self.assertEqual([c["job"] for c in expected["samples"]],
+                             [driver.asdict(j) for j in selected])
+            proof = driver.finished_group(root, expected)
+            self.assertEqual(proof["samples"], rows)
+            self.assertEqual(proof["state"], "pass")
+            self.assertTrue(all(row["attempt"] == proof["attempt"]
+                                for row in rows))
+            self.assertEqual(proof["files"], {
+                name: driver.digest(self.group_path(root) / name)
+                for name in proof["files"]})
+            profiles = [owner.job_bindings[j.name] for j in selected]
+            for job, profile in zip(selected, profiles):
+                directory = driver.case_directory(root, job)
+                self.assertEqual(Path(profile["receipt_path"]),
+                                 directory / "complete.json")
+                output = profile["argv"][profile["argv"].index("-out")+1]
+                self.assertEqual(output, str(directory / "output"))
+            self.assertEqual(len({p["receipt_path"] for p in profiles}), 6)
+            files = driver.block_files(root, {"id": "segment_timing",
+                                               "jobs": profiles})
+            self.assertIn("jobs/timing-tier1/complete.json", files)
+            for job in selected:
+                self.assertIn(str((driver.case_directory(root, job) /
+                                   "complete.json").relative_to(root)), files)
+            result = driver.read_json(root / "summary.json")
+            self.assertEqual(len(result["timing_medians"]), 2)
+            self.assertTrue(all(m["valid_timing_comparison"]
+                                for m in result["timing_medians"]))
+            ratios = result["paired_ratios"]
+            self.assertEqual(ratios["orientation"], "B/A")
+            self.assertEqual(len(ratios["operations"]), 3)
+            for ratio in ratios["operations"]:
+                self.assertEqual(ratio["pairs"], [2, 3, 4])
+                self.assertEqual((ratio["pair_count"], ratio["median"],
+                                  ratio["min"], ratio["max"]), (3, 3, 2, 4))
+            driver.summary(root, rows)
+            self.assertTrue(all(not m["valid_timing_comparison"] for m in
+                                driver.read_json(root / "summary.json")[
+                                    "timing_medians"]))
+
+    def test_interrupted_group_restarts_all_six_then_reuses(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            owner, setup, selected, _ = self.fixture(root)
+            owner.interrupt_at = 2
+            with self.assertRaisesRegex(driver.ReviewRequired, "interruption"):
+                self.run_group(owner, setup, selected)
+            directory = self.group_path(root)
+            raw = driver.result_path(root, selected[0])
+            original = raw.read_bytes()
+            old = driver.read_json(directory / "attempt.json")
+            self.assertFalse((directory / "complete.json").exists())
+            resumed = self.owner(root, window="group-window-2")
+            rows = self.run_group(resumed, setup, selected)
+            self.assertEqual(resumed.calls, [j.name for j in selected])
+            retained = list((root / "attempts/jobs/timing-tier1").iterdir())
+            self.assertEqual(len(retained), 1)
+            self.assertEqual((retained[0] / raw.relative_to(directory))
+                             .read_bytes(), original)
+            retained_attempt = driver.read_json(retained[0] / "attempt.json")
+            self.assertEqual(retained_attempt, old)
+            attempt = driver.read_json(directory / "attempt.json")
+            self.assertNotEqual(attempt["attempt_id"], old["attempt_id"])
+            self.assertEqual(attempt["window_id"], "group-window-2")
+            self.assertTrue(all(row["attempt"] == attempt for row in rows))
+            before = (directory / "complete.json").read_bytes()
+            final = self.owner(root, [], window="group-window-3")
+            cached = self.run_group(final, setup, selected)
+            self.assertEqual(final.calls, [])
+            self.assertEqual(cached, rows)
+            after = (directory / "complete.json").read_bytes()
+            self.assertEqual(after, before)
+            self.assertEqual(cached[0]["attempt"]["window_id"],
+                             "group-window-2")
+
+    def test_alien_b_window_or_attempt_rejects_the_whole_group(self):
+        for field in ("window_id", "attempt_id"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as f:
+                root = Path(f).resolve()
+                owner, setup, selected, _ = self.fixture(root)
+                self.run_group(owner, setup, selected)
+
+                def alien(row, case):
+                    row["attempt"][field] = "alien"
+                    driver.atomic_json(case / "attempt.json", row["attempt"])
+
+                self.rewrite_sample(root, selected[1], alien)
+                expected = driver.timing_identity(owner, "tier1", setup)
+                with self.assertRaisesRegex(driver.ReviewRequired, "attempt"):
+                    driver.finished_group(root, expected)
+                old = (self.group_path(root) / "complete.json").read_bytes()
+                resumed = self.owner(root, window="replacement-window")
+                self.run_group(resumed, setup, selected)
+                self.assertEqual(resumed.calls, [j.name for j in selected])
+                attempts = root / "attempts/jobs/timing-tier1"
+                retained = list(attempts.iterdir())
+                after = (retained[0] / "complete.json").read_bytes()
+                self.assertEqual(after, old)
+
+    def test_changed_identity_or_missing_outputs_invalidates_group(self):
+        for mode in ("pair", "reference", "ratio", "operation", "order",
+                     "recipe", "configuration", "input", "raw",
+                     "sample-receipt", "coverage"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as f:
+                root = Path(f).resolve()
+                owner, setup, selected, _ = self.fixture(root)
+                self.run_group(owner, setup, selected)
+                path = self.group_path(root) / "complete.json"
+                receipt = driver.read_json(path)
+                if mode == "pair":
+                    receipt["identity"]["pair"].reverse()
+                elif mode == "reference":
+                    receipt["identity"]["reference"] = driver.FINALISTS[1]
+                elif mode == "ratio":
+                    receipt["identity"]["ratio"] = "A/B"
+                elif mode == "operation":
+                    receipt["identity"]["operation"] = "alien"
+                elif mode == "order":
+                    receipt["identity"]["samples"].reverse()
+                elif mode == "recipe":
+                    receipt["identity"]["samples"][0]["driver"] = "alien"
+                elif mode == "configuration":
+                    receipt["identity"]["samples"][0]["GOMAXPROCS"] = 2
+                elif mode == "input":
+                    receipt["identity"]["inputs"]["manifest.json"] = "0" * 64
+                elif mode == "raw":
+                    raw = driver.result_path(root, selected[1])
+                    raw.write_text(raw.read_text() + " ")
+                elif mode == "sample-receipt":
+                    (driver.case_directory(root, selected[1]) /
+                     "complete.json").unlink()
+                else:
+                    del receipt["files"][selected[1].name + "/complete.json"]
+                driver.atomic_json(path, receipt)
+                resumed = self.owner(root)
+                self.run_group(resumed, setup, selected)
+                self.assertEqual(resumed.calls, [j.name for j in selected])
+                self.assertEqual(len(list((root /
+                    "attempts/jobs/timing-tier1").iterdir())), 1)
+
+    def test_torn_driver_receipt_or_unexpected_proof_bug_is_not_a_retry(self):
+        for mode in ("torn", "type", "key", "permission"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as f:
+                root = Path(f).resolve()
+                owner, setup, selected, _ = self.fixture(root)
+                self.run_group(owner, setup, selected)
+                path = self.group_path(root) / "complete.json"
+                failure = {"torn": json.JSONDecodeError, "type": TypeError,
+                           "key": KeyError,
+                           "permission": PermissionError}[mode]
+                if mode == "torn":
+                    path.write_text("{")
+                    context = patch.object(driver, "COMMIT", driver.COMMIT)
+                else:
+                    context = patch.object(driver, "finished_group",
+                                           side_effect=failure("proof bug"))
+                before = path.read_bytes()
+                resumed = self.owner(root, [])
+                with context, self.assertRaises(failure):
+                    self.run_group(resumed, setup, selected)
+                self.assertEqual(resumed.calls, [])
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_incomplete_order_and_failed_proof_never_complete(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            owner, setup, selected, _ = self.fixture(root)
+            for samples in (selected[:-1], list(reversed(selected))):
+                with self.assertRaises(driver.ReviewRequired):
+                    self.run_group(owner, setup, samples)
+                self.assertEqual(owner.calls, [])
+            failure = driver.ReviewRequired("synthetic output proof failure")
+            with (patch.object(driver, "finished_group", side_effect=failure),
+                  self.assertRaises(driver.ReviewRequired)):
+                self.run_group(owner, setup, selected)
+            self.assertEqual(owner.calls, [j.name for j in selected])
+            complete = self.group_path(root) / "complete.json"
+            self.assertFalse(complete.exists())
+            result = driver.read_json(root / "summary.json")
+            self.assertFalse(any(m["valid_timing_comparison"]
+                                 for m in result["timing_medians"]))
+
+    def test_group_negatives_reuse_without_valid_metrics(self):
+        for mode in ("budget", "checks_failed"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as f:
+                root = Path(f).resolve()
+                owner, setup, selected, _ = self.fixture(root)
+                if mode == "checks_failed":
+                    owner.modes[0] = "checks_failed"
+                else:
+                    start = owner.start
+
+                    def over_budget(args, directory, env, cwd):
+                        owned = start(args, directory, env, cwd)
+                        if len(owner.calls) == 1:
+                            sample = fixture_resources(elapsed_seconds=1)
+                            (directory / "rss.jsonl").write_text(
+                                json.dumps(sample) + "\n")
+                            marker = directory / "budget-exceeded.json"
+                            driver.atomic_json(marker, {"state": "partial"})
+                            raise driver.BudgetExceeded(
+                                9 * driver.GIB, driver.CANDIDATE_BUDGET)
+                        return owned
+
+                    owner.start = over_budget
+                rows = self.run_group(owner, setup, selected)
+                expected_state = ("budget_exceeded" if mode == "budget"
+                                  else mode)
+                expected = driver.timing_identity(owner, "tier1", setup)
+                state = driver.finished_group(root, expected)["state"]
+                self.assertEqual(state, expected_state)
+                result = driver.read_json(root / "summary.json")
+                self.assertFalse(any(m["valid_timing_comparison"]
+                                     for m in result["timing_medians"]))
+                self.assertEqual(result["paired_ratios"]["operations"], [])
+                resumed = self.owner(root, [], window="later-window")
+                cached = self.run_group(resumed, setup, selected)
+                self.assertEqual(cached, rows)
+                self.assertEqual(resumed.calls, [])
+
+    def test_partial_known_negative_cannot_restart_a_whole_group_blindly(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            owner, setup, selected, _ = self.fixture(root)
+            owner.modes[0], owner.interrupt_at = "checks_failed", 2
+            with self.assertRaises(driver.ReviewRequired):
+                self.run_group(owner, setup, selected)
+            resumed = self.owner(root, [])
+            with self.assertRaises(FileNotFoundError):
+                self.run_group(resumed, setup, selected)
+            self.assertEqual(resumed.calls, [])
+            self.assertFalse((root / "attempts/jobs/timing-tier1").exists())
+
+    def test_damaged_completed_negative_is_not_a_blind_group_retry(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            owner, setup, selected, _ = self.fixture(root)
+            owner.modes[0] = "checks_failed"
+            self.run_group(owner, setup, selected)
+            path = self.group_path(root) / "complete.json"
+            original = path.read_bytes()
+            self.assertEqual(driver.read_json(path)["state"], "checks_failed")
+            case = driver.case_directory(root, selected[0])
+            (case / "complete.json").unlink()
+            resumed = self.owner(root, [])
+            with self.assertRaises(FileNotFoundError):
+                self.run_group(resumed, setup, selected)
+            self.assertEqual(resumed.calls, [])
+            self.assertEqual(path.read_bytes(), original)
+            self.assertFalse((root / "attempts/jobs/timing-tier1").exists())
+
+    def clock_owner(self, owner, clock, samples):
+        owner.job_limit = driver.Supervisor.job_limit.__get__(owner)
+        owner.permissions = unittest.mock.Mock(return_value=40000)
+        owner.stop_all = unittest.mock.Mock()
+        owner.observe = lambda groups: driver.Supervisor.guard(owner)
+        start = owner.start
+        recorded = []
+
+        def timed(args, directory, env, cwd):
+            driver.Supervisor.guard(owner)
+            recorded.append((clock[0], owner.launch_deadline, owner.swapouts))
+            owned = start(args, directory, env, cwd)
+            owned.deadline = owner.launch_deadline
+            clock[0] += 600
+            return owned
+
+        owner.start = timed
+        return recorded, patch.object(driver, "native_resources",
+                                      side_effect=samples)
+
+    def test_sample_clocks_reset_but_the_group_swap_baseline_does_not(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            owner, setup, selected, _ = self.fixture(root)
+            clock = [0]
+            sample = fixture_resources()
+            pagesize = sample["page_size"]
+            increments = [0, 64, 64, 128, 128, 192, 192,
+                          256, 256, 384, 384, 512, 512]
+            samples = [{**sample, "swapouts": 100 + n * 1024**2 // pagesize}
+                       for n in increments]
+            recorded, resources = self.clock_owner(owner, clock, samples)
+            with resources:
+                self.run_group(owner, setup, selected, clock=clock)
+            self.assertEqual(len(recorded), 6)
+            self.assertGreater(clock[0], 45 * 60)
+            self.assertTrue(all(end == start + 45 * 60 -
+                                driver.CLEANUP_RESERVE_SECONDS
+                                for start, end, _ in recorded))
+            baselines = [baseline for _, _, baseline in recorded]
+            self.assertEqual(baselines, [100]*6)
+            evidence = (root / "resources.jsonl").read_text().splitlines()
+            observations = [json.loads(line) for line in evidence]
+            starts = {r["swapouts_start"] for r in observations}
+            self.assertEqual(starts, {100})
+            self.assertEqual(observations[-1]["swapouts"] - 100,
+                             512 * 1024**2 // pagesize)
+
+    def test_cumulative_swap_and_sample_window_stop_the_unfinished_group(self):
+        for mode in ("swap", "window"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as f:
+                root = Path(f).resolve()
+                owner, setup, selected, _ = self.fixture(root)
+                clock = [0]
+                sample = fixture_resources()
+                pagesize = sample["page_size"]
+                samples = [{**sample, "swapouts": 100 + i * 64 * 1024**2 //
+                            pagesize if mode == "swap" else 100}
+                           for i in range(13)]
+                recorded, resources = self.clock_owner(owner, clock, samples)
+                if mode == "window":
+                    owner.block_deadline = 4000
+                failure = driver.FatalSession if mode == "swap" else (
+                    driver.DeadlineExceeded)
+                with resources, self.assertRaises(failure):
+                    self.run_group(owner, setup, selected, clock=clock)
+                self.assertLess(len(owner.calls), 6)
+                complete = self.group_path(root) / "complete.json"
+                self.assertFalse(complete.exists())
+                if mode == "swap":
+                    self.assertTrue(owner.stop_all.called)
+                    final = json.loads((root / "resources.jsonl").read_text()
+                                       .splitlines()[-1])
+                    self.assertEqual(final["swapouts_start"], 100)
+                    self.assertGreater((final["swapouts"] - 100) * pagesize,
+                                       driver.SWAP_GROWTH_LIMIT)
+
+    def test_fatal_keeps_partial_group_evidence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            owner, setup, selected, _ = self.fixture(root)
+            start = owner.start
+
+            def fatal(args, directory, env, cwd):
+                if owner.calls:
+                    raise driver.FatalSession("owned isolation lost")
+                return start(args, directory, env, cwd)
+
+            owner.start = fatal
+            with self.assertRaises(driver.FatalSession):
+                self.run_group(owner, setup, selected)
+            self.assertEqual(owner.calls, [selected[0].name])
+            self.assertTrue(driver.result_path(root, selected[0]).is_file())
+            complete = self.group_path(root) / "complete.json"
+            self.assertFalse(complete.exists())
 
 
 class DeadlineContractTests(unittest.TestCase):
