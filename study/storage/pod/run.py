@@ -2782,10 +2782,17 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
             return paths
 
         marker = directory / "partial.json"
-        if marker.is_file() and read_json(marker).get(
-                "reason_code") == "unit-maximum":
-            states.append("unit-maximum")
-            continue
+        if marker.is_file():
+            saved = read_json(marker)
+            if saved.get("state") == "fatal":
+                raise FatalSession("known fatal worker outcome")
+            if saved.get("state") not in {
+                    "partial", "skipped", "checks_failed"}:
+                raise ReviewRequired("unrecognised saved worker outcome")
+            if (saved["state"] != "partial"
+                    or saved.get("resumable") is False):
+                states.append(saved["state"])
+                continue
         receipt = auxiliary(
             supervisor, job["id"], [str(path) if arg == job["receipt_path"]
                                     else arg for arg in job["argv"]], validate,
@@ -2802,7 +2809,10 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
                 or (receipt["exit_code"] == 1
                     and result["state"] not in {"checks_failed", "partial"})):
             raise ReviewRequired(f"{block['id']}: fatal exit/receipt mismatch")
-        if (result.get("reason_code") == "time" and (
+        if (result["state"] == "skipped"
+                and result.get("reason_code") == "time"):
+            result = {**result, "state": "partial"}
+        elif (result.get("reason_code") == "time" and (
                 (block["id"] == "cpu_cost" and read_json(
                     directory / "process.json")["deadline_reason_code"] ==
                  "unit-maximum") or result.get("deadline_origin") == "unit")):
@@ -2818,8 +2828,7 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
             (directory / "complete.json").rename(
                 directory / "partial-complete.json")
         if (result["state"] == "partial"
-                and result.get("reason_code") == "time"
-                and "partial" not in states):
+                and result.get("reason_code") == "time"):
             raise DeadlineExceeded(f"{job['id']}: worker time interruption")
         states.append("unit-maximum" if result.get("reason_code") ==
                       "unit-maximum" else result["state"])
@@ -2913,6 +2922,8 @@ def execute_session(supervisor: Supervisor, admission: Mapping, inputs: Path,
         if saved and (saved.get("reason_code") == "budget-exceeded" or (
                 saved["state"] == "partial"
                 and saved.get("reason_code") not in {"time", "not-started"})):
+            if block_id == "setup" and saved["state"] != "completed":
+                raise ReviewRequired("setup incomplete; A9 required")
             outcomes[block_id] = "partial"
             continue  # Do not retry a known negative.
         if (saved and saved["state"] in {"completed", "checks_failed"}
