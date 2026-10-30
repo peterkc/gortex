@@ -1084,7 +1084,7 @@ def reusable(directory: Path, verify: Callable[[], dict], *,
         raise ReviewRequired("known negative outcome needs diagnosis")
     try:
         budget = budget or ((directory / "complete.json").is_file()
-            and worker_json(directory / "complete.json", "cache").get("state")
+            and read_json(directory / "complete.json").get("state")
             != "pass")
         if strict:
             budget = budget or any(directory.glob("*/budget-exceeded.json"))

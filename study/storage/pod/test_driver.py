@@ -2716,7 +2716,7 @@ class DurabilityTests(unittest.TestCase):
             owner.guard.assert_not_called()
 
     def test_completed_block_output_drift_restarts_only_damaged_job(self):
-        for damage in ("raw-time", "missing-receipt", "torn-receipt"):
+        for damage in ("raw-time", "missing-receipt"):
             with self.subTest(damage=damage), \
                     tempfile.TemporaryDirectory() as folder:
                 root = Path(folder).resolve()
@@ -2724,10 +2724,8 @@ class DurabilityTests(unittest.TestCase):
                 damaged = root / "jobs" / selected[1].name
                 if damage == "raw-time":
                     (damaged / "native-time.txt").write_text("changed")
-                elif damage == "missing-receipt":
-                    (damaged / "complete.json").unlink()
                 else:
-                    (damaged / "complete.json").write_text("{")
+                    (damaged / "complete.json").unlink()
                 owner = FixtureSupervisor(root, ["pass"])
                 owner.window = {"id": "resumed-window"}
                 result = self.resume_sdk(owner, selected, setup, admission)
@@ -2743,6 +2741,32 @@ class DurabilityTests(unittest.TestCase):
                 self.assertEqual(preserved, old[0])
                 self.assertEqual(len(list((root / "attempts/jobs" /
                                            selected[1].name).iterdir())), 1)
+
+    # A1 review H2 changed torn receipts to unexpected failures.
+    # Group coverage:
+    # test_torn_driver_receipt_or_unexpected_proof_bug_is_not_a_retry.
+    def test_torn_completed_driver_receipt_is_terminal_without_retry(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            selected, setup, admission, _ = self.sdk_session(root)
+            path = root / "jobs" / selected[1].name / "complete.json"
+            path.write_bytes(b"{")
+            before = {p: p.read_bytes() for p in
+                      driver.output_files([root / "jobs"])}
+            owner = FixtureSupervisor(root, [])
+            owner.window = {"id": "resumed-window"}
+            with self.assertRaises(json.JSONDecodeError):
+                self.resume_sdk(owner, selected, setup, admission)
+            self.assertEqual(owner.calls, [])
+            self.assertEqual(path.read_bytes(), b"{")
+            after = {p: p.read_bytes() for p in
+                     driver.output_files([root / "jobs"])}
+            self.assertEqual(after, before)
+            self.assertFalse((root / "attempts").exists())
+            saved = driver.read_json(root / "session.json")
+            self.assertEqual(saved["blocks"]["storage"]["terminal"], "fatal")
+            self.assertEqual(saved["blocks"]["storage"]["reason_code"],
+                             "JSONDecodeError")
 
     def test_new_run_internal_receipts_ignore_old_output_addresses(self):
         with tempfile.TemporaryDirectory() as folder:
