@@ -336,7 +336,7 @@ class CostTests(unittest.TestCase):
             argv = [sys.executable, cost.__file__, "--root", str(root),
                     "--config", str(config), "--receipt", str(receipt),
                     "--source-pin", "a" * 40, "--config-pin", "b" * 64,
-                    "--input-pin", "c" * 64]
+                    "--input-pin", "c" * 64, "--case", "0"]
             result = subprocess.run(argv, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             record = json.loads(receipt.read_text())

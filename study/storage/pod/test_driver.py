@@ -4234,9 +4234,10 @@ class HybridGroupTests(unittest.TestCase):
                     directory.parent / "started.json")
                 self.assertIn(owner.case, declaration["samples"])
                 self.assertEqual(declaration["reference"],
-                                 None if mode == "timing" else "exact-F32")
+                                 "w1" if mode == "timing" else "exact-F32")
                 self.assertEqual(declaration["ratio"],
-                                 None if mode == "timing" else "B/A")
+                                 "candidate/reference" if mode == "timing"
+                                 else "B/A")
                 self.assertFalse((directory.parent / "complete.json").exists())
                 self.assertEqual(driver.read_json(directory / "attempt.json"),
                                  driver.read_json(directory.parent /
