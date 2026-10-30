@@ -3130,9 +3130,9 @@ class HybridGroupTests(unittest.TestCase):
         owner.start = start
         return owner
 
-    def group(self, owner):
+    def group(self, owner, n=10000):
         profiles = driver.bound_jobs(owner.root)["hybrid"]
-        cases = [j for j in profiles if "generated-n10000-int8-" in j["id"]
+        cases = [j for j in profiles if f"generated-n{n}-int8-" in j["id"]
                  and "-w1-" in j["id"]]
         self.assertEqual(len(cases), 6)
         directory = Path(cases[0]["receipt_path"]).parents[1]
@@ -3161,8 +3161,8 @@ class HybridGroupTests(unittest.TestCase):
 
         return directory, identity, samples
 
-    def run_group(self, owner):
-        directory, identity, samples = self.group(owner)
+    def run_group(self, owner, *, n=10000):
+        directory, identity, samples = self.group(owner, n)
         with patch.object(driver.time, "monotonic",
                           side_effect=lambda: owner.clock[0]):
             return driver.comparison_group(owner, directory.name,
@@ -3329,8 +3329,10 @@ class HybridGroupTests(unittest.TestCase):
                 reason = {"worker": "wrong-platform hybrid",
                           "recipe": "original F32/top128",
                           "caller": "auxiliary command failed"}[mode]
-                with self.assertRaisesRegex(driver.ReviewRequired, reason):
+                with self.assertRaisesRegex(driver.ReviewRequired,
+                                            reason) as rejection:
                     self.run_group(owner)
+                self.assertIs(type(rejection.exception), driver.ReviewRequired)
                 directory, _, _ = self.group(owner)
                 before = {str(p.relative_to(directory)): p.read_bytes()
                           for p in driver.output_files([directory])}
@@ -3338,7 +3340,6 @@ class HybridGroupTests(unittest.TestCase):
                 rejection = directory / owner.calls[-1] / "partial.json"
                 negative = driver.read_json(rejection)
                 self.assertEqual(negative["state"], "checks_failed")
-                self.assertEqual(negative["reason_code"], "ReviewRequired")
                 self.assertRegex(negative["reason"], reason)
                 resumed = self.owner(root, window="hybrid-window-2")
                 with self.assertRaises((driver.ReviewRequired,
@@ -3438,6 +3439,44 @@ class HybridGroupTests(unittest.TestCase):
                 self.assertFalse((directory / "complete.json").exists())
                 self.assertEqual(len(owner.calls), 5 if step == 8192 else 1)
 
+    def test_sample_hashes_own_dataset_and_preparation_hashes_both(self):
+        for n, other in ((10000, 100000), (100000, 10000)):
+            with self.subTest(n=n), tempfile.TemporaryDirectory() as f:
+                root = Path(f).resolve()
+                owner = self.owner(root)
+                proof = self.run_group(owner, n=n)
+                work = (root / "home/.prime/research/gortex"
+                        / "storage-architecture/tmp/vector/hybrid-followup")
+                own_data, other_data = (work / f"generated-n{x}"
+                                        for x in (n, other))
+                self.assertTrue(own_data.is_dir())
+                self.assertFalse(other_data.exists())
+                profile = owner.job_bindings[owner.calls[0]]
+                folder = Path(profile["receipt_path"]).parent
+                paths = driver.hybrid_outputs(
+                    root, "latency", profile["selected_jobs"], folder)
+                self.assertEqual(paths[2:], [own_data])
+                for row in proof["samples"]:
+                    files = {root / p for p in row["files"]}
+                    self.assertIn(own_data / "document.f32", files)
+                    self.assertIn(own_data / "input-receipt.json", files)
+                    self.assertFalse(any(p.is_relative_to(other_data)
+                                         for p in files))
+        with tempfile.TemporaryDirectory() as f:
+            root = Path(f).resolve()
+            owner = self.owner(root)
+            profile = owner.job_bindings["hybrid-latency"]
+            folder = Path(profile["receipt_path"]).parent
+            with patch.object(driver.time, "monotonic", return_value=0):
+                driver.auxiliary(owner, profile["id"], profile["argv"],
+                    lambda _: driver.hybrid_outputs(root, "latency",
+                        profile["selected_jobs"], folder),
+                    selection=profile["selected_jobs"], directory=folder)
+            paths = driver.hybrid_outputs(
+                root, "latency", profile["selected_jobs"], folder)
+            self.assertEqual({p.name for p in paths[2:]},
+                             {"generated-n10000", "generated-n100000"})
+
     def test_full_schedule_keeps_scaling_round_and_group_only_metrics(self):
         with tempfile.TemporaryDirectory() as f:
             root = Path(f).resolve()
@@ -3517,6 +3556,18 @@ class MacHybridCallerTests(unittest.TestCase):
                                 for cmd in commands.values()))
         self.assertEqual(driver.hybrid_names("timing"),
                          list(driver.hybrid_commands(Path("/work"), "timing")))
+        child = self.load_child()
+        work = (root / "home/.prime/research/gortex/storage-architecture"
+                / "tmp/vector/hybrid-followup")
+        with patch.object(child, "WORK", work):
+            for mode in ("timing", "latency"):
+                commands = driver.hybrid_commands(root, mode)
+                binary = Path(next(iter(commands.values()))[0])
+                jobs = (child.timing_jobs(binary) if mode == "timing" else
+                        child.latency_jobs(binary, generated=True))
+                actual = {j.name: j.command for j in jobs}
+                self.assertEqual(commands, {name: actual[name]
+                                            for name in commands})
 
     def test_unsupported_inputs_refuse_before_build_or_sample(self):
         child = self.load_child()

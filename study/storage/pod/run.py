@@ -1930,8 +1930,7 @@ def hybrid_commands(root: Path, mode: str) -> dict[str, tuple[str, ...]]:
                 name = (f"{label}-{method}-m{m}-e{ef}-k{k}-w{workers}"
                         f"-block{repeat}")
                 planned[name + "-reference"] = base + (
-                    "-phase", "latency", "-method", "exact", "-m", "16",
-                    "-ef", "512", "-workers", "1")
+                    "-phase", "latency", "-method", "exact", "-workers", "1")
                 planned[name] = base + ("-phase", "latency", "-method", method,
                                        "-m", str(m), "-ef", str(ef),
                                        "-workers", str(workers))
@@ -2087,8 +2086,7 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
             raise ReviewRequired(f"auxiliary command failed: {name}")
     except ReviewRequired as error:
         atomic_json(directory / "partial.json", {
-            "state": "checks_failed", "reason": str(error),
-            "reason_code": type(error).__name__})
+            "state": "checks_failed", "reason": str(error)})
         raise
     for path in paths:
         if not path.resolve().is_relative_to(root):
@@ -2171,7 +2169,8 @@ def hybrid_outputs(root: Path, mode: str, selected=None,
     binary = work / "bin/darwin-arm64" / (
         "timing" if mode == "timing" else "ann")
     data = ([work / "timing-data"] if mode == "timing" else
-            [work / f"generated-n{n}" for n in (10000, 100000)])
+            sorted({Path(c[2]) for n, c in hybrid_commands(root, mode).items()
+                    if selected is None or n in selected}))
     return [runs, binary, *data]
 
 

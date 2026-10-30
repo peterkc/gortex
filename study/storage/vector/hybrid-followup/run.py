@@ -150,8 +150,7 @@ def latency_jobs(ann: Path, generated: bool = False) -> list[Job]:
                         f"-block{repeat}")
                 if generated:
                     jobs.append(Job(name + "-reference", base + (
-                        "-method", "exact", "-m", "16", "-ef", "512",
-                        "-workers", "1"), None, "timing"))
+                        "-method", "exact", "-workers", "1"), None, "timing"))
                 jobs.append(Job(name, base + flags, None, "timing"))
     return jobs
 
