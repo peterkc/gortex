@@ -191,6 +191,29 @@ jobs:
           "$uv" run --frozen --project "$project" python -m unittest discover \
             -s "$project" -p test_cpu_cost.py -v 2>&1 \
             | tee -a "$RUNNER_TEMP/storage/ci-cpu-cost.txt"
+      - name: Hybrid vector job plans and helpers on tiny fixtures only
+        shell: bash
+        env:
+          OPENBLAS_NUM_THREADS: "2"
+          UV_PYTHON_DOWNLOADS: never
+          UV_CACHE_DIR: ${{ runner.temp }}/storage/uv-cache
+        run: |
+          set -euo pipefail
+          uv="$RUNNER_TEMP/storage/evaluator-tools/uv-x86_64-unknown-linux-gnu/uv"
+          # Same interpreter family as the controller step: the driver's.
+          py="$(ls -1 "$RUNNER_TOOL_CACHE"/Python/3.14.*/x64/bin/python3.14 2>/dev/null | sort -V | tail -n 1 || true)"
+          if test -z "$py"; then
+            echo "FAIL: Python 3.14 absent from RUNNER_TOOL_CACHE; no download allowed"
+            exit 1
+          fi
+          cd study/storage/vector/hybrid-followup
+          if test ! -f uv.lock; then
+            "$uv" lock --python "$py"
+          fi
+          "$uv" lock --check --python "$py"
+          cp uv.lock "$RUNNER_TEMP/storage/ci-hybrid-followup-lock.txt"
+          "$uv" run --frozen --python "$py" python -B -m unittest -v test_followup 2>&1 \
+            | tee "$RUNNER_TEMP/storage/ci-hybrid-followup.txt"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
