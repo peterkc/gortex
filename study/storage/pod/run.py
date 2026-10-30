@@ -172,19 +172,19 @@ def bound_jobs(root: Path) -> dict[str, list[dict]]:
                          "-out", str(out)],
                 "receipt_path": str(out.parent / "complete.json"),
             })
-    for mode in ("timing", "latency"):
-        name = "hybrid-" + mode
+    for mode, name, selected, directory in hybrid_schedule(root):
         argv = [str(Path(sys.executable).resolve()), "-B",
                 str(root / "checkout/study/storage/vector"
                     / "hybrid-followup/run.py"),
                 mode, "--execute", "--run-id", "pod-A1-" + mode, "--jobs-file",
-                str(root / "aux" / name / "selected-jobs.json")]
+                str(directory / "selected-jobs.json"),
+                "--output-dir", str(directory)]
         if mode == "latency":
             argv += ["--generated", "--native-dir", str(root / "native")]
         result["hybrid"].append({
             "id": name, "minutes": 60, "argv": argv,
-            "selected_jobs": hybrid_names(mode),
-            "receipt_path": str(root / "aux" / name / "complete.json"),
+            "selected_jobs": selected,
+            "receipt_path": str(directory / "complete.json"),
         })
     for block, entries in result.items():
         for job in entries:
@@ -1053,7 +1053,8 @@ def reusable(directory: Path, verify: Callable[[], dict], *,
             budget = budget or any(directory.glob("*/budget-exceeded.json"))
             budget = budget or any(read_json(p).get("state") != "pass"
                 for p in (directory / "complete.json",
-                          *directory.glob("*/complete.json"))
+                          *directory.glob("*/complete.json"),
+                          *directory.glob("*/partial.json"))
                 if p.is_file())
         return verify()
     except FatalSession:
@@ -1547,19 +1548,27 @@ def timing_identity(supervisor: Supervisor, tier: str, setup: Mapping) -> dict:
 
 
 def finished_group(root: Path, expected: Mapping,
-                   receipt: dict | None = None) -> dict:
-    directory = root / "jobs" / f"timing-{expected['tier']}"
+                   receipt: dict | None = None, *, projection=None) -> dict:
+    directory = (projection[0] if projection else
+                 root / "jobs" / f"timing-{expected['tier']}")
     if receipt is None:
         receipt = read_json(directory / "complete.json")
     if (receipt["identity"] != expected
             or read_json(directory / "started.json") != expected):
         raise ReviewRequired("timing group identity changed")
     for relative, sha in receipt["files"].items():
-        if digest(persistent_path(directory / relative, directory)) != sha:
+        base = root if projection else directory
+        if digest(persistent_path(base / relative, base)) != sha:
             raise ReviewRequired("timing group artifact changed")
-    samples = [finished_case(root, Job(**case["job"]), case)
-               for case in expected["samples"]]
+    samples = (projection[1](receipt["attempt"], check_only=True) if projection
+               else [finished_case(root, Job(**case["job"]), case)
+                     for case in expected["samples"]])
     for case, row in zip(expected["samples"], samples):
+        if projection:
+            path = directory / case["id"] / "complete.json"
+            if str(path.relative_to(root)) not in receipt["files"]:
+                raise ReviewRequired("missing group sample completion")
+            continue
         job = Job(**case["job"])
         required = {"attempt.json", "native-time.txt", "time.json",
                     "process.json", "rss.jsonl", "stdout-stderr.log",
@@ -1568,7 +1577,8 @@ def finished_group(root: Path, expected: Mapping,
              not required <= row["files"].keys()) or
                 f"{job.name}/complete.json" not in receipt["files"]):
             raise ReviewRequired("timing group output coverage incomplete")
-    if (receipt["samples"] != samples or len(samples) != 6
+    if (receipt["samples"] != samples
+            or len(samples) != (len(expected["samples"]) if projection else 6)
             or not receipt["attempt"]["window_id"]
             or not receipt["attempt"]["attempt_id"]
             or any(row["attempt"] != receipt["attempt"] for row in samples)
@@ -1912,17 +1922,31 @@ def hybrid_commands(root: Path, mode: str) -> dict[str, tuple[str, ...]]:
         planned[label + "-int8"] = base + ("-phase", "int8-build")
         planned[label + "-native"] = base + ("-phase", "build", "-m", "32")
         for method, m, ef, k, workers in (
-            ("exact", 16, 512, 10, 1), ("int8", 16, 512, 128, 1),
+            ("int8", 16, 512, 128, 1),
             ("int8", 16, 512, 128, 4), ("int8", 16, 512, 128, 8),
             ("f32", 32, 1024, 10, 1),
         ):
             for repeat in (1, 2, 3):
                 name = (f"{label}-{method}-m{m}-e{ef}-k{k}-w{workers}"
                         f"-block{repeat}")
+                planned[name + "-reference"] = base + (
+                    "-phase", "latency", "-method", "exact", "-m", "16",
+                    "-ef", "512", "-workers", "1")
                 planned[name] = base + ("-phase", "latency", "-method", method,
                                        "-m", str(m), "-ef", str(ef),
                                        "-workers", str(workers))
     return planned
+
+
+def hybrid_schedule(root: Path):
+    for mode in ("timing", "latency"):
+        commands = hybrid_commands(root, mode)
+        prep = [n for n, c in commands.items()
+                if c[c.index("-phase") + 1] not in {"query", "latency"}]
+        yield mode, "hybrid-" + mode, prep, root / "aux" / ("hybrid-" + mode)
+        for name in (key for key in commands if key not in prep):
+            group = name.split("-w" if mode == "timing" else "-block")[0]
+            yield mode, name, [name], root / "aux" / group / name
 
 
 def hybrid_names(mode: str) -> list[str]:
@@ -1994,9 +2018,11 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
               validate: Callable[[Path], Sequence[Path]], *,
               selection: Sequence[str] = (),
               cwd: Path | None = None,
-              accepted_exit_codes: Sequence[int] = (0,)) -> dict:
+              accepted_exit_codes: Sequence[int] = (0,),
+              directory: Path | None = None, attempt: Mapping | None = None,
+              check_only: bool = False) -> dict:
     root = supervisor.root
-    directory = root / "aux" / name
+    directory = persistent_path(directory or root / "aux" / name, root)
     env = {**supervisor.environment,
            "GOMAXPROCS": str(supervisor.job_bindings[name]["gomaxprocs"])}
     working_directory = cwd or root / "checkout"
@@ -2013,17 +2039,37 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
             path = root / relative
             if not path.resolve().is_relative_to(root) or digest(path) != sha:
                 raise ReviewRequired("auxiliary output drift")
+        if attempt is not None and (receipt["attempt"] != attempt or
+                read_json(directory / "attempt.json") != attempt):
+            raise ReviewRequired("auxiliary sample attempt/window changed")
+        if attempt is not None and read_json(directory / "process.json")[
+                "window"]["id"] != attempt["window_id"]:
+            raise ReviewRequired("auxiliary process window changed")
         if receipt.get("state") != "budget_exceeded":
-            validate(directory)
+            paths = validate(directory)
+            required = {str(p.relative_to(root)) for p in
+                        output_files([directory, *paths])}
+            if attempt is not None and not required <= receipt["files"].keys():
+                raise ReviewRequired("sample output coverage changed")
         return receipt
-    cached = reusable(directory, verify_cached) if directory.exists() else None
+    if check_only:
+        return verify_cached()
+    cached = (reusable(directory, verify_cached) if attempt is None
+              and directory.exists() else None)
     if cached is not None:
         return cached
-    new_attempt(supervisor, directory)
+    if attempt is None:
+        new_attempt(supervisor, directory)
+    else:
+        directory.mkdir()
+        atomic_json(directory / "attempt.json", dict(attempt))
     atomic_json(directory / "started.json", identity)
     if selection:
         atomic_json(directory / "selected-jobs.json", list(selection))
+    baseline = supervisor.swapouts
     supervisor.job_limit(name, time.monotonic())
+    if attempt is not None:
+        supervisor.swapouts = baseline
     try:
         owned = supervisor.start(args, directory, env, working_directory)
         while owned.process.poll() is None:
@@ -2035,15 +2081,21 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
         supervisor.close(owned)
     except BudgetExceeded as error:
         return budget_receipt(supervisor, directory, root, error)
-    paths = output_files([directory, *validate(directory)])
-    if owned.process.returncode not in accepted_exit_codes:
-        raise ReviewRequired(f"auxiliary command failed: {name}")
+    try:
+        paths = output_files([directory, *validate(directory)])
+        if owned.process.returncode not in accepted_exit_codes:
+            raise ReviewRequired(f"auxiliary command failed: {name}")
+    except ReviewRequired as error:
+        atomic_json(directory / "partial.json", {
+            "state": "checks_failed", "reason": str(error),
+            "reason_code": type(error).__name__})
+        raise
     for path in paths:
         if not path.resolve().is_relative_to(root):
             raise FatalSession("auxiliary output escaped /work")
     receipt = {"identity": identity, "correctness_pass": False,
                "attempt": read_json(directory / "attempt.json"),
-               "exit_code": owned.process.returncode,
+               "exit_code": owned.process.returncode, "state": "pass",
                "wall_seconds": time.monotonic()-owned.started,
                "sampled_group_peak_rss_bytes_lower_bound": owned.peak_rss,
                "memory_scope": "whole block including build/preparation",
@@ -2054,11 +2106,16 @@ def auxiliary(supervisor: Supervisor, name: str, args: Sequence[str],
     return receipt
 
 
-def hybrid_outputs(root: Path, mode: str) -> list[Path]:
+def hybrid_outputs(root: Path, mode: str, selected=None,
+                   directory: Path | None = None, config=None) -> list[Path]:
     work = root / "home/.prime/research/gortex/storage-architecture/tmp"
     work = work / "vector/hybrid-followup"
-    runs = work / "runs" / mode / ("pod-A1-" + mode)
+    runs = directory or work / "runs" / mode / ("pod-A1-" + mode)
     for name, expected_command in hybrid_commands(root, mode).items():
+        if selected is not None and name not in selected:
+            continue
+        if directory and mode == "timing" and "query" in expected_command:
+            expected_command += ("-output", str(runs / f"{name}.result.json"))
         receipt = worker_json(runs / (name + ".json"), name)
         if tuple(receipt.get("command", ())) != expected_command:
             raise ReviewRequired("hybrid selected recipe/command substitution")
@@ -2066,8 +2123,17 @@ def hybrid_outputs(root: Path, mode: str) -> list[Path]:
                 or receipt.get("platform") != "darwin"
                 or receipt.get("architecture") != "arm64"):
             raise ReviewRequired("incomplete/wrong-platform hybrid result")
+        if config is not None and any(receipt["configuration"][k] != v
+                for k, v in config.items() if k != "runtime_environment"):
+            raise ReviewRequired("hybrid source/configuration drift")
         if receipt["kind"] != "timing":
             continue
+        if receipt["valid_timing_comparison"] is not False:
+            raise ReviewRequired("individual timing is not a comparison")
+        if any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0
+               for v in (receipt["result"]["latency_ns"][k]
+                         for k in ("p50", "p95"))):
+            raise ReviewRequired("invalid latency measurement")
         for key in ("resource_before", "resource_after"):
             if not {"timestamp", "load1", "load5", "load15", "level",
                     "pressure_state", "available_bytes", "swap_usage",
@@ -2109,6 +2175,45 @@ def hybrid_outputs(root: Path, mode: str) -> list[Path]:
     return [runs, binary, *data]
 
 
+def comparison_group(supervisor: Supervisor, name: str, identity: Mapping,
+                     samples: Callable) -> dict:
+    root = supervisor.root
+    folder = root / "aux" / name
+    def verify(receipt=None):
+        return finished_group(root, identity, receipt,
+                              projection=(folder, samples))
+    cached = reusable(folder, verify, strict=True) if folder.exists() else None
+    if cached is None:
+        new_attempt(supervisor, folder)
+        atomic_json(folder / "started.json", identity)
+        attempt = read_json(folder / "attempt.json")
+        supervisor.swapouts = None
+        rows = samples(attempt)
+        states = {r["state"] for r in rows}
+        state = ("budget_exceeded" if "budget_exceeded" in states else
+                 "checks_failed" if states != {"pass"} else "pass")
+        paths = output_files([folder]) + list(folder.glob("*/complete.json"))
+        cached = verify({"identity": identity, "state": state, "samples": rows,
+                         "attempt": attempt, "files": {
+                             str(p.relative_to(root)): digest(p)
+                             for p in paths}})
+        atomic_json(folder / "complete.json", cached)
+    ratios = []
+    if cached["state"] == "pass":
+        for label, pairs in identity["pairs"].items():
+            for metric in cached["samples"][0]["metrics"]:
+                values = [cached["samples"][b]["metrics"][metric] /
+                          cached["samples"][a]["metrics"][metric]
+                          for a, b in pairs]
+                ratios.append({"candidate": label, "metric": metric,
+                    "pairs": values, "pair_count": len(values),
+                    "median": statistics.median(values), "min": min(values),
+                    "max": max(values)})
+    return {**cached, "valid_timing_comparison": cached["state"] == "pass",
+            "paired_ratios": {"orientation": identity["ratio"],
+                              "operations": ratios}}
+
+
 def run_catalog_hybrid(supervisor: Supervisor,
                        sdk: Sequence[Mapping], block: str) -> None:
     root = supervisor.root
@@ -2130,18 +2235,48 @@ def run_catalog_hybrid(supervisor: Supervisor,
                                      candidate, entries)
                 return []
             receipts.append(auxiliary(supervisor, name, args, validate))
-    controller = (root / "checkout/study/storage/vector/hybrid-followup/run.py")
-    python = Path(sys.executable).resolve()
-    for mode in ("timing", "latency") if block == "hybrid" else ():
-        name = "hybrid-" + mode
-        args = [str(python), "-B", str(controller), mode, "--execute",
-                "--run-id", "pod-A1-" + mode, "--jobs-file",
-                str(root / "aux" / name / "selected-jobs.json")]
-        if mode == "latency":
-            args += ["--generated", "--native-dir", str(root / "native")]
-        receipts.append(auxiliary(
-            supervisor, name, args, lambda _: hybrid_outputs(root, mode),
-            selection=hybrid_names(mode), cwd=controller.parent))
+    profiles = bound_jobs(root)["hybrid"] if block == "hybrid" else []
+    for mode in ("timing", "latency") if profiles else ():
+        cohort = [(job, Path(job["receipt_path"]).parent) for job in profiles
+                  if job["id"] in hybrid_names(mode) + ["hybrid-" + mode]]
+        preparation, directory = cohort[0]
+        def run(job, directory, attempt=None, check_only=False, config=None):
+            return auxiliary(supervisor, job["id"], job["argv"], lambda _:
+                hybrid_outputs(root, mode, job["selected_jobs"],
+                               directory, config),
+                selection=job["selected_jobs"], directory=directory,
+                cwd=Path(job["argv"][2]).parent, attempt=attempt,
+                check_only=check_only)
+        prep = run(preparation, directory)
+        receipts.append(prep)
+        if prep["state"] != "pass":
+            continue
+        config = worker_json(directory / (preparation["selected_jobs"][0]
+                             + ".json"), "preparation")["configuration"]
+        groups = {}
+        for job, folder in cohort[1:]:
+            groups.setdefault(folder.parent.name, []).append((job, folder))
+        for name, cases in groups.items():
+            def samples(attempt, check_only=False):
+                rows = []
+                for job, directory in cases:
+                    row = run(job, directory, attempt, check_only, config)
+                    metrics = {} if row["state"] != "pass" else {
+                        k: v for k, v in worker_json(directory / (
+                            job["id"] + ".json"), job["id"])["result"][
+                                "latency_ns"].items() if k in {"p50", "p95"}}
+                    rows.append({**row, "metrics": metrics})
+                return rows
+            pairs = {} if mode == "timing" else {"B": [[0, 1], [2, 3], [4, 5]]}
+            receipts.append(comparison_group(supervisor, name, {
+                "operation": "hybrid-" + mode,
+                "reference": None if mode == "timing" else "exact-F32",
+                "ratio": None if mode == "timing" else "B/A",
+                "pairs": pairs, "samples": [supervisor.job_bindings[j["id"]]
+                                           for j, _ in cases],
+                "driver_sha256": digest(Path(__file__)),
+                "preparation": digest(Path(preparation["receipt_path"])),
+                "configuration": config}, samples))
     atomic_json(root / (block + "-summary.json"), {
         "source": COMMIT, "blocks": receipts,
         "skipped_catalogs_failed_correctness": sorted(set(CATALOGS)-passed),
@@ -2232,6 +2367,10 @@ def block_files(root: Path, block: Mapping) -> dict[str, str]:
                         else "aux") / job["id"] / "complete.json")
         if block["id"] == "segment_timing":
             path = Path(job["receipt_path"]).parents[1] / "complete.json"
+        if block["id"] == "hybrid":
+            path = Path(job["receipt_path"])
+            if path.parent.parent != root / "aux":
+                path = path.parents[1] / "complete.json"
         if not path.exists():
             continue  # Measured correctness rejection can omit dependent jobs.
         paths[str(path.relative_to(root))] = digest(path)

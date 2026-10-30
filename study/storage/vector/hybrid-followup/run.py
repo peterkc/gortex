@@ -139,6 +139,8 @@ def latency_jobs(ann: Path, generated: bool = False) -> list[Job]:
                        if recipe[0] in ("exact", "int8")
                        or recipe == ("f32", 32, 1024, 10, 1)]
         for method, m, ef, k, workers in methods:
+            if generated and method == "exact":
+                continue
             flags = ("-method", method, "-m", str(m), "-ef", str(ef),
                      "-workers", str(workers))
             if method == "i8":
@@ -146,6 +148,10 @@ def latency_jobs(ann: Path, generated: bool = False) -> list[Job]:
             for repeat in range(1, 4):
                 name = (f"{label}-{method}-m{m}-e{ef}-k{k}-w{workers}"
                         f"-block{repeat}")
+                if generated:
+                    jobs.append(Job(name + "-reference", base + (
+                        "-method", "exact", "-m", "16", "-ef", "512",
+                        "-workers", "1"), None, "timing"))
                 jobs.append(Job(name, base + flags, None, "timing"))
     return jobs
 
@@ -300,6 +306,7 @@ def main() -> None:
     parser.add_argument("--run-id", default="run-1")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--jobs-file", type=Path)
+    parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
     mode = cast(Mode, args.mode)
     if args.generated and mode != "latency":
@@ -353,7 +360,12 @@ def main() -> None:
         telemetry = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = telemetry
         spec.loader.exec_module(telemetry)
-    directory = WORK / "runs" / mode / args.run_id
+    directory = args.output_dir or WORK / "runs" / mode / args.run_id
+    if args.output_dir and mode == "timing":
+        jobs = [Job(j.name, j.command + ("-output", str(
+            directory / (j.name + ".result.json"))),
+            directory / (j.name + ".result.json"), j.kind)
+            if j.kind == "timing" else j for j in jobs]
     directory.mkdir(parents=True, exist_ok=True)
     plan = [{"name": job.name, "command": job.command, "kind": job.kind,
              "artifact": str(job.artifact) if job.artifact else None}
@@ -404,6 +416,8 @@ def main() -> None:
             input_sha = generated_input_sha(job) if args.generated else None
             receipt_path = directory / (job.name + ".json")
             if receipt_path.exists():
+                if job.kind == "timing":
+                    raise RuntimeError("whole groups own timing reuse")
                 prior = json.loads(receipt_path.read_text())
                 if (args.generated and prior.get("input_receipt_sha256")
                         != input_sha):

@@ -88,6 +88,7 @@ class FixtureSupervisor:
         self.modes = modes
         self.interrupt_at = interrupt_at
         self.calls = []
+        self.swapouts = None
 
     def begin_block(self, block, outcomes):
         self.job_bindings = {job["id"]: dict(job) for job in block["jobs"]}
@@ -3004,6 +3005,487 @@ class NativeEntryTests(unittest.TestCase):
 
 
 
+class HybridGroupTests(unittest.TestCase):
+    def owner(self, root, *, window="hybrid-window-1", stop=None, budget=None,
+              swap_step=0):
+        owner = fixture_owner(root)
+        owner.window = {"id": window}
+        owner.block_id, owner.block_deadline = "hybrid", 100000
+        owner.job_bindings = {job["id"]: {
+            **job, "kind": "hybrid", "gomaxprocs": 10,
+            "estimated_peak_bytes": driver.GIB}
+            for job in driver.bound_jobs(root)["hybrid"]}
+        owner.job_minutes = {name: 60 for name in owner.job_bindings}
+        owner.calls, owner.clocks, owner.baselines = [], [], []
+        owner.clock, owner.counter = [0.0], 10000
+        owner.arm_guard = unittest.mock.Mock()
+        owner.close = unittest.mock.Mock()
+        owner.stop_all = unittest.mock.Mock()
+        driver.atomic_json(root / "python-runtime.json", {"fixture": True})
+
+        def start(args, directory, env, cwd):
+            name = owner.case["id"]
+            owner.calls.append(name)
+            if len(owner.calls) == stop:
+                raise driver.DeadlineExceeded("fixture interruption")
+            self.assertEqual(args, owner.case["argv"])
+            mode = args[3]
+            if name not in {"hybrid-timing", "hybrid-latency"}:
+                declaration = driver.read_json(
+                    directory.parent / "started.json")
+                self.assertIn(owner.case, declaration["samples"])
+                self.assertEqual(declaration["reference"],
+                                 None if mode == "timing" else "exact-F32")
+                self.assertEqual(declaration["ratio"],
+                                 None if mode == "timing" else "B/A")
+                self.assertFalse((directory.parent / "complete.json").exists())
+                self.assertEqual(driver.read_json(directory / "attempt.json"),
+                                 driver.read_json(directory.parent /
+                                                  "attempt.json"))
+            selected = driver.read_json(directory / "selected-jobs.json")
+            commands = driver.hybrid_commands(root, mode)
+            owner.clocks.append((owner.clock[0], owner.launch_deadline))
+            owner.baselines.append(owner.swapouts)
+            if owner.swapouts is None:
+                owner.swapouts = owner.counter
+            before = fixture_resources(swapouts=owner.counter, load1=20)
+            owner.counter += swap_step
+            after = fixture_resources(swapouts=owner.counter, load1=22)
+            driver.resource_limit(after, 0, owner.swapouts, admission=False)
+            driver.atomic_json(directory / "process.json", {
+                "window": owner.window, "command": args})
+            (directory / "rss.jsonl").write_text(json.dumps({
+                **after, "elapsed_seconds": 1.0}) + "\n")
+            (directory / "stdout-stderr.log").write_text("fixture")
+            if len(owner.calls) == budget:
+                raise fixture_budget_stop(directory)
+            for sample in selected:
+                command = commands[sample]
+                flags = dict(zip(command[1::2], command[2::2]))
+                Path(command[0]).parent.mkdir(parents=True, exist_ok=True)
+                Path(command[0]).write_bytes(b"fixture-binary")
+                phase = flags["-phase"]
+                kind = "timing" if phase in {"query", "latency"} else (
+                    "preparation")
+                if mode == "timing":
+                    data = Path(flags["-data-dir"])
+                    data.mkdir(parents=True, exist_ok=True)
+                    (data / "fixture-index").write_bytes(b"generated")
+                    if kind == "timing":
+                        command += ("-output", str(
+                            directory / (sample + ".result.json")))
+                    result = {"queries": 256, "n": int(flags["-n"]),
+                        "dimensions": int(flags["-dimensions"]),
+                        "workers": int(flags.get("-workers", 1)),
+                        "candidate_pool":
+                        "global quantized top128, then original F32 rerank"}
+                else:
+                    data = Path(flags["-dataset"])
+                    data.mkdir(parents=True, exist_ok=True)
+                    inputs = {}
+                    for file in ("document.f32", "query.f32", "records.json",
+                                 "query-records.json"):
+                        (data / file).write_bytes(
+                            b"generated-" + file.encode())
+                        inputs[file] = {"sha256": driver.digest(data / file)}
+                    driver.atomic_json(data / "input-receipt.json", inputs)
+                    native = data / "native-M32-f32-rep1/build.json"
+                    native.parent.mkdir(exist_ok=True)
+                    driver.atomic_json(native, {"native_version": "2.26.5",
+                        "config": {"Connectivity": 32, "ExpansionAdd": 256,
+                                   "Quantization": 1, "Dimensions": 1024}})
+                    result = {"method": flags.get("-method", "exact"),
+                        "phase": phase, "queries": 256, "candidate_k": 128,
+                        "M": 32, "ef_search": 1024,
+                        "required_file_components_bytes": {
+                            "int8_with_original_f32": 1}}
+                repeat = (int(sample.split("-block")[1][0])
+                          if mode == "latency" and kind == "timing" else 1)
+                value = 100 * repeat
+                if mode == "latency" and result["method"] != "exact":
+                    value *= repeat + 1
+                result["latency_ns"] = {"count": 256, "p50": value,
+                                         "p95": value * 2}
+                receipt = {"command": command, "exit_code": 0,
+                    "platform": "darwin", "architecture": "arm64",
+                    "kind": kind, "result": result,
+                    "configuration": {"source": "fixture-source",
+                        "go_version": "fixture-go", "native_files": {},
+                        "runtime_environment": {"GOMAXPROCS": "10"}},
+                    "resource_before": before, "resource_after": after,
+                    "valid_timing_comparison": False}
+                if mode == "latency":
+                    receipt["input_receipt_sha256"] = driver.digest(
+                        data / "input-receipt.json")
+                driver.atomic_json(directory / (sample + ".json"), receipt)
+                if mode == "timing" and kind == "timing":
+                    driver.atomic_json(directory / (sample + ".result.json"),
+                                       result)
+            started = owner.clock[0]
+            owner.clock[0] += 100
+            return SimpleNamespace(process=fixture_process(123, 0),
+                directory=directory, started=started, peak_rss=1024,
+                deadline=owner.launch_deadline)
+
+        owner.start = start
+        return owner
+
+    def group(self, owner):
+        profiles = driver.bound_jobs(owner.root)["hybrid"]
+        cases = [j for j in profiles if "generated-n10000-int8-" in j["id"]
+                 and "-w1-" in j["id"]]
+        self.assertEqual(len(cases), 6)
+        directory = Path(cases[0]["receipt_path"]).parents[1]
+        identity = {"reference": "exact-F32", "operation": "hybrid-latency",
+            "input": "fixture-generated-input", "recipe": "int8/global128",
+            "source": "fixture-source", "config": "fixture-config",
+            "pairs": {"B": [[0, 1], [2, 3], [4, 5]]}, "ratio": "B/A",
+            "samples": [owner.job_bindings[j["id"]] for j in cases]}
+
+        def samples(attempt, check_only=False):
+            rows = []
+            for job in cases:
+                folder = Path(job["receipt_path"]).parent
+                row = driver.auxiliary(owner, job["id"], job["argv"],
+                    lambda _, j=job, d=folder: driver.hybrid_outputs(
+                        owner.root, "latency", j["selected_jobs"], d,
+                        {"source": "fixture-source",
+                         "go_version": "fixture-go", "native_files": {}}),
+                    selection=job["selected_jobs"], directory=folder,
+                    attempt=attempt, check_only=check_only)
+                metrics = {} if row["state"] != "pass" else {
+                    k: driver.read_json(folder / (job["id"] + ".json"))[
+                        "result"]["latency_ns"][k] for k in ("p50", "p95")}
+                rows.append({**row, "metrics": metrics})
+            return rows
+
+        return directory, identity, samples
+
+    def run_group(self, owner):
+        directory, identity, samples = self.group(owner)
+        with patch.object(driver.time, "monotonic",
+                          side_effect=lambda: owner.clock[0]):
+            return driver.comparison_group(owner, directory.name,
+                                           identity, samples)
+
+    def rehash(self, root, directory):
+        for path in directory.glob("*/complete.json"):
+            row = driver.read_json(path)
+            row["files"] = {name: driver.digest(root / name)
+                            for name in row["files"]}
+            driver.atomic_json(path, row)
+        proof = driver.read_json(directory / "complete.json")
+        for index, sample in enumerate(proof["identity"]["samples"]):
+            row = driver.read_json(directory / sample["id"] / "complete.json")
+            metrics = proof["samples"][index]["metrics"]
+            proof["samples"][index] = {**row, "metrics": metrics
+                                      if row["state"] == "pass" else {}}
+        proof["files"] = {name: driver.digest(root / name)
+                          for name in proof["files"]}
+        driver.atomic_json(directory / "complete.json", proof)
+
+    def test_interrupt_after_a_or_b_restarts_whole_group_then_zero_spawn(self):
+        for stop in (2, 3):
+            with self.subTest(stop=stop), tempfile.TemporaryDirectory() as f:
+                root = Path(f).resolve()
+                owner = self.owner(root, stop=stop)
+                with self.assertRaisesRegex(driver.DeadlineExceeded,
+                                            "interruption"):
+                    self.run_group(owner)
+                directory, _, _ = self.group(owner)
+                files = {str(p.relative_to(directory)): p.read_bytes()
+                         for p in [*driver.output_files([directory]),
+                                   *directory.glob("*/complete.json")]}
+                self.assertNotIn("complete.json", files)
+                old = driver.read_json(directory / "attempt.json")
+                resumed = self.owner(root, window="hybrid-window-2")
+                proof = self.run_group(resumed)
+                self.assertEqual(len(resumed.calls), 6)
+                self.assertEqual(["-reference" in n for n in resumed.calls],
+                                 [True, False] * 3)
+                archive = list((root / "attempts/aux" /
+                                directory.name).iterdir())
+                self.assertEqual(len(archive), 1)
+                for name, raw in files.items():
+                    self.assertEqual((archive[0] / name).read_bytes(), raw)
+                self.assertNotEqual(old["attempt_id"],
+                                    proof["attempt"]["attempt_id"])
+                self.assertEqual(proof["attempt"]["window_id"],
+                                 "hybrid-window-2")
+                before = (directory / "complete.json").read_bytes()
+                final = self.owner(root, window="hybrid-window-3")
+                self.assertEqual(self.run_group(final), proof)
+                self.assertEqual(final.calls, [])
+                self.assertEqual((directory / "complete.json").read_bytes(),
+                                 before)
+                self.assertTrue(proof["valid_timing_comparison"])
+                self.assertEqual(proof["paired_ratios"]["orientation"], "B/A")
+                for ratio in proof["paired_ratios"]["operations"]:
+                    self.assertEqual(ratio["pairs"], [2, 3, 4])
+                    self.assertEqual((ratio["pair_count"], ratio["median"],
+                                      ratio["min"], ratio["max"]),
+                                     (3, 3, 2, 4))
+
+    def test_wrong_identity_order_hash_coverage_and_window_reject(self):
+        modes = ("reference", "recipe", "input", "source", "config", "ratio",
+                 "order",
+                 "hash", "coverage", "attempt_id", "window_id", "process",
+                 "raw-source", "raw-config", "raw-command", "raw-recipe")
+        for mode in modes:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as f:
+                root = Path(f).resolve()
+                owner = self.owner(root)
+                self.run_group(owner)
+                directory, expected, samples = self.group(owner)
+                if mode in {"reference", "recipe", "input",
+                            "source", "config", "ratio"}:
+                    expected[mode] = "alien"
+                elif mode == "order":
+                    expected["samples"] = expected["samples"][::-1]
+                elif mode in {"hash", "coverage"}:
+                    case = directory / expected["samples"][1]["id"]
+                    if mode == "hash":
+                        (case / "stdout-stderr.log").write_text("changed")
+                    else:
+                        receipt = driver.read_json(case / "complete.json")
+                        del receipt["files"][str((case /
+                            (case.name + ".json")).relative_to(root))]
+                        driver.atomic_json(case / "complete.json", receipt)
+                        self.rehash(root, directory)
+                elif mode.startswith("raw-"):
+                    case = directory / expected["samples"][1]["id"]
+                    path = case / (case.name + ".json")
+                    raw = driver.read_json(path)
+                    if mode == "raw-source":
+                        raw["configuration"]["source"] = "alien"
+                    elif mode == "raw-config":
+                        raw["configuration"]["native_files"] = {"alien": "0"}
+                    elif mode == "raw-command":
+                        raw["command"][-1] = "8"
+                    else:
+                        raw["result"]["candidate_k"] = 64
+                    driver.atomic_json(path, raw)
+                    self.rehash(root, directory)
+                else:
+                    case = directory / expected["samples"][1]["id"]
+                    if mode == "process":
+                        path = case / "process.json"
+                        value = driver.read_json(path)
+                        value["window"]["id"] = "alien"
+                    else:
+                        path = case / "attempt.json"
+                        value = driver.read_json(path)
+                        value[mode] = "alien"
+                        receipt = driver.read_json(case / "complete.json")
+                        receipt["attempt"] = value
+                        driver.atomic_json(case / "complete.json", receipt)
+                    driver.atomic_json(path, value)
+                    self.rehash(root, directory)
+                with self.assertRaises(driver.ReviewRequired):
+                    driver.finished_group(root, expected,
+                                          projection=(directory, samples))
+
+    def test_budget_negative_reuses_and_corruption_never_retries(self):
+        with tempfile.TemporaryDirectory() as f:
+            root = Path(f).resolve()
+            owner = self.owner(root, budget=2)
+            proof = self.run_group(owner)
+            self.assertEqual(proof["state"], "budget_exceeded")
+            self.assertFalse(proof["valid_timing_comparison"])
+            self.assertEqual(proof["paired_ratios"]["operations"], [])
+            resumed = self.owner(root, window="hybrid-window-2")
+            self.assertEqual(self.run_group(resumed), proof)
+            self.assertEqual(resumed.calls, [])
+            directory, _, _ = self.group(owner)
+            (directory / "complete.json").unlink()
+            with self.assertRaises(FileNotFoundError):
+                self.run_group(resumed)
+            self.assertEqual(resumed.calls, [])
+            self.assertFalse((root / "attempts").exists())
+
+    def test_known_rejection_does_not_restart_in_fresh_namespace(self):
+        for mode in ("worker", "recipe", "caller"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as f:
+                root = Path(f).resolve()
+                owner = self.owner(root)
+                start = owner.start
+
+                def rejected(args, directory, env, cwd):
+                    owned = start(args, directory, env, cwd)
+                    if len(owner.calls) == 2:
+                        path = directory / (directory.name + ".json")
+                        raw = driver.read_json(path)
+                        if mode == "worker":
+                            raw["exit_code"] = 1
+                            owned.process.returncode = 1
+                        elif mode == "recipe":
+                            raw["result"]["candidate_k"] = 64
+                        else:
+                            owned.process.returncode = 1
+                        driver.atomic_json(path, raw)
+                    return owned
+
+                owner.start = rejected
+                reason = {"worker": "wrong-platform hybrid",
+                          "recipe": "original F32/top128",
+                          "caller": "auxiliary command failed"}[mode]
+                with self.assertRaisesRegex(driver.ReviewRequired, reason):
+                    self.run_group(owner)
+                directory, _, _ = self.group(owner)
+                before = {str(p.relative_to(directory)): p.read_bytes()
+                          for p in driver.output_files([directory])}
+                self.assertFalse((directory / "complete.json").exists())
+                rejection = directory / owner.calls[-1] / "partial.json"
+                negative = driver.read_json(rejection)
+                self.assertEqual(negative["state"], "checks_failed")
+                self.assertEqual(negative["reason_code"], "ReviewRequired")
+                self.assertRegex(negative["reason"], reason)
+                resumed = self.owner(root, window="hybrid-window-2")
+                with self.assertRaises((driver.ReviewRequired,
+                                        FileNotFoundError)):
+                    self.run_group(resumed)
+                self.assertEqual(resumed.calls, [])
+                self.assertFalse((root / "attempts").exists())
+                for name, raw in before.items():
+                    self.assertEqual((directory / name).read_bytes(), raw)
+
+    def test_failed_group_never_emits_ratios_or_blindly_retries(self):
+        with tempfile.TemporaryDirectory() as f:
+            root = Path(f).resolve()
+            owner = self.owner(root)
+            self.run_group(owner)
+            directory, expected, samples = self.group(owner)
+            case = directory / expected["samples"][1]["id"]
+            row = driver.read_json(case / "complete.json")
+            row["state"] = "checks_failed"
+            driver.atomic_json(case / "complete.json", row)
+            self.rehash(root, directory)
+            proof = driver.read_json(directory / "complete.json")
+            proof["state"] = "checks_failed"
+            driver.atomic_json(directory / "complete.json", proof)
+            resumed = self.owner(root, window="hybrid-window-2")
+            cached = self.run_group(resumed)
+            self.assertEqual(cached["state"], "checks_failed")
+            self.assertFalse(cached["valid_timing_comparison"])
+            self.assertEqual(cached["paired_ratios"]["operations"], [])
+            self.assertEqual(resumed.calls, [])
+            del proof["files"][str((case / "complete.json").relative_to(root))]
+            driver.atomic_json(directory / "complete.json", proof)
+            with self.assertRaises(driver.ReviewRequired):
+                self.run_group(resumed)
+            self.assertEqual(resumed.calls, [])
+            self.assertFalse((root / "attempts").exists())
+
+    def test_unowned_or_aliased_output_directory_has_no_effect(self):
+        with tempfile.TemporaryDirectory() as f:
+            root = Path(f).resolve()
+            owner = self.owner(root)
+            job = next(iter(owner.job_bindings.values()))
+            outside = root.parent / (root.name + "-unowned")
+            self.assertFalse(outside.exists())
+            with self.assertRaises(driver.FatalSession):
+                driver.auxiliary(owner, job["id"], job["argv"], lambda _: [],
+                                 directory=outside)
+            self.assertFalse(outside.exists())
+            real = root / "real"
+            real.mkdir()
+            alias = root / "alias"
+            alias.symlink_to(real, target_is_directory=True)
+            with self.assertRaises(driver.FatalSession):
+                driver.auxiliary(owner, job["id"], job["argv"], lambda _: [],
+                                 directory=alias / "output")
+            self.assertEqual(list(real.iterdir()), [])
+            self.assertEqual(owner.calls, [])
+
+    def test_unexpected_verification_errors_propagate_without_retry(self):
+        with tempfile.TemporaryDirectory() as f:
+            root = Path(f).resolve()
+            owner = self.owner(root)
+            self.run_group(owner)
+            resumed = self.owner(root, window="hybrid-window-2")
+            for error in (TypeError("bug"), KeyError("bug"),
+                          PermissionError("fixture"),
+                          driver.FatalSession("driver JSON")):
+                with self.subTest(error=type(error).__name__):
+                    with patch.object(driver, "finished_group",
+                                      side_effect=error):
+                        with self.assertRaises(type(error)):
+                            self.run_group(resumed)
+                    self.assertEqual(resumed.calls, [])
+            self.assertFalse((root / "attempts").exists())
+
+    def test_per_sample_clocks_and_one_group_swapouts_baseline(self):
+        with tempfile.TemporaryDirectory() as f:
+            root = Path(f).resolve()
+            owner = self.owner(root, swap_step=4096)
+            self.run_group(owner)
+            self.assertEqual(owner.baselines, [None] + [10000] * 5)
+            self.assertEqual(owner.clocks, [(i * 100, i * 100 + 2700)
+                                           for i in range(6)])
+        with tempfile.TemporaryDirectory() as f:
+            owner = self.owner(Path(f).resolve())
+            owner.block_deadline = 3599
+            with self.assertRaises(driver.DeadlineExceeded):
+                self.run_group(owner)
+            self.assertEqual(owner.calls, [])
+        for step in (8192, -1):
+            with self.subTest(step=step), tempfile.TemporaryDirectory() as f:
+                root = Path(f).resolve()
+                owner = self.owner(root, swap_step=step)
+                with self.assertRaises(driver.FatalSession):
+                    self.run_group(owner)
+                directory, _, _ = self.group(owner)
+                self.assertFalse((directory / "complete.json").exists())
+                self.assertEqual(len(owner.calls), 5 if step == 8192 else 1)
+
+    def test_full_schedule_keeps_scaling_round_and_group_only_metrics(self):
+        with tempfile.TemporaryDirectory() as f:
+            root = Path(f).resolve()
+            owner = self.owner(root)
+            with patch.object(driver.time, "monotonic",
+                              side_effect=lambda: owner.clock[0]):
+                driver.run_catalog_hybrid(owner, [], "hybrid")
+            profiles = driver.bound_jobs(root)["hybrid"]
+            self.assertEqual(owner.calls, [j["id"] for j in profiles])
+            self.assertEqual(len(profiles), 86)
+            self.assertEqual(sum(len(j["selected_jobs"])
+                                 for j in profiles), 94)
+            self.assertEqual(len({j["receipt_path"] for j in profiles}), 86)
+            for mode, count in (("timing", 40), ("latency", 54)):
+                self.assertEqual(len(driver.hybrid_commands(root, mode)),
+                                 count)
+            summary = driver.read_json(root / "hybrid-summary.json")
+            groups = [g for g in summary["blocks"] if "samples" in g]
+            self.assertEqual(len(groups), 12)
+            for group in groups:
+                self.assertTrue(group["valid_timing_comparison"])
+                cases = group["identity"]["samples"]
+                if group["identity"]["operation"] == "hybrid-timing":
+                    self.assertEqual([int(j["id"].split("-w")[1][0])
+                                      for j in cases], [1, 4, 8] * 3)
+                    self.assertIsNone(group["identity"]["reference"])
+                    self.assertIsNone(group["identity"]["ratio"])
+                    self.assertEqual(group["paired_ratios"]["operations"], [])
+                else:
+                    self.assertEqual(group["identity"]["reference"],
+                                     "exact-F32")
+                    self.assertEqual(group["identity"]["ratio"], "B/A")
+                    self.assertEqual(["-reference" in j["id"] for j in cases],
+                                     [True, False] * 3)
+                self.assertEqual(len({j["receipt_path"] for j in cases}),
+                                 len(cases))
+                for job in cases:
+                    folder = Path(job["receipt_path"]).parent
+                    raw = driver.read_json(folder / (job["id"] + ".json"))
+                    self.assertFalse(raw["valid_timing_comparison"])
+            files = driver.block_files(root, {
+                "id": "hybrid", "jobs": profiles})
+            for group in groups:
+                path = (root / "aux" / group["attempt"]["job_id"]
+                        / "complete.json")
+                self.assertIn(str(path.relative_to(root)), files)
+
+
 class MacHybridCallerTests(unittest.TestCase):
     def load_child(self):
         import importlib.util
@@ -3018,30 +3500,23 @@ class MacHybridCallerTests(unittest.TestCase):
     def test_mac_commands_use_pinned_controller_and_darwin_binaries(self):
         root = Path("/fixture-root")
         jobs = driver.bound_jobs(root)["hybrid"]
-        self.assertEqual(len(jobs), 2)
+        self.assertEqual(len(jobs), 86)
         for job in jobs:
             self.assertEqual(job["argv"][0],
                              str(Path(sys.executable).resolve()))
             self.assertEqual(job["argv"][1], "-B")
-        for mode, count in (("timing", 40), ("latency", 36)):
+            directory = Path(job["receipt_path"]).parent
+            output = job["argv"][job["argv"].index("--output-dir") + 1]
+            self.assertEqual(output, str(directory))
+            self.assertEqual(job["argv"][job["argv"].index("--jobs-file") + 1],
+                             str(directory / "selected-jobs.json"))
+        for mode, count in (("timing", 40), ("latency", 54)):
             commands = driver.hybrid_commands(root, mode)
             self.assertEqual(len(commands), count)
             self.assertTrue(all("/bin/darwin-arm64/" in cmd[0]
                                 for cmd in commands.values()))
         self.assertEqual(driver.hybrid_names("timing"),
                          list(driver.hybrid_commands(Path("/work"), "timing")))
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            with patch.object(driver, "auxiliary", return_value={}) as launch:
-                driver.run_catalog_hybrid(SimpleNamespace(root=root), [],
-                                          "hybrid")
-            expected = driver.bound_jobs(root)["hybrid"]
-            self.assertEqual(len(launch.call_args_list), len(expected))
-            for call, job in zip(launch.call_args_list, expected):
-                self.assertEqual(call.args[1], job["id"])
-                self.assertEqual(call.args[2], job["argv"])
-                self.assertEqual(call.kwargs["selection"],
-                                 job["selected_jobs"])
 
     def test_unsupported_inputs_refuse_before_build_or_sample(self):
         child = self.load_child()
@@ -3101,6 +3576,7 @@ class MacHybridCallerTests(unittest.TestCase):
                 loader=SimpleNamespace(exec_module=unittest.mock.Mock()))
             expected = driver.hybrid_commands(root, "timing")[name]
             result = {"queries": 256, "n": 10000, "dimensions": 384,
+                      "latency_ns": {"count": 256, "p50": 100, "p95": 200},
                       "workers": 1, "candidate_pool":
                       "global quantized top128, then original F32 rerank"}
 

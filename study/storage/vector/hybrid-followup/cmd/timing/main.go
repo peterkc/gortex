@@ -46,6 +46,7 @@ func run() error {
 	workers := flag.Int("workers", 1, "1,4,8 scan goroutines")
 	queries := flag.Int("queries", 256, "query count")
 	repeat := flag.Int("repeat", 1, "timing repetition")
+	output := flag.String("output", "", "separate fresh result path")
 	directory := flag.String("data-dir", filepath.Join(dataRoot, "timing-data"), "owned data/output directory")
 	flag.Parse()
 	if *phase == "plan" {
@@ -126,7 +127,12 @@ func run() error {
 	}
 	after := loadLine()
 	out := map[string]any{"phase": "query", "n": *n, "dimensions": *dimensions, "workers": *workers, "queries": *queries, "repeat": *repeat, "latency_ns": summary(latency), "load_before": before, "load_after": after, "gomaxprocs": runtime.GOMAXPROCS(0), "candidate_pool": "global quantized top128, then original F32 rerank", "request_concurrency": 1, "warmup_queries": min(8, *queries)}
-	f, err := os.OpenFile(filepath.Join(*directory, fmt.Sprintf("n%d-d%d-w%d-rep%d.json", *n, *dimensions, *workers, *repeat)), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	if *output == "" {
+		*output = filepath.Join(*directory,
+			fmt.Sprintf("n%d-d%d-w%d-rep%d.json",
+				*n, *dimensions, *workers, *repeat))
+	}
+	f, err := os.OpenFile(*output, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
 	}

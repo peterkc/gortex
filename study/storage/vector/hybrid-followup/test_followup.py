@@ -132,6 +132,32 @@ class FollowupTests(unittest.TestCase):
         self.assertEqual(len(latency), 240)
         self.assertTrue(all(job.kind == "timing" for job in latency))
 
+    def test_generated_latency_pairs_exact_and_retains_each_recipe(self):
+        with patch.object(runner, "WORK", Path("/fixture/hybrid-followup")):
+            jobs = runner.latency_jobs(Path("ann"), generated=True)
+        self.assertEqual(len(jobs), 54)
+        self.assertEqual(len({job.name for job in jobs}), 54)
+        self.assertEqual(sum(j.kind == "preparation" for j in jobs), 6)
+        timed = [j for j in jobs if j.kind == "timing"]
+        self.assertEqual(len(timed), 48)
+        recipes = set()
+        for index in range(0, len(timed), 6):
+            group = timed[index:index + 6]
+            flags = [dict(zip(j.command[1::2], j.command[2::2]))
+                     for j in group]
+            self.assertEqual([f["-method"] for f in flags[::2]], ["exact"] * 3)
+            self.assertEqual(len({f["-dataset"] for f in flags}), 1)
+            self.assertEqual(len({j.name for j in group}), 6)
+            self.assertTrue(all(j.artifact is None for j in group))
+            for a, b in zip(group[::2], group[1::2]):
+                self.assertEqual(a.name, b.name + "-reference")
+            b = flags[1]
+            self.assertTrue(all(f == b for f in flags[1::2]))
+            recipes.add((b["-method"], b["-m"], b["-ef"], b["-workers"]))
+        self.assertEqual(recipes, {("int8", "16", "512", str(w))
+                                   for w in (1, 4, 8)} |
+                                  {("f32", "32", "1024", "1")})
+
     def test_exact_text_spacing_and_chunk_ids(self):
         row = {"id": "symbol", "kind": "function", "name": "F",
                "signature": "", "file_path": "beads/f.go"}

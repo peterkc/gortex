@@ -19,7 +19,7 @@ class ControllerTests(unittest.TestCase):
         jobs = run.latency_jobs(Path("ann"), generated=True)
         self.assertEqual(sum(j.kind == "preparation" for j in jobs), 6)
         timed = [j for j in jobs if j.kind == "timing"]
-        self.assertEqual(len(timed), 30)
+        self.assertEqual(len(timed), 48)
         for job in timed:
             flags = dict(zip(job.command[1::2], job.command[2::2]))
             self.assertIn(flags["-method"], ("exact", "int8", "f32"))
@@ -53,6 +53,110 @@ class ControllerTests(unittest.TestCase):
                         with self.assertRaises(error):
                             run.main()
                         self.assertEqual(build.called, admitted)
+
+    def test_timing_namespaces_refuse_individual_reuse_and_adoption(self):
+        from io import StringIO
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        import sys
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            work, scratch = root / "work", root / "scratch"
+            data = work / "timing-data"
+            data.mkdir(parents=True)
+            index = data / "int8-n10000-d384.bin"
+            index.write_bytes(b"immutable-input")
+            name = "n10000-d384-w1-rep1"
+            selected = root / "selected.json"
+            selected.write_text(json.dumps([name]))
+            sample = {"timestamp": 1, "load1": 20, "load5": 18,
+                "load15": 17, "level": 20, "pressure_state": 1,
+                "available_bytes": 4 * 1024**3, "swapouts": 10000,
+                "page_size": 16384, "swap_usage": "used = 100M",
+                "ac_power": True}
+            telemetry = SimpleNamespace(native_resources=Mock(
+                side_effect=lambda _: dict(sample)))
+            spec = SimpleNamespace(name="storage_telemetry",
+                loader=SimpleNamespace(exec_module=Mock()))
+            result = {"queries": 256, "n": 10000, "dimensions": 384,
+                "workers": 1, "candidate_pool":
+                "global quantized top128, then original F32 rerank",
+                "latency_ns": {"count": 256, "p50": 100, "p95": 200}}
+            outputs = []
+
+            def execute(command, **options):
+                path = Path(command[command.index("-output") + 1])
+                outputs.append(path)
+                self.assertEqual(command[command.index("-data-dir") + 1],
+                                 str(data))
+                with path.open("x") as stream:
+                    json.dump(result, stream)
+                return SimpleNamespace(returncode=0)
+
+            def invoke(directory):
+                argv = ["run.py", "timing", "--execute", "--jobs-file",
+                        str(selected), "--output-dir", str(directory)]
+                with patch.object(run.sys, "argv", argv):
+                    run.main()
+
+            with (patch.object(run, "WORK", work),
+                  patch.object(run, "SCRATCH", scratch),
+                  patch.object(run.sys, "platform", "darwin"),
+                  patch.object(run.platform, "machine", return_value="arm64"),
+                  patch.object(run, "build") as build,
+                  patch.object(run, "source_fingerprint", return_value="pin"),
+                  patch.object(run.subprocess, "check_output",
+                               return_value="go1.27.1 darwin/arm64"),
+                  patch.object(run.subprocess, "run",
+                               side_effect=execute) as go,
+                  patch.object(run, "compatible_prior") as adopt,
+                  patch.object(run.importlib.util, "spec_from_file_location",
+                               return_value=spec),
+                  patch.object(run.importlib.util, "module_from_spec",
+                               return_value=telemetry),
+                  patch.dict(sys.modules), patch.dict(run.os.environ),
+                  patch("sys.stdout", StringIO())):
+                first = root / "attempt1/sample"
+                second = root / "attempt2/sample"
+                invoke(first)
+                receipt_path = first / (name + ".json")
+                receipt = json.loads(receipt_path.read_text())
+                self.assertFalse(receipt["valid_timing_comparison"])
+                self.assertEqual(receipt["artifact_sha256"], run.file_digest(
+                    first / (name + ".result.json")))
+                receipt["source_fingerprint"] = "old-source"
+                receipt_path.write_text(json.dumps(receipt))
+                original = receipt_path.read_bytes()
+                with self.assertRaisesRegex(RuntimeError, "whole groups"):
+                    invoke(first)
+                adopt.assert_not_called()
+                self.assertEqual(go.call_count, 1)
+                invoke(second)
+                self.assertEqual(outputs, [first / (name + ".result.json"),
+                                           second / (name + ".result.json")])
+                self.assertEqual(receipt_path.read_bytes(), original)
+                self.assertEqual(index.read_bytes(), b"immutable-input")
+                self.assertFalse((data / (name + ".json")).exists())
+                third = root / "attempt3/sample"
+                third.mkdir(parents=True)
+                (third / (name + ".result.json")).write_text("partial")
+                before = telemetry.native_resources.call_count
+                with self.assertRaisesRegex(RuntimeError, "unrecorded output"):
+                    invoke(third)
+                self.assertEqual(go.call_count, 2)
+                self.assertEqual(telemetry.native_resources.call_count, before)
+                adopt.assert_not_called()
+                for names in ([name, name], [name + "/alias"]):
+                    selected.write_text(json.dumps(names))
+                    before_build = build.call_count
+                    unused = root / "rejected/sample"
+                    with patch("sys.stderr", StringIO()):
+                        with self.assertRaises(SystemExit):
+                            invoke(unused)
+                    self.assertEqual(build.call_count, before_build)
+                    self.assertEqual(go.call_count, 2)
+                    self.assertFalse(unused.exists())
 
     def test_generated_hash_drift(self):
         with tempfile.TemporaryDirectory() as folder:
