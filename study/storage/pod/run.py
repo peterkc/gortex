@@ -693,11 +693,11 @@ class Supervisor:
         try:
             if digest(self.go_file) != self.go_sha:
                 raise DeadlineExceeded("current window go changed")
+            go = read_json(self.go_file)
         except FileNotFoundError as error:
             raise DeadlineExceeded("current window go removed") from error
         if not full and time.monotonic() < self.next_d12_check:
             return self.block_deadline - time.monotonic()
-        go = read_json(self.go_file)
         remaining = window_limit(
             go, self.native_identity["input_manifest_sha256"], time.time())
         daemon_off(self.off, self.environment)
@@ -847,7 +847,7 @@ class Supervisor:
                     raise DeadlineExceeded(
                         f"{self.block_id}: expired before spawn")
                 if digest(self.go_file) != self.go_sha:
-                    raise FatalSession("go changed before spawn")
+                    raise DeadlineExceeded("go changed before spawn")
                 window_limit(read_json(self.go_file), self.native_identity[
                     "input_manifest_sha256"], time.time())
                 process = subprocess.Popen(
@@ -855,8 +855,11 @@ class Supervisor:
                     stderr=subprocess.STDOUT, start_new_session=True,
                     preexec_fn=prepare_child,
                 )
-            except (OSError, subprocess.SubprocessError, ReviewRequired):
+            except (OSError, subprocess.SubprocessError, ReviewRequired) as e:
                 log.close()
+                if (isinstance(e, FileNotFoundError)
+                        and e.filename == str(self.go_file)):
+                    raise DeadlineExceeded("window go removed") from e
                 raise
             owned = OwnedProcess(
                 process, directory, time.monotonic(), log=log,
@@ -1081,7 +1084,7 @@ def reusable(directory: Path, verify: Callable[[], dict], *,
         raise ReviewRequired("known negative outcome needs diagnosis")
     try:
         budget = budget or ((directory / "complete.json").is_file()
-            and read_json(directory / "complete.json").get("state")
+            and worker_json(directory / "complete.json", "cache").get("state")
             != "pass")
         if strict:
             budget = budget or any(directory.glob("*/budget-exceeded.json"))

@@ -2940,6 +2940,116 @@ class DurabilityTests(unittest.TestCase):
 
 
 class FailureBoundaryTests(unittest.TestCase):
+    def test_go_removal_before_spawn_is_not_a_missing_executable(self):
+        for mode in ("before-hash", "after-hash", "executable"):
+            with (self.subTest(mode=mode),
+                  tempfile.TemporaryDirectory() as folder):
+                root = Path(folder).resolve()
+                directory = root / "case"
+                directory.mkdir()
+                owner = fixture_owner(root)
+                owner.go_file = root / "go.json"
+                driver.atomic_json(owner.go_file, NativeAdmissionTests().go(
+                    owner.native_identity["input_manifest_sha256"]))
+                owner.go_sha = driver.digest(owner.go_file)
+                owner.case = {"gomaxprocs": 10}
+                owner.block_id, owner.swapouts = "catalog", 7
+                owner.stop_all = unittest.mock.Mock()
+                admissions = []
+                digest, open_file = driver.digest, Path.open
+                log = StringIO()
+                missing = FileNotFoundError(driver.errno.ENOENT,
+                                            "missing executable", "/missing")
+                def guard(*, admission=False):
+                    if admission:
+                        admissions.append(True)
+                    if mode == "before-hash" and len(admissions) == 2:
+                        owner.go_file.unlink()
+                def hashed(path):
+                    result = digest(path)
+                    if mode == "after-hash" and path == owner.go_file:
+                        owner.go_file.unlink()
+                    return result
+                def opened(path, *args, **kwargs):
+                    if path == directory / "stdout-stderr.log":
+                        return log
+                    return open_file(path, *args, **kwargs)
+                owner.guard = guard
+                expected = (FileNotFoundError if mode == "executable"
+                            else driver.DeadlineExceeded)
+                with (patch.object(driver, "digest", side_effect=hashed),
+                      patch.object(Path, "open", new=opened),
+                      patch.object(driver.time, "monotonic", return_value=0),
+                      patch.object(driver.time, "time", return_value=1000),
+                      patch.object(driver.signal, "pthread_sigmask",
+                                   return_value=set()),
+                      patch.object(driver.subprocess, "Popen",
+                                   side_effect=missing) as spawn,
+                      self.assertRaises(expected) as caught):
+                    owner.start(["/missing"], directory,
+                        {**driver.environment(root), "GOMAXPROCS": "10"}, root)
+                if mode == "executable":
+                    self.assertIs(caught.exception, missing)
+                    spawn.assert_called_once()
+                else:
+                    spawn.assert_not_called()
+                    self.assertIsInstance(caught.exception.__cause__,
+                                          FileNotFoundError)
+                self.assertTrue(log.closed)
+                self.assertEqual(owner.active, [])
+                owner.stop_all.assert_called_once()
+
+    def test_go_removed_between_permission_hash_and_read_is_time(self):
+        for full in (True, False):
+            with (self.subTest(full=full),
+                  tempfile.TemporaryDirectory() as folder):
+                root = Path(folder).resolve()
+                owner = fixture_owner(root)
+                owner.go_file = root / "go.json"
+                owner.off_file = root / "off.json"
+                owner.off, owner.next_d12_check = {}, 10000
+                driver.atomic_json(owner.off_file, owner.off)
+                owner.native_identity["daemon_off_identities_sha256"] = (
+                    driver.digest(owner.off_file))
+                driver.atomic_json(owner.go_file, NativeAdmissionTests().go(
+                    owner.native_identity["input_manifest_sha256"]))
+                owner.go_sha = driver.digest(owner.go_file)
+                digest = driver.digest
+                def removed_after_hash(path):
+                    value = digest(path)
+                    if path == owner.go_file:
+                        owner.go_file.unlink()
+                    return value
+                with (patch.object(driver, "digest",
+                                   side_effect=removed_after_hash),
+                      patch.object(driver.time, "monotonic", return_value=0),
+                      patch.object(driver, "daemon_off") as probe,
+                      self.assertRaises(driver.DeadlineExceeded) as caught):
+                    owner.permissions(full=full)
+                self.assertIsInstance(caught.exception.__cause__,
+                                      FileNotFoundError)
+                probe.assert_not_called()
+                self.assertFalse(owner.go_file.exists())
+
+    def test_negative_markers_still_precede_a_torn_completion(self):
+        for name in ("partial.json", "budget-exceeded.json"):
+            with (self.subTest(marker=name),
+                  tempfile.TemporaryDirectory() as folder):
+                root = Path(folder).resolve()
+                directory = root / "jobs/case"
+                directory.mkdir(parents=True)
+                (directory / "complete.json").write_bytes(b"{")
+                driver.atomic_json(directory / name,
+                                   {"state": "checks_failed"})
+                before = {p: p.read_bytes() for p in directory.iterdir()}
+                verify = unittest.mock.Mock(
+                    side_effect=driver.ReviewRequired("known proof failure"))
+                with self.assertRaises(driver.ReviewRequired):
+                    driver.reusable(directory, verify)
+                after = {p: p.read_bytes() for p in directory.iterdir()}
+                self.assertEqual(after, before)
+                self.assertFalse((root / "attempts").exists())
+
     def test_unknown_cache_errors_propagate_in_both_modes_without_writes(self):
         for strict in (False, True):
             for error in (KeyError("bug"), TypeError("bug"), ValueError("bug"),
