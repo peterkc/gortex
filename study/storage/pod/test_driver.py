@@ -2453,6 +2453,7 @@ class NativeAdmissionTests(unittest.TestCase):
                     tempfile.TemporaryDirectory() as folder:
                 root = Path(folder).resolve()
                 selected, setup, _ = DriverTests().fixture(root)
+                _, setup, _ = fixture_references(root, setup)
                 owner = FixtureSupervisor(root, ["pass", "pass"])
                 owner.stop_all = unittest.mock.Mock()
                 owner.arm_guard = unittest.mock.Mock()
@@ -2480,6 +2481,9 @@ class NativeAdmissionTests(unittest.TestCase):
                     {"id": "storage", "jobs": [
                         {"id": j.name, "kind": j.stage, "gomaxprocs": 10,
                          "minutes": 30} for j in selected]}]}
+                config["blocks"][1]["jobs"].extend(
+                    {"id": driver.Job("oracle", "oracle", tier).name,
+                     "gomaxprocs": 10} for tier in driver.ARCHIVES)
                 with (patch.object(driver, "prepare", return_value=setup),
                       patch.object(driver, "jobs", return_value=selected),
                       patch.object(driver, "process_groups", return_value={}),
@@ -2674,6 +2678,7 @@ class DurabilityTests(unittest.TestCase):
     def sdk_session(self, root):
         cases = DriverTests()
         selected, setup, _ = cases.fixture(root)
+        _, setup, _ = fixture_references(root, setup)
         owner = FixtureSupervisor(root, ["pass", "pass"])
         receipts = []
         cases.execute(owner, selected, setup, receipts)
@@ -2681,6 +2686,9 @@ class DurabilityTests(unittest.TestCase):
             {"id": job.name, "gomaxprocs": 10,
              "receipt_path": str(root / "jobs" / job.name / "complete.json")}
             for job in selected]}]
+        blocks[1]["jobs"].extend(
+            {"id": driver.Job("oracle", "oracle", tier).name,
+             "gomaxprocs": 10} for tier in driver.ARCHIVES)
         admission = {"blocks": blocks}
         driver.atomic_json(root / "session.json", {
             "identity": {"configuration": admission,
