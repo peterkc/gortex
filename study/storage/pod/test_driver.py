@@ -4224,13 +4224,28 @@ class CodeRankCaseTests(unittest.TestCase):
                              job["receipt_path"])
             self.assertTrue(Path(job["receipt_path"]).is_relative_to(root))
 
+    def test_case_selection_keeps_original_indices_and_refuses_bad_lists(self):
+        root = Path("/fixture/run")
+        template = DeadlineContractTests().bindings(root)["cpu_cost"][0]
+        everything = driver.cpu_case_jobs(root, template)
+        chosen = driver.cpu_case_jobs(root, template, [4, 8, 12])
+        self.assertEqual(chosen, [everything[i] for i in (4, 8, 12)])
+        self.assertEqual([j["argv"][-2:] for j in chosen],
+                         [["--case", "4"], ["--case", "8"], ["--case", "12"]])
+        for cases in ([], [4, 4], [8, 4], [driver.CPU_CASES], [-1], [True],
+                      [4.0], "4", (4,), {"4": 4}):
+            with (self.subTest(cases=cases),
+                  self.assertRaisesRegex(driver.ReviewRequired, "ascending")):
+                driver.cpu_case_jobs(root, template, cases)
+
     def test_selected_template_and_unbound_case_ids_refuse_before_owner(self):
         root = Path("/fixture/run")
         template = DeadlineContractTests().bindings(root)["cpu_cost"][0]
         with self.assertRaisesRegex(driver.ReviewRequired, "case-free"):
             driver.cpu_case_jobs(root, {**template,
                 "argv": [*template["argv"], "--case", "0"]})
-        for damage in ("missing-case", "preselected", "extra-template"):
+        for damage in ("missing-case", "preselected", "extra-template",
+                       "selected-unbound"):
             with self.subTest(damage=damage), \
                     tempfile.TemporaryDirectory() as folder:
                 scratch = Path(folder).resolve()
@@ -4244,6 +4259,12 @@ class CodeRankCaseTests(unittest.TestCase):
                                          + f"-{driver.CPU_CASES - 1:02d}")
                 elif damage == "preselected":
                     cpu["jobs"][0]["argv"] += ["--case", "0"]
+                elif damage == "selected-unbound":
+                    cpu["cases"] = [4, 8]
+                    for case in range(driver.CPU_CASES):
+                        if case != 4:
+                            document["jobs"].pop(
+                                cpu["jobs"][0]["id"] + f"-{case:02d}")
                 else:
                     duplicate = {**deepcopy(cpu["jobs"][0]), "id": "other"}
                     duplicate["receipt_path"] += "-other"
@@ -4322,6 +4343,42 @@ class NativeEntryTests(unittest.TestCase):
         driver.atomic_json(go, NativeAdmissionTests().go(
             driver.digest(manifest)))
         return config_path, manifest, staged
+
+    def test_selected_cpu_cases_reach_the_owner_with_only_their_jobs(self):
+        class Reached(Exception):
+            pass
+
+        def owner(root, env, config):
+            raise Reached([j["id"] for b in config["blocks"]
+                           if b["id"] == "cpu_cost" for j in b["jobs"]])
+
+        with tempfile.TemporaryDirectory() as folder:
+            scratch = Path(folder).resolve()
+            config_path, manifest, staged = self.inputs(scratch)
+            value = driver.read_json(config_path)
+            cpu = next(b for b in value["blocks"] if b["id"] == "cpu_cost")
+            cpu["cases"] = [4, 8, 12]
+            wanted = [cpu["jobs"][0]["id"] + f"-{case:02d}"
+                      for case in (4, 8, 12)]
+            driver.atomic_json(config_path, value)
+            document = driver.read_json(manifest)
+            document["files"][str(config_path)] = driver.digest(config_path)
+            document["jobs"] = {key: files for key, files in
+                                document["jobs"].items()
+                                if key == "*" or key in wanted}
+            driver.atomic_json(manifest, document)
+            driver.atomic_json(Path(value["window_file"]),
+                NativeAdmissionTests().go(driver.digest(manifest)))
+            with (patch.object(driver, "__file__", str(staged)),
+                  patch.object(driver, "Supervisor", side_effect=owner),
+                  patch.object(driver.subprocess, "Popen") as spawn,
+                  patch.object(sys, "argv", ["run.py", "--native",
+                      str(config_path), "--root",
+                      str(scratch / "mac-run/original")]),
+                  self.assertRaises(Reached) as reached):
+                driver.main()
+            self.assertEqual(reached.exception.args[0], wanted)
+            spawn.assert_not_called()
 
     def test_new_run_ids_same_pins_and_finally_without_go(self):
         with tempfile.TemporaryDirectory() as folder:

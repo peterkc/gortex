@@ -170,11 +170,20 @@ def owned_path(value: object, root: Path) -> bool:
             and Path(value).is_relative_to(root))
 
 
-def cpu_case_jobs(root: Path, template: Mapping) -> list[dict]:
+def cpu_case_jobs(root: Path, template: Mapping,
+                  cases: object = None) -> list[dict]:
     if "--case" in template["argv"]:
         raise ReviewRequired("CPU binding must be a case-free template")
+    # An optional block-level selection reruns only some cases, keeping
+    # each case's original index, job id and receipt path.
+    selected = list(range(CPU_CASES)) if cases is None else cases
+    if (not isinstance(selected, list) or not selected
+            or any(type(case) is not int or not 0 <= case < CPU_CASES
+                   for case in selected)
+            or selected != sorted(set(selected))):
+        raise ReviewRequired("CPU cases must be ascending unique indices")
     result = []
-    for case in range(CPU_CASES):
+    for case in selected:
         name = f"{template['id']}-{case:02d}"
         receipt = str(root / "aux" / name / "output/receipt.json")
         argv = [receipt if arg == template["receipt_path"] else arg
@@ -3187,7 +3196,8 @@ def main() -> int:
         if block["id"] == "cpu_cost":
             if len(block["jobs"]) != 1:
                 raise ReviewRequired("one CPU case template required")
-            block["jobs"] = cpu_case_jobs(root, block["jobs"][0])
+            block["jobs"] = cpu_case_jobs(root, block["jobs"][0],
+                                          block.get("cases"))
     preflight({b["id"]: b["jobs"] for b in config["blocks"]
                if b["id"] in INPUT_BLOCKS}, root)
     if not {j["id"] for b in config["blocks"] if b["id"] == "cpu_cost"
