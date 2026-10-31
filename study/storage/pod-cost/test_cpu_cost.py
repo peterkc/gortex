@@ -690,8 +690,11 @@ class CostTests(unittest.TestCase):
                 calls = []
 
                 def prepare(root, output):
-                    for suffix in (".json", "-gate.json"):
-                        (output / ("metadata-8192" + suffix)).write_text("[]")
+                    for suffix, rows in ((".json", 400),
+                                         ("-gate.json", 200)):
+                        (output / ("metadata-8192" + suffix)).write_text(
+                            json.dumps([{"indices": list(range(rows)),
+                                         "shape": [rows, 4], "inputs": {}}]))
                     (output / "metadata-8192-reference.json").write_text(
                         json.dumps({"status": "completed", "runtime": "1.31.0",
                                     "intra_op_threads": 16,
