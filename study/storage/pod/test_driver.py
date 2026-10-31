@@ -2049,7 +2049,7 @@ class NativeAdmissionTests(unittest.TestCase):
         owned = [SimpleNamespace(process=fixture_process(pid))
                  for pid in (21, 23)]
         library = SimpleNamespace(proc_pid_rusage=unittest.mock.Mock(
-            side_effect=usage))
+            side_effect=usage), proc_pidpath=unittest.mock.Mock())
         with (patch.object(driver.sys, "platform", "darwin"),
               patch.object(driver.ctypes, "CDLL",
                            return_value=library) as load_library,
@@ -2069,6 +2069,41 @@ class NativeAdmissionTests(unittest.TestCase):
                 self.assertRaises(driver.FatalSession):
             driver.process_groups({}, [])
         probe.assert_not_called()
+
+    def test_unreadable_setuid_ps_member_is_skipped_but_others_unproved(self):
+        # r9 stopped when the smoke worker's setuid /bin/ps (EPERM for
+        # proc_pid_rusage) was sampled inside the owned group.
+        paths = {31: b"/bin/ps", 32: b"/usr/local/bin/other", 41: b"/bin/ps"}
+
+        def usage(pid, flavor, pointer):
+            if pid in paths:
+                driver.ctypes.set_errno(driver.errno.EPERM)
+                return -1
+            info = driver.ctypes.cast(
+                pointer, driver.ctypes.POINTER(driver.DarwinUsage)).contents
+            info.proc_start_abstime, info.resident_size = 7, 4096
+            return 0
+
+        def pidpath(pid, buffer, size):
+            value = paths[pid]
+            driver.ctypes.memmove(buffer, value, len(value))
+            return len(value)
+
+        driver.libproc.cache_clear()
+        self.addCleanup(driver.libproc.cache_clear)
+        library = SimpleNamespace(
+            proc_pid_rusage=unittest.mock.Mock(side_effect=usage),
+            proc_pidpath=unittest.mock.Mock(side_effect=pidpath))
+        owned = [SimpleNamespace(process=fixture_process(pid))
+                 for pid in (30, 33, 41)]
+        with (patch.object(driver.sys, "platform", "darwin"),
+              patch.object(driver.ctypes, "CDLL", return_value=library),
+              patch.object(driver, "native_output", return_value=(
+                  "30 30\n31 30\n33 33\n32 33\n41 41\n"))):
+            groups = driver.process_groups({}, owned)
+        self.assertEqual(groups[30], {(30, 7): 4096})
+        self.assertIsNone(groups[33])
+        self.assertIsNone(groups[41])
 
     def test_live_observations_bound_d12_and_keep_cheap_checks(self):
         with tempfile.TemporaryDirectory() as folder:

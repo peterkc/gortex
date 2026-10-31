@@ -562,7 +562,22 @@ def libproc() -> ctypes.CDLL:
     library.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int,
                                       ctypes.c_void_p]
     library.proc_pid_rusage.restype = ctypes.c_int
+    library.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p,
+                                     ctypes.c_uint32]
+    library.proc_pidpath.restype = ctypes.c_int
     return library
+
+
+# Setuid system tools a worker may run in its own process group. Their
+# usage is unreadable (EPERM) for the whole short life of the process.
+UNREADABLE_TOOLS = frozenset({"/bin/ps"})
+
+
+def unreadable_tool(pid: int) -> bool:
+    library = libproc()
+    path = ctypes.create_string_buffer(4096)
+    length = library.proc_pidpath(pid, path, ctypes.sizeof(path))
+    return length > 0 and path.value.decode() in UNREADABLE_TOOLS
 
 
 def darwin_usage(pid: int) -> DarwinUsage | None:
@@ -595,6 +610,10 @@ def process_groups(env: Mapping[str, str],
             try:
                 usage = darwin_usage(pid)
             except FatalSession:
+                # pod-v8 shutdown checks run setuid /bin/ps; skip only that
+                # member (a few MB, short-lived), keep everything else unproved.
+                if pid != pgid and unreadable_tool(pid):
+                    continue
                 groups[pgid] = None
                 continue
             if usage is not None and groups.get(pgid, {}) is not None:
