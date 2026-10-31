@@ -7096,6 +7096,20 @@ class DatasetBindingTests(unittest.TestCase):
                                                      "runtime": {}})
         return owner, inputs, setup
 
+    def test_usearch_build_links_the_static_archive_from_setup(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            self.prepare_fixture(root)
+            linking = driver.read_json(root / "linking.json")
+            flags = linking["sqlite-usearch"]["build_environment"]
+            self.assertEqual(flags["CGO_CFLAGS"], f"-I{root / 'native'}")
+            self.assertTrue(flags["CGO_LDFLAGS"].startswith(
+                f"-L{root / 'native'} "))
+            self.assertIn("-lc++" if sys.platform == "darwin" else "-lstdc++",
+                          flags["CGO_LDFLAGS"].split())
+            self.assertNotIn("CGO_LDFLAGS",
+                             linking["libsql-segment"]["build_environment"])
+
     def test_generated_binding_is_carried_and_resume_hashes_outputs(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder).resolve()

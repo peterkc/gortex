@@ -1544,6 +1544,12 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping) -> dict:
         } else "0"
         if name == "sqlite-usearch":
             env["CGO_CFLAGS"] = f"-I{native}"
+            # The Go binding links -lusearch_c: point it at the static
+            # archive built above and add the C++ runtime it needs.
+            runtime = ("-lc++ -framework CoreFoundation -framework Security"
+                       if sys.platform == "darwin"
+                       else "-lstdc++ -lm -pthread")
+            env["CGO_LDFLAGS"] = f"-L{native} {runtime}"
         binary = root / "bin" / name
         supervisor.run([
             "go", "build", "-p=1", "-o", str(binary), target,
