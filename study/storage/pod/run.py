@@ -1255,6 +1255,16 @@ def extract(archive: Path, target: Path, prefix: str) -> None:
     """Python 3.10 equivalent of a stricter data-only extraction policy."""
     with tarfile.open(archive) as bundle:
         members = bundle.getmembers()
+        # macOS tar adds 163-byte AppleDouble "._<name>" copies of extended
+        # attributes beside each entry; they hold no study data. Drop only
+        # those that pair with a real sibling; check the rest as before.
+        names = {member.name for member in members}
+        members = [
+            member for member in members
+            if not (member.isfile() and member.size <= 4096
+                    and PurePosixPath(member.name).name.startswith("._")
+                    and str(PurePosixPath(member.name).with_name(
+                        PurePosixPath(member.name).name[2:])) in names)]
         seen: set[str] = set()
         total = 0
         if len(members) > 100000:
@@ -1367,7 +1377,7 @@ def generate_tier10(supervisor: Supervisor, inputs: Path) -> None:
     archive = root / "downloads/tier10.tar"
     with tarfile.open(archive, "w") as output:
         output.add(root / "data/tier10", arcname="tier10")
-    supervisor.run(["zstd", "--output", str(archive) + ".zst", str(archive)])
+    supervisor.run(["zstd", "-o", str(archive) + ".zst", str(archive)])
 
 
 def control_binding(root: Path, manifest_file: Path) -> dict[str, str]:
@@ -1567,7 +1577,7 @@ def prepare(supervisor: Supervisor, inputs: Path, identity: Mapping) -> dict:
         unpacked = root / "downloads" / f"{tier}.tar"
         # Keep decompression separate from extraction and preserve the input.
         supervisor.run([
-            "zstd", "--decompress", "--output", str(unpacked), str(archive),
+            "zstd", "--decompress", "-o", str(unpacked), str(archive),
         ])
         extract(unpacked, root / "data", tier)
     generate_tier10(supervisor, inputs)

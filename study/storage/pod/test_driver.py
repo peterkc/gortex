@@ -1,11 +1,12 @@
 """Tiny controller fixtures. No study workload or model download."""
 import ast
 from copy import deepcopy
-from io import StringIO
+from io import BytesIO, StringIO
 import json
 import os
 import signal
 import sys
+import tarfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -7063,7 +7064,7 @@ class DatasetBindingTests(unittest.TestCase):
                         json.dumps(edge) + "\n"
                         for edge in (edges or {}).get(name, ())))
             if args[0] == "zstd":
-                Path(args[args.index("--output") + 1]).write_bytes(b"archive")
+                Path(args[args.index("-o") + 1]).write_bytes(b"archive")
             log = root / "setup" / ("log-" + str(len(owner.calls)))
             log.write_text(driver.COMMIT if args[:2] == ["git", "rev-parse"]
                            else "fixture version")
@@ -7095,6 +7096,31 @@ class DatasetBindingTests(unittest.TestCase):
             setup = driver.prepare(owner, inputs, {"driver": "fixture",
                                                      "runtime": {}})
         return owner, inputs, setup
+
+    def test_extract_drops_only_paired_appledouble_members(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            archive = root / "tier1.tar"
+
+            def add(bundle, name, data=b""):
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                bundle.addfile(info, BytesIO(data))
+
+            with tarfile.open(archive, "w") as bundle:
+                add(bundle, "._tier1", b"x" * 163)
+                directory = tarfile.TarInfo("tier1")
+                directory.type = tarfile.DIRTYPE
+                bundle.addfile(directory)
+                add(bundle, "tier1/._data.json", b"x" * 163)
+                add(bundle, "tier1/data.json", b"{}")
+            driver.extract(archive, root / "out", "tier1")
+            self.assertEqual(sorted(p.name for p in (root / "out").rglob("*")),
+                             ["data.json", "tier1"])
+            with tarfile.open(archive, "a") as bundle:
+                add(bundle, "._tier2", b"x" * 163)
+            with self.assertRaisesRegex(driver.ReviewRequired, "unsafe"):
+                driver.extract(archive, root / "again", "tier1")
 
     def test_usearch_build_links_the_static_archive_from_setup(self):
         with tempfile.TemporaryDirectory() as folder:
