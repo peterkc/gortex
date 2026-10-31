@@ -621,13 +621,28 @@ class CostTests(unittest.TestCase):
                     self.assertEqual(record["reason"], "crash")
                     self.assertEqual(record["teardown"], "unverified")
 
-    def test_repeat_estimate_scales_gate_rows_without_scaling_load(self):
+    def test_repeat_estimate_scales_padded_tokens_without_scaling_load(self):
+        # r8 body-512: gate 200 texts / 60,001 padded tokens took 89.5 s;
+        # the full 4,842 texts / 487,377 tokens took 709 s. A row ratio
+        # predicted 2,167 s and refused the 1-thread repeat.
         warm = {"load_seconds": 2, "seconds": 3, "completed_texts": 200}
         measured = {"load_seconds": 2, "seconds": 75,
                     "completed_texts": 5000}
-        self.assertEqual(cost.repeat_seconds(warm, 5000), 79)
-        self.assertEqual(cost.repeat_seconds(measured, 5000), 79)
+        self.assertAlmostEqual(cost.repeat_seconds(warm, 1000, 25000), 86.5)
+        self.assertAlmostEqual(cost.repeat_seconds(measured, 9000, 9000),
+                               86.5)
+        self.assertLess(cost.repeat_seconds(
+            {"load_seconds": 0.15, "seconds": 89.5, "completed_texts": 200},
+            60001, 487377), 900)
         self.assertEqual(warm["seconds"], 3)
+
+    def test_padded_tokens_counts_batch_rows_times_width(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "tokens.json"
+            path.write_text(json.dumps([
+                {"indices": [0, 1], "shape": [2, 8], "inputs": {}},
+                {"indices": [2], "shape": [1, 3], "inputs": {}}]))
+            self.assertEqual(cost.padded_tokens(path), 19)
 
     @unittest.skipUnless(sys.platform == "linux", "Linux runner contract")
     def test_native_guard_partial_report_is_not_a_worker_crash(self):
@@ -755,8 +770,10 @@ class CostTests(unittest.TestCase):
             calls = []
 
             def prepare(root, output):
-                for suffix in (".json", "-gate.json"):
-                    (output / ("metadata-8192" + suffix)).write_text("[]")
+                for suffix, rows in ((".json", 400), ("-gate.json", 200)):
+                    (output / ("metadata-8192" + suffix)).write_text(
+                        json.dumps([{"indices": list(range(rows)),
+                                     "shape": [rows, 4], "inputs": {}}]))
                 (output / "metadata-8192-reference.json").write_text(
                     json.dumps({"status": "completed", "runtime": "1.31.0",
                                 "intra_op_threads": 16, "inter_op_threads": 1,

@@ -334,9 +334,19 @@ def reap_children() -> bool:
             return False
 
 
-def repeat_seconds(estimate: Mapping, planned_rows: int) -> float:
+def padded_tokens(path: Path) -> int:
+    return sum(rows * width for rows, width in
+               (batch["shape"] for batch in json.loads(path.read_text())))
+
+
+def repeat_seconds(estimate: Mapping, sample_tokens: int,
+                   planned_tokens: int) -> float:
+    # Scale by padded tokens, not rows: the 200-text gate sample has longer
+    # texts than the full set (body-512: ~300 vs ~100 tokens per text), so a
+    # row ratio overstated repeats ~3x. The 10% margin covers the 3-5% the
+    # token ratio measured low on the Mac (r8).
     return (estimate["load_seconds"] + 2 + estimate["seconds"]
-            * planned_rows / estimate["completed_texts"])
+            * 1.1 * planned_tokens / sample_tokens)
 
 
 def execute(args: argparse.Namespace) -> int:
@@ -434,9 +444,12 @@ def execute(args: argparse.Namespace) -> int:
             reference_data = json.loads(reference_path.read_text())
             gate = checked_gate(warm, reference_data, digest(gate_tokens))
             case["gate"], case["warmups"] = gate, 1
+            planned = padded_tokens(output / f"{name}.json")
             for repeat in range(1, planned_repeats(case) + 1):
-                estimate = (case["repeats"][-1] if case["repeats"] else warm)
-                needed = repeat_seconds(estimate, len(tokens[name]["ids"]))
+                estimate, sample = ((case["repeats"][-1], planned)
+                                    if case["repeats"] else
+                                    (warm, padded_tokens(gate_tokens)))
+                needed = repeat_seconds(estimate, sample, planned)
                 if time.monotonic() + needed >= case_end:
                     case["admission_refusal"] = {
                         "requested_seconds": needed,
