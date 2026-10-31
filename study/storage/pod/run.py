@@ -50,6 +50,8 @@ CONTROL_TREES = {
     "pod": ("run.py",),
 }
 GIB = 1024 ** 3
+# pod-cost/cpu_cost.py matrix(): 5 policies x threads 1/2/4/8.
+CPU_CASES = 20
 MEMORY_MINIMUM = 4 * GIB
 CANDIDATE_BUDGET = 8 * GIB
 ORACLE_BUDGET = 24 * GIB
@@ -169,7 +171,7 @@ def cpu_case_jobs(root: Path, template: Mapping) -> list[dict]:
     if "--case" in template["argv"]:
         raise ReviewRequired("CPU binding must be a case-free template")
     result = []
-    for case in range(25):
+    for case in range(CPU_CASES):
         name = f"{template['id']}-{case:02d}"
         receipt = str(root / "aux" / name / "output/receipt.json")
         argv = [receipt if arg == template["receipt_path"] else arg

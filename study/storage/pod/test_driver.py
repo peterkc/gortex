@@ -4193,11 +4193,11 @@ class CodeRankCaseTests(unittest.TestCase):
         before = deepcopy(template)
         cases = driver.cpu_case_jobs(root, template)
         self.assertEqual(template, before)
-        self.assertEqual(len(cases), 25)
-        self.assertEqual(len({j["id"] for j in cases}), 25)
-        self.assertEqual(len({j["receipt_path"] for j in cases}), 25)
+        self.assertEqual(len(cases), 20)
+        self.assertEqual(len({j["id"] for j in cases}), 20)
+        self.assertEqual(len({j["receipt_path"] for j in cases}), 20)
         self.assertEqual([j["argv"][-2:] for j in cases],
-                         [["--case", str(i)] for i in range(25)])
+                         [["--case", str(i)] for i in range(20)])
         owner = SimpleNamespace()
         owner.root, owner.block_id = root, "setup"
         owner.permissions = lambda: 100000
@@ -4230,7 +4230,8 @@ class CodeRankCaseTests(unittest.TestCase):
                            if b["id"] == "cpu_cost")
                 document = driver.read_json(manifest)
                 if damage == "missing-case":
-                    document["jobs"].pop(cpu["jobs"][0]["id"] + "-24")
+                    document["jobs"].pop(cpu["jobs"][0]["id"]
+                                         + f"-{driver.CPU_CASES - 1:02d}")
                 elif damage == "preselected":
                     cpu["jobs"][0]["argv"] += ["--case", "0"]
                 else:

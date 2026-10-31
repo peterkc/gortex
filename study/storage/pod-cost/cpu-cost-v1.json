@@ -18,7 +18,7 @@
     "control/onnx/main.go": "1767b02b728f19723822a671511afb3ae3959eb620ce741af5ae77a5eaa4c38c",
     "control/onnx/go.mod": "c5a6d3391572769af698e1f995f7418583f17ca6481aeef34ef049bda94210cd",
     "control/onnx/go.sum": "1f13cb5a004a0525921f6b256901095cdd0d0ffd890b5f2a3e6e214ef1332263",
-    "control/pod-cost/cpu_cost.py": "94df97d840cc15e4d85fde358a334a60dc9f695521e5f3ca5bfc84d200752679",
+    "control/pod-cost/cpu_cost.py": "2bee3e984aa9ccfa2adeedd2025ade29b3b7c7454b12468e105c8316eb07c397",
     "control/pod-cost/pyproject.toml": "c17cae7c327ca5567a643e71865716106bcf77c8b60e7c20ff0397fe844487ea",
     "control/pod-cost/uv.lock": "9ba456814cafc954d4b6ae9b249ca45504b3180ed493a152abb784e664813496"
   },
@@ -34,7 +34,7 @@
     "padding": "right to longest; PAD and type ID 0; attention mask 0",
     "batching": "first 200 fixed; remainder stable length order; max16; rows*width^2<=4000000 unless singleton; queries one per batch",
     "reference": "Python ORT 1.31.0 first200 exact policy rows; intra16/inter1; no prepacking",
-    "measured_repeats": 3,
+    "measured_repeats": "3; 1 at one intra-op thread; no 16-thread case (user decision 2026-10-31)",
     "warmup": "first200 correctness gate per thread/policy; fresh process",
     "deadline": "driver aux/cpu-cost/process.json absolute_deadline minus30 seconds; no refresh",
     "allocation": "remaining time divided among remaining planned cases; reduced repeats explicit"

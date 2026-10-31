@@ -87,9 +87,11 @@ class CostTests(unittest.TestCase):
 
     def test_complete_matrix(self):
         cases = cost.matrix()
-        self.assertEqual(len(cases), 25)
-        self.assertEqual(len([c for c in cases if c["corpus"] != "query"]), 20)
-        self.assertEqual({c["threads"] for c in cases}, {1, 2, 4, 8, 16})
+        self.assertEqual(len(cases), 20)
+        self.assertEqual(len([c for c in cases if c["corpus"] != "query"]), 16)
+        self.assertEqual({c["threads"] for c in cases}, {1, 2, 4, 8})
+        self.assertEqual({c["threads"]: cost.planned_repeats(c)
+                          for c in cases}, {1: 1, 2: 3, 4: 3, 8: 3})
         self.assertEqual({(c["corpus"], c["cap"]) for c in cases},
                          {("metadata", 8192), ("body", 512), ("body", 2048),
                           ("body", 8192), ("query", 8192)})
@@ -469,7 +471,7 @@ class CostTests(unittest.TestCase):
                 "/fixture/config", "--receipt", "/fixture/receipt"]
         for key in ("source-pin", "config-pin", "input-pin"):
             base += ["--" + key, "a" * 64]
-        for selector in ([], ["--case", "-1"], ["--case", "25"],
+        for selector in ([], ["--case", "-1"], ["--case", "20"],
                          ["--case", "wrong"]):
             with (self.subTest(selector=selector),
                   patch.object(cost.sys, "argv", base + selector),
@@ -477,7 +479,7 @@ class CostTests(unittest.TestCase):
                   self.assertRaises(SystemExit)):
                 cost.main()
             run.assert_not_called()
-        for case in range(25):
+        for case in range(20):
             with (self.subTest(case=case),
                   patch.object(cost.sys, "argv", base + ["--case", str(case)]),
                   patch.object(cost, "execute", return_value=0) as run):
@@ -743,6 +745,46 @@ class CostTests(unittest.TestCase):
                                      ("partial", "time"))
                     self.assertEqual(results[1][2]["cases"][0][
                         "actual_repeats"], 0)
+
+    def test_one_thread_case_completes_after_its_single_repeat(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            cases = cost.matrix()[:1]
+            self.assertEqual(cases[0]["threads"], 1)
+            vector = [1.0, *([0.0]*767)]
+            calls = []
+
+            def prepare(root, output):
+                for suffix in (".json", "-gate.json"):
+                    (output / ("metadata-8192" + suffix)).write_text("[]")
+                (output / "metadata-8192-reference.json").write_text(
+                    json.dumps({"status": "completed", "runtime": "1.31.0",
+                                "intra_op_threads": 16, "inter_op_threads": 1,
+                                "token_sha256": cost.digest(
+                                    output / "metadata-8192-gate.json"),
+                                "vectors": [vector]*200}))
+                return {"metadata-8192": {"ids": list(range(400)),
+                                          "symbols": 400}}
+
+            def probe(args, case, tokens, output, repeat, end, env):
+                calls.append(repeat)
+                planned = 200 if repeat == 0 else 400
+                return {"status": "completed", "reason": "",
+                        "runtime": "1.31.0", "intra_op_threads": 1,
+                        "inter_op_threads": 1,
+                        "token_file_sha256": cost.digest(tokens),
+                        "planned_texts": planned, "completed_texts": planned,
+                        "vectors": [vector]*planned, "seconds": 0.01,
+                        "load_seconds": 0.01, "minutes_per_10k_symbols": 1}
+
+            code, record, summary = self.execute_fixture(
+                root, prepare, probe, cases, case=0)
+            self.assertEqual(calls, [0, 1])
+            self.assertEqual((code, record["state"]), (0, "completed"))
+            self.assertEqual(summary["cases"][0]["status"], "completed")
+            self.assertEqual(summary["cases"][0]["actual_repeats"], 1)
+            self.assertEqual(summary["planned_repeats"],
+                             {"1": 1, "2": 3, "4": 3, "8": 3})
 
 
 

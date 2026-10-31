@@ -21,6 +21,13 @@ POLICIES = (("metadata", 8192, "docs_.jsonl", 5000),
             ("body", 8192, "body_.jsonl", 4842),
             ("query", 8192, "qrows_.jsonl", 333))
 PREFIX = "Represent this query for searching relevant code: "
+# User decision 2026-10-31: no 16-thread oversubscription case, and one
+# measured repeat at one thread, to fit the study's run period.
+THREADS = (1, 2, 4, 8)
+
+
+def planned_repeats(case: Mapping) -> int:
+    return 1 if case["threads"] == 1 else 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +92,7 @@ def matrix() -> list[dict]:
              "status": "skipped", "reason": "time", "repeats": [],
              "warmups": 0, "actual_repeats": 0}
             for corpus, cap, _, _ in POLICIES
-            for thread in (1, 2, 4, 8, 16)]
+            for thread in THREADS]
 
 
 def batches(encoded: Mapping[str, Sequence[Sequence[int]]],
@@ -282,7 +289,7 @@ def probe(args: argparse.Namespace, case: Mapping, tokens: Path,
             "-output", str(output), "-no-prepack", "-threads",
             str(case["threads"]), "-corpus", case["corpus"], "-cap",
             str(case["cap"]), "-repeat", str(repeat), "-planned-repeats",
-            "3", "-guard", f"{guard}s"]
+            str(planned_repeats(case)), "-guard", f"{guard}s"]
     report = completed_worker(argv, output, end, args.root, env, partial=True)
     required = {"runtime", "disable_prepacking", "inter_op_threads",
                 "intra_op_threads", "token_file_sha256", "vectors",
@@ -427,7 +434,7 @@ def execute(args: argparse.Namespace) -> int:
             reference_data = json.loads(reference_path.read_text())
             gate = checked_gate(warm, reference_data, digest(gate_tokens))
             case["gate"], case["warmups"] = gate, 1
-            for repeat in range(1, 4):
+            for repeat in range(1, planned_repeats(case) + 1):
                 estimate = (case["repeats"][-1] if case["repeats"] else warm)
                 needed = repeat_seconds(estimate, len(tokens[name]["ids"]))
                 if time.monotonic() + needed >= case_end:
@@ -443,8 +450,8 @@ def execute(args: argparse.Namespace) -> int:
                 case["actual_repeats"] += int(report["status"] == "completed")
                 if report["status"] == "partial":
                     break
-            case["status"] = ("completed" if case["actual_repeats"] == 3
-                              else "partial")
+            case["status"] = ("completed" if case["actual_repeats"]
+                              == planned_repeats(case) else "partial")
             case["reason"] = "" if case["status"] == "completed" else "time"
         state = ("completed" if all(c["status"] == "completed" for c in cases)
                  else "partial")
@@ -475,7 +482,8 @@ def execute(args: argparse.Namespace) -> int:
     if not clean and state != "fatal":
         state, failure = "partial", {"reason_code": "process",
                                      "reason": "unverified child teardown"}
-    summary = {"cases": cases, "failure": failure, "planned_repeats": 3,
+    summary = {"cases": cases, "failure": failure, "planned_repeats": {
+                   str(t): planned_repeats({"threads": t}) for t in THREADS},
                "cost_scope": "M1 Max CPU; precomputed tokens",
                "accepted_timings": failure is None and any(
                    c["actual_repeats"] for c in cases),
@@ -502,7 +510,8 @@ def main() -> int:
         parser.add_argument("--" + name, type=Path, required=True)
     for name in ("source-pin", "config-pin", "input-pin"):
         parser.add_argument("--" + name, required=True)
-    parser.add_argument("--case", type=int, choices=range(25), required=True)
+    parser.add_argument("--case", type=int, choices=range(len(matrix())),
+                        required=True)
     return execute(parser.parse_args())
 
 
