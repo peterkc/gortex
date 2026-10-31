@@ -1369,7 +1369,9 @@ class ReviewFixTests(unittest.TestCase):
                           clean_handoff=selected != "unclean",
                           exit_code=1 if selected == "partial" else 0,
                           reason_code="worker", reason="fixture partial",
-                          files={"result.txt": driver.digest(artifact)})
+                          files={("result.txt" if name == "smoke" else
+                                  f"aux/{job['id']}/result.txt"):
+                                 driver.digest(artifact)})
             program = (
                 "import json,pathlib,sys; p=pathlib.Path(sys.argv[1]); "
                 "p.parent.mkdir(parents=True, exist_ok=True); "

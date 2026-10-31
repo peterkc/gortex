@@ -2770,8 +2770,9 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
             if not isinstance(files, dict) or not files:
                 raise ReviewRequired(f"{block['id']}: missing result files")
             for relative, expected in files.items():
-                output = (supervisor.root if block["id"] == "cpu_cost"
-                          else directory) / relative
+                # These workers key their files by the run root they read.
+                output = (supervisor.root if block["id"] in {
+                    "cpu_cost", "calibration"} else directory) / relative
                 if (not owned_path(str(output), directory)
                         or not output.resolve().is_relative_to(directory)
                         or not sha_pin(expected, (64,))
