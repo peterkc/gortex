@@ -131,7 +131,8 @@ def ready(status: Mapping, pid: int, sock: str,
     if (status.get("pid") != pid or status.get("socket_path") != sock
             or status.get("version") != VERSION):
         raise Unsafe("wrong daemon identity/reachability")
-    actual = [r["prefix"] for r in status.get("tracked_repos", [])]
+    # A daemon with no tracked repository reports "tracked_repos": null.
+    actual = [r["prefix"] for r in status.get("tracked_repos") or []]
     return (sorted(actual) == sorted(prefixes)
             and status.get("ready") is True
             and status.get("enrichment_complete") is True
@@ -333,14 +334,15 @@ class Attempt:
                 exceeded = True
             self.daemon = None
         texts = native.native_output(
-            ["/usr/sbin/lsof", "-nP", "-d", "txt", "-Fn"], self.env,
+            ["/usr/sbin/lsof", "-nP", "-w", "-d", "txt", "-Fn"], self.env,
             absent_ok=True)
         if any(Path(line[1:].removesuffix(" (deleted)")).resolve()
                == self.binary for line in texts.splitlines()
                if line.startswith("n/")):
             raise Unsafe("private binary process survived shutdown")
         sockets = native.native_output(
-            ["/usr/sbin/lsof", "-nP", "-U", "-Fn"], self.env, absent_ok=True)
+            ["/usr/sbin/lsof", "-nP", "-w", "-U", "-Fn"], self.env,
+            absent_ok=True)
         if self.env["GORTEX_DAEMON_SOCKET"] in sockets:
             raise Unsafe("private socket holder survived shutdown")
         envs = native.native_output(

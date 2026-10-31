@@ -219,6 +219,11 @@ class BoundaryTests(NativeFixture):
         status["build_lane"]["active"] = True
         self.assertFalse(runner.ready(
             status, 123, status["socket_path"], ["P-a"]))
+        status["build_lane"]["active"] = False
+        status["tracked_repos"] = None  # a fresh daemon reports null
+        self.assertTrue(runner.ready(status, 123, status["socket_path"], []))
+        self.assertFalse(runner.ready(
+            status, 123, status["socket_path"], ["P-a"]))
 
     def test_escaped_or_symlinked_paths_rejected_without_writes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -912,8 +917,11 @@ class FrozenV9Tests(NativeFixture):
                                       mode="smoke")
             installed = "/installed/gortex"
             with patch.object(runner.native, "native_output", side_effect=[
-                    "n" + installed + "\n", "", ""]):
+                    "n" + installed + "\n", "", ""]) as native:
                 attempt.stop()
+            # -w keeps lsof's unrelated mount warnings off stderr.
+            self.assertTrue(all("-w" in call.args[0] for call in
+                                native.call_args_list[:2]))
             with (patch.object(runner.native, "native_output", side_effect=[
                     "", "n" + attempt.env["GORTEX_DAEMON_SOCKET"] + "\n"]),
                   self.assertRaisesRegex(runner.Unsafe, "socket holder")):
