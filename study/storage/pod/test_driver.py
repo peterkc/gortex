@@ -2268,6 +2268,7 @@ class NativeAdmissionTests(unittest.TestCase):
                 "d11_limits": {"minimum_level": 20,
                                "available_minimum_bytes": 4 * driver.GIB,
                                "candidate_budget_bytes": 8 * driver.GIB,
+                               "coderank_budget_bytes": 16 * driver.GIB,
                                "oracle_budget_bytes": 24 * driver.GIB,
                                "swap_growth_bytes": 512 * 1024 * 1024},
                 "launcher": {"path": str(Path(sys.executable).resolve()),
@@ -2309,6 +2310,13 @@ class NativeAdmissionTests(unittest.TestCase):
                 with self.assertRaises(driver.FatalSession):
                     owner.permissions()
                 self.assertEqual(off.call_count, 1)
+                # A config written before the CodeRank budget refuses.
+                stale = deepcopy(before)
+                stale["identities_sha256"] = driver.digest(identities_file)
+                del stale["d11_limits"]["coderank_budget_bytes"]
+                with self.assertRaisesRegex(driver.FatalSession,
+                                            "D11 limits differ"):
+                    driver.Supervisor(root, {}, stale)
 
     def test_start_observes_30s_and_rechecks_go_before_spawn(self):
         for revoke, bound in ((False, False), (True, False),
@@ -2528,6 +2536,8 @@ class NativeAdmissionTests(unittest.TestCase):
 
     def test_owned_aggregate_candidate_and_oracle_budgets_stop_and_reap(self):
         for kind, budget in (("screen", 8 * driver.GIB),
+                             ("evaluator", 8 * driver.GIB),
+                             ("coderank", 16 * driver.GIB),
                              ("oracle", 24 * driver.GIB)):
             with self.subTest(kind=kind), \
                     tempfile.TemporaryDirectory() as folder:
@@ -4276,6 +4286,7 @@ class NativeEntryTests(unittest.TestCase):
                   "d11_limits": {"minimum_level": 20,
                                  "available_minimum_bytes": 4 * driver.GIB,
                                  "candidate_budget_bytes": 8 * driver.GIB,
+                                 "coderank_budget_bytes": 16 * driver.GIB,
                                  "oracle_budget_bytes": 24 * driver.GIB,
                                  "swap_growth_bytes": 512 * 1024 * 1024},
                   "launcher": {"path": str(launcher), "version": [3, 14, 7],

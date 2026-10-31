@@ -54,6 +54,9 @@ GIB = 1024 ** 3
 CPU_CASES = 20
 MEMORY_MINIMUM = 4 * GIB
 CANDIDATE_BUDGET = 8 * GIB
+# User decision 2026-10-31: CodeRank ORT at an 8192-token cap peaks at
+# about 12-13 GB on the M1 Max, so CodeRank jobs get their own budget.
+CODERANK_BUDGET = 16 * GIB
 ORACLE_BUDGET = 24 * GIB
 SWAP_GROWTH_LIMIT = 512 * 1024 * 1024
 NODE_SCALE = 82088 / 81179
@@ -741,6 +744,7 @@ class Supervisor:
         if admission["d11_limits"] != {
                 "minimum_level": 20, "available_minimum_bytes": MEMORY_MINIMUM,
                 "candidate_budget_bytes": CANDIDATE_BUDGET,
+                "coderank_budget_bytes": CODERANK_BUDGET,
                 "oracle_budget_bytes": ORACLE_BUDGET,
                 "swap_growth_bytes": SWAP_GROWTH_LIMIT}:
             raise FatalSession("D11 limits differ from the approved policy")
@@ -1018,8 +1022,8 @@ class Supervisor:
                     "group_rss_bytes": rss, **self.sample,
                 }) + "\n")
 
-        budget = (ORACLE_BUDGET if self.case.get("kind") == "oracle"
-                  else CANDIDATE_BUDGET)
+        budget = {"oracle": ORACLE_BUDGET, "coderank": CODERANK_BUDGET}.get(
+            self.case.get("kind"), CANDIDATE_BUDGET)
         if self.current_rss > budget:
             for owned in self.active:
                 atomic_json(owned.directory / "budget-exceeded.json", {
