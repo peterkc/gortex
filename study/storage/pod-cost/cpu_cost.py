@@ -341,12 +341,14 @@ def padded_tokens(path: Path) -> int:
 
 def repeat_seconds(estimate: Mapping, sample_tokens: int,
                    planned_tokens: int) -> float:
-    # Scale by padded tokens, not rows: the 200-text gate sample has longer
-    # texts than the full set (body-512: ~300 vs ~100 tokens per text), so a
-    # row ratio overstated repeats ~3x. The 10% margin covers the 3-5% the
-    # token ratio measured low on the Mac (r8).
+    # Scale by padded tokens, not rows: the 200-text gate sample has
+    # longer texts than the full set (body-512: ~300 vs ~100 tokens per
+    # text), so a row ratio overstated repeats ~3x. A warm-up estimate
+    # gets a 10% margin for the 3-5% the token ratio ran low on the Mac;
+    # a measured repeat (same file) is used as is.
+    margin = 1.0 if sample_tokens == planned_tokens else 1.1
     return (estimate["load_seconds"] + 2 + estimate["seconds"]
-            * 1.1 * planned_tokens / sample_tokens)
+            * margin * planned_tokens / sample_tokens)
 
 
 def execute(args: argparse.Namespace) -> int:

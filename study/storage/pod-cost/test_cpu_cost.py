@@ -629,8 +629,7 @@ class CostTests(unittest.TestCase):
         measured = {"load_seconds": 2, "seconds": 75,
                     "completed_texts": 5000}
         self.assertAlmostEqual(cost.repeat_seconds(warm, 1000, 25000), 86.5)
-        self.assertAlmostEqual(cost.repeat_seconds(measured, 9000, 9000),
-                               86.5)
+        self.assertAlmostEqual(cost.repeat_seconds(measured, 9000, 9000), 79)
         self.assertLess(cost.repeat_seconds(
             {"load_seconds": 0.15, "seconds": 89.5, "completed_texts": 200},
             60001, 487377), 900)
