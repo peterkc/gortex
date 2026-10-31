@@ -395,6 +395,7 @@ def main() -> None:
     temporary = SCRATCH / "cache/tmp"
     temporary.mkdir(parents=True, exist_ok=True)
     os.environ["TMPDIR"] = str(temporary)
+    WORK.mkdir(parents=True, exist_ok=True)  # absent in a fresh HOME
     with (WORK / "execution.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         build(binary, mode, args.native_dir.resolve())

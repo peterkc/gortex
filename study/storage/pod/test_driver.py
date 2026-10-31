@@ -5195,6 +5195,30 @@ class HybridGroupTests(unittest.TestCase):
                           for name in proof["files"]}
         driver.atomic_json(directory / "complete.json", proof)
 
+    def test_block_files_takes_receipts_from_the_driver_not_the_config(self):
+        # The native config binds only id/kind/minutes/memory profiles for
+        # driver-built hybrid and segment_timing jobs: no receipt_path.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            hybrid = driver.bound_jobs(root)["hybrid"]
+            prep = Path(hybrid[0]["receipt_path"])
+            prep.parent.mkdir(parents=True)
+            driver.atomic_json(prep, {"files": {}})
+            profiles = {"id": "hybrid", "jobs": [
+                {"id": job["id"], "kind": "hybrid", "minutes": job["minutes"],
+                 "gomaxprocs": 10, "estimated_peak_bytes": driver.GIB,
+                 "owner": "study-harness"} for job in hybrid]}
+            self.assertIn(str(prep.relative_to(root)),
+                          driver.block_files(root, profiles))
+            timing = driver.bound_jobs(root)["segment_timing"]
+            group = Path(timing[0]["receipt_path"]).parents[1]
+            group.mkdir(parents=True)
+            driver.atomic_json(group / "complete.json", {"files": {}})
+            self.assertIn(str((group / "complete.json").relative_to(root)),
+                          driver.block_files(root, {
+                              "id": "segment_timing",
+                              "jobs": [{"id": j["id"]} for j in timing]}))
+
     def test_interrupt_after_a_or_b_restarts_whole_group_then_zero_spawn(self):
         for stop in (2, 3):
             with self.subTest(stop=stop), tempfile.TemporaryDirectory() as f:

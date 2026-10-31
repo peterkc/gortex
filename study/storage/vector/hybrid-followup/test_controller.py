@@ -60,6 +60,58 @@ class ControllerTests(unittest.TestCase):
                             run.main()
                         self.assertEqual(build.called, admitted)
 
+    def test_fresh_home_creates_the_work_tree_before_locking(self):
+        from io import StringIO
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        import sys
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            # A run root starts with an empty HOME, so WORK does not exist.
+            work, scratch = root / "home/work", root / "home/scratch"
+            name = "n10000-d384-build"
+            selected = root / "selected.json"
+            selected.write_text(json.dumps([name]))
+            sample = {"timestamp": 1, "load1": 20, "load5": 18,
+                "load15": 17, "level": 20, "pressure_state": 1,
+                "available_bytes": 4 * 1024**3, "swapouts": 10000,
+                "page_size": 16384, "swap_usage": "used = 100M",
+                "ac_power": True}
+            telemetry = SimpleNamespace(native_resources=Mock(
+                side_effect=lambda _: dict(sample)))
+            spec = SimpleNamespace(name="storage_telemetry",
+                loader=SimpleNamespace(exec_module=Mock()))
+
+            def execute(command, **options):
+                data = Path(command[command.index("-data-dir") + 1])
+                data.mkdir(parents=True, exist_ok=True)
+                (data / "int8-n10000-d384.bin").write_bytes(b"index")
+                return SimpleNamespace(returncode=0)
+
+            argv = ["run.py", "timing", "--execute", "--jobs-file",
+                    str(selected), "--output-dir", str(root / "out")]
+            with (patch.object(run, "WORK", work),
+                  patch.object(run, "SCRATCH", scratch),
+                  patch.object(run.sys, "platform", "darwin"),
+                  patch.object(run.platform, "machine", return_value="arm64"),
+                  patch.object(run, "build"),
+                  patch.object(run, "source_fingerprint", return_value="pin"),
+                  patch.object(run.subprocess, "check_output",
+                               return_value="go1.27.1 darwin/arm64"),
+                  patch.object(run.subprocess, "run", side_effect=execute),
+                  patch.object(run.importlib.util, "spec_from_file_location",
+                               return_value=spec),
+                  patch.object(run.importlib.util, "module_from_spec",
+                               return_value=telemetry),
+                  patch.object(run.sys, "argv", argv),
+                  patch.dict(sys.modules), patch.dict(run.os.environ),
+                  patch("sys.stdout", StringIO())):
+                run.main()
+            self.assertTrue((work / "execution.lock").is_file())
+            receipt = json.loads((root / "out" / (name + ".json")).read_text())
+            self.assertEqual(receipt["exit_code"], 0)
+
     def test_timing_namespaces_refuse_individual_reuse_and_adoption(self):
         from io import StringIO
         from types import SimpleNamespace

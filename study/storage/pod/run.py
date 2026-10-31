@@ -2862,14 +2862,18 @@ def binding_block(supervisor: Supervisor, block: Mapping) -> str:
 
 def block_files(root: Path, block: Mapping) -> dict[str, str]:
     paths = {}
+    # The native config binds only profiles for driver-built jobs; their
+    # receipt paths come from the driver, as when the block ran.
+    bound = {job["id"]: job["receipt_path"]
+             for job in bound_jobs(root).get(block["id"], [])}
     for job in block["jobs"]:
         path = (root / "setup-complete.json" if block["id"] == "setup" else
                 root / ("jobs" if block["id"] in {"storage", "segment_timing"}
                         else "aux") / job["id"] / "complete.json")
         if block["id"] == "segment_timing":
-            path = Path(job["receipt_path"]).parents[1] / "complete.json"
+            path = Path(bound[job["id"]]).parents[1] / "complete.json"
         if block["id"] == "hybrid":
-            path = Path(job["receipt_path"])
+            path = Path(bound[job["id"]])
             if path.parent.parent != root / "aux":
                 path = path.parents[1] / "complete.json"
         if not path.exists():
