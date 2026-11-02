@@ -263,6 +263,7 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/storage/ci-pod-cgroup-setup.txt"
       - name: Pod lifecycle and accuracy runbook fixtures, no cloud calls
         if: ${{ !cancelled() }}
+        working-directory: study/storage/pod
         shell: bash
         env:
           OPENBLAS_NUM_THREADS: "2"
@@ -275,8 +276,9 @@ jobs:
         run: |
           set -euo pipefail
           uv="$RUNNER_TEMP/storage/evaluator-tools/uv-x86_64-unknown-linux-gnu/uv"
-          "$uv" run --frozen --project study/storage/pod-cost python -B -m unittest discover \
-            -s study/storage/pod -p test_lifecycle_support.py -v 2>&1 \
+          "$uv" run --frozen --project "$GITHUB_WORKSPACE/study/storage/pod-cost" \
+            python -B -m unittest -v \
+            test_lifecycle_support test_lifecycle_c2 test_admission_c2 2>&1 \
             | tee "$RUNNER_TEMP/storage/ci-pod-lifecycle.txt"
       - name: Corpus extractor and builder fixtures without model inference
         if: ${{ !cancelled() }}

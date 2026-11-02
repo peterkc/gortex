@@ -77,83 +77,13 @@ jobs:
         import json
         import os
         from pathlib import Path
-        import re
         import subprocess
-        import unittest
+        import sys
 
+        sys.path.insert(
+            0, str(Path(os.environ["GITHUB_WORKSPACE"]) / "study/storage/checks"))
+        from workflow_helpers import admit_dispatch, unique_object
 
-        def unique_object(pairs):
-            result = {}
-            for key, value in pairs:
-                if key in result:
-                    raise RuntimeError("duplicate policy key: " + key)
-                result[key] = value
-            return result
-
-
-        def admit_dispatch(request, *, source, actual, policy_pin, attempt):
-            if source != actual:
-                raise RuntimeError("checkout differs from the workflow commit")
-            if request["event"] != "workflow_dispatch":
-                return
-            if attempt != "1":
-                raise RuntimeError("no rerun: obtain approval and dispatch afresh")
-            if not request["approval_id"].strip():
-                raise RuntimeError("recorded exact-batch approval ID is required")
-            if not re.fullmatch(r"[0-9a-f]{40}", request["fork_commit"]):
-                raise RuntimeError("fork_commit must be a full lowercase commit")
-            if request["fork_commit"] != actual:
-                raise RuntimeError("select the reviewed workflow commit for dispatch")
-            if not re.fullmatch(r"[0-9a-f]{64}", request["policy_sha256"]):
-                raise RuntimeError("policy_sha256 must be a full lowercase SHA-256")
-            if request["policy_sha256"] != policy_pin:
-                raise RuntimeError("policy hash differs; obtain exact-value approval")
-            tag = request["release_tag"]
-            if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", tag)
-                    or tag == "latest"):
-                raise RuntimeError("explicit fixed public fixture release required")
-
-
-        class AdmissionTests(unittest.TestCase):
-            def test_exact_and_push(self):
-                admit_dispatch(self.request(), source="a" * 40, actual="a" * 40,
-                               policy_pin="b" * 64, attempt="1")
-                admit_dispatch({"event": "push"}, source="a" * 40,
-                               actual="a" * 40, policy_pin="b" * 64, attempt="2")
-
-            def request(self):
-                return {"event": "workflow_dispatch", "approval_id": "batch-record",
-                        "fork_commit": "a" * 40, "policy_sha256": "b" * 64,
-                        "release_tag": "storage-fixtures-v1"}
-
-            def test_refusal_before_execution(self):
-                cases = (("approval_id", ""), ("approval_id", "  "),
-                         ("fork_commit", "a" * 39),
-                         ("fork_commit", "c" * 40),
-                         ("policy_sha256", "b" * 63),
-                         ("policy_sha256", "c" * 64),
-                         ("release_tag", "latest"), ("release_tag", "../other"))
-                for field, value in cases:
-                    with self.subTest(field=field, value=value):
-                        request = {**self.request(), field: value}
-                        with self.assertRaises(RuntimeError):
-                            admit_dispatch(request, source="a" * 40,
-                                           actual="a" * 40, policy_pin="b" * 64,
-                                           attempt="1")
-                for actual, attempt in (("c" * 40, "1"), ("a" * 40, "2")):
-                    with self.assertRaises(RuntimeError):
-                        admit_dispatch(self.request(), source="a" * 40,
-                                       actual=actual, policy_pin="b" * 64,
-                                       attempt=attempt)
-
-            def test_duplicate_policy_key(self):
-                with self.assertRaises(RuntimeError):
-                    unique_object([("wall_seconds", 1), ("wall_seconds", 2)])
-
-
-        suite = unittest.defaultTestLoader.loadTestsFromTestCase(AdmissionTests)
-        if not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful():
-            raise RuntimeError("workflow admission self-tests failed")
         policy_path = Path("study/storage/checks/run-policy.json")
         raw = policy_path.read_bytes()
         policy_pin = hashlib.sha256(raw).hexdigest()
@@ -319,6 +249,7 @@ jobs:
     - tests
     if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'peterkc/gortex' }}
     runs-on: ubuntu-24.04
+    # Includes both policy timing deadlines and the finalization/upload reserve.
     timeout-minutes: ${{ fromJSON(needs.tests.outputs.timeouts).base }}
     env:
       CHECK_GROUP: base
@@ -353,25 +284,26 @@ jobs:
         import subprocess
         import sys
 
+        sys.path.insert(
+            0, str(Path(os.environ["GITHUB_WORKSPACE"]) / "study/storage/checks"))
+        from workflow_helpers import (
+            MeasurementHost, admit_dispatch, admit_measurement,
+        )
+
         raw = Path("study/storage/checks/run-policy.json").read_bytes()
         pin = hashlib.sha256(raw).hexdigest()
         actual = subprocess.check_output(["git", "rev-parse", "HEAD"],
                                          text=True).strip()
-        if (os.environ["GITHUB_EVENT_NAME"] != "workflow_dispatch"
-                or os.environ["GITHUB_RUN_ATTEMPT"] != "1"
-                or not os.environ["REQUEST_APPROVAL"].strip()
-                or pin != os.environ["REQUEST_POLICY"]
-                or actual != os.environ["REQUEST_COMMIT"]
-                or actual != os.environ["GITHUB_SHA"]):
-            raise RuntimeError("manual approval, source or committed policy drift")
-        if subprocess.check_output(["git", "status", "--porcelain"]):
-            raise RuntimeError("measurement checkout is dirty")
+        request = {"event": os.environ["GITHUB_EVENT_NAME"],
+                   "approval_id": os.environ["REQUEST_APPROVAL"],
+                   "fork_commit": os.environ["REQUEST_COMMIT"],
+                   "policy_sha256": os.environ["REQUEST_POLICY"],
+                   "release_tag": os.environ["REQUEST_RELEASE"]}
+        admit_dispatch(request, source=os.environ["GITHUB_SHA"], actual=actual,
+                       policy_pin=pin, attempt=os.environ["GITHUB_RUN_ATTEMPT"])
+        checkout_status = subprocess.check_output(["git", "status", "--porcelain"])
         policy = json.loads(raw)
         role = os.environ["CHECK_GROUP"]
-        if role not in ("base", "linkdelta", "vector"):
-            raise RuntimeError("unknown measurement group")
-        if platform.system() != "Linux" or sys.version_info < (3, 12):
-            raise RuntimeError("Linux with Python 3.12+ required")
         venue = policy["venue"]
         cpu_count = os.cpu_count()
         mem = dict(line.split(":", 1) for line in
@@ -380,15 +312,17 @@ jobs:
         print(json.dumps({"actual_cpu_count": cpu_count,
                           "physical_memory_bytes": physical_bytes,
                           "approved_venue": venue}), flush=True)
-        if cpu_count != venue["cpus"]:
-            raise RuntimeError("actual CPU count differs from the approved venue")
-        if physical_bytes < venue["job_memory_bytes"] + venue["host_reserve_bytes"]:
-            raise RuntimeError("host cannot supply the cap and outside-owner reserve")
         event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
-        if event["repository"]["private"] or venue["price_cap_usd"] != 0:
-            raise RuntimeError("only the zero-cost public-fork venue is approved")
-        if role in ("base", "linkdelta") and shutil.which("zstd") is None:
-            raise RuntimeError("the strict public fixture fetch requires zstd")
+        host = MeasurementHost(
+            system=platform.system(), python_version=sys.version_info[:2],
+            cpu_count=cpu_count, physical_bytes=physical_bytes,
+            private_repository=event["repository"]["private"],
+            zstd_available=shutil.which("zstd") is not None)
+        admit_measurement(
+            event=request["event"], role=role, checkout_status=checkout_status,
+            host=host, cpus=venue["cpus"], job_memory_bytes=venue["job_memory_bytes"],
+            host_reserve_bytes=venue["host_reserve_bytes"],
+            price_cap_usd=venue["price_cap_usd"])
         work = Path(os.environ["WORK"])
         for name in ("evidence", "bin", "preparation", "inputs", "results"):
             (work / name).mkdir()

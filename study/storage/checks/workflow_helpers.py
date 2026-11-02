@@ -1,7 +1,9 @@
 """Workflow coordination and capacity admission for storage checks."""
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+import re
 
 
 def collect_linkdelta_tiers(
@@ -68,3 +70,68 @@ def base_capacity_record(tiers: Sequence[Mapping[str, int]],
             "required_free_bytes": required, "free_bytes": free_bytes,
             "status": "admitted" if free_bytes >= required
             else "blocked_capacity"}
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise RuntimeError("duplicate policy key: " + key)
+        result[key] = value
+    return result
+
+
+def admit_dispatch(request, *, source, actual, policy_pin, attempt):
+    if source != actual:
+        raise RuntimeError("checkout differs from the workflow commit")
+    if request["event"] != "workflow_dispatch":
+        return
+    if attempt != "1":
+        raise RuntimeError("no rerun: obtain approval and dispatch afresh")
+    if not request["approval_id"].strip():
+        raise RuntimeError("recorded exact-batch approval ID is required")
+    if not re.fullmatch(r"[0-9a-f]{40}", request["fork_commit"]):
+        raise RuntimeError("fork_commit must be a full lowercase commit")
+    if request["fork_commit"] != actual:
+        raise RuntimeError("select the reviewed workflow commit for dispatch")
+    if not re.fullmatch(r"[0-9a-f]{64}", request["policy_sha256"]):
+        raise RuntimeError("policy_sha256 must be a full lowercase SHA-256")
+    if request["policy_sha256"] != policy_pin:
+        raise RuntimeError("policy hash differs; obtain exact-value approval")
+    tag = request["release_tag"]
+    if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", tag)
+            or tag == "latest"):
+        raise RuntimeError("explicit fixed public fixture release required")
+
+
+@dataclass(frozen=True, slots=True)
+class MeasurementHost:
+    system: str
+    python_version: tuple[int, int]
+    cpu_count: int | None
+    physical_bytes: int
+    private_repository: bool
+    zstd_available: bool
+
+
+def admit_measurement(*, event: str, role: str, checkout_status: bytes,
+                      host: MeasurementHost, cpus: int,
+                      job_memory_bytes: int, host_reserve_bytes: int,
+                      price_cap_usd: int) -> None:
+    if event != "workflow_dispatch":
+        raise RuntimeError("manual approval, source or committed policy drift")
+    if checkout_status:
+        raise RuntimeError("measurement checkout is dirty")
+    if role not in ("base", "linkdelta", "vector"):
+        raise RuntimeError("unknown measurement group")
+    if host.system != "Linux" or host.python_version < (3, 12):
+        raise RuntimeError("Linux with Python 3.12+ required")
+    if host.cpu_count != cpus:
+        raise RuntimeError("actual CPU count differs from the approved venue")
+    if host.physical_bytes < job_memory_bytes + host_reserve_bytes:
+        raise RuntimeError(
+            "host cannot supply the cap and outside-owner reserve")
+    if host.private_repository or price_cap_usd != 0:
+        raise RuntimeError("only the zero-cost public-fork venue is approved")
+    if role in ("base", "linkdelta") and not host.zstd_available:
+        raise RuntimeError("the strict public fixture fetch requires zstd")

@@ -20,7 +20,7 @@
       "timeout_minutes": 45
     },
     "base": {
-      "timeout_minutes": 265,
+      "timeout_minutes": 310,
       "setup_seconds": 1500,
       "cleanup_upload_seconds": 600
     },
@@ -77,8 +77,8 @@
     "review": "Upload the manifest before timing. Lead review follows the run; a rejected manifest invalidates only tier100 results."
   },
   "base": {
-    "main_wall_seconds": 9000,
-    "side_wall_seconds": 2700,
+    "main_wall_seconds": 10800,
+    "side_wall_seconds": 3600,
     "runs": 3,
     "safety_timeout_seconds": 900,
     "memory_limits_bytes": {
@@ -158,7 +158,7 @@
     "/venue/price_cap_usd": "Zero-cost public-fork standard Linux CI venue only. No paid runner, model inference, cloud job or extra service is requested.",
     "/venue/max_parallel": "Lead approved the parallel three-runner measurement venue after gortex-ops confirmed capacity: tests finish first, then base, linkdelta and vector each depend only on tests. Each group prepares and freezes its own inputs, with no base-artifact download. Every A/B/C or component comparison stays within its own host. The exact-policy user approval must name parallel execution on three measurement runners.",
     "/jobs/tests/timeout_minutes": "Integration estimate: 45 minutes for setup, three readonly Go module vet/test pairs and three stdlib Python suites (base, fixtures and shared workflow helpers). This is not a measurement bound.",
-    "/jobs/base/timeout_minutes": "Review C-1 lead-approved sizing: 150 main + 45 conditional side + 10 fetch + 5 tiny generation + 20 tier100 generation + 25 setup + 10 cleanup/upload = 265 minutes, below the hosted 360-minute limit. Do not cut cleanup reserve. Estimates are unmeasured.",
+    "/jobs/base/timeout_minutes": "Review C-2 lead-approved resize: main 180 + conditional side 60 + fetch 10 + tiny generation 5 + tier100 generation 20 + setup 25 + cleanup/upload 10 = 310 minutes. The unchanged 70-minute non-measurement allowance includes the 10-minute finalization/upload reserve; setup, data preparation and both timing deadlines project to 300 minutes before that reserve. The 50 minutes below GitHub 360 are not extra usable job time. Estimates are unmeasured, not a completion guarantee.",
     "/jobs/base/setup_seconds": "Integration reserve: 25 minutes for Go setup, downloads, serial builds, metadata and manifest freezing outside timing; unmeasured. The fixed unused-software removal shares this setup reserve; budget roughly 1-3 minutes, not a measured bound.",
     "/jobs/base/cleanup_upload_seconds": "Integration reserve: 10 minutes for owned-root cleanup and evidence upload, outside target timing; unmeasured.",
     "/jobs/linkdelta/timeout_minutes": "C-LD-8 revised projection: (2*9000 serial tier deadlines + 600 fetch + 1200 setup + 1200 finalization/cleanup/upload) / 60 = 350 minutes. Timing phases have 330 minutes through setup/fetch, leaving 20 minutes inside this job for finalization and uploads. The job cap is 10 minutes below GitHub 360; that external margin is not extra usable runtime. Reserves and throughput are unmeasured, not guaranteed finish times.",
@@ -181,9 +181,9 @@
     "/tier100/memory_limits_bytes/engine": "study/storage/checks/fixtures/FIXTURES.md proposes 10737418240 bytes; estimated RSS 3-8 GiB is uncertain and excludes possible additional cache charge.",
     "/tier100/repos": "Approved scaling recipe in study/storage/checks/fixtures/FIXTURES.md: ten unchanged real parts followed by ninety correlated derived top-ups.",
     "/tier100/seed": "Approved existing cmd/gen recipe in study/storage/checks/fixtures/FIXTURES.md: seed 20261022, ordered ten-source input, synthetic cross-repository links disabled.",
-    "/base/main_wall_seconds": "Review C-1 checks-base sizing forwarded by the lead: unmeasured main-path upper bound 150 minutes, covering 27 fresh A/B/C timing processes plus three tiny controls. Main and side limits are required separately; their sum bounds maximum base measurement.",
-    "/base/side_wall_seconds": "Review C-1 checks-base sizing forwarded by the lead: unmeasured separate 45-minute upper bound for nine C-side timing processes plus one tiny control. Run only after a conclusive Check 1 miss, never after an incomplete or inconclusive result. Maximum measurement is main 150 plus conditional side 45 = 195 minutes.",
-    "/base/runs": "Review C-1 checks-base design: three rotating A/B/C fresh-process rounds per unchanged tier, not three warm passes in one process. Main has 27 timing processes plus three tiny controls; conditional C-side adds nine plus one tiny. Each miss query has 20 measured calls in the reviewed source. Serving directories are freed only after receipt hashes/sizes are recorded; those directories are not uploaded evidence.",
+    "/base/main_wall_seconds": "Review C-2 checks-base resize forwarded by the lead: 10800 seconds (180 minutes), adding a 30-minute reserve to the prior 150-minute main bound. More repeated hit/read sampling adds at most 19 calls per judged stratum, at most 5985 extra main calls across 27 timing processes; the three tiny controls remain. This is a planning bound, not a measured runtime. Main and side limits stay independent.",
+    "/base/side_wall_seconds": "Review C-2 checks-base resize forwarded by the lead: 3600 seconds (60 minutes), adding a 15-minute reserve to the prior 45-minute side bound. At most 1995 extra side calls across nine timing processes, with at most 19 extra calls per judged stratum; the one tiny control remains. Run only after a conclusive Check 1 miss, never an incomplete or inconclusive result. Maximum measurement is main 180 plus conditional side 60 = 240 minutes. This is a planning bound, not measured.",
+    "/base/runs": "Three rotating A/B/C fresh-process rounds per unchanged tier, not warm passes in one process. Main has 27 timing processes plus three tiny controls; conditional C-side adds nine plus one tiny. Repeated hit/read sampling adds at most 19 calls per judged stratum; the independent main/side deadline bases state the total added-call bounds. Serving directories are freed only after receipt hashes/sizes are recorded; those directories are not uploaded evidence.",
     "/base/safety_timeout_seconds": "study/storage/checks/base/README.md proposed config sets the accepted runner safety timeout to 900 seconds.",
     "/base/memory_limits_bytes/runner": "study/storage/checks/base/README.md proposed config: 536870912 bytes; estimate below 512 MiB, not a measured peak.",
     "/base/memory_limits_bytes/checker": "study/storage/checks/base/README.md proposed config: 1073741824 bytes; estimate below one GiB, not a measured peak.",
