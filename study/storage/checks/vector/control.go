@@ -323,13 +323,25 @@ func summarize(c runConfig) error {
 		if checker.Exact && latency <= 50 {
 			status = "pass"
 		}
-		targets = append(targets, targetResult{Target: mode + " exact ordered top-k at 150000x768, <=4 workers, p95<=50ms", P95MS: latency, Exact: checker.Exact, Status: status})
+		target := mode + " exact ordered top-k at 150000x768, <=4 workers, p95<=50ms"
+		if mode == "f32" {
+			target = "f32 scalar single-accumulator float64 kernel; exact ordered top-k at 150000x768, <=4 workers, p95<=50ms"
+			if !checker.Exact {
+				status = "blocked"
+			}
+		}
+		targets = append(targets, targetResult{Target: target, P95MS: latency, Exact: checker.Exact, Status: status})
 	}
 	return writeJSON(filepath.Join(c.Out, "result.partial.json"), selectResult(targets[0], targets[1]))
 }
 func selectResult(f32, int8 targetResult) result {
 	r := result{Status: "miss", Branch: "return_miss_to_user", SyntheticOnly: true, Targets: []targetResult{f32, int8}}
-	if f32.Exact && f32.P95MS <= 50 {
+	if !f32.Exact {
+		r.Status = "blocked"
+		r.Branch = "f32_reference_mismatch_return_user"
+		return r
+	}
+	if f32.P95MS <= 50 {
 		r.Status = "pass"
 		r.Branch = "keep_exact_f32_int8_extra_evidence"
 		return r

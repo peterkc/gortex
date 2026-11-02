@@ -115,7 +115,10 @@ type checkResult struct {
 	Mismatches []string `json:"mismatched_query_ids"`
 }
 
-func measure(ctx context.Context, c runConfig, mode string) error {
+func measure(ctx context.Context, c runConfig, mode string) (err error) {
+	if mode != "f32" && mode != "int8" {
+		return fmt.Errorf("unknown scan mode %q", mode)
+	}
 	in, err := loadInput(ctx, c.Data, c.FixturePin)
 	if err != nil {
 		return err
@@ -126,6 +129,12 @@ func measure(ctx context.Context, c runConfig, mode string) error {
 		}
 	}
 	result := engineResult{Mode: mode, Workers: c.Workers, Candidates: c.Candidates, K: c.K, Documents: in.manifest.Documents, Dimensions: dimensions}
+	partial, err := os.OpenFile(filepath.Join(c.Out, mode+"-samples.partial.jsonl"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, partial.Close()) }()
+	encoder := json.NewEncoder(partial)
 	for _, phase := range []string{"warmup", "measure"} {
 		count := len(in.vectors)
 		if phase == "warmup" {
@@ -138,8 +147,17 @@ func measure(ctx context.Context, c runConfig, mode string) error {
 			if err != nil {
 				return err
 			}
-			result.Samples = append(result.Samples, sample{in.queries[i].ID, phase, elapsed, hits})
+			row := sample{in.queries[i].ID, phase, elapsed, hits}
+			// Preserve completed rows outside query timing, without relying on defers
+			// running after the launcher's hard cgroup deadline or an OOM kill.
+			if err := encoder.Encode(row); err != nil {
+				return err
+			}
+			result.Samples = append(result.Samples, row)
 		}
+	}
+	if err := partial.Sync(); err != nil {
+		return err
 	}
 	return writeJSON(filepath.Join(c.Out, mode+"-engine.json"), result)
 }

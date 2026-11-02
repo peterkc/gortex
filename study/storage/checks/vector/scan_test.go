@@ -40,31 +40,36 @@ func TestHarnessVectorContract(t *testing.T) {
 	}
 }
 func TestExactTiesAndInputOrder(t *testing.T) {
-	rows := []dataset.Vector{{NodeID: "z", Values: []float32{1, 0}}, {NodeID: "a", Values: []float32{1, 0}}, {NodeID: "b", Values: []float32{1, .001}}}
-	before := slices.Clone(rows[0].Values)
-	m := mustMatrix(t, rows, 2)
-	rows[0].Values[0] = 0 // The index owns its copy.
-	if m.raw[0] != before[0] {
+	rows := []dataset.Vector{{NodeID: "z", Values: []float32{1, 0}}, {NodeID: "a", Values: []float32{1, 0}}, {NodeID: "m", Values: []float32{1, 0}}}
+	copied := mustMatrix(t, rows, 2)
+	rows[0].Values[0] = 0
+	if copied.raw[0] != 1 {
 		t.Fatal("matrix aliases caller values")
 	}
-	rows[0].Values[0] = before[0]
-	if err := m.buildInt8(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	want := []adapter.Hit{{ID: "a", Score: 1}, {ID: "z", Score: 1}}
-	for _, mode := range []string{"f32", "int8"} {
-		for workers := 1; workers <= 4; workers++ {
-			got, err := m.search(context.Background(), []float32{1, 0}, 2, workers, 3, mode)
-			if err != nil || exactResults(want, got) != nil {
-				t.Fatal(mode, workers, got, err)
-			}
+	rows[0].Values[0] = 1
+	want := []adapter.Hit{{ID: "a", Score: 1}, {ID: "m", Score: 1}}
+	for _, order := range []string{"forward", "reversed"} {
+		input := slices.Clone(rows)
+		if order == "reversed" {
+			slices.Reverse(input)
 		}
-	}
-	slices.Reverse(rows)
-	reordered := mustMatrix(t, rows, 2)
-	got, err := reordered.search(context.Background(), []float32{1, 0}, 2, 4, 0, "f32")
-	if err != nil || exactResults(want, got) != nil {
-		t.Fatal("enumeration order affected ties", got, err)
+		for _, mode := range []string{"f32", "int8"} {
+			t.Run(order+"-"+mode, func(t *testing.T) {
+				m := mustMatrix(t, input, 2)
+				if mode == "int8" {
+					if err := m.buildInt8(context.Background()); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for workers := 1; workers <= 4; workers++ {
+					// Three tied rows compete for two slots, including the int8 pool.
+					got, err := m.search(context.Background(), []float32{1, 0}, 2, workers, 2, mode)
+					if err != nil || exactResults(want, got) != nil {
+						t.Fatal(workers, got, err)
+					}
+				}
+			})
+		}
 	}
 }
 func TestInt8PruningMustNotMasqueradeAsExact(t *testing.T) {

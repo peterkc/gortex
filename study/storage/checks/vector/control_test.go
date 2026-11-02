@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"gxstudy/dataset"
 	"gxstudy/runner"
 )
 
@@ -25,7 +27,9 @@ func TestSelectionBranches(t *testing.T) {
 		{"synthetic-int8-not-a-recommendation", true, 51, true, 49, "partial", "synthetic_only_return_user_for_real_vector_int8_decision"},
 		{"one-approximate-result", true, 51, false, 49, "miss", "return_miss_to_user"},
 		{"both-latency-miss", true, 51, true, 51, "miss", "both_latency_miss_return_user_ann_diagnostic_eligible_not_run"},
-		{"f32-not-exact", false, 49, false, 49, "miss", "return_miss_to_user"},
+		{"f32-not-exact", false, 49, false, 49, "blocked", "f32_reference_mismatch_return_user"},
+		{"broken-f32-cannot-select-int8", false, 40, true, 30, "blocked", "f32_reference_mismatch_return_user"},
+		{"broken-f32-cannot-enable-ann", false, 60, true, 60, "blocked", "f32_reference_mismatch_return_user"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got := selectResult(targetResult{Exact: test.fExact, P95MS: test.fMS}, targetResult{Exact: test.iExact, P95MS: test.iMS})
@@ -122,5 +126,116 @@ func TestFailedComponentCannotProducePass(t *testing.T) {
 	}
 	if !reflect.DeepEqual(receipt.Config, c) {
 		t.Fatal("request binding changed")
+	}
+}
+
+func TestRunCLIRefusalGuards(t *testing.T) {
+	oldRevision := sourceRevision
+	sourceRevision = testRevision
+	t.Cleanup(func() { sourceRevision = oldRevision })
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	executablePin, err := dataset.Hash(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherGeneratorPin := "0" + executablePin[1:]
+	if otherGeneratorPin == executablePin {
+		otherGeneratorPin = "1" + executablePin[1:]
+	}
+	host, err := os.Hostname()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fault := range []string{"document-count", "generator-pin", "source-pin", "nested-output"} {
+		t.Run(fault, func(t *testing.T) {
+			dir, _, _ := tinyInput(t)
+			// Admission reads the manifest, not the matrix shape. Keep the matrix
+			// tiny: every case must refuse before output creation or child launch.
+			pin := rewriteFixtureManifest(t, dir, func(m *fixtureManifest) {
+				m.Documents = 150000
+				m.SourceRevision = testRevision
+				m.GeneratorSHA256 = executablePin
+				switch fault {
+				case "document-count":
+					m.Documents = 32
+				case "generator-pin":
+					m.GeneratorSHA256 = otherGeneratorPin
+				case "source-pin":
+					m.SourceRevision = strings.Repeat("3", 40)
+				}
+			})
+			if _, err := readManifest(dir, pin); err != nil {
+				t.Fatal("unrelated manifest refusal would mask the CLI guard", err)
+			}
+			out := filepath.Join(t.TempDir(), "new-output")
+			message := "measurement requires 150000 vectors from this pinned generator build"
+			if fault == "nested-output" {
+				out = filepath.Join(dir, "new-output")
+				message = "output cannot be inside the immutable input fixture"
+			}
+			limit := int64(os.Getpagesize())
+			approved := approval{true, testRevision, executablePin, executablePin, pin, host, "test-operator", 0, 60, runner.MemoryLimits{Runner: limit, Checker: limit, Engine: limit}}
+			path := filepath.Join(t.TempDir(), "approval.json")
+			if err := writeJSON(path, approved); err != nil {
+				t.Fatal(err)
+			}
+			approvalPin, err := dataset.Hash(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"-data", dir, "-fixture-pin", pin, "-out", out,
+				"-launcher", executable, "-cgroup-root", t.TempDir(),
+				"-approval", path, "-approval-pin", approvalPin, "-wall-time", "1m",
+				"-runner-bytes", fmt.Sprint(limit), "-checker-bytes", fmt.Sprint(limit),
+				"-engine-bytes", fmt.Sprint(limit), "-workers", "1", "-k", "1", "-candidates", "1"}
+			if err := runCLI(args); err == nil || err.Error() != message {
+				t.Fatal("CLI guard did not refuse its isolated fault", err)
+			}
+			if _, err := os.Stat(out); !os.IsNotExist(err) {
+				t.Fatal("refusal created output and could reach a child launch", err)
+			}
+		})
+	}
+}
+
+func TestSummarizeScalarKernelAndF32Defect(t *testing.T) {
+	for _, exact := range []bool{true, false} {
+		name := "exact"
+		if !exact {
+			name = "reference-mismatch"
+		}
+		t.Run(name, func(t *testing.T) {
+			c := runConfig{Out: t.TempDir()}
+			for _, mode := range []string{"f32", "int8"} {
+				engine := engineResult{Mode: mode, Workers: 4, Candidates: 128, K: 10, Documents: 150000, Dimensions: 768,
+					Samples: []sample{{QueryID: "query", Phase: "measure", LatencyNS: 40e6}}}
+				checker := checkResult{Exact: true, Checked: 1}
+				if mode == "f32" {
+					checker.Exact = exact
+				}
+				if err := writeJSON(filepath.Join(c.Out, mode+"-engine.json"), engine); err != nil {
+					t.Fatal(err)
+				}
+				if err := writeJSON(filepath.Join(c.Out, mode+"-check.json"), checker); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := summarize(c); err != nil {
+				t.Fatal(err)
+			}
+			var got result
+			if err := readJSON(filepath.Join(c.Out, "result.partial.json"), &got); err != nil {
+				t.Fatal(err)
+			}
+			if len(got.Targets) != 2 || !strings.Contains(got.Targets[0].Target, "scalar single-accumulator float64 kernel") {
+				t.Fatal("F32 target hides its measured kernel", got)
+			}
+			if !exact && (got.Status != "blocked" || got.Branch != "f32_reference_mismatch_return_user" || got.Targets[0].Status != "blocked" || got.ANNRun) {
+				t.Fatal("summarizer routed a reference mismatch into performance selection", got)
+			}
+		})
 	}
 }

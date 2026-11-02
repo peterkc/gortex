@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"gxstudy/adapter"
 	"gxstudy/dataset"
 )
 
@@ -19,7 +22,11 @@ const testGenerator = "222222222222222222222222222222222222222222222222222222222
 
 func tinyInput(t *testing.T) (string, string, input) {
 	t.Helper()
-	dir := filepath.Join(t.TempDir(), "fixture")
+	temporary, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(temporary, "fixture")
 	if err := writeFixture(context.Background(), dir, testRevision, testGenerator, 20261101, 32, 3); err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +67,7 @@ func TestExistingNPYIdentityFormatRoundTrip(t *testing.T) {
 	}
 }
 func TestInputHashAndAliasRejection(t *testing.T) {
-	dir, pin, _ := tinyInput(t)
+	dir, pin, in := tinyInput(t)
 	if _, err := loadInput(context.Background(), dir, testGenerator); err == nil {
 		t.Fatal("wrong manifest hash accepted")
 	}
@@ -71,18 +78,23 @@ func TestInputHashAndAliasRejection(t *testing.T) {
 	if _, err := loadInput(context.Background(), alias, pin); err == nil {
 		t.Fatal("symlink alias accepted")
 	}
-	f, err := os.OpenFile(filepath.Join(dir, "vectors.npy"), os.O_WRONLY, 0)
+	path := filepath.Join(dir, "vectors.npy")
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.WriteAt([]byte{0}, 0); err != nil {
+	headerEnd := 10 + int(binary.LittleEndian.Uint16(data[8:10]))
+	bits := binary.LittleEndian.Uint32(data[headerEnd:])
+	binary.LittleEndian.PutUint32(data[headerEnd:], bits^1)
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.Close(); err != nil {
-		t.Fatal(err)
+	// This is still a valid, normalized NPY. Only the checksum can reject it.
+	if _, _, err := readNPY(context.Background(), path, 32, 3, in.documents); err != nil {
+		t.Fatal("payload mutation introduced an unrelated parse fault", err)
 	}
-	if _, err := loadInput(context.Background(), dir, pin); err == nil {
-		t.Fatal("changed input accepted under old manifest")
+	if _, err := loadInput(context.Background(), dir, pin); err == nil || err.Error() != "fixture input hash mismatch: vectors.npy" {
+		t.Fatal("changed input did not fail its checksum guard", err)
 	}
 }
 func TestNPYRejectsUnsupportedAndPartialInputs(t *testing.T) {
@@ -124,17 +136,20 @@ func TestNPYRejectsUnsupportedAndPartialInputs(t *testing.T) {
 	}
 }
 func TestIdentityRejections(t *testing.T) {
-	for name, text := range map[string]string{
-		"duplicate": "{\"id\":\"a\",\"parent_id\":\"a\",\"repo\":\"r\"}\n{\"id\":\"a\",\"parent_id\":\"a\",\"repo\":\"r\"}\n",
-		"missing":   "{\"id\":\"a\",\"parent_id\":\"a\"}\n",
-		"partial":   "{\"id\":",
+	for _, test := range []struct {
+		name, text string
+		count      int
+	}{
+		{"duplicate", "{\"id\":\"a\",\"parent_id\":\"a\",\"repo\":\"r\"}\n{\"id\":\"a\",\"parent_id\":\"a\",\"repo\":\"r\"}\n", 2},
+		{"missing-repo", "{\"id\":\"a\",\"parent_id\":\"a\"}\n", 1},
+		{"partial", "{\"id\":", 1},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(test.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "documents.jsonl")
-			if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+			if err := os.WriteFile(path, []byte(test.text), 0600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := readIdentities(path, 2); err == nil {
+			if _, err := readIdentities(path, test.count); err == nil {
 				t.Fatal("bad identity accepted")
 			}
 		})
@@ -189,5 +204,177 @@ func TestEngineCheckerAndOmittedNeighbor(t *testing.T) {
 	}
 	if _, err := readIdentities(path, 1); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// rewriteFixtureManifest changes only the named test fixture and returns its new pin.
+func rewriteFixtureManifest(t *testing.T, dir string, change func(*fixtureManifest)) string {
+	t.Helper()
+	path := filepath.Join(dir, "manifest.json")
+	var manifest fixtureManifest
+	if err := readJSON(path, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	change(&manifest)
+	body, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	pin, err := dataset.Hash(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pin
+}
+
+func TestManifestGuards(t *testing.T) {
+	for _, test := range []struct {
+		name, message string
+		change        func(*fixtureManifest)
+	}{
+		{"synthetic", "unsupported fixture identity/count/dimension/recipe", func(m *fixtureManifest) { m.Synthetic = false }},
+		{"recipe", "unsupported fixture identity/count/dimension/recipe", func(m *fixtureManifest) { m.Recipe = "other recipe" }},
+		{"source-revision", "unsupported fixture identity/count/dimension/recipe", func(m *fixtureManifest) { m.SourceRevision = "not-hex" }},
+		{"generator-sha", "unsupported fixture identity/count/dimension/recipe", func(m *fixtureManifest) { m.GeneratorSHA256 = testRevision }},
+		{"extra-hash", "fixture requires exactly documents.jsonl, queries.jsonl and vectors.npy hashes", func(m *fixtureManifest) { m.SHA256["extra"] = testGenerator }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir, _, _ := tinyInput(t)
+			pin := rewriteFixtureManifest(t, dir, test.change)
+			if _, err := readManifest(dir, pin); err == nil || err.Error() != test.message {
+				t.Fatal("manifest guard did not refuse its isolated fault", err)
+			}
+		})
+	}
+}
+
+func TestQueryTargetGuards(t *testing.T) {
+	for _, fault := range []string{"missing-parent", "wrong-repo"} {
+		t.Run(fault, func(t *testing.T) {
+			dir, _, in := tinyInput(t)
+			rows := append([]identity(nil), in.queries...)
+			if fault == "missing-parent" {
+				rows[0].ID = "absent-parent"
+			} else {
+				rows[0].Repo = "other-repo"
+			}
+			var body strings.Builder
+			encoder := json.NewEncoder(&body)
+			for _, row := range rows {
+				if err := encoder.Encode(row); err != nil {
+					t.Fatal(err)
+				}
+			}
+			path := filepath.Join(dir, "queries.jsonl")
+			if err := os.WriteFile(path, []byte(body.String()), 0600); err != nil {
+				t.Fatal(err)
+			}
+			queryPin, err := dataset.Hash(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pin := rewriteFixtureManifest(t, dir, func(m *fixtureManifest) { m.SHA256["queries.jsonl"] = queryPin })
+			if _, err := loadInput(context.Background(), dir, pin); err == nil || err.Error() != "query target is absent from its repository" {
+				t.Fatal("query-target guard did not refuse its isolated fault", err)
+			}
+		})
+	}
+}
+
+func TestEngineIdentityGuards(t *testing.T) {
+	dir, pin, in := tinyInput(t)
+	c := runConfig{Data: dir, FixturePin: pin, Out: t.TempDir(), Workers: 4, K: 3, Candidates: 16}
+	if err := measure(context.Background(), c, "f32"); err != nil {
+		t.Fatal(err)
+	}
+	var original engineResult
+	if err := readJSON(filepath.Join(c.Out, "f32-engine.json"), &original); err != nil {
+		t.Fatal(err)
+	}
+	if checked, err := checkAnswers(context.Background(), in, c, "f32", original); err != nil || !checked.Exact {
+		t.Fatal("unmodified engine result must be valid", checked, err)
+	}
+	for _, test := range []struct {
+		name   string
+		change func(*engineResult)
+	}{
+		{"mode", func(r *engineResult) { r.Mode = "int8" }},
+		{"workers", func(r *engineResult) { r.Workers = 1 }},
+		{"candidates", func(r *engineResult) { r.Candidates = 15 }},
+		{"k", func(r *engineResult) { r.K = 2 }},
+		{"documents", func(r *engineResult) { r.Documents = 31 }},
+		{"dimensions", func(r *engineResult) { r.Dimensions = 384 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := original
+			test.change(&changed)
+			if _, err := checkAnswers(context.Background(), in, c, "f32", changed); err == nil || err.Error() != "engine result identity mismatch" {
+				t.Fatal("engine-identity guard did not refuse its isolated fault", err)
+			}
+		})
+	}
+}
+
+func TestMeasurePreservesSamplesAfterLateFailure(t *testing.T) {
+	dir, pin, in := tinyInput(t)
+	c := runConfig{Data: dir, FixturePin: pin, Out: t.TempDir(), Workers: 4, K: 3, Candidates: 16}
+	complete := filepath.Join(c.Out, "f32-engine.json")
+	old := []byte("existing output must not be adopted")
+	if err := os.WriteFile(complete, old, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := measure(context.Background(), c, "f32"); !errors.Is(err, os.ErrExist) {
+		t.Fatal("expected the final output collision after queries completed", err)
+	}
+	unchanged, err := os.ReadFile(complete)
+	if err != nil || string(unchanged) != string(old) {
+		t.Fatal("existing output changed", err)
+	}
+	partial, err := os.Open(filepath.Join(c.Out, "f32-samples.partial.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer partial.Close()
+	decoder := json.NewDecoder(partial)
+	var rows []sample
+	for {
+		var row sample
+		err := decoder.Decode(&row)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows = append(rows, row)
+	}
+	if len(rows) != 6 {
+		t.Fatal("successful samples were lost on a later failure", len(rows))
+	}
+	for i, row := range rows {
+		query := i % 3
+		phase := "warmup"
+		if i >= 3 {
+			phase = "measure"
+		}
+		want, err := reference(context.Background(), in.matrix, in.vectors[query], c.K, make([]adapter.Hit, len(in.matrix.ids)))
+		if err != nil || row.QueryID != in.queries[query].ID || row.Phase != phase || row.LatencyNS <= 0 || exactResults(want, row.Hits) != nil {
+			t.Fatal("partial spool lost sample identity, order or answer", i, row, err)
+		}
+	}
+}
+
+func TestMeasureUnknownModeCreatesNoOutput(t *testing.T) {
+	dir, pin, _ := tinyInput(t)
+	c := runConfig{Data: dir, FixturePin: pin, Out: t.TempDir(), Workers: 1, K: 3, Candidates: 16}
+	if err := measure(context.Background(), c, "unknown"); err == nil || err.Error() != `unknown scan mode "unknown"` {
+		t.Fatal("unknown mode did not refuse at the pre-effect boundary", err)
+	}
+	entries, err := os.ReadDir(c.Out)
+	if err != nil || len(entries) != 0 {
+		t.Fatal("unknown mode created output before refusal", entries, err)
 	}
 }

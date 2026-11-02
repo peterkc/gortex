@@ -19,6 +19,9 @@ No Go command or measurement may run on the Mac.
 - Every warm-up and measured answer is checked, including every returned F32 score.
   One omitted neighbor, wrong ID, changed score or reordered tie fails exactness.
 - Nearest-rank p95 is `sorted[ceil(0.95*n)-1]`. The target is at most 50 ms.
+  F32 timings measure the current scalar, single-accumulator float64 kernel.
+  Bitwise score checks fix its summation order. A latency miss is specific to
+  this kernel, not evidence against an optimized exact F32 scan.
 - Requests run serially. Each request uses the explicitly selected 1–4 workers.
   Int8 selects one global candidate pool before original-F32 reranking.
 
@@ -66,6 +69,9 @@ synthetic fixture instead of inference:
    Query IDs are relevance-style labels; their vectors are not copied documents.
 
 The generator is reproducible only at its pinned source, Go build and seed.
+`study/storage/checks/run-policy.json` owns the seed and query-count pins; CI
+checks them when generating the fixture. The binary requires the exact approved
+manifest hash rather than a second hard-coded seed/query-count policy.
 The query count and all actual hashes must be frozen before timing. This fixture
 says nothing about embedding quality or real-vector quantization.
 
@@ -94,8 +100,10 @@ Each scenario is Given/When/Then in the normal Go suite:
 
 - Given the harness fixture, when F32 scans with 1–4 workers, then ordered hits
   and scores equal the existing oracle (`TestHarnessVectorContract`).
-- Given duplicate vectors, when ties span workers or input order reverses, then
-  the same ID-tied top-k returns (`TestExactTiesAndInputOrder`).
+- Given three identical vectors z/a/m competing for two slots, when input order
+  reverses or worker count changes, then both scans return a/m. The int8 pool is
+  also limited to two (`TestExactTiesAndInputOrder`). This correctness fixture
+  proves cutoff ties; the paired latency corpus at k=10 need not split a tie.
 - Given unequal near-ties, when the difference is below an epsilon-style cutoff,
   then score order still wins (`TestNearTiesUseNoEpsilon`).
 - Given int8-colliding candidates, when pruning drops the original-F32 winner,
@@ -114,15 +122,25 @@ Each scenario is Given/When/Then in the normal Go suite:
   partial/reordered engine answer, when loaded or checked, then refuse or report
   non-exactness (`TestInputHashAndAliasRejection`,
   `TestNPYRejectsUnsupportedAndPartialInputs`, `TestIdentityRejections`,
-  `TestEngineCheckerAndOmittedNeighbor`).
+  `TestEngineCheckerAndOmittedNeighbor`). Manifest fields, query targets and all
+  engine identity fields have independent refusal cases
+  (`TestManifestGuards`, `TestQueryTargetGuards`, `TestEngineIdentityGuards`).
 - Given missing CLI arguments or approval drift, when invoked, then refuse before
   output creation. Given a failed component, retain a blocked result and receipt
   (`TestExplicitRunArgumentsRefuseBeforeOutput`,
   `TestEntrypointRequiresBinaryAndArguments`, `TestApprovalIdentityAndLimits`,
-  `TestFailedComponentCannotProducePass`).
-- Given F32 passes, keep F32. Given F32 misses, synthetic int8 can never recommend
-  int8. Only two latency misses expose ANN diagnostic eligibility; nothing runs
-  ANN (`TestSelectionBranches`). Warm-ups never enter p95
+  `TestFailedComponentCannotProducePass`). `TestRunCLIRefusalGuards` checks the
+  pinned generator, source, count and output-path refusals at the actual CLI
+  boundary before output or child creation. Unknown scan modes also refuse
+  before output (`TestMeasureUnknownModeCreatesNoOutput`). A later output
+  refusal retains completed sample rows
+  (`TestMeasurePreservesSamplesAfterLateFailure`).
+- Given an inexact F32 result, block selection before int8 or ANN. Given exact
+  F32 passes, keep F32. Given an exact F32 latency miss, synthetic int8 can never
+  recommend int8. Only two latency misses expose ANN diagnostic eligibility;
+  nothing runs ANN (`TestSelectionBranches`). The serialized summary identifies
+  the scalar F32 kernel and blocks reference mismatches
+  (`TestSummarizeScalarKernelAndF32Defect`). Warm-ups never enter p95
   (`TestNearestRankP95`).
 
 Update/delete/remove-readd and concurrent publication scenarios do not apply to
@@ -204,9 +222,13 @@ fixture recipe/seed/hashes, host, exact component commands, all numeric caps,
 absolute deadline, approval hash, terminal component receipts and output hashes.
 Each component receipt includes engine/reducer/checker PID, RSS, cgroup peak,
 OOM/exit state and owned-scope removal. `result.partial.json` is never completion
-proof by itself. Failed logs and partial files remain in the output folder.
+proof by itself. Each successful query writes its existing sample JSON record
+outside the timed interval to `<mode>-samples.partial.jsonl`. A hard deadline or
+OOM can leave a truncated last row; earlier complete rows remain evidence, not a
+complete result. Failed logs and partial files remain in the output folder.
 
-F32 passes keep F32; int8 is extra evidence. An F32 miss returns synthetic-only
+An F32 reference mismatch blocks performance selection. Exact F32 passes keep
+F32; int8 is extra evidence. A scalar F32 latency miss returns synthetic-only
 int8 results to the user, even if int8 passes. Both latency misses mark ANN
 eligible for a separately approved diagnostic, not implemented here. No retry,
 cap increase, inference, native build or backend recommendation follows.
