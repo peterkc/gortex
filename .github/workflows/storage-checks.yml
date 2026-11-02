@@ -1,0 +1,1134 @@
+# Manual measurement requires separate user approval of the exact committed policy
+# hash and batch. This file records that approval; it does not grant it.
+# Job dependencies serialize all four runners. A completed protocol is not a target
+# pass: the lead reviews result.json branches and the tier100 freeze after the run.
+# GitHub supports the step-list anchor used below; no merge keys are used.
+name: Storage contract checks
+on:
+  push:
+    branches:
+    - study/storage-harness
+    paths:
+    - study/storage/checks/**
+    - study/storage/harness/**
+    - .github/workflows/storage-checks.yml
+  workflow_dispatch:
+    inputs:
+      approval_id:
+        description: Public artifact record of exact-policy batch approval. Never enter secrets or private notes.
+        required: true
+        type: string
+      release_tag:
+        description: Fixed public fixture release tag; never latest
+        required: true
+        type: string
+      fork_commit:
+        description: Full reviewed fork commit; must equal the selected workflow ref commit
+        required: true
+        type: string
+      policy_sha256:
+        description: Approved SHA-256 of study/storage/checks/run-policy.json at that commit
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: storage-checks
+  cancel-in-progress: false
+env:
+  GOTOOLCHAIN: local
+  GOENV: 'off'
+  GOWORK: 'off'
+  GOFLAGS: -mod=readonly
+  CGO_ENABLED: '0'
+  GOOS: linux
+  GOARCH: amd64
+  PYTHONDONTWRITEBYTECODE: '1'
+  LANG: C.UTF-8
+jobs:
+  tests:
+    if: github.repository == 'peterkc/gortex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      WORK: ${{ runner.temp }}/storage-checks-tests
+    outputs:
+      timeouts: ${{ steps.preflight.outputs.timeouts }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: ${{ github.sha }}
+        persist-credentials: false
+    - name: Check policy, source, approval inputs and refusal cases
+      id: preflight
+      env:
+        REQUEST_APPROVAL: ${{ inputs.approval_id }}
+        REQUEST_RELEASE: ${{ inputs.release_tag }}
+        REQUEST_COMMIT: ${{ inputs.fork_commit }}
+        REQUEST_POLICY: ${{ inputs.policy_sha256 }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir "$WORK"
+        python3.12 -B -c '
+        import hashlib
+        import json
+        import os
+        from pathlib import Path
+        import re
+        import subprocess
+        import unittest
+
+
+        def unique_object(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise RuntimeError("duplicate policy key: " + key)
+                result[key] = value
+            return result
+
+
+        def admit_dispatch(request, *, source, actual, policy_pin, attempt):
+            if source != actual:
+                raise RuntimeError("checkout differs from the workflow commit")
+            if request["event"] != "workflow_dispatch":
+                return
+            if attempt != "1":
+                raise RuntimeError("no rerun: obtain approval and dispatch afresh")
+            if not request["approval_id"].strip():
+                raise RuntimeError("recorded exact-batch approval ID is required")
+            if not re.fullmatch(r"[0-9a-f]{40}", request["fork_commit"]):
+                raise RuntimeError("fork_commit must be a full lowercase commit")
+            if request["fork_commit"] != actual:
+                raise RuntimeError("select the reviewed workflow commit for dispatch")
+            if not re.fullmatch(r"[0-9a-f]{64}", request["policy_sha256"]):
+                raise RuntimeError("policy_sha256 must be a full lowercase SHA-256")
+            if request["policy_sha256"] != policy_pin:
+                raise RuntimeError("policy hash differs; obtain exact-value approval")
+            tag = request["release_tag"]
+            if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", tag)
+                    or tag == "latest"):
+                raise RuntimeError("explicit fixed public fixture release required")
+
+
+        class AdmissionTests(unittest.TestCase):
+            def test_exact_and_push(self):
+                admit_dispatch(self.request(), source="a" * 40, actual="a" * 40,
+                               policy_pin="b" * 64, attempt="1")
+                admit_dispatch({"event": "push"}, source="a" * 40,
+                               actual="a" * 40, policy_pin="b" * 64, attempt="2")
+
+            def request(self):
+                return {"event": "workflow_dispatch", "approval_id": "batch-record",
+                        "fork_commit": "a" * 40, "policy_sha256": "b" * 64,
+                        "release_tag": "storage-fixtures-v1"}
+
+            def test_refusal_before_execution(self):
+                cases = (("approval_id", ""), ("approval_id", "  "),
+                         ("fork_commit", "a" * 39),
+                         ("fork_commit", "c" * 40),
+                         ("policy_sha256", "b" * 63),
+                         ("policy_sha256", "c" * 64),
+                         ("release_tag", "latest"), ("release_tag", "../other"))
+                for field, value in cases:
+                    with self.subTest(field=field, value=value):
+                        request = {**self.request(), field: value}
+                        with self.assertRaises(RuntimeError):
+                            admit_dispatch(request, source="a" * 40,
+                                           actual="a" * 40, policy_pin="b" * 64,
+                                           attempt="1")
+                for actual, attempt in (("c" * 40, "1"), ("a" * 40, "2")):
+                    with self.assertRaises(RuntimeError):
+                        admit_dispatch(self.request(), source="a" * 40,
+                                       actual=actual, policy_pin="b" * 64,
+                                       attempt=attempt)
+
+            def test_duplicate_policy_key(self):
+                with self.assertRaises(RuntimeError):
+                    unique_object([("wall_seconds", 1), ("wall_seconds", 2)])
+
+
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(AdmissionTests)
+        if not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful():
+            raise RuntimeError("workflow admission self-tests failed")
+        policy_path = Path("study/storage/checks/run-policy.json")
+        raw = policy_path.read_bytes()
+        policy_pin = hashlib.sha256(raw).hexdigest()
+        policy = json.loads(raw, object_pairs_hook=unique_object)
+        if policy["schema"] != "design-c-checks-run-policy/v1":
+            raise RuntimeError("unsupported committed policy schema")
+        if policy["contract"]["construction_selection_approved"] is not True:
+            raise RuntimeError("the approved D29 construction selection must be true")
+        actual = subprocess.check_output(["git", "rev-parse", "HEAD"],
+                                         text=True).strip()
+        request = {"event": os.environ["GITHUB_EVENT_NAME"],
+                   "approval_id": os.environ["REQUEST_APPROVAL"],
+                   "fork_commit": os.environ["REQUEST_COMMIT"],
+                   "policy_sha256": os.environ["REQUEST_POLICY"],
+                   "release_tag": os.environ["REQUEST_RELEASE"]}
+        admit_dispatch(request, source=os.environ["GITHUB_SHA"], actual=actual,
+                       policy_pin=policy_pin, attempt=os.environ["GITHUB_RUN_ATTEMPT"])
+        if (policy["jobs"]["tests"]["timeout_minutes"] != 45
+                or policy["venue"]["runner"] != "ubuntu-24.04"
+                or policy["venue"]["max_parallel"] != 1
+                or policy["venue"]["price_cap_usd"] != 0):
+            raise RuntimeError("workflow literals or zero-cost serial venue differ")
+        timeouts = {}
+        for role in ("base", "linkdelta", "vector"):
+            minutes = policy["jobs"][role]["timeout_minutes"]
+            if type(minutes) is not int or not 0 < minutes <= 360:
+                raise RuntimeError("positive job timeout at most 360 minutes required")
+            timeouts[role] = minutes
+        base_seconds = (policy["fetch"]["wall_seconds"]
+                        + policy["tiny"]["wall_seconds"]
+                        + policy["tier100"]["wall_seconds"]
+                        + policy["base"]["wall_seconds"])
+        link_seconds = (policy["fetch"]["wall_seconds"]
+                        + len(policy["linkdelta"]["tiers"])
+                        * policy["linkdelta"]["wall_seconds"])
+        vector_seconds = (policy["vector"]["generate_wall_seconds"]
+                          + policy["vector"]["wall_seconds"])
+        for role, seconds in (("base", base_seconds), ("linkdelta", link_seconds),
+                              ("vector", vector_seconds)):
+            job = policy["jobs"][role]
+            required = seconds + job["setup_seconds"] + job["cleanup_upload_seconds"]
+            if required > job["timeout_minutes"] * 60:
+                raise RuntimeError("job budget omits a phase or its reserve: " + role)
+        with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+            output.write("timeouts="
+                         + json.dumps(timeouts, separators=(",", ":")) + "\n")
+        evidence = Path(os.environ["WORK"])
+        (evidence / "policy.json").write_bytes(raw)
+        (evidence / "admission.json").write_text(json.dumps({
+            "source_revision": actual, "policy_sha256": policy_pin,
+            "request": request, "run_id": os.environ["GITHUB_RUN_ID"],
+            "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+            "actor": os.environ["GITHUB_ACTOR"], "job_timeouts": timeouts,
+        }, indent=2) + "\n")
+        ' 2>&1 | tee "$WORK/preflight.log"
+    - name: Use the reviewed Go toolchain
+      id: toolchain
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+      with:
+        go-version: 1.27.1
+        cache: false
+    - name: Isolate Go build state outside the checkout
+      id: isolation
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3.12 -B -c '
+        import os
+        from pathlib import Path
+
+        cache = Path(os.environ["RUNNER_TEMP"]) / "checks-test-cache"
+        folders = {"GOCACHE": "build", "GOMODCACHE": "mod", "GOPATH": "gopath",
+                   "HOME": "home", "TMPDIR": "tmp", "XDG_CONFIG_HOME": "config",
+                   "XDG_CACHE_HOME": "cache", "XDG_DATA_HOME": "data",
+                   "XDG_STATE_HOME": "state", "XDG_RUNTIME_DIR": "runtime"}
+        with Path(os.environ["GITHUB_ENV"]).open("a") as output:
+            for key, folder in folders.items():
+                directory = cache / folder
+                directory.mkdir(parents=True, mode=0o700)
+                output.write(key + "=" + str(directory) + "\n")
+        '
+        go version | tee "$WORK/go-version.txt"
+    - name: base vet
+      if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.preflight.outcome == 'success' && steps.isolation.outcome == 'success' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        go -C study/storage/checks/base vet -p=1 ./... 2>&1 \
+          | tee "$WORK/base-vet.log"
+    - name: base test
+      if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.preflight.outcome == 'success' && steps.isolation.outcome == 'success' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        go -C study/storage/checks/base test -p=1 -v ./... 2>&1 \
+          | tee "$WORK/base-test.log"
+    - name: linkdelta vet
+      if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.preflight.outcome == 'success' && steps.isolation.outcome == 'success' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        go -C study/storage/checks/linkdelta vet -p=1 ./... 2>&1 \
+          | tee "$WORK/linkdelta-vet.log"
+    - name: linkdelta test
+      if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.preflight.outcome == 'success' && steps.isolation.outcome == 'success' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        go -C study/storage/checks/linkdelta test -p=1 -v ./... 2>&1 \
+          | tee "$WORK/linkdelta-test.log"
+    - name: vector vet
+      if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.preflight.outcome == 'success' && steps.isolation.outcome == 'success' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        go -C study/storage/checks/vector vet -p=1 ./... 2>&1 \
+          | tee "$WORK/vector-vet.log"
+    - name: vector test
+      if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.preflight.outcome == 'success' && steps.isolation.outcome == 'success' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        go -C study/storage/checks/vector test -p=1 -v ./... 2>&1 \
+          | tee "$WORK/vector-test.log"
+    - name: base Python unit tests
+      if: ${{ !cancelled() && steps.preflight.outcome == 'success' && steps.isolation.outcome == 'success' }}
+      working-directory: study/storage/checks/base
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3.12 -B -m unittest -v test_measure 2>&1 \
+          | tee "$WORK/base-python.log"
+    - name: fixtures Python unit tests
+      if: ${{ !cancelled() && steps.preflight.outcome == 'success' && steps.isolation.outcome == 'success' }}
+      working-directory: study/storage/checks/fixtures
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3.12 -B -m unittest -v test_fetch 2>&1 \
+          | tee "$WORK/fixtures-python.log"
+    - name: Upload unit and admission evidence
+      if: ${{ always() }}
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: storage-checks-tests-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/storage-checks-tests/
+        if-no-files-found: error
+  base:
+    name: 'Checks 1, 2 and 5: same-host A/B/C base comparison'
+    needs:
+    - tests
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'peterkc/gortex' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ fromJSON(needs.tests.outputs.timeouts).base }}
+    env:
+      CHECK_GROUP: base
+      WORK: ${{ runner.temp }}/storage-checks
+    outputs:
+      freeze_uploaded: ${{ steps.freeze_upload.outcome }}
+    steps: &measurement_steps
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: ${{ github.sha }}
+        persist-credentials: false
+    - name: Bind the approved batch and actual host before any target
+      env:
+        REQUEST_APPROVAL: ${{ inputs.approval_id }}
+        REQUEST_RELEASE: ${{ inputs.release_tag }}
+        REQUEST_COMMIT: ${{ inputs.fork_commit }}
+        REQUEST_POLICY: ${{ inputs.policy_sha256 }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir "$WORK"
+        printf '%s\n' 'phase=start' | tee -a "$WORK/df.log"
+        df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP" 2>&1 | tee -a "$WORK/df.log"
+        python3.12 -B -c '
+        import hashlib
+        import json
+        import os
+        from pathlib import Path
+        import platform
+        import shutil
+        import socket
+        import subprocess
+        import sys
+
+        raw = Path("study/storage/checks/run-policy.json").read_bytes()
+        pin = hashlib.sha256(raw).hexdigest()
+        actual = subprocess.check_output(["git", "rev-parse", "HEAD"],
+                                         text=True).strip()
+        if (os.environ["GITHUB_EVENT_NAME"] != "workflow_dispatch"
+                or os.environ["GITHUB_RUN_ATTEMPT"] != "1"
+                or not os.environ["REQUEST_APPROVAL"].strip()
+                or pin != os.environ["REQUEST_POLICY"]
+                or actual != os.environ["REQUEST_COMMIT"]
+                or actual != os.environ["GITHUB_SHA"]):
+            raise RuntimeError("manual approval, source or committed policy drift")
+        if subprocess.check_output(["git", "status", "--porcelain"]):
+            raise RuntimeError("measurement checkout is dirty")
+        policy = json.loads(raw)
+        role = os.environ["CHECK_GROUP"]
+        if role not in ("base", "linkdelta", "vector"):
+            raise RuntimeError("unknown measurement group")
+        if platform.system() != "Linux" or sys.version_info < (3, 12):
+            raise RuntimeError("Linux with Python 3.12+ required")
+        venue = policy["venue"]
+        cpu_count = os.cpu_count()
+        mem = dict(line.split(":", 1) for line in
+                   Path("/proc/meminfo").read_text().splitlines())
+        physical_bytes = int(mem["MemTotal"].split()[0]) * 1024
+        print(json.dumps({"actual_cpu_count": cpu_count,
+                          "physical_memory_bytes": physical_bytes,
+                          "approved_venue": venue}), flush=True)
+        if cpu_count != venue["cpus"]:
+            raise RuntimeError("actual CPU count differs from the approved venue")
+        if physical_bytes < venue["job_memory_bytes"] + venue["host_reserve_bytes"]:
+            raise RuntimeError("host cannot supply the cap and outside-owner reserve")
+        event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+        if event["repository"]["private"] or venue["price_cap_usd"] != 0:
+            raise RuntimeError("only the zero-cost public-fork venue is approved")
+        if role in ("base", "linkdelta") and shutil.which("zstd") is None:
+            raise RuntimeError("the strict public fixture fetch requires zstd")
+        work = Path(os.environ["WORK"])
+        for name in ("evidence", "bin", "preparation", "inputs", "results"):
+            (work / name).mkdir()
+        (work / "evidence/policy.json").write_bytes(raw)
+        record = {
+            "schema": "design-c-checks-operator-record/v1",
+            "approval_id": os.environ["REQUEST_APPROVAL"],
+            "authority": "Separate user approval of this exact batch is required; "
+                         "a nonempty identifier does not grant approval.",
+            "source_revision": actual, "policy_sha256": pin,
+            "contract": policy["contract"], "group": role,
+            "release_tag": os.environ["REQUEST_RELEASE"],
+            "host": socket.gethostname(), "operator": os.environ["GITHUB_ACTOR"],
+            "run_id": os.environ["GITHUB_RUN_ID"],
+            "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+            "run_url": "https://github.com/" + os.environ["GITHUB_REPOSITORY"]
+                       + "/actions/runs/" + os.environ["GITHUB_RUN_ID"],
+            "venue": venue, "actual_cpu_count": cpu_count,
+            "physical_memory_bytes": physical_bytes,
+            "disk_at_admission": shutil.disk_usage(work)._asdict(),
+            "platform": platform.platform(),
+            "python": sys.version,
+        }
+        (work / "evidence/operator.json").write_text(
+            json.dumps(record, indent=2, allow_nan=False) + "\n")
+        cache = Path(os.environ["RUNNER_TEMP"]) / "checks-cache"
+        folders = {"GOCACHE": "build", "GOMODCACHE": "mod", "GOPATH": "gopath",
+                   "HOME": "home", "TMPDIR": "tmp", "XDG_CONFIG_HOME": "config",
+                   "XDG_CACHE_HOME": "cache", "XDG_DATA_HOME": "data",
+                   "XDG_STATE_HOME": "state", "XDG_RUNTIME_DIR": "runtime"}
+        with Path(os.environ["GITHUB_ENV"]).open("a") as output:
+            output.write("CHECKOUT_REVISION=" + actual + "\n")
+            output.write("GX_CHECKS_JOB_BYTES="
+                         + str(venue["job_memory_bytes"]) + "\n")
+            for key, folder in folders.items():
+                directory = cache / folder
+                directory.mkdir(parents=True, mode=0o700)
+                output.write(key + "=" + str(directory) + "\n")
+        ' 2>&1 | tee "$WORK/preflight.log"
+      id: admission
+    - name: Record disk after admission
+      if: ${{ always() && steps.admission.outcome != 'skipped' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        printf '%s\n' 'phase=after-admission' | tee -a "$WORK/df.log"
+        df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP" 2>&1 | tee -a "$WORK/df.log"
+    - name: Use the reviewed Go toolchain
+      id: toolchain
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+      with:
+        go-version: 1.27.1
+        cache: false
+    - name: Record disk after toolchain
+      if: ${{ always() && steps.toolchain.outcome != 'skipped' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        printf '%s\n' 'phase=after-toolchain' | tee -a "$WORK/df.log"
+        df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP" 2>&1 | tee -a "$WORK/df.log"
+    - name: Free unused preinstalled software on the disposable VM only
+      id: software_cleanup
+      if: ${{ env.CHECK_GROUP == 'base' || env.CHECK_GROUP == 'linkdelta' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Destructive only on this disposable hosted VM. Never remove job evidence.
+        test "$RUNNER_ENVIRONMENT" = github-hosted
+        test "$RUNNER_OS" = Linux
+        printf '%s\n' 'phase=before-software-cleanup' | tee -a "$WORK/df.log"
+        df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP" 2>&1 | tee -a "$WORK/df.log"
+        python3.12 -B -c '
+        import os
+        from pathlib import Path
+
+        protected = [Path(os.environ[key]).resolve() for key in
+                     ("GITHUB_WORKSPACE", "RUNNER_TEMP", "WORK", "HOME",
+                      "GOCACHE", "GOMODCACHE", "GOPATH")]
+        for name in ("/usr/share/dotnet", "/usr/local/lib/android", "/opt/ghc",
+                     "/opt/hostedtoolcache/CodeQL"):
+            target = Path(name).resolve()
+            if any(target.is_relative_to(root) or root.is_relative_to(target)
+                   for root in protected):
+                raise RuntimeError(
+                    "refuse software cleanup overlapping protected state")
+        '
+        sudo rm -rf -- /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+          /opt/hostedtoolcache/CodeQL
+        printf '%s\n' 'phase=after-software-cleanup' | tee -a "$WORK/df.log"
+        df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP" 2>&1 | tee -a "$WORK/df.log"
+    - name: Record disk after software cleanup
+      if: ${{ always() && steps.software_cleanup.outcome != 'skipped' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        printf '%s\n' 'phase=after-software-cleanup-terminal' | tee -a "$WORK/df.log"
+        df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP" 2>&1 | tee -a "$WORK/df.log"
+    - name: Delegate one bounded job tree; keep the cleanup owner outside
+      shell: bash
+      run: |
+        set -euo pipefail
+        root="/sys/fs/cgroup/gxchecks-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${CHECK_GROUP}"
+        test -f /sys/fs/cgroup/cgroup.controllers
+        echo +memory | sudo tee /sys/fs/cgroup/cgroup.subtree_control
+        sudo mkdir "$root"
+        stat -c '%d %i' "$root" > "$WORK/evidence/cgroup-root.identity"
+        echo "GX_CHECKS_CGROUP_ROOT=$root" >> "$GITHUB_ENV"
+        printf '%s\n' "$GX_CHECKS_JOB_BYTES" | sudo tee "$root/memory.max"
+        echo 0 | sudo tee "$root/memory.swap.max"
+        echo 1 | sudo tee "$root/memory.oom.group"
+        echo +memory | sudo tee "$root/cgroup.subtree_control"
+        sudo mkdir "$root/driver"
+        sudo chown -R "$(id -u):$(id -g)" "$root"
+      id: delegate
+    - name: Record disk after delegate
+      if: ${{ always() && steps.delegate.outcome != 'skipped' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        printf '%s\n' 'phase=after-delegate' | tee -a "$WORK/df.log"
+        df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP" 2>&1 | tee -a "$WORK/df.log"
+    - name: Build only this group outside measurement timing
+      shell: bash
+      run: |2
+
+        set -euo pipefail
+        printf '%s\n' "$$" | sudo tee "$GX_CHECKS_CGROUP_ROOT/driver/cgroup.procs" > /dev/null
+        expected="${GX_CHECKS_CGROUP_ROOT#/sys/fs/cgroup}/driver"
+        grep -Fx "0::$expected" "/proc/$$/cgroup" | tee "$WORK/evidence/driver-build.txt"
+        go version | tee "$WORK/evidence/go-version.txt"
+        go -C study/storage/harness build -p=1 -trimpath \
+          -o "$WORK/bin/limited-command" ./cmd/limited-command 2>&1 | tee "$WORK/evidence/build-launcher.log"
+        case "$CHECK_GROUP" in
+          base)
+            go -C study/storage/harness build -p=1 -trimpath \
+              -o "$WORK/bin/gen" ./cmd/gen 2>&1 | tee "$WORK/evidence/build-gen.log"
+            go -C study/storage/adapters/sqlite-segment build -p=1 -trimpath \
+              -o "$WORK/bin/sqlite-segment" . 2>&1 | tee "$WORK/evidence/build-a.log"
+            go -C study/storage/adapters/pebble-bleve build -p=1 -trimpath \
+              -o "$WORK/bin/pebble-bleve" . 2>&1 | tee "$WORK/evidence/build-b.log"
+            go -C study/storage/checks/base build -p=1 -trimpath \
+              -o "$WORK/bin/parquet-base" ./cmd/parquet 2>&1 | tee "$WORK/evidence/build-c.log"
+            go -C study/storage/checks/base build -p=1 -trimpath \
+              -o "$WORK/bin/parquet-side" ./cmd/side 2>&1 | tee "$WORK/evidence/build-c-side.log"
+            go -C study/storage/checks/base build -p=1 -trimpath \
+              -o "$WORK/bin/base-fixture" ./cmd/fixture 2>&1 | tee "$WORK/evidence/build-tiny.log"
+            ;;
+          linkdelta)
+            go -C study/storage/checks/linkdelta build -p=1 -trimpath \
+              -o "$WORK/bin/linkdelta" . 2>&1 | tee "$WORK/evidence/build-linkdelta.log"
+            ;;
+          vector)
+            go -C study/storage/checks/vector build -p=1 -trimpath \
+              -ldflags "-X main.sourceRevision=$CHECKOUT_REVISION" \
+              -o "$WORK/bin/vector-check" . 2>&1 | tee "$WORK/evidence/build-vector.log"
+            ;;
+          *) echo "unsupported measurement group" >&2; exit 2 ;;
+        esac
+        python3.12 -B -c '
+        import hashlib
+        import json
+        import os
+        from pathlib import Path
+        import subprocess
+
+        work = Path(os.environ["WORK"])
+        record = {}
+        for path in sorted((work / "bin").iterdir()):
+            with path.open("rb") as source:
+                pin = hashlib.file_digest(source, "sha256").hexdigest()
+            record[path.name] = {
+                "path": str(path), "sha256": pin,
+                "go_version_m": subprocess.check_output(
+                    ["go", "version", "-m", str(path)], text=True),
+            }
+        (work / "evidence/builds.json").write_text(json.dumps({
+            "source_revision": os.environ["CHECKOUT_REVISION"],
+            "build_flags": ["-p=1", "-trimpath"], "cgo_enabled": False,
+            "binaries": record,
+        }, indent=2) + "\n")
+        '
+      id: build
+    - name: Record disk after build
+      if: ${{ always() && steps.build.outcome != 'skipped' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        printf '%s\n' 'phase=after-build' | tee -a "$WORK/df.log"
+        df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP" 2>&1 | tee -a "$WORK/df.log"
+    - name: Fetch strict inputs and finish bound fixture generation
+      env:
+        REQUEST_APPROVAL: ${{ inputs.approval_id }}
+        REQUEST_RELEASE: ${{ inputs.release_tag }}
+        REQUEST_COMMIT: ${{ inputs.fork_commit }}
+        REQUEST_POLICY: ${{ inputs.policy_sha256 }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        printf '%s\n' "$$" | sudo tee "$GX_CHECKS_CGROUP_ROOT/driver/cgroup.procs" > /dev/null
+        expected="${GX_CHECKS_CGROUP_ROOT#/sys/fs/cgroup}/driver"
+        grep -Fx "0::$expected" "/proc/$$/cgroup"
+        python3.12 -B -c '
+        from datetime import datetime, timedelta, timezone
+        import hashlib
+        import json
+        import os
+        from pathlib import Path
+        import re
+        import shutil
+        import socket
+        import subprocess
+        import sys
+
+
+        def sha256(path):
+            with Path(path).open("rb") as source:
+                return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+        def write_json(path, value):
+            with path.open("x", encoding="utf-8") as output:
+                json.dump(value, output, indent=2, allow_nan=False)
+                output.write("\n")
+
+
+        def generate(work, launcher, cgroup, name, command, spec, request):
+            phase = work / "preparation" / name
+            phase.mkdir()
+            write_json(phase / "input.json", request)
+            deadline = datetime.now(timezone.utc) + timedelta(
+                seconds=spec["wall_seconds"])
+            write_json(phase / "policy.json", {
+                "schema": "external-limits/v1", "deadline": deadline.isoformat(),
+            })
+            write_json(phase / "binding.json", {
+                "source_revision": request["source_revision"],
+                "harness_sha256": sha256(launcher),
+                "data_sha256": sha256(phase / "input.json"),
+                "recipe_sha256": sha256(phase / "policy.json"),
+                "host": request["host"], "command": command,
+                "memory_limits_bytes": spec["memory_limits_bytes"],
+            })
+            argv = [str(launcher), "-binding", str(phase / "binding.json"),
+                    "-binding-pin", sha256(phase / "binding.json"),
+                    "-policy", str(phase / "policy.json"),
+                    "-data", str(phase / "input.json"), "-cgroup-root", cgroup,
+                    "-out", str(phase / "limited"), "--", *command]
+            write_json(phase / "command.json", {"argv": argv})
+            completed = subprocess.run(argv, check=False)
+            receipt = json.loads((phase / "limited/receipt.json").read_text())
+            if (completed.returncode != 0 or receipt["state"] != "completed"
+                    or receipt["removed"] is not True):
+                raise RuntimeError(name + " did not complete and remove its scope")
+            return sha256(phase / "limited/receipt.json")
+
+
+        def freeze_tier(directory, destination, label, expected_count, metadata):
+            raw = (directory / "manifest.json").read_bytes()
+            manifest = json.loads(raw)
+            if (manifest["generator_version"] != "gxstudy-v2"
+                    or len(manifest["repos"]) != expected_count
+                    or len(set(manifest["repos"])) != expected_count
+                    or manifest.get("cross_repo_policy")):
+                raise RuntimeError("generated tier identity differs from the recipe")
+            for name, expected in manifest["sha256"].items():
+                path = directory / name
+                if (path.is_symlink() or not path.is_file()
+                        or path.resolve() != path.absolute()
+                        or not path.resolve().is_relative_to(directory.resolve())
+                        or sha256(path) != expected):
+                    raise RuntimeError("generated tier file identity differs: " + name)
+            destination.mkdir()
+            (destination / "manifest.json").write_bytes(raw)
+            totals = {key: 0 for key in manifest["counts"]}
+            parts = {}
+            for repo in manifest["repos"]:
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", repo):
+                    raise RuntimeError("noncanonical generated repository identity")
+                part_raw = (directory / repo / "manifest.json").read_bytes()
+                part = json.loads(part_raw)
+                for key in totals:
+                    totals[key] += part["counts"][key]
+                part_dir = destination / repo
+                part_dir.mkdir()
+                (part_dir / "manifest.json").write_bytes(part_raw)
+                parts[repo] = part
+            if totals != manifest["counts"]:
+                raise RuntimeError("generated count sums differ")
+            write_json(destination / "freeze.json", {
+                **metadata, "label": label, "manifest_sha256": sha256(
+                    directory / "manifest.json"), "manifest": manifest,
+                "repositories": parts, "count_sums": totals,
+                "query_count": len(json.loads(
+                    (directory / "queries.json").read_text())),
+            })
+
+
+        work = Path(os.environ["WORK"])
+        source = Path(os.environ["GITHUB_WORKSPACE"])
+        role = os.environ["CHECK_GROUP"]
+        policy = json.loads((work / "evidence/policy.json").read_text())
+        operator = json.loads((work / "evidence/operator.json").read_text())
+        builds = json.loads((work / "evidence/builds.json").read_text())["binaries"]
+        launcher = work / "bin/limited-command"
+        cgroup = os.environ["GX_CHECKS_CGROUP_ROOT"]
+        approval = work / "evidence/operator.json"
+        common = {
+            "source_revision": os.environ["CHECKOUT_REVISION"],
+            "host": socket.gethostname(), "approval_sha256": sha256(approval),
+            "run_policy_sha256": sha256(work / "evidence/policy.json"),
+        }
+        freeze = work / "evidence/freeze"
+        freeze.mkdir()
+        if role in ("base", "linkdelta"):
+            spec = policy["fetch"]
+            out = work / "preparation/fetch"
+            command = ["bash", str(source / "study/storage/checks/fixtures/fetch.sh"),
+                       str(Path(sys.executable).resolve()),
+                       "--release-tag", os.environ["REQUEST_RELEASE"],
+                       "--source-revision", common["source_revision"],
+                       "--launcher", str(launcher), "--approval", str(approval),
+                       "--cgroup-root", cgroup, "--out", str(out),
+                       "--data-dir", str(out / "data"),
+                       "--wall-seconds", str(spec["wall_seconds"])]
+            for component in ("runner", "checker", "engine"):
+                command.extend(["--" + component + "-memory-bytes",
+                                str(spec["memory_limits_bytes"][component])])
+            write_json(work / "evidence/fetch-command.json", {"argv": command})
+            subprocess.run(command, check=True)
+            for name in ("input.json", "verified.json", "result.json"):
+                shutil.copy2(out / name, work / "evidence" / ("fetch-" + name))
+            for tier in ("tier1", "tier10"):
+                shutil.copy2(out / "data" / tier / "manifest.json",
+                             freeze / (tier + "-manifest.json"))
+        if role == "base":
+            tiny = work / "inputs/tiny"
+            tiny_command = [str(work / "bin/base-fixture"), "-out", str(tiny),
+                            "-source-revision", common["source_revision"]]
+            tiny_receipt = generate(work, launcher, cgroup, "tiny", tiny_command,
+                                    policy["tiny"], {
+                                        **common, "command": tiny_command,
+                                        "generator": builds["base-fixture"],
+                                    })
+            freeze_tier(tiny, freeze / "tiny", "synthetic three-function CI tier", 1,
+                        {**common, "generator": builds["base-fixture"],
+                         "generation_receipt_sha256": tiny_receipt})
+            tier10 = work / "preparation/fetch/data/tier10"
+            parents = {tier: sha256(work / "preparation/fetch/data" / tier
+                                    / "manifest.json")
+                       for tier in ("tier1", "tier10")}
+            spec = policy["tier100"]
+            parent = json.loads((tier10 / "manifest.json").read_text())
+            if parent["repos"] != spec["source_order"]:
+                raise RuntimeError("ordered tier100 parent source list differs")
+            sources = [str(tier10 / repo) for repo in spec["source_order"]]
+            tier100 = work / "inputs/tier100"
+            command = [str(work / "bin/gen"), "-sources", ",".join(sources),
+                       "-repos", str(spec["repos"]), "-seed", str(spec["seed"]),
+                       "-synthetic-cross-repo="
+                       + str(spec["synthetic_cross_repo"]).lower(),
+                       "-out", str(tier100)]
+            receipt = generate(work, launcher, cgroup, "tier100", command, spec, {
+                **common, "generator": builds["gen"], "parent_manifests": parents,
+                "ordered_sources": sources, "recipe": spec, "command": command,
+            })
+            generated = json.loads((tier100 / "manifest.json").read_text())
+            expected_repos = [*spec["source_order"],
+                              *(f"r{i:03d}" for i in range(
+                                  len(spec["source_order"]), spec["repos"]))]
+            if (generated["repos"] != expected_repos
+                    or generated["seed"] != spec["seed"]):
+                raise RuntimeError("tier100 ordered recipe output differs")
+            freeze_tier(tier100, freeze / "tier100", spec["label"], spec["repos"], {
+                **common, "generator": builds["gen"], "parent_manifests": parents,
+                "ordered_sources": sources, "recipe": spec, "command": command,
+                "generation_receipt_sha256": receipt,
+            })
+        elif role == "vector":
+            spec = policy["vector"]
+            data = work / "inputs/vector"
+            command = [str(work / "bin/vector-check"), "generate", "-out", str(data),
+                       "-documents", str(spec["documents"]),
+                       "-queries", str(spec["queries"]), "-seed", str(spec["seed"])]
+            receipt = generate(work, launcher, cgroup, "vector", command, {
+                "wall_seconds": spec["generate_wall_seconds"],
+                "memory_limits_bytes": spec["generator_memory_limits_bytes"],
+            }, {**common, "generator": builds["vector-check"], "recipe": spec,
+                "command": command})
+            manifest = json.loads((data / "manifest.json").read_text())
+            for field in ("documents", "queries", "dimensions", "seed"):
+                if manifest[field] != spec[field]:
+                    raise RuntimeError("generated vector shape/seed differs: " + field)
+            if (manifest["synthetic"] is not True
+                    or manifest["source_revision"] != common["source_revision"]
+                    or manifest["generator_sha256"]
+                    != builds["vector-check"]["sha256"]):
+                raise RuntimeError("generated vector provenance differs")
+            for name, expected in manifest["sha256"].items():
+                if sha256(data / name) != expected:
+                    raise RuntimeError("generated vector hash differs: " + name)
+            shutil.copy2(data / "manifest.json", freeze / "vector-manifest.json")
+            write_json(freeze / "vector-freeze.json", {
+                **common, "manifest": manifest,
+                "manifest_sha256": sha256(data / "manifest.json"),
+                "generator": builds["vector-check"], "command": command,
+                "generation_receipt_sha256": receipt,
+                "scope": "D28 synthetic-only; no ANN or inference",
+            })
+
+        phases = {"base": ("fetch", "tiny", "tier100"),
+                  "linkdelta": ("fetch",), "vector": ("vector",)}[role]
+        for phase in phases:
+            for name in ("receipt.json", "command.log"):
+                shutil.copy2(work / "preparation" / phase / "limited" / name,
+                             freeze / (phase + "-" + name))
+        ' 2>&1 | tee "$WORK/evidence/preparation.log"
+      id: prepare
+    - name: Record disk after prepare
+      if: ${{ always() && steps.prepare.outcome != 'skipped' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        printf '%s\n' 'phase=after-prepare' | tee -a "$WORK/df.log"
+        df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP" 2>&1 | tee -a "$WORK/df.log"
+    - name: Upload immutable manifests before any candidate timing
+      id: freeze_upload
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: storage-checks-freeze-${{ env.CHECK_GROUP }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/storage-checks/evidence/freeze/
+        if-no-files-found: error
+    - name: Record disk after freeze_upload
+      if: ${{ always() && steps.freeze_upload.outcome != 'skipped' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        printf '%s\n' 'phase=after-freeze_upload' | tee -a "$WORK/df.log"
+        df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP" 2>&1 | tee -a "$WORK/df.log"
+    - name: Run this group once with explicit policy settings
+      env:
+        REQUEST_APPROVAL: ${{ inputs.approval_id }}
+        REQUEST_RELEASE: ${{ inputs.release_tag }}
+        REQUEST_COMMIT: ${{ inputs.fork_commit }}
+        REQUEST_POLICY: ${{ inputs.policy_sha256 }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        printf '%s\n' "$$" | sudo tee "$GX_CHECKS_CGROUP_ROOT/driver/cgroup.procs" > /dev/null
+        expected="${GX_CHECKS_CGROUP_ROOT#/sys/fs/cgroup}/driver"
+        grep -Fx "0::$expected" "/proc/$$/cgroup"
+        python3.12 -B -c '
+        import hashlib
+        import json
+        import os
+        from pathlib import Path
+        import subprocess
+        import shutil
+
+        work = Path(os.environ["WORK"])
+        policy = json.loads((work / "evidence/policy.json").read_text())
+        role = os.environ["CHECK_GROUP"]
+        disk = shutil.disk_usage(Path(os.environ["RUNNER_TEMP"]))
+        minimum = policy["disk_min_free_bytes"][role]
+        if type(minimum) is not int or minimum <= 0:
+            raise RuntimeError("positive integer disk admission floor required")
+        with (work / "evidence/capacity-before-timing.json").open("x") as output:
+            json.dump({"disk": disk._asdict(), "minimum_free_bytes": minimum}, output)
+        if disk.free < minimum:
+            raise RuntimeError(f"no timing: {disk.free} free bytes < "
+                               f"{minimum} required for {role}")
+        for relative in ("study/storage/checks/run-policy.json",
+                         str(work / "evidence/policy.json")):
+            pin = hashlib.sha256(Path(relative).read_bytes()).hexdigest()
+            if pin != os.environ["REQUEST_POLICY"]:
+                raise RuntimeError("approved policy changed before timing")
+        if (subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+                != os.environ["CHECKOUT_REVISION"]
+                or subprocess.check_output(["git", "status", "--porcelain"])):
+            raise RuntimeError("source changed during fixture preparation")
+        builds = json.loads((work / "evidence/builds.json").read_text())["binaries"]
+        for binary in builds.values():
+            with Path(binary["path"]).open("rb") as source:
+                pin = hashlib.file_digest(source, "sha256").hexdigest()
+            if pin != binary["sha256"]:
+                raise RuntimeError("prebuilt executable changed before timing")
+        '
+        python3.12 -B -c '
+        import hashlib
+        import json
+        import os
+        from pathlib import Path
+        import subprocess
+
+
+        def sha256(path):
+            with Path(path).open("rb") as source:
+                return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+        def write_json(path, value):
+            with path.open("x", encoding="utf-8") as output:
+                json.dump(value, output, indent=2, allow_nan=False)
+                output.write("\n")
+
+
+        work = Path(os.environ["WORK"])
+        source = Path(os.environ["GITHUB_WORKSPACE"])
+        policy = json.loads((work / "evidence/policy.json").read_text())
+        operator = json.loads((work / "evidence/operator.json").read_text())
+        builds = json.loads((work / "evidence/builds.json").read_text())["binaries"]
+        approval = work / "evidence/operator.json"
+        common = {
+            "source_revision": os.environ["CHECKOUT_REVISION"],
+            "cgroup_root": os.environ["GX_CHECKS_CGROUP_ROOT"],
+        }
+        role = os.environ["CHECK_GROUP"]
+        if role == "base":
+            spec = policy["base"]
+            directories = {"tiny": work / "inputs/tiny",
+                           "tier1": work / "preparation/fetch/data/tier1",
+                           "tier10": work / "preparation/fetch/data/tier10",
+                           "tier100": work / "inputs/tier100"}
+            config = {
+                "schema": "design-c-base-run/v1", **common,
+                "source_root": str(source),
+                "recipe_sha256": sha256(work / "evidence/policy.json"),
+                "approval_path": str(approval), "approval_sha256": sha256(approval),
+                **spec, "output_dir": str(work / "results/base"),
+                "construction_selection_approved":
+                    policy["contract"]["construction_selection_approved"],
+                "binaries": {key: {"path": builds[name]["path"],
+                                    "sha256": builds[name]["sha256"]}
+                             for key, name in (("a", "sqlite-segment"),
+                                               ("b", "pebble-bleve"),
+                                               ("c", "parquet-base"),
+                                               ("c_side", "parquet-side"))},
+                "data": {label: {"path": str(directory),
+                                 "sha256": sha256(directory / "manifest.json")}
+                         for label, directory in directories.items()},
+            }
+            path = work / "evidence/base-config.json"
+            write_json(path, config)
+            command = ["bash", str(source / "study/storage/checks/base/run.sh"),
+                       "--config", str(path)]
+            write_json(work / "evidence/base-command.json", {"argv": command})
+            subprocess.run(command, check=True)
+        elif role == "linkdelta":
+            spec = policy["linkdelta"]
+            for item in spec["tiers"]:
+                tier = item["tier"]
+                config = {
+                    "schema": "linkdelta-measure/v1", **common,
+                    "base_layout": spec["base_layout"],
+                    "data": str(work / "preparation/fetch/data" / tier),
+                    "out": str(work / "results" / tier),
+                    "launcher": str(work / "bin/limited-command"),
+                    "approval": str(approval), "approval_sha256": sha256(approval),
+                    "delta_repo": item["delta_repo"],
+                    "delta_sizes": spec["delta_sizes"],
+                    "query_repeats": spec["query_repeats"],
+                    "wall_seconds": spec["wall_seconds"],
+                    "memory_limits_bytes": spec["memory_limits_bytes"],
+                    "link_memory_limit_bytes": spec["link_memory_limit_bytes"],
+                }
+                path = work / "evidence" / ("linkdelta-" + tier + "-config.json")
+                write_json(path, config)
+                command = ["bash", str(source / "study/storage/checks/linkdelta"
+                                       / "measure.sh"),
+                           str(work / "bin/linkdelta"), str(path), sha256(path)]
+                write_json(work / "evidence" / ("linkdelta-" + tier + "-command.json"),
+                           {"argv": command})
+                subprocess.run(command, check=True)
+        elif role == "vector":
+            spec = policy["vector"]
+            fixture = work / "inputs/vector"
+            vector_approval = {
+                "approved": True, "source_revision": common["source_revision"],
+                "executable_sha256": builds["vector-check"]["sha256"],
+                "launcher_sha256": builds["limited-command"]["sha256"],
+                "fixture_sha256": sha256(fixture / "manifest.json"),
+                "host": operator["host"], "operator": operator["operator"],
+                "price_cap_usd": policy["venue"]["price_cap_usd"],
+                "wall_time_seconds": spec["wall_seconds"],
+                "memory_limits_bytes": spec["memory_limits_bytes"],
+            }
+            path = work / "evidence/vector-approval.json"
+            write_json(path, vector_approval)
+            write_json(work / "evidence/vector-approval-binding.json", {
+                "operator_record_sha256": sha256(approval),
+                "approval_sha256": sha256(path),
+                "approval_id": operator["approval_id"],
+                "policy_sha256": operator["policy_sha256"],
+            })
+            command = ["bash", str(source / "study/storage/checks/vector/run.sh"),
+                       str(work / "bin/vector-check"), "-data", str(fixture),
+                       "-fixture-pin", vector_approval["fixture_sha256"],
+                       "-out", str(work / "results/vector"),
+                       "-launcher", str(work / "bin/limited-command"),
+                       "-cgroup-root", common["cgroup_root"],
+                       "-approval", str(path), "-approval-pin", sha256(path),
+                       "-wall-time", str(spec["wall_seconds"]) + "s",
+                       "-workers", str(spec["workers"]), "-k", str(spec["k"]),
+                       "-candidates", str(spec["candidates"])]
+            for component in ("runner", "checker", "engine"):
+                command.extend(["-" + component + "-bytes",
+                                str(spec["memory_limits_bytes"][component])])
+            write_json(work / "evidence/vector-command.json", {"argv": command})
+            subprocess.run(command, check=True)
+        else:
+            raise RuntimeError("unknown measurement group")
+        ' 2>&1 | tee "$WORK/evidence/measurement.log"
+      id: measure
+    - name: Record disk after measure
+      if: ${{ always() && steps.measure.outcome != 'skipped' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        printf '%s\n' 'phase=after-measure' | tee -a "$WORK/df.log"
+        df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP" 2>&1 | tee -a "$WORK/df.log"
+    - name: Retain cleanup evidence and release only this owned job tree
+      if: ${{ always() }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        if test -n "${GX_CHECKS_CGROUP_ROOT:-}"; then
+          # This owner survives a test-parent failure. Preserve kernel evidence,
+          # kill only the inode-checked job tree once, then wait on kernel events.
+          sudo python3.12 -c '
+        import json
+        import os
+        import select
+        import stat
+        import sys
+        import time
+        from pathlib import Path
+
+        root = Path(sys.argv[1])
+        expected = Path("/sys/fs/cgroup") / (
+            "gxchecks-" + sys.argv[3] + "-" + sys.argv[4] + "-" + sys.argv[5]
+        )
+        identity = tuple(map(int, Path(sys.argv[2]).read_text().split()))
+        info = root.lstat()
+        if (root != expected or root.resolve() != root
+                or not stat.S_ISDIR(info.st_mode)):
+            raise RuntimeError("refuse cleanup outside the exact job cgroup")
+        if identity != (info.st_dev, info.st_ino):
+            raise RuntimeError("refuse cleanup of a replaced job cgroup")
+        relative = "/" + str(root.relative_to("/sys/fs/cgroup"))
+        membership = Path("/proc/self/cgroup").read_text().splitlines()
+        if any(line == "0::" + relative
+               or line.startswith("0::" + relative + "/") for line in membership):
+            raise RuntimeError("cleanup process must be outside the target cgroup")
+
+
+        def snapshot(phase):
+            names = (
+                "cgroup.procs", "cgroup.events", "memory.max", "memory.swap.max",
+                "memory.oom.group", "memory.peak", "memory.events",
+            )
+            for current, _, _ in os.walk(root):
+                path = Path(current)
+                fields = {name: (path / name).read_text().strip() for name in names}
+                print(json.dumps({
+                    "phase": phase, "scope": str(path.relative_to(root)),
+                    "state": fields,
+                }), flush=True)
+
+
+        snapshot("before-kill")
+        fd = os.open(root / "cgroup.events", os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            def state():
+                os.lseek(fd, 0, os.SEEK_SET)
+                return dict(line.split() for line in
+                            os.read(fd, 4096).decode().splitlines())
+
+            state()
+            poll = select.poll()
+            poll.register(fd, select.POLLPRI | select.POLLERR)
+            (root / "cgroup.kill").write_text("1")
+            deadline = time.monotonic() + 30
+            while state()["populated"] != "0":
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("job cgroup stayed populated after cgroup.kill")
+                poll.poll(max(1, int(remaining * 1000)))
+        finally:
+            os.close(fd)
+        snapshot("after-kill")
+        for current, _, _ in os.walk(root, topdown=False):
+            path = Path(current)
+            entry = path.lstat()
+            if not stat.S_ISDIR(entry.st_mode) or entry.st_dev != info.st_dev:
+                raise RuntimeError("refuse cleanup of an unexpected cgroup entry")
+            if path == root and (entry.st_dev, entry.st_ino) != identity:
+                raise RuntimeError("job cgroup changed before removal")
+            path.rmdir()
+        print(json.dumps({
+            "phase": "removed", "root": str(root), "success": True,
+        }), flush=True)
+        ' "$GX_CHECKS_CGROUP_ROOT" "$WORK/evidence/cgroup-root.identity" \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$CHECK_GROUP" \
+            2>&1 | tee "$WORK/evidence/cgroup-cleanup.log"
+        fi
+      id: cleanup
+    - name: Record disk after cleanup
+      if: ${{ always() && steps.cleanup.outcome != 'skipped' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        printf '%s\n' 'phase=after-cleanup' | tee -a "$WORK/df.log"
+        df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP" 2>&1 | tee -a "$WORK/df.log"
+    - name: Upload every receipt, result and diagnostic log, including failures
+      if: ${{ always() }}
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: storage-checks-${{ env.CHECK_GROUP }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |-
+          ${{ runner.temp }}/storage-checks/preflight.log
+          ${{ runner.temp }}/storage-checks/evidence/**
+          ${{ runner.temp }}/storage-checks/preparation/**/*.json
+          ${{ runner.temp }}/storage-checks/preparation/**/command.log
+          ${{ runner.temp }}/storage-checks/results/**/*.json
+          ${{ runner.temp }}/storage-checks/results/**/*.json.partial
+          ${{ runner.temp }}/storage-checks/results/**/*.jsonl
+          ${{ runner.temp }}/storage-checks/results/*.log
+          ${{ runner.temp }}/storage-checks/results/**/command.log
+          ${{ runner.temp }}/storage-checks/results/**/runner-*.log*
+          ${{ runner.temp }}/storage-checks/results/**/engine-*.log*
+          ${{ runner.temp }}/storage-checks/results/**/checker-*.log*
+          ${{ runner.temp }}/storage-checks/df.log
+        if-no-files-found: error
+  linkdelta:
+    name: 'Checks 3 and 4: unchanged tiers, serial link/delta comparison'
+    needs:
+    - tests
+    - base
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && needs.tests.result == 'success' && needs.base.outputs.freeze_uploaded == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ fromJSON(needs.tests.outputs.timeouts).linkdelta }}
+    env:
+      CHECK_GROUP: linkdelta
+      WORK: ${{ runner.temp }}/storage-checks
+    steps: *measurement_steps
+  vector:
+    name: 'Check 6: D28 synthetic-only vector scan'
+    needs:
+    - tests
+    - base
+    - linkdelta
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && needs.tests.result == 'success' && needs.base.outputs.freeze_uploaded == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ fromJSON(needs.tests.outputs.timeouts).vector }}
+    env:
+      CHECK_GROUP: vector
+      WORK: ${{ runner.temp }}/storage-checks
+    steps: *measurement_steps

@@ -1,0 +1,209 @@
+{
+  "schema": "design-c-checks-run-policy/v1",
+  "approval_boundary": "Proposed settings. The user must approve this exact committed file hash and the exact batched run list before manual dispatch. An approval ID records that approval; it does not create it.",
+  "contract": {
+    "plan_sha256": "6be0527942877b7a3d3586d73a853669cf3f0dcc6425f85e657303de1428ba42",
+    "actions_sha256": "55732cdaf7b3058bfdab6e479d96e5aa0eda44e11433d818f0028f015833c7f8",
+    "construction_selection_approved": true,
+    "vector_scope": "D28 synthetic-only scan control; no inference, ANN execution or int8 recommendation"
+  },
+  "venue": {
+    "runner": "ubuntu-24.04",
+    "cpus": 4,
+    "job_memory_bytes": 12884901888,
+    "host_reserve_bytes": 2147483648,
+    "price_cap_usd": 0,
+    "max_parallel": 1
+  },
+  "jobs": {
+    "tests": {
+      "timeout_minutes": 45
+    },
+    "base": {
+      "timeout_minutes": 250,
+      "setup_seconds": 1500,
+      "cleanup_upload_seconds": 600
+    },
+    "linkdelta": {
+      "timeout_minutes": 230,
+      "setup_seconds": 1200,
+      "cleanup_upload_seconds": 1200
+    },
+    "vector": {
+      "timeout_minutes": 40,
+      "setup_seconds": 600,
+      "cleanup_upload_seconds": 600
+    }
+  },
+  "fetch": {
+    "wall_seconds": 600,
+    "memory_limits_bytes": {
+      "runner": 268435456,
+      "checker": 268435456,
+      "engine": 2147483648
+    }
+  },
+  "tiny": {
+    "wall_seconds": 300,
+    "memory_limits_bytes": {
+      "runner": 268435456,
+      "checker": 268435456,
+      "engine": 1073741824
+    }
+  },
+  "tier100": {
+    "wall_seconds": 1200,
+    "memory_limits_bytes": {
+      "runner": 268435456,
+      "checker": 268435456,
+      "engine": 10737418240
+    },
+    "repos": 100,
+    "seed": 20261022,
+    "synthetic_cross_repo": false,
+    "source_order": [
+      "K-apimachinery",
+      "K-component-base",
+      "K-kube-aggregator",
+      "K-metrics",
+      "K-cli-runtime",
+      "K-controller-manager",
+      "P-flask",
+      "P-click",
+      "P-werkzeug",
+      "P-jinja"
+    ],
+    "label": "derived-100-repository fixture: 10 real source parts plus 90 correlated derived top-ups",
+    "review": "Upload the manifest before timing. Lead review follows the run; a rejected manifest invalidates only tier100 results."
+  },
+  "base": {
+    "wall_seconds": 10800,
+    "runs": 3,
+    "safety_timeout_seconds": 900,
+    "memory_limits_bytes": {
+      "runner": 536870912,
+      "checker": 1073741824,
+      "engine": 4294967296
+    }
+  },
+  "linkdelta": {
+    "wall_seconds": 5400,
+    "memory_limits_bytes": {
+      "runner": 536870912,
+      "checker": 2147483648,
+      "engine": 8589934592
+    },
+    "link_memory_limit_bytes": 1610612736,
+    "delta_sizes": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      32
+    ],
+    "query_repeats": 3,
+    "base_layout": "c-parquet",
+    "tiers": [
+      {
+        "tier": "tier1",
+        "delta_repo": "K-client-go"
+      },
+      {
+        "tier": "tier10",
+        "delta_repo": "K-apimachinery"
+      }
+    ]
+  },
+  "vector": {
+    "generate_wall_seconds": 600,
+    "generator_memory_limits_bytes": {
+      "runner": 268435456,
+      "checker": 268435456,
+      "engine": 1073741824
+    },
+    "documents": 150000,
+    "queries": 256,
+    "dimensions": 768,
+    "seed": 20261102,
+    "wall_seconds": 600,
+    "memory_limits_bytes": {
+      "runner": 268435456,
+      "checker": 2147483648,
+      "engine": 2147483648
+    },
+    "workers": 4,
+    "k": 10,
+    "candidates": 128
+  },
+  "disk_min_free_bytes": {
+    "base": 25769803776,
+    "linkdelta": 12884901888,
+    "vector": 2147483648
+  },
+  "disk_admission": "Free-space floor on RUNNER_TEMP before candidate timing, not a measured peak bound. Workspace and RUNNER_TEMP df logs are retained after every execution phase. A miss stops; nothing is deleted and no cap or venue changes automatically.",
+  "software_cleanup": "Base/linkdelta only: on a disposable github-hosted Linux VM, remove exactly /usr/share/dotnet, /usr/local/lib/android, /opt/ghc and /opt/hostedtoolcache/CodeQL. Preserve all workspace, RUNNER_TEMP, job evidence, Go/Python/Node tools and other tool-cache entries. Plan roughly 30 GiB free immediately after cleanup, before later caches and fixtures: an unverified 14 GiB starting-space assumption plus a historical 16.7 GiB Android/.NET reclaim. GHC/CodeQL savings are not credited. Actual image occupancy varies; df and the unchanged timing floors decide admission.",
+  "basis": {
+    "/venue/cpus": "study/storage/checks/base/README.md Estimate and limits, study/storage/checks/vector/README.md Sizing estimates, and study/storage/checks/fixtures/FIXTURES.md name a four-vCPU Ubuntu host.",
+    "/venue/job_memory_bytes": "Integration proposal: 12 GiB enclosing cap on the reports nominal 16-GB host, above the 10 GiB tier100 target cap with two GiB inside the job for controllers and cache. Delegation and outside-owner cleanup follow .github/workflows/storage-screen.yml. This is not engine RSS or a measured requirement.",
+    "/venue/host_reserve_bytes": "Integration proposal: require at least 2 GiB physical memory outside the enclosing cap for the runner and cleanup owner. The reports name a nominal 16-GB host; actual MemTotal is checked.",
+    "/venue/price_cap_usd": "Zero-cost public-fork standard Linux CI venue only. No paid runner, model inference, cloud job or extra service is requested.",
+    "/venue/max_parallel": "Lead requested the active runner count. Serial job dependencies use one runner at a time and assume no additional parallel slot. Base uploads the tier100 freeze before any candidate timing in the batch.",
+    "/jobs/tests/timeout_minutes": "Integration estimate: 45 minutes for setup, three readonly Go module vet/test pairs and two stdlib Python suites. This is not a measurement bound.",
+    "/jobs/base/timeout_minutes": "Hard job envelope: (1500 setup + 600 fetch + 300 tiny generation + 1200 tier100 generation + 10800 measurement + 600 cleanup/upload) / 60 = 250 minutes.",
+    "/jobs/base/setup_seconds": "Integration reserve: 25 minutes for Go setup, downloads, serial builds, metadata and manifest freezing outside timing; unmeasured. The fixed unused-software removal shares this setup reserve; budget roughly 1-3 minutes, not a measured bound.",
+    "/jobs/base/cleanup_upload_seconds": "Integration reserve: 10 minutes for owned-root cleanup and evidence upload, outside target timing; unmeasured.",
+    "/jobs/linkdelta/timeout_minutes": "Hard job envelope: (1200 setup + 600 fetch + 2 * 5400 serial measurement + 1200 cleanup/upload) / 60 = 230 minutes.",
+    "/jobs/linkdelta/setup_seconds": "checks-link-delta proposal relayed by lead: build/cleanup about 20 minutes. This envelope reserves 20 minutes for setup/build separately; unmeasured. The fixed unused-software removal shares this setup reserve; budget roughly 1-3 minutes, not a measured bound.",
+    "/jobs/linkdelta/cleanup_upload_seconds": "Integration reserve: 20 additional minutes for cleanup, two-tier evidence and upload; unmeasured.",
+    "/jobs/vector/timeout_minutes": "Hard job envelope: (600 setup + 600 generation + 600 measurement + 600 cleanup/upload) / 60 = 40 minutes.",
+    "/jobs/vector/setup_seconds": "Integration reserve: 10 minutes for Go setup, serial builds, metadata and freeze, outside query timing; unmeasured.",
+    "/jobs/vector/cleanup_upload_seconds": "Integration reserve: 10 minutes for owned-root cleanup and evidence upload; unmeasured.",
+    "/fetch/wall_seconds": "study/storage/checks/fixtures/FIXTURES.md proposes 600 seconds; expected download/decompression/hash time is 2-5 minutes.",
+    "/fetch/memory_limits_bytes/runner": "Integration proposal: 256 MiB positive binding field only. The external fetch operation does not launch or measure a runner component.",
+    "/fetch/memory_limits_bytes/checker": "Integration proposal: 256 MiB positive binding field only. The external fetch operation does not launch or measure a checker component.",
+    "/fetch/memory_limits_bytes/engine": "study/storage/checks/fixtures/FIXTURES.md proposes 2147483648 bytes for the fetch process tree including charged file cache.",
+    "/tiny/wall_seconds": "Integration proposal: five-minute generation deadline for checks/base/cmd/fixture, the source-free three-function tier documented in study/storage/checks/base/README.md.",
+    "/tiny/memory_limits_bytes/runner": "Integration proposal: 256 MiB binding-only field; no runner component is launched by external tiny generation.",
+    "/tiny/memory_limits_bytes/checker": "Integration proposal: 256 MiB binding-only field; no checker component is launched by external tiny generation.",
+    "/tiny/memory_limits_bytes/engine": "Integration proposal: one-GiB generator cap, using the vector report generator budget as a conservative starting bound for the three-function fixture; not measured.",
+    "/tier100/wall_seconds": "study/storage/checks/fixtures/FIXTURES.md proposes 1200 seconds; generation estimate is 2-10 minutes, not a Linux measurement.",
+    "/tier100/memory_limits_bytes/runner": "Integration proposal: 256 MiB binding-only field; no runner component is launched by external tier100 generation.",
+    "/tier100/memory_limits_bytes/checker": "Integration proposal: 256 MiB binding-only field; no checker component is launched by external tier100 generation.",
+    "/tier100/memory_limits_bytes/engine": "study/storage/checks/fixtures/FIXTURES.md proposes 10737418240 bytes; estimated RSS 3-8 GiB is uncertain and excludes possible additional cache charge.",
+    "/tier100/repos": "Approved scaling recipe in study/storage/checks/fixtures/FIXTURES.md: ten unchanged real parts followed by ninety correlated derived top-ups.",
+    "/tier100/seed": "Approved existing cmd/gen recipe in study/storage/checks/fixtures/FIXTURES.md: seed 20261022, ordered ten-source input, synthetic cross-repository links disabled.",
+    "/base/wall_seconds": "study/storage/checks/base/README.md proposed bound 10800 seconds and unmeasured 90-180-minute estimate including a possible bounded side-index branch.",
+    "/base/runs": "study/storage/checks/base/README.md specifies three fresh measured processes per scaling point.",
+    "/base/safety_timeout_seconds": "study/storage/checks/base/README.md proposed config sets the accepted runner safety timeout to 900 seconds.",
+    "/base/memory_limits_bytes/runner": "study/storage/checks/base/README.md proposed config: 536870912 bytes; estimate below 512 MiB, not a measured peak.",
+    "/base/memory_limits_bytes/checker": "study/storage/checks/base/README.md proposed config: 1073741824 bytes; estimate below one GiB, not a measured peak.",
+    "/base/memory_limits_bytes/engine": "study/storage/checks/base/README.md proposed config: 4294967296 bytes; estimated engine RSS 1-3 GiB, with charged-cache uncertainty.",
+    "/linkdelta/wall_seconds": "checks-link-delta proposal relayed by lead: 5400 seconds per unchanged tier, about 65 minutes expected, including the package-decomposition branch within the 90-minute deadline.",
+    "/linkdelta/memory_limits_bytes/runner": "checks-link-delta proposal relayed by lead: 536870912 bytes per tier.",
+    "/linkdelta/memory_limits_bytes/checker": "checks-link-delta proposal relayed by lead: 2147483648 bytes per tier.",
+    "/linkdelta/memory_limits_bytes/engine": "checks-link-delta proposal relayed by lead: 8589934592 bytes per tier. This is never substituted for the link target cap.",
+    "/linkdelta/link_memory_limit_bytes": "study/storage/checks/linkdelta/README.md and the approved check target: exactly 1610612736 bytes (1.5 GiB) for linking, independent of the engine cap.",
+    "/linkdelta/delta_sizes": "checks-link-delta proposal relayed by lead: [1,2,4,8,16,32] physical chain checkpoints over alternating edits.",
+    "/linkdelta/query_repeats": "checks-link-delta proposal relayed by lead: three measured repeats after one discarded warm-up; the warm-up is implemented by the entrypoint.",
+    "/vector/generate_wall_seconds": "Integration proposal: 600-second generation bound, separate from the report 600-second measurement bound. The report estimates 3-8 minutes for the overall vector work.",
+    "/vector/generator_memory_limits_bytes/runner": "Integration proposal: 256 MiB binding-only field; external generation launches no runner component.",
+    "/vector/generator_memory_limits_bytes/checker": "Integration proposal: 256 MiB binding-only field; external generation launches no checker component.",
+    "/vector/generator_memory_limits_bytes/engine": "study/storage/checks/vector/README.md proposes a one-GiB generator cap for the synthetic NPY/JSONL fixture.",
+    "/vector/documents": "D28 approved fixture and study/storage/checks/vector/README.md: 150000 documents.",
+    "/vector/queries": "D28 approved fixture and study/storage/checks/vector/README.md: freeze 256 held-out queries before timing.",
+    "/vector/dimensions": "D28 approved fixture and study/storage/checks/vector/README.md: 768 F32 components per vector; generator shape is fixed in source.",
+    "/vector/seed": "D28 approved recipe and study/storage/checks/vector/README.md: seed 20261102 with the pinned generator source/build.",
+    "/vector/wall_seconds": "study/storage/checks/vector/README.md proposes 600 seconds for the complete serial measurement/controller run.",
+    "/vector/memory_limits_bytes/runner": "study/storage/checks/vector/README.md proposed run flags: 268435456 bytes for the small reducer.",
+    "/vector/memory_limits_bytes/checker": "study/storage/checks/vector/README.md proposed run flags: 2147483648 bytes for each independent checker.",
+    "/vector/memory_limits_bytes/engine": "study/storage/checks/vector/README.md proposed run flags: 2147483648 bytes for each scan engine.",
+    "/vector/workers": "D28 allows at most four scan workers; study/storage/checks/vector/README.md proposed run uses four on the four-vCPU host.",
+    "/vector/k": "study/storage/checks/vector/README.md proposed run flags: top k is 10.",
+    "/vector/candidates": "study/storage/checks/vector/README.md proposed run flags: one global int8 candidate pool of 128 before original-F32 reranking.",
+    "/disk_min_free_bytes/base": "Integration proposal: 24 GiB free, rounding up 24 times the 952570424-byte unchanged pair in study/storage/checks/fixtures/fixture-pins.json. Three fresh runs and up to four layouts retain many indexes; tier100, scratch and serving amplification remain uncertain. This is an admission floor, not a peak guarantee.",
+    "/disk_min_free_bytes/linkdelta": "Integration proposal: 12 GiB free, rounding up 12 times the 952570424-byte unchanged pair in study/storage/checks/fixtures/fixture-pins.json for retained clean C bases, two delta forms/chains, validation memos and answer spools. Actual peak is unmeasured; no evidence is deleted.",
+    "/disk_min_free_bytes/vector": "Integration proposal: 2 GiB free, rounding up four times the 460800000-byte F32 matrix for reference scratch, outputs and headroom. Actual fixture files and existing caches are already charged when the floor is checked.",
+    "/software_cleanup": "Supported fixed-path cleanup, not a third-party action. The current actions/runner-images Ubuntu2404 software list confirms installed Android, .NET, Haskell and CodeQL toolsets. jlumbroso/free-disk-space README reports an older ubuntu-20.04.4 sample of 14 GiB Android and 2.7 GiB .NET reclaimed; its 31 GiB total also removes things this workflow preserves. Treat the 30 GiB planning figure as uncertain, not a current-host measurement. Sources: https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md and https://github.com/jlumbroso/free-disk-space#typical-output ."
+  }
+}
