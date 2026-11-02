@@ -42,10 +42,12 @@ def unified_root() -> Path:
         fields = location.split()
         if fields[4] == str(ROOT):
             mounts.append((fields[3], filesystem.split()[0]))
-    if mounts != [("/", "cgroup2")] or (ROOT / "memory.max").exists():
+    # The real root lacks these non-root interfaces. A namespace/delegated
+    # mount must not pass merely because its cgroup.type says "domain".
+    if (mounts != [("/", "cgroup2")]
+            or (ROOT / "memory.max").exists()
+            or (ROOT / "cgroup.type").exists()):
         raise ValueError("true cgroup v2 root mount required")
-    if (ROOT / "cgroup.type").read_text().strip() != "domain":
-        raise ValueError("unified root must be a domain cgroup")
     if "memory" not in (ROOT / "cgroup.controllers").read_text().split():
         raise ValueError("memory controller unavailable at unified root")
     return ROOT

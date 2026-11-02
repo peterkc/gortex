@@ -77,6 +77,20 @@ resource/deadline/file-limit profile and reviewed fork/input/script/config
 fingerprints before create. Require an Ubuntu 24.04
 x86-64 root image with Python 3.12 and the true writable cgroup v2 root at
 `/sys/fs/cgroup`. A delegated namespace root is not sufficient for this path.
+No existing provider/image proof of that root layout has been supplied. The
+execution JSON must bind reviewed prior evidence, or the user must explicitly
+approve the lifecycle's bounded first-in-pod-check fallback and its cost risk.
+The latter stages only the cgroup helper before bulk upload. It checks true-root
+layout/write access within the original 300-second allowance; missing/refused
+proof makes the owner request deletion. Allow up to eight minutes for first
+check, terminate and deletion observations under normal host/API operation.
+At the archived 0.264/hour rate, that window's estimate is 0.0352, not verified
+billing or a fresh quote. Hourly rounding and separate fees can make the charge
+higher; confirm that basis before approving the fallback. Success permits the
+original full run, not a new clock.
+The session's later cgroup-limit setup remains an independent exit-78 backstop.
+Preparation made no API call. This option adds no namespace-root support or
+permission bypass.
 The read-only receipt observed a 100-GB default boot disk, rendered `100+`; this
 is not approval or proof of fee inclusion. Confirm the explicit disk/image in
 the fresh receipt. Do not omit disk size and permit a CLI prompt.
@@ -157,6 +171,22 @@ derived from approved JSON durations, not hardcoded by the shell. Readiness has
 its own approved allowance (example 900 seconds) inside setup. Actual upload
 bytes, a conservative referenced link rate, margin and bootstrap reserve must
 fit the same setup window before create.
+
+Approve `expected_evidence_bytes`, `evidence_size_reference`, a measured
+`minimum_download_mbps` and `download_reference` too. A proposed 768-MiB normal
+forecast has these modeled components for both cuts: 386,105,344 bytes of body
+token JSON, 11,474,944 of query token JSON, 18,628,608 of NPY scalar payload and
+50,970,624 of Go JSON scalar allowance. Their subtotal is 467,179,520 bytes.
+The remaining approximately 322 MiB is forecast room for corpus/provenance,
+notices, headers, bindings and normal logs; those bytes have not been measured.
+The forecast is not a hard failure-output bound. Each of 16 child stages can
+leave files subject to its separate 256-MiB file cap. Source references are
+`admission.py`'s token bound, `build_accuracy_corpus.py`'s 512-token query cap,
+`accuracy_bridge.py`'s 768-dimensional vectors, and `groups.py`'s subset copies.
+At 10 Mbit/s, this forecast needs 836 seconds including margin/handshakes, so
+admission refuses a 420-second copy. At 100 Mbit/s it needs 111 seconds. The
+actual marker byte count must still fit the original remaining copy window.
+No download shortfall authorizes more paid time.
 
 An outer controller timeout uses the analysis deadline plus at most 30 seconds
 of kill grace. Small packing gets 30 seconds, full/partial packing 240, each
@@ -336,7 +366,11 @@ Its small list includes score metrics/receipts and bindings, with omissions
 explicitly recorded. It also packages retained evidence after a failure as
 `partial-evidence`; completed 2,048 work survives a later 8,192 OOM. Only both
 cuts and all six successful scores produce `full-evidence`. The atomic completion
-marker reports exit and scope after packing. The live log stays outside the
+marker reports exit, scope and actual archive bytes after packing. A normal
+exit-78 session still attempts partial packaging; only failed packaging reduces
+it to diagnostics-only or none. An earlier host root-precheck refusal has no
+study bundle and records its local exit-78 refusal instead. The live log stays
+outside the
 manifest; the bundle contains only its explicit partial 1-MiB tail. Evidence includes:
 
 - Both cuts' bridge manifests, token exports, preparation receipts and Go reports.
@@ -363,7 +397,16 @@ this runbook asks an operator to remove an unproved shared cgroup or resource.
 A lost SSH acknowledgement or probe permits short read-only reconnection, never
 a second session launch. The helper ignores host SSH config, uses explicit
 identity/known_hosts and keepalives, and never holds one connection for the
-analysis lifetime. A permanently lost channel still preserves the host cutoff.
+analysis lifetime. Read-only probes also check the session's own atomic PID;
+a dead session stops promptly, and a missing PID gets only the original
+30-second startup grace. A permanently lost channel still preserves the host
+cutoff. After a host helper failure, use the lifecycle's `--observe-only` path
+only after that helper has exited and while the original pod remains live.
+It cannot undo deletion requested by a handled helper failure or recover remote
+bytes from a deleted pod. It copies into a fresh private recovery child
+without overwriting earlier bytes, uploading, relaunching or resetting clocks.
+Diagnostic/log decoding failures do not prevent a valid bulk copy attempt;
+log-tail fallback preserves raw bytes, and failed attempts retain separate errors.
 
 Stop on any shape mismatch, stale/over-ceiling quote, wrong pin, unconfirmed
 8,192 support, OOM, deadline, file/disk limit, child/cleanup failure, partial cut,
@@ -390,7 +433,13 @@ all documents and exact original query indices/bytes, including interleaved
 languages; a missing language or wrong denominator refuses. Repeated output
 paths must refuse rather than overwrite. A source update requires a new reviewed
 fingerprint; deleting/re-adding the same frozen input does not change its bytes.
-No removed tests or changed shared callers belong to this new-file-only change.
+The impossible same-short-ID collision fixture was removed because the CLI
+already discards those rows; exact matching and distinct-ID ambiguity tests
+remain. Do not claim a hidden spot/price-twin guard. C2 fixtures also cover
+unknown-identity polling without FIFO events, all four terminal signals,
+transient deletion-read errors without effect replay, the first-root deadline,
+copy-only recovery, PID startup/death, byte tails and download-window refusal.
+All new unittest modules must run in fresh CI; they have not run locally.
 
 Only static/syntax inspection is allowed during preparation. It cannot prove
 8,192 fit, throughput, cloud deletion or final cost. Exact offer pins, final

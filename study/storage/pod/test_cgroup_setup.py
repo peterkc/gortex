@@ -33,6 +33,43 @@ class ArgumentTests(unittest.TestCase):
                     cgroup_setup.positive(value)
         self.assertEqual(cgroup_setup.positive("64"), 64)
 
+    def test_true_root_without_type_is_accepted(self):
+        self.root_layout_case("true-root")
+
+    def test_nonroot_interfaces_or_delegated_mount_are_rejected(self):
+        for layout in ("domain-type", "memory-limit", "delegated-mount"):
+            with self.subTest(layout=layout):
+                self.root_layout_case(layout)
+
+    def root_layout_case(self, layout):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary).resolve()
+            root = directory / "cgroup"
+            root.mkdir()
+            (root / "cgroup.controllers").write_text("cpu memory\n")
+            if layout == "domain-type":
+                (root / "cgroup.type").write_text("domain\n")
+            if layout == "memory-limit":
+                (root / "memory.max").write_text("max\n")
+            mount_root = "/delegated" if layout == "delegated-mount" else "/"
+            mountinfo = directory / "mountinfo"
+            mountinfo.write_text(
+                f"1 0 0:1 {mount_root} {root} rw - cgroup2 cgroup rw\n")
+
+            def mapped_path(value):
+                return (mountinfo if value == "/proc/self/mountinfo"
+                        else Path(value))
+
+            with patch.object(cgroup_setup, "ROOT", root), \
+                    patch.object(cgroup_setup, "Path",
+                                 side_effect=mapped_path):
+                if layout == "true-root":
+                    self.assertFalse((root / "cgroup.type").exists())
+                    self.assertEqual(cgroup_setup.unified_root(), root)
+                else:
+                    with self.assertRaisesRegex(ValueError, "true cgroup"):
+                        cgroup_setup.unified_root()
+
     def test_symlinked_root_is_rejected_before_controller_access(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary).resolve()

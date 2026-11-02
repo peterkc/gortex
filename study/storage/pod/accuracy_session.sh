@@ -2,6 +2,8 @@
 # D14 only. Exact offer, profile and files require lead/user approval first.
 set -euo pipefail
 cd /srv/storage-pod
+printf '%s\n' "$$" > session.pid.tmp
+mv session.pid.tmp session.pid
 . ./env.sh
 mkdir evidence
 CGROOT=
@@ -104,7 +106,11 @@ import json
 import sys
 from pathlib import Path
 marker = Path("complete.json.tmp")
-marker.write_text(json.dumps({"exit": int(sys.argv[1]), "scope": sys.argv[2]}))
+bundle = Path("evidence.tar")
+size = bundle.stat().st_size if sys.argv[2] in (
+    "full-evidence", "partial-evidence") else None
+marker.write_text(json.dumps({"exit": int(sys.argv[1]), "scope": sys.argv[2],
+                              "bundle_bytes": size}))
 marker.replace("complete.json")
 PY
   # The bounded controller exits normally. Its private empty directories live

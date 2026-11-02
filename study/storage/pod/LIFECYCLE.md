@@ -9,7 +9,8 @@ or caller-map tooling.
 ```text
 Approve exact inputs -> local validation -> one fresh availability read
   -> arm owner -> create once -> validate request/status -> publish RENTED
-  -> short detached launch -> read-only completion probes -> verified copy
+  -> bounded root precheck -> short detached launch -> read-only probes
+  -> verified copy
   -> terminate once -> bounded active/history proof -> lead acceptance
        ^ timer, signals and manual stop share the same locked owner
 ```
@@ -76,7 +77,21 @@ proposal, not permission to execute it.
   "analysis_seconds": 9600,
   "copy_seconds": 420,
   "minimum_upload_mbps": 100,
-  "upload_reference": "REQUIRED_RECENT_CONSERVATIVE_LINK_MEASUREMENT",
+  "upload_reference": "REQUIRED_RECENT_CONSERVATIVE_UPLINK_MEASUREMENT",
+  "minimum_download_mbps": 100,
+  "download_reference": "REQUIRED_RECENT_CONSERVATIVE_DOWNLINK_MEASUREMENT",
+  "expected_evidence_bytes": 805306368,
+  "evidence_size_reference": "REQUIRED_REVIEWED_NORMAL_OUTPUT_FORECAST",
+  "cgroup_root": {
+    "mode": "prior-evidence",
+    "provider": "nebius",
+    "cloud_id": "REQUIRED_FRESH_CLOUD_ID",
+    "location": "REQUIRED_APPROVED_LOCATION",
+    "image": "REQUIRED_APPROVED_IMAGE",
+    "source_reference": "REQUIRED_REVIEWED_PROVIDER_OR_PRIOR_ROOT_PROOF",
+    "evidence_path": "REQUIRED_CANONICAL_PRIVATE_EVIDENCE_FILE",
+    "evidence_sha256": "REQUIRED_64_HEX"
+  },
   "token_json_max_bytes": 193052672,
   "token_size_reference": "REQUIRED_REVIEWED_FROZEN_QUOTA_EXPORT_BOUND",
   "budget": "2.00",
@@ -100,6 +115,43 @@ D14 bounds reject before create. Three hours at 0.50/hour is 1.50. One further
 billing-hour contingency makes 2; it grants no runtime extension. Even a short
 run refuses a quote above 0.50/hour. Deletion has at least a two-minute reserve.
 Shorter approved times must also reserve controller cleanup, packing and copy.
+
+### Cgroup venue evidence before approval
+
+Availability and price receipts do not prove that a CPU pod is a VM or exposes
+its true writable cgroup root. No such provider/image proof has been supplied.
+For `prior-evidence`, the lead inspects the referenced provider document or
+prior root observation. It must establish the exact provider, cloud, location
+and image tuple. Admission binds those fields and the canonical evidence file's
+SHA-256; it cannot judge whether its prose supports the claim.
+
+If that proof is unavailable, the user can explicitly approve this replacement
+`cgroup_root` object as part of the final run approval:
+
+```json
+{
+  "mode": "first-in-pod-check",
+  "probe_seconds": 300,
+  "approval_reference": "REQUIRED_USER_APPROVAL_OF_UNKNOWN_ROOT_AND_CHECK_COST"
+}
+```
+
+This is not existing venue evidence or permission to rent now. The first
+in-pod check becomes the layout/access evidence. Before bulk input upload, the
+host stages only the reviewed cgroup helper and checks the true root and write
+access without changing cgroups. The original 300-second allowance includes
+create, readiness and this check. Without its exact success receipt, the owner
+requests deletion at that deadline, even if the host helper never starts.
+Allow up to eight minutes for this check, the terminate call and deletion
+observations under normal host/API operation. At the archived 0.264/hour rate,
+that window has a 0.0352 rate/time estimate; it is not a fresh quote or invoice.
+Hourly rounding or separate fees can make the charge higher. Confirm that billing
+basis before approving the fallback; do not use 0.0352 as a charge cap.
+API/host failure can defeat that window; the original hard cutoff and escalation
+rules remain. If the check passes, the full run continues within its original
+three-hour/$2 limits. The later session still applies and verifies its cgroup
+limits; failure there remains exit 78, followed by deletion. No namespace-root
+support or permission bypass is added.
 
 ## 2. Validate public inputs before rental
 
@@ -132,8 +184,19 @@ payload takes 560 seconds at 10 Mbit/s even before margin, so that link can be
 refused. Do not replace this calculation with a larger arbitrary timeout or
 invent a public URL for local ONNX exports.
 
-The output directory is reserved before create and must remain empty until
-copy. The lead chooses an approved local-only directory in the existing Prime
+Download admission uses the approved normal-output byte forecast and a separately
+referenced minimum downlink, with the same 25% margin and 30-second allowance.
+The proposed 768-MiB forecast needs 836 seconds at 10 Mbit/s, so it refuses a
+420-second copy window before create. At 100 Mbit/s it needs 111 seconds.
+The forecast is not a guarantee for failure logs or a hard archive maximum.
+The published marker also carries actual archive bytes. Before bulk copy, the
+host checks those bytes against the original remaining copy window and the
+absolute archive bound; it never extends rental to salvage an oversized result.
+
+The output directory is reserved before create, with its device/inode recorded,
+and must remain empty until the first copy. Recovery uses a fresh private child
+under that same approved directory and preserves earlier files. The lead chooses
+an approved local-only directory in the existing Prime
 Gortex research hub, for example
 `research/gortex/storage-architecture/artifacts/accuracy/<execution-id>/`.
 Check ownership, ignore rules, privacy and free disk before selecting its exact
@@ -166,12 +229,15 @@ exactly one owned nonce name. Request-summary quantity/provider/team/shape pins
 and status fields are checked before publishing validation. Echoed request
 fields are not observed allocation. Missing live fields remain listed.
 
-Signals, manual stop and timer use the same locked owner. CLI subprocesses have
+SIGINT, SIGTERM, SIGHUP, SIGQUIT, manual stop and timer use the same locked owner.
+CLI subprocesses have
 separate sessions so terminal Ctrl-C goes through that owner. After uncertain
 create or early reconciliation failure, the process keeps its handlers and FIFO
 service until the lease is resolved or its one terminate attempt is issued.
-It does not return with only an unprotected timer. An unresolved identity is an
-immediate resource-owner escalation; do not kill a guess or abandon that owner.
+It leaves at most 15 seconds idle between unknown-identity reconciliation
+attempts, even without a FIFO signal; it does not wait until the hard cutoff. It does not return with only an
+unprotected timer. An unresolved identity is an immediate resource-owner
+escalation; do not kill a guess or abandon that owner.
 
 ## 4. Launch once, observe and copy
 
@@ -180,7 +246,9 @@ python3.12 -B study/storage/pod/host_run.py   --state "$PRIVATE/lease" --destina
 ```
 
 Arguments must match the approved JSON. ACTIVE readiness and first SSH contact
-share the approved readiness allowance. SSH/SCP ignore user configuration with
+share the approved readiness allowance, shortened by the first-root-check
+allowance when that fallback was explicitly approved. SSH/SCP ignore user
+configuration with
 `-F /dev/null`, use BatchMode/IdentitiesOnly, a private known_hosts file and
 keepalives every 30 seconds (six missed replies). First-use host-key trust is
 explicit; if unacceptable, obtain a separately reviewed host-key path first.
@@ -188,21 +256,47 @@ explicit; if unacceptable, obtain a separately reviewed host-key path first.
 Initial `mkdir -p` observations and pinned staging uploads are idempotent and
 bounded by the original setup/upload clock. A failed upload has at most one
 same-byte re-transfer before any launch. It cannot refresh the allowance.
+Each failed upload/probe keeps a separate error receipt; later attempts do not
+overwrite earlier errors.
 The helper writes an exclusive local launch receipt, then sends one short
 `nohup setsid` start command. It does not wait on that SSH channel. A lost or
 uncertain acknowledgement permits only observation, never another launch.
 
 The session writes an atomic `complete.json` after cleanup/packing, with exit
-status and `full-evidence`, `partial-evidence`, `diagnostics-only` or `none` scope.
-Short read-only probes can reconnect until the copy reserve. Permanently lost
+status, actual bulk archive size, and `full-evidence`, `partial-evidence`,
+`diagnostics-only` or `none` scope. The session records its own PID atomically
+before setup. Read-only probes check completion first, then launch/PID liveness.
+A dead session stops immediately. A missing PID gets only the original 30-second
+startup grace; it cannot idle until the analysis cutoff. A completed marker wins
+over an already-exited PID. Short probes can reconnect until the copy reserve.
+Permanently lost
 transport still leaves the independent cutoff armed and requests stop when the
 host helper exits. Do not restart a half pair or rerun host launch on that state.
+
+If the original helper has failed and exited while the pod is still live, run
+exactly one replacement helper
+with the same arguments plus `--observe-only`. Keep the original deletion owner
+running. This mode requires the existing validated launch/connection receipts
+and unchanged approved output directory identity. It makes no connect/account
+call, upload or launch. It probes and copies into a fresh `recovery-<id>/` child;
+the matching state receipt names that directory. All clocks remain the original
+ones. Even after the normal observation reserve expires, it can read one existing
+completion marker before cutoff, but actual copy must still fit the remaining
+window. Missing launch proof or a replaced output directory refuses. Do not run
+two helpers concurrently or change source/input pins during recovery. Handled
+helper failures still request deletion; recovery cannot undo that request or
+retrieve remote bytes after deletion. It is useful after abrupt helper death
+only while the original resource and owner remain available.
 
 Copy diagnostics first, including exit 78. Small bundles list explicit paths,
 omissions and JSON metrics/bindings; each file is at most 1 MiB and the bundle
 32 MiB. Full or partial evidence gets the approved copy window (at most 420
 seconds), diagnostics 60 and log-tail fallback 15. All shorten at the cutoff.
-Timed-out transport groups are killed and reaped. An intact first cut survives
+Timed-out transport groups are killed and reaped. Log tails remain raw bytes,
+including invalid UTF-8. A diagnostic or diagnostic-journal failure does not
+veto an independent full/partial copy attempt. Normal verification still applies. An early root
+precheck refusal has only its local exit-78 receipt, not fabricated study output.
+An intact first cut survives
 second-cut OOM in partial evidence; it cannot become an accepted comparison.
 
 Copy verification checks the reviewed checkout again, external tar hash, fresh
@@ -222,6 +316,9 @@ executes it before journal writes. It never replays an uncertain effect. Then
 it reads complete active/history sets within the remaining deletion reserve.
 Prove the ID absent from active and present once with `terminated_at`. A delayed
 history entry permits more read-only observations, not another terminate.
+Transient CLI, JSON or read-timeout failures retain unique error receipts and
+retry only these observations within the same deadline. A final rate/time proof
+failure is not retried or converted into success.
 
 A later read-only reconciliation is available:
 

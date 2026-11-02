@@ -22,6 +22,7 @@ from typing import assert_never
 
 
 VERSION = "0.17.0"
+OWNER_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
 
 
 def save(path: Path, value: object) -> None:
@@ -86,14 +87,17 @@ def execution_pins(value: Mapping, now: float) -> Mapping | Invalid:
                 "approval_reference",
                 "token_json_max_bytes", "token_size_reference",
                 "payload_path", "session_path", "environment_path",
-                "ssh_key_path", "destination")
+                "ssh_key_path", "destination", "minimum_download_mbps",
+                "download_reference", "expected_evidence_bytes",
+                "evidence_size_reference", "cgroup_root")
     if any(key not in value or value[key] in (None, "") for key in required):
         return Invalid("every execution pin is mandatory; no defaults")
     texts = ("cli_context", "offer_id", "cloud_id", "image",
              "harness_commit", "quote_reference", "gpu_label", "provider",
              "location", "upload_reference", "approval_reference",
              "token_size_reference", "payload_path", "session_path",
-             "environment_path", "ssh_key_path", "destination")
+             "environment_path", "ssh_key_path", "destination",
+             "download_reference", "evidence_size_reference")
     if any(not isinstance(value[key], str) or not value[key].strip()
            for key in texts):
         return Invalid("text execution pins must be nonempty strings")
@@ -112,13 +116,22 @@ def execution_pins(value: Mapping, now: float) -> Mapping | Invalid:
                 "cutoff_seconds", "contingency_seconds", "setup_seconds",
                 "minimum_free_bytes", "minimum_memory_bytes", "gpu_count",
                 "ready_seconds", "analysis_seconds", "copy_seconds",
-                "bootstrap_seconds", "token_json_max_bytes")
+                "bootstrap_seconds", "token_json_max_bytes",
+                "expected_evidence_bytes")
     if any(type(value[k]) is not int or value[k] < 1 for k in integers):
         return Invalid("resource and time pins must be positive integers")
     uplink = value["minimum_upload_mbps"]
     if (type(uplink) not in (int, float) or not math.isfinite(uplink)
             or uplink <= 0):
         return Invalid("minimum upload rate must be finite and positive")
+    downlink = value["minimum_download_mbps"]
+    if (type(downlink) not in (int, float) or not math.isfinite(downlink)
+            or downlink <= 0):
+        return Invalid("minimum download rate must be finite and positive")
+    if value["expected_evidence_bytes"] > 8 * 1024 ** 3 + 16 * 1024 ** 2:
+        return Invalid("expected evidence exceeds the archive byte bound")
+    if not isinstance(value["cgroup_root"], dict):
+        return Invalid("cgroup root evidence must be a JSON object")
     if (value["provider"] != "nebius" or value["vcpus"] != 8
             or value["memory_gb"] != 32 or value["gpu_count"] != 1
             or value["max_seconds"] > 10800 or value["cutoff_seconds"] > 10680
@@ -328,8 +341,7 @@ def select_offer(document: Mapping, config: Mapping) -> dict:
                 and Decimal(str(row["price_value"]))
                 == Decimal(str(config["quoted_total_hourly"]))):
             matches.append(row)
-    if (len(matches) != 1 or matches[0]["id"] != config["offer_id"]
-            or sum(row["id"] == matches[0]["id"] for row in rows) != 1):
+    if len(matches) != 1 or matches[0]["id"] != config["offer_id"]:
         raise ValueError(
             "approved availability row is absent/ambiguous/changed")
     return matches[0]
@@ -337,12 +349,24 @@ def select_offer(document: Mapping, config: Mapping) -> dict:
 
 def verify_deletion(config: Mapping, state: Path, pod_id: str,
                     started: float, deadline: float) -> None:
+    attempt = 0
     while True:
         if time.monotonic() >= deadline:
             raise TimeoutError(
                 "deletion unproved; use read-only verify and escalate")
-        active = pages(config, state, "list", "post-terminate", deadline)
-        history = pages(config, state, "history", "history", deadline)
+        attempt += 1
+        try:
+            active = pages(config, state, "list", "post-terminate", deadline)
+            history = pages(config, state, "history", "history", deadline)
+        except (subprocess.CalledProcessError, ValueError, TimeoutError,
+                subprocess.TimeoutExpired) as error:
+            save(state / ("deletion-read-error-" + uuid.uuid4().hex + ".json"),
+                 {"attempt": attempt, "observed_epoch": time.time(),
+                  "monotonic": time.monotonic(), "error": repr(error)})
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                threading.Event().wait(min(5, remaining))
+            continue
         if time.monotonic() >= deadline:
             raise TimeoutError("deletion observation exceeded reserve")
         entry = [row for row in history if row["id"] == pod_id]
@@ -377,7 +401,21 @@ def verify_deletion(config: Mapping, state: Path, pod_id: str,
         threading.Event().wait(min(5, remaining))
 
 
+def root_capability_confirmed(state: Path) -> bool:
+    try:
+        with (state / "root-capability.json").open("rb") as receipt:
+            raw = receipt.read(1025)
+        value = json.loads(raw) if len(raw) <= 1024 else None
+    except (OSError, ValueError):
+        return False
+    return (isinstance(value, dict) and set(value) == {"root", "writable"}
+            and value["root"] == "/sys/fs/cgroup"
+            and value["writable"] is True)
+
+
 def connect(state: Path) -> None:
+    from admission import root_probe_seconds
+
     config = json.loads((state / "config.json").read_text())
     session = json.loads((state / "session.json").read_text())
     try:
@@ -387,7 +425,8 @@ def connect(state: Path) -> None:
             raise ValueError("rental refused or already deleted")
         if time.time() - session["started_epoch"] >= config["setup_seconds"]:
             raise ValueError("paid setup allowance has expired")
-        ready_deadline = session["started_epoch"] + config["ready_seconds"]
+        ready_deadline = session["started_epoch"] + min(
+            config["ready_seconds"], root_probe_seconds(config))
         attempt = 0
         while True:
             if time.time() >= ready_deadline:
@@ -445,11 +484,14 @@ def connect(state: Path) -> None:
 
 
 def rent(config_path: Path, state: Path) -> None:
-    from admission import validate
+    from admission import root_probe_seconds, validate
 
     approved = configuration(config_path)
     # No account operation precedes local refusals.
     upload = validate(approved)
+    probe_seconds = (root_probe_seconds(approved)
+                     if approved["cgroup_root"].get("mode")
+                     == "first-in-pod-check" else None)
     executable = shutil.which("prime")
     if executable is None:
         raise FileNotFoundError("pinned Prime CLI is not installed")
@@ -472,7 +514,12 @@ def rent(config_path: Path, state: Path) -> None:
     checked = execution_pins(config, time.time())
     if isinstance(checked, Invalid):
         raise ValueError(checked.reason)
-    Path(config["destination"]).mkdir(mode=0o700)
+    destination = Path(config["destination"])
+    destination.mkdir(mode=0o700)
+    identity = destination.stat()
+    save(state / "destination-identity.json", {
+        "path": str(destination), "device": identity.st_dev,
+        "inode": identity.st_ino})
     name = "storage-" + uuid.uuid4().hex
     os.mkfifo(state / "stop.fifo", 0o600)
     descriptor = os.open(state / "stop.fifo", os.O_RDWR | os.O_NONBLOCK)
@@ -534,7 +581,7 @@ def rent(config_path: Path, state: Path) -> None:
     timer.daemon = False
     handlers = {number: signal.signal(
         number, lambda *_: os.write(descriptor, b"host-signal\n"))
-        for number in (signal.SIGINT, signal.SIGTERM)}
+        for number in OWNER_SIGNALS}
     primary: BaseException | None = None
     timer.start()
     try:
@@ -601,11 +648,27 @@ def rent(config_path: Path, state: Path) -> None:
         # create or failed early reconciliation (C-CUB-2).
         urgent = primary is not None
         while needs_owner(lease):
-            ready = select.select([descriptor], [], [], 0 if urgent else 15)[0]
-            expired = (time.time() >= started + config["cutoff_seconds"]
+            cutoff_seconds = config["cutoff_seconds"]
+            if probe_seconds is not None and not root_capability_confirmed(
+                    state):
+                cutoff_seconds = min(cutoff_seconds, probe_seconds)
+            remaining = min(started + cutoff_seconds - time.time(),
+                            monotonic_start + cutoff_seconds
+                            - time.monotonic())
+            timeout = 0 if urgent else 15
+            if remaining > 0:
+                timeout = min(timeout, remaining)
+            elif isinstance(lease, Identified):
+                timeout = 0
+            ready = select.select([descriptor], [], [], timeout)[0]
+            if (cutoff_seconds != config["cutoff_seconds"]
+                    and root_capability_confirmed(state)):
+                cutoff_seconds = config["cutoff_seconds"]
+            expired = (time.time() >= started + cutoff_seconds
                        or time.monotonic()
-                       >= monotonic_start + config["cutoff_seconds"])
-            if not ready and not expired and not urgent:
+                       >= monotonic_start + cutoff_seconds)
+            if (not ready and not expired and not urgent
+                    and not isinstance(lease, Unidentified)):
                 continue
             reason = (os.read(descriptor, 4096).decode() if ready
                       else "owner-refusal-or-cutoff")
@@ -617,10 +680,6 @@ def rent(config_path: Path, state: Path) -> None:
                 print("DELETION UNPROVED; owner retained if lease live: "
                       + repr(error),
                       file=sys.stderr, flush=True)
-                # Avoid a busy loop after an unresolved cutoff.
-                # Signals/FIFO stay live during read-only reconciliation.
-                if needs_owner(lease):
-                    select.select([descriptor], [], [], 15)
         timer.cancel()
         timer.join()
         os.close(descriptor)

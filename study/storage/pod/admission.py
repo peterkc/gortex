@@ -31,9 +31,75 @@ PATHS = {"payload_path": "payload_sha256", "session_path": "session_sha256",
 
 
 def upload_seconds(size: int, mbps: float) -> int:
-    if size < 0 or not math.isfinite(mbps) or mbps <= 0:
+    if (type(size) is not int or size < 0
+            or type(mbps) not in (int, float)
+            or not math.isfinite(mbps) or mbps <= 0):
         raise ValueError("invalid upload size/rate")
     return math.ceil(size * 8 / (mbps * 1_000_000) * 1.25) + 30
+
+
+def root_probe_seconds(config: Mapping) -> int:
+    """Bind reviewed evidence, or bound an explicitly approved root check."""
+    root = config.get("cgroup_root")
+    if not isinstance(root, dict):
+        raise ValueError("cgroup_root must be an explicit evidence/check mode")
+    mode = root.get("mode")
+    if mode == "first-in-pod-check":
+        reference = root.get("approval_reference")
+        seconds = root.get("probe_seconds")
+        if (not isinstance(reference, str) or not reference.strip()
+                or type(seconds) is not int or not 1 <= seconds <= 300):
+            raise ValueError("root check needs approval and 1..300 seconds")
+        return seconds
+    if mode != "prior-evidence":
+        raise ValueError("unknown cgroup_root mode")
+    for name in ("provider", "cloud_id", "location", "image"):
+        expected = config.get(name)
+        if (not isinstance(expected, str) or not expected.strip()
+                or root.get(name) != expected):
+            raise ValueError("cgroup root evidence identity differs from pins")
+    reference = root.get("source_reference")
+    if not isinstance(reference, str) or not reference.strip():
+        raise ValueError("cgroup root evidence needs a source reference")
+    name, pin = root.get("evidence_path"), root.get("evidence_sha256")
+    if (not isinstance(name, str) or not name
+            or not isinstance(pin, str) or len(pin) != 64
+            or any(c not in "0123456789abcdef" for c in pin)):
+        raise ValueError("cgroup root evidence needs a path and SHA-256 pin")
+    path = Path(name)
+    try:
+        if (str(path) != name or not path.is_absolute()
+                or path.resolve() != path or not path.is_file()):
+            raise ValueError("cgroup root evidence must be canonical/regular")
+        if digest(path) != pin:
+            raise ValueError("cgroup root evidence hash differs from approval")
+    except (OSError, RuntimeError) as error:
+        raise ValueError("cannot read cgroup root evidence") from error
+    seconds = config.get("ready_seconds")
+    if type(seconds) is not int or seconds < 1:
+        raise ValueError("ready_seconds must be a positive integer")
+    return seconds
+
+
+def check_download(config: Mapping, size: int, seconds: int) -> int:
+    """Check an expected or actual byte count against its copy window."""
+    expected = config.get("expected_evidence_bytes")
+    if (type(expected) is not int
+            or not 1 <= expected <= MAX_PAYLOAD + TAR_OVERHEAD):
+        raise ValueError("invalid approved normal evidence byte envelope")
+    for name in ("download_reference", "evidence_size_reference"):
+        reference = config.get(name)
+        if not isinstance(reference, str) or not reference.strip():
+            raise ValueError("download needs nonempty rate/size references")
+    if (type(size) is not int
+            or not 1 <= size <= MAX_PAYLOAD + TAR_OVERHEAD
+            or type(seconds) is not int or seconds < 1):
+        raise ValueError("download bytes/window must be positive integers "
+                         "within the archive bound")
+    required = upload_seconds(size, config.get("minimum_download_mbps"))
+    if required > seconds:
+        raise ValueError("download does not fit approved copy window")
+    return required
 
 
 def payload_check(bundle: Path,
@@ -105,6 +171,9 @@ def payload_check(bundle: Path,
 
 
 def validate(config: Mapping, *, destination_ready: bool = False) -> int:
+    root_probe_seconds(config)
+    check_download(config, config.get("expected_evidence_bytes"),
+                   config.get("copy_seconds"))
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=HERE,
                                    text=True).strip()
     dirty = subprocess.check_output(
