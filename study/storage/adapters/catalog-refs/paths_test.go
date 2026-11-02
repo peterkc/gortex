@@ -106,10 +106,10 @@ func TestRefsPublicationPaths(t *testing.T) {
 	}
 	results["linked_set_two_repositories"] = map[string]any{"publish_ns": commitNS, "catalog_bytes_before": beforeBytes, "catalog_bytes_after": afterBytes, "set_directories_created": 1}
 	results["limit"] = "One tiny-fixture observation per path, not a performance benchmark or stable latency estimate. Includes prepare-log fsync and commit directory fsync, excludes segment verification."
-	if err = os.MkdirAll("verification", 0755); err != nil {
+	if err = os.MkdirAll(filepath.Join(dir, "verification"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err = dataset.WriteJSON("verification/refs-path-observations.json", results); err != nil {
+	if err = dataset.WriteJSON(filepath.Join(dir, "verification", "refs-path-observations.json"), results); err != nil {
 		t.Fatal(err)
 	}
 }

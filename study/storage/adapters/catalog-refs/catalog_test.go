@@ -85,6 +85,10 @@ func TestSnapshotAndSetRejection(t *testing.T) {
 // This tiny package fixture runs the actual harness's six-window readers and
 // default 12 checkpoint + 12 external SIGKILL trials. It is not corpus tier1.
 func TestHarnessFixtureProtocol(t *testing.T) {
+	root := os.Getenv("GXSTUDY_TEST_CGROUP_ROOT")
+	if root == "" {
+		t.Fatal("GXSTUDY_TEST_CGROUP_ROOT is required for the bounded catalog fixture")
+	}
 	ctx := context.Background()
 	dir := t.TempDir()
 	data := filepath.Join(dir, "fixture")
@@ -111,18 +115,49 @@ func TestHarnessFixtureProtocol(t *testing.T) {
 	if err := dataset.TierManifest(data, []string{d.Repo}, dataset.Manifest{Version: dataset.GeneratorVersion}); err != nil {
 		t.Fatal(err)
 	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	harnessHash, err := dataset.Hash(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataHash, err := dataset.Hash(filepath.Join(data, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipeHash, err := dataset.Hash(filepath.Join(data, "queries.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := os.Hostname()
+	if err != nil {
+		t.Fatal(err)
+	}
 	oldArgs := os.Args
 	defer func() { os.Args = oldArgs }()
 	out := filepath.Join(dir, "out")
-	os.Args = []string{candidate, "-data", data, "-out", out, "-runs", "1", "-warmup=false", "-crash-trials", "12"}
-	err := runner.RunCLI(backend{}, factory)
+	bindingPath := filepath.Join(dir, "binding.json")
+	os.Args = []string{candidate, "-data", data, "-out", out, "-runs", "1", "-warmup=false", "-crash-trials", "12",
+		"-binding", bindingPath, "-cgroup-root", root}
+	binding := runner.RunBinding{
+		SourceRevision: strings.Repeat("a", 40), HarnessSHA256: harnessHash,
+		DataSHA256: dataHash, RecipeSHA256: recipeHash, Host: host,
+		Command: os.Args[1:],
+		Limits:  runner.MemoryLimits{Runner: 256 << 20, Checker: 256 << 20, Engine: 256 << 20},
+	}
+	if err = dataset.WriteJSON(bindingPath, binding); err != nil {
+		t.Fatal(err)
+	}
+	err = runner.RunCLI(backend{}, factory)
 	resultPath := filepath.Join(out, candidate+"-fixture-01.json")
 	resultData, readErr := os.ReadFile(resultPath)
 	if readErr == nil {
-		if e := os.MkdirAll("verification", 0755); e != nil {
+		if e := os.MkdirAll(filepath.Join(dir, "verification"), 0755); e != nil {
 			t.Fatal(e)
 		}
-		if e := os.WriteFile("verification/fixture-result.json", resultData, 0600); e != nil {
+		if e := os.WriteFile(filepath.Join(dir, "verification", "fixture-result.json"), resultData, 0600); e != nil {
 			t.Fatal(e)
 		}
 	}

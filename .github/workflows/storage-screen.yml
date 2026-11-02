@@ -89,13 +89,28 @@ jobs:
           set -euo pipefail
           go build -p=1 -o "$RUNNER_TEMP/storage/bin/oracle" ./cmd/oracle
           go build -p=1 -o "$RUNNER_TEMP/storage/bin/gen" ./cmd/gen
-      - name: Check and build the catalog dispatch precedent
-        working-directory: study/storage/adapters/catalog-refs
+      - name: Catalog callers and dispatch precedent inside the delegated tree
         shell: bash
         run: |
           set -euo pipefail
-          go test -p=1 ./...
-          go build -p=1 -o "$RUNNER_TEMP/storage/bin/catalog-refs" .
+          test "$(id -u)" -ne 0
+          printf '%s\n' "$$" \
+            | sudo tee "$GXSTUDY_TEST_CGROUP_ROOT/test-driver/cgroup.procs" > /dev/null
+          expected="${GXSTUDY_TEST_CGROUP_ROOT#/sys/fs/cgroup}/test-driver"
+          grep -Fx "0::$expected" "/proc/$$/cgroup" \
+            | tee -a "$RUNNER_TEMP/storage/ci-cgroup.txt"
+          go -C study/storage/adapters/catalog-refs test -p=1 -v ./... 2>&1 \
+            | tee "$RUNNER_TEMP/storage/ci-catalog-refs.txt"
+          go -C study/storage/adapters/catalog-bbolt test -p=1 -v ./... 2>&1 \
+            | tee "$RUNNER_TEMP/storage/ci-catalog-bbolt.txt"
+          go -C study/storage/adapters/catalog-manifest test -p=1 -v ./... 2>&1 \
+            | tee "$RUNNER_TEMP/storage/ci-catalog-manifest.txt"
+          go -C study/storage/adapters/catalog-pebble test -p=1 -v ./... 2>&1 \
+            | tee "$RUNNER_TEMP/storage/ci-catalog-pebble.txt"
+          go -C study/storage/adapters/catalog-sqlite test -p=1 -v ./... 2>&1 \
+            | tee "$RUNNER_TEMP/storage/ci-catalog-sqlite.txt"
+          go -C study/storage/adapters/catalog-refs build -p=1 \
+            -o "$RUNNER_TEMP/storage/bin/catalog-refs" .
       - name: Streaming adapter callers on tiny native fixtures
         shell: bash
         run: |
@@ -322,11 +337,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          echo "Tracked source/configuration changes:"
+          git diff --name-status -- study/storage .github/workflows/storage-screen.yml \
+            | tee "$RUNNER_TEMP/storage/ci-protected-diff.txt"
+          echo "Untracked paths under study/storage:"
+          git ls-files --others --exclude-standard -- study/storage \
+            | tee "$RUNNER_TEMP/storage/ci-untracked.txt"
+          echo "Ignored paths under study/storage:"
+          git ls-files --others --ignored --exclude-standard -- study/storage \
+            | tee "$RUNNER_TEMP/storage/ci-ignored.txt"
           sha256sum --check "$RUNNER_TEMP/storage/ci-protected-before.txt" \
             > "$RUNNER_TEMP/storage/ci-protected-after.txt"
           git diff --exit-code -- study/storage .github/workflows/storage-screen.yml
-          test -z "$(git ls-files --others --exclude-standard study/storage)"
-          test -z "$(git ls-files --others --ignored --exclude-standard study/storage)"
+          test ! -s "$RUNNER_TEMP/storage/ci-untracked.txt"
+          test ! -s "$RUNNER_TEMP/storage/ci-ignored.txt"
       - name: Release only this job's delegated cgroup parent
         if: always()
         shell: bash
