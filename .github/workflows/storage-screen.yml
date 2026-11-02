@@ -89,6 +89,7 @@ jobs:
           set -euo pipefail
           go build -p=1 -o "$RUNNER_TEMP/storage/bin/oracle" ./cmd/oracle
           go build -p=1 -o "$RUNNER_TEMP/storage/bin/gen" ./cmd/gen
+          go build -trimpath -p=1 -o "$RUNNER_TEMP/storage/bin/limited-command" ./cmd/limited-command
       - name: Catalog callers and dispatch precedent inside the delegated tree
         shell: bash
         run: |
@@ -241,6 +242,116 @@ jobs:
           "$uv" run --frozen --project study/storage/pod-cost python -m unittest discover \
             -s study/storage/onnx -p test_accuracy_bridge.py -v 2>&1 \
             | tee "$RUNNER_TEMP/storage/ci-bridge.txt"
+      - name: Corpus extractor and builder fixtures without model inference
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          OPENBLAS_NUM_THREADS: "2"
+          OMP_NUM_THREADS: "2"
+          MKL_NUM_THREADS: "2"
+          UV_PYTHON: python3.12
+          UV_PYTHON_DOWNLOADS: never
+          UV_CACHE_DIR: ${{ runner.temp }}/storage/uv-cache
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/storage/bridge-env
+        run: |
+          set -euo pipefail
+          extractor=study/storage/onnx/corpus_extract
+          test -z "$(gofmt -l "$extractor")"
+          go -C "$extractor" test -p=1 -v ./... 2>&1 \
+            | tee "$RUNNER_TEMP/storage/ci-corpus-extractor.txt"
+          go -C "$extractor" vet -p=1 ./...
+          go -C "$extractor" build -trimpath -p=1 -o "$RUNNER_TEMP/storage/bin/corpus-extract" .
+          export GXSTUDY_CORPUS_EXTRACTOR="$RUNNER_TEMP/storage/bin/corpus-extract"
+          uv="$RUNNER_TEMP/storage/evaluator-tools/uv-x86_64-unknown-linux-gnu/uv"
+          "$uv" run --frozen --project study/storage/pod-cost python -m unittest discover \
+            -s study/storage/onnx -p test_build_accuracy_corpus.py -v 2>&1 \
+            | tee "$RUNNER_TEMP/storage/ci-corpus-builder.txt"
+      - name: Acquire only pinned public source trees and five tokenizer files
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest=study/storage/onnx/accuracy-sources-v1.json
+          pin="$(sha256sum "$manifest" | cut -d' ' -f1)"
+          python3.12 study/storage/onnx/fetch_accuracy_inputs.py \
+            --manifest "$manifest" --manifest-pin "$pin" \
+            --output "$RUNNER_TEMP/storage/accuracy-inputs" 2>&1 \
+            | tee "$RUNNER_TEMP/storage/ci-corpus-acquisition.txt"
+      - name: Build real frozen corpus under a hard memory limit and deadline
+        shell: bash
+        env:
+          OPENBLAS_NUM_THREADS: "2"
+          OMP_NUM_THREADS: "2"
+          MKL_NUM_THREADS: "2"
+          TOKENIZERS_PARALLELISM: "false"
+          UV_PYTHON: python3.12
+          UV_PYTHON_DOWNLOADS: never
+          UV_CACHE_DIR: ${{ runner.temp }}/storage/uv-cache
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/storage/bridge-env
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$$" \
+            | sudo tee "$GXSTUDY_TEST_CGROUP_ROOT/test-driver/cgroup.procs" > /dev/null
+          python3.12 -c '
+          import datetime
+          import hashlib
+          import json
+          import os
+          import socket
+          import subprocess
+          from pathlib import Path
+
+          def sha(path):
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "storage"
+          manifest = Path("study/storage/onnx/accuracy-sources-v1.json").resolve()
+          policy = root / "corpus-policy.json"
+          policy.write_text(json.dumps({
+              "schema": "external-limits/v1",
+              "deadline": (datetime.datetime.now(datetime.UTC)
+                           + datetime.timedelta(minutes=10)).isoformat(),
+          }))
+          command = [str(root / "evaluator-tools/uv-x86_64-unknown-linux-gnu/uv"),
+                     "run", "--frozen", "--project", "study/storage/pod-cost",
+                     "python", "study/storage/onnx/build_accuracy_corpus.py",
+                     "--manifest", str(manifest), "--manifest-pin", sha(manifest),
+                     "--sources", str(root / "accuracy-inputs"),
+                     "--tokenizer", str(root / "accuracy-inputs/tokenizer"),
+                     "--go-extractor", str(root / "bin/corpus-extract"),
+                     "--output", str(root / "accuracy-corpus")]
+          (root / "corpus-binding.json").write_text(json.dumps({
+              "source_revision": os.environ["GITHUB_SHA"],
+              "harness_sha256": sha(root / "bin/limited-command"),
+              "data_sha256": sha(manifest), "recipe_sha256": sha(policy),
+              "host": socket.gethostname(), "command": command,
+              "memory_limits_bytes": {
+                  "runner": 536870912, "checker": 4294967296,
+                  "engine": 4294967296,
+              },
+          }))
+          binding = root / "corpus-binding.json"
+          subprocess.run([
+              str(root / "bin/limited-command"), "-binding", str(binding),
+              "-binding-pin", hashlib.sha256(binding.read_bytes()).hexdigest(),
+              "-policy", str(root / "corpus-policy.json"),
+              "-data", str(Path("study/storage/onnx/accuracy-sources-v1.json").resolve()),
+              "-cgroup-root", os.environ["GXSTUDY_TEST_CGROUP_ROOT"],
+              "-out", str(root / "corpus-launch"), "--",
+              *command,
+          ], check=True)
+          ' 2>&1 | tee "$RUNNER_TEMP/storage/ci-corpus-run.txt"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: accuracy-corpus-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/storage/accuracy-corpus/
+            ${{ runner.temp }}/storage/accuracy-inputs/acquisition.json
+            ${{ runner.temp }}/storage/accuracy-inputs/tokenizer/
+            ${{ runner.temp }}/storage/corpus-launch/
+            ${{ runner.temp }}/storage/corpus-binding.json
+            ${{ runner.temp }}/storage/corpus-policy.json
+          if-no-files-found: warn
       - name: D3 inference contracts on tiny NumPy fixtures only
         # Independent of the driver step; report it even after a failure.
         if: ${{ !cancelled() }}

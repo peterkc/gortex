@@ -1,0 +1,19 @@
+{
+  "schema": "accuracy-sources/v1",
+  "sources": [
+    {
+      "language": "go",
+      "repo": "https://github.com/golang/go",
+      "tag": "go1.23.2",
+      "commit": "ed07b321aef7632f956ce991dd10fdd7e1abd827",
+      "tree": "b5db4f10f3238e4c0de0645a9e31f9a123e071f9"
+    },
+    {
+      "language": "python",
+      "repo": "https://github.com/python/cpython",
+      "tag": "v3.12.7",
+      "commit": "0b05ead877f909b7efe712db758012d9dbece7ce",
+      "tree": "c572705d83b94fe0c9c3080bc3fab4ac2c2ee32f"
+    }
+  ]
+}
