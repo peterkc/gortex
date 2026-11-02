@@ -101,14 +101,19 @@ jobs:
             | tee -a "$RUNNER_TEMP/storage/ci-cgroup.txt"
           go -C study/storage/adapters/catalog-refs test -p=1 -v ./... 2>&1 \
             | tee "$RUNNER_TEMP/storage/ci-catalog-refs.txt"
+          go -C study/storage/adapters/catalog-refs vet -p=1 ./...
           go -C study/storage/adapters/catalog-bbolt test -p=1 -v ./... 2>&1 \
             | tee "$RUNNER_TEMP/storage/ci-catalog-bbolt.txt"
+          go -C study/storage/adapters/catalog-bbolt vet -p=1 ./...
           go -C study/storage/adapters/catalog-manifest test -p=1 -v ./... 2>&1 \
             | tee "$RUNNER_TEMP/storage/ci-catalog-manifest.txt"
+          go -C study/storage/adapters/catalog-manifest vet -p=1 ./...
           go -C study/storage/adapters/catalog-pebble test -p=1 -v ./... 2>&1 \
             | tee "$RUNNER_TEMP/storage/ci-catalog-pebble.txt"
+          go -C study/storage/adapters/catalog-pebble vet -p=1 ./...
           go -C study/storage/adapters/catalog-sqlite test -p=1 -v ./... 2>&1 \
             | tee "$RUNNER_TEMP/storage/ci-catalog-sqlite.txt"
+          go -C study/storage/adapters/catalog-sqlite vet -p=1 ./...
           go -C study/storage/adapters/catalog-refs build -p=1 \
             -o "$RUNNER_TEMP/storage/bin/catalog-refs" .
       - name: Streaming adapter callers on tiny native fixtures
@@ -203,7 +208,7 @@ jobs:
           UV_PYTHON: python3.12
           UV_PYTHON_DOWNLOADS: never
           UV_CACHE_DIR: ${{ runner.temp }}/storage/uv-cache
-          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/storage/python-env
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/storage/evaluator-env
         run: |
           set -euo pipefail
           tools="$RUNNER_TEMP/storage/evaluator-tools"
@@ -216,7 +221,6 @@ jobs:
           tar -xzf "$tools/uv.tar.gz" -C "$tools"
           export PATH="$tools/uv-x86_64-unknown-linux-gnu:$PATH"
           uv --version | tee "$RUNNER_TEMP/storage/ci-evaluator.txt"
-          export UV_PROJECT_ENVIRONMENT="$RUNNER_TEMP/storage/evaluator-env"
           uv run --frozen --project study/storage/neon-eval python -m unittest discover \
             -s study/storage/neon-eval -p test_evaluate.py -v 2>&1 \
             | tee -a "$RUNNER_TEMP/storage/ci-evaluator.txt"
@@ -248,7 +252,7 @@ jobs:
           UV_PYTHON: python3.12
           UV_PYTHON_DOWNLOADS: never
           UV_CACHE_DIR: ${{ runner.temp }}/storage/uv-cache
-          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/storage/python-env
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/storage/models-env
         run: |
           set -euo pipefail
           uv="$RUNNER_TEMP/storage/evaluator-tools/uv-x86_64-unknown-linux-gnu/uv"
@@ -287,7 +291,7 @@ jobs:
           UV_PYTHON: python3.12
           UV_PYTHON_DOWNLOADS: never
           UV_CACHE_DIR: ${{ runner.temp }}/storage/uv-cache
-          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/storage/python-env
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/storage/cpu-cost-env
         run: |
           set -euo pipefail
           uv="$RUNNER_TEMP/storage/evaluator-tools/uv-x86_64-unknown-linux-gnu/uv"
@@ -312,7 +316,7 @@ jobs:
           OPENBLAS_NUM_THREADS: "2"
           UV_PYTHON_DOWNLOADS: never
           UV_CACHE_DIR: ${{ runner.temp }}/storage/uv-cache
-          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/storage/python-env
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/storage/hybrid-env
         run: |
           set -euo pipefail
           uv="$RUNNER_TEMP/storage/evaluator-tools/uv-x86_64-unknown-linux-gnu/uv"
