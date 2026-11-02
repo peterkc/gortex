@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import io
 import json
+import os
 import subprocess
 import sys
 import tokenize
@@ -14,7 +15,10 @@ from pathlib import Path, PurePosixPath
 
 
 PREFIX = "Represent this query for searching relevant code: "
-QUOTAS = ((2048, 450, 25), (4096, 40, 20), (8192, 10, 5))
+QUOTAS = {
+    "go": ((2048, 450, 25), (4096, 40, 20), (8192, 10, 5)),
+    "python": ((2048, 450, 25), (4096, 8, 4), (8192, 0, 0)),
+}
 SOURCES = {
     "go": ("https://github.com/golang/go", "go1.23.2",
            "ed07b321aef7632f956ce991dd10fdd7e1abd827"),
@@ -35,6 +39,7 @@ RECIPE = {
     "order": ("language, bucket; targets first then fill; "
               "SHA256(lang LF bucket LF ID)"),
     "quotas": QUOTAS,
+    "python_result_label": "Python short-code control",
 }
 
 
@@ -44,7 +49,10 @@ class CorpusError(Exception):
 
 def canonical(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, ensure_ascii=False,
-                      separators=(",", ":"), allow_nan=False).encode("utf-8")
+                      separators=(",", ":"), allow_nan=False).replace(
+                          "\u0085", "\\u0085").replace(
+                          "\u2028", "\\u2028").replace(
+                          "\u2029", "\\u2029").encode("utf-8")
 
 
 def digest(content: bytes) -> str:
@@ -94,6 +102,11 @@ def git_output(repository: Path, *args: str, data=None) -> bytes:
     return result.stdout
 
 
+def check_object_size(size: int, total: int) -> None:
+    if size > 16 * 1024 * 1024 or total > 1024 ** 3:
+        raise CorpusError("source object size bound exceeded")
+
+
 def source_files(repository: Path, source: Mapping) -> tuple[dict, bytes]:
     commit, tree = source["commit"], source["tree"]
     head = git_output(repository, "rev-parse", "HEAD").decode().strip()
@@ -126,9 +139,9 @@ def source_files(repository: Path, source: Mapping) -> tuple[dict, bytes]:
         end = payload.index(b"\n", offset)
         got_oid, kind, size_text = payload[offset:end].decode().split()
         size = int(size_text)
-        if (got_oid != oid or kind != "blob" or size > 16 * 1024 * 1024
-                or len(payload) > 1024 ** 3):
-            raise CorpusError("source object identity/type/size mismatch")
+        if got_oid != oid or kind != "blob":
+            raise CorpusError("source object identity/type mismatch")
+        check_object_size(size, len(payload))
         content = payload[end + 1:end + 1 + size]
         if (len(content) != size
                 or payload[end + 1 + size:end + 2 + size] != b"\n"):
@@ -148,7 +161,7 @@ def eligible_path(path: str, language: str) -> bool:
     if language == "go":
         return (len(parts) > 1 and parts[0] == "src"
                 and "vendor" not in parts and "testdata" not in parts
-                and path.endswith(".go"))
+                and path.endswith(".go") and not path.endswith("_test.go"))
     return (len(parts) > 1 and parts[0] == "Lib"
             and parts[1] != "test" and path.endswith(".py"))
 
@@ -167,8 +180,8 @@ def paragraph(documentation: str) -> str:
 
 def offsets(source: bytes) -> list[int]:
     values = [0]
-    for line in source.splitlines(keepends=True):
-        values.append(values[-1] + len(line))
+    for line in source.split(b"\n")[:-1]:
+        values.append(values[-1] + len(line) + 1)
     return values
 
 
@@ -178,7 +191,7 @@ def python_extract(path: str, content: bytes) -> list[dict]:
     encoding, _ = tokenize.detect_encoding(io.BytesIO(content).readline)
     source = content.decode(encoding)
     raw = source.encode("utf-8")
-    lines, starts = source.splitlines(keepends=True), offsets(raw)
+    lines, starts = source.split("\n"), offsets(raw)
     tree = ast.parse(source, filename=path)
     blank = bytearray(raw)
 
@@ -242,7 +255,7 @@ def python_extract(path: str, content: bytes) -> list[dict]:
                 "signature": bytes(blank[signature_start:colon]).decode(),
                 "body": bytes(blank[start:end]).decode(),
                 "documentation": ast.get_docstring(node, clean=False) or "",
-                "notice": source[:starts[tree.body[0].lineno - 1]],
+                "notice": raw[:starts[tree.body[0].lineno - 1]].decode(),
                 "source_comments": comments_text,
             })
             return  # Nested definitions stay inside this body only.
@@ -310,10 +323,11 @@ def measure(rows: Sequence[Mapping], tokenizer) -> list[dict]:
 
 
 def bucket(tokens: int) -> int | None:
-    return next((upper for upper, _, _ in QUOTAS if tokens <= upper), None)
+    return next((upper for upper, _, _ in QUOTAS["go"]
+                 if tokens <= upper), None)
 
 
-def select(rows: Sequence[Mapping], quotas=QUOTAS,
+def select(rows: Sequence[Mapping], quotas=None,
            languages=("go", "python")) -> tuple[list, list, dict]:
     ids, unique_text, prepared, rejected = set(), set(), [], Counter()
     for row in sorted(rows, key=lambda r: r["id"]):
@@ -343,7 +357,8 @@ def select(rows: Sequence[Mapping], quotas=QUOTAS,
         }
         counts["availability"][language] = {}
         previous = 0
-        for upper, document_count, query_count in quotas:
+        requested = QUOTAS[language] if quotas is None else quotas
+        for upper, document_count, query_count in requested:
             available = [r for r in population
                          if previous < r["tokens"] <= upper]
             available.sort(key=lambda r: digest(
@@ -369,14 +384,15 @@ def select(rows: Sequence[Mapping], quotas=QUOTAS,
     for language in languages:
         ds = [r for r in documents if r["language"] == language]
         qs = [r for r in queries if r["language"] == language]
+        requested = QUOTAS[language] if quotas is None else quotas
         selected["by_language"][language] = {
             "documents": len(ds), "queries": len(qs),
             "documents_by_bucket": {
                 str(upper): sum(bucket(r["tokens"]) == upper for r in ds)
-                for upper, _, _ in quotas},
+                for upper, _, _ in requested},
             "queries_by_bucket": {
                 str(upper): sum(bucket(r["tokens"]) == upper for r in qs)
-                for upper, _, _ in quotas},
+                for upper, _, _ in requested},
         }
     counts["selected"] = selected
     return documents, queries, counts
@@ -401,9 +417,15 @@ def input_manifest(path: Path, pin: str) -> dict:
     if file_hash(path) != pin:
         raise CorpusError("input manifest hash mismatch")
     manifest = read_json(path)
-    if (set(manifest) != {"schema", "sources"}
+    if (set(manifest) != {"schema", "sources", "quotas", "python_control"}
             or manifest["schema"] != "accuracy-sources/v1"):
         raise CorpusError("expected accuracy-sources/v1")
+    if canonical(manifest["quotas"]) != canonical(QUOTAS):
+        raise CorpusError("source manifest quota mismatch")
+    control = manifest["python_control"]
+    if (not isinstance(control, dict)
+            or control.get("result_label") != RECIPE["python_result_label"]):
+        raise CorpusError("missing Python short-code control label")
     sources = manifest["sources"]
     if len(sources) != 2 or {s["language"] for s in sources} != set(SOURCES):
         raise CorpusError("exactly Go and Python sources required")
@@ -474,6 +496,15 @@ def emit(output: Path, documents: Sequence[Mapping],
     return freeze_id
 
 
+def offline_tokenizer(directory: Path):
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained(
+        directory, local_files_only=True, trust_remote_code=False)
+
+
 def build(args: argparse.Namespace) -> None:
     manifest = input_manifest(args.manifest, args.manifest_pin)
     storage = Path(__file__).resolve().parents[1]
@@ -482,10 +513,7 @@ def build(args: argparse.Namespace) -> None:
     token_pins = tokenizer_files(args.tokenizer, pins["inputs"])
     args.output.mkdir()  # Existing output, even partial, is never resumed.
     try:
-        from transformers import AutoTokenizer
-
-        tokenizer = AutoTokenizer.from_pretrained(
-            args.tokenizer, local_files_only=True, trust_remote_code=False)
+        tokenizer = offline_tokenizer(args.tokenizer)
         rows, licenses, bound_sources = [], {}, []
         for source in sorted(manifest["sources"], key=lambda s: s["language"]):
             repository = args.sources / source["language"]
@@ -501,6 +529,7 @@ def build(args: argparse.Namespace) -> None:
         revision = git_output(checkout, "rev-parse", "HEAD").decode().strip()
         bindings = {"sources": bound_sources, "tokenizer": token_pins,
                     "harness_revision": revision,
+                    "python_version": sys.version,
                     "input_manifest_sha256": args.manifest_pin,
                     "builder_sha256": file_hash(Path(__file__)),
                     "extractor_sha256": file_hash(args.go_extractor),

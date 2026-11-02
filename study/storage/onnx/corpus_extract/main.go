@@ -91,24 +91,12 @@ func extract(req request) (extraction, error) {
 			name = "(" + string(source[positions.Offset(receiver.Pos()):positions.Offset(receiver.End())]) + ")." + name
 			kind = "method"
 		}
-		docs := make([]string, 0)
-		if function.Doc != nil {
-			for _, comment := range function.Doc.List {
-				text := comment.Text
-				if strings.HasPrefix(text, "//") {
-					text = text[2:]
-				} else {
-					text = strings.TrimSuffix(strings.TrimPrefix(text, "/*"), "*/")
-				}
-				docs = append(docs, text)
-			}
-		}
 		result = append(result, declaration{
 			Path: req.Path, Name: name, Kind: kind, Start: start, End: end,
 			Line:      positions.PositionFor(function.Pos(), false).Line,
 			EndLine:   positions.PositionFor(function.End(), false).Line,
 			Signature: strings.TrimRight(string(blank[start:positions.Offset(function.Body.Pos())]), " \t\r\n"),
-			Body:      string(blank[start:end]), Documentation: strings.Join(docs, "\n"),
+			Body:      string(blank[start:end]), Documentation: function.Doc.Text(),
 			Notice: string(source[:positions.Offset(file.Package)]),
 		})
 	}

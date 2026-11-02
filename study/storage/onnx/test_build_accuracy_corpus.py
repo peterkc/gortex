@@ -4,9 +4,11 @@ import copy
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 from transformers import AutoTokenizer, BertTokenizerFast
@@ -113,26 +115,108 @@ class CorpusTests(unittest.TestCase):
         self.assertNotIn("8193", {r["id"] for r in ds})
         self.assertEqual(counts["population"]["go"], {
             "total": 6, "above_2048": 5, "above_4096": 3, "above_8192": 1})
+        expected = {"go": ([450, 40, 10], [25, 20, 5]),
+                    "python": ([450, 8, 0], [25, 4, 0])}
         population = []
-        for language in ("go", "python"):
-            for upper, docs in ((2048, 450), (4096, 40), (8192, 10)):
+        for language, (document_counts, _) in expected.items():
+            for upper, docs in zip((2048, 4096, 8192), document_counts):
                 population.extend(self.row(f"{language}-{upper}-{i}", upper,
                                            language) for i in range(docs + 2))
         documents, queries, counts = corpus.select(population)
-        self.assertEqual((len(documents), len(queries)), (1000, 100))
+        self.assertEqual((len(documents), len(queries)), (958, 79))
         self.assertEqual(counts["shortfalls"], [])
-        for language in ("go", "python"):
+        for language, (document_counts, query_counts) in expected.items():
             ds = [r for r in documents if r["language"] == language]
             qs = [r for r in queries if r["language"] == language]
             self.assertEqual([sum(r["tokens"] == n for r in ds)
-                              for n in (2048, 4096, 8192)], [450, 40, 10])
+                              for n in (2048, 4096, 8192)], document_counts)
             self.assertEqual([sum(r["tokens"] == n for r in qs)
-                              for n in (2048, 4096, 8192)], [25, 20, 5])
-            self.assertEqual(len({r["id"] for r in ds}), 500)
+                              for n in (2048, 4096, 8192)], query_counts)
+            self.assertEqual(len({r["id"] for r in ds}), sum(document_counts))
             self.assertTrue({r["id"] for r in qs} <= {r["id"] for r in ds})
+        self.assertEqual(counts["population"]["python"]["above_4096"], 2)
+        self.assertEqual(counts["availability"]["python"]["8192"]["documents"], 2)
         before = copy.deepcopy(population)
         corpus.select(population)
         self.assertEqual(population, before)
+
+    def test_python_mid_bucket_nine_requested_with_eight_available_fails(self):
+        rows = [{**self.row(f"python-mid-{i}", 3000, "python"),
+                 "query_tokens": 20 if i < 4 else None} for i in range(8)]
+        ds, qs, counts = corpus.select(
+            rows, ((2048, 0, 0), (4096, 9, 4), (8192, 0, 0)), ("python",))
+        self.assertEqual(counts["shortfalls"], ["python:4096"])
+        self.assertEqual(counts["availability"]["python"]["4096"], {
+            "documents": 8, "queries": 4,
+            "required_documents": 9, "required_queries": 4})
+        self.assertEqual((len(ds), len(qs)), (8, 4))
+        output = self.root / "nine-requested"
+        output.mkdir()
+        corpus.write_json(output / "counts.json", counts)
+        with self.assertRaisesRegex(corpus.CorpusError, "python:4096"):
+            corpus.emit(output, ds, qs, counts, {"sources": []}, {})
+        self.assertEqual([p.name for p in output.iterdir()], ["counts.json"])
+
+    def test_python_non_lf_separators_and_utf8_notice_keep_physical_spans(self):
+        separators = "\v\f\x85\u2028\u2029"
+        prefix = "# licence Café " + separators + "\n"
+        ordinary = "ordinary" + separators + "text"
+        source = (prefix + "def read(value='" + ordinary + "'):\n"
+                  '    "Read the original public value without changes."\n'
+                  "    # erase " + separators + "\n"
+                  "    return value\n")
+        raw = source.encode()
+        row, = corpus.python_extract("Lib/physical.py", raw)
+        self.assertEqual((row["line"], row["end_line"]), (2, 5))
+        self.assertEqual(row["notice"], prefix)
+        self.assertEqual(row["start"], len(prefix.encode()))
+        self.assertEqual(raw[row["start"]:row["end"]],
+                         source[len(prefix):].rstrip("\n").encode())
+        self.assertIn(ordinary, row["body"])
+        self.assertIn(ordinary, row["signature"])
+        self.assertNotIn("# erase", row["body"])
+        self.assertNotIn("Read the original", row["body"])
+        self.assertEqual(len(row["body"].encode()), row["end"] - row["start"])
+        self.assertEqual(corpus.offsets(raw),
+                         [0] + [i + 1 for i, byte in enumerate(raw) if byte == 10])
+        self.assertEqual(corpus.python_extract("Lib/physical.py", raw[:-1]), [row])
+
+    def test_jsonl_unicode_separators_round_trip_through_bridge_lines(self):
+        self.assertEqual(corpus.canonical({"text": "Café"}),
+                         '{"text":"Café"}'.encode())
+        text = "Café\x85first\u2028second\u2029last"
+        row = {**self.row("unicode-lines", query=text), "text": text}
+        counts = {"shortfalls": []}
+        corpus.write_json(self.root / "counts.json", counts)
+        corpus.emit(self.root, [row], [row], counts,
+                    {"sources": []}, {"go": b"complete fixture license"})
+        for name in ("documents.jsonl", "queries.jsonl", "provenance.jsonl"):
+            content = (self.root / name).read_text()
+            self.assertEqual(len(content.splitlines()), 1)
+            parsed = json.loads(content.splitlines()[0])
+            if name != "provenance.jsonl":
+                self.assertEqual(parsed["text"], text)
+                for escaped in (r"\u0085", r"\u2028", r"\u2029"):
+                    self.assertIn(escaped, content)
+            self.assertIn("Café" if name != "provenance.jsonl" else "unicode-lines",
+                          content)
+
+    def test_go_directive_only_documentation_cannot_supply_query(self):
+        executable = Path(os.environ["GXSTUDY_CORPUS_EXTRACTOR"])
+        raw = (b"package f\n"
+               b"//go:linkname OnlyDirectives local.symbol.with.long.name\n"
+               b"//go:nosplit\n//export OnlyDirectives\n"
+               b"//line fake.go:900\nfunc OnlyDirectives() {}\n")
+        source = {"repo": "https://github.com/golang/go", "commit": "a" * 40,
+                  "tree": "b" * 40, "language": "go"}
+        row, = corpus.candidates({"src/directives.go": raw}, source, executable)
+        self.assertEqual(row["documentation"], "")
+        self.assertEqual(row["query"], "")
+        _, queries, counts = corpus.select(
+            corpus.measure([row], self.tokenizer), ((2048, 1, 1),), ("go",))
+        self.assertEqual(queries, [])
+        self.assertEqual(counts["shortfalls"], ["go:2048"])
+        self.assertIn("//export OnlyDirectives", row["source_comments"])
 
     def test_query_character_and_prefixed_token_limits(self):
         rows = [self.row("short", query="s" * 29),
@@ -249,7 +333,7 @@ class CorpusTests(unittest.TestCase):
         _, chosen, _ = corpus.select(
             [self.row("b", query=row["query"]), row], ((2048, 1, 1),), ("go",))
         self.assertEqual([r["id"] for r in chosen], ["a"])
-        self.assertIn("python:8192", counts["shortfalls"])
+        self.assertIn("python:4096", counts["shortfalls"])
         for name in ("../src/a.go", "./src/a.go", "/src/a.go", "src//a.go"):
             with self.assertRaises(corpus.CorpusError):
                 corpus.safe_path(name)
@@ -257,6 +341,8 @@ class CorpusTests(unittest.TestCase):
             corpus.unique_object([("a", 1), ("a", 2)])
         self.assertFalse(corpus.eligible_path("src/vendor/a.go", "go"))
         self.assertFalse(corpus.eligible_path("src/testdata/a.go", "go"))
+        self.assertFalse(corpus.eligible_path("src/io/read_test.go", "go"))
+        self.assertTrue(corpus.eligible_path("src/io/read.go", "go"))
         self.assertFalse(corpus.eligible_path("Lib/test/a.py", "python"))
         output = self.root / "shortfall"
         output.mkdir()
@@ -273,6 +359,100 @@ class CorpusTests(unittest.TestCase):
             self.tokenizer_dir / "tokenizer_config.json")
         with self.assertRaisesRegex(corpus.CorpusError, "hash/type"):
             corpus.tokenizer_files(self.tokenizer_dir, pins)
+
+    def test_real_input_manifest_rejects_changed_schema_pin_and_source(self):
+        checked_in = Path(__file__).with_name("accuracy-sources-v1.json")
+        original = json.loads(checked_in.read_text())
+        path = self.root / "sources.json"
+        corpus.write_json(path, original)
+        self.assertEqual(corpus.input_manifest(path, corpus.file_hash(path)),
+                         original)
+        for kind in ("schema", "pin", "commit", "tree", "quotas", "unknown",
+                     "label", "missing-label", "control-type"):
+            with self.subTest(kind=kind):
+                changed = copy.deepcopy(original)
+                if kind == "schema":
+                    changed["schema"] = "accuracy-sources/v2"
+                elif kind in ("commit", "tree"):
+                    changed["sources"][0][kind] = "0" * 40
+                elif kind == "quotas":
+                    changed["quotas"]["python"][1][1] = 9
+                elif kind == "unknown":
+                    changed["extra"] = True
+                elif kind == "label":
+                    changed["python_control"]["result_label"] = "long-body comparison"
+                elif kind == "missing-label":
+                    del changed["python_control"]["result_label"]
+                elif kind == "control-type":
+                    changed["python_control"] = None
+                path.write_text(json.dumps(changed))
+                pin = "0" * 64 if kind == "pin" else corpus.file_hash(path)
+                with self.assertRaises(corpus.CorpusError):
+                    corpus.input_manifest(path, pin)
+
+    def test_source_object_size_boundaries_and_reader_enforcement(self):
+        corpus.check_object_size(16 * 1024 * 1024, 1024 ** 3)
+        for size, total in ((16 * 1024 * 1024 + 1, 1),
+                            (1, 1024 ** 3 + 1)):
+            with self.subTest(size=size, total=total):
+                with self.assertRaisesRegex(corpus.CorpusError, "size bound"):
+                    corpus.check_object_size(size, total)
+        oid = "a" * 40
+        source = {"commit": "b" * 40, "tree": "c" * 40, "language": "go"}
+        listing = f"100644 blob {oid}\tLICENSE\0".encode()
+        # A refused header needs no oversized allocation or full payload.
+        payload = f"{oid} blob {16 * 1024 * 1024 + 1}\nx\n".encode()
+        with mock.patch.object(corpus, "git_output", side_effect=[
+                (source["commit"] + "\n").encode(),
+                (source["tree"] + "\n").encode(), listing, payload]):
+            with self.assertRaisesRegex(corpus.CorpusError, "size bound"):
+                corpus.source_files(self.root, source)
+
+    def test_build_forces_offline_tokenizer_and_binds_python_version(self):
+        # Real tiny tokenizer/extractor; only pinned-source I/O and quota scale
+        # are fixtures. This does not establish pinned-corpus feasibility.
+        executable = Path(os.environ["GXSTUDY_CORPUS_EXTRACTOR"])
+        tiny_quotas = {language: ((2048, 1, 1), (4096, 0, 0), (8192, 0, 0))
+                       for language in ("go", "python")}
+        checked_in = Path(__file__).with_name("accuracy-sources-v1.json")
+        manifest = json.loads(checked_in.read_text())
+        manifest["quotas"] = tiny_quotas
+        path = self.root / "sources.json"
+        corpus.write_json(path, manifest)
+        token_pins = {p.name: corpus.file_hash(p)
+                      for p in self.tokenizer_dir.iterdir()}
+        inputs = {
+            "go": {"src/f.go": (
+                b"package f\n"
+                b"// Go fixture returns the original documented public value.\n"
+                b"func Read() string { return \"ordinary\" }\n")},
+            "python": {"Lib/f.py": (
+                b"def read():\n"
+                b'    "Python fixture returns the original documented value."\n'
+                b'    return "ordinary"\n')},
+        }
+        args = argparse.Namespace(
+            manifest=path, manifest_pin=corpus.file_hash(path),
+            sources=self.root / "sources", tokenizer=self.tokenizer_dir,
+            go_extractor=executable, output=self.root / "built")
+        with (mock.patch.object(corpus, "QUOTAS", tiny_quotas),
+              mock.patch.dict(corpus.RECIPE, {"quotas": tiny_quotas}),
+              mock.patch.object(corpus, "tokenizer_files", return_value=token_pins),
+              mock.patch.object(corpus, "source_files", side_effect=lambda _, source:
+                                (inputs[source["language"]], b"fixture license")),
+              mock.patch.dict(os.environ, {"HF_HUB_OFFLINE": "0",
+                                           "TRANSFORMERS_OFFLINE": "0"})):
+            corpus.build(args)
+            self.assertEqual(os.environ["HF_HUB_OFFLINE"], "1")
+            self.assertEqual(os.environ["TRANSFORMERS_OFFLINE"], "1")
+            with self.assertRaises(FileExistsError):
+                corpus.build(args)
+        frozen = corpus.read_json(args.output / "freeze.json")
+        self.assertEqual(frozen["bindings"]["python_version"], sys.version)
+        self.assertEqual(frozen["freeze_id"], corpus.file_hash(
+            args.output / "freeze-canonical.json"))
+        self.assertEqual(corpus.read_json(args.output / "counts.json")[
+            "selected"]["documents"], 2)
 
     def test_real_bridge_score_ties_and_shuffled_batches(self):
         documents = [self.row(f"p{i:02}") for i in range(11)]

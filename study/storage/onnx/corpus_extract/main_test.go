@@ -41,7 +41,7 @@ func (t *T) Read() string { return "/* not a comment */" }
 	if strings.Contains(first.Body, "secret comment") || !strings.Contains(first.Body, `"ordinary string"`) || !strings.Contains(first.Body, "nested := func()") {
 		t.Fatal(first.Body)
 	}
-	if !strings.HasPrefix(first.Documentation, " Décode preserves") || first.Notice != "// license notice\n" {
+	if !strings.HasPrefix(first.Documentation, "Décode preserves") || first.Notice != "// license notice\n" {
 		t.Fatal(first)
 	}
 	if first.Signature != "func Décode(value string) string" || !strings.Contains(rows[1].Body, `"/* not a comment */"`) {
@@ -82,5 +82,32 @@ func TestPhysicalLinesIgnoreLineDirectives(t *testing.T) {
 	}
 	if file.Declarations[0].Line != 3 || file.Declarations[0].EndLine != 3 {
 		t.Fatal("adjusted rather than physical source span", file.Declarations[0])
+	}
+}
+
+func TestDirectiveOnlyDocumentationIsNotQueryText(t *testing.T) {
+	source := `package f
+//go:linkname OnlyDirectives local.symbol.with.more.than.thirty.characters
+//go:nosplit
+//export OnlyDirectives
+//line fake.go:900
+func OnlyDirectives() {}
+
+// Ordinary prose remains documentation for the public function.
+//go:noinline
+func Documented() {}
+`
+	file, err := extract(request{Path: "src/directives.go", Source: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(file.Declarations) != 2 || file.Declarations[0].Documentation != "" {
+		t.Fatal("directives became documentation", file.Declarations)
+	}
+	if file.Declarations[1].Documentation != "Ordinary prose remains documentation for the public function.\n" {
+		t.Fatal("ordinary documentation changed", file.Declarations[1])
+	}
+	if !strings.Contains(file.SourceComments, "//export OnlyDirectives") {
+		t.Fatal("directive provenance lost", file.SourceComments)
 	}
 }

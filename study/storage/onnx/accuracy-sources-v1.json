@@ -15,5 +15,14 @@
       "commit": "0b05ead877f909b7efe712db758012d9dbece7ce",
       "tree": "c572705d83b94fe0c9c3080bc3fab4ac2c2ee32f"
     }
-  ]
+  ],
+  "quotas": {
+    "go": [[2048, 450, 25], [4096, 40, 20], [8192, 10, 5]],
+    "python": [[2048, 450, 25], [4096, 8, 4], [8192, 0, 0]]
+  },
+  "python_control": {
+    "reason": "The pinned CPython population has eight bodies above 2,048 tokens and none above 4,096. Python is a short-code control; Go carries the long-body comparison.",
+    "result_label": "Python short-code control",
+    "reporting": "Every per-language Python result must use this control label."
+  }
 }
