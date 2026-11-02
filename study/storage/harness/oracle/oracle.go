@@ -197,7 +197,7 @@ type Backend struct{}
 
 func (Backend) Name() string { return "oracle" }
 func (Backend) Capabilities() adapter.Capabilities {
-	return adapter.Capabilities{Ranking: map[string]adapter.RankPolicy{"vector": {Exact: true}, "multi_vector": {Exact: true}, "symbols": {Exact: true}, "content": {Exact: true}, "native_multi_symbols": {Exact: true}, "native_multi_vector": {Exact: true}}, Deployment: "embedded", Libraries: []string{}, Operations: map[string]string{"graph": "native in-memory maps", "search": "native plain BM25", "vector": "native exact cosine", "delta": "full rebuild", "catalog": "reference atomic JSON + flock"}, Notes: []string{"Reference correctness implementation; not a candidate storage engine."}}
+	return adapter.Capabilities{Ranking: map[string]adapter.RankPolicy{"vector": {Exact: true}, "multi_vector": {Exact: true}, "symbols": {Exact: true}, "content": {Exact: true}, "native_multi_symbols": {Exact: true}, "native_multi_vector": {Exact: true}}, Deployment: "embedded", Libraries: []string{}, Operations: map[string]string{"graph": "disk scans (in-memory tiny fixture helper)", "search": "disk-scan exact BM25", "vector": "disk-scan exact cosine", "delta": "full rebuild", "catalog": "reference atomic JSON + flock"}, Notes: []string{"Reference correctness implementation; not a candidate storage engine."}}
 }
 func (Backend) Build(ctx context.Context, d dataset.Dataset, dir string) (adapter.SegmentRef, adapter.BuildStats, error) {
 	if e := ctx.Err(); e != nil {
@@ -268,18 +268,22 @@ func (Backend) Open(ctx context.Context, dir string, ref adapter.SegmentRef) (ad
 	if e := VerifyRef(ref); e != nil {
 		return nil, e
 	}
-	d, e := dataset.Load(ref.Path)
+	d, e := dataset.OpenSource(ref.Path)
 	if e != nil {
 		return nil, e
 	}
-	return New(d), nil
+	return &DiskSegment{Data: d}, nil
 }
 func (b Backend) BuildDelta(ctx context.Context, base adapter.SegmentRef, c adapter.FileChange, dir string) (adapter.SegmentRef, adapter.BuildStats, error) {
-	d, e := dataset.Load(base.Path)
+	d, e := dataset.OpenSource(base.Path)
 	if e != nil {
 		return adapter.SegmentRef{}, adapter.BuildStats{}, e
 	}
-	return b.Build(ctx, adapter.ApplyChange(d, c), dir)
+	changed, e := adapter.ChangeSource(d, c)
+	if e != nil {
+		return adapter.SegmentRef{}, adapter.BuildStats{}, e
+	}
+	return b.Build(ctx, changed, dir)
 }
 func DiskBytes(dir string) (int64, error) {
 	var n int64

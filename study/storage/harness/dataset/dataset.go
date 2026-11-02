@@ -86,6 +86,7 @@ type Manifest struct {
 	SHA256          map[string]string `json:"sha256"`
 }
 type Dataset struct {
+	Source  *DiskSource `json:"source,omitempty"`
 	Repo    string
 	Nodes   []Node
 	Edges   []Edge
@@ -246,9 +247,13 @@ func Write(dir string, d Dataset) (Manifest, error) {
 	m := d.Meta
 	m.Version = GeneratorVersion
 	m.Repo = d.Repo
-	m.Counts = d.Counts()
+	var err error
+	m.Counts, err = CountRows(d)
+	if err != nil {
+		return m, err
+	}
 	m.SHA256 = map[string]string{}
-	paths := []error{writeLines(filepath.Join(dir, RecordFiles[0]), d.Nodes), writeLines(filepath.Join(dir, RecordFiles[1]), d.Edges), writeLines(filepath.Join(dir, RecordFiles[2]), d.Files), writeLines(filepath.Join(dir, RecordFiles[3]), d.Symbols), writeLines(filepath.Join(dir, RecordFiles[4]), d.Content), writeVectors(filepath.Join(dir, RecordFiles[5]), d.Vectors)}
+	paths := []error{writeRowStream(filepath.Join(dir, RecordFiles[0]), d.NodeRows()), writeRowStream(filepath.Join(dir, RecordFiles[1]), d.EdgeRows()), writeRowStream(filepath.Join(dir, RecordFiles[2]), d.FileRows()), writeRowStream(filepath.Join(dir, RecordFiles[3]), d.SymbolRows()), writeRowStream(filepath.Join(dir, RecordFiles[4]), d.ContentRows()), writeVectorStream(filepath.Join(dir, RecordFiles[5]), d.VectorRows())}
 	for _, e := range paths {
 		if e != nil {
 			return m, e

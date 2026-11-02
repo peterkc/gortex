@@ -31,6 +31,15 @@ func (m *GlobalMulti) SearchSymbols(ctx context.Context, q string, k int) ([]ada
 	return m.symbols.search(q, k), nil
 }
 func (Backend) OpenMulti(ctx context.Context, segments map[string]adapter.Segment) (adapter.MultiRepo, error) {
+	var disk []dataset.Dataset
+	for _, s := range segments {
+		if v, ok := s.(*DiskSegment); ok {
+			disk = append(disk, v.Data)
+		}
+	}
+	if len(disk) == len(segments) {
+		return &DiskMulti{Fanout: adapter.Fanout{Segments: segments}, Data: disk}, ctx.Err()
+	}
 	var ds []dataset.Dataset
 	for _, s := range segments {
 		v, ok := s.(*Segment)
