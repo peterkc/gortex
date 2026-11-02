@@ -102,10 +102,17 @@ func TestQueryChecksRunAfterWarmAndMeasuredOperations(t *testing.T) {
 				} else {
 					samples, checks, err = measuredQueries(ctx, segments, nil, qs, want, adapter.Capabilities{})
 				}
-				if err != nil || operations.Load() != minimum || checker.calls.Load() != minimum || len(samples["id"]) != 2 {
-					t.Fatal("checking disturbed query phase", operations.Load(), checker.calls.Load(), samples, err)
+				// Identical warm/measured semantic envelopes share one checker RPC.
+				// Operations, measured samples and warmup failures stay distinct.
+				expectedCalls := int64(len(qs))
+				if err != nil || operations.Load() != minimum || checker.calls.Load() != expectedCalls || len(samples["id"]) != len(qs) {
+					t.Fatal("query/check phase counts differ", operations.Load(), checker.calls.Load(), samples, err)
 				}
-				if len(checks) < 2 || checks[0].Mismatch != wrong || checks[1].Mismatch != wrong {
+				expectedChecks := len(qs)
+				if warm && wrong {
+					expectedChecks += len(qs)
+				}
+				if len(checks) != expectedChecks || checks[0].Mismatch != wrong || checks[1].Mismatch != wrong {
 					t.Fatal("deferred mismatch was lost", checks)
 				}
 				if checks[0].QueryID != qs[0].ID && !warm {

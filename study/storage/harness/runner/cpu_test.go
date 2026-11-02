@@ -135,7 +135,7 @@ func TestFixedMissRepeatsAndSemanticMemoKey(t *testing.T) {
 	segment := oracle.New(d)
 	query := workload.Query{ID: "miss", Op: "id", Repo: d.Repo, Key: "missing"}
 	expected := []workload.Expected{{QueryID: query.ID, Answer: workload.Answer{Missing: true}}}
-	ctx := context.WithValue(context.Background(), lookupRepeatKey{}, 20)
+	ctx := context.WithValue(context.Background(), queryMinimumKey{}, 20)
 	samples, checks, err := measuredQueries(ctx, map[string]adapter.Segment{d.Repo: segment}, nil, []workload.Query{query}, expected, oracle.Backend{}.Capabilities())
 	if err != nil || len(samples["id"]) != 20 || len(checks) != 20 {
 		t.Fatal("fixed repeats not collected", len(samples["id"]), len(checks), err)
@@ -199,5 +199,58 @@ func TestActualBytesGuardCoversUnderreportedStats(t *testing.T) {
 	}
 	if actual != 1 || checkBuildCPU(0, actual) == nil {
 		t.Fatal("actual non-empty artifact escaped zero-CPU guard", actual)
+	}
+}
+
+func TestWarmCountsPlanEveryJudgedStratum(t *testing.T) {
+	d := conformance.Fixture()
+	segment := oracle.New(d)
+	segments := map[string]adapter.Segment{d.Repo: segment}
+	multi := adapter.Fanout{Segments: segments}
+	var queries []workload.Query
+	for i := 0; i < 12; i++ {
+		queries = append(queries, workload.Query{ID: fmt.Sprint("file-", i), Op: "file", Repo: d.Repo, Key: "f.go"})
+	}
+	queries = append(queries, workload.Query{ID: "file-miss", Op: "file", Repo: d.Repo, Key: "missing"}, workload.Query{ID: "traverse", Op: "traverse2", Repo: d.Repo, Key: "a", Kind: "calls"}, workload.Query{ID: "multi-name", Op: "multi_name", Key: "Alpha", K: 10}, workload.Query{ID: "text", Op: "multi_symbols", Key: "graph", K: 10})
+	var expected []workload.Expected
+	for _, q := range queries {
+		answer, err := workload.Evaluate(context.Background(), segments, multi, q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected = append(expected, workload.Expected{QueryID: q.ID, Answer: answer})
+	}
+	ctx := context.WithValue(context.Background(), queryMinimumKey{}, 20)
+	samples, checks, err := warmedQueries(ctx, segments, multi, queries, expected, oracle.Backend{}.Capabilities(), 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(samples["file"]) != 44 || len(samples["traverse2"]) != 20 || len(samples["multi_name"]) != 20 || len(samples["multi_symbols"]) != 1 {
+		t.Fatal("wrong per-stratum repetitions", samples)
+	}
+	for _, check := range checks {
+		if check.Mismatch {
+			t.Fatal(check)
+		}
+	}
+	if sampleRepetitions("file_hit", 20, 20) != 1 || sampleRepetitions("file_hit", 0, 20) != 20 || sampleRepetitions("", 0, 20) != 1 {
+		t.Fatal("repetition rejection/default changed")
+	}
+}
+
+func TestSharedLookupClassifierLabelsAllListAndIDCases(t *testing.T) {
+	for _, tc := range []struct {
+		op      string
+		answer  workload.Answer
+		missing bool
+	}{
+		{"id", workload.Answer{Missing: true}, true}, {"id", workload.Answer{Node: &dataset.Node{ID: "a"}}, false},
+		{"name", workload.Answer{}, true}, {"file", workload.Answer{}, true},
+		{"name", workload.Answer{Nodes: []dataset.Node{{ID: "a"}}}, false}, {"file", workload.Answer{Nodes: []dataset.Node{{ID: "a"}}}, false},
+	} {
+		sample, err := latencyFromPending(pendingCheck{NS: 1, Query: workload.Query{Op: tc.op}, Answer: tc.answer}, workload.Check{Status: "passed"})
+		if err != nil || sample.Missing != tc.missing {
+			t.Fatal("lookup label mismatch", tc, sample, err)
+		}
 	}
 }

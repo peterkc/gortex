@@ -45,12 +45,24 @@ The Bleve mapping and query functions remain identical to reference B.
 
 Every graph lookup copy, adjacency copy, range directory, seal and Pebble file
 counts in graph serving bytes. Text, vectors and total bytes are separate.
-B now routes existing key prefixes into physically separate `graph`,
-`text-records` and `vectors` Pebble stores. All stores share one 256 MiB cache.
+B routes existing key prefixes into physically separate `graph`, `text-records`
+and `vectors` Pebble stores. All stores share one 256 MiB cache. Each store and
+C's side store bulk-build with WAL disabled and non-sync batches, then Flush,
+Close and whole-file seal fsync. Unpublished builds have no WAL recovery promise.
+Sealed stores must hold no WAL bytes; byte accounting never hides a stray WAL.
 Graph files, raw text plus Bleve files, and vector files have independent byte
 inventories. Shared seals count as graph metadata. The three categories sum to
 all artifact bytes. No compressed SST prefix share is estimated or subtracted.
 The C fallback counts both its Parquet lookup copies and its Pebble side store.
+B's unused K/kind index is omitted; Kind remains in every full node record.
+This B is `split-key-prefix/v1`, single-decode and WAL-disabled, not the older
+single-store/two-pass options-study B. Historical restoration hashes in
+`adapters/RECOVERY.md` describe that older version, not these Check 5 numbers.
+B still Flushes and Closes without a forced final full-range compaction. Its
+sealed LSM shape, bytes and reads can depend on background compaction timing.
+This is disclosed in `result.json`, not silently treated as a fixed LSM shape.
+The tier100 cost of 300 DBs, native file/metadata caches, open handles, concurrent
+memtables and batches is unmeasured, like C's retained metadata/handles.
 Scratch peak and real product old/new-version coexistence remain unmeasured.
 
 ## CI fixture commands
@@ -155,11 +167,21 @@ establish serialization; the disk-backed checker validates every measured answer
 Data retains gxstudy-v2. Builds and downloads finish before timing. Processes run
 serially, with three rotating A-B-C, B-C-A and C-A-B rounds per tier.
 
-Each existing ID/name/file miss receives exactly 20 measured calls per timing
-process. Warmup calls do not count. A lookup hit/miss stratum needs at least 20
-measured samples across the three processes. Memoized semantic checks use the full
-source/query/policy/answer envelope, omitting only elapsed time and warmup state.
-They do not cache serving answers or remove measurements.
+The driver passes `-min-query-samples 20`. Each judged stratum needs at least
+20 measured samples in **each** fresh process, because each process's p95 decides
+the ratio. Pooled samples cannot satisfy this requirement. The existing discarded
+warmup counts each stratum, then each query repeats `ceil(20 / warmup_count)`
+times, with a minimum of one. Without warmup observations, a judged query repeats
+20 times. Hits, misses and design-specific read strata use this rule; shared
+Bleve text is observational and is not repeated. Ordinary runner callers retain
+the default one-call behavior.
+
+Repetitions use the same warmed keys consecutively. They are not independent cold
+keys or statistical confidence evidence. A GC pause is still possible. Warmup
+calls do not count. Lookup directions use separate `name_hit` and `name_miss`
+strata; the combined `name` p95 is reported but does not decide. Memoized semantic
+checks use the full source/query/policy/answer envelope, omitting only elapsed
+time and warmup state. They do not cache serving answers or remove measurements.
 
 The accepted runner enforces independent runner/checker/engine cgroup hard limits.
 The driver bounds main and conditional side separately with the required `base`
@@ -193,15 +215,26 @@ not contemporaneous controls or a statistical confidence claim. Missing or
 invalid controls stop the comparison, not start more runs.
 
 Check 5 retains the 300 graph B/edge ceiling and the applicable B-relative read
-ceiling of 1.0. Every multi/traversal operation uses the same paired rule, including
-identical-code searches. Opposite read directions require consistency across all
-three pairs before they become a read trade-off. Construction ties use the sum of
+ceiling of 1.0. Design-specific multi/traversal reads keep that unchanged ceiling
+and need at least 20 observations in every paired process. `symbols` and
+`multi_symbols` run identical Bleve mapping/query and fanout code in B and C.
+Their timings remain reported separately, but cannot reject a format or set a
+read direction. `multi_name` remains judged: its fanout calls different native
+Parquet/Pebble lookup paths. No noise margin is introduced.
+
+Opposite design-specific read directions require consistency across all three
+pairs before they become a read trade-off. Construction ties use the sum of
 per-tier median adjusted CPU, then total bytes; unresolved ties return to the user.
+CPU comparison still ranks the observed medians exactly, not statistical equality.
 
 Only complete, hash-valid terminal evidence with typed `semantic` check failures
 can reject C for a wrong answer and fall back to independently passing B. An
 `operation_error`, OOM, deadline, invalid hash, missing receipt or unclassified
-failure blocks the comparison. A failed A/B correctness control invalidates it.
+failure blocks the comparison. The complete runner failure multiset must be
+explained by typed semantic check records. Extra input-change, crash, release,
+reset or unknown failures block, even beside a semantic mismatch. The driver does
+not classify the contents of their human error text. A failed A/B correctness
+control invalidates it.
 All selection-table rows, numeric boundaries and these rejection paths have
 regression test source. The driver never treats unknown C evidence as a B pass.
 
@@ -211,7 +244,7 @@ A is the plan's read-only SQLite segment reference. The existing adapter is
 layer. Report construction as **storage-build CPU on neutral records, equal
 adapter work**. The plan's **0.50 of same-host current-main cold-index CPU** has
 no equal whole-product path here and remains **unmeasured: needs product
-integration (D18, stage 1)**. Never compute that target from an A/C adapter ratio.
+integration (D29)**. Never compute that target from an A/C adapter ratio.
 
 D29 approves using storage-build CPU for the both-pass tie-break while judging
 correctness/read/disk targets. Set `construction_selection_approved` to true

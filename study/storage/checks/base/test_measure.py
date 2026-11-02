@@ -5,13 +5,15 @@ import subprocess
 import tempfile
 import json
 import sys
+import os
+from unittest.mock import patch
 from pathlib import Path
 import unittest
 
 from measure import (
     RunError, SemanticMismatch, aggregate, artifact_inventory, base_verdict,
     canonical_output, checked_file, choose_base, collect_run, digest,
-    latency_groups, lookup_verdict, paired_ratios, percentile,
+    latency_groups, lookup_verdict, paired_ratios, percentile, run,
     protected_snapshot, ratio_status, remove_serving, validate_config,
     validate_fixture_pins,
 )
@@ -116,7 +118,8 @@ def observations(values=(100, 100, 100), *, graph=300, cpu=10):
         result[tier] = {
             "sample_counts": {key: 60 for key in operations},
             "runs": [{"pair_index": index,
-                      "p95_ns": {key: value for key in operations}}
+                      "p95_ns": {key: value for key in operations},
+                      "sample_counts": {key: 20 for key in operations}}
                      for index, value in enumerate(values, 1)],
             "bytes_per_edge": graph, "construction_cpu_ns": cpu,
             "total_bytes": 1000,
@@ -134,6 +137,10 @@ def physical_fixture(root, adapter="pebble-bleve", *, vector_bytes=50000):
         payloads = {"nodes.parquet": ("graph", b"g" * 300),
                     "symbols.parquet": ("text", b"t" * 400),
                     "vectors.parquet": ("vectors", b"v" * vector_bytes)}
+    if adapter == "pebble-bleve":
+        payloads.update({"graph/000002.log": ("graph", b"g" * 64),
+                         "text-records/000002.log": ("text", b"t" * 80),
+                         "vectors/000002.log": ("vectors", b"v" * 96)})
     entries = []
     for name, (category, payload) in payloads.items():
         target = path / name
@@ -186,12 +193,12 @@ class PairedProtocolTests(unittest.TestCase):
     def test_insufficient_or_missing_stratum_is_partial(self):
         for count in (0, 1, 19):
             candidate = observations()
-            candidate["tier1"]["sample_counts"]["file_miss"] = count
+            candidate["tier1"]["runs"][0]["sample_counts"]["file_miss"] = count
             result = lookup_verdict(candidate, observations())
             self.assertEqual(result["status"], "partial")
             self.assertEqual(result["insufficient_strata"],
                              ["tier1/file_miss"])
-        candidate["tier1"]["sample_counts"].pop("file_miss")
+        candidate["tier1"]["runs"][0]["sample_counts"].pop("file_miss")
         self.assertEqual(lookup_verdict(candidate, observations())["status"],
                          "partial")
 
@@ -223,16 +230,16 @@ class PairedProtocolTests(unittest.TestCase):
         control = observations()
         candidate = observations()
         for row, value in zip(candidate["tier1"]["runs"], (90, 110, 90)):
-            row["p95_ns"]["name"] = value
-            row["p95_ns"]["symbols"] = 80
+            row["p95_ns"]["name_hit"] = value
+            row["p95_ns"]["in_calls"] = 80
         result = base_verdict(candidate, control, control)
-        self.assertEqual(result["read_directions"]["tier1/name"], 0)
-        self.assertEqual(result["read_directions"]["tier1/symbols"], -1)
+        self.assertEqual(result["read_directions"]["tier1/name_hit"], 0)
+        self.assertEqual(result["read_directions"]["tier1/in_calls"], -1)
         self.assertEqual(choose_base(result, result,
                                     cpu_selection_approved=True)[1],
                          "ask_user_unresolved_tie")
         for row in candidate["tier1"]["runs"]:
-            row["p95_ns"]["name"] = 110
+            row["p95_ns"]["name_hit"] = 110
         result = base_verdict(candidate, control, control)
         self.assertEqual(choose_base(result, result,
                                     cpu_selection_approved=True)[1],
@@ -259,7 +266,7 @@ class PhysicalAccountingTests(unittest.TestCase):
             self.assertEqual(one["bytes"]["graph"], two["bytes"]["graph"])
             self.assertEqual(two["bytes"]["vectors"]
                              - one["bytes"]["vectors"], 40000)
-            self.assertEqual(one["bytes"]["text"], 420)
+            self.assertEqual(one["bytes"]["text"], 500)
 
     def test_misclassified_or_unbound_bytes_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -352,8 +359,10 @@ def terminal_fixture(root, *, failure_kind=None):
     report = {"adapter": "parquet-base", "run": 1,
               "manifest_sha256": "a" * 64, "timing_only": True,
               "success": not failed, "builds": [{"cpu_ns": 100}],
-              "checks": [{"status": "failed", "mismatch": True,
+              "checks": [{"query_id": "wrong-edge", "detail": "edge differs",
+                          "status": "failed", "mismatch": True,
                           "failure_kind": failure_kind}] if failed else [],
+              "failures": ["wrong-edge: edge differs"] if failed else [],
               "delta_checks": [], "crash": [],
               "query_latency_sha256": {"queries.jsonl": digest(latency)}}
     components = {name: {"oom_kills": 0, "exit_code": 0,
@@ -406,8 +415,10 @@ class TerminalEvidenceTests(unittest.TestCase):
             directory = root / "mixed"
             report, receipt = terminal_fixture(directory,
                                                 failure_kind="semantic")
-            report["checks"].append({"status": "failed", "mismatch": True,
+            report["checks"].append({"query_id": "io", "detail": "I/O error",
+                                     "status": "failed", "mismatch": True,
                                      "failure_kind": "operation_error"})
+            report["failures"].append("io: I/O error")
             save_terminal(directory, report, receipt)
             self.assert_blocked(directory)
 
@@ -596,6 +607,152 @@ class ConfigRefusalTests(unittest.TestCase):
         expected = "source revision" if sys.platform == "linux" else "Linux CI"
         with self.assertRaisesRegex(RunError, expected):
             validate_config(self.config(), Path("unopened.json"))
+
+
+class C2DecisionRegressionTests(unittest.TestCase):
+    def test_identical_text_cannot_reject_or_create_a_read_conflict(self):
+        control = observations()
+        candidate = observations()
+        for tier in candidate.values():
+            for row in tier["runs"]:
+                row["p95_ns"]["symbols"] = 150
+                row["p95_ns"]["multi_symbols"] = 150
+                row["p95_ns"]["in_calls"] = 90
+        result = base_verdict(candidate, control, control)
+        self.assertEqual(result["status"], "pass")
+        self.assertFalse(any("symbols" in key for key in
+                             result["read_directions"]))
+        self.assertEqual(result["identical_code_reads"][
+            "tier10/multi_symbols"]["ratios"], [1.5, 1.5, 1.5])
+        self.assertNotEqual(choose_base(result, result,
+                                       cpu_selection_approved=True)[1],
+                            "ask_user_read_tradeoff")
+        for row in candidate["tier10"]["runs"]:
+            row["p95_ns"]["multi_name"] = 101
+        self.assertEqual(base_verdict(candidate, control, control)["status"],
+                         "miss")
+
+    def test_pooled_count_cannot_admit_an_underfilled_pair_statistic(self):
+        control = observations()
+        candidate = observations()
+        candidate["tier1"]["sample_counts"]["file_hit"] = 36
+        for row in candidate["tier1"]["runs"]:
+            row["sample_counts"]["file_hit"] = 12
+        self.assertEqual(lookup_verdict(candidate, control)["status"],
+                         "partial")
+        candidate = observations()
+        candidate["tier10"]["runs"][1]["sample_counts"]["multi_traverse2"] = 19
+        result = base_verdict(candidate, control, control)
+        self.assertEqual(result["status"], "partial")
+        self.assertIn("tier10/multi_traverse2",
+                      result["insufficient_read_strata"])
+
+    def test_combined_name_group_does_not_set_a_lookup_direction(self):
+        control = observations()
+        candidate = observations()
+        for row in candidate["tier1"]["runs"]:
+            row["p95_ns"]["name"] = 10000
+        result = base_verdict(candidate, control, control)
+        self.assertEqual(result["status"], "pass")
+        self.assertNotIn("tier1/name", result["read_directions"])
+        self.assertEqual(result["read_directions"]["tier1/name_hit"], 0)
+        self.assertEqual(result["read_directions"]["tier1/name_miss"], 0)
+
+    def test_every_unexplained_runner_failure_blocks_a_semantic_miss(self):
+        extra = ("input changed during run: data", "release failed",
+                 "reset failed", "crash: unavailable", "unknown failure")
+        with tempfile.TemporaryDirectory() as tmp:
+            for index, message in enumerate(extra):
+                root = Path(tmp) / str(index)
+                report, receipt = terminal_fixture(root,
+                                                    failure_kind="semantic")
+                report["failures"].append(message)
+                save_terminal(root, report, receipt)
+                with self.subTest(message=message), self.assertRaises(
+                        RunError) as caught:
+                    collect_run(root, "parquet-base", {"sha256": "a" * 64},
+                                full_protocol=False)
+                self.assertIs(type(caught.exception), RunError)
+                self.assertTrue((root / "run-01/queries.jsonl").exists())
+
+    def test_failure_multiset_does_not_hide_a_duplicate_runner_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "duplicate"
+            report, receipt = terminal_fixture(root, failure_kind="semantic")
+            report["failures"] *= 2
+            save_terminal(root, report, receipt)
+            with self.assertRaises(RunError) as caught:
+                collect_run(root, "parquet-base", {"sha256": "a" * 64},
+                            full_protocol=False)
+            self.assertIs(type(caught.exception), RunError)
+
+
+class OrchestrationRegressionTests(unittest.TestCase):
+    def test_semantic_branch_assembly_and_unknown_failure_receipts(self):
+        scenarios = (("c", 200, "recommend_b"),
+                     ("c", 602, "stop_and_amend"),
+                     ("c_side", 200, "recommend_b"),
+                     ("resource", 200, "comparison_unavailable_stop"))
+        for failed_adapter, b_bytes, branch in scenarios:
+            with self.subTest(case=failed_adapter, b_bytes=b_bytes):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    config, config_path, _ = pinned_inputs(root)
+                    config["data"]["tiny"] = config["data"]["tier1"]
+                    config["data"]["tier100"] = config["data"]["tier1"]
+                    config.update(
+                        source_revision="a" * 40, approval_sha256="a" * 64,
+                        recipe_sha256="a" * 64, binaries={},
+                        memory_limits_bytes={},
+                        base={"main_wall_seconds": 9000,
+                              "side_wall_seconds": 2700},
+                        construction_selection_approved=True)
+
+                    def process_boundary(config, output, label, adapter,
+                                         data_label, deadline, *,
+                                         full_protocol, pair_index=0):
+                        if adapter == failed_adapter and full_protocol:
+                            raise SemanticMismatch([({"checked": True}, {})])
+                        if failed_adapter == "resource" and adapter == "c":
+                            raise RunError("unclassified process failure")
+                        if full_protocol:
+                            return []
+                        ns = (200 if failed_adapter == "c_side"
+                              and adapter == "c" else 100)
+                        groups = {key: [ns] * 20 for key in
+                                  observations()["tier1"]["sample_counts"]}
+                        inventory = {
+                            "construction_cpu_ns": 100,
+                            "raw_build_cpu_ns": 100,
+                            "verification_cpu_ns": 0,
+                            "bytes": {"graph": b_bytes if adapter == "b"
+                                      else 200}, "total": 1000,
+                            "verification": {str(i): {} for i in range(9)}}
+                        return [({"pair_index": pair_index,
+                                  "_inventory": [inventory]}, groups)]
+
+                    with (
+                        patch("measure.validate_config"),
+                        patch("measure.measure_adapter", process_boundary),
+                        patch.dict(os.environ),
+                    ):
+                        if failed_adapter == "resource":
+                            with self.assertRaises(RunError):
+                                run(config, config_path)
+                        else:
+                            run(config, config_path)
+                    result_path = root / "output/result.json"
+                    result = json.loads(result_path.read_text(
+                        encoding="utf-8"))
+                    self.assertEqual(result["branch_taken"], branch)
+                    if failed_adapter == "resource":
+                        self.assertEqual(result["status"], "blocked")
+                        self.assertIn("error", result)
+                        self.assertIn("measured_value", result)
+                    else:
+                        self.assertEqual(result["check2"]["status"], "miss")
+                        self.assertEqual(result["check5"]["b"]["passes"],
+                                         b_bytes == 200)
 
 
 if __name__ == "__main__":

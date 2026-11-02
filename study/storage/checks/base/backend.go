@@ -132,7 +132,7 @@ type sideWriter struct {
 
 func newSideWriter(path string) (*sideWriter, error) {
 	cache := pebble.NewCache(cacheBytes / 2)
-	db, err := pebble.Open(path, &pebble.Options{Cache: cache})
+	db, err := pebble.Open(path, &pebble.Options{Cache: cache, DisableWAL: true})
 	if err != nil {
 		cache.Unref()
 		return nil, err
@@ -146,7 +146,7 @@ func (s *sideWriter) add(n dataset.Node, raw []byte) error {
 		}
 	}
 	if s.batch.Len() >= 4<<20 {
-		if err := s.batch.Commit(pebble.Sync); err != nil {
+		if err := s.batch.Commit(pebble.NoSync); err != nil {
 			return err
 		}
 		s.batch.Reset()
@@ -154,7 +154,7 @@ func (s *sideWriter) add(n dataset.Node, raw []byte) error {
 	return nil
 }
 func (s *sideWriter) finish() error {
-	if err := s.batch.Commit(pebble.Sync); err != nil {
+	if err := s.batch.Commit(pebble.NoSync); err != nil {
 		return err
 	}
 	return s.db.Flush()

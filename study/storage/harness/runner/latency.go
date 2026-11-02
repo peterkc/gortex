@@ -24,17 +24,11 @@ func latencyFromPending(p pendingCheck, check workload.Check) (queryLatency, err
 	if p.NS <= 0 {
 		return queryLatency{}, fmt.Errorf("supported query %s lacks positive engine elapsed_ns", p.Query.ID)
 	}
-	missing := false
-	switch p.Query.Op {
-	case "id":
-		missing = p.Answer.Missing
-	case "name", "file":
-		missing = len(p.Answer.Nodes) == 0
-	}
+	missing := lookupMissing(p.Query, p.Answer)
 	return queryLatency{QueryID: p.Query.ID, Operation: p.Query.Op, Kind: p.Query.Kind, NS: p.NS, Warmup: p.Warmup, Missing: missing, Status: check.Status}, nil
 }
 
-type lookupRepeatKey struct{}
+type queryMinimumKey struct{}
 
 func lookupMissing(query workload.Query, answer workload.Answer) bool {
 	switch query.Op {
@@ -45,4 +39,29 @@ func lookupMissing(query workload.Query, answer workload.Answer) bool {
 	default:
 		return false
 	}
+}
+
+// Only design-specific, judged strata receive repetition. Shared text paths
+// remain observational. Empty means this operation is not judged here.
+func sampleStratum(q workload.Query, a workload.Answer) string {
+	switch q.Op {
+	case "id", "name", "file":
+		if lookupMissing(q, a) {
+			return q.Op + "_miss"
+		}
+		return q.Op + "_hit"
+	case "in", "multi_in":
+		if q.Kind == "calls" {
+			return q.Op + "_calls"
+		}
+	case "traverse2", "traverse3", "multi_name", "multi_traverse2", "multi_traverse3":
+		return q.Op
+	}
+	return ""
+}
+func sampleRepetitions(stratum string, warmCount, minimum int) int {
+	if stratum == "" || minimum <= 1 {
+		return 1
+	}
+	return max(1, (minimum+max(1, warmCount)-1)/max(1, warmCount))
 }

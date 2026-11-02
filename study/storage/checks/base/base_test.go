@@ -518,3 +518,30 @@ func TestOpenRejectsInconsistentVerificationRows(t *testing.T) {
 		t.Fatal("inconsistent row witness accepted")
 	}
 }
+
+func TestSealedSideStoreHasNoWALBytes(t *testing.T) {
+	ref, _, err := (Backend{SideIndex: true}).Build(context.Background(), conformance.Fixture(), filepath.Join(t.TempDir(), "sealed"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := filepath.WalkDir(filepath.Join(ref.Path, "side"), func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if filepath.Ext(path) == ".log" {
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			if info.Size() > 0 {
+				t.Fatalf("sealed side retained WAL bytes: %s (%d)", path, info.Size())
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

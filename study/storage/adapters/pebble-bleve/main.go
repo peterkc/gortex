@@ -134,7 +134,7 @@ func writeRecords(ctx context.Context, d dataset.Dataset, put func([]byte, []byt
 		if e := putJSON(key("N", n.ID), n); e != nil {
 			return e
 		}
-		for _, k := range [][]byte{key("A", n.Name, n.ID), key("P", n.FilePath, n.ID), key("K", n.Kind, n.ID)} {
+		for _, k := range [][]byte{key("A", n.Name, n.ID), key("P", n.FilePath, n.ID)} {
 			if e := put(k, []byte(n.ID)); e != nil {
 				return e
 			}

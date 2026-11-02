@@ -8,7 +8,9 @@ import (
 	"gxstudy/adapter"
 	"gxstudy/conformance"
 	"gxstudy/dataset"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -126,22 +128,36 @@ func TestPhysicalStoresKeepScopesAndOneSharedCache(t *testing.T) {
 	}
 	defer opened.Close()
 	stores := opened.(*segment).kv.(*scopedKV)
+	expectedPrefixes := map[string]string{"graph": "AFIMNOP", "text-records": "SC", "vectors": "V"}
+	seen := map[byte]int{}
 	for _, name := range []string{"graph", "text-records", "vectors"} {
 		if stores.stores[name] == nil {
 			t.Fatal("missing physical scope", name)
 		}
+		rows := 0
 		if err := stores.stores[name].Scan([]byte{}, func(key, value []byte) error {
-			if recordScope(key) != name {
-				t.Fatalf("prefix in wrong store: %q in %s", key, name)
+			if len(key) == 0 || !strings.ContainsRune(expectedPrefixes[name], rune(key[0])) {
+				t.Fatalf("key in wrong physical store: %q in %s", key, name)
 			}
+			rows++
+			seen[key[0]]++
 			return nil
 		}); err != nil {
 			t.Fatal(err)
+		}
+		if rows == 0 {
+			t.Fatal("physical store is empty", name)
 		}
 		if err := stores.stores[name].db.Set([]byte("write"), []byte("x"), pebble.Sync); !errors.Is(err, pebble.ErrReadOnly) {
 			t.Fatal("store is writable", name, err)
 		}
 	}
+	for _, prefix := range []byte{'N', 'S', 'C', 'V'} {
+		if seen[prefix] == 0 {
+			t.Fatal("missing stored record family", string(prefix))
+		}
+	}
+
 	if pebbleCaches.users != 3 {
 		t.Fatal("split stores did not share one cache", pebbleCaches.users)
 	}
@@ -149,8 +165,10 @@ func TestPhysicalStoresKeepScopesAndOneSharedCache(t *testing.T) {
 	if err := dataset.ReadJSON(filepath.Join(ref.Path, "seal.json"), &manifest); err != nil {
 		t.Fatal(err)
 	}
+	expectedCategories := map[string]string{"graph": "graph", "text-records": "text", "vectors": "vectors", "symbols.bleve": "text", "content.bleve": "text"}
 	for _, file := range manifest.Files {
-		if file.Category != artifactCategory(file.Name) {
+		first := strings.Split(filepath.ToSlash(file.Name), "/")[0]
+		if expectedCategories[first] == "" || file.Category != expectedCategories[first] {
 			t.Fatal("wrong physical byte category", file)
 		}
 	}
@@ -171,5 +189,34 @@ func TestPartialSplitOpenReleasesEveryCacheReference(t *testing.T) {
 	}
 	if pebbleCaches.users != 0 || pebbleCaches.cache != nil {
 		t.Fatal("partial open leaked cache ownership")
+	}
+}
+
+func TestSealedStoresHaveNoWALBytes(t *testing.T) {
+	ref, _, err := (backend{}).Build(context.Background(), conformance.Fixture(), filepath.Join(t.TempDir(), "sealed"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, store := range []string{"graph", "text-records", "vectors"} {
+		if err := filepath.WalkDir(filepath.Join(ref.Path, store), func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			if filepath.Ext(path) == ".log" {
+				info, err := entry.Info()
+				if err != nil {
+					return err
+				}
+				if info.Size() > 0 {
+					t.Fatalf("sealed %s retained WAL bytes: %s (%d)", store, path, info.Size())
+				}
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

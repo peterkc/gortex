@@ -160,7 +160,7 @@ func buildKV(ctx context.Context, path string, d dataset.Dataset, addSymbol, add
 		}
 	}()
 	for _, name := range []string{"graph", "text-records", "vectors"} {
-		store, e := openPebble(filepath.Join(path, name), pebble.Options{})
+		store, e := openPebble(filepath.Join(path, name), pebble.Options{DisableWAL: true})
 		if e != nil {
 			return e
 		}
@@ -173,7 +173,7 @@ func buildKV(ctx context.Context, path string, d dataset.Dataset, addSymbol, add
 			return err
 		}
 		if batch.Len() >= 4<<20 {
-			if err := batch.Commit(pebble.Sync); err != nil {
+			if err := batch.Commit(pebble.NoSync); err != nil {
 				return err
 			}
 			batch.Reset()
@@ -184,7 +184,7 @@ func buildKV(ctx context.Context, path string, d dataset.Dataset, addSymbol, add
 		return err
 	}
 	for _, name := range []string{"graph", "text-records", "vectors"} {
-		if err = batches[name].Commit(pebble.Sync); err != nil {
+		if err = batches[name].Commit(pebble.NoSync); err != nil {
 			return err
 		}
 		if err = stores.stores[name].db.Flush(); err != nil {

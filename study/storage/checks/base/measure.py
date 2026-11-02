@@ -1,6 +1,7 @@
 """CI-only Checks 1, 2 and 5 over the accepted separate-process runner."""
 
 import argparse
+from collections import Counter
 import hashlib
 import json
 import math
@@ -27,8 +28,7 @@ class SemanticMismatch(RunError):
         self.reports = reports
 
 
-LOOKUP_MIN_SAMPLES = 20
-LOOKUP_MISS_REPEATS = 20
+MIN_QUERY_SAMPLES = 20
 TIMING_RUNS = 3
 
 
@@ -124,7 +124,7 @@ def combined_status(statuses):
     return "pass"
 
 
-def paired_ratios(candidate, reference, key):
+def paired_runs(candidate, reference):
     left = {row["pair_index"]: row for row in candidate["runs"]}
     right = {row["pair_index"]: row for row in reference["runs"]}
     expected = set(range(1, TIMING_RUNS + 1))
@@ -132,10 +132,20 @@ def paired_ratios(candidate, reference, key):
             or len(candidate["runs"]) != TIMING_RUNS
             or len(reference["runs"]) != TIMING_RUNS):
         raise RunError("fresh-process pairs are incomplete or mismatched")
+    return [(left[index], right[index]) for index in sorted(left)]
+
+
+def sufficient_samples(candidate, reference, key):
+    return all(type(row.get("sample_counts", {}).get(key)) is int
+               and row["sample_counts"][key] >= MIN_QUERY_SAMPLES
+               for pair in paired_runs(candidate, reference) for row in pair)
+
+
+def paired_ratios(candidate, reference, key):
     ratios = []
-    for index in sorted(left):
-        numerator = left[index]["p95_ns"].get(key)
-        denominator = right[index]["p95_ns"].get(key)
+    for left, right in paired_runs(candidate, reference):
+        numerator = left["p95_ns"].get(key)
+        denominator = right["p95_ns"].get(key)
         if (type(numerator) is not int or numerator <= 0
                 or type(denominator) is not int or denominator <= 0):
             raise RunError(f"missing paired read: {key}")
@@ -350,10 +360,16 @@ def collect_run(directory, expected_adapter, data, *, full_protocol):
         failed_checks = [check for check in checks
                          if check.get("mismatch") is True
                          or check.get("status") == "failed"]
-        mismatch = bool(failed_checks) and all(
+        check_failures = Counter(
+            check["query_id"] + ": " + check["detail"]
+            for check in failed_checks)
+        unexplained_failures = Counter(report["failures"]) != check_failures
+        mismatch = bool(failed_checks) and not unexplained_failures and all(
             check.get("mismatch") is True
             and check.get("failure_kind") == "semantic"
             for check in failed_checks)
+        if report["success"] and (failed_checks or report["failures"]):
+            raise RunError("successful result contains failures")
         if receipt["success"] != report["success"]:
             raise RunError("inconsistent terminal success states")
         if not report["success"]:
@@ -404,8 +420,8 @@ def measure_adapter(config, output, label, adapter, data_label, deadline,
                "-runs", "1", "-warmup=false", "-crash-trials", "12",
                "-safety-timeout", f"{config['safety_timeout_seconds']}s",
                "-binding", str(binding_path), "-cgroup-root",
-               config["cgroup_root"], "-lookup-miss-repeats",
-               "1" if full_protocol else str(LOOKUP_MISS_REPEATS)]
+               config["cgroup_root"], "-min-query-samples",
+               "1" if full_protocol else str(MIN_QUERY_SAMPLES)]
     if not full_protocol:
         command.append("-timing-only")
     binding = {
@@ -621,8 +637,8 @@ def lookup_verdict(candidate, reference):
             for kind in ("hit", "miss"):
                 key = f"{operation}_{kind}"
                 label = f"{tier}/{key}"
-                if min(candidate[tier]["sample_counts"].get(key, 0),
-                       reference[tier]["sample_counts"].get(key, 0)) < 20:
+                if not sufficient_samples(
+                        candidate[tier], reference[tier], key):
                     insufficient.append(label)
                     statuses.append("partial")
                     continue
@@ -631,8 +647,8 @@ def lookup_verdict(candidate, reference):
                 statuses.append(ratio_status(values, 1.5))
     return {"status": ("partial" if insufficient else
                        combined_status(statuses)),
-            "target": "each paired lookup hit/miss p95 <= 1.5x same-host A",
-            "minimum_samples": LOOKUP_MIN_SAMPLES,
+            "target": "paired lookup p95 <= 1.5x A; >=20 samples per run",
+            "minimum_samples_per_run": MIN_QUERY_SAMPLES,
             "insufficient_strata": insufficient, "measured_value": ratios}
 
 
@@ -642,13 +658,19 @@ def base_verdict(candidate, a, b):
     reads = {}
     directions = {}
     observations = {}
+    shared_reads = {}
+    insufficient = []
     for tier in ("tier1", "tier10", "tier100"):
-        required = ["name", "symbols", "in_calls", "traverse2", "traverse3"]
+        required = ["name_hit", "name_miss", "in_calls", "traverse2",
+                    "traverse3"]
         if tier != "tier1":
-            required += ["multi_name", "multi_symbols", "multi_in_calls",
-                         "multi_traverse2", "multi_traverse3"]
+            required += ["multi_name", "multi_in_calls", "multi_traverse2",
+                         "multi_traverse3"]
         for operation in required:
             key = f"{tier}/{operation}"
+            if not sufficient_samples(candidate[tier], b[tier], operation):
+                insufficient.append(key)
+                continue
             ratios = paired_ratios(candidate[tier], b[tier], operation)
             observations[key] = ratios
             directions[key] = (-1 if all(value < 1 for value in ratios) else
@@ -656,19 +678,33 @@ def base_verdict(candidate, a, b):
             if operation.startswith(("multi_", "traverse")):
                 reads[key] = ratios
                 statuses.append(ratio_status(ratios, 1.0))
+        shared = (["symbols"] if tier == "tier1"
+                  else ["symbols", "multi_symbols"])
+        for operation in shared:
+            pairs = paired_runs(candidate[tier], b[tier])
+            present = all(operation in row["p95_ns"]
+                          for pair in pairs for row in pair)
+            shared_reads[f"{tier}/{operation}"] = {
+                "ratios": (paired_ratios(candidate[tier], b[tier], operation)
+                           if present else None),
+                "judged": False,
+                "reason": "identical Bleve mapping/query and fanout code"}
     disk = {tier: row["bytes_per_edge"] for tier, row in candidate.items()}
     statuses.append("pass" if max(disk.values()) <= 300 else "miss")
-    status = combined_status(statuses)
+    status = ("partial" if insufficient or lookup["status"] == "partial"
+              else combined_status(statuses))
     return {
         "passes": status == "pass", "status": status, "lookup": lookup,
         "cross_repo_traversal_ratios": reads, "read_directions": directions,
         "read_p95_ratios": observations, "serving_bytes_per_edge": disk,
+        "insufficient_read_strata": insufficient,
+        "identical_code_reads": shared_reads,
+        "minimum_samples_per_run": MIN_QUERY_SAMPLES,
         "construction_cpu_ns": sum(row["construction_cpu_ns"]
                                    for row in candidate.values()),
         "total_bytes": sum(row["total_bytes"] for row in candidate.values()),
         "construction_scope": "storage-build CPU on neutral records, "
                               "equal adapter work; read-back CPU separate",
-        "identical_code_reads": "included, judged by paired fresh-run rule",
     }
 
 
@@ -719,8 +755,20 @@ def run(config, config_path):
         "binaries": config["binaries"], "data": config["data"],
         "memory_limits_bytes": config["memory_limits_bytes"],
         "base": config["base"],
-        "lookup_protocol": {"minimum_samples": LOOKUP_MIN_SAMPLES,
-                            "measured_miss_repeats": LOOKUP_MISS_REPEATS},
+        "lookup_protocol": {
+            "minimum_samples_per_run": MIN_QUERY_SAMPLES,
+            "repetitions": "ceil(minimum/discarded warmup stratum count); "
+                           "same warmed keys repeated consecutively",
+            "cold_independent_keys": False,
+            "combined_name_group": "reported only; directions use hit/miss"},
+        "reference_b": {
+            "layout": "split-key-prefix/v1", "neutral_decode_passes": 1,
+            "wal": "disabled for private bulk build; flush/close/seal sync",
+            "kind_index": "omitted; unused by every Reader",
+            "compaction": "flush/close only, no forced final compaction; "
+                          "sealed LSM shape can vary with background timing",
+            "historical_options_study": "different layout/two-pass identity; "
+                                        "not directly comparable"},
         "paired_protocol": {"fresh_runs": TIMING_RUNS,
                             "crossing_ceiling": "partial", "epsilon": 0},
         "whole_product_construction": {
