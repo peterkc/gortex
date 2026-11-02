@@ -165,6 +165,7 @@ func checkedAnswer(ctx context.Context, q workload.Query, w workload.Expected, g
 // pendingCheck contains one bounded observation, never the source corpus. Real
 // Expected values hold repeatable disk descriptors, not loaded records.
 type pendingCheck struct {
+	NS int64 `json:"elapsed_ns"`
 	// Preserve runtime-only fields without changing the public query format.
 	Sources       []dataset.Dataset
 	NativeScoring bool

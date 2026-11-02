@@ -50,6 +50,7 @@ func Summarize(ns []int64) Distribution {
 }
 
 type BuildRecord struct {
+	CPU           int64              `json:"cpu_ns"`
 	ArtifactBytes int64              `json:"artifact_bytes"`
 	Repo          string             `json:"repo"`
 	DurationNS    int64              `json:"duration_ns"`
@@ -112,6 +113,7 @@ type Result struct {
 	Failures       []string                `json:"failures"`
 	Success        bool                    `json:"success"`
 	TimingOnly     bool                    `json:"timing_only,omitempty"`
+	QueryLatencies map[string]string       `json:"query_latency_sha256,omitempty"`
 }
 
 // MarshalJSON leaves the full protocol unchanged and omits unrun timing phases.
@@ -710,6 +712,24 @@ func queryRun(ctx context.Context, s map[string]adapter.Segment, m adapter.Multi
 			checks = append(checks, check)
 		}
 	}
+	var latencies *os.File
+	if output, ok := ctx.Value(queryLatencyKey{}).(queryLatencyOutput); ok {
+		latencies, err = os.CreateTemp(output.dir, "query-latencies-*.jsonl")
+		if err != nil {
+			return nil, nil, err
+		}
+		defer func() {
+			err = errors.Join(err, latencies.Close())
+			hash, hashErr := dataset.Hash(latencies.Name())
+			err = errors.Join(err, hashErr)
+			if hashErr == nil {
+				if output.result.QueryLatencies == nil {
+					output.result.QueryLatencies = map[string]string{}
+				}
+				output.result.QueryLatencies[filepath.Base(latencies.Name())] = hash
+			}
+		}()
+	}
 	encoder := json.NewEncoder(spool)
 	for i, q := range qs {
 		q = withPolicy(q, caps)
@@ -740,7 +760,7 @@ func queryRun(ctx context.Context, s map[string]adapter.Segment, m adapter.Multi
 			}
 			samples[metric] = append(samples[metric], ns)
 		}
-		if e := encoder.Encode(pendingCheck{Query: q, Expected: want[i], Sources: want[i].Sources, NativeScoring: q.NativeScoring, MatchRepos: q.MatchRepos, Answer: got, Inputs: inputs, Warmup: isWarm}); e != nil {
+		if e := encoder.Encode(pendingCheck{NS: ns, Query: q, Expected: want[i], Sources: want[i].Sources, NativeScoring: q.NativeScoring, MatchRepos: q.MatchRepos, Answer: got, Inputs: inputs, Warmup: isWarm}); e != nil {
 			return samples, checks, e
 		}
 	}
@@ -760,6 +780,15 @@ func queryRun(ctx context.Context, s map[string]adapter.Segment, m adapter.Multi
 		check, e := row.check(ctx)
 		if e != nil {
 			return samples, checks, e
+		}
+		if latencies != nil && row.Ready == nil {
+			latency, latencyErr := latencyFromPending(row, check)
+			if latencyErr != nil {
+				return samples, checks, latencyErr
+			}
+			if latencyErr = json.NewEncoder(latencies).Encode(latency); latencyErr != nil {
+				return samples, checks, latencyErr
+			}
 		}
 		addCheck(check, row.Warmup)
 	}
@@ -783,6 +812,7 @@ func warmedQueries(ctx context.Context, s map[string]adapter.Segment, m adapter.
 	return queryRun(ctx, s, m, append(warmQ, measuredQ...), append(warmW, measuredW...), caps, len(warmQ))
 }
 func runOnce(ctx context.Context, b *trackedBackend, factory adapter.CatalogFactory, ds []dataset.Dataset, qs []workload.Query, want []workload.Expected, dir string, trials int, safetyTimeout time.Duration, r *Result) (err error) {
+	ctx = context.WithValue(ctx, queryLatencyKey{}, queryLatencyOutput{dir: dir, result: r})
 	var referenceErr error
 	if len(ds) > 0 && ds[0].Source == nil {
 		want, referenceErr = oracle.ReferenceAnswers(ds, qs, want)
@@ -801,9 +831,11 @@ func runOnce(ctx context.Context, b *trackedBackend, factory adapter.CatalogFact
 		start := time.Now()
 		ref, stats, e := b.Build(ctx, d, filepath.Join(dir, "segments", d.Repo))
 		ns := time.Since(start).Nanoseconds()
+		cpu := int64(0)
 		if c := backendClient(b.Backend); c != nil {
 			c.mu.Lock()
 			ns = c.lastBuild
+			cpu = c.lastBuildCPU
 			c.mu.Unlock()
 		}
 		if e != nil {
@@ -816,7 +848,12 @@ func runOnce(ctx context.Context, b *trackedBackend, factory adapter.CatalogFact
 		if e != nil {
 			return e
 		}
-		r.Builds = append(r.Builds, BuildRecord{ArtifactBytes: bytes, Repo: d.Repo, DurationNS: ns, Stats: stats, Ref: ref})
+		if backendClient(b.Backend) != nil {
+			if e = checkBuildCPU(cpu, bytes); e != nil {
+				return e
+			}
+		}
+		r.Builds = append(r.Builds, BuildRecord{CPU: cpu, ArtifactBytes: bytes, Repo: d.Repo, DurationNS: ns, Stats: stats, Ref: ref})
 		refs[d.Repo] = ref
 		buildTimes = append(buildTimes, ns)
 	}
@@ -951,9 +988,11 @@ func runOnce(ctx context.Context, b *trackedBackend, factory adapter.CatalogFact
 	start = time.Now()
 	delta, stats, e := b.BuildDelta(ctx, refs[ds[0].Repo], change, filepath.Join(dir, "delta"))
 	nsDelta := time.Since(start).Nanoseconds()
+	cpuDelta := int64(0)
 	if c := backendClient(b.Backend); c != nil {
 		c.mu.Lock()
 		nsDelta = c.lastBuild
+		cpuDelta = c.lastBuildCPU
 		c.mu.Unlock()
 	}
 	if e != nil {
@@ -966,7 +1005,12 @@ func runOnce(ctx context.Context, b *trackedBackend, factory adapter.CatalogFact
 	if e != nil {
 		return e
 	}
-	r.Delta = BuildRecord{ArtifactBytes: bytes, Repo: ds[0].Repo, DurationNS: nsDelta, Stats: stats, Ref: delta}
+	if backendClient(b.Backend) != nil {
+		if e = checkBuildCPU(cpuDelta, bytes); e != nil {
+			return e
+		}
+	}
+	r.Delta = BuildRecord{CPU: cpuDelta, ArtifactBytes: bytes, Repo: ds[0].Repo, DurationNS: nsDelta, Stats: stats, Ref: delta}
 	r.Metrics["delta_build"] = Summarize([]int64{nsDelta})
 	changed, e := adapter.ChangeSource(ds[0], change)
 	if e != nil {

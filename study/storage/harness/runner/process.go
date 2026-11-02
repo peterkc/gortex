@@ -57,6 +57,7 @@ type ProcessReply struct {
 	Usage               adapter.ResourceUsage
 	Check               workload.Check
 	Elapsed             int64
+	CPU                 int64 `json:"cpu_ns"`
 	Start, End          time.Time
 	Publication         publicationTimes
 	Metrics             map[string]int64
@@ -129,23 +130,35 @@ func (s *ProcessService) Call(req ProcessRequest, out *ProcessReply) (callErr er
 		_, out.NativeMulti = s.backend.(adapter.NativeMulti)
 		_, out.Server = s.backend.(adapter.ServerHooks)
 	case "build":
+		before, err := processCPU()
+		if err != nil {
+			return err
+		}
 		start := time.Now()
-		ref, stats, err := s.backend.Build(ctx, req.Dataset, req.Path)
+		ref, stats, buildErr := s.backend.Build(ctx, req.Dataset, req.Path)
 		out.End = time.Now()
 		out.Start = start
 		out.Elapsed = out.End.Sub(start).Nanoseconds()
 		out.Ref = ref
 		out.Stats = stats
-		return err
+		after, cpuErr := processCPU()
+		out.CPU = after - before
+		return errors.Join(buildErr, cpuErr, checkBuildCPU(out.CPU, stats.Bytes))
 	case "delta":
+		before, err := processCPU()
+		if err != nil {
+			return err
+		}
 		start := time.Now()
-		ref, stats, err := s.backend.BuildDelta(ctx, req.Ref, req.Change, req.Path)
+		ref, stats, buildErr := s.backend.BuildDelta(ctx, req.Ref, req.Change, req.Path)
 		out.End = time.Now()
 		out.Start = start
 		out.Elapsed = out.End.Sub(start).Nanoseconds()
 		out.Ref = ref
 		out.Stats = stats
-		return err
+		after, cpuErr := processCPU()
+		out.CPU = after - before
+		return errors.Join(buildErr, cpuErr, checkBuildCPU(out.CPU, stats.Bytes))
 	case "open":
 		start := time.Now()
 		v, err := s.backend.Open(ctx, req.Path, req.Ref)
@@ -408,6 +421,7 @@ type processClient struct {
 	failure              error
 	log                  *os.File
 	lastBuild            int64
+	lastBuildCPU         int64
 	buildStart, buildEnd time.Time
 	openNS               int64
 	mu                   sync.Mutex
@@ -602,17 +616,19 @@ func (b *remoteBackend) Build(ctx context.Context, d dataset.Dataset, path strin
 	r, e := b.client.call(ctx, ProcessRequest{Op: "build", Dataset: d, Path: path})
 	b.client.mu.Lock()
 	b.client.lastBuild = r.Elapsed
+	b.client.lastBuildCPU = r.CPU
 	b.client.buildStart, b.client.buildEnd = r.Start, r.End
 	b.client.mu.Unlock()
-	return r.Ref, r.Stats, e
+	return r.Ref, r.Stats, errors.Join(e, checkBuildCPU(r.CPU, r.Stats.Bytes))
 }
 func (b *remoteBackend) BuildDelta(ctx context.Context, ref adapter.SegmentRef, c adapter.FileChange, path string) (adapter.SegmentRef, adapter.BuildStats, error) {
 	r, e := b.client.call(ctx, ProcessRequest{Op: "delta", Ref: ref, Change: c, Path: path})
 	b.client.mu.Lock()
 	b.client.lastBuild = r.Elapsed
+	b.client.lastBuildCPU = r.CPU
 	b.client.buildStart, b.client.buildEnd = r.Start, r.End
 	b.client.mu.Unlock()
-	return r.Ref, r.Stats, e
+	return r.Ref, r.Stats, errors.Join(e, checkBuildCPU(r.CPU, r.Stats.Bytes))
 }
 func (b *remoteBackend) Open(ctx context.Context, path string, ref adapter.SegmentRef) (adapter.Segment, error) {
 	r, e := b.client.call(ctx, ProcessRequest{Op: "open", Path: path, Ref: ref})

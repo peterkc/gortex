@@ -119,6 +119,9 @@ func TestActualCLIProcessesAndFullProtocol(t *testing.T) {
 	if !report.Success || len(report.DeltaChecks) == 0 || len(report.Concurrent.CommitRaceWindows) != len(stages) || len(report.Crash) != 2 {
 		t.Fatal("full protocol did not run", report.Failures)
 	}
+	if len(report.Builds) == 0 || report.Builds[0].CPU <= 0 || report.Delta.CPU <= 0 {
+		t.Fatal("engine construction CPU missing", report.Builds, report.Delta.CPU)
+	}
 	if report.PeakRSSBytes != receipt.Components["engine"].PeakRSSBytes {
 		t.Fatal("reported RSS is not engine-only")
 	}
