@@ -8,6 +8,7 @@ import (
 	"gxstudy/conformance"
 	"gxstudy/dataset"
 	"gxstudy/runner"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -110,7 +111,7 @@ func TestServingAndDelta(t *testing.T) {
 		}
 	}
 	hits, err := s.VectorTopK(ctx, d.Vectors[0].Values, 2)
-	if err != nil || len(hits) != 2 || hits[0].ID != "a" || hits[0].Score != 1 {
+	if err != nil || !validSelfFixtureHits(hits) {
 		t.Fatal(hits, err)
 	}
 	if _, err = s.VectorTopK(ctx, []float32{1}, 1); err == nil {
@@ -265,4 +266,39 @@ func TestBuildNestedPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.Close()
+}
+
+// Native metric_cos_gt<float> rounds its square roots, product and division.
+// Four float32 epsilons at 1 remain below the 1e-6 fixture acceptance ceiling.
+const selfScoreRounding = 4.0 / (1 << 23)
+
+func validSelfFixtureHits(hits []adapter.Hit) bool {
+	return len(hits) == 2 && hits[0].ID == "a" && hits[1].ID == "b" &&
+		math.Abs(hits[0].Score-1) <= selfScoreRounding &&
+		math.Abs(hits[1].Score) <= 1+selfScoreRounding && hits[1].Score < 0.5
+}
+
+func TestSelfFixtureRejectsWrongVectorsAndOrdering(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hits []adapter.Hit
+		want bool
+	}{
+		{"exact", []adapter.Hit{{ID: "a", Score: 1}, {ID: "b", Score: -0.08}}, true},
+		{"one-float32-step", []adapter.Hit{{ID: "a", Score: float64(math.Nextafter32(1, 0))}, {ID: "b", Score: -0.08}}, true},
+		{"rounding-boundary", []adapter.Hit{{ID: "a", Score: 1 - selfScoreRounding}, {ID: "b", Score: -0.08}}, true},
+		{"outside-rounding", []adapter.Hit{{ID: "a", Score: 1 - 2*selfScoreRounding}, {ID: "b", Score: -0.08}}, false},
+		{"wrong-vector", []adapter.Hit{{ID: "b", Score: 1}, {ID: "a", Score: -0.08}}, false},
+		{"wrong-self-score", []adapter.Hit{{ID: "a", Score: 0.5}, {ID: "b", Score: -0.08}}, false},
+		{"reversed", []adapter.Hit{{ID: "b", Score: -0.08}, {ID: "a", Score: 1}}, false},
+		{"both-score-one", []adapter.Hit{{ID: "a", Score: 1}, {ID: "b", Score: 1}}, false},
+		{"missing-hit", []adapter.Hit{{ID: "a", Score: 1}}, false},
+		{"nonfinite", []adapter.Hit{{ID: "a", Score: math.NaN()}, {ID: "b", Score: -0.08}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := validSelfFixtureHits(tc.hits); got != tc.want {
+				t.Fatalf("valid self fixture=%v, want %v: %v", got, tc.want, tc.hits)
+			}
+		})
+	}
 }
