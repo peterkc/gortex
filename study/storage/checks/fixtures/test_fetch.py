@@ -160,6 +160,65 @@ class FixtureFetchTests(unittest.TestCase):
                 self.assertEqual(list(destination.iterdir()), [])
                 self.assertFalse((self.root / "escape").exists())
 
+    def test_download_accepts_matching_file_url(self):
+        source = self.root / "archive-source.bin"
+        content = b"pinned fixture archive\n"
+        source.write_bytes(content)
+        destination = self.root / "archive.bin"
+        spec = {
+            "archive_bytes": len(content),
+            "archive_sha256": hashlib.sha256(content).hexdigest(),
+        }
+        fetch.download(source.as_uri(), destination, spec)
+        self.assertEqual(destination.read_bytes(), content)
+        self.assertFalse(destination.with_suffix(".bin.partial").exists())
+
+    def test_download_rejects_each_length_or_hash_mismatch(self):
+        source = self.root / "archive-source.bin"
+        content = b"pinned fixture archive\n"
+        source.write_bytes(content)
+        matching_hash = hashlib.sha256(content).hexdigest()
+        wrong_hash = hashlib.sha256(b"different archive").hexdigest()
+        cases = (
+            ("overrun", len(content) - 1, matching_hash,
+             "download exceeds pinned bytes", b""),
+            ("short", len(content) + 1, matching_hash,
+             "download length differs", content),
+            ("hash", len(content), wrong_hash,
+             "download hash differs", content),
+        )
+        for name, length, digest, message, partial_content in cases:
+            with self.subTest(name=name):
+                destination = self.root / f"{name}.bin"
+                spec = {"archive_bytes": length, "archive_sha256": digest}
+                with self.assertRaisesRegex(fetch.FetchError, f"^{message}$"):
+                    fetch.download(source.as_uri(), destination, spec)
+                self.assertFalse(destination.exists())
+                partial = destination.with_suffix(".bin.partial")
+                self.assertEqual(partial.read_bytes(), partial_content)
+                self.assertEqual(source.read_bytes(), content)
+
+    def test_latest_tag_is_refused_before_output_creation(self):
+        output = self.root / "fetch-output"
+        approval = self.root / "approval.json"
+        approval.write_text("{}\n", encoding="utf-8")
+        args = fetch.parser().parse_args([
+            "run", "--release-tag", "latest",
+            "--source-revision", "a" * 40,
+            "--launcher", str(self.root / "unavailable-launcher"),
+            "--approval", str(approval),
+            "--cgroup-root", str(self.root / "unused-cgroup"),
+            "--out", str(output), "--data-dir", str(output / "data"),
+            "--runner-memory-bytes", "1048576",
+            "--checker-memory-bytes", "1048576",
+            "--engine-memory-bytes", "1048576", "--wall-seconds", "1",
+        ])
+        with self.assertRaisesRegex(
+            fetch.FetchError, "^moving latest tag refused$",
+        ):
+            fetch.run(args)
+        self.assertFalse(output.exists())
+
     def test_json_arrays_and_duplicate_keys_are_rejected(self):
         path = self.root / "receipt.json"
         for text in ('[]', '{"state":"failed","state":"completed"}'):
