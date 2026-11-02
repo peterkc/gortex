@@ -11,7 +11,7 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.24.2 // indirect
 	github.com/blevesearch/bleve/v2 v2.6.1
-	github.com/blevesearch/bleve_index_api v1.4.1 // indirect
+	github.com/blevesearch/bleve_index_api v1.4.1
 	github.com/blevesearch/geo v0.2.6 // indirect
 	github.com/blevesearch/go-porterstemmer v1.0.3 // indirect
 	github.com/blevesearch/gtreap v0.1.1 // indirect

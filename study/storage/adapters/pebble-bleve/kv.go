@@ -110,32 +110,86 @@ func (p *pebbleKV) Scan(prefix []byte, visit func([]byte, []byte) error) (err er
 	}
 	return it.Error()
 }
-func buildKV(ctx context.Context, path string, d dataset.Dataset) (err error) {
-	store, err := openPebble(path, pebble.Options{})
-	if err != nil {
-		return err
+
+// Stores are physically separate so compressed SSTs, filters and metadata
+// can be counted without estimating a key prefix's share of a mixed file.
+type scopedKV struct{ stores map[string]*pebbleKV }
+
+func recordScope(key []byte) string {
+	if len(key) > 0 {
+		switch key[0] {
+		case 'S', 'C':
+			return "text-records"
+		case 'V':
+			return "vectors"
+		}
 	}
-	defer func() { err = errors.Join(err, store.Close()) }()
-	db := store.db
-	batch := db.NewBatch()
-	defer func() { err = errors.Join(err, batch.Close()) }()
-	err = writeRecords(ctx, d, func(k, v []byte) error {
-		if e := batch.Set(k, v, nil); e != nil {
+	return "graph"
+}
+func (s *scopedKV) Get(key []byte) ([]byte, error) { return s.stores[recordScope(key)].Get(key) }
+func (s *scopedKV) Scan(prefix []byte, visit func([]byte, []byte) error) error {
+	return s.stores[recordScope(prefix)].Scan(prefix, visit)
+}
+func (s *scopedKV) Close() error {
+	var err error
+	for _, name := range []string{"vectors", "text-records", "graph"} {
+		if db := s.stores[name]; db != nil {
+			err = errors.Join(err, db.Close())
+		}
+	}
+	return err
+}
+func openStores(path string) (kvStore, error) {
+	stores := &scopedKV{stores: map[string]*pebbleKV{}}
+	for _, name := range []string{"graph", "text-records", "vectors"} {
+		opened, err := openKV(filepath.Join(path, name))
+		if err != nil {
+			return nil, errors.Join(err, stores.Close())
+		}
+		stores.stores[name] = opened.(*pebbleKV)
+	}
+	return stores, nil
+}
+func buildKV(ctx context.Context, path string, d dataset.Dataset, addSymbol, addContent func(string, string) error) (err error) {
+	stores := &scopedKV{stores: map[string]*pebbleKV{}}
+	defer func() { err = errors.Join(err, stores.Close()) }()
+	batches := map[string]*pebble.Batch{}
+	defer func() {
+		for _, batch := range batches {
+			err = errors.Join(err, batch.Close())
+		}
+	}()
+	for _, name := range []string{"graph", "text-records", "vectors"} {
+		store, e := openPebble(filepath.Join(path, name), pebble.Options{})
+		if e != nil {
 			return e
 		}
+		stores.stores[name] = store
+		batches[name] = store.db.NewBatch()
+	}
+	err = writeRecords(ctx, d, func(key, value []byte) error {
+		batch := batches[recordScope(key)]
+		if err := batch.Set(key, value, nil); err != nil {
+			return err
+		}
 		if batch.Len() >= 4<<20 {
-			if e := batch.Commit(pebble.Sync); e != nil {
-				return e
+			if err := batch.Commit(pebble.Sync); err != nil {
+				return err
 			}
 			batch.Reset()
 		}
 		return nil
-	})
+	}, addSymbol, addContent)
 	if err != nil {
 		return err
 	}
-	if err = batch.Commit(pebble.Sync); err != nil {
-		return err
+	for _, name := range []string{"graph", "text-records", "vectors"} {
+		if err = batches[name].Commit(pebble.Sync); err != nil {
+			return err
+		}
+		if err = stores.stores[name].db.Flush(); err != nil {
+			return err
+		}
 	}
-	return db.Flush()
+	return nil
 }

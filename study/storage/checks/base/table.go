@@ -2,7 +2,6 @@ package base
 
 import (
 	"bufio"
-	"bytes"
 	"container/list"
 	"context"
 	"crypto/sha256"
@@ -11,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"iter"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +18,7 @@ import (
 
 	"github.com/parquet-go/parquet-go"
 	"github.com/parquet-go/parquet-go/compress/snappy"
+	"gxstudy/runner"
 )
 
 // Row tables are sorted by (key,id). Their range directories are a sparse
@@ -35,71 +34,77 @@ type rowRange struct {
 	End   int64  `parquet:"end,delta"`
 }
 
-func encodedRows[T any](records iter.Seq2[T, error], identity func(T) (string, string)) iter.Seq2[row, error] {
-	return func(yield func(row, error) bool) {
-		for value, err := range records {
-			if err != nil {
-				yield(row{}, err)
-				return
-			}
-			raw, err := json.Marshal(value)
-			key, id := identity(value)
-			if !yield(row{Key: key, ID: id, Raw: raw}, err) {
-				return
-			}
-		}
-	}
+type rowSpool struct {
+	file   *os.File
+	buffer *bufio.Writer
 }
 
-// External sort, Parquet compression and range construction all stay inside
-// the engine's construction CPU/memory accounting. Scratch is not a cache.
-func writeTable(ctx context.Context, dir, name string, rows iter.Seq2[row, error], unique bool) (err error) {
-	scratch, err := os.MkdirTemp(dir, "sort-")
+func newRowSpool(path string) (*rowSpool, error) {
+	file, err := os.Create(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer func() { err = errors.Join(err, os.RemoveAll(scratch)) }()
-	input, err := os.Create(filepath.Join(scratch, "input"))
+	return &rowSpool{file: file, buffer: bufio.NewWriterSize(file, 64<<10)}, nil
+}
+func (s *rowSpool) put(r row) error {
+	_, err := fmt.Fprintf(s.buffer, "%s\t%s\t%s\n", hex.EncodeToString([]byte(r.Key)), hex.EncodeToString([]byte(r.ID)), r.Raw)
+	return err
+}
+func (s *rowSpool) close() error { return errors.Join(s.buffer.Flush(), s.file.Close()) }
+
+type tableVerification struct {
+	Rows         int64  `json:"rows"`
+	InputSHA256  string `json:"input_sha256"`
+	OutputSHA256 string `json:"output_sha256"`
+	CPU          int64  `json:"cpu_ns"`
+}
+
+func verifyTable(ctx context.Context, dir, name, expected string, count int64) (result tableVerification, err error) {
+	before, err := runner.ProcessCPU()
 	if err != nil {
-		return err
+		return result, err
 	}
-	buffer := bufio.NewWriterSize(input, 64<<10)
-	for r, e := range rows {
-		if e != nil {
-			return errors.Join(e, input.Close())
-		}
-		if e = ctx.Err(); e != nil {
-			return errors.Join(e, input.Close())
-		}
-		if r.Key == "" && unique {
-			return errors.Join(fmt.Errorf("empty %s identity", name), input.Close())
-		}
-		if _, e = fmt.Fprintf(buffer, "%s\t%s\t%s\n", hex.EncodeToString([]byte(r.Key)), hex.EncodeToString([]byte(r.ID)), r.Raw); e != nil {
-			return errors.Join(e, input.Close())
-		}
+	actual := sha256.New()
+	var rows int64
+	err = scanTable(ctx, dir, name, newBlockCache(4<<20), nil, func(r row) error { rows++; return json.NewEncoder(actual).Encode(r) })
+	after, cpuErr := runner.ProcessCPU()
+	result = tableVerification{Rows: rows, InputSHA256: expected, OutputSHA256: hex.EncodeToString(actual.Sum(nil)), CPU: after - before}
+	if err = errors.Join(err, cpuErr); err != nil {
+		return result, err
 	}
-	if err = errors.Join(buffer.Flush(), input.Close()); err != nil {
-		return err
+	if rows != count || result.InputSHA256 != result.OutputSHA256 {
+		return result, fmt.Errorf("full-payload Parquet round trip differs: %s", name)
 	}
-	sorted := filepath.Join(scratch, "sorted")
-	cmd := exec.CommandContext(ctx, "sort", "-S", "4M", "-T", scratch, "-o", sorted, input.Name())
+	if result.CPU < 0 {
+		return result, fmt.Errorf("negative verification CPU")
+	}
+	return result, nil
+}
+
+// Source decoding has already fanned out into bounded on-disk sort inputs.
+// All sort/index/compression/seal CPU remains construction work. Only the
+// separately recorded, complete read-back verification is excluded from the tie.
+func writeSortedTable(ctx context.Context, dir, scratch, name string, unique bool) (verification tableVerification, err error) {
+	input := filepath.Join(scratch, name+".input")
+	sorted := filepath.Join(scratch, name+".sorted")
+	cmd := exec.CommandContext(ctx, "sort", "-S", "4M", "-T", scratch, "-o", sorted, input)
 	cmd.Env = append(os.Environ(), "LC_ALL=C")
 	if output, e := cmd.CombinedOutput(); e != nil {
-		return fmt.Errorf("sort %s: %w: %s", name, e, output)
+		return verification, fmt.Errorf("sort %s: %w: %s", name, e, output)
 	}
 	source, err := os.Open(sorted)
 	if err != nil {
-		return err
+		return verification, err
 	}
 	defer func() { err = errors.Join(err, source.Close()) }()
 	data, err := os.Create(filepath.Join(dir, name+".parquet"))
 	if err != nil {
-		return err
+		return verification, err
 	}
 	defer func() { err = errors.Join(err, data.Close()) }()
 	ranges, err := os.Create(filepath.Join(dir, name+".ranges.parquet"))
 	if err != nil {
-		return err
+		return verification, err
 	}
 	defer func() { err = errors.Join(err, ranges.Close()) }()
 	options := []parquet.WriterOption{parquet.MaxRowsPerRowGroup(1024), parquet.PageBufferSize(32 << 10), parquet.Compression(&snappy.Codec{})}
@@ -118,68 +123,66 @@ func writeTable(ctx context.Context, dir, name string, rows iter.Seq2[row, error
 	var current rowRange
 	var index int64
 	for {
+		if err = ctx.Err(); err != nil {
+			return verification, err
+		}
 		line, e := reader.ReadString('\n')
 		if e == io.EOF {
 			break
 		}
 		if e != nil {
-			return e
+			return verification, e
 		}
 		parts := strings.SplitN(strings.TrimSuffix(line, "\n"), "\t", 3)
 		if len(parts) != 3 {
-			return fmt.Errorf("invalid sort row")
+			return verification, fmt.Errorf("invalid sort row")
 		}
 		key, e := hex.DecodeString(parts[0])
 		if e != nil {
-			return e
+			return verification, e
 		}
 		id, e := hex.DecodeString(parts[1])
 		if e != nil {
-			return e
+			return verification, e
 		}
-		if index > 0 && current.Key == string(key) && unique {
-			return fmt.Errorf("duplicate %s identity %q", name, key)
+		if unique && (len(key) == 0 || (index > 0 && current.Key == string(key))) {
+			return verification, fmt.Errorf("empty or duplicate %s identity %q", name, key)
 		}
 		if index == 0 || current.Key != string(key) {
 			if index > 0 {
 				current.End = index
 				if _, e = directory.Write([]rowRange{current}); e != nil {
-					return e
+					return verification, e
 				}
 			}
 			current = rowRange{Key: string(key), First: index}
 		}
 		value := row{Key: string(key), ID: string(id), Raw: []byte(parts[2])}
 		if e = json.NewEncoder(expected).Encode(value); e != nil {
-			return e
+			return verification, e
 		}
 		if _, e = writer.Write([]row{value}); e != nil {
-			return e
+			return verification, e
 		}
 		index++
 	}
 	if index > 0 {
 		current.End = index
 		if _, err = directory.Write([]rowRange{current}); err != nil {
-			return err
+			return verification, err
 		}
 	}
 	closeErr := errors.Join(writer.Close(), directory.Close())
 	writer = nil
 	directory = nil
 	if closeErr != nil {
-		return closeErr
+		return verification, closeErr
 	}
-	actual := sha256.New()
-	if err = scanTable(ctx, dir, name, newBlockCache(4<<20), nil, func(r row) error {
-		return json.NewEncoder(actual).Encode(r)
-	}); err != nil {
-		return err
+	verification, err = verifyTable(ctx, dir, name, hex.EncodeToString(expected.Sum(nil)), index)
+	if err != nil {
+		return verification, err
 	}
-	if !bytes.Equal(expected.Sum(nil), actual.Sum(nil)) {
-		return fmt.Errorf("full-payload Parquet round trip differs: %s", name)
-	}
-	return nil
+	return verification, errors.Join(os.Remove(input), os.Remove(sorted))
 }
 
 const blockSize int64 = 32 << 10
@@ -225,15 +228,19 @@ func (f cachedFile) ReadAt(target []byte, offset int64) (int, error) {
 				f.cache.mu.Unlock()
 				return total, err
 			}
+			if n == 0 {
+				f.cache.mu.Unlock()
+				return total, io.EOF
+			}
 			bytes = bytes[:n]
 			element = f.cache.lru.PushFront(cacheEntry{key: key, bytes: bytes})
 			f.cache.entries[key] = element
-			f.cache.used += int64(n)
+			f.cache.used += int64(cap(bytes))
 			for f.cache.used > f.cache.limit && f.cache.lru.Len() > 1 {
 				last := f.cache.lru.Back()
 				entry := last.Value.(cacheEntry)
 				delete(f.cache.entries, entry.key)
-				f.cache.used -= int64(len(entry.bytes))
+				f.cache.used -= int64(cap(entry.bytes))
 				f.cache.lru.Remove(last)
 			}
 		}
@@ -252,30 +259,41 @@ func (f cachedFile) ReadAt(target []byte, offset int64) (int, error) {
 	}
 	return total, nil
 }
-func openRows[T any](path string, cache *blockCache) (*parquet.GenericReader[T], *os.File, error) {
+
+type tableFile struct {
+	file    *os.File
+	parquet *parquet.File
+}
+
+func openTable(path string, cache *blockCache) (*tableFile, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	stat, err := file.Stat()
 	if err != nil {
-		return nil, nil, errors.Join(err, file.Close())
+		return nil, errors.Join(err, file.Close())
 	}
-	pf, err := parquet.OpenFile(cachedFile{file, cache}, stat.Size())
+	parsed, err := parquet.OpenFile(cachedFile{file, cache}, stat.Size())
 	if err != nil {
-		return nil, nil, errors.Join(err, file.Close())
+		return nil, errors.Join(err, file.Close())
 	}
-	if !parquet.EqualNodes(parquet.SchemaOf(new(T)), pf.Schema()) {
-		return nil, nil, errors.Join(fmt.Errorf("unexpected table schema: %s", path), file.Close())
-	}
-	return parquet.NewGenericReader[T](pf), file, nil
+	return &tableFile{file: file, parquet: parsed}, nil
 }
-func tableRange(path, key string, cache *blockCache) (result rowRange, found bool, err error) {
-	reader, file, err := openRows[rowRange](path, cache)
+func openRows[T any](path string, cache *blockCache) (*parquet.GenericReader[T], *os.File, error) {
+	opened, err := openTable(path, cache)
 	if err != nil {
-		return result, false, err
+		return nil, nil, err
 	}
-	defer func() { err = errors.Join(err, reader.Close(), file.Close()) }()
+	if !parquet.EqualNodes(parquet.SchemaOf(new(T)), opened.parquet.Schema()) {
+		return nil, nil, errors.Join(fmt.Errorf("unexpected table schema: %s", path), opened.file.Close())
+	}
+	return parquet.NewGenericReader[T](opened.parquet), opened.file, nil
+}
+
+func tableRange(table *tableFile, key string) (result rowRange, found bool, err error) {
+	reader := parquet.NewGenericReader[rowRange](table.parquet)
+	defer func() { err = errors.Join(err, reader.Close()) }()
 	low, high := int64(0), reader.NumRows()
 	one := make([]rowRange, 1)
 	for low < high {
@@ -320,6 +338,14 @@ func scanTable(ctx context.Context, dir, name string, cache *blockCache, span *r
 		return err
 	}
 	defer func() { err = errors.Join(err, reader.Close(), file.Close()) }()
+	return scanReader(ctx, reader, span, visit)
+}
+func (s *Segment) scan(ctx context.Context, name string, span *rowRange, visit func(row) error) (err error) {
+	reader := parquet.NewGenericReader[row](s.tables[name].parquet)
+	defer func() { err = errors.Join(err, reader.Close()) }()
+	return scanReader(ctx, reader, span, visit)
+}
+func scanReader(ctx context.Context, reader *parquet.GenericReader[row], span *rowRange, visit func(row) error) (err error) {
 	first, end := int64(0), reader.NumRows()
 	if span != nil {
 		first, end = span.First, span.End

@@ -7,6 +7,7 @@ import (
 	"github.com/cockroachdb/pebble/v2/vfs"
 	"gxstudy/adapter"
 	"gxstudy/conformance"
+	"gxstudy/dataset"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -41,12 +42,12 @@ func TestSharedCacheLifecycle(t *testing.T) {
 			t.Fatal(e)
 		}
 		stores = append(stores, opened)
-		graph := opened.(*segment).kv.(*pebbleKV)
+		graph := opened.(*segment).kv.(*scopedKV).stores["graph"]
 		if e := graph.db.Set([]byte("must-not-write"), []byte("x"), pebble.Sync); !errors.Is(e, pebble.ErrReadOnly) {
 			t.Fatal("native write guard missing", e)
 		}
 	}
-	if pebbleCaches.users != 2 || pebbleCaches.cache == nil {
+	if pebbleCaches.users != 6 || pebbleCaches.cache == nil {
 		t.Fatal("cache was not shared")
 	}
 	var wg sync.WaitGroup
@@ -66,7 +67,7 @@ func TestSharedCacheLifecycle(t *testing.T) {
 		})
 	}
 	wg.Wait()
-	if pebbleCaches.users != 2 {
+	if pebbleCaches.users != 6 {
 		t.Fatal("concurrent opener leaked shared cache")
 	}
 	for _, s := range stores {
@@ -80,13 +81,14 @@ func TestSharedCacheLifecycle(t *testing.T) {
 	}
 }
 func TestWritableBuildKeepsNativeLock(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "graph")
+	root := t.TempDir()
+	path := filepath.Join(root, "graph")
 	store, e := openPebble(path, pebble.Options{})
 	if e != nil {
 		t.Fatal(e)
 	}
 	defer store.Close()
-	if e = buildKV(context.Background(), path, conformance.Fixture()); e == nil {
+	if e = buildKV(context.Background(), root, conformance.Fixture(), nil, nil); e == nil {
 		t.Fatal("Build opened an already locked writable path")
 	}
 	if pebbleCaches.users != 1 {
@@ -109,5 +111,65 @@ func TestSealedLockRejectsWritableOptions(t *testing.T) {
 	}
 	if pebbleCaches.users != 0 || pebbleCaches.cache != nil {
 		t.Fatal("invalid options retained a cache")
+	}
+}
+
+func TestPhysicalStoresKeepScopesAndOneSharedCache(t *testing.T) {
+	b := backend{}
+	ref, _, err := b.Build(context.Background(), conformance.Fixture(), filepath.Join(t.TempDir(), "split"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := b.Open(context.Background(), ref.Path, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.Close()
+	stores := opened.(*segment).kv.(*scopedKV)
+	for _, name := range []string{"graph", "text-records", "vectors"} {
+		if stores.stores[name] == nil {
+			t.Fatal("missing physical scope", name)
+		}
+		if err := stores.stores[name].Scan([]byte{}, func(key, value []byte) error {
+			if recordScope(key) != name {
+				t.Fatalf("prefix in wrong store: %q in %s", key, name)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := stores.stores[name].db.Set([]byte("write"), []byte("x"), pebble.Sync); !errors.Is(err, pebble.ErrReadOnly) {
+			t.Fatal("store is writable", name, err)
+		}
+	}
+	if pebbleCaches.users != 3 {
+		t.Fatal("split stores did not share one cache", pebbleCaches.users)
+	}
+	var manifest sealManifest
+	if err := dataset.ReadJSON(filepath.Join(ref.Path, "seal.json"), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range manifest.Files {
+		if file.Category != artifactCategory(file.Name) {
+			t.Fatal("wrong physical byte category", file)
+		}
+	}
+}
+func TestPartialSplitOpenReleasesEveryCacheReference(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"graph", "text-records"} {
+		store, err := openPebble(filepath.Join(root, name), pebble.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := openStores(root); err == nil {
+		t.Fatal("missing vector store accepted")
+	}
+	if pebbleCaches.users != 0 || pebbleCaches.cache != nil {
+		t.Fatal("partial open leaked cache ownership")
 	}
 }

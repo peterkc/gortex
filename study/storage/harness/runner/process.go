@@ -130,7 +130,7 @@ func (s *ProcessService) Call(req ProcessRequest, out *ProcessReply) (callErr er
 		_, out.NativeMulti = s.backend.(adapter.NativeMulti)
 		_, out.Server = s.backend.(adapter.ServerHooks)
 	case "build":
-		before, err := processCPU()
+		before, err := ProcessCPU()
 		if err != nil {
 			return err
 		}
@@ -141,11 +141,11 @@ func (s *ProcessService) Call(req ProcessRequest, out *ProcessReply) (callErr er
 		out.Elapsed = out.End.Sub(start).Nanoseconds()
 		out.Ref = ref
 		out.Stats = stats
-		after, cpuErr := processCPU()
+		after, cpuErr := ProcessCPU()
 		out.CPU = after - before
 		return errors.Join(buildErr, cpuErr, checkBuildCPU(out.CPU, stats.Bytes))
 	case "delta":
-		before, err := processCPU()
+		before, err := ProcessCPU()
 		if err != nil {
 			return err
 		}
@@ -156,7 +156,7 @@ func (s *ProcessService) Call(req ProcessRequest, out *ProcessReply) (callErr er
 		out.Elapsed = out.End.Sub(start).Nanoseconds()
 		out.Ref = ref
 		out.Stats = stats
-		after, cpuErr := processCPU()
+		after, cpuErr := ProcessCPU()
 		out.CPU = after - before
 		return errors.Join(buildErr, cpuErr, checkBuildCPU(out.CPU, stats.Bytes))
 	case "open":

@@ -33,3 +33,16 @@ func latencyFromPending(p pendingCheck, check workload.Check) (queryLatency, err
 	}
 	return queryLatency{QueryID: p.Query.ID, Operation: p.Query.Op, Kind: p.Query.Kind, NS: p.NS, Warmup: p.Warmup, Missing: missing, Status: check.Status}, nil
 }
+
+type lookupRepeatKey struct{}
+
+func lookupMissing(query workload.Query, answer workload.Answer) bool {
+	switch query.Op {
+	case "id":
+		return answer.Missing
+	case "name", "file":
+		return len(answer.Nodes) == 0
+	default:
+		return false
+	}
+}

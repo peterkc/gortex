@@ -25,11 +25,14 @@ func compareRankedAnswer(q workload.Query, w workload.Expected, got workload.Ans
 	fail := func(reason string) workload.Check {
 		c.Mismatch = true
 		c.Status = "failed"
+		c.FailureKind = "semantic"
 		c.Detail = reason
 		return c
 	}
 	if inputs == nil {
-		return fail("native fan-out has no own-score input trace")
+		check := fail("native fan-out has no own-score input trace")
+		check.FailureKind = "operation_error"
+		return check
 	}
 	var all []adapter.Hit
 	for _, input := range inputs {

@@ -13,7 +13,9 @@ import (
 	"gxstudy/adapter"
 )
 
-func buildText(ctx context.Context, path string, rows func(func(string, string) error) error) (err error) {
+// BuildText creates the shared study Bleve mapping. The producer calls add
+// synchronously and returns its errors; BuildText owns and closes the index.
+func BuildText(ctx context.Context, path string, rows func(func(string, string) error) error) (err error) {
 	m := bleve.NewIndexMapping()
 	m.ScoringModel = "bm25"
 	if err = m.AddCustomTokenizer("gxwords", map[string]interface{}{"type": "regexp", "regexp": `[\p{L}\p{N}]+`}); err != nil {
@@ -61,7 +63,10 @@ func buildText(ctx context.Context, path string, rows func(func(string, string) 
 	}
 	return nil
 }
-func searchText(ctx context.Context, ix bleve.Index, text string, k int) ([]adapter.Hit, error) {
+
+// SearchText applies the shared native BM25 policy. Zero k returns no hits;
+// negative k returns all matches. The caller retains ownership of the index.
+func SearchText(ctx context.Context, ix bleve.Index, text string, k int) ([]adapter.Hit, error) {
 	if k == 0 {
 		return nil, nil
 	}
@@ -104,10 +109,10 @@ func searchText(ctx context.Context, ix bleve.Index, text string, k int) ([]adap
 	return hits, nil
 }
 func (s *Segment) SearchSymbols(ctx context.Context, q string, k int) ([]adapter.Hit, error) {
-	return searchText(ctx, s.symbols, q, k)
+	return SearchText(ctx, s.symbols, q, k)
 }
 func (s *Segment) SearchContent(ctx context.Context, q string, k int) ([]adapter.Hit, error) {
-	return searchText(ctx, s.content, q, k)
+	return SearchText(ctx, s.content, q, k)
 }
 
 // TextIndex returns a borrowed read-only index for a Bleve alias. It is valid

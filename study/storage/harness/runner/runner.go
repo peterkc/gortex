@@ -50,7 +50,7 @@ func Summarize(ns []int64) Distribution {
 }
 
 type BuildRecord struct {
-	CPU           int64              `json:"cpu_ns"`
+	CPU           int64              `json:"cpu_ns,omitempty"`
 	ArtifactBytes int64              `json:"artifact_bytes"`
 	Repo          string             `json:"repo"`
 	DurationNS    int64              `json:"duration_ns"`
@@ -175,21 +175,22 @@ func ReferenceCatalog(b adapter.Backend) adapter.CatalogFactory {
 const defaultSafetyTimeout = 30 * time.Second
 
 type runRequest struct {
-	Adapter       string
-	Data          string
-	Out           string
-	Run           int
-	Trials        int
-	SafetyTimeout time.Duration
-	TimingOnly    bool
-	CatalogArgs   []string
-	CatalogResult string
-	Binding       RunBinding
-	RunnerScope   string
-	CheckerScope  string
-	EngineScope   string
-	checker       *processClient
-	engine        *processClient
+	Adapter           string
+	Data              string
+	Out               string
+	Run               int
+	Trials            int
+	SafetyTimeout     time.Duration
+	TimingOnly        bool
+	LookupMissRepeats int
+	CatalogArgs       []string
+	CatalogResult     string
+	Binding           RunBinding
+	RunnerScope       string
+	CheckerScope      string
+	EngineScope       string
+	checker           *processClient
+	engine            *processClient
 }
 
 // trackedBackend owns all refs produced by this run, including crash fixtures.
@@ -274,6 +275,7 @@ func RunCLI(b adapter.Backend, factory adapter.CatalogFactory) error {
 	trials := fs.Int("crash-trials", 12, "hook trials plus this many external-time trials")
 	warm := fs.Bool("warmup", true, "discard one full fresh-process warm-up")
 	timingOnly := fs.Bool("timing-only", false, "time the base workload only; skip update and publication correctness phases")
+	lookupRepeats := fs.Int("lookup-miss-repeats", 1, "fixed measured calls per ID/name/file miss; warmup unchanged")
 	safetyTimeout := fs.Duration("safety-timeout", defaultSafetyTimeout, "safety deadline for each commit-race check and crash child")
 	bindingPath := fs.String("binding", "", "required source/harness/data/recipe/host/command/limit receipt")
 	cgroupRoot := fs.String("cgroup-root", "", "required delegated Linux cgroup-v2 subtree")
@@ -282,6 +284,9 @@ func RunCLI(b adapter.Backend, factory adapter.CatalogFactory) error {
 	}
 	if *data == "" || *out == "" || *runs < 1 || *trials < 1 {
 		return fmt.Errorf("data, out and positive runs/trials required")
+	}
+	if *lookupRepeats < 1 {
+		return fmt.Errorf("lookup-miss-repeats must be positive")
 	}
 	if *safetyTimeout <= 0 {
 		return fmt.Errorf("safety-timeout must be positive")
@@ -322,7 +327,7 @@ func RunCLI(b adapter.Backend, factory adapter.CatalogFactory) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	for run := first; run <= *runs; run++ {
-		req := runRequest{Adapter: b.Name(), Data: *data, Out: *out, Run: run, Trials: *trials, SafetyTimeout: *safetyTimeout, TimingOnly: *timingOnly, Binding: binding}
+		req := runRequest{Adapter: b.Name(), Data: *data, Out: *out, Run: run, Trials: *trials, SafetyTimeout: *safetyTimeout, TimingOnly: *timingOnly, LookupMissRepeats: *lookupRepeats, Binding: binding}
 		if err = controlledRun(ctx, exe, "__measure_run", *cgroupRoot, req); err != nil {
 			return err
 		}
@@ -466,13 +471,20 @@ func loadTier(dir string) ([]dataset.Dataset, []workload.Query, []workload.Expec
 	return ds, qs, want, digest, e
 }
 func runChild(original adapter.Backend, factory adapter.CatalogFactory, req runRequest) error {
+	if req.LookupMissRepeats < 0 {
+		return fmt.Errorf("lookup-miss-repeats must be positive")
+	}
+	if req.LookupMissRepeats == 0 {
+		req.LookupMissRepeats = 1
+	}
+
 	if req.SafetyTimeout < 0 {
 		return fmt.Errorf("safety-timeout must be positive")
 	}
 	if req.SafetyTimeout == 0 {
 		req.SafetyTimeout = defaultSafetyTimeout
 	}
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), lookupRepeatKey{}, req.LookupMissRepeats)
 	if req.checker != nil {
 		ctx = context.WithValue(ctx, checkerContextKey{}, req.checker)
 		ctx = context.WithValue(ctx, sampleDirectoryKey{}, filepath.Join(req.Out, fmt.Sprintf("run-%02d", req.Run)))
@@ -741,32 +753,45 @@ func queryRun(ctx context.Context, s map[string]adapter.Segment, m adapter.Multi
 			}
 			continue
 		}
-		got, inputs, _, _, ns, e := evaluateTimed(ctx, s, m, q)
-		if e != nil {
-			check := workload.Check{QueryID: q.ID, Operation: q.Op, Status: "failed", Mismatch: true, Detail: e.Error()}
-			if errors.Is(e, adapter.ErrUnsupported) && strings.HasPrefix(q.Op, "native_") {
-				check.Status = "unsupported"
-				check.Mismatch = false
+		repeats := 1
+		for attempt := 0; attempt < repeats; attempt++ {
+			got, inputs, _, _, ns, e := evaluateTimed(ctx, s, m, q)
+			if e != nil {
+				check := workload.Check{QueryID: q.ID, Operation: q.Op, Status: "failed", Mismatch: true, Detail: e.Error(), FailureKind: "operation_error"}
+				if errors.Is(e, adapter.ErrUnsupported) && strings.HasPrefix(q.Op, "native_") {
+					check.Status = "unsupported"
+					check.Mismatch = false
+				}
+				if e := encoder.Encode(pendingCheck{Ready: &check, Warmup: isWarm}); e != nil {
+					return samples, checks, e
+				}
+				break
 			}
-			if e := encoder.Encode(pendingCheck{Ready: &check, Warmup: isWarm}); e != nil {
+			if attempt == 0 && !isWarm && lookupMissing(q, got) {
+				if count, ok := ctx.Value(lookupRepeatKey{}).(int); ok && count > 1 {
+					repeats = count
+				}
+			}
+			if !isWarm {
+				metric := q.Op
+				if q.Op == "in" || q.Op == "out" || q.Op == "multi_in" {
+					metric += "_" + q.Kind
+				}
+				samples[metric] = append(samples[metric], ns)
+			}
+			if e := encoder.Encode(pendingCheck{NS: ns, Query: q, Expected: want[i], Sources: want[i].Sources, NativeScoring: q.NativeScoring, MatchRepos: q.MatchRepos, Answer: got, Inputs: inputs, Warmup: isWarm}); e != nil {
 				return samples, checks, e
 			}
-			continue
-		}
-		if !isWarm {
-			metric := q.Op
-			if q.Op == "in" || q.Op == "out" || q.Op == "multi_in" {
-				metric += "_" + q.Kind
-			}
-			samples[metric] = append(samples[metric], ns)
-		}
-		if e := encoder.Encode(pendingCheck{NS: ns, Query: q, Expected: want[i], Sources: want[i].Sources, NativeScoring: q.NativeScoring, MatchRepos: q.MatchRepos, Answer: got, Inputs: inputs, Warmup: isWarm}); e != nil {
-			return samples, checks, e
 		}
 	}
 	if _, err = spool.Seek(0, 0); err != nil {
 		return samples, checks, err
 	}
+	memo, err := newReaderCheckMemo(filepath.Dir(spool.Name()))
+	if err != nil {
+		return samples, checks, err
+	}
+	defer func() { err = errors.Join(err, memo.close()) }()
 	decoder := json.NewDecoder(spool)
 	for {
 		var row pendingCheck
@@ -777,7 +802,10 @@ func queryRun(ctx context.Context, s map[string]adapter.Segment, m adapter.Multi
 		if e != nil {
 			return samples, checks, e
 		}
-		check, e := row.check(ctx)
+		semantic := row
+		semantic.NS = 0
+		semantic.Warmup = false
+		check, e := memo.check(ctx, semantic)
 		if e != nil {
 			return samples, checks, e
 		}

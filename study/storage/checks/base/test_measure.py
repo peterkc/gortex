@@ -2,16 +2,26 @@
 
 import copy
 import subprocess
+import tempfile
+import json
+import sys
 from pathlib import Path
 import unittest
 
-from measure import RunError, choose_base, latency_groups, percentile
+from measure import (
+    RunError, SemanticMismatch, aggregate, artifact_inventory, base_verdict,
+    canonical_output, checked_file, choose_base, collect_run, digest,
+    latency_groups, lookup_verdict, paired_ratios, percentile,
+    protected_snapshot, ratio_status, remove_serving, validate_config,
+    validate_fixture_pins,
+)
 
 
 class SelectionTests(unittest.TestCase):
-    def candidate(self, passes=True, cpu=10, total=20, read=5):
-        return {"passes": passes, "construction_cpu_ns": cpu,
-                "total_bytes": total, "read_p95_ns": {"one": read}}
+    def candidate(self, passes=True, cpu=10, total=20):
+        return {"passes": passes, "status": "pass" if passes else "miss",
+                "construction_cpu_ns": cpu, "total_bytes": total,
+                "read_directions": {"one": 0}}
 
     def test_all_five_rows(self):
         cases = [
@@ -52,8 +62,7 @@ class SelectionTests(unittest.TestCase):
         c = self.candidate()
         self.assertEqual(choose_base(b, c, cpu_selection_approved=True)[1],
                          "ask_user_unresolved_tie")
-        c = {**c, "read_p95_ns": {"one": 4, "two": 7}}
-        b = {**b, "read_p95_ns": {"one": 6, "two": 5}}
+        c = {**c, "read_directions": {"one": -1, "two": 1}}
         original = copy.deepcopy((b, c))
         self.assertEqual(choose_base(b, c, cpu_selection_approved=True)[1],
                          "ask_user_read_tradeoff")
@@ -89,6 +98,504 @@ class TimingEvidenceTests(unittest.TestCase):
         result = subprocess.run([str(script)], capture_output=True)
         self.assertEqual(result.returncode, 2)
         self.assertIn(b"--config", result.stderr)
+
+
+def dump_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+
+def observations(values=(100, 100, 100), *, graph=300, cpu=10):
+    operations = ["id", "name", "file", "symbols", "in_calls", "traverse2",
+                  "traverse3", "multi_name", "multi_symbols", "multi_in_calls",
+                  "multi_traverse2", "multi_traverse3"]
+    operations += [op + "_" + kind for op in ("id", "name", "file")
+                   for kind in ("hit", "miss")]
+    result = {}
+    for tier in ("tier1", "tier10", "tier100"):
+        result[tier] = {
+            "sample_counts": {key: 60 for key in operations},
+            "runs": [{"pair_index": index,
+                      "p95_ns": {key: value for key in operations}}
+                     for index, value in enumerate(values, 1)],
+            "bytes_per_edge": graph, "construction_cpu_ns": cpu,
+            "total_bytes": 1000,
+        }
+    return result
+
+
+def physical_fixture(root, adapter="pebble-bleve", *, vector_bytes=50000):
+    path = root / "run-01/segments/repo"
+    payloads = {"graph/000001.sst": ("graph", b"g" * 300),
+                "text-records/000001.sst": ("text", b"t" * 400),
+                "symbols.bleve/index": ("text", b"s" * 20),
+                "vectors/000001.sst": ("vectors", b"v" * vector_bytes)}
+    if adapter.startswith("parquet-"):
+        payloads = {"nodes.parquet": ("graph", b"g" * 300),
+                    "symbols.parquet": ("text", b"t" * 400),
+                    "vectors.parquet": ("vectors", b"v" * vector_bytes)}
+    entries = []
+    for name, (category, payload) in payloads.items():
+        target = path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+        entries.append({"name": name, "size": len(payload),
+                        "sha256": digest(target), "category": category})
+    seal = {"files": entries}
+    if adapter.startswith("parquet-"):
+        counts = {name: 1 for name in (
+            "nodes", "edges", "files", "symbols", "content", "vectors")}
+        families = {"nodes": "nodes", "names": "nodes", "paths": "nodes",
+                    "out": "edges", "in": "edges", "files": "files",
+                    "symbols": "symbols", "content": "content",
+                    "vectors": "vectors"}
+        seal["meta"] = {"counts": counts}
+        seal["verification"] = {
+            name: {"rows": counts[family], "input_sha256": "a" * 64,
+                   "output_sha256": "a" * 64, "cpu_ns": 1}
+            for name, family in families.items()}
+    dump_json(path / "seal.json", seal)
+    build = {"repo": "repo", "cpu_ns": 100,
+             "ref": {"path": str(path), "digest": digest(path / "seal.json")},
+             "artifact_bytes": sum(item.stat().st_size
+                                   for item in path.glob("**/*")
+                                   if item.is_file())}
+    return build, seal
+
+
+def refresh_seal(build, seal):
+    path = Path(build["ref"]["path"]) / "seal.json"
+    old_size = path.stat().st_size
+    dump_json(path, seal)
+    return {**build, "ref": {**build["ref"], "digest": digest(path)},
+            "artifact_bytes": build["artifact_bytes"]
+                              + path.stat().st_size - old_size}
+
+
+class PairedProtocolTests(unittest.TestCase):
+    def test_exact_lookup_boundary_and_crossing_are_not_rounded(self):
+        control = observations()
+        for values, status in [((150, 150, 150), "pass"),
+                               ((151, 151, 151), "miss"),
+                               ((149, 151, 150), "partial")]:
+            with self.subTest(values=values):
+                result = lookup_verdict(observations(values), control)
+                self.assertEqual(result["status"], status)
+                self.assertEqual(len(result["measured_value"]), 12)
+
+    def test_insufficient_or_missing_stratum_is_partial(self):
+        for count in (0, 1, 19):
+            candidate = observations()
+            candidate["tier1"]["sample_counts"]["file_miss"] = count
+            result = lookup_verdict(candidate, observations())
+            self.assertEqual(result["status"], "partial")
+            self.assertEqual(result["insufficient_strata"],
+                             ["tier1/file_miss"])
+        candidate["tier1"]["sample_counts"].pop("file_miss")
+        self.assertEqual(lookup_verdict(candidate, observations())["status"],
+                         "partial")
+
+    def test_duplicate_missing_and_wrong_pairs_are_rejected(self):
+        for indices in ((1, 2), (1, 2, 2), (4, 5, 6), (1, 2, 3, 3)):
+            candidate = observations()["tier1"]
+            row = candidate["runs"][0]
+            candidate["runs"] = [{**row, "pair_index": index}
+                                 for index in indices]
+            with self.subTest(indices=indices), self.assertRaises(RunError):
+                paired_ratios(candidate, observations()["tier1"], "name")
+
+    def test_serving_and_read_ceilings_remain_300_and_one(self):
+        control = observations()
+        for byte_count, status in ((300, "pass"), (301, "miss")):
+            result = base_verdict(observations(graph=byte_count),
+                                  control, control)
+            self.assertEqual(result["status"], status)
+        candidate = observations()
+        for row in candidate["tier10"]["runs"]:
+            row["p95_ns"]["multi_name"] = 101
+        self.assertEqual(base_verdict(candidate, control, control)["status"],
+                         "miss")
+        candidate["tier10"]["runs"][0]["p95_ns"]["multi_name"] = 99
+        self.assertEqual(base_verdict(candidate, control, control)["status"],
+                         "partial")
+
+    def test_read_conflict_requires_consistent_opposite_directions(self):
+        control = observations()
+        candidate = observations()
+        for row, value in zip(candidate["tier1"]["runs"], (90, 110, 90)):
+            row["p95_ns"]["name"] = value
+            row["p95_ns"]["symbols"] = 80
+        result = base_verdict(candidate, control, control)
+        self.assertEqual(result["read_directions"]["tier1/name"], 0)
+        self.assertEqual(result["read_directions"]["tier1/symbols"], -1)
+        self.assertEqual(choose_base(result, result,
+                                    cpu_selection_approved=True)[1],
+                         "ask_user_unresolved_tie")
+        for row in candidate["tier1"]["runs"]:
+            row["p95_ns"]["name"] = 110
+        result = base_verdict(candidate, control, control)
+        self.assertEqual(choose_base(result, result,
+                                    cpu_selection_approved=True)[1],
+                         "ask_user_read_tradeoff")
+
+    def test_partial_candidate_never_becomes_b_only_pass(self):
+        b = SelectionTests().candidate()
+        c = {**SelectionTests().candidate(False), "status": "partial"}
+        self.assertEqual(choose_base(b, c, cpu_selection_approved=True),
+                         ("comparison_unavailable", "stop_no_recommendation"))
+        self.assertEqual(ratio_status([1, 1, 1], 1), "pass")
+        self.assertEqual(ratio_status([1, 1.01, 0.99], 1), "partial")
+
+
+class PhysicalAccountingTests(unittest.TestCase):
+    def test_exact_scope_sums_and_vector_growth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first, _ = physical_fixture(root / "one")
+            second, _ = physical_fixture(root / "two", vector_bytes=90000)
+            one = artifact_inventory(first, "pebble-bleve")
+            two = artifact_inventory(second, "pebble-bleve")
+            self.assertEqual(sum(one["bytes"].values()), one["total"])
+            self.assertEqual(one["bytes"]["graph"], two["bytes"]["graph"])
+            self.assertEqual(two["bytes"]["vectors"]
+                             - one["bytes"]["vectors"], 40000)
+            self.assertEqual(one["bytes"]["text"], 420)
+
+    def test_misclassified_or_unbound_bytes_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            build, seal = physical_fixture(Path(tmp))
+            seal["files"][-1]["category"] = "graph"
+            build = refresh_seal(build, seal)
+            with self.assertRaises(RunError):
+                artifact_inventory(build, "pebble-bleve")
+            seal["files"][-1]["category"] = "vectors"
+            build = refresh_seal(build, seal)
+            (Path(build["ref"]["path"]) / "unbound").write_bytes(b"x")
+            with self.assertRaises(RunError):
+                artifact_inventory(build, "pebble-bleve")
+
+    def test_readback_cpu_is_separate_and_bad_witnesses_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            build, seal = physical_fixture(Path(tmp), "parquet-base")
+            inventory = artifact_inventory(build, "parquet-base")
+            self.assertEqual(inventory["raw_build_cpu_ns"], 100)
+            self.assertEqual(inventory["verification_cpu_ns"], 9)
+            self.assertEqual(inventory["construction_cpu_ns"], 91)
+            for field, value in (("rows", 2), ("output_sha256", "b" * 64),
+                                 ("cpu_ns", -1), ("cpu_ns", 100)):
+                changed = copy.deepcopy(seal)
+                changed["verification"]["nodes"][field] = value
+                changed_build = refresh_seal(build, changed)
+                with self.subTest(field=field), self.assertRaises(RunError):
+                    artifact_inventory(changed_build, "parquet-base")
+                build = refresh_seal(changed_build, seal)
+
+    def test_cpu_uses_median_and_graph_uses_edge_divisor(self):
+        reports = []
+        for index, cpu in enumerate((10, 100, 20), 1):
+            inventory = {"construction_cpu_ns": cpu, "raw_build_cpu_ns": cpu,
+                         "verification_cpu_ns": 0, "bytes": {"graph": 300},
+                         "total": 1000}
+            report = {"pair_index": index, "_inventory": [inventory]}
+            reports.append((report, {"id_hit": [100] * 20}))
+        result = aggregate(reports, {"counts": {"edges": 2}, "repos": ["r"]})
+        self.assertEqual(result["construction_cpu_ns"], 20)
+        self.assertEqual(result["bytes_per_edge"], 150)
+        self.assertEqual(result["sample_counts"]["id_hit"], 60)
+        with self.assertRaises(RunError):
+            aggregate(reports, {"counts": {"edges": 0}, "repos": ["r"]})
+        with self.assertRaises(RunError):
+            aggregate([], {"counts": {"edges": 2}, "repos": ["r"]})
+
+    def test_successful_removal_keeps_inventory_and_receipts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp) / "timing"
+            build, _ = physical_fixture(run)
+            inventory = artifact_inventory(build, "pebble-bleve")
+            proof = Path(tmp) / "inventory.json"
+            dump_json(proof, inventory)
+            log = Path(tmp) / "engine.log"
+            log.write_text("retained", encoding="utf-8")
+            receipt = Path(tmp) / "removal.jsonl"
+            removed = remove_serving([inventory], run, receipt)
+            self.assertFalse(Path(inventory["path"]).exists())
+            self.assertEqual(len(removed), 1)
+            self.assertTrue(proof.exists())
+            self.assertEqual(log.read_text(encoding="utf-8"), "retained")
+            records = [json.loads(line) for line in
+                       receipt.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([row["state"] for row in records],
+                             ["remove_intent", "removed"])
+            self.assertEqual(records[0]["files"], inventory["files"])
+
+    def test_replaced_or_foreign_serving_directory_is_never_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build, _ = physical_fixture(root / "timing")
+            inventory = artifact_inventory(build, "pebble-bleve")
+            for change in ({"identity": [-1, -1]}, {"repo": "other"}):
+                with self.subTest(change=change), self.assertRaises(RunError):
+                    remove_serving([{**inventory, **change}], root / "timing",
+                                   root / ("receipt-" + next(iter(change))))
+                self.assertTrue(Path(inventory["path"]).exists())
+
+
+def terminal_fixture(root, *, failure_kind=None):
+    root.mkdir()
+    run = root / "run-01"
+    run.mkdir()
+    latency = run / "queries.jsonl"
+    row = {"status": "passed", "elapsed_ns": 10, "warmup": False,
+           "operation": "id", "missing": False}
+    latency.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    failed = failure_kind is not None
+    report = {"adapter": "parquet-base", "run": 1,
+              "manifest_sha256": "a" * 64, "timing_only": True,
+              "success": not failed, "builds": [{"cpu_ns": 100}],
+              "checks": [{"status": "failed", "mismatch": True,
+                          "failure_kind": failure_kind}] if failed else [],
+              "delta_checks": [], "crash": [],
+              "query_latency_sha256": {"queries.jsonl": digest(latency)}}
+    components = {name: {"oom_kills": 0, "exit_code": 0,
+                         "status": "completed"}
+                  for name in ("runner", "checker", "engine")}
+    if failed:
+        components["runner"].update(exit_code=1, status="failed")
+    receipt = {"success": not failed, "components": components,
+               "output_sha256": {}}
+    save_terminal(root, report, receipt)
+    return report, receipt
+
+
+def save_terminal(root, report, receipt):
+    path = root / "parquet-base-tier-01.json"
+    dump_json(path, report)
+    receipt = {**receipt, "output_sha256": {path.name: digest(path)}}
+    dump_json(root / "components-01.json", receipt)
+
+
+class TerminalEvidenceTests(unittest.TestCase):
+    def collect(self, root, *, full=False):
+        return collect_run(root, "parquet-base", {"sha256": "a" * 64},
+                           full_protocol=full)
+
+    def assert_blocked(self, root):
+        with self.assertRaises(RunError) as caught:
+            self.collect(root)
+        self.assertIs(type(caught.exception), RunError)
+
+    def test_complete_success_and_semantic_failure_are_distinct(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            terminal_fixture(root / "success")
+            collected = self.collect(root / "success")
+            self.assertEqual(collected[0][1]["id_hit"], [10])
+            terminal_fixture(root / "semantic", failure_kind="semantic")
+            with self.assertRaises(SemanticMismatch) as caught:
+                self.collect(root / "semantic")
+            self.assertEqual(len(caught.exception.reports), 1)
+            self.assertTrue((root / "semantic/run-01/queries.jsonl").exists())
+
+    def test_operation_unknown_and_mixed_failures_never_fall_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for kind in ("operation_error", "", "unknown"):
+                directory = root / ("kind-" + kind)
+                terminal_fixture(directory, failure_kind=kind)
+                self.assert_blocked(directory)
+            directory = root / "mixed"
+            report, receipt = terminal_fixture(directory,
+                                                failure_kind="semantic")
+            report["checks"].append({"status": "failed", "mismatch": True,
+                                     "failure_kind": "operation_error"})
+            save_terminal(directory, report, receipt)
+            self.assert_blocked(directory)
+
+    def test_oom_deadline_hash_zero_cpu_and_protocol_are_not_misses(self):
+        changes = ("oom", "deadline", "output-hash", "latency-hash",
+                   "zero-cpu", "missing-cpu", "no-builds", "wrong-protocol",
+                   "inconsistent-success")
+        with tempfile.TemporaryDirectory() as tmp:
+            for change in changes:
+                directory = Path(tmp) / change
+                report, receipt = terminal_fixture(directory,
+                                                    failure_kind="semantic")
+                if change == "oom":
+                    receipt["components"]["engine"]["oom_kills"] = 1
+                elif change == "deadline":
+                    receipt["components"]["runner"].update(
+                        status="deadline", exit_code=1)
+                elif change == "latency-hash":
+                    report["query_latency_sha256"]["queries.jsonl"] = "0" * 64
+                elif change == "zero-cpu":
+                    report["builds"][0]["cpu_ns"] = 0
+                elif change == "missing-cpu":
+                    report["builds"][0].pop("cpu_ns")
+                elif change == "no-builds":
+                    report["builds"] = []
+                elif change == "inconsistent-success":
+                    receipt["success"] = True
+                elif change == "wrong-protocol":
+                    report["timing_only"] = False
+                save_terminal(directory, report, receipt)
+                if change == "output-hash":
+                    path = directory / "parquet-base-tier-01.json"
+                    path.write_text("{}", encoding="utf-8")
+                with self.subTest(change=change):
+                    self.assert_blocked(directory)
+                    self.assertTrue((directory / "run-01").exists())
+
+    def test_full_protocol_and_missing_terminal_evidence_are_required(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report, receipt = terminal_fixture(root / "timing")
+            report["timing_only"] = False
+            save_terminal(root / "timing", report, receipt)
+            with self.assertRaises(RunError):
+                self.collect(root / "timing", full=True)
+            (root / "empty").mkdir()
+            self.assert_blocked(root / "empty")
+
+
+def pinned_inputs(root):
+    source = root / "source"
+    config_dir = root / "policy"
+    config_dir.mkdir()
+    config_path = config_dir / "run.json"
+    approval_path = config_dir / "approval.json"
+    dump_json(config_path, {})
+    dump_json(approval_path, {})
+    for name in ("harness", "adapters/sqlite-segment",
+                 "adapters/pebble-bleve", "checks/base"):
+        (source / "study/storage" / name).mkdir(parents=True)
+    data = {}
+    pins = {"schema": "design-c-fixtures/v1", "tiers": {}}
+    for label in ("tier1", "tier10"):
+        directory = root / label
+        part = directory / "repo/manifest.json"
+        dump_json(part, {"repo": "repo"})
+        manifest = {"repos": ["repo"], "counts": {"nodes": 1, "edges": 2},
+                    "sha256": {"repo/manifest.json": digest(part)}}
+        dump_json(directory / "manifest.json", manifest)
+        data[label] = {"path": str(directory),
+                       "sha256": digest(directory / "manifest.json")}
+        pins["tiers"][label] = {
+            "repos": manifest["repos"], "counts": manifest["counts"],
+            "manifest_sha256": data[label]["sha256"],
+            "part_manifests": {"repo": digest(part)}}
+    pin_path = source / "study/storage/checks/fixtures/fixture-pins.json"
+    dump_json(pin_path, pins)
+    config = {"source_root": str(source), "data": data,
+              "approval_path": str(approval_path),
+              "output_dir": str(root / "output")}
+    return config, config_path, pin_path
+
+
+class InputBoundaryTests(unittest.TestCase):
+    def test_exact_pins_not_self_consistent_alternate_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _, pin_path = pinned_inputs(Path(tmp))
+            self.assertEqual(validate_fixture_pins(config), digest(pin_path))
+            path = Path(config["data"]["tier1"]["path"]) / "manifest.json"
+            changed = json.loads(path.read_text(encoding="utf-8"))
+            changed["counts"]["edges"] = 3
+            dump_json(path, changed)
+            config["data"]["tier1"]["sha256"] = digest(path)
+            with self.assertRaises(RunError):
+                validate_fixture_pins(config)
+
+    def test_part_manifest_pin_is_independent_of_top_level_pin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _, _ = pinned_inputs(Path(tmp))
+            part = Path(config["data"]["tier10"]["path"])
+            dump_json(part / "repo/manifest.json", {"repo": "changed"})
+            with self.assertRaises(RunError):
+                validate_fixture_pins(config)
+
+    def test_added_source_fixture_and_policy_files_are_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config, config_path, _ = pinned_inputs(root)
+            before = protected_snapshot(config, config_path)
+            targets = [Path(config["source_root"]) / "study/storage/harness/x",
+                       Path(config["data"]["tier1"]["path"]) / "unexpected",
+                       config_path.parent / "unexpected"]
+            for target in targets:
+                target.write_bytes(b"new")
+                self.assertNotEqual(protected_snapshot(config, config_path),
+                                    before)
+                target.unlink()
+                self.assertEqual(protected_snapshot(config, config_path),
+                                 before)
+
+    def test_canonical_fresh_output_and_alias_rejections(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config, config_path, _ = pinned_inputs(root)
+            self.assertEqual(canonical_output(config, config_path),
+                             root / "output")
+            alias = root / "alias"
+            alias.symlink_to(Path(config["source_root"]),
+                             target_is_directory=True)
+            candidates = [alias / "new", root / "source/../output",
+                          Path(config["source_root"]) / "output",
+                          Path(config["data"]["tier1"]["path"]) / "output",
+                          config_path.parent / "output", root / "source"]
+            for path in candidates:
+                with self.subTest(path=path), self.assertRaises(RunError):
+                    canonical_output({**config, "output_dir": str(path)},
+                                     config_path)
+
+    def test_checked_file_rejects_parent_absolute_and_symlink_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "file").write_bytes(b"x")
+            (root / "alias").symlink_to(root / "file")
+            self.assertEqual(checked_file(root, "file"), root / "file")
+            for name in (str(root / "file"), "../file", "alias"):
+                with self.subTest(name=name), self.assertRaises(RunError):
+                    checked_file(root, name)
+
+
+class ConfigRefusalTests(unittest.TestCase):
+    def config(self):
+        root = Path(__file__).resolve().parents[4]
+        return {
+            "schema": "design-c-base-run/v1", "source_root": str(root),
+            "source_revision": "0" * 40, "recipe_sha256": "a" * 64,
+            "approval_path": "/not-read-before-source-refusal",
+            "approval_sha256": "a" * 64,
+            "base": {"main_wall_seconds": 9000, "side_wall_seconds": 2700},
+            "runs": 3, "safety_timeout_seconds": 900,
+            "memory_limits_bytes": {"runner": 1 << 20, "checker": 1 << 20,
+                                    "engine": 1 << 20},
+            "output_dir": "/not-created", "cgroup_root": "/not-used",
+            "binaries": {}, "data": {},
+            "construction_selection_approved": True,
+        }
+
+    def test_bad_schema_and_caps_refuse_before_source_and_output(self):
+        config = self.config()
+        changes = [({"schema": "unknown"}, "exact documented fields"),
+                   ({"wall_seconds": 100}, "exact documented fields"),
+                   ({"runs": 2}, "three fresh runs"),
+                   ({"runs": True}, "positive runs"),
+                   ({"safety_timeout_seconds": 0}, "positive"),
+                   ({"base": {"main_wall_seconds": 9000}}, "side limits"),
+                   ({"base": {"main_wall_seconds": -1,
+                              "side_wall_seconds": 2700}}, "positive"),
+                   ({"memory_limits_bytes": {"engine": 1}}, "three component"),
+                   ({"memory_limits_bytes": {"runner": 1, "checker": 1,
+                                             "engine": 1}}, "page-aligned")]
+        for change, message in changes:
+            with self.subTest(change=change), self.assertRaisesRegex(
+                    RunError, message):
+                validate_config({**config, **change}, Path("unopened.json"))
+
+    def test_unapproved_source_or_platform_refuses_before_approval_io(self):
+        expected = "source revision" if sys.platform == "linux" else "Linux CI"
+        with self.assertRaisesRegex(RunError, expected):
+            validate_config(self.config(), Path("unopened.json"))
 
 
 if __name__ == "__main__":

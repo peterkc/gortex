@@ -2,11 +2,17 @@ package base
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"iter"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/blevesearch/bleve/v2"
@@ -328,5 +334,187 @@ func TestRangesCrossRowGroupAndStreamStops(t *testing.T) {
 	cancel()
 	if _, err := s.FileNodes(ctx, "unknown"); err == nil {
 		t.Fatal("cancelled missing lookup accepted")
+	}
+}
+
+func countedRows[T any](values []T, calls *int) iter.Seq2[T, error] {
+	return func(yield func(T, error) bool) {
+		*calls = *calls + 1
+		for _, value := range values {
+			if !yield(value, nil) {
+				return
+			}
+		}
+	}
+}
+func TestSingleDecodeFanoutAndCounts(t *testing.T) {
+	for _, sideMode := range []bool{false, true} {
+		d := conformance.Fixture()
+		root := t.TempDir()
+		spools := map[string]*rowSpool{}
+		for _, name := range []string{"nodes", "names", "paths", "out", "in", "files", "symbols", "content", "vectors"} {
+			spool, err := newRowSpool(filepath.Join(root, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			spools[name] = spool
+		}
+		var side *sideWriter
+		if sideMode {
+			var err error
+			side, err = newSideWriter(filepath.Join(root, "side"))
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		calls := [6]int{}
+		symbols, content := 0, 0
+		counts, err := ingestRows(context.Background(), inputRows{countedRows(d.Nodes, &calls[0]), countedRows(d.Edges, &calls[1]), countedRows(d.Files, &calls[2]), countedRows(d.Symbols, &calls[3]), countedRows(d.Content, &calls[4]), countedRows(d.Vectors, &calls[5])}, spools, side, func(string, string) error { symbols++; return nil }, func(string, string) error { content++; return nil })
+		for _, spool := range spools {
+			if closeErr := spool.close(); closeErr != nil {
+				t.Fatal(closeErr)
+			}
+		}
+		if side != nil {
+			err = errors.Join(err, side.finish(), side.close())
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if calls != [6]int{1, 1, 1, 1, 1, 1} || counts != d.Counts() || symbols != len(d.Symbols) || content != len(d.Content) {
+			t.Fatal("source pass or count mismatch", calls, counts)
+		}
+	}
+}
+func TestVerificationRejectsDeliberatePayloadDigestChange(t *testing.T) {
+	root := t.TempDir()
+	scratch := filepath.Join(root, "scratch")
+	if err := os.Mkdir(scratch, 0755); err != nil {
+		t.Fatal(err)
+	}
+	spool, err := newRowSpool(filepath.Join(scratch, "nodes.input"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := spool.put(row{Key: "a", ID: "a", Raw: []byte(`{"id":"a","name":"Alpha"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := spool.close(); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := writeSortedTable(context.Background(), root, scratch, "nodes", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified.Rows != 1 || verified.InputSHA256 != verified.OutputSHA256 {
+		t.Fatal("round trip was not verified", verified)
+	}
+	if _, err := verifyTable(context.Background(), root, "nodes", strings.Repeat("0", 64), 1); err == nil {
+		t.Fatal("changed payload digest accepted")
+	}
+	if _, err := verifyTable(context.Background(), root, "nodes", verified.InputSHA256, 2); err == nil {
+		t.Fatal("dropped row accepted")
+	}
+}
+func TestRetainedMetadataConcurrentReadsAndClose(t *testing.T) {
+	_, s := openFixture(t, Backend{}, conformance.Fixture())
+	original := s.tables["in"].parquet
+	file := s.tables["in"].file
+	var wait sync.WaitGroup
+	for range 8 {
+		wait.Go(func() {
+			for range 5 {
+				edges, err := s.InEdges(context.Background(), "a", "calls")
+				if err != nil || len(edges) != 1 {
+					t.Error("concurrent retained read", edges, err)
+				}
+			}
+		})
+	}
+	wait.Wait()
+	if s.tables["in"].parquet != original {
+		t.Fatal("query reopened/redecoded metadata")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Stat(); err == nil {
+		t.Fatal("close leaked table file")
+	}
+}
+func TestCacheChargesAllocatedShortBlocks(t *testing.T) {
+	cache := newBlockCache(2 * blockSize)
+	for i := 0; i < 10; i++ {
+		path := filepath.Join(t.TempDir(), fmt.Sprint(i))
+		if err := os.WriteFile(path, []byte{byte(i)}, 0600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var value [1]byte
+		if _, err := (cachedFile{file: file, cache: cache}).ReadAt(value[:], 0); err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if cache.used != 2*blockSize || len(cache.entries) != 2 {
+		t.Fatal("short blocks bypassed cache budget", cache.used, len(cache.entries))
+	}
+}
+func TestExportedTextHelpersPreserveMappingAndRefuseMissingTerms(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "text")
+	if err := BuildText(context.Background(), path, func(add func(string, string) error) error { return add("a", "Alpha graph") }); err != nil {
+		t.Fatal(err)
+	}
+	index, err := bleve.OpenUsing(path, map[string]interface{}{"read_only": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	for _, tc := range []struct {
+		term    string
+		k, want int
+	}{{"GRAPH", 10, 1}, {"absent", 10, 0}, {"graph", 0, 0}, {"graph", -1, 1}} {
+		hits, err := SearchText(context.Background(), index, tc.term, tc.k)
+		if err != nil || len(hits) != tc.want {
+			t.Fatal("shared text behavior changed", tc, hits, err)
+		}
+	}
+}
+
+func TestOpenRejectsInconsistentVerificationRows(t *testing.T) {
+	ref, segment := openFixture(t, Backend{}, conformance.Fixture())
+	if err := segment.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(ref.Path, "seal.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest seal
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	witness := manifest.Verification["nodes"]
+	witness.Rows++
+	manifest.Verification["nodes"] = witness
+	raw, err = json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256(raw)
+	ref.Digest = hex.EncodeToString(hash[:])
+	ref.Version = ref.Digest
+	if opened, err := (Backend{}).Open(context.Background(), ref.Path, ref); err == nil {
+		opened.Close()
+		t.Fatal("inconsistent row witness accepted")
 	}
 }

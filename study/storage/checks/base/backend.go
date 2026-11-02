@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"iter"
 	"os"
 	"path/filepath"
 	"slices"
@@ -21,6 +22,7 @@ import (
 	"github.com/blevesearch/bleve/v2"
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/cockroachdb/pebble/v2/vfs"
+	"github.com/parquet-go/parquet-go"
 	"gxstudy/adapter"
 	"gxstudy/dataset"
 )
@@ -42,7 +44,7 @@ func (b Backend) Capabilities() adapter.Capabilities {
 		Ranking:    map[string]adapter.RankPolicy{"symbols": {Mode: "native"}, "content": {Mode: "native"}, "multi_symbols": {Mode: "native"}, "vector": {Exact: true}, "multi_vector": {Exact: true}},
 		Libraries:  []string{"github.com/parquet-go/parquet-go v0.30.1", "github.com/blevesearch/bleve/v2 v2.6.1", "github.com/cockroachdb/pebble/v2 v2.1.7 (side branch only)"},
 		Deployment: "test-only per-repository sealed Parquet directory; reference JSON catalog",
-		Notes:      []string{"GraphAr-style sorted full-payload tables with sparse endpoint range directories, not GraphAr SDK/wire compatibility or dense N+1 offsets.", "Shared 256 MiB serving-cache payload budget across all repositories: Parquet only, or 128 MiB Parquet plus 128 MiB Pebble. No answer cache or resident graph. OS cache, metadata and identical Bleve memory are outside that budget and included in RSS/cgroup peaks.", "Full-payload lookup copies and both adjacency copies count in serving bytes; external-sort CPU and temporary disk belong to construction.", "Build/open/Reader subset only. Product catalog, daemon, retire and recovery are not established."},
+		Notes:      []string{"GraphAr-style sorted full-payload tables with sparse endpoint range directories, not GraphAr SDK/wire compatibility or dense N+1 offsets.", "Shared 256 MiB serving-cache payload budget across all repositories: Parquet only, or 128 MiB Parquet plus 128 MiB Pebble. No answer cache or resident graph. Parsed Parquet metadata and handles survive for the Segment lifetime; OS cache, metadata and identical Bleve memory are outside that budget and included in RSS/cgroup peaks.", "Full-payload lookup copies and both adjacency copies count in serving bytes; external-sort CPU and temporary disk belong to construction.", "Build/open/Reader subset only. Product catalog, daemon, retire and recovery are not established."},
 	}
 }
 
@@ -53,17 +55,18 @@ type sealEntry struct {
 	Category string `json:"category"`
 }
 type seal struct {
-	RoundTrip bool             `json:"round_trip_verified"`
-	Format    string           `json:"format"`
-	Repo      string           `json:"repo"`
-	SideIndex bool             `json:"side_index"`
-	Meta      dataset.Manifest `json:"meta"`
-	Files     []sealEntry      `json:"files"`
+	Verification map[string]tableVerification `json:"verification"`
+	Format       string                       `json:"format"`
+	Repo         string                       `json:"repo"`
+	SideIndex    bool                         `json:"side_index"`
+	Meta         dataset.Manifest             `json:"meta"`
+	Files        []sealEntry                  `json:"files"`
 }
 type Segment struct {
 	dir              string
 	seal             seal
 	cache            *blockCache
+	tables           map[string]*tableFile
 	side             *pebble.DB
 	symbols, content bleve.Index
 	once             sync.Once
@@ -120,43 +123,165 @@ func indexKey(prefix string, fields ...string) []byte {
 	}
 	return []byte(key.String())
 }
-func buildSide(ctx context.Context, d dataset.Dataset, path string) (err error) {
+
+type sideWriter struct {
+	db    *pebble.DB
+	batch *pebble.Batch
+	cache *pebble.Cache
+}
+
+func newSideWriter(path string) (*sideWriter, error) {
 	cache := pebble.NewCache(cacheBytes / 2)
-	defer cache.Unref()
 	db, err := pebble.Open(path, &pebble.Options{Cache: cache})
 	if err != nil {
+		cache.Unref()
+		return nil, err
+	}
+	return &sideWriter{db: db, batch: db.NewBatch(), cache: cache}, nil
+}
+func (s *sideWriter) add(n dataset.Node, raw []byte) error {
+	for _, key := range [][]byte{indexKey("N", n.ID), indexKey("A", n.Name, n.ID), indexKey("P", n.FilePath, n.ID)} {
+		if err := s.batch.Set(key, raw, nil); err != nil {
+			return err
+		}
+	}
+	if s.batch.Len() >= 4<<20 {
+		if err := s.batch.Commit(pebble.Sync); err != nil {
+			return err
+		}
+		s.batch.Reset()
+	}
+	return nil
+}
+func (s *sideWriter) finish() error {
+	if err := s.batch.Commit(pebble.Sync); err != nil {
 		return err
 	}
-	defer func() { err = errors.Join(err, db.Close()) }()
-	batch := db.NewBatch()
-	defer func() { err = errors.Join(err, batch.Close()) }()
-	for n, e := range d.NodeRows() {
-		if e != nil {
+	return s.db.Flush()
+}
+func (s *sideWriter) close() error {
+	err := errors.Join(s.batch.Close(), s.db.Close())
+	s.cache.Unref()
+	return err
+}
+
+type inputRows struct {
+	nodes   iter.Seq2[dataset.Node, error]
+	edges   iter.Seq2[dataset.Edge, error]
+	files   iter.Seq2[dataset.File, error]
+	symbols iter.Seq2[dataset.Symbol, error]
+	content iter.Seq2[dataset.Content, error]
+	vectors iter.Seq2[dataset.Vector, error]
+}
+
+func ingestRows(ctx context.Context, input inputRows, spools map[string]*rowSpool, side *sideWriter, addSymbol, addContent func(string, string) error) (counts dataset.Counts, err error) {
+	put := func(table, key, id string, raw []byte) error {
+		if e := ctx.Err(); e != nil {
 			return e
 		}
-		if e = ctx.Err(); e != nil {
-			return e
+		return spools[table].put(row{Key: key, ID: id, Raw: raw})
+	}
+	for n, e := range input.nodes {
+		if e != nil {
+			return counts, e
 		}
 		raw, e := json.Marshal(n)
 		if e != nil {
-			return e
+			return counts, e
 		}
-		for _, key := range [][]byte{indexKey("N", n.ID), indexKey("A", n.Name, n.ID), indexKey("P", n.FilePath, n.ID)} {
-			if e = batch.Set(key, raw, nil); e != nil {
-				return e
+		for _, v := range []struct{ table, key string }{{"nodes", n.ID}, {"names", n.Name}, {"paths", n.FilePath}} {
+			if e = put(v.table, v.key, n.ID, raw); e != nil {
+				return counts, e
 			}
 		}
-		if batch.Len() >= 4<<20 {
-			if e = batch.Commit(pebble.Sync); e != nil {
-				return e
+		if side != nil {
+			if e = side.add(n, raw); e != nil {
+				return counts, e
 			}
-			batch.Reset()
+		}
+		counts.Nodes++
+	}
+	for edge, e := range input.edges {
+		if e != nil {
+			return counts, e
+		}
+		raw, e := json.Marshal(edge)
+		if e != nil {
+			return counts, e
+		}
+		if e = put("out", edge.From, edge.Kind+"\x00"+edge.To, raw); e != nil {
+			return counts, e
+		}
+		if e = put("in", edge.To, edge.Kind+"\x00"+edge.From, raw); e != nil {
+			return counts, e
+		}
+		counts.Edges++
+		if edge.CrossRepo {
+			counts.CrossEdges++
 		}
 	}
-	if err = batch.Commit(pebble.Sync); err != nil {
-		return err
+	for f, e := range input.files {
+		if e != nil {
+			return counts, e
+		}
+		raw, e := json.Marshal(f)
+		if e != nil {
+			return counts, e
+		}
+		if e = put("files", f.Path, f.Path, raw); e != nil {
+			return counts, e
+		}
+		counts.Files++
 	}
-	return db.Flush()
+	for s, e := range input.symbols {
+		if e != nil {
+			return counts, e
+		}
+		raw, e := json.Marshal(s)
+		if e != nil {
+			return counts, e
+		}
+		if e = put("symbols", s.NodeID, s.NodeID, raw); e != nil {
+			return counts, e
+		}
+		if e = addSymbol(s.NodeID, s.Tokens); e != nil {
+			return counts, e
+		}
+		counts.Symbols++
+	}
+	for c, e := range input.content {
+		if e != nil {
+			return counts, e
+		}
+		raw, e := json.Marshal(c)
+		if e != nil {
+			return counts, e
+		}
+		if e = put("content", c.ChunkID, c.ChunkID, raw); e != nil {
+			return counts, e
+		}
+		if e = addContent(c.ChunkID, c.Body); e != nil {
+			return counts, e
+		}
+		counts.Content++
+	}
+	for v, e := range input.vectors {
+		if e != nil {
+			return counts, e
+		}
+		if e = validVector(v.Values); e != nil {
+			return counts, e
+		}
+		raw, e := json.Marshal(v)
+		if e != nil {
+			return counts, e
+		}
+		if e = put("vectors", v.NodeID, v.NodeID, raw); e != nil {
+			return counts, e
+		}
+		counts.Vectors++
+	}
+	return counts, nil
 }
 
 // Sealed read-only opens may coexist, as in the unchanged B adapter.
@@ -174,9 +299,7 @@ func (f sealedFS) Lock(path string) (io.Closer, error) {
 	return noLock{}, nil
 }
 
-func (b Backend) Build(ctx context.Context, d dataset.Dataset, dir string) (adapter.SegmentRef, adapter.BuildStats, error) {
-	var ref adapter.SegmentRef
-	var stats adapter.BuildStats
+func (b Backend) Build(ctx context.Context, d dataset.Dataset, dir string) (ref adapter.SegmentRef, stats adapter.BuildStats, err error) {
 	if err := ctx.Err(); err != nil {
 		return ref, stats, err
 	}
@@ -188,87 +311,76 @@ func (b Backend) Build(ctx context.Context, d dataset.Dataset, dir string) (adap
 	if err = os.Mkdir(dir, 0755); err != nil {
 		return ref, stats, err
 	}
-	for v, e := range d.VectorRows() {
+	scratch, err := os.MkdirTemp(dir, "sort-")
+	if err != nil {
+		return ref, stats, err
+	}
+	scratchOwned := true
+	defer func() {
+		if scratchOwned {
+			err = errors.Join(err, os.RemoveAll(scratch))
+		}
+	}()
+	names := []string{"nodes", "names", "paths", "out", "in", "files", "symbols", "content", "vectors"}
+	spools := map[string]*rowSpool{}
+	// Keep closure errors visible, including before a private build can seal.
+	closeSpools := func() error {
+		var e error
+		for name, spool := range spools {
+			e = errors.Join(e, spool.close())
+			delete(spools, name)
+		}
+		return e
+	}
+	for _, name := range names {
+		spool, e := newRowSpool(filepath.Join(scratch, name+".input"))
+		if e != nil {
+			return ref, stats, errors.Join(e, closeSpools())
+		}
+		spools[name] = spool
+	}
+	var side *sideWriter
+	if b.SideIndex {
+		side, err = newSideWriter(filepath.Join(dir, "side"))
+		if err != nil {
+			return ref, stats, errors.Join(err, closeSpools())
+		}
+	}
+	var counts dataset.Counts
+	err = BuildText(ctx, filepath.Join(dir, "symbols.bleve"), func(addSymbol func(string, string) error) error {
+		return BuildText(ctx, filepath.Join(dir, "content.bleve"), func(addContent func(string, string) error) error {
+			var e error
+			counts, e = ingestRows(ctx, inputRows{d.NodeRows(), d.EdgeRows(), d.FileRows(), d.SymbolRows(), d.ContentRows(), d.VectorRows()}, spools, side, addSymbol, addContent)
+			return e
+		})
+	})
+	err = errors.Join(err, closeSpools())
+	if side != nil {
+		if err == nil {
+			err = side.finish()
+		}
+		err = errors.Join(err, side.close())
+	}
+	if err != nil {
+		return ref, stats, err
+	}
+	verifications := map[string]tableVerification{}
+	for _, name := range names {
+		unique := name != "names" && name != "paths" && name != "out" && name != "in"
+		verified, e := writeSortedTable(ctx, dir, scratch, name, unique)
 		if e != nil {
 			return ref, stats, e
 		}
-		if e = validVector(v.Values); e != nil {
-			return ref, stats, e
-		}
+		verifications[name] = verified
 	}
-	jobs := []struct {
-		name string
-		rows func() error
-	}{
-		{"nodes", func() error {
-			return writeTable(ctx, dir, "nodes", encodedRows(d.NodeRows(), func(n dataset.Node) (string, string) { return n.ID, n.ID }), true)
-		}},
-		{"names", func() error {
-			return writeTable(ctx, dir, "names", encodedRows(d.NodeRows(), func(n dataset.Node) (string, string) { return n.Name, n.ID }), false)
-		}},
-		{"paths", func() error {
-			return writeTable(ctx, dir, "paths", encodedRows(d.NodeRows(), func(n dataset.Node) (string, string) { return n.FilePath, n.ID }), false)
-		}},
-		{"out", func() error {
-			return writeTable(ctx, dir, "out", encodedRows(d.EdgeRows(), func(e dataset.Edge) (string, string) { return e.From, e.Kind + "\x00" + e.To }), false)
-		}},
-		{"in", func() error {
-			return writeTable(ctx, dir, "in", encodedRows(d.EdgeRows(), func(e dataset.Edge) (string, string) { return e.To, e.Kind + "\x00" + e.From }), false)
-		}},
-		{"files", func() error {
-			return writeTable(ctx, dir, "files", encodedRows(d.FileRows(), func(f dataset.File) (string, string) { return f.Path, f.Path }), true)
-		}},
-		{"symbols", func() error {
-			return writeTable(ctx, dir, "symbols", encodedRows(d.SymbolRows(), func(s dataset.Symbol) (string, string) { return s.NodeID, s.NodeID }), true)
-		}},
-		{"content", func() error {
-			return writeTable(ctx, dir, "content", encodedRows(d.ContentRows(), func(c dataset.Content) (string, string) { return c.ChunkID, c.ChunkID }), true)
-		}},
-		{"vectors", func() error {
-			return writeTable(ctx, dir, "vectors", encodedRows(d.VectorRows(), func(v dataset.Vector) (string, string) { return v.NodeID, v.NodeID }), true)
-		}},
-	}
-	for _, job := range jobs {
-		if err = job.rows(); err != nil {
-			return ref, stats, fmt.Errorf("build %s: %w", job.name, err)
-		}
-	}
-	if b.SideIndex {
-		if err = buildSide(ctx, d, filepath.Join(dir, "side")); err != nil {
-			return ref, stats, err
-		}
-	}
-	if err = buildText(ctx, filepath.Join(dir, "symbols.bleve"), func(add func(string, string) error) error {
-		for s, e := range d.SymbolRows() {
-			if e != nil {
-				return e
-			}
-			if e = add(s.NodeID, s.Tokens); e != nil {
-				return e
-			}
-		}
-		return nil
-	}); err != nil {
+	if err = os.RemoveAll(scratch); err != nil {
 		return ref, stats, err
 	}
-	if err = buildText(ctx, filepath.Join(dir, "content.bleve"), func(add func(string, string) error) error {
-		for c, e := range d.ContentRows() {
-			if e != nil {
-				return e
-			}
-			if e = add(c.ChunkID, c.Body); e != nil {
-				return e
-			}
-		}
-		return nil
-	}); err != nil {
-		return ref, stats, err
-	}
+	scratchOwned = false
 	meta := d.Meta
-	if meta.Counts, err = dataset.CountRows(d); err != nil {
-		return ref, stats, err
-	}
-	manifest := seal{RoundTrip: true, Format: format, Repo: d.Repo, SideIndex: b.SideIndex, Meta: meta}
+	counts.SkippedSpans = meta.Counts.SkippedSpans
+	meta.Counts = counts
+	manifest := seal{Verification: verifications, Format: format, Repo: d.Repo, SideIndex: b.SideIndex, Meta: meta}
 	var dirs []string
 	err = filepath.WalkDir(dir, func(path string, de fs.DirEntry, e error) error {
 		if e != nil {
@@ -365,7 +477,7 @@ func (b Backend) Open(ctx context.Context, dir string, ref adapter.SegmentRef) (
 	if err = json.Unmarshal(raw, &manifest); err != nil {
 		return nil, err
 	}
-	if !manifest.RoundTrip || manifest.Format != format || manifest.Repo != ref.Repo || manifest.SideIndex != b.SideIndex {
+	if manifest.Format != format || manifest.Repo != ref.Repo || manifest.SideIndex != b.SideIndex {
 		return nil, fmt.Errorf("seal identity mismatch")
 	}
 	seen := map[string]bool{}
@@ -394,12 +506,38 @@ func (b Backend) Open(ctx context.Context, dir string, ref adapter.SegmentRef) (
 			}
 		}
 	}
+	counts := manifest.Meta.Counts
+	expectedRows := map[string]int{"nodes": counts.Nodes, "names": counts.Nodes, "paths": counts.Nodes, "out": counts.Edges, "in": counts.Edges, "files": counts.Files, "symbols": counts.Symbols, "content": counts.Content, "vectors": counts.Vectors}
+	for name, rows := range expectedRows {
+		verification, ok := manifest.Verification[name]
+		_, hashError := hex.DecodeString(verification.InputSHA256)
+		if !ok || len(verification.InputSHA256) != 64 || hashError != nil || verification.InputSHA256 != verification.OutputSHA256 || verification.Rows != int64(rows) || verification.CPU < 0 {
+			return nil, fmt.Errorf("missing/invalid verification witness: %s", name)
+		}
+	}
 	cache, pCache, err := acquireCaches(b.SideIndex)
 	if err != nil {
 		return nil, err
 	}
-	s := &Segment{dir: dir, seal: manifest, cache: cache}
+	s := &Segment{dir: dir, seal: manifest, cache: cache, tables: map[string]*tableFile{}}
 	fail := func(e error) (adapter.Segment, error) { return nil, errors.Join(e, s.Close()) }
+	for _, name := range []string{"nodes", "names", "paths", "out", "in", "files", "symbols", "content", "vectors"} {
+		for _, suffix := range []string{"", ".ranges"} {
+			key := name + suffix
+			table, e := openTable(filepath.Join(dir, key+".parquet"), cache)
+			if e != nil {
+				return fail(e)
+			}
+			s.tables[key] = table
+			schema := parquet.SchemaOf(new(row))
+			if suffix != "" {
+				schema = parquet.SchemaOf(new(rowRange))
+			}
+			if !parquet.EqualNodes(schema, table.parquet.Schema()) {
+				return fail(fmt.Errorf("unexpected table schema: %s", key))
+			}
+		}
+	}
 	if b.SideIndex {
 		s.side, err = pebble.Open(filepath.Join(dir, "side"), &pebble.Options{ReadOnly: true, Cache: pCache, FS: sealedFS{FS: vfs.Default, lockPath: filepath.Join(dir, "side", "LOCK")}})
 		if err != nil {
@@ -418,6 +556,9 @@ func (b Backend) Open(ctx context.Context, dir string, ref adapter.SegmentRef) (
 }
 func (s *Segment) Close() error {
 	s.once.Do(func() {
+		for _, table := range s.tables {
+			s.closeErr = errors.Join(s.closeErr, table.file.Close())
+		}
 		if s.content != nil {
 			s.closeErr = errors.Join(s.closeErr, s.content.Close())
 		}

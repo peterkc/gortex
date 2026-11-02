@@ -41,14 +41,16 @@ type segment struct {
 	symbols, content bleve.Index
 }
 type sealFile struct {
-	Name   string
-	Size   int64
-	SHA256 string
+	Name     string `json:"name"`
+	Size     int64  `json:"size"`
+	SHA256   string `json:"sha256"`
+	Category string `json:"category"`
 }
 type sealManifest struct {
-	Repo   string
-	Engine string
-	Files  []sealFile
+	Repo   string     `json:"repo"`
+	Engine string     `json:"engine"`
+	Layout string     `json:"layout"`
+	Files  []sealFile `json:"files"`
 }
 
 func main() {
@@ -72,7 +74,7 @@ func (backend) Capabilities() adapter.Capabilities {
 			"vector":  "emulated exact cosine scan of stored float32 vector blobs",
 			"delta":   "emulated full rebuild from stored primary records",
 		}, Libraries: []string{engineVersion, "github.com/blevesearch/bleve/v2 v2.6.1"},
-		Deployment: "embedded; one graph KV store and two Bleve indexes per sealed repository segment; reference JSON catalog",
+		Deployment: "embedded; graph/text/vector KV stores and two Bleve indexes per sealed repository segment; reference JSON catalog",
 		Notes:      []string{engineCacheNotes, "No answer cache or in-memory graph/vector copy. Bleve ranking is native, not the oracle BM25 formula: sqrt term frequency and disjunction coordination can change rankings.", "Default multi operations and traversal use harness fan-out/BFS. No native multi/traversal interface.", "Open checks manifest digest and artifact sizes, not every file hash; immutable files are trusted after sealing. Build hashes and fsyncs all artifacts."},
 	}
 }
@@ -111,7 +113,7 @@ func recordID(k []byte) (string, error) {
 	b, e := base64.RawURLEncoding.DecodeString(parts[1])
 	return string(b), e
 }
-func writeRecords(ctx context.Context, d dataset.Dataset, put func([]byte, []byte) error) error {
+func writeRecords(ctx context.Context, d dataset.Dataset, put func([]byte, []byte) error, addSymbol, addContent func(string, string) error) error {
 	putJSON := func(k []byte, v any) error {
 		if e := ctx.Err(); e != nil {
 			return e
@@ -167,6 +169,11 @@ func writeRecords(ctx context.Context, d dataset.Dataset, put func([]byte, []byt
 		if e := putJSON(key("S", s.NodeID), s); e != nil {
 			return e
 		}
+		if addSymbol != nil {
+			if e := addSymbol(s.NodeID, s.Tokens); e != nil {
+				return e
+			}
+		}
 	}
 	for c, readErr := range d.ContentRows() {
 		if readErr != nil {
@@ -174,6 +181,11 @@ func writeRecords(ctx context.Context, d dataset.Dataset, put func([]byte, []byt
 		}
 		if e := putJSON(key("C", c.ChunkID), c); e != nil {
 			return e
+		}
+		if addContent != nil {
+			if e := addContent(c.ChunkID, c.Body); e != nil {
+				return e
+			}
 		}
 	}
 	for v, readErr := range d.VectorRows() {
@@ -250,38 +262,15 @@ func (backend) Build(ctx context.Context, d dataset.Dataset, path string) (adapt
 	if e = os.Mkdir(path, 0755); e != nil {
 		return ref, stats, e
 	}
-	if e = buildKV(ctx, filepath.Join(path, "graph"), d); e != nil {
-		return ref, stats, e
-	}
-	e = buildText(ctx, filepath.Join(path, "symbols.bleve"), func(add func(string, string) error) error {
-		for s, readErr := range d.SymbolRows() {
-			if readErr != nil {
-				return readErr
-			}
-			if e := add(s.NodeID, s.Tokens); e != nil {
-				return e
-			}
-		}
-		return nil
+	e = buildText(ctx, filepath.Join(path, "symbols.bleve"), func(addSymbol func(string, string) error) error {
+		return buildText(ctx, filepath.Join(path, "content.bleve"), func(addContent func(string, string) error) error {
+			return buildKV(ctx, path, d, addSymbol, addContent)
+		})
 	})
 	if e != nil {
 		return ref, stats, e
 	}
-	e = buildText(ctx, filepath.Join(path, "content.bleve"), func(add func(string, string) error) error {
-		for c, readErr := range d.ContentRows() {
-			if readErr != nil {
-				return readErr
-			}
-			if e := add(c.ChunkID, c.Body); e != nil {
-				return e
-			}
-		}
-		return nil
-	})
-	if e != nil {
-		return ref, stats, e
-	}
-	manifest := sealManifest{Repo: d.Repo, Engine: engineVersion}
+	manifest := sealManifest{Repo: d.Repo, Engine: engineVersion, Layout: "split-key-prefix/v1"}
 	var dirs []string
 	e = filepath.WalkDir(path, func(p string, de fs.DirEntry, err error) error {
 		if err != nil {
@@ -306,7 +295,7 @@ func (backend) Build(ctx context.Context, d dataset.Dataset, path string) (adapt
 		if err != nil {
 			return err
 		}
-		manifest.Files = append(manifest.Files, sealFile{Name: rel, Size: info.Size(), SHA256: hash})
+		manifest.Files = append(manifest.Files, sealFile{Name: rel, Size: info.Size(), SHA256: hash, Category: artifactCategory(rel)})
 		stats.Bytes += info.Size()
 		f, err := os.OpenFile(p, os.O_RDWR, 0)
 		if err != nil {
@@ -370,7 +359,7 @@ func (backend) Open(ctx context.Context, path string, ref adapter.SegmentRef) (a
 	if e = json.Unmarshal(b, &manifest); e != nil {
 		return nil, e
 	}
-	if manifest.Repo != ref.Repo || manifest.Engine != engineVersion {
+	if manifest.Repo != ref.Repo || manifest.Engine != engineVersion || manifest.Layout != "split-key-prefix/v1" {
 		return nil, fmt.Errorf("seal identity mismatch")
 	}
 	for _, f := range manifest.Files {
@@ -385,7 +374,7 @@ func (backend) Open(ctx context.Context, path string, ref adapter.SegmentRef) (a
 			return nil, fmt.Errorf("artifact size mismatch: %s", f.Name)
 		}
 	}
-	kv, e := openKV(filepath.Join(path, "graph"))
+	kv, e := openStores(path)
 	if e != nil {
 		return nil, e
 	}
@@ -632,4 +621,16 @@ func (b backend) BuildDelta(ctx context.Context, old adapter.SegmentRef, c adapt
 	ref, stats, e := b.Build(ctx, adapter.ApplyChange(d, c), path)
 	stats.Notes = append(stats.Notes, "delta is a full rebuild; old primary records decoded from KV outside the serving path")
 	return ref, stats, e
+}
+
+func artifactCategory(name string) string {
+	first := strings.Split(filepath.ToSlash(name), "/")[0]
+	switch first {
+	case "vectors":
+		return "vectors"
+	case "text-records", "symbols.bleve", "content.bleve":
+		return "text"
+	default:
+		return "graph"
+	}
 }

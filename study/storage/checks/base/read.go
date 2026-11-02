@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"iter"
 	"math"
-	"path/filepath"
 	"slices"
 	"strings"
 
@@ -20,11 +19,11 @@ func lookupRows[T any](ctx context.Context, s *Segment, table, key string) (valu
 	if err = ctx.Err(); err != nil {
 		return nil, err
 	}
-	span, found, err := tableRange(filepath.Join(s.dir, table+".ranges.parquet"), key, s.cache)
+	span, found, err := tableRange(s.tables[table+".ranges"], key)
 	if err != nil || !found {
 		return nil, err
 	}
-	err = scanTable(ctx, s.dir, table, s.cache, &span, func(r row) error {
+	err = s.scan(ctx, table, &span, func(r row) error {
 		if r.Key != key {
 			return fmt.Errorf("range directory key mismatch")
 		}
@@ -139,7 +138,7 @@ func (s *Segment) VectorTopK(ctx context.Context, query []float32, k int) ([]ada
 		norm += float64(x) * float64(x)
 	}
 	var hits []adapter.Hit
-	err := scanTable(ctx, s.dir, "vectors", s.cache, nil, func(r row) error {
+	err := s.scan(ctx, "vectors", nil, func(r row) error {
 		var v dataset.Vector
 		if err := json.Unmarshal(r.Raw, &v); err != nil {
 			return err
@@ -168,7 +167,7 @@ func (s *Segment) VectorTopK(ctx context.Context, query []float32, k int) ([]ada
 	return adapter.Top(hits, k), nil
 }
 func allRows[T any](ctx context.Context, s *Segment, table string) (values []T, err error) {
-	err = scanTable(ctx, s.dir, table, s.cache, nil, func(r row) error {
+	err = s.scan(ctx, table, nil, func(r row) error {
 		var value T
 		if err := json.Unmarshal(r.Raw, &value); err != nil {
 			return err
@@ -227,7 +226,7 @@ var stopIteration = errors.New("consumer stopped row iteration")
 
 func recordRows[T any](ctx context.Context, s *Segment, table string) iter.Seq2[T, error] {
 	return func(yield func(T, error) bool) {
-		err := scanTable(ctx, s.dir, table, s.cache, nil, func(r row) error {
+		err := s.scan(ctx, table, nil, func(r row) error {
 			var value T
 			if err := json.Unmarshal(r.Raw, &value); err != nil {
 				return err

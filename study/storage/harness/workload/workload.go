@@ -60,6 +60,7 @@ type Expected struct {
 	Answer  Answer `json:"answer"`
 }
 type Check struct {
+	FailureKind   string   `json:"failure_kind,omitempty"`
 	NativeScoring bool     `json:"native_scoring,omitempty"`
 	LocalOverlap  *float64 `json:"local_overlap_at_k,omitempty"`
 	CutoffTie     bool     `json:"cutoff_tie_accepted,omitempty"`
@@ -132,7 +133,12 @@ func Validate(q Query, a Answer) error {
 }
 func Compare(q Query, want, got Answer) Check {
 	c := Check{QueryID: q.ID, Operation: q.Op, Status: "passed", NativeScoring: q.NativeScoring}
-	fail := func(detail string) { c.Mismatch = true; c.Status = "failed"; c.Detail = detail }
+	fail := func(detail string) {
+		c.Mismatch = true
+		c.Status = "failed"
+		c.Detail = detail
+		c.FailureKind = "semantic"
+	}
 	if err := Validate(q, got); err != nil {
 		fail(err.Error())
 		return c
