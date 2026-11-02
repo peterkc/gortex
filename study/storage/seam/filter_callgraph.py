@@ -7,6 +7,9 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import TextIO
+
+from run_limited import HARD_LIMIT, HEADROOM, SOFT_LIMIT
 
 
 COMMIT = "7096db70df5ab7d83e20a28d9ccfd0994812acf9"
@@ -52,21 +55,74 @@ def filename(value: str, source: str) -> str:
     return value[len(prefix):] if value.startswith(prefix) else value
 
 
-def parse_edges(lines: Iterable[str], source: str) -> list[Edge] | Invalid:
-    edges = []
-    for number, line in enumerate(lines, 1):
-        fields = line.rstrip("\n").split("\t")
-        if (len(fields) != 11 or not fields[0] or not fields[4]
-                or not fields[9].isascii() or not fields[9].isdigit()
-                or fields[10] not in ("static", "dynamic")):
-            return Invalid(f"edge line {number}: malformed 11-field TSV")
-        caller = Node(fields[0], fields[1], filename(fields[2], source),
-                      fields[3])
-        callee = Node(fields[4], fields[5], filename(fields[6], source),
-                      fields[7])
-        edges.append(Edge(caller, callee, filename(fields[8], source),
-                          int(fields[9]), fields[10]))
-    return edges
+@dataclass(frozen=True, slots=True)
+class Frontier:
+    edges: frozenset[Edge]
+    symbols: Mapping[str, frozenset[Node]]
+    total_edges: int
+    packages: frozenset[str]
+    raw_frontier_edges: int
+    diagnostic_occurrences: int
+
+
+def parse_edge(line: str, number: int, source: str) -> Edge | Invalid:
+    fields = line.rstrip("\n").split("\t")
+    if (len(fields) != 11 or not fields[0] or not fields[4]
+            or not fields[9].isascii() or not fields[9].isdigit()
+            or fields[10] not in ("static", "dynamic")):
+        return Invalid(f"edge line {number}: malformed 11-field TSV")
+    caller = Node(fields[0], fields[1], filename(fields[2], source), fields[3])
+    callee = Node(fields[4], fields[5], filename(fields[6], source), fields[7])
+    return Edge(caller, callee, filename(fields[8], source), int(fields[9]),
+                fields[10])
+
+
+def scan_frontier(stream: TextIO, names: Sequence[str], source: str,
+                  diagnostics: TextIO) -> Frontier | Invalid:
+    """Read all edges, but retain only the reverse depth-three frontier."""
+    if not names or len(names) != len(set(names)):
+        return Invalid("seam manifest: empty or duplicate symbols")
+    symbols = {name: set() for name in names}
+    retained, packages, seen, frontier = set(), set(), set(), set()
+    total, raw_frontier, diagnostic_count = 0, 0, 0
+    for depth in range(3):
+        if depth and not frontier:
+            break
+        stream.seek(0)
+        callers = set()
+        for number, line in enumerate(stream, 1):
+            edge = parse_edge(line, number, source)
+            if isinstance(edge, Invalid):
+                return edge
+            if depth == 0:
+                total += 1
+                for node in (edge.caller, edge.callee):
+                    if node.package:
+                        packages.add(node.package)
+                    if node.name in symbols:
+                        symbols[node.name].add(node)
+                    if not node.file or not node.package or node.synthetic:
+                        diagnostic_count += 1
+                        diagnostics.write(json.dumps({
+                            "edge_line": number, "node": asdict(node),
+                        }) + "\n")
+            if ((depth == 0 and edge.callee.name in symbols)
+                    or (depth > 0 and edge.callee in frontier)):
+                retained.add(edge)
+                raw_frontier += 1
+                callers.add(edge.caller)
+        seeds = {node for group in symbols.values() for node in group}
+        seen.update(seeds)
+        frontier = callers - seen
+        seen.update(frontier)
+    missing = [name for name, nodes in symbols.items() if not nodes]
+    if missing:
+        return Invalid("symbols absent from edge graph (not zero): "
+                       + ", ".join(sorted(missing)))
+    frozen_symbols = {name: frozenset(nodes)
+                      for name, nodes in symbols.items()}
+    return Frontier(frozenset(retained), frozen_symbols, total,
+                    frozenset(packages), raw_frontier, diagnostic_count)
 
 
 def caller_set(nodes: Iterable[Node]) -> dict:
@@ -87,30 +143,23 @@ def caller_set(nodes: Iterable[Node]) -> dict:
             "split": groups}
 
 
-def analyze(edges: Sequence[Edge],
-            symbols: Sequence[Mapping]) -> dict | Invalid:
-    names = [row["symbol"] for row in symbols]
-    if not names or len(names) != len(set(names)):
-        return Invalid("seam manifest: empty or duplicate symbols")
-    unique = set(edges)
-    nodes = {node for edge in unique for node in (edge.caller, edge.callee)}
-    missing = sorted(set(names) - {node.name for node in nodes})
-    if missing:
-        return Invalid("symbols absent from edge graph (not zero): "
-                       + ", ".join(missing))
+def analyze(graph: Frontier, symbols: Sequence[Mapping]) -> dict:
+    names = {row["symbol"] for row in symbols}
+    nodes = {node for edge in graph.edges
+             for node in (edge.caller, edge.callee)}
     incoming = defaultdict(set)
-    for edge in unique:
+    for edge in graph.edges:
         incoming[edge.callee].add(edge.caller)
     reports, all_direct, all_depth3 = {}, set(), set()
     for row in symbols:
-        seeds = {n for n in nodes if n.name == row["symbol"]}
+        seeds = graph.symbols[row["symbol"]]
         direct = {caller for n in seeds for caller in incoming[n]}
         seen, frontier, levels = set(seeds), set(seeds), []
         for _ in range(3):
             frontier = {c for n in frontier for c in incoming[n]} - seen
             seen.update(frontier)
             levels.append(sorted(frontier))
-        depth3 = set(seen) - seeds
+        depth3 = seen - seeds
         all_direct.update(direct)
         all_depth3.update(depth3)
         reports[row["symbol"]] = {
@@ -118,13 +167,17 @@ def analyze(edges: Sequence[Edge],
             "depth3": caller_set(depth3),
             "by_shortest_depth": [caller_set(level) for level in levels],
         }
-    selected = sorted((e for e in unique if e.callee.name in names),
+    selected = sorted((e for e in graph.edges if e.callee.name in names),
                       key=lambda e: (e.callee, e.caller, e.file, e.line,
                                      e.dispatch))
     return {
-        "edge_counts": {"raw": len(edges), "unique": len(unique),
-                        "duplicates": len(edges) - len(unique),
-                        "selected": len(selected)},
+        "edge_counts": {"raw": graph.total_edges,
+                        "frontier_unique": len(graph.edges),
+                        "frontier_raw": graph.raw_frontier_edges,
+                        "frontier_duplicates": graph.raw_frontier_edges
+                        - len(graph.edges), "selected": len(selected)},
+        "package_count": len(graph.packages),
+        "diagnostic_endpoint_occurrences": graph.diagnostic_occurrences,
         "selected_edges": [asdict(e) for e in selected],
         "symbols": reports, "direct_union": caller_set(all_direct),
         "depth3_union": caller_set(all_depth3),
@@ -132,6 +185,49 @@ def analyze(edges: Sequence[Edge],
                              if not n.package or not n.file],
         "synthetic_nodes": [asdict(n) for n in sorted(nodes) if n.synthetic],
     }
+
+
+def resource_facts(launcher: Mapping, kernel: Mapping,
+                   host: Mapping) -> dict | Invalid:
+    memory = launcher.get("memory", {})
+    binding = launcher.get("binding", {})
+    argv = kernel.get("argv", [])
+    bound_command = binding.get("command", [])
+    if (launcher.get("schema") != "external-command/v1"
+            or launcher.get("state") != "completed"
+            or launcher.get("removed") is not True
+            or not launcher.get("deadline")
+            or memory.get("status") != "completed"
+            or memory.get("limit_bytes") != HARD_LIMIT
+            or memory.get("oom_kills") != 0 or memory.get("exit_code") != 0
+            or type(memory.get("cgroup_peak_bytes")) is not int
+            or memory["cgroup_peak_bytes"] <= 0):
+        return Invalid("analysis launcher did not complete within its limits")
+    if (kernel.get("schema") != "seam-kernel-limits/v1"
+            or kernel.get("memory.max") != HARD_LIMIT
+            or kernel.get("memory.swap.max") != 0
+            or kernel.get("memory.oom.group") != 1
+            or kernel.get("gomemlimit") != SOFT_LIMIT
+            or kernel.get("cgroup") != launcher.get("cgroup")):
+        return Invalid("analysis kernel memory limit facts mismatch")
+    if (not isinstance(argv, list) or len(argv) != 3 + len(OPTIONS)
+            or argv[1:3] != ["run", TOOL] or argv[3:] != OPTIONS
+            or not isinstance(bound_command, list)
+            or bound_command[-len(argv):] != argv):
+        return Invalid("analysis argv/options differ from launcher receipt")
+    if (type(host.get("memtotal_bytes")) is not int
+            or host["memtotal_bytes"] < HARD_LIMIT + HEADROOM
+            or type(host.get("nproc")) is not int or host["nproc"] < 1):
+        return Invalid("refuse: insufficient MemTotal or invalid nproc")
+    return {"memory_max_bytes": kernel["memory.max"],
+            "memory_swap_max_bytes": kernel["memory.swap.max"],
+            "memory_oom_group": kernel["memory.oom.group"],
+            "memory_peak_bytes": memory["cgroup_peak_bytes"],
+            "oom_kills": memory["oom_kills"], "exit_code": memory["exit_code"],
+            "deadline": launcher["deadline"], "gomemlimit": SOFT_LIMIT,
+            "memtotal_bytes": host["memtotal_bytes"], "nproc": host["nproc"],
+            "argv": argv, "options": argv[3:],
+            "launcher_binary_sha256": binding.get("harness_sha256")}
 
 
 def markdown(report: Mapping) -> str:
@@ -145,7 +241,12 @@ def markdown(report: Mapping) -> str:
             "synthetic and unresolved nodes are reported in JSON.", "",
             "## Run identity", "", "```json",
             json.dumps(report["identity"], indent=2), "```", "",
+            "## Resources", "", "```json",
+            json.dumps(report["resources"], indent=2), "```", "",
             "## Counts", "", json.dumps(report["edge_counts"]), "",
+            "Raw/package counts cover the full graph. Unique/duplicate edge "
+            "counts cover only the retained frontier. Full node diagnostics "
+            "are streamed to node-diagnostics.jsonl.", "",
             "| Symbol | Direct | Depth 3 |", "| --- | ---: | ---: |"]
     for name, counts in report["symbols"].items():
         rows.append(f"| `{name}` | {counts['direct']['count']} | "
@@ -158,7 +259,8 @@ def markdown(report: Mapping) -> str:
                     f"{len(union['files'])} files, "
                     f"{len(union['packages'])} packages. Split: {split}.")
     for key in ("unresolved_nodes", "synthetic_nodes"):
-        rows.append(f"- {key}: {len(report[key])}; full list in JSON.")
+        rows.append(f"- {key}: {len(report[key])} distinct frontier nodes; "
+                    "full-graph occurrences in node-diagnostics.jsonl.")
     rows.extend("- " + text for text in report["non_callable_limits"])
     return "\n".join(rows) + "\n"
 
@@ -173,13 +275,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--go-version")
     parser.add_argument("--commit")
     parser.add_argument("--tree")
+    parser.add_argument("--launcher-receipt", type=Path)
+    parser.add_argument("--kernel-limits", type=Path)
+    parser.add_argument("--host-capacity", type=Path)
+    parser.add_argument("--package-list", type=Path)
     args = parser.parse_args(argv)
     if args.print_format:
         print(FORMAT)
         return 0
     if any(getattr(args, name) is None for name in
            ("edges", "symbols", "source", "output", "go_version",
-            "commit", "tree")):
+            "commit", "tree", "launcher_receipt", "kernel_limits",
+            "host_capacity", "package_list")):
         parser.error("all analysis arguments are required")
     manifest = json.loads(args.symbols.read_text())
     expected = {"schema": "seam-symbols/v1", "commit": COMMIT, "tree": TREE}
@@ -187,33 +294,71 @@ def main(argv: Sequence[str] | None = None) -> int:
             or args.commit != COMMIT or args.tree != TREE
             or args.go_version != "go1.27.3"):
         parser.error("source/toolchain/manifest identity mismatch")
-    with args.edges.open(encoding="utf-8") as stream:
-        edges = parse_edges(stream, str(args.source))
-    if isinstance(edges, Invalid):
-        parser.error(edges.reason)
-    report = analyze(edges, manifest["symbols"])
-    if isinstance(report, Invalid):
-        parser.error(report.reason)
+    resources = resource_facts(
+        json.loads(args.launcher_receipt.read_text()),
+        json.loads(args.kernel_limits.read_text()),
+        json.loads(args.host_capacity.read_text()))
+    if isinstance(resources, Invalid):
+        parser.error(resources.reason)
+    with args.package_list.open(encoding="utf-8") as stream:
+        listed_packages = sum(1 for line in stream if line.strip())
+    if not listed_packages:
+        parser.error("package inventory is empty")
+    if args.output.exists():
+        parser.error("output directory already exists")
+    diagnostic_path = args.output.parent / "node-diagnostics.jsonl.partial"
+    with args.edges.open(encoding="utf-8") as stream, \
+            diagnostic_path.open("x", encoding="utf-8") as diagnostics:
+        graph = scan_frontier(stream, [row["symbol"] for row in
+                                      manifest["symbols"]],
+                              str(args.source), diagnostics)
+    if isinstance(graph, Invalid):
+        parser.error(graph.reason)
+    report = analyze(graph, manifest["symbols"])
     with args.edges.open("rb") as stream:
         raw_pin = hashlib.file_digest(stream, "sha256").hexdigest()
     report["identity"] = {
         "commit": COMMIT, "tree": TREE, "go": args.go_version,
         "tool": TOOL, "tool_version": "v0.52.0", "algorithm": "cha",
-        "options": OPTIONS, "raw_sha256": raw_pin,
+        "options": resources["options"], "raw_sha256": raw_pin,
         "symbols_sha256": hashlib.sha256(
             args.symbols.read_bytes()).hexdigest(),
         "upstream_synthetic_policy": "DeleteSyntheticNodes before output",
     }
+    resources["launcher_receipt_sha256"] = hashlib.sha256(
+        args.launcher_receipt.read_bytes()).hexdigest()
+    resources["kernel_limits_sha256"] = hashlib.sha256(
+        args.kernel_limits.read_bytes()).hexdigest()
+    with args.package_list.open("rb") as stream:
+        package_pin = hashlib.file_digest(stream, "sha256").hexdigest()
+    report["listed_package_count"] = listed_packages
+    report["listed_packages_sha256"] = package_pin
+    report["resources"] = resources
     report["non_callable_limits"] = manifest["non_callable_limits"]
     report["assertion_sites"] = manifest["assertion_sites"]
     args.output.mkdir()  # A fresh directory refuses stale/replayed success.
+    diagnostic_output = args.output / "node-diagnostics.jsonl"
+    diagnostic_path.rename(diagnostic_output)
+    with diagnostic_output.open("rb") as stream:
+        diagnostic_pin = hashlib.file_digest(stream, "sha256").hexdigest()
     outputs = {"seam-callers.json": json.dumps(report, indent=2) + "\n",
                "summary.md": markdown(report)}
     for name, text in outputs.items():
         (args.output / name).write_text(text)
     receipt = {"state": "completed", "identity": report["identity"],
+               "resources": resources,
+               "package_count": report["package_count"],
+               "listed_package_count": listed_packages,
+               "listed_packages_sha256": package_pin,
+               "total_edge_count": graph.total_edges,
+               "frontier_edge_count": len(graph.edges),
+               "frontier_raw_edge_count": graph.raw_frontier_edges,
+               "frontier_duplicate_edge_count": graph.raw_frontier_edges
+               - len(graph.edges),
+               "diagnostic_endpoint_occurrences": graph.diagnostic_occurrences,
                "outputs": {name: hashlib.sha256(text.encode()).hexdigest()
                            for name, text in outputs.items()}}
+    receipt["outputs"]["node-diagnostics.jsonl"] = diagnostic_pin
     (args.output / "receipt.json").write_text(
         json.dumps(receipt, indent=2) + "\n")
     return 0

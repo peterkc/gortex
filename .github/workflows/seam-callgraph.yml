@@ -4,7 +4,11 @@ name: Pinned storage seam callgraph
     branches: [study/storage-harness]
     paths:
       - .github/workflows/seam-callgraph.yml
-      - study/storage/seam/filter_callgraph.py
+      - study/storage/seam/**
+  workflow_dispatch:
+concurrency:
+  group: seam-callgraph-${{ github.ref }}
+  cancel-in-progress: false
 permissions:
   contents: read
 jobs:
@@ -19,8 +23,8 @@ jobs:
       GOWORK: "off"
       GOFLAGS: -mod=readonly -p=2
       GOMAXPROCS: "2"
-      # Soft Go heap target, not a hard RSS cap. Leave runner/CGO headroom.
-      GOMEMLIMIT: 5GiB
+      # The hard 12 GiB cgroup limit includes descendants and charged cache.
+      GOMEMLIMIT: 10GiB
       CGO_ENABLED: "1"
       # Match the pinned source's CI parsing/build environment.
       CGO_CFLAGS: -O2 -g -fno-strict-aliasing
@@ -57,6 +61,12 @@ jobs:
           # The source module declares exactly go 1.27.3; no auto-switching.
           go-version: "1.27.3"
           cache: false
+      - name: Verify host capacity before any heavy command
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3.12 -B study/storage/seam/run_limited.py preflight \
+            --output "$RUNNER_TEMP/seam-artifacts"
       - name: Filter contract tests, without running any Go tests
         shell: bash
         run: |
@@ -64,6 +74,39 @@ jobs:
           python3.12 -B -m unittest discover -s study/storage/seam \
             -p test_filter_callgraph.py -v 2>&1 \
             | tee "$RUNNER_TEMP/seam-artifacts/filter-tests.txt"
+      - name: Build and bind the checked-out hard-limit launcher
+        working-directory: study/storage/harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/seam-artifacts/bin"
+          go build -trimpath -p=1 \
+            -o "$RUNNER_TEMP/seam-artifacts/bin/limited-command" ./cmd/limited-command
+          sha256sum "$RUNNER_TEMP/seam-artifacts/bin/limited-command" \
+            > "$RUNNER_TEMP/seam-artifacts/launcher.sha256"
+      - name: Delegate a private cgroup tree, leaving the runner outside
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="/sys/fs/cgroup/gxseam-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          test -f /sys/fs/cgroup/cgroup.controllers
+          echo +memory | sudo tee /sys/fs/cgroup/cgroup.subtree_control
+          sudo mkdir "$root"
+          echo +memory | sudo tee "$root/cgroup.subtree_control"
+          sudo mkdir "$root/owner"
+          sudo chown -R "$(id -u):$(id -g)" "$root"
+          stat -c '%d %i' "$root" > "$RUNNER_TEMP/seam-artifacts/cgroup-root.identity"
+          echo "GXSEAM_CGROUP_ROOT=$root" >> "$GITHUB_ENV"
+      - name: Upload bounded diagnostics before heavy analysis
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: seam-callgraph-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/seam-artifacts/*.txt
+            ${{ runner.temp }}/seam-artifacts/host-capacity.json
+            ${{ runner.temp }}/seam-artifacts/launcher.sha256
+          if-no-files-found: error
       - name: Full CHA edges, including tests, with every flag explicit
         timeout-minutes: 30
         working-directory: ${{ runner.temp }}/seam-source
@@ -71,7 +114,7 @@ jobs:
         run: |
           set -euo pipefail
           artifact="$RUNNER_TEMP/seam-artifacts"
-          trap 'status=$?; echo "callgraph_exit=$status" >> "$artifact/receipt.txt"' EXIT
+          trap 'status=$?; echo "analysis_step_exit=$status" >> "$artifact/receipt.txt"' EXIT
           test "$(go env GOVERSION)" = go1.27.3
           test "$(go list -m -f '{{.Version}}' golang.org/x/tools)" = v0.52.0
           sha256sum go.mod go.sum > "$artifact/module-before.sha256"
@@ -80,26 +123,42 @@ jobs:
             GOFLAGS >> "$artifact/receipt.txt"
           printf 'GOMEMLIMIT=%s\nGOMAXPROCS=%s\n' "$GOMEMLIMIT" "$GOMAXPROCS" \
             >> "$artifact/receipt.txt"
+          # clone3 checks the common ancestor. The small launcher owner is in
+          # a sibling scope, outside its 12 GiB payload's OOM group.
+          printf '%s\n' "$$" | sudo tee "$GXSEAM_CGROUP_ROOT/owner/cgroup.procs" > /dev/null
           fmt="$(python3.12 "$GITHUB_WORKSPACE/study/storage/seam/filter_callgraph.py" --print-format)"
-          command=(go run golang.org/x/tools/cmd/callgraph -algo=cha \
+          command=("$(command -v go)" run golang.org/x/tools/cmd/callgraph -algo=cha \
             -test=true -tags= -cpuprofile= -memprofile= "-format=$fmt" ./...)
           printf '%q ' "${command[@]}" >> "$artifact/receipt.txt"
           printf '\n' >> "$artifact/receipt.txt"
-          "${command[@]}" > "$artifact/edges.tsv.partial" 2> "$artifact/callgraph.stderr"
+          python3.12 -B "$GITHUB_WORKSPACE/study/storage/seam/run_limited.py" run \
+            --label analysis --artifact "$artifact" \
+            --launcher "$artifact/bin/limited-command" --root "$GXSEAM_CGROUP_ROOT" \
+            --cwd "$RUNNER_TEMP/seam-source" --commit "$SOURCE_COMMIT" -- "${command[@]}"
           sha256sum --check "$artifact/module-before.sha256"
           git diff --exit-code -- go.mod go.sum
           mv "$artifact/edges.tsv.partial" "$artifact/edges.tsv"
-      - name: Filter and bind complete edges to report receipt
+      - name: Stream the seam frontier inside a separate hard memory scope
+        timeout-minutes: 5
         shell: bash
         run: |
           set -euo pipefail
-          python3.12 -B study/storage/seam/filter_callgraph.py \
-            --edges "$RUNNER_TEMP/seam-artifacts/edges.tsv" \
-            --symbols study/storage/seam/seam_symbols.json \
-            --source "$RUNNER_TEMP/seam-source" \
-            --output "$RUNNER_TEMP/seam-artifacts/report" \
+          artifact="$RUNNER_TEMP/seam-artifacts"
+          printf '%s\n' "$$" | sudo tee "$GXSEAM_CGROUP_ROOT/owner/cgroup.procs" > /dev/null
+          python3.12 -B study/storage/seam/run_limited.py run \
+            --label filter --artifact "$artifact" \
+            --launcher "$artifact/bin/limited-command" --root "$GXSEAM_CGROUP_ROOT" \
+            --cwd "$GITHUB_WORKSPACE" --commit "$SOURCE_COMMIT" -- \
+            "$(command -v python3.12)" -B "$GITHUB_WORKSPACE/study/storage/seam/filter_callgraph.py" \
+            --edges "$artifact/edges.tsv" \
+            --symbols "$GITHUB_WORKSPACE/study/storage/seam/seam_symbols.json" \
+            --source "$RUNNER_TEMP/seam-source" --output "$artifact/report" \
             --commit "$SOURCE_COMMIT" --tree "$SOURCE_TREE" \
-            --go-version "$(go env GOVERSION)"
+            --go-version "$(go env GOVERSION)" \
+            --launcher-receipt "$artifact/analysis-launch/receipt.json" \
+            --kernel-limits "$artifact/analysis-kernel.json" \
+            --host-capacity "$artifact/host-capacity.json" \
+            --package-list "$artifact/packages.txt"
       - name: Compress full or explicitly partial raw evidence
         if: always()
         shell: bash
@@ -110,9 +169,21 @@ jobs:
           elif test -f "$RUNNER_TEMP/seam-artifacts/edges.tsv.partial"; then
             gzip -n "$RUNNER_TEMP/seam-artifacts/edges.tsv.partial"
           fi
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      - name: Release only the delegated seam root
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -n "${GXSEAM_CGROUP_ROOT:-}"; then
+            sudo python3.12 -B study/storage/seam/run_limited.py cleanup \
+              --root "$GXSEAM_CGROUP_ROOT" \
+              --identity "$RUNNER_TEMP/seam-artifacts/cgroup-root.identity" \
+              --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
+          fi
+      - name: Upload final evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
-          name: seam-callgraph-${{ github.sha }}
+          name: seam-callgraph-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/seam-artifacts/
           if-no-files-found: error
