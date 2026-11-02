@@ -7,7 +7,10 @@ import (
 	"os/exec"
 )
 
-type memoryScope struct{ path string }
+type memoryScope struct {
+	path    string
+	stopped bool
+}
 
 func newMemoryScope(root, label string, limit int64) (*memoryScope, error) {
 	return nil, fmt.Errorf("hard memory enforcement requires Linux cgroup v2")

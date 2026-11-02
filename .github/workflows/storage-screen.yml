@@ -54,6 +54,18 @@ jobs:
           sha256sum study/storage/pod/run.py study/storage/pod/test_driver.py \
             study/storage/onnx/main.go study/storage/onnx/main_test.go \
             | tee -a "$RUNNER_TEMP/storage/ci-source.txt"
+      - name: Vet Darwin harness stubs without executing target code
+        working-directory: study/storage/harness
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+          CGO_ENABLED: "0"
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This stdlib-only module has no import "C" or target C compiler need.
+          go vet -p=1 ./... 2>&1 \
+            | tee "$RUNNER_TEMP/storage/ci-harness-darwin.txt"
       - name: Delegate test-only cgroup-v2 memory scopes
         shell: bash
         run: |
