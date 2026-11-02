@@ -1,0 +1,147 @@
+{
+  "schema": "design-c-fixtures/v1",
+  "generator_version": "gxstudy-v2",
+  "seed": 20261022,
+  "synthetic_cross_repo": false,
+  "source_indexer_revision": "73933568f89c51898f54380160200b46d0a068f8",
+  "sources": {
+    "K-client-go": {
+      "repository": "https://github.com/kubernetes/client-go",
+      "revision": "066ed4ed59a957c7b6d02be537a20ff9dc33fda8",
+      "source_sha256": "42cda7d3b2a1c25d5e18b7de1ef24ab6c77748f57758178ba5955843ac34bab7",
+      "license": "Apache-2.0"
+    },
+    "K-apimachinery": {
+      "repository": "https://github.com/kubernetes/apimachinery",
+      "revision": "e3a4b17431f39b969054c2bcd520243dc7be59a7",
+      "source_sha256": "42cda7d3b2a1c25d5e18b7de1ef24ab6c77748f57758178ba5955843ac34bab7",
+      "license": "Apache-2.0"
+    },
+    "K-component-base": {
+      "repository": "https://github.com/kubernetes/component-base",
+      "revision": "34e9194d5c7827c2867ad58c278e7bba05f3fff5",
+      "source_sha256": "42cda7d3b2a1c25d5e18b7de1ef24ab6c77748f57758178ba5955843ac34bab7",
+      "license": "Apache-2.0"
+    },
+    "K-kube-aggregator": {
+      "repository": "https://github.com/kubernetes/kube-aggregator",
+      "revision": "e4b5f54e6cff131ba50ae2047706a57aa6d08c53",
+      "source_sha256": "42cda7d3b2a1c25d5e18b7de1ef24ab6c77748f57758178ba5955843ac34bab7",
+      "license": "Apache-2.0"
+    },
+    "K-metrics": {
+      "repository": "https://github.com/kubernetes/metrics",
+      "revision": "0dbb5b986e22d45b8687347da28670e5ed6db1f3",
+      "source_sha256": "42cda7d3b2a1c25d5e18b7de1ef24ab6c77748f57758178ba5955843ac34bab7",
+      "license": "Apache-2.0"
+    },
+    "K-cli-runtime": {
+      "repository": "https://github.com/kubernetes/cli-runtime",
+      "revision": "19695eca11f0be24fe4cb33e0c7c30de7e16c23d",
+      "source_sha256": "42cda7d3b2a1c25d5e18b7de1ef24ab6c77748f57758178ba5955843ac34bab7",
+      "license": "Apache-2.0"
+    },
+    "K-controller-manager": {
+      "repository": "https://github.com/kubernetes/controller-manager",
+      "revision": "8f2a887f7a609446fe46fd41bd25459a95367dbf",
+      "source_sha256": "42cda7d3b2a1c25d5e18b7de1ef24ab6c77748f57758178ba5955843ac34bab7",
+      "license": "Apache-2.0"
+    },
+    "P-flask": {
+      "repository": "https://github.com/pallets/flask",
+      "revision": "22d924701a6ae2e4cd01e9a15bbaf3946094af65",
+      "source_sha256": "fae63ca58aca5783c7c4dff639cdb6af29520104735250c67812d0dfaa6bac83",
+      "license": "BSD-3-Clause"
+    },
+    "P-click": {
+      "repository": "https://github.com/pallets/click",
+      "revision": "8b19813f2bfca99f1018a587a8cf54fc959f2e5d",
+      "source_sha256": "fae63ca58aca5783c7c4dff639cdb6af29520104735250c67812d0dfaa6bac83",
+      "license": "BSD-3-Clause"
+    },
+    "P-werkzeug": {
+      "repository": "https://github.com/pallets/werkzeug",
+      "revision": "6604c3b8784ecc7cf5ac0b7412d916989b4c7d45",
+      "source_sha256": "fae63ca58aca5783c7c4dff639cdb6af29520104735250c67812d0dfaa6bac83",
+      "license": "BSD-3-Clause"
+    },
+    "P-jinja": {
+      "repository": "https://github.com/pallets/jinja",
+      "revision": "15206881c006c79667fe5154fe80c01c65410679",
+      "source_sha256": "fae63ca58aca5783c7c4dff639cdb6af29520104735250c67812d0dfaa6bac83",
+      "license": "BSD-3-Clause"
+    }
+  },
+  "tiers": {
+    "tier1": {
+      "asset": "tier1.tar.zst",
+      "archive_sha256": "5ac6b1e83fc04b6e021c7a78ccdf52d002e06555f657ba1e9da02dd7b616b3fb",
+      "archive_bytes": 36857489,
+      "tar_bytes": 516300800,
+      "manifest_sha256": "9c1a7fe9ebbee64b94f4c904795ada4942622f0efcd4e7657b6318922cdef736",
+      "bytes": 516258893,
+      "file_count": 10,
+      "queries": 694,
+      "repos": [
+        "K-client-go"
+      ],
+      "counts": {
+        "nodes": 81179,
+        "edges": 448952,
+        "files": 2482,
+        "symbols": 51393,
+        "content": 15934,
+        "vectors": 16132,
+        "cross_edges": 15733,
+        "skipped_spans": 284
+      },
+      "part_manifests": {
+        "K-client-go": "dc3d3a1295839eca74ded6eb8fbf852751def2dcbee523619c226bc90e7abcad"
+      }
+    },
+    "tier10": {
+      "asset": "tier10.tar.zst",
+      "archive_sha256": "5064655da1ac9d24db23d4474110275b532a0f20733cc2faf4cfd751fb05da6c",
+      "archive_bytes": 42551184,
+      "tar_bytes": 436469760,
+      "manifest_sha256": "8cde7d90cfd0af9125e8d7152675d41c7c075f99e8fcc6805e6141854a1873bb",
+      "bytes": 436311531,
+      "file_count": 73,
+      "queries": 752,
+      "repos": [
+        "K-apimachinery",
+        "K-component-base",
+        "K-kube-aggregator",
+        "K-metrics",
+        "K-cli-runtime",
+        "K-controller-manager",
+        "P-flask",
+        "P-click",
+        "P-werkzeug",
+        "P-jinja"
+      ],
+      "counts": {
+        "nodes": 82088,
+        "edges": 414089,
+        "files": 1885,
+        "symbols": 47131,
+        "content": 14952,
+        "vectors": 16423,
+        "cross_edges": 14350,
+        "skipped_spans": 1624
+      },
+      "part_manifests": {
+        "K-apimachinery": "59d9ac6df572b9b22336b037c633a822e20497f0dbea694e4e4c2c7ffe2b72c5",
+        "K-component-base": "43bb1b6b0b883026b91dac4bc38d2bcbbeddc4009c4cb2927f56913f9a13694c",
+        "K-kube-aggregator": "0d00abdead62bab3597859dd0727f91d8a1522ee42901de0d7a8e2edef46d926",
+        "K-metrics": "fc19809a5e6e371b8dcf68de37e06d7d34447cc8de8a3fcda2e1aa8d3b765ad4",
+        "K-cli-runtime": "7994c88b5c0bf699bdd6b3363b7dfb2900a352b21323dd7390880213556ab3f2",
+        "K-controller-manager": "4d5ea8d898b149a3b6e93308cac785b07677956b1144eeed4b4543f902b25bb2",
+        "P-flask": "9f44fb07675cadd999a52170e3236d56d060d268890935a52c77836d5d364f35",
+        "P-click": "7c0e20e6a636e9b1c932d038bf2e859005e3acaaef95b06472c60a1fa8993dd7",
+        "P-werkzeug": "427a5ea5a3caca1db801a5a93637f4141a2218217992e94311a01def45b6e378",
+        "P-jinja": "77ebe159b43d4274abc41cb3ab2c2f0f553c2ce2a350264c5257d53e029e6c24"
+      }
+    }
+  }
+}
