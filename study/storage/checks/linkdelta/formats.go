@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -84,7 +85,7 @@ func readDelta(path, format string) (rows []row, err error) {
 					if rec.Column(c).IsNull(j) {
 						return nil, fmt.Errorf("null delta field")
 					}
-					values[c] = rec.Column(c).(*array.String).Value(j)
+					values[c] = strings.Clone(rec.Column(c).(*array.String).Value(j))
 				}
 				if rec.Column(6).IsNull(j) {
 					return nil, fmt.Errorf("null delta payload")
@@ -127,7 +128,7 @@ func readDelta(path, format string) (rows []row, err error) {
 			if len(r.Value) == 0 {
 				return nil, fmt.Errorf("missing delta payload")
 			}
-		case "mask_file", "mask_node":
+		case "mask_file", "mask_node", "mask_chunk":
 			if r.Key == "" || len(r.Value) != 0 {
 				return nil, fmt.Errorf("invalid tombstone")
 			}

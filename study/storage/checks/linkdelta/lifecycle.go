@@ -45,7 +45,7 @@ func (l *lifecycle) close() error { return l.cat.Close() }
 func (l *lifecycle) publish(ctx context.Context, ref adapter.SegmentRef, old *adapter.SegmentRef) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	refs, err := ancestors(ref)
+	refs, err := ancestors(l.b, ref)
 	if err != nil {
 		return err
 	}
@@ -58,7 +58,7 @@ func (l *lifecycle) publish(ctx context.Context, ref adapter.SegmentRef, old *ad
 	}
 	return l.cat.Publish(ctx, ref.Repo, ref, old)
 }
-func ancestors(ref adapter.SegmentRef) ([]adapter.SegmentRef, error) {
+func ancestors(b backend, ref adapter.SegmentRef) ([]adapter.SegmentRef, error) {
 	var out []adapter.SegmentRef
 	seen := map[string]bool{}
 	for {
@@ -67,7 +67,7 @@ func ancestors(ref adapter.SegmentRef) ([]adapter.SegmentRef, error) {
 		}
 		seen[ref.Path] = true
 		out = append(out, ref)
-		s, err := readSeal(ref)
+		s, err := b.readSeal(ref)
 		if err != nil {
 			return nil, err
 		}
@@ -85,7 +85,7 @@ func (l *lifecycle) pin(ctx context.Context, repo string) (adapter.Segment, func
 		return nil, nil, err
 	}
 	defer release()
-	refs, err := ancestors(v[repo])
+	refs, err := ancestors(l.b, v[repo])
 	if err != nil {
 		return nil, nil, err
 	}
@@ -136,7 +136,7 @@ func (l *lifecycle) retire(ctx context.Context, ref adapter.SegmentRef) error {
 		if e != nil {
 			return e
 		}
-		refs, e := ancestors(root)
+		refs, e := ancestors(l.b, root)
 		if e != nil {
 			return e
 		}
@@ -149,7 +149,7 @@ func (l *lifecycle) retire(ctx context.Context, ref adapter.SegmentRef) error {
 	if l.pins[ref.Path] > 0 {
 		return fmt.Errorf("pinned version")
 	}
-	if _, err = readSeal(ref); err != nil {
+	if _, err = l.b.readSeal(ref); err != nil {
 		return err
 	}
 	fence := filepath.Join(l.root, "retired-"+ref.Digest)

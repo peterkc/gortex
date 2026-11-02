@@ -1,16 +1,15 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"gxstudy/adapter"
 	"gxstudy/dataset"
-	"io"
 	"os"
 	"path/filepath"
+	"slices"
 )
 
 // row is a shared physical envelope; Value retains every source-record field.
@@ -22,11 +21,6 @@ type row struct {
 	Target string `parquet:"target"`
 	Name   string `parquet:"name"`
 	Value  []byte `parquet:"value"`
-}
-type position struct {
-	Family, Key, Owner, Source, Target, Name string
-	Offset                                   int64
-	Length                                   int
 }
 
 func dataRows(ctx context.Context, d dataset.Dataset, add func(row) error) error {
@@ -102,8 +96,34 @@ func changeRows(ctx context.Context, s *segment, c adapter.FileChange) ([]row, e
 		return nil, err
 	}
 	rows := []row{{Family: "mask_file", Key: c.Path}}
+	oldIDs := map[string]bool{}
 	for _, n := range old {
+		oldIDs[n.ID] = true
 		rows = append(rows, row{Family: "mask_node", Key: n.ID})
+	}
+	chunks := map[string]bool{}
+	for _, id := range s.owners.ByFile[c.Path] {
+		chunks[id] = true
+	}
+	for _, n := range old {
+		for _, id := range s.owners.ByNode[n.ID] {
+			chunks[id] = true
+		}
+	}
+	for _, l := range s.layers {
+		for _, v := range l.text["content"] {
+			if v.File == c.Path || oldIDs[v.Node] {
+				chunks[v.ID] = true
+			}
+		}
+	}
+	ids := make([]string, 0, len(chunks))
+	for id := range chunks {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	for _, id := range ids {
+		rows = append(rows, row{Family: "mask_chunk", Key: id})
 	}
 	seen := map[string]bool{}
 	err = dataRows(ctx, c.Replacement, func(r row) error {
@@ -120,46 +140,6 @@ func changeRows(ctx context.Context, s *segment, c adapter.FileChange) ([]row, e
 		return nil
 	})
 	return rows, err
-}
-func writeBase(ctx context.Context, path string, d dataset.Dataset) (err error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, f.Close()) }()
-	w := bufio.NewWriterSize(f, 64<<10)
-	enc := json.NewEncoder(w)
-	if err = dataRows(ctx, d, func(r row) error { return enc.Encode(r) }); err != nil {
-		return err
-	}
-	if err = w.Flush(); err != nil {
-		return err
-	}
-	return f.Sync()
-}
-func baseIndex(path string) (index []position, err error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { err = errors.Join(err, f.Close()) }()
-	r := bufio.NewReaderSize(f, 64<<10)
-	var offset int64
-	for {
-		line, e := r.ReadBytes('\n')
-		if e == io.EOF && len(line) == 0 {
-			return index, nil
-		}
-		if e != nil {
-			return nil, e
-		}
-		var v row
-		if e = json.Unmarshal(line, &v); e != nil {
-			return nil, e
-		}
-		index = append(index, position{v.Family, v.Key, v.Owner, v.Source, v.Target, v.Name, offset, len(line)})
-		offset += int64(len(line))
-	}
 }
 func syncDir(path string) (err error) {
 	f, err := os.Open(path)

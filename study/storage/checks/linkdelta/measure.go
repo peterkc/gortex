@@ -21,7 +21,6 @@ import (
 	"reflect"
 	"slices"
 	"strings"
-	cbase "study/checks/base"
 	"syscall"
 	"time"
 )
@@ -73,12 +72,13 @@ type targetResult struct {
 	Reason   string `json:"reason,omitempty"`
 }
 type runSummary struct {
-	Schema   string            `json:"schema"`
-	Targets  []targetResult    `json:"targets"`
-	Receipts map[string]string `json:"receipts_sha256"`
-	Outputs  map[string]string `json:"outputs_sha256"`
-	Complete bool              `json:"complete"`
-	Error    string            `json:"error,omitempty"`
+	Schema    string            `json:"schema"`
+	Targets   []targetResult    `json:"targets"`
+	Receipts  map[string]string `json:"receipts_sha256"`
+	Outputs   map[string]string `json:"outputs_sha256"`
+	Complete  bool              `json:"complete"`
+	Protected string            `json:"protected_inputs"`
+	Error     string            `json:"error,omitempty"`
 }
 
 func digest(s string) bool { b, e := hex.DecodeString(s); return e == nil && len(b) == 32 }
@@ -108,7 +108,7 @@ func readConfig(path, pin string) (c config, err error) {
 		return c, fmt.Errorf("trailing config data")
 	}
 	if c.BaseLayout != "c-parquet" {
-		return c, fmt.Errorf("measurement requires the C Parquet base; JSON is tiny-test-only")
+		return c, fmt.Errorf("measurement requires the C Parquet base")
 	}
 	if c.Schema != "linkdelta-measure/v1" || c.Repeats < 1 || c.WallSeconds < 1 || c.DeltaRepo == "" || len(c.Sizes) == 0 {
 		return c, fmt.Errorf("explicit schema, repo, sizes, repeats and wall bound required")
@@ -364,14 +364,22 @@ func measure(args []string) (err error) {
 	receipt, runErr := launch(c, "controller", c.Limits.Runner, command, frozenPath)
 	resultPin, resultErr := dataset.Hash(filepath.Join(c.Out, "result.json"))
 	final := struct {
-		Schema         string
-		SourceRevision string
-		Inputs         map[string]string
-		Controller     externalResult
-		ResultSHA256   string
-		Complete       bool
-		Error          string
+		Schema              string
+		SourceRevision      string
+		Inputs              map[string]string
+		Controller          externalResult
+		ResultSHA256        string
+		Complete            bool
+		Error               string
+		ControllerLogSHA256 string
+		ProtectedInputs     string
 	}{Schema: "linkdelta-terminal/v1", SourceRevision: c.SourceRevision, Inputs: meta, Controller: receipt, ResultSHA256: resultPin, Complete: runErr == nil && resultErr == nil}
+	logPin, logErr := dataset.Hash(filepath.Join(c.Out, "controller-scope", "command.log"))
+	protected, protectedErr := protectedInputs(c)
+	final.ControllerLogSHA256 = logPin
+	final.ProtectedInputs = protected
+	runErr = errors.Join(runErr, logErr, protectedErr)
+	final.Complete = runErr == nil && resultErr == nil
 	if runErr != nil || resultErr != nil {
 		final.Error = errors.Join(runErr, resultErr).Error()
 	}
@@ -432,6 +440,14 @@ func work(ctx context.Context, c config, task string) error {
 		return control(c)
 	case "prepare":
 		return prepare(ctx, c)
+	case "prepare-link":
+		ds, _, e := loadTier(c.Data)
+		if e != nil {
+			return e
+		}
+		return prepareLink(ctx, ds, filepath.Join(c.Out, "facts"))
+	case "references":
+		return prepareReferences(ctx, c)
 	case "link-global", "link-package":
 		_, err := resolveFacts(ctx, filepath.Join(c.Out, "facts"), filepath.Join(c.Out, task), strings.TrimPrefix(task, "link-"))
 		return err
@@ -457,6 +473,9 @@ func work(ctx context.Context, c config, task string) error {
 func control(c config) (err error) {
 	summary := runSummary{Schema: "linkdelta-run/v1", Receipts: map[string]string{}, Outputs: map[string]string{}}
 	defer func() {
+		protected, checkErr := protectedInputs(c)
+		summary.Protected = protected
+		err = errors.Join(err, checkErr)
 		for _, target := range []string{"check3-link-peak-and-parity", "check4-arrow", "check4-parquet", "check4-delta-selection"} {
 			found := false
 			for _, result := range summary.Targets {
@@ -465,50 +484,23 @@ func control(c config) (err error) {
 				}
 			}
 			if !found {
-				summary.Targets = append(summary.Targets, targetResult{Target: target, Status: "blocked", Branch: "not-completed", Reason: "Inspect the preserved component receipts and error; no target pass is inferred."})
+				summary.Targets = append(summary.Targets, targetResult{Target: target, Status: "blocked", Branch: "not-completed", Reason: fmt.Sprint("Not run: ", err)})
 			}
 		}
-		summary.Complete = err == nil
-		if err != nil {
-			summary.Error = err.Error()
-		}
-		for _, name := range []string{"prepare", "link-global", "check-link-global", "link-package", "check-link-package", "delta-arrow", "delta-parquet", "verify-arrow", "verify-parquet"} {
+		for _, name := range []string{"prepare", "prepare-link", "references", "link-global", "check-link-global", "link-package", "check-link-package", "delta-arrow", "delta-parquet", "verify-arrow", "verify-parquet"} {
 			p := filepath.Join(c.Out, name+"-scope", "receipt.json")
 			if pin, e := dataset.Hash(p); e == nil {
 				summary.Receipts[name] = pin
+			} else if !os.IsNotExist(e) {
+				err = errors.Join(err, e)
 			}
 		}
-		// Retain every produced output and hash it; failed scope files remain too.
-		e := filepath.WalkDir(c.Out, func(p string, de os.DirEntry, e error) error {
-			if e != nil {
-				return e
-			}
-			if de.IsDir() {
-				if p != c.Out && slices.Contains([]string{"home", "cache", "config", "tmp", "state", "runtime"}, de.Name()) {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if !de.Type().IsRegular() {
-				return fmt.Errorf("unexpected output type")
-			}
-			if p == filepath.Join(c.Out, "result.json") {
-				return nil
-			}
-			pin, e := dataset.Hash(p)
-			if e != nil {
-				return e
-			}
-			rel, e := filepath.Rel(c.Out, p)
-			if e != nil {
-				return e
-			}
-			summary.Outputs[rel] = pin
-			return nil
-		})
+		// The live controller scope is owned by the outer terminal receipt.
+		outputs, e := outputPins(c.Out)
+		summary.Outputs = outputs
 		err = errors.Join(err, e)
-		if e != nil {
-			summary.Complete = false
+		summary.Complete = err == nil
+		if err != nil {
 			summary.Error = err.Error()
 		}
 		err = errors.Join(err, dataset.WriteJSON(filepath.Join(c.Out, "result.json"), summary))
@@ -523,130 +515,221 @@ func control(c config) (err error) {
 		return e
 	}
 	run := func(task string, limit int64) (externalResult, error) {
+		var policy struct{ Deadline time.Time }
+		if e := dataset.ReadJSON(filepath.Join(c.Out, "policy.json"), &policy); e != nil {
+			return externalResult{}, e
+		}
+		if !time.Now().Before(policy.Deadline) {
+			return externalResult{}, fmt.Errorf("shared deadline expired")
+		}
+		approval, e := dataset.Hash(c.Approval)
+		if e != nil {
+			return externalResult{}, e
+		}
+		if approval != c.ApprovalSHA256 {
+			return externalResult{}, fmt.Errorf("approval changed")
+		}
 		return launch(c, task, limit, []string{exe, "worker", "-config", cfg, "-config-pin", pin, "-task", task}, filepath.Join(c.Out, "inputs.json"))
 	}
-	if _, err = run("prepare", c.Limits.Checker); err != nil {
-		return err
-	}
-	attemptLink := func(mode string) (externalResult, linkResult, bool, error) {
-		rec, e := run("link-"+mode, c.LinkLimit)
-		var result linkResult
+	summary.Targets, err = collectTargets(c, run)
+	return err
+}
+
+// Hash finalized outputs only. The outer receipt owns the live controller scope.
+func outputPins(root string) (map[string]string, error) {
+	pins := map[string]string{}
+	err := filepath.WalkDir(root, func(p string, de os.DirEntry, e error) error {
 		if e != nil {
-			if rec.State == "oom" && rec.Removed && rec.Memory.LimitBytes == linkCap && rec.Memory.OOMKills > 0 {
-				result.Status = "miss"
-				return rec, result, false, nil
+			return e
+		}
+		if de.IsDir() {
+			if p == filepath.Join(root, "controller-scope") || (p != root && slices.Contains([]string{"home", "cache", "config", "tmp", "state", "runtime"}, de.Name())) {
+				return filepath.SkipDir
 			}
-			return rec, result, false, e
+			return nil
 		}
-		if e = dataset.ReadJSON(filepath.Join(c.Out, "link-"+mode, "result.json"), &result); e != nil {
-			return rec, result, false, e
+		if !de.Type().IsRegular() {
+			return fmt.Errorf("unexpected output type")
 		}
-		if _, e = run("check-link-"+mode, c.Limits.Checker); e != nil {
-			return rec, result, false, e
+		if p == filepath.Join(root, "result.json") {
+			return nil
 		}
-		var parity parityResult
-		if e = dataset.ReadJSON(filepath.Join(c.Out, "check-link-"+mode+".json"), &parity); e != nil {
-			return rec, result, false, e
+		pin, e := dataset.Hash(p)
+		if e != nil {
+			return e
 		}
-		if parity.Status != "pass" && parity.Status != "miss" {
-			return rec, result, false, fmt.Errorf("invalid link parity result")
+		rel, e := filepath.Rel(root, p)
+		if e != nil {
+			return e
 		}
-		ok := result.Status == "pass" && parity.Status == "pass" && rec.Memory.PeakBytes > 0 && rec.Memory.PeakBytes <= linkCap
-		if !ok && result.Status == "pass" {
-			result.Status = "miss"
-		}
-		return rec, result, ok, nil
+		pins[rel] = pin
+		return nil
+	})
+	return pins, err
+}
+
+// Only an accounted, removed terminal scope permits an independent successor.
+func safeReceipt(r externalResult, limit int64) bool {
+	if !r.Removed || r.Memory.LimitBytes != limit || r.Memory.PID <= 0 || r.Memory.PeakBytes <= 0 {
+		return false
 	}
-	lr, l, linkOK, linkErr := attemptLink("global")
-	branch, status := "global", "pass"
-	if linkErr != nil {
-		return linkErr
+	switch r.State {
+	case "completed":
+		return r.Memory.Status == "completed" && r.Memory.ExitCode == 0 && r.Memory.OOMKills == 0
+	case "oom":
+		return r.Memory.Status == "failed" && r.Memory.OOMKills > 0
+	case "failed":
+		return r.Memory.Status == "failed" && r.Memory.ExitCode != 0 && r.Memory.OOMKills == 0
 	}
-	if !linkOK {
-		lr, l, linkOK, linkErr = attemptLink("package")
-		branch = "per-package"
-		if linkErr != nil {
-			return linkErr
+	return false
+}
+func containedFailure(r externalResult, limit int64) bool {
+	return r.State != "completed" && safeReceipt(r, limit)
+}
+func memoryFallback(r externalResult) bool {
+	return safeReceipt(r, linkCap) && ((r.State == "oom" && r.Memory.OOMKills > 0) || (r.State == "completed" && r.Memory.PeakBytes > linkCap))
+}
+func linkTarget(mode string, r externalResult, l linkResult, parity parityResult) targetResult {
+	status := "miss"
+	if l.Status == "partial" {
+		status = "partial"
+	}
+	if l.Status == "pass" && parity.Status == "pass" && safeReceipt(r, linkCap) && r.State == "completed" && r.Memory.PeakBytes <= linkCap {
+		status = "pass"
+	}
+	return targetResult{Target: "check3-link-peak-and-parity", Status: status, Branch: mode, Measured: struct {
+		Memory runner.ComponentMemory
+		Link   linkResult
+		Parity parityResult
+	}{r.Memory, l, parity}, Reason: "Synthetic projected name/scope/kind/span/ordinal linking only; language resolver rules untested."}
+
+}
+func collectTargets(c config, run func(string, int64) (externalResult, error)) ([]targetResult, error) {
+	var targets []targetResult
+	rec, e := run("prepare", c.Limits.Checker)
+	if e != nil {
+		return targets, e
+	}
+	rec, e = run("prepare-link", c.Limits.Checker)
+	if e != nil {
+		targets = append(targets, targetResult{Target: "check3-link-peak-and-parity", Status: "blocked", Branch: "link-preparation", Reason: e.Error()})
+		if !containedFailure(rec, c.Limits.Checker) {
+			return targets, e
 		}
-		if !linkOK {
-			status = l.Status
-			if status != "partial" {
-				status = "miss"
+	} else {
+		attempt := func(mode string) (targetResult, bool, error) {
+			r, err := run("link-"+mode, c.LinkLimit)
+			var l linkResult
+			if err != nil {
+				if !containedFailure(r, c.LinkLimit) {
+					return targetResult{}, false, err
+				}
+				return targetResult{Target: "check3-link-peak-and-parity", Status: "miss", Branch: mode, Measured: r, Reason: err.Error()}, memoryFallback(r), nil
 			}
-			branch = "stop-return-design-question"
+			if err = dataset.ReadJSON(filepath.Join(c.Out, "link-"+mode, "result.json"), &l); err != nil {
+				return targetResult{Target: "check3-link-peak-and-parity", Status: "blocked", Branch: mode, Reason: err.Error()}, false, nil
+			}
+			check, err := run("check-link-"+mode, c.Limits.Checker)
+			if err != nil {
+				if !containedFailure(check, c.Limits.Checker) {
+					return targetResult{}, false, err
+				}
+				return targetResult{Target: "check3-link-peak-and-parity", Status: "blocked", Branch: mode, Reason: err.Error()}, false, nil
+			}
+			var parity parityResult
+			if err = dataset.ReadJSON(filepath.Join(c.Out, "check-link-"+mode+".json"), &parity); err != nil {
+				return targetResult{Target: "check3-link-peak-and-parity", Status: "blocked", Branch: mode, Reason: err.Error()}, false, nil
+			}
+			return linkTarget(mode, r, l, parity), memoryFallback(r), nil
 		}
+		result, fallback, err := attempt("global")
+		if err != nil {
+			return targets, err
+		}
+		if fallback {
+			global := result
+			global.Target = "check3-global-attempt"
+			targets = append(targets, global)
+			result, _, err = attempt("package")
+			if err != nil {
+				return targets, err
+			}
+		}
+		targets = append(targets, result)
 	}
-	summary.Targets = append(summary.Targets, targetResult{Target: "check3-link-peak-and-parity", Status: status, Branch: branch, Measured: struct {
-		PeakBytes int64
-		Link      linkResult
-	}{lr.Memory.PeakBytes, l}, Reason: "Synthetic qualified-name/file-scope resolution only; language resolver rules untested."})
-	if status != "pass" {
-		return fmt.Errorf("Check 3 did not pass: %s", branch)
+	// References belong only to Check 4. A semantic Check 3 miss never reaches
+	// this dependency or suppresses either physical form.
+	rec, e = run("references", c.Limits.Checker)
+	if e != nil {
+		for _, f := range []string{"arrow", "parquet"} {
+			targets = append(targets, targetResult{Target: "check4-" + f, Status: "blocked", Branch: "reference-preparation", Reason: e.Error()})
+		}
+		if !containedFailure(rec, c.Limits.Checker) {
+			return targets, e
+		}
+		targets = append(targets, selectDelta(map[string]deltaReport{}))
+		return targets, nil
 	}
-	deltaResults := map[string]deltaReport{}
+	results := map[string]deltaReport{}
 	for _, format := range []string{"arrow", "parquet"} {
-		if _, err = run("delta-"+format, c.Limits.Engine); err != nil {
-			return err
+		rec, e = run("delta-"+format, c.Limits.Engine)
+		if e != nil {
+			targets = append(targets, targetResult{Target: "check4-" + format, Status: "blocked", Branch: "engine", Measured: rec, Reason: e.Error()})
+			if !containedFailure(rec, c.Limits.Engine) {
+				return targets, e
+			}
+			continue
 		}
-		if _, err = run("verify-"+format, c.Limits.Checker); err != nil {
-			return err
+		engine := rec
+		rec, e = run("verify-"+format, c.Limits.Checker)
+		if e != nil {
+			targets = append(targets, targetResult{Target: "check4-" + format, Status: "miss", Branch: "correctness-verification", Measured: rec, Reason: e.Error()})
+			if !containedFailure(rec, c.Limits.Checker) {
+				return targets, e
+			}
+			continue
 		}
 		var report deltaReport
-		if err = dataset.ReadJSON(filepath.Join(c.Out, "delta-"+format, "metrics.json"), &report); err != nil {
-			return err
-		}
-		deltaResults[format] = report
 		var verification verifyReport
-		if err = dataset.ReadJSON(filepath.Join(c.Out, "verify-"+format+".json"), &verification); err != nil {
-			return err
+		e = errors.Join(dataset.ReadJSON(filepath.Join(c.Out, "delta-"+format, "metrics.json"), &report), dataset.ReadJSON(filepath.Join(c.Out, "verify-"+format+".json"), &verification))
+		if e != nil || verification.Status != "pass" || verification.Checked == 0 {
+			targets = append(targets, targetResult{Target: "check4-" + format, Status: "blocked", Branch: "missing-or-invalid-evidence", Reason: fmt.Sprint(e)})
+			continue
 		}
-		parityStatus := "pass"
+		report.EngineMemory = &engine.Memory
+		results[format] = report
+		targets = append(targets, deltaTarget(format, report))
+		status := "pass"
 		if verification.NativeTopKEqual != verification.NativeTopKComparisons {
-			parityStatus = "partial"
+			status = "partial"
 		}
-		summary.Targets = append(summary.Targets, deltaTarget(format, report), targetResult{Target: "check4-" + format + "-native-ranking-parity", Status: parityStatus, Branch: "measured-diagnostic-not-a-ranking-equivalence-claim", Measured: verification})
+		targets = append(targets, targetResult{Target: "check4-" + format + "-native-ranking-parity", Status: status, Branch: "measured-diagnostic-not-a-ranking-equivalence-claim", Measured: verification})
 	}
-	a, p := deltaResults["arrow"], deltaResults["parquet"]
-	selection := "unresolved"
-	selectionStatus := "partial"
-	if a.MaxEditCPU > 1e9 && p.MaxEditCPU > 1e9 {
-		selection = "stop-ask-user-both-edit-bound-misses"
-		selectionStatus = "miss"
-	} else {
-		ap, pp := deltaPass(a), deltaPass(p)
-		switch {
-		case ap && pp:
-			selection = "both-pass-lead-selects-simplest"
-			selectionStatus = "partial"
-		case ap:
-			selection = "arrow"
-			selectionStatus = "pass"
-		case pp:
-			selection = "parquet"
-			selectionStatus = "pass"
-		default:
-			selection = "no-passing-form"
-			selectionStatus = "miss"
-		}
-	}
-	summary.Targets = append(summary.Targets, targetResult{Target: "check4-delta-selection", Status: selectionStatus, Branch: selection, Measured: map[string]string{"base": "shared C Parquet plus native Bleve", "edit_batch": "alternating harness MakeChange and original-file replacement; same file churn", "scope": "full tier query workload plus delta probes; no daemon routing"}})
+	targets = append(targets, selectDelta(results))
+	return targets, nil
+}
+func protectedInputs(c config) (string, error) {
 	var f frozen
-	if err = dataset.ReadJSON(filepath.Join(c.Out, "frozen.json"), &f); err != nil {
-		return err
+	if e := dataset.ReadJSON(filepath.Join(c.Out, "frozen.json"), &f); e != nil {
+		return "not checked: frozen snapshot unavailable", e
 	}
 	pins, e := treePins(c.Data)
 	if e != nil {
-		return e
+		return "check failed", e
 	}
 	if !reflect.DeepEqual(pins, f.Protected) {
-		return fmt.Errorf("protected dataset changed")
+		return "changed", fmt.Errorf("protected dataset changed")
 	}
-	return nil
+	return "unchanged", nil
 }
+
 func prepare(ctx context.Context, c config) error {
 	ds, m, err := loadTier(c.Data)
 	if err != nil {
 		return err
+	}
+	if len(ds) == 0 || c.DeltaRepo != ds[0].Repo {
+		return fmt.Errorf("delta_repo must be ds[0].Repo for the pinned tier workload")
 	}
 	qs, err := querySet(c, ds)
 	if err != nil {
@@ -669,9 +752,6 @@ func prepare(ctx context.Context, c config) error {
 	}
 	f := frozen{Counts: m.Counts, Repos: repos, QueryCount: len(qs), Protected: pins}
 	if err = dataset.WriteJSON(filepath.Join(c.Out, "frozen.json"), f); err != nil {
-		return err
-	}
-	if err = prepareLink(ctx, ds, filepath.Join(c.Out, "facts")); err != nil {
 		return err
 	}
 	c1, err := runner.MakeChange(input)
@@ -790,29 +870,37 @@ func cpuNS() (int64, error) {
 }
 
 type checkpoint struct {
-	Size                  int
-	BaseP95, DeltaP95     map[string]float64
-	Ratio                 map[string]float64
-	WorstRatio            float64
-	DeltaBytes, BaseBytes int64
-	ByteRatio             float64
+	Size                          int
+	BaseP95, WrapperP95, DeltaP95 map[string]float64
+	Ratio, AARatio                map[string]float64
+	WorstRatio, AAWorstRatio      float64
+	DeltaBytes, BaseBytes         int64
+	ByteRatio                     float64
+	MaxEditCPU                    int64
+	Visibility                    runner.Distribution
+	OpenNS                        int64
+}
+type editSample struct {
+	Size            int
+	CPU, Visibility int64
 }
 type deltaReport struct {
-	Format           string
-	MaxEditCPU       int64
-	Visibility       runner.Distribution
-	Edits            int
-	Checkpoints      []checkpoint
-	CompactionBranch string
-	Threshold        *int
-	LowerBound       *int
+	Format, ReadCostScope string
+	EngineMemory          *runner.ComponentMemory `json:"engine_memory,omitempty"`
+	MaxEditCPU            int64
+	Visibility            runner.Distribution
+	EditSamples           []editSample
+	Edits                 int
+	Checkpoints           []checkpoint
+	CompactionBranch      string
+	Threshold, LowerBound *int
 }
 type sample struct {
-	Size   int
-	Repeat int
-	Form   string
-	Query  workload.Query
-	Answer workload.Answer
+	Size, Repeat int
+	Form         string
+	Query        workload.Query
+	ElapsedNS    int64  `json:"elapsed_ns"`
+	AnswerSHA256 string `json:"answer_sha256"`
 }
 
 func measureDeltas(ctx context.Context, c config, format string) (err error) {
@@ -838,7 +926,7 @@ func measureDeltas(ctx context.Context, c config, format string) (err error) {
 	}
 	defer func() { err = errors.Join(err, spool.Close()) }()
 	enc := json.NewEncoder(spool)
-	b := backend{format: format, baseBackend: cbase.Backend{SideIndex: false}}
+	b := newBackend(format)
 	l, err := newLifecycle(out, b)
 	if err != nil {
 		return err
@@ -851,6 +939,7 @@ func measureDeltas(ctx context.Context, c config, format string) (err error) {
 		}
 	}()
 	var current adapter.SegmentRef
+	cleanRefs := map[bool]adapter.SegmentRef{}
 	var baseBytes int64
 	for i, d := range ds {
 		r, stats, e := b.Build(ctx, d, filepath.Join(out, fmt.Sprintf("base-%d", i)))
@@ -859,6 +948,7 @@ func measureDeltas(ctx context.Context, c config, format string) (err error) {
 		}
 		if d.Repo == c.DeltaRepo {
 			current = r
+			cleanRefs[false] = r
 			baseBytes = stats.Bytes
 			if e = l.publish(ctx, r, nil); e != nil {
 				return e
@@ -874,7 +964,7 @@ func measureDeltas(ctx context.Context, c config, format string) (err error) {
 			segments[d.Repo] = s
 		}
 	}
-	report := deltaReport{Format: format}
+	report := deltaReport{Format: format, ReadCostScope: "Both codecs use the same typed indexed merge. Raw A/A ratios show wrapper/noise effects; no A/A subtraction or controlled speedup is claimed. Codec comparison is write/seal/open/bytes."}
 	var visibility []int64
 	var deltaBytes int64
 	for n := 1; n <= c.Sizes[len(c.Sizes)-1]; n++ {
@@ -908,6 +998,7 @@ func measureDeltas(ctx context.Context, c config, format string) (err error) {
 		if e = release(); e != nil {
 			return e
 		}
+		report.EditSamples = append(report.EditSamples, editSample{Size: n, CPU: c1 - c0, Visibility: elapsed})
 		report.MaxEditCPU = max(report.MaxEditCPU, c1-c0)
 		visibility = append(visibility, elapsed)
 		report.Edits++
@@ -929,31 +1020,36 @@ func measureDeltas(ctx context.Context, c config, format string) (err error) {
 		if e != nil {
 			return e
 		}
-		clean, _, e := b.Build(ctx, source, filepath.Join(out, fmt.Sprintf("compact-%06d", n)))
-		if e != nil {
-			return e
+		clean, ok := cleanRefs[n%2 == 1]
+		if !ok {
+			clean, _, e = b.Build(ctx, source, filepath.Join(out, fmt.Sprintf("compact-%06d", n)))
+			if e != nil {
+				return e
+			}
+			cleanRefs[n%2 == 1] = clean
 		}
 		base, e := b.Open(ctx, clean.Path, clean)
 		if e != nil {
 			return e
 		}
+		openStart := time.Now()
 		delta, e := b.Open(ctx, current.Path, current)
 		if e != nil {
 			return errors.Join(e, base.Close())
 		}
-		cp := checkpoint{Size: n, BaseP95: map[string]float64{}, DeltaP95: map[string]float64{}, Ratio: map[string]float64{}, DeltaBytes: deltaBytes, BaseBytes: baseBytes, ByteRatio: float64(deltaBytes) / float64(baseBytes)}
-		timings := map[string]map[string][]int64{"base": {}, "delta": {}}
+		cp := checkpoint{Size: n, DeltaBytes: deltaBytes, BaseBytes: baseBytes, ByteRatio: float64(deltaBytes) / float64(baseBytes), MaxEditCPU: report.MaxEditCPU, Visibility: runner.Summarize(visibility), OpenNS: time.Since(openStart).Nanoseconds()}
+		timings := map[string]map[string][]int64{"base": {}, "wrapper": {}, "delta": {}}
 		// Warm each layout with the identical complete query sequence. Both see warm
 		// OS caches. Serial alternating order limits systematic ordering bias.
 		for repeat := -1; repeat < c.Repeats; repeat++ {
-			forms := []string{"base", "delta"}
+			forms := []string{"base", "wrapper", "delta"}
 			if repeat%2 == 0 {
 				slices.Reverse(forms)
 			}
 			for _, form := range forms {
 				selected := base
-				if external := base.(*segment).external; external != nil {
-					selected = external
+				if form == "base" {
+					selected = base.(*segment).external
 				}
 				if form == "delta" {
 					selected = delta
@@ -974,7 +1070,11 @@ func measureDeltas(ctx context.Context, c config, format string) (err error) {
 					if repeat >= 0 {
 						timings[form][q.Op] = append(timings[form][q.Op], ns)
 					}
-					if e = enc.Encode(sample{n, repeat, form, q, answer}); e != nil {
+					answerPin, e := storeAnswer(filepath.Join(c.Out, "answer-blobs"), answer)
+					if e != nil {
+						return errors.Join(e, base.Close(), delta.Close())
+					}
+					if e = enc.Encode(sample{Size: n, Repeat: repeat, Form: form, Query: q, ElapsedNS: ns, AnswerSHA256: answerPin}); e != nil {
 						return errors.Join(e, base.Close(), delta.Close())
 					}
 				}
@@ -983,16 +1083,9 @@ func measureDeltas(ctx context.Context, c config, format string) (err error) {
 		if e = errors.Join(base.Close(), delta.Close()); e != nil {
 			return e
 		}
-		for op, ns := range timings["base"] {
-			a := runner.Summarize(ns).P95
-			d := runner.Summarize(timings["delta"][op]).P95
-			if a <= 0 {
-				return fmt.Errorf("nonpositive baseline timing")
-			}
-			cp.BaseP95[op] = a
-			cp.DeltaP95[op] = d
-			cp.Ratio[op] = d / a
-			cp.WorstRatio = max(cp.WorstRatio, d/a)
+		cp, e = summarizeTimings(cp, timings)
+		if e != nil {
+			return e
 		}
 		report.Checkpoints = append(report.Checkpoints, cp)
 	}
@@ -1000,7 +1093,34 @@ func measureDeltas(ctx context.Context, c config, format string) (err error) {
 	report = threshold(report)
 	return dataset.WriteJSON(filepath.Join(out, "metrics.json"), report)
 }
+func summarizeTimings(cp checkpoint, timings map[string]map[string][]int64) (checkpoint, error) {
+	cp.BaseP95 = map[string]float64{}
+	cp.WrapperP95 = map[string]float64{}
+	cp.DeltaP95 = map[string]float64{}
+	cp.Ratio = map[string]float64{}
+	cp.AARatio = map[string]float64{}
+	cp.WorstRatio = 0
+	cp.AAWorstRatio = 0
+	for op, ns := range timings["base"] {
+		a := runner.Summarize(ns).P95
+		d := runner.Summarize(timings["delta"][op]).P95
+		wrapper := runner.Summarize(timings["wrapper"][op]).P95
+		if a <= 0 || d <= 0 || wrapper <= 0 {
+			return cp, fmt.Errorf("nonpositive timing")
+		}
+		cp.BaseP95[op] = a
+		cp.DeltaP95[op] = d
+		cp.WrapperP95[op] = wrapper
+		cp.Ratio[op] = d / a
+		cp.AARatio[op] = wrapper / a
+		cp.WorstRatio = max(cp.WorstRatio, d/a)
+		cp.AAWorstRatio = max(cp.AAWorstRatio, wrapper/a)
+	}
+	return cp, nil
+}
 func threshold(r deltaReport) deltaReport {
+	r.Threshold = nil
+	r.LowerBound = nil
 	for i, p := range r.Checkpoints {
 		if p.WorstRatio > 1.10 {
 			r.CompactionBranch = "observed-10-percent-crossing"
@@ -1020,25 +1140,24 @@ func threshold(r deltaReport) deltaReport {
 	}
 	return r
 }
-func deltaPass(r deltaReport) bool {
-	if r.MaxEditCPU > 1e9 || r.Visibility.P95 > 5e9 || len(r.Checkpoints) == 0 {
-		return false
-	}
-	var chosen *int
-	if r.Threshold != nil {
-		chosen = r.Threshold
-	} else {
+func selectedCheckpoint(r deltaReport) (checkpoint, bool) {
+	chosen := r.Threshold
+	if chosen == nil {
 		chosen = r.LowerBound
 	}
 	if chosen == nil {
-		return false
+		return checkpoint{}, false
 	}
 	for _, p := range r.Checkpoints {
 		if p.Size == *chosen {
-			return p.WorstRatio <= 1.10 && p.ByteRatio <= 2
+			return p, true
 		}
 	}
-	return false
+	return checkpoint{}, false
+}
+func deltaPass(r deltaReport) bool {
+	p, ok := selectedCheckpoint(r)
+	return ok && p.Size > 0 && p.Visibility.Count == p.Size && p.MaxEditCPU > 0 && p.MaxEditCPU <= 1e9 && p.Visibility.P95 > 0 && p.Visibility.P95 <= 5e9 && p.WorstRatio > 0 && p.WorstRatio <= 1.10 && p.ByteRatio > 0 && p.ByteRatio <= 2
 }
 func deltaTarget(format string, r deltaReport) targetResult {
 	status := "pass"
@@ -1046,6 +1165,27 @@ func deltaTarget(format string, r deltaReport) targetResult {
 		status = "miss"
 	}
 	return targetResult{Target: "check4-" + format, Status: status, Branch: r.CompactionBranch, Measured: r}
+}
+func selectDelta(results map[string]deltaReport) targetResult {
+	a, p := results["arrow"], results["parquet"]
+	selection, status := "no-passing-form", "miss"
+	ac, ao := selectedCheckpoint(a)
+	pc, po := selectedCheckpoint(p)
+	switch {
+	case len(results) == 0:
+		selection, status = "no-complete-form-evidence", "blocked"
+	case ao && po && ac.MaxEditCPU > 1e9 && pc.MaxEditCPU > 1e9:
+		selection = "stop-ask-user-both-edit-bound-misses"
+	case ao && po && ac.Visibility.P95 > 5e9 && pc.Visibility.P95 > 5e9:
+		selection = "stop-ask-user-both-visibility-bound-misses"
+	case deltaPass(a) && deltaPass(p):
+		selection, status = "both-pass-lead-selects-simplest", "partial"
+	case deltaPass(a):
+		selection, status = "arrow", "pass"
+	case deltaPass(p):
+		selection, status = "parquet", "pass"
+	}
+	return targetResult{Target: "check4-delta-selection", Status: status, Branch: selection, Measured: map[string]string{"base": "shared C Parquet plus native Bleve", "read_cost": "format-independent indexed merge; raw A/A controls retained", "edit_batch": "alternating MakeChange and original-file replacement", "scope": "full tier query workload plus delta probes; no daemon routing"}}
 }
 
 type verifyReport struct {
@@ -1055,35 +1195,264 @@ type verifyReport struct {
 	DifferencesSHA256                               string
 }
 
-func verifyDeltas(ctx context.Context, c config, format string) (err error) {
-	ds, _, err := loadTier(c.Data)
+type referenceRecord struct {
+	Binding  string
+	Query    workload.Query
+	Expected workload.Expected
+}
+
+func referenceKey(odd bool, q workload.Query) string {
+	return hashJSON(struct {
+		Odd   bool
+		Query workload.Query
+	}{odd, q})
+}
+func referenceBinding(c config) (string, error) {
+	pins := map[string]string{}
+	for name, p := range map[string]string{"tier": filepath.Join(c.Data, "manifest.json"), "changed": filepath.Join(c.Out, "changed-source", "manifest.json"), "queries": filepath.Join(c.Out, "queries.json"), "changes": filepath.Join(c.Out, "changes.json")} {
+		h, e := dataset.Hash(p)
+		if e != nil {
+			return "", e
+		}
+		pins[name] = h
+	}
+	return hashJSON(pins), nil
+}
+func storeAnswer(dir string, a workload.Answer) (string, error) {
+	raw, err := json.Marshal(a)
 	if err != nil {
+		return "", err
+	}
+	pin := fmt.Sprintf("%x", sha256.Sum256(raw))
+	p := filepath.Join(dir, pin+".json")
+	if _, err = os.Stat(p); err == nil {
+		return pin, nil
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return "", err
+	}
+	_, err = f.Write(raw)
+	return pin, errors.Join(err, f.Close())
+}
+func loadAnswer(dir, pin string) (workload.Answer, error) {
+	var a workload.Answer
+	if !digest(pin) {
+		return a, fmt.Errorf("invalid answer pin")
+	}
+	p := filepath.Join(dir, pin+".json")
+	actual, err := dataset.Hash(p)
+	if err != nil {
+		return a, err
+	}
+	if actual != pin {
+		return a, fmt.Errorf("answer blob hash mismatch")
+	}
+	err = dataset.ReadJSON(p, &a)
+	return a, err
+}
+func importPinnedReferences(c config, dir, binding string, qs, original []workload.Query) (err error) {
+	f, err := os.Open(filepath.Join(c.Data, "expected.json"))
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, f.Close()) }()
+	dec := json.NewDecoder(bufio.NewReaderSize(f, 64<<10))
+	t, e := dec.Token()
+	if e != nil || t != json.Delim('[') {
+		return fmt.Errorf("expected array required")
+	}
+	i := 0
+	for dec.More() {
+		var want workload.Expected
+		if err = dec.Decode(&want); err != nil {
+			return err
+		}
+		if i >= len(original) || i >= len(qs) {
+			return fmt.Errorf("extra pinned reference")
+		}
+		q := original[i]
+		q.ExactRank = true
+		if want.QueryID != q.ID || !reflect.DeepEqual(q, qs[i]) {
+			return fmt.Errorf("pinned query binding mismatch")
+		}
+		if err = dataset.WriteJSON(filepath.Join(dir, referenceKey(false, q)+".json"), referenceRecord{binding, q, want}); err != nil {
+			return err
+		}
+		i++
+	}
+	t, err = dec.Token()
+	if err != nil || t != json.Delim(']') || i != len(original) {
+		return fmt.Errorf("truncated or missing pinned references")
+	}
+	var trailing any
+	if dec.Decode(&trailing) != io.EOF {
+		return fmt.Errorf("trailing reference data")
+	}
+	return nil
+}
+func prepareReferences(ctx context.Context, c config) (err error) {
+	ds, m, err := loadTier(c.Data)
+	if err != nil {
+		return err
+	}
+	if !digest(m.SHA256["queries.json"]) || !digest(m.SHA256["expected.json"]) {
+		return fmt.Errorf("pinned queries and expected.json are required")
+	}
+	var qs, original []workload.Query
+	if err = dataset.ReadJSON(filepath.Join(c.Out, "queries.json"), &qs); err != nil {
+		return err
+	}
+	if err = dataset.ReadJSON(filepath.Join(c.Data, "queries.json"), &original); err != nil {
+		return err
+	}
+	binding, err := referenceBinding(c)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(c.Out, "references")
+	if err = os.Mkdir(dir, 0700); err != nil {
+		return err
+	}
+	if err = os.Mkdir(filepath.Join(dir, "validated"), 0700); err != nil {
+		return err
+	}
+	if err = os.Mkdir(filepath.Join(c.Out, "answer-blobs"), 0700); err != nil {
+		return err
+	}
+	// Stream the pinned original references; never retain the answer array.
+	if err = importPinnedReferences(c, dir, binding, qs, original); err != nil {
 		return err
 	}
 	changed, err := dataset.OpenSource(filepath.Join(c.Out, "changed-source"))
 	if err != nil {
 		return err
 	}
-	originalView, _ := oracle.DiskView(ds)
-	changedDS := slices.Clone(ds)
-	for i, d := range changedDS {
+	odd := slices.Clone(ds)
+	for i, d := range odd {
 		if d.Repo == c.DeltaRepo {
-			changedDS[i] = changed
+			odd[i] = changed
 		}
 	}
-	changedView, _ := oracle.DiskView(changedDS)
+	for _, isOdd := range []bool{false, true} {
+		sources := ds
+		if isOdd {
+			sources = odd
+		}
+		view, _ := oracle.DiskView(sources)
+		for i, q := range qs {
+			if !isOdd && i < len(original) {
+				continue
+			}
+			if err = ctx.Err(); err != nil {
+				return err
+			}
+			want, e := workload.Evaluate(ctx, view, adapter.Fanout{Segments: view}, q)
+			if e != nil {
+				return e
+			}
+			expected := workload.Expected{QueryID: q.ID, Answer: want}
+			if workload.Lexical(q.Op) {
+				expected.MatchRepos, e = matchRepositories(ctx, sources, q)
+				if e != nil {
+					return e
+				}
+			}
+			if err = dataset.WriteJSON(filepath.Join(dir, referenceKey(isOdd, q)+".json"), referenceRecord{binding, q, expected}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// Same any-token membership rule as oracle's text index. This streams only one
+// query's ID/repository matches, not the graph or every answer into RAM.
+func matchRepositories(ctx context.Context, ds []dataset.Dataset, q workload.Query) (map[string]string, error) {
+	terms := oracle.Tokens(q.Key)
+	matches := map[string]string{}
+	add := func(id, body, repo string) {
+		tokens := oracle.Tokens(body)
+		for _, term := range terms {
+			if slices.Contains(tokens, term) {
+				matches[id] = repo
+				return
+			}
+		}
+	}
+	for _, d := range ds {
+		if q.Repo != "" && q.Repo != d.Repo {
+			continue
+		}
+		if strings.HasSuffix(q.Op, "content") {
+			for v, e := range d.ContentRows() {
+				if e != nil {
+					return nil, e
+				}
+				if e = ctx.Err(); e != nil {
+					return nil, e
+				}
+				add(v.ChunkID, v.Body, d.Repo)
+			}
+		} else {
+			for v, e := range d.SymbolRows() {
+				if e != nil {
+					return nil, e
+				}
+				if e = ctx.Err(); e != nil {
+					return nil, e
+				}
+				add(v.NodeID, v.Tokens, d.Repo)
+			}
+		}
+	}
+	return matches, nil
+}
+func compareReference(q workload.Query, want workload.Expected, got workload.Answer) error {
+	if workload.Lexical(q.Op) {
+		q.NativeScoring = true
+		q.MatchRepos = want.MatchRepos
+		q.ExactRank = strings.HasPrefix(q.ID, "delta-marker-")
+		q.MinOverlap = 0
+	} else {
+		q.CutoffTies = want.Ties
+	}
+	c := workload.Compare(q, want.Answer, got)
+	if c.Mismatch {
+		return fmt.Errorf("query %s: %s", q.ID, c.Detail)
+	}
+	return nil
+}
+func hitIDs(hits []adapter.Hit) []string {
+	out := make([]string, len(hits))
+	for i, h := range hits {
+		out[i] = h.ID
+	}
+	return out
+}
+func verifyDeltas(ctx context.Context, c config, format string) (err error) {
+	binding, err := referenceBinding(c)
+	if err != nil {
+		return err
+	}
+	var qs []workload.Query
+	if err = dataset.ReadJSON(filepath.Join(c.Out, "queries.json"), &qs); err != nil {
+		return err
+	}
+	queries := map[string]workload.Query{}
+	for _, q := range qs {
+		if _, ok := queries[q.ID]; ok {
+			return fmt.Errorf("duplicate query ID")
+		}
+		queries[q.ID] = q
+	}
 	scratch, err := os.MkdirTemp(c.Out, "verify-native-"+format+"-")
 	if err != nil {
 		return err
 	}
 	defer func() { err = errors.Join(err, os.RemoveAll(scratch)) }()
-	pairDir, memoDir := filepath.Join(scratch, "pairs"), filepath.Join(scratch, "memo")
-	if err = os.Mkdir(pairDir, 0700); err != nil {
-		return err
-	}
-	if err = os.Mkdir(memoDir, 0700); err != nil {
-		return err
-	}
 	diffPath := filepath.Join(c.Out, "native-rank-differences-"+format+".jsonl")
 	diff, err := os.Create(diffPath)
 	if err != nil {
@@ -1092,72 +1461,110 @@ func verifyDeltas(ctx context.Context, c config, format string) (err error) {
 	defer func() { err = errors.Join(err, diff.Close()) }()
 	enc := json.NewEncoder(diff)
 	report := verifyReport{Status: "pass"}
+	referencePins := map[string]string{}
+	seen := map[string]bool{}
+	checked := map[string]bool{}
+	refs := filepath.Join(c.Out, "references")
+	blobs := filepath.Join(c.Out, "answer-blobs")
 	err = eachJSON(filepath.Join(c.Out, "delta-"+format, "answers.jsonl"), func(s sample) error {
-		view, sources := originalView, ds
-		if s.Size%2 == 1 {
-			view, sources = changedView, changedDS
-		}
-		q := s.Query
-		fullKey, e := json.Marshal(struct {
-			Odd    bool
-			Query  workload.Query
-			Answer workload.Answer
-		}{s.Size%2 == 1, s.Query, s.Answer})
-		if e != nil {
+		if e := ctx.Err(); e != nil {
 			return e
 		}
-		memoPath := filepath.Join(memoDir, fmt.Sprintf("%x", sha256.Sum256(fullKey)))
-		_, memoErr := os.Stat(memoPath)
-		if memoErr != nil && !os.IsNotExist(memoErr) {
-			return memoErr
+		q, ok := queries[s.Query.ID]
+		if !ok || !reflect.DeepEqual(q, s.Query) || !slices.Contains(c.Sizes, s.Size) || s.Repeat < -1 || s.Repeat >= c.Repeats || !slices.Contains([]string{"base", "wrapper", "delta"}, s.Form) || s.ElapsedNS <= 0 {
+			return fmt.Errorf("invalid observation binding")
 		}
-		if os.IsNotExist(memoErr) {
-			want, e := workload.Evaluate(ctx, view, adapter.Fanout{Segments: view}, s.Query)
+		observation := hashJSON(struct {
+			Size, Repeat int
+			Form, Query  string
+		}{s.Size, s.Repeat, s.Form, q.ID})
+		if seen[observation] {
+			return fmt.Errorf("duplicate query observation")
+		}
+		seen[observation] = true
+		key := referenceKey(s.Size%2 == 1, q)
+		var ref referenceRecord
+		if referencePins[key] == "" {
+			if e := dataset.ReadJSON(filepath.Join(refs, key+".json"), &ref); e != nil {
+				return e
+			}
+			if ref.Binding != binding || !reflect.DeepEqual(ref.Query, q) || ref.Expected.QueryID != q.ID {
+				return fmt.Errorf("reference source/query binding mismatch")
+			}
+			referencePins[key] = hashJSON(ref)
+		}
+		memo := hashJSON(struct{ Reference, Answer string }{referencePins[key], s.AnswerSHA256})
+		marker := filepath.Join(refs, "validated", memo+".json")
+		cleanPath := filepath.Join(refs, "clean-"+key+".json")
+		var cleanPin string
+		cleanErr := dataset.ReadJSON(cleanPath, &cleanPin)
+		if s.Form != "base" && cleanErr != nil {
+			return fmt.Errorf("missing accepted clean baseline: %w", cleanErr)
+		}
+		if s.Form == "wrapper" && cleanPin != s.AnswerSHA256 {
+			return fmt.Errorf("zero-layer wrapper differs from raw C")
+		}
+		_, e := os.Stat(marker)
+		if e != nil && !os.IsNotExist(e) {
+			return e
+		}
+		if !checked[memo] && os.IsNotExist(e) {
+			if ref.Expected.QueryID == "" {
+				if e = dataset.ReadJSON(filepath.Join(refs, key+".json"), &ref); e != nil {
+					return e
+				}
+			}
+			a, e := loadAnswer(blobs, s.AnswerSHA256)
 			if e != nil {
 				return e
 			}
-			if workload.Lexical(q.Op) {
-				ids := make([]string, len(s.Answer.Hits))
-				for i, h := range s.Answer.Hits {
-					ids[i] = h.ID
+			if s.Form == "base" {
+				if e = compareReference(q, ref.Expected, a); e != nil {
+					return e
 				}
-				expected, e := oracle.DiskReference(ctx, sources, q, ids)
+			} else {
+				clean, e := loadAnswer(blobs, cleanPin)
 				if e != nil {
 					return e
 				}
-				q.NativeScoring = true
-				q.MatchRepos = expected.MatchRepos
-				// Full marker coverage is exact. Other native top-k ranks are diagnostic,
-				// because per-index statistics can legitimately change the ordered top-k.
-				q.ExactRank = strings.HasPrefix(q.ID, "delta-marker-")
-				q.MinOverlap = 0
+				expected := ref.Expected
+				expected.Answer = clean
+				if e = compareReference(q, expected, a); e != nil {
+					return e
+				}
 			}
-			check := workload.Compare(q, want, s.Answer)
-			if check.Mismatch {
-				return fmt.Errorf("%s size %d %s query %s: %s", format, s.Size, s.Form, q.ID, check.Detail)
-			}
-			if e = os.WriteFile(memoPath, []byte("checked-complete\n"), 0600); e != nil {
+			if e = dataset.WriteJSON(marker, struct{ Reference, Answer string }{referencePins[key], s.AnswerSHA256}); e != nil {
 				return e
 			}
 		}
+		checked[memo] = true
+		if s.Form == "base" {
+			if cleanErr != nil && !os.IsNotExist(cleanErr) {
+				return cleanErr
+			}
+			if os.IsNotExist(cleanErr) {
+				if e = dataset.WriteJSON(cleanPath, s.AnswerSHA256); e != nil {
+					return e
+				}
+			}
+		}
 		report.Checked++
-		if !workload.Lexical(q.Op) || s.Repeat < 0 {
+		if !workload.Lexical(q.Op) || s.Repeat < 0 || s.Form == "wrapper" {
 			return nil
 		}
-		key, _ := json.Marshal(struct {
+		pairKey := hashJSON(struct {
 			Size, Repeat int
 			ID           string
 		}{s.Size, s.Repeat, q.ID})
-		name := fmt.Sprintf("%x", sha256.Sum256(key))
 		other := "base"
 		if s.Form == "base" {
 			other = "delta"
 		}
+		pairPath := filepath.Join(scratch, pairKey+"-"+other+".json")
 		var paired sample
-		p := filepath.Join(pairDir, name+"-"+other+".json")
-		e = dataset.ReadJSON(p, &paired)
+		e = dataset.ReadJSON(pairPath, &paired)
 		if os.IsNotExist(e) {
-			return dataset.WriteJSON(filepath.Join(pairDir, name+"-"+s.Form+".json"), s)
+			return dataset.WriteJSON(filepath.Join(scratch, pairKey+"-"+s.Form+".json"), s)
 		}
 		if e != nil {
 			return e
@@ -1166,34 +1573,35 @@ func verifyDeltas(ctx context.Context, c config, format string) (err error) {
 		if a.Form != "base" {
 			a, b = b, a
 		}
-		ids := func(hits []adapter.Hit) []string {
-			out := make([]string, len(hits))
-			for i, h := range hits {
-				out[i] = h.ID
-			}
-			return out
+		clean, e := loadAnswer(blobs, a.AnswerSHA256)
+		if e != nil {
+			return e
+		}
+		delta, e := loadAnswer(blobs, b.AnswerSHA256)
+		if e != nil {
+			return e
 		}
 		report.NativeTopKComparisons++
-		if slices.Equal(ids(a.Answer.Hits), ids(b.Answer.Hits)) {
+		if slices.Equal(hitIDs(clean.Hits), hitIDs(delta.Hits)) {
 			report.NativeTopKEqual++
 		} else {
 			if e = enc.Encode(struct {
 				Size, Repeat int
 				Query        workload.Query
 				Clean, Delta []adapter.Hit
-			}{s.Size, s.Repeat, s.Query, a.Answer.Hits, b.Answer.Hits}); e != nil {
+			}{s.Size, s.Repeat, q, clean.Hits, delta.Hits}); e != nil {
 				return e
 			}
 		}
-		return os.Remove(p)
+		return os.Remove(pairPath)
 	})
 	if err != nil {
 		return err
 	}
-	if report.Checked == 0 {
-		return fmt.Errorf("empty answer spool")
+	if report.Checked != len(qs)*len(c.Sizes)*(c.Repeats+1)*3 {
+		return fmt.Errorf("incomplete answer/timing spool")
 	}
-	entries, err := os.ReadDir(pairDir)
+	entries, err := os.ReadDir(scratch)
 	if err != nil {
 		return err
 	}
