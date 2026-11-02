@@ -30,47 +30,52 @@ The original source indexer was `73933568f89c51898f54380160200b46d0a068f8`.
 The README's Gortex-source revision `76c080e5` describes an older derived recipe.
 It is not the provenance of this pair.
 
-## Proposed release, not yet published
+## Prepared release assets, not yet published
 
-Repository: `peterkc/gortex`. Proposed tag: `storage-design-c-fixtures-v1`.
-The existing tier1 archive is a historical input, not release-ready packaging.
-It contains twelve 163-byte AppleDouble `._` files (1,956 bytes total), each
-carrying `com.apple.provenance`. The strict extractor refuses them. Repack the
-verified ten-file tier1 on the approved CI host without metadata, then update
-its archive hash/length/tar-length in `fixture-pins.json` before release or fetch.
-Do not change any dataset or manifest bytes, and do not relax the extractor.
-Tier10's existing archive contains only its 73 files and 11 directories.
+Repository: `peterkc/gortex`. Intended tag: `storage-design-c-fixtures-v1`.
+The tag remains an explicit `fetch.py` argument. The pin file has no release-tag
+field, and no unchecked field was added. Publication still needs the user's
+approval and the lead's separate publication action.
 
-Historical archive identities, retained in the pin file pending clean packaging:
+The lead prepared tier1 on the Mac because the verified source files exist only
+locally; a Linux CI host cannot read them. Packaging used Python's standard-library
+`tarfile`, not BSD tar, so it did not copy xattrs or create AppleDouble entries.
+The tar uses USTAR with exactly the ten verified files in byte-sorted order.
+It contains no directory entries. Every entry has mode `0644`, uid/gid `0`, empty
+uname/gname and mtime `0`. The lead compressed it with zstd **1.5.7**, `-19 -T1`.
+No dataset or manifest bytes changed.
 
-- `tier1.tar.zst`: 36,857,489 bytes, SHA-256
-  `5ac6b1e83fc04b6e021c7a78ccdf52d002e06555f657ba1e9da02dd7b616b3fb`.
-- `tier10.tar.zst`: 42,551,184 bytes, SHA-256
+The lead checked all ten file hashes before and after packaging, the unchanged
+516,258,893-byte file total, absence of `._` members, and equality of the zstd
+round trip with the tar. The prepared file sizes and SHA-256 values were also
+checked read-only during release preparation. No fetch or extraction ran here.
+
+Current pins in `fixture-pins.json`:
+
+- **tier1.tar.zst:** 36,669,062 bytes, SHA-256
+  `c802fd028b25d83caeca5f62835dd2279dc08e20ef80e6fb7138b010e9ec24f5`.
+  Its tar is 516,270,080 bytes, SHA-256
+  `6e4ca8bd35518fe2175a13ff74b82244eb1773af6f7fa4ad6eef36616da7dbbd`.
+- **tier10.tar.zst:** unchanged at 42,551,184 bytes, SHA-256
   `5064655da1ac9d24db23d4474110275b532a0f20733cc2faf4cfd751fb05da6c`.
+  Its tar is 436,469,760 bytes. It contains 73 files and 11 directory entries.
 
-Together the current archives are 79,408,673 bytes, about 75.7 MiB. The clean
-tier1 size/hash is not known yet. Code-only packaging proposal, after approval:
+Total compressed download: 79,220,246 bytes, about 75.6 MiB. The tier1 root
+manifest remains
+`9c1a7fe9ebbee64b94f4c904795ada4942622f0efcd4e7657b6318922cdef736`.
+`extract_tier` accepts a files-only archive: it requires every allowed file and
+the exact byte total, but does not require directory entries. Its final
+`tarfile.extractall(..., filter="data")` creates the parent directories. The
+strict refusal of links, extra files and AppleDouble members is unchanged.
 
-```sh
-LC_ALL=C COPYFILE_DISABLE=1 tar --no-xattrs --format=ustar --sort=name \
-  --owner=0 --group=0 --numeric-owner --mtime=@0 \
-  -C "$VERIFIED_DATA" -cf "$OUT/tier1-clean.tar" \
-  tier1/K-client-go/content.jsonl tier1/K-client-go/edges.jsonl \
-  tier1/K-client-go/files.jsonl tier1/K-client-go/manifest.json \
-  tier1/K-client-go/nodes.jsonl tier1/K-client-go/symbols.jsonl \
-  tier1/K-client-go/vectors.bin tier1/expected.json \
-  tier1/manifest.json tier1/queries.json
-zstd -19 -T1 --no-progress -o "$OUT/tier1.tar.zst" "$OUT/tier1-clean.tar"
-sha256sum "$OUT/tier1.tar.zst"
-stat --printf='%s\n' "$OUT/tier1.tar.zst" "$OUT/tier1-clean.tar"
-```
-
-The explicit file arguments above are in byte-sorted order and include only
-the ten verified files; no directory recursion can add an unverified member.
-Inspect the tar's exact ten-file inventory and reverify the unchanged root/file
-hashes. Extraction creates the two required directories. The lead pins all new
-packaging lengths/hashes; no run may substitute an unpinned archive. These commands use GNU tar on Linux and do not
-rewrite the source data. Do not run them on the Mac in this study.
+**Historical tier1 packaging, not for upload:** the former archive was
+36,857,489 bytes with SHA-256
+`5ac6b1e83fc04b6e021c7a78ccdf52d002e06555f657ba1e9da02dd7b616b3fb`;
+its tar was 516,300,800 bytes. That tar contained twelve 163-byte AppleDouble
+`._` files (1,956 extra bytes) carrying `com.apple.provenance`. The strict
+extractor refuses that packaging. Those identities remain historical evidence,
+not accepted release pins. The previous proposed GNU-tar-on-Linux procedure
+was not used because CI could not see the local verified data.
 
 Versioned release assets avoid re-indexing and whole-corpus generator memory.
 An Actions cache can accelerate later reads, but it is not the source of truth:

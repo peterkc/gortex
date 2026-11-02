@@ -75,9 +75,9 @@
   "tiers": {
     "tier1": {
       "asset": "tier1.tar.zst",
-      "archive_sha256": "5ac6b1e83fc04b6e021c7a78ccdf52d002e06555f657ba1e9da02dd7b616b3fb",
-      "archive_bytes": 36857489,
-      "tar_bytes": 516300800,
+      "archive_sha256": "c802fd028b25d83caeca5f62835dd2279dc08e20ef80e6fb7138b010e9ec24f5",
+      "archive_bytes": 36669062,
+      "tar_bytes": 516270080,
       "manifest_sha256": "9c1a7fe9ebbee64b94f4c904795ada4942622f0efcd4e7657b6318922cdef736",
       "bytes": 516258893,
       "file_count": 10,
