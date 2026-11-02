@@ -1,29 +1,54 @@
 # One owned CPU pod lifecycle
 
-This procedure prepares a future lead-operated run. It grants no spend approval.
-Use the run-specific approval and reviewed commit before any account command.
-These helpers require Prime CLI **0.17.0**. They do not import caller-map tooling
-or change `run.py` or `test_driver.py`.
+**Preparation only. This document grants no spend approval.** The lead operates
+one approved Nebius on-demand CPU offer with Prime CLI **0.17.0**. The complete
+attempt includes provisioning, setup, analysis, copy and deletion. It must stay
+within three hours and $2. These helpers do not use `run.py`, `test_driver.py`
+or caller-map tooling.
 
 ```text
-Approve exact inputs -> prepare/hash inputs -> start host owner -> create once
-  -> compare reported pins -> detached pod session -> bounded copy
-  -> terminate --yes once -> complete active/history proof -> local verification
-                        ^ independent host cutoff also calls termination
+Approve exact inputs -> local validation -> one fresh availability read
+  -> arm owner -> create once -> validate request/status -> publish RENTED
+  -> short detached launch -> read-only completion probes -> verified copy
+  -> terminate once -> bounded active/history proof -> lead acceptance
+       ^ timer, signals and manual stop share the same locked owner
 ```
 
-## 1. Approval and required inputs
+## 1. Approve the exact execution
 
-The lead obtains a fresh offer receipt through the resource owner. The receipt
-must name the CLI context/account, provider, on-demand CPU offer short ID, cloud
-ID, region, CPU/RAM, GPU label, image, disk and **total** hourly price, including
-storage and other charged components. Refresh availability and price immediately
-before approval/use. A saved old quote is not a current offer. No interactive
-selection, resource default, spot substitution or second create is allowed.
+Obtain a fresh resource-owner receipt for context/account, short ID, cloud ID,
+provider, region, on-demand status, CPU/RAM, image, boot disk and hourly price.
+Approve the reviewed commit, input/script/config hashes, numeric profile and
+private durable output destination. Keep CLI installation and context unchanged
+until deletion is verified. An archived quote is not approval or availability.
 
-Prepare an execution JSON outside the checkout, in a private host directory.
-All keys below are mandatory. Replace placeholders with reviewed, approved data.
-The numeric example is the accuracy profile, not approval to execute it.
+Use `--no-group-similar` JSON. Default grouping hides CPU rows. Filter the fresh
+result by approved cloud, provider, location, numeric `price_value`, CPU shape
+and Available stock. Use the quoted default boot disk; other sizes need a
+separate reviewed price/selection contract. Accept only an explicitly present `is_spot: null` or
+`false`; missing, true or malformed values refuse. Require exactly one match.
+Empty output fails once. Do not retry it, choose the next cheapest row or change
+location. Create with the selected `--id`, not the CLI's broad `--cloud-id`
+alternative. Its first-match OR selection can select another location.
+
+The read-only November 2 receipt observed one matching Nebius FI 8/32 CPU row
+at 0.264/hour, SKU count 1 and default boot disk 100 GB. These are observations,
+not permanent pins. Refresh them before use. Availability displays `CPU NODE`,
+while the status formatter uses raw type plus count (`CPU_NODE x1` in the
+source-derived fixture). There was no live status sample. Do not call that
+fixture observed allocation evidence.
+
+CLI 0.17.0 short IDs omit spot and price. Even no-group output deduplicates short
+IDs. The CLI has no atomic offer/price lock or create `--max-price`. Post-create
+checks stop a mismatch, but cannot prevent its initial charge. Host/API outages
+can prevent a literal billing guarantee. The user's approval must accept these
+limits; otherwise do not rent. Confirm boot-disk/other fee inclusion separately.
+The current path requires the approved total rate to match the selected and
+reported rate. Unknown or separately charged fees are not a zero-cost assumption.
+
+Prepare private execution JSON outside the checkout. All keys are mandatory;
+replace paths and placeholders before validation. The numeric example is a
+proposal, not permission to execute it.
 
 ```json
 {
@@ -31,177 +56,200 @@ The numeric example is the accuracy profile, not approval to execute it.
   "provider": "nebius",
   "offer_id": "REQUIRED_FRESH_SHORT_ID",
   "cloud_id": "REQUIRED_FRESH_CLOUD_ID",
-  "gpu_label": "REQUIRED_EXACT_CLI_CPU_LABEL",
+  "location": "REQUIRED_APPROVED_LOCATION",
+  "gpu_label": "CPU_NODE x1",
+  "gpu_count": 1,
   "image": "REQUIRED_APPROVED_IMAGE",
-  "disk_gb": 64,
+  "disk_gb": 100,
   "vcpus": 8,
   "memory_gb": 32,
   "quoted_total_hourly": "REQUIRED_FRESH_TOTAL",
   "quote_checked_epoch": 0,
   "quote_reference": "REQUIRED_RECEIPT_REFERENCE",
+  "approval_reference": "REQUIRED_RUN_APPROVAL",
   "harness_commit": "REQUIRED_REVIEWED_FULL_FORK_COMMIT",
   "max_seconds": 10800,
   "cutoff_seconds": 10680,
   "setup_seconds": 1800,
+  "ready_seconds": 900,
+  "bootstrap_seconds": 300,
+  "analysis_seconds": 9600,
+  "copy_seconds": 420,
+  "minimum_upload_mbps": 100,
+  "upload_reference": "REQUIRED_RECENT_CONSERVATIVE_LINK_MEASUREMENT",
+  "token_json_max_bytes": 193052672,
+  "token_size_reference": "REQUIRED_REVIEWED_FROZEN_QUOTA_EXPORT_BOUND",
   "budget": "2.00",
   "hourly_ceiling": "0.50",
   "contingency_seconds": 3600,
   "minimum_memory_bytes": 30064771072,
   "minimum_free_bytes": 34359738368,
+  "payload_path": "REQUIRED_CANONICAL_PRIVATE_PATH/inputs.tar",
+  "session_path": "REQUIRED_CANONICAL_PRIVATE_PATH/session.sh",
+  "environment_path": "REQUIRED_CANONICAL_PRIVATE_PATH/env.sh",
+  "ssh_key_path": "REQUIRED_CANONICAL_PRIVATE_KEY_PATH",
+  "destination": "REQUIRED_CANONICAL_DURABLE_PRIVATE_FRESH_DIRECTORY",
   "payload_sha256": "REQUIRED_64_HEX",
   "session_sha256": "REQUIRED_64_HEX",
   "environment_sha256": "REQUIRED_64_HEX"
 }
 ```
 
-`lifecycle.py` rejects missing inputs, invalid pins, nonpositive numeric limits,
-a future/stale quote (older than 15 minutes), and over-ceiling arithmetic.
-For this profile: 3 h × $0.50/h = $1.50. A further 1 h contingency makes $2.
-That contingency is **not permission to extend the three-hour run**. A quote
-above $0.50/h is refused even when its three-hour estimate is below $2.
-`max_seconds` is the full paid interval. `cutoff_seconds` reserves two minutes
-for deletion and verification. Start the timer before create, not after setup.
+The quote must be no older than 15 minutes. Positive integer/time/hash checks and
+D14 bounds reject before create. Three hours at 0.50/hour is 1.50. One further
+billing-hour contingency makes 2; it grants no runtime extension. Even a short
+run refuses a quote above 0.50/hour. Deletion has at least a two-minute reserve.
+Shorter approved times must also reserve controller cleanup, packing and copy.
 
-The CLI has no create `--max-price` and no create JSON response. Therefore this
-is not an atomic price lock or an absolute billing guarantee during an API or
-host outage. An approval must accept this limit. If that limit is unacceptable,
-do not rent. The code checks the fresh quote before create and every reported
-price afterward. A mismatch requests termination, not a higher ceiling.
+## 2. Validate public inputs before rental
 
-## 2. Prepare a public-only payload before rental
+Use a clean reviewed checkout. Stage only public source and approved inputs;
+exclude `.git`, credentials, execution JSON and private host dumps. Include the
+reviewed session and complete nonsecret `env.sh`. See the
+[accuracy runbook](../onnx/ACCURACY-POD-RUNBOOK.md) for exact inputs and limits.
 
-Use a clean reviewed fork checkout. The lead supplies its full commit. Stage only
-public source and approved public inputs. Never include `.git`, credentials,
-private code, host environment dumps or the execution JSON in the pod payload.
-Record the source commit and the selected source files' hashes. Include exactly
-the reviewed session script and a complete `env.sh` with nonsecret explicit
-settings. A later boundary must source that file again; it must not rely on a
-previous SSH shell's exports.
-
-`artifacts.py` packages plain tar, not a second compression layer. Each payload
-file is SHA-256-bound in `evidence/file-manifest.json`. The external tar SHA-256
-covers that manifest. There are at most 1,024 payload files, 4 GiB per file,
-8 GiB total, and 16 MiB of allowed tar overhead. A payload directory must not
-already contain `file-manifest.json`. Reject links, devices, traversal, duplicate
-or noncanonical archive names. Keep bundles outside their source directory.
+`artifacts.py` packages plain tar with an exact SHA-256 manifest and external tar
+hash. Limits: 1,024 payload files, 4 GiB per file, 8 GiB total and 16 MiB tar
+overhead. It rejects links, traversal, devices, duplicates and noncanonical names.
+Keep the fresh bundle outside its source. Do not stage an existing manifest.
 
 ```bash
 python3.12 -B study/storage/pod/artifacts.py   --source "$STAGED_PUBLIC_INPUTS" --bundle "$PRIVATE/inputs.tar"
-# Put the resulting hash and the script/env hashes in the approved JSON.
-# Validate its complete fields without invoking Prime or loading project code:
-python3.12 -B -c 'import sys; sys.path.insert(0,"study/storage/pod"); from pathlib import Path; from lifecycle import configuration; configuration(Path(sys.argv[1]))' "$PRIVATE/execution.json"
+python3.12 -B -c 'import sys; sys.path.insert(0,"study/storage/pod"); from pathlib import Path; from lifecycle import configuration; from admission import validate; validate(configuration(Path(sys.argv[1])))' "$PRIVATE/execution.json"
 ```
 
-## 3. One host owner, one creation
+The second command is cloud-free. `rent` repeats it before any account operation.
+It checks clean reviewed HEAD, canonical regular inputs, transport hashes,
+private key, fresh output path outside the checkout, archive member/manifest
+hashes, complete reviewed harness export, pinned Go/uv archives, frozen corpus,
+model bytes and prepared 8,192/Linux-runtime proofs.
+The lead still reviews the trust/source meaning of those proofs.
 
-Use a host that stays awake and connected for the whole paid interval. Do not
-run the owner inside the SSH connection to the rented pod. Keep the CLI
-installation and account context unchanged until deletion is verified. Keep a managed process
-handle and its full stdout/stderr. Do not daemonize or duplicate the owner.
-The state directory must be new, absolute and private. Its files are local-only.
+Upload admission uses actual transport bytes, the referenced minimum uplink,
+25% margin and 30 seconds of handshakes. Readiness + upload + bootstrap reserve
+must fit setup. Bootstrap reserve is not a new paid extension. A roughly 0.7-GB
+payload takes 560 seconds at 10 Mbit/s even before margin, so that link can be
+refused. Do not replace this calculation with a larger arbitrary timeout or
+invent a public URL for local ONNX exports.
+
+The output directory is reserved before create and must remain empty until
+copy. The lead chooses an approved local-only directory in the existing Prime
+Gortex research hub, for example
+`research/gortex/storage-architecture/artifacts/accuracy/<execution-id>/`.
+Check ownership, ignore rules, privacy and free disk before selecting its exact
+canonical path. Do not leave accepted bundles only in an ephemeral session or
+upstream checkout. Keep the bundle, hash, approval and deletion receipts.
+
+## 3. Keep one host deletion owner
+
+Use an always-on host. On a Mac, wrap the retained owner with `caffeinate -i`.
+Keep the lid open; do not force sleep, shut down or change networks during the
+attempt. `caffeinate` does not protect against those actions. Do not run this
+owner through the pod's SSH channel or daemonize/duplicate it. Retain its managed
+process handle and full stdout/stderr. Set `PRIME_DISABLE_VERSION_CHECK=1`.
 
 ```bash
-python3.12 -B study/storage/pod/lifecycle.py rent   --config "$PRIVATE/execution.json" --state "$PRIVATE/lease"
+PRIME_DISABLE_VERSION_CHECK=1 caffeinate -i python3.12 -B study/storage/pod/lifecycle.py rent   --config "$PRIVATE/execution.json" --state "$PRIVATE/lease"
 ```
 
-This command remains running. The lead starts it with the host's managed
-background-process mechanism and retains its handle. Wait for `RENTED` and
-`session.json`; do not treat a create timeout as permission to repeat create.
+On an always-on Linux host omit `caffeinate -i`. State must be new, absolute and
+private. Wait for **RENTED** and `validated.json`, not merely `session.json`.
+The latter carries identity for cleanup before validation permits connection.
+The owner arms its cutoff before the single create. The create call has a
+separate 90-second bound and a last cancellation/deadline check before spawn.
+An expired/cancelled call records not-created; an uncertain outcome never retries.
 
-Create must start within the initial three-minute readiness window (or the
-shorter setup allowance). After opening its logs, the helper checks cancellation
-and the monotonic deadline again before spawning the CLI. An expired/cancelled
-pre-mutation create records `not-created` and cancels its unused timer; it does
-not create late or guess a resource. An uncertain CLI outcome is different and
-retains the cutoff/reconciliation path.
+Global context/plain flags and explicit offer, name, CPU, RAM, disk, image and
+`--yes` make create noninteractive. Pass boot-disk size explicitly; do not allow
+a Typer disk prompt. No attached disk is created. The complete list identifies
+exactly one owned nonce name. Request-summary quantity/provider/team/shape pins
+and status fields are checked before publishing validation. Echoed request
+fields are not observed allocation. Missing live fields remain listed.
 
-The helper uses the explicit context, `--plain`, offer ID, cloud ID, unique name,
-CPU, memory, disk, image and `--yes`. It supplies no stdin. CPU/no-team/provider
-request-summary fields are checked against the pinned CLI output. The complete
-paginated JSON list identifies exactly one unique owned name. The ID then stays
-fixed. Unknown identity is an escalation, never permission to delete a guess.
+Signals, manual stop and timer use the same locked owner. CLI subprocesses have
+separate sessions so terminal Ctrl-C goes through that owner. After uncertain
+create or early reconciliation failure, the process keeps its handlers and FIFO
+service until the lease is resolved or its one terminate attempt is issued.
+It does not return with only an unprotected timer. An unresolved identity is an
+immediate resource-owner escalation; do not kill a guess or abandon that owner.
 
-The initial status and ACTIVE status compare every available requested field,
-including total hourly price. CLI 0.17.0 omits offer/cloud IDs, spot status,
-vCPU/RAM and boot-disk size. Save those omissions honestly. Echoed request fields
-are not observed allocation proof. Require provider, image and price on ACTIVE,
-then require `preflight.py` inside the pod before setup/inference. It records
-CPU affinity, MemTotal, inherited cgroup memory limits and free disk. Exit 78
-means immediate refusal and termination, not a different shape or smaller job.
-
-## 4. Detached session and bounded copy
-
-The reviewed session must be a complete noninteractive script. It must use
-`set -euo pipefail`, close stdin, source `/srv/storage-pod/env.sh`, enforce setup
-and analysis deadlines, and package receipts on failure. It must run the observed
-shape preflight, not merely print capacity. Use `DEBIAN_FRONTEND=noninteractive`
-and explicit package-manager yes flags. Do not use a pseudo-terminal.
+## 4. Launch once, observe and copy
 
 ```bash
-python3.12 -B study/storage/pod/host_run.py   --state "$PRIVATE/lease" --destination "$PRIVATE/copied"   --ssh-key "$APPROVED_PRIVATE_SSH_KEY"   --session "$PRIVATE/session.sh" --environment "$PRIVATE/env.sh"   --payload "$PRIVATE/inputs.tar"
+python3.12 -B study/storage/pod/host_run.py   --state "$PRIVATE/lease" --destination "$APPROVED_DURABLE_DESTINATION"   --ssh-key "$APPROVED_PRIVATE_SSH_KEY" --session "$PRIVATE/session.sh"   --environment "$PRIVATE/env.sh" --payload "$PRIVATE/inputs.tar"
 ```
 
-The helper checks clean local HEAD and the three approved transport hashes.
-It uses BatchMode SSH/SCP and state-private known_hosts with first-use trust.
-If first-use SSH trust is unacceptable, do not use this transport without a
-separately verified host key. The remote command uses `nohup setsid`, redirects
-logs, closes stdin, and waits for that one detached process. A lost SSH transport
-or timeout does not kill or restart it. The host cutoff stays armed. A lead may
-request early deletion, but must not repeat a session after uncertain SSH output.
+Arguments must match the approved JSON. ACTIVE readiness and first SSH contact
+share the approved readiness allowance. SSH/SCP ignore user configuration with
+`-F /dev/null`, use BatchMode/IdentitiesOnly, a private known_hosts file and
+keepalives every 30 seconds (six missed replies). First-use host-key trust is
+explicit; if unacceptable, obtain a separately reviewed host-key path first.
 
-The script must produce `receipts.tar` first, then `evidence.tar` only on success.
-The small bundle uses an explicit JSON list of relative receipt paths, at most
-1 MiB each and 32 MiB for the archive. Omitted diagnostics are listed. A small
-bundle is **diagnostics only**, not a successful result. Keep the live log outside
-the manifested directory; add a stable, explicitly partial 1 MiB tail on exit.
+Initial `mkdir -p` observations and pinned staging uploads are idempotent and
+bounded by the original setup/upload clock. A failed upload has at most one
+same-byte re-transfer before any launch. It cannot refresh the allowance.
+The helper writes an exclusive local launch receipt, then sends one short
+`nohup setsid` start command. It does not wait on that SSH channel. A lost or
+uncertain acknowledgement permits only observation, never another launch.
 
-The full copy gets at most 420 seconds, fallback copy 60 seconds and early-log
-copy 15 seconds, all shortened by the existing cutoff. Timed-out copy processes
-are killed and reaped. The helper requests termination after a normal session
-and copy attempt, including failure. Shape refusal skips bulky copying.
+The session writes an atomic `complete.json` after cleanup/packing, with exit
+status and `full-evidence`, `partial-evidence`, `diagnostics-only` or `none` scope.
+Short read-only probes can reconnect until the copy reserve. Permanently lost
+transport still leaves the independent cutoff armed and requests stop when the
+host helper exits. Do not restart a half pair or rerun host launch on that state.
 
-## 5. Stop once, prove deletion, then verify locally
+Copy diagnostics first, including exit 78. Small bundles list explicit paths,
+omissions and JSON metrics/bindings; each file is at most 1 MiB and the bundle
+32 MiB. Full or partial evidence gets the approved copy window (at most 420
+seconds), diagnostics 60 and log-tail fallback 15. All shorten at the cutoff.
+Timed-out transport groups are killed and reaped. An intact first cut survives
+second-cut OOM in partial evidence; it cannot become an accepted comparison.
 
-Manual stop, signals and timer all feed the same locked owner:
+Copy verification checks the reviewed checkout again, external tar hash, fresh
+safe extraction, exact manifest and expected scope. A changed verifier or bad
+copy refuses acceptance. The host helper requests stop after copy/refusal/error.
+If stop IPC has lost its reader, preserve the primary error and escalate the
+cleanup failure; do not start another terminate owner.
+
+## 5. Prove deletion independently of cost audit
 
 ```bash
 python3.12 -B study/storage/pod/lifecycle.py stop --state "$PRIVATE/lease"
 ```
 
-The timer callback itself invokes shutdown. It does not merely wake a potentially
-blocked coordinator. The owner marks the identified lease attempted before its
-single `prime ... pods terminate POD_ID --yes`. It executes deletion before
-journal writes. Never retry an uncertain terminate. Read complete active/history
-JSON, prove the ID absent from active and present once with `terminated_at`, and
-record total cost, monotonic paid duration, stdout/stderr and exit status.
-`done.json` with `state: deleted` proves observed deletion. `not-created` means
-no create subprocess ran; it is not a deletion receipt. Absence is not success. A delayed or missing
-history entry needs immediate operator escalation, not a second mutation.
+The locked owner marks the lease attempted before one `terminate --yes`, and
+executes it before journal writes. It never replays an uncertain effect. Then
+it reads complete active/history sets within the remaining deletion reserve.
+Prove the ID absent from active and present once with `terminated_at`. A delayed
+history entry permits more read-only observations, not another terminate.
 
-Observe the owner's terminal result. A request to stop is not deletion proof.
-A verified deletion with exceeded time/cost is still a failed attempt. On owner,
-host or API failure, escalate to the resource owner with the exact ID/name and
-all saved observations. Do not create a replacement pod.
-
-After deletion, verify the external bundle hash, extract into a fresh directory,
-and verify its exact manifested payload set:
+A later read-only reconciliation is available:
 
 ```bash
-cd "$PRIVATE/copied"
-sha256sum --check evidence.tar.sha256
-python3.12 -B "$REVIEWED_CHECKOUT/study/storage/pod/artifacts.py"   --extract evidence.tar --destination "$PRIVATE/verified"
-python3.12 -B "$REVIEWED_CHECKOUT/study/storage/pod/artifacts.py"   --verify "$PRIVATE/verified/evidence/file-manifest.json"
+python3.12 -B study/storage/pod/lifecycle.py verify --state "$PRIVATE/lease"
 ```
 
-For a small bundle, use its own tar/hash and a different fresh destination.
-Never relabel partial evidence as full evidence. Final acceptance also needs the
-run-specific input, runtime, command, hard-limit, OOM and scoring checks.
+This mode cannot create or terminate. Observe the owner's terminal result too:
+a stop request is not proof. `done.json` state deleted records observed deletion;
+not-created proves no create subprocess began. Missing proof requires immediate
+resource-owner escalation with ID/name, logs and uncertain-effect receipt.
+Never create a replacement automatically.
+
+History `total_cost` units are unverified: a real 1.1-hour record at 1.29/hour
+contained 12961.0. Preserve that raw value for audit only. Do not divide it by a
+guessed factor or use it for the $2 check. Time/rate acceptance uses the approved
+rate, ceiling and host cutoff, not history totals. Termination's rendered UTC
+second supplies a conservative duration upper edge for later verification.
+A missing/unparseable time fails duration proof without erasing deletion proof.
+Rate-times-duration is an estimate, not an invoice; storage inclusion and final
+billing need authoritative confirmation. Unknown/missing cost never becomes a
+verified invoice or prevents recording observed deletion.
 
 ## Verification boundary
 
-These are new helpers adapted from earlier lifecycle work, not an accepted paid
-execution. Static checks do not prove concurrency, cloud deletion, fit or cost.
-Before rental, the lead needs independent source review and fresh CI of positive,
-refusal, timer/manual race, ambiguous-effect, lost-SSH, partial-copy and safe
-archive paths on the final commit. No local study test or cloud command belongs
-to runbook preparation.
+Before paid use, the lead requires fresh independent review and CI on the final
+commit, including fake process/clock refusals, signal/FIFO ownership, uncertain
+effects, delayed deletion, source-format fixtures, transport recovery, partial
+copy and real occupied-nonroot Linux cgroup setup. Static checks cannot prove
+cloud behavior, fit, throughput or billing. No local study test, Go build or
+account operation belongs to this preparation work.

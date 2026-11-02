@@ -95,6 +95,9 @@ def main() -> None:
     parser.add_argument("--source", type=Path)
     parser.add_argument("--bundle", type=Path)
     parser.add_argument("--small-list", type=Path)
+    parser.add_argument("--scope",
+                        choices=("full-evidence", "partial-evidence"),
+                        default="full-evidence")
     args = parser.parse_args()
     if args.extract:
         if (args.destination is None or args.verify or args.source
@@ -147,7 +150,7 @@ def main() -> None:
                 else source / "file-manifest.json")
     write_json(manifest, {
         "schema": "pod-file-manifest/v1", "files": files,
-        "scope": "diagnostics-only" if args.small_list else "full-evidence",
+        "scope": "diagnostics-only" if args.small_list else args.scope,
         "omitted": (sorted(set(small_files) - set(files))
                     if args.small_list else []),
         "self_hash": "covered by external bundle SHA-256",

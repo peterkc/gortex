@@ -1,5 +1,12 @@
 """Cloud-free lifecycle, shape, archive and language identity fixtures."""
+from copy import deepcopy
+from datetime import datetime, timezone
+from decimal import Decimal
+from hashlib import sha256
+from io import BytesIO
+import errno
 import json
+import signal
 import subprocess
 import sys
 import tarfile
@@ -13,6 +20,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+import admission
 import artifacts
 import accuracy
 import groups
@@ -24,47 +32,279 @@ import preflight
 def pins() -> dict:
     return {
         "cli_context": "approved", "provider": "nebius", "offer_id": "cpu",
-        "cloud_id": "cloud", "image": "image", "gpu_label": "CPU",
-        "disk_gb": 64, "vcpus": 8, "memory_gb": 32,
-        "quoted_total_hourly": "0.25", "quote_checked_epoch": time.time(),
-        "harness_commit": "a" * 40, "quote_reference": "receipt",
+        "cloud_id": "cpu-d3_8vcpu-32gb", "image": "image",
+        "gpu_label": "CPU_NODE x1", "location": "FI", "gpu_count": 1,
+        "disk_gb": 100, "vcpus": 8, "memory_gb": 32,
+        "quoted_total_hourly": "0.264", "quote_checked_epoch": time.time(),
+        "harness_commit": "a" * 40, "quote_reference": "public offer receipt",
         "max_seconds": 10800, "cutoff_seconds": 10680, "setup_seconds": 1800,
+        "ready_seconds": 900, "analysis_seconds": 9600,
+        "copy_seconds": 420, "bootstrap_seconds": 300,
+        "minimum_upload_mbps": 100,
+        "upload_reference": "reviewed 100 Mbps upload measurement",
+        "approval_reference": "reviewed D14 execution approval",
+        "token_json_max_bytes": 256 * 1024 ** 2,
+        "token_size_reference": "CI token preparation byte-size receipt",
         "budget": "2", "hourly_ceiling": "0.50", "contingency_seconds": 3600,
         "minimum_free_bytes": 32 * 1024 ** 3,
         "minimum_memory_bytes": 28 * 1024 ** 3,
         "payload_sha256": "b" * 64, "session_sha256": "c" * 64,
         "environment_sha256": "d" * 64,
+        "payload_path": "/approved/inputs.tar",
+        "session_path": "/approved/session.sh",
+        "environment_path": "/approved/env.sh",
+        "ssh_key_path": "/approved/key", "destination": "/approved/copy",
     }
+
+
+FIXTURE_TOOLS = {
+    "go.tar.gz": b"synthetic pinned Go archive; never extracted",
+    "uv.tar.gz": b"synthetic pinned uv archive; never extracted",
+}
+FIXTURE_SOURCES = {
+    "study/storage/pod/lifecycle.py": b"reviewed lifecycle fixture source",
+    "study/storage/pod/preflight.py": b"reviewed preflight fixture source",
+}
+
+
+def fixture_tool_pins():
+    return {name: sha256(raw).hexdigest()
+            for name, raw in FIXTURE_TOOLS.items()}
+
+
+def fixture_source_pins():
+    return {name: sha256(raw).hexdigest()
+            for name, raw in FIXTURE_SOURCES.items()}
+
+
+def fixture_source_digest(path):
+    expected = {admission.HERE.parents[2] / name: pin
+                for name, pin in fixture_source_pins().items()}
+    if path in expected:
+        return expected[path]
+    return artifacts.digest(path)
+
+
+def fixture_git_output(arguments, **kwargs):
+    if arguments == ["git", "rev-parse", "HEAD"]:
+        return "a" * 40
+    if arguments[:2] == ["git", "status"]:
+        return ""
+    expected = ["git", "ls-files", "--", "study/storage/harness",
+                "study/storage/onnx", "study/storage/neon-eval",
+                "study/storage/pod-cost", "study/storage/pod"]
+    if (arguments != expected or
+            kwargs.get("cwd") != admission.HERE.parents[2]):
+        raise AssertionError("unexpected reviewed-source enumeration")
+    return "\n".join(FIXTURE_SOURCES) + "\n"
+
+
+def invalid_pin_values(value):
+    return (
+        ("quoted_total_hourly", "0.51"), ("quoted_total_hourly", "NaN"),
+        ("quoted_total_hourly", "0"), ("hourly_ceiling", "0.51"),
+        ("budget", "2.01"), ("budget", "0"),
+        ("quote_checked_epoch", 0), ("quote_checked_epoch", float("inf")),
+        ("quote_checked_epoch", value["quote_checked_epoch"] + 901),
+        ("provider", "other"), ("vcpus", True), ("vcpus", 7),
+        ("memory_gb", 31), ("gpu_count", 0), ("gpu_count", 2),
+        ("disk_gb", 0), ("max_seconds", 10801),
+        ("cutoff_seconds", 10681), ("cutoff_seconds", 10700),
+        ("setup_seconds", 1801), ("ready_seconds", 1800),
+        ("analysis_seconds", 9601), ("analysis_seconds", 1800),
+        ("copy_seconds", 421), ("bootstrap_seconds", 0),
+        ("contingency_seconds", 3601), ("minimum_upload_mbps", 0),
+        ("minimum_upload_mbps", float("nan")),
+        ("minimum_memory_bytes", -1),
+        ("minimum_memory_bytes", 28 * 1024 ** 3 - 1),
+        ("minimum_free_bytes", 32 * 1024 ** 3 - 1),
+        ("payload_sha256", "missing"), ("session_sha256", "C" * 64),
+        ("environment_sha256", "d" * 63), ("harness_commit", "z" * 40),
+        ("upload_reference", " "), ("approval_reference", ""),
+        ("token_size_reference", None),
+        ("token_json_max_bytes", 256 * 1024 ** 2 + 1),
+        ("payload_path", ""), ("session_path", None),
+        ("environment_path", " "), ("ssh_key_path", ""),
+        ("destination", ""),
+    )
+
+
+def offer_document(config, **changes):
+    # Sanitized public CPU row: display price is rounded; price_value is not.
+    row = {
+        "id": config["offer_id"], "cloud_id": config["cloud_id"],
+        "provider": "nebius", "location": "FI", "gpu_type": "CPU NODE",
+        "gpu_count": 1, "vcpus": "8", "memory_gb": "32", "disk_gb": "100+",
+        "stock_status": "Available", "is_spot": None,
+        "price_per_hour": "$0.26", "price_value": 0.264,
+        **changes,
+    }
+    return {"gpu_resources": [row], "total_count": 1,
+            "filters": {"group_similar": False}}
+
+
+def active_status(**changes):
+    return {"id": "pod", "provider": "nebius", "image": "image",
+            "cost_per_hour": "0.264", "gpu": "CPU_NODE x1",
+            "status": "ACTIVE", "ssh": "root@127.0.0.1 -p 22", **changes}
+
+
+class Clock:
+    """Advance waits without sleeping or changing the process clock."""
+
+    def __init__(self):
+        self.epoch = 1_793_643_060.0
+        self.elapsed = 0.0
+        self.waits = []
+
+    def time(self):
+        return self.epoch + self.elapsed
+
+    def monotonic(self):
+        return 1000.0 + self.elapsed
+
+    def wait(self, seconds):
+        self.waits.append(seconds)
+        self.elapsed += seconds
+
+    def event(self):
+        return SimpleNamespace(wait=self.wait)
+
+
+def write_tar(bundle, members):
+    with tarfile.open(bundle, "w") as archive:
+        for name, raw in members.items():
+            member = tarfile.TarInfo("evidence/" + name)
+            member.size = len(raw)
+            archive.addfile(member, BytesIO(raw))
+
+
+def json_bytes(value):
+    return (json.dumps(value, sort_keys=True) + "\n").encode()
+
+
+def input_fixture(root):
+    """Tiny byte-bound proof fixture; never a model or an inference run."""
+    members = {
+        **FIXTURE_TOOLS,
+        **{"harness/" + name: raw for name, raw in FIXTURE_SOURCES.items()},
+        "corpus/document.jsonl": b'{"id":"fixture"}\n',
+        "tokenizer/config.json": b'{}\n',
+        "tokenizer/tokenizer_config.json": b'{}\n',
+        "model/fixture.onnx": b"not an executable model",
+        "runtime/libonnxruntime.so.1.31.0": b"not an executable library",
+    }
+    canonical = {"files": {"document.jsonl": sha256(
+        members["corpus/document.jsonl"]).hexdigest()}}
+    members["corpus/freeze-canonical.json"] = json_bytes(canonical)
+    freeze = sha256(members["corpus/freeze-canonical.json"]).hexdigest()
+    members["corpus/freeze.json"] = json_bytes(
+        {**canonical, "freeze_id": freeze})
+    inputs = {"data/cpu-cost/" + name: sha256(raw).hexdigest()
+              for name, raw in members.items()
+              if name.startswith(("tokenizer/", "model/"))}
+    members["harness/study/storage/pod-cost/cpu-cost-v1.json"] = json_bytes({
+        "model_revision": accuracy.REVISION, "inputs": inputs})
+    members["model-limit.json"] = json_bytes({
+        "schema": "model-limit/v1", "model_revision": accuracy.REVISION,
+        "config_sha256": inputs["data/cpu-cost/tokenizer/config.json"],
+        "tokenizer_config_sha256": inputs[
+            "data/cpu-cost/tokenizer/tokenizer_config.json"],
+        "maximum_tokens": 8192, "includes_special_tokens": True,
+        "source_reference": "reviewed fixture model limit"})
+    members["runtime/receipt.json"] = json_bytes({
+        "schema": "linux-ort/v1", "version": "1.31.0",
+        "platform": "linux-x86_64",
+        "member_sha256": sha256(
+            members["runtime/libonnxruntime.so.1.31.0"]).hexdigest(),
+        "member_path": "onnxruntime/capi/libonnxruntime.so.1.31.0",
+        "download_sha256": "d" * 64,
+        "download_url": "https://example.invalid/trusted-wheel",
+        "verification": "reviewed fixture release pin and wheel RECORD"})
+    members["file-manifest.json"] = json_bytes({
+        "files": {name: sha256(raw).hexdigest()
+                  for name, raw in members.items()}})
+    payload = root / "inputs.tar"
+    write_tar(payload, members)
+    session = root / "session.sh"
+    environment, key = root / "env.sh", root / "key"
+    for path in (session, environment, key):
+        path.write_text("fixture; never executed\n")
+    key.chmod(0o600)
+    config = {**pins(), "payload_path": str(payload),
+              "session_path": str(session),
+              "environment_path": str(environment),
+              "ssh_key_path": str(key), "destination": str(root / "copy")}
+    for name, pin in admission.PATHS.items():
+        config[pin] = artifacts.digest(Path(config[name]))
+    payload.with_suffix(".tar.sha256").write_text(
+        config["payload_sha256"] + "  inputs.tar\n")
+    return config, freeze, members
 
 
 class SupportTests(unittest.TestCase):
     def test_pins_and_rejections_do_not_mutate_input(self):
+        # Given approved pins, return a copy and refuse bad D14 limits.
         value = pins()
-        snapshot = dict(value)
-        self.assertNotIsInstance(lifecycle.execution_pins(
-            value, value["quote_checked_epoch"]), lifecycle.Invalid)
+        snapshot = deepcopy(value)
+        parsed = lifecycle.execution_pins(value, value["quote_checked_epoch"])
+        self.assertNotIsInstance(parsed, lifecycle.Invalid)
+        self.assertEqual(parsed, value)
+        self.assertIsNot(parsed, value)
         self.assertEqual(value, snapshot)
-        for key, wrong in (("quoted_total_hourly", "0.51"),
-                           ("hourly_ceiling", "0.51"),
-                           ("quote_checked_epoch", 0), ("vcpus", True),
-                           ("minimum_memory_bytes", -1),
-                           ("payload_sha256", "missing")):
-            with self.subTest(key=key):
+        for key, wrong in invalid_pin_values(value):
+            with self.subTest(key=key, wrong=wrong):
+                candidate = {**value, key: wrong}
+                before = deepcopy(candidate)
                 self.assertIsInstance(lifecycle.execution_pins(
-                    {**value, key: wrong}, time.time()), lifecycle.Invalid)
+                    candidate, value["quote_checked_epoch"]),
+                    lifecycle.Invalid)
+                self.assertEqual(candidate, before)
+        for key in value:
+            with self.subTest(missing=key):
+                candidate = {k: v for k, v in value.items() if k != key}
+                self.assertIsInstance(lifecycle.execution_pins(
+                    candidate, value["quote_checked_epoch"]),
+                    lifecycle.Invalid)
         self.assertIsInstance(lifecycle.execution_pins({}, time.time()),
                               lifecycle.Invalid)
 
+    def test_bad_configuration_refuses_before_create(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            path = root / "execution.json"
+            value = pins()
+            cases = [{**value, key: wrong}
+                     for key, wrong in invalid_pin_values(value)]
+            cases += [{k: v for k, v in value.items() if k != missing}
+                      for missing in value]
+            for index, candidate in enumerate(cases):
+                with self.subTest(case=index):
+                    path.write_text(json.dumps(candidate))
+                    with patch.object(lifecycle, "call") as call, \
+                            patch.object(admission, "validate") as validate, \
+                            patch.object(lifecycle.shutil, "which",
+                                         side_effect=AssertionError(
+                                             "bad pins reached CLI lookup")):
+                        with self.assertRaises(ValueError):
+                            lifecycle.rent(path, root / "state")
+                    validate.assert_not_called()
+                    call.assert_not_called()
+
     def test_shape_refuses_each_insufficient_resource(self):
         config = pins()
-        facts = {"cpus": 8, "available_memory_bytes": 32 * 1024 ** 3,
+        facts = {"cpus": 16, "effective_cpus": 8,
+                 "available_memory_bytes": 32 * 1024 ** 3,
                  "free_disk_bytes": 40 * 1024 ** 3,
                  "cgroup_controllers": "cpu memory"}
         self.assertFalse(preflight.refused(facts, config))
-        for key, wrong in (("cpus", 7), ("available_memory_bytes", 1),
+        for key, wrong in (("cpus", 7), ("effective_cpus", 4),
+                           ("available_memory_bytes", 1),
                            ("free_disk_bytes", 1),
                            ("cgroup_controllers", "cpu")):
-            self.assertTrue(preflight.refused({**facts, key: wrong}, config))
+            with self.subTest(key=key):
+                self.assertTrue(preflight.refused(
+                    {**facts, key: wrong}, config))
         self.assertIn("vcpus", lifecycle.mismatches({"vcpus": 16}, config))
         self.assertEqual(lifecycle.mismatches({"vcpus": 8}, config), [])
 
@@ -158,6 +398,7 @@ class SupportTests(unittest.TestCase):
             meminfo.write_text("MemTotal: 33554432 kB\n")
             membership.write_text("0::/owned/bootstrap\n")
             (cgroup / "cgroup.controllers").write_text("cpu memory")
+            (phase / "cpu.max").write_text("800000 100000")
             for path, limit in ((cgroup, "max"),
                                 (cgroup / "owned", str(26 * 1024 ** 3)),
                                 (phase, str(4 * 1024 ** 3))):
@@ -170,14 +411,21 @@ class SupportTests(unittest.TestCase):
 
             with patch.object(preflight, "Path", side_effect=mapped), \
                     patch.object(preflight.os, "sched_getaffinity",
-                                 return_value=set(range(8)), create=True), \
+                                 return_value=set(range(16)), create=True), \
                     patch.object(preflight.shutil, "disk_usage",
                                  return_value=SimpleNamespace(
                                      free=40 * 1024 ** 3)):
                 current = preflight.observe(pins(), root)
                 self.assertTrue(preflight.refused(current, pins()))
                 capacity = preflight.observe(pins(), root, cgroup)
+                self.assertEqual(capacity["cpus"], 16)
+                self.assertEqual(capacity["effective_cpus"], 8)
                 self.assertFalse(preflight.refused(capacity, pins()))
+                (phase / "cpu.max").write_text("400000 100000")
+                limited = preflight.observe(pins(), root, cgroup)
+                self.assertEqual(limited["effective_cpus"], 4)
+                self.assertTrue(preflight.refused(limited, pins()))
+                (phase / "cpu.max").write_text("800000 100000")
                 (cgroup / "memory.max").write_text(str(20 * 1024 ** 3))
                 self.assertTrue(preflight.refused(
                     preflight.observe(pins(), root, cgroup), pins()))
@@ -189,27 +437,35 @@ class SupportTests(unittest.TestCase):
     def test_timer_manual_and_uncertain_effects_never_replay(self):
         for create_timeout, delete_timeout, early_error in (
                 (False, False, False), (True, False, False),
-                (False, True, False), (False, False, True)):
+                (False, True, False), (False, False, True),
+                (True, False, True)):
             with self.subTest(create=create_timeout, delete=delete_timeout,
                               early_error=early_error):
                 self.lifecycle_case(create_timeout, delete_timeout,
                                     early_error)
 
-    def lifecycle_case(self, create_timeout, delete_timeout, early_error):
+    def lifecycle_case(self, create_timeout, delete_timeout, early_error,
+                       refusal=None):
+        # Given an uncertain create, retain FIFO/signals until one deletion.
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary).resolve()
             state = directory / "state"
-            config = directory / "execution.json"
-            config.write_text(json.dumps(pins()))
+            config_path = directory / "execution.json"
+            clock = Clock()
+            config = {**pins(), "quote_checked_epoch": clock.time(),
+                      "destination": str(directory / "destination")}
+            config_path.write_text(json.dumps(config))
             counts = {"create": 0, "terminate": 0}
+            timers, restored, reconciliations = [], [], []
+            handlers = {}
             deleted = False
-            failed_early = False
-            timers = []
+            create_error = subprocess.TimeoutExpired(["create"], 90)
 
             class Timer:
                 def __init__(self, seconds, callback):
                     self.callback = callback
                     self.started = False
+                    self.cancelled = False
                     self.worker = None
                     timers.append(self)
 
@@ -217,60 +473,115 @@ class SupportTests(unittest.TestCase):
                     self.started = True
 
                 def cancel(self):
-                    pass
+                    self.cancelled = True
 
                 def join(self):
                     if self.worker is not None:
                         self.worker.join()
 
-            def call(config, state, label, arguments, timeout, **kwargs):
+            def signal_handler(number, handler):
+                if callable(handler):
+                    handlers[number] = handler
+                    return "old-" + str(number)
+                self.assertEqual(counts["terminate"], 1,
+                                 "signals restored while lease still live")
+                restored.append(number)
+
+            def call(config, state, label, arguments, timeout=30, **kwargs):
                 nonlocal deleted
+                if label == "availability":
+                    self.assertEqual(timers, [])
+                    self.assertEqual(kwargs["namespace"], "availability")
+                    self.assertEqual(arguments, [
+                        "list", "--gpu-type", "CPU_NODE", "--no-group-similar",
+                        "--output", "json"])
+                    (state / "availability.stdout").write_text(
+                        json.dumps(offer_document(config)))
+                    return subprocess.CompletedProcess(arguments, 0)
                 self.assertTrue(timers[0].started)
+                self.assertEqual(set(handlers),
+                                 {signal.SIGINT, signal.SIGTERM})
                 counts[label] += 1
                 if label == "create":
-                    if create_timeout:
-                        raise subprocess.TimeoutExpired(arguments, timeout)
-                    (state / "create.stdout").write_text(
-                        "cloudId: cloud\nvcpus: 8\nmemory: 32\ndiskSize: 64\n"
-                        "image: image\nprovider: nebius\n"
-                        "gpuCount: 0\nteam: None\n")
-                    if early_error:
+                    destination = Path(config["destination"])
+                    self.assertTrue(destination.is_dir())
+                    self.assertEqual(destination.stat().st_mode & 0o777, 0o700)
+                    self.assertNotIn("--cloud-id", arguments)
+                    self.assertEqual(arguments[arguments.index("--id") + 1],
+                                     config["offer_id"])
+                    for option, key in (("--vcpus", "vcpus"),
+                                        ("--memory", "memory_gb"),
+                                        ("--disk-size", "disk_gb"),
+                                        ("--image", "image")):
+                        self.assertEqual(
+                            arguments[arguments.index(option) + 1],
+                            str(config[key]))
+                    self.assertEqual(arguments[-1], "--yes")
+                    if early_error and not create_timeout:
                         timers[0].callback()
+                        self.assertEqual(restored, [])
+                        self.assertTrue((state / "stop.fifo").exists())
+                    if create_timeout:
+                        raise create_error
+                    summary = (
+                        "cloudId: cpu-d3_8vcpu-32gb\nvcpus: 8\n"
+                        "memory: 32\ndiskSize: 100\nimage: image\n"
+                        "provider: nebius\ngpuCount: 1\nteam: None\n")
+                    if refusal == "summary":
+                        summary = summary.replace("gpuCount: 1", "gpuCount: 0")
+                    (state / "create.stdout").write_text(summary)
                 if label == "terminate":
                     deleted = True
+                    clock.elapsed = max(clock.elapsed, 10)
+                    self.assertEqual(arguments, ["terminate", "pod", "--yes"])
                     if delete_timeout:
                         raise subprocess.TimeoutExpired(arguments, timeout)
                 return subprocess.CompletedProcess(arguments, 0)
 
-            def pages(config, state, mode, label):
-                nonlocal failed_early
-                if label == "reconcile" and early_error and not failed_early:
-                    failed_early = True
-                    return []
+            def pages(config, state, mode, label, deadline=None):
+                if label == "reconcile":
+                    reconciliations.append(label)
+                    if early_error and len(reconciliations) == 1:
+                        return []
                 if mode == "history":
-                    return [{"id": "pod", "terminated_at": "observed",
-                             "total_cost": "0.01"}]
+                    ended = datetime.fromtimestamp(
+                        clock.epoch + 10, timezone.utc).strftime(
+                            "%Y-%m-%d %H:%M:%S UTC")
+                    return [{"id": "pod", "terminated_at": ended,
+                             "total_cost": 12961.0}]
                 if deleted:
                     return []
                 return [{"id": "pod", "name": json.loads(
                     (state / "owner.json").read_text())["name"]}]
 
-            def select(*unused):
+            def select(descriptors, *unused):
+                self.assertEqual(restored, [])
+                self.assertTrue((state / "stop.fifo").exists())
+                if not early_error and timers[0].worker is None:
+                    timers[0].worker = threading.Thread(
+                        target=timers[0].callback)
+                    timers[0].worker.start()
+                # Exercise the installed fake signal handler and manual FIFO.
+                handlers[signal.SIGINT]()
+                handlers[signal.SIGTERM]()
                 lifecycle.stop_request(state)
-                timer = timers[0]
-                if early_error:
-                    return ([], [], [])
-                timer.worker = threading.Thread(target=timer.callback)
-                timer.worker.start()
-                return ([], [], [])
+                return (descriptors, [], [])
 
-            status = {"id": "pod", "provider": "nebius", "image": "image",
-                      "cost_per_hour": "0.25", "gpu": "CPU"}
-            with patch.object(lifecycle.threading, "Timer", Timer), \
+            status = active_status()
+            if refusal not in (None, "summary"):
+                status[refusal] = "wrong"
+                if refusal == "cost_per_hour":
+                    status[refusal] = "0.50"
+            with patch.object(admission, "validate", return_value=60), \
+                    patch.object(lifecycle.threading, "Timer", Timer), \
+                    patch.object(lifecycle.signal, "signal", signal_handler), \
                     patch.object(lifecycle.shutil, "which",
                                  return_value="/prime"), \
                     patch.object(lifecycle.subprocess, "check_output",
                                  return_value="Prime CLI version: 0.17.0\n"), \
+                    patch.object(lifecycle.time, "time", clock.time), \
+                    patch.object(lifecycle.time, "monotonic",
+                                 clock.monotonic), \
                     patch.object(lifecycle, "call", side_effect=call), \
                     patch.object(lifecycle, "pages", side_effect=pages), \
                     patch.object(lifecycle, "status_read",
@@ -278,17 +589,336 @@ class SupportTests(unittest.TestCase):
                     patch.object(lifecycle.select, "select",
                                  side_effect=select):
                 if create_timeout:
-                    with self.assertRaises(RuntimeError):
-                        lifecycle.rent(config, state)
+                    with self.assertRaises(
+                            subprocess.TimeoutExpired) as raised:
+                        lifecycle.rent(config_path, state)
+                    self.assertIs(raised.exception, create_error)
+                elif refusal:
+                    with self.assertRaisesRegex(ValueError, "approved"):
+                        lifecycle.rent(config_path, state)
                 elif early_error:
-                    with self.assertRaises(ValueError):
-                        lifecycle.rent(config, state)
+                    with self.assertRaisesRegex(
+                            ValueError, "identity unproved"):
+                        lifecycle.rent(config_path, state)
                 else:
-                    lifecycle.rent(config, state)
+                    lifecycle.rent(config_path, state)
             self.assertEqual(counts, {"create": 1, "terminate": 1})
-            self.assertEqual(json.loads((state / "done.json").read_text())[
-                "state"], "deleted")
-            lifecycle.stop_request(state)  # Already-done stop changes nothing.
+            if refusal or create_timeout:
+                self.assertFalse((state / "validated.json").exists())
+            else:
+                self.assertTrue((state / "validated.json").exists())
+            if create_timeout and early_error:
+                self.assertGreaterEqual(len(reconciliations), 2)
+            self.assertCountEqual(restored, [signal.SIGINT, signal.SIGTERM])
+            self.assertTrue(timers[0].cancelled)
+            done = json.loads((state / "done.json").read_text())
+            self.assertEqual(done["state"], "deleted")
+            self.assertTrue(done["within_time_and_approved_rate"])
+            argv = json.loads((state / "create-command.json").read_text())
+            self.assertEqual(argv[:5],
+                             ["/prime", "--context", "approved", "--plain",
+                              "pods"])
+            self.assertIn("--yes", argv)
+            lifecycle.stop_request(state)  # Already-deleted stop is a no-op.
+
+    def test_summary_and_status_mismatch_terminate_without_validation(self):
+        for refusal in ("summary", "cost_per_hour", "provider", "image",
+                        "gpu"):
+            with self.subTest(refusal=refusal):
+                self.lifecycle_case(False, False, False, refusal)
+
+    def test_select_offer_requires_one_exact_ungrouped_on_demand_row(self):
+        config = pins()
+        for spot in (None, False):
+            document = offer_document(config, is_spot=spot)
+            before = deepcopy(document)
+            selected = lifecycle.select_offer(document, config)
+            self.assertEqual(selected["id"], config["offer_id"])
+            self.assertEqual(document, before)
+        wrong_rows = (
+            {"is_spot": True}, {"is_spot": 0}, {"is_spot": "false"},
+            {"id": "other"}, {"cloud_id": "other"}, {"provider": "other"},
+            {"location": "US"}, {"stock_status": "Unavailable"},
+            {"gpu_type": "CPU NODE (Spot)"}, {"gpu_count": 0},
+            {"vcpus": "16"}, {"vcpus": 8}, {"memory_gb": "16"},
+            {"disk_gb": "64+"}, {"disk_gb": "200+"},
+            {"price_value": 0.26}, {"price_value": 0.265},
+        )
+        documents = [offer_document(config, **wrong) for wrong in wrong_rows]
+        absent_spot = offer_document(config)
+        del absent_spot["gpu_resources"][0]["is_spot"]
+        documents.append(absent_spot)
+        empty = offer_document(config)
+        empty.update(gpu_resources=[], total_count=0)
+        documents.append(empty)
+        duplicate = offer_document(config)
+        duplicate["gpu_resources"] *= 2
+        duplicate["total_count"] = 2
+        documents.append(duplicate)
+        collision = offer_document(config)
+        collision["gpu_resources"].append({
+            **collision["gpu_resources"][0], "location": "US"})
+        collision["total_count"] = 2
+        documents.append(collision)
+        multiple = offer_document(config)
+        multiple["gpu_resources"].append({
+            **multiple["gpu_resources"][0], "id": "other"})
+        multiple["total_count"] = 2
+        documents.append(multiple)
+        grouped = offer_document(config)
+        grouped["filters"]["group_similar"] = True
+        documents.append(grouped)
+        incomplete = offer_document(config)
+        incomplete["total_count"] = 2
+        documents.append(incomplete)
+        for index, document in enumerate(documents):
+            with self.subTest(case=index):
+                before = deepcopy(document)
+                with self.assertRaises(ValueError):
+                    lifecycle.select_offer(document, config)
+                self.assertEqual(document, before)
+
+    def test_empty_availability_refuses_after_one_read_without_timer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            config = root / "execution.json"
+            config.write_text(json.dumps({
+                **pins(), "destination": str(root / "destination")}))
+
+            def call(config, state, label, arguments, timeout=30, **kwargs):
+                self.assertEqual(label, "availability")
+                self.assertEqual(kwargs["namespace"], "availability")
+                (state / "availability.stdout").write_text(json.dumps({
+                    "gpu_resources": [], "total_count": 0,
+                    "filters": {"group_similar": False}}))
+                return subprocess.CompletedProcess(arguments, 0)
+
+            with patch.object(admission, "validate", return_value=60), \
+                    patch.object(lifecycle.shutil, "which",
+                                 return_value="/prime"), \
+                    patch.object(lifecycle.subprocess, "check_output",
+                                 return_value="Prime CLI version: 0.17.0\n"), \
+                    patch.object(lifecycle, "call",
+                                 side_effect=call) as read, \
+                    patch.object(lifecycle.threading, "Timer") as timer:
+                with self.assertRaisesRegex(ValueError, "no retry"):
+                    lifecycle.rent(config, root / "state")
+            self.assertEqual(read.call_count, 1)
+            timer.assert_not_called()
+            self.assertFalse((root / "destination").exists())
+
+    def test_call_uses_context_plain_namespace_and_yes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary).resolve()
+            config = {**pins(), "cli_executable": "/prime"}
+            with patch.object(lifecycle.subprocess, "run") as run:
+                run.return_value = subprocess.CompletedProcess([], 0, "", "")
+                lifecycle.call(config, state, "create",
+                               ["create", "--id", "cpu", "--yes"])
+                self.assertEqual(run.call_args.args[0], [
+                    "/prime", "--context", "approved", "--plain", "pods",
+                    "create", "--id", "cpu", "--yes"])
+                lifecycle.call(config, state, "availability", ["list"],
+                               namespace="availability")
+                self.assertEqual(run.call_args.args[0], [
+                    "/prime", "--context", "approved", "--plain",
+                    "availability",
+                    "list"])
+                lifecycle.call(config, state, "terminate",
+                               ["terminate", "pod", "--yes"])
+                self.assertEqual(run.call_args.args[0][-4:],
+                                 ["pods", "terminate", "pod", "--yes"])
+                self.assertTrue(run.call_args.kwargs["start_new_session"])
+
+    def test_deletion_waits_for_history_without_trusting_raw_total(self):
+        self.deletion_case("boundary", None)
+        for cost in (None, 12961.0):
+            with self.subTest(cost=cost):
+                self.deletion_case("delayed", cost)
+
+    def test_deletion_requires_absence_history_reserve_and_rate_time(self):
+        for mode in ("active", "missing-history", "missing-time", "reserve",
+                     "elapsed", "rate", "bad-time"):
+            with self.subTest(mode=mode):
+                self.deletion_case(mode, None)
+
+    def deletion_case(self, mode, cost):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary).resolve()
+            clock = Clock()
+            config = {**pins(), "cli_executable": "/prime"}
+            if mode == "rate":
+                config["quoted_total_hourly"] = "0.51"
+            reads = []
+            histories = 0
+            elapsed = {"elapsed": 10800, "boundary": 10799}.get(mode, 10)
+            started = clock.epoch - elapsed
+            deadline = clock.monotonic() + 12
+            ended = datetime.fromtimestamp(
+                clock.epoch, timezone.utc).strftime(
+                    "%Y-%m-%d %H:%M:%S UTC")
+            entry = {"id": "pod", "terminated_at": ended}
+            if mode == "bad-time":
+                entry["terminated_at"] = "not a UTC timestamp"
+            if mode == "missing-time":
+                del entry["terminated_at"]
+            if cost is not None:
+                entry["total_cost"] = cost
+
+            def call(config, state, label, arguments, timeout=30, **kwargs):
+                nonlocal histories
+                mode_arg = arguments[0]
+                reads.append(arguments)
+                self.assertIn(mode_arg, ("list", "history"))
+                if mode_arg == "list":
+                    rows = [{"id": "pod"}] if mode == "active" else []
+                    key = "pods"
+                else:
+                    histories += 1
+                    absent = (mode == "missing-history" or
+                              mode == "delayed" and histories == 1)
+                    rows = [] if absent else [entry]
+                    key = "history"
+                (state / (label + ".stdout")).write_text(json.dumps({
+                    key: rows, "offset": 0, "total_count": len(rows)}))
+                if mode == "reserve":
+                    clock.elapsed += 20
+                return subprocess.CompletedProcess(arguments, 0)
+
+            with patch.object(lifecycle, "call", side_effect=call), \
+                    patch.object(lifecycle.time, "monotonic",
+                                 clock.monotonic), \
+                    patch.object(lifecycle.threading, "Event", clock.event):
+                if mode in ("active", "missing-history", "missing-time",
+                            "reserve"):
+                    with self.assertRaises(TimeoutError):
+                        lifecycle.verify_deletion(config, state, "pod",
+                                                  started, deadline)
+                    self.assertFalse((state / "done.json").exists())
+                elif mode in ("elapsed", "rate", "bad-time"):
+                    with self.assertRaisesRegex(ValueError, "time/rate"):
+                        lifecycle.verify_deletion(config, state, "pod",
+                                                  started, deadline)
+                    done = json.loads((state / "done.json").read_text())
+                    self.assertEqual(done["state"], "deleted")
+                    self.assertFalse(done["within_time_and_approved_rate"])
+                else:
+                    lifecycle.verify_deletion(config, state, "pod",
+                                              started, deadline)
+                    done = json.loads((state / "done.json").read_text())
+                    self.assertEqual(done["state"], "deleted")
+                    expected = 10800 if mode == "boundary" else 11
+                    self.assertEqual(done["elapsed_seconds"], expected)
+                    self.assertTrue(done["within_time_and_approved_rate"])
+                    estimate = Decimal(expected) / 3600 * Decimal("0.264")
+                    self.assertEqual(Decimal(done["rate_time_estimate"]),
+                                     estimate)
+                    self.assertIn("not-verified", done["billed_cost"])
+                    self.assertEqual(histories, 1 if mode == "boundary" else 2)
+                    self.assertEqual(clock.waits,
+                                     [] if mode == "boundary" else [5])
+            self.assertTrue(reads)
+            self.assertFalse(any(argument in ("create", "terminate")
+                                 for read in reads for argument in read))
+
+    def test_verify_command_only_reads_existing_lease(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary).resolve()
+            (state / "config.json").write_text(json.dumps(pins()))
+            (state / "session.json").write_text(json.dumps({
+                "pod_id": "pod", "started_epoch": 1_793_643_060}))
+            with patch.object(sys, "argv", [
+                    "lifecycle.py", "verify", "--state", str(state)]), \
+                    patch.object(lifecycle, "verify_deletion") as verify, \
+                    patch.object(lifecycle, "rent") as rent, \
+                    patch.object(lifecycle, "stop_request") as stop, \
+                    patch.object(lifecycle, "call") as call:
+                lifecycle.main()
+            verify.assert_called_once()
+            self.assertEqual(verify.call_args.args[2:4],
+                             ("pod", 1_793_643_060))
+            rent.assert_not_called()
+            stop.assert_not_called()
+            call.assert_not_called()
+
+    def test_connect_waits_four_minutes_but_refuses_readiness_expiry(self):
+        self.connect_case("ready")
+        self.connect_case("expired")
+
+    def test_connect_requires_validation_and_exact_root_ip_port(self):
+        for mode in ("unvalidated", "refused", "deleted"):
+            with self.subTest(mode=mode):
+                self.connect_case(mode)
+        for ssh in ("ssh root@127.0.0.1 -p 22", "user@127.0.0.1 -p 22",
+                    "root@example.invalid -p 22", "root@127.0.0.1 -P 22",
+                    "root@127.0.0.1 -p 0", "root@127.0.0.1 -p 65536",
+                    "root@127.0.0.1 -p +22", "root@127.0.0.1 -p 22 extra"):
+            with self.subTest(ssh=ssh):
+                self.connect_case("bad-ssh", ssh)
+
+    def connect_case(self, mode, ssh="root@127.0.0.1 -p 22"):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary).resolve()
+            clock = Clock()
+            config = {**pins(), "quote_checked_epoch": clock.time()}
+            (state / "config.json").write_text(json.dumps(config))
+            (state / "session.json").write_text(json.dumps({
+                "pod_id": "pod", "started_epoch": clock.epoch}))
+            if mode != "unvalidated":
+                (state / "validated.json").write_text("{}")
+            if mode == "refused":
+                (state / "rental-error.json").write_text("{}")
+            if mode == "deleted":
+                (state / "done.json").write_text('{"state":"deleted"}')
+            observed = []
+
+            def status_read(*arguments):
+                observed.append(clock.elapsed)
+                status = ("INSTALLING" if mode == "expired" or
+                          mode == "ready" and clock.elapsed < 240
+                          else "ACTIVE")
+                return active_status(status=status, ssh=ssh)
+
+            with patch.object(lifecycle.time, "time", clock.time), \
+                    patch.object(lifecycle.threading, "Event", clock.event), \
+                    patch.object(lifecycle, "status_read",
+                                 side_effect=status_read), \
+                    patch.object(lifecycle, "stop_request") as stop:
+                if mode == "ready":
+                    lifecycle.connect(state)
+                    self.assertEqual(clock.elapsed, 240)
+                    connection = json.loads(
+                        (state / "connection.json").read_text())
+                    self.assertEqual(connection,
+                                     {"target": "root@127.0.0.1",
+                                      "port": "22"})
+                    self.assertEqual(json.loads(
+                        (state / "session-inputs.json").read_text())[
+                            "analysis_seconds"], 9600)
+                    stop.assert_not_called()
+                else:
+                    with self.assertRaises(ValueError):
+                        lifecycle.connect(state)
+                    stop.assert_called_once_with(state)
+                    self.assertFalse((state / "connection.json").exists())
+            if mode == "expired":
+                self.assertEqual(clock.elapsed, 900)
+            if mode in ("unvalidated", "refused", "deleted"):
+                self.assertEqual(observed, [])
+
+    def test_cleanup_ipc_failure_keeps_primary_exception(self):
+        state = Path("/approved/state")
+        failure = OSError(errno.ENXIO, "no FIFO reader")
+        primary = RuntimeError("original operation failed")
+        with patch.object(lifecycle, "stop_request", side_effect=failure):
+            lifecycle.request_cleanup(state, primary)
+            self.assertEqual(str(primary), "original operation failed")
+            self.assertTrue(any("ENXIO" in note or "No such device" in note
+                                or "no FIFO reader" in note
+                                for note in primary.__notes__))
+            with self.assertRaises(OSError) as raised:
+                lifecycle.request_cleanup(state)
+            self.assertIs(raised.exception, failure)
 
     def test_archive_manifest_extra_changed_and_unsafe_members(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -434,85 +1064,607 @@ class SupportTests(unittest.TestCase):
             self.assertFalse((root / "go").exists())
 
 
+class AdmissionTests(unittest.TestCase):
+    def test_valid_local_inputs_are_checked_without_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            config, freeze, _ = input_fixture(root)
+            before = deepcopy(config)
+            with patch.object(admission, "FREEZE", freeze), \
+                    patch.object(admission, "TOOLS", fixture_tool_pins()), \
+                    patch.object(admission, "digest", fixture_source_digest), \
+                    patch.object(admission.subprocess, "check_output",
+                                 side_effect=fixture_git_output):
+                seconds = admission.validate(config)
+            self.assertGreaterEqual(seconds, 30)
+            self.assertLessEqual(seconds + 900 + 300, 1800)
+            self.assertEqual(config, before)
+            self.assertFalse(Path(config["destination"]).exists())
+            destination = Path(config["destination"])
+            destination.mkdir(mode=0o700)
+            with patch.object(admission, "FREEZE", freeze), \
+                    patch.object(admission, "TOOLS", fixture_tool_pins()), \
+                    patch.object(admission, "digest", fixture_source_digest), \
+                    patch.object(admission.subprocess, "check_output",
+                                 side_effect=fixture_git_output):
+                self.assertEqual(admission.validate(
+                    config, destination_ready=True), seconds)
+                (destination / "unapproved").write_text("existing")
+                with self.assertRaisesRegex(ValueError, "empty"):
+                    admission.validate(config, destination_ready=True)
+
+    def test_transport_payload_key_destination_refuse_before_create(self):
+        cases = ("payload-hash", "session-hash", "environment-hash",
+                 "key-mode", "key-alias", "payload-alias", "relative-path",
+                 "noncanonical-text",
+                 "destination-exists", "destination-parent",
+                 "destination-source",
+                 "sidecar", "payload-name", "upload-feasibility", "dirty-head",
+                 "wrong-head", "token-cap", "token-small")
+        for mode in cases:
+            with self.subTest(mode=mode), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                config, freeze, _ = input_fixture(root)
+                payload = Path(config["payload_path"])
+                head, dirty = "a" * 40, ""
+                if mode.endswith("-hash"):
+                    config[mode.replace("-hash", "_sha256")] = "0" * 64
+                elif mode == "key-mode":
+                    Path(config["ssh_key_path"]).chmod(0o644)
+                elif mode in ("key-alias", "payload-alias"):
+                    name = ("ssh_key_path" if mode == "key-alias"
+                            else "payload_path")
+                    alias = root / "alias"
+                    alias.symlink_to(config[name])
+                    config[name] = str(alias)
+                elif mode == "noncanonical-text":
+                    path = Path(config["environment_path"])
+                    config["environment_path"] = (
+                        str(path.parent) + "/./" + path.name)
+                elif mode == "relative-path":
+                    config["environment_path"] = "env.sh"
+                elif mode == "destination-exists":
+                    Path(config["destination"]).mkdir(mode=0o700)
+                elif mode == "destination-parent":
+                    config["destination"] = str(root / "missing/copy")
+                elif mode == "destination-source":
+                    config["destination"] = str(admission.HERE / "copy")
+                elif mode == "sidecar":
+                    payload.with_suffix(".tar.sha256").write_text("wrong\n")
+                elif mode == "payload-name":
+                    other = root / "other.tar"
+                    payload.rename(other)
+                    config["payload_path"] = str(other)
+                elif mode == "upload-feasibility":
+                    config["minimum_upload_mbps"] = 0.000001
+                elif mode == "dirty-head":
+                    dirty = " M fixture.py\n"
+                elif mode == "wrong-head":
+                    head = "e" * 40
+                elif mode == "token-cap":
+                    config["token_json_max_bytes"] += 1
+                elif mode == "token-small":
+                    config["token_json_max_bytes"] = (
+                        admission.TOKEN_JSON_BOUND - 1)
+
+                def git_output(arguments, **kwargs):
+                    if arguments == ["git", "rev-parse", "HEAD"]:
+                        return head
+                    if arguments[:2] == ["git", "status"]:
+                        return dirty
+                    return fixture_git_output(arguments, **kwargs)
+
+                path = root / "execution.json"
+                path.write_text(json.dumps(config))
+                with patch.object(admission, "FREEZE", freeze), \
+                        patch.object(admission, "TOOLS",
+                                     fixture_tool_pins()), \
+                        patch.object(admission, "digest",
+                                     fixture_source_digest), \
+                        patch.object(admission.subprocess, "check_output",
+                                     side_effect=git_output), \
+                        patch.object(lifecycle, "call") as create:
+                    with self.assertRaises(ValueError):
+                        lifecycle.rent(path, root / "state")
+                create.assert_not_called()
+                self.assertFalse((root / "state").exists())
+
+    def test_missing_or_changed_tools_sources_refuse_before_create(self):
+        for mode in ("missing-go", "changed-go", "missing-uv", "changed-uv",
+                     "missing-source", "changed-source"):
+            with self.subTest(mode=mode):
+                self.export_case(mode)
+
+    def test_reviewed_source_set_must_be_nonempty_and_canonical(self):
+        for mode in ("empty-source-set", "aliased-source",
+                     "nonregular-source"):
+            with self.subTest(mode=mode):
+                self.export_case(mode)
+
+    def export_case(self, mode):
+        # An approved manifest cannot replace independent tool/source pins.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            config, freeze, members = input_fixture(root)
+            if mode.endswith(("-go", "-uv", "-source")) and mode not in (
+                    "aliased-source", "nonregular-source"):
+                name = {"go": "go.tar.gz", "uv": "uv.tar.gz",
+                        "source": "harness/study/storage/pod/preflight.py"}[
+                            mode.rsplit("-", 1)[1]]
+                if mode.startswith("missing-"):
+                    del members[name]
+                else:
+                    members[name] = b"changed but self-consistently manifested"
+                members["file-manifest.json"] = json_bytes({
+                    "files": {name: sha256(raw).hexdigest()
+                              for name, raw in members.items()
+                              if name != "file-manifest.json"}})
+                payload = Path(config["payload_path"])
+                write_tar(payload, members)
+                config["payload_sha256"] = artifacts.digest(payload)
+                payload.with_suffix(".tar.sha256").write_text(
+                    config["payload_sha256"] + "  inputs.tar\n")
+
+            def git_output(arguments, **kwargs):
+                if arguments[:2] == ["git", "ls-files"]:
+                    if mode == "empty-source-set":
+                        return ""
+                    if mode == "aliased-source":
+                        return "study/storage/pod/../pod/lifecycle.py\n"
+                    if mode == "nonregular-source":
+                        return "study/storage/pod/not-a-reviewed-file.py\n"
+                return fixture_git_output(arguments, **kwargs)
+
+            expected = "pinned Go/uv archive"
+            if mode in ("missing-source", "changed-source"):
+                expected = "complete reviewed harness export"
+            if mode == "empty-source-set":
+                expected = "file set is empty"
+            if mode in ("aliased-source", "nonregular-source"):
+                expected = "nonregular/aliased path"
+            path = root / "execution.json"
+            path.write_text(json.dumps(config))
+            with patch.object(admission, "FREEZE", freeze), \
+                    patch.object(admission, "TOOLS", fixture_tool_pins()), \
+                    patch.object(admission, "digest", fixture_source_digest), \
+                    patch.object(admission.subprocess, "check_output",
+                                 side_effect=git_output), \
+                    patch.object(lifecycle, "call") as create:
+                with self.assertRaisesRegex(ValueError, expected):
+                    lifecycle.rent(path, root / "state")
+            create.assert_not_called()
+            self.assertFalse((root / "state").exists())
+
+    def test_token_json_bound_accepts_exact_source_supported_cap(self):
+        self.assertEqual(admission.TOKEN_JSON_BOUND, 193_052_672)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            config, freeze, _ = input_fixture(root)
+            config["token_json_max_bytes"] = 193_052_672
+            with patch.object(admission, "FREEZE", freeze), \
+                    patch.object(admission, "TOOLS", fixture_tool_pins()), \
+                    patch.object(admission, "digest", fixture_source_digest), \
+                    patch.object(admission.subprocess, "check_output",
+                                 side_effect=fixture_git_output):
+                self.assertGreaterEqual(admission.validate(config), 30)
+
+    def test_upload_seconds_includes_margin_and_rounds_at_byte_boundary(self):
+        self.assertEqual(admission.upload_seconds(0, 100), 30)
+        self.assertEqual(admission.upload_seconds(9_999_999, 100), 31)
+        self.assertEqual(admission.upload_seconds(10_000_000, 100), 31)
+        self.assertEqual(admission.upload_seconds(10_000_001, 100), 32)
+        for size, rate in ((-1, 100), (1, 0), (1, -1),
+                           (1, float("nan")), (1, float("inf"))):
+            with self.subTest(size=size, rate=rate):
+                with self.assertRaises(ValueError):
+                    admission.upload_seconds(size, rate)
+
+    def test_payload_parser_refuses_unsafe_or_missing_bound_proofs(self):
+        cases = ("traversal", "link", "duplicate", "missing-limit",
+                 "missing-runtime", "wrong-freeze", "wrong-model",
+                 "wrong-limit", "wrong-runtime", "changed-member",
+                 "unmanifested")
+        for mode in cases:
+            with self.subTest(mode=mode), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                config, freeze, members = input_fixture(root)
+                payload = Path(config["payload_path"])
+                if mode in ("traversal", "link", "duplicate"):
+                    with tarfile.open(payload, "w") as archive:
+                        member = tarfile.TarInfo("evidence/a")
+                        if mode == "traversal":
+                            member.name = "evidence/../outside"
+                        if mode == "link":
+                            member.type = tarfile.SYMTYPE
+                            member.linkname = "outside"
+                        archive.addfile(member)
+                        if mode == "duplicate":
+                            archive.addfile(member)
+                else:
+                    if mode == "missing-limit":
+                        del members["model-limit.json"]
+                    elif mode == "missing-runtime":
+                        del members["runtime/receipt.json"]
+                    elif mode == "wrong-freeze":
+                        members["corpus/freeze.json"] = json_bytes({
+                            "files": {}, "freeze_id": "0" * 64})
+                    elif mode == "wrong-model":
+                        name = ("harness/study/storage/pod-cost/"
+                                "cpu-cost-v1.json")
+                        value = json.loads(members[name])
+                        value["model_revision"] = "wrong"
+                        members[name] = json_bytes(value)
+                    elif mode == "wrong-limit":
+                        value = json.loads(members["model-limit.json"])
+                        value["maximum_tokens"] = 2048
+                        members["model-limit.json"] = json_bytes(value)
+                    elif mode == "wrong-runtime":
+                        value = json.loads(members["runtime/receipt.json"])
+                        value["platform"] = "macos-arm64"
+                        members["runtime/receipt.json"] = json_bytes(value)
+                    elif mode == "changed-member":
+                        members["model/fixture.onnx"] = b"different bytes"
+                    if mode != "unmanifested":
+                        members["file-manifest.json"] = json_bytes({
+                            "files": {name: sha256(raw).hexdigest()
+                                      for name, raw in members.items()
+                                      if name != "file-manifest.json"}})
+                    else:
+                        members["extra"] = b"not in the manifest"
+                    write_tar(payload, members)
+                with patch.object(admission, "FREEZE", freeze), \
+                        patch.object(admission, "TOOLS", fixture_tool_pins()):
+                    with self.assertRaises((ValueError, KeyError)):
+                        admission.payload_check(payload, fixture_source_pins())
+
+
 class HostTransferTests(unittest.TestCase):
     def test_success_loss_and_copy_timeout_have_one_cleanup_owner(self):
         for mode in ("success", "lost", "copy-timeout", "changed-input"):
             with self.subTest(mode=mode):
                 self.host_case(mode)
 
+    def test_ambiguous_launch_probes_without_relaunch(self):
+        for mode in ("launch-255", "launch-timeout", "probe-recovery"):
+            with self.subTest(mode=mode):
+                self.host_case(mode)
+
+    def test_shape_refusal_and_partial_evidence_copy_before_cleanup(self):
+        for mode in ("shape-refusal", "partial"):
+            with self.subTest(mode=mode):
+                self.host_case(mode)
+
+    def test_copied_archive_hash_scope_manifest_and_head_are_verified(self):
+        for mode in ("bad-hash", "bad-scope", "bad-manifest", "changed-head",
+                     "dirty-verifier", "receipt-loss"):
+            with self.subTest(mode=mode):
+                self.host_case(mode)
+
+    def test_invalid_completion_marker_never_claims_a_verified_result(self):
+        for mode in ("marker-exit", "marker-scope", "marker-json",
+                     "marker-overflow", "marker-negative",
+                     "marker-inconsistent"):
+            with self.subTest(mode=mode):
+                self.host_case(mode)
+
+    def test_duplicate_launch_or_argument_mismatch_never_uses_ssh(self):
+        for mode in ("duplicate", "wrong-argument"):
+            with self.subTest(mode=mode):
+                self.host_case(mode)
+
+    def test_readiness_and_upload_recovery_keep_original_deadline(self):
+        for mode in ("ready-recovery", "upload-recovery", "upload-failure"):
+            with self.subTest(mode=mode):
+                self.host_case(mode)
+
     def host_case(self, mode):
+        # Given approved bytes, launch once, verify copies, then stop.
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             state = root / "lease"
             state.mkdir()
-            session, environment = root / "session.sh", root / "env.sh"
-            payload, key = root / "inputs.tar", root / "key"
-            for path in (session, environment, payload, key):
-                path.write_text("fixture")
-            key.chmod(0o600)
-            config = {**pins(), "session_sha256": artifacts.digest(session),
-                      "environment_sha256": artifacts.digest(environment),
-                      "payload_sha256": artifacts.digest(payload)}
+            config, freeze, _ = input_fixture(root)
+            destination = Path(config["destination"])
+            destination.mkdir(mode=0o700)
+            clock = Clock()
+            config.update(quote_checked_epoch=clock.time(), upload_seconds=60)
             (state / "config.json").write_text(json.dumps(config))
-            (state / "connection.json").write_text(json.dumps({
-                "target": "root@127.0.0.1", "port": "22"}))
-            (state / "owner.json").write_text(json.dumps({
-                "cutoff_epoch": time.time() + 600}))
+            (state / "validated.json").write_text('{"pod_id":"pod"}')
+            owner = {"started_epoch": clock.epoch,
+                     "cutoff_epoch": clock.epoch + config["cutoff_seconds"]}
+            (state / "owner.json").write_text(json.dumps(owner))
             if mode == "changed-input":
-                payload.write_text("changed")
-            children = []
+                Path(config["payload_path"]).write_text("changed")
+            if mode == "duplicate":
+                (state / "launch-requested.json").write_text(
+                    '{"relaunch_allowed":false}')
+            events, transports, copies = [], [], []
+            launches, probes, mkdirs = 0, 0, 0
+            upload_attempts = []
+            completed = {"exit": 0, "scope": "full-evidence"}
+            if mode == "shape-refusal":
+                completed = {"exit": 78, "scope": "diagnostics-only"}
+            if mode == "partial":
+                completed = {"exit": 1, "scope": "partial-evidence"}
+            if mode == "marker-exit":
+                completed = {"exit": "0", "scope": "full-evidence"}
+            if mode == "marker-overflow":
+                completed = {"exit": 256, "scope": "full-evidence"}
+            if mode == "marker-negative":
+                completed = {"exit": -1, "scope": "partial-evidence"}
+            if mode == "marker-inconsistent":
+                completed = {"exit": 1, "scope": "full-evidence"}
+            if mode == "marker-scope":
+                completed = {"exit": 0, "scope": "accepted-anything"}
 
-            class Child:
-                def __init__(self, command, **kwargs):
-                    self.args = command
-                    self.pid = 101 + len(children)
-                    self.returncode = None
-                    self.timed_out = False
-                    self.full = any(
-                        arg.endswith(":/srv/storage-pod/evidence.tar")
-                        for arg in command)
-                    children.append(self)
-                    if kwargs.get("start_new_session") is not True:
-                        raise AssertionError("SCP must own a process group")
+            def connect(state):
+                self.assertEqual(transports, [])
+                events.append("connect")
+                (state / "connection.json").write_text(json.dumps({
+                    "target": "root@127.0.0.1", "port": "22"}))
+                (state / "session-inputs.json").write_text("{}")
 
-                def wait(self, timeout=None):
-                    if (mode == "copy-timeout" and self.full
-                            and not self.timed_out):
-                        self.timed_out = True
-                        raise subprocess.TimeoutExpired(self.args, timeout)
-                    self.returncode = 0
-                    return 0
+            def git_output(arguments, **kwargs):
+                self.assertEqual(arguments[:1], ["git"])
+                verifying_evidence = copies and copies[-1] == "evidence.tar"
+                if arguments[1] == "rev-parse":
+                    return "e" * 40 if (mode == "changed-head" and
+                                         verifying_evidence) else "a" * 40
+                if arguments[1] == "ls-files":
+                    return fixture_git_output(arguments, **kwargs)
+                self.assertEqual(arguments[1], "status")
+                return " M verifier.py\n" if (mode == "dirty-verifier" and
+                                              verifying_evidence) else ""
 
-                def poll(self):
-                    return self.returncode
+            def download(name):
+                scope = ("diagnostics-only" if name == "receipts.tar"
+                         else completed["scope"])
+                if mode == "bad-scope" and name == "evidence.tar":
+                    scope = "diagnostics-only"
+                raw = b"retained tiny fixture receipt\n"
+                members = {"receipt.txt": raw,
+                           "file-manifest.json": json_bytes({
+                               "schema": "pod-file-manifest/v1",
+                               "scope": scope,
+                               "files": {"receipt.txt":
+                                         sha256(raw).hexdigest()}})}
+                if mode == "bad-manifest" and name == "evidence.tar":
+                    members["receipt.txt"] = b"changed after manifest creation"
+                bundle = destination / name
+                write_tar(bundle, members)
+                digest = artifacts.digest(bundle)
+                if mode == "bad-hash" and name == "evidence.tar":
+                    digest = "0" * 64
+                (destination / (name + ".sha256")).write_text(
+                    digest + "  " + name + "\n")
+
+            def transport(arguments, deadline):
+                nonlocal launches, probes, mkdirs
+                arguments = list(arguments)
+                transports.append((arguments, deadline))
+                self.assertLessEqual(deadline, owner["cutoff_epoch"])
+                self.assertGreater(deadline, clock.time())
+                self.assertIn(arguments[0], ("ssh", "scp"))
+                if arguments[0] == "scp":
+                    if arguments[-1] == str(destination):
+                        name = Path(arguments[-3].split(":", 1)[1]).name
+                        self.assertEqual(arguments[-2],
+                                         arguments[-3] + ".sha256")
+                        copies.append(name)
+                        events.append("copy-" + name)
+                        if mode == "copy-timeout" and name == "evidence.tar":
+                            raise subprocess.TimeoutExpired(arguments, 1)
+                        if mode == "receipt-loss" and name == "receipts.tar":
+                            raise subprocess.CalledProcessError(255, arguments)
+                        download(name)
+                        return ""
+                    upload_attempts.append((arguments, deadline))
+                    events.append("upload")
+                    if mode in ("upload-recovery", "upload-failure"):
+                        same = [entry for entry in upload_attempts
+                                if entry[0] == arguments]
+                        if mode == "upload-failure" or len(same) == 1:
+                            clock.elapsed += 10
+                            raise subprocess.CalledProcessError(255, arguments)
+                    return ""
+                remote = arguments[-1]
+                if "mkdir -p" in remote:
+                    mkdirs += 1
+                    events.append("mkdir")
+                    self.assertLessEqual(deadline,
+                                         clock.epoch + config["ready_seconds"])
+                    if mode == "ready-recovery" and mkdirs == 1:
+                        raise subprocess.CalledProcessError(255, arguments)
+                    return ""
+                if "nohup" in remote:
+                    launches += 1
+                    events.append("launch")
+                    self.assertTrue((state / "launch-requested.json").exists())
+                    self.assertEqual(remote.count("nohup"), 1)
+                    self.assertIn("mkdir launched", remote)
+                    self.assertLessEqual(deadline, clock.time() + 30)
+                    if mode == "launch-255":
+                        raise subprocess.CalledProcessError(255, arguments)
+                    if mode == "launch-timeout":
+                        raise subprocess.TimeoutExpired(arguments, 30)
+                    return ""
+                if remote.startswith("test ! -f "):
+                    probes += 1
+                    events.append("probe")
+                    if (mode == "lost" or
+                            mode == "probe-recovery" and probes == 1):
+                        clock.elapsed += deadline - clock.time()
+                        raise subprocess.CalledProcessError(255, arguments)
+                    return ("not JSON" if mode == "marker-json"
+                            else json.dumps(completed))
+                if remote.startswith("tail -c "):
+                    events.append("tail")
+                    if mode == "receipt-loss":
+                        raise subprocess.CalledProcessError(255, arguments)
+                    return "partial log tail\n"
+                self.fail("unexpected transport command: " + repr(arguments))
+
+            def cleanup(state, primary=None):
+                events.append("cleanup")
+                self.assertEqual(json.loads(
+                    (state / "owner.json").read_text()),
+                    owner, "transport failure cleared cutoff owner")
+                self.assertFalse((state / "done.json").exists())
+                if (primary is None and
+                        completed["scope"] != "diagnostics-only"):
+                    self.assertTrue(
+                        (state / "evidence.tar-verified.json").exists())
 
             argv = ["host_run.py", "--state", str(state), "--destination",
-                    str(root / "copy"), "--ssh-key", str(key), "--session",
-                    str(session), "--environment", str(environment),
-                    "--payload", str(payload)]
-            responses = [subprocess.CompletedProcess([], 0),
-                         subprocess.CompletedProcess([], 255 if mode == "lost"
-                                                     else 0)]
+                    str(destination), "--ssh-key", config["ssh_key_path"],
+                    "--session", config["session_path"], "--environment",
+                    config["environment_path"], "--payload",
+                    config["payload_path"]]
+            if mode == "wrong-argument":
+                argv[-1] = str(root / "different-inputs.tar")
+            failure_modes = {"lost", "copy-timeout", "changed-input",
+                             "bad-hash", "bad-scope", "bad-manifest",
+                             "changed-head",
+                             "dirty-verifier", "duplicate", "wrong-argument",
+                             "upload-failure", "marker-exit", "marker-scope",
+                             "marker-json", "marker-overflow",
+                             "marker-negative", "marker-inconsistent"}
             with patch.object(sys, "argv", argv), \
-                    patch.object(host_run, "connect"), \
-                    patch.object(host_run, "stop_request") as stop, \
+                    patch.object(admission, "FREEZE", freeze), \
+                    patch.object(admission, "TOOLS", fixture_tool_pins()), \
+                    patch.object(admission, "digest", fixture_source_digest), \
+                    patch.object(host_run, "connect", side_effect=connect), \
+                    patch.object(host_run, "request_cleanup",
+                                 side_effect=cleanup) as stop, \
                     patch.object(host_run.subprocess, "check_output",
-                                 side_effect=["a" * 40, ""]), \
-                    patch.object(host_run.subprocess, "Popen", Child), \
-                    patch.object(host_run.subprocess, "run",
-                                 side_effect=responses), \
-                    patch.object(host_run.os, "killpg") as kill:
-                if mode in ("lost", "changed-input"):
-                    with self.assertRaises((RuntimeError, ValueError)):
+                                 side_effect=git_output), \
+                    patch.object(host_run, "transport",
+                                 side_effect=transport), \
+                    patch.object(host_run.time, "time", clock.time), \
+                    patch.object(host_run.threading, "Event", clock.event):
+                if mode in failure_modes:
+                    with self.assertRaises((ValueError, TimeoutError,
+                                            subprocess.SubprocessError)):
                         host_run.main()
+                    self.assertIsNotNone(stop.call_args.args[1])
+                    self.assertFalse((state / "copy-result.json").exists())
                 else:
-                    self.assertEqual(host_run.main(),
-                                     0 if mode == "success" else 1)
-                self.assertEqual(stop.call_count, 0 if mode == "lost" else 1)
-                self.assertEqual(kill.call_count,
-                                 1 if mode == "copy-timeout" else 0)
-            self.assertEqual(sum(child.full for child in children),
-                             0 if mode in ("lost", "changed-input") else 1)
+                    self.assertEqual(host_run.main(), completed["exit"])
+                    self.assertEqual(json.loads(
+                        (state / "copy-result.json").read_text()), completed)
+                stop.assert_called_once()
+            self.assertEqual(events[-1], "cleanup")
+            no_launch = mode in {"changed-input", "duplicate",
+                                 "wrong-argument", "upload-failure"}
+            self.assertEqual(launches, 0 if no_launch else 1)
+            if mode in {"changed-input", "duplicate", "wrong-argument"}:
+                self.assertEqual(transports, [])
+                return
+            self.assertEqual(events[0], "connect")
+            self.assertEqual(events[1], "mkdir")
+            expected_uploads = (2 if mode == "upload-failure" else
+                                6 if mode == "upload-recovery" else 3)
+            self.assertEqual(len(upload_attempts), expected_uploads)
+            if mode in {"upload-recovery", "upload-failure"}:
+                for first, second in zip(upload_attempts[::2],
+                                         upload_attempts[1::2], strict=True):
+                    self.assertEqual(first, second)
+                self.assertTrue((state / "upload-error.json").exists())
+            if mode == "upload-failure":
+                self.assertFalse((state / "launch-requested.json").exists())
+                return
+            staged = upload_attempts[::2] if mode == "upload-recovery" else (
+                upload_attempts)
+            target = "root@127.0.0.1:" + host_run.REMOTE
+            self.assertEqual(staged[0][0][-2:],
+                             [config["environment_path"], target + "env.sh"])
+            self.assertEqual(staged[1][0][-2:],
+                             [config["session_path"], target + "session.sh"])
+            self.assertEqual(staged[2][0][-7:], [
+                str(host_run.HERE / "artifacts.py"),
+                str(host_run.HERE / "preflight.py"),
+                str(host_run.HERE / "cgroup_setup.py"),
+                str(state / "session-inputs.json"), config["payload_path"],
+                config["payload_path"] + ".sha256", target])
+            upload_start = clock.epoch + (5 if mode == "ready-recovery" else 0)
+            self.assertEqual([deadline for _, deadline in staged],
+                             [upload_start + config["upload_seconds"]] * 3)
+            launch = json.loads((state / "launch-requested.json").read_text())
+            self.assertIs(launch["relaunch_allowed"], False)
+            self.assertGreaterEqual(probes, 1)
+            self.assertLess(events.index("launch"), events.index("probe"))
+            if mode in {"launch-255", "launch-timeout"}:
+                self.assertTrue((state / "launch-ack-uncertain.json").exists())
+            if mode in {"lost", "probe-recovery"}:
+                self.assertTrue((state / "probe-error.json").exists())
+                self.assertGreater(probes, 1)
+            if mode in {"lost", "marker-exit", "marker-scope", "marker-json"}:
+                self.assertNotIn("evidence.tar", copies)
+            elif mode == "shape-refusal":
+                self.assertEqual(copies, ["receipts.tar"])
+                self.assertFalse(
+                    (state / "evidence.tar-verified.json").exists())
+            else:
+                self.assertEqual(copies, ["receipts.tar", "evidence.tar"])
+            if mode == "partial":
+                verified = json.loads(
+                    (state / "evidence.tar-verified.json").read_text())
+                self.assertEqual(verified["scope"], "partial-evidence")
+                manifest = (destination /
+                            "verified-evidence/evidence/file-manifest.json")
+                self.assertNotIn("accepted-pair.json",
+                                 json.loads(manifest.read_text())["files"])
+            if mode in {"bad-hash", "bad-scope", "bad-manifest",
+                        "changed-head", "dirty-verifier", "copy-timeout"}:
+                self.assertFalse(
+                    (state / "evidence.tar-verified.json").exists())
+                self.assertTrue(
+                    (state / "receipts.tar-verified.json").exists())
+            if mode != "receipt-loss":
+                self.assertTrue(
+                    (state / "receipts.tar-verified.json").exists())
+            if mode == "receipt-loss":
+                self.assertTrue((state / "log-tail-error.json").exists())
+                self.assertTrue(
+                    (state / "evidence.tar-verified.json").exists())
+
+    def test_transport_timeout_kills_and_reaps_process_group(self):
+        child = SimpleNamespace(pid=101, returncode=None)
+        failure = subprocess.TimeoutExpired(["scp", "fixture"], 1)
+        with patch.object(host_run.time, "time", return_value=100), \
+                patch.object(host_run.subprocess, "Popen",
+                             return_value=child) as popen, \
+                patch.object(host_run.os, "killpg") as kill:
+            child.communicate = unittest.mock.Mock(side_effect=failure)
+            child.poll = unittest.mock.Mock(return_value=None)
+            child.wait = unittest.mock.Mock(return_value=-9)
+            with self.assertRaises(subprocess.TimeoutExpired) as raised:
+                host_run.transport(["scp", "fixture"], 101)
+            self.assertIs(raised.exception, failure)
+            kill.assert_called_once_with(101, signal.SIGKILL)
+            child.wait.assert_called_once_with()
+            child.communicate.assert_called_once_with(timeout=1)
+            self.assertTrue(popen.call_args.kwargs["start_new_session"])
+
+    def test_transport_returns_small_stdout_and_rejects_expired_window(self):
+        child = SimpleNamespace(returncode=0)
+        child.communicate = unittest.mock.Mock(
+            return_value=("small stdout", ""))
+        with patch.object(host_run.time, "time", return_value=100), \
+                patch.object(host_run.subprocess, "Popen",
+                             return_value=child) as popen:
+            self.assertEqual(host_run.transport(["ssh", "fixture"], 101),
+                             "small stdout")
+            child.returncode = 255
+            with self.assertRaises(subprocess.CalledProcessError) as raised:
+                host_run.transport(["ssh", "fixture"], 101)
+            self.assertEqual(raised.exception.output, "small stdout")
+            self.assertEqual(popen.call_count, 2)
+            with self.assertRaises(TimeoutError):
+                host_run.transport(["ssh", "fixture"], 100)
+            self.assertEqual(popen.call_count, 2)
 
 
 if __name__ == "__main__":

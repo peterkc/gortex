@@ -1,159 +1,243 @@
-"""Run one pod session and bounded copy under its host owner."""
+"""Launch once, observe, copy and request owned deletion."""
 import argparse
 import json
 import os
 import signal
 import subprocess
+import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Literal, assert_never
 
-from artifacts import digest
-from lifecycle import connect, stop_request
-
+import artifacts
+from admission import validate
+from lifecycle import connect, request_cleanup, save
 
 HERE = Path(__file__).resolve().parent
+REMOTE = "/srv/storage-pod/"
+
+
+def transport(arguments: Sequence[str], deadline: float) -> str:
+    remaining = deadline - time.time()
+    if remaining <= 0:
+        raise TimeoutError("transport window expired")
+    child = subprocess.Popen(arguments, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True, start_new_session=True)
+    try:
+        stdout, stderr = child.communicate(timeout=remaining)
+    except BaseException:
+        if child.poll() is None:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                if child.poll() is None:
+                    raise RuntimeError("transport process group state unknown")
+        child.wait()
+        raise
+    if child.returncode:
+        raise subprocess.CalledProcessError(child.returncode, arguments,
+                                            output=stdout, stderr=stderr)
+    return stdout
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--state", type=Path, required=True)
-    parser.add_argument("--destination", type=Path, required=True)
-    parser.add_argument("--ssh-key", type=Path, required=True)
-    parser.add_argument("--session", type=Path, required=True)
-    parser.add_argument("--environment", type=Path, required=True)
-    parser.add_argument("--payload", type=Path, required=True)
+    for flag in ("state", "destination", "ssh-key", "session",
+                 "environment", "payload"):
+        parser.add_argument("--" + flag, type=Path, required=True)
     args = parser.parse_args()
     state = args.state.resolve()
     config = json.loads((state / "config.json").read_text())
-    try:
+    primary: BaseException | None = None
+    ssh, scp, connection = [], [], {}
+    cutoff = json.loads((state / "owner.json").read_text())["cutoff_epoch"]
+
+    def run(arguments: Sequence[str], seconds: float,
+            deadline: float = cutoff) -> str:
+        return transport(arguments,
+                         min(time.time() + seconds, deadline, cutoff))
+
+    def upload(arguments: Sequence[str], deadline: float) -> None:
+        # Before launch, re-transfer overwrites the same approved bytes.
+        # This never restarts analysis or refreshes the setup allowance.
+        for attempt in range(2):
+            try:
+                run(arguments, config["upload_seconds"], deadline)
+                return
+            except (subprocess.SubprocessError, TimeoutError) as error:
+                save(state / "upload-error.json",
+                     {"attempt": attempt, "error": repr(error)})
+                if attempt == 1 or time.time() >= deadline:
+                    raise
+
+    def copy(name: str, seconds: int, expected: str) -> None:
+        remote = connection["target"] + ":" + REMOTE + name
+        run([*scp, remote, remote + ".sha256", str(args.destination)], seconds)
         head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=HERE,
                                        text=True).strip()
-        if head != config["harness_commit"]:
-            raise ValueError("helper checkout is not the reviewed harness")
-        dirty = subprocess.check_output(
-            ["git", "status", "--porcelain", "--untracked-files=all"],
-            cwd=HERE, text=True)
-        if dirty:
-            raise ValueError("helper checkout is not clean")
-        for path, key in ((args.payload, "payload_sha256"),
-                          (args.session, "session_sha256"),
-                          (args.environment, "environment_sha256")):
-            if digest(path) != config[key]:
-                raise ValueError("transport input differs from approved hash")
-        if args.payload.name != "inputs.tar":
-            raise ValueError("payload must be the approved inputs.tar")
-        if args.ssh_key.stat().st_mode & 0o077:
-            raise ValueError("SSH key must be private")
-        args.destination.mkdir(mode=0o700)
-    except BaseException:
-        stop_request(state)
-        raise
-    connect(state)  # Refusal requests immediate termination.
-    connection = json.loads((state / "connection.json").read_text())
-    cutoff = json.loads((state / "owner.json").read_text())["cutoff_epoch"]
-    ssh = ["ssh", "-T", "-o", "BatchMode=yes",
-           "-o", "IdentitiesOnly=yes", "-o",
-           "StrictHostKeyChecking=accept-new", "-o",
-           "UserKnownHostsFile=" + str(state / "known_hosts"),
-           "-i", str(args.ssh_key),
-           "-p", connection["port"], connection["target"]]
-    scp = ["scp", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o",
-           "StrictHostKeyChecking=accept-new", "-o",
-           "UserKnownHostsFile=" + str(state / "known_hosts"),
-           "-i", str(args.ssh_key),
-           "-P", connection["port"]]
-    transport: Literal["intact", "lost"] = "intact"
+        dirty = subprocess.check_output(["git", "status", "--porcelain"],
+                                        cwd=HERE,
+                                        text=True)
+        if head != config["harness_commit"] or dirty:
+            raise ValueError("verifier checkout changed during paid execution")
+        bundle = args.destination / name
+        if (args.destination / (name + ".sha256")).read_text() != (
+                artifacts.digest(bundle) + "  " + name + "\n"):
+            raise ValueError("copied archive hash mismatch")
+        destination = (args.destination
+                       / ("verified-" + name.removesuffix(".tar")))
+        artifacts.extract(bundle, destination)
+        manifest = destination / "evidence/file-manifest.json"
+        artifacts.verify(manifest)
+        if json.loads(manifest.read_text())["scope"] != expected:
+            raise ValueError(
+                "copied archive scope differs from completion marker")
+        save(state / (name + "-verified.json"), {"scope": expected,
+             "harness_commit": head,
+             "approval_reference": config["approval_reference"]})
 
-    def transfer(arguments: Sequence[str], seconds: int) -> None:
-        remaining = min(seconds, int(cutoff - time.time()))
-        if remaining <= 0:
-            raise TimeoutError("copy window has expired")
-        child = subprocess.Popen(
-            arguments,
-            stdin=subprocess.DEVNULL, start_new_session=True)
+    diagnostics_copied = False
+
+    def diagnostics() -> None:
+        nonlocal diagnostics_copied
+        if not connection or diagnostics_copied:
+            return
         try:
-            code = child.wait(timeout=remaining)
-        except BaseException:
-            if child.poll() is None:
-                try:
-                    os.killpg(child.pid, signal.SIGKILL)
-                except ProcessLookupError as error:
-                    if child.poll() is None:
-                        raise RuntimeError(
-                            "copy group state is unknown") from error
-            child.wait()
-            raise
-        if code:
-            raise subprocess.CalledProcessError(code, child.args)
-
-    def copy(name: str, seconds: int) -> None:
-        remote = connection["target"] + ":/srv/storage-pod/" + name
-        transfer([*scp, remote, remote + ".sha256", str(args.destination)],
-                 seconds)
+            copy("receipts.tar", 60, "diagnostics-only")
+            diagnostics_copied = True
+        except (OSError, ValueError, subprocess.SubprocessError,
+                TimeoutError) as error:
+            save(state / "fallback-copy-error.json", {"error": repr(error)})
+            try:
+                tail = run([*ssh, "tail -c 1048576 " + REMOTE
+                            + "session.log"], 15)
+                (args.destination / "session-log-tail.partial.txt").write_text(
+                    tail)
+            except (subprocess.SubprocessError, TimeoutError) as tail_error:
+                save(state / "log-tail-error.json",
+                     {"error": repr(tail_error)})
 
     try:
-        subprocess.run([*ssh, "umask 077; mkdir /srv/storage-pod"],
-                       stdin=subprocess.DEVNULL, timeout=30, check=True)
-        transfer([*scp, str(args.environment),
-                  connection["target"] + ":/srv/storage-pod/env.sh"], 30)
-        transfer([*scp, str(args.session),
-                  connection["target"] + ":/srv/storage-pod/session.sh"], 30)
-        for source in (HERE / "artifacts.py", HERE / "preflight.py",
-                       state / "session-inputs.json", args.payload,
-                       args.payload.with_suffix(args.payload.suffix
-                                                + ".sha256")):
-            transfer([*scp, str(source), connection["target"]
-                      + ":/srv/storage-pod/" + source.name], 420)
-        remote = ("set -eu; cd /srv/storage-pod; . ./env.sh; "
-                  "nohup setsid bash ./session.sh >session.log 2>&1 "
-                  "</dev/null & child=$!; echo $child >session.pid; "
-                  "wait $child")
-        try:
-            result = subprocess.run([*ssh, remote], stdin=subprocess.DEVNULL,
-                                    timeout=max(1, int(cutoff - time.time())))
-        except subprocess.TimeoutExpired:
-            transport = "lost"
-            raise
-        if result.returncode == 255:
-            transport = "lost"
-            raise RuntimeError("SSH lost; remote survives; cutoff stays armed")
-        if result.returncode == 78:
-            return 78  # finally requests immediate shape-refusal termination.
-        if result.returncode == 0:
+        for flag, key in (("destination", "destination"),
+                          ("ssh_key", "ssh_key_path"),
+                          ("session", "session_path"),
+                          ("environment", "environment_path"),
+                          ("payload", "payload_path")):
+            canonical = getattr(args, flag).resolve()
+            if str(canonical) != config[key]:
+                raise ValueError(
+                    "host arguments differ from pre-rental approval")
+            setattr(args, flag, canonical)
+        validate(config, destination_ready=True)
+        if (state / "launch-requested.json").exists():
+            raise ValueError(
+                "one launch already requested; never relaunch this attempt")
+        connect(state)
+        connection = json.loads((state / "connection.json").read_text())
+        owner = json.loads((state / "owner.json").read_text())
+        ready = owner["started_epoch"] + config["ready_seconds"]
+        setup = owner["started_epoch"] + config["setup_seconds"]
+        options = ["-F", "/dev/null", "-o", "BatchMode=yes",
+                   "-o", "IdentitiesOnly=yes",
+                   "-o", "ServerAliveInterval=30",
+                   "-o", "ServerAliveCountMax=6",
+                   "-o", "StrictHostKeyChecking=accept-new", "-o",
+                   "UserKnownHostsFile=" + str(state / "known_hosts"),
+                   "-i", str(args.ssh_key)]
+        ssh = ["ssh", "-T", *options, "-p", connection["port"],
+               connection["target"]]
+        scp = ["scp", *options, "-P", connection["port"]]
+        while True:
             try:
-                copy("evidence.tar", 420)
-            except (subprocess.SubprocessError, TimeoutError) as error:
-                (state / "bulk-copy-error.txt").write_text(repr(error))
-            else:
-                (state / "copy-result.txt").write_text(
-                    "full; verify locally\n")
-                return 0
+                run([*ssh, "umask 077; mkdir -p " + REMOTE], 30, ready)
+                break
+            except (subprocess.CalledProcessError,
+                    subprocess.TimeoutExpired) as error:
+                if (isinstance(error, subprocess.CalledProcessError)
+                        and error.returncode != 255):
+                    raise
+                if time.time() >= ready:
+                    raise TimeoutError("sshd readiness expired") from error
+                threading.Event().wait(min(5, ready - time.time()))
+        upload_deadline = min(time.time() + config["upload_seconds"],
+                              setup - config["bootstrap_seconds"])
+        upload([*scp, str(args.environment),
+                connection["target"] + ":" + REMOTE + "env.sh"],
+               upload_deadline)
+        upload([*scp, str(args.session),
+                connection["target"] + ":" + REMOTE + "session.sh"],
+               upload_deadline)
+        sources = [HERE / name for name in
+                   ("artifacts.py", "preflight.py", "cgroup_setup.py")]
+        sources += [state / "session-inputs.json", args.payload,
+                    args.payload.with_suffix(".tar.sha256")]
+        upload([*scp, *[str(source) for source in sources],
+                connection["target"] + ":" + REMOTE],
+               upload_deadline)
+        # Keep the exclusive receipt after an ambiguous SSH response.
+        with (state / "launch-requested.json").open("x") as stream:
+            json.dump({"requested_epoch": time.time(),
+                       "relaunch_allowed": False}, stream)
+        remote = ("set -eu; cd " + REMOTE + "; mkdir launched; . ./env.sh; "
+                  "nohup setsid bash ./session.sh "
+                  ">session.log 2>&1 </dev/null & "
+                  "echo $! >session.pid")
         try:
-            copy("receipts.tar", 60)
-        except (subprocess.SubprocessError, TimeoutError) as error:
-            (state / "fallback-copy-error.txt").write_text(repr(error))
-            # Early bootstrap may fail before the packer is available.
-            with (args.destination / "session-log-tail.partial.txt").open(
-                    "xb") as output:
-                subprocess.run([
-                    *ssh, "tail -c 1048576 /srv/storage-pod/session.log"],
-                    stdin=subprocess.DEVNULL, stdout=output,
-                    timeout=max(1, min(15, int(cutoff - time.time()))),
-                    check=True)
+            run([*ssh, remote], 30, setup)
+        except (subprocess.TimeoutExpired,
+                subprocess.CalledProcessError) as error:
+            if (isinstance(error, subprocess.CalledProcessError)
+                    and error.returncode != 255):
+                raise
+            save(state / "launch-ack-uncertain.json", {"error": repr(error)})
+        completion_deadline = min(cutoff - config["copy_seconds"] - 90,
+                                  owner["started_epoch"]
+                                  + config["analysis_seconds"] + 360)
+        attempt = 0
+        while time.time() < completion_deadline:
+            try:
+                raw = run([*ssh, "test ! -f " + REMOTE
+                           + "complete.json || cat "
+                           + REMOTE + "complete.json"],
+                          30, completion_deadline)
+            except (subprocess.SubprocessError, TimeoutError) as error:
+                save(state / "probe-error.json",
+                     {"attempt": attempt, "error": repr(error)})
+            else:
+                if raw.strip():
+                    completed = json.loads(raw)
+                    if (type(completed["exit"]) is not int
+                            or not 0 <= completed["exit"] <= 255
+                            or completed["scope"] not in
+                            ("full-evidence", "partial-evidence",
+                             "diagnostics-only", "none")
+                            or (completed["scope"] == "full-evidence")
+                            != (completed["exit"] == 0)):
+                        raise ValueError("invalid completion marker")
+                    save(state / "completion.json", completed)
+                    break
+            attempt += 1
+            remaining = completion_deadline - time.time()
+            if remaining > 0:
+                threading.Event().wait(min(15, remaining))
         else:
-            (state / "copy-result.txt").write_text(
-                "diagnostics only; no accepted result\n")
-        return 1
+            raise TimeoutError("completion unproved before copy reserve")
+        diagnostics()  # Includes shape refusal 78 and first-cut-only output.
+        if completed["scope"] in ("full-evidence", "partial-evidence"):
+            copy("evidence.tar", config["copy_seconds"], completed["scope"])
+        save(state / "copy-result.json", completed)
+        return completed["exit"] or (
+            0 if completed["scope"] == "full-evidence" else 1)
+    except BaseException as error:
+        primary = error
+        try:
+            diagnostics()
+        except Exception as copy_error:
+            error.add_note("Diagnostics copy failed: " + repr(copy_error))
+        raise
     finally:
-        match transport:
-            case "intact":
-                stop_request(state)
-            case "lost":
-                pass  # Detached work remains covered by the independent owner.
-            case _:
-                assert_never(transport)
+        request_cleanup(state, primary)
 
 
 if __name__ == "__main__":

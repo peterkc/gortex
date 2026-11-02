@@ -75,8 +75,11 @@ Obtain the fresh offer through pi-gcp. The user approves the exact short ID,
 cloud ID, context/account, image, region, disk, total hourly price, numeric
 resource/deadline/file-limit profile and reviewed fork/input/script/config
 fingerprints before create. Require an Ubuntu 24.04
-x86-64 root image with Python 3.12 and writable delegated cgroup v2. The example
-64-GB disk is a proposal, not a verified offer. Confirm it in the fresh receipt.
+x86-64 root image with Python 3.12 and the true writable cgroup v2 root at
+`/sys/fs/cgroup`. A delegated namespace root is not sufficient for this path.
+The read-only receipt observed a 100-GB default boot disk, rendered `100+`; this
+is not approval or proof of fee inclusion. Confirm the explicit disk/image in
+the fresh receipt. Do not omit disk size and permit a CLI prompt.
 No availability/account/cloud command was run to prepare this document.
 
 The two preparation receipts use these field names:
@@ -95,10 +98,11 @@ runtime/receipt.json:
   verification=<source pin plus RECORD/release-checksum method>
 ```
 
-`accuracy.py` refuses a missing or mismatched receipt before inference. This
-structure check does not replace the lead's source/limit/trust review. The lead
-can run its stdlib-only `verify_inputs(STAGING)` preparation check before rental;
-it hashes inputs but does not load a model or execute a benchmark.
+`admission.py` checks the complete reviewed harness export and pinned Go/uv
+archives, archive manifest, frozen input bindings, model bytes
+and these receipts before create. `accuracy.py` repeats validation before
+inference. Structure/hash checks do not replace source/limit/trust review. The
+stdlib-only preparation check does not load a model or run inference.
 
 ## Approved resource profile and schedule
 
@@ -119,8 +123,10 @@ prepare, body, query, assembly and scores serially, then repeats at the other cu
 At the largest phase, 24 + 0.5 = **24.5 GiB**, leaving 1.5 GiB inside the 26-GiB
 parent. The observed minimum is **28 GiB** (30,064,771,072 bytes), leaving at least
 2 GiB outside that parent for the OS. A nominal 32-GB offer is not proof of
-MemTotal or inherited cgroup capacity. Require exact eight-CPU affinity, that
-memory floor and **32 GiB free disk after input extraction**. Refuse otherwise.
+MemTotal or inherited cgroup capacity. Require at least eight CPUs in affinity and no known inherited CPU quota below
+eight, that memory floor and **32 GiB free disk after input extraction**. Record
+raw affinity and each ancestor `cpu.max`. This does not authorize a larger offer
+or higher price. Refuse insufficient effective capacity.
 No swap is allowed in the parent, controller or payload scopes. Use eight
 intra-op threads and one inter-op thread for both cuts. No cost/thread sweep or
 extra inference warm-up is part of this accuracy comparison.
@@ -134,11 +140,32 @@ to each later phase and its descendants. The archive limits are separate.
 Controller peak/events are explicitly a **before-pack snapshot**, not a sampled
 engine peak or a claim to its full lifetime maximum.
 
-Paid time starts before create. Setup must finish by minute 30. All accuracy
-phases share the nonrefreshing deadline at minute **160**. Packaging gets at most
-four minutes, full copy seven minutes, fallback one minute. The host cutoff at
-minute **178** directly requests deletion, leaving two minutes inside the
-three-hour bound. Every transport timeout is also shortened by that cutoff.
+The unchanged 256-MiB file cap has a conservative token-export bound. The frozen
+quotas have 900 bodies at most 2,048 tokens, 48 at most 4,096, and 10 at most
+8,192, including special tokens. `cpu_cost.batches` makes widths above 2,048
+singleton under its 4,000,000 quadratic budget; shorter rows pad no further than
+2,048. Three flat arrays at indent 2 need at most 30 bytes per signed-int64 value,
+including indentation, comma and newline. Allow another 2 MiB for batch metadata:
+`(900*2048 + 48*4096 + 10*8192)*3*30 + 2*1024**2 = 193052672` bytes, below 256 MiB.
+The 79 queries at most 512 tokens are smaller. `admission.py` requires the approved
+bound to cover this source-derived value. Retain its source/approval reference;
+do not raise the cap after a file-limit failure.
+
+Paid time starts before create. The example setup ends at minute 30 and all
+accuracy phases share the nonrefreshing deadline at minute **160**. Both are
+derived from approved JSON durations, not hardcoded by the shell. Readiness has
+its own approved allowance (example 900 seconds) inside setup. Actual upload
+bytes, a conservative referenced link rate, margin and bootstrap reserve must
+fit the same setup window before create.
+
+An outer controller timeout uses the analysis deadline plus at most 30 seconds
+of kill grace. Small packing gets 30 seconds, full/partial packing 240, each
+with five seconds of kill grace. The host observes completion for at most six
+minutes after analysis and always leaves its copy reserve. Full copy gets at
+most seven minutes, diagnostics one minute. The cutoff at minute **178**
+requests deletion, leaving two minutes inside the three-hour bound. Shorter
+approved durations must preserve these reserves. Every transport timeout also
+shortens at that cutoff; no reconnect refreshes any clock.
 A $0.50/hour ceiling gives $1.50 for three hours and $2 for a one-hour billing
 contingency. The contingency grants no runtime extension. API/host failures can
 still prevent a literal billing guarantee; use the lifecycle's escalation rule.
@@ -222,15 +249,19 @@ No model inference or local Go test is needed for this preparation review.
 
 ## Execute once through the existing bridge and evaluator
 
-Start the lifecycle owner with a retained host handle. After its `RENTED` receipt,
+Start the lifecycle owner with a retained host handle. After its `RENTED` and `validated.json` receipts,
 run `host_run.py` exactly as documented in the lifecycle, with the approved
 `accuracy_session.sh`, `env.sh` and `inputs.tar`. Do not use an interactive shell.
 The session verifies the upload/manifest and shape before setup, then shape again
-after extraction. The second check measures capacity at the original cgroup
-anchor recorded before this script creates its private limits. It does not
-mistake the bootstrap's own 4-GiB limit for the host's RAM. The anchor must remain
-an actual ancestor, and all its inherited limits still apply. Phase limits have
-separate receipts. It builds these in the pod under the bootstrap cap:
+after extraction. The script records the original SSH membership/capacity before migration.
+`cgroup_setup.py` creates the private parent at the true unified root, enables
+memory before creating leaves, applies limits, then moves the controller. The
+second memory-capacity anchor is that actual root ancestor, not the old SSH
+scope which is no longer an ancestor. It does not mistake bootstrap's 4-GiB
+limit for host RAM. CPU quota observation still walks all actual ancestors.
+The same helper is exercised by the occupied-nonroot Linux CI integration test.
+Unsupported namespace/container roots refuse; no EBUSY workaround skips limits.
+Phase limits have separate receipts. It builds these in the pod under the bootstrap cap:
 
 ```text
 cd harness/study/storage/harness
@@ -239,8 +270,8 @@ cd harness/study/storage/onnx
 go build -trimpath -p=1 -o /.../bin/onnxprobe .
 ```
 
-The actual script uses absolute paths. It records full Go environment,
-`gcc --version` and binary hashes, checks the pinned Go/Cgo flags and GCC target,
+The actual script uses absolute paths. It checks and records the pinned Go/Cgo environment and GCC target before
+either build, then records binary hashes,
 and uses the same built binaries for both cuts. `accuracy.py` then performs the following sequence for cut 2048 and cut
 8192. Every command runs through `limited.py`, which hash-binds argv, host, fork
 source, launcher, frozen data, policy and the nonrefreshing absolute deadline to
@@ -300,9 +331,13 @@ was selected. A result informs design; it is not a fabricated accuracy threshold
 
 ## Copy-back and stop rules
 
-The session creates diagnostics first. Full evidence is packaged only after both
-cuts and all six scores succeed. The live log stays outside the manifest; the
-bundle contains only its explicit partial 1-MiB tail. Full evidence includes:
+The session creates diagnostics first on success or failure, including exit 78.
+Its small list includes score metrics/receipts and bindings, with omissions
+explicitly recorded. It also packages retained evidence after a failure as
+`partial-evidence`; completed 2,048 work survives a later 8,192 OOM. Only both
+cuts and all six successful scores produce `full-evidence`. The atomic completion
+marker reports exit and scope after packing. The live log stays outside the
+manifest; the bundle contains only its explicit partial 1-MiB tail. Evidence includes:
 
 - Both cuts' bridge manifests, token exports, preparation receipts and Go reports.
 - Document-then-query NPY/config/cut receipts and overall/language score receipts.
@@ -320,17 +355,29 @@ bundle contains only its explicit partial 1-MiB tail. Full evidence includes:
 The controller's private empty cgroup directories remain until pod deletion;
 all payload scopes must be killed/empty/removed first. The controller exits
 normally within its own limit. The host owner deletes the whole pod after copy,
-then proves that deletion before the lead verifies hashes locally. No path in
+then proves that deletion. The host copy path checks the reviewed verifier HEAD,
+external hash, fresh extraction, manifest and scope before reporting a verified
+copy; the lead retains and accepts that evidence after deletion. No path in
 this runbook asks an operator to remove an unproved shared cgroup or resource.
+
+A lost SSH acknowledgement or probe permits short read-only reconnection, never
+a second session launch. The helper ignores host SSH config, uses explicit
+identity/known_hosts and keepalives, and never holds one connection for the
+analysis lifetime. A permanently lost channel still preserves the host cutoff.
 
 Stop on any shape mismatch, stale/over-ceiling quote, wrong pin, unconfirmed
 8,192 support, OOM, deadline, file/disk limit, child/cleanup failure, partial cut,
-wrong ID/order/label, SSH uncertainty or cost/time breach. Preserve the failure.
+wrong ID/order/label, unrecovered transport loss or rate/time breach. Preserve the failure.
 On OOM, do not raise memory, lower the cap, drop long bodies or create a replacement.
 Do not resume a half pair or mix source/corpus/runtime changes. No paid retry is
 authorized. If only diagnostics copy succeeds, label it partial and make no
-comparative claim. Missing deletion proof requires immediate resource-owner
-escalation, never another uncertain terminate command.
+comparative claim. Missing deletion proof requires immediate resource-owner escalation. Later
+`lifecycle.py verify` is read-only; never issue another uncertain terminate.
+History `total_cost` units are not verified and cannot enforce the $2 cap. Keep
+that audit value separate from rate/time estimates and deletion proof. Final
+invoice and storage inclusion remain unverified unless an authoritative billing
+source confirms them. Choose the durable private destination named in the
+approved execution JSON before rent, not an ephemeral session folder.
 
 ## Verification scenarios and current limit
 
