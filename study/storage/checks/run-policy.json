@@ -13,19 +13,19 @@
     "job_memory_bytes": 12884901888,
     "host_reserve_bytes": 2147483648,
     "price_cap_usd": 0,
-    "max_parallel": 1
+    "max_parallel": 3
   },
   "jobs": {
     "tests": {
       "timeout_minutes": 45
     },
     "base": {
-      "timeout_minutes": 250,
+      "timeout_minutes": 265,
       "setup_seconds": 1500,
       "cleanup_upload_seconds": 600
     },
     "linkdelta": {
-      "timeout_minutes": 230,
+      "timeout_minutes": 350,
       "setup_seconds": 1200,
       "cleanup_upload_seconds": 1200
     },
@@ -77,7 +77,8 @@
     "review": "Upload the manifest before timing. Lead review follows the run; a rejected manifest invalidates only tier100 results."
   },
   "base": {
-    "wall_seconds": 10800,
+    "main_wall_seconds": 9000,
+    "side_wall_seconds": 2700,
     "runs": 3,
     "safety_timeout_seconds": 900,
     "memory_limits_bytes": {
@@ -87,7 +88,7 @@
     }
   },
   "linkdelta": {
-    "wall_seconds": 5400,
+    "wall_seconds": 9000,
     "memory_limits_bytes": {
       "runner": 536870912,
       "checker": 2147483648,
@@ -141,19 +142,26 @@
     "linkdelta": 12884901888,
     "vector": 2147483648
   },
-  "disk_admission": "Free-space floor on RUNNER_TEMP before candidate timing, not a measured peak bound. Workspace and RUNNER_TEMP df logs are retained after every execution phase. A miss stops; nothing is deleted and no cap or venue changes automatically.",
+  "disk_admission": "Free-space floors on RUNNER_TEMP before candidate timing, not measured peak bounds. Retain workspace and RUNNER_TEMP df logs after every execution phase. A capacity refusal blocks timing, never records a format miss, deletes no evidence and changes no cap or venue automatically. The base post-freeze formula is an additional admission floor.",
   "software_cleanup": "Base/linkdelta only: on a disposable github-hosted Linux VM, remove exactly /usr/share/dotnet, /usr/local/lib/android, /opt/ghc and /opt/hostedtoolcache/CodeQL. Preserve all workspace, RUNNER_TEMP, job evidence, Go/Python/Node tools and other tool-cache entries. Plan roughly 30 GiB free immediately after cleanup, before later caches and fixtures: an unverified 14 GiB starting-space assumption plus a historical 16.7 GiB Android/.NET reclaim. GHC/CodeQL savings are not credited. Actual image occupancy varies; df and the unchanged timing floors decide admission.",
+  "base_capacity": {
+    "serving_sets": 2,
+    "input_multiplier": 8,
+    "edge_bytes": 300,
+    "node_bytes": 256,
+    "reserve_bytes": 1073741824
+  },
   "basis": {
     "/venue/cpus": "study/storage/checks/base/README.md Estimate and limits, study/storage/checks/vector/README.md Sizing estimates, and study/storage/checks/fixtures/FIXTURES.md name a four-vCPU Ubuntu host.",
     "/venue/job_memory_bytes": "Integration proposal: 12 GiB enclosing cap on the reports nominal 16-GB host, above the 10 GiB tier100 target cap with two GiB inside the job for controllers and cache. Delegation and outside-owner cleanup follow .github/workflows/storage-screen.yml. This is not engine RSS or a measured requirement.",
     "/venue/host_reserve_bytes": "Integration proposal: require at least 2 GiB physical memory outside the enclosing cap for the runner and cleanup owner. The reports name a nominal 16-GB host; actual MemTotal is checked.",
     "/venue/price_cap_usd": "Zero-cost public-fork standard Linux CI venue only. No paid runner, model inference, cloud job or extra service is requested.",
-    "/venue/max_parallel": "Lead requested the active runner count. Serial job dependencies use one runner at a time and assume no additional parallel slot. Base uploads the tier100 freeze before any candidate timing in the batch.",
-    "/jobs/tests/timeout_minutes": "Integration estimate: 45 minutes for setup, three readonly Go module vet/test pairs and two stdlib Python suites. This is not a measurement bound.",
-    "/jobs/base/timeout_minutes": "Hard job envelope: (1500 setup + 600 fetch + 300 tiny generation + 1200 tier100 generation + 10800 measurement + 600 cleanup/upload) / 60 = 250 minutes.",
+    "/venue/max_parallel": "Lead approved the parallel three-runner measurement venue after gortex-ops confirmed capacity: tests finish first, then base, linkdelta and vector each depend only on tests. Each group prepares and freezes its own inputs, with no base-artifact download. Every A/B/C or component comparison stays within its own host. The exact-policy user approval must name parallel execution on three measurement runners.",
+    "/jobs/tests/timeout_minutes": "Integration estimate: 45 minutes for setup, three readonly Go module vet/test pairs and three stdlib Python suites (base, fixtures and shared workflow helpers). This is not a measurement bound.",
+    "/jobs/base/timeout_minutes": "Review C-1 lead-approved sizing: 150 main + 45 conditional side + 10 fetch + 5 tiny generation + 20 tier100 generation + 25 setup + 10 cleanup/upload = 265 minutes, below the hosted 360-minute limit. Do not cut cleanup reserve. Estimates are unmeasured.",
     "/jobs/base/setup_seconds": "Integration reserve: 25 minutes for Go setup, downloads, serial builds, metadata and manifest freezing outside timing; unmeasured. The fixed unused-software removal shares this setup reserve; budget roughly 1-3 minutes, not a measured bound.",
     "/jobs/base/cleanup_upload_seconds": "Integration reserve: 10 minutes for owned-root cleanup and evidence upload, outside target timing; unmeasured.",
-    "/jobs/linkdelta/timeout_minutes": "Hard job envelope: (1200 setup + 600 fetch + 2 * 5400 serial measurement + 1200 cleanup/upload) / 60 = 230 minutes.",
+    "/jobs/linkdelta/timeout_minutes": "C-LD-8 revised projection: (2*9000 serial tier deadlines + 600 fetch + 1200 setup + 1200 finalization/cleanup/upload) / 60 = 350 minutes. Timing phases have 330 minutes through setup/fetch, leaving 20 minutes inside this job for finalization and uploads. The job cap is 10 minutes below GitHub 360; that external margin is not extra usable runtime. Reserves and throughput are unmeasured, not guaranteed finish times.",
     "/jobs/linkdelta/setup_seconds": "checks-link-delta proposal relayed by lead: build/cleanup about 20 minutes. This envelope reserves 20 minutes for setup/build separately; unmeasured. The fixed unused-software removal shares this setup reserve; budget roughly 1-3 minutes, not a measured bound.",
     "/jobs/linkdelta/cleanup_upload_seconds": "Integration reserve: 20 additional minutes for cleanup, two-tier evidence and upload; unmeasured.",
     "/jobs/vector/timeout_minutes": "Hard job envelope: (600 setup + 600 generation + 600 measurement + 600 cleanup/upload) / 60 = 40 minutes.",
@@ -173,13 +181,14 @@
     "/tier100/memory_limits_bytes/engine": "study/storage/checks/fixtures/FIXTURES.md proposes 10737418240 bytes; estimated RSS 3-8 GiB is uncertain and excludes possible additional cache charge.",
     "/tier100/repos": "Approved scaling recipe in study/storage/checks/fixtures/FIXTURES.md: ten unchanged real parts followed by ninety correlated derived top-ups.",
     "/tier100/seed": "Approved existing cmd/gen recipe in study/storage/checks/fixtures/FIXTURES.md: seed 20261022, ordered ten-source input, synthetic cross-repository links disabled.",
-    "/base/wall_seconds": "study/storage/checks/base/README.md proposed bound 10800 seconds and unmeasured 90-180-minute estimate including a possible bounded side-index branch.",
-    "/base/runs": "study/storage/checks/base/README.md specifies three fresh measured processes per scaling point.",
+    "/base/main_wall_seconds": "Review C-1 checks-base sizing forwarded by the lead: unmeasured main-path upper bound 150 minutes, covering 27 fresh A/B/C timing processes plus three tiny controls. Main and side limits are required separately; their sum bounds maximum base measurement.",
+    "/base/side_wall_seconds": "Review C-1 checks-base sizing forwarded by the lead: unmeasured separate 45-minute upper bound for nine C-side timing processes plus one tiny control. Run only after a conclusive Check 1 miss, never after an incomplete or inconclusive result. Maximum measurement is main 150 plus conditional side 45 = 195 minutes.",
+    "/base/runs": "Review C-1 checks-base design: three rotating A/B/C fresh-process rounds per unchanged tier, not three warm passes in one process. Main has 27 timing processes plus three tiny controls; conditional C-side adds nine plus one tiny. Each miss query has 20 measured calls in the reviewed source. Serving directories are freed only after receipt hashes/sizes are recorded; those directories are not uploaded evidence.",
     "/base/safety_timeout_seconds": "study/storage/checks/base/README.md proposed config sets the accepted runner safety timeout to 900 seconds.",
     "/base/memory_limits_bytes/runner": "study/storage/checks/base/README.md proposed config: 536870912 bytes; estimate below 512 MiB, not a measured peak.",
     "/base/memory_limits_bytes/checker": "study/storage/checks/base/README.md proposed config: 1073741824 bytes; estimate below one GiB, not a measured peak.",
     "/base/memory_limits_bytes/engine": "study/storage/checks/base/README.md proposed config: 4294967296 bytes; estimated engine RSS 1-3 GiB, with charged-cache uncertainty.",
-    "/linkdelta/wall_seconds": "checks-link-delta proposal relayed by lead: 5400 seconds per unchanged tier, about 65 minutes expected, including the package-decomposition branch within the 90-minute deadline.",
+    "/linkdelta/wall_seconds": "C-LD-8 revised wall estimate from checks-link-delta: 9000 seconds per serial tier, unmeasured and conditional on planning rates of 100000 reference edge rows/s, 50000 reference node rows/s and 8000000 stored vector-coordinate JSON decodes/s. Across 144 workload sequences per tier, dominant work is about 6930/7815 seconds for tier1/tier10, leaving about 2070/1185 seconds for preparation, builds, 64 durable seals/opens, parity, serialization, hashing and finalization. No M1 baseline, extra query parallelism or retry is assumed. Slower actual throughput can exceed the estimate; preserve partial evidence.",
     "/linkdelta/memory_limits_bytes/runner": "checks-link-delta proposal relayed by lead: 536870912 bytes per tier.",
     "/linkdelta/memory_limits_bytes/checker": "checks-link-delta proposal relayed by lead: 2147483648 bytes per tier.",
     "/linkdelta/memory_limits_bytes/engine": "checks-link-delta proposal relayed by lead: 8589934592 bytes per tier. This is never substituted for the link target cap.",
@@ -201,9 +210,10 @@
     "/vector/workers": "D28 allows at most four scan workers; study/storage/checks/vector/README.md proposed run uses four on the four-vCPU host.",
     "/vector/k": "study/storage/checks/vector/README.md proposed run flags: top k is 10.",
     "/vector/candidates": "study/storage/checks/vector/README.md proposed run flags: one global int8 candidate pool of 128 before original-F32 reranking.",
-    "/disk_min_free_bytes/base": "Integration proposal: 24 GiB free, rounding up 24 times the 952570424-byte unchanged pair in study/storage/checks/fixtures/fixture-pins.json. Three fresh runs and up to four layouts retain many indexes; tier100, scratch and serving amplification remain uncertain. This is an admission floor, not a peak guarantee.",
+    "/disk_min_free_bytes/base": "Retain the original 24-GiB minimum, which rounded up 24 times the 952570424-byte unchanged pair in fixture-pins.json. Review C-1 frees timing serving directories only after receipt hashes/sizes, so fresh rounds do not accumulate serving copies; keep the input fixtures and evidence. The separate post-tier100-freeze formula uses actual frozen bytes/counts and can require more free space. Neither floor is a measured peak guarantee.",
     "/disk_min_free_bytes/linkdelta": "Integration proposal: 12 GiB free, rounding up 12 times the 952570424-byte unchanged pair in study/storage/checks/fixtures/fixture-pins.json for retained clean C bases, two delta forms/chains, validation memos and answer spools. Actual peak is unmeasured; no evidence is deleted.",
     "/disk_min_free_bytes/vector": "Integration proposal: 2 GiB free, rounding up four times the 460800000-byte F32 matrix for reference scratch, outputs and headroom. Actual fixture files and existing caches are already charged when the floor is checked.",
-    "/software_cleanup": "Supported fixed-path cleanup, not a third-party action. The current actions/runner-images Ubuntu2404 software list confirms installed Android, .NET, Haskell and CodeQL toolsets. jlumbroso/free-disk-space README reports an older ubuntu-20.04.4 sample of 14 GiB Android and 2.7 GiB .NET reclaimed; its 31 GiB total also removes things this workflow preserves. Treat the 30 GiB planning figure as uncertain, not a current-host measurement. Sources: https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md and https://github.com/jlumbroso/free-disk-space#typical-output ."
+    "/software_cleanup": "Supported fixed-path cleanup, not a third-party action. The current actions/runner-images Ubuntu2404 software list confirms installed Android, .NET, Haskell and CodeQL toolsets. jlumbroso/free-disk-space README reports an older ubuntu-20.04.4 sample of 14 GiB Android and 2.7 GiB .NET reclaimed; its 31 GiB total also removes things this workflow preserves. Treat the 30 GiB planning figure as uncertain, not a current-host measurement. Sources: https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md and https://github.com/jlumbroso/free-disk-space#typical-output .",
+    "/base_capacity": "Review C-1 checks-base estimate forwarded by the lead: required_free_bytes = 2*(8*S + 300*E + 256*N) + 1073741824. S is maximum input bytes, N maximum nodes, E maximum edges over tier1, tier10 and tier100; use fixture-pins.json for tier1/10 and the frozen generated inventory for tier100. Inputs already occupy disk and are not added again. This is an admission floor, not a measured peak guarantee. Insufficient space is blocked by capacity, never a format miss."
   }
 }

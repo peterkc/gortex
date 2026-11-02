@@ -254,6 +254,13 @@ jobs:
           "$uv" run --frozen --project study/storage/pod-cost python -m unittest discover \
             -s study/storage/onnx -p test_accuracy_bridge.py -v 2>&1 \
             | tee "$RUNNER_TEMP/storage/ci-bridge.txt"
+      - name: Pod cgroup setup from occupied non-root scope
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo python3.12 -B study/storage/pod/test_cgroup_setup.py --integration \
+            2>&1 | tee "$RUNNER_TEMP/storage/ci-pod-cgroup-setup.txt"
       - name: Pod lifecycle and accuracy runbook fixtures, no cloud calls
         if: ${{ !cancelled() }}
         shell: bash
