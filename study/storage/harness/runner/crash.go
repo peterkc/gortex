@@ -130,6 +130,13 @@ func killPublish(ctx context.Context, req publishRequest, requestPath, stage str
 	childCtx, cancel := context.WithTimeout(ctx, safetyTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(childCtx, exe, "__catalog_publish", requestPath)
+	if scope, ok := ctx.Value(engineScopeKey{}).(string); ok {
+		release, e := limitCommand(cmd, scope)
+		if e != nil {
+			return false, e
+		}
+		defer release()
+	}
 	stdout, e := cmd.StdoutPipe()
 	if e != nil {
 		return false, e

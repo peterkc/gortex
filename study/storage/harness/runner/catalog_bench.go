@@ -226,7 +226,15 @@ func RunCatalogBenchmark(b adapter.Backend, factory adapter.CatalogFactory, args
 		if err = os.Mkdir(dir, 0755); err != nil {
 			return err
 		}
-		values, recovery, footprint, err := catalogTrial(*candidate, factory, old, next, repos, dir)
+		var values map[string]int64
+		var recovery catalogReadResult
+		var footprint map[string]int64
+		if client := backendClient(b); client != nil {
+			reply, callErr := client.call(context.Background(), ProcessRequest{Op: "catalog-trial", Old: old, View: next, Repos: repos, Path: dir})
+			values, recovery, footprint, err = reply.Metrics, reply.Recovery, reply.Footprint, callErr
+		} else {
+			values, recovery, footprint, err = catalogTrial(*candidate, factory, old, next, repos, dir)
+		}
 		if err != nil {
 			return err
 		}
@@ -240,7 +248,11 @@ func RunCatalogBenchmark(b adapter.Backend, factory adapter.CatalogFactory, args
 	for name, samples := range metrics {
 		distributions[name] = Summarize(samples)
 	}
-	return dataset.WriteJSON(filepath.Join(absolute, "result.json"), map[string]any{
+	resultName := "result.json"
+	if backendClient(b) != nil {
+		resultName += ".partial"
+	}
+	return dataset.WriteJSON(filepath.Join(absolute, resultName), map[string]any{
 		"success": true, "candidate": *candidate, "entries": *entries, "repeats": *repeats, "seed": *seed,
 		"fixture_sha256": hashes, "latency": distributions, "recoveries": recoveries, "footprints": footprints,
 		"measurement_point": "per trial, after recovery child closed; catalog directory only; fixtures excluded",

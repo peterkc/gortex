@@ -16,6 +16,9 @@ import (
 // It renames one, removes one (and its owned edges/docs/vector), adds a new
 // symbol/vector, and adds/changes call edges. It never changes its input.
 func MakeChange(d dataset.Dataset) (adapter.FileChange, error) {
+	if d.Source != nil {
+		return makeDiskChange(d)
+	}
 	byFile := map[string][]dataset.Node{}
 	for _, n := range d.Nodes {
 		if n.Language == "go" && n.FilePath != "" && n.StartLine > 0 && (n.Kind == "function" || n.Kind == "method") {
@@ -118,9 +121,12 @@ func MakeChange(d dataset.Dataset) (adapter.FileChange, error) {
 	r.Vectors = append(r.Vectors, dataset.MakeVector(added.ID, 20261022))
 	return adapter.FileChange{Path: path, Replacement: r}, nil
 }
-func deltaIdentities(base dataset.Dataset, c adapter.FileChange) (dataset.Node, dataset.Node, dataset.Node) {
+func deltaIdentities(base dataset.Dataset, c adapter.FileChange) (dataset.Node, dataset.Node, dataset.Node, error) {
 	old := map[string]dataset.Node{}
-	for _, n := range base.Nodes {
+	for n, err := range base.NodeRows() {
+		if err != nil {
+			return dataset.Node{}, dataset.Node{}, dataset.Node{}, err
+		}
 		if n.FilePath == c.Path {
 			old[n.ID] = n
 		}
@@ -138,7 +144,7 @@ func deltaIdentities(base dataset.Dataset, c adapter.FileChange) (dataset.Node, 
 	for _, n := range old {
 		removed = n
 	}
-	return renamed, removed, added
+	return renamed, removed, added, nil
 }
 func checkDelta(ctx context.Context, b adapter.Backend, ref adapter.SegmentRef, base, changed dataset.Dataset, c adapter.FileChange) ([]workload.Check, error) {
 	s, e := b.Open(ctx, ref.Path, ref)
@@ -146,10 +152,23 @@ func checkDelta(ctx context.Context, b adapter.Backend, ref adapter.SegmentRef, 
 		return nil, e
 	}
 	defer s.Close()
-	o := oracle.New(changed)
-	renamed, removed, added := deltaIdentities(base, c)
-	qs := []workload.Query{{ID: "delta-file", Op: "file", Repo: changed.Repo, Key: c.Path}, {ID: "delta-old-name", Op: "name", Repo: changed.Repo, Key: renamed.Name, K: -1}, {ID: "delta-new-name", Op: "name", Repo: changed.Repo, Key: renamed.Name + "__renamed", K: -1}, {ID: "delta-removed-id", Op: "id", Repo: changed.Repo, Key: removed.ID}, {ID: "delta-added-id", Op: "id", Repo: changed.Repo, Key: added.ID}, {ID: "delta-removed-out", Op: "out", Repo: changed.Repo, Key: removed.ID, Kind: "any"}, {ID: "delta-added-out", Op: "out", Repo: changed.Repo, Key: added.ID, Kind: "any"}, {ID: "delta-renamed-out", Op: "out", Repo: changed.Repo, Key: renamed.ID, Kind: "any"}, {ID: "delta-added-in", Op: "in", Repo: changed.Repo, Key: added.ID, Kind: "any"}, {ID: "delta-dangling-in", Op: "in", Repo: changed.Repo, Key: removed.ID, Kind: "any"}, {ID: "delta-symbol", Op: "symbols", Repo: changed.Repo, Key: "deltaprobe", K: len(changed.Symbols), MinOverlap: 1, ExactRank: true, ForbiddenIDs: []string{removed.ID}}, {ID: "delta-content", Op: "content", Repo: changed.Repo, Key: "deltaprobe", K: len(changed.Content), MinOverlap: 1, ExactRank: true}, {ID: "delta-vector", Op: "vector", Repo: changed.Repo, Vec: perturb(dataset.MakeVector(added.ID, 20261022).Values), K: 10, RequiredIDs: []string{added.ID}, ForbiddenIDs: []string{removed.ID}}}
+	o := adapter.Segment(oracle.New(changed))
+	if changed.Source != nil {
+		o = &oracle.DiskSegment{Data: changed}
+	}
+	renamed, removed, added, e := deltaIdentities(base, c)
+	if e != nil {
+		return nil, e
+	}
+	qs := []workload.Query{{ID: "delta-file", Op: "file", Repo: changed.Repo, Key: c.Path}, {ID: "delta-old-name", Op: "name", Repo: changed.Repo, Key: renamed.Name, K: -1}, {ID: "delta-new-name", Op: "name", Repo: changed.Repo, Key: renamed.Name + "__renamed", K: -1}, {ID: "delta-removed-id", Op: "id", Repo: changed.Repo, Key: removed.ID}, {ID: "delta-added-id", Op: "id", Repo: changed.Repo, Key: added.ID}, {ID: "delta-removed-out", Op: "out", Repo: changed.Repo, Key: removed.ID, Kind: "any"}, {ID: "delta-added-out", Op: "out", Repo: changed.Repo, Key: added.ID, Kind: "any"}, {ID: "delta-renamed-out", Op: "out", Repo: changed.Repo, Key: renamed.ID, Kind: "any"}, {ID: "delta-added-in", Op: "in", Repo: changed.Repo, Key: added.ID, Kind: "any"}, {ID: "delta-dangling-in", Op: "in", Repo: changed.Repo, Key: removed.ID, Kind: "any"}, {ID: "delta-symbol", Op: "symbols", Repo: changed.Repo, Key: "deltaprobe", K: max(len(changed.Symbols), changed.Meta.Counts.Symbols), MinOverlap: 1, ExactRank: true, ForbiddenIDs: []string{removed.ID}}, {ID: "delta-content", Op: "content", Repo: changed.Repo, Key: "deltaprobe", K: max(len(changed.Content), changed.Meta.Counts.Content), MinOverlap: 1, ExactRank: true}, {ID: "delta-vector", Op: "vector", Repo: changed.Repo, Vec: perturb(dataset.MakeVector(added.ID, 20261022).Values), K: 10, RequiredIDs: []string{added.ID}, ForbiddenIDs: []string{removed.ID}}}
 	var want []workload.Expected
+	if changed.Source != nil {
+		for _, q := range qs {
+			want = append(want, workload.Expected{QueryID: q.ID, Sources: []dataset.Dataset{changed}})
+		}
+		_, checks, e := measuredQueries(ctx, map[string]adapter.Segment{changed.Repo: s}, nil, qs, want, b.Capabilities())
+		return checks, e
+	}
 	for _, q := range qs {
 		a, e := workload.Evaluate(ctx, map[string]adapter.Segment{changed.Repo: o}, nil, q)
 		if e != nil {

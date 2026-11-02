@@ -33,6 +33,10 @@ type publicationTimes struct {
 // Open is explicit and outside it, including for the oracle command.
 func measurePublication(ctx context.Context, b adapter.Backend, cat adapter.Catalog, next, old adapter.SegmentRef) (publicationTimes, error) {
 	var t publicationTimes
+	if remote, ok := cat.(*remoteCatalog); ok {
+		r, e := remote.client.call(ctx, ProcessRequest{Op: "publish-measured", Handle: remote.id, Ref: next, OldRef: &old})
+		return r.Publication, e
+	}
 	start := time.Now()
 	if e := verifyPublication(ctx, b, cat, next); e != nil {
 		return t, e
@@ -91,7 +95,10 @@ func commitRace(ctx context.Context, b adapter.Backend, factory adapter.CatalogF
 	if e != nil {
 		return nil, nil, e
 	}
-	renamed, removed, _ := deltaIdentities(base, change)
+	renamed, removed, _, e := deltaIdentities(base, change)
+	if e != nil {
+		return nil, nil, e
+	}
 	var newRenamed dataset.Node
 	for _, n := range change.Replacement.Nodes {
 		if n.ID == renamed.ID {

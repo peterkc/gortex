@@ -458,3 +458,61 @@ Corpus generation, benchmarks and adapter protocols are outside recovery scope.
 They need separate clearance and their current resource conditions. Rebuild
 `bin/oracle` and `bin/gen` from this module before later use. Historical results
 do not verify a rebuilt binary or regenerated workload.
+
+
+## Enforced measurement interface
+
+Measurement commands now require Linux cgroup v2. The parent cgroup must already
+be delegated to the operator, with its memory controller enabled. The tool
+creates separate runner, checker and engine child cgroups. It sets and verifies
+`memory.max`, disables swap, and enables group OOM termination before each child
+starts. There is no sampled-RSS or GOMEMLIMIT fallback. No measurement runs on
+macOS.
+
+Use an explicit binding file and a fresh output directory:
+
+```text
+ADAPTER -data TIER -out FRESH_OUTPUT -runs 1 -warmup=false \
+  -crash-trials 12 -safety-timeout 15m \
+  -binding BINDING.json -cgroup-root DELEGATED_CGROUP
+
+ADAPTER catalog-bench -binding BINDING.json \
+  -cgroup-root DELEGATED_CGROUP -- \
+  -candidate CANDIDATE -entries 10 -repeats 1 -seed 20261025 -out FRESH_OUTPUT
+```
+
+The binding file is a closed JSON object with these required fields:
+
+- `source_revision`: the reviewed source commit, as a full hexadecimal OID.
+- `harness_sha256`: SHA-256 of the exact adapter executable.
+- `data_sha256`: SHA-256 of the tier's `manifest.json`. For catalog-only work,
+  hash the UTF-8 fixture-spec string
+  `gxstudy-catalog-fixture/v1\nentries=N\nseed=S\n`, with decimal `N` and `S`.
+- `recipe_sha256`: SHA-256 of the accepted synthetic-data or model recipe.
+- `host`: the exact value of the run host's hostname.
+- `command`: the exact argument array after the executable, including all binding
+  and cgroup flags. For catalog commands, the first entry is `catalog-bench`.
+- `memory_limits_bytes`: an object with positive integer `runner`, `checker` and
+  `engine` byte limits. Supply user-approved limits for real runs. The tool has
+  no numeric measurement-limit defaults.
+
+`components-NN.json` is the final acceptance receipt. It binds the request,
+component accounting and top-level output hashes. A failed or cancelled attempt
+keeps its request, logs and partial outputs. A `.partial` result is not a complete
+receipt. An existing output directory is rejected rather than resumed or reused.
+Cleanup failure also makes the receipt fail. Cleanup checks cgroup ownership and
+never removes a replaced or unrelated cgroup.
+
+The result's `pid` and `peak_rss_bytes` describe the engine process only.
+`runner_memory`, `checker_memory` and the component receipt label overhead
+separately. Each component also reports kernel cgroup peak memory, including its
+process tree and charged file cache; that figure is not RSS. Candidate helper
+processes belong to the engine cgroup. Operation timings run inside the engine,
+not around the transport or checker. Concurrent-reader samples and exact
+percentile scratch files are disk-backed. Their complete checks remain in the
+hash-bound sample logs instead of an unbounded in-memory passing-check list.
+
+The old `study/storage/pod/run.py` controller does not supply the new binding or
+cgroup flags. It therefore fails closed against this interface. Do not reuse its
+old memory estimates or silently invent limits. Its fixture suite remains in CI;
+a later approved run must migrate that controller if it needs it.

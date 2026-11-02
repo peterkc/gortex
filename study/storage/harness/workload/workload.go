@@ -49,6 +49,7 @@ type Answer struct {
 	Missing bool           `json:"missing,omitempty"`
 }
 type Expected struct {
+	Sources    []dataset.Dataset `json:"-"`
 	Local      *Answer           `json:"local,omitempty"`
 	MatchRepos map[string]string `json:"match_repositories,omitempty"`
 	Global     *Answer           `json:"global,omitempty"`

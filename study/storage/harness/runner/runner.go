@@ -11,10 +11,12 @@ import (
 	"gxstudy/dataset"
 	"gxstudy/oracle"
 	"gxstudy/workload"
+	"io"
 	"math"
 	"math/rand/v2"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
@@ -55,6 +57,9 @@ type BuildRecord struct {
 	Ref           adapter.SegmentRef `json:"ref"`
 }
 type ConcurrentResult struct {
+	CheckedSamples int               `json:"checked_samples"`
+	SampleSHA256   map[string]string `json:"sample_sha256,omitempty"`
+
 	OpenNS              int64          `json:"open_ns"`
 	PrecommitNS         int64          `json:"precommit_ns"`
 	NewSamplesPerReader []int64        `json:"new_samples_per_reader"`
@@ -168,12 +173,21 @@ func ReferenceCatalog(b adapter.Backend) adapter.CatalogFactory {
 const defaultSafetyTimeout = 30 * time.Second
 
 type runRequest struct {
+	Adapter       string
 	Data          string
 	Out           string
 	Run           int
 	Trials        int
 	SafetyTimeout time.Duration
 	TimingOnly    bool
+	CatalogArgs   []string
+	CatalogResult string
+	Binding       RunBinding
+	RunnerScope   string
+	CheckerScope  string
+	EngineScope   string
+	checker       *processClient
+	engine        *processClient
 }
 
 // trackedBackend owns all refs produced by this run, including crash fixtures.
@@ -212,7 +226,15 @@ func Main(b adapter.Backend, factory adapter.CatalogFactory) {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "catalog-bench":
-			err = RunCatalogBenchmark(b, factory, os.Args[2:])
+			err = RunLimitedCatalog(b, factory, os.Args[2:])
+		case "__engine", "__checker":
+			err = processServe(b, factory, os.Args[1] == "__checker")
+		case "__catalog_bench_run":
+			if len(os.Args) != 3 {
+				err = fmt.Errorf("catalog benchmark request required")
+			} else {
+				err = catalogRunChild(b, factory, os.Args[2])
+			}
 		case "__catalog_bench_read":
 			if len(os.Args) != 3 {
 				err = fmt.Errorf("catalog recovery child requires request")
@@ -228,7 +250,7 @@ func Main(b adapter.Backend, factory adapter.CatalogFactory) {
 				var req runRequest
 				err = dataset.ReadJSON(os.Args[2], &req)
 				if err == nil {
-					err = runChild(b, factory, req)
+					err = isolatedRunChild(b, factory, req)
 				}
 			}
 		default:
@@ -251,6 +273,8 @@ func RunCLI(b adapter.Backend, factory adapter.CatalogFactory) error {
 	warm := fs.Bool("warmup", true, "discard one full fresh-process warm-up")
 	timingOnly := fs.Bool("timing-only", false, "time the base workload only; skip update and publication correctness phases")
 	safetyTimeout := fs.Duration("safety-timeout", defaultSafetyTimeout, "safety deadline for each commit-race check and crash child")
+	bindingPath := fs.String("binding", "", "required source/harness/data/recipe/host/command/limit receipt")
+	cgroupRoot := fs.String("cgroup-root", "", "required delegated Linux cgroup-v2 subtree")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return err
 	}
@@ -272,6 +296,13 @@ func RunCLI(b adapter.Backend, factory adapter.CatalogFactory) error {
 	if factory == nil {
 		return fmt.Errorf("catalog factory required")
 	}
+	if *bindingPath == "" || *cgroupRoot == "" {
+		return fmt.Errorf("binding and cgroup-root required; no unbounded measurement mode")
+	}
+	binding, err := readBinding(*bindingPath, *data, os.Args[1:])
+	if err != nil {
+		return err
+	}
 	if _, err = os.Stat(*out); err == nil {
 		return fmt.Errorf("output directory exists")
 	}
@@ -286,27 +317,49 @@ func RunCLI(b adapter.Backend, factory adapter.CatalogFactory) error {
 	if *warm {
 		first = 0
 	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
 	for run := first; run <= *runs; run++ {
-		path := filepath.Join(*out, fmt.Sprintf("request-%02d.json", run))
-		if err = dataset.WriteJSON(path, runRequest{Data: *data, Out: *out, Run: run, Trials: *trials, SafetyTimeout: *safetyTimeout, TimingOnly: *timingOnly}); err != nil {
+		req := runRequest{Adapter: b.Name(), Data: *data, Out: *out, Run: run, Trials: *trials, SafetyTimeout: *safetyTimeout, TimingOnly: *timingOnly, Binding: binding}
+		if err = controlledRun(ctx, exe, "__measure_run", *cgroupRoot, req); err != nil {
 			return err
-		}
-		cmd := exec.Command(exe, "__measure_run", path)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err = cmd.Run(); err != nil {
-			return fmt.Errorf("fresh-process run %d: %w", run, err)
 		}
 	}
 	return nil
 }
 func loadTier(dir string) ([]dataset.Dataset, []workload.Query, []workload.Expected, string, error) {
 	var meta dataset.Manifest
-	if e := dataset.ReadJSON(filepath.Join(dir, "manifest.json"), &meta); e != nil {
+	manifestPath, pathErr := dataset.SafeFile(dir, "manifest.json")
+	if pathErr != nil {
+		return nil, nil, nil, "", pathErr
+	}
+	if e := dataset.ReadJSON(manifestPath, &meta); e != nil {
 		return nil, nil, nil, "", e
 	}
+	if meta.Version != dataset.GeneratorVersion {
+		return nil, nil, nil, "", fmt.Errorf("unsupported tier version")
+	}
+	seenRepos := map[string]bool{}
+	for _, id := range meta.Repos {
+		if id == "" || id == "." || filepath.Base(id) != id || seenRepos[id] {
+			return nil, nil, nil, "", fmt.Errorf("invalid or duplicate repository %q", id)
+		}
+		seenRepos[id] = true
+		for _, name := range append(slices.Clone(dataset.RecordFiles), "manifest.json") {
+			if meta.SHA256[filepath.Join(id, name)] == "" {
+				return nil, nil, nil, "", fmt.Errorf("unbound tier file")
+			}
+		}
+	}
+	if meta.SHA256["queries.json"] == "" || meta.SHA256["expected.json"] == "" {
+		return nil, nil, nil, "", fmt.Errorf("unbound workload")
+	}
 	for p, want := range meta.SHA256 {
-		got, e := dataset.Hash(filepath.Join(dir, p))
+		path, e := dataset.SafeFile(dir, p)
+		if e != nil {
+			return nil, nil, nil, "", e
+		}
+		got, e := dataset.Hash(path)
 		if e != nil {
 			return nil, nil, nil, "", e
 		}
@@ -316,24 +369,93 @@ func loadTier(dir string) ([]dataset.Dataset, []workload.Query, []workload.Expec
 	}
 	var ds []dataset.Dataset
 	for _, id := range meta.Repos {
-		d, e := dataset.Load(filepath.Join(dir, id))
+		d, e := dataset.OpenSource(filepath.Join(dir, id))
 		if e != nil {
 			return nil, nil, nil, "", e
 		}
+		if d.Repo != id {
+			return nil, nil, nil, "", fmt.Errorf("repository identity mismatch")
+		}
 		ds = append(ds, d)
+	}
+	if e := dataset.ValidateTierIDs(ds); e != nil {
+		return nil, nil, nil, "", e
 	}
 	var qs []workload.Query
 	var want []workload.Expected
 	if e := dataset.ReadJSON(filepath.Join(dir, "queries.json"), &qs); e != nil {
 		return nil, nil, nil, "", e
 	}
-	if e := dataset.ReadJSON(filepath.Join(dir, "expected.json"), &want); e != nil {
+	file, e := os.Open(filepath.Join(dir, "expected.json"))
+	if e != nil {
 		return nil, nil, nil, "", e
 	}
-	if len(ds) == 0 || len(qs) != len(want) {
+	decoder := json.NewDecoder(file)
+	if token, e := decoder.Token(); e != nil || token != json.Delim('[') {
+		file.Close()
+		return nil, nil, nil, "", fmt.Errorf("expected array required")
+	}
+	for decoder.More() {
+		var row workload.Expected
+		if e := decoder.Decode(&row); e != nil {
+			file.Close()
+			return nil, nil, nil, "", e
+		}
+		want = append(want, workload.Expected{QueryID: row.QueryID, Sources: ds})
+	}
+	if token, e := decoder.Token(); e != nil || token != json.Delim(']') {
+		file.Close()
+		return nil, nil, nil, "", fmt.Errorf("truncated expected array")
+	}
+	var trailing any
+	if e := decoder.Decode(&trailing); e != io.EOF {
+		file.Close()
+		return nil, nil, nil, "", fmt.Errorf("trailing expected data")
+	}
+	if e := file.Close(); e != nil {
+		return nil, nil, nil, "", e
+	}
+	if len(ds) == 0 || len(qs) == 0 || len(qs) != len(want) {
 		return nil, nil, nil, "", fmt.Errorf("empty tier or mismatched workload")
 	}
+	counts := dataset.Counts{}
+	for _, d := range ds {
+		counts = dataset.Sum(counts, d.Meta.Counts)
+	}
+	if counts != meta.Counts {
+		return nil, nil, nil, "", fmt.Errorf("tier counts differ from repositories")
+	}
+	seenQueries := map[string]bool{}
 	for i, q := range qs {
+		op := strings.TrimPrefix(q.Op, "native_")
+		if !slices.Contains([]string{"id", "name", "file", "in", "out", "traverse2", "traverse3", "symbols", "content", "vector", "multi_name", "multi_in", "multi_symbols", "multi_vector", "multi_traverse2", "multi_traverse3"}, op) {
+			return nil, nil, nil, "", fmt.Errorf("unknown query operation %q", q.Op)
+		}
+		if strings.HasSuffix(op, "vector") {
+			if len(q.Vec) != dataset.Dimensions {
+				return nil, nil, nil, "", fmt.Errorf("query vector dimensions")
+			}
+			norm := 0.
+			for _, value := range q.Vec {
+				if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+					return nil, nil, nil, "", fmt.Errorf("nonfinite query vector")
+				}
+				norm += float64(value) * float64(value)
+			}
+			if norm == 0 {
+				return nil, nil, nil, "", fmt.Errorf("zero query vector")
+			}
+		}
+		if strings.Contains(op, "traverse") && q.Depth != 2 && q.Depth != 3 {
+			return nil, nil, nil, "", fmt.Errorf("unsupported traversal depth")
+		}
+		if q.ID == "" || seenQueries[q.ID] {
+			return nil, nil, nil, "", fmt.Errorf("duplicate or empty query id")
+		}
+		seenQueries[q.ID] = true
+		if !strings.HasPrefix(op, "multi_") && !seenRepos[q.Repo] {
+			return nil, nil, nil, "", fmt.Errorf("unknown query repository")
+		}
 		if q.ID != want[i].QueryID {
 			return nil, nil, nil, "", fmt.Errorf("query IDs differ")
 		}
@@ -349,6 +471,13 @@ func runChild(original adapter.Backend, factory adapter.CatalogFactory, req runR
 		req.SafetyTimeout = defaultSafetyTimeout
 	}
 	ctx := context.Background()
+	if req.checker != nil {
+		ctx = context.WithValue(ctx, checkerContextKey{}, req.checker)
+		ctx = context.WithValue(ctx, sampleDirectoryKey{}, filepath.Join(req.Out, fmt.Sprintf("run-%02d", req.Run)))
+	}
+	if req.EngineScope != "" {
+		ctx = context.WithValue(ctx, engineScopeKey{}, req.EngineScope)
+	}
 	load, e := exec.Command("uptime").CombinedOutput()
 	if e != nil {
 		return e
@@ -397,11 +526,39 @@ func runChild(original adapter.Backend, factory adapter.CatalogFactory, req runR
 	if runtime.GOOS == "linux" {
 		r.PeakRSSBytes *= 1024
 	}
+	var finalMeta dataset.Manifest
+	if e = dataset.ReadJSON(filepath.Join(req.Data, "manifest.json"), &finalMeta); e != nil {
+		r.Failures = append(r.Failures, e.Error())
+	} else {
+		for name, hash := range finalMeta.SHA256 {
+			path, pathErr := dataset.SafeFile(req.Data, name)
+			if pathErr != nil {
+				r.Failures = append(r.Failures, pathErr.Error())
+				continue
+			}
+			got, hashErr := dataset.Hash(path)
+			if hashErr != nil {
+				r.Failures = append(r.Failures, hashErr.Error())
+			} else if got != hash {
+				r.Failures = append(r.Failures, "input changed during run: "+name)
+			}
+		}
+	}
+	finalDigest, digestErr := dataset.Hash(filepath.Join(req.Data, "manifest.json"))
+	if digestErr != nil {
+		r.Failures = append(r.Failures, digestErr.Error())
+	} else if finalDigest != digest {
+		r.Failures = append(r.Failures, "tier manifest changed during run")
+	}
 	summarizeOverlap(&r)
 	collectFailures(&r)
 	r.Success = len(r.Failures) == 0
 	if req.Run > 0 {
-		if e = dataset.WriteJSON(filepath.Join(req.Out, fmt.Sprintf("%s-%s-%02d.json", original.Name(), r.Tier, req.Run)), r); e != nil {
+		resultPath := filepath.Join(req.Out, fmt.Sprintf("%s-%s-%02d.json", original.Name(), r.Tier, req.Run))
+		if req.engine != nil {
+			resultPath += ".partial"
+		}
+		if e = dataset.WriteJSON(resultPath, r); e != nil {
 			return e
 		}
 	} else {
@@ -409,7 +566,11 @@ func runChild(original adapter.Backend, factory adapter.CatalogFactory, req runR
 		if r.TimingOnly {
 			status["timing_only"] = true
 		}
-		if e = dataset.WriteJSON(filepath.Join(dir, "warmup-status.json"), status); e != nil {
+		statusPath := filepath.Join(dir, "warmup-status.json")
+		if req.engine != nil {
+			statusPath += ".partial"
+		}
+		if e = dataset.WriteJSON(statusPath, status); e != nil {
 			return e
 		}
 	}
@@ -534,10 +695,8 @@ func measuredQueries(ctx context.Context, s map[string]adapter.Segment, m adapte
 			checks = append(checks, workload.Check{QueryID: q.ID, Operation: q.Op, Status: "unsupported", Detail: why})
 			continue
 		}
-		queryMulti, inputs := traceNativeFanout(m, q)
-		start := time.Now()
-		got, e := workload.Evaluate(ctx, s, queryMulti, q)
-		ns := time.Since(start).Nanoseconds()
+		got, inputs, start, end, e := evaluateTimed(ctx, s, m, q)
+		ns := end.Sub(start).Nanoseconds()
 		if e != nil {
 			if errors.Is(e, adapter.ErrUnsupported) && strings.HasPrefix(q.Op, "native_") {
 				checks = append(checks, workload.Check{QueryID: q.ID, Operation: q.Op, Status: "unsupported", Detail: e.Error()})
@@ -551,7 +710,11 @@ func measuredQueries(ctx context.Context, s map[string]adapter.Segment, m adapte
 			metric += "_" + q.Kind
 		}
 		samples[metric] = append(samples[metric], ns)
-		checks = append(checks, compareRankedAnswer(q, want[i], got, inputs))
+		check, e := checkedAnswer(ctx, q, want[i], got, inputs)
+		if e != nil {
+			return samples, checks, e
+		}
+		checks = append(checks, check)
 	}
 	return samples, checks, nil
 }
@@ -584,9 +747,11 @@ func warmedQueries(ctx context.Context, s map[string]adapter.Segment, m adapter.
 }
 func runOnce(ctx context.Context, b *trackedBackend, factory adapter.CatalogFactory, ds []dataset.Dataset, qs []workload.Query, want []workload.Expected, dir string, trials int, safetyTimeout time.Duration, r *Result) (err error) {
 	var referenceErr error
-	want, referenceErr = oracle.ReferenceAnswers(ds, qs, want)
-	if referenceErr != nil {
-		return referenceErr
+	if len(ds) > 0 && ds[0].Source == nil {
+		want, referenceErr = oracle.ReferenceAnswers(ds, qs, want)
+		if referenceErr != nil {
+			return referenceErr
+		}
 	}
 	refs := map[string]adapter.SegmentRef{}
 	var buildTimes []int64
@@ -599,6 +764,11 @@ func runOnce(ctx context.Context, b *trackedBackend, factory adapter.CatalogFact
 		start := time.Now()
 		ref, stats, e := b.Build(ctx, d, filepath.Join(dir, "segments", d.Repo))
 		ns := time.Since(start).Nanoseconds()
+		if c := backendClient(b.Backend); c != nil {
+			c.mu.Lock()
+			ns = c.lastBuild
+			c.mu.Unlock()
+		}
 		if e != nil {
 			return e
 		}
@@ -619,11 +789,25 @@ func runOnce(ctx context.Context, b *trackedBackend, factory adapter.CatalogFact
 	}
 	preparePhase()
 	start := time.Now()
+	client := backendClient(b.Backend)
+	openBefore := int64(0)
+	if client != nil {
+		client.mu.Lock()
+		openBefore = client.openNS
+		client.mu.Unlock()
+	}
 	first, e := openAll(ctx, b, refs)
 	if e != nil {
 		return e
 	}
-	r.Metrics["open_first_no_cache_flush"] = Summarize([]int64{time.Since(start).Nanoseconds()})
+	openElapsed := time.Since(start).Nanoseconds()
+	if client != nil {
+		client.mu.Lock()
+		openElapsed = client.openNS - openBefore
+		openBefore = client.openNS
+		client.mu.Unlock()
+	}
+	r.Metrics["open_first_no_cache_flush"] = Summarize([]int64{openElapsed})
 	if e = closeAll(first); e != nil {
 		return e
 	}
@@ -635,7 +819,13 @@ func runOnce(ctx context.Context, b *trackedBackend, factory adapter.CatalogFact
 		return e
 	}
 	defer func() { err = errors.Join(err, closeAll(segments)) }()
-	r.Metrics["open_warm"] = Summarize([]int64{time.Since(start).Nanoseconds()})
+	openElapsed = time.Since(start).Nanoseconds()
+	if client != nil {
+		client.mu.Lock()
+		openElapsed = client.openNS - openBefore
+		client.mu.Unlock()
+	}
+	r.Metrics["open_warm"] = Summarize([]int64{openElapsed})
 	if e = resource(ctx, b.Backend, r, "open"); e != nil {
 		return e
 	}
@@ -724,6 +914,11 @@ func runOnce(ctx context.Context, b *trackedBackend, factory adapter.CatalogFact
 	start = time.Now()
 	delta, stats, e := b.BuildDelta(ctx, refs[ds[0].Repo], change, filepath.Join(dir, "delta"))
 	nsDelta := time.Since(start).Nanoseconds()
+	if c := backendClient(b.Backend); c != nil {
+		c.mu.Lock()
+		nsDelta = c.lastBuild
+		c.mu.Unlock()
+	}
 	if e != nil {
 		return e
 	}
@@ -736,7 +931,10 @@ func runOnce(ctx context.Context, b *trackedBackend, factory adapter.CatalogFact
 	}
 	r.Delta = BuildRecord{ArtifactBytes: bytes, Repo: ds[0].Repo, DurationNS: nsDelta, Stats: stats, Ref: delta}
 	r.Metrics["delta_build"] = Summarize([]int64{nsDelta})
-	changed := adapter.ApplyChange(ds[0], change)
+	changed, e := adapter.ChangeSource(ds[0], change)
+	if e != nil {
+		return e
+	}
 	r.DeltaChecks, e = checkDelta(ctx, b, delta, ds[0], changed, change)
 	if e != nil {
 		return e

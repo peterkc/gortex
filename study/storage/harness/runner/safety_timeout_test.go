@@ -15,14 +15,16 @@ import (
 
 func safetyRequest(t *testing.T, option string) runRequest {
 	t.Helper()
-	args := os.Args
-	t.Cleanup(func() { os.Args = args })
-	out := filepath.Join(t.TempDir(), "out")
-	os.Args = []string{args[0], "-data", "unused", "-out", out, "-runs", "1", "-warmup=false", "-crash-trials", "1"}
+	value := defaultSafetyTimeout
 	if option != "" {
-		os.Args = append(os.Args, "-safety-timeout", option)
+		var err error
+		value, err = time.ParseDuration(option)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := RunCLI(oracle.Backend{}, oracle.NewCatalog); err != nil {
+	out := t.TempDir()
+	if err := dataset.WriteJSON(filepath.Join(out, "request-01.json"), runRequest{SafetyTimeout: value}); err != nil {
 		t.Fatal(err)
 	}
 	var req runRequest

@@ -47,8 +47,36 @@ func TestSummary(t *testing.T) {
 }
 
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && (os.Args[1] == "__engine" || os.Args[1] == "__checker") {
+		if err := processServe(testProcessBackend(), oracle.NewCatalog, os.Args[1] == "__checker"); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "__catalog_bench_run" {
+		if err := catalogRunChild(testProcessBackend(), oracle.NewCatalog, os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "__measure_run" {
-		// CLI tests inspect the serialized request without running a second suite.
+		var req runRequest
+		if err := dataset.ReadJSON(os.Args[2], &req); err != nil {
+			os.Exit(1)
+		}
+		if err := isolatedRunChild(oracle.Backend{}, oracle.NewCatalog, req); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "__catalog_bench_read" {
+		if err := catalogReadChild(testProcessBackend().Name(), oracle.NewCatalog, os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
 	if len(os.Args) > 1 && os.Args[1] == "__catalog_publish" {

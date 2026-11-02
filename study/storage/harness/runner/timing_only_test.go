@@ -9,23 +9,16 @@ import (
 	"gxstudy/dataset"
 	"gxstudy/oracle"
 	"gxstudy/workload"
-	"os"
 	"path/filepath"
 	"slices"
 	"testing"
 )
 
-func TestTimingOnlyCLISerialization(t *testing.T) {
+func TestTimingOnlyRequestSerialization(t *testing.T) {
 	for _, timingOnly := range []bool{false, true} {
 		t.Run(map[bool]string{false: "default", true: "timing"}[timingOnly], func(t *testing.T) {
-			args := os.Args
-			t.Cleanup(func() { os.Args = args })
-			out := filepath.Join(t.TempDir(), "out")
-			os.Args = []string{args[0], "-data", "unused", "-out", out, "-runs", "1", "-warmup=false"}
-			if timingOnly {
-				os.Args = append(os.Args, "-timing-only")
-			}
-			if err := RunCLI(oracle.Backend{}, oracle.NewCatalog); err != nil {
+			out := t.TempDir()
+			if err := dataset.WriteJSON(filepath.Join(out, "request-01.json"), runRequest{TimingOnly: timingOnly, SafetyTimeout: defaultSafetyTimeout}); err != nil {
 				t.Fatal(err)
 			}
 			var req runRequest
