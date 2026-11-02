@@ -233,3 +233,30 @@ func TestHostStopUsesDistinctExitCode(t *testing.T) {
 		})
 	}
 }
+
+func TestRestoreRowsPreservesShuffledIdentityAndPartialSlots(t *testing.T) {
+	indices := []int{2, 0, 3, 1}
+	vectors := [][]float32{{20, 21}, {0, 1}, {30, 31}, {10, 11}}
+	got, err := restoreRows(indices, vectors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for row, want := range [][]float32{{0, 1}, {10, 11}, {20, 21}, {30, 31}} {
+		if !slices.Equal(got[row], want) {
+			t.Fatal("wrong original row", row, got[row], want)
+		}
+	}
+	if !slices.Equal(indices, []int{2, 0, 3, 1}) || !slices.Equal(vectors[0], []float32{20, 21}) {
+		t.Fatal("restoration changed caller inputs")
+	}
+	partial, err := restoreRows(indices, [][]float32{{20, 21}, {0, 1}, nil, nil})
+	if err != nil || partial[1] != nil || partial[3] != nil || !slices.Equal(partial[0], []float32{0, 1}) || !slices.Equal(partial[2], []float32{20, 21}) {
+		t.Fatal("partial rows lost identity", partial, err)
+	}
+	for _, bad := range [][]int{{0, 1, 1, 3}, {0, 1, 2}, {0, 1, 2, 4}, {-1, 1, 2, 3}} {
+		got, err := restoreRows(bad, vectors)
+		if err == nil || got != nil {
+			t.Fatal("accepted invalid restoration", bad, got, err)
+		}
+	}
+}

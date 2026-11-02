@@ -415,9 +415,10 @@ func run() error {
 			return err
 		}
 		latencyMS := time.Since(batchStart).Seconds() * 1000
-		for i, index := range batch.Indices {
-			report.Vectors[index] = vectors[i]
+		if len(vectors) != len(batch.Indices) {
+			return fmt.Errorf("batch vector/index count mismatch")
 		}
+		copy(report.Vectors[count:count+len(vectors)], vectors)
 		count += len(batch.Indices)
 		report.CompletedTexts = count
 		for _, mask := range batch.Inputs["attention_mask"] {
@@ -435,6 +436,14 @@ func run() error {
 		}
 	}
 	report.Seconds = time.Since(start).Seconds()
+	var indices []int
+	for _, batch := range batches {
+		indices = append(indices, batch.Indices...)
+	}
+	report.Vectors, err = restoreRows(indices, report.Vectors)
+	if err != nil {
+		return err
+	}
 	if report.Seconds200 > 0 {
 		report.TextsPerSecond200 = 200 / report.Seconds200
 	}
@@ -476,4 +485,22 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(errorExitCode(err))
 	}
+}
+
+// restoreRows maps batch-order outputs back to the full input order. Nil vectors
+// are uncompleted rows in a partial report; their positions must also survive.
+func restoreRows(indices []int, vectors [][]float32) ([][]float32, error) {
+	if len(indices) != len(vectors) {
+		return nil, fmt.Errorf("row restoration requires every input index")
+	}
+	ordered := make([][]float32, len(vectors))
+	seen := make([]bool, len(vectors))
+	for i, index := range indices {
+		if index < 0 || index >= len(vectors) || seen[index] {
+			return nil, fmt.Errorf("duplicate or out-of-range input index %d", index)
+		}
+		seen[index] = true
+		ordered[index] = vectors[i]
+	}
+	return ordered, nil
 }
