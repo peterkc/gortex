@@ -106,21 +106,25 @@ func buildDeltaText(ctx context.Context, dir string, rows []row) error {
 
 // A member excludes only its superseded documents. An alias-wide exclusion
 // would incorrectly hide replacement IDs in the newer member too.
+type textIndex = bleve.Index
+
 type maskedIndex struct {
-	bleve.Index
+	textIndex
 	excluded []string
 }
 
+var _ bleve.Index = maskedIndex{}
+
 func (m maskedIndex) SearchInContext(ctx context.Context, req *bleve.SearchRequest) (*bleve.SearchResult, error) {
 	if len(m.excluded) == 0 {
-		return m.Index.SearchInContext(ctx, req)
+		return m.textIndex.SearchInContext(ctx, req)
 	}
 	copy := *req
 	filter := bleve.NewBooleanQuery()
 	filter.AddMust(req.Query)
 	filter.AddMustNot(bleve.NewDocIDQuery(m.excluded))
 	copy.Query = filter
-	return m.Index.SearchInContext(ctx, &copy)
+	return m.textIndex.SearchInContext(ctx, &copy)
 }
 func (m maskedIndex) Search(req *bleve.SearchRequest) (*bleve.SearchResult, error) {
 	return m.SearchInContext(context.Background(), req)
@@ -147,7 +151,7 @@ func (s *segment) configureText(ctx context.Context) error {
 		}
 		slices.Sort(excluded)
 		excluded = slices.Compact(excluded)
-		members := []bleve.Index{maskedIndex{Index: index, excluded: excluded}}
+		members := []bleve.Index{maskedIndex{textIndex: index, excluded: excluded}}
 		for i, l := range s.layers {
 			ix := l.symbols
 			if kind == "content" {
@@ -161,7 +165,7 @@ func (s *segment) configureText(ctx context.Context) error {
 			}
 			slices.Sort(masks)
 			masks = slices.Compact(masks)
-			members = append(members, maskedIndex{Index: ix, excluded: masks})
+			members = append(members, maskedIndex{textIndex: ix, excluded: masks})
 		}
 		alias := bleve.NewIndexAlias(members...)
 		if err := alias.SetIndexMapping(index.Mapping()); err != nil {

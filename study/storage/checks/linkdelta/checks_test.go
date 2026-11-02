@@ -88,7 +88,7 @@ func TestFullPayloadAndLifecycleEdits(t *testing.T) {
 			cases := []struct {
 				name string
 				c    adapter.FileChange
-			}{{"no-op", noOp}, {"body-only", body}, {"mutation", changed}, {"delete", {Path: "f.go", Replacement: dataset.Dataset{Repo: d.Repo}}}, {"rename-add", renamed}, {"remove-renamed", {Path: renamed.Path, Replacement: dataset.Dataset{Repo: d.Repo}}}, {"re-add", noOp}}
+			}{{"no-op", noOp}, {"body-only", body}, {"mutation", changed}, {"delete", adapter.FileChange{Path: "f.go", Replacement: dataset.Dataset{Repo: d.Repo}}}, {"rename-add", renamed}, {"remove-renamed", adapter.FileChange{Path: renamed.Path, Replacement: dataset.Dataset{Repo: d.Repo}}}, {"re-add", noOp}}
 			root := t.TempDir()
 			ref, _, err := b.Build(ctx, d, filepath.Join(root, "base"))
 			if err != nil {
