@@ -100,6 +100,10 @@ func TestCancellationDuringEngineBuildPreservesFailureAndCleanup(t *testing.T) {
 			<-finished
 			t.Fatal(err)
 		}
+	case earlyErr := <-finished:
+		pipe.Close()
+		<-ready
+		t.Fatalf("run ended before the engine-build cancellation handshake: %v", earlyErr)
 	case <-ctx.Done():
 		pipe.Close()
 		<-ready

@@ -463,8 +463,11 @@ do not verify a rebuilt binary or regenerated workload.
 ## Enforced measurement interface
 
 Measurement commands now require Linux cgroup v2. The parent cgroup must already
-be delegated to the operator, with its memory controller enabled. The tool
-creates separate runner, checker and engine child cgroups. It sets and verifies
+be delegated to the operator, with its memory controller enabled. Start the
+controller from a leaf inside that delegated tree. Permission to write a target
+`cgroup.procs` alone is insufficient: cgroup placement also checks the common
+ancestor of the source and target cgroups. The tool creates separate runner,
+checker and engine child cgroups. It sets and verifies
 `memory.max`, disables swap, and enables group OOM termination before each child
 starts. There is no sampled-RSS or GOMEMLIMIT fallback. No measurement runs on
 macOS.
