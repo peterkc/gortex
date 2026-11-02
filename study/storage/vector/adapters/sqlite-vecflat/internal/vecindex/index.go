@@ -62,12 +62,21 @@ func Cosine(a, b []float32) float64 {
 }
 
 func Build(ctx context.Context, path, mode string, vectors []dataset.Vector, cfg Config) error {
-	seen := make(map[string]bool, len(vectors))
-	for _, v := range vectors {
+	return BuildSource(ctx, path, mode, dataset.Dataset{Vectors: vectors}, cfg)
+}
+func BuildSource(ctx context.Context, path, mode string, d dataset.Dataset, cfg Config) error {
+	// Runtime sources have already passed disk-backed identity validation.
+	seen := make(map[string]bool)
+	for v, readErr := range d.VectorRows() {
+		if readErr != nil {
+			return readErr
+		}
 		if v.NodeID == "" || len(v.NodeID) > 1<<20 || seen[v.NodeID] {
 			return fmt.Errorf("invalid or duplicate vector ID")
 		}
-		seen[v.NodeID] = true
+		if d.Source == nil {
+			seen[v.NodeID] = true
+		}
 		if err := Validate(v.Values); err != nil {
 			return err
 		}
@@ -80,7 +89,10 @@ func Build(ctx context.Context, path, mode string, vectors []dataset.Vector, cfg
 	w := bufio.NewWriterSize(f, 1<<20)
 	switch mode {
 	case "flat":
-		for _, v := range vectors {
+		for v, readErr := range d.VectorRows() {
+			if readErr != nil {
+				return readErr
+			}
 			if err = ctx.Err(); err != nil {
 				return err
 			}
@@ -103,7 +115,10 @@ func Build(ctx context.Context, path, mode string, vectors []dataset.Vector, cfg
 			seed = 20261022
 		}
 		g.Rng = rand.New(rand.NewSource(seed))
-		for _, v := range vectors {
+		for v, readErr := range d.VectorRows() {
+			if readErr != nil {
+				return readErr
+			}
 			if err = ctx.Err(); err != nil {
 				return err
 			}

@@ -167,7 +167,10 @@ func insertRecords(ctx context.Context, tx *sql.Tx, d dataset.Dataset) error {
 		stmts[i] = st
 		defer st.Close()
 	}
-	for _, n := range d.Nodes {
+	for n, readErr := range d.NodeRows() {
+		if readErr != nil {
+			return readErr
+		}
 		raw, err := json.Marshal(n)
 		if err != nil {
 			return err
@@ -176,7 +179,10 @@ func insertRecords(ctx context.Context, tx *sql.Tx, d dataset.Dataset) error {
 			return err
 		}
 	}
-	for _, e := range d.Edges {
+	for e, readErr := range d.EdgeRows() {
+		if readErr != nil {
+			return readErr
+		}
 		raw, err := json.Marshal(e)
 		if err != nil {
 			return err
@@ -185,7 +191,10 @@ func insertRecords(ctx context.Context, tx *sql.Tx, d dataset.Dataset) error {
 			return err
 		}
 	}
-	for _, f := range d.Files {
+	for f, readErr := range d.FileRows() {
+		if readErr != nil {
+			return readErr
+		}
 		raw, err := json.Marshal(f)
 		if err != nil {
 			return err
@@ -194,17 +203,26 @@ func insertRecords(ctx context.Context, tx *sql.Tx, d dataset.Dataset) error {
 			return err
 		}
 	}
-	for _, s := range d.Symbols {
+	for s, readErr := range d.SymbolRows() {
+		if readErr != nil {
+			return readErr
+		}
 		if _, err := stmts[3].ExecContext(ctx, s.NodeID, s.Tokens); err != nil {
 			return err
 		}
 	}
-	for _, c := range d.Content {
+	for c, readErr := range d.ContentRows() {
+		if readErr != nil {
+			return readErr
+		}
 		if _, err := stmts[4].ExecContext(ctx, c.ChunkID, c.NodeID, c.FilePath, c.Body); err != nil {
 			return err
 		}
 	}
-	for _, v := range d.Vectors {
+	for v, readErr := range d.VectorRows() {
+		if readErr != nil {
+			return readErr
+		}
 		if err := validateVector(v.Values); err != nil {
 			return err
 		}

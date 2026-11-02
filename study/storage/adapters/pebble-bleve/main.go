@@ -125,7 +125,10 @@ func writeRecords(ctx context.Context, d dataset.Dataset, put func([]byte, []byt
 	if e := putJSON(key("M"), dataset.Dataset{Repo: d.Repo, Meta: d.Meta}); e != nil {
 		return e
 	}
-	for _, n := range d.Nodes {
+	for n, readErr := range d.NodeRows() {
+		if readErr != nil {
+			return readErr
+		}
 		if e := putJSON(key("N", n.ID), n); e != nil {
 			return e
 		}
@@ -135,8 +138,13 @@ func writeRecords(ctx context.Context, d dataset.Dataset, put func([]byte, []byt
 			}
 		}
 	}
-	for i, e := range d.Edges {
-		seq := fmt.Sprintf("%016x", i)
+	edgeIndex := 0
+	for e, readErr := range d.EdgeRows() {
+		if readErr != nil {
+			return readErr
+		}
+		seq := fmt.Sprintf("%016x", edgeIndex)
+		edgeIndex++
 		if err := putJSON(key("O", e.From, e.Kind, seq), e); err != nil {
 			return err
 		}
@@ -144,22 +152,34 @@ func writeRecords(ctx context.Context, d dataset.Dataset, put func([]byte, []byt
 			return err
 		}
 	}
-	for _, f := range d.Files {
+	for f, readErr := range d.FileRows() {
+		if readErr != nil {
+			return readErr
+		}
 		if e := putJSON(key("F", f.Path), f); e != nil {
 			return e
 		}
 	}
-	for _, s := range d.Symbols {
+	for s, readErr := range d.SymbolRows() {
+		if readErr != nil {
+			return readErr
+		}
 		if e := putJSON(key("S", s.NodeID), s); e != nil {
 			return e
 		}
 	}
-	for _, c := range d.Content {
+	for c, readErr := range d.ContentRows() {
+		if readErr != nil {
+			return readErr
+		}
 		if e := putJSON(key("C", c.ChunkID), c); e != nil {
 			return e
 		}
 	}
-	for _, v := range d.Vectors {
+	for v, readErr := range d.VectorRows() {
+		if readErr != nil {
+			return readErr
+		}
 		if e := ctx.Err(); e != nil {
 			return e
 		}
@@ -234,7 +254,10 @@ func (backend) Build(ctx context.Context, d dataset.Dataset, path string) (adapt
 		return ref, stats, e
 	}
 	e = buildText(ctx, filepath.Join(path, "symbols.bleve"), func(add func(string, string) error) error {
-		for _, s := range d.Symbols {
+		for s, readErr := range d.SymbolRows() {
+			if readErr != nil {
+				return readErr
+			}
 			if e := add(s.NodeID, s.Tokens); e != nil {
 				return e
 			}
@@ -245,7 +268,10 @@ func (backend) Build(ctx context.Context, d dataset.Dataset, path string) (adapt
 		return ref, stats, e
 	}
 	e = buildText(ctx, filepath.Join(path, "content.bleve"), func(add func(string, string) error) error {
-		for _, c := range d.Content {
+		for c, readErr := range d.ContentRows() {
+			if readErr != nil {
+				return readErr
+			}
 			if e := add(c.ChunkID, c.Body); e != nil {
 				return e
 			}

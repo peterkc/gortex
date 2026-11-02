@@ -24,24 +24,36 @@ func nativeConfig() usearch.IndexConfig {
 	return c
 }
 func buildNative(ctx context.Context, path string, vectors []dataset.Vector) error {
+	return buildNativeSource(ctx, path, dataset.Dataset{Vectors: vectors})
+}
+func buildNativeSource(ctx context.Context, path string, d dataset.Dataset) error {
 	idx, err := usearch.NewIndex(nativeConfig())
 	if err != nil {
 		return err
 	}
 	defer idx.Destroy()
-	if err = idx.Reserve(uint(len(vectors))); err != nil {
+	count := len(d.Vectors)
+	if d.Source != nil {
+		count = d.Meta.Counts.Vectors
+	}
+	if err = idx.Reserve(uint(count)); err != nil {
 		return err
 	}
 	if err = idx.ChangeThreadsAdd(1); err != nil {
 		return err
 	}
-	for i, v := range vectors {
+	i := uint64(0)
+	for v, readErr := range d.VectorRows() {
+		if readErr != nil {
+			return readErr
+		}
 		if err = ctx.Err(); err != nil {
 			return err
 		}
-		if err = idx.Add(uint64(i), v.Values); err != nil {
+		if err = idx.Add(i, v.Values); err != nil {
 			return err
 		}
+		i++
 	}
 	if err = idx.Save(path); err != nil {
 		return err

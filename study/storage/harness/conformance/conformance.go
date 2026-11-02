@@ -44,6 +44,39 @@ func CheckBackend(t *testing.T, b adapter.Backend) {
 	if string(got) != string(want) {
 		t.Fatal("full node payload did not round-trip")
 	}
+	t.Run("disk-build-input", func(t *testing.T) {
+		input := filepath.Join(t.TempDir(), "input")
+		if _, err := dataset.Write(input, d); err != nil {
+			t.Fatal(err)
+		}
+		source, err := dataset.OpenSource(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref, _, err := b.Build(ctx, source, filepath.Join(t.TempDir(), "disk-segment"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		segment, err := b.Open(ctx, ref.Path, ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer segment.Close()
+		node, err := segment.NodeByID(ctx, "a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		actual, _ := json.Marshal(node)
+		if string(actual) != string(want) {
+			t.Fatal("disk-backed build changed payload")
+		}
+		if b.Capabilities().Unsupported["out"] == "" {
+			edges, err := segment.OutEdges(ctx, "b", "calls")
+			if err != nil || len(edges) != 1 {
+				t.Fatal("disk-backed build lost edge", edges, err)
+			}
+		}
+	})
 	caps := b.Capabilities()
 	if caps.Unsupported["name"] == "" {
 		a, e := s.NodesByName(ctx, "missing", 10)
