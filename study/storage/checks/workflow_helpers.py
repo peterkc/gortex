@@ -81,6 +81,14 @@ def unique_object(pairs):
     return result
 
 
+def dispatch_request(environ: Mapping[str, str]) -> dict[str, str]:
+    return {"event": environ["GITHUB_EVENT_NAME"],
+            "approval_id": environ["REQUEST_APPROVAL"],
+            "fork_commit": environ["REQUEST_COMMIT"],
+            "policy_sha256": environ["REQUEST_POLICY"],
+            "release_tag": environ["REQUEST_RELEASE"]}
+
+
 def admit_dispatch(request, *, source, actual, policy_pin, attempt):
     if source != actual:
         raise RuntimeError("checkout differs from the workflow commit")

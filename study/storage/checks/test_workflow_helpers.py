@@ -11,6 +11,7 @@ from workflow_helpers import (
     admit_measurement,
     base_capacity_record,
     collect_linkdelta_tiers,
+    dispatch_request,
     require_idle_targets,
     unique_object,
 )
@@ -154,6 +155,36 @@ class BaseCapacityTests(unittest.TestCase):
 
 
 class AdmissionTests(unittest.TestCase):
+    def test_dispatch_environment_mapping_is_exact(self):
+        environ = {
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "REQUEST_APPROVAL": "batch-record", "REQUEST_COMMIT": "a" * 40,
+            "REQUEST_POLICY": "b" * 64,
+            "REQUEST_RELEASE": "storage-fixtures-v1",
+            "GITHUB_SHA": "c" * 40, "UNRELATED": "ignored",
+        }
+        before = dict(environ)
+        self.assertEqual(dispatch_request(environ), {
+            "event": "workflow_dispatch", "approval_id": "batch-record",
+            "fork_commit": "a" * 40, "policy_sha256": "b" * 64,
+            "release_tag": "storage-fixtures-v1",
+        })
+        self.assertEqual(environ, before)
+
+    def test_dispatch_environment_requires_every_field(self):
+        required = ("GITHUB_EVENT_NAME", "REQUEST_APPROVAL", "REQUEST_COMMIT",
+                    "REQUEST_POLICY", "REQUEST_RELEASE")
+        for missing in required:
+            with self.subTest(missing=missing):
+                environ = {key: "present" for key in required
+                           if key != missing}
+                environ["GITHUB_SHA"] = "c" * 40
+                before = dict(environ)
+                with self.assertRaises(KeyError) as raised:
+                    dispatch_request(environ)
+                self.assertEqual(raised.exception.args, (missing,))
+                self.assertEqual(environ, before)
+
     def test_exact_and_push(self):
         admit_dispatch(self.request(), source="a" * 40, actual="a" * 40,
                        policy_pin="b" * 64, attempt="1")

@@ -82,7 +82,7 @@ jobs:
 
         sys.path.insert(
             0, str(Path(os.environ["GITHUB_WORKSPACE"]) / "study/storage/checks"))
-        from workflow_helpers import admit_dispatch, unique_object
+        from workflow_helpers import admit_dispatch, dispatch_request, unique_object
 
         policy_path = Path("study/storage/checks/run-policy.json")
         raw = policy_path.read_bytes()
@@ -94,11 +94,7 @@ jobs:
             raise RuntimeError("the approved D29 construction selection must be true")
         actual = subprocess.check_output(["git", "rev-parse", "HEAD"],
                                          text=True).strip()
-        request = {"event": os.environ["GITHUB_EVENT_NAME"],
-                   "approval_id": os.environ["REQUEST_APPROVAL"],
-                   "fork_commit": os.environ["REQUEST_COMMIT"],
-                   "policy_sha256": os.environ["REQUEST_POLICY"],
-                   "release_tag": os.environ["REQUEST_RELEASE"]}
+        request = dispatch_request(os.environ)
         admit_dispatch(request, source=os.environ["GITHUB_SHA"], actual=actual,
                        policy_pin=policy_pin, attempt=os.environ["GITHUB_RUN_ATTEMPT"])
         if (policy["jobs"]["tests"]["timeout_minutes"] != 45
@@ -287,18 +283,14 @@ jobs:
         sys.path.insert(
             0, str(Path(os.environ["GITHUB_WORKSPACE"]) / "study/storage/checks"))
         from workflow_helpers import (
-            MeasurementHost, admit_dispatch, admit_measurement,
+            MeasurementHost, admit_dispatch, admit_measurement, dispatch_request,
         )
 
         raw = Path("study/storage/checks/run-policy.json").read_bytes()
         pin = hashlib.sha256(raw).hexdigest()
         actual = subprocess.check_output(["git", "rev-parse", "HEAD"],
                                          text=True).strip()
-        request = {"event": os.environ["GITHUB_EVENT_NAME"],
-                   "approval_id": os.environ["REQUEST_APPROVAL"],
-                   "fork_commit": os.environ["REQUEST_COMMIT"],
-                   "policy_sha256": os.environ["REQUEST_POLICY"],
-                   "release_tag": os.environ["REQUEST_RELEASE"]}
+        request = dispatch_request(os.environ)
         admit_dispatch(request, source=os.environ["GITHUB_SHA"], actual=actual,
                        policy_pin=pin, attempt=os.environ["GITHUB_RUN_ATTEMPT"])
         checkout_status = subprocess.check_output(["git", "status", "--porcelain"])
