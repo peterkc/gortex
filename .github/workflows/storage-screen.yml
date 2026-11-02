@@ -39,11 +39,39 @@ jobs:
           echo "GOMODCACHE=$RUNNER_TEMP/storage/go-mod" >> "$GITHUB_ENV"
           echo "TMPDIR=$RUNNER_TEMP/storage/tmp" >> "$GITHUB_ENV"
           echo "GOTMPDIR=$RUNNER_TEMP/storage/tmp" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/storage/home" "$RUNNER_TEMP/storage/config" \
+            "$RUNNER_TEMP/storage/data" "$RUNNER_TEMP/storage/cache"
+          echo "HOME=$RUNNER_TEMP/storage/home" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=$RUNNER_TEMP/storage/config" >> "$GITHUB_ENV"
+          echo "XDG_DATA_HOME=$RUNNER_TEMP/storage/data" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$RUNNER_TEMP/storage/cache" >> "$GITHUB_ENV"
+          echo "PYTHONDONTWRITEBYTECODE=1" >> "$GITHUB_ENV"
+          python3.12 -c 'import os; from pathlib import Path; p = Path(os.environ["GITHUB_ENV"]); p.open("a").write("".join(k + "=\n" for k in os.environ if k.startswith(("PRIME_", "RLM_", "GORTEX_"))))'
+          git ls-files study/storage .github/workflows/storage-screen.yml \
+            | xargs sha256sum > "$RUNNER_TEMP/storage/ci-protected-before.txt"
           git rev-parse HEAD | tee "$RUNNER_TEMP/storage/ci-source.txt"
           go version | tee -a "$RUNNER_TEMP/storage/ci-source.txt"
           sha256sum study/storage/pod/run.py study/storage/pod/test_driver.py \
             study/storage/onnx/main.go study/storage/onnx/main_test.go \
             | tee -a "$RUNNER_TEMP/storage/ci-source.txt"
+      - name: Delegate test-only cgroup-v2 memory scopes
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="/sys/fs/cgroup/gxstudy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          test -f /sys/fs/cgroup/cgroup.controllers
+          echo +memory | sudo tee /sys/fs/cgroup/cgroup.subtree_control
+          sudo mkdir "$root"
+          echo +memory | sudo tee "$root/cgroup.subtree_control"
+          sudo chown -R "$(id -u):$(id -g)" "$root"
+          echo "GXSTUDY_TEST_CGROUP_ROOT=$root" >> "$GITHUB_ENV"
+      - name: Harness tests and vet, including actual hard-limit failures
+        working-directory: study/storage/harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -p=1 -v ./... 2>&1 | tee "$RUNNER_TEMP/storage/ci-harness.txt"
+          go vet -p=1 ./...
       - name: Build the independent tiny-fixture tools
         working-directory: study/storage/harness
         shell: bash
@@ -58,6 +86,34 @@ jobs:
           set -euo pipefail
           go test -p=1 ./...
           go build -p=1 -o "$RUNNER_TEMP/storage/bin/catalog-refs" .
+      - name: Streaming adapter callers on tiny native fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          go -C study/storage/adapters/badger-bleve test -p=1 ./...
+          go -C study/storage/adapters/badger-bleve vet -p=1 ./...
+          go -C study/storage/adapters/bbolt-bleve test -p=1 ./...
+          go -C study/storage/adapters/bbolt-bleve vet -p=1 ./...
+          go -C study/storage/adapters/pebble-bleve test -p=1 ./...
+          go -C study/storage/adapters/pebble-bleve vet -p=1 ./...
+          go -C study/storage/adapters/sqlite-segment test -p=1 ./...
+          go -C study/storage/adapters/sqlite-segment vet -p=1 ./...
+          go -C study/storage/adapters/libsql-segment test -p=1 ./...
+          go -C study/storage/adapters/libsql-segment vet -p=1 ./...
+          go -C study/storage/vector/adapters/sqlite-vecflat test -p=1 ./...
+          go -C study/storage/vector/adapters/sqlite-vecflat vet -p=1 ./...
+      - name: Pinned USearch dependency and streaming caller fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The existing script verifies its public source archive hash, builds
+          # one static target with one worker, and writes only under isolated HOME.
+          python3.12 study/storage/vector/scripts/build_usearch.py --execute
+          native="$HOME/.prime/research/gortex/storage-architecture/tmp/native/usearch"
+          export CGO_CFLAGS="-I$native"
+          export CGO_LDFLAGS="-L$native -lstdc++ -lm -pthread"
+          go -C study/storage/vector/adapters/sqlite-usearch test -p=1 ./...
+          go -C study/storage/vector/adapters/sqlite-usearch vet -p=1 ./...
       - name: Probe tests, vet and Linux build without a model or runtime library
         working-directory: study/storage/onnx
         shell: bash
@@ -122,12 +178,11 @@ jobs:
           UV_PYTHON: python3.12
           UV_PYTHON_DOWNLOADS: never
           UV_CACHE_DIR: ${{ runner.temp }}/storage/uv-cache
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/storage/python-env
         run: |
           set -euo pipefail
           tools="$RUNNER_TEMP/storage/evaluator-tools"
-          layout="$RUNNER_TEMP/storage/evaluator-layout"
-          project="research/gortex/storage-architecture/tmp/neon-eval"
-          mkdir -p "$tools" "$layout/$(dirname "$project")"
+          mkdir -p "$tools"
           curl --fail --location --max-time 90 --max-filesize 67108864 \
             https://github.com/astral-sh/uv/releases/download/0.13.5/uv-x86_64-unknown-linux-gnu.tar.gz \
             -o "$tools/uv.tar.gz"
@@ -136,18 +191,27 @@ jobs:
           tar -xzf "$tools/uv.tar.gz" -C "$tools"
           export PATH="$tools/uv-x86_64-unknown-linux-gnu:$PATH"
           uv --version | tee "$RUNNER_TEMP/storage/ci-evaluator.txt"
-          cp -R study/storage/neon-eval "$layout/$project"
-          cd "$layout"
-          if test ! -f "$project/uv.lock"; then
-            uv lock --project "$project"
-          fi
-          uv lock --check --project "$project"
-          cp "$project/uv.lock" "$RUNNER_TEMP/storage/ci-evaluator-lock.txt"
-          sha256sum "$project/pyproject.toml" "$project/uv.lock" \
-            "$project/evaluate.py" "$project/test_evaluate.py" \
+          export UV_PROJECT_ENVIRONMENT="$RUNNER_TEMP/storage/evaluator-env"
+          uv run --frozen --project study/storage/neon-eval python -m unittest discover \
+            -s study/storage/neon-eval -p test_evaluate.py -v 2>&1 \
             | tee -a "$RUNNER_TEMP/storage/ci-evaluator.txt"
-          uv run --project research/gortex/storage-architecture/tmp/neon-eval python -m unittest discover -s research/gortex/storage-architecture/tmp/neon-eval -p test_evaluate.py -v 2>&1 \
-            | tee -a "$RUNNER_TEMP/storage/ci-evaluator.txt"
+      - name: Accuracy bridge fixtures without model inference
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          OPENBLAS_NUM_THREADS: "2"
+          OMP_NUM_THREADS: "2"
+          MKL_NUM_THREADS: "2"
+          UV_PYTHON: python3.12
+          UV_PYTHON_DOWNLOADS: never
+          UV_CACHE_DIR: ${{ runner.temp }}/storage/uv-cache
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/storage/bridge-env
+        run: |
+          set -euo pipefail
+          uv="$RUNNER_TEMP/storage/evaluator-tools/uv-x86_64-unknown-linux-gnu/uv"
+          "$uv" run --frozen --project study/storage/pod-cost python -m unittest discover \
+            -s study/storage/onnx -p test_accuracy_bridge.py -v 2>&1 \
+            | tee "$RUNNER_TEMP/storage/ci-bridge.txt"
       - name: D3 inference contracts on tiny NumPy fixtures only
         # Independent of the driver step; report it even after a failure.
         if: ${{ !cancelled() }}
@@ -159,6 +223,7 @@ jobs:
           UV_PYTHON: python3.12
           UV_PYTHON_DOWNLOADS: never
           UV_CACHE_DIR: ${{ runner.temp }}/storage/uv-cache
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/storage/python-env
         run: |
           set -euo pipefail
           uv="$RUNNER_TEMP/storage/evaluator-tools/uv-x86_64-unknown-linux-gnu/uv"
@@ -197,6 +262,7 @@ jobs:
           UV_PYTHON: python3.12
           UV_PYTHON_DOWNLOADS: never
           UV_CACHE_DIR: ${{ runner.temp }}/storage/uv-cache
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/storage/python-env
         run: |
           set -euo pipefail
           uv="$RUNNER_TEMP/storage/evaluator-tools/uv-x86_64-unknown-linux-gnu/uv"
@@ -221,6 +287,7 @@ jobs:
           OPENBLAS_NUM_THREADS: "2"
           UV_PYTHON_DOWNLOADS: never
           UV_CACHE_DIR: ${{ runner.temp }}/storage/uv-cache
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/storage/python-env
         run: |
           set -euo pipefail
           uv="$RUNNER_TEMP/storage/evaluator-tools/uv-x86_64-unknown-linux-gnu/uv"
@@ -240,6 +307,24 @@ jobs:
             | tee "$RUNNER_TEMP/storage/ci-hybrid-followup.txt"
           "$uv" run --frozen --python "$py" python -B -m unittest -v test_followup 2>&1 \
             | tee -a "$RUNNER_TEMP/storage/ci-hybrid-followup.txt"
+      - name: Verify protected source and configuration stayed unchanged
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum --check "$RUNNER_TEMP/storage/ci-protected-before.txt" \
+            > "$RUNNER_TEMP/storage/ci-protected-after.txt"
+          git diff --exit-code -- study/storage .github/workflows/storage-screen.yml
+          test -z "$(git ls-files --others --exclude-standard study/storage)"
+          test -z "$(git ls-files --others --ignored --exclude-standard study/storage)"
+      - name: Release only this job's delegated cgroup parent
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -n "${GXSTUDY_TEST_CGROUP_ROOT:-}"; then
+            rmdir "$GXSTUDY_TEST_CGROUP_ROOT"
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
