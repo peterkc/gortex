@@ -74,6 +74,8 @@ def needs_owner(lease: Lease) -> bool:
 
 
 def execution_pins(value: Mapping, now: float) -> Mapping | Invalid:
+    from artifacts import MAX_PAYLOAD, TAR_OVERHEAD
+
     required = ("cli_context", "offer_id", "cloud_id", "image", "disk_gb",
                 "quoted_total_hourly", "quote_checked_epoch",
                 "harness_commit", "quote_reference", "gpu_label", "provider",
@@ -128,7 +130,7 @@ def execution_pins(value: Mapping, now: float) -> Mapping | Invalid:
     if (type(downlink) not in (int, float) or not math.isfinite(downlink)
             or downlink <= 0):
         return Invalid("minimum download rate must be finite and positive")
-    if value["expected_evidence_bytes"] > 8 * 1024 ** 3 + 16 * 1024 ** 2:
+    if value["expected_evidence_bytes"] > MAX_PAYLOAD + TAR_OVERHEAD:
         return Invalid("expected evidence exceeds the archive byte bound")
     if not isinstance(value["cgroup_root"], dict):
         return Invalid("cgroup root evidence must be a JSON object")
@@ -413,9 +415,43 @@ def root_capability_confirmed(state: Path) -> bool:
             and value["writable"] is True)
 
 
-def connect(state: Path) -> None:
-    from admission import root_probe_seconds
+def first_ssh_contact(state: Path, config: Mapping,
+                      owner: Mapping) -> tuple[float, float] | None:
+    """Return proved first-contact clocks, or None for unproved contact."""
+    def unique_fields(pairs):
+        value = dict(pairs)
+        if len(value) != len(pairs):
+            raise ValueError("duplicate SSH contact field")
+        return value
 
+    try:
+        with (state / "ssh-contact.json").open("rb") as receipt:
+            raw = receipt.read(1025)
+        value = (json.loads(raw, object_pairs_hook=unique_fields)
+                 if len(raw) <= 1024 else None)
+        if (not isinstance(value, dict)
+                or set(value) != {"connected_epoch", "connected_monotonic"}):
+            return None
+        epoch = value["connected_epoch"]
+        monotonic = value["connected_monotonic"]
+        started_epoch = owner.get("started_epoch")
+        started_monotonic = owner.get("started_monotonic")
+        ready_seconds = config.get("ready_seconds")
+        clocks = (epoch, monotonic, started_epoch, started_monotonic,
+                  ready_seconds)
+        if any(type(clock) not in (int, float) or not math.isfinite(clock)
+               for clock in clocks):
+            return None
+        if (not started_epoch <= epoch <= started_epoch + ready_seconds
+                or not started_monotonic <= monotonic
+                <= started_monotonic + ready_seconds):
+            return None
+        return float(epoch), float(monotonic)
+    except (OSError, ValueError, OverflowError):
+        return None
+
+
+def connect(state: Path) -> None:
     config = json.loads((state / "config.json").read_text())
     session = json.loads((state / "session.json").read_text())
     try:
@@ -425,8 +461,7 @@ def connect(state: Path) -> None:
             raise ValueError("rental refused or already deleted")
         if time.time() - session["started_epoch"] >= config["setup_seconds"]:
             raise ValueError("paid setup allowance has expired")
-        ready_deadline = session["started_epoch"] + min(
-            config["ready_seconds"], root_probe_seconds(config))
+        ready_deadline = session["started_epoch"] + config["ready_seconds"]
         attempt = 0
         while True:
             if time.time() >= ready_deadline:
@@ -524,13 +559,28 @@ def rent(config_path: Path, state: Path) -> None:
     os.mkfifo(state / "stop.fifo", 0o600)
     descriptor = os.open(state / "stop.fifo", os.O_RDWR | os.O_NONBLOCK)
     started, monotonic_start = time.time(), time.monotonic()
-    save(state / "owner.json", {"pid": os.getpid(), "name": name,
-                               "started_epoch": started,
-                               "cutoff_epoch": started
-                               + config["cutoff_seconds"]})
+    owner = {"pid": os.getpid(), "name": name,
+             "started_epoch": started, "started_monotonic": monotonic_start,
+             "cutoff_epoch": started + config["cutoff_seconds"]}
+    save(state / "owner.json", owner)
     lease: Lease = Unidentified()
     lock = threading.Lock()
     errors: list[Exception] = []
+
+    def record_cleanup_error(error: Exception, reason: str,
+                             prefix: str) -> None:
+        errors.append(error)
+        try:
+            save(state / ("owner-error-" + uuid.uuid4().hex + ".json"), {
+                "reason": reason, "observed_epoch": time.time(),
+                "monotonic": time.monotonic(), "error": repr(error)})
+        except OSError as journal_error:
+            error.add_note(
+                "Owner error journal failed: " + repr(journal_error))
+        try:
+            print(prefix + repr(error), file=sys.stderr, flush=True)
+        except OSError as stderr_error:
+            error.add_note("Owner stderr failed: " + repr(stderr_error))
 
     def shutdown(reason: str) -> None:
         nonlocal lease
@@ -568,12 +618,23 @@ def rent(config_path: Path, state: Path) -> None:
                 "argv": command(config, "terminate", pod_id, "--yes")})
             verify_deletion(config, state, pod_id, started, deadline)
 
+    def owner_deadlines() -> tuple[float, float]:
+        epoch = started + config["cutoff_seconds"]
+        monotonic = monotonic_start + config["cutoff_seconds"]
+        if probe_seconds is None or root_capability_confirmed(state):
+            return epoch, monotonic
+        contact = first_ssh_contact(state, config, owner)
+        if contact is None:
+            return (min(epoch, started + config["ready_seconds"]),
+                    min(monotonic, monotonic_start + config["ready_seconds"]))
+        return (min(epoch, contact[0] + probe_seconds),
+                min(monotonic, contact[1] + probe_seconds))
+
     def cutoff() -> None:
         try:
             shutdown("hard-cutoff")
         except Exception as error:
-            errors.append(error)
-            print("CUTOFF FAILED: " + repr(error), file=sys.stderr, flush=True)
+            record_cleanup_error(error, "hard-cutoff", "CUTOFF FAILED: ")
         finally:
             os.write(descriptor, b"cutoff\n")
 
@@ -648,25 +709,19 @@ def rent(config_path: Path, state: Path) -> None:
         # create or failed early reconciliation (C-CUB-2).
         urgent = primary is not None
         while needs_owner(lease):
-            cutoff_seconds = config["cutoff_seconds"]
-            if probe_seconds is not None and not root_capability_confirmed(
-                    state):
-                cutoff_seconds = min(cutoff_seconds, probe_seconds)
-            remaining = min(started + cutoff_seconds - time.time(),
-                            monotonic_start + cutoff_seconds
-                            - time.monotonic())
+            epoch_deadline, monotonic_deadline = owner_deadlines()
+            remaining = min(epoch_deadline - time.time(),
+                            monotonic_deadline - time.monotonic())
             timeout = 0 if urgent else 15
             if remaining > 0:
                 timeout = min(timeout, remaining)
             elif isinstance(lease, Identified):
                 timeout = 0
             ready = select.select([descriptor], [], [], timeout)[0]
-            if (cutoff_seconds != config["cutoff_seconds"]
-                    and root_capability_confirmed(state)):
-                cutoff_seconds = config["cutoff_seconds"]
-            expired = (time.time() >= started + cutoff_seconds
-                       or time.monotonic()
-                       >= monotonic_start + cutoff_seconds)
+            # A receipt arriving during select takes effect before cleanup.
+            epoch_deadline, monotonic_deadline = owner_deadlines()
+            expired = (time.time() >= epoch_deadline
+                       or time.monotonic() >= monotonic_deadline)
             if (not ready and not expired and not urgent
                     and not isinstance(lease, Unidentified)):
                 continue
@@ -676,10 +731,9 @@ def rent(config_path: Path, state: Path) -> None:
             try:
                 shutdown(reason)
             except Exception as error:
-                errors.append(error)
-                print("DELETION UNPROVED; owner retained if lease live: "
-                      + repr(error),
-                      file=sys.stderr, flush=True)
+                record_cleanup_error(
+                    error, reason,
+                    "DELETION UNPROVED; owner retained if lease live: ")
         timer.cancel()
         timer.join()
         os.close(descriptor)
@@ -688,6 +742,8 @@ def rent(config_path: Path, state: Path) -> None:
     if primary is not None:
         for error in errors:
             primary.add_note("Cleanup observation: " + repr(error))
+            for note in tuple(getattr(error, "__notes__", ())):
+                primary.add_note(note)
         raise primary
     if errors:
         raise errors[-1]

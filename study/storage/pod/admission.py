@@ -171,7 +171,9 @@ def payload_check(bundle: Path,
 
 
 def validate(config: Mapping, *, destination_ready: bool = False) -> int:
-    root_probe_seconds(config)
+    root_seconds = root_probe_seconds(config)
+    if config["cgroup_root"]["mode"] != "first-in-pod-check":
+        root_seconds = 0
     check_download(config, config.get("expected_evidence_bytes"),
                    config.get("copy_seconds"))
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=HERE,
@@ -240,9 +242,9 @@ def validate(config: Mapping, *, destination_ready: bool = False) -> int:
                            for name in support_names)
     transport_bytes += len(json.dumps(config).encode("utf-8")) + 4096
     seconds = upload_seconds(transport_bytes, config["minimum_upload_mbps"])
-    if (config["ready_seconds"] + config["bootstrap_seconds"] + seconds
-            > config["setup_seconds"]):
-        raise ValueError("upload/readiness/build do not fit approved setup")
+    if (config["ready_seconds"] + root_seconds
+            + config["bootstrap_seconds"] + seconds > config["setup_seconds"]):
+        raise ValueError("readiness/root/upload/build exceed approved setup")
     if not (TOKEN_JSON_BOUND <= config["token_json_max_bytes"]
             <= 256 * 1024 ** 2):
         raise ValueError("prepared token JSON exceeds approved per-file cap")

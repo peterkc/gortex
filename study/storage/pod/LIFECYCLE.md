@@ -136,21 +136,35 @@ If that proof is unavailable, the user can explicitly approve this replacement
 }
 ```
 
-This is not existing venue evidence or permission to rent now. The first
-in-pod check becomes the layout/access evidence. Before bulk input upload, the
-host stages only the reviewed cgroup helper and checks the true root and write
-access without changing cgroups. The original 300-second allowance includes
-create, readiness and this check. Without its exact success receipt, the owner
-requests deletion at that deadline, even if the host helper never starts.
-Allow up to eight minutes for this check, the terminate call and deletion
-observations under normal host/API operation. At the archived 0.264/hour rate,
-that window has a 0.0352 rate/time estimate; it is not a fresh quote or invoice.
-Hourly rounding or separate fees can make the charge higher. Confirm that billing
-basis before approving the fallback; do not use 0.0352 as a charge cap.
-API/host failure can defeat that window; the original hard cutoff and escalation
-rules remain. If the check passes, the full run continues within its original
-three-hour/$2 limits. The later session still applies and verifies its cgroup
-limits; failure there remains exit 78, followed by deletion. No namespace-root
+This is not existing venue evidence or permission to rent now. Create, ACTIVE
+and the first successful SSH contact share the original `ready_seconds` window
+(example: 900 seconds). The first-root check's 300 seconds starts at that first
+successful contact, not at create. Its wall and monotonic timestamps are recorded
+once in `ssh-contact.json`; retrying or restarting a helper cannot refresh them.
+Run the owner and helper on the same always-on host. Do not copy a live lease to
+another host with a different monotonic clock.
+
+Before bulk input upload, the host stages only the reviewed cgroup helper and
+checks the true root and write access without changing cgroups. Without contact
+by the readiness deadline, the owner requests deletion with the root question
+unanswered. After contact, missing/refused root proof ends at contact plus the
+approved probe allowance. The owner enforces those same deadlines even if the
+helper disappears. Success permits the original full run, not a fresh clock.
+
+Worst-case readiness plus root check is 900 + 300 = 1,200 seconds (20 minutes).
+At the archived 0.264/hour rate, that is 0.088, or about 0.09. Including the
+120-second cleanup/deletion-observation reserve gives 22 minutes and 0.0968,
+or about 0.10, under normal host/API operation. The terminate command's
+30-second limit is inside that reserve, not another allowance. These are
+time/rate estimates, not billing caps, fresh quotes or invoices. Hourly rounding or separate fees can raise the
+charge; confirm that basis in the final run approval. API/host failure can
+defeat these windows. The three-hour/$2 full-attempt limits do not change.
+
+Before any terminate attempt, the original hard cutoff still applies. After an
+early attempt, the timer is cancelled; it does not issue another terminate if
+that attempt fails. Use read-only `verify` and immediate resource-owner
+escalation then. The later session still applies and verifies its cgroup limits;
+failure there remains exit 78, followed by a cleanup request. No namespace-root
 support or permission bypass is added.
 
 ## 2. Validate public inputs before rental
@@ -178,8 +192,9 @@ model bytes and prepared 8,192/Linux-runtime proofs.
 The lead still reviews the trust/source meaning of those proofs.
 
 Upload admission uses actual transport bytes, the referenced minimum uplink,
-25% margin and 30 seconds of handshakes. Readiness + upload + bootstrap reserve
-must fit setup. Bootstrap reserve is not a new paid extension. A roughly 0.7-GB
+25% margin and 30 seconds of handshakes. Readiness + the separate first-root
+allowance (when selected) + upload + bootstrap reserve must fit setup. Bootstrap
+reserve is not a new paid extension. A roughly 0.7-GB
 payload takes 560 seconds at 10 Mbit/s even before margin, so that link can be
 refused. Do not replace this calculation with a larger arbitrary timeout or
 invent a public URL for local ONNX exports.
@@ -189,9 +204,12 @@ referenced minimum downlink, with the same 25% margin and 30-second allowance.
 The proposed 768-MiB forecast needs 836 seconds at 10 Mbit/s, so it refuses a
 420-second copy window before create. At 100 Mbit/s it needs 111 seconds.
 The forecast is not a guarantee for failure logs or a hard archive maximum.
-The published marker also carries actual archive bytes. Before bulk copy, the
-host checks those bytes against the original remaining copy window and the
-absolute archive bound; it never extends rental to salvage an oversized result.
+The published marker also carries actual archive bytes. Invalid or over-limit
+archive bytes still refuse before transfer. If the conservative rate calculation
+exceeds the remaining copy window, the host saves
+`download-forecast-exceeded.json` and still attempts the copy. The actual link
+can be faster than its pinned floor. The original copy/cutoff deadline, external
+hash, exact copied size and manifest checks remain; no rental extension follows.
 
 The output directory is reserved before create, with its device/inode recorded,
 and must remain empty until the first copy. Recovery uses a fresh private child
@@ -246,9 +264,9 @@ python3.12 -B study/storage/pod/host_run.py   --state "$PRIVATE/lease" --destina
 ```
 
 Arguments must match the approved JSON. ACTIVE readiness and first SSH contact
-share the approved readiness allowance, shortened by the first-root-check
-allowance when that fallback was explicitly approved. SSH/SCP ignore user
-configuration with
+share the approved readiness allowance. In first-in-pod-check mode, the separate
+root allowance starts only after that first successful SSH contact. SSH/SCP ignore
+user configuration with
 `-F /dev/null`, use BatchMode/IdentitiesOnly, a private known_hosts file and
 keepalives every 30 seconds (six missed replies). First-use host-key trust is
 explicit; if unacceptable, obtain a separately reviewed host-key path first.
@@ -258,6 +276,9 @@ bounded by the original setup/upload clock. A failed upload has at most one
 same-byte re-transfer before any launch. It cannot refresh the allowance.
 Each failed upload/probe keeps a separate error receipt; later attempts do not
 overwrite earlier errors.
+The read-only root probe can retry SSH 255/timeouts until the same original
+root deadline. Each error is retained; exit 78 never retries. This does not
+repeat uploads, create, analysis or the root-check allowance.
 The helper writes an exclusive local launch receipt, then sends one short
 `nohup setsid` start command. It does not wait on that SSH channel. A lost or
 uncertain acknowledgement permits only observation, never another launch.
@@ -268,25 +289,33 @@ status, actual bulk archive size, and `full-evidence`, `partial-evidence`,
 before setup. Read-only probes check completion first, then launch/PID liveness.
 A dead session stops immediately. A missing PID gets only the original 30-second
 startup grace; it cannot idle until the analysis cutoff. A completed marker wins
-over an already-exited PID. Short probes can reconnect until the copy reserve.
+over an already-exited PID; the producer rechecks after observing process exit.
+Invalid or unproved PID facts are uncertainty, not death. They keep separate
+receipts and permit only more read-only probes until the original deadline.
+Short probes can reconnect until the copy reserve.
 Permanently lost
 transport still leaves the independent cutoff armed and requests stop when the
 host helper exits. Do not restart a half pair or rerun host launch on that state.
 
 If the original helper has failed and exited while the pod is still live, run
-exactly one replacement helper
-with the same arguments plus `--observe-only`. Keep the original deletion owner
-running. This mode requires the existing validated launch/connection receipts
-and unchanged approved output directory identity. It makes no connect/account
-call, upload or launch. It probes and copies into a fresh `recovery-<id>/` child;
-the matching state receipt names that directory. All clocks remain the original
-ones. Even after the normal observation reserve expires, it can read one existing
-completion marker before cutoff, but actual copy must still fit the remaining
-window. Missing launch proof or a replaced output directory refuses. Do not run
-two helpers concurrently or change source/input pins during recovery. Handled
-helper failures still request deletion; recovery cannot undo that request or
-retrieve remote bytes after deletion. It is useful after abrupt helper death
-only while the original resource and owner remain available.
+one replacement helper with the same arguments plus `--observe-only`. Keep the
+original deletion owner running. This mode requires the existing validated
+launch/connection receipts and unchanged approved output directory identity.
+It makes no connect/account call, upload or launch. Copies go to a fresh private
+`recovery-<id>/` child; the matching state receipt names that directory.
+
+Before its first probe, a local argument/path/state refusal writes an
+`observe-refusal-<id>.json` receipt and requests no cleanup. The original owner's
+cutoff remains its responsibility; this is not a new clock. One corrected rerun
+is allowed after that local refusal. Existing `done.json` or `rental-error.json`
+refuses immediately, without probing or stopping anything. Do not run two
+helpers concurrently or change source/input pins during recovery.
+
+After its first probe attempt, the helper again requests stop on copy or failure.
+It cannot undo an existing deletion request or retrieve remote bytes after
+deletion. Even after the normal observation reserve expires, it can read one
+existing completion marker before cutoff. Its copy attempt still uses only the
+original remaining time; a conservative download warning is not a refusal.
 
 Copy diagnostics first, including exit 78. Small bundles list explicit paths,
 omissions and JSON metrics/bindings; each file is at most 1 MiB and the bundle
@@ -301,9 +330,11 @@ second-cut OOM in partial evidence; it cannot become an accepted comparison.
 
 Copy verification checks the reviewed checkout again, external tar hash, fresh
 safe extraction, exact manifest and expected scope. A changed verifier or bad
-copy refuses acceptance. The host helper requests stop after copy/refusal/error.
-If stop IPC has lost its reader, preserve the primary error and escalate the
-cleanup failure; do not start another terminate owner.
+copy refuses acceptance. A normal helper requests stop after copy/refusal/error;
+an observation helper does so only after its first probe attempt. If stop IPC
+has lost its reader, preserve the error and escalate; do not start another
+terminate owner. In particular, a failed cleanup request after root refusal
+raises visibly instead of returning exit 78 as though cleanup were requested.
 
 ## 5. Prove deletion independently of cost audit
 

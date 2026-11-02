@@ -103,6 +103,8 @@ def remove_owned(groups: dict[Path, str]) -> None:
 class IntegrationTests(unittest.TestCase):
     def test_occupied_nonroot_entry_migrates_to_private_true_root(self):
         root = cgroup_setup.unified_root()
+        self.assertFalse((root / "cgroup.type").exists())
+        self.assertFalse((root / "memory.max").exists())
         (root / "cgroup.subtree_control").write_text("+memory\n")
         token = uuid.uuid4().hex
         fixture = root / f"storage-cgroup-fixture-{token}"
@@ -116,6 +118,8 @@ class IntegrationTests(unittest.TestCase):
                 fixture.mkdir(mode=0o700)
                 status = fixture.stat()
                 owned[fixture] = f"{status.st_dev}:{status.st_ino}"
+                self.assertTrue((fixture / "cgroup.type").is_file())
+                self.assertTrue((fixture / "memory.max").is_file())
                 # Report the nonroot entry, then wait for stdin EOF.
                 code = (
                     "import os, sys; from pathlib import Path; "

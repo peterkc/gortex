@@ -3,6 +3,7 @@ from contextlib import ExitStack
 from copy import deepcopy
 from datetime import datetime, timezone
 from io import StringIO
+import errno
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import artifacts
 import lifecycle
 from test_lifecycle_support import Clock, offer_document, pins
 
@@ -57,10 +59,13 @@ class Rental:
         self.abort_after = None
         self.create_error = None
         self.race_cutoff = False
+        self.ssh_receipt = None
+        self.ssh_receipt_after = 0
         self.root_receipt = None
         self.root_receipt_after = 0
         self.calls = []
         self.reconciliations = []
+        self.reconcile_errors = []
         self.polls = []
         self.handlers = {}
         self.old_handlers = {number: object() for number in SIGNALS}
@@ -68,6 +73,7 @@ class Rental:
         self.delivered = []
         self.terminate_times = []
         self.verifications = []
+        self.verify_error = None
         self.status_reads = 0
         self.descriptor = None
         self.worker = None
@@ -144,6 +150,8 @@ class Rental:
         if label == "reconcile":
             self.reconciliations.append(self.clock.elapsed)
             self.test.assertEqual(self.restored, [])
+            if self.reconcile_errors:
+                raise self.reconcile_errors.pop(0)
             if self.clock.elapsed == 0 and self.identity_after > 0:
                 raise subprocess.CalledProcessError(1, ["list"])
         if self.clock.elapsed < self.identity_after:
@@ -161,6 +169,10 @@ class Rental:
         self.test.assertEqual(tuple(self.handlers), SIGNALS)
         self.test.assertTrue((self.state / "stop.fifo").exists())
         self.clock.elapsed += timeout
+        contact_path = self.state / "ssh-contact.json"
+        if (self.ssh_receipt is not None and not contact_path.exists()
+                and self.clock.elapsed >= self.ssh_receipt_after):
+            contact_path.write_text(self.ssh_receipt)
         if (self.root_receipt is not None
                 and self.clock.elapsed >= self.root_receipt_after):
             (self.state / "root-capability.json").write_text(self.root_receipt)
@@ -186,6 +198,8 @@ class Rental:
         self.test.assertEqual(pod_id, "pod")
         self.test.assertEqual(len(self.terminate_times), 1)
         self.verifications.append(deadline)
+        if self.verify_error is not None:
+            raise self.verify_error
 
     def status_read(self, config, state, pod_id, label):
         self.status_reads += 1
@@ -249,30 +263,196 @@ class OwnerTests(unittest.TestCase):
                 self.assertTrue(rental.timer.cancelled)
                 self.assertTrue(rental.timer.joined)
 
-    def test_unidentified_failure_keeps_owner_past_cutoff(self):
-        # Given permanent identity failure, when cutoff passes,
-        # then reads recur without releasing ownership or handlers.
+    def test_reconciliation_receipt_survives_broken_stderr(self):
+        # Given an unknown-identity read error and broken stderr after
+        # HUP, when identity appears at 15 s, then delete once.
+        for diagnostic_error in (BrokenPipeError(errno.EPIPE, "closed pipe"),
+                                 OSError(errno.EIO, "terminal lost")):
+            with self.subTest(error=repr(diagnostic_error)), \
+                    tempfile.TemporaryDirectory() as temporary:
+                rental = Rental(self, Path(temporary).resolve())
+                rental.identity_after = 15
+                rental.stop_after = 0
+                primary = subprocess.TimeoutExpired(["create"], 90)
+                rental.create_error = primary
+                read_error = subprocess.CalledProcessError(1, ["list"])
+                rental.reconcile_errors = [read_error]
+
+                def broken_stderr(_):
+                    # Save the original failure before output.
+                    receipts = list(rental.state.glob("owner-error-*.json"))
+                    self.assertEqual(len(receipts), 1)
+                    receipt = json.loads(receipts[0].read_text())
+                    self.assertEqual(receipt, {
+                        "error": repr(read_error),
+                        "reason": "host-signal\n" * len(SIGNALS),
+                        "observed_epoch": rental.clock.epoch,
+                        "monotonic": 1000.0})
+                    raise diagnostic_error
+
+                stderr = SimpleNamespace(write=broken_stderr)
+                with patch.object(lifecycle.sys, "stderr", stderr):
+                    with self.assertRaises(subprocess.TimeoutExpired) as got:
+                        rental.run()
+                self.assertIs(got.exception, primary)
+                self.assertEqual(rental.reconciliations, [0, 15])
+                self.assertEqual(rental.terminate_times, [15])
+                self.assertEqual(rental.calls,
+                                 ["availability", "create", "terminate"])
+                self.assertEqual(rental.restored, list(SIGNALS))
+                self.assertTrue(rental.timer.cancelled)
+                self.assertTrue(rental.timer.joined)
+                self.assertIn("Cleanup observation: " + repr(read_error),
+                              primary.__notes__)
+                self.assertIn("Owner stderr failed: " + repr(diagnostic_error),
+                              primary.__notes__)
+
+    def test_journal_failure_keeps_owner_and_exception_notes(self):
+        # Given failed journaling and stderr, when a read recovers,
+        # then retain both original notes and finish the one cleanup.
         with tempfile.TemporaryDirectory() as temporary:
             rental = Rental(self, Path(temporary).resolve())
-            rental.identity_after = float("inf")
-            rental.create_error = subprocess.TimeoutExpired(["create"], 90)
-            rental.abort_after = rental.config["cutoff_seconds"] + 15
-            try:
-                with patch.object(lifecycle.sys, "stderr", StringIO()) as log:
-                    with self.assertRaises(OwnerObserved):
-                        rental.run()
-                self.assertIn("owner retained; escalate", log.getvalue())
-                self.assertEqual(rental.restored, [])
-                self.assertEqual(rental.calls, ["availability", "create"])
-                self.assertEqual(rental.terminate_times, [])
-                self.assertEqual(rental.reconciliations[-1],
-                                 rental.abort_after)
-                self.assertEqual(rental.reconciliations[:3], [0, 15, 30])
-                self.assertFalse(rental.timer.cancelled)
-                self.assertTrue((rental.state / "stop.fifo").exists())
-            finally:
-                if rental.descriptor is not None:
-                    os.close(rental.descriptor)
+            rental.identity_after = 15
+            primary = subprocess.TimeoutExpired(["create"], 90)
+            primary.add_note("original create note")
+            rental.create_error = primary
+            read_error = subprocess.CalledProcessError(1, ["list"])
+            read_error.add_note("original read note")
+            rental.reconcile_errors = [read_error]
+            journal_error = OSError(errno.EIO, "state journal unavailable")
+            stderr_error = BrokenPipeError(errno.EPIPE, "closed pipe")
+            original_save = lifecycle.save
+            failed_journals = []
+
+            def save(path, value):
+                if path.name.startswith("owner-error-"):
+                    failed_journals.append(value)
+                    raise journal_error
+                original_save(path, value)
+
+            with patch.object(lifecycle, "save", side_effect=save), \
+                    patch.object(lifecycle.sys, "stderr") as stderr:
+                stderr.write.side_effect = stderr_error
+                with self.assertRaises(subprocess.TimeoutExpired) as got:
+                    rental.run()
+            self.assertIs(got.exception, primary)
+            self.assertEqual(rental.reconciliations, [0, 15])
+            self.assertEqual(rental.terminate_times, [15])
+            self.assertEqual(rental.restored, list(SIGNALS))
+            self.assertTrue(rental.timer.joined)
+            self.assertEqual(len(failed_journals), 1)
+            self.assertEqual(failed_journals[0]["error"], repr(read_error))
+            self.assertEqual(list(rental.state.glob("owner-error-*.json")), [])
+            self.assertIn("original create note", primary.__notes__)
+            self.assertIn("original read note", primary.__notes__)
+            self.assertIn("Cleanup observation: " + repr(read_error),
+                          primary.__notes__)
+            for note in ("Owner error journal failed: " + repr(journal_error),
+                         "Owner stderr failed: " + repr(stderr_error)):
+                self.assertIn(note, read_error.__notes__)
+                self.assertIn(note, primary.__notes__)
+
+    def test_cutoff_error_survives_broken_stderr(self):
+        # Given cutoff proof failure and broken stderr, when owner and
+        # timer race, then retain the error without a second mutation.
+        with tempfile.TemporaryDirectory() as temporary:
+            rental = Rental(self, Path(temporary).resolve())
+            rental.stop_after = 15
+            rental.race_cutoff = True
+            primary = ValueError("deletion proof unavailable")
+            rental.verify_error = primary
+            stderr_error = OSError(errno.EIO, "terminal lost")
+            with patch.object(lifecycle.sys, "stderr") as stderr:
+                stderr.write.side_effect = stderr_error
+                with self.assertRaises(ValueError) as got:
+                    rental.run()
+            self.assertIs(got.exception, primary)
+            self.assertEqual(rental.terminate_times, [15])
+            self.assertEqual(rental.restored, list(SIGNALS))
+            self.assertTrue(rental.timer.joined)
+            receipts = [json.loads(path.read_text()) for path in
+                        rental.state.glob("owner-error-*.json")]
+            self.assertEqual(receipts, [{
+                "error": repr(primary), "reason": "hard-cutoff",
+                "observed_epoch": rental.clock.epoch + 15,
+                "monotonic": 1015.0}])
+            self.assertIn("Owner stderr failed: " + repr(stderr_error),
+                          primary.__notes__)
+
+    def test_broken_rented_stdout_requests_cleanup(self):
+        # Given validated create and broken RENTED stdout, when print
+        # fails, then delete and restore before raising the same error.
+        with tempfile.TemporaryDirectory() as temporary:
+            rental = Rental(self, Path(temporary).resolve())
+            primary = BrokenPipeError(errno.EPIPE, "rental output closed")
+            with patch.object(lifecycle.sys, "stdout") as stdout:
+                stdout.write.side_effect = primary
+                with self.assertRaises(BrokenPipeError) as got:
+                    rental.run()
+            self.assertIs(got.exception, primary)
+            self.assertTrue((rental.state / "validated.json").exists())
+            self.assertEqual(json.loads(
+                (rental.state / "rental-error.json").read_text()),
+                {"error": repr(primary)})
+            self.assertEqual(rental.terminate_times, [0])
+            self.assertEqual(rental.reconciliations, [])
+            self.assertEqual(rental.calls,
+                             ["availability", "create", "terminate"])
+            self.assertEqual(rental.restored, list(SIGNALS))
+            self.assertTrue(rental.timer.cancelled)
+            self.assertTrue(rental.timer.joined)
+
+    def test_unidentified_failure_keeps_owner_past_cutoff(self):
+        # Given permanent read/identity failure, when cutoff passes,
+        # then retain every error without releasing ownership.
+        for failed_reads in (False, True):
+            with self.subTest(failed_reads=failed_reads), \
+                    tempfile.TemporaryDirectory() as temporary:
+                rental = Rental(self, Path(temporary).resolve())
+                rental.identity_after = float("inf")
+                rental.create_error = subprocess.TimeoutExpired(["create"], 90)
+                rental.abort_after = rental.config["cutoff_seconds"] + 15
+                failures = [subprocess.CalledProcessError(index, ["list"])
+                            for index in range(1, 7)] if failed_reads else []
+                rental.reconcile_errors = list(failures)
+                try:
+                    with patch.object(lifecycle.sys, "stderr",
+                                      StringIO()) as log:
+                        with self.assertRaises(OwnerObserved):
+                            rental.run()
+                    self.assertIn("DELETION UNPROVED", log.getvalue())
+                    receipts = [json.loads(path.read_text()) for path in
+                                rental.state.glob("owner-error-*.json")]
+                    receipts.sort(key=lambda row: row["monotonic"])
+                    self.assertEqual(len(receipts),
+                                     len(rental.reconciliations))
+                    if failed_reads:
+                        self.assertEqual([row["error"] for row in receipts],
+                                         [repr(error) for error in failures])
+                    else:
+                        self.assertIn("owner retained; escalate",
+                                      log.getvalue())
+                    self.assertEqual(
+                        [row["observed_epoch"] for row in receipts],
+                        [rental.clock.epoch + elapsed
+                         for elapsed in rental.reconciliations])
+                    self.assertEqual([row["monotonic"] for row in receipts],
+                                     [1000 + elapsed
+                                      for elapsed in rental.reconciliations])
+                    self.assertEqual({row["reason"] for row in receipts},
+                                     {"owner-refusal-or-cutoff"})
+                    self.assertEqual(rental.reconcile_errors, [])
+                    self.assertEqual(rental.restored, [])
+                    self.assertEqual(rental.calls, ["availability", "create"])
+                    self.assertEqual(rental.terminate_times, [])
+                    self.assertEqual(rental.reconciliations[-1],
+                                     rental.abort_after)
+                    self.assertEqual(rental.reconciliations[:3], [0, 15, 30])
+                    self.assertFalse(rental.timer.cancelled)
+                    self.assertTrue((rental.state / "stop.fifo").exists())
+                finally:
+                    if rental.descriptor is not None:
+                        os.close(rental.descriptor)
 
     def test_identified_owner_waits_for_fifo_or_cutoff(self):
         # Given a known rental and no readiness, when time passes,
@@ -355,6 +535,27 @@ class OfferTests(unittest.TestCase):
 
 
 class ExecutionPinTests(unittest.TestCase):
+    def test_evidence_bound_uses_artifact_constants(self):
+        # Given archive bounds, when evidence meets their sum,
+        # then accept it and refuse one byte above the sum.
+        bounds = ((artifacts.MAX_PAYLOAD, artifacts.TAR_OVERHEAD),
+                  (17, 5), (31, 11))
+        for payload, overhead in bounds:
+            with self.subTest(payload=payload, overhead=overhead), \
+                    patch.object(artifacts, "MAX_PAYLOAD", payload), \
+                    patch.object(artifacts, "TAR_OVERHEAD", overhead):
+                for extra, expected in ((0, dict), (1, lifecycle.Invalid)):
+                    with self.subTest(extra=extra):
+                        config = {**execution_fixture(100),
+                                  "expected_evidence_bytes":
+                                  payload + overhead + extra}
+                        before = deepcopy(config)
+                        checked = lifecycle.execution_pins(config, 100)
+                        self.assertIsInstance(checked, expected)
+                        self.assertEqual(config, before)
+                        if extra == 0:
+                            self.assertEqual(checked, config)
+
     def test_download_evidence_and_root_pins_are_mandatory(self):
         # Given a valid structural config, when a new pin is absent,
         # then reject it before rent can perform account operations.
@@ -525,38 +726,155 @@ class RootDeadlineTests(unittest.TestCase):
         rental.path.write_text(json.dumps(rental.config))
         return rental
 
-    def test_missing_host_root_check_stops_by_probe_deadline(self):
-        # Given no host helper, when the first-check allowance expires,
-        # then the owner attempts deletion by that original deadline.
+    def first_contact(self, rental, seconds):
+        rental.ssh_receipt = json.dumps({
+            "connected_epoch": rental.clock.epoch + seconds,
+            "connected_monotonic": 1000.0 + seconds})
+        rental.ssh_receipt_after = seconds
+
+    def test_missing_host_contact_stops_by_readiness_deadline(self):
+        # Given no SSH contact, when readiness expires at 900 s,
+        # then delete once without granting an idle study allowance.
         for seconds in (299, 300):
             with self.subTest(seconds=seconds), \
                     tempfile.TemporaryDirectory() as temporary:
                 rental = self.fallback(Path(temporary).resolve(), seconds)
                 rental.run()
-                self.assertEqual(rental.terminate_times, [seconds])
+                self.assertEqual(rental.terminate_times, [900])
                 self.assertEqual(rental.calls,
                                  ["availability", "create", "terminate"])
                 self.assertEqual(rental.restored, list(SIGNALS))
                 self.assertTrue(rental.timer.started)
                 self.assertTrue(rental.timer.cancelled)
+                owner = json.loads((rental.state / "owner.json").read_text())
+                self.assertEqual(owner["started_epoch"], rental.clock.epoch)
+                self.assertEqual(owner["started_monotonic"], 1000.0)
+                self.assertEqual(owner["cutoff_epoch"], rental.clock.epoch
+                                 + rental.config["cutoff_seconds"])
 
-    def test_valid_root_receipt_retains_normal_cutoff(self):
-        # Given root proof arriving at the early deadline,
-        # when the owner wakes, then the original hard cutoff applies.
+    def test_first_contact_starts_full_probe_window(self):
+        # Given first contact at 0/320/899/900 s, when proof is absent,
+        # then grant the full probe window from those original clocks.
+        for connected, expected in ((0, 300), (320, 620),
+                                    (899, 1199), (900, 1200)):
+            with self.subTest(connected=connected), \
+                    tempfile.TemporaryDirectory() as temporary:
+                rental = self.fallback(Path(temporary).resolve())
+                self.first_contact(rental, connected)
+                rental.run()
+                self.assertEqual(rental.terminate_times, [expected])
+                self.assertEqual(rental.calls,
+                                 ["availability", "create", "terminate"])
+                self.assertEqual(rental.restored, list(SIGNALS))
+                owner = json.loads((rental.state / "owner.json").read_text())
+                self.assertEqual(lifecycle.first_ssh_contact(
+                    rental.state, rental.config, owner),
+                    (rental.clock.epoch + connected, 1000.0 + connected))
+                raw = (rental.state / "ssh-contact.json").read_text()
+                self.assertEqual(raw, rental.ssh_receipt)
+
+    def test_root_receipt_at_contact_deadline_retains_original_cutoff(self):
+        # Given root proof arriving at the contact-based deadline,
+        # when select returns, then retain only the original cutoff.
+        for connected, probe in ((0, 299), (0, 300), (320, 300),
+                                  (899, 300), (900, 300)):
+            with self.subTest(connected=connected, probe=probe), \
+                    tempfile.TemporaryDirectory() as temporary:
+                rental = self.fallback(Path(temporary).resolve(), probe)
+                self.first_contact(rental, connected)
+                rental.root_receipt = json.dumps({
+                    "root": "/sys/fs/cgroup", "writable": True})
+                rental.root_receipt_after = connected + probe
+                rental.run()
+                self.assertEqual(rental.terminate_times,
+                                 [rental.config["cutoff_seconds"]])
+                self.assertIn(connected + probe,
+                              [elapsed for elapsed, _ in rental.polls])
+                self.assertEqual(rental.restored, list(SIGNALS))
+
+    def test_each_contact_clock_bounds_owner_cleanup(self):
+        # Given differing contact clocks, when either deadline expires,
+        # then the other clock cannot extend ownership.
+        for epoch_offset, monotonic_offset in ((320, 400), (400, 320)):
+            with self.subTest(epoch_offset=epoch_offset), \
+                    tempfile.TemporaryDirectory() as temporary:
+                rental = self.fallback(Path(temporary).resolve())
+                rental.ssh_receipt = json.dumps({
+                    "connected_epoch": rental.clock.epoch + epoch_offset,
+                    "connected_monotonic": 1000.0 + monotonic_offset})
+                rental.ssh_receipt_after = 400
+                rental.run()
+                self.assertEqual(rental.terminate_times, [620])
+
+    def test_contact_deadlines_cannot_extend_original_cutoffs(self):
+        # Given a probe exceeding the hard cutoff in mocked admission,
+        # when contact is valid, then both clocks keep the hard bound.
         with tempfile.TemporaryDirectory() as temporary:
-            rental = self.fallback(Path(temporary).resolve(), 299)
-            rental.root_receipt = json.dumps({
-                "root": "/sys/fs/cgroup", "writable": True})
-            rental.root_receipt_after = 299
+            rental = self.fallback(Path(temporary).resolve(), 20000)
+            self.first_contact(rental, 320)
             rental.run()
             self.assertEqual(rental.terminate_times,
                              [rental.config["cutoff_seconds"]])
-            self.assertIn((299, 14), rental.polls)
-            self.assertEqual(rental.restored, list(SIGNALS))
 
-    def test_invalid_root_receipts_keep_early_cleanup_deadline(self):
-        # Given malformed or structurally wrong root proof,
-        # when the allowance expires, then do not extend the rental.
+    def test_invalid_contacts_keep_readiness_deadline(self):
+        # Given malformed, aliased, oversized or out-of-range contact,
+        # when readiness expires, then no unproved clock extends it.
+        clock = Clock()
+        valid = {"connected_epoch": clock.epoch + 320,
+                 "connected_monotonic": 1320.0}
+        invalid = ["{invalid", "[]", "{}", json.dumps({
+            "epoch": valid["connected_epoch"],
+            "monotonic": valid["connected_monotonic"]}),
+            json.dumps({**valid, "extra": 0}),
+            json.dumps(valid) + " " * 1024,
+            '{"connected_epoch":0,"connected_epoch":'
+            + str(valid["connected_epoch"]) + ',"connected_monotonic":1320}',
+            '{"connected_epoch":' + str(valid["connected_epoch"])
+            + ',"connected_monotonic":0,"connected_monotonic":1320}']
+        for name, start in (("connected_epoch", clock.epoch),
+                            ("connected_monotonic", 1000.0)):
+            for value in (True, False, None, "320", [], {}, float("nan"),
+                          float("inf"), -float("inf"), 10 ** 400,
+                          start - 1, start + 901):
+                invalid.append(json.dumps({**valid, name: value}))
+        for raw in invalid:
+            with self.subTest(raw=raw[:80]), \
+                    tempfile.TemporaryDirectory() as temporary:
+                rental = self.fallback(Path(temporary).resolve())
+                rental.ssh_receipt = raw
+                rental.run()
+                self.assertEqual(rental.terminate_times, [900])
+                self.assertEqual(rental.restored, list(SIGNALS))
+                owner = json.loads((rental.state / "owner.json").read_text())
+                self.assertIsNone(lifecycle.first_ssh_contact(
+                    rental.state, rental.config, owner))
+
+    def test_contact_byte_bound_accepts_edge_and_rejects_missing_io(self):
+        # Given a capped receipt, when its size is exactly 1 KiB,
+        # then accept it; one extra byte or missing I/O stays unproved.
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            owner = {"started_epoch": 10, "started_monotonic": 20}
+            config = {"ready_seconds": 900}
+            receipt = state / "ssh-contact.json"
+            self.assertIsNone(lifecycle.first_ssh_contact(
+                state, config, owner))
+            raw = json.dumps({"connected_epoch": 910,
+                              "connected_monotonic": 920})
+            receipt.write_text(raw + " " * (1024 - len(raw)))
+            self.assertEqual(lifecycle.first_ssh_contact(state, config, owner),
+                             (910.0, 920.0))
+            receipt.write_text(raw + " " * (1025 - len(raw)))
+            self.assertIsNone(lifecycle.first_ssh_contact(
+                state, config, owner))
+            receipt.unlink()
+            receipt.mkdir()
+            self.assertIsNone(lifecycle.first_ssh_contact(
+                state, config, owner))
+
+    def test_invalid_root_receipts_keep_contact_probe_deadline(self):
+        # Given valid contact and malformed or structurally wrong root
+        # proof, when the probe expires, then do not extend the rental.
         invalid = (
             "{invalid", "[]", "{}",
             '{"root":"/sys/fs/cgroup","writable":1}',
@@ -569,24 +887,22 @@ class RootDeadlineTests(unittest.TestCase):
             with self.subTest(raw=raw[:80]), \
                     tempfile.TemporaryDirectory() as temporary:
                 rental = self.fallback(Path(temporary).resolve())
+                self.first_contact(rental, 320)
                 rental.root_receipt = raw
                 rental.run()
-                self.assertEqual(rental.terminate_times, [300])
+                self.assertEqual(rental.terminate_times, [620])
                 self.assertEqual(rental.restored, list(SIGNALS))
 
-    def test_connect_readiness_uses_probe_or_existing_ready_allowance(self):
-        # Given a pending pod, when its readiness allowance expires,
-        # then connect requests cleanup at the original deadline.
-        for mode, expected in (("first-in-pod-check", 299),
-                               ("prior-evidence", 900)):
+    def test_connect_pending_expires_at_readiness_in_both_modes(self):
+        # Given a pending pod in either root mode, when 900 s passes,
+        # then connect requests cleanup at the readiness deadline.
+        for mode in ("first-in-pod-check", "prior-evidence"):
             with self.subTest(mode=mode), \
                     tempfile.TemporaryDirectory() as temporary:
                 state = Path(temporary)
                 clock = Clock()
                 config = execution_fixture(clock.time())
-                config["cgroup_root"] = {"mode": mode}
-                if mode == "first-in-pod-check":
-                    config["cgroup_root"]["probe_seconds"] = expected
+                config["cgroup_root"] = {"mode": mode, "probe_seconds": 300}
                 (state / "config.json").write_text(json.dumps(config))
                 (state / "session.json").write_text(json.dumps({
                     "pod_id": "pod", "started_epoch": clock.epoch}))
@@ -594,10 +910,7 @@ class RootDeadlineTests(unittest.TestCase):
                 status = {"id": "pod", "provider": "nebius",
                           "image": "image", "gpu": "CPU_NODE x1",
                           "cost_per_hour": "0.264", "status": "PENDING"}
-                admission = SimpleNamespace(
-                    root_probe_seconds=probe_seconds_fixture)
-                with patch.dict(sys.modules, {"admission": admission}), \
-                        patch.object(lifecycle.time, "time", clock.time), \
+                with patch.object(lifecycle.time, "time", clock.time), \
                         patch.object(lifecycle.threading, "Event",
                                      clock.event), \
                         patch.object(lifecycle, "status_read",
@@ -605,11 +918,46 @@ class RootDeadlineTests(unittest.TestCase):
                         patch.object(lifecycle, "request_cleanup") as stop:
                     with self.assertRaisesRegex(ValueError, "readiness"):
                         lifecycle.connect(state)
-                self.assertEqual(clock.elapsed, expected)
-                self.assertEqual(sum(clock.waits), expected)
-                self.assertEqual(read.call_count,
-                                 20 if expected == 299 else 60)
+                self.assertEqual(clock.elapsed, 900)
+                self.assertEqual(sum(clock.waits), 900)
+                self.assertEqual(read.call_count, 60)
                 stop.assert_called_once()
+
+    def test_connect_active_after_320_accepts_valid_ssh_in_both_modes(self):
+        # Given slow boot and valid ACTIVE SSH metadata at 320 s,
+        # when connect reads it, then preserve the 900 s ready window.
+        for mode in ("first-in-pod-check", "prior-evidence"):
+            with self.subTest(mode=mode), \
+                    tempfile.TemporaryDirectory() as temporary:
+                state = Path(temporary)
+                clock = Clock()
+                clock.elapsed = 320
+                config = execution_fixture(clock.time())
+                config["cgroup_root"] = {"mode": mode, "probe_seconds": 300}
+                (state / "config.json").write_text(json.dumps(config))
+                (state / "session.json").write_text(json.dumps({
+                    "pod_id": "pod", "started_epoch": clock.epoch}))
+                (state / "validated.json").write_text("{}")
+                status = {"id": "pod", "provider": "nebius",
+                          "image": "image", "gpu": "CPU_NODE x1",
+                          "cost_per_hour": "0.264", "status": "ACTIVE",
+                          "ssh": "root@127.0.0.1 -p 22"}
+                with patch.object(lifecycle.time, "time", clock.time), \
+                        patch.object(lifecycle, "status_read",
+                                     return_value=status) as read, \
+                        patch.object(lifecycle, "request_cleanup") as stop:
+                    lifecycle.connect(state)
+                self.assertEqual(clock.elapsed, 320)
+                self.assertEqual(clock.waits, [])
+                read.assert_called_once()
+                stop.assert_not_called()
+                self.assertEqual(json.loads(
+                    (state / "connection.json").read_text()),
+                    {"target": "root@127.0.0.1", "port": "22"})
+                inputs = json.loads(
+                    (state / "session-inputs.json").read_text())
+                self.assertEqual(inputs["started_epoch"], clock.epoch)
+                self.assertEqual(inputs["cutoff_epoch"], clock.epoch + 10680)
 
 
 if __name__ == "__main__":

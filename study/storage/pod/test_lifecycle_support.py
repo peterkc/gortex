@@ -904,8 +904,7 @@ class SupportTests(unittest.TestCase):
                     stop.assert_called_once_with(state)
                     self.assertFalse((state / "connection.json").exists())
             if mode == "expired":
-                # This explicit first-check profile has a 300-second bound.
-                self.assertEqual(clock.elapsed, 300)
+                self.assertEqual(clock.elapsed, 900)
             if mode in ("unvalidated", "refused", "deleted"):
                 self.assertEqual(observed, [])
 
@@ -1080,7 +1079,7 @@ class AdmissionTests(unittest.TestCase):
                                  side_effect=fixture_git_output):
                 seconds = admission.validate(config)
             self.assertGreaterEqual(seconds, 30)
-            self.assertLessEqual(seconds + 900 + 300, 1800)
+            self.assertLessEqual(seconds + 900 + 300 + 300, 1800)
             self.assertEqual(config, before)
             self.assertFalse(Path(config["destination"]).exists())
             destination = Path(config["destination"])
@@ -1095,6 +1094,43 @@ class AdmissionTests(unittest.TestCase):
                 (destination / "unapproved").write_text("existing")
                 with self.assertRaisesRegex(ValueError, "empty"):
                     admission.validate(config, destination_ready=True)
+
+    def test_first_root_window_is_reserved_before_create(self):
+        # Given admitted inputs, only the fallback adds a root setup phase.
+        for mode, root_seconds in (("first-in-pod-check", 300),
+                                   ("prior-evidence", 0)):
+            with self.subTest(mode=mode), \
+                    tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary).resolve()
+                config, freeze, _ = input_fixture(directory)
+                if mode == "prior-evidence":
+                    proof = directory / "root-evidence.txt"
+                    proof.write_bytes(b"synthetic; not provider evidence\n")
+                    config["cgroup_root"] = {
+                        **{name: config[name] for name in
+                           ("provider", "cloud_id", "location", "image")},
+                        "mode": mode, "source_reference": "synthetic fixture",
+                        "evidence_path": str(proof),
+                        "evidence_sha256": artifacts.digest(proof)}
+                with patch.object(admission, "FREEZE", freeze), \
+                        patch.object(admission, "TOOLS",
+                                     fixture_tool_pins()), \
+                        patch.object(admission, "digest",
+                                     fixture_source_digest), \
+                        patch.object(admission.subprocess, "check_output",
+                                     side_effect=fixture_git_output), \
+                        patch.object(lifecycle, "call") as create:
+                    seconds = admission.validate(config)
+                    config["setup_seconds"] = (config["ready_seconds"]
+                        + root_seconds + config["bootstrap_seconds"] + seconds)
+                    self.assertEqual(admission.validate(config), seconds)
+                    config["setup_seconds"] -= 1
+                    path = directory / "execution.json"
+                    path.write_text(json.dumps(config))
+                    with self.assertRaisesRegex(ValueError, "approved setup"):
+                        lifecycle.rent(path, directory / "state")
+                    create.assert_not_called()
+                self.assertFalse((directory / "state").exists())
 
     def test_transport_payload_key_destination_refuse_before_create(self):
         cases = ("payload-hash", "session-hash", "environment-hash",
@@ -1324,6 +1360,11 @@ class AdmissionTests(unittest.TestCase):
 
 
 class HostTransferTests(unittest.TestCase):
+    OBSERVATION_PREFLIGHT_REFUSALS = (
+        "observe-no-launch", "observe-replaced-root", "observe-wrong-argument",
+        "observe-done", "observe-error", "observe-bad-config",
+        "observe-changed-input",
+    )
     INVALID_MARKER_MODES = (
         "marker-exit", "marker-scope", "marker-json", "marker-overflow",
         "marker-negative", "marker-inconsistent",
@@ -1366,8 +1407,9 @@ class HostTransferTests(unittest.TestCase):
                 self.host_case(mode)
 
     def test_copy_only_recovery_preserves_original_files_and_clocks(self):
-        for mode in ("observe", "observe-late", "observe-no-launch",
-                     "observe-replaced-root", "observe-never-started"):
+        for mode in (("observe", "observe-late", "observe-never-started",
+                      "observe-corrected")
+                     + self.OBSERVATION_PREFLIGHT_REFUSALS):
             with self.subTest(mode=mode):
                 self.host_case(mode)
 
@@ -1384,9 +1426,26 @@ class HostTransferTests(unittest.TestCase):
 
     def test_root_precheck_refuses_before_bulk_upload_or_launch(self):
         self.host_case("root-refusal")
+        self.host_case("root-refusal-stop-error")
 
     def test_actual_size_and_remaining_download_window_are_enforced(self):
-        for mode in ("bad-size", "download-window"):
+        for mode in ("bad-size", "archive-bound", "observe-download-window",
+                     "observe-download-timeout", "observe-warning-journal"):
+            with self.subTest(mode=mode):
+                self.host_case(mode)
+
+    def test_readonly_root_probe_recovers_without_restaging_or_relaunch(self):
+        for mode in ("root-probe-recovery", "root-probe-timeout",
+                     "root-probe-expired"):
+            with self.subTest(mode=mode):
+                self.host_case(mode)
+
+    def test_slow_boot_gets_root_window_but_contact_never_resets(self):
+        self.host_case("slow-boot")
+        self.host_case("root-probe-existing-contact")
+
+    def test_uncertain_liveness_retries_readonly_until_completion(self):
+        for mode in ("unproved-recovery", "invalid-pid-recovery"):
             with self.subTest(mode=mode):
                 self.host_case(mode)
 
@@ -1404,6 +1463,7 @@ class HostTransferTests(unittest.TestCase):
             (state / "config.json").write_text(json.dumps(config))
             (state / "validated.json").write_text('{"pod_id":"pod"}')
             owner = {"started_epoch": clock.epoch,
+                     "started_monotonic": clock.monotonic(),
                      "cutoff_epoch": clock.epoch + config["cutoff_seconds"]}
             (state / "owner.json").write_text(json.dumps(owner))
             identity = destination.stat()
@@ -1425,16 +1485,27 @@ class HostTransferTests(unittest.TestCase):
                     clock.elapsed = config["analysis_seconds"] + 400
                 if mode == "observe-never-started":
                     clock.elapsed = 60
+                if mode in {"observe-download-window",
+                            "observe-download-timeout",
+                            "observe-warning-journal"}:
+                    clock.elapsed = config["cutoff_seconds"] - 20
+                if mode in {"observe-done", "observe-error"}:
+                    marker = ("done.json" if mode == "observe-done"
+                              else "rental-error.json")
+                    (state / marker).write_text("{}")
+                    (state / "config.json").unlink()
                 if mode == "observe-replaced-root":
                     destination.rename(root / "replaced-original")
                     destination.mkdir(mode=0o700)
-            if mode == "changed-input":
+            if mode == "observe-bad-config":
+                (state / "config.json").write_text("{invalid-json")
+            if mode in {"changed-input", "observe-changed-input"}:
                 Path(config["payload_path"]).write_text("changed")
             if mode == "duplicate":
                 (state / "launch-requested.json").write_text(
                     '{"relaunch_allowed":false}')
             events, transports, copies = [], [], []
-            launches, probes, mkdirs = 0, 0, 0
+            launches, probes, mkdirs, root_probes = 0, 0, 0, 0
             upload_attempts = []
             completed = {"exit": 0, "scope": "full-evidence"}
             if mode == "shape-refusal":
@@ -1458,13 +1529,21 @@ class HostTransferTests(unittest.TestCase):
                                          else 10_240)
             if mode == "bad-size":
                 completed["bundle_bytes"] = 1
-            if mode == "download-window":
-                completed["bundle_bytes"] = 8 * 1024 ** 3
+            if mode == "archive-bound":
+                completed["bundle_bytes"] = (artifacts.MAX_PAYLOAD
+                                             + artifacts.TAR_OVERHEAD + 1)
 
             def connect(state):
                 self.assertFalse(observing)
                 self.assertEqual(transports, [])
                 events.append("connect")
+                if mode == "slow-boot":
+                    clock.elapsed = 320
+                if mode == "root-probe-existing-contact":
+                    (state / "ssh-contact.json").write_text(json.dumps({
+                        "connected_epoch": clock.epoch,
+                        "connected_monotonic": clock.monotonic()}))
+                    clock.elapsed = 200
                 (state / "connection.json").write_text(json.dumps({
                     "target": "root@127.0.0.1", "port": "22"}))
                 (state / "session-inputs.json").write_text("{}")
@@ -1515,12 +1594,13 @@ class HostTransferTests(unittest.TestCase):
                     digest + "  " + name + "\n")
 
             download("evidence.tar", root)
-            if mode not in {"bad-size", "download-window", "pack-refusal"}:
+            if mode not in {"bad-size", "archive-bound", "pack-refusal"}:
                 completed["bundle_bytes"] = (
                     root / "evidence.tar").stat().st_size
 
             def transport(arguments, deadline):
-                nonlocal launches, probes, mkdirs, copy_destination
+                nonlocal launches, probes, mkdirs, root_probes
+                nonlocal copy_destination
                 arguments = list(arguments)
                 transports.append((arguments, deadline))
                 self.assertLessEqual(deadline, owner["cutoff_epoch"])
@@ -1536,7 +1616,10 @@ class HostTransferTests(unittest.TestCase):
                                          arguments[-3] + ".sha256")
                         copies.append(name)
                         events.append("copy-" + name)
-                        if mode == "copy-timeout" and name == "evidence.tar":
+                        if (mode in {"copy-timeout",
+                                     "observe-download-timeout"}
+                                and name == "evidence.tar"):
+                            clock.elapsed += deadline - clock.time()
                             raise subprocess.TimeoutExpired(arguments, 1)
                         if (mode in {"receipt-loss", "binary-tail",
                                      "diagnostic-journal", "tail-decode-error"}
@@ -1563,14 +1646,27 @@ class HostTransferTests(unittest.TestCase):
                         raise subprocess.CalledProcessError(255, arguments)
                     return b""
                 if remote == host_run.ROOT_PROBE_COMMAND:
+                    root_probes += 1
                     events.append("root-probe")
                     self.assertEqual(len(upload_attempts), 2 if mode ==
                                      "upload-recovery" else 1)
-                    self.assertLessEqual(deadline, clock.epoch + 300)
-                    if mode == "root-refusal":
+                    contact = json.loads(
+                        (state / "ssh-contact.json").read_text())
+                    self.assertLessEqual(deadline,
+                                         contact["connected_epoch"] + 300)
+                    if mode in {"root-refusal", "root-refusal-stop-error"}:
                         raise subprocess.CalledProcessError(
                             78, arguments, output=b"",
                             stderr=b"\x80true root unavailable\n")
+                    if mode in {"root-probe-expired",
+                                "root-probe-existing-contact"} or (
+                            mode in {"root-probe-recovery",
+                                     "root-probe-timeout"}
+                            and root_probes == 1):
+                        clock.elapsed += deadline - clock.time()
+                        if mode == "root-probe-timeout":
+                            raise subprocess.TimeoutExpired(arguments, 30)
+                        raise subprocess.CalledProcessError(255, arguments)
                     return json_bytes({"root": "/sys/fs/cgroup",
                                        "writable": True})
                 if "nohup" in remote:
@@ -1593,6 +1689,11 @@ class HostTransferTests(unittest.TestCase):
                             mode == "probe-recovery" and probes == 1):
                         clock.elapsed += deadline - clock.time()
                         raise subprocess.CalledProcessError(255, arguments)
+                    if (mode in {"unproved-recovery", "invalid-pid-recovery"}
+                            and probes == 1):
+                        return json_bytes({"completion_hex": None,
+                            "launched": True, "process": "unproved"
+                            if mode == "unproved-recovery" else "invalid"})
                     if (mode in {"dead-session", "never-started", "stale-pid",
                                  "observe-never-started"}
                             or mode == "startup-recovery" and probes < 3):
@@ -1619,6 +1720,9 @@ class HostTransferTests(unittest.TestCase):
                 self.fail("unexpected transport command: " + repr(arguments))
 
             def journal(path, value):
+                if (mode == "observe-warning-journal"
+                        and path.name == "download-forecast-exceeded.json"):
+                    raise OSError("fixture forecast journal unavailable")
                 if (mode == "diagnostic-journal"
                         and path.name.startswith("fallback-copy-error-")):
                     raise OSError("fixture diagnostic journal unavailable")
@@ -1630,8 +1734,11 @@ class HostTransferTests(unittest.TestCase):
                     (state / "owner.json").read_text()),
                     owner, "transport failure cleared cutoff owner")
                 self.assertFalse((state / "done.json").exists())
-                if (primary is None and
-                        completed["scope"] != "diagnostics-only"):
+                if mode == "root-refusal-stop-error":
+                    self.assertIsNone(primary)
+                    raise OSError(errno.ENXIO, "fixture owner absent")
+                if (primary is None and mode != "root-refusal"
+                        and completed["scope"] != "diagnostics-only"):
                     self.assertTrue(
                         (state / "evidence.tar-verified.json").exists())
 
@@ -1640,7 +1747,7 @@ class HostTransferTests(unittest.TestCase):
                     "--session", config["session_path"], "--environment",
                     config["environment_path"], "--payload",
                     config["payload_path"]]
-            if mode == "wrong-argument":
+            if mode in {"wrong-argument", "observe-wrong-argument"}:
                 argv[-1] = str(root / "different-inputs.tar")
             if observing:
                 argv.append("--observe-only")
@@ -1650,10 +1757,13 @@ class HostTransferTests(unittest.TestCase):
                              "dirty-verifier", "duplicate", "wrong-argument",
                              "upload-failure", "dead-session", "never-started",
                              "stale-pid", "observe-never-started",
-                             "bad-size", "download-window",
-                             "observe-no-launch",
-                             "observe-replaced-root"} | set(
-                                 self.INVALID_MARKER_MODES)
+                             "bad-size", "archive-bound",
+                             "observe-download-timeout", "root-probe-expired",
+                             "root-probe-existing-contact",
+                             "root-refusal-stop-error"} | set(
+                                 self.INVALID_MARKER_MODES) | set(
+                                 self.OBSERVATION_PREFLIGHT_REFUSALS)
+            preprobe_refusal = mode in self.OBSERVATION_PREFLIGHT_REFUSALS
             with patch.object(sys, "argv", argv), \
                     patch.object(admission, "FREEZE", freeze), \
                     patch.object(admission, "TOOLS", fixture_tool_pins()), \
@@ -1667,26 +1777,70 @@ class HostTransferTests(unittest.TestCase):
                     patch.object(host_run, "transport",
                                  side_effect=transport), \
                     patch.object(host_run.time, "time", clock.time), \
+                    patch.object(host_run.time, "monotonic",
+                                 clock.monotonic), \
                     patch.object(host_run.threading, "Event", clock.event):
+                if mode == "observe-corrected":
+                    payload_index = argv.index("--payload") + 1
+                    approved_payload = argv[payload_index]
+                    argv[payload_index] = str(root / "typo-inputs.tar")
+                    with self.assertRaisesRegex(
+                            ValueError, "arguments differ"):
+                        host_run.main()
+                    stop.assert_not_called()
+                    self.assertEqual(transports, [])
+                    self.assertEqual(len(list(state.glob(
+                        "observe-refusal-*.json"))), 1)
+                    argv[payload_index] = approved_payload
                 if mode in failure_modes:
                     with self.assertRaises((ValueError, TimeoutError,
                                             RuntimeError, OSError,
                                             subprocess.SubprocessError)):
                         host_run.main()
-                    self.assertIsNotNone(stop.call_args.args[1])
+                    if preprobe_refusal:
+                        stop.assert_not_called()
+                    elif mode == "root-refusal-stop-error":
+                        self.assertIsNone(stop.call_args.args[1])
+                    else:
+                        self.assertIsNotNone(stop.call_args.args[1])
                     self.assertFalse((state / "copy-result.json").exists())
                 elif mode == "root-refusal":
                     self.assertEqual(host_run.main(), 78)
-                    self.assertIsNotNone(stop.call_args.args[1])
+                    self.assertIsNone(stop.call_args.args[1])
                     self.assertFalse((state / "copy-result.json").exists())
                 else:
                     self.assertEqual(host_run.main(), completed["exit"])
                     self.assertEqual(json.loads(
                         (state / "copy-result.json").read_text()), completed)
-                stop.assert_called_once()
+                if preprobe_refusal:
+                    stop.assert_not_called()
+                else:
+                    stop.assert_called_once()
+            if preprobe_refusal:
+                self.assertEqual(events, [])
+                self.assertEqual(transports, [])
+                self.assertEqual(launches, 0)
+                refusals = list(state.glob("observe-refusal-*.json"))
+                self.assertEqual(len(refusals), 1)
+                refusal = json.loads(refusals[0].read_text())
+                self.assertIs(refusal["cleanup_requested"], False)
+                self.assertEqual(refusal["phase"], "before-first-probe")
+                if mode in {"observe-done", "observe-error"}:
+                    self.assertIn("rental refused or already deleted",
+                                  refusal["error"])
+                self.assertEqual(json.loads(
+                    (state / "owner.json").read_text()), owner)
+                retained = (root / "replaced-original"
+                            if mode == "observe-replaced-root"
+                            else original_destination)
+                self.assertEqual((retained / "old-partial.tar").read_bytes(),
+                                 b"preserve me")
+                return
             self.assertEqual(events[-1], "cleanup")
             no_launch = (observing or mode in {"changed-input", "duplicate",
-                         "wrong-argument", "upload-failure", "root-refusal"})
+                         "wrong-argument", "upload-failure", "root-refusal",
+                         "root-refusal-stop-error", "root-probe-expired",
+                         "root-probe-existing-contact"})
             self.assertEqual(launches, 0 if no_launch else 1)
             if observing:
                 retained = (root / "replaced-original"
@@ -1696,9 +1850,6 @@ class HostTransferTests(unittest.TestCase):
                                  b"preserve me")
                 self.assertEqual(upload_attempts, [])
                 self.assertEqual(mkdirs, 0)
-                if mode in {"observe-no-launch", "observe-replaced-root"}:
-                    self.assertEqual(transports, [])
-                    return
                 self.assertEqual(events[0], "probe")
                 self.assertNotEqual(copy_destination, original_destination)
                 self.assertEqual(copy_destination.parent, original_destination)
@@ -1715,7 +1866,10 @@ class HostTransferTests(unittest.TestCase):
                 self.assertEqual(events[1], "mkdir")
                 expected_uploads = (2 if mode == "upload-failure" else
                                     8 if mode == "upload-recovery" else
-                                    1 if mode == "root-refusal" else 4)
+                                    1 if mode in {"root-refusal",
+                                        "root-refusal-stop-error",
+                                        "root-probe-expired",
+                                        "root-probe-existing-contact"} else 4)
                 self.assertEqual(len(upload_attempts), expected_uploads)
                 if mode in {"upload-recovery", "upload-failure"}:
                     for first, second in zip(upload_attempts[::2],
@@ -1725,10 +1879,13 @@ class HostTransferTests(unittest.TestCase):
                     errors = list(state.glob("upload-error-*.json"))
                     self.assertEqual(len(errors),
                                      2 if mode == "upload-failure" else 4)
-                if mode in {"upload-failure", "root-refusal"}:
+                if mode in {"upload-failure", "root-refusal",
+                            "root-refusal-stop-error", "root-probe-expired",
+                            "root-probe-existing-contact"}:
                     self.assertFalse(
                         (state / "launch-requested.json").exists())
-                    if mode == "root-refusal":
+                    if mode in {"root-refusal", "root-refusal-stop-error"}:
+                        self.assertEqual(root_probes, 1)
                         self.assertEqual(copies, [])
                         refusal = json.loads((state /
                             "root-probe-refusal.json").read_text())
@@ -1736,6 +1893,12 @@ class HostTransferTests(unittest.TestCase):
                         self.assertEqual(bytes.fromhex(refusal["stderr_hex"]),
                                          b"\x80true root unavailable\n")
                         self.assertLessEqual(clock.elapsed, 300)
+                    if mode in {"root-probe-expired",
+                                "root-probe-existing-contact"}:
+                        self.assertEqual(clock.elapsed, 300)
+                        errors = list(state.glob("root-probe-error-*.json"))
+                        self.assertEqual(len(errors), root_probes)
+                        self.assertGreater(root_probes, 1)
                     return
                 staged = (upload_attempts[::2] if mode == "upload-recovery"
                           else upload_attempts)
@@ -1753,16 +1916,33 @@ class HostTransferTests(unittest.TestCase):
                     str(state / "session-inputs.json"), config["payload_path"],
                     config["payload_path"] + ".sha256", target])
                 upload_start = (clock.epoch
-                                + (5 if mode == "ready-recovery" else 0))
+                                + (5 if mode == "ready-recovery" else 0)
+                                + (320 if mode == "slow-boot" else 0)
+                                + (35 if mode in {"root-probe-recovery",
+                                    "root-probe-timeout"} else 0))
                 extra = 10 if mode == "upload-recovery" else 0
+                probe_delay = (35 if mode in {"root-probe-recovery",
+                                            "root-probe-timeout"} else 0)
                 self.assertEqual([deadline for _, deadline in staged],
-                    [upload_start + config["upload_seconds"]]
+                    [upload_start - probe_delay + config["upload_seconds"]]
                     + [upload_start + extra + config["upload_seconds"]] * 3)
+                if probe_delay:
+                    self.assertEqual(root_probes, 2)
+                    self.assertEqual(len(list(state.glob(
+                        "root-probe-error-*.json"))), 1)
                 self.assertLess(events.index("root-probe"),
                                 events.index("launch"))
                 self.assertEqual(json.loads((state /
                     "root-capability.json").read_text()),
                     {"root": "/sys/fs/cgroup", "writable": True})
+                if mode == "slow-boot":
+                    contact = json.loads((state /
+                        "ssh-contact.json").read_text())
+                    self.assertEqual(contact, {
+                        "connected_epoch": clock.epoch + 320,
+                        "connected_monotonic": 1320.0})
+                    self.assertLess(clock.elapsed, config["ready_seconds"])
+                    self.assertEqual(root_probes, 1)
             launch = json.loads((state / "launch-requested.json").read_text())
             self.assertIs(launch["relaunch_allowed"], False)
             self.assertGreaterEqual(probes, 1)
@@ -1789,7 +1969,7 @@ class HostTransferTests(unittest.TestCase):
                 self.assertEqual({error["attempt"] for error in errors},
                                  set(range(len(errors))))
                 self.assertGreater(probes, 1)
-            if (mode in {"lost", "download-window"}
+            if (mode in {"lost", "archive-bound"}
                     or mode in self.INVALID_MARKER_MODES):
                 self.assertNotIn("evidence.tar", copies)
             elif mode == "pack-refusal":
@@ -1821,7 +2001,8 @@ class HostTransferTests(unittest.TestCase):
                                  json.loads(manifest.read_text())["files"])
             if mode in {"bad-hash", "bad-scope", "bad-manifest",
                         "changed-head", "dirty-verifier", "copy-timeout",
-                        "bad-size", "download-window"}:
+                        "bad-size", "archive-bound",
+                        "observe-download-timeout"}:
                 self.assertFalse(
                     (state / "evidence.tar-verified.json").exists())
                 self.assertTrue(
@@ -1841,15 +2022,34 @@ class HostTransferTests(unittest.TestCase):
                 self.assertEqual((destination /
                     "session-log-tail.partial.txt").read_bytes(),
                     b"\x80partial log tail\xe2\x82\xac\n")
-            if mode == "diagnostic-journal":
+            if mode in {"diagnostic-journal", "observe-warning-journal"}:
                 self.assertEqual(len(list(state.glob(
                     "diagnostics-error-*.json"))), 1)
+            if mode in {"observe-download-window", "observe-download-timeout"}:
+                warning = json.loads((state /
+                    "download-forecast-exceeded.json").read_text())
+                self.assertGreater(warning["required_seconds"],
+                                   warning["available_seconds"])
+                self.assertEqual(warning["available_seconds"], 20)
+                self.assertEqual(warning["cutoff_epoch"],
+                                 owner["cutoff_epoch"])
+                self.assertEqual(copies, ["receipts.tar", "evidence.tar"])
+                bulk = [entry for entry in transports
+                        if entry[0][0] == "scp" and len(entry[0]) >= 3
+                        and entry[0][-3].endswith("/evidence.tar")]
+                self.assertEqual(len(bulk), 1)
+                self.assertEqual(bulk[0][1], owner["cutoff_epoch"])
+            if mode in {"unproved-recovery", "invalid-pid-recovery"}:
+                self.assertEqual(probes, 2)
+                self.assertEqual(clock.elapsed, 15)
+                self.assertEqual(len(list(state.glob(
+                    "probe-liveness-error-*.json"))), 1)
 
     def test_observation_producer_checks_pid_and_prioritizes_completion(self):
         # Given files and process outcomes, the real read-only producer emits
         # a closed receipt; final marker bytes win over a dead/invalid PID.
         cases = ("missing", "running", "dead", "invalid", "zero", "unicode",
-                 "too-long", "overflow", "permission", "complete")
+                 "too-long", "overflow", "permission", "complete", "race")
         for mode in cases:
             with self.subTest(mode=mode), \
                     tempfile.TemporaryDirectory() as temporary:
@@ -1861,10 +2061,19 @@ class HostTransferTests(unittest.TestCase):
                            "overflow": "9" * 10}.get(mode, "123")
                     (directory / "session.pid").write_text(pid)
                 raw = b'\x80not a valid completion marker'
+                if mode == "race":
+                    raw = json_bytes({"exit": 0, "scope": "full-evidence",
+                                      "bundle_bytes": 10_240})
                 if mode == "complete":
                     (directory / "complete.json").write_bytes(raw)
                 output = []
-                error = (ProcessLookupError() if mode == "dead" else
+
+                def finished_during_signal(pid, signum):
+                    (directory / "complete.json").write_bytes(raw)
+                    raise ProcessLookupError()
+
+                error = (finished_during_signal if mode == "race" else
+                         ProcessLookupError() if mode == "dead" else
                          PermissionError() if mode == "permission" else
                          OverflowError() if mode == "overflow" else None)
                 with patch.object(sys, "argv", ["-c", temporary]), \
@@ -1874,10 +2083,13 @@ class HostTransferTests(unittest.TestCase):
                     exec(compile(host_run.PROBE_SOURCE, "pod-probe", "exec"),
                          {})
                 receipt = json.loads(output[0])
-                if mode == "complete":
+                if mode in {"complete", "race"}:
                     self.assertEqual(bytes.fromhex(receipt["completion_hex"]),
                                      raw)
-                    exists.assert_not_called()
+                    if mode == "race":
+                        exists.assert_called_once_with(123, 0)
+                    else:
+                        exists.assert_not_called()
                 else:
                     expected = ("invalid" if mode in {
                         "invalid", "zero", "unicode", "too-long"} else

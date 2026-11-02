@@ -80,14 +80,24 @@ x86-64 root image with Python 3.12 and the true writable cgroup v2 root at
 No existing provider/image proof of that root layout has been supplied. The
 execution JSON must bind reviewed prior evidence, or the user must explicitly
 approve the lifecycle's bounded first-in-pod-check fallback and its cost risk.
-The latter stages only the cgroup helper before bulk upload. It checks true-root
-layout/write access within the original 300-second allowance; missing/refused
-proof makes the owner request deletion. Allow up to eight minutes for first
-check, terminate and deletion observations under normal host/API operation.
-At the archived 0.264/hour rate, that window's estimate is 0.0352, not verified
-billing or a fresh quote. Hourly rounding and separate fees can make the charge
-higher; confirm that basis before approving the fallback. Success permits the
-original full run, not a new clock.
+The latter stages only the cgroup helper before bulk upload. Create, ACTIVE and
+first SSH keep their original 900-second readiness allowance. The approved
+300-second first-root window starts at the first successful SSH contact. Both
+clocks are recorded once; retries never restart the window. Owner and helper
+must stay on the same always-on host with the original lease state.
+
+Without contact by readiness, the root question is unanswered and the owner
+requests deletion. After contact, missing/refused proof ends at contact plus
+300 seconds. Worst-case readiness plus check is 20 minutes: 0.088, about 0.09,
+at the archived 0.264/hour rate. With the 120-second deletion reserve it is
+22 minutes and 0.0968, about 0.10, under normal operation. The terminate call's
+30-second limit uses that reserve; it adds no further allowance. These estimates
+are not invoices;
+hourly rounding and separate fees can make the charge higher. Confirm the basis
+in final run approval. The original three-hour/$2 limits are unchanged.
+
+If an early terminate attempt fails, the timer issues no second terminate.
+Use read-only verification and immediate resource-owner escalation instead.
 The session's later cgroup-limit setup remains an independent exit-78 backstop.
 Preparation made no API call. This option adds no namespace-root support or
 permission bypass.
@@ -169,8 +179,10 @@ Paid time starts before create. The example setup ends at minute 30 and all
 accuracy phases share the nonrefreshing deadline at minute **160**. Both are
 derived from approved JSON durations, not hardcoded by the shell. Readiness has
 its own approved allowance (example 900 seconds) inside setup. Actual upload
-bytes, a conservative referenced link rate, margin and bootstrap reserve must
-fit the same setup window before create.
+bytes, a conservative referenced link rate, margin, the distinct first-root
+allowance and bootstrap reserve must fit the same setup window before create.
+The first-root allowance is added only for first-in-pod-check mode; the existing
+prior-evidence readiness bound remains unchanged.
 
 Approve `expected_evidence_bytes`, `evidence_size_reference`, a measured
 `minimum_download_mbps` and `download_reference` too. A proposed 768-MiB normal
@@ -185,8 +197,10 @@ leave files subject to its separate 256-MiB file cap. Source references are
 `accuracy_bridge.py`'s 768-dimensional vectors, and `groups.py`'s subset copies.
 At 10 Mbit/s, this forecast needs 836 seconds including margin/handshakes, so
 admission refuses a 420-second copy. At 100 Mbit/s it needs 111 seconds. The
-actual marker byte count must still fit the original remaining copy window.
-No download shortfall authorizes more paid time.
+actual marker byte count still obeys the hard archive bound. If the conservative
+rate estimate exceeds the remaining time, the host records a warning and tries
+the copy under the unchanged deadline. It still verifies size, external hash,
+manifest and scope. No download shortfall authorizes more paid time.
 
 An outer controller timeout uses the analysis deadline plus at most 30 seconds
 of kill grace. Small packing gets 30 seconds, full/partial packing 240, each
@@ -400,11 +414,16 @@ identity/known_hosts and keepalives, and never holds one connection for the
 analysis lifetime. Read-only probes also check the session's own atomic PID;
 a dead session stops promptly, and a missing PID gets only the original
 30-second startup grace. A permanently lost channel still preserves the host
-cutoff. After a host helper failure, use the lifecycle's `--observe-only` path
+cutoff. The producer rechecks a completed marker after process exit; uncertain
+PID facts permit more bounded read-only observations, not a fresh session.
+After a host helper failure, use the lifecycle's `--observe-only` path
 only after that helper has exited and while the original pod remains live.
-It cannot undo deletion requested by a handled helper failure or recover remote
-bytes from a deleted pod. It copies into a fresh private recovery child
-without overwriting earlier bytes, uploading, relaunching or resetting clocks.
+A local observation refusal before the first probe keeps a receipt and requests
+no deletion. One corrected rerun is allowed; the owner's original cutoff is not
+reset. A done/refused rental exits immediately without a probe or cleanup.
+After the first probe attempt, copy/failure again requests cleanup. It cannot
+undo deletion already requested or recover bytes from a deleted pod. Copies use
+a fresh private recovery child without overwriting, uploading or relaunching.
 Diagnostic/log decoding failures do not prevent a valid bulk copy attempt;
 log-tail fallback preserves raw bytes, and failed attempts retain separate errors.
 

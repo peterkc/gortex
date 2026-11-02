@@ -12,8 +12,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import artifacts
-from admission import check_download, root_probe_seconds, validate
-from lifecycle import connect, request_cleanup, save
+from admission import root_probe_seconds, upload_seconds, validate
+from lifecycle import connect, first_ssh_contact, request_cleanup, save
 
 HERE = Path(__file__).resolve().parent
 REMOTE = "/srv/storage-pod/"
@@ -44,8 +44,11 @@ else:
         pass
     except (OSError, OverflowError):
         status = "unproved"
-    value = {"completion_hex": None,
-             "launched": (root / "launched").is_dir(), "process": status}
+    if status == "dead" and marker.is_file():
+        value = {"completion_hex": marker.read_bytes().hex()}
+    else:
+        value = {"completion_hex": None,
+                 "launched": (root / "launched").is_dir(), "process": status}
 print(json.dumps(value))
 '''
 ROOT_PROBE_SOURCE = '''import json
@@ -86,6 +89,17 @@ def transport(arguments: Sequence[str], deadline: float) -> bytes:
     return stdout
 
 
+def observation_refused(state: Path, error: BaseException) -> None:
+    """Record a local rescue refusal without acquiring cleanup authority."""
+    try:
+        save(state / ("observe-refusal-" + uuid.uuid4().hex + ".json"),
+             {"error": repr(error), "epoch": time.time(),
+              "phase": "before-first-probe", "cleanup_requested": False})
+    except OSError as journal_error:
+        error.add_note("Observation refusal journal failed: "
+                       + repr(journal_error))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     for flag in ("state", "destination", "ssh-key", "session",
@@ -94,10 +108,19 @@ def main() -> int:
     parser.add_argument("--observe-only", action="store_true")
     args = parser.parse_args()
     state = args.state.resolve()
-    config = json.loads((state / "config.json").read_text())
+    try:
+        if args.observe_only and any((state / name).exists() for name in
+                                     ("done.json", "rental-error.json")):
+            raise ValueError("rental refused or already deleted")
+        config = json.loads((state / "config.json").read_text())
+        cutoff = json.loads((state / "owner.json").read_text())["cutoff_epoch"]
+    except BaseException as error:
+        if args.observe_only:
+            observation_refused(state, error)
+        raise
     primary: BaseException | None = None
+    cleanup_owned = not args.observe_only
     ssh, scp, connection = [], [], {}
-    cutoff = json.loads((state / "owner.json").read_text())["cutoff_epoch"]
 
     def run(arguments: Sequence[str], seconds: float,
             deadline: float = cutoff) -> bytes:
@@ -232,8 +255,7 @@ def main() -> int:
                connection["target"]]
         scp = ["scp", *options, "-P", connection["port"]]
         if not args.observe_only:
-            root_deadline = min(ready, owner["started_epoch"]
-                                + root_probe_seconds(config))
+            root_deadline = ready
             while True:
                 try:
                     run([*ssh, "umask 077; mkdir -p " + REMOTE],
@@ -247,26 +269,51 @@ def main() -> int:
                     if time.time() >= root_deadline:
                         raise TimeoutError("sshd readiness expired") from error
                     threading.Event().wait(min(5, root_deadline - time.time()))
+            if config["cgroup_root"]["mode"] == "first-in-pod-check":
+                try:
+                    with (state / "ssh-contact.json").open("x") as stream:
+                        json.dump({"connected_epoch": time.time(),
+                                   "connected_monotonic": time.monotonic()},
+                                  stream)
+                except FileExistsError:
+                    pass  # The first contact must never be refreshed.
+                contact = first_ssh_contact(state, config, owner)
+                if contact is None:
+                    raise ValueError("original first SSH contact is unproved")
+                root_deadline = contact[0] + root_probe_seconds(config)
             upload([*scp, str(HERE / "cgroup_setup.py"),
                     connection["target"] + ":" + REMOTE + "cgroup_setup.py"],
                    min(time.time() + config["upload_seconds"], root_deadline))
-            try:
-                root_receipt = json.loads(
-                    run([*ssh, ROOT_PROBE_COMMAND], 30, root_deadline))
-                if (root_receipt != {"root": "/sys/fs/cgroup",
-                                     "writable": True}
-                        or root_receipt["writable"] is not True):
-                    raise ValueError("true-root precheck receipt differs")
-                save(state / "root-capability.json", root_receipt)
-            except subprocess.CalledProcessError as error:
-                if error.returncode != 78:
-                    raise
-                primary = error
-                save(state / "root-probe-refusal.json", {"exit": 78,
-                     "epoch": time.time(), "error": repr(error),
-                     "stdout_hex": (error.stdout or b"").hex(),
-                     "stderr_hex": (error.stderr or b"").hex()})
-                return 78
+            root_attempt = 0
+            while True:
+                try:
+                    root_receipt = json.loads(
+                        run([*ssh, ROOT_PROBE_COMMAND], 30, root_deadline))
+                    if (root_receipt != {"root": "/sys/fs/cgroup",
+                                         "writable": True}
+                            or root_receipt["writable"] is not True):
+                        raise ValueError("true-root precheck receipt differs")
+                    save(state / "root-capability.json", root_receipt)
+                    break
+                except (subprocess.CalledProcessError,
+                        subprocess.TimeoutExpired) as error:
+                    if (isinstance(error, subprocess.CalledProcessError)
+                            and error.returncode == 78):
+                        save(state / "root-probe-refusal.json", {"exit": 78,
+                             "epoch": time.time(), "error": repr(error),
+                             "stdout_hex": (error.stdout or b"").hex(),
+                             "stderr_hex": (error.stderr or b"").hex()})
+                        return 78
+                    if (isinstance(error, subprocess.CalledProcessError)
+                            and error.returncode != 255):
+                        raise
+                    record_error("root-probe", error, attempt=root_attempt)
+                    root_attempt += 1
+                    remaining = root_deadline - time.time()
+                    if remaining <= 0:
+                        raise TimeoutError(
+                            "root probe readiness expired") from error
+                    threading.Event().wait(min(5, remaining))
             upload_deadline = min(time.time() + config["upload_seconds"],
                                   setup - config["bootstrap_seconds"])
             upload([*scp, str(args.environment),
@@ -309,6 +356,7 @@ def main() -> int:
             probe_deadline = (cutoff if args.observe_only and attempt == 0
                               else completion_deadline)
             try:
+                cleanup_owned = True
                 raw = run([*ssh, PROBE_COMMAND], 30, probe_deadline)
             except (subprocess.SubprocessError, TimeoutError) as error:
                 record_error("probe", error, attempt=attempt)
@@ -328,10 +376,14 @@ def main() -> int:
                     save(state / "completion.json", completed)
                     break
                 status = observation["process"]
-                if (status not in ("missing", "dead", "running")
+                if (status not in ("missing", "dead", "running",
+                                   "invalid", "unproved")
                         or type(observation["launched"]) is not bool):
                     raise ValueError("invalid session liveness receipt")
-                if (status == "dead"
+                if status in ("invalid", "unproved"):
+                    record_error("probe-liveness", RuntimeError(
+                        "session liveness " + status), attempt=attempt)
+                elif (status == "dead"
                         or (status == "missing" or not observation["launched"])
                         and time.time() >= requested + 30):
                     raise RuntimeError(
@@ -351,9 +403,27 @@ def main() -> int:
             diagnostic_error = error
         if completed["scope"] in ("full-evidence", "partial-evidence"):
             size = completed["bundle_bytes"]
-            check_download(config, size,
-                           int(min(config["copy_seconds"],
-                                   cutoff - time.time())))
+            if (type(size) is not int
+                    or not 1 <= size <= artifacts.MAX_PAYLOAD
+                    + artifacts.TAR_OVERHEAD):
+                raise ValueError("invalid completed archive byte bound")
+            available = int(min(config["copy_seconds"], cutoff - time.time()))
+            required = upload_seconds(size, config["minimum_download_mbps"])
+            if required > available:
+                try:
+                    save(state / "download-forecast-exceeded.json", {
+                        "bundle_bytes": size, "required_seconds": required,
+                        "available_seconds": available,
+                        "minimum_download_mbps":
+                            config["minimum_download_mbps"],
+                        "cutoff_epoch": cutoff, "epoch": time.time(),
+                        "action": "attempt-copy-with-original-deadline"})
+                except OSError as error:
+                    if diagnostic_error is None:
+                        diagnostic_error = error
+                    else:
+                        diagnostic_error.add_note(
+                            "Forecast warning journal failed: " + repr(error))
             copy("evidence.tar", config["copy_seconds"], completed["scope"],
                  size)
         if diagnostic_error is not None:
@@ -368,13 +438,17 @@ def main() -> int:
             0 if completed["scope"] == "full-evidence" else 1)
     except BaseException as error:
         primary = error
-        try:
-            diagnostics()
-        except Exception as copy_error:
-            error.add_note("Diagnostics copy failed: " + repr(copy_error))
+        if args.observe_only and not cleanup_owned:
+            observation_refused(state, error)
+        else:
+            try:
+                diagnostics()
+            except Exception as copy_error:
+                error.add_note("Diagnostics copy failed: " + repr(copy_error))
         raise
     finally:
-        request_cleanup(state, primary)
+        if cleanup_owned:
+            request_cleanup(state, primary)
 
 
 if __name__ == "__main__":
