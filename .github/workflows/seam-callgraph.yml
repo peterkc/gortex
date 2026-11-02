@@ -1,0 +1,118 @@
+name: Pinned storage seam callgraph
+"on":
+  push:
+    branches: [study/storage-harness]
+    paths:
+      - .github/workflows/seam-callgraph.yml
+      - study/storage/seam/filter_callgraph.py
+permissions:
+  contents: read
+jobs:
+  seam-callgraph:
+    if: github.repository == 'peterkc/gortex' && github.ref == 'refs/heads/study/storage-harness'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      SOURCE_COMMIT: 7096db70df5ab7d83e20a28d9ccfd0994812acf9
+      SOURCE_TREE: 829d2461eb61b73069b4206a137346fc338b02c6
+      GOTOOLCHAIN: local
+      GOWORK: "off"
+      GOFLAGS: -mod=readonly -p=2
+      GOMAXPROCS: "2"
+      # Soft Go heap target, not a hard RSS cap. Leave runner/CGO headroom.
+      GOMEMLIMIT: 5GiB
+      CGO_ENABLED: "1"
+      # Match the pinned source's CI parsing/build environment.
+      CGO_CFLAGS: -O2 -g -fno-strict-aliasing
+      CGO_CXXFLAGS: -O2 -g -fno-strict-aliasing
+      GOOS: linux
+      GOARCH: amd64
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Bind exact upstream source, separately from harness scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/seam-artifacts" "$RUNNER_TEMP/seam-source"
+          echo "state=started" > "$RUNNER_TEMP/seam-artifacts/receipt.txt"
+          git -C "$RUNNER_TEMP/seam-source" init
+          git -C "$RUNNER_TEMP/seam-source" fetch --depth=1 \
+            https://github.com/zzet/gortex.git "$SOURCE_COMMIT"
+          git -C "$RUNNER_TEMP/seam-source" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/seam-source" rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(git -C "$RUNNER_TEMP/seam-source" rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          grep -Fx 'go 1.27.3' "$RUNNER_TEMP/seam-source/go.mod"
+          grep -Fx $'\tgolang.org/x/tools v0.52.0' "$RUNNER_TEMP/seam-source/go.mod"
+          echo "GOCACHE=$RUNNER_TEMP/seam-cache/build" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$RUNNER_TEMP/seam-cache/mod" >> "$GITHUB_ENV"
+          printf 'harness=%s\ncommit=%s\ntree=%s\n' \
+            "$GITHUB_SHA" "$SOURCE_COMMIT" "$SOURCE_TREE" \
+            >> "$RUNNER_TEMP/seam-artifacts/receipt.txt"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          # The source module declares exactly go 1.27.3; no auto-switching.
+          go-version: "1.27.3"
+          cache: false
+      - name: Filter contract tests, without running any Go tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3.12 -B -m unittest discover -s study/storage/seam \
+            -p test_filter_callgraph.py -v 2>&1 \
+            | tee "$RUNNER_TEMP/seam-artifacts/filter-tests.txt"
+      - name: Full CHA edges, including tests, with every flag explicit
+        timeout-minutes: 30
+        working-directory: ${{ runner.temp }}/seam-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact="$RUNNER_TEMP/seam-artifacts"
+          trap 'status=$?; echo "callgraph_exit=$status" >> "$artifact/receipt.txt"' EXIT
+          test "$(go env GOVERSION)" = go1.27.3
+          test "$(go list -m -f '{{.Version}}' golang.org/x/tools)" = v0.52.0
+          sha256sum go.mod go.sum > "$artifact/module-before.sha256"
+          go version >> "$artifact/receipt.txt"
+          go env -json GOOS GOARCH CGO_ENABLED CGO_CFLAGS CGO_CXXFLAGS \
+            GOFLAGS >> "$artifact/receipt.txt"
+          printf 'GOMEMLIMIT=%s\nGOMAXPROCS=%s\n' "$GOMEMLIMIT" "$GOMAXPROCS" \
+            >> "$artifact/receipt.txt"
+          fmt="$(python3.12 "$GITHUB_WORKSPACE/study/storage/seam/filter_callgraph.py" --print-format)"
+          command=(go run golang.org/x/tools/cmd/callgraph -algo=cha \
+            -test=true -tags= -cpuprofile= -memprofile= "-format=$fmt" ./...)
+          printf '%q ' "${command[@]}" >> "$artifact/receipt.txt"
+          printf '\n' >> "$artifact/receipt.txt"
+          "${command[@]}" > "$artifact/edges.tsv.partial" 2> "$artifact/callgraph.stderr"
+          sha256sum --check "$artifact/module-before.sha256"
+          git diff --exit-code -- go.mod go.sum
+          mv "$artifact/edges.tsv.partial" "$artifact/edges.tsv"
+      - name: Filter and bind complete edges to report receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3.12 -B study/storage/seam/filter_callgraph.py \
+            --edges "$RUNNER_TEMP/seam-artifacts/edges.tsv" \
+            --symbols study/storage/seam/seam_symbols.json \
+            --source "$RUNNER_TEMP/seam-source" \
+            --output "$RUNNER_TEMP/seam-artifacts/report" \
+            --commit "$SOURCE_COMMIT" --tree "$SOURCE_TREE" \
+            --go-version "$(go env GOVERSION)"
+      - name: Compress full or explicitly partial raw evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -f "$RUNNER_TEMP/seam-artifacts/edges.tsv"; then
+            gzip -n "$RUNNER_TEMP/seam-artifacts/edges.tsv"
+          elif test -f "$RUNNER_TEMP/seam-artifacts/edges.tsv.partial"; then
+            gzip -n "$RUNNER_TEMP/seam-artifacts/edges.tsv.partial"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: seam-callgraph-${{ github.sha }}
+          path: ${{ runner.temp }}/seam-artifacts/
+          if-no-files-found: error
