@@ -187,11 +187,56 @@ func (p pendingCheck) check(ctx context.Context) (workload.Check, error) {
 	expected.Sources = p.Sources
 	return checkedAnswer(ctx, query, expected, p.Answer, p.Inputs)
 }
-func checkReaderSample(ctx context.Context, sample readerSample) (readerSample, error) {
+
+// readerCheckMemo is owned by the sequential post-phase validator. Keeping the
+// index on disk avoids a map that grows with distinct answers or sample count.
+type readerCheckMemo struct{ dir string }
+
+func newReaderCheckMemo(dir string) (*readerCheckMemo, error) {
+	path, err := os.MkdirTemp(dir, "reader-checks-*")
+	if err != nil {
+		return nil, err
+	}
+	return &readerCheckMemo{dir: path}, nil
+}
+func (m *readerCheckMemo) close() error { return os.RemoveAll(m.dir) }
+
+func (m *readerCheckMemo) check(ctx context.Context, pending pendingCheck) (workload.Check, error) {
+	if err := ctx.Err(); err != nil {
+		return workload.Check{}, err
+	}
+	// Hash the complete spool envelope, not a subset. It includes source overlays
+	// and the runtime-only query policy omitted from the public JSON formats.
+	encoded, err := json.Marshal(pending)
+	if err != nil {
+		return workload.Check{}, err
+	}
+	path := filepath.Join(m.dir, fmt.Sprintf("%x.json", sha256.Sum256(encoded)))
+	var check workload.Check
+	err = dataset.ReadJSON(path, &check)
+	if err == nil {
+		return check, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return workload.Check{}, fmt.Errorf("read reader check memo: %w", err)
+	}
+	check, err = pending.check(ctx)
+	if err != nil {
+		return workload.Check{}, err
+	}
+	// One owner writes only completed results. Any read/write failure stops this
+	// run; a new run gets a fresh directory and cannot consume a partial result.
+	if err := dataset.WriteJSON(path, check); err != nil {
+		return workload.Check{}, fmt.Errorf("write reader check memo: %w", err)
+	}
+	return check, nil
+}
+
+func (m *readerCheckMemo) checkReaderSample(ctx context.Context, sample readerSample) (readerSample, error) {
 	if sample.pending == nil {
 		return sample, sample.err
 	}
-	check, err := sample.pending.check(ctx)
+	check, err := m.check(ctx, *sample.pending)
 	sample.check = check
 	sample.pending = nil
 	if err == nil && check.Mismatch {

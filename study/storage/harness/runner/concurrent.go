@@ -316,6 +316,11 @@ func concurrent(ctx context.Context, b adapter.Backend, factory adapter.CatalogF
 	defer release()
 	cache := &readCache{segments: map[adapter.SegmentRef]adapter.Segment{old: segments[old.Repo]}, b: b}
 	defer func() { err = errors.Join(err, cache.close()) }()
+	memo, e := newReaderCheckMemo(dir)
+	if e != nil {
+		return r, e
+	}
+	defer func() { err = errors.Join(err, memo.close()) }()
 	preparePhase()
 	idleControl := startReaders(ctx, b, cat, cache, segments, old, qs, want, newWant)
 	timer := time.NewTimer(150 * time.Millisecond)
@@ -333,7 +338,7 @@ func concurrent(ctx context.Context, b adapter.Backend, factory adapter.CatalogF
 		if readErr != nil {
 			return r, readErr
 		}
-		s, checkErr := checkReaderSample(ctx, s)
+		s, checkErr := memo.checkReaderSample(ctx, s)
 		if checkErr != nil {
 			return r, checkErr
 		}
@@ -441,7 +446,7 @@ func concurrent(ctx context.Context, b adapter.Backend, factory adapter.CatalogF
 		if readErr != nil {
 			return r, readErr
 		}
-		s, checkErr := checkReaderSample(ctx, s)
+		s, checkErr := memo.checkReaderSample(ctx, s)
 		if checkErr != nil {
 			return r, checkErr
 		}

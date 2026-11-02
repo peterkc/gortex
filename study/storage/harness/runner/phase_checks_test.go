@@ -36,6 +36,7 @@ type phaseChecker struct {
 	active     *atomic.Bool
 	calls      atomic.Int64
 	wrong      bool
+	delegate   *ProcessService
 }
 
 func (c *phaseChecker) Call(req ProcessRequest, out *ProcessReply) error {
@@ -47,6 +48,9 @@ func (c *phaseChecker) Call(req ProcessRequest, out *ProcessReply) error {
 	if c.operations != nil && c.operations.Load() < c.minimum {
 		out.Error = "checker ran between sampled queries"
 		return nil
+	}
+	if c.delegate != nil {
+		return c.delegate.Call(req, out)
 	}
 	out.Check = workload.Check{QueryID: req.Query.ID, Operation: req.Query.Op, Status: "ok", NativeScoring: req.NativeScoring}
 	if c.wrong {
@@ -149,6 +153,7 @@ func TestDiskReadersCheckOnlyAfterStoppingAndRejectBadSamples(t *testing.T) {
 	if err != nil || checker.calls.Load() != 0 {
 		t.Fatal("checker ran in reader phase", checker.calls.Load(), err)
 	}
+	memo := fixtureReaderMemo(t)
 	count := 0
 	for sample, err := range stream.rows() {
 		if err != nil {
@@ -157,20 +162,25 @@ func TestDiskReadersCheckOnlyAfterStoppingAndRejectBadSamples(t *testing.T) {
 		if sample.pending == nil {
 			t.Fatal("sample lost its unverified answer")
 		}
-		checked, err := checkReaderSample(ctx, sample)
+		checked, err := memo.checkReaderSample(ctx, sample)
 		if err != nil || checked.pending != nil {
 			t.Fatal("post-phase check failed", checked, err)
 		}
+		bad := *sample.pending
+		node := *bad.Answer.Node
+		node.Name += "-wrong"
+		bad.Answer.Node = &node
+		sample.pending = &bad
 		checker.wrong = true
-		failed, err := checkReaderSample(ctx, sample)
+		failed, err := memo.checkReaderSample(ctx, sample)
 		if err == nil || !failed.check.Mismatch {
 			t.Fatal("bad recorded answer was accepted", failed, err)
 		}
 		checker.wrong = false
 		count++
 	}
-	if count == 0 || checker.calls.Load() != int64(2*count) {
-		t.Fatal("not all spooled answers were checked", count, checker.calls.Load())
+	if count == 0 || checker.calls.Load() != 2 {
+		t.Fatal("identical spooled answers were rechecked", count, checker.calls.Load())
 	}
 }
 
