@@ -25,6 +25,7 @@ import (
 	"github.com/parquet-go/parquet-go"
 	"gxstudy/adapter"
 	"gxstudy/dataset"
+	"gxstudy/runner"
 )
 
 const cacheBytes int64 = 256 << 20
@@ -125,9 +126,10 @@ func indexKey(prefix string, fields ...string) []byte {
 }
 
 type sideWriter struct {
-	db    *pebble.DB
-	batch *pebble.Batch
-	cache *pebble.Cache
+	identity os.FileInfo
+	db       *pebble.DB
+	batch    *pebble.Batch
+	cache    *pebble.Cache
 }
 
 func newSideWriter(path string) (*sideWriter, error) {
@@ -137,7 +139,13 @@ func newSideWriter(path string) (*sideWriter, error) {
 		cache.Unref()
 		return nil, err
 	}
-	return &sideWriter{db: db, batch: db.NewBatch(), cache: cache}, nil
+	identity, err := os.Lstat(path)
+	if err != nil {
+		err = errors.Join(err, db.Close())
+		cache.Unref()
+		return nil, err
+	}
+	return &sideWriter{db: db, batch: db.NewBatch(), cache: cache, identity: identity}, nil
 }
 func (s *sideWriter) add(n dataset.Node, raw []byte) error {
 	for _, key := range [][]byte{indexKey("N", n.ID), indexKey("A", n.Name, n.ID), indexKey("P", n.FilePath, n.ID)} {
@@ -360,6 +368,9 @@ func (b Backend) Build(ctx context.Context, d dataset.Dataset, dir string) (ref 
 			err = side.finish()
 		}
 		err = errors.Join(err, side.close())
+		if err == nil {
+			err = runner.RemoveEmptyBuildWALs(filepath.Join(dir, "side"), side.identity)
+		}
 	}
 	if err != nil {
 		return ref, stats, err

@@ -361,7 +361,7 @@ def collect_run(directory, expected_adapter, data, *, full_protocol):
                          if check.get("mismatch") is True
                          or check.get("status") == "failed"]
         check_failures = Counter(
-            check["query_id"] + ": " + check["detail"]
+            check["query_id"] + ": " + check.get("detail", "")
             for check in failed_checks)
         unexplained_failures = Counter(report["failures"]) != check_failures
         mismatch = bool(failed_checks) and not unexplained_failures and all(
@@ -690,9 +690,14 @@ def base_verdict(candidate, a, b):
                 "judged": False,
                 "reason": "identical Bleve mapping/query and fanout code"}
     disk = {tier: row["bytes_per_edge"] for tier, row in candidate.items()}
-    statuses.append("pass" if max(disk.values()) <= 300 else "miss")
-    status = ("partial" if insufficient or lookup["status"] == "partial"
-              else combined_status(statuses))
+    disk_status = "pass" if max(disk.values()) <= 300 else "miss"
+    statuses.append(disk_status)
+    if disk_status == "miss":
+        status = "miss"
+    elif insufficient or lookup["status"] == "partial":
+        status = "partial"
+    else:
+        status = combined_status(statuses)
     return {
         "passes": status == "pass", "status": status, "lookup": lookup,
         "cross_repo_traversal_ratios": reads, "read_directions": directions,

@@ -9,7 +9,9 @@ import (
 	"github.com/cockroachdb/pebble/v2/vfs"
 	"gxstudy/adapter"
 	"gxstudy/dataset"
+	"gxstudy/runner"
 	"io"
+	"os"
 	"path/filepath"
 	"sync"
 )
@@ -154,17 +156,27 @@ func buildKV(ctx context.Context, path string, d dataset.Dataset, addSymbol, add
 	stores := &scopedKV{stores: map[string]*pebbleKV{}}
 	defer func() { err = errors.Join(err, stores.Close()) }()
 	batches := map[string]*pebble.Batch{}
-	defer func() {
-		for _, batch := range batches {
+	owned := map[string]os.FileInfo{}
+	closeBatches := func() error {
+		var err error
+		for name, batch := range batches {
 			err = errors.Join(err, batch.Close())
+			delete(batches, name)
 		}
-	}()
+		return err
+	}
+	defer func() { err = errors.Join(err, closeBatches()) }()
 	for _, name := range []string{"graph", "text-records", "vectors"} {
 		store, e := openPebble(filepath.Join(path, name), pebble.Options{DisableWAL: true})
 		if e != nil {
 			return e
 		}
 		stores.stores[name] = store
+		identity, e := os.Lstat(filepath.Join(path, name))
+		if e != nil {
+			return e
+		}
+		owned[name] = identity
 		batches[name] = store.db.NewBatch()
 	}
 	err = writeRecords(ctx, d, func(key, value []byte) error {
@@ -188,6 +200,17 @@ func buildKV(ctx context.Context, path string, d dataset.Dataset, addSymbol, add
 			return err
 		}
 		if err = stores.stores[name].db.Flush(); err != nil {
+			return err
+		}
+	}
+	if err = closeBatches(); err != nil {
+		return err
+	}
+	if err = stores.Close(); err != nil {
+		return err
+	}
+	for _, name := range []string{"graph", "text-records", "vectors"} {
+		if err = runner.RemoveEmptyBuildWALs(filepath.Join(path, name), owned[name]); err != nil {
 			return err
 		}
 	}

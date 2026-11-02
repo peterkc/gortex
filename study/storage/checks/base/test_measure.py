@@ -755,5 +755,43 @@ class OrchestrationRegressionTests(unittest.TestCase):
                                          b_bytes == 200)
 
 
+class C3OutcomeRegressionTests(unittest.TestCase):
+    def test_conclusive_disk_miss_survives_partial_latency_evidence(self):
+        control = observations()
+        b = base_verdict(control, control, control)
+        for byte_count, status, branch in (
+                (301, "miss", "recommend_b"),
+                (300, "partial", "stop_no_recommendation")):
+            candidate = observations(graph=byte_count)
+            candidate["tier1"]["runs"][0]["sample_counts"]["file_miss"] = 19
+            c = base_verdict(candidate, control, control)
+            self.assertEqual(c["lookup"]["status"], "partial")
+            self.assertEqual(c["status"], status)
+            chosen = choose_base(b, c, cpu_selection_approved=True)
+            self.assertEqual(chosen[1], branch)
+        c = base_verdict(observations(graph=301), control, control)
+        b_miss = base_verdict(observations(graph=301), control, control)
+        self.assertEqual(choose_base(b_miss, c,
+                                    cpu_selection_approved=True)[1],
+                         "stop_and_amend")
+
+    def test_omitted_detail_defaults_empty_but_extra_errors_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for index, extra in enumerate((None, "input changed during run")):
+                root = Path(tmp) / str(index)
+                report, receipt = terminal_fixture(root,
+                                                    failure_kind="semantic")
+                report["checks"][0].pop("detail")
+                report["failures"] = ["wrong-edge: "]
+                if extra is not None:
+                    report["failures"].append(extra)
+                save_terminal(root, report, receipt)
+                with self.assertRaises(RunError) as caught:
+                    collect_run(root, "parquet-base", {"sha256": "a" * 64},
+                                full_protocol=False)
+                self.assertIs(type(caught.exception),
+                              SemanticMismatch if extra is None else RunError)
+
+
 if __name__ == "__main__":
     unittest.main()

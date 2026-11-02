@@ -49,7 +49,12 @@ B routes existing key prefixes into physically separate `graph`, `text-records`
 and `vectors` Pebble stores. All stores share one 256 MiB cache. Each store and
 C's side store bulk-build with WAL disabled and non-sync batches, then Flush,
 Close and whole-file seal fsync. Unpublished builds have no WAL recovery promise.
-Sealed stores must hold no WAL bytes; byte accounting never hides a stray WAL.
+Pebble v2.1.7 still creates an active WAL with writes disabled. Close emits its
+11-byte EOF trailer. After successful Flush/Close, one shared helper validates
+empty or exact EOF-only content and removes it from the identity-captured build
+store before sealing. It rejects real records, malformed/trailing content and
+aliases. Size alone never permits removal. Sealed stores must hold no `.log`
+entry; byte accounting never hides a stray WAL.
 Graph files, raw text plus Bleve files, and vector files have independent byte
 inventories. Shared seals count as graph metadata. The three categories sum to
 all artifact bytes. No compressed SST prefix share is estimated or subtracted.
@@ -226,6 +231,9 @@ Opposite design-specific read directions require consistency across all three
 pairs before they become a read trade-off. Construction ties use the sum of
 per-tier median adjusted CPU, then total bytes; unresolved ties return to the user.
 CPU comparison still ranks the observed medians exactly, not statistical equality.
+A validated disk miss remains conclusive even if latency sampling is partial.
+Partial per-metric details remain visible; B must independently pass before it
+can be selected. Resource, identity and hash failures still block first.
 
 Only complete, hash-valid terminal evidence with typed `semantic` check failures
 can reject C for a wrong answer and fall back to independently passing B. An

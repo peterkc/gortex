@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"github.com/cockroachdb/pebble/v2"
@@ -8,6 +9,7 @@ import (
 	"gxstudy/adapter"
 	"gxstudy/conformance"
 	"gxstudy/dataset"
+	"gxstudy/runner"
 	"os"
 	"path/filepath"
 	"strings"
@@ -202,21 +204,60 @@ func TestSealedStoresHaveNoWALBytes(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if entry.IsDir() {
-				return nil
-			}
 			if filepath.Ext(path) == ".log" {
-				info, err := entry.Info()
-				if err != nil {
-					return err
-				}
-				if info.Size() > 0 {
-					t.Fatalf("sealed %s retained WAL bytes: %s (%d)", store, path, info.Size())
-				}
+				t.Fatalf("sealed %s retained WAL entry: %s", store, path)
 			}
 			return nil
 		}); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+func TestBulkCleanupRejectsNativeRecordBearingWAL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wal-on")
+	store, err := openPebble(path, pebble.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := os.Lstat(path)
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	value := []byte("real-wal-payload-must-not-be-discarded")
+	if err := store.db.Set([]byte("key"), value, pebble.Sync); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if err := store.db.Flush(); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	logs, err := filepath.Glob(filepath.Join(path, "*.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundRecord := false
+	for _, name := range logs {
+		raw, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		foundRecord = foundRecord || bytes.Contains(raw, value)
+	}
+	if !foundRecord {
+		t.Fatal("native fixture has no record-bearing WAL")
+	}
+	if err := runner.RemoveEmptyBuildWALs(path, identity); err == nil {
+		t.Fatal("record-bearing native WAL accepted")
+	}
+	for _, name := range logs {
+		if _, err := os.Lstat(name); err != nil {
+			t.Fatal("rejected native WAL removed", name, err)
 		}
 	}
 }
