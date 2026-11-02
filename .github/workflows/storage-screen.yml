@@ -65,6 +65,7 @@ jobs:
           echo +memory | sudo tee "$root/cgroup.subtree_control"
           sudo mkdir "$root/test-driver"
           sudo chown -R "$(id -u):$(id -g)" "$root"
+          stat -c '%d %i' "$root" > "$RUNNER_TEMP/storage/cgroup-root.identity"
           echo "GXSTUDY_TEST_CGROUP_ROOT=$root" >> "$GITHUB_ENV"
       - name: Harness tests and vet, including actual hard-limit failures
         working-directory: study/storage/harness
@@ -332,10 +333,84 @@ jobs:
         run: |
           set -euo pipefail
           if test -n "${GXSTUDY_TEST_CGROUP_ROOT:-}"; then
-            # The /sys/fs/cgroup parent is root-owned. Remove only the two
-            # known directories; rmdir still rejects live or unexpected children.
-            sudo rmdir "$GXSTUDY_TEST_CGROUP_ROOT/test-driver"
-            sudo rmdir "$GXSTUDY_TEST_CGROUP_ROOT"
+            # This owner survives a test-parent failure. Preserve kernel evidence,
+            # kill only the inode-checked job tree once, then wait on kernel events.
+            sudo python3.12 -c '
+          import json
+          import os
+          import select
+          import stat
+          import sys
+          import time
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          expected = Path("/sys/fs/cgroup") / (
+              "gxstudy-" + sys.argv[3] + "-" + sys.argv[4]
+          )
+          identity = tuple(map(int, Path(sys.argv[2]).read_text().split()))
+          info = root.lstat()
+          if (root != expected or root.resolve() != root
+                  or not stat.S_ISDIR(info.st_mode)):
+              raise RuntimeError("refuse cleanup outside the exact job cgroup")
+          if identity != (info.st_dev, info.st_ino):
+              raise RuntimeError("refuse cleanup of a replaced job cgroup")
+          relative = "/" + str(root.relative_to("/sys/fs/cgroup"))
+          membership = Path("/proc/self/cgroup").read_text().splitlines()
+          if any(line == "0::" + relative
+                 or line.startswith("0::" + relative + "/") for line in membership):
+              raise RuntimeError("cleanup process must be outside the target cgroup")
+
+
+          def snapshot(phase):
+              names = (
+                  "cgroup.procs", "cgroup.events", "memory.max", "memory.swap.max",
+                  "memory.oom.group", "memory.peak", "memory.events",
+              )
+              for current, _, _ in os.walk(root):
+                  path = Path(current)
+                  fields = {name: (path / name).read_text().strip() for name in names}
+                  print(json.dumps({
+                      "phase": phase, "scope": str(path.relative_to(root)),
+                      "state": fields,
+                  }), flush=True)
+
+
+          snapshot("before-kill")
+          fd = os.open(root / "cgroup.events", os.O_RDONLY | os.O_CLOEXEC)
+          try:
+              def state():
+                  os.lseek(fd, 0, os.SEEK_SET)
+                  return dict(line.split() for line in
+                              os.read(fd, 4096).decode().splitlines())
+
+              state()
+              poll = select.poll()
+              poll.register(fd, select.POLLPRI | select.POLLERR)
+              (root / "cgroup.kill").write_text("1")
+              deadline = time.monotonic() + 30
+              while state()["populated"] != "0":
+                  remaining = deadline - time.monotonic()
+                  if remaining <= 0:
+                      raise RuntimeError("job cgroup stayed populated after cgroup.kill")
+                  poll.poll(max(1, int(remaining * 1000)))
+          finally:
+              os.close(fd)
+          snapshot("after-kill")
+          for current, _, _ in os.walk(root, topdown=False):
+              path = Path(current)
+              entry = path.lstat()
+              if not stat.S_ISDIR(entry.st_mode) or entry.st_dev != info.st_dev:
+                  raise RuntimeError("refuse cleanup of an unexpected cgroup entry")
+              if path == root and (entry.st_dev, entry.st_ino) != identity:
+                  raise RuntimeError("job cgroup changed before removal")
+              path.rmdir()
+          print(json.dumps({
+              "phase": "removed", "root": str(root), "success": True,
+          }), flush=True)
+          ' "$GXSTUDY_TEST_CGROUP_ROOT" "$RUNNER_TEMP/storage/cgroup-root.identity" \
+              "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+              > "$RUNNER_TEMP/storage/ci-cgroup-cleanup.txt"
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()

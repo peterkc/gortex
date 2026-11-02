@@ -7,6 +7,7 @@ import (
 	"gxstudy/dataset"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -128,5 +129,27 @@ func TestCancellationDuringEngineBuildPreservesFailureAndCleanup(t *testing.T) {
 	}
 	if _, err = os.Stat(filepath.Join(out, "oracle-tier-01.json")); !os.IsNotExist(err) {
 		t.Fatal("cancelled build published a complete result", err)
+	}
+	assertRunScopesRemoved(t, out)
+}
+
+func TestMemoryScopeSetsAndReadsKernelOOMPolicy(t *testing.T) {
+	scope, err := newMemoryScope(testCgroupRoot(t), "kernel-policy", 256<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := scope.close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	for name, want := range map[string]string{"memory.swap.max": "0", "memory.oom.group": "1"} {
+		got, err := os.ReadFile(filepath.Join(scope.path, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(string(got)) != want {
+			t.Fatal("kernel OOM policy mismatch", name, string(got), want)
+		}
 	}
 }

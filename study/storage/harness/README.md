@@ -504,7 +504,11 @@ component accounting and top-level output hashes. A failed or cancelled attempt
 keeps its request, logs and partial outputs. A `.partial` result is not a complete
 receipt. An existing output directory is rejected rather than resumed or reused.
 Cleanup failure also makes the receipt fail. Cleanup checks cgroup ownership and
-never removes a replaced or unrelated cgroup.
+never removes a replaced or unrelated cgroup. Keep a cleanup owner outside the
+worker tree: Go defers cannot run after a parent is killed. CI's job owner records
+the root inode, saves kernel memory/OOM evidence, writes `cgroup.kill` once, waits
+for kernel-reported emptiness, and removes only that job-owned tree. This cleanup
+also runs after a test-parent failure.
 
 The result's `pid` and `peak_rss_bytes` describe the engine process only.
 `runner_memory`, `checker_memory` and the component receipt label overhead

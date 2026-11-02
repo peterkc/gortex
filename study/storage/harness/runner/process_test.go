@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"gxstudy/adapter"
 	"gxstudy/conformance"
@@ -11,6 +12,7 @@ import (
 	"gxstudy/oracle"
 	"gxstudy/workload"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -158,6 +160,7 @@ func TestHardLimitFailurePreservesEvidenceForEachComponent(t *testing.T) {
 			if _, e := os.Stat(filepath.Join(out, "request-01.json")); e != nil {
 				t.Fatal("failed request erased", e)
 			}
+			assertRunScopesRemoved(t, out)
 		})
 	}
 }
@@ -427,5 +430,49 @@ func TestLegacyUnboundedEntrypointsRejectBeforeOutput(t *testing.T) {
 	}
 	if err := RunLimitedCatalog(namedCatalogBackend{}, oracle.NewCatalog, []string{"-candidate", "catalog-refs", "-out", out}); err == nil {
 		t.Fatal("legacy catalog invocation accepted")
+	}
+}
+
+func TestCheckerExitBeforeHandshakeReturnsItsExitStatus(t *testing.T) {
+	root := testCgroupRoot(t)
+	scope, err := newMemoryScope(root, "checker-startup-exit", 256<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := scope.close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	t.Setenv("GXSTUDY_TEST_CHECKER_EXIT", "1")
+	ctx, cancel := context.WithTimeout(context.Background(), defaultSafetyTimeout)
+	defer cancel()
+	client, err := startProcess(ctx, scope.path, filepath.Join(t.TempDir(), "checker.log"), true)
+	if client != nil {
+		client.close()
+		t.Fatal("early-exit checker was accepted")
+	}
+	if err == nil || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("checker exit was hidden until the RPC deadline", err)
+	}
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 23 {
+		t.Fatal("lost checker exit status", err)
+	}
+}
+
+func assertRunScopesRemoved(t *testing.T, out string) {
+	t.Helper()
+	var req runRequest
+	if err := dataset.ReadJSON(filepath.Join(out, "request-01.json"), &req); err != nil {
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{"runner": req.RunnerScope, "checker": req.CheckerScope, "engine": req.EngineScope} {
+		if path == "" {
+			t.Fatal("missing owned scope identity", name)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatal("owned scope leaked after termination", name, path, err)
+		}
 	}
 }

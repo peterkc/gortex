@@ -48,6 +48,9 @@ func TestSummary(t *testing.T) {
 
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && (os.Args[1] == "__engine" || os.Args[1] == "__checker") {
+		if os.Args[1] == "__checker" && os.Getenv("GXSTUDY_TEST_CHECKER_EXIT") == "1" {
+			os.Exit(23)
+		}
 		if err := processServe(testProcessBackend(), oracle.NewCatalog, os.Args[1] == "__checker"); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)

@@ -395,7 +395,15 @@ type processClient struct {
 }
 
 func socketPair() (net.Conn, *os.File, error) {
+	// Mark both originals close-on-exec before another goroutine can fork.
+	// ExtraFiles explicitly duplicates the intended child descriptors.
+	syscall.ForkLock.RLock()
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err == nil {
+		syscall.CloseOnExec(fds[0])
+		syscall.CloseOnExec(fds[1])
+	}
+	syscall.ForkLock.RUnlock()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -414,13 +422,21 @@ func startProcess(ctx context.Context, scope, path string, checker bool) (client
 	if err != nil {
 		return nil, err
 	}
-	defer child.Close()
+	defer func() {
+		if child != nil {
+			child.Close()
+		}
+	}()
 	hooks, hookChild, err := socketPair()
 	if err != nil {
 		conn.Close()
 		return nil, err
 	}
-	defer hookChild.Close()
+	defer func() {
+		if hookChild != nil {
+			hookChild.Close()
+		}
+	}()
 	log, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		conn.Close()
@@ -456,6 +472,18 @@ func startProcess(ctx context.Context, scope, path string, checker bool) (client
 		log.Close()
 		return nil, err
 	}
+	// The parent must not retain the peer endpoints while waiting for an RPC.
+	// Otherwise an early child exit cannot produce EOF on conn or hooks.
+	err = errors.Join(child.Close(), hookChild.Close())
+	child, hookChild = nil, nil
+	if err != nil {
+		killErr := cmd.Process.Kill()
+		waitErr := cmd.Wait()
+		conn.Close()
+		hooks.Close()
+		log.Close()
+		return nil, errors.Join(err, killErr, waitErr)
+	}
 	if err = os.WriteFile(path+".pid", []byte(strconv.Itoa(cmd.Process.Pid)), 0600); err != nil {
 		cmd.Process.Kill()
 		cmd.Wait()
@@ -477,8 +505,7 @@ func startProcess(ctx context.Context, scope, path string, checker bool) (client
 	go func() { defer close(hookDone); server.ServeConn(hooks) }()
 	client = &processClient{rpc: rpc.NewClient(conn), cmd: cmd, hook: hooks, hookDone: hookDone, log: log}
 	if _, err = client.call(ctx, ProcessRequest{Op: "describe"}); err != nil {
-		client.close()
-		return nil, err
+		return nil, errors.Join(err, client.close())
 	}
 	return client, nil
 }
