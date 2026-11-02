@@ -50,11 +50,12 @@ jobs:
     if: github.repository == 'peterkc/gortex'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    env:
-      WORK: ${{ runner.temp }}/storage-checks-tests
     outputs:
       timeouts: ${{ steps.preflight.outputs.timeouts }}
     steps:
+    - name: Set the job work directory from the runner temp path
+      shell: bash
+      run: echo "WORK=$RUNNER_TEMP/storage-checks-tests" >> "$GITHUB_ENV"
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
         ref: ${{ github.sha }}
@@ -308,10 +309,12 @@ jobs:
     timeout-minutes: ${{ fromJSON(needs.tests.outputs.timeouts).base }}
     env:
       CHECK_GROUP: base
-      WORK: ${{ runner.temp }}/storage-checks
     outputs:
       freeze_uploaded: ${{ steps.freeze_upload.outcome }}
     steps: &measurement_steps
+    - name: Set the job work directory from the runner temp path
+      shell: bash
+      run: echo "WORK=$RUNNER_TEMP/storage-checks" >> "$GITHUB_ENV"
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
         ref: ${{ github.sha }}
@@ -1117,7 +1120,6 @@ jobs:
     timeout-minutes: ${{ fromJSON(needs.tests.outputs.timeouts).linkdelta }}
     env:
       CHECK_GROUP: linkdelta
-      WORK: ${{ runner.temp }}/storage-checks
     steps: *measurement_steps
   vector:
     name: 'Check 6: D28 synthetic-only vector scan'
@@ -1130,5 +1132,4 @@ jobs:
     timeout-minutes: ${{ fromJSON(needs.tests.outputs.timeouts).vector }}
     env:
       CHECK_GROUP: vector
-      WORK: ${{ runner.temp }}/storage-checks
     steps: *measurement_steps
