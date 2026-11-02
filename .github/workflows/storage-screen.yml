@@ -254,6 +254,23 @@ jobs:
           "$uv" run --frozen --project study/storage/pod-cost python -m unittest discover \
             -s study/storage/onnx -p test_accuracy_bridge.py -v 2>&1 \
             | tee "$RUNNER_TEMP/storage/ci-bridge.txt"
+      - name: Pod lifecycle and accuracy runbook fixtures, no cloud calls
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          OPENBLAS_NUM_THREADS: "2"
+          OMP_NUM_THREADS: "2"
+          MKL_NUM_THREADS: "2"
+          UV_PYTHON: python3.12
+          UV_PYTHON_DOWNLOADS: never
+          UV_CACHE_DIR: ${{ runner.temp }}/storage/uv-cache
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/storage/bridge-env
+        run: |
+          set -euo pipefail
+          uv="$RUNNER_TEMP/storage/evaluator-tools/uv-x86_64-unknown-linux-gnu/uv"
+          "$uv" run --frozen --project study/storage/pod-cost python -B -m unittest discover \
+            -s study/storage/pod -p test_lifecycle_support.py -v 2>&1 \
+            | tee "$RUNNER_TEMP/storage/ci-pod-lifecycle.txt"
       - name: Corpus extractor and builder fixtures without model inference
         if: ${{ !cancelled() }}
         shell: bash
