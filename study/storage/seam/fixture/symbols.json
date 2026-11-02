@@ -1,0 +1,14 @@
+{
+  "schema": "seam-fixture-symbols/v1",
+  "fixture_sha256": "82779706afc8d8cfa5aabde4d80364471c04695a7b9a9671457e0bc3bdcff619",
+  "symbols": [
+    {
+      "symbol": "example.com/seamfixture.Seam",
+      "why": "CI integration fixture only"
+    }
+  ],
+  "non_callable_limits": [
+    "Fixture-only run; not FR-010 or AC-011 evidence. Full-source evidence uses POD-RUNBOOK.md."
+  ],
+  "assertion_sites": []
+}

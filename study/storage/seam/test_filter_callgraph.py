@@ -1,4 +1,4 @@
-"""Given/When/Then cases for the CI-only callgraph filter."""
+"""Given/When/Then cases for the pinned callgraph filter."""
 import hashlib
 import io
 import json
@@ -34,14 +34,18 @@ def resource_fixture():
         "removed": True, "cgroup": "/sys/fs/cgroup/fixture/analysis",
         "deadline": "2026-11-02T06:00:00Z",
         "binding": {"command": ["/bin/bash", "/script", *argv],
-                    "harness_sha256": "1" * 64},
-        "memory": {"status": "completed", "limit_bytes": 12884901888,
+                    "harness_sha256": "1" * 64,
+                    "source_revision": cg.COMMIT},
+        "memory": {"status": "completed", "limit_bytes": limited.HARD_LIMIT,
                    "cgroup_peak_bytes": 123456789, "oom_kills": 0,
                    "exit_code": 0},
-    }, {"schema": "seam-kernel-limits/v1", "memory.max": 12884901888,
+    }, {"schema": "seam-kernel-limits/v1", "memory.max": limited.HARD_LIMIT,
         "memory.swap.max": 0, "memory.oom.group": 1,
-        "cgroup": "/sys/fs/cgroup/fixture/analysis", "gomemlimit": "10GiB",
-        "argv": argv}, {"memtotal_bytes": 16 * 1024 ** 3, "nproc": 4})
+        "cgroup": "/sys/fs/cgroup/fixture/analysis",
+        "gomemlimit": limited.SOFT_LIMIT, "profile": "pod",
+        "file_max_bytes": limited.PROFILES["pod"]["file_max"],
+        "argv": argv}, {"profile": "pod", "memtotal_bytes": 64 * 1024 ** 3,
+                        "nproc": 4})
 
 
 def report(text):
@@ -117,7 +121,7 @@ class FilterTests(unittest.TestCase):
     def test_resource_receipt_requires_success_and_actual_kernel_limits(self):
         launcher, kernel, host = resource_fixture()
         value = cg.resource_facts(launcher, kernel, host)
-        self.assertEqual(value["memory_max_bytes"], 12884901888)
+        self.assertEqual(value["memory_max_bytes"], limited.HARD_LIMIT)
         self.assertEqual(value["memory_peak_bytes"], 123456789)
         self.assertEqual(value["memory_swap_max_bytes"], 0)
         self.assertEqual(value["memory_oom_group"], 1)
@@ -142,6 +146,9 @@ class FilterTests(unittest.TestCase):
                     launcher, {**kernel, field: bad}, host), cg.Invalid)
 
     def test_options_must_match_the_bound_actual_argv(self):
+        self.assertEqual(cg.OPTIONS, [
+            "-algo=cha", "-test=true", "-tags=", "-cpuprofile=",
+            "-memprofile=", "-format=" + cg.FORMAT, "./..."])
         launcher, kernel, host = resource_fixture()
         for bad in ("-test=false", "-algo=rta", "./internal/graph/..."):
             argv = [*kernel["argv"][:-1], bad]
@@ -155,11 +162,11 @@ class FilterTests(unittest.TestCase):
         self.assertIsInstance(cg.resource_facts(
             altered_binding, kernel, host), cg.Invalid)
         self.assertIsInstance(cg.resource_facts(
-            launcher, kernel, {**host, "memtotal_bytes": 15 * 1024 ** 3 - 1}),
+            launcher, kernel, {**host, "memtotal_bytes": 56 * 1024 ** 3 - 1}),
             cg.Invalid)
 
     def test_preflight_refuses_capacity_below_cap_plus_headroom(self):
-        boundary = 15 * 1024 ** 3
+        boundary = 56 * 1024 ** 3
         for total, expected in ((boundary - 1024, False), (boundary, True)):
             value = limited.host_capacity(f"MemTotal: {total // 1024} kB\n", 4)
             self.assertEqual(value["sufficient"], expected)
@@ -184,38 +191,176 @@ class FilterTests(unittest.TestCase):
             with patch.object(Path, "read_text", read_document), \
                     patch.object(limited.subprocess, "check_output",
                                  return_value="4\n"), \
-                    patch.dict(os.environ, {"GOMEMLIMIT": "10GiB"}):
+                    patch.dict(os.environ, {"GOMEMLIMIT": limited.SOFT_LIMIT}):
                 with self.assertRaisesRegex(RuntimeError, "MemTotal"):
                     limited.preflight(output)
             self.assertFalse(json.loads(
                 (output / "host-capacity.json").read_text())["sufficient"])
 
+    def test_preflight_rejects_wrong_soft_limit_after_capacity_passes(self):
+        documents = {"/proc/meminfo": "MemTotal: 67108864 kB\n",
+                     "/proc/swaps": "", "/proc/self/cgroup": "0::/outside"}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(Path, "read_text",
+                             lambda path: documents[str(path)]), \
+                patch.object(limited.subprocess, "check_output",
+                             return_value="4\n"), \
+                patch.object(limited.subprocess, "run"), \
+                patch.object(limited.shutil, "disk_usage",
+                             return_value=Namespace(free=20 * limited.GIB)), \
+                patch.dict(os.environ, {"GOMEMLIMIT": "off"}):
+            with self.assertRaisesRegex(RuntimeError, "GOMEMLIMIT"):
+                limited.preflight(Path(directory))
+
     def test_launcher_failure_is_not_converted_to_success(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
             (output / "host-capacity.json").write_text(json.dumps({
-                "memtotal_bytes": 16 * 1024 ** 3, "nproc": 4}))
+                "profile": "pod", "memtotal_bytes": 64 * 1024 ** 3,
+                "disk_free_bytes": 20 * limited.GIB, "nproc": 4}))
             args = Namespace(artifact=output, label="analysis",
                              launcher=Path("/bin/false"), root=output,
                              cwd=output, commit=cg.COMMIT,
                              command=["/bin/true"])
-            with patch.dict(os.environ, {"GOMEMLIMIT": "10GiB"}):
+            with patch.dict(os.environ, {"GOMEMLIMIT": limited.SOFT_LIMIT}):
                 self.assertEqual(limited.launch(args), 1)
             binding = json.loads(
                 (output / "analysis-binding.json").read_text())
             self.assertEqual(binding["command"][-1], "/bin/true")
             self.assertEqual(binding["memory_limits_bytes"]["engine"],
-                             12884901888)
+                             limited.HARD_LIMIT)
             self.assertEqual(binding["harness_sha256"],
                              limited.digest(Path("/bin/false")))
             script = (output / "analysis-command.sh").read_text()
             self.assertNotIn("GITHUB_", script)
             self.assertNotIn("RUNNER_", script)
             self.assertIn("set -euo pipefail", script)
+            self.assertIn('ulimit -f "$blocks"', script)
             self.assertIn('list -deps -test -tags=', script)
             self.assertIn('| cat > "$artifact/edges.tsv.partial"', script)
             self.assertLess(script.index("listed_package_count="),
                             script.index('| cat >'))
+
+    def test_launch_refuses_bad_capacity_soft_limit_and_label(self):
+        valid = {"profile": "pod", "memtotal_bytes": 64 * limited.GIB,
+                 "disk_free_bytes": 20 * limited.GIB}
+        cases = [({**valid, "memtotal_bytes": 1}, limited.SOFT_LIMIT,
+                  "pod", "analysis"),
+                 ({**valid, "disk_free_bytes": 1}, limited.SOFT_LIMIT,
+                  "pod", "analysis"),
+                 (valid, "off", "pod", "analysis"),
+                 ({**valid, "profile": "ci-oom"}, "64MiB", "ci-oom",
+                  "analysis")]
+        for capacity, soft, profile, label in cases:
+            with self.subTest(profile=profile, label=label, soft=soft), \
+                    tempfile.TemporaryDirectory() as directory:
+                artifact = Path(directory)
+                (artifact / "host-capacity.json").write_text(
+                    json.dumps(capacity))
+                args = Namespace(artifact=artifact, profile=profile,
+                                 label=label, launcher=Path("/bin/false"))
+                with patch.dict(os.environ, {"GOMEMLIMIT": soft}), \
+                        patch.object(limited.subprocess, "run") as launch:
+                    with self.assertRaises(RuntimeError):
+                        limited.launch(args)
+                    launch.assert_not_called()
+
+    def test_kernel_facts_refuse_wrong_membership_or_limits(self):
+        root = Path("/sys/fs/cgroup/unit")
+        baseline = {"/proc/self/cgroup": "0::/unit/gxstudy-external-x\n",
+                    str(root / "gxstudy-external-x/memory.max"):
+                    str(limited.HARD_LIMIT),
+                    str(root / "gxstudy-external-x/memory.swap.max"): "0",
+                    str(root / "gxstudy-external-x/memory.oom.group"): "1"}
+        changes = [{"/proc/self/cgroup": "1:memory:/legacy\n"},
+                   {"/proc/self/cgroup": "0::/wrong/gxstudy-external-x\n"},
+                   {str(root / "gxstudy-external-x/memory.max"): "1"},
+                   {str(root / "gxstudy-external-x/memory.swap.max"): "1"},
+                   {str(root / "gxstudy-external-x/memory.oom.group"): "0"}]
+        for change in changes:
+            documents = {**baseline, **change}
+            with tempfile.TemporaryDirectory() as directory, \
+                    patch.object(Path, "read_text",
+                                 lambda path: documents[str(path)]):
+                with self.assertRaises(RuntimeError):
+                    limited.facts(Path(directory) / "facts.json", root,
+                                  ["/bin/true"])
+
+    def test_facts_reads_back_the_actual_file_limit(self):
+        root = Path("/sys/fs/cgroup/unit")
+        scope = root / "gxstudy-external-x"
+        documents = {"/proc/self/cgroup": "0::/unit/gxstudy-external-x\n",
+                     str(scope / "memory.max"): str(limited.HARD_LIMIT),
+                     str(scope / "memory.swap.max"): "0",
+                     str(scope / "memory.oom.group"): "1"}
+        bound = limited.PROFILES["pod"]["file_max"]
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(Path, "read_text",
+                             lambda path: documents[str(path)]):
+            target = Path(directory) / "facts.json"
+            with patch.object(limited.resource, "getrlimit",
+                              return_value=(bound, bound)):
+                limited.facts(target, root, ["/bin/true"])
+            with patch.object(limited.resource, "getrlimit",
+                              return_value=(-1, -1)):
+                with self.assertRaisesRegex(RuntimeError, "file-size"):
+                    limited.facts(Path(directory) / "bad.json", root,
+                                  ["/bin/true"])
+
+    def test_cleanup_refuses_replaced_root_and_active_membership(self):
+        root = Path("/sys/fs/cgroup/gxseam-unit-1")
+        for tested_root, inode, membership in (
+                (root, 3, "0::/outside\n"),
+                (root, 2, "0::/gxseam-unit-1/owner\n"),
+                (Path("/sys/fs/cgroup/gxseam-other-1"), 2, "0::/outside\n")):
+            documents = {"/identity": "1 2",
+                         "/proc/self/cgroup": membership}
+            entry = Namespace(st_dev=1, st_ino=inode)
+            with patch.object(Path, "lstat", return_value=entry), \
+                    patch.object(Path, "is_dir", return_value=True), \
+                    patch.object(Path, "resolve", lambda path: path), \
+                    patch.object(Path, "read_text",
+                                 lambda path: documents[str(path)]), \
+                    patch.object(Path, "rmdir") as remove:
+                with self.assertRaises(RuntimeError):
+                    limited.cleanup(tested_root, Path("/identity"),
+                                    "unit", "1")
+                remove.assert_not_called()
+
+    def test_profiles_and_fixture_digest_cannot_bless_production(self):
+        launcher, kernel, host = resource_fixture()
+        self.assertIsInstance(cg.resource_facts(
+            launcher, kernel, host, "ci-fixture"), cg.Invalid)
+        fixture = Path(__file__).parent / "fixture"
+        expected = json.loads((fixture / "symbols.json").read_text())
+        self.assertEqual(limited.fixture_digest(fixture),
+                         expected["fixture_sha256"])
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            for name in [*limited.FIXTURE_FILES, "symbols.json"]:
+                (source / name).write_bytes((fixture / name).read_bytes())
+            (source / "seam.go").write_text("changed fixture")
+            self.assertNotEqual(limited.fixture_digest(source),
+                                expected["fixture_sha256"])
+            (source / "extra.go").write_text("package extra")
+            with self.assertRaises(ValueError):
+                limited.fixture_digest(source)
+
+    def test_ci_budget_fits_job_and_has_no_full_source_analysis(self):
+        workflow = Path(__file__).resolve().parents[3] / (
+            ".github/workflows/seam-callgraph.yml")
+        text = workflow.read_text()
+        self.assertIn(f"timeout-minutes: {limited.CI_JOB_MINUTES}", text)
+        self.assertIn("fromJSON(steps.budgets.outputs.json)", text)
+        seconds = (limited.PROFILES["ci-fixture"]["analysis"]
+                   + limited.PROFILES["ci-fixture"]["filter"]
+                   + limited.PROFILES["ci-oom"]["oom"] + 120)
+        self.assertLess(seconds + 10 * 60, limited.CI_JOB_MINUTES * 60)
+        self.assertIn("study/storage/harness/**", text)
+        self.assertNotIn("https://github.com/zzet/gortex.git", text)
+        self.assertIn("--profile ci-fixture", text)
+        self.assertIn("NOT FR-010/AC-011 evidence", text)
+        self.assertIn("POD-RUNBOOK.md", text)
 
     def test_streaming_retains_only_frontier_and_bounds_memory(self):
         class EdgeStream:
@@ -282,12 +427,43 @@ class FilterTests(unittest.TestCase):
             ".github/workflows/seam-callgraph.yml")
         text = workflow.read_text()
         markers = ("name: Compress full or explicitly partial raw evidence",
-                       "name: Release only the delegated seam root",
+                   "name: Release only the delegated seam root",
                    "name: Upload final evidence")
         for marker in markers:
             block = text.split(marker, 1)[1].split("\n      - ", 1)[0]
             self.assertIn("if: always()", block)
         self.assertNotIn("continue-on-error:", text)
+
+    def test_artifact_manifest_rejects_changed_or_unlisted_payload(self):
+        packer = Path(__file__).parent / "package_artifacts.py"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = root / "payload"
+            payload.mkdir()
+            raw = payload / "edges.tsv"
+            raw.write_text("edge bytes")
+            bundle = root / "evidence.tar.gz"
+            command = [sys.executable, "-B", str(packer), "--source",
+                       str(payload), "--bundle", str(bundle)]
+            result = subprocess.run(command, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = payload / "file-manifest.json"
+            entries = json.loads(manifest.read_text())["files"]
+            self.assertEqual(set(entries), {"edges.tsv"})
+            self.assertEqual(entries["edges.tsv"], limited.digest(raw))
+            self.assertEqual(bundle.with_suffix(".gz.sha256").read_text(),
+                             limited.digest(bundle) + "  evidence.tar.gz\n")
+            command = [sys.executable, "-B", str(packer), "--verify",
+                       str(manifest)]
+            self.assertEqual(subprocess.run(
+                command, capture_output=True).returncode, 0)
+            raw.write_text("changed")
+            self.assertNotEqual(subprocess.run(
+                command, capture_output=True).returncode, 0)
+            raw.write_text("edge bytes")
+            (payload / "unlisted.txt").write_text("extra")
+            self.assertNotEqual(subprocess.run(
+                command, capture_output=True).returncode, 0)
 
     def test_cli_receipt_hashes_summary_and_replay_refusal(self):
         # Given fresh files, output is bound to raw bytes and exact pins.
@@ -345,6 +521,27 @@ class FilterTests(unittest.TestCase):
                 command, capture_output=True).returncode, 0)
             self.assertFalse(
                 (root / "node-diagnostics.jsonl.partial").exists())
+            original_manifest = json.loads(manifest.read_text())
+            for index, field in enumerate(("arg-commit", "arg-tree", "schema",
+                                           "commit", "tree")):
+                changed = list(command)
+                changed[changed.index(str(output))] = str(root / str(index))
+                altered_manifest = dict(original_manifest)
+                altered_launcher = json.loads(json.dumps(launcher))
+                if field == "arg-commit":
+                    changed[changed.index("--commit") + 1] = "0" * 40
+                    altered_launcher["binding"]["source_revision"] = "0" * 40
+                elif field == "arg-tree":
+                    changed[changed.index("--tree") + 1] = "0" * 40
+                else:
+                    altered_manifest[field] = "wrong"
+                manifest.write_text(json.dumps(altered_manifest))
+                launcher_path.write_text(json.dumps(altered_launcher))
+                self.assertNotEqual(subprocess.run(
+                    changed, capture_output=True).returncode, 0, field)
+                self.assertFalse((root / str(index)).exists())
+            manifest.write_text(json.dumps(original_manifest))
+            launcher_path.write_text(json.dumps(launcher))
             command[command.index("go1.27.3")] = "go1.27.2"
             command[command.index(str(output))] = str(root / "rejected")
             self.assertNotEqual(subprocess.run(

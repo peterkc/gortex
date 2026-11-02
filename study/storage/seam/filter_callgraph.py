@@ -1,4 +1,4 @@
-"""Filter pinned x/tools callgraph TSV edges. Run only on approved CI."""
+"""Filter pinned x/tools edges from approved fixtures or the study pod."""
 import argparse
 import hashlib
 import json
@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TextIO
 
-from run_limited import HARD_LIMIT, HEADROOM, SOFT_LIMIT
+from run_limited import PROFILES, fixture_digest
 
 
 COMMIT = "7096db70df5ab7d83e20a28d9ccfd0994812acf9"
@@ -65,21 +65,23 @@ class Frontier:
     diagnostic_occurrences: int
 
 
-def parse_edge(line: str, number: int, source: str) -> Edge | Invalid:
+def parse_fields(line: str, number: int) -> list[str] | Invalid:
     fields = line.rstrip("\n").split("\t")
     if (len(fields) != 11 or not fields[0] or not fields[4]
             or not fields[9].isascii() or not fields[9].isdigit()
             or fields[10] not in ("static", "dynamic")):
         return Invalid(f"edge line {number}: malformed 11-field TSV")
-    caller = Node(fields[0], fields[1], filename(fields[2], source), fields[3])
-    callee = Node(fields[4], fields[5], filename(fields[6], source), fields[7])
-    return Edge(caller, callee, filename(fields[8], source), int(fields[9]),
-                fields[10])
+    return fields
+
+
+def field_node(fields: Sequence[str], offset: int, source: str) -> Node:
+    return Node(fields[offset], fields[offset + 1],
+                filename(fields[offset + 2], source), fields[offset + 3])
 
 
 def scan_frontier(stream: TextIO, names: Sequence[str], source: str,
                   diagnostics: TextIO) -> Frontier | Invalid:
-    """Read all edges, but retain only the reverse depth-three frontier."""
+    """Validate all records; allocate edges only for the requested frontier."""
     if not names or len(names) != len(set(names)):
         return Invalid("seam manifest: empty or duplicate symbols")
     symbols = {name: set() for name in names}
@@ -88,29 +90,41 @@ def scan_frontier(stream: TextIO, names: Sequence[str], source: str,
     for depth in range(3):
         if depth and not frontier:
             break
+        wanted = set(symbols) if depth == 0 else {n.name for n in frontier}
         stream.seek(0)
         callers = set()
         for number, line in enumerate(stream, 1):
-            edge = parse_edge(line, number, source)
-            if isinstance(edge, Invalid):
-                return edge
+            fields = parse_fields(line, number)
+            if isinstance(fields, Invalid):
+                return fields
             if depth == 0:
                 total += 1
-                for node in (edge.caller, edge.callee):
-                    if node.package:
-                        packages.add(node.package)
-                    if node.name in symbols:
-                        symbols[node.name].add(node)
-                    if not node.file or not node.package or node.synthetic:
-                        diagnostic_count += 1
-                        diagnostics.write(json.dumps({
-                            "edge_line": number, "node": asdict(node),
-                        }) + "\n")
-            if ((depth == 0 and edge.callee.name in symbols)
-                    or (depth > 0 and edge.callee in frontier)):
-                retained.add(edge)
-                raw_frontier += 1
-                callers.add(edge.caller)
+                for offset in (0, 4):
+                    if fields[offset + 1]:
+                        packages.add(fields[offset + 1])
+                    diagnostic = (not fields[offset + 1]
+                                  or not fields[offset + 2]
+                                  or bool(fields[offset + 3]))
+                    if fields[offset] in symbols or diagnostic:
+                        node = field_node(fields, offset, source)
+                        if node.name in symbols:
+                            symbols[node.name].add(node)
+                        if diagnostic:
+                            diagnostic_count += 1
+                            diagnostics.write(json.dumps({
+                                "edge_line": number, "node": asdict(node),
+                            }) + "\n")
+            # Raw callee rejection avoids Node/Edge allocation on later passes.
+            if fields[4] not in wanted:
+                continue
+            callee = field_node(fields, 4, source)
+            if depth and callee not in frontier:
+                continue
+            caller = field_node(fields, 0, source)
+            retained.add(Edge(caller, callee, filename(fields[8], source),
+                              int(fields[9]), fields[10]))
+            raw_frontier += 1
+            callers.add(caller)
         seeds = {node for group in symbols.values() for node in group}
         seen.update(seeds)
         frontier = callers - seen
@@ -188,7 +202,10 @@ def analyze(graph: Frontier, symbols: Sequence[Mapping]) -> dict:
 
 
 def resource_facts(launcher: Mapping, kernel: Mapping,
-                   host: Mapping) -> dict | Invalid:
+                   host: Mapping, profile: str = "pod") -> dict | Invalid:
+    if profile not in ("pod", "ci-fixture"):
+        return Invalid("profile cannot produce a callgraph report")
+    limits = PROFILES[profile]
     memory = launcher.get("memory", {})
     binding = launcher.get("binding", {})
     argv = kernel.get("argv", [])
@@ -198,16 +215,18 @@ def resource_facts(launcher: Mapping, kernel: Mapping,
             or launcher.get("removed") is not True
             or not launcher.get("deadline")
             or memory.get("status") != "completed"
-            or memory.get("limit_bytes") != HARD_LIMIT
+            or memory.get("limit_bytes") != limits["hard"]
             or memory.get("oom_kills") != 0 or memory.get("exit_code") != 0
             or type(memory.get("cgroup_peak_bytes")) is not int
             or memory["cgroup_peak_bytes"] <= 0):
         return Invalid("analysis launcher did not complete within its limits")
     if (kernel.get("schema") != "seam-kernel-limits/v1"
-            or kernel.get("memory.max") != HARD_LIMIT
+            or kernel.get("profile") != profile
+            or kernel.get("file_max_bytes") != limits["file_max"]
+            or kernel.get("memory.max") != limits["hard"]
             or kernel.get("memory.swap.max") != 0
             or kernel.get("memory.oom.group") != 1
-            or kernel.get("gomemlimit") != SOFT_LIMIT
+            or kernel.get("gomemlimit") != limits["soft"]
             or kernel.get("cgroup") != launcher.get("cgroup")):
         return Invalid("analysis kernel memory limit facts mismatch")
     if (not isinstance(argv, list) or len(argv) != 3 + len(OPTIONS)
@@ -215,23 +234,27 @@ def resource_facts(launcher: Mapping, kernel: Mapping,
             or not isinstance(bound_command, list)
             or bound_command[-len(argv):] != argv):
         return Invalid("analysis argv/options differ from launcher receipt")
-    if (type(host.get("memtotal_bytes")) is not int
-            or host["memtotal_bytes"] < HARD_LIMIT + HEADROOM
+    if (host.get("profile") != profile
+            or type(host.get("memtotal_bytes")) is not int
+            or host["memtotal_bytes"] < limits["hard"] + limits["headroom"]
             or type(host.get("nproc")) is not int or host["nproc"] < 1):
         return Invalid("refuse: insufficient MemTotal or invalid nproc")
-    return {"memory_max_bytes": kernel["memory.max"],
+    return {"profile": profile, "file_max_bytes": limits["file_max"],
+            "memory_max_bytes": kernel["memory.max"],
             "memory_swap_max_bytes": kernel["memory.swap.max"],
             "memory_oom_group": kernel["memory.oom.group"],
             "memory_peak_bytes": memory["cgroup_peak_bytes"],
             "oom_kills": memory["oom_kills"], "exit_code": memory["exit_code"],
-            "deadline": launcher["deadline"], "gomemlimit": SOFT_LIMIT,
+            "deadline": launcher["deadline"], "gomemlimit": limits["soft"],
             "memtotal_bytes": host["memtotal_bytes"], "nproc": host["nproc"],
             "argv": argv, "options": argv[3:],
             "launcher_binary_sha256": binding.get("harness_sha256")}
 
 
 def markdown(report: Mapping) -> str:
-    rows = ["# Storage seam callers", "", "CHA is conservative, not runtime "
+    title = ("# Storage seam callers" if report["identity"]["profile"] == "pod"
+             else "# CI fixture callers (not study evidence)")
+    rows = [title, "", "CHA is conservative, not runtime "
             "reachability. Depth 3 means shortest reverse paths of 1–3 edges.",
             "Self/cycle returns to a seed do not count as transitive callers.",
             "File/package unions use caller declarations, not call sites.",
@@ -268,6 +291,8 @@ def markdown(report: Mapping) -> str:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--print-format", action="store_true")
+    parser.add_argument("--profile", choices=("pod", "ci-fixture"),
+                        default="pod")
     parser.add_argument("--edges", type=Path)
     parser.add_argument("--symbols", type=Path)
     parser.add_argument("--source", type=Path)
@@ -289,15 +314,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             "host_capacity", "package_list")):
         parser.error("all analysis arguments are required")
     manifest = json.loads(args.symbols.read_text())
-    expected = {"schema": "seam-symbols/v1", "commit": COMMIT, "tree": TREE}
-    if (any(manifest.get(k) != v for k, v in expected.items())
-            or args.commit != COMMIT or args.tree != TREE
-            or args.go_version != "go1.27.3"):
+    if args.profile == "pod":
+        expected = {"schema": "seam-symbols/v1", "commit": COMMIT,
+                    "tree": TREE}
+        valid_source = (not any(manifest.get(k) != v
+                                for k, v in expected.items())
+                        and args.commit == COMMIT and args.tree == TREE)
+    else:
+        valid_source = (manifest.get("schema") == "seam-fixture-symbols/v1"
+                        and args.tree == manifest.get("fixture_sha256")
+                        and args.tree == fixture_digest(args.source)
+                        and len(args.commit) == 40
+                        and all(c in "0123456789abcdef" for c in args.commit))
+    if not valid_source or args.go_version != "go1.27.3":
         parser.error("source/toolchain/manifest identity mismatch")
+    launcher = json.loads(args.launcher_receipt.read_text())
+    if launcher.get("binding", {}).get("source_revision") != args.commit:
+        parser.error("bound source revision differs from report identity")
     resources = resource_facts(
-        json.loads(args.launcher_receipt.read_text()),
+        launcher,
         json.loads(args.kernel_limits.read_text()),
-        json.loads(args.host_capacity.read_text()))
+        json.loads(args.host_capacity.read_text()), args.profile)
     if isinstance(resources, Invalid):
         parser.error(resources.reason)
     with args.package_list.open(encoding="utf-8") as stream:
@@ -318,7 +355,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     with args.edges.open("rb") as stream:
         raw_pin = hashlib.file_digest(stream, "sha256").hexdigest()
     report["identity"] = {
-        "commit": COMMIT, "tree": TREE, "go": args.go_version,
+        "profile": args.profile, "commit": args.commit,
+        "tree": args.tree, "go": args.go_version,
+        "tree_kind": "git-tree" if args.profile == "pod" else "fixture-sha256",
+        "evidence_scope": ("full-source" if args.profile == "pod" else
+                           "CI fixture only; not FR-010/AC-011 evidence"),
         "tool": TOOL, "tool_version": "v0.52.0", "algorithm": "cha",
         "options": resources["options"], "raw_sha256": raw_pin,
         "symbols_sha256": hashlib.sha256(
