@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -607,7 +606,7 @@ func TestVectorMergedTopKWithMaskedWinnersAndTies(t *testing.T) {
 					t.Fatal(e)
 				}
 				got, e := s.VectorTopK(ctx, v, k)
-				if e != nil || !reflect.DeepEqual(want, got) {
+				if e != nil || !slices.Equal(want, got) {
 					t.Fatal(k, want, got, e)
 				}
 			}

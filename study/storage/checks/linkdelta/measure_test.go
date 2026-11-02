@@ -11,11 +11,13 @@ import (
 	"gxstudy/runner"
 	"gxstudy/workload"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func fixtureConfig(t *testing.T) config {
@@ -39,10 +41,6 @@ func fixtureConfig(t *testing.T) config {
 		}
 		expected = append(expected, workload.Expected{QueryID: q.ID, Answer: a})
 	}
-	expected, e := oracle.ReferenceAnswers([]dataset.Dataset{d}, queries, expected)
-	if e != nil {
-		t.Fatal(e)
-	}
 	if err := dataset.WriteJSON(filepath.Join(tier, "expected.json"), expected); err != nil {
 		t.Fatal(err)
 	}
@@ -62,6 +60,15 @@ func fixtureConfig(t *testing.T) config {
 func TestMeasurementWorkersTinyCompleteQueries(t *testing.T) {
 	ctx := context.Background()
 	c := fixtureConfig(t)
+	var generated []map[string]json.RawMessage
+	if err := dataset.ReadJSON(filepath.Join(c.Data, "expected.json"), &generated); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range generated {
+		if len(row) != 2 || row["query_id"] == nil || row["answer"] == nil {
+			t.Fatal("fixture differs from cmd/gen's query_id/answer format", row)
+		}
+	}
 	if err := os.Mkdir(c.Out, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +95,14 @@ func TestMeasurementWorkersTinyCompleteQueries(t *testing.T) {
 		}
 		if metrics.Edits != 2 || len(metrics.Checkpoints) != 2 || metrics.Visibility.Count != 2 || metrics.MaxEditCPU <= 0 {
 			t.Fatal(metrics)
+		}
+		var edits []editSample
+		if err = eachJSON(filepath.Join(c.Out, "delta-"+format, "edits.jsonl"), func(s editSample) error { edits = append(edits, s); return nil }); err != nil || !slices.Equal(edits, metrics.EditSamples) {
+			t.Fatal("durable edits differ from final report", edits, metrics.EditSamples, err)
+		}
+		var checkpoints []checkpoint
+		if err = eachJSON(filepath.Join(c.Out, "delta-"+format, "checkpoints.jsonl"), func(p checkpoint) error { checkpoints = append(checkpoints, p); return nil }); err != nil || !reflect.DeepEqual(checkpoints, metrics.Checkpoints) {
+			t.Fatal("durable checkpoints differ from final report", checkpoints, metrics.Checkpoints, err)
 		}
 
 		raw := map[int]map[string]map[string][]int64{}
@@ -133,12 +148,52 @@ func TestMeasurementWorkersTinyCompleteQueries(t *testing.T) {
 	if !reflect.DeepEqual(before, after) {
 		t.Fatal("protected input mutated")
 	}
+	// An absent reference match set is incomplete evidence, not a candidate miss.
+	var qs []workload.Query
+	if err = dataset.ReadJSON(filepath.Join(c.Out, "queries.json"), &qs); err != nil {
+		t.Fatal(err)
+	}
+	lexical := false
+	for _, q := range qs {
+		if !workload.Lexical(q.Op) {
+			continue
+		}
+		lexical = true
+		refPath := filepath.Join(c.Out, "references", referenceKey(false, q)+".json")
+		raw, e := os.ReadFile(refPath)
+		if e != nil {
+			t.Fatal(e)
+		}
+		var ref referenceRecord
+		if e = json.Unmarshal(raw, &ref); e != nil || ref.MatchRepos == nil {
+			t.Fatal("source-derived map missing", ref, e)
+		}
+		ref.MatchRepos = nil
+		if e = dataset.WriteJSON(refPath, ref); e != nil {
+			t.Fatal(e)
+		}
+		if e = verifyDeltas(ctx, c, "arrow"); e == nil || errors.Is(e, errAnswerMismatch) {
+			t.Fatal("missing match map must block, not report a semantic miss", e)
+		}
+		var blocked verifyReport
+		if e = dataset.ReadJSON(filepath.Join(c.Out, "verify-arrow.json"), &blocked); e != nil || blocked.Status != "blocked" || blocked.Error == "" {
+			t.Fatal(blocked, e)
+		}
+		if e = os.WriteFile(refPath, raw, 0600); e != nil {
+			t.Fatal(e)
+		}
+		break
+	}
+	if !lexical {
+		t.Fatal("fixture has no lexical query")
+	}
 	// Corrupt one real serialized answer and require the checker caller to fail.
 	path := filepath.Join(c.Out, "delta-arrow", "answers.jsonl")
 	var rows []sample
 	if err = eachJSON(path, func(s sample) error { rows = append(rows, s); return nil }); err != nil {
 		t.Fatal(err)
 	}
+	cleanRows := slices.Clone(rows)
 	changed := false
 	for i := range rows {
 		a, e := loadAnswer(filepath.Join(c.Out, "answer-blobs"), rows[i].AnswerSHA256)
@@ -159,24 +214,49 @@ func TestMeasurementWorkersTinyCompleteQueries(t *testing.T) {
 	if !changed {
 		t.Fatal("fixture lacks edge answer")
 	}
-	file, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, s := range rows {
-		raw, e := json.Marshal(s)
-		if e != nil {
-			t.Fatal(e)
+	writeRows := func(rows []sample) {
+		t.Helper()
+		file, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if _, e = file.Write(append(raw, '\n')); e != nil {
-			t.Fatal(e)
+		enc := json.NewEncoder(file)
+		for _, s := range rows {
+			if err := enc.Encode(s); err != nil {
+				_ = file.Close()
+				t.Fatal(err)
+			}
+		}
+		if err = file.Close(); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if err = file.Close(); err != nil {
-		t.Fatal(err)
+	writeRows(rows)
+	if err = verifyDeltas(ctx, c, "arrow"); !errors.Is(err, errAnswerMismatch) {
+		t.Fatal("dropped edge did not produce a semantic mismatch", err)
 	}
-	if err = verifyDeltas(ctx, c, "arrow"); err == nil {
-		t.Fatal("dropped edge accepted by checker caller")
+	var failed verifyReport
+	if err = dataset.ReadJSON(filepath.Join(c.Out, "verify-arrow.json"), &failed); err != nil || failed.Status != "miss" || failed.Error == "" {
+		t.Fatal("missing structured mismatch report", failed, err)
+	}
+	// A wrapper hash difference cannot be a semantic miss before its blobs verify.
+	missingBlob := false
+	for i := range cleanRows {
+		if cleanRows[i].Form == "wrapper" {
+			cleanRows[i].AnswerSHA256 = strings.Repeat("0", 64)
+			missingBlob = true
+			break
+		}
+	}
+	if !missingBlob {
+		t.Fatal("fixture has no wrapper observation")
+	}
+	writeRows(cleanRows)
+	if err = verifyDeltas(ctx, c, "arrow"); err == nil || errors.Is(err, errAnswerMismatch) {
+		t.Fatal("missing wrapper blob became semantic inequality", err)
+	}
+	if err = dataset.ReadJSON(filepath.Join(c.Out, "verify-arrow.json"), &failed); err != nil || failed.Status != "blocked" {
+		t.Fatal("missing blob did not produce a blocked report", failed, err)
 	}
 }
 func TestConfigRefusesMissingDriftAndWrongLimits(t *testing.T) {
@@ -240,7 +320,6 @@ func TestThresholdBranchesKeepTargets(t *testing.T) {
 	}{
 		{"cpu", func(r *deltaReport) { r.Checkpoints[0].MaxEditCPU = 1000000001 }},
 		{"visibility", func(r *deltaReport) { r.Checkpoints[0].Visibility.P95 = 5000000001 }},
-		{"disk", func(r *deltaReport) { r.Checkpoints[0].ByteRatio = 2.01 }},
 		{"read", func(r *deltaReport) { r.Checkpoints[0].WorstRatio = 1.1001 }},
 		{"missing-samples", func(r *deltaReport) { r.Checkpoints[0].Visibility.Count = 0 }},
 		{"no-threshold", func(r *deltaReport) { r.LowerBound = nil }},
@@ -258,6 +337,10 @@ func TestThresholdBranchesKeepTargets(t *testing.T) {
 		})
 	}
 	r := passingReport()
+	r.Checkpoints[0].ByteRatio = 3
+	if !deltaPass(r) {
+		t.Fatal("diagnostic byte ratio became an unapproved decision rule")
+	}
 	r.MaxEditCPU = 9e9
 	r.Visibility.P95 = 9e9
 	r.Checkpoints = append(r.Checkpoints, checkpoint{Size: 32, MaxEditCPU: 9e9, Visibility: runner.Distribution{Count: 32, P95: 9e9}, WorstRatio: 1.2, ByteRatio: 1})
@@ -265,6 +348,9 @@ func TestThresholdBranchesKeepTargets(t *testing.T) {
 	r.LowerBound = nil
 	if !deltaPass(r) {
 		t.Fatal("unserved diagnostics invalidated earlier regime")
+	}
+	if selected := selectDelta(map[string]formResult{"arrow": {Status: "pass", Report: r}, "parquet": {Status: "pass", Report: r}}); selected.Branch != "both-pass-lead-selects-simplest" {
+		t.Fatal("later diagnostics triggered an edit-bound stop", selected)
 	}
 
 }
@@ -314,16 +400,22 @@ func completedReceipt(limit int64) externalResult {
 	return externalResult{State: "completed", Removed: true, Memory: runner.ComponentMemory{PID: 1, LimitBytes: limit, PeakBytes: 1, PeakRSSBytes: 1, Status: "completed", ExitCode: 0}}
 }
 func TestSelectionAndLinkReceiptDecisions(t *testing.T) {
+	pass := formResult{Status: "pass", Report: passingReport()}
+	miss := formResult{Status: "miss"}
+	blocked := formResult{Status: "blocked"}
 	for _, tc := range []struct {
 		name           string
-		reports        map[string]deltaReport
+		reports        map[string]formResult
 		branch, status string
 	}{
-		{"arrow", map[string]deltaReport{"arrow": passingReport()}, "arrow", "pass"},
-		{"parquet", map[string]deltaReport{"parquet": passingReport()}, "parquet", "pass"},
-		{"both", map[string]deltaReport{"arrow": passingReport(), "parquet": passingReport()}, "both-pass-lead-selects-simplest", "partial"},
-		{"none", map[string]deltaReport{"arrow": {}, "parquet": {}}, "no-passing-form", "miss"},
-		{"missing", map[string]deltaReport{}, "no-complete-form-evidence", "blocked"},
+		{"arrow-other-measured-miss", map[string]formResult{"arrow": pass, "parquet": miss}, "arrow", "pass"},
+		{"parquet-other-measured-miss", map[string]formResult{"parquet": pass, "arrow": miss}, "parquet", "pass"},
+		{"arrow-other-blocked", map[string]formResult{"arrow": pass, "parquet": blocked}, "arrow-passes-parquet-blocked", "partial"},
+		{"parquet-other-blocked", map[string]formResult{"parquet": pass, "arrow": blocked}, "parquet-passes-arrow-blocked", "partial"},
+		{"absent-other-is-blocked", map[string]formResult{"arrow": pass}, "arrow-passes-parquet-blocked", "partial"},
+		{"both", map[string]formResult{"arrow": pass, "parquet": pass}, "both-pass-lead-selects-simplest", "partial"},
+		{"none", map[string]formResult{"arrow": miss, "parquet": miss}, "no-passing-form", "miss"},
+		{"missing", map[string]formResult{}, "no-complete-form-evidence", "blocked"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := selectDelta(tc.reports)
@@ -333,21 +425,30 @@ func TestSelectionAndLinkReceiptDecisions(t *testing.T) {
 		})
 	}
 	a, p := passingReport(), passingReport()
-	a.Checkpoints[0].MaxEditCPU = 2e9
+	a.Checkpoints[0].MaxEditCPU = 3e9
 	p.Checkpoints[0].MaxEditCPU = 2e9
-	if r := selectDelta(map[string]deltaReport{"arrow": a, "parquet": p}); r.Branch != "stop-ask-user-both-edit-bound-misses" {
+	if r := selectDelta(map[string]formResult{"arrow": {Status: "miss", Report: a}, "parquet": {Status: "miss", Report: p}}); r.Branch != "stop-ask-user-both-edit-bound-misses" {
 		t.Fatal(r)
+	}
+	// No read regime passes for Arrow. Its shortest completed edit still counts.
+	a.Checkpoints[0].WorstRatio = 1.2
+	a = threshold(a)
+	p.Checkpoints[0].Size = 4
+	p.Checkpoints[0].Visibility.Count = 4
+	p.LowerBound = intPtr(4)
+	if r := selectDelta(map[string]formResult{"arrow": {Status: "miss", Report: a}, "parquet": {Status: "miss", Report: p}}); r.Branch != "stop-ask-user-both-edit-bound-misses" {
+		t.Fatal("first-size crossing hid edit-bound user stop", r)
 	}
 	a, p = passingReport(), passingReport()
 	a.Checkpoints[0].Visibility.P95 = 6e9
 	p.Checkpoints[0].Visibility.P95 = 6e9
-	if r := selectDelta(map[string]deltaReport{"arrow": a, "parquet": p}); r.Branch != "stop-ask-user-both-visibility-bound-misses" {
-		t.Fatal(r)
+	if r := selectDelta(map[string]formResult{"arrow": {Status: "miss", Report: a}, "parquet": {Status: "miss", Report: p}}); r.Branch != "no-passing-form" || r.Status != "miss" {
+		t.Fatal("unapproved visibility-specific stop", r)
 	}
 	rec := completedReceipt(linkCap)
 	l := linkResult{Status: "pass"}
 	parity := parityResult{Status: "pass"}
-	if r := linkTarget("global", rec, l, parity); r.Status != "pass" {
+	if r := linkTarget("global", rec, l, parity, collisionStats{}); r.Status != "pass" {
 		t.Fatal(r)
 	}
 	for _, tc := range []struct {
@@ -364,7 +465,7 @@ func TestSelectionAndLinkReceiptDecisions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r, l, p := rec, l, parity
 			tc.change(&r, &l, &p)
-			if got := linkTarget("global", r, l, p); got.Status != tc.status {
+			if got := linkTarget("global", r, l, p, collisionStats{}); got.Status != tc.status {
 				t.Fatal(got)
 			}
 		})
@@ -392,7 +493,7 @@ func TestSelectionAndLinkReceiptDecisions(t *testing.T) {
 	}
 }
 func TestIndependentControllerPaths(t *testing.T) {
-	for _, scenario := range []string{"partial", "parity-miss", "oom-arrow-failure", "unsafe-cleanup", "cancelled", "references-failure", "verify-arrow-failure"} {
+	for _, scenario := range []string{"partial", "parity-miss", "oom-arrow-failure", "link-crash", "missing-collisions", "unsafe-cleanup", "cancelled", "deadline-parquet", "references-failure", "verify-arrow-failure", "verify-arrow-oom", "verify-arrow-mismatch"} {
 		t.Run(scenario, func(t *testing.T) {
 			c := fixtureConfig(t)
 			if e := os.Mkdir(c.Out, 0700); e != nil {
@@ -425,6 +526,8 @@ func TestIndependentControllerPaths(t *testing.T) {
 						r.State = "oom"
 						r.Memory.OOMKills = 1
 						return r, errors.New("contained OOM")
+					case "link-crash":
+						return failed(limit), errors.New("contained link crash")
 					case "unsafe-cleanup":
 						r = failed(limit)
 						r.Removed = false
@@ -435,10 +538,29 @@ func TestIndependentControllerPaths(t *testing.T) {
 						return r, errors.New("cancelled")
 					}
 				}
+				if task == "delta-parquet" && scenario == "deadline-parquet" {
+					r = failed(limit)
+					r.State = "deadline"
+					return r, errors.New("worker deadline expired")
+				}
+				if task == "verify-arrow" && (scenario == "verify-arrow-oom" || scenario == "verify-arrow-mismatch") {
+					r = failed(limit)
+					if scenario == "verify-arrow-oom" {
+						r.State = "oom"
+						r.Memory.OOMKills = 1
+					} else {
+						write(filepath.Join(c.Out, task+".json"), verifyReport{Status: "miss", Error: "answer differs: fixture wrong edge"})
+					}
+					return r, errors.New("checker did not pass")
+				}
 				if (task == "delta-arrow" && scenario == "oom-arrow-failure") || (task == "verify-arrow" && scenario == "verify-arrow-failure") || (task == "references" && scenario == "references-failure") {
 					return failed(limit), errors.New("contained failure")
 				}
 				switch task {
+				case "prepare-link":
+					if scenario != "missing-collisions" {
+						write(filepath.Join(c.Out, "facts", "collisions.json"), collisionStats{})
+					}
 				case "link-global", "link-package":
 					status := "pass"
 					if scenario == "partial" && task == "link-global" {
@@ -459,6 +581,16 @@ func TestIndependentControllerPaths(t *testing.T) {
 				return r, nil
 			}
 			targets, e := collectTargets(c, run)
+			byTarget := map[string]targetResult{}
+			for _, target := range targets {
+				byTarget[target.Target] = target
+			}
+			if scenario == "deadline-parquet" {
+				if e == nil || byTarget["check4-arrow"].Status != "pass" || byTarget["check4-parquet"].Status != "blocked" || slices.Contains(calls, "verify-parquet") {
+					t.Fatal("deadline lost earlier result or allowed another launch", calls, targets, e)
+				}
+				return
+			}
 			if scenario == "unsafe-cleanup" || scenario == "cancelled" {
 				if e == nil || slices.Contains(calls, "references") || slices.Contains(calls, "link-package") {
 					t.Fatal(calls, targets, e)
@@ -479,6 +611,21 @@ func TestIndependentControllerPaths(t *testing.T) {
 			}
 			if (scenario == "oom-arrow-failure") != slices.Contains(calls, "link-package") {
 				t.Fatal("wrong fallback decision", calls)
+			}
+			if scenario == "link-crash" || scenario == "missing-collisions" {
+				if byTarget["check3-link-peak-and-parity"].Status != "blocked" || slices.Contains(calls, "link-package") {
+					t.Fatal("unmeasured link failure became miss/retry", calls, targets)
+				}
+			}
+			if scenario == "oom-arrow-failure" || scenario == "verify-arrow-failure" || scenario == "verify-arrow-oom" {
+				if byTarget["check4-arrow"].Status != "blocked" || byTarget["check4-delta-selection"].Status != "partial" || byTarget["check4-delta-selection"].Branch != "parquet-passes-arrow-blocked" {
+					t.Fatal("unknown Arrow result became a format choice", targets)
+				}
+			}
+			if scenario == "verify-arrow-mismatch" {
+				if byTarget["check4-arrow"].Status != "miss" || byTarget["check4-delta-selection"].Status != "pass" || byTarget["check4-delta-selection"].Branch != "parquet" {
+					t.Fatal("measured mismatch lost its distinct status", targets)
+				}
 			}
 			if scenario == "partial" || scenario == "parity-miss" {
 				for _, target := range targets {
@@ -586,5 +733,286 @@ func TestDeltaRepositoryMustMatchPinnedQueryRepository(t *testing.T) {
 	}
 	if e := prepare(context.Background(), c); e == nil {
 		t.Fatal("unexercised delta repository accepted")
+	}
+}
+
+func TestLexicalReferenceRequiresExplicitMatchSet(t *testing.T) {
+	ctx := context.Background()
+	d := conformance.Fixture()
+	q := workload.Query{ID: "absent-lexical", Op: "symbols", Repo: d.Repo, Key: "absentlexicaltoken987", K: -1}
+	matches, err := matchRepositories(ctx, []dataset.Dataset{d}, q)
+	if err != nil || matches == nil || len(matches) != 0 {
+		t.Fatal(matches, err)
+	}
+	ref := referenceRecord{Query: q, Expected: workload.Expected{QueryID: q.ID}, MatchRepos: matches}
+	raw, err := json.Marshal(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var read referenceRecord
+	if err = json.Unmarshal(raw, &read); err != nil || read.MatchRepos == nil {
+		t.Fatal("empty membership was erased by serialization", string(raw), err)
+	}
+	if err = compareReference(q, read.Expected, read.MatchRepos, workload.Answer{}); err != nil {
+		t.Fatal("empty native answer refused with a valid empty set", err)
+	}
+	if err = compareReference(q, read.Expected, nil, workload.Answer{}); err == nil || errors.Is(err, errAnswerMismatch) {
+		t.Fatal("missing reference membership must block", err)
+	}
+	if err = compareReference(q, read.Expected, read.MatchRepos, workload.Answer{Hits: []adapter.Hit{{ID: "non-member", Score: 1}}}); !errors.Is(err, errAnswerMismatch) {
+		t.Fatal("non-member hit did not fail semantic validation", err)
+	}
+}
+
+func TestLinkTargetShowsCollisionFactShares(t *testing.T) {
+	collisions := collisionStats{NameScopeGroups: 2, ExtendedGroups: 1, NameScopeFacts: 6, ExtendedFacts: 3}
+	r := linkTarget("global", completedReceipt(linkCap), linkResult{Status: "pass", Facts: 12}, parityResult{Status: "pass"}, collisions)
+	m, ok := r.Measured.(linkMeasurement)
+	if !ok || r.Status != "pass" || m.Collisions != collisions || m.NameScopeCollisionFactShare != .5 || m.OrdinalFactShare != .25 {
+		t.Fatal(r)
+	}
+}
+
+func TestWorkerDeadlineReservesControllerFinalization(t *testing.T) {
+	c := fixtureConfig(t)
+	if err := os.Mkdir(c.Out, 0700); err != nil {
+		t.Fatal(err)
+	}
+	c.WallSeconds = 9000
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	if err := writePolicies(c, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range []string{"controller", "prepare", "references", "link-global", "delta-arrow", "verify-parquet"} {
+		var policy struct {
+			Schema   string
+			Deadline time.Time
+		}
+		if err := dataset.ReadJSON(launchPolicy(c, task), &policy); err != nil {
+			t.Fatal(err)
+		}
+		want := now.Add(9000 * time.Second)
+		if task != "controller" {
+			want = want.Add(-60 * time.Second)
+		}
+		if policy.Schema != "external-limits/v1" || !policy.Deadline.Equal(want) {
+			t.Fatal(task, policy, want)
+		}
+	}
+	for _, seconds := range []int{0, 30, 60} {
+		bad := c
+		bad.Out = t.TempDir()
+		bad.WallSeconds = seconds
+		if err := writePolicies(bad, now); err == nil {
+			t.Fatal("budget without a finalization reserve accepted", seconds)
+		}
+		entries, err := os.ReadDir(bad.Out)
+		if err != nil || len(entries) != 0 {
+			t.Fatal("rejected budget created policies", entries, err)
+		}
+	}
+}
+
+func TestExpiredWorkerPolicyStillWritesBlockedSummary(t *testing.T) {
+	c := fixtureConfig(t)
+	c.WallSeconds = 9000
+	if err := os.Mkdir(c.Out, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepare(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	if err := dataset.WriteJSON(filepath.Join(c.Out, "config.json"), c); err != nil {
+		t.Fatal(err)
+	}
+	// Expired workers, but 59 seconds remain for the controller. No sleep or launch.
+	if err := writePolicies(c, time.Now().Add(-8941*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := control(c); err == nil || !strings.Contains(err.Error(), "worker deadline expired") {
+		t.Fatal(err)
+	}
+	var summary runSummary
+	if err := dataset.ReadJSON(filepath.Join(c.Out, "result.json"), &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.Complete || len(summary.Targets) != 4 || summary.Protected != "unchanged" || summary.Error == "" {
+		t.Fatal(summary)
+	}
+	for _, target := range summary.Targets {
+		if target.Status != "blocked" || !strings.Contains(target.Reason, "worker deadline expired") {
+			t.Fatal(target)
+		}
+	}
+	if reason := unfinishedReason(nil); reason == "" || strings.Contains(reason, "<nil>") {
+		t.Fatal(reason)
+	}
+	if _, err := os.Stat(filepath.Join(c.Out, "prepare-binding.json")); !os.IsNotExist(err) {
+		t.Fatal("expired worker was prepared for launch", err)
+	}
+}
+
+func TestDeltaProgressCrashHelper(t *testing.T) {
+	configPath := os.Getenv("LINKDELTA_PROGRESS_CONFIG")
+	if configPath == "" {
+		return
+	}
+	var c config
+	if err := dataset.ReadJSON(configPath, &c); err != nil {
+		t.Fatal(err)
+	}
+	stage := os.Getenv("LINKDELTA_PROGRESS_STAGE")
+	adapter.Checkpoint = func(s string) {
+		if s == stage {
+			os.Exit(99)
+		}
+	}
+	if err := measureDeltas(context.Background(), c, "arrow"); err != nil {
+		t.Fatal(err)
+	}
+	t.Fatal("progress checkpoint was unreachable")
+}
+
+func TestCompletedDeltaProgressSurvivesWorkerExit(t *testing.T) {
+	for _, stage := range []string{"linkdelta-after-edit", "linkdelta-after-checkpoint"} {
+		t.Run(stage, func(t *testing.T) {
+			c := fixtureConfig(t)
+			if err := os.Mkdir(c.Out, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := prepare(context.Background(), c); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(c.Out, "answer-blobs"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(c.Out, "progress-fixture.json")
+			if err := dataset.WriteJSON(configPath, c); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(os.Args[0], "-test.run=^TestDeltaProgressCrashHelper$")
+			cmd.Env = append(os.Environ(), "LINKDELTA_PROGRESS_CONFIG="+configPath, "LINKDELTA_PROGRESS_STAGE="+stage)
+			output, err := cmd.CombinedOutput()
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 99 {
+				t.Fatal("unexpected helper outcome", err, string(output))
+			}
+			var edits []editSample
+			if err = eachJSON(filepath.Join(c.Out, "delta-arrow", "edits.jsonl"), func(s editSample) error { edits = append(edits, s); return nil }); err != nil || len(edits) != 1 || edits[0].Size != 1 || edits[0].CPU <= 0 || edits[0].Visibility <= 0 {
+				t.Fatal("completed edit lost", edits, err)
+			}
+			var points []checkpoint
+			if err = eachJSON(filepath.Join(c.Out, "delta-arrow", "checkpoints.jsonl"), func(p checkpoint) error { points = append(points, p); return nil }); err != nil {
+				t.Fatal(err)
+			}
+			want := 0
+			if stage == "linkdelta-after-checkpoint" {
+				want = 1
+			}
+			if len(points) != want || (want == 1 && (points[0].Size != 1 || points[0].Visibility.Count != 1 || len(points[0].BaseP95) == 0)) {
+				t.Fatal("completed checkpoint lost", points)
+			}
+			if _, err = os.Stat(filepath.Join(c.Out, "delta-arrow", "metrics.json")); !os.IsNotExist(err) {
+				t.Fatal("aborted worker produced final metrics", err)
+			}
+			pins, err := outputPins(c.Out)
+			if err != nil || !digest(pins["delta-arrow/edits.jsonl"]) || !digest(pins["delta-arrow/checkpoints.jsonl"]) {
+				t.Fatal("terminal hashing omitted progress", pins, err)
+			}
+		})
+	}
+}
+
+func TestCleanReferenceSourceValidationIsNotRepeated(t *testing.T) {
+	for _, scenario := range []string{"cached", "invalid-first-source"} {
+		t.Run(scenario, func(t *testing.T) {
+			invalidFirst := scenario == "invalid-first-source"
+			c := fixtureConfig(t)
+			c.Sizes = []int{1, 2, 3}
+			if err := os.Mkdir(c.Out, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := prepare(context.Background(), c); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(c.Out, "answer-blobs"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			source, hidden := filepath.Join(c.Out, "changed-source"), filepath.Join(c.Out, "hidden-source")
+			moved := false
+			defer func() {
+				if moved {
+					if err := os.Rename(hidden, source); err != nil {
+						t.Error(err)
+					}
+				}
+			}()
+			previous := adapter.Checkpoint
+			defer func() { adapter.Checkpoint = previous }()
+			count := 0
+			var hookErr error
+			if invalidFirst {
+				if err := os.Rename(source, hidden); err != nil {
+					t.Fatal(err)
+				}
+				moved = true
+			} else {
+				adapter.Checkpoint = func(stage string) {
+					if stage == "linkdelta-after-checkpoint" {
+						count++
+						if count == 1 {
+							hookErr = os.Rename(source, hidden)
+							moved = hookErr == nil
+						}
+					}
+				}
+			}
+			err := measureDeltas(context.Background(), c, "arrow")
+			if invalidFirst {
+				if err == nil {
+					t.Fatal("source missing before its first build was accepted")
+				}
+				return
+			}
+			if err != nil || hookErr != nil || count != 3 || !moved {
+				t.Fatal("later checkpoints reopened the already-built source", count, err, hookErr)
+			}
+		})
+	}
+}
+
+func TestNativeLexicalRequiresFullCountWithoutRankEquivalence(t *testing.T) {
+	wanted := []adapter.Hit{{ID: "a", Score: 4}, {ID: "b", Score: 3}, {ID: "c", Score: 2}, {ID: "d", Score: 1}}
+	native := []adapter.Hit{{ID: "d", Score: 4}, {ID: "c", Score: 3}, {ID: "b", Score: 2}, {ID: "a", Score: 1}}
+	matches := map[string]string{"a": "r", "b": "r", "c": "r", "d": "r"}
+	for _, k := range []int{-1, 0, 1, 2, 8} {
+		q := workload.Query{ID: "native-cardinality", Op: "symbols", Repo: "r", K: k, ExactRank: true}
+		count := len(wanted)
+		if k >= 0 {
+			count = min(k, count)
+		}
+		want := workload.Expected{QueryID: q.ID, Answer: workload.Answer{Hits: wanted[:count]}}
+		full := workload.Answer{Hits: native[:count]}
+		if err := compareReference(q, want, matches, full); err != nil {
+			t.Fatal("full native result incorrectly required rank equivalence", k, err)
+		}
+		if count > 0 {
+			invalid := slices.Clone(native[:count])
+			invalid[0].ID = "non-member"
+			if err := compareReference(q, want, matches, workload.Answer{Hits: invalid}); !errors.Is(err, errAnswerMismatch) {
+				t.Fatal("full count bypassed native membership", k, err)
+			}
+		}
+		if count > 1 {
+			duplicate := slices.Clone(native[:count])
+			duplicate[1] = duplicate[0]
+			if err := compareReference(q, want, matches, workload.Answer{Hits: duplicate}); !errors.Is(err, errAnswerMismatch) {
+				t.Fatal("full count bypassed duplicate rejection", k, err)
+			}
+			underfilled := workload.Answer{Hits: native[:count-1]}
+			if err := compareReference(q, want, matches, underfilled); !errors.Is(err, errAnswerMismatch) {
+				t.Fatal("valid but underfilled nonempty result accepted", k, err)
+			}
+		}
 	}
 }

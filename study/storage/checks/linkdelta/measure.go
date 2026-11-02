@@ -26,8 +26,33 @@ import (
 )
 
 const linkCap int64 = 1610612736
+const finalizationReserve = 60 * time.Second
+
+func launchPolicy(c config, name string) string {
+	if name == "controller" {
+		return filepath.Join(c.Out, "policy.json")
+	}
+	return filepath.Join(c.Out, "worker-policy.json")
+}
+func writePolicies(c config, now time.Time) error {
+	deadline := now.Add(time.Duration(c.WallSeconds) * time.Second)
+	workerDeadline := deadline.Add(-finalizationReserve)
+	if !workerDeadline.After(now) {
+		return fmt.Errorf("wall budget must exceed the 60-second controller finalization reserve")
+	}
+	for name, until := range map[string]time.Time{"controller": deadline, "worker": workerDeadline} {
+		if err := dataset.WriteJSON(launchPolicy(c, name), struct {
+			Schema   string    `json:"schema"`
+			Deadline time.Time `json:"deadline"`
+		}{"external-limits/v1", until}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 var errEdgeMismatch = errors.New("full edge multiset differs")
+var errAnswerMismatch = errors.New("answer differs")
 
 type parityResult struct {
 	Status string
@@ -328,11 +353,7 @@ func measure(args []string) (err error) {
 	if err = os.WriteFile(cfgCopy, raw, 0600); err != nil {
 		return err
 	}
-	deadline := time.Now().Add(time.Duration(c.WallSeconds) * time.Second)
-	if err = dataset.WriteJSON(filepath.Join(c.Out, "policy.json"), struct {
-		Schema   string    `json:"schema"`
-		Deadline time.Time `json:"deadline"`
-	}{"external-limits/v1", deadline}); err != nil {
+	if err = writePolicies(c, time.Now()); err != nil {
 		return err
 	}
 	for _, name := range []string{"home", "config", "cache", "data", "tmp", "state", "runtime"} {
@@ -399,7 +420,7 @@ func launch(c config, name string, limit int64, command []string, dataPath strin
 	if err != nil {
 		return receipt, err
 	}
-	policy := filepath.Join(c.Out, "policy.json")
+	policy := launchPolicy(c, name)
 	recipe, err := dataset.Hash(policy)
 	if err != nil {
 		return receipt, err
@@ -470,6 +491,12 @@ func work(ctx context.Context, c config, task string) error {
 		return fmt.Errorf("unknown worker task")
 	}
 }
+func unfinishedReason(err error) string {
+	if err != nil {
+		return "Not completed: " + err.Error()
+	}
+	return "No complete evidence was produced."
+}
 func control(c config) (err error) {
 	summary := runSummary{Schema: "linkdelta-run/v1", Receipts: map[string]string{}, Outputs: map[string]string{}}
 	defer func() {
@@ -484,7 +511,7 @@ func control(c config) (err error) {
 				}
 			}
 			if !found {
-				summary.Targets = append(summary.Targets, targetResult{Target: target, Status: "blocked", Branch: "not-completed", Reason: fmt.Sprint("Not run: ", err)})
+				summary.Targets = append(summary.Targets, targetResult{Target: target, Status: "blocked", Branch: "not-completed", Reason: unfinishedReason(err)})
 			}
 		}
 		for _, name := range []string{"prepare", "prepare-link", "references", "link-global", "check-link-global", "link-package", "check-link-package", "delta-arrow", "delta-parquet", "verify-arrow", "verify-parquet"} {
@@ -516,11 +543,11 @@ func control(c config) (err error) {
 	}
 	run := func(task string, limit int64) (externalResult, error) {
 		var policy struct{ Deadline time.Time }
-		if e := dataset.ReadJSON(filepath.Join(c.Out, "policy.json"), &policy); e != nil {
+		if e := dataset.ReadJSON(launchPolicy(c, task), &policy); e != nil {
 			return externalResult{}, e
 		}
 		if !time.Now().Before(policy.Deadline) {
-			return externalResult{}, fmt.Errorf("shared deadline expired")
+			return externalResult{}, fmt.Errorf("worker deadline expired; controller finalization reserve remains")
 		}
 		approval, e := dataset.Hash(c.Approval)
 		if e != nil {
@@ -589,7 +616,17 @@ func containedFailure(r externalResult, limit int64) bool {
 func memoryFallback(r externalResult) bool {
 	return safeReceipt(r, linkCap) && ((r.State == "oom" && r.Memory.OOMKills > 0) || (r.State == "completed" && r.Memory.PeakBytes > linkCap))
 }
-func linkTarget(mode string, r externalResult, l linkResult, parity parityResult) targetResult {
+
+type linkMeasurement struct {
+	Memory                      runner.ComponentMemory
+	Link                        linkResult
+	Parity                      parityResult
+	Collisions                  collisionStats
+	NameScopeCollisionFactShare float64
+	OrdinalFactShare            float64
+}
+
+func linkTarget(mode string, r externalResult, l linkResult, parity parityResult, collisions collisionStats) targetResult {
 	status := "miss"
 	if l.Status == "partial" {
 		status = "partial"
@@ -597,12 +634,12 @@ func linkTarget(mode string, r externalResult, l linkResult, parity parityResult
 	if l.Status == "pass" && parity.Status == "pass" && safeReceipt(r, linkCap) && r.State == "completed" && r.Memory.PeakBytes <= linkCap {
 		status = "pass"
 	}
-	return targetResult{Target: "check3-link-peak-and-parity", Status: status, Branch: mode, Measured: struct {
-		Memory runner.ComponentMemory
-		Link   linkResult
-		Parity parityResult
-	}{r.Memory, l, parity}, Reason: "Synthetic projected name/scope/kind/span/ordinal linking only; language resolver rules untested."}
-
+	m := linkMeasurement{Memory: r.Memory, Link: l, Parity: parity, Collisions: collisions}
+	if l.Facts > 0 {
+		m.NameScopeCollisionFactShare = float64(collisions.NameScopeFacts) / float64(l.Facts)
+		m.OrdinalFactShare = float64(collisions.ExtendedFacts) / float64(l.Facts)
+	}
+	return targetResult{Target: "check3-link-peak-and-parity", Status: status, Branch: mode, Measured: m, Reason: "Synthetic projected name/scope/kind/span/ordinal linking only; language resolver rules untested."}
 }
 func collectTargets(c config, run func(string, int64) (externalResult, error)) ([]targetResult, error) {
 	var targets []targetResult
@@ -611,12 +648,19 @@ func collectTargets(c config, run func(string, int64) (externalResult, error)) (
 		return targets, e
 	}
 	rec, e = run("prepare-link", c.Limits.Checker)
-	if e != nil {
+	var collisions collisionStats
+	if e == nil {
+		e = dataset.ReadJSON(filepath.Join(c.Out, "facts", "collisions.json"), &collisions)
+		if e != nil {
+			targets = append(targets, targetResult{Target: "check3-link-peak-and-parity", Status: "blocked", Branch: "collision-evidence", Reason: e.Error()})
+		}
+	} else {
 		targets = append(targets, targetResult{Target: "check3-link-peak-and-parity", Status: "blocked", Branch: "link-preparation", Reason: e.Error()})
 		if !containedFailure(rec, c.Limits.Checker) {
 			return targets, e
 		}
-	} else {
+	}
+	if e == nil {
 		attempt := func(mode string) (targetResult, bool, error) {
 			r, err := run("link-"+mode, c.LinkLimit)
 			var l linkResult
@@ -624,7 +668,11 @@ func collectTargets(c config, run func(string, int64) (externalResult, error)) (
 				if !containedFailure(r, c.LinkLimit) {
 					return targetResult{}, false, err
 				}
-				return targetResult{Target: "check3-link-peak-and-parity", Status: "miss", Branch: mode, Measured: r, Reason: err.Error()}, memoryFallback(r), nil
+				status := "blocked"
+				if memoryFallback(r) {
+					status = "miss"
+				}
+				return targetResult{Target: "check3-link-peak-and-parity", Status: status, Branch: mode, Measured: r, Reason: err.Error()}, memoryFallback(r), nil
 			}
 			if err = dataset.ReadJSON(filepath.Join(c.Out, "link-"+mode, "result.json"), &l); err != nil {
 				return targetResult{Target: "check3-link-peak-and-parity", Status: "blocked", Branch: mode, Reason: err.Error()}, false, nil
@@ -640,7 +688,7 @@ func collectTargets(c config, run func(string, int64) (externalResult, error)) (
 			if err = dataset.ReadJSON(filepath.Join(c.Out, "check-link-"+mode+".json"), &parity); err != nil {
 				return targetResult{Target: "check3-link-peak-and-parity", Status: "blocked", Branch: mode, Reason: err.Error()}, false, nil
 			}
-			return linkTarget(mode, r, l, parity), memoryFallback(r), nil
+			return linkTarget(mode, r, l, parity, collisions), memoryFallback(r), nil
 		}
 		result, fallback, err := attempt("global")
 		if err != nil {
@@ -667,11 +715,12 @@ func collectTargets(c config, run func(string, int64) (externalResult, error)) (
 		if !containedFailure(rec, c.Limits.Checker) {
 			return targets, e
 		}
-		targets = append(targets, selectDelta(map[string]deltaReport{}))
+		targets = append(targets, selectDelta(map[string]formResult{}))
 		return targets, nil
 	}
-	results := map[string]deltaReport{}
+	results := map[string]formResult{}
 	for _, format := range []string{"arrow", "parquet"} {
+		results[format] = formResult{Status: "blocked"}
 		rec, e = run("delta-"+format, c.Limits.Engine)
 		if e != nil {
 			targets = append(targets, targetResult{Target: "check4-" + format, Status: "blocked", Branch: "engine", Measured: rec, Reason: e.Error()})
@@ -683,7 +732,13 @@ func collectTargets(c config, run func(string, int64) (externalResult, error)) (
 		engine := rec
 		rec, e = run("verify-"+format, c.Limits.Checker)
 		if e != nil {
-			targets = append(targets, targetResult{Target: "check4-" + format, Status: "miss", Branch: "correctness-verification", Measured: rec, Reason: e.Error()})
+			status := "blocked"
+			var verification verifyReport
+			if rec.State == "failed" && containedFailure(rec, c.Limits.Checker) && dataset.ReadJSON(filepath.Join(c.Out, "verify-"+format+".json"), &verification) == nil && verification.Status == "miss" && verification.Error != "" {
+				status = "miss"
+			}
+			results[format] = formResult{Status: status}
+			targets = append(targets, targetResult{Target: "check4-" + format, Status: status, Branch: "correctness-verification", Measured: rec, Reason: e.Error()})
 			if !containedFailure(rec, c.Limits.Checker) {
 				return targets, e
 			}
@@ -693,12 +748,17 @@ func collectTargets(c config, run func(string, int64) (externalResult, error)) (
 		var verification verifyReport
 		e = errors.Join(dataset.ReadJSON(filepath.Join(c.Out, "delta-"+format, "metrics.json"), &report), dataset.ReadJSON(filepath.Join(c.Out, "verify-"+format+".json"), &verification))
 		if e != nil || verification.Status != "pass" || verification.Checked == 0 {
-			targets = append(targets, targetResult{Target: "check4-" + format, Status: "blocked", Branch: "missing-or-invalid-evidence", Reason: fmt.Sprint(e)})
+			reason := "Verification has no complete pass evidence."
+			if e != nil {
+				reason = e.Error()
+			}
+			targets = append(targets, targetResult{Target: "check4-" + format, Status: "blocked", Branch: "missing-or-invalid-evidence", Reason: reason})
 			continue
 		}
 		report.EngineMemory = &engine.Memory
-		results[format] = report
-		targets = append(targets, deltaTarget(format, report))
+		target := deltaTarget(format, report)
+		results[format] = formResult{Status: target.Status, Report: report}
+		targets = append(targets, target)
 		status := "pass"
 		if verification.NativeTopKEqual != verification.NativeTopKComparisons {
 			status = "partial"
@@ -903,6 +963,12 @@ type sample struct {
 	AnswerSHA256 string `json:"answer_sha256"`
 }
 
+func appendSynced(f *os.File, v any) error {
+	if err := json.NewEncoder(f).Encode(v); err != nil {
+		return err
+	}
+	return f.Sync()
+}
 func measureDeltas(ctx context.Context, c config, format string) (err error) {
 	ds, _, err := loadTier(c.Data)
 	if err != nil {
@@ -926,6 +992,16 @@ func measureDeltas(ctx context.Context, c config, format string) (err error) {
 	}
 	defer func() { err = errors.Join(err, spool.Close()) }()
 	enc := json.NewEncoder(spool)
+	edits, err := os.Create(filepath.Join(out, "edits.jsonl"))
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, edits.Close()) }()
+	checkpoints, err := os.Create(filepath.Join(out, "checkpoints.jsonl"))
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, checkpoints.Close()) }()
 	b := newBackend(format)
 	l, err := newLifecycle(out, b)
 	if err != nil {
@@ -998,7 +1074,12 @@ func measureDeltas(ctx context.Context, c config, format string) (err error) {
 		if e = release(); e != nil {
 			return e
 		}
-		report.EditSamples = append(report.EditSamples, editSample{Size: n, CPU: c1 - c0, Visibility: elapsed})
+		edit := editSample{Size: n, CPU: c1 - c0, Visibility: elapsed}
+		if e = appendSynced(edits, edit); e != nil {
+			return e
+		}
+		adapter.Checkpoint("linkdelta-after-edit")
+		report.EditSamples = append(report.EditSamples, edit)
 		report.MaxEditCPU = max(report.MaxEditCPU, c1-c0)
 		visibility = append(visibility, elapsed)
 		report.Edits++
@@ -1009,19 +1090,19 @@ func measureDeltas(ctx context.Context, c config, format string) (err error) {
 		}
 		// Equal visible data, two physical layouts. The clean base is rebuilt from
 		// the independent odd/even source, never from the candidate's own answers.
-		inputPath := filepath.Join(c.Data, c.DeltaRepo)
-		if len(ds) == 1 {
-			inputPath = ds[0].Source.Dir
-		}
-		if n%2 == 1 {
-			inputPath = filepath.Join(c.Out, "changed-source")
-		}
-		source, e := dataset.OpenSource(inputPath)
-		if e != nil {
-			return e
-		}
 		clean, ok := cleanRefs[n%2 == 1]
 		if !ok {
+			inputPath := filepath.Join(c.Data, c.DeltaRepo)
+			if len(ds) == 1 {
+				inputPath = ds[0].Source.Dir
+			}
+			if n%2 == 1 {
+				inputPath = filepath.Join(c.Out, "changed-source")
+			}
+			source, e := dataset.OpenSource(inputPath)
+			if e != nil {
+				return e
+			}
 			clean, _, e = b.Build(ctx, source, filepath.Join(out, fmt.Sprintf("compact-%06d", n)))
 			if e != nil {
 				return e
@@ -1087,6 +1168,13 @@ func measureDeltas(ctx context.Context, c config, format string) (err error) {
 		if e != nil {
 			return e
 		}
+		if e = spool.Sync(); e != nil {
+			return e
+		}
+		if e = appendSynced(checkpoints, cp); e != nil {
+			return e
+		}
+		adapter.Checkpoint("linkdelta-after-checkpoint")
 		report.Checkpoints = append(report.Checkpoints, cp)
 	}
 	report.Visibility = runner.Summarize(visibility)
@@ -1157,7 +1245,7 @@ func selectedCheckpoint(r deltaReport) (checkpoint, bool) {
 }
 func deltaPass(r deltaReport) bool {
 	p, ok := selectedCheckpoint(r)
-	return ok && p.Size > 0 && p.Visibility.Count == p.Size && p.MaxEditCPU > 0 && p.MaxEditCPU <= 1e9 && p.Visibility.P95 > 0 && p.Visibility.P95 <= 5e9 && p.WorstRatio > 0 && p.WorstRatio <= 1.10 && p.ByteRatio > 0 && p.ByteRatio <= 2
+	return ok && p.Size > 0 && p.Visibility.Count == p.Size && p.MaxEditCPU > 0 && p.MaxEditCPU <= 1e9 && p.Visibility.P95 > 0 && p.Visibility.P95 <= 5e9 && p.WorstRatio > 0 && p.WorstRatio <= 1.10
 }
 func deltaTarget(format string, r deltaReport) targetResult {
 	status := "pass"
@@ -1166,29 +1254,53 @@ func deltaTarget(format string, r deltaReport) targetResult {
 	}
 	return targetResult{Target: "check4-" + format, Status: status, Branch: r.CompactionBranch, Measured: r}
 }
-func selectDelta(results map[string]deltaReport) targetResult {
+
+// Status records whether the other form is measured or still unknown.
+type formResult struct {
+	Status string
+	Report deltaReport
+}
+
+func editCheckpoint(r deltaReport) (checkpoint, bool) {
+	if p, ok := selectedCheckpoint(r); ok {
+		return p, true
+	}
+	if len(r.Checkpoints) > 0 {
+		// Completed checkpoints follow the strictly increasing configured sizes.
+		return r.Checkpoints[0], true
+	}
+	return checkpoint{}, false
+}
+func selectDelta(results map[string]formResult) targetResult {
 	a, p := results["arrow"], results["parquet"]
+	known := func(f formResult) bool { return f.Status == "pass" || f.Status == "miss" }
+	ap, pp := a.Status == "pass" && deltaPass(a.Report), p.Status == "pass" && deltaPass(p.Report)
+	ac, ao := editCheckpoint(a.Report)
+	pc, po := editCheckpoint(p.Report)
 	selection, status := "no-passing-form", "miss"
-	ac, ao := selectedCheckpoint(a)
-	pc, po := selectedCheckpoint(p)
 	switch {
-	case len(results) == 0:
+	case !known(a) && !known(p):
 		selection, status = "no-complete-form-evidence", "blocked"
-	case ao && po && ac.MaxEditCPU > 1e9 && pc.MaxEditCPU > 1e9:
+	case known(a) && known(p) && ao && po && ac.MaxEditCPU > 1e9 && pc.MaxEditCPU > 1e9:
 		selection = "stop-ask-user-both-edit-bound-misses"
-	case ao && po && ac.Visibility.P95 > 5e9 && pc.Visibility.P95 > 5e9:
-		selection = "stop-ask-user-both-visibility-bound-misses"
-	case deltaPass(a) && deltaPass(p):
+	case ap && pp:
 		selection, status = "both-pass-lead-selects-simplest", "partial"
-	case deltaPass(a):
+	case ap && !known(p):
+		selection, status = "arrow-passes-parquet-blocked", "partial"
+	case pp && !known(a):
+		selection, status = "parquet-passes-arrow-blocked", "partial"
+	case ap:
 		selection, status = "arrow", "pass"
-	case deltaPass(p):
+	case pp:
 		selection, status = "parquet", "pass"
+	case !known(a) || !known(p):
+		selection, status = "incomplete-form-evidence", "blocked"
 	}
 	return targetResult{Target: "check4-delta-selection", Status: status, Branch: selection, Measured: map[string]string{"base": "shared C Parquet plus native Bleve", "read_cost": "format-independent indexed merge; raw A/A controls retained", "edit_batch": "alternating MakeChange and original-file replacement", "scope": "full tier query workload plus delta probes; no daemon routing"}}
 }
 
 type verifyReport struct {
+	Error                                           string `json:"error,omitempty"`
 	Status                                          string
 	Checked, NativeTopKComparisons, NativeTopKEqual int
 	NativeTopKMatchRate                             float64
@@ -1199,6 +1311,8 @@ type referenceRecord struct {
 	Binding  string
 	Query    workload.Query
 	Expected workload.Expected
+	// Separate from Expected: its omitempty tag would erase a valid empty map.
+	MatchRepos map[string]string `json:"match_repositories"`
 }
 
 func referenceKey(odd bool, q workload.Query) string {
@@ -1253,7 +1367,7 @@ func loadAnswer(dir, pin string) (workload.Answer, error) {
 	err = dataset.ReadJSON(p, &a)
 	return a, err
 }
-func importPinnedReferences(c config, dir, binding string, qs, original []workload.Query) (err error) {
+func importPinnedReferences(ctx context.Context, c config, dir, binding string, qs, original []workload.Query, ds []dataset.Dataset) (err error) {
 	f, err := os.Open(filepath.Join(c.Data, "expected.json"))
 	if err != nil {
 		return err
@@ -1278,7 +1392,15 @@ func importPinnedReferences(c config, dir, binding string, qs, original []worklo
 		if want.QueryID != q.ID || !reflect.DeepEqual(q, qs[i]) {
 			return fmt.Errorf("pinned query binding mismatch")
 		}
-		if err = dataset.WriteJSON(filepath.Join(dir, referenceKey(false, q)+".json"), referenceRecord{binding, q, want}); err != nil {
+		var matches map[string]string
+		if workload.Lexical(q.Op) {
+			matches, err = matchRepositories(ctx, ds, q)
+			if err != nil {
+				return err
+			}
+		}
+		want.MatchRepos = nil
+		if err = dataset.WriteJSON(filepath.Join(dir, referenceKey(false, q)+".json"), referenceRecord{Binding: binding, Query: q, Expected: want, MatchRepos: matches}); err != nil {
 			return err
 		}
 		i++
@@ -1323,7 +1445,7 @@ func prepareReferences(ctx context.Context, c config) (err error) {
 		return err
 	}
 	// Stream the pinned original references; never retain the answer array.
-	if err = importPinnedReferences(c, dir, binding, qs, original); err != nil {
+	if err = importPinnedReferences(ctx, c, dir, binding, qs, original, ds); err != nil {
 		return err
 	}
 	changed, err := dataset.OpenSource(filepath.Join(c.Out, "changed-source"))
@@ -1354,13 +1476,14 @@ func prepareReferences(ctx context.Context, c config) (err error) {
 				return e
 			}
 			expected := workload.Expected{QueryID: q.ID, Answer: want}
+			var matches map[string]string
 			if workload.Lexical(q.Op) {
-				expected.MatchRepos, e = matchRepositories(ctx, sources, q)
+				matches, e = matchRepositories(ctx, sources, q)
 				if e != nil {
 					return e
 				}
 			}
-			if err = dataset.WriteJSON(filepath.Join(dir, referenceKey(isOdd, q)+".json"), referenceRecord{binding, q, expected}); err != nil {
+			if err = dataset.WriteJSON(filepath.Join(dir, referenceKey(isOdd, q)+".json"), referenceRecord{Binding: binding, Query: q, Expected: expected, MatchRepos: matches}); err != nil {
 				return err
 			}
 		}
@@ -1410,10 +1533,13 @@ func matchRepositories(ctx context.Context, ds []dataset.Dataset, q workload.Que
 	}
 	return matches, nil
 }
-func compareReference(q workload.Query, want workload.Expected, got workload.Answer) error {
+func compareReference(q workload.Query, want workload.Expected, matches map[string]string, got workload.Answer) error {
 	if workload.Lexical(q.Op) {
+		if matches == nil {
+			return fmt.Errorf("lexical reference %s lacks prepared match sets", q.ID)
+		}
 		q.NativeScoring = true
-		q.MatchRepos = want.MatchRepos
+		q.MatchRepos = matches
 		q.ExactRank = strings.HasPrefix(q.ID, "delta-marker-")
 		q.MinOverlap = 0
 	} else {
@@ -1421,7 +1547,17 @@ func compareReference(q workload.Query, want workload.Expected, got workload.Ans
 	}
 	c := workload.Compare(q, want.Answer, got)
 	if c.Mismatch {
-		return fmt.Errorf("query %s: %s", q.ID, c.Detail)
+		return fmt.Errorf("%w: query %s: %s", errAnswerMismatch, q.ID, c.Detail)
+	}
+	if workload.Lexical(q.Op) {
+		// Native ranking may differ; an underfilled result is still incorrect.
+		count := len(want.Answer.Hits)
+		if q.K >= 0 {
+			count = min(q.K, count)
+		}
+		if len(got.Hits) != count {
+			return fmt.Errorf("%w: query %s: native hit count %d, expected %d", errAnswerMismatch, q.ID, len(got.Hits), count)
+		}
 	}
 	return nil
 }
@@ -1433,6 +1569,17 @@ func hitIDs(hits []adapter.Hit) []string {
 	return out
 }
 func verifyDeltas(ctx context.Context, c config, format string) (err error) {
+	report := verifyReport{Status: "blocked"}
+	defer func() {
+		if err != nil {
+			report.Status = "blocked"
+			if errors.Is(err, errAnswerMismatch) {
+				report.Status = "miss"
+			}
+			report.Error = err.Error()
+		}
+		err = errors.Join(err, dataset.WriteJSON(filepath.Join(c.Out, "verify-"+format+".json"), report))
+	}()
 	binding, err := referenceBinding(c)
 	if err != nil {
 		return err
@@ -1460,7 +1607,6 @@ func verifyDeltas(ctx context.Context, c config, format string) (err error) {
 	}
 	defer func() { err = errors.Join(err, diff.Close()) }()
 	enc := json.NewEncoder(diff)
-	report := verifyReport{Status: "pass"}
 	referencePins := map[string]string{}
 	seen := map[string]bool{}
 	checked := map[string]bool{}
@@ -1491,6 +1637,9 @@ func verifyDeltas(ctx context.Context, c config, format string) (err error) {
 			if ref.Binding != binding || !reflect.DeepEqual(ref.Query, q) || ref.Expected.QueryID != q.ID {
 				return fmt.Errorf("reference source/query binding mismatch")
 			}
+			if workload.Lexical(q.Op) && ref.MatchRepos == nil {
+				return fmt.Errorf("lexical reference %s lacks prepared match sets", q.ID)
+			}
 			referencePins[key] = hashJSON(ref)
 		}
 		memo := hashJSON(struct{ Reference, Answer string }{referencePins[key], s.AnswerSHA256})
@@ -1502,7 +1651,14 @@ func verifyDeltas(ctx context.Context, c config, format string) (err error) {
 			return fmt.Errorf("missing accepted clean baseline: %w", cleanErr)
 		}
 		if s.Form == "wrapper" && cleanPin != s.AnswerSHA256 {
-			return fmt.Errorf("zero-layer wrapper differs from raw C")
+			// A missing/corrupt blob is incomplete evidence, not answer inequality.
+			if _, e := loadAnswer(blobs, cleanPin); e != nil {
+				return e
+			}
+			if _, e := loadAnswer(blobs, s.AnswerSHA256); e != nil {
+				return e
+			}
+			return fmt.Errorf("%w: zero-layer wrapper differs from raw C", errAnswerMismatch)
 		}
 		_, e := os.Stat(marker)
 		if e != nil && !os.IsNotExist(e) {
@@ -1519,7 +1675,7 @@ func verifyDeltas(ctx context.Context, c config, format string) (err error) {
 				return e
 			}
 			if s.Form == "base" {
-				if e = compareReference(q, ref.Expected, a); e != nil {
+				if e = compareReference(q, ref.Expected, ref.MatchRepos, a); e != nil {
 					return e
 				}
 			} else {
@@ -1529,7 +1685,7 @@ func verifyDeltas(ctx context.Context, c config, format string) (err error) {
 				}
 				expected := ref.Expected
 				expected.Answer = clean
-				if e = compareReference(q, expected, a); e != nil {
+				if e = compareReference(q, expected, ref.MatchRepos, a); e != nil {
 					return e
 				}
 			}
@@ -1618,5 +1774,6 @@ func verifyDeltas(ctx context.Context, c config, format string) (err error) {
 	if err != nil {
 		return err
 	}
-	return dataset.WriteJSON(filepath.Join(c.Out, "verify-"+format+".json"), report)
+	report.Status = "pass"
+	return nil
 }

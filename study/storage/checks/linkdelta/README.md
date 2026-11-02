@@ -79,6 +79,15 @@ Warm-up and measured observations retain `elapsed_ns`, state, variant, repeat,
 query and full-answer SHA256. Full answer blobs are content-addressed outside the
 timed call and stored once; no answer cache replaces a timed query. A separate
 capped checker streams pinned `expected.json` for unchanged original queries.
+Those generator-format entries supply golden answers, not lexical match sets.
+Preparation computes lexical membership from the same source/token rule as the
+oracle, including explicit empty sets. A missing prepared set blocks verification,
+not a candidate correctness miss. Native lexical results must have the full
+expected top-k count even when their rank order or selected IDs differ.
+Non-lexical reuse binds the complete query and
+unchanged hash-pinned data to the approved golden answer; it does not assume that
+the generator and current harness revisions are identical. Current clean C still
+must match exactly. Incompatible semantics fail rather than regenerate fixtures.
 Changed-state and added-probe references are computed once, on disk, and shared
 across both formats. Repeated complete checks reuse a reference/query/answer-bound
 validation marker. Native ordered top-k pairs use disk scratch, not a retained
@@ -95,12 +104,17 @@ ratios. A/A is not subtracted and the 1.10 bound is unchanged. Read serving is
 format-independent by construction; write/seal, open and bytes distinguish the
 codecs. The worst operation determines the 10% crossing. No observed
 crossing means a lower bound only; the threshold remains unresolved. A crossing
-at the smallest size supplies no passing threshold. Delta serving bytes must
-also fit the 2x bound at the proposed threshold/lower-bound checkpoint. If both
-forms pass, the lead selects the simplest form; code does not invent that judgment.
+at the smallest size supplies no passing threshold. Serving bytes and byte ratios
+are diagnostics, not additional acceptance bounds. If both forms pass, the lead
+selects the simplest form; code does not invent that judgment. A passing form
+cannot be selected as the sole pass while the other form is blocked or absent.
+A measured miss of the other form permits that selection.
 CPU maxima and visibility p95 apply to the prefix that the chosen threshold or
 lower-bound checkpoint would serve. Later-chain edit maxima remain diagnostics,
-not failures of an earlier compaction regime. Raw per-edit samples preserve both.
+not failures of an earlier compaction regime. Report-level `MaxEditCPU` and
+`Visibility` describe the whole measured chain and are diagnostic. If no read
+regime passes, the edit-bound user-stop rule uses the smallest completed
+checkpoint. Raw per-edit samples preserve both.
 
 A base's hashes and ownership-key metadata are admitted once per run owner.
 Later opens still validate the seal digest, exact identity, safe paths and every
@@ -159,9 +173,11 @@ values; this example deliberately cannot run as written. Memory values are bytes
 
 The controller, preparation/checkers and engines enter separate accepted-launcher
 cgroups. Runner/checker limits remain explicit. The link engine gets the exact
-1.5 GiB hard cap. The shared absolute deadline covers the complete serial run.
-The launcher verifies its own executable, command, hostname, policy and input
-hashes. `inputs.json` additionally binds the worker executable, source declaration,
+1.5 GiB hard cap. The controller deadline covers the complete serial run.
+All workers stop 60 seconds before it, leaving a fixed finalization reserve.
+A wall budget of 60 seconds or less is refused; the outer approved cap does not
+increase. The launcher verifies its own executable, command, hostname, policy
+and input hashes. `inputs.json` additionally binds the worker executable, source declaration,
 config, data manifest and approval hashes. The lead must verify that the source
 declaration matches the reviewed build receipt; a supplied OID alone is not proof.
 
@@ -170,16 +186,26 @@ job's existing owned-root cleanup. If the controller is killed, it cannot clean
 sibling engine scopes itself. Do not run this script without that external owner.
 The launcher records each scope's terminal state, peak, OOM events and removal.
 Only a measured link memory miss permits the package-decomposition branch.
-Semantic partial/parity misses do not. Check 4 still runs after a semantic Check 3
-miss; Arrow and Parquet also proceed independently after contained, cleaned
-failures. Lost approval, cancellation, shared deadline expiry, invalid bindings
-or uncertain cleanup stop further launches. These are independent measurements,
+Semantic partial/parity misses do not. A non-OOM link crash is blocked, not a
+measured miss, and cannot trigger fallback. Check 3 reports collision counts and
+fact shares beside its result; missing collision evidence blocks it. Check 4
+still runs after a contained Check 3 failure or semantic miss. Arrow and Parquet
+also proceed independently after contained, cleaned failures. Lost approval,
+cancellation, worker deadline expiry, invalid bindings or uncertain cleanup stop further launches. These are independent measurements,
 not retries. The controller rechecks the approval and deadline before each launch.
 
 Keep `run-receipt.json` and the controller scope's `receipt.json` as terminal
 records. `result.json` contains target values/statuses/branches, all component
 receipt hashes and all result/output hashes. A controller error preserves partial
-outputs and labels uncompleted targets blocked. `Complete` records collection,
+outputs and labels uncompleted targets blocked. Each completed edit and checkpoint
+is appended and synchronized immediately in `delta-*/edits.jsonl` and
+`delta-*/checkpoints.jsonl`; completed checkpoints also synchronize their answer
+spool. Progress synchronization is outside the timed operation. A worker deadline
+keeps these records and leaves the controller its finalization reserve. Controller
+OOM or storage failure can still prevent the inner summary; the outer terminal
+receipt remains authoritative. Checker crashes, OOM and incomplete reports block
+verification. Only a structured semantic mismatch report makes it a miss.
+`Complete` records collection,
 not acceptance: inspect every target status and branch before claiming a pass. Native rank differences live in `native-rank-differences-*.jsonl`, with
 counts, match rate and hashes in `verify-*.json`. Protected input hashes are checked
 on every observed controller exit and again by the outer terminal owner. If a
