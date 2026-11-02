@@ -687,35 +687,83 @@ func globalExpected(w workload.Expected) workload.Expected {
 	return w
 }
 func measuredQueries(ctx context.Context, s map[string]adapter.Segment, m adapter.MultiRepo, qs []workload.Query, want []workload.Expected, caps adapter.Capabilities) (map[string][]int64, []workload.Check, error) {
-	samples := map[string][]int64{}
-	checks := make([]workload.Check, 0, len(qs))
+	return queryRun(ctx, s, m, qs, want, caps, 0)
+}
+
+// queryRun spools bounded answers during sampling and validates only after all
+// native operations, including discarded warm-up operations, have finished.
+func queryRun(ctx context.Context, s map[string]adapter.Segment, m adapter.MultiRepo, qs []workload.Query, want []workload.Expected, caps adapter.Capabilities, warmup int) (samples map[string][]int64, checks []workload.Check, err error) {
+	spool, err := os.CreateTemp("", "gxstudy-query-checks-*")
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { err = errors.Join(err, spool.Close(), os.Remove(spool.Name())) }()
+	samples = map[string][]int64{}
+	var warmFailures []workload.Check
+	addCheck := func(check workload.Check, isWarm bool) {
+		if isWarm {
+			if check.Mismatch {
+				check.QueryID = "warmup_" + check.QueryID
+				warmFailures = append(warmFailures, check)
+			}
+		} else {
+			checks = append(checks, check)
+		}
+	}
+	encoder := json.NewEncoder(spool)
 	for i, q := range qs {
 		q = withPolicy(q, caps)
+		isWarm := i < warmup
 		if why := unsupported(caps, q); why != "" {
-			checks = append(checks, workload.Check{QueryID: q.ID, Operation: q.Op, Status: "unsupported", Detail: why})
-			continue
-		}
-		got, inputs, start, end, e := evaluateTimed(ctx, s, m, q)
-		ns := end.Sub(start).Nanoseconds()
-		if e != nil {
-			if errors.Is(e, adapter.ErrUnsupported) && strings.HasPrefix(q.Op, "native_") {
-				checks = append(checks, workload.Check{QueryID: q.ID, Operation: q.Op, Status: "unsupported", Detail: e.Error()})
-				continue
+			check := workload.Check{QueryID: q.ID, Operation: q.Op, Status: "unsupported", Detail: why}
+			if e := encoder.Encode(pendingCheck{Ready: &check, Warmup: isWarm}); e != nil {
+				return samples, checks, e
 			}
-			checks = append(checks, workload.Check{QueryID: q.ID, Operation: q.Op, Status: "failed", Mismatch: true, Detail: e.Error()})
 			continue
 		}
-		metric := q.Op
-		if q.Op == "in" || q.Op == "out" || q.Op == "multi_in" {
-			metric += "_" + q.Kind
+		got, inputs, _, _, ns, e := evaluateTimed(ctx, s, m, q)
+		if e != nil {
+			check := workload.Check{QueryID: q.ID, Operation: q.Op, Status: "failed", Mismatch: true, Detail: e.Error()}
+			if errors.Is(e, adapter.ErrUnsupported) && strings.HasPrefix(q.Op, "native_") {
+				check.Status = "unsupported"
+				check.Mismatch = false
+			}
+			if e := encoder.Encode(pendingCheck{Ready: &check, Warmup: isWarm}); e != nil {
+				return samples, checks, e
+			}
+			continue
 		}
-		samples[metric] = append(samples[metric], ns)
-		check, e := checkedAnswer(ctx, q, want[i], got, inputs)
+		if !isWarm {
+			metric := q.Op
+			if q.Op == "in" || q.Op == "out" || q.Op == "multi_in" {
+				metric += "_" + q.Kind
+			}
+			samples[metric] = append(samples[metric], ns)
+		}
+		if e := encoder.Encode(pendingCheck{Query: q, Expected: want[i], Sources: want[i].Sources, NativeScoring: q.NativeScoring, MatchRepos: q.MatchRepos, Answer: got, Inputs: inputs, Warmup: isWarm}); e != nil {
+			return samples, checks, e
+		}
+	}
+	if _, err = spool.Seek(0, 0); err != nil {
+		return samples, checks, err
+	}
+	decoder := json.NewDecoder(spool)
+	for {
+		var row pendingCheck
+		e := decoder.Decode(&row)
+		if e == io.EOF {
+			break
+		}
 		if e != nil {
 			return samples, checks, e
 		}
-		checks = append(checks, check)
+		check, e := row.check(ctx)
+		if e != nil {
+			return samples, checks, e
+		}
+		addCheck(check, row.Warmup)
 	}
+	checks = append(checks, warmFailures...)
 	return samples, checks, nil
 }
 func shuffled(qs []workload.Query, want []workload.Expected, seed uint64) ([]workload.Query, []workload.Expected) {
@@ -731,19 +779,8 @@ func shuffled(qs []workload.Query, want []workload.Expected, seed uint64) ([]wor
 }
 func warmedQueries(ctx context.Context, s map[string]adapter.Segment, m adapter.MultiRepo, qs []workload.Query, want []workload.Expected, caps adapter.Capabilities, seed uint64) (map[string][]int64, []workload.Check, error) {
 	warmQ, warmW := shuffled(qs, want, seed)
-	_, warm, e := measuredQueries(ctx, s, m, warmQ, warmW, caps)
-	if e != nil {
-		return nil, warm, e
-	}
 	measuredQ, measuredW := shuffled(qs, want, seed+4002)
-	ns, checks, e := measuredQueries(ctx, s, m, measuredQ, measuredW, caps)
-	for _, c := range warm {
-		if c.Mismatch {
-			c.QueryID = "warmup_" + c.QueryID
-			checks = append(checks, c)
-		}
-	}
-	return ns, checks, e
+	return queryRun(ctx, s, m, append(warmQ, measuredQ...), append(warmW, measuredW...), caps, len(warmQ))
 }
 func runOnce(ctx context.Context, b *trackedBackend, factory adapter.CatalogFactory, ds []dataset.Dataset, qs []workload.Query, want []workload.Expected, dir string, trials int, safetyTimeout time.Duration, r *Result) (err error) {
 	var referenceErr error

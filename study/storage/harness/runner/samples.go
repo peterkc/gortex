@@ -23,6 +23,7 @@ type storedSample struct {
 	PinNS                        int64
 	NS                           int64
 	Check                        workload.Check
+	Pending                      *pendingCheck
 	NewVersion                   bool
 	Error                        string
 }
@@ -56,7 +57,7 @@ func (s sampleStream) rows() iter.Seq2[readerSample, error] {
 					yield(readerSample{}, err)
 					return
 				}
-				sample := readerSample{start: row.Start, end: row.End, pinStart: row.PinStart, pinEnd: row.PinEnd, pinNS: row.PinNS, ns: row.NS, check: row.Check, newVersion: row.NewVersion}
+				sample := readerSample{start: row.Start, end: row.End, pinStart: row.PinStart, pinEnd: row.PinEnd, pinNS: row.PinNS, ns: row.NS, check: row.Check, pending: row.Pending, newVersion: row.NewVersion}
 				if row.Error != "" {
 					sample.err = errors.New(row.Error)
 				}

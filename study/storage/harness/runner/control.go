@@ -29,7 +29,7 @@ func controlledRun(ctx context.Context, exe, mode, root string, req runRequest) 
 		}
 		// Bind this attempt only. Do not accumulate prior attempts' filenames or
 		// sample records in the unmeasured, small controller process.
-		names := []string{fmt.Sprintf("request-%02d.json", req.Run), fmt.Sprintf("runner-%02d.log", req.Run)}
+		names := []string{fmt.Sprintf("request-%02d.json", req.Run), fmt.Sprintf("runner-%02d.log", req.Run), fmt.Sprintf("runner-%02d.memory.json", req.Run)}
 		for _, component := range []string{"engine", "checker"} {
 			base := fmt.Sprintf("%s-%02d", component, req.Run)
 			names = append(names, base+".log", base+".log.pid", base+".memory.json")
@@ -101,15 +101,7 @@ func controlledRun(ctx context.Context, exe, mode, root string, req runRequest) 
 			err = errors.Join(err, scope.stop())
 		}
 	}
-	pid := 0
-	var processState *os.ProcessState
-	if cmd != nil {
-		processState = cmd.ProcessState
-		if cmd.Process != nil {
-			pid = cmd.Process.Pid
-		}
-	}
-	memory, memoryErr := scopeMemory(req.RunnerScope, req.Binding.Limits.Runner, pid, processState, runErr)
+	memory, memoryErr := runnerMemory(req, cmd, runErr)
 	receipt.Components["runner"] = memory
 	err = errors.Join(err, memoryErr)
 	for _, component := range []struct {
@@ -213,6 +205,7 @@ func catalogRunChild(b adapter.Backend, factory adapter.CatalogFactory, path str
 	if err = dataset.ReadJSON(path, &req); err != nil {
 		return err
 	}
+	defer func() { err = errors.Join(err, recordRunnerRSS(req)) }()
 	engine, err := startProcess(context.Background(), req.EngineScope, filepath.Join(req.Out, "engine-01.log"), false)
 	if err != nil {
 		return err

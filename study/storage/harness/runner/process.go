@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"gxstudy/adapter"
@@ -10,6 +11,7 @@ import (
 	"gxstudy/workload"
 	"net"
 	"net/rpc"
+	"net/rpc/jsonrpc"
 	"os"
 	"os/exec"
 	"strconv"
@@ -37,6 +39,9 @@ type ProcessRequest struct {
 	Inputs        []adapter.SearchInput
 	Text          string
 	Deadline      int64
+	ForwardHooks  bool
+	NativeScoring bool
+	MatchRepos    map[string]string
 }
 type ProcessReply struct {
 	Error, Code         string
@@ -62,6 +67,7 @@ type ProcessService struct {
 	backend       adapter.Backend
 	factory       adapter.CatalogFactory
 	checker       bool
+	checkpoint    func(string)
 	mu            sync.Mutex
 	next          int
 	segments      map[int]adapter.Segment
@@ -79,6 +85,9 @@ func (s *ProcessService) putSegment(v adapter.Segment) int {
 	return s.next
 }
 func (s *ProcessService) Call(req ProcessRequest, out *ProcessReply) (callErr error) {
+	// These runtime policy fields are intentionally absent from query-file JSON.
+	req.Query.NativeScoring = req.NativeScoring
+	req.Query.MatchRepos = req.MatchRepos
 	ctx := context.Background()
 	if req.Deadline != 0 {
 		var cancel context.CancelFunc
@@ -98,6 +107,11 @@ func (s *ProcessService) Call(req ProcessRequest, out *ProcessReply) (callErr er
 				out.Code = "conflict"
 			}
 			callErr = nil
+		}
+		// A failed JSON response write otherwise leaves net/rpc's caller waiting.
+		// Native durations have already stopped before this transport check.
+		if _, err := json.Marshal(out); err != nil {
+			*out = ProcessReply{Error: fmt.Sprintf("unencodable process response: %v", err)}
 		}
 	}()
 	if s.checker && req.Op != "check" && req.Op != "describe" {
@@ -219,6 +233,11 @@ func (s *ProcessService) Call(req ProcessRequest, out *ProcessReply) (callErr er
 	case "publish":
 		if catalog == nil {
 			return fmt.Errorf("unknown catalog")
+		}
+		if req.ForwardHooks {
+			previous := adapter.Checkpoint
+			adapter.Checkpoint = s.checkpoint
+			defer func() { adapter.Checkpoint = previous }()
 		}
 		return catalog.Publish(ctx, req.Ref.Repo, req.Ref, req.OldRef)
 	case "publish-set":
@@ -352,22 +371,22 @@ func processServe(b adapter.Backend, factory adapter.CatalogFactory, checker boo
 		return err
 	}
 	defer callbackConn.Close()
-	callback := rpc.NewClient(callbackConn)
+	callback := jsonrpc.NewClient(callbackConn)
 	defer callback.Close()
 	s := &ProcessService{backend: b, factory: factory, checker: checker, segments: map[int]adapter.Segment{}, catalogs: map[int]adapter.Catalog{}, multis: map[int]adapter.MultiRepo{}, releases: map[int]func(){}}
-	previous := adapter.Checkpoint
-	adapter.Checkpoint = func(stage string) {
+	// Forward only explicitly armed correctness checkpoints. Ordinary native
+	// publication timings must not include callback transport.
+	s.checkpoint = func(stage string) {
 		var reply ProcessReply
 		if err := callback.Call("Hook.Call", ProcessRequest{Op: "hook", Text: stage}, &reply); err != nil {
 			panic(err)
 		}
 	}
-	defer func() { adapter.Checkpoint = previous }()
 	server := rpc.NewServer()
 	if err = server.RegisterName("Process", s); err != nil {
 		return err
 	}
-	server.ServeConn(conn)
+	server.ServeCodec(jsonrpc.NewServerCodec(conn))
 	cleanup := s.cleanupErrors
 	for _, release := range s.releases {
 		release()
@@ -502,14 +521,18 @@ func startProcess(ctx context.Context, scope, path string, checker bool) (client
 		return nil, err
 	}
 	hookDone := make(chan struct{})
-	go func() { defer close(hookDone); server.ServeConn(hooks) }()
-	client = &processClient{rpc: rpc.NewClient(conn), cmd: cmd, hook: hooks, hookDone: hookDone, log: log}
-	if _, err = client.call(ctx, ProcessRequest{Op: "describe"}); err != nil {
+	go func() { defer close(hookDone); server.ServeCodec(jsonrpc.NewServerCodec(hooks)) }()
+	client = &processClient{rpc: jsonrpc.NewClient(conn), cmd: cmd, hook: hooks, hookDone: hookDone, log: log}
+	describeCtx, cancelDescribe := context.WithTimeout(ctx, defaultSafetyTimeout)
+	defer cancelDescribe()
+	if _, err = client.call(describeCtx, ProcessRequest{Op: "describe"}); err != nil {
 		return nil, errors.Join(err, client.close())
 	}
 	return client, nil
 }
 func (c *processClient) call(ctx context.Context, req ProcessRequest) (ProcessReply, error) {
+	req.NativeScoring = req.Query.NativeScoring
+	req.MatchRepos = req.Query.MatchRepos
 	var out ProcessReply
 	if err := ctx.Err(); err != nil {
 		return out, err
@@ -522,7 +545,7 @@ func (c *processClient) call(ctx context.Context, req ProcessRequest) (ProcessRe
 	select {
 	case <-ctx.Done():
 		c.rpc.Close()
-		return out, ctx.Err()
+		return ProcessReply{}, ctx.Err()
 	case <-call.Done:
 		if call.Error != nil {
 			return out, call.Error
@@ -543,7 +566,8 @@ func (c *processClient) call(ctx context.Context, req ProcessRequest) (ProcessRe
 }
 func (c *processClient) close() error {
 	c.rpc.Close()
-	// EOF joins the owned server; cancellation also terminates native calls.
+	// Closing RPC stops new requests. A stuck native call is killed at the
+	// cleanup deadline; cancelling a context alone cannot interrupt native code.
 	wait := make(chan error, 1)
 	go func() { wait <- c.cmd.Wait() }()
 	timer := time.NewTimer(defaultSafetyTimeout)
@@ -770,7 +794,7 @@ func (c *remoteCatalog) Publish(ctx context.Context, repo string, ref adapter.Se
 	if ref.Repo != repo {
 		return fmt.Errorf("publication repository mismatch")
 	}
-	_, e := c.client.call(ctx, ProcessRequest{Op: "publish", Handle: c.id, Ref: ref, OldRef: old})
+	_, e := c.client.call(ctx, ProcessRequest{Op: "publish", Handle: c.id, Ref: ref, OldRef: old, ForwardHooks: ctx.Value(checkpointContextKey{}) == true})
 	return e
 }
 func (c *remoteCatalog) PublishSet(ctx context.Context, set, old adapter.View) error {
@@ -823,7 +847,7 @@ func (c *remoteCatalog) VerifyPublication(ctx context.Context, ref adapter.Segme
 }
 
 // evaluateTimed keeps IPC and reference checking outside operation timings.
-func evaluateTimed(ctx context.Context, segments map[string]adapter.Segment, m adapter.MultiRepo, q workload.Query) (workload.Answer, []adapter.SearchInput, time.Time, time.Time, error) {
+func evaluateTimed(ctx context.Context, segments map[string]adapter.Segment, m adapter.MultiRepo, q workload.Query) (workload.Answer, []adapter.SearchInput, time.Time, time.Time, int64, error) {
 	var client *processClient
 	for _, s := range segments {
 		if v, ok := s.(*remoteSegment); ok {
@@ -837,13 +861,13 @@ func evaluateTimed(ctx context.Context, segments map[string]adapter.Segment, m a
 			req.Handle = native.id
 		}
 		r, e := client.call(ctx, req)
-		return r.Answer, r.Inputs, r.Start, r.End, e
+		return r.Answer, r.Inputs, r.Start, r.End, r.Elapsed, e
 	}
 	multi, inputs := traceNativeFanout(m, q)
 	start := time.Now()
 	a, e := workload.Evaluate(ctx, segments, multi, q)
 	end := time.Now()
-	return a, inputs, start, end, e
+	return a, inputs, start, end, end.Sub(start).Nanoseconds(), e
 }
 
 func backendClient(b adapter.Backend) *processClient {
@@ -863,3 +887,4 @@ func backendClient(b adapter.Backend) *processClient {
 }
 
 type engineScopeKey struct{}
+type checkpointContextKey struct{}

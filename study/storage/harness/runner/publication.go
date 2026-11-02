@@ -25,8 +25,8 @@ func verifyPublication(ctx context.Context, b adapter.Backend, cat adapter.Catal
 }
 
 type publicationTimes struct {
-	Begin, End          time.Time
-	OpenNS, PrecommitNS int64
+	Begin, End                     time.Time
+	OpenNS, PrecommitNS, ElapsedNS int64
 }
 
 // Measure only the commit's before-write..after-dirsync interval. Verification
@@ -71,6 +71,7 @@ func measurePublication(ctx context.Context, b adapter.Backend, cat adapter.Cata
 		return t, fmt.Errorf("commit timing requires all ordered checkpoints")
 	}
 	t.PrecommitNS = t.Begin.Sub(invoke).Nanoseconds()
+	t.ElapsedNS = t.End.Sub(t.Begin).Nanoseconds()
 	return t, nil
 }
 
@@ -204,7 +205,8 @@ func commitRace(ctx context.Context, b adapter.Backend, factory adapter.CatalogF
 		}
 	}
 	defer func() { adapter.Checkpoint = previous }()
-	if e = cat.Publish(ctx, old.Repo, next, &old); e != nil {
+	hookCtx := context.WithValue(ctx, checkpointContextKey{}, true)
+	if e = cat.Publish(hookCtx, old.Repo, next, &old); e != nil {
 		return windows, checks, e
 	}
 	if firstErr != nil {

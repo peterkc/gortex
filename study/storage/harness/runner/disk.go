@@ -161,3 +161,42 @@ func checkedAnswer(ctx context.Context, q workload.Query, w workload.Expected, g
 	}
 	return compareRankedAnswer(q, expected, got, inputs), nil
 }
+
+// pendingCheck contains one bounded observation, never the source corpus. Real
+// Expected values hold repeatable disk descriptors, not loaded records.
+type pendingCheck struct {
+	// Preserve runtime-only fields without changing the public query format.
+	Sources       []dataset.Dataset
+	NativeScoring bool
+	MatchRepos    map[string]string
+	Query         workload.Query
+	Expected      workload.Expected
+	Answer        workload.Answer
+	Inputs        []adapter.SearchInput
+	Warmup        bool
+	Ready         *workload.Check
+}
+
+func (p pendingCheck) check(ctx context.Context) (workload.Check, error) {
+	if p.Ready != nil {
+		return *p.Ready, nil
+	}
+	query, expected := p.Query, p.Expected
+	query.NativeScoring = p.NativeScoring
+	query.MatchRepos = p.MatchRepos
+	expected.Sources = p.Sources
+	return checkedAnswer(ctx, query, expected, p.Answer, p.Inputs)
+}
+func checkReaderSample(ctx context.Context, sample readerSample) (readerSample, error) {
+	if sample.pending == nil {
+		return sample, sample.err
+	}
+	check, err := sample.pending.check(ctx)
+	sample.check = check
+	sample.pending = nil
+	if err == nil && check.Mismatch {
+		err = fmt.Errorf("reader check %s: %s", check.QueryID, check.Detail)
+	}
+	sample.err = errors.Join(sample.err, err)
+	return sample, sample.err
+}

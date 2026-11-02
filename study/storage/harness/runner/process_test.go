@@ -122,6 +122,13 @@ func TestActualCLIProcessesAndFullProtocol(t *testing.T) {
 	if report.PeakRSSBytes != receipt.Components["engine"].PeakRSSBytes {
 		t.Fatal("reported RSS is not engine-only")
 	}
+	var runnerSelf ComponentMemory
+	if err := dataset.ReadJSON(filepath.Join(out, "runner-01.memory.json"), &runnerSelf); err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Components["runner"].PeakRSSBytes != runnerSelf.PeakRSSBytes || receipt.Components["runner"].RSSSource != "RUSAGE_SELF" {
+		t.Fatal("runner receipt did not use its own high-water", receipt.Components["runner"], runnerSelf)
+	}
 	// A repeat cannot reuse the output and certify an old result.
 	if err := RunCLI(oracle.Backend{}, oracle.NewCatalog); err == nil {
 		t.Fatal("restart reused an existing run directory")
@@ -166,7 +173,7 @@ func TestHardLimitFailurePreservesEvidenceForEachComponent(t *testing.T) {
 }
 func TestCLIRejectsMissingOrMismatchedBindingsBeforeOutput(t *testing.T) {
 	data := fixtureTier(t)
-	for _, kind := range []string{"missing", "digest", "host", "command", "limit"} {
+	for _, kind := range []string{"missing", "digest", "host", "command", "limit", "alignment"} {
 		t.Run(kind, func(t *testing.T) {
 			out := filepath.Join(t.TempDir(), "out")
 			path := filepath.Join(t.TempDir(), "binding.json")
@@ -183,6 +190,8 @@ func TestCLIRejectsMissingOrMismatchedBindingsBeforeOutput(t *testing.T) {
 				binding.Command = nil
 			case "limit":
 				binding.Limits.Engine = 0
+			case "alignment":
+				binding.Limits.Engine++
 			}
 			if kind != "missing" {
 				if err := dataset.WriteJSON(path, binding); err != nil {
@@ -475,4 +484,26 @@ func assertRunScopesRemoved(t *testing.T, out string) {
 			t.Fatal("owned scope leaked after termination", name, path, err)
 		}
 	}
+}
+
+func cliFixtureRequest(t *testing.T, extra ...string) runRequest {
+	t.Helper()
+	root := testCgroupRoot(t)
+	data := fixtureTier(t)
+	out := filepath.Join(t.TempDir(), "out")
+	bindingPath := filepath.Join(t.TempDir(), "binding.json")
+	previous := os.Args
+	t.Cleanup(func() { os.Args = previous })
+	os.Args = append([]string{previous[0], "-data", data, "-out", out, "-runs", "1", "-warmup=false", "-crash-trials", "1", "-binding", bindingPath, "-cgroup-root", root}, extra...)
+	if err := dataset.WriteJSON(bindingPath, fixtureBinding(t, data, os.Args[1:])); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunCLI(oracle.Backend{}, oracle.NewCatalog); err != nil {
+		t.Fatal(err)
+	}
+	var req runRequest
+	if err := dataset.ReadJSON(filepath.Join(out, "request-01.json"), &req); err != nil {
+		t.Fatal(err)
+	}
+	return req
 }

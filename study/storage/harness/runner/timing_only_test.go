@@ -14,17 +14,14 @@ import (
 	"testing"
 )
 
-func TestTimingOnlyRequestSerialization(t *testing.T) {
+func TestTimingOnlyFlagReachesWrittenRequest(t *testing.T) {
 	for _, timingOnly := range []bool{false, true} {
 		t.Run(map[bool]string{false: "default", true: "timing"}[timingOnly], func(t *testing.T) {
-			out := t.TempDir()
-			if err := dataset.WriteJSON(filepath.Join(out, "request-01.json"), runRequest{TimingOnly: timingOnly, SafetyTimeout: defaultSafetyTimeout}); err != nil {
-				t.Fatal(err)
+			var args []string
+			if timingOnly {
+				args = append(args, "-timing-only")
 			}
-			var req runRequest
-			if err := dataset.ReadJSON(filepath.Join(out, "request-01.json"), &req); err != nil {
-				t.Fatal(err)
-			}
+			req := cliFixtureRequest(t, args...)
 			if req.TimingOnly != timingOnly || req.SafetyTimeout != defaultSafetyTimeout {
 				t.Fatal("request mode or default timeout changed", req)
 			}

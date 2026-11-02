@@ -10,7 +10,9 @@ import (
 	"gxstudy/oracle"
 	"gxstudy/workload"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"testing"
 	"time"
@@ -47,6 +49,27 @@ func TestSummary(t *testing.T) {
 }
 
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "__rss_child" {
+		memory := make([]byte, 64<<20)
+		for i := range memory {
+			memory[i] = 1
+		}
+		runtime.KeepAlive(memory)
+		os.Exit(0)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "__rss_parent" {
+		var req runRequest
+		if err := dataset.ReadJSON(os.Args[2], &req); err != nil {
+			os.Exit(1)
+		}
+		if err := exec.Command(os.Args[0], "__rss_child").Run(); err != nil {
+			os.Exit(1)
+		}
+		if err := recordRunnerRSS(req); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) > 1 && (os.Args[1] == "__engine" || os.Args[1] == "__checker") {
 		if os.Args[1] == "__checker" && os.Getenv("GXSTUDY_TEST_CHECKER_EXIT") == "1" {
 			os.Exit(23)

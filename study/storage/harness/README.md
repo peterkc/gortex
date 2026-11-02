@@ -523,3 +523,34 @@ The old `study/storage/pod/run.py` controller does not supply the new binding or
 cgroup flags. It therefore fails closed against this interface. Do not reuse its
 old memory estimates or silently invent limits. Its fixture suite remains in CI;
 a later approved run must migrate that controller if it needs it.
+
+
+### Sampling and process-memory boundaries
+
+The runner spools query answers before it checks them. Warm-up and measured
+queries finish before reference checking starts. Concurrent readers likewise
+spool bounded observations; the checker validates them only after the reader
+phase stops. A phase is accepted only if every recorded answer passes. Successful
+post-publication observation counts are provisional until those checks finish.
+A mismatch fails the phase. In-memory fixture readers still stop at their first
+mismatch, as do post-phase disk checks; neither path certifies unchecked samples.
+
+Query and publish durations use the engine's monotonic elapsed values. Wall-clock
+timestamps classify overlap with build/publication windows; subtracting decoded
+RPC timestamps does not define operation latency. For a remote candidate,
+`build_publish_ns` sums native build, verification/open, precommit and commit
+elapsed durations. It excludes transport and the runner's publication handshake.
+Normal timed publications do not send checkpoint callbacks. Only an explicitly
+armed, untimed commit-race check forwards those callbacks to the runner.
+
+RPC uses the standard JSON codec so present zero overlaps and empty payload maps
+survive process transport. Invalid native JSON responses become visible RPC
+errors. A context cancellation returns no partially decoded response; it cannot
+interrupt an arbitrary native call. Cleanup kills a stuck process at the existing
+cleanup deadline, and the startup describe handshake has the same bounded guard.
+
+Runner RSS comes from its own `RUSAGE_SELF` record after its owned joins, not from
+a wait status that can include reaped engine/checker peaks. The record is included
+in the component receipt's output hashes. If abrupt termination prevents that
+record, runner process RSS is unavailable; the kernel cgroup peak and OOM evidence
+remain separate. Such a run cannot produce a successful receipt.

@@ -15,23 +15,11 @@ import (
 
 func safetyRequest(t *testing.T, option string) runRequest {
 	t.Helper()
-	value := defaultSafetyTimeout
+	args := []string{"-timing-only"}
 	if option != "" {
-		var err error
-		value, err = time.ParseDuration(option)
-		if err != nil {
-			t.Fatal(err)
-		}
+		args = append(args, "-safety-timeout", option)
 	}
-	out := t.TempDir()
-	if err := dataset.WriteJSON(filepath.Join(out, "request-01.json"), runRequest{SafetyTimeout: value}); err != nil {
-		t.Fatal(err)
-	}
-	var req runRequest
-	if err := dataset.ReadJSON(filepath.Join(out, "request-01.json"), &req); err != nil {
-		t.Fatal(err)
-	}
-	return req
+	return cliFixtureRequest(t, args...)
 }
 
 type deadlineCatalog struct {

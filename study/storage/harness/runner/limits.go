@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -38,6 +39,7 @@ type ComponentMemory struct {
 	LimitBytes   int64  `json:"limit_bytes"`
 	PeakBytes    int64  `json:"cgroup_peak_bytes"`
 	PeakRSSBytes int64  `json:"process_peak_rss_bytes"`
+	RSSSource    string `json:"process_peak_rss_source"`
 	OOMKills     int64  `json:"oom_kills"`
 	ExitCode     int    `json:"exit_code"`
 	Status       string `json:"status"`
@@ -86,6 +88,11 @@ func readBinding(path, data string, args []string) (RunBinding, error) {
 	}
 	if binding.Limits.Runner <= 0 || binding.Limits.Checker <= 0 || binding.Limits.Engine <= 0 {
 		return binding, fmt.Errorf("explicit positive runner, checker and engine hard limits required")
+	}
+	for _, limit := range []int64{binding.Limits.Runner, binding.Limits.Checker, binding.Limits.Engine} {
+		if limit%int64(os.Getpagesize()) != 0 {
+			return binding, fmt.Errorf("memory limits must be page aligned")
+		}
 	}
 	host, err := os.Hostname()
 	if err != nil {
@@ -143,6 +150,7 @@ func scopeMemory(path string, limit int64, pid int, state *os.ProcessState, runE
 		r.ExitCode = state.ExitCode()
 		if usage, ok := state.SysUsage().(*syscall.Rusage); ok {
 			r.PeakRSSBytes = usage.Maxrss * 1024
+			r.RSSSource = "wait status high-water"
 		}
 	}
 	if runErr == nil && r.OOMKills == 0 && r.ExitCode == 0 {
@@ -157,6 +165,7 @@ func scopeMemory(path string, limit int64, pid int, state *os.ProcessState, runE
 	return r, nil
 }
 func isolatedRunChild(original adapter.Backend, factory adapter.CatalogFactory, req runRequest) (err error) {
+	defer func() { err = errors.Join(err, recordRunnerRSS(req)) }()
 	ctx := context.Background()
 	engine, err := startProcess(ctx, req.EngineScope, filepath.Join(req.Out, fmt.Sprintf("engine-%02d.log", req.Run)), false)
 	if err != nil {
@@ -222,4 +231,44 @@ func runLimitedCommand(ctx context.Context, exe, mode, requestPath, scope, logPa
 	defer release()
 	err = cmd.Run()
 	return cmd, errors.Join(err, log.Close())
+}
+
+// The runner reaps engine/checker children, so its wait status is not a self-only
+// RSS source. Write RUSAGE_SELF from inside the runner after its owned joins.
+func recordRunnerRSS(req runRequest) error {
+	var usage syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
+		return err
+	}
+	peak := usage.Maxrss
+	if runtime.GOOS == "linux" {
+		peak *= 1024
+	}
+	return dataset.WriteJSON(filepath.Join(req.Out, fmt.Sprintf("runner-%02d.memory.json", req.Run)), ComponentMemory{PID: os.Getpid(), PeakRSSBytes: peak, RSSSource: "RUSAGE_SELF"})
+}
+func runnerMemory(req runRequest, cmd *exec.Cmd, runErr error) (ComponentMemory, error) {
+	pid := 0
+	var state *os.ProcessState
+	if cmd != nil {
+		state = cmd.ProcessState
+		if cmd.Process != nil {
+			pid = cmd.Process.Pid
+		}
+	}
+	memory, err := scopeMemory(req.RunnerScope, req.Binding.Limits.Runner, pid, state, runErr)
+	memory.PeakRSSBytes = 0
+	memory.RSSSource = "self RSS unavailable"
+	var own ComponentMemory
+	readErr := dataset.ReadJSON(filepath.Join(req.Out, fmt.Sprintf("runner-%02d.memory.json", req.Run)), &own)
+	if readErr == nil && (own.PID != pid || own.PeakRSSBytes <= 0 || own.RSSSource != "RUSAGE_SELF") {
+		readErr = fmt.Errorf("invalid runner self-RSS record")
+	}
+	if readErr != nil {
+		memory.Status = "failed"
+		memory.Error = errors.Join(runErr, readErr).Error()
+		return memory, errors.Join(err, readErr)
+	}
+	memory.PeakRSSBytes = own.PeakRSSBytes
+	memory.RSSSource = own.RSSSource
+	return memory, err
 }

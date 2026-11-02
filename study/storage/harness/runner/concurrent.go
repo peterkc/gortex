@@ -23,6 +23,7 @@ type readerSample struct {
 	pinStart, pinEnd time.Time
 	pinNS            int64
 	check            workload.Check
+	pending          *pendingCheck
 	newVersion       bool
 	err              error
 }
@@ -145,7 +146,7 @@ func readerLoop(ctx context.Context, b adapter.Backend, cat adapter.Catalog, cac
 			samples = append(samples, sample)
 			return nil
 		}
-		row := storedSample{Start: sample.start, End: sample.end, PinStart: sample.pinStart, PinEnd: sample.pinEnd, PinNS: sample.pinNS, NS: sample.ns, Check: sample.check, NewVersion: sample.newVersion}
+		row := storedSample{Start: sample.start, End: sample.end, PinStart: sample.pinStart, PinEnd: sample.pinEnd, PinNS: sample.pinNS, NS: sample.ns, Check: sample.check, Pending: sample.pending, NewVersion: sample.newVersion}
 		if sample.err != nil {
 			row.Error = sample.err.Error()
 		}
@@ -209,11 +210,18 @@ func readerLoop(ctx context.Context, b adapter.Backend, cat adapter.Catalog, cac
 			}
 		}
 		publishedAtStart := c.published.Load()
-		got, inputs, start, end, e := evaluateTimed(ctx, local, adapter.Fanout{Segments: local}, q)
+		got, inputs, start, end, ns, e := evaluateTimed(ctx, local, adapter.Fanout{Segments: local}, q)
 		release()
-		check, checkErr := checkedAnswer(ctx, q, expected, got, inputs)
-		if e == nil {
-			e = checkErr
+		var check workload.Check
+		var pending *pendingCheck
+		if spool != nil {
+			pending = &pendingCheck{Query: q, Expected: expected, Sources: expected.Sources, NativeScoring: q.NativeScoring, MatchRepos: q.MatchRepos, Answer: got, Inputs: inputs}
+		} else {
+			var checkErr error
+			check, checkErr = checkedAnswer(ctx, q, expected, got, inputs)
+			if e == nil {
+				e = checkErr
+			}
 		}
 		newVersion := view[old.Repo] != old && publishedAtStart
 		if newVersion && e == nil && !check.Mismatch {
@@ -223,7 +231,7 @@ func readerLoop(ctx context.Context, b adapter.Backend, cat adapter.Catalog, cac
 			default:
 			}
 		}
-		if writeErr := emit(readerSample{start: start, end: end, ns: end.Sub(start).Nanoseconds(), pinStart: pinStart, pinEnd: pinEnd, pinNS: pinNS, check: check, err: e, newVersion: newVersion}); writeErr != nil {
+		if writeErr := emit(readerSample{start: start, end: end, ns: ns, pinStart: pinStart, pinEnd: pinEnd, pinNS: pinNS, check: check, pending: pending, err: e, newVersion: newVersion}); writeErr != nil {
 			finish(writeErr)
 			return
 		}
@@ -325,6 +333,10 @@ func concurrent(ctx context.Context, b adapter.Backend, factory adapter.CatalogF
 		if readErr != nil {
 			return r, readErr
 		}
+		s, checkErr := checkReaderSample(ctx, s)
+		if checkErr != nil {
+			return r, checkErr
+		}
 		if e = idleStats.add(s.ns); e != nil {
 			return r, e
 		}
@@ -373,8 +385,13 @@ func concurrent(ctx context.Context, b adapter.Backend, factory adapter.CatalogF
 		finishReaderStream(control)
 		return r, publishErr
 	}
-	r.PublishNS = publishEnd.Sub(publishStart).Nanoseconds()
+	r.PublishNS = times.ElapsedNS
 	r.BuildPublishNS = publishEnd.Sub(begin).Nanoseconds()
+	if client := backendClient(b); client != nil {
+		client.mu.Lock()
+		r.BuildPublishNS = client.lastBuild + times.OpenNS + times.PrecommitNS + times.ElapsedNS
+		client.mu.Unlock()
+	}
 	control.published.Store(true)
 	afterTimer := time.NewTimer(30 * time.Second)
 	enough := func() bool {
@@ -390,7 +407,7 @@ func concurrent(ctx context.Context, b adapter.Backend, factory adapter.CatalogF
 		select {
 		case <-control.progress:
 		case <-afterTimer.C:
-			afterErr = fmt.Errorf("new-version checked sample minimum not reached")
+			afterErr = fmt.Errorf("new-version sample minimum not reached before deferred checks")
 		case <-ctx.Done():
 			afterErr = ctx.Err()
 		}
@@ -423,6 +440,10 @@ func concurrent(ctx context.Context, b adapter.Backend, factory adapter.CatalogF
 	for s, readErr := range samples.rows() {
 		if readErr != nil {
 			return r, readErr
+		}
+		s, checkErr := checkReaderSample(ctx, s)
+		if checkErr != nil {
+			return r, checkErr
 		}
 		count++
 		r.CheckedSamples++
