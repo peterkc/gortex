@@ -320,6 +320,8 @@ func TestThresholdBranchesKeepTargets(t *testing.T) {
 	}{
 		{"cpu", func(r *deltaReport) { r.Checkpoints[0].MaxEditCPU = 1000000001 }},
 		{"visibility", func(r *deltaReport) { r.Checkpoints[0].Visibility.P95 = 5000000001 }},
+		{"disk", func(r *deltaReport) { r.Checkpoints[0].ByteRatio = 2.01 }},
+		{"missing-disk", func(r *deltaReport) { r.Checkpoints[0].ByteRatio = 0 }},
 		{"read", func(r *deltaReport) { r.Checkpoints[0].WorstRatio = 1.1001 }},
 		{"missing-samples", func(r *deltaReport) { r.Checkpoints[0].Visibility.Count = 0 }},
 		{"no-threshold", func(r *deltaReport) { r.LowerBound = nil }},
@@ -337,9 +339,9 @@ func TestThresholdBranchesKeepTargets(t *testing.T) {
 		})
 	}
 	r := passingReport()
-	r.Checkpoints[0].ByteRatio = 3
+	r.Checkpoints[0].ByteRatio = 2
 	if !deltaPass(r) {
-		t.Fatal("diagnostic byte ratio became an unapproved decision rule")
+		t.Fatal("inclusive 2x byte bound refused")
 	}
 	r.MaxEditCPU = 9e9
 	r.Visibility.P95 = 9e9
@@ -1014,5 +1016,88 @@ func TestNativeLexicalRequiresFullCountWithoutRankEquivalence(t *testing.T) {
 				t.Fatal("valid but underfilled nonempty result accepted", k, err)
 			}
 		}
+	}
+}
+
+func TestMatchRepositoriesMatchesOracleAcrossRepositories(t *testing.T) {
+	ctx := context.Background()
+	var memory, disk []dataset.Dataset
+	view := map[string]adapter.Segment{}
+	for _, repo := range []string{"one", "two"} {
+		d := conformance.Fixture()
+		d.Repo = repo
+		for i := range d.Nodes {
+			d.Nodes[i].ID = repo + "/" + d.Nodes[i].ID
+		}
+		for i := range d.Edges {
+			d.Edges[i].From = repo + "/" + d.Edges[i].From
+			d.Edges[i].To = repo + "/" + d.Edges[i].To
+		}
+		for i := range d.Symbols {
+			d.Symbols[i].NodeID = repo + "/" + d.Symbols[i].NodeID
+		}
+		for i := range d.Content {
+			d.Content[i].NodeID = repo + "/" + d.Content[i].NodeID
+			d.Content[i].ChunkID = repo + "/" + d.Content[i].ChunkID
+		}
+		for i := range d.Vectors {
+			d.Vectors[i].NodeID = repo + "/" + d.Vectors[i].NodeID
+		}
+		d.Symbols[1].Tokens += " symbolonly"
+		d.Content[0].Body += " textonly"
+		memory = append(memory, d)
+		view[repo] = oracle.New(d)
+		dir := filepath.Join(t.TempDir(), repo)
+		if _, err := dataset.Write(dir, d); err != nil {
+			t.Fatal(err)
+		}
+		source, err := dataset.OpenSource(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		disk = append(disk, source)
+	}
+	queries := []workload.Query{
+		{Op: "symbols", Repo: "one", Key: "graph node", K: 10},
+		{Op: "symbols", Repo: "two", Key: "symbolonly", K: 10},
+		{Op: "content", Repo: "one", Key: "textonly", K: 10},
+		{Op: "content", Repo: "two", Key: "graph node", K: 10},
+		{Op: "multi_symbols", Key: "symbolonly", K: 10},
+		{Op: "multi_symbols", Key: "graph node", K: 10},
+		{Op: "symbols", Repo: "two", Key: "absentterm987", K: 10},
+		{Op: "content", Repo: "one", Key: "absentterm987", K: 10},
+		{Op: "multi_symbols", Key: "absentterm987", K: 10},
+	}
+	var expected []workload.Expected
+	for i := range queries {
+		q := &queries[i]
+		q.ID = q.Op + ":" + q.Repo + ":" + q.Key
+		answer, err := workload.Evaluate(ctx, view, adapter.Fanout{Segments: view}, *q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected = append(expected, workload.Expected{QueryID: q.ID, Answer: answer})
+	}
+	references, err := oracle.ReferenceAnswers(memory, queries, expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, q := range queries {
+		t.Run(q.ID, func(t *testing.T) {
+			matches, err := matchRepositories(ctx, disk, q)
+			if err != nil || matches == nil || !reflect.DeepEqual(matches, references[i].MatchRepos) {
+				t.Fatal("streamed match set differs from oracle", matches, references[i].MatchRepos, err)
+			}
+			for _, repo := range matches {
+				if q.Repo != "" && repo != q.Repo {
+					t.Fatal("local query included another repository", q, matches)
+				}
+			}
+		})
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := matchRepositories(cancelled, disk, queries[0]); !errors.Is(err, context.Canceled) {
+		t.Fatal("cancelled derivation was not refused", err)
 	}
 }

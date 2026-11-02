@@ -1245,7 +1245,7 @@ func selectedCheckpoint(r deltaReport) (checkpoint, bool) {
 }
 func deltaPass(r deltaReport) bool {
 	p, ok := selectedCheckpoint(r)
-	return ok && p.Size > 0 && p.Visibility.Count == p.Size && p.MaxEditCPU > 0 && p.MaxEditCPU <= 1e9 && p.Visibility.P95 > 0 && p.Visibility.P95 <= 5e9 && p.WorstRatio > 0 && p.WorstRatio <= 1.10
+	return ok && p.Size > 0 && p.Visibility.Count == p.Size && p.MaxEditCPU > 0 && p.MaxEditCPU <= 1e9 && p.Visibility.P95 > 0 && p.Visibility.P95 <= 5e9 && p.WorstRatio > 0 && p.WorstRatio <= 1.10 && p.ByteRatio > 0 && p.ByteRatio <= 2
 }
 func deltaTarget(format string, r deltaReport) targetResult {
 	status := "pass"

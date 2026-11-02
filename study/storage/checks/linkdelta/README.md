@@ -84,6 +84,13 @@ Preparation computes lexical membership from the same source/token rule as the
 oracle, including explicit empty sets. A missing prepared set blocks verification,
 not a candidate correctness miss. Native lexical results must have the full
 expected top-k count even when their rank order or selected IDs differ.
+Oracle tokenization accepts Unicode letters and decimal digits (Nd). Bleve accepts
+letters and all number categories (N), including other numbers (No) and letter
+numbers (Nl), such as `²`, `½` and `Ⅻ`. These rules can yield different matches and
+counts, so a correct native base can fail against the oracle on such text. This
+limit is not exhaustively checked against the frozen corpus. The occupancy rule
+remains strict; delta and wrapper answers compare with clean C's same analyzer.
+Aligning shared tokenizers is outside this module.
 Non-lexical reuse binds the complete query and
 unchanged hash-pinned data to the approved golden answer; it does not assume that
 the generator and current harness revisions are identical. Current clean C still
@@ -104,9 +111,14 @@ ratios. A/A is not subtracted and the 1.10 bound is unchanged. Read serving is
 format-independent by construction; write/seal, open and bytes distinguish the
 codecs. The worst operation determines the 10% crossing. No observed
 crossing means a lower bound only; the threshold remains unresolved. A crossing
-at the smallest size supplies no passing threshold. Serving bytes and byte ratios
-are diagnostics, not additional acceptance bounds. If both forms pass, the lead
-selects the simplest form; code does not invent that judgment. A passing form
+at the smallest size supplies no passing threshold. The selected checkpoint must
+also have a positive delta/base byte ratio at most 2. The approved Design C target
+contract says "Change-layer delta bytes before compaction at most twice
+sealed-store bytes" (Prime plan `agent/plans/gortex-design-c/PLAN.md:765–766`).
+Line 790 applies that contract to Checks 1 to 6. This ratio counts all layer bytes
+through the selected checkpoint over the delta repository's sealed base bytes.
+If both forms pass, the lead selects the simplest form; code does not invent that
+judgment. A passing form
 cannot be selected as the sole pass while the other form is blocked or absent.
 A measured miss of the other form permits that selection.
 CPU maxima and visibility p95 apply to the prefix that the chosen threshold or
@@ -175,6 +187,10 @@ The controller, preparation/checkers and engines enter separate accepted-launche
 cgroups. Runner/checker limits remain explicit. The link engine gets the exact
 1.5 GiB hard cap. The controller deadline covers the complete serial run.
 All workers stop 60 seconds before it, leaving a fixed finalization reserve.
+The 60 seconds is an unmeasured engineering allowance. Finalization hashes the
+whole tier input tree and all finalized outputs. It can exceed the allowance and
+lose `result.json` at the controller deadline. Retained progress and the outer
+terminal receipt remain necessary; no full-tier completion time is guaranteed.
 A wall budget of 60 seconds or less is refused; the outer approved cap does not
 increase. The launcher verifies its own executable, command, hostname, policy
 and input hashes. `inputs.json` additionally binds the worker executable, source declaration,
