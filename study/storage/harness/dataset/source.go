@@ -30,16 +30,20 @@ func SafeFile(root, name string) (string, error) {
 	if name == "" || filepath.IsAbs(name) || filepath.Clean(name) != name || name == "." || strings.HasPrefix(name, ".."+string(filepath.Separator)) || name == ".." {
 		return "", fmt.Errorf("unsafe input path %q", name)
 	}
-	path := filepath.Join(root, name)
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(canonicalRoot, name)
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return "", err
 	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
-	if resolved != abs {
+	if resolved != path {
 		return "", fmt.Errorf("input alias or symlink: %s", name)
 	}
 	info, err := os.Stat(path)

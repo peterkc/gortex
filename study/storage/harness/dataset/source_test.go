@@ -123,3 +123,67 @@ func TestSafeFileRejectsAliases(t *testing.T) {
 		}
 	}
 }
+
+func TestSafeFileAllowsLinkedRootsButNotLinkedDescendants(t *testing.T) {
+	real := t.TempDir()
+	if _, err := Write(filepath.Join(real, "nested"), diskFixture()); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "root")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []string{real, link, filepath.Join(link, "nested")} {
+		name := "nested/nodes.jsonl"
+		if filepath.Base(root) == "nested" {
+			name = "nodes.jsonl"
+		}
+		path, err := SafeFile(root, name)
+		if err != nil {
+			t.Fatal(root, err)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil || len(got) == 0 {
+			t.Fatal(path, err)
+		}
+	}
+	source, err := OpenSource(filepath.Join(link, "nested"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nodes []Node
+	for node, err := range source.NodeRows() {
+		if err != nil {
+			t.Fatal(err)
+		}
+		nodes = append(nodes, node)
+	}
+	if !reflect.DeepEqual(nodes, diskFixture().Nodes) {
+		t.Fatal("linked-root iteration changed records", nodes)
+	}
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("external"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range []struct{ name, target string }{{"file-link", filepath.Join(outside, "secret")}, {"folder-link", outside}, {"inside-link", filepath.Join(real, "nested")}} {
+		if err := os.Symlink(entry.target, filepath.Join(real, entry.name)); err != nil {
+			t.Fatal(err)
+		}
+		name := entry.name
+		if entry.name == "folder-link" {
+			name += "/secret"
+		}
+		if entry.name == "inside-link" {
+			name += "/nodes.jsonl"
+		}
+		if _, err := SafeFile(link, name); err == nil {
+			t.Fatal("accepted descendant alias", name)
+		}
+	}
+	if _, err := SafeFile(link, "missing"); !os.IsNotExist(err) {
+		t.Fatal("missing input changed", err)
+	}
+	if _, err := SafeFile(link, "nested"); err == nil {
+		t.Fatal("accepted directory as a record file")
+	}
+}
