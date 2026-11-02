@@ -102,7 +102,7 @@ jobs:
           fixture="$GITHUB_WORKSPACE/study/storage/seam/fixture"
           tree=$(python3.12 -c 'import json,sys; print(json.load(open(sys.argv[1]))["fixture_sha256"])' "$fixture/symbols.json")
           go_binary=$(command -v go)
-          echo $$ > "$GXSEAM_CGROUP_ROOT/owner/cgroup.procs"
+          printf '%s\n' "$$" | sudo tee "$GXSEAM_CGROUP_ROOT/owner/cgroup.procs" > /dev/null
           exec python3.12 -B study/storage/seam/run_pipeline.py \
             --profile ci-fixture --source "$fixture" \
             --artifact "$RUNNER_TEMP/seam-artifacts" \
@@ -124,7 +124,7 @@ jobs:
           set -euo pipefail
           identity="$RUNNER_TEMP/seam-artifacts/cgroup-root.identity"
           if test -f "$identity"; then
-            python3.12 -B study/storage/seam/run_limited.py cleanup \
+            sudo python3.12 -B study/storage/seam/run_limited.py cleanup \
               --root "$GXSEAM_CGROUP_ROOT" --identity "$identity" \
               --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
           fi
