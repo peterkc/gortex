@@ -190,6 +190,8 @@ def python_extract(path: str, content: bytes) -> list[dict]:
     # offsets into decoded UTF-8. Original bytes have their own hash.
     encoding, _ = tokenize.detect_encoding(io.BytesIO(content).readline)
     source = content.decode(encoding)
+    if "\r" in source.replace("\r\n", ""):
+        raise CorpusError(f"lone CR is unsupported in Python source: {path}")
     raw = source.encode("utf-8")
     lines, starts = source.split("\n"), offsets(raw)
     tree = ast.parse(source, filename=path)

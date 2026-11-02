@@ -19,11 +19,14 @@ noncanonical paths. Go declarations come from the stdlib-only `corpus_extract`
 helper. Python declarations come from `ast` and `tokenize`. Nested definitions
 remain in their enclosing bodies, not as separate candidates. Comments and
 Python docstrings are blanked, but ordinary strings remain.
-Go `*_test.go`, `src/vendor/` and `testdata/` files are excluded, as are
-Python `Lib/test/` files. Go documentation follows `ast.CommentGroup.Text()`:
+Go `*_test.go` files and paths containing any `vendor` or `testdata` component
+are excluded. Python excludes only `Lib/test/`; test code elsewhere, such as
+`Lib/idlelib/idle_test/`, stays in the population.
+Go documentation follows `ast.CommentGroup.Text()`:
 `//go:`, `//line` and `//export` directives never become query text. All comments,
 including directives, remain in the source/license provenance.
 Python spans and notices use UTF-8 byte offsets and LF-only physical lines.
+CRLF is accepted. A lone CR is rejected, not normalized or silently misaligned.
 
 Every model-ready body includes its kind, qualified name, signature and path.
 Token counts include this header and special tokens, without truncation.

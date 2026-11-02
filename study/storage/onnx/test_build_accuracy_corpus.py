@@ -135,7 +135,8 @@ class CorpusTests(unittest.TestCase):
             self.assertEqual(len({r["id"] for r in ds}), sum(document_counts))
             self.assertTrue({r["id"] for r in qs} <= {r["id"] for r in ds})
         self.assertEqual(counts["population"]["python"]["above_4096"], 2)
-        self.assertEqual(counts["availability"]["python"]["8192"]["documents"], 2)
+        self.assertEqual(
+            counts["availability"]["python"]["8192"]["documents"], 2)
         before = copy.deepcopy(population)
         corpus.select(population)
         self.assertEqual(population, before)
@@ -157,7 +158,8 @@ class CorpusTests(unittest.TestCase):
             corpus.emit(output, ds, qs, counts, {"sources": []}, {})
         self.assertEqual([p.name for p in output.iterdir()], ["counts.json"])
 
-    def test_python_non_lf_separators_and_utf8_notice_keep_physical_spans(self):
+    def test_python_non_lf_separators_and_utf8_notice_keep_physical_spans(
+            self):
         separators = "\v\f\x85\u2028\u2029"
         prefix = "# licence Café " + separators + "\n"
         ordinary = "ordinary" + separators + "text"
@@ -177,9 +179,33 @@ class CorpusTests(unittest.TestCase):
         self.assertNotIn("# erase", row["body"])
         self.assertNotIn("Read the original", row["body"])
         self.assertEqual(len(row["body"].encode()), row["end"] - row["start"])
-        self.assertEqual(corpus.offsets(raw),
-                         [0] + [i + 1 for i, byte in enumerate(raw) if byte == 10])
-        self.assertEqual(corpus.python_extract("Lib/physical.py", raw[:-1]), [row])
+        self.assertEqual(
+            corpus.offsets(raw),
+            [0] + [i + 1 for i, byte in enumerate(raw) if byte == 10])
+        self.assertEqual(
+            corpus.python_extract("Lib/physical.py", raw[:-1]), [row])
+
+    def test_python_lone_cr_refuses_but_crlf_preserves_spans(self):
+        for newline in ("\n", "\r\n"):
+            with self.subTest(newline=repr(newline)):
+                notice = "# licence Café" + newline
+                body = ("def read():" + newline
+                        + '    return "\\r"' + newline)
+                raw = (notice + body).encode()
+                row, = corpus.python_extract("Lib/endings.py", raw)
+                self.assertEqual(row["notice"], notice)
+                self.assertEqual((row["line"], row["end_line"]), (2, 3))
+                self.assertEqual(row["start"], len(notice.encode()))
+                self.assertEqual(row["body"], body.rstrip("\r\n"))
+                self.assertEqual(raw[row["start"]:row["end"]],
+                                 row["body"].encode())
+        for raw in (b"# notice\rdef read():\n    return 1\n",
+                    b"def read():\r    return 1\r",
+                    b"def read():\n    return 1\r",
+                    b"# bare CR at EOF\r"):
+            with self.subTest(source=repr(raw)):
+                with self.assertRaisesRegex(corpus.CorpusError, "lone CR"):
+                    corpus.python_extract("Lib/endings.py", raw)
 
     def test_jsonl_unicode_separators_round_trip_through_bridge_lines(self):
         self.assertEqual(corpus.canonical({"text": "Café"}),
@@ -198,8 +224,9 @@ class CorpusTests(unittest.TestCase):
                 self.assertEqual(parsed["text"], text)
                 for escaped in (r"\u0085", r"\u2028", r"\u2029"):
                     self.assertIn(escaped, content)
-            self.assertIn("Café" if name != "provenance.jsonl" else "unicode-lines",
-                          content)
+            self.assertIn(
+                "Café" if name != "provenance.jsonl" else "unicode-lines",
+                content)
 
     def test_go_directive_only_documentation_cannot_supply_query(self):
         executable = Path(os.environ["GXSTUDY_CORPUS_EXTRACTOR"])
@@ -209,7 +236,8 @@ class CorpusTests(unittest.TestCase):
                b"//line fake.go:900\nfunc OnlyDirectives() {}\n")
         source = {"repo": "https://github.com/golang/go", "commit": "a" * 40,
                   "tree": "b" * 40, "language": "go"}
-        row, = corpus.candidates({"src/directives.go": raw}, source, executable)
+        row, = corpus.candidates(
+            {"src/directives.go": raw}, source, executable)
         self.assertEqual(row["documentation"], "")
         self.assertEqual(row["query"], "")
         _, queries, counts = corpus.select(
@@ -380,7 +408,8 @@ class CorpusTests(unittest.TestCase):
                 elif kind == "unknown":
                     changed["extra"] = True
                 elif kind == "label":
-                    changed["python_control"]["result_label"] = "long-body comparison"
+                    changed["python_control"]["result_label"] = (
+                        "long-body comparison")
                 elif kind == "missing-label":
                     del changed["python_control"]["result_label"]
                 elif kind == "control-type":
@@ -424,11 +453,13 @@ class CorpusTests(unittest.TestCase):
         inputs = {
             "go": {"src/f.go": (
                 b"package f\n"
-                b"// Go fixture returns the original documented public value.\n"
+                b"// Go fixture returns the original documented "
+                b"public value.\n"
                 b"func Read() string { return \"ordinary\" }\n")},
             "python": {"Lib/f.py": (
                 b"def read():\n"
-                b'    "Python fixture returns the original documented value."\n'
+                b'    "Python fixture returns the original '
+                b'documented value."\n'
                 b'    return "ordinary"\n')},
         }
         args = argparse.Namespace(
@@ -437,9 +468,11 @@ class CorpusTests(unittest.TestCase):
             go_extractor=executable, output=self.root / "built")
         with (mock.patch.object(corpus, "QUOTAS", tiny_quotas),
               mock.patch.dict(corpus.RECIPE, {"quotas": tiny_quotas}),
-              mock.patch.object(corpus, "tokenizer_files", return_value=token_pins),
-              mock.patch.object(corpus, "source_files", side_effect=lambda _, source:
-                                (inputs[source["language"]], b"fixture license")),
+              mock.patch.object(
+                  corpus, "tokenizer_files", return_value=token_pins),
+              mock.patch.object(
+                  corpus, "source_files", side_effect=lambda _, source:
+                  (inputs[source["language"]], b"fixture license")),
               mock.patch.dict(os.environ, {"HF_HUB_OFFLINE": "0",
                                            "TRANSFORMERS_OFFLINE": "0"})):
             corpus.build(args)
