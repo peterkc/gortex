@@ -276,10 +276,12 @@ in CLI 0.17.0; they have no team option. No global team selection is relied on.
 Exactly one `Successfully created pod <id>` line supplies the
 candidate identity. The ID is 8 to 64 letters, digits, `_` or `-`, starting
 with a letter or digit. Status by ID must confirm its owned nonce name and
-pinned team before identification or deletion. The list is an extra collision check:
-zero matching rows are allowed, but a different ID with our name is refused.
-For uncertain create, cleanup first uses the same stdout candidate, or falls
-back to one list candidate, always with status name/team confirmation. Quantity,
+pinned team before identification for use. The list is an extra collision
+check: zero matching rows are allowed, but a different ID with our name is refused.
+For uncertain create, cleanup first uses the same stdout ID with status name
+confirmation. Wrong billing is journaled but does not prevent deleting that
+owned pod. A list-only fallback still requires status name/team confirmation.
+Cleanup status/list reads use fresh receipt names for every attempt. Quantity,
 provider and shape pins are checked before publishing validation. Echoed request
 fields are not observed allocation. Missing live fields remain listed.
 

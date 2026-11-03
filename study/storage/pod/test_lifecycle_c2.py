@@ -210,7 +210,8 @@ class Rental:
     def status_read(self, config, state, pod_id, label):
         self.status_reads += 1
         self.test.assertEqual(pod_id, self.pod_id)
-        self.test.assertIn(label, ("initial-status", "reconcile-status"))
+        self.test.assertTrue(label == "initial-status"
+                             or label.startswith("reconcile-status-"))
         return {"id": self.pod_id, "provider": "nebius",
                 "name": json.loads((state / "owner.json").read_text())["name"],
                 "team_id": config["team_id"],
@@ -294,6 +295,123 @@ class TeamRental(Rental):
                 **self.status_changes}
 
 
+class CleanupReceiptRental(Rental):
+    """Keep real call/status/pages and fake only the CLI process boundary."""
+
+    def __init__(self, test, root):
+        super().__init__(test, root)
+        self.fail_read = "status"
+        self.list_reads = 0
+        self.cli_operations = []
+        self.retry_at_cutoff = False
+        self.cutoff_retried = False
+        self.abort_after = 30
+
+    def cli_run(self, arguments, **kwargs):
+        namespace, operation = arguments[4:6]
+        self.cli_operations.append(operation)
+        if namespace == "availability":
+            document = availability(self.config)
+        elif operation == "create":
+            kwargs["stdout"].write(
+                "Successfully created pod " + self.pod_id + "\n")
+            raise subprocess.TimeoutExpired(arguments, 90)
+        elif operation == "status":
+            self.status_reads += 1
+            self.test.assertEqual(arguments[6], self.pod_id)
+            if self.fail_read == "status" and self.status_reads == 1:
+                kwargs["stderr"].write("No status found\n")
+                return subprocess.CompletedProcess(arguments, 1)
+            document = {
+                "id": self.pod_id, "team_id": self.config["team_id"],
+                "name": json.loads(
+                    (self.state / "owner.json").read_text())["name"]}
+        elif operation == "list":
+            self.list_reads += 1
+            if self.fail_read == "list" and self.list_reads == 1:
+                kwargs["stderr"].write("Temporary list failure\n")
+                return subprocess.CompletedProcess(arguments, 1)
+            document = {"pods": [], "total_count": 0, "offset": 0}
+        elif operation == "terminate":
+            self.test.assertEqual(arguments[-3:],
+                                  ["terminate", self.pod_id, "--yes"])
+            self.terminate_times.append(self.clock.elapsed)
+            return subprocess.CompletedProcess(arguments, 0, "deleted", "")
+        else:
+            raise AssertionError("unexpected fake CLI operation")
+        kwargs["stdout"].write(json.dumps(document))
+        return subprocess.CompletedProcess(arguments, 0)
+
+    def select(self, descriptors, unused_write, unused_error, timeout):
+        if (self.retry_at_cutoff and self.status_reads == 1
+                and not self.cutoff_retried):
+            self.cutoff_retried = True
+            self.clock.elapsed = self.config["cutoff_seconds"]
+            self.timer.callback()
+            return descriptors, [], []
+        return super().select(descriptors, unused_write, unused_error, timeout)
+
+    def run(self):
+        replacements = [
+            (lifecycle.threading, "Timer", self.make_timer),
+            (lifecycle.signal, "signal", self.install_signal),
+            (lifecycle.shutil, "which", lambda _: "/prime"),
+            (lifecycle.subprocess, "check_output",
+             lambda *_, **kw: "Prime CLI version: 0.17.0\n"),
+            (lifecycle.subprocess, "run", self.cli_run),
+            (lifecycle.time, "time", self.clock.time),
+            (lifecycle.time, "monotonic", self.clock.monotonic),
+            (lifecycle, "verify_deletion", self.verify),
+            (lifecycle.select, "select", self.select),
+            (lifecycle.os, "read", self.read),
+        ]
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(
+                sys.modules, {"admission": SimpleNamespace(
+                    PYTHON_VERSION=admission.PYTHON_VERSION,
+                    validate=lambda _: 60,
+                    root_probe_seconds=probe_seconds_fixture)}))
+            for owner, name, replacement in replacements:
+                stack.enter_context(patch.object(owner, name, replacement))
+            lifecycle.rent(self.path, self.state)
+
+
+class CleanupReceiptTests(unittest.TestCase):
+    def test_real_call_cleanup_retry_keeps_unique_status_receipts(self):
+        # Given a status/list read failure, when cleanup retries,
+        # then the real exclusive-open call path terminates once.
+        self.receipt_retry(False)
+
+    def test_real_call_hard_cutoff_retries_with_unique_status_receipts(self):
+        # Given the first cleanup read fails, when hard cutoff retries,
+        # then real call/status/pages still reach one terminate.
+        self.receipt_retry(True)
+
+    def receipt_retry(self, at_cutoff):
+        for failed_read in ("status", "list"):
+            with self.subTest(failed_read=failed_read, cutoff=at_cutoff), \
+                    tempfile.TemporaryDirectory() as temporary:
+                rental = CleanupReceiptRental(
+                    self, Path(temporary).resolve())
+                rental.fail_read = failed_read
+                rental.retry_at_cutoff = at_cutoff
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    rental.run()
+                self.assertEqual(rental.status_reads, 2)
+                expected = rental.config["cutoff_seconds"] if at_cutoff else 15
+                self.assertEqual(rental.terminate_times, [expected])
+                self.assertEqual(rental.cli_operations.count("create"), 1)
+                self.assertEqual(rental.cli_operations.count("terminate"), 1)
+                self.assertEqual(len(list(rental.state.glob(
+                    "reconcile-status-*.stdout"))), 2)
+                self.assertEqual(len(list(rental.state.glob(
+                    "reconcile-status-*.stderr"))), 2)
+                errors = [json.loads(path.read_text())["error"] for path in
+                          rental.state.glob("owner-error-*.json")]
+                self.assertEqual(len(errors), 1)
+                self.assertNotIn("FileExistsError", errors[0])
+
+
 class TeamScopeTests(unittest.TestCase):
     def test_team_create_identifies_from_stdout_when_list_is_empty(self):
         # Given matching status and a hidden list, when create ends,
@@ -314,10 +432,9 @@ class TeamScopeTests(unittest.TestCase):
             self.assertEqual(rental.terminate_times, [15])
 
     def test_invalid_status_identity_never_identifies_or_terminates(self):
-        # Given wrong/missing name or team, when status cannot confirm,
+        # Given wrong/missing name, when status cannot confirm,
         # then retain the lease without deleting a guessed ID.
-        for change in ({"team_id": None}, {"team_id": "other-team"},
-                       {"name": "other-name"}, {"name": None}):
+        for change in ({"name": "other-name"}, {"name": None}):
             with self.subTest(change=change), \
                     tempfile.TemporaryDirectory() as temporary:
                 rental = TeamRental(self, Path(temporary).resolve())
@@ -328,6 +445,46 @@ class TeamScopeTests(unittest.TestCase):
                 self.assertEqual(rental.terminate_times, [])
                 self.assertFalse((rental.state / "session.json").exists())
                 self.assertFalse((rental.state / "validated.json").exists())
+
+    def test_stdout_owned_wrong_team_is_deleted_and_journaled(self):
+        # Given stdout ID/name but wrong billing, when cleanup recovers,
+        # then delete the pod and record the team mismatch.
+        for reported_team in (None, "other-team"):
+            with self.subTest(team=reported_team), \
+                    tempfile.TemporaryDirectory() as temporary:
+                rental = TeamRental(self, Path(temporary).resolve())
+                rental.lost_ack = True
+                rental.status_changes = {"team_id": reported_team}
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    rental.run()
+                self.assertEqual(len(rental.terminate_times), 1)
+                journal = json.loads(
+                    (rental.state / "terminate-command.json").read_text())
+                self.assertEqual(journal["pod_id"], rental.pod_id)
+                self.assertEqual(journal["team_mismatch"], {
+                    "expected_team_id": rental.config["team_id"],
+                    "reported_team_id": reported_team,
+                    "ownership": "create.stdout ID and status name"})
+
+    def test_rent_wrong_team_refuses_use_but_cleanup_deletes(self):
+        # Given a wrong-team create, when rental checks billing,
+        # then refuse use but delete our stdout-owned pod.
+        for reported_team in (None, "other-team"):
+            with self.subTest(team=reported_team), \
+                    tempfile.TemporaryDirectory() as temporary:
+                rental = TeamRental(self, Path(temporary).resolve())
+                rental.status_changes = {"team_id": reported_team}
+                with self.assertRaisesRegex(ValueError, "approved name/team"):
+                    rental.run()
+                self.assertEqual(rental.status_reads, 2)
+                self.assertEqual(len(rental.terminate_times), 1)
+                self.assertFalse((rental.state / "session.json").exists())
+                self.assertFalse((rental.state / "validated.json").exists())
+                self.assertFalse((rental.state / "connection.json").exists())
+                journal = json.loads(
+                    (rental.state / "terminate-command.json").read_text())
+                self.assertEqual(journal["team_mismatch"]["reported_team_id"],
+                                 reported_team)
 
     def test_summary_team_or_sharing_refuses_before_validation(self):
         # Given a confirmed pod, when request team/sharing differs,

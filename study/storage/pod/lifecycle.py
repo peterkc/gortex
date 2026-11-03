@@ -686,13 +686,15 @@ def rent(config_path: Path, state: Path) -> None:
     def shutdown(reason: str) -> None:
         nonlocal lease
         with lock:
+            team_mismatch = None
             match lease:
                 case NotCreated() | Attempted():
                     return
                 case Unidentified():
                     stdout = state / "create.stdout"
-                    pod_id = (created_pod_id(stdout.read_text())
-                              if stdout.exists() else None)
+                    stdout_id = (created_pod_id(stdout.read_text())
+                                 if stdout.exists() else None)
+                    pod_id = stdout_id
                     matches = None
                     if pod_id is None:
                         matches = [pod for pod in pages(
@@ -703,8 +705,19 @@ def rent(config_path: Path, state: Path) -> None:
                                 "rental identity unproved; "
                                 "owner retained; escalate")
                         pod_id = matches[0]["id"]
-                    owned_status(config, state, pod_id, name,
-                                 "reconcile-status")
+                    status = status_read(
+                        config, state, pod_id,
+                        "reconcile-status-" + uuid.uuid4().hex)
+                    wrong_team = status.get("team_id") != config["team_id"]
+                    if (status.get("name") != name
+                            or (stdout_id is None and wrong_team)):
+                        raise ValueError(
+                            "rental identity differs from approved name/team")
+                    if wrong_team:
+                        team_mismatch = {
+                            "expected_team_id": config["team_id"],
+                            "reported_team_id": status.get("team_id"),
+                            "ownership": "create.stdout ID and status name"}
                     if matches is None:
                         matches = [pod for pod in pages(
                             config, state, "list", "reconcile")
@@ -730,7 +743,9 @@ def rent(config_path: Path, state: Path) -> None:
                      {"exit": "timeout-uncertain"})
             save(state / "terminate-command.json", {
                 "pod_id": pod_id, "reason": reason,
-                "argv": command(config, "terminate", pod_id, "--yes")})
+                "argv": command(config, "terminate", pod_id, "--yes"),
+                **({"team_mismatch": team_mismatch}
+                   if team_mismatch is not None else {})})
             verify_deletion(config, state, pod_id, started, deadline)
 
     def owner_deadlines() -> tuple[float, float]:
