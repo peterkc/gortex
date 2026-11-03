@@ -463,7 +463,7 @@ class Owner:
                                                  self.cleanup_team)
                     try:
                         self.invoke(["delete", self.sandbox_id, "--yes"],
-                                    label="terminate")
+                                    seconds=120, label="terminate")
                     except Exception as error:
                         self.record_error("delete-ack", error)
                     if journal_error is not None:
@@ -728,7 +728,8 @@ class Owner:
                     + '.sha256)" -le 256', 30, deadline)
         partial = destination / (".download-" + uuid.uuid4().hex + ".tar")
         sidecar = partial.with_suffix(".sha256")
-        self.download(REMOTE + name, partial, 300, deadline)
+        self.download(REMOTE + name, partial,
+                      min(deadline, self.cutoff) - time.monotonic(), deadline)
         self.download(REMOTE + name + ".sha256", sidecar, 30, deadline)
         checked_checkout(self.config)
         if (expected_bytes is not None

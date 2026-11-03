@@ -7,9 +7,11 @@
 > provider-proved all-fee cap. The three-hour workload/timing bounds stay fixed.
 > Only the guest admission block selects a new explicit venue. Corpus, model,
 > CPython, cgroups, workload commands and accuracy acceptance stay unchanged.
-> Old pod paths remain available but unused. Rebuild and approve the exact
-> source/input bundle before any sandbox run. This document grants no spend
-> approval.
+> The seven-domain egress allowlist stays open for the whole run. Measured
+> phases make no network calls by design. The sandbox does not enforce that
+> offline behavior. Old pod paths remain available but unused. Rebuild and
+> approve the exact source/input bundle before any sandbox run. This document
+> grants no spend approval.
 
 **Preparation only. No pod has been rented or approved by this document.**
 The lead operates one Prime Intellect Nebius **on-demand CPU, 8 vCPU / 32 GB**

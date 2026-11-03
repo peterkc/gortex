@@ -75,10 +75,13 @@ class OwnerTests(unittest.TestCase):
 
     def test_delete_ack_loss_and_logging_failure_never_replay_delete(self):
         self.owned()
-        def invoke(arguments, *args, **kwargs):
+        delete_timeouts = []
+
+        def invoke(arguments, seconds=30, *args, **kwargs):
             self.commands.append(arguments)
             if arguments[0] == "delete":
-                raise subprocess.TimeoutExpired(arguments, 30)
+                delete_timeouts.append(seconds)
+                raise subprocess.TimeoutExpired(arguments, seconds)
             return result(0, json.dumps(details(status="TERMINATED")))
         self.owner.invoke = invoke
         with mock.patch.object(
@@ -87,6 +90,7 @@ class OwnerTests(unittest.TestCase):
             self.assertFalse(self.owner.cleanup("cutoff"))
         self.assertTrue(self.owner.cleanup("verify-only"))
         self.assertEqual(sum(c[0] == "delete" for c in self.commands), 1)
+        self.assertEqual(delete_timeouts, [120])
 
     def test_unknown_or_mismatched_identity_never_deletes_or_claims_done(self):
         self.owner.lease = driver.Unidentified()
@@ -253,6 +257,35 @@ class OwnerTests(unittest.TestCase):
                 self.owner.copy("evidence.tar", "full-evidence",
                                 self.owner.cutoff,
                                 archive.stat().st_size + 1)
+
+    def test_copy_download_uses_remaining_window_not_fixed_300(self):
+        self.owner.remote = mock.Mock()
+        started = self.owner.monotonic
+        cases = (("evidence.tar", "full-evidence", 420, 1000, 410),
+                 ("receipts.tar", "diagnostics-only", 60, 1000, 50),
+                 ("partial.tar", "partial-evidence", 420, 200, 190))
+        for name, scope, window, cutoff, remaining in cases:
+            with self.subTest(scope=scope):
+                archive = self.bundle(scope)
+                self.owner.cutoff = started + cutoff
+                downloads = []
+
+                def download(remote, local, seconds, deadline):
+                    downloads.append((seconds, deadline))
+                    if remote.endswith(".sha256"):
+                        local.write_text(driver.artifacts.digest(archive)
+                                         + "  " + name + "\n")
+                    else:
+                        local.write_bytes(archive.read_bytes())
+
+                self.owner.download = download
+                with mock.patch.object(driver, "checked_checkout"), \
+                        mock.patch.object(driver.time, "monotonic",
+                                          return_value=started + 10):
+                    self.owner.copy(name, scope, started + window,
+                                    archive.stat().st_size)
+                self.assertEqual(downloads, [(remaining, started + window),
+                                             (30, started + window)])
 
     def test_copy_rejects_hash_scope_and_destination_alias(self):
         archive = self.bundle("partial-evidence")

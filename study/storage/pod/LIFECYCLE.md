@@ -480,8 +480,10 @@ Bootstrap allows exactly these seven domains, with no deny rules:
 `archive.ubuntu.com`, `security.ubuntu.com`, `proxy.golang.org`, `sum.golang.org`,
 `storage.googleapis.com`, `pypi.org`, `files.pythonhosted.org`.
 The driver emits and confirms this policy. Missing, extra, duplicate or wildcard
-domains refuse use. Existing measured phases stay offline. Apt, Go-module and
-locked Python setup stay unchanged; this is not a deny-all run.
+domains refuse use. The seven-domain egress allowlist stays open for the whole
+run. Measured phases make no network calls by design; the sandbox does not
+enforce that offline behavior. Apt, Go-module and locked Python setup stay
+unchanged; this is not a deny-all run.
 
 Copy `sandbox.example.json` to a private operator directory and fill every
 `PENDING` field. Re-export the five existing harness subtrees, rebuild the
@@ -525,8 +527,9 @@ PRIME_TEAM_ID="$TEAM" prime --context "$CONTEXT" --plain images list \
 Exec stdout is wrapped, so guest JSON is downloaded from fresh receipt files.
 Uploads get guest-side hash checks. Copy validates size, SHA-256, safe members,
 manifest coverage and scope before publishing. The SDK buffers whole files with
-a 300-second request limit. The approved 100 Mbps floors are host measurements,
-not proved sandbox-path rates. Forecast excess warns; deadlines stay fixed.
+a per-phase 300-second HTTP timeout. The approved 100 Mbps floors are host
+measurements, not proved sandbox-path rates. Forecast excess warns; deadlines
+stay fixed.
 
 Cleanup needs get-confirmed ID/name/unique label. Wrong billing refuses use but
 cannot block cleanup of that owned ID. One delete intent permits one invocation.
