@@ -463,11 +463,13 @@ def verify_deletion(config: Mapping, state: Path, pod_id: str,
 
 def root_facts_confirmed(value: object) -> bool:
     """Accept only actual D14 host/runtime facts from the first root check."""
+    from admission import PYTHON_VERSION
+
     expected = {
         "root": "/sys/fs/cgroup", "writable": True,
         "memory_controller": True, "euid": 0, "machine": "x86_64",
         "os_id": "ubuntu", "os_version": "22.04",
-        "python_implementation": "CPython", "python_version": "3.12.16",
+        "python_implementation": "CPython", "python_version": PYTHON_VERSION,
     }
     if (not isinstance(value, dict)
             or set(value) != set(expected) | {"glibc_version"}

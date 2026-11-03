@@ -40,6 +40,7 @@ class AdmissionC2Tests(unittest.TestCase):
         # Given the reviewed standalone release, when validating tools,
         # then no execution JSON field or system Python can replace its
         # pin.
+        self.assertEqual(admission.PYTHON_VERSION, "3.12.16")
         self.assertEqual(admission.TOOLS["python.tar.gz"],
                          "ce4f6d0a6cfdb3bed6e44c2f9affd85943"
                          "c76a42e25ad3a259002f31d6fb8a20")

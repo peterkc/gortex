@@ -77,10 +77,32 @@ print(json.dumps({
 }))
 '''
 PYTHON = REMOTE + "python/bin/python3.12"
+PYTHON_BOOTSTRAP_SECONDS = 30
 PYTHON_BOOTSTRAP_COMMAND = (
-    "set -eu; cd " + REMOTE + "; printf '%s  python.tar.gz\n' "
-    + shlex.quote(admission.TOOLS["python.tar.gz"])
-    + " | sha256sum --check -; tar -xzf python.tar.gz; test -x " + PYTHON)
+    "set -eu; cd " + shlex.quote(REMOTE) + "; pin="
+    + shlex.quote(admission.TOOLS["python.tar.gz"]) + "\n"
+    + r'''
+printf '%s  python.tar.gz\n' "$pin" | sha256sum --check -
+completed() {
+    test -d python && test ! -L python &&
+    test -f python/.bootstrap-sha256 &&
+    test "$(cat python/.bootstrap-sha256)" = "$pin" &&
+    test -x python/bin/python3.12
+}
+if completed; then exit 0; fi
+if test -e python || test -L python; then
+    echo "refusing an incomplete or different Python prefix" >&2
+    exit 78
+fi
+temporary=$(mktemp -d .python-bootstrap.XXXXXXXXXX)
+trap 'rm -rf -- "$temporary"' EXIT
+tar -xzf python.tar.gz -C "$temporary"
+test -x "$temporary/python/bin/python3.12"
+printf '%s\n' "$pin" > "$temporary/python/.bootstrap-sha256"
+if mv -T -- "$temporary/python" python; then exit 0; fi
+# An earlier attempt may finish after its SSH acknowledgement was lost.
+completed
+''')
 PROBE_COMMAND = (PYTHON + " -B -c " + shlex.quote(PROBE_SOURCE)
                  + " " + shlex.quote(REMOTE))
 ROOT_PROBE_COMMAND = ("cd " + REMOTE + " && " + PYTHON + " -B -c "
@@ -118,6 +140,26 @@ def stage_python(bundle: Path, state: Path) -> Path:
         finally:
             temporary.unlink(missing_ok=True)
     return target
+
+
+def publish_first_ssh_contact(state: Path, connected_epoch: float,
+                              connected_monotonic: float) -> None:
+    """Publish complete first-contact clocks without replacing a winner."""
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                mode="w", dir=state, prefix="ssh-contact-", suffix=".tmp",
+                delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump({"connected_epoch": connected_epoch,
+                       "connected_monotonic": connected_monotonic}, stream)
+        try:
+            os.link(temporary, state / "ssh-contact.json")
+        except FileExistsError:
+            pass  # The first contact must never be refreshed.
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def transport(arguments: Sequence[str], deadline: float) -> bytes:
@@ -326,13 +368,7 @@ def main() -> int:
                         raise TimeoutError("sshd readiness expired") from error
                     threading.Event().wait(min(5, root_deadline - time.time()))
             if config["cgroup_root"]["mode"] == "first-in-pod-check":
-                try:
-                    with (state / "ssh-contact.json").open("x") as stream:
-                        json.dump({"connected_epoch": time.time(),
-                                   "connected_monotonic": time.monotonic()},
-                                  stream)
-                except FileExistsError:
-                    pass  # The first contact must never be refreshed.
+                publish_first_ssh_contact(state, time.time(), time.monotonic())
                 contact = first_ssh_contact(state, config, owner)
                 if contact is None:
                     raise ValueError("original first SSH contact is unproved")
@@ -345,8 +381,48 @@ def main() -> int:
             upload([*scp, str(python_archive),
                     connection["target"] + ":" + REMOTE + "python.tar.gz"],
                    preupload_deadline)
-            run([*ssh, PYTHON_BOOTSTRAP_COMMAND],
-                config["bootstrap_seconds"], root_deadline)
+            bootstrap_attempt = 0
+            while True:
+                started = time.time()
+                if started >= min(root_deadline, cutoff):
+                    error = TimeoutError("Python bootstrap readiness expired")
+                    record_error("python-bootstrap-window", error,
+                                 sha256=admission.TOOLS["python.tar.gz"],
+                                 root_deadline_epoch=root_deadline)
+                    raise error
+                attempt_deadline = min(started + PYTHON_BOOTSTRAP_SECONDS,
+                                       root_deadline, cutoff)
+                details = {
+                    "attempt": bootstrap_attempt,
+                    "sha256": admission.TOOLS["python.tar.gz"],
+                    "started_epoch": started,
+                    "attempt_deadline_epoch": attempt_deadline,
+                    "root_deadline_epoch": root_deadline,
+                }
+                try:
+                    run([*ssh, PYTHON_BOOTSTRAP_COMMAND],
+                        PYTHON_BOOTSTRAP_SECONDS, attempt_deadline)
+                except Exception as error:
+                    remaining = root_deadline - time.time()
+                    record_error("python-bootstrap", error, **details,
+                                 finished_epoch=time.time(),
+                                 window_exhausted=remaining <= 0)
+                    retryable = (
+                        isinstance(error, subprocess.TimeoutExpired)
+                        or isinstance(error, subprocess.CalledProcessError)
+                        and error.returncode == 255)
+                    if not retryable:
+                        raise
+                    if remaining <= 0:
+                        raise TimeoutError(
+                            "Python bootstrap readiness expired") from error
+                    threading.Event().wait(min(5, remaining))
+                    bootstrap_attempt += 1
+                else:
+                    save(state / ("python-bootstrap-" + uuid.uuid4().hex
+                                  + ".json"),
+                         {**details, "finished_epoch": time.time(), "exit": 0})
+                    break
             root_attempt = 0
             while True:
                 try:

@@ -20,6 +20,7 @@ HERE = Path(__file__).resolve().parent
 # Add 2 MiB for metadata.
 TOKEN_JSON_BOUND = ((900 * 2048 + 48 * 4096 + 10 * 8192) * 3 * 30
                     + 2 * 1024 ** 2)
+PYTHON_VERSION = "3.12.16"
 TOOLS = {
     "go.tar.gz":
         "65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40",

@@ -16,7 +16,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import admission
 import artifacts
+import host_run
 import lifecycle
 from test_lifecycle_support import Clock, offer_document, pins, root_facts
 
@@ -800,6 +802,95 @@ class DeletionProofTests(unittest.TestCase):
                 self.assertIs(done["within_time_and_approved_rate"], False)
 
 
+class ContactPublicationTests(unittest.TestCase):
+    def test_contact_is_complete_before_link_and_keeps_first_clocks(self):
+        # Given no contact, when publishing it, then readers see missing
+        # or complete JSON. Re-entry cannot refresh either first clock.
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            target = state / "ssh-contact.json"
+            expected = {"connected_epoch": 330, "connected_monotonic": 420}
+            real_link = os.link
+            owned = []
+
+            def publish(source, destination):
+                source = Path(source)
+                owned.append(source)
+                self.assertEqual(source.parent, state)
+                self.assertEqual(destination, target)
+                self.assertFalse(target.exists())
+                self.assertEqual(json.loads(source.read_text()), expected)
+                real_link(source, destination)
+
+            with patch.object(host_run.os, "link", side_effect=publish):
+                host_run.publish_first_ssh_contact(state, 330, 420)
+            self.assertEqual(json.loads(target.read_text()), expected)
+            before = target.read_bytes(), target.stat().st_ino
+            host_run.publish_first_ssh_contact(state, 400, 490)
+            self.assertEqual((target.read_bytes(), target.stat().st_ino),
+                             before)
+            self.assertEqual(list(state.iterdir()), [target])
+            self.assertEqual(len(owned), 1)
+            self.assertFalse(owned[0].exists())
+            self.assertEqual(lifecycle.first_ssh_contact(
+                state, {"ready_seconds": 900},
+                {"started_epoch": 10, "started_monotonic": 100}),
+                (330.0, 420.0))
+
+    def test_link_race_reuses_complete_winner_and_removes_only_own_temp(self):
+        # Given a concurrent complete contact, when the link loses, then
+        # preserve the winner and any other writer's temporary file.
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            target = state / "ssh-contact.json"
+            other = state / "ssh-contact-other.tmp"
+            other.write_bytes(b"other writer's unpublished bytes")
+            winner = b'{"connected_epoch":20,"connected_monotonic":30}'
+            real_link = os.link
+
+            def race(source, destination):
+                self.assertEqual(json.loads(Path(source).read_text()),
+                                 {"connected_epoch": 40,
+                                  "connected_monotonic": 50})
+                target.write_bytes(winner)
+                real_link(source, destination)
+
+            with patch.object(host_run.os, "link", side_effect=race):
+                host_run.publish_first_ssh_contact(state, 40, 50)
+            self.assertEqual(target.read_bytes(), winner)
+            self.assertEqual(set(state.iterdir()), {target, other})
+            self.assertEqual(other.read_bytes(),
+                             b"other writer's unpublished bytes")
+
+    def test_contact_link_failure_leaves_no_contact_or_owned_temp(self):
+        # Given a link error, when publication fails, then no partial
+        # receipt or replacement clock can grant root-check authority.
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            with patch.object(host_run.os, "link", side_effect=OSError(
+                    errno.EIO, "synthetic link failure")):
+                with self.assertRaises(OSError):
+                    host_run.publish_first_ssh_contact(state, 40, 50)
+            self.assertEqual(list(state.iterdir()), [])
+            self.assertIsNone(lifecycle.first_ssh_contact(
+                state, {"ready_seconds": 900},
+                {"started_epoch": 10, "started_monotonic": 20}))
+
+    def test_invalid_existing_contact_is_never_repaired_or_refreshed(self):
+        # Given invalid JSON, when publication loses, then retain
+        # it unchanged and preserve the existing fail-closed validation.
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            target = state / "ssh-contact.json"
+            target.write_bytes(b"{partial old contact")
+            host_run.publish_first_ssh_contact(state, 40, 50)
+            self.assertEqual(target.read_bytes(), b"{partial old contact")
+            self.assertEqual(list(state.iterdir()), [target])
+            self.assertIsNone(lifecycle.first_ssh_contact(
+                state, {"ready_seconds": 900},
+                {"started_epoch": 10, "started_monotonic": 20}))
+
+
 class RootDeadlineTests(unittest.TestCase):
     def fallback(self, root, seconds=300):
         rental = Rental(self, root)
@@ -1003,6 +1094,14 @@ class RootDeadlineTests(unittest.TestCase):
         for value in wrong:
             with self.subTest(value=value):
                 self.assertFalse(lifecycle.root_facts_confirmed(value))
+
+    def test_root_facts_use_the_central_python_version(self):
+        # Given a changed tool version, when validating root facts, then
+        # accept only central metadata, not the old production literal.
+        with patch.object(admission, "PYTHON_VERSION", "3.12.99"):
+            self.assertTrue(lifecycle.root_facts_confirmed(
+                root_facts(python_version="3.12.99")))
+            self.assertFalse(lifecycle.root_facts_confirmed(root_facts()))
 
     def test_invalid_actual_facts_never_extend_readiness_or_contact(self):
         # Given invalid full-shaped facts, with or without SSH contact,

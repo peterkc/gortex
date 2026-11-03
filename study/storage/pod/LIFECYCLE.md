@@ -156,7 +156,9 @@ This is not existing venue evidence or permission to rent now. Create, ACTIVE
 and the first successful SSH contact share the original `ready_seconds` window
 (example: 900 seconds). The first-root check's 300 seconds starts at that first
 successful contact, not at create. Its wall and monotonic timestamps are recorded
-once in `ssh-contact.json`; retrying or restarting a helper cannot refresh them.
+once in `ssh-contact.json`. A complete temporary file is atomically linked into
+place without replacing an existing receipt. Retrying or restarting a helper
+cannot refresh those clocks.
 Run the owner and helper on the same always-on host. Do not copy a live lease to
 another host with a different monotonic clock.
 
@@ -299,8 +301,13 @@ bounded by the original setup/upload clock. A failed upload has at most one
 same-byte re-transfer before any launch. It cannot refresh the allowance.
 The separately uploaded CPython archive is included in transport feasibility as
 well as in the bulk payload. Bootstrap upload/extraction consumes the same
-first-contact root window; it never refreshes it. Its interpreter supplies all
-session startup, setup, cleanup and uv environment creation. Each failed upload
+first-contact root window; it never refreshes it. Python hash/unpack has a
+separate 30-second attempt limit, not the in-pod build reserve. SSH 255/timeouts
+can retry until that original root deadline; other remote exits do not retry.
+Each attempt retains a receipt. Extraction uses a unique private directory and
+publishes only a complete, verified Python prefix; a retry can reuse that prefix
+without unpacking into live files. Its interpreter supplies all session startup,
+setup, cleanup and uv environment creation. Each failed upload
 or probe keeps a separate error receipt; later attempts do not overwrite it.
 The read-only root probe can retry SSH 255/timeouts until the same original
 root deadline. Each error is retained; exit 78 never retries. This does not

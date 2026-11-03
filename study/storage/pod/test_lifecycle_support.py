@@ -6,6 +6,8 @@ from hashlib import sha256
 from io import BytesIO
 import errno
 import json
+import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -1496,6 +1498,166 @@ class AdmissionTests(unittest.TestCase):
                         admission.payload_check(payload, fixture_source_pins())
 
 
+@unittest.skipUnless(sys.platform == "linux", "Ubuntu GNU mv -T contract")
+class PythonBootstrapPublicationTests(unittest.TestCase):
+    """Exercise the target shell with tiny archives, never an interpreter."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+
+    def archive(self, directory, *, executable=True):
+        raw = b"synthetic interpreter bytes; must never execute\n"
+        with tarfile.open(directory / "python.tar.gz", "w:gz") as archive:
+            member = tarfile.TarInfo("python/bin/python3.12")
+            member.size = len(raw)
+            member.mode = 0o755 if executable else 0o644
+            archive.addfile(member, BytesIO(raw))
+        return raw
+
+    def invoke(self, directory, *, pin=None, env=None):
+        if pin is None:
+            pin = artifacts.digest(directory / "python.tar.gz")
+        command = host_run.PYTHON_BOOTSTRAP_COMMAND.replace(
+            shlex.quote(host_run.REMOTE), shlex.quote(str(directory)), 1)
+        command = command.replace(admission.TOOLS["python.tar.gz"], pin, 1)
+        return subprocess.run(["bash", "-c", command], capture_output=True,
+                              text=True, timeout=5, env=env)
+
+    def test_lost_ack_reuses_completed_prefix_without_unpacking(self):
+        # Given a lost completion ack, when retried, then reuse
+        # bytes and directory inode without executing the interpreter.
+        raw = self.archive(self.root)
+        first = self.invoke(self.root)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        prefix = self.root / "python"
+        executable = prefix / "bin/python3.12"
+        before = prefix.stat().st_ino, executable.stat().st_ino
+        second = self.invoke(self.root)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual((prefix.stat().st_ino, executable.stat().st_ino),
+                         before)
+        self.assertEqual(executable.read_bytes(), raw)
+        self.assertEqual((prefix / ".bootstrap-sha256").read_text(),
+                         artifacts.digest(self.root / "python.tar.gz") + "\n")
+        self.assertEqual(list(self.root.glob(".python-bootstrap.*")), [])
+
+    def test_archive_hash_is_checked_even_for_a_completed_prefix(self):
+        # Given a complete prefix, when the archive changes, then the
+        # fast path still refuses it and preserves the complete prefix.
+        self.archive(self.root)
+        pin = artifacts.digest(self.root / "python.tar.gz")
+        self.assertEqual(self.invoke(self.root, pin=pin).returncode, 0)
+        prefix = self.root / "python"
+        before = prefix.stat().st_ino
+        (self.root / "python.tar.gz").write_bytes(b"changed archive")
+        self.assertNotEqual(self.invoke(self.root, pin=pin).returncode, 0)
+        self.assertEqual(prefix.stat().st_ino, before)
+
+    def test_partial_unpublished_attempt_does_not_poison_retry(self):
+        # Given a killed attempt's partial private tree, when retried,
+        # then publish a separate complete tree and leave the old tree.
+        abandoned = self.root / ".python-bootstrap.abandoned"
+        abandoned.mkdir()
+        (abandoned / "partial").write_bytes(b"unfinished")
+        raw = self.archive(self.root)
+        result = self.invoke(self.root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / "python/bin/python3.12").read_bytes(),
+                         raw)
+        self.assertEqual(list(self.root.glob(".python-bootstrap.*")),
+                         [abandoned])
+        self.assertEqual((abandoned / "partial").read_bytes(), b"unfinished")
+
+    def test_failed_unpack_or_missing_executable_never_publishes(self):
+        # Given a corrupt tar or nonexecutable member, when extraction
+        # fails, then remove its private tree, never publish python/.
+        for condition in ("bad-tar", "not-executable"):
+            with self.subTest(condition=condition):
+                directory = self.root / condition
+                directory.mkdir()
+                if condition == "bad-tar":
+                    (directory / "python.tar.gz").write_bytes(b"not a tar")
+                else:
+                    self.archive(directory, executable=False)
+                self.assertNotEqual(self.invoke(directory).returncode, 0)
+                self.assertFalse((directory / "python").exists())
+                self.assertEqual(list(directory.glob(".python-bootstrap.*")),
+                                 [])
+
+    def test_concurrent_complete_winner_is_not_clobbered(self):
+        # Given an earlier attempt publishing just before mv, when this
+        # attempt loses, then keep the same-pin complete winner intact.
+        raw = self.archive(self.root)
+        pin = artifacts.digest(self.root / "python.tar.gz")
+        winner = self.root / "winner"
+        (winner / "bin").mkdir(parents=True)
+        executable = winner / "bin/python3.12"
+        executable.write_bytes(raw)
+        executable.chmod(0o755)
+        (winner / ".bootstrap-sha256").write_text(pin + "\n")
+        winner_inode = winner.stat().st_ino
+        tools = self.root / "tools"
+        tools.mkdir()
+        move = tools / "mv"
+        move.write_text('#!/bin/bash\nset -eu\n'
+                        '/usr/bin/mv -T -- "$WINNER" python\n'
+                        'exec /usr/bin/mv "$@"\n')
+        move.chmod(0o755)
+        environment = {**os.environ, "WINNER": str(winner),
+                       "PATH": str(tools) + os.pathsep + os.environ["PATH"]}
+        result = self.invoke(self.root, env=environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        prefix = self.root / "python"
+        self.assertEqual(prefix.stat().st_ino, winner_inode)
+        self.assertEqual((prefix / "bin/python3.12").read_bytes(), raw)
+        self.assertEqual((prefix / ".bootstrap-sha256").read_text(),
+                         pin + "\n")
+        self.assertEqual(list(self.root.glob(".python-bootstrap.*")), [])
+
+    def test_invalid_existing_prefix_is_refused_without_merging(self):
+        # Given an external partial prefix, when bootstrap runs, then
+        # refuse instead of replacing or merging unknown content.
+        for condition in ("empty", "partial", "missing-marker",
+                          "different-pin", "symlink"):
+            with self.subTest(condition=condition):
+                directory = self.root / condition
+                directory.mkdir()
+                self.archive(directory)
+                prefix = directory / "python"
+                if condition == "symlink":
+                    external = directory / "external"
+                    external.mkdir()
+                    (external / "partial").write_bytes(b"unknown content")
+                    prefix.symlink_to(external, target_is_directory=True)
+                else:
+                    prefix.mkdir()
+                if condition == "partial":
+                    (prefix / "partial").write_bytes(b"unknown content")
+                elif condition in {"missing-marker", "different-pin"}:
+                    (prefix / "bin").mkdir()
+                    executable = prefix / "bin/python3.12"
+                    executable.write_bytes(b"unknown executable")
+                    executable.chmod(0o755)
+                    if condition == "different-pin":
+                        (prefix / ".bootstrap-sha256").write_text(
+                            "wrong pin\n")
+                before = prefix.lstat().st_ino, sorted(prefix.iterdir())
+                names = ("partial", "bin/python3.12", ".bootstrap-sha256")
+                original_bytes = {
+                    name: (prefix / name).read_bytes() for name in names
+                    if (prefix / name).is_file()}
+                self.assertEqual(self.invoke(directory).returncode, 78)
+                self.assertEqual((prefix.lstat().st_ino,
+                                  sorted(prefix.iterdir())), before)
+                self.assertEqual({
+                    name: (prefix / name).read_bytes() for name in names
+                    if (prefix / name).is_file()}, original_bytes)
+                self.assertEqual(list(directory.glob(".python-bootstrap.*")),
+                                 [])
+
+
 class HostTransferTests(unittest.TestCase):
     OBSERVATION_PREFLIGHT_REFUSALS = (
         "observe-no-launch", "observe-replaced-root", "observe-wrong-argument",
@@ -1571,14 +1733,28 @@ class HostTransferTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 self.host_case(mode)
 
+    BOOTSTRAP_FAILURES = (
+        "bootstrap-failure", "bootstrap-exit-2", "bootstrap-exit-78",
+        "bootstrap-255", "bootstrap-timeout",
+    )
+    BOOTSTRAP_RECOVERIES = (
+        "bootstrap-recovery-255", "bootstrap-recovery-timeout",
+    )
+
     def test_bootstrap_failure_never_launches_or_refreshes_contact(self):
-        # Given no system Python, when remote hash/unpack fails or
-        # expires,
-        # then only two precheck uploads occur and cleanup is requested
-        # once.
-        for mode in ("bootstrap-failure", "bootstrap-timeout"):
+        # Given remote exit 1/2/78 or permanent transport loss, when
+        # bootstrap fails, then keep receipts and request cleanup once.
+        for mode in self.BOOTSTRAP_FAILURES:
             with self.subTest(mode=mode):
                 self.host_case(mode)
+
+    def test_bootstrap_transport_retries_keep_first_contact_and_inputs(self):
+        # Given transport loss, when the next attempt succeeds,
+        # then reuse both preuploads and the original root deadline.
+        for root_mode in ("first-in-pod-check", "prior-evidence"):
+            for mode in self.BOOTSTRAP_RECOVERIES:
+                with self.subTest(mode=mode, root_mode=root_mode):
+                    self.host_case(mode, root_mode=root_mode)
 
     def test_actual_root_runtime_facts_precede_bulk_in_both_modes(self):
         # Given either prior proof or first-check approval, when actual
@@ -1860,18 +2036,35 @@ class HostTransferTests(unittest.TestCase):
                     events.append("python-bootstrap")
                     self.assertEqual(len(upload_attempts),
                                      4 if mode == "upload-recovery" else 2)
-                    if mode == "bootstrap-failure":
-                        raise subprocess.CalledProcessError(1, arguments)
-                    if mode == "bootstrap-timeout":
-                        clock.elapsed += deadline - clock.time()
-                        raise subprocess.TimeoutExpired(arguments, 300)
+                    self.assertLessEqual(deadline - clock.time(), 30)
+                    self.assertEqual(host_run.PYTHON_BOOTSTRAP_SECONDS, 30)
+                    remote_exit = {"bootstrap-failure": 1,
+                                   "bootstrap-exit-2": 2,
+                                   "bootstrap-exit-78": 78}.get(mode)
+                    if remote_exit is not None:
+                        raise subprocess.CalledProcessError(remote_exit,
+                                                            arguments)
+                    if (mode in {"bootstrap-timeout", "bootstrap-255"}
+                            or mode in self.BOOTSTRAP_RECOVERIES
+                            and bootstraps == 1):
+                        if mode == "bootstrap-255":
+                            # Errors reach 295 s, then wait to expiry.
+                            # No 61st transport may start at 300 s.
+                            raise subprocess.CalledProcessError(255, arguments)
+                        seconds = deadline - clock.time()
+                        clock.elapsed += seconds
+                        if mode.endswith("255"):
+                            raise subprocess.CalledProcessError(255, arguments)
+                        raise subprocess.TimeoutExpired(arguments, seconds)
                     return b""
                 if remote == host_run.ROOT_PROBE_COMMAND:
                     root_probes += 1
                     events.append("root-probe")
                     self.assertEqual(len(upload_attempts), 4 if mode ==
                                      "upload-recovery" else 2)
-                    self.assertEqual(bootstraps, 1)
+                    self.assertEqual(
+                        bootstraps, 2 if mode in self.BOOTSTRAP_RECOVERIES
+                        else 1)
                     if root_mode == "first-in-pod-check":
                         contact = json.loads(
                             (state / "ssh-contact.json").read_text())
@@ -1989,7 +2182,8 @@ class HostTransferTests(unittest.TestCase):
                              "root-probe-existing-contact",
                              "root-refusal-stop-error"} | set(
                                  self.INVALID_MARKER_MODES) | set(
-                                 self.OBSERVATION_PREFLIGHT_REFUSALS)
+                                 self.OBSERVATION_PREFLIGHT_REFUSALS) | set(
+                                     self.BOOTSTRAP_FAILURES)
             preprobe_refusal = mode in self.OBSERVATION_PREFLIGHT_REFUSALS
             with patch.object(sys, "argv", argv), \
                     patch.object(admission, "FREEZE", freeze), \
@@ -2069,7 +2263,8 @@ class HostTransferTests(unittest.TestCase):
                          "bootstrap-failure", "bootstrap-timeout",
                          "root-facts-refusal",
                          "root-refusal-stop-error", "root-probe-expired",
-                         "root-probe-existing-contact"})
+                         "root-probe-existing-contact"}
+                         or mode in self.BOOTSTRAP_FAILURES)
             self.assertEqual(launches, 0 if no_launch else 1)
             if observing:
                 retained = (root / "replaced-original"
@@ -2079,6 +2274,7 @@ class HostTransferTests(unittest.TestCase):
                                  b"preserve me")
                 self.assertEqual(upload_attempts, [])
                 self.assertEqual(bootstraps, 0)
+                self.assertFalse((state / "ssh-contact.json").exists())
                 self.assertFalse((state / "python.tar.gz").exists())
                 self.assertFalse(
                     (state / "python-bootstrap-input.json").exists())
@@ -2105,7 +2301,8 @@ class HostTransferTests(unittest.TestCase):
                                         "bootstrap-timeout",
                                         "root-refusal-stop-error",
                                         "root-probe-expired",
-                                        "root-probe-existing-contact"} else 5)
+                                        "root-probe-existing-contact"}
+                                    or mode in self.BOOTSTRAP_FAILURES else 5)
                 self.assertEqual(len(upload_attempts), expected_uploads)
                 if mode in {"upload-recovery", "upload-failure"}:
                     for first, second in zip(upload_attempts[::2],
@@ -2115,11 +2312,12 @@ class HostTransferTests(unittest.TestCase):
                     errors = list(state.glob("upload-error-*.json"))
                     self.assertEqual(len(errors),
                                      2 if mode == "upload-failure" else 5)
-                if mode in {"upload-failure", "root-refusal",
+                if (mode in {"upload-failure", "root-refusal",
                             "root-facts-refusal", "bootstrap-failure",
                             "bootstrap-timeout",
                             "root-refusal-stop-error", "root-probe-expired",
-                            "root-probe-existing-contact"}:
+                            "root-probe-existing-contact"}
+                        or mode in self.BOOTSTRAP_FAILURES):
                     self.assertFalse(
                         (state / "launch-requested.json").exists())
                     if mode in {"root-refusal", "root-refusal-stop-error"}:
@@ -2140,17 +2338,60 @@ class HostTransferTests(unittest.TestCase):
                         self.assertEqual(
                             json.dumps(refusal["facts"], sort_keys=True),
                             json.dumps(facts, sort_keys=True))
-                    if mode in {"bootstrap-failure", "bootstrap-timeout"}:
-                        self.assertEqual(bootstraps, 1)
+                    if mode in self.BOOTSTRAP_FAILURES:
+                        self.assertNotIn("evidence.tar", copies)
+                        self.assertEqual(events.count("connect"), 1)
                         self.assertEqual(root_probes, 0)
                         self.assertFalse(
                             (state / "root-capability.json").exists())
                         contact = json.loads(
                             (state / "ssh-contact.json").read_text())
-                        self.assertEqual(contact["connected_epoch"],
-                                         clock.epoch)
-                        if mode == "bootstrap-timeout":
+                        self.assertEqual(contact, {
+                            "connected_epoch": clock.epoch,
+                            "connected_monotonic": 1000.0})
+                        errors = [json.loads(path.read_text()) for path
+                                  in state.glob(
+                                      "python-bootstrap-error-*.json")]
+                        self.assertEqual(len(errors), bootstraps)
+                        self.assertEqual(sorted(e["attempt"] for e in errors),
+                                         list(range(bootstraps)))
+                        bootstrap_command = host_run.PYTHON_BOOTSTRAP_COMMAND
+                        bootstrap_calls = [
+                            entry for entry in transports
+                            if entry[0][-1] == bootstrap_command]
+                        for receipt in errors:
+                            index = receipt["attempt"]
+                            self.assertEqual(receipt["sha256"],
+                                fixture_tool_pins()["python.tar.gz"])
+                            self.assertEqual(receipt["root_deadline_epoch"],
+                                             clock.epoch + 300)
+                            self.assertEqual(receipt["attempt_deadline_epoch"],
+                                             bootstrap_calls[index][1])
+                            self.assertLessEqual(
+                                receipt["started_epoch"],
+                                receipt["finished_epoch"])
+                            self.assertLessEqual(
+                                receipt["attempt_deadline_epoch"]
+                                - receipt["started_epoch"], 30)
+                        if mode in {"bootstrap-timeout", "bootstrap-255"}:
                             self.assertEqual(clock.elapsed, 300)
+                            self.assertGreater(bootstraps, 1)
+                            if mode == "bootstrap-255":
+                                self.assertEqual(bootstraps, 60)
+                                self.assertEqual(
+                                    errors[-1]["window_exhausted"], False)
+                                windows = list(state.glob(
+                                    "python-bootstrap-window-error-*.json"))
+                                self.assertEqual(len(windows), 1)
+                                self.assertEqual(json.loads(
+                                    windows[0].read_text())["epoch"],
+                                    clock.epoch + 300)
+                            else:
+                                self.assertTrue(max(errors, key=lambda e:
+                                    e["attempt"])["window_exhausted"])
+                        else:
+                            self.assertEqual(bootstraps, 1)
+                            self.assertFalse(errors[0]["window_exhausted"])
                     if mode in {"root-probe-expired",
                                 "root-probe-existing-contact"}:
                         self.assertEqual(clock.elapsed, 300)
@@ -2179,14 +2420,50 @@ class HostTransferTests(unittest.TestCase):
                                 + (5 if mode == "ready-recovery" else 0)
                                 + (320 if mode == "slow-boot" else 0)
                                 + (35 if mode in {"root-probe-recovery",
-                                    "root-probe-timeout"} else 0))
+                                    "root-probe-timeout"}
+                                    or mode in self.BOOTSTRAP_RECOVERIES
+                                    else 0))
                 extra = 20 if mode == "upload-recovery" else 0
                 probe_delay = (35 if mode in {"root-probe-recovery",
-                                            "root-probe-timeout"} else 0)
+                                            "root-probe-timeout"}
+                               or mode in self.BOOTSTRAP_RECOVERIES else 0)
                 self.assertEqual([deadline for _, deadline in staged],
                     [upload_start - probe_delay + config["upload_seconds"]] * 2
                     + [upload_start + extra + config["upload_seconds"]] * 3)
-                if probe_delay:
+                if mode in self.BOOTSTRAP_RECOVERIES:
+                    self.assertEqual(events.count("connect"), 1)
+                    self.assertEqual(bootstraps, 2)
+                    self.assertEqual(root_probes, 1)
+                    receipts = [json.loads(path.read_text()) for path
+                                in state.glob("python-bootstrap-*.json")
+                                if path.name != "python-bootstrap-input.json"]
+                    self.assertEqual(len(receipts), 2)
+                    receipts.sort(key=lambda receipt: receipt["attempt"])
+                    self.assertIn("error", receipts[0])
+                    self.assertEqual(receipts[1]["exit"], 0)
+                    root_window = (300 if root_mode == "first-in-pod-check"
+                                   else 900)
+                    for index, receipt in enumerate(receipts):
+                        self.assertEqual(receipt["attempt"], index)
+                        self.assertEqual(receipt["sha256"],
+                            fixture_tool_pins()["python.tar.gz"])
+                        self.assertEqual(receipt["root_deadline_epoch"],
+                                         clock.epoch + root_window)
+                        self.assertEqual(receipt["started_epoch"],
+                                         clock.epoch + index * 35)
+                        self.assertEqual(receipt["attempt_deadline_epoch"],
+                                         clock.epoch + index * 35 + 30)
+                        self.assertEqual(receipt["finished_epoch"],
+                                         clock.epoch + (30 if index == 0
+                                                        else 35))
+                    if root_mode == "first-in-pod-check":
+                        self.assertEqual(json.loads((state /
+                            "ssh-contact.json").read_text()), {
+                                "connected_epoch": clock.epoch,
+                                "connected_monotonic": 1000.0})
+                    else:
+                        self.assertFalse((state / "ssh-contact.json").exists())
+                elif probe_delay:
                     self.assertEqual(root_probes, 2)
                     self.assertEqual(len(list(state.glob(
                         "root-probe-error-*.json"))), 1)
