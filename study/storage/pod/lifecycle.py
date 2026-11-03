@@ -353,7 +353,8 @@ def created_pod_id(stdout: str) -> str | None:
              if line.startswith("Successfully created pod")]
     if len(lines) != 1:
         return None
-    match = re.fullmatch(r"Successfully created pod ([0-9a-f]{32})", lines[0])
+    match = re.fullmatch(
+        r"Successfully created pod ([A-Za-z0-9][A-Za-z0-9_-]{7,63})", lines[0])
     return match.group(1) if match else None
 
 

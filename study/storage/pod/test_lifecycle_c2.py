@@ -353,8 +353,15 @@ class TeamScopeTests(unittest.TestCase):
         valid = "Successfully created pod " + "a" * 32
         invalid = ("", valid + "\n" + valid,
                    "Successfully created pod ../other", valid + " extra",
-                   "Successfully created pod " + "A" * 32)
+                   "Successfully created pod -" + "a" * 31,
+                   "Successfully created pod abc def12345",
+                   "Successfully created pod abc/def12345",
+                   "Successfully created pod abc1234")
         self.assertEqual(lifecycle.created_pod_id(valid), "a" * 32)
+        # Status by ID is the identity check; other plain ID styles pass.
+        for pod_id in ("cmsuwt9xt001jlz7hvtybvei6", "A" * 32, "pod_1-abcd"):
+            self.assertEqual(lifecycle.created_pod_id(
+                "Successfully created pod " + pod_id), pod_id)
         for text in invalid:
             with self.subTest(text=text), \
                     tempfile.TemporaryDirectory() as temporary:
