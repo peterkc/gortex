@@ -130,8 +130,15 @@ import json
 import os
 from decimal import Decimal
 value = json.load(open("session-inputs.json"))
+venue = value.get("venue", "pod")
+if venue not in ("pod", "sandbox"):
+    raise SystemExit(78)
+sandbox = venue == "sandbox"
+provider = "prime-sandbox" if sandbox else "nebius"
+budget_cap = Decimal("3.00") if sandbox else Decimal("2.00")
+hourly_cap = Decimal("0.60") if sandbox else Decimal("0.50")
 if (value["harness_commit"] != os.environ["HARNESS_COMMIT"]
-        or value["provider"] != "nebius"
+        or value["provider"] != provider
         or value["vcpus"] != 8 or value["memory_gb"] != 32
         or value["minimum_memory_bytes"] < 28 * 1024 ** 3
         or value["minimum_free_bytes"] < 32 * 1024 ** 3
@@ -139,8 +146,8 @@ if (value["harness_commit"] != os.environ["HARNESS_COMMIT"]
         or not 0 < value["setup_seconds"] < value["analysis_seconds"] <= 9600
         or value["started_epoch"] + value["analysis_seconds"] + 330 >= value["cutoff_epoch"]
         or value["cutoff_epoch"] - value["started_epoch"] > 10680
-        or Decimal(str(value["budget"])) > 2
-        or Decimal(str(value["hourly_ceiling"])) > Decimal("0.50")):
+        or Decimal(str(value["budget"])) > budget_cap
+        or Decimal(str(value["hourly_ceiling"])) > hourly_cap):
     raise SystemExit(78)
 PY
 python3.12 -B preflight.py --inputs session-inputs.json \

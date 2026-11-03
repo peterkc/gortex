@@ -1,5 +1,9 @@
 # One owned CPU pod lifecycle
 
+> **Sandbox venue:** use [Sandbox venue](#sandbox-venue) for the new
+> Prime Sandbox profile. The pod procedure below stays available but is not
+> used by that profile. Neither procedure grants spend approval.
+
 **Preparation only. This document grants no spend approval.** The lead operates
 one approved Nebius on-demand CPU offer with Prime CLI **0.17.0**. The complete
 attempt includes provisioning, setup, analysis, copy and deletion. It must stay
@@ -427,3 +431,113 @@ effects, delayed deletion, source-format fixtures, transport recovery, partial
 copy and real occupied-nonroot Linux cgroup setup. Static checks cannot prove
 cloud behavior, fit, throughput or billing. No local study test, Go build or
 account operation belongs to this preparation work.
+
+## Sandbox venue
+
+Use `sandbox.py` for the new venue, not `lifecycle.py rent` or `host_run.py`.
+It uses Prime CLI 0.17.0 API transport. No SSH key, agent, pod quote, pod status
+price or pod connection string is needed. Keep the reviewed CLI/SDK unchanged.
+
+```text
+Exact approval + local admission -> read-only image baseline
+  -> arm owner -> create once -> confirm identity and use pins
+  -> first API exec -> pinned Python -> actual root/runtime check
+  -> same D14 session once -> observations -> verified copy
+  -> delete once -> prove stopped -> read-only image receipt
+  -> report new images for manual review, never auto-delete images
+       ^ original cutoff and signals share the retained owner
+```
+
+The fixed profile is **8 vCPU, 32 GiB RAM, 40 GiB disk, amd64, zero GPU**.
+The Ubuntu 22.04 Linux/amd64 manifest resolved on November 3, 2026 is:
+
+```text
+ubuntu@sha256:8a2321a92b438238f93b4346fff61bc4259c99fdd4d9b52ee86f153fee0c344f
+```
+
+Record its source index digest too:
+`sha256:076e7bf82319619f28dd0aa9c02ab34b055ad37100395b4f49a2ffba04fb5e11`.
+Metadata is not runtime proof. The guest must actually prove root, x86_64,
+Ubuntu 22.04, CPython 3.12.16, glibc >=2.28 and the true writable cgroup-v2 root.
+The existing preflight checks effective CPU, inherited memory and free disk.
+A writable cgroup root remains unverified until that bounded guest check.
+
+[Published prices](https://docs.primeintellect.ai/sandboxes/overview.md), valid
+through December 22, 2026, are CPU 0.02/vCPU-hour, RAM 0.0125/GiB-hour and disk
+0.0002/GiB-hour, in USD. The profile costs **0.568/hour** under the approved
+**0.60/hour ceiling**. Three hours plus the retained one-hour contingency cost
+2.272. Add the approved 0.05 image allowance: **2.322 <=3.00**. This is
+**resources plus a bounded image allowance, not a provider-proved all-fee cap**.
+The validator refuses these prices from December 23 UTC; renewed review is needed.
+
+The host cutoff stays **10680 seconds**. The server timeout is **180 minutes**,
+as a backstop, not a replacement for the owner or contingency. Readiness stays
+900 seconds. One persisted first API exec starts the 300-second root window.
+Retries never refresh it. Setup 1800, analysis 9600 and copy 420 stay fixed.
+No idle timeout, custom Prime Image, checkpoint or volume is requested.
+
+Bootstrap allows exactly these seven domains, with no deny rules:
+`archive.ubuntu.com`, `security.ubuntu.com`, `proxy.golang.org`, `sum.golang.org`,
+`storage.googleapis.com`, `pypi.org`, `files.pythonhosted.org`.
+The driver emits and confirms this policy. Missing, extra, duplicate or wildcard
+domains refuse use. Existing measured phases stay offline. Apt, Go-module and
+locked Python setup stay unchanged; this is not a deny-all run.
+
+Copy `sandbox.example.json` to a private operator directory and fill every
+`PENDING` field. Re-export the five existing harness subtrees, rebuild the
+manifest/tar and bind `env.sh` to the new reviewed commit. `session.sh` must equal
+the reviewed `accuracy_session.sh`. Only its admission block selects the sandbox
+profile; default pod checks and all workload commands stay unchanged. Do not
+reuse an older pod bundle, lease or result directory. State/results need fresh,
+separate, canonical private paths outside the checkout.
+
+From the reviewed clean checkout, use its native CPython 3.12 interpreter:
+
+```sh
+python3.12 -B study/storage/pod/sandbox.py check --config "$CONFIG"
+python3.12 -B study/storage/pod/sandbox.py run --config "$CONFIG" --state "$FRESH_STATE"
+```
+
+`check` is local-only except the CLI version command. The example refuses use.
+`run` requires separate execution approval. Keep its owner alive until deletion
+is proved. Uncertain create/launch acknowledgements permit reconciliation and
+observation only, never a rerun. Unproved identity/deletion retains the owner.
+
+These are the owner's CLI shapes. **Do not issue an extra create or launch.**
+The owner supplies the nonce, team, all seven allow flags and original deadlines.
+
+```sh
+prime --context "$CONTEXT" --plain sandbox create "$IMAGE" --name "$NONCE" \
+  --label "$LABEL" --cpu-cores 8 --memory-gb 32 --disk-size-gb 40 \
+  --arch amd64 --gpu-count 0 --timeout-minutes 180 --team-id "$TEAM" \
+  --network-allow archive.ubuntu.com --network-allow security.ubuntu.com \
+  --network-allow proxy.golang.org --network-allow sum.golang.org \
+  --network-allow storage.googleapis.com --network-allow pypi.org \
+  --network-allow files.pythonhosted.org --yes
+prime --context "$CONTEXT" --plain sandbox run "$ID" --user root --timeout 30 \
+  -- bash -c "$SCRIPT"
+prime --context "$CONTEXT" --plain sandbox download "$ID" "$REMOTE_FILE" "$FRESH_PARTIAL"
+prime --context "$CONTEXT" --plain sandbox delete "$ID" --yes
+PRIME_TEAM_ID="$TEAM" prime --context "$CONTEXT" --plain images list \
+  --output json --page 1 --num 250
+```
+
+Exec stdout is wrapped, so guest JSON is downloaded from fresh receipt files.
+Uploads get guest-side hash checks. Copy validates size, SHA-256, safe members,
+manifest coverage and scope before publishing. The SDK buffers whole files with
+a 300-second request limit. The approved 100 Mbps floors are host measurements,
+not proved sandbox-path rates. Forecast excess warns; deadlines stay fixed.
+
+Cleanup needs get-confirmed ID/name/unique label. Wrong billing refuses use but
+cannot block cleanup of that owned ID. One delete intent permits one invocation.
+A lost acknowledgement permits only read-only verification. `TERMINATED` or
+`TIMEOUT` proves stopped. Alternatively require a narrow native HTTP404 and a
+complete owned-team/unique-label list showing absence. `ERROR`, `PAUSED`, other
+CLI failures and an empty list alone do not prove stopping.
+
+Read-only image receipts before create and after deletion stay in private host
+state/results. The driver pins `PRIME_TEAM_ID` only in its own process; image
+list has no team flag. Saved CLI config does not change. New artifacts require
+manual ownership/cleanup review, not automatic deletion or attribution to this
+run. Failed mandatory post-delete receipts make the run incomplete. Image fees
+remain covered only by the stated allowance, not a provider-proved all-fee cap.

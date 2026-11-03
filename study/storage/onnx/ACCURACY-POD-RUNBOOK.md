@@ -1,5 +1,16 @@
 # D14 accuracy pod runbook: 2,048 versus 8,192 tokens
 
+> **Sandbox venue:** the new driver uses the
+> [sandbox profile](../pod/LIFECYCLE.md#sandbox-venue), not the pod operation
+> below. Its approved limits are 8 vCPU/32 GiB/40 GiB, 0.60 USD/hour and 3.00 USD
+> total. The resource reserve plus bounded image allowance is 2.322 USD, not a
+> provider-proved all-fee cap. The three-hour workload/timing bounds stay fixed.
+> Only the guest admission block selects a new explicit venue. Corpus, model,
+> CPython, cgroups, workload commands and accuracy acceptance stay unchanged.
+> Old pod paths remain available but unused. Rebuild and approve the exact
+> source/input bundle before any sandbox run. This document grants no spend
+> approval.
+
 **Preparation only. No pod has been rented or approved by this document.**
 The lead operates one Prime Intellect Nebius **on-demand CPU, 8 vCPU / 32 GB**
 pod. The full paid attempt, including setup, copy-out and deletion, is limited
