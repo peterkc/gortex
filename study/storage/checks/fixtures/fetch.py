@@ -171,6 +171,14 @@ def extract_tier(tar_path: Path, data: Path, tier: str, spec: dict) -> None:
         archive.extractall(data, members=members, filter="data")
 
 
+def decompress(archive: Path, tar_path: Path) -> None:
+    # The CI runner's zstd rejects --output; use the short -o form.
+    subprocess.run(
+        ["zstd", "--decompress", "--keep", "-q", "-o", str(tar_path),
+         str(archive)], check=True,
+    )
+
+
 def download(url: str, path: Path, spec: dict) -> None:
     partial = path.with_suffix(path.suffix + ".partial")
     total = 0
@@ -209,10 +217,7 @@ def worker(args: argparse.Namespace) -> None:
         download(url, archive, spec)
         tar_path = downloads / f"{tier}.tar"
         # zstd and extraction run inside the launcher's process-tree cap.
-        subprocess.run(
-            ["zstd", "--decompress", "--keep", "--output", str(tar_path),
-             str(archive)], check=True,
-        )
+        decompress(archive, tar_path)
         if tar_path.stat().st_size != spec["tar_bytes"]:
             raise FetchError("decompressed tar length differs")
         extract_tier(tar_path, args.data_dir, tier, spec)

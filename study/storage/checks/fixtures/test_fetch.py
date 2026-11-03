@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -159,6 +160,19 @@ class FixtureFetchTests(unittest.TestCase):
                     )
                 self.assertEqual(list(destination.iterdir()), [])
                 self.assertFalse((self.root / "escape").exists())
+
+    def test_decompress_runs_the_runner_zstd(self):
+        # Real zstd, as in the measurement job: argv must suit its CLI.
+        original = self.root / "payload.tar"
+        original.write_bytes(b"tar bytes for the runner zstd\n" * 64)
+        archive = self.root / "payload.tar.zst"
+        subprocess.run(
+            ["zstd", "-q", "-o", str(archive), str(original)], check=True,
+        )
+        restored = self.root / "restored.tar"
+        fetch.decompress(archive, restored)
+        self.assertEqual(restored.read_bytes(), original.read_bytes())
+        self.assertTrue(archive.exists())
 
     def test_download_accepts_matching_file_url(self):
         source = self.root / "archive-source.bin"
