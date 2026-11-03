@@ -67,6 +67,7 @@ proposal, not permission to execute it.
 ```json
 {
   "cli_context": "REQUIRED_APPROVED_CONTEXT",
+  "team_id": "REQUIRED_APPROVED_BILLING_TEAM_ID",
   "provider": "nebius",
   "offer_id": "REQUIRED_FRESH_SHORT_ID",
   "cloud_id": "REQUIRED_FRESH_CLOUD_ID",
@@ -267,9 +268,18 @@ An expired/cancelled call records not-created; an uncertain outcome never retrie
 
 Global context/plain flags and explicit offer, name, CPU, RAM, disk, image and
 `--yes` make create noninteractive. Pass boot-disk size explicitly; do not allow
-a Typer disk prompt. No attached disk is created. The complete list identifies
-exactly one owned nonce name. Request-summary quantity/provider/team/shape pins
-and status fields are checked before publishing validation. Echoed request
+a Typer disk prompt. No attached disk is created. Create passes the required
+billing `team_id` explicitly, without sharing flags. The request summary must
+echo that team and must not report sharing. Other pod commands are user-scoped
+in CLI 0.17.0; they have no team option. No global team selection is relied on.
+
+Exactly one `Successfully created pod <32-lowercase-hex-id>` line supplies the
+candidate identity. Status by ID must confirm its owned nonce name and pinned
+team before identification or deletion. The list is an extra collision check:
+zero matching rows are allowed, but a different ID with our name is refused.
+For uncertain create, cleanup first uses the same stdout candidate, or falls
+back to one list candidate, always with status name/team confirmation. Quantity,
+provider and shape pins are checked before publishing validation. Echoed request
 fields are not observed allocation. Missing live fields remain listed.
 
 SIGINT, SIGTERM, SIGHUP, SIGQUIT, manual stop and timer use the same locked owner.

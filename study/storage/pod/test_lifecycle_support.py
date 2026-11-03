@@ -33,7 +33,8 @@ import preflight
 
 def pins() -> dict:
     return {
-        "cli_context": "approved", "provider": "nebius", "offer_id": "840aa0",
+        "cli_context": "approved", "team_id": "team-approved",
+        "provider": "nebius", "offer_id": "840aa0",
         "cloud_id": "cpu-d3_8vcpu-32gb", "image": "ubuntu_22_cuda_12",
         "gpu_label": "CPU_NODE x1", "location": "US", "gpu_count": 1,
         "disk_gb": 100, "vcpus": 8, "memory_gb": 32,
@@ -143,7 +144,8 @@ def invalid_pin_values(value):
         ("token_json_max_bytes", 256 * 1024 ** 2 + 1),
         ("payload_path", ""), ("session_path", None),
         ("environment_path", " "), ("ssh_key_path", ""),
-        ("destination", ""),
+        ("destination", ""), ("team_id", ""), ("team_id", " "),
+        ("team_id", None), ("team_id", 1), ("team_id", False),
     )
 
 
@@ -163,7 +165,7 @@ def offer_document(config, **changes):
 
 
 def active_status(**changes):
-    return {"id": "pod", "provider": "nebius",
+    return {"id": "pod", "provider": "nebius", "team_id": "team-approved",
             "image": "ubuntu_22_cuda_12", "cost_per_hour": "0.274",
             "gpu": "CPU_NODE x1",
             "status": "ACTIVE", "ssh": "root@127.0.0.1 -p 22", **changes}
@@ -336,7 +338,8 @@ class SupportTests(unittest.TestCase):
                 self.assertTrue(preflight.refused(
                     {**facts, key: wrong}, config))
         self.assertIn("vcpus", lifecycle.mismatches({"vcpus": 16}, config))
-        self.assertEqual(lifecycle.mismatches({"vcpus": 8}, config), [])
+        self.assertEqual(lifecycle.mismatches(
+            {"vcpus": 8, "team_id": config["team_id"]}, config), [])
 
     def test_create_refuses_before_spawn_after_cancel_or_expiry(self):
         for expired in (True, False):
@@ -485,6 +488,7 @@ class SupportTests(unittest.TestCase):
             config = {**pins(), "quote_checked_epoch": clock.time(),
                       "destination": str(directory / "destination")}
             config_path.write_text(json.dumps(config))
+            pod_id = "a" * 32
             counts = {"create": 0, "terminate": 0}
             timers, restored, reconciliations = [], [], []
             handlers = {}
@@ -533,6 +537,11 @@ class SupportTests(unittest.TestCase):
                                  set(lifecycle.OWNER_SIGNALS))
                 counts[label] += 1
                 if label == "create":
+                    status["name"] = json.loads(
+                        (state / "owner.json").read_text())["name"]
+                    self.assertEqual(arguments[arguments.index("--team-id")
+                                               + 1], config["team_id"])
+                    self.assertNotIn("--share-with-team", arguments)
                     destination = Path(config["destination"])
                     self.assertTrue(destination.is_dir())
                     self.assertEqual(destination.stat().st_mode & 0o777, 0o700)
@@ -558,14 +567,16 @@ class SupportTests(unittest.TestCase):
                         "cloudId: cpu-d3_8vcpu-32gb\nvcpus: 8\n"
                         "memory: 32\ndiskSize: 100\n"
                         "image: ubuntu_22_cuda_12\n"
-                        "provider: nebius\ngpuCount: 1\nteam: None\n")
+                        "provider: nebius\ngpuCount: 1\n"
+                        f"team: {config['team_id']}\n"
+                        f"Successfully created pod {pod_id}\n")
                     if refusal == "summary":
                         summary = summary.replace("gpuCount: 1", "gpuCount: 0")
                     (state / "create.stdout").write_text(summary)
                 if label == "terminate":
                     deleted = True
                     clock.elapsed = max(clock.elapsed, 10)
-                    self.assertEqual(arguments, ["terminate", "pod", "--yes"])
+                    self.assertEqual(arguments, ["terminate", pod_id, "--yes"])
                     if delete_timeout:
                         raise subprocess.TimeoutExpired(arguments, timeout)
                 return subprocess.CompletedProcess(arguments, 0)
@@ -579,11 +590,11 @@ class SupportTests(unittest.TestCase):
                     ended = datetime.fromtimestamp(
                         clock.epoch + 10, timezone.utc).strftime(
                             "%Y-%m-%d %H:%M:%S UTC")
-                    return [{"id": "pod", "terminated_at": ended,
+                    return [{"id": pod_id, "terminated_at": ended,
                              "total_cost": 12961.0}]
                 if deleted:
                     return []
-                return [{"id": "pod", "name": json.loads(
+                return [{"id": pod_id, "name": json.loads(
                     (state / "owner.json").read_text())["name"]}]
 
             def select(descriptors, *unused):
@@ -599,7 +610,7 @@ class SupportTests(unittest.TestCase):
                 lifecycle.stop_request(state)
                 return (descriptors, [], [])
 
-            status = active_status()
+            status = active_status(id=pod_id)
             if refusal not in (None, "summary"):
                 status[refusal] = "wrong"
                 if refusal == "cost_per_hour":
@@ -890,7 +901,15 @@ class SupportTests(unittest.TestCase):
             with self.subTest(ssh=ssh):
                 self.connect_case("bad-ssh", ssh)
 
-    def connect_case(self, mode, ssh="root@127.0.0.1 -p 22"):
+    def test_connect_refuses_wrong_or_personal_team(self):
+        # Given a personal/other-team status, when connecting,
+        # then request cleanup without publishing a connection.
+        for team in (None, "other-team"):
+            with self.subTest(team=team):
+                self.connect_case("wrong-team", team_id=team)
+
+    def connect_case(self, mode, ssh="root@127.0.0.1 -p 22", *,
+                     team_id="team-approved"):
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary).resolve()
             clock = Clock()
@@ -911,7 +930,7 @@ class SupportTests(unittest.TestCase):
                 status = ("INSTALLING" if mode == "expired" or
                           mode == "ready" and clock.elapsed < 240
                           else "ACTIVE")
-                return active_status(status=status, ssh=ssh)
+                return active_status(status=status, ssh=ssh, team_id=team_id)
 
             with patch.object(lifecycle.time, "time", clock.time), \
                     patch.object(lifecycle.threading, "Event", clock.event), \

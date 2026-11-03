@@ -4,6 +4,7 @@ import ipaddress
 import json
 import math
 import os
+import re
 import select
 import signal
 import shlex
@@ -76,8 +77,8 @@ def needs_owner(lease: Lease) -> bool:
 def execution_pins(value: Mapping, now: float) -> Mapping | Invalid:
     from artifacts import MAX_PAYLOAD, TAR_OVERHEAD
 
-    required = ("cli_context", "offer_id", "cloud_id", "image", "disk_gb",
-                "quoted_total_hourly", "quote_checked_epoch",
+    required = ("cli_context", "team_id", "offer_id", "cloud_id", "image",
+                "disk_gb", "quoted_total_hourly", "quote_checked_epoch",
                 "disk_hourly_per_gb", "disk_price_reference",
                 "harness_commit", "quote_reference", "gpu_label", "provider",
                 "vcpus", "memory_gb", "max_seconds", "cutoff_seconds",
@@ -95,7 +96,7 @@ def execution_pins(value: Mapping, now: float) -> Mapping | Invalid:
                 "evidence_size_reference", "cgroup_root")
     if any(key not in value or value[key] in (None, "") for key in required):
         return Invalid("every execution pin is mandatory; no defaults")
-    texts = ("cli_context", "offer_id", "cloud_id", "image",
+    texts = ("cli_context", "team_id", "offer_id", "cloud_id", "image",
              "harness_commit", "quote_reference", "gpu_label", "provider",
              "location", "upload_reference", "approval_reference",
              "token_size_reference", "payload_path", "session_path",
@@ -332,7 +333,7 @@ def mismatches(status: Mapping, config: Mapping) -> list[str]:
                 or rate + disk_charge(config)
                 > Decimal(str(config["hourly_ceiling"]))):
             wrong.append("cost_per_hour")
-    if status.get("team_id") is not None:
+    if status.get("team_id") != config["team_id"]:
         wrong.append("team_id")
     return wrong
 
@@ -345,6 +346,24 @@ def status_read(config: Mapping, state: Path, pod_id: str, label: str) -> dict:
     if value["id"] != pod_id:
         raise ValueError("status returned another pod")
     return value
+
+
+def created_pod_id(stdout: str) -> str | None:
+    lines = [line for line in stdout.splitlines()
+             if line.startswith("Successfully created pod")]
+    if len(lines) != 1:
+        return None
+    match = re.fullmatch(r"Successfully created pod ([0-9a-f]{32})", lines[0])
+    return match.group(1) if match else None
+
+
+def owned_status(config: Mapping, state: Path, pod_id: str,
+                 name: str, label: str) -> dict:
+    status = status_read(config, state, pod_id, label)
+    if (status.get("name") != name
+            or status.get("team_id") != config["team_id"]):
+        raise ValueError("rental identity differs from approved name/team")
+    return status
 
 
 def stop_request(state: Path) -> None:
@@ -670,14 +689,28 @@ def rent(config_path: Path, state: Path) -> None:
                 case NotCreated() | Attempted():
                     return
                 case Unidentified():
-                    matches = [pod for pod in pages(
-                        config, state, "list", "reconcile")
-                               if pod["name"] == name]
-                    if len(matches) != 1:
-                        raise ValueError(
-                            "rental identity unproved; "
-                            "owner retained; escalate")
-                    pod_id = matches[0]["id"]
+                    stdout = state / "create.stdout"
+                    pod_id = (created_pod_id(stdout.read_text())
+                              if stdout.exists() else None)
+                    matches = None
+                    if pod_id is None:
+                        matches = [pod for pod in pages(
+                            config, state, "list", "reconcile")
+                                   if pod["name"] == name]
+                        if len(matches) != 1:
+                            raise ValueError(
+                                "rental identity unproved; "
+                                "owner retained; escalate")
+                        pod_id = matches[0]["id"]
+                    owned_status(config, state, pod_id, name,
+                                 "reconcile-status")
+                    if matches is None:
+                        matches = [pod for pod in pages(
+                            config, state, "list", "reconcile")
+                                   if pod["name"] == name]
+                    if (len(matches) > 1 or any(
+                            pod["id"] != pod_id for pod in matches)):
+                        raise ValueError("conflicting rental identity")
                 case Identified(pod_id=pod_id):
                     pass
                 case _:
@@ -731,7 +764,8 @@ def rent(config_path: Path, state: Path) -> None:
                   "--vcpus", str(config["vcpus"]),
                   "--memory", str(config["memory_gb"]),
                   "--disk-size", str(config["disk_gb"]),
-                  "--image", config["image"], "--yes"]
+                  "--image", config["image"],
+                  "--team-id", config["team_id"], "--yes"]
         save(state / "create-command.json", command(config, *create))
         try:
             result = call(config, state, "create", create, 90,
@@ -743,11 +777,14 @@ def rent(config_path: Path, state: Path) -> None:
             save(state / "done.json", {"state": "not-created"})
             raise
         result.check_returncode()
+        pod_id = created_pod_id((state / "create.stdout").read_text())
+        if pod_id is None:
+            raise ValueError("ambiguous create; never create again")
+        status = owned_status(config, state, pod_id, name, "initial-status")
         matches = [pod for pod in pages(config, state, "list", "identify")
                    if pod["name"] == name]
-        if len(matches) != 1:
-            raise ValueError("ambiguous create; never create again")
-        pod_id = matches[0]["id"]
+        if len(matches) > 1 or any(pod["id"] != pod_id for pod in matches):
+            raise ValueError("conflicting rental identity")
         with lock:
             if not isinstance(lease, Unidentified):
                 raise RuntimeError("cutoff already owns this rental")
@@ -764,11 +801,13 @@ def rent(config_path: Path, state: Path) -> None:
                    "memory": str(config["memory_gb"]),
                    "diskSize": str(config["disk_gb"]),
                    "image": config["image"], "provider": config["provider"],
-                   "gpuCount": str(config["gpu_count"]), "team": "None"}
-        if any(key + ": " + value not in summary
-               for key, value in request.items()):
+                   "gpuCount": str(config["gpu_count"])}
+        teams = [line for line in summary if line.startswith("team:")]
+        if (any(key + ": " + value not in summary
+                for key, value in request.items())
+                or teams != ["team: " + config["team_id"]]
+                or any(line.startswith("sharing:") for line in summary)):
             raise ValueError("CLI request differs from approved offer")
-        status = status_read(config, state, pod_id, "initial-status")
         if mismatches(status, config):
             raise ValueError("reported rental differs from approved pins")
         save(state / "initial-rate.json", rate_receipt(status, config))

@@ -49,6 +49,7 @@ class Rental:
     """Own fake state, signal handlers and an optional cutoff thread."""
 
     def __init__(self, test, root):
+        self.pod_id = "a" * 32
         self.test = test
         self.clock = Clock()
         self.state = root / "state"
@@ -134,9 +135,12 @@ class Rental:
             (state / "create.stdout").write_text(
                 "cloudId: cpu-d3_8vcpu-32gb\nvcpus: 8\n"
                 "memory: 32\ndiskSize: 100\nimage: ubuntu_22_cuda_12\n"
-                "provider: nebius\ngpuCount: 1\nteam: None\n")
+                "provider: nebius\ngpuCount: 1\n"
+                f"team: {config['team_id']}\n"
+                f"Successfully created pod {self.pod_id}\n")
         elif label == "terminate":
-            self.test.assertEqual(arguments, ["terminate", "pod", "--yes"])
+            self.test.assertEqual(arguments,
+                                  ["terminate", self.pod_id, "--yes"])
             self.test.assertEqual(self.restored, [])
             self.terminate_times.append(self.clock.elapsed)
             if self.race_cutoff:
@@ -159,7 +163,7 @@ class Rental:
         if self.clock.elapsed < self.identity_after:
             return []
         owner = json.loads((state / "owner.json").read_text())
-        return [{"id": "pod", "name": owner["name"]}]
+        return [{"id": self.pod_id, "name": owner["name"]}]
 
     def read(self, descriptor, size):
         self.owner_requested.set()
@@ -197,7 +201,7 @@ class Rental:
         return [], [], []
 
     def verify(self, config, state, pod_id, started, deadline):
-        self.test.assertEqual(pod_id, "pod")
+        self.test.assertEqual(pod_id, self.pod_id)
         self.test.assertEqual(len(self.terminate_times), 1)
         self.verifications.append(deadline)
         if self.verify_error is not None:
@@ -205,8 +209,11 @@ class Rental:
 
     def status_read(self, config, state, pod_id, label):
         self.status_reads += 1
-        self.test.assertEqual((pod_id, label), ("pod", "initial-status"))
-        return {"id": "pod", "provider": "nebius",
+        self.test.assertEqual(pod_id, self.pod_id)
+        self.test.assertIn(label, ("initial-status", "reconcile-status"))
+        return {"id": self.pod_id, "provider": "nebius",
+                "name": json.loads((state / "owner.json").read_text())["name"],
+                "team_id": config["team_id"],
                 "image": "ubuntu_22_cuda_12",
                 "cost_per_hour": "0.274", "gpu": "CPU_NODE x1"}
 
@@ -243,6 +250,198 @@ class Rental:
                     self.test.assertFalse(self.worker.is_alive())
 
 
+class TeamRental(Rental):
+    """Exercise real owner transitions with account-free team receipts."""
+
+    def __init__(self, test, root):
+        super().__init__(test, root)
+        self.list_mode = "hidden"
+        self.summary_team = self.config["team_id"]
+        self.sharing = ""
+        self.success_lines = None
+        self.status_changes = {}
+        self.lost_ack = False
+        self.create_argv = []
+
+    def call(self, config, state, label, arguments, timeout=30, **kwargs):
+        result = super().call(config, state, label, arguments, timeout,
+                              **kwargs)
+        if label == "create":
+            self.create_argv = list(arguments)
+            path = state / "create.stdout"
+            summary = path.read_text().replace(
+                "team: " + config["team_id"], "team: " + self.summary_team)
+            if self.success_lines is not None:
+                summary = "\n".join(line for line in summary.splitlines()
+                                    if not line.startswith(
+                                        "Successfully created pod"))
+                summary += "\n" + self.success_lines
+            path.write_text(summary + self.sharing)
+            if self.lost_ack:
+                raise subprocess.TimeoutExpired(arguments, timeout)
+        return result
+
+    def pages(self, config, state, mode, label, deadline=None):
+        rows = super().pages(config, state, mode, label, deadline)
+        if self.list_mode == "hidden":
+            return []
+        if self.list_mode == "conflicting":
+            return [{**rows[0], "id": "b" * 32}]
+        return rows
+
+    def status_read(self, config, state, pod_id, label):
+        return {**super().status_read(config, state, pod_id, label),
+                **self.status_changes}
+
+
+class TeamScopeTests(unittest.TestCase):
+    def test_team_create_identifies_from_stdout_when_list_is_empty(self):
+        # Given matching status and a hidden list, when create ends,
+        # then identify and terminate exactly the confirmed stdout ID.
+        with tempfile.TemporaryDirectory() as temporary:
+            rental = TeamRental(self, Path(temporary).resolve())
+            rental.stop_after = 15
+            rental.run()
+            argv = rental.create_argv
+            self.assertEqual(argv[argv.index("--team-id") + 1],
+                             rental.config["team_id"])
+            self.assertNotIn("--share-with-team", argv)
+            self.assertNotIn("--add-members", argv)
+            self.assertEqual(json.loads(
+                (rental.state / "session.json").read_text())["pod_id"],
+                rental.pod_id)
+            self.assertTrue((rental.state / "validated.json").exists())
+            self.assertEqual(rental.terminate_times, [15])
+
+    def test_invalid_status_identity_never_identifies_or_terminates(self):
+        # Given wrong/missing name or team, when status cannot confirm,
+        # then retain the lease without deleting a guessed ID.
+        for change in ({"team_id": None}, {"team_id": "other-team"},
+                       {"name": "other-name"}, {"name": None}):
+            with self.subTest(change=change), \
+                    tempfile.TemporaryDirectory() as temporary:
+                rental = TeamRental(self, Path(temporary).resolve())
+                rental.status_changes = change
+                rental.abort_after = 0
+                with self.assertRaises(OwnerObserved):
+                    rental.run()
+                self.assertEqual(rental.terminate_times, [])
+                self.assertFalse((rental.state / "session.json").exists())
+                self.assertFalse((rental.state / "validated.json").exists())
+
+    def test_summary_team_or_sharing_refuses_before_validation(self):
+        # Given a confirmed pod, when request team/sharing differs,
+        # then refuse validation and delete the confirmed ID once.
+        for team, sharing in (("None", ""), ("other-team", ""),
+                              ("team-approved\nteam: None", ""),
+                              ("team-approved", "sharing: All team members\n"),
+                              ("team-approved",
+                               "sharing: All team members (from config "
+                               "default)\n")):
+            with self.subTest(team=team, sharing=sharing), \
+                    tempfile.TemporaryDirectory() as temporary:
+                rental = TeamRental(self, Path(temporary).resolve())
+                rental.summary_team, rental.sharing = team, sharing
+                with self.assertRaisesRegex(ValueError, "approved offer"):
+                    rental.run()
+                self.assertEqual(len(rental.terminate_times), 1)
+                self.assertFalse((rental.state / "validated.json").exists())
+
+    def test_invalid_create_id_lines_never_guess_an_identity(self):
+        # Given missing/duplicate/bad success lines with an empty list,
+        # when create returns zero, then never guess or terminate.
+        valid = "Successfully created pod " + "a" * 32
+        invalid = ("", valid + "\n" + valid,
+                   "Successfully created pod ../other", valid + " extra",
+                   "Successfully created pod " + "A" * 32)
+        self.assertEqual(lifecycle.created_pod_id(valid), "a" * 32)
+        for text in invalid:
+            with self.subTest(text=text), \
+                    tempfile.TemporaryDirectory() as temporary:
+                self.assertIsNone(lifecycle.created_pod_id(text))
+                rental = TeamRental(self, Path(temporary).resolve())
+                rental.success_lines = text
+                rental.abort_after = 0
+                with self.assertRaises(OwnerObserved):
+                    rental.run()
+                self.assertEqual(rental.terminate_times, [])
+                self.assertFalse((rental.state / "session.json").exists())
+
+    def test_unidentified_shutdown_uses_confirmed_stdout_id(self):
+        # Given a lost create acknowledgement and invisible list, when
+        # shutdown confirms ID/name/team, then delete that ID once.
+        with tempfile.TemporaryDirectory() as temporary:
+            rental = TeamRental(self, Path(temporary).resolve())
+            rental.lost_ack = True
+            with self.assertRaises(subprocess.TimeoutExpired):
+                rental.run()
+            self.assertEqual(rental.status_reads, 1)
+            self.assertEqual(len(rental.terminate_times), 1)
+            self.assertFalse((rental.state / "session.json").exists())
+
+    def test_list_fallback_confirms_team_before_terminating(self):
+        # Given no usable stdout ID but a visible owned-name list row,
+        # when status confirms name/team, then clean up exactly that ID.
+        with tempfile.TemporaryDirectory() as temporary:
+            rental = TeamRental(self, Path(temporary).resolve())
+            rental.list_mode = "visible"
+            rental.success_lines = ""
+            with self.assertRaisesRegex(ValueError, "ambiguous create"):
+                rental.run()
+            self.assertEqual(rental.status_reads, 1)
+            self.assertEqual(len(rental.terminate_times), 1)
+
+    def test_list_fallback_rejects_unconfirmed_name_or_team(self):
+        # Given only a list candidate, when status name/team disagrees,
+        # then keep the unresolved owner and never terminate that ID.
+        for change in ({"team_id": None}, {"team_id": "other-team"},
+                       {"name": "other-name"}):
+            with self.subTest(change=change), \
+                    tempfile.TemporaryDirectory() as temporary:
+                rental = TeamRental(self, Path(temporary).resolve())
+                rental.list_mode = "visible"
+                rental.success_lines = ""
+                rental.status_changes = change
+                rental.abort_after = 0
+                with self.assertRaises(OwnerObserved):
+                    rental.run()
+                self.assertEqual(rental.terminate_times, [])
+
+    def test_list_name_collision_refuses_without_terminating(self):
+        # Given another ID with our nonce, when list disagrees,
+        # then refuse both initial identity and cleanup of either guess.
+        with tempfile.TemporaryDirectory() as temporary:
+            rental = TeamRental(self, Path(temporary).resolve())
+            rental.list_mode = "conflicting"
+            rental.abort_after = 0
+            with self.assertRaises(OwnerObserved):
+                rental.run()
+            self.assertEqual(rental.terminate_times, [])
+            self.assertFalse((rental.state / "session.json").exists())
+
+    def test_team_pin_is_required_nonempty_text(self):
+        # Given an absent/empty/non-string team, when loading config,
+        # then reject before any CLI call.
+        for team in (None, "", " ", 1, False):
+            with self.subTest(team=team), \
+                    tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "execution.json"
+                config = pins()
+                config["team_id"] = team
+                path.write_text(json.dumps(config))
+                with patch.object(lifecycle, "call") as call:
+                    with self.assertRaises(ValueError):
+                        lifecycle.configuration(path)
+                call.assert_not_called()
+        with tempfile.TemporaryDirectory() as temporary:
+            config = pins()
+            del config["team_id"]
+            path = Path(temporary) / "execution.json"
+            path.write_text(json.dumps(config))
+            with self.assertRaises(ValueError):
+                lifecycle.configuration(path)
+
+
 class OwnerTests(unittest.TestCase):
     def test_unidentified_reconciles_without_fifo_readiness(self):
         # Given a failed first read, when identity appears at 15/30 s,
@@ -260,7 +459,7 @@ class OwnerTests(unittest.TestCase):
                 self.assertEqual(rental.reconciliations,
                                  list(range(0, visible + 1, 15)))
                 self.assertEqual(rental.terminate_times, [visible])
-                self.assertEqual(rental.status_reads, 0)
+                self.assertEqual(rental.status_reads, 1)
                 self.assertEqual(rental.calls,
                                  ["availability", "create", "terminate"])
                 self.assertEqual(rental.restored, list(SIGNALS))
@@ -575,7 +774,7 @@ class OfferTests(unittest.TestCase):
         config = execution_fixture(100)
         for raw in ("0.264", "0.274"):
             with self.subTest(raw=raw):
-                status = {"cost_per_hour": raw}
+                status = {"cost_per_hour": raw, "team_id": config["team_id"]}
                 before = deepcopy(status)
                 self.assertEqual(lifecycle.mismatches(status, config), [])
                 receipt = lifecycle.rate_receipt(status, config)
@@ -595,7 +794,7 @@ class OfferTests(unittest.TestCase):
             {"cost_per_hour": "0.274"},
             {**config, "hourly_ceiling": "0.28"}))
         self.assertEqual(lifecycle.mismatches(
-            {"cost_per_hour": "0.264"},
+            {"cost_per_hour": "0.264", "team_id": config["team_id"]},
             {**config, "hourly_ceiling": "0.28"}), [])
         for raw in (None, True, False, [], {}, "NaN", "Infinity",
                     "-Infinity", "bad", "-0.01"):
@@ -1144,7 +1343,8 @@ class RootDeadlineTests(unittest.TestCase):
                 (state / "validated.json").write_text("{}")
                 status = {"id": "pod", "provider": "nebius",
                           "image": "ubuntu_22_cuda_12", "gpu": "CPU_NODE x1",
-                          "cost_per_hour": "0.274", "status": "PENDING"}
+                          "cost_per_hour": "0.274", "status": "PENDING",
+                          "team_id": config["team_id"]}
                 with patch.object(lifecycle.time, "time", clock.time), \
                         patch.object(lifecycle.threading, "Event",
                                      clock.event), \
@@ -1176,6 +1376,7 @@ class RootDeadlineTests(unittest.TestCase):
                 status = {"id": "pod", "provider": "nebius",
                           "image": "ubuntu_22_cuda_12", "gpu": "CPU_NODE x1",
                           "cost_per_hour": "0.274", "status": "ACTIVE",
+                          "team_id": config["team_id"],
                           "ssh": "root@127.0.0.1 -p 22"}
                 with patch.object(lifecycle.time, "time", clock.time), \
                         patch.object(lifecycle, "status_read",
