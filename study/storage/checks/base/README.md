@@ -118,7 +118,12 @@ limits need the run owner's approval before execution:
   "recipe_sha256": "<approved generator/recipe SHA-256>",
   "approval_path": "/absolute/base-policy/user-operator-approval.json",
   "approval_sha256": "<approval receipt SHA-256>",
-  "base": {"main_wall_seconds": 9000, "side_wall_seconds": 2700},
+  "base": {"main_wall_seconds": 12540, "side_wall_seconds": 3600},
+  "job": {
+    "started_unix_seconds": 0,
+    "timeout_seconds": 21000,
+    "cleanup_upload_seconds": 1200
+  },
   "runs": 3,
   "safety_timeout_seconds": 900,
   "memory_limits_bytes": {
@@ -188,11 +193,36 @@ strata; the combined `name` p95 is reported but does not decide. Memoized semant
 checks use the full source/query/policy/answer envelope, omitting only elapsed
 time and warmup state. They do not cache serving answers or remove measurements.
 
+### Checker-only edge index
+
+After native sampling stops, the checker builds one incoming/outgoing endpoint
+index per immutable source. It retains source byte offsets and lengths, not edge
+payloads or candidate answers. Each lookup reads the original full JSONL rows in
+source order. Kind filters, duplicates and BFS fanout rules are unchanged. Text,
+vector and node reference reads still scan. In-memory data and update overlays
+use the independent scan path. Changing the complete dataset descriptor closes
+the old view before opening another one.
+
+Construction checks the manifest, record hashes, edge count and byte size. It
+rejects invalid JSON, UTF-8 and an unterminated last line, as the scan reader does.
+Every reference call refuses changed file identities, sizes or modification
+times. These guards assume the frozen input tree stays immutable; they are not
+a defense against an actor that rewrites bytes and forges filesystem metadata.
+The checker closes its read handles at shutdown. None of this work enters native
+build/query duration or construction CPU. Scan parity tests cover each endpoint
+lookup and BFS frontier, including a deliberately dropped index entry.
+
 The accepted runner enforces independent runner/checker/engine cgroup hard limits.
-The driver bounds main and conditional side separately with the required `base`
-limits. There is no separately adjustable total; the maximum is their sum. On
-expiry or interruption,
-it sends SIGTERM to the runner and allows the existing 30-second cleanup join.
+The driver bounds main and conditional side with the required `base` limits and
+clamps both to one absolute first-step clock in `job`. The workflow records epoch
+seconds in its first step, before checkout. It replaces the zero placeholder in
+the example; missing, zero, future or expired clocks refuse execution. Setup
+cannot reset this clock. The gap from GitHub job start to that first step is
+expected to be seconds, not measured; the one-minute margin also covers this gap.
+No token permission is added to fetch a timing value.
+
+On expiry or interruption, the driver sends SIGTERM to the runner and allows the
+existing 30-second cleanup join.
 If that join fails, it kills only its runner and refuses completion. The CI job
 owner must stay outside the worker tree, retain the job cgroup identity and apply
 the accepted job-level cleanup procedure on every exit. Never retry, reuse the
@@ -261,18 +291,33 @@ unmeasured. False still forces comparison-unavailable and no recommendation.
 
 ## Estimate and limits
 
-The main proposal allows 150 minutes for 27 fresh timing processes and three
-tiny correctness processes. The conditional side proposal adds 45 minutes for
-nine timing processes and one tiny correctness process. The maximum is 195
-minutes, not the old 180-minute estimate. These are unmeasured planning bounds on
-the named 4-vCPU/16-GB CI host, not evidence that the workload fits them. The base
-job also needs its separately budgeted setup/fixture phases. Full vector/content
-queries can dominate even though these checks make no Check 6 claim.
+The rerun allows 209 minutes for 27 fresh timing processes and three tiny
+correctness processes. The conditional side allowance remains 60 minutes for
+nine timing processes and one tiny correctness process. No queries, tiers,
+samples, fresh runs or crash trials are removed. The crash-child safety limit
+remains 900 seconds; it is not a whole timing-process timeout.
+
+The complete admission sum is **60 preparation + 209 main + 60 conditional side
++ 20 cleanup/upload = 349 minutes < 350-minute job timeout < GitHub 360 minutes**.
+Preparation is fetch 10, tiny generation 5, tier100 generation 20 and setup 25.
+Work stops at 329 minutes from the first step, before checkout/setup. The separate
+one-minute margin covers the expected job-start gap and up to 30 seconds for
+runner termination. The launch wrapper also enforces this absolute cutoff plus
+that termination grace. The remaining 20 minutes are reserved for owned cleanup
+and evidence uploads, not more measurement.
+
+Indexed-checker planning ranges are 1–4 minutes per tier1 process, 2–6 at tier10
+and 3–10 at tier100. Main totals 54–180 minutes; conditional side adds 18–60.
+These are unmeasured estimates, not a completion guarantee. Node/text/vector
+reference scans and answer payloads remain. The one-host comparison and the full
+100-repository workload stay unchanged.
 
 Estimate engine peak at 1–3 GiB, runner below 512 MiB and checker below 1 GiB;
 these are not measured values or an assurance that the proposed caps fit. The
 main bounded buffers are the shared 256 MiB cache, 4 MiB sort, 1,024-row Parquet
-groups and 1,000-document Bleve batches. Charged file cache, resident Parquet
+groups and 1,000-document Bleve batches. Checker span metadata may add roughly
+100–200 MiB, but its peak and speedup have not been measured; the 1 GiB checker
+cap and engine cache/answer-cache rules are unchanged. Charged file cache, resident Parquet
 metadata, largest row payloads and Bleve memory remain unknowns. Missing approval
 or an OOM/deadline stops the attempt rather than changing its data or limits.
 

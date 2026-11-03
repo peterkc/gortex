@@ -76,6 +76,10 @@ type ProcessService struct {
 	multis        map[int]adapter.MultiRepo
 	releases      map[int]func()
 	cleanupErrors []error
+	// Separate from native handle bookkeeping: only checker RPCs own this state.
+	checkerMu     sync.Mutex
+	referenceKey  string
+	referenceView *oracle.CheckerView
 }
 
 func (s *ProcessService) putSegment(v adapter.Segment) int {
@@ -349,7 +353,13 @@ func (s *ProcessService) Call(req ProcessRequest, out *ProcessReply) (callErr er
 				ids = append(ids, h.ID)
 			}
 		}
-		expected, err := oracle.DiskReference(ctx, req.Data, req.Query, ids)
+		var expected workload.Expected
+		var err error
+		if s.checker {
+			expected, err = s.checkReference(ctx, req.Data, req.Query, ids)
+		} else {
+			expected, err = oracle.DiskReference(ctx, req.Data, req.Query, ids)
+		}
 		if err != nil {
 			return err
 		}
@@ -358,6 +368,43 @@ func (s *ProcessService) Call(req ProcessRequest, out *ProcessReply) (callErr er
 		return fmt.Errorf("unknown process operation %q", req.Op)
 	}
 	return nil
+}
+
+// checkReference is reached only after native sampling. One complete descriptor
+// owns one view; changing tier or overlay closes the old handles before reuse.
+func (s *ProcessService) checkReference(ctx context.Context, ds []dataset.Dataset, q workload.Query, ids []string) (workload.Expected, error) {
+	encoded, err := json.Marshal(ds)
+	if err != nil {
+		return workload.Expected{}, err
+	}
+	key := string(encoded)
+	s.checkerMu.Lock()
+	defer s.checkerMu.Unlock()
+	if s.referenceView != nil && s.referenceKey != key {
+		err = s.referenceView.Close()
+		s.referenceView, s.referenceKey = nil, ""
+		if err != nil {
+			return workload.Expected{}, err
+		}
+	}
+	if s.referenceView == nil {
+		view, err := oracle.NewCheckerView(ctx, ds)
+		if err != nil {
+			return workload.Expected{}, err
+		}
+		s.referenceView, s.referenceKey = view, key
+	}
+	return s.referenceView.Reference(ctx, q, ids)
+}
+func (s *ProcessService) closeReference() error {
+	s.checkerMu.Lock()
+	defer s.checkerMu.Unlock()
+	if s.referenceView == nil {
+		return nil
+	}
+	err := s.referenceView.Close()
+	s.referenceView, s.referenceKey = nil, ""
+	return err
 }
 
 type HookService struct{}
@@ -400,7 +447,7 @@ func processServe(b adapter.Backend, factory adapter.CatalogFactory, checker boo
 		return err
 	}
 	server.ServeCodec(jsonrpc.NewServerCodec(conn))
-	cleanup := s.cleanupErrors
+	cleanup := append(s.cleanupErrors, s.closeReference())
 	for _, release := range s.releases {
 		release()
 	}

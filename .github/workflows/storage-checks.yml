@@ -127,6 +127,11 @@ jobs:
             required = seconds + job["setup_seconds"] + job["cleanup_upload_seconds"]
             if required > job["timeout_minutes"] * 60:
                 raise RuntimeError("job budget omits a phase or its reserve: " + role)
+            if role == "base" and (
+                    job["timeout_minutes"] > 350
+                    or job["cleanup_upload_seconds"] < 1200
+                    or required >= job["timeout_minutes"] * 60):
+                raise RuntimeError("base needs a strict margin and 20-minute reserve")
         with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
             output.write("timeouts="
                          + json.dumps(timeouts, separators=(",", ":")) + "\n")
@@ -250,9 +255,11 @@ jobs:
     env:
       CHECK_GROUP: base
     steps: &measurement_steps
-    - name: Set the job work directory from the runner temp path
+    - name: Bind the work directory and first-step clock before checkout
       shell: bash
-      run: echo "WORK=$RUNNER_TEMP/storage-checks" >> "$GITHUB_ENV"
+      run: |
+        echo "GX_CHECKS_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+        echo "WORK=$RUNNER_TEMP/storage-checks" >> "$GITHUB_ENV"
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
         ref: ${{ github.sha }}
@@ -878,6 +885,7 @@ jobs:
         from pathlib import Path
         import subprocess
         import sys
+        import time
 
         sys.path.insert(
             0, str(Path(os.environ["GITHUB_WORKSPACE"]) / "study/storage/checks"))
@@ -908,6 +916,7 @@ jobs:
         role = os.environ["CHECK_GROUP"]
         if role == "base":
             spec = policy["base"]
+            job_policy = policy["jobs"]["base"]
             base_work = work.resolve(strict=True)
             config_directory = base_work / "input-config/base"
             config_directory.mkdir(parents=True)
@@ -925,6 +934,12 @@ jobs:
                 "recipe_sha256": sha256(work / "evidence/policy.json"),
                 "approval_path": str(base_approval),
                 "approval_sha256": sha256(base_approval), "base": limits,
+                "job": {
+                    "started_unix_seconds": int(
+                        os.environ["GX_CHECKS_JOB_STARTED"]),
+                    "timeout_seconds": job_policy["timeout_minutes"] * 60,
+                    "cleanup_upload_seconds": job_policy["cleanup_upload_seconds"],
+                },
                 **{key: value for key, value in spec.items() if key not in limits},
                 "output_dir": str(base_work / "results/base"),
                 "construction_selection_approved":
@@ -944,7 +959,15 @@ jobs:
             command = ["bash", str(source / "study/storage/checks/base/run.sh"),
                        "--config", str(path)]
             write_json(work / "evidence/base-command.json", {"argv": command})
-            subprocess.run(command, check=True)
+            # Allow at most 30 seconds to join the runner before the separate
+            # cleanup/upload reserve. The base driver uses the same job clock.
+            job = config["job"]
+            remaining = (job["started_unix_seconds"] + job["timeout_seconds"]
+                         - job["cleanup_upload_seconds"] - 60 - time.time())
+            if remaining <= 0:
+                raise RuntimeError(
+                    "base absolute work deadline exhausted during setup")
+            subprocess.run(command, check=True, timeout=remaining + 30)
         elif role == "linkdelta":
             spec = policy["linkdelta"]
             invocations = []

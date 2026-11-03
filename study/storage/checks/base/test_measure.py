@@ -6,6 +6,7 @@ import tempfile
 import json
 import sys
 import os
+import time
 from unittest.mock import patch
 from pathlib import Path
 import unittest
@@ -15,7 +16,7 @@ from measure import (
     canonical_output, checked_file, choose_base, collect_run, digest,
     latency_groups, lookup_verdict, paired_ratios, percentile, run,
     protected_snapshot, ratio_status, remove_serving, validate_config,
-    validate_fixture_pins,
+    validate_fixture_pins, phase_deadlines,
 )
 
 
@@ -577,6 +578,9 @@ class ConfigRefusalTests(unittest.TestCase):
             "approval_path": "/not-read-before-source-refusal",
             "approval_sha256": "a" * 64,
             "base": {"main_wall_seconds": 9000, "side_wall_seconds": 2700},
+            "job": {"started_unix_seconds": int(time.time()),
+                    "timeout_seconds": 350 * 60,
+                    "cleanup_upload_seconds": 20 * 60},
             "runs": 3, "safety_timeout_seconds": 900,
             "memory_limits_bytes": {"runner": 1 << 20, "checker": 1 << 20,
                                     "engine": 1 << 20},
@@ -703,6 +707,9 @@ class OrchestrationRegressionTests(unittest.TestCase):
                     config.update(
                         source_revision="a" * 40, approval_sha256="a" * 64,
                         recipe_sha256="a" * 64, binaries={},
+                        job={"started_unix_seconds": int(time.time()),
+                             "timeout_seconds": 350 * 60,
+                             "cleanup_upload_seconds": 20 * 60},
                         memory_limits_bytes={},
                         base={"main_wall_seconds": 9000,
                               "side_wall_seconds": 2700},
@@ -791,6 +798,63 @@ class C3OutcomeRegressionTests(unittest.TestCase):
                                 full_protocol=False)
                 self.assertIs(type(caught.exception),
                               SemanticMismatch if extra is None else RunError)
+
+
+class AbsoluteDeadlineTests(unittest.TestCase):
+    def job(self):
+        return {"started_unix_seconds": 100000,
+                "timeout_seconds": 350 * 60,
+                "cleanup_upload_seconds": 20 * 60}
+
+    def test_setup_is_counted_and_side_cannot_reset_job_clock(self):
+        base = {"main_wall_seconds": 209 * 60,
+                "side_wall_seconds": 60 * 60}
+        # Sixty minutes of setup leaves exactly the complete phase sum.
+        main, total = phase_deadlines(
+            base, self.job(), monotonic_now=5000, unix_now=103600)
+        self.assertEqual(main, 5000 + 209 * 60)
+        self.assertEqual(total, 5000 + 269 * 60)
+        # Ten more setup minutes shorten the global cap, not the reserve.
+        later_main, later_total = phase_deadlines(
+            base, self.job(), monotonic_now=5600, unix_now=104200)
+        self.assertEqual(later_main, 5600 + 209 * 60)
+        self.assertEqual(later_total, total)
+        self.assertEqual(100000 + 329 * 60,
+                         104200 + later_total - 5600)
+        side_start = later_main
+        side_end = min(later_total, side_start + base["side_wall_seconds"])
+        self.assertEqual(side_end - side_start, 50 * 60)
+        self.assertEqual(base, {"main_wall_seconds": 12540,
+                                "side_wall_seconds": 3600})
+
+    def test_exhausted_clock_bad_reserve_and_missing_clock_refuse(self):
+        base = {"main_wall_seconds": 12540, "side_wall_seconds": 3600}
+        for changed in ({}, {**self.job(), "started_unix_seconds": True},
+                        {**self.job(), "started_unix_seconds": 200000},
+                        {**self.job(), "timeout_seconds": 351 * 60},
+                        {**self.job(), "cleanup_upload_seconds": 1199}):
+            with self.subTest(job=changed), self.assertRaises(RunError):
+                phase_deadlines(base, changed, monotonic_now=1,
+                                unix_now=103600)
+        with self.assertRaisesRegex(RunError, "exhausted"):
+            phase_deadlines(base, self.job(), monotonic_now=1,
+                            unix_now=100000 + 329 * 60)
+
+    def test_policy_has_one_complete_sum_below_the_job_cap(self):
+        policy = json.loads(Path(__file__).parents[1].joinpath(
+            "run-policy.json").read_text())
+        job = policy["jobs"]["base"]
+        seconds = (policy["fetch"]["wall_seconds"]
+                   + policy["tiny"]["wall_seconds"]
+                   + policy["tier100"]["wall_seconds"]
+                   + job["setup_seconds"]
+                   + policy["base"]["main_wall_seconds"]
+                   + policy["base"]["side_wall_seconds"]
+                   + job["cleanup_upload_seconds"])
+        self.assertEqual(seconds, 349 * 60)
+        self.assertLess(seconds, job["timeout_minutes"] * 60)
+        self.assertEqual(job["timeout_minutes"], 350)
+        self.assertEqual(job["cleanup_upload_seconds"], 20 * 60)
 
 
 if __name__ == "__main__":

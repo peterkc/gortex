@@ -11,9 +11,12 @@ import (
 	"strings"
 )
 
-// DiskSegment scans sealed input records. Only one record, query terms and
-// requested output are retained; there is no graph, text or vector corpus map.
-type DiskSegment struct{ Data dataset.Dataset }
+// DiskSegment scans sealed input records. Checker-owned views may retain edge
+// spans, but never a graph payload, text or vector corpus map.
+type DiskSegment struct {
+	Data  dataset.Dataset
+	index *edgeIndex
+}
 
 func (s *DiskSegment) Close() error { return nil }
 func (s *DiskSegment) NodeByID(ctx context.Context, id string) (dataset.Node, error) {
@@ -65,6 +68,9 @@ func (s *DiskSegment) FileNodes(ctx context.Context, path string) ([]dataset.Nod
 	return out, nil
 }
 func (s *DiskSegment) edges(ctx context.Context, id, kind string, incoming bool) ([]dataset.Edge, error) {
+	if s.index != nil {
+		return s.index.edges(ctx, id, kind, incoming)
+	}
 	var out []dataset.Edge
 	for e, err := range s.Data.EdgeRows() {
 		if err != nil {

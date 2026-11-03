@@ -236,10 +236,36 @@ def canonical_output(config, config_path):
     return canonical
 
 
+def phase_deadlines(base, job, *, monotonic_now, unix_now):
+    """Bound both phases with one first-step clock."""
+    fields = {"started_unix_seconds", "timeout_seconds",
+              "cleanup_upload_seconds"}
+    if (set(job) != fields
+            or any(type(value) is not int or value <= 0
+                   for value in job.values())):
+        raise RunError("explicit positive job clock and reserves required")
+    if (job["timeout_seconds"] > 350 * 60
+            or job["cleanup_upload_seconds"] < 20 * 60
+            or job["started_unix_seconds"] > unix_now):
+        raise RunError("invalid job clock, timeout or upload reserve")
+    # One minute below the job cap covers the first-step start gap and
+    # the runner termination grace, separately from the upload reserve.
+    cutoff = (job["started_unix_seconds"] + job["timeout_seconds"]
+              - job["cleanup_upload_seconds"] - 60)
+    remaining = cutoff - unix_now
+    if remaining <= 0:
+        raise RunError("absolute job work deadline exhausted")
+    absolute = monotonic_now + remaining
+    main = min(absolute, monotonic_now + base["main_wall_seconds"])
+    total = min(absolute, monotonic_now + base["main_wall_seconds"]
+                + base["side_wall_seconds"])
+    return main, total
+
+
 def validate_config(config, config_path):
     required = {
         "schema", "source_root", "source_revision", "recipe_sha256",
-        "approval_path", "approval_sha256", "base", "runs",
+        "approval_path", "approval_sha256", "base", "job", "runs",
         "safety_timeout_seconds", "memory_limits_bytes", "output_dir",
         "cgroup_root", "binaries", "data", "construction_selection_approved",
     }
@@ -262,6 +288,8 @@ def validate_config(config, config_path):
     if any(type(value) is not int or value <= 0 or value % page_size
            for value in limits.values()):
         raise RunError("positive page-aligned memory limits required")
+    phase_deadlines(config["base"], config["job"],
+                    monotonic_now=time.monotonic(), unix_now=time.time())
     if sys.platform != "linux":
         raise RunError("measurements require approved Linux CI, not this Mac")
     root = Path(config["source_root"])
@@ -742,8 +770,9 @@ def run(config, config_path):
     os.environ.pop("GOMEMLIMIT", None)
     os.environ.update(GOMAXPROCS="4", GOFLAGS="-mod=readonly", GOWORK="off")
     started = time.monotonic()
-    main_deadline = started + config["base"]["main_wall_seconds"]
-    total_deadline = main_deadline + config["base"]["side_wall_seconds"]
+    main_deadline, total_deadline = phase_deadlines(
+        config["base"], config["job"], monotonic_now=started,
+        unix_now=time.time())
     results = {}
     reports = {}
     semantic_failures = {}
@@ -759,7 +788,7 @@ def run(config, config_path):
         "fixture_pins_sha256": validate_fixture_pins(config),
         "binaries": config["binaries"], "data": config["data"],
         "memory_limits_bytes": config["memory_limits_bytes"],
-        "base": config["base"],
+        "base": config["base"], "job": config["job"],
         "lookup_protocol": {
             "minimum_samples_per_run": MIN_QUERY_SAMPLES,
             "repetitions": "ceil(minimum/discarded warmup stratum count); "

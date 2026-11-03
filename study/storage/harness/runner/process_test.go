@@ -510,3 +510,122 @@ func cliFixtureRequest(t *testing.T, extra ...string) runRequest {
 	}
 	return req
 }
+
+func TestCheckerOwnsOneReferenceViewOutsideEngineMeasurements(t *testing.T) {
+	ds, _, _, _, err := loadTier(fixtureTier(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &noPublicationBackend{}
+	service := &ProcessService{backend: backend, checker: true}
+	t.Cleanup(func() {
+		if err := service.closeReference(); err != nil {
+			t.Error(err)
+		}
+	})
+	var described ProcessReply
+	if err = service.Call(ProcessRequest{Op: "describe"}, &described); err != nil || described.Error != "" || service.referenceView != nil {
+		t.Fatal("handshake constructed an index", err, described.Error)
+	}
+	q := workload.Query{ID: "edge", Op: "in", Repo: ds[0].Repo, Key: "a", Kind: "calls"}
+	expected, err := oracle.DiskReference(context.Background(), ds, q, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := ProcessRequest{Op: "check", Data: ds, Query: q, Answer: expected.Answer}
+	for repeat := 0; repeat < 2; repeat++ {
+		var reply ProcessReply
+		previous := service.referenceView
+		if err = service.Call(request, &reply); err != nil || reply.Error != "" || reply.Check.Mismatch {
+			t.Fatal("reference check failed", err, reply.Error, reply.Check)
+		}
+		if service.referenceView == nil || repeat > 0 && previous != service.referenceView {
+			t.Fatal("checker rebuilt identical view")
+		}
+		if backend.builds != 0 || reply.Elapsed != 0 || reply.CPU != 0 || !reply.Start.IsZero() || !reply.End.IsZero() {
+			t.Fatal("checker entered native construction/timing", reply)
+		}
+	}
+	owned := service.referenceView
+	if err = service.closeReference(); err != nil {
+		t.Fatal(err)
+	}
+	if service.referenceView != nil || owned.Validate(context.Background()) == nil {
+		t.Fatal("checker shutdown left view open")
+	}
+	// Non-checker callers retain the independently scanned reference path.
+	engine := &ProcessService{backend: backend}
+	var reply ProcessReply
+	if err = engine.Call(request, &reply); err != nil || reply.Error != "" || reply.Check.Mismatch || engine.referenceView != nil {
+		t.Fatal("engine acquired checker index", err, reply)
+	}
+}
+
+func TestCheckerReferenceDescriptorOverlayAndTierIsolation(t *testing.T) {
+	ds, _, _, _, err := loadTier(fixtureTier(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &ProcessService{checker: true}
+	defer service.closeReference()
+	q := workload.Query{ID: "edge", Op: "in", Repo: ds[0].Repo, Key: "a", Kind: "calls"}
+	if _, err = service.checkReference(context.Background(), ds, q, nil); err != nil {
+		t.Fatal(err)
+	}
+	original := service.referenceView
+	change, err := MakeChange(ds[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := adapter.ChangeSource(ds[0], change)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlay := []dataset.Dataset{changed}
+	want, err := oracle.DiskReference(context.Background(), overlay, q, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := service.checkReference(context.Background(), overlay, q, nil)
+	a, _ := json.Marshal(want)
+	b, _ := json.Marshal(got)
+	if err != nil || string(a) != string(b) || service.referenceView == original || original.Validate(context.Background()) == nil {
+		t.Fatal("overlay reused or changed the original index", err, string(a), string(b))
+	}
+	// Removing and re-adding a descriptor creates a new owned view, not stale
+	// offsets retained from before the overlay.
+	if _, err = service.checkReference(context.Background(), ds, q, nil); err != nil {
+		t.Fatal(err)
+	}
+	immutable := service.referenceView
+	ds[0].Meta.Seed++
+	if _, err = service.checkReference(context.Background(), ds, q, nil); err == nil {
+		t.Fatal("same-path changed manifest descriptor reused index")
+	}
+	if service.referenceView != nil || immutable.Validate(context.Background()) == nil {
+		t.Fatal("failed replacement retained open view")
+	}
+	other, _, _, _, err := loadTier(fixtureTier(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.checkReference(context.Background(), other, q, nil); err != nil {
+		t.Fatal("different tier path did not get its own view", err)
+	}
+}
+
+func TestCheckerCancelledRequestDoesNotRetainView(t *testing.T) {
+	ds, _, _, _, err := loadTier(fixtureTier(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &ProcessService{checker: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err = service.checkReference(ctx, ds, workload.Query{Op: "in"}, nil); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if service.referenceView != nil {
+		t.Fatal("cancelled construction retained a reference view")
+	}
+}
