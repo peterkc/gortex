@@ -25,6 +25,10 @@ TOOLS = {
         "65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40",
     "uv.tar.gz":
         "f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f",
+    # astral-sh/python-build-standalone 20261026, CPython 3.12.16,
+    # x86_64-unknown-linux-gnu-install_only_stripped.
+    "python.tar.gz":
+        "ce4f6d0a6cfdb3bed6e44c2f9affd85943c76a42e25ad3a259002f31d6fb8a20",
 }
 PATHS = {"payload_path": "payload_sha256", "session_path": "session_sha256",
          "environment_path": "environment_sha256"}
@@ -103,10 +107,11 @@ def check_download(config: Mapping, size: int, seconds: int) -> int:
 
 
 def payload_check(bundle: Path,
-                  expected_sources: Mapping | None = None) -> None:
+                  expected_sources: Mapping | None = None) -> int:
     if bundle.stat().st_size > MAX_PAYLOAD + TAR_OVERHEAD:
         raise ValueError("input archive byte bound exceeded")
     hashes, metadata, seen, total = {}, {}, set(), 0
+    python_bytes = 0
     wanted = {"corpus/freeze.json", "corpus/freeze-canonical.json",
               "model-limit.json", "runtime/receipt.json",
               "harness/study/storage/pod-cost/cpu-cost-v1.json",
@@ -127,6 +132,8 @@ def payload_check(bundle: Path,
                     or total > MAX_PAYLOAD + TAR_OVERHEAD):
                 raise ValueError("input archive exceeds bounds")
             relative = str(Path(*name.parts[1:]))
+            if relative == "python.tar.gz":
+                python_bytes = member.size
             stream = archive.extractfile(member)
             if relative in wanted:
                 if member.size > 16 * 1024 ** 2:
@@ -139,7 +146,7 @@ def payload_check(bundle: Path,
                 value.update(chunk)
             hashes[relative] = value.hexdigest()
     if any(hashes.get(name) != pin for name, pin in TOOLS.items()):
-        raise ValueError("missing or changed pinned Go/uv archive")
+        raise ValueError("missing or changed pinned Go/uv/Python archive")
     if expected_sources is not None and any(
             hashes.get("harness/" + name) != pin
             for name, pin in expected_sources.items()):
@@ -168,6 +175,7 @@ def payload_check(bundle: Path,
     verify_proofs(pins, metadata["model-limit.json"],
                   metadata["runtime/receipt.json"],
                   hashes["runtime/libonnxruntime.so.1.31.0"])
+    return python_bytes
 
 
 def validate(config: Mapping, *, destination_ready: bool = False) -> int:
@@ -235,8 +243,10 @@ def validate(config: Mapping, *, destination_ready: bool = False) -> int:
         if source.resolve() != source or not source.is_file():
             raise ValueError("reviewed source uses a nonregular/aliased path")
         expected_sources[name] = digest(source)
-    payload_check(payload, expected_sources)
+    python_bytes = payload_check(payload, expected_sources)
     transport_bytes = sum(Path(config[name]).stat().st_size for name in PATHS)
+    # Python travels once before the root check and again in inputs.tar.
+    transport_bytes += python_bytes
     support_names = ("artifacts.py", "preflight.py", "cgroup_setup.py")
     transport_bytes += sum((HERE / name).stat().st_size
                            for name in support_names)

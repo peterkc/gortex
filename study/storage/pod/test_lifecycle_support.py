@@ -31,11 +31,13 @@ import preflight
 
 def pins() -> dict:
     return {
-        "cli_context": "approved", "provider": "nebius", "offer_id": "cpu",
-        "cloud_id": "cpu-d3_8vcpu-32gb", "image": "image",
-        "gpu_label": "CPU_NODE x1", "location": "FI", "gpu_count": 1,
+        "cli_context": "approved", "provider": "nebius", "offer_id": "840aa0",
+        "cloud_id": "cpu-d3_8vcpu-32gb", "image": "ubuntu_22_cuda_12",
+        "gpu_label": "CPU_NODE x1", "location": "US", "gpu_count": 1,
         "disk_gb": 100, "vcpus": 8, "memory_gb": 32,
-        "quoted_total_hourly": "0.264", "quote_checked_epoch": time.time(),
+        "quoted_total_hourly": "0.274", "quote_checked_epoch": time.time(),
+        "disk_hourly_per_gb": "0.0001",
+        "disk_price_reference": "synthetic USD per GB-hour unit assumption",
         "harness_commit": "a" * 40, "quote_reference": "public offer receipt",
         "max_seconds": 10800, "cutoff_seconds": 10680, "setup_seconds": 1800,
         "ready_seconds": 900, "analysis_seconds": 9600,
@@ -67,6 +69,7 @@ def pins() -> dict:
 FIXTURE_TOOLS = {
     "go.tar.gz": b"synthetic pinned Go archive; never extracted",
     "uv.tar.gz": b"synthetic pinned uv archive; never extracted",
+    "python.tar.gz": b"synthetic pinned Python archive; never executed",
 }
 FIXTURE_SOURCES = {
     "study/storage/pod/lifecycle.py": b"reviewed lifecycle fixture source",
@@ -115,7 +118,13 @@ def invalid_pin_values(value):
         ("quote_checked_epoch", value["quote_checked_epoch"] + 901),
         ("provider", "other"), ("vcpus", True), ("vcpus", 7),
         ("memory_gb", 31), ("gpu_count", 0), ("gpu_count", 2),
-        ("disk_gb", 0), ("max_seconds", 10801),
+        ("disk_gb", 0), ("disk_gb", 101), ("image", "other"),
+        ("disk_hourly_per_gb", None), ("disk_hourly_per_gb", True),
+        ("disk_hourly_per_gb", 0.0001), ("disk_hourly_per_gb", "-0.0001"),
+        ("disk_hourly_per_gb", "NaN"), ("disk_hourly_per_gb", "Infinity"),
+        ("disk_hourly_per_gb", "-Infinity"), ("disk_hourly_per_gb", "bad"),
+        ("disk_price_reference", " "), ("disk_price_reference", False),
+        ("max_seconds", 10801),
         ("cutoff_seconds", 10681), ("cutoff_seconds", 10700),
         ("setup_seconds", 1801), ("ready_seconds", 1800),
         ("analysis_seconds", 9601), ("analysis_seconds", 1800),
@@ -140,7 +149,8 @@ def offer_document(config, **changes):
     # Sanitized public CPU row: display price is rounded; price_value is not.
     row = {
         "id": config["offer_id"], "cloud_id": config["cloud_id"],
-        "provider": "nebius", "location": "FI", "gpu_type": "CPU NODE",
+        "provider": "nebius", "location": config["location"],
+        "gpu_type": "CPU NODE",
         "gpu_count": 1, "vcpus": "8", "memory_gb": "32", "disk_gb": "100+",
         "stock_status": "Available", "is_spot": None,
         "price_per_hour": "$0.26", "price_value": 0.264,
@@ -151,9 +161,20 @@ def offer_document(config, **changes):
 
 
 def active_status(**changes):
-    return {"id": "pod", "provider": "nebius", "image": "image",
-            "cost_per_hour": "0.264", "gpu": "CPU_NODE x1",
+    return {"id": "pod", "provider": "nebius",
+            "image": "ubuntu_22_cuda_12", "cost_per_hour": "0.274",
+            "gpu": "CPU_NODE x1",
             "status": "ACTIVE", "ssh": "root@127.0.0.1 -p 22", **changes}
+
+
+def root_facts(**changes):
+    return {
+        "root": "/sys/fs/cgroup", "writable": True,
+        "memory_controller": True, "euid": 0, "machine": "x86_64",
+        "os_id": "ubuntu", "os_version": "22.04",
+        "python_implementation": "CPython", "python_version": "3.12.16",
+        "glibc_version": "2.35", **changes,
+    }
 
 
 class Clock:
@@ -514,6 +535,7 @@ class SupportTests(unittest.TestCase):
                     self.assertTrue(destination.is_dir())
                     self.assertEqual(destination.stat().st_mode & 0o777, 0o700)
                     self.assertNotIn("--cloud-id", arguments)
+                    self.assertNotIn("--env", arguments)
                     self.assertEqual(arguments[arguments.index("--id") + 1],
                                      config["offer_id"])
                     for option, key in (("--vcpus", "vcpus"),
@@ -532,7 +554,8 @@ class SupportTests(unittest.TestCase):
                         raise create_error
                     summary = (
                         "cloudId: cpu-d3_8vcpu-32gb\nvcpus: 8\n"
-                        "memory: 32\ndiskSize: 100\nimage: image\n"
+                        "memory: 32\ndiskSize: 100\n"
+                        "image: ubuntu_22_cuda_12\n"
                         "provider: nebius\ngpuCount: 1\nteam: None\n")
                     if refusal == "summary":
                         summary = summary.replace("gpuCount: 1", "gpuCount: 0")
@@ -645,7 +668,7 @@ class SupportTests(unittest.TestCase):
         wrong_rows = (
             {"is_spot": True}, {"is_spot": 0}, {"is_spot": "false"},
             {"id": "other"}, {"cloud_id": "other"}, {"provider": "other"},
-            {"location": "US"}, {"stock_status": "Unavailable"},
+            {"location": "FI"}, {"stock_status": "Unavailable"},
             {"gpu_type": "CPU NODE (Spot)"}, {"gpu_count": 0},
             {"vcpus": "16"}, {"vcpus": 8}, {"memory_gb": "16"},
             {"disk_gb": "64+"}, {"disk_gb": "200+"},
@@ -812,7 +835,14 @@ class SupportTests(unittest.TestCase):
                     expected = 10800 if mode == "boundary" else 11
                     self.assertEqual(done["elapsed_seconds"], expected)
                     self.assertTrue(done["within_time_and_approved_rate"])
-                    estimate = Decimal(expected) / 3600 * Decimal("0.264")
+                    estimate = Decimal(expected) / 3600 * Decimal("0.284")
+                    self.assertEqual(
+                        Decimal(done["conservative_hourly_bound"]),
+                        Decimal("0.284"))
+                    self.assertEqual(done["quoted_expected_total_hourly"],
+                                     "0.274")
+                    self.assertEqual(done["disk_price_reference"],
+                                     config["disk_price_reference"])
                     self.assertEqual(Decimal(done["rate_time_estimate"]),
                                      estimate)
                     self.assertIn("not-verified", done["billed_cost"])
@@ -1211,6 +1241,7 @@ class AdmissionTests(unittest.TestCase):
 
     def test_missing_or_changed_tools_sources_refuse_before_create(self):
         for mode in ("missing-go", "changed-go", "missing-uv", "changed-uv",
+                     "missing-python", "changed-python",
                      "missing-source", "changed-source"):
             with self.subTest(mode=mode):
                 self.export_case(mode)
@@ -1226,9 +1257,10 @@ class AdmissionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             config, freeze, members = input_fixture(root)
-            if mode.endswith(("-go", "-uv", "-source")) and mode not in (
-                    "aliased-source", "nonregular-source"):
+            if (mode.endswith(("-go", "-uv", "-python", "-source"))
+                    and mode not in ("aliased-source", "nonregular-source")):
                 name = {"go": "go.tar.gz", "uv": "uv.tar.gz",
+                        "python": "python.tar.gz",
                         "source": "harness/study/storage/pod/preflight.py"}[
                             mode.rsplit("-", 1)[1]]
                 if mode.startswith("missing-"):
@@ -1255,7 +1287,7 @@ class AdmissionTests(unittest.TestCase):
                         return "study/storage/pod/not-a-reviewed-file.py\n"
                 return fixture_git_output(arguments, **kwargs)
 
-            expected = "pinned Go/uv archive"
+            expected = "pinned Go/uv/Python archive"
             if mode in ("missing-source", "changed-source"):
                 expected = "complete reviewed harness export"
             if mode == "empty-source-set":
@@ -1274,6 +1306,111 @@ class AdmissionTests(unittest.TestCase):
                     lifecycle.rent(path, root / "state")
             create.assert_not_called()
             self.assertFalse((root / "state").exists())
+
+    def test_python_staging_is_private_idempotent_and_unexecuted(self):
+        # Given admitted archive bytes, when staged twice, then reuse
+        # only
+        # the pinned bytes and keep both the interpreter and tar
+        # unexecuted.
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary).resolve()
+            config, _, _ = input_fixture(directory)
+            state = directory / "state"
+            state.mkdir(mode=0o700)
+            with patch.object(admission, "TOOLS", fixture_tool_pins()), \
+                    patch.object(host_run.subprocess, "Popen") as execute:
+                first = host_run.stage_python(Path(config["payload_path"]),
+                                              state)
+                identity = first.stat().st_ino
+                second = host_run.stage_python(Path(config["payload_path"]),
+                                               state)
+            execute.assert_not_called()
+            self.assertEqual(first, second)
+            self.assertEqual(second.stat().st_ino, identity)
+            self.assertEqual(second.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(second.read_bytes(),
+                             FIXTURE_TOOLS["python.tar.gz"])
+            self.assertEqual(list(state.glob("*.tmp")), [])
+            self.assertEqual(json.loads(
+                (state / "python-bootstrap-input.json").read_text()), {
+                    "member": "evidence/python.tar.gz",
+                    "sha256": fixture_tool_pins()["python.tar.gz"],
+                    "bytes": len(FIXTURE_TOOLS["python.tar.gz"])})
+
+    def test_python_staging_rejects_changed_missing_or_aliased_bytes(self):
+        # Given a staged path or changed input, when its identity or
+        # hash
+        # differs, then refuse without connecting or replacing that
+        # path.
+        for mode in ("changed-member", "missing-member", "changed-stage",
+                     "stage-alias"):
+            with self.subTest(mode=mode), \
+                    tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary).resolve()
+                config, _, members = input_fixture(directory)
+                bundle = Path(config["payload_path"])
+                state = directory / "state"
+                state.mkdir(mode=0o700)
+                target = state / "python.tar.gz"
+                if mode == "changed-member":
+                    members["python.tar.gz"] = b"changed archive bytes"
+                    write_tar(bundle, members)
+                elif mode == "missing-member":
+                    del members["python.tar.gz"]
+                    write_tar(bundle, members)
+                elif mode == "changed-stage":
+                    target.write_bytes(b"changed stage")
+                else:
+                    outside = directory / "outside"
+                    outside.write_bytes(FIXTURE_TOOLS["python.tar.gz"])
+                    target.symlink_to(outside)
+                with patch.object(admission, "TOOLS", fixture_tool_pins()), \
+                        patch.object(host_run, "connect") as connect:
+                    with self.assertRaises((ValueError, KeyError)):
+                        host_run.stage_python(bundle, state)
+                connect.assert_not_called()
+                self.assertFalse(
+                    (state / "python-bootstrap-input.json").exists())
+                self.assertEqual(list(state.glob("*.tmp")), [])
+                if mode == "changed-stage":
+                    self.assertEqual(target.read_bytes(), b"changed stage")
+                elif mode == "stage-alias":
+                    self.assertTrue(target.is_symlink())
+                    self.assertEqual(outside.read_bytes(),
+                                     FIXTURE_TOOLS["python.tar.gz"])
+                else:
+                    self.assertFalse(target.exists())
+
+    def test_upload_forecast_counts_python_both_in_payload_and_preupload(self):
+        # Given a pinned member inside inputs.tar, when feasibility is
+        # checked, then count its extra pre-root copy as well as the
+        # payload.
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary).resolve()
+            config, freeze, _ = input_fixture(directory)
+            sizes = []
+            original = admission.upload_seconds
+
+            def forecast(size, rate):
+                sizes.append(size)
+                return original(size, rate)
+
+            with patch.object(admission, "FREEZE", freeze), \
+                    patch.object(admission, "TOOLS", fixture_tool_pins()), \
+                    patch.object(admission, "digest", fixture_source_digest), \
+                    patch.object(admission.subprocess, "check_output",
+                                 side_effect=fixture_git_output), \
+                    patch.object(admission, "upload_seconds",
+                                 side_effect=forecast):
+                admission.validate(config)
+            expected = sum(Path(config[name]).stat().st_size
+                           for name in admission.PATHS)
+            support = ("artifacts.py", "preflight.py", "cgroup_setup.py")
+            expected += sum((admission.HERE / name).stat().st_size
+                            for name in support)
+            expected += len(json.dumps(config).encode("utf-8")) + 4096
+            expected += len(FIXTURE_TOOLS["python.tar.gz"])
+            self.assertEqual(sizes[-1], expected)
 
     def test_token_json_bound_accepts_exact_source_supported_cap(self):
         self.assertEqual(admission.TOKEN_JSON_BOUND, 193_052_672)
@@ -1434,6 +1571,69 @@ class HostTransferTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 self.host_case(mode)
 
+    def test_bootstrap_failure_never_launches_or_refreshes_contact(self):
+        # Given no system Python, when remote hash/unpack fails or
+        # expires,
+        # then only two precheck uploads occur and cleanup is requested
+        # once.
+        for mode in ("bootstrap-failure", "bootstrap-timeout"):
+            with self.subTest(mode=mode):
+                self.host_case(mode)
+
+    def test_actual_root_runtime_facts_precede_bulk_in_both_modes(self):
+        # Given either prior proof or first-check approval, when actual
+        # facts
+        # differ, then refuse with 78 before bulk upload or analysis
+        # launch.
+        wrong = [
+            {**root_facts(), key: value}
+            for key, value in (
+                ("euid", 1000), ("euid", False), ("euid", 0.0),
+                ("machine", "aarch64"), ("os_id", "debian"),
+                ("os_version", "24.04"), ("python_version", "3.12.15"),
+                ("python_implementation", "PyPy"),
+                ("glibc_version", "2.27"), ("glibc_version", "not-a-version"),
+                ("writable", False), ("memory_controller", False),
+                ("root", "/delegated/cgroup"))
+        ]
+        wrong += [{key: value for key, value in root_facts().items()
+                   if key != missing} for missing in root_facts()]
+        for mode in ("first-in-pod-check", "prior-evidence"):
+            with self.subTest(mode=mode, valid=True):
+                self.host_case("success", root_mode=mode)
+            for facts in wrong:
+                with self.subTest(mode=mode, facts=facts):
+                    self.host_case("root-facts-refusal", root_mode=mode,
+                                   facts=facts)
+
+    def test_commands_and_early_session_paths_use_standalone_python(self):
+        # Given an image without system Python 3.12, when constructing
+        # every
+        # early command, then the staged interpreter owns startup and
+        # cleanup.
+        absolute = "/srv/storage-pod/python/bin/python3.12"
+        self.assertTrue(host_run.PROBE_COMMAND.startswith(absolute + " -B"))
+        self.assertIn("&& " + absolute + " -B", host_run.ROOT_PROBE_COMMAND)
+        bootstrap = host_run.PYTHON_BOOTSTRAP_COMMAND
+        self.assertLess(bootstrap.index("sha256sum --check"),
+                        bootstrap.index("tar -xzf"))
+        self.assertIn(admission.TOOLS["python.tar.gz"], bootstrap)
+        self.assertNotIn("python3.12 -", bootstrap)
+        script = (host_run.HERE / "accuracy_session.sh").read_text()
+        exported = 'export PATH="/srv/storage-pod/python/bin:$PATH"'
+        self.assertLess(script.index(exported), script.index("python3.12 -B"))
+        self.assertEqual(script.count("--python " + absolute), 2)
+        self.assertNotIn("/usr/bin/python3.12", script)
+        self.assertNotIn("python3.12-venv", script)
+        self.assertIn('test "$VERSION_ID" = 22.04', script)
+        self.assertIn("apt-get install -y ca-certificates build-essential",
+                      script)
+        setup = script[script.index("setup() {"):]
+        self.assertLess(setup.index(exported), setup.index("python3.12 -B"))
+        self.assertIn("gnu_get_libc_version", host_run.ROOT_PROBE_SOURCE)
+        self.assertIn("platform.freedesktop_os_release()",
+                      host_run.ROOT_PROBE_SOURCE)
+
     def test_readonly_root_probe_recovers_without_restaging_or_relaunch(self):
         for mode in ("root-probe-recovery", "root-probe-timeout",
                      "root-probe-expired"):
@@ -1449,13 +1649,22 @@ class HostTransferTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 self.host_case(mode)
 
-    def host_case(self, mode):
+    def host_case(self, mode, *, root_mode="first-in-pod-check", facts=None):
         # Given approved bytes, launch once, verify copies, then stop.
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             state = root / "lease"
             state.mkdir()
             config, freeze, _ = input_fixture(root)
+            if root_mode == "prior-evidence":
+                proof = root / "prior-root.txt"
+                proof.write_bytes(b"synthetic prior proof, not live evidence")
+                config["cgroup_root"] = {
+                    **{key: config[key] for key in
+                       ("provider", "cloud_id", "location", "image")},
+                    "mode": root_mode, "source_reference": "fixture",
+                    "evidence_path": str(proof),
+                    "evidence_sha256": artifacts.digest(proof)}
             destination = Path(config["destination"])
             destination.mkdir(mode=0o700)
             clock = Clock()
@@ -1506,6 +1715,7 @@ class HostTransferTests(unittest.TestCase):
                     '{"relaunch_allowed":false}')
             events, transports, copies = [], [], []
             launches, probes, mkdirs, root_probes = 0, 0, 0, 0
+            bootstraps = 0
             upload_attempts = []
             completed = {"exit": 0, "scope": "full-evidence"}
             if mode == "shape-refusal":
@@ -1599,7 +1809,7 @@ class HostTransferTests(unittest.TestCase):
                     root / "evidence.tar").stat().st_size
 
             def transport(arguments, deadline):
-                nonlocal launches, probes, mkdirs, root_probes
+                nonlocal launches, probes, mkdirs, root_probes, bootstraps
                 nonlocal copy_destination
                 arguments = list(arguments)
                 transports.append((arguments, deadline))
@@ -1645,15 +1855,30 @@ class HostTransferTests(unittest.TestCase):
                     if mode == "ready-recovery" and mkdirs == 1:
                         raise subprocess.CalledProcessError(255, arguments)
                     return b""
+                if remote == host_run.PYTHON_BOOTSTRAP_COMMAND:
+                    bootstraps += 1
+                    events.append("python-bootstrap")
+                    self.assertEqual(len(upload_attempts),
+                                     4 if mode == "upload-recovery" else 2)
+                    if mode == "bootstrap-failure":
+                        raise subprocess.CalledProcessError(1, arguments)
+                    if mode == "bootstrap-timeout":
+                        clock.elapsed += deadline - clock.time()
+                        raise subprocess.TimeoutExpired(arguments, 300)
+                    return b""
                 if remote == host_run.ROOT_PROBE_COMMAND:
                     root_probes += 1
                     events.append("root-probe")
-                    self.assertEqual(len(upload_attempts), 2 if mode ==
-                                     "upload-recovery" else 1)
-                    contact = json.loads(
-                        (state / "ssh-contact.json").read_text())
-                    self.assertLessEqual(deadline,
-                                         contact["connected_epoch"] + 300)
+                    self.assertEqual(len(upload_attempts), 4 if mode ==
+                                     "upload-recovery" else 2)
+                    self.assertEqual(bootstraps, 1)
+                    if root_mode == "first-in-pod-check":
+                        contact = json.loads(
+                            (state / "ssh-contact.json").read_text())
+                        self.assertLessEqual(
+                            deadline, contact["connected_epoch"] + 300)
+                    else:
+                        self.assertLessEqual(deadline, clock.epoch + 900)
                     if mode in {"root-refusal", "root-refusal-stop-error"}:
                         raise subprocess.CalledProcessError(
                             78, arguments, output=b"",
@@ -1667,8 +1892,7 @@ class HostTransferTests(unittest.TestCase):
                         if mode == "root-probe-timeout":
                             raise subprocess.TimeoutExpired(arguments, 30)
                         raise subprocess.CalledProcessError(255, arguments)
-                    return json_bytes({"root": "/sys/fs/cgroup",
-                                       "writable": True})
+                    return json_bytes(root_facts() if facts is None else facts)
                 if "nohup" in remote:
                     launches += 1
                     events.append("launch")
@@ -1737,7 +1961,8 @@ class HostTransferTests(unittest.TestCase):
                 if mode == "root-refusal-stop-error":
                     self.assertIsNone(primary)
                     raise OSError(errno.ENXIO, "fixture owner absent")
-                if (primary is None and mode != "root-refusal"
+                if (primary is None and mode not in
+                        {"root-refusal", "root-facts-refusal"}
                         and completed["scope"] != "diagnostics-only"):
                     self.assertTrue(
                         (state / "evidence.tar-verified.json").exists())
@@ -1755,7 +1980,9 @@ class HostTransferTests(unittest.TestCase):
                              "bad-hash", "bad-scope", "bad-manifest",
                              "changed-head",
                              "dirty-verifier", "duplicate", "wrong-argument",
-                             "upload-failure", "dead-session", "never-started",
+                             "upload-failure", "bootstrap-failure",
+                             "bootstrap-timeout", "dead-session",
+                             "never-started",
                              "stale-pid", "observe-never-started",
                              "bad-size", "archive-bound",
                              "observe-download-timeout", "root-probe-expired",
@@ -1804,7 +2031,7 @@ class HostTransferTests(unittest.TestCase):
                     else:
                         self.assertIsNotNone(stop.call_args.args[1])
                     self.assertFalse((state / "copy-result.json").exists())
-                elif mode == "root-refusal":
+                elif mode in {"root-refusal", "root-facts-refusal"}:
                     self.assertEqual(host_run.main(), 78)
                     self.assertIsNone(stop.call_args.args[1])
                     self.assertFalse((state / "copy-result.json").exists())
@@ -1839,6 +2066,8 @@ class HostTransferTests(unittest.TestCase):
             self.assertEqual(events[-1], "cleanup")
             no_launch = (observing or mode in {"changed-input", "duplicate",
                          "wrong-argument", "upload-failure", "root-refusal",
+                         "bootstrap-failure", "bootstrap-timeout",
+                         "root-facts-refusal",
                          "root-refusal-stop-error", "root-probe-expired",
                          "root-probe-existing-contact"})
             self.assertEqual(launches, 0 if no_launch else 1)
@@ -1849,6 +2078,10 @@ class HostTransferTests(unittest.TestCase):
                 self.assertEqual((retained / "old-partial.tar").read_bytes(),
                                  b"preserve me")
                 self.assertEqual(upload_attempts, [])
+                self.assertEqual(bootstraps, 0)
+                self.assertFalse((state / "python.tar.gz").exists())
+                self.assertFalse(
+                    (state / "python-bootstrap-input.json").exists())
                 self.assertEqual(mkdirs, 0)
                 self.assertEqual(events[0], "probe")
                 self.assertNotEqual(copy_destination, original_destination)
@@ -1865,11 +2098,14 @@ class HostTransferTests(unittest.TestCase):
                 self.assertEqual(events[0], "connect")
                 self.assertEqual(events[1], "mkdir")
                 expected_uploads = (2 if mode == "upload-failure" else
-                                    8 if mode == "upload-recovery" else
-                                    1 if mode in {"root-refusal",
+                                    10 if mode == "upload-recovery" else
+                                    2 if mode in {"root-refusal",
+                                        "root-facts-refusal",
+                                        "bootstrap-failure",
+                                        "bootstrap-timeout",
                                         "root-refusal-stop-error",
                                         "root-probe-expired",
-                                        "root-probe-existing-contact"} else 4)
+                                        "root-probe-existing-contact"} else 5)
                 self.assertEqual(len(upload_attempts), expected_uploads)
                 if mode in {"upload-recovery", "upload-failure"}:
                     for first, second in zip(upload_attempts[::2],
@@ -1878,8 +2114,10 @@ class HostTransferTests(unittest.TestCase):
                         self.assertEqual(first, second)
                     errors = list(state.glob("upload-error-*.json"))
                     self.assertEqual(len(errors),
-                                     2 if mode == "upload-failure" else 4)
+                                     2 if mode == "upload-failure" else 5)
                 if mode in {"upload-failure", "root-refusal",
+                            "root-facts-refusal", "bootstrap-failure",
+                            "bootstrap-timeout",
                             "root-refusal-stop-error", "root-probe-expired",
                             "root-probe-existing-contact"}:
                     self.assertFalse(
@@ -1893,6 +2131,26 @@ class HostTransferTests(unittest.TestCase):
                         self.assertEqual(bytes.fromhex(refusal["stderr_hex"]),
                                          b"\x80true root unavailable\n")
                         self.assertLessEqual(clock.elapsed, 300)
+                    if mode == "root-facts-refusal":
+                        self.assertEqual(root_probes, 1)
+                        self.assertEqual(copies, [])
+                        refusal = json.loads((state /
+                            "root-probe-refusal.json").read_text())
+                        self.assertEqual(refusal["exit"], 78)
+                        self.assertEqual(
+                            json.dumps(refusal["facts"], sort_keys=True),
+                            json.dumps(facts, sort_keys=True))
+                    if mode in {"bootstrap-failure", "bootstrap-timeout"}:
+                        self.assertEqual(bootstraps, 1)
+                        self.assertEqual(root_probes, 0)
+                        self.assertFalse(
+                            (state / "root-capability.json").exists())
+                        contact = json.loads(
+                            (state / "ssh-contact.json").read_text())
+                        self.assertEqual(contact["connected_epoch"],
+                                         clock.epoch)
+                        if mode == "bootstrap-timeout":
+                            self.assertEqual(clock.elapsed, 300)
                     if mode in {"root-probe-expired",
                                 "root-probe-existing-contact"}:
                         self.assertEqual(clock.elapsed, 300)
@@ -1907,10 +2165,12 @@ class HostTransferTests(unittest.TestCase):
                     str(host_run.HERE / "cgroup_setup.py"),
                     target + "cgroup_setup.py"])
                 self.assertEqual(staged[1][0][-2:],
-                    [config["environment_path"], target + "env.sh"])
+                    [str(state / "python.tar.gz"), target + "python.tar.gz"])
                 self.assertEqual(staged[2][0][-2:],
+                    [config["environment_path"], target + "env.sh"])
+                self.assertEqual(staged[3][0][-2:],
                     [config["session_path"], target + "session.sh"])
-                self.assertEqual(staged[3][0][-6:], [
+                self.assertEqual(staged[4][0][-6:], [
                     str(host_run.HERE / "artifacts.py"),
                     str(host_run.HERE / "preflight.py"),
                     str(state / "session-inputs.json"), config["payload_path"],
@@ -1920,21 +2180,23 @@ class HostTransferTests(unittest.TestCase):
                                 + (320 if mode == "slow-boot" else 0)
                                 + (35 if mode in {"root-probe-recovery",
                                     "root-probe-timeout"} else 0))
-                extra = 10 if mode == "upload-recovery" else 0
+                extra = 20 if mode == "upload-recovery" else 0
                 probe_delay = (35 if mode in {"root-probe-recovery",
                                             "root-probe-timeout"} else 0)
                 self.assertEqual([deadline for _, deadline in staged],
-                    [upload_start - probe_delay + config["upload_seconds"]]
+                    [upload_start - probe_delay + config["upload_seconds"]] * 2
                     + [upload_start + extra + config["upload_seconds"]] * 3)
                 if probe_delay:
                     self.assertEqual(root_probes, 2)
                     self.assertEqual(len(list(state.glob(
                         "root-probe-error-*.json"))), 1)
+                self.assertLess(events.index("python-bootstrap"),
+                                events.index("root-probe"))
                 self.assertLess(events.index("root-probe"),
                                 events.index("launch"))
                 self.assertEqual(json.loads((state /
                     "root-capability.json").read_text()),
-                    {"root": "/sys/fs/cgroup", "writable": True})
+                    root_facts())
                 if mode == "slow-boot":
                     contact = json.loads((state /
                         "ssh-contact.json").read_text())

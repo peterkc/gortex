@@ -78,6 +78,7 @@ def execution_pins(value: Mapping, now: float) -> Mapping | Invalid:
 
     required = ("cli_context", "offer_id", "cloud_id", "image", "disk_gb",
                 "quoted_total_hourly", "quote_checked_epoch",
+                "disk_hourly_per_gb", "disk_price_reference",
                 "harness_commit", "quote_reference", "gpu_label", "provider",
                 "vcpus", "memory_gb", "max_seconds", "cutoff_seconds",
                 "budget", "hourly_ceiling", "contingency_seconds",
@@ -99,16 +100,22 @@ def execution_pins(value: Mapping, now: float) -> Mapping | Invalid:
              "location", "upload_reference", "approval_reference",
              "token_size_reference", "payload_path", "session_path",
              "environment_path", "ssh_key_path", "destination",
-             "download_reference", "evidence_size_reference")
+             "download_reference", "evidence_size_reference",
+             "disk_price_reference")
     if any(not isinstance(value[key], str) or not value[key].strip()
            for key in texts):
         return Invalid("text execution pins must be nonempty strings")
+    if not isinstance(value["disk_hourly_per_gb"], str):
+        return Invalid("disk hourly rate must be a decimal string")
     try:
+        disk_rate = Decimal(value["disk_hourly_per_gb"])
         price = Decimal(str(value["quoted_total_hourly"]))
         ceiling = Decimal(str(value["hourly_ceiling"]))
         budget = Decimal(str(value["budget"]))
     except InvalidOperation:
         return Invalid("quoted price must be a finite decimal")
+    if not disk_rate.is_finite() or disk_rate < 0:
+        return Invalid("disk hourly rate must be finite and nonnegative")
     checked = value["quote_checked_epoch"]
     if (not all(n.is_finite() for n in (price, ceiling, budget))
             or type(checked) not in (int, float)
@@ -135,6 +142,8 @@ def execution_pins(value: Mapping, now: float) -> Mapping | Invalid:
     if not isinstance(value["cgroup_root"], dict):
         return Invalid("cgroup root evidence must be a JSON object")
     if (value["provider"] != "nebius" or value["vcpus"] != 8
+            or value["image"] != "ubuntu_22_cuda_12"
+            or value["disk_gb"] != 100
             or value["memory_gb"] != 32 or value["gpu_count"] != 1
             or value["max_seconds"] > 10800 or value["cutoff_seconds"] > 10680
             or value["max_seconds"] - value["cutoff_seconds"] < 120
@@ -264,6 +273,47 @@ def pages(config: Mapping, state: Path, mode: str, label: str,
             raise ValueError("incomplete CLI result set")
 
 
+def hourly_rate(value: object) -> Decimal:
+    """Reject malformed or nonfinite rate fields at the CLI boundary."""
+    if type(value) not in (str, int, float):
+        raise ValueError("hourly rate must be a finite decimal")
+    try:
+        rate = Decimal(str(value))
+    except InvalidOperation as error:
+        raise ValueError("hourly rate is malformed") from error
+    if not rate.is_finite() or rate < 0:
+        raise ValueError("hourly rate must be finite and nonnegative")
+    return rate
+
+
+def disk_charge(config: Mapping) -> Decimal:
+    return (Decimal(config["disk_gb"])
+            * Decimal(config["disk_hourly_per_gb"]))
+
+
+def total_hourly(compute: object, config: Mapping) -> Decimal:
+    """Availability reports compute; disk units are an approved assumption."""
+    return hourly_rate(compute) + disk_charge(config)
+
+
+def conservative_hourly(config: Mapping) -> Decimal:
+    # Status may already include disk. Bound either interpretation.
+    return min(Decimal(str(config["hourly_ceiling"])),
+               Decimal(str(config["quoted_total_hourly"]))
+               + disk_charge(config))
+
+
+def rate_receipt(status: Mapping, config: Mapping) -> dict:
+    return {
+        "raw_status_hourly": status.get("cost_per_hour"),
+        "basis": "unknown, conservative",
+        "quoted_expected_total_hourly": config["quoted_total_hourly"],
+        "conservative_hourly_bound": str(conservative_hourly(config)),
+        "disk_hourly_per_gb": config["disk_hourly_per_gb"],
+        "disk_price_reference": config["disk_price_reference"],
+    }
+
+
 def mismatches(status: Mapping, config: Mapping) -> list[str]:
     expected = {"provider": config["provider"], "image": config["image"],
                 "offer_id": config["offer_id"],
@@ -276,10 +326,12 @@ def mismatches(status: Mapping, config: Mapping) -> list[str]:
     if ("is_spot" in status and status["is_spot"] is not None
             and status["is_spot"] is not False):
         wrong.append("is_spot")
-    if "cost_per_hour" in status and (
-            Decimal(str(status["cost_per_hour"]))
-            != Decimal(str(config["quoted_total_hourly"]))):
-        wrong.append("cost_per_hour")
+    if "cost_per_hour" in status:
+        rate = hourly_rate(status["cost_per_hour"])
+        if (rate > Decimal(str(config["quoted_total_hourly"]))
+                or rate + disk_charge(config)
+                > Decimal(str(config["hourly_ceiling"]))):
+            wrong.append("cost_per_hour")
     if status.get("team_id") is not None:
         wrong.append("team_id")
     return wrong
@@ -340,7 +392,7 @@ def select_offer(document: Mapping, config: Mapping) -> dict:
                                            str(config["disk_gb"]) + "+")
                 and "is_spot" in row
                 and (row["is_spot"] is None or row["is_spot"] is False)
-                and Decimal(str(row["price_value"]))
+                and total_hourly(row["price_value"], config)
                 == Decimal(str(config["quoted_total_hourly"]))):
             matches.append(row)
     if len(matches) != 1 or matches[0]["id"] != config["offer_id"]:
@@ -383,12 +435,18 @@ def verify_deletion(config: Mapping, state: Path, pod_id: str,
             except (TypeError, ValueError):
                 elapsed = -1  # Deletion remains recorded; time is unproved.
             estimate = (Decimal(str(max(0, elapsed))) / 3600
-                        * Decimal(str(config["quoted_total_hourly"])))
+                        * conservative_hourly(config))
             accepted = within_budget(elapsed, estimate, config)
             save(state / "done.json", {
                 "state": "deleted", "pod": entry[0],
                 "elapsed_seconds": elapsed,
                 "rate_time_estimate": str(estimate),
+                "rate_basis": "unknown, conservative",
+                "quoted_expected_total_hourly":
+                    config["quoted_total_hourly"],
+                "conservative_hourly_bound":
+                    str(conservative_hourly(config)),
+                "disk_price_reference": config["disk_price_reference"],
                 "termination_time": ("unproved" if elapsed < 0
                                      else "UTC-second-upper-edge"),
                 "within_time_and_approved_rate": accepted,
@@ -403,6 +461,28 @@ def verify_deletion(config: Mapping, state: Path, pod_id: str,
         threading.Event().wait(min(5, remaining))
 
 
+def root_facts_confirmed(value: object) -> bool:
+    """Accept only actual D14 host/runtime facts from the first root check."""
+    expected = {
+        "root": "/sys/fs/cgroup", "writable": True,
+        "memory_controller": True, "euid": 0, "machine": "x86_64",
+        "os_id": "ubuntu", "os_version": "22.04",
+        "python_implementation": "CPython", "python_version": "3.12.16",
+    }
+    if (not isinstance(value, dict)
+            or set(value) != set(expected) | {"glibc_version"}
+            or any(value[key] != fact for key, fact in expected.items())
+            or type(value["euid"]) is not int
+            or value["writable"] is not True
+            or value["memory_controller"] is not True):
+        return False
+    version = value["glibc_version"]
+    parts = version.split(".") if isinstance(version, str) else []
+    return (len(parts) == 2
+            and all(part.isascii() and part.isdecimal() for part in parts)
+            and tuple(int(part) for part in parts) >= (2, 28))
+
+
 def root_capability_confirmed(state: Path) -> bool:
     try:
         with (state / "root-capability.json").open("rb") as receipt:
@@ -410,9 +490,7 @@ def root_capability_confirmed(state: Path) -> bool:
         value = json.loads(raw) if len(raw) <= 1024 else None
     except (OSError, ValueError):
         return False
-    return (isinstance(value, dict) and set(value) == {"root", "writable"}
-            and value["root"] == "/sys/fs/cgroup"
-            and value["writable"] is True)
+    return root_facts_confirmed(value)
 
 
 def first_ssh_contact(state: Path, config: Mapping,
@@ -482,6 +560,7 @@ def connect(state: Path) -> None:
         if any(status.get(key) is None for key in
                ("provider", "image", "gpu", "cost_per_hour")):
             raise ValueError("missing mandatory active-pod fact")
+        save(state / "active-rate.json", rate_receipt(status, config))
         parts = shlex.split(status["ssh"])
         if (len(parts) != 3 or parts[1] != "-p"
                 or not parts[0].startswith("root@")):
@@ -690,6 +769,7 @@ def rent(config_path: Path, state: Path) -> None:
         status = status_read(config, state, pod_id, "initial-status")
         if mismatches(status, config):
             raise ValueError("reported rental differs from approved pins")
+        save(state / "initial-rate.json", rate_receipt(status, config))
         save(state / "unavailable-initial-fields.json", [key for key in
              ("offer_id", "cloud_id", "is_spot", "vcpus",
               "memory_gb", "disk_gb")

@@ -5,6 +5,7 @@ cd /srv/storage-pod
 printf '%s\n' "$$" > session.pid.tmp
 mv session.pid.tmp session.pid
 . ./env.sh
+export PATH="/srv/storage-pod/python/bin:$PATH"
 mkdir evidence
 CGROOT=
 CAPACITY_GROUP=
@@ -122,7 +123,7 @@ trap finish EXIT
 test "$(id -u)" -eq 0
 test "$(uname -m)" = x86_64
 . /etc/os-release
-test "$ID" = ubuntu && test "$VERSION_ID" = 24.04
+test "$ID" = ubuntu && test "$VERSION_ID" = 22.04
 command -v python3.12
 python3.12 -B - <<'PY'
 import json
@@ -167,6 +168,7 @@ setup() {
   set -euo pipefail
   cd /srv/storage-pod
   . ./env.sh
+  export PATH="/srv/storage-pod/python/bin:$PATH"
   echo $$ > "$CGROOT/bootstrap/cgroup.procs"
   sha256sum --check inputs.tar.sha256
   python3.12 -B artifacts.py --extract inputs.tar --destination input
@@ -175,7 +177,7 @@ setup() {
     --directory . --capacity-cgroup "$CAPACITY_GROUP" \
     --receipt evidence/host-after.json || exit 78
   apt-get update
-  apt-get install -y ca-certificates python3.12-venv build-essential
+  apt-get install -y ca-certificates build-essential
   cd "$W"
   printf '%s  go.tar.gz\n' \
     65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40 \
@@ -209,10 +211,10 @@ PY
     go build -trimpath -p=1 -o "$W/bin/onnxprobe" . )
   export UV_PROJECT_ENVIRONMENT="$W/bridge-env"
   uv sync --frozen --project harness/study/storage/pod-cost \
-    --python /usr/bin/python3.12
+    --python /srv/storage-pod/python/bin/python3.12
   export UV_PROJECT_ENVIRONMENT="$W/score-env"
   uv sync --frozen --project harness/study/storage/neon-eval \
-    --python /usr/bin/python3.12
+    --python /srv/storage-pod/python/bin/python3.12
 
   sha256sum bin/* runtime/libonnxruntime.so.1.31.0 go.tar.gz uv.tar.gz \
     > /srv/storage-pod/evidence/tool-hashes.txt

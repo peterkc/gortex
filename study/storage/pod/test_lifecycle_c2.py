@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import artifacts
 import lifecycle
-from test_lifecycle_support import Clock, offer_document, pins
+from test_lifecycle_support import Clock, offer_document, pins, root_facts
 
 
 SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
@@ -131,7 +131,7 @@ class Rental:
                 raise self.create_error
             (state / "create.stdout").write_text(
                 "cloudId: cpu-d3_8vcpu-32gb\nvcpus: 8\n"
-                "memory: 32\ndiskSize: 100\nimage: image\n"
+                "memory: 32\ndiskSize: 100\nimage: ubuntu_22_cuda_12\n"
                 "provider: nebius\ngpuCount: 1\nteam: None\n")
         elif label == "terminate":
             self.test.assertEqual(arguments, ["terminate", "pod", "--yes"])
@@ -204,8 +204,9 @@ class Rental:
     def status_read(self, config, state, pod_id, label):
         self.status_reads += 1
         self.test.assertEqual((pod_id, label), ("pod", "initial-status"))
-        return {"id": "pod", "provider": "nebius", "image": "image",
-                "cost_per_hour": "0.264", "gpu": "CPU_NODE x1"}
+        return {"id": "pod", "provider": "nebius",
+                "image": "ubuntu_22_cuda_12",
+                "cost_per_hour": "0.274", "gpu": "CPU_NODE x1"}
 
     def run(self):
         replacements = [
@@ -509,7 +510,7 @@ class OfferTests(unittest.TestCase):
         document = availability(config)
         selected = document["gpu_resources"][0]
         document["gpu_resources"].append({
-            **selected, "id": "other", "location": "US"})
+            **selected, "id": "other", "location": "FI"})
         document["total_count"] = 2
         before = deepcopy(document)
         self.assertIs(lifecycle.select_offer(document, config), selected)
@@ -532,6 +533,88 @@ class OfferTests(unittest.TestCase):
         config = execution_fixture(0)
         with self.assertRaisesRegex(ValueError, "absent"):
             lifecycle.select_offer(availability(config, id="other"), config)
+
+    def test_availability_requires_exact_compute_plus_assumed_disk_total(self):
+        # Given raw compute .264 and 100 GB at .0001 per GB-hour, when
+        # selecting an offer, then only the quoted total .274 is
+        # accepted.
+        config = execution_fixture(100)
+        before = deepcopy(config)
+        document = availability(config)
+        self.assertEqual(lifecycle.total_hourly(0.264, config),
+                         lifecycle.Decimal("0.274"))
+        selected = lifecycle.select_offer(document, config)
+        self.assertEqual(selected["id"], "840aa0")
+        self.assertEqual(selected["price_value"], 0.264)
+        self.assertEqual(config, before)
+        for total in ("0.264", "0.273", "0.275"):
+            with self.subTest(total=total):
+                with self.assertRaisesRegex(ValueError, "absent"):
+                    lifecycle.select_offer(
+                        document, {**config, "quoted_total_hourly": total})
+        for rate in (None, True, False, "NaN", "Infinity", "-Infinity",
+                     "bad", -1):
+            with self.subTest(rate=rate):
+                with self.assertRaises(ValueError):
+                    lifecycle.select_offer(
+                        availability(config, price_value=rate), config)
+        for rate in (0.274, 0.265):
+            with self.subTest(mismatched_compute=rate):
+                with self.assertRaisesRegex(ValueError, "absent"):
+                    lifecycle.select_offer(
+                        availability(config, price_value=rate), config)
+
+    def test_status_unknown_rate_basis_has_two_conservative_limits(self):
+        # Given unknown status units, when raw rate is .264 or .274,
+        # then
+        # accept both only within quote and disk-inclusive ceiling
+        # limits.
+        config = execution_fixture(100)
+        for raw in ("0.264", "0.274"):
+            with self.subTest(raw=raw):
+                status = {"cost_per_hour": raw}
+                before = deepcopy(status)
+                self.assertEqual(lifecycle.mismatches(status, config), [])
+                receipt = lifecycle.rate_receipt(status, config)
+                self.assertEqual(receipt["raw_status_hourly"], raw)
+                self.assertEqual(receipt["basis"], "unknown, conservative")
+                self.assertEqual(receipt["quoted_expected_total_hourly"],
+                                 "0.274")
+                self.assertEqual(lifecycle.Decimal(
+                    receipt["conservative_hourly_bound"]),
+                    lifecycle.Decimal("0.284"))
+                self.assertEqual(receipt["disk_price_reference"],
+                                 config["disk_price_reference"])
+                self.assertEqual(status, before)
+        self.assertIn("cost_per_hour", lifecycle.mismatches(
+            {"cost_per_hour": "0.275"}, config))
+        self.assertIn("cost_per_hour", lifecycle.mismatches(
+            {"cost_per_hour": "0.274"},
+            {**config, "hourly_ceiling": "0.28"}))
+        self.assertEqual(lifecycle.mismatches(
+            {"cost_per_hour": "0.264"},
+            {**config, "hourly_ceiling": "0.28"}), [])
+        for raw in (None, True, False, [], {}, "NaN", "Infinity",
+                    "-Infinity", "bad", "-0.01"):
+            with self.subTest(rejected_raw=raw):
+                with self.assertRaises(ValueError):
+                    lifecycle.mismatches({"cost_per_hour": raw}, config)
+        self.assertEqual(lifecycle.conservative_hourly(
+            {**config, "quoted_total_hourly": "0.499"}),
+            lifecycle.Decimal("0.50"))
+
+    def test_budget_and_deletion_estimates_use_conservative_hourly_bound(self):
+        # Given unknown status basis, when three hours are estimated,
+        # then use .284 rather than .274 and reject an underfunded
+        # budget.
+        config = execution_fixture(100)
+        upper = lifecycle.conservative_hourly(config)
+        self.assertEqual(upper, lifecycle.Decimal("0.284"))
+        estimate = lifecycle.Decimal(3) * upper
+        self.assertEqual(estimate, lifecycle.Decimal("0.852"))
+        self.assertTrue(lifecycle.within_budget(10800, estimate, config))
+        self.assertFalse(lifecycle.within_budget(
+            10800, estimate, {**config, "budget": "0.84"}))
 
 
 class ExecutionPinTests(unittest.TestCase):
@@ -782,8 +865,7 @@ class RootDeadlineTests(unittest.TestCase):
                     tempfile.TemporaryDirectory() as temporary:
                 rental = self.fallback(Path(temporary).resolve(), probe)
                 self.first_contact(rental, connected)
-                rental.root_receipt = json.dumps({
-                    "root": "/sys/fs/cgroup", "writable": True})
+                rental.root_receipt = json.dumps(root_facts())
                 rental.root_receipt_after = connected + probe
                 rental.run()
                 self.assertEqual(rental.terminate_times,
@@ -893,6 +975,59 @@ class RootDeadlineTests(unittest.TestCase):
                 self.assertEqual(rental.terminate_times, [620])
                 self.assertEqual(rental.restored, list(SIGNALS))
 
+    def test_actual_root_facts_are_strict_and_do_not_mutate_input(self):
+        # Given actual UID/OS/arch/runtime/root facts, when each field
+        # is
+        # checked, then only a complete compatible receipt can lift
+        # cutoff.
+        for glibc in ("2.28", "2.35", "3.0"):
+            value = root_facts(glibc_version=glibc)
+            before = deepcopy(value)
+            self.assertTrue(lifecycle.root_facts_confirmed(value))
+            self.assertEqual(value, before)
+        wrong = [None, [], {}, True]
+        wrong += [{key: value for key, value in root_facts().items()
+                   if key != missing} for missing in root_facts()]
+        wrong += [{**root_facts(), key: value} for key, value in (
+            ("root", "/delegated/cgroup"), ("writable", 1),
+            ("writable", False), ("memory_controller", 1),
+            ("memory_controller", False), ("euid", False), ("euid", 0.0),
+            ("euid", 1000), ("euid", float("nan")),
+            ("machine", "aarch64"), ("os_id", "debian"),
+            ("os_version", "24.04"), ("python_implementation", "PyPy"),
+            ("python_version", "3.12.15"))]
+        wrong += [root_facts(glibc_version=value) for value in (
+            None, True, False, 2.35, float("nan"), float("inf"),
+            "2.27", "2", "2.35.1", "2.x", " 2.35", "٢.٣٥", "2.-35")]
+        wrong.append({**root_facts(), "extra": 0})
+        for value in wrong:
+            with self.subTest(value=value):
+                self.assertFalse(lifecycle.root_facts_confirmed(value))
+
+    def test_invalid_actual_facts_never_extend_readiness_or_contact(self):
+        # Given invalid full-shaped facts, with or without SSH contact,
+        # then the existing 900 or contact+300 deadline remains
+        # unchanged.
+        wrong = [root_facts(**{key: value}) for key, value in (
+            ("euid", False), ("euid", 1000), ("machine", "aarch64"),
+            ("os_id", "debian"), ("os_version", "24.04"),
+            ("python_version", "3.12.15"), ("glibc_version", "2.27"),
+            ("glibc_version", float("inf")),
+            ("memory_controller", False), ("writable", 1))]
+        wrong += [{key: value for key, value in root_facts().items()
+                   if key != missing} for missing in root_facts()]
+        for contact, expected in ((None, 900), (320, 620)):
+            for value in wrong:
+                with self.subTest(contact=contact, value=value), \
+                        tempfile.TemporaryDirectory() as temporary:
+                    rental = self.fallback(Path(temporary).resolve())
+                    if contact is not None:
+                        self.first_contact(rental, contact)
+                    rental.root_receipt = json.dumps(value)
+                    rental.run()
+                    self.assertEqual(rental.terminate_times, [expected])
+                    self.assertEqual(rental.restored, list(SIGNALS))
+
     def test_connect_pending_expires_at_readiness_in_both_modes(self):
         # Given a pending pod in either root mode, when 900 s passes,
         # then connect requests cleanup at the readiness deadline.
@@ -908,8 +1043,8 @@ class RootDeadlineTests(unittest.TestCase):
                     "pod_id": "pod", "started_epoch": clock.epoch}))
                 (state / "validated.json").write_text("{}")
                 status = {"id": "pod", "provider": "nebius",
-                          "image": "image", "gpu": "CPU_NODE x1",
-                          "cost_per_hour": "0.264", "status": "PENDING"}
+                          "image": "ubuntu_22_cuda_12", "gpu": "CPU_NODE x1",
+                          "cost_per_hour": "0.274", "status": "PENDING"}
                 with patch.object(lifecycle.time, "time", clock.time), \
                         patch.object(lifecycle.threading, "Event",
                                      clock.event), \
@@ -939,8 +1074,8 @@ class RootDeadlineTests(unittest.TestCase):
                     "pod_id": "pod", "started_epoch": clock.epoch}))
                 (state / "validated.json").write_text("{}")
                 status = {"id": "pod", "provider": "nebius",
-                          "image": "image", "gpu": "CPU_NODE x1",
-                          "cost_per_hour": "0.264", "status": "ACTIVE",
+                          "image": "ubuntu_22_cuda_12", "gpu": "CPU_NODE x1",
+                          "cost_per_hour": "0.274", "status": "ACTIVE",
                           "ssh": "root@127.0.0.1 -p 22"}
                 with patch.object(lifecycle.time, "time", clock.time), \
                         patch.object(lifecycle, "status_read",

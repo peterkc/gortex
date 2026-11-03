@@ -57,16 +57,33 @@ rebuild evidence, not the final run commit.
 Before rental, the lead reads the pinned model/tokenizer configuration and model
 limit documentation. Record evidence that the **model and tokenizer support
 8,192 tokens including special tokens**, with configuration hashes and the
-source reference, in `model-limit.json`. Do not infer support merely because a
+source reference, in `model-limit.json`. The lead's reviewed interpretation at
+this pinned revision is: README line 11 advertises 8,192 context; the pinned
+`sentence_bert_config.json` sets total tokenized length, including CLS/SEP, to
+8,192; tokenizer `model_max_length` and model `n_positions` agree. The model's
+`max_trained_positions=2048` affects DynamicNTK only when rotary scaling is set;
+it is null here. Tokenizer `max_length=512` is a call default; this pipeline
+supplies its cut. Record the source hashes and this interpretation. Training
+positions were 2,048: quality beyond that is this experiment's question, not a
+configuration promise. Do not infer support merely because a
 CLI accepts `-cap 8192`. If the configuration needs interpretation or disagrees
 with the claimed limit, stop and return the question to the lead.
 
 Use Linux x86-64 **ORT 1.31.0**, not the macOS ARM wheel in `cpu-cost-v1.json`.
-The Linux wheel/release URL and trusted SHA-256 are **not yet supplied here**.
-They are mandatory pre-rental inputs, not values to guess during paid setup.
-Verify that trusted wheel/release and its RECORD/checksums before staging the
-library. Stage `runtime/libonnxruntime.so.1.31.0`, needed CPU shared dependencies,
-and `runtime/receipt.json` with version, platform, download URL/hash, extracted
+The CPU wheel is
+`onnxruntime-1.31.0-cp312-cp312-manylinux_2_28_x86_64.whl`, SHA-256
+`5e129d6c56abd53e659cb70f00a108d6824086470ff99c2e47a82e5786563db3`,
+as published by `https://pypi.org/pypi/onnxruntime/1.31.0/json`.
+Its `manylinux_2_28` tag requires glibc at least 2.28. Ubuntu 22.04's published
+libc6 package is glibc 2.35, but check the actual image in the first pod check.
+Verify the trusted wheel hash and each extracted member against its RECORD.
+The acquired C library member SHA-256 is
+`21901b1b02233484b80888c16f4f5473742f796bf5528d5d0c4073dbe9802001`.
+The CPU provider helper SHA-256 is
+`086ec1d5388f64153d9c63470d126693db9a182c8ce236d3a1119068471b8a0d`.
+Its standard CPU system-library dependencies remain image checks, not staged
+CUDA dependencies. Stage `runtime/libonnxruntime.so.1.31.0`, needed CPU shared
+dependencies, and `runtime/receipt.json` with version, platform, download URL/hash, extracted
 member path/hash and verification method. A hash first measured from an
 unverified download is not a trusted download pin. No CUDA dependency is allowed.
 The Go probe uses yalue **1.36.0** from its module lock and is built inside the pod.
@@ -74,23 +91,34 @@ The Go probe uses yalue **1.36.0** from its module lock and is built inside the 
 Obtain the fresh offer through pi-gcp. The user approves the exact short ID,
 cloud ID, context/account, image, region, disk, total hourly price, numeric
 resource/deadline/file-limit profile and reviewed fork/input/script/config
-fingerprints before create. Require an Ubuntu 24.04
-x86-64 root image with Python 3.12 and the true writable cgroup v2 root at
-`/sys/fs/cgroup`. A delegated namespace root is not sufficient for this path.
+fingerprints before create. The selected US CPU offer exposes only
+`ubuntu_22_cuda_12` (Ubuntu 22.04).
+Require x86-64, root login, glibc at least 2.28, and the true writable cgroup v2
+root at `/sys/fs/cgroup`. Use the pinned standalone CPython 3.12 below, not an
+assumed system Python. The CUDA-named image does not authorize CUDA dependencies;
+this remains a CPU-only workload. A delegated namespace root is not sufficient
+for this path.
 No existing provider/image proof of that root layout has been supplied. The
 execution JSON must bind reviewed prior evidence, or the user must explicitly
 approve the lifecycle's bounded first-in-pod-check fallback and its cost risk.
-The latter stages only the cgroup helper before bulk upload. Create, ACTIVE and
-first SSH keep their original 900-second readiness allowance. The approved
+The latter first stages and verifies the pinned standalone CPython archive,
+extracts it under the private session directory, and stages the cgroup helper.
+It uses that interpreter before any bulk upload. The first check must observe
+root UID, x86-64, Ubuntu 22.04, the pinned Python, glibc at least 2.28, and the
+true writable cgroup root. None of these facts is inferred from the image name.
+Create, ACTIVE and first SSH keep their original 900-second readiness allowance.
+The approved
 300-second first-root window starts at the first successful SSH contact. Both
 clocks are recorded once; retries never restart the window. Owner and helper
 must stay on the same always-on host with the original lease state.
 
 Without contact by readiness, the root question is unanswered and the owner
 requests deletion. After contact, missing/refused proof ends at contact plus
-300 seconds. Worst-case readiness plus check is 20 minutes: 0.088, about 0.09,
-at the archived 0.264/hour rate. With the 120-second deletion reserve it is
-22 minutes and 0.0968, about 0.10, under normal operation. The terminate call's
+300 seconds. Readiness plus check is at most 20 minutes under normal operation.
+At the expected 0.274/hour compute-plus-disk total, its estimate is about 0.0913.
+Using the conservative status-basis bound of 0.284/hour gives about 0.0947;
+with the 120-second cleanup/deletion reserve it is 22 minutes and about 0.1041.
+The terminate call's
 30-second limit uses that reserve; it adds no further allowance. These estimates
 are not invoices;
 hourly rounding and separate fees can make the charge higher. Confirm the basis
@@ -99,12 +127,21 @@ in final run approval. The original three-hour/$2 limits are unchanged.
 If an early terminate attempt fails, the timer issues no second terminate.
 Use read-only verification and immediate resource-owner escalation instead.
 The session's later cgroup-limit setup remains an independent exit-78 backstop.
-Preparation made no API call. This option adds no namespace-root support or
+This staging preparation made no Prime/account API call. This option adds no namespace-root support or
 permission bypass.
-The read-only receipt observed a 100-GB default boot disk, rendered `100+`; this
-is not approval or proof of fee inclusion. Confirm the explicit disk/image in
-the fresh receipt. Do not omit disk size and permit a CLI prompt.
-No availability/account/cloud command was run to prepare this document.
+The November 2, 3:17 PM PST receipt has FI and US 8/32 CPU rows, both at
+0.264/hour compute. Select US short ID `840aa0`, cloud `cpu-d3_8vcpu-32gb`, CLI
+`location=US` (raw data center `us-central1`), with exactly one match. These facts
+must still be refreshed before rental. Use the 100-GB default boot disk: the
+raw offer says it is not included in compute price. `pricePerUnit=0.0001` does
+not state its unit; the user-approved working assumption is USD per GB-hour.
+That adds 0.010/hour, giving expected total 0.274/hour. Record the assumption
+and source in the execution JSON, not as verified billing. Keep the explicit
+image/disk create flags and request echoes. Never pass `pods create --env`:
+CLI 0.17 filters out this CPU image when that flag is used. `env.sh` is uploaded
+and sourced separately, not sent as that CLI flag.
+Receipt collection was read-only; no pod was rented. This staging work uses
+those retained files and makes no Prime/account call.
 
 The two preparation receipts use these field names:
 
@@ -210,8 +247,14 @@ most seven minutes, diagnostics one minute. The cutoff at minute **178**
 requests deletion, leaving two minutes inside the three-hour bound. Shorter
 approved durations must preserve these reserves. Every transport timeout also
 shortens at that cutoff; no reconnect refreshes any clock.
-A $0.50/hour ceiling gives $1.50 for three hours and $2 for a one-hour billing
-contingency. The contingency grants no runtime extension. API/host failures can
+Apply the $0.50/hour ceiling to compute plus assumed disk, not compute alone.
+Availability total must equal the approved quoted total. Status rate component
+basis is unknown: raw status must not exceed that total, and raw plus assumed
+disk must not exceed the ceiling. Retain its raw value with `basis: unknown,
+conservative`. Use `min(ceiling, quoted total + assumed disk)` for conservative
+budget/duration estimates: 0.284/hour here, or 1.136 for three hours plus one
+billing-contingency hour. At the full $0.50 ceiling, those four hours give $2.
+The contingency grants no runtime extension. API/host failures can
 still prevent a literal billing guarantee; use the lifecycle's escalation rule.
 
 ## Stage and pin before create
@@ -227,6 +270,7 @@ runtime/{libonnxruntime.so.1.31.0,receipt.json,...CPU dependencies...}
 model-limit.json
 go.tar.gz
 uv.tar.gz
+python.tar.gz
 ```
 
 Export only those harness subtrees from the lead's clean reviewed commit with
@@ -245,8 +289,22 @@ Go 1.27.1 minimum without an automatic toolchain download. Use the repository's
 existing uv **0.13.5** Linux GNU archive, SHA-256
 `f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f`, from
 `https://github.com/astral-sh/uv/releases/download/0.13.5/uv-x86_64-unknown-linux-gnu.tar.gz`.
-Stage these before the paid interval. Keep package installation/sync inside the
-pod, charged to setup. Do not change either Python lock file to install ORT.
+Stage these before the paid interval. Also stage `python.tar.gz` from the
+Astral python-build-standalone **20261026** release:
+`cpython-3.12.16+20261026-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz`,
+SHA-256 `ce4f6d0a6cfdb3bed6e44c2f9affd85943c76a42e25ad3a259002f31d6fb8a20`.
+Source: `https://github.com/astral-sh/python-build-standalone/releases/tag/20261026`.
+Verify against that release's published `SHA256SUMS` before use. It contains the
+`python/` prefix and `python/bin/python3.12`; retain its acquisition receipt.
+
+The host separately uploads this same pinned archive before the root check,
+verifies its hash, and extracts it in the owned session directory. Its upload
+is counted in transport feasibility in addition to the bulk payload bytes.
+Bootstrap consumes the original first-contact root allowance. All remote early
+probes, session startup, cleanup and uv sync use the staged interpreter. Do not
+install system `python3.12-venv` or rely on an Ubuntu 22.04 package for Python
+3.12. Keep other package installation/sync inside the pod, charged to setup.
+Do not change either Python lock file to install ORT.
 
 Use `artifacts.py --source STAGING --bundle PRIVATE/inputs.tar` from the generic
 lifecycle. Its manifest binds every staged byte. Its external hash is the

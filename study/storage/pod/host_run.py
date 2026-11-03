@@ -4,6 +4,9 @@ import json
 import os
 import signal
 import shlex
+import shutil
+import tarfile
+import tempfile
 import uuid
 import subprocess
 import threading
@@ -11,9 +14,11 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
+import admission
 import artifacts
 from admission import root_probe_seconds, upload_seconds, validate
-from lifecycle import connect, first_ssh_contact, request_cleanup, save
+from lifecycle import (connect, first_ssh_contact, request_cleanup,
+                       root_facts_confirmed, save)
 
 HERE = Path(__file__).resolve().parent
 REMOTE = "/srv/storage-pod/"
@@ -51,18 +56,68 @@ else:
                  "launched": (root / "launched").is_dir(), "process": status}
 print(json.dumps(value))
 '''
-ROOT_PROBE_SOURCE = '''import json
+ROOT_PROBE_SOURCE = '''import ctypes
+import json
 import os
+import platform
 import cgroup_setup
 root = cgroup_setup.unified_root()
 if not os.access(root, os.W_OK):
     raise ValueError("true cgroup root is not writable")
-print(json.dumps({"root": str(root), "writable": True}))
+libc = ctypes.CDLL(None)
+libc.gnu_get_libc_version.restype = ctypes.c_char_p
+release = platform.freedesktop_os_release()
+print(json.dumps({
+    "root": str(root), "writable": True, "memory_controller": True,
+    "euid": os.geteuid(), "machine": platform.machine(),
+    "os_id": release.get("ID"), "os_version": release.get("VERSION_ID"),
+    "python_implementation": platform.python_implementation(),
+    "python_version": platform.python_version(),
+    "glibc_version": libc.gnu_get_libc_version().decode("ascii"),
+}))
 '''
-PROBE_COMMAND = ("python3.12 -B -c " + shlex.quote(PROBE_SOURCE)
+PYTHON = REMOTE + "python/bin/python3.12"
+PYTHON_BOOTSTRAP_COMMAND = (
+    "set -eu; cd " + REMOTE + "; printf '%s  python.tar.gz\n' "
+    + shlex.quote(admission.TOOLS["python.tar.gz"])
+    + " | sha256sum --check -; tar -xzf python.tar.gz; test -x " + PYTHON)
+PROBE_COMMAND = (PYTHON + " -B -c " + shlex.quote(PROBE_SOURCE)
                  + " " + shlex.quote(REMOTE))
-ROOT_PROBE_COMMAND = ("cd " + REMOTE + "; python3.12 -B -c "
+ROOT_PROBE_COMMAND = ("cd " + REMOTE + " && " + PYTHON + " -B -c "
                       + shlex.quote(ROOT_PROBE_SOURCE) + " || exit 78")
+
+
+def stage_python(bundle: Path, state: Path) -> Path:
+    """Stage the pinned member from admitted inputs without executing it."""
+    target = state / "python.tar.gz"
+    pin = admission.TOOLS["python.tar.gz"]
+    with tempfile.NamedTemporaryFile(dir=state, prefix="python-",
+                                     suffix=".tmp", delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            with tarfile.open(bundle, "r:") as archive:
+                member = archive.getmember("evidence/python.tar.gz")
+                if (not member.isfile()
+                        or not 0 <= member.size <= artifacts.MAX_FILE):
+                    raise ValueError("invalid bootstrap Python archive member")
+                with archive.extractfile(member) as source:
+                    shutil.copyfileobj(source, stream)
+            stream.flush()
+            if artifacts.digest(temporary) != pin:
+                raise ValueError("bootstrap Python archive SHA-256 differs")
+            if target.exists() or target.is_symlink():
+                if (target.resolve() != target or not target.is_file()
+                        or target.stat().st_mode & 0o077
+                        or artifacts.digest(target) != pin):
+                    raise ValueError("staged Python archive changed/aliased")
+            else:
+                temporary.replace(target)
+            save(state / "python-bootstrap-input.json", {
+                "member": "evidence/python.tar.gz", "sha256": pin,
+                "bytes": member.size})
+        finally:
+            temporary.unlink(missing_ok=True)
+    return target
 
 
 def transport(arguments: Sequence[str], deadline: float) -> bytes:
@@ -242,6 +297,7 @@ def main() -> int:
             if launch_path.exists():
                 raise ValueError("one launch already requested; use "
                                  "--observe-only, never relaunch")
+            python_archive = stage_python(args.payload, state)
             connect(state)
         connection = json.loads((state / "connection.json").read_text())
         options = ["-F", "/dev/null", "-o", "BatchMode=yes",
@@ -281,18 +337,27 @@ def main() -> int:
                 if contact is None:
                     raise ValueError("original first SSH contact is unproved")
                 root_deadline = contact[0] + root_probe_seconds(config)
+            preupload_deadline = min(
+                time.time() + config["upload_seconds"], root_deadline)
             upload([*scp, str(HERE / "cgroup_setup.py"),
                     connection["target"] + ":" + REMOTE + "cgroup_setup.py"],
-                   min(time.time() + config["upload_seconds"], root_deadline))
+                   preupload_deadline)
+            upload([*scp, str(python_archive),
+                    connection["target"] + ":" + REMOTE + "python.tar.gz"],
+                   preupload_deadline)
+            run([*ssh, PYTHON_BOOTSTRAP_COMMAND],
+                config["bootstrap_seconds"], root_deadline)
             root_attempt = 0
             while True:
                 try:
                     root_receipt = json.loads(
                         run([*ssh, ROOT_PROBE_COMMAND], 30, root_deadline))
-                    if (root_receipt != {"root": "/sys/fs/cgroup",
-                                         "writable": True}
-                            or root_receipt["writable"] is not True):
-                        raise ValueError("true-root precheck receipt differs")
+                    if not root_facts_confirmed(root_receipt):
+                        save(state / "root-probe-refusal.json", {
+                            "exit": 78, "epoch": time.time(),
+                            "facts": root_receipt,
+                            "error": "actual host/runtime/root facts refused"})
+                        return 78
                     save(state / "root-capability.json", root_receipt)
                     break
                 except (subprocess.CalledProcessError,
@@ -335,6 +400,7 @@ def main() -> int:
                            "relaunch_allowed": False}, stream)
             remote = ("set -eu; cd " + REMOTE
                       + "; mkdir launched; . ./env.sh; "
+                      'export PATH="/srv/storage-pod/python/bin:$PATH"; '
                       "nohup setsid bash ./session.sh "
                       ">session.log 2>&1 </dev/null &")
             try:

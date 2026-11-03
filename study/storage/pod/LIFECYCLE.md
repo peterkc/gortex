@@ -32,20 +32,33 @@ Empty output fails once. Do not retry it, choose the next cheapest row or change
 location. Create with the selected `--id`, not the CLI's broad `--cloud-id`
 alternative. Its first-match OR selection can select another location.
 
-The read-only November 2 receipt observed one matching Nebius FI 8/32 CPU row
-at 0.264/hour, SKU count 1 and default boot disk 100 GB. These are observations,
-not permanent pins. Refresh them before use. Availability displays `CPU NODE`,
-while the status formatter uses raw type plus count (`CPU_NODE x1` in the
-source-derived fixture). There was no live status sample. Do not call that
-fixture observed allocation evidence.
+The November 2, 3:17 PM PST read-only receipt has two 8/32 CPU rows at
+0.264/hour compute: Nebius FI/eu-north1 (`3964f0`) and US/us-central1 (`840aa0`).
+This study selects the US row: CLI `location` is `US`, not `us-central1`.
+Require exactly one match after the location filter. Refresh these observations
+before use; they are not permanent pins. Availability displays `CPU NODE`, while
+status uses raw type plus count (`CPU_NODE x1` in the source-derived fixture).
+There was no live status sample; do not call that fixture allocation evidence.
+
+The raw offer lists only `ubuntu_22_cuda_12`. Its default disk is 100 GB and is
+not included in compute price. `pricePerUnit=0.0001` has no stated time/size unit.
+The approved working assumption is USD per GB-hour: 100 GB adds 0.010/hour and
+expected total becomes 0.274/hour. Record this assumption and its receipt in
+`disk_price_reference`; do not describe the unit or invoice as verified.
 
 CLI 0.17.0 short IDs omit spot and price. Even no-group output deduplicates short
 IDs. The CLI has no atomic offer/price lock or create `--max-price`. Post-create
 checks stop a mismatch, but cannot prevent its initial charge. Host/API outages
 can prevent a literal billing guarantee. The user's approval must accept these
 limits; otherwise do not rent. Confirm boot-disk/other fee inclusion separately.
-The current path requires the approved total rate to match the selected and
-reported rate. Unknown or separately charged fees are not a zero-cost assumption.
+Availability compute plus approved assumed disk charge must equal the quoted
+total. Status `cost_per_hour` has unknown component basis: require its raw value
+not to exceed that total, and raw value plus assumed disk charge not to exceed
+the hourly ceiling. Record the raw value and `basis: unknown, conservative`.
+For duration/budget estimates, use the conservative hourly bound
+`min(hourly_ceiling, quoted_total_hourly + assumed_disk_charge)`; it is 0.284
+for this example, not an invoice. This covers either reading of the status rate.
+Unknown fees remain unknown, not zero.
 
 Prepare private execution JSON outside the checkout. All keys are mandatory;
 replace paths and placeholders before validation. The numeric example is a
@@ -62,9 +75,11 @@ proposal, not permission to execute it.
   "gpu_count": 1,
   "image": "REQUIRED_APPROVED_IMAGE",
   "disk_gb": 100,
+  "disk_hourly_per_gb": "0.0001",
+  "disk_price_reference": "REQUIRED_RECEIPT_AND_USD_PER_GB_HOUR_ASSUMPTION",
   "vcpus": 8,
   "memory_gb": 32,
-  "quoted_total_hourly": "REQUIRED_FRESH_TOTAL",
+  "quoted_total_hourly": "REQUIRED_FRESH_COMPUTE_PLUS_ASSUMED_DISK_TOTAL",
   "quote_checked_epoch": 0,
   "quote_reference": "REQUIRED_RECEIPT_REFERENCE",
   "approval_reference": "REQUIRED_RUN_APPROVAL",
@@ -111,9 +126,10 @@ proposal, not permission to execute it.
 ```
 
 The quote must be no older than 15 minutes. Positive integer/time/hash checks and
-D14 bounds reject before create. Three hours at 0.50/hour is 1.50. One further
-billing-hour contingency makes 2; it grants no runtime extension. Even a short
-run refuses a quote above 0.50/hour. Deletion has at least a two-minute reserve.
+D14 bounds reject before create. Three hours at the 0.50/hour ceiling is 1.50.
+One further billing-hour contingency makes 2; it grants no runtime extension.
+The example's 0.284 conservative bound gives 1.136 for four hours, including
+contingency. Even a short run refuses a quote above 0.50/hour. Deletion has at least a two-minute reserve.
 Shorter approved times must also reserve controller cleanup, packing and copy.
 
 ### Cgroup venue evidence before approval
@@ -144,18 +160,25 @@ once in `ssh-contact.json`; retrying or restarting a helper cannot refresh them.
 Run the owner and helper on the same always-on host. Do not copy a live lease to
 another host with a different monotonic clock.
 
-Before bulk input upload, the host stages only the reviewed cgroup helper and
-checks the true root and write access without changing cgroups. Without contact
+Before bulk input upload, the host stages the source-pinned standalone CPython
+archive and reviewed cgroup helper. It checks the archive SHA-256, unpacks it in
+the private session directory, and uses that interpreter for the root check and
+later observations. No system Python or CLI `--env` is needed. First checks must
+prove root UID, x86-64, Ubuntu 22.04, the pinned Python 3.12, glibc at least 2.28,
+and the true writable cgroup root. These are observed requirements, not facts
+inferred from the advertised image. Unsupported facts refuse before bulk input
+upload or analysis. No CUDA runtime dependency is added. Without contact
 by the readiness deadline, the owner requests deletion with the root question
 unanswered. After contact, missing/refused root proof ends at contact plus the
 approved probe allowance. The owner enforces those same deadlines even if the
 helper disappears. Success permits the original full run, not a fresh clock.
 
 Worst-case readiness plus root check is 900 + 300 = 1,200 seconds (20 minutes).
-At the archived 0.264/hour rate, that is 0.088, or about 0.09. Including the
-120-second cleanup/deletion-observation reserve gives 22 minutes and 0.0968,
-or about 0.10, under normal host/API operation. The terminate command's
-30-second limit is inside that reserve, not another allowance. These are
+At the proposed 0.274/hour compute-plus-disk total, that is about 0.0913.
+Using the 0.284 conservative status-basis bound gives about 0.0947. Including
+120 seconds for cleanup/deletion observations gives 22 minutes and about 0.1041
+at that conservative bound, under normal host/API operation. The terminate
+command's 30-second limit is inside that reserve, not another allowance. These are
 time/rate estimates, not billing caps, fresh quotes or invoices. Hourly rounding or separate fees can raise the
 charge; confirm that basis in the final run approval. API/host failure can
 defeat these windows. The three-hour/$2 full-attempt limits do not change.
@@ -187,8 +210,8 @@ python3.12 -B -c 'import sys; sys.path.insert(0,"study/storage/pod"); from pathl
 The second command is cloud-free. `rent` repeats it before any account operation.
 It checks clean reviewed HEAD, canonical regular inputs, transport hashes,
 private key, fresh output path outside the checkout, archive member/manifest
-hashes, complete reviewed harness export, pinned Go/uv archives, frozen corpus,
-model bytes and prepared 8,192/Linux-runtime proofs.
+hashes, complete reviewed harness export, pinned Go/uv/CPython archives,
+frozen corpus, model bytes and prepared 8,192/Linux-runtime proofs.
 The lead still reviews the trust/source meaning of those proofs.
 
 Upload admission uses actual transport bytes, the referenced minimum uplink,
@@ -274,8 +297,11 @@ explicit; if unacceptable, obtain a separately reviewed host-key path first.
 Initial `mkdir -p` observations and pinned staging uploads are idempotent and
 bounded by the original setup/upload clock. A failed upload has at most one
 same-byte re-transfer before any launch. It cannot refresh the allowance.
-Each failed upload/probe keeps a separate error receipt; later attempts do not
-overwrite earlier errors.
+The separately uploaded CPython archive is included in transport feasibility as
+well as in the bulk payload. Bootstrap upload/extraction consumes the same
+first-contact root window; it never refreshes it. Its interpreter supplies all
+session startup, setup, cleanup and uv environment creation. Each failed upload
+or probe keeps a separate error receipt; later attempts do not overwrite it.
 The read-only root probe can retry SSH 255/timeouts until the same original
 root deadline. Each error is retained; exit 78 never retries. This does not
 repeat uploads, create, analysis or the root-check allowance.
