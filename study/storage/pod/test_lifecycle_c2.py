@@ -229,6 +229,7 @@ class Rental:
         with ExitStack() as stack:
             stack.enter_context(patch.dict(
                 sys.modules, {"admission": SimpleNamespace(
+                    PYTHON_VERSION=admission.PYTHON_VERSION,
                     validate=lambda _: 60,
                     root_probe_seconds=probe_seconds_fixture)}))
             for owner, name, replacement in replacements:
