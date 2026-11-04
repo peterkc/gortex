@@ -1269,9 +1269,9 @@ func checkpointReadStatus(p checkpoint) string {
 		switch v {
 		case "pass":
 		case "miss":
-			status = v
+			return "miss"
 		default:
-			return "unresolved"
+			status = "unresolved"
 		}
 	}
 	return status
@@ -1329,6 +1329,12 @@ func deltaTarget(format string, r deltaReport) targetResult {
 	}
 	if r.CompactionBranch == "a-a-unresolved-no-threshold" {
 		status = "unresolved"
+		for _, p := range r.Checkpoints {
+			if p.MaxEditCPU > 1e9 || p.Visibility.P95 > 5e9 || p.ByteRatio > 2 {
+				status = "miss"
+				break
+			}
+		}
 	}
 	return targetResult{Target: "check4-" + format, Status: status, Branch: r.CompactionBranch, Measured: r}
 }

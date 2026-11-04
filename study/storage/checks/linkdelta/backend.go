@@ -93,10 +93,6 @@ func (b backend) BuildDelta(ctx context.Context, old adapter.SegmentRef, c adapt
 	if err != nil {
 		return adapter.SegmentRef{}, adapter.BuildStats{}, errors.Join(err, opened.Close())
 	}
-	p0, err := cpuNS()
-	if err != nil {
-		return adapter.SegmentRef{}, adapter.BuildStats{}, errors.Join(err, opened.Close())
-	}
 	added, err := indexLayer(rows)
 	if err != nil {
 		return adapter.SegmentRef{}, adapter.BuildStats{}, errors.Join(err, opened.Close())
@@ -104,6 +100,10 @@ func (b backend) BuildDelta(ctx context.Context, old adapter.SegmentRef, c adapt
 	view := *prior
 	view.layers = append(slices.Clone(prior.layers), added)
 	view.indexMasks()
+	p0, err := cpuNS()
+	if err != nil {
+		return adapter.SegmentRef{}, adapter.BuildStats{}, errors.Join(err, opened.Close())
+	}
 	var deltaText []row
 	for i, l := range view.layers {
 		for _, r := range l.textRows {

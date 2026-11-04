@@ -662,8 +662,16 @@ func TestCanonicalPayloadAndIDOnlyInventory(t *testing.T) {
 					t.Fatalf("%s rows=%d want=%d", name, count, want)
 				}
 			}
-			if _, err := os.Stat(filepath.Join(ref.Path, "ids.ranges.parquet")); !os.IsNotExist(err) {
-				t.Fatal("second logical-ID lookup copy", err)
+			rangeFiles, err := filepath.Glob(filepath.Join(ref.Path, "*.ranges.parquet"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var rangeNames []string
+			for _, path := range rangeFiles {
+				rangeNames = append(rangeNames, filepath.Base(path))
+			}
+			if !slices.Equal(rangeNames, []string{"names.ranges.parquet", "paths.ranges.parquet", "terminals.ranges.parquet"}) {
+				t.Fatal("unused serving range directory", rangeNames)
 			}
 			count := s.seal.Verification["ids"].Rows
 			for _, name := range []string{"out", "in"} {
@@ -843,5 +851,122 @@ func TestFixedWidthLocalColumnsAllowOpenTimeProjection(t *testing.T) {
 	}
 	if n != 2 || got[0].Local != 0 || got[1].Local != 1 || got[1].Number != 1 {
 		t.Fatal("local ID projection changed", got, n)
+	}
+}
+
+func TestLayoutValidationIsOncePerAbsolutePathAndSeal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "base")
+	calls := 0
+	valid := func() error { calls++; return nil }
+	if err := validateLayoutOnce(path, "first", valid); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateLayoutOnce(path, "first", valid); err != nil || calls != 1 {
+		t.Fatal("second open rescanned layout", calls, err)
+	}
+	if err := validateLayoutOnce(filepath.Join(filepath.Dir(path), "copy"), "first", valid); err != nil || calls != 2 {
+		t.Fatal("new path reused validation", calls, err)
+	}
+	if err := validateLayoutOnce(path, "second", valid); err != nil || calls != 3 {
+		t.Fatal("new seal reused validation", calls, err)
+	}
+	for _, message := range []string{"duplicate or non-dense local ID: nodes", "truncated offset directory: out"} {
+		bad := func() error { calls++; return errors.New(message) }
+		before := calls
+		for range 2 {
+			if err := validateLayoutOnce(path, message, bad); err == nil || err.Error() != message {
+				t.Fatal("bad first open accepted", err)
+			}
+		}
+		if calls != before+2 {
+			t.Fatal("failed validation was cached", calls, before)
+		}
+	}
+}
+func TestOnlyServingOrOffsetBuildRangesAreWritten(t *testing.T) {
+	for _, name := range []string{"nodes", "ids", "names", "qnames", "paths", "edges", "out", "in", "terminals", "kinds", "files", "symbols", "content", "vectors"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writer, file, err := newRangeDirectory(dir, name, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if writer != nil {
+				if err = errors.Join(writer.Close(), file.Close()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err = os.Stat(filepath.Join(dir, name+".ranges.parquet"))
+			expected := name == "names" || name == "paths" || name == "terminals" || name == "out" || name == "in"
+			if expected && err != nil {
+				t.Fatal("required build directory missing", err)
+			}
+			if !expected && !os.IsNotExist(err) {
+				t.Fatal("unused directory written", name, err)
+			}
+		})
+	}
+}
+
+func TestOffsetValidationChecksAcrossLargeBlockBoundary(t *testing.T) {
+	dir := t.TempDir()
+	tables := map[string]*tableFile{}
+	for _, name := range []string{"nodes", "edges"} {
+		file, err := os.Create(filepath.Join(dir, name+".parquet"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		writer := parquet.NewGenericWriter[row](file)
+		rows := []row{{Local: 0, Number: 0}}
+		if name == "edges" {
+			rows = append(rows, row{Local: 1, Number: 1})
+		}
+		if _, err = writer.Write(rows); err != nil {
+			t.Fatal(err)
+		}
+		if err = errors.Join(writer.Close(), file.Close()); err != nil {
+			t.Fatal(err)
+		}
+		table, err := openTable(file.Name(), newBlockCache(4<<20))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tables[name] = table
+		t.Cleanup(func() { table.file.Close() })
+	}
+	tables["out"], tables["in"] = tables["edges"], tables["edges"]
+	count := uint64(8193)
+	offsets := map[string]*os.File{}
+	for _, name := range []string{"out", "in"} {
+		values := make([]uint64, 2+count+1)
+		values[0], values[1] = count, 1
+		values[len(values)-1] = 2
+		raw := make([]byte, len(values)*8)
+		for i, value := range values {
+			binary.LittleEndian.PutUint64(raw[i*8:], value)
+		}
+		path := filepath.Join(dir, name+".offsets")
+		if err := os.WriteFile(path, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := os.OpenFile(path, os.O_RDWR, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		offsets[name] = file
+		t.Cleanup(func() { file.Close() })
+	}
+	segment := Segment{dir: dir, tables: tables, offsets: offsets, seal: seal{Verification: map[string]tableVerification{"ids": {Rows: int64(count)}, "kinds": {Rows: 1}}}}
+	if err := segment.validateLocalLayout(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// The final block must not escape monotonicity validation.
+	var bad [8]byte
+	binary.LittleEndian.PutUint64(bad[:], 3)
+	if _, err := offsets["out"].WriteAt(bad[:], 16+8192*8); err != nil {
+		t.Fatal(err)
+	}
+	if err := segment.validateLocalLayout(context.Background()); err == nil || !strings.Contains(err.Error(), "invalid offset directory") {
+		t.Fatal("bad final block accepted", err)
 	}
 }

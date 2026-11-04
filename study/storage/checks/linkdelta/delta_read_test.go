@@ -477,3 +477,81 @@ func TestLexicalParityRejectsInvalidCutoffsAndFullSetDifferences(t *testing.T) {
 		})
 	}
 }
+
+func TestResolvedReadMissSetsThresholdDespiteUnresolvedOperation(t *testing.T) {
+	prior := passingReport().Checkpoints[0]
+	crossing := prior
+	crossing.Size = 4
+	crossing.ReadVerdict = map[string]string{"pass": "pass", "miss": "miss", "noisy": "unresolved"}
+	if got := checkpointReadStatus(crossing); got != "miss" {
+		t.Errorf("resolved miss hidden by unresolved operation: %s", got)
+	}
+	r := threshold(deltaReport{Checkpoints: []checkpoint{prior, crossing}})
+	if r.CompactionBranch != "observed-read-bound-crossing" || r.Threshold == nil || *r.Threshold != prior.Size || r.LowerBound != nil {
+		t.Fatal("resolved crossing lost its preceding threshold", r)
+	}
+	if deltaTarget("arrow", r).Status != "pass" || crossing.ReadVerdict["noisy"] != "unresolved" {
+		t.Fatal("preceding passing regime or per-operation uncertainty changed", r)
+	}
+}
+
+func TestUnresolvedReadDoesNotHideIndependentLimitMiss(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*checkpoint)
+		status string
+	}{
+		{"limits-pass", func(*checkpoint) {}, "unresolved"},
+		{"edit-cpu-miss", func(p *checkpoint) { p.MaxEditCPU = 1000000001 }, "miss"},
+		{"visibility-miss", func(p *checkpoint) { p.Visibility.P95 = 5000000001 }, "miss"},
+		{"byte-ratio-miss", func(p *checkpoint) { p.ByteRatio = 2.01 }, "miss"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := passingReport().Checkpoints[0]
+			p.ReadVerdict = map[string]string{"resolved": "pass", "noisy": "unresolved"}
+			tc.change(&p)
+			if got := checkpointReadStatus(p); got != "unresolved" {
+				t.Fatal(got)
+			}
+			r := threshold(deltaReport{Checkpoints: []checkpoint{p}})
+			if r.Threshold != nil || r.LowerBound != nil || deltaPass(r) {
+				t.Fatal("unresolved reads became a passing regime", r)
+			}
+			if got := deltaTarget("arrow", r).Status; got != tc.status {
+				t.Fatal("unresolved read hid an independent limit result", got, tc.status)
+			}
+			p.Size, p.Visibility.Count = 4, 4
+			r = threshold(deltaReport{Checkpoints: []checkpoint{passingReport().Checkpoints[0], p}})
+			if got := deltaTarget("arrow", r).Status; got != tc.status {
+				t.Fatal("later unresolved checkpoint hid an independent limit result", got, tc.status)
+			}
+		})
+	}
+}
+
+func TestTextRebuildCPUWindowExcludesViewConstruction(t *testing.T) {
+	source, err := os.ReadFile("backend.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, build, ok := strings.Cut(string(source), "func (b backend) BuildDelta(")
+	if !ok {
+		t.Fatal("BuildDelta missing")
+	}
+	build, _, _ = strings.Cut(build, "func finishSeal(")
+	// Pin the two measured windows without running a base build on this Mac.
+	// Layer/mask construction and payload writes stay only in total edit CPU.
+	last := -1
+	for _, boundary := range []string{
+		"indexLayer(rows)", "view.indexMasks()", "p0, err := cpuNS()",
+		"var deltaText []row", "p1, err := cpuNS()", "writeDelta(",
+		"c0, err := cpuNS()", "b.buildText(", "c1, err := cpuNS()",
+		"b.cache.TextCPU[ref.Digest] = (p1 - p0) + (c1 - c0)",
+	} {
+		at := strings.Index(build, boundary)
+		if at <= last {
+			t.Fatalf("D text CPU boundary missing or out of order: %q", boundary)
+		}
+		last = at
+	}
+}

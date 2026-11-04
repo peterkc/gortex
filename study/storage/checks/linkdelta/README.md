@@ -120,11 +120,15 @@ operation is `unresolved`, never `pass` or `miss`. No A/A subtraction is used.
 
 The last tested size before a resolved read-bound crossing sets the compaction
 threshold. A crossing at the smallest size supplies no passing threshold. No
-crossing supplies a lower bound only. An unresolved control prevents selection
-through that checkpoint. The selected checkpoint also needs a positive
-cumulative delta/base byte ratio at most 2. Each edit reports its D rebuild CPU
-inside its total edit CPU. Each checkpoint reports text p95 beside the hidden
-base content-row count. All current and retained serving files count in bytes.
+crossing supplies a lower bound only. A resolved read miss marks a crossing even
+if another operation is unresolved. Otherwise, an unresolved control prevents
+selection through that checkpoint. Known edit CPU, visibility and byte-ratio
+misses remain misses. The selected checkpoint also needs a positive cumulative
+delta/base byte ratio at most 2. Each edit reports its D rebuild CPU inside its
+total edit CPU. D rebuild CPU covers visible D text collection and text-index
+construction only, not layer indexing or view-mask construction. Each checkpoint
+reports text p95 beside the hidden base content-row count. All current and
+retained serving files count in bytes.
 If both forms pass, the lead selects the simplest form; code does not invent that
 judgment. A passing form
 cannot be selected as the sole pass while the other form is blocked or absent.

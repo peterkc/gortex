@@ -98,7 +98,7 @@ func TestMeasurementWorkersTinyCompleteQueries(t *testing.T) {
 		}
 		for _, edit := range metrics.EditSamples {
 			if edit.TextRebuildCPU <= 0 || edit.CPU < edit.TextRebuildCPU {
-				t.Fatal("D rebuild CPU missing or outside edit CPU", edit)
+				t.Fatal("D text collection/build CPU missing or outside total edit CPU", edit)
 			}
 		}
 		for _, cp := range metrics.Checkpoints {

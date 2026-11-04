@@ -78,10 +78,16 @@ Serving reads use sparse range lookup and bounded block caching, not a resident
 graph. The shared serving cache payload budget is 256 MiB across all repositories:
 256 MiB Parquet, or 128 MiB Parquet plus 128 MiB Pebble in the fallback. Bleve,
 metadata and OS cache remain outside that budget and inside process/cgroup memory.
-Each open segment retains parsed metadata and file handles for its 14 tables
-and 13 range directories, plus two dense offset files. The logical-ID table has
-no duplicate range directory. Queries create private readers, not new file/footer
-parses. This is 29 retained graph/auxiliary handles before Bleve/Pebble handles. The tier100 memory and file-descriptor cost remains unmeasured. Cache
+Each open segment retains parsed metadata and file handles for its 14 tables,
+three range directories (names, paths and terminals), and two dense offset files.
+Outgoing/incoming range directories exist only while building the dense offsets;
+other unused directories are not written. Queries create private readers, not
+new file/footer parses. This is 19 retained handles before Bleve/Pebble handles.
+The first open validates local IDs and every offset; later opens of the same
+absolute path and seal digest reuse successful process-local validation. Every
+open still checks the seal, artifact sizes and schemas. A new path or seal digest
+needs fresh validation. Failed validation is never cached. Sealed files must
+remain immutable. Offset validation reads 64-KiB blocks. The tier100 memory and file-descriptor cost remains unmeasured. Cache
 charges use allocated block capacity, including short final blocks.
 The Bleve mapping and query functions remain identical to reference B.
 

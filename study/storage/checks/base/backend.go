@@ -2,7 +2,6 @@
 package base
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -430,14 +429,12 @@ func (b Backend) Build(ctx context.Context, d dataset.Dataset, dir string) (ref 
 			return ref, stats, e
 		}
 		verifications[name] = verified
-		if name == "ids" {
-			if e = os.Remove(filepath.Join(dir, "ids.ranges.parquet")); e != nil {
-				return ref, stats, e
-			}
-		}
 	}
 	for _, name := range []string{"out", "in"} {
 		if err = writeOffsets(ctx, dir, name, uint64(verifications["ids"].Rows), uint64(verifications["kinds"].Rows)); err != nil {
+			return ref, stats, err
+		}
+		if err = os.Remove(filepath.Join(dir, name+".ranges.parquet")); err != nil {
 			return ref, stats, err
 		}
 	}
@@ -572,7 +569,7 @@ func (b Backend) Open(ctx context.Context, dir string, ref adapter.SegmentRef) (
 	}
 	for _, name := range []string{"nodes", "ids", "names", "qnames", "paths", "edges", "out", "in", "terminals", "kinds", "files", "symbols", "content", "vectors"} {
 		for _, suffix := range []string{".parquet", ".ranges.parquet"} {
-			if name == "ids" && suffix == ".ranges.parquet" {
+			if !servingRangeTable(name) && suffix == ".ranges.parquet" {
 				continue
 			}
 			if !seen[name+suffix] {
@@ -603,7 +600,7 @@ func (b Backend) Open(ctx context.Context, dir string, ref adapter.SegmentRef) (
 	fail := func(e error) (adapter.Segment, error) { return nil, errors.Join(e, s.Close()) }
 	for _, name := range []string{"nodes", "ids", "names", "qnames", "paths", "edges", "out", "in", "terminals", "kinds", "files", "symbols", "content", "vectors"} {
 		for _, suffix := range []string{"", ".ranges"} {
-			if name == "ids" && suffix == ".ranges" {
+			if !servingRangeTable(name) && suffix == ".ranges" {
 				continue
 			}
 			key := name + suffix
@@ -631,7 +628,7 @@ func (b Backend) Open(ctx context.Context, dir string, ref adapter.SegmentRef) (
 		}
 		s.offsets[name] = file
 	}
-	if err = s.validateLocalLayout(ctx); err != nil {
+	if err = validateLayoutOnce(dir, ref.Digest, func() error { return s.validateLocalLayout(ctx) }); err != nil {
 		return fail(err)
 	}
 	if b.SideIndex {
@@ -712,6 +709,31 @@ func (s *Segment) offsetSpan(name string, local, tag uint64) (span rowRange, err
 	}
 	return span, nil
 }
+
+// Sealed bases are immutable. Cache only successful validation, keyed by both
+// canonical path and seal digest; failed first adoption never marks a base valid.
+var validatedLayouts sync.Map
+
+type layoutValidation struct {
+	once sync.Once
+	err  error
+}
+
+func validateLayoutOnce(path, digest string, validate func() error) error {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	key := struct{ Path, Digest string }{absolute, digest}
+	entry, _ := validatedLayouts.LoadOrStore(key, &layoutValidation{})
+	state := entry.(*layoutValidation)
+	state.once.Do(func() { state.err = validate() })
+	if state.err != nil {
+		validatedLayouts.CompareAndDelete(key, state)
+	}
+	return state.err
+}
+
 func (s *Segment) validateLocalLayout(ctx context.Context) error {
 	for _, name := range []string{"nodes", "edges"} {
 		type localRow struct {
@@ -763,7 +785,6 @@ func (s *Segment) validateLocalLayout(ctx context.Context) error {
 		if info.Size() != 16+int64(kinds*(count+1))*8 {
 			return fmt.Errorf("truncated offset directory: %s", name)
 		}
-		reader := bufio.NewReader(io.NewSectionReader(s.offsets[name], 16, info.Size()-16))
 		var header [16]byte
 		if _, err = s.offsets[name].ReadAt(header[:], 0); err != nil {
 			return err
@@ -771,19 +792,28 @@ func (s *Segment) validateLocalLayout(ctx context.Context) error {
 		if binary.LittleEndian.Uint64(header[:8]) != count || binary.LittleEndian.Uint64(header[8:]) != kinds {
 			return fmt.Errorf("invalid offset directory header: %s", name)
 		}
+		reader := io.NewSectionReader(s.offsets[name], 16, info.Size()-16)
+		buffer := make([]byte, 64<<10)
+		remaining := kinds * (count + 1)
 		previous := uint64(0)
-		for position := uint64(0); position < kinds*(count+1); position++ {
+		first := true
+		for remaining > 0 {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			var offset uint64
-			if err := binary.Read(reader, binary.LittleEndian, &offset); err != nil {
+			block := buffer[:min(uint64(len(buffer)), remaining*8)]
+			if _, err = io.ReadFull(reader, block); err != nil {
 				return fmt.Errorf("truncated offset directory: %s: %w", name, err)
 			}
-			if (position == 0 && offset != 0) || offset < previous || offset > uint64(s.tables[name].parquet.NumRows()) {
-				return fmt.Errorf("invalid offset directory: %s", name)
+			for position := 0; position < len(block); position += 8 {
+				offset := binary.LittleEndian.Uint64(block[position:])
+				if (first && offset != 0) || offset < previous || offset > uint64(s.tables[name].parquet.NumRows()) {
+					return fmt.Errorf("invalid offset directory: %s", name)
+				}
+				first = false
+				previous = offset
 			}
-			previous = offset
+			remaining -= uint64(len(block)) / 8
 		}
 		if previous != uint64(s.tables[name].parquet.NumRows()) {
 			return fmt.Errorf("invalid offset directory end: %s", name)

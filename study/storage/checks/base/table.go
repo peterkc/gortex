@@ -111,14 +111,15 @@ func writeSortedTable(ctx context.Context, dir, scratch, name string, unique boo
 		return verification, err
 	}
 	defer func() { err = errors.Join(err, data.Close()) }()
-	ranges, err := os.Create(filepath.Join(dir, name+".ranges.parquet"))
+	options := []parquet.WriterOption{parquet.MaxRowsPerRowGroup(1024), parquet.PageBufferSize(32 << 10), parquet.Compression(&snappy.Codec{})}
+	directory, ranges, err := newRangeDirectory(dir, name, options)
 	if err != nil {
 		return verification, err
 	}
-	defer func() { err = errors.Join(err, ranges.Close()) }()
-	options := []parquet.WriterOption{parquet.MaxRowsPerRowGroup(1024), parquet.PageBufferSize(32 << 10), parquet.Compression(&snappy.Codec{})}
 	writer := parquet.NewGenericWriter[row](data, options...)
-	directory := parquet.NewGenericWriter[rowRange](ranges, options...)
+	if ranges != nil {
+		defer func() { err = errors.Join(err, ranges.Close()) }()
+	}
 	defer func() {
 		if writer != nil {
 			err = errors.Join(err, writer.Close())
@@ -158,7 +159,7 @@ func writeSortedTable(ctx context.Context, dir, scratch, name string, unique boo
 			return verification, fmt.Errorf("empty or duplicate %s identity %q", name, key)
 		}
 		if index == 0 || current.Key != string(key) {
-			if index > 0 {
+			if index > 0 && directory != nil {
 				current.End = index
 				if _, e = directory.Write([]rowRange{storedRange(name, current)}); e != nil {
 					return verification, e
@@ -205,13 +206,16 @@ func writeSortedTable(ctx context.Context, dir, scratch, name string, unique boo
 		}
 		index++
 	}
-	if index > 0 {
+	if index > 0 && directory != nil {
 		current.End = index
 		if _, err = directory.Write([]rowRange{storedRange(name, current)}); err != nil {
 			return verification, err
 		}
 	}
-	closeErr := errors.Join(writer.Close(), directory.Close())
+	closeErr := writer.Close()
+	if directory != nil {
+		closeErr = errors.Join(closeErr, directory.Close())
+	}
 	writer = nil
 	directory = nil
 	if closeErr != nil {
@@ -418,6 +422,20 @@ func scanReader(ctx context.Context, reader *parquet.GenericReader[row], span *r
 		first += int64(n)
 	}
 	return nil
+}
+
+func servingRangeTable(name string) bool {
+	return name == "names" || name == "paths" || name == "terminals"
+}
+func newRangeDirectory(dir, name string, options []parquet.WriterOption) (*parquet.GenericWriter[rowRange], *os.File, error) {
+	if !servingRangeTable(name) && name != "out" && name != "in" {
+		return nil, nil, nil
+	}
+	file, err := os.Create(filepath.Join(dir, name+".ranges.parquet"))
+	if err != nil {
+		return nil, nil, err
+	}
+	return parquet.NewGenericWriter[rowRange](file, options...), file, nil
 }
 
 func graphTable(name string) bool {
