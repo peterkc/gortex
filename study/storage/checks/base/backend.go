@@ -151,7 +151,7 @@ func newSideWriter(path string) (*sideWriter, error) {
 }
 func (s *sideWriter) add(n dataset.Node, local uint64) error {
 	hash := sha256.Sum256([]byte(n.ID))
-	for _, key := range [][]byte{append([]byte("N/"), hash[:]...), append(indexKey("A", n.Name), localBytes(local)...), append(indexKey("Q", n.QualName), localBytes(local)...), append(indexKey("P", n.FilePath), localBytes(local)...)} {
+	for _, key := range [][]byte{append([]byte("N/"), hash[:]...), append(indexKey("A", n.Name), []byte(n.ID)...), append(indexKey("Q", n.QualName), localBytes(local)...), append(indexKey("P", n.FilePath), localBytes(local)...)} {
 		if err := s.batch.Set(key, localBytes(local), nil); err != nil {
 			return err
 		}
@@ -213,7 +213,13 @@ func ingestRows(ctx context.Context, input inputRows, spools map[string]*rowSpoo
 			return counts, e
 		}
 		for _, v := range []struct{ table, key string }{{"ids", n.ID}, {"names", n.Name}, {"qnames", n.QualName}, {"paths", n.FilePath}} {
-			if e = put(v.table, v.key, localKey(local), nil); e != nil {
+			sortID := localKey(local)
+			if v.table == "names" {
+				// Hex preserves logical-ID order; NUL sorts before extensions.
+				// The suffix alone survives as the fixed-width Local column.
+				sortID = hex.EncodeToString([]byte(n.ID)) + "\x00" + sortID
+			}
+			if e = put(v.table, v.key, sortID, nil); e != nil {
 				return counts, e
 			}
 		}
@@ -668,7 +674,7 @@ func (s *Segment) Close() error {
 	})
 	return s.closeErr
 }
-func (s *Segment) sideNodes(ctx context.Context, prefix []byte) (nodes []dataset.Node, err error) {
+func (s *Segment) sideNodes(ctx context.Context, prefix []byte, limit int) (nodes []dataset.Node, err error) {
 	if err = ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -690,6 +696,9 @@ func (s *Segment) sideNodes(ctx context.Context, prefix []byte) (nodes []dataset
 			return nil, e
 		}
 		nodes = append(nodes, n)
+		if limit > 0 && len(nodes) == limit {
+			break
+		}
 	}
 	return nodes, iterator.Error()
 }
@@ -737,8 +746,7 @@ func validateLayoutOnce(path, digest string, validate func() error) error {
 func (s *Segment) validateLocalLayout(ctx context.Context) error {
 	for _, name := range []string{"nodes", "edges"} {
 		type localRow struct {
-			Local  uint64 `parquet:"local,plain,uncompressed"`
-			Number uint64 `parquet:"number,plain,uncompressed"`
+			Local uint64 `parquet:"local,plain,uncompressed"`
 		}
 		reader := parquet.NewGenericReader[localRow](s.tables[name].parquet)
 		rows := make([]localRow, 256)
@@ -750,7 +758,7 @@ func (s *Segment) validateLocalLayout(ctx context.Context) error {
 			}
 			n, e := reader.Read(rows)
 			for _, r := range rows[:n] {
-				if r.Local != index || r.Number != index {
+				if r.Local != index {
 					scanErr = fmt.Errorf("duplicate or non-dense local ID: %s", name)
 					break
 				}

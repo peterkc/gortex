@@ -489,6 +489,10 @@ jobs:
           -o "$WORK/bin/limited-command" ./cmd/limited-command 2>&1 | tee "$WORK/evidence/build-launcher.log"
         case "$CHECK_GROUP" in
           base)
+            if [ "$CHECK_STEP" = check2 ]; then
+              go -C study/storage/checks/base build -p=1 -trimpath \
+                -o "$WORK/bin/fixture" ./cmd/fixture 2>&1 | tee "$WORK/evidence/build-fixture.log"
+            fi
             go -C study/storage/harness build -p=1 -trimpath \
               -o "$WORK/bin/gen" ./cmd/gen 2>&1 | tee "$WORK/evidence/build-gen.log"
             go -C study/storage/adapters/sqlite-segment build -p=1 -trimpath \
@@ -701,7 +705,20 @@ jobs:
             for tier in ("tier1", "tier10"):
                 shutil.copy2(out / "data" / tier / "manifest.json",
                              freeze / (tier + "-manifest.json"))
-        if role == "base" and os.environ["CHECK_STEP"] == "check5-tier100":
+        if role == "base" and os.environ["CHECK_STEP"] == "check2":
+            spec = policy["tiny"]
+            tiny = work / "inputs/tiny"
+            command = [str(work / "bin/fixture"), "-out", str(tiny),
+                       "-source-revision", common["source_revision"]]
+            receipt = generate(work, launcher, cgroup, "tiny", command, spec, {
+                **common, "generator": builds["fixture"], "recipe": spec,
+                "command": command,
+            })
+            freeze_tier(tiny, freeze / "tiny", "source-free tiny correctness", 1, {
+                **common, "generator": builds["fixture"], "recipe": spec,
+                "command": command, "generation_receipt_sha256": receipt,
+            })
+        elif role == "base" and os.environ["CHECK_STEP"] == "check5-tier100":
             tier10 = work / "preparation/fetch/data/tier10"
             parents = {tier: sha256(work / "preparation/fetch/data" / tier
                                     / "manifest.json")
@@ -765,7 +782,9 @@ jobs:
                 "scope": "D28 synthetic-only; no ANN or inference",
             })
 
-        phases = (["fetch", "tier100"] if role == "base"
+        phases = (["fetch", "tiny"] if role == "base"
+                  and os.environ["CHECK_STEP"] == "check2"
+                  else ["fetch", "tier100"] if role == "base"
                   and os.environ["CHECK_STEP"] == "check5-tier100"
                   else ["fetch"] if role in ("base", "linkdelta")
                   else ["vector"])
@@ -964,7 +983,7 @@ jobs:
             variant = os.environ["REQUEST_C_VARIANT"]
             selected = base_step_spec(step, variant)
             directories = {
-                tier: (base_work / "inputs/tier100" if tier == "tier100"
+                tier: (base_work / "inputs" / tier if tier in ("tiny", "tier100")
                        else base_work / "preparation/fetch/data" / tier)
                 for tier in selected["tiers"]}
             config = {

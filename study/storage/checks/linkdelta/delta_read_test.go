@@ -522,8 +522,8 @@ func TestUnresolvedReadDoesNotHideIndependentLimitMiss(t *testing.T) {
 			}
 			p.Size, p.Visibility.Count = 4, 4
 			r = threshold(deltaReport{Checkpoints: []checkpoint{passingReport().Checkpoints[0], p}})
-			if got := deltaTarget("arrow", r).Status; got != tc.status {
-				t.Fatal("later unresolved checkpoint hid an independent limit result", got, tc.status)
+			if got := deltaTarget("arrow", r).Status; got != "unresolved" {
+				t.Fatal("later unresolved checkpoint rejected a viable smaller prefix", got)
 			}
 		})
 	}

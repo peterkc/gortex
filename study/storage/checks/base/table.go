@@ -26,12 +26,10 @@ import (
 // Row tables are sorted by (key,id). Their range directories are a sparse
 // CSR/CSC analogue: an absent endpoint has an empty range, not a fake node.
 type row struct {
-	Key    string `parquet:"key,dict"`
-	ID     string `parquet:"id,dict"`
-	Tag    uint64 `parquet:"tag,plain,uncompressed"`
-	Local  uint64 `parquet:"local,plain,uncompressed"`
-	Number uint64 `parquet:"number,plain,uncompressed"`
-	Raw    []byte `parquet:"payload"`
+	Key   string `parquet:"key,dict"`
+	ID    string `parquet:"id,dict"`
+	Local uint64 `parquet:"local,plain,uncompressed"`
+	Raw   []byte `parquet:"payload"`
 }
 type rowRange struct {
 	Tag     uint64 `parquet:"tag,plain,uncompressed"`
@@ -174,7 +172,7 @@ func writeSortedTable(ctx context.Context, dir, scratch, name string, unique boo
 		value := row{Key: string(key), ID: string(id), Raw: raw}
 		if graphTable(name) {
 			local := string(id)
-			if name == "out" || name == "in" {
+			if name == "out" || name == "in" || name == "names" {
 				local = local[len(local)-16:]
 			}
 			value.Local, e = strconv.ParseUint(local, 16, 64)
@@ -183,18 +181,6 @@ func writeSortedTable(ctx context.Context, dir, scratch, name string, unique boo
 			}
 			value.ID = ""
 			if numericTable(name) {
-				numeric := string(key)
-				if name == "out" || name == "in" {
-					value.Tag, e = strconv.ParseUint(numeric[:16], 16, 64)
-					if e != nil {
-						return verification, e
-					}
-					numeric = numeric[16:]
-				}
-				value.Number, e = strconv.ParseUint(numeric, 16, 64)
-				if e != nil {
-					return verification, e
-				}
 				value.Key = ""
 			}
 		}

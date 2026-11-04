@@ -439,7 +439,9 @@ def collect_run(directory, expected_adapter, data, *, full_protocol,
                  for item in components.values()):
             raise RunError("incomplete successful component receipt")
         if full_protocol and not semantic_failure and (
-                not report["delta_checks"] or not report["crash"]):
+                not report["delta_checks"] or not report["crash"]
+                or report.get("concurrent", {}).get("checked_samples", 0) <= 0
+                or not report.get("concurrent", {}).get("checks")):
             raise RunError("full correctness phases missing")
         if not report["builds"]:
             raise RunError("missing construction records")
@@ -847,7 +849,7 @@ def output_hashes(directory):
     return hashes
 
 
-def combine_check5(tiers, lookup_result):
+def combine_check5(tiers, lookup_result, correctness_result):
     """Reduce saved observations without launching measurements."""
     if len(tiers) != 3 or {row["step"] for row in tiers} != {
             "check5-tier1", "check5-tier10", "check5-tier100"}:
@@ -865,6 +867,28 @@ def combine_check5(tiers, lookup_result):
     expected_lookup = "check1-plain" if variant == "plain" else "check1-side"
     if lookup_result["step"] != expected_lookup:
         raise RunError("selected Check 1 result required")
+    if (not correctness_result
+            or correctness_result.get("schema") != "design-c-base-step/v1"
+            or correctness_result.get("step") != "check2"
+            or correctness_result.get("status") not in ("pass", "miss")
+            or correctness_result.get("protected_inputs_unchanged") is not True
+            or correctness_result.get("check2", {}).get("protocol")
+            != "full-tiny"):
+        raise RunError("completed full tiny Check 2 receipt required")
+    for key in ("source_revision", "recipe_sha256"):
+        if correctness_result.get(key) != tiers[0][key]:
+            raise RunError("Check 2 source or policy differs")
+    correctness = correctness_result.get("measured_value", {})
+    if set(correctness) != {"a", "b", "c", "c_side"}:
+        raise RunError("Check 2 requires all four candidates")
+    for adapter, result in correctness.items():
+        tiny = result.get("tiny", {})
+        if (tiny.get("status") not in ("pass", "miss")
+                or (tiny["status"] == "miss"
+                    and tiny.get("failure_kind") != "semantic")):
+            raise RunError("incomplete Check 2 candidate result")
+    if correctness["a"]["tiny"]["status"] != "pass":
+        raise RunError("Check 2 reference control failed")
     observations = {adapter: {} for adapter in ("a", "b", selected)}
     for row in tiers:
         tier = row["step"].removeprefix("check5-")
@@ -878,6 +902,10 @@ def combine_check5(tiers, lookup_result):
         b, a, b, lookup=lookup_verdict(lookup["b"], lookup["a"]))
     c_verdict = base_verdict(
         c, a, b, lookup=lookup_verdict(lookup[selected], lookup["a"]))
+    for adapter, verdict in (("b", b_verdict), (selected, c_verdict)):
+        if correctness[adapter]["tiny"]["status"] == "miss":
+            verdict.update(passes=False, status="miss",
+                           reason="checked tiny semantic mismatch")
     row, branch = choose_base(b_verdict, c_verdict,
                               cpu_selection_approved=True)
     return {"b": b_verdict, "c": c_verdict, "selection_table_row": row,
@@ -913,6 +941,7 @@ def run_selected(config, config_path):
     receipt = {"schema": "design-c-base-step/v1", "step": step,
                "c_variant": variant, "status": "blocked",
                "source_revision": config["source_revision"],
+               "host": socket.gethostname(), "script_sha256": digest(__file__),
                "recipe_sha256": config["recipe_sha256"],
                "config_sha256": digest(config_path),
                "approval_sha256": config["approval_sha256"],
@@ -932,35 +961,44 @@ def run_selected(config, config_path):
                 order = adapters[index - 1:] + adapters[:index - 1]
                 for adapter in order:
                     label = f"{adapter}-{tier}-pair{index}"
-                    observed = measure_adapter(
-                        config, output, label, adapter, tier, deadline,
-                        full_protocol=False, pair_index=index,
-                        mode=("base-only" if step.startswith("check5-")
-                              else spec["mode"]))
+                    try:
+                        observed = measure_adapter(
+                            config, output, label, adapter, tier, deadline,
+                            full_protocol=step == "check2", pair_index=index,
+                            mode=("base-only" if step.startswith("check5-")
+                                  else spec["mode"]))
+                    except SemanticMismatch as error:
+                        if step != "check2":
+                            raise
+                        if adapter == "a":
+                            raise RunError(
+                                "reference control semantic mismatch"
+                            ) from error
+                        values[adapter][tier] = {
+                            "status": "miss", "failure_kind": "semantic",
+                            "reports": [report for report, _ in error.reports]}
+                        continue
                     reports[adapter][tier].extend(observed)
             for adapter in spec["adapters"]:
                 if step == "bytes":
                     values[adapter] = reports[adapter][tier][0][0][
                         "_inventory"]
                 elif step == "check2":
-                    values[adapter][tier] = {
-                        "verification": [row["verification"] for report, _
-                                         in reports[adapter][tier]
-                                         for row in report["_inventory"]],
-                        "checks": [check
-                                   for report, _ in reports[adapter][tier]
-                                   for check in report["checks"]],
-                        "storage_build_cpu_ns": sum(
-                            row["construction_cpu_ns"] for report, _
-                            in reports[adapter][tier]
-                            for row in report["_inventory"])}
+                    if tier not in values[adapter]:
+                        values[adapter][tier] = {
+                            "status": "pass",
+                            "reports": [report for report, _
+                                        in reports[adapter][tier]]}
                 else:
                     values[adapter][tier] = aggregate(reports[adapter][tier],
                                                       manifest)
         if step == "bytes":
             receipt.update(bytes_report(values, manifest), status="pass")
         elif step == "check2":
-            receipt.update(status="pass", check2={"status": "pass"},
+            status = ("miss" if any(row["tiny"]["status"] == "miss"
+                                    for row in values.values()) else "pass")
+            receipt.update(status=status,
+                           check2={"status": status, "protocol": "full-tiny"},
                            measured_value=values)
         elif step.startswith("check1-"):
             candidate = "c" if step == "check1-plain" else "c_side"
@@ -987,11 +1025,15 @@ def run_selected(config, config_path):
                        error_type=type(error).__name__)
         raise
     finally:
-        receipt["protected_inputs_unchanged"] = (
-            protected_snapshot(config, config_path) == before)
-        if not receipt["protected_inputs_unchanged"]:
-            receipt["status"] = "blocked"
-        receipt["output_sha256"] = output_hashes(output)
+        receipt["measured_value"] = receipt.get("measured_value", values)
+        try:
+            receipt["protected_inputs_unchanged"] = (
+                protected_snapshot(config, config_path) == before)
+            if not receipt["protected_inputs_unchanged"]:
+                receipt["status"] = "blocked"
+            receipt["output_sha256"] = output_hashes(output)
+        except (OSError, RunError) as error:
+            receipt.update(status="blocked", evidence_error=str(error))
         write_json(output / "result.json", receipt)
     if receipt["status"] == "blocked":
         raise RunError("selected check is blocked")
@@ -1220,18 +1262,23 @@ def main():
     inputs.add_argument("--config", type=Path)
     inputs.add_argument("--combine-check5", type=Path, nargs=3)
     parser.add_argument("--lookup-result", type=Path)
+    parser.add_argument("--correctness-result", type=Path)
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
     signal.signal(signal.SIGTERM, interrupted)
     if args.combine_check5:
-        if args.lookup_result is None or args.out is None:
-            parser.error("reduction needs --lookup-result and fresh --out")
+        if (args.lookup_result is None or args.correctness_result is None
+                or args.out is None):
+            parser.error("reduction needs --lookup-result, "
+                         "--correctness-result and fresh --out")
         result = combine_check5(
             [read_json(path) for path in args.combine_check5],
-            read_json(args.lookup_result))
+            read_json(args.lookup_result), read_json(args.correctness_result))
         write_json(args.out, result)
     else:
-        if args.lookup_result is not None or args.out is not None:
+        if (args.lookup_result is not None
+                or args.correctness_result is not None
+                or args.out is not None):
             parser.error("reduction arguments require --combine-check5")
         config_path = args.config.resolve(strict=True)
         run(read_json(config_path), config_path)

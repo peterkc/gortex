@@ -1,11 +1,13 @@
 """Storage workflow regression tests. Run on CI, not on the Mac."""
 
 import ast
+import os
 import textwrap
 from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from workflow_helpers import (
     MeasurementHost,
@@ -290,7 +292,9 @@ class StepSelectionTests(unittest.TestCase):
         self.assertEqual(base_step_spec("bytes", ""), {
             "tiers": ["tier1"], "adapters": ["a", "b", "c", "c_side"],
             "mode": "build-only", "runs": 1})
-        self.assertEqual(base_step_spec("check2", "")["mode"], "check-only")
+        self.assertEqual(base_step_spec("check2", ""), {
+            "tiers": ["tiny"], "adapters": ["a", "b", "c", "c_side"],
+            "mode": "full-protocol", "runs": 1})
         for step in ("check1-plain", "check1-side"):
             spec = base_step_spec(step, "")
             self.assertEqual(spec["tiers"], ["tier1", "tier10"])
@@ -341,6 +345,78 @@ class WorkflowSourceTests(unittest.TestCase):
         self.assertEqual(len(blocks), 9)
         for block in blocks:
             ast.parse(block)
+
+    def test_only_check2_generates_and_uses_the_tiny_fixture(self):
+        source = (Path(__file__).parents[3]
+                  / ".github/workflows/storage-checks.yml").read_text()
+        blocks = []
+        active = None
+        for line in source.splitlines():
+            if "python3.12 -B -c '" in line:
+                active = []
+            elif active is not None:
+                if line.strip() == "'" or line.lstrip().startswith("' "):
+                    blocks.append(ast.parse(textwrap.dedent(
+                        "\n".join(active))))
+                    active = None
+                else:
+                    active.append(line)
+        preparation = next(
+            node for block in blocks for node in block.body
+            if isinstance(node, ast.If)
+            and ast.unparse(node.test)
+            == "role == 'base' and os.environ['CHECK_STEP'] == 'check2'")
+        calls = []
+
+        def generate(*args):
+            calls.append(("generate", args))
+            return "receipt-pin"
+
+        def freeze(*args):
+            calls.append(("freeze", args))
+
+        common = {"source_revision": "a" * 40}
+        tiny_policy = {"wall_seconds": 300}
+        for step in ("check2", "check1-plain", "bytes"):
+            calls.clear()
+            namespace = {
+                "os": os, "role": "base", "work": Path("/work"),
+                "policy": {"tiny": tiny_policy}, "common": common,
+                "builds": {"fixture": {"sha256": "b" * 64}},
+                "launcher": Path("/work/bin/limited-command"),
+                "cgroup": "test-scope", "freeze": Path("/work/freeze"),
+                "generate": generate, "freeze_tier": freeze,
+            }
+            with patch.dict(os.environ, {"CHECK_STEP": step}):
+                exec(compile(ast.Module(body=[preparation], type_ignores=[]),
+                             "workflow-preparation", "exec"), namespace)
+            if step != "check2":
+                self.assertEqual(calls, [])
+                continue
+            self.assertEqual([row[0] for row in calls],
+                             ["generate", "freeze"])
+            args = calls[0][1]
+            self.assertEqual(args[3:6], (
+                "tiny", ["/work/bin/fixture", "-out", "/work/inputs/tiny",
+                         "-source-revision", common["source_revision"]],
+                tiny_policy))
+            self.assertEqual(calls[1][1][:4], (
+                Path("/work/inputs/tiny"), Path("/work/freeze/tiny"),
+                "source-free tiny correctness", 1))
+        directories = next(
+            node for block in blocks for node in ast.walk(block)
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name)
+                    and target.id == "directories"
+                    for target in node.targets))
+        namespace = {"base_work": Path("/work"),
+                     "selected": base_step_spec("check2", "")}
+        exec(compile(ast.Module(body=[directories], type_ignores=[]),
+                     "workflow-directories", "exec"), namespace)
+        self.assertEqual(namespace["directories"],
+                         {"tiny": Path("/work/inputs/tiny")})
+        self.assertIn('if [ "$CHECK_STEP" = check2 ]; then', source)
+        self.assertIn('-o "$WORK/bin/fixture" ./cmd/fixture', source)
 
 
 class MeasurementAdmissionTests(unittest.TestCase):

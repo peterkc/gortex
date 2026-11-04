@@ -122,9 +122,10 @@ The last tested size before a resolved read-bound crossing sets the compaction
 threshold. A crossing at the smallest size supplies no passing threshold. No
 crossing supplies a lower bound only. A resolved read miss marks a crossing even
 if another operation is unresolved. Otherwise, an unresolved control prevents
-selection through that checkpoint. Known edit CPU, visibility and byte-ratio
-misses remain misses. The selected checkpoint also needs a positive cumulative
-delta/base byte ratio at most 2. Each edit reports its D rebuild CPU inside its
+selection through that checkpoint. If no threshold can be selected, only an edit
+CPU, visibility or byte-ratio miss at the smallest completed checkpoint makes the
+report `miss`. The selected checkpoint also needs a positive cumulative delta/base
+byte ratio at most 2. Each edit reports its D rebuild CPU inside its
 total edit CPU. D rebuild CPU covers visible D text collection and text-index
 construction only, not layer indexing or view-mask construction. Each checkpoint
 reports text p95 beside the hidden base content-row count. All current and

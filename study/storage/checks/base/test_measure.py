@@ -432,7 +432,8 @@ class SelectedDriverTests(unittest.TestCase):
     def test_only_selected_adapter_tier_and_mode_reach_the_boundary(self):
         cases = (("bytes", "", ["a", "b", "c", "c_side"], ["tier1"],
                   "build-only", 1),
-                 ("check2", "", ["c"], ["tier1"], "check-only", 1),
+                 ("check2", "", ["a", "b", "c", "c_side"], ["tiny"],
+                  "full-protocol", 1),
                  ("check1-plain", "", ["a", "b", "c"],
                   ["tier1", "tier10"], "lookup-only", 3),
                  ("check1-side", "", ["a", "b", "c_side"],
@@ -448,6 +449,7 @@ class SelectedDriverTests(unittest.TestCase):
                 root = Path(tmp)
                 config, config_path, _ = pinned_inputs(root)
                 config["data"]["tier100"] = config["data"]["tier1"]
+                config["data"]["tiny"] = config["data"]["tier1"]
                 config.update(
                     step=step, c_variant=variant, source_revision="a" * 40,
                     recipe_sha256="b" * 64, approval_sha256="c" * 64,
@@ -462,7 +464,7 @@ class SelectedDriverTests(unittest.TestCase):
                 def boundary(config, output, label, adapter, tier, deadline,
                              *, full_protocol, pair_index=0, mode=None):
                     invoked.append((adapter, tier, mode, pair_index))
-                    self.assertFalse(full_protocol)
+                    self.assertEqual(full_protocol, step == "check2")
                     inventory = {
                         "repo": "repo", "files": {"lookup": {"bytes": 100}},
                         "bytes": {"graph": 100}, "total": 100,
@@ -497,6 +499,100 @@ class SelectedDriverTests(unittest.TestCase):
                                   "metrics"):
                         self.assertNotIn(field, json.dumps(result))
 
+    def selected_config(self, root, step):
+        config, config_path, _ = pinned_inputs(root)
+        data = config["data"]["tier1"]
+        config["data"] = {"tiny" if step == "check2" else "tier1": data}
+        config.update(
+            step=step, c_variant="", source_revision="a" * 40,
+            recipe_sha256="b" * 64, approval_sha256="c" * 64,
+            binaries={}, base={"main_wall_seconds": 9000,
+                               "side_wall_seconds": 2700},
+            job={"started_unix_seconds": int(time.time()),
+                 "timeout_seconds": 350 * 60,
+                 "cleanup_upload_seconds": 20 * 60})
+        return config, config_path
+
+    def test_check2_records_semantic_misses_but_blocks_other_failures(self):
+        for failed in ("a", "b", "c", "c_side", "resource"):
+            with (self.subTest(failed=failed),
+                  tempfile.TemporaryDirectory() as tmp):
+                root = Path(tmp)
+                config, config_path = self.selected_config(root, "check2")
+                invoked = []
+
+                def boundary(config, output, label, adapter, tier, deadline,
+                             *, full_protocol, pair_index=0, mode=None):
+                    invoked.append(adapter)
+                    self.assertEqual(tier, "tiny")
+                    self.assertTrue(full_protocol)
+                    if failed == "resource":
+                        raise RunError("transport failure")
+                    if adapter == failed:
+                        raise SemanticMismatch([({"checked": True}, {})])
+                    return [({"checks": [{"status": "passed"}]}, {})]
+
+                with (patch("measure.measure_adapter", boundary),
+                      patch.dict(os.environ)):
+                    if failed in ("a", "resource"):
+                        with self.assertRaises(RunError):
+                            run_selected(config, config_path)
+                    else:
+                        run_selected(config, config_path)
+                receipt = json.loads((root / "output/result.json").read_text())
+                if failed in ("a", "resource"):
+                    self.assertEqual(receipt["status"], "blocked")
+                    self.assertEqual(invoked, ["a"])
+                else:
+                    self.assertEqual(invoked, ["a", "b", "c", "c_side"])
+                    self.assertEqual(receipt["status"], "miss")
+                    for adapter in invoked:
+                        tiny = receipt["measured_value"][adapter]["tiny"]
+                        self.assertEqual(tiny["status"],
+                                         "miss" if adapter == failed
+                                         else "pass")
+
+    def test_selected_hash_errors_still_write_complete_failure_receipt(self):
+        for target in ("output_hashes", "protected_snapshot"):
+            for error in (OSError("read failed"), RunError("invalid output")):
+                with self.subTest(target=target, error=error):
+                    with tempfile.TemporaryDirectory() as tmp:
+                        root = Path(tmp)
+                        config, config_path = self.selected_config(root,
+                                                                  "check2")
+                        behavior = ({"side_effect": error}
+                                    if target == "output_hashes" else
+                                    {"side_effect": [{"files": {}}, error]})
+                        with (
+                            patch("measure.measure_adapter", return_value=[]),
+                            patch("measure." + target, **behavior),
+                            patch.dict(os.environ),
+                        ):
+                            with self.assertRaises(RunError):
+                                run_selected(config, config_path)
+                        receipt = json.loads(
+                            (root / "output/result.json").read_text())
+                        self.assertEqual(receipt["status"], "blocked")
+                        self.assertIn(str(error), receipt["evidence_error"])
+                        self.assertEqual(set(receipt["measured_value"]),
+                                         {"a", "b", "c", "c_side"})
+                        self.assertEqual(receipt["script_sha256"], digest(
+                            Path(__file__).with_name("measure.py")))
+                        self.assertTrue(receipt["host"])
+
+
+def correctness_receipt(common, failed=()):
+    return {**common, "schema": "design-c-base-step/v1", "step": "check2",
+            "status": "miss" if failed else "pass",
+            "protected_inputs_unchanged": True,
+            "check2": {"protocol": "full-tiny"},
+            "measured_value": {
+                adapter: {"tiny": ({"status": "miss",
+                                    "failure_kind": "semantic"}
+                                   if adapter in failed else
+                                   {"status": "pass"})}
+                for adapter in ("a", "b", "c", "c_side")}}
+
 
 class TierReductionTests(unittest.TestCase):
     def test_independent_tiers_equal_the_combined_selection(self):
@@ -522,17 +618,66 @@ class TierReductionTests(unittest.TestCase):
                              for tier in ("tier1", "tier10", "tier100")]
                     lookup = {**common, "step": "check1-" + variant,
                               "measured_value": {"a": a, "b": b, selected: c}}
-                    result = combine_check5(tiers, lookup)
+                    correctness = correctness_receipt(common)
+                    result = combine_check5(tiers, lookup, correctness)
                     self.assertEqual(result, {
                         "b": expected_b, "c": expected_c,
                         "selection_table_row": row, "branch_taken": branch,
                         "c_variant": selected})
-                    self.assertEqual(combine_check5(list(reversed(tiers)),
-                                                    lookup), result)
+                    self.assertEqual(combine_check5(
+                        list(reversed(tiers)), lookup, correctness), result)
                     with self.assertRaises(RunError):
-                        combine_check5(tiers[:2], lookup)
+                        combine_check5(tiers[:2], lookup, correctness)
                     with self.assertRaises(RunError):
-                        combine_check5(tiers, {**lookup, "c_variant": "other"})
+                        combine_check5(tiers, {**lookup, "c_variant": "other"},
+                                       correctness)
+
+    def test_matching_full_tiny_evidence_controls_candidate_eligibility(self):
+        for variant in ("plain", "side"):
+            selected = "c" if variant == "plain" else "c_side"
+            other = "c_side" if variant == "plain" else "c"
+            observed = observations()
+            common = {"source_revision": "a" * 40,
+                      "recipe_sha256": "b" * 64, "c_variant": variant,
+                      "status": "partial"}
+            tiers = [{**common, "step": "check5-" + tier,
+                      "measured_value": {
+                          key: {tier: observed[tier]}
+                          for key in ("a", "b", selected)}}
+                     for tier in ("tier1", "tier10", "tier100")]
+            lookup = {**common, "step": "check1-" + variant,
+                      "measured_value": {
+                          key: observed for key in ("a", "b", selected)}}
+            passing = correctness_receipt(common)
+            invalid = [None, {**passing, "status": "blocked"},
+                       {**passing, "source_revision": "f" * 40},
+                       {**passing, "recipe_sha256": "f" * 64},
+                       {**passing, "protected_inputs_unchanged": False},
+                       {**passing, "check2": {"protocol": "check-only"}},
+                       {**passing, "measured_value": {}},
+                       correctness_receipt(common, ("a",))]
+            nonsemantic = correctness_receipt(common, (selected,))
+            nonsemantic["measured_value"][selected]["tiny"].pop("failure_kind")
+            invalid.append(nonsemantic)
+            for receipt in invalid:
+                with self.subTest(variant=variant, receipt=receipt):
+                    with self.assertRaises(RunError):
+                        combine_check5(tiers, lookup, receipt)
+            for failed, row in ((("b",), "only_c_passes"),
+                                ((selected,), "only_b_passes"),
+                                (("b", selected), "neither_passes")):
+                with self.subTest(variant=variant, failed=failed):
+                    result = combine_check5(
+                        tiers, lookup, correctness_receipt(common, failed))
+                    self.assertEqual(result["selection_table_row"], row)
+                    for key, label in (("b", "b"), (selected, "c")):
+                        self.assertEqual(result[label]["passes"],
+                                         key not in failed)
+            # A failure in the unselected C variant does not reject selected C.
+            result = combine_check5(
+                tiers, lookup, correctness_receipt(common, (other,)))
+            self.assertTrue(result["b"]["passes"])
+            self.assertTrue(result["c"]["passes"])
 
 
 class BytesOnlyTests(unittest.TestCase):
@@ -656,6 +801,26 @@ class TerminalEvidenceTests(unittest.TestCase):
                 self.collect(root / "timing", full=True)
             (root / "empty").mkdir()
             self.assert_blocked(root / "empty")
+
+    def test_full_protocol_requires_delta_crash_and_concurrent_evidence(self):
+        for missing in (None, "delta_checks", "crash", "concurrent"):
+            with (self.subTest(missing=missing),
+                  tempfile.TemporaryDirectory() as tmp):
+                root = Path(tmp) / "full"
+                report, receipt = terminal_fixture(root)
+                report.update(
+                    timing_only=False, delta_checks=[{"status": "passed"}],
+                    crash=[{"status": "passed"}],
+                    concurrent={"checked_samples": 1,
+                                "checks": [{"status": "passed"}]})
+                if missing is not None:
+                    report[missing] = {} if missing == "concurrent" else []
+                save_terminal(root, report, receipt)
+                if missing is None:
+                    self.assertEqual(len(self.collect(root, full=True)), 1)
+                else:
+                    with self.assertRaises(RunError):
+                        self.collect(root, full=True)
 
 
 def pinned_inputs(root):

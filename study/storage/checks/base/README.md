@@ -13,9 +13,11 @@ Manual dispatch takes one named step or an approved batch:
   graph+text+vectors, upper bound for graph bytes**. Its existing SQLite driver's
   `dbstat` graph-table/index page share is a separate diagnostic, not graph-only
   file accounting.
-- `check2`: build/open plain C at tier1 and check every unchanged query once.
-  No warmup, repeated query timing, update or catalog phases run. Storage-build
-  CPU remains reported separately.
+- `check2`: generate the source-free tiny fixture and run the full correctness
+  protocol once for A, B, plain C and side C. This includes checked reads,
+  delta rebuilds, crash trials and concurrent publication/read checks. Tiny
+  timings do not feed selection. A candidate's semantic failure makes it a miss;
+  an A control failure or resource/transport failure blocks the comparison.
 - `check1-plain` or `check1-side`: time only ID, name and file lookups at tier1
   and tier10, with A and B controls and the named C variant.
 - `check5-tier1`, `check5-tier10` or `check5-tier100`: measure one tier's base
@@ -27,17 +29,22 @@ The two allowed batches are `check2,check1-plain,check4` and
 `check5-tier1,check5-tier10,check5-tier100`. Empty, unknown, duplicate or other
 step sets fail preflight before measurement jobs start.
 
-Reduce the three saved Check 5 results with the saved selected Check 1 result:
+Reduce the three saved Check 5 results with the selected Check 1 result and
+the completed Check 2 correctness receipt:
 
 ```sh
 python3 -B measure.py --combine-check5 tier1-result.json tier10-result.json \
-  tier100-result.json --lookup-result check1-result.json --out selection.json
+  tier100-result.json --lookup-result check1-result.json \
+  --correctness-result check2-result.json --out selection.json
 ```
 
 This command performs no measurements. It preserves the existing combined
-verdict and selection table. Results must share the source revision, policy and
-selected C variant. The old combined path without `step` remains for regression
-tests only; the workflow always supplies a selected step.
+verdict and selection table. All results must share the source revision and
+policy. Check 1 and Check 5 must share the selected C variant. Check 2 covers
+both variants; missing, blocked or mismatched correctness evidence refuses
+selection. A saved semantic miss makes that candidate ineligible. The old combined
+path without `step` remains for regression tests only; the workflow always supplies
+a selected step.
 
 ## Storage and exposed API
 
@@ -61,10 +68,17 @@ One sorted logical-ID lookup maps to those IDs. Name, qualified-name and file
 lookups hold local IDs, not node payloads. Each edge payload appears once;
 outgoing and incoming tables contain references. Kind-specific dense N+1 offsets
 include zero-degree nodes and explicit unresolved endpoints. The graph ID columns
-are fixed-width and uncompressed. Strings and open-ended metadata live in the
-canonical payload area. All serving files, including offsets, lookup copies,
+are fixed-width and uncompressed. Each row stores one `local` column, without
+redundant `tag` or `number` columns. Kind and endpoint offsets carry adjacency
+boundaries; the canonical row position carries its dense ID. Strings and
+open-ended metadata live in the canonical payload area. All serving files, including offsets, lookup copies,
 seal metadata and the optional bounded Pebble side index, count in inventory.
-The side index holds local IDs only. No whole-graph serving map replaces a lookup.
+Side-index values hold local IDs only. Name lookup references and side-name
+keys sort by logical ID, independent of source order. A limit `k` restricts the
+range or iterator before reading canonical node payloads, so at most `k`
+payloads decode. Unlimited name and file lookups still read every matching
+payload. Sort keys are construction-only; Parquet name rows retain local IDs,
+not logical-ID copies. No whole-graph serving map replaces a lookup.
 
 After writing, construction reads every table and compares a streaming full-row
 digest with the input. Duplicate edges survive; duplicate logical node IDs refuse
@@ -219,8 +233,9 @@ functions, including two in one file for the full update/publication protocol.
 Its tests check disk-backed expected answers, deterministic manifests, delta
 readiness and invalid-input/overwrite rejection. All execution remains CI-only.
 
-The driver runs the full tiny correctness protocol once per candidate. It then
-uses three fresh timing-only processes per candidate per scaling point. Timing-only
+The Check 2 driver runs the full tiny correctness protocol once for each of
+A, B, plain C and side C. Separate Check 1 and Check 5 jobs use three fresh
+timing-only processes per candidate at their selected scaling points. Timing-only
 success is not full lifecycle correctness. Complete tier1 C verification witnesses
 establish serialization; the disk-backed checker validates every measured answer.
 Data retains gxstudy-v2. Builds and downloads finish before timing. Processes run

@@ -37,13 +37,16 @@ func decodeRow[T any](ctx context.Context, s *Segment, table string, r row) (val
 	}
 	return value, err
 }
-func lookupRows[T any](ctx context.Context, s *Segment, table, key string) (values []T, err error) {
+func lookupRows[T any](ctx context.Context, s *Segment, table, key string, limit int) (values []T, err error) {
 	if err = ctx.Err(); err != nil {
 		return nil, err
 	}
 	span, found, err := tableRange(s.tables[table+".ranges"], key)
 	if err != nil || !found {
 		return nil, err
+	}
+	if limit >= 0 && span.End-span.First > int64(limit) {
+		span.End = span.First + int64(limit)
 	}
 	err = s.scan(ctx, table, &span, func(r row) error {
 		if r.Key != key {
@@ -176,9 +179,9 @@ func (s *Segment) NodesByName(ctx context.Context, name string, k int) ([]datase
 	var nodes []dataset.Node
 	var err error
 	if s.side != nil {
-		nodes, err = s.sideNodes(ctx, indexKey("A", name))
+		nodes, err = s.sideNodes(ctx, indexKey("A", name), k)
 	} else {
-		nodes, err = lookupRows[dataset.Node](ctx, s, "names", name)
+		nodes, err = lookupRows[dataset.Node](ctx, s, "names", name, k)
 	}
 	if err != nil {
 		return nil, err
@@ -193,9 +196,9 @@ func (s *Segment) FileNodes(ctx context.Context, path string) ([]dataset.Node, e
 	var nodes []dataset.Node
 	var err error
 	if s.side != nil {
-		nodes, err = s.sideNodes(ctx, indexKey("P", path))
+		nodes, err = s.sideNodes(ctx, indexKey("P", path), -1)
 	} else {
-		nodes, err = lookupRows[dataset.Node](ctx, s, "paths", path)
+		nodes, err = lookupRows[dataset.Node](ctx, s, "paths", path, -1)
 	}
 	slices.SortFunc(nodes, func(a, b dataset.Node) int { return strings.Compare(a.ID, b.ID) })
 	return nodes, err

@@ -827,7 +827,7 @@ func TestFixedWidthLocalColumnsAllowOpenTimeProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	writer := parquet.NewGenericWriter[row](file)
-	if _, err = writer.Write([]row{{Local: 0, Number: 0, Raw: []byte("payload once")}, {Local: 1, Number: 1, Raw: []byte("second payload")}}); err != nil {
+	if _, err = writer.Write([]row{{Local: 0, Raw: []byte("payload once")}, {Local: 1, Raw: []byte("second payload")}}); err != nil {
 		t.Fatal(err)
 	}
 	if err = errors.Join(writer.Close(), file.Close()); err != nil {
@@ -838,9 +838,19 @@ func TestFixedWidthLocalColumnsAllowOpenTimeProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer table.file.Close()
+	columns := table.parquet.Schema().Columns()
+	if fmt.Sprint(columns) != "[[key] [id] [local] [payload]]" {
+		t.Fatal("redundant stored columns", columns)
+	}
+	for _, group := range table.parquet.Metadata().RowGroups {
+		for _, column := range group.Columns {
+			if slices.Equal(column.MetaData.PathInSchema, []string{"local"}) && column.MetaData.Codec.String() != "UNCOMPRESSED" {
+				t.Fatal("compressed local IDs")
+			}
+		}
+	}
 	type localRow struct {
-		Local  uint64 `parquet:"local,plain,uncompressed"`
-		Number uint64 `parquet:"number,plain,uncompressed"`
+		Local uint64 `parquet:"local,plain,uncompressed"`
 	}
 	reader := parquet.NewGenericReader[localRow](table.parquet)
 	defer reader.Close()
@@ -849,7 +859,7 @@ func TestFixedWidthLocalColumnsAllowOpenTimeProjection(t *testing.T) {
 	if err != nil && err != io.EOF {
 		t.Fatal(err)
 	}
-	if n != 2 || got[0].Local != 0 || got[1].Local != 1 || got[1].Number != 1 {
+	if n != 2 || got[0].Local != 0 || got[1].Local != 1 {
 		t.Fatal("local ID projection changed", got, n)
 	}
 }
@@ -917,9 +927,9 @@ func TestOffsetValidationChecksAcrossLargeBlockBoundary(t *testing.T) {
 			t.Fatal(err)
 		}
 		writer := parquet.NewGenericWriter[row](file)
-		rows := []row{{Local: 0, Number: 0}}
+		rows := []row{{Local: 0}}
 		if name == "edges" {
-			rows = append(rows, row{Local: 1, Number: 1})
+			rows = append(rows, row{Local: 1})
 		}
 		if _, err = writer.Write(rows); err != nil {
 			t.Fatal(err)
@@ -968,5 +978,277 @@ func TestOffsetValidationChecksAcrossLargeBlockBoundary(t *testing.T) {
 	}
 	if err := segment.validateLocalLayout(context.Background()); err == nil || !strings.Contains(err.Error(), "invalid offset directory") {
 		t.Fatal("bad final block accepted", err)
+	}
+}
+
+func TestNameLookupLimitsPayloadDecoding(t *testing.T) {
+	for _, side := range []bool{false, true} {
+		t.Run(fmt.Sprint(side), func(t *testing.T) {
+			dir := t.TempDir()
+			nodes := []dataset.Node{{ID: "z", Name: "same", FilePath: "f"}, {ID: "a", Name: "same", FilePath: "f"}, {ID: "a\x00!", Name: "same", FilePath: "f"}}
+			for i := range nodes {
+				nodes[i].Kind = "function"
+				nodes[i].QualName = "pkg.same"
+				nodes[i].Language = "go"
+				nodes[i].StartLine = i + 1
+				nodes[i].EndLine = i + 10
+				nodes[i].Payload = map[string]json.RawMessage{"nested": json.RawMessage(`{"a":[1,"value"]}`)}
+			}
+			rows := make([]row, len(nodes))
+			for i, node := range nodes {
+				raw, err := encodeNode(node)
+				if err != nil {
+					t.Fatal(err)
+				}
+				rows[i] = row{Local: uint64(i), Raw: raw}
+			}
+			// Any attempt to decode the unselected third result fails, not just a count.
+			rows[0].Raw = []byte("invalid unselected node payload")
+			tables := map[string]*tableFile{}
+			for _, table := range []struct {
+				name string
+				rows []row
+			}{{"nodes", rows}, {"names", []row{{Key: "same", Local: 1}, {Key: "same", Local: 2}, {Key: "same", Local: 0}}}, {"paths", []row{{Key: "f", Local: 0}, {Key: "f", Local: 1}, {Key: "f", Local: 2}}}} {
+				path := filepath.Join(dir, table.name+".parquet")
+				file, err := os.Create(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writer := parquet.NewGenericWriter[row](file)
+				if _, err = writer.Write(table.rows); err != nil {
+					t.Fatal(err)
+				}
+				if err = errors.Join(writer.Close(), file.Close()); err != nil {
+					t.Fatal(err)
+				}
+				opened, err := openTable(path, newBlockCache(4<<20))
+				if err != nil {
+					t.Fatal(err)
+				}
+				tables[table.name] = opened
+				t.Cleanup(func() { opened.file.Close() })
+			}
+			for _, name := range []string{"names", "paths"} {
+				key := "same"
+				if name == "paths" {
+					key = "f"
+				}
+				path := filepath.Join(dir, name+".ranges.parquet")
+				file, err := os.Create(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writer := parquet.NewGenericWriter[rowRange](file)
+				if _, err = writer.Write([]rowRange{{Key: key, First: 0, End: 3}}); err != nil {
+					t.Fatal(err)
+				}
+				if err = errors.Join(writer.Close(), file.Close()); err != nil {
+					t.Fatal(err)
+				}
+				opened, err := openTable(path, newBlockCache(4<<20))
+				if err != nil {
+					t.Fatal(err)
+				}
+				tables[name+".ranges"] = opened
+				t.Cleanup(func() { opened.file.Close() })
+			}
+			segment := Segment{tables: tables, seal: seal{Meta: dataset.Manifest{Counts: dataset.Counts{Nodes: 3}}}}
+			if side {
+				writer, err := newSideWriter(filepath.Join(dir, "side"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { writer.close() })
+				for i, node := range nodes {
+					if err = writer.add(node, uint64(i)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err = writer.finish(); err != nil {
+					t.Fatal(err)
+				}
+				segment.side = writer.db
+			}
+			for _, limit := range []int{1, 2} {
+				got, err := segment.NodesByName(context.Background(), "same", limit)
+				if err != nil {
+					t.Fatal("bounded payload decode", limit, err)
+				}
+				actual, err := json.Marshal(got)
+				if err != nil {
+					t.Fatal(err)
+				}
+				expected, err := json.Marshal(nodes[1 : 1+limit])
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(actual, expected) {
+					t.Fatal("bounded full payload/order changed", limit, string(actual), string(expected))
+				}
+			}
+			if _, err := segment.NodesByName(context.Background(), "same", -1); err == nil {
+				t.Fatal("unlimited name lookup skipped payload")
+			}
+			if _, err := segment.FileNodes(context.Background(), "f"); err == nil {
+				t.Fatal("file lookup was incorrectly limited")
+			}
+			for _, tc := range []struct {
+				name string
+				k    int
+			}{{"same", 0}, {"missing", 2}} {
+				got, err := segment.NodesByName(context.Background(), tc.name, tc.k)
+				if err != nil || len(got) != 0 {
+					t.Fatal("empty name lookup", got, err)
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if _, err := segment.NodesByName(ctx, "same", 1); !errors.Is(err, context.Canceled) {
+				t.Fatal("canceled name lookup accepted", err)
+			}
+		})
+	}
+}
+
+func TestNameSortKeysUseLogicalIDsNotInputOrder(t *testing.T) {
+	d := conformance.Fixture()
+	d.Nodes = []dataset.Node{{ID: "z", Name: "same"}, {ID: "a\x00!", Name: "same"}, {ID: "a", Name: "same"}}
+	d.Edges = nil
+	dir := t.TempDir()
+	spools := map[string]*rowSpool{}
+	for _, name := range []string{"nodes", "ids", "names", "qnames", "paths", "edges", "out", "in", "terminals", "kinds", "files", "symbols", "content", "vectors"} {
+		spool, err := newRowSpool(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		spools[name] = spool
+	}
+	calls := [6]int{}
+	_, err := ingestRows(context.Background(), inputRows{countedRows(d.Nodes, &calls[0]), countedRows(d.Edges, &calls[1]), countedRows(d.Files, &calls[2]), countedRows(d.Symbols, &calls[3]), countedRows(d.Content, &calls[4]), countedRows(d.Vectors, &calls[5])}, spools, nil, func(string, string) error { return nil }, func(string, string) error { return nil })
+	for _, spool := range spools {
+		err = errors.Join(err, spool.close())
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "names"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+	slices.Sort(lines)
+	var locals []string
+	for _, line := range lines {
+		fields := strings.Split(line, "\t")
+		id, err := hex.DecodeString(fields[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		locals = append(locals, string(id[len(id)-16:]))
+	}
+	if !slices.Equal(locals, []string{localKey(2), localKey(1), localKey(0)}) {
+		t.Fatal("name references are not in logical-ID order", locals)
+	}
+}
+
+func TestRebuiltNameLookupsPreserveLogicalIDOrder(t *testing.T) {
+	for _, side := range []bool{false, true} {
+		t.Run(fmt.Sprint(side), func(t *testing.T) {
+			d := conformance.Fixture()
+			d.Nodes[0].ID = "z"
+			d.Nodes[1].ID = "a\x00!"
+			d.Nodes[2].ID = "a"
+			for i := range d.Nodes {
+				d.Nodes[i].Name = "same"
+			}
+			backend := Backend{SideIndex: side}
+			ref, segment := openFixture(t, backend, d)
+			for i := 0; i < 2; i++ {
+				for _, limit := range []int{-1, 0, 1, 2, 5} {
+					got, err := segment.NodesByName(context.Background(), "same", limit)
+					if err != nil {
+						t.Fatal(err)
+					}
+					want, err := oracle.New(d).NodesByName(context.Background(), "same", limit)
+					if err != nil {
+						t.Fatal(err)
+					}
+					actual, err := json.Marshal(got)
+					if err != nil {
+						t.Fatal(err)
+					}
+					expected, err := json.Marshal(want)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !bytes.Equal(actual, expected) {
+						t.Fatal("persisted name payload/order", limit, string(actual), string(expected))
+					}
+				}
+				if err := segment.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if i == 0 {
+					opened, err := backend.Open(context.Background(), ref.Path, ref)
+					if err != nil {
+						t.Fatal(err)
+					}
+					segment = opened.(*Segment)
+				}
+			}
+		})
+	}
+}
+
+func TestGraphRowsDoNotPayForRedundantNumericColumns(t *testing.T) {
+	type legacyRow struct {
+		Key    string `parquet:"key,dict"`
+		ID     string `parquet:"id,dict"`
+		Tag    uint64 `parquet:"tag,plain,uncompressed"`
+		Local  uint64 `parquet:"local,plain,uncompressed"`
+		Number uint64 `parquet:"number,plain,uncompressed"`
+		Raw    []byte `parquet:"payload"`
+	}
+	dir := t.TempDir()
+	currentPath := filepath.Join(dir, "current.parquet")
+	oldPath := filepath.Join(dir, "legacy.parquet")
+	file, err := os.Create(currentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := parquet.NewGenericWriter[row](file)
+	oldRows := make([]legacyRow, 128)
+	rows := make([]row, 128)
+	for i := range rows {
+		rows[i] = row{Local: uint64(i), Raw: []byte("one payload")}
+		oldRows[i] = legacyRow{Local: uint64(i), Number: uint64(i), Raw: rows[i].Raw}
+	}
+	if _, err = writer.Write(rows); err != nil {
+		t.Fatal(err)
+	}
+	if err = errors.Join(writer.Close(), file.Close()); err != nil {
+		t.Fatal(err)
+	}
+	file, err = os.Create(oldPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldWriter := parquet.NewGenericWriter[legacyRow](file)
+	if _, err = oldWriter.Write(oldRows); err != nil {
+		t.Fatal(err)
+	}
+	if err = errors.Join(oldWriter.Close(), file.Close()); err != nil {
+		t.Fatal(err)
+	}
+	current, err := os.Stat(currentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := os.Stat(oldPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Size() >= old.Size() {
+		t.Fatal("redundant numeric columns still cost bytes", current.Size(), old.Size())
 	}
 }
