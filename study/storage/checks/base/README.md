@@ -16,8 +16,9 @@ Manual dispatch takes one named step or an approved batch:
 - `check2`: generate the source-free tiny fixture and run the full correctness
   protocol once for A, B, plain C and side C. This includes checked reads,
   delta rebuilds, crash trials and concurrent publication/read checks. Tiny
-  timings do not feed selection. A candidate's semantic failure makes it a miss;
-  an A control failure or resource/transport failure blocks the comparison.
+  timings do not feed selection. A C variant's semantic failure makes it a miss;
+  an A or B reference-control failure or resource/transport failure blocks the
+  comparison.
 - `check1-plain` or `check1-side`: time only ID, name and file lookups at tier1
   and tier10, with A and B controls and the named C variant.
 - `check5-tier1`, `check5-tier10` or `check5-tier100`: measure one tier's base
@@ -42,9 +43,9 @@ This command performs no measurements. It preserves the existing combined
 verdict and selection table. All results must share the source revision and
 policy. Check 1 and Check 5 must share the selected C variant. Check 2 covers
 both variants; missing, blocked or mismatched correctness evidence refuses
-selection. A saved semantic miss makes that candidate ineligible. The old combined
-path without `step` remains for regression tests only; the workflow always supplies
-a selected step.
+selection. An A or B semantic miss blocks selection; a saved C semantic miss
+makes that variant ineligible. The old combined path without `step` remains for
+regression tests only; the workflow always supplies a selected step.
 
 ## Storage and exposed API
 
@@ -73,9 +74,11 @@ redundant `tag` or `number` columns. Kind and endpoint offsets carry adjacency
 boundaries; the canonical row position carries its dense ID. Strings and
 open-ended metadata live in the canonical payload area. All serving files, including offsets, lookup copies,
 seal metadata and the optional bounded Pebble side index, count in inventory.
-Side-index values hold local IDs only. Name lookup references and side-name
-keys sort by logical ID, independent of source order. A limit `k` restricts the
-range or iterator before reading canonical node payloads, so at most `k`
+The side index holds local IDs only. Name lookup references sort by logical ID,
+independent of source order. Side-name keys use fixed-width row ordinals from
+that sorted names table, with canonical local IDs as values. Their order matches
+logical-ID order within each name without copying logical IDs into side keys.
+A limit `k` restricts the range or iterator before reading canonical node payloads, so at most `k`
 payloads decode. Unlimited name and file lookups still read every matching
 payload. Sort keys are construction-only; Parquet name rows retain local IDs,
 not logical-ID copies. No whole-graph serving map replaces a lookup.

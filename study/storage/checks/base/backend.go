@@ -151,10 +151,16 @@ func newSideWriter(path string) (*sideWriter, error) {
 }
 func (s *sideWriter) add(n dataset.Node, local uint64) error {
 	hash := sha256.Sum256([]byte(n.ID))
-	for _, key := range [][]byte{append([]byte("N/"), hash[:]...), append(indexKey("A", n.Name), []byte(n.ID)...), append(indexKey("Q", n.QualName), localBytes(local)...), append(indexKey("P", n.FilePath), localBytes(local)...)} {
-		if err := s.batch.Set(key, localBytes(local), nil); err != nil {
+	for _, key := range [][]byte{append([]byte("N/"), hash[:]...), append(indexKey("Q", n.QualName), localBytes(local)...), append(indexKey("P", n.FilePath), localBytes(local)...)} {
+		if err := s.setLocal(key, local); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+func (s *sideWriter) setLocal(key []byte, local uint64) error {
+	if err := s.batch.Set(key, localBytes(local), nil); err != nil {
+		return err
 	}
 	if s.batch.Len() >= 4<<20 {
 		if err := s.batch.Commit(pebble.NoSync); err != nil {
@@ -163,6 +169,17 @@ func (s *sideWriter) add(n dataset.Node, local uint64) error {
 		s.batch.Reset()
 	}
 	return nil
+}
+
+// The names table is already sorted by (name, logical ID). Its row ordinal
+// preserves that order within each name without another logical-ID copy.
+func (s *sideWriter) addNames(ctx context.Context, dir string) error {
+	ordinal := uint64(0)
+	return scanTable(ctx, dir, "names", newBlockCache(4<<20), nil, func(r row) error {
+		err := s.setLocal(append(indexKey("A", r.Key), localBytes(ordinal)...), r.Local)
+		ordinal++
+		return err
+	})
 }
 func (s *sideWriter) finish() error {
 	if err := s.batch.Commit(pebble.NoSync); err != nil {
@@ -405,6 +422,11 @@ func (b Backend) Build(ctx context.Context, d dataset.Dataset, dir string) (ref 
 		if err != nil {
 			return ref, stats, errors.Join(err, closeSpools())
 		}
+		defer func() {
+			if side != nil {
+				err = errors.Join(err, side.close())
+			}
+		}()
 	}
 	var counts dataset.Counts
 	err = BuildText(ctx, filepath.Join(dir, "symbols.bleve"), func(addSymbol func(string, string) error) error {
@@ -419,9 +441,11 @@ func (b Backend) Build(ctx context.Context, d dataset.Dataset, dir string) (ref 
 		if err == nil {
 			err = side.finish()
 		}
+		identity := side.identity
 		err = errors.Join(err, side.close())
+		side = nil
 		if err == nil {
-			err = runner.RemoveEmptyBuildWALs(filepath.Join(dir, "side"), side.identity)
+			err = runner.RemoveEmptyBuildWALs(filepath.Join(dir, "side"), identity)
 		}
 	}
 	if err != nil {
@@ -435,6 +459,26 @@ func (b Backend) Build(ctx context.Context, d dataset.Dataset, dir string) (ref 
 			return ref, stats, e
 		}
 		verifications[name] = verified
+	}
+	if b.SideIndex {
+		// Keep side construction out of the separately excluded read-back CPU.
+		side, err = newSideWriter(filepath.Join(dir, "side"))
+		if err != nil {
+			return ref, stats, err
+		}
+		if err = side.addNames(ctx, dir); err != nil {
+			return ref, stats, err
+		}
+		identity := side.identity
+		err = side.finish()
+		err = errors.Join(err, side.close())
+		side = nil
+		if err != nil {
+			return ref, stats, err
+		}
+		if err = runner.RemoveEmptyBuildWALs(filepath.Join(dir, "side"), identity); err != nil {
+			return ref, stats, err
+		}
 	}
 	for _, name := range []string{"out", "in"} {
 		if err = writeOffsets(ctx, dir, name, uint64(verifications["ids"].Rows), uint64(verifications["kinds"].Rows)); err != nil {

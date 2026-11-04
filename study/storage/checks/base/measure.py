@@ -887,7 +887,8 @@ def combine_check5(tiers, lookup_result, correctness_result):
                 or (tiny["status"] == "miss"
                     and tiny.get("failure_kind") != "semantic")):
             raise RunError("incomplete Check 2 candidate result")
-    if correctness["a"]["tiny"]["status"] != "pass":
+    if any(correctness[adapter]["tiny"]["status"] != "pass"
+           for adapter in ("a", "b")):
         raise RunError("Check 2 reference control failed")
     observations = {adapter: {} for adapter in ("a", "b", selected)}
     for row in tiers:
@@ -902,10 +903,9 @@ def combine_check5(tiers, lookup_result, correctness_result):
         b, a, b, lookup=lookup_verdict(lookup["b"], lookup["a"]))
     c_verdict = base_verdict(
         c, a, b, lookup=lookup_verdict(lookup[selected], lookup["a"]))
-    for adapter, verdict in (("b", b_verdict), (selected, c_verdict)):
-        if correctness[adapter]["tiny"]["status"] == "miss":
-            verdict.update(passes=False, status="miss",
-                           reason="checked tiny semantic mismatch")
+    if correctness[selected]["tiny"]["status"] == "miss":
+        c_verdict.update(passes=False, status="miss",
+                         reason="checked tiny semantic mismatch")
     row, branch = choose_base(b_verdict, c_verdict,
                               cpu_selection_approved=True)
     return {"b": b_verdict, "c": c_verdict, "selection_table_row": row,
@@ -970,7 +970,7 @@ def run_selected(config, config_path):
                     except SemanticMismatch as error:
                         if step != "check2":
                             raise
-                        if adapter == "a":
+                        if adapter in ("a", "b"):
                             raise RunError(
                                 "reference control semantic mismatch"
                             ) from error

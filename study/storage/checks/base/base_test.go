@@ -622,6 +622,25 @@ func resealFixture(t *testing.T, ref adapter.SegmentRef) adapter.SegmentRef {
 	ref.Version = ref.Digest
 	return ref
 }
+func checkSideLookupKey(t *testing.T, key []byte, nodes []dataset.Node) {
+	t.Helper()
+	if !bytes.HasPrefix(key, []byte("A/")) && !bytes.HasPrefix(key, []byte("Q/")) && !bytes.HasPrefix(key, []byte("P/")) {
+		return
+	}
+	separator := bytes.IndexByte(key[2:], '/')
+	if separator < 0 {
+		t.Fatal("missing side lookup field separator", key)
+	}
+	suffix := key[3+separator:]
+	if len(suffix) != 8 {
+		t.Fatal("side lookup suffix is not a fixed-width integer", key)
+	}
+	for _, node := range nodes {
+		if bytes.Contains(suffix, []byte(node.ID)) {
+			t.Fatal("logical ID copied into side lookup suffix", node.ID, key)
+		}
+	}
+}
 func TestCanonicalPayloadAndIDOnlyInventory(t *testing.T) {
 	for _, side := range []bool{false, true} {
 		t.Run(fmt.Sprint(side), func(t *testing.T) {
@@ -685,12 +704,20 @@ func TestCanonicalPayloadAndIDOnlyInventory(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				t.Cleanup(func() {
+					if it != nil {
+						it.Close()
+					}
+				})
 				for ok := it.First(); ok; ok = it.Next() {
 					if len(it.Value()) != 8 {
 						t.Fatal("side index stores a payload")
 					}
+					checkSideLookupKey(t, it.Key(), d.Nodes)
 				}
-				if err = errors.Join(it.Error(), it.Close()); err != nil {
+				err = errors.Join(it.Error(), it.Close())
+				it = nil
+				if err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -1058,13 +1085,53 @@ func TestNameLookupLimitsPayloadDecoding(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				t.Cleanup(func() { writer.close() })
+				t.Cleanup(func() {
+					if writer != nil {
+						writer.close()
+					}
+				})
 				for i, node := range nodes {
 					if err = writer.add(node, uint64(i)); err != nil {
 						t.Fatal(err)
 					}
 				}
+				identity := writer.identity
+				err = errors.Join(writer.finish(), writer.close())
+				writer = nil
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = runner.RemoveEmptyBuildWALs(filepath.Join(dir, "side"), identity); err != nil {
+					t.Fatal(err)
+				}
+				writer, err = newSideWriter(filepath.Join(dir, "side"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = writer.addNames(context.Background(), dir); err != nil {
+					t.Fatal(err)
+				}
 				if err = writer.finish(); err != nil {
+					t.Fatal(err)
+				}
+				it, err := writer.db.NewIter(nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if it != nil {
+						it.Close()
+					}
+				})
+				for ok := it.First(); ok; ok = it.Next() {
+					if len(it.Value()) != 8 {
+						t.Fatal("side index stores a payload")
+					}
+					checkSideLookupKey(t, it.Key(), nodes)
+				}
+				err = errors.Join(it.Error(), it.Close())
+				it = nil
+				if err != nil {
 					t.Fatal(err)
 				}
 				segment.side = writer.db

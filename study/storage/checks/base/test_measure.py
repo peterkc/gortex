@@ -534,15 +534,16 @@ class SelectedDriverTests(unittest.TestCase):
 
                 with (patch("measure.measure_adapter", boundary),
                       patch.dict(os.environ)):
-                    if failed in ("a", "resource"):
+                    if failed in ("a", "b", "resource"):
                         with self.assertRaises(RunError):
                             run_selected(config, config_path)
                     else:
                         run_selected(config, config_path)
                 receipt = json.loads((root / "output/result.json").read_text())
-                if failed in ("a", "resource"):
+                if failed in ("a", "b", "resource"):
                     self.assertEqual(receipt["status"], "blocked")
-                    self.assertEqual(invoked, ["a"])
+                    self.assertEqual(invoked, ["a", "b"] if failed == "b"
+                                     else ["a"])
                 else:
                     self.assertEqual(invoked, ["a", "b", "c", "c_side"])
                     self.assertEqual(receipt["status"], "miss")
@@ -655,7 +656,9 @@ class TierReductionTests(unittest.TestCase):
                        {**passing, "protected_inputs_unchanged": False},
                        {**passing, "check2": {"protocol": "check-only"}},
                        {**passing, "measured_value": {}},
-                       correctness_receipt(common, ("a",))]
+                       correctness_receipt(common, ("a",)),
+                       correctness_receipt(common, ("b",)),
+                       correctness_receipt(common, ("b", selected))]
             nonsemantic = correctness_receipt(common, (selected,))
             nonsemantic["measured_value"][selected]["tiny"].pop("failure_kind")
             invalid.append(nonsemantic)
@@ -663,16 +666,11 @@ class TierReductionTests(unittest.TestCase):
                 with self.subTest(variant=variant, receipt=receipt):
                     with self.assertRaises(RunError):
                         combine_check5(tiers, lookup, receipt)
-            for failed, row in ((("b",), "only_c_passes"),
-                                ((selected,), "only_b_passes"),
-                                (("b", selected), "neither_passes")):
-                with self.subTest(variant=variant, failed=failed):
-                    result = combine_check5(
-                        tiers, lookup, correctness_receipt(common, failed))
-                    self.assertEqual(result["selection_table_row"], row)
-                    for key, label in (("b", "b"), (selected, "c")):
-                        self.assertEqual(result[label]["passes"],
-                                         key not in failed)
+            result = combine_check5(
+                tiers, lookup, correctness_receipt(common, (selected,)))
+            self.assertEqual(result["selection_table_row"], "only_b_passes")
+            self.assertTrue(result["b"]["passes"])
+            self.assertFalse(result["c"]["passes"])
             # A failure in the unselected C variant does not reject selected C.
             result = combine_check5(
                 tiers, lookup, correctness_receipt(common, (other,)))
