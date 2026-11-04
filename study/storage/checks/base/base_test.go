@@ -1240,11 +1240,14 @@ func TestRebuiltNameLookupsPreserveLogicalIDOrder(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					actual, err := json.Marshal(got)
+					// Encode as the checker does (workload.Answer omits an empty
+					// list, so nil and [] are equal) but without Canonical's sort,
+					// so order and multiplicity still have to match.
+					actual, err := json.Marshal(workload.Answer{Nodes: got})
 					if err != nil {
 						t.Fatal(err)
 					}
-					expected, err := json.Marshal(want)
+					expected, err := json.Marshal(workload.Answer{Nodes: want})
 					if err != nil {
 						t.Fatal(err)
 					}
