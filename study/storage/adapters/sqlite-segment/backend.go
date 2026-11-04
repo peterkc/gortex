@@ -118,6 +118,17 @@ func (Backend) Build(ctx context.Context, d dataset.Dataset, dir string) (adapte
 	if _, err = db.ExecContext(ctx, "ANALYZE"); err != nil {
 		return ref, stats, err
 	}
+	// dbstat is compiled into the existing modernc driver. This reports a
+	// table-page share separately; the complete mixed serving file still counts.
+	var graphPages int64
+	if err = db.QueryRowContext(ctx, `SELECT COALESCE(SUM(pgsize),0) FROM dbstat WHERE name IN
+  ('nodes','edges','files','metadata','sqlite_autoindex_nodes_1','sqlite_autoindex_metadata_1','nodes_name','nodes_file','edges_out','edges_in')`).Scan(&graphPages); err != nil {
+		return ref, stats, fmt.Errorf("graph dbstat: %w", err)
+	}
+	share := filepath.Join(dir, "graph-share.json")
+	if err = dataset.WriteJSON(share, map[string]any{"graph_table_page_bytes": graphPages, "scope": "dbstat graph tables and indexes; excludes shared/free pages and seal"}); err != nil {
+		return ref, stats, err
+	}
 	if err = closeDB(); err != nil {
 		return ref, stats, err
 	}
@@ -135,7 +146,7 @@ func (Backend) Build(ctx context.Context, d dataset.Dataset, dir string) (adapte
 	if err = os.Chmod(manifest, 0444); err != nil {
 		return ref, stats, err
 	}
-	for _, p := range []string{path, manifest, dir} {
+	for _, p := range []string{path, manifest, share, dir} {
 		f, e := os.Open(p)
 		if e != nil {
 			return ref, stats, e

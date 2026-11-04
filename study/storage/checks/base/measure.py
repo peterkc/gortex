@@ -15,6 +15,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from workflow_helpers import base_step_spec
+
 
 class RunError(RuntimeError):
     """A run cannot support the requested measurement claim."""
@@ -202,6 +205,8 @@ def validate_fixture_pins(config):
     if pins["schema"] != "design-c-fixtures/v1":
         raise RunError("unsupported reviewed fixture-pin schema")
     for label in ("tier1", "tier10"):
+        if label not in config["data"]:
+            continue
         item = config["data"][label]
         pinned = pins["tiers"][label]
         directory = Path(item["path"])
@@ -278,6 +283,9 @@ def validate_config(config, config_path):
         "safety_timeout_seconds", "memory_limits_bytes", "output_dir",
         "cgroup_root", "binaries", "data", "construction_selection_approved",
     }
+    if "step" in config:
+        required |= {"step", "c_variant"}
+        base_step_spec(config["step"], config["c_variant"])
     if set(config) != required or config["schema"] != "design-c-base-run/v1":
         raise RunError("config requires the exact documented fields")
     for key in ("runs", "safety_timeout_seconds"):
@@ -321,8 +329,12 @@ def validate_config(config, config_path):
         path = Path(binary["path"])
         if not path.is_absolute() or digest(path) != binary["sha256"]:
             raise RunError("missing or changed executable")
-    if set(config["data"]) != {"tiny", "tier1", "tier10", "tier100"}:
-        raise RunError("tiny and all three scaling fixture paths required")
+    expected_data = {"tiny", "tier1", "tier10", "tier100"}
+    if "step" in config:
+        spec = base_step_spec(config["step"], config["c_variant"])
+        expected_data = set(spec["tiers"])
+    if set(config["data"]) != expected_data:
+        raise RunError("exact selected scaling fixture paths required")
     for label, item in config["data"].items():
         path = Path(item["path"])
         if not path.is_absolute():
@@ -363,7 +375,8 @@ def run_command(command, log_path, remaining):
         return code
 
 
-def collect_run(directory, expected_adapter, data, *, full_protocol):
+def collect_run(directory, expected_adapter, data, *, full_protocol,
+                mode=None):
     reports = []
     semantic_failure = False
     for receipt_path in sorted(directory.glob("components-*.json")):
@@ -390,7 +403,14 @@ def collect_run(directory, expected_adapter, data, *, full_protocol):
         report = read_json(result_paths[0])
         if report["manifest_sha256"] != data["sha256"]:
             raise RunError("unmatched result manifest")
-        if bool(report.get("timing_only", False)) == full_protocol:
+        if mode in ("build-only", "check-only"):
+            field = "build_only" if mode == "build-only" else "check_only"
+            if report.get(field) is not True:
+                raise RunError("incorrect selected no-timing boundary")
+            if any(key in report for key in ("metrics", "query_latency_sha256",
+                                             "delta", "concurrent", "crash")):
+                raise RunError("no-timing result contains an unselected phase")
+        elif bool(report.get("timing_only", False)) == full_protocol:
             raise RunError("incorrect correctness/timing-only boundary")
         checks = [*report.get("checks", []), *report.get("delta_checks", []),
                   *report.get("concurrent", {}).get("checks", [])]
@@ -424,6 +444,10 @@ def collect_run(directory, expected_adapter, data, *, full_protocol):
         if not report["builds"]:
             raise RunError("missing construction records")
         for build in report["builds"]:
+            if mode == "build-only":
+                if "cpu_ns" in build or "duration_ns" in build:
+                    raise RunError("bytes result contains timing")
+                continue
             if (type(build.get("cpu_ns")) is not int
                     or build["cpu_ns"] <= 0):
                 raise RunError("missing positive construction CPU")
@@ -437,9 +461,11 @@ def collect_run(directory, expected_adapter, data, *, full_protocol):
         if semantic_failure:
             reports.append((report, {}))
             continue
-        if not rows:
+        if mode == "check-only" and not checks:
+            raise RunError("check-only result lacks checked answers")
+        if not rows and mode not in ("build-only", "check-only"):
             raise RunError("no hash-bound query timing samples")
-        reports.append((report, latency_groups(rows)))
+        reports.append((report, latency_groups(rows) if rows else {}))
     if not reports:
         raise RunError("no terminal component receipts")
     if semantic_failure:
@@ -448,7 +474,7 @@ def collect_run(directory, expected_adapter, data, *, full_protocol):
 
 
 def measure_adapter(config, output, label, adapter, data_label, deadline,
-                    *, full_protocol, pair_index=0):
+                    *, full_protocol, pair_index=0, mode=None):
     binary = config["binaries"][adapter]
     fixture = config["data"][data_label]
     binding_path = output / f"{label}.binding.json"
@@ -458,9 +484,14 @@ def measure_adapter(config, output, label, adapter, data_label, deadline,
                "-safety-timeout", f"{config['safety_timeout_seconds']}s",
                "-binding", str(binding_path), "-cgroup-root",
                config["cgroup_root"], "-min-query-samples",
-               "1" if full_protocol else str(MIN_QUERY_SAMPLES)]
-    if not full_protocol:
+               "1" if full_protocol or mode in ("build-only", "check-only")
+               else str(MIN_QUERY_SAMPLES)]
+    if mode in ("build-only", "check-only"):
+        command.append("-" + mode)
+    elif not full_protocol:
         command.append("-timing-only")
+        if mode in ("lookup-only", "base-only"):
+            command.append("-" + mode)
     binding = {
         "source_revision": config["source_revision"],
         "harness_sha256": binary["sha256"],
@@ -476,7 +507,7 @@ def measure_adapter(config, output, label, adapter, data_label, deadline,
     names = {"a": "sqlite-segment", "b": "pebble-bleve",
              "c": "parquet-base", "c_side": "parquet-side"}
     reports = collect_run(run_dir, names[adapter], fixture,
-                          full_protocol=full_protocol)
+                          full_protocol=full_protocol, mode=mode)
     if code != 0:
         raise RunError(f"unclassified adapter exit {code}")
     if not full_protocol:
@@ -486,7 +517,8 @@ def measure_adapter(config, output, label, adapter, data_label, deadline,
                 expected = (run_dir / "run-01" / "segments" / build["repo"])
                 if Path(build["ref"]["path"]) != expected:
                     raise RunError("unexpected segment path in run result")
-                inventory.append(artifact_inventory(build, report["adapter"]))
+                inventory.append(artifact_inventory(
+                    build, report["adapter"], bytes_only=mode == "build-only"))
             report["_inventory"] = inventory
             report["pair_index"] = pair_index
             report["_controller_started"] = controller_started
@@ -519,7 +551,7 @@ def valid_sha256(value):
         return False
 
 
-def artifact_inventory(build, adapter):
+def artifact_inventory(build, adapter, *, bytes_only=False):
     path = Path(build["ref"]["path"])
     identity = path.lstat()
     if not stat.S_ISDIR(identity.st_mode) or path.resolve() != path:
@@ -555,26 +587,49 @@ def artifact_inventory(build, adapter):
             raise RunError("unbound serving artifact")
         if adapter.startswith("parquet-"):
             verification = seal["verification"]
-            families = {"nodes": "nodes", "names": "nodes", "paths": "nodes",
-                        "out": "edges", "in": "edges", "files": "files",
-                        "symbols": "symbols", "content": "content",
-                        "vectors": "vectors"}
+            families = {"nodes": "nodes", "names": "nodes", "qnames": "nodes",
+                        "paths": "nodes", "edges": "edges", "out": "edges",
+                        "in": "edges", "files": "files", "symbols": "symbols",
+                        "content": "content", "vectors": "vectors",
+                        "ids": None, "terminals": None, "kinds": None}
             if set(verification) != set(families):
                 raise RunError("missing full-table verification witnesses")
             for name, witness in verification.items():
                 if (not valid_sha256(witness["input_sha256"])
                         or witness["input_sha256"] != witness["output_sha256"]
-                        or witness["rows"] != seal["meta"]["counts"][
-                            families[name]]
+                        or type(witness["rows"]) is not int
+                        or witness["rows"] < 0
+                        or (families[name] is not None
+                            and witness["rows"] != seal["meta"]["counts"][
+                                families[name]])
                         or type(witness["cpu_ns"]) is not int
                         or witness["cpu_ns"] < 0):
                     raise RunError("invalid full-table verification witness")
                 verification_cpu += witness["cpu_ns"]
+            counts = seal["meta"]["counts"]
+            if (verification["ids"]["rows"] != counts["nodes"]
+                    + verification["terminals"]["rows"]
+                    or verification["terminals"]["rows"] > 2 * counts["edges"]
+                    or verification["kinds"]["rows"] > counts["edges"]):
+                raise RunError("inconsistent local-ID verification counts")
     categories = {key: 0 for key in ("graph", "text", "vectors")}
     for item in files.values():
         categories[item["category"]] += item["bytes"]
     if sum(categories.values()) != build["artifact_bytes"]:
         raise RunError("artifact inventory is incomplete")
+    if bytes_only and adapter == "sqlite-segment":
+        share = read_json(path / "graph-share.json")
+        if (type(share["graph_table_page_bytes"]) is not int
+                or not 0 <= share["graph_table_page_bytes"]
+                <= categories["graph"]):
+            raise RunError("invalid SQLite graph table page share")
+    else:
+        share = None
+    if bytes_only:
+        return {"graph_table_page_share": share,
+                "repo": build["repo"], "path": str(path), "files": files,
+                "bytes": categories, "total": build["artifact_bytes"],
+                "identity": [identity.st_dev, identity.st_ino]}
     raw_cpu = build["cpu_ns"]
     if not 0 <= verification_cpu < raw_cpu:
         raise RunError("impossible construction/verification CPU accounting")
@@ -585,6 +640,35 @@ def artifact_inventory(build, adapter):
             "verification_cpu_ns": verification_cpu,
             "construction_cpu_ns": raw_cpu - verification_cpu,
             "verification": verification}
+
+
+def bytes_report(inventories, manifest):
+    if set(inventories) != {"a", "b", "c", "c_side"}:
+        raise RunError("bytes requires A, B, plain C and C with side index")
+    edges = manifest["counts"]["edges"]
+    if type(edges) is not int or edges <= 0:
+        raise RunError("bytes/edge requires positive edge count")
+    expected = set(manifest["repos"])
+    values = {}
+    for adapter, rows in inventories.items():
+        repos = [row["repo"] for row in rows]
+        if len(set(repos)) != len(repos) or set(repos) != expected:
+            raise RunError("bytes inventory omits or repeats a repository")
+        graph = sum(row["bytes"]["graph"] for row in rows)
+        values[adapter] = {
+            "scope": ("mixed file: graph+text+vectors, "
+                      "upper bound for graph bytes"
+                      if adapter == "a" else "graph serving files only"),
+            "graph_table_page_share": ([row.get("graph_table_page_share")
+                                        for row in rows]
+                                       if adapter == "a" else None),
+            "graph_serving_bytes": graph, "bytes_per_edge": graph / edges,
+            "total_serving_bytes": sum(row["total"] for row in rows),
+            "inventory": [{"repo": row["repo"], "files": row["files"]}
+                          for row in rows],
+        }
+    return {"step": "bytes", "tier": "tier1", "counts": manifest["counts"],
+            "measured_value": values}
 
 
 def remove_serving(directories, run_directory, receipt_path):
@@ -689,15 +773,17 @@ def lookup_verdict(candidate, reference):
             "insufficient_strata": insufficient, "measured_value": ratios}
 
 
-def base_verdict(candidate, a, b):
-    lookup = lookup_verdict(candidate, a)
+def base_verdict(candidate, a, b, *, tiers=("tier1", "tier10", "tier100"),
+                 lookup=None):
+    if lookup is None:
+        lookup = lookup_verdict(candidate, a)
     statuses = [lookup["status"]]
     reads = {}
     directions = {}
     observations = {}
     shared_reads = {}
     insufficient = []
-    for tier in ("tier1", "tier10", "tier100"):
+    for tier in tiers:
         required = ["name_hit", "name_miss", "in_calls", "traverse2",
                     "traverse3"]
         if tier != "tier1":
@@ -761,8 +847,160 @@ def output_hashes(directory):
     return hashes
 
 
+def combine_check5(tiers, lookup_result):
+    """Reduce saved observations without launching measurements."""
+    if len(tiers) != 3 or {row["step"] for row in tiers} != {
+            "check5-tier1", "check5-tier10", "check5-tier100"}:
+        raise RunError("one saved result for every Check 5 tier required")
+    variant = tiers[0]["c_variant"]
+    if variant not in ("plain", "side"):
+        raise RunError("invalid selected C variant")
+    selected = "c" if variant == "plain" else "c_side"
+    identity = ("source_revision", "recipe_sha256", "c_variant")
+    for row in [*tiers, lookup_result]:
+        if any(row[key] != tiers[0][key] for key in identity):
+            raise RunError("saved check source, policy or C variant differs")
+        if row["status"] not in ("pass", "miss", "partial"):
+            raise RunError("saved check is blocked or incomplete")
+    expected_lookup = "check1-plain" if variant == "plain" else "check1-side"
+    if lookup_result["step"] != expected_lookup:
+        raise RunError("selected Check 1 result required")
+    observations = {adapter: {} for adapter in ("a", "b", selected)}
+    for row in tiers:
+        tier = row["step"].removeprefix("check5-")
+        for adapter in observations:
+            if set(row["measured_value"][adapter]) != {tier}:
+                raise RunError("Check 5 result contains an unselected tier")
+            observations[adapter][tier] = row["measured_value"][adapter][tier]
+    lookup = lookup_result["measured_value"]
+    a, b, c = (observations[key] for key in ("a", "b", selected))
+    b_verdict = base_verdict(
+        b, a, b, lookup=lookup_verdict(lookup["b"], lookup["a"]))
+    c_verdict = base_verdict(
+        c, a, b, lookup=lookup_verdict(lookup[selected], lookup["a"]))
+    row, branch = choose_base(b_verdict, c_verdict,
+                              cpu_selection_approved=True)
+    return {"b": b_verdict, "c": c_verdict, "selection_table_row": row,
+            "branch_taken": branch, "c_variant": selected}
+
+
+def run_selected(config, config_path):
+    step, variant = config["step"], config["c_variant"]
+    spec = base_step_spec(step, variant)
+    output = canonical_output(config, config_path)
+    before = protected_snapshot(config, config_path)
+    protected_bytes = sum(Path(path).stat().st_size
+                          for path in before["files"])
+    finalize_seconds = finalization_reserve(protected_bytes)
+    output.mkdir(mode=0o700)
+    isolated = output / "environment"
+    isolated.mkdir()
+    for key in list(os.environ):
+        if key.startswith(("PRIME_", "RLM_", "GORTEX_")):
+            del os.environ[key]
+    for key in ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
+                "XDG_STATE_HOME", "XDG_RUNTIME_DIR", "TMPDIR"):
+        path = isolated / key.lower()
+        path.mkdir()
+        os.environ[key] = str(path)
+    os.environ.pop("GOMEMLIMIT", None)
+    os.environ.update(GOMAXPROCS="4", GOFLAGS="-mod=readonly", GOWORK="off")
+    deadline, _ = phase_deadlines(config["base"], config["job"],
+                                  finalization_seconds=finalize_seconds,
+                                  monotonic_now=time.monotonic(),
+                                  unix_now=time.time())
+    selected = "c_side" if variant == "side" else "c"
+    receipt = {"schema": "design-c-base-step/v1", "step": step,
+               "c_variant": variant, "status": "blocked",
+               "source_revision": config["source_revision"],
+               "recipe_sha256": config["recipe_sha256"],
+               "config_sha256": digest(config_path),
+               "approval_sha256": config["approval_sha256"],
+               "fixture_pins_sha256": validate_fixture_pins(config),
+               "binaries": config["binaries"], "data": config["data"],
+               "finalization": {"protected_bytes": protected_bytes,
+                                "reserve_seconds": finalize_seconds}}
+    reports = {adapter: {tier: [] for tier in spec["tiers"]}
+               for adapter in spec["adapters"]}
+    values = {adapter: {} for adapter in spec["adapters"]}
+    try:
+        for tier in spec["tiers"]:
+            manifest = read_json(Path(config["data"][tier]["path"])
+                                 / "manifest.json")
+            for index in range(1, spec["runs"] + 1):
+                adapters = spec["adapters"]
+                order = adapters[index - 1:] + adapters[:index - 1]
+                for adapter in order:
+                    label = f"{adapter}-{tier}-pair{index}"
+                    observed = measure_adapter(
+                        config, output, label, adapter, tier, deadline,
+                        full_protocol=False, pair_index=index,
+                        mode=("base-only" if step.startswith("check5-")
+                              else spec["mode"]))
+                    reports[adapter][tier].extend(observed)
+            for adapter in spec["adapters"]:
+                if step == "bytes":
+                    values[adapter] = reports[adapter][tier][0][0][
+                        "_inventory"]
+                elif step == "check2":
+                    values[adapter][tier] = {
+                        "verification": [row["verification"] for report, _
+                                         in reports[adapter][tier]
+                                         for row in report["_inventory"]],
+                        "checks": [check
+                                   for report, _ in reports[adapter][tier]
+                                   for check in report["checks"]],
+                        "storage_build_cpu_ns": sum(
+                            row["construction_cpu_ns"] for report, _
+                            in reports[adapter][tier]
+                            for row in report["_inventory"])}
+                else:
+                    values[adapter][tier] = aggregate(reports[adapter][tier],
+                                                      manifest)
+        if step == "bytes":
+            receipt.update(bytes_report(values, manifest), status="pass")
+        elif step == "check2":
+            receipt.update(status="pass", check2={"status": "pass"},
+                           measured_value=values)
+        elif step.startswith("check1-"):
+            candidate = "c" if step == "check1-plain" else "c_side"
+            verdict = lookup_verdict(values[candidate], values["a"])
+            receipt.update(status=verdict["status"], check1=verdict,
+                           measured_value=values,
+                           c_variant="plain" if candidate == "c" else "side")
+        else:
+            tier = spec["tiers"][0]
+            # Check 1 is a saved prerequisite, not another measurement here.
+            pending = {"status": "partial", "reason": "saved Check 1 required"}
+            verdicts = {adapter: base_verdict(
+                values[adapter], values["a"], values["b"], tiers=(tier,),
+                lookup=pending) for adapter in ("b", selected)}
+            receipt.update(status="partial", check5=verdicts,
+                           measured_value=values,
+                           reduction="combine tiers with selected Check 1")
+    except SemanticMismatch as error:
+        receipt.update(status="miss", failure_kind="semantic",
+                       error=str(error))
+        raise
+    except BaseException as error:
+        receipt.update(status="blocked", error=str(error),
+                       error_type=type(error).__name__)
+        raise
+    finally:
+        receipt["protected_inputs_unchanged"] = (
+            protected_snapshot(config, config_path) == before)
+        if not receipt["protected_inputs_unchanged"]:
+            receipt["status"] = "blocked"
+        receipt["output_sha256"] = output_hashes(output)
+        write_json(output / "result.json", receipt)
+    if receipt["status"] == "blocked":
+        raise RunError("selected check is blocked")
+
+
 def run(config, config_path):
     validate_config(config, config_path)
+    if "step" in config:
+        return run_selected(config, config_path)
     output = canonical_output(config, config_path)
     before = protected_snapshot(config, config_path)
     protected_bytes = sum(Path(path).stat().st_size
@@ -810,7 +1048,7 @@ def run(config, config_path):
             "cold_independent_keys": False,
             "combined_name_group": "reported only; directions use hit/miss"},
         "reference_b": {
-            "layout": "split-key-prefix/v1", "neutral_decode_passes": 1,
+            "layout": "dense-local-id/v2", "neutral_decode_passes": 1,
             "wal": "disabled for private bulk build; flush/close/seal sync",
             "kind_index": "omitted; unused by every Reader",
             "compaction": "flush/close only, no forced final compaction; "
@@ -918,7 +1156,7 @@ def run(config, config_path):
             final_lookup = lookup_verdict(results[selected], results["a"])
             witnesses = [item["verification"]
                          for item in results[selected]["tier1"]["inventory"]]
-            if not witnesses or any(len(item) != 9 for item in witnesses):
+            if not witnesses or any(len(item) != 14 for item in witnesses):
                 raise RunError("no complete tier1 round-trip verification")
             check2 = {"status": "pass", "verification": witnesses,
                       "target": "complete tier1 payload round trip and "
@@ -978,11 +1216,25 @@ def interrupted(signum, frame):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, required=True)
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--config", type=Path)
+    inputs.add_argument("--combine-check5", type=Path, nargs=3)
+    parser.add_argument("--lookup-result", type=Path)
+    parser.add_argument("--out", type=Path)
     args = parser.parse_args()
-    config_path = args.config.resolve(strict=True)
     signal.signal(signal.SIGTERM, interrupted)
-    run(read_json(config_path), config_path)
+    if args.combine_check5:
+        if args.lookup_result is None or args.out is None:
+            parser.error("reduction needs --lookup-result and fresh --out")
+        result = combine_check5(
+            [read_json(path) for path in args.combine_check5],
+            read_json(args.lookup_result))
+        write_json(args.out, result)
+    else:
+        if args.lookup_result is not None or args.out is not None:
+            parser.error("reduction arguments require --combine-check5")
+        config_path = args.config.resolve(strict=True)
+        run(read_json(config_path), config_path)
 
 
 if __name__ == "__main__":

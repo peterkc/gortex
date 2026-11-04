@@ -96,6 +96,16 @@ func TestMeasurementWorkersTinyCompleteQueries(t *testing.T) {
 		if metrics.Edits != 2 || len(metrics.Checkpoints) != 2 || metrics.Visibility.Count != 2 || metrics.MaxEditCPU <= 0 {
 			t.Fatal(metrics)
 		}
+		for _, edit := range metrics.EditSamples {
+			if edit.TextRebuildCPU <= 0 || edit.CPU < edit.TextRebuildCPU {
+				t.Fatal("D rebuild CPU missing or outside edit CPU", edit)
+			}
+		}
+		for _, cp := range metrics.Checkpoints {
+			if cp.HiddenBaseTextRows["content"] != len(conformance.Fixture().Content) || cp.HiddenBaseTextRows["symbols"] != len(conformance.Fixture().Symbols) {
+				t.Fatal("hidden base text count missing", cp)
+			}
+		}
 		var edits []editSample
 		if err = eachJSON(filepath.Join(c.Out, "delta-"+format, "edits.jsonl"), func(s editSample) error { edits = append(edits, s); return nil }); err != nil || !slices.Equal(edits, metrics.EditSamples) {
 			t.Fatal("durable edits differ from final report", edits, metrics.EditSamples, err)
@@ -105,8 +115,33 @@ func TestMeasurementWorkersTinyCompleteQueries(t *testing.T) {
 			t.Fatal("durable checkpoints differ from final report", checkpoints, metrics.Checkpoints, err)
 		}
 
+		var triple []sample
 		raw := map[int]map[string]map[string][]int64{}
 		if e := eachJSON(filepath.Join(c.Out, "delta-"+format, "answers.jsonl"), func(s sample) error {
+			triple = append(triple, s)
+			if len(triple) == 3 {
+				if triple[0].Form != "base" {
+					t.Fatal("dependent form precedes clean baseline", triple)
+				}
+				positions := map[int]bool{}
+				for _, v := range triple {
+					positions[v.TimingPosition] = true
+				}
+				if len(positions) != 3 || !positions[0] || !positions[1] || !positions[2] {
+					t.Fatal("timing positions not retained", triple)
+				}
+				forms := map[string]bool{}
+				for _, v := range triple {
+					if v.Size != triple[0].Size || v.Repeat != triple[0].Repeat || !reflect.DeepEqual(v.Query, triple[0].Query) {
+						t.Fatal("A/A samples are not query-paired", triple)
+					}
+					forms[v.Form] = true
+				}
+				if len(forms) != 3 {
+					t.Fatal("missing paired form", triple)
+				}
+				triple = nil
+			}
 			if s.ElapsedNS <= 0 {
 				t.Fatal("missing raw timing")
 			}
@@ -120,6 +155,9 @@ func TestMeasurementWorkersTinyCompleteQueries(t *testing.T) {
 			return nil
 		}); e != nil {
 			t.Fatal(e)
+		}
+		if len(triple) != 0 {
+			t.Fatal("incomplete timing triple", triple)
 		}
 		for _, cp := range metrics.Checkpoints {
 			empty := func() checkpoint {
@@ -282,7 +320,7 @@ func TestConfigRefusesMissingDriftAndWrongLimits(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		change func(*config)
-	}{{"missing-data", func(c *config) { c.Data = "" }}, {"missing-engine-limit", func(c *config) { c.Limits.Engine = 0 }}, {"wrong-link-cap", func(c *config) { c.LinkLimit = linkCap * 2 }}, {"missing-wall", func(c *config) { c.WallSeconds = 0 }}, {"reordered-sizes", func(c *config) { c.Sizes = []int{2, 1} }}, {"approval-drift", func(c *config) { c.ApprovalSHA256 = strings.Repeat("0", 64) }}} {
+	}{{"unknown-step", func(c *config) { c.Step = "check3" }}, {"missing-data", func(c *config) { c.Data = "" }}, {"missing-engine-limit", func(c *config) { c.Limits.Engine = 0 }}, {"wrong-link-cap", func(c *config) { c.LinkLimit = linkCap * 2 }}, {"missing-wall", func(c *config) { c.WallSeconds = 0 }}, {"reordered-sizes", func(c *config) { c.Sizes = []int{2, 1} }}, {"approval-drift", func(c *config) { c.ApprovalSHA256 = strings.Repeat("0", 64) }}} {
 		t.Run(tc.name, func(t *testing.T) {
 			bad := c
 			tc.change(&bad)
@@ -304,7 +342,7 @@ func TestThresholdBranchesKeepTargets(t *testing.T) {
 		points           []checkpoint
 		branch           string
 		threshold, lower *int
-	}{{"crossing", []checkpoint{{Size: 1, WorstRatio: 1.01}, {Size: 4, WorstRatio: 1.10}, {Size: 16, WorstRatio: 1.11}}, "observed-10-percent-crossing", intPtr(4), nil}, {"no-crossing", []checkpoint{{Size: 1, WorstRatio: 1}, {Size: 4, WorstRatio: 1.1}}, "no-crossing-lower-bound-only", nil, intPtr(4)}, {"first-size-misses", []checkpoint{{Size: 1, WorstRatio: 1.11}}, "crossing-at-smallest-size-threshold-unresolved", nil, nil}} {
+	}{{"crossing", []checkpoint{{Size: 1, ReadVerdict: map[string]string{"op": "pass"}}, {Size: 4, ReadVerdict: map[string]string{"op": "pass"}}, {Size: 16, ReadVerdict: map[string]string{"op": "miss"}}}, "observed-read-bound-crossing", intPtr(4), nil}, {"no-crossing", []checkpoint{{Size: 1, ReadVerdict: map[string]string{"op": "pass"}}, {Size: 4, ReadVerdict: map[string]string{"op": "pass"}}}, "no-crossing-lower-bound-only", nil, intPtr(4)}, {"first-size-misses", []checkpoint{{Size: 1, ReadVerdict: map[string]string{"op": "miss"}}}, "crossing-at-smallest-size-threshold-unresolved", nil, nil}} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := threshold(deltaReport{Checkpoints: tc.points})
 			if r.CompactionBranch != tc.branch || !reflect.DeepEqual(r.Threshold, tc.threshold) || !reflect.DeepEqual(r.LowerBound, tc.lower) {
@@ -322,7 +360,7 @@ func TestThresholdBranchesKeepTargets(t *testing.T) {
 		{"visibility", func(r *deltaReport) { r.Checkpoints[0].Visibility.P95 = 5000000001 }},
 		{"disk", func(r *deltaReport) { r.Checkpoints[0].ByteRatio = 2.01 }},
 		{"missing-disk", func(r *deltaReport) { r.Checkpoints[0].ByteRatio = 0 }},
-		{"read", func(r *deltaReport) { r.Checkpoints[0].WorstRatio = 1.1001 }},
+		{"read", func(r *deltaReport) { r.Checkpoints[0].ReadVerdict["op"] = "miss" }},
 		{"missing-samples", func(r *deltaReport) { r.Checkpoints[0].Visibility.Count = 0 }},
 		{"no-threshold", func(r *deltaReport) { r.LowerBound = nil }},
 		{"absent-checkpoint", func(r *deltaReport) { r.LowerBound = intPtr(32) }},
@@ -345,7 +383,7 @@ func TestThresholdBranchesKeepTargets(t *testing.T) {
 	}
 	r.MaxEditCPU = 9e9
 	r.Visibility.P95 = 9e9
-	r.Checkpoints = append(r.Checkpoints, checkpoint{Size: 32, MaxEditCPU: 9e9, Visibility: runner.Distribution{Count: 32, P95: 9e9}, WorstRatio: 1.2, ByteRatio: 1})
+	r.Checkpoints = append(r.Checkpoints, checkpoint{Size: 32, MaxEditCPU: 9e9, Visibility: runner.Distribution{Count: 32, P95: 9e9}, WorstRatio: 1.2, ReadVerdict: map[string]string{"op": "miss"}, ByteRatio: 1})
 	r.Threshold = intPtr(1)
 	r.LowerBound = nil
 	if !deltaPass(r) {
@@ -396,7 +434,7 @@ func TestMeasurementRefusesExistingOutputBeforeLaunch(t *testing.T) {
 }
 
 func passingReport() deltaReport {
-	return deltaReport{MaxEditCPU: 1, Visibility: runner.Distribution{Count: 1, P95: 1}, Checkpoints: []checkpoint{{Size: 1, MaxEditCPU: 1, Visibility: runner.Distribution{Count: 1, P95: 1}, WorstRatio: 1, ByteRatio: 1}}, LowerBound: intPtr(1)}
+	return deltaReport{MaxEditCPU: 1, Visibility: runner.Distribution{Count: 1, P95: 1}, Checkpoints: []checkpoint{{Size: 1, MaxEditCPU: 1, Visibility: runner.Distribution{Count: 1, P95: 1}, WorstRatio: 1, ReadVerdict: map[string]string{"op": "pass"}, ByteRatio: 1}}, LowerBound: intPtr(1)}
 }
 func completedReceipt(limit int64) externalResult {
 	return externalResult{State: "completed", Removed: true, Memory: runner.ComponentMemory{PID: 1, LimitBytes: limit, PeakBytes: 1, PeakRSSBytes: 1, Status: "completed", ExitCode: 0}}
@@ -433,7 +471,7 @@ func TestSelectionAndLinkReceiptDecisions(t *testing.T) {
 		t.Fatal(r)
 	}
 	// No read regime passes for Arrow. Its shortest completed edit still counts.
-	a.Checkpoints[0].WorstRatio = 1.2
+	a.Checkpoints[0].ReadVerdict["op"] = "miss"
 	a = threshold(a)
 	p.Checkpoints[0].Size = 4
 	p.Checkpoints[0].Visibility.Count = 4

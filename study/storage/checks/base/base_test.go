@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/cockroachdb/pebble/v2"
 	"gxstudy/runner"
+	"io"
 	"iter"
 	"os"
 	"path/filepath"
@@ -19,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/blevesearch/bleve/v2"
+	"github.com/parquet-go/parquet-go"
 
 	"gxstudy/adapter"
 	"gxstudy/conformance"
@@ -355,7 +358,7 @@ func TestSingleDecodeFanoutAndCounts(t *testing.T) {
 		d := conformance.Fixture()
 		root := t.TempDir()
 		spools := map[string]*rowSpool{}
-		for _, name := range []string{"nodes", "names", "paths", "out", "in", "files", "symbols", "content", "vectors"} {
+		for _, name := range []string{"nodes", "ids", "names", "qnames", "paths", "edges", "out", "in", "terminals", "kinds", "files", "symbols", "content", "vectors"} {
 			spool, err := newRowSpool(filepath.Join(root, name))
 			if err != nil {
 				t.Fatal(err)
@@ -585,5 +588,260 @@ func TestBulkCleanupRejectsNativeRecordBearingWAL(t *testing.T) {
 		if _, err := os.Lstat(name); err != nil {
 			t.Fatal("rejected native WAL removed", name, err)
 		}
+	}
+}
+
+func resealFixture(t *testing.T, ref adapter.SegmentRef) adapter.SegmentRef {
+	t.Helper()
+	var manifest seal
+	if err := dataset.ReadJSON(filepath.Join(ref.Path, "seal.json"), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	for i := range manifest.Files {
+		path := filepath.Join(ref.Path, manifest.Files[i].Name)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hash, err := dataset.Hash(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		manifest.Files[i].Size = info.Size()
+		manifest.Files[i].SHA256 = hash
+	}
+	raw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(ref.Path, "seal.json"), raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256(raw)
+	ref.Digest = hex.EncodeToString(hash[:])
+	ref.Version = ref.Digest
+	return ref
+}
+func TestCanonicalPayloadAndIDOnlyInventory(t *testing.T) {
+	for _, side := range []bool{false, true} {
+		t.Run(fmt.Sprint(side), func(t *testing.T) {
+			d := conformance.Fixture()
+			d.Edges = append(d.Edges, d.Edges[0], dataset.Edge{From: "a", To: "external", Kind: "calls"})
+			ref, s := openFixture(t, Backend{SideIndex: side}, d)
+			compareGraph(t, d, s)
+			for _, name := range []string{"nodes", "edges", "ids", "names", "qnames", "paths", "out", "in"} {
+				count := 0
+				err := s.scan(context.Background(), name, nil, func(r row) error {
+					count++
+					if r.ID != "" {
+						t.Fatalf("logical ID copied into %s", name)
+					}
+					if name == "nodes" || name == "edges" {
+						if len(r.Raw) == 0 || r.Key != "" {
+							t.Fatalf("missing canonical payload or string primary key: %s", name)
+						}
+					} else if len(r.Raw) != 0 {
+						t.Fatalf("lookup duplicates payload: %s", name)
+					}
+					if numericTable(name) && r.Key != "" {
+						t.Fatalf("noninteger graph key: %s", name)
+					}
+					return nil
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := len(d.Nodes)
+				if name == "edges" || name == "out" || name == "in" {
+					want = len(d.Edges)
+				}
+				if name == "ids" {
+					want++
+				}
+				if count != want {
+					t.Fatalf("%s rows=%d want=%d", name, count, want)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(ref.Path, "ids.ranges.parquet")); !os.IsNotExist(err) {
+				t.Fatal("second logical-ID lookup copy", err)
+			}
+			count := s.seal.Verification["ids"].Rows
+			for _, name := range []string{"out", "in"} {
+				info, err := os.Stat(filepath.Join(ref.Path, name+".offsets"))
+				if err != nil || info.Size() != 16+8*(count+1)*s.seal.Verification["kinds"].Rows {
+					t.Fatal("missing dense N+1 offsets", info, err)
+				}
+			}
+			if side {
+				it, err := s.side.NewIter(nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for ok := it.First(); ok; ok = it.Next() {
+					if len(it.Value()) != 8 {
+						t.Fatal("side index stores a payload")
+					}
+				}
+				if err = errors.Join(it.Error(), it.Close()); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+func TestCorruptLocalIDsAndOffsetsRefuseBeforeServing(t *testing.T) {
+	for _, side := range []bool{false, true} {
+		for _, corrupt := range []string{"offsets", "duplicate-node", "duplicate-edge"} {
+			t.Run(fmt.Sprintf("side=%v/%s", side, corrupt), func(t *testing.T) {
+				b := Backend{SideIndex: side}
+				ref, s := openFixture(t, b, conformance.Fixture())
+				var rows []row
+				name := "nodes"
+				if corrupt == "duplicate-edge" {
+					name = "edges"
+				}
+				if corrupt != "offsets" {
+					if err := s.scan(context.Background(), name, nil, func(r row) error { rows = append(rows, r); return nil }); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := s.Close(); err != nil {
+					t.Fatal(err)
+				}
+				expected := "local ID"
+				if corrupt == "offsets" {
+					path := filepath.Join(ref.Path, "in.offsets")
+					info, err := os.Stat(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err = os.Truncate(path, info.Size()-1); err != nil {
+						t.Fatal(err)
+					}
+					expected = "truncated offset directory"
+				} else {
+					rows[1].Local = rows[0].Local
+					file, err := os.Create(filepath.Join(ref.Path, name+".parquet"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					writer := parquet.NewGenericWriter[row](file)
+					if _, err = writer.Write(rows); err != nil {
+						t.Fatal(err)
+					}
+					if err = errors.Join(writer.Close(), file.Close()); err != nil {
+						t.Fatal(err)
+					}
+				}
+				ref = resealFixture(t, ref)
+				opened, err := b.Open(context.Background(), ref.Path, ref)
+				if opened != nil {
+					opened.Close()
+					t.Fatal("corrupt sealed base served a reader")
+				}
+				if err == nil || !strings.Contains(err.Error(), expected) {
+					t.Fatalf("missing named refusal %q: %v", expected, err)
+				}
+			})
+		}
+	}
+}
+
+func TestBinaryPayloadRoundTripsWithoutRecordJSON(t *testing.T) {
+	d := conformance.Fixture()
+	for _, node := range d.Nodes {
+		raw, err := encodeNode(node)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := decodeNode(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertRecords(t, []dataset.Node{node}, []dataset.Node{got})
+		if _, err = decodeNode(raw[:len(raw)-1]); err == nil {
+			t.Fatal("truncated payload accepted")
+		}
+	}
+	for _, edge := range d.Edges {
+		raw, err := encodeEdge(edge, 0, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := decodeEdge(raw, func(id uint64) (string, error) {
+			if id == 0 {
+				return edge.From, nil
+			}
+			return edge.To, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertRecords(t, []dataset.Edge{edge}, []dataset.Edge{got})
+	}
+}
+func TestDenseKindOffsetsIncludeZeroDegreeAndTerminals(t *testing.T) {
+	dir := t.TempDir()
+	file, err := os.Create(filepath.Join(dir, "out.ranges.parquet"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := parquet.NewGenericWriter[rowRange](file)
+	ranges := []rowRange{{Numeric: true, Grouped: true, Tag: 0, Number: 1, First: 0, End: 2}, {Numeric: true, Grouped: true, Tag: 1, Number: 3, First: 2, End: 3}}
+	if _, err = writer.Write(ranges); err != nil {
+		t.Fatal(err)
+	}
+	if err = errors.Join(writer.Close(), file.Close()); err != nil {
+		t.Fatal(err)
+	}
+	if err = writeOffsets(context.Background(), dir, "out", 4, 2); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "out.offsets"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []uint64{4, 2, 0, 0, 2, 2, 2, 2, 2, 2, 2, 3}
+	if len(raw) != 8*len(want) {
+		t.Fatal("wrong N+1 directory length", len(raw))
+	}
+	for i, value := range want {
+		if got := binary.LittleEndian.Uint64(raw[i*8:]); got != value {
+			t.Fatalf("offset %d=%d want=%d", i, got, value)
+		}
+	}
+}
+
+func TestFixedWidthLocalColumnsAllowOpenTimeProjection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nodes.parquet")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := parquet.NewGenericWriter[row](file)
+	if _, err = writer.Write([]row{{Local: 0, Number: 0, Raw: []byte("payload once")}, {Local: 1, Number: 1, Raw: []byte("second payload")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = errors.Join(writer.Close(), file.Close()); err != nil {
+		t.Fatal(err)
+	}
+	table, err := openTable(path, newBlockCache(4<<20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer table.file.Close()
+	type localRow struct {
+		Local  uint64 `parquet:"local,plain,uncompressed"`
+		Number uint64 `parquet:"number,plain,uncompressed"`
+	}
+	reader := parquet.NewGenericReader[localRow](table.parquet)
+	defer reader.Close()
+	got := make([]localRow, 2)
+	n, err := reader.Read(got)
+	if err != nil && err != io.EOF {
+		t.Fatal(err)
+	}
+	if n != 2 || got[0].Local != 0 || got[1].Local != 1 || got[1].Number != 1 {
+		t.Fatal("local ID projection changed", got, n)
 	}
 }

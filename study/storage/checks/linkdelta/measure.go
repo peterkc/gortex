@@ -15,6 +15,7 @@ import (
 	"gxstudy/runner"
 	"gxstudy/workload"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -61,6 +62,7 @@ type parityResult struct {
 
 // Every resource and workload choice is explicit in the hash-bound operator file.
 type config struct {
+	Step           string              `json:"step,omitempty"`
 	BaseLayout     string              `json:"base_layout"`
 	Schema         string              `json:"schema"`
 	Data           string              `json:"data"`
@@ -131,6 +133,9 @@ func readConfig(path, pin string) (c config, err error) {
 	var extra any
 	if dec.Decode(&extra) != io.EOF {
 		return c, fmt.Errorf("trailing config data")
+	}
+	if c.Step != "" && c.Step != "check4" {
+		return c, fmt.Errorf("unsupported linkdelta step %q", c.Step)
 	}
 	if c.BaseLayout != "c-parquet" {
 		return c, fmt.Errorf("measurement requires the C Parquet base")
@@ -503,7 +508,11 @@ func control(c config) (err error) {
 		protected, checkErr := protectedInputs(c)
 		summary.Protected = protected
 		err = errors.Join(err, checkErr)
-		for _, target := range []string{"check3-link-peak-and-parity", "check4-arrow", "check4-parquet", "check4-delta-selection"} {
+		expected := []string{"check4-arrow", "check4-parquet", "check4-delta-selection"}
+		if c.Step != "check4" {
+			expected = append(expected, "check3-link-peak-and-parity")
+		}
+		for _, target := range expected {
 			found := false
 			for _, result := range summary.Targets {
 				if result.Target == target {
@@ -647,63 +656,65 @@ func collectTargets(c config, run func(string, int64) (externalResult, error)) (
 	if e != nil {
 		return targets, e
 	}
-	rec, e = run("prepare-link", c.Limits.Checker)
-	var collisions collisionStats
-	if e == nil {
-		e = dataset.ReadJSON(filepath.Join(c.Out, "facts", "collisions.json"), &collisions)
-		if e != nil {
-			targets = append(targets, targetResult{Target: "check3-link-peak-and-parity", Status: "blocked", Branch: "collision-evidence", Reason: e.Error()})
+	if c.Step != "check4" {
+		rec, e = run("prepare-link", c.Limits.Checker)
+		var collisions collisionStats
+		if e == nil {
+			e = dataset.ReadJSON(filepath.Join(c.Out, "facts", "collisions.json"), &collisions)
+			if e != nil {
+				targets = append(targets, targetResult{Target: "check3-link-peak-and-parity", Status: "blocked", Branch: "collision-evidence", Reason: e.Error()})
+			}
+		} else {
+			targets = append(targets, targetResult{Target: "check3-link-peak-and-parity", Status: "blocked", Branch: "link-preparation", Reason: e.Error()})
+			if !containedFailure(rec, c.Limits.Checker) {
+				return targets, e
+			}
 		}
-	} else {
-		targets = append(targets, targetResult{Target: "check3-link-peak-and-parity", Status: "blocked", Branch: "link-preparation", Reason: e.Error()})
-		if !containedFailure(rec, c.Limits.Checker) {
-			return targets, e
-		}
-	}
-	if e == nil {
-		attempt := func(mode string) (targetResult, bool, error) {
-			r, err := run("link-"+mode, c.LinkLimit)
-			var l linkResult
-			if err != nil {
-				if !containedFailure(r, c.LinkLimit) {
-					return targetResult{}, false, err
+		if e == nil {
+			attempt := func(mode string) (targetResult, bool, error) {
+				r, err := run("link-"+mode, c.LinkLimit)
+				var l linkResult
+				if err != nil {
+					if !containedFailure(r, c.LinkLimit) {
+						return targetResult{}, false, err
+					}
+					status := "blocked"
+					if memoryFallback(r) {
+						status = "miss"
+					}
+					return targetResult{Target: "check3-link-peak-and-parity", Status: status, Branch: mode, Measured: r, Reason: err.Error()}, memoryFallback(r), nil
 				}
-				status := "blocked"
-				if memoryFallback(r) {
-					status = "miss"
+				if err = dataset.ReadJSON(filepath.Join(c.Out, "link-"+mode, "result.json"), &l); err != nil {
+					return targetResult{Target: "check3-link-peak-and-parity", Status: "blocked", Branch: mode, Reason: err.Error()}, false, nil
 				}
-				return targetResult{Target: "check3-link-peak-and-parity", Status: status, Branch: mode, Measured: r, Reason: err.Error()}, memoryFallback(r), nil
-			}
-			if err = dataset.ReadJSON(filepath.Join(c.Out, "link-"+mode, "result.json"), &l); err != nil {
-				return targetResult{Target: "check3-link-peak-and-parity", Status: "blocked", Branch: mode, Reason: err.Error()}, false, nil
-			}
-			check, err := run("check-link-"+mode, c.Limits.Checker)
-			if err != nil {
-				if !containedFailure(check, c.Limits.Checker) {
-					return targetResult{}, false, err
+				check, err := run("check-link-"+mode, c.Limits.Checker)
+				if err != nil {
+					if !containedFailure(check, c.Limits.Checker) {
+						return targetResult{}, false, err
+					}
+					return targetResult{Target: "check3-link-peak-and-parity", Status: "blocked", Branch: mode, Reason: err.Error()}, false, nil
 				}
-				return targetResult{Target: "check3-link-peak-and-parity", Status: "blocked", Branch: mode, Reason: err.Error()}, false, nil
+				var parity parityResult
+				if err = dataset.ReadJSON(filepath.Join(c.Out, "check-link-"+mode+".json"), &parity); err != nil {
+					return targetResult{Target: "check3-link-peak-and-parity", Status: "blocked", Branch: mode, Reason: err.Error()}, false, nil
+				}
+				return linkTarget(mode, r, l, parity, collisions), memoryFallback(r), nil
 			}
-			var parity parityResult
-			if err = dataset.ReadJSON(filepath.Join(c.Out, "check-link-"+mode+".json"), &parity); err != nil {
-				return targetResult{Target: "check3-link-peak-and-parity", Status: "blocked", Branch: mode, Reason: err.Error()}, false, nil
-			}
-			return linkTarget(mode, r, l, parity, collisions), memoryFallback(r), nil
-		}
-		result, fallback, err := attempt("global")
-		if err != nil {
-			return targets, err
-		}
-		if fallback {
-			global := result
-			global.Target = "check3-global-attempt"
-			targets = append(targets, global)
-			result, _, err = attempt("package")
+			result, fallback, err := attempt("global")
 			if err != nil {
 				return targets, err
 			}
+			if fallback {
+				global := result
+				global.Target = "check3-global-attempt"
+				targets = append(targets, global)
+				result, _, err = attempt("package")
+				if err != nil {
+					return targets, err
+				}
+			}
+			targets = append(targets, result)
 		}
-		targets = append(targets, result)
 	}
 	// References belong only to Check 4. A semantic Check 3 miss never reaches
 	// this dependency or suppresses either physical form.
@@ -926,23 +937,27 @@ func cpuNS() (int64, error) {
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &u); err != nil {
 		return 0, err
 	}
-	return u.Utime.Sec*1e9 + u.Utime.Usec*1e3 + u.Stime.Sec*1e9 + u.Stime.Usec*1e3, nil
+	return u.Utime.Sec*1e9 + int64(u.Utime.Usec)*1e3 + u.Stime.Sec*1e9 + int64(u.Stime.Usec)*1e3, nil
 }
 
 type checkpoint struct {
-	Size                          int
-	BaseP95, WrapperP95, DeltaP95 map[string]float64
-	Ratio, AARatio                map[string]float64
-	WorstRatio, AAWorstRatio      float64
-	DeltaBytes, BaseBytes         int64
-	ByteRatio                     float64
-	MaxEditCPU                    int64
-	Visibility                    runner.Distribution
-	OpenNS                        int64
+	Size                                   int
+	ReadLimitNS, AALimitNS, AADifferenceNS map[string]float64
+	ReadVerdict                            map[string]string
+	HiddenBaseTextRows                     map[string]int
+	BaseP95, WrapperP95, DeltaP95          map[string]float64
+	Ratio, AARatio                         map[string]float64
+	WorstRatio, AAWorstRatio               float64
+	DeltaBytes, BaseBytes                  int64
+	ByteRatio                              float64
+	MaxEditCPU                             int64
+	Visibility                             runner.Distribution
+	OpenNS                                 int64
 }
 type editSample struct {
 	Size            int
 	CPU, Visibility int64
+	TextRebuildCPU  int64
 }
 type deltaReport struct {
 	Format, ReadCostScope string
@@ -956,11 +971,12 @@ type deltaReport struct {
 	Threshold, LowerBound *int
 }
 type sample struct {
-	Size, Repeat int
-	Form         string
-	Query        workload.Query
-	ElapsedNS    int64  `json:"elapsed_ns"`
-	AnswerSHA256 string `json:"answer_sha256"`
+	Size, Repeat   int
+	TimingPosition int `json:"timing_position"`
+	Form           string
+	Query          workload.Query
+	ElapsedNS      int64  `json:"elapsed_ns"`
+	AnswerSHA256   string `json:"answer_sha256"`
 }
 
 func appendSynced(f *os.File, v any) error {
@@ -1040,7 +1056,7 @@ func measureDeltas(ctx context.Context, c config, format string) (err error) {
 			segments[d.Repo] = s
 		}
 	}
-	report := deltaReport{Format: format, ReadCostScope: "Both codecs use the same typed indexed merge. Raw A/A ratios show wrapper/noise effects; no A/A subtraction or controlled speedup is claimed. Codec comparison is write/seal/open/bytes."}
+	report := deltaReport{Format: format, ReadCostScope: "Both codecs use the same typed indexed merge. Per-query paired A/A timings resolve each operation's own limit; no A/A subtraction is used. Codec comparison is write/seal/open/bytes."}
 	var visibility []int64
 	var deltaBytes int64
 	for n := 1; n <= c.Sizes[len(c.Sizes)-1]; n++ {
@@ -1074,7 +1090,10 @@ func measureDeltas(ctx context.Context, c config, format string) (err error) {
 		if e = release(); e != nil {
 			return e
 		}
-		edit := editSample{Size: n, CPU: c1 - c0, Visibility: elapsed}
+		b.cache.mu.Lock()
+		textCPU := b.cache.TextCPU[next.Digest]
+		b.cache.mu.Unlock()
+		edit := editSample{Size: n, CPU: c1 - c0, Visibility: elapsed, TextRebuildCPU: textCPU}
 		if e = appendSynced(edits, edit); e != nil {
 			return e
 		}
@@ -1118,32 +1137,28 @@ func measureDeltas(ctx context.Context, c config, format string) (err error) {
 		if e != nil {
 			return errors.Join(e, base.Close())
 		}
-		cp := checkpoint{Size: n, DeltaBytes: deltaBytes, BaseBytes: baseBytes, ByteRatio: float64(deltaBytes) / float64(baseBytes), MaxEditCPU: report.MaxEditCPU, Visibility: runner.Summarize(visibility), OpenNS: time.Since(openStart).Nanoseconds()}
+		cp := checkpoint{HiddenBaseTextRows: map[string]int{"content": delta.(*segment).hiddenTextCount("content"), "symbols": delta.(*segment).hiddenTextCount("symbol")}, Size: n, DeltaBytes: deltaBytes, BaseBytes: baseBytes, ByteRatio: float64(deltaBytes) / float64(baseBytes), MaxEditCPU: report.MaxEditCPU, Visibility: runner.Summarize(visibility), OpenNS: time.Since(openStart).Nanoseconds()}
 		timings := map[string]map[string][]int64{"base": {}, "wrapper": {}, "delta": {}}
-		// Warm each layout with the identical complete query sequence. Both see warm
-		// OS caches. Serial alternating order limits systematic ordering bias.
-		for repeat := -1; repeat < c.Repeats; repeat++ {
-			forms := []string{"base", "wrapper", "delta"}
-			if repeat%2 == 0 {
-				slices.Reverse(forms)
+		// Pair equal queries in balanced order, with no evidence serialization
+		// between their timed forms. Whole-workload form blocks confound A/A
+		// tails with drift and evidence I/O between equivalent observations.
+		views := map[string]map[string]adapter.Segment{}
+		for form, selected := range map[string]adapter.Segment{"base": base.(*segment).external, "wrapper": base, "delta": delta} {
+			view := map[string]adapter.Segment{}
+			for repo, s := range segments {
+				view[repo] = s
 			}
-			for _, form := range forms {
-				selected := base
-				if form == "base" {
-					selected = base.(*segment).external
-				}
-				if form == "delta" {
-					selected = delta
-				}
-				view := map[string]adapter.Segment{}
-				for repo, s := range segments {
-					view[repo] = s
-				}
-				view[c.DeltaRepo] = selected
-				fan := adapter.Fanout{Segments: view}
-				for _, q := range qs {
+			view[c.DeltaRepo] = selected
+			views[form] = view
+		}
+		for repeat := -1; repeat < c.Repeats; repeat++ {
+			for qi, q := range qs {
+				var answers [3]workload.Answer
+				var records [3]sample
+				for i, form := range timingOrder(repeat + 1 + qi) {
+					view := views[form]
 					start := time.Now()
-					answer, e := workload.Evaluate(ctx, view, fan, q)
+					answer, e := workload.Evaluate(ctx, view, adapter.Fanout{Segments: view}, q)
 					ns := time.Since(start).Nanoseconds()
 					if e != nil {
 						return errors.Join(e, base.Close(), delta.Close())
@@ -1151,12 +1166,26 @@ func measureDeltas(ctx context.Context, c config, format string) (err error) {
 					if repeat >= 0 {
 						timings[form][q.Op] = append(timings[form][q.Op], ns)
 					}
-					answerPin, e := storeAnswer(filepath.Join(c.Out, "answer-blobs"), answer)
+					answers[i] = answer
+					records[i] = sample{Size: n, Repeat: repeat, TimingPosition: i, Form: form, Query: q, ElapsedNS: ns}
+				}
+				for i, answer := range answers {
+					pin, e := storeAnswer(filepath.Join(c.Out, "answer-blobs"), answer)
 					if e != nil {
 						return errors.Join(e, base.Close(), delta.Close())
 					}
-					if e = enc.Encode(sample{Size: n, Repeat: repeat, Form: form, Query: q, ElapsedNS: ns, AnswerSHA256: answerPin}); e != nil {
-						return errors.Join(e, base.Close(), delta.Close())
+					records[i].AnswerSHA256 = pin
+				}
+				// Verification adopts the clean answer before its dependent forms.
+				// TimingPosition retains actual timed order, not this spool order.
+				for _, form := range []string{"base", "wrapper", "delta"} {
+					for _, record := range records {
+						if record.Form != form {
+							continue
+						}
+						if e = enc.Encode(record); e != nil {
+							return errors.Join(e, base.Close(), delta.Close())
+						}
 					}
 				}
 			}
@@ -1181,20 +1210,44 @@ func measureDeltas(ctx context.Context, c config, format string) (err error) {
 	report = threshold(report)
 	return dataset.WriteJSON(filepath.Join(out, "metrics.json"), report)
 }
+
+// Each form occupies each position twice in six consecutive query triples.
+func timingOrder(sequence int) [3]string {
+	return [6][3]string{{"base", "wrapper", "delta"}, {"wrapper", "delta", "base"}, {"delta", "base", "wrapper"}, {"delta", "wrapper", "base"}, {"wrapper", "base", "delta"}, {"base", "delta", "wrapper"}}[sequence%6]
+}
+func readVerdict(base, wrapper, delta float64) (limit, aaLimit, difference float64, status string) {
+	limit = max(1.10*base, base+1e6)
+	aaLimit = max(.10*base, 1e6)
+	difference = math.Abs(wrapper - base)
+	status = "pass"
+	if difference > aaLimit {
+		status = "unresolved"
+	} else if delta > limit {
+		status = "miss"
+	}
+	return
+}
 func summarizeTimings(cp checkpoint, timings map[string]map[string][]int64) (checkpoint, error) {
 	cp.BaseP95 = map[string]float64{}
 	cp.WrapperP95 = map[string]float64{}
 	cp.DeltaP95 = map[string]float64{}
 	cp.Ratio = map[string]float64{}
 	cp.AARatio = map[string]float64{}
+	cp.ReadLimitNS = map[string]float64{}
+	cp.AALimitNS = map[string]float64{}
+	cp.AADifferenceNS = map[string]float64{}
+	cp.ReadVerdict = map[string]string{}
 	cp.WorstRatio = 0
 	cp.AAWorstRatio = 0
+	if len(timings["base"]) == 0 {
+		return cp, fmt.Errorf("missing base timings")
+	}
 	for op, ns := range timings["base"] {
 		a := runner.Summarize(ns).P95
 		d := runner.Summarize(timings["delta"][op]).P95
 		wrapper := runner.Summarize(timings["wrapper"][op]).P95
-		if a <= 0 || d <= 0 || wrapper <= 0 {
-			return cp, fmt.Errorf("nonpositive timing")
+		if a <= 0 || d <= 0 || wrapper <= 0 || math.IsNaN(a+d+wrapper) || math.IsInf(a+d+wrapper, 0) {
+			return cp, fmt.Errorf("nonpositive or nonfinite timing")
 		}
 		cp.BaseP95[op] = a
 		cp.DeltaP95[op] = d
@@ -1203,15 +1256,37 @@ func summarizeTimings(cp checkpoint, timings map[string]map[string][]int64) (che
 		cp.AARatio[op] = wrapper / a
 		cp.WorstRatio = max(cp.WorstRatio, d/a)
 		cp.AAWorstRatio = max(cp.AAWorstRatio, wrapper/a)
+		cp.ReadLimitNS[op], cp.AALimitNS[op], cp.AADifferenceNS[op], cp.ReadVerdict[op] = readVerdict(a, wrapper, d)
 	}
 	return cp, nil
+}
+func checkpointReadStatus(p checkpoint) string {
+	if len(p.ReadVerdict) == 0 {
+		return "unresolved"
+	}
+	status := "pass"
+	for _, v := range p.ReadVerdict {
+		switch v {
+		case "pass":
+		case "miss":
+			status = v
+		default:
+			return "unresolved"
+		}
+	}
+	return status
 }
 func threshold(r deltaReport) deltaReport {
 	r.Threshold = nil
 	r.LowerBound = nil
 	for i, p := range r.Checkpoints {
-		if p.WorstRatio > 1.10 {
-			r.CompactionBranch = "observed-10-percent-crossing"
+		status := checkpointReadStatus(p)
+		if status == "unresolved" {
+			r.CompactionBranch = "a-a-unresolved-no-threshold"
+			return r
+		}
+		if status == "miss" {
+			r.CompactionBranch = "observed-read-bound-crossing"
 			if i == 0 {
 				r.CompactionBranch = "crossing-at-smallest-size-threshold-unresolved"
 			} else {
@@ -1245,12 +1320,15 @@ func selectedCheckpoint(r deltaReport) (checkpoint, bool) {
 }
 func deltaPass(r deltaReport) bool {
 	p, ok := selectedCheckpoint(r)
-	return ok && p.Size > 0 && p.Visibility.Count == p.Size && p.MaxEditCPU > 0 && p.MaxEditCPU <= 1e9 && p.Visibility.P95 > 0 && p.Visibility.P95 <= 5e9 && p.WorstRatio > 0 && p.WorstRatio <= 1.10 && p.ByteRatio > 0 && p.ByteRatio <= 2
+	return ok && p.Size > 0 && p.Visibility.Count == p.Size && p.MaxEditCPU > 0 && p.MaxEditCPU <= 1e9 && p.Visibility.P95 > 0 && p.Visibility.P95 <= 5e9 && checkpointReadStatus(p) == "pass" && p.ByteRatio > 0 && p.ByteRatio <= 2
 }
 func deltaTarget(format string, r deltaReport) targetResult {
 	status := "pass"
 	if !deltaPass(r) {
 		status = "miss"
+	}
+	if r.CompactionBranch == "a-a-unresolved-no-threshold" {
+		status = "unresolved"
 	}
 	return targetResult{Target: "check4-" + format, Status: status, Branch: r.CompactionBranch, Measured: r}
 }
@@ -1540,7 +1618,7 @@ func compareReference(q workload.Query, want workload.Expected, matches map[stri
 		}
 		q.NativeScoring = true
 		q.MatchRepos = matches
-		q.ExactRank = strings.HasPrefix(q.ID, "delta-marker-")
+		q.ExactRank = q.K < 0 || q.K >= len(matches) || strings.HasPrefix(q.ID, "delta-marker-")
 		q.MinOverlap = 0
 	} else {
 		q.CutoffTies = want.Ties

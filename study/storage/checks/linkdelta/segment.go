@@ -8,6 +8,7 @@ import (
 	"github.com/blevesearch/bleve/v2"
 	"gxstudy/adapter"
 	"gxstudy/dataset"
+	"iter"
 	"math"
 	"slices"
 	"strings"
@@ -16,9 +17,12 @@ import (
 type baseResources interface {
 	adapter.Segment
 	TextIndex(string) (bleve.Index, error)
+	VectorRows(context.Context) iter.Seq2[dataset.Vector, error]
 }
 type layer struct {
-	symbols, content     bleve.Index
+	spaces               map[string]rowSpace
+	hidden               map[string]rowBitmap
+	textRows             []row
 	files, nodes, chunks map[string]bool
 	byID                 map[string]dataset.Node
 	byName, byFile       map[string][]dataset.Node
@@ -27,11 +31,18 @@ type layer struct {
 	text                 map[string][]chunkOwner
 }
 type chunkOwner struct{ ID, Node, File string }
-type ownership struct{ ByFile, ByNode map[string][]string }
+type ownership struct {
+	ByFile, ByNode map[string][]string
+	Spaces         map[string]rowSpace
+	Text           map[string][]chunkOwner
+}
 type segment struct {
 	external                      adapter.Segment
 	openedText                    []bleve.Index
-	symbols, content              bleve.Index
+	symbols, content              [2]bleve.Index
+	baseHidden                    map[string]rowBitmap
+	hiddenNames                   map[string]int
+	hiddenText                    map[string]int
 	ref                           adapter.SegmentRef
 	layers                        []layer
 	fileMask, nodeMask, chunkMask map[string]int
@@ -41,6 +52,7 @@ type segment struct {
 func lookup(parts ...string) string { b, _ := json.Marshal(parts); return string(b) }
 func indexLayer(rows []row) (l layer, err error) {
 	l = layer{files: map[string]bool{}, nodes: map[string]bool{}, chunks: map[string]bool{}, byID: map[string]dataset.Node{}, byName: map[string][]dataset.Node{}, byFile: map[string][]dataset.Node{}, outgoing: map[string][]dataset.Edge{}, incoming: map[string][]dataset.Edge{}, vectors: map[string]dataset.Vector{}, text: map[string][]chunkOwner{}}
+	var owners []rowOwner
 	for _, r := range rows {
 		switch r.Family {
 		case "mask_file":
@@ -86,6 +98,7 @@ func indexLayer(rows []row) (l layer, err error) {
 			}
 			l.vectors[v.NodeID] = v
 		case "symbol":
+			l.textRows = append(l.textRows, r)
 			var v dataset.Symbol
 			if err = json.Unmarshal(r.Value, &v); err != nil {
 				return l, err
@@ -95,6 +108,7 @@ func indexLayer(rows []row) (l layer, err error) {
 			}
 			l.text["symbol"] = append(l.text["symbol"], chunkOwner{ID: v.NodeID, Node: v.NodeID})
 		case "content":
+			l.textRows = append(l.textRows, r)
 			var v dataset.Content
 			if err = json.Unmarshal(r.Value, &v); err != nil {
 				return l, err
@@ -111,7 +125,23 @@ func indexLayer(rows []row) (l layer, err error) {
 		default:
 			return l, fmt.Errorf("unknown indexed family")
 		}
+		if r.Family == "node" || r.Family == "edge" || r.Family == "content" || r.Family == "vector" {
+			owners = append(owners, ownerOf(r))
+		}
 	}
+	for i, r := range owners {
+		if r.Family != "vector" {
+			continue
+		}
+		for _, c := range l.text["content"] {
+			if c.ID == r.Key {
+				owners[i].Node = c.Node
+				owners[i].File = c.File
+				break
+			}
+		}
+	}
+	l.spaces = rowSpaces(owners)
 	return l, nil
 }
 func (s *segment) indexMasks() {
@@ -129,6 +159,7 @@ func (s *segment) indexMasks() {
 			s.chunkMask[k] = i + 1
 		}
 	}
+	s.indexHidden()
 }
 func (s *segment) masked(owner, source string, after int) bool {
 	return (owner != "" && s.fileMask[owner] > after+1) || (source != "" && s.nodeMask[source] > after+1)
@@ -146,11 +177,11 @@ func (s *segment) NodeByID(ctx context.Context, id string) (dataset.Node, error)
 		return n, e
 	}
 	count := 0
-	if e == nil && !s.masked(n.FilePath, n.ID, -1) {
+	if e == nil && !s.baseRowHidden("node", n.ID) {
 		count = 1
 	}
-	for i, l := range s.layers {
-		if v, ok := l.byID[id]; ok && !s.masked(v.FilePath, v.ID, i) {
+	for _, l := range s.layers {
+		if v, ok := l.byID[id]; ok && !l.rowHidden("node", v.ID) {
 			n = v
 			count++
 		}
@@ -163,11 +194,15 @@ func (s *segment) NodeByID(ctx context.Context, id string) (dataset.Node, error)
 	}
 	return n, nil
 }
-func (s *segment) nodes(ctx context.Context, field, key string) ([]dataset.Node, error) {
+func (s *segment) nodes(ctx context.Context, field, key string, k int) ([]dataset.Node, error) {
 	var base []dataset.Node
 	var err error
 	if field == "name" {
-		base, err = s.external.NodesByName(ctx, key, -1)
+		baseK := k
+		if k > 0 {
+			baseK = overfetch(k, s.hiddenNames[key])
+		}
+		base, err = s.external.NodesByName(ctx, key, baseK)
 	} else {
 		base, err = s.external.FileNodes(ctx, key)
 	}
@@ -176,11 +211,11 @@ func (s *segment) nodes(ctx context.Context, field, key string) ([]dataset.Node,
 	}
 	out := make([]dataset.Node, 0, len(base))
 	for _, n := range base {
-		if !s.masked(n.FilePath, n.ID, -1) {
+		if !s.baseRowHidden("node", n.ID) {
 			out = append(out, n)
 		}
 	}
-	for i, l := range s.layers {
+	for _, l := range s.layers {
 		rows := l.byFile[key]
 		if field == "name" {
 			rows = l.byName[key]
@@ -189,7 +224,7 @@ func (s *segment) nodes(ctx context.Context, field, key string) ([]dataset.Node,
 			if err = ctx.Err(); err != nil {
 				return nil, err
 			}
-			if !s.masked(n.FilePath, n.ID, i) {
+			if !l.rowHidden("node", n.ID) {
 				out = append(out, n)
 			}
 		}
@@ -203,7 +238,7 @@ func (s *segment) NodesByName(ctx context.Context, name string, k int) ([]datase
 	if len(s.layers) == 0 {
 		return s.external.NodesByName(ctx, name, k)
 	}
-	out, err := s.nodes(ctx, "name", name)
+	out, err := s.nodes(ctx, "name", name, k)
 	slices.SortFunc(out, func(a, b dataset.Node) int { return strings.Compare(a.ID, b.ID) })
 	if k >= 0 && len(out) > k {
 		out = out[:k]
@@ -214,7 +249,7 @@ func (s *segment) FileNodes(ctx context.Context, path string) ([]dataset.Node, e
 	if len(s.layers) == 0 {
 		return s.external.FileNodes(ctx, path)
 	}
-	return s.nodes(ctx, "file", path)
+	return s.nodes(ctx, "file", path, -1)
 }
 func (s *segment) edges(ctx context.Context, field, id, kind string) ([]dataset.Edge, error) {
 	var base []dataset.Edge
@@ -229,11 +264,11 @@ func (s *segment) edges(ctx context.Context, field, id, kind string) ([]dataset.
 	}
 	out := make([]dataset.Edge, 0, len(base))
 	for _, e := range base {
-		if !s.masked(e.FilePath, e.From, -1) {
+		if !s.baseRowHidden("edge", edgeKey(e)) {
 			out = append(out, e)
 		}
 	}
-	for i, l := range s.layers {
+	for _, l := range s.layers {
 		rows := l.incoming[id]
 		if field == "source" {
 			rows = l.outgoing[id]
@@ -242,7 +277,7 @@ func (s *segment) edges(ctx context.Context, field, id, kind string) ([]dataset.
 			if err = ctx.Err(); err != nil {
 				return nil, err
 			}
-			if (kind == "" || kind == "any" || kind == e.Kind) && !s.masked(e.FilePath, e.From, i) {
+			if (kind == "" || kind == "any" || kind == e.Kind) && !l.rowHidden("edge", edgeKey(e)) {
 				out = append(out, e)
 			}
 		}
@@ -265,13 +300,13 @@ func (s *segment) SearchSymbols(ctx context.Context, q string, k int) ([]adapter
 	if len(s.layers) == 0 {
 		return s.external.SearchSymbols(ctx, q, k)
 	}
-	return nativeSearch(ctx, s.symbols, q, k)
+	return s.searchText(ctx, "symbol", q, k)
 }
 func (s *segment) SearchContent(ctx context.Context, q string, k int) ([]adapter.Hit, error) {
 	if len(s.layers) == 0 {
 		return s.external.SearchContent(ctx, q, k)
 	}
-	return nativeSearch(ctx, s.content, q, k)
+	return s.searchText(ctx, "content", q, k)
 }
 func (s *segment) VectorTopK(ctx context.Context, q []float32, k int) ([]adapter.Hit, error) {
 	if len(s.layers) == 0 {
@@ -293,45 +328,43 @@ func (s *segment) VectorTopK(ctx context.Context, q []float32, k int) ([]adapter
 	if k == 0 {
 		return nil, nil
 	}
-	// Every masked base vector belongs to an old node ID. Overfetch by that
-	// upper bound, then use the same exact cosine and tie order for delta hits.
-	baseK := k
-	if k > 0 {
-		if k > math.MaxInt-len(s.nodeMask) {
-			baseK = -1
-		} else {
-			baseK += len(s.nodeMask)
-		}
-	}
-	base, err := s.external.VectorTopK(ctx, q, baseK)
-	if err != nil {
-		return nil, err
-	}
+	// Filter the vector row's bitmap inside the scan, before it enters top-k.
 	var hits []adapter.Hit
-	for _, h := range base {
-		if s.nodeMask[h.ID] == 0 {
-			hits = append(hits, h)
+	for v, err := range s.external.(baseResources).VectorRows(ctx) {
+		if err != nil {
+			return nil, err
+		}
+		if s.baseRowHidden("vector", v.NodeID) {
+			continue
+		}
+		hits = append(hits, cosineHit(v, q, norm))
+		if k > 0 && len(hits) >= 2*k {
+			hits = adapter.Top(hits, k)
 		}
 	}
-	for i, l := range s.layers {
+	for _, l := range s.layers {
 		for id, v := range l.vectors {
-			if err = ctx.Err(); err != nil {
+			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-			if s.masked("", id, i) {
+			if l.rowHidden("vector", id) {
 				continue
 			}
-			dot, n := 0., 0.
-			for j, x := range v.Values {
-				dot += float64(x) * float64(q[j])
-				n += float64(x) * float64(x)
-			}
-			score := 0.
-			if n > 0 {
-				score = dot / math.Sqrt(n*norm)
-			}
-			hits = adapter.Top(append(hits, adapter.Hit{ID: id, Score: score}), k)
+			hits = adapter.Top(append(hits, cosineHit(v, q, norm)), k)
 		}
 	}
 	return adapter.Top(hits, k), nil
+}
+
+func cosineHit(v dataset.Vector, q []float32, norm float64) adapter.Hit {
+	dot, n := 0., 0.
+	for j, x := range v.Values {
+		dot += float64(x) * float64(q[j])
+		n += float64(x) * float64(x)
+	}
+	score := 0.
+	if n > 0 {
+		score = dot / math.Sqrt(n*norm)
+	}
+	return adapter.Hit{ID: v.NodeID, Score: score}
 }

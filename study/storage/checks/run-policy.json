@@ -2,8 +2,8 @@
   "schema": "design-c-checks-run-policy/v1",
   "approval_boundary": "Proposed settings. The user must approve this exact committed file hash and the exact batched run list before manual dispatch. An approval ID records that approval; it does not create it.",
   "contract": {
-    "plan_sha256": "6be0527942877b7a3d3586d73a853669cf3f0dcc6425f85e657303de1428ba42",
-    "actions_sha256": "55732cdaf7b3058bfdab6e479d96e5aa0eda44e11433d818f0028f015833c7f8",
+    "plan_sha256": "15b39c3c7087ee544f7616ad4e295052951729b463ec08b9add296fd637059c1",
+    "actions_sha256": "e11c66331a2ea941152371193291a99cd38b7aa4a94c42559533f6a356e5ce5a",
     "construction_selection_approved": true,
     "vector_scope": "D28 synthetic-only scan control; no inference, ANN execution or int8 recommendation"
   },
@@ -156,7 +156,7 @@
     "/venue/job_memory_bytes": "Integration proposal: 12 GiB enclosing cap on the reports nominal 16-GB host, above the 10 GiB tier100 target cap with two GiB inside the job for controllers and cache. Delegation and outside-owner cleanup follow .github/workflows/storage-screen.yml. This is not engine RSS or a measured requirement.",
     "/venue/host_reserve_bytes": "Integration proposal: require at least 2 GiB physical memory outside the enclosing cap for the runner and cleanup owner. The reports name a nominal 16-GB host; actual MemTotal is checked.",
     "/venue/price_cap_usd": "Zero-cost public-fork standard Linux CI venue only. No paid runner, model inference, cloud job or extra service is requested.",
-    "/venue/max_parallel": "Lead approved the parallel three-runner measurement venue after gortex-ops confirmed capacity: tests finish first, then base, linkdelta and vector each depend only on tests. Each group prepares and freezes its own inputs, with no base-artifact download. Every A/B/C or component comparison stays within its own host. The exact-policy user approval must name parallel execution on three measurement runners.",
+    "/venue/max_parallel": "Approved D12 sets start at most three independent measurement jobs: Check 2 + plain Check 1 + Check 4, or one Check 5 tier per job. Every singleton starts one job. Vector/Check 6 is not selectable. All same-host A/B/C controls remain within one selected job.",
     "/jobs/tests/timeout_minutes": "Integration estimate: 45 minutes for setup, three readonly Go module vet/test pairs and three stdlib Python suites (base, fixtures and shared workflow helpers). This is not a measurement bound.",
     "/jobs/base/timeout_minutes": "Indexed-checker rerun: fetch 10 + tiny generation 5 + tier100 generation 20 + setup 25 + (209 - F/60 - 0.5) main work + conditional side 60 + join 0.5 + finalization F/60 + cleanup/upload 20 = 349 minutes, strictly below the 350-minute job cap and GitHub 360-minute ceiling. F=max(60,ceil(9*P/67108864)) seconds, where P is the exact initial protected-file byte total. Both phase bounds and the 329-minute first-step cutoff subtract F+30 seconds. Join and finalization finish by minute 329, before the unchanged wrapper kill at minute 329.5. The additional minute covers the job-start gap. These are unmeasured planning bounds, not a completion guarantee.",
     "/jobs/base/setup_seconds": "Integration reserve: 25 minutes for Go setup, downloads, serial builds, metadata and manifest freezing outside timing; unmeasured. The fixed unused-software removal shares this setup reserve; budget roughly 1-3 minutes, not a measured bound.",
@@ -214,6 +214,44 @@
     "/disk_min_free_bytes/linkdelta": "Integration proposal: 12 GiB free, rounding up 12 times the 952570424-byte unchanged pair in study/storage/checks/fixtures/fixture-pins.json for retained clean C bases, two delta forms/chains, validation memos and answer spools. Actual peak is unmeasured; no evidence is deleted.",
     "/disk_min_free_bytes/vector": "Integration proposal: 2 GiB free, rounding up four times the 460800000-byte F32 matrix for reference scratch, outputs and headroom. Actual fixture files and existing caches are already charged when the floor is checked.",
     "/software_cleanup": "Supported fixed-path cleanup, not a third-party action. The current actions/runner-images Ubuntu2404 software list confirms installed Android, .NET, Haskell and CodeQL toolsets. jlumbroso/free-disk-space README reports an older ubuntu-20.04.4 sample of 14 GiB Android and 2.7 GiB .NET reclaimed; its 31 GiB total also removes things this workflow preserves. Treat the 30 GiB planning figure as uncertain, not a current-host measurement. Sources: https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md and https://github.com/jlumbroso/free-disk-space#typical-output .",
-    "/base_capacity": "Review C-1 checks-base estimate forwarded by the lead: required_free_bytes = 2*(8*S + 300*E + 256*N) + 1073741824. S is maximum input bytes, N maximum nodes, E maximum edges over tier1, tier10 and tier100; use fixture-pins.json for tier1/10 and the frozen generated inventory for tier100. Inputs already occupy disk and are not added again. This is an admission floor, not a measured peak guarantee. Insufficient space is blocked by capacity, never a format miss."
+    "/base_capacity": "Review C-1 checks-base estimate forwarded by the lead: required_free_bytes = 2*(8*S + 300*E + 256*N) + 1073741824. S is maximum input bytes, N maximum nodes, E maximum edges over tier1, tier10 and tier100; use fixture-pins.json for tier1/10 and the frozen generated inventory for tier100. Inputs already occupy disk and are not added again. This is an admission floor, not a measured peak guarantee. Insufficient space is blocked by capacity, never a format miss. Stage 1 revision retains the conservative 300 edge-byte capacity coefficient; payload, references, offsets and any side index are counted in measured inventory, never inferred from this floor."
+  },
+  "dispatch": {
+    "allowed_sets": [
+      [
+        "bytes"
+      ],
+      [
+        "check2"
+      ],
+      [
+        "check1-plain"
+      ],
+      [
+        "check1-side"
+      ],
+      [
+        "check5-tier1"
+      ],
+      [
+        "check5-tier10"
+      ],
+      [
+        "check5-tier100"
+      ],
+      [
+        "check4"
+      ],
+      [
+        "check2",
+        "check1-plain",
+        "check4"
+      ],
+      [
+        "check5-tier1",
+        "check5-tier10",
+        "check5-tier100"
+      ]
+    ]
   }
 }

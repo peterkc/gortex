@@ -125,3 +125,109 @@ func TestTimingOnlyDefaultJSONUnchanged(t *testing.T) {
 		t.Fatal("default result serialization changed", string(got), string(want))
 	}
 }
+
+func TestBuildOnlyHasNoServingOrTimingPhases(t *testing.T) {
+	d := conformance.Fixture()
+	b := &trackedBackend{Backend: oracle.Backend{}}
+	result := Result{BuildOnly: true, Metrics: map[string]Distribution{}, Capabilities: b.Capabilities()}
+	query := workload.Query{ID: "must-not-run", Op: "unknown", Repo: d.Repo}
+	if err := runOnce(context.Background(), b, nil, []dataset.Dataset{d}, []workload.Query{query}, nil, t.TempDir(), 1, defaultSafetyTimeout, &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Builds) != 1 || len(result.Checks) != 0 || len(result.Metrics) != 0 || result.Delta.Ref.Path != "" {
+		t.Fatal("build-only performed unselected work", result)
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]json.RawMessage
+	if err = json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"metrics", "checks", "delta", "concurrent", "crash", "query_latency_sha256", "started", "uptime"} {
+		if _, ok := wire[field]; ok {
+			t.Fatal("unselected timing or phase emitted", field)
+		}
+	}
+	for _, field := range []string{"cpu_ns", "duration_ns", "p95_ns"} {
+		if bytes.Contains(raw, []byte(field)) {
+			t.Fatal("timing field emitted", string(raw))
+		}
+	}
+}
+
+func TestCheckOnlyQueriesOnceAndEmitsOnlyBuildCPU(t *testing.T) {
+	d := conformance.Fixture()
+	b := &trackedBackend{Backend: oracle.Backend{}}
+	q := workload.Query{ID: "point", Op: "id", Repo: d.Repo, Key: "a"}
+	want, err := workload.Evaluate(context.Background(), map[string]adapter.Segment{d.Repo: oracle.New(d)}, nil, q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := Result{CheckOnly: true, Metrics: map[string]Distribution{}, Capabilities: b.Capabilities()}
+	if err = runOnce(context.Background(), b, nil, []dataset.Dataset{d}, []workload.Query{q}, []workload.Expected{{QueryID: q.ID, Answer: want}}, t.TempDir(), 1, defaultSafetyTimeout, &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Checks) != 1 || result.Checks[0].Mismatch || len(result.Metrics) != 0 || len(result.QueryLatencies) != 0 || len(b.refs) != 1 {
+		t.Fatal("check-only ran unselected work", result)
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"duration_ns", "metrics", "query_latency_sha256", "p95_ns", "concurrent", "delta"} {
+		if bytes.Contains(raw, []byte(field)) {
+			t.Fatal("timing or update field emitted", field)
+		}
+	}
+	if !bytes.Contains(raw, []byte("cpu_ns")) {
+		t.Fatal("reported storage-build CPU omitted")
+	}
+}
+
+func TestSelectedCheckOperationsKeepPairedAnswers(t *testing.T) {
+	var qs []workload.Query
+	var want []workload.Expected
+	for _, op := range []string{"id", "name", "file", "out", "in", "traverse2", "symbols", "content", "vector", "multi_name", "multi_in", "multi_traverse3", "multi_symbols", "multi_vector"} {
+		qs = append(qs, workload.Query{ID: op, Op: op})
+		want = append(want, workload.Expected{QueryID: op})
+	}
+	for _, tc := range []struct {
+		lookup, base bool
+		expected     []string
+	}{
+		{true, false, []string{"id", "name", "file"}},
+		{false, true, []string{"name", "in", "traverse2", "symbols", "multi_name", "multi_in", "multi_traverse3", "multi_symbols"}},
+	} {
+		selected, answers := selectedQueries(qs, want, tc.lookup, tc.base)
+		var got []string
+		for i, q := range selected {
+			got = append(got, q.ID)
+			if answers[i].QueryID != q.ID {
+				t.Fatal("answer pairing changed")
+			}
+		}
+		if !slices.Equal(got, tc.expected) {
+			t.Fatal("unselected measurement", got, tc.expected)
+		}
+	}
+	if len(qs) != 14 || len(want) != 14 {
+		t.Fatal("caller inputs changed")
+	}
+}
+
+func TestSelectedModeFlagsReachRequest(t *testing.T) {
+	for _, mode := range []string{"build-only", "check-only", "lookup-only", "base-only"} {
+		t.Run(mode, func(t *testing.T) {
+			args := []string{"-" + mode}
+			if mode == "lookup-only" || mode == "base-only" {
+				args = append(args, "-timing-only")
+			}
+			req := cliFixtureRequest(t, args...)
+			if req.BuildOnly != (mode == "build-only") || req.CheckOnly != (mode == "check-only") || req.LookupOnly != (mode == "lookup-only") || req.BaseOnly != (mode == "base-only") {
+				t.Fatal("selected mode lost", req)
+			}
+		})
+	}
+}

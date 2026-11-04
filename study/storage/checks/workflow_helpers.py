@@ -81,12 +81,67 @@ def unique_object(pairs):
     return result
 
 
+STEPS = ("bytes", "check2", "check1-plain", "check1-side", "check5-tier1",
+         "check5-tier10", "check5-tier100", "check4")
+BATCHES = (frozenset(("check2", "check1-plain", "check4")),
+           frozenset(("check5-tier1", "check5-tier10", "check5-tier100")))
+
+
+def selected_steps(text: str) -> tuple[str, ...]:
+    names = tuple(part.strip() for part in text.split(","))
+    if not names or any(not name for name in names):
+        raise RuntimeError("nonempty named step selection required")
+    if len(set(names)) != len(names):
+        raise RuntimeError("duplicate step selection")
+    if any(name not in STEPS for name in names):
+        raise RuntimeError("unknown step selection")
+    chosen = frozenset(names)
+    if len(chosen) != 1 and chosen not in BATCHES:
+        raise RuntimeError("step set is not approved")
+    return tuple(name for name in STEPS if name in chosen)
+
+
+def base_step_spec(step: str, c_variant: str) -> dict[str, object]:
+    if step == "bytes":
+        return {"tiers": ["tier1"], "adapters": ["a", "b", "c", "c_side"],
+                "mode": "build-only", "runs": 1}
+    if step == "check2":
+        return {"tiers": ["tier1"], "adapters": ["c"],
+                "mode": "check-only", "runs": 1}
+    if step in ("check1-plain", "check1-side"):
+        return {"tiers": ["tier1", "tier10"],
+                "adapters": ["a", "b", "c" if step == "check1-plain"
+                             else "c_side"],
+                "mode": "lookup-only", "runs": 3}
+    if step in ("check5-tier1", "check5-tier10", "check5-tier100"):
+        if c_variant not in ("plain", "side"):
+            raise RuntimeError("Check 5 requires c_variant=plain or side")
+        return {"tiers": [step.removeprefix("check5-")],
+                "adapters": ["a", "b", "c" if c_variant == "plain"
+                             else "c_side"], "mode": "timing-only", "runs": 3}
+    raise RuntimeError("unknown base step")
+
+
+def measurement_jobs(steps: Sequence[str]) -> dict[str, object]:
+    chosen = selected_steps(",".join(steps))
+    return {"base": [step for step in chosen if step != "check4"],
+            "linkdelta": "check4" in chosen, "vector": False}
+
+
+def linkdelta_config_step(step: str) -> dict[str, str]:
+    if step != "check4":
+        raise RuntimeError("only check4 is an approved linkdelta step")
+    return {"step": "check4"}
+
+
 def dispatch_request(environ: Mapping[str, str]) -> dict[str, str]:
     return {"event": environ["GITHUB_EVENT_NAME"],
             "approval_id": environ["REQUEST_APPROVAL"],
             "fork_commit": environ["REQUEST_COMMIT"],
             "policy_sha256": environ["REQUEST_POLICY"],
-            "release_tag": environ["REQUEST_RELEASE"]}
+            "release_tag": environ["REQUEST_RELEASE"],
+            "steps": environ["REQUEST_STEPS"],
+            "c_variant": environ["REQUEST_C_VARIANT"]}
 
 
 def admit_dispatch(request, *, source, actual, policy_pin, attempt):
@@ -94,6 +149,10 @@ def admit_dispatch(request, *, source, actual, policy_pin, attempt):
         raise RuntimeError("checkout differs from the workflow commit")
     if request["event"] != "workflow_dispatch":
         return
+    chosen = selected_steps(request["steps"])
+    for step in chosen:
+        if step != "check4":
+            base_step_spec(step, request["c_variant"])
     if attempt != "1":
         raise RuntimeError("no rerun: obtain approval and dispatch afresh")
     if not request["approval_id"].strip():

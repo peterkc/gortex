@@ -17,6 +17,7 @@ from measure import (
     latency_groups, lookup_verdict, paired_ratios, percentile, run,
     protected_snapshot, ratio_status, remove_serving, validate_config,
     validate_fixture_pins, phase_deadlines, finalization_reserve,
+    bytes_report, combine_check5, run_selected,
 )
 
 
@@ -153,13 +154,15 @@ def physical_fixture(root, adapter="pebble-bleve", *, vector_bytes=50000):
     if adapter.startswith("parquet-"):
         counts = {name: 1 for name in (
             "nodes", "edges", "files", "symbols", "content", "vectors")}
-        families = {"nodes": "nodes", "names": "nodes", "paths": "nodes",
-                    "out": "edges", "in": "edges", "files": "files",
-                    "symbols": "symbols", "content": "content",
-                    "vectors": "vectors"}
+        families = {"nodes": "nodes", "names": "nodes", "qnames": "nodes",
+                    "paths": "nodes", "edges": "edges", "out": "edges",
+                    "in": "edges", "files": "files", "symbols": "symbols",
+                    "content": "content", "vectors": "vectors",
+                    "ids": "nodes", "terminals": None, "kinds": "edges"}
         seal["meta"] = {"counts": counts}
         seal["verification"] = {
-            name: {"rows": counts[family], "input_sha256": "a" * 64,
+            name: {"rows": counts[family] if family else 0,
+                   "input_sha256": "a" * 64,
                    "output_sha256": "a" * 64, "cpu_ns": 1}
             for name, family in families.items()}
     dump_json(path / "seal.json", seal)
@@ -287,8 +290,8 @@ class PhysicalAccountingTests(unittest.TestCase):
             build, seal = physical_fixture(Path(tmp), "parquet-base")
             inventory = artifact_inventory(build, "parquet-base")
             self.assertEqual(inventory["raw_build_cpu_ns"], 100)
-            self.assertEqual(inventory["verification_cpu_ns"], 9)
-            self.assertEqual(inventory["construction_cpu_ns"], 91)
+            self.assertEqual(inventory["verification_cpu_ns"], 14)
+            self.assertEqual(inventory["construction_cpu_ns"], 86)
             for field, value in (("rows", 2), ("output_sha256", "b" * 64),
                                  ("cpu_ns", -1), ("cpu_ns", 100)):
                 changed = copy.deepcopy(seal)
@@ -382,6 +385,192 @@ def save_terminal(root, report, receipt):
     dump_json(path, report)
     receipt = {**receipt, "output_sha256": {path.name: digest(path)}}
     dump_json(root / "components-01.json", receipt)
+
+
+class SelectedReceiptTests(unittest.TestCase):
+    def test_build_and_check_modes_accept_no_timing_only(self):
+        for mode in ("build-only", "check-only"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                directory = Path(tmp) / "terminal"
+                terminal_fixture(directory)
+                data = {"sha256": "a" * 64}
+                # Rewrite the bound result into the narrow no-timing shape.
+                component_path = next(directory.glob("components-*.json"))
+                receipt = json.loads(component_path.read_text())
+                name = next(name for name in receipt["output_sha256"]
+                            if name.startswith("parquet-base-")
+                            and name.endswith(".json"))
+                report = json.loads((directory / name).read_text())
+                report = {key: report[key] for key in (
+                    "adapter", "run", "manifest_sha256", "builds", "failures",
+                    "success")}
+                report[mode.replace("-", "_")] = True
+                if mode == "build-only":
+                    report["builds"] = [
+                        {key: value for key, value in row.items()
+                         if key not in ("cpu_ns", "duration_ns")}
+                        for row in report["builds"]]
+                else:
+                    report["checks"] = [{"status": "passed",
+                                         "query_id": "one"}]
+                dump_json(directory / name, report)
+                receipt["output_sha256"][name] = digest(directory / name)
+                dump_json(component_path, receipt)
+                result = collect_run(directory, "parquet-base", data,
+                                     full_protocol=False, mode=mode)
+                self.assertEqual(result[0][1], {})
+                report["metrics"] = {"unselected": {"p95_ns": 10}}
+                dump_json(directory / name, report)
+                receipt["output_sha256"][name] = digest(directory / name)
+                dump_json(component_path, receipt)
+                with self.assertRaises(RunError):
+                    collect_run(directory, "parquet-base", data,
+                                full_protocol=False, mode=mode)
+
+
+class SelectedDriverTests(unittest.TestCase):
+    def test_only_selected_adapter_tier_and_mode_reach_the_boundary(self):
+        cases = (("bytes", "", ["a", "b", "c", "c_side"], ["tier1"],
+                  "build-only", 1),
+                 ("check2", "", ["c"], ["tier1"], "check-only", 1),
+                 ("check1-plain", "", ["a", "b", "c"],
+                  ["tier1", "tier10"], "lookup-only", 3),
+                 ("check1-side", "", ["a", "b", "c_side"],
+                  ["tier1", "tier10"], "lookup-only", 3),
+                 ("check5-tier1", "plain", ["a", "b", "c"],
+                  ["tier1"], "base-only", 3),
+                 ("check5-tier10", "side", ["a", "b", "c_side"],
+                  ["tier10"], "base-only", 3),
+                 ("check5-tier100", "plain", ["a", "b", "c"],
+                  ["tier100"], "base-only", 3))
+        for step, variant, adapters, tiers, mode, runs in cases:
+            with self.subTest(step=step), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                config, config_path, _ = pinned_inputs(root)
+                config["data"]["tier100"] = config["data"]["tier1"]
+                config.update(
+                    step=step, c_variant=variant, source_revision="a" * 40,
+                    recipe_sha256="b" * 64, approval_sha256="c" * 64,
+                    binaries={}, base={"main_wall_seconds": 9000,
+                                       "side_wall_seconds": 2700},
+                    job={"started_unix_seconds": int(time.time()),
+                         "timeout_seconds": 350 * 60,
+                         "cleanup_upload_seconds": 20 * 60})
+                config["data"] = {key: config["data"][key] for key in tiers}
+                invoked = []
+
+                def boundary(config, output, label, adapter, tier, deadline,
+                             *, full_protocol, pair_index=0, mode=None):
+                    invoked.append((adapter, tier, mode, pair_index))
+                    self.assertFalse(full_protocol)
+                    inventory = {
+                        "repo": "repo", "files": {"lookup": {"bytes": 100}},
+                        "bytes": {"graph": 100}, "total": 100,
+                        "construction_cpu_ns": 10, "raw_build_cpu_ns": 10,
+                        "verification_cpu_ns": 0, "verification": {}}
+                    return [({"_inventory": [inventory],
+                              "pair_index": pair_index, "checks": [
+                                  {"status": "passed", "query_id": "one"}]},
+                             {key: [100] * 20 for key in
+                              observations()["tier1"]["sample_counts"]})]
+
+                with (patch("measure.measure_adapter", boundary),
+                      patch("measure.validate_fixture_pins", return_value="x"),
+                      patch("measure.protected_snapshot",
+                            return_value={"files": {}}),
+                      patch.dict(os.environ)):
+                    run_selected(config, config_path)
+                self.assertEqual(set(invoked), {
+                    (adapter, tier, mode, index)
+                    for adapter in adapters for tier in tiers
+                    for index in range(1, runs + 1)})
+                self.assertEqual(len(invoked),
+                                 len(adapters) * len(tiers) * runs)
+                result = json.loads((root / "output/result.json").read_text())
+                self.assertEqual(result["step"], step)
+                self.assertEqual(result["finalization"], {
+                    "protected_bytes": 0, "reserve_seconds": 60})
+                self.assertNotIn("check3", result)
+                self.assertNotIn("check6", result)
+                if step == "bytes":
+                    for field in ("cpu_ns", "duration_ns", "p95_ns",
+                                  "metrics"):
+                        self.assertNotIn(field, json.dumps(result))
+
+
+class TierReductionTests(unittest.TestCase):
+    def test_independent_tiers_equal_the_combined_selection(self):
+        for variant in ("plain", "side"):
+            for c_bytes, c_ns in ((200, 90), (301, 100), (200, 200)):
+                with self.subTest(variant=variant, bytes=c_bytes, ns=c_ns):
+                    selected = "c" if variant == "plain" else "c_side"
+                    a = observations()
+                    b = observations(graph=250, cpu=20)
+                    c = observations((c_ns,) * 3, graph=c_bytes, cpu=10)
+                    expected_b = base_verdict(b, a, b)
+                    expected_c = base_verdict(c, a, b)
+                    row, branch = choose_base(
+                        expected_b, expected_c, cpu_selection_approved=True)
+                    common = {"source_revision": "a" * 40,
+                              "recipe_sha256": "b" * 64,
+                              "c_variant": variant, "status": "partial"}
+                    tiers = [{**common, "step": "check5-" + tier,
+                              "measured_value": {
+                                  key: {tier: value[tier]}
+                                  for key, value in (("a", a), ("b", b),
+                                                     (selected, c))}}
+                             for tier in ("tier1", "tier10", "tier100")]
+                    lookup = {**common, "step": "check1-" + variant,
+                              "measured_value": {"a": a, "b": b, selected: c}}
+                    result = combine_check5(tiers, lookup)
+                    self.assertEqual(result, {
+                        "b": expected_b, "c": expected_c,
+                        "selection_table_row": row, "branch_taken": branch,
+                        "c_variant": selected})
+                    self.assertEqual(combine_check5(list(reversed(tiers)),
+                                                    lookup), result)
+                    with self.assertRaises(RunError):
+                        combine_check5(tiers[:2], lookup)
+                    with self.assertRaises(RunError):
+                        combine_check5(tiers, {**lookup, "c_variant": "other"})
+
+
+class BytesOnlyTests(unittest.TestCase):
+    def test_hand_computed_inventory_includes_lookup_offsets_and_side(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            inventories = {}
+            for adapter in ("a", "b", "c", "c_side"):
+                root = Path(tmp) / adapter
+                root.mkdir()
+                payloads = {"canonical": 40, "logical-lookup": 20,
+                            "name-file-lookups": 16, "offsets": 24}
+                if adapter == "c_side":
+                    payloads["side-index"] = 25
+                for name, size in payloads.items():
+                    (root / name).write_bytes(b"x" * size)
+                build = {"repo": "repo", "ref": {"path": str(root)},
+                         "artifact_bytes": sum(payloads.values())}
+                # A-style unsplit inventory uses every physical file.
+                inventories[adapter] = [artifact_inventory(
+                    build, "fixture", bytes_only=True)]
+            report = bytes_report(inventories, {
+                "counts": {"edges": 5}, "repos": ["repo"]})
+            values = report["measured_value"]
+            for adapter in ("a", "b", "c"):
+                self.assertEqual(values[adapter]["bytes_per_edge"], 20)
+                self.assertEqual(values[adapter]["graph_serving_bytes"], 100)
+            self.assertEqual(values["c_side"]["bytes_per_edge"], 25)
+            self.assertEqual(len(values["c_side"]["inventory"][0]["files"]), 5)
+            raw = json.dumps(report)
+            for field in ("cpu_ns", "duration_ns", "p95_ns", "metrics"):
+                self.assertNotIn(field, raw)
+            with self.assertRaises(RunError):
+                bytes_report({key: value for key, value in inventories.items()
+                              if key != "c_side"}, {
+                                  "counts": {"edges": 5}, "repos": ["repo"]})
+            with self.assertRaises(RunError):
+                bytes_report(inventories, {
+                    "counts": {"edges": 0}, "repos": ["repo"]})
 
 
 class TerminalEvidenceTests(unittest.TestCase):
@@ -734,7 +923,7 @@ class OrchestrationRegressionTests(unittest.TestCase):
                             "verification_cpu_ns": 0,
                             "bytes": {"graph": b_bytes if adapter == "b"
                                       else 200}, "total": 1000,
-                            "verification": {str(i): {} for i in range(9)}}
+                            "verification": {str(i): {} for i in range(14)}}
                         return [({"pair_index": pair_index,
                                   "_inventory": [inventory]}, groups)]
 

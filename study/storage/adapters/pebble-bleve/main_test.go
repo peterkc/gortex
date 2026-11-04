@@ -274,3 +274,39 @@ func TestDeltaAndConcurrentReaders(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestDenseCanonicalGraphLayout(t *testing.T) {
+	d := conformance.Fixture()
+	d.Edges = append(d.Edges, d.Edges[0])
+	rows := map[string][]byte{}
+	put := func(k, v []byte) error { rows[string(k)] = slices.Clone(v); return nil }
+	if err := writeRecords(context.Background(), d, put, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	counts := map[byte]int{}
+	for k, v := range rows {
+		counts[k[0]]++
+		switch k[0] {
+		case 'A', 'Q', 'P', 'O', 'I':
+			if len(v) != 8 || (len(k)-1)%8 != 0 {
+				t.Fatalf("noninteger graph reference: %q", k)
+			}
+		case 'N':
+			node, err := decodeNode(v)
+			if err != nil || node.ID == "" || len(k) != 9 {
+				t.Fatal("invalid canonical node", node, err)
+			}
+		case 'E':
+			if len(k) != 9 {
+				t.Fatal("noninteger canonical edge key")
+			}
+		}
+	}
+	if counts['N'] != len(d.Nodes) || counts['E'] != len(d.Edges) || counts['O'] != len(d.Edges) || counts['I'] != len(d.Edges) {
+		t.Fatal("payload/reference multiplicity changed", counts)
+	}
+	d.Nodes = append(d.Nodes, d.Nodes[0])
+	if err := writeRecords(context.Background(), d, put, nil, nil); err == nil {
+		t.Fatal("duplicate logical ID accepted")
+	}
+}

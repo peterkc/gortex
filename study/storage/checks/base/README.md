@@ -1,7 +1,43 @@
 # Design C base checks (throwaway)
 
 This module implements the Check 1/2/5 prototype. It is not a product backend.
-No measurement, test, build or module download runs on the Mac.
+Measurements run only on approved Linux CI. Focused local tests use the approved
+isolated environment; construction CPU cases compile locally and run in Linux CI.
+
+## Selected CI steps
+
+Manual dispatch takes one named step or an approved batch:
+
+- `bytes`: build A, B, plain C and C with the side index at tier1, without queries
+  or timing fields. Every serving file counts. A is labeled **mixed file:
+  graph+text+vectors, upper bound for graph bytes**. Its existing SQLite driver's
+  `dbstat` graph-table/index page share is a separate diagnostic, not graph-only
+  file accounting.
+- `check2`: build/open plain C at tier1 and check every unchanged query once.
+  No warmup, repeated query timing, update or catalog phases run. Storage-build
+  CPU remains reported separately.
+- `check1-plain` or `check1-side`: time only ID, name and file lookups at tier1
+  and tier10, with A and B controls and the named C variant.
+- `check5-tier1`, `check5-tier10` or `check5-tier100`: measure one tier's base
+  reads, bytes and construction CPU. The required `c_variant=plain|side` comes
+  from Check 1. These jobs do not rerun Check 1 or select a format.
+- `check4`: run the delta check without Check 3. No selection runs Check 6.
+
+The two allowed batches are `check2,check1-plain,check4` and
+`check5-tier1,check5-tier10,check5-tier100`. Empty, unknown, duplicate or other
+step sets fail preflight before measurement jobs start.
+
+Reduce the three saved Check 5 results with the saved selected Check 1 result:
+
+```sh
+python3 -B measure.py --combine-check5 tier1-result.json tier10-result.json \
+  tier100-result.json --lookup-result check1-result.json --out selection.json
+```
+
+This command performs no measurements. It preserves the existing combined
+verdict and selection table. Results must share the source revision, policy and
+selected C variant. The old combined path without `step` remains for regression
+tests only; the workflow always supplies a selected step.
 
 ## Storage and exposed API
 
@@ -20,14 +56,20 @@ the segment-owned index. Borrowed indexes expire at `Segment.Close`.
 same Bleve mapping and query policy to the delta prototype. A row producer must
 call its supplied `add(id, text)` callback synchronously and return its errors.
 
-Nodes have three sorted lookup copies. Edges have outgoing/incoming sorted
-copies and sparse CSR/CSC-style endpoint range directories. Zero-degree and
-external endpoints do not create fake nodes. The prototype is GraphAr-style,
-not GraphAr SDK/wire compatibility or the design's final dense N+1 layout.
-Every table retains the complete source record as opaque JSON payload inside
-Parquet. After writing, construction reads every table and compares a streaming
-full-row digest with the input. Duplicate edges survive; duplicate node IDs
-refuse sealing. All six harness record families persist.
+Nodes have dense integer local IDs and one canonical binary payload per ID.
+One sorted logical-ID lookup maps to those IDs. Name, qualified-name and file
+lookups hold local IDs, not node payloads. Each edge payload appears once;
+outgoing and incoming tables contain references. Kind-specific dense N+1 offsets
+include zero-degree nodes and explicit unresolved endpoints. The graph ID columns
+are fixed-width and uncompressed. Strings and open-ended metadata live in the
+canonical payload area. All serving files, including offsets, lookup copies,
+seal metadata and the optional bounded Pebble side index, count in inventory.
+The side index holds local IDs only. No whole-graph serving map replaces a lookup.
+
+After writing, construction reads every table and compares a streaming full-row
+digest with the input. Duplicate edges survive; duplicate logical node IDs refuse
+sealing. Open rejects duplicate canonical local IDs and truncated offset
+directories before returning a reader. All six harness record families persist.
 
 Each neutral record family is decoded once. That pass fans out lookup and
 adjacency copies, feeds Bleve and the optional side store, validates vectors,
@@ -36,10 +78,10 @@ Serving reads use sparse range lookup and bounded block caching, not a resident
 graph. The shared serving cache payload budget is 256 MiB across all repositories:
 256 MiB Parquet, or 128 MiB Parquet plus 128 MiB Pebble in the fallback. Bleve,
 metadata and OS cache remain outside that budget and inside process/cgroup memory.
-Each open segment retains parsed metadata and file handles for its nine tables
-and nine range directories. Queries create private readers, not new file/footer
-parses. This is 18 retained Parquet handles per repository before Bleve/Pebble
-handles. The tier100 memory and file-descriptor cost remains unmeasured. Cache
+Each open segment retains parsed metadata and file handles for its 14 tables
+and 13 range directories, plus two dense offset files. The logical-ID table has
+no duplicate range directory. Queries create private readers, not new file/footer
+parses. This is 29 retained graph/auxiliary handles before Bleve/Pebble handles. The tier100 memory and file-descriptor cost remains unmeasured. Cache
 charges use allocated block capacity, including short final blocks.
 The Bleve mapping and query functions remain identical to reference B.
 
@@ -60,8 +102,8 @@ inventories. Shared seals count as graph metadata. The three categories sum to
 all artifact bytes. No compressed SST prefix share is estimated or subtracted.
 The C fallback counts both its Parquet lookup copies and its Pebble side store.
 B's unused K/kind index is omitted; Kind remains in every full node record.
-This B is `split-key-prefix/v1`, single-decode and WAL-disabled, not the older
-single-store/two-pass options-study B. Historical restoration hashes in
+This B is `dense-local-id/v2`, single-decode and WAL-disabled, not the older
+JSON/string-key Check 5 B or single-store/two-pass options-study B. Historical restoration hashes in
 `adapters/RECOVERY.md` describe that older version, not these Check 5 numbers.
 B still Flushes and Closes without a forced final full-range compaction. Its
 sealed LSM shape, bytes and reads can depend on background compaction timing.

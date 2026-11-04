@@ -14,8 +14,16 @@ on:
     - .github/workflows/storage-checks.yml
   workflow_dispatch:
     inputs:
+      steps:
+        description: Comma-separated named steps. One step or an approved D12 batch only.
+        required: true
+        type: string
+      c_variant:
+        description: Check 5 only. C variant selected by Check 1 (plain or side).
+        required: false
+        type: string
       approval_id:
-        description: Public approval record for the exact-policy parallel batch (3 measurement runners). Never enter secrets or private notes.
+        description: Public approval record for the exact policy and selected step set. Never enter secrets or private notes.
         required: true
         type: string
       release_tag:
@@ -53,6 +61,7 @@ jobs:
     timeout-minutes: 45
     outputs:
       timeouts: ${{ steps.preflight.outputs.timeouts }}
+      measurement_jobs: ${{ steps.preflight.outputs.measurement_jobs }}
     steps:
     - name: Set the job work directory from the runner temp path
       shell: bash
@@ -68,6 +77,8 @@ jobs:
         REQUEST_RELEASE: ${{ inputs.release_tag }}
         REQUEST_COMMIT: ${{ inputs.fork_commit }}
         REQUEST_POLICY: ${{ inputs.policy_sha256 }}
+        REQUEST_STEPS: ${{ inputs.steps }}
+        REQUEST_C_VARIANT: ${{ inputs.c_variant }}
       shell: bash
       run: |
         set -euo pipefail
@@ -82,7 +93,10 @@ jobs:
 
         sys.path.insert(
             0, str(Path(os.environ["GITHUB_WORKSPACE"]) / "study/storage/checks"))
-        from workflow_helpers import admit_dispatch, dispatch_request, unique_object
+        from workflow_helpers import (
+            admit_dispatch, dispatch_request, unique_object,
+            selected_steps, measurement_jobs,
+        )
 
         policy_path = Path("study/storage/checks/run-policy.json")
         raw = policy_path.read_bytes()
@@ -102,6 +116,12 @@ jobs:
                 or policy["venue"]["max_parallel"] != 3
                 or policy["venue"]["price_cap_usd"] != 0):
             raise RuntimeError("workflow literals or zero-cost parallel venue differ")
+        chosen = (selected_steps(request["steps"])
+                  if request["event"] == "workflow_dispatch" else ())
+        jobs = (measurement_jobs(chosen) if chosen else
+                {"base": [], "linkdelta": False, "vector": False})
+        for allowed in policy["dispatch"]["allowed_sets"]:
+            selected_steps(",".join(allowed))
         timeouts = {}
         for role in ("base", "linkdelta", "vector"):
             minutes = policy["jobs"][role]["timeout_minutes"]
@@ -133,6 +153,8 @@ jobs:
                     or required >= job["timeout_minutes"] * 60):
                 raise RuntimeError("base needs a strict margin and 20-minute reserve")
         with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+            output.write("measurement_jobs="
+                         + json.dumps(jobs, separators=(",", ":")) + "\n")
             output.write("timeouts="
                          + json.dumps(timeouts, separators=(",", ":")) + "\n")
         evidence = Path(os.environ["WORK"])
@@ -245,15 +267,22 @@ jobs:
         path: ${{ runner.temp }}/storage-checks-tests/
         if-no-files-found: error
   base:
-    name: 'Checks 1, 2 and 5: same-host A/B/C base comparison'
+    name: '${{ matrix.step }}: same-host base check'
     needs:
     - tests
-    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'peterkc/gortex' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && needs.tests.result == 'success' && fromJSON(needs.tests.outputs.measurement_jobs).base[0] != null }}
     runs-on: ubuntu-24.04
     # Includes both policy timing deadlines and the finalization/upload reserve.
     timeout-minutes: ${{ fromJSON(needs.tests.outputs.timeouts).base }}
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        step: ${{ fromJSON(needs.tests.outputs.measurement_jobs).base }}
     env:
       CHECK_GROUP: base
+      CHECK_STEP: ${{ matrix.step }}
+      REQUEST_C_VARIANT: ${{ inputs.c_variant }}
     steps: &measurement_steps
     - name: Bind the work directory and first-step clock before checkout
       shell: bash
@@ -270,6 +299,8 @@ jobs:
         REQUEST_RELEASE: ${{ inputs.release_tag }}
         REQUEST_COMMIT: ${{ inputs.fork_commit }}
         REQUEST_POLICY: ${{ inputs.policy_sha256 }}
+        REQUEST_STEPS: ${{ inputs.steps }}
+        REQUEST_C_VARIANT: ${{ inputs.c_variant }}
       shell: bash
       run: |
         set -euo pipefail
@@ -333,6 +364,8 @@ jobs:
                          "a nonempty identifier does not grant approval.",
             "source_revision": actual, "policy_sha256": pin,
             "contract": policy["contract"], "group": role,
+            "step": os.environ["CHECK_STEP"],
+            "c_variant": request["c_variant"],
             "release_tag": os.environ["REQUEST_RELEASE"],
             "host": socket.gethostname(), "operator": os.environ["GITHUB_ACTOR"],
             "run_id": os.environ["GITHUB_RUN_ID"],
@@ -423,7 +456,7 @@ jobs:
       shell: bash
       run: |
         set -euo pipefail
-        root="/sys/fs/cgroup/gxchecks-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${CHECK_GROUP}"
+        root="/sys/fs/cgroup/gxchecks-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${CHECK_STEP}"
         test -f /sys/fs/cgroup/cgroup.controllers
         echo +memory | sudo tee /sys/fs/cgroup/cgroup.subtree_control
         sudo mkdir "$root"
@@ -466,8 +499,6 @@ jobs:
               -o "$WORK/bin/parquet-base" ./cmd/parquet 2>&1 | tee "$WORK/evidence/build-c.log"
             go -C study/storage/checks/base build -p=1 -trimpath \
               -o "$WORK/bin/parquet-side" ./cmd/side 2>&1 | tee "$WORK/evidence/build-c-side.log"
-            go -C study/storage/checks/base build -p=1 -trimpath \
-              -o "$WORK/bin/base-fixture" ./cmd/fixture 2>&1 | tee "$WORK/evidence/build-tiny.log"
             ;;
           linkdelta)
             go -C study/storage/checks/linkdelta build -p=1 -trimpath \
@@ -517,6 +548,8 @@ jobs:
         REQUEST_RELEASE: ${{ inputs.release_tag }}
         REQUEST_COMMIT: ${{ inputs.fork_commit }}
         REQUEST_POLICY: ${{ inputs.policy_sha256 }}
+        REQUEST_STEPS: ${{ inputs.steps }}
+        REQUEST_C_VARIANT: ${{ inputs.c_variant }}
       shell: bash
       run: |
         set -euo pipefail
@@ -668,18 +701,7 @@ jobs:
             for tier in ("tier1", "tier10"):
                 shutil.copy2(out / "data" / tier / "manifest.json",
                              freeze / (tier + "-manifest.json"))
-        if role == "base":
-            tiny = work / "inputs/tiny"
-            tiny_command = [str(work / "bin/base-fixture"), "-out", str(tiny),
-                            "-source-revision", common["source_revision"]]
-            tiny_receipt = generate(work, launcher, cgroup, "tiny", tiny_command,
-                                    policy["tiny"], {
-                                        **common, "command": tiny_command,
-                                        "generator": builds["base-fixture"],
-                                    })
-            freeze_tier(tiny, freeze / "tiny", "synthetic three-function CI tier", 1,
-                        {**common, "generator": builds["base-fixture"],
-                         "generation_receipt_sha256": tiny_receipt})
+        if role == "base" and os.environ["CHECK_STEP"] == "check5-tier100":
             tier10 = work / "preparation/fetch/data/tier10"
             parents = {tier: sha256(work / "preparation/fetch/data" / tier
                                     / "manifest.json")
@@ -743,8 +765,10 @@ jobs:
                 "scope": "D28 synthetic-only; no ANN or inference",
             })
 
-        phases = {"base": ("fetch", "tiny", "tier100"),
-                  "linkdelta": ("fetch",), "vector": ("vector",)}[role]
+        phases = (["fetch", "tier100"] if role == "base"
+                  and os.environ["CHECK_STEP"] == "check5-tier100"
+                  else ["fetch"] if role in ("base", "linkdelta")
+                  else ["vector"])
         for phase in phases:
             for name in ("receipt.json", "command.log"):
                 shutil.copy2(work / "preparation" / phase / "limited" / name,
@@ -762,7 +786,7 @@ jobs:
       id: freeze_upload
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
       with:
-        name: storage-checks-freeze-${{ env.CHECK_GROUP }}-${{ github.run_id }}-${{ github.run_attempt }}
+        name: storage-checks-freeze-${{ env.CHECK_STEP }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: ${{ runner.temp }}/storage-checks/evidence/freeze/
         if-no-files-found: error
     - name: Record disk after freeze_upload
@@ -797,24 +821,31 @@ jobs:
         policy = json.loads(policy_raw)
         pins = json.loads(Path("study/storage/checks/fixtures/fixture-pins.json")
                           .read_text())
-        frozen = json.loads((work / "evidence/freeze/tier100/freeze.json").read_text())
-        if frozen["input_bytes"] != sum(frozen["inventory_bytes"].values()):
-            raise RuntimeError("frozen tier100 byte inventory differs")
+        frozen = None
+        if os.environ["CHECK_STEP"] == "check5-tier100":
+            frozen_path = work / "evidence/freeze/tier100/freeze.json"
+            frozen = json.loads(frozen_path.read_text())
+            if frozen["input_bytes"] != sum(
+                    frozen["inventory_bytes"].values()):
+                raise RuntimeError("frozen tier100 byte inventory differs")
         tiers = [{"bytes": pins["tiers"][tier]["bytes"],
                   "nodes": pins["tiers"][tier]["counts"]["nodes"],
                   "edges": pins["tiers"][tier]["counts"]["edges"]}
                  for tier in ("tier1", "tier10")]
-        tiers.append({"bytes": frozen["input_bytes"],
-                      "nodes": frozen["count_sums"]["nodes"],
-                      "edges": frozen["count_sums"]["edges"]})
+        if frozen is not None:
+            tiers.append({"bytes": frozen["input_bytes"],
+                          "nodes": frozen["count_sums"]["nodes"],
+                          "edges": frozen["count_sums"]["edges"]})
         disk = shutil.disk_usage(Path(os.environ["RUNNER_TEMP"]))
         capacity = base_capacity_record(tiers, policy["base_capacity"], disk.free)
         record = {**capacity, "schema": "design-c-base-capacity/v1", "tiers": tiers,
-                  "tier100_inventory_bytes": frozen["inventory_bytes"],
-                  "tier100_counts": frozen["count_sums"],
+                  "tier100_inventory_bytes": (frozen["inventory_bytes"]
+                                              if frozen else None),
+                  "tier100_counts": (frozen["count_sums"] if frozen else None),
                   "formula": policy["base_capacity"], "disk": disk._asdict(),
                   "policy_sha256": hashlib.sha256(policy_raw).hexdigest(),
-                  "tier100_manifest_sha256": frozen["manifest_sha256"]}
+                  "tier100_manifest_sha256": (frozen["manifest_sha256"]
+                                             if frozen else None)}
         capacity_path = work / "evidence/capacity-after-tier100-freeze.json"
         with capacity_path.open("x") as output:
             json.dump(record, output, indent=2, allow_nan=False)
@@ -836,6 +867,8 @@ jobs:
         REQUEST_RELEASE: ${{ inputs.release_tag }}
         REQUEST_COMMIT: ${{ inputs.fork_commit }}
         REQUEST_POLICY: ${{ inputs.policy_sha256 }}
+        REQUEST_STEPS: ${{ inputs.steps }}
+        REQUEST_C_VARIANT: ${{ inputs.c_variant }}
       shell: bash
       run: |
         set -euo pipefail
@@ -889,7 +922,10 @@ jobs:
 
         sys.path.insert(
             0, str(Path(os.environ["GITHUB_WORKSPACE"]) / "study/storage/checks"))
-        from workflow_helpers import collect_linkdelta_tiers, require_idle_targets
+        from workflow_helpers import (
+            collect_linkdelta_tiers, require_idle_targets, linkdelta_config_step,
+            base_step_spec,
+        )
 
 
         def sha256(path):
@@ -924,12 +960,16 @@ jobs:
             base_approval.write_bytes(approval.read_bytes())
             limits = {name: spec[name] for name in
                       ("main_wall_seconds", "side_wall_seconds")}
-            directories = {"tiny": base_work / "inputs/tiny",
-                           "tier1": base_work / "preparation/fetch/data/tier1",
-                           "tier10": base_work / "preparation/fetch/data/tier10",
-                           "tier100": base_work / "inputs/tier100"}
+            step = os.environ["CHECK_STEP"]
+            variant = os.environ["REQUEST_C_VARIANT"]
+            selected = base_step_spec(step, variant)
+            directories = {
+                tier: (base_work / "inputs/tier100" if tier == "tier100"
+                       else base_work / "preparation/fetch/data" / tier)
+                for tier in selected["tiers"]}
             config = {
                 "schema": "design-c-base-run/v1", **common,
+                "step": step, "c_variant": variant,
                 "source_root": str(source.resolve(strict=True)),
                 "recipe_sha256": sha256(work / "evidence/policy.json"),
                 "approval_path": str(base_approval),
@@ -975,6 +1015,7 @@ jobs:
                 tier = item["tier"]
                 config = {
                     "schema": "linkdelta-measure/v1", **common,
+                    **linkdelta_config_step(os.environ["CHECK_STEP"]),
                     "base_layout": spec["base_layout"],
                     "data": str(work / "preparation/fetch/data" / tier),
                     "out": str(work / "results" / tier),
@@ -1140,7 +1181,7 @@ jobs:
             "phase": "removed", "root": str(root), "success": True,
         }), flush=True)
         ' "$GX_CHECKS_CGROUP_ROOT" "$WORK/evidence/cgroup-root.identity" \
-            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$CHECK_GROUP" \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$CHECK_STEP" \
             2>&1 | tee "$WORK/evidence/cgroup-cleanup.log"
         fi
       id: cleanup
@@ -1155,7 +1196,7 @@ jobs:
       if: ${{ always() }}
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
       with:
-        name: storage-checks-${{ env.CHECK_GROUP }}-${{ github.run_id }}-${{ github.run_attempt }}
+        name: storage-checks-${{ env.CHECK_STEP }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: |-
           ${{ runner.temp }}/storage-checks/preflight.log
           ${{ runner.temp }}/storage-checks/evidence/**
@@ -1173,22 +1214,13 @@ jobs:
           ${{ runner.temp }}/storage-checks/df.log
         if-no-files-found: error
   linkdelta:
-    name: 'Checks 3 and 4: unchanged tiers, serial link/delta comparison'
+    name: 'check4: serial tier delta comparison'
     needs:
     - tests
-    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && needs.tests.result == 'success' }}
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && needs.tests.result == 'success' && fromJSON(needs.tests.outputs.measurement_jobs).linkdelta }}
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ fromJSON(needs.tests.outputs.timeouts).linkdelta }}
     env:
       CHECK_GROUP: linkdelta
-    steps: *measurement_steps
-  vector:
-    name: 'Check 6: D28 synthetic-only vector scan'
-    needs:
-    - tests
-    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && needs.tests.result == 'success' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: ${{ fromJSON(needs.tests.outputs.timeouts).vector }}
-    env:
-      CHECK_GROUP: vector
+      CHECK_STEP: check4
     steps: *measurement_steps

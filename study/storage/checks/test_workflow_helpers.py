@@ -1,5 +1,7 @@
 """Storage workflow regression tests. Run on CI, not on the Mac."""
 
+import ast
+import textwrap
 from dataclasses import replace
 from pathlib import Path
 import tempfile
@@ -14,6 +16,8 @@ from workflow_helpers import (
     dispatch_request,
     require_idle_targets,
     unique_object,
+    STEPS, BATCHES, selected_steps, measurement_jobs, base_step_spec,
+    linkdelta_config_step,
 )
 
 
@@ -162,18 +166,21 @@ class AdmissionTests(unittest.TestCase):
             "REQUEST_POLICY": "b" * 64,
             "REQUEST_RELEASE": "storage-fixtures-v1",
             "GITHUB_SHA": "c" * 40, "UNRELATED": "ignored",
+            "REQUEST_STEPS": "bytes", "REQUEST_C_VARIANT": "",
         }
         before = dict(environ)
         self.assertEqual(dispatch_request(environ), {
             "event": "workflow_dispatch", "approval_id": "batch-record",
             "fork_commit": "a" * 40, "policy_sha256": "b" * 64,
-            "release_tag": "storage-fixtures-v1",
+            "release_tag": "storage-fixtures-v1", "steps": "bytes",
+            "c_variant": "",
         })
         self.assertEqual(environ, before)
 
     def test_dispatch_environment_requires_every_field(self):
         required = ("GITHUB_EVENT_NAME", "REQUEST_APPROVAL", "REQUEST_COMMIT",
-                    "REQUEST_POLICY", "REQUEST_RELEASE")
+                    "REQUEST_POLICY", "REQUEST_RELEASE", "REQUEST_STEPS",
+                    "REQUEST_C_VARIANT")
         for missing in required:
             with self.subTest(missing=missing):
                 environ = {key: "present" for key in required
@@ -194,7 +201,8 @@ class AdmissionTests(unittest.TestCase):
     def request(self):
         return {"event": "workflow_dispatch", "approval_id": "batch-record",
                 "fork_commit": "a" * 40, "policy_sha256": "b" * 64,
-                "release_tag": "storage-fixtures-v1"}
+                "release_tag": "storage-fixtures-v1", "steps": "bytes",
+                "c_variant": ""}
 
     def test_refusal_before_execution(self):
         cases = (("approval_id", ""), ("approval_id", "  "),
@@ -216,6 +224,19 @@ class AdmissionTests(unittest.TestCase):
                                actual=actual, policy_pin="b" * 64,
                                attempt=attempt)
 
+    def test_check5_missing_or_invalid_variant_fails_preflight(self):
+        for variant in ("", "other", "PLAIN"):
+            with (self.subTest(variant=variant),
+                  self.assertRaises(RuntimeError)):
+                admit_dispatch({**self.request(), "steps": "check5-tier1",
+                                "c_variant": variant}, source="a" * 40,
+                               actual="a" * 40, policy_pin="b" * 64,
+                               attempt="1")
+        for variant in ("plain", "side"):
+            admit_dispatch({**self.request(), "steps": "check5-tier1",
+                            "c_variant": variant}, source="a" * 40,
+                           actual="a" * 40, policy_pin="b" * 64, attempt="1")
+
     def test_duplicate_policy_key(self):
         with self.assertRaises(RuntimeError):
             unique_object([("wall_seconds", 1), ("wall_seconds", 2)])
@@ -232,6 +253,94 @@ class AdmissionTests(unittest.TestCase):
                 admit_dispatch(request, source="a" * 40, actual="a" * 40,
                                policy_pin="b" * 64, attempt="1")
             self.assertEqual(request, before)
+
+
+class StepSelectionTests(unittest.TestCase):
+    def test_every_single_step_and_only_its_measurement_jobs(self):
+        for step in STEPS:
+            with self.subTest(step=step):
+                self.assertEqual(selected_steps(step), (step,))
+                self.assertEqual(measurement_jobs((step,)), {
+                    "base": [] if step == "check4" else [step],
+                    "linkdelta": step == "check4", "vector": False,
+                })
+
+    def test_only_the_two_approved_batches_in_any_order(self):
+        for batch in BATCHES:
+            names = tuple(step for step in STEPS if step in batch)
+            self.assertEqual(selected_steps(",".join(names)), names)
+            self.assertEqual(selected_steps(", ".join(reversed(names))), names)
+            jobs = measurement_jobs(names)
+            self.assertEqual(jobs["base"], [
+                step for step in names if step != "check4"])
+            self.assertEqual(jobs["linkdelta"], "check4" in batch)
+            self.assertFalse(jobs["vector"])
+
+    def test_invalid_selections_refuse_before_measurement_jobs(self):
+        invalid = ("", " ", "unknown", "check3", "check6", "bytes,check4",
+                   "bytes,", "bytes,bytes", "check1-side,check4")
+        for text in invalid:
+            with self.subTest(text=text):
+                with self.assertRaises(RuntimeError):
+                    selected_steps(text)
+                with self.assertRaises(RuntimeError):
+                    measurement_jobs(text.split(","))
+
+    def test_each_step_has_only_its_measurement_work(self):
+        self.assertEqual(base_step_spec("bytes", ""), {
+            "tiers": ["tier1"], "adapters": ["a", "b", "c", "c_side"],
+            "mode": "build-only", "runs": 1})
+        self.assertEqual(base_step_spec("check2", "")["mode"], "check-only")
+        for step in ("check1-plain", "check1-side"):
+            spec = base_step_spec(step, "")
+            self.assertEqual(spec["tiers"], ["tier1", "tier10"])
+            self.assertEqual(spec["mode"], "lookup-only")
+            self.assertEqual(spec["adapters"], [
+                "a", "b", "c" if step.endswith("plain") else "c_side"])
+        for tier in ("tier1", "tier10", "tier100"):
+            for variant in ("plain", "side"):
+                spec = base_step_spec("check5-" + tier, variant)
+                self.assertEqual(spec["tiers"], [tier])
+                self.assertEqual(spec["mode"], "timing-only")
+                self.assertEqual(spec["adapters"], [
+                    "a", "b", "c" if variant == "plain" else "c_side"])
+            for variant in ("", "other"):
+                with self.assertRaises(RuntimeError):
+                    base_step_spec("check5-" + tier, variant)
+
+    def test_check4_sets_the_driver_step_without_check3(self):
+        self.assertEqual(linkdelta_config_step("check4"), {"step": "check4"})
+        for step in ("", "check3", "check6", "bytes"):
+            with self.assertRaises(RuntimeError):
+                linkdelta_config_step(step)
+
+
+class WorkflowSourceTests(unittest.TestCase):
+    def test_selected_jobs_and_embedded_python_compile(self):
+        source = (Path(__file__).parents[3]
+                  / ".github/workflows/storage-checks.yml").read_text()
+        self.assertNotIn("\n  vector:\n", source)
+        self.assertIn("step: ${{ fromJSON(needs.tests.outputs."
+                      "measurement_jobs).base }}", source)
+        self.assertIn("**linkdelta_config_step(os.environ[\"CHECK_STEP\"])",
+                      source)
+        self.assertIn("\"step\": step, \"c_variant\": variant", source)
+        self.assertIn("fromJSON(needs.tests.outputs."
+                      "measurement_jobs).linkdelta", source)
+        blocks = []
+        active = None
+        for line in source.splitlines():
+            if "python3.12 -B -c '" in line:
+                active = []
+            elif active is not None:
+                if line.strip() == "'" or line.lstrip().startswith("' "):
+                    blocks.append(textwrap.dedent("\n".join(active)))
+                    active = None
+                else:
+                    active.append(line)
+        self.assertEqual(len(blocks), 9)
+        for block in blocks:
+            ast.parse(block)
 
 
 class MeasurementAdmissionTests(unittest.TestCase):

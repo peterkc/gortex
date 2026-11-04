@@ -64,11 +64,11 @@ func (backend) Capabilities() adapter.Capabilities {
 			"symbols": {Mode: "native"}, "content": {Mode: "native"}, "multi_symbols": {Mode: "native"},
 		},
 		Operations: map[string]string{
-			"id":      "native KV point lookup; JSON record",
+			"id":      "native logical-ID lookup to binary local-ID payload",
 			"name":    "native KV name secondary index and point lookups",
 			"file":    "native KV file secondary index and point lookups",
-			"out":     "native KV endpoint/kind prefix index; JSON edge records",
-			"in":      "native KV endpoint/kind prefix index; JSON edge records",
+			"out":     "native KV endpoint/kind prefix index; local-ID references to one binary edge record",
+			"in":      "native KV endpoint/kind prefix index; local-ID references to one binary edge record",
 			"symbols": "native Bleve Scorch BM25; Unicode letter/digit tokenizer",
 			"content": "native Bleve Scorch BM25; Unicode letter/digit tokenizer",
 			"vector":  "emulated exact cosine scan of stored float32 vector blobs",
@@ -127,32 +127,92 @@ func writeRecords(ctx context.Context, d dataset.Dataset, put func([]byte, []byt
 	if e := putJSON(key("M"), dataset.Dataset{Repo: d.Repo, Meta: d.Meta}); e != nil {
 		return e
 	}
+	locals := map[string]uint64{}
+	dictionary := map[string]uint64{}
+	intern := func(text string) (uint64, error) {
+		if id, ok := dictionary[text]; ok {
+			return id, nil
+		}
+		id := uint64(len(dictionary))
+		dictionary[text] = id
+		return id, put(key("D", text), localBytes(id))
+	}
 	for n, readErr := range d.NodeRows() {
 		if readErr != nil {
 			return readErr
 		}
-		if e := putJSON(key("N", n.ID), n); e != nil {
+		if _, exists := locals[n.ID]; n.ID == "" || exists {
+			return fmt.Errorf("empty or duplicate node ID %q", n.ID)
+		}
+		local := uint64(len(locals))
+		locals[n.ID] = local
+		raw, e := encodeNode(n)
+		if e != nil {
 			return e
 		}
-		for _, k := range [][]byte{key("A", n.Name, n.ID), key("P", n.FilePath, n.ID)} {
-			if e := put(k, []byte(n.ID)); e != nil {
+		if e = put(numberKey('N', local), raw); e != nil {
+			return e
+		}
+		if e = put(logicalKey(n.ID), localBytes(local)); e != nil {
+			return e
+		}
+		for _, field := range []struct {
+			prefix byte
+			text   string
+		}{{'A', n.Name}, {'Q', n.QualName}, {'P', n.FilePath}} {
+			id, e := intern(field.text)
+			if e != nil {
+				return e
+			}
+			if e = put(numberKey(field.prefix, id, local), localBytes(local)); e != nil {
 				return e
 			}
 		}
 	}
-	edgeIndex := 0
-	for e, readErr := range d.EdgeRows() {
+	endpoint := func(id string) (uint64, error) {
+		if local, ok := locals[id]; ok {
+			return local, nil
+		}
+		local := uint64(len(locals))
+		locals[id] = local
+		if e := put(logicalKey(id), localBytes(local)); e != nil {
+			return 0, e
+		}
+		return local, put(numberKey('T', local), []byte(id))
+	}
+	edgeIndex := uint64(0)
+	for edge, readErr := range d.EdgeRows() {
 		if readErr != nil {
 			return readErr
 		}
-		seq := fmt.Sprintf("%016x", edgeIndex)
+		if e := ctx.Err(); e != nil {
+			return e
+		}
+		from, e := endpoint(edge.From)
+		if e != nil {
+			return e
+		}
+		to, e := endpoint(edge.To)
+		if e != nil {
+			return e
+		}
+		kind, e := intern(edge.Kind)
+		if e != nil {
+			return e
+		}
+		raw, e := encodeEdge(edge, from, to)
+		if e != nil {
+			return e
+		}
+		if e = put(numberKey('E', edgeIndex), raw); e != nil {
+			return e
+		}
+		for _, pk := range [][]byte{numberKey('O', from, kind, to, edgeIndex), numberKey('I', to, kind, from, edgeIndex)} {
+			if e = put(pk, localBytes(edgeIndex)); e != nil {
+				return e
+			}
+		}
 		edgeIndex++
-		if err := putJSON(key("O", e.From, e.Kind, seq), e); err != nil {
-			return err
-		}
-		if err := putJSON(key("I", e.To, e.Kind, seq), e); err != nil {
-			return err
-		}
 	}
 	for f, readErr := range d.FileRows() {
 		if readErr != nil {
@@ -270,7 +330,7 @@ func (backend) Build(ctx context.Context, d dataset.Dataset, path string) (adapt
 	if e != nil {
 		return ref, stats, e
 	}
-	manifest := sealManifest{Repo: d.Repo, Engine: engineVersion, Layout: "split-key-prefix/v1"}
+	manifest := sealManifest{Repo: d.Repo, Engine: engineVersion, Layout: "dense-local-id/v2"}
 	var dirs []string
 	e = filepath.WalkDir(path, func(p string, de fs.DirEntry, err error) error {
 		if err != nil {
@@ -359,7 +419,7 @@ func (backend) Open(ctx context.Context, path string, ref adapter.SegmentRef) (a
 	if e = json.Unmarshal(b, &manifest); e != nil {
 		return nil, e
 	}
-	if manifest.Repo != ref.Repo || manifest.Engine != engineVersion || manifest.Layout != "split-key-prefix/v1" {
+	if manifest.Repo != ref.Repo || manifest.Engine != engineVersion || manifest.Layout != "dense-local-id/v2" {
 		return nil, fmt.Errorf("seal identity mismatch")
 	}
 	for _, f := range manifest.Files {
@@ -392,71 +452,150 @@ func (backend) Open(ctx context.Context, path string, ref adapter.SegmentRef) (a
 func (s *segment) Close() error {
 	return errors.Join(s.symbols.Close(), s.content.Close(), s.kv.Close())
 }
-func (s *segment) NodeByID(ctx context.Context, id string) (dataset.Node, error) {
-	var n dataset.Node
-	if e := ctx.Err(); e != nil {
-		return n, e
+func numberKey(prefix byte, ids ...uint64) []byte {
+	raw := make([]byte, 1+8*len(ids))
+	raw[0] = prefix
+	for i, id := range ids {
+		binary.BigEndian.PutUint64(raw[1+8*i:], id)
 	}
-	b, e := s.kv.Get(key("N", id))
-	if e != nil {
-		return n, e
-	}
-	e = json.Unmarshal(b, &n)
-	return n, e
+	return raw
 }
-func (s *segment) nodes(ctx context.Context, prefix []byte) ([]dataset.Node, error) {
-	var a []dataset.Node
-	e := s.kv.Scan(prefix, func(_, v []byte) error {
-		n, e := s.NodeByID(ctx, string(v))
-		if e != nil {
-			return e
+func logicalKey(id string) []byte { return append([]byte("L/"), []byte(id)...) }
+func (s *segment) localID(id string) (uint64, error) {
+	raw, err := s.kv.Get(logicalKey(id))
+	if err != nil {
+		return 0, err
+	}
+	return parseLocal(raw)
+}
+func (s *segment) nodeAt(local uint64) (dataset.Node, error) {
+	raw, err := s.kv.Get(numberKey('N', local))
+	if err != nil {
+		return dataset.Node{}, err
+	}
+	return decodeNode(raw)
+}
+func (s *segment) logicalAt(local uint64) (string, error) {
+	n, err := s.nodeAt(local)
+	if err == nil {
+		return n.ID, nil
+	}
+	if !errors.Is(err, adapter.ErrNotFound) {
+		return "", err
+	}
+	raw, err := s.kv.Get(numberKey('T', local))
+	return string(raw), err
+}
+func (s *segment) NodeByID(ctx context.Context, id string) (dataset.Node, error) {
+	if err := ctx.Err(); err != nil {
+		return dataset.Node{}, err
+	}
+	local, err := s.localID(id)
+	if err != nil {
+		return dataset.Node{}, err
+	}
+	return s.nodeAt(local)
+}
+func (s *segment) nodes(ctx context.Context, prefix byte, text string) ([]dataset.Node, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	raw, err := s.kv.Get(key("D", text))
+	if errors.Is(err, adapter.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	field, err := parseLocal(raw)
+	if err != nil {
+		return nil, err
+	}
+	var nodes []dataset.Node
+	err = s.kv.Scan(numberKey(prefix, field), func(_, raw []byte) error {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		a = append(a, n)
+		local, err := parseLocal(raw)
+		if err != nil {
+			return err
+		}
+		node, err := s.nodeAt(local)
+		if err != nil {
+			return err
+		}
+		nodes = append(nodes, node)
 		return nil
 	})
-	return a, e
+	slices.SortFunc(nodes, func(a, b dataset.Node) int { return strings.Compare(a.ID, b.ID) })
+	return nodes, err
 }
 func (s *segment) NodesByName(ctx context.Context, name string, k int) ([]dataset.Node, error) {
 	if k == 0 {
+		return nil, ctx.Err()
+	}
+	nodes, err := s.nodes(ctx, 'A', name)
+	if k >= 0 && len(nodes) > k {
+		nodes = nodes[:k]
+	}
+	return nodes, err
+}
+func (s *segment) FileNodes(ctx context.Context, path string) ([]dataset.Node, error) {
+	return s.nodes(ctx, 'P', path)
+}
+func (s *segment) edges(ctx context.Context, direction byte, id, kind string) ([]dataset.Edge, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	local, err := s.localID(id)
+	if errors.Is(err, adapter.ErrNotFound) {
 		return nil, nil
 	}
-	a, e := s.nodes(ctx, key("A", name))
-	if e != nil {
-		return nil, e
+	if err != nil {
+		return nil, err
 	}
-	slices.SortFunc(a, func(a, b dataset.Node) int { return strings.Compare(a.ID, b.ID) })
-	if k >= 0 && len(a) > k {
-		a = a[:k]
-	}
-	return a, nil
-}
-func (s *segment) FileNodes(ctx context.Context, file string) ([]dataset.Node, error) {
-	return s.nodes(ctx, key("P", file))
-}
-func (s *segment) edges(ctx context.Context, direction, id, kind string) ([]dataset.Edge, error) {
-	p := key(direction, id)
+	prefix := numberKey(direction, local)
 	if kind != "" && kind != "any" {
-		p = key(direction, id, kind)
+		raw, err := s.kv.Get(key("D", kind))
+		if errors.Is(err, adapter.ErrNotFound) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		tag, err := parseLocal(raw)
+		if err != nil {
+			return nil, err
+		}
+		prefix = numberKey(direction, local, tag)
 	}
-	var a []dataset.Edge
-	e := s.kv.Scan(p, func(_, v []byte) error {
-		if e := ctx.Err(); e != nil {
-			return e
+	var edges []dataset.Edge
+	err = s.kv.Scan(prefix, func(_, raw []byte) error {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		var row dataset.Edge
-		if e := json.Unmarshal(v, &row); e != nil {
-			return e
+		local, err := parseLocal(raw)
+		if err != nil {
+			return err
 		}
-		a = append(a, row)
+		payload, err := s.kv.Get(numberKey('E', local))
+		if err != nil {
+			return err
+		}
+		edge, err := decodeEdge(payload, s.logicalAt)
+		if err != nil {
+			return err
+		}
+		edges = append(edges, edge)
 		return nil
 	})
-	return a, e
+	return edges, err
 }
 func (s *segment) OutEdges(ctx context.Context, id, kind string) ([]dataset.Edge, error) {
-	return s.edges(ctx, "O", id, kind)
+	return s.edges(ctx, 'O', id, kind)
 }
 func (s *segment) InEdges(ctx context.Context, id, kind string) ([]dataset.Edge, error) {
-	return s.edges(ctx, "I", id, kind)
+	return s.edges(ctx, 'I', id, kind)
 }
 func searchText(ctx context.Context, ix bleve.Index, text string, k int) ([]adapter.Hit, error) {
 	if k == 0 {
@@ -575,10 +714,26 @@ func (s *segment) records(ctx context.Context) (dataset.Dataset, error) {
 	if e = json.Unmarshal(b, &d); e != nil {
 		return d, e
 	}
-	if d.Nodes, e = readRows[dataset.Node](s.kv, "N"); e != nil {
+	e = s.kv.Scan(numberKey('N'), func(_, raw []byte) error {
+		node, err := decodeNode(raw)
+		if err != nil {
+			return err
+		}
+		d.Nodes = append(d.Nodes, node)
+		return nil
+	})
+	if e != nil {
 		return d, e
 	}
-	if d.Edges, e = readRows[dataset.Edge](s.kv, "O"); e != nil {
+	e = s.kv.Scan(numberKey('E'), func(_, raw []byte) error {
+		edge, err := decodeEdge(raw, s.logicalAt)
+		if err != nil {
+			return err
+		}
+		d.Edges = append(d.Edges, edge)
+		return nil
+	})
+	if e != nil {
 		return d, e
 	}
 	if d.Files, e = readRows[dataset.File](s.kv, "F"); e != nil {

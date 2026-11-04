@@ -201,8 +201,13 @@ func TestServingAndDelta(t *testing.T) {
 		t.Fatal("overwrote sealed generation")
 	}
 	entries, err := os.ReadDir(ref.Path)
-	if err != nil || len(entries) != 2 {
+	if err != nil || len(entries) != 3 {
 		t.Fatal("unexpected sidecars", entries, err)
+	}
+	for i, name := range []string{"SEALED.json", "graph-share.json", "segment.sqlite"} {
+		if entries[i].Name() != name {
+			t.Fatal("unexpected sidecar", entries[i].Name())
+		}
 	}
 	t.Log("sealed bytes", stats.Bytes, "files", len(entries))
 }
@@ -223,5 +228,26 @@ func TestFreshProcessOpen(t *testing.T) {
 	n, err := s.NodeByID(context.Background(), "a")
 	if err != nil || n.Name != "Alpha" {
 		t.Fatal(n, err)
+	}
+}
+
+func TestGraphPageShareIsSeparateFromMixedServingBytes(t *testing.T) {
+	ref, stats, err := (Backend{}).Build(context.Background(), conformance.Fixture(), filepath.Join(t.TempDir(), "share"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var share struct {
+		Bytes int64  `json:"graph_table_page_bytes"`
+		Scope string `json:"scope"`
+	}
+	if err = dataset.ReadJSON(filepath.Join(ref.Path, "graph-share.json"), &share); err != nil {
+		t.Fatal(err)
+	}
+	if share.Bytes <= 0 || share.Bytes >= stats.Bytes || share.Scope == "" {
+		t.Fatal("invalid separate graph-page share", share, stats.Bytes)
+	}
+	total, err := diskBytes(ref.Path)
+	if err != nil || total != stats.Bytes {
+		t.Fatal("serving files omitted", total, stats.Bytes, err)
 	}
 }

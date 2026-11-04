@@ -17,18 +17,20 @@ import (
 )
 
 type backend struct {
-	format string
-	cache  *adoptionCache
+	format    string
+	cache     *adoptionCache
+	buildText func(context.Context, string, []row) error
 }
 type adoptionCache struct {
 	mu         sync.Mutex
 	verified   map[adapter.SegmentRef]bool
 	owners     map[adapter.SegmentRef]ownership
 	HashPasses int
+	TextCPU    map[string]int64
 }
 
 func newBackend(format string) backend {
-	return backend{format: format, cache: &adoptionCache{verified: map[adapter.SegmentRef]bool{}, owners: map[adapter.SegmentRef]ownership{}}}
+	return backend{format: format, buildText: buildDeltaText, cache: &adoptionCache{TextCPU: map[string]int64{}, verified: map[adapter.SegmentRef]bool{}, owners: map[adapter.SegmentRef]ownership{}}}
 }
 
 type seal struct {
@@ -45,7 +47,7 @@ type seal struct {
 
 func (b backend) Name() string { return "sealed-" + b.format + "-delta" }
 func (b backend) Capabilities() adapter.Capabilities {
-	return adapter.Capabilities{Operations: map[string]string{"id": "typed C lookup plus indexed delta IDs", "name": "typed indexed merge", "file": "typed indexed merge", "out": "typed indexed source adjacency and owner masks", "in": "typed indexed target adjacency and owner masks", "symbols": "native Bleve filtered-member alias", "content": "native Bleve filtered-member alias", "vector": "base exact top-k plus masked delta exact cosine", "delta": "sealed " + b.format + " replacement rows and file/node/chunk tombstones"}, Libraries: []string{"arrow-go v18.7.0", "parquet-go v0.30.1", "native Bleve (shared C policy)"}, Deployment: "throwaway C Parquet base plus sealed deltas", Notes: []string{"The same indexed typed merge serves both forms; read cost is format-independent. Compare write/seal/open/bytes for codec choice.", "Durable payload+seal fsync and directory fsync. Full hashing once at seal/adoption; later opens verify seal digest, safe paths and sizes under immutable ownership.", "Incoming dangling edges retained."}}
+	return adapter.Capabilities{Operations: map[string]string{"id": "typed C lookup plus indexed delta IDs", "name": "typed indexed merge", "file": "typed indexed merge", "out": "typed indexed source adjacency and owner masks", "in": "typed indexed target adjacency and owner masks", "symbols": "base plus one immutable delta text index", "content": "base plus one immutable delta text index", "vector": "base and delta exact cosine with row bitmaps before top-k", "delta": "sealed " + b.format + " replacement rows and file/node/chunk tombstones"}, Libraries: []string{"arrow-go v18.7.0", "parquet-go v0.30.1", "native Bleve (shared C policy)"}, Deployment: "throwaway C Parquet base plus sealed deltas", Notes: []string{"The same indexed typed merge serves both forms; read cost is format-independent. Compare write/seal/open/bytes for codec choice.", "Durable payload+seal fsync and directory fsync. Full hashing once at seal/adoption; later opens verify seal digest, safe paths and sizes under immutable ownership.", "Incoming dangling edges retained."}}
 }
 func (b backend) Build(ctx context.Context, d dataset.Dataset, path string) (adapter.SegmentRef, adapter.BuildStats, error) {
 	if b.format != "arrow" && b.format != "parquet" {
@@ -74,25 +76,9 @@ func (b backend) Build(ctx context.Context, d dataset.Dataset, path string) (ada
 	if e = durableJSON(filepath.Join(abs, "base-ref.json"), ref); e != nil {
 		return adapter.SegmentRef{}, adapter.BuildStats{}, e
 	}
-	// Persist only ownership keys once; bodies stay in C. This construction and
-	// its memory/bytes are included in the baseline build and process accounting.
-	f, e := os.OpenFile(filepath.Join(abs, "chunks.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if e != nil {
-		return adapter.SegmentRef{}, adapter.BuildStats{}, e
-	}
-	enc := json.NewEncoder(f)
-	for v, e := range d.ContentRows() {
-		if e != nil {
-			return adapter.SegmentRef{}, adapter.BuildStats{}, errors.Join(e, f.Close())
-		}
-		if e = ctx.Err(); e == nil {
-			e = enc.Encode(chunkOwner{v.ChunkID, v.NodeID, v.FilePath})
-		}
-		if e != nil {
-			return adapter.SegmentRef{}, adapter.BuildStats{}, errors.Join(e, f.Close())
-		}
-	}
-	if e = errors.Join(f.Sync(), f.Close()); e != nil {
+	// Persist row ownership once; payloads remain in C. These serving keys and
+	// their resident indexes count in baseline bytes and process memory.
+	if e = writeOwners(ctx, abs, d); e != nil {
 		return adapter.SegmentRef{}, adapter.BuildStats{}, e
 	}
 	return b.finishSeal(abs, seal{Schema: "linkdelta-seal/v1", Repo: d.Repo, Format: "c-base", Base: &ref, Payload: "base-ref.json"}, "full")
@@ -102,9 +88,35 @@ func (b backend) BuildDelta(ctx context.Context, old adapter.SegmentRef, c adapt
 	if err != nil {
 		return adapter.SegmentRef{}, adapter.BuildStats{}, err
 	}
-	rows, err := changeRows(ctx, opened.(*segment), c)
-	err = errors.Join(err, opened.Close())
+	prior := opened.(*segment)
+	rows, err := changeRows(ctx, prior, c)
 	if err != nil {
+		return adapter.SegmentRef{}, adapter.BuildStats{}, errors.Join(err, opened.Close())
+	}
+	p0, err := cpuNS()
+	if err != nil {
+		return adapter.SegmentRef{}, adapter.BuildStats{}, errors.Join(err, opened.Close())
+	}
+	added, err := indexLayer(rows)
+	if err != nil {
+		return adapter.SegmentRef{}, adapter.BuildStats{}, errors.Join(err, opened.Close())
+	}
+	view := *prior
+	view.layers = append(slices.Clone(prior.layers), added)
+	view.indexMasks()
+	var deltaText []row
+	for i, l := range view.layers {
+		for _, r := range l.textRows {
+			if !view.masked(r.Owner, r.Source, i) && (r.Family != "content" || view.chunkMask[r.Key] <= i+1) {
+				deltaText = append(deltaText, r)
+			}
+		}
+	}
+	p1, err := cpuNS()
+	if err != nil {
+		return adapter.SegmentRef{}, adapter.BuildStats{}, errors.Join(err, opened.Close())
+	}
+	if err = opened.Close(); err != nil {
 		return adapter.SegmentRef{}, adapter.BuildStats{}, err
 	}
 	abs, err := filepath.Abs(path)
@@ -118,10 +130,24 @@ func (b backend) BuildDelta(ctx context.Context, old adapter.SegmentRef, c adapt
 	if err = writeDelta(filepath.Join(abs, payload), b.format, rows); err != nil {
 		return adapter.SegmentRef{}, adapter.BuildStats{}, err
 	}
-	if err = buildDeltaText(ctx, abs, rows); err != nil {
+	c0, err := cpuNS()
+	if err != nil {
 		return adapter.SegmentRef{}, adapter.BuildStats{}, err
 	}
-	return b.finishSeal(abs, seal{Schema: "linkdelta-seal/v1", Repo: old.Repo, Format: b.format, Parent: &old, Payload: payload}, "delta")
+	if err = b.buildText(ctx, abs, deltaText); err != nil {
+		return adapter.SegmentRef{}, adapter.BuildStats{}, err
+	}
+	c1, err := cpuNS()
+	if err != nil {
+		return adapter.SegmentRef{}, adapter.BuildStats{}, err
+	}
+	ref, stats, err := b.finishSeal(abs, seal{Schema: "linkdelta-seal/v1", Repo: old.Repo, Format: b.format, Parent: &old, Payload: payload}, "delta")
+	if err == nil {
+		b.cache.mu.Lock()
+		b.cache.TextCPU[ref.Digest] = (p1 - p0) + (c1 - c0)
+		b.cache.mu.Unlock()
+	}
+	return ref, stats, err
 }
 func finishSeal(path string, s seal, mode string) (adapter.SegmentRef, adapter.BuildStats, error) {
 	var stats adapter.BuildStats
@@ -234,15 +260,26 @@ func (b backend) ownership(ref adapter.SegmentRef) (ownership, error) {
 		return o, nil
 	}
 	o := ownership{ByFile: map[string][]string{}, ByNode: map[string][]string{}}
-	err := eachJSON(filepath.Join(ref.Path, "chunks.jsonl"), func(v chunkOwner) error {
-		o.ByFile[v.File] = append(o.ByFile[v.File], v.ID)
-		o.ByNode[v.Node] = append(o.ByNode[v.Node], v.ID)
-		return nil
-	})
-	if err == nil {
-		b.cache.owners[ref] = o
+	var rows []rowOwner
+	err := eachJSON(filepath.Join(ref.Path, "rows.jsonl"), func(r rowOwner) error { rows = append(rows, r); return nil })
+	if err != nil {
+		return o, err
 	}
-	return o, err
+	for _, r := range rows {
+		if r.Family == "content" {
+			o.ByFile[r.File] = append(o.ByFile[r.File], r.Key)
+			o.ByNode[r.Node] = append(o.ByNode[r.Node], r.Key)
+		}
+	}
+	o.Spaces = rowSpaces(rows)
+	o.Text = map[string][]chunkOwner{}
+	for _, r := range rows {
+		if r.Family == "symbol" || r.Family == "content" {
+			o.Text[r.Family] = append(o.Text[r.Family], chunkOwner{r.Key, r.Node, r.File})
+		}
+	}
+	b.cache.owners[ref] = o
+	return o, nil
 }
 func readSeal(ref adapter.SegmentRef) (seal, error) {
 	var s seal
@@ -282,8 +319,8 @@ func readSeal(ref adapter.SegmentRef) (seal, error) {
 		return s, fmt.Errorf("invalid sealed inventory")
 	}
 	if s.Format == "c-base" {
-		if _, ok := s.Files["chunks.jsonl"]; !ok {
-			return s, fmt.Errorf("missing content ownership metadata")
+		if _, ok := s.Files["rows.jsonl"]; !ok {
+			return s, fmt.Errorf("missing row-space ownership metadata")
 		}
 	}
 	for name, pin := range s.Files {
@@ -371,16 +408,15 @@ func (b backend) Open(ctx context.Context, path string, ref adapter.SegmentRef) 
 		if err != nil {
 			return nil, err
 		}
-		l.symbols, err = bleve.OpenUsing(filepath.Join(current.Path, "symbols.bleve"), map[string]interface{}{"read_only": true})
-		if err != nil {
-			return nil, err
+		if current == ref {
+			for _, name := range []string{"symbols", "content"} {
+				ix, e := bleve.OpenUsing(filepath.Join(current.Path, name+".bleve"), map[string]interface{}{"read_only": true})
+				if e != nil {
+					return nil, e
+				}
+				textIndexes = append(textIndexes, ix)
+			}
 		}
-		textIndexes = append(textIndexes, l.symbols)
-		l.content, err = bleve.OpenUsing(filepath.Join(current.Path, "content.bleve"), map[string]interface{}{"read_only": true})
-		if err != nil {
-			return nil, err
-		}
-		textIndexes = append(textIndexes, l.content)
 		reverse = append(reverse, l)
 		current = *s.Parent
 	}

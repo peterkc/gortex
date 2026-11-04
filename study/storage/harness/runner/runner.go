@@ -113,12 +113,60 @@ type Result struct {
 	Failures       []string                `json:"failures"`
 	Success        bool                    `json:"success"`
 	TimingOnly     bool                    `json:"timing_only,omitempty"`
+	BuildOnly      bool                    `json:"build_only,omitempty"`
+	CheckOnly      bool                    `json:"check_only,omitempty"`
+	LookupOnly     bool                    `json:"lookup_only,omitempty"`
+	BaseOnly       bool                    `json:"base_only,omitempty"`
 	QueryLatencies map[string]string       `json:"query_latency_sha256,omitempty"`
 }
 
 // MarshalJSON leaves the full protocol unchanged and omits unrun timing phases.
 func (r Result) MarshalJSON() ([]byte, error) {
 	type result Result
+	if r.BuildOnly {
+		type built struct {
+			ArtifactBytes int64              `json:"artifact_bytes"`
+			Repo          string             `json:"repo"`
+			Ref           adapter.SegmentRef `json:"ref"`
+		}
+		builds := make([]built, 0, len(r.Builds))
+		for _, build := range r.Builds {
+			builds = append(builds, built{build.ArtifactBytes, build.Repo, build.Ref})
+		}
+		return json.Marshal(struct {
+			Adapter        string   `json:"adapter"`
+			Tier           string   `json:"tier"`
+			Run            int      `json:"run"`
+			ManifestSHA256 string   `json:"manifest_sha256"`
+			BuildOnly      bool     `json:"build_only"`
+			Builds         []built  `json:"builds"`
+			Failures       []string `json:"failures"`
+			Success        bool     `json:"success"`
+		}{r.Adapter, r.Tier, r.Run, r.ManifestSHA256, true, builds, r.Failures, r.Success})
+	}
+	if r.CheckOnly {
+		type checkedBuild struct {
+			CPU           int64              `json:"cpu_ns"`
+			ArtifactBytes int64              `json:"artifact_bytes"`
+			Repo          string             `json:"repo"`
+			Ref           adapter.SegmentRef `json:"ref"`
+		}
+		builds := make([]checkedBuild, 0, len(r.Builds))
+		for _, b := range r.Builds {
+			builds = append(builds, checkedBuild{b.CPU, b.ArtifactBytes, b.Repo, b.Ref})
+		}
+		return json.Marshal(struct {
+			Adapter        string           `json:"adapter"`
+			Tier           string           `json:"tier"`
+			Run            int              `json:"run"`
+			ManifestSHA256 string           `json:"manifest_sha256"`
+			CheckOnly      bool             `json:"check_only"`
+			Builds         []checkedBuild   `json:"builds"`
+			Checks         []workload.Check `json:"checks"`
+			Failures       []string         `json:"failures"`
+			Success        bool             `json:"success"`
+		}{r.Adapter, r.Tier, r.Run, r.ManifestSHA256, true, builds, r.Checks, r.Failures, r.Success})
+	}
 	if !r.TimingOnly {
 		return json.Marshal(result(r))
 	}
@@ -182,6 +230,10 @@ type runRequest struct {
 	Trials              int
 	SafetyTimeout       time.Duration
 	TimingOnly          bool
+	BuildOnly           bool
+	CheckOnly           bool
+	LookupOnly          bool
+	BaseOnly            bool
 	QueryMinimumSamples int
 	CatalogArgs         []string
 	CatalogResult       string
@@ -274,6 +326,10 @@ func RunCLI(b adapter.Backend, factory adapter.CatalogFactory) error {
 	runs := fs.Int("runs", 5, "measured fresh-process runs")
 	trials := fs.Int("crash-trials", 12, "hook trials plus this many external-time trials")
 	warm := fs.Bool("warmup", true, "discard one full fresh-process warm-up")
+	baseOnly := fs.Bool("base-only", false, "time only Check 5 base read operations; requires timing-only")
+	checkOnly := fs.Bool("check-only", false, "build/open once and check queries once; no timing or publication phases")
+	lookupOnly := fs.Bool("lookup-only", false, "time only id, name and file queries; requires timing-only")
+	buildOnly := fs.Bool("build-only", false, "build sealed bases once; no query, update, publication or timing results")
 	timingOnly := fs.Bool("timing-only", false, "time the base workload only; skip update and publication correctness phases")
 	minimumSamples := fs.Int("min-query-samples", 1, "minimum per judged stratum per timing process; repetitions planned from discarded warmup")
 	safetyTimeout := fs.Duration("safety-timeout", defaultSafetyTimeout, "safety deadline for each commit-race check and crash child")
@@ -290,6 +346,18 @@ func RunCLI(b adapter.Backend, factory adapter.CatalogFactory) error {
 	}
 	if *safetyTimeout <= 0 {
 		return fmt.Errorf("safety-timeout must be positive")
+	}
+	if *checkOnly && (*buildOnly || *timingOnly || *warm || *runs != 1) {
+		return fmt.Errorf("check-only requires one run, no warmup and no other mode")
+	}
+	if *baseOnly && (!*timingOnly || *lookupOnly) {
+		return fmt.Errorf("base-only requires timing-only and excludes lookup-only")
+	}
+	if *lookupOnly && !*timingOnly {
+		return fmt.Errorf("lookup-only requires timing-only")
+	}
+	if *buildOnly && (*timingOnly || *warm || *runs != 1) {
+		return fmt.Errorf("build-only requires one run, no warmup and no timing-only")
 	}
 	var err error
 	*data, err = filepath.Abs(*data)
@@ -327,7 +395,7 @@ func RunCLI(b adapter.Backend, factory adapter.CatalogFactory) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	for run := first; run <= *runs; run++ {
-		req := runRequest{Adapter: b.Name(), Data: *data, Out: *out, Run: run, Trials: *trials, SafetyTimeout: *safetyTimeout, TimingOnly: *timingOnly, QueryMinimumSamples: *minimumSamples, Binding: binding}
+		req := runRequest{Adapter: b.Name(), Data: *data, Out: *out, Run: run, Trials: *trials, SafetyTimeout: *safetyTimeout, TimingOnly: *timingOnly, BuildOnly: *buildOnly, CheckOnly: *checkOnly, LookupOnly: *lookupOnly, BaseOnly: *baseOnly, QueryMinimumSamples: *minimumSamples, Binding: binding}
 		if err = controlledRun(ctx, exe, "__measure_run", *cgroupRoot, req); err != nil {
 			return err
 		}
@@ -470,6 +538,30 @@ func loadTier(dir string) ([]dataset.Dataset, []workload.Query, []workload.Expec
 	digest, e := dataset.Hash(filepath.Join(dir, "manifest.json"))
 	return ds, qs, want, digest, e
 }
+
+// Only the selected check's operations enter measurement; answers stay paired.
+func selectedQueries(qs []workload.Query, want []workload.Expected, lookup, base bool) ([]workload.Query, []workload.Expected) {
+	if !lookup && !base {
+		return qs, want
+	}
+	var selected []workload.Query
+	var answers []workload.Expected
+	for i, q := range qs {
+		keep := lookup && (q.Op == "id" || q.Op == "name" || q.Op == "file")
+		if base {
+			switch q.Op {
+			case "name", "in", "traverse2", "traverse3", "symbols", "multi_name", "multi_in", "multi_traverse2", "multi_traverse3", "multi_symbols":
+				keep = true
+			}
+		}
+		if keep {
+			selected = append(selected, q)
+			answers = append(answers, want[i])
+		}
+	}
+	return selected, answers
+}
+
 func runChild(original adapter.Backend, factory adapter.CatalogFactory, req runRequest) error {
 	if req.QueryMinimumSamples < 0 {
 		return fmt.Errorf("min-query-samples must be positive")
@@ -500,11 +592,13 @@ func runChild(original adapter.Backend, factory adapter.CatalogFactory, req runR
 	if e != nil {
 		return e
 	}
+	qs, want = selectedQueries(qs, want, req.LookupOnly, req.BaseOnly)
+
 	dir := filepath.Join(req.Out, fmt.Sprintf("run-%02d", req.Run))
 	if e = os.MkdirAll(dir, 0755); e != nil {
 		return e
 	}
-	r := Result{TimingOnly: req.TimingOnly, PID: os.Getpid(), Adapter: original.Name(), Tier: filepath.Base(req.Data), Run: req.Run, Started: time.Now().Format(time.RFC3339), Uptime: strings.TrimSpace(string(load)), GoVersion: runtime.Version(), CPUs: runtime.NumCPU(), ManifestSHA256: digest, Capabilities: original.Capabilities(), Metrics: map[string]Distribution{}, ServerUsage: map[string]adapter.ResourceUsage{}, Failures: []string{}}
+	r := Result{TimingOnly: req.TimingOnly, BuildOnly: req.BuildOnly, CheckOnly: req.CheckOnly, LookupOnly: req.LookupOnly, BaseOnly: req.BaseOnly, PID: os.Getpid(), Adapter: original.Name(), Tier: filepath.Base(req.Data), Run: req.Run, Started: time.Now().Format(time.RFC3339), Uptime: strings.TrimSpace(string(load)), GoVersion: runtime.Version(), CPUs: runtime.NumCPU(), ManifestSHA256: digest, Capabilities: original.Capabilities(), Metrics: map[string]Distribution{}, ServerUsage: map[string]adapter.ResourceUsage{}, Failures: []string{}}
 	b := &trackedBackend{Backend: original}
 	hooks, server := original.(adapter.ServerHooks)
 	if server {
@@ -846,7 +940,7 @@ func warmedQueries(ctx context.Context, s map[string]adapter.Segment, m adapter.
 func runOnce(ctx context.Context, b *trackedBackend, factory adapter.CatalogFactory, ds []dataset.Dataset, qs []workload.Query, want []workload.Expected, dir string, trials int, safetyTimeout time.Duration, r *Result) (err error) {
 	ctx = context.WithValue(ctx, queryLatencyKey{}, queryLatencyOutput{dir: dir, result: r})
 	var referenceErr error
-	if len(ds) > 0 && ds[0].Source == nil {
+	if !r.BuildOnly && len(ds) > 0 && ds[0].Source == nil {
 		want, referenceErr = oracle.ReferenceAnswers(ds, qs, want)
 		if referenceErr != nil {
 			return referenceErr
@@ -888,6 +982,22 @@ func runOnce(ctx context.Context, b *trackedBackend, factory adapter.CatalogFact
 		r.Builds = append(r.Builds, BuildRecord{CPU: cpu, ArtifactBytes: bytes, Repo: d.Repo, DurationNS: ns, Stats: stats, Ref: ref})
 		refs[d.Repo] = ref
 		buildTimes = append(buildTimes, ns)
+	}
+	if r.BuildOnly {
+		return nil
+	}
+	if r.CheckOnly {
+		segments, e := openAll(ctx, b, refs)
+		if e != nil {
+			return e
+		}
+		defer func() { err = errors.Join(err, closeAll(segments)) }()
+		// No latency output, warmup or repetitions. The checker stays unchanged.
+		checkCtx := context.WithValue(ctx, queryLatencyKey{}, nil)
+		checkCtx = context.WithValue(checkCtx, queryMinimumKey{}, 1)
+		_, checks, e := measuredQueries(checkCtx, segments, adapter.Fanout{Segments: segments}, qs, want, r.Capabilities)
+		r.Checks = append(r.Checks, checks...)
+		return e
 	}
 	r.Metrics["build_seal"] = Summarize(buildTimes)
 	if e := resource(ctx, b.Backend, r, "build"); e != nil {

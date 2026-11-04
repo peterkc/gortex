@@ -5,6 +5,7 @@ import (
 	"container/list"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -24,14 +26,21 @@ import (
 // Row tables are sorted by (key,id). Their range directories are a sparse
 // CSR/CSC analogue: an absent endpoint has an empty range, not a fake node.
 type row struct {
-	Key string `parquet:"key,dict"`
-	ID  string `parquet:"id,dict"`
-	Raw []byte `parquet:"payload"`
+	Key    string `parquet:"key,dict"`
+	ID     string `parquet:"id,dict"`
+	Tag    uint64 `parquet:"tag,plain,uncompressed"`
+	Local  uint64 `parquet:"local,plain,uncompressed"`
+	Number uint64 `parquet:"number,plain,uncompressed"`
+	Raw    []byte `parquet:"payload"`
 }
 type rowRange struct {
-	Key   string `parquet:"key,dict"`
-	First int64  `parquet:"first,delta"`
-	End   int64  `parquet:"end,delta"`
+	Tag     uint64 `parquet:"tag,plain,uncompressed"`
+	Grouped bool   `parquet:"grouped"`
+	Numeric bool   `parquet:"numeric"`
+	Key     string `parquet:"key,dict"`
+	Number  uint64 `parquet:"number,plain,uncompressed"`
+	First   int64  `parquet:"first,delta"`
+	End     int64  `parquet:"end,delta"`
 }
 
 type rowSpool struct {
@@ -47,7 +56,7 @@ func newRowSpool(path string) (*rowSpool, error) {
 	return &rowSpool{file: file, buffer: bufio.NewWriterSize(file, 64<<10)}, nil
 }
 func (s *rowSpool) put(r row) error {
-	_, err := fmt.Fprintf(s.buffer, "%s\t%s\t%s\n", hex.EncodeToString([]byte(r.Key)), hex.EncodeToString([]byte(r.ID)), r.Raw)
+	_, err := fmt.Fprintf(s.buffer, "%s\t%s\t%s\n", hex.EncodeToString([]byte(r.Key)), hex.EncodeToString([]byte(r.ID)), hex.EncodeToString(r.Raw))
 	return err
 }
 func (s *rowSpool) close() error { return errors.Join(s.buffer.Flush(), s.file.Close()) }
@@ -145,19 +154,49 @@ func writeSortedTable(ctx context.Context, dir, scratch, name string, unique boo
 		if e != nil {
 			return verification, e
 		}
-		if unique && (len(key) == 0 || (index > 0 && current.Key == string(key))) {
+		if unique && ((len(key) == 0 && name != "kinds") || (index > 0 && current.Key == string(key))) {
 			return verification, fmt.Errorf("empty or duplicate %s identity %q", name, key)
 		}
 		if index == 0 || current.Key != string(key) {
 			if index > 0 {
 				current.End = index
-				if _, e = directory.Write([]rowRange{current}); e != nil {
+				if _, e = directory.Write([]rowRange{storedRange(name, current)}); e != nil {
 					return verification, e
 				}
 			}
 			current = rowRange{Key: string(key), First: index}
 		}
-		value := row{Key: string(key), ID: string(id), Raw: []byte(parts[2])}
+		raw, e := hex.DecodeString(parts[2])
+		if e != nil {
+			return verification, e
+		}
+		value := row{Key: string(key), ID: string(id), Raw: raw}
+		if graphTable(name) {
+			local := string(id)
+			if name == "out" || name == "in" {
+				local = local[len(local)-16:]
+			}
+			value.Local, e = strconv.ParseUint(local, 16, 64)
+			if e != nil {
+				return verification, e
+			}
+			value.ID = ""
+			if numericTable(name) {
+				numeric := string(key)
+				if name == "out" || name == "in" {
+					value.Tag, e = strconv.ParseUint(numeric[:16], 16, 64)
+					if e != nil {
+						return verification, e
+					}
+					numeric = numeric[16:]
+				}
+				value.Number, e = strconv.ParseUint(numeric, 16, 64)
+				if e != nil {
+					return verification, e
+				}
+				value.Key = ""
+			}
+		}
 		if e = json.NewEncoder(expected).Encode(value); e != nil {
 			return verification, e
 		}
@@ -168,7 +207,7 @@ func writeSortedTable(ctx context.Context, dir, scratch, name string, unique boo
 	}
 	if index > 0 {
 		current.End = index
-		if _, err = directory.Write([]rowRange{current}); err != nil {
+		if _, err = directory.Write([]rowRange{storedRange(name, current)}); err != nil {
 			return verification, err
 		}
 	}
@@ -304,7 +343,7 @@ func tableRange(table *tableFile, key string) (result rowRange, found bool, err 
 		if _, err = reader.Read(one); err != nil && err != io.EOF {
 			return result, false, err
 		}
-		if one[0].Key < key {
+		if rangeKey(one[0]) < key {
 			low = middle + 1
 		} else {
 			high = middle
@@ -324,7 +363,7 @@ func tableRange(table *tableFile, key string) (result rowRange, found bool, err 
 		return result, false, fmt.Errorf("truncated range directory")
 	}
 	result = one[0]
-	if result.Key != key {
+	if rangeKey(result) != key {
 		return result, false, nil
 	}
 	if result.First < 0 || result.End <= result.First {
@@ -379,4 +418,89 @@ func scanReader(ctx context.Context, reader *parquet.GenericReader[row], span *r
 		first += int64(n)
 	}
 	return nil
+}
+
+func graphTable(name string) bool {
+	switch name {
+	case "nodes", "ids", "names", "qnames", "paths", "edges", "out", "in", "terminals", "kinds":
+		return true
+	}
+	return false
+}
+func numericTable(name string) bool {
+	switch name {
+	case "nodes", "edges", "out", "in", "terminals":
+		return true
+	}
+	return false
+}
+func localKey(id uint64) string { return fmt.Sprintf("%016x", id) }
+func storedRange(name string, r rowRange) rowRange {
+	if numericTable(name) {
+		r.Numeric = true
+		key := r.Key
+		if name == "out" || name == "in" {
+			r.Grouped = true
+			r.Tag, _ = strconv.ParseUint(key[:16], 16, 64)
+			key = key[16:]
+		}
+		r.Number, _ = strconv.ParseUint(key, 16, 64)
+		r.Key = ""
+	}
+	return r
+}
+func rangeKey(r rowRange) string {
+	if r.Numeric {
+		if r.Grouped {
+			return localKey(r.Tag) + localKey(r.Number)
+		}
+		return localKey(r.Number)
+	}
+	return r.Key
+}
+
+// Dense N+1 offsets include zero-degree nodes and unresolved terminals.
+func writeOffsets(ctx context.Context, dir, name string, count, kinds uint64) (err error) {
+	cache := newBlockCache(4 << 20)
+	reader, file, err := openRows[rowRange](filepath.Join(dir, name+".ranges.parquet"), cache)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, reader.Close(), file.Close()) }()
+	output, err := os.Create(filepath.Join(dir, name+".offsets"))
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, output.Close()) }()
+	buffer := bufio.NewWriter(output)
+	one := make([]rowRange, 1)
+	next, e := reader.Read(one)
+	if e != nil && e != io.EOF {
+		return e
+	}
+	offset := uint64(0)
+	if err = binary.Write(buffer, binary.LittleEndian, []uint64{count, kinds}); err != nil {
+		return err
+	}
+	for tag := uint64(0); tag < kinds; tag++ {
+		for id := uint64(0); id <= count; id++ {
+			if err = ctx.Err(); err != nil {
+				return err
+			}
+			if err = binary.Write(buffer, binary.LittleEndian, offset); err != nil {
+				return err
+			}
+			if next == 1 && one[0].Tag == tag && one[0].Number == id {
+				offset = uint64(one[0].End)
+				next, e = reader.Read(one)
+				if e != nil && e != io.EOF {
+					return e
+				}
+			}
+		}
+	}
+	if next != 0 {
+		return fmt.Errorf("offset endpoint outside local IDs")
+	}
+	return buffer.Flush()
 }

@@ -27,7 +27,7 @@ measurements on the Mac.
   alias/symlinked payload path, when checking runs, then it refuses or fails.
 - Given no paths, limits, approval binding or a fresh output directory, when the
   entrypoint starts, then it refuses rather than guessing or overwriting evidence.
-- Given native Bleve alias search, when delta-local statistics change ranking,
+- Given base-plus-D native Bleve search, when delta-local statistics change ranking,
   then the report lists every differing ordered top-k case against a clean C
   rebuild. Native match/mask correctness still fails on invalid or removed hits.
 
@@ -48,14 +48,20 @@ base. A missing C text-index API visibly blocks the run. Text build/search
 reuse `base.BuildText` and `base.SearchText`, including their mapping and analyzer.
 
 The overlay merges typed C lookups with delta ID/name/file and both adjacency
-indexes. Newest-mask maps make each visibility decision constant-time. Delta
-records are decoded once at open, not during every query. Vector merging requests
-base top-k plus the masked-ID upper bound, filters old IDs, then merges exact delta
-scores with the same score/ID tie order. Native search uses a Bleve alias of base
-plus deltas. Each member filters only its superseded document IDs, so replacement IDs in a
-newer member remain visible. Ordinary native rank differences are diagnostic,
-not quietly converted to slower formula queries. Full delta-marker coverage is
-still an exact correctness requirement.
+indexes. Each view binds dense node, edge, content-chunk and vector row spaces to
+hidden-row bitmaps. Graph and vector scans test their bitmap before top-k. Base
+name reads request at most k plus the hidden base rows with that name. The
+counted `rows.jsonl` file stores row ownership keys, not payload copies.
+
+Each edit builds one combined delta text index D' per text family, privately,
+from the visible delta text plus its replacement rows. Sealing and publication
+make D' visible together with the edit. Readers pinned to the old view keep its
+D. Searches query only the base and D. Base text requests overfetch by that
+index's hidden-row count, then filter by bitmap. No `IndexAlias` or `MustNot`
+DocID list serves the read path. Full text match sets equal a clean rebuild.
+At a cutoff, hits must be valid, visible, unique and full in count. Selected IDs
+and native BM25 order remain diagnostics. This prototype does not implement
+global visible-corpus rescoring.
 
 Check 3 removes `edge.to` only for declared targets. Its projected lookup key
 contains target name, repository, file scope, kind, span and a per-file declaration
@@ -103,20 +109,22 @@ name that repository. Both workload files must be pinned by the tier manifest.
 
 The one-file CPU and visibility window includes delta/text construction, seal,
 fsync, catalog verification/CAS, pinned open and a file read. It excludes source
-extraction and daemon/watch routing. Read ratios compare per-operation p95 with a
-clean C rebuild of exactly the same edited data, on the same host, serially, after
-the same warm-up. Every checkpoint also measures the zero-layer wrapper against
-that exact raw C reader. Raw samples reproduce all per-operation p95 and A/A
-ratios. A/A is not subtracted and the 1.10 bound is unchanged. Read serving is
-format-independent by construction; write/seal, open and bytes distinguish the
-codecs. The worst operation determines the 10% crossing. No observed
-crossing means a lower bound only; the threshold remains unresolved. A crossing
-at the smallest size supplies no passing threshold. The selected checkpoint must
-also have a positive delta/base byte ratio at most 2. The approved Design C target
-contract says "Change-layer delta bytes before compaction at most twice
-sealed-store bytes" (Prime plan `agent/plans/gortex-design-c/PLAN.md:765–766`).
-Line 790 applies that contract to Checks 1 to 6. This ratio counts all layer bytes
-through the selected checkpoint over the delta repository's sealed base bytes.
+extraction and daemon/watch routing. Read p95 compares each operation with
+`max(1.10 * clean p95, clean p95 + 1 ms)`. Every checkpoint measures the
+zero-layer wrapper against that same raw C reader. Each query runs all three
+forms in balanced order before answer serialization, hashing or evidence I/O.
+This replaces whole-workload form blocks that separated equal A/A samples by
+many seconds. Raw samples reproduce the per-operation p95 and control results.
+If `abs(wrapper p95 - base p95)` exceeds `max(0.10 * base p95, 1 ms)`, the
+operation is `unresolved`, never `pass` or `miss`. No A/A subtraction is used.
+
+The last tested size before a resolved read-bound crossing sets the compaction
+threshold. A crossing at the smallest size supplies no passing threshold. No
+crossing supplies a lower bound only. An unresolved control prevents selection
+through that checkpoint. The selected checkpoint also needs a positive
+cumulative delta/base byte ratio at most 2. Each edit reports its D rebuild CPU
+inside its total edit CPU. Each checkpoint reports text p95 beside the hidden
+base content-row count. All current and retained serving files count in bytes.
 If both forms pass, the lead selects the simplest form; code does not invent that
 judgment. A passing form
 cannot be selected as the sole pass while the other form is blocked or absent.
@@ -128,7 +136,7 @@ not failures of an earlier compaction regime. Report-level `MaxEditCPU` and
 regime passes, the edit-bound user-stop rule uses the smallest completed
 checkpoint. Raw per-edit samples preserve both.
 
-A base's hashes and ownership-key metadata are admitted once per run owner.
+A base's hashes and row-ownership metadata are admitted once per run owner.
 Later opens still validate the seal digest, exact identity, safe paths and every
 recorded size. Sealed files must remain immutable; same-size external tampering
 is detected on fresh adoption, not promised on every trusted read. Content chunk

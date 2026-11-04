@@ -599,6 +599,8 @@ func TestVectorMergedTopKWithMaskedWinnersAndTies(t *testing.T) {
 				t.Fatal(e)
 			}
 			defer s.Close()
+			view := s.(*segment)
+			view.external = noBaseVectorTopK{view.external.(baseResources)}
 			oracle := oracle.New(adapter.ApplyChange(d, c))
 			for _, k := range []int{0, 1, 2, -1} {
 				want, e := oracle.VectorTopK(ctx, v, k)
@@ -643,7 +645,7 @@ func TestNativeFamilyMaskCounterfactuals(t *testing.T) {
 				if e != nil {
 					t.Fatal(e)
 				}
-				rows = slices.DeleteFunc(rows, func(r row) bool { return r.Family == family })
+				rows = slices.DeleteFunc(rows, func(r row) bool { return r.Family == family || (family == "mask_node" && r.Family == "mask_file") })
 				dir := filepath.Join(root, "broken")
 				if e = os.Mkdir(dir, 0700); e != nil {
 					t.Fatal(e)
@@ -677,8 +679,8 @@ func TestNativeFamilyMaskCounterfactuals(t *testing.T) {
 	}
 }
 
-// The measured overlay may call indexed C operations, but never scan or encode
-// whole C row families to reconstruct text masks or vector answers.
+// Graph/text masks use counted row-owner metadata, never C payload scans.
+// Vector scans stream C rows and filter their bitmap before top-k.
 type noRowScans struct{ baseResources }
 
 func forbiddenRows[T any]() iter.Seq2[T, error] {
@@ -699,9 +701,7 @@ func (noRowScans) SymbolRows(context.Context) iter.Seq2[dataset.Symbol, error] {
 func (noRowScans) ContentRows(context.Context) iter.Seq2[dataset.Content, error] {
 	return forbiddenRows[dataset.Content]()
 }
-func (noRowScans) VectorRows(context.Context) iter.Seq2[dataset.Vector, error] {
-	return forbiddenRows[dataset.Vector]()
-}
+
 func TestOverlayUsesIndexedCWithoutWholeFamilyScans(t *testing.T) {
 	for _, format := range []string{"arrow", "parquet"} {
 		t.Run(format, func(t *testing.T) {

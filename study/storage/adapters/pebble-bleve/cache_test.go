@@ -130,7 +130,7 @@ func TestPhysicalStoresKeepScopesAndOneSharedCache(t *testing.T) {
 	}
 	defer opened.Close()
 	stores := opened.(*segment).kv.(*scopedKV)
-	expectedPrefixes := map[string]string{"graph": "AFIMNOP", "text-records": "SC", "vectors": "V"}
+	expectedPrefixes := map[string]string{"graph": "ADEFILMNOPQT", "text-records": "SC", "vectors": "V"}
 	seen := map[byte]int{}
 	for _, name := range []string{"graph", "text-records", "vectors"} {
 		if stores.stores[name] == nil {

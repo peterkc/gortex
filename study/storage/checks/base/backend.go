@@ -2,10 +2,12 @@
 package base
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -29,7 +31,7 @@ import (
 )
 
 const cacheBytes int64 = 256 << 20
-const format = "gxstudy-parquet-base/v1"
+const format = "gxstudy-parquet-base/v2"
 
 type Backend struct{ SideIndex bool }
 
@@ -41,11 +43,11 @@ func (b Backend) Name() string {
 }
 func (b Backend) Capabilities() adapter.Capabilities {
 	return adapter.Capabilities{
-		Operations: map[string]string{"id": "sorted Parquet ID directory and row range", "name": "sorted Parquet exact-name directory and ID-ordered row range", "file": "sorted Parquet file directory and row range", "in": "CSC-style endpoint ranges; kind filter over full rows", "out": "CSR-style endpoint ranges; kind filter over full rows", "symbols": "native Bleve BM25, identical to B", "content": "native Bleve BM25, identical to B", "vector": "emulated exact cosine scan of Parquet records", "delta": "emulated full rebuild from Parquet records"},
+		Operations: map[string]string{"id": "sorted logical-ID directory to canonical local-ID row", "name": "sorted exact-name local-ID candidates to canonical rows", "file": "sorted Parquet file directory and row range", "in": "CSC local-ID references with N+1 offsets; kind filter after dereference", "out": "CSR local-ID references with N+1 offsets; kind filter after dereference", "symbols": "native Bleve BM25, identical to B", "content": "native Bleve BM25, identical to B", "vector": "emulated exact cosine scan of Parquet records", "delta": "emulated full rebuild from Parquet records"},
 		Ranking:    map[string]adapter.RankPolicy{"symbols": {Mode: "native"}, "content": {Mode: "native"}, "multi_symbols": {Mode: "native"}, "vector": {Exact: true}, "multi_vector": {Exact: true}},
 		Libraries:  []string{"github.com/parquet-go/parquet-go v0.30.1", "github.com/blevesearch/bleve/v2 v2.6.1", "github.com/cockroachdb/pebble/v2 v2.1.7 (side branch only)"},
 		Deployment: "test-only per-repository sealed Parquet directory; reference JSON catalog",
-		Notes:      []string{"GraphAr-style sorted full-payload tables with sparse endpoint range directories, not GraphAr SDK/wire compatibility or dense N+1 offsets.", "Shared 256 MiB serving-cache payload budget across all repositories: Parquet only, or 128 MiB Parquet plus 128 MiB Pebble. No answer cache or resident graph. Parsed Parquet metadata and handles survive for the Segment lifetime; OS cache, metadata and identical Bleve memory are outside that budget and included in RSS/cgroup peaks.", "Full-payload lookup copies and both adjacency copies count in serving bytes; external-sort CPU and temporary disk belong to construction.", "Build/open/Reader subset only. Product catalog, daemon, retire and recovery are not established."},
+		Notes:      []string{"Dense local-ID canonical binary payload rows, ID-only lookup tables, and dense N+1 endpoint offsets; not GraphAr SDK/wire compatibility.", "Shared 256 MiB serving-cache payload budget across all repositories: Parquet only, or 128 MiB Parquet plus 128 MiB Pebble. No answer cache or resident graph. Parsed Parquet metadata and handles survive for the Segment lifetime; OS cache, metadata and identical Bleve memory are outside that budget and included in RSS/cgroup peaks.", "Canonical payloads, ID-only lookup copies, dense offset directories and optional side index count in serving bytes; external-sort CPU and temporary disk belong to construction.", "Build/open/Reader subset only. Product catalog, daemon, retire and recovery are not established."},
 	}
 }
 
@@ -67,6 +69,7 @@ type Segment struct {
 	dir              string
 	seal             seal
 	cache            *blockCache
+	offsets          map[string]*os.File
 	tables           map[string]*tableFile
 	side             *pebble.DB
 	symbols, content bleve.Index
@@ -147,9 +150,10 @@ func newSideWriter(path string) (*sideWriter, error) {
 	}
 	return &sideWriter{db: db, batch: db.NewBatch(), cache: cache, identity: identity}, nil
 }
-func (s *sideWriter) add(n dataset.Node, raw []byte) error {
-	for _, key := range [][]byte{indexKey("N", n.ID), indexKey("A", n.Name, n.ID), indexKey("P", n.FilePath, n.ID)} {
-		if err := s.batch.Set(key, raw, nil); err != nil {
+func (s *sideWriter) add(n dataset.Node, local uint64) error {
+	hash := sha256.Sum256([]byte(n.ID))
+	for _, key := range [][]byte{append([]byte("N/"), hash[:]...), append(indexKey("A", n.Name), localBytes(local)...), append(indexKey("Q", n.QualName), localBytes(local)...), append(indexKey("P", n.FilePath), localBytes(local)...)} {
+		if err := s.batch.Set(key, localBytes(local), nil); err != nil {
 			return err
 		}
 	}
@@ -189,38 +193,81 @@ func ingestRows(ctx context.Context, input inputRows, spools map[string]*rowSpoo
 		}
 		return spools[table].put(row{Key: key, ID: id, Raw: raw})
 	}
+	// This map exists only during construction. Serving resolves through counted
+	// on-disk ID rows, including reversible unresolved endpoint identities.
+	locals := map[string]uint64{}
+	kinds := map[string]uint64{}
 	for n, e := range input.nodes {
 		if e != nil {
 			return counts, e
 		}
-		raw, e := json.Marshal(n)
+		if _, exists := locals[n.ID]; n.ID == "" || exists {
+			return counts, fmt.Errorf("empty or duplicate node ID %q", n.ID)
+		}
+		local := uint64(counts.Nodes)
+		locals[n.ID] = local
+		raw, e := encodeNode(n)
 		if e != nil {
 			return counts, e
 		}
-		for _, v := range []struct{ table, key string }{{"nodes", n.ID}, {"names", n.Name}, {"paths", n.FilePath}} {
-			if e = put(v.table, v.key, n.ID, raw); e != nil {
+		if e = put("nodes", localKey(local), localKey(local), raw); e != nil {
+			return counts, e
+		}
+		for _, v := range []struct{ table, key string }{{"ids", n.ID}, {"names", n.Name}, {"qnames", n.QualName}, {"paths", n.FilePath}} {
+			if e = put(v.table, v.key, localKey(local), nil); e != nil {
 				return counts, e
 			}
 		}
 		if side != nil {
-			if e = side.add(n, raw); e != nil {
+			if e = side.add(n, local); e != nil {
 				return counts, e
 			}
 		}
 		counts.Nodes++
 	}
+	endpoint := func(id string) (uint64, error) {
+		if local, exists := locals[id]; exists {
+			return local, nil
+		}
+		local := uint64(len(locals))
+		locals[id] = local
+		if e := put("ids", id, localKey(local), nil); e != nil {
+			return 0, e
+		}
+		return local, put("terminals", localKey(local), localKey(local), []byte(id))
+	}
 	for edge, e := range input.edges {
 		if e != nil {
 			return counts, e
 		}
-		raw, e := json.Marshal(edge)
+		from, e := endpoint(edge.From)
 		if e != nil {
 			return counts, e
 		}
-		if e = put("out", edge.From, edge.Kind+"\x00"+edge.To, raw); e != nil {
+		to, e := endpoint(edge.To)
+		if e != nil {
 			return counts, e
 		}
-		if e = put("in", edge.To, edge.Kind+"\x00"+edge.From, raw); e != nil {
+		tag, exists := kinds[edge.Kind]
+		if !exists {
+			tag = uint64(len(kinds))
+			kinds[edge.Kind] = tag
+			if e = put("kinds", edge.Kind, localKey(tag), nil); e != nil {
+				return counts, e
+			}
+		}
+		local := uint64(counts.Edges)
+		raw, e := encodeEdge(edge, from, to)
+		if e != nil {
+			return counts, e
+		}
+		if e = put("edges", localKey(local), localKey(local), raw); e != nil {
+			return counts, e
+		}
+		if e = put("out", localKey(tag)+localKey(from), localKey(to)+edge.FilePath+"\x00"+localKey(uint64(edge.Line))+localKey(local), nil); e != nil {
+			return counts, e
+		}
+		if e = put("in", localKey(tag)+localKey(to), localKey(from)+edge.FilePath+"\x00"+localKey(uint64(edge.Line))+localKey(local), nil); e != nil {
 			return counts, e
 		}
 		counts.Edges++
@@ -329,7 +376,7 @@ func (b Backend) Build(ctx context.Context, d dataset.Dataset, dir string) (ref 
 			err = errors.Join(err, os.RemoveAll(scratch))
 		}
 	}()
-	names := []string{"nodes", "names", "paths", "out", "in", "files", "symbols", "content", "vectors"}
+	names := []string{"nodes", "ids", "names", "qnames", "paths", "edges", "out", "in", "terminals", "kinds", "files", "symbols", "content", "vectors"}
 	spools := map[string]*rowSpool{}
 	// Keep closure errors visible, including before a private build can seal.
 	closeSpools := func() error {
@@ -377,12 +424,22 @@ func (b Backend) Build(ctx context.Context, d dataset.Dataset, dir string) (ref 
 	}
 	verifications := map[string]tableVerification{}
 	for _, name := range names {
-		unique := name != "names" && name != "paths" && name != "out" && name != "in"
+		unique := name != "names" && name != "qnames" && name != "paths" && name != "out" && name != "in"
 		verified, e := writeSortedTable(ctx, dir, scratch, name, unique)
 		if e != nil {
 			return ref, stats, e
 		}
 		verifications[name] = verified
+		if name == "ids" {
+			if e = os.Remove(filepath.Join(dir, "ids.ranges.parquet")); e != nil {
+				return ref, stats, e
+			}
+		}
+	}
+	for _, name := range []string{"out", "in"} {
+		if err = writeOffsets(ctx, dir, name, uint64(verifications["ids"].Rows), uint64(verifications["kinds"].Rows)); err != nil {
+			return ref, stats, err
+		}
 	}
 	if err = os.RemoveAll(scratch); err != nil {
 		return ref, stats, err
@@ -506,19 +563,31 @@ func (b Backend) Open(ctx context.Context, dir string, ref adapter.SegmentRef) (
 			return nil, e
 		}
 		if info.Size() != entry.Size {
+			if strings.HasSuffix(entry.Name, ".offsets") {
+				return nil, fmt.Errorf("truncated offset directory: %s", entry.Name)
+			}
 			return nil, fmt.Errorf("artifact size mismatch: %s", entry.Name)
 		}
 		// Like B, immutable payload hashes are bound at seal; every Open checks sizes.
 	}
-	for _, name := range []string{"nodes", "names", "paths", "out", "in", "files", "symbols", "content", "vectors"} {
+	for _, name := range []string{"nodes", "ids", "names", "qnames", "paths", "edges", "out", "in", "terminals", "kinds", "files", "symbols", "content", "vectors"} {
 		for _, suffix := range []string{".parquet", ".ranges.parquet"} {
+			if name == "ids" && suffix == ".ranges.parquet" {
+				continue
+			}
 			if !seen[name+suffix] {
 				return nil, fmt.Errorf("missing required table %s", name+suffix)
 			}
 		}
 	}
 	counts := manifest.Meta.Counts
-	expectedRows := map[string]int{"nodes": counts.Nodes, "names": counts.Nodes, "paths": counts.Nodes, "out": counts.Edges, "in": counts.Edges, "files": counts.Files, "symbols": counts.Symbols, "content": counts.Content, "vectors": counts.Vectors}
+	expectedRows := map[string]int{"nodes": counts.Nodes, "names": counts.Nodes, "qnames": counts.Nodes, "paths": counts.Nodes, "edges": counts.Edges, "out": counts.Edges, "in": counts.Edges, "files": counts.Files, "symbols": counts.Symbols, "content": counts.Content, "vectors": counts.Vectors}
+	expectedRows["kinds"] = int(manifest.Verification["kinds"].Rows)
+	expectedRows["ids"] = int(manifest.Verification["ids"].Rows)
+	expectedRows["terminals"] = expectedRows["ids"] - counts.Nodes
+	if expectedRows["terminals"] < 0 {
+		return nil, fmt.Errorf("invalid local ID count")
+	}
 	for name, rows := range expectedRows {
 		verification, ok := manifest.Verification[name]
 		_, hashError := hex.DecodeString(verification.InputSHA256)
@@ -530,16 +599,22 @@ func (b Backend) Open(ctx context.Context, dir string, ref adapter.SegmentRef) (
 	if err != nil {
 		return nil, err
 	}
-	s := &Segment{dir: dir, seal: manifest, cache: cache, tables: map[string]*tableFile{}}
+	s := &Segment{dir: dir, seal: manifest, cache: cache, tables: map[string]*tableFile{}, offsets: map[string]*os.File{}}
 	fail := func(e error) (adapter.Segment, error) { return nil, errors.Join(e, s.Close()) }
-	for _, name := range []string{"nodes", "names", "paths", "out", "in", "files", "symbols", "content", "vectors"} {
+	for _, name := range []string{"nodes", "ids", "names", "qnames", "paths", "edges", "out", "in", "terminals", "kinds", "files", "symbols", "content", "vectors"} {
 		for _, suffix := range []string{"", ".ranges"} {
+			if name == "ids" && suffix == ".ranges" {
+				continue
+			}
 			key := name + suffix
 			table, e := openTable(filepath.Join(dir, key+".parquet"), cache)
 			if e != nil {
 				return fail(e)
 			}
 			s.tables[key] = table
+			if suffix == "" && table.parquet.NumRows() != int64(expectedRows[name]) {
+				return fail(fmt.Errorf("table row count differs: %s", name))
+			}
 			schema := parquet.SchemaOf(new(row))
 			if suffix != "" {
 				schema = parquet.SchemaOf(new(rowRange))
@@ -548,6 +623,16 @@ func (b Backend) Open(ctx context.Context, dir string, ref adapter.SegmentRef) (
 				return fail(fmt.Errorf("unexpected table schema: %s", key))
 			}
 		}
+	}
+	for _, name := range []string{"out", "in"} {
+		file, e := os.Open(filepath.Join(dir, name+".offsets"))
+		if e != nil {
+			return fail(e)
+		}
+		s.offsets[name] = file
+	}
+	if err = s.validateLocalLayout(ctx); err != nil {
+		return fail(err)
 	}
 	if b.SideIndex {
 		s.side, err = pebble.Open(filepath.Join(dir, "side"), &pebble.Options{ReadOnly: true, Cache: pCache, FS: sealedFS{FS: vfs.Default, lockPath: filepath.Join(dir, "side", "LOCK")}})
@@ -567,6 +652,9 @@ func (b Backend) Open(ctx context.Context, dir string, ref adapter.SegmentRef) (
 }
 func (s *Segment) Close() error {
 	s.once.Do(func() {
+		for _, file := range s.offsets {
+			s.closeErr = errors.Join(s.closeErr, file.Close())
+		}
 		for _, table := range s.tables {
 			s.closeErr = errors.Join(s.closeErr, table.file.Close())
 		}
@@ -596,11 +684,110 @@ func (s *Segment) sideNodes(ctx context.Context, prefix []byte) (nodes []dataset
 		if err = ctx.Err(); err != nil {
 			return nil, err
 		}
-		var n dataset.Node
-		if err = json.Unmarshal(iterator.Value(), &n); err != nil {
-			return nil, err
+		local, e := parseLocal(iterator.Value())
+		if e != nil {
+			return nil, e
+		}
+		n, e := s.nodeAt(ctx, local)
+		if e != nil {
+			return nil, e
 		}
 		nodes = append(nodes, n)
 	}
 	return nodes, iterator.Error()
+}
+
+func (s *Segment) offsetSpan(name string, local, tag uint64) (span rowRange, err error) {
+	if local >= uint64(s.seal.Verification["ids"].Rows) {
+		return span, fmt.Errorf("local endpoint outside base")
+	}
+	var raw [16]byte
+	if _, err = (cachedFile{s.offsets[name], s.cache}).ReadAt(raw[:], 16+int64(tag*(uint64(s.seal.Verification["ids"].Rows)+1)+local)*8); err != nil {
+		return span, fmt.Errorf("truncated offset directory: %s: %w", name, err)
+	}
+	span.First = int64(binary.LittleEndian.Uint64(raw[:8]))
+	span.End = int64(binary.LittleEndian.Uint64(raw[8:]))
+	if span.First < 0 || span.First > span.End || span.End > s.tables[name].parquet.NumRows() {
+		return span, fmt.Errorf("invalid offset directory: %s", name)
+	}
+	return span, nil
+}
+func (s *Segment) validateLocalLayout(ctx context.Context) error {
+	for _, name := range []string{"nodes", "edges"} {
+		type localRow struct {
+			Local  uint64 `parquet:"local,plain,uncompressed"`
+			Number uint64 `parquet:"number,plain,uncompressed"`
+		}
+		reader := parquet.NewGenericReader[localRow](s.tables[name].parquet)
+		rows := make([]localRow, 256)
+		index := uint64(0)
+		var scanErr error
+		for {
+			if scanErr = ctx.Err(); scanErr != nil {
+				break
+			}
+			n, e := reader.Read(rows)
+			for _, r := range rows[:n] {
+				if r.Local != index || r.Number != index {
+					scanErr = fmt.Errorf("duplicate or non-dense local ID: %s", name)
+					break
+				}
+				index++
+			}
+			if scanErr != nil {
+				break
+			}
+			if e == io.EOF {
+				break
+			}
+			if e != nil {
+				scanErr = e
+				break
+			}
+			if n == 0 {
+				scanErr = fmt.Errorf("truncated local ID column: %s", name)
+				break
+			}
+		}
+		if e := errors.Join(scanErr, reader.Close()); e != nil {
+			return e
+		}
+	}
+	count := uint64(s.seal.Verification["ids"].Rows)
+	for _, name := range []string{"out", "in"} {
+		info, err := os.Stat(filepath.Join(s.dir, name+".offsets"))
+		if err != nil {
+			return err
+		}
+		kinds := uint64(s.seal.Verification["kinds"].Rows)
+		if info.Size() != 16+int64(kinds*(count+1))*8 {
+			return fmt.Errorf("truncated offset directory: %s", name)
+		}
+		reader := bufio.NewReader(io.NewSectionReader(s.offsets[name], 16, info.Size()-16))
+		var header [16]byte
+		if _, err = s.offsets[name].ReadAt(header[:], 0); err != nil {
+			return err
+		}
+		if binary.LittleEndian.Uint64(header[:8]) != count || binary.LittleEndian.Uint64(header[8:]) != kinds {
+			return fmt.Errorf("invalid offset directory header: %s", name)
+		}
+		previous := uint64(0)
+		for position := uint64(0); position < kinds*(count+1); position++ {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			var offset uint64
+			if err := binary.Read(reader, binary.LittleEndian, &offset); err != nil {
+				return fmt.Errorf("truncated offset directory: %s: %w", name, err)
+			}
+			if (position == 0 && offset != 0) || offset < previous || offset > uint64(s.tables[name].parquet.NumRows()) {
+				return fmt.Errorf("invalid offset directory: %s", name)
+			}
+			previous = offset
+		}
+		if previous != uint64(s.tables[name].parquet.NumRows()) {
+			return fmt.Errorf("invalid offset directory end: %s", name)
+		}
+	}
+	return nil
 }

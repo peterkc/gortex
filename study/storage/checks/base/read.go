@@ -2,19 +2,41 @@ package base
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"math"
 	"slices"
 	"strings"
 
 	"github.com/cockroachdb/pebble/v2"
+	"github.com/parquet-go/parquet-go"
 	"gxstudy/adapter"
 	"gxstudy/dataset"
 )
 
+func decodeRow[T any](ctx context.Context, s *Segment, table string, r row) (value T, err error) {
+	switch target := any(&value).(type) {
+	case *dataset.Node:
+		if table == "nodes" {
+			*target, err = decodeNode(r.Raw)
+		} else {
+			*target, err = s.nodeAt(ctx, r.Local)
+		}
+	case *dataset.Edge:
+		if table == "edges" {
+			*target, err = decodeEdge(r.Raw, func(local uint64) (string, error) { return s.logicalAt(ctx, local) })
+		} else {
+			*target, err = s.edgeAt(ctx, r.Local)
+		}
+	default:
+		err = json.Unmarshal(r.Raw, &value)
+	}
+	return value, err
+}
 func lookupRows[T any](ctx context.Context, s *Segment, table, key string) (values []T, err error) {
 	if err = ctx.Err(); err != nil {
 		return nil, err
@@ -27,8 +49,8 @@ func lookupRows[T any](ctx context.Context, s *Segment, table, key string) (valu
 		if r.Key != key {
 			return fmt.Errorf("range directory key mismatch")
 		}
-		var value T
-		if e := json.Unmarshal(r.Raw, &value); e != nil {
+		value, e := decodeRow[T](ctx, s, table, r)
+		if e != nil {
 			return e
 		}
 		values = append(values, value)
@@ -36,33 +58,113 @@ func lookupRows[T any](ctx context.Context, s *Segment, table, key string) (valu
 	})
 	return values, err
 }
+func (s *Segment) nodeAt(ctx context.Context, local uint64) (n dataset.Node, err error) {
+	if local >= uint64(s.seal.Meta.Counts.Nodes) {
+		return n, adapter.ErrNotFound
+	}
+	span := rowRange{First: int64(local), End: int64(local) + 1}
+	err = s.scan(ctx, "nodes", &span, func(r row) error { var e error; n, e = decodeNode(r.Raw); return e })
+	return n, err
+}
+func (s *Segment) logicalAt(ctx context.Context, local uint64) (id string, err error) {
+	if local < uint64(s.seal.Meta.Counts.Nodes) {
+		n, e := s.nodeAt(ctx, local)
+		return n.ID, e
+	}
+	span, found, err := tableRange(s.tables["terminals.ranges"], localKey(local))
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("missing terminal local ID")
+	}
+	err = s.scan(ctx, "terminals", &span, func(r row) error { id = string(r.Raw); return nil })
+	return id, err
+}
+func (s *Segment) edgeAt(ctx context.Context, local uint64) (edge dataset.Edge, err error) {
+	span := rowRange{First: int64(local), End: int64(local) + 1}
+	err = s.scan(ctx, "edges", &span, func(r row) error {
+		var e error
+		edge, e = decodeEdge(r.Raw, func(id uint64) (string, error) { return s.logicalAt(ctx, id) })
+		return e
+	})
+	return edge, err
+}
+func (s *Segment) findLocal(ctx context.Context, table, id string) (local uint64, err error) {
+	if err = ctx.Err(); err != nil {
+		return 0, err
+	}
+	reader := parquet.NewGenericReader[row](s.tables[table].parquet)
+	defer func() { err = errors.Join(err, reader.Close()) }()
+	low, high := int64(0), reader.NumRows()
+	one := make([]row, 1)
+	read := func(index int64) error {
+		if e := reader.SeekToRow(index); e != nil {
+			return e
+		}
+		n, e := reader.Read(one)
+		if e != nil && e != io.EOF {
+			return e
+		}
+		if n != 1 {
+			return fmt.Errorf("truncated logical-ID lookup")
+		}
+		return nil
+	}
+	for low < high {
+		middle := low + (high-low)/2
+		if err = read(middle); err != nil {
+			return 0, err
+		}
+		if one[0].Key < id {
+			low = middle + 1
+		} else {
+			high = middle
+		}
+	}
+	if low == reader.NumRows() {
+		return 0, adapter.ErrNotFound
+	}
+	if err = read(low); err != nil {
+		return 0, err
+	}
+	if one[0].Key != id {
+		return 0, adapter.ErrNotFound
+	}
+	return one[0].Local, nil
+}
+func (s *Segment) localID(ctx context.Context, id string) (uint64, error) {
+	return s.findLocal(ctx, "ids", id)
+}
 func (s *Segment) NodeByID(ctx context.Context, id string) (dataset.Node, error) {
 	if err := ctx.Err(); err != nil {
 		return dataset.Node{}, err
 	}
 	if s.side != nil {
-		raw, closer, err := s.side.Get(indexKey("N", id))
+		hash := sha256.Sum256([]byte(id))
+		raw, closer, err := s.side.Get(append([]byte("N/"), hash[:]...))
 		if errors.Is(err, pebble.ErrNotFound) {
 			return dataset.Node{}, adapter.ErrNotFound
 		}
 		if err != nil {
 			return dataset.Node{}, err
 		}
-		var n dataset.Node
-		err = json.Unmarshal(raw, &n)
-		return n, errors.Join(err, closer.Close())
+		local, e := parseLocal(raw)
+		err = errors.Join(e, closer.Close())
+		if err != nil {
+			return dataset.Node{}, err
+		}
+		n, err := s.nodeAt(ctx, local)
+		if err == nil && n.ID != id {
+			return dataset.Node{}, fmt.Errorf("side lookup identity mismatch")
+		}
+		return n, err
 	}
-	rows, err := lookupRows[dataset.Node](ctx, s, "nodes", id)
+	local, err := s.localID(ctx, id)
 	if err != nil {
 		return dataset.Node{}, err
 	}
-	if len(rows) == 0 {
-		return dataset.Node{}, adapter.ErrNotFound
-	}
-	if len(rows) != 1 {
-		return dataset.Node{}, fmt.Errorf("duplicate ID rows")
-	}
-	return rows[0], nil
+	return s.nodeAt(ctx, local)
 }
 func (s *Segment) NodesByName(ctx context.Context, name string, k int) ([]dataset.Node, error) {
 	if err := ctx.Err(); err != nil {
@@ -88,26 +190,58 @@ func (s *Segment) NodesByName(ctx context.Context, name string, k int) ([]datase
 	return nodes, nil
 }
 func (s *Segment) FileNodes(ctx context.Context, path string) ([]dataset.Node, error) {
+	var nodes []dataset.Node
+	var err error
 	if s.side != nil {
-		return s.sideNodes(ctx, indexKey("P", path))
+		nodes, err = s.sideNodes(ctx, indexKey("P", path))
+	} else {
+		nodes, err = lookupRows[dataset.Node](ctx, s, "paths", path)
 	}
-	return lookupRows[dataset.Node](ctx, s, "paths", path)
+	slices.SortFunc(nodes, func(a, b dataset.Node) int { return strings.Compare(a.ID, b.ID) })
+	return nodes, err
 }
 func (s *Segment) edges(ctx context.Context, table, id, kind string) ([]dataset.Edge, error) {
-	edges, err := lookupRows[dataset.Edge](ctx, s, table, id)
+	local, err := s.localID(ctx, id)
+	if errors.Is(err, adapter.ErrNotFound) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	if kind == "" || kind == "any" {
-		return edges, nil
-	}
-	var result []dataset.Edge
-	for _, edge := range edges {
-		if edge.Kind == kind {
-			result = append(result, edge)
+	tags := make([]uint64, 0)
+	if kind != "" && kind != "any" {
+		tag, e := s.findLocal(ctx, "kinds", kind)
+		if errors.Is(e, adapter.ErrNotFound) {
+			return nil, nil
+		}
+		if e != nil {
+			return nil, e
+		}
+		tags = append(tags, tag)
+	} else {
+		for tag := uint64(0); tag < uint64(s.seal.Verification["kinds"].Rows); tag++ {
+			tags = append(tags, tag)
 		}
 	}
-	return result, nil
+	var edges []dataset.Edge
+	for _, tag := range tags {
+		span, e := s.offsetSpan(table, local, tag)
+		if e != nil {
+			return nil, e
+		}
+		err = s.scan(ctx, table, &span, func(r row) error {
+			edge, e := s.edgeAt(ctx, r.Local)
+			if e != nil {
+				return e
+			}
+			edges = append(edges, edge)
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return edges, err
 }
 func (s *Segment) OutEdges(ctx context.Context, id, kind string) ([]dataset.Edge, error) {
 	return s.edges(ctx, "out", id, kind)
@@ -168,9 +302,9 @@ func (s *Segment) VectorTopK(ctx context.Context, query []float32, k int) ([]ada
 }
 func allRows[T any](ctx context.Context, s *Segment, table string) (values []T, err error) {
 	err = s.scan(ctx, table, nil, func(r row) error {
-		var value T
-		if err := json.Unmarshal(r.Raw, &value); err != nil {
-			return err
+		value, e := decodeRow[T](ctx, s, table, r)
+		if e != nil {
+			return e
 		}
 		values = append(values, value)
 		return nil
@@ -183,7 +317,7 @@ func (s *Segment) records(ctx context.Context) (dataset.Dataset, error) {
 	if d.Nodes, err = allRows[dataset.Node](ctx, s, "nodes"); err != nil {
 		return d, err
 	}
-	if d.Edges, err = allRows[dataset.Edge](ctx, s, "out"); err != nil {
+	if d.Edges, err = allRows[dataset.Edge](ctx, s, "edges"); err != nil {
 		return d, err
 	}
 	if d.Files, err = allRows[dataset.File](ctx, s, "files"); err != nil {
@@ -227,9 +361,9 @@ var stopIteration = errors.New("consumer stopped row iteration")
 func recordRows[T any](ctx context.Context, s *Segment, table string) iter.Seq2[T, error] {
 	return func(yield func(T, error) bool) {
 		err := s.scan(ctx, table, nil, func(r row) error {
-			var value T
-			if err := json.Unmarshal(r.Raw, &value); err != nil {
-				return err
+			value, e := decodeRow[T](ctx, s, table, r)
+			if e != nil {
+				return e
 			}
 			if !yield(value, nil) {
 				return stopIteration
@@ -246,7 +380,7 @@ func (s *Segment) NodeRows(ctx context.Context) iter.Seq2[dataset.Node, error] {
 	return recordRows[dataset.Node](ctx, s, "nodes")
 }
 func (s *Segment) EdgeRows(ctx context.Context) iter.Seq2[dataset.Edge, error] {
-	return recordRows[dataset.Edge](ctx, s, "out")
+	return recordRows[dataset.Edge](ctx, s, "edges")
 }
 func (s *Segment) FileRows(ctx context.Context) iter.Seq2[dataset.File, error] {
 	return recordRows[dataset.File](ctx, s, "files")
