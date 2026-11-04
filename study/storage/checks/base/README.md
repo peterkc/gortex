@@ -106,9 +106,10 @@ output must be outside source, fixture and configuration directories. Aliased
 parents, symlinks and `..` output paths are refused. File hashes and directory
 entries protect inputs, including added or removed files.
 
-The configuration must have exactly these fields. The proposed phase limits are
-9,000 seconds main and 2,700 seconds conditional side. These and the example memory
-limits need the run owner's approval before execution:
+The configuration must have exactly these fields. The proposed envelopes are
+12,540 seconds main (including finalization and runner join) and 3,600 seconds
+conditional side. These and the example memory limits need the run owner's
+approval before execution:
 
 ```json
 {
@@ -291,20 +292,41 @@ unmeasured. False still forces comparison-unavailable and no recommendation.
 
 ## Estimate and limits
 
-The rerun allows 209 minutes for 27 fresh timing processes and three tiny
-correctness processes. The conditional side allowance remains 60 minutes for
+The rerun has a 209-minute main envelope for 27 fresh timing processes, three
+tiny correctness processes, runner join and finalization. The conditional side allowance remains 60 minutes for
 nine timing processes and one tiny correctness process. No queries, tiers,
 samples, fresh runs or crash trials are removed. The crash-child safety limit
 remains 900 seconds; it is not a whole timing-process timeout.
 
-The complete admission sum is **60 preparation + 209 main + 60 conditional side
-+ 20 cleanup/upload = 349 minutes < 350-minute job timeout < GitHub 360 minutes**.
+Let `P` be the exact total bytes of the unique protected files in the initial
+snapshot, including all four fixture tiers, source and policy files. The driver
+reserves `F = max(60, ceil(9*P / 67_108_864))` seconds for the closing protected
+hashes, output hashes and `result.json`. This assumes 64 MiB/s hashing and allows
+one protected pass plus output bytes up to `8*P`, using the existing capacity
+estimate's input multiplier of eight. This is a planning allowance, not a hard
+bound on retained failed artifacts or a measured hash rate. The 60-second floor
+covers small fixtures and result serialization. Slower hashing, larger retained
+outputs or many small files can still exhaust it; the wrapper remains a backstop.
+The result records `P` and `F`. No free-disk-based allowance is charged.
+
+The complete admission sum is **60 preparation + (209 - F/60 - 0.5) main work
++ 60 conditional side + 0.5 runner join + F/60 finalization + 20 cleanup/upload
+= 349 minutes < 350-minute job timeout < GitHub 360 minutes**.
 Preparation is fetch 10, tiny generation 5, tier100 generation 20 and setup 25.
-Work stops at 329 minutes from the first step, before checkout/setup. The separate
-one-minute margin covers the expected job-start gap and up to 30 seconds for
-runner termination. The launch wrapper also enforces this absolute cutoff plus
-that termination grace. The remaining 20 minutes are reserved for owned cleanup
-and evidence uploads, not more measurement.
+Both work deadlines subtract `F + 30` seconds from their phase envelopes and the
+329-minute absolute cutoff from the first step, before checkout/setup. An
+exhausted budget refuses work. The wrapper still kills at 329 minutes plus
+30 seconds; work plus join plus finalization ends by minute 329, before that kill.
+The separate one-minute margin covers the expected job-start gap. The remaining
+20 minutes stay reserved for owned cleanup and uploads, not more measurement.
+
+For protected bytes of tier1 alone (516,258,893), `F` is 70 seconds; for tier10
+alone (436,311,531), it is 60 seconds; the unchanged pair gives 128 seconds.
+Tier100 is not frozen yet. Ten copies of tier10 would be 4,363,115,310 bytes and
+586 seconds alone, or 713 seconds with the unchanged pair. This projection is
+not a tier100 pin. At that combined size, main work is 11,797 seconds and the
+reserve is 5.7% of its 12,540-second envelope. Source, policy and tiny bytes add
+to `P`; the driver uses the actual frozen bytes, not this projection.
 
 Indexed-checker planning ranges are 1–4 minutes per tier1 process, 2–6 at tier10
 and 3–10 at tier100. Main totals 54–180 minutes; conditional side adds 18–60.

@@ -16,7 +16,7 @@ from measure import (
     canonical_output, checked_file, choose_base, collect_run, digest,
     latency_groups, lookup_verdict, paired_ratios, percentile, run,
     protected_snapshot, ratio_status, remove_serving, validate_config,
-    validate_fixture_pins, phase_deadlines,
+    validate_fixture_pins, phase_deadlines, finalization_reserve,
 )
 
 
@@ -752,6 +752,10 @@ class OrchestrationRegressionTests(unittest.TestCase):
                     result = json.loads(result_path.read_text(
                         encoding="utf-8"))
                     self.assertEqual(result["branch_taken"], branch)
+                    self.assertEqual(result["finalization"]["reserve_seconds"],
+                                     60)
+                    self.assertGreater(
+                        result["finalization"]["protected_bytes"], 0)
                     if failed_adapter == "resource":
                         self.assertEqual(result["status"], "blocked")
                         self.assertIn("error", result)
@@ -806,20 +810,30 @@ class AbsoluteDeadlineTests(unittest.TestCase):
                 "timeout_seconds": 350 * 60,
                 "cleanup_upload_seconds": 20 * 60}
 
+    def test_hash_reserve_has_a_floor_and_covers_pinned_bytes(self):
+        for byte_count, seconds in ((0, 60), (1, 60),
+                                    (516258893, 70), (436311531, 60),
+                                    (952570424, 128), (4363115310, 586),
+                                    (5315685734, 713)):
+            with self.subTest(protected_bytes=byte_count):
+                self.assertEqual(finalization_reserve(byte_count), seconds)
+
     def test_setup_is_counted_and_side_cannot_reset_job_clock(self):
         base = {"main_wall_seconds": 209 * 60,
                 "side_wall_seconds": 60 * 60}
-        # Sixty minutes of setup leaves exactly the complete phase sum.
+        # The join and evidence reserve come out of main, not extra runtime.
         main, total = phase_deadlines(
-            base, self.job(), monotonic_now=5000, unix_now=103600)
-        self.assertEqual(main, 5000 + 209 * 60)
-        self.assertEqual(total, 5000 + 269 * 60)
+            base, self.job(), finalization_seconds=128,
+            monotonic_now=5000, unix_now=103600)
+        self.assertEqual(main, 5000 + 209 * 60 - 158)
+        self.assertEqual(total, 5000 + 269 * 60 - 158)
         # Ten more setup minutes shorten the global cap, not the reserve.
         later_main, later_total = phase_deadlines(
-            base, self.job(), monotonic_now=5600, unix_now=104200)
-        self.assertEqual(later_main, 5600 + 209 * 60)
+            base, self.job(), finalization_seconds=128,
+            monotonic_now=5600, unix_now=104200)
+        self.assertEqual(later_main, 5600 + 209 * 60 - 158)
         self.assertEqual(later_total, total)
-        self.assertEqual(100000 + 329 * 60,
+        self.assertEqual(100000 + 329 * 60 - 158,
                          104200 + later_total - 5600)
         side_start = later_main
         side_end = min(later_total, side_start + base["side_wall_seconds"])
@@ -827,18 +841,44 @@ class AbsoluteDeadlineTests(unittest.TestCase):
         self.assertEqual(base, {"main_wall_seconds": 12540,
                                 "side_wall_seconds": 3600})
 
+    def test_last_work_join_and_hashes_finish_before_wrapper_kill(self):
+        base = {"main_wall_seconds": 12540, "side_wall_seconds": 3600}
+        # Planned setup, a full phase sum, and a shortened absolute budget.
+        for setup_minutes in (60, 0, 70):
+            for reserve in (60, 128, 713):
+                with self.subTest(setup=setup_minutes, reserve=reserve):
+                    now = 100000 + setup_minutes * 60
+                    main, total = phase_deadlines(
+                        base, self.job(), finalization_seconds=reserve,
+                        monotonic_now=5000, unix_now=now)
+                    kill_at = (100000 + 350 * 60 - 20 * 60 - 60 + 30)
+                    self.assertLess(now + total - 5000 + 30 + reserve,
+                                    kill_at)
+                    self.assertLessEqual(total + 30 + reserve,
+                                         5000 + 269 * 60)
+                    self.assertLessEqual(main + 30 + reserve,
+                                         5000 + 209 * 60)
+
     def test_exhausted_clock_bad_reserve_and_missing_clock_refuse(self):
         base = {"main_wall_seconds": 12540, "side_wall_seconds": 3600}
-        for changed in ({}, {**self.job(), "started_unix_seconds": True},
+        for changed in ({}, None, [], "job", 1,
+                        {**self.job(), "started_unix_seconds": True},
                         {**self.job(), "started_unix_seconds": 200000},
                         {**self.job(), "timeout_seconds": 351 * 60},
                         {**self.job(), "cleanup_upload_seconds": 1199}):
             with self.subTest(job=changed), self.assertRaises(RunError):
-                phase_deadlines(base, changed, monotonic_now=1,
-                                unix_now=103600)
-        with self.assertRaisesRegex(RunError, "exhausted"):
-            phase_deadlines(base, self.job(), monotonic_now=1,
-                            unix_now=100000 + 329 * 60)
+                phase_deadlines(base, changed, finalization_seconds=128,
+                                monotonic_now=1, unix_now=103600)
+        for remaining in (0, 158):
+            with self.subTest(remaining=remaining), self.assertRaisesRegex(
+                    RunError, "exhausted"):
+                phase_deadlines(
+                    base, self.job(), finalization_seconds=128,
+                    monotonic_now=1,
+                    unix_now=100000 + 329 * 60 - remaining)
+        with self.assertRaisesRegex(RunError, "cannot fit"):
+            phase_deadlines(base, self.job(), finalization_seconds=12540,
+                            monotonic_now=1, unix_now=100000)
 
     def test_policy_has_one_complete_sum_below_the_job_cap(self):
         policy = json.loads(Path(__file__).parents[1].joinpath(
@@ -851,6 +891,13 @@ class AbsoluteDeadlineTests(unittest.TestCase):
                    + policy["base"]["main_wall_seconds"]
                    + policy["base"]["side_wall_seconds"]
                    + job["cleanup_upload_seconds"])
+        reserve = 713
+        main, total = phase_deadlines(
+            policy["base"], self.job(), finalization_seconds=reserve,
+            monotonic_now=0, unix_now=103600)
+        self.assertEqual(main, 11797)
+        self.assertEqual(60 * 60 + total + 30 + reserve
+                         + job["cleanup_upload_seconds"], 349 * 60)
         self.assertEqual(seconds, 349 * 60)
         self.assertLess(seconds, job["timeout_minutes"] * 60)
         self.assertEqual(job["timeout_minutes"], 350)

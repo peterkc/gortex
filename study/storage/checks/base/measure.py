@@ -236,11 +236,17 @@ def canonical_output(config, config_path):
     return canonical
 
 
-def phase_deadlines(base, job, *, monotonic_now, unix_now):
-    """Bound both phases with one first-step clock."""
+def finalization_reserve(protected_bytes):
+    """Budget protected hashes and output bytes up to eight times that size."""
+    return max(60, math.ceil(9 * protected_bytes / (64 * 1024 * 1024)))
+
+
+def phase_deadlines(base, job, *, finalization_seconds,
+                    monotonic_now, unix_now):
+    """Leave time for runner join and evidence within both work bounds."""
     fields = {"started_unix_seconds", "timeout_seconds",
               "cleanup_upload_seconds"}
-    if (set(job) != fields
+    if (not isinstance(job, dict) or set(job) != fields
             or any(type(value) is not int or value <= 0
                    for value in job.values())):
         raise RunError("explicit positive job clock and reserves required")
@@ -252,13 +258,16 @@ def phase_deadlines(base, job, *, monotonic_now, unix_now):
     # the runner termination grace, separately from the upload reserve.
     cutoff = (job["started_unix_seconds"] + job["timeout_seconds"]
               - job["cleanup_upload_seconds"] - 60)
-    remaining = cutoff - unix_now
+    reserve = 30 + finalization_seconds
+    remaining = cutoff - unix_now - reserve
     if remaining <= 0:
         raise RunError("absolute job work deadline exhausted")
     absolute = monotonic_now + remaining
-    main = min(absolute, monotonic_now + base["main_wall_seconds"])
+    main = min(absolute, monotonic_now + base["main_wall_seconds"] - reserve)
     total = min(absolute, monotonic_now + base["main_wall_seconds"]
-                + base["side_wall_seconds"])
+                + base["side_wall_seconds"] - reserve)
+    if main <= monotonic_now:
+        raise RunError("base main budget cannot fit join and finalization")
     return main, total
 
 
@@ -288,7 +297,7 @@ def validate_config(config, config_path):
     if any(type(value) is not int or value <= 0 or value % page_size
            for value in limits.values()):
         raise RunError("positive page-aligned memory limits required")
-    phase_deadlines(config["base"], config["job"],
+    phase_deadlines(config["base"], config["job"], finalization_seconds=60,
                     monotonic_now=time.monotonic(), unix_now=time.time())
     if sys.platform != "linux":
         raise RunError("measurements require approved Linux CI, not this Mac")
@@ -756,6 +765,9 @@ def run(config, config_path):
     validate_config(config, config_path)
     output = canonical_output(config, config_path)
     before = protected_snapshot(config, config_path)
+    protected_bytes = sum(Path(path).stat().st_size
+                          for path in before["files"])
+    finalize_seconds = finalization_reserve(protected_bytes)
     output.mkdir(mode=0o700)
     isolated = output / "environment"
     isolated.mkdir()
@@ -771,8 +783,8 @@ def run(config, config_path):
     os.environ.update(GOMAXPROCS="4", GOFLAGS="-mod=readonly", GOWORK="off")
     started = time.monotonic()
     main_deadline, total_deadline = phase_deadlines(
-        config["base"], config["job"], monotonic_now=started,
-        unix_now=time.time())
+        config["base"], config["job"], finalization_seconds=finalize_seconds,
+        monotonic_now=started, unix_now=time.time())
     results = {}
     reports = {}
     semantic_failures = {}
@@ -789,6 +801,8 @@ def run(config, config_path):
         "binaries": config["binaries"], "data": config["data"],
         "memory_limits_bytes": config["memory_limits_bytes"],
         "base": config["base"], "job": config["job"],
+        "finalization": {"protected_bytes": protected_bytes,
+                         "reserve_seconds": finalize_seconds},
         "lookup_protocol": {
             "minimum_samples_per_run": MIN_QUERY_SAMPLES,
             "repetitions": "ceil(minimum/discarded warmup stratum count); "
