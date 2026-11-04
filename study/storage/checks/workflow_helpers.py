@@ -106,7 +106,9 @@ def base_step_spec(step: str, c_variant: str) -> dict[str, object]:
         return {"tiers": ["tier1"], "adapters": ["a", "b", "c", "c_side"],
                 "mode": "build-only", "runs": 1}
     if step == "check2":
-        return {"tiers": ["tiny"], "adapters": ["a", "b", "c", "c_side"],
+        # Tiny lifecycle checks for all four, plus plain-C tier1 check-only.
+        return {"tiers": ["tiny", "tier1"],
+                "adapters": ["a", "b", "c", "c_side"],
                 "mode": "full-protocol", "runs": 1}
     if step in ("check1-plain", "check1-side"):
         return {"tiers": ["tier1", "tier10"],

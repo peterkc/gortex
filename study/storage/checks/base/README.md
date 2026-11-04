@@ -18,7 +18,10 @@ Manual dispatch takes one named step or an approved batch:
   delta rebuilds, crash trials and concurrent publication/read checks. Tiny
   timings do not feed selection. A C variant's semantic failure makes it a miss;
   an A or B reference-control failure or resource/transport failure blocks the
-  comparison.
+  comparison. The same job also builds/opens plain C on the unchanged tier1
+  fixture in check-only mode. It checks every query once and reports full-payload
+  verification witnesses plus equal-work `storage_build_cpu_ns`, as before.
+  A Check 2 pass requires both the tiny protocols and this tier1 round trip.
 - `check1-plain` or `check1-side`: time only ID, name and file lookups at tier1
   and tier10, with A and B controls and the named C variant.
 - `check5-tier1`, `check5-tier10` or `check5-tier100`: measure one tier's base
@@ -43,8 +46,9 @@ This command performs no measurements. It preserves the existing combined
 verdict and selection table. All results must share the source revision and
 policy. Check 1 and Check 5 must share the selected C variant. Check 2 covers
 both variants; missing, blocked or mismatched correctness evidence refuses
-selection. An A or B semantic miss blocks selection; a saved C semantic miss
-makes that variant ineligible. The old combined path without `step` remains for
+selection. Reduction also requires passing tier1 plain-C round-trip evidence,
+checked answers and storage-build CPU in that Check 2 receipt. An A or B semantic
+miss blocks selection; a saved tiny C semantic miss makes that variant ineligible. The old combined path without `step` remains for
 regression tests only; the workflow always supplies a selected step.
 
 ## Storage and exposed API

@@ -293,7 +293,8 @@ class StepSelectionTests(unittest.TestCase):
             "tiers": ["tier1"], "adapters": ["a", "b", "c", "c_side"],
             "mode": "build-only", "runs": 1})
         self.assertEqual(base_step_spec("check2", ""), {
-            "tiers": ["tiny"], "adapters": ["a", "b", "c", "c_side"],
+            "tiers": ["tiny", "tier1"],
+            "adapters": ["a", "b", "c", "c_side"],
             "mode": "full-protocol", "runs": 1})
         for step in ("check1-plain", "check1-side"):
             spec = base_step_spec(step, "")
@@ -414,7 +415,8 @@ class WorkflowSourceTests(unittest.TestCase):
         exec(compile(ast.Module(body=[directories], type_ignores=[]),
                      "workflow-directories", "exec"), namespace)
         self.assertEqual(namespace["directories"],
-                         {"tiny": Path("/work/inputs/tiny")})
+                         {"tiny": Path("/work/inputs/tiny"),
+                          "tier1": Path("/work/preparation/fetch/data/tier1")})
         self.assertIn('if [ "$CHECK_STEP" = check2 ]; then', source)
         self.assertIn('-o "$WORK/bin/fixture" ./cmd/fixture', source)
 

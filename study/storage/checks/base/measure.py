@@ -890,6 +890,11 @@ def combine_check5(tiers, lookup_result, correctness_result):
     if any(correctness[adapter]["tiny"]["status"] != "pass"
            for adapter in ("a", "b")):
         raise RunError("Check 2 reference control failed")
+    tier1 = correctness["c"].get("tier1", {})
+    cpu = tier1.get("storage_build_cpu_ns")
+    if (tier1.get("status") != "pass" or not tier1.get("verification")
+            or not tier1.get("checks") or type(cpu) is not int or cpu < 0):
+        raise RunError("passing tier1 plain-C Check 2 receipt required")
     observations = {adapter: {} for adapter in ("a", "b", selected)}
     for row in tiers:
         tier = row["step"].removeprefix("check5-")
@@ -954,19 +959,22 @@ def run_selected(config, config_path):
     values = {adapter: {} for adapter in spec["adapters"]}
     try:
         for tier in spec["tiers"]:
+            roundtrip = step == "check2" and tier == "tier1"
+            adapters = ["c"] if roundtrip else spec["adapters"]
+            mode = "check-only" if roundtrip else spec["mode"]
             manifest = read_json(Path(config["data"][tier]["path"])
                                  / "manifest.json")
             for index in range(1, spec["runs"] + 1):
-                adapters = spec["adapters"]
                 order = adapters[index - 1:] + adapters[:index - 1]
                 for adapter in order:
                     label = f"{adapter}-{tier}-pair{index}"
                     try:
                         observed = measure_adapter(
                             config, output, label, adapter, tier, deadline,
-                            full_protocol=step == "check2", pair_index=index,
+                            full_protocol=step == "check2" and not roundtrip,
+                            pair_index=index,
                             mode=("base-only" if step.startswith("check5-")
-                                  else spec["mode"]))
+                                  else mode))
                     except SemanticMismatch as error:
                         if step != "check2":
                             raise
@@ -979,10 +987,24 @@ def run_selected(config, config_path):
                             "reports": [report for report, _ in error.reports]}
                         continue
                     reports[adapter][tier].extend(observed)
-            for adapter in spec["adapters"]:
+            for adapter in adapters:
                 if step == "bytes":
                     values[adapter] = reports[adapter][tier][0][0][
                         "_inventory"]
+                elif roundtrip:
+                    if tier not in values[adapter]:
+                        values[adapter][tier] = {
+                            "status": "pass",
+                            "verification": [row["verification"]
+                                for report, _ in reports[adapter][tier]
+                                for row in report["_inventory"]],
+                            "checks": [check
+                                for report, _ in reports[adapter][tier]
+                                for check in report["checks"]],
+                            "storage_build_cpu_ns": sum(
+                                row["construction_cpu_ns"]
+                                for report, _ in reports[adapter][tier]
+                                for row in report["_inventory"])}
                 elif step == "check2":
                     if tier not in values[adapter]:
                         values[adapter][tier] = {
@@ -995,10 +1017,16 @@ def run_selected(config, config_path):
         if step == "bytes":
             receipt.update(bytes_report(values, manifest), status="pass")
         elif step == "check2":
-            status = ("miss" if any(row["tiny"]["status"] == "miss"
-                                    for row in values.values()) else "pass")
+            tiny_status = ("miss" if any(row["tiny"]["status"] == "miss"
+                                         for row in values.values())
+                           else "pass")
+            tier1_status = values["c"]["tier1"]["status"]
+            status = ("pass" if tiny_status == tier1_status == "pass"
+                      else "miss")
             receipt.update(status=status,
-                           check2={"status": status, "protocol": "full-tiny"},
+                           check2={"status": status, "protocol": "full-tiny",
+                                   "tiny_status": tiny_status,
+                                   "tier1_status": tier1_status},
                            measured_value=values)
         elif step.startswith("check1-"):
             candidate = "c" if step == "check1-plain" else "c_side"

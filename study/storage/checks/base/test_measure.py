@@ -432,7 +432,7 @@ class SelectedDriverTests(unittest.TestCase):
     def test_only_selected_adapter_tier_and_mode_reach_the_boundary(self):
         cases = (("bytes", "", ["a", "b", "c", "c_side"], ["tier1"],
                   "build-only", 1),
-                 ("check2", "", ["a", "b", "c", "c_side"], ["tiny"],
+                 ("check2", "", ["a", "b", "c", "c_side"], ["tiny", "tier1"],
                   "full-protocol", 1),
                  ("check1-plain", "", ["a", "b", "c"],
                   ["tier1", "tier10"], "lookup-only", 3),
@@ -464,7 +464,8 @@ class SelectedDriverTests(unittest.TestCase):
                 def boundary(config, output, label, adapter, tier, deadline,
                              *, full_protocol, pair_index=0, mode=None):
                     invoked.append((adapter, tier, mode, pair_index))
-                    self.assertEqual(full_protocol, step == "check2")
+                    self.assertEqual(full_protocol,
+                                     step == "check2" and tier == "tiny")
                     inventory = {
                         "repo": "repo", "files": {"lookup": {"bytes": 100}},
                         "bytes": {"graph": 100}, "total": 100,
@@ -482,18 +483,33 @@ class SelectedDriverTests(unittest.TestCase):
                             return_value={"files": {}}),
                       patch.dict(os.environ)):
                     run_selected(config, config_path)
-                self.assertEqual(set(invoked), {
+                expected = {
                     (adapter, tier, mode, index)
                     for adapter in adapters for tier in tiers
-                    for index in range(1, runs + 1)})
-                self.assertEqual(len(invoked),
-                                 len(adapters) * len(tiers) * runs)
+                    if step != "check2" or tier == "tiny"
+                    for index in range(1, runs + 1)}
+                if step == "check2":
+                    expected.add(("c", "tier1", "check-only", 1))
+                self.assertEqual(set(invoked), expected)
+                self.assertEqual(len(invoked), len(expected))
                 result = json.loads((root / "output/result.json").read_text())
                 self.assertEqual(result["step"], step)
                 self.assertEqual(result["finalization"], {
                     "protected_bytes": 0, "reserve_seconds": 60})
                 self.assertNotIn("check3", result)
                 self.assertNotIn("check6", result)
+                if step == "check2":
+                    self.assertEqual(result["status"], "pass")
+                    self.assertEqual(result["check2"]["tiny_status"], "pass")
+                    self.assertEqual(result["check2"]["tier1_status"], "pass")
+                    tier1 = result["measured_value"]["c"]["tier1"]
+                    self.assertEqual(tier1, {
+                        "status": "pass", "verification": [{}],
+                        "checks": [{"status": "passed", "query_id": "one"}],
+                        "storage_build_cpu_ns": 10})
+                    for adapter in adapters:
+                        self.assertEqual(result["measured_value"][adapter][
+                            "tiny"]["status"], "pass")
                 if step == "bytes":
                     for field in ("cpu_ns", "duration_ns", "p95_ns",
                                   "metrics"):
@@ -502,7 +518,8 @@ class SelectedDriverTests(unittest.TestCase):
     def selected_config(self, root, step):
         config, config_path, _ = pinned_inputs(root)
         data = config["data"]["tier1"]
-        config["data"] = {"tiny" if step == "check2" else "tier1": data}
+        config["data"] = ({"tiny": data, "tier1": data} if step == "check2"
+                          else {"tier1": data})
         config.update(
             step=step, c_variant="", source_revision="a" * 40,
             recipe_sha256="b" * 64, approval_sha256="c" * 64,
@@ -514,7 +531,8 @@ class SelectedDriverTests(unittest.TestCase):
         return config, config_path
 
     def test_check2_records_semantic_misses_but_blocks_other_failures(self):
-        for failed in ("a", "b", "c", "c_side", "resource"):
+        for failed in ("a", "b", "c", "c_side", "resource", "tier1",
+                       "roundtrip-digest"):
             with (self.subTest(failed=failed),
                   tempfile.TemporaryDirectory() as tmp):
                 root = Path(tmp)
@@ -524,8 +542,17 @@ class SelectedDriverTests(unittest.TestCase):
                 def boundary(config, output, label, adapter, tier, deadline,
                              *, full_protocol, pair_index=0, mode=None):
                     invoked.append(adapter)
-                    self.assertEqual(tier, "tiny")
-                    self.assertTrue(full_protocol)
+                    self.assertEqual(full_protocol, tier == "tiny")
+                    if tier == "tier1":
+                        self.assertEqual((adapter, mode), ("c", "check-only"))
+                        if failed == "roundtrip-digest":
+                            raise RunError("full-payload round trip differs")
+                        if failed == "tier1":
+                            raise SemanticMismatch([({"checked": True}, {})])
+                        return [({"checks": [{"status": "passed"}],
+                                  "_inventory": [{"verification": {},
+                                                  "construction_cpu_ns": 7}]},
+                                 {})]
                     if failed == "resource":
                         raise RunError("transport failure")
                     if adapter == failed:
@@ -534,19 +561,25 @@ class SelectedDriverTests(unittest.TestCase):
 
                 with (patch("measure.measure_adapter", boundary),
                       patch.dict(os.environ)):
-                    if failed in ("a", "b", "resource"):
+                    if failed in ("a", "b", "resource", "roundtrip-digest"):
                         with self.assertRaises(RunError):
                             run_selected(config, config_path)
                     else:
                         run_selected(config, config_path)
                 receipt = json.loads((root / "output/result.json").read_text())
-                if failed in ("a", "b", "resource"):
+                if failed in ("a", "b", "resource", "roundtrip-digest"):
                     self.assertEqual(receipt["status"], "blocked")
-                    self.assertEqual(invoked, ["a", "b"] if failed == "b"
-                                     else ["a"])
+                    expected = (["a", "b"] if failed == "b" else
+                                ["a", "b", "c", "c_side", "c"]
+                                if failed == "roundtrip-digest" else ["a"])
+                    self.assertEqual(invoked, expected)
                 else:
-                    self.assertEqual(invoked, ["a", "b", "c", "c_side"])
                     self.assertEqual(receipt["status"], "miss")
+                    self.assertEqual(invoked, ["a", "b", "c", "c_side", "c"])
+                    self.assertEqual(receipt["check2"]["tier1_status"],
+                                     "miss" if failed == "tier1" else "pass")
+                    self.assertEqual(receipt["check2"]["tiny_status"],
+                                     "pass" if failed == "tier1" else "miss")
                     for adapter in invoked:
                         tiny = receipt["measured_value"][adapter]["tiny"]
                         self.assertEqual(tiny["status"],
@@ -565,7 +598,8 @@ class SelectedDriverTests(unittest.TestCase):
                                     if target == "output_hashes" else
                                     {"side_effect": [{"files": {}}, error]})
                         with (
-                            patch("measure.measure_adapter", return_value=[]),
+                            patch("measure.measure_adapter", return_value=[(
+                                {"checks": [], "_inventory": []}, {})]),
                             patch("measure." + target, **behavior),
                             patch.dict(os.environ),
                         ):
@@ -583,7 +617,7 @@ class SelectedDriverTests(unittest.TestCase):
 
 
 def correctness_receipt(common, failed=()):
-    return {**common, "schema": "design-c-base-step/v1", "step": "check2",
+    receipt = {**common, "schema": "design-c-base-step/v1", "step": "check2",
             "status": "miss" if failed else "pass",
             "protected_inputs_unchanged": True,
             "check2": {"protocol": "full-tiny"},
@@ -593,6 +627,10 @@ def correctness_receipt(common, failed=()):
                                    if adapter in failed else
                                    {"status": "pass"})}
                 for adapter in ("a", "b", "c", "c_side")}}
+    receipt["measured_value"]["c"]["tier1"] = {
+        "status": "pass", "verification": [{"nodes": {}}],
+        "checks": [{"status": "passed"}], "storage_build_cpu_ns": 10}
+    return receipt
 
 
 class TierReductionTests(unittest.TestCase):
@@ -659,6 +697,15 @@ class TierReductionTests(unittest.TestCase):
                        correctness_receipt(common, ("a",)),
                        correctness_receipt(common, ("b",)),
                        correctness_receipt(common, ("b", selected))]
+            for change in (None, {"status": "miss"},
+                           {"storage_build_cpu_ns": None},
+                           {"verification": []}, {"checks": []}):
+                no_roundtrip = correctness_receipt(common)
+                if change is None:
+                    no_roundtrip["measured_value"]["c"].pop("tier1")
+                else:
+                    no_roundtrip["measured_value"]["c"]["tier1"].update(change)
+                invalid.append(no_roundtrip)
             nonsemantic = correctness_receipt(common, (selected,))
             nonsemantic["measured_value"][selected]["tiny"].pop("failure_kind")
             invalid.append(nonsemantic)
