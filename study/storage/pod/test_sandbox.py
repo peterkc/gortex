@@ -260,7 +260,8 @@ class OwnerTests(unittest.TestCase):
 
     def test_copy_download_uses_remaining_window_not_fixed_300(self):
         self.owner.remote = mock.Mock()
-        started = self.owner.monotonic
+        # A fixed start keeps the deadline arithmetic exact.
+        started = 1000.0
         cases = (("evidence.tar", "full-evidence", 420, 1000, 410),
                  ("receipts.tar", "diagnostics-only", 60, 1000, 50),
                  ("partial.tar", "partial-evidence", 420, 200, 190))
