@@ -127,9 +127,12 @@ func TestMeasurementWorkersTinyCompleteQueries(t *testing.T) {
 		var triple []sample
 		raw := map[int]map[string]map[string][]int64{}
 		warmups := map[int]map[string]int{}
-		// Orders the loop actually ran, per (size, query index) of measured triples.
-		nextQuery := map[[2]int]int{}
-		orders := map[[2]int]map[[3]string]int{}
+		// Orders the loop actually ran, per size and query ID of measured triples.
+		type sizeQuery struct {
+			size int
+			id   string
+		}
+		orders := map[sizeQuery]map[[3]string]int{}
 		if e := eachJSON(filepath.Join(c.Out, "delta-"+format, "answers.jsonl"), func(s sample) error {
 			triple = append(triple, s)
 			if len(triple) == 3 {
@@ -158,9 +161,7 @@ func TestMeasurementWorkersTinyCompleteQueries(t *testing.T) {
 					for _, v := range triple {
 						order[v.TimingPosition] = v.Form
 					}
-					run := [2]int{triple[0].Size, triple[0].Repeat}
-					key := [2]int{triple[0].Size, nextQuery[run]}
-					nextQuery[run]++
+					key := sizeQuery{triple[0].Size, triple[0].Query.ID}
 					if orders[key] == nil {
 						orders[key] = map[[3]string]int{}
 					}
