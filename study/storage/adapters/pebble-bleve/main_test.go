@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"gxstudy/adapter"
 	"gxstudy/conformance"
 	"gxstudy/dataset"
+	"gxstudy/oracle"
 	"gxstudy/runner"
 )
 
@@ -308,5 +310,106 @@ func TestDenseCanonicalGraphLayout(t *testing.T) {
 	d.Nodes = append(d.Nodes, d.Nodes[0])
 	if err := writeRecords(context.Background(), d, put, nil, nil); err == nil {
 		t.Fatal("duplicate logical ID accepted")
+	}
+}
+
+type nodeReadCounter struct {
+	kvStore
+	reads   int
+	entries int
+}
+
+func (counter *nodeReadCounter) Get(key []byte) ([]byte, error) {
+	if len(key) > 0 && key[0] == 'N' {
+		counter.reads++
+	}
+	return counter.kvStore.Get(key)
+}
+func (counter *nodeReadCounter) Scan(prefix []byte, visit func([]byte, []byte) error) error {
+	return counter.kvStore.Scan(prefix, func(key, value []byte) error {
+		if len(prefix) > 0 && prefix[0] == 'A' {
+			counter.entries++
+		}
+		return visit(key, value)
+	})
+}
+func TestBoundedNamesPreserveOracleOrderAfterReopen(t *testing.T) {
+	ctx := context.Background()
+	d := conformance.Fixture()
+	for i, id := range []string{"z", "a\x00!", "a"} {
+		d.Nodes[i].ID = id
+		d.Nodes[i].Name = "same"
+		d.Nodes[i].FilePath = "f.go"
+	}
+	reference := oracle.New(d)
+	b := backend{}
+	ref, _, err := b.Build(ctx, d, filepath.Join(t.TempDir(), "sealed"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for reopen := 0; reopen < 2; reopen++ {
+		opened, err := b.Open(ctx, ref.Path, ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := opened.(*segment)
+		counter := &nodeReadCounter{kvStore: s.kv}
+		s.kv = counter
+		func() {
+			defer func() {
+				if err := s.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			for _, limit := range []int{-1, 0, 1, 2, 5} {
+				counter.reads, counter.entries = 0, 0
+				got, err := s.NodesByName(ctx, "same", limit)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want, err := reference.NodesByName(ctx, "same", limit)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !slices.EqualFunc(got, want, func(a, b dataset.Node) bool { return reflect.DeepEqual(a, b) }) {
+					t.Fatal("bounded name payload/order", limit, got, want)
+				}
+				if counter.reads != len(want) {
+					t.Fatal("name lookup decoded unselected payloads", limit, counter.reads, len(want))
+				}
+				if counter.entries != len(want) {
+					t.Fatal("name iterator did not stop", limit, counter.entries, len(want))
+				}
+			}
+			counter.reads = 0
+			got, err := s.NodesByName(ctx, "missing", 2)
+			if err != nil || len(got) != 0 || counter.reads != 0 {
+				t.Fatal("missing-name payload read", got, err, counter.reads)
+			}
+			counter.reads = 0
+			got, err = s.FileNodes(ctx, "f.go")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := reference.FileNodes(ctx, "f.go")
+			if err != nil || !slices.EqualFunc(got, want, func(a, b dataset.Node) bool { return reflect.DeepEqual(a, b) }) || counter.reads != len(want) {
+				t.Fatal("file lookup changed", got, want, err, counter.reads)
+			}
+			for _, prefix := range []byte{'A', 'Q', 'P'} {
+				if err = s.kv.Scan([]byte{prefix}, func(key, value []byte) error {
+					if len(key) != 17 || len(value) != 8 {
+						t.Fatal("noninteger name/file reference", key, value)
+					}
+					for _, node := range d.Nodes {
+						if bytes.Contains(key[9:], []byte(node.ID)) || bytes.Contains(value, []byte(node.ID)) {
+							t.Fatal("logical ID in lookup reference", key, value)
+						}
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}()
 	}
 }

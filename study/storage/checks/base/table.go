@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -463,8 +464,34 @@ func rangeKey(r rowRange) string {
 	return r.Key
 }
 
+const offsetHeaderSize = 24
+
+type offsetDirectory struct {
+	file  *os.File
+	width uint64
+}
+
+func offsetWidth(rows uint64) uint64 {
+	if rows <= math.MaxUint32 {
+		return 4
+	}
+	return 8
+}
+func decodeOffset(raw []byte, width uint64) uint64 {
+	if width == 4 {
+		return uint64(binary.LittleEndian.Uint32(raw))
+	}
+	return binary.LittleEndian.Uint64(raw)
+}
+
 // Dense N+1 offsets include zero-degree nodes and unresolved terminals.
-func writeOffsets(ctx context.Context, dir, name string, count, kinds uint64) (err error) {
+func writeOffsets(ctx context.Context, dir, name string, count, kinds, rows uint64) error {
+	return writeOffsetsWidth(ctx, dir, name, count, kinds, offsetWidth(rows))
+}
+func writeOffsetsWidth(ctx context.Context, dir, name string, count, kinds, width uint64) (err error) {
+	if width != 4 && width != 8 {
+		return fmt.Errorf("invalid offset directory width: %s", name)
+	}
 	cache := newBlockCache(4 << 20)
 	reader, file, err := openRows[rowRange](filepath.Join(dir, name+".ranges.parquet"), cache)
 	if err != nil {
@@ -483,7 +510,7 @@ func writeOffsets(ctx context.Context, dir, name string, count, kinds uint64) (e
 		return e
 	}
 	offset := uint64(0)
-	if err = binary.Write(buffer, binary.LittleEndian, []uint64{count, kinds}); err != nil {
+	if err = binary.Write(buffer, binary.LittleEndian, []uint64{count, kinds, width}); err != nil {
 		return err
 	}
 	for tag := uint64(0); tag < kinds; tag++ {
@@ -491,7 +518,15 @@ func writeOffsets(ctx context.Context, dir, name string, count, kinds uint64) (e
 			if err = ctx.Err(); err != nil {
 				return err
 			}
-			if err = binary.Write(buffer, binary.LittleEndian, offset); err != nil {
+			if width == 4 {
+				if offset > math.MaxUint32 {
+					return fmt.Errorf("offset exceeds directory width: %s", name)
+				}
+				err = binary.Write(buffer, binary.LittleEndian, uint32(offset))
+			} else {
+				err = binary.Write(buffer, binary.LittleEndian, offset)
+			}
+			if err != nil {
 				return err
 			}
 			if next == 1 && one[0].Tag == tag && one[0].Number == id {

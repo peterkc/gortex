@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -32,6 +33,8 @@ type kvStore interface {
 	Scan([]byte, func([]byte, []byte) error) error
 	Close() error
 }
+
+var stopScan = errors.New("requested node limit reached")
 
 const servingCacheBytes int64 = 256 << 20
 
@@ -128,6 +131,7 @@ func writeRecords(ctx context.Context, d dataset.Dataset, put func([]byte, []byt
 		return e
 	}
 	locals := map[string]uint64{}
+	var nameFields []uint64
 	dictionary := map[string]uint64{}
 	intern := func(text string) (uint64, error) {
 		if id, ok := dictionary[text]; ok {
@@ -164,9 +168,20 @@ func writeRecords(ctx context.Context, d dataset.Dataset, put func([]byte, []byt
 			if e != nil {
 				return e
 			}
+			if field.prefix == 'A' {
+				nameFields = append(nameFields, id)
+				continue
+			}
 			if e = put(numberKey(field.prefix, id, local), localBytes(local)); e != nil {
 				return e
 			}
+		}
+	}
+	// Construction-only ID order; serving keys retain fixed-width ordinals.
+	for ordinal, id := range slices.Sorted(maps.Keys(locals)) {
+		local := locals[id]
+		if e := put(numberKey('A', nameFields[local], uint64(ordinal)), localBytes(local)); e != nil {
+			return e
 		}
 	}
 	endpoint := func(id string) (uint64, error) {
@@ -496,7 +511,7 @@ func (s *segment) NodeByID(ctx context.Context, id string) (dataset.Node, error)
 	}
 	return s.nodeAt(local)
 }
-func (s *segment) nodes(ctx context.Context, prefix byte, text string) ([]dataset.Node, error) {
+func (s *segment) nodes(ctx context.Context, prefix byte, text string, limit int) ([]dataset.Node, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -525,6 +540,9 @@ func (s *segment) nodes(ctx context.Context, prefix byte, text string) ([]datase
 			return err
 		}
 		nodes = append(nodes, node)
+		if limit > 0 && len(nodes) == limit {
+			return stopScan
+		}
 		return nil
 	})
 	slices.SortFunc(nodes, func(a, b dataset.Node) int { return strings.Compare(a.ID, b.ID) })
@@ -534,14 +552,10 @@ func (s *segment) NodesByName(ctx context.Context, name string, k int) ([]datase
 	if k == 0 {
 		return nil, ctx.Err()
 	}
-	nodes, err := s.nodes(ctx, 'A', name)
-	if k >= 0 && len(nodes) > k {
-		nodes = nodes[:k]
-	}
-	return nodes, err
+	return s.nodes(ctx, 'A', name, k)
 }
 func (s *segment) FileNodes(ctx context.Context, path string) ([]dataset.Node, error) {
-	return s.nodes(ctx, 'P', path)
+	return s.nodes(ctx, 'P', path, -1)
 }
 func (s *segment) edges(ctx context.Context, direction byte, id, kind string) ([]dataset.Edge, error) {
 	if err := ctx.Err(); err != nil {

@@ -107,6 +107,9 @@ func (p *pebbleKV) Scan(prefix []byte, visit func([]byte, []byte) error) (err er
 	defer func() { err = errors.Join(err, it.Close()) }()
 	for ok := it.First(); ok && bytes.HasPrefix(it.Key(), prefix); ok = it.Next() {
 		if err = visit(it.Key(), it.Value()); err != nil {
+			if err == stopScan {
+				return nil
+			}
 			return err
 		}
 	}

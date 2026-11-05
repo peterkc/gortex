@@ -13,6 +13,7 @@ import (
 	"gxstudy/runner"
 	"io"
 	"iter"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -695,7 +696,7 @@ func TestCanonicalPayloadAndIDOnlyInventory(t *testing.T) {
 			count := s.seal.Verification["ids"].Rows
 			for _, name := range []string{"out", "in"} {
 				info, err := os.Stat(filepath.Join(ref.Path, name+".offsets"))
-				if err != nil || info.Size() != 16+8*(count+1)*s.seal.Verification["kinds"].Rows {
+				if err != nil || info.Size() != offsetHeaderSize+4*(count+1)*s.seal.Verification["kinds"].Rows || s.offsets[name].width != 4 {
 					t.Fatal("missing dense N+1 offsets", info, err)
 				}
 			}
@@ -726,7 +727,7 @@ func TestCanonicalPayloadAndIDOnlyInventory(t *testing.T) {
 }
 func TestCorruptLocalIDsAndOffsetsRefuseBeforeServing(t *testing.T) {
 	for _, side := range []bool{false, true} {
-		for _, corrupt := range []string{"offsets", "duplicate-node", "duplicate-edge"} {
+		for _, corrupt := range []string{"offsets", "offset-width", "offset-size", "duplicate-node", "duplicate-edge"} {
 			t.Run(fmt.Sprintf("side=%v/%s", side, corrupt), func(t *testing.T) {
 				b := Backend{SideIndex: side}
 				ref, s := openFixture(t, b, conformance.Fixture())
@@ -735,7 +736,7 @@ func TestCorruptLocalIDsAndOffsetsRefuseBeforeServing(t *testing.T) {
 				if corrupt == "duplicate-edge" {
 					name = "edges"
 				}
-				if corrupt != "offsets" {
+				if !strings.HasPrefix(corrupt, "offset") {
 					if err := s.scan(context.Background(), name, nil, func(r row) error { rows = append(rows, r); return nil }); err != nil {
 						t.Fatal(err)
 					}
@@ -754,6 +755,22 @@ func TestCorruptLocalIDsAndOffsetsRefuseBeforeServing(t *testing.T) {
 						t.Fatal(err)
 					}
 					expected = "truncated offset directory"
+				} else if strings.HasPrefix(corrupt, "offset") {
+					path := filepath.Join(ref.Path, "in.offsets")
+					raw, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					width := uint64(3)
+					expected = "invalid offset directory width"
+					if corrupt == "offset-size" {
+						width = 8
+						expected = "truncated offset directory"
+					}
+					binary.LittleEndian.PutUint64(raw[16:24], width)
+					if err = os.WriteFile(path, raw, 0644); err != nil {
+						t.Fatal(err)
+					}
 				} else {
 					rows[1].Local = rows[0].Local
 					file, err := os.Create(filepath.Join(ref.Path, name+".parquet"))
@@ -829,20 +846,63 @@ func TestDenseKindOffsetsIncludeZeroDegreeAndTerminals(t *testing.T) {
 	if err = errors.Join(writer.Close(), file.Close()); err != nil {
 		t.Fatal(err)
 	}
-	if err = writeOffsets(context.Background(), dir, "out", 4, 2); err != nil {
+	if err = writeOffsets(context.Background(), dir, "out", 4, 2, 3); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, "out.offsets"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []uint64{4, 2, 0, 0, 2, 2, 2, 2, 2, 2, 2, 3}
-	if len(raw) != 8*len(want) {
-		t.Fatal("wrong N+1 directory length", len(raw))
+	payload, err := os.Create(filepath.Join(dir, "out.parquet"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for i, value := range want {
-		if got := binary.LittleEndian.Uint64(raw[i*8:]); got != value {
-			t.Fatalf("offset %d=%d want=%d", i, got, value)
+	payloadWriter := parquet.NewGenericWriter[row](payload)
+	if _, err = payloadWriter.Write([]row{{Local: 0}, {Local: 1}, {Local: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = errors.Join(payloadWriter.Close(), payload.Close()); err != nil {
+		t.Fatal(err)
+	}
+	table, err := openTable(filepath.Join(dir, "out.parquet"), newBlockCache(4<<20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer table.file.Close()
+	want := []uint64{0, 0, 2, 2, 2, 2, 2, 2, 2, 3}
+	for _, width := range []uint64{4, 8} {
+		if width == 8 {
+			if err = writeOffsetsWidth(context.Background(), dir, "out", 4, 2, width); err != nil {
+				t.Fatal(err)
+			}
+			raw, err = os.ReadFile(filepath.Join(dir, "out.offsets"))
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if len(raw) != offsetHeaderSize+int(width)*len(want) || binary.LittleEndian.Uint64(raw[16:24]) != width {
+			t.Fatal("wrong N+1 directory length or width", len(raw))
+		}
+		for i, value := range want {
+			if got := decodeOffset(raw[offsetHeaderSize+uint64(i)*width:], width); got != value {
+				t.Fatalf("width %d offset %d=%d want=%d", width, i, got, value)
+			}
+		}
+		directory, err := openOffsets(dir, "out", 4, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		segment := Segment{offsets: map[string]offsetDirectory{"out": directory}, tables: map[string]*tableFile{"out": table}, cache: newBlockCache(4 << 20), seal: seal{Verification: map[string]tableVerification{"ids": {Rows: 4}}}}
+		for tag := uint64(0); tag < 2; tag++ {
+			for local := uint64(0); local < 4; local++ {
+				got, err := segment.offsetSpan("out", local, tag)
+				if err != nil || got.First != int64(want[tag*5+local]) || got.End != int64(want[tag*5+local+1]) {
+					t.Fatal("wrong kind/local span", width, tag, local, got, err)
+				}
+			}
+		}
+		if err = directory.file.Close(); err != nil {
+			t.Fatal(err)
 		}
 	}
 }
@@ -946,65 +1006,85 @@ func TestOnlyServingOrOffsetBuildRangesAreWritten(t *testing.T) {
 }
 
 func TestOffsetValidationChecksAcrossLargeBlockBoundary(t *testing.T) {
-	dir := t.TempDir()
-	tables := map[string]*tableFile{}
-	for _, name := range []string{"nodes", "edges"} {
-		file, err := os.Create(filepath.Join(dir, name+".parquet"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		writer := parquet.NewGenericWriter[row](file)
-		rows := []row{{Local: 0}}
-		if name == "edges" {
-			rows = append(rows, row{Local: 1})
-		}
-		if _, err = writer.Write(rows); err != nil {
-			t.Fatal(err)
-		}
-		if err = errors.Join(writer.Close(), file.Close()); err != nil {
-			t.Fatal(err)
-		}
-		table, err := openTable(file.Name(), newBlockCache(4<<20))
-		if err != nil {
-			t.Fatal(err)
-		}
-		tables[name] = table
-		t.Cleanup(func() { table.file.Close() })
-	}
-	tables["out"], tables["in"] = tables["edges"], tables["edges"]
-	count := uint64(8193)
-	offsets := map[string]*os.File{}
-	for _, name := range []string{"out", "in"} {
-		values := make([]uint64, 2+count+1)
-		values[0], values[1] = count, 1
-		values[len(values)-1] = 2
-		raw := make([]byte, len(values)*8)
-		for i, value := range values {
-			binary.LittleEndian.PutUint64(raw[i*8:], value)
-		}
-		path := filepath.Join(dir, name+".offsets")
-		if err := os.WriteFile(path, raw, 0600); err != nil {
-			t.Fatal(err)
-		}
-		file, err := os.OpenFile(path, os.O_RDWR, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		offsets[name] = file
-		t.Cleanup(func() { file.Close() })
-	}
-	segment := Segment{dir: dir, tables: tables, offsets: offsets, seal: seal{Verification: map[string]tableVerification{"ids": {Rows: int64(count)}, "kinds": {Rows: 1}}}}
-	if err := segment.validateLocalLayout(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	// The final block must not escape monotonicity validation.
-	var bad [8]byte
-	binary.LittleEndian.PutUint64(bad[:], 3)
-	if _, err := offsets["out"].WriteAt(bad[:], 16+8192*8); err != nil {
-		t.Fatal(err)
-	}
-	if err := segment.validateLocalLayout(context.Background()); err == nil || !strings.Contains(err.Error(), "invalid offset directory") {
-		t.Fatal("bad final block accepted", err)
+	for _, width := range []uint64{4, 8} {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			dir := t.TempDir()
+			tables := map[string]*tableFile{}
+			for _, name := range []string{"nodes", "edges"} {
+				file, err := os.Create(filepath.Join(dir, name+".parquet"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				writer := parquet.NewGenericWriter[row](file)
+				rows := []row{{Local: 0}}
+				if name == "edges" {
+					rows = append(rows, row{Local: 1})
+				}
+				if _, err = writer.Write(rows); err != nil {
+					t.Fatal(err)
+				}
+				if err = errors.Join(writer.Close(), file.Close()); err != nil {
+					t.Fatal(err)
+				}
+				table, err := openTable(file.Name(), newBlockCache(4<<20))
+				if err != nil {
+					t.Fatal(err)
+				}
+				tables[name] = table
+				t.Cleanup(func() { table.file.Close() })
+			}
+			tables["out"], tables["in"] = tables["edges"], tables["edges"]
+			count := uint64((64<<10)/width + 1)
+			offsets := map[string]offsetDirectory{}
+			for _, name := range []string{"out", "in"} {
+				raw := make([]byte, offsetHeaderSize+(count+1)*width)
+				binary.LittleEndian.PutUint64(raw[:8], count)
+				binary.LittleEndian.PutUint64(raw[8:16], 1)
+				binary.LittleEndian.PutUint64(raw[16:24], width)
+				if width == 4 {
+					binary.LittleEndian.PutUint32(raw[len(raw)-4:], 2)
+				} else {
+					binary.LittleEndian.PutUint64(raw[len(raw)-8:], 2)
+				}
+				path := filepath.Join(dir, name+".offsets")
+				if err := os.WriteFile(path, raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+				directory, err := openOffsets(dir, name, count, 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				offsets[name] = directory
+				t.Cleanup(func() { directory.file.Close() })
+			}
+			segment := Segment{dir: dir, cache: newBlockCache(4 << 20), tables: tables, offsets: offsets, seal: seal{Verification: map[string]tableVerification{"ids": {Rows: int64(count)}, "kinds": {Rows: 1}}}}
+			if err := segment.validateLocalLayout(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			// The final block must not escape monotonicity validation.
+			span, err := segment.offsetSpan("out", count-1, 0)
+			if err != nil || span.First != 0 || span.End != 2 {
+				t.Fatal("width-specific span", span, err)
+			}
+			file, err := os.OpenFile(filepath.Join(dir, "out.offsets"), os.O_RDWR, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var bad [8]byte
+			if width == 4 {
+				binary.LittleEndian.PutUint32(bad[:], 3)
+			} else {
+				binary.LittleEndian.PutUint64(bad[:], 3)
+			}
+			_, err = file.WriteAt(bad[:width], offsetHeaderSize+(64<<10))
+			err = errors.Join(err, file.Close())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := segment.validateLocalLayout(context.Background()); err == nil || !strings.Contains(err.Error(), "invalid offset directory") {
+				t.Fatal("bad final block accepted", err)
+			}
+		})
 	}
 }
 
@@ -1320,5 +1400,141 @@ func TestGraphRowsDoNotPayForRedundantNumericColumns(t *testing.T) {
 	}
 	if current.Size() >= old.Size() {
 		t.Fatal("redundant numeric columns still cost bytes", current.Size(), old.Size())
+	}
+}
+
+func TestOffsetWidthAndHeaderRefusals(t *testing.T) {
+	for _, tc := range []struct{ rows, width uint64 }{{0, 4}, {math.MaxUint32, 4}, {math.MaxUint32 + 1, 8}} {
+		if got := offsetWidth(tc.rows); got != tc.width {
+			t.Fatal("wrong sealed offset width", tc.rows, got)
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		width   uint64
+		size    int
+		message string
+	}{{"bad-width", 3, 33, "invalid offset directory width"}, {"wrong-size", 8, 36, "truncated offset directory"}, {"truncated", 4, 35, "truncated offset directory"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			raw := make([]byte, tc.size)
+			binary.LittleEndian.PutUint64(raw[:8], 2)
+			binary.LittleEndian.PutUint64(raw[8:16], 1)
+			binary.LittleEndian.PutUint64(raw[16:24], tc.width)
+			if err := os.WriteFile(filepath.Join(dir, "out.offsets"), raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			directory, err := openOffsets(dir, "out", 2, 1)
+			if directory.file != nil {
+				directory.file.Close()
+				t.Fatal("bad directory served")
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.message) {
+				t.Fatal("missing named directory refusal", err)
+			}
+		})
+	}
+}
+
+func TestFourAndEightByteSealsPreserveGraphAnswers(t *testing.T) {
+	for _, side := range []bool{false, true} {
+		t.Run(fmt.Sprint(side), func(t *testing.T) {
+			d := conformance.Fixture()
+			d.Edges = append(d.Edges, d.Edges[0], dataset.Edge{From: "a", To: "unresolved", Kind: "calls"})
+			backend := Backend{SideIndex: side}
+			ref, segment := openFixture(t, backend, d)
+			compareGraph(t, d, segment)
+			for _, name := range []string{"out", "in"} {
+				if segment.offsets[name].width != 4 {
+					t.Fatal("tier-sized fixture did not choose 4 bytes")
+				}
+			}
+			if err := segment.Close(); err != nil {
+				t.Fatal(err)
+			}
+			hashes := map[string]string{}
+			for _, name := range []string{"nodes.parquet", "edges.parquet"} {
+				hash, err := dataset.Hash(filepath.Join(ref.Path, name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				hashes[name] = hash
+			}
+			// Test-only recoding forces 8 bytes; no production override is exposed.
+			for _, name := range []string{"out", "in"} {
+				path := filepath.Join(ref.Path, name+".offsets")
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wide := make([]byte, offsetHeaderSize+2*(len(raw)-offsetHeaderSize))
+				copy(wide[:16], raw[:16])
+				binary.LittleEndian.PutUint64(wide[16:24], 8)
+				for i := 0; i < (len(raw)-offsetHeaderSize)/4; i++ {
+					binary.LittleEndian.PutUint64(wide[offsetHeaderSize+i*8:], uint64(binary.LittleEndian.Uint32(raw[offsetHeaderSize+i*4:])))
+				}
+				if err = os.WriteFile(path, wide, 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ref = resealFixture(t, ref)
+			opened, err := backend.Open(context.Background(), ref.Path, ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer opened.Close()
+			compareGraph(t, d, opened)
+			for _, name := range []string{"out", "in"} {
+				if opened.(*Segment).offsets[name].width != 8 {
+					t.Fatal("forced 8-byte seal not adopted")
+				}
+			}
+			for name, want := range hashes {
+				got, err := dataset.Hash(filepath.Join(ref.Path, name))
+				if err != nil || got != want {
+					t.Fatal("payload file changed with offset width", name, got, err)
+				}
+			}
+		})
+	}
+}
+
+func TestCapabilitiesDescribePerKindOffsets(t *testing.T) {
+	for _, side := range []bool{false, true} {
+		for _, operation := range []string{"in", "out"} {
+			description := (Backend{SideIndex: side}).Capabilities().Operations[operation]
+			if !strings.Contains(description, "per-kind dense N+1 offsets") || !strings.Contains(description, "kind selected before dereference") {
+				t.Fatal("stale offset capability", description)
+			}
+		}
+	}
+}
+
+func TestOffsetWriterPreservesWideSealedCounts(t *testing.T) {
+	dir := t.TempDir()
+	file, err := os.Create(filepath.Join(dir, "out.ranges.parquet"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := parquet.NewGenericWriter[rowRange](file)
+	rows := uint64(math.MaxUint32) + 1
+	if _, err = writer.Write([]rowRange{{Numeric: true, Grouped: true, Tag: 0, Number: 0, First: 0, End: int64(rows)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = errors.Join(writer.Close(), file.Close()); err != nil {
+		t.Fatal(err)
+	}
+	if err = writeOffsets(context.Background(), dir, "out", 1, 1, rows); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "out.offsets"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != offsetHeaderSize+16 || binary.LittleEndian.Uint64(raw[16:24]) != 8 || binary.LittleEndian.Uint64(raw[len(raw)-8:]) != rows {
+		t.Fatal("large offset truncated", raw)
+	}
+	if err = writeOffsetsWidth(context.Background(), dir, "out", 1, 1, 4); err == nil || !strings.Contains(err.Error(), "exceeds directory width") {
+		t.Fatal("overflowing forced width accepted", err)
 	}
 }

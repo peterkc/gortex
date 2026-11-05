@@ -14,6 +14,7 @@ import (
 	"io"
 	"io/fs"
 	"iter"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -42,7 +43,7 @@ func (b Backend) Name() string {
 }
 func (b Backend) Capabilities() adapter.Capabilities {
 	return adapter.Capabilities{
-		Operations: map[string]string{"id": "sorted logical-ID directory to canonical local-ID row", "name": "sorted exact-name local-ID candidates to canonical rows", "file": "sorted Parquet file directory and row range", "in": "CSC local-ID references with N+1 offsets; kind filter after dereference", "out": "CSR local-ID references with N+1 offsets; kind filter after dereference", "symbols": "native Bleve BM25, identical to B", "content": "native Bleve BM25, identical to B", "vector": "emulated exact cosine scan of Parquet records", "delta": "emulated full rebuild from Parquet records"},
+		Operations: map[string]string{"id": "sorted logical-ID directory to canonical local-ID row", "name": "sorted exact-name local-ID candidates to canonical rows", "file": "sorted Parquet file directory and row range", "in": "CSC local-ID references with per-kind dense N+1 offsets; kind selected before dereference", "out": "CSR local-ID references with per-kind dense N+1 offsets; kind selected before dereference", "symbols": "native Bleve BM25, identical to B", "content": "native Bleve BM25, identical to B", "vector": "emulated exact cosine scan of Parquet records", "delta": "emulated full rebuild from Parquet records"},
 		Ranking:    map[string]adapter.RankPolicy{"symbols": {Mode: "native"}, "content": {Mode: "native"}, "multi_symbols": {Mode: "native"}, "vector": {Exact: true}, "multi_vector": {Exact: true}},
 		Libraries:  []string{"github.com/parquet-go/parquet-go v0.30.1", "github.com/blevesearch/bleve/v2 v2.6.1", "github.com/cockroachdb/pebble/v2 v2.1.7 (side branch only)"},
 		Deployment: "test-only per-repository sealed Parquet directory; reference JSON catalog",
@@ -68,7 +69,7 @@ type Segment struct {
 	dir              string
 	seal             seal
 	cache            *blockCache
-	offsets          map[string]*os.File
+	offsets          map[string]offsetDirectory
 	tables           map[string]*tableFile
 	side             *pebble.DB
 	symbols, content bleve.Index
@@ -481,7 +482,7 @@ func (b Backend) Build(ctx context.Context, d dataset.Dataset, dir string) (ref 
 		}
 	}
 	for _, name := range []string{"out", "in"} {
-		if err = writeOffsets(ctx, dir, name, uint64(verifications["ids"].Rows), uint64(verifications["kinds"].Rows)); err != nil {
+		if err = writeOffsets(ctx, dir, name, uint64(verifications["ids"].Rows), uint64(verifications["kinds"].Rows), uint64(verifications[name].Rows)); err != nil {
 			return ref, stats, err
 		}
 		if err = os.Remove(filepath.Join(dir, name+".ranges.parquet")); err != nil {
@@ -646,7 +647,7 @@ func (b Backend) Open(ctx context.Context, dir string, ref adapter.SegmentRef) (
 	if err != nil {
 		return nil, err
 	}
-	s := &Segment{dir: dir, seal: manifest, cache: cache, tables: map[string]*tableFile{}, offsets: map[string]*os.File{}}
+	s := &Segment{dir: dir, seal: manifest, cache: cache, tables: map[string]*tableFile{}, offsets: map[string]offsetDirectory{}}
 	fail := func(e error) (adapter.Segment, error) { return nil, errors.Join(e, s.Close()) }
 	for _, name := range []string{"nodes", "ids", "names", "qnames", "paths", "edges", "out", "in", "terminals", "kinds", "files", "symbols", "content", "vectors"} {
 		for _, suffix := range []string{"", ".ranges"} {
@@ -672,11 +673,11 @@ func (b Backend) Open(ctx context.Context, dir string, ref adapter.SegmentRef) (
 		}
 	}
 	for _, name := range []string{"out", "in"} {
-		file, e := os.Open(filepath.Join(dir, name+".offsets"))
+		directory, e := openOffsets(dir, name, uint64(manifest.Verification["ids"].Rows), uint64(manifest.Verification["kinds"].Rows))
 		if e != nil {
 			return fail(e)
 		}
-		s.offsets[name] = file
+		s.offsets[name] = directory
 	}
 	if err = validateLayoutOnce(dir, ref.Digest, func() error { return s.validateLocalLayout(ctx) }); err != nil {
 		return fail(err)
@@ -699,8 +700,8 @@ func (b Backend) Open(ctx context.Context, dir string, ref adapter.SegmentRef) (
 }
 func (s *Segment) Close() error {
 	s.once.Do(func() {
-		for _, file := range s.offsets {
-			s.closeErr = errors.Join(s.closeErr, file.Close())
+		for _, directory := range s.offsets {
+			s.closeErr = errors.Join(s.closeErr, directory.file.Close())
 		}
 		for _, table := range s.tables {
 			s.closeErr = errors.Join(s.closeErr, table.file.Close())
@@ -747,16 +748,50 @@ func (s *Segment) sideNodes(ctx context.Context, prefix []byte, limit int) (node
 	return nodes, iterator.Error()
 }
 
+func openOffsets(dir, name string, count, kinds uint64) (directory offsetDirectory, err error) {
+	directory.file, err = os.Open(filepath.Join(dir, name+".offsets"))
+	if err != nil {
+		return directory, err
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, directory.file.Close())
+			directory = offsetDirectory{}
+		}
+	}()
+	var header [offsetHeaderSize]byte
+	if _, err = directory.file.ReadAt(header[:], 0); err != nil {
+		return directory, fmt.Errorf("truncated offset directory: %s: %w", name, err)
+	}
+	if binary.LittleEndian.Uint64(header[:8]) != count || binary.LittleEndian.Uint64(header[8:16]) != kinds {
+		return directory, fmt.Errorf("invalid offset directory header: %s", name)
+	}
+	directory.width = binary.LittleEndian.Uint64(header[16:])
+	if directory.width != 4 && directory.width != 8 {
+		return directory, fmt.Errorf("invalid offset directory width: %s", name)
+	}
+	info, err := directory.file.Stat()
+	if err != nil {
+		return directory, err
+	}
+	maxEntries := uint64(math.MaxInt64-offsetHeaderSize) / directory.width
+	if count == math.MaxUint64 || (kinds > 0 && count+1 > maxEntries/kinds) || info.Size() != offsetHeaderSize+int64(kinds*(count+1)*directory.width) {
+		return directory, fmt.Errorf("truncated offset directory: %s", name)
+	}
+	return directory, nil
+}
+
 func (s *Segment) offsetSpan(name string, local, tag uint64) (span rowRange, err error) {
 	if local >= uint64(s.seal.Verification["ids"].Rows) {
 		return span, fmt.Errorf("local endpoint outside base")
 	}
+	directory := s.offsets[name]
 	var raw [16]byte
-	if _, err = (cachedFile{s.offsets[name], s.cache}).ReadAt(raw[:], 16+int64(tag*(uint64(s.seal.Verification["ids"].Rows)+1)+local)*8); err != nil {
+	if _, err = (cachedFile{directory.file, s.cache}).ReadAt(raw[:2*directory.width], offsetHeaderSize+int64(tag*(uint64(s.seal.Verification["ids"].Rows)+1)+local)*int64(directory.width)); err != nil {
 		return span, fmt.Errorf("truncated offset directory: %s: %w", name, err)
 	}
-	span.First = int64(binary.LittleEndian.Uint64(raw[:8]))
-	span.End = int64(binary.LittleEndian.Uint64(raw[8:]))
+	span.First = int64(decodeOffset(raw[:directory.width], directory.width))
+	span.End = int64(decodeOffset(raw[directory.width:], directory.width))
 	if span.First < 0 || span.First > span.End || span.End > s.tables[name].parquet.NumRows() {
 		return span, fmt.Errorf("invalid offset directory: %s", name)
 	}
@@ -829,22 +864,10 @@ func (s *Segment) validateLocalLayout(ctx context.Context) error {
 	}
 	count := uint64(s.seal.Verification["ids"].Rows)
 	for _, name := range []string{"out", "in"} {
-		info, err := os.Stat(filepath.Join(s.dir, name+".offsets"))
-		if err != nil {
-			return err
-		}
 		kinds := uint64(s.seal.Verification["kinds"].Rows)
-		if info.Size() != 16+int64(kinds*(count+1))*8 {
-			return fmt.Errorf("truncated offset directory: %s", name)
-		}
-		var header [16]byte
-		if _, err = s.offsets[name].ReadAt(header[:], 0); err != nil {
-			return err
-		}
-		if binary.LittleEndian.Uint64(header[:8]) != count || binary.LittleEndian.Uint64(header[8:]) != kinds {
-			return fmt.Errorf("invalid offset directory header: %s", name)
-		}
-		reader := io.NewSectionReader(s.offsets[name], 16, info.Size()-16)
+		directory := s.offsets[name]
+		width := directory.width
+		reader := io.NewSectionReader(directory.file, offsetHeaderSize, int64(kinds*(count+1)*width))
 		buffer := make([]byte, 64<<10)
 		remaining := kinds * (count + 1)
 		previous := uint64(0)
@@ -853,19 +876,19 @@ func (s *Segment) validateLocalLayout(ctx context.Context) error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			block := buffer[:min(uint64(len(buffer)), remaining*8)]
-			if _, err = io.ReadFull(reader, block); err != nil {
+			block := buffer[:min(uint64(len(buffer)), remaining*width)]
+			if _, err := io.ReadFull(reader, block); err != nil {
 				return fmt.Errorf("truncated offset directory: %s: %w", name, err)
 			}
-			for position := 0; position < len(block); position += 8 {
-				offset := binary.LittleEndian.Uint64(block[position:])
+			for position := 0; position < len(block); position += int(width) {
+				offset := decodeOffset(block[position:], width)
 				if (first && offset != 0) || offset < previous || offset > uint64(s.tables[name].parquet.NumRows()) {
 					return fmt.Errorf("invalid offset directory: %s", name)
 				}
 				first = false
 				previous = offset
 			}
-			remaining -= uint64(len(block)) / 8
+			remaining -= uint64(len(block)) / width
 		}
 		if previous != uint64(s.tables[name].parquet.NumRows()) {
 			return fmt.Errorf("invalid offset directory end: %s", name)

@@ -734,6 +734,9 @@ class BytesOnlyTests(unittest.TestCase):
                 root.mkdir()
                 payloads = {"canonical": 40, "logical-lookup": 20,
                             "name-file-lookups": 16, "offsets": 24}
+                if adapter in ("c", "c_side"):
+                    # N=2, one kind: two headers plus 2*(N+1) uint32 offsets.
+                    payloads["offsets"] = 2 * (24 + 3 * 4)
                 if adapter == "c_side":
                     payloads["side-index"] = 25
                 for name, size in payloads.items():
@@ -746,10 +749,13 @@ class BytesOnlyTests(unittest.TestCase):
             report = bytes_report(inventories, {
                 "counts": {"edges": 5}, "repos": ["repo"]})
             values = report["measured_value"]
-            for adapter in ("a", "b", "c"):
+            for adapter in ("a", "b"):
                 self.assertEqual(values[adapter]["bytes_per_edge"], 20)
                 self.assertEqual(values[adapter]["graph_serving_bytes"], 100)
-            self.assertEqual(values["c_side"]["bytes_per_edge"], 25)
+            self.assertEqual(values["c"]["graph_serving_bytes"], 148)
+            self.assertEqual(values["c"]["bytes_per_edge"], 148 / 5)
+            self.assertEqual(values["c_side"]["graph_serving_bytes"], 173)
+            self.assertEqual(values["c_side"]["bytes_per_edge"], 173 / 5)
             self.assertEqual(len(values["c_side"]["inventory"][0]["files"]), 5)
             raw = json.dumps(report)
             for field in ("cpu_ns", "duration_ns", "p95_ns", "metrics"):

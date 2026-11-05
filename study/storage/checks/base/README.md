@@ -72,7 +72,11 @@ Nodes have dense integer local IDs and one canonical binary payload per ID.
 One sorted logical-ID lookup maps to those IDs. Name, qualified-name and file
 lookups hold local IDs, not node payloads. Each edge payload appears once;
 outgoing and incoming tables contain references. Kind-specific dense N+1 offsets
-include zero-degree nodes and explicit unresolved endpoints. The graph ID columns
+include zero-degree nodes and explicit unresolved endpoints. Each direction uses
+4-byte offsets when its sealed row count fits uint32, otherwise 8-byte offsets.
+The 24-byte header records the local-ID count, kind count and entry width as
+three little-endian uint64 values. Open checks the width, exact file size and offset bounds.
+The graph ID columns
 are fixed-width and uncompressed. Each row stores one `local` column, without
 redundant `tag` or `number` columns. Kind and endpoint offsets carry adjacency
 boundaries; the canonical row position carries its dense ID. Strings and
