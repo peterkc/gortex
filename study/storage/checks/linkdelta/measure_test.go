@@ -127,6 +127,9 @@ func TestMeasurementWorkersTinyCompleteQueries(t *testing.T) {
 		var triple []sample
 		raw := map[int]map[string]map[string][]int64{}
 		warmups := map[int]map[string]int{}
+		// Orders the loop actually ran, per (size, query index) of measured triples.
+		nextQuery := map[[2]int]int{}
+		orders := map[[2]int]map[[3]string]int{}
 		if e := eachJSON(filepath.Join(c.Out, "delta-"+format, "answers.jsonl"), func(s sample) error {
 			triple = append(triple, s)
 			if len(triple) == 3 {
@@ -150,6 +153,19 @@ func TestMeasurementWorkersTinyCompleteQueries(t *testing.T) {
 				if len(forms) != 3 {
 					t.Fatal("missing paired form", triple)
 				}
+				if triple[0].Repeat >= 0 {
+					var order [3]string
+					for _, v := range triple {
+						order[v.TimingPosition] = v.Form
+					}
+					run := [2]int{triple[0].Size, triple[0].Repeat}
+					key := [2]int{triple[0].Size, nextQuery[run]}
+					nextQuery[run]++
+					if orders[key] == nil {
+						orders[key] = map[[3]string]int{}
+					}
+					orders[key][order]++
+				}
 				triple = nil
 			}
 			if s.ElapsedNS <= 0 {
@@ -172,6 +188,19 @@ func TestMeasurementWorkersTinyCompleteQueries(t *testing.T) {
 		}
 		if len(triple) != 0 {
 			t.Fatal("incomplete timing triple", triple)
+		}
+		if len(orders) != len(queries)*len(metrics.Checkpoints) {
+			t.Fatal("measured order evidence missing", format, len(orders))
+		}
+		for key, counts := range orders {
+			if len(counts) != 6 {
+				t.Fatal("query not timed in all six orders", format, key, counts)
+			}
+			for order, n := range counts {
+				if n != 2 {
+					t.Fatal("query order not timed exactly twice", format, key, order, n)
+				}
+			}
 		}
 		for _, cp := range metrics.Checkpoints {
 			for _, form := range []string{"base", "wrapper", "delta"} {
