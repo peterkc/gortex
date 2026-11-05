@@ -2,8 +2,8 @@
   "schema": "design-c-checks-run-policy/v1",
   "approval_boundary": "Proposed settings. The user must approve this exact committed file hash and the exact batched run list before manual dispatch. An approval ID records that approval; it does not create it.",
   "contract": {
-    "plan_sha256": "15b39c3c7087ee544f7616ad4e295052951729b463ec08b9add296fd637059c1",
-    "actions_sha256": "e11c66331a2ea941152371193291a99cd38b7aa4a94c42559533f6a356e5ce5a",
+    "plan_sha256": "4c851d2451417303b5fe6191058c4ae3909053833d5ae820bd45409946d882dc",
+    "actions_sha256": "0f572f0f03b38f1dbc4b1d0ac3904324fc96c90447265893335ab7ab4458704e",
     "construction_selection_approved": true,
     "vector_scope": "D28 synthetic-only scan control; no inference, ANN execution or int8 recommendation"
   },
@@ -25,7 +25,7 @@
       "cleanup_upload_seconds": 1200
     },
     "linkdelta": {
-      "timeout_minutes": 350,
+      "timeout_minutes": 320,
       "setup_seconds": 1200,
       "cleanup_upload_seconds": 1200
     },
@@ -88,7 +88,7 @@
     }
   },
   "linkdelta": {
-    "wall_seconds": 9000,
+    "wall_seconds": 16200,
     "memory_limits_bytes": {
       "runner": 536870912,
       "checker": 2147483648,
@@ -99,11 +99,9 @@
       1,
       2,
       4,
-      8,
-      16,
-      32
+      8
     ],
-    "query_repeats": 3,
+    "query_repeats": 12,
     "base_layout": "c-parquet",
     "tiers": [
       {
@@ -156,14 +154,14 @@
     "/venue/job_memory_bytes": "Integration proposal: 12 GiB enclosing cap on the reports nominal 16-GB host, above the 10 GiB tier100 target cap with two GiB inside the job for controllers and cache. Delegation and outside-owner cleanup follow .github/workflows/storage-screen.yml. This is not engine RSS or a measured requirement.",
     "/venue/host_reserve_bytes": "Integration proposal: require at least 2 GiB physical memory outside the enclosing cap for the runner and cleanup owner. The reports name a nominal 16-GB host; actual MemTotal is checked.",
     "/venue/price_cap_usd": "Zero-cost public-fork standard Linux CI venue only. No paid runner, model inference, cloud job or extra service is requested.",
-    "/venue/max_parallel": "Approved D12 sets start at most three independent measurement jobs: Check 2 + plain Check 1 + Check 4, or one Check 5 tier per job. Every singleton starts one job. Vector/Check 6 is not selectable. All same-host A/B/C controls remain within one selected job.",
+    "/venue/max_parallel": "Approved D12 sets start at most three independent measurement jobs. Check 2 + plain Check 1 leaves one slot for the two Check 4 tier jobs. Check 4 alone runs both tiers concurrently; every other singleton starts one job. The Check 5 batch runs one tier per job. Vector/Check 6 is not selectable. All same-host A/B/C controls remain within one selected job.",
     "/jobs/tests/timeout_minutes": "Integration estimate: 45 minutes for setup, three readonly Go module vet/test pairs and three stdlib Python suites (base, fixtures and shared workflow helpers). This is not a measurement bound.",
     "/jobs/base/timeout_minutes": "Selected steps retain the conservative 350-minute envelope: fetch 10 + tiny generation reserve 5 + tier100 generation reserve 20 + setup 25 + main 209 + side reserve 60 + cleanup/upload 20 = 349 minutes. Tiny generation runs only for check2; tier100 generation runs only for check5-tier100. Check2 runs four tiny full correctness protocols plus the original tier1 plain-C check-only round trip inside main, not inside timed checks. No timeout increase is needed. F=max(60,ceil(9*P/67108864)) finalization seconds and the 30-second join come out of main/absolute first-step work, before the unchanged minute-329.5 wrapper cutoff. All bounds are unmeasured planning limits.",
     "/jobs/base/setup_seconds": "Integration reserve: 25 minutes for Go setup, downloads, serial builds, metadata and manifest freezing outside timing; unmeasured. The fixed unused-software removal shares this setup reserve; budget roughly 1-3 minutes, not a measured bound.",
     "/jobs/base/cleanup_upload_seconds": "Twenty minutes for owned-root cleanup and both freeze/result uploads. Driver finalization and its 30-second runner join come from the main envelope, not this upload reserve. The unchanged wrapper is a backstop at the absolute cutoff plus 30 seconds; unmeasured.",
-    "/jobs/linkdelta/timeout_minutes": "C-LD-8 revised projection: (2*9000 serial tier deadlines + 600 fetch + 1200 setup + 1200 finalization/cleanup/upload) / 60 = 350 minutes. Timing phases have 330 minutes through setup/fetch, leaving 20 minutes inside this job for finalization and uploads. The job cap is 10 minutes below GitHub 360; that external margin is not extra usable runtime. Reserves and throughput are unmeasured, not guaranteed finish times.",
+    "/jobs/linkdelta/timeout_minutes": "D16 per-tier projection: (600 fetch + 16200 tier deadline + 1200 setup + 1200 cleanup/upload) / 60 = 320 minutes. Each job runs only its selected tier. The job cap is 40 minutes below GitHub 360; that external margin is not extra usable runtime. Reserves and throughput are unmeasured, not guaranteed finish times.",
     "/jobs/linkdelta/setup_seconds": "checks-link-delta proposal relayed by lead: build/cleanup about 20 minutes. This envelope reserves 20 minutes for setup/build separately; unmeasured. The fixed unused-software removal shares this setup reserve; budget roughly 1-3 minutes, not a measured bound.",
-    "/jobs/linkdelta/cleanup_upload_seconds": "Integration reserve: 20 additional minutes for cleanup, two-tier evidence and upload; unmeasured.",
+    "/jobs/linkdelta/cleanup_upload_seconds": "Integration reserve: 20 additional minutes for cleanup, selected-tier evidence and upload; unmeasured.",
     "/jobs/vector/timeout_minutes": "Hard job envelope: (600 setup + 600 generation + 600 measurement + 600 cleanup/upload) / 60 = 40 minutes.",
     "/jobs/vector/setup_seconds": "Integration reserve: 10 minutes for Go setup, serial builds, metadata and freeze, outside query timing; unmeasured.",
     "/jobs/vector/cleanup_upload_seconds": "Integration reserve: 10 minutes for owned-root cleanup and evidence upload; unmeasured.",
@@ -188,13 +186,13 @@
     "/base/memory_limits_bytes/runner": "study/storage/checks/base/README.md proposed config: 536870912 bytes; estimate below 512 MiB, not a measured peak.",
     "/base/memory_limits_bytes/checker": "study/storage/checks/base/README.md proposed config: 1073741824 bytes; estimate below one GiB, not a measured peak.",
     "/base/memory_limits_bytes/engine": "study/storage/checks/base/README.md proposed config: 4294967296 bytes; estimated engine RSS 1-3 GiB, with charged-cache uncertainty.",
-    "/linkdelta/wall_seconds": "C-LD-8 revised wall estimate from checks-link-delta: 9000 seconds per serial tier, unmeasured and conditional on planning rates of 100000 reference edge rows/s, 50000 reference node rows/s and 8000000 stored vector-coordinate JSON decodes/s. Across 144 workload sequences per tier, dominant work is about 6930/7815 seconds for tier1/tier10, leaving about 2070/1185 seconds for preparation, builds, 64 durable seals/opens, parity, serialization, hashing and finalization. No M1 baseline, extra query parallelism or retry is assumed. Slower actual throughput can exceed the estimate; preserve partial evidence.",
+    "/linkdelta/wall_seconds": "D16 reserves 16200 seconds for each independent tier job, with four chain checkpoints and twelve measured query repeats after one discarded warm-up. This is an unmeasured planning bound, not a completion guarantee. No extra query parallelism or retry is assumed; preserve partial evidence if the deadline expires.",
     "/linkdelta/memory_limits_bytes/runner": "checks-link-delta proposal relayed by lead: 536870912 bytes per tier.",
     "/linkdelta/memory_limits_bytes/checker": "checks-link-delta proposal relayed by lead: 2147483648 bytes per tier.",
     "/linkdelta/memory_limits_bytes/engine": "checks-link-delta proposal relayed by lead: 8589934592 bytes per tier. This is never substituted for the link target cap.",
     "/linkdelta/link_memory_limit_bytes": "study/storage/checks/linkdelta/README.md and the approved check target: exactly 1610612736 bytes (1.5 GiB) for linking, independent of the engine cap.",
-    "/linkdelta/delta_sizes": "checks-link-delta proposal relayed by lead: [1,2,4,8,16,32] physical chain checkpoints over alternating edits.",
-    "/linkdelta/query_repeats": "checks-link-delta proposal relayed by lead: three measured repeats after one discarded warm-up; the warm-up is implemented by the entrypoint.",
+    "/linkdelta/delta_sizes": "Approved D16 checkpoints [1,2,4,8] over alternating edits. Sizes 16 and 32 are outside this rerun.",
+    "/linkdelta/query_repeats": "Approved D16: twelve measured repeats after one discarded warm-up. Each query runs each of the six existing form orders twice. Retain every timed sample; no sample filter or verdict rule changes.",
     "/vector/generate_wall_seconds": "Integration proposal: 600-second generation bound, separate from the report 600-second measurement bound. The report estimates 3-8 minutes for the overall vector work.",
     "/vector/generator_memory_limits_bytes/runner": "Integration proposal: 256 MiB binding-only field; external generation launches no runner component.",
     "/vector/generator_memory_limits_bytes/checker": "Integration proposal: 256 MiB binding-only field; external generation launches no checker component.",

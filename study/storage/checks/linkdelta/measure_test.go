@@ -60,6 +60,7 @@ func fixtureConfig(t *testing.T) config {
 func TestMeasurementWorkersTinyCompleteQueries(t *testing.T) {
 	ctx := context.Background()
 	c := fixtureConfig(t)
+	c.Repeats = 12
 	var generated []map[string]json.RawMessage
 	if err := dataset.ReadJSON(filepath.Join(c.Data, "expected.json"), &generated); err != nil {
 		t.Fatal(err)
@@ -81,6 +82,14 @@ func TestMeasurementWorkersTinyCompleteQueries(t *testing.T) {
 	}
 	if err = prepareReferences(ctx, c); err != nil {
 		t.Fatal(err)
+	}
+	var queries []workload.Query
+	if err = dataset.ReadJSON(filepath.Join(c.Out, "queries.json"), &queries); err != nil {
+		t.Fatal(err)
+	}
+	queryCounts := map[string]int{}
+	for _, q := range queries {
+		queryCounts[q.Op]++
 	}
 	for _, format := range []string{"arrow", "parquet"} {
 		if err = work(ctx, c, "delta-"+format); err != nil {
@@ -117,6 +126,7 @@ func TestMeasurementWorkersTinyCompleteQueries(t *testing.T) {
 
 		var triple []sample
 		raw := map[int]map[string]map[string][]int64{}
+		warmups := map[int]map[string]int{}
 		if e := eachJSON(filepath.Join(c.Out, "delta-"+format, "answers.jsonl"), func(s sample) error {
 			triple = append(triple, s)
 			if len(triple) == 3 {
@@ -146,6 +156,10 @@ func TestMeasurementWorkersTinyCompleteQueries(t *testing.T) {
 				t.Fatal("missing raw timing")
 			}
 			if s.Repeat < 0 {
+				if warmups[s.Size] == nil {
+					warmups[s.Size] = map[string]int{}
+				}
+				warmups[s.Size][s.Form]++
 				return nil
 			}
 			if raw[s.Size] == nil {
@@ -160,6 +174,16 @@ func TestMeasurementWorkersTinyCompleteQueries(t *testing.T) {
 			t.Fatal("incomplete timing triple", triple)
 		}
 		for _, cp := range metrics.Checkpoints {
+			for _, form := range []string{"base", "wrapper", "delta"} {
+				if warmups[cp.Size][form] != len(queries) {
+					t.Fatal("warm-up evidence count differs", format, cp.Size, form, warmups)
+				}
+				for op, count := range queryCounts {
+					if got := len(raw[cp.Size][form][op]); got != count*12 {
+						t.Fatal("timed sample count differs", format, cp.Size, form, op, got, count*12)
+					}
+				}
+			}
 			empty := func() checkpoint {
 				return checkpoint{BaseP95: map[string]float64{}, WrapperP95: map[string]float64{}, DeltaP95: map[string]float64{}, Ratio: map[string]float64{}, AARatio: map[string]float64{}}
 			}

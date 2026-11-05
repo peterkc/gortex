@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"gxstudy/adapter"
@@ -346,6 +347,42 @@ func TestTimingOrderPairsQueriesAndBalancesPositions(t *testing.T) {
 	}
 	if len(positions) != 3 {
 		t.Fatal(positions)
+	}
+}
+
+func TestApprovedTimingScheduleBalancesEveryQuery(t *testing.T) {
+	raw, err := os.ReadFile("../run-policy.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var policy struct {
+		LinkDelta struct {
+			Repeats int `json:"query_repeats"`
+		} `json:"linkdelta"`
+	}
+	if err = json.Unmarshal(raw, &policy); err != nil {
+		t.Fatal(err)
+	}
+	orders := func(repeats, qi int) map[[3]string]int {
+		counts := map[[3]string]int{}
+		for repeat := 0; repeat < repeats; repeat++ {
+			counts[timingOrder(repeat+1+qi)]++
+		}
+		return counts
+	}
+	for _, qi := range []int{0, 1, 2, 5, 6, 31} {
+		counts := orders(policy.LinkDelta.Repeats, qi)
+		if len(counts) != 6 {
+			t.Fatalf("query %d: want all six orders, got %v", qi, counts)
+		}
+		for order, count := range counts {
+			if count != 2 {
+				t.Fatalf("query %d order %v: want twice, got %d", qi, order, count)
+			}
+		}
+		if len(orders(3, qi)) == 6 {
+			t.Fatalf("query %d: three repeats unexpectedly cover all six orders", qi)
+		}
 	}
 }
 func TestCheck4OnlyStartsNoCheck3WorkOrResult(t *testing.T) {

@@ -62,6 +62,7 @@ jobs:
     outputs:
       timeouts: ${{ steps.preflight.outputs.timeouts }}
       measurement_jobs: ${{ steps.preflight.outputs.measurement_jobs }}
+      linkdelta_jobs: ${{ steps.preflight.outputs.linkdelta_jobs }}
     steps:
     - name: Set the job work directory from the runner temp path
       shell: bash
@@ -95,7 +96,7 @@ jobs:
             0, str(Path(os.environ["GITHUB_WORKSPACE"]) / "study/storage/checks"))
         from workflow_helpers import (
             admit_dispatch, dispatch_request, unique_object,
-            selected_steps, measurement_jobs,
+            selected_steps, measurement_jobs, linkdelta_jobs,
         )
 
         policy_path = Path("study/storage/checks/run-policy.json")
@@ -120,6 +121,7 @@ jobs:
                   if request["event"] == "workflow_dispatch" else ())
         jobs = (measurement_jobs(chosen) if chosen else
                 {"base": [], "linkdelta": False, "vector": False})
+        link_jobs = linkdelta_jobs(policy, jobs)
         for allowed in policy["dispatch"]["allowed_sets"]:
             selected_steps(",".join(allowed))
         timeouts = {}
@@ -137,8 +139,7 @@ jobs:
                         + policy["tier100"]["wall_seconds"]
                         + sum(base_limits))
         link_seconds = (policy["fetch"]["wall_seconds"]
-                        + len(policy["linkdelta"]["tiers"])
-                        * policy["linkdelta"]["wall_seconds"])
+                        + policy["linkdelta"]["wall_seconds"])
         vector_seconds = (policy["vector"]["generate_wall_seconds"]
                           + policy["vector"]["wall_seconds"])
         for role, seconds in (("base", base_seconds), ("linkdelta", link_seconds),
@@ -155,6 +156,8 @@ jobs:
         with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
             output.write("measurement_jobs="
                          + json.dumps(jobs, separators=(",", ":")) + "\n")
+            output.write("linkdelta_jobs="
+                         + json.dumps(link_jobs, separators=(",", ":")) + "\n")
             output.write("timeouts="
                          + json.dumps(timeouts, separators=(",", ":")) + "\n")
         evidence = Path(os.environ["WORK"])
@@ -282,6 +285,7 @@ jobs:
     env:
       CHECK_GROUP: base
       CHECK_STEP: ${{ matrix.step }}
+      CHECK_ARTIFACT: ${{ matrix.step }}
       REQUEST_C_VARIANT: ${{ inputs.c_variant }}
     steps: &measurement_steps
     - name: Bind the work directory and first-step clock before checkout
@@ -805,7 +809,7 @@ jobs:
       id: freeze_upload
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
       with:
-        name: storage-checks-freeze-${{ env.CHECK_STEP }}-${{ github.run_id }}-${{ github.run_attempt }}
+        name: storage-checks-freeze-${{ env.CHECK_ARTIFACT }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: ${{ runner.temp }}/storage-checks/evidence/freeze/
         if-no-files-found: error
     - name: Record disk after freeze_upload
@@ -1032,6 +1036,8 @@ jobs:
             invocations = []
             for item in spec["tiers"]:
                 tier = item["tier"]
+                if tier != os.environ["CHECK_TIER"]:
+                    continue
                 config = {
                     "schema": "linkdelta-measure/v1", **common,
                     **linkdelta_config_step(os.environ["CHECK_STEP"]),
@@ -1215,7 +1221,7 @@ jobs:
       if: ${{ always() }}
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
       with:
-        name: storage-checks-${{ env.CHECK_STEP }}-${{ github.run_id }}-${{ github.run_attempt }}
+        name: storage-checks-${{ env.CHECK_ARTIFACT }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: |-
           ${{ runner.temp }}/storage-checks/preflight.log
           ${{ runner.temp }}/storage-checks/evidence/**
@@ -1233,13 +1239,20 @@ jobs:
           ${{ runner.temp }}/storage-checks/df.log
         if-no-files-found: error
   linkdelta:
-    name: 'check4: serial tier delta comparison'
+    name: 'check4 ${{ matrix.tier }}: same-host delta comparison'
     needs:
     - tests
     if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && needs.tests.result == 'success' && fromJSON(needs.tests.outputs.measurement_jobs).linkdelta }}
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ fromJSON(needs.tests.outputs.timeouts).linkdelta }}
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(needs.tests.outputs.linkdelta_jobs).max_parallel }}
+      matrix:
+        tier: ${{ fromJSON(needs.tests.outputs.linkdelta_jobs).tiers }}
     env:
       CHECK_GROUP: linkdelta
       CHECK_STEP: check4
+      CHECK_TIER: ${{ matrix.tier }}
+      CHECK_ARTIFACT: check4-${{ matrix.tier }}
     steps: *measurement_steps

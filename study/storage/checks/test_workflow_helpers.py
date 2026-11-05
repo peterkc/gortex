@@ -1,6 +1,8 @@
 """Storage workflow regression tests. Run on CI, not on the Mac."""
 
 import ast
+import hashlib
+import json
 import os
 import textwrap
 from dataclasses import replace
@@ -419,6 +421,175 @@ class WorkflowSourceTests(unittest.TestCase):
                           "tier1": Path("/work/preparation/fetch/data/tier1")})
         self.assertIn('if [ "$CHECK_STEP" = check2 ]; then', source)
         self.assertIn('-o "$WORK/bin/fixture" ./cmd/fixture', source)
+
+
+class Check4ProtocolTests(unittest.TestCase):
+    def policy(self):
+        return json.loads((Path(__file__).parent / "run-policy.json").read_text())
+
+    def test_per_tier_budget_accepts_equality_rejects_one_more_second(self):
+        source = (Path(__file__).parents[3]
+                  / ".github/workflows/storage-checks.yml").read_text()
+        start = source.index("        timeouts = {}")
+        end = source.index('        with Path(os.environ["GITHUB_OUTPUT"])', start)
+        budget = compile(textwrap.dedent(source[start:end]),
+                         "workflow-preflight-budget", "exec")
+        policy = self.policy()
+        policy["linkdelta"]["wall_seconds"] = 16200
+        policy["jobs"]["linkdelta"]["timeout_minutes"] = 320
+        namespace = {"policy": policy}
+        exec(budget, namespace)
+        self.assertEqual(namespace["timeouts"]["linkdelta"], 320)
+        policy["linkdelta"]["wall_seconds"] += 1
+        with self.assertRaisesRegex(RuntimeError, "job budget.*linkdelta"):
+            exec(budget, {"policy": policy})
+        policy["linkdelta"]["wall_seconds"] = 16200
+        policy["base"]["main_wall_seconds"] += 60
+        with self.assertRaisesRegex(RuntimeError, "base needs a strict margin"):
+            exec(budget, {"policy": policy})
+
+    def run_preflight(self, steps):
+        source = (Path(__file__).parents[3]
+                  / ".github/workflows/storage-checks.yml").read_text()
+        start = source.index("        python3.12 -B -c '")
+        start = source.index("\n", start) + 1
+        end = source.index("\n        ' 2>&1", start)
+        code = compile(textwrap.dedent(source[start:end]),
+                       "workflow-preflight", "exec")
+        raw = (Path(__file__).parent / "run-policy.json").read_bytes()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "output"
+            environment = {
+                "GITHUB_WORKSPACE": str(Path(__file__).parents[3]),
+                "GITHUB_SHA": "a" * 40, "GITHUB_RUN_ATTEMPT": "1",
+                "GITHUB_EVENT_NAME": "workflow_dispatch",
+                "GITHUB_OUTPUT": str(output), "WORK": temporary,
+                "GITHUB_RUN_ID": "123", "GITHUB_ACTOR": "fixture",
+                "REQUEST_APPROVAL": "fixture-only",
+                "REQUEST_COMMIT": "a" * 40,
+                "REQUEST_POLICY": hashlib.sha256(raw).hexdigest(),
+                "REQUEST_RELEASE": "storage-fixtures-v1",
+                "REQUEST_STEPS": steps, "REQUEST_C_VARIANT": "plain",
+            }
+            with (patch.dict(os.environ, environment),
+                  patch("pathlib.Path.read_bytes", return_value=raw),
+                  patch("subprocess.check_output", return_value="a" * 40 + "\n")):
+                exec(code, {})
+            return dict((name, json.loads(value)) for name, value in
+                        (line.split("=", 1) for line in
+                         output.read_text().splitlines()))
+
+    def test_check4_only_has_two_tiers_and_two_parallel_slots(self):
+        output = self.run_preflight("check4")
+        self.assertEqual(output["measurement_jobs"], {
+            "base": [], "linkdelta": True, "vector": False})
+        self.assertEqual(output["linkdelta_jobs"], {
+            "tiers": ["tier1", "tier10"], "max_parallel": 2})
+        self.assertEqual(output["timeouts"]["linkdelta"], 320)
+
+    def test_first_d12_batch_leaves_one_parallel_linkdelta_slot(self):
+        output = self.run_preflight("check4,check1-plain,check2")
+        self.assertEqual(output["measurement_jobs"], {
+            "base": ["check2", "check1-plain"],
+            "linkdelta": True, "vector": False})
+        self.assertEqual(output["linkdelta_jobs"], {
+            "tiers": ["tier1", "tier10"], "max_parallel": 1})
+        self.assertEqual(output["timeouts"]["linkdelta"], 320)
+
+    def test_non_check4_batches_keep_their_jobs_and_timeouts(self):
+        for steps in ("bytes", "check1-side",
+                      "check5-tier1,check5-tier10,check5-tier100"):
+            with self.subTest(steps=steps):
+                output = self.run_preflight(steps)
+                self.assertEqual(output["measurement_jobs"], {
+                    "base": steps.split(","), "linkdelta": False,
+                    "vector": False})
+                self.assertEqual(output["linkdelta_jobs"], {
+                    "tiers": [], "max_parallel": 1})
+                self.assertEqual(output["timeouts"], {
+                    "base": 350, "linkdelta": 320, "vector": 40})
+
+    def test_approved_policy_values_and_contract_hashes(self):
+        policy = self.policy()
+        self.assertEqual(policy["linkdelta"]["query_repeats"], 12)
+        self.assertEqual(policy["linkdelta"]["delta_sizes"], [1, 2, 4, 8])
+        self.assertEqual(policy["linkdelta"]["wall_seconds"], 16200)
+        self.assertEqual(policy["jobs"]["linkdelta"], {
+            "timeout_minutes": 320, "setup_seconds": 1200,
+            "cleanup_upload_seconds": 1200})
+        self.assertEqual(policy["contract"]["plan_sha256"],
+                         "4c851d2451417303b5fe6191058c4ae3909053833d5ae820bd45409946d882dc")
+        self.assertEqual(policy["contract"]["actions_sha256"],
+                         "0f572f0f03b38f1dbc4b1d0ac3904324fc96c90447265893335ab7ab4458704e")
+
+    def test_each_matrix_job_generates_only_its_tier_config(self):
+        source = (Path(__file__).parents[3]
+                  / ".github/workflows/storage-checks.yml").read_text()
+        start = source.index('        elif role == "linkdelta":')
+        end = source.index('        elif role == "vector":', start)
+        branch = ast.parse(textwrap.dedent(source[start:end])
+                           .replace("elif ", "if ", 1))
+        loop = next(node for node in branch.body[0].body
+                    if isinstance(node, ast.For))
+        code = compile(ast.Module(body=[loop], type_ignores=[]),
+                       "workflow-tier-config", "exec")
+        spec = self.policy()["linkdelta"]
+        for item in spec["tiers"]:
+            with self.subTest(tier=item["tier"]):
+                writes = []
+                namespace = {
+                    "os": os, "spec": spec, "work": Path("/work"),
+                    "source": Path("/source"), "approval": Path("/approval"),
+                    "common": {"source_revision": "a" * 40},
+                    "sha256": lambda path: "b" * 64,
+                    "write_json": lambda path, value: writes.append((path, value)),
+                    "linkdelta_config_step": linkdelta_config_step,
+                    "invocations": [],
+                }
+                with patch.dict(os.environ, {"CHECK_STEP": "check4",
+                                             "CHECK_TIER": item["tier"]}):
+                    exec(code, namespace)
+                self.assertEqual(len(writes), 2)
+                config = writes[0][1]
+                self.assertEqual(config["data"],
+                                 "/work/preparation/fetch/data/" + item["tier"])
+                self.assertEqual(config["delta_repo"], item["delta_repo"])
+                self.assertEqual(config["query_repeats"], 12)
+                self.assertEqual(config["delta_sizes"], [1, 2, 4, 8])
+                self.assertEqual(config["wall_seconds"], 16200)
+                self.assertEqual([tier for tier, _ in namespace["invocations"]],
+                                 [item["tier"]])
+
+    def test_matrix_and_artifact_bindings_keep_base_names_unchanged(self):
+        source = (Path(__file__).parents[3]
+                  / ".github/workflows/storage-checks.yml").read_text()
+        base = source.split("\n  base:\n", 1)[1].split("    steps:", 1)[0]
+        linkdelta = source.split("\n  linkdelta:\n", 1)[1]
+        self.assertIn("CHECK_ARTIFACT: ${{ matrix.step }}", base)
+        self.assertIn("CHECK_TIER: ${{ matrix.tier }}", linkdelta)
+        self.assertIn("CHECK_ARTIFACT: check4-${{ matrix.tier }}", linkdelta)
+        self.assertIn("max-parallel: ${{ fromJSON(needs.tests.outputs."
+                      "linkdelta_jobs).max_parallel }}", linkdelta)
+        self.assertIn("tier: ${{ fromJSON(needs.tests.outputs."
+                      "linkdelta_jobs).tiers }}", linkdelta)
+        templates = [line.strip().removeprefix("name: ") for line in
+                     source.splitlines() if "name: storage-checks-" in line
+                     and "env.CHECK_ARTIFACT" in line]
+        self.assertEqual(len(templates), 2)
+        for template, prefix in zip(templates, ("storage-checks-freeze-",
+                                                "storage-checks-")):
+            def render(artifact):
+                return (template.replace("${{ env.CHECK_ARTIFACT }}", artifact)
+                        .replace("${{ github.run_id }}", "123")
+                        .replace("${{ github.run_attempt }}", "1"))
+            for step in STEPS:
+                if step != "check4":
+                    self.assertEqual(render(step), prefix + step + "-123-1")
+            self.assertEqual([render("check4-" + tier) for tier in
+                              ("tier1", "tier10")], [
+                                  prefix + "check4-tier1-123-1",
+                                  prefix + "check4-tier10-123-1"])
 
 
 class MeasurementAdmissionTests(unittest.TestCase):

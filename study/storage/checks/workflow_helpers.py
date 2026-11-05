@@ -130,6 +130,15 @@ def measurement_jobs(steps: Sequence[str]) -> dict[str, object]:
             "linkdelta": "check4" in chosen, "vector": False}
 
 
+def linkdelta_jobs(policy: Mapping[str, object],
+                   jobs: Mapping[str, object]) -> dict[str, object]:
+    if not jobs["linkdelta"]:
+        return {"tiers": [], "max_parallel": 1}
+    tiers = [item["tier"] for item in policy["linkdelta"]["tiers"]]
+    available = max(1, policy["venue"]["max_parallel"] - len(jobs["base"]))
+    return {"tiers": tiers, "max_parallel": min(len(tiers), available)}
+
+
 def linkdelta_config_step(step: str) -> dict[str, str]:
     if step != "check4":
         raise RuntimeError("only check4 is an approved linkdelta step")
