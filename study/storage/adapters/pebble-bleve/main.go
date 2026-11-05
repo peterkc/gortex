@@ -345,7 +345,8 @@ func (backend) Build(ctx context.Context, d dataset.Dataset, path string) (adapt
 	if e != nil {
 		return ref, stats, e
 	}
-	manifest := sealManifest{Repo: d.Repo, Engine: engineVersion, Layout: "dense-local-id/v2"}
+	// v3: 'A' keys hold logical-ID ordinals.
+	manifest := sealManifest{Repo: d.Repo, Engine: engineVersion, Layout: "dense-local-id/v3"}
 	var dirs []string
 	e = filepath.WalkDir(path, func(p string, de fs.DirEntry, err error) error {
 		if err != nil {
@@ -434,7 +435,10 @@ func (backend) Open(ctx context.Context, path string, ref adapter.SegmentRef) (a
 	if e = json.Unmarshal(b, &manifest); e != nil {
 		return nil, e
 	}
-	if manifest.Repo != ref.Repo || manifest.Engine != engineVersion || manifest.Layout != "dense-local-id/v2" {
+	if manifest.Layout != "dense-local-id/v3" {
+		return nil, fmt.Errorf("seal layout mismatch")
+	}
+	if manifest.Repo != ref.Repo || manifest.Engine != engineVersion {
 		return nil, fmt.Errorf("seal identity mismatch")
 	}
 	for _, f := range manifest.Files {

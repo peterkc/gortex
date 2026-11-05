@@ -31,7 +31,9 @@ import (
 )
 
 const cacheBytes int64 = 256 << 20
-const format = "gxstudy-parquet-base/v2"
+
+// v3: the offset header records the entry width.
+const format = "gxstudy-parquet-base/v3"
 
 type Backend struct{ SideIndex bool }
 
@@ -593,7 +595,10 @@ func (b Backend) Open(ctx context.Context, dir string, ref adapter.SegmentRef) (
 	if err = json.Unmarshal(raw, &manifest); err != nil {
 		return nil, err
 	}
-	if manifest.Format != format || manifest.Repo != ref.Repo || manifest.SideIndex != b.SideIndex {
+	if manifest.Format != format {
+		return nil, fmt.Errorf("seal format mismatch")
+	}
+	if manifest.Repo != ref.Repo || manifest.SideIndex != b.SideIndex {
 		return nil, fmt.Errorf("seal identity mismatch")
 	}
 	seen := map[string]bool{}

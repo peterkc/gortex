@@ -133,7 +133,7 @@ inventories. Shared seals count as graph metadata. The three categories sum to
 all artifact bytes. No compressed SST prefix share is estimated or subtracted.
 The C fallback counts both its Parquet lookup copies and its Pebble side store.
 B's unused K/kind index is omitted; Kind remains in every full node record.
-This B is `dense-local-id/v2`, single-decode and WAL-disabled, not the older
+This B is `dense-local-id/v3`, single-decode and WAL-disabled, not the older
 JSON/string-key Check 5 B or single-store/two-pass options-study B. Historical restoration hashes in
 `adapters/RECOVERY.md` describe that older version, not these Check 5 numbers.
 B still Flushes and Closes without a forced final full-range compaction. Its

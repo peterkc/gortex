@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -58,6 +59,13 @@ func TestOperationsAndFreshOpen(t *testing.T) {
 	ref, stats, e := b.Build(ctx, d, filepath.Join(t.TempDir(), "segment"))
 	if e != nil {
 		t.Fatal(e)
+	}
+	var manifest sealManifest
+	if e = dataset.ReadJSON(filepath.Join(ref.Path, "seal.json"), &manifest); e != nil {
+		t.Fatal(e)
+	}
+	if manifest.Layout != "dense-local-id/v3" {
+		t.Fatal("unpinned seal layout", manifest.Layout)
 	}
 	t.Logf("build mode=%s bytes=%d", stats.Mode, stats.Bytes)
 	before := artifactHashes(t, ref.Path)
@@ -178,6 +186,24 @@ func TestOperationsAndFreshOpen(t *testing.T) {
 	if v, e := b.Open(ctx, bad.Path, bad); e == nil {
 		v.Close()
 		t.Fatal("bad ref accepted")
+	}
+	manifest.Layout = "dense-local-id/v2"
+	if e = dataset.WriteJSON(filepath.Join(ref.Path, "seal.json"), manifest); e != nil {
+		t.Fatal(e)
+	}
+	oldRef := ref
+	oldRef.Digest, e = dataset.Hash(filepath.Join(ref.Path, "seal.json"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	oldRef.Version = oldRef.Digest
+	opened, e := b.Open(ctx, oldRef.Path, oldRef)
+	if opened != nil {
+		opened.Close()
+		t.Fatal("old layout served a reader")
+	}
+	if e == nil || !strings.Contains(e.Error(), "layout") {
+		t.Fatal("missing old-layout refusal", e)
 	}
 }
 func TestFreshProcessHelper(t *testing.T) {

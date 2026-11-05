@@ -1118,7 +1118,7 @@ def run(config, config_path):
             "cold_independent_keys": False,
             "combined_name_group": "reported only; directions use hit/miss"},
         "reference_b": {
-            "layout": "dense-local-id/v2", "neutral_decode_passes": 1,
+            "layout": "dense-local-id/v3", "neutral_decode_passes": 1,
             "wal": "disabled for private bulk build; flush/close/seal sync",
             "kind_index": "omitted; unused by every Reader",
             "compaction": "flush/close only, no forced final compaction; "

@@ -489,9 +489,6 @@ func writeOffsets(ctx context.Context, dir, name string, count, kinds, rows uint
 	return writeOffsetsWidth(ctx, dir, name, count, kinds, offsetWidth(rows))
 }
 func writeOffsetsWidth(ctx context.Context, dir, name string, count, kinds, width uint64) (err error) {
-	if width != 4 && width != 8 {
-		return fmt.Errorf("invalid offset directory width: %s", name)
-	}
 	cache := newBlockCache(4 << 20)
 	reader, file, err := openRows[rowRange](filepath.Join(dir, name+".ranges.parquet"), cache)
 	if err != nil {

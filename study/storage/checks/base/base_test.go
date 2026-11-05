@@ -507,6 +507,9 @@ func TestOpenRejectsInconsistentVerificationRows(t *testing.T) {
 	if err := json.Unmarshal(raw, &manifest); err != nil {
 		t.Fatal(err)
 	}
+	if manifest.Format != "gxstudy-parquet-base/v3" {
+		t.Fatal("unpinned seal format", manifest.Format)
+	}
 	witness := manifest.Verification["nodes"]
 	witness.Rows++
 	manifest.Verification["nodes"] = witness
@@ -523,6 +526,21 @@ func TestOpenRejectsInconsistentVerificationRows(t *testing.T) {
 	if opened, err := (Backend{}).Open(context.Background(), ref.Path, ref); err == nil {
 		opened.Close()
 		t.Fatal("inconsistent row witness accepted")
+	}
+	witness.Rows--
+	manifest.Verification["nodes"] = witness
+	manifest.Format = "gxstudy-parquet-base/v2"
+	if err = dataset.WriteJSON(path, manifest); err != nil {
+		t.Fatal(err)
+	}
+	ref = resealFixture(t, ref)
+	opened, err := (Backend{}).Open(context.Background(), ref.Path, ref)
+	if opened != nil {
+		opened.Close()
+		t.Fatal("old format served a reader")
+	}
+	if err == nil || !strings.Contains(err.Error(), "format") {
+		t.Fatal("missing old-format refusal", err)
 	}
 }
 
@@ -1414,17 +1432,33 @@ func TestOffsetWidthAndHeaderRefusals(t *testing.T) {
 		width   uint64
 		size    int
 		message string
-	}{{"bad-width", 3, 33, "invalid offset directory width"}, {"wrong-size", 8, 36, "truncated offset directory"}, {"truncated", 4, 35, "truncated offset directory"}} {
+	}{{"bad-width", 3, 33, "invalid offset directory width"}, {"wrong-size", 8, 36, "truncated offset directory"}, {"truncated", 4, 35, "truncated offset directory"},
+		{"header-count", 4, 36, "invalid offset directory header"}, {"header-kinds", 4, 36, "invalid offset directory header"},
+		{"count-overflow", 4, 24, "truncated offset directory"}, {"size-overflow", 8, 24, "truncated offset directory"}} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			raw := make([]byte, tc.size)
-			binary.LittleEndian.PutUint64(raw[:8], 2)
-			binary.LittleEndian.PutUint64(raw[8:16], 1)
+			count, kinds := uint64(2), uint64(1)
+			if tc.name == "count-overflow" {
+				count = math.MaxUint64
+			}
+			if tc.name == "size-overflow" {
+				count = math.MaxInt64
+				kinds = 2
+			}
+			binary.LittleEndian.PutUint64(raw[:8], count)
+			binary.LittleEndian.PutUint64(raw[8:16], kinds)
 			binary.LittleEndian.PutUint64(raw[16:24], tc.width)
+			if tc.name == "header-count" {
+				binary.LittleEndian.PutUint64(raw[:8], 3)
+			}
+			if tc.name == "header-kinds" {
+				binary.LittleEndian.PutUint64(raw[8:16], 2)
+			}
 			if err := os.WriteFile(filepath.Join(dir, "out.offsets"), raw, 0600); err != nil {
 				t.Fatal(err)
 			}
-			directory, err := openOffsets(dir, "out", 2, 1)
+			directory, err := openOffsets(dir, "out", count, kinds)
 			if directory.file != nil {
 				directory.file.Close()
 				t.Fatal("bad directory served")
@@ -1536,5 +1570,31 @@ func TestOffsetWriterPreservesWideSealedCounts(t *testing.T) {
 	}
 	if err = writeOffsetsWidth(context.Background(), dir, "out", 1, 1, 4); err == nil || !strings.Contains(err.Error(), "exceeds directory width") {
 		t.Fatal("overflowing forced width accepted", err)
+	}
+}
+
+func TestOldFormatRefusesBeforeArtifactReads(t *testing.T) {
+	for _, side := range []bool{false, true} {
+		t.Run(fmt.Sprint(side), func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "seal.json")
+			manifest := seal{Format: "gxstudy-parquet-base/v2", Repo: "old", SideIndex: side}
+			if err := dataset.WriteJSON(path, manifest); err != nil {
+				t.Fatal(err)
+			}
+			hash, err := dataset.Hash(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref := adapter.SegmentRef{Repo: "old", Path: dir, Version: hash, Digest: hash}
+			opened, err := (Backend{SideIndex: side}).Open(context.Background(), dir, ref)
+			if opened != nil {
+				opened.Close()
+				t.Fatal("old format served a reader")
+			}
+			if err == nil || err.Error() != "seal format mismatch" {
+				t.Fatal("old format reached artifact validation", err)
+			}
+		})
 	}
 }
