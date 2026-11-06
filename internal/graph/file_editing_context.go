@@ -1,5 +1,7 @@
 package graph
 
+import "sort"
+
 // FileEditingContextOf computes the FileEditingContext projection through r's
 // own Reader methods: the file node, the symbols defined in filePath, the file
 // node's import out-edges, and the 1-hop callers / callees (via EdgeCalls) of
@@ -9,7 +11,7 @@ package graph
 //
 // Every read is a batched Reader call, so a reader wrapper that narrows
 // adjacency gets the same fixed round-trip count with its own edge semantics.
-func FileEditingContextOf(r Reader, filePath string, kinds []NodeKind) *FileEditingContextResult {
+func FileEditingContextOf(r FileEditingContextRows, filePath string, kinds []NodeKind) *FileEditingContextResult {
 	if filePath == "" {
 		return nil
 	}
@@ -86,6 +88,10 @@ func FileEditingContextOf(r Reader, filePath string, kinds []NodeKind) *FileEdit
 	for id := range calleeIDSet {
 		calleeIDs = append(calleeIDs, id)
 	}
+	// Consumers cap these projections. Order the complete identity sets before
+	// hydration so map iteration cannot change either the sample or its etag.
+	sort.Strings(callerIDs)
+	sort.Strings(calleeIDs)
 	callerNodes := r.GetNodesByIDs(callerIDs)
 	calleeNodes := r.GetNodesByIDs(calleeIDs)
 	for _, id := range callerIDs {

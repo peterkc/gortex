@@ -14,43 +14,70 @@ import (
 )
 
 type runOptions struct {
-	Binary           string
-	Manifest         string
-	Scratch          string
-	Output           string
-	GitSHA           string
-	Profile          string
-	Host             string
-	Scenario         string
-	Agents           int
-	Editors          int
-	Worktrees        int
-	Seed             int64
-	Duration         time.Duration
-	Deadline         time.Duration
-	WarmTimeout      time.Duration
-	StopTimeout      time.Duration
-	CPUProfile       time.Duration
-	KeepState        bool
-	SweepRepetitions int
-	SweepBudget      time.Duration
-	pairedDriver     func(context.Context, *privateRun, []*socketClient, []*socketClient, *Phase) error
+	RetainReadSourceFailures bool
+	NightlySeed              string
+	EditACKMode              string
+	Binary                   string
+	Manifest                 string
+	Scratch                  string
+	Output                   string
+	GitSHA                   string
+	Profile                  string
+	Host                     string
+	Scenario                 string
+	Agents                   int
+	Editors                  int
+	Worktrees                int
+	Seed                     int64
+	Duration                 time.Duration
+	PRSmokeDrain             time.Duration
+	PRSmokeDrainVersion      int
+	Deadline                 time.Duration
+	WarmTimeout              time.Duration
+	StopTimeout              time.Duration
+	CPUProfile               time.Duration
+	Gauges                   bool
+	HeapProfiles             bool
+	WorktreeSteps            []int
+	KeepState                bool
+	SweepRepetitions         int
+	SweepBudget              time.Duration
+	EditMean                 time.Duration
+	EditCount                int
+	SearchReadbackAcceptance bool
+	EditGateModes            bool
+	EditGateSeed             string
+	EditRepos                int
+	EditProbeRole            string
+	editProbeBaseline        bool
+	Discovery                discoveryOptions
+	Startup                  startupOptions
+	pairedDriver             func(context.Context, *privateRun, []*socketClient, []*socketClient, *Phase) error
+	smokeState               *privateRun // only the fixed smoke entry lends its freshly owned store
+	smokeMarkers             []string
 }
 
 func parseRun(args []string) (runOptions, error) {
 	var o runOptions
 	f := flag.NewFlagSet("load run", flag.ContinueOnError)
 	bindRunFlags(f, &o)
+	f.BoolVar(&o.RetainReadSourceFailures, "retain-read-source-failures", false, "opt-in private bounded raw wire evidence for failed read.source attempts")
+	bindMemoryFlags(f, &o)
 	if err := f.Parse(args); err != nil {
 		return o, err
 	}
 	if f.NArg() != 0 {
 		return o, errors.New("unexpected positional run arguments")
 	}
-	return o, validateRunOptions(o)
+	if o.EditRepos < 1 {
+		return o, errors.New("--edit-repos must be positive")
+	}
+	o.editProbeBaseline = o.EditProbeRole == "baseline"
+	return o, errors.Join(validateRunOptions(o), validateMemoryOptions(o))
 }
 
 func bindRunFlags(f *flag.FlagSet, o *runOptions) {
+	f.StringVar(&o.EditACKMode, "edit-ack", "", "owned daemon edit.ack policy: local or full; omit to preserve the full default")
 	f.StringVar(&o.Binary, "binary", "", "Gortex binary (never an existing daemon)")
 	f.StringVar(&o.Manifest, "manifest", "", "pinned JSON corpus manifest; source roots are read-only")
 	f.StringVar(&o.Scratch, "scratch", "", "artifact/private-clone parent outside all source roots")
@@ -58,12 +85,14 @@ func bindRunFlags(f *flag.FlagSet, o *runOptions) {
 	f.StringVar(&o.GitSHA, "git-sha", "", "full binary revision if absent from Go build metadata")
 	f.StringVar(&o.Profile, "profile", "agent", "agent (default) or explicit saturation")
 	f.StringVar(&o.Host, "host", "native", "native, reference, or floor (validated, never provisioned)")
-	f.StringVar(&o.Scenario, "scenario", "read", "read, edit, many, many-edit, worktrees, cold, restart, sweep, all")
-	f.IntVar(&o.Agents, "agents", 4, "pure reading agents (may be 0 only for edit/many-edit)")
+	f.StringVar(&o.Scenario, "scenario", "read", "read, edit, many, many-edit, worktrees, worktree-discovery, cold, restart, sweep, idle-stop, edit-and-probe, all")
+	f.IntVar(&o.Agents, "agents", 4, "pure reading agents (may be 0 for edit, many-edit, or edit-and-probe; idle-stop requires 0)")
 	f.IntVar(&o.Editors, "edit-agents", 4, "combined editing/readback/reading agents in edit scenarios, in addition to pure readers")
 	f.IntVar(&o.Worktrees, "worktrees", 4, "linked worktrees in addition to primary")
 	f.Int64Var(&o.Seed, "seed", 1, "reproducible per-agent request/think plan seed")
 	f.DurationVar(&o.Duration, "duration", time.Minute, "measured workload phase duration")
+	f.DurationVar(&o.PRSmokeDrain, "pr-smoke-drain", 0, "opt-in standalone PR drain budget after the offered duration; unsupported for paired runs")
+	f.IntVar(&o.PRSmokeDrainVersion, "pr-smoke-drain-version", 1, "PR drain identity: 1 for reads, explicit 2 for edits and their visibility probes")
 	f.DurationVar(&o.Deadline, "deadline", 120*time.Second, "product call/visibility deadline, independently of phase clipping")
 	f.DurationVar(&o.WarmTimeout, "warm-timeout", 30*time.Minute, "startup/enrichment/public analysis gate budget")
 	f.DurationVar(&o.StopTimeout, "stop-timeout", 30*time.Second, "graceful owned-daemon shutdown budget before force kill")
@@ -71,17 +100,82 @@ func bindRunFlags(f *flag.FlagSet, o *runOptions) {
 	f.BoolVar(&o.KeepState, "keep-state", false, "retain private corpus/store for native diagnostics only (default removes completed scenario state)")
 	f.IntVar(&o.SweepRepetitions, "sweep-repetitions", 15, "samples per benchmark operation (smoke may explicitly use 1)")
 	f.DurationVar(&o.SweepBudget, "sweep-duration", 10*time.Minute, "separate total budget for the repeated paced sweep")
+	bindStartupFlags(f, &o.Startup)
+	f.DurationVar(&o.EditMean, "edit-mean", 0, "edit-and-probe per-editor Poisson mean; 0 preserves the 15s default")
+	f.IntVar(&o.EditRepos, "edit-repos", 1, "edit-and-probe: one repository (default), or exactly six distinct pinned repositories")
+	bindDiscoveryFlags(f, &o.Discovery)
+	f.IntVar(&o.EditCount, "edit-count", 100, "edit-and-probe: 100 logical edits, or explicit 1-edit diagnostic")
+	f.BoolVar(&o.SearchReadbackAcceptance, "search-readback-acceptance", false, "explicit search acceptance: 1000 immediate same-session search witnesses at 1, 4 or 8 editors")
+	f.BoolVar(&o.EditGateModes, "edit-gate-modes", false, "edit-and-probe gate: rotate five probe surfaces over 100 total edits; JSON ACKs remain unchanged")
+	f.StringVar(&o.NightlySeed, "nightly-workload-seed", "", "opt-in measured one-second search delay: search-delay-v1 (edit4), search-delay-read16-v1 (read16)")
+	f.StringVar(&o.EditGateSeed, "edit-gate-seed", "", "explicit gate-only fault: ack-wait or closed-read-gate; requires a seed-tagged binary")
+	f.StringVar(&o.EditProbeRole, "edit-probe-role", "", "edit-and-probe standalone role: candidate (default; phase accounting required) or baseline (absent phase timings reported unavailable)")
+}
+
+// The explicit search profile measures the first read after a local ACK.
+// Use the same effective policy for owned startup and workload identity.
+func (o runOptions) editACKPolicy() string {
+	if o.SearchReadbackAcceptance {
+		return "local"
+	}
+	return o.EditACKMode
 }
 
 func validateRunOptions(o runOptions) error {
+	if err := validateNightlyWorkloadSeed(o); err != nil {
+		return err
+	}
+	if o.EditACKMode != "" && o.EditACKMode != "local" && o.EditACKMode != "full" {
+		return errors.New("--edit-ack must be local or full when explicitly set")
+	}
+	if o.SearchReadbackAcceptance && o.EditACKMode == "full" {
+		return errors.New("--search-readback-acceptance requires local ACKs; --edit-ack full conflicts with that profile")
+	}
+	if o.SearchReadbackAcceptance && (o.Scenario != editProbeScenario || o.EditCount != 1000 || o.Editors != 1 && o.Editors != 4 && o.Editors != 8 || o.Agents != 0 || o.Worktrees != 0 || o.EditRepos != 1) {
+		return errors.New("--search-readback-acceptance requires edit-and-probe, 1000 edits, 1/4/8 editors, one primary repository and no pure readers or worktrees")
+	}
+	if o.EditGateSeed != "" && (!o.EditGateModes || o.EditGateSeed != "ack-wait" && o.EditGateSeed != "closed-read-gate") {
+		return errors.New("--edit-gate-seed requires --edit-gate-modes and ack-wait or closed-read-gate")
+	}
+	if o.EditGateModes && (o.Scenario != editProbeScenario || o.EditCount != 100 || o.Agents != 0) {
+		return errors.New("--edit-gate-modes requires edit-and-probe, 100 total edits and no extra pure readers")
+	}
+	if o.EditMean < 0 || o.EditMean > 0 && o.Scenario != editProbeScenario {
+		return errors.New("--edit-mean requires edit-and-probe and a nonnegative duration; 0 uses the 15s default")
+	}
+	if o.EditRepos < 0 || o.EditRepos > 1 && (o.EditRepos != 6 || o.Scenario != editProbeScenario) {
+		return errors.New("--edit-repos selects one repository or exactly six for edit-and-probe only")
+	}
+
+	if err := validatePRSmokeDrain(o); err != nil {
+		return err
+	}
 	if o.Binary == "" || o.Manifest == "" || o.Scratch == "" || o.Worktrees < 0 || o.Duration <= 0 || o.Deadline <= 0 || o.WarmTimeout <= 0 || o.StopTimeout <= 0 || o.CPUProfile < 0 || o.CPUProfile > o.Duration {
 		return errors.New("run requires --binary, --manifest, --scratch and nonnegative counts and positive budgets")
 	}
 	if err := validateAgentCounts(o.Scenario, o.Agents, o.Editors); err != nil {
 		return err
 	}
+	if err := o.Discovery.validate(o.Scenario, o.Worktrees); err != nil {
+		return err
+	}
+	if err := o.Startup.validate(o.Scenario); err != nil {
+		return err
+	}
+	if o.Scenario == "idle-stop" && (o.Worktrees != 0 || o.CPUProfile != 0 || o.Profile != "agent") {
+		return errors.New("idle-stop requires an agent-profile standalone run with no worktrees or CPU profiling")
+	}
 	if _, err := parseProfile(o.Profile); err != nil {
 		return err
+	}
+	if o.Scenario == editProbeScenario && (o.Profile != "agent" || o.Agents > editProbeMaxReaders || o.Editors < 1 || o.Editors > editProbeMaxEditors || o.Worktrees > 15 || o.CPUProfile != 0 || !o.SearchReadbackAcceptance && o.EditCount != 1 && o.EditCount != 100 || o.EditCount == 1 && o.Editors != 1) {
+		return fmt.Errorf("edit-and-probe requires --profile agent --agents 0..%d --edit-agents 1..%d on one repository or explicit routed checkouts, at most 15 linked worktrees, no CPU profile, and --edit-count 100 (or an explicit 1-edit, 1-editor diagnostic)", editProbeMaxReaders, editProbeMaxEditors)
+	}
+	if o.Scenario == editProbeScenario && (o.EditRepos > 1 || o.Worktrees > 0) && (o.EditRepos > 1 && o.Worktrees > 0 || o.Agents != 0 || o.EditCount != 100 || o.Editors < max(o.EditRepos, o.Worktrees+1)) {
+		return errors.New("routed edit-and-probe selects six repositories or linked checkouts, 100 edits, no pure readers and at least one fixed editor per checkout")
+	}
+	if o.EditProbeRole != "" && (o.Scenario != editProbeScenario || o.EditProbeRole != "candidate" && o.EditProbeRole != "baseline") {
+		return errors.New("--edit-probe-role is candidate or baseline, for edit-and-probe only")
 	}
 	if o.SweepRepetitions < 1 || o.SweepBudget <= 0 {
 		return errors.New("sweep repetitions and duration must be positive")
@@ -93,11 +187,11 @@ func validateRunOptions(o runOptions) error {
 		return errors.New("--cpu-profile requires a whole number of seconds")
 	}
 	activeAgents := o.Agents
-	if o.Scenario == "edit" || o.Scenario == "many-edit" || o.Scenario == "all" {
+	if o.Scenario == "edit" || o.Scenario == "many-edit" || o.Scenario == "all" || o.Scenario == editProbeScenario {
 		activeAgents += o.Editors
 	}
 	activeWorktrees := 1
-	if o.Scenario == "worktrees" || o.Scenario == "all" {
+	if o.Scenario == "worktrees" || o.Scenario == "all" || o.Scenario == editProbeScenario && o.Worktrees > 0 {
 		activeWorktrees += o.Worktrees
 	}
 	if o.Host == "floor" && (activeAgents > 4 || activeWorktrees > 4) {
@@ -110,7 +204,22 @@ func validateRunOptions(o runOptions) error {
 }
 
 func selectedScenarios(o runOptions) ([]string, error) {
+	if o.Scenario == checkoutDiscoveryScenario {
+		if o.Agents+o.Editors < 2 || o.Host == "floor" {
+			return nil, errors.New("worktree-discovery requires at least two reading/editing sessions and a native or reference host")
+		}
+		return []string{checkoutDiscoveryScenario}, nil
+	}
+	if o.Scenario == "idle-stop" {
+		return []string{"idle-stop"}, nil
+	}
 	all := []string{"read", "edit", "many", "many-edit", "worktrees", "cold", "restart", "sweep"}
+	if o.Scenario == startupScenario {
+		return []string{startupScenario}, nil
+	}
+	if o.Scenario == editProbeScenario {
+		return []string{editProbeScenario}, nil
+	}
 	if o.Scenario == "all" {
 		if o.Host == "floor" {
 			return []string{"read", "edit", "worktrees", "cold", "restart", "sweep"}, nil
@@ -159,12 +268,16 @@ func runCommand(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	ctx = withReadSourceFailureEvidence(ctx, o.RetainReadSourceFailures)
 	corpora, err := loadManifest(o.Manifest)
 	if err != nil {
 		return err
 	}
 	if err := validateOutputRoots(corpora, o.Scratch, o.Output); err != nil {
 		return err
+	}
+	if o.Discovery.Prepare != "" {
+		return prepareDiscoveryState(ctx, o, corpora)
 	}
 	sha, err := binaryRevision(o.Binary, o.GitSHA)
 	if err != nil {
@@ -212,6 +325,9 @@ func runCommand(ctx context.Context, args []string) error {
 
 func newRunReport(o runOptions, corpora []Corpus, sha string, host Host, outputRoot string) (Report, error) {
 	report := Report{SchemaVersion: reportVersion, RunID: filepath.Base(outputRoot), GitSHA: sha, Binary: o.Binary, Started: time.Now().UTC(), Profile: o.Profile, Seed: o.Seed, Host: host, Corpus: corpora, Metrics: make(map[string]Metric), Artifacts: map[string]string{"root": outputRoot}, Crashes: make(map[string]int)}
+	if o.RetainReadSourceFailures {
+		report.FailureCapture = &readSourceFailureConfig{MaxRecords: readSourceFailureRecords, MaxBytes: readSourceFailureBytes, Encoding: "base64"}
+	}
 	for _, corpus := range corpora {
 		ops, err := readingPlan(corpus)
 		if o.Scenario == "sweep" {
@@ -222,8 +338,26 @@ func newRunReport(o runOptions, corpora []Corpus, sha string, host Host, outputR
 		}
 		report.Workload.Operations = append(report.Workload.Operations, ops...)
 	}
+	if o.Scenario == editProbeScenario {
+		plan, err := planEditProbeRoutes(corpora, o)
+		if err != nil {
+			return report, err
+		}
+		report.Workload.EditProbe = &plan
+		report.Workload.Operations, err = editProbeRouteOperations(plan, corpora)
+		if err != nil {
+			return report, err
+		}
+		report.Workload.SessionModel = plan.SessionModel
+	}
+	report.NightlySeed = o.NightlySeed
+	report.Workload.EditGateSeed = o.EditGateSeed
+	report.Workload.EditACKMode = o.editACKPolicy()
 	report.Workload.Scenario, report.Workload.Agents, report.Workload.EditAgents, report.Workload.LinkedWorktrees = o.Scenario, o.Agents, o.Editors, o.Worktrees
 	report.Workload.DurationSec, report.Workload.DeadlineSec, report.Workload.Seed, report.Workload.Profile = o.Duration.Seconds(), o.Deadline.Seconds(), o.Seed, o.Profile
+	if o.PRSmokeDrain > 0 {
+		report.Workload.PRSmokeDrain = &PRSmokeDrain{Version: prSmokeDrainVersion(o), OfferedSeconds: o.Duration.Seconds(), MaxDrainSeconds: o.PRSmokeDrain.Seconds()}
+	}
 	report.Workload.CPUProfileSec, report.Workload.WarmTimeoutSec, report.Workload.StopTimeoutSec, report.Workload.KeepState = o.CPUProfile.Seconds(), o.WarmTimeout.Seconds(), o.StopTimeout.Seconds(), o.KeepState
 	report.Workload.SessionModel = "per_agent"
 	report.Workload.SweepRepetitions, report.Workload.SweepBudgetSec = o.SweepRepetitions, o.SweepBudget.Seconds()
@@ -232,6 +366,18 @@ func newRunReport(o runOptions, corpora []Corpus, sha string, host Host, outputR
 	}
 	if o.Scenario == "all" {
 		report.Workload.SessionModel = "per_agent_load_and_per_operation_isolated_sweep"
+	}
+	if report.Workload.EditProbe != nil {
+		report.Workload.SessionModel = report.Workload.EditProbe.SessionModel
+		builds := 1
+		if o.pairedDriver != nil {
+			builds = 2
+		}
+		budget, err := report.Workload.EditProbe.budget(o.Deadline, builds)
+		if err != nil {
+			return report, err
+		}
+		report.Workload.DurationSec = budget.Seconds()
 	}
 	var err error
 	report.RequestPlan, err = hashJSON(report.Workload)
@@ -275,12 +421,19 @@ func finishReport(report *Report, expectedPhases int) error {
 
 func captureReceipt(ctx context.Context, p *privateRun, client *socketClient, phase *Phase) {
 	statusCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	statusStarted := time.Now()
 	status, err := control(statusCtx, p.Socket, "status", nil)
+	statusFinished := time.Now()
 	cancel()
 	if err != nil {
 		phase.Errors = append(phase.Errors, "status receipt: "+err.Error())
 	} else {
 		phase.Status = append(phase.Status, status)
+		pid := 0
+		if p.process != nil && p.process.Process != nil {
+			pid = p.process.Process.Pid
+		}
+		recordStatusCapture(phase, pid, statusStarted, statusFinished)
 	}
 	statsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	stats, err := client.call(statsCtx, "resources/read", map[string]any{"uri": "gortex://stats"})

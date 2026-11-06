@@ -68,6 +68,7 @@ type ProjectConfig struct {
 
 // GlobalConfig is the user-level config at ~/.gortex/config.yaml.
 type GlobalConfig struct {
+	Edit          EditConfig               `mapstructure:"edit" yaml:"edit,omitempty"`
 	Projects      map[string]ProjectConfig `mapstructure:"projects"       yaml:"projects,omitempty"`
 	Repos         []RepoEntry              `mapstructure:"repos"          yaml:"repos,omitempty"`
 	ActiveProject string                   `mapstructure:"active_project" yaml:"active_project,omitempty"`
@@ -347,6 +348,9 @@ func LoadGlobal(configPath ...string) (*GlobalConfig, error) {
 		return nil, fmt.Errorf("parsing global config: %w", err)
 	}
 
+	if _, err := gc.Edit.AckMode(); err != nil {
+		return nil, err
+	}
 	gc.configPath = path
 	return gc, nil
 }
@@ -383,7 +387,7 @@ func saveGlobalConfigLocked(gc *GlobalConfig) error {
 	if err != nil {
 		return fmt.Errorf("marshaling global config: %w", err)
 	}
-	if err := globalConfigWriteFile(path, data, 0644); err != nil {
+	if err := globalConfigWriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("writing global config to %s: %w", path, err)
 	}
 	return nil

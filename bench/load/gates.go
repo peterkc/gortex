@@ -76,6 +76,11 @@ func (p *privateRun) awaitSocket(ctx context.Context) error {
 func (p *privateRun) awaitReady(ctx context.Context, start time.Time, expected []privateRepo) (map[string]json.RawMessage, map[string]Metric, error) {
 	gate := make(map[string]json.RawMessage)
 	metrics := map[string]Metric{"cold_queryable_observed_upper_bound_seconds": unavailable("s", "queryable endpoint not reached"), "cold_enrichment_observed_upper_bound_seconds": unavailable("s", "enrichment endpoint not reached"), "readiness_poll_interval_seconds": measured(.25, "s")}
+	var last readiness
+	observed, lastCovered := false, false
+	summary := func() string {
+		return fmt.Sprintf("probe_observed=%t ready=%t enriched=%t covered=%t tracked=%d", observed, last.Ready, last.Enriched, lastCovered, len(last.TrackedRepos))
+	}
 	for {
 		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		data, err := control(probeCtx, p.Socket, "probe", nil)
@@ -87,6 +92,7 @@ func (p *privateRun) awaitReady(ctx context.Context, start time.Time, expected [
 			}
 			gate["readiness"] = data
 			covered, coverageErr := readyCoverage(state, expected)
+			last, observed, lastCovered = state, true, covered
 			if coverageErr != nil {
 				return gate, metrics, coverageErr
 			}
@@ -103,11 +109,11 @@ func (p *privateRun) awaitReady(ctx context.Context, start time.Time, expected [
 		}
 		select {
 		case <-p.done:
-			return gate, metrics, fmt.Errorf("daemon exited during readiness gate: %v", p.exitErr)
+			return gate, metrics, fmt.Errorf("daemon exited during readiness gate (%s): %v", summary(), p.exitErr)
 		default:
 		}
 		if err := waitContext(ctx, 250*time.Millisecond); err != nil {
-			return gate, metrics, fmt.Errorf("readiness/enrichment gate: %w", err)
+			return gate, metrics, fmt.Errorf("readiness/enrichment gate (%s): %w", summary(), err)
 		}
 	}
 }
@@ -121,7 +127,11 @@ func (p *privateRun) writeBootRepos(worktrees bool) ([]privateRepo, error) {
 	for _, repo := range configured {
 		entries = append(entries, map[string]string{"path": repo.Path, "name": repo.Corpus.Label})
 	}
-	data, err := json.Marshal(map[string]any{"repos": entries})
+	payload := map[string]any{"repos": entries}
+	if p.editACKMode != "" {
+		payload["edit"] = map[string]string{"ack": p.editACKMode}
+	}
+	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}

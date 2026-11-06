@@ -13,6 +13,7 @@ import (
 	"github.com/gofrs/flock"
 
 	"github.com/zzet/gortex/internal/daemon"
+	"github.com/zzet/gortex/internal/platform"
 )
 
 // daemonDecision is the resolved auto-start outcome.
@@ -24,16 +25,19 @@ const (
 	daemonUnavailable                       // autostart off, or spawn failed/timed out
 )
 
+// spawnLockInactivityTimeout is deliberately an inactivity budget, not a
+// total startup budget. The lock winner holds the spawn lock until the
+// detached child's socket is live; a schema migration can legitimately keep
+// that socket closed for longer than a minute. Fresh PID-bound startup state
+// extends this deadline in the same way spawnDetachedDaemon extends its own
+// wait, while a missing/stale heartbeat still releases callers promptly.
+// Tests shorten it only in an isolated helper process; there is no user
+// configuration or environment override for this production budget.
+var spawnLockInactivityTimeout = 60 * time.Second
+
 const (
-	// spawnLockInactivityTimeout is deliberately an inactivity budget, not a
-	// total startup budget. The lock winner holds the spawn lock until the
-	// detached child's socket is live; a schema migration can legitimately keep
-	// that socket closed for longer than a minute. Fresh PID-bound startup state
-	// extends this deadline in the same way spawnDetachedDaemon extends its own
-	// wait, while a missing/stale heartbeat still releases callers promptly.
-	spawnLockInactivityTimeout = 60 * time.Second
-	spawnLockPollInterval      = 100 * time.Millisecond
-	spawnProgressFreshness     = 10 * time.Second
+	spawnLockPollInterval  = 100 * time.Millisecond
+	spawnProgressFreshness = 10 * time.Second
 	// spawnFailCooldown bounds serial retries of a broken spawn: within
 	// the window at most one spawn attempt runs across contending callers.
 	spawnFailCooldown = 5 * time.Second
@@ -125,20 +129,76 @@ func waitSpawnLockInterval(ctx context.Context, pause time.Duration) error {
 	}
 }
 
-func daemonStartupHeartbeatFresh(now time.Time) bool {
-	state, ok := daemon.ReadRuntimeState()
-	return ok && state.StartupProgressFresh(now, spawnProgressFreshness)
+// daemonStartupHeartbeatWaiter belongs to one contended spawn-lock wait. A
+// fresh pre-socket record may transition to Serving before endpoint visibility
+// reaches this caller. Honor that same process's handoff for one bounded lease;
+// an already-serving daemon must not keep a replacement wait alive forever.
+func daemonStartupHeartbeatWaiter() func(time.Time) bool {
+	return startupHeartbeatWaiterWithOwnerProof(startupRuntimeOwnerMatches)
+}
+
+func startupRuntimeOwnerMatches(state daemon.RuntimeState) bool {
+	if state.ProcessBirthToken == "" {
+		return false
+	}
+	owner, err := platform.CaptureProcessIdentity(state.PID)
+	if err != nil {
+		return false
+	}
+	token, err := owner.Token()
+	if err != nil || token != state.ProcessBirthToken {
+		return false
+	}
+	running, err := owner.Running()
+	return err == nil && running
+}
+
+func startupHeartbeatWaiterWithOwnerProof(ownerMatches func(daemon.RuntimeState) bool) func(time.Time) bool {
+	return startupHeartbeatWaiterWithRuntimeReader(ownerMatches, daemon.ReadRuntimeState)
+}
+
+// The reader seam lets isolated proxy fixtures record the actual read used by
+// the waiter. A second read cannot explain a failed first observation.
+func startupHeartbeatWaiterWithRuntimeReader(ownerMatches func(daemon.RuntimeState) bool, readState func() (daemon.RuntimeState, bool)) func(time.Time) bool {
+	var ownerPID int
+	var ownerBirth string
+	var handoffUntil time.Time
+	return func(now time.Time) bool {
+		state, ok := readState()
+		if !ok {
+			return false
+		}
+		if state.StartupProgressFresh(now, spawnProgressFreshness) {
+			ownerPID, ownerBirth = 0, ""
+			handoffUntil = time.Time{}
+			// Preserve legacy pre-socket waiting, but grant the new Serving lease
+			// only when the recorded incarnation matches the actual live process.
+			if ownerMatches(state) {
+				ownerPID, ownerBirth = state.PID, state.ProcessBirthToken
+				handoffUntil = now.Add(spawnProgressFreshness)
+			}
+			return true
+		}
+		if state.StartupPhase != daemon.StartupServing || ownerPID <= 0 || state.PID != ownerPID || state.ProcessBirthToken != ownerBirth || !now.Before(handoffUntil) || !ownerMatches(state) {
+			return false
+		}
+		// This is a local copy only: reuse the existing timestamp/skew checks
+		// without broadening pre-socket progress semantics for other callers.
+		state.StartupPhase = daemon.StartupOpeningStore
+		return state.StartupProgressFresh(now, spawnProgressFreshness)
+	}
 }
 
 // Injectable seams so the race/fallback/spawn-failure branches are
 // testable without a real daemon.
 var (
-	isDaemonRunning   = daemon.IsRunning
-	spawnDaemon       = spawnBareDaemon
-	stopIntentActive  = daemon.StopIntentActive
-	runningDaemonInfo = dialRunningDaemonIdentity
-	binaryVersion     = canonicalVersion
-	stopStaleDaemon   = stopDaemonForHandoff
+	waitForDaemonSpawnLock = waitForSpawnLock
+	isDaemonRunning        = daemon.IsRunning
+	spawnDaemon            = spawnBareDaemon
+	stopIntentActive       = daemon.StopIntentActive
+	runningDaemonInfo      = dialRunningDaemonIdentity
+	binaryVersion          = canonicalVersion
+	stopStaleDaemon        = stopDaemonForHandoff
 )
 
 // spawnBareDaemon is the autostart default for spawnDaemon. Autostart has no
@@ -201,9 +261,9 @@ func ensureDaemonReadyWithError(autostart bool) (daemonDecision, daemonIdentity,
 	_ = os.MkdirAll(filepath.Dir(lockPath), 0o700)
 	lock := flock.New(lockPath)
 
-	locked, err := waitForSpawnLock(context.Background(), lock, spawnLockWaitOptions{
+	locked, err := waitForDaemonSpawnLock(context.Background(), lock, spawnLockWaitOptions{
 		daemonRunning:   isDaemonRunning,
-		startupProgress: daemonStartupHeartbeatFresh,
+		startupProgress: daemonStartupHeartbeatWaiter(),
 	})
 	if err != nil || !locked {
 		// Couldn't acquire the lock in time. The winner may have brought
@@ -251,8 +311,8 @@ func replaceStaleDaemon(observed daemonIdentity) (daemonDecision, daemonIdentity
 	_ = os.MkdirAll(filepath.Dir(lockPath), 0o700)
 	lock := flock.New(lockPath)
 
-	locked, err := waitForSpawnLock(context.Background(), lock, spawnLockWaitOptions{
-		startupProgress: daemonStartupHeartbeatFresh,
+	locked, err := waitForDaemonSpawnLock(context.Background(), lock, spawnLockWaitOptions{
+		startupProgress: daemonStartupHeartbeatWaiter(),
 	})
 	if err != nil || !locked {
 		if err == nil {

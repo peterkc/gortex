@@ -54,8 +54,10 @@ func checkToolResult(data json.RawMessage) error {
 		return errors.New("tool returned isError without error content")
 	}
 	var body struct {
-		Code    string `json:"error_code"`
-		Message string `json:"message"`
+		Code      string         `json:"error_code"`
+		Message   string         `json:"message"`
+		Retriable bool           `json:"retriable"`
+		Data      map[string]any `json:"data"`
 	}
 	if err := json.Unmarshal(payload, &body); err != nil {
 		return err
@@ -64,7 +66,15 @@ func checkToolResult(data json.RawMessage) error {
 	if body.Code == "invalid_argument" {
 		code = -32602
 	}
-	return &rpcError{Code: code, Message: body.Code + ": " + body.Message}
+	if readFreshnessCode(body.Code) {
+		body.Data = copyRPCErrorData(body.Data)
+		if body.Data == nil {
+			body.Data = make(map[string]any)
+		}
+		body.Data["error_code"] = body.Code
+		body.Data["retriable"] = body.Retriable
+	}
+	return &rpcError{Code: code, Message: body.Code + ": " + body.Message, Data: body.Data, Retriable: body.Code == "repo_loading" && body.Retriable}
 }
 
 type toolCaller interface {
@@ -74,6 +84,14 @@ type toolCaller interface {
 // Each logical call has its own product budget. The phase context may end
 // sooner; that observation is right-censored, never a product deadline.
 func callTool(ctx context.Context, client toolCaller, r request, args map[string]any, role string, agent, step, slot int, timeout time.Duration, sleep func(context.Context, time.Duration) error) (json.RawMessage, []Attempt, error) {
+	return callToolPolicy(ctx, client, r, args, role, agent, step, slot, timeout, sleep, false)
+}
+
+func callEditProbeTool(ctx context.Context, client toolCaller, r request, args map[string]any, role string, agent, step, slot int, timeout time.Duration, sleep func(context.Context, time.Duration) error) (json.RawMessage, []Attempt, error) {
+	return callToolPolicy(ctx, client, r, args, role, agent, step, slot, timeout, sleep, true)
+}
+
+func callToolPolicy(ctx context.Context, client toolCaller, r request, args map[string]any, role string, agent, step, slot int, timeout time.Duration, sleep func(context.Context, time.Duration) error, retryTyped bool) (json.RawMessage, []Attempt, error) {
 	logicalStart := time.Now()
 	productEnd := logicalStart.Add(timeout)
 	phaseEnd, phaseBounded := ctx.Deadline()
@@ -91,31 +109,95 @@ func callTool(ctx context.Context, client toolCaller, r request, args map[string
 		return nil, nil, err
 	}
 	var attempts []Attempt
+	freshnessRetries := 0
 	for retry := 0; ; retry++ {
 		start := time.Now()
-		data, err := client.call(callCtx, "tools/call", map[string]any{"name": r.Tool, "arguments": args})
-		if err == nil && callCtx.Err() != nil {
-			err = callCtx.Err()
+		seed, delayNS, err := delayNightlySearch(callCtx, r.name(), role)
+		recorder, wire := readSourceFailureCapture(callCtx, r, args)
+		var data json.RawMessage
+		if err == nil {
+			params := map[string]any{"name": r.Tool, "arguments": args}
+			if wire == nil {
+				data, err = client.call(callCtx, "tools/call", params)
+			} else if observed, ok := client.(interface {
+				callWithFailureCapture(context.Context, string, any, *failureWireCapture) (json.RawMessage, error)
+			}); ok {
+				data, err = observed.callWithFailureCapture(callCtx, "tools/call", params, wire)
+			} else {
+				wire.unsupported = true
+				data, err = client.call(callCtx, "tools/call", params)
+			}
+		}
+		returned := time.Now()
+		if retryTyped {
+			if clock, ok := client.(interface{ responseReturnedAt() time.Time }); ok {
+				if observed := clock.responseReturnedAt(); !observed.IsZero() && !observed.Before(start) {
+					returned = observed
+				}
+			}
+		}
+		// A socket deadline can fire before the context timer goroutine runs.
+		// Classify against the actual call deadline as well, so a clipped
+		// offered window does not invent a product/checkout failure.
+		expired := callCtx.Err() != nil
+		if deadline, ok := callCtx.Deadline(); ok && !returned.Before(deadline) {
+			expired = true
+		}
+		expiry := callCtx.Err()
+		if expired && expiry == nil {
+			expiry = context.DeadlineExceeded
+		}
+		if err == nil && expired {
+			err = expiry
 		}
 		if err == nil {
 			err = checkToolResult(data)
 		}
-		a := Attempt{Tool: r.name(), Role: role, Request: hash, Agent: agent, Step: step, Slot: slot, Retry: retry, Started: start, DurationMS: float64(time.Since(start)) / float64(time.Millisecond), LogicalMS: float64(time.Since(logicalStart)) / float64(time.Millisecond), Outcome: "success"}
+		a := Attempt{NightlySeed: seed, NightlyDelayNS: delayNS, Tool: r.name(), Role: role, Request: hash, Agent: agent, Step: step, Slot: slot, Retry: retry, Started: start, DurationMS: float64(returned.Sub(start)) / float64(time.Millisecond), LogicalMS: float64(returned.Sub(logicalStart)) / float64(time.Millisecond), Outcome: "success"}
+		if err == nil && !retryTyped {
+			// Retain explicit incompleteness without changing the RPC outcome,
+			// original response-arrival latency, deadline, or retry authority.
+			a.ReadMetadataState = observePartialMetadata(r, args, role, data)
+		}
+		if session, ok := client.(*socketClient); ok {
+			a.CWD = session.cwd
+		}
 		var remote *rpcError
 		if err != nil {
 			a.Outcome, a.Error = "error", err.Error()
 			if errors.As(err, &remote) {
 				a.Code = remote.Code
+				a.ErrorData = copyRPCErrorData(remote.Data)
 			}
-			if remote != nil && remote.Code == -32002 {
+			if remote != nil && remote.Code == -32002 && (!retryTyped || remote.retryEditProbe()) {
 				a.Outcome = "busy"
+			} else if retryTyped && remote != nil && remote.retryEditProbe() {
+				a.Outcome = "retryable"
 			}
-			if callCtx.Err() != nil {
+			// A fresh RPC, never internal replay or a new logical deadline. The
+			// explicit scoped contract cannot authorize writes or first-ACK probes.
+			if !retryTyped && !expired && remote.retryReadFreshness(r, args, role) && freshnessRetries < readFreshnessRetryLimit {
+				a.Outcome = "retryable"
+				freshnessRetries++
+			}
+			if _, expected := err.(*editProbeExpectedAbsence); expected {
+				a.Outcome = "expected_refusal"
+				a.Code = -32000
+				a.ExpectedOutcome = "symbol_absent"
+			}
+			if expired {
 				a.Outcome = terminalOutcome()
+				err = errors.Join(err, expiry)
+			}
+			if retryTyped && errors.Is(err, errEditProbeEvidenceIncomplete) {
+				a.Outcome = "harness_incomplete"
+			}
+			if wire != nil {
+				a.FailureRPC = recorder.failure(wire)
 			}
 		}
 		attempts = append(attempts, a)
-		if a.Outcome != "busy" {
+		if a.Outcome != "busy" && a.Outcome != "retryable" {
 			return data, attempts, err
 		}
 		if err := sleep(callCtx, busyBackoff(retry)); err != nil {

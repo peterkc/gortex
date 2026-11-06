@@ -458,6 +458,13 @@ func generationReadProbes() []genProbe {
 			}
 			return nodeTokens(nodes)
 		}},
+		{name: "FindFoldedNameCandidatesContext", run: func(t *testing.T, s *Store) []string {
+			nodes, more, err := s.FindFoldedNameCandidatesContext(t.Context(), "Gen", 1000, graph.NameSearchFilter{RepoAllow: map[string]bool{genReadRepo: true}})
+			if err != nil || more {
+				t.Fatalf("folded generation head: more=%v err=%v", more, err)
+			}
+			return nodeTokens(nodes)
+		}},
 		{name: "FindNodesByNames", run: func(t *testing.T, s *Store) []string {
 			return nodeSliceMapTokens(s.FindNodesByNames(genReadProbeNames()))
 		}},
@@ -727,6 +734,47 @@ func generationReadProbes() []genProbe {
 			return nodeTokens(got.Nodes)
 		}},
 
+		{name: "BFSAdmissionFilteredContext", run: func(t *testing.T, s *Store) []string {
+			var out []string
+			for _, dir := range []graph.Direction{graph.DirectionForward, graph.DirectionBackward} {
+				request := graph.BFSAdmissionRequest{Seed: genReadShared, Direction: dir, Kinds: []graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences, graph.EdgeImports}, Depth: 3, Limit: 64}
+				rows, handled, err := s.BFSAdmissionFilteredContext(t.Context(), request, graph.OutlineEdgeFilter{ExcludeVia: "spring.Bean"})
+				if err != nil || !handled {
+					t.Fatalf("scoped BFS snapshot declined: handled=%v error=%v", handled, err)
+				}
+				for _, node := range rows.Nodes {
+					out = append(out, nodeTokens([]*graph.Node{node})...)
+				}
+				for _, adjacency := range rows.Adjacency {
+					out = append(out, edgeTokens(adjacency.Edges)...)
+				}
+			}
+			return out
+		}},
+
+		{name: "CallAncestorsContext", run: func(t *testing.T, s *Store) []string {
+			rows, err := s.CallAncestorsContext(t.Context(), genReadProbeIDs())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out []string
+			for _, row := range rows {
+				out = append(out, fmt.Sprintf("%s/%s/%s/%s", row.From, row.To, row.FromKind, row.FromFile))
+			}
+			return out
+		}},
+		{name: "CallAncestorsFilteredContext", run: func(t *testing.T, s *Store) []string {
+			rows, err := s.CallAncestorsFilteredContext(t.Context(), genReadProbeIDs(), graph.OutlineEdgeFilter{ExcludeVia: "spring.Bean"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out []string
+			for _, row := range rows {
+				out = append(out, fmt.Sprintf("%s/%s/%s/%s", row.From, row.To, row.FromKind, row.FromFile))
+			}
+			return out
+		}},
+
 		{name: "GetOutEdges", run: func(t *testing.T, s *Store) []string {
 			return edgeTokens(s.GetOutEdges(genReadShared))
 		}},
@@ -771,6 +819,13 @@ func generationReadProbes() []genProbe {
 			m, _, err := s.GetInEdgesByNodeIDsWithMetaContext(context.Background(), genReadProbeIDs(), 64)
 			if err != nil {
 				t.Fatalf("GetInEdgesByNodeIDsWithMetaContext: %v", err)
+			}
+			return edgeSliceMapTokens(m)
+		}},
+		{name: "GetInEdgesByNodeIDsFromRepos", run: func(t *testing.T, s *Store) []string {
+			m, handled, err := s.GetInEdgesByNodeIDsFromRepos(genReadProbeIDs(), []string{"", genReadRepo, genReadOtherRepo, "extra"})
+			if err != nil || !handled {
+				t.Fatalf("GetInEdgesByNodeIDsFromRepos: handled=%v err=%v", handled, err)
 			}
 			return edgeSliceMapTokens(m)
 		}},
@@ -1121,7 +1176,7 @@ func generationReadProbes() []genProbe {
 			return edgeTokens(s.ExternalCallCandidateEdges())
 		}},
 		{name: "DistinctExternalTargets", run: func(t *testing.T, s *Store) []string {
-			return prefixed("external ", s.DistinctExternalTargets([]graph.EdgeKind{graph.EdgeCalls}))
+			return prefixed("external ", s.DistinctExternalTargets([]graph.EdgeKind{graph.EdgeCalls}, ""))
 		}},
 
 		{name: "NodeCount", run: func(t *testing.T, s *Store) []string {
@@ -1473,6 +1528,13 @@ func generationReadProbes() []genProbe {
 				out = append(out, n)
 			}
 			return nodeTokens(out)
+		}},
+		{name: "FileLocationsInScopeSeq", run: func(t *testing.T, s *Store) []string {
+			var out []string
+			for n := range s.FileLocationsInScopeSeq([]string{"", genReadRepo}) {
+				out = append(out, fmt.Sprintf("file %s|%s|%s|%s|%s", n.ID, n.FilePath, n.Language, n.RepoPrefix, n.WorkspaceID))
+			}
+			return out
 		}},
 		{name: "EdgesInScopeSeq", run: func(t *testing.T, s *Store) []string {
 			var out []string
@@ -2092,6 +2154,7 @@ func generationCapabilityChecklist() []capabilityCase {
 		{iface: (*graph.ScopedAnalysisCommunityReader)(nil), probe: "ScopedAnalysisCommunitySummaries"},
 		{iface: (*graph.AtomicVectorCorpusInstaller)(nil), skip: skipSidecar},
 		{iface: (*graph.BFSCapable)(nil), probe: "BFS"},
+		{iface: (*graph.FilteredBFSAdmissionReader)(nil), probe: "BFSAdmissionFilteredContext"},
 		{iface: (*graph.BlameEnrichmentReader)(nil), skip: skipSidecar},
 		{iface: (*graph.BlameEnrichmentWriter)(nil), skip: skipSidecar},
 		{iface: (*graph.BoundedEdgeExistenceReader)(nil), probe: "FindExistingEdgeEndpoints"},
@@ -2105,8 +2168,11 @@ func generationCapabilityChecklist() []capabilityCase {
 		{iface: (*graph.BulkLoader)(nil), skip: "the cold-load bracket engages only on a provably empty store; its generation-0 emptiness gate is asserted by TestColdGraphStoreEmptyIgnoresDerivedGenerations"},
 		{iface: (*graph.BundleFingerprintSink)(nil), skip: skipInMemory},
 		{iface: (*graph.CallableBindingNodeSequencer)(nil), probe: "NodesInScopeSeq"},
+		{iface: (*graph.CallAncestorReader)(nil), probe: "CallAncestorsContext"},
+		{iface: (*graph.FilteredCallAncestorReader)(nil), probe: "CallAncestorsFilteredContext"},
 		{iface: (*graph.CallReferenceOutgoingReader)(nil), probe: "GetCallReferenceOutEdgesContext"},
 		{iface: (*graph.ScopedKindSummarySequencer)(nil), probe: "NodesLightByKindsInScopeSeq"},
+		{iface: (*graph.ScopedFileLocationSequencer)(nil), probe: "FileLocationsInScopeSeq"},
 		{iface: (*graph.ChurnEnrichmentReader)(nil), skip: skipSidecar},
 		{iface: (*graph.ChurnEnrichmentWriter)(nil), skip: skipSidecar},
 		{iface: (*graph.ClassHierarchyTraverser)(nil), probe: "ClassHierarchyTraverse"},
@@ -2224,6 +2290,7 @@ func generationCapabilityChecklist() []capabilityCase {
 		{iface: (*graph.NodePlacementBatchReader)(nil), probe: "NodePlacementsByIDs"},
 		{iface: (*graph.NodeSearchKeyScanner)(nil), probe: "ScanNodeSearchKeys"},
 		{iface: (*graph.FilteredContainingNameReader)(nil), probe: "FindNodesByNameContainingFilteredContext"},
+		{iface: (*graph.FoldedNameCandidateReader)(nil), probe: "FindFoldedNameCandidatesContext"},
 		{iface: (*graph.NodesByKindsScanner)(nil), probe: "NodesByKinds"},
 		{iface: (*graph.NodesByKindsSequencer)(nil), probe: "NodesByKindsSeq"},
 		{iface: (*graph.NodesInFilesByKindFinder)(nil), probe: "NodesInFilesByKind"},
@@ -2253,6 +2320,7 @@ func generationCapabilityChecklist() []capabilityCase {
 		{iface: (*graph.RepoNamesNodeFinder)(nil), probe: "FindNodesByNamesInRepo"},
 		{iface: (*graph.RepoNodeIdentitySequencer)(nil), probe: "NodesInScopeSeq"},
 		{iface: (*graph.RepoNodeKindIDReader)(nil), probe: "RepoProjections"},
+		{iface: (*graph.RepoScopedInEdgeReader)(nil), probe: "GetInEdgesByNodeIDsFromRepos"},
 		{iface: (*graph.ResolverNameScopeFinder)(nil), probe: "FindNodesByResolverNameScopes"},
 		{iface: (*graph.ScopeBindingNodeSequencer)(nil), probe: "NodesInScopeSeq"},
 		{iface: (*graph.ScopedCrossRepoCandidates)(nil), probe: "CrossRepoCandidatesForRepos"},

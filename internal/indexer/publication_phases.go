@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"weak"
 )
 
 // PublicationPhase names one step between an edit reaching the daemon and the
@@ -69,8 +70,18 @@ const (
 	// coordinator's queue.
 	PublicationTicketEnqueued PublicationPhase = "ticket_enqueued"
 	// PublicationCycleStarted is the coordinator starting the cycle that will
-	// serve the ticket (the quiet window has closed).
+	// serve the ticket (the quiet window has closed), or the accepted canonical
+	// point attempt becoming runnable. It is not a pure debounce duration.
 	PublicationCycleStarted PublicationPhase = "cycle_started"
+	// These are the accepted canonical point attempt's actual common executor
+	// boundaries. They exclude before-image inspection and post-executor event
+	// work; they are not a full patch wall or a split of its nested deep laps.
+	PublicationPatchExecutionStarted  PublicationPhase = "patch_execution_started"
+	PublicationPatchExecutionFinished PublicationPhase = "patch_execution_finished"
+	// The precise derived tail follows resolver and semantic work. These marks
+	// surround that actual call, not the wider point executor or its nested laps.
+	PublicationPatchDerivedStarted  PublicationPhase = "patch_derived_started"
+	PublicationPatchDerivedFinished PublicationPhase = "patch_derived_finished"
 	// PublicationAdmitted is the build acquiring the shared build lane.
 	PublicationAdmitted PublicationPhase = "admitted"
 	// PublicationPlanned is the build's file set and generation being fixed.
@@ -89,6 +100,9 @@ const (
 	// route it published describes a sample taken after the ticket arrived.
 	// It is terminal.
 	PublicationTicketCompleted PublicationPhase = "ticket_completed"
+	// PublicationTimerArmStarted is an independently observed native serving
+	// timer's actual arm start; it is not request admission.
+	PublicationTimerArmStarted PublicationPhase = "timer_arm_started"
 	// PublicationTicketFailed is the ticket ending without a publication. It
 	// is terminal.
 	PublicationTicketFailed PublicationPhase = "ticket_failed"
@@ -120,12 +134,14 @@ const (
 // the first instant the record reached it, which is the only reading a latency
 // breakdown can use when a coalesced cycle serves several records.
 type PublicationPhaseRecorder struct {
-	mu          sync.Mutex
-	perCheckout int
-	checkouts   int
-	byCheckout  map[string][]*PublicationPhaseRecord
-	byKey       map[string]*PublicationPhaseRecord
-	lastTouched map[string]time.Time
+	sharedInstance string
+	sharedSelf     weak.Pointer[PublicationPhaseRecorder]
+	mu             sync.Mutex
+	perCheckout    int
+	checkouts      int
+	byCheckout     map[string][]*PublicationPhaseRecord
+	byKey          map[string]*PublicationPhaseRecord
+	lastTouched    map[string]time.Time
 }
 
 // NewPublicationPhaseRecorder returns a recorder that keeps at most
@@ -138,13 +154,15 @@ func NewPublicationPhaseRecorder(perCheckout, checkouts int) *PublicationPhaseRe
 	if checkouts <= 0 {
 		checkouts = defaultPublicationCheckouts
 	}
-	return &PublicationPhaseRecorder{
+	r := &PublicationPhaseRecorder{
 		perCheckout: perCheckout,
 		checkouts:   checkouts,
 		byCheckout:  make(map[string][]*PublicationPhaseRecord),
 		byKey:       make(map[string]*PublicationPhaseRecord),
 		lastTouched: make(map[string]time.Time),
 	}
+	r.initializeSharedIdentity()
+	return r
 }
 
 var defaultPublicationPhases = NewPublicationPhaseRecorder(0, 0)
@@ -157,15 +175,30 @@ func DefaultPublicationPhases() *PublicationPhaseRecorder { return defaultPublic
 // PublicationPhaseRecord is one edit's (or one fresh request's) path to
 // publication.
 type PublicationPhaseRecord struct {
-	mu         sync.Mutex
-	key        string
-	checkoutID string
-	source     string
-	ticket     uint64
-	generation int64
-	origin     time.Time
-	marks      []publicationMark
-	terminal   bool
+	sharedPhysical        *SharedPhysicalOwner
+	sharedProofRevoked    bool
+	mu                    sync.Mutex
+	key                   string
+	checkoutID            string
+	source                string
+	ticket                uint64
+	generation            int64
+	origin                time.Time
+	marks                 []publicationMark
+	terminal              bool
+	canonicalBound        bool
+	patchLaps             *canonicalPatchEvidence    // immutable, exact accepted attempt only
+	laneWait              *canonicalLaneWaitEvidence // separate from executor-contained laps
+	debounce              *canonicalDebounceEvidence
+	owner                 weak.Pointer[PublicationPhaseRecorder] // membership only; never retains an expired recorder
+	acceptedAttempt       *PublicationStamps                     // private exact winner witness, cleared on completion
+	attemptWindow         *canonicalAttemptWindow
+	admissions            *canonicalAdmissionEvidence
+	coalescedWinner       weak.Pointer[PublicationPhaseRecord] // identity only; never retains an evicted attempt
+	coalescedLinked       bool
+	background            *canonicalBackgroundEvidence
+	backgroundUnavailable *RequestedBackgroundUnavailable
+	sharedSetExecution    *sharedMutationSetExecution // immutable actual shared executor; never independent P/B
 }
 
 type publicationMark struct {
@@ -186,11 +219,15 @@ func (r *PublicationPhaseRecorder) Begin(checkoutID, key, source string, origin 
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.beginLocked(checkoutID, key, source, origin)
+}
+
+func (r *PublicationPhaseRecorder) beginLocked(checkoutID, key, source string, origin time.Time) *PublicationPhaseRecord {
 	if existing, ok := r.byKey[key]; ok {
 		return existing
 	}
 	record := &PublicationPhaseRecord{
-		key: key, checkoutID: checkoutID, source: source, origin: origin,
+		key: key, checkoutID: checkoutID, source: source, origin: origin, owner: weak.Make(r),
 		marks: []publicationMark{{phase: PublicationReceived, at: origin}},
 	}
 	if _, known := r.byCheckout[checkoutID]; !known && len(r.byCheckout) >= r.checkouts {
@@ -258,6 +295,10 @@ func (r *PublicationPhaseRecorder) Rekey(oldKey, newKey string) bool {
 	delete(r.byKey, oldKey)
 	r.byKey[newKey] = record
 	record.mu.Lock()
+	// A frozen anchor is immutable, even if a later alias is restored.
+	if record.sharedSetExecution != nil && record.sharedSetExecution.ownerProof != nil {
+		record.sharedProofRevoked = true
+	}
 	record.key = newKey
 	record.mu.Unlock()
 	return true
@@ -340,6 +381,35 @@ func (p *PublicationPhaseRecord) BindTicket(sequence uint64) {
 	p.mu.Unlock()
 }
 
+// bindCanonicalTicket is called under the watcher's admission mutex, before
+// its debounce timer can wake. A record describes one ticket: accidentally
+// reused or terminal context metadata must not attach an old edit to a newer
+// generation. This only refuses timing association, never mutation admission.
+func (p *PublicationPhaseRecord) bindCanonicalTicket(sequence uint64, at time.Time) bool {
+	if p == nil || sequence == 0 {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.terminal || p.canonicalBound || at.Before(p.origin) || p.ticket != 0 {
+		return false
+	}
+	p.canonicalBound = true
+	p.ticket = sequence
+	p.markLocked(PublicationTicketEnqueued, at)
+	return true
+}
+
+// Key returns the current recorder identity without allocating a phase snapshot.
+func (p *PublicationPhaseRecord) Key() string {
+	if p == nil {
+		return ""
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.key
+}
+
 // SetGeneration records the dirty generation that published this record.
 func (p *PublicationPhaseRecord) SetGeneration(generationID int64) {
 	if p == nil || generationID <= 0 {
@@ -404,15 +474,21 @@ type PublicationPhaseOffset struct {
 // PublicationPhaseSnapshot is a record rendered for a receipt or a status
 // answer. Phases are ordered by offset.
 type PublicationPhaseSnapshot struct {
-	Key               string                   `json:"key"`
-	CheckoutID        string                   `json:"checkout_id"`
-	Source            string                   `json:"source"`
-	Ticket            uint64                   `json:"ticket,omitempty"`
-	DirtyGenerationID int64                    `json:"dirty_generation_id,omitempty"`
-	OriginWall        string                   `json:"origin_wall"`
-	Clock             string                   `json:"clock"`
-	Terminal          bool                     `json:"terminal"`
-	Phases            []PublicationPhaseOffset `json:"phases"`
+	Key                string                   `json:"key"`
+	CheckoutID         string                   `json:"checkout_id"`
+	Source             string                   `json:"source"`
+	Ticket             uint64                   `json:"ticket,omitempty"`
+	DirtyGenerationID  int64                    `json:"dirty_generation_id,omitempty"`
+	OriginWall         string                   `json:"origin_wall"`
+	Clock              string                   `json:"clock"`
+	Terminal           bool                     `json:"terminal"`
+	Phases             []PublicationPhaseOffset `json:"phases"`
+	patchLaps          *canonicalPatchEvidence  // private; legacy timeline wire stays unchanged
+	laneWait           *canonicalLaneWaitEvidence
+	debounce           *canonicalDebounceEvidence
+	attemptWindow      *canonicalAttemptWindow
+	admissions         *canonicalAdmissionEvidence
+	sharedSetExecution *sharedMutationSetExecution
 }
 
 // Snapshot renders the record.
@@ -424,11 +500,17 @@ func (p *PublicationPhaseRecord) Snapshot() PublicationPhaseSnapshot {
 	defer p.mu.Unlock()
 	out := PublicationPhaseSnapshot{
 		Key: p.key, CheckoutID: p.checkoutID, Source: p.source, Ticket: p.ticket,
-		DirtyGenerationID: p.generation,
-		OriginWall:        p.origin.UTC().Format(time.RFC3339Nano),
-		Clock:             "monotonic",
-		Terminal:          p.terminal,
-		Phases:            make([]PublicationPhaseOffset, 0, len(p.marks)),
+		DirtyGenerationID:  p.generation,
+		OriginWall:         p.origin.UTC().Format(time.RFC3339Nano),
+		Clock:              "monotonic",
+		Terminal:           p.terminal,
+		Phases:             make([]PublicationPhaseOffset, 0, len(p.marks)),
+		patchLaps:          p.patchLaps,
+		laneWait:           p.laneWait,
+		debounce:           p.debounce,
+		attemptWindow:      p.attemptWindow,
+		admissions:         p.admissions,
+		sharedSetExecution: p.sharedSetExecution,
 	}
 	for _, mark := range p.marks {
 		offset := mark.at.Sub(p.origin)
@@ -477,8 +559,12 @@ func (p *PublicationPhaseRecord) FinishBackgroundWork(completed bool) {
 // (view selection, admission, the parse gate, the write's own checks) is
 // exactly where a slow commit's time goes. The record absorbs them when it opens.
 type PublicationStamps struct {
-	mu    sync.Mutex
-	marks []publicationMark
+	mu         sync.Mutex
+	marks      []publicationMark
+	patchLaps  *canonicalPatchLaps
+	laneWait   canonicalLaneWait
+	debounce   canonicalDebounceWait
+	admissions [canonicalAdmissionCount]canonicalAdmissionPair
 }
 
 type publicationStampsKey struct{}
@@ -539,8 +625,37 @@ func (p *PublicationPhaseRecord) Absorb(stamps *PublicationStamps) {
 	}
 	stamps.mu.Lock()
 	marks := append([]publicationMark(nil), stamps.marks...)
+	var patch *canonicalPatchEvidence
+	var lane *canonicalLaneWaitEvidence
+	var debounce *canonicalDebounceEvidence
+	var admissions *canonicalAdmissionEvidence
+	if stamps.patchLaps != nil {
+		frozen := stamps.patchLaps.freeze(p.origin)
+		patch = &frozen
+		frozenAdmissions := stamps.freezeCanonicalAdmissions(p.origin)
+		admissions = &frozenAdmissions
+	}
+	if !stamps.laneWait.started.IsZero() || stamps.laneWait.invalid {
+		frozen := stamps.laneWait.freeze(p.origin)
+		lane = &frozen
+	}
+	if !stamps.debounce.started.IsZero() {
+		frozen := stamps.debounce.freeze(p.origin)
+		debounce = &frozen
+	}
 	stamps.mu.Unlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	for _, mark := range marks {
-		p.MarkAt(mark.phase, mark.at)
+		if !mark.at.IsZero() {
+			p.markLocked(mark.phase, mark.at)
+		}
+	}
+	if !p.terminal && p.canonicalBound && p.patchLaps == nil {
+		p.patchLaps = patch
+		p.laneWait = lane
+		p.debounce = debounce
+		p.acceptedAttempt = stamps
+		p.admissions = admissions
 	}
 }

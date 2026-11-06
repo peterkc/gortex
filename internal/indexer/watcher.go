@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"weak"
 
 	"github.com/zzet/gortex/internal/thirdparty/fswatcher"
 	"go.uber.org/zap"
@@ -61,6 +62,26 @@ type MutationTicket struct {
 	Path       string
 	Generation uint64
 	Done       <-chan MutationResult
+	// PublicationRecord is optional, immutable admission metadata. Native
+	// events have none. The watcher binds it before waking work; the existing
+	// consumer of Done records completion, never a second channel reader.
+	PublicationRecord *PublicationPhaseRecord `json:"-"`
+	tierMu            sync.RWMutex
+	tiers             MutationTierState
+}
+
+// mutationWaiter owns only outstanding ticket state. Publication metadata is
+// released with the same completion/stop paths as its existing result channel;
+// it is not a separate tracing registry or completed-history collection.
+type mutationWaiter struct {
+	sharedInvocation   *sharedSetInvocation
+	ticket             *MutationTicket
+	tool               bool
+	done               chan MutationResult
+	publication        *PublicationPhaseRecord
+	schedulingEntered  time.Time
+	backgroundEligible bool
+	timerObservation   *canonicalPointTimer
 }
 
 // MutationResult is the terminal graph-freshness result for a ticket.
@@ -161,24 +182,31 @@ type Watcher struct {
 	excludes           *excludes.Matcher
 	// currentExcludePatterns is installed by MultiWatcher for its configured
 	// repository. ConfigManager returns immutable, shared policy snapshots.
-	currentExcludePatterns func() []string
-	currentIncludePatterns func() []string
-	excludePolicyIncludes  []string
-	excludePolicyMu        sync.Mutex
-	excludePolicyPatterns  []string
-	excludePolicyMatcher   *excludes.Matcher
-	events                 chan GraphChangeEvent
-	history                []GraphChangeEvent
-	historyMu              sync.Mutex
-	pending                map[string]*time.Timer
-	pendingGeneration      map[string]uint64
-	mutationWaiters        map[string]map[uint64]chan MutationResult
-	nextGeneration         uint64
+	currentExcludePatterns     func() []string
+	currentIncludePatterns     func() []string
+	excludePolicyIncludes      []string
+	excludePolicyMu            sync.Mutex
+	excludePolicyPatterns      []string
+	excludePolicyMatcher       *excludes.Matcher
+	events                     chan GraphChangeEvent
+	history                    []GraphChangeEvent
+	historyMu                  sync.Mutex
+	pending                    map[string]*time.Timer
+	pendingGeneration          map[string]uint64
+	mutationWaiters            map[string]map[uint64]mutationWaiter
+	failedPaths                map[string]MutationTierState // retained failures only; guarded by mu
+	heldNative                 map[string]ChangeKind        // native echoes awaiting outstanding tool receipts; guarded by mu
+	mutationEchoesAttached     uint64
+	mutationSuperseded         uint64
+	mutationWaitersLater       uint64
+	observedMutationGeneration map[string]uint64 // lazy index into outstanding waiters, not timing history
+	nextGeneration             uint64
 	// mutationRetryDelayFn and pointMutationPatch are deterministic test seams.
 	// Production retries use mutationRetryBackoff and the complete point pipeline.
 	mutationRetryDelayFn   func(int) time.Duration
 	pointMutationPatch     func(string, ChangeKind, uint64) error
 	mutationBeforeComplete func(string, uint64)
+	mutationTimerArmed     func(time.Duration) // test hook: actual point/storm timer argument
 	mu                     sync.Mutex
 	stopping               bool
 	asyncWork              sync.WaitGroup
@@ -196,6 +224,8 @@ type Watcher struct {
 	stoppedOnce      sync.Once
 	symbolChangeCb   SymbolChangeCallback
 	symbolChangeCbMu sync.RWMutex
+	sourceEventCb    func(string)
+	sourceEventCbMu  sync.RWMutex
 
 	// Degraded-watch state: set when the OS can't fully cover the tree —
 	// inotify watch exhaustion (ENOSPC) or FD exhaustion (EMFILE/ENFILE).
@@ -229,24 +259,28 @@ type Watcher struct {
 
 	// Storm-mode state. Guarded by stormMu so the hot per-file
 	// debounce path (mu) doesn't contend with rate-tracking.
-	stormMu            sync.Mutex
-	eventTimes         []time.Time           // sliding window of recent event timestamps
-	stormBatch         map[string]ChangeKind // dirty set during an event storm
-	stormGenerations   map[string]uint64     // newest debounced generation adopted per path
-	stormTimer         *time.Timer           // fires after the quiet period
-	stormActive        bool                  // true while waiting to drain
-	stormExplicit      bool                  // admitted complete explicit frontier requires forced reads
-	stormStopped       bool                  // Stop has closed storm admission
-	stormRetryAttempt  int                   // retry ordinal for the published storm timer
-	stormWork          sync.WaitGroup        // scheduled/running timer callbacks
-	stormDrained       func(int)             // test hook: batch drained; batch size arg
-	stormBeforeLock    func()                // test hook: immediately before repository-lane admission
-	explicitReindexRaw watcherBatchReindex   // complete forced frontier; caller already holds repository lane
-	batchReindex       watcherBatchReindex   // one bounded batch; MultiWatcher installs shared catch-up
-	discoverReindex    watcherBatchReindex   // additive directory discovery with the same complete tail
+	stormMu                     sync.Mutex
+	eventTimes                  []time.Time           // sliding window of recent event timestamps
+	stormBatch                  map[string]ChangeKind // dirty set during an event storm
+	stormGenerations            map[string]uint64     // newest debounced generation adopted per path
+	stormTimerObservation       *mutationSetTimerObservation
+	stormPublicationObserved    bool
+	stormTimer                  *time.Timer // fires after the quiet period
+	stormActive                 bool        // true while waiting to drain
+	stormExplicit               bool        // admitted complete explicit frontier requires forced reads
+	stormStopped                bool        // Stop has closed storm admission
+	sharedOwnerLegacyFinalizing func(time.Time)
+	sharedOwnerBeforeProjection func(time.Time)
+	stormSharedInvocation       *sharedSetInvocation
+	stormRetryAttempt           int                 // retry ordinal for the published storm timer
+	stormWork                   sync.WaitGroup      // scheduled/running timer callbacks
+	stormDrained                func(int)           // test hook: batch drained; batch size arg
+	stormBeforeLock             func()              // test hook: immediately before repository-lane admission
+	batchReindex                watcherBatchReindex // one bounded batch; MultiWatcher installs shared catch-up
+	discoverReindex             watcherBatchReindex // additive directory discovery with the same complete tail
 	// pointReindexRaw runs the complete exact-path pipeline after the watcher
 	// already owns the repository lane. MultiWatcher installs its raw tail here.
-	pointReindexRaw func(string) (*IndexResult, error)
+	pointReindexRaw func(string, *PublicationStamps) (*IndexResult, error)
 
 	// poller is the adaptive-interval fallback that re-checks git
 	// HEAD movement and tracked-file mtimes on a timer, catching the
@@ -331,6 +365,7 @@ func (w *Watcher) mutationRetryDelay(attempt int) time.Duration {
 
 var (
 	errMutationSuperseded    = errors.New("mutation generation superseded")
+	errPatchLandedSuperseded = fmt.Errorf("mutation patch landed: %w", errMutationSuperseded)
 	errMutationPatchAborted  = errors.New("mutation patch aborted")
 	errWatcherStopped        = errors.New("watcher stopped before mutation completed")
 	errWatcherIndexerMissing = errors.New("watcher repository indexer is no longer registered")
@@ -1196,6 +1231,7 @@ func (w *Watcher) Stop() error {
 	}
 	w.pending = make(map[string]*time.Timer)
 	w.pendingGeneration = make(map[string]uint64)
+	w.heldNative = nil
 	w.mu.Unlock()
 	if w.stopAdmissionClosed != nil {
 		w.stopAdmissionClosed()
@@ -1285,6 +1321,23 @@ func (w *Watcher) OnSymbolChange(cb SymbolChangeCallback) {
 	w.symbolChangeCbMu.Lock()
 	defer w.symbolChangeCbMu.Unlock()
 	w.symbolChangeCb = cb
+}
+
+// OnSourceEvent replaces the callback invoked synchronously for a source path
+// before storm handling or debounce. The callback must return promptly.
+func (w *Watcher) OnSourceEvent(cb func(string)) {
+	w.sourceEventCbMu.Lock()
+	w.sourceEventCb = cb
+	w.sourceEventCbMu.Unlock()
+}
+
+func (w *Watcher) notifySourceEvent(path string) {
+	w.sourceEventCbMu.RLock()
+	cb := w.sourceEventCb
+	w.sourceEventCbMu.RUnlock()
+	if cb != nil {
+		cb(path)
+	}
 }
 
 // OnDegraded registers a callback invoked once when the file watcher first
@@ -1711,6 +1764,7 @@ func (w *Watcher) handleEvent(event fswatcher.WatchEvent) {
 		}
 		return
 	}
+	w.notifySourceEvent(path)
 
 	// Before the exclusion check: an ignore file can sit in a folder whose
 	// own events are excluded, and its rules apply all the same.
@@ -1761,55 +1815,91 @@ func (w *Watcher) handleEvent(event fswatcher.WatchEvent) {
 		}
 	}
 
+	w.scheduleNativeEvent(path, kind)
+}
+
+// scheduleNativeEvent holds echoes before storm accounting and rechecks tool
+// ownership at the eventual point/storm admission boundary.
+func (w *Watcher) scheduleNativeEvent(path string, kind ChangeKind) {
+	w.mu.Lock()
+	held := w.holdNativeForToolLocked(path, kind)
+	w.mu.Unlock()
+	if held {
+		return
+	}
 	// Storm mode — if more than StormThreshold events arrived within
 	// StormWindowMs, skip the per-file debounced path and accumulate
 	// into a batch. The batch drains once StormQuietPeriodMs has
 	// passed with no further events.
 	if w.shouldEnterStorm() {
-		w.recordInStorm(path, kind)
+		w.recordInStormEvent(path, kind, true)
 		return
 	}
 
-	w.scheduleFileMutation(path, kind)
+	w.scheduleMutationEnteredEvent(path, kind, nil, time.Time{}, false, true)
 }
 
 // EnqueueFileMutation hands a committed filesystem mutation directly to the
 // watcher's debounced generation queue. It does not depend on fsnotify delivery,
-// so daemon-backed MCP edits remain reliable even when native watch delivery is
-// degraded. The request context governs admission only; the returned ticket
+// so drift repair remains reliable even when native watch delivery is
+// degraded. Tool writes use EnqueueToolMutation instead. The request context
+// governs admission only; the returned ticket
 // resolves when this generation or a newer coalesced generation reaches a
 // terminal graph state.
 func (w *Watcher) EnqueueFileMutation(ctx context.Context, filePath string) (*MutationTicket, error) {
+	return w.enqueueFileMutation(ctx, filePath, false)
+}
+
+// EnqueueToolMutation admits an already committed tool write without waiting
+// for native-event quiet time. It shares validation and generation ownership
+// with EnqueueFileMutation; the request context governs admission only.
+func (w *Watcher) EnqueueToolMutation(ctx context.Context, filePath string) (*MutationTicket, error) {
+	return w.enqueueFileMutation(ctx, filePath, true)
+}
+
+// mutationAdmissionPath is the common validation prologue for point and set
+// admission. A set validates every member before publishing any generation.
+func (w *Watcher) mutationAdmissionPath(ctx context.Context, filePath string) (string, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return "", err
 	}
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	root := w.indexer.RootPath()
 	if root == "" {
-		return nil, nil
+		return "", nil
 	}
 	rel, err := filepath.Rel(root, absPath)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return nil, nil
+		return "", nil
 	}
 	if w.isExcluded(absPath) {
-		return nil, nil
+		return "", nil
 	}
 	if _, ok := w.indexer.effectiveLanguage(absPath, nil); !ok {
-		return nil, nil
+		return "", nil
 	}
 	select {
 	case <-w.done:
-		return nil, errWatcherStopped
+		return "", errWatcherStopped
 	default:
+	}
+	w.indexer.noteToolWrite(rel)
+	return absPath, nil
+}
+
+func (w *Watcher) enqueueFileMutation(ctx context.Context, filePath string, tool bool) (*MutationTicket, error) {
+	ctx, schedulingEntered := canonicalSchedulingEntry(ctx)
+	absPath, err := w.mutationAdmissionPath(ctx, filePath)
+	if err != nil || absPath == "" {
+		return nil, err
 	}
 	if w.mutationBeforeAdmission != nil {
 		w.mutationBeforeAdmission()
 	}
-	ticket := w.scheduleFileMutation(absPath, ChangeModified)
+	ticket := w.scheduleMutationEntered(absPath, ChangeModified, filePublicationRecordFrom(ctx, absPath), schedulingEntered, tool)
 	if ticket == nil {
 		return nil, errWatcherStopped
 	}
@@ -1819,32 +1909,24 @@ func (w *Watcher) EnqueueFileMutation(ctx context.Context, filePath string) (*Mu
 // EnqueueFileMutations admits one committed frontier before any drain can run.
 // A nil map means the owner cannot schedule this set; no member was admitted.
 func (w *Watcher) EnqueueFileMutations(ctx context.Context, files []string) (map[string]*MutationTicket, error) {
+	originalEntry := time.Now()
+	ctx, schedulingEntered := canonicalSchedulingEntry(ctx)
 	if len(files) == 1 {
-		ticket, err := w.EnqueueFileMutation(ctx, files[0])
+		ticket, err := w.EnqueueToolMutation(ctx, files[0])
 		if ticket == nil {
 			return nil, err
 		}
 		return map[string]*MutationTicket{ticket.Path: ticket}, err
 	}
+	call := sharedSetInvocationFor(ctx, w, originalEntry, len(files))
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	paths := make(map[string]struct{}, len(files))
-	root := w.indexer.RootPath()
-	if root == "" {
-		return nil, nil
-	}
 	for _, file := range files {
-		path, err := filepath.Abs(file)
-		if err != nil {
+		path, err := w.mutationAdmissionPath(ctx, file)
+		if err != nil || path == "" {
 			return nil, err
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || w.isExcluded(path) {
-			return nil, nil
-		}
-		if _, ok := w.indexer.effectiveLanguage(path, nil); !ok {
-			return nil, nil
 		}
 		paths[path] = struct{}{}
 	}
@@ -1853,7 +1935,7 @@ func (w *Watcher) EnqueueFileMutations(ctx context.Context, files []string) (map
 	}
 	if len(paths) == 1 {
 		for path := range paths {
-			ticket, err := w.EnqueueFileMutation(ctx, path)
+			ticket, err := w.EnqueueToolMutation(ctx, path)
 			if ticket == nil {
 				return nil, err
 			}
@@ -1864,9 +1946,15 @@ func (w *Watcher) EnqueueFileMutations(ctx context.Context, files []string) (map
 		w.mutationBeforeAdmission()
 	}
 	w.stormMu.Lock()
-	defer w.stormMu.Unlock()
 	w.mu.Lock()
-	defer w.mu.Unlock()
+	var invalidatedBackground []*canonicalBackgroundOwner
+	defer func() {
+		w.mu.Unlock()
+		w.stormMu.Unlock()
+		for _, background := range invalidatedBackground {
+			background.publishUnavailable()
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -1883,11 +1971,29 @@ func (w *Watcher) EnqueueFileMutations(ctx context.Context, files []string) (map
 		w.pendingGeneration = make(map[string]uint64)
 	}
 	if w.mutationWaiters == nil {
-		w.mutationWaiters = make(map[string]map[uint64]chan MutationResult)
+		w.mutationWaiters = make(map[string]map[uint64]mutationWaiter)
 	}
+	freshSet := !w.stormActive && len(w.stormBatch) == 0
+	if !freshSet || len(paths) != call.count {
+		call.invalid.Store(true)
+	}
+	if w.stormSharedInvocation != nil {
+		w.stormSharedInvocation.invalid.Store(true)
+	}
+	call.root = w.indexer.RootPath()
+	call.prefix = w.indexer.RepoPrefix()
+	w.stormSharedInvocation = call
 	tickets := make(map[string]*MutationTicket, len(paths))
 	for path := range paths {
+		backgroundEligible := freshSet && w.pendingGeneration[path] == 0 && w.observedMutationGeneration[path] == 0
+		if !backgroundEligible {
+			call.invalid.Store(true)
+		}
 		if timer, ok := w.pending[path]; ok {
+			if observation := w.mutationWaiters[path][w.pendingGeneration[path]].timerObservation; observation != nil && observation.background != nil {
+				observation.background.invalidate("superseded_by_mutation_set")
+				invalidatedBackground = append(invalidatedBackground, observation.background)
+			}
 			if timer.Stop() {
 				w.asyncWork.Done()
 			}
@@ -1896,14 +2002,27 @@ func (w *Watcher) EnqueueFileMutations(ctx context.Context, files []string) (map
 		w.nextGeneration++
 		generation := w.nextGeneration
 		if w.mutationWaiters[path] == nil {
-			w.mutationWaiters[path] = make(map[uint64]chan MutationResult)
+			w.mutationWaiters[path] = make(map[uint64]mutationWaiter)
 		}
 		done := make(chan MutationResult, 1)
-		w.mutationWaiters[path][generation] = done
+		ticket := newMutationTierTicket(path, generation, done)
+		record := filePublicationRecordFrom(ctx, path)
+		if record != nil && record.bindCanonicalTicket(generation, time.Now()) {
+			ticket.PublicationRecord = record
+			w.stormPublicationObserved = true
+			if w.observedMutationGeneration == nil {
+				w.observedMutationGeneration = make(map[string]uint64)
+			}
+			w.observedMutationGeneration[path] = generation
+		}
+		// Set admission is not a point timer. Carry the actual entry and owner;
+		// background coverage stays unavailable until the storm executor proves it.
+		w.mutationWaiters[path][generation] = mutationWaiter{done: done, tool: true, ticket: ticket,
+			publication: ticket.PublicationRecord, schedulingEntered: schedulingEntered, backgroundEligible: backgroundEligible, sharedInvocation: call}
 		w.pendingGeneration[path] = generation
 		w.stormGenerations[path] = generation
 		w.stormBatch[path] = ChangeModified
-		tickets[path] = &MutationTicket{Path: path, Generation: generation, Done: done}
+		tickets[path] = ticket
 	}
 	w.stormActive = true
 	w.stormExplicit = true
@@ -1918,13 +2037,65 @@ func (w *Watcher) EnqueueFileMutations(ctx context.Context, files []string) (map
 // for the same path; every earlier ticket stays attached until the newest patch
 // produces a terminal graph event.
 func (w *Watcher) scheduleFileMutation(path string, kind ChangeKind) *MutationTicket {
+	return w.scheduleFileMutationWithRecord(path, kind, nil)
+}
+
+func (w *Watcher) scheduleFileMutationWithRecord(path string, kind ChangeKind, record *PublicationPhaseRecord) *MutationTicket {
+	var entered time.Time
+	if record != nil {
+		entered = time.Now()
+	}
+	return w.scheduleFileMutationEntered(path, kind, record, entered)
+}
+
+func (w *Watcher) scheduleFileMutationEntered(path string, kind ChangeKind, record *PublicationPhaseRecord, entered time.Time) *MutationTicket {
+	return w.scheduleMutationEntered(path, kind, record, entered, false)
+}
+
+func (w *Watcher) scheduleMutationEntered(path string, kind ChangeKind, record *PublicationPhaseRecord, entered time.Time, tool bool) *MutationTicket {
+	return w.scheduleMutationEnteredEvent(path, kind, record, entered, tool, false)
+}
+
+func (w *Watcher) scheduleMutationEnteredEvent(path string, kind ChangeKind, record *PublicationPhaseRecord, entered time.Time, tool, native bool) *MutationTicket {
 	w.mu.Lock()
+	if native && w.holdNativeForToolLocked(path, kind) {
+		w.mu.Unlock()
+		return nil
+	}
 	if w.stopping {
 		w.mu.Unlock()
 		return nil
 	}
+	_, hadPending := w.pending[path]
+	backgroundEligible := record != nil && !hadPending && w.observedMutationGeneration[path] == 0
+	var admissionPredecessor uint64
+	admissionStopFailed := false
+	var successorBackground *canonicalBackgroundOwner
+	var previousBackground *canonicalBackgroundOwner
 	if timer, exists := w.pending[path]; exists {
-		if timer.Stop() {
+		previous := w.mutationWaiters[path][w.pendingGeneration[path]].timerObservation
+		var stopStarted time.Time
+		if previous != nil && previous.background != nil {
+			previousBackground = previous.background
+			stopStarted = time.Now()
+		}
+		stopped := timer.Stop()
+		if record != nil && w.observedMutationGeneration[path] == 0 {
+			predecessor := w.pendingGeneration[path]
+			prior := w.mutationWaiters[path][predecessor]
+			if predecessor != 0 && prior.done != nil && prior.publication == nil && prior.timerObservation == nil {
+				if stopped {
+					backgroundEligible = true
+					admissionPredecessor = predecessor
+				} else {
+					admissionStopFailed = true
+				}
+			}
+		}
+		if !stopStarted.IsZero() {
+			successorBackground = previous.background.stopped(w, path, w.pendingGeneration[path], previous.successor, stopStarted, time.Now(), stopped, record == nil)
+		}
+		if stopped {
 			w.asyncWork.Done()
 		}
 	}
@@ -1934,35 +2105,135 @@ func (w *Watcher) scheduleFileMutation(path string, kind ChangeKind) *MutationTi
 		w.pendingGeneration = make(map[string]uint64)
 	}
 	if w.mutationWaiters == nil {
-		w.mutationWaiters = make(map[string]map[uint64]chan MutationResult)
+		w.mutationWaiters = make(map[string]map[uint64]mutationWaiter)
 	}
 	if w.mutationWaiters[path] == nil {
-		w.mutationWaiters[path] = make(map[uint64]chan MutationResult)
+		w.mutationWaiters[path] = make(map[uint64]mutationWaiter)
 	}
 	done := make(chan MutationResult, 1)
-	w.mutationWaiters[path][generation] = done
 	w.pendingGeneration[path] = generation
-	w.armPointMutationTimerLocked(path, kind, generation, 0, time.Duration(w.config.DebounceMs)*time.Millisecond)
+	ticket := newMutationTierTicket(path, generation, done)
+	if record != nil && record.bindCanonicalTicket(generation, time.Now()) {
+		ticket.PublicationRecord = record
+		if w.observedMutationGeneration == nil {
+			w.observedMutationGeneration = make(map[string]uint64)
+		}
+		w.observedMutationGeneration[path] = generation
+	}
+	w.mutationWaiters[path][generation] = mutationWaiter{done: done, ticket: ticket, publication: ticket.PublicationRecord, schedulingEntered: entered, backgroundEligible: backgroundEligible, tool: tool}
+	delay := time.Duration(w.config.DebounceMs) * time.Millisecond
+	if tool {
+		delay = 0
+	}
+	armedBackground := w.armPointMutationTimerLocked(path, kind, generation, 0, delay, successorBackground, admissionPredecessor, admissionStopFailed)
 	w.mu.Unlock()
-	return &MutationTicket{Path: path, Generation: generation, Done: done}
+	if previousBackground != nil {
+		previousBackground.publishUnavailable()
+	}
+	if armedBackground != nil && armedBackground != previousBackground {
+		armedBackground.publishUnavailable()
+	}
+	return ticket
 }
 
-func (w *Watcher) armPointMutationTimerLocked(path string, kind ChangeKind, generation uint64, retryAttempt int, delay time.Duration) {
+func (w *Watcher) armPointMutationTimerLocked(path string, kind ChangeKind, generation uint64, retryAttempt int, delay time.Duration, background *canonicalBackgroundOwner, admissionPredecessor uint64, admissionStopFailed bool) *canonicalBackgroundOwner {
 	var timer *time.Timer
+	var observation *canonicalPointTimer
+	if w.mutationWaiters[path][generation].publication != nil {
+		observation = &canonicalPointTimer{}
+		if retryAttempt == 0 {
+			observation.debounce.started = time.Now()
+		}
+	} else if requested := w.observedMutationGeneration[path]; requested != 0 && requested < generation {
+		// Observe this callback, not the predecessor's quiet wait. Native storm
+		// waiters do not require a scan to establish that no observer exists.
+		observation = &canonicalPointTimer{}
+	}
+	if observation != nil {
+		waiter := w.mutationWaiters[path][generation]
+		if retryAttempt == 0 && waiter.publication != nil {
+			background = newCanonicalBackground(waiter.publication, w, path, generation, waiter.schedulingEntered)
+			if background != nil {
+				background.admissionPredecessor = admissionPredecessor
+				if !waiter.backgroundEligible {
+					reason := "preexisting_path_work"
+					if admissionStopFailed {
+						reason = "preexisting_timer_stop_not_successful"
+					}
+					background.invalidate(reason)
+				}
+			}
+		}
+		observation.background, observation.successor = background, waiter.publication == nil
+		if background != nil {
+			armStarted := observation.debounce.started
+			if armStarted.IsZero() {
+				armStarted = time.Now()
+			}
+			background.armStarted(w, path, generation, observation.successor, armStarted)
+			if observation.successor && retryAttempt == 0 {
+				observation.debounce.started = armStarted // same actual native arm reading, never predecessor quiet
+			}
+		}
+		waiter.timerObservation = observation
+		w.mutationWaiters[path][generation] = waiter
+	}
 	w.asyncWork.Add(1)
+	if w.mutationTimerArmed != nil {
+		w.mutationTimerArmed(delay)
+	}
 	timer = time.AfterFunc(delay, func() {
+		if observation != nil {
+			observation.entered = time.Now() // callback entry precedes claim/admission
+			if observation.background != nil {
+				observation.background.callback(w, path, generation, observation.successor, observation.entered)
+			}
+			if !observation.debounce.started.IsZero() {
+				observation.debounce.entered = observation.entered
+			}
+		}
 		defer w.asyncWork.Done()
 		// Timer.Stop can lose a race with a callback that is already queued.
 		// Only the newest timer may consume the pending entry.
 		if !w.claimPendingTimer(path, &timer) {
+			if observation != nil && observation.background != nil {
+				observation.background.invalidate("timer_claim_superseded")
+				observation.background.publishUnavailable()
+			}
 			return
 		}
-		w.runPointMutation(path, kind, generation, retryAttempt)
+		publication := w.runPointMutationObserved(path, kind, generation, retryAttempt, observation)
+		if publication != nil && observation != nil {
+			// The mutation returned after its existing completion and cohort-release
+			// defers. Timing publication does not move Done or resource ownership.
+			finished := time.Now()
+			publication.finishPhysicalAttempt(observation.entered, finished, retryAttempt, w.logger)
+			if observation.background != nil {
+				observation.background.finish(publication, observation.entered, finished, retryAttempt)
+			}
+		} else if observation != nil && observation.background != nil {
+			observation.background.invalidate("serving_attempt_unavailable")
+			observation.background.publishUnavailable()
+		}
 	})
 	w.pending[path] = timer
+	if observation != nil && observation.background != nil {
+		observation.background.armFinished(w, path, generation, observation.successor, time.Now())
+		return observation.background
+	}
+	return nil
 }
 
 func (w *Watcher) runPointMutation(path string, kind ChangeKind, generation uint64, retryAttempt int) {
+	w.runPointMutationObserved(path, kind, generation, retryAttempt, nil)
+}
+
+func (w *Watcher) runPointMutationObserved(path string, kind ChangeKind, generation uint64, retryAttempt int, observation *canonicalPointTimer) (publication *pointPublicationAttempt) {
+	publication = w.beginPointPublicationObserved(path, generation, retryAttempt, observation)
+	if publication != nil && observation != nil {
+		publication.stamps.debounce = observation.debounce // immutable callback-owned pair, exact generation only
+		publication.stamps.startAttemptControl(observation.entered)
+	}
 	if w.pointMutationClaimed != nil {
 		w.pointMutationClaimed(path)
 	}
@@ -1971,7 +2242,12 @@ func (w *Watcher) runPointMutation(path string, kind ChangeKind, generation uint
 	// otherwise puts every path into the patch path at once, contending for the
 	// repository mutation lane. Admission pressure retains this generation and
 	// its waiters instead of turning a bounded wait into a terminal receipt.
+	var cohortAdmission canonicalAdmissionSpan
+	if publication != nil {
+		cohortAdmission = publication.stamps.beginCanonicalAdmission(canonicalCohortAdmission)
+	}
 	release, admissionErr := w.admitMutationWork(path)
+	cohortAdmission.end()
 	if admissionErr != nil {
 		if errors.Is(admissionErr, errWatcherStopped) {
 			w.completeMutationWaitersIfCurrent(path, generation, errWatcherStopped)
@@ -1979,6 +2255,7 @@ func (w *Watcher) runPointMutation(path string, kind ChangeKind, generation uint
 		}
 		if errors.Is(admissionErr, errMutationAdmissionDeferred) {
 			if w.mutationGenerationSuperseded(path, generation) {
+				w.noteMutationSuperseded()
 				return
 			}
 			if w.schedulePointMutationRetry(path, kind, generation, retryAttempt+1) {
@@ -1989,6 +2266,7 @@ func (w *Watcher) runPointMutation(path string, kind ChangeKind, generation uint
 				return
 			}
 			if w.mutationGenerationSuperseded(path, generation) {
+				w.noteMutationSuperseded()
 				return
 			}
 		}
@@ -1997,6 +2275,7 @@ func (w *Watcher) runPointMutation(path string, kind ChangeKind, generation uint
 	}
 	defer release()
 	complete := true
+	supersededRecorded := false
 	// The completeness fact for the bounded derived passes this patch runs.
 	// Read by the deferred completion below, so it must outlive the patch call
 	// and stay the zero value ("not observed") on every arm that never reaches
@@ -2015,13 +2294,21 @@ func (w *Watcher) runPointMutation(path string, kind ChangeKind, generation uint
 			if w.mutationBeforeComplete != nil {
 				w.mutationBeforeComplete(path, generation)
 			}
-			w.completeMutationWaitersWithFanout(path, generation, patchErr, fanout)
+			if !w.completeMutationWaitersObserved(path, generation, patchErr, fanout, true, publication) && patchErr == nil {
+				if !supersededRecorded {
+					w.noteMutationSuperseded()
+				}
+				// The graph body landed, but a successor won admission before
+				// this completion. Cover only older receipts without accepting
+				// this attempt as the current timing/publication winner.
+				w.completeMutationWaitersGuarded(path, generation, nil, fanout, false)
+			}
 		}
 	}()
 	if w.pointMutationPatch != nil {
 		patchErr = w.pointMutationPatch(path, kind, generation)
 	} else {
-		patchErr = w.patchGraphObservingFanout(path, kind, generation, &fanout)
+		patchErr = w.patchGraphWithReceiptStateObserved(path, kind, generation, false, &fanout, publication)
 	}
 	var storageErr *store_sqlite.StorageError
 	if errors.As(patchErr, &storageErr) {
@@ -2031,9 +2318,21 @@ func (w *Watcher) runPointMutation(path string, kind ChangeKind, generation uint
 		patchErr = errWatcherStopped
 		return
 	}
+	if errors.Is(patchErr, errMutationSuperseded) {
+		w.noteMutationSuperseded()
+		supersededRecorded = true
+	}
+	if errors.Is(patchErr, errPatchLandedSuperseded) {
+		patchErr = nil
+	}
 	if w.mutationGenerationSuperseded(path, generation) {
-		patchErr = errMutationSuperseded
-		complete = false
+		if !supersededRecorded {
+			w.noteMutationSuperseded()
+			supersededRecorded = true
+		}
+		// A successful body covers its own receipt even when a newer write
+		// now needs another patch. Pre-write aborts and errors cover none.
+		complete = patchErr == nil
 		return
 	}
 	if !retryableMutationError(patchErr) {
@@ -2048,14 +2347,24 @@ func (w *Watcher) runPointMutation(path string, kind ChangeKind, generation uint
 		return
 	}
 	if w.mutationGenerationSuperseded(path, generation) {
+		if !supersededRecorded {
+			w.noteMutationSuperseded()
+		}
 		patchErr = errMutationSuperseded
 		complete = false
 	}
+	return
 }
 
 func (w *Watcher) schedulePointMutationRetry(path string, kind ChangeKind, generation uint64, attempt int) bool {
 	w.mu.Lock()
-	defer w.mu.Unlock()
+	var invalidated *canonicalBackgroundOwner
+	defer func() {
+		w.mu.Unlock()
+		if invalidated != nil {
+			invalidated.publishUnavailable()
+		}
+	}()
 	if w.stopping || w.pendingGeneration[path] != generation {
 		return false
 	}
@@ -2064,7 +2373,11 @@ func (w *Watcher) schedulePointMutationRetry(path string, kind ChangeKind, gener
 	if _, exists := w.pending[path]; exists {
 		return true
 	}
-	w.armPointMutationTimerLocked(path, kind, generation, attempt, w.mutationRetryDelay(attempt))
+	if observation := w.mutationWaiters[path][generation].timerObservation; observation != nil && observation.background != nil {
+		invalidated = observation.background
+		invalidated.invalidate("retry_or_backoff")
+	}
+	w.armPointMutationTimerLocked(path, kind, generation, attempt, w.mutationRetryDelay(attempt), nil, 0, false)
 	return true
 }
 
@@ -2078,19 +2391,6 @@ func (w *Watcher) completeMutationWaitersIfCurrent(path string, appliedGeneratio
 	return w.completeMutationWaitersGuarded(path, appliedGeneration, err, DerivedFanoutCompleteness{}, true)
 }
 
-// completeMutationWaitersWithFanout is the arm that actually ran the graph
-// patch, so it is the only one that has a derived-fan-out observation to
-// publish. Every other completion arm reports the zero value, which reads as
-// "not observed" rather than as a complete fan-out.
-func (w *Watcher) completeMutationWaitersWithFanout(
-	path string,
-	appliedGeneration uint64,
-	err error,
-	fanout DerivedFanoutCompleteness,
-) bool {
-	return w.completeMutationWaitersGuarded(path, appliedGeneration, err, fanout, true)
-}
-
 func (w *Watcher) completeMutationWaitersGuarded(
 	path string,
 	appliedGeneration uint64,
@@ -2098,9 +2398,21 @@ func (w *Watcher) completeMutationWaitersGuarded(
 	fanout DerivedFanoutCompleteness,
 	requireCurrent bool,
 ) bool {
+	return w.completeMutationWaitersObserved(path, appliedGeneration, err, fanout, requireCurrent, nil)
+}
+
+func (w *Watcher) completeMutationWaitersObserved(
+	path string,
+	appliedGeneration uint64,
+	err error,
+	fanout DerivedFanoutCompleteness,
+	requireCurrent bool,
+	publication *pointPublicationAttempt,
+) bool {
 	type completion struct {
-		requested uint64
-		done      chan MutationResult
+		requested   uint64
+		done        chan MutationResult
+		publication *PublicationPhaseRecord
 	}
 	// One choke point for every completion arm, present and future: a mutation
 	// that reports an error never publishes a derived-fan-out verdict. Reindexed
@@ -2115,20 +2427,48 @@ func (w *Watcher) completeMutationWaitersGuarded(
 		w.mu.Unlock()
 		return false
 	}
+	_, hasAppliedWaiter := w.mutationWaiters[path][appliedGeneration]
+	// The successful executor's finishGeneration may already have removed the
+	// pending ordinal. Its exact waiter must still exist, with no newer owner.
+	currentIndependent := hasAppliedWaiter && w.pendingGeneration[path] <= appliedGeneration
 	if requireCurrent && w.pendingGeneration[path] == appliedGeneration {
 		delete(w.pendingGeneration, path)
 	}
 	var completions []completion
-	for generation, done := range w.mutationWaiters[path] {
+	var accepted *PublicationPhaseRecord
+	for generation, waiter := range w.mutationWaiters[path] {
 		if generation <= appliedGeneration {
-			completions = append(completions, completion{requested: generation, done: done})
+			w.finishMutationTierLocked(path, waiter.ticket, err, fanout)
+			if err == nil && generation < appliedGeneration {
+				w.mutationWaitersLater++
+			}
+			if publication != nil && err == nil && !w.stopping && generation == appliedGeneration && waiter.publication == publication.record {
+				accepted = waiter.publication
+			}
+			if publication != nil && publication.independent && err == nil && !w.stopping &&
+				generation < appliedGeneration && waiter.publication != nil && currentIndependent {
+				accepted = publication.record
+			}
+			completions = append(completions, completion{requested: generation, done: waiter.done, publication: waiter.publication})
 			delete(w.mutationWaiters[path], generation)
 		}
 	}
 	if len(w.mutationWaiters[path]) == 0 {
 		delete(w.mutationWaiters, path)
 	}
+	if w.observedMutationGeneration[path] <= appliedGeneration {
+		delete(w.observedMutationGeneration, path)
+	}
 	w.mu.Unlock()
+	if accepted != nil {
+		accepted.Absorb(publication.stamps)
+		if publication.independent {
+			accepted.Mark(PublicationTicketCompleted)
+			for _, completion := range completions {
+				completion.publication.linkCoalescedWinner(accepted, completion.requested, appliedGeneration)
+			}
+		}
+	}
 
 	for _, completion := range completions {
 		completion.done <- MutationResult{
@@ -2140,18 +2480,26 @@ func (w *Watcher) completeMutationWaitersGuarded(
 		}
 		close(completion.done)
 	}
+	w.drainHeldNative(path)
 	return true
 }
 
 func (w *Watcher) failMutationWaiters(err error) {
 	w.mu.Lock()
 	waiters := w.mutationWaiters
+	for path, byGeneration := range waiters {
+		for _, waiter := range byGeneration {
+			w.finishMutationTierLocked(path, waiter.ticket, err, DerivedFanoutCompleteness{})
+		}
+	}
 	w.mutationWaiters = nil
+	w.heldNative = nil
+	w.observedMutationGeneration = nil
 	w.mu.Unlock()
 	for _, byGeneration := range waiters {
-		for generation, done := range byGeneration {
-			done <- MutationResult{RequestedGeneration: generation, Err: err}
-			close(done)
+		for generation, waiter := range byGeneration {
+			waiter.done <- MutationResult{RequestedGeneration: generation, Err: err}
+			close(waiter.done)
 		}
 	}
 }
@@ -2223,15 +2571,23 @@ func (w *Watcher) shouldEnterStorm() bool {
 // later delete of the same path overwrites an earlier create so the
 // drain does the right final thing (treats the path as deleted).
 func (w *Watcher) recordInStorm(path string, kind ChangeKind) {
+	w.recordInStormEvent(path, kind, false)
+}
+
+func (w *Watcher) recordInStormEvent(path string, kind ChangeKind, native bool) {
 	w.stormMu.Lock()
 	defer w.stormMu.Unlock()
 	if w.stormStopped {
 		return
 	}
-	w.stormActive = true
 	// Cancel any pending per-file timers for this path — storm mode
 	// takes over.
 	w.mu.Lock()
+	if native && w.holdNativeForToolLocked(path, kind) {
+		w.mu.Unlock()
+		return
+	}
+	w.stormActive = true
 	if timer, exists := w.pending[path]; exists {
 		if timer.Stop() {
 			w.asyncWork.Done()
@@ -2248,6 +2604,29 @@ func (w *Watcher) recordInStorm(path string, kind ChangeKind) {
 			w.stormGenerations[path] = generation
 		}
 	}
+	// A native-only storm path has no stopped point timer to adopt. Give it
+	// the same path generation and live ticket evidence as point admission.
+	if w.stormGenerations[path] == 0 {
+		w.nextGeneration++
+		generation := w.nextGeneration
+		if w.stormGenerations == nil {
+			w.stormGenerations = make(map[string]uint64)
+		}
+		if w.pendingGeneration == nil {
+			w.pendingGeneration = make(map[string]uint64)
+		}
+		if w.mutationWaiters == nil {
+			w.mutationWaiters = make(map[string]map[uint64]mutationWaiter)
+		}
+		if w.mutationWaiters[path] == nil {
+			w.mutationWaiters[path] = make(map[uint64]mutationWaiter)
+		}
+		done := make(chan MutationResult, 1)
+		ticket := newMutationTierTicket(path, generation, done)
+		w.mutationWaiters[path][generation] = mutationWaiter{done: done, ticket: ticket}
+		w.pendingGeneration[path] = generation
+		w.stormGenerations[path] = generation
+	}
 	w.mu.Unlock()
 	w.stormBatch[path] = kind
 	w.stormRetryAttempt = 0
@@ -2259,10 +2638,34 @@ func (w *Watcher) recordInStorm(path string, kind ChangeKind) {
 
 func (w *Watcher) armStormTimerLocked(delay time.Duration) {
 	w.stormWork.Add(1)
+	if w.mutationTimerArmed != nil {
+		w.mutationTimerArmed(delay)
+	}
+	var observation *mutationSetTimerObservation
+	if w.stormExplicit && w.stormPublicationObserved {
+		observation = &mutationSetTimerObservation{invocation: w.stormSharedInvocation, watcher: weak.Make(w), armStarted: time.Now()}
+		if observation.invocation != nil && observation.invocation.arms.Add(1) != 1 {
+			observation.invocation.invalid.Store(true)
+		}
+		for _, generation := range w.stormGenerations {
+			if generation > observation.frontier {
+				observation.frontier = generation
+			}
+		}
+	}
+	w.stormTimerObservation = observation
 	w.stormTimer = time.AfterFunc(delay, func() {
 		defer w.stormWork.Done()
-		w.drainStorm()
+		attempt := w.drainStormObserved(observation)
+		returned := time.Now()
+		if w.sharedOwnerBeforeProjection != nil {
+			w.sharedOwnerBeforeProjection(returned)
+		}
+		w.finishSharedOwnerProof(attempt, observation, returned)
 	})
+	if observation != nil {
+		observation.armFinished = time.Now()
+	}
 }
 
 // stopStormTimerLocked cancels the currently published quiet timer. A timer
@@ -2275,7 +2678,10 @@ func (w *Watcher) stopStormTimerLocked() {
 	}
 	if w.stormTimer.Stop() {
 		w.stormWork.Done()
+	} else if w.stormTimerObservation != nil {
+		w.stormTimerObservation.invalid.Store(true)
 	}
+	w.stormTimerObservation = nil
 	w.stormTimer = nil
 }
 
@@ -2283,7 +2689,17 @@ func (w *Watcher) stopStormTimerLocked() {
 // parse/evict pipeline. The batch runner performs one receipt-scoped resolver
 // pass and one derived catch-up; no per-file transaction or graph-wide tail is
 // paid for a checkout-sized event burst.
-func (w *Watcher) drainStorm() {
+func (w *Watcher) drainStorm() { w.drainStormObserved(nil) }
+
+func (w *Watcher) drainStormObserved(timer *mutationSetTimerObservation) (finished *mutationSetPublicationAttempt) {
+	entered := time.Now()
+	var publication *mutationSetPublicationAttempt
+	completed := false
+	defer func() {
+		if publication != nil && completed {
+			w.finishMutationSetBackground(publication, timer, time.Now())
+		}
+	}()
 	var generations map[string]uint64
 	defer func() {
 		recovered := recover()
@@ -2303,6 +2719,8 @@ func (w *Watcher) drainStorm() {
 	generations = w.stormGenerations
 	explicit := w.stormExplicit
 	w.stormExplicit = false
+	w.stormPublicationObserved = false
+	w.stormSharedInvocation = nil
 	retryAttempt := w.stormRetryAttempt
 	w.stormBatch = make(map[string]ChangeKind)
 	w.stormGenerations = make(map[string]uint64)
@@ -2342,11 +2760,19 @@ func (w *Watcher) drainStorm() {
 	var err error
 	var fanout DerivedFanoutCompleteness
 	if explicit {
-		result, fanout, err = w.reindexExplicitMutationPaths(paths)
+		publication = w.beginMutationSetPublication(generations, entered, retryAttempt)
+		var stamps *PublicationStamps
+		if publication != nil {
+			stamps = publication.stamps
+		}
+		result, fanout, err = w.reindexMutationPathsObserved(paths, true, generations, stamps)
 	} else {
-		result, err = w.reindexStormPaths(paths)
+		result, fanout, err = w.reindexStormPathsObserved(paths, generations)
 	}
 
+	if publication != nil {
+		w.finishMutationSetPublication(publication, result, err, time.Now())
+	}
 	reindexed, deleted, failed := 0, 0, 0
 	if result != nil {
 		reindexed = result.StaleFileCount
@@ -2373,6 +2799,11 @@ func (w *Watcher) drainStorm() {
 		err = errWatcherStopped
 	}
 	w.completeStormMutationWaiters(generations, result, err, fanout)
+	completed = err == nil && result != nil
+	if completed {
+		finished = publication
+	}
+	return
 }
 
 func (w *Watcher) scheduleStormMutationRetry(batch map[string]ChangeKind, generations map[string]uint64, attempt int, explicit bool) bool {
@@ -2441,13 +2872,6 @@ func (w *Watcher) completeStormMutationWaiters(
 
 	w.mu.Lock()
 	for path, appliedGeneration := range generations {
-		// A newer direct mutation now owns every older ticket for this path.
-		// Recheck while holding the same mutex used by successor admission so a
-		// permanent batch failure cannot strand the older waiter on the failed
-		// generation.
-		if w.pendingGeneration[path] > appliedGeneration {
-			continue
-		}
 		pathErr := batchErr
 		if pathErr == nil && result == nil {
 			pathErr = errors.New("storm mutation batch completed without a result")
@@ -2457,6 +2881,14 @@ func (w *Watcher) completeStormMutationWaiters(
 				pathErr = fmt.Errorf("storm mutation batch failed to index %s", path)
 			}
 		}
+		if !w.stopping && w.pendingGeneration[path] > appliedGeneration {
+			w.mutationSuperseded++
+		}
+		// Failed/unlanded work cannot cover receipts owned by a newer
+		// repair. A successful path covers only its applied ordinal.
+		if pathErr != nil && w.pendingGeneration[path] > appliedGeneration {
+			continue
+		}
 		if w.pendingGeneration[path] == appliedGeneration {
 			delete(w.pendingGeneration, path)
 		}
@@ -2464,12 +2896,16 @@ func (w *Watcher) completeStormMutationWaiters(
 		if pathErr != nil {
 			pathFanout = DerivedFanoutCompleteness{}
 		}
-		for requestedGeneration, done := range w.mutationWaiters[path] {
+		for requestedGeneration, waiter := range w.mutationWaiters[path] {
 			if requestedGeneration > appliedGeneration {
 				continue
 			}
+			w.finishMutationTierLocked(path, waiter.ticket, pathErr, pathFanout)
+			if pathErr == nil && requestedGeneration < appliedGeneration {
+				w.mutationWaitersLater++
+			}
 			completions = append(completions, completion{
-				done: done,
+				done: waiter.done,
 				result: MutationResult{
 					RequestedGeneration: requestedGeneration,
 					AppliedGeneration:   appliedGeneration,
@@ -2483,12 +2919,18 @@ func (w *Watcher) completeStormMutationWaiters(
 		if len(w.mutationWaiters[path]) == 0 {
 			delete(w.mutationWaiters, path)
 		}
+		if w.observedMutationGeneration[path] <= appliedGeneration {
+			delete(w.observedMutationGeneration, path)
+		}
 	}
 	w.mu.Unlock()
 
 	for _, completion := range completions {
 		completion.done <- completion.result
 		close(completion.done)
+	}
+	for path := range generations {
+		w.drainHeldNative(path)
 	}
 }
 
@@ -2590,6 +3032,17 @@ func (w *Watcher) patchGraphWithReceiptState(
 	receiptChecked bool,
 	fanout *DerivedFanoutCompleteness,
 ) error {
+	return w.patchGraphWithReceiptStateObserved(path, kind, generation, receiptChecked, fanout, nil)
+}
+
+func (w *Watcher) patchGraphWithReceiptStateObserved(
+	path string,
+	kind ChangeKind,
+	generation uint64,
+	receiptChecked bool,
+	fanout *DerivedFanoutCompleteness,
+	publication *pointPublicationAttempt,
+) error {
 	if !w.generationCurrent(path, generation) {
 		return errMutationSuperseded
 	}
@@ -2599,12 +3052,13 @@ func (w *Watcher) patchGraphWithReceiptState(
 	// IndexRepo replacement uses the same lane and cannot change underneath
 	// the raw patch.
 	laneCtx, cancelLane := w.mutationLaneContext()
+	laneCtx = publication.withContext(laneCtx)
 	err := w.indexer.coordinateRepositoryMutation(laneCtx, OutputEntryWatcherPatchGraph, func() error {
 		idx := w.currentMutationIndexer()
 		if idx == nil {
 			return errWatcherIndexerMissing
 		}
-		return w.patchGraphWithReceiptStateRawModern(idx, path, kind, generation, receiptChecked, &pending, fanout)
+		return w.patchGraphWithReceiptStateRawModern(laneCtx, idx, path, kind, generation, receiptChecked, &pending, fanout)
 	})
 	cancelLane()
 	// User callbacks are deliberately outside the repository lane. Their
@@ -2642,20 +3096,28 @@ func pointMutationClassification(
 // reindexPointPathRaw runs after the caller has acquired the repository lane.
 // MultiWatcher supplies the cross-repository resolver and derived tail; a
 // standalone Watcher falls back to the equivalent single-repository tail.
-func (w *Watcher) reindexPointPathRaw(idx *Indexer, path string) (*IndexResult, error) {
+func (w *Watcher) reindexPointPathRaw(idx *Indexer, path string, generation uint64, stamps *PublicationStamps) (*IndexResult, error) {
 	if w.pointReindexRaw != nil {
-		return w.pointReindexRaw(path)
+		return w.pointReindexRaw(path, stamps)
 	}
 	if idx == nil || idx.rootPath == "" {
 		return nil, errWatcherIndexerMissing
 	}
-	return idx.incrementalPointWatcherPath(idx.rootPath, path)
+	mode := incrementalPathMode{
+		detectDeletions: true, forceExplicitFiles: true, publication: stamps,
+		onRelations: func() { w.markRelations(path, generation) },
+	}
+	if owner := idx.repositoryMutationOwner; owner != nil && idx.repoPrefix != "" {
+		return owner.incrementalReindexRepoRawMode(idx.repoPrefix, []string{path}, mode)
+	}
+	return idx.incrementalWatcherPaths(idx.rootPath, []string{path}, mode)
 }
 
 // patchGraphWithReceiptStateRawModern replaces the historical hand-built point
 // patch with the same receipt, resolver, and exact derived-invalidation pipeline
 // used by bounded reconciliation. The caller already owns the repository lane.
 func (w *Watcher) patchGraphWithReceiptStateRawModern(
+	ctx context.Context,
 	idx *Indexer,
 	path string,
 	kind ChangeKind,
@@ -2664,6 +3126,12 @@ func (w *Watcher) patchGraphWithReceiptStateRawModern(
 	pending *symbolChangeNotification,
 	fanout *DerivedFanoutCompleteness,
 ) error {
+	stamps := PublicationStampsFrom(ctx)
+	if stamps.switchAttemptControl(patchInspection) {
+		// Registered before the existing patchMu unlock: early-return inspection
+		// includes its real unlock, then outer mutation finalization continues.
+		defer stamps.switchAttemptControl(patchAttemptFinalize)
+	}
 	if !w.generationCurrent(path, generation) {
 		return errMutationSuperseded
 	}
@@ -2680,6 +3148,7 @@ func (w *Watcher) patchGraphWithReceiptStateRawModern(
 	// startup replay already checked the persisted receipt, so it bypasses this
 	// cheap in-memory mtime test and forces the exact observed path.
 	if kind == ChangeModified && !receiptChecked && idx.fileMtimeMatches(path) {
+		stamps.recordNativeMtimeDuplicate()
 		return nil
 	}
 
@@ -2725,7 +3194,9 @@ func (w *Watcher) patchGraphWithReceiptStateRawModern(
 	// "complete" over a catch-up that was cut.
 	observation := beginDerivedFanoutObservation(idx)
 	defer observation.close()
-	result, err := w.reindexPointPathRaw(idx, path)
+	stamps.switchAttemptControlAt(patchExecutorControl, markPointPublication(ctx, PublicationPatchExecutionStarted))
+	result, err := w.reindexPointPathRaw(idx, path, generation, PublicationStampsFrom(ctx))
+	stamps.switchAttemptControlAt(patchAttemptFinalize, markPointPublication(ctx, PublicationPatchExecutionFinished))
 	observed := observation.close()
 	if err != nil {
 		// A failed patch publishes no fan-out verdict. Whatever the bounded
@@ -2824,13 +3295,26 @@ func (w *Watcher) patchGraphWithReceiptStateRawModern(
 	default:
 	}
 	if w.logger != nil {
-		w.logger.Info("graph patch complete",
-			zap.String("file", path),
-			zap.String("kind", string(kind)),
-			zap.String("delta_class", classification),
-			zap.Int64("ms", ev.DurationMs),
-			zap.Int("incident_edges", priorEdges),
-			zap.Inline(patchWriteLog{split: idx.writeCounterMark().Since(writes)}))
+		if laps, observed := PublicationStampsFrom(ctx).snapshotPatchLog(); observed {
+			w.logger.Info("graph patch complete",
+				zap.String("file", path),
+				zap.String("kind", string(kind)),
+				zap.String("delta_class", classification),
+				zap.Int64("ms", ev.DurationMs),
+				zap.Int("incident_edges", priorEdges),
+				zap.Inline(patchWriteLog{split: idx.writeCounterMark().Since(writes)}),
+				zap.Inline(laps))
+		} else {
+			// Keep the ordinary native log path free of new timing snapshots,
+			// field slices or lazy encoders. Only a bound attempt opts in.
+			w.logger.Info("graph patch complete",
+				zap.String("file", path),
+				zap.String("kind", string(kind)),
+				zap.String("delta_class", classification),
+				zap.Int64("ms", ev.DurationMs),
+				zap.Int("incident_edges", priorEdges),
+				zap.Inline(patchWriteLog{split: idx.writeCounterMark().Since(writes)}))
+		}
 	}
 	if superseded {
 		// Every core write of the patch landed before the newer generation
@@ -2840,7 +3324,7 @@ func (w *Watcher) patchGraphWithReceiptStateRawModern(
 			journal.settle()
 			journal.written()
 		}
-		return errMutationSuperseded
+		return errPatchLandedSuperseded
 	}
 	return nil
 }

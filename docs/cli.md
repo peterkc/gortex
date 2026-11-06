@@ -140,6 +140,17 @@ without changing config. Do not untrack the live owner just to resolve a
 duplicate name. If the owner's path no longer exists, inspect the untrack
 preview before confirming removal of its corpus.
 
+Live collisions return `prefix_collision` and a non-zero exit with or without
+`--wait`, including while another track holds the controller lock. The error
+names the owner. A warmup loser does not change the owner's corpus, workspace
+configuration, watcher or pending base publication. Probes report the collision
+instead of presenting that root as loading or already tracked.
+
+An unresolved configured alias is not proof of a new root. If startup has not
+finished resolving those identities, retry after that resolution completes;
+Gortex leaves the tracking configuration unchanged rather than adding a second
+entry for the same physical directory.
+
 ## Per-repo setup
 
 ```bash
@@ -524,6 +535,7 @@ gortex savings [--verbose] [--json]      # Today / Last 7 days / All time bar-ch
 gortex bench <sub>                       # user-facing benchmark suite (recall / tokens / tokens-efficiency / perf / daemon-latency / embedders / swebench / all)
 gortex audit [--badge|--format svg|json|text]  # A-F repo health grade + README-ready SVG shield
 gortex gain [--since 7d]                 # forward-looking per-call USD savings + optional history slice
+gortex store cleanup-backup [--backend-path P]  # remove the store backups taken before schema upgrades (the daemon also prunes them after 14 days)
 gortex version
 ```
 

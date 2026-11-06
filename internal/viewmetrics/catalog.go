@@ -17,6 +17,18 @@ import "strings"
 // Series names. The prefix is the subsystem, the suffix is the unit: _total
 // for a counter, _seconds for a duration, and a bare noun for a gauge.
 const (
+	// Dispatcher admission series have a fixed three-lane vocabulary. Queue
+	// bucket counters are disjoint upper bounds in milliseconds, not cumulative.
+	MCPDispatchInFlight                = "views_mcp_dispatch_in_flight"
+	MCPDispatchQueueDepth              = "views_mcp_dispatch_queue_depth"
+	MCPDispatchDraining                = "views_mcp_dispatch_draining"
+	MCPDispatchCancelledHeld           = "views_mcp_dispatch_cancelled_held"
+	MCPDispatchRefusalsTotal           = "views_mcp_dispatch_refusals_total"
+	MCPDispatchReservedSlotsUsed       = "views_mcp_dispatch_reserved_slots_used"
+	MCPDispatchReservedAdmissionsTotal = "views_mcp_dispatch_reserved_admissions_total"
+	MCPDispatchQueueWaitBucketsTotal   = "views_mcp_dispatch_queue_wait_buckets_total"
+	MCPDispatchQueueWaitSeconds        = "views_mcp_dispatch_queue_wait_seconds"
+
 	// SearchRerankAnalysisSkippedBusyTotal counts searches that omitted all analysis
 	// ranking signals because an optional read found the store writer busy.
 	SearchRerankAnalysisSkippedBusyTotal = "views_search_rerank_analysis_skipped_busy_total"
@@ -227,6 +239,11 @@ const (
 	// ContractRepairTotal counts idle repairs of contract inputs that no
 	// ordinary save would settle, by what was repaired.
 	ContractRepairTotal = "views_contract_repair_total"
+	// ContractLinkedJobsTotal counts what the linked-checkout scheduling
+	// policy did with a linked worktree's jobs: held back for foreground
+	// demand, stopped at a fill checkpoint because demand returned, or
+	// started, a strict request's start counted apart.
+	ContractLinkedJobsTotal = "views_contract_linked_jobs_total"
 )
 
 // Label names.
@@ -250,6 +267,7 @@ const (
 	LabelWhy      = "why"
 	LabelMode     = "mode"
 	LabelResult   = "result"
+	LabelPolicy   = "policy"
 )
 
 // Contract analysis job modes: a whole-cohort rebuild, a cache fill that
@@ -328,6 +346,23 @@ const (
 	ContractRepairPendingHeader = "pending_header"
 	ContractRepairStuckReceipt  = "stuck_receipt"
 	ContractRepairStuckEnvelope = "stuck_envelope"
+)
+
+// Linked-checkout contract scheduling policies: start a linked worktree's job
+// only once the daemon is idle, at most one at a time and spaced, or at once.
+const (
+	ContractLinkedIdle      = "idle"
+	ContractLinkedThrottled = "throttled"
+	ContractLinkedEager     = "eager"
+)
+
+// Linked-checkout contract job events. A deferral is counted once per hold,
+// however long it lasts; a strict start is a job a waiting caller asked for.
+const (
+	ContractLinkedDeferred          = "deferred"
+	ContractLinkedCheckpointStopped = "checkpoint_stopped"
+	ContractLinkedStarted           = "started"
+	ContractLinkedStrictStarted     = "strict_started"
 )
 
 // Committed-base generation shapes: self-contained, or composed over a parent.
@@ -632,7 +667,20 @@ func FallbackReasonCode(reason string) string {
 
 // catalog declares every series. It is the allow-list: a name absent from it
 // records nothing.
+var dispatchLaneLabel = labelSpec{name: "lane", values: []string{"mutating", "fast", "slow"}}
+var dispatchWaitOutcomeLabel = labelSpec{name: "outcome", values: []string{"admitted", "refused", "cancelled"}}
+
 var catalog = map[string]spec{
+	MCPDispatchInFlight:                {kind: kindGauge, labels: []labelSpec{dispatchLaneLabel}},
+	MCPDispatchQueueDepth:              {kind: kindGauge, labels: []labelSpec{dispatchLaneLabel}},
+	MCPDispatchDraining:                {kind: kindGauge, labels: []labelSpec{dispatchLaneLabel}},
+	MCPDispatchCancelledHeld:           {kind: kindGauge, labels: []labelSpec{dispatchLaneLabel}},
+	MCPDispatchRefusalsTotal:           {kind: kindCounter, labels: []labelSpec{dispatchLaneLabel}},
+	MCPDispatchReservedSlotsUsed:       {kind: kindGauge},
+	MCPDispatchReservedAdmissionsTotal: {kind: kindCounter},
+	MCPDispatchQueueWaitSeconds:        {kind: kindDuration, labels: []labelSpec{dispatchLaneLabel, dispatchWaitOutcomeLabel}},
+	MCPDispatchQueueWaitBucketsTotal:   {kind: kindCounter, labels: []labelSpec{dispatchLaneLabel, dispatchWaitOutcomeLabel, {name: "bucket_ms", values: []string{"1ms", "5ms", "10ms", "25ms", "50ms", "100ms", "250ms", "500ms", "1000ms", "2500ms", "5000ms", "10000ms", "30000ms", "inf"}}}},
+
 	SearchRerankAnalysisSkippedBusyTotal: {kind: kindCounter},
 	FamilyInventorySeconds: {kind: kindDuration, labels: []labelSpec{
 		{name: LabelOutcome, values: []string{OutcomeOK, OutcomeError}},
@@ -826,5 +874,11 @@ var catalog = map[string]spec{
 	}},
 	ContractRepairTotal: {kind: kindCounter, labels: []labelSpec{
 		{name: LabelKind, values: []string{ContractRepairPendingHeader, ContractRepairStuckReceipt, ContractRepairStuckEnvelope}},
+	}},
+	ContractLinkedJobsTotal: {kind: kindCounter, labels: []labelSpec{
+		{name: LabelPolicy, values: []string{ContractLinkedIdle, ContractLinkedThrottled, ContractLinkedEager}},
+		{name: LabelEvent, values: []string{
+			ContractLinkedDeferred, ContractLinkedCheckpointStopped, ContractLinkedStarted, ContractLinkedStrictStarted,
+		}},
 	}},
 }

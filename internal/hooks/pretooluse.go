@@ -809,7 +809,7 @@ func hookSearchScope(cwd string, toolInput map[string]any) searchScopeVerdict {
 // scopeNamesFile reports whether a `path` scope names one file rather than a
 // directory to search under. An existing path answers directly; one that is
 // not on disk (a scope the agent typed from memory) is judged by whether it
-// carries an extension.
+// carries an extension (`.` and `..` are always directories).
 func scopeNamesFile(cwd, scope string) bool {
 	abs := scope
 	if !filepath.IsAbs(abs) && cwd != "" {
@@ -817,6 +817,9 @@ func scopeNamesFile(cwd, scope string) bool {
 	}
 	if info, err := os.Stat(abs); err == nil {
 		return !info.IsDir()
+	}
+	if base := filepath.Base(scope); base == "." || base == ".." {
+		return false
 	}
 	return filepath.Ext(scope) != ""
 }
@@ -1205,7 +1208,7 @@ func readOnlyNativeAllowance(writing bool) enrichResult {
 // hook lets it through because the path's repository is still loading.
 func repoLoadingNativeAllowance(repo string) string {
 	if repo == "" {
-		repo = "this repository"
+		return "[Gortex] Graph admission for this path is still resolving and is not yet established (repo_loading, identity_pending). Native tools are allowed while this temporary state resolves. Retry shortly without changing tracking configuration.\n"
 	}
 	return fmt.Sprintf("[Gortex] %s is still loading after a restart; graph tools return repo_loading until it is ready. "+
 		"Native reads are allowed until then.\n", repo)
@@ -1314,7 +1317,7 @@ func fileIndexStatusFromCoverage(result daemon.FileCoverageResult) fileIndexStat
 		st.ProbeOK, st.ReadOnly, st.MutationKnown, st.MutationReason = true, true, true, result.MutationReason
 	}
 	st.MutationKnown = st.MutationKnown || result.MutationState == "ready"
-	if result.RepoState == daemon.RepoStateLoading {
+	if result.RepoState == daemon.RepoStateLoading || result.RepoState == daemon.RepoStateIdentityPending {
 		// Coverage read from a loading repository's persisted rows is not a
 		// reason to deny: report it as loading, never as indexed.
 		st.ProbeOK, st.Loading, st.LoadingRepo = true, true, result.Repo
@@ -1455,7 +1458,77 @@ func enrichBashWithProbe(toolInput map[string]any, cwd string, probe fileScopePr
 	if cmd == "" {
 		return enrichResult{}
 	}
+	return enrichBashCommand(cmd, cwd, probe, 0, time.Time{})
+}
 
+// enrichBashCommand answers one command at the given nesting depth: 0 for
+// the command the agent typed, 1 for a command it runs as text (`bash -c`,
+// a Python os.system), whose own nested commands are not examined.
+//
+// The shapes the hook has always answered come first, exactly as before:
+// their analysis and probes share nothing with what follows. Only a
+// command they do not deny is looked at again for what they cannot see —
+// os.open, scripts behind a wrapper, nested commands — in a second
+// analysis with its own budget, starting when it begins. A zero deadline
+// gives each part its own; a nested command gets the deadline of the
+// command it is nested in.
+func enrichBashCommand(cmd, cwd string, probe fileScopeProbe, depth int, deadline time.Time) enrichResult {
+	r := enrichBashShapes(cmd, cwd, probe, deadline)
+	if r.deny {
+		return r
+	}
+	if deadline.IsZero() {
+		deadline = time.Now().Add(inlineScriptTime)
+	}
+	pyScripts, shells := inlineScriptsAt(cmd, true)
+	if len(pyScripts) == 0 && len(shells) == 0 {
+		return r
+	}
+	scripts := analyzeInlineScripts(pyScripts, deadline, true)
+	dirs := newCommandDirs(cmd)
+	var nested []nestedCommand
+	if depth == 0 {
+		nested = nestedCommands(shells, scripts, dirs, cwd)
+	}
+	r = enrichBashExtra(r, cwd, probe, deadline, scripts, shells, dirs, nested)
+	if depth > 0 {
+		return r
+	}
+	// A walk that reads the files it finds is answered last, after
+	// everything else, nested commands included, and only ever adds a
+	// deny.
+	return enrichBashWalks(r, walkCandidates(pyScripts, dirs, cwd, nested), deadline)
+}
+
+// enrichBashExtra answers what the shapes cannot see: os.open, scripts
+// behind a wrapper and the nested commands.
+func enrichBashExtra(r enrichResult, cwd string, probe fileScopeProbe, deadline time.Time, scripts []analyzedScript, shells []inlineScript, dirs commandDirs, nested []nestedCommand) enrichResult {
+	if len(scripts) == 0 && len(shells) == 0 {
+		return r
+	}
+	if extra, ok := scriptReadAnswer(scripts, true, dirs, cwd, probe, time.Now()); ok {
+		if extra.deny {
+			return extra
+		}
+		if r == (enrichResult{}) {
+			r = extra
+		}
+	}
+	// A Python os.open write is a write shape the patterns cannot see: it
+	// gets the shell-write answer.
+	if writes := scriptWrites(scripts, dirs); len(writes) > 0 {
+		if w, answered := enrichBashWrite(BashClassification{Action: BashActionWriteSource, Writes: writes}, cwd); answered {
+			if w.deny {
+				return w
+			}
+			r = w
+		}
+	}
+	return enrichNestedCommands(r, nested, probe, 0, deadline)
+}
+
+// enrichBashShapes answers the shell shapes and inline Python of a command.
+func enrichBashShapes(cmd, cwd string, probe fileScopeProbe, deadline time.Time) enrichResult {
 	c := classifyBashCommand(cmd)
 	if c.Action == BashActionWriteSource {
 		if result, answered := enrichBashWrite(c, cwd); answered {
@@ -1466,16 +1539,46 @@ func enrichBashWithProbe(toolInput map[string]any, cwd string, probe fileScopePr
 		// the write pre-pass instead of returning silence.
 		c = classifyBashReadCommand(cmd)
 	}
-	// A grep whose every target lies outside every tracked repo gets the
-	// silence `cat` of the same file and Grep with `path:` already get (#893):
-	// the graph the redirect names has nothing for it. Pass over it rather than
-	// stopping, so a source read chained after it is still answered.
+	// A grep whose every target lies outside every tracked repo, or is docs or
+	// config inside one, gets the silence `cat` of the same file and Grep with
+	// `path:` already get (#893): the graph the redirect names has nothing for
+	// it. Pass over it rather than stopping, so a source read chained after it
+	// is still answered, unless the operands it read off the command cannot
+	// be trusted (searchOperandsUncertain).
+	trusted := !searchOperandsUncertain(cmd)
 	outsideGraph := func(next BashClassification) bool {
-		return next.Action == BashActionGrepLike && bashSearchOutsideTrackedRepos(next.Paths, cwd)
+		return next.Action == BashActionGrepLike && trusted &&
+			(bashSearchOutsideTrackedRepos(next.Paths, cwd) || bashSearchNonSource(next.Paths, cwd))
 	}
 	if outsideGraph(c) {
 		c = classifyBashReadCommandSkipping(cmd, outsideGraph)
 	}
+	// An inline Python one-liner or heredoc that opens indexed source is the
+	// read door agents take once cat and grep are redirected. It is answered
+	// for every command, not only when the shell leaves it passthrough: a
+	// read/grep/find that follows it would otherwise make the command
+	// non-passthrough and skip the Python analysis, so `python3 -c "…"`
+	// chained after a `head` still answers. The analysis is self-limiting and
+	// silent for commands that carry no inline Python.
+	//
+	// A Python deny answers at once. Anything softer (the edit advisory, a
+	// read-only or loading allowance) must not cost the command a deny its
+	// shell read earns on its own, so the shell answer is taken first when
+	// it denies.
+	py, pyAnswered := enrichBashScriptRead(cmd, cwd, probe, deadline)
+	if pyAnswered && (py.deny || c.Action == BashActionPassthrough) {
+		return py
+	}
+	shell := enrichBashShellRead(c, cwd, probe)
+	if shell.deny || !pyAnswered {
+		return shell
+	}
+	return py
+}
+
+// enrichBashShellRead answers the grep, find or source read a classified
+// Bash command leads with.
+func enrichBashShellRead(c BashClassification, cwd string, probe fileScopeProbe) enrichResult {
 	switch c.Action {
 	case BashActionGrepLike:
 		return probeSymbolPattern("Bash", c.Pattern, cwd, defaultGrepGuidance())
@@ -1614,7 +1717,7 @@ var dirCoverageFn = dirCoverageViaDaemon
 // Only a completed walk that claimed nothing proves a scope holds no source.
 // From the graph alone a scope mid-walk looks exactly like an excluded one.
 func scopeTrackedFromCoverage(result daemon.DirCoverageResult) (hasSource, probeOK bool) {
-	if result.RepoState == daemon.RepoStateLoading {
+	if result.RepoState == daemon.RepoStateLoading || result.RepoState == daemon.RepoStateIdentityPending {
 		// A loading repository's scope holds nothing the graph will answer
 		// for yet, whatever its persisted rows say (see fileIndexStatus).
 		return false, true
