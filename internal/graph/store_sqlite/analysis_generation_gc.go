@@ -189,7 +189,7 @@ func (s *Store) pruneAnalysisGenerationChunk(ctx context.Context, generationID i
 	if err != nil {
 		return 0, false, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return 0, false, err
 	}
 	committed = true
@@ -245,7 +245,7 @@ func (s *Store) finishPruneAnalysisGeneration(ctx context.Context, generationID 
 	if err != nil {
 		return 0, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return 0, err
 	}
 	committed = true

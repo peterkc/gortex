@@ -118,7 +118,7 @@ func (s *Store) BulkUpsertEmbeddings(items []graph.VectorItem) error {
 		}
 	}
 
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 // BuildVectorIndex finalises the vector index. Because SimilarTo scores

@@ -54,7 +54,7 @@ func (s *Store) BulkSetCoverage(repoPrefix string, rows []graph.CoverageEnrichme
 			return err
 		}
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 // DeleteCoverage drops coverage rows for the supplied node ids, chunked.
@@ -109,7 +109,7 @@ func (s *Store) DeleteCoverage(nodeIDs []string) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 // CoverageRows returns coverage rows for repoPrefix; empty repoPrefix

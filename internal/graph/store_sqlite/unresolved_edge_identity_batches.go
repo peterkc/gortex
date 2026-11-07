@@ -241,7 +241,7 @@ func (s *Store) reindexUnresolvedEdgeTargetsTransactionLocked(
 		}
 		invalidatedAnalysis = true
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return stats, false, false, err
 	}
 	committed = true

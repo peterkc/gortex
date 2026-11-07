@@ -84,7 +84,7 @@ func (s *Store) markEdgesCrossRepo(edges []*graph.Edge) (changed, statements int
 			}
 			invalidatedAnalysis = true
 		}
-		if commitErr := tx.Commit(); commitErr != nil {
+		if commitErr := s.commitPayloadTx(tx); commitErr != nil {
 			return changed, statements, commitErr
 		}
 		changed += txChanged

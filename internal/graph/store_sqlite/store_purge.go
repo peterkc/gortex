@@ -362,7 +362,7 @@ func (s *Store) RekeyRepoPrefix(oldPrefix, newPrefix string) error {
 		changed = true
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return err
 	}
 	s.firstIndexDrainsMu.Lock()

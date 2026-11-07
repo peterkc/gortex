@@ -193,7 +193,7 @@ func (s *Store) copyPayloadGeneration(ctx context.Context, from, to int64, repoP
 	if err != nil {
 		return GenerationCopyCounts{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return GenerationCopyCounts{}, err
 	}
 	if counts.Rows > 0 {

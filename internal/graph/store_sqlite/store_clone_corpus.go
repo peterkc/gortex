@@ -104,7 +104,7 @@ func (s *Store) BulkSetCloneCorpus(repoPrefix string, rows []graph.CloneCorpusRo
 	if err := markCloneCorpusInitializedTx(tx, s.viewGen, repoPrefix); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 // BulkSetCloneSignatures finalizes existing clone-corpus rows without encoding
@@ -127,7 +127,7 @@ func (s *Store) BulkSetCloneSignatures(repoPrefix string, updates []graph.CloneC
 	if err := markCloneCorpusInitializedTx(tx, s.viewGen, repoPrefix); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 func updateCloneSignaturesTx(tx *sql.Tx, viewGen int64, repoPrefix string, updates []graph.CloneCorpusSignatureUpdate) error {
@@ -202,7 +202,7 @@ func (s *Store) ReplaceCloneCorpus(repoPrefix string, rows []graph.CloneCorpusRo
 	if err := markCloneCorpusInitializedTx(tx, s.viewGen, repoPrefix); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 // ResetCloneCorpus clears a repository's projection and initialization marker
@@ -225,7 +225,7 @@ func (s *Store) ResetCloneCorpus(repoPrefix string) error {
 	if _, err := tx.Exec(`DELETE FROM clone_corpus_state WHERE view_gen = ? AND repo_prefix = ?`, s.viewGen, repoPrefix); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 func upsertCloneCorpusTx(tx *sql.Tx, viewGen int64, repoPrefix string, rows []graph.CloneCorpusRow) error {
@@ -337,7 +337,7 @@ func (s *Store) MarkCloneCorpusInitialized(repoPrefix string) error {
 	if err := markCloneCorpusInitializedTx(tx, s.viewGen, repoPrefix); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 func markCloneCorpusInitializedTx(tx *sql.Tx, viewGen int64, repoPrefix string) error {

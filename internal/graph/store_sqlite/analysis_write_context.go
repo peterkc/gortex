@@ -32,6 +32,7 @@ func (s *Store) analysisWriteContext() context.Context {
 // transaction ends. A canceled database/sql lifetime would let a second
 // Rollback return ErrTxDone before its automatic rollback physically finished.
 type ownedWriteTx struct {
+	core            *storeCore
 	tx              *sql.Tx
 	release         func() error
 	committed       bool
@@ -57,7 +58,7 @@ func (s *Store) beginOwnedWrite(ctx context.Context) (*ownedWriteTx, error) {
 	if err != nil {
 		return nil, errors.Join(err, release())
 	}
-	return &ownedWriteTx{tx: tx, release: release}, nil
+	return &ownedWriteTx{core: s.storeCore, tx: tx, release: release}, nil
 }
 
 func (s *Store) acquireWriteConnContext(ctx context.Context) (*sql.Conn, func() error, error) {
@@ -78,10 +79,16 @@ func (o *ownedWriteTx) commit(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := o.core.fault(FaultPayloadWriteBeforeCommit); err != nil {
+		return err
+	}
 	o.commitAttempted = true
 	err := o.tx.Commit()
 	o.committed = err == nil
-	return err
+	if err != nil {
+		return err
+	}
+	return o.core.fault(FaultPayloadWriteAfterCommit)
 }
 
 func (o *ownedWriteTx) finish(err *error) {

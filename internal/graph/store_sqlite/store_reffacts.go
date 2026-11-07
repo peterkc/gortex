@@ -67,7 +67,7 @@ func (s *Store) BulkSetRefFacts(repoPrefix string, facts []graph.RefFact) error 
 			return err
 		}
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 // DeleteRefFactsByFiles drops all facts sourced in the supplied files for one
@@ -112,7 +112,7 @@ func (s *Store) DeleteRefFactsByFiles(repoPrefix string, files []string) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 // LoadRefFactsByFiles returns the persisted facts for one repo prefix, scoped

@@ -61,7 +61,7 @@ func (s *Store) execManagedPayloadWriteLocked(ctx context.Context, query string,
 	if err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return nil, err
 	}
 	return result, nil

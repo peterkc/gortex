@@ -80,7 +80,7 @@ func (s *Store) BulkSetFileMtimes(repoPrefix string, mtimes map[string]int64) er
 		return err
 	}
 
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 // ReplaceFileMtimes persists the AUTHORITATIVE full mtime set for one repo
@@ -114,7 +114,7 @@ func (s *Store) ReplaceFileMtimes(repoPrefix string, mtimes map[string]int64) er
 		return err
 	}
 
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 // DeleteFileMtimes drops the rows for a set of repo-relative file paths
@@ -160,7 +160,7 @@ func (s *Store) DeleteFileMtimes(repoPrefix string, paths []string) error {
 		}
 	}
 
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 // insertMtimesTx writes every (path -> ns) entry for repoPrefix into the

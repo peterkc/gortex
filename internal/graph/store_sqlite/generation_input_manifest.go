@@ -216,7 +216,7 @@ func (s *Store) WriteInputManifest(ctx context.Context, meta InputManifestMeta, 
 		s.viewGen, meta.ManifestVersion, isFull, len(entries), meta.PolicyDigest); err != nil {
 		return fmt.Errorf("store_sqlite: write input manifest meta at generation %d: %w", s.viewGen, err)
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 // InputManifest reads this generation's manifest in one read transaction. The

@@ -75,7 +75,7 @@ func (s *Store) LoadActiveAnalysisHeader(formatVersion uint32) (graph.AnalysisGe
 		if remainingErr != nil {
 			return graph.AnalysisGenerationHeader{}, false, remainingErr
 		}
-		if commitErr := tx.Commit(); commitErr != nil {
+		if commitErr := s.commitPayloadTx(tx); commitErr != nil {
 			return graph.AnalysisGenerationHeader{}, false, commitErr
 		}
 		committed = true
@@ -85,7 +85,7 @@ func (s *Store) LoadActiveAnalysisHeader(formatVersion uint32) (graph.AnalysisGe
 	if header.FormatVersion != formatVersion {
 		return graph.AnalysisGenerationHeader{}, false, nil
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return graph.AnalysisGenerationHeader{}, false, err
 	}
 	committed = true

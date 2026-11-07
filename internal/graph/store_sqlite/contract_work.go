@@ -68,7 +68,7 @@ func (s *Store) SetContractWork(ctx context.Context, work []graph.ContractWork) 
 	if err := setContractWorkTx(ctx, tx, s.viewGen, work, encoded); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 func (s *Store) ContractWorkContext(ctx context.Context) ([]graph.ContractWork, error) {

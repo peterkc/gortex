@@ -181,7 +181,7 @@ WHERE id IN (SELECT CAST(value AS TEXT) FROM json_each(?)) AND view_gen = ?`, fr
 		result.NodesRemoved = int(rows)
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return graph.ContractOwnerReplaceResult{}, err
 	}
 	committed = true

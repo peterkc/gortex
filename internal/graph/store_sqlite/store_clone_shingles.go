@@ -119,7 +119,7 @@ func (s *Store) DeleteCloneShingles(nodeIDs []string) error {
 		}
 	}
 
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 // LoadCloneShingles returns the recorded shingle sets for one repo

@@ -66,5 +66,5 @@ AND p.resolver_version=v.resolver_version AND p.dependency_revision=v.dependency
 			return err
 		}
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }

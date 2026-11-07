@@ -93,7 +93,7 @@ func (s *Store) WipeContent(repoPrefix string) error {
 	if _, err := deleteContentFTSByOwnershipTx(tx, contentOwnerByRepo, s.viewGen, repoPrefix); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 // WipeContentFile removes one file's content rows — the incremental
@@ -112,7 +112,7 @@ func (s *Store) WipeContentFile(filePath string) error {
 	if _, err := deleteContentFTSByOwnershipTx(tx, contentOwnerByFile, s.viewGen, filePath); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 // ContentRepoHasRows reports whether a repository owns any persisted content
@@ -159,7 +159,7 @@ func (s *Store) WipeContentFileInRepo(repoPrefix, filePath string) error {
 	if _, err := deleteContentFTSByOwnershipTx(tx, contentOwnerByRepoFile, s.viewGen, repoPrefix, filePath); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 // DeleteContentFilesForRepoNotIn sweeps a repo's content rows down to keep —
@@ -204,7 +204,7 @@ AND file_path NOT IN (SELECT CAST(value AS TEXT) FROM json_each(?))`
 	if _, err := deleteContentFTSByOwnershipTx(tx, predicate, s.viewGen, repoPrefix, keepJSON); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 // ReplaceContentFiles atomically replaces the complete section set for many
@@ -379,7 +379,7 @@ AND file_path IN (SELECT CAST(value AS TEXT) FROM json_each(?))`
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return err
 	}
 	stats.commits++
@@ -452,7 +452,7 @@ func (s *Store) AppendContent(repoPrefix string, items []graph.ContentFTSItem) e
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return err
 	}
 	commit = true

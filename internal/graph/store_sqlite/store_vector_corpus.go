@@ -60,7 +60,7 @@ func (s *Store) ReplaceVectorCorpus(
 	if err := ctx.Err(); err != nil {
 		return graph.VectorCorpusStats{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return graph.VectorCorpusStats{}, err
 	}
 	return stats, nil
