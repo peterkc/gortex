@@ -66,6 +66,10 @@ type backgroundCheckpointCoordination struct {
 }
 
 type storeCore struct {
+	// faultHook stops an operation at a declared durable boundary
+	// (fault_hook.go). It is set only by WithFaultHook and never changes.
+	faultHook FaultHook
+
 	firstIndexDrainsMu sync.Mutex
 	firstIndexDrains   map[string]graph.FirstIndexDrain
 
@@ -765,6 +769,8 @@ type openOptions struct {
 	// diskAvail reports the free bytes on the volume holding a directory.
 	// nil means platform.DiskAvailBytes; tests inject a fixed figure.
 	diskAvail func(dir string) (uint64, error)
+	// faultHook is WithFaultHook's hook; nil on every production path.
+	faultHook FaultHook
 }
 
 // WithRebuild permits Open to drop and recreate an on-disk database whose
@@ -1076,7 +1082,7 @@ func openStore(path string, current int, migrations []schemaMigration, o openOpt
 	// close the pools and prepared statements. Handles derived later by
 	// AtGeneration share this core and leave teardown to this one.
 	s := &Store{
-		storeCore: &storeCore{db: readDB, writerDB: db, readGate: readGate, dbPath: path, wiped: didWipe},
+		storeCore: &storeCore{db: readDB, writerDB: db, readGate: readGate, dbPath: path, wiped: didWipe, faultHook: o.faultHook},
 		ownsCore:  true,
 	}
 	// Initialise the bundle cache at construction so its pointer is
@@ -2693,7 +2699,7 @@ func (s *Store) persistEdgeAttributesBatch(edges []*graph.Edge) (statements int,
 			}
 			invalidatedAnalysis = true
 		}
-		if err := tx.Commit(); err != nil {
+		if err := s.commitPayloadTx(tx); err != nil {
 			return statements, err
 		}
 		if invalidatedAnalysis {
@@ -2839,7 +2845,7 @@ func (s *Store) ReindexEdge(e *graph.Edge, oldTo string) {
 		return
 	}
 	receipt.recordInserted(e, inserted)
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		panicOnFatal(err)
 		return
 	}

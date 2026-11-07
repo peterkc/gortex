@@ -51,7 +51,7 @@ func (s *Store) ReplaceSemanticBindingTypes(repoPrefix string, rows []graph.Sema
 		}
 		changed = semanticBindingWriteChanged(result) || changed
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return err
 	}
 	if changed {
@@ -122,7 +122,7 @@ func (s *Store) ReplaceSemanticBindingTypesForFiles(repoPrefix string, files []s
 		}
 		changed = semanticBindingWriteChanged(result) || changed
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return err
 	}
 	if changed {
@@ -171,7 +171,7 @@ func (s *Store) DeleteSemanticBindingTypesByFiles(repoPrefix string, files []str
 		}
 		changed = semanticBindingWriteChanged(result) || changed
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return err
 	}
 	if changed {

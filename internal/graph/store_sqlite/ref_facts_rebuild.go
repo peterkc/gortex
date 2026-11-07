@@ -131,7 +131,7 @@ WHERE view_gen = ?
 		}
 		statements++
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return statements, err
 	}
 	return statements, nil
@@ -249,7 +249,7 @@ func (s *Store) replaceRefFactsForFiles(repoPrefix string, files []string) (stat
 		return statements, fmt.Errorf("ref-facts refill: %w", err)
 	}
 	statements++
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return statements, err
 	}
 	return statements, nil

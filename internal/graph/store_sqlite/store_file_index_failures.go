@@ -67,7 +67,7 @@ func (s *Store) ReplaceFileIndexFailures(repoPrefix string, failures []graph.Fil
 			return err
 		}
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 var (

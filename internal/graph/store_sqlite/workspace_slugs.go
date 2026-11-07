@@ -91,7 +91,7 @@ func (s *Store) BackfillWorkspaceSlugsWithImpact(slugs []graph.WorkspaceSlug) gr
 		}
 		invalidatedAnalysis = true
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		panicOnFatal(err)
 		return graph.WorkspaceSlugBackfillResult{}
 	}

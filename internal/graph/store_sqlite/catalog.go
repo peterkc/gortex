@@ -48,7 +48,24 @@ func (c *Catalog) exec(ctx context.Context, query string, args ...any) (sql.Resu
 		return nil, err
 	}
 	defer c.store.writeMu.Unlock()
-	return c.store.execActiveWriteLocked(ctx, query, args...)
+	return c.execLocked(ctx, query, args...)
+}
+
+// execLocked runs one control-plane statement as its own transaction while the
+// caller holds the mutation gate. Its commit is a catalog transition commit, so
+// the catalog fault points bracket it.
+func (c *Catalog) execLocked(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	if err := c.store.fault(FaultCatalogBeforeCommit); err != nil {
+		return nil, err
+	}
+	result, err := c.store.execUnmanagedWriteLocked(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.store.fault(FaultCatalogAfterCommit); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // execGuarded runs one compare-and-set statement and reports a no-op as a
@@ -131,11 +148,14 @@ func (c *Catalog) withTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	if err := fn(tx); err != nil {
 		return err
 	}
+	if err := c.store.fault(FaultCatalogBeforeCommit); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
 	committed = true
-	return nil
+	return c.store.fault(FaultCatalogAfterCommit)
 }
 
 // catalogNullString stores the empty string as NULL, so "unset" and "set to
@@ -2370,10 +2390,18 @@ ON CONFLICT(checkout_id) DO UPDATE SET
 			return err
 		}
 		if route.DirtyGenerationID != route.CommitGenerationID {
-			return validateViewGenerationAdmissionTx(ctx, tx, route.DirtyGenerationID)
+			if err := validateViewGenerationAdmissionTx(ctx, tx, route.DirtyGenerationID); err != nil {
+				return err
+			}
+		}
+		if route.CommitGenerationID != 0 || route.DirtyGenerationID != 0 {
+			return c.store.fault(FaultPublishBeforeCommit)
 		}
 		return nil
 	})
+	if err == nil && (route.CommitGenerationID != 0 || route.DirtyGenerationID != 0) {
+		err = c.store.fault(FaultPublishAfterCommit)
+	}
 	if err == nil {
 		// A route re-installed over an existing row may have let go of what
 		// it named before.
@@ -2546,10 +2574,18 @@ UPDATE checkout_routes
 			return err
 		}
 		if req.DirtyGenerationID != req.CommitGenerationID {
-			return validateViewGenerationAdmissionTx(ctx, tx, req.DirtyGenerationID)
+			if err := validateViewGenerationAdmissionTx(ctx, tx, req.DirtyGenerationID); err != nil {
+				return err
+			}
+		}
+		if req.CommitGenerationID != 0 || req.DirtyGenerationID != 0 {
+			return c.store.fault(FaultPublishBeforeCommit)
 		}
 		return nil
 	})
+	if err == nil && (req.CommitGenerationID != 0 || req.DirtyGenerationID != 0) {
+		err = c.store.fault(FaultPublishAfterCommit)
+	}
 	if err == nil {
 		// Whatever the route named before and no longer names lost a
 		// reference: a commit layer another checkout's route held, say.
@@ -2561,9 +2597,8 @@ UPDATE checkout_routes
 }
 
 // flipRouteSlotSQL is one guarded statement per slot. Naming a single column
-// leaves the other slot's pointer exactly as it was without reading it first,
-// so a flip of the dirty generation can never revert a commit generation a
-// concurrent flip installed.
+// leaves the other slot's pointer exactly as it was, so a flip of the dirty
+// generation can never revert a commit generation a concurrent flip installed.
 var flipRouteSlotSQL = map[RouteSlot]string{
 	RouteSlotCommit: `
 UPDATE checkout_routes
@@ -2589,9 +2624,30 @@ func (c *Catalog) FlipCheckoutRouteSlot(ctx context.Context, req FlipCheckoutRou
 	if err := requireCatalogValue("state", req.State, routeStates); err != nil {
 		return err
 	}
-	return c.withTx(ctx, func(tx *sql.Tx) error {
+	var publishes bool
+	err := c.withTx(ctx, func(tx *sql.Tx) error {
 		if err := validateRouteGraphAdmissionTx(ctx, tx, req.CheckoutID); err != nil {
 			return err
+		}
+		if c.store.faultHook != nil {
+			var commit, dirty sql.NullInt64
+			err := tx.QueryRowContext(ctx,
+				`SELECT commit_generation_id, dirty_generation_id FROM checkout_routes WHERE checkout_id = ?`,
+				req.CheckoutID).Scan(&commit, &dirty)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			// The checkout serves the stack of both slots, so a change to either
+			// slot changes what it serves. The flip publishes when it changes its
+			// slot and the route still names a generation afterward.
+			changed := commit.Int64 != req.GenerationID
+			if req.Slot == RouteSlotCommit {
+				commit.Int64 = req.GenerationID
+			} else {
+				changed = dirty.Int64 != req.GenerationID
+				dirty.Int64 = req.GenerationID
+			}
+			publishes = changed && (commit.Int64 != 0 || dirty.Int64 != 0)
 		}
 		err := execGuardedTx(ctx, tx,
 			fmt.Sprintf("%s slot of route for checkout %s at epoch %d", req.Slot, req.CheckoutID, req.ExpectedRouteEpoch),
@@ -2600,8 +2656,21 @@ func (c *Catalog) FlipCheckoutRouteSlot(ctx context.Context, req FlipCheckoutRou
 		if err != nil {
 			return err
 		}
-		return validateViewGenerationAdmissionTx(ctx, tx, req.GenerationID)
+		if err := validateViewGenerationAdmissionTx(ctx, tx, req.GenerationID); err != nil {
+			return err
+		}
+		if publishes {
+			return c.store.fault(FaultPublishBeforeCommit)
+		}
+		return nil
 	})
+	if err != nil {
+		return err
+	}
+	if publishes {
+		return c.store.fault(FaultPublishAfterCommit)
+	}
+	return nil
 }
 
 // --- ref views ----------------------------------------------------------
@@ -2809,8 +2878,14 @@ UPDATE ref_views
 		if err != nil {
 			return err
 		}
-		return validateViewGenerationAdmissionTx(ctx, tx, req.GenerationID)
+		if err := validateViewGenerationAdmissionTx(ctx, tx, req.GenerationID); err != nil {
+			return err
+		}
+		return c.store.fault(FaultPublishBeforeCommit)
 	})
+	if err == nil {
+		err = c.store.fault(FaultPublishAfterCommit)
+	}
 	if err == nil {
 		// The generation the view pointed at before lost that reference.
 		noteAnyGenerationReferenceReleased()

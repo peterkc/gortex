@@ -106,7 +106,7 @@ func (s *Store) RemoveEdgesExact(edges []*graph.Edge) int {
 		}
 		removed += int(rows)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		panicOnFatal(err)
 		return 0
 	}

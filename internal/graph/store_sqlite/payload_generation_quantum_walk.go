@@ -222,7 +222,7 @@ walk:
 	if err := payloadQuantumStatementGuard(ctx); err != nil && !s.commitsThroughWALPause(wide, removed, err) {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return err
 	}
 	committed = true

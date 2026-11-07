@@ -179,7 +179,7 @@ func (s *Store) setEdgeProvenanceBatchSetOriented(batch []graph.EdgeProvenanceUp
 				chunkChanged++
 			}
 			if chunkChanged == 0 {
-				if commitErr := tx.Commit(); commitErr != nil {
+				if commitErr := s.commitPayloadTx(tx); commitErr != nil {
 					err = commitErr
 					return
 				}
@@ -199,7 +199,7 @@ func (s *Store) setEdgeProvenanceBatchSetOriented(batch []graph.EdgeProvenanceUp
 				err = updateErr
 				return
 			}
-			if commitErr := tx.Commit(); commitErr != nil {
+			if commitErr := s.commitPayloadTx(tx); commitErr != nil {
 				err = commitErr
 				return
 			}

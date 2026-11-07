@@ -291,7 +291,7 @@ func (s *Store) contractBoundaryWriteTx(ctx context.Context, rows []graph.Contra
 	if err := fn(tx); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return err
 	}
 	committed = true

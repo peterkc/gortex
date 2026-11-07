@@ -426,7 +426,7 @@ func (s *Store) withFoldTx(ctx context.Context, to int64, fn func(ctx context.Co
 	if err := stepCtx.Err(); err != nil {
 		return foldCause(stepCtx, err)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return foldCause(stepCtx, err)
 	}
 	destination.constantInputCounter(destination.viewGen).Add(1)

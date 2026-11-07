@@ -52,7 +52,7 @@ func (s *Store) BulkSetReleases(repoPrefix string, rows []graph.ReleaseEnrichmen
 			return err
 		}
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 // DeleteReleases drops release rows for the supplied node ids, chunked.
@@ -107,7 +107,7 @@ func (s *Store) DeleteReleases(nodeIDs []string) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 // ReleaseRows returns release rows for repoPrefix; empty → all repos.

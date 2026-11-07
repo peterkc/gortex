@@ -49,7 +49,7 @@ func (s *Store) BulkSetBlame(repoPrefix string, rows []graph.BlameEnrichment) er
 			return err
 		}
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 func (s *Store) DeleteBlame(nodeIDs []string) error {
@@ -100,7 +100,7 @@ func (s *Store) DeleteBlame(nodeIDs []string) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 func (s *Store) BlameRows(repoPrefix string) []graph.BlameEnrichment {

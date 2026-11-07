@@ -84,7 +84,7 @@ func (s *Store) ReplaceFileMetas(repoPrefix string, rows []graph.FileMetaRow) er
 		return err
 	}
 	if equal {
-		return tx.Commit()
+		return s.commitPayloadTx(tx)
 	}
 	if _, err := tx.Exec(`DELETE FROM files WHERE view_gen = ? AND repo_prefix = ?`, s.viewGen, repoPrefix); err != nil {
 		return err

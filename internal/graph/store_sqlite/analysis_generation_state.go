@@ -135,7 +135,7 @@ func (s *Store) invalidateAnalysisGenerationLocked() error {
 	if err := s.invalidateAnalysisViewTx(tx); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return err
 	}
 	committed = true

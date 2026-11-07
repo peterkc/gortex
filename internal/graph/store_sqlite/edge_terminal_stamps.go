@@ -75,7 +75,7 @@ func (s *Store) persistEdgeTerminalStamps(edges []*graph.Edge) (edgeTerminalStam
 			}
 			invalidatedAnalysis = true
 		}
-		if err := tx.Commit(); err != nil {
+		if err := s.commitPayloadTx(tx); err != nil {
 			return stats, err
 		}
 		stats.changedRows += txChanged

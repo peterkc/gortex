@@ -186,7 +186,7 @@ func (s *Store) CopyGenerationPayloadWhole(ctx context.Context, from, to int64) 
 		}
 		counts.Rows += moved
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return GenerationCopyCounts{}, err
 	}
 	if counts.Rows > 0 {
@@ -357,7 +357,7 @@ DELETE FROM generation_node_tombstones
 		to); err != nil {
 		return counts, fmt.Errorf("store_sqlite: settle flattened identity masks: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return GenerationCopyCounts{}, err
 	}
 	if counts.Rows > 0 {
