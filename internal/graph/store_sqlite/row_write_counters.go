@@ -25,7 +25,7 @@ func (r RowWriteCounts) Since(p RowWriteCounts) RowWriteCounts {
 var nodeRowsWritten, edgeRowsWritten, symbolFTSRowsWritten, contentFTSRowsWritten atomic.Int64
 
 func rowWriteMark() RowWriteCounts {
-	return RowWriteCounts{nodeRowsWritten.Load(), edgeRowsWritten.Load(), symbolFTSRowsWritten.Load(), contentFTSRowsWritten.Load()}
+	return RowWriteCounts{Nodes: nodeRowsWritten.Load(), Edges: edgeRowsWritten.Load(), SymbolFTS: symbolFTSRowsWritten.Load(), ContentFTS: contentFTSRowsWritten.Load()}
 }
 func countStatementRows(counter *atomic.Int64, result sql.Result, err error) {
 	if err == nil && result != nil {
@@ -62,7 +62,7 @@ type ReindexWriteCounts struct {
 var reindexUpdated, reindexDeleted, reindexInserted, reindexFast, reindexGeneric, reindexReceipt atomic.Int64
 
 func reindexWriteMark() ReindexWriteCounts {
-	return ReindexWriteCounts{reindexUpdated.Load(), reindexDeleted.Load(), reindexInserted.Load(), reindexFast.Load(), reindexGeneric.Load(), reindexReceipt.Load()}
+	return ReindexWriteCounts{Updated: reindexUpdated.Load(), Deleted: reindexDeleted.Load(), Inserted: reindexInserted.Load(), FastPath: reindexFast.Load(), Generic: reindexGeneric.Load(), ReceiptFallback: reindexReceipt.Load()}
 }
 func (r ReindexWriteCounts) Since(p ReindexWriteCounts) ReindexWriteCounts {
 	return ReindexWriteCounts{r.Updated - p.Updated, r.Deleted - p.Deleted, r.Inserted - p.Inserted, r.FastPath - p.FastPath, r.Generic - p.Generic, r.ReceiptFallback - p.ReceiptFallback}
