@@ -5,15 +5,15 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+
+	"github.com/zzet/gortex/internal/storage"
 )
 
-// DedicatedGraphClosing is durable withdrawal, not successful cleanup. Its
-// owner and prefix remain reserved until the cleanup saga deletes the graph.
-const DedicatedGraphClosing = "closing"
+const DedicatedGraphClosing = storage.DedicatedGraphClosing
 
 // ErrCatalogGraphClosing refuses new publication or build admission while a
 // dedicated graph's durable cleanup is pending.
-var ErrCatalogGraphClosing = errors.New("store_sqlite: dedicated graph is closing")
+var ErrCatalogGraphClosing = storage.ErrCatalogGraphClosing
 
 // RepositoryCleanupIdentity is the durable identity needed to restore a
 // process-local owner fence. It deliberately includes generation-zero payload.

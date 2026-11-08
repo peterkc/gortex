@@ -4,8 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"sync/atomic"
+
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Released generation references, reported to the retirement sweep.
@@ -88,26 +89,7 @@ func positiveIDs(ids ...int64) []int64 {
 	return out
 }
 
-// GenerationReferencedError is a retirement refused for the references the
-// generation still had, when the refusal knows them. It matches
-// ErrCatalogGenerationReferenced.
-type GenerationReferencedError struct {
-	GenerationID int64
-	Refs         ViewGenerationReferences
-}
-
-func (e *GenerationReferencedError) Error() string {
-	return fmt.Sprintf("%v: generation %d", ErrCatalogGenerationReferenced, e.GenerationID)
-}
-
-func (e *GenerationReferencedError) Unwrap() error { return ErrCatalogGenerationReferenced }
-
-// OnlyBased reports references that are nothing but generations built on
-// this one: the one kind a release can always name, since only removing or
-// re-basing the generation above releases it.
-func (r ViewGenerationReferences) OnlyBased() bool {
-	return r.Based && !r.Routed && !r.RefViewed && !r.GraphActive && !r.DedicatedPublication && !r.ContractAttached
-}
+type GenerationReferencedError = storage.GenerationReferencedError
 
 // routeGenerationsTx reads the generations a checkout's route names now (none
 // when it has no row), so a write that repoints it can name what it released.

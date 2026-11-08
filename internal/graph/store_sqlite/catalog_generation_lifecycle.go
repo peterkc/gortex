@@ -5,11 +5,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // ErrCatalogGenerationRetiring means a proposed catalog reference targets a
 // generation whose retirement fence has already committed.
-var ErrCatalogGenerationRetiring = errors.New("store_sqlite: view generation is retiring")
+var ErrCatalogGenerationRetiring = storage.ErrCatalogGenerationRetiring
 
 // validateViewGenerationAdmissionTx rejects missing or retiring positive
 // generations, and references into an existing closing dedicated graph.

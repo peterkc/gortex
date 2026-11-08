@@ -2,6 +2,8 @@ package store_sqlite
 
 import (
 	"encoding/binary"
+
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Per-edit write-ahead-log accounting.
@@ -23,18 +25,7 @@ import (
 // appended while this edit ran", which is exactly the log growth a reader
 // pinned across the edit would hold.
 
-// WALWriteMark is one sample of the log position.
-type WALWriteMark struct {
-	// Valid is false when the store has no readable wal-index (an in-memory
-	// database, a closed store, a store not in WAL mode yet).
-	Valid bool
-	// MxFrame is the number of valid frames in the log.
-	MxFrame uint32
-	// Salt identifies the log incarnation; a reset changes it.
-	Salt [8]byte
-	// PageSize is the database page size recorded in the wal-index header.
-	PageSize uint32
-}
+type WALWriteMark = storage.WALWriteMark
 
 // WALWriteDelta is the log growth between two marks.
 type WALWriteDelta struct {

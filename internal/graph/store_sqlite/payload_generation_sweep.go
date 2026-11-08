@@ -2,13 +2,13 @@ package store_sqlite
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -85,7 +85,7 @@ const (
 // ErrRepositoryCleanupPending. That is why the default budget above is a
 // runaway ceiling rather than a slice, and it is the reason to fix before
 // lowering it.
-var ErrPayloadSweepBudgetExhausted = errors.New("store_sqlite: payload generation sweep yielded on its budget")
+var ErrPayloadSweepBudgetExhausted = storage.ErrPayloadSweepBudgetExhausted
 
 // payloadSweepBudget bounds one sweep pass. A zero or negative field is
 // unbounded on that axis, which is what a caller that must finish (a test
@@ -272,18 +272,7 @@ func (p *payloadSweepState) failureReason() string {
 	return p.reason
 }
 
-// StorageFailure is one payload generation's last storage-layer maintenance
-// failure: the generation it happened to, and the bounded, path-free sentence
-// SafeStorageFailureReason renders for it.
-//
-// It carries no error, no path and no SQL. A readiness payload is read by a
-// person and shipped off a machine, and the full cause — which is kept on the
-// *StorageError the failing call returned, and logged by the caller — belongs
-// in the daemon log rather than in a status poll.
-type StorageFailure struct {
-	GenerationID int64  `json:"generation_id"`
-	Reason       string `json:"reason"`
-}
+type StorageFailure = storage.StorageFailure
 
 // RecordStorageFailure states that a generation's storage maintenance failed,
 // and reports whether the error was a storage failure at all.

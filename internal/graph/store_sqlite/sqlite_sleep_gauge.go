@@ -11,6 +11,8 @@ import (
 
 	"modernc.org/libc"
 	sqlite3 "modernc.org/sqlite/lib"
+
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Time spent asleep through SQLite's VFS.
@@ -122,18 +124,7 @@ func vfsAt(p uintptr) *sqlite3.Tsqlite3_vfs {
 	return *(**sqlite3.Tsqlite3_vfs)(unsafe.Pointer(&p))
 }
 
-// SQLiteSleepMark samples process-wide VFS sleeps. Busy counters exclude the
-// driver's cancellable Go busy handler; an installed gauge can report zero
-// even while that handler waits for a lock.
-type SQLiteSleepMark struct {
-	Installed     bool  `json:"installed"`
-	VFSOnly       bool  `json:"vfs_only"`
-	BusyNanos     int64 `json:"busy_nanos"`
-	BusyCalls     int64 `json:"busy_calls"`
-	WALRetryNanos int64 `json:"wal_retry_nanos"`
-	WALRetryCalls int64 `json:"wal_retry_calls"`
-	MaxNanos      int64 `json:"max_nanos"`
-}
+type SQLiteSleepMark = storage.SQLiteSleepMark
 
 func sqliteSleepMark() SQLiteSleepMark {
 	return SQLiteSleepMark{

@@ -14,6 +14,7 @@ import (
 
 	sqlite "modernc.org/sqlite"
 
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -807,7 +808,7 @@ UPDATE checkouts
 // moved on — and because both production observers already handle that error
 // correctly for a refusal. A caller that wants the distinction tests this
 // sentinel, or reads CheckoutObservationReport.Verdict.
-var ErrCatalogObservationFenced = fmt.Errorf("%w: superseded by a newer observation", ErrCatalogStaleGuard)
+var ErrCatalogObservationFenced = storage.ErrCatalogObservationFenced
 
 // CheckoutHeadRefusedMarker prefixes the durable trace a refused head write
 // leaves in the checkout's last_error.
@@ -2175,28 +2176,7 @@ UPDATE generation_producer_completeness SET state = ?, reason = ?
 		string(ProducerStateUnavailable), reason, generationID, producer, string(ProducerStateUnavailable))
 }
 
-// ViewGenerationReferences is which kinds of pointer still name a generation.
-// It is the reference guard's verdict broken out by holder, so a refused
-// retirement can say why it was refused instead of only that it was.
-type ViewGenerationReferences struct {
-	// Routed is a checkout route naming the generation in either slot.
-	Routed bool
-	// RefViewed is a ref view serving it as its active generation.
-	RefViewed bool
-	// Based is another generation naming it as the layer beneath.
-	Based bool
-	// GraphActive is a dedicated graph's active pointer.
-	GraphActive bool
-	// DedicatedPublication is the graph's current build/publication association.
-	DedicatedPublication bool
-	ContractAttached     bool
-}
-
-// Any reports whether any pointer names the generation. It is the boolean the
-// delete guard enforces.
-func (r ViewGenerationReferences) Any() bool {
-	return r.Routed || r.RefViewed || r.Based || r.GraphActive || r.DedicatedPublication || r.ContractAttached
-}
+type ViewGenerationReferences = storage.ViewGenerationReferences
 
 // ViewGenerationReferenced reports whether anything still points at a
 // generation. It asks exactly what DeleteViewGeneration's guard asks, so a

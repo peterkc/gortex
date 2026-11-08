@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -35,15 +36,15 @@ import (
 var (
 	// ErrPayloadGenerationSealed means a write was attempted through a handle
 	// whose generation is no longer building.
-	ErrPayloadGenerationSealed = errors.New("store_sqlite: payload generation is published and no longer writable")
+	ErrPayloadGenerationSealed = storage.ErrPayloadGenerationSealed
 
 	// ErrPayloadGenerationInUse means retirement was refused because a lease
 	// holder still reads the generation.
-	ErrPayloadGenerationInUse = errors.New("store_sqlite: payload generation is leased")
+	ErrPayloadGenerationInUse = storage.ErrPayloadGenerationInUse
 
 	// ErrPayloadGenerationIncomplete means a publish was refused because a
 	// producer has not finished contributing to the generation.
-	ErrPayloadGenerationIncomplete = errors.New("store_sqlite: payload generation has a producer still building")
+	ErrPayloadGenerationIncomplete = storage.ErrPayloadGenerationIncomplete
 
 	// ErrPayloadGenerationRetired means a derived-plane write was attempted
 	// through a handle whose generation is being retired, or has already been

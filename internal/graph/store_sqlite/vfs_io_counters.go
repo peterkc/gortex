@@ -9,6 +9,8 @@ import (
 
 	"modernc.org/libc"
 	sqlite3 "modernc.org/sqlite/lib"
+
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Page I/O timed at the VFS.
@@ -167,21 +169,7 @@ func vfsIOMark() VFSIOMark {
 	return m
 }
 
-// VFSIOSplit is one lap's page I/O: reads and writes of the main database file
-// and of the log, by the writer connection and by every other connection.
-type VFSIOSplit struct {
-	OtherWALWriteBytes                                             int64
-	WALReset                                                       bool
-	WriterMainReads, WriterWALReads, OtherMainReads, OtherWALReads int64
-	WriterMainReadTime, WriterWALReadTime                          time.Duration
-	OtherMainReadTime, OtherWALReadTime                            time.Duration
-	WriterMainWrites, WriterWALWrites, OtherMainWrites             int64
-	WriterMainWriteTime, WriterWALWriteTime, OtherMainWriteTime    time.Duration
-	WriterMainWriteBytes, WriterWALWriteBytes, OtherMainWriteBytes int64
-	Rows                                                           RowWriteCounts
-	Reindex                                                        ReindexWriteCounts
-	Transactions                                                   int64
-}
+type VFSIOSplit = storage.VFSIOSplit
 
 // WriteMark samples process-wide VFS writes, logical statement rows and begun
 // write transactions without taking a store lock. Concurrent stores and writers
@@ -200,10 +188,6 @@ func (s *Store) WriteMark() VFSIOMark {
 	}
 	return m
 }
-
-// WALBytes includes all connections: writer TLS classification is best-effort
-// when more than one store has a writer in the same process.
-func (d VFSIOSplit) WALBytes() int64 { return d.WriterWALWriteBytes + d.OtherWALWriteBytes }
 
 // Since is the lap between prev and m.
 func (m VFSIOMark) Since(prev VFSIOMark) VFSIOSplit {

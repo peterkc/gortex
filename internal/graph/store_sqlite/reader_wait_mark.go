@@ -1,6 +1,10 @@
 package store_sqlite
 
-import "time"
+import (
+	"time"
+
+	"github.com/zzet/gortex/internal/storage"
+)
 
 // ReaderWaitMark is a monotonic, per-process sample of the time the store's
 // readers spent waiting before they could read: held at the read gate while
@@ -95,21 +99,7 @@ func (m ReaderWaitMark) Since(prev ReaderWaitMark) time.Duration {
 	return time.Duration((m.GateNanos - prev.GateNanos) + (m.PoolNanos - prev.PoolNanos))
 }
 
-// ReaderWaitSplit is one lap's store waits, each on its own.
-type ReaderWaitSplit struct {
-	Gate, ReadPool, WriterPool time.Duration
-	BusySleep, WALRetrySleep   time.Duration
-	BusySleeps, WALRetries     int64
-	ReadTxn                    time.Duration
-	ReadTxns                   int64
-	CacheHits, CacheMisses     int64
-	CacheSpills, MappedPages   int64
-	WriterCacheHits            int64
-	WriterCacheMisses          int64
-	WriterCacheSpills          int64
-	WriterCacheSkipped         int64
-	VFS                        VFSIOSplit
-}
+type ReaderWaitSplit = storage.ReaderWaitSplit
 
 // Split is the lap between prev and m, by kind of wait.
 func (m ReaderWaitMark) Split(prev ReaderWaitMark) ReaderWaitSplit {

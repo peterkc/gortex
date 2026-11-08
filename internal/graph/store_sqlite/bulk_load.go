@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Compile-time assertion: *Store satisfies graph.BulkLoader.
@@ -841,7 +842,7 @@ func (s *Store) oweWALDrainAfterPublication(result walCheckpointResult, boundary
 // ErrGenerationBulkCheckpointBusy reports that a periodic checkpoint still
 // owns the physical checkpoint path, so a generation build must retry instead
 // of falling back to writes that compete with that checkpoint.
-var ErrGenerationBulkCheckpointBusy = errors.New("store_sqlite: generation bulk checkpoint is still active")
+var ErrGenerationBulkCheckpointBusy = storage.ErrGenerationBulkCheckpointBusy
 
 // InGenerationBulkLoad reports the generation whose bulk window this store is
 // currently holding, and whether it holds one at all.

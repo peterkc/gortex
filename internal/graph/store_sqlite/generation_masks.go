@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // The ownership-mask accessors.
@@ -23,31 +24,12 @@ import (
 // so they do not invalidate an analysis generation; they take the same mutation
 // gate every durable write in this package takes, and nothing more.
 
-// OwnershipMode is what a generation claims about a masked path or source. The
-// two vocabularies below differ: a file may be replaced, deleted or declared
-// read-only context, while an edge source may only be replaced.
-type OwnershipMode string
+type OwnershipMode = storage.OwnershipMode
 
 const (
-	// OwnershipReplace claims the generation's own payload supersedes the
-	// layer below, including when that payload is empty.
-	OwnershipReplace OwnershipMode = "replace"
-	// OwnershipDelete claims the path is gone and nothing below shows through.
-	OwnershipDelete OwnershipMode = "delete"
-	// OwnershipContext claims NOTHING. It records that the generation needed
-	// the path to resolve its own change set and deliberately carries no
-	// payload of its own for it, so the layer below keeps answering for the
-	// file whole — identity, adjacency, derived outputs and all.
-	//
-	// It is the third mode rather than the absence of a mask because the two
-	// statements are different: an unmentioned path is one nothing was ever
-	// said about, while a context path is one a generation read, decided was
-	// unchanged by its own change, and declined to claim. The difference is
-	// what makes "a generation claims exactly its change set" checkable at
-	// publish instead of being an agreement between two lists — see the
-	// context arm of ValidateGenerationMasks, which refuses the mask over any
-	// payload at all.
-	OwnershipContext OwnershipMode = "context"
+	OwnershipReplace = storage.OwnershipReplace
+	OwnershipDelete  = storage.OwnershipDelete
+	OwnershipContext = storage.OwnershipContext
 )
 
 var fileOwnershipModes = []OwnershipMode{OwnershipReplace, OwnershipDelete, OwnershipContext}
@@ -57,22 +39,14 @@ var fileOwnershipModes = []OwnershipMode{OwnershipReplace, OwnershipDelete, Owne
 // replacement already says, so there is no delete marker to write.
 var edgeSourceOwnershipModes = []OwnershipMode{OwnershipReplace}
 
-// ProducerState is how complete one producer's contribution to a generation is.
-type ProducerState string
+type ProducerState = storage.ProducerState
 
 const (
-	// ProducerStateComplete means the producer finished and its payload is whole.
-	ProducerStateComplete ProducerState = "complete"
-	// ProducerStateIncomplete means the producer finished but its payload is
-	// partial, so an absence it leaves behind is not a fact.
-	ProducerStateIncomplete ProducerState = "incomplete"
-	// ProducerStateBuilding means the producer is still running.
-	ProducerStateBuilding ProducerState = "building"
-	// ProducerStateUnavailable means the producer could not run at all.
-	ProducerStateUnavailable ProducerState = "unavailable"
-	// ProducerStateDisabledByConfig means the producer was switched off, so its
-	// absence is intended rather than a failure.
-	ProducerStateDisabledByConfig ProducerState = "disabled_by_config"
+	ProducerStateComplete         = storage.ProducerStateComplete
+	ProducerStateIncomplete       = storage.ProducerStateIncomplete
+	ProducerStateBuilding         = storage.ProducerStateBuilding
+	ProducerStateUnavailable      = storage.ProducerStateUnavailable
+	ProducerStateDisabledByConfig = storage.ProducerStateDisabledByConfig
 )
 
 var producerStates = []ProducerState{
@@ -89,37 +63,22 @@ var producerStates = []ProducerState{
 var (
 	// ErrMasksAtBaseGeneration means a mask write was attempted through a
 	// handle pinned to the base generation, where a mask has no meaning.
-	ErrMasksAtBaseGeneration = errors.New("store_sqlite: ownership masks require a derived view generation")
+	ErrMasksAtBaseGeneration = storage.ErrMasksAtBaseGeneration
 
 	// ErrGenerationMaskInvalidValue means a mask write carried a value outside
 	// its vocabulary, or left a required identifier empty.
-	ErrGenerationMaskInvalidValue = errors.New("store_sqlite: invalid generation mask value")
+	ErrGenerationMaskInvalidValue = storage.ErrGenerationMaskInvalidValue
 
 	// ErrGenerationMaskIntegrity means a generation's masks contradict the
 	// payload it carries at the same generation.
-	ErrGenerationMaskIntegrity = errors.New("store_sqlite: generation mask contradicts its payload")
+	ErrGenerationMaskIntegrity = storage.ErrGenerationMaskIntegrity
 )
 
-// FileMask is one file-level ownership claim.
-type FileMask struct {
-	RepoPrefix string
-	FilePath   string
-	Mode       OwnershipMode
-}
+type FileMask = storage.FileMask
 
-// EdgeSourceMask is one source node whose outgoing edge set the generation
-// replaces without owning the node's file.
-type EdgeSourceMask struct {
-	SourceID string
-	Mode     OwnershipMode
-}
+type EdgeSourceMask = storage.EdgeSourceMask
 
-// ProducerCompleteness is one producer's contribution state for a generation.
-type ProducerCompleteness struct {
-	Producer string
-	State    ProducerState
-	Reason   string
-}
+type ProducerCompleteness = storage.ProducerCompleteness
 
 // generationMaskChunk bounds rows per multi-row INSERT. The widest mask row
 // binds 4 host parameters, so 200 rows = 800 params, under SQLite's

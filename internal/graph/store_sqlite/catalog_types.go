@@ -3,6 +3,8 @@ package store_sqlite
 import (
 	"errors"
 	"fmt"
+
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // State vocabularies for the checkout-lifecycle catalog.
@@ -12,38 +14,19 @@ import (
 // Keeping the check in Go rather than in a CHECK constraint means extending a
 // vocabulary is a code change, not a migration of every installed database.
 
-// DedicatedGraphReady is a dedicated graph that can serve queries. This is
-// distinct from ViewGenerationReady, which describes a published generation.
-const DedicatedGraphReady = "graph_ready"
+const DedicatedGraphReady = storage.DedicatedGraphReady
 
-// CheckoutState is the lifecycle state of one working copy.
-type CheckoutState string
+type CheckoutState = storage.CheckoutState
 
 const (
-	// CheckoutStateReady is the steady state: the path is present and served.
-	CheckoutStateReady CheckoutState = "checkout_ready"
-	// CheckoutStateAvailabilityGrace means the path stopped answering but its
-	// availability deadline has not expired, so nothing is torn down yet.
-	CheckoutStateAvailabilityGrace CheckoutState = "availability_grace"
-	// CheckoutStateRemovalGrace means Git authoritatively stopped listing the
-	// checkout but its removal deadline has not expired. Queries fall back to
-	// the family primary while the identity remains recoverable.
-	CheckoutStateRemovalGrace CheckoutState = "removal_grace"
-	// CheckoutStateUnavailable retains an intended checkout after serving
-	// layers expire. Its identity and tracking configuration survive recovery.
-	CheckoutStateUnavailable CheckoutState = "checkout_unavailable"
-	// CheckoutStateReconciling means a reconciler is bringing the checkout's
-	// effective mode in line with its desired mode.
-	CheckoutStateReconciling CheckoutState = "reconciling"
-	// CheckoutStateDemoting means the checkout is dropping from a dedicated
-	// graph back to the automatic lane.
-	CheckoutStateDemoting CheckoutState = "demoting"
-	// CheckoutStateForgetting means the checkout is being removed from the
-	// catalog and its dependent rows released.
-	CheckoutStateForgetting CheckoutState = "forgetting_checkout"
-	// CheckoutStatePrimaryClosureRetiring means the whole family's primary
-	// closure is retiring and this checkout is going with it.
-	CheckoutStatePrimaryClosureRetiring CheckoutState = "primary_closure_retiring"
+	CheckoutStateReady                  = storage.CheckoutStateReady
+	CheckoutStateAvailabilityGrace      = storage.CheckoutStateAvailabilityGrace
+	CheckoutStateRemovalGrace           = storage.CheckoutStateRemovalGrace
+	CheckoutStateUnavailable            = storage.CheckoutStateUnavailable
+	CheckoutStateReconciling            = storage.CheckoutStateReconciling
+	CheckoutStateDemoting               = storage.CheckoutStateDemoting
+	CheckoutStateForgetting             = storage.CheckoutStateForgetting
+	CheckoutStatePrimaryClosureRetiring = storage.CheckoutStatePrimaryClosureRetiring
 )
 
 var checkoutStates = []CheckoutState{
@@ -57,36 +40,23 @@ var checkoutStates = []CheckoutState{
 	CheckoutStatePrimaryClosureRetiring,
 }
 
-// CheckoutMode is how a checkout is served: from its own graph, or from the
-// family's shared automatic lane.
-type CheckoutMode string
+type CheckoutMode = storage.CheckoutMode
 
 const (
-	// CheckoutModeDedicated serves the checkout from its own graph.
-	CheckoutModeDedicated CheckoutMode = "dedicated"
-	// CheckoutModeAutomatic serves the checkout from the family's shared lane.
-	CheckoutModeAutomatic CheckoutMode = "automatic"
+	CheckoutModeDedicated = storage.CheckoutModeDedicated
+	CheckoutModeAutomatic = storage.CheckoutModeAutomatic
 )
 
 var checkoutModes = []CheckoutMode{CheckoutModeDedicated, CheckoutModeAutomatic}
 
-// ViewGenerationState is the lifecycle state of one view generation. It also
-// governs ref_view_builds.state: a build's state is the state of the
-// generation it is producing, and the in-flight coalescing index keys on the
-// building value.
-type ViewGenerationState string
+type ViewGenerationState = storage.ViewGenerationState
 
 const (
-	// ViewGenerationBuilding is the only mutable state.
-	ViewGenerationBuilding ViewGenerationState = "building"
-	// ViewGenerationReady is published and immutable.
-	ViewGenerationReady ViewGenerationState = "ready"
-	// ViewGenerationSuperseded is a ready generation a newer one replaced.
-	ViewGenerationSuperseded ViewGenerationState = "superseded"
-	// ViewGenerationRetiring is queued for deletion once nothing points at it.
-	ViewGenerationRetiring ViewGenerationState = "retiring"
-	// ViewGenerationFailed never reached ready.
-	ViewGenerationFailed ViewGenerationState = "failed"
+	ViewGenerationBuilding   = storage.ViewGenerationBuilding
+	ViewGenerationReady      = storage.ViewGenerationReady
+	ViewGenerationSuperseded = storage.ViewGenerationSuperseded
+	ViewGenerationRetiring   = storage.ViewGenerationRetiring
+	ViewGenerationFailed     = storage.ViewGenerationFailed
 )
 
 var viewGenerationStates = []ViewGenerationState{
@@ -97,19 +67,13 @@ var viewGenerationStates = []ViewGenerationState{
 	ViewGenerationFailed,
 }
 
-// IntentSourceKind is who asked for a checkout to be tracked.
-type IntentSourceKind string
+type IntentSourceKind = storage.IntentSourceKind
 
 const (
-	// IntentSourceCLITrack is an explicit `gortex` command.
-	IntentSourceCLITrack IntentSourceKind = "cli_track"
-	// IntentSourceMCPTrack is an explicit tool call over MCP.
-	IntentSourceMCPTrack IntentSourceKind = "mcp_track"
-	// IntentSourceManualConfig is a checkout named in configuration.
-	IntentSourceManualConfig IntentSourceKind = "manual_config"
-	// IntentSourceProjectMembership is a checkout tracked because it belongs
-	// to a tracked project rather than because anyone named it.
-	IntentSourceProjectMembership IntentSourceKind = "project_membership"
+	IntentSourceCLITrack          = storage.IntentSourceCLITrack
+	IntentSourceMCPTrack          = storage.IntentSourceMCPTrack
+	IntentSourceManualConfig      = storage.IntentSourceManualConfig
+	IntentSourceProjectMembership = storage.IntentSourceProjectMembership
 )
 
 var intentSourceKinds = []IntentSourceKind{
@@ -119,21 +83,12 @@ var intentSourceKinds = []IntentSourceKind{
 	IntentSourceProjectMembership,
 }
 
-// IntentTransitionState is the progress of the single in-flight mode change a
-// checkout may have. There is no terminal success value: completing a
-// transition deletes the row, because UNIQUE(checkout_id) is what stops a
-// second transition from starting and a retained success row would block it
-// forever. A failed transition is retained deliberately — it keeps the slot
-// occupied until something resolves it.
-type IntentTransitionState string
+type IntentTransitionState = storage.IntentTransitionState
 
 const (
-	// IntentTransitionPending is created but not yet started.
-	IntentTransitionPending IntentTransitionState = "pending"
-	// IntentTransitionRunning is being applied.
-	IntentTransitionRunning IntentTransitionState = "running"
-	// IntentTransitionFailed stopped part-way and holds the slot.
-	IntentTransitionFailed IntentTransitionState = "failed"
+	IntentTransitionPending = storage.IntentTransitionPending
+	IntentTransitionRunning = storage.IntentTransitionRunning
+	IntentTransitionFailed  = storage.IntentTransitionFailed
 )
 
 var intentTransitionStates = []IntentTransitionState{
@@ -142,20 +97,14 @@ var intentTransitionStates = []IntentTransitionState{
 	IntentTransitionFailed,
 }
 
-// RefViewState is the lifecycle state of a named view of a graph.
-type RefViewState string
+type RefViewState = storage.RefViewState
 
 const (
-	// RefViewPending has a desired selector but nothing resolved yet.
-	RefViewPending RefViewState = "pending"
-	// RefViewBuilding has an in-flight build for its desired fingerprint.
-	RefViewBuilding RefViewState = "building"
-	// RefViewReady is serving its active generation.
-	RefViewReady RefViewState = "ready"
-	// RefViewStale is still serving, but the desired selector has moved on.
-	RefViewStale RefViewState = "stale"
-	// RefViewFailed could not resolve or build.
-	RefViewFailed RefViewState = "failed"
+	RefViewPending  = storage.RefViewPending
+	RefViewBuilding = storage.RefViewBuilding
+	RefViewReady    = storage.RefViewReady
+	RefViewStale    = storage.RefViewStale
+	RefViewFailed   = storage.RefViewFailed
 )
 
 var refViewStates = []RefViewState{
@@ -166,16 +115,12 @@ var refViewStates = []RefViewState{
 	RefViewFailed,
 }
 
-// RouteState is the lifecycle state of one checkout's route.
-type RouteState string
+type RouteState = storage.RouteState
 
 const (
-	// RoutePending has no generation to serve from yet.
-	RoutePending RouteState = "pending"
-	// RouteActive is serving.
-	RouteActive RouteState = "active"
-	// RouteRetired no longer serves; its generations may be released.
-	RouteRetired RouteState = "retired"
+	RoutePending = storage.RoutePending
+	RouteActive  = storage.RouteActive
+	RouteRetired = storage.RouteRetired
 )
 
 var routeStates = []RouteState{RoutePending, RouteActive, RouteRetired}
@@ -226,15 +171,15 @@ var (
 	// — an incarnation, a route epoch, a primary epoch, or a generation still
 	// being in the building state — no longer matched the stored row. Nothing
 	// was written.
-	ErrCatalogStaleGuard = errors.New("store_sqlite: catalog guard mismatch, no rows changed")
+	ErrCatalogStaleGuard = storage.ErrCatalogStaleGuard
 
 	// ErrCatalogNotFound means the addressed catalog row does not exist.
-	ErrCatalogNotFound = errors.New("store_sqlite: catalog row not found")
+	ErrCatalogNotFound = storage.ErrCatalogNotFound
 
 	// ErrCatalogGenerationReferenced means a view generation cannot be deleted
 	// because a route, a ref view, a dedicated graph, or another generation's
 	// base pointer still names it.
-	ErrCatalogGenerationReferenced = errors.New("store_sqlite: view generation is still referenced")
+	ErrCatalogGenerationReferenced = storage.ErrCatalogGenerationReferenced
 
 	// ErrCatalogIntentTransitionActive means the checkout already has an
 	// in-flight intent transition; only one may exist at a time.
@@ -242,7 +187,7 @@ var (
 
 	// ErrCatalogInvalidValue means a write carried a value outside the state
 	// vocabulary, or left a required identifier empty.
-	ErrCatalogInvalidValue = errors.New("store_sqlite: invalid catalog value")
+	ErrCatalogInvalidValue = storage.ErrCatalogInvalidValue
 
 	// ErrRefViewBuildInFlight means another attempt is already building the
 	// same work — the same ref view, tree, base generation and fingerprint.
@@ -329,21 +274,7 @@ type IntentTransition struct {
 	LastError          string
 }
 
-// CheckoutPathEvidence is the last filesystem sample taken for a checkout's
-// path: enough to tell a deleted working copy from a detached volume.
-type CheckoutPathEvidence struct {
-	CheckoutID                  string
-	RootPathIdentity            string
-	RootVolumeKind              string
-	RootVolumeToken             string
-	NearestExistingAncestorPath string
-	AncestorVolumeKind          string
-	AncestorVolumeToken         string
-	CommonDirVolumeKind         string
-	CommonDirVolumeToken        string
-	SampledAt                   int64 // unix seconds
-	SampleGeneration            int64
-}
+type CheckoutPathEvidence = storage.CheckoutPathEvidence
 
 // DedicatedGraph is a graph built for one checkout. ActiveGenerationID is 0
 // when no generation is published yet.
