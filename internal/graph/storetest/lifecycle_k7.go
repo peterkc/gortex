@@ -18,8 +18,10 @@ import (
 // version T retires is a sealed E1 candidate nobody published.
 
 // k7Chain publishes E0 for R1, seals the unpublished candidate unarmed and
-// retires the candidate armed at at.
-func k7Chain(t *testing.T, backend Backend, f *FixtureF, s *stopper, at stop) (string, Instance, Build, Publication, error) {
+// retires the candidate armed at at. With cancelAtStop, the stop cancels the
+// retirement's context instead of returning errStopped, so whether the stop
+// was reached comes from the stopper.
+func k7Chain(t *testing.T, backend Backend, f *FixtureF, s *stopper, at stop, cancelAtStop bool) (string, Instance, Build, Publication, error) {
 	t.Helper()
 	ctx := caseContext(t)
 	dir := t.TempDir()
@@ -29,13 +31,13 @@ func k7Chain(t *testing.T, backend Backend, f *FixtureF, s *stopper, at stop) (s
 	base := current(t, ctx, inst, CheckoutR1)
 	retireCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	if s.cancel != nil {
+	if cancelAtStop {
 		s.cancel = cancel
 	}
 	s.arm(at)
 	err := inst.Retire(retireCtx, candidate.Version())
 	stopped := errors.Is(err, errStopped)
-	if s.cancel != nil {
+	if cancelAtStop {
 		_, stopped = s.disarm()
 	}
 	if at.point == "" && err != nil {
@@ -55,7 +57,7 @@ func testK7InterruptedRetire(t *testing.T, backend Backend) {
 		t.Run(at.String(), func(t *testing.T) {
 			s := &stopper{}
 			defer s.disarm()
-			dir, old, candidate, base, err := k7Chain(t, backend, f, s, at)
+			dir, old, candidate, base, err := k7Chain(t, backend, f, s, at, false)
 			if !errors.Is(err, errStopped) {
 				t.Fatalf("the retirement stopped at %s returned %v, want the stop", at, err)
 			}
@@ -101,7 +103,7 @@ func testK7CancelledRetire(t *testing.T, backend Backend) {
 	f := NewFixtureF(t)
 	for _, at := range k7Stops(t, backend, f) {
 		t.Run(at.String(), func(t *testing.T) {
-			_, inst, candidate, base, _ := k7Chain(t, backend, f, &stopper{cancel: func() {}}, at)
+			_, inst, candidate, base, _ := k7Chain(t, backend, f, &stopper{}, at, true)
 			k7AssertResumes(t, inst, f, candidate, base, "after a cancellation at "+at.String())
 		})
 	}
@@ -111,7 +113,7 @@ func k7Stops(t *testing.T, backend Backend, f *FixtureF) []stop {
 	t.Helper()
 	dry := &stopper{}
 	// k7Chain fails the test itself when the unstopped retirement returns an error.
-	_, _, _, _, _ = k7Chain(t, backend, f, dry, stop{})
+	_, _, _, _, _ = k7Chain(t, backend, f, dry, stop{}, false)
 	arrivals, _ := dry.disarm()
 	return stopsOf(t, backend.Open(t, t.TempDir(), nil).Declaration().FaultPoints, arrivals)
 }

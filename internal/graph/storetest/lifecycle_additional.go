@@ -75,7 +75,7 @@ func testK2ExpiredOwner(t *testing.T, backend Backend) {
 func testK3FailedWriteRefusesSeal(t *testing.T, backend Backend) {
 	ctx, f, inst, s, build, base := k3Building(t, backend)
 	dry := &stopper{}
-	_, _, _, dryBuild, _ := k3BuildingWith(t, backend, f, dry)
+	_, _, dryBuild, _ := k3BuildingWith(t, backend, f, dry)
 	dry.arm(stop{})
 	if err := dryBuild.Write(ctx, f.Payload("r", E1)); err != nil {
 		t.Fatalf("the unstopped write: %v", err)
@@ -106,21 +106,21 @@ func k3Building(t *testing.T, backend Backend) (context.Context, *FixtureF, Inst
 	t.Helper()
 	f := NewFixtureF(t)
 	s := &stopper{}
-	ctx, inst, _, build, base := k3BuildingWith(t, backend, f, s)
+	ctx, inst, build, base := k3BuildingWith(t, backend, f, s)
 	return ctx, f, inst, s, build, base
 }
 
 // k3BuildingWith publishes E0 and begins the E1 build, unarmed.
-func k3BuildingWith(t *testing.T, backend Backend, f *FixtureF, s *stopper) (context.Context, Instance, Version, Build, Publication) {
+func k3BuildingWith(t *testing.T, backend Backend, f *FixtureF, s *stopper) (context.Context, Instance, Build, Publication) {
 	t.Helper()
 	ctx := caseContext(t)
 	inst := newChainIn(t, ctx, backend, t.TempDir(), s.hook, f, CheckoutR1)
-	e0 := publishVersion(t, ctx, inst, f, CheckoutR1, E0)
+	publishVersion(t, ctx, inst, f, CheckoutR1, E0)
 	build, err := inst.Begin(ctx, BuildRequest{Checkout: CheckoutR1, Inputs: f.Inputs(CheckoutR1, E1), Operation: "k3-incomplete"})
 	if err != nil {
 		t.Fatalf("begin E1: %v", err)
 	}
-	return ctx, inst, e0, build, current(t, ctx, inst, CheckoutR1)
+	return ctx, inst, build, current(t, ctx, inst, CheckoutR1)
 }
 
 // k3AssertIncompleteRefuses checks that S and P of an incomplete attempt

@@ -579,28 +579,34 @@ func damageSQLite(t *testing.T, dir string, kind storetest.Damage, version store
 		if err != nil {
 			t.Fatalf("version %q: %v", version, err)
 		}
-		execRaw(t, path, "", id)
+		deletePayloadRows(t, path, id)
 	default:
 		t.Fatalf("sqlite cannot apply damage %q", kind)
 	}
 }
 
-// execRaw runs statement on the store file outside the store. An empty
-// statement deletes generation's rows from every ordinary table keyed by
-// view_gen: its payload, with its catalog row left in place.
-func execRaw(t *testing.T, path, statement string, generation ...int64) {
+// execRaw runs statement on the store file outside the store.
+func execRaw(t *testing.T, path, statement string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatalf("open %s raw: %v", path, err)
 	}
 	defer db.Close()
-	if statement != "" {
-		if _, err := db.Exec(statement); err != nil {
-			t.Fatalf("%s on %s: %v", statement, path, err)
-		}
-		return
+	if _, err := db.Exec(statement); err != nil {
+		t.Fatalf("%s on %s: %v", statement, path, err)
 	}
+}
+
+// deletePayloadRows deletes generation's rows from every ordinary table keyed
+// by view_gen: its payload, with its catalog row left in place.
+func deletePayloadRows(t *testing.T, path string, generation int64) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open %s raw: %v", path, err)
+	}
+	defer db.Close()
 	rows, err := db.Query(`SELECT m.name FROM sqlite_master m, pragma_table_info(m.name) c
 		WHERE m.type = 'table' AND m.sql NOT LIKE 'CREATE VIRTUAL%' AND c.name = 'view_gen'`)
 	if err != nil {
@@ -621,8 +627,8 @@ func execRaw(t *testing.T, path, statement string, generation ...int64) {
 		t.Fatal("no table carries a view_gen column")
 	}
 	for _, table := range tables {
-		if _, err := db.Exec(`DELETE FROM "`+table+`" WHERE view_gen = ?`, generation[0]); err != nil {
-			t.Fatalf("delete generation %d from %s: %v", generation[0], table, err)
+		if _, err := db.Exec(`DELETE FROM "`+table+`" WHERE view_gen = ?`, generation); err != nil {
+			t.Fatalf("delete generation %d from %s: %v", generation, table, err)
 		}
 	}
 }

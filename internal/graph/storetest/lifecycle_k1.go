@@ -115,11 +115,8 @@ func newK1Chain(t *testing.T, backend Backend) (context.Context, *FixtureF, Inst
 	t.Helper()
 	ctx := caseContext(t)
 	f := NewFixtureF(t)
-	inst := backend.Open(t, t.TempDir(), nil)
+	inst := newChainIn(t, ctx, backend, t.TempDir(), nil, f, CheckoutR1, CheckoutR2, CheckoutS1)
 	for _, c := range f.Checkouts {
-		if err := inst.Track(ctx, c); err != nil {
-			t.Fatalf("track %s: %v", c.ID, err)
-		}
 		current, err := inst.Current(ctx, c.ID)
 		if err != nil {
 			t.Fatalf("current publication of %s: %v", c.ID, err)
@@ -139,18 +136,8 @@ func publishVersion(t *testing.T, ctx context.Context, inst Instance, f *Fixture
 	if err != nil {
 		t.Fatalf("%s: current publication: %v", checkout, err)
 	}
-	build, err := inst.Begin(ctx, BuildRequest{
-		Checkout: checkout, Inputs: f.Inputs(checkout, epoch), Operation: fmt.Sprintf("build-%s-E%d", checkout, epoch),
-	})
-	if err != nil {
-		t.Fatalf("%s E%d: begin: %v", checkout, epoch, err)
-	}
-	if err := build.Write(ctx, f.Payload(f.RepositoryOf(checkout).Prefix, epoch)); err != nil {
-		t.Fatalf("%s E%d: write: %v", checkout, epoch, err)
-	}
-	if err := build.Seal(ctx); err != nil {
-		t.Fatalf("%s E%d: seal: %v", checkout, epoch, err)
-	}
+	build := sealedBuild(t, ctx, inst, checkout, f.Inputs(checkout, epoch),
+		fmt.Sprintf("build-%s-E%d", checkout, epoch), f.Payload(f.RepositoryOf(checkout).Prefix, epoch))
 	if err := build.Publish(ctx, current, fmt.Sprintf("publish-%s-E%d", checkout, epoch)); err != nil {
 		t.Fatalf("%s E%d: publish over %+v: %v", checkout, epoch, current, err)
 	}

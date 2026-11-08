@@ -583,12 +583,7 @@ func TestStorageFaultSealAfterCommit(t *testing.T) {
 
 func TestStorageFaultPublishBeforeCommit(t *testing.T) {
 	c := newFaultChain(t, FaultPublishBeforeCommit)
-	if err := c.writeE1(c.e1Handle); err != nil {
-		t.Fatalf("write E1: %v", err)
-	}
-	if err := c.store.PublishPayloadGeneration(c.ctx, c.e1, 2); err != nil {
-		t.Fatalf("seal E1: %v", err)
-	}
+	c.sealE1(t)
 	c.stop.armed.Store(true)
 	c.stop.requireStopped(t, "E1 route flip", c.store.Catalog().FlipCheckoutRouteSlot(c.ctx, c.flipRequest(c.e1, 1)))
 
@@ -603,12 +598,7 @@ func TestStorageFaultPublishBeforeCommit(t *testing.T) {
 
 func TestStorageFaultPublishAfterCommit(t *testing.T) {
 	c := newFaultChain(t, FaultPublishAfterCommit)
-	if err := c.writeE1(c.e1Handle); err != nil {
-		t.Fatalf("write E1: %v", err)
-	}
-	if err := c.store.PublishPayloadGeneration(c.ctx, c.e1, 2); err != nil {
-		t.Fatalf("seal E1: %v", err)
-	}
+	c.sealE1(t)
 	c.stop.armed.Store(true)
 	c.stop.requireStopped(t, "E1 route flip", c.store.Catalog().FlipCheckoutRouteSlot(c.ctx, c.flipRequest(c.e1, 1)))
 
@@ -647,12 +637,7 @@ func TestStorageFaultPublishOtherSites(t *testing.T) {
 
 func testPublishOtherSite(t *testing.T, point FaultPoint, refView bool) {
 	c := newFaultChain(t, point)
-	if err := c.writeE1(c.e1Handle); err != nil {
-		t.Fatalf("write E1: %v", err)
-	}
-	if err := c.store.PublishPayloadGeneration(c.ctx, c.e1, 2); err != nil {
-		t.Fatalf("seal E1: %v", err)
-	}
+	c.sealE1(t)
 	const viewID = "fault-ref"
 	if refView {
 		if err := c.store.Catalog().UpsertRefView(c.ctx, RefView{
@@ -713,12 +698,7 @@ func testPublishOtherSite(t *testing.T, point FaultPoint, refView bool) {
 
 func testPublishRouteInstall(t *testing.T, point FaultPoint, slot RouteSlot) {
 	c := newFaultChain(t, point)
-	if err := c.writeE1(c.e1Handle); err != nil {
-		t.Fatalf("write E1: %v", err)
-	}
-	if err := c.store.PublishPayloadGeneration(c.ctx, c.e1, 2); err != nil {
-		t.Fatalf("seal E1: %v", err)
-	}
+	c.sealE1(t)
 	if err := c.store.Catalog().DeleteCheckoutRoute(c.ctx, faultCheckout); err != nil {
 		t.Fatalf("remove the seed route: %v", err)
 	}
@@ -757,17 +737,7 @@ func testPublishRouteInstall(t *testing.T, point FaultPoint, slot RouteSlot) {
 
 func testPublishDirtyClear(t *testing.T, point FaultPoint) {
 	c := newFaultChain(t, point)
-	if err := c.writeE1(c.e1Handle); err != nil {
-		t.Fatalf("write E1: %v", err)
-	}
-	if err := c.store.PublishPayloadGeneration(c.ctx, c.e1, 2); err != nil {
-		t.Fatalf("seal E1: %v", err)
-	}
-	dirty := c.flipRequest(c.e1, 1)
-	dirty.Slot = RouteSlotDirty
-	if err := c.store.Catalog().FlipCheckoutRouteSlot(c.ctx, dirty); err != nil {
-		t.Fatalf("seed the dirty route: %v", err)
-	}
+	c.seedDirtyE1(t)
 	clear := c.flipRequest(0, 2)
 	clear.Slot = RouteSlotDirty
 	c.stop.armed.Store(true)
@@ -805,17 +775,7 @@ func TestStorageFaultUnchangedServedGenerationDoesNotPublish(t *testing.T) {
 					req := c.flipRequest(c.e0, 1)
 					want := CheckoutRoute{CheckoutID: faultCheckout, GraphID: payloadGraphID, CommitGenerationID: c.e0, RouteEpoch: 2, State: RouteActive}
 					if site != "SameCommit" {
-						if err := c.writeE1(c.e1Handle); err != nil {
-							t.Fatalf("write E1: %v", err)
-						}
-						if err := c.store.PublishPayloadGeneration(c.ctx, c.e1, 2); err != nil {
-							t.Fatalf("seal E1: %v", err)
-						}
-						dirty := c.flipRequest(c.e1, 1)
-						dirty.Slot = RouteSlotDirty
-						if err := c.store.Catalog().FlipCheckoutRouteSlot(c.ctx, dirty); err != nil {
-							t.Fatalf("seed dirty: %v", err)
-						}
+						c.seedDirtyE1(t)
 						req.ExpectedRouteEpoch = 2
 						want.DirtyGenerationID, want.RouteEpoch = c.e1, 3
 					}
@@ -846,17 +806,7 @@ func TestStorageFaultCommitSlotUnderDirtyPublishes(t *testing.T) {
 			for _, site := range []string{"CommitUnderDirty", "ClearCommitUnderDirty"} {
 				t.Run(site, func(t *testing.T) {
 					c := newFaultChain(t, point)
-					if err := c.writeE1(c.e1Handle); err != nil {
-						t.Fatalf("write E1: %v", err)
-					}
-					if err := c.store.PublishPayloadGeneration(c.ctx, c.e1, 2); err != nil {
-						t.Fatalf("seal E1: %v", err)
-					}
-					dirty := c.flipRequest(c.e1, 1)
-					dirty.Slot = RouteSlotDirty
-					if err := c.store.Catalog().FlipCheckoutRouteSlot(c.ctx, dirty); err != nil {
-						t.Fatalf("seed dirty: %v", err)
-					}
+					c.seedDirtyE1(t)
 					req := c.flipRequest(c.e1, 2)
 					if site == "ClearCommitUnderDirty" {
 						req.GenerationID = 0
@@ -915,6 +865,28 @@ func TestStorageFaultRouteWithoutGenerationDoesNotPublish(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+// sealE1 writes and seals E1 without publishing it.
+func (c *faultChain) sealE1(t *testing.T) {
+	t.Helper()
+	if err := c.writeE1(c.e1Handle); err != nil {
+		t.Fatalf("write E1: %v", err)
+	}
+	if err := c.store.PublishPayloadGeneration(c.ctx, c.e1, 2); err != nil {
+		t.Fatalf("seal E1: %v", err)
+	}
+}
+
+// seedDirtyE1 seals E1 and installs it in the dirty slot over E0.
+func (c *faultChain) seedDirtyE1(t *testing.T) {
+	t.Helper()
+	c.sealE1(t)
+	dirty := c.flipRequest(c.e1, 1)
+	dirty.Slot = RouteSlotDirty
+	if err := c.store.Catalog().FlipCheckoutRouteSlot(c.ctx, dirty); err != nil {
+		t.Fatalf("seed dirty: %v", err)
 	}
 }
 

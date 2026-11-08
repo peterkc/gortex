@@ -15,7 +15,6 @@ import (
 // unchanged on every backend in Backends.
 //
 //	storetest_test.TestStorageContract    each name in Backends
-//	store_sqlite_test.TestStorageContract sqlite only
 //	        | backendtest adapter (storetest.Backend)
 //	        v
 //	RunStorageContract
