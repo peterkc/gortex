@@ -170,7 +170,7 @@ func WithLogger(logger *zap.Logger) Option {
 // two Reconcilers over the same store are two actors racing through the same
 // incarnation guards rather than two divergent caches.
 type Reconciler struct {
-	catalog *store_sqlite.Catalog
+	catalog Catalog
 	hooks   CleanupHooks
 	cfg     Config
 
@@ -182,7 +182,7 @@ type Reconciler struct {
 }
 
 // New builds a Reconciler over a catalog handle.
-func New(catalog *store_sqlite.Catalog, hooks CleanupHooks, cfg Config, opts ...Option) (*Reconciler, error) {
+func New(catalog Catalog, hooks CleanupHooks, cfg Config, opts ...Option) (*Reconciler, error) {
 	if catalog == nil {
 		return nil, fmt.Errorf("%w: nil catalog", ErrInvalidConfig)
 	}
