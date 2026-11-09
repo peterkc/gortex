@@ -48,9 +48,14 @@ func WithWideRetirementQuantum(ctx context.Context) context.Context {
 	return context.WithValue(ctx, payloadWideQuantumKey{}, true)
 }
 
-func wideRetirementQuantum(ctx context.Context) bool {
+// WideRetirementQuantum reports whether ctx is marked for wide retirement quanta.
+func WideRetirementQuantum(ctx context.Context) bool {
 	wide, _ := ctx.Value(payloadWideQuantumKey{}).(bool)
 	return wide
+}
+
+func wideRetirementQuantum(ctx context.Context) bool {
+	return WideRetirementQuantum(ctx)
 }
 
 // wideRetirementBatch is the chunk size wide quanta learned last.
