@@ -26,7 +26,7 @@ func editGateClosedReclaimSeed(s *Store) {
 	res := walReclaimResult{urgent: true, bytesBefore: s.observedWALFileSize(s.dbPath + "-wal")}
 	_ = s.reclaimWALInLane(ctx, cfg, db, &res)
 	if res.pauseClosed {
-		s.walReclaim.update(func(stats *WALReclaimStats) { stats.notePause(res.pause) })
+		s.walReclaim.update(func(stats *WALReclaimStats) { noteWALReclaimPause(stats, res.pause) })
 		s.walReclaim.pauseDrain.observe(res.pauseDrain)
 		s.walReclaim.pauseTruncate.observe(res.pauseTruncate)
 	}

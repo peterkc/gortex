@@ -393,7 +393,7 @@ func (st *walReclaimState) update(fn func(*WALReclaimStats)) {
 	st.mu.Unlock()
 }
 
-func (st *WALReclaimStats) notePause(d time.Duration) {
+func noteWALReclaimPause(st *WALReclaimStats, d time.Duration) {
 	st.PauseCount++
 	st.PauseTotal += d
 	st.PauseLast = d
@@ -587,7 +587,7 @@ func (s *Store) reclaimWALOnce(cfg walReclaimConfig, ckptDB *sql.DB, walPath str
 	}
 	s.walReclaim.update(func(st *WALReclaimStats) {
 		st.ThresholdBytes = cfg.thresholdBytes
-		st.noteInterruption(res)
+		noteWALReclaimInterruption(st, res)
 		if res.deferredEditBurst {
 			st.DeferredEditBurst++
 		}
@@ -606,7 +606,7 @@ func (s *Store) reclaimWALOnce(cfg walReclaimConfig, ckptDB *sql.DB, walPath str
 			st.WriterHoldMax = max(st.WriterHoldMax, res.writerHold)
 		}
 		if res.pauseClosed {
-			st.notePause(res.pause)
+			noteWALReclaimPause(st, res.pause)
 			s.walReclaim.pauseDrain.observe(res.pauseDrain)
 			s.walReclaim.pauseTruncate.observe(res.pauseTruncate)
 		}

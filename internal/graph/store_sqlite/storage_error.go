@@ -13,21 +13,21 @@ import (
 // legacy Store-method panics. That distinction lets index/build boundaries
 // recover storage failures without swallowing programmer or extractor panics.
 type StorageError struct {
-	err error
+	Err error `json:"-"`
 }
 
 func (e *StorageError) Error() string {
-	if e == nil || e.err == nil {
+	if e == nil || e.Err == nil {
 		return "store_sqlite: storage operation failed"
 	}
-	return "store_sqlite: " + e.err.Error()
+	return "store_sqlite: " + e.Err.Error()
 }
 
 func (e *StorageError) Unwrap() error {
 	if e == nil {
 		return nil
 	}
-	return e.err
+	return e.Err
 }
 
 // isSQLiteFullFailure recognizes the actual SQLite driver cause, not errors
@@ -71,7 +71,7 @@ func wrapStorageError(err error) error {
 	if errors.As(err, &wrapped) {
 		return err
 	}
-	return &StorageError{err: err}
+	return &StorageError{Err: err}
 }
 
 // StorageErrorFromPanic recognizes only panics emitted by the SQLite store.

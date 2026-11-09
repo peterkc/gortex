@@ -144,10 +144,10 @@ func installVFSIOCounters(tls *libc.TLS, methods, walMethods uintptr) {
 
 // VFSIOMark is a sample of the page I/O counters, process-wide.
 type VFSIOMark struct {
-	// Available identifies physical VFS counters. fallbackWAL is sampled only
+	// Available identifies physical VFS counters. FallbackWAL is sampled only
 	// by a store-backed mark when those hooks are unavailable.
 	Available   bool
-	fallbackWAL WALWriteMark
+	FallbackWAL WALWriteMark `json:"-"`
 	// [file][writer]: file 0 other, 1 main database, 2 log; writer 1 is the
 	// writer connection.
 	ReadCalls, ReadNanos, ReadBytes    [3][2]int64
@@ -184,7 +184,7 @@ func WriteMark() VFSIOMark { return vfsIOMark() }
 func (s *Store) WriteMark() VFSIOMark {
 	m := vfsIOMark()
 	if !m.Available {
-		m.fallbackWAL = s.WALWriteMark()
+		m.FallbackWAL = s.WALWriteMark()
 	}
 	return m
 }
@@ -216,7 +216,7 @@ func (m VFSIOMark) Since(prev VFSIOMark) VFSIOSplit {
 		OtherMainWriteBytes:  d(m.WriteBytes, prev.WriteBytes, vfsFileMain, 0),
 	}
 	if !m.Available {
-		wal := WALWrittenBetween(prev.fallbackWAL, m.fallbackWAL)
+		wal := WALWrittenBetween(prev.FallbackWAL, m.FallbackWAL)
 		if wal.Valid {
 			split.WriterWALWriteBytes = wal.Bytes
 			split.WALReset = wal.Reset
