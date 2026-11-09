@@ -7,7 +7,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -52,7 +52,7 @@ func (l *CheckoutLifecycle) RetirementBacklog(ctx context.Context) (RetirementBa
 	if l == nil || l.catalog == nil {
 		return RetirementBacklog{}, errNoCatalog
 	}
-	rows, err := l.catalog.ListViewGenerations(ctx, store_sqlite.ViewGenerationFilter{})
+	rows, err := l.catalog.ListViewGenerations(ctx, storage.ViewGenerationFilter{})
 	if err != nil {
 		return RetirementBacklog{}, err
 	}
@@ -61,7 +61,7 @@ func (l *CheckoutLifecycle) RetirementBacklog(ctx context.Context) (RetirementBa
 
 // retirementBacklogFrom computes the backlog against a catalog listing the
 // caller already holds.
-func (l *CheckoutLifecycle) retirementBacklogFrom(rows []store_sqlite.ViewGeneration, now time.Time) RetirementBacklog {
+func (l *CheckoutLifecycle) retirementBacklogFrom(rows []storage.ViewGeneration, now time.Time) RetirementBacklog {
 	var out RetirementBacklog
 	if l == nil {
 		return out
@@ -72,7 +72,7 @@ func (l *CheckoutLifecycle) retirementBacklogFrom(rows []store_sqlite.ViewGenera
 	out.Generations = len(owed)
 	out.Parked = l.pruneRetirementParked(owed)
 	for _, row := range rows {
-		if row.State == store_sqlite.ViewGenerationRetiring {
+		if row.State == storage.ViewGenerationRetiring {
 			out.Retiring++
 		}
 		if _, ok := owed[row.GenerationID]; ok {

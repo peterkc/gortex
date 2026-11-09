@@ -7,7 +7,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 const (
@@ -264,9 +264,9 @@ func (idx *Indexer) deleteRefFactsForFiles(repoPrefix string, graphPaths []strin
 // their out-edges, the targets' names, the delete and the write), each with
 // the major page faults it took. A nil *refFactLegs records nothing.
 type refFactLegs struct {
-	sampleWrites func() store_sqlite.VFSIOMark
-	writes       store_sqlite.VFSIOMark
-	writeCounts  map[string]store_sqlite.VFSIOSplit
+	sampleWrites func() storage.VFSIOMark
+	writes       storage.VFSIOMark
+	writeCounts  map[string]storage.VFSIOSplit
 	last         time.Time
 	io           editDeltaIO
 	took         map[string]time.Duration
@@ -274,8 +274,8 @@ type refFactLegs struct {
 	order        []string
 }
 
-func newRefFactLegs(sample func() store_sqlite.VFSIOMark) *refFactLegs {
-	return &refFactLegs{sampleWrites: sample, writes: sample(), writeCounts: make(map[string]store_sqlite.VFSIOSplit), last: time.Now(), io: editDeltaProcessIO(),
+func newRefFactLegs(sample func() storage.VFSIOMark) *refFactLegs {
+	return &refFactLegs{sampleWrites: sample, writes: sample(), writeCounts: make(map[string]storage.VFSIOSplit), last: time.Now(), io: editDeltaProcessIO(),
 		took: make(map[string]time.Duration), faults: make(map[string]int64)}
 }
 

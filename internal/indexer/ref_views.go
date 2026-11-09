@@ -19,6 +19,7 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/indexer/source"
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -166,7 +167,7 @@ type RefViewResult struct {
 	// with, so a caller can label the view with the commit it is really at.
 	Resolved gitstate.ResolvedSelector
 
-	State store_sqlite.RefViewState
+	State storage.RefViewState
 
 	// BuildToken identifies the in-flight attempt a building answer is waiting
 	// on. It is empty when the build that was in flight has just been
@@ -501,30 +502,30 @@ func (m *RefViewManager) row(
 	ctx context.Context,
 	viewID string,
 	req RefViewRequest,
-) (store_sqlite.RefView, error) {
+) (storage.RefView, error) {
 	stored, found, err := m.catalog.GetRefView(ctx, viewID)
 	if err != nil {
-		return store_sqlite.RefView{}, err
+		return storage.RefView{}, err
 	}
 	if found {
 		return stored, nil
 	}
-	var created store_sqlite.RefView
+	var created storage.RefView
 	err = m.withWriter(ctx, func(writeCtx context.Context) error {
 		var writeErr error
-		created, writeErr = m.catalog.GetOrCreateRefView(writeCtx, store_sqlite.RefView{
+		created, writeErr = m.catalog.GetOrCreateRefView(writeCtx, storage.RefView{
 			RefViewID:         viewID,
 			GraphID:           req.GraphID,
 			SelectorKind:      string(req.SelectorKind),
 			SelectorValue:     req.SelectorValue,
 			EnrichmentProfile: req.EnrichmentProfile,
-			State:             store_sqlite.RefViewPending,
+			State:             storage.RefViewPending,
 			ExactView:         true,
 		})
 		return writeErr
 	})
 	if err != nil {
-		return store_sqlite.RefView{}, err
+		return storage.RefView{}, err
 	}
 	return created, nil
 }
@@ -643,7 +644,7 @@ func (m *RefViewManager) demandCommittedBase(repoPrefix string) {
 // makes a moved ref on an unchanged tree a metadata update.
 func (m *RefViewManager) activeIsCurrent(
 	ctx context.Context,
-	view store_sqlite.RefView,
+	view storage.RefView,
 	fingerprint string,
 ) (bool, error) {
 	if view.ActiveGenerationID <= 0 || view.ActiveBuildFingerprint != fingerprint {
@@ -675,7 +676,7 @@ func (m *RefViewManager) activeIsCurrent(
 // the next selection re-stamps.
 func (m *RefViewManager) coalesced(
 	ctx context.Context,
-	view store_sqlite.RefView,
+	view storage.RefView,
 	base primaryBase,
 	resolved gitstate.ResolvedSelector,
 	fingerprint string,
@@ -683,7 +684,7 @@ func (m *RefViewManager) coalesced(
 	if view.DesiredTree != resolved.TreeOID || view.DesiredBuildFingerprint != fingerprint {
 		return RefViewResult{}, false, nil
 	}
-	build, inFlight, err := m.catalog.InFlightRefViewBuild(ctx, store_sqlite.RefViewBuildKey{
+	build, inFlight, err := m.catalog.InFlightRefViewBuild(ctx, storage.RefViewBuildKey{
 		RefViewID:        view.RefViewID,
 		DesiredTree:      resolved.TreeOID,
 		BaseGenerationID: base.generationID,
@@ -698,7 +699,7 @@ func (m *RefViewManager) coalesced(
 	return RefViewResult{
 		RefViewID:  view.RefViewID,
 		Resolved:   resolved,
-		State:      store_sqlite.RefViewBuilding,
+		State:      storage.RefViewBuilding,
 		BuildToken: build.BuildToken,
 	}, true, nil
 }
@@ -710,18 +711,18 @@ func (m *RefViewManager) coalesced(
 // captures has to be the one that write left behind.
 func (m *RefViewManager) desire(
 	ctx context.Context,
-	view store_sqlite.RefView,
+	view storage.RefView,
 	resolved gitstate.ResolvedSelector,
 	fingerprint string,
 	current bool,
-) (store_sqlite.RefView, error) {
-	state := store_sqlite.RefViewBuilding
+) (storage.RefView, error) {
+	state := storage.RefViewBuilding
 	if current {
-		state = store_sqlite.RefViewReady
+		state = storage.RefViewReady
 	}
 	now := time.Now().Unix()
 	err := m.withWriter(ctx, func(writeCtx context.Context) error {
-		return m.catalog.UpdateRefViewDesire(writeCtx, store_sqlite.UpdateRefViewDesireRequest{
+		return m.catalog.UpdateRefViewDesire(writeCtx, storage.UpdateRefViewDesireRequest{
 			RefViewID:               view.RefViewID,
 			DesiredRef:              resolved.FullRef,
 			DesiredCommit:           resolved.CommitOID,
@@ -733,15 +734,15 @@ func (m *RefViewManager) desire(
 		})
 	})
 	if err != nil {
-		return store_sqlite.RefView{}, err
+		return storage.RefView{}, err
 	}
 	stored, found, err := m.catalog.GetRefView(ctx, view.RefViewID)
 	if err != nil {
-		return store_sqlite.RefView{}, err
+		return storage.RefView{}, err
 	}
 	if !found {
-		return store_sqlite.RefView{}, fmt.Errorf("%w: ref view %s",
-			store_sqlite.ErrCatalogNotFound, view.RefViewID)
+		return storage.RefView{}, fmt.Errorf("%w: ref view %s",
+			storage.ErrCatalogNotFound, view.RefViewID)
 	}
 	return stored, nil
 }
@@ -758,12 +759,12 @@ func (m *RefViewManager) desire(
 // selection past the contention writes it.
 func (m *RefViewManager) adoptMetadata(
 	ctx context.Context,
-	view store_sqlite.RefView,
+	view storage.RefView,
 	resolved gitstate.ResolvedSelector,
 ) (RefViewResult, error) {
 	now := time.Now().Unix()
 	err := m.withWriter(ctx, func(writeCtx context.Context) error {
-		return m.catalog.TouchRefViewSelection(writeCtx, store_sqlite.TouchRefViewSelectionRequest{
+		return m.catalog.TouchRefViewSelection(writeCtx, storage.TouchRefViewSelectionRequest{
 			RefViewID:          view.RefViewID,
 			ExpectedRouteEpoch: view.RouteEpoch,
 			ActiveRef:          resolved.FullRef,
@@ -773,7 +774,7 @@ func (m *RefViewManager) adoptMetadata(
 		})
 	})
 	if err != nil &&
-		!errors.Is(err, store_sqlite.ErrCatalogStaleGuard) &&
+		!errors.Is(err, storage.ErrCatalogStaleGuard) &&
 		!errors.Is(err, ErrRefViewStoreBusy) {
 		return RefViewResult{}, err
 	}
@@ -782,7 +783,7 @@ func (m *RefViewManager) adoptMetadata(
 		RefViewID:    view.RefViewID,
 		GenerationID: view.ActiveGenerationID,
 		Resolved:     resolved,
-		State:        store_sqlite.RefViewReady,
+		State:        storage.RefViewReady,
 	}, nil
 }
 
@@ -791,14 +792,14 @@ func (m *RefViewManager) adoptMetadata(
 func (m *RefViewManager) startBuild(
 	ctx context.Context,
 	req RefViewRequest,
-	view store_sqlite.RefView,
+	view storage.RefView,
 	base primaryBase,
 	resolved gitstate.ResolvedSelector,
 	identity GenerationIdentity,
 	fingerprint string,
 ) (RefViewResult, error) {
 	now := time.Now().Unix()
-	attempt := store_sqlite.RefViewBuild{
+	attempt := storage.RefViewBuild{
 		BuildID:            uuid.NewV7().String(),
 		RefViewID:          view.RefViewID,
 		DesiredRef:         resolved.FullRef,
@@ -808,12 +809,12 @@ func (m *RefViewManager) startBuild(
 		EnrichmentProfile:  req.EnrichmentProfile,
 		BuildFingerprint:   fingerprint,
 		CapturedRouteEpoch: view.RouteEpoch,
-		State:              store_sqlite.ViewGenerationBuilding,
+		State:              storage.ViewGenerationBuilding,
 		BuildToken:         uuid.NewV7().String(),
 		CreatedAt:          now,
 		LastProgress:       now,
 	}
-	var claimed store_sqlite.RefViewBuild
+	var claimed storage.RefViewBuild
 	err := m.withWriter(ctx, func(writeCtx context.Context) error {
 		var claimErr error
 		claimed, claimErr = m.catalog.ClaimRefViewBuild(
@@ -821,7 +822,7 @@ func (m *RefViewManager) startBuild(
 		return claimErr
 	})
 	if err != nil {
-		if errors.Is(err, store_sqlite.ErrRefViewBuildInFlight) {
+		if errors.Is(err, storage.ErrRefViewBuildInFlight) {
 			viewmetrics.Count(viewmetrics.RefViewSelectionTotal, viewmetrics.RefViewCoalesced)
 			// The build token is the id the caller polls on, so it is what
 			// makes two selections of one tree legible as one build.
@@ -831,7 +832,7 @@ func (m *RefViewManager) startBuild(
 			return RefViewResult{
 				RefViewID:  view.RefViewID,
 				Resolved:   resolved,
-				State:      store_sqlite.RefViewBuilding,
+				State:      storage.RefViewBuilding,
 				BuildToken: claimed.BuildToken,
 			}, nil
 		}
@@ -858,8 +859,8 @@ func (m *RefViewManager) startBuild(
 func (m *RefViewManager) runDetached(
 	ctx context.Context,
 	req RefViewRequest,
-	view store_sqlite.RefView,
-	build store_sqlite.RefViewBuild,
+	view storage.RefView,
+	build storage.RefViewBuild,
 	base primaryBase,
 	resolved gitstate.ResolvedSelector,
 	identity GenerationIdentity,
@@ -875,7 +876,7 @@ func (m *RefViewManager) runDetached(
 	if admissionErr != nil {
 		closingCtx, cancel := context.WithTimeout(context.Background(), m.writerBudget)
 		defer cancel()
-		m.completeBuild(closingCtx, build, store_sqlite.ViewGenerationFailed, 0, admissionErr.Error())
+		m.completeBuild(closingCtx, build, storage.ViewGenerationFailed, 0, admissionErr.Error())
 		return RefViewResult{}, admissionErr
 	}
 	go func() {
@@ -885,7 +886,7 @@ func (m *RefViewManager) runDetached(
 		release, err := m.gate.Acquire(buildCtx, ViewBuildInteractive)
 		if err != nil {
 			waitErr := fmt.Errorf("indexer: wait for ref-view build admission: %w", err)
-			m.completeBuild(buildCtx, build, store_sqlite.ViewGenerationFailed, 0, waitErr.Error())
+			m.completeBuild(buildCtx, build, storage.ViewGenerationFailed, 0, waitErr.Error())
 			if errors.Is(err, ErrViewBuildQueueFull) {
 				viewmetrics.Count(viewmetrics.RefViewSelectionTotal, viewmetrics.RefViewDeferred)
 				m.logger.Debug("ref view manager: build deferred by admission capacity",
@@ -895,7 +896,7 @@ func (m *RefViewManager) runDetached(
 				done <- outcome{result: RefViewResult{
 					RefViewID: view.RefViewID,
 					Resolved:  resolved,
-					State:     store_sqlite.RefViewBuilding,
+					State:     storage.RefViewBuilding,
 				}}
 				return
 			}
@@ -930,14 +931,14 @@ func (m *RefViewManager) runDetached(
 // building is the answer a selection gives when the pass it claimed is still
 // running: the token to poll, and the state the selector resolved to.
 func (m *RefViewManager) building(
-	view store_sqlite.RefView,
-	build store_sqlite.RefViewBuild,
+	view storage.RefView,
+	build storage.RefViewBuild,
 	resolved gitstate.ResolvedSelector,
 ) RefViewResult {
 	return RefViewResult{
 		RefViewID:  view.RefViewID,
 		Resolved:   resolved,
-		State:      store_sqlite.RefViewBuilding,
+		State:      storage.RefViewBuilding,
 		BuildToken: build.BuildToken,
 	}
 }
@@ -956,7 +957,7 @@ func (m *RefViewManager) building(
 // A stamp refused as stale means the claim has already been taken over. That
 // is not this goroutine's to resolve: the build finds out at publish time,
 // where losing the claim costs it the adoption rather than the pass.
-func (m *RefViewManager) heartbeat(ctx context.Context, build store_sqlite.RefViewBuild) func() {
+func (m *RefViewManager) heartbeat(ctx context.Context, build storage.RefViewBuild) func() {
 	done, stopped := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(stopped)
@@ -968,7 +969,7 @@ func (m *RefViewManager) heartbeat(ctx context.Context, build store_sqlite.RefVi
 				return
 			case <-ticker.C:
 				err := m.catalog.TouchRefViewBuild(ctx, build.BuildID, build.BuildToken, time.Now().Unix())
-				if err != nil && !errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
+				if err != nil && !errors.Is(err, storage.ErrCatalogStaleGuard) {
 					m.logger.Debug("ref view manager: could not stamp a build's progress",
 						zap.String("build", build.BuildID), zap.Error(err))
 				}
@@ -985,8 +986,8 @@ func (m *RefViewManager) heartbeat(ctx context.Context, build store_sqlite.RefVi
 func (m *RefViewManager) runBuild(
 	ctx context.Context,
 	req RefViewRequest,
-	view store_sqlite.RefView,
-	build store_sqlite.RefViewBuild,
+	view storage.RefView,
+	build storage.RefViewBuild,
 	base primaryBase,
 	resolved gitstate.ResolvedSelector,
 	identity GenerationIdentity,
@@ -1007,7 +1008,7 @@ func (m *RefViewManager) runBuild(
 	}
 	if buildErr != nil {
 		failure := classifyRefViewBuildError(buildErr)
-		m.completeBuild(ctx, build, store_sqlite.ViewGenerationFailed, 0, failure.Error())
+		m.completeBuild(ctx, build, storage.ViewGenerationFailed, 0, failure.Error())
 		result, err := m.failed(ctx, view, failure)
 		result.Built = true
 		return result, err
@@ -1039,7 +1040,7 @@ func (m *RefViewManager) runBuild(
 	// attempt in the same transaction, so a pass whose claim was reclaimed
 	// while it ran publishes nothing.
 	now := time.Now().Unix()
-	err = m.catalog.AdoptRefViewGeneration(ctx, store_sqlite.AdoptRefViewGenerationRequest{
+	err = m.catalog.AdoptRefViewGeneration(ctx, storage.AdoptRefViewGenerationRequest{
 		RefViewID:                       view.RefViewID,
 		ExpectedRouteEpoch:              build.CapturedRouteEpoch,
 		ExpectedDesiredTree:             resolved.TreeOID,
@@ -1057,7 +1058,7 @@ func (m *RefViewManager) runBuild(
 		LastSelected:                    now,
 	})
 	if err != nil {
-		if errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
+		if errors.Is(err, storage.ErrCatalogStaleGuard) {
 			return m.superseded(ctx, build, generationID, view, published), nil
 		}
 		return RefViewResult{}, err
@@ -1067,7 +1068,7 @@ func (m *RefViewManager) runBuild(
 		RefViewID:    view.RefViewID,
 		GenerationID: generationID,
 		Resolved:     published,
-		State:        store_sqlite.RefViewReady,
+		State:        storage.RefViewReady,
 		Built:        true,
 	}, nil
 }
@@ -1078,9 +1079,9 @@ func (m *RefViewManager) runBuild(
 // selector actually moved to.
 func (m *RefViewManager) superseded(
 	ctx context.Context,
-	build store_sqlite.RefViewBuild,
+	build storage.RefViewBuild,
 	generationID int64,
-	view store_sqlite.RefView,
+	view storage.RefView,
 	published gitstate.ResolvedSelector,
 ) RefViewResult {
 	m.supersede(ctx, build, generationID)
@@ -1088,7 +1089,7 @@ func (m *RefViewManager) superseded(
 	return RefViewResult{
 		RefViewID: view.RefViewID,
 		Resolved:  published,
-		State:     store_sqlite.RefViewBuilding,
+		State:     storage.RefViewBuilding,
 		Built:     true,
 	}
 }
@@ -1098,7 +1099,7 @@ func (m *RefViewManager) superseded(
 // failing the selection because the bookkeeping failed would turn a retryable
 // answer into an error. Both are detached from the request for the reason
 // completeBuild gives — a cancellation is exactly when they matter most.
-func (m *RefViewManager) supersede(ctx context.Context, build store_sqlite.RefViewBuild, generationID int64) {
+func (m *RefViewManager) supersede(ctx context.Context, build storage.RefViewBuild, generationID int64) {
 	ctx = closingContext(ctx)
 	if generationID > 0 {
 		if err := m.store.MarkPayloadGenerationSuperseded(ctx, generationID); err != nil {
@@ -1107,7 +1108,7 @@ func (m *RefViewManager) supersede(ctx context.Context, build store_sqlite.RefVi
 				zap.Int64("generation", generationID), zap.Error(err))
 		}
 	}
-	m.completeBuild(ctx, build, store_sqlite.ViewGenerationSuperseded, generationID, "")
+	m.completeBuild(ctx, build, storage.ViewGenerationSuperseded, generationID, "")
 }
 
 // completeBuild ends one attempt that will not publish — it failed, or it was
@@ -1125,12 +1126,12 @@ func (m *RefViewManager) supersede(ctx context.Context, build store_sqlite.RefVi
 // decided by the time it runs.
 func (m *RefViewManager) completeBuild(
 	ctx context.Context,
-	build store_sqlite.RefViewBuild,
-	state store_sqlite.ViewGenerationState,
+	build storage.RefViewBuild,
+	state storage.ViewGenerationState,
 	generationID int64,
 	buildError string,
 ) {
-	err := m.catalog.CompleteRefViewBuild(closingContext(ctx), store_sqlite.CompleteRefViewBuildRequest{
+	err := m.catalog.CompleteRefViewBuild(closingContext(ctx), storage.CompleteRefViewBuildRequest{
 		BuildID:      build.BuildID,
 		BuildToken:   build.BuildToken,
 		State:        state,
@@ -1138,7 +1139,7 @@ func (m *RefViewManager) completeBuild(
 		LastProgress: time.Now().Unix(),
 		Error:        buildError,
 	})
-	if err != nil && !errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
+	if err != nil && !errors.Is(err, storage.ErrCatalogStaleGuard) {
 		m.logger.Warn("ref view manager: could not close a build attempt",
 			zap.String("build", build.BuildID), zap.Error(err))
 	}
@@ -1155,25 +1156,25 @@ func (m *RefViewManager) completeBuild(
 // cost the caller the cause this call is about to return.
 func (m *RefViewManager) failed(
 	ctx context.Context,
-	view store_sqlite.RefView,
+	view storage.RefView,
 	cause error,
 ) (RefViewResult, error) {
 	recordCtx, cancel := context.WithTimeout(closingContext(ctx), m.writerBudget)
 	defer cancel()
-	err := m.catalog.FailRefView(recordCtx, store_sqlite.FailRefViewRequest{
+	err := m.catalog.FailRefView(recordCtx, storage.FailRefViewRequest{
 		RefViewID:          view.RefViewID,
 		ExpectedRouteEpoch: view.RouteEpoch,
 		LastError:          cause.Error(),
 		LastResolved:       time.Now().Unix(),
 	})
-	if err != nil && !errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
+	if err != nil && !errors.Is(err, storage.ErrCatalogStaleGuard) {
 		m.logger.Warn("ref view manager: could not record a failed selection",
 			zap.String("ref_view", view.RefViewID), zap.Error(err))
 	}
 	viewmetrics.Count(viewmetrics.RefViewSelectionTotal, viewmetrics.RefViewFailed)
 	return RefViewResult{
 		RefViewID: view.RefViewID,
-		State:     store_sqlite.RefViewFailed,
+		State:     storage.RefViewFailed,
 	}, cause
 }
 

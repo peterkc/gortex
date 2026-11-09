@@ -7,9 +7,9 @@ import (
 	"slices"
 	"sort"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/search/trigram"
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -174,7 +174,7 @@ type checkoutTextState struct {
 	// manifest is the resolved input manifest of the routed working-tree
 	// chain the searcher describes; hasManifest is false when there was
 	// none to resolve, which forces the next change to a rebuild.
-	manifest    map[string]store_sqlite.InputManifestEntry
+	manifest    map[string]storage.InputManifestEntry
 	hasManifest bool
 
 	// claims caches the file claims of the generations in the routed stack
@@ -319,7 +319,7 @@ func (c *CheckoutCoordinator) textSearcher(ctx context.Context) (*trigram.Search
 func (c *CheckoutCoordinator) patchTextSearcher(
 	state *checkoutTextState,
 	corpus textCorpusSet,
-	manifest map[string]store_sqlite.InputManifestEntry,
+	manifest map[string]storage.InputManifestEntry,
 ) (updated, removed int) {
 	changed := map[string]struct{}{}
 	for p, next := range manifest {
@@ -401,11 +401,11 @@ func (s textCorpusSet) paths() []string {
 // the materializer pins a view: pin, then confirm the route did not move, and
 // retry a bounded number of times when it did. An unrouted checkout pins
 // nothing. The returned lease is never nil.
-func (c *CheckoutCoordinator) pinTextRoute(ctx context.Context) (store_sqlite.CheckoutRoute, bool, *graphview.Lease, error) {
+func (c *CheckoutCoordinator) pinTextRoute(ctx context.Context) (storage.CheckoutRoute, bool, *graphview.Lease, error) {
 	for attempt := 0; ; attempt++ {
 		route, found, err := c.catalog.GetCheckoutRoute(ctx, c.checkoutID)
 		if err != nil {
-			return store_sqlite.CheckoutRoute{}, false, nil, fmt.Errorf("indexer: read the route of checkout %q: %w", c.checkoutID, err)
+			return storage.CheckoutRoute{}, false, nil, fmt.Errorf("indexer: read the route of checkout %q: %w", c.checkoutID, err)
 		}
 		if !found || c.leases == nil {
 			return route, found, nil, nil
@@ -421,14 +421,14 @@ func (c *CheckoutCoordinator) pinTextRoute(ctx context.Context) (store_sqlite.Ch
 		current, found, err := c.catalog.GetCheckoutRoute(ctx, c.checkoutID)
 		if err != nil {
 			lease.Release()
-			return store_sqlite.CheckoutRoute{}, false, nil, fmt.Errorf("indexer: read the route of checkout %q: %w", c.checkoutID, err)
+			return storage.CheckoutRoute{}, false, nil, fmt.Errorf("indexer: read the route of checkout %q: %w", c.checkoutID, err)
 		}
 		if found && current == route {
 			return route, true, lease, nil
 		}
 		lease.Release()
 		if attempt+1 >= textRouteAttempts {
-			return store_sqlite.CheckoutRoute{}, false, nil, fmt.Errorf("indexer: the route of checkout %q kept changing while its text corpus was read", c.checkoutID)
+			return storage.CheckoutRoute{}, false, nil, fmt.Errorf("indexer: the route of checkout %q kept changing while its text corpus was read", c.checkoutID)
 		}
 	}
 }
@@ -436,7 +436,7 @@ func (c *CheckoutCoordinator) pinTextRoute(ctx context.Context) (store_sqlite.Ch
 // textChain lists the routed working-tree chain oldest first: the generation
 // that stands on the commit generation, then each child up to the routed top.
 // A route with no working-tree layer has no chain.
-func (c *CheckoutCoordinator) textChain(ctx context.Context, route store_sqlite.CheckoutRoute, routed bool) []int64 {
+func (c *CheckoutCoordinator) textChain(ctx context.Context, route storage.CheckoutRoute, routed bool) []int64 {
 	if !routed || route.DirtyGenerationID <= 0 {
 		return nil
 	}
@@ -451,7 +451,7 @@ func (c *CheckoutCoordinator) textChain(ctx context.Context, route store_sqlite.
 // version, or under another policy. Unlike loadDirtyChainManifest it does not
 // refuse a chain whose closure was truncated: that decides whether a build may
 // stack on the chain, not which bytes the working copy holds.
-func (c *CheckoutCoordinator) textChainManifest(ctx context.Context, chain []int64) (map[string]store_sqlite.InputManifestEntry, bool) {
+func (c *CheckoutCoordinator) textChainManifest(ctx context.Context, chain []int64) (map[string]storage.InputManifestEntry, bool) {
 	if len(chain) == 0 {
 		return nil, false
 	}
@@ -527,7 +527,7 @@ func (c *CheckoutCoordinator) releaseTextSearcher() {
 // The bytes still come from the checkout root, so the answer is about the right
 // working copy; what it cannot yet see is a path only the layers know about.
 // Callers hold textMu.
-func (c *CheckoutCoordinator) textCorpus(ctx context.Context, route store_sqlite.CheckoutRoute, routed bool, chain []int64) (textCorpusSet, error) {
+func (c *CheckoutCoordinator) textCorpus(ctx context.Context, route storage.CheckoutRoute, routed bool, chain []int64) (textCorpusSet, error) {
 	state := &c.textState
 	commit := state.commitSide
 	if !routed || route.CommitGenerationID <= 0 || state.commitSideFor != route.CommitGenerationID || commit == nil {

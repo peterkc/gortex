@@ -190,6 +190,7 @@ func derivationParser(
 	logger *zap.Logger, repoPrefix, root string,
 ) *Indexer {
 	idx := New(store.AtGeneration(generationID), registry, cfg, logger)
+	idx.SetCensusCatalog(store.Catalog())
 	idx.SetRepoPrefix(repoPrefix)
 	idx.rootPath = root
 	return idx

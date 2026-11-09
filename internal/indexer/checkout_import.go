@@ -6,7 +6,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // The file-by-file import of a large working-tree change.
@@ -39,7 +39,7 @@ var importInteractivePaths = 32
 // write. A fold that is refused leaves the chain routed; the next link then
 // takes the chain's own depth rules.
 func (c *CheckoutCoordinator) foldImportChain(
-	ctx context.Context, commitGeneration int64, route *store_sqlite.CheckoutRoute, out *CheckoutCycle,
+	ctx context.Context, commitGeneration int64, route *storage.CheckoutRoute, out *CheckoutCycle,
 ) {
 	if out.DirtyChainDepth < dirtyChainCompactionDepth || out.DirtyGenerationID <= 0 {
 		return
@@ -133,7 +133,7 @@ func (c *CheckoutCoordinator) foldImportChain(
 		return
 	}
 	previous := route.DirtyGenerationID
-	if err := c.flip(ctx, route, store_sqlite.RouteSlotDirty, built.GenerationID); err != nil {
+	if err := c.flip(ctx, route, storage.RouteSlotDirty, built.GenerationID); err != nil {
 		c.abandonCopiedGeneration(context.WithoutCancel(ctx), built.GenerationID)
 		return
 	}

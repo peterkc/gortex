@@ -15,8 +15,8 @@ import (
 
 	"github.com/zzet/gortex/internal/gitstate"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer/source"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // DirtyLayerGenerationKind is the generation kind a working-tree layer
@@ -284,8 +284,8 @@ func (b *SparseGenerationBuilder) BuildDirtyLayer(
 		changes = delta
 		entries := manifestDeltaEntries(req.parentManifest, next)
 		manifest = &generationInputManifest{
-			meta: store_sqlite.InputManifestMeta{
-				ManifestVersion: store_sqlite.InputManifestVersion,
+			meta: storage.InputManifestMeta{
+				ManifestVersion: storage.InputManifestVersion,
 				IsFull:          false,
 				EntryCount:      len(entries),
 				PolicyDigest:    policy,
@@ -364,7 +364,12 @@ func (b *SparseGenerationBuilder) BuildDirtyLayer(
 	var baseCensusFunc func(context.Context) (map[string]int, error)
 	if b.Semantic != nil {
 		if req.parent > 0 {
-			chainCensus = dirtyChainLanguageCensus(ctx, b.Store, req.parent, req.RepoPrefix)
+			var censusStore generationStoreSource
+			var censusCatalog viewGenerationCatalog
+			if b.Store != nil {
+				censusStore, censusCatalog = b.Store, b.Store.Catalog()
+			}
+			chainCensus = dirtyChainLanguageCensus(ctx, censusStore, censusCatalog, req.parent, req.RepoPrefix)
 		}
 		baseCensus, baseCensusFunc = req.baseCensus, req.baseCensusFunc
 	}
@@ -452,7 +457,7 @@ func (b *SparseGenerationBuilder) BuildDirtyLayer(
 	report.BatchRemaining = remaining
 	report.outpacedSample = outpaced && err == nil && generationID > 0
 	report.dirtySample = before
-	report.WAL = store_sqlite.WALWrittenBetween(walMark, b.Store.WALWriteMark())
+	report.WAL = storage.WALWrittenBetween(walMark, b.Store.WALWriteMark())
 	b.logWorkingTreeBuild(req, generationID, report, err)
 	report.ChainFallbackReason = req.chainFallbackReason
 	report.ChainDepth = 1
@@ -475,12 +480,11 @@ func (b *SparseGenerationBuilder) BuildDirtyLayer(
 // grouped projection, no node decoding), the newest generation winning per
 // file. It walks at most maxChainWalkDepth working-tree generations and stops
 // at the first row that is not one.
-func dirtyChainLanguageCensus(ctx context.Context, store *store_sqlite.Store, top int64, repoPrefix string) map[string]map[string]int {
+func dirtyChainLanguageCensus(ctx context.Context, store generationStoreSource, catalog viewGenerationCatalog, top int64, repoPrefix string) map[string]map[string]int {
 	census := map[string]map[string]int{}
 	if store == nil {
 		return census
 	}
-	catalog := store.Catalog()
 	id := top
 	for depth := 0; id > 0 && depth < maxChainWalkDepth; depth++ {
 		row, found, err := catalog.GetViewGeneration(ctx, id)
@@ -488,7 +492,7 @@ func dirtyChainLanguageCensus(ctx context.Context, store *store_sqlite.Store, to
 			break
 		}
 		generation := map[string]map[string]int{}
-		for _, count := range graph.ReadRepoLanguageFileCounts(store.AtGeneration(id), []string{repoPrefix}) {
+		for _, count := range graph.ReadRepoLanguageFileCounts(store.AtGenerationStore(id), []string{repoPrefix}) {
 			if count.Language == "" || count.Count <= 0 {
 				continue
 			}
@@ -529,14 +533,14 @@ func chainManifestAdmitter(parent resolvedManifest, snap gitstate.DirtySnapshot,
 	for _, content := range snap.Contents {
 		contents[path.Clean(content.Path)] = content
 	}
-	return func(p string) store_sqlite.InputManifestAdmission {
-		if prior, ok := parent.entry(p); ok && prior.State == store_sqlite.InputManifestPresent {
+	return func(p string) storage.InputManifestAdmission {
+		if prior, ok := parent.entry(p); ok && prior.State == storage.InputManifestPresent {
 			if content, sampled := contents[p]; sampled && prior.Mode == content.Mode && prior.ContentSHA256 == content.SHA256 {
 				return prior.Admission
 			}
 		}
 		if admit == nil {
-			return store_sqlite.InputManifestAdmitted
+			return storage.InputManifestAdmitted
 		}
 		return admit(p)
 	}
@@ -916,7 +920,7 @@ func partialWorkingTreeManifest(
 	batch []LayerPathChange,
 	policy string,
 ) (*generationInputManifest, string) {
-	state := resolvedManifest{policy: policy, entries: map[string]store_sqlite.InputManifestEntry{}}
+	state := resolvedManifest{policy: policy, entries: map[string]storage.InputManifestEntry{}}
 	if chained {
 		for p, e := range parent.entries {
 			state.entries[p] = e
@@ -929,11 +933,11 @@ func partialWorkingTreeManifest(
 			delete(state.entries, change.Path)
 		}
 	}
-	var entries []store_sqlite.InputManifestEntry
+	var entries []storage.InputManifestEntry
 	if chained {
 		entries = manifestDeltaEntries(parent, state)
 	} else {
-		entries = make([]store_sqlite.InputManifestEntry, 0, len(state.entries))
+		entries = make([]storage.InputManifestEntry, 0, len(state.entries))
 		for _, e := range state.entries {
 			entries = append(entries, e)
 		}
@@ -951,8 +955,8 @@ func partialWorkingTreeManifest(
 		fmt.Fprintf(h, "\x00%s\x00%s\x00%s\x00%s\x00%s", p, e.State, e.Mode, e.ContentSHA256, e.Admission)
 	}
 	return &generationInputManifest{
-		meta: store_sqlite.InputManifestMeta{
-			ManifestVersion: store_sqlite.InputManifestVersion,
+		meta: storage.InputManifestMeta{
+			ManifestVersion: storage.InputManifestVersion,
 			IsFull:          !chained,
 			EntryCount:      len(entries),
 			PolicyDigest:    policy,

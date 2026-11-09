@@ -6,6 +6,7 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // This is the actual selected predecessor descriptor used by core builders.
@@ -25,10 +26,10 @@ func selectedContractCoreStorageBackend(ctx context.Context, target *store_sqlit
 		if err != nil {
 			return nil, err
 		}
-		if base != nil || !found || row.State != store_sqlite.ViewGenerationBuilding ||
+		if base != nil || !found || row.State != storage.ViewGenerationBuilding ||
 			row.OwnerKind != "dedicated_graph" || row.GenerationKind != "dedicated" ||
 			row.CheckoutID != checkout || row.BaseGenerationID != 0 || row.LayerID != "" || row.LowerViewFingerprint != "" {
-			return nil, store_sqlite.ErrCatalogStaleGuard
+			return nil, storage.ErrCatalogStaleGuard
 		}
 		// Only this owned physical root can contain an interrupted census. Do
 		// not substitute a selected ancestor or another actor's latest header.
@@ -38,7 +39,7 @@ func selectedContractCoreStorageBackend(ctx context.Context, target *store_sqlit
 		}
 		if found {
 			if !state.Accepted || state.InputVersion != contractCoreInputVersion {
-				return nil, store_sqlite.ErrCatalogStaleGuard
+				return nil, storage.ErrCatalogStaleGuard
 			}
 			resumed = &state
 		}

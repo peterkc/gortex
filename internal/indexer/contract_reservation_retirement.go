@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
@@ -29,7 +30,11 @@ func (l *CheckoutLifecycle) DeferContractReservationRetirement(ctx context.Conte
 	}
 	l.owed[generation] = struct{}{}
 	l.coordMu.Unlock()
-	countRetirementOwed(l.store, generation, viewmetrics.OwedDiscovered)
+	var owedStore graph.Store
+	if l.store != nil {
+		owedStore = l.store
+	}
+	countRetirementOwed(owedStore, generation, viewmetrics.OwedDiscovered)
 	notifyDeferredRetirementWork()
 	return nil
 }

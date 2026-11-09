@@ -24,7 +24,6 @@ import (
 	"github.com/zzet/gortex/internal/embedding"
 	"github.com/zzet/gortex/internal/entrypoints"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer/source"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/pathkey"
@@ -87,6 +86,7 @@ type repositoryUntrackState struct {
 // MultiIndexer orchestrates indexing across multiple repositories.
 type MultiIndexer struct {
 	graph               graph.Store
+	censusCatalog       viewGenerationCatalog
 	relationsPending    atomic.Bool // restart batch has not published its shared resolver tail
 	contractCoreRuntime atomic.Pointer[ContractCoreRuntimeHooks]
 	// contractSources caches the accepted bytes each journal fingerprinted,
@@ -408,6 +408,7 @@ func (mi *MultiIndexer) newPerRepoIndexerGuardedWithMode(
 		factory = New
 	}
 	idx := factory(mi.graph, mi.registry, cfg, mi.logger)
+	idx.censusCatalog = mi.censusCatalog
 	idx.contractCoreRuntime.Store(mi.contractCoreRuntime.Load())
 	idx.shadowAdmission = mi.shadowAdmission
 	idx.parseAdmission.Store(mi.parseAdmission.Load())
@@ -3210,7 +3211,7 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 	idx.SetProjectID(resolveProjectID(&entryCopy, cfg, prefix))
 	idx.SetRootPath(absPath)
 	idx.SetFileMtimes(priorMtimes)
-	if store, ok := mi.graph.(*store_sqlite.Store); ok {
+	if store, ok := mi.graph.(warmupWALWaiter); ok && store.SharesSymbolSearchCore(mi.graph) {
 		idx.warmupWriteBoundary = func() error { return store.AwaitWarmupWAL(ctx) }
 		defer func() {
 			if idx.warmupWriteBoundary != nil {

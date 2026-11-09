@@ -13,7 +13,6 @@ import (
 
 	"github.com/zzet/gortex/internal/gitcmd"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/semantic"
 )
 
@@ -76,7 +75,7 @@ type CommittedTypecheckOutcome struct {
 // runCommittedTypecheck runs the type checker's stage over a committed tree's
 // payload. Like the working-tree stage it never fails the build: what it
 // could not do, the generation declares.
-func (b *SparseGenerationBuilder) runCommittedTypecheck(ctx context.Context, req BuildRequest, handle *store_sqlite.Store, report *BuildReport) {
+func (b *SparseGenerationBuilder) runCommittedTypecheck(ctx context.Context, req BuildRequest, handle graph.Store, report *BuildReport) {
 	out := &report.CommittedTypecheck
 	out.Requested = true
 	if b.Semantic == nil {

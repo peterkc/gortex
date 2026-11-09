@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer/source"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // ClaimedDedicatedDeltaRequest advances an immutable dedicated base using its
@@ -17,7 +17,7 @@ import (
 // Config and workspace/project stamping must match the claim's effective policy
 // identity. Policy changes require an explicit full reseed, not this delta path.
 type ClaimedDedicatedDeltaRequest struct {
-	Claim       store_sqlite.DedicatedBaseBuildClaim
+	Claim       storage.DedicatedBaseBuildClaim
 	Base        LayerBase
 	BaseTreeOID string
 	RepoDir     string
@@ -35,7 +35,7 @@ type ClaimedDedicatedDeltaRequest struct {
 // this builder is the last guard before payload is written under it. It wraps
 // ErrDedicatedBaseCandidate so existing candidate-class handling is unchanged.
 var errDedicatedDeltaParentRevision = fmt.Errorf("%w: dedicated delta parent dependency revision differs",
-	store_sqlite.ErrDedicatedBaseCandidate)
+	storage.ErrDedicatedBaseCandidate)
 
 // BuildClaimedDedicatedDelta reuses commit-layer sparse planning without calling
 // BuildCommitLayer/Build: those APIs stamp a commit kind and allocate a different
@@ -51,7 +51,7 @@ func (b *SparseGenerationBuilder) BuildClaimedDedicatedDelta(ctx context.Context
 		return 0, BuildReport{}, err
 	}
 	if claim.GenerationID <= 0 || claim.BaseGenerationID <= 0 || claim.AttemptToken == "" {
-		return 0, BuildReport{}, fmt.Errorf("%w: dedicated delta requires a positive reservation and parent", store_sqlite.ErrDedicatedBaseCandidate)
+		return 0, BuildReport{}, fmt.Errorf("%w: dedicated delta requires a positive reservation and parent", storage.ErrDedicatedBaseCandidate)
 	}
 	catalog := b.Store.Catalog()
 	p, found, err := catalog.DedicatedBasePublication(ctx, claim.Desire.Authority.GraphID)
@@ -60,11 +60,11 @@ func (b *SparseGenerationBuilder) BuildClaimedDedicatedDelta(ctx context.Context
 	}
 	if !found || !dedicatedDeltaClaimMatches(p.Claim, claim) ||
 		(p.AttemptState != "building" && p.AttemptState != "ready" && p.AttemptState != "adopted") {
-		return 0, BuildReport{}, fmt.Errorf("%w: dedicated delta reservation changed", store_sqlite.ErrCatalogStaleGuard)
+		return 0, BuildReport{}, fmt.Errorf("%w: dedicated delta reservation changed", storage.ErrCatalogStaleGuard)
 	}
 	// ExistingGenerationID makes this an atomic validate-only transaction. The
 	// preceding read is only an early rejection, never an allocation fence.
-	validated, err := catalog.ClaimDedicatedBaseBuild(ctx, store_sqlite.ClaimDedicatedBaseBuildRequest{
+	validated, err := catalog.ClaimDedicatedBaseBuild(ctx, storage.ClaimDedicatedBaseBuildRequest{
 		ExistingGenerationID: claim.GenerationID,
 		Desire:               claim.Desire, ExpectedActiveGenerationID: claim.ExpectedActiveGenerationID,
 		AttemptToken: claim.AttemptToken, BaseGenerationID: claim.BaseGenerationID,
@@ -74,7 +74,7 @@ func (b *SparseGenerationBuilder) BuildClaimedDedicatedDelta(ctx context.Context
 		return 0, BuildReport{}, err
 	}
 	if !dedicatedDeltaClaimMatches(validated, claim) {
-		return 0, BuildReport{}, fmt.Errorf("%w: dedicated delta association was replaced", store_sqlite.ErrCatalogStaleGuard)
+		return 0, BuildReport{}, fmt.Errorf("%w: dedicated delta association was replaced", storage.ErrCatalogStaleGuard)
 	}
 	row, found, err := catalog.GetViewGeneration(ctx, claim.GenerationID)
 	if err != nil {
@@ -87,29 +87,29 @@ func (b *SparseGenerationBuilder) BuildClaimedDedicatedDelta(ctx context.Context
 		row.BaseGenerationID != claim.BaseGenerationID || row.LayerID != claim.LayerID || row.LowerViewFingerprint != claim.LowerViewFingerprint ||
 		row.TreeOID != identity.TreeOID || row.ConfigHash != identity.ConfigHash ||
 		row.ExtractorVersions != identity.ExtractorVersions || row.ResolverVersion != identity.ResolverVersion || row.DependencyRevision != identity.DependencyRevision {
-		return 0, BuildReport{}, fmt.Errorf("%w: incompatible dedicated delta identity", store_sqlite.ErrDedicatedBaseCandidate)
+		return 0, BuildReport{}, fmt.Errorf("%w: incompatible dedicated delta identity", storage.ErrDedicatedBaseCandidate)
 	}
 	parent, found, err := catalog.GetViewGeneration(ctx, claim.BaseGenerationID)
 	if err != nil {
 		return 0, BuildReport{}, err
 	}
 	if !found || parent.GenerationID <= claim.Desire.Authority.GenerationFloor ||
-		(parent.State != store_sqlite.ViewGenerationReady && parent.State != store_sqlite.ViewGenerationSuperseded) ||
+		(parent.State != storage.ViewGenerationReady && parent.State != storage.ViewGenerationSuperseded) ||
 		parent.OwnerKind != "dedicated_graph" || parent.GenerationKind != "dedicated" ||
 		parent.GraphID != row.GraphID || parent.CheckoutID != row.CheckoutID || parent.TreeOID != request.BaseTreeOID ||
 		parent.ConfigHash != identity.ConfigHash || parent.ExtractorVersions != identity.ExtractorVersions || parent.ResolverVersion != identity.ResolverVersion {
-		return 0, BuildReport{}, fmt.Errorf("%w: dedicated delta parent tree, policy or ownership differs", store_sqlite.ErrDedicatedBaseCandidate)
+		return 0, BuildReport{}, fmt.Errorf("%w: dedicated delta parent tree, policy or ownership differs", storage.ErrDedicatedBaseCandidate)
 	}
 	// Checked before the ready/superseded short circuit: a reservation already
 	// built over a differently-frozen parent must not be coalesced either.
 	if parent.DependencyRevision != identity.DependencyRevision {
 		return 0, BuildReport{}, fmt.Errorf("%w: parent generation %d", errDedicatedDeltaParentRevision, parent.GenerationID)
 	}
-	if row.State == store_sqlite.ViewGenerationReady || row.State == store_sqlite.ViewGenerationSuperseded {
+	if row.State == storage.ViewGenerationReady || row.State == storage.ViewGenerationSuperseded {
 		return row.GenerationID, BuildReport{GenerationID: row.GenerationID, Coalesced: true, Duration: time.Since(started)}, nil
 	}
-	if row.State != store_sqlite.ViewGenerationBuilding || request.Base == nil {
-		return 0, BuildReport{}, fmt.Errorf("%w: dedicated delta needs a building reservation and full lower reader", store_sqlite.ErrDedicatedBaseCandidate)
+	if row.State != storage.ViewGenerationBuilding || request.Base == nil {
+		return 0, BuildReport{}, fmt.Errorf("%w: dedicated delta needs a building reservation and full lower reader", storage.ErrDedicatedBaseCandidate)
 	}
 	commit := CommitLayerRequest{Base: request.Base, RepoDir: request.RepoDir, RootPath: request.RootPath,
 		BaseTreeOID: request.BaseTreeOID, TargetTreeOID: identity.TreeOID}
@@ -148,7 +148,7 @@ func (b *SparseGenerationBuilder) BuildClaimedDedicatedDelta(ctx context.Context
 		return 0, BuildReport{}, err
 	}
 	failed := func(ctx context.Context, cause error) error {
-		return b.Store.Catalog().FailDedicatedBaseBuild(ctx, store_sqlite.FailDedicatedBaseBuildRequest{
+		return b.Store.Catalog().FailDedicatedBaseBuild(ctx, storage.FailDedicatedBaseBuildRequest{
 			Claim: claim, Error: cause.Error(),
 		})
 	}
@@ -156,7 +156,7 @@ func (b *SparseGenerationBuilder) BuildClaimedDedicatedDelta(ctx context.Context
 		claim.GenerationID, handle, validated.Status != "allocated", prepare, failed)
 }
 
-func dedicatedDeltaClaimMatches(a, b store_sqlite.DedicatedBaseBuildClaim) bool {
+func dedicatedDeltaClaimMatches(a, b storage.DedicatedBaseBuildClaim) bool {
 	return a.Desire == b.Desire && a.AttemptToken == b.AttemptToken && a.GenerationID == b.GenerationID &&
 		a.BaseGenerationID == b.BaseGenerationID && a.LayerID == b.LayerID && a.LowerViewFingerprint == b.LowerViewFingerprint &&
 		a.ExpectedActiveGenerationID == b.ExpectedActiveGenerationID

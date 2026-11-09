@@ -23,6 +23,7 @@ import (
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/runtimeactivity"
 	"github.com/zzet/gortex/internal/semantic"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 const sparseGenerationBuildActivity = "sparse_generation_build"
@@ -276,8 +277,8 @@ type BuildRequest struct {
 // generationInputManifest is one build's manifest write: its meta row and the
 // entry rows (see dirty_chain_manifest.go).
 type generationInputManifest struct {
-	meta    store_sqlite.InputManifestMeta
-	entries []store_sqlite.InputManifestEntry
+	meta    storage.InputManifestMeta
+	entries []storage.InputManifestEntry
 }
 
 // EnrichmentStage names the checkout a build's enrichment pass describes.
@@ -490,7 +491,7 @@ type BuildReport struct {
 	ContestedEdgeSources int
 
 	// Producers is exactly what was declared for the generation.
-	Producers []store_sqlite.ProducerCompleteness
+	Producers []storage.ProducerCompleteness
 
 	// Enrichment is what the semantic enrichment stage did, zero when the
 	// build did not ask for it.
@@ -542,10 +543,10 @@ type BuildReport struct {
 	// paths that differ from the parent's for a delta.
 	ManifestEntriesWritten int
 	// WAL is the write-ahead log the store appended while the build ran
-	// (store_sqlite.WALWrittenBetween over marks taken at its start and
+	// (storage.WALWrittenBetween over marks taken at its start and
 	// end): the per-edit log cost a reader pinned across the edit holds.
 	// Filled by the working-tree entry points; zero-valued otherwise.
-	WAL store_sqlite.WALWriteDelta
+	WAL storage.WALWriteDelta
 }
 
 // SparseGenerationBuilder builds sparse payload generations over one store.
@@ -639,7 +640,7 @@ func (b *SparseGenerationBuilder) Build(ctx context.Context, req BuildRequest) (
 // shared by sparse and initial full plans. Claimed full builds join an already
 // reserved candidate through the preparation-aware runner below.
 func (b *SparseGenerationBuilder) buildPlannedGeneration(ctx context.Context, req BuildRequest, plan buildPlan, report BuildReport, started time.Time) (int64, BuildReport, error) {
-	generationID, handle, adopted, err := b.Store.BeginPayloadGenerationWithStatus(ctx, store_sqlite.PayloadGenerationRequest{
+	generationID, handle, adopted, err := b.Store.BeginPayloadGenerationWithStatus(ctx, storage.PayloadGenerationRequest{
 		OwnerKind: req.Identity.OwnerKind, GraphID: req.Identity.GraphID,
 		LayerID: req.Identity.LayerID, CheckoutID: req.Identity.CheckoutID,
 		GenerationKind: req.Identity.GenerationKind, BaseGenerationID: req.Identity.BaseGenerationID,
@@ -1123,6 +1124,7 @@ func (b *SparseGenerationBuilder) runPass(
 	report *BuildReport,
 ) (contextSeparation, error) {
 	idx := New(handle, b.Registry, b.Config, b.Logger)
+	idx.SetCensusCatalog(handle.Catalog())
 	if err := b.installSelectedContractCoreInputs(ctx, idx, handle, req); err != nil {
 		idx.Close()
 		return contextSeparation{}, err
@@ -2369,10 +2371,10 @@ func (b *SparseGenerationBuilder) writeMasks(
 		}
 	}
 
-	masks := make([]store_sqlite.FileMask, 0, len(covered)+len(plan.deleted)+len(withdrawn))
+	masks := make([]storage.FileMask, 0, len(covered)+len(plan.deleted)+len(withdrawn))
 	for graphPath := range covered {
-		masks = append(masks, store_sqlite.FileMask{
-			RepoPrefix: req.RepoPrefix, FilePath: graphPath, Mode: store_sqlite.OwnershipReplace,
+		masks = append(masks, storage.FileMask{
+			RepoPrefix: req.RepoPrefix, FilePath: graphPath, Mode: storage.OwnershipReplace,
 		})
 		report.ReplaceMasks++
 	}
@@ -2381,8 +2383,8 @@ func (b *SparseGenerationBuilder) writeMasks(
 			return fmt.Errorf(
 				"indexer: generation carries payload at %q while declaring it read-only context", graphPath)
 		}
-		masks = append(masks, store_sqlite.FileMask{
-			RepoPrefix: req.RepoPrefix, FilePath: graphPath, Mode: store_sqlite.OwnershipContext,
+		masks = append(masks, storage.FileMask{
+			RepoPrefix: req.RepoPrefix, FilePath: graphPath, Mode: storage.OwnershipContext,
 		})
 	}
 	for _, rel := range plan.deleted {
@@ -2391,8 +2393,8 @@ func (b *SparseGenerationBuilder) writeMasks(
 			return fmt.Errorf(
 				"indexer: generation carries payload at %q while claiming it deleted", graphPath)
 		}
-		masks = append(masks, store_sqlite.FileMask{
-			RepoPrefix: req.RepoPrefix, FilePath: graphPath, Mode: store_sqlite.OwnershipDelete,
+		masks = append(masks, storage.FileMask{
+			RepoPrefix: req.RepoPrefix, FilePath: graphPath, Mode: storage.OwnershipDelete,
 		})
 		report.DeleteMasks++
 	}
@@ -2487,7 +2489,7 @@ func (b *SparseGenerationBuilder) unclaimedEdgeSources(
 	req BuildRequest,
 	handle *store_sqlite.Store,
 	covered map[string]struct{},
-) ([]store_sqlite.EdgeSourceMask, int) {
+) ([]storage.EdgeSourceMask, int) {
 	unclaimed := make(map[string]struct{})
 	for _, edge := range handle.AllEdges() {
 		if edge == nil || edge.From == "" {
@@ -2517,7 +2519,7 @@ func (b *SparseGenerationBuilder) unclaimedEdgeSources(
 	} else {
 		baseEdges = req.Base.GetOutEdgesByNodeIDs(sources)
 	}
-	masks := make([]store_sqlite.EdgeSourceMask, 0, len(sources))
+	masks := make([]storage.EdgeSourceMask, 0, len(sources))
 	for _, id := range sources {
 		if basePaths != nil {
 			for _, p := range basePaths[id] {
@@ -2537,8 +2539,8 @@ func (b *SparseGenerationBuilder) unclaimedEdgeSources(
 				}
 			}
 		}
-		masks = append(masks, store_sqlite.EdgeSourceMask{
-			SourceID: id, Mode: store_sqlite.OwnershipReplace,
+		masks = append(masks, storage.EdgeSourceMask{
+			SourceID: id, Mode: storage.OwnershipReplace,
 		})
 	}
 	return masks, contested
@@ -2562,10 +2564,10 @@ func (b *SparseGenerationBuilder) unclaimedEdgeSources(
 // anything else keeps the marker and meets the build-failure guard below.
 func withoutSettledContextSources(
 	handle *store_sqlite.Store,
-	markers []store_sqlite.EdgeSourceMask,
+	markers []storage.EdgeSourceMask,
 	withdrawn map[string]struct{},
 	covered map[string]struct{},
-) []store_sqlite.EdgeSourceMask {
+) []storage.EdgeSourceMask {
 	if len(markers) == 0 {
 		return markers
 	}
@@ -2669,13 +2671,13 @@ func (b *SparseGenerationBuilder) declareProducers(
 	handle *store_sqlite.Store,
 	report *BuildReport,
 ) error {
-	vector := store_sqlite.ProducerCompleteness{
+	vector := storage.ProducerCompleteness{
 		Producer: string(graphview.CapSearchVector),
-		State:    store_sqlite.ProducerStateDisabledByConfig,
+		State:    storage.ProducerStateDisabledByConfig,
 		Reason:   "no embedding provider is configured for the build",
 	}
 	if b.Embedder != nil {
-		vector.State = store_sqlite.ProducerStateComplete
+		vector.State = storage.ProducerStateComplete
 		vector.Reason = ""
 	}
 
@@ -2691,22 +2693,22 @@ func (b *SparseGenerationBuilder) declareProducers(
 	// CREATES, between a claimed file and an untouched one, has no base edge
 	// to walk, so the generation replaces the claimed file's payload without
 	// the counterpart's half of the pair ever being written.
-	similarity := store_sqlite.ProducerCompleteness{
+	similarity := storage.ProducerCompleteness{
 		Producer: string(graphview.CapSimilarity),
-		State:    store_sqlite.ProducerStateDisabledByConfig,
+		State:    storage.ProducerStateDisabledByConfig,
 		Reason:   "near-duplicate detection is switched off for the build",
 	}
 	if b.Config.Coverage.IsEnabled("clones") {
-		similarity.State = store_sqlite.ProducerStateIncomplete
+		similarity.State = storage.ProducerStateIncomplete
 		similarity.Reason = "near-duplicate detection ranks bodies against a corpus; " +
 			"a sparse generation ranks them against its file set"
 	}
-	if req.followup && report.cloneFollowupComplete && similarity.State == store_sqlite.ProducerStateIncomplete {
+	if req.followup && report.cloneFollowupComplete && similarity.State == storage.ProducerStateIncomplete {
 		// The follow-up recomputed the owed paths' clone rows
 		// (RecomputeDerivedPaths): it completes what the layers below it
 		// deferred to it (graphview.followupSatisfied).
-		similarity.State, similarity.Reason = store_sqlite.ProducerStateComplete, ""
-	} else if similarity.State == store_sqlite.ProducerStateIncomplete && len(report.ChangedBodyFiles) > 0 {
+		similarity.State, similarity.Reason = storage.ProducerStateComplete, ""
+	} else if similarity.State == storage.ProducerStateIncomplete && len(report.ChangedBodyFiles) > 0 {
 		// The generation holds a body whose clone rows were not carried
 		// (clone_carry.go): they are owed to the follow-up, which is what the
 		// token says; a layer without one keeps the reason above for good.
@@ -2719,24 +2721,24 @@ func (b *SparseGenerationBuilder) declareProducers(
 	// than by the build reaching publish.
 	text, declaresText := textSearchProducer(req.Identity)
 
-	rows := []store_sqlite.ProducerCompleteness{
-		{Producer: string(graphview.CapSourceSnapshot), State: store_sqlite.ProducerStateComplete},
-		{Producer: string(graphview.CapSourceConfig), State: store_sqlite.ProducerStateComplete, Reason: sourceConfigNarrowingReason},
-		{Producer: string(graphview.CapSyntaxGraph), State: store_sqlite.ProducerStateComplete},
-		{Producer: string(graphview.CapResolutionLocal), State: store_sqlite.ProducerStateComplete},
-		{Producer: string(graphview.CapIncomingEdges), State: store_sqlite.ProducerStateComplete},
-		{Producer: string(graphview.CapSearchSymbols), State: store_sqlite.ProducerStateComplete},
-		{Producer: string(graphview.CapSearchContent), State: store_sqlite.ProducerStateComplete},
+	rows := []storage.ProducerCompleteness{
+		{Producer: string(graphview.CapSourceSnapshot), State: storage.ProducerStateComplete},
+		{Producer: string(graphview.CapSourceConfig), State: storage.ProducerStateComplete, Reason: sourceConfigNarrowingReason},
+		{Producer: string(graphview.CapSyntaxGraph), State: storage.ProducerStateComplete},
+		{Producer: string(graphview.CapResolutionLocal), State: storage.ProducerStateComplete},
+		{Producer: string(graphview.CapIncomingEdges), State: storage.ProducerStateComplete},
+		{Producer: string(graphview.CapSearchSymbols), State: storage.ProducerStateComplete},
+		{Producer: string(graphview.CapSearchContent), State: storage.ProducerStateComplete},
 		vector,
 		similarity,
 		{
 			Producer: string(graphview.CapResolutionCrossRepo),
-			State:    store_sqlite.ProducerStateIncomplete,
+			State:    storage.ProducerStateIncomplete,
 			Reason:   "a sparse generation is resolved within one repository",
 		},
 	}
 	if b.contractCoreRuntime != nil {
-		rows = append(rows, store_sqlite.ProducerCompleteness{Producer: string(graphview.CapContracts), State: store_sqlite.ProducerStateIncomplete, Reason: graphview.ReasonContractsPending})
+		rows = append(rows, storage.ProducerCompleteness{Producer: string(graphview.CapContracts), State: storage.ProducerStateIncomplete, Reason: graphview.ReasonContractsPending})
 	}
 	if declaresText {
 		rows = append(rows, text)
@@ -2768,7 +2770,7 @@ func (b *SparseGenerationBuilder) declareProducers(
 		for i := range rows {
 			switch rows[i].Producer {
 			case string(graphview.CapResolutionLocal), string(graphview.CapIncomingEdges):
-				rows[i].State = store_sqlite.ProducerStateIncomplete
+				rows[i].State = storage.ProducerStateIncomplete
 				rows[i].Reason = truncated
 			}
 		}
@@ -2789,8 +2791,8 @@ func (b *SparseGenerationBuilder) declareProducers(
 // inputs moved".
 func (b *SparseGenerationBuilder) abandon(ctx context.Context, generationID int64) {
 	err := b.Store.Catalog().SetViewGenerationState(
-		ctx, generationID, store_sqlite.ViewGenerationFailed, store_sqlite.ViewGenerationBuilding)
-	if err != nil && !errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
+		ctx, generationID, storage.ViewGenerationFailed, storage.ViewGenerationBuilding)
+	if err != nil && !errors.Is(err, storage.ErrCatalogStaleGuard) {
 		b.Logger.Warn("indexer: could not mark an abandoned generation failed",
 			zap.Int64("generation", generationID), zap.Error(err))
 	}
@@ -2808,7 +2810,7 @@ func (b *SparseGenerationBuilder) abandon(ctx context.Context, generationID int6
 // generations like superseded ones, leases respected.
 func (b *SparseGenerationBuilder) tear(ctx context.Context, generationID int64) error {
 	return b.Store.Catalog().SetViewGenerationState(
-		ctx, generationID, store_sqlite.ViewGenerationFailed, store_sqlite.ViewGenerationBuilding)
+		ctx, generationID, storage.ViewGenerationFailed, storage.ViewGenerationBuilding)
 }
 
 // derivedGenerationTarget reports whether a store handle is pinned to a
@@ -2846,15 +2848,15 @@ func derivedGenerationTarget(g graph.Store) bool {
 // ones it did.
 func lspProducerRow(
 	identity GenerationIdentity, out EnrichmentOutcome,
-) store_sqlite.ProducerCompleteness {
-	disabled := func(reason string) store_sqlite.ProducerCompleteness {
-		return store_sqlite.ProducerCompleteness{
-			State: store_sqlite.ProducerStateDisabledByConfig, Reason: reason,
+) storage.ProducerCompleteness {
+	disabled := func(reason string) storage.ProducerCompleteness {
+		return storage.ProducerCompleteness{
+			State: storage.ProducerStateDisabledByConfig, Reason: reason,
 		}
 	}
-	incomplete := func(reason string) store_sqlite.ProducerCompleteness {
-		return store_sqlite.ProducerCompleteness{
-			State:  store_sqlite.ProducerStateIncomplete,
+	incomplete := func(reason string) storage.ProducerCompleteness {
+		return storage.ProducerCompleteness{
+			State:  storage.ProducerStateIncomplete,
 			Reason: reason + "; the next build over this checkout runs it again",
 		}
 	}
@@ -2872,7 +2874,7 @@ func lspProducerRow(
 	case len(out.Starved) > 0:
 		return incomplete("the language-server workspace cap refused " + strings.Join(out.Starved, ", "))
 	default:
-		return store_sqlite.ProducerCompleteness{State: store_sqlite.ProducerStateComplete}
+		return storage.ProducerCompleteness{State: storage.ProducerStateComplete}
 	}
 }
 
@@ -2954,21 +2956,21 @@ func servesTextSearch(identity GenerationIdentity) bool {
 // claim the capability. GrepCheckout (checkout_text_search.go) enforces the
 // same rule from the route, for the window in which a coordinator has withdrawn
 // the working-tree slot.
-func textSearchProducer(identity GenerationIdentity) (store_sqlite.ProducerCompleteness, bool) {
+func textSearchProducer(identity GenerationIdentity) (storage.ProducerCompleteness, bool) {
 	switch {
 	case identity.OwnerKind == refViewOwnerKind:
-		return store_sqlite.ProducerCompleteness{
+		return storage.ProducerCompleteness{
 			Producer: string(graphview.CapSearchText),
-			State:    store_sqlite.ProducerStateUnavailable,
+			State:    storage.ProducerStateUnavailable,
 			Reason:   noWorkingCopyTextSearchReason,
 		}, true
 	case servesTextSearch(identity):
-		return store_sqlite.ProducerCompleteness{
+		return storage.ProducerCompleteness{
 			Producer: string(graphview.CapSearchText),
-			State:    store_sqlite.ProducerStateComplete,
+			State:    storage.ProducerStateComplete,
 		}, true
 	default:
-		return store_sqlite.ProducerCompleteness{}, false
+		return storage.ProducerCompleteness{}, false
 	}
 }
 
@@ -3088,17 +3090,17 @@ func (s *fileSetSource) Walk(ctx context.Context, fn func(source.FileMeta) error
 // ran inline, declare it complete for the paths they cover. A committed
 // tree's build declares what its own stage did, or, on a dedicated base's
 // copy route, what the corpus it copied carried.
-func (b *SparseGenerationBuilder) semanticProducerRow(req BuildRequest, report *BuildReport) (store_sqlite.ProducerCompleteness, bool) {
-	incomplete := func(reason string) (store_sqlite.ProducerCompleteness, bool) {
-		return store_sqlite.ProducerCompleteness{
+func (b *SparseGenerationBuilder) semanticProducerRow(req BuildRequest, report *BuildReport) (storage.ProducerCompleteness, bool) {
+	incomplete := func(reason string) (storage.ProducerCompleteness, bool) {
+		return storage.ProducerCompleteness{
 			Producer: string(graphview.CapSemantic),
-			State:    store_sqlite.ProducerStateIncomplete,
+			State:    storage.ProducerStateIncomplete,
 			Reason:   reason,
 		}, true
 	}
-	complete := store_sqlite.ProducerCompleteness{
+	complete := storage.ProducerCompleteness{
 		Producer: string(graphview.CapSemantic),
-		State:    store_sqlite.ProducerStateComplete,
+		State:    storage.ProducerStateComplete,
 	}
 	switch {
 	case !enrichesWorkingCopy(req.Identity):
@@ -3143,9 +3145,9 @@ func (b *SparseGenerationBuilder) measurePrepublish(report *BuildReport, check f
 
 // storeWaitMark is the store's cumulative wait and VFS counters, zero without
 // a store.
-func (b *SparseGenerationBuilder) storeWaitMark() store_sqlite.ReaderWaitMark {
+func (b *SparseGenerationBuilder) storeWaitMark() storage.ReaderWaitMark {
 	if b == nil || b.Store == nil {
-		return store_sqlite.ReaderWaitMark{}
+		return storage.ReaderWaitMark{}
 	}
 	return b.Store.ReaderWaitMark()
 }

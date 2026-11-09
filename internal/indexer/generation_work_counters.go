@@ -11,9 +11,9 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer/source"
 	"github.com/zzet/gortex/internal/semantic"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // GenerationWorkCounters is the physical work one sparse generation build did,
@@ -99,7 +99,7 @@ type GenerationWorkCounters struct {
 
 	// Store is the writer-side physical accounting for this generation's
 	// bulk window; StoreMeasured is false when no window was recorded.
-	Store         store_sqlite.GenerationWriteCounters
+	Store         storage.GenerationWriteCounters
 	StoreMeasured bool
 
 	// Phases are the wall times of the build's stages in execution order.
@@ -227,7 +227,7 @@ func (w *GenerationWorkCounters) mark(name string) {
 
 // finish fills what is only known once the physical build has ended: the
 // report's outcome and the store's writer-side counters for the generation.
-func (w *GenerationWorkCounters) finish(store *store_sqlite.Store, generationID int64, report *BuildReport) {
+func (w *GenerationWorkCounters) finish(store generationWriteCounterStore, generationID int64, report *BuildReport) {
 	if w == nil || report == nil {
 		return
 	}

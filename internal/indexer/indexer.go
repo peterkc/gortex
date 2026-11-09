@@ -29,7 +29,6 @@ import (
 	"github.com/zzet/gortex/internal/excludes"
 	"github.com/zzet/gortex/internal/fixtures"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/intern"
 	"github.com/zzet/gortex/internal/licenses"
 	"github.com/zzet/gortex/internal/modules"
@@ -45,6 +44,7 @@ import (
 	"github.com/zzet/gortex/internal/search/trigram"
 	"github.com/zzet/gortex/internal/semantic"
 	gortexsql "github.com/zzet/gortex/internal/sql"
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/todos"
 )
 
@@ -195,6 +195,8 @@ type deferredPassAttempt struct {
 type Indexer struct {
 	pendingColdManifests *coldManifestCensus
 	deferredAttempt      *deferredPassAttempt
+
+	censusCatalog viewGenerationCatalog
 
 	graph graph.Store
 	// primaryWatcherWriteIntent is captured from the original durable store at
@@ -376,7 +378,7 @@ type Indexer struct {
 	contractSharedInputsChanged    bool
 	contractProjectionContext      context.Context
 	contractRestatementErr         error
-	contractInputWitness           *store_sqlite.PayloadInputWitness
+	contractInputWitness           *storage.PayloadInputWitness
 	contractProjectionNeedsWitness bool
 	contractUnchangedFiles         int
 	contractProofUsed              bool
@@ -711,11 +713,11 @@ type Indexer struct {
 	// applyLaps times one structural graph apply (incremental_apply_laps.go).
 	applyLaps *applyLaps
 	// storeWaits, when set, reads the store's cumulative waits
-	// (store_sqlite.ReaderWaitMark: the read gate and pools, SQLite's own
+	// (storage.ReaderWaitMark: the read gate and pools, SQLite's own
 	// busy and WAL-retry sleeps, read-transaction time) for the apply steps'
 	// split.
-	storeWaits    func() store_sqlite.ReaderWaitMark
-	writeCounters func() store_sqlite.VFSIOMark
+	storeWaits    func() storage.ReaderWaitMark
+	writeCounters func() storage.VFSIOMark
 }
 
 // contractCacheEntry is a cached contract-extraction result for one file.
@@ -758,7 +760,7 @@ func New(g graph.Store, reg *parser.Registry, cfg config.IndexConfig, logger *za
 		contractCache: make(map[string]*contractCacheEntry),
 		cloneIndex:    newIncrementalCloneIndex(),
 	}
-	if store, ok := g.(*store_sqlite.Store); ok {
+	if store, ok := g.(indexWriteObserver); ok && store.SharesSymbolSearchCore(g) {
 		idx.primaryWatcherWriteIntent = store.AnnounceWrite
 		idx.writeCounters = store.WriteMark
 		idx.resolver.SetWriteCounterSource(store.WriteMark)
@@ -3436,7 +3438,7 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 			}
 			drainPressure := newShadowDrainPressure(shadowEstimate, idx.RepoPrefix(), idx.logger)
 			drainViewGeneration := int64(-1)
-			if sqlite, ok := diskTarget.(*store_sqlite.Store); ok {
+			if sqlite, ok := diskTarget.(generationIdentity); ok && sqlite.SharesSymbolSearchCore(diskTarget) {
 				drainViewGeneration = sqlite.ViewGeneration()
 			}
 			idx.logger.Info("indexer: drain start (shadow → disk)",
@@ -3458,8 +3460,8 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 				restubGoModuleRepoIncoming(diskTarget, idx.RepoPrefix())
 			}
 			var evictedNodes, evictedEdges int
-			sqliteTarget, isSQLite := diskTarget.(*store_sqlite.Store)
-			retirement := isSQLite && sqliteTarget.SupportsShadowReplacementRetirement()
+			sqliteTarget, isSQLite := diskTarget.(shadowReplacementStore)
+			retirement := isSQLite && sqliteTarget.SharesSymbolSearchCore(diskTarget) && sqliteTarget.SupportsShadowReplacementRetirement()
 			if shadowEvictionBranchHook != nil {
 				shadowEvictionBranchHook(retirement)
 			}
@@ -4977,7 +4979,7 @@ func recoverIndexCtxRawStoragePanic(result **IndexResult, retErr *error) {
 	if recovered == nil {
 		return
 	}
-	storageErr, ok := store_sqlite.StorageErrorFromPanic(recovered)
+	storageErr, ok := storage.StorageErrorFromPanic(recovered)
 	if !ok {
 		panic(recovered)
 	}
@@ -10376,18 +10378,15 @@ func (idx *Indexer) ChangedSinceMtimes(root string) (changed []string, deleted [
 // return or panic from a successful completion. Do not share timers between
 // goroutines.
 type reconcilePhaseTiming struct {
-	writes       store_sqlite.VFSIOMark
-	sampleWrites func() store_sqlite.VFSIOMark
+	writes       storage.VFSIOMark
+	sampleWrites func() storage.VFSIOMark
 	logger       *zap.Logger
 	fields       []zap.Field
 	started      time.Time
 	finished     bool
 }
 
-func startReconcilePhase(logger *zap.Logger, repo, phase string, fields ...zap.Field) *reconcilePhaseTiming {
-	return startReconcilePhaseWithWrites(store_sqlite.WriteMark, logger, repo, phase, fields...)
-}
-func startReconcilePhaseWithWrites(sample func() store_sqlite.VFSIOMark, logger *zap.Logger, repo, phase string, fields ...zap.Field) *reconcilePhaseTiming {
+func startReconcilePhaseWithWrites(sample func() storage.VFSIOMark, logger *zap.Logger, repo, phase string, fields ...zap.Field) *reconcilePhaseTiming {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -10397,7 +10396,7 @@ func startReconcilePhaseWithWrites(sample func() store_sqlite.VFSIOMark, logger 
 		fields:  append([]zap.Field{zap.String("repo", repo), zap.String("phase", phase)}, fields...),
 		started: time.Now(),
 	}
-	logger.Info("indexer: reconcile phase started", append(append([]zap.Field(nil), timer.fields...), writeCounterFields("phase_", store_sqlite.VFSIOSplit{})...)...)
+	logger.Info("indexer: reconcile phase started", append(append([]zap.Field(nil), timer.fields...), writeCounterFields("phase_", storage.VFSIOSplit{})...)...)
 	return timer
 }
 

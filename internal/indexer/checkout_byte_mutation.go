@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/gitstate"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // ErrCheckoutByteAnchorUnavailable leaves a byte edit on ordinary route
@@ -19,9 +19,9 @@ var ErrCheckoutByteAnchorUnavailable = fmt.Errorf("%w: no authenticated accepted
 type checkoutByteAnchor struct {
 	head         gitstate.HEADState
 	headEvidence gitstate.HeadEvidence
-	checkout     store_sqlite.Checkout
+	checkout     storage.Checkout
 	rootInfo     os.FileInfo
-	route        store_sqlite.CheckoutRoute
+	route        storage.CheckoutRoute
 	ids          []int64
 	lease        *graphview.Lease
 	basePin      *graphview.BasePin
@@ -30,8 +30,8 @@ type checkoutByteAnchor struct {
 // captureByteAnchor runs before withdrawing an actual accepted route. The
 // provisional route pins and final route comparison close retirement races;
 // no payload, mask or graph reader is materialized.
-func (c *CheckoutCoordinator) captureByteAnchor(ctx context.Context, route store_sqlite.CheckoutRoute) error {
-	if c.leases == nil || route.State != store_sqlite.RouteActive || route.CommitGenerationID <= 0 || route.DirtyGenerationID <= 0 {
+func (c *CheckoutCoordinator) captureByteAnchor(ctx context.Context, route storage.CheckoutRoute) error {
+	if c.leases == nil || route.State != storage.RouteActive || route.CommitGenerationID <= 0 || route.DirtyGenerationID <= 0 {
 		return ErrCheckoutByteAnchorUnavailable
 	}
 	provisional := c.leases.Acquire(route.CommitGenerationID, route.DirtyGenerationID)
@@ -40,7 +40,7 @@ func (c *CheckoutCoordinator) captureByteAnchor(ctx context.Context, route store
 	if err != nil {
 		return err
 	}
-	if !found || checkout.State != store_sqlite.CheckoutStateReady || checkout.EffectiveMode != store_sqlite.CheckoutModeAutomatic || checkout.DesiredMode != store_sqlite.CheckoutModeAutomatic || checkout.ActiveIntentTransitionID != "" || checkout.UnavailableSince != 0 || checkout.RemovalDetectedAt != 0 || !sameMutationRoot(checkout.RootPath, c.root) {
+	if !found || checkout.State != storage.CheckoutStateReady || checkout.EffectiveMode != storage.CheckoutModeAutomatic || checkout.DesiredMode != storage.CheckoutModeAutomatic || checkout.ActiveIntentTransitionID != "" || checkout.UnavailableSince != 0 || checkout.RemovalDetectedAt != 0 || !sameMutationRoot(checkout.RootPath, c.root) {
 		return ErrCheckoutByteAnchorUnavailable
 	}
 	info, err := checkoutRootFileInfo(c.root)
@@ -143,7 +143,7 @@ func (l *CheckoutLifecycle) beginCheckoutByteMutation(ctx context.Context, check
 	if err != nil {
 		return nil, err
 	}
-	if found && initialRoute.State == store_sqlite.RouteRetired {
+	if found && initialRoute.State == storage.RouteRetired {
 		return nil, ErrCheckoutByteAnchorUnavailable
 	}
 	c, closing := l.awaitMutationCoordinator(ctx, checkoutID)
@@ -164,7 +164,7 @@ func (l *CheckoutLifecycle) beginCheckoutByteMutation(ctx context.Context, check
 	if err != nil {
 		return nil, err
 	}
-	if ordinaryWhenIdle && found && route.State == store_sqlite.RouteActive && route.CommitGenerationID > 0 && route.DirtyGenerationID > 0 {
+	if ordinaryWhenIdle && found && route.State == storage.RouteActive && route.CommitGenerationID > 0 && route.DirtyGenerationID > 0 {
 		c.byteMu.Lock()
 		// TryLock never waits while holding byteMu. A winning admission owns
 		// cycleMu before a new attempt can register, and keeps it until Close.
@@ -199,7 +199,7 @@ func (l *CheckoutLifecycle) beginCheckoutByteMutation(ctx context.Context, check
 			return m, nil
 		}
 	}
-	if found && route.State == store_sqlite.RouteActive && route.DirtyGenerationID > 0 {
+	if found && route.State == storage.RouteActive && route.DirtyGenerationID > 0 {
 		if err := c.captureByteAnchor(waitCtx, route); err != nil {
 			return nil, err
 		}
@@ -308,7 +308,7 @@ func (m *CheckoutMutation) checkByteAuthority(ctx context.Context, sample gitsta
 	if err != nil {
 		return err
 	}
-	if !found || route.GraphID != a.route.GraphID || route.CommitGenerationID != a.route.CommitGenerationID || (route.DirtyGenerationID != 0 && route.DirtyGenerationID != a.route.DirtyGenerationID) || (route.State != store_sqlite.RouteActive && route.State != store_sqlite.RoutePending) {
+	if !found || route.GraphID != a.route.GraphID || route.CommitGenerationID != a.route.CommitGenerationID || (route.DirtyGenerationID != 0 && route.DirtyGenerationID != a.route.DirtyGenerationID) || (route.State != storage.RouteActive && route.State != storage.RoutePending) {
 		return ErrCheckoutMutationRouteMoved
 	}
 	if m.byteSnapshot != nil && route != m.route {

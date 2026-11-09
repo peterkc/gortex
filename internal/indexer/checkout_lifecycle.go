@@ -28,6 +28,7 @@ import (
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/pathkey"
 	"github.com/zzet/gortex/internal/reconcile"
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -35,16 +36,16 @@ import (
 // import the catalog package just to say who asked.
 const (
 	// TrackSourceCLI is an explicit `gortex track` / daemon control call.
-	TrackSourceCLI = store_sqlite.IntentSourceCLITrack
+	TrackSourceCLI = storage.IntentSourceCLITrack
 	// TrackSourceMCP is an explicit track_repository tool call.
-	TrackSourceMCP = store_sqlite.IntentSourceMCPTrack
+	TrackSourceMCP = storage.IntentSourceMCPTrack
 	// TrackSourceConfig is a repository named in the global configuration.
-	TrackSourceConfig = store_sqlite.IntentSourceManualConfig
+	TrackSourceConfig = storage.IntentSourceManualConfig
 	// TrackSourceImplicit records a checkout observed without anyone asking
 	// for it — the auto-index path. It is deliberately not an intent kind:
 	// the constant exists so a caller can name the case, and the lifecycle
 	// writes no tracking intent for it.
-	TrackSourceImplicit store_sqlite.IntentSourceKind = ""
+	TrackSourceImplicit storage.IntentSourceKind = ""
 )
 
 // ErrCheckoutNotTracked reports a lifecycle operation aimed at a path or
@@ -276,7 +277,7 @@ type CheckoutLifecycle struct {
 	// the "the catalog could not be asked" branch has no other way to be
 	// exercised, and that branch is the one that decides whether a teardown's
 	// invalidation happens at all.
-	cohortGraphSubject func(context.Context, string) (store_sqlite.DedicatedGraph, bool, error)
+	cohortGraphSubject func(context.Context, string) (storage.DedicatedGraph, bool, error)
 	// owed holds generations no coordinator is left to retire: the backlog a
 	// dropped one handed over, the commit layers its reuse cache was holding,
 	// and the two slots of a checkout whose route is being withdrawn. The
@@ -318,10 +319,10 @@ type CheckoutLifecycle struct {
 	interactiveDemand func() bool
 	retireOwedSlice   func(ctx context.Context, generationID int64) error
 	// retireQuantum is a per-lifecycle test seam around the real quantum call.
-	retireQuantum func(context.Context, int64, func(int64) bool) (store_sqlite.PayloadRetirementProgress, error)
+	retireQuantum func(context.Context, int64, func(int64) bool) (storage.PayloadRetirementProgress, error)
 	// derivationEnvHook replaces derivationEnvFor (tests): the environment
 	// the startup correction re-derives a generation in.
-	derivationEnvHook func(row store_sqlite.ViewGeneration) (derivationEnv, bool)
+	derivationEnvHook func(row storage.ViewGeneration) (derivationEnv, bool)
 	// foregroundWork and walBytes are test seams for the sweep's pacing
 	// (checkout_deferred_retirement_pacing.go): the foreground activity and
 	// the WAL the log holds since its last reset.
@@ -573,7 +574,7 @@ func NewCheckoutLifecycle(cfg CheckoutLifecycleConfig) (*CheckoutLifecycle, erro
 // (EnsureRefView reads it before the identity it keys on, ref_views.go), so it
 // has no cached base to invalidate; what it does cache, the dependency cohort,
 // is invalidated by the observation event that precedes publication.
-func (l *CheckoutLifecycle) dedicatedBaseAdopted(event store_sqlite.DedicatedBaseAdoptionEvent) {
+func (l *CheckoutLifecycle) dedicatedBaseAdopted(event storage.DedicatedBaseAdoptionEvent) {
 	if l == nil || !event.Advanced() {
 		return
 	}
@@ -751,7 +752,7 @@ type RegisterResult struct {
 func (l *CheckoutLifecycle) Register(
 	ctx context.Context,
 	entry config.RepoEntry,
-	source store_sqlite.IntentSourceKind,
+	source storage.IntentSourceKind,
 ) (outcome RegisterResult, err error) {
 	if l == nil || l.mi == nil {
 		return RegisterResult{}, errors.New("indexer: checkout lifecycle is not wired")
@@ -871,7 +872,7 @@ type checkoutIdentity struct {
 func (l *CheckoutLifecycle) recordCheckout(
 	ctx context.Context,
 	prefix, root string,
-	source store_sqlite.IntentSourceKind,
+	source storage.IntentSourceKind,
 	seeding bool,
 ) (checkoutIdentity, error) {
 	if l.catalog == nil || prefix == "" {
@@ -939,7 +940,7 @@ func (l *CheckoutLifecycle) recordCheckout(
 	restoreExplicitIntent := source != TrackSourceImplicit &&
 		(!seeding || existing == nil || existing.ActiveIntentTransitionID == "")
 	if restoreExplicitIntent {
-		intent := store_sqlite.TrackingIntent{
+		intent := storage.TrackingIntent{
 			IntentID:      uuid.NewV7().String(),
 			CheckoutID:    identity.checkoutID,
 			SourceKind:    source,
@@ -967,7 +968,7 @@ func (l *CheckoutLifecycle) recordCheckout(
 // upsertFamily writes the family row, preserving the creation timestamp of
 // one that already exists.
 func (l *CheckoutLifecycle) upsertFamily(ctx context.Context, familyID, commonDir string, now int64) error {
-	family := store_sqlite.RepositoryFamily{
+	family := storage.RepositoryFamily{
 		FamilyID:          familyID,
 		CommonDirIdentity: commonDir,
 		State:             reconcile.FamilyStateReady,
@@ -992,7 +993,7 @@ func (l *CheckoutLifecycle) upsertFamily(ctx context.Context, familyID, commonDi
 // it under, which is the identity the lifecycle keys on.
 func (l *CheckoutLifecycle) checkoutByAdminName(
 	ctx context.Context, familyID, adminName string,
-) (*store_sqlite.Checkout, error) {
+) (*storage.Checkout, error) {
 	checkouts, err := l.catalog.ListCheckouts(ctx, familyID)
 	if err != nil {
 		return nil, err
@@ -1013,17 +1014,17 @@ func (l *CheckoutLifecycle) allocateCheckout(
 	record *gitstate.WorktreeRecord,
 	inv *gitstate.FamilyInventory,
 	now time.Time,
-) (store_sqlite.Checkout, error) {
-	checkout := store_sqlite.Checkout{
+) (storage.Checkout, error) {
+	checkout := storage.Checkout{
 		CheckoutID:     uuid.NewV7().String(),
 		Incarnation:    uuid.NewV7().String(),
 		FamilyID:       familyID,
 		RootPath:       root,
 		GitDir:         gitDirFor(inv, record),
 		AdminName:      record.AdminName,
-		State:          store_sqlite.CheckoutStateReady,
-		DesiredMode:    store_sqlite.CheckoutModeDedicated,
-		EffectiveMode:  store_sqlite.CheckoutModeDedicated,
+		State:          storage.CheckoutStateReady,
+		DesiredMode:    storage.CheckoutModeDedicated,
+		EffectiveMode:  storage.CheckoutModeDedicated,
 		Locked:         record.Locked,
 		Prunable:       record.Prunable,
 		HeadRef:        record.HEADRef,
@@ -1035,17 +1036,17 @@ func (l *CheckoutLifecycle) allocateCheckout(
 	if err == nil {
 		return checkout, nil
 	}
-	if !errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
-		return store_sqlite.Checkout{}, err
+	if !errors.Is(err, storage.ErrCatalogStaleGuard) {
+		return storage.Checkout{}, err
 	}
 	// Another actor allocated this administrative name first. Its row is the
 	// identity; adopting it is what keeps one working copy to one identity.
 	winner, lookupErr := l.checkoutByAdminName(ctx, familyID, record.AdminName)
 	if lookupErr != nil {
-		return store_sqlite.Checkout{}, lookupErr
+		return storage.Checkout{}, lookupErr
 	}
 	if winner == nil {
-		return store_sqlite.Checkout{}, err
+		return storage.Checkout{}, err
 	}
 	return *winner, nil
 }
@@ -1057,15 +1058,15 @@ func (l *CheckoutLifecycle) allocateCheckout(
 // removal grace must not be deleted moments after someone re-tracked it.
 func (l *CheckoutLifecycle) confirmPresent(
 	ctx context.Context,
-	existing store_sqlite.Checkout,
+	existing storage.Checkout,
 	record *gitstate.WorktreeRecord,
 	inv *gitstate.FamilyInventory,
 	now time.Time,
 ) error {
-	req := store_sqlite.UpdateCheckoutObservationRequest{
+	req := storage.UpdateCheckoutObservationRequest{
 		CheckoutID:     existing.CheckoutID,
 		Incarnation:    existing.Incarnation,
-		State:          store_sqlite.CheckoutStateReady,
+		State:          storage.CheckoutStateReady,
 		RootPath:       record.Path,
 		GitDir:         gitDirFor(inv, record),
 		Locked:         record.Locked,
@@ -1077,7 +1078,7 @@ func (l *CheckoutLifecycle) confirmPresent(
 		LastSeen:       now.Unix(),
 	}
 	if err := l.catalog.UpdateCheckoutObservation(ctx, req); err != nil {
-		if errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
+		if errors.Is(err, storage.ErrCatalogStaleGuard) {
 			// Another actor re-keyed the row between the read and this
 			// write. Its incarnation is the current one; the next pass
 			// observes the path under it.
@@ -1103,21 +1104,21 @@ func (l *CheckoutLifecycle) confirmPresent(
 // the identity this registration read is not the current one and the next pass
 // records the mode against the row that is.
 func (l *CheckoutLifecycle) claimDedicated(
-	ctx context.Context, existing store_sqlite.Checkout, now time.Time,
+	ctx context.Context, existing storage.Checkout, now time.Time,
 ) error {
-	if existing.DesiredMode == store_sqlite.CheckoutModeDedicated &&
-		existing.EffectiveMode == store_sqlite.CheckoutModeDedicated {
+	if existing.DesiredMode == storage.CheckoutModeDedicated &&
+		existing.EffectiveMode == storage.CheckoutModeDedicated {
 		return nil
 	}
-	err := l.catalog.UpdateCheckoutState(ctx, store_sqlite.UpdateCheckoutStateRequest{
+	err := l.catalog.UpdateCheckoutState(ctx, storage.UpdateCheckoutStateRequest{
 		CheckoutID:    existing.CheckoutID,
 		Incarnation:   existing.Incarnation,
-		State:         store_sqlite.CheckoutStateReady,
-		DesiredMode:   store_sqlite.CheckoutModeDedicated,
-		EffectiveMode: store_sqlite.CheckoutModeDedicated,
+		State:         storage.CheckoutStateReady,
+		DesiredMode:   storage.CheckoutModeDedicated,
+		EffectiveMode: storage.CheckoutModeDedicated,
 		LastSeen:      now.Unix(),
 	})
-	if errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
+	if errors.Is(err, storage.ErrCatalogStaleGuard) {
 		return nil
 	}
 	return err
@@ -1126,25 +1127,25 @@ func (l *CheckoutLifecycle) claimDedicated(
 // releaseUnconfiguredBinding removes only abandoned, unpublished identity
 // metadata. Configured and live owners are protected under the binding's prefix.
 // The catalog guards publication and the exact row against intervening changes.
-func (l *CheckoutLifecycle) releaseUnconfiguredBinding(ctx context.Context, binding store_sqlite.DedicatedGraph) error {
+func (l *CheckoutLifecycle) releaseUnconfiguredBinding(ctx context.Context, binding storage.DedicatedGraph) error {
 	owner, found, err := l.catalog.GetCheckout(ctx, binding.OwnerCheckoutID)
 	if err != nil {
 		return err
 	}
 	if !found {
-		return fmt.Errorf("%w: dedicated graph %s has no known owner", store_sqlite.ErrCatalogStaleGuard, binding.GraphID)
+		return fmt.Errorf("%w: dedicated graph %s has no known owner", storage.ErrCatalogStaleGuard, binding.GraphID)
 	}
 	root := pathkey.CanonicalPath(owner.RootPath)
 	if meta := l.mi.GetMetadata(binding.RepoPrefix); meta != nil &&
 		(pathkey.SamePathIdentity(pathkey.CanonicalPath(meta.RootPath), root) || sameDirectory(meta.RootPath, root)) {
-		return fmt.Errorf("%w: dedicated graph %s has a live owner", store_sqlite.ErrCatalogStaleGuard, binding.GraphID)
+		return fmt.Errorf("%w: dedicated graph %s has a live owner", storage.ErrCatalogStaleGuard, binding.GraphID)
 	}
 	if l.cfgMgr == nil {
-		return fmt.Errorf("%w: configured owners are unavailable", store_sqlite.ErrCatalogStaleGuard)
+		return fmt.Errorf("%w: configured owners are unavailable", storage.ErrCatalogStaleGuard)
 	}
 	if configured := l.cfgMgr.RepoPathLookup()(root); configured != nil &&
 		EffectiveRepoPrefix(l.cfgMgr, *configured) == binding.RepoPrefix {
-		return fmt.Errorf("%w: dedicated graph %s has a configured owner", store_sqlite.ErrCatalogStaleGuard, binding.GraphID)
+		return fmt.Errorf("%w: dedicated graph %s has a configured owner", storage.ErrCatalogStaleGuard, binding.GraphID)
 	}
 	return l.catalog.DeleteUnpublishedDedicatedGraph(ctx, binding)
 }
@@ -1168,7 +1169,7 @@ func (l *CheckoutLifecycle) bindDedicatedGraph(
 		if existing.FamilyID != familyID {
 			return "", true, fmt.Errorf(
 				"%w: checkout %s already owns dedicated graph %s in family %s",
-				store_sqlite.ErrCatalogStaleGuard, checkoutID, existing.GraphID, existing.FamilyID,
+				storage.ErrCatalogStaleGuard, checkoutID, existing.GraphID, existing.FamilyID,
 			)
 		}
 		if existing.RepoPrefix != prefix && l.cfgMgr != nil {
@@ -1219,7 +1220,7 @@ func (l *CheckoutLifecycle) bindDedicatedGraph(
 	if err != nil {
 		return "", err
 	}
-	row := store_sqlite.DedicatedGraph{
+	row := storage.DedicatedGraph{
 		GraphID:         graphID,
 		OwnerCheckoutID: checkoutID,
 		RepoPrefix:      prefix,
@@ -1382,14 +1383,14 @@ func (l *CheckoutLifecycle) applyUntrack(
 	if preview.Incarnation != "" && checkout.Incarnation != preview.Incarnation {
 		return out, fmt.Errorf(
 			"%w: checkout %s was re-keyed between the preview and the confirm; preview the untrack again",
-			store_sqlite.ErrCatalogStaleGuard, preview.Prefix)
+			storage.ErrCatalogStaleGuard, preview.Prefix)
 	}
 
 	// The demote plan is the one whose precondition is a pair of rows rather
 	// than the checkout's own, so it is re-asked here — before anything is
 	// revoked, so a refusal leaves the tracked set exactly as the preview
 	// found it.
-	var owned, primary *store_sqlite.DedicatedGraph
+	var owned, primary *storage.DedicatedGraph
 	if preview.Plan == UntrackPlanDemote {
 		if owned, primary, err = l.familyGraphsFor(ctx, checkout); err != nil {
 			return out, err
@@ -1490,8 +1491,8 @@ func (l *CheckoutLifecycle) applyUntrack(
 // familyGraphsFor reads the graph a checkout owns and its family's primary,
 // which is the pair every mode change is decided against.
 func (l *CheckoutLifecycle) familyGraphsFor(
-	ctx context.Context, checkout store_sqlite.Checkout,
-) (owned, primary *store_sqlite.DedicatedGraph, err error) {
+	ctx context.Context, checkout storage.Checkout,
+) (owned, primary *storage.DedicatedGraph, err error) {
 	graphs, err := l.catalog.ListDedicatedGraphs(ctx, checkout.FamilyID)
 	if err != nil {
 		return nil, nil, err
@@ -1538,7 +1539,7 @@ func (l *CheckoutLifecycle) familyGraphsFor(
 // selection, and making that selection pay for a whole committed base first is
 // the latency this census exists to keep off the wake-up path.
 func (l *CheckoutLifecycle) dedicatedBaseConsumers(
-	ctx context.Context, graph store_sqlite.DedicatedGraph,
+	ctx context.Context, graph storage.DedicatedGraph,
 ) (bool, error) {
 	if l == nil || l.catalog == nil {
 		return false, nil
@@ -1566,14 +1567,14 @@ func (l *CheckoutLifecycle) dedicatedBaseConsumers(
 
 // dependentCheckout decides whether one catalog row is a checkout that composes
 // over the family primary's committed base. See dedicatedBaseConsumers.
-func dependentCheckout(checkout store_sqlite.Checkout, ownerCheckoutID string) bool {
+func dependentCheckout(checkout storage.Checkout, ownerCheckoutID string) bool {
 	switch {
 	case checkout.CheckoutID == "" || checkout.CheckoutID == ownerCheckoutID:
 		return false
-	case checkout.EffectiveMode != store_sqlite.CheckoutModeAutomatic:
+	case checkout.EffectiveMode != storage.CheckoutModeAutomatic:
 		return false
-	case checkout.State == store_sqlite.CheckoutStateForgetting,
-		checkout.State == store_sqlite.CheckoutStatePrimaryClosureRetiring:
+	case checkout.State == storage.CheckoutStateForgetting,
+		checkout.State == storage.CheckoutStatePrimaryClosureRetiring:
 		return false
 	}
 	return true
@@ -1624,7 +1625,7 @@ func (l *CheckoutLifecycle) requestDedicatedBase(repoPrefix, reason string) bool
 // flips the checkout to automatic and then cannot retire the corpus it is being
 // served from, leaving a family whose base is owned by an automatic checkout.
 func demotableNow(
-	checkout store_sqlite.Checkout, prefix string, owned, primary *store_sqlite.DedicatedGraph,
+	checkout storage.Checkout, prefix string, owned, primary *storage.DedicatedGraph,
 ) error {
 	var blockers []string
 	if owned != nil && owned.IsPrimaryBase {
@@ -2021,7 +2022,7 @@ func (l *CheckoutLifecycle) runFamilyRetry(familyID string, deadline int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	_, err := l.ReconcileFamily(ctx, familyID)
 	cancel()
-	if err == nil || errors.Is(err, store_sqlite.ErrCatalogNotFound) {
+	if err == nil || errors.Is(err, storage.ErrCatalogNotFound) {
 		return
 	}
 	l.logger.Warn("checkout lifecycle: scheduled family reconciliation failed",
@@ -2199,17 +2200,17 @@ func (l *CheckoutLifecycle) applyCoordinators(ctx context.Context, report reconc
 		if entry.CheckoutID == "" || !entry.Durable {
 			continue
 		}
-		if entry.State == store_sqlite.CheckoutStateReconciling && (entry.Action == reconcile.ActionAvailabilityRecovered || entry.Action == reconcile.ActionRemovalCancelled) {
+		if entry.State == storage.CheckoutStateReconciling && (entry.Action == reconcile.ActionAvailabilityRecovered || entry.Action == reconcile.ActionRemovalCancelled) {
 			if err := l.recoverCheckout(ctx, entry.CheckoutID); err != nil {
 				l.logger.Warn("checkout recovery failed", zap.String("checkout", entry.CheckoutID), zap.Error(err))
-				report.Checkouts[i].State = store_sqlite.CheckoutStateUnavailable
+				report.Checkouts[i].State = storage.CheckoutStateUnavailable
 				report.Checkouts[i].RetryAt = l.clock().Add(30 * time.Second).Unix()
 				continue
 			}
-			entry.State = store_sqlite.CheckoutStateReady
+			entry.State = storage.CheckoutStateReady
 			report.Checkouts[i].State = entry.State
 		}
-		if report.PrimaryGraphID == "" || entry.State != store_sqlite.CheckoutStateReady {
+		if report.PrimaryGraphID == "" || entry.State != storage.CheckoutStateReady {
 			l.dropCoordinator(entry.CheckoutID)
 			l.withdrawStaleRoute(ctx, entry.CheckoutID)
 			continue
@@ -2219,7 +2220,7 @@ func (l *CheckoutLifecycle) applyCoordinators(ctx context.Context, report reconc
 			l.dropCoordinator(entry.CheckoutID)
 			continue
 		}
-		if checkout.EffectiveMode != store_sqlite.CheckoutModeAutomatic {
+		if checkout.EffectiveMode != storage.CheckoutModeAutomatic {
 			l.dropCoordinator(entry.CheckoutID)
 			l.withdrawStaleRoute(ctx, entry.CheckoutID)
 			continue
@@ -2240,13 +2241,13 @@ func (l *CheckoutLifecycle) recoverCheckout(ctx context.Context, checkoutID stri
 		return err
 	}
 	if !found {
-		return store_sqlite.ErrCatalogNotFound
+		return storage.ErrCatalogNotFound
 	}
 	if err := l.rec.ResetRecoveredLayers(ctx, checkoutID, checkout.Incarnation); err != nil {
 		return err
 	}
 	prefix := l.prefixForCheckout(ctx, checkoutID)
-	if prefix != "" && checkout.EffectiveMode == store_sqlite.CheckoutModeDedicated {
+	if prefix != "" && checkout.EffectiveMode == storage.CheckoutModeDedicated {
 		meta, idx := l.mi.GetMetadata(prefix), l.mi.GetIndexer(prefix)
 		_, err = l.mi.ReconcileRepoCtx(ctx, config.RepoEntry{Path: checkout.RootPath, Name: prefix}, l.mi.FileMtimes(prefix))
 		// ReconcileRepoCtx restores a missing registration; an already registered
@@ -2255,18 +2256,18 @@ func (l *CheckoutLifecycle) recoverCheckout(ctx context.Context, checkoutID stri
 		if err == nil && meta != nil && idx != nil {
 			coordinator, current := l.mi.repositoryMutationCoordinatorForSnapshot(prefix, meta, idx)
 			if !current {
-				err = store_sqlite.ErrCatalogStaleGuard
+				err = storage.ErrCatalogStaleGuard
 			} else {
 				_, err = coordinator.reconcile(ctx, nil)
 			}
 		}
 		if err != nil {
-			stateErr := l.catalog.UpdateCheckoutRecoveryState(ctx, checkoutID, checkout.Incarnation, store_sqlite.CheckoutStateReconciling, store_sqlite.CheckoutStateUnavailable, err.Error(), l.clock().Unix())
+			stateErr := l.catalog.UpdateCheckoutRecoveryState(ctx, checkoutID, checkout.Incarnation, storage.CheckoutStateReconciling, storage.CheckoutStateUnavailable, err.Error(), l.clock().Unix())
 			return errors.Join(err, stateErr)
 		}
 		l.attachWatcherContext(ctx, prefix)
 	}
-	if err := l.catalog.UpdateCheckoutRecoveryState(ctx, checkoutID, checkout.Incarnation, store_sqlite.CheckoutStateReconciling, store_sqlite.CheckoutStateReady, "", l.clock().Unix()); err != nil {
+	if err := l.catalog.UpdateCheckoutRecoveryState(ctx, checkoutID, checkout.Incarnation, storage.CheckoutStateReconciling, storage.CheckoutStateReady, "", l.clock().Unix()); err != nil {
 		return err
 	}
 	return nil
@@ -2282,7 +2283,7 @@ func (l *CheckoutLifecycle) recoverCheckout(ctx context.Context, checkoutID stri
 // family's initial inventory was taken, and not opted into lazy activation.
 // The startup inventory itself, and anything under the lazy flag, stays dormant.
 func (l *CheckoutLifecycle) coordinatorAdmitted(
-	checkout store_sqlite.Checkout, action reconcile.CheckoutAction,
+	checkout storage.Checkout, action reconcile.CheckoutAction,
 ) bool {
 	if l.hasCoordinator(checkout.CheckoutID) {
 		return true
@@ -2450,8 +2451,8 @@ func (l *CheckoutLifecycle) startCheckoutCoordinator(ctx context.Context, checko
 	if err != nil || !found {
 		return false
 	}
-	if checkout.State != store_sqlite.CheckoutStateReady ||
-		checkout.EffectiveMode != store_sqlite.CheckoutModeAutomatic {
+	if checkout.State != storage.CheckoutStateReady ||
+		checkout.EffectiveMode != storage.CheckoutModeAutomatic {
 		return false
 	}
 	_, primary, err := l.familyGraphsFor(ctx, checkout)
@@ -2547,7 +2548,7 @@ func (l *CheckoutLifecycle) PrimaryRegistered(prefix string) {
 // layers compose over the primary's corpus, so a generation stamped with
 // anything else would land beside that corpus instead of over it.
 func (l *CheckoutLifecycle) ensureCoordinator(
-	ctx context.Context, primaryGraphID string, checkout store_sqlite.Checkout,
+	ctx context.Context, primaryGraphID string, checkout storage.Checkout,
 ) {
 	nextHead := checkoutHeadIdentity{ref: checkout.HeadRef, commit: checkout.HeadCommit}
 	l.coordMu.Lock()
@@ -2559,7 +2560,7 @@ func (l *CheckoutLifecycle) ensureCoordinator(
 		previousHead, tracked := l.coordinatorHeads[checkout.CheckoutID]
 		l.coordinatorHeads[checkout.CheckoutID] = nextHead
 		if tracked && previousHead != nextHead &&
-			checkout.EffectiveMode == store_sqlite.CheckoutModeAutomatic {
+			checkout.EffectiveMode == storage.CheckoutModeAutomatic {
 			// Signal while the registry lock still proves this is the live
 			// coordinator for the accepted row. Signal is buffered to one and
 			// non-blocking, so a burst of ref events remains coalescible.
@@ -2640,7 +2641,7 @@ func (l *CheckoutLifecycle) CoordinatorStartFailures() []CoordinatorStartFailure
 }
 
 // recordCoordinatorStartFailure states why one checkout has no build loop.
-func (l *CheckoutLifecycle) recordCoordinatorStartFailure(checkout store_sqlite.Checkout, err error) {
+func (l *CheckoutLifecycle) recordCoordinatorStartFailure(checkout storage.Checkout, err error) {
 	if l == nil || err == nil || checkout.CheckoutID == "" {
 		return
 	}
@@ -2679,7 +2680,7 @@ func (l *CheckoutLifecycle) clearCoordinatorStartFailure(checkoutID string) {
 // registry first would have its loop signalled onto a route it is still
 // building the layers for.
 func (l *CheckoutLifecycle) buildCoordinator(
-	ctx context.Context, primaryGraphID string, checkout store_sqlite.Checkout,
+	ctx context.Context, primaryGraphID string, checkout storage.Checkout,
 ) (*CheckoutCoordinator, error) {
 	if l.store == nil || l.catalog == nil {
 		return nil, nil
@@ -3218,7 +3219,7 @@ func (l *CheckoutLifecycle) installCoordinator(checkoutID string, coordinator *C
 // newly installed coordinator without its baseline and mistake first discovery
 // for a branch switch.
 func (l *CheckoutLifecycle) installCoordinatorAtHead(
-	checkout store_sqlite.Checkout, coordinator *CheckoutCoordinator,
+	checkout storage.Checkout, coordinator *CheckoutCoordinator,
 ) bool {
 	return l.installCoordinatorWithHead(
 		checkout.CheckoutID,
@@ -3329,7 +3330,11 @@ func (l *CheckoutLifecycle) oweRetirement(generations ...int64) {
 	}
 	l.coordMu.Unlock()
 	for _, generationID := range added {
-		countRetirementOwed(l.store, generationID, viewmetrics.OwedReleased)
+		var owedStore graph.Store
+		if l.store != nil {
+			owedStore = l.store
+		}
+		countRetirementOwed(owedStore, generationID, viewmetrics.OwedReleased)
 	}
 	if len(added) > 0 {
 		notifyDeferredRetirementWork()
@@ -3602,7 +3607,7 @@ func (l *CheckoutLifecycle) sweepRetirements(ctx context.Context) int {
 	}
 	for _, generationID := range owed {
 		started := time.Now()
-		var generation store_sqlite.ViewGeneration
+		var generation storage.ViewGeneration
 		prefix := ""
 		if l.catalog != nil {
 			generation, _, _ = l.catalog.GetViewGeneration(ctx, generationID)
@@ -3625,7 +3630,7 @@ func (l *CheckoutLifecycle) sweepRetirements(ctx context.Context) int {
 				zap.Float64("elapsed_seconds", elapsed.Seconds()),
 				zap.Error(err))
 		}
-		if err != nil && !errors.Is(err, store_sqlite.ErrCatalogNotFound) {
+		if err != nil && !errors.Is(err, storage.ErrCatalogNotFound) {
 			continue
 		}
 		if err == nil {
@@ -3695,7 +3700,7 @@ func (l *CheckoutLifecycle) orphanedGenerations(
 		seen[generationID] = struct{}{}
 	}
 	var out []int64
-	collect := func(row store_sqlite.ViewGeneration) {
+	collect := func(row storage.ViewGeneration) {
 		if row.GenerationID <= 0 {
 			return
 		}
@@ -3709,7 +3714,7 @@ func (l *CheckoutLifecycle) orphanedGenerations(
 	// A dedicated base is decided on its chain rather than on a route or a
 	// coordinator, so the two scans below hand it here instead of judging it.
 	// See dedicatedChainRetirementCandidates.
-	var dedicated []store_sqlite.ViewGeneration
+	var dedicated []storage.ViewGeneration
 
 	const retirementScanPageSize = 512
 
@@ -3719,10 +3724,10 @@ func (l *CheckoutLifecycle) orphanedGenerations(
 	// orphan behind the catalog listing bound.
 	var discardedBeforeGenerationID int64
 	for {
-		discarded, scanErr := l.catalog.ListViewGenerations(ctx, store_sqlite.ViewGenerationFilter{
-			States: []store_sqlite.ViewGenerationState{
-				store_sqlite.ViewGenerationSuperseded,
-				store_sqlite.ViewGenerationRetiring,
+		discarded, scanErr := l.catalog.ListViewGenerations(ctx, storage.ViewGenerationFilter{
+			States: []storage.ViewGenerationState{
+				storage.ViewGenerationSuperseded,
+				storage.ViewGenerationRetiring,
 			},
 			BeforeGenerationID: discardedBeforeGenerationID,
 			Limit:              retirementScanPageSize,
@@ -3754,11 +3759,11 @@ func (l *CheckoutLifecycle) orphanedGenerations(
 	// generations behind the catalog listing bound.
 	const abandonedBuildingGrace = time.Minute
 	abandonedBuildingBefore := l.clock().Add(-abandonedBuildingGrace).Unix()
-	scanRetirementState := func(state store_sqlite.ViewGenerationState, label string) {
+	scanRetirementState := func(state storage.ViewGenerationState, label string) {
 		var beforeGenerationID int64
 		for {
-			rows, scanErr := l.catalog.ListViewGenerations(ctx, store_sqlite.ViewGenerationFilter{
-				States:             []store_sqlite.ViewGenerationState{state},
+			rows, scanErr := l.catalog.ListViewGenerations(ctx, storage.ViewGenerationFilter{
+				States:             []storage.ViewGenerationState{state},
 				BeforeGenerationID: beforeGenerationID,
 				Limit:              retirementScanPageSize,
 			})
@@ -3768,12 +3773,12 @@ func (l *CheckoutLifecycle) orphanedGenerations(
 				return
 			}
 			for _, row := range rows {
-				if state == store_sqlite.ViewGenerationBuilding &&
+				if state == storage.ViewGenerationBuilding &&
 					row.CreatedAt >= l.buildingRecoveryCutoff &&
 					row.CreatedAt > abandonedBuildingBefore {
 					continue
 				}
-				if state == store_sqlite.ViewGenerationBuilding &&
+				if state == storage.ViewGenerationBuilding &&
 					l.store.PayloadBuildFlightActive(row.GenerationID) {
 					continue
 				}
@@ -3785,14 +3790,14 @@ func (l *CheckoutLifecycle) orphanedGenerations(
 			beforeGenerationID = rows[len(rows)-1].GenerationID
 		}
 	}
-	scanRetirementState(store_sqlite.ViewGenerationFailed, "failed")
-	scanRetirementState(store_sqlite.ViewGenerationBuilding, "building")
+	scanRetirementState(storage.ViewGenerationFailed, "failed")
+	scanRetirementState(storage.ViewGenerationBuilding, "building")
 
 	const orphanedGraphPageSize = 512
 	var beforeGenerationID int64
 	for {
-		rows, scanErr := l.catalog.ListViewGenerations(ctx, store_sqlite.ViewGenerationFilter{
-			States:             []store_sqlite.ViewGenerationState{store_sqlite.ViewGenerationReady},
+		rows, scanErr := l.catalog.ListViewGenerations(ctx, storage.ViewGenerationFilter{
+			States:             []storage.ViewGenerationState{storage.ViewGenerationReady},
 			MissingGraph:       true,
 			BeforeGenerationID: beforeGenerationID,
 			Limit:              orphanedGraphPageSize,
@@ -3815,11 +3820,11 @@ func (l *CheckoutLifecycle) orphanedGenerations(
 	// only the route can say whether a layer is still the one being served.
 	// Cursor through every page so newer routed or served layers cannot hide an
 	// older orphan behind the catalog listing bound.
-	routes := map[string]store_sqlite.CheckoutRoute{}
+	routes := map[string]storage.CheckoutRoute{}
 	var layerBeforeGenerationID int64
 	for {
-		layers, scanErr := l.catalog.ListViewGenerations(ctx, store_sqlite.ViewGenerationFilter{
-			States:             []store_sqlite.ViewGenerationState{store_sqlite.ViewGenerationReady},
+		layers, scanErr := l.catalog.ListViewGenerations(ctx, storage.ViewGenerationFilter{
+			States:             []storage.ViewGenerationState{storage.ViewGenerationReady},
 			OwnerKind:          checkoutLayerOwnerKind,
 			BeforeGenerationID: layerBeforeGenerationID,
 			Limit:              retirementScanPageSize,
@@ -3864,12 +3869,12 @@ func (l *CheckoutLifecycle) orphanedGenerations(
 
 func readyLayerRetirementCandidates(
 	ctx context.Context,
-	layers []store_sqlite.ViewGeneration,
+	layers []storage.ViewGeneration,
 	served map[string]struct{},
-	routes map[string]store_sqlite.CheckoutRoute,
-	lookup func(context.Context, []string) (map[string]store_sqlite.CheckoutRoute, error),
-) ([]store_sqlite.ViewGeneration, error) {
-	eligible := make([]store_sqlite.ViewGeneration, 0, len(layers))
+	routes map[string]storage.CheckoutRoute,
+	lookup func(context.Context, []string) (map[string]storage.CheckoutRoute, error),
+) ([]storage.ViewGeneration, error) {
+	eligible := make([]storage.ViewGeneration, 0, len(layers))
 	unresolved := make([]string, 0, len(layers))
 	for _, row := range layers {
 		if row.CheckoutID == "" {
@@ -3891,7 +3896,7 @@ func readyLayerRetirementCandidates(
 		}
 		// Install the missing-route value before the batch so it also acts as
 		// this page's de-duplication marker.
-		routes[row.CheckoutID] = store_sqlite.CheckoutRoute{}
+		routes[row.CheckoutID] = storage.CheckoutRoute{}
 		unresolved = append(unresolved, row.CheckoutID)
 	}
 	if len(unresolved) > 0 {
@@ -3950,7 +3955,7 @@ const (
 )
 
 // dedicatedBaseGenerationRow reports a dedicated graph's committed base.
-func dedicatedBaseGenerationRow(row store_sqlite.ViewGeneration) bool {
+func dedicatedBaseGenerationRow(row storage.ViewGeneration) bool {
 	return row.GenerationID > 0 && row.GraphID != "" &&
 		row.OwnerKind == checkoutLayerOwnerKind &&
 		row.GenerationKind == DedicatedBaseGenerationKind
@@ -4004,15 +4009,15 @@ func (l *CheckoutLifecycle) supersededChainRetentionWindow() int {
 // BEFORE it goes.
 func (l *CheckoutLifecycle) dedicatedChainRetirementCandidates(
 	ctx context.Context,
-	rows []store_sqlite.ViewGeneration,
-) []store_sqlite.ViewGeneration {
+	rows []storage.ViewGeneration,
+) []storage.ViewGeneration {
 	if l == nil || l.catalog == nil || len(rows) == 0 {
 		return nil
 	}
 	pins := l.pinnedDedicatedBases()
 	defer pins.requestRelease(l)
-	byID := make(map[int64]store_sqlite.ViewGeneration, len(rows))
-	byGraph := map[string][]store_sqlite.ViewGeneration{}
+	byID := make(map[int64]storage.ViewGeneration, len(rows))
+	byGraph := map[string][]storage.ViewGeneration{}
 	graphs := make([]string, 0, 4)
 	for _, row := range rows {
 		if !dedicatedBaseGenerationRow(row) {
@@ -4027,7 +4032,7 @@ func (l *CheckoutLifecycle) dedicatedChainRetirementCandidates(
 		}
 		byGraph[row.GraphID] = append(byGraph[row.GraphID], row)
 	}
-	var out []store_sqlite.ViewGeneration
+	var out []storage.ViewGeneration
 	for _, graphID := range graphs {
 		out = append(out, l.dedicatedGraphRetirementCandidates(ctx, graphID, byGraph[graphID], byID, pins)...)
 		if len(out) >= maxDedicatedChainRetirementCandidates {
@@ -4081,7 +4086,7 @@ func (l *CheckoutLifecycle) pinnedDedicatedBases() *basePinRegistry {
 // pinned reports whether a live route is composed over this generation, and
 // records that the pass wanted to offer it: a base the retention window no
 // longer covers is one the holders have to be asked to release.
-func (p *basePinRegistry) pinned(row store_sqlite.ViewGeneration, reason string) bool {
+func (p *basePinRegistry) pinned(row storage.ViewGeneration, reason string) bool {
 	if p == nil {
 		return false
 	}
@@ -4125,10 +4130,10 @@ func (p *basePinRegistry) requestRelease(l *CheckoutLifecycle) {
 func (l *CheckoutLifecycle) dedicatedGraphRetirementCandidates(
 	ctx context.Context,
 	graphID string,
-	rows []store_sqlite.ViewGeneration,
-	byID map[int64]store_sqlite.ViewGeneration,
+	rows []storage.ViewGeneration,
+	byID map[int64]storage.ViewGeneration,
 	pins *basePinRegistry,
-) []store_sqlite.ViewGeneration {
+) []storage.ViewGeneration {
 	graph, found, err := l.catalog.GetDedicatedGraph(ctx, graphID)
 	if err != nil {
 		// A failed read is not evidence that the graph has no live chain. Leave
@@ -4161,7 +4166,7 @@ func (l *CheckoutLifecycle) dedicatedGraphRetirementCandidates(
 		if kept >= window {
 			break
 		}
-		if row.State != store_sqlite.ViewGenerationSuperseded {
+		if row.State != storage.ViewGenerationSuperseded {
 			continue
 		}
 		if _, live := retained[row.GenerationID]; live {
@@ -4170,9 +4175,9 @@ func (l *CheckoutLifecycle) dedicatedGraphRetirementCandidates(
 		kept++
 		l.walkDedicatedChain(ctx, row.GenerationID, byID, retained)
 	}
-	out := make([]store_sqlite.ViewGeneration, 0, len(rows))
+	out := make([]storage.ViewGeneration, 0, len(rows))
 	for _, row := range rows {
-		if row.State == store_sqlite.ViewGenerationRetiring {
+		if row.State == storage.ViewGenerationRetiring {
 			// Its fence is already committed, so the decision was taken on an
 			// earlier pass and what is left is to finish it.
 			out = append(out, row)
@@ -4209,7 +4214,7 @@ func (l *CheckoutLifecycle) dedicatedGraphRetirementCandidates(
 func (l *CheckoutLifecycle) walkDedicatedChain(
 	ctx context.Context,
 	id int64,
-	byID map[int64]store_sqlite.ViewGeneration,
+	byID map[int64]storage.ViewGeneration,
 	into map[int64]struct{},
 ) {
 	for depth := 0; id > 0 && depth < maxDedicatedChainAncestry; depth++ {
@@ -4809,7 +4814,7 @@ func (l *CheckoutLifecycle) ResolvePrefix(pathOrPrefix string) string {
 
 // checkoutForPrefix reads the checkout a repo prefix is bound to, nil when
 // the prefix has no catalog identity.
-func (l *CheckoutLifecycle) checkoutForPrefix(ctx context.Context, prefix string) (*store_sqlite.Checkout, error) {
+func (l *CheckoutLifecycle) checkoutForPrefix(ctx context.Context, prefix string) (*storage.Checkout, error) {
 	if l.catalog == nil || prefix == "" {
 		return nil, nil
 	}
@@ -4841,7 +4846,7 @@ func (l *CheckoutLifecycle) prefixForCheckout(ctx context.Context, checkoutID st
 			}
 		}
 	}
-	if checkout.EffectiveMode == store_sqlite.CheckoutModeDedicated {
+	if checkout.EffectiveMode == storage.CheckoutModeDedicated {
 		return l.registeredPrefixForRoot(checkout.RootPath)
 	}
 	return ""

@@ -8,7 +8,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -153,7 +153,7 @@ func (l *CheckoutLifecycle) serveDeferredRetirementBurst(
 		return 0, true, discoveryErr
 	}
 	mark := l.store.WALWriteMark()
-	var committed store_sqlite.PayloadRetirementProgress
+	var committed storage.PayloadRetirementProgress
 	var touched []int64
 	defer func() {
 		if committed.ChunksCommitted == 0 && !committed.CatalogRemoved {
@@ -163,7 +163,7 @@ func (l *CheckoutLifecycle) serveDeferredRetirementBurst(
 		l.noteRetirementProgress(time.Now())
 		l.retirementWALPaused.Store(false)
 		if l.logger != nil {
-			wal := store_sqlite.WALWrittenBetween(mark, l.store.WALWriteMark())
+			wal := storage.WALWrittenBetween(mark, l.store.WALWriteMark())
 			l.logger.Info("indexer: deferred retirement committed a bounded burst",
 				zap.Int64s("generations", touched),
 				zap.Int("generations_touched", len(touched)),
@@ -223,7 +223,7 @@ func (l *CheckoutLifecycle) serveDeferredRetirementBurst(
 		releaseSeq := retirementReleaseSeq()
 		quantumCtx := burstCtx
 		if wide {
-			quantumCtx = store_sqlite.WithWideRetirementQuantum(burstCtx)
+			quantumCtx = storage.WithWideRetirementQuantum(burstCtx)
 		}
 		progress, retireErr := runQuantum(quantumCtx, generationID, inUse)
 		parked := false
@@ -247,22 +247,22 @@ func (l *CheckoutLifecycle) serveDeferredRetirementBurst(
 			l.forgetDeferredRetirement(generationID, owners[generationID], true)
 			l.unparkRetirement(generationID)
 			// The Store reported the base the removal released.
-		} else if errors.Is(retireErr, store_sqlite.ErrCatalogNotFound) {
+		} else if errors.Is(retireErr, storage.ErrCatalogNotFound) {
 			l.forgetDeferredRetirement(generationID, owners[generationID], false)
 		} else if retirementStillReferenced(retireErr) {
 			l.parkReferencedRetirement(generationID, time.Now(), releaseSeq, retireErr)
 			parked = true
-		} else if errors.Is(retireErr, store_sqlite.ErrPayloadGenerationInUse) {
+		} else if errors.Is(retireErr, storage.ErrPayloadGenerationInUse) {
 			// Lease refusals are not progress; rotate to a sibling this burst.
-		} else if errors.Is(retireErr, store_sqlite.ErrPayloadRetirementWriteWanted) {
+		} else if errors.Is(retireErr, storage.ErrPayloadRetirementWriteWanted) {
 			deferredRetirementPreemptions.Add(1)
 			break
 		} else if errors.Is(retireErr, context.DeadlineExceeded) && ctx.Err() == nil {
 			break
-		} else if retireErr != nil && !errors.Is(retireErr, store_sqlite.ErrPayloadSweepBudgetExhausted) {
+		} else if retireErr != nil && !errors.Is(retireErr, storage.ErrPayloadSweepBudgetExhausted) {
 			return retired, true, errors.Join(discoveryErr, retireErr)
 		}
-		if errors.Is(retireErr, store_sqlite.ErrPayloadSweepBudgetExhausted) && progress.ChunksCommitted == 0 {
+		if errors.Is(retireErr, storage.ErrPayloadSweepBudgetExhausted) && progress.ChunksCommitted == 0 {
 			// The Store's own WAL observation refused admission. This is
 			// neither an empty-source proof nor a reason to churn siblings.
 			l.noteRetirementWALPause(l.walSinceReset())

@@ -448,6 +448,9 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	languages.RegisterFallbackChunkers(reg, conf.Index.FallbackChunkers, logger)
 
 	idx := indexer.New(g, reg, conf.Index, logger)
+	if store, ok := g.(*store_sqlite.Store); ok {
+		idx.SetCensusCatalog(store.Catalog())
+	}
 	s.Indexer = idx
 
 	// Semantic enrichment (opt-in). A daemon-managed LSP router owns
@@ -708,6 +711,9 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	var mi *indexer.MultiIndexer
 	if cm != nil {
 		mi = indexer.NewMultiIndexer(g, reg, idx.Search(), cm, logger)
+		if store, ok := g.(*store_sqlite.Store); ok {
+			mi.SetCensusCatalog(store.Catalog())
+		}
 		if embedder != nil {
 			mi.SetEmbedder(embedder)
 			mi.SetEmbeddingChunkOptions(EmbeddingChunkOptions(conf))

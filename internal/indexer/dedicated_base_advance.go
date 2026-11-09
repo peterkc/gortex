@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Keep ordinary committed advancement sparse, but stop extending long chains.
@@ -53,7 +53,7 @@ func (p *dedicatedBasePublisher) ensureCurrent(ctx context.Context, leases *grap
 // dedicatedBaseParentForAdvance performs a bounded metadata-only ancestry check.
 // The catalog revalidates the selected parent transactionally when claiming it;
 // these reads are planning, not publication authority or a payload lease.
-func dedicatedBaseParentForAdvance(ctx context.Context, catalog *store_sqlite.Catalog, authority store_sqlite.DedicatedBaseAuthority, active store_sqlite.ViewGeneration, target store_sqlite.DedicatedBaseIdentity) (int64, error) {
+func dedicatedBaseParentForAdvance(ctx context.Context, catalog viewGenerationCatalog, authority storage.DedicatedBaseAuthority, active storage.ViewGeneration, target storage.DedicatedBaseIdentity) (int64, error) {
 	if active.GenerationID > 0 && active.GenerationID <= authority.GenerationFloor {
 		// A pre-protocol pointer is an expected-active CAS fence, not a trusted
 		// committed lower snapshot. Reconstruct from Git; do not traverse or
@@ -69,7 +69,7 @@ func dedicatedBaseParentForAdvance(ctx context.Context, catalog *store_sqlite.Ca
 	// a changed revision falls to the full-root branch below, and stored
 	// ancestry that is not revision-homogeneous is not reusable advancement
 	// ancestry — it re-roots too, it never blocks publication.
-	policy := store_sqlite.DedicatedBaseIdentity{
+	policy := storage.DedicatedBaseIdentity{
 		ConfigHash: active.ConfigHash, ExtractorVersions: active.ExtractorVersions,
 		ResolverVersion: active.ResolverVersion, DependencyRevision: active.DependencyRevision,
 	}
@@ -81,17 +81,17 @@ func dedicatedBaseParentForAdvance(ctx context.Context, catalog *store_sqlite.Ca
 		// the walk never stops early and reports a shorter chain than it found.
 		if _, duplicate := seen[row.GenerationID]; duplicate {
 			return 0, fmt.Errorf("%w: cyclic active dedicated ancestry at generation %d",
-				store_sqlite.ErrDedicatedBaseCandidate, row.GenerationID)
+				storage.ErrDedicatedBaseCandidate, row.GenerationID)
 		}
 		if len(seen) >= maxDedicatedBaseActiveAncestryWalk {
 			return 0, fmt.Errorf("%w: active dedicated ancestry is at least %d generations deep at generation %d, over the %d-generation catalog limit",
-				store_sqlite.ErrDedicatedBaseCandidate, len(seen)+1, row.GenerationID, maxDedicatedBaseActiveAncestryWalk)
+				storage.ErrDedicatedBaseCandidate, len(seen)+1, row.GenerationID, maxDedicatedBaseActiveAncestryWalk)
 		}
 		if row.GenerationID <= authority.GenerationFloor || row.OwnerKind != "dedicated_graph" || row.GenerationKind != "dedicated" ||
 			row.GraphID != authority.GraphID || row.CheckoutID != authority.Owner.CheckoutID || row.TreeOID == "" || row.BaseGenerationID < 0 ||
-			(row.State != store_sqlite.ViewGenerationReady && row.State != store_sqlite.ViewGenerationSuperseded) ||
+			(row.State != storage.ViewGenerationReady && row.State != storage.ViewGenerationSuperseded) ||
 			row.ConfigHash != policy.ConfigHash || row.ExtractorVersions != policy.ExtractorVersions || row.ResolverVersion != policy.ResolverVersion {
-			return 0, fmt.Errorf("%w: invalid active dedicated ancestry at generation %d", store_sqlite.ErrDedicatedBaseCandidate, row.GenerationID)
+			return 0, fmt.Errorf("%w: invalid active dedicated ancestry at generation %d", storage.ErrDedicatedBaseCandidate, row.GenerationID)
 		}
 		// Revision non-homogeneity below the head is NOT corruption, so it is
 		// not an error: the catalog's ancestry validation revision-checks only
@@ -109,7 +109,7 @@ func dedicatedBaseParentForAdvance(ctx context.Context, catalog *store_sqlite.Ca
 		seen[row.GenerationID] = struct{}{}
 		if row.BaseGenerationID == 0 {
 			if row.LayerID != "" || row.LowerViewFingerprint != "" {
-				return 0, fmt.Errorf("%w: dedicated root has sparse identity", store_sqlite.ErrDedicatedBaseCandidate)
+				return 0, fmt.Errorf("%w: dedicated root has sparse identity", storage.ErrDedicatedBaseCandidate)
 			}
 			break
 		}
@@ -120,7 +120,7 @@ func dedicatedBaseParentForAdvance(ctx context.Context, catalog *store_sqlite.Ca
 			return 0, err
 		}
 		if !found {
-			return 0, fmt.Errorf("%w: active dedicated ancestor missing", store_sqlite.ErrDedicatedBaseCandidate)
+			return 0, fmt.Errorf("%w: active dedicated ancestor missing", storage.ErrDedicatedBaseCandidate)
 		}
 	}
 	if target.ConfigHash != policy.ConfigHash || target.ExtractorVersions != policy.ExtractorVersions || target.ResolverVersion != policy.ResolverVersion ||
@@ -145,13 +145,13 @@ func dedicatedBaseParentForAdvance(ctx context.Context, catalog *store_sqlite.Ca
 // bounded planning read dedicatedBaseParentForAdvance performs — and the
 // returned depth is exact when it is at most limit and "more than limit"
 // otherwise, which is all a bound check needs.
-func dedicatedBaseAncestryDepth(ctx context.Context, catalog *store_sqlite.Catalog, row store_sqlite.ViewGeneration, limit int) (int, error) {
+func dedicatedBaseAncestryDepth(ctx context.Context, catalog viewGenerationCatalog, row storage.ViewGeneration, limit int) (int, error) {
 	seen := make(map[int64]struct{}, limit+1)
 	depth := 0
 	for {
 		if _, duplicate := seen[row.GenerationID]; duplicate {
 			return 0, fmt.Errorf("%w: cyclic dedicated ancestry at generation %d",
-				store_sqlite.ErrDedicatedBaseCandidate, row.GenerationID)
+				storage.ErrDedicatedBaseCandidate, row.GenerationID)
 		}
 		seen[row.GenerationID] = struct{}{}
 		depth++
@@ -163,7 +163,7 @@ func dedicatedBaseAncestryDepth(ctx context.Context, catalog *store_sqlite.Catal
 			return 0, err
 		}
 		if !found {
-			return 0, fmt.Errorf("%w: dedicated ancestor %d missing", store_sqlite.ErrDedicatedBaseCandidate, row.BaseGenerationID)
+			return 0, fmt.Errorf("%w: dedicated ancestor %d missing", storage.ErrDedicatedBaseCandidate, row.BaseGenerationID)
 		}
 		row = next
 	}
@@ -172,7 +172,7 @@ func dedicatedBaseAncestryDepth(ctx context.Context, catalog *store_sqlite.Catal
 // buildObservedClaim dispatches by the reservation actually returned by the
 // catalog. A cached or coalesced claim can name a different valid parent than
 // the caller proposed. Never splice the observed active reader under that claim.
-func (p *dedicatedBasePublisher) buildObservedClaim(ctx context.Context, observation dedicatedBaseObservation, claim store_sqlite.DedicatedBaseBuildClaim, leases *graphview.LeaseManager) (int64, BuildReport, error) {
+func (p *dedicatedBasePublisher) buildObservedClaim(ctx context.Context, observation dedicatedBaseObservation, claim storage.DedicatedBaseBuildClaim, leases *graphview.LeaseManager) (int64, BuildReport, error) {
 	if claim.BaseGenerationID == 0 {
 		return observation.Builder.BuildClaimedDedicatedBase(ctx, ClaimedDedicatedBaseRequest{
 			Claim: claim, RootPath: observation.RootPath, WorkspaceID: observation.WorkspaceID,
@@ -180,14 +180,14 @@ func (p *dedicatedBasePublisher) buildObservedClaim(ctx context.Context, observa
 		})
 	}
 	if leases == nil {
-		return 0, BuildReport{}, fmt.Errorf("%w: initial runtime cannot consume a claimed delta", store_sqlite.ErrDedicatedBaseCandidate)
+		return 0, BuildReport{}, fmt.Errorf("%w: initial runtime cannot consume a claimed delta", storage.ErrDedicatedBaseCandidate)
 	}
 	parent, found, err := p.runtime.store.Catalog().GetViewGeneration(ctx, claim.BaseGenerationID)
 	if err != nil {
 		return 0, BuildReport{}, err
 	}
 	if !found || parent.TreeOID == "" {
-		return 0, BuildReport{}, fmt.Errorf("%w: claimed dedicated parent missing", store_sqlite.ErrDedicatedBaseCandidate)
+		return 0, BuildReport{}, fmt.Errorf("%w: claimed dedicated parent missing", storage.ErrDedicatedBaseCandidate)
 	}
 	// The claim's parent is not necessarily the one the planner proposed — a
 	// cached or coalesced reservation names its own valid parent, and the
@@ -204,7 +204,7 @@ func (p *dedicatedBasePublisher) buildObservedClaim(ctx context.Context, observa
 	}
 	if depth >= maxDedicatedBaseDeltaAncestors {
 		return 0, BuildReport{}, fmt.Errorf("%w: claimed dedicated parent %d is %d generations deep; a delta over it would pass the %d-generation ancestry bound",
-			store_sqlite.ErrDedicatedBaseCandidate, claim.BaseGenerationID, depth, maxDedicatedBaseDeltaAncestors)
+			storage.ErrDedicatedBaseCandidate, claim.BaseGenerationID, depth, maxDedicatedBaseDeltaAncestors)
 	}
 	request := ClaimedDedicatedDeltaRequest{
 		Claim: claim, BaseTreeOID: parent.TreeOID, RepoDir: observation.RootPath,

@@ -17,6 +17,7 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 	"go.uber.org/zap"
 )
@@ -313,13 +314,13 @@ func (c *ContractAnalysisCoordinator) execute(job *contractAnalysisJob) string {
 			var err error
 			if c.options.RetireReservation != nil {
 				err = c.options.RetireReservation(cleanup, target.Catalog, generation, c.options.Leases.InUse)
-				if err == nil || errors.Is(err, store_sqlite.ErrCatalogGenerationReferenced) {
+				if err == nil || errors.Is(err, storage.ErrCatalogGenerationReferenced) {
 					continue
 				}
 				c.options.Logger.Warn("contract reservation retirement handoff refused", zap.Int64("generation", generation), zap.Error(err))
 			}
 			err = target.Catalog.RetirePayloadGeneration(cleanup, generation, c.options.Leases.InUse)
-			if err != nil && !errors.Is(err, store_sqlite.ErrCatalogGenerationReferenced) {
+			if err != nil && !errors.Is(err, storage.ErrCatalogGenerationReferenced) {
 				c.options.Logger.Warn("contract analysis reservation retirement deferred", zap.Int64("generation", generation), zap.Error(err))
 			}
 		}
@@ -344,7 +345,7 @@ func (c *ContractAnalysisCoordinator) execute(job *contractAnalysisJob) string {
 		}
 		keyDigest := sha256.Sum256(encoded)
 		graphDigest := sha256.Sum256([]byte(target.Key.RepoPrefix + "\x00" + target.Key.CheckoutID))
-		_, payload, err := target.Catalog.BeginPayloadGeneration(c.ctx, store_sqlite.PayloadGenerationRequest{OwnerKind: "dedicated_graph", GraphID: "contract-analysis:" + hex.EncodeToString(graphDigest[:]), CheckoutID: target.Key.CheckoutID, GenerationKind: "contract_analysis", LayerID: hex.EncodeToString(keyDigest[:]) + ":" + job.id + ":" + hex.EncodeToString(attempt), LowerViewFingerprint: job.id, CreatedAt: time.Now().Unix()})
+		_, payload, err := target.Catalog.BeginPayloadGeneration(c.ctx, storage.PayloadGenerationRequest{OwnerKind: "dedicated_graph", GraphID: "contract-analysis:" + hex.EncodeToString(graphDigest[:]), CheckoutID: target.Key.CheckoutID, GenerationKind: "contract_analysis", LayerID: hex.EncodeToString(keyDigest[:]) + ":" + job.id + ":" + hex.EncodeToString(attempt), LowerViewFingerprint: job.id, CreatedAt: time.Now().Unix()})
 		if err != nil {
 			c.options.Logger.Warn("contract payload reservation failed", zap.Error(err))
 			return viewmetrics.ContractJobFailed

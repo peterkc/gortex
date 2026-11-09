@@ -24,6 +24,7 @@ import (
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/resolver"
 	"github.com/zzet/gortex/internal/search/trigram"
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -1717,7 +1718,7 @@ func (c *CheckoutCoordinator) settledWithoutBuild(ctx context.Context) (Checkout
 		return out, false
 	}
 	route, found, err := c.catalog.GetCheckoutRoute(ctx, c.checkoutID)
-	if err != nil || !found || route.State != store_sqlite.RouteActive ||
+	if err != nil || !found || route.State != storage.RouteActive ||
 		route.GraphID != base.graphID || route.CommitGenerationID <= 0 || route.DirtyGenerationID <= 0 {
 		return out, false
 	}
@@ -2071,7 +2072,7 @@ func (c *CheckoutCoordinator) recomposeOverAdvancedBase(
 	ctx context.Context,
 	base primaryBase,
 	head gitstate.DirtySnapshot,
-	route *store_sqlite.CheckoutRoute,
+	route *storage.CheckoutRoute,
 	out *CheckoutCycle,
 ) (bool, error) {
 	commitRow, dirtyRow, ok, err := c.recomposableStack(ctx, base, head, *route)
@@ -2198,7 +2199,7 @@ func (c *CheckoutCoordinator) recomposeOverAdvancedBase(
 		return true, err
 	}
 	route.RouteEpoch++
-	route.State = store_sqlite.RouteActive
+	route.State = storage.RouteActive
 	route.CommitGenerationID = commitGeneration
 	route.DirtyGenerationID = dirtyGeneration
 	c.rememberRoutedDirty(dirtyGeneration)
@@ -2240,9 +2241,9 @@ func (c *CheckoutCoordinator) recomposableStack(
 	ctx context.Context,
 	base primaryBase,
 	head gitstate.DirtySnapshot,
-	route store_sqlite.CheckoutRoute,
-) (commitRow, dirtyRow store_sqlite.ViewGeneration, ok bool, err error) {
-	if route.State != store_sqlite.RouteActive || route.GraphID != base.graphID ||
+	route storage.CheckoutRoute,
+) (commitRow, dirtyRow storage.ViewGeneration, ok bool, err error) {
+	if route.State != storage.RouteActive || route.GraphID != base.graphID ||
 		route.CommitGenerationID <= 0 || route.DirtyGenerationID <= 0 ||
 		head.HeadTree == "" || head.Fingerprint == "" {
 		return commitRow, dirtyRow, false, nil
@@ -2389,7 +2390,7 @@ func (c *CheckoutCoordinator) RehomeTo(ctx context.Context, graphID string) (Che
 		return out, err
 	}
 	if !found {
-		return out, fmt.Errorf("%w: dedicated graph %s", store_sqlite.ErrCatalogNotFound, graphID)
+		return out, fmt.Errorf("%w: dedicated graph %s", storage.ErrCatalogNotFound, graphID)
 	}
 	base, err := graphBase(ctx, c.catalog, dedicated)
 	if err != nil {
@@ -2459,29 +2460,29 @@ func (c *CheckoutCoordinator) RehomeTo(ctx context.Context, graphID string) (Che
 // generations in one write.
 func (c *CheckoutCoordinator) installStack(
 	ctx context.Context,
-	route store_sqlite.CheckoutRoute,
+	route storage.CheckoutRoute,
 	routed bool,
 	graphID string,
 	commitGeneration, dirtyGeneration int64,
 ) error {
 	if !routed {
-		return c.catalog.UpsertCheckoutRoute(ctx, store_sqlite.CheckoutRoute{
+		return c.catalog.UpsertCheckoutRoute(ctx, storage.CheckoutRoute{
 			CheckoutID:         c.checkoutID,
 			GraphID:            graphID,
 			CommitGenerationID: commitGeneration,
 			DirtyGenerationID:  dirtyGeneration,
-			State:              store_sqlite.RouteActive,
+			State:              storage.RouteActive,
 		})
 	}
-	err := c.catalog.FlipCheckoutRoute(ctx, store_sqlite.FlipCheckoutRouteRequest{
+	err := c.catalog.FlipCheckoutRoute(ctx, storage.FlipCheckoutRouteRequest{
 		CheckoutID:         c.checkoutID,
 		ExpectedRouteEpoch: route.RouteEpoch,
 		GraphID:            graphID,
 		CommitGenerationID: commitGeneration,
 		DirtyGenerationID:  dirtyGeneration,
-		State:              store_sqlite.RouteActive,
+		State:              storage.RouteActive,
 	})
-	if errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
+	if errors.Is(err, storage.ErrCatalogStaleGuard) {
 		return fmt.Errorf("%w: whole stack", errRouteMoved)
 	}
 	return err
@@ -2515,7 +2516,7 @@ func (c *CheckoutCoordinator) primaryBase(ctx context.Context) (primaryBase, err
 	if err != nil {
 		return primaryBase{}, err
 	}
-	var primary *store_sqlite.DedicatedGraph
+	var primary *storage.DedicatedGraph
 	for i := range graphs {
 		if graphs[i].IsPrimaryBase {
 			primary = &graphs[i]
@@ -2585,8 +2586,8 @@ func (c *CheckoutCoordinator) demandCommittedBase() {
 // two cannot disagree about what "the corpus" is.
 func graphBase(
 	ctx context.Context,
-	catalog *store_sqlite.Catalog,
-	dedicated store_sqlite.DedicatedGraph,
+	catalog graphBaseCatalog,
+	dedicated storage.DedicatedGraph,
 ) (primaryBase, error) {
 	out := primaryBase{graphID: dedicated.GraphID}
 	if dedicated.ActiveGenerationID > 0 {
@@ -2686,7 +2687,7 @@ func graphBase(
 // exactly this shape — returns the family's current base unchanged, which is
 // the behaviour this path replaced.
 func (c *CheckoutCoordinator) pinRoutedBase(
-	ctx context.Context, base primaryBase, route store_sqlite.CheckoutRoute,
+	ctx context.Context, base primaryBase, route storage.CheckoutRoute,
 ) (primaryBase, bool) {
 	pinned, ok, err := c.reconcilePinnedBaseFor(ctx, base, route)
 	if err != nil {
@@ -2705,10 +2706,10 @@ func (c *CheckoutCoordinator) pinRoutedBase(
 // A writable snapshot must still name a complete active pair; pending routes
 // are considered only by reconcilePinnedBaseFor after admission withdraws DIRTY.
 func (c *CheckoutCoordinator) pinnedBaseFor(
-	ctx context.Context, base primaryBase, route store_sqlite.CheckoutRoute,
+	ctx context.Context, base primaryBase, route storage.CheckoutRoute,
 ) (primaryBase, bool, error) {
 	var out primaryBase
-	if route.State != store_sqlite.RouteActive || route.GraphID != base.graphID ||
+	if route.State != storage.RouteActive || route.GraphID != base.graphID ||
 		route.CommitGenerationID <= 0 || route.DirtyGenerationID <= 0 {
 		return out, false, nil
 	}
@@ -2720,13 +2721,13 @@ func (c *CheckoutCoordinator) pinnedBaseFor(
 // and no incomplete route is active or servable. The shared validation below
 // still proves that the retained COMMIT was built against a live pinned base.
 func (c *CheckoutCoordinator) reconcilePinnedBaseFor(
-	ctx context.Context, base primaryBase, route store_sqlite.CheckoutRoute,
+	ctx context.Context, base primaryBase, route storage.CheckoutRoute,
 ) (primaryBase, bool, error) {
-	if route.State == store_sqlite.RouteActive {
+	if route.State == storage.RouteActive {
 		return c.pinnedBaseFor(ctx, base, route)
 	}
 	var out primaryBase
-	if route.State != store_sqlite.RoutePending || route.GraphID != base.graphID ||
+	if route.State != storage.RoutePending || route.GraphID != base.graphID ||
 		route.CommitGenerationID <= 0 || route.DirtyGenerationID != 0 {
 		return out, false, nil
 	}
@@ -2855,7 +2856,7 @@ func (c *CheckoutCoordinator) releaseRequestedBasePin() int64 {
 // graph's corpus and compose over nothing here. The reset is a compare-and-set
 // like every other route write, so a coordinator that loses it leaves the
 // winner's route alone.
-func (c *CheckoutCoordinator) ensureRoute(ctx context.Context, base primaryBase) (store_sqlite.CheckoutRoute, error) {
+func (c *CheckoutCoordinator) ensureRoute(ctx context.Context, base primaryBase) (storage.CheckoutRoute, error) {
 	route, found, err := c.catalog.GetCheckoutRoute(ctx, c.checkoutID)
 	if err != nil {
 		return route, err
@@ -2865,10 +2866,10 @@ func (c *CheckoutCoordinator) ensureRoute(ctx context.Context, base primaryBase)
 		if err != nil {
 			return route, err
 		}
-		route = store_sqlite.CheckoutRoute{
+		route = storage.CheckoutRoute{
 			CheckoutID: c.checkoutID,
 			GraphID:    base.graphID,
-			State:      store_sqlite.RoutePending,
+			State:      storage.RoutePending,
 		}
 		if err := c.catalog.UpsertCheckoutRoute(ctx, route); err != nil {
 			return route, err
@@ -2882,14 +2883,14 @@ func (c *CheckoutCoordinator) ensureRoute(ctx context.Context, base primaryBase)
 	if err != nil {
 		return route, err
 	}
-	err = c.catalog.FlipCheckoutRoute(ctx, store_sqlite.FlipCheckoutRouteRequest{
+	err = c.catalog.FlipCheckoutRoute(ctx, storage.FlipCheckoutRouteRequest{
 		CheckoutID:         c.checkoutID,
 		GraphID:            base.graphID,
 		ExpectedRouteEpoch: route.RouteEpoch,
-		State:              store_sqlite.RoutePending,
+		State:              storage.RoutePending,
 	})
 	if err != nil {
-		if errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
+		if errors.Is(err, storage.ErrCatalogStaleGuard) {
 			return route, errRouteMoved
 		}
 		return route, err
@@ -2898,7 +2899,7 @@ func (c *CheckoutCoordinator) ensureRoute(ctx context.Context, base primaryBase)
 	route.GraphID = base.graphID
 	route.CommitGenerationID, route.DirtyGenerationID = 0, 0
 	route.RouteEpoch++
-	route.State = store_sqlite.RoutePending
+	route.State = storage.RoutePending
 	c.dropRetained(ctx, 0)
 	// The working-tree cache goes with it. Every layer it holds was built over
 	// a commit generation composed on the graph this checkout has just left, so
@@ -2916,7 +2917,7 @@ func (c *CheckoutCoordinator) reconcileCommitSlot(
 	ctx context.Context,
 	base primaryBase,
 	targetTree string,
-	route *store_sqlite.CheckoutRoute,
+	route *storage.CheckoutRoute,
 	out *CheckoutCycle,
 ) (int64, error) {
 	identity := c.commitIdentity(base, targetTree)
@@ -3117,30 +3118,30 @@ func (c *CheckoutCoordinator) resolveCommitLayer(
 // dirty generation has nothing to tear.
 func (c *CheckoutCoordinator) moveCommitSlot(
 	ctx context.Context,
-	route *store_sqlite.CheckoutRoute,
+	route *storage.CheckoutRoute,
 	generationID int64,
 ) error {
 	_ = c.captureByteAnchor(ctx, *route)
 	if route.DirtyGenerationID <= 0 {
-		return c.flip(ctx, route, store_sqlite.RouteSlotCommit, generationID)
+		return c.flip(ctx, route, storage.RouteSlotCommit, generationID)
 	}
-	err := c.catalog.FlipCheckoutRoute(ctx, store_sqlite.FlipCheckoutRouteRequest{
+	err := c.catalog.FlipCheckoutRoute(ctx, storage.FlipCheckoutRouteRequest{
 		CheckoutID:         c.checkoutID,
 		ExpectedRouteEpoch: route.RouteEpoch,
 		GraphID:            route.GraphID,
 		CommitGenerationID: generationID,
 		DirtyGenerationID:  0,
-		State:              store_sqlite.RoutePending,
+		State:              storage.RoutePending,
 	})
 	if err != nil {
-		if errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
-			return fmt.Errorf("%w: %s slot", errRouteMoved, store_sqlite.RouteSlotCommit)
+		if errors.Is(err, storage.ErrCatalogStaleGuard) {
+			return fmt.Errorf("%w: %s slot", errRouteMoved, storage.RouteSlotCommit)
 		}
 		return err
 	}
 	dropped := route.DirtyGenerationID
 	route.RouteEpoch++
-	route.State = store_sqlite.RoutePending
+	route.State = storage.RoutePending
 	route.CommitGenerationID = generationID
 	route.DirtyGenerationID = 0
 	c.rememberRoutedDirty(0)
@@ -3162,7 +3163,7 @@ func (c *CheckoutCoordinator) moveCommitSlot(
 // names — a store written by a binary that flipped the two slots separately,
 // or a slot-at-a-time flip from another surface. The rebuild that follows
 // would serve that pair for its whole duration, so the slot goes first.
-func (c *CheckoutCoordinator) clearDirtySlot(ctx context.Context, route *store_sqlite.CheckoutRoute) error {
+func (c *CheckoutCoordinator) clearDirtySlot(ctx context.Context, route *storage.CheckoutRoute) error {
 	// Acceleration is optional; an uncertain anchor leaves byte edits on the
 	// ordinary route path. Capture before the active route loses its reference.
 	_ = c.captureByteAnchor(ctx, *route)
@@ -3171,22 +3172,22 @@ func (c *CheckoutCoordinator) clearDirtySlot(ctx context.Context, route *store_s
 	if admissionErr != nil {
 		return admissionErr
 	}
-	err := c.catalog.FlipCheckoutRouteSlot(ctx, store_sqlite.FlipCheckoutRouteSlotRequest{
+	err := c.catalog.FlipCheckoutRouteSlot(ctx, storage.FlipCheckoutRouteSlotRequest{
 		CheckoutID:         c.checkoutID,
-		Slot:               store_sqlite.RouteSlotDirty,
+		Slot:               storage.RouteSlotDirty,
 		GenerationID:       0,
 		ExpectedRouteEpoch: route.RouteEpoch,
-		State:              store_sqlite.RoutePending,
+		State:              storage.RoutePending,
 	})
 	if err != nil {
-		if errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
-			return fmt.Errorf("%w: %s slot", errRouteMoved, store_sqlite.RouteSlotDirty)
+		if errors.Is(err, storage.ErrCatalogStaleGuard) {
+			return fmt.Errorf("%w: %s slot", errRouteMoved, storage.RouteSlotDirty)
 		}
 		return err
 	}
 	dropped := route.DirtyGenerationID
 	route.RouteEpoch++
-	route.State = store_sqlite.RoutePending
+	route.State = storage.RoutePending
 	route.DirtyGenerationID = 0
 	c.rememberRoutedDirty(0)
 	c.releaseDirtyChain(ctx, dropped, 0)
@@ -3221,7 +3222,7 @@ func (c *CheckoutCoordinator) reconcileDirtySlot(
 	ctx context.Context,
 	commitGeneration int64,
 	targetTree string,
-	route *store_sqlite.CheckoutRoute,
+	route *storage.CheckoutRoute,
 	out *CheckoutCycle,
 ) (slotErr error) {
 	// The plan's own reads between the cycle's admission and the build are
@@ -3323,7 +3324,7 @@ func (c *CheckoutCoordinator) reconcileDirtySlot(
 	// than re-indexed. The route flip below is the only write it makes.
 	if cached, ok := c.cachedDirty(ctx, key); ok {
 		previous := route.DirtyGenerationID
-		if err := c.flip(ctx, route, store_sqlite.RouteSlotDirty, cached); err != nil {
+		if err := c.flip(ctx, route, storage.RouteSlotDirty, cached); err != nil {
 			// A cached generation is another cycle's work, not this one's, so
 			// a lost flip leaves it exactly as it was.
 			return err
@@ -3362,7 +3363,7 @@ func (c *CheckoutCoordinator) reconcileDirtySlot(
 	}
 	out.DirtyBuilt = true
 	previous := route.DirtyGenerationID
-	if err := c.flip(ctx, route, store_sqlite.RouteSlotDirty, generationID); err != nil {
+	if err := c.flip(ctx, route, storage.RouteSlotDirty, generationID); err != nil {
 		c.supersede(ctx, generationID)
 		c.deferRetire(generationID, "lost route flip")
 		return err
@@ -3742,8 +3743,8 @@ func (c *CheckoutCoordinator) ancestryLayerBase(view *graphview.RepoView) LayerB
 // database now holds.
 func (c *CheckoutCoordinator) flip(
 	ctx context.Context,
-	route *store_sqlite.CheckoutRoute,
-	slot store_sqlite.RouteSlot,
+	route *storage.CheckoutRoute,
+	slot storage.RouteSlot,
 	generationID int64,
 ) error {
 	// Warming an already sealed generation is read-only and may outlast an
@@ -3766,27 +3767,27 @@ func (c *CheckoutCoordinator) flip(
 	// already ready and PublishAndRoute — which publishes and then flips —
 	// would refuse it for not being in the building state. The flip alone is
 	// what is left of that pair for a caller holding a published generation.
-	err := c.catalog.FlipCheckoutRouteSlot(ctx, store_sqlite.FlipCheckoutRouteSlotRequest{
+	err := c.catalog.FlipCheckoutRouteSlot(ctx, storage.FlipCheckoutRouteSlotRequest{
 		CheckoutID:         c.checkoutID,
 		Slot:               slot,
 		GenerationID:       generationID,
 		ExpectedRouteEpoch: route.RouteEpoch,
-		State:              store_sqlite.RouteActive,
+		State:              storage.RouteActive,
 	})
 	if err != nil {
-		if errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
+		if errors.Is(err, storage.ErrCatalogStaleGuard) {
 			return fmt.Errorf("%w: %s slot", errRouteMoved, slot)
 		}
 		return err
 	}
 	route.RouteEpoch++
-	route.State = store_sqlite.RouteActive
+	route.State = storage.RouteActive
 	// Only the generation leaving the slot lost a reference.
 	switch slot {
-	case store_sqlite.RouteSlotCommit:
+	case storage.RouteSlotCommit:
 		noteRetirementReferencesReleased(route.CommitGenerationID)
 		route.CommitGenerationID = generationID
-	case store_sqlite.RouteSlotDirty:
+	case storage.RouteSlotDirty:
 		noteRetirementReferencesReleased(route.DirtyGenerationID)
 		route.DirtyGenerationID = generationID
 		c.rememberRoutedDirty(generationID)
@@ -3848,7 +3849,7 @@ func (c *CheckoutCoordinator) cachedCommit(ctx context.Context, key string) (int
 // built from the inputs key names (sharedCommit): it is filed under this
 // checkout's key while its own row names its builder. Renamed to this
 // checkout, its identity renders key exactly.
-func (c *CheckoutCoordinator) adoptedCommitRowFor(row store_sqlite.ViewGeneration, key string) bool {
+func (c *CheckoutCoordinator) adoptedCommitRowFor(row storage.ViewGeneration, key string) bool {
 	if row.GenerationKind != CommitLayerGenerationKind || row.CheckoutID == c.checkoutID {
 		return false
 	}
@@ -3888,7 +3889,7 @@ func (c *CheckoutCoordinator) adoptedCommitRowFor(row store_sqlite.ViewGeneratio
 // evicting one and attributes every write to the generation the cache gave up.
 func (c *CheckoutCoordinator) storedCommit(ctx context.Context, identity GenerationIdentity) (int64, bool) {
 	key := generationIdentityKey(identity)
-	rows, err := c.catalog.FindReusableViewGenerations(ctx, store_sqlite.ViewGeneration{
+	rows, err := c.catalog.FindReusableViewGenerations(ctx, storage.ViewGeneration{
 		OwnerKind:            identity.OwnerKind,
 		GraphID:              identity.GraphID,
 		LayerID:              identity.LayerID,
@@ -3932,10 +3933,10 @@ func (c *CheckoutCoordinator) storedCommit(ctx context.Context, identity Generat
 // retired (the catalog's reference guard), whichever checkout offers it.
 func (c *CheckoutCoordinator) sharedCommit(ctx context.Context, identity GenerationIdentity) (int64, bool) {
 	sharedCommitLookups.Add(1)
-	rows, err := c.catalog.ListViewGenerations(ctx, store_sqlite.ViewGenerationFilter{
+	rows, err := c.catalog.ListViewGenerations(ctx, storage.ViewGenerationFilter{
 		GraphID:   identity.GraphID,
 		OwnerKind: identity.OwnerKind,
-		States:    []store_sqlite.ViewGenerationState{store_sqlite.ViewGenerationReady, store_sqlite.ViewGenerationSuperseded},
+		States:    []storage.ViewGenerationState{storage.ViewGenerationReady, storage.ViewGenerationSuperseded},
 		Limit:     maxSharedCommitLayerCandidates,
 	})
 	if err != nil {
@@ -3969,7 +3970,7 @@ var sharedCommitLookups atomic.Int64
 
 // sameCommitLayerInputs reports whether a stored generation was built from
 // the same inputs as identity, whoever built it.
-func sameCommitLayerInputs(row store_sqlite.ViewGeneration, identity GenerationIdentity) bool {
+func sameCommitLayerInputs(row storage.ViewGeneration, identity GenerationIdentity) bool {
 	return row.GraphID == identity.GraphID &&
 		row.BaseGenerationID == identity.BaseGenerationID &&
 		row.LowerViewFingerprint == identity.LowerViewFingerprint &&
@@ -3999,7 +4000,7 @@ func sameCommitLayerInputs(row store_sqlite.ViewGeneration, identity GenerationI
 // no real lookup would return, which is the only way to state "and if the SQL
 // ever did, this refuses it". The SQL half is pinned in its own package, by
 // TestFindReusableViewGenerationsMatchesTheWholeIdentity.
-func selectReusableCommitGeneration(rows []store_sqlite.ViewGeneration, key string) (int64, bool) {
+func selectReusableCommitGeneration(rows []storage.ViewGeneration, key string) (int64, bool) {
 	for _, row := range rows {
 		if !servableGeneration(row.State) || generationRowKey(row) != key {
 			continue
@@ -4287,7 +4288,7 @@ func (c *CheckoutCoordinator) offerRetire(ctx context.Context, generationID int6
 		c.retireCalled(generationID)
 	}
 	if err := c.store.RetirePayloadGeneration(ctx, generationID, c.inUse()); err != nil {
-		if errors.Is(err, store_sqlite.ErrCatalogNotFound) {
+		if errors.Is(err, storage.ErrCatalogNotFound) {
 			return
 		}
 		c.mu.Lock()
@@ -4297,7 +4298,11 @@ func (c *CheckoutCoordinator) offerRetire(ctx context.Context, generationID int6
 		c.mu.Unlock()
 		if !known {
 			// A refused offer is owed to the background sweep like a deferral.
-			countRetirementOwed(c.store, generationID, viewmetrics.OwedReleased)
+			var owedStore graph.Store
+			if c.store != nil {
+				owedStore = c.store
+			}
+			countRetirementOwed(owedStore, generationID, viewmetrics.OwedReleased)
 			notifyDeferredRetirementWork()
 		}
 		// The blocking reason and how many generations this coordinator is
@@ -4316,9 +4321,9 @@ func (c *CheckoutCoordinator) offerRetire(ctx context.Context, generationID int6
 // class, so a log line and a counter can be read against each other.
 func retireBlockReason(err error) string {
 	switch {
-	case errors.Is(err, store_sqlite.ErrPayloadGenerationInUse):
+	case errors.Is(err, storage.ErrPayloadGenerationInUse):
 		return viewmetrics.RefusedLeased
-	case errors.Is(err, store_sqlite.ErrCatalogGenerationReferenced):
+	case errors.Is(err, storage.ErrCatalogGenerationReferenced):
 		return viewmetrics.RefusedRouted
 	default:
 		return viewmetrics.RefusedError
@@ -4343,7 +4348,7 @@ func (c *CheckoutCoordinator) SweepRetirements(ctx context.Context) int {
 	retired := 0
 	for _, generationID := range pending {
 		err := c.store.RetirePayloadGeneration(ctx, generationID, c.inUse())
-		if err != nil && !errors.Is(err, store_sqlite.ErrCatalogNotFound) {
+		if err != nil && !errors.Is(err, storage.ErrCatalogNotFound) {
 			continue
 		}
 		retired++
@@ -4746,34 +4751,34 @@ func builderConfigSections(
 func cohortProducerPolicy(cfg config.IndexConfig, hasEmbedder bool) []DependencyRevisionProducer {
 	vector := DependencyRevisionProducer{
 		Producer: string(graphview.CapSearchVector),
-		State:    string(store_sqlite.ProducerStateDisabledByConfig),
+		State:    string(storage.ProducerStateDisabledByConfig),
 		Reason:   "no embedding provider is configured for the build",
 	}
 	if hasEmbedder {
-		vector.State = string(store_sqlite.ProducerStateComplete)
+		vector.State = string(storage.ProducerStateComplete)
 		vector.Reason = ""
 	}
 	similarity := DependencyRevisionProducer{
 		Producer: string(graphview.CapSimilarity),
-		State:    string(store_sqlite.ProducerStateDisabledByConfig),
+		State:    string(storage.ProducerStateDisabledByConfig),
 		Reason:   "near-duplicate detection is switched off for the build",
 	}
 	if cfg.Coverage.IsEnabled("clones") {
-		similarity.State = string(store_sqlite.ProducerStateIncomplete)
+		similarity.State = string(storage.ProducerStateIncomplete)
 		similarity.Reason = "near-duplicate detection ranks bodies against a corpus; " +
 			"a sparse generation ranks them against its file set"
 	}
 	complete := func(capability graphview.CapabilityID) DependencyRevisionProducer {
 		return DependencyRevisionProducer{
 			Producer: string(capability),
-			State:    string(store_sqlite.ProducerStateComplete),
+			State:    string(storage.ProducerStateComplete),
 		}
 	}
 	return []DependencyRevisionProducer{
 		complete(graphview.CapSourceSnapshot),
 		{
 			Producer: string(graphview.CapSourceConfig),
-			State:    string(store_sqlite.ProducerStateComplete),
+			State:    string(storage.ProducerStateComplete),
 			Reason:   sourceConfigNarrowingReason,
 		},
 		complete(graphview.CapSyntaxGraph),
@@ -4785,7 +4790,7 @@ func cohortProducerPolicy(cfg config.IndexConfig, hasEmbedder bool) []Dependency
 		similarity,
 		{
 			Producer: string(graphview.CapResolutionCrossRepo),
-			State:    string(store_sqlite.ProducerStateIncomplete),
+			State:    string(storage.ProducerStateIncomplete),
 			Reason:   "a sparse generation is resolved within one repository",
 		},
 	}
@@ -4844,7 +4849,7 @@ func generationIdentityKey(identity GenerationIdentity) string {
 
 // generationRowKey renders a stored generation's identity the same way, so a
 // row read back from the catalog can be compared with a request.
-func generationRowKey(row store_sqlite.ViewGeneration) string {
+func generationRowKey(row storage.ViewGeneration) string {
 	return generationIdentityKey(GenerationIdentity{
 		OwnerKind:            row.OwnerKind,
 		GraphID:              row.GraphID,
@@ -4865,8 +4870,8 @@ func generationRowKey(row store_sqlite.ViewGeneration) string {
 // servableGeneration mirrors the materializer's rule for a generation a route
 // may name: ready serves, and so does superseded — superseded says only that a
 // newer generation exists, and the route decides what a checkout reads.
-func servableGeneration(state store_sqlite.ViewGenerationState) bool {
-	return state == store_sqlite.ViewGenerationReady || state == store_sqlite.ViewGenerationSuperseded
+func servableGeneration(state storage.ViewGenerationState) bool {
+	return state == storage.ViewGenerationReady || state == storage.ViewGenerationSuperseded
 }
 
 // indexConfigHash digests the index configuration a generation was built

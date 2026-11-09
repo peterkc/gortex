@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/config"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 )
 
@@ -43,7 +42,7 @@ const (
 //
 // A repository's own corpus is not one of its dependencies. It is the thing the
 // generation is OF, and the identity already names it in its own columns: the
-// committed base's TreeOID (`store_sqlite.DedicatedBaseIdentity`, stamped by
+// committed base's TreeOID (`storage.DedicatedBaseIdentity`, stamped by
 // `InitialBasePublisher.observe`), a checkout commit layer's TreeOID and its
 // LowerViewFingerprint (`CheckoutCoordinator.commitIdentity`), a working-tree
 // layer's content fingerprint. Digesting those same bytes a SECOND time here
@@ -810,7 +809,7 @@ type dependencyCohortSource struct {
 	// producer that cannot see the roster cannot certify it.
 	Leases *graphview.LeaseManager
 	// Catalog names a dedicated roster member's committed corpus.
-	Catalog *store_sqlite.Catalog
+	Catalog dedicatedCohortCatalog
 
 	// WorkspaceMembers reports the repositories that share the target's
 	// workspace — MultiIndexer.ReposInWorkspace in production, which is the

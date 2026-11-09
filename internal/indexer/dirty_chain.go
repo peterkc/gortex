@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/zzet/gortex/internal/gitstate"
+	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"go.uber.org/zap"
@@ -447,7 +448,11 @@ func (c *CheckoutCoordinator) deferRetire(generationID int64, why string) {
 	held := len(c.backlog)
 	c.mu.Unlock()
 	if !known {
-		countRetirementOwed(c.store, generationID, retireOwedClass(why))
+		var owedStore graph.Store
+		if c.store != nil {
+			owedStore = c.store
+		}
+		countRetirementOwed(owedStore, generationID, retireOwedClass(why))
 		// An idle worker need not wait out its pause for new debt.
 		notifyDeferredRetirementWork()
 	}

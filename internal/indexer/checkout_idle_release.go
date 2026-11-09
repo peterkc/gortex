@@ -12,7 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/gitstate"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Idle checkouts give their layers back.
@@ -94,7 +94,7 @@ func (s *idleCheckoutState) used(checkoutID string) time.Time {
 
 // idleCheckoutInput is what the release decision reads about one checkout.
 type idleCheckoutInput struct {
-	Checkout store_sqlite.Checkout
+	Checkout storage.Checkout
 	Primary  bool
 	Busy     bool // activating, or a fold of its chain in flight
 	// LastUse is the newest of its last selection, its newest generation's
@@ -123,7 +123,7 @@ func decideIdleCheckout(in idleCheckoutInput, after time.Duration, now time.Time
 		return false, idleKeepDisabled
 	case in.Primary:
 		return false, idleKeepPrimary
-	case in.Checkout.EffectiveMode != store_sqlite.CheckoutModeAutomatic:
+	case in.Checkout.EffectiveMode != storage.CheckoutModeAutomatic:
 		return false, idleKeepNotAutomatic
 	case in.Busy:
 		return false, idleKeepBusy
@@ -157,7 +157,7 @@ func (l *CheckoutLifecycle) ReleaseIdleCheckouts(ctx context.Context) ([]string,
 		l.logger.Debug("checkout lifecycle: idle release scan failed", zap.Error(err))
 		return nil, err
 	}
-	var checkouts []store_sqlite.Checkout
+	var checkouts []storage.Checkout
 	for _, family := range families {
 		members, err := l.catalog.ListCheckouts(ctx, family.FamilyID)
 		if err != nil {
@@ -189,9 +189,9 @@ func (l *CheckoutLifecycle) ReleaseIdleCheckouts(ctx context.Context) ([]string,
 
 // idleCheckoutInput gathers the decision's input. The working tree is
 // sampled only for a checkout already past the idle limit by use.
-func (l *CheckoutLifecycle) idleCheckoutInput(ctx context.Context, checkout store_sqlite.Checkout, after time.Duration, now time.Time) (idleCheckoutInput, bool) {
+func (l *CheckoutLifecycle) idleCheckoutInput(ctx context.Context, checkout storage.Checkout, after time.Duration, now time.Time) (idleCheckoutInput, bool) {
 	in := idleCheckoutInput{Checkout: checkout, LastUse: time.Unix(l.buildingRecoveryCutoff, 0)}
-	if checkout.EffectiveMode != store_sqlite.CheckoutModeAutomatic {
+	if checkout.EffectiveMode != storage.CheckoutModeAutomatic {
 		return in, true
 	}
 	owned, primary, err := l.familyGraphsFor(ctx, checkout)
@@ -208,7 +208,7 @@ func (l *CheckoutLifecycle) idleCheckoutInput(ctx context.Context, checkout stor
 	if used := l.idle.used(checkout.CheckoutID); used.After(in.LastUse) {
 		in.LastUse = used
 	}
-	rows, err := l.catalog.ListViewGenerations(ctx, store_sqlite.ViewGenerationFilter{CheckoutID: checkout.CheckoutID, Limit: 64})
+	rows, err := l.catalog.ListViewGenerations(ctx, storage.ViewGenerationFilter{CheckoutID: checkout.CheckoutID, Limit: 64})
 	if err != nil {
 		return in, false
 	}
@@ -261,19 +261,19 @@ func newestUncommittedChange(ctx context.Context, root string) (time.Time, error
 // releaseIdleCheckout stops the checkout's coordinator, sets its route
 // pending with both slots cleared, and owes the generations the route named
 // to the sweep. It reports whether the route was released.
-func (l *CheckoutLifecycle) releaseIdleCheckout(ctx context.Context, checkout store_sqlite.Checkout, idleFor time.Duration) bool {
+func (l *CheckoutLifecycle) releaseIdleCheckout(ctx context.Context, checkout storage.Checkout, idleFor time.Duration) bool {
 	route, found, err := l.catalog.GetCheckoutRoute(ctx, checkout.CheckoutID)
-	if err != nil || !found || route.State != store_sqlite.RouteActive ||
+	if err != nil || !found || route.State != storage.RouteActive ||
 		(route.CommitGenerationID <= 0 && route.DirtyGenerationID <= 0) {
 		return false
 	}
 	// The coordinator first: a live one would rebuild the cleared route on
 	// its next cycle. Its owed retirements move to the lifecycle.
 	l.dropCoordinator(checkout.CheckoutID)
-	err = l.catalog.FlipCheckoutRoute(ctx, store_sqlite.FlipCheckoutRouteRequest{
+	err = l.catalog.FlipCheckoutRoute(ctx, storage.FlipCheckoutRouteRequest{
 		CheckoutID: checkout.CheckoutID, GraphID: route.GraphID,
 		CommitGenerationID: 0, DirtyGenerationID: 0,
-		State: store_sqlite.RoutePending, ExpectedRouteEpoch: route.RouteEpoch,
+		State: storage.RoutePending, ExpectedRouteEpoch: route.RouteEpoch,
 	})
 	if err != nil {
 		// A cycle moved the route first (it was not idle after all), or the

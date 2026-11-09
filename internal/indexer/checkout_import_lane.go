@@ -7,8 +7,9 @@ import (
 	"sync"
 
 	"github.com/zzet/gortex/internal/gitstate"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/semantic"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 type importBuildLaneKey struct{}
@@ -100,13 +101,13 @@ func resumeImportBuildLane(ctx context.Context, yieldable bool) (context.Context
 // routed commit names an immutable base and the sample can be confirmed. Open
 // and retain that complete positive ancestry before making those decisions;
 // the first mutation reentry checks the route, correction epochs and source.
-func (c *CheckoutCoordinator) prepareImportPreamble(ctx context.Context, sample gitstate.DirtySnapshot, route store_sqlite.CheckoutRoute) (func(), error) {
+func (c *CheckoutCoordinator) prepareImportPreamble(ctx context.Context, sample gitstate.DirtySnapshot, route storage.CheckoutRoute) (func(), error) {
 	noop := func() {}
 	lane, _ := ctx.Value(importBuildLaneKey{}).(*importBuildLane)
 	if lane == nil {
 		return noop, nil
 	}
-	if route.State != store_sqlite.RouteActive || route.CommitGenerationID <= 0 || route.DirtyGenerationID <= 0 {
+	if route.State != storage.RouteActive || route.CommitGenerationID <= 0 || route.DirtyGenerationID <= 0 {
 		// A read-only early hint is not authority to continue after a route
 		// moved. Restore ordinary admission before any live fallback.
 		_, err := lane.reenter(ctx, true)
@@ -170,7 +171,7 @@ func (c *CheckoutCoordinator) prepareImportPreamble(ctx context.Context, sample 
 // no payload, and each mutation/full-build boundary reenters the lane. Only an
 // ordinary imported delta passing the stricter ancestry checks below remains
 // outside it for physical preparation.
-func (c *CheckoutCoordinator) prepareImportPlan(ctx context.Context, commit int64, sample gitstate.DirtySnapshot, route store_sqlite.CheckoutRoute) (func(), error) {
+func (c *CheckoutCoordinator) prepareImportPlan(ctx context.Context, commit int64, sample gitstate.DirtySnapshot, route storage.CheckoutRoute) (func(), error) {
 	noop := func() {}
 	lane, _ := ctx.Value(importBuildLaneKey{}).(*importBuildLane)
 	if lane == nil || lane.gate == nil || c.builder == nil {
@@ -309,7 +310,7 @@ func (b *SparseGenerationBuilder) importEnrichmentProvidersReady(ctx context.Con
 
 // The resolver can materialize dependents/shared emitters beyond Changes.
 // Check that actual payload before allowing any provider to execute off lane.
-func (b *SparseGenerationBuilder) importHandleEnrichmentReady(ctx context.Context, req BuildRequest, handle *store_sqlite.Store) bool {
+func (b *SparseGenerationBuilder) importHandleEnrichmentReady(ctx context.Context, req BuildRequest, handle graph.Store) bool {
 	languages := map[string][]string{}
 	for _, node := range handle.AllNodes() {
 		if node != nil && node.RepoPrefix == req.RepoPrefix && node.Language != "" {
@@ -337,7 +338,7 @@ func (c *CheckoutCoordinator) importPreparationHint(ctx context.Context) bool {
 		return false
 	}
 	route, found, err := c.catalog.GetCheckoutRoute(ctx, c.checkoutID)
-	if err != nil || !found || route.State != store_sqlite.RouteActive || route.CommitGenerationID <= 0 || route.DirtyGenerationID <= 0 {
+	if err != nil || !found || route.State != storage.RouteActive || route.CommitGenerationID <= 0 || route.DirtyGenerationID <= 0 {
 		return false
 	}
 	commit, found, err := c.catalog.GetViewGeneration(ctx, route.CommitGenerationID)
