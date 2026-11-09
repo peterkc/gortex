@@ -263,6 +263,8 @@ type storeCore struct {
 	analysisViewRevisions     sync.Map
 	constantInputRevisions    sync.Map
 	payloadInputAdminRevision atomic.Uint64
+	// Its non-zero-sized address is the private identity shared by input proofs.
+	payloadInputIdentity byte
 	// Contract proof history is dormant until a caller reserves a bounded
 	// portion of its existing cache budget. It owns data only, under writeMu.
 	contractProjectionHistory  *contractProjectionHistory

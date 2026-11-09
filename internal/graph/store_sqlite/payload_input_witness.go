@@ -14,11 +14,13 @@ var ErrPayloadInputChanged = fmt.Errorf("%w: payload input changed", ErrCatalogS
 // PayloadInputWitness binds selected ancestor rows to one live store core.
 // It is process-local proof, not persisted cache authority.
 type PayloadInputWitness struct {
-	core      *storeCore
+	source    *byte
 	admin     uint64
-	revisions []payloadInputRevision
+	revisions []PayloadInputWitnessRevision
 }
-type payloadInputRevision struct {
+
+// PayloadInputWitnessRevision is one opaque captured generation row.
+type PayloadInputWitnessRevision struct {
 	generation                    int64
 	analysis, constants, bindings uint64
 	state                         string
@@ -27,7 +29,7 @@ type payloadInputRevision struct {
 // PayloadInputRevision is an opaque comparable revision of one selected handle.
 // It describes cached input ownership, not catalog lifetime or publication authority.
 type PayloadInputRevision struct {
-	core                   *storeCore
+	source                 *byte
 	generation             int64
 	analysis, input, admin uint64
 }
@@ -50,7 +52,7 @@ func (s *Store) PayloadInputRevisionContext(ctx context.Context) (PayloadInputRe
 	if err := ctx.Err(); err != nil {
 		return PayloadInputRevision{}, err
 	}
-	return PayloadInputRevision{core: s.storeCore, generation: s.viewGen, analysis: s.analysisViewCounter(s.viewGen).Load(), input: s.constantInputCounter(s.viewGen).Load(), admin: s.payloadInputAdminRevision.Load()}, nil
+	return NewPayloadInputRevision(&s.payloadInputIdentity, s.viewGen, s.analysisViewCounter(s.viewGen).Load(), s.constantInputCounter(s.viewGen).Load(), s.payloadInputAdminRevision.Load()), nil
 }
 
 // CapturePayloadInputWitness must precede the checked projection. It includes
@@ -82,7 +84,9 @@ func (s *Store) CapturePayloadInputWitness(ctx context.Context, generationIDs []
 	if err := conn.PingContext(ctx); err != nil {
 		return nil, err
 	}
-	w := &PayloadInputWitness{core: s.storeCore, admin: s.payloadInputAdminRevision.Load()}
+	source := &s.payloadInputIdentity
+	admin := s.payloadInputAdminRevision.Load()
+	var revisions []PayloadInputWitnessRevision
 	for g := range ids {
 		var state string
 		if g > 0 {
@@ -90,14 +94,14 @@ func (s *Store) CapturePayloadInputWitness(ctx context.Context, generationIDs []
 				return nil, err
 			}
 		}
-		w.revisions = append(w.revisions, payloadInputRevision{generation: g, analysis: s.analysisViewCounter(g).Load(), constants: s.constantInputCounter(g).Load(), bindings: s.semanticBindingInputCounter(g).Load(), state: state})
+		revisions = append(revisions, NewPayloadInputWitnessRevision(g, s.analysisViewCounter(g).Load(), s.constantInputCounter(g).Load(), s.semanticBindingInputCounter(g).Load(), state))
 	}
-	sort.Slice(w.revisions, func(i, j int) bool { return w.revisions[i].generation < w.revisions[j].generation })
-	return w, nil
+	sort.Slice(revisions, func(i, j int) bool { return revisions[i].GenerationID() < revisions[j].GenerationID() })
+	return NewPayloadInputWitness(source, admin, revisions), nil
 }
 
-func (w *PayloadInputWitness) validateLocked(s *Store, ctx context.Context) error {
-	if w.core != s.storeCore || len(w.revisions) == 0 || w.admin != s.payloadInputAdminRevision.Load() {
+func validatePayloadInputWitnessLocked(w *PayloadInputWitness, s *Store, ctx context.Context) error {
+	if !w.MatchesSource(&s.payloadInputIdentity) || w.RevisionCount() == 0 || w.AdminRevision() != s.payloadInputAdminRevision.Load() {
 		return ErrPayloadInputChanged
 	}
 	conn, release, err := s.activeWriteConnLocked(ctx)
@@ -105,21 +109,22 @@ func (w *PayloadInputWitness) validateLocked(s *Store, ctx context.Context) erro
 		return err
 	}
 	defer release()
-	for _, r := range w.revisions {
-		if r.generation > 0 {
+	for i := 0; i < w.RevisionCount(); i++ {
+		generation, analysis, constants, bindings, capturedState := w.Revision(i).Values()
+		if generation > 0 {
 			var state string
-			err := conn.QueryRowContext(ctx, "SELECT state FROM view_generations WHERE generation_id=?", r.generation).Scan(&state)
+			err := conn.QueryRowContext(ctx, "SELECT state FROM view_generations WHERE generation_id=?", generation).Scan(&state)
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrPayloadInputChanged
 			}
 			if err != nil {
 				return err
 			}
-			if state != r.state {
+			if state != capturedState {
 				return ErrPayloadInputChanged
 			}
 		}
-		if r.analysis != s.analysisViewCounter(r.generation).Load() || r.constants != s.constantInputCounter(r.generation).Load() || r.bindings != s.semanticBindingInputCounter(r.generation).Load() {
+		if analysis != s.analysisViewCounter(generation).Load() || constants != s.constantInputCounter(generation).Load() || bindings != s.semanticBindingInputCounter(generation).Load() {
 			return ErrPayloadInputChanged
 		}
 	}
@@ -160,7 +165,7 @@ func (c *Catalog) execGuardedWithInputWitness(ctx context.Context, w *PayloadInp
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := w.validateLocked(c.store, ctx); err != nil {
+	if err := validatePayloadInputWitnessLocked(w, c.store, ctx); err != nil {
 		return err
 	}
 	result, err := c.execLocked(ctx, query, args...)

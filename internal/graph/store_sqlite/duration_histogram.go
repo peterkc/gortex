@@ -5,6 +5,8 @@ import (
 	"slices"
 	"sync/atomic"
 	"time"
+
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // DurationHistogramBounds are the upper edges of a duration histogram's
@@ -25,6 +27,8 @@ var DurationHistogramBounds = [...]time.Duration{
 	2 * time.Second,
 	5 * time.Second,
 }
+
+func init() { storage.DurationHistogramBounds = &DurationHistogramBounds }
 
 // durationHistogram counts durations into DurationHistogramBounds with
 // atomics only, so recording never takes a lock and a status read never
@@ -88,12 +92,13 @@ func (h DurationHistogram) Quantile(q float64) time.Duration {
 	if n == 0 {
 		return 0
 	}
+	bounds := storage.DurationHistogramBounds
 	rank := max(int64(math.Ceil(q*float64(n))), 1)
 	var seen int64
 	for i, c := range h.Counts {
 		seen += c
-		if seen >= rank && i < len(DurationHistogramBounds) {
-			return min(DurationHistogramBounds[i], h.Max)
+		if seen >= rank && i < len(bounds) {
+			return min(bounds[i], h.Max)
 		}
 	}
 	return h.Max

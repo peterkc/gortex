@@ -145,7 +145,7 @@ func (s *Store) publishContractAttachments(ctx context.Context, targets []Contra
 	// reacquires it; a late selected metadata write refuses the whole cohort.
 	for _, target := range targets {
 		if witness := target.ProjectionWitness; witness != nil {
-			if err := witness.validateContractSelectionLocked(target.Store, ctx, target.Witnesses); err != nil {
+			if err := validateContractSelectionLocked(witness, target.Store, ctx, target.Witnesses); err != nil {
 				return nil, err
 			}
 		}
