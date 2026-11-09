@@ -37,6 +37,7 @@ func TestResolveFilesAndIncomingLogsPhasesAndAdmissions(t *testing.T) {
 	}
 	core, logs := observer.New(zap.InfoLevel)
 	r := New(g)
+	r.SetWriteCounterSource(store_sqlite.WriteMark)
 	r.SetLogger(zap.New(core))
 	r.ResolveFilesAndIncoming([]string{"a/pkg/changed.go", "a/pkg/changed.go", ""})
 

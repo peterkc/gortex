@@ -10391,12 +10391,19 @@ func startReconcilePhaseWithWrites(sample func() storage.VFSIOMark, logger *zap.
 		logger = zap.NewNop()
 	}
 	timer := &reconcilePhaseTiming{
-		writes: sample(), sampleWrites: sample,
-		logger:  logger,
-		fields:  append([]zap.Field{zap.String("repo", repo), zap.String("phase", phase)}, fields...),
-		started: time.Now(),
+		sampleWrites: sample,
+		logger:       logger,
+		fields:       append([]zap.Field{zap.String("repo", repo), zap.String("phase", phase)}, fields...),
 	}
-	logger.Info("indexer: reconcile phase started", append(append([]zap.Field(nil), timer.fields...), writeCounterFields("phase_", storage.VFSIOSplit{})...)...)
+	startFields := append([]zap.Field(nil), timer.fields...)
+	if sample == nil {
+		startFields = append(startFields, zap.Bool("phase_write_counters_unavailable", true))
+	} else {
+		timer.writes = sample()
+		startFields = append(startFields, writeCounterFields("phase_", storage.VFSIOSplit{})...)
+	}
+	timer.started = time.Now()
+	logger.Info("indexer: reconcile phase started", startFields...)
 	return timer
 }
 
@@ -10421,7 +10428,11 @@ func (timer *reconcilePhaseTiming) finish(outcome string, fields ...zap.Field) {
 	all := append([]zap.Field(nil), timer.fields...)
 	all = append(all, zap.Duration("elapsed", time.Since(timer.started)), zap.String("outcome", outcome))
 	all = append(all, fields...)
-	all = append(all, writeCounterFields("phase_", timer.sampleWrites().Since(timer.writes))...)
+	if timer.sampleWrites == nil {
+		all = append(all, zap.Bool("phase_write_counters_unavailable", true))
+	} else {
+		all = append(all, writeCounterFields("phase_", timer.sampleWrites().Since(timer.writes))...)
+	}
 	timer.logger.Info("indexer: reconcile phase complete", all...)
 }
 

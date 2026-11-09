@@ -24,6 +24,7 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/pathguard"
 	"github.com/zzet/gortex/internal/pathkey"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // ChangeKind describes the type of filesystem change.
@@ -3142,7 +3143,11 @@ func (w *Watcher) patchGraphWithReceiptStateRawModern(
 	}
 
 	start := time.Now()
-	writes := idx.writeCounterMark()
+	sampleWrites := idx.writeCounters
+	var writes storage.VFSIOMark
+	if sampleWrites != nil {
+		writes = sampleWrites()
+	}
 	kind = w.reconcileKindWithDisk(path, kind)
 	// This is the identity duplicate gate for native watcher events. A Darwin
 	// startup replay already checked the persisted receipt, so it bypasses this
@@ -3302,7 +3307,7 @@ func (w *Watcher) patchGraphWithReceiptStateRawModern(
 				zap.String("delta_class", classification),
 				zap.Int64("ms", ev.DurationMs),
 				zap.Int("incident_edges", priorEdges),
-				zap.Inline(patchWriteLog{split: idx.writeCounterMark().Since(writes)}),
+				zap.Inline(patchWriteLogSince(sampleWrites, writes)),
 				zap.Inline(laps))
 		} else {
 			// Keep the ordinary native log path free of new timing snapshots,
@@ -3313,7 +3318,7 @@ func (w *Watcher) patchGraphWithReceiptStateRawModern(
 				zap.String("delta_class", classification),
 				zap.Int64("ms", ev.DurationMs),
 				zap.Int("incident_edges", priorEdges),
-				zap.Inline(patchWriteLog{split: idx.writeCounterMark().Since(writes)}))
+				zap.Inline(patchWriteLogSince(sampleWrites, writes)))
 		}
 	}
 	if superseded {

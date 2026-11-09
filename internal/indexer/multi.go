@@ -33,6 +33,7 @@ import (
 	"github.com/zzet/gortex/internal/search"
 	"github.com/zzet/gortex/internal/search/trigram"
 	"github.com/zzet/gortex/internal/semantic"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // RepoMetadata holds per-repo indexing state.
@@ -86,6 +87,7 @@ type repositoryUntrackState struct {
 // MultiIndexer orchestrates indexing across multiple repositories.
 type MultiIndexer struct {
 	graph               graph.Store
+	writeCounters       func() storage.VFSIOMark
 	censusCatalog       viewGenerationCatalog
 	relationsPending    atomic.Bool // restart batch has not published its shared resolver tail
 	contractCoreRuntime atomic.Pointer[ContractCoreRuntimeHooks]

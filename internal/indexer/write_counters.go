@@ -1,7 +1,6 @@
 package indexer
 
 import (
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/storage"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -38,30 +37,46 @@ func writeCounterFields(prefix string, d storage.VFSIOSplit) []zap.Field {
 	return fields
 }
 
-type patchWriteLog struct{ split storage.VFSIOSplit }
+type patchWriteLog struct {
+	split       storage.VFSIOSplit
+	unavailable bool
+}
 
 func (m patchWriteLog) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	if m.unavailable {
+		enc.AddBool("write_counters_unavailable", true)
+		return nil
+	}
 	for _, f := range writeCounterFields("", m.split) {
 		f.AddTo(enc)
 	}
 	return nil
 }
 
+// writeCounterMark samples an installed source; callers check presence separately.
 func (idx *Indexer) writeCounterMark() storage.VFSIOMark {
-	if idx.writeCounters != nil {
-		return idx.writeCounters()
-	}
-	return store_sqlite.WriteMark()
+	return idx.writeCounters()
 }
-func (mi *MultiIndexer) writeCounterMark() storage.VFSIOMark {
-	if source, ok := mi.graph.(interface{ WriteMark() storage.VFSIOMark }); ok {
-		return source.WriteMark()
+
+func patchWriteLogSince(sample func() storage.VFSIOMark, start storage.VFSIOMark) patchWriteLog {
+	if sample == nil {
+		return patchWriteLog{unavailable: true}
 	}
-	return store_sqlite.WriteMark()
+	return patchWriteLog{split: sample().Since(start)}
+}
+
+func (mi *MultiIndexer) writeCounterSource() func() storage.VFSIOMark {
+	if mi.writeCounters != nil {
+		return mi.writeCounters
+	}
+	if source, ok := mi.graph.(interface{ WriteMark() storage.VFSIOMark }); ok {
+		return source.WriteMark
+	}
+	return nil
 }
 func (idx *Indexer) startReconcilePhase(logger *zap.Logger, repo, phase string, fields ...zap.Field) *reconcilePhaseTiming {
-	return startReconcilePhaseWithWrites(idx.writeCounterMark, logger, repo, phase, fields...)
+	return startReconcilePhaseWithWrites(idx.writeCounters, logger, repo, phase, fields...)
 }
 func (mi *MultiIndexer) startReconcilePhase(logger *zap.Logger, repo, phase string, fields ...zap.Field) *reconcilePhaseTiming {
-	return startReconcilePhaseWithWrites(mi.writeCounterMark, logger, repo, phase, fields...)
+	return startReconcilePhaseWithWrites(mi.writeCounterSource(), logger, repo, phase, fields...)
 }

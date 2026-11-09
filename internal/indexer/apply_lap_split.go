@@ -28,8 +28,9 @@ type applyLapSplit struct {
 	// store is the store's cumulative waits (storage.ReaderWaitMark),
 	// when the indexer has a source for them; blockReads the process's block
 	// reads.
-	store      storage.ReaderWaitMark
-	blockReads int64
+	store         storage.ReaderWaitMark
+	writeCounters bool
+	blockReads    int64
 	// sched is the process's scheduler-latency histogram
 	// (sched_latency_mark.go): the runnable waits of every goroutine.
 	sched schedMark
@@ -39,8 +40,10 @@ func (idx *Indexer) applyLapSplitMark() applyLapSplit {
 	mark := applyLapSplit{cpu: processCPUTime(), blockReads: editDeltaProcessIO().blockReads, sched: readSchedMark()}
 	if idx.storeWaits != nil {
 		mark.store = idx.storeWaits()
-	} else {
+		mark.writeCounters = true
+	} else if idx.writeCounters != nil {
 		mark.store.VFS = idx.writeCounterMark()
+		mark.writeCounters = true
 	}
 	if w, ok := idx.graph.(writeLockWaiter); ok {
 		mark.wait = w.WriteLockWait()
@@ -52,11 +55,15 @@ func (idx *Indexer) applyLapSplitMark() applyLapSplit {
 // to now.
 func applyLapSplitFields(name string, start, now applyLapSplit) []zap.Field {
 	waits, waited := now.sched.since(start.sched)
-	return append(append([]zap.Field{
+	fields := append([]zap.Field{
 		zap.Float64(name+"_cpu_ms", float64((now.cpu-start.cpu).Microseconds())/1000),
 		zap.Float64(name+"_lock_wait_ms", float64((now.wait-start.wait).Microseconds())/1000),
 		zap.Int64(name+"_block_reads", now.blockReads-start.blockReads),
-	}, append(storeWaitFields(name+"_", now.store.Split(start.store)), schedWaitFields(name+"_", waits, waited)...)...), writeCounterFields(name+"_", now.store.VFS.Since(start.store.VFS))...)
+	}, append(storeWaitFields(name+"_", now.store.Split(start.store)), schedWaitFields(name+"_", waits, waited)...)...)
+	if !start.writeCounters || !now.writeCounters {
+		return append(fields, zap.Bool(name+"_write_counters_unavailable", true))
+	}
+	return append(fields, writeCounterFields(name+"_", now.store.VFS.Since(start.store.VFS))...)
 }
 
 // schedWaitFields renders the process's runnable waits that ended over a

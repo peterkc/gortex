@@ -148,7 +148,7 @@ func (idx *Indexer) persistRefFactsForFiles(graphPaths []string) {
 	if !ok {
 		return
 	}
-	legs := newRefFactLegs(idx.writeCounterMark)
+	legs := newRefFactLegs(idx.writeCounters)
 	defer func() { idx.logger.Info("ref-facts: persisted", legs.fields(len(graphPaths))...) }()
 	for start := 0; start < len(graphPaths); start += refFactFileBatch {
 		end := min(start+refFactFileBatch, len(graphPaths))
@@ -275,7 +275,11 @@ type refFactLegs struct {
 }
 
 func newRefFactLegs(sample func() storage.VFSIOMark) *refFactLegs {
-	return &refFactLegs{sampleWrites: sample, writes: sample(), writeCounts: make(map[string]storage.VFSIOSplit), last: time.Now(), io: editDeltaProcessIO(),
+	var writes storage.VFSIOMark
+	if sample != nil {
+		writes = sample()
+	}
+	return &refFactLegs{sampleWrites: sample, writes: writes, writeCounts: make(map[string]storage.VFSIOSplit), last: time.Now(), io: editDeltaProcessIO(),
 		took: make(map[string]time.Duration), faults: make(map[string]int64)}
 }
 
@@ -289,17 +293,24 @@ func (l *refFactLegs) lap(name string) {
 	}
 	l.took[name] += now.Sub(l.last)
 	l.faults[name] += io.since(l.io).majorFaults
-	writes := l.sampleWrites()
-	l.writeCounts[name] = addVFSIOSplit(l.writeCounts[name], writes.Since(l.writes))
-	l.writes = writes
+	if l.sampleWrites != nil {
+		writes := l.sampleWrites()
+		l.writeCounts[name] = addVFSIOSplit(l.writeCounts[name], writes.Since(l.writes))
+		l.writes = writes
+	}
 	l.last, l.io = now, io
 }
 
 func (l *refFactLegs) fields(files int) []zap.Field {
 	fields := []zap.Field{zap.Int("files", files)}
+	if l.sampleWrites == nil {
+		fields = append(fields, zap.Bool("write_counters_unavailable", true))
+	}
 	for _, name := range l.order {
 		fields = append(fields, zap.Duration(name, l.took[name]), zap.Int64(name+"_faults", l.faults[name]))
-		fields = append(fields, writeCounterFields(name+"_", l.writeCounts[name])...)
+		if l.sampleWrites != nil {
+			fields = append(fields, writeCounterFields(name+"_", l.writeCounts[name])...)
+		}
 	}
 	return fields
 }
