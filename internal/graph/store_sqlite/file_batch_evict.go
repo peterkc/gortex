@@ -167,7 +167,7 @@ WHERE file_path IN (SELECT file_path FROM nodes WHERE id IN
 		return 0, 0, err
 	}
 	if !hasCandidates {
-		if err := tx.Commit(); err != nil {
+		if err := s.commitPayloadTx(tx); err != nil {
 			return 0, 0, err
 		}
 		s.finishAnalysisMutationLocked(false)
@@ -281,7 +281,7 @@ WHERE file_path IN (SELECT file_path FROM nodes WHERE id IN
 		}
 		invalidatedAnalysis = true
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return 0, 0, err
 	}
 

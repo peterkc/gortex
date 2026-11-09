@@ -655,7 +655,13 @@ func (s *Store) publishSealedGeneration(ctx context.Context, catalog *Catalog, g
 		return err
 	}
 	timings.mark(publishStepCatalogRollup)
+	if err := s.fault(FaultSealBeforeCommit); err != nil {
+		return err
+	}
 	if err := catalog.publishViewGenerationWithInputWitness(ctx, generationID, publishedAt, witness); err != nil {
+		return err
+	}
+	if err := s.fault(FaultSealAfterCommit); err != nil {
 		return err
 	}
 	timings.mark(publishStepCatalogPublish)
@@ -1424,7 +1430,7 @@ func (s *Store) deletePayloadChunkMode(ctx context.Context, generationID int64, 
 	if err != nil {
 		return 0, false, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return 0, false, err
 	}
 	committed = true

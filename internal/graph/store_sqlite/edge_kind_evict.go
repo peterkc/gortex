@@ -76,7 +76,7 @@ func (s *Store) EvictEdgesByKinds(kinds []graph.EdgeKind) int {
 		panicOnFatal(err)
 		return 0
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		panicOnFatal(err)
 		return 0
 	}

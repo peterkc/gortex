@@ -179,7 +179,7 @@ func (s *Store) publishContractAttachments(ctx context.Context, targets []Contra
 		}
 		results[i].PayloadGeneration = target.Attachment.PayloadGeneration
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadSealTx(tx); err != nil {
 		return nil, err
 	}
 	return results, nil

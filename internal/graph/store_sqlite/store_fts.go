@@ -128,7 +128,7 @@ func (s *Store) ResetSymbolFTS(repoPrefix string) error {
 	if _, err := tx.Exec(`DELETE FROM symbol_fts_rowid WHERE view_gen = ? AND repo_prefix = ?`, s.viewGen, repoPrefix); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 // BatchUpsertSymbolFTS replaces only the supplied symbols. Unlike
@@ -172,7 +172,7 @@ func (s *Store) BatchDeleteSymbolFTS(nodeIDs []string) error {
 	if err := s.deleteSymbolFTSTx(tx, ids); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return err
 	}
 	s.forgetFreshFTSNodes(s.viewGen, ids)
@@ -413,7 +413,7 @@ func (s *Store) batchUpsertSymbolFTS(items []graph.SymbolFTSItem) (symbolFTSBatc
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return stats, err
 	}
 	stats.commits++
@@ -488,7 +488,7 @@ func (s *Store) ReplaceSymbolFTS(repoPrefix string, produce func(emit func([]gra
 	if err := produce(emit); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return err
 	}
 	committed = true
@@ -596,7 +596,7 @@ func (s *Store) BulkUpsertSymbolFTS(repoPrefix string, items []graph.SymbolFTSIt
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return err
 	}
 	commit = true

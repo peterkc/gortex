@@ -91,7 +91,7 @@ func (s *Store) EvictContractNodesByIDs(ids []string) (nodesRemoved, edgesRemove
 		}
 		nodesRemoved += int(rows)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		panicOnFatal(err)
 		return 0, 0
 	}

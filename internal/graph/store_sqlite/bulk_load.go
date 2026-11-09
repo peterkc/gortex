@@ -339,6 +339,23 @@ func (s *Store) execActiveWriteLocked(ctx context.Context, query string, args ..
 	if s.managedPayloadGeneration {
 		return s.execManagedPayloadWriteLocked(ctx, query, args...)
 	}
+	if err := s.fault(FaultPayloadWriteBeforeCommit); err != nil {
+		return nil, err
+	}
+	result, err := s.execUnmanagedWriteLocked(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.fault(FaultPayloadWriteAfterCommit); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// execUnmanagedWriteLocked runs one autocommit statement on the active writer
+// connection. execActiveWriteLocked brackets it with the payload fault points,
+// Catalog.execLocked with the catalog ones.
+func (s *Store) execUnmanagedWriteLocked(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	if err := s.refuseSealedPayloadWrite(); err != nil {
 		return nil, err
 	}

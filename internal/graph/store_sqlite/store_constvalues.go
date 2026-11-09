@@ -84,7 +84,7 @@ func (s *Store) ReplaceConstantValues(repoPrefix string, rows []graph.ConstantVa
 		return err
 	}
 	if equal {
-		return tx.Commit()
+		return s.commitPayloadTx(tx)
 	}
 	if _, err := tx.Exec(`DELETE FROM constant_values WHERE view_gen = ? AND repo_prefix = ?`, s.viewGen, repoPrefix); err != nil {
 		return err
@@ -209,7 +209,7 @@ func (s *Store) ConstantValuesByNodeIDs(nodeIDs []string) (map[string]string, er
 // commitConstantInput runs under writeMu. Failed or unchanged transactions do
 // not withdraw an input witness; every committed sidecar change does.
 func (s *Store) commitConstantInput(tx *sql.Tx, changed bool) error {
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return err
 	}
 	if changed {

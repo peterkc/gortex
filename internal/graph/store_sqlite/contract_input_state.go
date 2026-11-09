@@ -131,7 +131,7 @@ func (s *Store) setContractInputStateWithWorkReceiptsAndSources(ctx context.Cont
 	if err := s.setContractInputStateWithWorkTx(ctx, tx, expected, next, work, encoded, accepted); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 func (s *Store) setContractInputStateWithWorkTx(ctx context.Context, tx *sql.Tx, expected *graph.ContractInputState, next graph.ContractInputState, work []graph.ContractWork, encoded [][]byte, accepted bool) error {
@@ -227,7 +227,7 @@ func (s *Store) AcceptContractInputMutationContext(ctx context.Context, expected
 	if n != 1 {
 		return ErrCatalogStaleGuard
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 func sameContractInput(a, b graph.ContractInputState) bool {

@@ -381,7 +381,7 @@ func (s *Store) writeMaskRowsWithSuffix(insert, suffix string, total int, row fu
 			return err
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return err
 	}
 	s.constantInputCounter(s.viewGen).Add(1)

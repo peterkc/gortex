@@ -62,7 +62,7 @@ func (s *Store) BulkSetChurn(repoPrefix string, rows []graph.ChurnEnrichment) er
 			return err
 		}
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 // DeleteChurn drops churn rows for the supplied node ids, chunked into
@@ -118,7 +118,7 @@ func (s *Store) DeleteChurn(nodeIDs []string) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 // ChurnRows returns every churn row for repoPrefix; an EMPTY repoPrefix

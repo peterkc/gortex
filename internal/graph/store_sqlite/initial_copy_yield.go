@@ -67,7 +67,7 @@ func (s *Store) withInitialCopyTx(ctx context.Context, destination *Store, fn fu
 	if err := step.Err(); err != nil {
 		return cause(err)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return cause(err)
 	}
 	destination.constantInputCounter(destination.viewGen).Add(1)

@@ -89,7 +89,7 @@ WHERE from_id IN (SELECT CAST(value AS TEXT) FROM json_each(?))
 		panicOnFatal(err)
 		return 0, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		panicOnFatal(err)
 		return 0, err
 	}

@@ -163,7 +163,7 @@ func (c *Catalog) execGuardedWithInputWitness(ctx context.Context, w *PayloadInp
 	if err := w.validateLocked(c.store, ctx); err != nil {
 		return err
 	}
-	result, err := c.store.execActiveWriteLocked(ctx, query, args...)
+	result, err := c.execLocked(ctx, query, args...)
 	if err != nil {
 		return err
 	}

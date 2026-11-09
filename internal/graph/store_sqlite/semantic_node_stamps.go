@@ -89,7 +89,7 @@ func (s *Store) persistSemanticNodeStamps(stamps []graph.SemanticNodeStamp) (sem
 			}
 			invalidatedAnalysis = true
 		}
-		if err := tx.Commit(); err != nil {
+		if err := s.commitPayloadTx(tx); err != nil {
 			return stats, err
 		}
 		stats.enriched += txEnriched

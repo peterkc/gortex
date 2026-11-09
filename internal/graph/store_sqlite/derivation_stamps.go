@@ -139,7 +139,7 @@ func (s *Store) WriteDerivationStamps(ctx context.Context, stamps map[string]int
 			return fmt.Errorf("store_sqlite: write derivation stamp %s at generation %d: %w", pass, s.viewGen, err)
 		}
 	}
-	return tx.Commit()
+	return s.commitPayloadTx(tx)
 }
 
 // StaleDerivationGeneration is one live generation whose stamp for a pass is
@@ -440,7 +440,7 @@ func (c *DerivedCorrection) ReplaceSourceEdges(ctx context.Context, sources []st
 			c.stats.Sources += len(sourceSet)
 			return nil
 		}
-		if err := tx.Commit(); err != nil {
+		if err := c.s.commitPayloadTx(tx); err != nil {
 			return err
 		}
 		if invalidated {
@@ -544,7 +544,7 @@ func (c *DerivedCorrection) Finish(ctx context.Context) (DerivedCorrectionStats,
 		c.req.GenerationID, c.req.Pass, c.req.ToVersion, time.Now().UnixNano()); err != nil {
 		return c.stats, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := c.s.commitPayloadTx(tx); err != nil {
 		return c.stats, err
 	}
 	c.finished = true

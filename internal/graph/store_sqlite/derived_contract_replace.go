@@ -157,7 +157,7 @@ DELETE FROM nodes WHERE id IN (SELECT id FROM orphan) AND view_gen = ?`,
 		result.NodesRemoved += int(nodeRows)
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return graph.DerivedContractReplaceResult{}, err
 	}
 	committed = true

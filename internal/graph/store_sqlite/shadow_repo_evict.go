@@ -274,7 +274,7 @@ func (s *Store) shadowEvictStep(ctx context.Context, mutate func(*sql.Tx) (int, 
 			return 0, err
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return 0, err
 	}
 	if invalidated {

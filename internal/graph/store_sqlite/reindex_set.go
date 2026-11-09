@@ -272,7 +272,7 @@ func (s *Store) reindexEdgesSetTransactionLocked(ctx context.Context, batch []gr
 	for _, row := range inserts {
 		receipt.recordInserted(row.receiptEdge, true)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitPayloadTx(tx); err != nil {
 		return stats, false, false, nil, err
 	}
 	committed = true
