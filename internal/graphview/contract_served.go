@@ -5,7 +5,7 @@ import (
 	"sync"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // ContractServedSources pins the positive generations of admitted current core
@@ -71,7 +71,7 @@ func (s *ContractServedSources) Validate(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if !found || row.State != store_sqlite.ViewGenerationReady && row.State != store_sqlite.ViewGenerationSuperseded {
+		if !found || row.State != storage.ViewGenerationReady && row.State != storage.ViewGenerationSuperseded {
 			return graph.ErrContractProjectionStale
 		}
 	}

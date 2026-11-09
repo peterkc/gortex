@@ -10,6 +10,7 @@ import (
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -899,7 +900,7 @@ func (m *Materializer) route(ctx context.Context, checkoutID string) (store_sqli
 	case !found:
 		return route, NewViewError(CodeCheckoutInaccessible,
 			fmt.Sprintf("checkout %q is not routed", checkoutID))
-	case route.State == store_sqlite.RouteRetired:
+	case route.State == storage.RouteRetired:
 		return route, NewViewError(CodeCheckoutInaccessible,
 			fmt.Sprintf("the route of checkout %q has retired", checkoutID))
 	default:
@@ -1095,9 +1096,9 @@ func (m *Materializer) servableGeneration(ctx context.Context, generationID int6
 			fmt.Sprintf("generation %d is not in the catalog", generationID))
 	}
 	switch row.State {
-	case store_sqlite.ViewGenerationReady, store_sqlite.ViewGenerationSuperseded:
+	case storage.ViewGenerationReady, storage.ViewGenerationSuperseded:
 		return row, nil
-	case store_sqlite.ViewGenerationBuilding:
+	case storage.ViewGenerationBuilding:
 		return row, NewViewError(CodeViewBuilding,
 			fmt.Sprintf("generation %d is still building", generationID))
 	default:
@@ -1208,7 +1209,7 @@ func (m *Materializer) completeness(generations []*store_sqlite.Store) (Complete
 				}
 				continue
 			}
-			if id != CapContracts && row.State == store_sqlite.ProducerStateIncomplete && row.Reason == ReasonDeferredToFollowup {
+			if id != CapContracts && row.State == storage.ProducerStateIncomplete && row.Reason == ReasonDeferredToFollowup {
 				satisfied, err := followupSatisfied(generations, stack, index, id)
 				if err != nil {
 					return nil, WrapViewError(CodeCheckoutInaccessible,
@@ -1242,17 +1243,17 @@ func (m *Materializer) completeness(generations []*store_sqlite.Store) (Complete
 // caller sees. The two vocabularies are one-to-one: a producer is the
 // thing that populates a capability, so how far along it is IS how far
 // along the capability is.
-func capabilityStateOf(state store_sqlite.ProducerState) CapabilityState {
+func capabilityStateOf(state storage.ProducerState) CapabilityState {
 	switch state {
-	case store_sqlite.ProducerStateComplete:
+	case storage.ProducerStateComplete:
 		return StateComplete
-	case store_sqlite.ProducerStateIncomplete:
+	case storage.ProducerStateIncomplete:
 		return StateIncomplete
-	case store_sqlite.ProducerStateBuilding:
+	case storage.ProducerStateBuilding:
 		return StateBuilding
-	case store_sqlite.ProducerStateUnavailable:
+	case storage.ProducerStateUnavailable:
 		return StateUnavailable
-	case store_sqlite.ProducerStateDisabledByConfig:
+	case storage.ProducerStateDisabledByConfig:
 		return StateDisabledByConfig
 	default:
 		return CapabilityState("")
@@ -1263,7 +1264,7 @@ func capabilityStateOf(state store_sqlite.ProducerState) CapabilityState {
 // reads it: its producer rows, and (read on demand) the paths its file masks
 // cover.
 type producerLayer struct {
-	rows    []store_sqlite.ProducerCompleteness
+	rows    []storage.ProducerCompleteness
 	covered map[string]struct{}
 	deleted map[string]struct{}
 	read    bool
@@ -1280,7 +1281,7 @@ func (l *producerLayer) coveredPaths(handle *store_sqlite.Store) (map[string]str
 	l.covered = make(map[string]struct{}, len(masks))
 	l.deleted = make(map[string]struct{})
 	for _, m := range masks {
-		if m.Mode == store_sqlite.OwnershipDelete {
+		if m.Mode == storage.OwnershipDelete {
 			l.deleted[m.FilePath] = struct{}{}
 			continue
 		}
@@ -1317,7 +1318,7 @@ func followupSatisfied(generations []*store_sqlite.Store, stack []producerLayer,
 		}
 		complete := false
 		for _, row := range stack[j].rows {
-			if CapabilityID(row.Producer) == id && row.State == store_sqlite.ProducerStateComplete {
+			if CapabilityID(row.Producer) == id && row.State == storage.ProducerStateComplete {
 				complete = true
 				break
 			}

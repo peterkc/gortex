@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 // MaxRepoViewLayers is how deep one repository's view may stack.
@@ -24,12 +23,6 @@ import (
 // working tree is passed as a layer, leaving the third level for the
 // session buffer layer the MCP overlay composes at request time.
 const MaxRepoViewLayers = 3
-
-// Compile-time assertion that a pinned store handle reads as a base
-// graph. ComposeRepoView takes the wider graph.Reader so a test can
-// compose over an in-memory corpus, but the handle is what production
-// passes and the stack would be pointless if it did not fit.
-var _ graph.Reader = (*store_sqlite.Store)(nil)
 
 // ComposeRepoView stacks layers over a base reader and returns the
 // composed reader together with the identity that names it.

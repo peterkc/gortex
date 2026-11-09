@@ -7,7 +7,7 @@ import (
 	"slices"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // ContractSelection names the data a contract consumer will actually read.
@@ -44,18 +44,18 @@ func (v *RepoView) ContractReadiness(ctx context.Context, selection ContractSele
 	if len(selection.RepoPrefixes) == 0 {
 		selection.RepoPrefixes = []string{v.ID.RepoPrefix}
 	}
-	var base *store_sqlite.Store
+	var base contractReadinessHandle
 	if v.ComposesBaseCorpus() {
 		base = v.contractStore.AtGeneration(BaseCorpusGeneration)
 	}
-	handles := make([]*store_sqlite.Store, 0, len(v.sources))
+	handles := make([]contractReadinessHandle, 0, len(v.sources))
 	for _, source := range v.sources {
 		handles = append(handles, source.Handle)
 	}
 	return readContractReadiness(ctx, base, handles, v.ID.RepoPrefix, selection)
 }
 
-func readContractReadiness(ctx context.Context, base *store_sqlite.Store, handles []*store_sqlite.Store, producerRepo string, selection ContractSelection) (ContractReadiness, error) {
+func readContractReadiness(ctx context.Context, base contractReadinessHandle, handles []contractReadinessHandle, producerRepo string, selection ContractSelection) (ContractReadiness, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -67,7 +67,7 @@ func readContractReadiness(ctx context.Context, base *store_sqlite.Store, handle
 	}
 	work := make(map[string]graph.ContractWork)
 	baseline := make(map[string]bool, len(selection.RepoPrefixes))
-	read := func(handle *store_sqlite.Store, shared bool) error {
+	read := func(handle contractReadinessHandle, shared bool) error {
 		var positiveRows []graph.ContractWork
 		if !shared {
 			var err error
@@ -122,14 +122,14 @@ func readContractReadiness(ctx context.Context, base *store_sqlite.Store, handle
 				if CapabilityID(row.Producer) != CapContracts {
 					continue
 				}
-				if row.State == store_sqlite.ProducerStateComplete {
+				if row.State == storage.ProducerStateComplete {
 					// A full-root producer is repo-specific; never use it to
 					// certify companion repositories in a wider matcher.
 					if slices.Contains(selection.RepoPrefixes, producerRepo) {
 						baseline[producerRepo] = true
 					}
 				}
-				if row.State == store_sqlite.ProducerStateDisabledByConfig {
+				if row.State == storage.ProducerStateDisabledByConfig {
 					return ContractReadiness{State: StateDisabledByConfig}, nil
 				}
 			}

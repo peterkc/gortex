@@ -5,7 +5,6 @@ import (
 	"reflect"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 // SelectedContractInputs captures contract-specific input authority from the
@@ -19,7 +18,7 @@ type SelectedContractInputs struct {
 	dependencies   []*SelectedContractInputs
 	selection      *SelectedContractInputs
 	companion      bool
-	store          *store_sqlite.Store
+	store          graph.Store
 	core           graph.Reader
 	repo, checkout string
 }
@@ -29,7 +28,7 @@ type SelectedContractInputs struct {
 // companion-repo input changes cannot be hidden by an unchanged local receipt.
 func ComposeSelectedContractInputs(repo, checkout string, dependencies ...*SelectedContractInputs) (*SelectedContractInputs, error) {
 	var witnesses []graph.ContractInputWitness
-	var store *store_sqlite.Store
+	var store graph.Store
 	for _, input := range dependencies {
 		if input == nil {
 			return nil, graph.ErrContractInputVector
@@ -50,7 +49,7 @@ func ComposeSelectedContractInputs(repo, checkout string, dependencies ...*Selec
 }
 
 type contractInputSource struct {
-	handle *store_sqlite.Store
+	handle contractInputHandle
 	actor  string
 }
 

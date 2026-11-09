@@ -5,7 +5,7 @@ import (
 	"slices"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // OpenPreviousContractCohort recovers only one physical contributor move from
@@ -135,10 +135,10 @@ func (m *Materializer) OpenPreviousContractCohort(ctx context.Context, selected 
 			if readErr != nil {
 				return readErr
 			}
-			if !found || row.State == store_sqlite.ViewGenerationRetiring {
+			if !found || row.State == storage.ViewGenerationRetiring {
 				return graph.ErrContractPredecessorRetired
 			}
-			if row.State != store_sqlite.ViewGenerationReady && row.State != store_sqlite.ViewGenerationSuperseded {
+			if row.State != storage.ViewGenerationReady && row.State != storage.ViewGenerationSuperseded {
 				return graph.ErrContractProjectionStale
 			}
 		}

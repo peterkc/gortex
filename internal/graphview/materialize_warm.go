@@ -2,7 +2,7 @@ package graphview
 
 import (
 	"context"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // WarmRoute loads, ahead of any request, what materializing a checkout route
@@ -70,11 +70,11 @@ func (m *Materializer) RouteAncestry(ctx context.Context, generations ...int64) 
 // opening payloads or constructing a reader. The moved result distinguishes an
 // exact route-reread mismatch from every other refusal; its error retains the
 // ordinary Building metadata. Callers must inspect moved before err.
-func (m *Materializer) PinCheckoutRoute(ctx context.Context, checkoutID string, route store_sqlite.CheckoutRoute) (*Lease, bool, error) {
+func (m *Materializer) PinCheckoutRoute(ctx context.Context, checkoutID string, route storage.CheckoutRoute) (*Lease, bool, error) {
 	if err := m.validate(); err != nil {
 		return nil, false, err
 	}
-	if ctx == nil || route.State != store_sqlite.RouteActive || route.CommitGenerationID <= 0 || route.DirtyGenerationID <= 0 {
+	if ctx == nil || route.State != storage.RouteActive || route.CommitGenerationID <= 0 || route.DirtyGenerationID <= 0 {
 		return nil, false, NewViewError(CodeViewBuilding, "an active positive checkout route is required")
 	}
 	lease, moved, err := m.pinCheckoutRoute(ctx, checkoutID, route, []int64{route.CommitGenerationID, route.DirtyGenerationID})
