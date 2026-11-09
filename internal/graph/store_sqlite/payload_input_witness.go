@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // ErrPayloadInputChanged refuses publication when a selected input changed.
@@ -13,26 +15,14 @@ var ErrPayloadInputChanged = fmt.Errorf("%w: payload input changed", ErrCatalogS
 
 // PayloadInputWitness binds selected ancestor rows to one live store core.
 // It is process-local proof, not persisted cache authority.
-type PayloadInputWitness struct {
-	source    *byte
-	admin     uint64
-	revisions []PayloadInputWitnessRevision
-}
+type PayloadInputWitness = storage.PayloadInputWitness
 
 // PayloadInputWitnessRevision is one opaque captured generation row.
-type PayloadInputWitnessRevision struct {
-	generation                    int64
-	analysis, constants, bindings uint64
-	state                         string
-}
+type PayloadInputWitnessRevision = storage.PayloadInputWitnessRevision
 
 // PayloadInputRevision is an opaque comparable revision of one selected handle.
 // It describes cached input ownership, not catalog lifetime or publication authority.
-type PayloadInputRevision struct {
-	source                 *byte
-	generation             int64
-	analysis, input, admin uint64
-}
+type PayloadInputRevision = storage.PayloadInputRevision
 
 // PayloadInputRevision samples only this handle's raw generation clocks. It
 // includes sidecar/ownership changes and rare administration without implicitly

@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"sync/atomic"
 
 	"github.com/zzet/gortex/internal/storage"
 )
@@ -32,24 +31,16 @@ import (
 
 type GenerationReferenceRelease = storage.GenerationReferenceRelease
 
-var generationReferenceReleaseObserver atomic.Pointer[func(GenerationReferenceRelease)]
-
 // OnGenerationReferencesReleased installs the process-wide observer of
 // released generation references (nil removes it). It runs after the
 // releasing transaction commits, on the writer's goroutine, and must not block.
 func OnGenerationReferencesReleased(observer func(GenerationReferenceRelease)) {
-	if observer == nil {
-		generationReferenceReleaseObserver.Store(nil)
-		return
-	}
-	generationReferenceReleaseObserver.Store(&observer)
+	storage.OnGenerationReferencesReleased(observer)
 }
 
 // noteGenerationReferencesReleased reports a committed release.
 func noteGenerationReferencesReleased(release GenerationReferenceRelease) {
-	if observer := generationReferenceReleaseObserver.Load(); observer != nil {
-		(*observer)(release)
-	}
+	storage.EmitGenerationReferencesReleased(release)
 }
 
 // noteAnyGenerationReferenceReleased reports a committed release the write
