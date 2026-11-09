@@ -15,16 +15,7 @@ const DedicatedGraphClosing = storage.DedicatedGraphClosing
 // dedicated graph's durable cleanup is pending.
 var ErrCatalogGraphClosing = storage.ErrCatalogGraphClosing
 
-// RepositoryCleanupIdentity is the durable identity needed to restore a
-// process-local owner fence. It deliberately includes generation-zero payload.
-type RepositoryCleanupIdentity struct {
-	GraphID     string
-	CheckoutID  string
-	Incarnation string
-	RepoPrefix  string
-	FamilyID    string
-	RootPath    string
-}
+type RepositoryCleanupIdentity = storage.RepositoryCleanupIdentity
 
 // BeginRepositoryCleanup fences a graph before physical teardown. The caller
 // must already hold lifecycle cleanup authorization; this does not authorize

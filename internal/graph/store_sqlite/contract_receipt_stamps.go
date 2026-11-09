@@ -1,5 +1,7 @@
 package store_sqlite
 
+import "github.com/zzet/gortex/internal/storage"
+
 import (
 	"context"
 	"database/sql"
@@ -97,18 +99,7 @@ type contractCoreWindowSpan struct {
 // contractCoreWindowGapRing bounds the gaps kept per path.
 const contractCoreWindowGapRing = 16
 
-// ContractCoreWindowGap is the quiet gap before one core-write window of a
-// path opened: Quiet runs from the close of the path's previous window to
-// this window's open, and OpenPrev is how long that previous window was
-// open. Seq is the write seq that opened this window.
-type ContractCoreWindowGap struct {
-	Path            string
-	Checkout        string
-	ClosedAt        time.Time
-	Seq             uint64
-	OpenedAt        time.Time
-	Quiet, OpenPrev time.Duration
-}
+type ContractCoreWindowGap = storage.ContractCoreWindowGap
 
 func (w *contractReceiptWriteSequence) clock() time.Time {
 	if w.now != nil {

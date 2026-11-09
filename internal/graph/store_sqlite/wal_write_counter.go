@@ -27,19 +27,7 @@ import (
 
 type WALWriteMark = storage.WALWriteMark
 
-// WALWriteDelta is the log growth between two marks.
-type WALWriteDelta struct {
-	// Valid is false when either mark was unreadable.
-	Valid bool `json:"valid"`
-	// Frames is the number of frames appended between the marks.
-	Frames int64 `json:"frames"`
-	// Bytes is Frames times the on-disk frame size (page plus the 24-byte
-	// frame header).
-	Bytes int64 `json:"bytes"`
-	// Reset reports that the log was reset between the marks; Frames and
-	// Bytes then count only the frames since the reset.
-	Reset bool `json:"reset,omitempty"`
-}
+type WALWriteDelta = storage.WALWriteDelta
 
 // walFrameHeaderBytes is the fixed header in front of every WAL frame.
 const walFrameHeaderBytes = 24
@@ -79,25 +67,5 @@ func readWALWriteMark(dbPath string) WALWriteMark {
 
 // WALWrittenBetween is the log growth from before to after.
 func WALWrittenBetween(before, after WALWriteMark) WALWriteDelta {
-	if !before.Valid || !after.Valid {
-		return WALWriteDelta{}
-	}
-	delta := WALWriteDelta{Valid: true}
-	switch {
-	case before.Salt == after.Salt && after.MxFrame >= before.MxFrame:
-		delta.Frames = int64(after.MxFrame - before.MxFrame)
-	default:
-		// The log was reset (the salt moved, or mxFrame went backwards on an
-		// uninitialised header): only the frames since the reset are known.
-		delta.Reset = true
-		delta.Frames = int64(after.MxFrame)
-	}
-	pageSize := after.PageSize
-	if pageSize == 0 {
-		pageSize = before.PageSize
-	}
-	if pageSize > 0 {
-		delta.Bytes = delta.Frames * int64(pageSize+walFrameHeaderBytes)
-	}
-	return delta
+	return storage.WALWrittenBetween(before, after)
 }

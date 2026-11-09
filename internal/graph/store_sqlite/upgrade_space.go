@@ -1,7 +1,8 @@
 package store_sqlite
 
+import "github.com/zzet/gortex/internal/storage"
+
 import (
-	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -53,32 +54,9 @@ const (
 	walFileHeaderBytes = 32
 )
 
-// ErrInsufficientUpgradeSpace means Open refused a schema upgrade because
-// the volume holding the store has less free space than the upgrade needs.
-// The store is left exactly as it was.
-var ErrInsufficientUpgradeSpace = errors.New("not enough free disk space to upgrade the sqlite store schema")
+var ErrInsufficientUpgradeSpace = storage.ErrInsufficientUpgradeSpace
 
-// InsufficientUpgradeSpaceError names the store, the transition, and both
-// byte counts. Callers can match ErrInsufficientUpgradeSpace with errors.Is.
-type InsufficientUpgradeSpaceError struct {
-	Path      string
-	From      int
-	To        int
-	Need      uint64
-	Available uint64
-}
-
-func (e *InsufficientUpgradeSpaceError) Error() string {
-	return fmt.Sprintf("%v: upgrading %s from v%d to v%d needs %d bytes (%s) free, %d bytes (%s) available; "+
-		"the store was not modified — free disk space on that volume or move the store to a larger one, then start again",
-		ErrInsufficientUpgradeSpace, e.Path, e.From, e.To, e.Need, formatMiB(e.Need), e.Available, formatMiB(e.Available))
-}
-
-func (e *InsufficientUpgradeSpaceError) Unwrap() error { return ErrInsufficientUpgradeSpace }
-
-func formatMiB(n uint64) string {
-	return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
-}
+type InsufficientUpgradeSpaceError = storage.InsufficientUpgradeSpaceError
 
 // storeSpaceStats is the on-disk shape of a store as the read-only probe sees
 // it, WAL contents included.

@@ -142,20 +142,7 @@ func installVFSIOCounters(tls *libc.TLS, methods, walMethods uintptr) {
 	log.Printf("store_sqlite: vfs io counters installed")
 }
 
-// VFSIOMark is a sample of the page I/O counters, process-wide.
-type VFSIOMark struct {
-	// Available identifies physical VFS counters. FallbackWAL is sampled only
-	// by a store-backed mark when those hooks are unavailable.
-	Available   bool
-	FallbackWAL WALWriteMark `json:"-"`
-	// [file][writer]: file 0 other, 1 main database, 2 log; writer 1 is the
-	// writer connection.
-	ReadCalls, ReadNanos, ReadBytes    [3][2]int64
-	WriteCalls, WriteNanos, WriteBytes [3][2]int64
-	Rows                               RowWriteCounts
-	Reindex                            ReindexWriteCounts
-	Transactions                       int64
-}
+type VFSIOMark = storage.VFSIOMark
 
 func vfsIOMark() VFSIOMark {
 	m := VFSIOMark{Available: vfsIOInstalled.Load(), Rows: rowWriteMark(), Reindex: reindexWriteMark(), Transactions: WriteTransactionsBegun()}
@@ -187,42 +174,6 @@ func (s *Store) WriteMark() VFSIOMark {
 		m.FallbackWAL = s.WALWriteMark()
 	}
 	return m
-}
-
-// Since is the lap between prev and m.
-func (m VFSIOMark) Since(prev VFSIOMark) VFSIOSplit {
-	d := func(a, b [3][2]int64, f, w int) int64 { return a[f][w] - b[f][w] }
-	split := VFSIOSplit{
-		OtherWALWriteBytes:   d(m.WriteBytes, prev.WriteBytes, vfsFileWAL, 0),
-		Rows:                 m.Rows.Since(prev.Rows),
-		Reindex:              m.Reindex.Since(prev.Reindex),
-		Transactions:         m.Transactions - prev.Transactions,
-		WriterMainWrites:     d(m.WriteCalls, prev.WriteCalls, vfsFileMain, 1),
-		WriterMainWriteTime:  time.Duration(d(m.WriteNanos, prev.WriteNanos, vfsFileMain, 1)),
-		WriterMainWriteBytes: d(m.WriteBytes, prev.WriteBytes, vfsFileMain, 1),
-		WriterMainReads:      d(m.ReadCalls, prev.ReadCalls, vfsFileMain, 1),
-		WriterWALReads:       d(m.ReadCalls, prev.ReadCalls, vfsFileWAL, 1),
-		OtherMainReads:       d(m.ReadCalls, prev.ReadCalls, vfsFileMain, 0),
-		OtherWALReads:        d(m.ReadCalls, prev.ReadCalls, vfsFileWAL, 0),
-		WriterMainReadTime:   time.Duration(d(m.ReadNanos, prev.ReadNanos, vfsFileMain, 1)),
-		WriterWALReadTime:    time.Duration(d(m.ReadNanos, prev.ReadNanos, vfsFileWAL, 1)),
-		OtherMainReadTime:    time.Duration(d(m.ReadNanos, prev.ReadNanos, vfsFileMain, 0)),
-		OtherWALReadTime:     time.Duration(d(m.ReadNanos, prev.ReadNanos, vfsFileWAL, 0)),
-		WriterWALWrites:      d(m.WriteCalls, prev.WriteCalls, vfsFileWAL, 1),
-		OtherMainWrites:      d(m.WriteCalls, prev.WriteCalls, vfsFileMain, 0),
-		WriterWALWriteTime:   time.Duration(d(m.WriteNanos, prev.WriteNanos, vfsFileWAL, 1)),
-		OtherMainWriteTime:   time.Duration(d(m.WriteNanos, prev.WriteNanos, vfsFileMain, 0)),
-		WriterWALWriteBytes:  d(m.WriteBytes, prev.WriteBytes, vfsFileWAL, 1),
-		OtherMainWriteBytes:  d(m.WriteBytes, prev.WriteBytes, vfsFileMain, 0),
-	}
-	if !m.Available {
-		wal := WALWrittenBetween(prev.FallbackWAL, m.FallbackWAL)
-		if wal.Valid {
-			split.WriterWALWriteBytes = wal.Bytes
-			split.WALReset = wal.Reset
-		}
-	}
-	return split
 }
 
 // The log file's wrappers: count, then call the log table's originals.

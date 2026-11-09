@@ -600,63 +600,15 @@ func (c *Catalog) UpdateCheckoutObservation(ctx context.Context, req UpdateCheck
 	return err
 }
 
-// CheckoutObservationVerdict is what an observation write did with the request
-// it was given. It is the diagnostic the error cannot carry: a refused
-// observation is not a failed write, and an accepted one that had to adopt a
-// stepped-back clock is not an ordinary one.
-type CheckoutObservationVerdict string
+type CheckoutObservationVerdict = storage.CheckoutObservationVerdict
 
 const (
-	// CheckoutObservationApplied: this observation was the newest the row had
-	// seen, and every column it stated landed.
-	CheckoutObservationApplied CheckoutObservationVerdict = "applied"
-	// CheckoutObservationFenced: a newer observation holds the row, so nothing
-	// was written. The row is intact and the caller's pass is simply not the
-	// one that counts.
-	CheckoutObservationFenced CheckoutObservationVerdict = "fenced"
-	// CheckoutObservationRebased: passes kept arriving behind the row's clock,
-	// which is a host clock that moved and not an observer that is late, so the
-	// fence adopted the new clock domain rather than refusing forever. The
-	// write landed.
-	CheckoutObservationRebased CheckoutObservationVerdict = "rebased"
+	CheckoutObservationApplied = storage.CheckoutObservationApplied
+	CheckoutObservationFenced  = storage.CheckoutObservationFenced
+	CheckoutObservationRebased = storage.CheckoutObservationRebased
 )
 
-// CheckoutObservationReport is the diagnostic half of an observation write: it
-// says what the write actually recorded, which the error alone cannot, because
-// a refused observation is not a refused row.
-type CheckoutObservationReport struct {
-	// Verdict says whether the write landed, and why not when it did not.
-	Verdict CheckoutObservationVerdict
-	// Position is the monotonic observation position the row stands at after
-	// the call: this write's, when it landed, and the newer observation's when
-	// it was refused. It never moves backwards, not even when the host clock
-	// does.
-	Position int64
-	// FencedBy and FencingObservation name the observation that refused this
-	// one — its position and the pass clock it was accepted at. Both are 0
-	// when nothing refused anything.
-	FencedBy           int64
-	FencingObservation int64
-	// HeadRef, HeadCommit and HeadTree are the head facts the row holds after
-	// the call, whether this request stated them or the fence kept them.
-	HeadRef, HeadCommit, HeadTree string
-	// HeadRefused says the head axis alone was held back: the rest of the
-	// request landed, but the head the row carries was published by an
-	// adoption this sample is behind, so the sample's head was not written.
-	// The row keeps the published head and the refusal is traced durably in
-	// last_error.
-	HeadRefused bool
-	// HeadEpoch is the clock at which an adoption published the head the row
-	// holds, and 0 when no adoption published it — the sequence a sample has
-	// to reference before it may move that head.
-	HeadEpoch int64
-}
-
-// Fenced reports the refusal, which is the one verdict a caller has to branch
-// on: its sample was superseded and nothing it stated was written.
-func (r CheckoutObservationReport) Fenced() bool {
-	return r.Verdict == CheckoutObservationFenced
-}
+type CheckoutObservationReport = storage.CheckoutObservationReport
 
 // UpdateCheckoutObservationWithReport is UpdateCheckoutObservation with the
 // fence's verdict preserved. See UpdateCheckoutObservation for the contract;
@@ -3264,14 +3216,7 @@ func scanRefViewBuild(scan func(...any) error, build *RefViewBuild) error {
 	return nil
 }
 
-// RefViewBuildKey names one coalescing slot: the four columns the partial
-// unique index on the in-flight builds is keyed by.
-type RefViewBuildKey struct {
-	RefViewID        string
-	DesiredTree      string
-	BaseGenerationID int64
-	BuildFingerprint string
-}
+type RefViewBuildKey = storage.RefViewBuildKey
 
 // InFlightRefViewBuild returns the attempt holding one coalescing slot.
 //

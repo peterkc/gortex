@@ -368,30 +368,7 @@ func (s *Store) setPayloadSeal(generationID int64, state int32) {
 	}
 }
 
-// PayloadGenerationRequest describes the generation to begin: who owns it,
-// which layer it is built over, and the fingerprint of the inputs that
-// produced it. The fingerprint fields are what make two begins for the same
-// layer the same build.
-type PayloadGenerationRequest struct {
-	OwnerKind      string
-	GraphID        string
-	LayerID        string
-	CheckoutID     string
-	GenerationKind string
-
-	// BaseGenerationID is the layer beneath this one, 0 for the base corpus.
-	BaseGenerationID int64
-
-	LowerViewFingerprint string
-	TreeOID              string
-	ProvenanceCommitOID  string
-	ConfigHash           string
-	ExtractorVersions    string
-	ResolverVersion      string
-	DependencyRevision   string
-
-	CreatedAt int64 // unix seconds
-}
+type PayloadGenerationRequest = storage.PayloadGenerationRequest
 
 // BeginPayloadGeneration creates a building generation and returns its id
 // together with the handle to write it through. Writers then populate the

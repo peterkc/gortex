@@ -1,5 +1,7 @@
 package store_sqlite
 
+import "github.com/zzet/gortex/internal/storage"
+
 import (
 	"context"
 	"database/sql"
@@ -8,37 +10,7 @@ import (
 	"sync"
 )
 
-// GenerationWriteCounters is the physical write work one generation bulk
-// window executed, measured at the writer rather than inferred from what a
-// reader returns afterwards.
-//
-// The two measures answer different questions and are kept apart on purpose:
-//
-//   - StatementRowChanges is SQLite's own total_changes() delta on the pinned
-//     writer connection across the window: every row an INSERT, UPDATE or
-//     DELETE statement actually changed there — nodes, edges, sidecars, FTS
-//     rowid maps, the FTS virtual tables, masks, producer states and the
-//     withdrawal deletes of a fallback context separation alike. It is the
-//     "rows the statements executed" count, not a count of rows that survived.
-//   - BulkNodeRows and BulkEdgeRows are the node and edge rows the batch
-//     writer committed through AddBatch inside the window (its own
-//     changed/inserted accounting), the two payload tables the other measure
-//     cannot split out.
-//
-// Neither counts reads, and neither counts rows written outside the window
-// (a store without a pinned writer, such as an in-memory one, opens none).
-type GenerationWriteCounters struct {
-	GenerationID int64
-	// WindowOpened reports that a generation bulk window was actually held; a
-	// false value means the other fields are zero because nothing was
-	// measured, not because nothing was written.
-	WindowOpened        bool
-	StatementRowChanges int64
-	BulkNodeRows        int64
-	BulkEdgeRows        int64
-	// Batches counts the AddBatch commits the window observed.
-	Batches int64
-}
+type GenerationWriteCounters = storage.GenerationWriteCounters
 
 type generationWriteCounterKey struct {
 	core         *storeCore

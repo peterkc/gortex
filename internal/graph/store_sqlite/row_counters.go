@@ -1,5 +1,7 @@
 package store_sqlite
 
+import "github.com/zzet/gortex/internal/storage"
+
 import (
 	"context"
 	"database/sql"
@@ -476,21 +478,9 @@ func (s *Store) ensureRowCountersUntilStopped() error {
 	return s.EnsureRowCounters(ctx)
 }
 
-// RowCounterDrift is one generation whose counter disagrees with its rows.
-type RowCounterDrift struct {
-	GenerationID             int64
-	CounterNodes, ExactNodes int64
-	CounterEdges, ExactEdges int64
-}
+type RowCounterDrift = storage.RowCounterDrift
 
-// RowCounterCheck is the outcome of CheckRowCounters.
-type RowCounterCheck struct {
-	Ready       bool
-	Generations int
-	Drift       []RowCounterDrift
-	Repaired    bool
-	Elapsed     time.Duration
-}
+type RowCounterCheck = storage.RowCounterCheck
 
 // CheckRowCounters recounts every generation in one read snapshot and compares
 // the counters of that same snapshot. With repair, a drift is corrected by

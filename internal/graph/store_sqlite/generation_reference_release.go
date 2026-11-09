@@ -30,19 +30,7 @@ import (
 // can wait for a named release only when nothing but a generation built on it
 // did, and take any release as its cue otherwise.
 
-// GenerationReferenceRelease is one committed catalog write that may have
-// released generation references.
-type GenerationReferenceRelease struct {
-	// Removed is the generation whose catalog row this write deleted (0 for
-	// none).
-	Removed int64
-	// Released names the generations whose references may have been
-	// released. Empty with Any false means none.
-	Released []int64
-	// Any reports a release the write cannot name: any generation's reference
-	// may have gone.
-	Any bool
-}
+type GenerationReferenceRelease = storage.GenerationReferenceRelease
 
 var generationReferenceReleaseObserver atomic.Pointer[func(GenerationReferenceRelease)]
 

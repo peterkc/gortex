@@ -521,12 +521,7 @@ func (s *Store) beginBulkLoadLocked() (outcome, reason string) {
 	return "engaged", "cold_store"
 }
 
-// ErrGenerationBulkLoadPopulated refuses a generation-scoped bulk window over
-// a generation that already holds payload rows. The window's whole licence is
-// that nothing can be reading or colliding with the rows it is about to write;
-// a generation with rows has neither property, and a second window over one is
-// the caller's bug, not a condition to work around.
-var ErrGenerationBulkLoadPopulated = errors.New("store_sqlite: generation already holds payload rows")
+var ErrGenerationBulkLoadPopulated = storage.ErrGenerationBulkLoadPopulated
 
 // BeginGenerationBulkLoad opens the bulk write shape for ONE payload
 // generation that holds no rows yet, and reports whether it engaged.

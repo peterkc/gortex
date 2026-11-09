@@ -1,5 +1,7 @@
 package store_sqlite
 
+import "github.com/zzet/gortex/internal/storage"
+
 import (
 	"context"
 	"database/sql"
@@ -7,9 +9,7 @@ import (
 	"time"
 )
 
-// ErrGenerationCopyYielded means the entire copy transaction has rolled back
-// and released its writer. It is not cancellation of the caller's build.
-var ErrGenerationCopyYielded = errors.New("store_sqlite: generation copy yielded to queued writer")
+var ErrGenerationCopyYielded = storage.ErrGenerationCopyYielded
 
 func (s *Store) withInitialCopyTx(ctx context.Context, destination *Store, fn func(context.Context, *sql.Tx) error) error {
 	if err := s.writeMu.LockContext(ctx); err != nil {
