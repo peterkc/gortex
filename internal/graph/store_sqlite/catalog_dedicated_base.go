@@ -569,7 +569,7 @@ func (c *Catalog) ClaimDedicatedBaseBuild(ctx context.Context, req ClaimDedicate
 			TreeOID: req.Desire.Identity.TreeOID, ConfigHash: req.Desire.Identity.ConfigHash, ExtractorVersions: req.Desire.Identity.ExtractorVersions,
 			ResolverVersion: req.Desire.Identity.ResolverVersion, DependencyRevision: req.Desire.Identity.DependencyRevision,
 			ProvenanceCommitOID: req.ProvenanceCommitOID, CreatedAt: req.CreatedAt, State: ViewGenerationBuilding}
-		if err := g.validate(); err != nil {
+		if err := validateViewGeneration(g); err != nil {
 			return err
 		}
 		result, err := tx.ExecContext(ctx, insertViewGenerationSQL, viewGenerationInsertArgs(g)...)

@@ -346,7 +346,7 @@ func validateAuthorizeUntrackRequest(req AuthorizeUntrackRequest) error {
 			req.RequiredPrimaryState == "" {
 			return fmt.Errorf("%w: demotion authorization needs a ready primary and transition", ErrCatalogInvalidValue)
 		}
-		if err := req.Transition.validate(); err != nil {
+		if err := validateIntentTransition(*req.Transition); err != nil {
 			return err
 		}
 		if req.Transition.CheckoutID != req.CheckoutID ||
@@ -355,7 +355,7 @@ func validateAuthorizeUntrackRequest(req AuthorizeUntrackRequest) error {
 		}
 	}
 	if req.Cleanup != nil {
-		if err := req.Cleanup.validate(); err != nil {
+		if err := validateCleanupEntry(*req.Cleanup); err != nil {
 			return err
 		}
 		if req.Cleanup.Phase != CleanupPhasePending {
@@ -387,7 +387,7 @@ func validateCommitAuthorizedDemotionRequest(req CommitAuthorizedDemotionRequest
 		if req.OwnedGraphID == "" {
 			return fmt.Errorf("%w: graph cleanup has no owned graph", ErrCatalogInvalidValue)
 		}
-		if err := req.Cleanup.validate(); err != nil {
+		if err := validateCleanupEntry(*req.Cleanup); err != nil {
 			return err
 		}
 		if req.Cleanup.Phase != CleanupPhasePending {

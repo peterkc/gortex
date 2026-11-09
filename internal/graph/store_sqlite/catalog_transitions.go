@@ -22,14 +22,14 @@ type BeginIntentTransitionRequest struct {
 func (c *Catalog) BeginIntentTransitionWithTrackingIntent(
 	ctx context.Context, req BeginIntentTransitionRequest,
 ) (IntentTransition, bool, error) {
-	if err := req.Transition.validate(); err != nil {
+	if err := validateIntentTransition(req.Transition); err != nil {
 		return IntentTransition{}, false, err
 	}
 	if err := requireCatalogID("incarnation", req.Incarnation); err != nil {
 		return IntentTransition{}, false, err
 	}
 	if req.TrackingIntent != nil {
-		if err := req.TrackingIntent.validate(); err != nil {
+		if err := validateTrackingIntent(*req.TrackingIntent); err != nil {
 			return IntentTransition{}, false, err
 		}
 		if req.TrackingIntent.CheckoutID != req.Transition.CheckoutID {

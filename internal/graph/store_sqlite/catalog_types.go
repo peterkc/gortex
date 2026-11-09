@@ -579,7 +579,7 @@ type UpdateCheckoutObservationRequest struct {
 	LastError string
 }
 
-func (r UpdateCheckoutObservationRequest) validate() error {
+func validateUpdateCheckoutObservationRequest(r UpdateCheckoutObservationRequest) error {
 	if err := requireCatalogID("checkout_id", r.CheckoutID); err != nil {
 		return err
 	}
@@ -659,7 +659,7 @@ func requireCatalogID(field, value string) error {
 	return nil
 }
 
-func (f RepositoryFamily) validate() error {
+func validateRepositoryFamily(f RepositoryFamily) error {
 	if err := requireCatalogID("family_id", f.FamilyID); err != nil {
 		return err
 	}
@@ -669,7 +669,7 @@ func (f RepositoryFamily) validate() error {
 	return requireCatalogID("state", f.State)
 }
 
-func (c Checkout) validate() error {
+func validateCheckout(c Checkout) error {
 	if err := requireCatalogID("checkout_id", c.CheckoutID); err != nil {
 		return err
 	}
@@ -688,7 +688,7 @@ func (c Checkout) validate() error {
 	return requireCatalogValue("effective_mode", c.EffectiveMode, checkoutModes)
 }
 
-func (i TrackingIntent) validate() error {
+func validateTrackingIntent(i TrackingIntent) error {
 	if err := requireCatalogID("intent_id", i.IntentID); err != nil {
 		return err
 	}
@@ -701,7 +701,7 @@ func (i TrackingIntent) validate() error {
 	return requireCatalogID("source_locator", i.SourceLocator)
 }
 
-func (t IntentTransition) validate() error {
+func validateIntentTransition(t IntentTransition) error {
 	if err := requireCatalogID("transition_id", t.TransitionID); err != nil {
 		return err
 	}
@@ -726,7 +726,7 @@ func (t IntentTransition) validate() error {
 	return optionalCatalogValue("prior_checkout_state", t.PriorCheckoutState, checkoutStates)
 }
 
-func (g DedicatedGraph) validate() error {
+func validateDedicatedGraph(g DedicatedGraph) error {
 	if err := requireCatalogID("graph_id", g.GraphID); err != nil {
 		return err
 	}
@@ -739,7 +739,7 @@ func (g DedicatedGraph) validate() error {
 	return requireCatalogID("state", g.State)
 }
 
-func (g ViewGeneration) validate() error {
+func validateViewGeneration(g ViewGeneration) error {
 	if err := requireCatalogID("owner_kind", g.OwnerKind); err != nil {
 		return err
 	}
@@ -749,7 +749,7 @@ func (g ViewGeneration) validate() error {
 	return requireCatalogValue("state", g.State, viewGenerationStates)
 }
 
-func (l ViewLayer) validate() error {
+func validateViewLayer(l ViewLayer) error {
 	if err := requireCatalogID("layer_id", l.LayerID); err != nil {
 		return err
 	}
@@ -759,7 +759,7 @@ func (l ViewLayer) validate() error {
 	return requireCatalogID("graph_id", l.GraphID)
 }
 
-func (r CheckoutRoute) validate() error {
+func validateCheckoutRoute(r CheckoutRoute) error {
 	if err := requireCatalogID("checkout_id", r.CheckoutID); err != nil {
 		return err
 	}
@@ -769,7 +769,7 @@ func (r CheckoutRoute) validate() error {
 	return requireCatalogValue("state", r.State, routeStates)
 }
 
-func (v RefView) validate() error {
+func validateRefView(v RefView) error {
 	if err := requireCatalogID("ref_view_id", v.RefViewID); err != nil {
 		return err
 	}
@@ -788,7 +788,7 @@ func (v RefView) validate() error {
 	return requireCatalogValue("state", v.State, refViewStates)
 }
 
-func (b RefViewBuild) validate() error {
+func validateRefViewBuild(b RefViewBuild) error {
 	if err := requireCatalogID("build_id", b.BuildID); err != nil {
 		return err
 	}
@@ -804,7 +804,7 @@ func (b RefViewBuild) validate() error {
 	return requireCatalogValue("state", b.State, viewGenerationStates)
 }
 
-func (e CleanupEntry) validate() error {
+func validateCleanupEntry(e CleanupEntry) error {
 	if err := requireCatalogID("cleanup_id", e.CleanupID); err != nil {
 		return err
 	}

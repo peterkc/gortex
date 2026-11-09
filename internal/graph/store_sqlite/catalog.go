@@ -190,7 +190,7 @@ func catalogBoolInt(value bool) int {
 // REPLACE: REPLACE deletes the existing row first, which would cascade
 // through every checkout that references it.
 func (c *Catalog) UpsertRepositoryFamily(ctx context.Context, family RepositoryFamily) error {
-	if err := family.validate(); err != nil {
+	if err := validateRepositoryFamily(family); err != nil {
 		return err
 	}
 	_, err := c.exec(ctx, `
@@ -276,7 +276,7 @@ const checkoutColumns = `incarnation, family_id, root_path, git_dir, admin_name,
 
 // UpsertCheckout writes one checkout row.
 func (c *Catalog) UpsertCheckout(ctx context.Context, checkout Checkout) error {
-	if err := checkout.validate(); err != nil {
+	if err := validateCheckout(checkout); err != nil {
 		return err
 	}
 	_, err := c.exec(ctx, `
@@ -329,7 +329,7 @@ ON CONFLICT(checkout_id) DO UPDATE SET
 // as a read before it, because a separate read would leave open the very
 // window it is meant to close.
 func (c *Catalog) AllocateCheckout(ctx context.Context, checkout Checkout) error {
-	if err := checkout.validate(); err != nil {
+	if err := validateCheckout(checkout); err != nil {
 		return err
 	}
 	// The guard is keyed on the administrative name, so an allocation without
@@ -688,7 +688,7 @@ func (c *Catalog) UpdateCheckoutObservationAtHeadEpoch(
 	req UpdateCheckoutObservationRequest,
 	headEpoch int64,
 ) (CheckoutObservationReport, error) {
-	if err := req.validate(); err != nil {
+	if err := validateUpdateCheckoutObservationRequest(req); err != nil {
 		return CheckoutObservationReport{}, err
 	}
 	subject := fmt.Sprintf("checkout %s incarnation %s", req.CheckoutID, req.Incarnation)
@@ -1163,7 +1163,7 @@ func (c *Catalog) DeleteCheckout(ctx context.Context, checkoutID string) error {
 // same source for the same checkout updates the existing row rather than
 // adding a duplicate.
 func (c *Catalog) UpsertTrackingIntent(ctx context.Context, intent TrackingIntent) error {
-	if err := intent.validate(); err != nil {
+	if err := validateTrackingIntent(intent); err != nil {
 		return err
 	}
 	_, err := c.exec(ctx, `
@@ -1309,7 +1309,7 @@ UPDATE tracking_intents SET active = 0, revoked_at = ?
 // written — UNIQUE(checkout_id) is the enforcement, the pre-check only turns
 // it into a typed error.
 func (c *Catalog) BeginIntentTransition(ctx context.Context, transition IntentTransition) error {
-	if err := transition.validate(); err != nil {
+	if err := validateIntentTransition(transition); err != nil {
 		return err
 	}
 	return c.withTx(ctx, func(tx *sql.Tx) error {
@@ -1704,7 +1704,7 @@ func viewGenerationInsertArgs(generation ViewGeneration) []any {
 // row is written exactly once; afterwards only PublishViewGeneration may
 // change it, and only out of the building state.
 func (c *Catalog) CreateViewGeneration(ctx context.Context, generation ViewGeneration) (int64, error) {
-	if err := generation.validate(); err != nil {
+	if err := validateViewGeneration(generation); err != nil {
 		return 0, err
 	}
 	var generationID int64
@@ -2061,7 +2061,7 @@ SELECT generation_id FROM view_generations
 // The lookup and the insert run in one transaction under the mutation gate,
 // which is what makes the check-then-insert atomic against a concurrent begin.
 func (c *Catalog) AdoptOrCreateViewGeneration(ctx context.Context, generation ViewGeneration) (int64, bool, error) {
-	if err := generation.validate(); err != nil {
+	if err := validateViewGeneration(generation); err != nil {
 		return 0, false, err
 	}
 	if generation.State != ViewGenerationBuilding {
@@ -2294,7 +2294,7 @@ func (c *Catalog) deleteViewGeneration(ctx context.Context, generationID int64) 
 
 // UpsertViewLayer writes one layer row.
 func (c *Catalog) UpsertViewLayer(ctx context.Context, layer ViewLayer) error {
-	if err := layer.validate(); err != nil {
+	if err := validateViewLayer(layer); err != nil {
 		return err
 	}
 	_, err := c.exec(ctx, `
@@ -2339,7 +2339,7 @@ SELECT kind, graph_id, checkout_id, target_ref, target_commit, target_tree
 // Repointing an existing route is FlipCheckoutRoute's job: this write does not
 // compare-and-set, so it is for installing a route, not for moving one.
 func (c *Catalog) UpsertCheckoutRoute(ctx context.Context, route CheckoutRoute) error {
-	if err := route.validate(); err != nil {
+	if err := validateCheckoutRoute(route); err != nil {
 		return err
 	}
 	var previous []int64
@@ -2684,7 +2684,7 @@ func refViewInsertArgs(view RefView) []any {
 // second row for the same (graph, selector, profile) is a constraint failure,
 // not a duplicate view.
 func (c *Catalog) UpsertRefView(ctx context.Context, view RefView) error {
-	if err := view.validate(); err != nil {
+	if err := validateRefView(view); err != nil {
 		return err
 	}
 	return c.withTx(ctx, func(tx *sql.Tx) error {
@@ -2729,7 +2729,7 @@ ON CONFLICT(ref_view_id) DO UPDATE SET
 // The insert declines the conflict instead, so an existing row is read back
 // exactly as it stands.
 func (c *Catalog) GetOrCreateRefView(ctx context.Context, view RefView) (RefView, error) {
-	if err := view.validate(); err != nil {
+	if err := validateRefView(view); err != nil {
 		return RefView{}, err
 	}
 	err := c.withTx(ctx, func(tx *sql.Tx) error {
@@ -3023,7 +3023,7 @@ func refViewBuildInsertArgs(build RefViewBuild) []any {
 // for the same ref view, tree, base and fingerprint fails rather than racing
 // the first to produce the same generation twice.
 func (c *Catalog) UpsertRefViewBuild(ctx context.Context, build RefViewBuild) error {
-	if err := build.validate(); err != nil {
+	if err := validateRefViewBuild(build); err != nil {
 		return err
 	}
 	return c.withTx(ctx, func(tx *sql.Tx) error {
@@ -3079,7 +3079,7 @@ func (c *Catalog) ClaimRefViewBuild(
 	build RefViewBuild,
 	abandonedBefore int64,
 ) (RefViewBuild, error) {
-	if err := build.validate(); err != nil {
+	if err := validateRefViewBuild(build); err != nil {
 		return RefViewBuild{}, err
 	}
 	if build.State != ViewGenerationBuilding {
@@ -3332,7 +3332,7 @@ func (c *Catalog) GetRefViewBuild(ctx context.Context, buildID string) (RefViewB
 // UpsertCleanupEntry writes one deferred-deletion record. The journal has no
 // foreign keys, so an entry outlives the rows it names.
 func (c *Catalog) UpsertCleanupEntry(ctx context.Context, entry CleanupEntry) error {
-	if err := entry.validate(); err != nil {
+	if err := validateCleanupEntry(entry); err != nil {
 		return err
 	}
 	_, err := c.exec(ctx, `
