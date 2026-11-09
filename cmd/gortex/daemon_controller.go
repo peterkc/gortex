@@ -21,7 +21,6 @@ import (
 	"github.com/zzet/gortex/internal/coverage"
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/indexer"
 	gortexmcp "github.com/zzet/gortex/internal/mcp"
@@ -31,6 +30,7 @@ import (
 	"github.com/zzet/gortex/internal/search"
 	"github.com/zzet/gortex/internal/semantic"
 	"github.com/zzet/gortex/internal/semantic/lsp"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // realController is the production daemon.Controller implementation. It
@@ -1771,7 +1771,7 @@ func publicationPhasesStatus(recorder *indexer.PublicationPhaseRecorder) []daemo
 type storeWALReporter interface {
 	DBStats() (dbBytes, walBytes int64)
 	CloseCheckpointEstimate() (time.Duration, int64)
-	WALReclaimStats() store_sqlite.WALReclaimStats
+	WALReclaimStats() storage.WALReclaimStats
 }
 
 // storageStatusFor renders the store's write-ahead-log state, nil for a store
@@ -1802,7 +1802,7 @@ func storageStatusFor(g graph.Store) *daemon.StorageStatus {
 		out.LastFirstIndexDrain = reporter.LastFirstIndexDrains()
 	}
 	if passive, ok := g.(interface {
-		WALPassiveStats() store_sqlite.WALPassiveStats
+		WALPassiveStats() storage.WALPassiveStats
 	}); ok {
 		out.WALCheckpoint = daemon.WALCheckpointStatusFrom(passive.WALPassiveStats())
 	}
@@ -1818,7 +1818,7 @@ func storageStatusFor(g graph.Store) *daemon.StorageStatus {
 // storeRowCounterReporter is the store's writer-maintained row counters.
 type storeRowCounterReporter interface {
 	RowCountersReady() bool
-	CheckRowCounters(ctx context.Context, repair bool) (store_sqlite.RowCounterCheck, error)
+	CheckRowCounters(ctx context.Context, repair bool) (storage.RowCounterCheck, error)
 }
 
 // checkRowCounters runs the exact status's drift check of the row counters:
@@ -1843,7 +1843,7 @@ func checkRowCounters(ctx context.Context, g graph.Store) *daemon.RowCounterStat
 	return out
 }
 
-func walReclaimStatus(st store_sqlite.WALReclaimStats) *daemon.WALReclaimStatus {
+func walReclaimStatus(st storage.WALReclaimStats) *daemon.WALReclaimStatus {
 	return daemon.WALReclaimStatusFrom(st)
 }
 
@@ -1997,7 +1997,7 @@ func viewsPublicationStalls(stalls []indexer.CheckoutPublicationStall) []daemon.
 // internal/daemon is the protocol package — and a nil register stays nil so the
 // field is omitted: "nothing is stuck" must render as absence, not as an empty
 // list that reads like a section someone forgot to fill in.
-func viewsStorageFailures(failures []store_sqlite.StorageFailure) []daemon.StorageFailure {
+func viewsStorageFailures(failures []storage.StorageFailure) []daemon.StorageFailure {
 	if len(failures) == 0 {
 		return nil
 	}
