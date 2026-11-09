@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -40,18 +41,15 @@ const (
 	payloadWideQuantumChunkTarget = 8 * time.Millisecond
 )
 
-type payloadWideQuantumKey struct{}
-
 // WithWideRetirementQuantum marks ctx for wide retirement quanta: the caller
 // has checked that no interactive work waits for the writer.
 func WithWideRetirementQuantum(ctx context.Context) context.Context {
-	return context.WithValue(ctx, payloadWideQuantumKey{}, true)
+	return storage.WithWideRetirementQuantum(ctx)
 }
 
 // WideRetirementQuantum reports whether ctx is marked for wide retirement quanta.
 func WideRetirementQuantum(ctx context.Context) bool {
-	wide, _ := ctx.Value(payloadWideQuantumKey{}).(bool)
-	return wide
+	return storage.WideRetirementQuantum(ctx)
 }
 
 func wideRetirementQuantum(ctx context.Context) bool {
