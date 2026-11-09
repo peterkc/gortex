@@ -21,6 +21,7 @@ import (
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 const unresolvedPrefix = "unresolved::"
@@ -315,8 +316,8 @@ type Resolver struct {
 	goPackageOwnershipInventory bool
 	goPackageOwnershipPrepared  map[string]GoPackageOwnershipLookup
 	graph                       graph.Store
-	writeCounters               func() store_sqlite.VFSIOMark
-	writeCounterDefault         atomic.Pointer[func() store_sqlite.VFSIOMark]
+	writeCounters               func() storage.VFSIOMark
+	writeCounterDefault         atomic.Pointer[func() storage.VFSIOMark]
 	logger                      *zap.Logger
 	dirIndex                    map[string][]graph.FileNodeIdentity
 	lastDirIndex                map[string][]graph.FileNodeIdentity
@@ -3298,7 +3299,7 @@ func incrementalAdmissionSummary(frontier incrementalFileFrontier, sources map[s
 // SetGraph retargets it. Each phase captures one source for both endpoints.
 func (r *Resolver) setDefaultWriteCounterSource(g graph.Store) {
 	sample := store_sqlite.WriteMark
-	if source, ok := g.(interface{ WriteMark() store_sqlite.VFSIOMark }); ok {
+	if source, ok := g.(interface{ WriteMark() storage.VFSIOMark }); ok {
 		sample = source.WriteMark
 	}
 	r.writeCounterDefault.Store(&sample)
@@ -3306,7 +3307,7 @@ func (r *Resolver) setDefaultWriteCounterSource(g graph.Store) {
 
 // SetWriteCounterSource preserves the underlying store's WAL-position fallback
 // when the resolver reads through a delta graph. Install before using the resolver.
-func (r *Resolver) SetWriteCounterSource(sample func() store_sqlite.VFSIOMark) {
+func (r *Resolver) SetWriteCounterSource(sample func() storage.VFSIOMark) {
 	r.writeCounters = sample
 }
 
