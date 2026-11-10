@@ -23,11 +23,11 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
+	"github.com/zzet/gortex/internal/storage/backend"
 	"github.com/zzet/gortex/internal/tokens"
 )
 
@@ -175,13 +175,13 @@ func indexRepoForBench(root string) (*indexedRepo, error) {
 	if err != nil {
 		return nil, err
 	}
-	g, err := store_sqlite.Open(filepath.Join(tmpDir, "bench.sqlite"))
+	g, closeBackend, err := backend.OpenRaw("", filepath.Join(tmpDir, "bench.sqlite"))
 	if err != nil {
 		_ = os.RemoveAll(tmpDir)
 		return nil, err
 	}
 	closeStore := func() {
-		_ = g.Close()
+		_ = closeBackend()
 		_ = os.RemoveAll(tmpDir)
 	}
 	reg := parser.NewRegistry()

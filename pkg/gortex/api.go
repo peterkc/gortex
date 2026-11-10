@@ -39,8 +39,9 @@ type Option func(*settings)
 // settings collects everything the options can influence before the Engine
 // and its store are constructed.
 type settings struct {
-	index     config.IndexConfig
-	storePath string
+	index       config.IndexConfig
+	storePath   string
+	backendName string
 }
 
 // WithWorkers sets the number of parallel parsing workers.
@@ -88,7 +89,7 @@ func New(opts ...Option) (*Engine, error) {
 		}
 	}
 
-	st, closeStore, err := backend.OpenRaw("sqlite", path)
+	st, closeStore, err := backend.OpenRaw(set.backendName, path)
 	if err != nil {
 		if tmpDir != "" {
 			_ = os.RemoveAll(tmpDir)

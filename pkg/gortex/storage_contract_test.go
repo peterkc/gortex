@@ -27,6 +27,10 @@ func TestStorageContract(t *testing.T) {
 	}
 }
 
+func withK12Backend(name string) Option {
+	return func(s *settings) { s.backendName = name }
+}
+
 // k12PrivateTemp points the process temp directory at a fresh path and
 // returns it, so a case can see every directory the Engine creates there.
 func k12PrivateTemp(t *testing.T) string {
@@ -68,7 +72,7 @@ func testEngineIndexesIntoAPrivateStoreAndRemovesIt(t *testing.T, backend string
 	f := storetest.NewFixtureF(t)
 	tmp := k12PrivateTemp(t)
 
-	engine, err := New(WithWorkers(1))
+	engine, err := New(WithWorkers(1), withK12Backend(backend))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -106,7 +110,7 @@ func testEngineStorePathSurvivesClose(t *testing.T, backend string) {
 	tmp := k12PrivateTemp(t)
 	path := filepath.Join(t.TempDir(), "engine", "store")
 
-	engine, err := New(WithWorkers(1), WithStorePath(path))
+	engine, err := New(WithWorkers(1), WithStorePath(path), withK12Backend(backend))
 	if err != nil {
 		t.Fatalf("New on %s: %v", path, err)
 	}
@@ -134,7 +138,7 @@ func testEngineStorePathSurvivesClose(t *testing.T, backend string) {
 		t.Fatalf("Close left %v in the temp directory", got)
 	}
 
-	reopened, err := New(WithStorePath(path))
+	reopened, err := New(WithStorePath(path), withK12Backend(backend))
 	if err != nil {
 		t.Fatalf("reopen %s: %v", path, err)
 	}

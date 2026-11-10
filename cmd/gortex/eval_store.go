@@ -19,11 +19,15 @@ import (
 // The returned cleanup closes the store and removes the temp directory;
 // callers MUST call it once they are done reading the store.
 func newEvalStore(name string) (graph.Store, func(), error) {
+	return newEvalStoreForBackend(name, "")
+}
+
+func newEvalStoreForBackend(name, backendName string) (graph.Store, func(), error) {
 	tmpDir, err := os.MkdirTemp("", "gortex-eval-"+name+"-*")
 	if err != nil {
 		return nil, nil, err
 	}
-	st, closeStore, err := backend.OpenRaw("sqlite", filepath.Join(tmpDir, name+".sqlite"))
+	st, closeStore, err := backend.OpenRaw(backendName, filepath.Join(tmpDir, name+".sqlite"))
 	if err != nil {
 		_ = os.RemoveAll(tmpDir)
 		return nil, nil, err

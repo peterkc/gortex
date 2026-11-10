@@ -586,6 +586,10 @@ func initRepoConfig(globalPath, root string, logger *zap.Logger) *config.Config 
 // the store and removes the temp dir; callers MUST call it once they are
 // done reading the returned graph.
 func indexRepoForInit(ctx context.Context, root string, logger *zap.Logger) (graph.Store, func(), error) {
+	return indexRepoForInitWithBackend(ctx, root, logger, "")
+}
+
+func indexRepoForInitWithBackend(ctx context.Context, root string, logger *zap.Logger, backendName string) (graph.Store, func(), error) {
 	if logger == nil {
 		logger = newLogger()
 	}
@@ -597,7 +601,7 @@ func indexRepoForInit(ctx context.Context, root string, logger *zap.Logger) (gra
 	if err != nil {
 		return nil, nil, err
 	}
-	st, closeStore, err := backend.OpenRaw("sqlite", filepath.Join(tmpDir, "init.sqlite"))
+	st, closeStore, err := backend.OpenRaw(backendName, filepath.Join(tmpDir, "init.sqlite"))
 	if err != nil {
 		_ = os.RemoveAll(tmpDir)
 		return nil, nil, err
