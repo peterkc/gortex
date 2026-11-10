@@ -24,32 +24,45 @@ type OpenOptions struct {
 // UpgradeHook is an optional per-open hook set only in acceptance builds.
 type UpgradeHook struct{ option store_sqlite.Option }
 
-type constructor func(string, OpenOptions) (graph.Store, func() error, error)
+type registration struct {
+	open    func(string, OpenOptions) (graph.Store, func() error, error)
+	offline any
+}
 
-var constructors = map[string]constructor{
-	"sqlite": openSQLite,
+var backends = map[string]registration{
+	"sqlite": {open: openSQLite, offline: store_sqlite.OfflineMaintenance{}},
+}
+
+// RepoIndexStateBaseViewGen is the scope of the SQLite freshness probe.
+const RepoIndexStateBaseViewGen = store_sqlite.RepoIndexStateBaseViewGen
+
+// Offline returns the selected backend's file-only capabilities, or nil when
+// unavailable. It never opens a store. An empty name selects the default.
+func Offline(name string) any {
+	selected, _ := selectBackend(name)
+	return selected.offline
 }
 
 // CheckName validates a backend name before any filesystem work.
 func CheckName(name string) error {
-	_, err := selectConstructor(name)
+	_, err := selectBackend(name)
 	return err
 }
 
-func selectConstructor(name string) (constructor, error) {
+func selectBackend(name string) (registration, error) {
 	key := strings.ToLower(strings.TrimSpace(name))
 	switch key {
 	case "", "sqlite3":
 		key = "sqlite"
 	case "memory", "mem", "in-memory":
-		return nil, errors.New("the in-memory backend is retired; use --backend sqlite --backend-path <path> " +
+		return registration{}, errors.New("the in-memory backend is retired; use --backend sqlite --backend-path <path> " +
 			"(a throwaway path gives the old ephemeral behaviour)")
 	}
-	open, ok := constructors[key]
+	selected, ok := backends[key]
 	if !ok {
-		return nil, fmt.Errorf("unknown backend %q (expected: sqlite)", name)
+		return registration{}, fmt.Errorf("unknown backend %q (expected: sqlite)", name)
 	}
-	return open, nil
+	return selected, nil
 }
 
 // OpenRaw passes path unchanged to the selected backend. It returns the native
@@ -61,11 +74,11 @@ func OpenRaw(name, path string) (graph.Store, func() error, error) {
 // Open passes the resolved path and requested options to the selected backend.
 // It returns the native store, without wrapping its capabilities or errors.
 func Open(name, path string, options OpenOptions) (graph.Store, func() error, error) {
-	open, err := selectConstructor(name)
+	selected, err := selectBackend(name)
 	if err != nil {
 		return nil, nil, err
 	}
-	return open(path, options)
+	return selected.open(path, options)
 }
 
 func openSQLite(path string, options OpenOptions) (graph.Store, func() error, error) {

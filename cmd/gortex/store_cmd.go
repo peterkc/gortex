@@ -8,8 +8,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/zzet/gortex/internal/daemon"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/platform"
+	"github.com/zzet/gortex/internal/storage"
+	"github.com/zzet/gortex/internal/storage/backend"
 )
 
 // storeBackendPath is the graph store `gortex store` subcommands act on.
@@ -45,9 +46,17 @@ func init() {
 	rootCmd.AddCommand(storeCmd)
 }
 
+type upgradeBackupRemover interface {
+	RemoveUpgradeBackups(string) ([]storage.UpgradeBackup, error)
+}
+
 func runStoreCleanupBackup(cmd *cobra.Command, _ []string) error {
 	storePath := resolveStoreBackendPath(storeBackendPath)
-	removed, err := store_sqlite.RemoveUpgradeBackups(storePath)
+	remover, ok := backend.Offline("").(upgradeBackupRemover)
+	if !ok {
+		return fmt.Errorf("remove store backups of %s: unavailable for this backend", storePath)
+	}
+	removed, err := remover.RemoveUpgradeBackups(storePath)
 	out := cmd.OutOrStdout()
 	for _, backup := range removed {
 		fmt.Fprintf(out, "removed %s (schema v%d, %s)\n", backup.Path, backup.Version, formatBytes(uint64(backup.Size)))

@@ -7,7 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
+	"github.com/zzet/gortex/internal/storage/backend"
 )
 
 // The stop path's view of the daemon's closing store.
@@ -16,7 +17,7 @@ import (
 // records nothing until the pass ends; killing it discards the copy and the
 // next open starts over (restart #8, 2026-09-25: killed after 211 s with a
 // 22.4 GB WAL untouched). The store reports its close in a progress file
-// (store_sqlite.CloseProgress). Past its grace, the stop keeps waiting while
+// (storage.CloseProgress). Past its grace, the stop keeps waiting while
 // that report shows fresh progress and force-kills only after
 // daemonCloseNoProgressBound without any.
 
@@ -34,9 +35,13 @@ func resolveDaemonCloseNoProgressBound() time.Duration {
 	return 60 * time.Second
 }
 
+type closeProgressReader interface {
+	ReadCloseProgress(string) (storage.CloseProgress, bool)
+}
+
 // daemonCloseProgress reads the closing daemon's report; nil when unknown.
 // A seam: the stop tests install a fake close.
-var daemonCloseProgress func() (store_sqlite.CloseProgress, bool)
+var daemonCloseProgress func() (storage.CloseProgress, bool)
 
 func installDaemonCloseProgressForTarget(target *daemonStopTarget) func() {
 	if target.store == nil {
@@ -51,25 +56,31 @@ func installDaemonCloseProgressForStore(path string) func() {
 	if daemonCloseProgress != nil || strings.TrimSpace(path) == "" {
 		return func() {}
 	}
-	daemonCloseProgress = func() (store_sqlite.CloseProgress, bool) { return store_sqlite.ReadCloseProgress(path) }
+	// Stop has the captured path, but no backend name. Use the default
+	// reader without opening a Store or taking ownership from the daemon.
+	reader, ok := backend.Offline("").(closeProgressReader)
+	if !ok {
+		return func() {}
+	}
+	daemonCloseProgress = func() (storage.CloseProgress, bool) { return reader.ReadCloseProgress(path) }
 	return func() { daemonCloseProgress = nil }
 }
 
 // daemonCloseProgressFor returns the close report of process pid while it is
 // draining.
-func daemonCloseProgressFor(pid int) (store_sqlite.CloseProgress, bool) {
+func daemonCloseProgressFor(pid int) (storage.CloseProgress, bool) {
 	if daemonCloseProgress == nil {
-		return store_sqlite.CloseProgress{}, false
+		return storage.CloseProgress{}, false
 	}
 	p, ok := daemonCloseProgress()
 	if !ok || p.Phase != "draining" || (p.PID != 0 && pid != 0 && p.PID != pid) {
-		return store_sqlite.CloseProgress{}, false
+		return storage.CloseProgress{}, false
 	}
 	return p, true
 }
 
 // describeCloseProgress renders a report for the stop's log lines.
-func describeCloseProgress(p store_sqlite.CloseProgress, ok bool, now time.Time) string {
+func describeCloseProgress(p storage.CloseProgress, ok bool, now time.Time) string {
 	if !ok {
 		return ""
 	}

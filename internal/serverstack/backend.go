@@ -22,7 +22,6 @@ import (
 
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/platform"
 	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/storage/backend"
@@ -115,13 +114,21 @@ func backendOpenError(path string, err error) error {
 	return fmt.Errorf("open sqlite store at %q: %w (%s)", path, err, hint)
 }
 
+type upgradeBackupPruner interface {
+	PruneUpgradeBackups(path string, now time.Time) ([]string, error)
+}
+
 // pruneStoreUpgradeBackups removes the pre-upgrade backups of storePath that
-// have outlived store_sqlite.UpgradeBackupRetention at now, along with any
+// have outlived the backend's retention window at now, along with any
 // partial copy an interrupted upgrade left behind. The caller must hold the
 // store lock. Failures are logged, never fatal: a backup that cannot be
 // removed costs disk space, not correctness.
-func pruneStoreUpgradeBackups(storePath string, logger *zap.Logger, now time.Time) {
-	removed, err := store_sqlite.PruneUpgradeBackups(storePath, store_sqlite.UpgradeBackupRetention, now)
+func pruneStoreUpgradeBackups(name, storePath string, logger *zap.Logger, now time.Time) {
+	pruner, ok := backend.Offline(name).(upgradeBackupPruner)
+	if !ok {
+		return
+	}
+	removed, err := pruner.PruneUpgradeBackups(storePath, now)
 	for _, path := range removed {
 		logger.Info("serverstack: removed expired store upgrade backup", zap.String("path", path))
 	}
