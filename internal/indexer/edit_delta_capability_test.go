@@ -34,6 +34,20 @@ var _ graph.FileIdentityBatchEvicter = (*graph.DeltaWriter)(nil)
 // deliberately does not implement, with the reason. The reason names what
 // the engine does instead.
 var editDeltaAbsentCapabilities = map[string]string{
+	"anonymous{Close}":                    "scratch-evidence resource cleanup, asserted only after an evidence opener returns an insufficient physical store; DeltaWriter owns no closeable backend resource",
+	"graph.ContractAttachmentReader":      "attachment read on the captured physical generation source, never on the mutable DeltaWriter; selected-source attachment validation stays with that generation",
+	"indexer.checkoutGenerationStore":     "physical checkout lifecycle and generation publication; a DeltaWriter does not own that lifecycle, so it does not install the physical checkout runtime",
+	"indexer.contractEvidenceStore":       "scratch evidence store opened for contract followup; an insufficient result is refused and closed rather than substituting a mutable file delta",
+	"indexer.contractPublicationStore":    "captured physical publication source for contract attachments; DeltaWriter stages file mutations and cannot own generation fencing or publication",
+	"indexer.cooperativeGenerationCopier": "optional same-core cooperative payload copy on the dedicated builder; absent, the builder uses its existing CopyPayloadGeneration path, not a DeltaWriter forwarding path",
+	"indexer.generationIdentity":          "physical generation identity for stored census counts; absent on DeltaWriter, the census keeps generation zero and does not claim a physical payload identity",
+	"indexer.generationPayloadStore":      "native generation handle returned by the payload factory, not the mutable DeltaWriter; payload masks, manifests and publication remain owned by that physical generation",
+	"indexer.generationStoreSource":       "physical generation handle selection for inherited stored census counts; absent on DeltaWriter, the census does not borrow a parent generation for those counts",
+	"indexer.indexWriteObserver":          "same-core physical write demand and telemetry; absent on DeltaWriter, the indexer does not install a backend write observer from the composed file delta",
+	"indexer.primaryContractCoreStore":    "physical primary mutation journal; without this same-core generation-zero capability the installed contract runtime refuses the mutation rather than writing through DeltaWriter",
+	"indexer.shadowReplacementStore":      "whole-repository physical shadow replacement and retirement; absent on DeltaWriter, the engine keeps its ordinary eviction path without claiming backend retirement support",
+	"indexer.warmupWALWaiter":             "physical WAL fence for whole-repository warmup; absent on DeltaWriter, no WAL wait callback is installed because a file delta owns no WAL",
+
 	"graph.FoldedNameCandidateReader": "handler-only coherent candidate/payload snapshot; mutable DeltaWriter owns neither a physical read transaction nor a frozen delta layer, so the name-only handler refuses unsupported composition instead of forwarding base-only complete absence",
 	"anonymous{DBStats}":              "physical durable-store file-size telemetry; full-shadow drain samples a real store, whereas DeltaWriter stages per-file changes without owning a database or WAL file",
 
