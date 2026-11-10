@@ -3,6 +3,7 @@ package store_sqlite
 import (
 	"errors"
 	"fmt"
+	"github.com/zzet/gortex/internal/storage"
 	"io"
 	"log"
 	"os"
@@ -43,13 +44,7 @@ func UpgradeBackupPath(storePath string, version int) string {
 	return storePath + ".v" + strconv.Itoa(version) + upgradeBackupSuffix
 }
 
-// UpgradeBackup is one finalized pre-upgrade backup on disk.
-type UpgradeBackup struct {
-	Path    string
-	Version int // schema version the backed-up store had
-	Size    int64
-	ModTime time.Time
-}
+type UpgradeBackup = storage.UpgradeBackup
 
 // ListUpgradeBackups returns the finalized backups next to storePath,
 // ordered by schema version. Interrupted partial copies are not listed.
