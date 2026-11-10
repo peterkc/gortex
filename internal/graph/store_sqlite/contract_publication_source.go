@@ -63,6 +63,15 @@ func (s *Store) CaptureContractPublicationSource(ctx context.Context, expected g
 	return result, nil
 }
 
+// CaptureContractPublicationSourceStore preserves the captured native ancestry.
+func (s *Store) CaptureContractPublicationSourceStore(ctx context.Context, expected graph.ContractInputState, witnesses []graph.ContractInputWitness) (graph.Store, error) {
+	handle, err := s.CaptureContractPublicationSource(ctx, expected, witnesses)
+	if handle == nil {
+		return nil, err
+	}
+	return handle, err
+}
+
 // A source that no longer matches its checked physical selection must be
 // recaptured. Preserve the catalog refusal too: no ancestry or publication
 // guard is bypassed, and malformed inputs and SQL errors remain failures.

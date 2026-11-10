@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/zzet/gortex/internal/graph"
 )
 
 // AtManagedGeneration derives a borrowed positive-generation handle whose
@@ -18,6 +19,15 @@ func (s *Store) AtManagedGeneration(generationID int64) (*Store, error) {
 	handle := s.AtGeneration(generationID)
 	handle.managedPayloadGeneration = true
 	return handle, nil
+}
+
+// AtManagedGenerationStore returns the native managed generation handle.
+func (s *Store) AtManagedGenerationStore(generationID int64) (graph.Store, error) {
+	handle, err := s.AtManagedGeneration(generationID)
+	if handle == nil {
+		return nil, err
+	}
+	return handle, err
 }
 
 // checkManagedPayloadWriteTx validates a lifecycle-qualified write through the

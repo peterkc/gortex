@@ -111,6 +111,11 @@ func (s *Store) DerivationStamps(ctx context.Context) (map[string]int, error) {
 	return out, rows.Err()
 }
 
+// DerivationStampsAtGeneration keeps the native generation selection and error identity.
+func (s *Store) DerivationStampsAtGeneration(ctx context.Context, generationID int64) (map[string]int, error) {
+	return s.AtGeneration(generationID).DerivationStamps(ctx)
+}
+
 // WriteDerivationStamps records the versions of the passes that derived this
 // generation's rows. It goes through the payload write gate, so it is accepted
 // while the generation is building (and at the mutable base generation) and
@@ -259,6 +264,15 @@ func (s *Store) BeginDerivedCorrection(ctx context.Context, req DerivedCorrectio
 		return nil, err
 	}
 	return c, nil
+}
+
+// BeginDerivedCorrectionHandle returns the native correction without boxing a nil pointer.
+func (s *Store) BeginDerivedCorrectionHandle(ctx context.Context, req DerivedCorrectionRequest) (DerivedCorrectionHandle, error) {
+	correction, err := s.BeginDerivedCorrection(ctx, req)
+	if correction == nil {
+		return nil, err
+	}
+	return correction, err
 }
 
 // checkTx refuses a generation that is not correctable or whose stamp moved.

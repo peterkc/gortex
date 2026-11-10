@@ -302,6 +302,15 @@ func (s *Store) BeginChainFold(ctx context.Context, req ChainFoldRequest) (*Chai
 	return f, nil
 }
 
+// BeginChainFoldHandle returns the native fold without boxing a nil pointer.
+func (s *Store) BeginChainFoldHandle(ctx context.Context, req ChainFoldRequest) (ChainFoldHandle, error) {
+	fold, err := s.BeginChainFold(ctx, req)
+	if fold == nil {
+		return nil, err
+	}
+	return fold, err
+}
+
 // chainFoldKeys is the column list a table's rows are paged by within one
 // generation: its primary key without the generation column, or the table's
 // id where the key is the row's physical id.

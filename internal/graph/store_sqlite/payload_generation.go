@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/zzet/gortex/internal/graph"
 	"log"
 	"math"
 	"strconv"
@@ -383,6 +384,15 @@ func (s *Store) BeginPayloadGeneration(ctx context.Context, req PayloadGeneratio
 	return generationID, handle, err
 }
 
+// BeginPayloadGenerationStore returns the native generation handle as a graph.Store.
+func (s *Store) BeginPayloadGenerationStore(ctx context.Context, req PayloadGenerationRequest) (int64, graph.Store, error) {
+	id, handle, err := s.BeginPayloadGeneration(ctx, req)
+	if handle == nil {
+		return id, nil, err
+	}
+	return id, handle, err
+}
+
 // BeginPayloadGenerationWithStatus is BeginPayloadGeneration with the catalog's
 // adoption verdict preserved. adopted is true when the returned handle belongs
 // to an already-building generation with the same complete input identity.
@@ -420,6 +430,15 @@ func (s *Store) BeginPayloadGenerationWithStatus(
 		return 0, nil, false, err
 	}
 	return generationID, handle, adopted, nil
+}
+
+// BeginPayloadGenerationStoreWithStatus returns the native generation handle as a graph.Store.
+func (s *Store) BeginPayloadGenerationStoreWithStatus(ctx context.Context, req PayloadGenerationRequest) (int64, graph.Store, bool, error) {
+	id, handle, adopted, err := s.BeginPayloadGenerationWithStatus(ctx, req)
+	if handle == nil {
+		return id, nil, adopted, err
+	}
+	return id, handle, adopted, err
 }
 
 // PublishPayloadGeneration validates a building generation and moves it to
@@ -517,6 +536,15 @@ func (s *Store) PreparePayloadGenerationPublication(ctx context.Context, generat
 		return nil, fmt.Errorf("%w: generation %d", ErrCatalogNotFound, generationID)
 	}
 	return &PreparedPayloadGenerationPublication{store: s, generationID: generationID, ownerKind: row.OwnerKind}, nil
+}
+
+// PreparePayloadGenerationPublicationHandle retains the native publication object.
+func (s *Store) PreparePayloadGenerationPublicationHandle(ctx context.Context, generationID int64) (PreparedPayloadPublication, error) {
+	publication, err := s.PreparePayloadGenerationPublication(ctx, generationID)
+	if publication == nil {
+		return nil, err
+	}
+	return publication, err
 }
 
 // Publish validates and seals the current payload, then publishes it only if

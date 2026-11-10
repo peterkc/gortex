@@ -3357,3 +3357,6 @@ func (c *Catalog) DeleteCleanupEntry(ctx context.Context, cleanupID string) erro
 	return c.deleteOne(ctx, fmt.Sprintf("cleanup entry %s", cleanupID),
 		`DELETE FROM cleanup_journal WHERE cleanup_id = ?`, cleanupID)
 }
+
+// IsNilMaterializerCatalog reports pointer absence, not catalog liveness.
+func (c *Catalog) IsNilMaterializerCatalog() bool { return c == nil }
