@@ -385,7 +385,7 @@ func RunContractFollowupBatch(ctx context.Context, req ContractFollowupBatchRequ
 		if priority[target.Key.RepoPrefix] {
 			candidate := prepared.publications[len(prepared.publications)-1]
 			started := time.Now()
-			results, publishErr := candidate.Store.PublishContractAttachmentsWithInputsContext(ctx, []store_sqlite.ContractAttachmentPublishTarget{candidate}, started.Unix())
+			results, publishErr := candidate.Store.(*store_sqlite.Store).PublishContractAttachmentsWithInputsContext(ctx, []store_sqlite.ContractAttachmentPublishTarget{candidate}, started.Unix())
 			if publishErr != nil {
 				return fail(contractProjectionPublicationError(publishErr))
 			}
@@ -402,7 +402,7 @@ func RunContractFollowupBatch(ctx context.Context, req ContractFollowupBatchRequ
 	// for any exact key already committed above. This is the complete cohort's
 	// coherent validation point, not a claim all targets first became ready here.
 	started := time.Now()
-	results, publishErr := prepared.publications[0].Store.PublishContractAttachmentsWithInputsContext(ctx, prepared.publications, started.Unix())
+	results, publishErr := prepared.publications[0].Store.(*store_sqlite.Store).PublishContractAttachmentsWithInputsContext(ctx, prepared.publications, started.Unix())
 	if publishErr != nil {
 		return fail(contractProjectionPublicationError(publishErr))
 	}

@@ -91,7 +91,7 @@ type ChainFoldRequest struct {
 	// BuildFlight optionally borrows the caller's live destination leader.
 	// The caller retains it across Begin retries and through publication/landing;
 	// neither a refused Begin nor Release completes borrowed ownership.
-	BuildFlight *PayloadBuildFlight
+	BuildFlight PayloadBuildFlightHandle
 }
 
 // chainFoldPhase is where in a member the fold is.
@@ -212,7 +212,10 @@ func (s *Store) BeginChainFold(ctx context.Context, req ChainFoldRequest) (*Chai
 			return fail(fmt.Errorf("%w: member %d is not ready", ErrChainFoldStale, id))
 		}
 	}
-	flight := req.BuildFlight
+	flight, native := req.BuildFlight.(*PayloadBuildFlight)
+	if req.BuildFlight != nil && !native {
+		return fail(fmt.Errorf("%w: foreign payload build flight", ErrCatalogInvalidValue))
+	}
 	borrowed := flight != nil
 	if borrowed {
 		if err := s.validatePayloadBuildFlight(flight, req.To); err != nil {

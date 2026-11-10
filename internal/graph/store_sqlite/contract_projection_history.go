@@ -24,6 +24,16 @@ type ContractProjectionCursor struct {
 	generation                                 int64
 }
 
+// NewContractProjectionCursor preserves an owned physical clock tuple.
+func NewContractProjectionCursor(instance, analysis, input, bindings, admin uint64, generation int64) ContractProjectionCursor {
+	return ContractProjectionCursor{instance: instance, analysis: analysis, input: input, bindings: bindings, admin: admin, generation: generation}
+}
+
+// Values returns the cursor's owned scalar tuple without validation.
+func (c ContractProjectionCursor) Values() (instance, analysis, input, bindings, admin uint64, generation int64) {
+	return c.instance, c.analysis, c.input, c.bindings, c.admin, c.generation
+}
+
 // ContractProjectionDelta is current committed history, not publication proof.
 // Complete=false requires the original physical read proof; Domains must never
 // be used when incomplete. Publication still needs a locked input witness.
@@ -123,8 +133,7 @@ func (s *Store) CaptureContractProjectionCursor(ctx context.Context) (ContractPr
 }
 
 func (s *Store) contractProjectionCursorLocked() ContractProjectionCursor {
-	return ContractProjectionCursor{instance: s.contractProjectionInstance, generation: s.viewGen,
-		analysis: s.analysisViewCounter(s.viewGen).Load(), input: s.constantInputCounter(s.viewGen).Load(), bindings: s.semanticBindingInputCounter(s.viewGen).Load(), admin: s.payloadInputAdminRevision.Load()}
+	return NewContractProjectionCursor(s.contractProjectionInstance, s.analysisViewCounter(s.viewGen).Load(), s.constantInputCounter(s.viewGen).Load(), s.semanticBindingInputCounter(s.viewGen).Load(), s.payloadInputAdminRevision.Load(), s.viewGen)
 }
 
 // ContractProjectionChanges returns an owned description only when EVERY
@@ -147,18 +156,20 @@ func (s *Store) ContractProjectionChanges(ctx context.Context, from ContractProj
 	}
 	after := s.contractProjectionCursorLocked()
 	out := ContractProjectionDelta{After: after}
-	if from.instance == 0 || from.instance != after.instance || from.generation != after.generation || from.analysis > after.analysis || from.input > after.input || from.bindings > after.bindings || from.admin != after.admin {
+	fromInstance, fromAnalysis, fromInput, fromBindings, fromAdmin, fromGeneration := from.Values()
+	afterInstance, afterAnalysis, afterInput, afterBindings, afterAdmin, afterGeneration := after.Values()
+	if fromInstance == 0 || fromInstance != afterInstance || fromGeneration != afterGeneration || fromAnalysis > afterAnalysis || fromInput > afterInput || fromBindings > afterBindings || fromAdmin != afterAdmin {
 		return out, nil
 	}
-	if from.analysis == after.analysis && from.input == after.input && from.bindings == after.bindings {
+	if fromAnalysis == afterAnalysis && fromInput == afterInput && fromBindings == afterBindings {
 		out.Complete = true
 		return out, nil
 	}
-	currentAnalysis, currentInput, currentBindings := from.analysis, from.input, from.bindings
+	currentAnalysis, currentInput, currentBindings := fromAnalysis, fromInput, fromBindings
 	domainCount := 0
 	for i := 0; i < h.count; i++ {
 		e := h.slots[(h.start+i)%len(h.slots)]
-		if e.generation != from.generation || e.analysis <= from.analysis && e.input <= from.input && e.bindings <= from.bindings {
+		if e.generation != fromGeneration || e.analysis <= fromAnalysis && e.input <= fromInput && e.bindings <= fromBindings {
 			continue
 		}
 		if e.beforeAnalysis != currentAnalysis || e.beforeInput != currentInput || e.beforeBindings != currentBindings || !e.complete {
@@ -166,13 +177,13 @@ func (s *Store) ContractProjectionChanges(ctx context.Context, from ContractProj
 		}
 		domainCount += len(e.domains)
 		currentAnalysis, currentInput, currentBindings = e.analysis, e.input, e.bindings
-		if currentAnalysis == after.analysis && currentInput == after.input && currentBindings == after.bindings {
+		if currentAnalysis == afterAnalysis && currentInput == afterInput && currentBindings == afterBindings {
 			// Only allocate after the complete chain is known, at exact capacity.
 			out.Domains = make([]ContractProjectionDomain, domainCount)
 			at := 0
 			for j := 0; j <= i; j++ {
 				entry := h.slots[(h.start+j)%len(h.slots)]
-				if entry.generation != from.generation || entry.analysis <= from.analysis && entry.input <= from.input && entry.bindings <= from.bindings {
+				if entry.generation != fromGeneration || entry.analysis <= fromAnalysis && entry.input <= fromInput && entry.bindings <= fromBindings {
 					continue
 				}
 				for _, d := range entry.domains {
