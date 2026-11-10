@@ -174,6 +174,9 @@ type generationPayloadStore interface {
 	WriteMark() storage.VFSIOMark
 }
 
+// GenerationBuilderStore is the store input to the dedicated-base runtime.
+type GenerationBuilderStore = generationBuilderStore
+
 type generationBuilderStore interface {
 	SymbolSearchCoreKey() any
 	RetirePayloadGeneration(ctx context.Context, generationID int64, inUse func(int64) bool) error
@@ -196,6 +199,9 @@ type generationBuilderStore interface {
 	SharesSymbolSearchCore(other any) bool
 	WALWriteMark() storage.WALWriteMark
 }
+
+// CheckoutGenerationStore is the store input to the contract analysis runtime.
+type CheckoutGenerationStore = checkoutGenerationStore
 
 type checkoutGenerationStore interface {
 	SymbolSearchViewGeneration() int64

@@ -80,6 +80,9 @@ type materializerCatalog interface {
 	GetViewGeneration(context.Context, int64) (storage.ViewGeneration, bool, error)
 }
 
+// MaterializerStore is the store input to a Materializer.
+type MaterializerStore = materializerStore
+
 type materializerStore interface {
 	graph.Store
 	IsNilGenerationHandle() bool

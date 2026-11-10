@@ -19,7 +19,6 @@ import (
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/embedding"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/indexer"
 	gortexmcp "github.com/zzet/gortex/internal/mcp"
@@ -344,6 +343,10 @@ func (s *SharedServer) installTelemetrySender(srv *gortexmcp.Server, store *tele
 	s.addCleanup("telemetry_sender", func() error { owner.Close(); return nil })
 }
 
+type backendCatalogProvider interface {
+	BackendCatalog() any
+}
+
 // NewSharedServer builds the whole server stack — graph.Store ->
 // parser.Registry -> indexer -> query.Engine -> mcp.Server plus every
 // side-effect init — through one wiring shared by the daemon, the HTTP
@@ -443,6 +446,13 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	s.addCleanup("backend", backendCleanup)
 	s.Graph = g
 
+	var catalog indexer.CheckoutCatalog
+	if provider, ok := g.(backendCatalogProvider); ok {
+		if native, ok := provider.BackendCatalog().(indexer.CheckoutCatalog); ok && !native.IsNilMaterializerCatalog() {
+			catalog = native
+		}
+	}
+
 	reg := parser.NewRegistry()
 	languages.RegisterAll(reg)
 	languages.RegisterCustomGrammars(reg, conf.Index.Grammars, logger)
@@ -450,8 +460,8 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	languages.RegisterFallbackChunkers(reg, conf.Index.FallbackChunkers, logger)
 
 	idx := indexer.New(g, reg, conf.Index, logger)
-	if store, ok := g.(*store_sqlite.Store); ok {
-		idx.SetCensusCatalog(store.Catalog())
+	if catalog != nil {
+		idx.SetCensusCatalog(catalog)
 	}
 	s.Indexer = idx
 
@@ -713,8 +723,8 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	var mi *indexer.MultiIndexer
 	if cm != nil {
 		mi = indexer.NewMultiIndexer(g, reg, idx.Search(), cm, logger)
-		if store, ok := g.(*store_sqlite.Store); ok {
-			mi.SetCensusCatalog(store.Catalog())
+		if catalog != nil {
+			mi.SetCensusCatalog(catalog)
 		}
 		if embedder != nil {
 			mi.SetEmbedder(embedder)
@@ -755,12 +765,8 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 			logger.Warn("serverstack: views.retain_inactive is not a positive duration; using the shipped window",
 				zap.String("value", conf.Views.RetainInactive))
 		}
-		var lifecycleCatalog *store_sqlite.Catalog
-		if provider, ok := g.(interface{ Catalog() *store_sqlite.Catalog }); ok {
-			lifecycleCatalog = provider.Catalog()
-		}
 		lifecycle, lerr := indexer.NewCheckoutLifecycle(indexer.CheckoutLifecycleConfig{
-			Catalog:       lifecycleCatalog,
+			Catalog:       catalog,
 			MultiIndexer:  mi,
 			ConfigManager: cm,
 			Graph:         g,
@@ -798,8 +804,8 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 		// retirement sweep that uses the lifecycle's manager as its in-use
 		// predicate. Installing it does not publish anything; it only gives the
 		// publisher/drain half a live owner.
-		if store, ok := g.(*store_sqlite.Store); ok {
-			runtime, rerr := indexer.NewDedicatedBaseRuntime(store, store.Catalog(), lifecycle.ViewLeases())
+		if store, ok := g.(indexer.GenerationBuilderStore); ok && catalog != nil {
+			runtime, rerr := indexer.NewDedicatedBaseRuntime(store, catalog, lifecycle.ViewLeases())
 			if rerr != nil {
 				_ = s.Close()
 				return nil, fmt.Errorf("build dedicated base publisher runtime: %w", rerr)
@@ -912,14 +918,16 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	// manager would be invisible to the sweep and its generations could be
 	// deleted mid-read. A backend without a catalog hands the server nothing
 	// and every request stays on the base corpus.
-	if store, ok := g.(*store_sqlite.Store); ok {
+	if store, ok := g.(graphview.MaterializerStore); ok && !store.IsNilGenerationHandle() && catalog != nil {
 		leases := s.CheckoutLifecycle.ViewLeases()
 		if leases == nil {
+			// If loading global config failed there is no lifecycle, so no
+			// lease manager exists yet. Keep the standalone read path.
 			leases = graphview.NewLeaseManager()
 		}
 		srv.SetMaterializer(&graphview.Materializer{
 			Store:   store,
-			Catalog: store.Catalog(),
+			Catalog: catalog,
 			Leases:  leases,
 			Logger:  logger,
 		})
