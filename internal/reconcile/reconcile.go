@@ -35,8 +35,8 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/gitstate"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -215,7 +215,7 @@ func New(catalog Catalog, hooks CleanupHooks, cfg Config, opts ...Option) (*Reco
 // same instant — two checkouts reconciled together get the same "now", not
 // two microseconds apart.
 type familyPass struct {
-	family         store_sqlite.RepositoryFamily
+	family         storage.RepositoryFamily
 	inventory      *gitstate.FamilyInventory
 	inventoryErr   error
 	primaryGraphID string
@@ -246,7 +246,7 @@ func (r *Reconciler) ReconcileFamilyCandidates(ctx context.Context, familyID str
 		return FamilyReport{}, err
 	}
 	if !ok {
-		return FamilyReport{}, fmt.Errorf("%w: family %s", store_sqlite.ErrCatalogNotFound, familyID)
+		return FamilyReport{}, fmt.Errorf("%w: family %s", storage.ErrCatalogNotFound, familyID)
 	}
 
 	started := time.Now()
@@ -343,7 +343,7 @@ func (r *Reconciler) ReconcileFamilyCandidates(ctx context.Context, familyID str
 func (r *Reconciler) reconcileKnown(
 	ctx context.Context,
 	pass *familyPass,
-	existing store_sqlite.Checkout,
+	existing storage.Checkout,
 	record *gitstate.WorktreeRecord,
 ) (CheckoutReport, error) {
 	root := existing.RootPath
@@ -388,11 +388,11 @@ func (r *Reconciler) reconcileKnown(
 		if record == nil {
 			// A fresh local marker proves this checkout is reachable, not that the
 			// failed family inventory is evidence about any other checkout or clock.
-			req.State = store_sqlite.CheckoutStateReady
+			req.State = storage.CheckoutStateReady
 			req.LastError = ""
 			entry.Action = ActionReadyConfirmed
-			if existing.State != store_sqlite.CheckoutStateReady {
-				req.State = store_sqlite.CheckoutStateReconciling
+			if existing.State != storage.CheckoutStateReady {
+				req.State = storage.CheckoutStateReconciling
 				entry.Action = ActionAvailabilityRecovered
 			}
 		} else {
@@ -441,7 +441,7 @@ func (r *Reconciler) reconcileKnown(
 	}
 
 	if err := r.catalog.UpdateCheckoutObservation(ctx, req); err != nil {
-		if errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
+		if errors.Is(err, storage.ErrCatalogStaleGuard) {
 			// Another actor moved this row first. Its write is the one that
 			// counts; re-reading and overwriting would undo it.
 			entry.Action = ActionGuardLost
@@ -488,11 +488,11 @@ func (r *Reconciler) reconcileKnown(
 func (r *Reconciler) applyPresent(
 	ctx context.Context,
 	pass *familyPass,
-	existing store_sqlite.Checkout,
+	existing storage.Checkout,
 	record *gitstate.WorktreeRecord,
-	req *store_sqlite.UpdateCheckoutObservationRequest,
+	req *storage.UpdateCheckoutObservationRequest,
 ) CheckoutAction {
-	req.State = store_sqlite.CheckoutStateReady
+	req.State = storage.CheckoutStateReady
 	req.LastAccessible = pass.now.Unix()
 	req.UnavailableSince = 0
 	req.AvailabilityDeadline = 0
@@ -512,10 +512,10 @@ func (r *Reconciler) applyPresent(
 
 	switch {
 	case existing.RemovalDetectedAt != 0:
-		req.State = store_sqlite.CheckoutStateReconciling
+		req.State = storage.CheckoutStateReconciling
 		return ActionRemovalCancelled
-	case existing.State != store_sqlite.CheckoutStateReady:
-		req.State = store_sqlite.CheckoutStateReconciling
+	case existing.State != storage.CheckoutStateReady:
+		req.State = storage.CheckoutStateReconciling
 		return ActionAvailabilityRecovered
 	}
 	return ActionReadyConfirmed
@@ -527,12 +527,12 @@ func (r *Reconciler) applyPresent(
 func (r *Reconciler) applyInaccessible(
 	ctx context.Context,
 	pass *familyPass,
-	existing store_sqlite.Checkout,
-	req *store_sqlite.UpdateCheckoutObservationRequest,
+	existing storage.Checkout,
+	req *storage.UpdateCheckoutObservationRequest,
 ) (CheckoutAction, bool, error) {
 	now := pass.now.Unix()
 	if existing.UnavailableSince == 0 {
-		req.State = store_sqlite.CheckoutStateAvailabilityGrace
+		req.State = storage.CheckoutStateAvailabilityGrace
 		req.UnavailableSince = now
 		req.AvailabilityDeadline = pass.now.Add(r.cfg.AvailabilityGrace).Unix()
 		return ActionAvailabilityGraceStarted, false, nil
@@ -557,14 +557,14 @@ func (r *Reconciler) applyInaccessible(
 func (r *Reconciler) applyRemoved(
 	ctx context.Context,
 	pass *familyPass,
-	existing store_sqlite.Checkout,
+	existing storage.Checkout,
 	class Classification,
-	req *store_sqlite.UpdateCheckoutObservationRequest,
+	req *storage.UpdateCheckoutObservationRequest,
 ) (CheckoutAction, bool, error) {
 	// Removal grace is a serving state as well as a clock: once Git has
 	// authoritatively omitted this checkout, new readers must stop pinning its
 	// stale route and use the labeled, read-only family fallback immediately.
-	req.State = store_sqlite.CheckoutStateRemovalGrace
+	req.State = storage.CheckoutStateRemovalGrace
 	now := pass.now.Unix()
 	if existing.RemovalDetectedAt == 0 {
 		req.RemovalDetectedAt = now
@@ -585,7 +585,7 @@ func (r *Reconciler) applyRemoved(
 // retainIntended expires serving layers without revoking the user's tracking
 // intent or deleting its graph/config identity. The purge journal is idempotent
 // and is cleared by recovery, so a later outage can purge rebuilt layers again.
-func (r *Reconciler) retainIntended(ctx context.Context, pass *familyPass, existing store_sqlite.Checkout, req *store_sqlite.UpdateCheckoutObservationRequest) (CheckoutAction, bool, error) {
+func (r *Reconciler) retainIntended(ctx context.Context, pass *familyPass, existing storage.Checkout, req *storage.UpdateCheckoutObservationRequest) (CheckoutAction, bool, error) {
 	owned, err := r.ownedGraph(ctx, existing.FamilyID, existing.CheckoutID)
 	if err != nil {
 		return "", false, err
@@ -640,14 +640,14 @@ func (r *Reconciler) retainIntended(ctx context.Context, pass *familyPass, exist
 	action := ActionMarkedUnavailable
 	if owned != nil && owned.IsPrimaryBase {
 		action = ActionPrimaryRetirementRefused
-		if existing.State != store_sqlite.CheckoutStateUnavailable && r.logger != nil {
+		if existing.State != storage.CheckoutStateUnavailable && r.logger != nil {
 			r.logger.Warn("primary_retirement_refused", zap.String("family", existing.FamilyID), zap.String("checkout", existing.CheckoutID), zap.String("root", existing.RootPath), zap.String("cause", cause))
 		}
 	}
 	if err := r.purgeLayersOnce(context.WithoutCancel(ctx), existing, cause); err != nil {
 		return "", true, err
 	}
-	req.State = store_sqlite.CheckoutStateUnavailable
+	req.State = storage.CheckoutStateUnavailable
 	return action, true, nil
 }
 
@@ -665,7 +665,7 @@ func (r *Reconciler) retainIntended(ctx context.Context, pass *familyPass, exist
 func (r *Reconciler) retireCheckout(
 	ctx context.Context,
 	pass *familyPass,
-	existing store_sqlite.Checkout,
+	existing storage.Checkout,
 	cause string,
 ) (CheckoutAction, bool, error) {
 	owned, err := r.ownedGraph(ctx, existing.FamilyID, existing.CheckoutID)
@@ -686,7 +686,7 @@ func (r *Reconciler) retireCheckout(
 	}
 	err = retire()
 	switch {
-	case errors.Is(err, store_sqlite.ErrCatalogStaleGuard):
+	case errors.Is(err, storage.ErrCatalogStaleGuard):
 		return ActionGuardLost, false, nil
 	case err != nil && !r.cleanupDeferred(err):
 		return "", false, err
@@ -778,16 +778,16 @@ func (r *Reconciler) observeNew(
 		return entry, nil
 	}
 
-	checkout := store_sqlite.Checkout{
+	checkout := storage.Checkout{
 		CheckoutID:     uuid.NewV7().String(),
 		Incarnation:    uuid.NewV7().String(),
 		FamilyID:       pass.family.FamilyID,
 		RootPath:       record.Path,
 		GitDir:         pass.gitDirFor(record),
 		AdminName:      record.AdminName,
-		State:          store_sqlite.CheckoutStateReady,
-		DesiredMode:    store_sqlite.CheckoutModeAutomatic,
-		EffectiveMode:  store_sqlite.CheckoutModeAutomatic,
+		State:          storage.CheckoutStateReady,
+		DesiredMode:    storage.CheckoutModeAutomatic,
+		EffectiveMode:  storage.CheckoutModeAutomatic,
 		Locked:         record.Locked,
 		Prunable:       record.Prunable,
 		LastAccessible: pass.now.Unix(),
@@ -800,7 +800,7 @@ func (r *Reconciler) observeNew(
 		}
 	}
 	if err := r.catalog.AllocateCheckout(ctx, checkout); err != nil {
-		if errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
+		if errors.Is(err, storage.ErrCatalogStaleGuard) {
 			// Another actor allocated this administrative name between this
 			// pass's listing and its insert. Its identity is the one that
 			// counts; the next pass matches the record to that row instead of
@@ -850,7 +850,7 @@ func observeDiscoveryLag(now time.Time, lastSeen int64) {
 // moves that matter. The empty state on either side is a checkout that did not
 // exist yet or no longer does, and is recorded under its own bounded name
 // rather than as an empty label.
-func recordTransition(from, to store_sqlite.CheckoutState, class Classification) {
+func recordTransition(from, to storage.CheckoutState, class Classification) {
 	if from == to {
 		return
 	}
@@ -859,7 +859,7 @@ func recordTransition(from, to store_sqlite.CheckoutState, class Classification)
 }
 
 // transitionState renders a lifecycle state as a metric label.
-func transitionState(state store_sqlite.CheckoutState) string {
+func transitionState(state storage.CheckoutState) string {
 	if state == "" {
 		return viewmetrics.StateNone
 	}
@@ -899,7 +899,7 @@ func evidenceClass(class Classification) string {
 // can be reconstructed from ordinary logs. Healthy confirmations remain Debug.
 func (r *Reconciler) recordClassification(
 	pass *familyPass,
-	existing store_sqlite.Checkout,
+	existing storage.Checkout,
 	record *gitstate.WorktreeRecord,
 	fresh PathEvidence,
 	class Classification,
@@ -988,8 +988,8 @@ func (p *familyPass) gitDirFor(record *gitstate.WorktreeRecord) string {
 // observationFrom seeds a guarded write with everything the stored row already
 // says, so a branch only has to state what it changes. The mode axis is not
 // part of it: a pass observes how a checkout looks, never how it is served.
-func observationFrom(c store_sqlite.Checkout) store_sqlite.UpdateCheckoutObservationRequest {
-	return store_sqlite.UpdateCheckoutObservationRequest{
+func observationFrom(c storage.Checkout) storage.UpdateCheckoutObservationRequest {
+	return storage.UpdateCheckoutObservationRequest{
 		CheckoutID:           c.CheckoutID,
 		Incarnation:          c.Incarnation,
 		State:                c.State,
@@ -1013,7 +1013,7 @@ func observationFrom(c store_sqlite.Checkout) store_sqlite.UpdateCheckoutObserva
 
 // ownedGraph returns the dedicated graph a checkout owns, or nil. A checkout
 // owns at most one, which the catalog enforces.
-func (r *Reconciler) ownedGraph(ctx context.Context, familyID, checkoutID string) (*store_sqlite.DedicatedGraph, error) {
+func (r *Reconciler) ownedGraph(ctx context.Context, familyID, checkoutID string) (*storage.DedicatedGraph, error) {
 	if familyID == "" || checkoutID == "" {
 		return nil, nil
 	}

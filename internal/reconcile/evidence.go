@@ -6,8 +6,8 @@ import (
 	"io/fs"
 
 	"github.com/zzet/gortex/internal/gitstate"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // RemovalEvidence names what justified concluding that a checkout is gone.
@@ -109,7 +109,7 @@ func SampledPathEvidence(sample gitstate.PathEvidence) PathEvidence {
 // The stored row has no "did the root exist" column. A root identity is only
 // ever written for a root that was statted, so its presence is what records
 // that the root was there when the sample was taken.
-func StoredPathEvidence(row store_sqlite.CheckoutPathEvidence) PathEvidence {
+func StoredPathEvidence(row storage.CheckoutPathEvidence) PathEvidence {
 	return PathEvidence{
 		RootExists:          row.RootPathIdentity != "",
 		RootIdentity:        row.RootPathIdentity,
@@ -124,8 +124,8 @@ func StoredPathEvidence(row store_sqlite.CheckoutPathEvidence) PathEvidence {
 // CatalogRow raises evidence back into the row shape the catalog stores for
 // one checkout. The common-dir columns are left to whoever samples the shared
 // git directory; a checkout-root sample knows nothing about it.
-func (e PathEvidence) CatalogRow(checkoutID string, sampledAt, generation int64) store_sqlite.CheckoutPathEvidence {
-	return store_sqlite.CheckoutPathEvidence{
+func (e PathEvidence) CatalogRow(checkoutID string, sampledAt, generation int64) storage.CheckoutPathEvidence {
+	return storage.CheckoutPathEvidence{
 		CheckoutID:                  checkoutID,
 		RootPathIdentity:            e.RootIdentity,
 		RootVolumeKind:              e.RootVolumeKind,

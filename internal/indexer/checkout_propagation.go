@@ -18,7 +18,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/gitcmd"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Primary-to-worktree propagation under the per-file delta model.
@@ -501,7 +501,7 @@ func (c *CheckoutCoordinator) coveredPaths(ctx context.Context, generations ...i
 			return nil, err
 		}
 		for _, mask := range masks {
-			if mask.Mode != store_sqlite.OwnershipReplace && mask.Mode != store_sqlite.OwnershipDelete {
+			if mask.Mode != storage.OwnershipReplace && mask.Mode != storage.OwnershipDelete {
 				continue
 			}
 			if rel, ok := builderRelPath(c.repoPrefix, mask.FilePath); ok {
@@ -554,7 +554,7 @@ func (c *CheckoutCoordinator) reparentDirtyChain(
 	ctx context.Context,
 	graphID string,
 	top int64,
-	oldCommit store_sqlite.ViewGeneration,
+	oldCommit storage.ViewGeneration,
 	newCommit int64,
 	fingerprint string,
 ) (int64, string, error) {
@@ -586,7 +586,7 @@ func (c *CheckoutCoordinator) reparentDirtyChain(
 	// Bottom first: every copy's parent must already exist.
 	for i := len(chain) - 1; i >= 0; i-- {
 		member := chain[i]
-		generationID, _, adopted, err := c.store.BeginPayloadGenerationStoreWithStatus(ctx, store_sqlite.PayloadGenerationRequest{
+		generationID, _, adopted, err := c.store.BeginPayloadGenerationStoreWithStatus(ctx, storage.PayloadGenerationRequest{
 			OwnerKind: member.OwnerKind, GraphID: member.GraphID, LayerID: member.LayerID,
 			CheckoutID: member.CheckoutID, GenerationKind: member.GenerationKind,
 			BaseGenerationID:     parent,
@@ -635,7 +635,7 @@ func (c *CheckoutCoordinator) abandonCopiedGeneration(ctx context.Context, gener
 		return
 	}
 	err := c.catalog.SetViewGenerationState(ctx, generationID,
-		store_sqlite.ViewGenerationFailed, store_sqlite.ViewGenerationBuilding)
+		storage.ViewGenerationFailed, storage.ViewGenerationBuilding)
 	if err != nil {
 		// Not building any more: it was published.
 		c.supersede(ctx, generationID)

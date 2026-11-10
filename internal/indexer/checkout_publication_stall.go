@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // checkoutPublicationStallThreshold is how many cycles in a row must publish
@@ -141,7 +141,7 @@ func checkoutCycleFailureClass(err error) string {
 		return ""
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return "canceled"
-	case errors.Is(err, store_sqlite.ErrCatalogStaleGuard):
+	case errors.Is(err, storage.ErrCatalogStaleGuard):
 		return "catalog_guard"
 	case errors.Is(err, ErrDirtySnapshotChanged), errors.Is(err, errCheckoutUnsettled):
 		return "working_tree_moved"

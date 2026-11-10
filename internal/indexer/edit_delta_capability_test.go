@@ -34,6 +34,7 @@ var _ graph.FileIdentityBatchEvicter = (*graph.DeltaWriter)(nil)
 // deliberately does not implement, with the reason. The reason names what
 // the engine does instead.
 var editDeltaAbsentCapabilities = map[string]string{
+	"indexer.configuredRepositoryStore":   "configured repository ownership is an optional physical catalog read, not a file-delta operation; without it both configured-owner paths keep live ownership or configuration order",
 	"anonymous{Close}":                    "scratch-evidence resource cleanup, asserted only after an evidence opener returns an insufficient physical store; DeltaWriter owns no closeable backend resource",
 	"graph.ContractAttachmentReader":      "attachment read on the captured physical generation source, never on the mutable DeltaWriter; selected-source attachment validation stays with that generation",
 	"indexer.checkoutGenerationStore":     "physical checkout lifecycle and generation publication; a DeltaWriter does not own that lifecycle, so it does not install the physical checkout runtime",
@@ -86,7 +87,6 @@ var editDeltaAbsentCapabilities = map[string]string{
 	"graph.editingContextLayerIncoming":                    "private incoming-adjacency adapter asserted only on the borrowed immutable layer of an editing-context scope; DeltaWriter is not that layer and its ordinary composed incoming reads preserve delta ownership",
 	"graph.OverlayLayerScopedNameReader":                   "a capability of the layers a delta composes over, not of a store: the engine asks it of each layer below the delta, and a DeltaWriter is never a layer below another delta",
 	"graph.ReadContextBinder":                              "request-handler cancellation of long whole-store reads; the per-save engine never binds its store, and absent the binder returns the reader unchanged",
-	"anonymous{Catalog}":                                   "whole-repository or administrative operation (full index, repository reset, untrack or cleanup, warm start, vector corpus, bulk load windows, WAL maintenance); not on a file delta's per-save path",
 	"anonymous{CheckpointWAL}":                             "whole-repository or administrative operation (full index, repository reset, untrack or cleanup, warm start, vector corpus, bulk load windows, WAL maintenance); not on a file delta's per-save path",
 	"anonymous{Concurrent}":                                "embedder capability probe, asserted on the embedding provider, not on the store",
 	"anonymous{ConcurrentCheckoutPreparation}":             "compiler-admission and off-lane preparation eligibility, asserted on semantic providers, never on a store or delta; providers without it keep preparation on the serialized lane",

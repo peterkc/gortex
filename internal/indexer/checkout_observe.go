@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/gitstate"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/pathkey"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 const (
@@ -77,7 +77,7 @@ type checkoutObservationProof struct {
 	inventory    *gitstate.FamilyInventory
 	familyID     string
 	selected     gitstate.WorktreeRecord
-	primary      store_sqlite.DedicatedGraph
+	primary      storage.DedicatedGraph
 	rootInfo     os.FileInfo
 	gitInfo      os.FileInfo
 	commonInfo   os.FileInfo
@@ -103,7 +103,7 @@ type checkoutObservationJob struct {
 	done          chan struct{}
 	proof         *checkoutObservationProof
 	proofErr      error
-	checkout      store_sqlite.Checkout
+	checkout      storage.Checkout
 	found         bool
 	err           error
 }
@@ -120,7 +120,7 @@ type checkoutObservationJob struct {
 // busy/error outcome carries no permission to fall through to another graph.
 // Explicit selectors must provide an authorizer for the known primary prefix;
 // it runs outside locks and before any catalog observation or build activation.
-func (l *CheckoutLifecycle) ObserveCheckoutPath(ctx context.Context, path string, authorize ...func(string) error) (checkout store_sqlite.Checkout, found bool, err error) {
+func (l *CheckoutLifecycle) ObserveCheckoutPath(ctx context.Context, path string, authorize ...func(string) error) (checkout storage.Checkout, found bool, err error) {
 	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) || l.rec == nil || path == "" || !filepath.IsAbs(path) {
 		return checkout, false, nil
 	}
@@ -194,10 +194,10 @@ func (l *CheckoutLifecycle) ObserveCheckoutPath(ctx context.Context, path string
 	}
 	checkout, found, err = l.catalog.GetCheckout(ctx, job.checkout.CheckoutID)
 	if err != nil || !found {
-		return store_sqlite.Checkout{}, false, err
+		return storage.Checkout{}, false, err
 	}
 	if checkout.Incarnation != job.checkout.Incarnation || !sameMutationRoot(checkout.RootPath, job.proof.selected.Path) {
-		return store_sqlite.Checkout{}, false, ErrCheckoutMutationStale
+		return storage.Checkout{}, false, ErrCheckoutMutationStale
 	}
 	return checkout, true, nil
 }
@@ -495,46 +495,46 @@ func (l *CheckoutLifecycle) validateCheckoutObservation(ctx context.Context, pro
 	return nil
 }
 
-func (l *CheckoutLifecycle) applyCheckoutObservation(ctx context.Context, proof *checkoutObservationProof) (store_sqlite.Checkout, bool, error) {
+func (l *CheckoutLifecycle) applyCheckoutObservation(ctx context.Context, proof *checkoutObservationProof) (storage.Checkout, bool, error) {
 	if err := l.validateCheckoutObservation(ctx, proof); err != nil {
-		return store_sqlite.Checkout{}, false, err
+		return storage.Checkout{}, false, err
 	}
 	entry, err := l.rec.ObserveCheckoutWithAdmission(ctx, proof.familyID, proof.selected.Path, func() error {
 		return l.validateCheckoutObservation(ctx, proof)
 	}, proof.inventory)
 	if err != nil {
-		return store_sqlite.Checkout{}, false, err
+		return storage.Checkout{}, false, err
 	}
 	if !entry.Durable || entry.CheckoutID == "" {
-		return store_sqlite.Checkout{}, false, fmt.Errorf("%w: %s", ErrCheckoutNotTracked, entry.Detail)
+		return storage.Checkout{}, false, fmt.Errorf("%w: %s", ErrCheckoutNotTracked, entry.Detail)
 	}
 	checkout, found, err := l.catalog.GetCheckout(ctx, entry.CheckoutID)
 	if err != nil || !found {
 		return checkout, found, err
 	}
 	if checkout.Incarnation != entry.Incarnation || !sameMutationRoot(checkout.RootPath, proof.selected.Path) {
-		return store_sqlite.Checkout{}, false, ErrCheckoutMutationStale
+		return storage.Checkout{}, false, ErrCheckoutMutationStale
 	}
 	if err := l.validateCheckoutObservation(ctx, proof); err != nil {
-		return store_sqlite.Checkout{}, false, err
+		return storage.Checkout{}, false, err
 	}
-	if checkout.State == store_sqlite.CheckoutStateReady && checkout.EffectiveMode == store_sqlite.CheckoutModeAutomatic {
+	if checkout.State == storage.CheckoutStateReady && checkout.EffectiveMode == storage.CheckoutModeAutomatic {
 		l.ActivateCheckout(checkout.CheckoutID, "first request observed checkout")
 	}
 	return checkout, true, nil
 }
 
-func (l *CheckoutLifecycle) observationPrimary(ctx context.Context, familyID string) (store_sqlite.DedicatedGraph, error) {
+func (l *CheckoutLifecycle) observationPrimary(ctx context.Context, familyID string) (storage.DedicatedGraph, error) {
 	graphs, err := l.catalog.ListDedicatedGraphs(ctx, familyID)
 	if err != nil {
-		return store_sqlite.DedicatedGraph{}, err
+		return storage.DedicatedGraph{}, err
 	}
 	for _, graph := range graphs {
 		if graph.IsPrimaryBase && graph.GraphID != "" {
 			return graph, nil
 		}
 	}
-	return store_sqlite.DedicatedGraph{}, fmt.Errorf("%w: known family has no primary graph", ErrCheckoutNotTracked)
+	return storage.DedicatedGraph{}, fmt.Errorf("%w: known family has no primary graph", ErrCheckoutNotTracked)
 }
 
 // Verify both lexical containment and physical root identity. Case folding is

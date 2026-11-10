@@ -5,7 +5,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // The outermost nested saga notifies only after its final phase/journal write
@@ -117,7 +117,7 @@ func (r *Reconciler) RepositoryCleanupPending(ctx context.Context, graphID, chec
 		return false, err
 	}
 	for _, entry := range entries {
-		if entry.Phase == store_sqlite.CleanupPhaseDone {
+		if entry.Phase == storage.CleanupPhaseDone {
 			continue
 		}
 		target, err := decodeSagaTarget(entry)
