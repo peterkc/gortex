@@ -34,6 +34,8 @@ import (
 	"github.com/zzet/gortex/internal/semantic/lsp"
 	"github.com/zzet/gortex/internal/semantic/scip"
 	"github.com/zzet/gortex/internal/semantic/tstypes"
+	"github.com/zzet/gortex/internal/storage"
+	"github.com/zzet/gortex/internal/storage/backend"
 	"github.com/zzet/gortex/internal/telemetry"
 )
 
@@ -82,13 +84,13 @@ type SharedServerConfig struct {
 	Global            *config.GlobalConfig // loaded ~/.gortex/config.yaml
 	Logger            *zap.Logger
 	Version           string
-	MigrationObserver store_sqlite.MigrationObserver
+	MigrationObserver storage.MigrationObserver
 	// Set only by the acceptance-tagged per-invocation configurator.
-	sqliteUpgradeOption store_sqlite.Option
-	Embedder            EmbedderRequest
-	SideStores          SideStores
-	ScopeWorkspace      string
-	ScopeProject        string
+	upgradeHook    backend.UpgradeHook
+	Embedder       EmbedderRequest
+	SideStores     SideStores
+	ScopeWorkspace string
+	ScopeProject   string
 	// ActiveProject names the project the MCP server should start scoped
 	// to (multi-repo mode hint). Empty leaves it unset.
 	ActiveProject string
@@ -433,7 +435,7 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 
 	// allowRebuild is gated on actually holding the store lock: only then may
 	// the sqlite backend rebuild a supported older schema when necessary.
-	g, backendCleanup, err := openBackendWithUpgradeOption(cfg.Backend, storePath, logger, storeLockHeld, cfg.sqliteUpgradeOption, cfg.MigrationObserver)
+	g, backendCleanup, err := openBackendWithUpgradeHook(cfg.Backend, storePath, logger, storeLockHeld, cfg.upgradeHook, cfg.MigrationObserver)
 	if err != nil {
 		// Backend initialization can fail after the store lock was acquired.
 		return nil, errors.Join(err, s.Close())
