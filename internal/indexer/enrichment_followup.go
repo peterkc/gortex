@@ -186,7 +186,7 @@ func (c *CheckoutCoordinator) derivedDebtLayers(ctx context.Context, top int64) 
 	slices.Reverse(chain)
 	out := make([]derivedDebtLayer, 0, len(chain))
 	for _, id := range chain {
-		handle := c.store.AtGeneration(id)
+		handle := generationAt(c.store, id)
 		rows, err := handle.ProducerStates()
 		if err != nil {
 			return nil, err
@@ -220,7 +220,7 @@ func (c *CheckoutCoordinator) derivedDebtLayers(ctx context.Context, top int64) 
 // owed. It is what an answer's rider reads (semantic_pending and the clone
 // equivalent): SemanticPending and SemanticComplete below.
 func (c *CheckoutCoordinator) PendingDerived(ctx context.Context) (map[graphview.CapabilityID]DerivedDebt, int64, error) {
-	if c == nil || c.catalog == nil {
+	if c == nil || (c.catalog == nil || c.catalog.IsNilMaterializerCatalog()) {
 		return nil, 0, nil
 	}
 	route, found, err := c.catalog.GetCheckoutRoute(ctx, c.checkoutID)

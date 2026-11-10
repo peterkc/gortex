@@ -55,7 +55,7 @@ func (c *CheckoutCoordinator) retirePayloadGenerationSlice(
 	generationID int64,
 	maxElapsed time.Duration,
 ) (retired bool, pending bool, err error) {
-	if c == nil || c.store == nil || generationID <= 0 {
+	if c == nil || (c.store == nil || c.store.IsNilGenerationHandle()) || generationID <= 0 {
 		return false, false, nil
 	}
 	c.mu.Lock()

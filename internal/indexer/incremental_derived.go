@@ -4,10 +4,10 @@ import (
 	"context"
 	"time"
 
+	"github.com/zzet/gortex/internal/storage"
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/entrypoints"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/reach"
 	"github.com/zzet/gortex/internal/resolver"
 )
@@ -85,7 +85,7 @@ type IncrementalDerivedReport struct {
 	// set beside the pass's wall time, it says whether a slow pass worked or
 	// waited.
 	PassCPUMs       map[string]int64
-	PassWrites      map[string]store_sqlite.VFSIOSplit
+	PassWrites      map[string]storage.VFSIOSplit
 	FrameworkMs     int64
 	ExternalCallsMs int64
 	CrossRepoMs     int64
@@ -263,10 +263,10 @@ func (mi *MultiIndexer) runIncrementalDerivedPassesWithPriorTopologyHeld(
 	report.PassFaults = map[string]int64{}
 	faultsAt, cpuAt := editDeltaProcessIO(), processCPUTime()
 	sampleWrites := mi.writeCounterSource()
-	var writesAt store_sqlite.VFSIOMark
+	var writesAt storage.VFSIOMark
 	if sampleWrites != nil {
 		writesAt = sampleWrites()
-		report.PassWrites = make(map[string]store_sqlite.VFSIOSplit)
+		report.PassWrites = make(map[string]storage.VFSIOSplit)
 	}
 	notePassFaults := func(pass string) {
 		now, cpu := editDeltaProcessIO(), processCPUTime()

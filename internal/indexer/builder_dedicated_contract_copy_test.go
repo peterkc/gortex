@@ -20,7 +20,7 @@ func asyncClaimedCopyFixture(t *testing.T) (*SparseGenerationBuilder, dedicatedB
 	request.Identity.ExtractorVersions = builder.extractorVersionsFingerprint()
 	ctx := context.Background()
 	// Production Open must install the publication schema; do not create it in this fixture.
-	catalog := builder.Store.Catalog()
+	catalog := any(builder.Store).(*store_sqlite.Store).Catalog()
 	authority, err := catalog.AcquireDedicatedBaseAuthority(ctx, store_sqlite.AcquireDedicatedBaseAuthorityRequest{
 		GraphID: request.Identity.GraphID,
 		Owner:   store_sqlite.DedicatedBaseOwner{CheckoutID: request.Identity.CheckoutID, Incarnation: "private-incarnation"},
@@ -61,7 +61,7 @@ func indexAsyncCopyPrimary(t *testing.T, b *SparseGenerationBuilder, req dedicat
 	result, err := idx.IndexCtx(ctx, req.RootPath)
 	require.NoError(t, err)
 	require.Empty(t, result.FailedFiles)
-	pending, found, err := b.Store.ContractInputStateContext(ctx, req.RepoPrefix, "")
+	pending, found, err := any(b.Store).(*store_sqlite.Store).ContractInputStateContext(ctx, req.RepoPrefix, "")
 	require.NoError(t, err)
 	require.True(t, found)
 	require.False(t, pending.Accepted)
@@ -77,9 +77,9 @@ func indexAsyncCopyPrimary(t *testing.T, b *SparseGenerationBuilder, req dedicat
 	_, err = leases.CaptureInitialRawRepositorySource(ctx, registration, "accepted-copy-source")
 	require.NoError(t, err)
 	mi.SetOutputGenerationAuthority(NewOutputGenerationAuthority(leases))
-	options := ContractFollowupCaptureOptions{Context: ctx, Store: b.Store, Materializer: &graphview.Materializer{Store: b.Store, Catalog: b.Store.Catalog(), Leases: leases}, MultiIndexer: mi, Registry: b.Registry, Config: b.Config, Logger: b.Logger, Yield: func(ctx context.Context) error { return ctx.Err() }}
+	options := ContractFollowupCaptureOptions{Catalog: slice2TestCatalog(b.Store), Context: ctx, Store: any(b.Store).(*store_sqlite.Store), Materializer: &graphview.Materializer{Store: any(b.Store).(*store_sqlite.Store), Catalog: any(b.Store).(*store_sqlite.Store).Catalog(), Leases: leases}, MultiIndexer: mi, Registry: b.Registry, Config: b.Config, Logger: b.Logger, Yield: func(ctx context.Context) error { return ctx.Err() }}
 	require.NoError(t, reconcilePrimaryContractBaseline(ctx, options, req.RepoPrefix))
-	accepted, found, err := b.Store.ContractInputStateContext(ctx, req.RepoPrefix, "")
+	accepted, found, err := any(b.Store).(*store_sqlite.Store).ContractInputStateContext(ctx, req.RepoPrefix, "")
 	require.NoError(t, err)
 	require.True(t, found)
 	require.True(t, accepted.Accepted)
@@ -95,17 +95,17 @@ func TestClaimedAsyncBaseCopiesCertifiedPrimaryWithoutReparse(t *testing.T) {
 	require.Equal(t, extractorVersionsFingerprint(), zero.ExtractorVersions)
 	require.NotEqual(t, req.Identity.ExtractorVersions, zero.ExtractorVersions, "fixture must exercise installed marker mismatch")
 	beforeNodes, beforeEdges := claimedBasePayload(b.Store)
-	before, found, err := b.Store.ContractInputStateContext(ctx, req.RepoPrefix, "")
+	before, found, err := any(b.Store).(*store_sqlite.Store).ContractInputStateContext(ctx, req.RepoPrefix, "")
 	require.NoError(t, err)
 	require.True(t, found)
-	baseline, err := b.Store.ContractBoundaryReceiptBaselineContext(ctx, req.RepoPrefix, "")
+	baseline, err := any(b.Store).(*store_sqlite.Store).ContractBoundaryReceiptBaselineContext(ctx, req.RepoPrefix, "")
 	require.NoError(t, err)
 	require.NotNil(t, baseline)
 	id, report := buildClaimedBaseWithReport(t, b, ClaimedDedicatedBaseRequest{Claim: claim, RootPath: req.RootPath, WorkspaceID: req.WorkspaceID, ProjectID: req.ProjectID})
 	route, _ := claimedRoute(t, logs)
 	require.Equal(t, "copy_generation_zero", route, "accepted primary policy must not force a second full-tree reparse")
 	require.Contains(t, report.IndexedPaths, "base.go", "copy report retains actual copied inventory")
-	physical := b.Store.AtGeneration(id)
+	physical := any(b.Store).(*store_sqlite.Store).AtGeneration(id)
 	after, found, err := physical.ContractInputStateContext(ctx, req.RepoPrefix, "")
 	require.NoError(t, err)
 	require.True(t, found)
@@ -122,7 +122,7 @@ func TestClaimedAsyncBaseCopiesCertifiedPrimaryWithoutReparse(t *testing.T) {
 	afterNodes, afterEdges := claimedBasePayload(view.Reader)
 	require.Equal(t, beforeNodes, afterNodes)
 	require.Equal(t, beforeEdges, afterEdges)
-	m := &graphview.Materializer{Store: b.Store, Catalog: b.Store.Catalog(), Leases: graphview.NewLeaseManager()}
+	m := &graphview.Materializer{Store: any(b.Store).(*store_sqlite.Store), Catalog: any(b.Store).(*store_sqlite.Store).Catalog(), Leases: graphview.NewLeaseManager()}
 	selected, err := m.CaptureContractInputs(ctx, view, req.RepoPrefix, req.Identity.CheckoutID)
 	require.NoError(t, err)
 	require.NoError(t, selected.Validate(ctx))
@@ -144,10 +144,10 @@ func TestClaimedAsyncBaseRefusesUncertifiedOrForeignPrimaryPolicy(t *testing.T) 
 				indexAsyncCopyPrimary(t, b, req, true)
 			}
 			if kind == "accepted_without_census" {
-				state, found, err := b.Store.ContractInputStateContext(ctx, req.RepoPrefix, "")
+				state, found, err := any(b.Store).(*store_sqlite.Store).ContractInputStateContext(ctx, req.RepoPrefix, "")
 				require.NoError(t, err)
 				require.True(t, found)
-				require.NoError(t, b.Store.AcceptContractInputMutationWithReceiptsContext(ctx, state, nil))
+				require.NoError(t, any(b.Store).(*store_sqlite.Store).AcceptContractInputMutationWithReceiptsContext(ctx, state, nil))
 			}
 			if kind == "extractor_changed" {
 				state := generationZeroIndexState(t, b, req)
@@ -157,7 +157,7 @@ func TestClaimedAsyncBaseRefusesUncertifiedOrForeignPrimaryPolicy(t *testing.T) 
 			if kind == "runtime_absent" {
 				b.contractCoreRuntime = nil
 			}
-			empty, err := b.Store.AtManagedGeneration(1)
+			empty, err := any(b.Store).(*store_sqlite.Store).AtManagedGeneration(1)
 			require.NoError(t, err)
 			copy, _, _ := b.claimedBaseCopyPlan(ctx, empty, req.RootPath, req.RepoPrefix, req.Identity.TreeOID, req.Identity.ExtractorVersions, true)
 			require.False(t, copy, "policy proof must not bless a legacy, pending, missing-baseline or mismatched source")
@@ -190,9 +190,9 @@ func TestClaimedAsyncBaseRechecksActualCopiedCensusBeforePublish(t *testing.T) {
 	ctx := context.Background()
 	b, req, claim := asyncClaimedCopyFixture(t)
 	indexAsyncCopyPrimary(t, b, req, true)
-	_, _, err := b.BuildClaimedDedicatedBase(ctx, ClaimedDedicatedBaseRequest{Claim: claim, RootPath: req.RootPath, CopySource: asyncCopyPendingProbe{b.Store}})
+	_, _, err := b.BuildClaimedDedicatedBase(ctx, ClaimedDedicatedBaseRequest{Claim: claim, RootPath: req.RootPath, CopySource: asyncCopyPendingProbe{any(b.Store).(*store_sqlite.Store)}})
 	require.ErrorContains(t, err, "copied primary contract input is not accepted")
-	generation, found, err := b.Store.Catalog().GetViewGeneration(ctx, claim.GenerationID)
+	generation, found, err := any(b.Store).(*store_sqlite.Store).Catalog().GetViewGeneration(ctx, claim.GenerationID)
 	require.NoError(t, err)
 	require.True(t, found)
 	require.NotEqual(t, store_sqlite.ViewGenerationReady, generation.State)

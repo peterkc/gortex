@@ -10,7 +10,7 @@ type ContractProjectionDomain struct {
 
 // ContractProjectionCursor contains owned scalar identity only. In particular it
 // retains no store, reader, lease, transaction or context. Its unexported fields
-// can only be minted by a current store capture.
+// are carried through value helpers; captures and validation stay backend-owned.
 type ContractProjectionCursor struct {
 	instance, analysis, input, bindings, admin uint64
 	generation                                 int64

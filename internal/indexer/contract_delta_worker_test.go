@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"fmt"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"os"
 	"reflect"
 	"strings"
@@ -106,7 +107,7 @@ func TestContractFillCheckpointResumesMissingUnitsAndEqualsCold(t *testing.T) {
 	var p *contractDeltaCache
 	scratch := t.TempDir()
 	beforeHeld := f.options.Materializer.Leases.Held()
-	beforeWork, err := f.options.Store.ContractWorkForScopeContext(t.Context(), "fixture", "")
+	beforeWork, err := any(f.options.Store).(*store_sqlite.Store).ContractWorkForScopeContext(t.Context(), "fixture", "")
 	require.NoError(t, err)
 	require.NotEmpty(t, beforeWork)
 	report, err := runFixtureContractJob(t, f.options, contractFixtureJob{layer: 1, cache: &p, scratchParent: scratch, otherActorWaiting: func() bool { return true }})
@@ -126,7 +127,7 @@ func TestContractFillCheckpointResumesMissingUnitsAndEqualsCold(t *testing.T) {
 	attachment, err := f.options.Store.GetContractAttachmentContext(t.Context(), graph.ContractAttachmentKey{RepoPrefix: "fixture", InputVersion: inputs.State.InputVersion, InputFingerprint: inputs.State.InputFingerprint})
 	require.NoError(t, err)
 	require.Nil(t, attachment, "a partial fill never publishes an attachment")
-	afterWork, err := f.options.Store.ContractWorkForScopeContext(t.Context(), "fixture", "")
+	afterWork, err := any(f.options.Store).(*store_sqlite.Store).ContractWorkForScopeContext(t.Context(), "fixture", "")
 	require.NoError(t, err)
 	require.Equal(t, beforeWork, afterWork, "partial fill leaves captured work unacknowledged")
 	kept := make(map[string]*contractUnit)

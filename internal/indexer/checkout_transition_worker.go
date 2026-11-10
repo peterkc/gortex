@@ -124,7 +124,7 @@ func waitModeTransition(ctx context.Context, run *modeTransitionRun) (modeTransi
 // execute. Unknown causes are deliberately left standing: they may belong to a
 // newer binary, and guessing at a destructive mode change is never recovery.
 func (l *CheckoutLifecycle) resumeModeTransitions(ctx context.Context) (int, error) {
-	if l == nil || l.catalog == nil {
+	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) {
 		return 0, nil
 	}
 	transitions, err := l.catalog.ListIntentTransitions(ctx)

@@ -55,7 +55,7 @@ func TestContractCohortWorkSurvivesPrioritySubsetRecaptureAndNextEdit(t *testing
 	run := func(snapshot ContractFollowupSnapshot, targets []ContractFollowupTarget, partial bool) (ContractFollowupBatchReport, error) {
 		session, err := newContractDeltaSession(cache, snapshot, f.options.Config)
 		require.NoError(t, err)
-		req := ContractFollowupBatchRequest{Snapshot: snapshot, Targets: targets, RebuildReason: ContractFollowupUnknownInterval, Registry: f.options.Registry, Config: f.options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: f.options.Materializer.Leases, Yield: f.options.Yield, delta: session}
+		req := ContractFollowupBatchRequest{OpenEvidence: openSlice2TestEvidence, Snapshot: snapshot, Targets: targets, RebuildReason: ContractFollowupUnknownInterval, Registry: f.options.Registry, Config: f.options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: f.options.Materializer.Leases, Yield: f.options.Yield, delta: session}
 		if partial {
 			req.PriorityRepos = []string{"fixture"}
 			req.BackgroundCurrent = func(context.Context) error { return errContractJobKeyMoved }
@@ -146,7 +146,7 @@ func TestContractCohortWorkSurvivesPrioritySubsetRecaptureAndNextEdit(t *testing
 	var payload *store_sqlite.Store
 	for _, target := range all {
 		if target.Key.RepoPrefix == "fixture" {
-			payload = target.Payload
+			payload = any(target.Payload).(*store_sqlite.Store)
 		}
 	}
 	require.NotNil(t, payload)

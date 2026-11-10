@@ -28,7 +28,7 @@ func (s *Server) retireDeadPendingSourceIncarnations() {
 	}
 	var catalog *store_sqlite.Catalog
 	if s.materializer != nil {
-		catalog = s.materializer.Catalog
+		catalog = s.materializer.Catalog.(*store_sqlite.Catalog)
 	}
 	if catalog == nil {
 		if store, ok := s.graph.(*store_sqlite.Store); ok {

@@ -5,11 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"github.com/zzet/gortex/internal/storage"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Folding a chain in steps.

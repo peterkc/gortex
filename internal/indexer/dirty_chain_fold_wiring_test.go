@@ -334,7 +334,7 @@ func TestSteppedFoldCanceledHalfWayIsSweptAndTheNextFoldStartsClean(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	fold, err := storeChainFoldBackend{store: f.store}.BeginChainFold(context.Background(), folded, to, "crash")
+	fold, err := storeChainFoldBackend{store: f.store, catalog: slice2TestCatalog(f.store)}.BeginChainFold(context.Background(), folded, to, "crash")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,7 +414,7 @@ func TestSteppedFoldOverALargeChainObeysTheWALMark(t *testing.T) {
 		t.Fatalf("depth %d after four edits (%s)", trigger.DirtyChainDepth, trigger.DirtyChainReason)
 	}
 	const mark = 1 << 30
-	probe := &walMarkProbe{inner: storeChainFoldBackend{store: f.store}, store: f.store, mark: mark}
+	probe := &walMarkProbe{inner: storeChainFoldBackend{store: f.store, catalog: slice2TestCatalog(f.store)}, store: f.store, mark: mark}
 	c.compaction.backend = probe
 	report := c.compactDirtyChain(context.Background(), trigger)
 	t.Logf("fold over 4x%d files: %s landing %q, %d steps, %d refused over the mark, worst log at a committed step %d bytes",
@@ -556,7 +556,7 @@ func TestSteppedFoldKeepsTheStackKeyAcrossItsLanding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	backend := storeChainFoldBackend{store: store}
+	backend := storeChainFoldBackend{store: store, catalog: slice2TestCatalog(store)}
 	fold, err := backend.BeginChainFold(ctx, lower, to, "test")
 	if err != nil {
 		t.Fatal(err)

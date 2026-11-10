@@ -31,7 +31,7 @@ func newDedicatedAdvanceFixture(t testing.TB) *dedicatedAdvanceFixture {
 	b, request, claim := privateClaimedDedicatedFixture(t)
 	return &dedicatedAdvanceFixture{
 		builder: b, request: request,
-		publisher: &dedicatedBasePublisher{runtime: &dedicatedBaseRuntime{store: b.Store}, authority: claim.Desire.Authority},
+		publisher: &dedicatedBasePublisher{runtime: &dedicatedBaseRuntime{catalog: slice2TestCatalog(b.Store), store: b.Store}, authority: claim.Desire.Authority},
 		leases:    graphview.NewLeaseManager(), identity: claim.Desire.Identity, workspace: request.WorkspaceID,
 	}
 }
@@ -51,7 +51,7 @@ func (f *dedicatedAdvanceFixture) git(t testing.TB, args ...string) string {
 
 func (f *dedicatedAdvanceFixture) observe(t testing.TB, ctx context.Context) (dedicatedBaseObservation, error) {
 	t.Helper()
-	g, found, err := f.builder.Store.Catalog().GetDedicatedGraph(ctx, f.publisher.authority.GraphID)
+	g, found, err := any(f.builder.Store).(*store_sqlite.Store).Catalog().GetDedicatedGraph(ctx, f.publisher.authority.GraphID)
 	if err != nil {
 		return dedicatedBaseObservation{}, err
 	}
@@ -90,7 +90,7 @@ func (f *dedicatedAdvanceFixture) commitFile(t testing.TB, value string) {
 
 func (f *dedicatedAdvanceFixture) view(t testing.TB, ctx context.Context, generation int64) *graphview.RepoView {
 	t.Helper()
-	m := graphview.Materializer{Store: f.builder.Store, Catalog: f.builder.Store.Catalog(), Leases: f.leases, Logger: f.builder.Logger}
+	m := graphview.Materializer{Store: any(f.builder.Store).(*store_sqlite.Store), Catalog: any(f.builder.Store).(*store_sqlite.Store).Catalog(), Leases: f.leases, Logger: f.builder.Logger}
 	v, err := m.MaterializeRefView(ctx, f.publisher.authority.GraphID, generation)
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +132,7 @@ func TestDedicatedBaseCurrentInitialDeltaAndReadyReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	observation.RootPath = filepath.Join(t.TempDir(), "absent-git-root")
-	check, err := installDedicatedWriteAudit(ctx, f.builder.Store, f.request.StorePath)
+	check, err := installDedicatedWriteAudit(ctx, any(f.builder.Store).(*store_sqlite.Store), f.request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func TestDedicatedBaseCurrentStaleBuildCannotAdopt(t *testing.T) {
 			return observation, err
 		}
 		observation.PrePublish = func(ctx context.Context, _ int64) error {
-			publication, found, err := f.builder.Store.Catalog().DedicatedBasePublication(ctx, f.publisher.authority.GraphID)
+			publication, found, err := any(f.builder.Store).(*store_sqlite.Store).Catalog().DedicatedBasePublication(ctx, f.publisher.authority.GraphID)
 			if err != nil {
 				return err
 			}
@@ -221,7 +221,7 @@ func TestDedicatedBaseCurrentStaleBuildCannotAdopt(t *testing.T) {
 			}
 			newer := observation.Identity
 			newer.ConfigHash += "-newer-observation"
-			_, err = f.builder.Store.Catalog().RecordDedicatedBaseDesire(ctx, store_sqlite.RecordDedicatedBaseDesireRequest{Authority: f.publisher.authority, ExpectedDesiredEpoch: publication.Desire.Epoch, Identity: newer})
+			_, err = any(f.builder.Store).(*store_sqlite.Store).Catalog().RecordDedicatedBaseDesire(ctx, store_sqlite.RecordDedicatedBaseDesireRequest{Authority: f.publisher.authority, ExpectedDesiredEpoch: publication.Desire.Epoch, Identity: newer})
 			return err
 		}
 		return observation, nil
@@ -229,7 +229,7 @@ func TestDedicatedBaseCurrentStaleBuildCannotAdopt(t *testing.T) {
 	if !errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
 		t.Fatalf("stale build adopted: %+v, %v", out, err)
 	}
-	graph, found, err := f.builder.Store.Catalog().GetDedicatedGraph(ctx, f.publisher.authority.GraphID)
+	graph, found, err := any(f.builder.Store).(*store_sqlite.Store).Catalog().GetDedicatedGraph(ctx, f.publisher.authority.GraphID)
 	if err != nil || !found || graph.ActiveGenerationID != initial.Claim.GenerationID {
 		t.Fatalf("stale build replaced active root: %+v, %v", graph, err)
 	}
@@ -253,7 +253,7 @@ func TestDedicatedBaseCurrentReconstructsPreAuthorityActive(t *testing.T) {
 			b, request, git := privateDedicatedBuilderFixture(t)
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
-			catalog := b.Store.Catalog()
+			catalog := any(b.Store).(*store_sqlite.Store).Catalog()
 			// The physical builder fixture already registered this Git family and
 			// its canonical owner. Reuse that binding rather than inventing a
 			// second family with the same unique common directory.
@@ -275,7 +275,7 @@ func TestDedicatedBaseCurrentReconstructsPreAuthorityActive(t *testing.T) {
 				t.Fatal(err)
 			}
 			legacyID := request.RepoPrefix + "/legacy_only.go::UntrustedDirtyLegacy"
-			b.Store.AtGeneration(legacy).AddNode(&graph.Node{ID: legacyID, Name: "UntrustedDirtyLegacy", Kind: graph.KindFunction, FilePath: request.RepoPrefix + "/legacy_only.go", RepoPrefix: request.RepoPrefix, Language: "go"})
+			any(b.Store).(*store_sqlite.Store).AtGeneration(legacy).AddNode(&graph.Node{ID: legacyID, Name: "UntrustedDirtyLegacy", Kind: graph.KindFunction, FilePath: request.RepoPrefix + "/legacy_only.go", RepoPrefix: request.RepoPrefix, Language: "go"})
 			if err := catalog.PublishViewGeneration(ctx, legacy, 2); err != nil {
 				t.Fatal(err)
 			}
@@ -290,7 +290,7 @@ func TestDedicatedBaseCurrentReconstructsPreAuthorityActive(t *testing.T) {
 			if authority.GenerationFloor < legacy {
 				t.Fatalf("legacy not fenced: %+v", authority)
 			}
-			f := &dedicatedAdvanceFixture{builder: b, request: request, publisher: &dedicatedBasePublisher{runtime: &dedicatedBaseRuntime{store: b.Store}, authority: authority}, leases: graphview.NewLeaseManager(), identity: identity, workspace: request.WorkspaceID}
+			f := &dedicatedAdvanceFixture{builder: b, request: request, publisher: &dedicatedBasePublisher{runtime: &dedicatedBaseRuntime{catalog: slice2TestCatalog(b.Store), store: b.Store}, authority: authority}, leases: graphview.NewLeaseManager(), identity: identity, workspace: request.WorkspaceID}
 			if change == "new-tree" {
 				f.commitFile(t, "package dedicated\nfunc AdvancementMarker() int { return 1 }\n")
 			}
@@ -305,7 +305,7 @@ func TestDedicatedBaseCurrentReconstructsPreAuthorityActive(t *testing.T) {
 			if f.view(t, ctx, result.Claim.GenerationID).Reader.GetNode(legacyID) != nil {
 				t.Fatal("legacy dirty payload leaked into rebuilt committed root")
 			}
-			if b.Store.AtGeneration(legacy).GetNode(legacyID) == nil {
+			if any(b.Store).(*store_sqlite.Store).AtGeneration(legacy).GetNode(legacyID) == nil {
 				t.Fatal("adoption unexpectedly retired old payload")
 			}
 		})
@@ -320,7 +320,7 @@ func TestDedicatedBaseAdvanceParentDepthPolicy(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	initial := f.ensure(t, ctx)
-	catalog := f.builder.Store.Catalog()
+	catalog := any(f.builder.Store).(*store_sqlite.Store).Catalog()
 	parent, found, err := catalog.GetViewGeneration(ctx, initial.Claim.GenerationID)
 	if err != nil || !found {
 		t.Fatalf("initial row: found=%v err=%v", found, err)
@@ -417,7 +417,7 @@ func TestDedicatedBaseCurrentHistoricalDeltaUsesReturnedParent(t *testing.T) {
 	if reused.Claim.GenerationID != first.Claim.GenerationID || reused.Claim.BaseGenerationID != initial.Claim.GenerationID || reused.Claim.ExpectedActiveGenerationID != second.Claim.GenerationID || !reused.Report.Coalesced || reused.Adoption.AlreadyAdopted || physicalCallbacks != 0 {
 		t.Fatalf("historical dispatch/adoption mismatch: %+v callbacks=%d", reused, physicalCallbacks)
 	}
-	graphRow, found, err := f.builder.Store.Catalog().GetDedicatedGraph(ctx, f.publisher.authority.GraphID)
+	graphRow, found, err := any(f.builder.Store).(*store_sqlite.Store).Catalog().GetDedicatedGraph(ctx, f.publisher.authority.GraphID)
 	if err != nil || !found || graphRow.ActiveGenerationID != first.Claim.GenerationID {
 		t.Fatalf("historical candidate was not adopted: %+v found=%v err=%v", graphRow, found, err)
 	}
@@ -485,11 +485,11 @@ func TestDedicatedBaseCurrentCanceledDeltaFollowerKeepsLeader(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) || follower.Claim.GenerationID != generation || follower.Claim.Status == "allocated" {
 		t.Fatalf("follower did not join then cancel: %+v err=%v", follower, err)
 	}
-	if !f.builder.Store.PayloadBuildFlightActive(generation) || !f.leases.InUse(initial.Claim.GenerationID) {
+	if !any(f.builder.Store).(*store_sqlite.Store).PayloadBuildFlightActive(generation) || !f.leases.InUse(initial.Claim.GenerationID) {
 		t.Fatal("canceled follower removed the leader's flight or parent lease")
 	}
 	claim := follower.Claim
-	validated, err := f.builder.Store.Catalog().ClaimDedicatedBaseBuild(ctx, store_sqlite.ClaimDedicatedBaseBuildRequest{
+	validated, err := any(f.builder.Store).(*store_sqlite.Store).Catalog().ClaimDedicatedBaseBuild(ctx, store_sqlite.ClaimDedicatedBaseBuildRequest{
 		ExistingGenerationID: claim.GenerationID, Desire: claim.Desire,
 		ExpectedActiveGenerationID: claim.ExpectedActiveGenerationID, AttemptToken: claim.AttemptToken,
 		BaseGenerationID: claim.BaseGenerationID, LayerID: claim.LayerID, LowerViewFingerprint: claim.LowerViewFingerprint,
@@ -504,7 +504,7 @@ func TestDedicatedBaseCurrentCanceledDeltaFollowerKeepsLeader(t *testing.T) {
 	if leader.err != nil || leader.result.Adoption.GenerationID != generation {
 		t.Fatalf("leader could not finish after follower cancellation: %+v err=%v", leader.result, leader.err)
 	}
-	if f.builder.Store.PayloadBuildFlightActive(generation) || f.leases.InUse(initial.Claim.GenerationID) {
+	if any(f.builder.Store).(*store_sqlite.Store).PayloadBuildFlightActive(generation) || f.leases.InUse(initial.Claim.GenerationID) {
 		t.Fatal("completed delta retained its flight or private lower lease")
 	}
 	replay := f.ensure(t, ctx)
@@ -531,12 +531,12 @@ func TestDedicatedBaseCurrentPhysicalFailurePreservesActiveAndCharacterizesRetry
 	if !errors.Is(err, physicalFailure) || failed.Claim.GenerationID <= 0 || failed.Adoption.GenerationID != 0 {
 		t.Fatalf("physical failure returned success/partial adoption: %+v err=%v", failed, err)
 	}
-	catalog := f.builder.Store.Catalog()
+	catalog := any(f.builder.Store).(*store_sqlite.Store).Catalog()
 	beforeRetry, found, err := catalog.GetDedicatedGraph(ctx, f.publisher.authority.GraphID)
 	if err != nil || !found || beforeRetry.ActiveGenerationID != initial.Claim.GenerationID {
 		t.Fatalf("physical failure changed active: %+v found=%v err=%v", beforeRetry, found, err)
 	}
-	if f.builder.Store.PayloadBuildFlightActive(failed.Claim.GenerationID) || f.leases.InUse(initial.Claim.GenerationID) {
+	if any(f.builder.Store).(*store_sqlite.Store).PayloadBuildFlightActive(failed.Claim.GenerationID) || f.leases.InUse(initial.Claim.GenerationID) {
 		t.Fatal("failed physical owner retained its flight or private parent lease")
 	}
 	row, rowFound, rowErr := catalog.GetViewGeneration(ctx, failed.Claim.GenerationID)
@@ -605,7 +605,7 @@ func TestDedicatedDeltaBuildTakesItsFactHintsFromTheWholeAncestry(t *testing.T) 
 
 	// The generation a single-handle scope would read holds no facts of its
 	// own, which is the blindness this pins.
-	parentFacts, err := f.builder.Store.AtGeneration(parent).LoadRefFactsByFiles(prefix, nil)
+	parentFacts, err := any(f.builder.Store).(*store_sqlite.Store).AtGeneration(parent).LoadRefFactsByFiles(prefix, nil)
 	if err != nil {
 		t.Fatalf("read generation %d's facts: %v", parent, err)
 	}
@@ -633,7 +633,7 @@ func TestDedicatedDeltaBuildTakesItsFactHintsFromTheWholeAncestry(t *testing.T) 
 		Kind: "calls", RefName: "Committed", Line: 2, Origin: "ast_resolved", Tier: "resolved",
 		FilePath: advancePath, Lang: "go",
 	}
-	if err := f.builder.Store.AtGeneration(0).BulkSetRefFacts(prefix, []graph.RefFact{hint}); err != nil {
+	if err := any(f.builder.Store).(*store_sqlite.Store).AtGeneration(0).BulkSetRefFacts(prefix, []graph.RefFact{hint}); err != nil {
 		t.Fatalf("seed the corpus hint: %v", err)
 	}
 
@@ -645,7 +645,7 @@ func TestDedicatedDeltaBuildTakesItsFactHintsFromTheWholeAncestry(t *testing.T) 
 	}
 
 	claimed := map[string]bool{}
-	for _, path := range claimedPaths(t, f.builder.Store, delta.Claim.GenerationID) {
+	for _, path := range claimedPaths(t, any(f.builder.Store).(*store_sqlite.Store), delta.Claim.GenerationID) {
 		claimed[path] = true
 	}
 	if !claimed[advancePath] {
@@ -656,7 +656,7 @@ func TestDedicatedDeltaBuildTakesItsFactHintsFromTheWholeAncestry(t *testing.T) 
 	// rather than as a claim. Either way the closure reached it, and that is
 	// the question the scope of the fact hints decides.
 	reached := map[string]bool{}
-	for _, path := range closurePaths(t, f.builder.Store, delta.Claim.GenerationID) {
+	for _, path := range closurePaths(t, any(f.builder.Store).(*store_sqlite.Store), delta.Claim.GenerationID) {
 		reached[path] = true
 	}
 	if !reached[basePath] {

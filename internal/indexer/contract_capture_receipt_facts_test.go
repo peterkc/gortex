@@ -18,7 +18,7 @@ func TestContractCaptureReceiptFactsKeepOpaqueAndFailureDistinct(t *testing.T) {
 	options.selectedInputs = inputs
 	row := opaqueTestReceipt(t, jobRoutes, map[string]string{strings.Repeat("k", contractCoreReceiptKeyBytes+1): "value"})
 	files := map[string]ContractFollowupFile{row.FilePath: {RepoPrefix: "fixture", Path: row.FilePath, Policy: "current-policy"}}
-	handles := map[string][]*store_sqlite.Store{"fixture": {f.store}}
+	handles := map[string][]generationPayloadStore{"fixture": {f.store}}
 	persist := func(row graph.ContractBoundaryReceipt) {
 		row.Accepted = false
 		require.NoError(t, f.store.SetContractBoundaryReceiptsContext(t.Context(), []graph.ContractBoundaryReceipt{row}))
@@ -50,7 +50,7 @@ func TestContractCaptureReceiptFactsKeepStableRowsAndPendingFallback(t *testing.
 	}
 	options := f.options
 	options.selectedInputs = inputs
-	handles := map[string][]*store_sqlite.Store{"fixture": {f.store}}
+	handles := map[string][]generationPayloadStore{"fixture": {f.store}}
 	facts, err := contractCaptureReceiptFacts(ctx, options, handles, files)
 	require.NoError(t, err)
 	require.Len(t, facts, len(files))
@@ -101,7 +101,7 @@ func TestContractCaptureReceiptFactsDoNotReplaceANewerPendingOwner(t *testing.T)
 	// This lower-level facts check uses real physical building rows. Outer capture
 	// still independently requires accepted selected authority before using it.
 	options.selectedInputs = &graphview.SelectedContractInputs{Witnesses: append(append([]graph.ContractInputWitness(nil), inputs.Witnesses...), graph.ContractInputWitness{GenerationID: generation, State: graph.ContractInputState{RepoPrefix: "fixture", CheckoutID: "linked"}})}
-	facts, err := contractCaptureReceiptFacts(t.Context(), options, map[string][]*store_sqlite.Store{"fixture": {f.store, upper}}, files)
+	facts, err := contractCaptureReceiptFacts(t.Context(), options, map[string][]generationPayloadStore{"fixture": {f.store, upper}}, files)
 	require.NoError(t, err)
 	require.NotContains(t, facts, staged.FilePath, "an older accepted base must not replace the selected pending owner")
 	require.Contains(t, facts, "fixture/routes.go", "unmodified inherited owner remains captured")

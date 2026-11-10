@@ -231,7 +231,7 @@ type InitialBasePublisher struct {
 // runtime there is no authority to publish under, and a substituted lease
 // manager is a silent downgrade rather than an error at the point of use.
 func NewInitialBasePublisher(lifecycle *CheckoutLifecycle) (*InitialBasePublisher, error) {
-	if lifecycle == nil || lifecycle.store == nil || lifecycle.catalog == nil || lifecycle.mi == nil {
+	if lifecycle == nil || (lifecycle.store == nil || lifecycle.store.IsNilGenerationHandle()) || (lifecycle.catalog == nil || lifecycle.catalog.IsNilMaterializerCatalog()) || lifecycle.mi == nil {
 		return nil, fmt.Errorf("%w: publication requires a lifecycle over a store", errInitialBasePublisherInput)
 	}
 	runtime, ok := lifecycle.DedicatedBasePublisherRuntime().(*DedicatedBaseRuntime)
@@ -938,6 +938,7 @@ func (p *InitialBasePublisher) observe(ctx context.Context, graphID, repoPrefix 
 	}
 	sections := dedicatedBaseConfigSections(repoCfg)
 	builder := &SparseGenerationBuilder{
+		Catalog:    l.catalog,
 		Store:      l.store,
 		Registry:   l.mi.registry,
 		Config:     frozen,

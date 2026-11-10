@@ -24,7 +24,6 @@ import (
 	"github.com/zzet/gortex/internal/excludes"
 	"github.com/zzet/gortex/internal/gitstate"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/pathkey"
 	"github.com/zzet/gortex/internal/reconcile"
@@ -88,7 +87,9 @@ type CheckoutLifecycleConfig struct {
 	MultiIndexer *MultiIndexer
 	// ConfigManager persists the tracked-repository list.
 	ConfigManager *config.ConfigManager
-	// Graph is the store; the lifecycle uses its catalog when it has one.
+	// Catalog is the catalog paired with Graph.
+	Catalog CheckoutCatalog
+	// Graph is the opened store itself.
 	Graph  graph.Store
 	Logger *zap.Logger
 	// Reconcile carries the two grace windows. A zero value takes the
@@ -166,8 +167,8 @@ type CheckoutLifecycle struct {
 	routePrewarm routePrewarmerSlot
 	mi           *MultiIndexer
 	cfgMgr       *config.ConfigManager
-	catalog      *store_sqlite.Catalog
-	store        *store_sqlite.Store
+	catalog      CheckoutCatalog
+	store        checkoutGenerationStore
 	leases       *graphview.LeaseManager
 	// Non-Git observations have no catalog intent to distinguish them from
 	// removed config entries. Keep their live root until explicit registration
@@ -461,11 +462,19 @@ func (l *CheckoutLifecycle) clock() time.Time {
 	return time.Now()
 }
 
-// NewCheckoutLifecycle builds the lifecycle. It fails only on a missing
-// indexer; everything else degrades to the pre-catalog behaviour.
+// NewCheckoutLifecycle builds the lifecycle. A physical generation store
+// requires its paired catalog; other stores keep pre-catalog behaviour.
 func NewCheckoutLifecycle(cfg CheckoutLifecycleConfig) (*CheckoutLifecycle, error) {
 	if cfg.MultiIndexer == nil {
 		return nil, errors.New("indexer: checkout lifecycle needs a multi-repo indexer")
+	}
+	// Only the original physical store may own generation lifecycle operations.
+	store, _ := cfg.Graph.(checkoutGenerationStore)
+	if store != nil && (store.IsNilGenerationHandle() || !store.SharesSymbolSearchCore(cfg.Graph)) {
+		store = nil
+	}
+	if store != nil && (cfg.Catalog == nil || cfg.Catalog.IsNilMaterializerCatalog()) {
+		return nil, errors.New("indexer: checkout lifecycle needs the store's paired catalog")
 	}
 	logger := cfg.Logger
 	if logger == nil {
@@ -509,18 +518,11 @@ func NewCheckoutLifecycle(cfg CheckoutLifecycleConfig) (*CheckoutLifecycle, erro
 		l.leases = graphview.NewLeaseManager()
 	}
 
-	provider, ok := cfg.Graph.(interface {
-		Catalog() *store_sqlite.Catalog
-	})
-	if !ok {
+	l.catalog = cfg.Catalog
+	if l.catalog == nil || l.catalog.IsNilMaterializerCatalog() {
 		return l, nil
 	}
-	l.catalog = provider.Catalog()
-	// The coordinators build, publish, route and retire payload generations,
-	// all of which are store operations rather than catalog ones. A backend
-	// that answers with a catalog but is not the SQLite store keeps every
-	// pre-layer behaviour and grows no coordinators.
-	l.store, _ = cfg.Graph.(*store_sqlite.Store)
+	l.store = store
 
 	rcfg := cfg.Reconcile
 	if rcfg.AvailabilityGrace <= 0 || rcfg.RemovalGrace <= 0 {
@@ -875,7 +877,7 @@ func (l *CheckoutLifecycle) recordCheckout(
 	source storage.IntentSourceKind,
 	seeding bool,
 ) (checkoutIdentity, error) {
-	if l.catalog == nil || prefix == "" {
+	if (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) || prefix == "" {
 		return checkoutIdentity{}, nil
 	}
 	if l.RepositoryAdmissionClosed(prefix) {
@@ -1541,7 +1543,7 @@ func (l *CheckoutLifecycle) familyGraphsFor(
 func (l *CheckoutLifecycle) dedicatedBaseConsumers(
 	ctx context.Context, graph storage.DedicatedGraph,
 ) (bool, error) {
-	if l == nil || l.catalog == nil {
+	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) {
 		return false, nil
 	}
 	if graph.FamilyID != "" {
@@ -2128,7 +2130,7 @@ func (l *CheckoutLifecycle) knownFamilies(ctx context.Context) []familyProbe {
 // familyForPrefix reads the family a repo prefix is bound to, empty when the
 // prefix has no dedicated-graph binding.
 func (l *CheckoutLifecycle) familyForPrefix(ctx context.Context, prefix string) string {
-	if l.catalog == nil || prefix == "" {
+	if (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) || prefix == "" {
 		return ""
 	}
 	binding, ok, err := l.catalog.GetDedicatedGraph(ctx, GraphIDFor(prefix))
@@ -2193,7 +2195,7 @@ func (l *CheckoutLifecycle) reconcileCatalogFamily(ctx context.Context, familyID
 // one, so a route under a dedicated checkout routes nothing and holds two
 // generations out of the retirement scan until it goes.
 func (l *CheckoutLifecycle) applyCoordinators(ctx context.Context, report reconcile.FamilyReport) {
-	if l == nil || l.store == nil || l.catalog == nil {
+	if l == nil || l.store == nil || l.store.IsNilGenerationHandle() || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) {
 		return
 	}
 	for i, entry := range report.Checkouts {
@@ -2444,7 +2446,7 @@ func (l *CheckoutLifecycle) activateCheckout(ctx context.Context, checkoutID str
 // when it is still a ready automatic checkout with a primary. It reports
 // whether it got as far as ensureCoordinator.
 func (l *CheckoutLifecycle) startCheckoutCoordinator(ctx context.Context, checkoutID string) bool {
-	if l.catalog == nil {
+	if l.catalog == nil || l.catalog.IsNilMaterializerCatalog() {
 		return false
 	}
 	checkout, found, err := l.catalog.GetCheckout(ctx, checkoutID)
@@ -2509,7 +2511,7 @@ func (l *CheckoutLifecycle) stopAwaitingPrimary(primaryGraphID, checkoutID strin
 // skip in either order is recorded here first. Each retry runs as an
 // activation on the lifecycle's own context, so Close joins it.
 func (l *CheckoutLifecycle) PrimaryRegistered(prefix string) {
-	if l == nil || l.catalog == nil || prefix == "" {
+	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) || prefix == "" {
 		return
 	}
 	l.awaitingPrimaryMu.Lock()
@@ -2682,7 +2684,7 @@ func (l *CheckoutLifecycle) clearCoordinatorStartFailure(checkoutID string) {
 func (l *CheckoutLifecycle) buildCoordinator(
 	ctx context.Context, primaryGraphID string, checkout storage.Checkout,
 ) (*CheckoutCoordinator, error) {
-	if l.store == nil || l.catalog == nil {
+	if l.store == nil || l.store.IsNilGenerationHandle() || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) {
 		return nil, nil
 	}
 	// The construction-time admission. It is handed to the coordinator below
@@ -2739,6 +2741,7 @@ func (l *CheckoutLifecycle) buildCoordinator(
 	}
 	index = frozen
 	builder := &SparseGenerationBuilder{
+		Catalog:    l.catalog,
 		Store:      l.store,
 		Registry:   l.mi.registry,
 		Config:     index,
@@ -2755,6 +2758,7 @@ func (l *CheckoutLifecycle) buildCoordinator(
 	}
 	builder = l.installContractCoreBuilder(builder)
 	coordinator, err := NewCheckoutCoordinator(CheckoutCoordinatorConfig{
+		Catalog:        l.catalog,
 		GitWork:        &l.gitWork,
 		PrewarmRoute:   l.routePrewarm.call,
 		CheckoutID:     checkout.CheckoutID,
@@ -3314,7 +3318,7 @@ func (l *CheckoutLifecycle) stopCheckoutWorkspaces(root string) {
 // coordinator is left to offer them. New debt is counted owed and wakes an
 // idle retirement worker, as a coordinator's deferral does.
 func (l *CheckoutLifecycle) oweRetirement(generations ...int64) {
-	if l == nil || l.store == nil || len(generations) == 0 {
+	if l == nil || l.store == nil || l.store.IsNilGenerationHandle() || len(generations) == 0 {
 		return
 	}
 	added := make([]int64, 0, len(generations))
@@ -3331,7 +3335,7 @@ func (l *CheckoutLifecycle) oweRetirement(generations ...int64) {
 	l.coordMu.Unlock()
 	for _, generationID := range added {
 		var owedStore graph.Store
-		if l.store != nil {
+		if l.store != nil && !l.store.IsNilGenerationHandle() {
 			owedStore = l.store
 		}
 		countRetirementOwed(owedStore, generationID, viewmetrics.OwedReleased)
@@ -3349,7 +3353,7 @@ func (l *CheckoutLifecycle) oweRetirement(generations ...int64) {
 // else in the catalog names a checkout's layers — and the payload would sit in
 // the database with no id anything could offer for collection.
 func (l *CheckoutLifecycle) oweRoutedGenerations(ctx context.Context, checkoutID string) {
-	if l == nil || l.catalog == nil || checkoutID == "" {
+	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) || checkoutID == "" {
 		return
 	}
 	route, found, err := l.catalog.GetCheckoutRoute(ctx, checkoutID)
@@ -3369,7 +3373,7 @@ func (l *CheckoutLifecycle) oweRoutedGenerations(ctx context.Context, checkoutID
 // first is what keeps the read cheap for the checkouts — every dedicated one,
 // every sweep — that have no route at all.
 func (l *CheckoutLifecycle) withdrawStaleRoute(ctx context.Context, checkoutID string) {
-	if l == nil || l.catalog == nil || checkoutID == "" {
+	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) || checkoutID == "" {
 		return
 	}
 	route, found, err := l.catalog.GetCheckoutRoute(ctx, checkoutID)
@@ -3596,7 +3600,7 @@ func (l *CheckoutLifecycle) sweepRetirements(ctx context.Context) int {
 	for _, coordinator := range coordinators {
 		retired += coordinator.SweepRetirements(ctx)
 	}
-	if l.store == nil {
+	if l.store == nil || l.store.IsNilGenerationHandle() {
 		return retired
 	}
 	owed = append(owed, l.orphanedGenerations(ctx, served, owed)...)
@@ -3609,7 +3613,7 @@ func (l *CheckoutLifecycle) sweepRetirements(ctx context.Context) int {
 		started := time.Now()
 		var generation storage.ViewGeneration
 		prefix := ""
-		if l.catalog != nil {
+		if l.catalog != nil && !l.catalog.IsNilMaterializerCatalog() {
 			generation, _, _ = l.catalog.GetViewGeneration(ctx, generationID)
 			if graph, found, _ := l.catalog.GetDedicatedGraph(ctx, generation.GraphID); found {
 				prefix = graph.RepoPrefix
@@ -3692,7 +3696,7 @@ func (l *CheckoutLifecycle) orphanedGenerations(
 	served map[string]struct{},
 	known []int64,
 ) []int64 {
-	if l.catalog == nil {
+	if l.catalog == nil || l.catalog.IsNilMaterializerCatalog() {
 		return nil
 	}
 	seen := make(map[int64]struct{}, len(known))
@@ -4011,7 +4015,7 @@ func (l *CheckoutLifecycle) dedicatedChainRetirementCandidates(
 	ctx context.Context,
 	rows []storage.ViewGeneration,
 ) []storage.ViewGeneration {
-	if l == nil || l.catalog == nil || len(rows) == 0 {
+	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) || len(rows) == 0 {
 		return nil
 	}
 	pins := l.pinnedDedicatedBases()
@@ -4243,7 +4247,7 @@ func (l *CheckoutLifecycle) walkDedicatedChain(
 // selected root binds normally below and reconcile brings the retained corpus
 // into agreement with that root.
 func (l *CheckoutLifecycle) repairLegacyConfiguredBinding(ctx context.Context, entry config.RepoEntry) error {
-	if l.catalog == nil || l.mi.GetMetadata(entry.Name) != nil {
+	if (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) || l.mi.GetMetadata(entry.Name) != nil {
 		return nil
 	}
 	binding, found, err := l.catalog.GetDedicatedGraph(ctx, GraphIDFor(entry.Name))
@@ -4571,7 +4575,7 @@ func (h cleanupHooks) ReleaseGraph(ctx context.Context, graphID, cause string) e
 func (l *CheckoutLifecycle) cohortSubjectForGraph(
 	ctx context.Context, graphID string,
 ) (prefix, workspaceID string, served bool, err error) {
-	if l == nil || l.catalog == nil || graphID == "" {
+	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) || graphID == "" {
 		return "", "", false, nil
 	}
 	read := l.catalog.GetDedicatedGraph
@@ -4815,7 +4819,7 @@ func (l *CheckoutLifecycle) ResolvePrefix(pathOrPrefix string) string {
 // checkoutForPrefix reads the checkout a repo prefix is bound to, nil when
 // the prefix has no catalog identity.
 func (l *CheckoutLifecycle) checkoutForPrefix(ctx context.Context, prefix string) (*storage.Checkout, error) {
-	if l.catalog == nil || prefix == "" {
+	if (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) || prefix == "" {
 		return nil, nil
 	}
 	graph, ok, err := l.catalog.GetDedicatedGraph(ctx, GraphIDFor(prefix))
@@ -4831,7 +4835,7 @@ func (l *CheckoutLifecycle) checkoutForPrefix(ctx context.Context, prefix string
 
 // prefixForCheckout resolves a checkout back to the repo prefix serving it.
 func (l *CheckoutLifecycle) prefixForCheckout(ctx context.Context, checkoutID string) string {
-	if l.catalog == nil || checkoutID == "" {
+	if (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) || checkoutID == "" {
 		return ""
 	}
 	checkout, ok, err := l.catalog.GetCheckout(ctx, checkoutID)

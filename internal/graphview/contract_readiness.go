@@ -29,16 +29,20 @@ type ContractReadiness struct {
 // ContractReadiness reads the primary corpus when no routed RepoView was
 // selected. It still requires explicit per-repo baseline authority.
 func (m *Materializer) ContractReadiness(ctx context.Context, selection ContractSelection) (ContractReadiness, error) {
-	if m == nil || m.Store == nil {
+	if m == nil || m.Store == nil || m.Store.IsNilGenerationHandle() {
 		return ContractReadiness{State: StateUnavailable}, nil
 	}
-	return readContractReadiness(ctx, m.Store.AtGeneration(BaseCorpusGeneration), nil, "", selection)
+	base, ok := m.Store.AtGenerationStore(BaseCorpusGeneration).(contractReadinessHandle)
+	if !ok {
+		return ContractReadiness{}, graph.ErrContractInputVector
+	}
+	return readContractReadiness(ctx, base, nil, "", selection)
 }
 
 // ContractReadiness reads explicit producer debt only on demand. Ordinary
 // source, symbol and local caller materialization never reads token history.
 func (v *RepoView) ContractReadiness(ctx context.Context, selection ContractSelection) (ContractReadiness, error) {
-	if v == nil || v.contractStore == nil {
+	if v == nil || v.contractStore == nil || v.contractStore.IsNilGenerationHandle() {
 		return ContractReadiness{State: StateUnavailable}, nil
 	}
 	if len(selection.RepoPrefixes) == 0 {
@@ -46,7 +50,11 @@ func (v *RepoView) ContractReadiness(ctx context.Context, selection ContractSele
 	}
 	var base contractReadinessHandle
 	if v.ComposesBaseCorpus() {
-		base = v.contractStore.AtGeneration(BaseCorpusGeneration)
+		var ok bool
+		base, ok = v.contractStore.AtGenerationStore(BaseCorpusGeneration).(contractReadinessHandle)
+		if !ok {
+			return ContractReadiness{}, graph.ErrContractInputVector
+		}
 	}
 	handles := make([]contractReadinessHandle, 0, len(v.sources))
 	for _, source := range v.sources {

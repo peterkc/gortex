@@ -912,10 +912,10 @@ func (s *Server) freshnessWaitTarget(
 	if checkoutID == "" {
 		return store_sqlite.Checkout{}, freshReasonCommittedBaseAdvance, false
 	}
-	if s == nil || s.materializer == nil || s.materializer.Catalog == nil {
+	if s == nil || s.materializer == nil || s.materializer.Catalog.(*store_sqlite.Catalog) == nil {
 		return store_sqlite.Checkout{}, freshReasonWaitTargetUnavailable, false
 	}
-	checkout, found, err := s.materializer.Catalog.GetCheckout(ctx, checkoutID)
+	checkout, found, err := s.materializer.Catalog.(*store_sqlite.Catalog).GetCheckout(ctx, checkoutID)
 	if err != nil || !found {
 		return store_sqlite.Checkout{}, freshReasonWaitTargetUnavailable, false
 	}
@@ -931,10 +931,10 @@ func (s *Server) freshnessWaitTarget(
 // catalog wired, a catalog read that failed, or a route row that is gone —
 // which is a fact about the lookup and never about the view.
 func (s *Server) publishedCheckoutRoute(ctx context.Context, checkoutID string) (store_sqlite.CheckoutRoute, bool) {
-	if s == nil || s.materializer == nil || s.materializer.Catalog == nil || checkoutID == "" {
+	if s == nil || s.materializer == nil || s.materializer.Catalog.(*store_sqlite.Catalog) == nil || checkoutID == "" {
 		return store_sqlite.CheckoutRoute{}, false
 	}
-	route, found, err := s.materializer.Catalog.GetCheckoutRoute(ctx, checkoutID)
+	route, found, err := s.materializer.Catalog.(*store_sqlite.Catalog).GetCheckoutRoute(ctx, checkoutID)
 	if err != nil || !found {
 		return store_sqlite.CheckoutRoute{}, false
 	}
@@ -1243,7 +1243,7 @@ func (s *Server) viewForSessionCWD(ctx context.Context) (*requestView, error) {
 		return nil, err
 	}
 	requested := graphview.Selector{Kind: graphview.SelectorWorktree, CheckoutID: checkout.CheckoutID}
-	route, routeFound, routeErr := s.materializer.Catalog.GetCheckoutRoute(ctx, checkout.CheckoutID)
+	route, routeFound, routeErr := s.materializer.Catalog.(*store_sqlite.Catalog).GetCheckoutRoute(ctx, checkout.CheckoutID)
 	if routeErr == nil && routeFound && !graphview.RouteReady(route) {
 		// Route exists but is not serving both generation slots. Mutative
 		// tools refuse (writing the base corpus instead of this checkout is
@@ -1434,7 +1434,7 @@ func graceBaseFallback(
 // the graph's own repository, which is what makes the label a served view
 // rather than a decoration.
 func (s *Server) viewForBaseSelector(ctx context.Context, selector graphview.Selector) (*requestView, error) {
-	dedicated, found, err := s.materializer.Catalog.GetDedicatedGraph(ctx, selector.GraphID)
+	dedicated, found, err := s.materializer.Catalog.(*store_sqlite.Catalog).GetDedicatedGraph(ctx, selector.GraphID)
 	switch {
 	case err != nil:
 		return nil, graphview.WrapViewError(graphview.CodeCheckoutInaccessible,
@@ -2243,7 +2243,7 @@ func (s *Server) materializeRequestView(
 ) (*requestView, error) {
 	rider := graphview.NewViewRider(requested)
 	rider.CheckoutID = checkout.CheckoutID
-	route, found, err := s.materializer.Catalog.GetCheckoutRoute(ctx, checkout.CheckoutID)
+	route, found, err := s.materializer.Catalog.(*store_sqlite.Catalog).GetCheckoutRoute(ctx, checkout.CheckoutID)
 	switch {
 	case err != nil:
 		return viewFallback(strict, rider, graphview.WrapViewError(graphview.CodeCheckoutInaccessible,
@@ -2353,7 +2353,7 @@ func (s *Server) viewFamilies(ctx context.Context) []string {
 		if prefix == "" {
 			continue
 		}
-		dedicated, found, err := s.materializer.Catalog.GetDedicatedGraph(ctx, indexer.GraphIDFor(prefix))
+		dedicated, found, err := s.materializer.Catalog.(*store_sqlite.Catalog).GetDedicatedGraph(ctx, indexer.GraphIDFor(prefix))
 		if err != nil || !found || dedicated.FamilyID == "" || seen[dedicated.FamilyID] {
 			continue
 		}
@@ -2382,7 +2382,7 @@ func (s *Server) familyPrimary(ctx context.Context, familyID string) (store_sqli
 // readiness. Grace selectors first scope this registration's repository, then
 // report readiness only to sessions allowed to observe that primary.
 func (s *Server) familyPrimaryRegistration(ctx context.Context, familyID string) (store_sqlite.DedicatedGraph, error) {
-	graphs, err := s.materializer.Catalog.ListDedicatedGraphs(ctx, familyID)
+	graphs, err := s.materializer.Catalog.(*store_sqlite.Catalog).ListDedicatedGraphs(ctx, familyID)
 	if err != nil {
 		return store_sqlite.DedicatedGraph{}, graphview.WrapViewError(graphview.CodeCheckoutInaccessible,
 			fmt.Sprintf("list the graphs of family %q", familyID), err)
@@ -2419,7 +2419,7 @@ func (s *Server) checkoutInSessionScope(ctx context.Context, checkout store_sqli
 		// for that same-family session; an unrelated unresolved CWD still fails
 		// closed below.
 		if cwd := SessionCWDFromContext(ctx); cwd != "" {
-			_, found, err := graphview.CheckoutForPath(ctx, s.materializer.Catalog,
+			_, found, err := graphview.CheckoutForPath(ctx, s.materializer.Catalog.(*store_sqlite.Catalog),
 				[]string{checkout.FamilyID}, cwd)
 			if err == nil && found {
 				return nil
@@ -2427,7 +2427,7 @@ func (s *Server) checkoutInSessionScope(ctx context.Context, checkout store_sqli
 		}
 		return s.repoPrefixInSessionScope(ctx, "", checkout.CheckoutID)
 	}
-	graphs, err := s.materializer.Catalog.ListDedicatedGraphs(ctx, checkout.FamilyID)
+	graphs, err := s.materializer.Catalog.(*store_sqlite.Catalog).ListDedicatedGraphs(ctx, checkout.FamilyID)
 	if err == nil {
 		for _, dedicated := range graphs {
 			if dedicated.RepoPrefix != "" && repos[dedicated.RepoPrefix] {
@@ -2462,7 +2462,7 @@ func (s *Server) repoPrefixForCheckout(ctx context.Context, checkout store_sqlit
 }
 
 func (s *Server) repoPrefixForCheckoutChecked(ctx context.Context, checkout store_sqlite.Checkout) (string, error) {
-	graphs, err := s.materializer.Catalog.ListDedicatedGraphs(ctx, checkout.FamilyID)
+	graphs, err := s.materializer.Catalog.(*store_sqlite.Catalog).ListDedicatedGraphs(ctx, checkout.FamilyID)
 	if err != nil {
 		return "", err
 	}
@@ -2728,7 +2728,7 @@ var (
 // worker if it is not running. It reads nothing: it is called inside the
 // publication, between published and the flip.
 func (s *Server) queueRouteFTSWarm(materializer *graphview.Materializer, generations []int64) {
-	if s == nil || materializer == nil || materializer.Store == nil || len(generations) == 0 {
+	if s == nil || materializer == nil || (materializer.Store == nil || materializer.Store.IsNilGenerationHandle()) || len(generations) == 0 {
 		return
 	}
 	ctx, done, ok := s.admitBackground()

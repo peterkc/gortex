@@ -68,7 +68,7 @@ type SetPrimaryResult struct {
 // primary that moved between the preview and the confirm is refused rather
 // than overwritten.
 func (l *CheckoutLifecycle) PreviewSetPrimary(ctx context.Context, graphID string) (SetPrimaryPreview, error) {
-	if l == nil || l.catalog == nil {
+	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) {
 		return SetPrimaryPreview{}, errNoCatalog
 	}
 	out := SetPrimaryPreview{GraphID: graphID}

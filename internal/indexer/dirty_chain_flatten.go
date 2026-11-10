@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zzet/gortex/internal/storage"
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 // The copy-based chain compactor.
@@ -42,17 +42,17 @@ var errFlattenRefused = errors.New("indexer: working-tree chain not folded")
 // flattenDirtyChain folds the chain topped by top (rooted at commit) into one
 // generation over commit and publishes it. It does not route it.
 func (c *CheckoutCoordinator) flattenDirtyChain(
-	ctx context.Context, commit store_sqlite.ViewGeneration, top int64,
+	ctx context.Context, commit storage.ViewGeneration, top int64,
 ) (dirtyLayerBuild, error) {
 	return c.flattenDirtyChainOver(ctx, commit, commit, top, c.copyChainAtOnce)
 }
 
 // chainCopier copies a chain (oldest first) into the empty building
 // generation to. finish runs once the fold is published (ok) or abandoned.
-type chainCopier func(ctx context.Context, oldestFirst []int64, to int64) (counts store_sqlite.GenerationCopyCounts, finish func(ctx context.Context, ok bool), err error)
+type chainCopier func(ctx context.Context, oldestFirst []int64, to int64) (counts storage.GenerationCopyCounts, finish func(ctx context.Context, ok bool), err error)
 
 // copyChainAtOnce is the one-shot copy (one transaction per member).
-func (c *CheckoutCoordinator) copyChainAtOnce(ctx context.Context, oldestFirst []int64, to int64) (store_sqlite.GenerationCopyCounts, func(context.Context, bool), error) {
+func (c *CheckoutCoordinator) copyChainAtOnce(ctx context.Context, oldestFirst []int64, to int64) (storage.GenerationCopyCounts, func(context.Context, bool), error) {
 	counts, err := c.store.FlattenGenerationChain(ctx, oldestFirst, to)
 	return counts, func(context.Context, bool) {}, err
 }
@@ -64,7 +64,7 @@ func (c *CheckoutCoordinator) copyChainAtOnce(ctx context.Context, oldestFirst [
 // (the fold above a running fold). The folded generation carries the whole
 // chain's manifest, since it describes the whole working tree.
 func (c *CheckoutCoordinator) flattenDirtyChainOver(
-	ctx context.Context, commit, root store_sqlite.ViewGeneration, top int64, copy chainCopier,
+	ctx context.Context, commit, root storage.ViewGeneration, top int64, copy chainCopier,
 ) (dirtyLayerBuild, error) {
 	built, _, err := c.flattenDirtyChainChecked(ctx, commit, root, top, copy, c.verifyFlattenedChain)
 	return built, err
@@ -78,7 +78,7 @@ type foldVerifier func(ctx context.Context, root int64, oldestFirst []int64, fol
 // nil deliberately skips validation; production inline folds supply the exact
 // verifier. It also returns the folded members, oldest first.
 func (c *CheckoutCoordinator) flattenDirtyChainChecked(
-	ctx context.Context, commit, root store_sqlite.ViewGeneration, top int64, copy chainCopier, verify foldVerifier,
+	ctx context.Context, commit, root storage.ViewGeneration, top int64, copy chainCopier, verify foldVerifier,
 ) (dirtyLayerBuild, []int64, error) {
 	phases := inlineFoldPhasesFrom(ctx)
 	// A planning fold must reenter with ordinary interactive cancellation.
@@ -132,7 +132,7 @@ func (c *CheckoutCoordinator) flattenDirtyChainChecked(
 	}
 
 	phases.next("reservation")
-	generationID, handle, adopted, err := c.store.BeginPayloadGenerationWithStatus(ctx, store_sqlite.PayloadGenerationRequest{
+	generationID, rawHandle, adopted, err := c.store.BeginPayloadGenerationStoreWithStatus(ctx, storage.PayloadGenerationRequest{
 		OwnerKind: head.OwnerKind, GraphID: head.GraphID, LayerID: head.LayerID,
 		CheckoutID: head.CheckoutID, GenerationKind: head.GenerationKind,
 		BaseGenerationID:     root.GenerationID,
@@ -144,6 +144,7 @@ func (c *CheckoutCoordinator) flattenDirtyChainChecked(
 	if err != nil {
 		return dirtyLayerBuild{}, nil, fmt.Errorf("indexer: begin the folded working-tree generation: %w", err)
 	}
+	handle := rawHandle.(generationPayloadStore)
 	if adopted {
 		return dirtyLayerBuild{}, nil, fmt.Errorf("%w: generation %d is being built by another writer", errFlattenRefused, generationID)
 	}
@@ -167,13 +168,13 @@ func (c *CheckoutCoordinator) flattenDirtyChainChecked(
 		return dirtyLayerBuild{}, nil, fmt.Errorf("indexer: fold working-tree chain %v: %w", oldestFirst, err)
 	}
 	phases.next("manifest_write")
-	entries := make([]store_sqlite.InputManifestEntry, 0, len(manifest.entries))
+	entries := make([]storage.InputManifestEntry, 0, len(manifest.entries))
 	for _, e := range manifest.entries {
 		entries = append(entries, e)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].FilePath < entries[j].FilePath })
-	meta := store_sqlite.InputManifestMeta{
-		ManifestVersion: store_sqlite.InputManifestVersion,
+	meta := storage.InputManifestMeta{
+		ManifestVersion: storage.InputManifestVersion,
 		IsFull:          true,
 		EntryCount:      len(entries),
 		PolicyDigest:    manifest.policy,
@@ -193,7 +194,7 @@ func (c *CheckoutCoordinator) flattenDirtyChainChecked(
 		return dirtyLayerBuild{}, nil, err
 	}
 	phases.next("publish_finish")
-	if err := publishCopiedGeneration(ctx, generationID, foldPublication, c.store.PreparePayloadGenerationPublication); err != nil {
+	if err := publishCopiedGeneration(ctx, generationID, foldPublication, c.store.PreparePayloadGenerationPublicationHandle); err != nil {
 		abandon()
 		return dirtyLayerBuild{}, nil, fmt.Errorf("indexer: publish the folded working-tree generation %d: %w", generationID, err)
 	}
@@ -220,7 +221,7 @@ func (c *CheckoutCoordinator) flattenDirtyChainChecked(
 // physical lane. The caller's immutable-ancestry fence and live admission still
 // precede every payload seal, validation and guarded publication.
 func publishCopiedGeneration(ctx context.Context, generationID int64, admission *importFoldPublication,
-	prepare func(context.Context, int64) (*store_sqlite.PreparedPayloadGenerationPublication, error),
+	prepare func(context.Context, int64) (storage.PreparedPayloadPublication, error),
 ) error {
 	publication, err := prepare(ctx, generationID)
 	if err != nil {

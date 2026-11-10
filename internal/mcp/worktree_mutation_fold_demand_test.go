@@ -124,10 +124,10 @@ func TestDefaultWorktreeMutationWaitingForRouteDoesNotBlockRequiredFold(t *testi
 	// A fresh runtime registers the same catalog owner with a fresh lease manager.
 	leases := graphview.NewLeaseManager()
 	f.srv.materializer.Leases = leases
-	fresh, err := indexer.NewCheckoutLifecycle(indexer.CheckoutLifecycleConfig{
+	fresh, err := indexer.NewCheckoutLifecycle(slice2LifecycleConfig(indexer.CheckoutLifecycleConfig{
 		MultiIndexer: f.srv.multiIndexer, ConfigManager: f.srv.configManager,
 		Graph: f.store, Logger: f.srv.logger, ViewLeases: leases,
-	})
+	}))
 	require.NoError(t, err)
 	fresh.SetBuildGate(gate)
 	t.Cleanup(func() { _ = fresh.Close() })

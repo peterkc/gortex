@@ -107,13 +107,13 @@ func newAdjacencyMemoFixtureWithFiles(t *testing.T, extra map[string]string) (*r
 	bm := search.NewNull()
 	mi := indexer.NewMultiIndexer(store, registry, bm, cm, zap.NewNop())
 	leases := graphview.NewLeaseManager()
-	lifecycle, err := indexer.NewCheckoutLifecycle(indexer.CheckoutLifecycleConfig{
+	lifecycle, err := indexer.NewCheckoutLifecycle(slice2LifecycleConfig(indexer.CheckoutLifecycleConfig{
 		MultiIndexer: mi, ConfigManager: cm, Graph: store,
 		Logger: zap.NewNop(), ViewLeases: leases,
-	})
+	}))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = lifecycle.Close() })
-	runtime, err := indexer.NewDedicatedBaseRuntime(store, lifecycle.ViewLeases())
+	runtime, err := indexer.NewDedicatedBaseRuntime(store, store.Catalog(), lifecycle.ViewLeases())
 	require.NoError(t, err)
 	require.NoError(t, lifecycle.SetDedicatedBaseCleanupRuntime(runtime))
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -147,7 +147,7 @@ func newAdjacencyMemoFixtureWithFiles(t *testing.T, extra map[string]string) (*r
 
 	engine := query.NewEngine(store)
 	engine.SetSearch(bm)
-	srv := NewServer(engine, store, nil, nil, zap.NewNop(), nil, MultiRepoOptions{
+	srv := NewServer(engine, store, nil, nil, zap.NewNop(), nil, MultiRepoOptions{Catalog: store.Catalog(),
 		MultiIndexer: mi, ConfigManager: cm,
 	})
 	srv.SetMaterializer(&graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: leases})

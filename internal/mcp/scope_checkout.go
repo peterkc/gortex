@@ -42,7 +42,7 @@ func (s *Server) scopeForAutomaticCheckoutChecked(ctx context.Context, cwd strin
 }
 
 func (s *Server) scopeForAutomaticCheckoutWithPrefix(ctx context.Context, cwd string, lookup func(context.Context, store_sqlite.Checkout) (string, error)) (workspaceID, projectID, repoPrefix string, ok bool, err error) {
-	if s == nil || s.multiIndexer == nil || s.materializer == nil || s.materializer.Catalog == nil {
+	if s == nil || s.multiIndexer == nil || s.materializer == nil || (s.materializer.Catalog == nil || s.materializer.Catalog.IsNilMaterializerCatalog()) {
 		return "", "", "", false, nil
 	}
 	checkout, found, err := s.checkoutForRequestPath(ctx, cwd)

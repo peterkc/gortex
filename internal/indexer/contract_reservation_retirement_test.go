@@ -62,12 +62,12 @@ func TestContractFailedNonemptyReservationHandsOffDurableCleanup(t *testing.T) {
 	}
 	handed := 0
 	wake := DeferredRetirementWake()
-	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Logger: zap.NewNop(), Yield: yield,
+	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: slice2TestCatalog(f.store), OpenEvidence: openSlice2TestEvidence, Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Logger: zap.NewNop(), Yield: yield,
 		Capture: func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
 			t.Fatal("execute already owns its captured snapshot")
 			return ContractFollowupSnapshot{}, nil, nil
 		},
-		RetireReservation: func(ctx context.Context, catalog *store_sqlite.Store, id int64, inUse func(int64) bool) error {
+		RetireReservation: func(ctx context.Context, catalog ContractReservationStore, id int64, inUse func(int64) bool) error {
 			handed++
 			require.Equal(t, reserved, id)
 			require.False(t, inUse(id), "the failed batch released its payload lease before cleanup")

@@ -366,8 +366,8 @@ func (b *SparseGenerationBuilder) BuildDirtyLayer(
 		if req.parent > 0 {
 			var censusStore generationStoreSource
 			var censusCatalog viewGenerationCatalog
-			if b.Store != nil {
-				censusStore, censusCatalog = b.Store, b.Store.Catalog()
+			if b.Store != nil && !b.Store.IsNilGenerationHandle() {
+				censusStore, censusCatalog = b.Store, b.Catalog
 			}
 			chainCensus = dirtyChainLanguageCensus(ctx, censusStore, censusCatalog, req.parent, req.RepoPrefix)
 		}

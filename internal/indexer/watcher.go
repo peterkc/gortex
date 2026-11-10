@@ -21,7 +21,6 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/excludes"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/pathguard"
 	"github.com/zzet/gortex/internal/pathkey"
 	"github.com/zzet/gortex/internal/storage"
@@ -1495,7 +1494,7 @@ func (w *Watcher) guardWatcherPanic(op string) {
 }
 
 func watcherStoragePanicError(op string, recovered any) (error, bool) {
-	storageErr, ok := store_sqlite.StorageErrorFromPanic(recovered)
+	storageErr, ok := storage.StorageErrorFromPanic(recovered)
 	if !ok {
 		return nil, false
 	}
@@ -2311,7 +2310,7 @@ func (w *Watcher) runPointMutationObserved(path string, kind ChangeKind, generat
 	} else {
 		patchErr = w.patchGraphWithReceiptStateObserved(path, kind, generation, false, &fanout, publication)
 	}
-	var storageErr *store_sqlite.StorageError
+	var storageErr *storage.StorageError
 	if errors.As(patchErr, &storageErr) {
 		w.logWatcherStorageFailure("patch "+path, patchErr)
 	}

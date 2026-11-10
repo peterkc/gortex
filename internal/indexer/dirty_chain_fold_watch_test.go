@@ -90,7 +90,7 @@ func TestStarvedSteppedFoldGivesUp(t *testing.T) {
 	core, logs := observer.New(zapcore.InfoLevel)
 	c.logger = zap.New(core)
 	c.compaction.mu.Lock()
-	c.compaction.backend = refusingFoldBackend{inner: storeChainFoldBackend{store: f.store}, err: store_sqlite.ErrChainFoldWALMark}
+	c.compaction.backend = refusingFoldBackend{inner: storeChainFoldBackend{store: f.store, catalog: slice2TestCatalog(f.store)}, err: store_sqlite.ErrChainFoldWALMark}
 	c.compaction.starvation = 300 * time.Millisecond
 	c.compaction.mu.Unlock()
 	started := time.Now()

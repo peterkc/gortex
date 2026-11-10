@@ -6,8 +6,8 @@ import (
 
 	"github.com/zzet/gortex/internal/gitstate"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
+	"github.com/zzet/gortex/internal/storage"
 	"go.uber.org/zap"
 )
 
@@ -56,8 +56,8 @@ const maxChainWalkDepth = min(maxPhysicalChainDepth, graphview.MaxDirtyChainDept
 //
 // It performs at most maxDepth point reads and caches nothing.
 func (c *CheckoutCoordinator) dirtyChainRoot(
-	ctx context.Context, top int64, commit store_sqlite.ViewGeneration, maxDepth int,
-) (chain []store_sqlite.ViewGeneration, ok bool, reason string, err error) {
+	ctx context.Context, top int64, commit storage.ViewGeneration, maxDepth int,
+) (chain []storage.ViewGeneration, ok bool, reason string, err error) {
 	row, found, err := c.catalog.GetViewGeneration(ctx, top)
 	if err != nil {
 		return nil, false, "", err
@@ -70,8 +70,8 @@ func (c *CheckoutCoordinator) dirtyChainRoot(
 
 // dirtyChainRootFrom is dirtyChainRoot for a top row the caller already read.
 func (c *CheckoutCoordinator) dirtyChainRootFrom(
-	ctx context.Context, top store_sqlite.ViewGeneration, commit store_sqlite.ViewGeneration, maxDepth int,
-) (chain []store_sqlite.ViewGeneration, ok bool, reason string, err error) {
+	ctx context.Context, top storage.ViewGeneration, commit storage.ViewGeneration, maxDepth int,
+) (chain []storage.ViewGeneration, ok bool, reason string, err error) {
 	if maxDepth <= 0 {
 		maxDepth = maxChainWalkDepth
 	}
@@ -123,7 +123,7 @@ func (c *CheckoutCoordinator) dirtyChainRootFrom(
 // checkout and layer. The commit generation contributes only its graph and
 // tree — it may be another checkout's layer the coordinator adopted
 // (sharedCommit), so its checkout says nothing about the chain's.
-func dirtyChainHopMatches(hop, top, commit store_sqlite.ViewGeneration) bool {
+func dirtyChainHopMatches(hop, top, commit storage.ViewGeneration) bool {
 	return servableGeneration(hop.State) &&
 		hop.GenerationKind == DirtyLayerGenerationKind &&
 		hop.CheckoutID == top.CheckoutID &&
@@ -141,7 +141,7 @@ func dirtyChainHopMatches(hop, top, commit store_sqlite.ViewGeneration) bool {
 // commitID? A row built direct over that commit generation is accepted exactly
 // as before (servable and sitting on it); anything deeper must pass the full
 // chain walk. It reads the commit row only for a chained row.
-func (c *CheckoutCoordinator) dirtyRootedAt(ctx context.Context, dirty store_sqlite.ViewGeneration, commitID int64) (bool, error) {
+func (c *CheckoutCoordinator) dirtyRootedAt(ctx context.Context, dirty storage.ViewGeneration, commitID int64) (bool, error) {
 	if !servableGeneration(dirty.State) || commitID <= 0 {
 		return false, nil
 	}
@@ -157,7 +157,7 @@ func (c *CheckoutCoordinator) dirtyRootedAt(ctx context.Context, dirty store_sql
 
 // dirtyRootedAtCommit is dirtyRootedAt for a commit row the caller already
 // read.
-func (c *CheckoutCoordinator) dirtyRootedAtCommit(ctx context.Context, dirty, commit store_sqlite.ViewGeneration) (bool, error) {
+func (c *CheckoutCoordinator) dirtyRootedAtCommit(ctx context.Context, dirty, commit storage.ViewGeneration) (bool, error) {
 	if !servableGeneration(dirty.State) {
 		return false, nil
 	}
@@ -177,7 +177,7 @@ func (c *CheckoutCoordinator) dirtyRootedAtCommit(ctx context.Context, dirty, co
 // (generationIdentityKey), because two builds over different parents are not
 // the same physical build. For a generation built direct the two keys are
 // equal.
-func logicalDirtyKey(row store_sqlite.ViewGeneration, rootID int64) string {
+func logicalDirtyKey(row storage.ViewGeneration, rootID int64) string {
 	row.BaseGenerationID = rootID
 	return generationRowKey(row)
 }
@@ -185,7 +185,7 @@ func logicalDirtyKey(row store_sqlite.ViewGeneration, rootID int64) string {
 // dirtyRowRendersKey reports whether a retained working-tree row still renders
 // the reuse key it was filed under: its physical key (a direct generation), or
 // its logical key over the commit generation its chain is rooted at.
-func (c *CheckoutCoordinator) dirtyRowRendersKey(ctx context.Context, row store_sqlite.ViewGeneration, key string) bool {
+func (c *CheckoutCoordinator) dirtyRowRendersKey(ctx context.Context, row storage.ViewGeneration, key string) bool {
 	if generationRowKey(row) == key {
 		return true
 	}
@@ -197,7 +197,7 @@ func (c *CheckoutCoordinator) dirtyRowRendersKey(ctx context.Context, row store_
 // is not a working-tree generation and returns its id, provided the walk is a
 // well-formed chain of this row's layer within the bound. The terminal is then
 // checked as a root by the caller's key comparison, which carries its id.
-func (c *CheckoutCoordinator) dirtyChainTerminal(ctx context.Context, row store_sqlite.ViewGeneration) (int64, bool) {
+func (c *CheckoutCoordinator) dirtyChainTerminal(ctx context.Context, row storage.ViewGeneration) (int64, bool) {
 	if row.GenerationKind != DirtyLayerGenerationKind || row.BaseGenerationID <= 0 {
 		return 0, false
 	}
@@ -210,7 +210,7 @@ func (c *CheckoutCoordinator) dirtyChainTerminal(ctx context.Context, row store_
 	}
 	// Walk the chain as a predicate over a synthetic commit that carries the
 	// top's layer coordinates; the terminal is wherever it lands.
-	probe := store_sqlite.ViewGeneration{CheckoutID: row.CheckoutID, GraphID: row.GraphID, TreeOID: row.TreeOID}
+	probe := storage.ViewGeneration{CheckoutID: row.CheckoutID, GraphID: row.GraphID, TreeOID: row.TreeOID}
 	current := parent
 	seen := map[int64]struct{}{row.GenerationID: {}}
 	for depth := 2; depth <= maxChainWalkDepth; depth++ {
@@ -259,8 +259,8 @@ type dirtyParentSelection struct {
 // itself and may still refuse it.
 func (c *CheckoutCoordinator) selectDirtyParent(
 	ctx context.Context,
-	route store_sqlite.CheckoutRoute,
-	commit store_sqlite.ViewGeneration,
+	route storage.CheckoutRoute,
+	commit storage.ViewGeneration,
 	sample gitstate.DirtySnapshot,
 ) (int64, resolvedManifest, string) {
 	sel := c.selectDirtyParentDetail(ctx, route, commit, sample, maxDirtyChainDepth)
@@ -271,8 +271,8 @@ func (c *CheckoutCoordinator) selectDirtyParent(
 // explicit depth bound (production passes maxDirtyChainDepth).
 func (c *CheckoutCoordinator) selectDirtyParentDetail(
 	ctx context.Context,
-	route store_sqlite.CheckoutRoute,
-	commit store_sqlite.ViewGeneration,
+	route storage.CheckoutRoute,
+	commit storage.ViewGeneration,
 	sample gitstate.DirtySnapshot,
 	maxDepth int,
 ) dirtyParentSelection {
@@ -312,7 +312,7 @@ func (c *CheckoutCoordinator) selectDirtyParentDetail(
 		top.ResolverVersion != current.ResolverVersion || top.DependencyRevision != current.DependencyRevision {
 		return fallback(dirtyChainFallbackPolicyChanged)
 	}
-	if c.store == nil {
+	if c.store == nil || c.store.IsNilGenerationHandle() {
 		return fallback(dirtyChainFallbackParentManifestMissing)
 	}
 	oldestFirst := make([]int64, 0, len(chain))
@@ -327,7 +327,7 @@ func (c *CheckoutCoordinator) selectDirtyParentDetail(
 	if parentManifest.policy != policy {
 		return fallback(dirtyChainFallbackPolicyChanged)
 	}
-	admit := func(p string) store_sqlite.InputManifestAdmission {
+	admit := func(p string) storage.InputManifestAdmission {
 		// Same bytes under the same policy get the same verdict; anything else
 		// is in the delta whatever its admission, so it cannot change the plan.
 		for _, content := range sample.Contents {
@@ -339,7 +339,7 @@ func (c *CheckoutCoordinator) selectDirtyParentDetail(
 			}
 			break
 		}
-		return store_sqlite.InputManifestAdmitted
+		return storage.InputManifestAdmitted
 	}
 	nextMeta, nextEntries := admittedManifest(sample, admit, policy)
 	next := resolvedFromFull(nextMeta, nextEntries)
@@ -359,7 +359,7 @@ func (c *CheckoutCoordinator) selectDirtyParentDetail(
 // can use, or why none, and returns the selection. It routes nothing.
 func (c *CheckoutCoordinator) reportDirtyParent(
 	ctx context.Context,
-	route store_sqlite.CheckoutRoute,
+	route storage.CheckoutRoute,
 	commitGeneration int64,
 	sample gitstate.DirtySnapshot,
 	out *CheckoutCycle,
@@ -449,7 +449,7 @@ func (c *CheckoutCoordinator) deferRetire(generationID int64, why string) {
 	c.mu.Unlock()
 	if !known {
 		var owedStore graph.Store
-		if c.store != nil {
+		if c.store != nil && !c.store.IsNilGenerationHandle() {
 			owedStore = c.store
 		}
 		countRetirementOwed(owedStore, generationID, retireOwedClass(why))
@@ -515,13 +515,16 @@ func (c *CheckoutCoordinator) dirtyChainMembers(ctx context.Context, top int64) 
 // refuses with closure_truncated_parent when any link declared a truncated
 // closure, and with the resolveChainLinks codes (parent_manifest_missing,
 // policy_changed) when the manifests cannot be folded.
-func loadDirtyChainManifest(ctx context.Context, store *store_sqlite.Store, oldestFirst []int64) (resolvedManifest, string) {
-	if store == nil || len(oldestFirst) == 0 {
+func loadDirtyChainManifest(ctx context.Context, store interface {
+	generationStoreSource
+	IsNilGenerationHandle() bool
+}, oldestFirst []int64) (resolvedManifest, string) {
+	if store == nil || store.IsNilGenerationHandle() || len(oldestFirst) == 0 {
 		return resolvedManifest{}, dirtyChainFallbackParentManifestMissing
 	}
 	links := make([]chainManifestLink, 0, len(oldestFirst))
 	for _, generationID := range oldestFirst {
-		handle := store.AtGeneration(generationID)
+		handle := generationAt(store, generationID)
 		if truncatedClosureProducers(handle) {
 			return resolvedManifest{}, dirtyChainFallbackClosureTruncatedParent
 		}
@@ -538,7 +541,7 @@ func loadDirtyChainManifest(ctx context.Context, store *store_sqlite.Store, olde
 // resolution or incoming-edge producer incomplete — what a build whose
 // affected closure was truncated declares. A generation whose producer states
 // cannot be read is treated the same way.
-func truncatedClosureProducers(handle *store_sqlite.Store) bool {
+func truncatedClosureProducers(handle generationPayloadStore) bool {
 	rows, err := handle.ProducerStates()
 	if err != nil {
 		return true
@@ -546,7 +549,7 @@ func truncatedClosureProducers(handle *store_sqlite.Store) bool {
 	for _, row := range rows {
 		switch row.Producer {
 		case string(graphview.CapResolutionLocal), string(graphview.CapIncomingEdges):
-			if row.State == store_sqlite.ProducerStateIncomplete {
+			if row.State == storage.ProducerStateIncomplete {
 				return true
 			}
 		}
@@ -560,18 +563,18 @@ func truncatedClosureProducers(handle *store_sqlite.Store) bool {
 // without bytes is absent from HEAD. A path neither sample recorded as
 // HEAD-relative is assumed held, which only decides between modified and
 // deleted for an undo — both of which are in the delta either way.
-func sampledHeadHolds(parent resolvedManifest, next []store_sqlite.InputManifestEntry) func(string) bool {
+func sampledHeadHolds(parent resolvedManifest, next []storage.InputManifestEntry) func(string) bool {
 	known := map[string]bool{}
 	for _, e := range next {
 		switch e.State {
-		case store_sqlite.InputManifestAbsent:
+		case storage.InputManifestAbsent:
 			known[e.FilePath] = true
-		case store_sqlite.InputManifestHeadEqual:
+		case storage.InputManifestHeadEqual:
 			known[e.FilePath] = e.ContentSHA256 != ""
 		}
 	}
 	for p, e := range parent.entries {
-		if _, ok := known[p]; !ok && e.State == store_sqlite.InputManifestAbsent {
+		if _, ok := known[p]; !ok && e.State == storage.InputManifestAbsent {
 			known[p] = true
 		}
 	}

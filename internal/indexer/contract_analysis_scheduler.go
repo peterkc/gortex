@@ -1217,12 +1217,12 @@ func (c *ContractAnalysisCoordinator) admitPendingBaselines(want contractActorWa
 func (c *ContractAnalysisCoordinator) attached(want contractActorWant) bool {
 	var receiver interface {
 		GetContractAttachmentContext(context.Context, graph.ContractAttachmentKey) (*graph.ContractAttachment, error)
-	} = c.options.Store.AtGeneration(0)
+	} = generationAt(c.options.Store, 0)
 	if want.source != nil {
 		if len(want.source.sources) == 0 {
 			return false
 		}
-		receiver = want.source.sources[len(want.source.sources)-1].Handle
+		receiver = want.source.sources[len(want.source.sources)-1].Handle.(graph.ContractAttachmentReader)
 	}
 	names := make(map[string]bool)
 	for _, witness := range want.inputs.Witnesses {
@@ -1504,7 +1504,7 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 	if err == nil {
 		seen := make(map[graph.ContractAttachmentKey]bool, len(targets))
 		for _, target := range targets {
-			if target.Catalog == nil || target.Payload != nil || target.Key.InputVersion == "" || target.Key.InputFingerprint == "" || seen[target.Key] {
+			if (target.Catalog == nil || target.Catalog.IsNilGenerationHandle()) || (target.Payload != nil && !target.Payload.IsNilGenerationHandle()) || target.Key.InputVersion == "" || target.Key.InputFingerprint == "" || seen[target.Key] {
 				err = fmt.Errorf("contract analysis capture: invalid target")
 				break
 			}

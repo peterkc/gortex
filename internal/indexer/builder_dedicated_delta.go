@@ -44,7 +44,7 @@ var errDedicatedDeltaParentRevision = fmt.Errorf("%w: dedicated delta parent dep
 func (b *SparseGenerationBuilder) BuildClaimedDedicatedDelta(ctx context.Context, request ClaimedDedicatedDeltaRequest) (int64, BuildReport, error) {
 	started := time.Now()
 	claim := request.Claim
-	if ctx == nil || b == nil || b.Store == nil || b.Registry == nil || b.Logger == nil {
+	if ctx == nil || b == nil || (b.Store == nil || b.Store.IsNilGenerationHandle()) || b.Registry == nil || b.Logger == nil {
 		return 0, BuildReport{}, fmt.Errorf("indexer: claimed delta requires context, store, registry and logger")
 	}
 	if err := ctx.Err(); err != nil {
@@ -53,7 +53,7 @@ func (b *SparseGenerationBuilder) BuildClaimedDedicatedDelta(ctx context.Context
 	if claim.GenerationID <= 0 || claim.BaseGenerationID <= 0 || claim.AttemptToken == "" {
 		return 0, BuildReport{}, fmt.Errorf("%w: dedicated delta requires a positive reservation and parent", storage.ErrDedicatedBaseCandidate)
 	}
-	catalog := b.Store.Catalog()
+	catalog := b.Catalog
 	p, found, err := catalog.DedicatedBasePublication(ctx, claim.Desire.Authority.GraphID)
 	if err != nil {
 		return 0, BuildReport{}, err
@@ -143,12 +143,13 @@ func (b *SparseGenerationBuilder) BuildClaimedDedicatedDelta(ctx context.Context
 		}
 		return b.prepareOwnedDedicatedDelta(ctx, target, req)
 	}
-	handle, err := b.Store.AtManagedGeneration(claim.GenerationID)
+	rawHandle, err := b.Store.AtManagedGenerationStore(claim.GenerationID)
 	if err != nil {
 		return 0, BuildReport{}, err
 	}
+	handle := rawHandle.(generationPayloadStore)
 	failed := func(ctx context.Context, cause error) error {
-		return b.Store.Catalog().FailDedicatedBaseBuild(ctx, storage.FailDedicatedBaseBuildRequest{
+		return b.Catalog.FailDedicatedBaseBuild(ctx, storage.FailDedicatedBaseBuildRequest{
 			Claim: claim, Error: cause.Error(),
 		})
 	}

@@ -62,7 +62,7 @@ var contractCoreDirectProbes = map[string]struct {
 	"overlay_view.go|BoundedExactNameReader":         {1, "probes requestBaseReader, which readerFor wraps only afterwards"},
 	"view_request.go|ContentSearcher":                {1, "newBaseGraphReader is handed s.graph alone"},
 	"view_request.go|local:GetFileNodesByPaths":      {1, "baseGraphReader.base is s.graph alone"},
-	"view_search.go|local:SearchContent":             {1, "bindSources is handed s.graph alone"},
+	"view_search.go|local:SearchContent":             {2, "bindSources receives the opened base and exact borrowed generation handles, never request readers"},
 	"../analysis/betweenness.go|NodesByKindsScanner": {1, "fallback after NodeIDsByKinds, which the wrapper serves"},
 	"../analysis/deadcode.go|NodesByKindsScanner":    {1, "fallback after NodeIDsByKinds, which the wrapper serves"},
 }
@@ -227,6 +227,7 @@ func contractCoreCapabilityTable() []contractCoreCapRow {
 		{"local:LastFirstIndexDrains", capOf[capLastFirstIndexDrains], capDropped, capReasonBackend + " (shared-store drain observations, never selected graph state)"},
 		{"local:WALPassiveStats", capOf[walPassiveSnapshotReader], capDropped, capReasonBackend + " (physical checkpoint counters, never selected graph state)"},
 		{"local:AnnounceInteractiveRead", capOf[interactiveReadAnnouncer], capDropped, capReasonBackend + " (call-scoped physical store cooperation, never selected graph authority)"},
+		{"local:AnnounceWrite", capOf[sourceWriteAnnouncer], capDropped, capReasonBackend + " (foreground write intent, never selected graph authority)"},
 		{"AnalysisGenerationStore", capOf[graph.AnalysisGenerationStore], capDropped, capReasonBackend},
 		{"AnalysisQueryStore", capOf[graph.AnalysisQueryStore], capDropped, capReasonBackend},
 		{"TryAnalysisQueryStore", capOf[graph.TryAnalysisQueryStore], capDropped, capReasonBackend},

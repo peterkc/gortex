@@ -55,7 +55,7 @@ func TestPrivatePhysicalBuilderRetirementFence(t *testing.T) {
 			defer cancel()
 			identity := fixture.Identity
 			identity.GenerationKind = "commit"
-			id, _, adopted, err := builder.Store.BeginPayloadGenerationWithStatus(ctx, store_sqlite.PayloadGenerationRequest{
+			id, _, adopted, err := any(builder.Store).(*store_sqlite.Store).BeginPayloadGenerationWithStatus(ctx, store_sqlite.PayloadGenerationRequest{
 				OwnerKind: identity.OwnerKind, GraphID: identity.GraphID, CheckoutID: identity.CheckoutID,
 				GenerationKind: identity.GenerationKind, LayerID: "private-physical-retirement",
 				TreeOID:    identity.TreeOID,
@@ -66,7 +66,7 @@ func TestPrivatePhysicalBuilderRetirementFence(t *testing.T) {
 			}
 			// Explicit qualification: this owns the shared physical helper
 			// boundary, not public Build/claimed-generation ingress.
-			handle, err := builder.Store.AtManagedGeneration(id)
+			handle, err := any(builder.Store).(*store_sqlite.Store).AtManagedGeneration(id)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -128,7 +128,7 @@ func TestPrivatePhysicalBuilderRetirementFence(t *testing.T) {
 				case <-ctx.Done():
 					return fmt.Errorf("physical source barrier: %w", ctx.Err())
 				}
-				if !builder.Store.PayloadBuildFlightActive(id) {
+				if !any(builder.Store).(*store_sqlite.Store).PayloadBuildFlightActive(id) {
 					return errors.New("source barrier lacks an actual active build flight")
 				}
 				// Seed after intake begins, avoiding earlier initial eviction;
@@ -136,7 +136,7 @@ func TestPrivatePhysicalBuilderRetirementFence(t *testing.T) {
 				handle.AddBatch([]*graph.Node{{ID: unreadID, Name: "Unread", Kind: graph.KindFunction,
 					FilePath: fixture.RepoPrefix + "/retirement-unread.go", RepoPrefix: fixture.RepoPrefix}}, nil)
 				for i := range followerDone {
-					flight, isLeader, ready, err := builder.Store.JoinPayloadBuildFlight(ctx, id, true)
+					flight, isLeader, ready, err := any(builder.Store).(*store_sqlite.Store).JoinPayloadBuildFlight(ctx, id, true)
 					if err != nil || flight == nil || isLeader || ready {
 						return fmt.Errorf("follower %d admission: leader=%v ready=%v err=%v", i, isLeader, ready, err)
 					}
@@ -150,7 +150,7 @@ func TestPrivatePhysicalBuilderRetirementFence(t *testing.T) {
 				}
 				return nil
 			}
-			if builder.Store.PayloadBuildFlightActive(id) {
+			if any(builder.Store).(*store_sqlite.Store).PayloadBuildFlightActive(id) {
 				t.Fatal("unexpected owner before retirement precheck")
 			}
 			var setupErr error
@@ -178,14 +178,14 @@ func TestPrivatePhysicalBuilderRetirementFence(t *testing.T) {
 					if !errors.Is(retireErr, store_sqlite.ErrPayloadGenerationInUse) {
 						t.Errorf("active physical owner did not stop sweep: %v", retireErr)
 					}
-					row, found, err := builder.Store.Catalog().GetViewGeneration(ctx, id)
+					row, found, err := any(builder.Store).(*store_sqlite.Store).Catalog().GetViewGeneration(ctx, id)
 					if err != nil || !found || row.State != store_sqlite.ViewGenerationRetiring {
 						t.Errorf("fence before release: found=%v row=%+v err=%v", found, row, err)
 					}
-					if builder.Store.AtGeneration(id).GetNode(unreadID) == nil {
+					if any(builder.Store).(*store_sqlite.Store).AtGeneration(id).GetNode(unreadID) == nil {
 						t.Error("unread payload swept while physical owner remained blocked")
 					}
-					if !builder.Store.PayloadBuildFlightActive(id) {
+					if !any(builder.Store).(*store_sqlite.Store).PayloadBuildFlightActive(id) {
 						t.Error("retirement released the blocked flight")
 					}
 				}
@@ -233,7 +233,7 @@ func TestPrivatePhysicalBuilderRetirementFence(t *testing.T) {
 						t.Errorf("follower %d lost sealed cause: %v", i, err)
 					}
 				}
-				row, found, err := builder.Store.Catalog().GetViewGeneration(ctx, id)
+				row, found, err := any(builder.Store).(*store_sqlite.Store).Catalog().GetViewGeneration(ctx, id)
 				if err != nil || !found || row.State != store_sqlite.ViewGenerationRetiring {
 					t.Errorf("abandonment lost retiring fence: found=%v row=%+v err=%v", found, row, err)
 				}
@@ -241,19 +241,19 @@ func TestPrivatePhysicalBuilderRetirementFence(t *testing.T) {
 			if preparations.Load() != 1 || opens.Load() == 0 || closes.Load() != 1 || followers != 2 {
 				t.Errorf("ownership: prepares=%d opens=%d closes=%d followers=%d", preparations.Load(), opens.Load(), closes.Load(), followers)
 			}
-			if builder.Store.PayloadBuildFlightActive(id) {
+			if any(builder.Store).(*store_sqlite.Store).PayloadBuildFlightActive(id) {
 				t.Error("completed leader retained its flight")
 			}
 			if builder.Store.GetNode(baseID) == nil {
 				t.Error("candidate changed generation-zero sentinel")
 			}
-			if err := builder.Store.RetirePayloadGeneration(ctx, id, builder.Store.PayloadBuildFlightActive); err != nil {
+			if err := any(builder.Store).(*store_sqlite.Store).RetirePayloadGeneration(ctx, id, any(builder.Store).(*store_sqlite.Store).PayloadBuildFlightActive); err != nil {
 				t.Errorf("post-drain retirement: %v", err)
 			}
-			if _, found, err := builder.Store.Catalog().GetViewGeneration(ctx, id); err != nil || found {
+			if _, found, err := any(builder.Store).(*store_sqlite.Store).Catalog().GetViewGeneration(ctx, id); err != nil || found {
 				t.Errorf("post-drain generation remains: found=%v err=%v", found, err)
 			}
-			if builder.Store.AtGeneration(id).GetNode(unreadID) != nil || builder.Store.AtGeneration(id).GetNode(fixture.RepoPrefix+"/base.go::Committed") != nil {
+			if any(builder.Store).(*store_sqlite.Store).AtGeneration(id).GetNode(unreadID) != nil || any(builder.Store).(*store_sqlite.Store).AtGeneration(id).GetNode(fixture.RepoPrefix+"/base.go::Committed") != nil {
 				t.Error("post-drain physical payload remains")
 			}
 			t.Logf("mode=%s generation=%d prepares=%d opens=%d closes=%d followers=%d leader_err=%v", mode, id, preparations.Load(), opens.Load(), closes.Load(), followers, leader.err)

@@ -5,7 +5,6 @@ import (
 	"sort"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 // The delta's ownership claims are written before the enrichment stage runs,
@@ -41,7 +40,7 @@ func (o editDeltaOwnership) owns(e *graph.Edge) bool {
 // editDeltaSettleEnrichment removes, from the generation, every edge the
 // enrichment stage wrote outside the delta's ownership whose identity the view
 // below already serves. It returns how many it removed.
-func editDeltaSettleEnrichment(handle *store_sqlite.Store, below graph.Reader, own editDeltaOwnership) int {
+func editDeltaSettleEnrichment(handle generationPayloadStore, below graph.Reader, own editDeltaOwnership) int {
 	var stray []*graph.Edge
 	for _, e := range handle.AllEdgesLight() {
 		if !own.owns(e) {
@@ -93,7 +92,7 @@ func editDeltaSettleEnrichment(handle *store_sqlite.Store, below graph.Reader, o
 // copies. Under the claim it serves this generation's copy only, the row the
 // primary per-save path upserts over the one it held. It returns how many it
 // claimed.
-func editDeltaClaimEnrichedNodes(handle *store_sqlite.Store, below graph.Reader, own editDeltaOwnership) (int, error) {
+func editDeltaClaimEnrichedNodes(handle generationPayloadStore, below graph.Reader, own editDeltaOwnership) (int, error) {
 	var ids []string
 	for _, n := range handle.AllNodesLight() {
 		if n == nil || n.ID == "" {

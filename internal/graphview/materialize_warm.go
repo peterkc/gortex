@@ -2,6 +2,7 @@ package graphview
 
 import (
 	"context"
+
 	"github.com/zzet/gortex/internal/storage"
 )
 
@@ -45,7 +46,11 @@ func (m *Materializer) WarmRoute(ctx context.Context, generations ...int64) (loa
 	// route answers its node and edge reads from memory (generation_layer_rows.go).
 	if n := len(generations); n > 0 {
 		top := generations[n-1]
-		cache.preloadRows(ctx, top, m.Store.GenerationCorrectionEpoch(top), m.Store.AtGeneration(top))
+		handle, ok := m.Store.AtGenerationStore(top).(GenerationLayerHandle)
+		if !ok {
+			return loaded, NewViewError(CodeCheckoutInaccessible, "generation handle lacks layer reads")
+		}
+		cache.preloadRows(ctx, top, m.Store.GenerationCorrectionEpoch(top), handle)
 	}
 	return loaded, nil
 }

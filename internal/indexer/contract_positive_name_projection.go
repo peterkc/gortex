@@ -10,8 +10,8 @@ import (
 
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // This checkpoint contains only owned scalar clocks and bounded sparse data.
@@ -19,41 +19,45 @@ import (
 // retained. A current job must mint its own independently leased counterpart.
 type contractPositiveNameProjection struct {
 	repos   map[string]contractPositiveNameRepo
-	clocks  []store_sqlite.ContractProjectionCursor
+	clocks  []storage.ContractProjectionCursor
 	bytes   int64
 	budget  int64
 	answers map[string]contractCertifiedNameAnswer
 }
 type contractPositiveNameRepo struct {
-	prefix    []store_sqlite.ContractProjectionCursor
+	prefix    []storage.ContractProjectionCursor
 	suffix    contractSparseDeclarationShape
-	baseNames map[string][]store_sqlite.ContractProjectionDeclaration
+	baseNames map[string][]storage.ContractProjectionDeclaration
 }
 
-func contractPositiveChain(reader graph.Reader, depth int) ([]*store_sqlite.Store, bool) {
+func contractPositiveChain(reader graph.Reader, depth int) ([]generationPayloadStore, bool) {
 	if depth > graphview.MaxGenerationAncestryDepth+graphview.MaxDirtyChainDepth {
 		return nil, false
 	}
 	switch v := reader.(type) {
-	case *store_sqlite.Store:
-		return []*store_sqlite.Store{v}, v != nil && v.ViewGeneration() > 0
+	case generationPayloadStore:
+		return []generationPayloadStore{v}, v != nil && !v.IsNilGenerationHandle() && v.SharesSymbolSearchCore(reader) && v.ViewGeneration() > 0
 	case *graph.OverlaidView:
 		layer, ok := v.LayerReader().(*graphview.GenerationLayer)
-		if !ok || layer == nil || layer.ProjectionHandle() == nil || layer.ProjectionHandle().ViewGeneration() <= 0 {
+		if !ok || layer == nil {
+			return nil, false
+		}
+		handle, ok := layer.ProjectionHandle().(generationPayloadStore)
+		if !ok || handle == nil || handle.IsNilGenerationHandle() || handle.ViewGeneration() <= 0 {
 			return nil, false
 		}
 		chain, ok := contractPositiveChain(v.Base(), depth+1)
 		if !ok {
 			return nil, false
 		}
-		return append(chain, layer.ProjectionHandle()), true
+		return append(chain, handle), true
 	}
 	return nil, false
 }
 
 // capturePositiveNames reads sparse dirty suffixes only. True full-base or
 // opaque selection changes remain on the ordinary physical replay path.
-func capturePositiveNames(ctx context.Context, readers map[string]graph.Reader, handles map[string][]*store_sqlite.Store, budget int64) (*contractPositiveNameProjection, error) {
+func capturePositiveNames(ctx context.Context, readers map[string]graph.Reader, handles map[string][]generationPayloadStore, budget int64) (*contractPositiveNameProjection, error) {
 	if budget < 4096 || budget > contractDeltaCacheBudget {
 		return nil, nil
 	}
@@ -68,7 +72,7 @@ func capturePositiveNames(ctx context.Context, readers map[string]graph.Reader, 
 	for _, repo := range slices.Sorted(maps.Keys(readers)) {
 		reader := readers[repo]
 		for _, h := range handles[repo] {
-			if h == nil || h.ViewGeneration() <= 0 {
+			if (h == nil || h.IsNilGenerationHandle()) || h.ViewGeneration() <= 0 {
 				return nil, nil
 			}
 		}
@@ -79,8 +83,8 @@ func capturePositiveNames(ctx context.Context, readers map[string]graph.Reader, 
 		if !ok {
 			return nil, nil
 		}
-		var prefix []store_sqlite.ContractProjectionCursor
-		var suffix []store_sqlite.ContractProjectionFootprint
+		var prefix []storage.ContractProjectionCursor
+		var suffix []storage.ContractProjectionFootprint
 		dirty := false
 		for _, handle := range chain {
 			if err := ctx.Err(); err != nil {
@@ -90,11 +94,11 @@ func capturePositiveNames(ctx context.Context, readers map[string]graph.Reader, 
 			if err != nil {
 				return nil, err
 			}
-			row, found, err := handle.Catalog().GetViewGeneration(ctx, handle.ViewGeneration())
+			row, found, err := handle.ViewGenerationRecord(ctx, handle.ViewGeneration())
 			if err != nil {
 				return nil, err
 			}
-			if !found || row.State != store_sqlite.ViewGenerationReady {
+			if !found || row.State != storage.ViewGenerationReady {
 				return nil, nil
 			}
 			if row.GenerationKind != DirtyLayerGenerationKind {
@@ -140,16 +144,16 @@ func capturePositiveNames(ctx context.Context, readers map[string]graph.Reader, 
 	return out, nil
 }
 
-func contractSparseDeclarationOwnership(f store_sqlite.ContractProjectionFootprint) bool {
+func contractSparseDeclarationOwnership(f storage.ContractProjectionFootprint) bool {
 	files := map[string]bool{}
 	contextOnly := map[string]bool{}
 	ids := map[string]bool{}
 	rows := map[string]bool{}
 	for _, mask := range f.Files {
-		if mask.Mode == store_sqlite.OwnershipReplace || mask.Mode == store_sqlite.OwnershipDelete {
+		if mask.Mode == storage.OwnershipReplace || mask.Mode == storage.OwnershipDelete {
 			files[mask.FilePath] = true
 		}
-		if mask.Mode == store_sqlite.OwnershipContext {
+		if mask.Mode == storage.OwnershipContext {
 			contextOnly[mask.FilePath] = true
 		}
 	}
@@ -157,7 +161,7 @@ func contractSparseDeclarationOwnership(f store_sqlite.ContractProjectionFootpri
 		rows[row.ID] = true
 	}
 	for _, mask := range f.Identities {
-		if mask.Kind == store_sqlite.NodeIdentityMaskReplace && !rows[mask.NodeID] {
+		if mask.Kind == storage.NodeIdentityMaskReplace && !rows[mask.NodeID] {
 			return false
 		}
 		ids[mask.NodeID] = true
@@ -186,8 +190,8 @@ func (p *contractPositiveNameProjection) sameName(other *contractPositiveNamePro
 	return true
 }
 
-func positiveNameClocks(ctx context.Context, readers map[string]graph.Reader) ([]store_sqlite.ContractProjectionCursor, error) {
-	var out []store_sqlite.ContractProjectionCursor
+func positiveNameClocks(ctx context.Context, readers map[string]graph.Reader) ([]storage.ContractProjectionCursor, error) {
+	var out []storage.ContractProjectionCursor
 	seen := map[int64]bool{}
 	for _, repo := range slices.Sorted(maps.Keys(readers)) {
 		chain, ok := contractPositiveChain(readers[repo], 0)
@@ -353,12 +357,12 @@ func positiveNameRepoEqual(old, current contractPositiveNameRepo, name string) b
 }
 
 type positiveNameIterator struct {
-	suffix, prefix []store_sqlite.ContractProjectionDeclaration
+	suffix, prefix []storage.ContractProjectionDeclaration
 	shape          contractSparseDeclarationShape
 	upper, lower   int
 }
 
-func (i *positiveNameIterator) next() (store_sqlite.ContractProjectionDeclaration, bool) {
+func (i *positiveNameIterator) next() (storage.ContractProjectionDeclaration, bool) {
 	if i.upper < len(i.suffix) {
 		row := i.suffix[i.upper]
 		i.upper++
@@ -371,7 +375,7 @@ func (i *positiveNameIterator) next() (store_sqlite.ContractProjectionDeclaratio
 			return row, true
 		}
 	}
-	return store_sqlite.ContractProjectionDeclaration{}, false
+	return storage.ContractProjectionDeclaration{}, false
 }
 
 func positivePrefixReader(ctx context.Context, reader graph.Reader) (graph.Reader, error) {
@@ -384,7 +388,11 @@ func positivePrefixReader(ctx context.Context, reader graph.Reader) (graph.Reade
 		if !ok || layer == nil {
 			return nil, graph.ErrContractProjectionIncomplete
 		}
-		row, found, err := layer.ProjectionHandle().Catalog().GetViewGeneration(ctx, layer.ProjectionHandle().ViewGeneration())
+		handle, ok := layer.ProjectionHandle().(generationPayloadStore)
+		if !ok || handle == nil || handle.IsNilGenerationHandle() {
+			return nil, graph.ErrContractProjectionIncomplete
+		}
+		row, found, err := handle.ViewGenerationRecord(ctx, handle.ViewGeneration())
 		if err != nil {
 			return nil, err
 		}
@@ -407,7 +415,7 @@ func completePositivePrefixNames(ctx context.Context, readers map[string]graph.R
 		names[answer.name] = true
 	}
 	for repo, current := range p.repos {
-		current.baseNames = map[string][]store_sqlite.ContractProjectionDeclaration{}
+		current.baseNames = map[string][]storage.ContractProjectionDeclaration{}
 		var missing []string
 		for name := range names {
 			if old != nil {
@@ -457,7 +465,7 @@ func completePositivePrefixNames(ctx context.Context, readers map[string]graph.R
 					return false
 				}
 				p.bytes += charge
-				row := store_sqlite.ContractProjectionDeclaration{ID: strings.Clone(node.ID), Name: strings.Clone(node.Name), Kind: strings.Clone(string(node.Kind)), FilePath: strings.Clone(node.FilePath), RepoPrefix: strings.Clone(node.RepoPrefix)}
+				row := storage.ContractProjectionDeclaration{ID: strings.Clone(node.ID), Name: strings.Clone(node.Name), Kind: strings.Clone(string(node.Kind)), FilePath: strings.Clone(node.FilePath), RepoPrefix: strings.Clone(node.RepoPrefix)}
 				current.baseNames[node.Name] = append(current.baseNames[node.Name], row)
 				return true
 			})

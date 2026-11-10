@@ -16,7 +16,7 @@ import (
 // require foreground admission plus SQL before the readback can return.
 func TestImportFoldPublishedReadbackDoesNotHoldLane(t *testing.T) {
 	f := newCoordinatorAncestryFixture(t)
-	id, _, err := f.c.store.BeginPayloadGeneration(t.Context(), store_sqlite.PayloadGenerationRequest{
+	id, _, err := any(f.c.store).(*store_sqlite.Store).BeginPayloadGeneration(t.Context(), store_sqlite.PayloadGenerationRequest{
 		OwnerKind: f.request.Identity.OwnerKind, GraphID: f.request.Identity.GraphID,
 		CheckoutID: f.request.Identity.CheckoutID, GenerationKind: DirtyLayerGenerationKind,
 		TreeOID: f.request.Identity.TreeOID, ConfigHash: f.request.Identity.ConfigHash,
@@ -69,7 +69,7 @@ func TestImportFoldPublishedReadbackDoesNotHoldLane(t *testing.T) {
 				}
 			},
 		}
-		err := publishCopiedGeneration(ctx, id, admission, f.c.store.PreparePayloadGenerationPublication)
+		err := publishCopiedGeneration(ctx, id, admission, f.c.store.PreparePayloadGenerationPublicationHandle)
 		if err == nil {
 			row, found, readErr := f.c.catalog.GetViewGeneration(ctx, id)
 			if readErr != nil {
@@ -95,7 +95,7 @@ func TestImportFoldPublishedReadbackDoesNotHoldLane(t *testing.T) {
 	if err != nil {
 		t.Fatalf("published readback held lane: %v", err)
 	}
-	err = f.c.store.AddBatchChecked([]*graph.Node{{ID: "postpublish-foreground", Kind: graph.KindFunction, Name: "Foreground"}}, nil)
+	err = any(f.c.store).(*store_sqlite.Store).AddBatchChecked([]*graph.Node{{ID: "postpublish-foreground", Kind: graph.KindFunction, Name: "Foreground"}}, nil)
 	foregroundRelease()
 	if err != nil {
 		t.Fatal(err)

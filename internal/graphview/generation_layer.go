@@ -9,7 +9,6 @@ import (
 	"sync"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/storage"
 )
 
@@ -44,7 +43,7 @@ import (
 //     and — should a row nevertheless be carried at one — never served
 //     from this layer, so a carried context row can no more shadow the
 //     layer below than duplicate it. Publish validation refuses the
-//     mask over payload (store_sqlite.ValidateGenerationMasks), which
+//     mask over payload (storage.ValidateGenerationMasks), which
 //     makes that last defence a second lock rather than the only one.
 //   - A node tombstone removes one identity the generation did not
 //     re-emit and whose file it does not claim.
@@ -98,9 +97,9 @@ import (
 //
 // A GenerationLayer is safe for concurrent reads from one request.
 type GenerationLayer struct {
-	handle *store_sqlite.Store
+	handle GenerationLayerHandle
 	// Checked projections reject masks materialized before a row correction.
-	inputRevision store_sqlite.PayloadInputRevision
+	inputRevision storage.PayloadInputRevision
 	// Set by the materializer before publication. A healthy checkout must
 	// not inherit filesystem failures from its designated primary.
 	failureRepoPrefix string
@@ -198,9 +197,9 @@ var _ graph.OverlayLayerReader = (*GenerationLayer)(nil)
 // overlay.
 // ProjectionHandle borrows the exact physical input of this immutable layer.
 // The caller must already own the view/lease; it is not a new selection.
-func (l *GenerationLayer) ProjectionHandle() *store_sqlite.Store { return l.handle }
+func (l *GenerationLayer) ProjectionHandle() GenerationLayerHandle { return l.handle }
 
-func NewGenerationLayer(handle *store_sqlite.Store) (*GenerationLayer, error) {
+func NewGenerationLayer(handle GenerationLayerHandle) (*GenerationLayer, error) {
 	return NewGenerationLayerContext(context.Background(), handle)
 }
 
@@ -208,8 +207,8 @@ func NewGenerationLayer(handle *store_sqlite.Store) (*GenerationLayer, error) {
 // honoring cancellation across every mask read. NewGenerationLayer preserves
 // the historical background-context behavior for callers without a request
 // lifetime to propagate.
-func NewGenerationLayerContext(ctx context.Context, handle *store_sqlite.Store) (*GenerationLayer, error) {
-	if handle == nil {
+func NewGenerationLayerContext(ctx context.Context, handle GenerationLayerHandle) (*GenerationLayer, error) {
+	if handle == nil || handle.IsNilGenerationHandle() {
 		return nil, fmt.Errorf("graphview: generation layer needs a store handle")
 	}
 	if ctx == nil {

@@ -98,7 +98,7 @@ func (b commitLayerBase) LoadRefFactsByTargetsContext(
 	if len(b.facts.handles) > 0 {
 		return b.facts.LoadRefFactsByTargetsContext(ctx, repoPrefix, targetIDs)
 	}
-	if b.corpus == nil {
+	if b.corpus == nil || b.corpus.IsNilGenerationHandle() {
 		return map[string][]graph.RefFact{}, nil
 	}
 	return loadRefFactsByTargetsContext(ctx, b.corpus, repoPrefix, targetIDs)

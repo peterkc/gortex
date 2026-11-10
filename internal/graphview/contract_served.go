@@ -28,7 +28,7 @@ type ContractServedSources struct {
 // must retain the originating request view and repository scope until Close;
 // generation pins alone do not own their composed readers or base-corpus owner.
 func (m *Materializer) AcquireContractServedSources(ctx context.Context, inputs *SelectedContractInputs) (*ContractServedSources, error) {
-	if m == nil || m.Store == nil || m.Leases == nil || m.Catalog == nil || inputs == nil || inputs.store != m.Store {
+	if m == nil || (m.Store == nil || m.Store.IsNilGenerationHandle()) || m.Leases == nil || (m.Catalog == nil || m.Catalog.IsNilMaterializerCatalog()) || inputs == nil || inputs.store != m.Store {
 		return nil, graph.ErrContractInputVector
 	}
 	if err := inputs.Validate(ctx); err != nil {

@@ -406,7 +406,7 @@ func (s *Server) stackedLevels(ctx context.Context, wrap func(underlying graph.R
 		return nil
 	}
 	sources := repoView.GenerationSources()
-	if len(sources) == 0 || sources[0].Handle == nil {
+	if len(sources) == 0 || (sources[0].Handle == nil || sources[0].Handle.IsNilGenerationHandle()) {
 		return nil
 	}
 	// The view's reader must be exactly len(sources)-1 composed levels over

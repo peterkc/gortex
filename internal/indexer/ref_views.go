@@ -16,7 +16,6 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/gitstate"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/indexer/source"
 	"github.com/zzet/gortex/internal/storage"
@@ -186,7 +185,8 @@ type RefViewResult struct {
 type RefViewManagerConfig struct {
 	// Store is any handle on the database. Generations are begun, published
 	// and superseded through it.
-	Store *store_sqlite.Store
+	Store   checkoutGenerationStore
+	Catalog CheckoutCatalog
 	// Builder builds the sparse generations. It must carry the index
 	// configuration the base corpus was indexed with.
 	Builder *SparseGenerationBuilder
@@ -269,8 +269,8 @@ type RefViewManagerConfig struct {
 // per-request state and is safe to use from many goroutines.
 type RefViewManager struct {
 	lifetime refViewLifetime
-	store    *store_sqlite.Store
-	catalog  *store_sqlite.Catalog
+	store    checkoutGenerationStore
+	catalog  CheckoutCatalog
 	builder  *SparseGenerationBuilder
 	logger   *zap.Logger
 	gate     *ViewBuildGate
@@ -330,7 +330,7 @@ type RefViewManager struct {
 // NewRefViewManager builds a manager over one store.
 func NewRefViewManager(cfg RefViewManagerConfig) (*RefViewManager, error) {
 	switch {
-	case cfg.Store == nil:
+	case cfg.Store == nil || cfg.Store.IsNilGenerationHandle():
 		return nil, errors.New("indexer: ref view manager needs a store")
 	case cfg.Builder == nil:
 		return nil, errors.New("indexer: ref view manager needs a generation builder")
@@ -354,7 +354,7 @@ func NewRefViewManager(cfg RefViewManagerConfig) (*RefViewManager, error) {
 	}
 	return &RefViewManager{
 		store:             cfg.Store,
-		catalog:           cfg.Store.Catalog(),
+		catalog:           cfg.Catalog,
 		builder:           cfg.Builder,
 		logger:            logger,
 		gate:              cfg.Gate,
@@ -994,7 +994,7 @@ func (m *RefViewManager) runBuild(
 ) (RefViewResult, error) {
 	generationID, report, buildErr := m.builder.BuildCommitLayer(WithIndexOrigin(ctx, "ref_view"), CommitLayerRequest{
 		Identity:      identity,
-		Base:          m.store.AtGeneration(base.generationID),
+		Base:          generationAt(m.store, base.generationID),
 		RepoDir:       req.RepoDir,
 		BaseTreeOID:   base.treeOID,
 		TargetTreeOID: resolved.TreeOID,

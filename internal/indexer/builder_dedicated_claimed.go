@@ -12,7 +12,6 @@ import (
 
 	"github.com/zzet/gortex/internal/gitcmd"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer/source"
 	"github.com/zzet/gortex/internal/storage"
 )
@@ -70,7 +69,7 @@ const generationZero int64 = 0
 // underneath and its readers are live. This builder only brackets; it makes no
 // claim about the shape.
 //
-// It is declared as an interface here rather than called on *store_sqlite.Store
+// It is declared as an interface here rather than called on generationPayloadStore
 // directly so the bracket is substitutable in a test. generationBulkLoader
 // resolves it with a plain optional assertion against the builder's own store,
 // which is what binds the production path; a test asserts the store still
@@ -110,7 +109,7 @@ type GenerationPayloadCopier interface {
 // reads back rather than trusting these numbers.
 //
 // It is an ALIAS of the store's own type rather than a second declaration of
-// the same three fields, and that is what lets *store_sqlite.Store satisfy
+// the same three fields, and that is what lets generationPayloadStore satisfy
 // GenerationPayloadCopier: an interface method's result type must be identical,
 // not merely identically shaped, so a separate struct here would leave the
 // production copier permanently unbindable and the copy route permanently dead.
@@ -137,7 +136,7 @@ func (b *SparseGenerationBuilder) BuildClaimedDedicatedBase(ctx context.Context,
 func (b *SparseGenerationBuilder) buildClaimedDedicatedBase(ctx context.Context, request ClaimedDedicatedBaseRequest, allowCopy bool) (builtGeneration int64, builtReport BuildReport, buildErr error) {
 	started := time.Now()
 	claim := request.Claim
-	if ctx == nil || b == nil || b.Store == nil || b.Registry == nil || b.Logger == nil {
+	if ctx == nil || b == nil || b.Store == nil || b.Store.IsNilGenerationHandle() || b.Registry == nil || b.Logger == nil {
 		return 0, BuildReport{}, fmt.Errorf("indexer: claimed base requires context, store, registry and logger")
 	}
 	if err := ctx.Err(); err != nil {
@@ -146,7 +145,7 @@ func (b *SparseGenerationBuilder) buildClaimedDedicatedBase(ctx context.Context,
 	if claim.GenerationID <= 0 || claim.AttemptToken == "" || claim.BaseGenerationID != 0 || claim.LayerID != "" || claim.LowerViewFingerprint != "" {
 		return 0, BuildReport{}, fmt.Errorf("indexer: initial base requires a positive full-snapshot reservation")
 	}
-	p, found, err := b.Store.Catalog().DedicatedBasePublication(ctx, claim.Desire.Authority.GraphID)
+	p, found, err := b.Catalog.DedicatedBasePublication(ctx, claim.Desire.Authority.GraphID)
 	if err != nil {
 		return 0, BuildReport{}, err
 	}
@@ -157,7 +156,7 @@ func (b *SparseGenerationBuilder) buildClaimedDedicatedBase(ctx context.Context,
 		(p.AttemptState != "building" && p.AttemptState != "ready" && p.AttemptState != "adopted") {
 		return 0, BuildReport{}, fmt.Errorf("%w: initial base reservation changed", storage.ErrCatalogStaleGuard)
 	}
-	row, found, err := b.Store.Catalog().GetViewGeneration(ctx, claim.GenerationID)
+	row, found, err := b.Catalog.GetViewGeneration(ctx, claim.GenerationID)
 	if err != nil {
 		return 0, BuildReport{}, err
 	}
@@ -183,7 +182,7 @@ func (b *SparseGenerationBuilder) buildClaimedDedicatedBase(ctx context.Context,
 	}
 	// Revalidate current availability and namespace before joining expensive
 	// work. This reuses the existing claim without allocating or rewriting it.
-	validated, err := b.Store.Catalog().ClaimDedicatedBaseBuild(ctx, storage.ClaimDedicatedBaseBuildRequest{
+	validated, err := b.Catalog.ClaimDedicatedBaseBuild(ctx, storage.ClaimDedicatedBaseBuildRequest{
 		ExistingGenerationID: claim.GenerationID,
 		Desire:               claim.Desire, ExpectedActiveGenerationID: claim.ExpectedActiveGenerationID,
 		AttemptToken: claim.AttemptToken, BaseGenerationID: claim.BaseGenerationID,
@@ -204,10 +203,11 @@ func (b *SparseGenerationBuilder) buildClaimedDedicatedBase(ctx context.Context,
 		RepoPrefix: claim.Desire.Authority.RepoPrefix, WorkspaceID: request.WorkspaceID,
 		ProjectID: request.ProjectID, PrePublish: request.PrePublish,
 	}
-	handle, err := b.Store.AtManagedGeneration(claim.GenerationID)
+	rawHandle, err := b.Store.AtManagedGenerationStore(claim.GenerationID)
 	if err != nil {
 		return 0, BuildReport{}, err
 	}
+	handle := rawHandle.(generationPayloadStore)
 	adopted := validated.Status != "allocated"
 	reparse := func(ctx context.Context) (source.ContentSource, buildPlan, BuildReport, error) {
 		target, err := source.NewGitTreeSource(ctx, request.RootPath, identity.TreeOID)
@@ -354,7 +354,7 @@ func (b *SparseGenerationBuilder) buildClaimedDedicatedBase(ctx context.Context,
 		return window.close()
 	}
 	failed := func(ctx context.Context, cause error) error {
-		return b.Store.Catalog().FailDedicatedBaseBuild(ctx, storage.FailDedicatedBaseBuildRequest{
+		return b.Catalog.FailDedicatedBaseBuild(ctx, storage.FailDedicatedBaseBuildRequest{
 			Claim: claim, Error: cause.Error(),
 		})
 	}
@@ -725,7 +725,7 @@ func (w *generationBulkWindow) close() error {
 // written at the end of the pass the copy route does not run.
 func (b *SparseGenerationBuilder) claimedBaseCopyPlan(
 	ctx context.Context,
-	handle *store_sqlite.Store,
+	handle generationPayloadStore,
 	rootPath, repoPrefix, treeOID, extractorVersions string,
 	copierPresent bool,
 ) (bool, graph.RepoIndexState, string) {
@@ -749,7 +749,7 @@ func (b *SparseGenerationBuilder) claimedBaseCopyPlan(
 	if len(inputs) != 0 {
 		return false, none, "the reserved generation carries interrupted contract input"
 	}
-	state, found, err := b.Store.AtGeneration(generationZero).GetRepoIndexState(repoPrefix)
+	state, found, err := generationAt(b.Store, generationZero).GetRepoIndexState(repoPrefix)
 	switch {
 	case err != nil:
 		return false, none, "generation zero index provenance is unreadable"
@@ -853,7 +853,7 @@ func (b *SparseGenerationBuilder) generationZeroPathsOutsideTree(
 			tree[name] = struct{}{}
 		}
 	}
-	rows, err := b.Store.AtGeneration(generationZero).FileMetasForRepo(repoPrefix)
+	rows, err := generationAt(b.Store, generationZero).FileMetasForRepo(repoPrefix)
 	if err != nil {
 		return 0, err
 	}
@@ -900,7 +900,7 @@ func (b *SparseGenerationBuilder) prepareCopiedDedicatedBase(
 	copier GenerationPayloadCopier,
 	repoPrefix string,
 	generationID int64,
-	handle *store_sqlite.Store,
+	handle generationPayloadStore,
 	zeroState graph.RepoIndexState,
 ) generationPayloadPreparation {
 	return func(ctx context.Context) (source.ContentSource, buildPlan, BuildReport, error) {
@@ -964,7 +964,7 @@ func (b *SparseGenerationBuilder) prepareCopiedDedicatedBase(
 // implement the writer) is not an error here, exactly as it is not an error at
 // the end of a pass.
 func writeCopiedGenerationIndexState(
-	handle *store_sqlite.Store,
+	handle generationPayloadStore,
 	repoPrefix string,
 	zeroState graph.RepoIndexState,
 	counts GenerationCopyCounts,
@@ -987,7 +987,7 @@ func writeCopiedGenerationIndexState(
 // from the destination generation rather than taken from the copier's own
 // counts. A report that says what the generation carries is the only kind a
 // later reader can check.
-func copiedDedicatedBaseReport(handle *store_sqlite.Store, repoPrefix string) (BuildReport, error) {
+func copiedDedicatedBaseReport(handle generationPayloadStore, repoPrefix string) (BuildReport, error) {
 	rows, err := handle.FileMetasForRepo(repoPrefix)
 	if err != nil {
 		return BuildReport{}, fmt.Errorf("indexer: read copied generation inventory: %w", err)

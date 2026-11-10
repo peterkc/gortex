@@ -496,7 +496,7 @@ func (c *CheckoutCoordinator) coveredPaths(ctx context.Context, generations ...i
 		}
 		// The file masks alone: one indexed read per generation, cheap
 		// enough for the per-edit fold check.
-		masks, err := c.store.AtGeneration(id).FileMasksContext(ctx)
+		masks, err := generationAt(c.store, id).FileMasksContext(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -586,7 +586,7 @@ func (c *CheckoutCoordinator) reparentDirtyChain(
 	// Bottom first: every copy's parent must already exist.
 	for i := len(chain) - 1; i >= 0; i-- {
 		member := chain[i]
-		generationID, _, adopted, err := c.store.BeginPayloadGenerationWithStatus(ctx, store_sqlite.PayloadGenerationRequest{
+		generationID, _, adopted, err := c.store.BeginPayloadGenerationStoreWithStatus(ctx, store_sqlite.PayloadGenerationRequest{
 			OwnerKind: member.OwnerKind, GraphID: member.GraphID, LayerID: member.LayerID,
 			CheckoutID: member.CheckoutID, GenerationKind: member.GenerationKind,
 			BaseGenerationID:     parent,

@@ -19,8 +19,8 @@ import (
 
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 	"go.uber.org/zap"
 )
@@ -141,7 +141,7 @@ func contractJobOutcomeOf(err error) string {
 		return viewmetrics.ContractJobSupersededInputsMoving
 	case errors.Is(err, errContractJobReadUnsettled):
 		return viewmetrics.ContractJobSupersededReadUnsettled
-	case errors.Is(err, store_sqlite.ErrCatalogStaleGuard), errors.Is(err, graph.ErrContractProjectionStale):
+	case errors.Is(err, storage.ErrCatalogStaleGuard), errors.Is(err, graph.ErrContractProjectionStale):
 		return viewmetrics.ContractJobSupersededPublishRefused
 	}
 	return viewmetrics.ContractJobFailed
@@ -798,7 +798,7 @@ type contractConvergenceHooks struct {
 	roundFiles int
 	// roundWait replaces contractRoundWait.
 	roundWait      time.Duration
-	openedEvidence func(*store_sqlite.Store)
+	openedEvidence func(contractEvidenceStore)
 	beforeExtract  func(path string)
 	afterExtract   func(path string)
 	proven         func(unit *contractUnit)
@@ -912,7 +912,7 @@ type contractConvergence struct {
 	// The final enrichment round's evidence and registry.
 	registry   *contracts.Registry
 	evidence   *contractFollowupEvidence
-	scratch    *store_sqlite.Store
+	scratch    contractEvidenceStore
 	scratchDir string
 }
 
@@ -1372,14 +1372,30 @@ func (c *contractConvergence) windowClosed(ctx context.Context, windows map[stri
 
 // openEvidence opens a fresh private scratch store for one round. Nothing a
 // round imported outlives it.
-func (c *contractConvergence) openEvidence() (*contractFollowupEvidence, *store_sqlite.Store, string, error) {
+func (c *contractConvergence) openEvidence() (*contractFollowupEvidence, contractEvidenceStore, string, error) {
 	start := time.Now()
 	defer func() { c.report.ScratchDuration += time.Since(start) }()
 	dir, err := os.MkdirTemp(c.req.ScratchParent, "gortex-contract-evidence-")
 	if err != nil {
 		return nil, nil, "", err
 	}
-	scratch, err := store_sqlite.Open(filepath.Join(dir, "evidence.sqlite"))
+	if c.req.OpenEvidence == nil {
+		_ = os.RemoveAll(dir)
+		return nil, nil, "", fmt.Errorf("contract followup: evidence opener unavailable")
+	}
+	rawScratch, err := c.req.OpenEvidence(filepath.Join(dir, "evidence.sqlite"))
+	var scratch contractEvidenceStore
+	if err == nil {
+		var ok bool
+		scratch, ok = rawScratch.(contractEvidenceStore)
+		if !ok {
+			if closer, ok := rawScratch.(interface{ Close() error }); ok {
+				_ = closer.Close()
+			}
+			_ = os.RemoveAll(dir)
+			return nil, nil, "", fmt.Errorf("contract followup: evidence store lacks required capabilities")
+		}
+	}
 	if err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, nil, "", err
@@ -1402,7 +1418,7 @@ func (c *contractConvergence) openEvidence() (*contractFollowupEvidence, *store_
 	return evidence, scratch, dir, nil
 }
 
-func closeContractEvidence(scratch *store_sqlite.Store, dir string) {
+func closeContractEvidence(scratch contractEvidenceStore, dir string) {
 	if scratch != nil {
 		_ = scratch.Close()
 	}
@@ -2064,7 +2080,7 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 	}
 	defer endpointBatch.close()
 	var evidence *contractFollowupEvidence
-	var scratch *store_sqlite.Store
+	var scratch contractEvidenceStore
 	var dir string
 	defer func() { closeContractEvidence(scratch, dir) }()
 	ensureEvidence := func() error {
@@ -3235,7 +3251,7 @@ func (c *contractConvergence) run() error {
 func (c *contractConvergence) noteWindowGaps() {
 	end := time.Now()
 	paths := slices.Sorted(maps.Keys(c.blocked))
-	var closes []store_sqlite.ContractCoreWindowClose
+	var closes []storage.ContractCoreWindowClose
 	missing := paths
 	if c.snap.WindowLastCloses != nil {
 		closes, missing = c.snap.WindowLastCloses(paths, end)

@@ -26,7 +26,7 @@ func positiveProjectionCapture(t *testing.T, reader graph.Reader, handles ...*st
 			require.NoError(t, h.Catalog().PublishViewGeneration(t.Context(), h.ViewGeneration(), 1))
 		}
 	}
-	p, err := capturePositiveNames(t.Context(), map[string]graph.Reader{"r": reader}, map[string][]*store_sqlite.Store{"r": handles}, 1<<20)
+	p, err := capturePositiveNames(t.Context(), map[string]graph.Reader{"r": reader}, map[string][]generationPayloadStore{"r": slice2PayloadHandles(handles)}, 1<<20)
 	require.NoError(t, err)
 	return p
 }
@@ -161,7 +161,7 @@ func TestContractPositiveNameValuesRefuseNewProducerAndNegativeReveal(t *testing
 	c.req.delta.currentNames = positiveProjectionCapture(t, graph.NewOverlaidViewWithLayer(h, deleted), h, s.AtGeneration(removed))
 	_, ok = c.positiveCandidateValue("A", "r")
 	require.False(t, ok)
-	bounded, err := capturePositiveNames(t.Context(), map[string]graph.Reader{"r": h}, map[string][]*store_sqlite.Store{"r": {h}}, 4095)
+	bounded, err := capturePositiveNames(t.Context(), map[string]graph.Reader{"r": h}, map[string][]generationPayloadStore{"r": {h}}, 4095)
 	require.NoError(t, err)
 	require.Nil(t, bounded)
 }

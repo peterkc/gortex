@@ -26,7 +26,7 @@ func TestCheckoutTextLayerClaimsKeepIdentitySeparateFromFileInventory(t *testing
 		}
 		return id, s.AtGeneration(id)
 	}
-	coordinator := &CheckoutCoordinator{store: s, repoPrefix: "alpha"}
+	coordinator := &CheckoutCoordinator{catalog: slice2TestCatalog(s), store: s, repoPrefix: "alpha"}
 	paths := map[string]struct{}{"keep.cs": {}, "unrelated.cs": {}}
 	want := map[string]struct{}{"keep.cs": {}, "unrelated.cs": {}}
 	id, upper := newGeneration()

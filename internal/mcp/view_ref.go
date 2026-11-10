@@ -35,7 +35,7 @@ func (s *Server) viewForRefSelector(ctx context.Context, selector graphview.Sele
 	if err != nil {
 		return nil, err
 	}
-	dedicated, found, err := s.materializer.Catalog.GetDedicatedGraph(ctx, graphID)
+	dedicated, found, err := s.materializer.Catalog.(*store_sqlite.Catalog).GetDedicatedGraph(ctx, graphID)
 	switch {
 	case err != nil:
 		return nil, graphview.WrapViewError(graphview.CodeCheckoutInaccessible,
@@ -201,7 +201,7 @@ func (s *Server) refViewGraphID(ctx context.Context, selector graphview.Selector
 // whatever root the corpus records for its prefix.
 func (s *Server) repoDirForPrefix(ctx context.Context, dedicated store_sqlite.DedicatedGraph) string {
 	if dedicated.OwnerCheckoutID != "" {
-		checkout, found, err := s.materializer.Catalog.GetCheckout(ctx, dedicated.OwnerCheckoutID)
+		checkout, found, err := s.materializer.Catalog.(*store_sqlite.Catalog).GetCheckout(ctx, dedicated.OwnerCheckoutID)
 		if err == nil && found && checkout.RootPath != "" {
 			return checkout.RootPath
 		}
@@ -223,7 +223,7 @@ func (s *Server) viewStore() *store_sqlite.Store {
 	if s == nil || s.materializer == nil {
 		return nil
 	}
-	return s.materializer.Store
+	return s.materializer.Store.(*store_sqlite.Store)
 }
 
 // refSelectorKind maps the wire selector vocabulary onto the resolver's.

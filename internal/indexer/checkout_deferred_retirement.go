@@ -22,7 +22,7 @@ const (
 // fairly selects one generation across live coordinator backlogs and durable
 // orphan/owed work, then advances at most one physical retirement slice.
 func (l *CheckoutLifecycle) SweepDeferredRetirements(ctx context.Context) (retired int, pending bool, err error) {
-	if l == nil || l.store == nil {
+	if l == nil || (l.store == nil || l.store.IsNilGenerationHandle()) {
 		return 0, false, nil
 	}
 	if ctx == nil {
@@ -103,7 +103,7 @@ func (l *CheckoutLifecycle) SweepDeferredRetirements(ctx context.Context) (retir
 	// pass) is not counted again.
 	for _, generationID := range discovered {
 		var owedStore graph.Store
-		if l.store != nil {
+		if l.store != nil && !l.store.IsNilGenerationHandle() {
 			owedStore = l.store
 		}
 		countRetirementOwed(owedStore, generationID, viewmetrics.OwedDiscovered)
@@ -345,7 +345,7 @@ func (l *CheckoutLifecycle) removeOwedRetirement(generationID int64) {
 
 func (l *CheckoutLifecycle) deferredRetirementInUse(generationID int64) bool {
 	if (l.leases != nil && l.leases.InUse(generationID)) ||
-		(l.store != nil && l.store.PayloadBuildFlightActive(generationID)) {
+		((l.store != nil && !l.store.IsNilGenerationHandle()) && l.store.PayloadBuildFlightActive(generationID)) {
 		return true
 	}
 	l.coordMu.Lock()
@@ -409,7 +409,7 @@ func (l *CheckoutLifecycle) discoverDeferredRetirements(
 	served map[string]struct{},
 	known []int64,
 ) ([]int64, error) {
-	if l.catalog == nil {
+	if l.catalog == nil || l.catalog.IsNilMaterializerCatalog() {
 		return nil, nil
 	}
 	deferredRetirementScans.Add(1)
@@ -549,7 +549,9 @@ func (l *CheckoutLifecycle) discoverDeferredRetirementsWith(
 			}
 		}
 		candidates, routeErr := readyLayerRetirementCandidates(
-			ctx, layers, served, routes, l.catalog.GetCheckoutRoutes,
+			ctx, layers, served, routes, func(ctx context.Context, ids []string) (map[string]storage.CheckoutRoute, error) {
+				return l.catalog.GetCheckoutRoutes(ctx, ids)
+			},
 		)
 		if routeErr != nil {
 			return out, fmt.Errorf("read checkout routes: %w", routeErr)

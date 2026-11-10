@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -77,10 +78,10 @@ func otherCall() { http.Get("http://other.test/v1/items") }
 	read := func(t *testing.T, req ContractFollowupRequest, report ContractFollowupReport) payload {
 		t.Helper()
 		var ids []string
-		for node := range req.Payload.NodesLightSeq() {
+		for node := range any(req.Payload).(*store_sqlite.Store).NodesLightSeq() {
 			ids = append(ids, node.ID)
 		}
-		nodes, err := req.Payload.GetNodesByIDsContext(context.Background(), ids)
+		nodes, err := any(req.Payload).(*store_sqlite.Store).GetNodesByIDsContext(context.Background(), ids)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -116,7 +117,7 @@ func otherCall() { http.Get("http://other.test/v1/items") }
 		if got, _ := json.Marshal(bridge.Meta["repos"]); string(got) != `["repo-a","repo-b","repo-c"]` {
 			t.Fatalf("incomplete bridge membership: %s", got)
 		}
-		hits, err := req.Payload.SearchSymbolsContext(context.Background(), "items", 100)
+		hits, err := any(req.Payload).(*store_sqlite.Store).SearchSymbolsContext(context.Background(), "items", 100)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -128,11 +129,11 @@ func otherCall() { http.Get("http://other.test/v1/items") }
 		if !reflect.DeepEqual(searchIDs, []string{"bridge::workspace::project::http::GET::/v1/items", "http::GET::/v1/items"}) {
 			t.Fatalf("shared canonical and bridge search documents missing: %v", searchIDs)
 		}
-		count, err := req.Payload.SymbolFTSCount()
+		count, err := any(req.Payload).(*store_sqlite.Store).SymbolFTSCount()
 		if err != nil || count != report.SymbolDocuments {
 			t.Fatalf("FTS accounting: count=%d report=%d err=%v", count, report.SymbolDocuments, err)
 		}
-		mode, known, err := req.Payload.GetSymbolFTSNormalization(req.Snapshot.Key.RepoPrefix)
+		mode, known, err := any(req.Payload).(*store_sqlite.Store).GetSymbolFTSNormalization(req.Snapshot.Key.RepoPrefix)
 		if err != nil || !known || mode != search.FTSNormalizationMode() {
 			t.Fatalf("target search normalization: %q %v %v", mode, known, err)
 		}
@@ -160,7 +161,7 @@ func otherCall() { http.Get("http://other.test/v1/items") }
 		targets = append(targets, ContractFollowupTarget{Key: req.Snapshot.Key, Work: req.Snapshot.Work, Payload: req.Payload, Catalog: req.Catalog})
 	}
 	first := requests[0]
-	batch, err := RunContractFollowupBatch(context.Background(), ContractFollowupBatchRequest{Snapshot: first.Snapshot, Targets: targets, RebuildReason: first.RebuildReason, Registry: first.Registry, Config: first.Config, Leases: first.Leases, Yield: first.Yield})
+	batch, err := RunContractFollowupBatch(context.Background(), ContractFollowupBatchRequest{OpenEvidence: openSlice2TestEvidence, Snapshot: first.Snapshot, Targets: targets, RebuildReason: first.RebuildReason, Registry: first.Registry, Config: first.Config, Leases: first.Leases, Yield: first.Yield})
 	if err != nil || len(batch.Targets) != len(requests) {
 		t.Fatalf("batch targets: %#v %v", batch, err)
 	}

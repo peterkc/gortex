@@ -14,16 +14,17 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/indexer/source"
 	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/storage"
 	"go.uber.org/zap"
 )
 
 type ContractFollowupCaptureOptions struct {
 	Context             context.Context
-	Store               *store_sqlite.Store
+	Store               checkoutGenerationStore
+	Catalog             CheckoutCatalog
 	Materializer        *graphview.Materializer
 	MultiIndexer        *MultiIndexer
 	Registry            *parser.Registry
@@ -93,7 +94,7 @@ type ContractFollowupSourceCapture func(context.Context, *ContractCaptureSource,
 func NewContractFollowupCapture(options ContractFollowupCaptureOptions) ContractFollowupCapture {
 	capture := NewContractFollowupSourceCapture(options)
 	return func(ctx context.Context, view *graphview.RepoView, inputs *graphview.SelectedContractInputs, repo, checkout string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
-		if inputs == nil || options.Store == nil || options.Materializer == nil {
+		if inputs == nil || options.Store == nil || options.Store.IsNilGenerationHandle() || options.Materializer == nil {
 			return ContractFollowupSnapshot{}, nil, graph.ErrContractInputVector
 		}
 		prepared, err := PrepareContractCaptureSource(view)
@@ -115,7 +116,7 @@ func NewContractFollowupSourceCapture(options ContractFollowupCaptureOptions) Co
 				prepared.Release()
 			}
 		}()
-		if inputs == nil || options.Store == nil || options.Materializer == nil {
+		if inputs == nil || options.Store == nil || options.Store.IsNilGenerationHandle() || options.Materializer == nil {
 			return snapshot, nil, graph.ErrContractInputVector
 		}
 		if err = inputs.Validate(ctx); err != nil {
@@ -133,23 +134,24 @@ func NewContractFollowupSourceCapture(options ContractFollowupCaptureOptions) Co
 		// Mint selected publication ancestry while these sources are leased,
 		// before census/extraction can overlap a content-equal background fold.
 		// A later real input mutation still fails the physical publication CAS.
-		receiver := options.Store.AtGeneration(0)
+		receiver := generationAt(options.Store, 0)
 		if prepared != nil {
 			if len(prepared.sources) == 0 {
 				return snapshot, nil, graph.ErrContractInputVector
 			}
-			receiver = prepared.sources[len(prepared.sources)-1].Handle
+			receiver = prepared.sources[len(prepared.sources)-1].Handle.(generationPayloadStore)
 		}
-		publicationSources := make(map[string]*store_sqlite.Store, len(names))
+		publicationSources := make(map[string]generationPayloadStore, len(names))
 		for _, name := range names {
 			state, sourceErr := graph.ComposeContractInputState(name, checkout, inputs.Witnesses)
 			if sourceErr != nil {
 				return snapshot, nil, sourceErr
 			}
-			publicationSources[name], sourceErr = receiver.CaptureContractPublicationSource(ctx, state, inputs.Witnesses)
+			rawSource, sourceErr := receiver.CaptureContractPublicationSourceStore(ctx, state, inputs.Witnesses)
 			if sourceErr != nil {
 				return snapshot, nil, sourceErr
 			}
+			publicationSources[name] = rawSource.(generationPayloadStore)
 		}
 		captureOptions := options
 		captureOptions.selectedInputs = inputs
@@ -193,7 +195,7 @@ func NewContractFollowupSourceCapture(options ContractFollowupCaptureOptions) Co
 				if w.State.RepoPrefix != name {
 					continue
 				}
-				rows, e := options.Store.AtGeneration(w.GenerationID).PendingContractWorkForScopeContext(ctx, name, w.State.CheckoutID)
+				rows, e := generationAt(options.Store, w.GenerationID).PendingContractWorkForScopeContext(ctx, name, w.State.CheckoutID)
 				if e != nil {
 					return ContractFollowupSnapshot{}, nil, e
 				}
@@ -211,7 +213,7 @@ func NewContractFollowupSourceCapture(options ContractFollowupCaptureOptions) Co
 			if existing != nil {
 				continue
 			}
-			targets = append(targets, ContractFollowupTarget{Key: key, Work: work, Catalog: publicationSources[name]})
+			targets = append(targets, ContractFollowupTarget{Key: key, Work: work, Catalog: publicationSources[name].(contractPublicationStore)})
 		}
 		if err = inputs.Validate(ctx); err != nil {
 			return ContractFollowupSnapshot{}, nil, err
@@ -228,7 +230,7 @@ func NewContractFollowupSourceCapture(options ContractFollowupCaptureOptions) Co
 // are never substituted for a different historical accepted file. It owns
 // prepared on every return: the snapshot releases it, or the failure does.
 func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupCaptureOptions, prepared *ContractCaptureSource, repos []string) (snapshot ContractFollowupSnapshot, err error) {
-	if ctx == nil || options.Store == nil || options.Materializer == nil || options.Materializer.Leases == nil || options.Materializer.Catalog == nil || options.MultiIndexer == nil || options.Registry == nil {
+	if ctx == nil || options.Store == nil || options.Store.IsNilGenerationHandle() || options.Materializer == nil || options.Materializer.Leases == nil || (options.Materializer.Catalog == nil || options.Materializer.Catalog.IsNilMaterializerCatalog()) || options.MultiIndexer == nil || options.Registry == nil {
 		prepared.Release()
 		return snapshot, fmt.Errorf("contract capture: incomplete selected owner")
 	}
@@ -252,24 +254,24 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 			releaseSnapshot()
 		}
 	}()
-	handles := []*store_sqlite.Store{}
+	handles := []generationPayloadStore{}
 	if prepared == nil {
 		lease := options.Materializer.Leases.Acquire(0)
 		release = append(release, lease.Release)
-		snapshot.Core = options.Store.AtGeneration(0)
-		handles = append(handles, options.Store.AtGeneration(0))
+		snapshot.Core = generationAt(options.Store, 0)
+		handles = append(handles, generationAt(options.Store, 0))
 	} else {
 		release = append(release, prepared.Release)
 		snapshot.Core = prepared.handoff.Reader
 		if prepared.composesBase {
-			handles = append(handles, options.Store.AtGeneration(0))
+			handles = append(handles, generationAt(options.Store, 0))
 		}
 		for _, physical := range prepared.handoff.GenerationSources() {
-			handles = append(handles, physical.Handle)
+			handles = append(handles, physical.Handle.(generationPayloadStore))
 		}
 	}
 	readers := make(map[string]graph.Reader)
-	handlesByRepo := make(map[string][]*store_sqlite.Store)
+	handlesByRepo := make(map[string][]generationPayloadStore)
 	if options.selectedInputs != nil {
 		readers = options.selectedInputs.SourceReaders()
 		ids := []int64{}
@@ -285,7 +287,7 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 				duplicate = duplicate || h.ViewGeneration() == w.GenerationID
 			}
 			if !duplicate {
-				handlesByRepo[w.State.RepoPrefix] = append(repoHandles, options.Store.AtGeneration(w.GenerationID))
+				handlesByRepo[w.State.RepoPrefix] = append(repoHandles, generationAt(options.Store, w.GenerationID))
 			}
 		}
 		lease := options.Materializer.Leases.Acquire(ids...)
@@ -333,7 +335,7 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 		if prepared != nil && prepared.repo == repo {
 			physical := prepared.sources
 			if len(physical) > 0 && physical[len(physical)-1].CheckoutID != "" {
-				checkout, found, e := options.Materializer.Catalog.GetCheckout(ctx, physical[len(physical)-1].CheckoutID)
+				checkout, found, e := options.Catalog.GetCheckout(ctx, physical[len(physical)-1].CheckoutID)
 				if e != nil {
 					return ContractFollowupSnapshot{}, e
 				}
@@ -528,7 +530,7 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 						// complete. A row whose core-write window is open is
 						// admitted in flight: the job's stamp scans see the window,
 						// and its first read of the file waits for it to close.
-						var state store_sqlite.ContractReceiptWriteState
+						var state storage.ContractReceiptWriteState
 						if !row.Deleted && !row.Accepted {
 							state = repoHandles[i].ContractReceiptWriteStates(repo, actor, []string{path})[path]
 						}
@@ -614,8 +616,8 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 				break
 			}
 		}
-		snapshot.WindowLastCloses = func(paths []string, before time.Time) ([]store_sqlite.ContractCoreWindowClose, []string) {
-			var closes []store_sqlite.ContractCoreWindowClose
+		snapshot.WindowLastCloses = func(paths []string, before time.Time) ([]storage.ContractCoreWindowClose, []string) {
+			var closes []storage.ContractCoreWindowClose
 			var missing []string
 			for _, path := range paths {
 				found := false
@@ -740,7 +742,7 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 		}
 	}
 	sort.Slice(projectionIDs, func(i, j int) bool { return projectionIDs[i] < projectionIDs[j] })
-	snapshot.CaptureProjectionWitness = func(ctx context.Context) (*store_sqlite.PayloadInputWitness, error) {
+	snapshot.CaptureProjectionWitness = func(ctx context.Context) (*storage.PayloadInputWitness, error) {
 		return options.Store.CapturePayloadInputWitness(ctx, projectionIDs)
 	}
 	snapshot.positiveNameCapture = func(ctx context.Context, budget int64) (*contractPositiveNameProjection, error) {
@@ -773,12 +775,12 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 // projection completes DI ownership across edge-only layers and aliases. Spring
 // and Java candidates are reselected through the same captured source reader;
 // replacements and file/identity masks can remove or change a physical candidate.
-func readContractFollowupSeeds(ctx context.Context, reader graph.Reader, handles []*store_sqlite.Store, repo string) ([]*graph.Node, []*graph.Edge, bool, error) {
+func readContractFollowupSeeds(ctx context.Context, reader graph.Reader, handles []generationPayloadStore, repo string) ([]*graph.Node, []*graph.Edge, bool, error) {
 	if len(handles) == 0 {
 		return nil, nil, false, nil
 	}
-	native, nativeReader := reader.(*store_sqlite.Store)
-	if reader == nil || nativeReader && native == nil {
+	native, nativeReader := reader.(generationPayloadStore)
+	if reader == nil || nativeReader && (native == nil || native.IsNilGenerationHandle() || !native.SharesSymbolSearchCore(reader)) {
 		return nil, nil, false, graph.ErrContractProjectionUnsupported
 	}
 	// Witness handles include positive namespace absence for companions whose
@@ -927,7 +929,7 @@ const (
 // row as captured and could not wait for the window. An unaccepted row this
 // process never wrote (seq 0) was left by a mutation of an earlier process,
 // and a deleted row in the census contradicts it: both are stuck.
-func contractCaptureRowAdmission(row *graph.ContractBoundaryReceipt, state store_sqlite.ContractReceiptWriteState, scanned bool) contractCaptureAdmission {
+func contractCaptureRowAdmission(row *graph.ContractBoundaryReceipt, state storage.ContractReceiptWriteState, scanned bool) contractCaptureAdmission {
 	switch {
 	case row.Deleted:
 		return contractCaptureStuck
@@ -945,7 +947,7 @@ func contractCaptureRowAdmission(row *graph.ContractBoundaryReceipt, state store
 // Inventory discovery uses physical indexed rows, while ownership is selected
 // through the same checked file masks as constant sidecars. An accepted empty
 // file has an inventory row; a tombstoned file does not.
-func captureAcceptedContractInventory(ctx context.Context, core graph.Reader, handles []*store_sqlite.Store, repo string) (map[string]graph.FileMetaRow, error) {
+func captureAcceptedContractInventory(ctx context.Context, core graph.Reader, handles []generationPayloadStore, repo string) (map[string]graph.FileMetaRow, error) {
 	candidates := make(map[string]bool)
 	for _, handle := range handles {
 		rows, e := handle.FileMetasForRepoContext(ctx, repo)

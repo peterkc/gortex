@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/viewmetrics"
 	"go.uber.org/zap"
 )
@@ -59,7 +58,8 @@ const contractBaselineReconcileCause = "namespace_baseline_reconciliation"
 
 // ContractStuckRepairOptions wires the repair to the runtime it repairs.
 type ContractStuckRepairOptions struct {
-	Store        *store_sqlite.Store
+	Store        checkoutGenerationStore
+	Catalog      CheckoutCatalog
 	MultiIndexer *MultiIndexer
 	// Baseline is the capture runtime the namespace header repair rebuilds
 	// the baseline with.
@@ -122,7 +122,7 @@ func NewContractStuckRepair(options ContractStuckRepairOptions) (*ContractStuckR
 // newContractStuckRepair is NewContractStuckRepair with adjust, which tests
 // use to set the repair's seams, run before the repair starts.
 func newContractStuckRepair(options ContractStuckRepairOptions, adjust func(*ContractStuckRepair)) (*ContractStuckRepair, error) {
-	if options.Store == nil || options.MultiIndexer == nil {
+	if options.Store == nil || options.Store.IsNilGenerationHandle() || options.MultiIndexer == nil {
 		return nil, fmt.Errorf("contract stuck repair: incomplete options")
 	}
 	if options.Logger == nil {
@@ -388,7 +388,7 @@ func (r *ContractStuckRepair) repairHeld(ctx context.Context, state *contractRep
 		r.mu.Unlock()
 	}()
 	repo := state.repo
-	store := r.options.Store.AtGeneration(0)
+	store := generationAt(r.options.Store, 0)
 	r.mu.Lock()
 	suspects, detected, scan := state.suspects, state.detected, state.scan
 	state.suspects, state.detected, state.scan = make(map[string]bool), make(map[string]bool), false
@@ -500,7 +500,7 @@ func (r *ContractStuckRepair) logRepair(repo, kind string, paths []string, err e
 }
 
 // unacceptedRows lists the repository's unaccepted primary receipt rows.
-func (r *ContractStuckRepair) unacceptedRows(ctx context.Context, store *store_sqlite.Store, repo string) []string {
+func (r *ContractStuckRepair) unacceptedRows(ctx context.Context, store generationPayloadStore, repo string) []string {
 	stamps, err := store.ContractBoundaryReceiptStampsContext(ctx, repo, "", nil)
 	if err != nil {
 		return nil
@@ -517,7 +517,7 @@ func (r *ContractStuckRepair) unacceptedRows(ctx context.Context, store *store_s
 // inFlight reports whether path is still in flight: its primary core-write
 // window is open, whatever its age, or its row was left by an earlier
 // process.
-func (r *ContractStuckRepair) inFlight(ctx context.Context, store *store_sqlite.Store, repo, path string) bool {
+func (r *ContractStuckRepair) inFlight(ctx context.Context, store generationPayloadStore, repo, path string) bool {
 	if store.ContractReceiptWriteStates(repo, "", []string{path})[path].Writing {
 		return true
 	}
@@ -527,7 +527,7 @@ func (r *ContractStuckRepair) inFlight(ctx context.Context, store *store_sqlite.
 // restartLeft reports whether path's primary row is unaccepted and no
 // mutation of this process wrote it: an earlier process stopped mid-body or
 // mid-accept. A failure envelope is never stuck.
-func (r *ContractStuckRepair) restartLeft(ctx context.Context, store *store_sqlite.Store, repo, path string) bool {
+func (r *ContractStuckRepair) restartLeft(ctx context.Context, store generationPayloadStore, repo, path string) bool {
 	row, _, err := store.ContractBoundaryReceiptContext(ctx, repo, "", path)
 	if err != nil || row == nil || row.Accepted || contractReceiptIsFailureEnvelope(row) {
 		return false
@@ -627,7 +627,7 @@ func (r *ContractStuckRepair) realEvict(repo, rel string) error {
 // job's.
 func (r *ContractStuckRepair) repairHeader(ctx context.Context, state *contractRepoRepair) {
 	repo := state.repo
-	store := r.options.Store.AtGeneration(0)
+	store := generationAt(r.options.Store, 0)
 	current, found, err := store.ContractInputStateContext(ctx, repo, "")
 	if err != nil || !found || current.Accepted {
 		state.pendingKey = ""

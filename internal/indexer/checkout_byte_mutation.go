@@ -127,7 +127,7 @@ func (l *CheckoutLifecycle) BeginCheckoutByteHandoff(ctx context.Context, checko
 }
 
 func (l *CheckoutLifecycle) beginCheckoutByteMutation(ctx context.Context, checkoutID, root, incarnation string, ordinaryWhenIdle bool) (_ *CheckoutMutation, resultErr error) {
-	if l == nil || l.catalog == nil || checkoutID == "" || root == "" || incarnation == "" {
+	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) || checkoutID == "" || root == "" || incarnation == "" {
 		return nil, ErrCheckoutByteAnchorUnavailable
 	}
 	if ctx == nil {

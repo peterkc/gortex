@@ -40,7 +40,7 @@ const (
 // retirementShapes reads the candidates' shapes for one burst; nil when the
 // catalog cannot answer, which leaves the cursor to choose.
 func (l *CheckoutLifecycle) retirementShapes(ctx context.Context, ordered []int64) map[int64]storage.RetirementCandidateShape {
-	if l.catalog == nil || len(ordered) == 0 {
+	if (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) || len(ordered) == 0 {
 		return nil
 	}
 	shapes, err := l.catalog.RetirementCandidateShapes(ctx, ordered)

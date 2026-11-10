@@ -557,7 +557,7 @@ func indexFileSetSnapshot(
 		report.NodeCount = result.NodeCount
 		report.EdgeCount = result.EdgeCount
 	}
-	builder := &SparseGenerationBuilder{Store: store, Registry: registry, Config: cfg, Logger: zap.NewNop()}
+	builder := &SparseGenerationBuilder{Catalog: slice2TestCatalog(store), Store: store, Registry: registry, Config: cfg, Logger: zap.NewNop()}
 	req := BuildRequest{
 		Base: store, Target: base, RootPath: root, RepoPrefix: "repo",
 		WorkspaceID: "workspace", ProjectID: "project",

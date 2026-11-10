@@ -753,7 +753,12 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 			logger.Warn("serverstack: views.retain_inactive is not a positive duration; using the shipped window",
 				zap.String("value", conf.Views.RetainInactive))
 		}
+		var lifecycleCatalog *store_sqlite.Catalog
+		if provider, ok := g.(interface{ Catalog() *store_sqlite.Catalog }); ok {
+			lifecycleCatalog = provider.Catalog()
+		}
 		lifecycle, lerr := indexer.NewCheckoutLifecycle(indexer.CheckoutLifecycleConfig{
+			Catalog:       lifecycleCatalog,
 			MultiIndexer:  mi,
 			ConfigManager: cm,
 			Graph:         g,
@@ -792,7 +797,7 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 		// predicate. Installing it does not publish anything; it only gives the
 		// publisher/drain half a live owner.
 		if store, ok := g.(*store_sqlite.Store); ok {
-			runtime, rerr := indexer.NewDedicatedBaseRuntime(store, lifecycle.ViewLeases())
+			runtime, rerr := indexer.NewDedicatedBaseRuntime(store, store.Catalog(), lifecycle.ViewLeases())
 			if rerr != nil {
 				_ = s.Close()
 				return nil, fmt.Errorf("build dedicated base publisher runtime: %w", rerr)

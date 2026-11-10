@@ -21,7 +21,7 @@ func dedicatedExistingClaimRequest(claim store_sqlite.DedicatedBaseBuildClaim) s
 func TestDedicatedExistingClaimFailedReplacementCannotAllocate(t *testing.T) {
 	builder, fixture, first := privateClaimedDedicatedFixture(t)
 	ctx := context.Background()
-	catalog := builder.Store.Catalog()
+	catalog := any(builder.Store).(*store_sqlite.Store).Catalog()
 	if err := catalog.FailDedicatedBaseBuild(ctx, store_sqlite.FailDedicatedBaseBuildRequest{Claim: first, Error: "first attempt failed"}); err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestDedicatedExistingClaimFailedReplacementCannotAllocate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	check, err := installDedicatedWriteAudit(ctx, builder.Store, fixture.StorePath)
+	check, err := installDedicatedWriteAudit(ctx, any(builder.Store).(*store_sqlite.Store), fixture.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,16 +76,16 @@ func TestDedicatedExistingClaimLiveStatesAreReadOnly(t *testing.T) {
 				}
 			}
 			if state == "adopted" {
-				if _, err := builder.Store.Catalog().AdoptDedicatedBaseGeneration(ctx, store_sqlite.AdoptDedicatedBaseGenerationRequest{Claim: claim}); err != nil {
+				if _, err := any(builder.Store).(*store_sqlite.Store).Catalog().AdoptDedicatedBaseGeneration(ctx, store_sqlite.AdoptDedicatedBaseGenerationRequest{Claim: claim}); err != nil {
 					t.Fatal(err)
 				}
 			}
-			check, err := installDedicatedWriteAudit(ctx, builder.Store, fixture.StorePath)
+			check, err := installDedicatedWriteAudit(ctx, any(builder.Store).(*store_sqlite.Store), fixture.StorePath)
 			if err != nil {
 				t.Fatal(err)
 			}
 			for range 4 {
-				validated, err := builder.Store.Catalog().ClaimDedicatedBaseBuild(ctx, dedicatedExistingClaimRequest(claim))
+				validated, err := any(builder.Store).(*store_sqlite.Store).Catalog().ClaimDedicatedBaseBuild(ctx, dedicatedExistingClaimRequest(claim))
 				wantStatus := "ready"
 				if state == "building" {
 					wantStatus = "building"
@@ -111,7 +111,7 @@ func TestDedicatedExistingClaimLiveStatesAreReadOnly(t *testing.T) {
 func TestDedicatedExistingClaimRejectsWrongIDTokenAndNegative(t *testing.T) {
 	builder, fixture, claim := privateClaimedDedicatedFixture(t)
 	ctx := context.Background()
-	check, err := installDedicatedWriteAudit(ctx, builder.Store, fixture.StorePath)
+	check, err := installDedicatedWriteAudit(ctx, any(builder.Store).(*store_sqlite.Store), fixture.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestDedicatedExistingClaimRejectsWrongIDTokenAndNegative(t *testing.T) {
 			case "desire":
 				request.Desire.Epoch++
 			}
-			_, err := builder.Store.Catalog().ClaimDedicatedBaseBuild(ctx, request)
+			_, err := any(builder.Store).(*store_sqlite.Store).Catalog().ClaimDedicatedBaseBuild(ctx, request)
 			if err == nil || (field != "negative" && !errors.Is(err, store_sqlite.ErrCatalogStaleGuard)) {
 				t.Fatalf("%s guard=%v", field, err)
 			}
@@ -142,14 +142,14 @@ func TestDedicatedExistingClaimRejectsWrongIDTokenAndNegative(t *testing.T) {
 func TestDedicatedExistingClaimDirectFailureIsReadOnly(t *testing.T) {
 	builder, fixture, claim := privateClaimedDedicatedFixture(t)
 	ctx := context.Background()
-	if err := builder.Store.Catalog().FailDedicatedBaseBuild(ctx, store_sqlite.FailDedicatedBaseBuildRequest{Claim: claim, Error: "failed"}); err != nil {
+	if err := any(builder.Store).(*store_sqlite.Store).Catalog().FailDedicatedBaseBuild(ctx, store_sqlite.FailDedicatedBaseBuildRequest{Claim: claim, Error: "failed"}); err != nil {
 		t.Fatal(err)
 	}
-	check, err := installDedicatedWriteAudit(ctx, builder.Store, fixture.StorePath)
+	check, err := installDedicatedWriteAudit(ctx, any(builder.Store).(*store_sqlite.Store), fixture.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := builder.Store.Catalog().ClaimDedicatedBaseBuild(ctx, dedicatedExistingClaimRequest(claim)); !errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
+	if _, err := any(builder.Store).(*store_sqlite.Store).Catalog().ClaimDedicatedBaseBuild(ctx, dedicatedExistingClaimRequest(claim)); !errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
 		t.Fatalf("failed validation=%v", err)
 	}
 	if err := check(); err != nil {
@@ -173,7 +173,7 @@ func BenchmarkDedicatedExistingClaimValidation(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {
-				validated, err := builder.Store.Catalog().ClaimDedicatedBaseBuild(ctx, request)
+				validated, err := any(builder.Store).(*store_sqlite.Store).Catalog().ClaimDedicatedBaseBuild(ctx, request)
 				if err != nil || validated.GenerationID != claim.GenerationID || validated.AttemptToken != claim.AttemptToken {
 					b.Fatalf("claim validation=%+v %v", validated, err)
 				}

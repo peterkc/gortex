@@ -12,10 +12,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/zzet/gortex/internal/storage"
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/runtimeactivity"
 	"github.com/zzet/gortex/internal/search"
 )
@@ -324,7 +324,7 @@ type EditDeltaReport struct {
 	PhaseReaderWait map[string]time.Duration
 	// PhaseStoreWaits is each phase's store waits by kind (the writer pool,
 	// SQLite's busy and WAL-retry sleeps, read-transaction time).
-	PhaseStoreWaits map[string]store_sqlite.ReaderWaitSplit
+	PhaseStoreWaits map[string]storage.ReaderWaitSplit
 	// PhaseSchedWait / PhaseSchedWaits are the runnable waits (for a
 	// processor) that ended during each phase, process-wide: their estimated
 	// total and their count (sched_latency_mark.go).
@@ -354,7 +354,7 @@ type EditDeltaReport struct {
 	// published generation's stack (edit_delta_contract_cache.go); nil when
 	// the delta's registry was not keyed.
 	carryRegistry        func(generation int64)
-	contractInputWitness *store_sqlite.PayloadInputWitness
+	contractInputWitness *storage.PayloadInputWitness
 	// StackCacheKey is the key the delta's per-stack caches were kept under
 	// (edit_delta_contract_cache.go), empty when the stack below has none.
 	StackCacheKey string
@@ -431,7 +431,7 @@ func (b *SparseGenerationBuilder) buildEditDelta(ctx context.Context, req BuildR
 	work.recordPlan(plan, report, report.PlanningDuration)
 	markPublicationPhase(ctx, PublicationPlanned)
 
-	generationID, handle, adopted, err := b.Store.BeginPayloadGenerationWithStatus(ctx, store_sqlite.PayloadGenerationRequest{
+	generationID, rawHandle, adopted, err := b.Store.BeginPayloadGenerationStoreWithStatus(ctx, storage.PayloadGenerationRequest{
 		OwnerKind: req.Identity.OwnerKind, GraphID: req.Identity.GraphID,
 		LayerID: req.Identity.LayerID, CheckoutID: req.Identity.CheckoutID,
 		GenerationKind: req.Identity.GenerationKind, BaseGenerationID: req.Identity.BaseGenerationID,
@@ -444,8 +444,9 @@ func (b *SparseGenerationBuilder) buildEditDelta(ctx context.Context, req BuildR
 	if err != nil {
 		return 0, BuildReport{}, fmt.Errorf("indexer: begin payload generation: %w", err)
 	}
+	handle := rawHandle.(generationPayloadStore)
 	report.GenerationID = generationID
-	flight, leader, ready, err := b.Store.JoinPayloadBuildFlight(ctx, generationID, adopted)
+	flight, leader, ready, err := b.Store.JoinPayloadBuildFlightHandle(ctx, generationID, adopted)
 	if err != nil {
 		report.Coalesced = adopted
 		report.Duration = time.Since(started)
@@ -500,7 +501,7 @@ func (b *SparseGenerationBuilder) buildEditDelta(ctx context.Context, req BuildR
 				return err
 			}
 		}
-		enrichTx, enrichIO, enrichStarted := store_sqlite.WriteTransactionsBegun(), editDeltaProcessIO(), time.Now()
+		enrichTx, enrichIO, enrichStarted := handle.WriteMark().Transactions, editDeltaProcessIO(), time.Now()
 		enrichWrites := handle.WriteMark()
 		enrichCPU, enrichStore := processCPUTime(), b.storeWaitMark()
 		b.runEnrichment(ctx, req, handle, &report)
@@ -572,7 +573,7 @@ func (b *SparseGenerationBuilder) buildEditDelta(ctx context.Context, req BuildR
 				zap.Any("store_io", storeWaitMillis(b.storeWaitMark().Split(enrichStore))),
 				zap.Int64("major_faults", editDeltaProcessIO().since(enrichIO).majorFaults),
 				zap.Inline(patchWriteLog{split: handle.WriteMark().Since(enrichWrites)}),
-				zap.Int64("write_tx", store_sqlite.WriteTransactionsBegun()-enrichTx),
+				zap.Int64("write_tx", handle.WriteMark().Transactions-enrichTx),
 				zap.Int("restated", delta.EnrichmentRestated),
 				zap.Int("node_claims", delta.EnrichmentNodeClaims))
 		}
@@ -610,7 +611,7 @@ func (b *SparseGenerationBuilder) buildEditDelta(ctx context.Context, req BuildR
 		} else {
 			publishErr = b.Store.PublishPayloadGeneration(ctx, generationID, time.Now().Unix())
 		}
-		if errors.Is(publishErr, store_sqlite.ErrPayloadInputChanged) {
+		if errors.Is(publishErr, storage.ErrPayloadInputChanged) {
 			if b.Logger != nil {
 				b.Logger.Info("indexer: contract input publication refused", zap.Int64("generation", generationID), zap.String("reason", "selected_input_changed"))
 			}
@@ -687,7 +688,7 @@ func (b *SparseGenerationBuilder) runEditDelta(
 	ctx context.Context,
 	req BuildRequest,
 	plan buildPlan,
-	handle *store_sqlite.Store,
+	handle generationPayloadStore,
 	report *BuildReport,
 	cloneProjection **cloneFollowupProjection,
 ) (*EditDeltaReport, error) {
@@ -700,13 +701,13 @@ func (b *SparseGenerationBuilder) runEditDelta(
 	out.PhaseFaults = make(map[string]int64)
 	out.PhaseCPU = make(map[string]time.Duration)
 	out.PhaseReaderWait = make(map[string]time.Duration)
-	out.PhaseStoreWaits = make(map[string]store_sqlite.ReaderWaitSplit)
+	out.PhaseStoreWaits = make(map[string]storage.ReaderWaitSplit)
 	out.PhaseSchedWait = make(map[string]time.Duration)
 	out.PhaseSchedWaits = make(map[string]int64)
 	schedLast := readSchedMark()
-	storeMark := func() store_sqlite.ReaderWaitMark {
-		if b.Store == nil {
-			return store_sqlite.ReaderWaitMark{}
+	storeMark := func() storage.ReaderWaitMark {
+		if b.Store == nil || b.Store.IsNilGenerationHandle() {
+			return storage.ReaderWaitMark{}
 		}
 		return b.Store.ReaderWaitMark()
 	}
@@ -717,7 +718,7 @@ func (b *SparseGenerationBuilder) runEditDelta(
 	out.PhaseRows = make(map[string]int64)
 	out.PhaseWriteTx = make(map[string]int64)
 	out.PhaseLayerRows = make(map[string]int)
-	walLast, txLast := handle.WALWriteMark(), store_sqlite.WriteTransactionsBegun()
+	walLast, txLast := handle.WALWriteMark(), handle.WriteMark().Transactions
 	layerRowsLast := 0
 	var layerRowsOf func() int
 	lap := func(name string) {
@@ -762,11 +763,11 @@ func (b *SparseGenerationBuilder) runEditDelta(
 		schedLast = schedNow
 		out.SleepGaugeInstalled = storeNow.Sleep.Installed
 		out.SleepGaugeVFSOnly = storeNow.Sleep.VFSOnly
-		walNow, txNow := handle.WALWriteMark(), store_sqlite.WriteTransactionsBegun()
+		walNow, txNow := handle.WALWriteMark(), handle.WriteMark().Transactions
 		if storeNow.VFS.Available {
 			out.PhaseWALBytes[name] += split.VFS.WALBytes()
 		} else {
-			wal := store_sqlite.WALWrittenBetween(walLast, walNow)
+			wal := storage.WALWrittenBetween(walLast, walNow)
 			out.PhaseWALBytes[name] += wal.Bytes
 			out.PhaseWALReset[name] = out.PhaseWALReset[name] || wal.Reset
 		}
@@ -781,7 +782,7 @@ func (b *SparseGenerationBuilder) runEditDelta(
 	// changed-record fallback, can consume accepted ancestor inputs. Capture
 	// once before reading those inputs and retain the original through every
 	// engine pass and the guarded final publication.
-	var contractInputWitness *store_sqlite.PayloadInputWitness
+	var contractInputWitness *storage.PayloadInputWitness
 	if generations, complete := editDeltaContractInputGenerations(req.Base, b.Store); complete && b.contractCoreRuntime == nil {
 		var err error
 		contractInputWitness, err = b.Store.CapturePayloadInputWitness(ctx, generations)
@@ -850,7 +851,7 @@ func (b *SparseGenerationBuilder) runEditDelta(
 	}
 	defer idx.Close()
 	idx.headProvenance = req.headProvenance
-	if store := b.Store; store != nil {
+	if store := b.Store; store != nil && !store.IsNilGenerationHandle() {
 		idx.storeWaits = store.ReaderWaitMark
 		idx.writeCounters = handle.WriteMark
 		idx.resolver.SetWriteCounterSource(handle.WriteMark)
@@ -1198,15 +1199,15 @@ func (b *SparseGenerationBuilder) runEditDelta(
 		sort.Strings(identityClaims)
 	}
 	lap("write_sentinels")
-	masks := make([]store_sqlite.FileMask, 0, len(payload.ReplacePaths)+len(payload.DeletePaths)+len(plan.deleted))
+	masks := make([]storage.FileMask, 0, len(payload.ReplacePaths)+len(payload.DeletePaths)+len(plan.deleted))
 	claimed := make(map[string]struct{}, len(payload.ReplacePaths)+len(payload.DeletePaths))
 	for _, p := range payload.ReplacePaths {
 		claimed[p] = struct{}{}
-		masks = append(masks, store_sqlite.FileMask{RepoPrefix: req.RepoPrefix, FilePath: p, Mode: store_sqlite.OwnershipReplace})
+		masks = append(masks, storage.FileMask{RepoPrefix: req.RepoPrefix, FilePath: p, Mode: storage.OwnershipReplace})
 	}
 	for _, p := range payload.DeletePaths {
 		claimed[p] = struct{}{}
-		masks = append(masks, store_sqlite.FileMask{RepoPrefix: req.RepoPrefix, FilePath: p, Mode: store_sqlite.OwnershipDelete})
+		masks = append(masks, storage.FileMask{RepoPrefix: req.RepoPrefix, FilePath: p, Mode: storage.OwnershipDelete})
 	}
 	for _, rel := range plan.deleted {
 		graphPath := builderGraphPath(req.RepoPrefix, rel)
@@ -1214,7 +1215,7 @@ func (b *SparseGenerationBuilder) runEditDelta(
 			continue
 		}
 		claimed[graphPath] = struct{}{}
-		masks = append(masks, store_sqlite.FileMask{RepoPrefix: req.RepoPrefix, FilePath: graphPath, Mode: store_sqlite.OwnershipDelete})
+		masks = append(masks, storage.FileMask{RepoPrefix: req.RepoPrefix, FilePath: graphPath, Mode: storage.OwnershipDelete})
 	}
 	sort.Slice(masks, func(i, j int) bool { return masks[i].FilePath < masks[j].FilePath })
 	out.ownership = editDeltaOwnership{
@@ -1241,9 +1242,9 @@ func (b *SparseGenerationBuilder) runEditDelta(
 			return nil, fmt.Errorf("indexer: write generation node identity claims: %w", err)
 		}
 	}
-	markers := make([]store_sqlite.EdgeSourceMask, 0, len(payload.EdgeSources))
+	markers := make([]storage.EdgeSourceMask, 0, len(payload.EdgeSources))
 	for _, id := range payload.EdgeSources {
-		markers = append(markers, store_sqlite.EdgeSourceMask{SourceID: id, Mode: store_sqlite.OwnershipReplace})
+		markers = append(markers, storage.EdgeSourceMask{SourceID: id, Mode: storage.OwnershipReplace})
 	}
 	if err := handle.SetEdgeSourceMasks(markers); err != nil {
 		return nil, fmt.Errorf("indexer: write generation edge-source masks: %w", err)
@@ -1393,7 +1394,7 @@ func (b *SparseGenerationBuilder) runEditDelta(
 // row the delta introduces (the dependency stub a deleted package's importers
 // now bind to, say) is served with no document. extracted holds the graph
 // paths the engine re-derived from source.
-func editDeltaResolverRowFTS(idx *Indexer, handle *store_sqlite.Store, nodes []*graph.Node, extracted map[string]struct{}) error {
+func editDeltaResolverRowFTS(idx *Indexer, handle generationPayloadStore, nodes []*graph.Node, extracted map[string]struct{}) error {
 	var items []graph.SymbolFTSItem
 	for _, node := range nodes {
 		if node == nil || !idx.shouldIndexForSearch(node) {
@@ -1426,7 +1427,7 @@ func editDeltaPhaseMillis(phases map[string]time.Duration) map[string]float64 {
 }
 
 // editDeltaPhaseStoreWaits renders each phase's store waits by kind.
-func editDeltaPhaseStoreWaits(phases map[string]store_sqlite.ReaderWaitSplit) map[string]map[string]float64 {
+func editDeltaPhaseStoreWaits(phases map[string]storage.ReaderWaitSplit) map[string]map[string]float64 {
 	out := make(map[string]map[string]float64, len(phases))
 	for name, w := range phases {
 		out[name] = storeWaitMillis(w)

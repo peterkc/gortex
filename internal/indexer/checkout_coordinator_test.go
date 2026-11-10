@@ -224,6 +224,7 @@ func (f *coordinatorFixture) coordinatorWithLogger(t testing.TB, cfg CheckoutCoo
 	cfg.WorkspaceID = builderRepoPrefix
 	cfg.ProjectID = builderRepoPrefix
 	cfg.Store = f.store
+	cfg.Catalog = f.catalog
 	if cfg.Builder == nil {
 		cfg.Builder = builderNewBuilder(f.store)
 	}
@@ -2096,7 +2097,7 @@ func TestCheckoutLifecycleCollectsAForgottenCheckoutsPayload(t *testing.T) {
 func newSweepLifecycle(t *testing.T, store *store_sqlite.Store) *CheckoutLifecycle {
 	t.Helper()
 	mi := NewMultiIndexer(store, newTestRegistry(), search.NewNull(), nil, zap.NewNop())
-	lc, err := NewCheckoutLifecycle(CheckoutLifecycleConfig{
+	lc, err := NewCheckoutLifecycle(CheckoutLifecycleConfig{Catalog: slice2TestCatalog(store),
 		MultiIndexer: mi,
 		Graph:        store,
 		Logger:       zap.NewNop(),

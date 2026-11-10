@@ -60,7 +60,7 @@ func TestContextContractWithdrawalRetainsCanonicalAndMasksCoherently(t *testing.
 	req := BuildRequest{RepoPrefix: builderRepoPrefix, Base: base}
 	store := builderOpenStore(t, "contract-context-withdrawal")
 	handle := builderContextDerivedHandle(t, store)
-	builder := &SparseGenerationBuilder{Store: store, Logger: zap.NewNop()}
+	builder := &SparseGenerationBuilder{Catalog: slice2TestCatalog(store), Store: store, Logger: zap.NewNop()}
 	separation, err := builder.withholdContextPayload(context.Background(), req, plan, corpus)
 	if err != nil {
 		t.Fatal(err)

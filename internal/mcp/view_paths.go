@@ -370,8 +370,8 @@ func markWorktreeRouteMoved(view *requestView) {
 // second store and cannot outlive the view's lease.
 func viewRouteCatalog(view *requestView) *store_sqlite.Catalog {
 	for _, source := range view.materialized.GenerationSources() {
-		if source.Handle != nil {
-			return source.Handle.Catalog()
+		if source.Handle != nil && !source.Handle.IsNilGenerationHandle() {
+			return source.Handle.(*store_sqlite.Store).Catalog()
 		}
 	}
 	return nil

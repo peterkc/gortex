@@ -65,10 +65,10 @@ func (p *selectedProjectionStore) validateLayers() error {
 		p.revisions = make([]store_sqlite.PayloadInputRevision, len(p.sources))
 	}
 	for i, source := range p.sources {
-		if source.Handle == nil || source.Layer == nil {
+		if (source.Handle == nil || source.Handle.IsNilGenerationHandle()) || source.Layer == nil {
 			return graph.ErrConstantProjectionUnsupported
 		}
-		before, err := source.Handle.PayloadInputRevisionContext(p.ctx)
+		before, err := source.Handle.(*store_sqlite.Store).PayloadInputRevisionContext(p.ctx)
 		if err != nil {
 			return err
 		}
@@ -79,7 +79,7 @@ func (p *selectedProjectionStore) validateLayers() error {
 		if _, err := checked.LayerConstantValueProjectionContext(p.ctx, nil, nil); err != nil {
 			return err
 		}
-		after, err := source.Handle.PayloadInputRevisionContext(p.ctx)
+		after, err := source.Handle.(*store_sqlite.Store).PayloadInputRevisionContext(p.ctx)
 		if err != nil {
 			return err
 		}
@@ -104,15 +104,15 @@ func (p *selectedProjectionStore) selectedDeletion() (bool, error) {
 		if !source.Layer.IsTombstone(p.entry.graphPath) {
 			return false, nil
 		}
-		before, err := source.Handle.PayloadInputRevisionContext(p.ctx)
+		before, err := source.Handle.(*store_sqlite.Store).PayloadInputRevisionContext(p.ctx)
 		if err != nil {
 			return false, err
 		}
-		rows, err := source.Handle.FileMasksForContext(p.ctx, p.entry.repoPrefix, []string{p.entry.graphPath})
+		rows, err := source.Handle.(*store_sqlite.Store).FileMasksForContext(p.ctx, p.entry.repoPrefix, []string{p.entry.graphPath})
 		if err != nil {
 			return false, err
 		}
-		after, err := source.Handle.PayloadInputRevisionContext(p.ctx)
+		after, err := source.Handle.(*store_sqlite.Store).PayloadInputRevisionContext(p.ctx)
 		if err != nil {
 			return false, err
 		}

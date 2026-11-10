@@ -177,7 +177,7 @@ func (f *refViewFixture) manager(t *testing.T, barrier func()) *RefViewManager {
 // drives them cannot wait for.
 func (f *refViewFixture) managerTuned(t *testing.T, barrier func(), tune func(*RefViewManagerConfig)) *RefViewManager {
 	t.Helper()
-	cfg := RefViewManagerConfig{
+	cfg := RefViewManagerConfig{Catalog: slice2TestCatalog(f.store),
 		Store:        f.store,
 		Builder:      builderNewBuilder(f.store),
 		Config:       config.Default().Index,
@@ -1123,7 +1123,7 @@ func TestRefViewWidenedDigestReachesTheProductionManagerShape(t *testing.T) {
 
 		builder := builderNewBuilder(f.store)
 		builder.Admissions = idx
-		view, err := NewRefViewManager(RefViewManagerConfig{
+		view, err := NewRefViewManager(RefViewManagerConfig{Catalog: slice2TestCatalog(f.store),
 			Store:   f.store,
 			Builder: builder,
 			Config:  config.Default().Index,

@@ -182,7 +182,7 @@ func (p *dedicatedBasePublisher) buildObservedClaim(ctx context.Context, observa
 	if leases == nil {
 		return 0, BuildReport{}, fmt.Errorf("%w: initial runtime cannot consume a claimed delta", storage.ErrDedicatedBaseCandidate)
 	}
-	parent, found, err := p.runtime.store.Catalog().GetViewGeneration(ctx, claim.BaseGenerationID)
+	parent, found, err := p.runtime.catalog.GetViewGeneration(ctx, claim.BaseGenerationID)
 	if err != nil {
 		return 0, BuildReport{}, err
 	}
@@ -198,7 +198,7 @@ func (p *dedicatedBasePublisher) buildObservedClaim(ctx context.Context, observa
 	// which is a far worse outcome than refusing the build. Refusing before the
 	// catalog's hard limit also keeps the refusal attributable — the next
 	// advance observes no new head and proposes a full root.
-	depth, err := dedicatedBaseAncestryDepth(ctx, p.runtime.store.Catalog(), parent, maxDedicatedBaseDeltaAncestors)
+	depth, err := dedicatedBaseAncestryDepth(ctx, p.runtime.catalog, parent, maxDedicatedBaseDeltaAncestors)
 	if err != nil {
 		return 0, BuildReport{}, err
 	}
@@ -212,7 +212,7 @@ func (p *dedicatedBasePublisher) buildObservedClaim(ctx context.Context, observa
 		ProjectID: observation.ProjectID, PrePublish: observation.PrePublish,
 	}
 	if claim.Status != "ready" && !claim.AlreadyAdopted {
-		materializer := graphview.Materializer{Store: p.runtime.store, Catalog: p.runtime.store.Catalog(), Leases: leases, Logger: observation.Builder.Logger}
+		materializer := graphview.Materializer{Store: p.runtime.store, Catalog: p.runtime.catalog, Leases: leases, Logger: observation.Builder.Logger}
 		view, err := materializer.MaterializeRefView(ctx, claim.Desire.Authority.GraphID, claim.BaseGenerationID)
 		if err != nil {
 			return 0, BuildReport{}, err

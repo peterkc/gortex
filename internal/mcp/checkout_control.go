@@ -112,7 +112,7 @@ func viewlessCatalogTool(name string) bool {
 // Catalog lookup must not depend on a ready corpus listing its repository:
 // that is precisely the missing state a recovery request is meant to repair.
 func (s *Server) registeredCheckoutForPath(ctx context.Context, path string) (store_sqlite.Checkout, bool, error) {
-	return graphview.RegisteredCheckoutForPath(ctx, s.materializer.Catalog, path)
+	return graphview.RegisteredCheckoutForPath(ctx, s.materializer.Catalog.(*store_sqlite.Catalog), path)
 }
 
 // registeredWorktreeSelector shares exact-root matching between control and
@@ -131,7 +131,7 @@ func (s *Server) registeredWorktreeSelector(ctx context.Context, selector graphv
 			found = pathkey.EqualPaths(root, canonicalWorktreeSelectorRoot(checkout.RootPath))
 		}
 	} else {
-		checkout, found, err = s.materializer.Catalog.GetCheckout(ctx, selector.CheckoutID)
+		checkout, found, err = s.materializer.Catalog.(*store_sqlite.Catalog).GetCheckout(ctx, selector.CheckoutID)
 	}
 	if err != nil {
 		return checkout, graphview.WrapViewError(graphview.CodeCheckoutInaccessible, fmt.Sprintf("read checkout %q", subject), err)
@@ -167,7 +167,7 @@ func checkoutControlPath(req *mcp.CallToolRequest) string {
 }
 
 func (s *Server) resolveCheckoutControlScope(ctx context.Context, selector graphview.Selector, req *mcp.CallToolRequest) (*checkoutControlScope, error) {
-	if s.materializer == nil || s.materializer.Catalog == nil {
+	if s.materializer == nil || s.materializer.Catalog.(*store_sqlite.Catalog) == nil {
 		if selector.Kind == graphview.SelectorAuto {
 			return nil, nil
 		}
@@ -218,7 +218,7 @@ func (s *Server) resolveCheckoutControlScope(ctx context.Context, selector graph
 	if selector.Kind == graphview.SelectorAuto {
 		scope.Selector = graphview.Selector{Kind: graphview.SelectorWorktree, CheckoutID: checkout.CheckoutID}
 	}
-	route, present, err := s.materializer.Catalog.GetCheckoutRoute(ctx, checkout.CheckoutID)
+	route, present, err := s.materializer.Catalog.(*store_sqlite.Catalog).GetCheckoutRoute(ctx, checkout.CheckoutID)
 	if err != nil {
 		return nil, graphview.WrapViewError(graphview.CodeCheckoutInaccessible, "read checkout control route", err)
 	}
@@ -227,7 +227,7 @@ func (s *Server) resolveCheckoutControlScope(ctx context.Context, selector graph
 		scope.GraphID = route.GraphID
 	}
 	if scope.GraphID == "" {
-		graphs, graphErr := s.materializer.Catalog.ListDedicatedGraphs(ctx, checkout.FamilyID)
+		graphs, graphErr := s.materializer.Catalog.(*store_sqlite.Catalog).ListDedicatedGraphs(ctx, checkout.FamilyID)
 		if graphErr != nil {
 			return nil, graphErr
 		}

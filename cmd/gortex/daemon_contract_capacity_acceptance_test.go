@@ -137,8 +137,8 @@ func TestContractCapacityTwoFourActorsMCPRetryAndSuccess(t *testing.T) {
 	materializer := state.mcpServer.Materializer()
 	cfg := state.configManager.GetRepoConfig("").Index
 	yield := contractAnalysisYield(state.mcpServer.ContractAnalysisShouldYield)
-	capture := indexer.ContractFollowupCaptureOptions{Context: ctx, Store: state.graph.(*store_sqlite.Store), Materializer: materializer, MultiIndexer: state.multiIndexer, Registry: state.indexer.Registry(), Config: cfg, Logger: zap.NewNop(), Yield: yield}
-	coordinator, err = indexer.NewContractAnalysisCoordinator(indexer.ContractAnalysisCoordinatorOptions{
+	capture := indexer.ContractFollowupCaptureOptions{Catalog: any(state.graph.(*store_sqlite.Store)).(*store_sqlite.Store).Catalog(), Context: ctx, Store: state.graph.(*store_sqlite.Store), Materializer: materializer, MultiIndexer: state.multiIndexer, Registry: state.indexer.Registry(), Config: cfg, Logger: zap.NewNop(), Yield: yield}
+	coordinator, err = indexer.NewContractAnalysisCoordinator(indexer.ContractAnalysisCoordinatorOptions{Catalog: any(state.graph.(*store_sqlite.Store)).(*store_sqlite.Store).Catalog(),
 		QueueCapacity: 2, JobSlots: 1, RequireRepoConfigs: true,
 		Store: state.graph.(*store_sqlite.Store), Leases: materializer.Leases, Registry: state.indexer.Registry(), Config: cfg, Logger: zap.NewNop(),
 		Capture: indexer.NewContractFollowupSourceCapture(capture), Inputs: indexer.NewContractPrimaryInputCapture(materializer),

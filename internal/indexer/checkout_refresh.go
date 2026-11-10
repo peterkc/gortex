@@ -178,7 +178,7 @@ func (l *CheckoutLifecycle) RequestCheckoutRefreshFromSample(
 func (l *CheckoutLifecycle) requestCheckoutRefresh(
 	ctx context.Context, checkoutID, expectedRoot string, sample *gitstate.DirtySnapshot,
 ) (*CheckoutRefreshTicket, error) {
-	if l == nil || l.catalog == nil || checkoutID == "" || expectedRoot == "" {
+	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) || checkoutID == "" || expectedRoot == "" {
 		return nil, fmt.Errorf("%w: checkout identity and root are required", ErrCheckoutMutationStale)
 	}
 	if ctx == nil {
@@ -203,7 +203,7 @@ func (l *CheckoutLifecycle) requestCheckoutRefresh(
 func (l *CheckoutLifecycle) checkoutRefreshTarget(ctx context.Context, checkoutID, expectedRoot string) (
 	context.Context, *CheckoutCoordinator, storage.Checkout, os.FileInfo, context.CancelFunc, error,
 ) {
-	if l == nil || l.catalog == nil || checkoutID == "" || expectedRoot == "" {
+	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) || checkoutID == "" || expectedRoot == "" {
 		return nil, nil, storage.Checkout{}, nil, nil, fmt.Errorf("%w: checkout identity and root are required", ErrCheckoutMutationStale)
 	}
 	if ctx == nil {
@@ -962,7 +962,7 @@ func (c *CheckoutCoordinator) announceTicketWrite() func() {
 	if c.announceWrite != nil {
 		return c.announceWrite()
 	}
-	if c.store == nil {
+	if c.store == nil || c.store.IsNilGenerationHandle() {
 		return nil
 	}
 	return c.store.AnnounceCheckoutRefresh()

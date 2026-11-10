@@ -130,13 +130,13 @@ func buildWorktreeSearchStack(t *testing.T, gortexYAML string) *worktreeSearchSt
 	bm := search.NewNull()
 	mi := indexer.NewMultiIndexer(store, reg, bm, cm, zap.NewNop())
 	leases := graphview.NewLeaseManager()
-	lifecycle, err := indexer.NewCheckoutLifecycle(indexer.CheckoutLifecycleConfig{
+	lifecycle, err := indexer.NewCheckoutLifecycle(slice2LifecycleConfig(indexer.CheckoutLifecycleConfig{
 		MultiIndexer:  mi,
 		ConfigManager: cm,
 		Graph:         store,
 		Logger:        zap.NewNop(),
 		ViewLeases:    leases,
-	})
+	}))
 	if err != nil {
 		t.Fatalf("build the lifecycle: %v", err)
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/storage"
 )
@@ -12,17 +11,17 @@ import (
 // This is the actual selected predecessor descriptor used by core builders.
 // It never substitutes an actor's latest head or folds mutable0 into the
 // cumulative positive identity.
-func newSelectedContractCoreStorageBackend(ctx context.Context, target *store_sqlite.Store, base graph.Reader, repo, checkout string) (*contractCoreStorageBackend, error) {
-	return selectedContractCoreStorageBackend(ctx, target, base, repo, checkout, false)
+func newSelectedContractCoreStorageBackend(ctx context.Context, target generationPayloadStore, catalog viewGenerationCatalog, base graph.Reader, repo, checkout string) (*contractCoreStorageBackend, error) {
+	return selectedContractCoreStorageBackend(ctx, target, catalog, base, repo, checkout, false)
 }
 
-func selectedContractCoreStorageBackend(ctx context.Context, target *store_sqlite.Store, base graph.Reader, repo, checkout string, fullRoot bool) (*contractCoreStorageBackend, error) {
-	if target == nil || target.ViewGeneration() <= 0 {
+func selectedContractCoreStorageBackend(ctx context.Context, target generationPayloadStore, catalog viewGenerationCatalog, base graph.Reader, repo, checkout string, fullRoot bool) (*contractCoreStorageBackend, error) {
+	if target == nil || target.IsNilGenerationHandle() || !target.SharesSymbolSearchCore(target) || target.ViewGeneration() <= 0 {
 		return nil, fmt.Errorf("contract core: positive target required")
 	}
 	var resumed *graph.ContractInputState
 	if fullRoot {
-		row, found, err := target.Catalog().GetViewGeneration(ctx, target.ViewGeneration())
+		row, found, err := catalog.GetViewGeneration(ctx, target.ViewGeneration())
 		if err != nil {
 			return nil, err
 		}
@@ -47,15 +46,18 @@ func selectedContractCoreStorageBackend(ctx context.Context, target *store_sqlit
 	var sources []graphview.GenerationSource
 	switch selected := base.(type) {
 	case commitLayerBase:
-		if selected.cloneCorpusBase != nil {
-			sources = append(sources, graphview.GenerationSource{Handle: selected.cloneCorpusBase})
+		if selected.cloneCorpusBase != nil && !selected.cloneCorpusBase.IsNilGenerationHandle() {
+			sources = append(sources, graphview.GenerationSource{Handle: selected.cloneCorpusBase.(graphview.GenerationSourceHandle)})
 		}
 		sources = append(sources, selected.cloneSources...)
-		if len(sources) == 0 && selected.corpus != nil {
-			sources = append(sources, graphview.GenerationSource{Handle: selected.corpus, Generation: selected.corpus.ViewGeneration()})
+		if len(sources) == 0 && (selected.corpus != nil && !selected.corpus.IsNilGenerationHandle()) {
+			sources = append(sources, graphview.GenerationSource{Handle: selected.corpus.(graphview.GenerationSourceHandle), Generation: selected.corpus.ViewGeneration()})
 		}
-	case *store_sqlite.Store:
-		sources = append(sources, graphview.GenerationSource{Handle: selected, Generation: selected.ViewGeneration()})
+	case generationPayloadStore:
+		if !selected.SharesSymbolSearchCore(base) {
+			return nil, fmt.Errorf("contract core: selected physical ancestry unavailable")
+		}
+		sources = append(sources, graphview.GenerationSource{Handle: selected.(graphview.GenerationSourceHandle), Generation: selected.ViewGeneration()})
 	case nil:
 		// A full cold root has no predecessor. All accepted sources are parsed by
 		// that root and contract work remains pending, never a certified empty tier.
@@ -66,7 +68,7 @@ func selectedContractCoreStorageBackend(ctx context.Context, target *store_sqlit
 	var cumulative *graph.ContractInputState
 	var cumulativeGeneration int64
 	for _, source := range sources {
-		if source.Handle == nil {
+		if source.Handle == nil || source.Handle.IsNilGenerationHandle() {
 			return nil, graph.ErrContractInputVector
 		}
 		generation := source.Handle.ViewGeneration()
@@ -74,7 +76,7 @@ func selectedContractCoreStorageBackend(ctx context.Context, target *store_sqlit
 			actors[0] = ""
 			continue
 		}
-		states, e := source.Handle.ContractInputStatesForRepoContext(ctx, repo)
+		states, e := source.Handle.(generationPayloadStore).ContractInputStatesForRepoContext(ctx, repo)
 		if e != nil {
 			return nil, e
 		}
@@ -103,7 +105,7 @@ func selectedContractCoreStorageBackend(ctx context.Context, target *store_sqlit
 				physical := sources[i]
 				generation := physical.Handle.ViewGeneration()
 				actor := actors[generation]
-				row, known, e := physical.Handle.ContractBoundaryReceiptForVersionContext(ctx, repo, actor, path, contractBoundaryReceiptVersion)
+				row, known, e := physical.Handle.(generationPayloadStore).ContractBoundaryReceiptForVersionContext(ctx, repo, actor, path, contractBoundaryReceiptVersion)
 				if e != nil {
 					return nil, nil, false, e
 				}
@@ -126,7 +128,7 @@ func selectedContractCoreStorageBackend(ctx context.Context, target *store_sqlit
 		Dependents: func(ctx context.Context, keys []string) ([]contractCoreDependent, error) {
 			var out []contractCoreDependent
 			for i, source := range sources {
-				rows, e := source.Handle.ContractBoundaryReceiptsForLookupKeysContext(ctx, keys, 4096)
+				rows, e := source.Handle.(generationPayloadStore).ContractBoundaryReceiptsForLookupKeysContext(ctx, keys, 4096)
 				if e != nil {
 					return nil, e
 				}
@@ -171,7 +173,7 @@ func selectedContractCoreStorageBackend(ctx context.Context, target *store_sqlit
 	if cumulativeGeneration > 0 && cumulative.CheckoutID == checkout {
 		generation := target.ViewGeneration()
 		for steps := 0; generation > cumulativeGeneration && steps < maxDedicatedBaseActiveAncestryWalk; steps++ {
-			row, found, err := target.Catalog().GetViewGeneration(ctx, generation)
+			row, found, err := catalog.GetViewGeneration(ctx, generation)
 			if err != nil {
 				return nil, err
 			}
@@ -196,7 +198,7 @@ func selectedContractCoreStorageBackend(ctx context.Context, target *store_sqlit
 	backend.stateInstalled = true
 	return backend, nil
 }
-func (b *SparseGenerationBuilder) installSelectedContractCoreInputs(ctx context.Context, idx *Indexer, handle *store_sqlite.Store, req BuildRequest) error {
+func (b *SparseGenerationBuilder) installSelectedContractCoreInputs(ctx context.Context, idx *Indexer, handle generationPayloadStore, req BuildRequest) error {
 	hooks := b.contractCoreRuntime
 	if hooks == nil {
 		return nil
@@ -205,7 +207,7 @@ func (b *SparseGenerationBuilder) installSelectedContractCoreInputs(ctx context.
 	if req.contractFullCensus {
 		base = nil // The claimed source census is a new complete positive root.
 	}
-	backend, e := selectedContractCoreStorageBackend(ctx, handle, base, req.RepoPrefix, req.Identity.CheckoutID, req.contractFullCensus)
+	backend, e := selectedContractCoreStorageBackend(ctx, handle, b.Catalog, base, req.RepoPrefix, req.Identity.CheckoutID, req.contractFullCensus)
 	if e != nil {
 		return e
 	}
@@ -224,8 +226,8 @@ func (b *SparseGenerationBuilder) installSelectedContractCoreInputs(ctx context.
 
 // prepareEmptyContractCoreInputs records deletion masks without running the
 // full indexing pass (which would erase payload retained by copy/resume paths).
-func (b *SparseGenerationBuilder) prepareEmptyContractCoreInputs(ctx context.Context, handle *store_sqlite.Store, req BuildRequest, plan buildPlan) (*contractCoreInputJournal, error) {
-	backend, err := newSelectedContractCoreStorageBackend(ctx, handle, req.Base, req.RepoPrefix, req.Identity.CheckoutID)
+func (b *SparseGenerationBuilder) prepareEmptyContractCoreInputs(ctx context.Context, handle generationPayloadStore, req BuildRequest, plan buildPlan) (*contractCoreInputJournal, error) {
+	backend, err := newSelectedContractCoreStorageBackend(ctx, handle, b.Catalog, req.Base, req.RepoPrefix, req.Identity.CheckoutID)
 	if err != nil {
 		return nil, err
 	}

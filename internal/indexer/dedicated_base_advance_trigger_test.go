@@ -914,7 +914,7 @@ func TestCommittedAdvancementRequiresTheSharedLeaseDomain(t *testing.T) {
 	t.Run("a private lease domain leaves no trigger", func(t *testing.T) {
 		f := newLifecycleFixture(t)
 		defer f.close()
-		private, err := NewDedicatedBaseRuntime(f.store, graphview.NewLeaseManager())
+		private, err := NewDedicatedBaseRuntime(f.store, slice2TestCatalog(f.store), graphview.NewLeaseManager())
 		require.NoError(t, err)
 		require.NoError(t, f.lc.SetDedicatedBaseCleanupRuntime(private))
 

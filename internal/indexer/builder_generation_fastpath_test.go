@@ -49,7 +49,7 @@ func newFastPathTestBuilder(t *testing.T) (*SparseGenerationBuilder, *store_sqli
 			t.Errorf("close store: %v", err)
 		}
 	})
-	return &SparseGenerationBuilder{
+	return &SparseGenerationBuilder{Catalog: slice2TestCatalog(store),
 		Store:    store,
 		Registry: parser.NewRegistry(),
 		Config:   config.IndexConfig{},
@@ -281,7 +281,7 @@ func BenchmarkSparseGenerationEmptyPhysicalBuild(b *testing.B) {
 			b.Errorf("close store: %v", err)
 		}
 	})
-	builder := &SparseGenerationBuilder{
+	builder := &SparseGenerationBuilder{Catalog: slice2TestCatalog(store),
 		Store: store, Registry: parser.NewRegistry(), Config: config.IndexConfig{}, Logger: zap.NewNop(),
 	}
 	root := b.TempDir()

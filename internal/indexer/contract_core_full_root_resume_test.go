@@ -29,13 +29,13 @@ func TestClaimedDedicatedBaseReparsesInterruptedContractNamespace(t *testing.T) 
 	})
 	contractCoreBeginFault.Store(nil)
 	require.ErrorIs(t, err, context.Canceled)
-	target := builder.Store.AtGeneration(claim.GenerationID)
+	target := any(builder.Store).(*store_sqlite.Store).AtGeneration(claim.GenerationID)
 	old, found, err := target.ContractInputStateContext(ctx, request.RepoPrefix, request.Identity.CheckoutID)
 	require.NoError(t, err)
 	require.True(t, found)
 	require.True(t, old.Accepted)
 	require.NotEqual(t, contractInputHash([]byte(contractCoreInputVersion+":empty-positive:"+request.RepoPrefix)), old.InputFingerprint)
-	row, found, err := builder.Store.Catalog().GetViewGeneration(ctx, claim.GenerationID)
+	row, found, err := any(builder.Store).(*store_sqlite.Store).Catalog().GetViewGeneration(ctx, claim.GenerationID)
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, store_sqlite.ViewGenerationBuilding, row.State)
@@ -61,7 +61,7 @@ func TestClaimedDedicatedBaseReparsesInterruptedContractNamespace(t *testing.T) 
 		RepoPrefix: request.RepoPrefix, CheckoutID: request.Identity.CheckoutID,
 		Version: contractBoundaryReceiptVersion, Fingerprint: "old-partial-census",
 	}))
-	publication, found, err := builder.Store.Catalog().DedicatedBasePublication(ctx, request.Identity.GraphID)
+	publication, found, err := any(builder.Store).(*store_sqlite.Store).Catalog().DedicatedBasePublication(ctx, request.Identity.GraphID)
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, "building", publication.AttemptState)
@@ -111,11 +111,11 @@ func TestClaimedDedicatedBaseReparsesInterruptedContractNamespace(t *testing.T) 
 func TestContractCoreFullRootResumeRefusesChangedPhysicalInput(t *testing.T) {
 	builder, request, claim, _ := claimedCopyFixture(t)
 	ctx := context.Background()
-	target := builder.Store.AtGeneration(claim.GenerationID)
+	target := any(builder.Store).(*store_sqlite.Store).AtGeneration(claim.GenerationID)
 	old := graph.ContractInputState{RepoPrefix: request.RepoPrefix, CheckoutID: request.Identity.CheckoutID,
 		InputVersion: contractCoreInputVersion, InputFingerprint: "interrupted", Accepted: true}
 	require.NoError(t, target.SetContractInputStateWithWorkContext(ctx, nil, old, nil))
-	backend, err := selectedContractCoreStorageBackend(ctx, target, nil, old.RepoPrefix, old.CheckoutID, true)
+	backend, err := selectedContractCoreStorageBackend(ctx, target, slice2TestCatalog(target), nil, old.RepoPrefix, old.CheckoutID, true)
 	require.NoError(t, err)
 	backend.fullNamespace = true
 	changed := old

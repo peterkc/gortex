@@ -6,9 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/zzet/gortex/internal/storage"
 	"go.uber.org/zap"
-
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 // Refusals, retries and starvation of a stepped fold.
@@ -61,7 +60,7 @@ func (c *CheckoutCoordinator) newFoldStepWatch(to int64) *foldStepWatch {
 	c.compaction.mu.Unlock()
 	now := time.Now()
 	w := &foldStepWatch{logger: c.logger, checkout: c.checkoutID, to: to, starve: starve, now: time.Now, started: now, progress: now}
-	if c.store != nil {
+	if c.store != nil && !c.store.IsNilGenerationHandle() {
 		store := c.store
 		w.walBytes = func() int64 {
 			mark := store.WALWriteMark()
@@ -97,10 +96,10 @@ func (w *foldStepWatch) refused(err error) error {
 	now := w.now()
 	cause := "other"
 	switch {
-	case errors.Is(err, store_sqlite.ErrChainFoldYielded):
+	case errors.Is(err, storage.ErrChainFoldYielded):
 		w.yielded++
 		cause = "yielded"
-	case errors.Is(err, store_sqlite.ErrChainFoldWALMark):
+	case errors.Is(err, storage.ErrChainFoldWALMark):
 		w.walMark++
 		cause = "wal_mark"
 	}
@@ -135,7 +134,7 @@ func (w *foldStepWatch) refused(err error) error {
 // attempt. WAL pressure and other faults retain the longer backoff; store
 // admission, interruption and transaction rollback are unchanged.
 func foldStepRetryDelay(err error) time.Duration {
-	if errors.Is(err, store_sqlite.ErrChainFoldYielded) {
+	if errors.Is(err, storage.ErrChainFoldYielded) {
 		return dirtyChainCompactionYieldPoll
 	}
 	return foldStepRetryPoll

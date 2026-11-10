@@ -457,7 +457,7 @@ func (c *CheckoutCoordinator) textChainManifest(ctx context.Context, chain []int
 	}
 	links := make([]chainManifestLink, 0, len(chain))
 	for _, generationID := range chain {
-		meta, entries, found, err := c.store.AtGeneration(generationID).InputManifest(ctx)
+		meta, entries, found, err := generationAt(c.store, generationID).InputManifest(ctx)
 		if err != nil {
 			return nil, false
 		}
@@ -531,7 +531,7 @@ func (c *CheckoutCoordinator) textCorpus(ctx context.Context, route storage.Chec
 	state := &c.textState
 	commit := state.commitSide
 	if !routed || route.CommitGenerationID <= 0 || state.commitSideFor != route.CommitGenerationID || commit == nil {
-		rows, err := c.store.AtGeneration(0).FileMetasForRepo(c.repoPrefix)
+		rows, err := generationAt(c.store, 0).FileMetasForRepo(c.repoPrefix)
 		if err != nil {
 			return textCorpusSet{}, fmt.Errorf("indexer: read the base file inventory of %q: %w", c.repoPrefix, err)
 		}
@@ -586,7 +586,7 @@ func (c *CheckoutCoordinator) applyLayerClaims(generationID int64, paths map[str
 // rules exactly and a generation the reader would refuse to compose is refused
 // here too. A context path is not a claim (FilePaths leaves it out).
 func (c *CheckoutCoordinator) loadLayerClaims(ctx context.Context, generationID int64) ([]textClaim, error) {
-	layer, err := graphview.NewGenerationLayerContext(ctx, c.store.AtGeneration(generationID))
+	layer, err := graphview.NewGenerationLayerContext(ctx, generationAt(c.store, generationID).(graphview.GenerationLayerHandle))
 	if err != nil {
 		return nil, fmt.Errorf("indexer: open generation %d: %w", generationID, err)
 	}

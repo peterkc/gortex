@@ -45,7 +45,7 @@ type schedulerProbe struct {
 func newSchedulerProbe(t *testing.T, adjust func(*ContractAnalysisCoordinatorOptions)) *schedulerProbe {
 	t.Helper()
 	p := &schedulerProbe{t: t, f: newContractWorkerFixture(t), gates: make(map[string]chan struct{}), running: make(map[string]int), jobs: make(map[string]int), captures: make(map[string]int), inputs: make(map[string]string)}
-	options := ContractAnalysisCoordinatorOptions{Store: p.f.store, Leases: p.f.leases, Registry: p.f.registry, Config: p.f.cfg, Capture: p.capture, Yield: func(ctx context.Context) error { return ctx.Err() }}
+	options := ContractAnalysisCoordinatorOptions{Catalog: slice2TestCatalog(p.f.store), OpenEvidence: openSlice2TestEvidence, Store: p.f.store, Leases: p.f.leases, Registry: p.f.registry, Config: p.f.cfg, Capture: p.capture, Yield: func(ctx context.Context) error { return ctx.Err() }}
 	if adjust != nil {
 		adjust(&options)
 	}
@@ -440,7 +440,7 @@ func TestContractSchedulerNoopIsNotAJob(t *testing.T) {
 	inputs := &graphview.SelectedContractInputs{State: state, Witnesses: f.inputs}
 	var captures, noopNow atomic.Int64
 	noopBase := time.Now()
-	options := ContractAnalysisCoordinatorOptions{Now: func() time.Time { return noopBase.Add(time.Duration(noopNow.Load())) }, Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Yield: func(ctx context.Context) error { return ctx.Err() },
+	options := ContractAnalysisCoordinatorOptions{Catalog: slice2TestCatalog(f.store), OpenEvidence: openSlice2TestEvidence, Now: func() time.Time { return noopBase.Add(time.Duration(noopNow.Load())) }, Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Yield: func(ctx context.Context) error { return ctx.Err() },
 		Capture: func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
 			captures.Add(1)
 			snapshot := a.Snapshot

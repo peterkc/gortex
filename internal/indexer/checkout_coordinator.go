@@ -20,7 +20,6 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/gitstate"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/resolver"
 	"github.com/zzet/gortex/internal/search/trigram"
@@ -228,7 +227,8 @@ type CheckoutCoordinatorConfig struct {
 
 	// Store is any handle on the database. Generations are begun, published,
 	// routed and retired through it.
-	Store *store_sqlite.Store
+	Store   checkoutGenerationStore
+	Catalog CheckoutCatalog
 	// Builder builds the sparse generations. It must carry the index
 	// configuration the base corpus was indexed with.
 	Builder *SparseGenerationBuilder
@@ -493,8 +493,8 @@ type CheckoutCoordinator struct {
 	workspaceID string
 	projectID   string
 
-	store   *store_sqlite.Store
-	catalog *store_sqlite.Catalog
+	store   checkoutGenerationStore
+	catalog CheckoutCatalog
 	builder *SparseGenerationBuilder
 	leases  *graphview.LeaseManager
 	logger  *zap.Logger
@@ -848,7 +848,7 @@ func NewCheckoutCoordinator(cfg CheckoutCoordinatorConfig) (*CheckoutCoordinator
 		return nil, errors.New("indexer: checkout coordinator needs a checkout root")
 	case cfg.FamilyID == "":
 		return nil, errors.New("indexer: checkout coordinator needs a family id")
-	case cfg.Store == nil:
+	case cfg.Store == nil || cfg.Store.IsNilGenerationHandle():
 		return nil, errors.New("indexer: checkout coordinator needs a store")
 	case cfg.Builder == nil:
 		return nil, errors.New("indexer: checkout coordinator needs a generation builder")
@@ -900,7 +900,7 @@ func NewCheckoutCoordinator(cfg CheckoutCoordinatorConfig) (*CheckoutCoordinator
 		workspaceID:     cfg.WorkspaceID,
 		projectID:       cfg.ProjectID,
 		store:           cfg.Store,
-		catalog:         cfg.Store.Catalog(),
+		catalog:         cfg.Catalog,
 		builder:         cfg.Builder,
 		leases:          cfg.Leases,
 		logger:          logger,
@@ -3065,7 +3065,7 @@ func (c *CheckoutCoordinator) resolveCommitLayer(
 		return stored, true, nil
 	}
 	started := time.Now()
-	var baseReader LayerBase = c.store.AtGeneration(base.generationID)
+	var baseReader LayerBase = generationAt(c.store, base.generationID)
 	if base.generationID > 0 {
 		view, openErr := c.baseViewMaterializer().MaterializeRefView(ctx, base.graphID, base.generationID)
 		if openErr != nil {
@@ -3730,7 +3730,7 @@ func (c *CheckoutCoordinator) ancestryLayerBase(view *graphview.RepoView) LayerB
 		cloneSources: view.GenerationSources(),
 	}
 	if view.ComposesBaseCorpus() {
-		base.cloneCorpusBase = c.store.AtGeneration(graphview.BaseCorpusGeneration)
+		base.cloneCorpusBase = generationAt(c.store, graphview.BaseCorpusGeneration)
 	}
 	if !view.ComposesBaseCorpus() {
 		base.stack = view.Generations()
@@ -4299,7 +4299,7 @@ func (c *CheckoutCoordinator) offerRetire(ctx context.Context, generationID int6
 		if !known {
 			// A refused offer is owed to the background sweep like a deferral.
 			var owedStore graph.Store
-			if c.store != nil {
+			if c.store != nil && !c.store.IsNilGenerationHandle() {
 				owedStore = c.store
 			}
 			countRetirementOwed(owedStore, generationID, viewmetrics.OwedReleased)
@@ -4983,7 +4983,7 @@ type commitLayerBase struct {
 	// The clone follow-up uses the pinned ancestry's per-generation corpus
 	// sidecars with the same ownership layers as Reader's composition.
 	cloneSources    []graphview.GenerationSource
-	cloneCorpusBase *store_sqlite.Store
+	cloneCorpusBase generationPayloadStore
 	// facts serves the reference-fact hints from the whole materialized
 	// ancestry. A base assembled with one takes it; a base assembled with a
 	// single corpus handle below keeps the older scope. See ancestryRefFacts
@@ -4991,7 +4991,7 @@ type commitLayerBase struct {
 	facts ancestryRefFacts
 	// corpus is the single-generation fact handle the older callers hand in.
 	// It is consulted only when no ancestry was composed.
-	corpus *store_sqlite.Store
+	corpus generationPayloadStore
 	// stack is the view's generation ancestry, bottom first, when every
 	// generation in it is immutable (the view does not compose the mutable
 	// generation zero); nil otherwise. Equal stacks read equal rows, so a
@@ -5065,7 +5065,7 @@ func (b commitLayerBase) LoadRefFactsByFiles(repoPrefix string, files []string) 
 	if len(b.facts.handles) > 0 {
 		return b.facts.LoadRefFactsByFiles(repoPrefix, files)
 	}
-	if b.corpus == nil {
+	if b.corpus == nil || b.corpus.IsNilGenerationHandle() {
 		return []graph.RefFact{}, nil
 	}
 	return b.corpus.LoadRefFactsByFiles(repoPrefix, files)
@@ -5078,7 +5078,7 @@ func (b commitLayerBase) LoadRefFactsByTargets(repoPrefix string, targetIDs []st
 	if len(b.facts.handles) > 0 {
 		return b.facts.LoadRefFactsByTargets(repoPrefix, targetIDs)
 	}
-	if b.corpus == nil {
+	if b.corpus == nil || b.corpus.IsNilGenerationHandle() {
 		return map[string][]graph.RefFact{}, nil
 	}
 	return b.corpus.LoadRefFactsByTargets(repoPrefix, targetIDs)
@@ -5102,7 +5102,7 @@ func (b commitLayerBase) RefFactsSplitAt(chainLayers int) (graph.RefFactsReader,
 // generation the structural reads compose, instead of from one of them.
 //
 // The rows are scoped by generation: ref_facts carries a view_gen column and
-// Store.AtGeneration(g) answers with generation g's rows ALONE
+// generationAt(Store, g) answers with generation g's rows ALONE
 // (store_reffacts.go LoadRefFactsByFiles / LoadRefFactsByTargets bind
 // s.viewGen; store_generation.go AtGeneration). A base handed one generation
 // handle therefore answers the closure's fact question from one layer of a
@@ -5130,22 +5130,22 @@ func (b commitLayerBase) RefFactsSplitAt(chainLayers int) (graph.RefFactsReader,
 // reading through them is bounded by the caller's view lifetime and needs no
 // pin of its own.
 type ancestryRefFacts struct {
-	handles []*store_sqlite.Store
+	handles []generationPayloadStore
 }
 
 // newAncestryRefFacts composes the fact readers for one materialized view:
 // generation zero first, then every generation the view stacks on it, bottom
 // first.
-func newAncestryRefFacts(corpus *store_sqlite.Store, view *graphview.RepoView) ancestryRefFacts {
+func newAncestryRefFacts(corpus generationStoreSource, view *graphview.RepoView) ancestryRefFacts {
 	var out ancestryRefFacts
 	if corpus != nil {
-		if base := corpus.AtGeneration(0); base != nil {
+		if base := generationAt(corpus, 0); base != nil && !base.IsNilGenerationHandle() {
 			out.handles = append(out.handles, base)
 		}
 	}
 	for _, source := range view.GenerationSources() {
-		if source.Handle != nil {
-			out.handles = append(out.handles, source.Handle)
+		if source.Handle != nil && !source.Handle.IsNilGenerationHandle() {
+			out.handles = append(out.handles, source.Handle.(generationPayloadStore))
 		}
 	}
 	return out

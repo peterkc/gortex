@@ -161,7 +161,7 @@ func TestContractDeltaRouterSameNameMountsStayInTheirRepository(t *testing.T) {
 		}
 		session, err := newContractDeltaSession(cache, snapshot, f.options.Config)
 		require.NoError(t, err)
-		batch, err := RunContractFollowupBatch(t.Context(), ContractFollowupBatchRequest{Snapshot: snapshot, Targets: targets, RebuildReason: ContractFollowupUnknownInterval, Registry: f.options.Registry, Config: f.options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: f.options.Materializer.Leases, Yield: f.options.Yield, delta: session})
+		batch, err := RunContractFollowupBatch(t.Context(), ContractFollowupBatchRequest{OpenEvidence: openSlice2TestEvidence, Snapshot: snapshot, Targets: targets, RebuildReason: ContractFollowupUnknownInterval, Registry: f.options.Registry, Config: f.options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: f.options.Materializer.Leases, Yield: f.options.Yield, delta: session})
 		require.NoError(t, err)
 		cache = session.cache
 		require.NotNil(t, cache)

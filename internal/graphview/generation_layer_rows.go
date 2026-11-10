@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 // A published generation is immutable, and the one a route flip introduces is
@@ -55,8 +54,8 @@ const (
 
 // loadGenerationRows reads a small generation's rows, or reports that the
 // generation is too large (or the read failed) with a nil result.
-func loadGenerationRows(ctx context.Context, handle *store_sqlite.Store) *generationRows {
-	if handle == nil {
+func loadGenerationRows(ctx context.Context, handle GenerationLayerHandle) *generationRows {
+	if handle == nil || handle.IsNilGenerationHandle() {
 		return nil
 	}
 	if ctx == nil {
@@ -203,7 +202,7 @@ func DisableGenerationRowsForTest() (restore func()) {
 // already has rows, or is too large. The caller reads epoch before the rows
 // are loaded: rows loaded across a correction land in the older epoch's
 // entry, which no later open is served from.
-func (c *generationLayerCache) preloadRows(ctx context.Context, generation int64, epoch uint64, handle *store_sqlite.Store) bool {
+func (c *generationLayerCache) preloadRows(ctx context.Context, generation int64, epoch uint64, handle GenerationLayerHandle) bool {
 	c.mu.Lock()
 	var entry *layerCacheEntry
 	for key, e := range c.entries {

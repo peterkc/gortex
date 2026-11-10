@@ -85,7 +85,7 @@ func TestLayerCacheRetryOneCorrectionDuringLoad(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	calls := 0
-	loader := func(ctx context.Context, h *store_sqlite.Store) (*GenerationLayer, error) {
+	loader := func(ctx context.Context, h GenerationLayerHandle) (*GenerationLayer, error) {
 		calls++
 		layer, err := NewGenerationLayerContext(ctx, h)
 		if calls == 1 {
@@ -114,7 +114,7 @@ func TestLayerCacheStaleRetryBoundCancellationAndOtherError(t *testing.T) {
 			defer cancel()
 			unrelated := errors.New("read failed")
 			calls := 0
-			loader := func(context.Context, *store_sqlite.Store) (*GenerationLayer, error) {
+			loader := func(context.Context, GenerationLayerHandle) (*GenerationLayer, error) {
 				calls++
 				if mode == "canceled" {
 					cancel()

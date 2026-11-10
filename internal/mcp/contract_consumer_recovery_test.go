@@ -51,7 +51,7 @@ func persistentConsumerFixture(t *testing.T, path string) (*contractConsumerFixt
 
 func absentRecoveryRuntime(t *testing.T, f *contractConsumerFixture) *contractRuntimeFake {
 	t.Helper()
-	c, err := indexer.NewContractAnalysisCoordinator(indexer.ContractAnalysisCoordinatorOptions{Store: f.store, Leases: f.srv.materializer.Leases, Registry: testRegistry(), Config: config.Default().Index, Yield: func(ctx context.Context) error { return ctx.Err() }, Capture: func(context.Context, *indexer.ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (indexer.ContractFollowupSnapshot, []indexer.ContractFollowupTarget, error) {
+	c, err := indexer.NewContractAnalysisCoordinator(indexer.ContractAnalysisCoordinatorOptions{Catalog: any(f.store).(*store_sqlite.Store).Catalog(), Store: f.store, Leases: f.srv.materializer.Leases, Registry: testRegistry(), Config: config.Default().Index, Yield: func(ctx context.Context) error { return ctx.Err() }, Capture: func(context.Context, *indexer.ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (indexer.ContractFollowupSnapshot, []indexer.ContractFollowupTarget, error) {
 		t.Fatal("restart recovery started fresh analysis")
 		return indexer.ContractFollowupSnapshot{}, nil, nil
 	}})

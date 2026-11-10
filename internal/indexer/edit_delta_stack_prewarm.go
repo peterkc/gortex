@@ -165,7 +165,7 @@ func singleFlight(key string, ready func() bool, load func()) {
 // The warm holds the generation's view (a lease on its ancestry) only for one
 // unit of work at a time, never across its steps or while it waits.
 func (c *CheckoutCoordinator) prewarmEditDeltaStackOnce(commitGeneration int64) {
-	if c == nil || c.builder == nil || c.builder.Store == nil || commitGeneration <= 0 {
+	if c == nil || c.builder == nil || (c.builder.Store == nil || c.builder.Store.IsNilGenerationHandle()) || commitGeneration <= 0 {
 		return
 	}
 	c.prewarmCommitGeneration.Store(commitGeneration)
@@ -1017,7 +1017,7 @@ func (d *prewarmDeferral) end() {
 // will re-derive: those caches would be orphaned when the correction moves
 // the stack's key.
 func (l *CheckoutLifecycle) DeferPrewarmsUntilCorrected(ctx context.Context) {
-	if l == nil || l.store == nil {
+	if l == nil || l.store == nil || l.store.IsNilGenerationHandle() {
 		return
 	}
 	stale := make(map[int64]struct{})

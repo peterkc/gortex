@@ -17,7 +17,6 @@ import (
 	"github.com/zzet/gortex/internal/embedding"
 	"github.com/zzet/gortex/internal/gitstate"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/indexer/source"
 	"github.com/zzet/gortex/internal/parser"
@@ -560,7 +559,8 @@ type SparseGenerationBuilder struct {
 	// Store is any handle on the database. Generations are begun and published
 	// through it and the pass writes through the handle it hands back, so which
 	// generation this handle is pinned to does not matter.
-	Store *store_sqlite.Store
+	Store   generationBuilderStore
+	Catalog CheckoutCatalog
 	// Registry is the parser registry the pass extracts with.
 	Registry *parser.Registry
 	// Config is the index configuration the pass runs under. It must be the
@@ -640,7 +640,7 @@ func (b *SparseGenerationBuilder) Build(ctx context.Context, req BuildRequest) (
 // shared by sparse and initial full plans. Claimed full builds join an already
 // reserved candidate through the preparation-aware runner below.
 func (b *SparseGenerationBuilder) buildPlannedGeneration(ctx context.Context, req BuildRequest, plan buildPlan, report BuildReport, started time.Time) (int64, BuildReport, error) {
-	generationID, handle, adopted, err := b.Store.BeginPayloadGenerationWithStatus(ctx, storage.PayloadGenerationRequest{
+	generationID, rawHandle, adopted, err := b.Store.BeginPayloadGenerationStoreWithStatus(ctx, storage.PayloadGenerationRequest{
 		OwnerKind: req.Identity.OwnerKind, GraphID: req.Identity.GraphID,
 		LayerID: req.Identity.LayerID, CheckoutID: req.Identity.CheckoutID,
 		GenerationKind: req.Identity.GenerationKind, BaseGenerationID: req.Identity.BaseGenerationID,
@@ -653,6 +653,7 @@ func (b *SparseGenerationBuilder) buildPlannedGeneration(ctx context.Context, re
 	if err != nil {
 		return 0, BuildReport{}, fmt.Errorf("indexer: begin payload generation: %w", err)
 	}
+	handle := rawHandle.(generationPayloadStore)
 	return b.buildReservedGeneration(ctx, req, plan, report, started, generationID, handle, adopted)
 }
 
@@ -660,7 +661,7 @@ func (b *SparseGenerationBuilder) buildPlannedGeneration(ctx context.Context, re
 // catalog path will supply its transactionally associated reservation here;
 // ordinary sparse callers continue to allocate through their existing API.
 // This helper is private and assumes its caller validated reservation identity.
-func (b *SparseGenerationBuilder) buildReservedGeneration(ctx context.Context, req BuildRequest, plan buildPlan, report BuildReport, started time.Time, generationID int64, handle *store_sqlite.Store, adopted bool) (int64, BuildReport, error) {
+func (b *SparseGenerationBuilder) buildReservedGeneration(ctx context.Context, req BuildRequest, plan buildPlan, report BuildReport, started time.Time, generationID int64, handle generationPayloadStore, adopted bool) (int64, BuildReport, error) {
 	return b.buildReservedGenerationWithPreparation(ctx, req, plan, report, started, generationID, handle, adopted, nil)
 }
 
@@ -673,13 +674,13 @@ type generationPayloadPreparation func(context.Context) (source.ContentSource, b
 // Ordinary builders have no dedicated publication association and pass nil.
 type generationPayloadFailure func(context.Context, error) error
 
-func (b *SparseGenerationBuilder) buildReservedGenerationWithPreparation(ctx context.Context, req BuildRequest, plan buildPlan, report BuildReport, started time.Time, generationID int64, handle *store_sqlite.Store, adopted bool, prepare generationPayloadPreparation) (int64, BuildReport, error) {
+func (b *SparseGenerationBuilder) buildReservedGenerationWithPreparation(ctx context.Context, req BuildRequest, plan buildPlan, report BuildReport, started time.Time, generationID int64, handle generationPayloadStore, adopted bool, prepare generationPayloadPreparation) (int64, BuildReport, error) {
 	return b.buildReservedGenerationWithCallbacks(ctx, req, plan, report, started, generationID, handle, adopted, prepare, nil)
 }
 
-func (b *SparseGenerationBuilder) buildReservedGenerationWithCallbacks(ctx context.Context, req BuildRequest, plan buildPlan, report BuildReport, started time.Time, generationID int64, handle *store_sqlite.Store, adopted bool, prepare generationPayloadPreparation, failed generationPayloadFailure) (int64, BuildReport, error) {
+func (b *SparseGenerationBuilder) buildReservedGenerationWithCallbacks(ctx context.Context, req BuildRequest, plan buildPlan, report BuildReport, started time.Time, generationID int64, handle generationPayloadStore, adopted bool, prepare generationPayloadPreparation, failed generationPayloadFailure) (int64, BuildReport, error) {
 	report.GenerationID = generationID
-	flight, leader, ready, err := b.Store.JoinPayloadBuildFlight(ctx, generationID, adopted)
+	flight, leader, ready, err := b.Store.JoinPayloadBuildFlightHandle(ctx, generationID, adopted)
 	if err != nil {
 		report.Coalesced = adopted
 		report.Duration = time.Since(started)
@@ -901,7 +902,7 @@ func (b *SparseGenerationBuilder) buildReservedGenerationWithCallbacks(ctx conte
 // fills the defaults a caller may leave unset.
 func (b *SparseGenerationBuilder) validate(ctx context.Context, req *BuildRequest) error {
 	switch {
-	case b == nil || b.Store == nil:
+	case b == nil || b.Store == nil || b.Store.IsNilGenerationHandle():
 		return errors.New("indexer: sparse generation builder needs a store")
 	case b.Registry == nil:
 		return errors.New("indexer: sparse generation builder needs a parser registry")
@@ -1120,11 +1121,11 @@ func (b *SparseGenerationBuilder) runPass(
 	ctx context.Context,
 	req BuildRequest,
 	plan buildPlan,
-	handle *store_sqlite.Store,
+	handle generationPayloadStore,
 	report *BuildReport,
 ) (contextSeparation, error) {
 	idx := New(handle, b.Registry, b.Config, b.Logger)
-	idx.SetCensusCatalog(handle.Catalog())
+	idx.SetCensusCatalog(b.Catalog)
 	if err := b.installSelectedContractCoreInputs(ctx, idx, handle, req); err != nil {
 		idx.Close()
 		return contextSeparation{}, err
@@ -1223,7 +1224,7 @@ func passCorpusCounts(corpus *graph.Graph, repoPrefix string) (int, int) {
 func (b *SparseGenerationBuilder) runEnrichment(
 	ctx context.Context,
 	req BuildRequest,
-	handle *store_sqlite.Store,
+	handle generationPayloadStore,
 	report *BuildReport,
 ) {
 	if req.committedTypecheck != nil && req.Enrich == nil && enrichesWorkingCopy(req.Identity) {
@@ -1472,7 +1473,7 @@ type contextSeparation struct {
 
 // contextCorpus is what the separation needs from the corpus it empties. Both
 // the in-memory pass corpus (*graph.Graph) and a generation handle
-// (*store_sqlite.Store) satisfy it, which is the point: the policy below is
+// (generationPayloadStore) satisfy it, which is the point: the policy below is
 // written once and cannot drift between the two modes.
 //
 // The identity-keyed sidecars are optional capabilities rather than methods
@@ -1778,7 +1779,7 @@ func (b *SparseGenerationBuilder) separateContextPayload(
 	ctx context.Context,
 	req BuildRequest,
 	plan buildPlan,
-	handle *store_sqlite.Store,
+	handle generationPayloadStore,
 ) (contextSeparation, error) {
 	return b.separateAndPrune(ctx, req, plan, handle)
 }
@@ -2349,7 +2350,7 @@ func builderEdgeEquivalent(carried, base *graph.Edge) bool {
 func (b *SparseGenerationBuilder) writeMasks(
 	req BuildRequest,
 	plan buildPlan,
-	handle *store_sqlite.Store,
+	handle generationPayloadStore,
 	report *BuildReport,
 ) error {
 	withdrawn := plan.withdrawn
@@ -2487,7 +2488,7 @@ func (b *SparseGenerationBuilder) writeMasks(
 // than one that names what it dropped.
 func (b *SparseGenerationBuilder) unclaimedEdgeSources(
 	req BuildRequest,
-	handle *store_sqlite.Store,
+	handle generationPayloadStore,
 	covered map[string]struct{},
 ) ([]storage.EdgeSourceMask, int) {
 	unclaimed := make(map[string]struct{})
@@ -2563,7 +2564,7 @@ func (b *SparseGenerationBuilder) unclaimedEdgeSources(
 // edge the generation carries out of it is recorded at a claimed, non-empty path;
 // anything else keeps the marker and meets the build-failure guard below.
 func withoutSettledContextSources(
-	handle *store_sqlite.Store,
+	handle generationPayloadStore,
 	markers []storage.EdgeSourceMask,
 	withdrawn map[string]struct{},
 	covered map[string]struct{},
@@ -2668,7 +2669,7 @@ const sourceConfigNarrowingReason = "per-directory ignore files and the untracke
 // named here.
 func (b *SparseGenerationBuilder) declareProducers(
 	req BuildRequest,
-	handle *store_sqlite.Store,
+	handle generationPayloadStore,
 	report *BuildReport,
 ) error {
 	vector := storage.ProducerCompleteness{
@@ -2790,7 +2791,7 @@ func (b *SparseGenerationBuilder) declareProducers(
 // would lose the distinction between "this build broke" and "this build's
 // inputs moved".
 func (b *SparseGenerationBuilder) abandon(ctx context.Context, generationID int64) {
-	err := b.Store.Catalog().SetViewGenerationState(
+	err := b.Catalog.SetViewGenerationState(
 		ctx, generationID, storage.ViewGenerationFailed, storage.ViewGenerationBuilding)
 	if err != nil && !errors.Is(err, storage.ErrCatalogStaleGuard) {
 		b.Logger.Warn("indexer: could not mark an abandoned generation failed",
@@ -2809,7 +2810,7 @@ func (b *SparseGenerationBuilder) abandon(ctx context.Context, generationID int6
 // routed, served or chained on; the retirement sweeps collect failed
 // generations like superseded ones, leases respected.
 func (b *SparseGenerationBuilder) tear(ctx context.Context, generationID int64) error {
-	return b.Store.Catalog().SetViewGenerationState(
+	return b.Catalog.SetViewGenerationState(
 		ctx, generationID, storage.ViewGenerationFailed, storage.ViewGenerationBuilding)
 }
 
@@ -3146,7 +3147,7 @@ func (b *SparseGenerationBuilder) measurePrepublish(report *BuildReport, check f
 // storeWaitMark is the store's cumulative wait and VFS counters, zero without
 // a store.
 func (b *SparseGenerationBuilder) storeWaitMark() storage.ReaderWaitMark {
-	if b == nil || b.Store == nil {
+	if b == nil || b.Store == nil || b.Store.IsNilGenerationHandle() {
 		return storage.ReaderWaitMark{}
 	}
 	return b.Store.ReaderWaitMark()

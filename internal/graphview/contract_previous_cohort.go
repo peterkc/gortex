@@ -19,7 +19,7 @@ func (m *Materializer) OpenPreviousContractCohort(ctx context.Context, selected 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if m == nil || m.Store == nil || m.Catalog == nil || m.Leases == nil || len(repos) == 0 || len(repos) > 1024 {
+	if m == nil || (m.Store == nil || m.Store.IsNilGenerationHandle()) || (m.Catalog == nil || m.Catalog.IsNilMaterializerCatalog()) || m.Leases == nil || len(repos) == 0 || len(repos) > 1024 {
 		return nil, graph.ErrContractInputVector
 	}
 	seenRepos := map[string]bool{}

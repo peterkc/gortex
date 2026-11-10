@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"testing"
 	"time"
 
@@ -108,7 +109,7 @@ func TestStoreAdapterReadsTheGenerationRunFromTheStore(t *testing.T) {
 	require.NotEmpty(t, sources)
 	known := 0
 	for _, source := range sources {
-		generation := source.Handle.SymbolSearchViewGeneration()
+		generation := any(source.Handle).(*store_sqlite.Store).SymbolSearchViewGeneration()
 		run, err := runner.SymbolFTSGenerationRun(ctx, generation)
 		require.NoError(t, err)
 		st, err := f.store.SymbolFTSGenerationStats(ctx, generation)

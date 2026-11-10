@@ -8,12 +8,13 @@ import (
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 func TestImportPublicationPreparesMetadataBeforeLaneAdmission(t *testing.T) {
 	f := newCoordinatorAncestryFixture(t)
 	identity := f.request.Identity
-	id, _, err := f.c.store.BeginPayloadGeneration(t.Context(), store_sqlite.PayloadGenerationRequest{
+	id, _, err := any(f.c.store).(*store_sqlite.Store).BeginPayloadGeneration(t.Context(), store_sqlite.PayloadGenerationRequest{
 		OwnerKind: identity.OwnerKind, GraphID: identity.GraphID,
 		CheckoutID: identity.CheckoutID, GenerationKind: DirtyLayerGenerationKind,
 		TreeOID: identity.TreeOID, ConfigHash: identity.ConfigHash,
@@ -50,14 +51,14 @@ func TestImportPublicationPreparesMetadataBeforeLaneAdmission(t *testing.T) {
 		}}
 		// Fault-inject slow metadata preparation at the actual per-call
 		// dispatch boundary, without a global hook or an alternate publisher.
-		prepare := func(ctx context.Context, generation int64) (*store_sqlite.PreparedPayloadGenerationPublication, error) {
+		prepare := func(ctx context.Context, generation int64) (storage.PreparedPayloadPublication, error) {
 			close(entered)
 			select {
 			case <-resume:
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}
-			return f.c.store.PreparePayloadGenerationPublication(ctx, generation)
+			return any(f.c.store).(*store_sqlite.Store).PreparePayloadGenerationPublication(ctx, generation)
 		}
 		result = publishCopiedGeneration(ctx, id, admission, prepare)
 		if result == nil && !gate.Stats().Active {
@@ -75,7 +76,7 @@ func TestImportPublicationPreparesMetadataBeforeLaneAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatalf("metadata preparation held the physical lane: %v", err)
 	}
-	writeErr := f.c.store.AddBatchChecked([]*graph.Node{{ID: "metadata-foreground", Kind: graph.KindFunction, Name: "Foreground"}}, nil)
+	writeErr := any(f.c.store).(*store_sqlite.Store).AddBatchChecked([]*graph.Node{{ID: "metadata-foreground", Kind: graph.KindFunction, Name: "Foreground"}}, nil)
 	foregroundRelease()
 	if writeErr != nil {
 		t.Fatalf("checked foreground SQL during preparation: %v", writeErr)
@@ -98,7 +99,7 @@ func TestImportPublicationPreparesMetadataBeforeLaneAdmission(t *testing.T) {
 func TestImportPublicationCancellationDoesNotAdmitOrPublish(t *testing.T) {
 	f := newCoordinatorAncestryFixture(t)
 	identity := f.request.Identity
-	id, _, err := f.c.store.BeginPayloadGeneration(t.Context(), store_sqlite.PayloadGenerationRequest{
+	id, _, err := any(f.c.store).(*store_sqlite.Store).BeginPayloadGeneration(t.Context(), store_sqlite.PayloadGenerationRequest{
 		OwnerKind: identity.OwnerKind, GraphID: identity.GraphID,
 		CheckoutID: identity.CheckoutID, GenerationKind: DirtyLayerGenerationKind,
 		TreeOID: identity.TreeOID, ConfigHash: identity.ConfigHash,
@@ -114,7 +115,7 @@ func TestImportPublicationCancellationDoesNotAdmitOrPublish(t *testing.T) {
 		admitted = true
 		return nil
 	}}
-	err = publishCopiedGeneration(ctx, id, admission, f.c.store.PreparePayloadGenerationPublication)
+	err = publishCopiedGeneration(ctx, id, admission, f.c.store.PreparePayloadGenerationPublicationHandle)
 	if !errors.Is(err, context.Canceled) || admitted {
 		t.Fatalf("cancelled preparation admitted=%v error=%v", admitted, err)
 	}

@@ -46,10 +46,10 @@ func (s *Server) validateSourceCheckoutIdentity(ctx context.Context, view *reque
 			return graphview.NewViewError(graphview.CodeCheckoutInaccessible, "source checkout physical root changed while reading")
 		}
 	}
-	if view == nil || view.rider == nil || s.materializer == nil || s.materializer.Catalog == nil {
+	if view == nil || view.rider == nil || s.materializer == nil || s.materializer.Catalog.(*store_sqlite.Catalog) == nil {
 		return nil
 	}
-	checkout, found, err := s.materializer.Catalog.GetCheckout(ctx, view.rider.CheckoutID)
+	checkout, found, err := s.materializer.Catalog.(*store_sqlite.Catalog).GetCheckout(ctx, view.rider.CheckoutID)
 	if err != nil {
 		return err
 	}

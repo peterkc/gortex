@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"path/filepath"
 	"testing"
 
@@ -45,7 +46,7 @@ func contractBaselineAuthorityFixture(t *testing.T) (ContractFollowupCaptureOpti
 	t.Cleanup(pin.Release)
 	authority := NewOutputGenerationAuthority(leases)
 	mi.SetOutputGenerationAuthority(authority)
-	options := ContractFollowupCaptureOptions{Context: ctx, Store: store, Materializer: &graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: leases}, MultiIndexer: mi, Registry: idx.registry, Config: idx.config, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }}
+	options := ContractFollowupCaptureOptions{Catalog: slice2TestCatalog(store), Context: ctx, Store: store, Materializer: &graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: leases}, MultiIndexer: mi, Registry: idx.registry, Config: idx.config, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }}
 	return options, pin, authority
 }
 
@@ -58,7 +59,7 @@ func TestContractBaselineAuthorityRefusesClosedAndIgnoresRawSourceMovement(t *te
 		t.Run(mode, func(t *testing.T) {
 			options, pin, authority := contractBaselineAuthorityFixture(t)
 			require.NoError(t, pin.ValidateAcceptedCurrent())
-			before, found, err := options.Store.ContractInputStateContext(t.Context(), "fixture", "")
+			before, found, err := any(options.Store).(*store_sqlite.Store).ContractInputStateContext(t.Context(), "fixture", "")
 			require.NoError(t, err)
 			require.True(t, found)
 			if mode == "closed" {
@@ -92,9 +93,9 @@ func TestContractBaselineAuthorityRefusesClosedAndIgnoresRawSourceMovement(t *te
 				require.Equal(t, authority.Stats().Issued, authority.Stats().Settled)
 				require.Zero(t, authority.Stats().LiveOwners)
 			}
-			baseline, err := options.Store.ContractBoundaryReceiptBaselineContext(t.Context(), "fixture", "")
+			baseline, err := any(options.Store).(*store_sqlite.Store).ContractBoundaryReceiptBaselineContext(t.Context(), "fixture", "")
 			require.NoError(t, err)
-			state, found, err := options.Store.ContractInputStateContext(t.Context(), "fixture", "")
+			state, found, err := any(options.Store).(*store_sqlite.Store).ContractInputStateContext(t.Context(), "fixture", "")
 			require.NoError(t, err)
 			require.True(t, found)
 			inputs, err := options.Materializer.CaptureContractInputs(t.Context(), nil, "fixture", "")

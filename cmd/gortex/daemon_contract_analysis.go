@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer"
 	gortexmcp "github.com/zzet/gortex/internal/mcp"
@@ -64,12 +65,12 @@ func installDaemonContractAnalysisWith(state *daemonState, logger *zap.Logger, a
 		return nil, fmt.Errorf("contract analysis: primary configuration unavailable")
 	}
 	cfg := primaryConfig.Index
-	captureOptions := indexer.ContractFollowupCaptureOptions{Context: ctx, Store: store, Materializer: materializer, MultiIndexer: state.multiIndexer, Registry: state.indexer.Registry(), Config: cfg, Logger: logger, BaselineAdmissionMu: &runtime.baselineAdmissionMu, BaselineJobs: &runtime.baselineJobs, Yield: contractAnalysisYield(state.mcpServer.ContractAnalysisShouldYield)}
+	captureOptions := indexer.ContractFollowupCaptureOptions{Context: ctx, Store: store, Catalog: store.Catalog(), Materializer: materializer, MultiIndexer: state.multiIndexer, Registry: state.indexer.Registry(), Config: cfg, Logger: logger, BaselineAdmissionMu: &runtime.baselineAdmissionMu, BaselineJobs: &runtime.baselineJobs, Yield: contractAnalysisYield(state.mcpServer.ContractAnalysisShouldYield)}
 	// Captures and jobs report suspect stuck inputs to the repair once it
 	// exists; a report before then is dropped.
 	var repair atomic.Pointer[indexer.ContractStuckRepair]
 	captureOptions.SuspectStuck = func(repo string, paths []string) { repair.Load().Suspect(repo, paths) }
-	options := indexer.ContractAnalysisCoordinatorOptions{MemoryLimitBytes: debug.SetMemoryLimit(-1), RequireRepoConfigs: true, Store: store, Leases: materializer.Leases, Registry: state.indexer.Registry(), Config: cfg, Logger: logger, Capture: indexer.NewContractFollowupSourceCapture(captureOptions), Inputs: indexer.NewContractPrimaryInputCapture(materializer), LinkedInputs: indexer.NewContractLinkedInputCapture(materializer), ReconcileBaseline: indexer.NewContractBaselineReconciler(captureOptions), Yield: contractAnalysisYield(state.mcpServer.ContractAnalysisShouldYield)}
+	options := indexer.ContractAnalysisCoordinatorOptions{OpenEvidence: openDaemonContractEvidence, MemoryLimitBytes: debug.SetMemoryLimit(-1), RequireRepoConfigs: true, Store: store, Catalog: store.Catalog(), Leases: materializer.Leases, Registry: state.indexer.Registry(), Config: cfg, Logger: logger, Capture: indexer.NewContractFollowupSourceCapture(captureOptions), Inputs: indexer.NewContractPrimaryInputCapture(materializer), LinkedInputs: indexer.NewContractLinkedInputCapture(materializer), ReconcileBaseline: indexer.NewContractBaselineReconciler(captureOptions), Yield: contractAnalysisYield(state.mcpServer.ContractAnalysisShouldYield)}
 	options.RetireReservation = state.lifecycle.DeferContractReservationRetirement
 	// Linked worktrees' fills follow the configured policy; the demand
 	// signal is the same foreground work the shared yield gives way to,
@@ -86,7 +87,7 @@ func installDaemonContractAnalysisWith(state *daemonState, logger *zap.Logger, a
 		return nil, err
 	}
 	runtime.coordinator = coordinator
-	runner, err := indexer.NewContractStuckRepair(indexer.ContractStuckRepairOptions{Store: store, MultiIndexer: state.multiIndexer, Baseline: captureOptions, Coordinator: coordinator, Logger: logger})
+	runner, err := indexer.NewContractStuckRepair(indexer.ContractStuckRepairOptions{Store: store, Catalog: store.Catalog(), MultiIndexer: state.multiIndexer, Baseline: captureOptions, Coordinator: coordinator, Logger: logger})
 	if err != nil {
 		cancel()
 		_ = coordinator.CloseContext(context.Background())
@@ -184,4 +185,12 @@ func (r *daemonContractAnalysis) waitClosed() error {
 	r.beginClose()
 	<-r.closeDone
 	return r.closeErr
+}
+
+func openDaemonContractEvidence(path string) (graph.Store, error) {
+	store, err := store_sqlite.Open(path)
+	if store == nil {
+		return nil, err
+	}
+	return store, err
 }

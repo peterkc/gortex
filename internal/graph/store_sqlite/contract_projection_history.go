@@ -3,10 +3,11 @@ package store_sqlite
 import (
 	"context"
 	"fmt"
-	"github.com/zzet/gortex/internal/storage"
 	"strings"
 	"sync/atomic"
 	"unsafe"
+
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // ContractProjectionDomain names potential query results, including absence.

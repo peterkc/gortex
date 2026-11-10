@@ -92,7 +92,7 @@ func (l *CheckoutLifecycle) startPromoteCheckout(
 	if l == nil || l.mi == nil {
 		return PromoteResult{}, nil, errors.New("indexer: checkout lifecycle is not wired")
 	}
-	if l.catalog == nil {
+	if l.catalog == nil || l.catalog.IsNilMaterializerCatalog() {
 		return PromoteResult{}, nil, errNoCatalog
 	}
 	checkout, err := l.checkoutStateOf(ctx, checkoutID)

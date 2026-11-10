@@ -15,7 +15,7 @@ func (b *SparseGenerationBuilder) claimedContractCopyPolicy(ctx context.Context,
 	if b.contractCoreRuntime == nil || desired != b.extractorVersionsFingerprint() || state.ExtractorVersions != extractorVersionsFingerprint() {
 		return false
 	}
-	return claimedContractCopyBaseline(ctx, b.Store.AtGeneration(generationZero), state.RepoPrefix) == nil
+	return claimedContractCopyBaseline(ctx, generationAt(b.Store, generationZero), state.RepoPrefix) == nil
 }
 
 func claimedContractCopyBaseline(ctx context.Context, handle contractCopyBaselineReader, repo string) error {

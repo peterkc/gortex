@@ -64,7 +64,7 @@ func (m *Materializer) OpenContractAnalysisForInputs(ctx context.Context, view *
 	if !inputs.State.Accepted {
 		return nil, NewViewError(CodeRequiredCapabilityIncomplete, "selected contract inputs are still being accepted")
 	}
-	var core graph.Reader = m.Store.AtGeneration(BaseCorpusGeneration)
+	var core graph.Reader = m.Store.AtGenerationStore(BaseCorpusGeneration)
 	if view != nil {
 		core = view.Reader
 	}
@@ -208,7 +208,7 @@ func (m *Materializer) OpenContractAnalysis(ctx context.Context, core graph.Read
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if m == nil || m.Store == nil || m.Catalog == nil || m.Leases == nil || core == nil || input.InputVersion == "" || input.InputFingerprint == "" {
+	if m == nil || m.Store == nil || m.Store.IsNilGenerationHandle() || m.Catalog == nil || m.Catalog.IsNilMaterializerCatalog() || m.Leases == nil || core == nil || input.InputVersion == "" || input.InputFingerprint == "" {
 		return nil, NewViewError(CodeRequiredCapabilityIncomplete, "selected contract inputs are not yet certified")
 	}
 	reader := m.contractAttachmentReader

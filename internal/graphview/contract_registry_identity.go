@@ -53,7 +53,7 @@ func (v *ContractAnalysisView) RegistryIdentity(ctx context.Context) (ContractRe
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if v == nil || v.Layer == nil || v.Layer.handle == nil {
+	if v == nil || v.Layer == nil || (v.Layer.handle == nil || v.Layer.handle.IsNilGenerationHandle()) {
 		return ContractRegistryIdentity{}, false
 	}
 	reader, ok := v.RegistryReader.(*contractRegistryReader)

@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"path/filepath"
 	"testing"
 	"time"
@@ -94,7 +95,7 @@ func TestContractCoreInstalledClaimedRootAndDirtyDeltaPersistReadiness(t *testin
 	id, _, err := builder.BuildClaimedDedicatedBase(ctx, ClaimedDedicatedBaseRequest{Claim: claim, RootPath: request.RootPath, WorkspaceID: request.WorkspaceID, ProjectID: request.ProjectID})
 	require.NoError(t, err)
 	require.Equal(t, claim.GenerationID, id)
-	physical := builder.Store.AtGeneration(id)
+	physical := any(builder.Store).(*store_sqlite.Store).AtGeneration(id)
 	state, found, err := physical.ContractInputStateContext(ctx, request.RepoPrefix, request.Identity.CheckoutID)
 	require.NoError(t, err)
 	require.True(t, found)
@@ -124,7 +125,7 @@ func TestContractCoreInstalledClaimedRootAndDirtyDeltaPersistReadiness(t *testin
 	identity.BaseGenerationID = id
 	delta, _, err := builder.BuildDirtyLayer(ctx, DirtyLayerRequest{Identity: identity, Base: physical, CheckoutRoot: request.RootPath, RepoPrefix: request.RepoPrefix, WorkspaceID: request.WorkspaceID, ProjectID: request.ProjectID})
 	require.NoError(t, err)
-	top := builder.Store.AtGeneration(delta)
+	top := any(builder.Store).(*store_sqlite.Store).AtGeneration(delta)
 	changed, found, err := top.ContractInputStateContext(ctx, request.RepoPrefix, request.Identity.CheckoutID)
 	require.NoError(t, err)
 	require.True(t, found)

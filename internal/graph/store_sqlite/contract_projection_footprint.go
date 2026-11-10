@@ -4,11 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"github.com/zzet/gortex/internal/storage"
 	"strings"
 	"unsafe"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // ContractProjectionDeclaration is physical potential membership, including

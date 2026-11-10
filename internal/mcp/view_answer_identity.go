@@ -54,7 +54,7 @@ func (s *Server) worktreeAnswerIdentity(ctx context.Context, checkout store_sqli
 			identity.dirtyGenerationID = layer.Generation
 		}
 	}
-	if s == nil || s.materializer == nil || s.materializer.Catalog == nil {
+	if s == nil || s.materializer == nil || (s.materializer.Catalog == nil || s.materializer.Catalog.IsNilMaterializerCatalog()) {
 		return identity
 	}
 	catalog := s.materializer.Catalog

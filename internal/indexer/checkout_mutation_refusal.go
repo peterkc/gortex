@@ -166,7 +166,7 @@ func (l *CheckoutLifecycle) forgetMutationRefusal(checkoutID string) {
 func (l *CheckoutLifecycle) currentMutationRefusalRoute(ctx context.Context, checkoutID, root string) (storage.Checkout, storage.CheckoutRoute, bool) {
 	var noCheckout storage.Checkout
 	var noRoute storage.CheckoutRoute
-	if l == nil || l.catalog == nil {
+	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) {
 		return noCheckout, noRoute, false
 	}
 	checkout, found, err := l.catalog.GetCheckout(ctx, checkoutID)

@@ -93,7 +93,7 @@ func privateDedicatedBuilderFixtureWithRegistry(t testing.TB, registry *parser.R
 			t.Error(err)
 		}
 	})
-	builder := &SparseGenerationBuilder{Store: store, Registry: registry, Config: config.Default().Index, Logger: zap.NewNop()}
+	builder := &SparseGenerationBuilder{Catalog: slice2TestCatalog(store), Store: store, Registry: registry, Config: config.Default().Index, Logger: zap.NewNop()}
 	// ExtractorVersions is the REAL fingerprint rather than a placeholder token,
 	// because it is not an opaque identity component: a reservation's
 	// extractor versions and the repo_index_state row an index pass writes are
@@ -209,7 +209,7 @@ func privateClaimedDedicatedFixture(t testing.TB) (*SparseGenerationBuilder, ded
 	builder, request, _ := privateDedicatedBuilderFixture(t)
 	ctx := context.Background()
 	// Production Open must install the publication schema; do not create it in this fixture.
-	catalog := builder.Store.Catalog()
+	catalog := any(builder.Store).(*store_sqlite.Store).Catalog()
 	authority, err := catalog.AcquireDedicatedBaseAuthority(ctx, store_sqlite.AcquireDedicatedBaseAuthorityRequest{
 		GraphID: request.Identity.GraphID,
 		Owner:   store_sqlite.DedicatedBaseOwner{CheckoutID: request.Identity.CheckoutID, Incarnation: "private-incarnation"},
@@ -239,7 +239,7 @@ func privateClaimedDedicatedFixture(t testing.TB) (*SparseGenerationBuilder, ded
 func BenchmarkPrivateClaimedDedicatedReadyCycle(b *testing.B) {
 	builder, request, claim := privateClaimedDedicatedFixture(b)
 	ctx := context.Background()
-	catalog := builder.Store.Catalog()
+	catalog := any(builder.Store).(*store_sqlite.Store).Catalog()
 	id, _, err := builder.BuildClaimedDedicatedBase(ctx, ClaimedDedicatedBaseRequest{Claim: claim, RootPath: request.RootPath})
 	if err != nil {
 		b.Fatal(err)
@@ -280,7 +280,7 @@ func BenchmarkPrivateClaimedDedicatedReadyCycle(b *testing.B) {
 func TestPrivateClaimedDedicatedBaseLifecycle(t *testing.T) {
 	builder, request, claim := privateClaimedDedicatedFixture(t)
 	ctx := context.Background()
-	catalog := builder.Store.Catalog()
+	catalog := any(builder.Store).(*store_sqlite.Store).Catalog()
 	joined, err := catalog.ClaimDedicatedBaseBuild(ctx, store_sqlite.ClaimDedicatedBaseBuildRequest{
 		Desire: claim.Desire, AttemptToken: "different-caller-token",
 	})
@@ -297,7 +297,7 @@ func TestPrivateClaimedDedicatedBaseLifecycle(t *testing.T) {
 	if err != nil || id != claim.GenerationID || report.Coalesced || report.NodeCount == 0 {
 		t.Fatalf("reserved build: id=%d report=%+v err=%v", id, report, err)
 	}
-	handle := builder.Store.AtGeneration(id)
+	handle := any(builder.Store).(*store_sqlite.Store).AtGeneration(id)
 	if handle.GetNode(request.RepoPrefix+"/base.go::Committed") == nil || handle.GetNode(request.RepoPrefix+"/base.go::DirtyOnly") != nil {
 		t.Fatal("candidate did not retain committed source isolation")
 	}
@@ -339,7 +339,7 @@ func TestPrivateClaimedDedicatedBaseLifecycle(t *testing.T) {
 func TestPrivateClaimedDedicatedBaseReadyCyclesDoNotWrite(t *testing.T) {
 	builder, request, claim := privateClaimedDedicatedFixture(t)
 	ctx := context.Background()
-	catalog := builder.Store.Catalog()
+	catalog := any(builder.Store).(*store_sqlite.Store).Catalog()
 	id, _, err := builder.BuildClaimedDedicatedBase(ctx, ClaimedDedicatedBaseRequest{Claim: claim, RootPath: request.RootPath})
 	if err != nil {
 		t.Fatal(err)
@@ -347,7 +347,7 @@ func TestPrivateClaimedDedicatedBaseReadyCyclesDoNotWrite(t *testing.T) {
 	if _, err := catalog.AdoptDedicatedBaseGeneration(ctx, store_sqlite.AdoptDedicatedBaseGenerationRequest{Claim: claim}); err != nil {
 		t.Fatal(err)
 	}
-	check, err := installDedicatedWriteAudit(ctx, builder.Store, request.StorePath)
+	check, err := installDedicatedWriteAudit(ctx, any(builder.Store).(*store_sqlite.Store), request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +402,7 @@ func TestPrivateReservedGenerationPreparationFailuresDrainFlight(t *testing.T) {
 			if mode == "publish_fence" {
 				req.PrePublish = func(context.Context, int64) error { return failure }
 			}
-			id, _, err := builder.buildReservedGenerationWithPreparation(ctx, req, buildPlan{}, BuildReport{}, time.Now(), claim.GenerationID, builder.Store.AtGeneration(claim.GenerationID), false, prepare)
+			id, _, err := builder.buildReservedGenerationWithPreparation(ctx, req, buildPlan{}, BuildReport{}, time.Now(), claim.GenerationID, any(builder.Store).(*store_sqlite.Store).AtGeneration(claim.GenerationID), false, prepare)
 			if err == nil || id != claim.GenerationID {
 				t.Fatalf("failure was lost: id=%d err=%v", id, err)
 			}
@@ -416,14 +416,14 @@ func TestPrivateReservedGenerationPreparationFailuresDrainFlight(t *testing.T) {
 			if preparations.Load() != 1 || closes.Load() != wantCloses {
 				t.Fatalf("source lifetime: prepares=%d closes=%d", preparations.Load(), closes.Load())
 			}
-			row, found, err := builder.Store.Catalog().GetViewGeneration(ctx, id)
+			row, found, err := any(builder.Store).(*store_sqlite.Store).Catalog().GetViewGeneration(ctx, id)
 			if err != nil || !found || row.State != "failed" {
 				t.Fatalf("abandoned candidate: %+v %v", row, err)
 			}
 			// A caller joining the terminal flight must not hang or open another source.
 			waitCtx, cancel := context.WithTimeout(ctx, time.Second)
 			defer cancel()
-			_, _, retryErr := builder.buildReservedGenerationWithPreparation(waitCtx, req, buildPlan{}, BuildReport{}, time.Now(), claim.GenerationID, builder.Store.AtGeneration(claim.GenerationID), true, prepare)
+			_, _, retryErr := builder.buildReservedGenerationWithPreparation(waitCtx, req, buildPlan{}, BuildReport{}, time.Now(), claim.GenerationID, any(builder.Store).(*store_sqlite.Store).AtGeneration(claim.GenerationID), true, prepare)
 			if retryErr == nil || errors.Is(retryErr, context.DeadlineExceeded) || preparations.Load() != 1 {
 				t.Fatalf("terminal flight retry err=%v preparations=%d", retryErr, preparations.Load())
 			}
@@ -440,7 +440,7 @@ func TestPrivateClaimedDedicatedBaseStaleDesireRejectsReadyCandidate(t *testing.
 	}
 	changed := claim.Desire.Identity
 	changed.ConfigHash += "-changed"
-	if _, err := builder.Store.Catalog().RecordDedicatedBaseDesire(ctx, store_sqlite.RecordDedicatedBaseDesireRequest{
+	if _, err := any(builder.Store).(*store_sqlite.Store).Catalog().RecordDedicatedBaseDesire(ctx, store_sqlite.RecordDedicatedBaseDesireRequest{
 		Authority: claim.Desire.Authority, ExpectedDesiredEpoch: claim.Desire.Epoch, Identity: changed,
 	}); err != nil {
 		t.Fatal(err)
@@ -448,7 +448,7 @@ func TestPrivateClaimedDedicatedBaseStaleDesireRejectsReadyCandidate(t *testing.
 	if _, _, err := builder.BuildClaimedDedicatedBase(ctx, build); !errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
 		t.Fatalf("stale ready build: %v", err)
 	}
-	if _, err := builder.Store.Catalog().AdoptDedicatedBaseGeneration(ctx, store_sqlite.AdoptDedicatedBaseGenerationRequest{Claim: claim}); !errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
+	if _, err := any(builder.Store).(*store_sqlite.Store).Catalog().AdoptDedicatedBaseGeneration(ctx, store_sqlite.AdoptDedicatedBaseGenerationRequest{Claim: claim}); !errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
 		t.Fatalf("stale ready adoption: %v", err)
 	}
 }
@@ -456,7 +456,7 @@ func TestPrivateClaimedDedicatedBaseStaleDesireRejectsReadyCandidate(t *testing.
 func TestPrivateClaimedDedicatedBaseConcurrentOnePhysicalBuild(t *testing.T) {
 	builder, request, claim := privateClaimedDedicatedFixture(t)
 	ctx := context.Background()
-	second, err := builder.Store.Catalog().ClaimDedicatedBaseBuild(ctx, store_sqlite.ClaimDedicatedBaseBuildRequest{Desire: claim.Desire, AttemptToken: "second-caller"})
+	second, err := any(builder.Store).(*store_sqlite.Store).Catalog().ClaimDedicatedBaseBuild(ctx, store_sqlite.ClaimDedicatedBaseBuildRequest{Desire: claim.Desire, AttemptToken: "second-caller"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,12 +526,12 @@ func TestPrivateReservedGenerationPreparationPanicClosesSource(t *testing.T) {
 			var recovered any
 			func() {
 				defer func() { recovered = recover() }()
-				_, _, _ = builder.buildReservedGenerationWithPreparation(ctx, req, buildPlan{}, BuildReport{}, time.Now(), claim.GenerationID, builder.Store.AtGeneration(claim.GenerationID), true, prepare)
+				_, _, _ = builder.buildReservedGenerationWithPreparation(ctx, req, buildPlan{}, BuildReport{}, time.Now(), claim.GenerationID, any(builder.Store).(*store_sqlite.Store).AtGeneration(claim.GenerationID), true, prepare)
 			}()
 			if recovered == nil || closes.Load() != 1 {
 				t.Fatalf("panic cleanup: recovered=%v closes=%d", recovered, closes.Load())
 			}
-			row, found, err := builder.Store.Catalog().GetViewGeneration(ctx, claim.GenerationID)
+			row, found, err := any(builder.Store).(*store_sqlite.Store).Catalog().GetViewGeneration(ctx, claim.GenerationID)
 			if err != nil || !found || row.State != "failed" {
 				t.Fatalf("panic candidate: %+v %v", row, err)
 			}
@@ -553,11 +553,11 @@ func TestPrivateReservedGenerationPreparationCancellationClosesSource(t *testing
 		return prepareOwnedDedicatedSnapshot(ctx, owned, func() error { cancel(); return ctx.Err() })
 	}
 	req := BuildRequest{Identity: request.Identity, Base: graph.New(), RootPath: request.RootPath, RepoPrefix: request.RepoPrefix}
-	_, _, err := builder.buildReservedGenerationWithPreparation(ctx, req, buildPlan{}, BuildReport{}, time.Now(), claim.GenerationID, builder.Store.AtGeneration(claim.GenerationID), true, prepare)
+	_, _, err := builder.buildReservedGenerationWithPreparation(ctx, req, buildPlan{}, BuildReport{}, time.Now(), claim.GenerationID, any(builder.Store).(*store_sqlite.Store).AtGeneration(claim.GenerationID), true, prepare)
 	if !errors.Is(err, context.Canceled) || closes.Load() != 1 {
 		t.Fatalf("cancel cleanup: err=%v closes=%d", err, closes.Load())
 	}
-	row, found, err := builder.Store.Catalog().GetViewGeneration(context.Background(), claim.GenerationID)
+	row, found, err := any(builder.Store).(*store_sqlite.Store).Catalog().GetViewGeneration(context.Background(), claim.GenerationID)
 	if err != nil || !found || row.State != "failed" {
 		t.Fatalf("canceled candidate: %+v %v", row, err)
 	}
@@ -569,7 +569,7 @@ func TestPrivateReservedGenerationRefreshedClaimSkipsReadyPayload(t *testing.T) 
 	if _, _, err := builder.BuildClaimedDedicatedBase(ctx, ClaimedDedicatedBaseRequest{Claim: claim, RootPath: request.RootPath}); err != nil {
 		t.Fatal(err)
 	}
-	validated, err := builder.Store.Catalog().ClaimDedicatedBaseBuild(ctx, store_sqlite.ClaimDedicatedBaseBuildRequest{Desire: claim.Desire, AttemptToken: claim.AttemptToken})
+	validated, err := any(builder.Store).(*store_sqlite.Store).Catalog().ClaimDedicatedBaseBuild(ctx, store_sqlite.ClaimDedicatedBaseBuildRequest{Desire: claim.Desire, AttemptToken: claim.AttemptToken})
 	if err != nil || validated.Status != "ready" {
 		t.Fatalf("refreshed claim=%+v err=%v", validated, err)
 	}
@@ -578,7 +578,7 @@ func TestPrivateReservedGenerationRefreshedClaimSkipsReadyPayload(t *testing.T) 
 		preparations.Add(1)
 		return nil, buildPlan{}, BuildReport{}, errors.New("ready payload must not prepare again")
 	}
-	id, report, err := builder.buildReservedGenerationWithPreparation(ctx, BuildRequest{}, buildPlan{}, BuildReport{}, time.Now(), claim.GenerationID, builder.Store.AtGeneration(claim.GenerationID), validated.Status != "allocated", prepare)
+	id, report, err := builder.buildReservedGenerationWithPreparation(ctx, BuildRequest{}, buildPlan{}, BuildReport{}, time.Now(), claim.GenerationID, any(builder.Store).(*store_sqlite.Store).AtGeneration(claim.GenerationID), validated.Status != "allocated", prepare)
 	if err != nil || id != claim.GenerationID || !report.Coalesced || preparations.Load() != 0 {
 		t.Fatalf("ready join: id=%d report=%+v err=%v preparations=%d", id, report, err, preparations.Load())
 	}
@@ -614,7 +614,7 @@ func TestPrivateReservedGenerationOnlyLeaderPreparesAndClosesSource(t *testing.T
 	for _, adopted := range []bool{false, true} {
 		go func() {
 			id, report, err := builder.buildReservedGenerationWithPreparation(ctx, req, buildPlan{}, BuildReport{}, time.Now(),
-				claim.GenerationID, builder.Store.AtGeneration(claim.GenerationID), adopted, prepare)
+				claim.GenerationID, any(builder.Store).(*store_sqlite.Store).AtGeneration(claim.GenerationID), adopted, prepare)
 			results <- result{id, report, err}
 		}()
 	}
@@ -637,7 +637,7 @@ func TestPrivateReservedGenerationOnlyLeaderPreparesAndClosesSource(t *testing.T
 func TestClaimedDedicatedBaseRejectsInvalidRequestsWithoutWrites(t *testing.T) {
 	builder, request, claim := privateClaimedDedicatedFixture(t)
 	ctx := context.Background()
-	check, err := installDedicatedWriteAudit(ctx, builder.Store, request.StorePath)
+	check, err := installDedicatedWriteAudit(ctx, any(builder.Store).(*store_sqlite.Store), request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -682,7 +682,7 @@ func TestClaimedDedicatedBaseRejectsInvalidRequestsWithoutWrites(t *testing.T) {
 	if err := check(); err != nil {
 		t.Fatal(err)
 	}
-	row, found, err := builder.Store.Catalog().GetViewGeneration(ctx, claim.GenerationID)
+	row, found, err := any(builder.Store).(*store_sqlite.Store).Catalog().GetViewGeneration(ctx, claim.GenerationID)
 	if err != nil || !found || row.State != store_sqlite.ViewGenerationBuilding {
 		t.Fatalf("invalid requests changed reserved generation: row=%+v found=%v err=%v", row, found, err)
 	}
@@ -691,7 +691,8 @@ func TestClaimedDedicatedBaseRejectsInvalidRequestsWithoutWrites(t *testing.T) {
 // installDedicatedWriteAudit instruments only a test-owned database. Keeping
 // this in the indexer test package avoids exporting production-only test hooks
 // from store_sqlite. All DDL commits before the measured interval starts.
-func installDedicatedWriteAudit(ctx context.Context, store *store_sqlite.Store, path string) (func() error, error) {
+func installDedicatedWriteAudit(ctx context.Context, rawStore any, path string) (func() error, error) {
+	store := rawStore.(*store_sqlite.Store)
 	// The preceding full build scheduled its planner-statistics work before
 	// returning. Join that owed work before this second connection's DDL tries
 	// to take the writer lock; a quiet WAL sample alone cannot prove the lane
@@ -783,11 +784,11 @@ func TestClaimedDedicatedBaseMaterializesWithoutMutableRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := builder.Store.Catalog().AdoptDedicatedBaseGeneration(ctx, store_sqlite.AdoptDedicatedBaseGenerationRequest{Claim: claim}); err != nil {
+	if _, err := any(builder.Store).(*store_sqlite.Store).Catalog().AdoptDedicatedBaseGeneration(ctx, store_sqlite.AdoptDedicatedBaseGenerationRequest{Claim: claim}); err != nil {
 		t.Fatal(err)
 	}
 	materializer := &graphview.Materializer{
-		Store: builder.Store, Catalog: builder.Store.Catalog(), Leases: graphview.NewLeaseManager(),
+		Store: any(builder.Store).(*store_sqlite.Store), Catalog: any(builder.Store).(*store_sqlite.Store).Catalog(), Leases: graphview.NewLeaseManager(),
 	}
 	view, err := materializer.MaterializeRefView(ctx, request.Identity.GraphID, id)
 	if err != nil {
@@ -852,7 +853,7 @@ func TestPrivateEmptyCommittedDedicatedBaseAcceptance(t *testing.T) {
 		}
 	})
 	registry := builderRegistry()
-	builder := &SparseGenerationBuilder{Store: store, Registry: registry, Config: config.Default().Index, Logger: zap.NewNop()}
+	builder := &SparseGenerationBuilder{Catalog: slice2TestCatalog(store), Store: store, Registry: registry, Config: config.Default().Index, Logger: zap.NewNop()}
 	catalog := store.Catalog()
 	const prefix = "private-empty"
 	const graphID = "private-empty-graph"
@@ -959,7 +960,7 @@ func TestPrivateEmptyCommittedDedicatedBaseAcceptance(t *testing.T) {
 		t.Logf("empty-view metadata node (no root-node policy assumed): %+v", node)
 	}
 	t.Logf("empty committed acceptance: commit=%s tree=%s generation=%d report_nodes=%d view_nodes=%d mutable_nodes=%d", commit, tree, id, report.NodeCount, len(nodes), len(store.AllNodes()))
-	checkWrites, err := installDedicatedWriteAudit(ctx, builder.Store, storePath)
+	checkWrites, err := installDedicatedWriteAudit(ctx, any(builder.Store).(*store_sqlite.Store), storePath)
 	if err != nil {
 		t.Fatal(err)
 	}

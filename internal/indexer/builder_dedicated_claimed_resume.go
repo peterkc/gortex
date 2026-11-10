@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer/source"
 	"github.com/zzet/gortex/internal/storage"
 )
@@ -56,7 +54,7 @@ func keepsReservationOnCancel(ctx context.Context) bool {
 // the complete payload of the reservation (its index state names the reserved
 // commit with the reserved extractor versions, over a clean tree, and it holds
 // the repository's rows).
-func claimedBaseResumable(handle *store_sqlite.Store, repoPrefix string, row storage.ViewGeneration) (bool, string) {
+func claimedBaseResumable(handle generationPayloadStore, repoPrefix string, row storage.ViewGeneration) (bool, string) {
 	state, found, err := handle.GetRepoIndexState(repoPrefix)
 	switch {
 	case err != nil:
@@ -77,7 +75,7 @@ func claimedBaseResumable(handle *store_sqlite.Store, repoPrefix string, row sto
 // prepareResumedDedicatedBase is the resume route's payload step: the payload
 // is already in the generation, so it produces nothing and reports what the
 // generation holds, exactly as the copy route reports what it copied.
-func (b *SparseGenerationBuilder) prepareResumedDedicatedBase(repoPrefix string, generationID int64, handle *store_sqlite.Store) generationPayloadPreparation {
+func (b *SparseGenerationBuilder) prepareResumedDedicatedBase(repoPrefix string, generationID int64, handle generationPayloadStore) generationPayloadPreparation {
 	return func(ctx context.Context) (source.ContentSource, buildPlan, BuildReport, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, buildPlan{}, BuildReport{}, err
@@ -94,8 +92,6 @@ func (b *SparseGenerationBuilder) prepareResumedDedicatedBase(repoPrefix string,
 	}
 }
 
-var _ graph.RepoIndexStateReader = (*store_sqlite.Store)(nil)
-
 // retireReplacedDedicatedClaim retires the generation a failed claim left
 // behind, as soon as a new claim no longer names it.
 //
@@ -107,11 +103,11 @@ var _ graph.RepoIndexStateReader = (*store_sqlite.Store)(nil)
 // different generation, the failed one is referenced by nothing and is retired
 // here. A refusal (a lease, a reference that appeared since) leaves it to the
 // ordinary sweep, which collects failed generations like superseded ones.
-func retireReplacedDedicatedClaim(ctx context.Context, store *store_sqlite.Store, previous storage.DedicatedBaseBuildClaim, previousState string, current storage.DedicatedBaseBuildClaim, inUse func(int64) bool) (bool, error) {
-	if store == nil || previous.GenerationID <= 0 || previous.GenerationID == current.GenerationID || previousState != "failed" {
+func retireReplacedDedicatedClaim(ctx context.Context, store retiringGenerationStore, catalog CheckoutCatalog, previous storage.DedicatedBaseBuildClaim, previousState string, current storage.DedicatedBaseBuildClaim, inUse func(int64) bool) (bool, error) {
+	if store == nil || store.IsNilGenerationHandle() || previous.GenerationID <= 0 || previous.GenerationID == current.GenerationID || previousState != "failed" {
 		return false, nil
 	}
-	row, found, err := store.Catalog().GetViewGeneration(ctx, previous.GenerationID)
+	row, found, err := catalog.GetViewGeneration(ctx, previous.GenerationID)
 	if err != nil || !found {
 		return false, err
 	}

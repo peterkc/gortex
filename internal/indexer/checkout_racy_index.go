@@ -121,7 +121,7 @@ func (l *CheckoutLifecycle) startFamilyRacyIndexHeal(ctx context.Context, family
 // content hash of every tracked file on each of its samples until its
 // coordinator heals it.
 func (l *CheckoutLifecycle) healFamilyRacyIndexes(ctx context.Context, familyID string) {
-	if l == nil || l.catalog == nil || familyID == "" {
+	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) || familyID == "" {
 		return
 	}
 	checkouts, err := l.catalog.ListCheckouts(ctx, familyID)

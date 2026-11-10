@@ -79,7 +79,7 @@ func (l *CheckoutLifecycle) dedicatedPrefixFor(ctx context.Context, root string)
 	if prefix := l.registeredPrefixForRoot(root); prefix != "" {
 		return prefix
 	}
-	if l.catalog == nil {
+	if l.catalog == nil || l.catalog.IsNilMaterializerCatalog() {
 		return ""
 	}
 	inv, err := gitstate.Inventory(ctx, root)
@@ -178,7 +178,7 @@ func (l *CheckoutLifecycle) prefixHolder(ctx context.Context) func(string) (stri
 // rather than a bare bool so every flow refuses an unknown identity the same
 // way.
 func (l *CheckoutLifecycle) checkoutStateOf(ctx context.Context, checkoutID string) (store_sqlite.Checkout, error) {
-	if l.catalog == nil {
+	if l.catalog == nil || l.catalog.IsNilMaterializerCatalog() {
 		return store_sqlite.Checkout{}, errNoCatalog
 	}
 	checkout, found, err := l.catalog.GetCheckout(ctx, checkoutID)

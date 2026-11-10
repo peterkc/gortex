@@ -10,7 +10,6 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
@@ -38,7 +37,8 @@ func (e *dedicatedBaseAdvanceRequiredError) Unwrap() error { return errDedicated
 // observation callers. It retains no observed config, builder or content source.
 // Startup must call it directly, not through a gate that startup itself opens.
 type dedicatedBaseRuntime struct {
-	store *store_sqlite.Store
+	store   generationBuilderStore
+	catalog CheckoutCatalog
 	// leases is the SHARED view-lease domain — the lifecycle's own manager,
 	// the one request readers and retirement already agree on. It is held so
 	// advancement triggers cannot invent a private one: ensureCurrent refuses a
@@ -190,14 +190,14 @@ func (r *DedicatedBaseRuntime) FinalizeDedicatedBaseOwner(graphID string, owner 
 // substituted lease manager silently degrades advancement (see the leases
 // field). Callers install the result before any owner can be registered —
 // SetDedicatedBaseCleanupRuntime refuses a late installation.
-func NewDedicatedBaseRuntime(store *store_sqlite.Store, leases *graphview.LeaseManager) (*DedicatedBaseRuntime, error) {
-	if store == nil {
+func NewDedicatedBaseRuntime(store generationBuilderStore, catalog CheckoutCatalog, leases *graphview.LeaseManager) (*DedicatedBaseRuntime, error) {
+	if store == nil || store.IsNilGenerationHandle() {
 		return nil, fmt.Errorf("%w: publisher runtime requires the stack's store", errDedicatedBaseRuntimeInput)
 	}
 	if leases == nil {
 		return nil, fmt.Errorf("%w: publisher runtime requires the shared view leases", errDedicatedBaseRuntimeInput)
 	}
-	return &DedicatedBaseRuntime{dedicatedBaseRuntime: &dedicatedBaseRuntime{store: store, leases: leases}}, nil
+	return &DedicatedBaseRuntime{dedicatedBaseRuntime: &dedicatedBaseRuntime{store: store, catalog: catalog, leases: leases}}, nil
 }
 
 // ViewLeases exposes the shared lease domain this runtime was installed with,
@@ -287,7 +287,7 @@ func (r *dedicatedBaseRuntime) acquire(ctx context.Context, graphID string) (fun
 // install is an owner-installation operation, NEVER a per-poll operation. The
 // canonical owner and explicit expected authority fence come from its caller.
 func (r *dedicatedBaseRuntime) install(ctx context.Context, req storage.AcquireDedicatedBaseAuthorityRequest) (*dedicatedBasePublisher, error) {
-	if r == nil || r.store == nil {
+	if r == nil || r.store == nil || r.store.IsNilGenerationHandle() {
 		return nil, fmt.Errorf("%w: installation requires a store", errDedicatedBaseRuntimeInput)
 	}
 	actorRelease, admission, err := r.admitOwnerState(ctx, req.GraphID, req.Owner, nil)
@@ -300,7 +300,7 @@ func (r *dedicatedBaseRuntime) install(ctx context.Context, req storage.AcquireD
 		return nil, err
 	}
 	defer release()
-	authority, err := r.store.Catalog().AcquireDedicatedBaseAuthority(ctx, req)
+	authority, err := r.catalog.AcquireDedicatedBaseAuthority(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -312,7 +312,7 @@ func (r *dedicatedBaseRuntime) install(ctx context.Context, req storage.AcquireD
 
 func (p *dedicatedBasePublisher) ensureObserved(ctx context.Context, observe func(context.Context) (dedicatedBaseObservation, error), leases *graphview.LeaseManager) (dedicatedBaseResult, error) {
 	var out dedicatedBaseResult
-	if p == nil || p.runtime == nil || p.runtime.store == nil || observe == nil {
+	if p == nil || p.runtime == nil || p.runtime.store == nil || p.runtime.store.IsNilGenerationHandle() || observe == nil {
 		return out, fmt.Errorf("%w: ensure requires publisher, store and observer", errDedicatedBaseRuntimeInput)
 	}
 	r := p.runtime
@@ -327,7 +327,7 @@ func (p *dedicatedBasePublisher) ensureObserved(ctx context.Context, observe fun
 	}
 	// Idempotent release also handles errors and panics in caller observation.
 	defer release()
-	catalog := r.store.Catalog()
+	catalog := r.catalog
 	publication, found, err := catalog.DedicatedBasePublication(ctx, p.authority.GraphID)
 	if err != nil {
 		return out, err
@@ -411,7 +411,7 @@ func (p *dedicatedBasePublisher) ensureObserved(ctx context.Context, observe fun
 	if r.leases != nil {
 		inUse = r.leases.InUse
 	}
-	if retired, retireErr := retireReplacedDedicatedClaim(ctx, r.store, publication.Claim, publication.AttemptState, out.Claim, inUse); retireErr != nil {
+	if retired, retireErr := retireReplacedDedicatedClaim(ctx, r.store, r.catalog, publication.Claim, publication.AttemptState, out.Claim, inUse); retireErr != nil {
 		observation.Builder.Logger.Warn("dedicated base: could not retire a replaced failed claim; the retirement sweep collects it",
 			zap.Int64("generation", publication.Claim.GenerationID), zap.Error(retireErr))
 	} else if retired {

@@ -130,7 +130,7 @@ func (l *CheckoutLifecycle) BeginCheckoutMutationAtView(ctx context.Context, che
 }
 
 func (l *CheckoutLifecycle) beginCheckoutMutation(ctx context.Context, checkoutID, expectedRoot string, expectedRouteEpoch int64, incarnation string, selected *storage.CheckoutRoute) (_ *CheckoutMutation, resultErr error) {
-	if l == nil || l.catalog == nil || checkoutID == "" || expectedRoot == "" || expectedRouteEpoch <= 0 {
+	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) || checkoutID == "" || expectedRoot == "" || expectedRouteEpoch <= 0 {
 		return nil, fmt.Errorf("%w: exact checkout identity and route epoch are required", ErrCheckoutMutationStale)
 	}
 	if ctx == nil {

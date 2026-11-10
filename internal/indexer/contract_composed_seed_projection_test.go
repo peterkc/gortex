@@ -31,13 +31,13 @@ func TestContractComposedSeedsReselectMetadataMasksAndEdgeOnlyOwners(t *testing.
 	selected := graph.NewOverlaidView(store, layer)
 	// A single base handle does not make this composed reader primary. The
 	// selected edge-only alias deliberately inherits its source from the base.
-	handles := []*store_sqlite.Store{store}
+	handles := []generationPayloadStore{store}
 	nodes, edges, supported, err := readContractFollowupSeeds(ctx, selected, handles, "repo")
 	require.NoError(t, err)
 	require.True(t, supported)
 	require.Equal(t, []*graph.Node{&updated}, nodes)
 	require.Equal(t, []*graph.Edge{edge}, edges)
-	duplicateNodes, duplicateEdges, supported, err := readContractFollowupSeeds(ctx, selected, []*store_sqlite.Store{store, store}, "repo")
+	duplicateNodes, duplicateEdges, supported, err := readContractFollowupSeeds(ctx, selected, []generationPayloadStore{store, store}, "repo")
 	require.NoError(t, err)
 	require.True(t, supported)
 	require.Equal(t, nodes, duplicateNodes)
@@ -81,7 +81,7 @@ func (r contractSeedProjectionFailure) LayerContractRepoProjectionContext(contex
 
 func TestContractComposedSeedsRejectCheckedErrorsAndCancellation(t *testing.T) {
 	store := newFTSStore(t)
-	handles := []*store_sqlite.Store{store}
+	handles := []generationPayloadStore{store}
 	for _, failure := range []error{errors.New("checked selected projection failed"), graph.ErrContractProjectionLimit, graph.ErrContractProjectionStale} {
 		nodes, edges, supported, err := readContractFollowupSeeds(t.Context(), contractSeedProjectionFailure{Reader: store, failure: failure}, handles, "repo")
 		require.ErrorIs(t, err, failure)
@@ -113,7 +113,7 @@ func TestContractSeedsUseSelectedNativeReaderInsteadOfHandleProxy(t *testing.T) 
 	require.NoError(t, err)
 	require.Len(t, wantNodes, 1)
 	require.Len(t, wantEdges, 1, "edge ownership follows the source repository, not its foreign target")
-	nodes, edges, supported, err := readContractFollowupSeeds(ctx, selected, []*store_sqlite.Store{proxy}, "repo")
+	nodes, edges, supported, err := readContractFollowupSeeds(ctx, selected, []generationPayloadStore{proxy}, "repo")
 	require.NoError(t, err)
 	require.True(t, supported)
 	require.Equal(t, wantNodes, nodes)
@@ -121,7 +121,7 @@ func TestContractSeedsUseSelectedNativeReaderInsteadOfHandleProxy(t *testing.T) 
 
 	// A positive reader must reselect candidates even when its only physical
 	// candidate handle is primary; this empty generation hides the base rows.
-	nodes, edges, supported, err = readContractFollowupSeeds(ctx, selected.AtGeneration(8), []*store_sqlite.Store{selected}, "repo")
+	nodes, edges, supported, err = readContractFollowupSeeds(ctx, selected.AtGeneration(8), []generationPayloadStore{selected}, "repo")
 	require.NoError(t, err)
 	require.True(t, supported)
 	require.Empty(t, nodes)
@@ -133,7 +133,7 @@ func TestContractSeedsUseSelectedNativeReaderInsteadOfHandleProxy(t *testing.T) 
 	require.Nil(t, nodes)
 	require.Nil(t, edges)
 	for _, reader := range []graph.Reader{nil, (*store_sqlite.Store)(nil)} {
-		nodes, edges, supported, err = readContractFollowupSeeds(ctx, reader, []*store_sqlite.Store{selected}, "repo")
+		nodes, edges, supported, err = readContractFollowupSeeds(ctx, reader, []generationPayloadStore{selected}, "repo")
 		require.ErrorIs(t, err, graph.ErrContractProjectionUnsupported)
 		require.False(t, supported)
 		require.Nil(t, nodes)

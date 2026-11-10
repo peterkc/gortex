@@ -67,18 +67,27 @@ func (m *Materializer) CaptureContractInputs(ctx context.Context, view *RepoView
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if m == nil || m.Store == nil {
+	if m == nil || m.Store == nil || m.Store.IsNilGenerationHandle() {
 		return nil, NewViewError(CodeRequiredCapabilityIncomplete, "selected contract input authority is unavailable")
+	}
+	baseStore := m.Store.AtGenerationStore(BaseCorpusGeneration)
+	var base contractInputHandle
+	if view == nil || view.ComposesBaseCorpus() {
+		var ok bool
+		base, ok = baseStore.(contractInputHandle)
+		if !ok {
+			return nil, graph.ErrContractInputVector
+		}
 	}
 	var sources []contractInputSource
 	if view == nil {
-		sources = append(sources, contractInputSource{handle: m.Store.AtGeneration(BaseCorpusGeneration)})
+		sources = append(sources, contractInputSource{handle: base})
 	} else {
 		if view.contractStore != m.Store || view.ID.RepoPrefix != repo {
 			return nil, NewViewError(CodeRequiredCapabilityIncomplete, "contract inputs belong to a different selected store")
 		}
 		if view.ComposesBaseCorpus() {
-			sources = append(sources, contractInputSource{handle: m.Store.AtGeneration(BaseCorpusGeneration)})
+			sources = append(sources, contractInputSource{handle: base})
 		}
 		for _, source := range view.sources {
 			sources = append(sources, contractInputSource{handle: source.Handle, actor: source.CheckoutID})
@@ -98,7 +107,7 @@ func (m *Materializer) CaptureContractInputs(ctx context.Context, view *RepoView
 	if err != nil {
 		return nil, err
 	}
-	var core graph.Reader = m.Store.AtGeneration(BaseCorpusGeneration)
+	var core graph.Reader = baseStore
 	if view != nil {
 		core = view.Reader
 	}
@@ -118,7 +127,12 @@ func (m *Materializer) CaptureContractCompanionInputs(ctx context.Context, view 
 	if err != nil {
 		return nil, err
 	}
-	sources := []contractInputSource{{handle: m.Store.AtGeneration(BaseCorpusGeneration)}}
+	baseStore := m.Store.AtGenerationStore(BaseCorpusGeneration)
+	base, ok := baseStore.(contractInputHandle)
+	if !ok {
+		return nil, graph.ErrContractInputVector
+	}
+	sources := []contractInputSource{{handle: base}}
 	for _, source := range view.sources {
 		sources = append(sources, contractInputSource{handle: source.Handle, actor: source.CheckoutID})
 	}
@@ -133,7 +147,7 @@ func (m *Materializer) CaptureContractCompanionInputs(ctx context.Context, view 
 	if err != nil {
 		return nil, err
 	}
-	return &SelectedContractInputs{State: state, Witnesses: witnesses, sources: sources, selection: selection, companion: true, store: m.Store, core: m.Store.AtGeneration(BaseCorpusGeneration), repo: repo, checkout: checkout}, nil
+	return &SelectedContractInputs{State: state, Witnesses: witnesses, sources: sources, selection: selection, companion: true, store: m.Store, core: baseStore, repo: repo, checkout: checkout}, nil
 }
 
 // SourceReaders returns the captured core reader for each admitted repository.

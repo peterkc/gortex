@@ -174,7 +174,7 @@ func newViewStackWithRepos(t *testing.T, includeOther bool) *viewStack {
 	eng := query.NewEngine(store)
 	eng.SetSearch(bm)
 	srv := NewServer(eng, store, nil, nil, zap.NewNop(), nil, MultiRepoOptions{
-		MultiIndexer:  mi,
+		Catalog: store.Catalog(), MultiIndexer: mi,
 		ConfigManager: cm,
 	})
 	srv.SetMaterializer(&graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: stack.leases})

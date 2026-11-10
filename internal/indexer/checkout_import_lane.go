@@ -246,7 +246,7 @@ func (b *SparseGenerationBuilder) immutableImportEpochs(ctx context.Context, sta
 		if generation <= 0 {
 			return nil, false, nil
 		}
-		stamps, err := b.Store.AtGeneration(generation).DerivationStamps(ctx)
+		stamps, err := generationAt(b.Store, generation).DerivationStamps(ctx)
 		if err != nil {
 			return nil, false, err
 		}

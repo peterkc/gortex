@@ -58,7 +58,7 @@ func BenchmarkContractDeltaJobRouteEdit(b *testing.B) {
 	require.NoError(b, err)
 	require.Empty(b, results["fixture"].FailedFiles)
 	materializer := &graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: graphview.NewLeaseManager()}
-	options := ContractFollowupCaptureOptions{Context: ctx, Store: store, Materializer: materializer, MultiIndexer: mi, Registry: registry, Config: config.Default().Index, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }}
+	options := ContractFollowupCaptureOptions{Catalog: slice2TestCatalog(store), Context: ctx, Store: store, Materializer: materializer, MultiIndexer: mi, Registry: registry, Config: config.Default().Index, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }}
 	require.NoError(b, reconcilePrimaryContractBaseline(ctx, options, "fixture"))
 	var cache *contractDeltaCache
 	sequence := 0
@@ -88,7 +88,7 @@ func BenchmarkContractDeltaJobRouteEdit(b *testing.B) {
 		require.NoError(b, err)
 		session, err := newContractDeltaSession(cache, snapshot, options.Config)
 		require.NoError(b, err)
-		report, err := RunContractFollowup(ctx, ContractFollowupRequest{RebuildReason: ContractFollowupUnknownInterval, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: registry, Config: options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: materializer.Leases, Logger: zap.NewNop(), Yield: options.Yield, delta: session})
+		report, err := RunContractFollowup(ctx, ContractFollowupRequest{OpenEvidence: openSlice2TestEvidence, RebuildReason: ContractFollowupUnknownInterval, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: registry, Config: options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: materializer.Leases, Logger: zap.NewNop(), Yield: options.Yield, delta: session})
 		require.NoError(b, err)
 		require.True(b, report.Published)
 		cache = session.cache

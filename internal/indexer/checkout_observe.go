@@ -121,7 +121,7 @@ type checkoutObservationJob struct {
 // Explicit selectors must provide an authorizer for the known primary prefix;
 // it runs outside locks and before any catalog observation or build activation.
 func (l *CheckoutLifecycle) ObserveCheckoutPath(ctx context.Context, path string, authorize ...func(string) error) (checkout store_sqlite.Checkout, found bool, err error) {
-	if l == nil || l.catalog == nil || l.rec == nil || path == "" || !filepath.IsAbs(path) {
+	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) || l.rec == nil || path == "" || !filepath.IsAbs(path) {
 		return checkout, false, nil
 	}
 	if ctx == nil {

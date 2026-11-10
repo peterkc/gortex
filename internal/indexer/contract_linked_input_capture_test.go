@@ -77,7 +77,7 @@ func TestContractLinkedInputCaptureKeepsCompanionPositiveAbsence(t *testing.T) {
 	reader, ok := inputs.SourceReaders()["companion"].(*store_sqlite.Store)
 	require.True(t, ok, "the actual companion source is native despite its positive absence witness")
 	require.Zero(t, reader.ViewGeneration())
-	var handles []*store_sqlite.Store
+	var handles []generationPayloadStore
 	for _, witness := range inputs.Witnesses {
 		if witness.State.RepoPrefix == "companion" {
 			handles = append(handles, f.store.AtGeneration(witness.GenerationID))

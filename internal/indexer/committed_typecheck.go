@@ -301,7 +301,7 @@ func treeHoldsGoFilesUnder(ctx context.Context, root, treeOID, dir string) (bool
 // of the type checker's rows: complete when the corpus's whole-repository
 // enrichment finished at the base's commit, and incomplete otherwise.
 func (b *SparseGenerationBuilder) copiedCorpusTypes(repoPrefix, commit string) committedTypesCarried {
-	if b.Semantic == nil || b.Store == nil {
+	if b.Semantic == nil || (b.Store == nil || b.Store.IsNilGenerationHandle()) {
 		return committedTypesCarried{set: true, reason: "no semantic enrichment manager is installed"}
 	}
 	current, persisted := b.Semantic.RepoEnrichmentMarkerState(b.Store, repoPrefix, commit)

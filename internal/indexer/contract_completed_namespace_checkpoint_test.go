@@ -49,7 +49,7 @@ func TestContractCompletedNamespaceCheckpointKeepsHistoricalWorkDelta(t *testing
 		require.NoError(t, err)
 		session, err := newContractDeltaSession(cache, snapshot, f.options.Config)
 		require.NoError(t, err)
-		report, err := RunContractFollowup(t.Context(), ContractFollowupRequest{RebuildReason: ContractFollowupUnknownInterval, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: f.options.Registry, Config: f.options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: f.options.Materializer.Leases, Yield: f.options.Yield, Logger: zap.NewNop(), delta: session})
+		report, err := RunContractFollowup(t.Context(), ContractFollowupRequest{OpenEvidence: openSlice2TestEvidence, RebuildReason: ContractFollowupUnknownInterval, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: f.options.Registry, Config: f.options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: f.options.Materializer.Leases, Yield: f.options.Yield, Logger: zap.NewNop(), delta: session})
 		cache = session.cache
 		require.NoError(t, err)
 		require.True(t, report.Published)
@@ -219,7 +219,7 @@ func TestContractCompletedUnknownDebtPrunedByCopyKeepsDelta(t *testing.T) {
 		require.NoError(t, err)
 		session, err := newContractDeltaSession(cache, snapshot, f.options.Config)
 		require.NoError(t, err)
-		report, err := RunContractFollowup(ctx, ContractFollowupRequest{RebuildReason: ContractFollowupUnknownInterval, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: f.options.Registry, Config: f.options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: f.options.Materializer.Leases, Yield: f.options.Yield, Logger: zap.NewNop(), delta: session})
+		report, err := RunContractFollowup(ctx, ContractFollowupRequest{OpenEvidence: openSlice2TestEvidence, RebuildReason: ContractFollowupUnknownInterval, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: f.options.Registry, Config: f.options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: f.options.Materializer.Leases, Yield: f.options.Yield, Logger: zap.NewNop(), delta: session})
 		cache = session.cache
 		require.NoError(t, err)
 		require.True(t, report.Published)

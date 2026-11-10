@@ -14,7 +14,6 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/storage"
@@ -28,11 +27,13 @@ import (
 type ContractFollowupCapture func(context.Context, *graphview.RepoView, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error)
 
 type ContractAnalysisCoordinatorOptions struct {
-	Store    *store_sqlite.Store
-	Leases   *graphview.LeaseManager
-	Registry *parser.Registry
-	Config   config.IndexConfig
-	Logger   *zap.Logger
+	OpenEvidence func(string) (graph.Store, error)
+	Store        checkoutGenerationStore
+	Catalog      CheckoutCatalog
+	Leases       *graphview.LeaseManager
+	Registry     *parser.Registry
+	Config       config.IndexConfig
+	Logger       *zap.Logger
 	// Capture runs on the scheduler's job slot: the census of an actor's
 	// wanted inputs from the source its request prepared.
 	Capture ContractFollowupSourceCapture
@@ -52,7 +53,7 @@ type ContractAnalysisCoordinatorOptions struct {
 	// existing durable deferred retirement owner after fencing it. A refusal
 	// keeps the ordinary synchronous cleanup fallback. Standalone coordinators
 	// without that owner retain full retirement.
-	RetireReservation func(context.Context, *store_sqlite.Store, int64, func(int64) bool) error
+	RetireReservation func(context.Context, ContractReservationStore, int64, func(int64) bool) error
 	// QueueCapacity bounds the actors with pending or running work, 1..32;
 	// zero means 8.
 	QueueCapacity int
@@ -164,7 +165,7 @@ type ContractAnalysisCoordinator struct {
 }
 
 func NewContractAnalysisCoordinator(options ContractAnalysisCoordinatorOptions) (*ContractAnalysisCoordinator, error) {
-	if options.Store == nil || options.Leases == nil || options.Registry == nil || options.Capture == nil || options.Yield == nil {
+	if options.Store == nil || options.Store.IsNilGenerationHandle() || options.Leases == nil || options.Registry == nil || options.Capture == nil || options.Yield == nil {
 		return nil, fmt.Errorf("contract analysis coordinator: incomplete options")
 	}
 	if options.QueueCapacity == 0 {
@@ -345,12 +346,12 @@ func (c *ContractAnalysisCoordinator) execute(job *contractAnalysisJob) string {
 		}
 		keyDigest := sha256.Sum256(encoded)
 		graphDigest := sha256.Sum256([]byte(target.Key.RepoPrefix + "\x00" + target.Key.CheckoutID))
-		_, payload, err := target.Catalog.BeginPayloadGeneration(c.ctx, storage.PayloadGenerationRequest{OwnerKind: "dedicated_graph", GraphID: "contract-analysis:" + hex.EncodeToString(graphDigest[:]), CheckoutID: target.Key.CheckoutID, GenerationKind: "contract_analysis", LayerID: hex.EncodeToString(keyDigest[:]) + ":" + job.id + ":" + hex.EncodeToString(attempt), LowerViewFingerprint: job.id, CreatedAt: time.Now().Unix()})
+		_, payload, err := target.Catalog.BeginPayloadGenerationStore(c.ctx, storage.PayloadGenerationRequest{OwnerKind: "dedicated_graph", GraphID: "contract-analysis:" + hex.EncodeToString(graphDigest[:]), CheckoutID: target.Key.CheckoutID, GenerationKind: "contract_analysis", LayerID: hex.EncodeToString(keyDigest[:]) + ":" + job.id + ":" + hex.EncodeToString(attempt), LowerViewFingerprint: job.id, CreatedAt: time.Now().Unix()})
 		if err != nil {
 			c.options.Logger.Warn("contract payload reservation failed", zap.Error(err))
 			return viewmetrics.ContractJobFailed
 		}
-		target.Payload = payload
+		target.Payload = payload.(generationPayloadStore)
 		targets = append(targets, target)
 		reserved = append(reserved, target)
 	}
@@ -390,7 +391,7 @@ func (c *ContractAnalysisCoordinator) execute(job *contractAnalysisJob) string {
 	if job.yield != nil {
 		yield = job.yield
 	}
-	report, err := RunContractFollowupBatch(c.ctx, ContractFollowupBatchRequest{Snapshot: job.snapshot, Targets: targets, RebuildReason: ContractFollowupUnknownInterval, Registry: c.options.Registry, Config: c.options.Config, RepoConfigs: job.snapshot.RepoConfigs, Logger: c.options.Logger, Leases: c.options.Leases, ScratchParent: c.options.ScratchParent, Yield: yield,
+	report, err := RunContractFollowupBatch(c.ctx, ContractFollowupBatchRequest{OpenEvidence: c.options.OpenEvidence, Snapshot: job.snapshot, Targets: targets, RebuildReason: ContractFollowupUnknownInterval, Registry: c.options.Registry, Config: c.options.Config, RepoConfigs: job.snapshot.RepoConfigs, Logger: c.options.Logger, Leases: c.options.Leases, ScratchParent: c.options.ScratchParent, Yield: yield,
 		PublishedEpoch: c.publishedEpoch, WaitPublished: c.waitPublished, OtherActorWaiting: job.otherActorWaiting, delta: job.delta,
 		PriorityRepos: job.priorityRepos, BackgroundCurrent: job.backgroundCurrent,
 		TargetPublished: func(result ContractFollowupTargetResult) {

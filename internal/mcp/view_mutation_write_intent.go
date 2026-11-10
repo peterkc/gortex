@@ -7,6 +7,8 @@ import (
 
 type sourceMutationWriteIntentKey struct{}
 
+type sourceWriteAnnouncer interface{ AnnounceWrite() func() }
+
 // sourceMutationWriteIntent belongs to one store-writing checkout handler.
 // Publication waits suspend its announcement. The selected route is still
 // revalidated by mutation admission after each wait.
@@ -20,7 +22,7 @@ type sourceMutationWriteIntent struct {
 
 func (s *Server) withSourceMutationWriteIntent(ctx context.Context, tool string) (context.Context, func()) {
 	if s == nil || s.facades == nil || !s.facades.mutatesSource(tool) ||
-		s.materializer == nil || s.materializer.Store == nil {
+		s.materializer == nil || s.materializer.Store == nil || s.materializer.Store.IsNilGenerationHandle() {
 		return ctx, func() {}
 	}
 	// Canonical source edits only write the working file; the watcher owns
@@ -38,7 +40,7 @@ func (s *Server) withSourceMutationWriteIntent(ctx context.Context, tool string)
 	default:
 		return ctx, func() {}
 	}
-	intent := &sourceMutationWriteIntent{announce: s.materializer.Store.AnnounceWrite}
+	intent := &sourceMutationWriteIntent{announce: s.materializer.Store.(sourceWriteAnnouncer).AnnounceWrite}
 	intent.release = intent.announce()
 	return context.WithValue(ctx, sourceMutationWriteIntentKey{}, intent), intent.close
 }

@@ -1491,6 +1491,8 @@ func prependUnique(slice []string, item string, maxLen int) []string {
 // MultiRepoOptions holds optional multi-repo components for the Server.
 // When nil or zero-valued, the server operates in single-repo mode.
 type MultiRepoOptions struct {
+	// Catalog pairs with g when this server builds its checkout lifecycle.
+	Catalog indexer.CheckoutCatalog
 	// EditAckMode is startup policy; empty inherits global config, then full.
 	EditAckMode   config.EditAckMode
 	MultiIndexer  *indexer.MultiIndexer
@@ -1989,6 +1991,7 @@ func NewServer(engine *query.Engine, g graph.Store, idx *indexer.Indexer, watche
 		// copy of the track / forget sequence.
 		if s.lifecycle == nil && s.multiIndexer != nil {
 			lifecycle, err := indexer.NewCheckoutLifecycle(indexer.CheckoutLifecycleConfig{
+				Catalog:       o.Catalog,
 				MultiIndexer:  s.multiIndexer,
 				ConfigManager: s.configManager,
 				Graph:         g,

@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 // Only stable accepted facts use the batched path. Pending/deleted rows and
@@ -16,7 +15,7 @@ type contractCaptureReceiptFact struct {
 	opaque   bool
 }
 
-func contractCaptureReceiptFacts(ctx context.Context, options ContractFollowupCaptureOptions, handles map[string][]*store_sqlite.Store, files map[string]ContractFollowupFile) (map[string]contractCaptureReceiptFact, error) {
+func contractCaptureReceiptFacts(ctx context.Context, options ContractFollowupCaptureOptions, handles map[string][]generationPayloadStore, files map[string]ContractFollowupFile) (map[string]contractCaptureReceiptFact, error) {
 	facts := make(map[string]contractCaptureReceiptFact)
 	if options.selectedInputs == nil {
 		return facts, nil
