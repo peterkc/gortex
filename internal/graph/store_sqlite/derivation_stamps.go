@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/zzet/gortex/internal/storage"
 	"log"
 	"sort"
 	"strings"
@@ -61,14 +62,14 @@ const generationDerivationStampsTableBody = ` (
 // Derivation-stamp and correction errors.
 var (
 	// ErrDerivationStampInvalid: an empty pass name or a version below 1.
-	ErrDerivationStampInvalid = errors.New("store_sqlite: invalid derivation stamp")
+	ErrDerivationStampInvalid = storage.ErrDerivationStampInvalid
 	// ErrDerivationStampMoved: the generation's stamp for the pass is no longer
 	// the version the correction started from (another correction finished).
-	ErrDerivationStampMoved = errors.New("store_sqlite: derivation stamp moved during the correction")
+	ErrDerivationStampMoved = storage.ErrDerivationStampMoved
 	// ErrDerivedCorrectionRefused: the generation cannot be corrected (it is
 	// retiring, failed, or has no catalog row), or a chunk carried a row the
 	// correction may not write.
-	ErrDerivedCorrectionRefused = errors.New("store_sqlite: derived-row correction refused")
+	ErrDerivedCorrectionRefused = storage.ErrDerivedCorrectionRefused
 )
 
 // maintenanceDerivedCorrection is the lane job kind of one correction chunk.
@@ -78,7 +79,7 @@ const maintenanceDerivedCorrection maintenanceJob = "derived_correction"
 // plus node rows). At the ≈0.1 ms per row a cold one-file delta costs on the
 // live-sized store (write_rows probe), 4,096 rows hold the writer well under
 // the reclaim's 2 s cap. Callers split larger corrections.
-const DerivedCorrectionMaxChunkRows = 4096
+const DerivedCorrectionMaxChunkRows = storage.DerivedCorrectionMaxChunkRows
 
 // derivedCorrectionWriterWait bounds the wait for the write gate per chunk.
 const derivedCorrectionWriterWait = 5 * time.Second
@@ -144,11 +145,7 @@ func (s *Store) WriteDerivationStamps(ctx context.Context, stamps map[string]int
 
 // StaleDerivationGeneration is one live generation whose stamp for a pass is
 // older than the running version.
-type StaleDerivationGeneration struct {
-	GenerationID int64
-	State        ViewGenerationState
-	Version      int // 0: no stamp
-}
+type StaleDerivationGeneration = storage.StaleDerivationGeneration
 
 // GenerationsWithStaleDerivation lists the catalogued generations in state
 // ready, superseded or building whose stamp for pass is below version (or
@@ -207,30 +204,10 @@ func (s *Store) bumpGenerationCorrectionEpoch(g int64) {
 }
 
 // DerivedCorrectionRequest names what one correction may write.
-type DerivedCorrectionRequest struct {
-	GenerationID int64
-	Pass         string
-	// FromVersion is the stamp the correction expects (0: no stamp);
-	// ToVersion the one it records when it finishes (> FromVersion).
-	FromVersion, ToVersion int
-	// EdgeKinds are the pass's derived edge kinds: the only edges a chunk may
-	// delete or insert.
-	EdgeKinds []graph.EdgeKind
-}
+type DerivedCorrectionRequest = storage.DerivedCorrectionRequest
 
 // DerivedCorrectionStats is what a correction wrote so far.
-type DerivedCorrectionStats struct {
-	Chunks int
-	// ChangedChunks are the chunks that changed a row; the others found the
-	// pass's rows already as given and wrote nothing.
-	ChangedChunks int
-	Sources       int
-	EdgesDeleted  int64
-	EdgesInserted int64
-	NodesUpdated  int64
-	MaxChunkHold  time.Duration
-	Elapsed       time.Duration
-}
+type DerivedCorrectionStats = storage.DerivedCorrectionStats
 
 // DerivedCorrection is one in-progress correction of a generation's derived
 // rows for one pass. It is not safe for concurrent use.

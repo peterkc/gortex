@@ -11,7 +11,7 @@ import (
 )
 
 // ErrPayloadInputChanged refuses publication when a selected input changed.
-var ErrPayloadInputChanged = fmt.Errorf("%w: payload input changed", ErrCatalogStaleGuard)
+var ErrPayloadInputChanged = storage.ErrPayloadInputChanged
 
 // PayloadInputWitness binds selected ancestor rows to one live store core.
 // It is process-local proof, not persisted cache authority.

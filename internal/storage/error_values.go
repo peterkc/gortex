@@ -137,3 +137,6 @@ func formatMiB(n uint64) string {
 // not be confirmed. Callers must skip instead of assuming the system temp
 // volume has the headroom checked for the store directory.
 var ErrVacuumTempDirectory = errors.New("sqlite vacuum: temporary directory unconfirmed")
+
+// ErrPayloadInputChanged refuses publication when a selected input changed.
+var ErrPayloadInputChanged = fmt.Errorf("%w: payload input changed", ErrCatalogStaleGuard)
