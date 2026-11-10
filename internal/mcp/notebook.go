@@ -24,14 +24,14 @@ import (
 // in cache dir): notebook entries live in the repo working tree so
 // they can be committed to git and reviewed in PRs.
 type notebookEntry struct {
-	ID         string
-	Title      string
-	Tags       []string
-	Created    time.Time
-	Updated    time.Time
-	LastUsed   time.Time
-	UsedCount  uint64
-	Body       string
+	ID        string
+	Title     string
+	Tags      []string
+	Created   time.Time
+	Updated   time.Time
+	LastUsed  time.Time
+	UsedCount uint64
+	Body      string
 }
 
 // notebookManager owns the repository notebook store, now backed by
