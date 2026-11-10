@@ -37,7 +37,6 @@ import (
 	"github.com/zzet/gortex/internal/claudemd"
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
@@ -45,6 +44,7 @@ import (
 	"github.com/zzet/gortex/internal/progress"
 	"github.com/zzet/gortex/internal/query"
 	genskills "github.com/zzet/gortex/internal/skills"
+	"github.com/zzet/gortex/internal/storage/backend"
 	"github.com/zzet/gortex/internal/telemetry"
 	"github.com/zzet/gortex/internal/workspace"
 )
@@ -597,13 +597,13 @@ func indexRepoForInit(ctx context.Context, root string, logger *zap.Logger) (gra
 	if err != nil {
 		return nil, nil, err
 	}
-	st, err := store_sqlite.Open(filepath.Join(tmpDir, "init.sqlite"))
+	st, closeStore, err := backend.OpenRaw("sqlite", filepath.Join(tmpDir, "init.sqlite"))
 	if err != nil {
 		_ = os.RemoveAll(tmpDir)
 		return nil, nil, err
 	}
 	cleanup := func() {
-		_ = st.Close()
+		_ = closeStore()
 		_ = os.RemoveAll(tmpDir)
 	}
 
