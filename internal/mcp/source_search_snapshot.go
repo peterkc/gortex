@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/indexer"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 const sourceSearchMaxFiles = 20000
@@ -46,14 +46,18 @@ func (s *Server) validateSourceCheckoutIdentity(ctx context.Context, view *reque
 			return graphview.NewViewError(graphview.CodeCheckoutInaccessible, "source checkout physical root changed while reading")
 		}
 	}
-	if view == nil || view.rider == nil || s.materializer == nil || s.materializer.Catalog.(*store_sqlite.Catalog) == nil {
+	if view == nil || view.rider == nil || s.materializer == nil || s.materializer.Catalog == nil || s.materializer.Catalog.IsNilMaterializerCatalog() {
 		return nil
 	}
-	checkout, found, err := s.materializer.Catalog.(*store_sqlite.Catalog).GetCheckout(ctx, view.rider.CheckoutID)
+	catalog := s.checkoutCatalog()
+	if catalog == nil {
+		return graphview.NewViewError(graphview.CodeCapabilityUnavailable, "source checkout identity requires a checkout catalog")
+	}
+	checkout, found, err := catalog.GetCheckout(ctx, view.rider.CheckoutID)
 	if err != nil {
 		return err
 	}
-	if !found || checkout.State != store_sqlite.CheckoutStateReady || checkout.Incarnation != view.sourceCheckoutIncarnation || filepath.Clean(checkout.RootPath) != filepath.Clean(view.viewRoot) {
+	if !found || checkout.State != storage.CheckoutStateReady || checkout.Incarnation != view.sourceCheckoutIncarnation || filepath.Clean(checkout.RootPath) != filepath.Clean(view.viewRoot) {
 		return graphview.NewViewError(graphview.CodeCheckoutInaccessible, "source checkout identity changed while reading")
 	}
 	return s.checkoutInSessionScope(ctx, checkout)

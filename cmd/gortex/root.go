@@ -122,10 +122,11 @@ func recordCLIEvent(cmd *cobra.Command, getenv func(string) string) {
 		return
 	}
 
-	sc, err := persistence.OpenSidecar(cliEventSidecarPath())
-	if err != nil || sc == nil {
+	native, err := persistence.OpenSidecar(cliEventSidecarPath())
+	if err != nil || native == nil {
 		return
 	}
+	var sc cliEventRecorder = native
 	defer func() { _ = sc.Close() }()
 	_ = sc.AddCLIEvent(time.Now(), sessionID, verb)
 }

@@ -7,10 +7,10 @@ import (
 	"sort"
 
 	"github.com/zzet/gortex/internal/gitstate"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/reconcile"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // A git_ref or commit selector names committed state nobody has checked out.
@@ -35,7 +35,7 @@ func (s *Server) viewForRefSelector(ctx context.Context, selector graphview.Sele
 	if err != nil {
 		return nil, err
 	}
-	dedicated, found, err := s.materializer.Catalog.(*store_sqlite.Catalog).GetDedicatedGraph(ctx, graphID)
+	dedicated, found, err := s.checkoutCatalog().GetDedicatedGraph(ctx, graphID)
 	switch {
 	case err != nil:
 		return nil, graphview.WrapViewError(graphview.CodeCheckoutInaccessible,
@@ -75,7 +75,7 @@ func (s *Server) viewForRefSelector(ctx context.Context, selector graphview.Sele
 	rider.ResolvedCommit = result.Resolved.CommitOID
 	rider.ResolvedTree = result.Resolved.TreeOID
 
-	if result.State == store_sqlite.RefViewReady && result.GenerationID > 0 {
+	if result.State == storage.RefViewReady && result.GenerationID > 0 {
 		return s.materializeRefView(ctx, dedicated, result.GenerationID, result.Resolved.TreeOID, rider)
 	}
 	return s.refViewBuilding(ctx, dedicated, result, rider)
@@ -90,7 +90,7 @@ func (s *Server) viewForRefSelector(ctx context.Context, selector graphview.Sele
 // looks like a right one.
 func (s *Server) refViewBuilding(
 	ctx context.Context,
-	dedicated store_sqlite.DedicatedGraph,
+	dedicated storage.DedicatedGraph,
 	result indexer.RefViewResult,
 	rider *graphview.ViewRider,
 ) (*requestView, error) {
@@ -134,7 +134,7 @@ func buildTokenOrUnknown(token string) string {
 // and binds the request's file surface to the tree it describes.
 func (s *Server) materializeRefView(
 	ctx context.Context,
-	dedicated store_sqlite.DedicatedGraph,
+	dedicated storage.DedicatedGraph,
 	generationID int64,
 	treeOID string,
 	rider *graphview.ViewRider,
@@ -199,9 +199,9 @@ func (s *Server) refViewGraphID(ctx context.Context, selector graphview.Selector
 // repoDirForPrefix resolves the repository a ref view's trees are read from:
 // the working copy the graph's owning checkout was indexed from, and otherwise
 // whatever root the corpus records for its prefix.
-func (s *Server) repoDirForPrefix(ctx context.Context, dedicated store_sqlite.DedicatedGraph) string {
+func (s *Server) repoDirForPrefix(ctx context.Context, dedicated storage.DedicatedGraph) string {
 	if dedicated.OwnerCheckoutID != "" {
-		checkout, found, err := s.materializer.Catalog.(*store_sqlite.Catalog).GetCheckout(ctx, dedicated.OwnerCheckoutID)
+		checkout, found, err := s.checkoutCatalog().GetCheckout(ctx, dedicated.OwnerCheckoutID)
 		if err == nil && found && checkout.RootPath != "" {
 			return checkout.RootPath
 		}
@@ -217,13 +217,13 @@ func (s *Server) repoDirForPrefix(ctx context.Context, dedicated store_sqlite.De
 	return ""
 }
 
-// viewStore is the SQLite handle a withdrawal is recorded through, nil when
-// the backend is not one.
-func (s *Server) viewStore() *store_sqlite.Store {
+// viewStore is the native withdrawal capability, nil when the backend lacks it.
+func (s *Server) viewStore() producerWithdrawer {
 	if s == nil || s.materializer == nil {
 		return nil
 	}
-	return s.materializer.Store.(*store_sqlite.Store)
+	store, _ := s.materializer.Store.(producerWithdrawer)
+	return store
 }
 
 // refSelectorKind maps the wire selector vocabulary onto the resolver's.

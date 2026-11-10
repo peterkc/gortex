@@ -18,12 +18,12 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/reconcile"
 	"github.com/zzet/gortex/internal/search"
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -777,7 +777,7 @@ func (s *Server) settleRequestFreshness(
 		// rather than whatever the catalog holds after it. Only the success path
 		// reads it: a wait that did not go fresh has no publication to check an
 		// answer against.
-		published, publishedKnown := store_sqlite.CheckoutRoute{}, false
+		published, publishedKnown := storage.CheckoutRoute{}, false
 		if outcome.fresh {
 			published, publishedKnown = s.publishedCheckoutRoute(ctx, checkout.CheckoutID)
 			if publishedKnown {
@@ -893,7 +893,7 @@ func (s *Server) freshnessWaitTarget(
 	selector graphview.Selector,
 	view *requestView,
 	selectErr error,
-) (store_sqlite.Checkout, string, bool) {
+) (storage.Checkout, string, bool) {
 	checkoutID := ""
 	switch {
 	case view != nil && view.rider != nil && view.rider.CheckoutID != "":
@@ -905,19 +905,19 @@ func (s *Server) freshnessWaitTarget(
 		if err != nil {
 			// The selector named a worktree a moment ago and does not now.
 			// That is a lookup that did not answer, not a committed base.
-			return store_sqlite.Checkout{}, freshReasonWaitTargetUnavailable, false
+			return storage.Checkout{}, freshReasonWaitTargetUnavailable, false
 		}
 		return checkout, "", true
 	}
 	if checkoutID == "" {
-		return store_sqlite.Checkout{}, freshReasonCommittedBaseAdvance, false
+		return storage.Checkout{}, freshReasonCommittedBaseAdvance, false
 	}
-	if s == nil || s.materializer == nil || s.materializer.Catalog.(*store_sqlite.Catalog) == nil {
-		return store_sqlite.Checkout{}, freshReasonWaitTargetUnavailable, false
+	if s == nil || s.materializer == nil || s.checkoutCatalog() == nil {
+		return storage.Checkout{}, freshReasonWaitTargetUnavailable, false
 	}
-	checkout, found, err := s.materializer.Catalog.(*store_sqlite.Catalog).GetCheckout(ctx, checkoutID)
+	checkout, found, err := s.checkoutCatalog().GetCheckout(ctx, checkoutID)
 	if err != nil || !found {
-		return store_sqlite.Checkout{}, freshReasonWaitTargetUnavailable, false
+		return storage.Checkout{}, freshReasonWaitTargetUnavailable, false
 	}
 	return checkout, "", true
 }
@@ -930,13 +930,13 @@ func (s *Server) freshnessWaitTarget(
 // second return of false means the snapshot could not be read at all — no
 // catalog wired, a catalog read that failed, or a route row that is gone —
 // which is a fact about the lookup and never about the view.
-func (s *Server) publishedCheckoutRoute(ctx context.Context, checkoutID string) (store_sqlite.CheckoutRoute, bool) {
-	if s == nil || s.materializer == nil || s.materializer.Catalog.(*store_sqlite.Catalog) == nil || checkoutID == "" {
-		return store_sqlite.CheckoutRoute{}, false
+func (s *Server) publishedCheckoutRoute(ctx context.Context, checkoutID string) (storage.CheckoutRoute, bool) {
+	if s == nil || s.materializer == nil || s.checkoutCatalog() == nil || checkoutID == "" {
+		return storage.CheckoutRoute{}, false
 	}
-	route, found, err := s.materializer.Catalog.(*store_sqlite.Catalog).GetCheckoutRoute(ctx, checkoutID)
+	route, found, err := s.checkoutCatalog().GetCheckoutRoute(ctx, checkoutID)
 	if err != nil || !found {
-		return store_sqlite.CheckoutRoute{}, false
+		return storage.CheckoutRoute{}, false
 	}
 	return route, true
 }
@@ -964,7 +964,7 @@ func (s *Server) publishedCheckoutRoute(ctx context.Context, checkoutID string) 
 // fresh:false. A route that advanced past the publication is a route the wait
 // is no longer a statement about, and saying so costs a caller one retry —
 // where the opposite error costs it a stale answer it was told was current.
-func servesPublishedRoute(view *requestView, checkoutID string, route store_sqlite.CheckoutRoute) bool {
+func servesPublishedRoute(view *requestView, checkoutID string, route storage.CheckoutRoute) bool {
 	switch {
 	case view == nil || view.rider == nil || view.materialized == nil:
 		return false
@@ -1183,7 +1183,7 @@ func (s *Server) selectRequestView(
 	selector graphview.Selector,
 	policy requestViewPolicy,
 ) (*requestView, error) {
-	if s == nil || s.materializer == nil {
+	if s == nil || s.materializer == nil || s.checkoutCatalog() == nil {
 		if selector.Kind == graphview.SelectorAuto {
 			return nil, nil
 		}
@@ -1243,7 +1243,7 @@ func (s *Server) viewForSessionCWD(ctx context.Context) (*requestView, error) {
 		return nil, err
 	}
 	requested := graphview.Selector{Kind: graphview.SelectorWorktree, CheckoutID: checkout.CheckoutID}
-	route, routeFound, routeErr := s.materializer.Catalog.(*store_sqlite.Catalog).GetCheckoutRoute(ctx, checkout.CheckoutID)
+	route, routeFound, routeErr := s.checkoutCatalog().GetCheckoutRoute(ctx, checkout.CheckoutID)
 	if routeErr == nil && routeFound && !graphview.RouteReady(route) {
 		// Route exists but is not serving both generation slots. Mutative
 		// tools refuse (writing the base corpus instead of this checkout is
@@ -1338,7 +1338,7 @@ func (s *Server) viewForWorktreeSelector(
 	if err != nil {
 		return nil, err
 	}
-	if checkout.State != store_sqlite.CheckoutStateReady {
+	if checkout.State != storage.CheckoutStateReady {
 		stateErr := graphview.NewViewError(graphview.CodeCheckoutInaccessible,
 			fmt.Sprintf("checkout %q is %s", checkout.CheckoutID, string(checkout.State)))
 		if checkoutStateAllowsBaseFallback(checkout.State) {
@@ -1387,11 +1387,11 @@ func canonicalWorktreeSelectorRoot(root string) string {
 	return filepath.Clean(root)
 }
 
-func checkoutStateAllowsBaseFallback(state store_sqlite.CheckoutState) bool {
+func checkoutStateAllowsBaseFallback(state storage.CheckoutState) bool {
 	switch state {
-	case store_sqlite.CheckoutStateAvailabilityGrace,
-		store_sqlite.CheckoutStateRemovalGrace,
-		store_sqlite.CheckoutStateUnavailable:
+	case storage.CheckoutStateAvailabilityGrace,
+		storage.CheckoutStateRemovalGrace,
+		storage.CheckoutStateUnavailable:
 		return true
 	default:
 		return false
@@ -1403,8 +1403,8 @@ func checkoutStateAllowsBaseFallback(state store_sqlite.CheckoutState) bool {
 // buffers from reintroducing the unavailable checkout above the base.
 func graceBaseFallback(
 	selector graphview.Selector,
-	checkout store_sqlite.Checkout,
-	primary store_sqlite.DedicatedGraph,
+	checkout storage.Checkout,
+	primary storage.DedicatedGraph,
 ) (*requestView, error) {
 	rider := graphview.NewViewRider(selector)
 	actual := graphview.Selector{Kind: graphview.SelectorBase, GraphID: primary.GraphID}
@@ -1413,7 +1413,7 @@ func graceBaseFallback(
 	}
 	rider.GraphID = primary.GraphID
 	rider.CheckoutID = checkout.CheckoutID
-	rider.RequestedState = string(store_sqlite.CheckoutStateReady)
+	rider.RequestedState = string(storage.CheckoutStateReady)
 	rider.ActualState = string(checkout.State)
 	return &requestView{
 		kind:                  requestViewKindBase,
@@ -1434,7 +1434,7 @@ func graceBaseFallback(
 // the graph's own repository, which is what makes the label a served view
 // rather than a decoration.
 func (s *Server) viewForBaseSelector(ctx context.Context, selector graphview.Selector) (*requestView, error) {
-	dedicated, found, err := s.materializer.Catalog.(*store_sqlite.Catalog).GetDedicatedGraph(ctx, selector.GraphID)
+	dedicated, found, err := s.checkoutCatalog().GetDedicatedGraph(ctx, selector.GraphID)
 	switch {
 	case err != nil:
 		return nil, graphview.WrapViewError(graphview.CodeCheckoutInaccessible,
@@ -2238,18 +2238,18 @@ var (
 func (s *Server) materializeRequestView(
 	ctx context.Context,
 	requested graphview.Selector,
-	checkout store_sqlite.Checkout,
+	checkout storage.Checkout,
 	strict bool,
 ) (*requestView, error) {
 	rider := graphview.NewViewRider(requested)
 	rider.CheckoutID = checkout.CheckoutID
-	route, found, err := s.materializer.Catalog.(*store_sqlite.Catalog).GetCheckoutRoute(ctx, checkout.CheckoutID)
+	route, found, err := s.checkoutCatalog().GetCheckoutRoute(ctx, checkout.CheckoutID)
 	switch {
 	case err != nil:
 		return viewFallback(strict, rider, graphview.WrapViewError(graphview.CodeCheckoutInaccessible,
 			fmt.Sprintf("read the route of checkout %q", checkout.CheckoutID), err))
 	case !found || !graphview.RouteReady(route):
-		if checkout.EffectiveMode == store_sqlite.CheckoutModeDedicated {
+		if checkout.EffectiveMode == storage.CheckoutModeDedicated {
 			return viewFallback(strict, rider, graphview.NewViewError(graphview.CodeCapabilityUnavailable,
 				fmt.Sprintf("dedicated checkout %q has no ready automatic route; waiting cannot build one. "+
 					"Select its indexed graph with view.kind:base and its graph_id, without require_fresh or wait_deadline, "+
@@ -2353,7 +2353,7 @@ func (s *Server) viewFamilies(ctx context.Context) []string {
 		if prefix == "" {
 			continue
 		}
-		dedicated, found, err := s.materializer.Catalog.(*store_sqlite.Catalog).GetDedicatedGraph(ctx, indexer.GraphIDFor(prefix))
+		dedicated, found, err := s.checkoutCatalog().GetDedicatedGraph(ctx, indexer.GraphIDFor(prefix))
 		if err != nil || !found || dedicated.FamilyID == "" || seen[dedicated.FamilyID] {
 			continue
 		}
@@ -2366,13 +2366,13 @@ func (s *Server) viewFamilies(ctx context.Context) []string {
 // familyPrimary resolves the one primary base and requires it to be ready.
 // Automatic routes and grace fallbacks share this invariant: naming a primary
 // row is not enough when its graph cannot truthfully answer yet.
-func (s *Server) familyPrimary(ctx context.Context, familyID string) (store_sqlite.DedicatedGraph, error) {
+func (s *Server) familyPrimary(ctx context.Context, familyID string) (storage.DedicatedGraph, error) {
 	primary, err := s.familyPrimaryRegistration(ctx, familyID)
 	if err != nil {
-		return store_sqlite.DedicatedGraph{}, err
+		return storage.DedicatedGraph{}, err
 	}
 	if primary.State != reconcile.GraphStateReady {
-		return store_sqlite.DedicatedGraph{}, graphview.NewViewError(graphview.CodePrimaryNotReady,
+		return storage.DedicatedGraph{}, graphview.NewViewError(graphview.CodePrimaryNotReady,
 			fmt.Sprintf("primary graph %q is %s", primary.GraphID, primary.State))
 	}
 	return primary, nil
@@ -2381,10 +2381,10 @@ func (s *Server) familyPrimary(ctx context.Context, familyID string) (store_sqli
 // familyPrimaryRegistration resolves primary identity without revealing its
 // readiness. Grace selectors first scope this registration's repository, then
 // report readiness only to sessions allowed to observe that primary.
-func (s *Server) familyPrimaryRegistration(ctx context.Context, familyID string) (store_sqlite.DedicatedGraph, error) {
-	graphs, err := s.materializer.Catalog.(*store_sqlite.Catalog).ListDedicatedGraphs(ctx, familyID)
+func (s *Server) familyPrimaryRegistration(ctx context.Context, familyID string) (storage.DedicatedGraph, error) {
+	graphs, err := s.checkoutCatalog().ListDedicatedGraphs(ctx, familyID)
 	if err != nil {
-		return store_sqlite.DedicatedGraph{}, graphview.WrapViewError(graphview.CodeCheckoutInaccessible,
+		return storage.DedicatedGraph{}, graphview.WrapViewError(graphview.CodeCheckoutInaccessible,
 			fmt.Sprintf("list the graphs of family %q", familyID), err)
 	}
 	for _, dedicated := range graphs {
@@ -2392,14 +2392,14 @@ func (s *Server) familyPrimaryRegistration(ctx context.Context, familyID string)
 			return dedicated, nil
 		}
 	}
-	return store_sqlite.DedicatedGraph{}, graphview.NewViewError(graphview.CodeNoPrimary,
+	return storage.DedicatedGraph{}, graphview.NewViewError(graphview.CodeNoPrimary,
 		fmt.Sprintf("family %q has no primary base graph", familyID))
 }
 
 // checkoutInSessionScope clamps an explicit selector to the repositories the
 // calling session may see. Without it, naming a checkout id would reach
 // across the workspace boundary every other query is held to.
-func (s *Server) checkoutInSessionScope(ctx context.Context, checkout store_sqlite.Checkout) error {
+func (s *Server) checkoutInSessionScope(ctx context.Context, checkout storage.Checkout) error {
 	if prefix := s.repoPrefixForCheckout(ctx, checkout); prefix != "" {
 		return s.repoPrefixInSessionScope(ctx, prefix, checkout.CheckoutID)
 	}
@@ -2419,7 +2419,7 @@ func (s *Server) checkoutInSessionScope(ctx context.Context, checkout store_sqli
 		// for that same-family session; an unrelated unresolved CWD still fails
 		// closed below.
 		if cwd := SessionCWDFromContext(ctx); cwd != "" {
-			_, found, err := graphview.CheckoutForPath(ctx, s.materializer.Catalog.(*store_sqlite.Catalog),
+			_, found, err := graphview.CheckoutForPath(ctx, s.checkoutCatalog(),
 				[]string{checkout.FamilyID}, cwd)
 			if err == nil && found {
 				return nil
@@ -2427,7 +2427,7 @@ func (s *Server) checkoutInSessionScope(ctx context.Context, checkout store_sqli
 		}
 		return s.repoPrefixInSessionScope(ctx, "", checkout.CheckoutID)
 	}
-	graphs, err := s.materializer.Catalog.(*store_sqlite.Catalog).ListDedicatedGraphs(ctx, checkout.FamilyID)
+	graphs, err := s.checkoutCatalog().ListDedicatedGraphs(ctx, checkout.FamilyID)
 	if err == nil {
 		for _, dedicated := range graphs {
 			if dedicated.RepoPrefix != "" && repos[dedicated.RepoPrefix] {
@@ -2456,13 +2456,13 @@ func (s *Server) repoPrefixInSessionScope(ctx context.Context, repoPrefix, subje
 // repoPrefixForCheckout resolves the repository a checkout is served under:
 // its own dedicated graph when it has one, and otherwise the family's primary
 // base graph, which is the lane an automatic checkout reads through.
-func (s *Server) repoPrefixForCheckout(ctx context.Context, checkout store_sqlite.Checkout) string {
+func (s *Server) repoPrefixForCheckout(ctx context.Context, checkout storage.Checkout) string {
 	prefix, _ := s.repoPrefixForCheckoutChecked(ctx, checkout)
 	return prefix
 }
 
-func (s *Server) repoPrefixForCheckoutChecked(ctx context.Context, checkout store_sqlite.Checkout) (string, error) {
-	graphs, err := s.materializer.Catalog.(*store_sqlite.Catalog).ListDedicatedGraphs(ctx, checkout.FamilyID)
+func (s *Server) repoPrefixForCheckoutChecked(ctx context.Context, checkout storage.Checkout) (string, error) {
+	graphs, err := s.checkoutCatalog().ListDedicatedGraphs(ctx, checkout.FamilyID)
 	if err != nil {
 		return "", err
 	}

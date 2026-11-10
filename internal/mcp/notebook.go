@@ -43,7 +43,7 @@ type notebookEntry struct {
 // files to sqlite rows.
 type notebookManager struct {
 	mu      sync.Mutex
-	sidecar *persistence.SidecarStore
+	sidecar notebookRecords
 	repoKey string
 	// legacyDir is the historical <repoPath>/.gortex/notebook/ markdown
 	// directory, kept so the one-shot migration can find + rename old

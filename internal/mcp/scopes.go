@@ -34,7 +34,7 @@ type SavedScope struct {
 // exported methods are safe for concurrent use.
 type scopeStore struct {
 	mu      sync.Mutex
-	sidecar *persistence.SidecarStore
+	sidecar scopeRecords
 	byName  map[string]SavedScope
 }
 
@@ -64,8 +64,9 @@ func newScopeStore(legacyPath string) *scopeStore {
 // sidecar, importing legacyPath/scopes.json once. Used by the daemon
 // path where the sidecar is opened once and shared.
 func newScopeStoreFromSidecar(sidecar *persistence.SidecarStore, legacyPath string) *scopeStore {
-	st := &scopeStore{sidecar: sidecar, byName: map[string]SavedScope{}}
+	st := &scopeStore{byName: map[string]SavedScope{}}
 	if sidecar != nil {
+		st.sidecar = sidecar
 		_ = sidecar.MigrateLegacyScopes(legacyPath)
 		if rows, err := sidecar.LoadScopes(); err == nil {
 			for _, r := range rows {

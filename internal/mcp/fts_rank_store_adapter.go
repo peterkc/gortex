@@ -4,8 +4,8 @@ import (
 	"context"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/search"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // The in-memory symbol-FTS ranker (search/fts_rank.go) reads the store through
@@ -47,14 +47,14 @@ type storeSearchCoreKeyer interface {
 }
 
 type storeFTSRankSource struct {
-	s     *store_sqlite.Store
+	s     nativeRankSource
 	exact storeExactTier
 	key   any
 }
 
 func adaptStoreFTSRankSource(searcher any) (search.ViewFTSRankSource, bool) {
-	s, ok := searcher.(*store_sqlite.Store)
-	if !ok || s == nil {
+	s, ok := searcher.(nativeRankSource)
+	if !ok || s.IsNilGenerationHandle() || !s.SharesSymbolSearchCore(searcher) {
 		return nil, false
 	}
 	exact, ok := searcher.(storeExactTier)
@@ -80,7 +80,7 @@ func adaptStoreFTSRankSource(searcher any) (search.ViewFTSRankSource, bool) {
 // search.FTSViewMatchSource). Until the store serves it, every generation that
 // needs a MATCH is read with its own, as before.
 type storeViewMatch interface {
-	SymbolFTSViewGenerationRows(ctx context.Context, generations []int64, match string, perGeneration int) (map[int64][]store_sqlite.SymbolFTSRow, map[int64]bool, error)
+	SymbolFTSViewGenerationRows(ctx context.Context, generations []int64, match string, perGeneration int) (map[int64][]storage.SymbolFTSRow, map[int64]bool, error)
 }
 
 // storeFTSViewMatchSource is the adapter over a store that serves the
@@ -188,7 +188,7 @@ func (a *storeFTSRankSource) SymbolFTSGenerationRun(ctx context.Context, generat
 // SymbolFTSTokenize is the store's FTS5 tokenizer, for rows the ranker cannot
 // tokenize itself.
 func (a *storeFTSRankSource) SymbolFTSTokenize(ctx context.Context, texts []string) ([][]string, error) {
-	return store_sqlite.SymbolFTSTokenize(ctx, texts)
+	return a.s.TokenizeSymbolFTS(ctx, texts)
 }
 
 // TakeFreshGenerationRows hands over the rows the generation's build wrote

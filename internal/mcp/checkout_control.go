@@ -9,9 +9,9 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/pathkey"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 type checkoutControlKey struct{}
@@ -20,10 +20,10 @@ type checkoutControlKey struct{}
 // Recovery and receipts must remain reachable while publication is pending,
 // but may observe only the checkout the session is authorized to address.
 type checkoutControlScope struct {
-	Checkout       store_sqlite.Checkout
+	Checkout       storage.Checkout
 	RepoPrefix     string
 	GraphID        string
-	Route          *store_sqlite.CheckoutRoute
+	Route          *storage.CheckoutRoute
 	Selector       graphview.Selector
 	CheckoutScoped bool
 }
@@ -111,15 +111,18 @@ func viewlessCatalogTool(name string) bool {
 
 // Catalog lookup must not depend on a ready corpus listing its repository:
 // that is precisely the missing state a recovery request is meant to repair.
-func (s *Server) registeredCheckoutForPath(ctx context.Context, path string) (store_sqlite.Checkout, bool, error) {
-	return graphview.RegisteredCheckoutForPath(ctx, s.materializer.Catalog.(*store_sqlite.Catalog), path)
+func (s *Server) registeredCheckoutForPath(ctx context.Context, path string) (storage.Checkout, bool, error) {
+	return graphview.RegisteredCheckoutForPath(ctx, s.checkoutCatalog(), path)
 }
 
 // registeredWorktreeSelector shares exact-root matching between control and
 // graph requests. In particular, a new nested worktree cannot resolve to its
 // already registered parent while discovery is still pending.
-func (s *Server) registeredWorktreeSelector(ctx context.Context, selector graphview.Selector) (store_sqlite.Checkout, error) {
-	var checkout store_sqlite.Checkout
+func (s *Server) registeredWorktreeSelector(ctx context.Context, selector graphview.Selector) (storage.Checkout, error) {
+	if s.checkoutCatalog() == nil {
+		return storage.Checkout{}, graphview.NewViewError(graphview.CodeCapabilityUnavailable, "checkout control requires a checkout catalog")
+	}
+	var checkout storage.Checkout
 	var found bool
 	var err error
 	subject := selector.CheckoutID
@@ -131,7 +134,7 @@ func (s *Server) registeredWorktreeSelector(ctx context.Context, selector graphv
 			found = pathkey.EqualPaths(root, canonicalWorktreeSelectorRoot(checkout.RootPath))
 		}
 	} else {
-		checkout, found, err = s.materializer.Catalog.(*store_sqlite.Catalog).GetCheckout(ctx, selector.CheckoutID)
+		checkout, found, err = s.checkoutCatalog().GetCheckout(ctx, selector.CheckoutID)
 	}
 	if err != nil {
 		return checkout, graphview.WrapViewError(graphview.CodeCheckoutInaccessible, fmt.Sprintf("read checkout %q", subject), err)
@@ -167,13 +170,13 @@ func checkoutControlPath(req *mcp.CallToolRequest) string {
 }
 
 func (s *Server) resolveCheckoutControlScope(ctx context.Context, selector graphview.Selector, req *mcp.CallToolRequest) (*checkoutControlScope, error) {
-	if s.materializer == nil || s.materializer.Catalog.(*store_sqlite.Catalog) == nil {
+	if s.materializer == nil || s.checkoutCatalog() == nil {
 		if selector.Kind == graphview.SelectorAuto {
 			return nil, nil
 		}
 		return nil, graphview.NewViewError(graphview.CodeCapabilityUnavailable, "checkout control requires a checkout catalog")
 	}
-	var checkout store_sqlite.Checkout
+	var checkout storage.Checkout
 	var found bool
 	var err error
 	switch selector.Kind {
@@ -213,12 +216,12 @@ func (s *Server) resolveCheckoutControlScope(ctx context.Context, selector graph
 	}
 	scope := &checkoutControlScope{
 		Checkout: checkout, RepoPrefix: s.repoPrefixForCheckout(ctx, checkout), Selector: selector,
-		CheckoutScoped: checkout.EffectiveMode == store_sqlite.CheckoutModeAutomatic || selector.Kind == graphview.SelectorWorktree,
+		CheckoutScoped: checkout.EffectiveMode == storage.CheckoutModeAutomatic || selector.Kind == graphview.SelectorWorktree,
 	}
 	if selector.Kind == graphview.SelectorAuto {
 		scope.Selector = graphview.Selector{Kind: graphview.SelectorWorktree, CheckoutID: checkout.CheckoutID}
 	}
-	route, present, err := s.materializer.Catalog.(*store_sqlite.Catalog).GetCheckoutRoute(ctx, checkout.CheckoutID)
+	route, present, err := s.checkoutCatalog().GetCheckoutRoute(ctx, checkout.CheckoutID)
 	if err != nil {
 		return nil, graphview.WrapViewError(graphview.CodeCheckoutInaccessible, "read checkout control route", err)
 	}
@@ -227,7 +230,7 @@ func (s *Server) resolveCheckoutControlScope(ctx context.Context, selector graph
 		scope.GraphID = route.GraphID
 	}
 	if scope.GraphID == "" {
-		graphs, graphErr := s.materializer.Catalog.(*store_sqlite.Catalog).ListDedicatedGraphs(ctx, checkout.FamilyID)
+		graphs, graphErr := s.checkoutCatalog().ListDedicatedGraphs(ctx, checkout.FamilyID)
 		if graphErr != nil {
 			return nil, graphErr
 		}

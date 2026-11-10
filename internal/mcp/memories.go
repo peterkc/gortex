@@ -33,7 +33,7 @@ const maxMemoriesCap = 10000
 type memoryManager struct {
 	mu      sync.Mutex
 	store   persistence.MemoryStore
-	sidecar *persistence.SidecarStore
+	sidecar memoryRecords
 	repoKey string
 }
 
@@ -58,8 +58,9 @@ func newMemoryManager(cacheDir, repoPath string) *memoryManager {
 // once. Used by the daemon path where the sidecar is opened once and
 // shared across managers.
 func newMemoryManagerFromSidecar(sidecar *persistence.SidecarStore, repoKey, legacyDir string) *memoryManager {
-	mm := &memoryManager{sidecar: sidecar, repoKey: repoKey}
+	mm := &memoryManager{repoKey: repoKey}
 	if sidecar != nil {
+		mm.sidecar = sidecar
 		_ = sidecar.MigrateLegacyMemories(repoKey, legacyDir)
 		if rows, err := sidecar.LoadMemoriesRows(repoKey); err == nil {
 			mm.store.Entries = rows

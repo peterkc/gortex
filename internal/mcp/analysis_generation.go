@@ -9,7 +9,6 @@ import (
 
 	"github.com/zzet/gortex/internal/analysis"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/runtimeactivity"
 	"github.com/zzet/gortex/internal/search"
 	"go.uber.org/zap"
@@ -72,13 +71,13 @@ func (s *Server) analysisViewGeneration() int64 {
 // works end to end" would be an over-read of this function.
 func (s *Server) analysisGenerationStore() graph.Store {
 	backend := s.backendStore()
-	scoped, ok := backend.(*store_sqlite.Store)
-	if !ok {
+	scoped, ok := backend.(analysisSource)
+	if !ok || !scoped.SharesSymbolSearchCore(backend) {
 		return backend
 	}
-	target := scoped
+	target := backend
 	if viewGen := s.analysisViewGeneration(); viewGen != scoped.ViewGeneration() {
-		if pinned := scoped.AtGeneration(viewGen); pinned != nil {
+		if pinned := scoped.AtGenerationStore(viewGen); pinned != nil {
 			target = pinned
 		}
 	}
@@ -92,17 +91,17 @@ func (s *Server) analysisGenerationStore() graph.Store {
 // derived generation, so it neither stales the installed snapshot nor
 // supersedes a pass in flight. The handle is kept for the last target, so the
 // per-request answer path does not copy the store handle each time.
-func (s *Server) viewScopedAnalysisHandle(target *store_sqlite.Store) *store_sqlite.Store {
+func (s *Server) viewScopedAnalysisHandle(target graph.Store) graph.Store {
 	if memo := s.analysisScopedHandle.Load(); memo != nil && memo.source == target {
 		return memo.scoped
 	}
-	scoped := target.ViewScopedAnalysis()
+	scoped := target.(analysisSource).ViewScopedAnalysisStore()
 	s.analysisScopedHandle.Store(&analysisScopedHandleMemo{source: target, scoped: scoped})
 	return scoped
 }
 
 type analysisScopedHandleMemo struct {
-	source, scoped *store_sqlite.Store
+	source, scoped graph.Store
 }
 
 func (s *Server) analysisGenerationBackends() (graph.AnalysisGenerationStore, graph.AnalysisQueryStore) {
