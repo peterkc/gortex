@@ -85,9 +85,9 @@ func (m ReaderWaitMark) Split(prev ReaderWaitMark) ReaderWaitSplit {
 }
 
 const (
-	vfsFileOther = iota
-	vfsFileMain
-	vfsFileWAL
+	VFSFileOther = iota
+	VFSFileMain
+	VFSFileWAL
 )
 
 // VFSIOMark is a sample of the page I/O counters, process-wide.
@@ -109,27 +109,27 @@ type VFSIOMark struct {
 func (m VFSIOMark) Since(prev VFSIOMark) VFSIOSplit {
 	d := func(a, b [3][2]int64, f, w int) int64 { return a[f][w] - b[f][w] }
 	split := VFSIOSplit{
-		OtherWALWriteBytes:   d(m.WriteBytes, prev.WriteBytes, vfsFileWAL, 0),
+		OtherWALWriteBytes:   d(m.WriteBytes, prev.WriteBytes, VFSFileWAL, 0),
 		Rows:                 m.Rows.Since(prev.Rows),
 		Reindex:              m.Reindex.Since(prev.Reindex),
 		Transactions:         m.Transactions - prev.Transactions,
-		WriterMainWrites:     d(m.WriteCalls, prev.WriteCalls, vfsFileMain, 1),
-		WriterMainWriteTime:  time.Duration(d(m.WriteNanos, prev.WriteNanos, vfsFileMain, 1)),
-		WriterMainWriteBytes: d(m.WriteBytes, prev.WriteBytes, vfsFileMain, 1),
-		WriterMainReads:      d(m.ReadCalls, prev.ReadCalls, vfsFileMain, 1),
-		WriterWALReads:       d(m.ReadCalls, prev.ReadCalls, vfsFileWAL, 1),
-		OtherMainReads:       d(m.ReadCalls, prev.ReadCalls, vfsFileMain, 0),
-		OtherWALReads:        d(m.ReadCalls, prev.ReadCalls, vfsFileWAL, 0),
-		WriterMainReadTime:   time.Duration(d(m.ReadNanos, prev.ReadNanos, vfsFileMain, 1)),
-		WriterWALReadTime:    time.Duration(d(m.ReadNanos, prev.ReadNanos, vfsFileWAL, 1)),
-		OtherMainReadTime:    time.Duration(d(m.ReadNanos, prev.ReadNanos, vfsFileMain, 0)),
-		OtherWALReadTime:     time.Duration(d(m.ReadNanos, prev.ReadNanos, vfsFileWAL, 0)),
-		WriterWALWrites:      d(m.WriteCalls, prev.WriteCalls, vfsFileWAL, 1),
-		OtherMainWrites:      d(m.WriteCalls, prev.WriteCalls, vfsFileMain, 0),
-		WriterWALWriteTime:   time.Duration(d(m.WriteNanos, prev.WriteNanos, vfsFileWAL, 1)),
-		OtherMainWriteTime:   time.Duration(d(m.WriteNanos, prev.WriteNanos, vfsFileMain, 0)),
-		WriterWALWriteBytes:  d(m.WriteBytes, prev.WriteBytes, vfsFileWAL, 1),
-		OtherMainWriteBytes:  d(m.WriteBytes, prev.WriteBytes, vfsFileMain, 0),
+		WriterMainWrites:     d(m.WriteCalls, prev.WriteCalls, VFSFileMain, 1),
+		WriterMainWriteTime:  time.Duration(d(m.WriteNanos, prev.WriteNanos, VFSFileMain, 1)),
+		WriterMainWriteBytes: d(m.WriteBytes, prev.WriteBytes, VFSFileMain, 1),
+		WriterMainReads:      d(m.ReadCalls, prev.ReadCalls, VFSFileMain, 1),
+		WriterWALReads:       d(m.ReadCalls, prev.ReadCalls, VFSFileWAL, 1),
+		OtherMainReads:       d(m.ReadCalls, prev.ReadCalls, VFSFileMain, 0),
+		OtherWALReads:        d(m.ReadCalls, prev.ReadCalls, VFSFileWAL, 0),
+		WriterMainReadTime:   time.Duration(d(m.ReadNanos, prev.ReadNanos, VFSFileMain, 1)),
+		WriterWALReadTime:    time.Duration(d(m.ReadNanos, prev.ReadNanos, VFSFileWAL, 1)),
+		OtherMainReadTime:    time.Duration(d(m.ReadNanos, prev.ReadNanos, VFSFileMain, 0)),
+		OtherWALReadTime:     time.Duration(d(m.ReadNanos, prev.ReadNanos, VFSFileWAL, 0)),
+		WriterWALWrites:      d(m.WriteCalls, prev.WriteCalls, VFSFileWAL, 1),
+		OtherMainWrites:      d(m.WriteCalls, prev.WriteCalls, VFSFileMain, 0),
+		WriterWALWriteTime:   time.Duration(d(m.WriteNanos, prev.WriteNanos, VFSFileWAL, 1)),
+		OtherMainWriteTime:   time.Duration(d(m.WriteNanos, prev.WriteNanos, VFSFileMain, 0)),
+		WriterWALWriteBytes:  d(m.WriteBytes, prev.WriteBytes, VFSFileWAL, 1),
+		OtherMainWriteBytes:  d(m.WriteBytes, prev.WriteBytes, VFSFileMain, 0),
 	}
 	if !m.Available {
 		wal := WALWrittenBetween(prev.FallbackWAL, m.FallbackWAL)
@@ -155,8 +155,8 @@ type WALWriteDelta struct {
 	Reset bool `json:"reset,omitempty"`
 }
 
-// walFrameHeaderBytes is the fixed header in front of every WAL frame.
-const walFrameHeaderBytes = 24
+// WALFrameHeaderBytes is the fixed header in front of every WAL frame.
+const WALFrameHeaderBytes = 24
 
 // WALWrittenBetween is the log growth from before to after.
 func WALWrittenBetween(before, after WALWriteMark) WALWriteDelta {
@@ -178,7 +178,7 @@ func WALWrittenBetween(before, after WALWriteMark) WALWriteDelta {
 		pageSize = before.PageSize
 	}
 	if pageSize > 0 {
-		delta.Bytes = delta.Frames * int64(pageSize+walFrameHeaderBytes)
+		delta.Bytes = delta.Frames * int64(pageSize+WALFrameHeaderBytes)
 	}
 	return delta
 }

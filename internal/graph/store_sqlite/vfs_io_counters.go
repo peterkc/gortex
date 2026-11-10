@@ -31,9 +31,9 @@ import (
 // process's major-fault count.
 
 const (
-	vfsFileOther = iota
-	vfsFileMain
-	vfsFileWAL
+	vfsFileOther = storage.VFSFileOther
+	vfsFileMain  = storage.VFSFileMain
+	vfsFileWAL   = storage.VFSFileWAL
 )
 
 // vfsIOCounters is one (file, connection) cell: calls and nanoseconds.

@@ -30,7 +30,7 @@ type WALWriteMark = storage.WALWriteMark
 type WALWriteDelta = storage.WALWriteDelta
 
 // walFrameHeaderBytes is the fixed header in front of every WAL frame.
-const walFrameHeaderBytes = 24
+const walFrameHeaderBytes = storage.WALFrameHeaderBytes
 
 // WALWriteMark samples the store's write-ahead-log position. It costs one
 // small file read and never blocks a writer or a reader.
