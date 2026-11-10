@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/zzet/gortex/internal/graph/storetest"
-	"github.com/zzet/gortex/internal/graph/storetest/backendtest"
 )
 
 // Given a checkout without a route, Current wraps ErrNotTracked on every
@@ -14,7 +13,7 @@ import (
 func TestStorageContractCurrentDistinguishesAbsentRouteFromReadFailure(t *testing.T) {
 	for _, name := range storetest.Backends() {
 		t.Run(name, func(t *testing.T) {
-			backend, ok := backendtest.Lookup(name)
+			backend, ok := Lookup(name)
 			if !ok {
 				t.Fatalf("backend %q is listed but backendtest has no adapter for it", name)
 			}
@@ -37,11 +36,11 @@ func TestStorageContractCurrentDistinguishesAbsentRouteFromReadFailure(t *testin
 func TestStorageContract(t *testing.T) {
 	for _, name := range storetest.Backends() {
 		t.Run(name, func(t *testing.T) {
-			backend, ok := backendtest.Lookup(name)
+			backend, ok := Lookup(name)
 			if !ok {
 				t.Fatalf("backend %q is listed but backendtest has no adapter for it", name)
 			}
-			storetest.RunStorageContract(t, backend, backendtest.Lookup)
+			storetest.RunStorageContract(t, backend, Lookup)
 		})
 	}
 }
