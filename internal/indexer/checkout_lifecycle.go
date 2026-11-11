@@ -473,7 +473,10 @@ func NewCheckoutLifecycle(cfg CheckoutLifecycleConfig) (*CheckoutLifecycle, erro
 	if store != nil && (store.IsNilGenerationHandle() || !store.SharesSymbolSearchCore(cfg.Graph)) {
 		store = nil
 	}
-	if store != nil && (cfg.Catalog == nil || cfg.Catalog.IsNilMaterializerCatalog()) {
+	if cfg.Catalog != nil && cfg.Catalog.IsNilMaterializerCatalog() {
+		cfg.Catalog = nil
+	}
+	if store != nil && cfg.Catalog == nil {
 		return nil, errors.New("indexer: checkout lifecycle needs the store's paired catalog")
 	}
 	logger := cfg.Logger
@@ -518,9 +521,6 @@ func NewCheckoutLifecycle(cfg CheckoutLifecycleConfig) (*CheckoutLifecycle, erro
 		l.leases = graphview.NewLeaseManager()
 	}
 
-	if cfg.Catalog != nil && cfg.Catalog.IsNilMaterializerCatalog() {
-		cfg.Catalog = nil
-	}
 	l.catalog = cfg.Catalog
 	if l.catalog == nil {
 		return l, nil
