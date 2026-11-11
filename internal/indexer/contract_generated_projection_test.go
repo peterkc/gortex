@@ -151,8 +151,8 @@ func TestContractBaselineRepairsTheAcceptedGeneratedParserNamespace(t *testing.T
 	materializer := &graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: leases}
 	var admission sync.Mutex
 	var jobs sync.WaitGroup
-	options := ContractFollowupCaptureOptions{Catalog: slice2TestCatalog(store), Context: ctx, Store: store, Materializer: materializer, MultiIndexer: mi, Registry: idx.registry, Config: idx.config, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }, BaselineAdmissionMu: &admission, BaselineJobs: &jobs}
-	coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: slice2TestCatalog(store), OpenEvidence: openSlice2TestEvidence, Store: store, Leases: leases, Registry: idx.registry, Config: idx.config, Capture: NewContractFollowupSourceCapture(options), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
+	options := ContractFollowupCaptureOptions{Catalog: testCatalog(store), Context: ctx, Store: store, Materializer: materializer, MultiIndexer: mi, Registry: idx.registry, Config: idx.config, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }, BaselineAdmissionMu: &admission, BaselineJobs: &jobs}
+	coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(store), OpenEvidence: openTestEvidenceStore, Store: store, Leases: leases, Registry: idx.registry, Config: idx.config, Capture: NewContractFollowupSourceCapture(options), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, coordinator.Close()); jobs.Wait() })
 	mi.SetContractCoreRuntime(ContractCoreRuntimeHooks{Published: coordinator.Published})

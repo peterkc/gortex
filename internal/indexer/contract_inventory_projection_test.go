@@ -13,7 +13,7 @@ import (
 )
 
 func inventoryProjectionFor(core graph.Reader, handles ...*store_sqlite.Store) *contractInventoryProjection {
-	return newContractInventoryProjection(map[string]graph.Reader{"r": core}, map[string][]generationPayloadStore{"r": slice2PayloadHandles(handles)})
+	return newContractInventoryProjection(map[string]graph.Reader{"r": core}, map[string][]generationPayloadStore{"r": payloadHandles(handles)})
 }
 
 func TestContractInventoryProjectionReusesOnlyCurrentOwnedRows(t *testing.T) {

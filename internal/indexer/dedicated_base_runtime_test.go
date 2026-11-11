@@ -17,7 +17,7 @@ import (
 func dedicatedRuntimeFixture(t testing.TB) (*dedicatedBaseRuntime, *dedicatedBasePublisher, dedicatedBaseObservation, dedicatedBuilderFixtureRequest) {
 	t.Helper()
 	builder, request, _ := privateDedicatedBuilderFixture(t)
-	runtime := &dedicatedBaseRuntime{catalog: slice2TestCatalog(builder.Store), store: builder.Store}
+	runtime := &dedicatedBaseRuntime{catalog: testCatalog(builder.Store), store: builder.Store}
 	publisher, err := runtime.install(context.Background(), store_sqlite.AcquireDedicatedBaseAuthorityRequest{
 		GraphID: request.Identity.GraphID, Token: "runtime-authority-one",
 		Owner: store_sqlite.DedicatedBaseOwner{CheckoutID: request.Identity.CheckoutID, Incarnation: "private-incarnation"},
@@ -612,14 +612,14 @@ func TestNewDedicatedBaseRuntimeRequiresStoreAndSharedLeases(t *testing.T) {
 	builder, _, _ := privateDedicatedBuilderFixture(t)
 	leases := graphview.NewLeaseManager()
 
-	if _, err := NewDedicatedBaseRuntime(nil, slice2TestCatalog(nil), leases); !errors.Is(err, errDedicatedBaseRuntimeInput) {
+	if _, err := NewDedicatedBaseRuntime(nil, testCatalog(nil), leases); !errors.Is(err, errDedicatedBaseRuntimeInput) {
 		t.Fatalf("runtime without a store = %v, want %v", err, errDedicatedBaseRuntimeInput)
 	}
-	if _, err := NewDedicatedBaseRuntime(builder.Store, slice2TestCatalog(builder.Store), nil); !errors.Is(err, errDedicatedBaseRuntimeInput) {
+	if _, err := NewDedicatedBaseRuntime(builder.Store, testCatalog(builder.Store), nil); !errors.Is(err, errDedicatedBaseRuntimeInput) {
 		t.Fatalf("runtime without shared leases = %v, want %v", err, errDedicatedBaseRuntimeInput)
 	}
 
-	runtime, err := NewDedicatedBaseRuntime(builder.Store, slice2TestCatalog(builder.Store), leases)
+	runtime, err := NewDedicatedBaseRuntime(builder.Store, testCatalog(builder.Store), leases)
 	if err != nil {
 		t.Fatal(err)
 	}

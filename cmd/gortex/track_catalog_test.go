@@ -50,7 +50,7 @@ func startCatalogTrackDaemonWithLogger(t *testing.T, entries, loaded []config.Re
 	require.NoError(t, err)
 	idx := indexer.New(store, reg, config.Default().Index, logger)
 	mi := indexer.NewMultiIndexer(store, reg, idx.Search(), cm, logger)
-	lc, err := indexer.NewCheckoutLifecycle(slice2LifecycleConfig(indexer.CheckoutLifecycleConfig{MultiIndexer: mi, ConfigManager: cm, Graph: store, Logger: logger}))
+	lc, err := indexer.NewCheckoutLifecycle(withPairedCatalog(indexer.CheckoutLifecycleConfig{MultiIndexer: mi, ConfigManager: cm, Graph: store, Logger: logger}))
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		require.NoError(t, lc.Close())
@@ -287,7 +287,7 @@ func TestControllerTrackConfiguredNameChangeRequiresConfigEdit(t *testing.T) {
 	root := pathkey.CanonicalExistingRoot(t.TempDir())
 	entries := []config.RepoEntry{{Path: root, Name: "src"}}
 	cm, mi := startCatalogTrackDaemon(t, entries, nil)
-	lc, err := indexer.NewCheckoutLifecycle(slice2LifecycleConfig(indexer.CheckoutLifecycleConfig{MultiIndexer: mi, ConfigManager: cm, Logger: zap.NewNop()}))
+	lc, err := indexer.NewCheckoutLifecycle(withPairedCatalog(indexer.CheckoutLifecycleConfig{MultiIndexer: mi, ConfigManager: cm, Logger: zap.NewNop()}))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, lc.Close()) })
 	c := &realController{multiIndexer: mi, configManager: cm, lifecycle: lc, logger: zap.NewNop()}

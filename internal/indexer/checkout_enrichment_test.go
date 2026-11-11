@@ -118,7 +118,7 @@ func (f *coordinatorFixture) secondWorktree(
 
 	builder := builderNewBuilder(f.store)
 	builder.Semantic = mgr
-	coordinator, err := NewCheckoutCoordinator(CheckoutCoordinatorConfig{Catalog: slice2TestCatalog(f.store),
+	coordinator, err := NewCheckoutCoordinator(CheckoutCoordinatorConfig{Catalog: testCatalog(f.store),
 		CheckoutID:   checkout.CheckoutID,
 		CheckoutRoot: root,
 		FamilyID:     f.familyID,

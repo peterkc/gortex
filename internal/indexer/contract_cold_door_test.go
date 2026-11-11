@@ -85,7 +85,7 @@ func newContractColdDoorFixture(t *testing.T) *contractColdDoorFixture {
 	require.NoError(t, err)
 	_, err = leases.CaptureInitialRawRepositorySource(ctx, registration, "cold-door-accepted-source")
 	require.NoError(t, err)
-	f.options = ContractFollowupCaptureOptions{Catalog: slice2TestCatalog(store), Context: ctx, Store: store, Materializer: &graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: leases}, MultiIndexer: f.mi, Registry: f.mi.registry, Config: config.Default().Index, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }}
+	f.options = ContractFollowupCaptureOptions{Catalog: testCatalog(store), Context: ctx, Store: store, Materializer: &graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: leases}, MultiIndexer: f.mi, Registry: f.mi.registry, Config: config.Default().Index, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }}
 	// A never-mutated owner has no raw-source witness; the baseline
 	// still lands, fenced only on its pending input state.
 	require.NoError(t, reconcilePrimaryContractBaseline(ctx, f.options, "fixture"))

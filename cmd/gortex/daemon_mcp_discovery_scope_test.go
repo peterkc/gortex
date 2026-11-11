@@ -59,7 +59,7 @@ func TestDispatcher_PendingDiscoveryStaysInItsWorktree(t *testing.T) {
 	registry.Register(languages.NewGoExtractor())
 	mi := indexer.NewMultiIndexer(store, registry, search.NewNull(), cm, zap.NewNop())
 	t.Cleanup(func() { _ = mi.Close(context.Background()) })
-	lifecycle, err := indexer.NewCheckoutLifecycle(slice2LifecycleConfig(indexer.CheckoutLifecycleConfig{MultiIndexer: mi, ConfigManager: cm, Graph: store, Logger: zap.NewNop()}))
+	lifecycle, err := indexer.NewCheckoutLifecycle(withPairedCatalog(indexer.CheckoutLifecycleConfig{MultiIndexer: mi, ConfigManager: cm, Graph: store, Logger: zap.NewNop()}))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = lifecycle.Close() })
 	// The primary family's new worktrees hang in Git metadata and ignore

@@ -34,7 +34,7 @@ func TestCoordinatorFreezesItsIndexConfiguration(t *testing.T) {
 	// Constructed directly rather than through the fixture helper: that helper
 	// overwrites Config with the default, and the caller's own nested values are
 	// exactly what this test is about.
-	c, err := NewCheckoutCoordinator(CheckoutCoordinatorConfig{Catalog: slice2TestCatalog(f.store),
+	c, err := NewCheckoutCoordinator(CheckoutCoordinatorConfig{Catalog: testCatalog(f.store),
 		CheckoutID:     f.checkoutID,
 		CheckoutRoot:   f.worktree,
 		FamilyID:       f.familyID,

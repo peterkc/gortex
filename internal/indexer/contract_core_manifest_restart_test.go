@@ -71,7 +71,7 @@ func TestContractCoreInstalledColdManifestReceiptsSurviveRestart(t *testing.T) {
 			_, err = leases.CaptureInitialRawRepositorySource(ctx, registration, "accepted-cold-manifest-source")
 			require.NoError(t, err)
 			mi.SetOutputGenerationAuthority(NewOutputGenerationAuthority(leases))
-			options := ContractFollowupCaptureOptions{Catalog: slice2TestCatalog(store), Context: ctx, Store: store, Materializer: &graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: leases}, MultiIndexer: mi, Registry: cold.registry, Config: cold.config, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }}
+			options := ContractFollowupCaptureOptions{Catalog: testCatalog(store), Context: ctx, Store: store, Materializer: &graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: leases}, MultiIndexer: mi, Registry: cold.registry, Config: cold.config, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }}
 			require.NoError(t, reconcilePrimaryContractBaseline(ctx, options, "repo"))
 			before, found, err := store.ContractInputStateContext(ctx, "repo", "")
 			require.NoError(t, err)

@@ -73,7 +73,7 @@ func newFamilyGuidanceFixture(t *testing.T, registered bool, state store_sqlite.
 		_, err := mi.TrackRepoCtx(t.Context(), config.RepoEntry{Path: primary, Name: "primary"})
 		require.NoError(t, err)
 	}
-	lifecycle, err := indexer.NewCheckoutLifecycle(slice2LifecycleConfig(indexer.CheckoutLifecycleConfig{MultiIndexer: mi, ConfigManager: cm, Graph: store, Logger: zap.NewNop()}))
+	lifecycle, err := indexer.NewCheckoutLifecycle(withPairedCatalog(indexer.CheckoutLifecycleConfig{MultiIndexer: mi, ConfigManager: cm, Graph: store, Logger: zap.NewNop()}))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = lifecycle.Close() })
 	srv := gortexmcp.NewServer(query.NewEngine(store), store, nil, nil, zap.NewNop(), nil, gortexmcp.MultiRepoOptions{MultiIndexer: mi, ConfigManager: cm, CheckoutLifecycle: lifecycle})

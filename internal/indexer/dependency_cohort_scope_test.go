@@ -703,7 +703,7 @@ func TestCohortProducerPolicyMirrorsTheDeclaredProducers(t *testing.T) {
 func TestCoordinatorRefusesAnUnfreezableConfiguration(t *testing.T) {
 	f := newCoordinatorFixture(t)
 
-	c, err := NewCheckoutCoordinator(CheckoutCoordinatorConfig{Catalog: slice2TestCatalog(f.store),
+	c, err := NewCheckoutCoordinator(CheckoutCoordinatorConfig{Catalog: testCatalog(f.store),
 		CheckoutID:     f.checkoutID,
 		CheckoutRoot:   f.worktree,
 		FamilyID:       f.familyID,

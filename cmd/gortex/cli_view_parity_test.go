@@ -150,7 +150,7 @@ func newParityFixture(t *testing.T) *parityFixture {
 	}
 	f.upsertWorktree(t, store_sqlite.CheckoutStateReady, store_sqlite.CheckoutModeAutomatic)
 
-	lifecycle, err := indexer.NewCheckoutLifecycle(slice2LifecycleConfig(indexer.CheckoutLifecycleConfig{
+	lifecycle, err := indexer.NewCheckoutLifecycle(withPairedCatalog(indexer.CheckoutLifecycleConfig{
 		MultiIndexer:  mi,
 		ConfigManager: cm,
 		Graph:         store,

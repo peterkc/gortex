@@ -2097,7 +2097,7 @@ func TestCheckoutLifecycleCollectsAForgottenCheckoutsPayload(t *testing.T) {
 func newSweepLifecycle(t *testing.T, store *store_sqlite.Store) *CheckoutLifecycle {
 	t.Helper()
 	mi := NewMultiIndexer(store, newTestRegistry(), search.NewNull(), nil, zap.NewNop())
-	lc, err := NewCheckoutLifecycle(CheckoutLifecycleConfig{Catalog: slice2TestCatalog(store),
+	lc, err := NewCheckoutLifecycle(CheckoutLifecycleConfig{Catalog: testCatalog(store),
 		MultiIndexer: mi,
 		Graph:        store,
 		Logger:       zap.NewNop(),

@@ -127,7 +127,7 @@ func TestReplacedFailedDedicatedClaimIsRetiredPromptly(t *testing.T) {
 	}
 
 	// A live claim is never retired, whatever the new claim names.
-	if retired, err := retireReplacedDedicatedClaim(ctx, builder.Store, slice2TestCatalog(builder.Store), failed.Claim, "building",
+	if retired, err := retireReplacedDedicatedClaim(ctx, builder.Store, testCatalog(builder.Store), failed.Claim, "building",
 		store_sqlite.DedicatedBaseBuildClaim{GenerationID: claim.GenerationID + 100}, nil); retired || err != nil {
 		t.Fatalf("a live claim was retired (retired=%v err=%v)", retired, err)
 	}
@@ -139,7 +139,7 @@ func TestReplacedFailedDedicatedClaimIsRetiredPromptly(t *testing.T) {
 	if err != nil || next.GenerationID == claim.GenerationID {
 		t.Fatalf("the next claim = %+v (err=%v); want a new generation", next, err)
 	}
-	retired, err := retireReplacedDedicatedClaim(ctx, builder.Store, slice2TestCatalog(builder.Store), failed.Claim, failed.AttemptState, next, nil)
+	retired, err := retireReplacedDedicatedClaim(ctx, builder.Store, testCatalog(builder.Store), failed.Claim, failed.AttemptState, next, nil)
 	if err != nil || !retired {
 		t.Fatalf("the replaced failed claim was not retired (retired=%v err=%v)", retired, err)
 	}

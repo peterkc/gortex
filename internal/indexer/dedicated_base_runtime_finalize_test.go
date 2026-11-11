@@ -99,7 +99,7 @@ func TestDedicatedBaseRuntimeFinalizeCannotDeleteSameOwnerReplacement(t *testing
 
 func TestDedicatedBaseRuntimeFinalizeKeepsHeldPublisherRevoked(t *testing.T) {
 	b, request, claim := privateClaimedDedicatedFixture(t)
-	r := &dedicatedBaseRuntime{catalog: slice2TestCatalog(b.Store), store: b.Store}
+	r := &dedicatedBaseRuntime{catalog: testCatalog(b.Store), store: b.Store}
 	graphID, owner := claim.Desire.Authority.GraphID, claim.Desire.Authority.Owner
 	if err := r.RegisterDedicatedBaseOwner(graphID, owner); err != nil {
 		t.Fatal(err)

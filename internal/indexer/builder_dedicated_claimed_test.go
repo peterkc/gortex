@@ -93,7 +93,7 @@ func privateDedicatedBuilderFixtureWithRegistry(t testing.TB, registry *parser.R
 			t.Error(err)
 		}
 	})
-	builder := &SparseGenerationBuilder{Catalog: slice2TestCatalog(store), Store: store, Registry: registry, Config: config.Default().Index, Logger: zap.NewNop()}
+	builder := &SparseGenerationBuilder{Catalog: testCatalog(store), Store: store, Registry: registry, Config: config.Default().Index, Logger: zap.NewNop()}
 	// ExtractorVersions is the REAL fingerprint rather than a placeholder token,
 	// because it is not an opaque identity component: a reservation's
 	// extractor versions and the repo_index_state row an index pass writes are
@@ -866,7 +866,7 @@ func TestPrivateEmptyCommittedDedicatedBaseAcceptance(t *testing.T) {
 		}
 	})
 	registry := builderRegistry()
-	builder := &SparseGenerationBuilder{Catalog: slice2TestCatalog(store), Store: store, Registry: registry, Config: config.Default().Index, Logger: zap.NewNop()}
+	builder := &SparseGenerationBuilder{Catalog: testCatalog(store), Store: store, Registry: registry, Config: config.Default().Index, Logger: zap.NewNop()}
 	catalog := store.Catalog()
 	const prefix = "private-empty"
 	const graphID = "private-empty-graph"

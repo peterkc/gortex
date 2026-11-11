@@ -137,7 +137,7 @@ func TestAncestryLayerBaseRecordsOnlyAnImmutableStack(t *testing.T) {
 		t.Fatal("fixture precondition: a dedicated root's view composes generation zero")
 	}
 	nativeStore := dedicated.builder.Store.(*store_sqlite.Store)
-	c := &CheckoutCoordinator{catalog: slice2TestCatalog(nativeStore), store: nativeStore}
+	c := &CheckoutCoordinator{catalog: testCatalog(nativeStore), store: nativeStore}
 	base, ok := c.ancestryLayerBase(view).(commitLayerBase)
 	if !ok || fmt.Sprint(base.stack) != fmt.Sprint(view.Generations()) || len(base.stack) == 0 {
 		t.Fatalf("the dedicated view's base stack = %v, want %v", base.stack, view.Generations())
@@ -150,7 +150,7 @@ func TestAncestryLayerBaseRecordsOnlyAnImmutableStack(t *testing.T) {
 	if !shared.ComposesBaseCorpus() {
 		t.Fatal("fixture precondition: the coordinator fixture's view does not compose generation zero")
 	}
-	if base := (&CheckoutCoordinator{catalog: slice2TestCatalog(f.store), store: f.store}).ancestryLayerBase(shared).(commitLayerBase); base.stack != nil {
+	if base := (&CheckoutCoordinator{catalog: testCatalog(f.store), store: f.store}).ancestryLayerBase(shared).(commitLayerBase); base.stack != nil {
 		t.Fatalf("a view composing generation zero carries stack %v", base.stack)
 	}
 }

@@ -46,7 +46,7 @@ func contractBaselineAuthorityFixture(t *testing.T) (ContractFollowupCaptureOpti
 	t.Cleanup(pin.Release)
 	authority := NewOutputGenerationAuthority(leases)
 	mi.SetOutputGenerationAuthority(authority)
-	options := ContractFollowupCaptureOptions{Catalog: slice2TestCatalog(store), Context: ctx, Store: store, Materializer: &graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: leases}, MultiIndexer: mi, Registry: idx.registry, Config: idx.config, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }}
+	options := ContractFollowupCaptureOptions{Catalog: testCatalog(store), Context: ctx, Store: store, Materializer: &graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: leases}, MultiIndexer: mi, Registry: idx.registry, Config: idx.config, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }}
 	return options, pin, authority
 }
 

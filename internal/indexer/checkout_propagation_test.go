@@ -179,7 +179,7 @@ func propagationCoordinator(t *testing.T, f *coordinatorFixture, adminName strin
 	if err := f.catalog.AllocateCheckout(context.Background(), checkout); err != nil {
 		t.Fatalf("allocate %s: %v", adminName, err)
 	}
-	c, err := NewCheckoutCoordinator(CheckoutCoordinatorConfig{Catalog: slice2TestCatalog(f.store),
+	c, err := NewCheckoutCoordinator(CheckoutCoordinatorConfig{Catalog: testCatalog(f.store),
 		CheckoutID:     checkout.CheckoutID,
 		CheckoutRoot:   root,
 		FamilyID:       f.familyID,

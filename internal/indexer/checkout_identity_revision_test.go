@@ -242,7 +242,7 @@ func TestRefusedCheckoutCohortIsNotReusable(t *testing.T) {
 	// nothing to describe, which is the shape every incomplete cohort takes.
 	refused := func() *CheckoutCoordinator {
 		t.Helper()
-		c, err := NewCheckoutCoordinator(CheckoutCoordinatorConfig{Catalog: slice2TestCatalog(f.store),
+		c, err := NewCheckoutCoordinator(CheckoutCoordinatorConfig{Catalog: testCatalog(f.store),
 			CheckoutID:     f.checkoutID,
 			CheckoutRoot:   f.worktree,
 			FamilyID:       f.familyID,

@@ -177,7 +177,7 @@ func TestContractWorkBatchCoversLaterTargetsBeforeSharedPreparation(t *testing.T
 	session, err = newContractDeltaSession(session.cache, a.Snapshot, a.Config)
 	require.NoError(t, err)
 	extracted := map[string]int{}
-	batch, err := RunContractFollowupBatch(t.Context(), ContractFollowupBatchRequest{OpenEvidence: openSlice2TestEvidence,
+	batch, err := RunContractFollowupBatch(t.Context(), ContractFollowupBatchRequest{OpenEvidence: openTestEvidenceStore,
 		Snapshot: a.Snapshot,
 		Targets: []ContractFollowupTarget{
 			{Key: a.Snapshot.Key, Payload: a.Payload, Catalog: a.Catalog},

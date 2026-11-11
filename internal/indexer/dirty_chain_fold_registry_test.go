@@ -115,7 +115,7 @@ func TestFirstEditOverAFoldTakesTheHandedOverRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	backend := storeChainFoldBackend{store: store, catalog: slice2TestCatalog(store)}
+	backend := storeChainFoldBackend{store: store, catalog: testCatalog(store)}
 	fold, err := backend.BeginChainFold(ctx, lower, to, "test")
 	if err != nil {
 		t.Fatal(err)

@@ -59,7 +59,7 @@ func TestAsyncContractProducerIdentityIsCapturedByRealCoordinatorAndRefManager(t
 	require.Equal(t, want, installed.extractors)
 	require.Equal(t, want, installed.cohort.ExtractorVersions)
 	require.Equal(t, want, installed.dirtyIdentity(fixture.graphID, 0).ExtractorVersions)
-	manager, err := NewRefViewManager(RefViewManagerConfig{Catalog: slice2TestCatalog(fixture.store), Store: fixture.store, Builder: builder, Config: config.Default().Index})
+	manager, err := NewRefViewManager(RefViewManagerConfig{Catalog: testCatalog(fixture.store), Store: fixture.store, Builder: builder, Config: config.Default().Index})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 	require.Equal(t, want, manager.extractors)
@@ -85,7 +85,7 @@ func TestAsyncContractProducerBuilderCopiesKeepInstalledOwnerState(t *testing.T)
 	installedCopy := *builder
 	observation := dedicatedBaseObservation{Builder: installedCopy}
 	oldOwner := fixture.inertCoordinator(t, CheckoutCoordinatorConfig{Builder: builder})
-	manager, err := NewRefViewManager(RefViewManagerConfig{Catalog: slice2TestCatalog(fixture.store), Store: fixture.store, Builder: builder, Config: config.Default().Index})
+	manager, err := NewRefViewManager(RefViewManagerConfig{Catalog: testCatalog(fixture.store), Store: fixture.store, Builder: builder, Config: config.Default().Index})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 	want := builder.extractorVersionsFingerprint()

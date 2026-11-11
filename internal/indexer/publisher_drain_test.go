@@ -32,7 +32,7 @@ import (
 // invisible to the retirement sweep) and before any owner can be registered.
 func mountPublisherRuntime(t *testing.T, f *lifecycleFixture) *DedicatedBaseRuntime {
 	t.Helper()
-	runtime, err := NewDedicatedBaseRuntime(f.store, slice2TestCatalog(f.store), f.lc.ViewLeases())
+	runtime, err := NewDedicatedBaseRuntime(f.store, testCatalog(f.store), f.lc.ViewLeases())
 	require.NoError(t, err)
 	require.NoError(t, f.lc.SetDedicatedBaseCleanupRuntime(runtime))
 	require.Same(t, f.lc.ViewLeases(), runtime.ViewLeases())

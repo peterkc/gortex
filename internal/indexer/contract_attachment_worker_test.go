@@ -115,7 +115,7 @@ func (f *contractWorkerFixture) request(t *testing.T, repo, layer string) Contra
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := ContractFollowupRequest{OpenEvidence: openSlice2TestEvidence, RebuildReason: ContractFollowupColdBaseline, Payload: payload, Catalog: f.store, Registry: f.registry, Config: f.cfg, Leases: f.leases, Yield: func(ctx context.Context) error { return ctx.Err() }}
+	req := ContractFollowupRequest{OpenEvidence: openTestEvidenceStore, RebuildReason: ContractFollowupColdBaseline, Payload: payload, Catalog: f.store, Registry: f.registry, Config: f.cfg, Leases: f.leases, Yield: func(ctx context.Context) error { return ctx.Err() }}
 	req.Snapshot = ContractFollowupSnapshot{Key: graph.ContractAttachmentKey{RepoPrefix: repo, InputVersion: state.InputVersion, InputFingerprint: state.InputFingerprint}, Core: f.store, Inputs: append([]graph.ContractInputWitness(nil), f.inputs...), Work: []graph.ContractWork{f.work[repo]}, Files: append([]ContractFollowupFile(nil), f.files...), Release: func() { f.releases++ }}
 	req.Snapshot.ReadAccepted = func(ctx context.Context, file ContractFollowupFile) (ContractAcceptedSource, error) {
 		if err := ctx.Err(); err != nil {
@@ -300,7 +300,7 @@ func TestContractFollowupBatchBuildsCohortOnceAndCleansScratch(t *testing.T) {
 		coreReads++
 		return core(ctx, file)
 	}
-	batch, err := RunContractFollowupBatch(context.Background(), ContractFollowupBatchRequest{OpenEvidence: openSlice2TestEvidence, Snapshot: a.Snapshot, Targets: []ContractFollowupTarget{{Key: a.Snapshot.Key, Work: a.Snapshot.Work, Payload: a.Payload, Catalog: a.Catalog}, {Key: b.Snapshot.Key, Work: b.Snapshot.Work, Payload: b.Payload, Catalog: b.Catalog}}, RebuildReason: a.RebuildReason, Registry: a.Registry, Config: a.Config, Leases: a.Leases, Yield: a.Yield, ScratchParent: scratchParent})
+	batch, err := RunContractFollowupBatch(context.Background(), ContractFollowupBatchRequest{OpenEvidence: openTestEvidenceStore, Snapshot: a.Snapshot, Targets: []ContractFollowupTarget{{Key: a.Snapshot.Key, Work: a.Snapshot.Work, Payload: a.Payload, Catalog: a.Catalog}, {Key: b.Snapshot.Key, Work: b.Snapshot.Work, Payload: b.Payload, Catalog: b.Catalog}}, RebuildReason: a.RebuildReason, Registry: a.Registry, Config: a.Config, Leases: a.Leases, Yield: a.Yield, ScratchParent: scratchParent})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -500,7 +500,7 @@ func TestContractFollowupBatchTargetFailureRollsBackCohort(t *testing.T) {
 	b := f.request(t, "repo-b", "batch-independent-b")
 	bad := b.Snapshot.Work[0]
 	bad.Token = "uncaptured-token"
-	batch, err := RunContractFollowupBatch(context.Background(), ContractFollowupBatchRequest{OpenEvidence: openSlice2TestEvidence, Snapshot: a.Snapshot, Targets: []ContractFollowupTarget{{Key: a.Snapshot.Key, Work: a.Snapshot.Work, Payload: a.Payload, Catalog: a.Catalog}, {Key: b.Snapshot.Key, Work: []graph.ContractWork{bad}, Payload: b.Payload, Catalog: b.Catalog}}, RebuildReason: a.RebuildReason, Registry: a.Registry, Config: a.Config, Leases: a.Leases, Yield: a.Yield, ScratchParent: t.TempDir()})
+	batch, err := RunContractFollowupBatch(context.Background(), ContractFollowupBatchRequest{OpenEvidence: openTestEvidenceStore, Snapshot: a.Snapshot, Targets: []ContractFollowupTarget{{Key: a.Snapshot.Key, Work: a.Snapshot.Work, Payload: a.Payload, Catalog: a.Catalog}, {Key: b.Snapshot.Key, Work: []graph.ContractWork{bad}, Payload: b.Payload, Catalog: b.Catalog}}, RebuildReason: a.RebuildReason, Registry: a.Registry, Config: a.Config, Leases: a.Leases, Yield: a.Yield, ScratchParent: t.TempDir()})
 	if err == nil || len(batch.Targets) != 2 {
 		t.Fatalf("invalid later target did not refuse cohort: %#v %v", batch, err)
 	}

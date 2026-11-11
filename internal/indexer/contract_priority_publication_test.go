@@ -20,7 +20,7 @@ func priorityBatchRequest(t *testing.T, f *contractWorkerFixture) (ContractFollo
 	a := f.request(t, "repo-a", "priority-a")
 	b := f.request(t, "repo-b", "priority-b")
 	// Deliberately put the priority target second in the captured vector.
-	return ContractFollowupBatchRequest{OpenEvidence: openSlice2TestEvidence, Snapshot: a.Snapshot, Targets: []ContractFollowupTarget{
+	return ContractFollowupBatchRequest{OpenEvidence: openTestEvidenceStore, Snapshot: a.Snapshot, Targets: []ContractFollowupTarget{
 		{Key: b.Snapshot.Key, Work: b.Snapshot.Work, Payload: b.Payload, Catalog: b.Catalog},
 		{Key: a.Snapshot.Key, Work: a.Snapshot.Work, Payload: a.Payload, Catalog: a.Catalog},
 	}, RebuildReason: a.RebuildReason, Registry: a.Registry, Config: a.Config, Leases: a.Leases,
@@ -173,7 +173,7 @@ func TestContractCoordinatorWaitTargetReopensBeforeWholeActorCompletes(t *testin
 			{Key: a.Snapshot.Key, Work: a.Snapshot.Work, Catalog: a.Catalog},
 		}, nil
 	}
-	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: slice2TestCatalog(f.store), OpenEvidence: openSlice2TestEvidence, Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: capture, Yield: a.Yield})
+	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(f.store), OpenEvidence: openTestEvidenceStore, Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: capture, Yield: a.Yield})
 	require.NoError(t, err)
 	defer func() { once.Do(func() { close(resume) }); require.NoError(t, c.Close()) }()
 	execute := c.execute
@@ -244,7 +244,7 @@ func TestContractCoordinatorExplicitTargetPublishesBeforeOlderRepositoryHint(t *
 			{Key: a.Snapshot.Key, Work: a.Snapshot.Work, Catalog: a.Catalog},
 		}, nil
 	}
-	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: slice2TestCatalog(f.store), OpenEvidence: openSlice2TestEvidence, Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: capture, Yield: a.Yield})
+	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(f.store), OpenEvidence: openTestEvidenceStore, Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: capture, Yield: a.Yield})
 	require.NoError(t, err)
 	first := make(chan ContractFollowupTargetResult, 2)
 	resume := make(chan struct{})
@@ -344,7 +344,7 @@ func TestContractCoordinatorPriorityWinnerSurvivesWakePanic(t *testing.T) {
 	// Freeze the existing scheduler clock so its automatic panic retry cannot
 	// race the assertions; no elapsed-time assumption establishes custody.
 	now := time.Now()
-	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: slice2TestCatalog(f.store), OpenEvidence: openSlice2TestEvidence, Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: capture, Yield: a.Yield, Now: func() time.Time { return now }})
+	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(f.store), OpenEvidence: openTestEvidenceStore, Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: capture, Yield: a.Yield, Now: func() time.Time { return now }})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, c.Close()) }()
 	execute := c.execute

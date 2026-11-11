@@ -354,7 +354,7 @@ func newRealCheckoutMutationFixtureWithSetup(t testing.TB, configure func(*parse
 	bm := search.NewNull()
 	mi := indexer.NewMultiIndexer(store, registry, bm, cm, zap.NewNop())
 	leases := graphview.NewLeaseManager()
-	lifecycle, err := indexer.NewCheckoutLifecycle(slice2LifecycleConfig(indexer.CheckoutLifecycleConfig{
+	lifecycle, err := indexer.NewCheckoutLifecycle(withPairedCatalog(indexer.CheckoutLifecycleConfig{
 		MultiIndexer: mi, ConfigManager: cm, Graph: store,
 		Logger: zap.NewNop(), ViewLeases: leases,
 	}))

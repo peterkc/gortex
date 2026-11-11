@@ -166,7 +166,7 @@ func TestDedicatedBaseRuntimeAuthorizedReregistrationRevokesOldSlot(t *testing.T
 
 func TestDedicatedBaseRuntimePhysicalTailIsPartOfOwnerDrain(t *testing.T) {
 	b, request, claim := privateClaimedDedicatedFixture(t)
-	r := &dedicatedBaseRuntime{catalog: slice2TestCatalog(b.Store), store: b.Store}
+	r := &dedicatedBaseRuntime{catalog: testCatalog(b.Store), store: b.Store}
 	publisher := &dedicatedBasePublisher{runtime: r, authority: claim.Desire.Authority}
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
@@ -343,7 +343,7 @@ func TestDedicatedBaseRuntimeConcurrentOwnerDrain(t *testing.T) {
 
 func TestDedicatedBaseRuntimeClosedPublisherSkipsObserverAndCatalogWrites(t *testing.T) {
 	b, request, claim := privateClaimedDedicatedFixture(t)
-	r := &dedicatedBaseRuntime{catalog: slice2TestCatalog(b.Store), store: b.Store}
+	r := &dedicatedBaseRuntime{catalog: testCatalog(b.Store), store: b.Store}
 	publisher := &dedicatedBasePublisher{runtime: r, authority: claim.Desire.Authority}
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
@@ -377,7 +377,7 @@ func TestDedicatedBaseRuntimeClosedPublisherSkipsObserverAndCatalogWrites(t *tes
 
 func TestDedicatedBaseRuntimeHeldPublisherCannotReopenRetrackedOwner(t *testing.T) {
 	b, request, claim := privateClaimedDedicatedFixture(t)
-	r := &dedicatedBaseRuntime{catalog: slice2TestCatalog(b.Store), store: b.Store}
+	r := &dedicatedBaseRuntime{catalog: testCatalog(b.Store), store: b.Store}
 	graphID, owner := claim.Desire.Authority.GraphID, claim.Desire.Authority.Owner
 	if err := r.RegisterDedicatedBaseOwner(graphID, owner); err != nil {
 		t.Fatal(err)
@@ -443,7 +443,7 @@ func BenchmarkDedicatedBaseRuntimeOwnerAdmission(b *testing.B) {
 // confirmed healthy slot is an independent positive control and must survive.
 func TestDedicatedBaseRuntimeInvalidInstallsDoNotRetainSlots(t *testing.T) {
 	b, request, claim := privateClaimedDedicatedFixture(t)
-	r := &dedicatedBaseRuntime{catalog: slice2TestCatalog(b.Store), store: b.Store}
+	r := &dedicatedBaseRuntime{catalog: testCatalog(b.Store), store: b.Store}
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
 	authority := claim.Desire.Authority
@@ -499,11 +499,11 @@ func TestDedicatedBaseRuntimeConcurrentInvalidAndValidInstallPreservesSlot(t *te
 	authority := claim.Desire.Authority
 	valid := store_sqlite.AcquireDedicatedBaseAuthorityRequest{GraphID: authority.GraphID, Owner: authority.Owner, Token: authority.Token}
 	// Establish catalog fixture validity independently of the empty test runtime.
-	control := &dedicatedBaseRuntime{catalog: slice2TestCatalog(b.Store), store: b.Store}
+	control := &dedicatedBaseRuntime{catalog: testCatalog(b.Store), store: b.Store}
 	if publisher, err := control.install(ctx, valid); err != nil || publisher == nil || publisher.authority != authority {
 		t.Fatalf("healthy authority control: publisher=%+v err=%v", publisher, err)
 	}
-	r := &dedicatedBaseRuntime{catalog: slice2TestCatalog(b.Store), store: b.Store}
+	r := &dedicatedBaseRuntime{catalog: testCatalog(b.Store), store: b.Store}
 	unlock, err := r.acquire(ctx, authority.GraphID)
 	if err != nil {
 		t.Fatal(err)

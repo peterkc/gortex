@@ -52,7 +52,7 @@ func TestContractFollowupPublishesCanonicalColdFixtureFiles(t *testing.T) {
 	require.NoError(t, err)
 	mi.SetOutputGenerationAuthority(NewOutputGenerationAuthority(leases))
 	materializer := &graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: leases}
-	options := ContractFollowupCaptureOptions{Catalog: slice2TestCatalog(store), Context: ctx, Store: store, Materializer: materializer, MultiIndexer: mi, Registry: idx.registry, Config: idx.config, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }}
+	options := ContractFollowupCaptureOptions{Catalog: testCatalog(store), Context: ctx, Store: store, Materializer: materializer, MultiIndexer: mi, Registry: idx.registry, Config: idx.config, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }}
 	require.NoError(t, reconcilePrimaryContractBaseline(ctx, options, "fixture"))
 	inputs, err := materializer.CaptureContractInputs(ctx, nil, "fixture", "")
 	require.NoError(t, err)
@@ -65,7 +65,7 @@ func TestContractFollowupPublishesCanonicalColdFixtureFiles(t *testing.T) {
 	snapshot.Work = targets[0].Work
 	_, payload, err := store.BeginPayloadGeneration(ctx, store_sqlite.PayloadGenerationRequest{OwnerKind: "dedicated_graph", GraphID: "fixture-contract", LayerID: "fixture-owner", GenerationKind: "contract_analysis", ConfigHash: "fixture-config", ExtractorVersions: `{"go":"1","json":"1"}`, ResolverVersion: "contract-only", CreatedAt: 1})
 	require.NoError(t, err)
-	request := ContractFollowupRequest{OpenEvidence: openSlice2TestEvidence, RebuildReason: ContractFollowupColdBaseline, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: idx.registry, Config: idx.config, RepoConfigs: snapshot.RepoConfigs, Leases: leases, Logger: zap.NewNop(), Yield: options.Yield}
+	request := ContractFollowupRequest{OpenEvidence: openTestEvidenceStore, RebuildReason: ContractFollowupColdBaseline, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: idx.registry, Config: idx.config, RepoConfigs: snapshot.RepoConfigs, Leases: leases, Logger: zap.NewNop(), Yield: options.Yield}
 	report, err := RunContractFollowup(ctx, request)
 	require.NoError(t, err, "a real canonical fixture-file owner must serve complete contract evidence")
 	require.True(t, report.Published)

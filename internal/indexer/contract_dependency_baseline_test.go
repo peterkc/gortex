@@ -51,7 +51,7 @@ func TestContractDependencyBaselineSchedulesTheMissingPhysicalNamespace(t *testi
 	}
 	var admission sync.Mutex
 	var jobs sync.WaitGroup
-	options := ContractFollowupCaptureOptions{Catalog: slice2TestCatalog(store), Context: ctx, Store: store, Materializer: materializer, MultiIndexer: mi, Registry: first.registry, Config: first.config, Logger: zaptest.NewLogger(t), Yield: func(ctx context.Context) error { return ctx.Err() }, BaselineAdmissionMu: &admission, BaselineJobs: &jobs}
+	options := ContractFollowupCaptureOptions{Catalog: testCatalog(store), Context: ctx, Store: store, Materializer: materializer, MultiIndexer: mi, Registry: first.registry, Config: first.config, Logger: zaptest.NewLogger(t), Yield: func(ctx context.Context) error { return ctx.Err() }, BaselineAdmissionMu: &admission, BaselineJobs: &jobs}
 	// Certify only the output namespace. Its composed input still needs the
 	// other physical namespace; retrying the output's baseline cannot help.
 	require.NoError(t, reconcilePrimaryContractBaseline(ctx, options, "a-certified"))
@@ -83,7 +83,7 @@ func TestContractDependencyBaselineSchedulesTheMissingPhysicalNamespace(t *testi
 			return ctx.Err()
 		}
 	}
-	coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: slice2TestCatalog(store), OpenEvidence: openSlice2TestEvidence, Store: store, Leases: leases, Registry: first.registry, Config: first.config, Capture: NewContractFollowupSourceCapture(options), Inputs: NewContractPrimaryInputCapture(materializer), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
+	coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(store), OpenEvidence: openTestEvidenceStore, Store: store, Leases: leases, Registry: first.registry, Config: first.config, Capture: NewContractFollowupSourceCapture(options), Inputs: NewContractPrimaryInputCapture(materializer), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, coordinator.Close()); jobs.Wait() })
 	mi.SetContractCoreRuntime(ContractCoreRuntimeHooks{Published: coordinator.Published})
@@ -149,7 +149,7 @@ func TestContractDependencyBaselineDoesNotInventAProducer(t *testing.T) {
 			input, err := graphview.ComposeSelectedContractInputs("repo-a", "", a, b, b)
 			require.NoError(t, err)
 			var calls atomic.Int64
-			coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: slice2TestCatalog(f.store), OpenEvidence: openSlice2TestEvidence, Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
+			coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(f.store), OpenEvidence: openTestEvidenceStore, Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
 				t.Error("unaccepted input reached attachment capture")
 				return ContractFollowupSnapshot{}, nil, errors.New("unexpected capture")
 			}, ReconcileBaseline: func(ctx context.Context, view *graphview.RepoView, repo, checkout string) (bool, error) {
@@ -207,7 +207,7 @@ func TestContractDependencyBaselineAdmitsWhileAPrimarySourceApplies(t *testing.T
 	reconcile := NewContractBaselineReconciler(options)
 	admittedBaseline := make(chan bool, 1)
 	nativeStore := options.Store.(*store_sqlite.Store)
-	coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: slice2TestCatalog(options.Store), OpenEvidence: openSlice2TestEvidence, Store: nativeStore, Leases: options.Materializer.Leases, Registry: options.Registry, Config: options.Config, Capture: NewContractFollowupSourceCapture(options), ReconcileBaseline: func(ctx context.Context, view *graphview.RepoView, repo, checkout string) (bool, error) {
+	coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(options.Store), OpenEvidence: openTestEvidenceStore, Store: nativeStore, Leases: options.Materializer.Leases, Registry: options.Registry, Config: options.Config, Capture: NewContractFollowupSourceCapture(options), ReconcileBaseline: func(ctx context.Context, view *graphview.RepoView, repo, checkout string) (bool, error) {
 		started, err := reconcile(ctx, view, repo, checkout)
 		select {
 		case admittedBaseline <- started && err == nil:

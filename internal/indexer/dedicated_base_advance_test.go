@@ -31,7 +31,7 @@ func newDedicatedAdvanceFixture(t testing.TB) *dedicatedAdvanceFixture {
 	b, request, claim := privateClaimedDedicatedFixture(t)
 	return &dedicatedAdvanceFixture{
 		builder: b, request: request,
-		publisher: &dedicatedBasePublisher{runtime: &dedicatedBaseRuntime{catalog: slice2TestCatalog(b.Store), store: b.Store}, authority: claim.Desire.Authority},
+		publisher: &dedicatedBasePublisher{runtime: &dedicatedBaseRuntime{catalog: testCatalog(b.Store), store: b.Store}, authority: claim.Desire.Authority},
 		leases:    graphview.NewLeaseManager(), identity: claim.Desire.Identity, workspace: request.WorkspaceID,
 	}
 }
@@ -295,7 +295,7 @@ func TestDedicatedBaseCurrentReconstructsPreAuthorityActive(t *testing.T) {
 			if authority.GenerationFloor < legacy {
 				t.Fatalf("legacy not fenced: %+v", authority)
 			}
-			f := &dedicatedAdvanceFixture{builder: b, request: request, publisher: &dedicatedBasePublisher{runtime: &dedicatedBaseRuntime{catalog: slice2TestCatalog(b.Store), store: b.Store}, authority: authority}, leases: graphview.NewLeaseManager(), identity: identity, workspace: request.WorkspaceID}
+			f := &dedicatedAdvanceFixture{builder: b, request: request, publisher: &dedicatedBasePublisher{runtime: &dedicatedBaseRuntime{catalog: testCatalog(b.Store), store: b.Store}, authority: authority}, leases: graphview.NewLeaseManager(), identity: identity, workspace: request.WorkspaceID}
 			if change == "new-tree" {
 				f.commitFile(t, "package dedicated\nfunc AdvancementMarker() int { return 1 }\n")
 			}

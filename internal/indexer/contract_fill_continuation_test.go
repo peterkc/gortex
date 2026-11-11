@@ -125,7 +125,7 @@ func TestContractFillContinuationCancellationDoesNotMintProvenance(t *testing.T)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	c.ctx = ctx
-	c.req = ContractFollowupRequest{OpenEvidence: openSlice2TestEvidence, delta: &contractDeltaSession{identity: contractDeltaIdentity{selection: "selected"}}}
+	c.req = ContractFollowupRequest{OpenEvidence: openTestEvidenceStore, delta: &contractDeltaSession{identity: contractDeltaIdentity{selection: "selected"}}}
 	c.report = &ContractFollowupReport{Mode: viewmetrics.ContractModeFill}
 	require.ErrorIs(t, c.continueFill(1, true), context.Canceled)
 	require.False(t, c.req.delta.continued)

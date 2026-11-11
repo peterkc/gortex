@@ -174,7 +174,7 @@ func newUnadmittedRefStack(t *testing.T) *refStack {
 	seedRefCatalog(t, store, graphID, repo, headTree)
 
 	leases := graphview.NewLeaseManager()
-	lifecycle, err := indexer.NewCheckoutLifecycle(slice2LifecycleConfig(indexer.CheckoutLifecycleConfig{
+	lifecycle, err := indexer.NewCheckoutLifecycle(withPairedCatalog(indexer.CheckoutLifecycleConfig{
 		MultiIndexer:  mi,
 		ConfigManager: cm,
 		Graph:         store,

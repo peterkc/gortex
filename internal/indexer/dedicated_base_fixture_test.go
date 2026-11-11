@@ -41,7 +41,7 @@ func editDeltaRealDedicatedBase(t *testing.T, tree, storePath string, cfg config
 	ctx := context.Background()
 	store := builderOpenStoreAt(t, storePath)
 	defer func() { _ = store.Close() }()
-	builder := &SparseGenerationBuilder{Catalog: slice2TestCatalog(store), Store: store, Registry: builderRegistry(), Config: cfg, Logger: logger}
+	builder := &SparseGenerationBuilder{Catalog: testCatalog(store), Store: store, Registry: builderRegistry(), Config: cfg, Logger: logger}
 	treeOID := builderGit(t, tree, "rev-parse", "HEAD^{tree}")
 	commit := builderGit(t, tree, "rev-parse", "HEAD")
 	catalog := store.Catalog()

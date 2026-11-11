@@ -54,7 +54,7 @@ func reopenedServedReadyRetirementFixture(t *testing.T) (*CheckoutLifecycle, *Vi
 	gate := NewViewBuildGate()
 	gate.Open()
 	l.SetBuildGate(gate)
-	c := &CheckoutCoordinator{catalog: slice2TestCatalog(store), store: store, gate: gate, checkoutID: checkout, basePinned: commit, routedDirty: routed, retainedDirty: []retainedDirtyLayer{{key: "retained", generationID: ids["retained"]}}, backlog: map[int64]struct{}{}}
+	c := &CheckoutCoordinator{catalog: testCatalog(store), store: store, gate: gate, checkoutID: checkout, basePinned: commit, routedDirty: routed, retainedDirty: []retainedDirtyLayer{{key: "retained", generationID: ids["retained"]}}, backlog: map[int64]struct{}{}}
 	l.coordinators = map[string]*CheckoutCoordinator{checkout: c}
 	lease := l.leases.Acquire(ids["leased"])
 	t.Cleanup(lease.Release)

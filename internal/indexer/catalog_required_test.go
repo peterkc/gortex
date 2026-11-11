@@ -35,7 +35,7 @@ func TestGenerationOwnersRefuseMissingCatalog(t *testing.T) {
 			require.Nil(t, ref)
 
 			analysis, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{
-				Store: store, Catalog: catalog, Leases: leases, Registry: builder.Registry, OpenEvidence: openSlice2TestEvidence,
+				Store: store, Catalog: catalog, Leases: leases, Registry: builder.Registry, OpenEvidence: openTestEvidenceStore,
 				Yield: func(ctx context.Context) error { return ctx.Err() },
 				Capture: func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
 					panic("constructor must not capture")

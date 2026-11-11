@@ -90,7 +90,7 @@ func TestInlineBusyFoldRefusesWithoutMonolithicCopy(t *testing.T) {
 	require.False(t, f.store.PayloadBuildFlightActive(to), "refused Begin must not create a second fold owner")
 	require.Equal(t, before, f.route(), "a refused optional copy cannot move the route")
 	require.True(t, f.store.PayloadBuildFlightActive(owner), "the refused inline attempt must not release the original owner's flight")
-	_, _, err = runChainFoldSteps(t.Context(), fold, storeChainFoldBackend{store: f.store, catalog: slice2TestCatalog(f.store)}.StepRetryable, nil)
+	_, _, err = runChainFoldSteps(t.Context(), fold, storeChainFoldBackend{store: f.store, catalog: testCatalog(f.store)}.StepRetryable, nil)
 	require.NoError(t, err, "the original fold retains its real lease and can continue")
 	ownerCounts, _, _ := fold.Counts()
 	require.Positive(t, ownerCounts.Rows)
@@ -115,7 +115,7 @@ func TestInlineBusyFoldAtTheCapPublishesTheExistingDirectFallback(t *testing.T) 
 	}
 	require.Equal(t, maxChainWalkDepth, at.DirtyChainDepth)
 	fold, owner, _ := inlineBusyHoldRealFold(t, f, c)
-	probe := &inlineBusyBeginProbe{storeChainFoldBackend: storeChainFoldBackend{store: f.store, catalog: slice2TestCatalog(f.store)}}
+	probe := &inlineBusyBeginProbe{storeChainFoldBackend: storeChainFoldBackend{store: f.store, catalog: testCatalog(f.store)}}
 	copied := 0
 	c.compaction.mu.Lock()
 	c.compaction.backend = probe
@@ -139,6 +139,6 @@ func TestInlineBusyFoldAtTheCapPublishesTheExistingDirectFallback(t *testing.T) 
 	require.Equal(t, at.DirtyGenerationID, next.DirtyParentGenerationID)
 	require.Equal(t, 2, next.DirtyChainDepth)
 	chainAssertFlat(t, f, "inline-busy-next-child")
-	_, _, err := runChainFoldSteps(t.Context(), fold, storeChainFoldBackend{store: f.store, catalog: slice2TestCatalog(f.store)}.StepRetryable, nil)
+	_, _, err := runChainFoldSteps(t.Context(), fold, storeChainFoldBackend{store: f.store, catalog: testCatalog(f.store)}.StepRetryable, nil)
 	require.NoError(t, err, "neither direct publication nor its next child may steal the held fold's lease")
 }

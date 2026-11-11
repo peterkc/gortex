@@ -179,7 +179,7 @@ func (f *lifecycleFixture) open() {
 	f.cm = cm
 
 	f.mi = NewMultiIndexer(store, newTestRegistry(), search.NewNull(), cm, logger)
-	lc, err := NewCheckoutLifecycle(CheckoutLifecycleConfig{Catalog: slice2TestCatalog(store),
+	lc, err := NewCheckoutLifecycle(CheckoutLifecycleConfig{Catalog: testCatalog(store),
 		MultiIndexer:  f.mi,
 		ConfigManager: cm,
 		Graph:         store,

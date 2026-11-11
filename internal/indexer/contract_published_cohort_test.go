@@ -21,14 +21,14 @@ func TestContractPublishedCohortRefusesRetiredProofAndReleasesWinnerLease(t *tes
 	f := newContractWorkerFixture(t)
 	a := f.request(t, "repo-a", "published-cohort-winner-a")
 	b := f.request(t, "repo-b", "published-cohort-winner-b")
-	batch, err := RunContractFollowupBatch(t.Context(), ContractFollowupBatchRequest{OpenEvidence: openSlice2TestEvidence, Snapshot: a.Snapshot, Targets: []ContractFollowupTarget{{Key: a.Snapshot.Key, Work: a.Snapshot.Work, Payload: a.Payload, Catalog: a.Catalog}, {Key: b.Snapshot.Key, Work: b.Snapshot.Work, Payload: b.Payload, Catalog: b.Catalog}}, RebuildReason: a.RebuildReason, Registry: a.Registry, Config: a.Config, Leases: a.Leases, Yield: a.Yield})
+	batch, err := RunContractFollowupBatch(t.Context(), ContractFollowupBatchRequest{OpenEvidence: openTestEvidenceStore, Snapshot: a.Snapshot, Targets: []ContractFollowupTarget{{Key: a.Snapshot.Key, Work: a.Snapshot.Work, Payload: a.Payload, Catalog: a.Catalog}, {Key: b.Snapshot.Key, Work: b.Snapshot.Work, Payload: b.Payload, Catalog: b.Catalog}}, RebuildReason: a.RebuildReason, Registry: a.Registry, Config: a.Config, Leases: a.Leases, Yield: a.Yield})
 	require.NoError(t, err)
 	proof := cloneContractPublishedCohort(batch.Publication)
 	require.NotNil(t, proof)
 	proof.Seq = 5
 	report := batch.Targets[0].Report
 	actor := NewContractActor("", []string{"repo-a", "repo-b"})
-	c := &ContractAnalysisCoordinator{options: ContractAnalysisCoordinatorOptions{Catalog: slice2TestCatalog(f.store), OpenEvidence: openSlice2TestEvidence, Store: f.store, Leases: f.leases}, actors: map[ContractActor]*contractActor{actor: {id: actor, lastCohort: cloneContractPublishedCohort(proof)}}}
+	c := &ContractAnalysisCoordinator{options: ContractAnalysisCoordinatorOptions{Catalog: testCatalog(f.store), OpenEvidence: openTestEvidenceStore, Store: f.store, Leases: f.leases}, actors: map[ContractActor]*contractActor{actor: {id: actor, lastCohort: cloneContractPublishedCohort(proof)}}}
 	leased, release, err := c.AcquireLastPublishedCohort(t.Context(), actor)
 	require.NoError(t, err)
 	require.Equal(t, report.PayloadGeneration, leased.Targets[0].PayloadGeneration)
@@ -89,7 +89,7 @@ func TestContractPublishedCohortCaptureTimeMixedTargetsDoNotAdvanceProof(t *test
 	_, err = mi.IndexAll()
 	require.NoError(t, err)
 	materializer := &graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: graphview.NewLeaseManager()}
-	options := ContractFollowupCaptureOptions{Catalog: slice2TestCatalog(store), Context: ctx, Store: store, Materializer: materializer, MultiIndexer: mi, Registry: registry, Config: config.Default().Index, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }}
+	options := ContractFollowupCaptureOptions{Catalog: testCatalog(store), Context: ctx, Store: store, Materializer: materializer, MultiIndexer: mi, Registry: registry, Config: config.Default().Index, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }}
 	for _, repo := range []string{"repo-a", "repo-b"} {
 		require.NoError(t, reconcilePrimaryContractBaseline(ctx, options, repo))
 	}
@@ -106,7 +106,7 @@ func TestContractPublishedCohortCaptureTimeMixedTargetsDoNotAdvanceProof(t *test
 	_, payload, err := store.BeginPayloadGeneration(ctx, store_sqlite.PayloadGenerationRequest{OwnerKind: "dedicated_graph", GraphID: "mixed-publication", LayerID: "first-a", GenerationKind: "contract_analysis", CreatedAt: 1})
 	require.NoError(t, err)
 	first.Work = targets[0].Work
-	report, err := RunContractFollowup(ctx, ContractFollowupRequest{OpenEvidence: openSlice2TestEvidence, Snapshot: first, RebuildReason: ContractFollowupColdBaseline, Payload: payload, Catalog: targets[0].Catalog, Registry: registry, Config: options.Config, RepoConfigs: first.RepoConfigs, Leases: materializer.Leases, Yield: options.Yield})
+	report, err := RunContractFollowup(ctx, ContractFollowupRequest{OpenEvidence: openTestEvidenceStore, Snapshot: first, RebuildReason: ContractFollowupColdBaseline, Payload: payload, Catalog: targets[0].Catalog, Registry: registry, Config: options.Config, RepoConfigs: first.RepoConfigs, Leases: materializer.Leases, Yield: options.Yield})
 	require.NoError(t, err)
 	require.True(t, report.Published)
 	// Production capture drops A before execute ever sees job.targets.
@@ -116,7 +116,7 @@ func TestContractPublishedCohortCaptureTimeMixedTargetsDoNotAdvanceProof(t *test
 	require.Len(t, mixed.Files, 2)
 	require.Len(t, remaining, 1)
 	require.Equal(t, "repo-b", remaining[0].Key.RepoPrefix)
-	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: slice2TestCatalog(store), OpenEvidence: openSlice2TestEvidence, Store: store, Leases: materializer.Leases, Registry: registry, Config: options.Config, Capture: NewContractFollowupSourceCapture(options), Yield: options.Yield})
+	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(store), OpenEvidence: openTestEvidenceStore, Store: store, Leases: materializer.Leases, Registry: registry, Config: options.Config, Capture: NewContractFollowupSourceCapture(options), Yield: options.Yield})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, c.Close()) }()
 	job := &contractAnalysisJob{id: "capture-time-mixed", snapshot: mixed, targets: remaining, queuedAt: time.Now()}
@@ -142,7 +142,7 @@ func TestContractPublishedCohortDuplicateDoesNotBorrowNewerBodyOnlyStamps(t *tes
 		return payload
 	}
 	firstTargets[0].Payload = reserve("original")
-	original, err := RunContractFollowupBatch(ctx, ContractFollowupBatchRequest{OpenEvidence: openSlice2TestEvidence, Snapshot: first, Targets: firstTargets, RebuildReason: ContractFollowupColdBaseline, Registry: f.options.Registry, Config: f.options.Config, RepoConfigs: first.RepoConfigs, Leases: f.options.Materializer.Leases, Yield: f.options.Yield})
+	original, err := RunContractFollowupBatch(ctx, ContractFollowupBatchRequest{OpenEvidence: openTestEvidenceStore, Snapshot: first, Targets: firstTargets, RebuildReason: ContractFollowupColdBaseline, Registry: f.options.Registry, Config: f.options.Config, RepoConfigs: first.RepoConfigs, Leases: f.options.Materializer.Leases, Yield: f.options.Yield})
 	require.NoError(t, err)
 	require.NotNil(t, original.Publication)
 	// Comment-only edits move source receipts while retaining the boundary key
@@ -170,7 +170,7 @@ func TestContractPublishedCohortDuplicateDoesNotBorrowNewerBodyOnlyStamps(t *tes
 	defer lease.Release()
 	prepared := &contractFollowupPrepared{}
 	defer func() { require.NoError(t, prepared.close()) }()
-	_, err = buildContractFollowupPrepared(ctx, ContractFollowupRequest{OpenEvidence: openSlice2TestEvidence, Snapshot: duplicate, Payload: loser, Catalog: duplicateTargets[0].Catalog, RebuildReason: ContractFollowupColdBaseline, Registry: f.options.Registry, Config: f.options.Config, RepoConfigs: duplicate.RepoConfigs, Leases: f.options.Materializer.Leases, Yield: f.options.Yield}, prepared)
+	_, err = buildContractFollowupPrepared(ctx, ContractFollowupRequest{OpenEvidence: openTestEvidenceStore, Snapshot: duplicate, Payload: loser, Catalog: duplicateTargets[0].Catalog, RebuildReason: ContractFollowupColdBaseline, Registry: f.options.Registry, Config: f.options.Config, RepoConfigs: duplicate.RepoConfigs, Leases: f.options.Materializer.Leases, Yield: f.options.Yield}, prepared)
 	require.NoError(t, err)
 	helper := "fixture/helper.go"
 	require.NotEqual(t, original.Publication.Stamps[helper].SourceFingerprint, prepared.proof.Stamps[helper].SourceFingerprint, "the duplicate preparation observed newer comment-only source bytes")

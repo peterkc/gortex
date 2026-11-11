@@ -45,7 +45,7 @@ func buildCatalogController(t *testing.T) (*realController, *indexer.MultiIndexe
 	mi := indexer.NewMultiIndexer(store, reg, search.NewNull(), cm, zap.NewNop())
 	t.Cleanup(func() { _ = mi.Close(context.Background()) })
 
-	lifecycle, err := indexer.NewCheckoutLifecycle(slice2LifecycleConfig(indexer.CheckoutLifecycleConfig{
+	lifecycle, err := indexer.NewCheckoutLifecycle(withPairedCatalog(indexer.CheckoutLifecycleConfig{
 		MultiIndexer:  mi,
 		ConfigManager: cm,
 		Graph:         store,

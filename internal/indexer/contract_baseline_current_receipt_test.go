@@ -75,7 +75,7 @@ func currentReceiptBaselineFixture(t *testing.T, helpers []string) (ContractFoll
 	_, err = leases.CaptureInitialRawRepositorySource(ctx, registration, "accepted-current-source")
 	require.NoError(t, err)
 	mi.SetOutputGenerationAuthority(NewOutputGenerationAuthority(leases))
-	options := ContractFollowupCaptureOptions{Catalog: slice2TestCatalog(store), Context: ctx, Store: store, Materializer: &graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: leases}, MultiIndexer: mi, Registry: idx.registry, Config: idx.config, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }}
+	options := ContractFollowupCaptureOptions{Catalog: testCatalog(store), Context: ctx, Store: store, Materializer: &graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: leases}, MultiIndexer: mi, Registry: idx.registry, Config: idx.config, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }}
 	spy.reads.Store(0)
 	return options, spy, idx, original
 }
@@ -111,7 +111,7 @@ func TestContractBaselineReusesCurrentAcceptedReceiptThroughAttachment(t *testin
 			var admission sync.Mutex
 			var jobs sync.WaitGroup
 			options.BaselineAdmissionMu, options.BaselineJobs = &admission, &jobs
-			coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: slice2TestCatalog(options.Store), OpenEvidence: openSlice2TestEvidence, Store: nativeStore, Leases: options.Materializer.Leases, Registry: options.Registry, Config: options.Config, Capture: NewContractFollowupSourceCapture(options), Inputs: NewContractPrimaryInputCapture(options.Materializer), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
+			coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(options.Store), OpenEvidence: openTestEvidenceStore, Store: nativeStore, Leases: options.Materializer.Leases, Registry: options.Registry, Config: options.Config, Capture: NewContractFollowupSourceCapture(options), Inputs: NewContractPrimaryInputCapture(options.Materializer), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
 			require.NoError(t, err)
 			defer coordinator.Close()
 			// This test proves receipt reuse through real asynchronous publication,

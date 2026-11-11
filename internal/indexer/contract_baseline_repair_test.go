@@ -49,7 +49,7 @@ func TestContractBaselineRepairsStaleReceiptsFromAcceptedCore(t *testing.T) {
 			defer acceptedPin.Release()
 			require.NoError(t, acceptedPin.ValidateAcceptedCurrent())
 			materializer := &graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: leases}
-			options := ContractFollowupCaptureOptions{Catalog: slice2TestCatalog(store), Context: ctx, Store: store, Materializer: materializer, MultiIndexer: mi, Registry: idx.registry, Config: idx.config, Logger: zaptest.NewLogger(t), Yield: func(ctx context.Context) error { return ctx.Err() }}
+			options := ContractFollowupCaptureOptions{Catalog: testCatalog(store), Context: ctx, Store: store, Materializer: materializer, MultiIndexer: mi, Registry: idx.registry, Config: idx.config, Logger: zaptest.NewLogger(t), Yield: func(ctx context.Context) error { return ctx.Err() }}
 			prior := contractBoundaryReceipt{Version: contractBoundaryReceiptVersion, FilePath: "fixture/routes.go", Source: "old-source", Policy: "old-policy"}
 			if mode == "unknown" {
 				prior.Version = "unknown-legacy-version"
@@ -65,7 +65,7 @@ func TestContractBaselineRepairsStaleReceiptsFromAcceptedCore(t *testing.T) {
 			var jobs sync.WaitGroup
 			options.BaselineAdmissionMu = &admission
 			options.BaselineJobs = &jobs
-			coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: slice2TestCatalog(store), OpenEvidence: openSlice2TestEvidence, Store: store, Leases: leases, Registry: idx.registry, Config: idx.config, Capture: NewContractFollowupSourceCapture(options), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
+			coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(store), OpenEvidence: openTestEvidenceStore, Store: store, Leases: leases, Registry: idx.registry, Config: idx.config, Capture: NewContractFollowupSourceCapture(options), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
 			require.NoError(t, err)
 			defer coordinator.Close()
 			mi.SetContractCoreRuntime(ContractCoreRuntimeHooks{Published: coordinator.Published})

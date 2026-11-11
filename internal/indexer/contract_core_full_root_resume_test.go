@@ -117,7 +117,7 @@ func TestContractCoreFullRootResumeRefusesChangedPhysicalInput(t *testing.T) {
 	old := graph.ContractInputState{RepoPrefix: request.RepoPrefix, CheckoutID: request.Identity.CheckoutID,
 		InputVersion: contractCoreInputVersion, InputFingerprint: "interrupted", Accepted: true}
 	require.NoError(t, target.SetContractInputStateWithWorkContext(ctx, nil, old, nil))
-	backend, err := selectedContractCoreStorageBackend(ctx, target, slice2TestCatalog(target), nil, old.RepoPrefix, old.CheckoutID, true)
+	backend, err := selectedContractCoreStorageBackend(ctx, target, testCatalog(target), nil, old.RepoPrefix, old.CheckoutID, true)
 	require.NoError(t, err)
 	backend.fullNamespace = true
 	changed := old

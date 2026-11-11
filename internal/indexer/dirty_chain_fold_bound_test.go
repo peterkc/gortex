@@ -77,7 +77,7 @@ func TestInlineFoldAtTheCapIsBoundedInTime(t *testing.T) {
 	}
 	var steps atomic.Int64
 	c.compaction.mu.Lock()
-	c.compaction.backend = stalledFoldBackend{inner: storeChainFoldBackend{store: f.store, catalog: slice2TestCatalog(f.store)}, stepDelay: 200 * time.Millisecond, steps: &steps}
+	c.compaction.backend = stalledFoldBackend{inner: storeChainFoldBackend{store: f.store, catalog: testCatalog(f.store)}, stepDelay: 200 * time.Millisecond, steps: &steps}
 	c.compaction.inlineBudget = 500 * time.Millisecond
 	c.compaction.mu.Unlock()
 	budget := c.inlineFoldBudget()

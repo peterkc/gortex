@@ -350,7 +350,7 @@ func builderIndex(t testing.TB, store *store_sqlite.Store, dir string) {
 }
 
 func builderNewBuilder(store *store_sqlite.Store) *SparseGenerationBuilder {
-	b := &SparseGenerationBuilder{Catalog: slice2TestCatalog(store),
+	b := &SparseGenerationBuilder{Catalog: testCatalog(store),
 		Store:    store,
 		Registry: builderRegistry(),
 		Config:   config.Default().Index,

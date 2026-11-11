@@ -45,7 +45,7 @@ func builderIndexSemantic(mgr *semantic.Manager) func(testing.TB, *store_sqlite.
 // builderNewBuilderOver is builderNewBuilder with the parser registry built by
 // registry.
 func builderNewBuilderOver(store *store_sqlite.Store, registry func() *parser.Registry) *SparseGenerationBuilder {
-	return &SparseGenerationBuilder{Catalog: slice2TestCatalog(store),
+	return &SparseGenerationBuilder{Catalog: testCatalog(store),
 		Store:    store,
 		Registry: registry(),
 		Config:   config.Default().Index,

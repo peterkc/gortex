@@ -39,7 +39,7 @@ func TestContractFollowupBatchKeepsWorkReportWhenInputKeyMoves(t *testing.T) {
 	targets[0].Payload = payload
 	moved := false
 	scratch := t.TempDir()
-	batch, err := RunContractFollowupBatch(ctx, ContractFollowupBatchRequest{OpenEvidence: openSlice2TestEvidence,
+	batch, err := RunContractFollowupBatch(ctx, ContractFollowupBatchRequest{OpenEvidence: openTestEvidenceStore,
 		RebuildReason: ContractFollowupUnknownInterval,
 		Snapshot:      snapshot, Targets: targets, Registry: f.options.Registry, Config: f.options.Config, RepoConfigs: snapshot.RepoConfigs,
 		Leases: f.options.Materializer.Leases, Logger: zap.NewNop(), Yield: f.options.Yield, ScratchParent: scratch,

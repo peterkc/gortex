@@ -62,7 +62,7 @@ func goTSRegistry() *parser.Registry {
 
 // builderWithRegistry is builderNewBuilder through reg.
 func builderWithRegistry(store *store_sqlite.Store, reg *parser.Registry) *SparseGenerationBuilder {
-	return &SparseGenerationBuilder{Catalog: slice2TestCatalog(store), Store: store, Registry: reg, Config: config.Default().Index, Logger: zap.NewNop()}
+	return &SparseGenerationBuilder{Catalog: testCatalog(store), Store: store, Registry: reg, Config: config.Default().Index, Logger: zap.NewNop()}
 }
 
 func perSaveCapabilityTree() map[string]string {

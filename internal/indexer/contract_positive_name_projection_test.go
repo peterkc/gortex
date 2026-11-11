@@ -26,7 +26,7 @@ func positiveProjectionCapture(t *testing.T, reader graph.Reader, handles ...*st
 			require.NoError(t, h.Catalog().PublishViewGeneration(t.Context(), h.ViewGeneration(), 1))
 		}
 	}
-	p, err := capturePositiveNames(t.Context(), map[string]graph.Reader{"r": reader}, map[string][]generationPayloadStore{"r": slice2PayloadHandles(handles)}, 1<<20)
+	p, err := capturePositiveNames(t.Context(), map[string]graph.Reader{"r": reader}, map[string][]generationPayloadStore{"r": payloadHandles(handles)}, 1<<20)
 	require.NoError(t, err)
 	return p
 }

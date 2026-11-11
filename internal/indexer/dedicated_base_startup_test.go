@@ -24,7 +24,7 @@ import (
 // owner is registered.
 func installStartupPublisherRuntime(t *testing.T, f *lifecycleFixture) *DedicatedBaseRuntime {
 	t.Helper()
-	runtime, err := NewDedicatedBaseRuntime(f.store, slice2TestCatalog(f.store), f.lc.ViewLeases())
+	runtime, err := NewDedicatedBaseRuntime(f.store, testCatalog(f.store), f.lc.ViewLeases())
 	require.NoError(t, err)
 	require.NoError(t, f.lc.SetDedicatedBaseCleanupRuntime(runtime))
 	return runtime
@@ -116,7 +116,7 @@ func TestInitialBasePublisherRequiresTheSharedLeaseDomain(t *testing.T) {
 	t.Run("private manager refused", func(t *testing.T) {
 		f := newLifecycleFixture(t)
 		defer f.close()
-		private, err := NewDedicatedBaseRuntime(f.store, slice2TestCatalog(f.store), graphview.NewLeaseManager())
+		private, err := NewDedicatedBaseRuntime(f.store, testCatalog(f.store), graphview.NewLeaseManager())
 		require.NoError(t, err)
 		require.NoError(t, f.lc.SetDedicatedBaseCleanupRuntime(private))
 
@@ -901,7 +901,7 @@ func TestInitialBasePublisherPublicationContextIsCancelledByAdmissionClose(t *te
 	dir := t.TempDir()
 	store := builderOpenStoreAt(t, filepath.Join(dir, "store.sqlite"))
 	t.Cleanup(func() { _ = store.Close() })
-	runtime, err := NewDedicatedBaseRuntime(store, slice2TestCatalog(store), graphview.NewLeaseManager())
+	runtime, err := NewDedicatedBaseRuntime(store, testCatalog(store), graphview.NewLeaseManager())
 	require.NoError(t, err)
 
 	ctx, cancel, release := runtime.publicationContext(context.Background())

@@ -79,7 +79,7 @@ func indexAsyncCopyPrimary(t *testing.T, b *SparseGenerationBuilder, req dedicat
 	_, err = leases.CaptureInitialRawRepositorySource(ctx, registration, "accepted-copy-source")
 	require.NoError(t, err)
 	mi.SetOutputGenerationAuthority(NewOutputGenerationAuthority(leases))
-	options := ContractFollowupCaptureOptions{Catalog: slice2TestCatalog(b.Store), Context: ctx, Store: nativeStore, Materializer: &graphview.Materializer{Store: nativeStore, Catalog: nativeStore.Catalog(), Leases: leases}, MultiIndexer: mi, Registry: b.Registry, Config: b.Config, Logger: b.Logger, Yield: func(ctx context.Context) error { return ctx.Err() }}
+	options := ContractFollowupCaptureOptions{Catalog: testCatalog(b.Store), Context: ctx, Store: nativeStore, Materializer: &graphview.Materializer{Store: nativeStore, Catalog: nativeStore.Catalog(), Leases: leases}, MultiIndexer: mi, Registry: b.Registry, Config: b.Config, Logger: b.Logger, Yield: func(ctx context.Context) error { return ctx.Err() }}
 	require.NoError(t, reconcilePrimaryContractBaseline(ctx, options, req.RepoPrefix))
 	accepted, found, err := nativeStore.ContractInputStateContext(ctx, req.RepoPrefix, "")
 	require.NoError(t, err)

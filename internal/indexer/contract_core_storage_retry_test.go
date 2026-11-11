@@ -26,7 +26,7 @@ func selectedBackendOverBuildingTarget(t *testing.T, path string) (*store_sqlite
 	})
 	require.NoError(t, err)
 	require.Positive(t, generation)
-	backend, err := newSelectedContractCoreStorageBackend(ctx, target, slice2TestCatalog(target), store, "fixture", "linked")
+	backend, err := newSelectedContractCoreStorageBackend(ctx, target, testCatalog(target), store, "fixture", "linked")
 	require.NoError(t, err)
 	return target, backend
 }

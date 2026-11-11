@@ -130,7 +130,7 @@ func buildWorktreeSearchStack(t *testing.T, gortexYAML string) *worktreeSearchSt
 	bm := search.NewNull()
 	mi := indexer.NewMultiIndexer(store, reg, bm, cm, zap.NewNop())
 	leases := graphview.NewLeaseManager()
-	lifecycle, err := indexer.NewCheckoutLifecycle(slice2LifecycleConfig(indexer.CheckoutLifecycleConfig{
+	lifecycle, err := indexer.NewCheckoutLifecycle(withPairedCatalog(indexer.CheckoutLifecycleConfig{
 		MultiIndexer:  mi,
 		ConfigManager: cm,
 		Graph:         store,

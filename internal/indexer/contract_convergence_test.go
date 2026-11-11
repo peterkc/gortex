@@ -80,7 +80,7 @@ func newContractJobFixtureWithRegistry(t *testing.T, files map[string]string, re
 	results, err := f.mi.IndexAll()
 	require.NoError(t, err)
 	require.Empty(t, results["fixture"].FailedFiles)
-	f.options = ContractFollowupCaptureOptions{Catalog: slice2TestCatalog(store), Context: ctx, Store: store, Materializer: &graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: graphview.NewLeaseManager()}, MultiIndexer: f.mi, Registry: f.mi.registry, Config: config.Default().Index, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }}
+	f.options = ContractFollowupCaptureOptions{Catalog: testCatalog(store), Context: ctx, Store: store, Materializer: &graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: graphview.NewLeaseManager()}, MultiIndexer: f.mi, Registry: f.mi.registry, Config: config.Default().Index, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }}
 	require.NoError(t, reconcilePrimaryContractBaseline(ctx, f.options, "fixture"))
 	return f
 }
@@ -341,7 +341,7 @@ func runFixtureContractJob(t *testing.T, options ContractFollowupCaptureOptions,
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	req := ContractFollowupRequest{OpenEvidence: openSlice2TestEvidence, RebuildReason: ContractFollowupUnknownInterval, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: options.Registry, Config: options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: options.Materializer.Leases, Logger: logger, Yield: yield,
+	req := ContractFollowupRequest{OpenEvidence: openTestEvidenceStore, RebuildReason: ContractFollowupUnknownInterval, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: options.Registry, Config: options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: options.Materializer.Leases, Logger: logger, Yield: yield,
 		PublishedEpoch: job.epoch, WaitPublished: job.wait, OtherActorWaiting: job.otherActorWaiting, ScratchParent: job.scratchParent, convergenceHooks: job.hooks}
 	if job.cache != nil {
 		session, sessionErr := newContractDeltaSession(*job.cache, snapshot, options.Config)
@@ -1404,7 +1404,7 @@ func TestContractAnalysisCoordinatorPublishedIsLevelTriggered(t *testing.T) {
 	capture := func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
 		return ContractFollowupSnapshot{}, nil, graph.ErrContractProjectionStale
 	}
-	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: slice2TestCatalog(f.store), OpenEvidence: openSlice2TestEvidence, Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: capture, Yield: func(ctx context.Context) error { return ctx.Err() }})
+	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(f.store), OpenEvidence: openTestEvidenceStore, Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: capture, Yield: func(ctx context.Context) error { return ctx.Err() }})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 
@@ -2135,7 +2135,7 @@ func newContractLinkedWorktree(t *testing.T, f *contractJobFixture, files map[st
 	for name, text := range files {
 		writeFile(t, filepath.Join(w.root, name), text)
 	}
-	w.builder = &SparseGenerationBuilder{Catalog: slice2TestCatalog(f.store), Store: f.store, Registry: f.mi.registry, Config: f.mi.configMgr.GetRepoConfig("fixture").Index, Logger: zap.NewNop()}
+	w.builder = &SparseGenerationBuilder{Catalog: testCatalog(f.store), Store: f.store, Registry: f.mi.registry, Config: f.mi.configMgr.GetRepoConfig("fixture").Index, Logger: zap.NewNop()}
 	w.builder.SetContractCoreRuntime(ContractCoreRuntimeHooks{Published: func(context.Context, string, string) { f.announce() }})
 	catalog := f.store.Catalog()
 	require.NoError(t, catalog.UpsertRepositoryFamily(ctx, store_sqlite.RepositoryFamily{FamilyID: "family-linked", CommonDirIdentity: filepath.Join(f.root, ".git"), State: reconcile.FamilyStateReady, CreatedAt: 1, LastSeen: 1}))
@@ -2208,7 +2208,7 @@ func (w *contractLinkedWorktree) job(t *testing.T, view *graphview.RepoView, hoo
 	nativeStore := options.Store.(*store_sqlite.Store)
 	_, payload, err := nativeStore.BeginPayloadGeneration(ctx, store_sqlite.PayloadGenerationRequest{OwnerKind: "dedicated_graph", GraphID: "contract-linked", LayerID: "job-" + time.Now().Format(time.RFC3339Nano), GenerationKind: "contract_analysis", ConfigHash: "job-config", ExtractorVersions: `{"go":"1"}`, ResolverVersion: "contract-only", CreatedAt: time.Now().UnixNano()})
 	require.NoError(t, err)
-	req := ContractFollowupRequest{OpenEvidence: openSlice2TestEvidence, RebuildReason: ContractFollowupUnknownInterval, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: options.Registry, Config: options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: options.Materializer.Leases, Logger: zap.NewNop(), Yield: options.Yield,
+	req := ContractFollowupRequest{OpenEvidence: openTestEvidenceStore, RebuildReason: ContractFollowupUnknownInterval, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: options.Registry, Config: options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: options.Materializer.Leases, Logger: zap.NewNop(), Yield: options.Yield,
 		PublishedEpoch: w.f.epoch.Load, WaitPublished: w.f.waitPublished, convergenceHooks: hooks}
 	return RunContractFollowup(ctx, req)
 }
@@ -3255,7 +3255,7 @@ func TestContractEvidenceDoorsReadTheCoreInsideTheGuard(t *testing.T) {
 	for _, file := range snapshot.Files {
 		files[file.Path] = file
 	}
-	req := ContractFollowupRequest{OpenEvidence: openSlice2TestEvidence, Snapshot: snapshot, Registry: f.options.Registry, Config: f.options.Config, Logger: zap.NewNop(), Yield: f.options.Yield}
+	req := ContractFollowupRequest{OpenEvidence: openTestEvidenceStore, Snapshot: snapshot, Registry: f.options.Registry, Config: f.options.Config, Logger: zap.NewNop(), Yield: f.options.Yield}
 	c := newContractConvergence(ctx, req, files, map[string]bool{"fixture": true}, &ContractFollowupReport{})
 	guard = c.guard
 	_, _, err = c.fullScan()
@@ -4304,7 +4304,7 @@ func TestContractConvergenceWaitWakesOnTheCloseOfAWindowItWaitsOn(t *testing.T) 
 		window bool
 	}{{"window_open", true}, {"moved_and_closed", false}} {
 		t.Run(row.name, func(t *testing.T) {
-			c := &contractConvergence{ctx: t.Context(), snap: snap, req: ContractFollowupRequest{OpenEvidence: openSlice2TestEvidence, WaitPublished: wait, PublishedEpoch: func() uint64 { return 0 }}}
+			c := &contractConvergence{ctx: t.Context(), snap: snap, req: ContractFollowupRequest{OpenEvidence: openTestEvidenceStore, WaitPublished: wait, PublishedEpoch: func() uint64 { return 0 }}}
 			mu.Lock()
 			writing = true
 			mu.Unlock()
@@ -4375,7 +4375,7 @@ func TestContractConvergenceWaitWakesOnACloseFollowedAtOnceByTheNextBegin(t *tes
 		}
 		return false
 	}
-	c := &contractConvergence{ctx: t.Context(), snap: snap, req: ContractFollowupRequest{OpenEvidence: openSlice2TestEvidence, WaitPublished: wait, PublishedEpoch: func() uint64 { return 0 }}}
+	c := &contractConvergence{ctx: t.Context(), snap: snap, req: ContractFollowupRequest{OpenEvidence: openTestEvidenceStore, WaitPublished: wait, PublishedEpoch: func() uint64 { return 0 }}}
 	c.markRound()
 	c.block(path, ContractReceiptStamp{Seq: 1, Writing: true})
 	since := c.wake()
@@ -4435,7 +4435,7 @@ func TestContractConvergenceWaitSeesWhatLandedBeforeItListened(t *testing.T) {
 				}
 				return false
 			}
-			c := &contractConvergence{ctx: t.Context(), snap: snap, req: ContractFollowupRequest{OpenEvidence: openSlice2TestEvidence, WaitPublished: wait, PublishedEpoch: func() uint64 { return 0 }}}
+			c := &contractConvergence{ctx: t.Context(), snap: snap, req: ContractFollowupRequest{OpenEvidence: openTestEvidenceStore, WaitPublished: wait, PublishedEpoch: func() uint64 { return 0 }}}
 			c.markRound()
 			if row.window {
 				c.block(path, ContractReceiptStamp{Seq: 1, Writing: true})
@@ -4493,7 +4493,7 @@ func TestContractConvergenceWaitWakesOnTheCloseOfAnyWindowItWaitsOn(t *testing.T
 		}
 		return false
 	}
-	c := &contractConvergence{ctx: t.Context(), snap: snap, req: ContractFollowupRequest{OpenEvidence: openSlice2TestEvidence, WaitPublished: wait, PublishedEpoch: func() uint64 { return 0 }}}
+	c := &contractConvergence{ctx: t.Context(), snap: snap, req: ContractFollowupRequest{OpenEvidence: openTestEvidenceStore, WaitPublished: wait, PublishedEpoch: func() uint64 { return 0 }}}
 	c.markRound()
 	c.block(first, ContractReceiptStamp{Seq: 1, Writing: true})
 	c.block(second, ContractReceiptStamp{Seq: 1, Writing: true})
@@ -5123,7 +5123,7 @@ func TestContractConvergenceWaitWakesWhenAWaitedOnRowDeparts(t *testing.T) {
 				}
 				return false
 			}
-			c := &contractConvergence{ctx: t.Context(), snap: snap, req: ContractFollowupRequest{OpenEvidence: openSlice2TestEvidence, WaitPublished: wait, PublishedEpoch: func() uint64 { return 0 }}}
+			c := &contractConvergence{ctx: t.Context(), snap: snap, req: ContractFollowupRequest{OpenEvidence: openTestEvidenceStore, WaitPublished: wait, PublishedEpoch: func() uint64 { return 0 }}}
 			c.markRound()
 			c.block(path, ContractReceiptStamp{Seq: 1, Writing: true})
 			since := c.wake()

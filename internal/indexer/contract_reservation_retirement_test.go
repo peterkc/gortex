@@ -62,7 +62,7 @@ func TestContractFailedNonemptyReservationHandsOffDurableCleanup(t *testing.T) {
 	}
 	handed := 0
 	wake := DeferredRetirementWake()
-	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: slice2TestCatalog(f.store), OpenEvidence: openSlice2TestEvidence, Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Logger: zap.NewNop(), Yield: yield,
+	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(f.store), OpenEvidence: openTestEvidenceStore, Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Logger: zap.NewNop(), Yield: yield,
 		Capture: func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
 			t.Fatal("execute already owns its captured snapshot")
 			return ContractFollowupSnapshot{}, nil, nil

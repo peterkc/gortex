@@ -162,7 +162,7 @@ func otherCall() { http.Get("http://other.test/v1/items") }
 		targets = append(targets, ContractFollowupTarget{Key: req.Snapshot.Key, Work: req.Snapshot.Work, Payload: req.Payload, Catalog: req.Catalog})
 	}
 	first := requests[0]
-	batch, err := RunContractFollowupBatch(context.Background(), ContractFollowupBatchRequest{OpenEvidence: openSlice2TestEvidence, Snapshot: first.Snapshot, Targets: targets, RebuildReason: first.RebuildReason, Registry: first.Registry, Config: first.Config, Leases: first.Leases, Yield: first.Yield})
+	batch, err := RunContractFollowupBatch(context.Background(), ContractFollowupBatchRequest{OpenEvidence: openTestEvidenceStore, Snapshot: first.Snapshot, Targets: targets, RebuildReason: first.RebuildReason, Registry: first.Registry, Config: first.Config, Leases: first.Leases, Yield: first.Yield})
 	if err != nil || len(batch.Targets) != len(requests) {
 		t.Fatalf("batch targets: %#v %v", batch, err)
 	}
