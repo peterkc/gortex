@@ -52,7 +52,7 @@ const compactionYieldCheckoutMutation = "synchronous checkout mutation"
 
 // storeChainFoldBackend is chainFoldBackend over the store.
 type storeChainFoldBackend struct {
-	store   checkoutGenerationStore
+	store   CheckoutGenerationStore
 	catalog CheckoutCatalog
 }
 

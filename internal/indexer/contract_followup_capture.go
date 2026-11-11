@@ -23,7 +23,7 @@ import (
 
 type ContractFollowupCaptureOptions struct {
 	Context             context.Context
-	Store               checkoutGenerationStore
+	Store               CheckoutGenerationStore
 	Catalog             CheckoutCatalog
 	Materializer        *graphview.Materializer
 	MultiIndexer        *MultiIndexer

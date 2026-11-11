@@ -559,7 +559,7 @@ type SparseGenerationBuilder struct {
 	// Store is any handle on the database. Generations are begun and published
 	// through it and the pass writes through the handle it hands back, so which
 	// generation this handle is pinned to does not matter.
-	Store   generationBuilderStore
+	Store   GenerationBuilderStore
 	Catalog CheckoutCatalog
 	// Registry is the parser registry the pass extracts with.
 	Registry *parser.Registry

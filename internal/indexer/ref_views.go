@@ -185,7 +185,7 @@ type RefViewResult struct {
 type RefViewManagerConfig struct {
 	// Store is any handle on the database. Generations are begun, published
 	// and superseded through it.
-	Store   checkoutGenerationStore
+	Store   CheckoutGenerationStore
 	Catalog CheckoutCatalog
 	// Builder builds the sparse generations. It must carry the index
 	// configuration the base corpus was indexed with.
@@ -269,7 +269,7 @@ type RefViewManagerConfig struct {
 // per-request state and is safe to use from many goroutines.
 type RefViewManager struct {
 	lifetime refViewLifetime
-	store    checkoutGenerationStore
+	store    CheckoutGenerationStore
 	catalog  CheckoutCatalog
 	builder  *SparseGenerationBuilder
 	logger   *zap.Logger

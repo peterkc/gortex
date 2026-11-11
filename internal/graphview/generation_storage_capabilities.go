@@ -81,9 +81,7 @@ type materializerCatalog interface {
 }
 
 // MaterializerStore is the store input to a Materializer.
-type MaterializerStore = materializerStore
-
-type materializerStore interface {
+type MaterializerStore interface {
 	graph.Store
 	IsNilGenerationHandle() bool
 	AtGenerationStore(int64) graph.Store

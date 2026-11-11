@@ -76,7 +76,7 @@ func stampBuiltGeneration(ctx context.Context, handle generationPayloadStore) er
 // each pass had across the chain it folds: its rows are theirs, so a pass one
 // of them was not stamped for is left unstamped (read as version 0) and the
 // correction re-derives it.
-func stampFoldedGeneration(ctx context.Context, store generationBuilderStore, chain []int64, handle generationPayloadStore) error {
+func stampFoldedGeneration(ctx context.Context, store GenerationBuilderStore, chain []int64, handle generationPayloadStore) error {
 	if store == nil || store.IsNilGenerationHandle() || handle == nil || handle.IsNilGenerationHandle() || len(chain) == 0 {
 		return nil
 	}

@@ -37,7 +37,7 @@ func (e *dedicatedBaseAdvanceRequiredError) Unwrap() error { return errDedicated
 // observation callers. It retains no observed config, builder or content source.
 // Startup must call it directly, not through a gate that startup itself opens.
 type dedicatedBaseRuntime struct {
-	store   generationBuilderStore
+	store   GenerationBuilderStore
 	catalog CheckoutCatalog
 	// leases is the SHARED view-lease domain — the lifecycle's own manager,
 	// the one request readers and retirement already agree on. It is held so
@@ -190,7 +190,7 @@ func (r *DedicatedBaseRuntime) FinalizeDedicatedBaseOwner(graphID string, owner 
 // degrades advancement (see the leases field). Callers install the result before
 // any owner can be registered —
 // SetDedicatedBaseCleanupRuntime refuses a late installation.
-func NewDedicatedBaseRuntime(store generationBuilderStore, catalog CheckoutCatalog, leases *graphview.LeaseManager) (*DedicatedBaseRuntime, error) {
+func NewDedicatedBaseRuntime(store GenerationBuilderStore, catalog CheckoutCatalog, leases *graphview.LeaseManager) (*DedicatedBaseRuntime, error) {
 	if store == nil || store.IsNilGenerationHandle() {
 		return nil, fmt.Errorf("%w: publisher runtime requires the stack's store", errDedicatedBaseRuntimeInput)
 	}

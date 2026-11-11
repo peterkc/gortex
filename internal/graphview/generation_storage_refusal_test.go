@@ -10,7 +10,7 @@ import (
 )
 
 type generationFactoryFixture struct {
-	materializerStore
+	MaterializerStore
 	missing bool
 }
 
@@ -18,14 +18,14 @@ func (s *generationFactoryFixture) AtGenerationStore(generation int64) graph.Sto
 	if s.missing {
 		return graph.New()
 	}
-	return s.materializerStore.AtGenerationStore(generation)
+	return s.MaterializerStore.AtGenerationStore(generation)
 }
 
 func TestMaterializerRefusesGenerationWithoutSourceReads(t *testing.T) {
 	store := openStackStore(t, "missing-source-reads")
 	generation := writeStackCommitGeneration(t, store)
 	m := newTestMaterializer(store)
-	factory := &generationFactoryFixture{materializerStore: store, missing: true}
+	factory := &generationFactoryFixture{MaterializerStore: store, missing: true}
 	m.Store = factory
 	handle, layer, _, err := m.openGeneration(t.Context(), generation)
 	require.Equal(t, CodeCheckoutInaccessible, CodeOf(err))
@@ -38,7 +38,7 @@ func TestWarmRouteRefusesPreloadWithoutLayerReads(t *testing.T) {
 	store := openStackStore(t, "missing-preload-reads")
 	generation := writeStackCommitGeneration(t, store)
 	m := newTestMaterializer(store)
-	factory := &generationFactoryFixture{materializerStore: store}
+	factory := &generationFactoryFixture{MaterializerStore: store}
 	m.Store = factory
 	m.newGenerationLayer = func(ctx context.Context, handle GenerationLayerHandle) (*GenerationLayer, error) {
 		layer, err := NewGenerationLayerContext(ctx, handle)
@@ -53,7 +53,7 @@ func TestWarmRouteRefusesPreloadWithoutLayerReads(t *testing.T) {
 func TestContractInputsRefuseBaseWithoutInputReads(t *testing.T) {
 	store := openTestStore(t)
 	m := newTestMaterializer(store)
-	m.Store = &generationFactoryFixture{materializerStore: store, missing: true}
+	m.Store = &generationFactoryFixture{MaterializerStore: store, missing: true}
 	inputs, err := m.CaptureContractInputs(t.Context(), nil, "repo", "")
 	require.ErrorIs(t, err, graph.ErrContractInputVector)
 	require.Nil(t, inputs)
@@ -63,7 +63,7 @@ func TestContractCompanionInputsRefuseBaseWithoutInputReads(t *testing.T) {
 	store := openTestStore(t)
 	generation := contractInputGeneration(t, store, "dedicated", 0, acceptedContractInput(stackRepo, testCheckoutID, "selected"))
 	m, view := materializeContractInputs(t, store, generation)
-	factory := &generationFactoryFixture{materializerStore: store, missing: true}
+	factory := &generationFactoryFixture{MaterializerStore: store, missing: true}
 	m.Store = factory
 	view.contractStore = factory
 	inputs, err := m.CaptureContractCompanionInputs(t.Context(), view, "companion", "")
@@ -74,7 +74,7 @@ func TestContractCompanionInputsRefuseBaseWithoutInputReads(t *testing.T) {
 func TestContractReadinessRefusesBaseWithoutReadinessReads(t *testing.T) {
 	store := openTestStore(t)
 	m := newTestMaterializer(store)
-	m.Store = &generationFactoryFixture{materializerStore: store, missing: true}
+	m.Store = &generationFactoryFixture{MaterializerStore: store, missing: true}
 	_, err := m.ContractReadiness(t.Context(), ContractSelection{RepoPrefixes: []string{"repo"}})
 	require.ErrorIs(t, err, graph.ErrContractInputVector)
 	lease := m.Leases.Acquire(BaseCorpusGeneration)

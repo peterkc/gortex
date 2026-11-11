@@ -58,7 +58,7 @@ const contractBaselineReconcileCause = "namespace_baseline_reconciliation"
 
 // ContractStuckRepairOptions wires the repair to the runtime it repairs.
 type ContractStuckRepairOptions struct {
-	Store        checkoutGenerationStore
+	Store        CheckoutGenerationStore
 	Catalog      CheckoutCatalog
 	MultiIndexer *MultiIndexer
 	// Baseline is the capture runtime the namespace header repair rebuilds

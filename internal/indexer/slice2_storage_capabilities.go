@@ -175,9 +175,7 @@ type generationPayloadStore interface {
 }
 
 // GenerationBuilderStore is the store input to the dedicated-base runtime.
-type GenerationBuilderStore = generationBuilderStore
-
-type generationBuilderStore interface {
+type GenerationBuilderStore interface {
 	SymbolSearchCoreKey() any
 	RetirePayloadGeneration(ctx context.Context, generationID int64, inUse func(int64) bool) error
 	ContractInputIdentityPublishedContext(ctx context.Context, w graph.ContractInputWitness) (bool, error)
@@ -201,9 +199,7 @@ type generationBuilderStore interface {
 }
 
 // CheckoutGenerationStore is the store input to the contract analysis runtime.
-type CheckoutGenerationStore = checkoutGenerationStore
-
-type checkoutGenerationStore interface {
+type CheckoutGenerationStore interface {
 	SymbolSearchViewGeneration() int64
 	OpenContractCoreWindows(repo string) []storage.ContractCoreWindow
 	ContractCoreOrphanEvents() (uint64, <-chan struct{})
@@ -220,7 +216,7 @@ type checkoutGenerationStore interface {
 	RetirePayloadGenerationQuantum(ctx context.Context, generationID int64, inUse func(int64) bool) (storage.PayloadRetirementProgress, error)
 	RetirePayloadGenerationQuantumFenced(ctx context.Context, generationID int64, inUse func(int64) bool) (storage.PayloadRetirementProgress, error)
 	StorageFailures() []storage.StorageFailure
-	generationBuilderStore
+	GenerationBuilderStore
 	BeginChainFoldHandle(ctx context.Context, req storage.ChainFoldRequest) (storage.ChainFoldHandle, error)
 	BeginDerivedCorrectionHandle(ctx context.Context, req storage.DerivedCorrectionRequest) (storage.DerivedCorrectionHandle, error)
 	FlattenGenerationChain(ctx context.Context, chain []int64, to int64) (counts storage.GenerationCopyCounts, err error)

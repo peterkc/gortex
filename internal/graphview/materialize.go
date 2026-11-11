@@ -83,7 +83,7 @@ type Materializer struct {
 	// indexed corpus through it and derives one pinned handle per routed
 	// generation, so which generation the handle it was given happens to
 	// be on does not matter.
-	Store materializerStore
+	Store MaterializerStore
 	// Catalog answers what the checkout is routed to.
 	Catalog materializerCatalog
 	// Leases pins the generations a materialized view reads. Retirement
@@ -165,7 +165,7 @@ type RepoView struct {
 	sources     []GenerationSource
 	// contractStore is used only by lazy contract consumers, never by ordinary
 	// view materialization. It derives the inherited mutable-corpus handle.
-	contractStore materializerStore
+	contractStore MaterializerStore
 	lease         *Lease
 	closeOnce     sync.Once
 }

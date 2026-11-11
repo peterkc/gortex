@@ -37,7 +37,7 @@ var editDeltaAbsentCapabilities = map[string]string{
 	"indexer.configuredRepositoryStore":   "configured repository ownership is an optional physical catalog read, not a file-delta operation; without it both configured-owner paths keep live ownership or configuration order",
 	"anonymous{Close}":                    "scratch-evidence resource cleanup, asserted only after an evidence opener returns an insufficient physical store; DeltaWriter owns no closeable backend resource",
 	"graph.ContractAttachmentReader":      "attachment read on the captured physical generation source, never on the mutable DeltaWriter; selected-source attachment validation stays with that generation",
-	"indexer.checkoutGenerationStore":     "physical checkout lifecycle and generation publication; a DeltaWriter does not own that lifecycle, so it does not install the physical checkout runtime",
+	"indexer.CheckoutGenerationStore":     "physical checkout lifecycle and generation publication; a DeltaWriter does not own that lifecycle, so it does not install the physical checkout runtime",
 	"indexer.contractEvidenceStore":       "scratch evidence store opened for contract followup; an insufficient result is refused and closed rather than substituting a mutable file delta",
 	"indexer.contractPublicationStore":    "captured physical publication source for contract attachments; DeltaWriter stages file mutations and cannot own generation fencing or publication",
 	"indexer.cooperativeGenerationCopier": "optional same-core cooperative payload copy on the dedicated builder; absent, the builder uses its existing CopyPayloadGeneration path, not a DeltaWriter forwarding path",

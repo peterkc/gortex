@@ -28,7 +28,7 @@ type ContractFollowupCapture func(context.Context, *graphview.RepoView, *graphvi
 
 type ContractAnalysisCoordinatorOptions struct {
 	OpenEvidence func(string) (graph.Store, error)
-	Store        checkoutGenerationStore
+	Store        CheckoutGenerationStore
 	Catalog      CheckoutCatalog
 	Leases       *graphview.LeaseManager
 	Registry     *parser.Registry

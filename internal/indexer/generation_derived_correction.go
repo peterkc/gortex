@@ -186,7 +186,7 @@ func (l *CheckoutLifecycle) derivationEnvFor(ctx context.Context, row storage.Vi
 // that one is the indexer's cold-index staging buffer only (see the graph
 // package's New fence), and anything held in it would die with the process.
 func derivationParser(
-	store generationBuilderStore, catalog CheckoutCatalog, generationID int64, registry *parser.Registry, cfg config.IndexConfig,
+	store GenerationBuilderStore, catalog CheckoutCatalog, generationID int64, registry *parser.Registry, cfg config.IndexConfig,
 	logger *zap.Logger, repoPrefix, root string,
 ) *Indexer {
 	idx := New(generationAt(store, generationID), registry, cfg, logger)

@@ -227,7 +227,7 @@ type CheckoutCoordinatorConfig struct {
 
 	// Store is any handle on the database. Generations are begun, published,
 	// routed and retired through it.
-	Store   checkoutGenerationStore
+	Store   CheckoutGenerationStore
 	Catalog CheckoutCatalog
 	// Builder builds the sparse generations. It must carry the index
 	// configuration the base corpus was indexed with.
@@ -493,7 +493,7 @@ type CheckoutCoordinator struct {
 	workspaceID string
 	projectID   string
 
-	store   checkoutGenerationStore
+	store   CheckoutGenerationStore
 	catalog CheckoutCatalog
 	builder *SparseGenerationBuilder
 	leases  *graphview.LeaseManager
