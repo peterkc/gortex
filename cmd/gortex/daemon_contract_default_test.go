@@ -12,9 +12,38 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/indexer"
+	gortexmcp "github.com/zzet/gortex/internal/mcp"
 	"go.uber.org/zap"
 )
+
+func TestDaemonContractAnalysisRequiresPairedCheckoutCatalog(t *testing.T) {
+	t.Setenv("GORTEX_ASYNC_CONTRACTS", "1")
+	store, err := store_sqlite.Open(":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	state := &daemonState{
+		graph: store, indexer: &indexer.Indexer{}, multiIndexer: &indexer.MultiIndexer{},
+		lifecycle: &indexer.CheckoutLifecycle{}, mcpServer: &gortexmcp.Server{},
+	}
+	leases := graphview.NewLeaseManager()
+	var nativeNil *store_sqlite.Catalog
+	for _, tc := range []struct {
+		name         string
+		materializer *graphview.Materializer
+	}{
+		{"missing", &graphview.Materializer{Store: store, Leases: leases}},
+		{"typed_nil", &graphview.Materializer{Store: store, Catalog: nativeNil, Leases: leases}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state.mcpServer.SetMaterializer(tc.materializer)
+			runtime, err := installDaemonContractAnalysis(state, zap.NewNop())
+			require.EqualError(t, err, "contract analysis: paired checkout catalog required")
+			require.Nil(t, runtime)
+		})
+	}
+}
 
 // Exercise the actual daemon constructor, including a restart over accepted
 // owner/catalog rows. The worker stays idle until a contract consumer requests
