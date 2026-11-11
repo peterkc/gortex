@@ -168,7 +168,7 @@ type CheckoutLifecycle struct {
 	mi           *MultiIndexer
 	cfgMgr       *config.ConfigManager
 	catalog      CheckoutCatalog
-	store        CheckoutGenerationStore
+	store        CheckoutGenerationStore // Construction keeps store and catalog interfaces free of typed nils.
 	leases       *graphview.LeaseManager
 	// Non-Git observations have no catalog intent to distinguish them from
 	// removed config entries. Keep their live root until explicit registration
@@ -469,6 +469,7 @@ func NewCheckoutLifecycle(cfg CheckoutLifecycleConfig) (*CheckoutLifecycle, erro
 		return nil, errors.New("indexer: checkout lifecycle needs a multi-repo indexer")
 	}
 	// Only the original physical store may own generation lifecycle operations.
+	// Normalize once so the owned store and catalog interfaces are never typed nil.
 	store, _ := cfg.Graph.(CheckoutGenerationStore)
 	if store != nil && (store.IsNilGenerationHandle() || !store.SharesSymbolSearchCore(cfg.Graph)) {
 		store = nil

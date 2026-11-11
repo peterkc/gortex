@@ -493,6 +493,7 @@ type CheckoutCoordinator struct {
 	workspaceID string
 	projectID   string
 
+	// Construction keeps store and catalog interfaces free of typed nils.
 	store   CheckoutGenerationStore
 	catalog CheckoutCatalog
 	builder *SparseGenerationBuilder

@@ -37,6 +37,7 @@ func (e *dedicatedBaseAdvanceRequiredError) Unwrap() error { return errDedicated
 // observation callers. It retains no observed config, builder or content source.
 // Startup must call it directly, not through a gate that startup itself opens.
 type dedicatedBaseRuntime struct {
+	// Construction keeps store and catalog interfaces free of typed nils.
 	store   GenerationBuilderStore
 	catalog CheckoutCatalog
 	// leases is the SHARED view-lease domain — the lifecycle's own manager,
