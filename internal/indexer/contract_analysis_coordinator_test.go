@@ -13,6 +13,22 @@ import (
 	"github.com/zzet/gortex/internal/graphview"
 )
 
+func TestContractAnalysisCoordinatorRefusesMissingEvidenceOpener(t *testing.T) {
+	f := newContractWorkerFixture(t)
+	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{
+		Store: f.store, Catalog: f.store.Catalog(), Leases: f.leases, Registry: f.registry,
+		Yield: func(ctx context.Context) error { return ctx.Err() },
+		Capture: func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
+			panic("constructor must not capture")
+		},
+	})
+	if c != nil {
+		t.Cleanup(func() { require.NoError(t, c.Close()) })
+	}
+	require.EqualError(t, err, "contract analysis coordinator: evidence opener required")
+	require.Nil(t, c)
+}
+
 // scheduleAndWait schedules inputs for the actor of repos and waits on the
 // promise of the seq it answered.
 func scheduleAndWait(t *testing.T, ctx context.Context, c *ContractAnalysisCoordinator, repos []string, repo string, inputs *graphview.SelectedContractInputs) (ContractScheduleResult, ContractActorStatus) {
