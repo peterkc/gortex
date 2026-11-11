@@ -48,24 +48,11 @@ import (
 // slower than the caller can afford, because the disk is busy or the rows are
 // wide.
 //
-// These are *ceilings on the pathological case*, not fair-share slices, and the
-// difference is load-bearing. A yield is only free for a caller that offers the
-// generation again: the coordinator backlog, the lifecycle's owed set and the
-// ref-view retention pass all do, but the repository-cleanup path does not —
-// internal/indexer/repository_cleanup.go:264 returns any retirement error that
-// is not ErrCatalogNotFound, and only ErrRepositoryCleanupPending is mapped
-// onto a retryable untrack. A default small enough to fire on an ordinary
-// retirement would therefore turn untracking a large repository from "this
-// takes a while" into "this failed". So the defaults are set well above the
-// payload any real generation carries — roughly sixty-four million rows, or
-// ten minutes of continuous deleting, against the low millions a very large
-// repository's whole graph amounts to — and what they actually stop is a sweep
-// that is not converging at all.
-//
-// Lowering them into a scheduler slice is a real improvement and a separate
-// change: it needs repository_cleanup.go to map ErrPayloadSweepBudgetExhausted
-// onto its pending sentinel first. TestTheDefaultSweepBudgetIsACeilingNotASlice
-// states that dependency where someone lowering these numbers will read it.
+// These are ceilings on the pathological case, not fair-share slices. The
+// defaults allow roughly sixty-four million rows or ten minutes of continuous
+// deleting. Callers resume yielded generations; repository cleanup maps
+// ErrPayloadSweepBudgetExhausted to ErrRepositoryCleanupPending for untrack.
+// TestTheDefaultSweepBudgetIsACeilingNotASlice pins the default budget's scale.
 const (
 	payloadSweepMaxRows    = 64_000_000
 	payloadSweepMaxChunks  = 4_000_000 // chunks are time-sized, down to payloadSweepMinBatch rows
