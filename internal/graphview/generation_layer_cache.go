@@ -52,7 +52,9 @@ func layerCacheKeyFor(store layerCacheSource, generation int64, row storage.View
 	key := layerCacheKey{generation: generation, createdAt: row.CreatedAt, publishedAt: row.PublishedAt}
 	if store != nil && !store.IsNilGenerationHandle() {
 		key.correctionEpoch = store.GenerationCorrectionEpoch(generation)
-		key.inputRevision = store.AtGenerationStore(generation).(GenerationLayerHandle).PayloadInputRevision()
+		if handle, ok := store.AtGenerationStore(generation).(GenerationLayerHandle); ok {
+			key.inputRevision = handle.PayloadInputRevision()
+		}
 	}
 	return key
 }

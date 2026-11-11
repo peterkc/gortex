@@ -9,6 +9,13 @@ import (
 	"testing"
 )
 
+func TestLayerCacheKeyUsesZeroRevisionForNegativeGeneration(t *testing.T) {
+	store := openStackStore(t, "negative-generation-cache-key")
+	row := store_sqlite.ViewGeneration{CreatedAt: 1, PublishedAt: 2}
+	key := layerCacheKeyFor(store, -1, row)
+	require.Equal(t, layerCacheKey{generation: -1, createdAt: 1, publishedAt: 2}, key)
+}
+
 func TestLayerCacheRefreshesCommittedCorrectionBeforeFinish(t *testing.T) {
 	ctx := t.Context()
 	store := openStackStore(t, "layer-cache-chunk-revision")
