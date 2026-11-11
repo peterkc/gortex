@@ -80,12 +80,37 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # setup-go keeps one build cache per OS, so the first test job to save
+      # it wins and the other partitions compile their packages again. Each
+      # partition keeps its own build cache instead, and the partitions on an
+      # OS share one module cache. Pushes to main and manual runs save them
+      # once per go.sum; pull requests only restore them.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache-dependency-path: |
-            go.sum
-            go.mod
+          cache: false
+      - name: Locate the Go caches
+        id: go-paths
+        shell: bash
+        run: |
+          echo "build=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "modules=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+          echo "version=$(go env GOVERSION)" >> "$GITHUB_OUTPUT"
+      # After a go.sum change, each cache starts from its newest entry.
+      - name: Restore the module cache
+        id: go-mod-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.go-paths.outputs.modules }}
+          key: go-mod-${{ matrix.os }}-${{ steps.go-paths.outputs.version }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-mod-${{ matrix.os }}-${{ steps.go-paths.outputs.version }}-
+      - name: Restore the partition's build cache
+        id: go-build-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.go-paths.outputs.build }}
+          key: go-build-${{ matrix.os }}-${{ matrix.partition }}-${{ steps.go-paths.outputs.version }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-build-${{ matrix.os }}-${{ matrix.partition }}-${{ steps.go-paths.outputs.version }}-
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: test-selection
@@ -97,6 +122,20 @@ jobs:
           TEST_RACE: ${{ matrix.os == 'ubuntu-24.04' }}
           TEST_WINDOWS: ${{ matrix.os == 'windows-latest' }}
         run: go run ./scripts/ci-test --selection test-selection.json
+      # Every partition on an OS offers the same module cache; the first save
+      # wins and the others only log that the key exists.
+      - name: Save the module cache
+        if: github.event_name != 'pull_request' && steps.go-mod-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.go-paths.outputs.modules }}
+          key: ${{ steps.go-mod-cache.outputs.cache-primary-key }}
+      - name: Save the partition's build cache
+        if: github.event_name != 'pull_request' && steps.go-build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.go-paths.outputs.build }}
+          key: ${{ steps.go-build-cache.outputs.cache-primary-key }}
       - name: Upload full-suite coverage
         if: matrix.os == 'ubuntu-24.04' && needs.plan.outputs.mode == 'full'
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
