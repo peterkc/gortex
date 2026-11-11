@@ -221,8 +221,7 @@ func TestAgedRetirementCannotEnterAnActualHeldEditCycle(t *testing.T) {
 	}()
 	go func() { _, _, err := l.SweepDeferredRetirements(ctx); done <- err }()
 	require.Eventually(t, func() bool { return gate.Stats().BackgroundQueued == 1 }, 5*time.Second, time.Millisecond)
-	nativeStore := l.store.(*store_sqlite.Store)
-	requireGenerationStateWithPayload(t, nativeStore, id, store_sqlite.ViewGenerationFailed)
+	requireGenerationStateWithPayload(t, l.store.(*store_sqlite.Store), id, store_sqlite.ViewGenerationFailed)
 	select {
 	case err := <-done:
 		joined = true
@@ -467,8 +466,7 @@ func TestRetirementBurstDistinguishesAutomaticRollbackFromLiveSQLFailure(t *test
 			require.Equal(t, first.RowsDeleted, fields["rows_deleted"])
 			require.EqualValues(t, first.StepsAdvanced, fields["steps_advanced"])
 			require.Zero(t, fields["retired_generations"])
-			nativeStore := l.store.(*store_sqlite.Store)
-			requireGenerationStateWithPayload(t, nativeStore, id, store_sqlite.ViewGenerationRetiring)
+			requireGenerationStateWithPayload(t, l.store.(*store_sqlite.Store), id, store_sqlite.ViewGenerationRetiring)
 			require.False(t, gate.Stats().Active)
 		})
 	}

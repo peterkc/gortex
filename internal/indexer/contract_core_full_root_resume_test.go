@@ -112,8 +112,7 @@ func TestClaimedDedicatedBaseReparsesInterruptedContractNamespace(t *testing.T) 
 func TestContractCoreFullRootResumeRefusesChangedPhysicalInput(t *testing.T) {
 	builder, request, claim, _ := claimedCopyFixture(t)
 	ctx := context.Background()
-	nativeStore := builder.Store.(*store_sqlite.Store)
-	target := nativeStore.AtGeneration(claim.GenerationID)
+	target := builder.Store.(*store_sqlite.Store).AtGeneration(claim.GenerationID)
 	old := graph.ContractInputState{RepoPrefix: request.RepoPrefix, CheckoutID: request.Identity.CheckoutID,
 		InputVersion: contractCoreInputVersion, InputFingerprint: "interrupted", Accepted: true}
 	require.NoError(t, target.SetContractInputStateWithWorkContext(ctx, nil, old, nil))

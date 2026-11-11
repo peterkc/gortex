@@ -146,8 +146,7 @@ func TestContractCohortWorkSurvivesPrioritySubsetRecaptureAndNextEdit(t *testing
 	var payload *store_sqlite.Store
 	for _, target := range all {
 		if target.Key.RepoPrefix == "fixture" {
-			nativeStore := target.Payload.(*store_sqlite.Store)
-			payload = nativeStore
+			payload = target.Payload.(*store_sqlite.Store)
 		}
 	}
 	require.NotNil(t, payload)

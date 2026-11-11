@@ -27,8 +27,7 @@ func TestContractStampUnroutedGenerationDoesNotMoveLeasedRows(t *testing.T) {
 		handles = append(handles, f.store.AtGeneration(0))
 	}
 	for _, source := range view.GenerationSources() {
-		nativeStore := source.Handle.(*store_sqlite.Store)
-		handles = append(handles, nativeStore)
+		handles = append(handles, source.Handle.(*store_sqlite.Store))
 	}
 	scanner := newContractStampScanner(inputs, map[string][]generationPayloadStore{"fixture": handles}, nil)
 	const path = "fixture/consts.go"
@@ -90,8 +89,7 @@ func TestContractStampPublishedPendingRowsAndMutableABAStayGuarded(t *testing.T)
 					handles = append(handles, f.store.AtGeneration(0))
 				}
 				for _, source := range view.GenerationSources() {
-					nativeStore := source.Handle.(*store_sqlite.Store)
-					handles = append(handles, nativeStore)
+					handles = append(handles, source.Handle.(*store_sqlite.Store))
 				}
 				scanner = newContractStampScanner(inputs, map[string][]generationPayloadStore{"fixture": handles}, nil)
 				handle, actor = f.store.AtGeneration(w.commit), contractLinkedCheckout

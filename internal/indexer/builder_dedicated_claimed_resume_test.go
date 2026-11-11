@@ -71,10 +71,9 @@ func TestClaimedDedicatedBaseResumesAfterAStopBeforePublication(t *testing.T) {
 	// The oracle: an uninterrupted copy build of an independent fixture.
 	reference, referenceRequest, referenceClaim, _ := claimedCopyFixture(t)
 	indexGenerationZero(t, reference, referenceRequest)
-	referenceStore := reference.Store.(*store_sqlite.Store)
 	referenceID := buildClaimedBase(t, reference, ClaimedDedicatedBaseRequest{
 		Claim: referenceClaim, RootPath: referenceRequest.RootPath, WorkspaceID: referenceRequest.WorkspaceID,
-		ProjectID: referenceRequest.ProjectID, CopySource: &copyProbe{store: referenceStore},
+		ProjectID: referenceRequest.ProjectID, CopySource: &copyProbe{store: reference.Store.(*store_sqlite.Store)},
 	})
 	gotNodes, gotEdges := claimedBasePayload(materializeClaimedBase(t, builder, request.Identity.GraphID, id).Reader)
 	wantNodes, wantEdges := claimedBasePayload(materializeClaimedBase(t, reference, referenceRequest.Identity.GraphID, referenceID).Reader)

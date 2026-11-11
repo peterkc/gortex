@@ -111,8 +111,7 @@ func TestDeferredReadyRediscoveryPreservesUngatedAndExplicitSweep(t *testing.T) 
 	l.SetBuildGate(nil)
 	_, _, err := l.SweepDeferredRetirements(t.Context())
 	require.NoError(t, err)
-	nativeStore := l.store.(*store_sqlite.Store)
-	requireCatalogGenerationPresent(t, nativeStore, ids["orphan"])
+	requireCatalogGenerationPresent(t, l.store.(*store_sqlite.Store), ids["orphan"])
 	require.Empty(t, l.owed, "ungated discovery must retain its served-checkout exclusion")
 	// Legacy explicit sweeping uses its original, conservative helper even when
 	// this lifecycle later has a managed worker gate.

@@ -121,8 +121,7 @@ func TestDedicatedBaseAdvanceRootsOnceTheChainHoldsTheBound(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	initial := f.ensure(t, ctx)
-	nativeStore := f.builder.Store.(*store_sqlite.Store)
-	catalog := nativeStore.Catalog()
+	catalog := f.builder.Store.(*store_sqlite.Store).Catalog()
 	root, found, err := catalog.GetViewGeneration(ctx, initial.Claim.GenerationID)
 	if err != nil || !found {
 		t.Fatalf("initial row: found=%v err=%v", found, err)
@@ -181,8 +180,7 @@ func TestDedicatedBaseWalkReportsDepthSeparatelyFromCycles(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	initial := f.ensure(t, ctx)
-	nativeStore := f.builder.Store.(*store_sqlite.Store)
-	catalog := nativeStore.Catalog()
+	catalog := f.builder.Store.(*store_sqlite.Store).Catalog()
 	root, found, err := catalog.GetViewGeneration(ctx, initial.Claim.GenerationID)
 	if err != nil || !found {
 		t.Fatalf("initial row: found=%v err=%v", found, err)
@@ -219,8 +217,7 @@ func TestDedicatedDeltaClaimRefusedAtTheAncestryBound(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	initial := f.ensure(t, ctx)
-	nativeStore := f.builder.Store.(*store_sqlite.Store)
-	catalog := nativeStore.Catalog()
+	catalog := f.builder.Store.(*store_sqlite.Store).Catalog()
 	root, found, err := catalog.GetViewGeneration(ctx, initial.Claim.GenerationID)
 	if err != nil || !found {
 		t.Fatalf("initial row: found=%v err=%v", found, err)

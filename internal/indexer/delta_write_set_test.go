@@ -281,8 +281,7 @@ func (f deltaWriteSetFixture) advance(t *testing.T, tree map[string]string) (int
 		"-c", "commit.gpgsign=false", "commit", "-qm", "ten-file edit")
 	target := f.git("rev-parse", "HEAD^{tree}")
 
-	nativeStore := f.builder.Store.(*store_sqlite.Store)
-	catalog := nativeStore.Catalog()
+	catalog := f.builder.Store.(*store_sqlite.Store).Catalog()
 	p, _, err := catalog.DedicatedBasePublication(ctx, f.baseClaim.Desire.Authority.GraphID)
 	if err != nil {
 		t.Fatal(err)
@@ -729,8 +728,7 @@ func TestCommittedBaseClosureCapReachesTheBuild(t *testing.T) {
 		}
 		// The knowingly incomplete generation says WHY it is incomplete, and
 		// the reason names the bound an operator can move.
-		nativeStore := fixture.builder.Store.(*store_sqlite.Store)
-		states, err := nativeStore.AtGeneration(generationID).ProducerStates()
+		states, err := fixture.builder.Store.(*store_sqlite.Store).AtGeneration(generationID).ProducerStates()
 		if err != nil {
 			t.Fatalf("ProducerStates: %v", err)
 		}

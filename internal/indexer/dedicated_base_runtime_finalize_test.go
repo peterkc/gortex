@@ -118,8 +118,7 @@ func TestDedicatedBaseRuntimeFinalizeKeepsHeldPublisherRevoked(t *testing.T) {
 	if err := r.FinalizeDedicatedBaseOwner(graphID, owner, drained); err != nil {
 		t.Fatal(err)
 	}
-	nativeStore := b.Store.(*store_sqlite.Store)
-	check, err := installDedicatedWriteAudit(t.Context(), nativeStore, request.StorePath)
+	check, err := installDedicatedWriteAudit(t.Context(), b.Store.(*store_sqlite.Store), request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -46,8 +46,7 @@ func (f coordinatorAncestryFixture) node(name, file string) *graph.Node {
 func (f coordinatorAncestryFixture) generation(t testing.TB, parent int64, kind string, nodes []*graph.Node, masks []store_sqlite.FileMask, tombstones []string) int64 {
 	t.Helper()
 	ctx := context.Background()
-	nativeStore := f.c.store.(*store_sqlite.Store)
-	id, handle, err := nativeStore.BeginPayloadGeneration(ctx, store_sqlite.PayloadGenerationRequest{
+	id, handle, err := f.c.store.(*store_sqlite.Store).BeginPayloadGeneration(ctx, store_sqlite.PayloadGenerationRequest{
 		OwnerKind: f.request.Identity.OwnerKind, GraphID: f.request.Identity.GraphID,
 		CheckoutID: f.request.Identity.CheckoutID, GenerationKind: kind,
 		BaseGenerationID: parent, TreeOID: f.request.Identity.TreeOID,
@@ -85,8 +84,7 @@ func TestCoordinatorCommitReaderComposesAncestryAndReleases(t *testing.T) {
 	top := f.generation(t, middle, "commit", []*graph.Node{newest}, []store_sqlite.FileMask{
 		{RepoPrefix: f.request.RepoPrefix, FilePath: newest.FilePath, Mode: store_sqlite.OwnershipReplace},
 	}, nil)
-	nativeStore := f.c.store.(*store_sqlite.Store)
-	if nativeStore.AtGeneration(top).GetNode(newest.ID) == nil {
+	if f.c.store.(*store_sqlite.Store).AtGeneration(top).GetNode(newest.ID) == nil {
 		t.Fatal("newest generation payload missing before composition")
 	}
 	reader, release, err := f.c.commitLayerReader(context.Background(), top)
@@ -125,8 +123,7 @@ func TestCoordinatorCommitReaderPreservesLegacyBaseZero(t *testing.T) {
 	top := f.generation(t, 0, "commit", []*graph.Node{current}, []store_sqlite.FileMask{
 		{RepoPrefix: f.request.RepoPrefix, FilePath: current.FilePath, Mode: store_sqlite.OwnershipReplace},
 	}, nil)
-	nativeStore := f.c.store.(*store_sqlite.Store)
-	if nativeStore.AtGeneration(top).GetNode(current.ID) == nil {
+	if f.c.store.(*store_sqlite.Store).AtGeneration(top).GetNode(current.ID) == nil {
 		t.Fatal("current generation payload missing before composition")
 	}
 	reader, release, err := f.c.commitLayerReader(context.Background(), top)
@@ -167,8 +164,7 @@ func TestCoordinatorCommitReaderRejectsUnavailableAncestry(t *testing.T) {
 func TestCoordinatorCommitReaderRejectsMismatchedDedicatedOwner(t *testing.T) {
 	f := newCoordinatorAncestryFixture(t)
 	ctx := context.Background()
-	nativeStore := f.c.store.(*store_sqlite.Store)
-	id, _, err := nativeStore.BeginPayloadGeneration(ctx, store_sqlite.PayloadGenerationRequest{
+	id, _, err := f.c.store.(*store_sqlite.Store).BeginPayloadGeneration(ctx, store_sqlite.PayloadGenerationRequest{
 		OwnerKind: checkoutLayerOwnerKind, GraphID: f.request.Identity.GraphID,
 		CheckoutID: f.otherCheckoutID, GenerationKind: "dedicated", TreeOID: f.request.Identity.TreeOID,
 	})

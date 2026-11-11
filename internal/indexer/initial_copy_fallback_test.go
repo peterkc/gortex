@@ -29,8 +29,7 @@ func TestClaimedInitialCopyYieldFallsBackOnceAndCompletesSameReservation(t *test
 	assertGenerationZeroMatchesTheReservedExtractors(t, b, req)
 	probe := &initialYieldCopyProbe{err: store_sqlite.ErrGenerationCopyYielded}
 	probe.before = func() {
-		nativeStore := b.Store.(*store_sqlite.Store)
-		row, ok, err := nativeStore.Catalog().GetViewGeneration(t.Context(), claim.GenerationID)
+		row, ok, err := b.Store.(*store_sqlite.Store).Catalog().GetViewGeneration(t.Context(), claim.GenerationID)
 		if err != nil || !ok || row.State != store_sqlite.ViewGenerationBuilding {
 			t.Errorf("copy was not building: %+v %v", row, err)
 		}
@@ -63,8 +62,7 @@ func TestClaimedInitialCopyParentCancellationDoesNotStartFallback(t *testing.T) 
 	if !errors.Is(err, context.Canceled) || errors.Is(err, store_sqlite.ErrGenerationCopyYielded) || probe.calls != 1 || logs.FilterMessage("claimed dedicated base source plan").Len() != 1 {
 		t.Fatalf("cancellation retried: %v calls=%d", err, probe.calls)
 	}
-	nativeStore := b.Store.(*store_sqlite.Store)
-	row, ok, stateErr := nativeStore.Catalog().GetViewGeneration(t.Context(), claim.GenerationID)
+	row, ok, stateErr := b.Store.(*store_sqlite.Store).Catalog().GetViewGeneration(t.Context(), claim.GenerationID)
 	if stateErr != nil || !ok || row.State != store_sqlite.ViewGenerationBuilding {
 		t.Fatalf("canceled reservation lost: %+v %v", row, stateErr)
 	}

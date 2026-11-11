@@ -209,8 +209,7 @@ func privateClaimedDedicatedFixture(t testing.TB) (*SparseGenerationBuilder, ded
 	builder, request, _ := privateDedicatedBuilderFixture(t)
 	ctx := context.Background()
 	// Production Open must install the publication schema; do not create it in this fixture.
-	nativeStore := builder.Store.(*store_sqlite.Store)
-	catalog := nativeStore.Catalog()
+	catalog := builder.Store.(*store_sqlite.Store).Catalog()
 	authority, err := catalog.AcquireDedicatedBaseAuthority(ctx, store_sqlite.AcquireDedicatedBaseAuthorityRequest{
 		GraphID: request.Identity.GraphID,
 		Owner:   store_sqlite.DedicatedBaseOwner{CheckoutID: request.Identity.CheckoutID, Incarnation: "private-incarnation"},
@@ -462,8 +461,7 @@ func TestPrivateClaimedDedicatedBaseStaleDesireRejectsReadyCandidate(t *testing.
 func TestPrivateClaimedDedicatedBaseConcurrentOnePhysicalBuild(t *testing.T) {
 	builder, request, claim := privateClaimedDedicatedFixture(t)
 	ctx := context.Background()
-	nativeStore := builder.Store.(*store_sqlite.Store)
-	second, err := nativeStore.Catalog().ClaimDedicatedBaseBuild(ctx, store_sqlite.ClaimDedicatedBaseBuildRequest{Desire: claim.Desire, AttemptToken: "second-caller"})
+	second, err := builder.Store.(*store_sqlite.Store).Catalog().ClaimDedicatedBaseBuild(ctx, store_sqlite.ClaimDedicatedBaseBuildRequest{Desire: claim.Desire, AttemptToken: "second-caller"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -623,9 +621,8 @@ func TestPrivateReservedGenerationOnlyLeaderPreparesAndClosesSource(t *testing.T
 	results := make(chan result, 2)
 	for _, adopted := range []bool{false, true} {
 		go func() {
-			nativeStore := builder.Store.(*store_sqlite.Store)
 			id, report, err := builder.buildReservedGenerationWithPreparation(ctx, req, buildPlan{}, BuildReport{}, time.Now(),
-				claim.GenerationID, nativeStore.AtGeneration(claim.GenerationID), adopted, prepare)
+				claim.GenerationID, builder.Store.(*store_sqlite.Store).AtGeneration(claim.GenerationID), adopted, prepare)
 			results <- result{id, report, err}
 		}()
 	}
@@ -973,8 +970,7 @@ func TestPrivateEmptyCommittedDedicatedBaseAcceptance(t *testing.T) {
 		t.Logf("empty-view metadata node (no root-node policy assumed): %+v", node)
 	}
 	t.Logf("empty committed acceptance: commit=%s tree=%s generation=%d report_nodes=%d view_nodes=%d mutable_nodes=%d", commit, tree, id, report.NodeCount, len(nodes), len(store.AllNodes()))
-	nativeStore := builder.Store.(*store_sqlite.Store)
-	checkWrites, err := installDedicatedWriteAudit(ctx, nativeStore, storePath)
+	checkWrites, err := installDedicatedWriteAudit(ctx, builder.Store.(*store_sqlite.Store), storePath)
 	if err != nil {
 		t.Fatal(err)
 	}

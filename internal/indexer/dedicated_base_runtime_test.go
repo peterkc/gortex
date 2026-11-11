@@ -36,8 +36,7 @@ func dedicatedRuntimeFixture(t testing.TB) (*dedicatedBaseRuntime, *dedicatedBas
 
 func dedicatedRuntimeObserver(runtime *dedicatedBaseRuntime, publisher *dedicatedBasePublisher, observation dedicatedBaseObservation) func(context.Context) (dedicatedBaseObservation, error) {
 	return func(ctx context.Context) (dedicatedBaseObservation, error) {
-		nativeStore := runtime.store.(*store_sqlite.Store)
-		graph, found, err := nativeStore.Catalog().GetDedicatedGraph(ctx, publisher.authority.GraphID)
+		graph, found, err := runtime.store.(*store_sqlite.Store).Catalog().GetDedicatedGraph(ctx, publisher.authority.GraphID)
 		if err != nil {
 			return dedicatedBaseObservation{}, err
 		}
@@ -72,8 +71,7 @@ func TestDedicatedBaseRuntimeReadyReplayAndNoWrites(t *testing.T) {
 	if err != nil || first.Adoption.GenerationID <= 0 || first.Adoption.AlreadyAdopted {
 		t.Fatalf("first=%+v err=%v", first, err)
 	}
-	nativeStore := runtime.store.(*store_sqlite.Store)
-	check, err := installDedicatedWriteAudit(ctx, nativeStore, request.StorePath)
+	check, err := installDedicatedWriteAudit(ctx, runtime.store.(*store_sqlite.Store), request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,8 +161,7 @@ func TestDedicatedBaseRuntimeFreshBuilderRequired(t *testing.T) {
 	if _, err := publisher.ensureInitial(ctx, dedicatedRuntimeObserver(runtime, publisher, observation)); err != nil {
 		t.Fatal(err)
 	}
-	nativeStore := runtime.store.(*store_sqlite.Store)
-	check, err := installDedicatedWriteAudit(ctx, nativeStore, request.StorePath)
+	check, err := installDedicatedWriteAudit(ctx, runtime.store.(*store_sqlite.Store), request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,8 +523,7 @@ func TestDedicatedBaseRuntimeOrdersObservationBeforeRecord(t *testing.T) {
 	}
 	// Both physical builds can reach preparation while the old one is blocked:
 	// the observation gate is not retained across build/flight waits.
-	nativeStore := runtime.store.(*store_sqlite.Store)
-	p, _, err := nativeStore.Catalog().DedicatedBasePublication(ctx, publisher.authority.GraphID)
+	p, _, err := runtime.store.(*store_sqlite.Store).Catalog().DedicatedBasePublication(ctx, publisher.authority.GraphID)
 	if err != nil || p.Desire.Identity != newer.Identity || p.Desire.Epoch != 2 {
 		t.Fatalf("new observation not recorded last: %+v %v", p, err)
 	}

@@ -113,8 +113,7 @@ func TestGenerationBulkBracketClosesOnEveryExitPath(t *testing.T) {
 			builder, request, claim, _ := claimedCopyFixture(t)
 			indexGenerationZero(t, builder, request)
 			loader := &bulkLoadProbe{}
-			nativeStore := builder.Store.(*store_sqlite.Store)
-			real := &copyProbe{store: nativeStore, bulk: loader}
+			real := &copyProbe{store: builder.Store.(*store_sqlite.Store), bulk: loader}
 			run := func(copier GenerationPayloadCopier) error {
 				_, _, err := builder.BuildClaimedDedicatedBase(context.Background(), ClaimedDedicatedBaseRequest{
 					Claim: claim, RootPath: request.RootPath, WorkspaceID: request.WorkspaceID,
@@ -153,8 +152,7 @@ func TestClaimedDedicatedBaseFailsClosedOnAPopulatedGeneration(t *testing.T) {
 	indexGenerationZero(t, builder, request)
 	populated := fmt.Errorf("%w: generation %d", store_sqlite.ErrGenerationBulkLoadPopulated, claim.GenerationID)
 	loader := &bulkLoadProbe{fail: populated}
-	nativeStore := builder.Store.(*store_sqlite.Store)
-	probe := &copyProbe{store: nativeStore, bulk: loader}
+	probe := &copyProbe{store: builder.Store.(*store_sqlite.Store), bulk: loader}
 
 	_, _, err := builder.BuildClaimedDedicatedBase(context.Background(), ClaimedDedicatedBaseRequest{
 		Claim: claim, RootPath: request.RootPath, WorkspaceID: request.WorkspaceID,
@@ -184,8 +182,7 @@ func TestClaimedDedicatedBaseCopiesThroughAnUnavailableBulkWindow(t *testing.T) 
 	builder, request, claim, logs := claimedCopyFixture(t)
 	indexGenerationZero(t, builder, request)
 	loader := &bulkLoadProbe{fail: errors.New("the store could not pin a writer")}
-	nativeStore := builder.Store.(*store_sqlite.Store)
-	probe := &copyProbe{store: nativeStore, bulk: loader}
+	probe := &copyProbe{store: builder.Store.(*store_sqlite.Store), bulk: loader}
 
 	id := buildClaimedBase(t, builder, ClaimedDedicatedBaseRequest{
 		Claim: claim, RootPath: request.RootPath, WorkspaceID: request.WorkspaceID,

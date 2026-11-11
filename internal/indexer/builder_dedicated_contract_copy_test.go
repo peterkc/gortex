@@ -20,8 +20,7 @@ func asyncClaimedCopyFixture(t *testing.T) (*SparseGenerationBuilder, dedicatedB
 	request.Identity.ExtractorVersions = builder.extractorVersionsFingerprint()
 	ctx := context.Background()
 	// Production Open must install the publication schema; do not create it in this fixture.
-	nativeStore := builder.Store.(*store_sqlite.Store)
-	catalog := nativeStore.Catalog()
+	catalog := builder.Store.(*store_sqlite.Store).Catalog()
 	authority, err := catalog.AcquireDedicatedBaseAuthority(ctx, store_sqlite.AcquireDedicatedBaseAuthorityRequest{
 		GraphID: request.Identity.GraphID,
 		Owner:   store_sqlite.DedicatedBaseOwner{CheckoutID: request.Identity.CheckoutID, Incarnation: "private-incarnation"},

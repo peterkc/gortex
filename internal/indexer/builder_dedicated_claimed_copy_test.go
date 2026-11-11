@@ -176,8 +176,7 @@ func claimedCopyFixture(t *testing.T) (*SparseGenerationBuilder, dedicatedBuilde
 // payload AND its repo_index_state provenance row.
 func indexGenerationZero(t *testing.T, builder *SparseGenerationBuilder, request dedicatedBuilderFixtureRequest) {
 	t.Helper()
-	nativeStore := builder.Store.(*store_sqlite.Store)
-	cold := nativeStore.AtGeneration(0)
+	cold := builder.Store.(*store_sqlite.Store).AtGeneration(0)
 	idx := New(cold, builder.Registry, builder.Config, builder.Logger)
 	idx.SetRepoPrefix(request.RepoPrefix)
 	idx.SetWorkspaceID(request.WorkspaceID)
@@ -285,8 +284,7 @@ func buildClaimedBaseWithReport(t *testing.T, builder *SparseGenerationBuilder, 
 	if report.Coalesced {
 		t.Fatal("a freshly allocated reservation reported reuse")
 	}
-	nativeStore := builder.Store.(*store_sqlite.Store)
-	if _, err := nativeStore.Catalog().AdoptDedicatedBaseGeneration(ctx,
+	if _, err := builder.Store.(*store_sqlite.Store).Catalog().AdoptDedicatedBaseGeneration(ctx,
 		store_sqlite.AdoptDedicatedBaseGenerationRequest{Claim: request.Claim}); err != nil {
 		t.Fatalf("adopt claimed base %d: %v", id, err)
 	}
@@ -414,8 +412,7 @@ func assertCopiedInventory(t *testing.T, got BuildReport, builder *SparseGenerat
 	if got.SourceBytes <= 0 {
 		t.Fatalf("the copy route reported %d source bytes behind %d files", got.SourceBytes, got.AddedFiles)
 	}
-	nativeStore := builder.Store.(*store_sqlite.Store)
-	metas, err := nativeStore.AtGeneration(0).FileMetasForRepo(request.RepoPrefix)
+	metas, err := builder.Store.(*store_sqlite.Store).AtGeneration(0).FileMetasForRepo(request.RepoPrefix)
 	if err != nil {
 		t.Fatalf("read generation zero's inventory: %v", err)
 	}
@@ -501,8 +498,7 @@ func TestClaimedDedicatedBaseCopyRecordsItsOwnIndexState(t *testing.T) {
 		Claim: referenceClaim, RootPath: referenceRequest.RootPath,
 		WorkspaceID: referenceRequest.WorkspaceID, ProjectID: referenceRequest.ProjectID,
 	})
-	referenceStore := reference.Store.(*store_sqlite.Store)
-	want, found, err := referenceStore.AtGeneration(referenceID).GetRepoIndexState(referenceRequest.RepoPrefix)
+	want, found, err := reference.Store.(*store_sqlite.Store).AtGeneration(referenceID).GetRepoIndexState(referenceRequest.RepoPrefix)
 	if err != nil || !found {
 		t.Fatalf("the re-parsed base has no index state to compare against: found=%v err=%v", found, err)
 	}
@@ -574,8 +570,7 @@ func TestClaimedDedicatedBaseReparsesWhenTheWorkingTreeStateIsUnreadable(t *test
 	if _, err := rawGitInFixture(t, request.RootPath, "--no-optional-locks", "status", "--porcelain"); err == nil {
 		t.Fatal("git status still succeeds over a corrupt index; the hazard is not staged")
 	}
-	nativeStore := builder.Store.(*store_sqlite.Store)
-	probe := &copyProbe{store: nativeStore}
+	probe := &copyProbe{store: builder.Store.(*store_sqlite.Store)}
 
 	buildClaimedBase(t, builder, ClaimedDedicatedBaseRequest{
 		Claim: claim, RootPath: request.RootPath, WorkspaceID: request.WorkspaceID,
@@ -603,8 +598,7 @@ func TestClaimedDedicatedBaseReparsesADirtyWorkingTree(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(request.RootPath, "dirty.go"), []byte(dirty), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	nativeStore := builder.Store.(*store_sqlite.Store)
-	probe := &copyProbe{store: nativeStore}
+	probe := &copyProbe{store: builder.Store.(*store_sqlite.Store)}
 
 	id := buildClaimedBase(t, builder, ClaimedDedicatedBaseRequest{
 		Claim: claim, RootPath: request.RootPath, WorkspaceID: request.WorkspaceID,
@@ -642,8 +636,7 @@ func TestClaimedDedicatedBaseReparsesWhenGenerationZeroIndexedADirtyTree(t *test
 	if err := os.Remove(dirtyPath); err != nil {
 		t.Fatal(err)
 	}
-	nativeStore := builder.Store.(*store_sqlite.Store)
-	probe := &copyProbe{store: nativeStore}
+	probe := &copyProbe{store: builder.Store.(*store_sqlite.Store)}
 
 	buildClaimedBase(t, builder, ClaimedDedicatedBaseRequest{
 		Claim: claim, RootPath: request.RootPath, WorkspaceID: request.WorkspaceID,
@@ -683,8 +676,7 @@ func assertGenerationZeroMatchesTheReservedExtractors(t *testing.T, builder *Spa
 // generationZeroIndexState reads the working-copy view's own freshness row.
 func generationZeroIndexState(t *testing.T, builder *SparseGenerationBuilder, request dedicatedBuilderFixtureRequest) graph.RepoIndexState {
 	t.Helper()
-	nativeStore := builder.Store.(*store_sqlite.Store)
-	state, found, err := nativeStore.AtGeneration(0).GetRepoIndexState(request.RepoPrefix)
+	state, found, err := builder.Store.(*store_sqlite.Store).AtGeneration(0).GetRepoIndexState(request.RepoPrefix)
 	if err != nil || !found {
 		t.Fatalf("generation zero has no index state: found=%v err=%v", found, err)
 	}
@@ -695,8 +687,7 @@ func generationZeroIndexState(t *testing.T, builder *SparseGenerationBuilder, re
 // which is how a provenance hazard is staged without touching the tree.
 func setGenerationZeroIndexState(t *testing.T, builder *SparseGenerationBuilder, state graph.RepoIndexState) {
 	t.Helper()
-	nativeStore := builder.Store.(*store_sqlite.Store)
-	writer, ok := graph.Store(nativeStore.AtGeneration(0)).(graph.RepoIndexStateWriter)
+	writer, ok := graph.Store(builder.Store.(*store_sqlite.Store).AtGeneration(0)).(graph.RepoIndexStateWriter)
 	if !ok {
 		t.Fatal("the fixture store cannot write repo_index_state; the provenance clauses cannot be staged")
 	}
@@ -746,8 +737,7 @@ func TestClaimedDedicatedBaseReparsesWhenGenerationZeroUsedOtherExtractorVersion
 			}
 			state.ExtractorVersions = tc.recorded
 			setGenerationZeroIndexState(t, builder, state)
-			nativeStore := builder.Store.(*store_sqlite.Store)
-			probe := &copyProbe{store: nativeStore}
+			probe := &copyProbe{store: builder.Store.(*store_sqlite.Store)}
 
 			id := buildClaimedBase(t, builder, ClaimedDedicatedBaseRequest{
 				Claim: claim, RootPath: request.RootPath, WorkspaceID: request.WorkspaceID,
@@ -790,8 +780,7 @@ func TestClaimedDedicatedBaseReparsesWhenGenerationZeroCoversAnotherTree(t *test
 	git("-c", "user.name=Private Test", "-c", "user.email=private@example.invalid",
 		"-c", "commit.gpgsign=false", "commit", "-qm", "a revision the reservation does not name")
 	indexGenerationZero(t, builder, request)
-	nativeStore := builder.Store.(*store_sqlite.Store)
-	probe := &copyProbe{store: nativeStore}
+	probe := &copyProbe{store: builder.Store.(*store_sqlite.Store)}
 
 	// The reservation still names the ORIGINAL tree, which is exactly the
 	// mismatch the predicate has to notice.
@@ -823,8 +812,7 @@ func TestClaimedDedicatedBaseReparsesAfterTheWorkingTreeMovedPastGenerationZero(
 	if got := git("rev-parse", "HEAD^{tree}"); got != request.Identity.TreeOID {
 		t.Fatalf("the empty commit changed the tree to %q; the fixture no longer isolates the head clause", got)
 	}
-	nativeStore := builder.Store.(*store_sqlite.Store)
-	probe := &copyProbe{store: nativeStore}
+	probe := &copyProbe{store: builder.Store.(*store_sqlite.Store)}
 
 	buildClaimedBase(t, builder, ClaimedDedicatedBaseRequest{
 		Claim: claim, RootPath: request.RootPath, WorkspaceID: request.WorkspaceID,
@@ -980,13 +968,11 @@ func TestTheProductionStoreIsTheGenerationCopyPrimitive(t *testing.T) {
 	// row of one shared virtual table. A copied base whose corpus were empty
 	// would answer every symbol search with nothing while every other
 	// assertion here stayed green.
-	nativeStore := builder.Store.(*store_sqlite.Store)
-	copied, err := nativeStore.AtGeneration(id).SymbolFTSCount()
+	copied, err := builder.Store.(*store_sqlite.Store).AtGeneration(id).SymbolFTSCount()
 	if err != nil {
 		t.Fatal(err)
 	}
-	referenceStore := reference.Store.(*store_sqlite.Store)
-	reparsed, err := referenceStore.AtGeneration(referenceID).SymbolFTSCount()
+	reparsed, err := reference.Store.(*store_sqlite.Store).AtGeneration(referenceID).SymbolFTSCount()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1003,8 +989,7 @@ func TestTheProductionStoreIsTheGenerationCopyPrimitive(t *testing.T) {
 func TestClaimedBaseCopyPlanRefusesWithoutACopyPrimitive(t *testing.T) {
 	builder, request, claim, _ := claimedCopyFixture(t)
 	indexGenerationZero(t, builder, request)
-	nativeStore := builder.Store.(*store_sqlite.Store)
-	handle, err := nativeStore.AtManagedGeneration(claim.GenerationID)
+	handle, err := builder.Store.(*store_sqlite.Store).AtManagedGeneration(claim.GenerationID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1059,8 +1044,7 @@ func TestClaimedDedicatedBaseBracketsBothRoutes(t *testing.T) {
 				}
 			}
 			loader := &bulkLoadProbe{}
-			nativeStore := builder.Store.(*store_sqlite.Store)
-			probe := &copyProbe{store: nativeStore, bulk: loader}
+			probe := &copyProbe{store: builder.Store.(*store_sqlite.Store), bulk: loader}
 			openAtPrePublish := make([]bool, 0, 1)
 			id := buildClaimedBase(t, builder, ClaimedDedicatedBaseRequest{
 				Claim: claim, RootPath: request.RootPath, WorkspaceID: request.WorkspaceID,
@@ -1108,10 +1092,9 @@ func TestClaimedDedicatedBaseClosesTheBulkLoadWhenTheCopyFails(t *testing.T) {
 	loader := &bulkLoadProbe{}
 	broken := errors.New("copy refused by the store")
 
-	nativeStore := builder.Store.(*store_sqlite.Store)
 	_, _, err := builder.BuildClaimedDedicatedBase(context.Background(), ClaimedDedicatedBaseRequest{
 		Claim: claim, RootPath: request.RootPath, WorkspaceID: request.WorkspaceID,
-		ProjectID: request.ProjectID, BulkLoad: loader, CopySource: &copyProbe{store: nativeStore, fail: broken},
+		ProjectID: request.ProjectID, BulkLoad: loader, CopySource: &copyProbe{store: builder.Store.(*store_sqlite.Store), fail: broken},
 	})
 	if !errors.Is(err, broken) {
 		t.Fatalf("build error = %v, want the copy failure", err)
@@ -1127,8 +1110,7 @@ func TestClaimedDedicatedBaseRunsWithoutARefusedBulkLoadBracket(t *testing.T) {
 	builder, request, claim, logs := claimedCopyFixture(t)
 	indexGenerationZero(t, builder, request)
 	loader := &bulkLoadProbe{refuse: true}
-	nativeStore := builder.Store.(*store_sqlite.Store)
-	probe := &copyProbe{store: nativeStore, bulk: loader}
+	probe := &copyProbe{store: builder.Store.(*store_sqlite.Store), bulk: loader}
 
 	id := buildClaimedBase(t, builder, ClaimedDedicatedBaseRequest{
 		Claim: claim, RootPath: request.RootPath, WorkspaceID: request.WorkspaceID,
@@ -1170,8 +1152,7 @@ func TestClaimedDedicatedBaseConcurrentCopyTakesOneLeaderWindow(t *testing.T) {
 	builder, request, claim, _ := claimedCopyFixture(t)
 	indexGenerationZero(t, builder, request)
 	loader := &bulkLoadProbe{}
-	nativeStore := builder.Store.(*store_sqlite.Store)
-	probe := &copyProbe{store: nativeStore, bulk: loader}
+	probe := &copyProbe{store: builder.Store.(*store_sqlite.Store), bulk: loader}
 	build := ClaimedDedicatedBaseRequest{
 		Claim: claim, RootPath: request.RootPath, WorkspaceID: request.WorkspaceID,
 		ProjectID: request.ProjectID, BulkLoad: loader, CopySource: probe,

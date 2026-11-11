@@ -100,8 +100,7 @@ func TestImportPublicationPreparesMetadataBeforeLaneAdmission(t *testing.T) {
 func TestImportPublicationCancellationDoesNotAdmitOrPublish(t *testing.T) {
 	f := newCoordinatorAncestryFixture(t)
 	identity := f.request.Identity
-	nativeStore := f.c.store.(*store_sqlite.Store)
-	id, _, err := nativeStore.BeginPayloadGeneration(t.Context(), store_sqlite.PayloadGenerationRequest{
+	id, _, err := f.c.store.(*store_sqlite.Store).BeginPayloadGeneration(t.Context(), store_sqlite.PayloadGenerationRequest{
 		OwnerKind: identity.OwnerKind, GraphID: identity.GraphID,
 		CheckoutID: identity.CheckoutID, GenerationKind: DirtyLayerGenerationKind,
 		TreeOID: identity.TreeOID, ConfigHash: identity.ConfigHash,

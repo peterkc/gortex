@@ -51,8 +51,7 @@ func (f *dedicatedAdvanceFixture) git(t testing.TB, args ...string) string {
 
 func (f *dedicatedAdvanceFixture) observe(t testing.TB, ctx context.Context) (dedicatedBaseObservation, error) {
 	t.Helper()
-	nativeStore := f.builder.Store.(*store_sqlite.Store)
-	g, found, err := nativeStore.Catalog().GetDedicatedGraph(ctx, f.publisher.authority.GraphID)
+	g, found, err := f.builder.Store.(*store_sqlite.Store).Catalog().GetDedicatedGraph(ctx, f.publisher.authority.GraphID)
 	if err != nil {
 		return dedicatedBaseObservation{}, err
 	}
@@ -134,8 +133,7 @@ func TestDedicatedBaseCurrentInitialDeltaAndReadyReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	observation.RootPath = filepath.Join(t.TempDir(), "absent-git-root")
-	nativeStore := f.builder.Store.(*store_sqlite.Store)
-	check, err := installDedicatedWriteAudit(ctx, nativeStore, f.request.StorePath)
+	check, err := installDedicatedWriteAudit(ctx, f.builder.Store.(*store_sqlite.Store), f.request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,8 +323,7 @@ func TestDedicatedBaseAdvanceParentDepthPolicy(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	initial := f.ensure(t, ctx)
-	nativeStore := f.builder.Store.(*store_sqlite.Store)
-	catalog := nativeStore.Catalog()
+	catalog := f.builder.Store.(*store_sqlite.Store).Catalog()
 	parent, found, err := catalog.GetViewGeneration(ctx, initial.Claim.GenerationID)
 	if err != nil || !found {
 		t.Fatalf("initial row: found=%v err=%v", found, err)
@@ -423,8 +420,7 @@ func TestDedicatedBaseCurrentHistoricalDeltaUsesReturnedParent(t *testing.T) {
 	if reused.Claim.GenerationID != first.Claim.GenerationID || reused.Claim.BaseGenerationID != initial.Claim.GenerationID || reused.Claim.ExpectedActiveGenerationID != second.Claim.GenerationID || !reused.Report.Coalesced || reused.Adoption.AlreadyAdopted || physicalCallbacks != 0 {
 		t.Fatalf("historical dispatch/adoption mismatch: %+v callbacks=%d", reused, physicalCallbacks)
 	}
-	nativeStore := f.builder.Store.(*store_sqlite.Store)
-	graphRow, found, err := nativeStore.Catalog().GetDedicatedGraph(ctx, f.publisher.authority.GraphID)
+	graphRow, found, err := f.builder.Store.(*store_sqlite.Store).Catalog().GetDedicatedGraph(ctx, f.publisher.authority.GraphID)
 	if err != nil || !found || graphRow.ActiveGenerationID != first.Claim.GenerationID {
 		t.Fatalf("historical candidate was not adopted: %+v found=%v err=%v", graphRow, found, err)
 	}

@@ -330,8 +330,7 @@ func runFixtureContractJob(t *testing.T, options ContractFollowupCaptureOptions,
 	if job.adjust != nil {
 		job.adjust(&snapshot)
 	}
-	nativeStore := options.Store.(*store_sqlite.Store)
-	_, payload, err := nativeStore.BeginPayloadGeneration(ctx, store_sqlite.PayloadGenerationRequest{OwnerKind: "dedicated_graph", GraphID: "contract-job", LayerID: "job-" + time.Now().Format(time.RFC3339Nano), GenerationKind: "contract_analysis", ConfigHash: "job-config", ExtractorVersions: `{"go":"1"}`, ResolverVersion: "contract-only", CreatedAt: int64(job.layer)})
+	_, payload, err := options.Store.(*store_sqlite.Store).BeginPayloadGeneration(ctx, store_sqlite.PayloadGenerationRequest{OwnerKind: "dedicated_graph", GraphID: "contract-job", LayerID: "job-" + time.Now().Format(time.RFC3339Nano), GenerationKind: "contract_analysis", ConfigHash: "job-config", ExtractorVersions: `{"go":"1"}`, ResolverVersion: "contract-only", CreatedAt: int64(job.layer)})
 	require.NoError(t, err)
 	yield := job.yield
 	if yield == nil {
@@ -2205,8 +2204,7 @@ func (w *contractLinkedWorktree) job(t *testing.T, view *graphview.RepoView, hoo
 	require.NoError(t, err)
 	require.Len(t, targets, 1)
 	snapshot.Work = targets[0].Work
-	nativeStore := options.Store.(*store_sqlite.Store)
-	_, payload, err := nativeStore.BeginPayloadGeneration(ctx, store_sqlite.PayloadGenerationRequest{OwnerKind: "dedicated_graph", GraphID: "contract-linked", LayerID: "job-" + time.Now().Format(time.RFC3339Nano), GenerationKind: "contract_analysis", ConfigHash: "job-config", ExtractorVersions: `{"go":"1"}`, ResolverVersion: "contract-only", CreatedAt: time.Now().UnixNano()})
+	_, payload, err := options.Store.(*store_sqlite.Store).BeginPayloadGeneration(ctx, store_sqlite.PayloadGenerationRequest{OwnerKind: "dedicated_graph", GraphID: "contract-linked", LayerID: "job-" + time.Now().Format(time.RFC3339Nano), GenerationKind: "contract_analysis", ConfigHash: "job-config", ExtractorVersions: `{"go":"1"}`, ResolverVersion: "contract-only", CreatedAt: time.Now().UnixNano()})
 	require.NoError(t, err)
 	req := ContractFollowupRequest{OpenEvidence: openTestEvidenceStore, RebuildReason: ContractFollowupUnknownInterval, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: options.Registry, Config: options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: options.Materializer.Leases, Logger: zap.NewNop(), Yield: options.Yield,
 		PublishedEpoch: w.f.epoch.Load, WaitPublished: w.f.waitPublished, convergenceHooks: hooks}
