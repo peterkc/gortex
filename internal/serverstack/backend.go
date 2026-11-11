@@ -65,7 +65,9 @@ func openBackendWithUpgradeHook(name, path string, logger *zap.Logger, allowRebu
 	return s, closeStore, nil
 }
 
-// checkBackend validates a requested backend name before taking the store lock.
+// checkBackend validates a requested backend name. It is split out of
+// OpenBackend so a caller that takes the cross-process store lock first can
+// reject an unusable name before touching the lock or the filesystem.
 func checkBackend(name string) error { return backend.CheckName(name) }
 
 // resolveBackendPath turns an empty backend path into a default under the

@@ -64,14 +64,10 @@ const (
 // retiring fence, its payload rows are a strict subset of what they were, and
 // the next pass continues from the step this one stopped on.
 //
-// Most callers resume it without needing to know that is what they are doing —
-// the coordinator backlog, the lifecycle's owed set and the ref-view retention
-// pass all offer a refused retirement again. One does not:
-// internal/indexer/repository_cleanup.go:264 propagates every retirement error
-// but ErrCatalogNotFound, and an untrack only reports a retryable "pending" for
-// ErrRepositoryCleanupPending. That is why the default budget above is a
-// runaway ceiling rather than a slice, and it is the reason to fix before
-// lowering it.
+// Callers resume yielded generations: the coordinator backlog, the
+// lifecycle's owed set and the ref-view retention pass offer a refused
+// retirement again, and repository cleanup maps this error to
+// ErrRepositoryCleanupPending so an untrack retries.
 var ErrPayloadSweepBudgetExhausted = storage.ErrPayloadSweepBudgetExhausted
 
 // payloadSweepBudget bounds one sweep pass. A zero or negative field is

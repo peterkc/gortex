@@ -274,9 +274,8 @@ func (l *CheckoutLifecycle) releaseRepositoryGraph(ctx context.Context, graphID 
 			// A sweep that stopped on its own budget is a YIELD, not a
 			// failure: the generation keeps its retiring fence, its rows are
 			// a strict subset of what they were, and the next pass resumes
-			// from the chunk this one stopped on
-			// (store_sqlite/payload_generation_sweep.go:72-85, which names
-			// this call site as the one caller that could not resume it).
+			// from the chunk this one stopped on (see
+			// storage.ErrPayloadSweepBudgetExhausted).
 			// Reported as any other error it would reach reconcile/saga.go,
 			// which skips DeleteDedicatedGraph and turns a slow untrack into
 			// a failed one; reported as pending it goes back on the cleanup
