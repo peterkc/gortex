@@ -17,8 +17,9 @@ func TestCheckoutLifecycleNormalizesAbsentStorage(t *testing.T) {
 				lifecycle, err := NewCheckoutLifecycle(CheckoutLifecycleConfig{MultiIndexer: &MultiIndexer{}, Graph: store, Catalog: catalog})
 				require.NoError(t, err)
 				t.Cleanup(lifecycle.cancelTransitions)
-				require.Nil(t, lifecycle.store)
-				require.Nil(t, lifecycle.catalog)
+				// Check the interfaces themselves, not only their dynamic pointers.
+				require.True(t, lifecycle.store == nil)
+				require.True(t, lifecycle.catalog == nil)
 				require.Nil(t, lifecycle.rec)
 			})
 		}
