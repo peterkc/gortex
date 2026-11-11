@@ -904,6 +904,8 @@ func (b *SparseGenerationBuilder) validate(ctx context.Context, req *BuildReques
 	switch {
 	case b == nil || b.Store == nil || b.Store.IsNilGenerationHandle():
 		return errors.New("indexer: sparse generation builder needs a store")
+	case b.Catalog == nil || b.Catalog.IsNilMaterializerCatalog():
+		return errors.New("indexer: sparse generation builder needs a catalog")
 	case b.Registry == nil:
 		return errors.New("indexer: sparse generation builder needs a parser registry")
 	case b.Logger == nil:

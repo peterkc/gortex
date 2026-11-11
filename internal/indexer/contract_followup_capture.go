@@ -234,6 +234,10 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 		prepared.Release()
 		return snapshot, fmt.Errorf("contract capture: incomplete selected owner")
 	}
+	if options.Catalog == nil || options.Catalog.IsNilMaterializerCatalog() {
+		prepared.Release()
+		return snapshot, fmt.Errorf("contract capture: paired checkout catalog required")
+	}
 	if err = ctx.Err(); err != nil {
 		prepared.Release()
 		return snapshot, err

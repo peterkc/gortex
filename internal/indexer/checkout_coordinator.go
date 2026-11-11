@@ -850,6 +850,8 @@ func NewCheckoutCoordinator(cfg CheckoutCoordinatorConfig) (*CheckoutCoordinator
 		return nil, errors.New("indexer: checkout coordinator needs a family id")
 	case cfg.Store == nil || cfg.Store.IsNilGenerationHandle():
 		return nil, errors.New("indexer: checkout coordinator needs a store")
+	case cfg.Catalog == nil || cfg.Catalog.IsNilMaterializerCatalog():
+		return nil, errors.New("indexer: checkout coordinator needs a catalog")
 	case cfg.Builder == nil:
 		return nil, errors.New("indexer: checkout coordinator needs a generation builder")
 	}

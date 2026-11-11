@@ -206,7 +206,7 @@ func TestPrivatePublicBuilderSQLiteFull(t *testing.T) {
 			})
 			registry := parser.NewRegistry()
 			languages.RegisterAll(registry)
-			builder := &indexer.SparseGenerationBuilder{Store: store, Registry: registry, Config: config.Default().Index, Logger: zap.NewNop()}
+			builder := &indexer.SparseGenerationBuilder{Catalog: store.Catalog(), Store: store, Registry: registry, Config: config.Default().Index, Logger: zap.NewNop()}
 			req := indexer.BuildRequest{
 				Identity: identity, Base: graph.New(), Target: wrapped, RootPath: root, RepoPrefix: repoPrefix,
 				WorkspaceID: "private-workspace", ProjectID: "private-project",

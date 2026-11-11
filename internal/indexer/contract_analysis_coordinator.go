@@ -168,6 +168,9 @@ func NewContractAnalysisCoordinator(options ContractAnalysisCoordinatorOptions) 
 	if options.Store == nil || options.Store.IsNilGenerationHandle() || options.Leases == nil || options.Registry == nil || options.Capture == nil || options.Yield == nil {
 		return nil, fmt.Errorf("contract analysis coordinator: incomplete options")
 	}
+	if options.Catalog == nil || options.Catalog.IsNilMaterializerCatalog() {
+		return nil, fmt.Errorf("contract analysis coordinator: paired checkout catalog required")
+	}
 	if options.QueueCapacity == 0 {
 		options.QueueCapacity = contractSchedulerCapacity
 	}

@@ -185,14 +185,17 @@ func (r *DedicatedBaseRuntime) FinalizeDedicatedBaseOwner(graphID string, owner 
 	return r.dedicatedBaseRuntime.FinalizeDedicatedBaseOwner(graphID, owner, drained)
 }
 
-// NewDedicatedBaseRuntime builds that one runtime. Both inputs are mandatory
-// and neither has a safe default: a nil store cannot acquire authority, and a
-// substituted lease manager silently degrades advancement (see the leases
-// field). Callers install the result before any owner can be registered —
+// NewDedicatedBaseRuntime builds that one runtime. The store, its paired catalog,
+// and the shared view leases are mandatory. A substituted lease manager silently
+// degrades advancement (see the leases field). Callers install the result before
+// any owner can be registered —
 // SetDedicatedBaseCleanupRuntime refuses a late installation.
 func NewDedicatedBaseRuntime(store generationBuilderStore, catalog CheckoutCatalog, leases *graphview.LeaseManager) (*DedicatedBaseRuntime, error) {
 	if store == nil || store.IsNilGenerationHandle() {
 		return nil, fmt.Errorf("%w: publisher runtime requires the stack's store", errDedicatedBaseRuntimeInput)
+	}
+	if catalog == nil || catalog.IsNilMaterializerCatalog() {
+		return nil, fmt.Errorf("%w: publisher runtime requires the stack's catalog", errDedicatedBaseRuntimeInput)
 	}
 	if leases == nil {
 		return nil, fmt.Errorf("%w: publisher runtime requires the shared view leases", errDedicatedBaseRuntimeInput)

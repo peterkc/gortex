@@ -332,6 +332,8 @@ func NewRefViewManager(cfg RefViewManagerConfig) (*RefViewManager, error) {
 	switch {
 	case cfg.Store == nil || cfg.Store.IsNilGenerationHandle():
 		return nil, errors.New("indexer: ref view manager needs a store")
+	case cfg.Catalog == nil || cfg.Catalog.IsNilMaterializerCatalog():
+		return nil, errors.New("indexer: ref view manager needs a catalog")
 	case cfg.Builder == nil:
 		return nil, errors.New("indexer: ref view manager needs a generation builder")
 	}
