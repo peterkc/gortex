@@ -311,7 +311,11 @@ func (c *CheckoutCoordinator) compactDirtyChainStepped(
 		if report.Canceled && err == nil {
 			err = ctx.Err()
 		}
-		destination.flight.Complete(err)
+		// The flight is set only after the copier joins as leader; an
+		// attempt canceled or refused before that owns nothing to release.
+		if destination.flight != nil {
+			destination.flight.Complete(err)
+		}
 	}()
 	k := &c.compaction
 	k.mu.Lock()
