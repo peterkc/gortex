@@ -109,7 +109,8 @@ func TestStoreAdapterReadsTheGenerationRunFromTheStore(t *testing.T) {
 	require.NotEmpty(t, sources)
 	known := 0
 	for _, source := range sources {
-		generation := any(source.Handle).(*store_sqlite.Store).SymbolSearchViewGeneration()
+		nativeStore := source.Handle.(*store_sqlite.Store)
+		generation := nativeStore.SymbolSearchViewGeneration()
 		run, err := runner.SymbolFTSGenerationRun(ctx, generation)
 		require.NoError(t, err)
 		st, err := f.store.SymbolFTSGenerationStats(ctx, generation)

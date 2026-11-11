@@ -59,7 +59,8 @@ func TestContractBaselineAuthorityRefusesClosedAndIgnoresRawSourceMovement(t *te
 		t.Run(mode, func(t *testing.T) {
 			options, pin, authority := contractBaselineAuthorityFixture(t)
 			require.NoError(t, pin.ValidateAcceptedCurrent())
-			before, found, err := any(options.Store).(*store_sqlite.Store).ContractInputStateContext(t.Context(), "fixture", "")
+			nativeStore := options.Store.(*store_sqlite.Store)
+			before, found, err := nativeStore.ContractInputStateContext(t.Context(), "fixture", "")
 			require.NoError(t, err)
 			require.True(t, found)
 			if mode == "closed" {
@@ -93,9 +94,9 @@ func TestContractBaselineAuthorityRefusesClosedAndIgnoresRawSourceMovement(t *te
 				require.Equal(t, authority.Stats().Issued, authority.Stats().Settled)
 				require.Zero(t, authority.Stats().LiveOwners)
 			}
-			baseline, err := any(options.Store).(*store_sqlite.Store).ContractBoundaryReceiptBaselineContext(t.Context(), "fixture", "")
+			baseline, err := nativeStore.ContractBoundaryReceiptBaselineContext(t.Context(), "fixture", "")
 			require.NoError(t, err)
-			state, found, err := any(options.Store).(*store_sqlite.Store).ContractInputStateContext(t.Context(), "fixture", "")
+			state, found, err := nativeStore.ContractInputStateContext(t.Context(), "fixture", "")
 			require.NoError(t, err)
 			require.True(t, found)
 			inputs, err := options.Materializer.CaptureContractInputs(t.Context(), nil, "fixture", "")

@@ -40,7 +40,8 @@ func (w *contractLinkedWorktree) cachedPositiveJob(t *testing.T, view *graphview
 	snapshot.Work = targets[0].Work
 	session, err := newContractDeltaSession(*cache, snapshot, options.Config)
 	require.NoError(t, err)
-	_, payload, err := any(options.Store).(*store_sqlite.Store).BeginPayloadGeneration(ctx, store_sqlite.PayloadGenerationRequest{OwnerKind: "dedicated_graph", GraphID: "positive-contract-job", LayerID: fmt.Sprint(time.Now().UnixNano()), GenerationKind: "contract_analysis", CreatedAt: time.Now().UnixNano()})
+	nativeStore := options.Store.(*store_sqlite.Store)
+	_, payload, err := nativeStore.BeginPayloadGeneration(ctx, store_sqlite.PayloadGenerationRequest{OwnerKind: "dedicated_graph", GraphID: "positive-contract-job", LayerID: fmt.Sprint(time.Now().UnixNano()), GenerationKind: "contract_analysis", CreatedAt: time.Now().UnixNano()})
 	require.NoError(t, err)
 	report, err := RunContractFollowup(ctx, ContractFollowupRequest{OpenEvidence: openSlice2TestEvidence, RebuildReason: ContractFollowupUnknownInterval, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: options.Registry, Config: options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: options.Materializer.Leases, Logger: zap.NewNop(), Yield: options.Yield, PublishedEpoch: w.f.epoch.Load, WaitPublished: w.f.waitPublished, delta: session})
 	*cache = session.cache

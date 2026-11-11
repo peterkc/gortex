@@ -29,15 +29,16 @@ func TestDedicatedRuntimeDependencyRevisionReadyReplay(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			row, found, err := any(runtime.store).(*store_sqlite.Store).Catalog().GetViewGeneration(ctx, first.Adoption.GenerationID)
+			nativeStore := runtime.store.(*store_sqlite.Store)
+			row, found, err := nativeStore.Catalog().GetViewGeneration(ctx, first.Adoption.GenerationID)
 			if err != nil || !found || row.DependencyRevision != observation.Identity.DependencyRevision {
 				t.Fatalf("fixture did not persist the requested dependency identity: %+v found=%v err=%v", row, found, err)
 			}
-			before, _, err := any(runtime.store).(*store_sqlite.Store).Catalog().DedicatedBasePublication(ctx, publisher.authority.GraphID)
+			before, _, err := nativeStore.Catalog().DedicatedBasePublication(ctx, publisher.authority.GraphID)
 			if err != nil {
 				t.Fatal(err)
 			}
-			check, err := installDedicatedWriteAudit(ctx, any(runtime.store).(*store_sqlite.Store), request.StorePath)
+			check, err := installDedicatedWriteAudit(ctx, nativeStore, request.StorePath)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -52,7 +53,7 @@ func TestDedicatedRuntimeDependencyRevisionReadyReplay(t *testing.T) {
 					t.Fatalf("unchanged dependency revision was not a ready replay: %+v err=%v", replay, err)
 				}
 			}
-			after, _, err := any(runtime.store).(*store_sqlite.Store).Catalog().DedicatedBasePublication(ctx, publisher.authority.GraphID)
+			after, _, err := nativeStore.Catalog().DedicatedBasePublication(ctx, publisher.authority.GraphID)
 			if err != nil || !reflect.DeepEqual(before, after) {
 				t.Fatalf("ready replay changed publication: before=%+v after=%+v err=%v", before, after, err)
 			}
@@ -75,11 +76,12 @@ func TestDedicatedRuntimeDependencyOnlyChangePreservesInitialGuard(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	before, _, err := any(runtime.store).(*store_sqlite.Store).Catalog().DedicatedBasePublication(ctx, publisher.authority.GraphID)
+	nativeStore := runtime.store.(*store_sqlite.Store)
+	before, _, err := nativeStore.Catalog().DedicatedBasePublication(ctx, publisher.authority.GraphID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	check, err := installDedicatedWriteAudit(ctx, any(runtime.store).(*store_sqlite.Store), request.StorePath)
+	check, err := installDedicatedWriteAudit(ctx, nativeStore, request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +93,7 @@ func TestDedicatedRuntimeDependencyOnlyChangePreservesInitialGuard(t *testing.T)
 	if !errors.Is(err, errDedicatedBaseAdvanceRequired) || !errors.As(err, &advance) || advance.ActiveGenerationID != first.Adoption.GenerationID || advance.Active != observation.Identity || advance.Observed != changed.Identity {
 		t.Fatalf("dependency change lost exact active/observed identities: %+v err=%v", advance, err)
 	}
-	after, _, err := any(runtime.store).(*store_sqlite.Store).Catalog().DedicatedBasePublication(ctx, publisher.authority.GraphID)
+	after, _, err := nativeStore.Catalog().DedicatedBasePublication(ctx, publisher.authority.GraphID)
 	if err != nil || !reflect.DeepEqual(before, after) {
 		t.Fatalf("rejected initial advancement changed desire: before=%+v after=%+v err=%v", before, after, err)
 	}

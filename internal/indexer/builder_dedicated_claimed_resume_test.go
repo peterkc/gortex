@@ -16,7 +16,8 @@ import (
 func TestClaimedDedicatedBaseResumesAfterAStopBeforePublication(t *testing.T) {
 	builder, request, claim, logs := claimedCopyFixture(t)
 	indexGenerationZero(t, builder, request)
-	probe := &copyProbe{store: any(builder.Store).(*store_sqlite.Store)}
+	nativeStore := builder.Store.(*store_sqlite.Store)
+	probe := &copyProbe{store: nativeStore}
 
 	// First start: stopped once the payload is in (just before publication).
 	ctx, stop := context.WithCancel(context.Background())
@@ -35,7 +36,7 @@ func TestClaimedDedicatedBaseResumesAfterAStopBeforePublication(t *testing.T) {
 	if len(probe.calls) != 1 {
 		t.Fatalf("fixture precondition: the first start copied %d times", len(probe.calls))
 	}
-	catalog := any(builder.Store).(*store_sqlite.Store).Catalog()
+	catalog := nativeStore.Catalog()
 	row, found, err := catalog.GetViewGeneration(context.Background(), claim.GenerationID)
 	if err != nil || !found || row.State != store_sqlite.ViewGenerationBuilding {
 		t.Fatalf("after the stop the reservation is %+v (found=%v err=%v); want it still building", row.State, found, err)
@@ -55,7 +56,7 @@ func TestClaimedDedicatedBaseResumesAfterAStopBeforePublication(t *testing.T) {
 		t.Fatalf("the next start's claim = %+v (err=%v); want the reservation %d", again, err, claim.GenerationID)
 	}
 	logs.TakeAll()
-	resumeProbe := &copyProbe{store: any(builder.Store).(*store_sqlite.Store)}
+	resumeProbe := &copyProbe{store: nativeStore}
 	id := buildClaimedBase(t, builder, ClaimedDedicatedBaseRequest{
 		Claim: again, RootPath: request.RootPath, WorkspaceID: request.WorkspaceID,
 		ProjectID: request.ProjectID, CopySource: resumeProbe,
@@ -70,9 +71,10 @@ func TestClaimedDedicatedBaseResumesAfterAStopBeforePublication(t *testing.T) {
 	// The oracle: an uninterrupted copy build of an independent fixture.
 	reference, referenceRequest, referenceClaim, _ := claimedCopyFixture(t)
 	indexGenerationZero(t, reference, referenceRequest)
+	referenceStore := reference.Store.(*store_sqlite.Store)
 	referenceID := buildClaimedBase(t, reference, ClaimedDedicatedBaseRequest{
 		Claim: referenceClaim, RootPath: referenceRequest.RootPath, WorkspaceID: referenceRequest.WorkspaceID,
-		ProjectID: referenceRequest.ProjectID, CopySource: &copyProbe{store: any(reference.Store).(*store_sqlite.Store)},
+		ProjectID: referenceRequest.ProjectID, CopySource: &copyProbe{store: referenceStore},
 	})
 	gotNodes, gotEdges := claimedBasePayload(materializeClaimedBase(t, builder, request.Identity.GraphID, id).Reader)
 	wantNodes, wantEdges := claimedBasePayload(materializeClaimedBase(t, reference, referenceRequest.Identity.GraphID, referenceID).Reader)
@@ -106,20 +108,21 @@ func TestReplacedFailedDedicatedClaimIsRetiredPromptly(t *testing.T) {
 	builder, request, claim, _ := claimedCopyFixture(t)
 	indexGenerationZero(t, builder, request)
 	ctx := context.Background()
+	nativeStore := builder.Store.(*store_sqlite.Store)
 	_, _, err := builder.BuildClaimedDedicatedBase(ctx, ClaimedDedicatedBaseRequest{
 		Claim: claim, RootPath: request.RootPath, WorkspaceID: request.WorkspaceID,
-		ProjectID: request.ProjectID, CopySource: &copyProbe{store: any(builder.Store).(*store_sqlite.Store)},
+		ProjectID: request.ProjectID, CopySource: &copyProbe{store: nativeStore},
 		PrePublish: func(context.Context, int64) error { return errors.New("injected publication failure") },
 	})
 	if err == nil {
 		t.Fatal("the injected failure did not fail the build")
 	}
-	catalog := any(builder.Store).(*store_sqlite.Store).Catalog()
+	catalog := nativeStore.Catalog()
 	failed, _, err := catalog.DedicatedBasePublication(ctx, claim.Desire.Authority.GraphID)
 	if err != nil || failed.AttemptState != "failed" {
 		t.Fatalf("fixture precondition: the claim is %q (err=%v), want failed", failed.AttemptState, err)
 	}
-	if len(any(builder.Store).(*store_sqlite.Store).AtGeneration(claim.GenerationID).GetRepoNodesLight(request.RepoPrefix)) == 0 {
+	if len(nativeStore.AtGeneration(claim.GenerationID).GetRepoNodesLight(request.RepoPrefix)) == 0 {
 		t.Fatal("fixture precondition: the failed generation holds no rows")
 	}
 
@@ -143,7 +146,7 @@ func TestReplacedFailedDedicatedClaimIsRetiredPromptly(t *testing.T) {
 	if _, found, _ := catalog.GetViewGeneration(ctx, claim.GenerationID); found {
 		t.Fatal("the replaced failed generation is still in the catalog")
 	}
-	if rows := any(builder.Store).(*store_sqlite.Store).AtGeneration(claim.GenerationID).GetRepoNodesLight(request.RepoPrefix); len(rows) != 0 {
+	if rows := nativeStore.AtGeneration(claim.GenerationID).GetRepoNodesLight(request.RepoPrefix); len(rows) != 0 {
 		t.Fatalf("the replaced failed generation still holds %d rows", len(rows))
 	}
 }

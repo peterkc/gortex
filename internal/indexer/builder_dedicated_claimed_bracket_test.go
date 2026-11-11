@@ -113,7 +113,8 @@ func TestGenerationBulkBracketClosesOnEveryExitPath(t *testing.T) {
 			builder, request, claim, _ := claimedCopyFixture(t)
 			indexGenerationZero(t, builder, request)
 			loader := &bulkLoadProbe{}
-			real := &copyProbe{store: any(builder.Store).(*store_sqlite.Store), bulk: loader}
+			nativeStore := builder.Store.(*store_sqlite.Store)
+			real := &copyProbe{store: nativeStore, bulk: loader}
 			run := func(copier GenerationPayloadCopier) error {
 				_, _, err := builder.BuildClaimedDedicatedBase(context.Background(), ClaimedDedicatedBaseRequest{
 					Claim: claim, RootPath: request.RootPath, WorkspaceID: request.WorkspaceID,
@@ -152,7 +153,8 @@ func TestClaimedDedicatedBaseFailsClosedOnAPopulatedGeneration(t *testing.T) {
 	indexGenerationZero(t, builder, request)
 	populated := fmt.Errorf("%w: generation %d", store_sqlite.ErrGenerationBulkLoadPopulated, claim.GenerationID)
 	loader := &bulkLoadProbe{fail: populated}
-	probe := &copyProbe{store: any(builder.Store).(*store_sqlite.Store), bulk: loader}
+	nativeStore := builder.Store.(*store_sqlite.Store)
+	probe := &copyProbe{store: nativeStore, bulk: loader}
 
 	_, _, err := builder.BuildClaimedDedicatedBase(context.Background(), ClaimedDedicatedBaseRequest{
 		Claim: claim, RootPath: request.RootPath, WorkspaceID: request.WorkspaceID,
@@ -182,7 +184,8 @@ func TestClaimedDedicatedBaseCopiesThroughAnUnavailableBulkWindow(t *testing.T) 
 	builder, request, claim, logs := claimedCopyFixture(t)
 	indexGenerationZero(t, builder, request)
 	loader := &bulkLoadProbe{fail: errors.New("the store could not pin a writer")}
-	probe := &copyProbe{store: any(builder.Store).(*store_sqlite.Store), bulk: loader}
+	nativeStore := builder.Store.(*store_sqlite.Store)
+	probe := &copyProbe{store: nativeStore, bulk: loader}
 
 	id := buildClaimedBase(t, builder, ClaimedDedicatedBaseRequest{
 		Claim: claim, RootPath: request.RootPath, WorkspaceID: request.WorkspaceID,
@@ -227,7 +230,7 @@ func TestGenerationBulkBracketEndsThroughTheDeferredDrainDoor(t *testing.T) {
 	// TRUNCATE.
 	t.Setenv("GORTEX_SQLITE_WAL_AUTOCHECKPOINT_PAGES", "1000000")
 	builder, request, claim := privateClaimedDedicatedFixture(t)
-	store := any(builder.Store).(*store_sqlite.Store)
+	store := builder.Store.(*store_sqlite.Store)
 	wal := request.StorePath + "-wal"
 
 	window := &generationBulkWindow{loader: store, generationID: claim.GenerationID, logger: zap.NewNop()}
@@ -289,7 +292,7 @@ func TestGenerationBulkBracketEndsThroughTheDeferredDrainDoor(t *testing.T) {
 func TestAnIndexPassFlushLeavesAGenerationBulkWindowToItsOwner(t *testing.T) {
 	t.Setenv("GORTEX_SQLITE_WAL_AUTOCHECKPOINT_PAGES", "1000000")
 	builder, request, claim := privateClaimedDedicatedFixture(t)
-	store := any(builder.Store).(*store_sqlite.Store)
+	store := builder.Store.(*store_sqlite.Store)
 	wal := request.StorePath + "-wal"
 
 	opened, err := store.BeginGenerationBulkLoad(claim.GenerationID)

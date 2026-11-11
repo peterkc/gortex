@@ -30,7 +30,8 @@ func TestClaimedAsyncBaseReparsesSidecarOnlyInterruptedTarget(t *testing.T) {
 	core, logs := observer.New(zap.InfoLevel)
 	b.Logger = zap.New(core)
 	indexAsyncCopyPrimary(t, b, req, true)
-	target := any(b.Store).(*store_sqlite.Store).AtGeneration(claim.GenerationID)
+	nativeStore := b.Store.(*store_sqlite.Store)
+	target := nativeStore.AtGeneration(claim.GenerationID)
 	copy, _, _ := b.claimedBaseCopyPlan(ctx, target, req.RootPath, req.RepoPrefix,
 		req.Identity.TreeOID, req.Identity.ExtractorVersions, true)
 	require.True(t, copy, "a current certified primary and clean tree must otherwise qualify for copy")
@@ -39,7 +40,7 @@ func TestClaimedAsyncBaseReparsesSidecarOnlyInterruptedTarget(t *testing.T) {
 	require.NoError(t, target.SetContractInputStateWithWorkContext(ctx, nil, retained, nil))
 	require.Empty(t, target.AllNodes())
 	require.Empty(t, target.AllEdges(), "this regression must not be caught by the existing graph-row guards")
-	probe := &quietContractCopyProbe{store: any(b.Store).(*store_sqlite.Store)}
+	probe := &quietContractCopyProbe{store: nativeStore}
 	id := buildClaimedBase(t, b, ClaimedDedicatedBaseRequest{
 		Claim: claim, RootPath: req.RootPath, WorkspaceID: req.WorkspaceID, ProjectID: req.ProjectID, CopySource: probe,
 	})
@@ -54,7 +55,7 @@ func TestClaimedAsyncBaseReparsesSidecarOnlyInterruptedTarget(t *testing.T) {
 	require.True(t, states[0].Accepted)
 	require.NotEqual(t, retained.InputFingerprint, states[0].InputFingerprint)
 	view := materializeClaimedBase(t, b, req.Identity.GraphID, id)
-	m := &graphview.Materializer{Store: any(b.Store).(*store_sqlite.Store), Catalog: any(b.Store).(*store_sqlite.Store).Catalog(), Leases: graphview.NewLeaseManager()}
+	m := &graphview.Materializer{Store: nativeStore, Catalog: nativeStore.Catalog(), Leases: graphview.NewLeaseManager()}
 	selected, err := m.CaptureContractInputs(ctx, view, req.RepoPrefix, req.Identity.CheckoutID)
 	require.NoError(t, err)
 	require.NoError(t, selected.Validate(ctx))

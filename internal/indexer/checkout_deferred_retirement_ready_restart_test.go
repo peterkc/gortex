@@ -80,27 +80,28 @@ func sweepUntilReadyOrphanRetired(t *testing.T, l *CheckoutLifecycle, id int64) 
 
 func TestDeferredRetirementRediscoversReadyOrphanAfterServedRestart(t *testing.T) {
 	l, _, _, ids := reopenedServedReadyRetirementFixture(t)
-	beforeFTS, err := any(l.store).(*store_sqlite.Store).SymbolFTSStats(t.Context())
+	nativeStore := l.store.(*store_sqlite.Store)
+	beforeFTS, err := nativeStore.SymbolFTSStats(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, int64(5), beforeFTS.Rows, "each fixture generation owns one physical FTS document")
 	sweepUntilReadyOrphanRetired(t, l, ids["orphan"])
-	afterFTS, err := any(l.store).(*store_sqlite.Store).SymbolFTSStats(t.Context())
+	afterFTS, err := nativeStore.SymbolFTSStats(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, beforeFTS.Rows-1, afterFTS.Rows, "retirement must remove the orphan's physical shared-FTS document")
-	require.Nil(t, any(l.store).(*store_sqlite.Store).AtGeneration(ids["orphan"]).GetNode("repo::orphan"), "physical node must be retired with its catalog row")
+	require.Nil(t, nativeStore.AtGeneration(ids["orphan"]).GetNode("repo::orphan"), "physical node must be retired with its catalog row")
 	for _, label := range []string{"commit", "routed", "retained", "leased"} {
 		row, found, err := l.catalog.GetViewGeneration(t.Context(), ids[label])
 		require.NoError(t, err)
 		require.True(t, found, label)
 		require.Equal(t, store_sqlite.ViewGenerationReady, row.State, label)
-		require.NotNil(t, any(l.store).(*store_sqlite.Store).AtGeneration(ids[label]).GetNode("repo::"+label), label)
+		require.NotNil(t, nativeStore.AtGeneration(ids[label]).GetNode("repo::"+label), label)
 	}
 	route, found, err := l.catalog.GetCheckoutRoute(t.Context(), "served-ready-restart")
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, ids["commit"], route.CommitGenerationID)
 	require.Equal(t, ids["routed"], route.DirtyGenerationID)
-	hits, err := any(l.store).(*store_sqlite.Store).AtGeneration(ids["routed"]).SearchSymbolsRepoScopedContext(t.Context(), "restart ready", []string{"repo"}, 10)
+	hits, err := nativeStore.AtGeneration(ids["routed"]).SearchSymbolsRepoScopedContext(t.Context(), "restart ready", []string{"repo"}, 10)
 	require.NoError(t, err)
 	require.NotEmpty(t, hits)
 }
@@ -110,7 +111,8 @@ func TestDeferredReadyRediscoveryPreservesUngatedAndExplicitSweep(t *testing.T) 
 	l.SetBuildGate(nil)
 	_, _, err := l.SweepDeferredRetirements(t.Context())
 	require.NoError(t, err)
-	requireCatalogGenerationPresent(t, any(l.store).(*store_sqlite.Store), ids["orphan"])
+	nativeStore := l.store.(*store_sqlite.Store)
+	requireCatalogGenerationPresent(t, nativeStore, ids["orphan"])
 	require.Empty(t, l.owed, "ungated discovery must retain its served-checkout exclusion")
 	// Legacy explicit sweeping uses its original, conservative helper even when
 	// this lifecycle later has a managed worker gate.
@@ -146,8 +148,9 @@ func TestDeferredReadyRediscoveryWaitsForPublishRetainLane(t *testing.T) {
 	}()
 	go func() { _, _, err := l.SweepDeferredRetirements(ctx); done <- err }()
 	require.Eventually(t, func() bool { return gate.Stats().BackgroundQueued == 1 }, 5*time.Second, time.Millisecond)
-	requireCatalogGenerationPresent(t, any(l.store).(*store_sqlite.Store), ids["orphan"])
-	require.NotNil(t, any(l.store).(*store_sqlite.Store).AtGeneration(ids["orphan"]).GetNode("repo::orphan"))
+	nativeStore := l.store.(*store_sqlite.Store)
+	requireCatalogGenerationPresent(t, nativeStore, ids["orphan"])
+	require.NotNil(t, nativeStore.AtGeneration(ids["orphan"]).GetNode("repo::orphan"))
 	select {
 	case err := <-done:
 		joined = true
@@ -166,5 +169,5 @@ func TestDeferredReadyRediscoveryWaitsForPublishRetainLane(t *testing.T) {
 		t.Fatal("retirement did not resume after publication retained its layer")
 	}
 	require.True(t, l.deferredRetirementInUse(ids["orphan"]))
-	requireCatalogGenerationPresent(t, any(l.store).(*store_sqlite.Store), ids["orphan"])
+	requireCatalogGenerationPresent(t, nativeStore, ids["orphan"])
 }

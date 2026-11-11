@@ -183,7 +183,8 @@ func TestContractFollowupNonemptyCrossRepoShapesAndScopedOwners(t *testing.T) {
 			t.Fatal("shared canonical differs across selected cohort attachments")
 		}
 		var bridges []*graph.Node
-		for node := range any(req.Payload).(*store_sqlite.Store).NodesByKindsSeq(graph.KindContractBridge) {
+		nativeStore := req.Payload.(*store_sqlite.Store)
+		for node := range nativeStore.NodesByKindsSeq(graph.KindContractBridge) {
 			bridges = append(bridges, node)
 		}
 		if len(bridges) != 1 {
@@ -194,7 +195,7 @@ func TestContractFollowupNonemptyCrossRepoShapesAndScopedOwners(t *testing.T) {
 		} else if !reflect.DeepEqual(firstBridge, bridges[0]) {
 			t.Fatal("complete bridge group differs across owners")
 		}
-		p, err := any(req.Payload).(*store_sqlite.Store).LayerContractRepoProjectionContext(context.Background(), req.Snapshot.Key.RepoPrefix)
+		p, err := nativeStore.LayerContractRepoProjectionContext(context.Background(), req.Snapshot.Key.RepoPrefix)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -458,7 +459,8 @@ export class ConfigService { constructor(@Inject(DATABASE_URL) private readonly 
 	if !report.Published {
 		t.Fatal("DI analysis not published")
 	}
-	projection, err := any(req.Payload).(*store_sqlite.Store).LayerContractRepoProjectionContext(context.Background(), "repo-a")
+	nativeStore := req.Payload.(*store_sqlite.Store)
+	projection, err := nativeStore.LayerContractRepoProjectionContext(context.Background(), "repo-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,7 +470,7 @@ export class ConfigService { constructor(@Inject(DATABASE_URL) private readonly 
 		if row.Edge.To != "di::DATABASE_URL" {
 			continue
 		}
-		targets, fetchErr := any(req.Payload).(*store_sqlite.Store).GetNodesByIDsContext(context.Background(), []string{row.Edge.To})
+		targets, fetchErr := nativeStore.GetNodesByIDsContext(context.Background(), []string{row.Edge.To})
 		if fetchErr != nil {
 			t.Fatal(fetchErr)
 		}
@@ -572,7 +574,8 @@ func TestContractFollowupRetainsDerivedSpringBeanCallsOnlyInAnalysis(t *testing.
 		t.Fatalf("Spring analysis failed=%#v %v", report, err)
 	}
 	source := "repo-a/OrderService.java::OrderService"
-	rows, truncated, err := any(req.Payload).(*store_sqlite.Store).GetOutEdgesByNodeIDsWithMetadataContext(context.Background(), []string{source}, graph.ContractProjectionRowLimit)
+	nativeStore := req.Payload.(*store_sqlite.Store)
+	rows, truncated, err := nativeStore.GetOutEdgesByNodeIDsWithMetadataContext(context.Background(), []string{source}, graph.ContractProjectionRowLimit)
 	if err != nil || truncated {
 		t.Fatalf("Spring outgoing proof unavailable=%v %v", truncated, err)
 	}
@@ -580,7 +583,7 @@ func TestContractFollowupRetainsDerivedSpringBeanCallsOnlyInAnalysis(t *testing.
 	for _, edge := range rows[source] {
 		if edge.Kind == graph.EdgeCalls && edge.Meta["via"] == "spring.Bean" {
 			links++
-			endpoints, readErr := any(req.Payload).(*store_sqlite.Store).GetNodesByIDsContext(context.Background(), []string{edge.From, edge.To})
+			endpoints, readErr := nativeStore.GetNodesByIDsContext(context.Background(), []string{edge.From, edge.To})
 			if readErr != nil || endpoints[edge.From] == nil || endpoints[edge.To] == nil {
 				t.Fatalf("derived Spring call endpoint unavailable=%#v %v", endpoints, readErr)
 			}
@@ -613,13 +616,14 @@ func TestContractFollowupIndexesSyntheticSearchOnlyInPayload(t *testing.T) {
 	if !report.Published || report.SymbolDocuments < 2 || report.FTSDuration < 0 {
 		t.Fatalf("missing actual analysis FTS=%#v", report)
 	}
-	hits, err := any(req.Payload).(*store_sqlite.Store).SearchSymbolsContext(context.Background(), "items", 20)
+	nativeStore := req.Payload.(*store_sqlite.Store)
+	hits, err := nativeStore.SearchSymbolsContext(context.Background(), "items", 20)
 	if err != nil {
 		t.Fatal(err)
 	}
 	endpoint, bridge := false, false
 	for _, hit := range hits {
-		nodes, err := any(req.Payload).(*store_sqlite.Store).GetNodesByIDsContext(context.Background(), []string{hit.NodeID})
+		nodes, err := nativeStore.GetNodesByIDsContext(context.Background(), []string{hit.NodeID})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -640,11 +644,11 @@ func TestContractFollowupIndexesSyntheticSearchOnlyInPayload(t *testing.T) {
 	if !endpoint || !bridge {
 		t.Fatalf("actual worker canonical/bridge not searchable: %#v", hits)
 	}
-	count, err := any(req.Payload).(*store_sqlite.Store).SymbolFTSCount()
+	count, err := nativeStore.SymbolFTSCount()
 	if err != nil || count != report.SymbolDocuments {
 		t.Fatalf("FTS document count mismatch=%d %#v %v", count, report, err)
 	}
-	mode, known, err := any(req.Payload).(*store_sqlite.Store).GetSymbolFTSNormalization("repo-a")
+	mode, known, err := nativeStore.GetSymbolFTSNormalization("repo-a")
 	if err != nil || !known || mode != search.FTSNormalizationMode() {
 		t.Fatalf("normalization not certified=%s %v %v", mode, known, err)
 	}

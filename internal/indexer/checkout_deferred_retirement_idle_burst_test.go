@@ -185,7 +185,8 @@ func extendedBurstYieldsTo(t *testing.T, priority ViewBuildPriority) {
 	// quantum may yield before reaching its first table with payload rows.
 	require.Positive(t, committed.RowsDeleted+int64(committed.StepsAdvanced),
 		"the committed quantum must delete payload or advance its resume cursor")
-	requireCatalogGenerationPresentOrRetiring(t, any(l.store).(*store_sqlite.Store), ids[0])
+	nativeStore := l.store.(*store_sqlite.Store)
+	requireCatalogGenerationPresentOrRetiring(t, nativeStore, ids[0])
 }
 
 // A burst runs the retirement preamble (reference check, fence transaction,
@@ -203,7 +204,8 @@ func TestRetirementBurstFencesEachGenerationOnce(t *testing.T) {
 	several := false
 	for pass := 0; pass < 20 && !several; pass++ {
 		seen := logs.Len()
-		preambles := any(l.store).(*store_sqlite.Store).RetirementPreambles()
+		nativeStore := l.store.(*store_sqlite.Store)
+		preambles := nativeStore.RetirementPreambles()
 		_, _, err := l.SweepDeferredRetirements(t.Context())
 		require.NoError(t, err)
 		bursts := logs.FilterMessage("indexer: deferred retirement committed a bounded burst").All()
@@ -211,7 +213,7 @@ func TestRetirementBurstFencesEachGenerationOnce(t *testing.T) {
 			continue
 		}
 		fields := bursts[len(bursts)-1].ContextMap()
-		require.EqualValues(t, fields["generations_touched"], any(l.store).(*store_sqlite.Store).RetirementPreambles()-preambles,
+		require.EqualValues(t, fields["generations_touched"], nativeStore.RetirementPreambles()-preambles,
 			"a burst re-ran the preamble for a generation it had already fenced")
 		several = fields["chunks_committed"].(int64) > 1
 	}

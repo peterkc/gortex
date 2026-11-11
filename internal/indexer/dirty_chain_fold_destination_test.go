@@ -59,7 +59,8 @@ func (f destinationProbeFold) Release(ctx context.Context) error {
 	if err := f.chainFoldSteps.Release(ctx); err != nil {
 		return err
 	}
-	row, found, err := any(f.backend.store).(*store_sqlite.Store).Catalog().GetViewGeneration(ctx, f.backend.to)
+	nativeStore := f.backend.store.(*store_sqlite.Store)
+	row, found, err := nativeStore.Catalog().GetViewGeneration(ctx, f.backend.to)
 	if err != nil || !found {
 		return fmt.Errorf("fold destination lookup: found=%t err=%v", found, err)
 	}

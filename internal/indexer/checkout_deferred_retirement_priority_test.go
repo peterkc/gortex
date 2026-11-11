@@ -184,7 +184,8 @@ func TestDeferredRetirementInUseIsPendingAndEligibleSiblingAdvances(t *testing.T
 
 	publish := func(layer string) int64 {
 		t.Helper()
-		generationID, _, err := any(f.lc.store).(*store_sqlite.Store).BeginPayloadGeneration(ctx, store_sqlite.PayloadGenerationRequest{
+		nativeStore := f.lc.store.(*store_sqlite.Store)
+		generationID, _, err := nativeStore.BeginPayloadGeneration(ctx, store_sqlite.PayloadGenerationRequest{
 			OwnerKind:      refViewOwnerKind,
 			GraphID:        "graph-retirement-in-use",
 			LayerID:        layer,

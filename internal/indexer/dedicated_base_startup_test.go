@@ -1021,7 +1021,8 @@ func TestTheStartupPublisherBuildsInsideOneGenerationBulkWindow(t *testing.T) {
 				require.NoError(t, os.WriteFile(filepath.Join(request.RootPath, "uncommitted.go"), []byte(uncommitted), 0o600))
 			}
 			store := runtime.store
-			require.NoError(t, any(store).(*store_sqlite.Store).CheckpointWAL())
+			nativeStore := store.(*store_sqlite.Store)
+			require.NoError(t, nativeStore.CheckpointWAL())
 
 			var (
 				windowGeneration int64
@@ -1034,8 +1035,8 @@ func TestTheStartupPublisherBuildsInsideOneGenerationBulkWindow(t *testing.T) {
 			)
 			observation.PrePublish = func(context.Context, int64) error {
 				hooks++
-				windowGeneration, windowHeld = any(store).(*store_sqlite.Store).InGenerationBulkLoad()
-				cacheSize, autoCheckpoint, shapeHeld = any(store).(*store_sqlite.Store).GenerationBulkLoadShape()
+				windowGeneration, windowHeld = nativeStore.InGenerationBulkLoad()
+				cacheSize, autoCheckpoint, shapeHeld = nativeStore.GenerationBulkLoadShape()
 				walAtPrePublish = walBytes(t, request.StorePath+"-wal")
 				return nil
 			}
@@ -1057,7 +1058,7 @@ func TestTheStartupPublisherBuildsInsideOneGenerationBulkWindow(t *testing.T) {
 			// else: nothing in the process will adopt a leaked generation
 			// window, so a build that returns still holding one strands the
 			// store's writer behind an unbounded log.
-			generation, stillHeld := any(store).(*store_sqlite.Store).InGenerationBulkLoad()
+			generation, stillHeld := nativeStore.InGenerationBulkLoad()
 			require.Falsef(t, stillHeld, "the build returned still holding the window on generation %d", generation)
 
 			// The write audit proper: the shape is read back off the pinned

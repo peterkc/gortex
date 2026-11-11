@@ -86,7 +86,8 @@ func TestGatedDeferredRetirementWaitsForTheEditIdle(t *testing.T) {
 	_, _, err = l.SweepDeferredRetirements(t.Context())
 	require.NoError(t, err)
 	require.Positive(t, quanta, "after the edit idle the sweep must serve a burst")
-	requireGenerationStateWithPayloadOrRetired(t, any(l.store).(*store_sqlite.Store), id)
+	nativeStore := l.store.(*store_sqlite.Store)
+	requireGenerationStateWithPayloadOrRetired(t, nativeStore, id)
 }
 
 // requireGenerationStateWithPayloadOrRetired accepts any progress: the burst

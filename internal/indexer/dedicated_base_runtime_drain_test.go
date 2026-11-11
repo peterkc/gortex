@@ -352,7 +352,8 @@ func TestDedicatedBaseRuntimeClosedPublisherSkipsObserverAndCatalogWrites(t *tes
 		t.Fatal(err)
 	}
 	awaitDedicatedDrain(t, drained)
-	check, err := installDedicatedWriteAudit(ctx, any(b.Store).(*store_sqlite.Store), request.StorePath)
+	nativeStore := b.Store.(*store_sqlite.Store)
+	check, err := installDedicatedWriteAudit(ctx, nativeStore, request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +398,8 @@ func TestDedicatedBaseRuntimeHeldPublisherCannotReopenRetrackedOwner(t *testing.
 	if err := r.RegisterDedicatedBaseOwner(graphID, owner); err != nil {
 		t.Fatal(err)
 	}
-	check, err := installDedicatedWriteAudit(t.Context(), any(b.Store).(*store_sqlite.Store), request.StorePath)
+	nativeStore := b.Store.(*store_sqlite.Store)
+	check, err := installDedicatedWriteAudit(t.Context(), nativeStore, request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -450,7 +452,8 @@ func TestDedicatedBaseRuntimeInvalidInstallsDoNotRetainSlots(t *testing.T) {
 	if err != nil || healthy == nil || healthy.admission == nil || healthy.authority != authority {
 		t.Fatalf("healthy install control: publisher=%+v err=%v", healthy, err)
 	}
-	check, err := installDedicatedWriteAudit(ctx, any(b.Store).(*store_sqlite.Store), request.StorePath)
+	nativeStore := b.Store.(*store_sqlite.Store)
+	check, err := installDedicatedWriteAudit(ctx, nativeStore, request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -538,7 +541,8 @@ func TestDedicatedBaseRuntimeConcurrentInvalidAndValidInstallPreservesSlot(t *te
 	if !counted {
 		t.Fatal("concurrent installs did not share an unconfirmed counted slot")
 	}
-	check, err := installDedicatedWriteAudit(ctx, any(b.Store).(*store_sqlite.Store), request.StorePath)
+	nativeStore := b.Store.(*store_sqlite.Store)
+	check, err := installDedicatedWriteAudit(ctx, nativeStore, request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}

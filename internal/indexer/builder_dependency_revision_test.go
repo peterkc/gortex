@@ -63,11 +63,12 @@ func TestDependencyRevisionOrdinaryBuilderCarriesMetadata(t *testing.T) {
 	if err != nil || id <= 0 || report.NodeCount == 0 {
 		t.Fatalf("actual build id=%d report=%+v err=%v", id, report, err)
 	}
-	row, found, err := any(builder.Store).(*store_sqlite.Store).Catalog().GetViewGeneration(ctx, id)
+	nativeStore := builder.Store.(*store_sqlite.Store)
+	row, found, err := nativeStore.Catalog().GetViewGeneration(ctx, id)
 	if err != nil || !found || row.DependencyRevision != identity.DependencyRevision {
 		t.Fatalf("build metadata=%+v found=%v err=%v", row, found, err)
 	}
-	if any(builder.Store).(*store_sqlite.Store).AtGeneration(id).GetNode(fixture.RepoPrefix+"/base.go::Committed") == nil {
+	if nativeStore.AtGeneration(id).GetNode(fixture.RepoPrefix+"/base.go::Committed") == nil {
 		t.Fatal("actual parser payload missing")
 	}
 	if len(builder.Store.AllNodes()) != 0 {
@@ -88,7 +89,8 @@ func TestDependencyRevisionOrdinaryBuilderCarriesMetadata(t *testing.T) {
 func TestDependencyRevisionClaimedFullAndDeltaOutput(t *testing.T) {
 	builder, fixture, git := privateDedicatedBuilderFixture(t)
 	ctx := context.Background()
-	catalog := any(builder.Store).(*store_sqlite.Store).Catalog()
+	nativeStore := builder.Store.(*store_sqlite.Store)
+	catalog := nativeStore.Catalog()
 	commit := func(body, message string) string {
 		t.Helper()
 		if err := os.WriteFile(filepath.Join(fixture.RootPath, "base.go"), []byte(body), 0o600); err != nil {
@@ -120,7 +122,7 @@ func TestDependencyRevisionClaimedFullAndDeltaOutput(t *testing.T) {
 	if _, err := catalog.AdoptDedicatedBaseGeneration(ctx, store_sqlite.AdoptDedicatedBaseGenerationRequest{Claim: first}); err != nil {
 		t.Fatal(err)
 	}
-	materializer := graphview.Materializer{Store: any(builder.Store).(*store_sqlite.Store), Catalog: catalog, Leases: graphview.NewLeaseManager(), Logger: zap.NewNop()}
+	materializer := graphview.Materializer{Store: nativeStore, Catalog: catalog, Leases: graphview.NewLeaseManager(), Logger: zap.NewNop()}
 	lower, err := materializer.MaterializeRefView(ctx, fixture.Identity.GraphID, id)
 	if err != nil {
 		t.Fatal(err)
@@ -142,7 +144,7 @@ func TestDependencyRevisionClaimedFullAndDeltaOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	deltaID, deltaReport, err := builder.BuildClaimedDedicatedDelta(ctx, ClaimedDedicatedDeltaRequest{Claim: second,
-		Base: commitLayerBase{Reader: lower.Reader, corpus: any(builder.Store).(*store_sqlite.Store).AtGeneration(id)}, BaseTreeOID: fixture.Identity.TreeOID,
+		Base: commitLayerBase{Reader: lower.Reader, corpus: nativeStore.AtGeneration(id)}, BaseTreeOID: fixture.Identity.TreeOID,
 		RepoDir: fixture.RootPath, RootPath: fixture.RootPath, WorkspaceID: fixture.WorkspaceID, ProjectID: fixture.ProjectID})
 	if err != nil || deltaID != second.GenerationID || deltaReport.NodeCount == 0 {
 		t.Fatalf("delta id=%d report=%+v err=%v", deltaID, deltaReport, err)
@@ -151,7 +153,7 @@ func TestDependencyRevisionClaimedFullAndDeltaOutput(t *testing.T) {
 	if err != nil || !found || row.DependencyRevision != "cohort-v1:a" || row.BaseGenerationID != id {
 		t.Fatalf("delta metadata=%+v found=%v err=%v", row, found, err)
 	}
-	if any(builder.Store).(*store_sqlite.Store).AtGeneration(deltaID).GetNode(fixture.RepoPrefix+"/base.go::AddedByDelta") == nil {
+	if nativeStore.AtGeneration(deltaID).GetNode(fixture.RepoPrefix+"/base.go::AddedByDelta") == nil {
 		t.Fatal("delta parser payload missing")
 	}
 	if _, err := catalog.AdoptDedicatedBaseGeneration(ctx, store_sqlite.AdoptDedicatedBaseGenerationRequest{Claim: second}); err != nil {
@@ -186,7 +188,7 @@ func TestDependencyRevisionClaimedFullAndDeltaOutput(t *testing.T) {
 		rootRow.LowerViewFingerprint != "" || rootRow.DependencyRevision != "cohort-v1:b" {
 		t.Fatalf("reroot metadata=%+v found=%v err=%v", rootRow, found, err)
 	}
-	if any(builder.Store).(*store_sqlite.Store).AtGeneration(rootID).GetNode(fixture.RepoPrefix+"/base.go::AddedByRoot") == nil {
+	if nativeStore.AtGeneration(rootID).GetNode(fixture.RepoPrefix+"/base.go::AddedByRoot") == nil {
 		t.Fatal("rerooted parser payload missing")
 	}
 	if _, err := catalog.AdoptDedicatedBaseGeneration(ctx, store_sqlite.AdoptDedicatedBaseGenerationRequest{Claim: third}); err != nil {
@@ -209,7 +211,7 @@ func TestDependencyRevisionClaimedFullAndDeltaOutput(t *testing.T) {
 	}
 	before := len(builder.Store.AllNodes())
 	refusedID, refusedReport, err := builder.BuildClaimedDedicatedDelta(ctx, ClaimedDedicatedDeltaRequest{Claim: mismatched,
-		Base: commitLayerBase{Reader: lower.Reader, corpus: any(builder.Store).(*store_sqlite.Store).AtGeneration(id)}, BaseTreeOID: fixture.Identity.TreeOID,
+		Base: commitLayerBase{Reader: lower.Reader, corpus: nativeStore.AtGeneration(id)}, BaseTreeOID: fixture.Identity.TreeOID,
 		RepoDir: fixture.RootPath, RootPath: fixture.RootPath, WorkspaceID: fixture.WorkspaceID, ProjectID: fixture.ProjectID})
 	if !errors.Is(err, errDedicatedDeltaParentRevision) || !errors.Is(err, store_sqlite.ErrDedicatedBaseCandidate) {
 		t.Fatalf("mismatched-revision parent extended the chain: id=%d report=%+v err=%v", refusedID, refusedReport, err)
@@ -221,7 +223,7 @@ func TestDependencyRevisionClaimedFullAndDeltaOutput(t *testing.T) {
 	if err != nil || !found || refusedRow.State != store_sqlite.ViewGenerationBuilding {
 		t.Fatalf("refused reservation was published: row=%+v found=%v err=%v", refusedRow, found, err)
 	}
-	if len(any(builder.Store).(*store_sqlite.Store).AtGeneration(mismatched.GenerationID).AllNodes()) != 0 {
+	if len(nativeStore.AtGeneration(mismatched.GenerationID).AllNodes()) != 0 {
 		t.Fatal("refused delta wrote payload")
 	}
 	if len(builder.Store.AllNodes()) != before || before != 0 {

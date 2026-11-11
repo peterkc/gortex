@@ -47,7 +47,8 @@ func newDedicatedDeltaFixture(t testing.TB) dedicatedDeltaFixture {
 	git("add", ".")
 	git("-c", "user.name=Delta Test", "-c", "user.email=delta@example.invalid", "-c", "commit.gpgsign=false", "commit", "-qm", "full lower fixture")
 	request.Identity.TreeOID, request.Identity.ProvenanceCommitOID = git("rev-parse", "HEAD^{tree}"), git("rev-parse", "HEAD")
-	catalog := any(builder.Store).(*store_sqlite.Store).Catalog()
+	nativeStore := builder.Store.(*store_sqlite.Store)
+	catalog := nativeStore.Catalog()
 	authority, err := catalog.AcquireDedicatedBaseAuthority(ctx, store_sqlite.AcquireDedicatedBaseAuthorityRequest{
 		GraphID: request.Identity.GraphID, Owner: store_sqlite.DedicatedBaseOwner{CheckoutID: request.Identity.CheckoutID, Incarnation: "private-incarnation"}, Token: "delta-fixture-authority",
 	})
@@ -71,20 +72,21 @@ func newDedicatedDeltaFixture(t testing.TB) dedicatedDeltaFixture {
 	if _, err := catalog.AdoptDedicatedBaseGeneration(ctx, store_sqlite.AdoptDedicatedBaseGenerationRequest{Claim: claim}); err != nil {
 		t.Fatal(err)
 	}
-	materializer := &graphview.Materializer{Store: any(builder.Store).(*store_sqlite.Store), Catalog: catalog, Leases: graphview.NewLeaseManager(), Logger: builder.Logger}
+	materializer := &graphview.Materializer{Store: nativeStore, Catalog: catalog, Leases: graphview.NewLeaseManager(), Logger: builder.Logger}
 	view, err := materializer.MaterializeRefView(ctx, claim.Desire.Authority.GraphID, id)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(view.Close) // Registered after Store.Close, so the real read lease drains first.
 	return dedicatedDeltaFixture{builder: builder, request: request, baseClaim: claim,
-		base: commitLayerBase{Reader: view.Reader, corpus: any(builder.Store).(*store_sqlite.Store).AtGeneration(id)}, materializer: materializer, git: git}
+		base: commitLayerBase{Reader: view.Reader, corpus: nativeStore.AtGeneration(id)}, materializer: materializer, git: git}
 }
 
 func (f dedicatedDeltaFixture) reserve(t testing.TB, tree string) ClaimedDedicatedDeltaRequest {
 	t.Helper()
 	ctx := context.Background()
-	catalog := any(f.builder.Store).(*store_sqlite.Store).Catalog()
+	nativeStore := f.builder.Store.(*store_sqlite.Store)
+	catalog := nativeStore.Catalog()
 	p, _, err := catalog.DedicatedBasePublication(ctx, f.baseClaim.Desire.Authority.GraphID)
 	if err != nil {
 		t.Fatal(err)
@@ -219,7 +221,8 @@ func (f dedicatedDeltaFixture) assertColdStructure(t *testing.T, ctx context.Con
 		t.Fatal(err)
 	}
 	defer target.Close()
-	cold := any(f.builder.Store).(*store_sqlite.Store).AtGeneration(0)
+	nativeStore := f.builder.Store.(*store_sqlite.Store)
+	cold := nativeStore.AtGeneration(0)
 	idx := New(cold, f.builder.Registry, f.builder.Config, f.builder.Logger)
 	idx.SetRepoPrefix(f.request.RepoPrefix)
 	idx.SetWorkspaceID(f.request.WorkspaceID)
@@ -378,7 +381,8 @@ func TestClaimedDedicatedDeltaRealGitStructuralParity(t *testing.T) {
 			if err != nil || id != request.Claim.GenerationID {
 				t.Fatalf("delta id=%d report=%+v err=%v", id, report, err)
 			}
-			active, _, err := any(f.builder.Store).(*store_sqlite.Store).Catalog().GetDedicatedGraph(ctx, request.Claim.Desire.Authority.GraphID)
+			nativeStore := f.builder.Store.(*store_sqlite.Store)
+			active, _, err := nativeStore.Catalog().GetDedicatedGraph(ctx, request.Claim.Desire.Authority.GraphID)
 			if err != nil || active.ActiveGenerationID != f.baseClaim.GenerationID {
 				t.Fatalf("builder adopted pointer: %+v %v", active, err)
 			}
@@ -457,7 +461,8 @@ func TestClaimedDedicatedDeltaConsecutiveAdoptedLayersFullPayload(t *testing.T) 
 			t.Fatalf("first delta indexed unrelated file: %+v", firstReport)
 		}
 	}
-	catalog := any(f.builder.Store).(*store_sqlite.Store).Catalog()
+	nativeStore := f.builder.Store.(*store_sqlite.Store)
+	catalog := nativeStore.Catalog()
 	if _, err := catalog.AdoptDedicatedBaseGeneration(ctx, store_sqlite.AdoptDedicatedBaseGenerationRequest{Claim: first.Claim}); err != nil {
 		t.Fatal(err)
 	}
@@ -480,7 +485,7 @@ func TestClaimedDedicatedDeltaConsecutiveAdoptedLayersFullPayload(t *testing.T) 
 	secondFixture.baseClaim = first.Claim
 	secondFixture.request.Identity.TreeOID = first.Claim.Desire.Identity.TreeOID
 	secondFixture.request.Identity.ProvenanceCommitOID = f.git("rev-parse", "HEAD")
-	secondFixture.base = commitLayerBase{Reader: lower.Reader, corpus: any(f.builder.Store).(*store_sqlite.Store).AtGeneration(firstID)}
+	secondFixture.base = commitLayerBase{Reader: lower.Reader, corpus: nativeStore.AtGeneration(firstID)}
 	secondBody := "package dedicated\n// Second delta updates the dependency.\nfunc Replacement() string { return \"replacement\" }\nfunc Committed() string { return Replacement() }\nfunc Caller() string { return Committed() }\n"
 	if err := os.WriteFile(filepath.Join(f.request.RootPath, "base.go"), []byte(secondBody), 0o600); err != nil {
 		t.Fatal(err)
@@ -534,7 +539,8 @@ func TestClaimedDedicatedDeltaStaleAndPolicyGuards(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := f.reserve(t, f.commit(t))
-	check, err := installDedicatedWriteAudit(ctx, any(f.builder.Store).(*store_sqlite.Store), f.request.StorePath)
+	nativeStore := f.builder.Store.(*store_sqlite.Store)
+	check, err := installDedicatedWriteAudit(ctx, nativeStore, f.request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -607,7 +613,8 @@ func TestClaimedDedicatedDeltaOnePhysicalAndReadyReplay(t *testing.T) {
 	if callbacks.Load() != 1 {
 		t.Fatalf("physical publication callbacks=%d", callbacks.Load())
 	}
-	check, err := installDedicatedWriteAudit(ctx, any(f.builder.Store).(*store_sqlite.Store), f.request.StorePath)
+	nativeStore := f.builder.Store.(*store_sqlite.Store)
+	check, err := installDedicatedWriteAudit(ctx, nativeStore, f.request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -660,7 +667,8 @@ func TestClaimedDedicatedDeltaTreeEquivalentCommitReusesBase(t *testing.T) {
 	if tree != f.request.Identity.TreeOID || f.git("rev-parse", "HEAD") == f.request.Identity.ProvenanceCommitOID {
 		t.Fatal("fixture did not create a distinct tree-equivalent commit")
 	}
-	check, err := installDedicatedWriteAudit(ctx, any(f.builder.Store).(*store_sqlite.Store), f.request.StorePath)
+	nativeStore := f.builder.Store.(*store_sqlite.Store)
+	check, err := installDedicatedWriteAudit(ctx, nativeStore, f.request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -683,17 +691,18 @@ func TestClaimedDedicatedDeltaPolicyChangeRequiresReseed(t *testing.T) {
 	ctx := context.Background()
 	identity := f.baseClaim.Desire.Identity
 	identity.ConfigHash = "new-output-affecting-policy"
-	desire, err := any(f.builder.Store).(*store_sqlite.Store).Catalog().RecordDedicatedBaseDesire(ctx, store_sqlite.RecordDedicatedBaseDesireRequest{
+	nativeStore := f.builder.Store.(*store_sqlite.Store)
+	desire, err := nativeStore.Catalog().RecordDedicatedBaseDesire(ctx, store_sqlite.RecordDedicatedBaseDesireRequest{
 		Authority: f.baseClaim.Desire.Authority, ExpectedDesiredEpoch: f.baseClaim.Desire.Epoch, Identity: identity,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	check, err := installDedicatedWriteAudit(ctx, any(f.builder.Store).(*store_sqlite.Store), f.request.StorePath)
+	check, err := installDedicatedWriteAudit(ctx, nativeStore, f.request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = any(f.builder.Store).(*store_sqlite.Store).Catalog().ClaimDedicatedBaseBuild(ctx, store_sqlite.ClaimDedicatedBaseBuildRequest{
+	_, err = nativeStore.Catalog().ClaimDedicatedBaseBuild(ctx, store_sqlite.ClaimDedicatedBaseBuildRequest{
 		Desire: desire, ExpectedActiveGenerationID: f.baseClaim.GenerationID, AttemptToken: "wrong-policy-parent", BaseGenerationID: f.baseClaim.GenerationID,
 	})
 	if !errors.Is(err, store_sqlite.ErrDedicatedBaseCandidate) {
@@ -715,7 +724,8 @@ func TestClaimedDedicatedDeltaParentRevisionChangeRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	tree := f.commit(t)
-	catalog := any(f.builder.Store).(*store_sqlite.Store).Catalog()
+	nativeStore := f.builder.Store.(*store_sqlite.Store)
+	catalog := nativeStore.Catalog()
 	parent, found, err := catalog.GetViewGeneration(ctx, f.baseClaim.GenerationID)
 	if err != nil || !found || parent.DependencyRevision != "" {
 		t.Fatalf("fixture parent revision: %+v found=%v err=%v", parent, found, err)
@@ -742,7 +752,7 @@ func TestClaimedDedicatedDeltaParentRevisionChangeRefused(t *testing.T) {
 	}
 	request := ClaimedDedicatedDeltaRequest{Claim: claim, Base: f.base, BaseTreeOID: f.request.Identity.TreeOID,
 		RepoDir: f.request.RootPath, RootPath: f.request.RootPath, WorkspaceID: f.request.WorkspaceID, ProjectID: f.request.ProjectID}
-	check, err := installDedicatedWriteAudit(ctx, any(f.builder.Store).(*store_sqlite.Store), f.request.StorePath)
+	check, err := installDedicatedWriteAudit(ctx, nativeStore, f.request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -206,7 +206,8 @@ func TestContractDependencyBaselineAdmitsWhileAPrimarySourceApplies(t *testing.T
 	options.BaselineAdmissionMu, options.BaselineJobs = &admission, &jobs
 	reconcile := NewContractBaselineReconciler(options)
 	admittedBaseline := make(chan bool, 1)
-	coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: slice2TestCatalog(options.Store), OpenEvidence: openSlice2TestEvidence, Store: any(options.Store).(*store_sqlite.Store), Leases: options.Materializer.Leases, Registry: options.Registry, Config: options.Config, Capture: NewContractFollowupSourceCapture(options), ReconcileBaseline: func(ctx context.Context, view *graphview.RepoView, repo, checkout string) (bool, error) {
+	nativeStore := options.Store.(*store_sqlite.Store)
+	coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: slice2TestCatalog(options.Store), OpenEvidence: openSlice2TestEvidence, Store: nativeStore, Leases: options.Materializer.Leases, Registry: options.Registry, Config: options.Config, Capture: NewContractFollowupSourceCapture(options), ReconcileBaseline: func(ctx context.Context, view *graphview.RepoView, repo, checkout string) (bool, error) {
 		started, err := reconcile(ctx, view, repo, checkout)
 		select {
 		case admittedBaseline <- started && err == nil:

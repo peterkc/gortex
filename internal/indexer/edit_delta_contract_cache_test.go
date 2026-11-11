@@ -136,7 +136,8 @@ func TestAncestryLayerBaseRecordsOnlyAnImmutableStack(t *testing.T) {
 	if view.ComposesBaseCorpus() {
 		t.Fatal("fixture precondition: a dedicated root's view composes generation zero")
 	}
-	c := &CheckoutCoordinator{catalog: slice2TestCatalog(any(dedicated.builder.Store).(*store_sqlite.Store)), store: any(dedicated.builder.Store).(*store_sqlite.Store)}
+	nativeStore := dedicated.builder.Store.(*store_sqlite.Store)
+	c := &CheckoutCoordinator{catalog: slice2TestCatalog(nativeStore), store: nativeStore}
 	base, ok := c.ancestryLayerBase(view).(commitLayerBase)
 	if !ok || fmt.Sprint(base.stack) != fmt.Sprint(view.Generations()) || len(base.stack) == 0 {
 		t.Fatalf("the dedicated view's base stack = %v, want %v", base.stack, view.Generations())

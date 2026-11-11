@@ -36,7 +36,8 @@ func dedicatedRuntimeFixture(t testing.TB) (*dedicatedBaseRuntime, *dedicatedBas
 
 func dedicatedRuntimeObserver(runtime *dedicatedBaseRuntime, publisher *dedicatedBasePublisher, observation dedicatedBaseObservation) func(context.Context) (dedicatedBaseObservation, error) {
 	return func(ctx context.Context) (dedicatedBaseObservation, error) {
-		graph, found, err := any(runtime.store).(*store_sqlite.Store).Catalog().GetDedicatedGraph(ctx, publisher.authority.GraphID)
+		nativeStore := runtime.store.(*store_sqlite.Store)
+		graph, found, err := nativeStore.Catalog().GetDedicatedGraph(ctx, publisher.authority.GraphID)
 		if err != nil {
 			return dedicatedBaseObservation{}, err
 		}
@@ -71,7 +72,8 @@ func TestDedicatedBaseRuntimeReadyReplayAndNoWrites(t *testing.T) {
 	if err != nil || first.Adoption.GenerationID <= 0 || first.Adoption.AlreadyAdopted {
 		t.Fatalf("first=%+v err=%v", first, err)
 	}
-	check, err := installDedicatedWriteAudit(ctx, any(runtime.store).(*store_sqlite.Store), request.StorePath)
+	nativeStore := runtime.store.(*store_sqlite.Store)
+	check, err := installDedicatedWriteAudit(ctx, nativeStore, request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,11 +101,12 @@ func TestDedicatedBaseRuntimeAdvanceRequiredPreservesDesire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before, _, err := any(runtime.store).(*store_sqlite.Store).Catalog().DedicatedBasePublication(ctx, publisher.authority.GraphID)
+	nativeStore := runtime.store.(*store_sqlite.Store)
+	before, _, err := nativeStore.Catalog().DedicatedBasePublication(ctx, publisher.authority.GraphID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	check, err := installDedicatedWriteAudit(ctx, any(runtime.store).(*store_sqlite.Store), request.StorePath)
+	check, err := installDedicatedWriteAudit(ctx, nativeStore, request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +130,7 @@ func TestDedicatedBaseRuntimeAdvanceRequiredPreservesDesire(t *testing.T) {
 			}
 		})
 	}
-	after, _, err := any(runtime.store).(*store_sqlite.Store).Catalog().DedicatedBasePublication(ctx, publisher.authority.GraphID)
+	after, _, err := nativeStore.Catalog().DedicatedBasePublication(ctx, publisher.authority.GraphID)
 	if err != nil || !reflect.DeepEqual(before, after) {
 		t.Fatalf("advance rejection changed desire: before=%+v after=%+v err=%v", before, after, err)
 	}
@@ -160,7 +163,8 @@ func TestDedicatedBaseRuntimeFreshBuilderRequired(t *testing.T) {
 	if _, err := publisher.ensureInitial(ctx, dedicatedRuntimeObserver(runtime, publisher, observation)); err != nil {
 		t.Fatal(err)
 	}
-	check, err := installDedicatedWriteAudit(ctx, any(runtime.store).(*store_sqlite.Store), request.StorePath)
+	nativeStore := runtime.store.(*store_sqlite.Store)
+	check, err := installDedicatedWriteAudit(ctx, nativeStore, request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +182,8 @@ func TestDedicatedBaseRuntimeExternalAdoptionDuringObservation(t *testing.T) {
 	runtime, publisher, observation, request := dedicatedRuntimeFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	catalog := any(runtime.store).(*store_sqlite.Store).Catalog()
+	nativeStore := runtime.store.(*store_sqlite.Store)
+	catalog := nativeStore.Catalog()
 	desire, err := catalog.RecordDedicatedBaseDesire(ctx, store_sqlite.RecordDedicatedBaseDesireRequest{Authority: publisher.authority, Identity: observation.Identity})
 	if err != nil {
 		t.Fatal(err)
@@ -205,7 +210,7 @@ func TestDedicatedBaseRuntimeExternalAdoptionDuringObservation(t *testing.T) {
 	if err != nil || p.Desire != desire || p.AttemptState != "adopted" {
 		t.Fatalf("external adoption lost: %+v %v", p, err)
 	}
-	check, err := installDedicatedWriteAudit(ctx, any(runtime.store).(*store_sqlite.Store), request.StorePath)
+	check, err := installDedicatedWriteAudit(ctx, nativeStore, request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,12 +258,13 @@ func TestDedicatedBaseRuntimeCancelAfterReadyBeforeAdoption(t *testing.T) {
 	defer release()
 	var generationID int64
 	dedicatedRuntimeWait(t, ctx, func() bool {
-		p, found, err := any(runtime.store).(*store_sqlite.Store).Catalog().DedicatedBasePublication(ctx, publisher.authority.GraphID)
+		nativeStore := runtime.store.(*store_sqlite.Store)
+		p, found, err := nativeStore.Catalog().DedicatedBasePublication(ctx, publisher.authority.GraphID)
 		if err != nil || !found {
 			return false
 		}
 		generationID = p.Claim.GenerationID
-		row, found, err := any(runtime.store).(*store_sqlite.Store).Catalog().GetViewGeneration(ctx, generationID)
+		row, found, err := nativeStore.Catalog().GetViewGeneration(ctx, generationID)
 		return err == nil && found && row.State == store_sqlite.ViewGenerationReady
 	})
 	cancelBuild()
@@ -329,15 +335,16 @@ func TestDedicatedBaseRuntimeCanceledFollowerDoesNotFailClaim(t *testing.T) {
 	}
 	// Observation/gate release alone does not prove a follower has passed its
 	// catalog ready-check and joined physical work. Cancel the actual waiter.
+	nativeStore := runtime.store.(*store_sqlite.Store)
 	dedicatedRuntimeWait(t, ctx, func() bool {
-		return any(runtime.store).(*store_sqlite.Store).PayloadBuildFlightWaiters(leaderGenerationID) == 1
+		return nativeStore.PayloadBuildFlightWaiters(leaderGenerationID) == 1
 	})
 	cancelFollower()
 	got := <-follower
 	if !errors.Is(got.err, context.Canceled) || got.result.Claim.GenerationID <= 0 {
 		t.Fatalf("follower=%+v %v", got.result, got.err)
 	}
-	p, _, err := any(runtime.store).(*store_sqlite.Store).Catalog().DedicatedBasePublication(ctx, publisher.authority.GraphID)
+	p, _, err := nativeStore.Catalog().DedicatedBasePublication(ctx, publisher.authority.GraphID)
 	if err != nil || p.AttemptState != "building" || p.Claim.AttemptToken != got.result.Claim.AttemptToken {
 		t.Fatalf("follower poisoned claim=%+v %v", p, err)
 	}
@@ -519,7 +526,8 @@ func TestDedicatedBaseRuntimeOrdersObservationBeforeRecord(t *testing.T) {
 	}
 	// Both physical builds can reach preparation while the old one is blocked:
 	// the observation gate is not retained across build/flight waits.
-	p, _, err := any(runtime.store).(*store_sqlite.Store).Catalog().DedicatedBasePublication(ctx, publisher.authority.GraphID)
+	nativeStore := runtime.store.(*store_sqlite.Store)
+	p, _, err := nativeStore.Catalog().DedicatedBasePublication(ctx, publisher.authority.GraphID)
 	if err != nil || p.Desire.Identity != newer.Identity || p.Desire.Epoch != 2 {
 		t.Fatalf("new observation not recorded last: %+v %v", p, err)
 	}

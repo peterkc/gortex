@@ -39,7 +39,8 @@ func TestDeferredRetirementDiscoversAndAgesDebtDuringPendingRequests(t *testing.
 	require.True(t, pending)
 	require.Positive(t, l.deferredRetirementEligibleSince.Load())
 	require.Zero(t, l.deferredRetirementProgress.Load(), "discovery is not committed retirement progress")
-	requireGenerationStateWithPayload(t, any(l.store).(*store_sqlite.Store), id, store_sqlite.ViewGenerationFailed)
+	nativeStore := l.store.(*store_sqlite.Store)
+	requireGenerationStateWithPayload(t, nativeStore, id, store_sqlite.ViewGenerationFailed)
 	// This is the same continuing debt, rather than a new idle window for
 	// each tiny commit. Pending tickets remain present throughout service.
 	l.deferredRetirementEligibleSince.Store(time.Now().Add(-3 * time.Minute).UnixNano())
@@ -62,7 +63,7 @@ func TestDeferredRetirementDiscoversAndAgesDebtDuringPendingRequests(t *testing.
 	}
 	require.NoError(t, ctx.Err(), "retirement exceeded its bounded convergence control")
 	require.False(t, pending)
-	requireGenerationRetired(t, any(l.store).(*store_sqlite.Store), id)
+	requireGenerationRetired(t, nativeStore, id)
 	require.Zero(t, l.deferredRetirementEligibleSince.Load())
 	entries := logs.FilterMessage("indexer: deferred retirement committed a bounded burst").All()
 	require.NotEmpty(t, entries)
@@ -220,7 +221,8 @@ func TestAgedRetirementCannotEnterAnActualHeldEditCycle(t *testing.T) {
 	}()
 	go func() { _, _, err := l.SweepDeferredRetirements(ctx); done <- err }()
 	require.Eventually(t, func() bool { return gate.Stats().BackgroundQueued == 1 }, 5*time.Second, time.Millisecond)
-	requireGenerationStateWithPayload(t, any(l.store).(*store_sqlite.Store), id, store_sqlite.ViewGenerationFailed)
+	nativeStore := l.store.(*store_sqlite.Store)
+	requireGenerationStateWithPayload(t, nativeStore, id, store_sqlite.ViewGenerationFailed)
 	select {
 	case err := <-done:
 		joined = true
@@ -264,7 +266,8 @@ func TestAgedRetirementRefusalsDoNotInventProgressOrRefreshDebtAge(t *testing.T)
 	for _, kind := range []string{"lease", "wal", "sweep_mutex", "build_flight"} {
 		t.Run(kind, func(t *testing.T) {
 			l, gate := agedRetirementLifecycle(store, started)
-			requireGenerationStateWithPayload(t, any(l.store).(*store_sqlite.Store), id, store_sqlite.ViewGenerationFailed)
+			nativeStore := l.store.(*store_sqlite.Store)
+			requireGenerationStateWithPayload(t, nativeStore, id, store_sqlite.ViewGenerationFailed)
 			l.owed[id] = struct{}{}
 			since := l.deferredRetirementEligibleSince.Load()
 			before := l.deferredRetirementProgress.Load()
@@ -277,12 +280,12 @@ func TestAgedRetirementRefusalsDoNotInventProgressOrRefreshDebtAge(t *testing.T)
 			case "build_flight":
 				// Admit the physical owner before failing its output, as in
 				// the abandonment handoff that retirement must not interrupt.
-				require.NoError(t, any(l.store).(*store_sqlite.Store).Catalog().SetViewGenerationState(t.Context(), id, store_sqlite.ViewGenerationBuilding, store_sqlite.ViewGenerationFailed))
-				flight, leader, _, err := any(l.store).(*store_sqlite.Store).JoinPayloadBuildFlight(t.Context(), id, false)
+				require.NoError(t, nativeStore.Catalog().SetViewGenerationState(t.Context(), id, store_sqlite.ViewGenerationBuilding, store_sqlite.ViewGenerationFailed))
+				flight, leader, _, err := nativeStore.JoinPayloadBuildFlight(t.Context(), id, false)
 				require.NoError(t, err)
 				require.True(t, leader)
 				defer flight.Complete(nil)
-				require.NoError(t, any(l.store).(*store_sqlite.Store).Catalog().SetViewGenerationState(t.Context(), id, store_sqlite.ViewGenerationFailed, store_sqlite.ViewGenerationBuilding))
+				require.NoError(t, nativeStore.Catalog().SetViewGenerationState(t.Context(), id, store_sqlite.ViewGenerationFailed, store_sqlite.ViewGenerationBuilding))
 			case "sweep_mutex":
 				l.retirementSweepMu.Lock()
 				defer l.retirementSweepMu.Unlock()
@@ -294,7 +297,7 @@ func TestAgedRetirementRefusalsDoNotInventProgressOrRefreshDebtAge(t *testing.T)
 			require.True(t, pending)
 			require.Equal(t, before, l.deferredRetirementProgress.Load())
 			require.Equal(t, since, l.deferredRetirementEligibleSince.Load())
-			requireGenerationStateWithPayload(t, any(l.store).(*store_sqlite.Store), id, store_sqlite.ViewGenerationFailed)
+			requireGenerationStateWithPayload(t, nativeStore, id, store_sqlite.ViewGenerationFailed)
 			require.False(t, gate.Stats().Active)
 		})
 	}
@@ -464,7 +467,8 @@ func TestRetirementBurstDistinguishesAutomaticRollbackFromLiveSQLFailure(t *test
 			require.Equal(t, first.RowsDeleted, fields["rows_deleted"])
 			require.EqualValues(t, first.StepsAdvanced, fields["steps_advanced"])
 			require.Zero(t, fields["retired_generations"])
-			requireGenerationStateWithPayload(t, any(l.store).(*store_sqlite.Store), id, store_sqlite.ViewGenerationRetiring)
+			nativeStore := l.store.(*store_sqlite.Store)
+			requireGenerationStateWithPayload(t, nativeStore, id, store_sqlite.ViewGenerationRetiring)
 			require.False(t, gate.Stats().Active)
 		})
 	}

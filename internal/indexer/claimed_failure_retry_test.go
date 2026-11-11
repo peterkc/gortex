@@ -37,7 +37,8 @@ func TestClaimedPhysicalFailureReleasesSameDesireForRetry(t *testing.T) {
 			if !errors.Is(err, want) || failed.Claim.GenerationID <= 0 || failed.Adoption.GenerationID != 0 {
 				t.Fatalf("failure was not physical/no-adoption: %+v err=%v", failed, err)
 			}
-			catalog := any(f.builder.Store).(*store_sqlite.Store).Catalog()
+			nativeStore := f.builder.Store.(*store_sqlite.Store)
+			catalog := nativeStore.Catalog()
 			row, found, err := catalog.GetViewGeneration(ctx, failed.Claim.GenerationID)
 			if err != nil || !found || row.State != "failed" {
 				t.Fatalf("payload terminal state: %+v found=%v err=%v", row, found, err)
@@ -50,7 +51,7 @@ func TestClaimedPhysicalFailureReleasesSameDesireForRetry(t *testing.T) {
 			if err != nil || !found || binding.ActiveGenerationID != oldActive {
 				t.Fatalf("failed attempt moved old route: %+v found=%v err=%v", binding, found, err)
 			}
-			if any(f.builder.Store).(*store_sqlite.Store).PayloadBuildFlightActive(failed.Claim.GenerationID) {
+			if nativeStore.PayloadBuildFlightActive(failed.Claim.GenerationID) {
 				t.Fatal("failed physical flight retained")
 			}
 			retry, err := f.publisher.ensureCurrent(ctx, f.leases, func(ctx context.Context) (dedicatedBaseObservation, error) { return f.observe(t, ctx) })
@@ -122,14 +123,15 @@ func TestClaimedCanceledPhysicalLeaderKeepsItsReservation(t *testing.T) {
 	// building, so the next start resumes the payload instead of building it
 	// again (builder_dedicated_claimed_resume.go). A build that FAILS still
 	// fails its claim (TestClaimedPhysicalFailureReleasesSameDesireForRetry).
-	publication, found, err := any(f.builder.Store).(*store_sqlite.Store).Catalog().DedicatedBasePublication(checkCtx, f.publisher.authority.GraphID)
+	nativeStore := f.builder.Store.(*store_sqlite.Store)
+	publication, found, err := nativeStore.Catalog().DedicatedBasePublication(checkCtx, f.publisher.authority.GraphID)
 	if err != nil || !found || publication.AttemptState != "building" || publication.Claim.GenerationID != id {
 		t.Fatalf("canceled leader did not keep its reservation: %+v found=%v err=%v", publication, found, err)
 	}
-	if row, found, err := any(f.builder.Store).(*store_sqlite.Store).Catalog().GetViewGeneration(checkCtx, id); err != nil || !found || row.State != store_sqlite.ViewGenerationBuilding {
+	if row, found, err := nativeStore.Catalog().GetViewGeneration(checkCtx, id); err != nil || !found || row.State != store_sqlite.ViewGenerationBuilding {
 		t.Fatalf("canceled leader's generation %d is %q (found=%v err=%v), want building", id, row.State, found, err)
 	}
-	if any(f.builder.Store).(*store_sqlite.Store).PayloadBuildFlightActive(id) {
+	if nativeStore.PayloadBuildFlightActive(id) {
 		t.Fatal("canceled physical flight retained")
 	}
 	retry := f.ensure(t, checkCtx)
@@ -203,7 +205,8 @@ func TestClaimedStaleLeaderFailureCannotFailReplacement(t *testing.T) {
 	if !errors.Is(failed.err, want) || failed.result.Adoption.GenerationID != 0 {
 		t.Fatalf("stale failure outcome: %+v", failed)
 	}
-	catalog := any(f.builder.Store).(*store_sqlite.Store).Catalog()
+	nativeStore := f.builder.Store.(*store_sqlite.Store)
+	catalog := nativeStore.Catalog()
 	publication, found, err := catalog.DedicatedBasePublication(ctx, f.publisher.authority.GraphID)
 	if err != nil || !found || publication.AttemptState != "adopted" || publication.Claim.GenerationID != replacement.Claim.GenerationID || publication.Claim.AttemptToken != replacement.Claim.AttemptToken {
 		t.Fatalf("stale leader terminal notification clobbered replacement: %+v found=%v err=%v", publication, found, err)
@@ -212,7 +215,7 @@ func TestClaimedStaleLeaderFailureCannotFailReplacement(t *testing.T) {
 	if err != nil || !found || binding.ActiveGenerationID != replacement.Claim.GenerationID {
 		t.Fatalf("stale failure moved active pointer: %+v found=%v err=%v", binding, found, err)
 	}
-	if any(f.builder.Store).(*store_sqlite.Store).PayloadBuildFlightActive(staleID) {
+	if nativeStore.PayloadBuildFlightActive(staleID) {
 		t.Fatal("stale failed physical flight retained")
 	}
 }
@@ -221,13 +224,14 @@ func TestClaimedTerminalRowCrashStateReclaimsSameDesire(t *testing.T) {
 	f := newDedicatedAdvanceFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	catalog := any(f.builder.Store).(*store_sqlite.Store).Catalog()
+	nativeStore := f.builder.Store.(*store_sqlite.Store)
+	catalog := nativeStore.Catalog()
 	publication, found, err := catalog.DedicatedBasePublication(ctx, f.publisher.authority.GraphID)
 	if err != nil || !found || publication.AttemptState != "building" || publication.Claim.GenerationID <= 0 {
 		t.Fatalf("initial allocated claim fixture: %+v found=%v err=%v", publication, found, err)
 	}
 	old := publication.Claim
-	if any(f.builder.Store).(*store_sqlite.Store).PayloadBuildFlightActive(old.GenerationID) {
+	if nativeStore.PayloadBuildFlightActive(old.GenerationID) {
 		t.Fatal("crash fixture unexpectedly owns a live physical flight")
 	}
 	// A still-BUILDING healthy row is not recovery permission: a fresh caller

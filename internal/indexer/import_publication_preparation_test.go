@@ -14,7 +14,8 @@ import (
 func TestImportPublicationPreparesMetadataBeforeLaneAdmission(t *testing.T) {
 	f := newCoordinatorAncestryFixture(t)
 	identity := f.request.Identity
-	id, _, err := any(f.c.store).(*store_sqlite.Store).BeginPayloadGeneration(t.Context(), store_sqlite.PayloadGenerationRequest{
+	nativeStore := f.c.store.(*store_sqlite.Store)
+	id, _, err := nativeStore.BeginPayloadGeneration(t.Context(), store_sqlite.PayloadGenerationRequest{
 		OwnerKind: identity.OwnerKind, GraphID: identity.GraphID,
 		CheckoutID: identity.CheckoutID, GenerationKind: DirtyLayerGenerationKind,
 		TreeOID: identity.TreeOID, ConfigHash: identity.ConfigHash,
@@ -58,7 +59,7 @@ func TestImportPublicationPreparesMetadataBeforeLaneAdmission(t *testing.T) {
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}
-			return any(f.c.store).(*store_sqlite.Store).PreparePayloadGenerationPublication(ctx, generation)
+			return nativeStore.PreparePayloadGenerationPublication(ctx, generation)
 		}
 		result = publishCopiedGeneration(ctx, id, admission, prepare)
 		if result == nil && !gate.Stats().Active {
@@ -76,7 +77,7 @@ func TestImportPublicationPreparesMetadataBeforeLaneAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatalf("metadata preparation held the physical lane: %v", err)
 	}
-	writeErr := any(f.c.store).(*store_sqlite.Store).AddBatchChecked([]*graph.Node{{ID: "metadata-foreground", Kind: graph.KindFunction, Name: "Foreground"}}, nil)
+	writeErr := nativeStore.AddBatchChecked([]*graph.Node{{ID: "metadata-foreground", Kind: graph.KindFunction, Name: "Foreground"}}, nil)
 	foregroundRelease()
 	if writeErr != nil {
 		t.Fatalf("checked foreground SQL during preparation: %v", writeErr)
@@ -99,7 +100,8 @@ func TestImportPublicationPreparesMetadataBeforeLaneAdmission(t *testing.T) {
 func TestImportPublicationCancellationDoesNotAdmitOrPublish(t *testing.T) {
 	f := newCoordinatorAncestryFixture(t)
 	identity := f.request.Identity
-	id, _, err := any(f.c.store).(*store_sqlite.Store).BeginPayloadGeneration(t.Context(), store_sqlite.PayloadGenerationRequest{
+	nativeStore := f.c.store.(*store_sqlite.Store)
+	id, _, err := nativeStore.BeginPayloadGeneration(t.Context(), store_sqlite.PayloadGenerationRequest{
 		OwnerKind: identity.OwnerKind, GraphID: identity.GraphID,
 		CheckoutID: identity.CheckoutID, GenerationKind: DirtyLayerGenerationKind,
 		TreeOID: identity.TreeOID, ConfigHash: identity.ConfigHash,

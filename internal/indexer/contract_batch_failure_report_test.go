@@ -30,7 +30,8 @@ func TestContractFollowupBatchKeepsWorkReportWhenInputKeyMoves(t *testing.T) {
 	snapshot.Work = targets[0].Work
 	session, err := newContractDeltaSession(cache, snapshot, f.options.Config)
 	require.NoError(t, err)
-	_, payload, err := any(f.options.Store).(*store_sqlite.Store).BeginPayloadGeneration(ctx, store_sqlite.PayloadGenerationRequest{
+	nativeStore := f.options.Store.(*store_sqlite.Store)
+	_, payload, err := nativeStore.BeginPayloadGeneration(ctx, store_sqlite.PayloadGenerationRequest{
 		OwnerKind: "dedicated_graph", GraphID: "contract-failed-batch", LayerID: "job-" + time.Now().Format(time.RFC3339Nano),
 		GenerationKind: "contract_analysis", ConfigHash: "job-config", ExtractorVersions: `{"go":"1"}`, ResolverVersion: "contract-only",
 	})

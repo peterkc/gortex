@@ -64,7 +64,8 @@ func sideSourcesOfView(store *store_sqlite.Store, view *graphview.RepoView) []si
 	out := []sideSource{{handle: store.AtGeneration(0)}}
 	for _, source := range view.GenerationSources() {
 		if source.Handle != nil {
-			out = append(out, sideSource{handle: any(source.Handle).(*store_sqlite.Store), layer: source.Layer})
+			nativeStore := source.Handle.(*store_sqlite.Store)
+			out = append(out, sideSource{handle: nativeStore, layer: source.Layer})
 		}
 	}
 	return out
