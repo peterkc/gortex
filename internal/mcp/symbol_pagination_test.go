@@ -290,9 +290,8 @@ func TestSymbolPageRetiredWaiterDoesNotReadClosedSpill(t *testing.T) {
 			entry := cache.lookup(cursor.Sequence)
 			require.NotNil(t, entry)
 			<-entry.token
-			nativeStorage := entry.storage.(*symbolPageStorage)
-			require.NoError(t, nativeStorage.spill(ctx))
-			artifact := nativeStorage.path
+			require.NoError(t, entry.storage.spill(ctx))
+			artifact := entry.storage.path
 			req.Params.Arguments = map[string]any{"query": "Needle", "limit": 4, "max_bytes": 0, "cursor": body["next_cursor"]}
 			barrier := &symbolAdmissionBarrier{Context: ctx, entered: make(chan struct{})}
 			type answer struct {
@@ -458,9 +457,8 @@ func TestSymbolPageNormalShutdownRemovesDefaultAndSessionSpills(t *testing.T) {
 		entry := cache.lookup(cursor.Sequence)
 		require.NotNil(t, entry)
 		<-entry.token
-		nativeStorage := entry.storage.(*symbolPageStorage)
-		require.NoError(t, nativeStorage.spill(t.Context()))
-		artifacts = append(artifacts, nativeStorage.path)
+		require.NoError(t, entry.storage.spill(t.Context()))
+		artifacts = append(artifacts, entry.storage.path)
 		entry.token <- struct{}{}
 	}
 	// SharedServer.Close and the CLI signal-return path already invoke this

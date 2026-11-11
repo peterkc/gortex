@@ -65,7 +65,7 @@ type symbolPageSequence struct {
 	owner                      *sessionState
 	scope                      ResolvedScope
 	template                   map[string]any
-	storage                    symbolPageRecords
+	storage                    *symbolPageStorage
 	retired                    atomic.Bool
 	nextPage, horizon, pending int
 	more                       bool
