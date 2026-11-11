@@ -100,6 +100,25 @@ var gatewayPresets = map[string]CustomProvider{
 		SchemaMode:    "json_schema",
 		PromptProfile: "frontier",
 	},
+	// Standard Compute (https://docs.standardcompute.com) is an
+	// OpenAI-compatible gateway; model ids carry a vendor prefix (list:
+	// GET /v1/models). US endpoint: https://us.stdcmpt.com/v1.
+	"standardcompute": {
+		BaseURL:       "https://api.stdcmpt.com/v1",
+		Model:         "deepseek/deepseek-v4-flash",
+		APIKeyEnv:     "STANDARDCOMPUTE_API_KEY",
+		SchemaMode:    "json_schema",
+		PromptProfile: "frontier",
+	},
+	// UberLLM (https://uberllm.dev/docs/quickstart) is an OpenAI-compatible
+	// gateway; model ids carry a vendor prefix (list: GET /v1/models).
+	"uberllm": {
+		BaseURL:       "https://api.uberllm.dev/v1",
+		Model:         "deepseek/deepseek-v4-flash",
+		APIKeyEnv:     "UBERLLM_API_KEY",
+		SchemaMode:    "json_schema",
+		PromptProfile: "frontier",
+	},
 }
 
 // Preset returns the named gateway preset (matched case-insensitively
