@@ -123,15 +123,17 @@ jobs:
           TEST_WINDOWS: ${{ matrix.os == 'windows-latest' }}
         run: go run ./scripts/ci-test --selection test-selection.json
       # Every partition on an OS offers the same module cache; the first save
-      # wins and the others only log that the key exists.
+      # wins and the others only log that the key exists. Both caches are
+      # saved even when tests fail, so a partition that runs out of time on
+      # a cold build still leaves a warm cache for the next run.
       - name: Save the module cache
-        if: github.event_name != 'pull_request' && steps.go-mod-cache.outputs.cache-hit != 'true'
+        if: ${{ !cancelled() && github.event_name != 'pull_request' && steps.go-mod-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.go-paths.outputs.modules }}
           key: ${{ steps.go-mod-cache.outputs.cache-primary-key }}
       - name: Save the partition's build cache
-        if: github.event_name != 'pull_request' && steps.go-build-cache.outputs.cache-hit != 'true'
+        if: ${{ !cancelled() && github.event_name != 'pull_request' && steps.go-build-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.go-paths.outputs.build }}
