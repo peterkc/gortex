@@ -5,7 +5,9 @@ import "sync/atomic"
 // EmitGenerationReferencesReleased reports a committed release through the
 // existing process-wide observer slot. The backend owns commit timing.
 func EmitGenerationReferencesReleased(release GenerationReferenceRelease) {
-	noteGenerationReferencesReleased(release)
+	if observer := generationReferenceReleaseObserver.Load(); observer != nil {
+		(*observer)(release)
+	}
 }
 
 var generationReferenceReleaseObserver atomic.Pointer[func(GenerationReferenceRelease)]
@@ -19,11 +21,4 @@ func OnGenerationReferencesReleased(observer func(GenerationReferenceRelease)) {
 		return
 	}
 	generationReferenceReleaseObserver.Store(&observer)
-}
-
-// noteGenerationReferencesReleased reports a committed release.
-func noteGenerationReferencesReleased(release GenerationReferenceRelease) {
-	if observer := generationReferenceReleaseObserver.Load(); observer != nil {
-		(*observer)(release)
-	}
 }

@@ -366,7 +366,7 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	// Reject an unusable backend name here, before the store lock is taken
 	// and before any path is resolved, so the caller gets the naming error
 	// rather than a downstream symptom of it.
-	if err := checkBackend(cfg.Backend); err != nil {
+	if err := backend.CheckName(cfg.Backend); err != nil {
 		return nil, err
 	}
 	// A one-shot server takes no store lock, so it must not be able to

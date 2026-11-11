@@ -42,7 +42,7 @@ func (s *Store) PayloadInputRevisionContext(ctx context.Context) (PayloadInputRe
 	if err := ctx.Err(); err != nil {
 		return PayloadInputRevision{}, err
 	}
-	return NewPayloadInputRevision(&s.payloadInputIdentity, s.viewGen, s.analysisViewCounter(s.viewGen).Load(), s.constantInputCounter(s.viewGen).Load(), s.payloadInputAdminRevision.Load()), nil
+	return storage.NewPayloadInputRevision(&s.payloadInputIdentity, s.viewGen, s.analysisViewCounter(s.viewGen).Load(), s.constantInputCounter(s.viewGen).Load(), s.payloadInputAdminRevision.Load()), nil
 }
 
 // CapturePayloadInputWitness must precede the checked projection. It includes
@@ -84,10 +84,10 @@ func (s *Store) CapturePayloadInputWitness(ctx context.Context, generationIDs []
 				return nil, err
 			}
 		}
-		revisions = append(revisions, NewPayloadInputWitnessRevision(g, s.analysisViewCounter(g).Load(), s.constantInputCounter(g).Load(), s.semanticBindingInputCounter(g).Load(), state))
+		revisions = append(revisions, storage.NewPayloadInputWitnessRevision(g, s.analysisViewCounter(g).Load(), s.constantInputCounter(g).Load(), s.semanticBindingInputCounter(g).Load(), state))
 	}
 	sort.Slice(revisions, func(i, j int) bool { return revisions[i].GenerationID() < revisions[j].GenerationID() })
-	return NewPayloadInputWitness(source, admin, revisions), nil
+	return storage.NewPayloadInputWitness(source, admin, revisions), nil
 }
 
 func validatePayloadInputWitnessLocked(w *PayloadInputWitness, s *Store, ctx context.Context) error {

@@ -13,6 +13,7 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/persistence"
+	"github.com/zzet/gortex/internal/storage/backend"
 )
 
 func TestSharedServerCloseReleasesNotebookSidecar(t *testing.T) {
@@ -152,7 +153,7 @@ func TestNewSharedServer_Oneshot(t *testing.T) {
 // accepts the empty backend name (there is only the sqlite store), and that
 // one-shot alone stays outside the store lock.
 func TestNewSharedServer_LifecyclesDefaultToSqlite(t *testing.T) {
-	if err := checkBackend(""); err != nil {
+	if err := backend.CheckName(""); err != nil {
 		t.Errorf("the empty backend name must resolve: %v", err)
 	}
 	if LifecycleOneshot.Writable() {
