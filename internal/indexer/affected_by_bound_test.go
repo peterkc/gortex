@@ -413,10 +413,9 @@ func TestDeletionShapedStagesCarryNoInEdges(t *testing.T) {
 //
 // Both tests below run over BOTH receipt backends, and the sqlite arm is the
 // load-bearing one: *store_sqlite.Store is the only graph.Store the daemon
-// ever holds (internal/serverstack/backend.go openSqliteBackend ->
-// store_sqlite.Open), so a fact that only *graph.Graph can carry reaches no
-// shipped consumer at all. The two accumulators are separate implementations;
-// exercising one proves nothing about the other.
+// ever holds (backend.Open -> store_sqlite.Open), so a fact that only *graph.Graph can
+// carry reaches no shipped consumer at all. The two accumulators are separate
+// implementations; exercising one proves nothing about the other.
 
 // receiptBackends are the two graph.Store implementations that bear mutation
 // receipts. "sqlite" is the production backend.
@@ -589,7 +588,7 @@ func TestAffectedByTruncationAnnouncesAMissingReceiptCarrier(t *testing.T) {
 // than another primitive test.
 //
 // Both run on *store_sqlite.Store — the only graph.Store the daemon ever holds
-// (internal/serverstack/backend.go openSqliteBackend -> store_sqlite.Open) — so
+// (backend.Open -> store_sqlite.Open) — so
 // a chain that only the in-memory graph can complete fails here.
 
 // enqueueAffectedByPointMutation indexes a one-definition corpus on store under
