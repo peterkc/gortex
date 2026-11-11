@@ -44,7 +44,7 @@ func OpenBackend(name, path string, logger *zap.Logger, allowRebuild bool, obser
 }
 
 func openBackendWithUpgradeHook(name, path string, logger *zap.Logger, allowRebuild bool, upgradeHook backend.UpgradeHook, observers ...storage.MigrationObserver) (graph.Store, func() error, error) {
-	if err := backend.CheckName(name); err != nil {
+	if err := checkBackend(name); err != nil {
 		return nil, nil, err
 	}
 	resolved, err := resolveBackendPath(path, "store.sqlite")
@@ -64,6 +64,9 @@ func openBackendWithUpgradeHook(name, path string, logger *zap.Logger, allowRebu
 	}
 	return s, closeStore, nil
 }
+
+// checkBackend validates a requested backend name before taking the store lock.
+func checkBackend(name string) error { return backend.CheckName(name) }
 
 // resolveBackendPath turns an empty backend path into a default under the
 // unified store directory (~/.gortex/store/<filename>, or the XDG_DATA_HOME
