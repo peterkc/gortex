@@ -199,6 +199,12 @@ var _ graph.OverlayLayerReader = (*GenerationLayer)(nil)
 // The caller must already own the view/lease; it is not a new selection.
 func (l *GenerationLayer) ProjectionHandle() GenerationLayerHandle { return l.handle }
 
+// ProjectionRevision is the input revision at which this layer materialized its
+// masks. It carries no store ownership and never substitutes for checked reads.
+func (l *GenerationLayer) ProjectionRevision() storage.PayloadInputRevision {
+	return l.inputRevision
+}
+
 func NewGenerationLayer(handle GenerationLayerHandle) (*GenerationLayer, error) {
 	return NewGenerationLayerContext(context.Background(), handle)
 }

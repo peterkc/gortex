@@ -5430,7 +5430,7 @@ func lastAuthoredTSFrom(blame map[string]graph.BlameEnrichment, n *graph.Node) (
 // The refusal is not a policy choice, it is the payload model. Every generation
 // a request can read is PUBLISHED, and publication seals the payload: a write
 // through a published generation's handle is refused with
-// store_sqlite.ErrPayloadGenerationSealed (payload_generation.go:33-35, :89,
+// storage.ErrPayloadGenerationSealed (payload_generation.go:33-35, :89,
 // :110, :122; only ViewGenerationBuilding admits a write —
 // payload_generation_managed.go:44-47). There is no writable counterpart of
 // readerFor(ctx) for a routed view, so "route the write to the generation the

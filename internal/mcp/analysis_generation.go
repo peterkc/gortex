@@ -85,7 +85,7 @@ func (s *Server) analysisGenerationStore() graph.Store {
 }
 
 // viewScopedAnalysisHandle is target's view-scoped analysis handle
-// (store_sqlite.ViewScopedAnalysis): its analysis revision, the gate every
+// (ViewScopedAnalysisStore): its analysis revision, the gate every
 // publication and the no-op rule check, moves only on writes to the analysed
 // view and to the base it composes over. A worktree edit writes its own
 // derived generation, so it neither stales the installed snapshot nor

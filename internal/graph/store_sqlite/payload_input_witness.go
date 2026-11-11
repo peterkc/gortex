@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync/atomic"
 
 	"github.com/zzet/gortex/internal/storage"
 )
@@ -19,6 +20,24 @@ type PayloadInputWitness = storage.PayloadInputWitness
 
 // PayloadInputWitnessRevision is one opaque captured generation row.
 type PayloadInputWitnessRevision = storage.PayloadInputWitnessRevision
+
+var nextPayloadRevisionCoreID atomic.Uint64
+
+// Revision identities carry no database owner or lifetime after capture.
+// A monotonically allocated ID also avoids address reuse after a core closes.
+func (s *Store) payloadRevisionCoreIdentity() uint64 {
+	if id := s.payloadInputIdentity.Load(); id != 0 {
+		return id
+	}
+	id := nextPayloadRevisionCoreID.Add(1)
+	if id == 0 {
+		panic("store_sqlite: payload revision identity exhausted")
+	}
+	if s.payloadInputIdentity.CompareAndSwap(0, id) {
+		return id
+	}
+	return s.payloadInputIdentity.Load()
+}
 
 // PayloadInputRevision is an opaque comparable revision of one selected handle.
 // It describes cached input ownership, not catalog lifetime or publication authority.
@@ -42,7 +61,7 @@ func (s *Store) PayloadInputRevisionContext(ctx context.Context) (PayloadInputRe
 	if err := ctx.Err(); err != nil {
 		return PayloadInputRevision{}, err
 	}
-	return storage.NewPayloadInputRevision(&s.payloadInputIdentity, s.viewGen, s.analysisViewCounter(s.viewGen).Load(), s.constantInputCounter(s.viewGen).Load(), s.payloadInputAdminRevision.Load()), nil
+	return storage.NewPayloadInputRevision(s.payloadRevisionCoreIdentity(), s.viewGen, s.analysisViewCounter(s.viewGen).Load(), s.constantInputCounter(s.viewGen).Load(), s.payloadInputAdminRevision.Load()), nil
 }
 
 // CapturePayloadInputWitness must precede the checked projection. It includes
@@ -74,7 +93,7 @@ func (s *Store) CapturePayloadInputWitness(ctx context.Context, generationIDs []
 	if err := conn.PingContext(ctx); err != nil {
 		return nil, err
 	}
-	source := &s.payloadInputIdentity
+	source := s.payloadRevisionCoreIdentity()
 	admin := s.payloadInputAdminRevision.Load()
 	var revisions []PayloadInputWitnessRevision
 	for g := range ids {
@@ -91,7 +110,7 @@ func (s *Store) CapturePayloadInputWitness(ctx context.Context, generationIDs []
 }
 
 func validatePayloadInputWitnessLocked(w *PayloadInputWitness, s *Store, ctx context.Context) error {
-	if !w.MatchesSource(&s.payloadInputIdentity) || w.RevisionCount() == 0 || w.AdminRevision() != s.payloadInputAdminRevision.Load() {
+	if !w.MatchesSource(s.payloadRevisionCoreIdentity()) || w.RevisionCount() == 0 || w.AdminRevision() != s.payloadInputAdminRevision.Load() {
 		return ErrPayloadInputChanged
 	}
 	conn, release, err := s.activeWriteConnLocked(ctx)

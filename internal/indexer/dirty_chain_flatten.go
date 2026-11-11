@@ -17,7 +17,7 @@ import (
 // The copy-based chain compactor.
 //
 // A working-tree chain is folded into ONE generation over the chain's commit
-// generation by copying rows (store_sqlite.FlattenGenerationChain), never by
+// generation by copying rows (FlattenGenerationChain), never by
 // re-parsing the working tree: the chain's rows already describe it. The
 // folded generation is checked against the chain's own composed view at every
 // path and identity the chain speaks for BEFORE it is published, and a fold

@@ -13,7 +13,7 @@
 // "invalid uri authority: C:%5CUsers%5C...", so the test cannot open the store
 // at all.
 //
-// The rules here are the production builder's (store_sqlite.sqliteDSN): make
+// The rules here are the production builder's (the SQLite backend's sqliteDSN): make
 // the path absolute, fold separators to "/", prefix a "/" when the result does
 // not already begin with one so a drive letter sits in the path rather than
 // the authority, and let url.URL do the percent-escaping. Keeping one copy in

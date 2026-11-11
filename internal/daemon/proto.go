@@ -890,7 +890,7 @@ type ViewsStatus struct {
 // StorageFailure is one payload generation's last storage-maintenance failure.
 //
 // Like CoordinatorStartFailure it mirrors the producing type
-// (store_sqlite.StorageFailure) on the wire rather than aliasing it: this
+// (storage.StorageFailure) on the wire rather than aliasing it: this
 // package is the daemon PROTOCOL, and a client must be able to decode it
 // without linking the graph store. The controller translates.
 //

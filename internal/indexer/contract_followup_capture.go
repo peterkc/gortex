@@ -46,11 +46,13 @@ type ContractFollowupCaptureOptions struct {
 // view's generations and the view facts the capture reads. A primary actor
 // has no view and no source; its capture pins the base corpus itself.
 type ContractCaptureSource struct {
-	handoff      *graphview.ViewHandoff
-	repo         string
-	composesBase bool
-	sources      []graphview.GenerationSource
-	once         sync.Once
+	// inventoryValues is a detached same-actor hint, never a borrowed reader.
+	inventoryValues *contractInventoryValues
+	handoff         *graphview.ViewHandoff
+	repo            string
+	composesBase    bool
+	sources         []graphview.GenerationSource
+	once            sync.Once
 	// onRelease, set only by tests, observes the release.
 	onRelease func()
 }
@@ -76,6 +78,7 @@ func PrepareContractCaptureSource(view *graphview.RepoView) (*ContractCaptureSou
 func (s *ContractCaptureSource) Release() {
 	if s != nil {
 		s.once.Do(func() {
+			s.inventoryValues = nil
 			s.handoff.Close()
 			if s.onRelease != nil {
 				s.onRelease()
@@ -307,6 +310,10 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 	// by the receipt stamps of the files it read (contract_stamp_scan.go), so
 	// a save to a file it never read cannot fail it.
 	inventoryProjection := newContractInventoryProjection(readers, handlesByRepo)
+	if prepared != nil {
+		inventoryProjection.seed(prepared.inventoryValues)
+		prepared.inventoryValues = nil
+	}
 	metaByPath := make(map[string]graph.FileMetaRow)
 	sources := make(map[string]source.ContentSource)
 	configs := make(map[string]config.IndexConfig)
@@ -367,6 +374,11 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 			pathRepos[path] = repo
 		}
 
+	}
+	// Only linked captures can seed a successor through a prepared source.
+	// Primary captures have no consumer for detached inventory.
+	if prepared != nil {
+		snapshot.inventoryValues = inventoryProjection.detachedValues()
 	}
 	snapshot.RepoConfigs = configs
 	snapshot.RepoExtractionOptions = extractionOptions

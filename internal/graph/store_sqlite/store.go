@@ -69,6 +69,8 @@ type storeCore struct {
 	// faultHook stops an operation at a declared durable boundary
 	// (fault_hook.go). It is set only by WithFaultHook and never changes.
 	faultHook FaultHook
+	// payloadInputIdentity is an opaque process-unique value, not an owner handle.
+	payloadInputIdentity atomic.Uint64
 
 	firstIndexDrainsMu sync.Mutex
 	firstIndexDrains   map[string]graph.FirstIndexDrain
@@ -263,8 +265,6 @@ type storeCore struct {
 	analysisViewRevisions     sync.Map
 	constantInputRevisions    sync.Map
 	payloadInputAdminRevision atomic.Uint64
-	// Its non-zero-sized address is the private identity shared by input proofs.
-	payloadInputIdentity byte
 	// Contract proof history is dormant until a caller reserves a bounded
 	// portion of its existing cache budget. It owns data only, under writeMu.
 	contractProjectionHistory  *contractProjectionHistory
@@ -1898,6 +1898,10 @@ func (s *Store) Close() (closeErr error) {
 	if !s.ownsCore {
 		return nil
 	}
+	// Detached input values cannot survive this owner's teardown. Invalidate
+	// after the pools close, including values sampled while Close was joining
+	// its workers. Borrowed handles above leave the shared owner unchanged.
+	defer s.payloadInputAdminRevision.Add(1)
 	policy := resolveCloseCheckpointPolicy()
 	started := time.Now()
 	defer func() {
