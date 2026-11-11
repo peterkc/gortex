@@ -15,7 +15,7 @@ import "time"
 //   - WriterPoolNanos/Waits: waits for the writer pool's one connection;
 //   - Sleep: time asleep through SQLite's VFS (process-wide), split into the
 //     native busy handler and the WAL read-lock retry loop. The driver's Go
-//     busy handler is not observable here (sqlite_sleep_gauge.go);
+//     busy handler is not observable here (store_sqlite/sqlite_sleep_gauge.go);
 //   - ReadTxnNanos/ReadTxns: the wall time of the pool's read transactions
 //     (a connection's first statement to its return to the pool), which is
 //     the store's share of a read-heavy lap.
@@ -30,7 +30,7 @@ type ReaderWaitMark struct {
 	Sleep           SQLiteSleepMark `json:"sleep"`
 	ReadTxnNanos    int64           `json:"read_txn_nanos"`
 	ReadTxns        int64           `json:"read_txns"`
-	// Page reads of the pool's read transactions (sqlite_read_gate.go):
+	// Page reads of the pool's read transactions (store_sqlite/sqlite_read_gate.go):
 	// found in the connection's page cache, read with a pread (from the log
 	// or the database file), and dirty pages spilled; MappedPages are pages
 	// served from the memory map instead, process-wide (every connection),
@@ -40,7 +40,7 @@ type ReaderWaitMark struct {
 	CacheSpills int64 `json:"cache_spills"`
 	MappedPages int64 `json:"mapped_pages"`
 	// The writer connection's page cache, read at the end of every hold of
-	// the write gate (writer_cache_counters.go). A writer spill means a
+	// the write gate (store_sqlite/writer_cache_counters.go). A writer spill means a
 	// transaction's dirty pages outgrew the cache and went to the log early.
 	WriterCacheHits   int64 `json:"writer_cache_hits"`
 	WriterCacheMisses int64 `json:"writer_cache_misses"`
@@ -48,7 +48,7 @@ type ReaderWaitMark struct {
 	// WriterCacheSkipped counts releases whose sample was skipped (a holder
 	// still had the connection); their pages land in a later sample.
 	WriterCacheSkipped int64 `json:"writer_cache_skipped"`
-	// VFS is the page I/O timed at the VFS (vfs_io_counters.go),
+	// VFS is the page I/O timed at the VFS (store_sqlite/vfs_io_counters.go),
 	// process-wide.
 	VFS VFSIOMark `json:"vfs"`
 }

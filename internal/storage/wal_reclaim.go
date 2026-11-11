@@ -55,7 +55,7 @@ type WALReclaimStats struct {
 	Backoff                 time.Duration // current backoff after the last attempt
 	LastOutcome             string
 	LastReason              string
-	// Build-lane yield (checkpoint_cycle_yield.go): PASSIVE attempts deferred
+	// Build-lane yield (store_sqlite/checkpoint_cycle_yield.go): PASSIVE attempts deferred
 	// while a mutation cycle held the lane, reclaim attempts refused for the
 	// same reason, background attempts of either kind a cycle cut short, and
 	// PASSIVE attempts forced past the deferral bound.
@@ -80,7 +80,7 @@ type WALReclaimStats struct {
 	// gate); RetirementEditYieldTimeouts the waits that ran out.
 	RetirementEditYields        int64
 	RetirementEditYieldTimeouts int64
-	// The incremental shrink (wal_shrink.go): big logs reset in place, the
+	// The incremental shrink (store_sqlite/wal_shrink.go): big logs reset in place, the
 	// slices that shrank their file afterwards, the bytes those slices
 	// returned, and the longest writer hold of one slice.
 	ShrinkInPlaceResets int64

@@ -80,7 +80,7 @@ var ErrGenerationBulkCheckpointBusy = errors.New("store_sqlite: generation bulk 
 // pass all offer a refused retirement again. One does not:
 // internal/indexer/repository_cleanup.go:264 propagates every retirement error
 // but ErrCatalogNotFound, and an untrack only reports a retryable "pending" for
-// ErrRepositoryCleanupPending. That is why the default budget above is a
-// runaway ceiling rather than a slice, and it is the reason to fix before
-// lowering it.
+// ErrRepositoryCleanupPending. That is why store_sqlite's default sweep budget
+// (defaultPayloadSweepBudget) is a runaway ceiling rather than a slice, and it
+// is the reason to fix before lowering it.
 var ErrPayloadSweepBudgetExhausted = errors.New("store_sqlite: payload generation sweep yielded on its budget")
