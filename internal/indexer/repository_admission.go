@@ -83,7 +83,7 @@ func (l *CheckoutLifecycle) stopRepositoryPublishers() <-chan struct{} {
 // callers must invoke it before making a newly bound corpus visible. It does
 // not itself make a catalog graph ready or authorize a build/publication.
 func (l *CheckoutLifecycle) RegisterRepositoryOwner(ctx context.Context, graphID string) error {
-	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) || l.leases == nil {
+	if l == nil || l.catalog == nil || l.leases == nil {
 		return graphview.ErrRepositoryOwnerUnknown
 	}
 	l.repositoryAdmissionMu.Lock()
@@ -252,7 +252,7 @@ func (l *CheckoutLifecycle) RepositoryAdmissionClosed(prefix string) bool {
 // restoreRepositoryAdmissions runs before Seed resumes any saga or startup
 // work. A failed read is fatal to admission restoration, never an empty result.
 func (l *CheckoutLifecycle) restoreRepositoryAdmissions(ctx context.Context) error {
-	if l.catalog == nil || l.catalog.IsNilMaterializerCatalog() {
+	if l.catalog == nil {
 		return nil
 	}
 	l.repositoryAdmissionMu.Lock()

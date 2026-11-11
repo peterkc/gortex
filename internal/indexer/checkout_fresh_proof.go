@@ -104,7 +104,7 @@ func (p CheckoutFreshProof) ReusableSample() bool {
 // loop owns.
 func (l *CheckoutLifecycle) ProveCheckoutFresh(ctx context.Context, checkoutID, expectedRoot string) (CheckoutFreshProof, error) {
 	var proof CheckoutFreshProof
-	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) || checkoutID == "" || expectedRoot == "" {
+	if l == nil || l.catalog == nil || checkoutID == "" || expectedRoot == "" {
 		return proof, fmt.Errorf("%w: checkout identity and root are required", ErrCheckoutMutationStale)
 	}
 	if ctx == nil {

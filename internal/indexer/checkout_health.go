@@ -103,7 +103,7 @@ type ViewsHealth struct {
 // the whole block on an error, which reads as "not available" instead.
 func (l *CheckoutLifecycle) ViewsHealth(ctx context.Context) (ViewsHealth, error) {
 	out := ViewsHealth{Counters: viewmetrics.Read().Flat()}
-	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) {
+	if l == nil || l.catalog == nil {
 		return out, errNoCatalog
 	}
 	out.Coordinators = l.liveCoordinators("")
@@ -115,7 +115,7 @@ func (l *CheckoutLifecycle) ViewsHealth(ctx context.Context) (ViewsHealth, error
 	// The store is what the retirement sweep reports its refusals to, and a
 	// census that counts retiring generations without saying why they are
 	// still there is the same defect the start failures fixed one field up.
-	if l.store != nil && !l.store.IsNilGenerationHandle() {
+	if l.store != nil {
 		out.StorageFailures = l.store.StorageFailures()
 	}
 	out.PublicationStalls = l.PublicationStalls()

@@ -1017,7 +1017,7 @@ func (d *prewarmDeferral) end() {
 // will re-derive: those caches would be orphaned when the correction moves
 // the stack's key.
 func (l *CheckoutLifecycle) DeferPrewarmsUntilCorrected(ctx context.Context) {
-	if l == nil || l.store == nil || l.store.IsNilGenerationHandle() {
+	if l == nil || l.store == nil {
 		return
 	}
 	stale := make(map[int64]struct{})

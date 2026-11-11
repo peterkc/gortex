@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/zzet/gortex/internal/gitstate"
-	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/storage"
 	"go.uber.org/zap"
@@ -312,7 +311,7 @@ func (c *CheckoutCoordinator) selectDirtyParentDetail(
 		top.ResolverVersion != current.ResolverVersion || top.DependencyRevision != current.DependencyRevision {
 		return fallback(dirtyChainFallbackPolicyChanged)
 	}
-	if c.store == nil || c.store.IsNilGenerationHandle() {
+	if c.store == nil {
 		return fallback(dirtyChainFallbackParentManifestMissing)
 	}
 	oldestFirst := make([]int64, 0, len(chain))
@@ -448,11 +447,7 @@ func (c *CheckoutCoordinator) deferRetire(generationID int64, why string) {
 	held := len(c.backlog)
 	c.mu.Unlock()
 	if !known {
-		var owedStore graph.Store
-		if c.store != nil && !c.store.IsNilGenerationHandle() {
-			owedStore = c.store
-		}
-		countRetirementOwed(owedStore, generationID, retireOwedClass(why))
+		countRetirementOwed(c.store, generationID, retireOwedClass(why))
 		// An idle worker need not wait out its pause for new debt.
 		notifyDeferredRetirementWork()
 	}

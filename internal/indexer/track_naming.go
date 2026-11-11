@@ -151,7 +151,7 @@ func (mi *MultiIndexer) trackPrefixFromFacts(entry config.RepoEntry, facts track
 // Catalog naming consumes completed discovery; no unjoinable worker can retain
 // this lifecycle. Reads respect the remaining admission budget.
 func (l *CheckoutLifecycle) dedicatedPrefixFromFacts(ctx context.Context, root string, facts trackNamingFacts, before time.Time) (string, error) {
-	if (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) || facts.inventory == nil || facts.record == nil || facts.record.AdminName == gitstate.MainAdminName {
+	if l.catalog == nil || facts.inventory == nil || facts.record == nil || facts.record.AdminName == gitstate.MainAdminName {
 		return "", nil
 	}
 	familyID := FamilyIDFor(facts.inventory.CommonDir)

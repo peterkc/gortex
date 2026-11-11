@@ -67,7 +67,7 @@ func (l *CheckoutLifecycle) interactiveWriteWanted(coordinators []*CheckoutCoord
 	if l.interactiveDemand != nil {
 		return l.interactiveDemand()
 	}
-	if reporter, ok := any(l.store).(writeDemandReporter); ok && (l.store != nil && !l.store.IsNilGenerationHandle()) && reporter.WriteWanted() {
+	if reporter, ok := any(l.store).(writeDemandReporter); ok && l.store != nil && reporter.WriteWanted() {
 		return true
 	}
 	for _, coordinator := range coordinators {

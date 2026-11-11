@@ -96,7 +96,7 @@ func (l *CheckoutLifecycle) resolveDestructivePrefix(ctx context.Context, pathOr
 	if meta := l.mi.GetMetadata(pathOrPrefix); meta != nil {
 		return pathOrPrefix, nil
 	}
-	if l.catalog != nil && !l.catalog.IsNilMaterializerCatalog() {
+	if l.catalog != nil {
 		graph, ok, err := l.catalog.GetDedicatedGraph(ctx, GraphIDFor(pathOrPrefix))
 		if err != nil {
 			return "", err
@@ -111,7 +111,7 @@ func (l *CheckoutLifecycle) resolveDestructivePrefix(ctx context.Context, pathOr
 	if prefix := l.ResolvePrefix(pathOrPrefix); prefix != "" {
 		return prefix, nil
 	}
-	if l.catalog == nil || l.catalog.IsNilMaterializerCatalog() {
+	if l.catalog == nil {
 		return "", nil
 	}
 	checkout, found, err := l.checkoutForPath(ctx, pathOrPrefix)

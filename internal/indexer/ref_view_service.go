@@ -38,7 +38,7 @@ type RefViewSelection struct {
 // per-request state, and building one costs a configuration digest and an
 // extractor fingerprint that would otherwise be recomputed on every selection.
 func (l *CheckoutLifecycle) EnsureRefView(ctx context.Context, sel RefViewSelection) (RefViewResult, error) {
-	if l == nil || (l.store == nil || l.store.IsNilGenerationHandle()) || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) {
+	if l == nil || l.store == nil || l.catalog == nil {
 		return RefViewResult{}, fmt.Errorf("indexer: this daemon serves no ref views")
 	}
 	ownerRead, err := l.AcquireRepositoryRead(sel.GraphID)
@@ -82,7 +82,7 @@ func (l *CheckoutLifecycle) EnsureRefView(ctx context.Context, sel RefViewSelect
 // already published rather than drive a new selection — the older generation a
 // building view can still answer from.
 func (l *CheckoutLifecycle) RefViewGeneration(ctx context.Context, refViewID string) (storage.RefView, bool, error) {
-	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) || refViewID == "" {
+	if l == nil || l.catalog == nil || refViewID == "" {
 		return storage.RefView{}, false, nil
 	}
 	return l.catalog.GetRefView(ctx, refViewID)

@@ -4300,11 +4300,7 @@ func (c *CheckoutCoordinator) offerRetire(ctx context.Context, generationID int6
 		c.mu.Unlock()
 		if !known {
 			// A refused offer is owed to the background sweep like a deferral.
-			var owedStore graph.Store
-			if c.store != nil && !c.store.IsNilGenerationHandle() {
-				owedStore = c.store
-			}
-			countRetirementOwed(owedStore, generationID, viewmetrics.OwedReleased)
+			countRetirementOwed(c.store, generationID, viewmetrics.OwedReleased)
 			notifyDeferredRetirementWork()
 		}
 		// The blocking reason and how many generations this coordinator is

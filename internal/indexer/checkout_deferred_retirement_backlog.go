@@ -49,7 +49,7 @@ func (b RetirementBacklog) Empty() bool {
 // RetirementBacklog reads the deferred retirement backlog: in-memory owed
 // work, plus one catalog listing for the retiring count and the sizes.
 func (l *CheckoutLifecycle) RetirementBacklog(ctx context.Context) (RetirementBacklog, error) {
-	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) {
+	if l == nil || l.catalog == nil {
 		return RetirementBacklog{}, errNoCatalog
 	}
 	rows, err := l.catalog.ListViewGenerations(ctx, storage.ViewGenerationFilter{})

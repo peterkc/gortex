@@ -109,7 +109,7 @@ func (l *CheckoutLifecycle) retirementPacedStandDown(starved bool) string {
 	if pace.active() && l.walSinceReset() > deferredRetirementWALPause {
 		// Refused on the log's size: the reclaim may then run through a busy
 		// lane, or nothing between this mark and its pressure mark moves.
-		if l.store != nil && !l.store.IsNilGenerationHandle() {
+		if l.store != nil {
 			l.store.RequestWALReclaim()
 		}
 		return "wal_pause"
@@ -122,7 +122,7 @@ func (l *CheckoutLifecycle) walSinceReset() int64 {
 	if l.walBytes != nil {
 		return l.walBytes()
 	}
-	if l.store == nil || l.store.IsNilGenerationHandle() {
+	if l.store == nil {
 		return 0
 	}
 	mark := l.store.WALWriteMark()
@@ -165,7 +165,7 @@ func orderForPace(pace retirementPace, ordered []int64, size func(int64) int64) 
 // recorded it (0 when unknown or on error).
 func (l *CheckoutLifecycle) generationStorageBytes(ctx context.Context) func(int64) int64 {
 	return func(id int64) int64 {
-		if l.catalog == nil || l.catalog.IsNilMaterializerCatalog() {
+		if l.catalog == nil {
 			return 0
 		}
 		row, found, err := l.catalog.GetViewGeneration(ctx, id)

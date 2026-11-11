@@ -98,7 +98,7 @@ type refViewCandidate struct {
 // sweepRefViewRetention collects the ref-view generations the bounds no longer
 // keep, and reports how many went.
 func (l *CheckoutLifecycle) sweepRefViewRetention(ctx context.Context) int {
-	if l == nil || (l.store == nil || l.store.IsNilGenerationHandle()) || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) {
+	if l == nil || l.store == nil || l.catalog == nil {
 		return 0
 	}
 	rows, err := l.catalog.ListViewGenerations(ctx, storage.ViewGenerationFilter{
@@ -150,7 +150,7 @@ func (l *CheckoutLifecycle) sweepRefViewRetention(ctx context.Context) int {
 // retirement worker. The catalog transition is durable before the in-memory
 // queue is updated, so a restart can rediscover every accepted generation.
 func (l *CheckoutLifecycle) queueRefViewRetirements(ctx context.Context) {
-	if l == nil || (l.store == nil || l.store.IsNilGenerationHandle()) || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) {
+	if l == nil || l.store == nil || l.catalog == nil {
 		return
 	}
 	rows, err := l.catalog.ListViewGenerations(ctx, storage.ViewGenerationFilter{

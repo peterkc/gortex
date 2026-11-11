@@ -214,7 +214,7 @@ func gitBlobContent(root, commit string) func(ctx context.Context, rel string) (
 // corrected, or ctx ends.
 func (l *CheckoutLifecycle) CorrectStaleDerivations(ctx context.Context) (DerivedCorrectionReport, error) {
 	var report DerivedCorrectionReport
-	if l == nil || l.store == nil || l.store.IsNilGenerationHandle() || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) {
+	if l == nil || l.store == nil || l.catalog == nil {
 		return report, nil
 	}
 	started := time.Now()

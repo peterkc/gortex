@@ -290,7 +290,7 @@ func (r *dedicatedBaseRuntime) acquire(ctx context.Context, graphID string) (fun
 // install is an owner-installation operation, NEVER a per-poll operation. The
 // canonical owner and explicit expected authority fence come from its caller.
 func (r *dedicatedBaseRuntime) install(ctx context.Context, req storage.AcquireDedicatedBaseAuthorityRequest) (*dedicatedBasePublisher, error) {
-	if r == nil || r.store == nil || r.store.IsNilGenerationHandle() {
+	if r == nil || r.store == nil {
 		return nil, fmt.Errorf("%w: installation requires a store", errDedicatedBaseRuntimeInput)
 	}
 	actorRelease, admission, err := r.admitOwnerState(ctx, req.GraphID, req.Owner, nil)
@@ -315,7 +315,7 @@ func (r *dedicatedBaseRuntime) install(ctx context.Context, req storage.AcquireD
 
 func (p *dedicatedBasePublisher) ensureObserved(ctx context.Context, observe func(context.Context) (dedicatedBaseObservation, error), leases *graphview.LeaseManager) (dedicatedBaseResult, error) {
 	var out dedicatedBaseResult
-	if p == nil || p.runtime == nil || p.runtime.store == nil || p.runtime.store.IsNilGenerationHandle() || observe == nil {
+	if p == nil || p.runtime == nil || p.runtime.store == nil || observe == nil {
 		return out, fmt.Errorf("%w: ensure requires publisher, store and observer", errDedicatedBaseRuntimeInput)
 	}
 	r := p.runtime

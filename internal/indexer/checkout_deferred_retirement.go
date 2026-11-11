@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
@@ -22,7 +21,7 @@ const (
 // fairly selects one generation across live coordinator backlogs and durable
 // orphan/owed work, then advances at most one physical retirement slice.
 func (l *CheckoutLifecycle) SweepDeferredRetirements(ctx context.Context) (retired int, pending bool, err error) {
-	if l == nil || (l.store == nil || l.store.IsNilGenerationHandle()) {
+	if l == nil || l.store == nil {
 		return 0, false, nil
 	}
 	if ctx == nil {
@@ -102,11 +101,7 @@ func (l *CheckoutLifecycle) SweepDeferredRetirements(ctx context.Context) (retir
 	// A generation already counted as owed (by a coordinator, or an earlier
 	// pass) is not counted again.
 	for _, generationID := range discovered {
-		var owedStore graph.Store
-		if l.store != nil && !l.store.IsNilGenerationHandle() {
-			owedStore = l.store
-		}
-		countRetirementOwed(owedStore, generationID, viewmetrics.OwedDiscovered)
+		countRetirementOwed(l.store, generationID, viewmetrics.OwedDiscovered)
 	}
 	l.coordMu.Lock()
 	for _, generationID := range discovered {
@@ -345,7 +340,7 @@ func (l *CheckoutLifecycle) removeOwedRetirement(generationID int64) {
 
 func (l *CheckoutLifecycle) deferredRetirementInUse(generationID int64) bool {
 	if (l.leases != nil && l.leases.InUse(generationID)) ||
-		((l.store != nil && !l.store.IsNilGenerationHandle()) && l.store.PayloadBuildFlightActive(generationID)) {
+		(l.store != nil && l.store.PayloadBuildFlightActive(generationID)) {
 		return true
 	}
 	l.coordMu.Lock()
@@ -409,7 +404,7 @@ func (l *CheckoutLifecycle) discoverDeferredRetirements(
 	served map[string]struct{},
 	known []int64,
 ) ([]int64, error) {
-	if l.catalog == nil || l.catalog.IsNilMaterializerCatalog() {
+	if l.catalog == nil {
 		return nil, nil
 	}
 	deferredRetirementScans.Add(1)

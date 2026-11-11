@@ -174,7 +174,7 @@ func (l *CheckoutLifecycle) FamiliesOverview(ctx context.Context, familyFilter s
 	if l == nil {
 		return FamiliesOverview{}, fmt.Errorf("indexer: checkout lifecycle is not wired")
 	}
-	if l.catalog == nil || l.catalog.IsNilMaterializerCatalog() {
+	if l.catalog == nil {
 		return FamiliesOverview{}, errNoCatalog
 	}
 	wanted := ""
@@ -409,7 +409,7 @@ func (l *CheckoutLifecycle) resolveFamilyID(ctx context.Context, selector string
 // actually has to hand — usually a directory — instead of an opaque graph
 // identifier they would first have to look up.
 func (l *CheckoutLifecycle) ResolveGraph(ctx context.Context, selector string) (storage.DedicatedGraph, error) {
-	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) {
+	if l == nil || l.catalog == nil {
 		return storage.DedicatedGraph{}, errNoCatalog
 	}
 	if selector == "" {
@@ -486,7 +486,7 @@ func (l *CheckoutLifecycle) ExplainView(ctx context.Context, path string) (ViewB
 	if l == nil {
 		return ViewBinding{}, fmt.Errorf("indexer: checkout lifecycle is not wired")
 	}
-	if l.catalog == nil || l.catalog.IsNilMaterializerCatalog() {
+	if l.catalog == nil {
 		return ViewBinding{}, errNoCatalog
 	}
 	abs, err := filepath.Abs(path)
@@ -716,7 +716,7 @@ func (l *CheckoutLifecycle) reconcileFamily(
 // ResolveFamilyID exposes the selector resolution the administrative surfaces
 // share: a family id, a graph id, a repo prefix or a path all name one family.
 func (l *CheckoutLifecycle) ResolveFamilyID(ctx context.Context, selector string) (string, error) {
-	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) {
+	if l == nil || l.catalog == nil {
 		return "", errNoCatalog
 	}
 	return l.resolveFamilyID(ctx, selector)

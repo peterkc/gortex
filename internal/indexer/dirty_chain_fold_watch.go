@@ -60,7 +60,7 @@ func (c *CheckoutCoordinator) newFoldStepWatch(to int64) *foldStepWatch {
 	c.compaction.mu.Unlock()
 	now := time.Now()
 	w := &foldStepWatch{logger: c.logger, checkout: c.checkoutID, to: to, starve: starve, now: time.Now, started: now, progress: now}
-	if c.store != nil && !c.store.IsNilGenerationHandle() {
+	if c.store != nil {
 		store := c.store
 		w.walBytes = func() int64 {
 			mark := store.WALWriteMark()

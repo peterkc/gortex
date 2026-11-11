@@ -138,7 +138,7 @@ func decideIdleCheckout(in idleCheckoutInput, after time.Duration, now time.Time
 // ReleaseIdleCheckouts releases the layers of every idle checkout (at most
 // once per idleCheckoutScanEvery) and returns the checkouts it released.
 func (l *CheckoutLifecycle) ReleaseIdleCheckouts(ctx context.Context) ([]string, error) {
-	if l == nil || (l.catalog == nil || l.catalog.IsNilMaterializerCatalog()) {
+	if l == nil || l.catalog == nil {
 		return nil, nil
 	}
 	after := idleCheckoutAfter()
