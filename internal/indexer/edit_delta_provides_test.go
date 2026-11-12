@@ -97,3 +97,37 @@ func TestEditDeltaProvidesRowsAreKeptPerStack(t *testing.T) {
 		t.Fatalf("third delta:\n%s\nwant:\n%s", got, want)
 	}
 }
+
+func TestEditDeltaProvidesReadsNoAdjacency(t *testing.T) {
+	// Given a dirty chain whose layers carry nodes outside their covered paths.
+	r := newChainOverlayRun(t)
+	d := r.depths[len(r.depths)-1]
+	p := r.pair(d)
+	idx := &Indexer{repoPrefix: builderRepoPrefix, graph: p.cached, resolver: resolver.New(p.cached)}
+	o := installEditDeltaProvides(idx, p.cacheBase, p.key, []string{"app/caller.go"})
+	if o == nil {
+		t.Fatal("no provides source")
+	}
+	cache := editDeltaBaseCache(p.key)
+	baseHits, baseMisses := cache.StackBaseAdjacencyStats()
+	layerHits, layerMisses := cache.StackLayerAdjacencyStats()
+
+	// When the provides source reads the deepest chain's view.
+	got := o.rows()
+
+	// Then it requests no adjacency and returns the same rows as a full scan.
+	afterBaseHits, afterBaseMisses := cache.StackBaseAdjacencyStats()
+	afterLayerHits, afterLayerMisses := cache.StackLayerAdjacencyStats()
+	if afterBaseHits+afterBaseMisses != baseHits+baseMisses || afterLayerHits+afterLayerMisses != layerHits+layerMisses {
+		t.Errorf("provides requested adjacency: base %d -> %d, layers %d -> %d",
+			baseHits+baseMisses, afterBaseHits+afterBaseMisses, layerHits+layerMisses, afterLayerHits+afterLayerMisses)
+	}
+	want := make(map[string][]*graph.Edge)
+	for _, row := range scanProvidesRows(p.plain) {
+		want[row.repo] = append(want[row.repo], row.edge)
+	}
+	if len(want) == 0 {
+		t.Fatal("fixture precondition: no provides rows")
+	}
+	chainOverlaySame(t, "provides", renderChainEdgeMap(got), renderChainEdgeMap(want))
+}

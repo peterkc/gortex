@@ -17,12 +17,11 @@ import (
 // source: seconds per save on a large store, and the same answer on every
 // delta over the same stack.
 //
-// The stack's rows are therefore kept per immutable stack, and each delta
-// replaces only the rows sourced in its own change set with the ones its view
-// holds for those files. That is the whole difference a delta can make to the
-// index: the delta re-derives its changed files, and a row it restates for
-// another source (a claimed source whose target moved) keeps the reference's
-// name and its provides_for binding, which are all the index reads.
+// Over a dirty chain, the cache keeps the provides edges below the chain,
+// including sources not placed there. Each delta composes the edges above
+// that stack and places their sources through its own view: a chain layer
+// can restate a source outside the paths it covers. Without a chain, the
+// stack's placed rows are kept and each delta replaces its changed paths.
 
 type providesRow struct {
 	edge *graph.Edge
@@ -31,8 +30,9 @@ type providesRow struct {
 }
 
 type editDeltaProvidesEntry struct {
-	key  string
-	rows []providesRow
+	key   string
+	rows  []providesRow // no-chain rows, also populated by pre-warming
+	edges []*graph.Edge // unplaced below-chain edges, under a separate key
 }
 
 var editDeltaProvidesCache struct {
@@ -40,7 +40,7 @@ var editDeltaProvidesCache struct {
 	entries []editDeltaProvidesEntry // most recent last
 }
 
-func cachedEditDeltaProvides(key string) ([]providesRow, bool) {
+func cachedEditDeltaProvides(key string) (editDeltaProvidesEntry, bool) {
 	editDeltaProvidesCache.Lock()
 	defer editDeltaProvidesCache.Unlock()
 	for i := len(editDeltaProvidesCache.entries) - 1; i >= 0; i-- {
@@ -49,15 +49,19 @@ func cachedEditDeltaProvides(key string) ([]providesRow, bool) {
 			continue
 		}
 		editDeltaProvidesCache.entries = append(append(editDeltaProvidesCache.entries[:i:i], editDeltaProvidesCache.entries[i+1:]...), entry)
-		return entry.rows, true
+		return entry, true
 	}
-	return nil, false
+	return editDeltaProvidesEntry{}, false
 }
 
 func storeEditDeltaProvides(key string, rows []providesRow) {
+	storeEditDeltaProvidesEntry(editDeltaProvidesEntry{key: key, rows: rows})
+}
+
+func storeEditDeltaProvidesEntry(entry editDeltaProvidesEntry) {
 	editDeltaProvidesCache.Lock()
 	defer editDeltaProvidesCache.Unlock()
-	editDeltaProvidesCache.entries = append(editDeltaProvidesCache.entries, editDeltaProvidesEntry{key: key, rows: rows})
+	editDeltaProvidesCache.entries = append(editDeltaProvidesCache.entries, entry)
 	if over := len(editDeltaProvidesCache.entries) - editDeltaContractCacheEntries; over > 0 {
 		editDeltaProvidesCache.entries = append([]editDeltaProvidesEntry(nil), editDeltaProvidesCache.entries[over:]...)
 	}
@@ -81,11 +85,7 @@ type editDeltaProvides struct {
 	calls   int
 }
 
-// installEditDeltaProvides sets the per-stack provides source on idx's
-// resolver. Over a dirty chain (a delta whose view splits its cache below the
-// chain), the rows are kept for the stack below the chain: the paths the
-// chain speaks for, and the sources of the provides rows its layers carry,
-// are answered by the delta's view like the change set's.
+// installEditDeltaProvides sets the per-stack provides source on idx's resolver.
 func installEditDeltaProvides(idx *Indexer, stack graph.Reader, key string, changedRel []string) *editDeltaProvides {
 	if idx == nil || idx.resolver == nil || key == "" || stack == nil {
 		return nil
@@ -93,31 +93,6 @@ func installEditDeltaProvides(idx *Indexer, stack graph.Reader, key string, chan
 	changed := make([]string, 0, len(changedRel))
 	for _, rel := range changedRel {
 		changed = append(changed, idx.prefixPath(rel))
-	}
-	if dw, ok := idx.graph.(*graph.DeltaWriter); ok && dw.ChainLayers() > 0 {
-		below, split := dw.ChainSplitBase()
-		if !split {
-			return nil
-		}
-		stack = below
-		seen := make(map[string]struct{}, len(changed))
-		for _, p := range changed {
-			seen[p] = struct{}{}
-		}
-		add := func(p string) {
-			if _, dup := seen[p]; !dup && p != "" {
-				seen[p] = struct{}{}
-				changed = append(changed, p)
-			}
-		}
-		for p := range dw.ChainTouchedPaths() {
-			add(p)
-		}
-		for _, e := range dw.ChainLayerEdgesByKinds([]graph.EdgeKind{graph.EdgeProvides}) {
-			add(e.FilePath)
-			add(graph.IDFile(e.From))
-		}
-		sort.Strings(changed)
 	}
 	o := &editDeltaProvides{view: idx.graph, stack: stack, key: key, changed: changed, logger: idx.logger}
 	idx.resolver.SetProvidesRowsSource(o.rows)
@@ -156,19 +131,26 @@ func providesRowsOf(r graph.Reader, paths []string) []providesRow {
 // every provides row of s with its source's placement.
 func scanProvidesRows(s graph.Store) []providesRow {
 	var edges []*graph.Edge
-	sources := make(map[string]struct{})
 	for e := range s.EdgesByKind(graph.EdgeProvides) {
 		if e != nil {
 			edges = append(edges, e)
-			sources[e.From] = struct{}{}
 		}
+	}
+	return placeProvidesRows(s, edges)
+}
+
+// placeProvidesRows applies the scan's placement rule to non-nil edges.
+func placeProvidesRows(r graph.Store, edges []*graph.Edge) []providesRow {
+	sources := make(map[string]struct{})
+	for _, e := range edges {
+		sources[e.From] = struct{}{}
 	}
 	ids := make([]string, 0, len(sources))
 	for id := range sources {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	placements := graph.NodePlacementsByIDs(s, ids)
+	placements := graph.NodePlacementsByIDs(r, ids)
 	rows := make([]providesRow, 0, len(edges))
 	for _, e := range edges {
 		placement, ok := placements[e.From]
@@ -183,6 +165,9 @@ func scanProvidesRows(s graph.Store) []providesRow {
 func (o *editDeltaProvides) rows() map[string][]*graph.Edge {
 	started := time.Now()
 	o.calls++
+	if dw, ok := o.view.(*graph.DeltaWriter); ok && dw.ChainLayers() > 0 {
+		return o.chainRows(dw, started)
+	}
 	changed := make(map[string]struct{}, len(o.changed))
 	for _, p := range o.changed {
 		changed[p] = struct{}{}
@@ -208,7 +193,8 @@ func (o *editDeltaProvides) rows() map[string][]*graph.Edge {
 		rows = append(rows, providesRowsOf(o.stack, o.changed)...)
 		storeEditDeltaProvides(o.key, rows)
 	})
-	stackRows, _ := cachedEditDeltaProvides(o.key)
+	entry, _ := cachedEditDeltaProvides(o.key)
+	stackRows := entry.rows
 	o.cached = hit
 	out := make(map[string][]*graph.Edge)
 	for _, row := range stackRows {
@@ -230,6 +216,48 @@ func (o *editDeltaProvides) rows() map[string][]*graph.Edge {
 	if o.logger != nil {
 		o.logger.Info("edit delta: provides rows",
 			zap.Bool("stack_cached", hit), zap.Int("stack_rows", len(stackRows)),
+			zap.Int64("ms", time.Since(started).Milliseconds()))
+	}
+	return out
+}
+
+// chainRows composes unplaced edges, then reads each source's current placement.
+func (o *editDeltaProvides) chainRows(dw *graph.DeltaWriter, started time.Time) map[string][]*graph.Edge {
+	// Pre-warmed placed rows can omit sources placed only by a chain layer.
+	key := "edges\x00" + o.key
+	var entry editDeltaProvidesEntry
+	var hit, ok bool
+	if _, split := dw.ChainSplitBase(); split {
+		_, hit = cachedEditDeltaProvides(key)
+		singleFlight("provides\x00"+key, func() bool { _, ok := cachedEditDeltaProvides(key); return ok }, func() {
+			if edges, ok := dw.EdgesByKindBelowChain(graph.EdgeProvides); ok {
+				storeEditDeltaProvidesEntry(editDeltaProvidesEntry{key: key, edges: edges})
+			}
+		})
+		entry, ok = cachedEditDeltaProvides(key)
+	}
+	o.cached = hit
+	var rows []providesRow
+	if !ok {
+		// A view-level fallback must not be kept under the below-chain key.
+		rows = scanProvidesRows(o.view)
+	} else {
+		var edges []*graph.Edge
+		for _, e := range entry.edges {
+			if dw.EdgeVisibleAboveChain(e) {
+				edges = append(edges, e)
+			}
+		}
+		edges = append(edges, dw.EdgesByKindAboveChain(graph.EdgeProvides)...)
+		rows = placeProvidesRows(o.view, edges)
+	}
+	out := make(map[string][]*graph.Edge)
+	for _, row := range rows {
+		out[row.repo] = append(out[row.repo], row.edge)
+	}
+	if o.logger != nil {
+		o.logger.Info("edit delta: provides rows",
+			zap.Bool("stack_cached", hit), zap.Int("stack_rows", len(entry.edges)),
 			zap.Int64("ms", time.Since(started).Milliseconds()))
 	}
 	return out
