@@ -244,9 +244,10 @@ func TestEditDeltaProvidesPrewarmedChain(t *testing.T) {
 					want[row.repo] = append(want[row.repo], row.edge)
 				}
 				wantCount := 1
-				if scenario == "own_add" {
+				switch scenario {
+				case "own_add":
 					wantCount = 2
-				} else if scenario == "own_evict" {
+				case "own_evict":
 					wantCount = 0
 				}
 				if len(want["repo"]) != wantCount {
