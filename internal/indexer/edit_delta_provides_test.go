@@ -1,7 +1,9 @@
 package indexer
 
 import (
+	"context"
 	"fmt"
+	"iter"
 	"sort"
 	"strings"
 	"testing"
@@ -130,4 +132,191 @@ func TestEditDeltaProvidesReadsNoAdjacency(t *testing.T) {
 		t.Fatal("fixture precondition: no provides rows")
 	}
 	chainOverlaySame(t, "provides", renderChainEdgeMap(got), renderChainEdgeMap(want))
+}
+
+// providesScanGraph counts whole-stack provides reads without changing the view.
+type providesScanGraph struct {
+	*graph.Graph
+	scans int
+}
+
+func (g *providesScanGraph) EdgesByKind(kind graph.EdgeKind) iter.Seq[*graph.Edge] {
+	if kind == graph.EdgeProvides {
+		g.scans++
+	}
+	return g.Graph.EdgesByKind(kind)
+}
+
+// providesChainLayer can place a source outside the paths the layer covers.
+type providesChainLayer struct {
+	*graph.OverlayLayer
+	generation int64
+	detached   *graph.Node
+}
+
+func (l *providesChainLayer) GenerationID() int64 { return l.generation }
+
+func (l *providesChainLayer) OwnsNodeIdentity(id string) bool {
+	return (l.detached != nil && id == l.detached.ID) || l.OverlayLayer.OwnsNodeIdentity(id)
+}
+
+func (l *providesChainLayer) NodeByID(id string) *graph.Node {
+	if l.detached != nil && id == l.detached.ID {
+		return l.detached
+	}
+	return l.OverlayLayer.NodeByID(id)
+}
+
+func TestEditDeltaProvidesPrewarmedChain(t *testing.T) {
+	for _, depth := range []int{1, 3} {
+		for _, scenario := range []string{"unchanged", "source_only_in_chain", "own_add", "own_evict"} {
+			t.Run(fmt.Sprintf("depth_%d/%s", depth, scenario), func(t *testing.T) {
+				resetChainOverlayCaches()
+				t.Cleanup(resetChainOverlayCaches)
+				b := builderNewBuilder(builderOpenStore(t, "provides"))
+				source := &graph.Node{ID: "repo/provider.ts::Module", Kind: graph.KindType,
+					Name: "Module", FilePath: "repo/provider.ts", RepoPrefix: "repo"}
+				edge := &graph.Edge{From: source.ID, To: graph.UnresolvedMarker + "Service",
+					Kind: graph.EdgeProvides, FilePath: source.FilePath, Line: 3}
+				g := &providesScanGraph{Graph: graph.New()}
+				if scenario != "source_only_in_chain" {
+					g.AddNode(source)
+				}
+				g.AddEdge(edge)
+				base := commitLayerBase{Reader: g, stack: []int64{1000001}}
+				key, ok := editDeltaBaseCacheKey(base, b.Store)
+				if !ok {
+					t.Fatal("no stack key")
+				}
+
+				// Given a commit stack whose provides pre-warm has finished.
+				if !b.PrewarmEditDeltaStack(context.Background(), openFixed(base), "repo", "", "", nil) {
+					t.Fatal("pre-warm did not run")
+				}
+				entry, ok := cachedEditDeltaProvides(key)
+				if !ok || g.scans == 0 {
+					t.Fatal("fixture precondition: provides step did not scan and cache the stack")
+				}
+				if scenario == "source_only_in_chain" && len(entry.rows) != 0 {
+					t.Fatal("fixture precondition: source was already placed below the chain")
+				}
+				var view graph.Reader = base
+				var generations []int64
+				for i := 0; i < depth; i++ {
+					layer := &providesChainLayer{OverlayLayer: graph.NewOverlayLayer(), generation: int64(1000002 + i)}
+					if scenario == "source_only_in_chain" && i == 0 {
+						layer.detached = source
+					}
+					view = graph.NewOverlaidViewWithLayer(view, layer)
+					generations = append(generations, layer.generation)
+				}
+				dw := graph.NewDeltaWriter(view, nil)
+				dw.SetBaseProjectionCache(editDeltaBaseCache(key))
+				dw.SetChainGenerations(generations, nil)
+				if _, ok := dw.ChainSplitBase(); !ok {
+					t.Fatal("fixture precondition: chain cannot split")
+				}
+				switch scenario {
+				case "own_add":
+					added := &graph.Node{ID: "repo/added.ts::Added", Kind: graph.KindType,
+						Name: "Added", FilePath: "repo/added.ts", RepoPrefix: "repo"}
+					dw.AddBatch([]*graph.Node{added}, []*graph.Edge{{From: added.ID,
+						To: graph.UnresolvedMarker + "AddedService", Kind: graph.EdgeProvides, FilePath: added.FilePath, Line: 4}})
+				case "own_evict":
+					dw.EvictFile(source.FilePath)
+				}
+				idx := &Indexer{repoPrefix: "repo", graph: dw, resolver: resolver.New(dw)}
+				o := installEditDeltaProvides(idx, base, key, nil)
+
+				// When the first chained delta builds its provides rows.
+				g.scans = 0
+				got := o.rows()
+
+				// Then it reuses the warm edges, not a below-chain scan.
+				if g.scans != 0 {
+					t.Errorf("pre-warmed chain ran %d below-chain provides scans, want 0", g.scans)
+				}
+				if !o.cached {
+					t.Error("first chained delta missed the pre-warmed entry")
+				}
+				want := make(map[string][]*graph.Edge)
+				for _, row := range scanProvidesRows(dw) {
+					want[row.repo] = append(want[row.repo], row.edge)
+				}
+				wantCount := 1
+				if scenario == "own_add" {
+					wantCount = 2
+				} else if scenario == "own_evict" {
+					wantCount = 0
+				}
+				if len(want["repo"]) != wantCount {
+					t.Fatalf("fixture precondition: scan has %d provides rows, want %d", len(want["repo"]), wantCount)
+				}
+				chainOverlaySame(t, "provides", renderChainEdgeMap(got), renderChainEdgeMap(want))
+				editDeltaProvidesCache.Lock()
+				entries := append([]editDeltaProvidesEntry(nil), editDeltaProvidesCache.entries...)
+				editDeltaProvidesCache.Unlock()
+				if len(entries) != 1 || entries[0].key != key {
+					t.Errorf("pre-warmed stack holds %d provides entries, want one under the plain key", len(entries))
+				}
+			})
+		}
+	}
+}
+
+func TestEditDeltaProvidesChainEntryUpgrade(t *testing.T) {
+	for _, empty := range []bool{false, true} {
+		t.Run(fmt.Sprintf("empty_%t", empty), func(t *testing.T) {
+			resetEditDeltaProvides()
+			t.Cleanup(resetEditDeltaProvides)
+			g := &providesScanGraph{Graph: graph.New()}
+			if !empty {
+				source := &graph.Node{ID: "repo/provider.ts::Module", Kind: graph.KindType,
+					Name: "Module", FilePath: "repo/provider.ts", RepoPrefix: "repo"}
+				g.AddBatch([]*graph.Node{source}, []*graph.Edge{{From: source.ID,
+					To: graph.UnresolvedMarker + "Service", Kind: graph.EdgeProvides, FilePath: source.FilePath}})
+			}
+			layer := &providesChainLayer{OverlayLayer: graph.NewOverlayLayer(), generation: 1}
+			dw := graph.NewDeltaWriter(graph.NewOverlaidViewWithLayer(g, layer), nil)
+			dw.SetBaseProjectionCache(graph.NewBaseProjectionCache())
+			dw.SetChainGenerations([]int64{1}, nil)
+			if _, ok := dw.ChainSplitBase(); !ok {
+				t.Fatal("fixture precondition: chain cannot split")
+			}
+			key := t.Name()
+			// Given the rows-only entry a no-split fallback stores.
+			storeEditDeltaProvides(key, scanProvidesRows(g))
+			idx := &Indexer{repoPrefix: "repo", graph: dw, resolver: resolver.New(dw)}
+			o := installEditDeltaProvides(idx, g, key, nil)
+
+			// When a later chained delta can split, it loads the missing edges.
+			g.scans = 0
+			got := o.rows()
+			if g.scans != 1 || o.cached {
+				t.Errorf("rows-only entry: scans=%d cached=%t, want one scan and a miss", g.scans, o.cached)
+			}
+			want := make(map[string][]*graph.Edge)
+			for _, row := range scanProvidesRows(dw) {
+				want[row.repo] = append(want[row.repo], row.edge)
+			}
+			if !empty && len(want["repo"]) != 1 {
+				t.Fatal("fixture precondition: scan has no provides row")
+			}
+			chainOverlaySame(t, "upgraded provides", renderChainEdgeMap(got), renderChainEdgeMap(want))
+
+			// Then even an empty edge set is complete and needs no reload.
+			g.scans = 0
+			got = o.rows()
+			if g.scans != 0 || !o.cached {
+				t.Errorf("complete entry: scans=%d cached=%t, want no scan and a hit", g.scans, o.cached)
+			}
+			chainOverlaySame(t, "reused provides", renderChainEdgeMap(got), renderChainEdgeMap(want))
+			editDeltaProvidesCache.Lock()
+			entries := append([]editDeltaProvidesEntry(nil), editDeltaProvidesCache.entries...)
+			editDeltaProvidesCache.Unlock()
+			if len(entries) != 1 || entries[0].key != key || !entries[0].hasEdges {
+				t.Errorf("upgraded stack holds %d provides entries, want one complete entry under the plain key", len(entries))
+			}
+		})
+	}
 }

@@ -30,9 +30,10 @@ type providesRow struct {
 }
 
 type editDeltaProvidesEntry struct {
-	key   string
-	rows  []providesRow // no-chain rows, also populated by pre-warming
-	edges []*graph.Edge // unplaced below-chain edges, under a separate key
+	key      string
+	rows     []providesRow // no-chain rows, also populated by pre-warming
+	edges    []*graph.Edge // unplaced stack edges, also populated by pre-warming
+	hasEdges bool          // distinguishes an empty edge set from a rows-only fallback
 }
 
 var editDeltaProvidesCache struct {
@@ -61,6 +62,12 @@ func storeEditDeltaProvides(key string, rows []providesRow) {
 func storeEditDeltaProvidesEntry(entry editDeltaProvidesEntry) {
 	editDeltaProvidesCache.Lock()
 	defer editDeltaProvidesCache.Unlock()
+	for i, kept := range editDeltaProvidesCache.entries {
+		if kept.key == entry.key {
+			editDeltaProvidesCache.entries = append(editDeltaProvidesCache.entries[:i:i], editDeltaProvidesCache.entries[i+1:]...)
+			break
+		}
+	}
 	editDeltaProvidesCache.entries = append(editDeltaProvidesCache.entries, entry)
 	if over := len(editDeltaProvidesCache.entries) - editDeltaContractCacheEntries; over > 0 {
 		editDeltaProvidesCache.entries = append([]editDeltaProvidesEntry(nil), editDeltaProvidesCache.entries[over:]...)
@@ -180,8 +187,9 @@ func (o *editDeltaProvides) rows() map[string][]*graph.Edge {
 		// layer the rows are not kept for when the delta can split its view,
 		// otherwise the view's rows with the change set's rows as the stack
 		// holds them.
-		if rows, ok := providesRowsBelowChain(dw); ok {
-			storeEditDeltaProvides(o.key, rows)
+		if entry, ok := providesEntryBelowChain(dw); ok {
+			entry.key = o.key
+			storeEditDeltaProvidesEntry(entry)
 			return
 		}
 		var rows []providesRow
@@ -223,18 +231,25 @@ func (o *editDeltaProvides) rows() map[string][]*graph.Edge {
 
 // chainRows composes unplaced edges, then reads each source's current placement.
 func (o *editDeltaProvides) chainRows(dw *graph.DeltaWriter, started time.Time) map[string][]*graph.Edge {
-	// Pre-warmed placed rows can omit sources placed only by a chain layer.
-	key := "edges\x00" + o.key
+	// Use the unplaced edges: the stack's rows can omit sources that only
+	// a chain layer places. Every source is placed through this delta's view.
+	key := o.key
 	var entry editDeltaProvidesEntry
 	var hit, ok bool
 	if _, split := dw.ChainSplitBase(); split {
-		_, hit = cachedEditDeltaProvides(key)
-		singleFlight("provides\x00"+key, func() bool { _, ok := cachedEditDeltaProvides(key); return ok }, func() {
-			if edges, ok := dw.EdgesByKindBelowChain(graph.EdgeProvides); ok {
-				storeEditDeltaProvidesEntry(editDeltaProvidesEntry{key: key, edges: edges})
+		ready := func() bool {
+			entry, ok := cachedEditDeltaProvides(key)
+			return ok && entry.hasEdges
+		}
+		hit = ready()
+		singleFlight("provides\x00"+key, ready, func() {
+			if entry, ok := providesEntryBelowChain(dw); ok {
+				entry.key = key
+				storeEditDeltaProvidesEntry(entry)
 			}
 		})
 		entry, ok = cachedEditDeltaProvides(key)
+		ok = ok && entry.hasEdges
 	}
 	o.cached = hit
 	var rows []providesRow
@@ -263,20 +278,20 @@ func (o *editDeltaProvides) chainRows(dw *graph.DeltaWriter, started time.Time) 
 	return out
 }
 
-// providesRowsBelowChain is scanProvidesRows over the part of dw's stack its
-// caches are kept for, placed there; ok is false when dw cannot split its
-// view or scan that part.
-func providesRowsBelowChain(dw *graph.DeltaWriter) ([]providesRow, bool) {
+// providesEntryBelowChain keeps both the unplaced edges and their rows over
+// the part of dw's stack its caches are kept for; ok is false when dw cannot
+// split its view or scan that part.
+func providesEntryBelowChain(dw *graph.DeltaWriter) (editDeltaProvidesEntry, bool) {
 	if dw == nil {
-		return nil, false
+		return editDeltaProvidesEntry{}, false
 	}
 	below, ok := dw.ChainSplitBase()
 	if !ok {
-		return nil, false
+		return editDeltaProvidesEntry{}, false
 	}
 	edges, ok := dw.EdgesByKindBelowChain(graph.EdgeProvides)
 	if !ok {
-		return nil, false
+		return editDeltaProvidesEntry{}, false
 	}
 	sources := make(map[string]struct{})
 	for _, e := range edges {
@@ -301,5 +316,5 @@ func providesRowsBelowChain(dw *graph.DeltaWriter) ([]providesRow, bool) {
 		}
 		rows = append(rows, providesRow{edge: e, repo: n.RepoPrefix, file: n.FilePath})
 	}
-	return rows, true
+	return editDeltaProvidesEntry{rows: rows, edges: edges, hasEdges: true}, true
 }
