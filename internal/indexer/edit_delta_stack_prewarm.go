@@ -554,7 +554,13 @@ func (b *SparseGenerationBuilder) prewarmEditDeltaStack(ctx context.Context, ope
 	// 3. The provides scan, then the rest of the repository.
 	with(func(v prewarmView) {
 		singleFlight("provides\x00"+key, func() bool { _, ok := cachedEditDeltaProvides(key); return ok }, func() {
-			storeEditDeltaProvides(key, scanProvidesRows(v.dw))
+			var edges []*graph.Edge
+			for e := range v.dw.EdgesByKind(graph.EdgeProvides) {
+				if e != nil {
+					edges = append(edges, e)
+				}
+			}
+			storeEditDeltaProvidesEntry(editDeltaProvidesEntry{key: key, rows: placeProvidesRows(v.dw, edges), edges: edges, hasEdges: true})
 		})
 	})
 	step("provides")
