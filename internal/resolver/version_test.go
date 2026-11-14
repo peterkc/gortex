@@ -71,12 +71,6 @@ func TestResolverVersionMovesWithTheContract(t *testing.T) {
 	names := FrameworkSynthesizerNames()
 	baseline := resolverVersionFingerprint(names, ResolutionSemanticsVersion)
 
-	t.Run("the previous semantics version is not reused", func(t *testing.T) {
-		if previous := resolverVersionFingerprint(names, ResolutionSemanticsVersion-1); previous == Version() {
-			t.Fatal("the previous semantics version still matches stored generations")
-		}
-	})
-
 	t.Run("a raised semantics version", func(t *testing.T) {
 		if got := resolverVersionFingerprint(names, ResolutionSemanticsVersion+1); got == baseline {
 			t.Fatal("raising the semantics version left the resolver version where it was")

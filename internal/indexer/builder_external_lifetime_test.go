@@ -3,7 +3,6 @@ package indexer
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -39,7 +38,7 @@ func TestExternalLifetimeDirtyDelta(t *testing.T) {
 	store := builderOpenStore(t, "dirty-base")
 	dir := externalLifetimeCheckout(t, store)
 	recordLastEditDelta(nil)
-	generation, report, err := builderNewBuilder(store).BuildDirtyLayer(context.Background(), DirtyLayerRequest{
+	generation, _, err := builderNewBuilder(store).BuildDirtyLayer(context.Background(), DirtyLayerRequest{
 		Identity: builderDirtyIdentity(), Base: store, CheckoutRoot: dir,
 		RepoPrefix: builderRepoPrefix, WorkspaceID: builderRepoPrefix, ProjectID: builderRepoPrefix,
 	})
@@ -49,7 +48,6 @@ func TestExternalLifetimeDirtyDelta(t *testing.T) {
 	require.Contains(t, delta.Paths, "util.go")
 	tombstones, err := store.AtGeneration(generation).NodeTombstones()
 	require.NoError(t, err)
-	fmt.Printf("EXTERNAL_LIFETIME dirty edit-delta reached paths=%v published tombstones=%v orphan=%d\n", delta.Paths, tombstones, report.OrphanStubTombstones)
 	clean := builderOpenStore(t, "dirty-clean")
 	builderIndex(t, clean, dir)
 	externalLifetimeCompare(t, builderComposed(t, store, generation), clean)
@@ -66,7 +64,6 @@ func TestExternalLifetimeDirtyDelta(t *testing.T) {
 	require.Empty(t, result.FailedFiles)
 	require.Empty(t, dw.Unsupported())
 	payload := dw.Payload(map[string]struct{}{builderGraphPath(builderRepoPrefix, "util.go"): {}})
-	fmt.Printf("EXTERNAL_LIFETIME DeltaWriter.Payload replace=%v delete=%v sources=%v tombstones=%v identities=%v\n", payload.ReplacePaths, payload.DeletePaths, payload.EdgeSources, payload.Tombstones, payload.IdentityClaims)
 	id := builderRepoPrefix + "::stdlib::strings::ToLower"
 	if !slices.Contains(payload.Tombstones, id) {
 		t.Errorf("DeltaWriter.Payload missing dead ToLower tombstone: %v\n%s", payload.Tombstones, externalLifetimeReferences(dw.View()))
@@ -109,7 +106,6 @@ func TestExternalLifetimeSparseFallback(t *testing.T) {
 	tombstones, err := handle.NodeTombstones()
 	require.NoError(t, err)
 	require.Equal(t, 1, report.OrphanStubTombstones, "only the dead ToLower stub is retired")
-	fmt.Printf("EXTERNAL_LIFETIME sparse fallback reason=%v masks=%+v tombstones=%v orphan=%d\n", fallback[0].ContextMap()["reason"], masks, tombstones, report.OrphanStubTombstones)
 	clean := builderOpenStore(t, "sparse-clean")
 	builderIndex(t, clean, dir)
 	externalLifetimeCompare(t, builderComposed(t, store, generation), clean)

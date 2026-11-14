@@ -61,17 +61,9 @@ func TestExternalLifetimeIncremental(t *testing.T) {
 		require.True(t, slices.ContainsFunc(steps, func(s string) bool { return strings.HasPrefix(s, "ref_facts:") }), "deferred catch-up must complete: %v", steps)
 		_, err = externalLifetimeIndexer(t, clean).Index(dir)
 		require.NoError(t, err)
-		fmt.Printf("EXTERNAL_LIFETIME backend=sqlite reached IncrementalReindexPaths; catchup=%v\n", steps)
 		externalLifetimeCompare(t, store, clean)
 
-		// Deletion can have an empty resolve frontier. Inspect its final
-		// bounded reference projection rather than assume catch-up ran.
-		steps = nil
-		require.NoError(t, os.Remove(path))
-		result, err = idx.IncrementalReindexPaths(dir, []string{path})
-		require.NoError(t, err)
-		require.Equal(t, 1, result.DeletedFileCount)
-		fmt.Printf("EXTERNAL_LIFETIME backend=sqlite after deletion catchup=%v\n%s", steps, externalLifetimeReferences(store))
+		// TestExternalLifetimeIncrementalLifecycle covers deletion against a fresh index.
 	})
 
 	t.Run("synchronous-references", func(t *testing.T) {
@@ -91,7 +83,6 @@ func TestExternalLifetimeIncremental(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, 1, result.StaleFileCount)
 		require.Contains(t, steps, "ref_facts")
-		fmt.Printf("EXTERNAL_LIFETIME synchronous structural resolve steps=%v\n", steps)
 		clean := builderOpenStore(t, "synchronous-clean")
 		_, err = externalLifetimeIndexer(t, clean).Index(dir)
 		require.NoError(t, err)
@@ -289,7 +280,6 @@ func externalLifetimeCompare(t *testing.T, got, clean graph.Reader) {
 			t.Errorf("stale ToLower/member_of pair: %s", builderRenderEdge(edge))
 		}
 	}
-	fmt.Printf("EXTERNAL_LIFETIME post-resolve bounded references\n%s", externalLifetimeReferences(got))
 	externalLifetimeRows(t, "nodes", builderRenderNodes(got.AllNodes()), builderRenderNodes(clean.AllNodes()))
 	externalLifetimeRows(t, "edges", builderRenderEdges(got.AllEdges()), builderRenderEdges(clean.AllEdges()))
 }
