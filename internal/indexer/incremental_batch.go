@@ -164,6 +164,15 @@ func (idx *Indexer) reindexIncrementalFilesBatched(
 		zap.Int("deleted_files", len(deletedFiles)))
 	defer deleteTiming.abort()
 	deletion := markerBatch.publicationStamps().beginPatchLap(patchApply)
+	var deletedStdlibCandidates []string
+	if len(deletedFiles) > 0 {
+		var paths []string
+		for _, path := range deletedFiles {
+			paths = append(paths, idx.prefixPath(idx.relKey(path)))
+		}
+		deletedStdlibCandidates = idx.capturePathStdlibCandidates(paths)
+	}
+	defer func() { idx.settleStdlibCandidates(deletedStdlibCandidates, markerBatch) }()
 	idx.evictDeletedFilesBatched(deletedFiles, &invalidation)
 	deletion.end()
 	deleteTiming.complete(nil)
@@ -1164,6 +1173,7 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 	// Retained contracts keep existing rows; actual orphans are deleted there.
 	idx.deleteSymbolFTS(oldFTSNodeIDs)
 	idx.applyLap("fts_delete")
+	stdlibCandidates := idx.captureStdlibCandidates(paths, view.outByNode)
 	idx.evictFileIdentities(paths, legacyIDs, legacyPaths)
 	idx.applyLap("evict")
 	// The carried in-edges ride the same AddBatch as the fresh payload: the
@@ -1235,6 +1245,7 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 		idx.applyLap("affected_plan")
 	}
 	idx.enrichAndMarkIncrementalStages(stages, markerBatch)
+	idx.settleStdlibCandidates(stdlibCandidates, markerBatch)
 	idx.applyLap("enrich_mark")
 }
 
@@ -2450,8 +2461,9 @@ func (idx *Indexer) evictFileIncrementalRaw(relPath string) forcedFileEviction {
 	// recover this file's records from a sibling's canonical scalar payload.
 	idx.ensureIncrementalContractRegistry()
 	var invalidation DerivedInvalidationPlan
-	nodesRemoved, edgesRemoved := idx.evictDeletedFilesBatched([]string{relPath}, &invalidation)
 	graphPath := idx.prefixPath(relPath)
+	batch.stdlibCandidates = idx.capturePathStdlibCandidates([]string{graphPath})
+	nodesRemoved, edgesRemoved := idx.evictDeletedFilesBatched([]string{relPath}, &invalidation)
 	idx.removeIncrementalContractsForFile(graphPath, &invalidation)
 	invalidation.Files = appendUniqueSorted(invalidation.Files, dependencyFiles...)
 

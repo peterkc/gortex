@@ -210,6 +210,7 @@ type reparsePendingEnrichmentBatch struct {
 	// deferredPriorBindings are the forward leg's carried bindings
 	// (edit_delta_prior_bindings.go); dropped when the batch deletes files.
 	deferredPriorBindings map[string]resolver.PriorBinding
+	stdlibCandidates      []string // old identities, retained independently of evidence scoping
 }
 
 func (b *reparsePendingEnrichmentBatch) add(graphPath string, pending bool) bool {

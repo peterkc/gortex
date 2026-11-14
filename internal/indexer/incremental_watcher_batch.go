@@ -198,6 +198,7 @@ func (idx *Indexer) runIncrementalResolutionCatchup(
 ) []string {
 	files = appendUniqueSorted(nil, files...)
 	if len(files) == 0 {
+		idx.retireDeferredStdlibCandidates(batch)
 		return nil
 	}
 	idx.observeIncrementalCatchup("resolve", files)
@@ -343,6 +344,9 @@ func (idx *Indexer) incrementalEvictWatcherPath(path string) (nodesRemoved, edge
 		idx.observeIncrementalCatchup("resolve", nil)
 		idx.ResolveAll()
 	}
+	n, e := idx.retireDeferredStdlibCandidates(eviction.batch)
+	eviction.nodesRemoved += n
+	eviction.edgesRemoved += e
 	if evictedGlobals {
 		idx.reresolveCSharpGlobalUsingDependents(
 			[]string{graphPath}, map[string]struct{}{graphPath: {}})
@@ -410,6 +414,7 @@ func (idx *Indexer) incrementalWatcherPaths(root string, paths []string, mode in
 		idx.ResolveAll()
 		resolve.end()
 	}
+	idx.retireDeferredStdlibCandidates(batch)
 	if mode.forceExplicitFiles || !idx.deferGlobalPasses.Load() {
 		if mode.exactPointSemantic {
 			idx.runIncrementalPointSemantic(result.DerivedInvalidation.Files)
@@ -675,6 +680,9 @@ func (mi *MultiIndexer) resolveIncrementalRepoMutationMode(
 			mi.runCrossRepoResolve(false)
 		}
 		cross.end()
+	}
+	if idx != nil {
+		idx.retireDeferredStdlibCandidates(batch)
 	}
 	if wide {
 		return nil
