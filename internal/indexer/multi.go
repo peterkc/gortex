@@ -1250,11 +1250,18 @@ func (mi *MultiIndexer) RunPreEnrichResolveFiles(ctx context.Context, files []st
 	if err := context.Cause(ctx); err != nil {
 		return err
 	}
+	masterRefused := false
 	if len(files) > 0 {
 		stats := mi.runMasterResolveFiles(files, true)
-		if stats != nil && stats.IncomingAdmissionRefused {
-			return &graph.BoundedLocalizationLimitError{
-				Resource: "warmup incoming-source candidates", Limit: stats.IncomingAdmissionLimit,
+		masterRefused = stats != nil && stats.IncomingAdmissionRefused
+		if masterRefused {
+			// Keep the full pass's early readiness boundary and the exact
+			// path's callback when the full pass has no pending work.
+			if onComputeDone != nil {
+				onComputeDone = sync.OnceFunc(onComputeDone)
+			}
+			if err := mi.runMasterResolveHookedContext(ctx, nil, true, onComputeDone); err != nil {
+				return err
 			}
 		}
 	}
@@ -1273,7 +1280,7 @@ func (mi *MultiIndexer) RunPreEnrichResolveFiles(ctx context.Context, files []st
 	if err := context.Cause(ctx); err != nil {
 		return err
 	}
-	if resolutionAffected > 0 {
+	if masterRefused || resolutionAffected > 0 {
 		return mi.runCrossRepoResolveContext(ctx, false)
 	}
 	if len(files) == 0 {
@@ -1284,7 +1291,7 @@ func (mi *MultiIndexer) RunPreEnrichResolveFiles(ctx context.Context, files []st
 		mi.finishGoModuleCalls(cr)
 		mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 		if admission.Refusal != nil {
-			return admission.Refusal
+			return mi.runCrossRepoResolveContext(ctx, false)
 		}
 	}
 	return context.Cause(ctx)
