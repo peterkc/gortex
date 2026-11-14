@@ -1276,8 +1276,12 @@ func (mi *MultiIndexer) RunPreEnrichResolveFiles(ctx context.Context, files []st
 	if resolutionAffected > 0 {
 		return mi.runCrossRepoResolveContext(ctx, false)
 	}
+	if len(files) == 0 {
+		return context.Cause(ctx)
+	}
 	if cr := mi.newCrossRepoResolver(); cr != nil {
 		_, admission := cr.ResolveMutationFrontiersBounded(files, files, files)
+		mi.finishGoModuleCalls(cr)
 		mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 		if admission.Refusal != nil {
 			return admission.Refusal
