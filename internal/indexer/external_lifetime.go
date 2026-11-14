@@ -100,40 +100,57 @@ func ownedStdlibNode(node *graph.Node, repoPrefix string) bool {
 
 // settleStdlibCandidates retains candidates until the complete deferred resolver
 // tail. A synchronous caller has already resolved its replacement graph.
-func (idx *Indexer) settleStdlibCandidates(ids []string, batch *reparsePendingEnrichmentBatch) {
+func (idx *Indexer) settleStdlibCandidates(ids, paths []string, batch *reparsePendingEnrichmentBatch) {
 	if len(ids) == 0 {
 		return
 	}
 	if batch != nil && batch.deferResolverCatchup {
 		batch.stdlibCandidates = appendUniqueSorted(batch.stdlibCandidates, ids...)
+		batch.stdlibCandidatePaths = appendUniqueSorted(batch.stdlibCandidatePaths, paths...)
 		return
 	}
-	idx.retireStdlibCandidates(ids)
+	idx.retireStdlibCandidates(ids, paths)
 }
 
 func (idx *Indexer) retireDeferredStdlibCandidates(batch *reparsePendingEnrichmentBatch) (int, int) {
 	if batch == nil {
 		return 0, 0
 	}
-	ids := batch.stdlibCandidates
-	batch.stdlibCandidates = nil
-	return idx.retireStdlibCandidates(ids)
+	ids, paths := batch.stdlibCandidates, batch.stdlibCandidatePaths
+	batch.stdlibCandidates, batch.stdlibCandidatePaths = nil, nil
+	return idx.retireStdlibCandidates(ids, paths)
 }
 
 // retireStdlibCandidates ignores only the attributed symbol's synthetic
 // membership. Every other incoming or outgoing edge protects the identity.
 // Modules are considered after their doomed members, so an import or a surviving
 // member keeps its module. Unsupported stores retain candidates unchanged.
-func (idx *Indexer) retireStdlibCandidates(ids []string) (int, int) {
+func (idx *Indexer) retireStdlibCandidates(ids, paths []string) (int, int) {
 	evicter, ok := idx.graph.(graph.PathlessNodeBatchEvicter)
 	if !ok || len(ids) == 0 {
 		return 0, 0
 	}
 	ids = appendUniqueSorted(nil, ids...)
 	nodes := idx.graph.GetNodesByIDs(ids)
+	// References emitted by the replacement files prove liveness without
+	// loading a shared symbol's complete repository-wide adjacency.
+	keep := make(map[string]bool)
+	if reader, ok := graph.RecordedEdgesOf(idx.graph); ok && len(paths) > 0 {
+		for _, edge := range reader.RecordedEdgesAt(paths) {
+			if edge != nil {
+				keep[edge.From], keep[edge.To] = true, true
+			}
+		}
+	}
+	for _, id := range ids {
+		node := nodes[id]
+		if keep[id] && ownedStdlibNode(node, idx.repoPrefix) && node.Kind != graph.KindModule {
+			keep[stdlibModuleID(node)] = true
+		}
+	}
 	var candidates []string
 	for _, id := range ids {
-		if ownedStdlibNode(nodes[id], idx.repoPrefix) {
+		if !keep[id] && ownedStdlibNode(nodes[id], idx.repoPrefix) {
 			candidates = append(candidates, id)
 		}
 	}

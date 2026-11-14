@@ -278,6 +278,85 @@ func (s *externalLifetimeCountingStore) GetOutEdgesByNodeIDs(ids []string) map[s
 func (s *externalLifetimeCountingStore) AllNodes() []*graph.Node { panic("unbounded node read") }
 func (s *externalLifetimeCountingStore) AllEdges() []*graph.Edge { panic("unbounded edge read") }
 
+// Given a structural body edit that retains every stdlib call, when either
+// resolution mode settles, then cleanup reads no stdlib adjacency. When the
+// edited file drops a shared call, only that symbol needs a liveness read.
+func TestExternalLifetimeIncrementalKeptCandidateReads(t *testing.T) {
+	for _, deferred := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deferred=%t", deferred), func(t *testing.T) {
+			dir := builderTempDir(t, "kept-candidates")
+			tree := externalLifetimeTree("ToLower")
+			tree["other.go"] = "package fixture\nimport \"strings\"\nfunc Other(s string) string { return strings.ToLower(s) }\n"
+			builderWriteTree(t, dir, tree)
+			store := &externalLifetimeCountingStore{Store: builderOpenStore(t, "kept-candidates")}
+			idx := externalLifetimeIndexer(t, store)
+			_, err := idx.Index(dir)
+			require.NoError(t, err)
+			path := filepath.Join(dir, "util.go")
+			compare := func() {
+				t.Helper()
+				clean := builderOpenStore(t, "kept-candidates-clean")
+				_, err := externalLifetimeIndexer(t, clean).Index(dir)
+				require.NoError(t, err)
+				externalLifetimeRows(t, "nodes", builderRenderNodes(store.Store.AllNodes()), builderRenderNodes(clean.AllNodes()))
+				externalLifetimeRows(t, "edges", builderRenderEdges(store.Store.AllEdges()), builderRenderEdges(clean.AllEdges()))
+			}
+			update := func(body string) {
+				t.Helper()
+				bumpMtime(t, path, body)
+				resolved := false
+				idx.incrementalCatchupHook = func(kind string, _ []string) {
+					if kind == "ref_facts" {
+						resolved = true
+						store.inReads, store.outReads = nil, nil
+					}
+				}
+				var result *IndexResult
+				var err error
+				if deferred {
+					result, err = idx.IncrementalReindexPaths(dir, []string{path})
+				} else {
+					result, err = idx.incrementalReindexPathsMode(dir, []string{path}, incrementalPathMode{detectDeletions: true})
+				}
+				require.NoError(t, err)
+				require.Empty(t, result.FailedFiles)
+				require.Equal(t, 1, result.StaleFileCount)
+				require.True(t, resolved, "must take the structural resolution path")
+			}
+			stdlibReads := func(reads [][]string) [][]string {
+				var result [][]string
+				for _, read := range reads {
+					var ids []string
+					for _, id := range read {
+						if strings.HasPrefix(id, "repo::stdlib::") || strings.HasPrefix(id, "repo::module::go:") {
+							ids = append(ids, id)
+						}
+					}
+					if len(ids) > 0 {
+						result = append(result, ids)
+					}
+				}
+				return result
+			}
+			// Given unchanged stdlib calls, when their body changes, then no
+			// candidate adjacency is needed after the resolution tail.
+			update("package fixture\nimport \"strings\"\nfunc NormalizeID(id string) string { cleaned := strings.TrimSpace(id); return strings.ToLower(cleaned) }\n")
+			require.Empty(t, stdlibReads(store.inReads))
+			require.Empty(t, stdlibReads(store.outReads))
+			compare()
+
+			// Given another caller of ToLower, when this file drops that call,
+			// then only ToLower is projected and its live graph remains intact.
+			update(externalLifetimeTree("ToUpper")["util.go"])
+			want := [][]string{{"repo::stdlib::strings::ToLower"}}
+			require.Equal(t, want, stdlibReads(store.inReads))
+			require.Equal(t, want, stdlibReads(store.outReads))
+			externalLifetimeRequireBase(t, store)
+			compare()
+		})
+	}
+}
+
 // Given duplicate old destinations, pathless recorded sources and unrelated
 // externals, when capture and cleanup run, then only the owned stdlib frontier
 // is projected. Real incoming/outgoing references and other repos are preserved.
@@ -319,7 +398,7 @@ func TestExternalLifetimeIncrementalBoundedCleanup(t *testing.T) {
 	ids = append(ids, live.ID, imported.ID, outgoing.ID, outgoingModule.ID, fileback.ID, dep.ID, external.ID, builtin.ID, "repo::stdlib::strings::Unknown", other.ID)
 	token := store.BeginMutationReceipt()
 	before := store_sqlite.WriteMark()
-	n, e := idx.retireStdlibCandidates(ids)
+	n, e := idx.retireStdlibCandidates(ids, nil)
 	require.Equal(t, 3, n)
 	require.Equal(t, 2, e)
 	require.Equal(t, store_sqlite.RowWriteCounts{Nodes: 3, Edges: 2}, store_sqlite.WriteMark().Since(before).Rows)
@@ -335,7 +414,7 @@ func TestExternalLifetimeIncrementalBoundedCleanup(t *testing.T) {
 	require.Equal(t, otherOut, builderRenderEdges(store.GetOutEdges(other.ID)))
 	token = store.BeginMutationReceipt()
 	before = store_sqlite.WriteMark()
-	n, e = idx.retireStdlibCandidates(ids)
+	n, e = idx.retireStdlibCandidates(ids, nil)
 	require.Zero(t, n)
 	require.Zero(t, e)
 	require.Zero(t, store_sqlite.WriteMark().Since(before).Rows.Total())
@@ -374,7 +453,7 @@ func TestExternalLifetimeIncrementalDeferredEmptyFrontier(t *testing.T) {
 				slices.Reverse(chunks)
 			}
 			for _, ids := range chunks {
-				idx.settleStdlibCandidates(ids, batch)
+				idx.settleStdlibCandidates(ids, nil, batch)
 			}
 			require.NotNil(t, store.GetNode(a.ID), "not retired before catch-up")
 			require.Len(t, batch.stdlibCandidates, 3)
@@ -438,7 +517,7 @@ func TestExternalLifetimeIncrementalUnsupportedStore(t *testing.T) {
 	store.AddBatch([]*graph.Node{symbol, module}, []*graph.Edge{externalLifetimeMembership(symbol, module)})
 	idx := externalLifetimeIndexer(t, struct{ graph.Store }{store})
 	before := store_sqlite.WriteMark()
-	n, e := idx.retireStdlibCandidates([]string{symbol.ID, module.ID})
+	n, e := idx.retireStdlibCandidates([]string{symbol.ID, module.ID}, nil)
 	require.Zero(t, n)
 	require.Zero(t, e)
 	require.Zero(t, store_sqlite.WriteMark().Since(before).Rows.Total())
@@ -512,7 +591,7 @@ func TestExternalLifetimeIncrementalImportOnly(t *testing.T) {
 	ids := idx.captureStdlibCandidates([]string{file.FilePath}, store.GetOutEdgesByNodeIDs([]string{file.ID}))
 	require.Equal(t, []string{module.ID}, ids)
 	require.Equal(t, 1, graph.RemoveEdgesExact(store, []*graph.Edge{edge}))
-	n, e := idx.retireStdlibCandidates(ids)
+	n, e := idx.retireStdlibCandidates(ids, nil)
 	require.Equal(t, 1, n)
 	require.Zero(t, e)
 	require.Nil(t, store.GetNode(module.ID))

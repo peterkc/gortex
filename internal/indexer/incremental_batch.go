@@ -172,7 +172,7 @@ func (idx *Indexer) reindexIncrementalFilesBatched(
 		}
 		deletedStdlibCandidates = idx.capturePathStdlibCandidates(paths)
 	}
-	defer func() { idx.settleStdlibCandidates(deletedStdlibCandidates, markerBatch) }()
+	defer func() { idx.settleStdlibCandidates(deletedStdlibCandidates, nil, markerBatch) }()
 	idx.evictDeletedFilesBatched(deletedFiles, &invalidation)
 	deletion.end()
 	deleteTiming.complete(nil)
@@ -1245,7 +1245,7 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 		idx.applyLap("affected_plan")
 	}
 	idx.enrichAndMarkIncrementalStages(stages, markerBatch)
-	idx.settleStdlibCandidates(stdlibCandidates, markerBatch)
+	idx.settleStdlibCandidates(stdlibCandidates, paths, markerBatch)
 	idx.applyLap("enrich_mark")
 }
 
