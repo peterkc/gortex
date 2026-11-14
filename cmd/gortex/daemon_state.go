@@ -1294,6 +1294,8 @@ func warmupDaemonStateContext(ctx context.Context, state *daemonState, logger *z
 				zap.Int("contract_edges", reconciled))
 		case warmGlobalResolveFull:
 			if err := state.multiIndexer.RunGlobalResolveContext(ctx); err != nil && ctx.Err() == nil {
+				timings.resolveErr = err
+				resolveOK = false
 				logger.Warn("daemon: warmup global resolve incomplete", zap.Error(err))
 			}
 		}
@@ -1376,6 +1378,7 @@ func warmupDaemonStateContext(ctx context.Context, state *daemonState, logger *z
 			zap.Int("contract_edges", reconciled))
 	case warmGlobalResolveFull:
 		if err := state.multiIndexer.RunGlobalResolveContext(ctx); err != nil {
+			timings.resolveErr = err
 			resolveOK = false
 			if ctx.Err() == nil {
 				logger.Warn("daemon: warmup post-batch resolve incomplete", zap.Error(err))

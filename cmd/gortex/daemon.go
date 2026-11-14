@@ -889,7 +889,7 @@ func publishWarmupCompletion(ctx context.Context, state *daemonState, controller
 			"warmup_seconds": int64(elapsed.Seconds()),
 			"warmup_ms":      elapsed.Milliseconds(),
 			// Keep storage details in the daemon log, not the readiness channel.
-			"error": "pre-enrichment resolve failed; check the daemon log",
+			"error": "warmup resolve failed; check the daemon log",
 		})
 		logWarmupSummary(logger, warmup, queryable, elapsed)
 		return

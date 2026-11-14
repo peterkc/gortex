@@ -37,6 +37,7 @@ type warmupResolveFailureStore struct {
 	resolveErr       error
 	refuseIncoming   atomic.Bool
 	incomingRefusals atomic.Int64
+	forceImpact      atomic.Bool
 }
 
 func (s *warmupResolveFailureStore) BeginUnresolvedEdgeScan(ctx context.Context) (graph.UnresolvedEdgeScan, error) {
@@ -60,6 +61,16 @@ func (s *warmupResolveFailureStore) GetInEdgesByNodeIDs(ids []string) map[string
 	return rows
 }
 
+func (s *warmupResolveFailureStore) BackfillWorkspaceSlugsWithImpact(slugs []graph.WorkspaceSlug) graph.WorkspaceSlugBackfillResult {
+	result := s.Store.BackfillWorkspaceSlugsWithImpact(slugs)
+	if s.forceImpact.Swap(false) {
+		// Select the lifecycle-owned full pass without changing storage behavior.
+		result.Changed++
+		result.ResolutionAffected++
+	}
+	return result
+}
+
 type warmupReadinessClient struct {
 	notifications chan mcp.JSONRPCNotification
 }
@@ -76,13 +87,20 @@ func TestWarmupCompletion(t *testing.T) {
 		name            string
 		failBeforeReady bool
 		failAfterReady  bool
+		resolveStep     string
+		failLate        bool
 	}{
 		{name: "success"},
 		{name: "resolve_failure_after_ready", failAfterReady: true},
 		{name: "resolve_failure_before_ready", failBeforeReady: true},
+		{name: "global_resolve_success", resolveStep: "workspace_backfill_before_derived"},
+		{name: "global_resolve_failure", resolveStep: "workspace_backfill_before_derived", failLate: true},
+		{name: "post_batch_resolve_success", resolveStep: "workspace_backfill_after_derived"},
+		{name: "post_batch_resolve_failure", resolveStep: "workspace_backfill_after_derived", failLate: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			failResolve := tc.failBeforeReady || tc.failAfterReady
+			// Given a warmup whose selected resolve pass either succeeds or fails.
+			failResolve := tc.failBeforeReady || tc.failAfterReady || tc.failLate
 			t.Setenv("GORTEX_ENRICH_OVERLAP", "1")
 			dir := t.TempDir()
 			repo := filepath.Join(dir, "repo")
@@ -98,7 +116,16 @@ func TestWarmupCompletion(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, cm.Global().AddRepo(config.RepoEntry{Path: repo}))
 			core, logs := observer.New(zap.InfoLevel)
-			logger := zap.New(core)
+			logger := zap.New(core, zap.Hooks(func(entry zapcore.Entry) error {
+				if tc.resolveStep != "" && entry.Message == "daemon: warmup step start" {
+					steps := logs.FilterMessage(entry.Message).All()
+					if steps[len(steps)-1].ContextMap()["step"] == tc.resolveStep {
+						g.forceImpact.Store(true)
+						g.failScan.Store(tc.failLate)
+					}
+				}
+				return nil
+			}))
 			reg := parser.NewRegistry()
 			reg.Register(languages.NewGoExtractor())
 			idx := indexer.New(g, reg, config.Default().Index, logger)
@@ -112,6 +139,7 @@ func TestWarmupCompletion(t *testing.T) {
 				g.failScan.Store(tc.failAfterReady)
 			})
 
+			// When warmup joins its phases and the final outcome is published.
 			mw, warmup := warmupDaemonState(state, logger, markReady)
 			if mw != nil {
 				t.Cleanup(func() { require.NoError(t, mw.Stop()) })
@@ -127,12 +155,22 @@ func TestWarmupCompletion(t *testing.T) {
 			viewBuilds := indexer.NewViewBuildGate()
 			publishWarmupCompletion(context.Background(), state, controller, logger, viewBuilds, warmup, time.Millisecond, time.Second)
 
+			// Then only successful resolution can report successful enrichment.
 			assert.True(t, controller.ready.Load(), "completion must leave the daemon queryable, even if compute-ready was skipped")
 			assert.True(t, viewBuilds.IsOpen(), "warmup must release waiting view builds on either outcome")
 			require.Len(t, logs.FilterMessage("daemon: enrichment apply gate opened").All(), 1)
 			phase, _ := srv.ReadinessPhase()
 			if failResolve {
-				require.Len(t, logs.FilterMessage("daemon: warmup resolve failed").All(), 1, "injection must reach the real resolver")
+				failureMessage := "daemon: warmup resolve failed"
+				if tc.failLate {
+					failureMessage = "daemon: warmup global resolve incomplete"
+					if tc.resolveStep == "workspace_backfill_after_derived" {
+						failureMessage = "daemon: warmup post-batch resolve incomplete"
+					}
+				}
+				require.Len(t, logs.FilterMessage(failureMessage).All(), 1, "injection must reach the selected real resolver")
+				assert.ErrorIs(t, warmup.resolveErr, resolveErr)
+				assert.True(t, mi.RelationsPending(), "failed resolution must not certify startup relations")
 				assert.False(t, controller.enriched.Load())
 				// Then health retains the same queryable but unenriched outcome.
 				health := buildDaemonHealthSnapshot(time.Now(), controller, state, nil)
@@ -147,11 +185,16 @@ func TestWarmupCompletion(t *testing.T) {
 				assert.Equal(t, "warmup_incomplete", notification.Params.AdditionalFields["phase"])
 				assert.Equal(t, true, notification.Params.AdditionalFields["ready"])
 				assert.Equal(t, false, notification.Params.AdditionalFields["enriched"])
-				assert.Equal(t, "pre-enrichment resolve failed; check the daemon log", notification.Params.AdditionalFields["error"])
+				assert.Equal(t, "warmup resolve failed; check the daemon log", notification.Params.AdditionalFields["error"])
 				entries := logs.FilterMessage("daemon: warmup incomplete").All()
 				require.Len(t, entries, 1)
 				assert.Equal(t, resolveErr.Error(), entries[0].ContextMap()["error"])
 			} else {
+				assert.NoError(t, warmup.resolveErr)
+				assert.False(t, mi.RelationsPending())
+				if tc.resolveStep == "workspace_backfill_after_derived" {
+					assert.Len(t, logs.FilterMessage("daemon: post-batch workspace eligibility change forced full cross-repo catch-up").All(), 1)
+				}
 				require.Len(t, client.notifications, 1)
 				notification := <-client.notifications
 				assert.Equal(t, "notifications/workspace_readiness", notification.Method)
