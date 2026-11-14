@@ -130,6 +130,13 @@ func (idx *Indexer) retireStdlibCandidates(ids, paths []string) (int, int) {
 	if !ok || len(ids) == 0 {
 		return 0, 0
 	}
+	// A per-file delta can still restore unchanged files' prior rows. Decide
+	// only after that restatement, or its endpoint filter loses live references.
+	if idx.inertReparsed != nil {
+		idx.deferredStdlibCandidates = appendUniqueSorted(idx.deferredStdlibCandidates, ids...)
+		idx.deferredStdlibCandidatePaths = appendUniqueSorted(idx.deferredStdlibCandidatePaths, paths...)
+		return 0, 0
+	}
 	ids = appendUniqueSorted(nil, ids...)
 	nodes := idx.graph.GetNodesByIDs(ids)
 	// References emitted by the replacement files prove liveness without

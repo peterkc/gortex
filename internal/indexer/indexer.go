@@ -530,8 +530,9 @@ type Indexer struct {
 	// both stages call runDeferredGoMod, but only the first may do the work.
 	deferredGoModDone bool
 
-	// Park warm-reconcile candidates until the workspace resolver finishes.
-	// Read and written only under the repository mutation lane.
+	// Park candidates until the warm workspace resolver or the per-file delta's
+	// unchanged-file restatement finishes. Warm runs hold the repository lane;
+	// a delta's private Indexer owns its candidates throughout the build.
 	deferredStdlibCandidates     []string
 	deferredStdlibCandidatePaths []string
 

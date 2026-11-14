@@ -314,3 +314,40 @@ func TestExternalLifetimeSparseFallbackAndDirtyDeltaReopen(t *testing.T) {
 		})
 	}
 }
+
+// Given a delta that temporarily loses an unchanged file's stdlib dataflow,
+// when that file's prior rows are restated, then retirement keeps their endpoints
+// and still removes candidates with no final reference.
+func TestExternalLifetimeDirtyDeltaInertRestatement(t *testing.T) {
+	store := builderOpenStore(t, "inert-stdlib")
+	path := builderGraphPath(builderRepoPrefix, "inert.go")
+	owner := &graph.Node{ID: path + "::Env", FilePath: path, Kind: graph.KindFunction}
+	live := externalLifetimeSymbol(builderRepoPrefix, "os", "Getenv")
+	dead := externalLifetimeSymbol(builderRepoPrefix, "os", "Getpid")
+	module := externalLifetimeModule(builderRepoPrefix, "os")
+	flow := &graph.Edge{From: live.ID, To: owner.ID, Kind: graph.EdgeValueFlow, FilePath: path, Origin: graph.OriginASTResolved}
+	store.AddBatch([]*graph.Node{owner, live, dead, module}, []*graph.Edge{
+		flow, externalLifetimeMembership(live, module), externalLifetimeMembership(dead, module),
+	})
+	dw := graph.NewDeltaWriter(store, builderContextDerivedHandle(t, store))
+	idx := externalLifetimeIndexer(t, dw)
+	idx.inertReparsed = map[string]struct{}{path: {}}
+	dw.RemoveEdgesExact([]*graph.Edge{flow})
+	dw.AddBatch([]*graph.Node{owner}, nil)
+	ids := []string{live.ID, dead.ID, module.ID, live.ID}
+	// Retirement must not erase a prior endpoint before RestateBelowRows can
+	// restore its reference. The other candidate remains dead after the restore.
+	n, e := idx.retireStdlibCandidates(ids, []string{path})
+	require.Zero(t, n)
+	require.Zero(t, e)
+	_, _, skipped := dw.RestateBelowRows([]string{path})
+	require.Empty(t, skipped)
+	idx.inertReparsed = nil
+	idx.retireStdlibCandidates(idx.deferredStdlibCandidates, idx.deferredStdlibCandidatePaths)
+
+	require.NotNil(t, dw.GetNode(live.ID))
+	require.NotNil(t, dw.GetNode(module.ID))
+	require.Nil(t, dw.GetNode(dead.ID))
+	require.Contains(t, builderRenderEdges(dw.GetOutEdges(live.ID)), builderRenderEdges([]*graph.Edge{flow})[0])
+	require.Empty(t, dw.Unsupported())
+}

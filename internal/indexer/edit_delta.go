@@ -1103,6 +1103,11 @@ func (b *SparseGenerationBuilder) runEditDelta(
 		out.InertRestated = len(inert) - len(skipped)
 	}
 	idx.inertReparsed = nil
+	// The final rows, including unchanged-file restatements, now determine
+	// stdlib liveness. Earlier per-file passes only parked their candidates.
+	ids, paths := idx.deferredStdlibCandidates, idx.deferredStdlibCandidatePaths
+	idx.deferredStdlibCandidates, idx.deferredStdlibCandidatePaths = nil, nil
+	idx.retireStdlibCandidates(ids, paths)
 
 	fixed := make(map[string]struct{}, len(out.Paths))
 	for _, rel := range out.Paths {
