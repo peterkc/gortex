@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -10,9 +11,13 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+
+	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/search"
 )
 
 func externalLifetimeTree(call string) map[string]string {
@@ -150,6 +155,100 @@ func TestExternalLifetimeIncrementalFallback(t *testing.T) {
 			_, err = cleanIdx.Index(dir)
 			require.NoError(t, err)
 			externalLifetimeCompare(t, store, clean)
+		})
+	}
+}
+
+func externalLifetimeMultiIndexer(t *testing.T, store graph.Store) *MultiIndexer {
+	t.Helper()
+	mi := NewMultiIndexer(store, newTestRegistry(), search.NewNull(), newTestConfigManager(t), zap.NewNop())
+	t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
+	return mi
+}
+
+// Given a SQLite repository with ToLower, when a save or parallel warm reconcile
+// replaces it with ToUpper and the workspace tail completes, then the entire
+// graph equals a fresh index. An unchanged warm reconcile removes nothing.
+func TestExternalLifetimeMultiIndexer(t *testing.T) {
+	for _, mode := range []string{"save", "warm-edit", "warm-unchanged", "warm-aborted"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := builderTempDir(t, "multi")
+			tree := externalLifetimeTree("ToLower")
+			tree["one.go"] = "package fixture\nfunc One() {}\n"
+			tree["two.go"] = "package fixture\nfunc Two() {}\n"
+			builderWriteTree(t, dir, tree)
+			entry := config.RepoEntry{Path: dir, Name: "repo"}
+			store := builderOpenStore(t, "multi")
+			mi := externalLifetimeMultiIndexer(t, store)
+			_, err := mi.TrackRepo(entry)
+			require.NoError(t, err)
+			if mode != "save" {
+				mi.BackfillWorkspaceSlugs()
+			}
+			externalLifetimeRequireBase(t, store)
+			priorMtimes := mi.FileMtimes("repo")
+			beforeNodes, beforeEdges := builderRenderNodes(store.AllNodes()), builderRenderEdges(store.AllEdges())
+			path := filepath.Join(dir, "util.go")
+			if mode != "warm-unchanged" {
+				bumpMtime(t, path, externalLifetimeTree("ToUpper")["util.go"])
+			}
+			if mode == "save" {
+				result, err := mi.IncrementalReindexRepo("repo", []string{path})
+				require.NoError(t, err)
+				require.Equal(t, 1, result.StaleFileCount)
+				require.Empty(t, result.FailedFiles)
+			} else {
+				require.NoError(t, mi.Close(context.Background()))
+				warm := externalLifetimeMultiIndexer(t, store)
+				warm.BeginParallelBatch()
+				defer warm.ResetBatch()
+				result, err := warm.ReconcileRepoCtx(context.Background(), entry, priorMtimes)
+				require.NoError(t, err)
+				require.False(t, result.FullRetrack, "fixture must stay on the incremental warm route")
+				require.Empty(t, result.FailedFiles)
+				if mode != "warm-unchanged" {
+					require.Equal(t, 1, result.StaleFileCount)
+					require.NotNil(t, store.GetNode("repo::stdlib::strings::ToLower"), "cleanup must wait for workspace resolution")
+				} else {
+					require.Zero(t, result.StaleFileCount)
+				}
+				if mode == "warm-edit" {
+					// A repeated registered reconcile must not lose pending cleanup.
+					again, err := warm.ReconcileRepoCtx(context.Background(), entry, priorMtimes)
+					require.NoError(t, err)
+					require.Nil(t, again, "registered repositories take the existing no-op route")
+				}
+				require.NoError(t, warm.RunPreEnrichResolveFiles(context.Background(), result.DerivedInvalidation.Files, nil))
+				if mode == "warm-aborted" {
+					// An incomplete attempt cannot consume the cleanup frontier.
+					run := warm.BeginDeferredPasses(context.Background(), nil)
+					run.attemptAborted = true
+					require.False(t, run.FinishTailResult().CrossRepoComplete)
+					require.NotNil(t, store.GetNode("repo::stdlib::strings::ToLower"))
+				}
+				require.True(t, warm.RunDeferredPassesAllResult(context.Background()).CrossRepoComplete)
+				if mode != "warm-unchanged" {
+					require.Nil(t, store.GetNode("repo::stdlib::strings::ToLower"), "workspace tail must retire before EndBatch")
+				}
+				warm.EndBatch()
+			}
+			clean := builderOpenStore(t, "multi-clean")
+			cleanMI := externalLifetimeMultiIndexer(t, clean)
+			_, err = cleanMI.TrackRepo(entry)
+			require.NoError(t, err)
+			if mode != "save" {
+				// Warmup's workspace resolve backfills synthetic-node stamps.
+				// Compare with the same completed workspace boundary, not Track alone.
+				cleanMI.BackfillWorkspaceSlugs()
+			}
+			if mode == "warm-unchanged" {
+				require.Equal(t, beforeNodes, builderRenderNodes(store.AllNodes()))
+				require.Equal(t, beforeEdges, builderRenderEdges(store.AllEdges()))
+				externalLifetimeRows(t, "nodes", builderRenderNodes(store.AllNodes()), builderRenderNodes(clean.AllNodes()))
+				externalLifetimeRows(t, "edges", builderRenderEdges(store.AllEdges()), builderRenderEdges(clean.AllEdges()))
+			} else {
+				externalLifetimeCompare(t, store, clean)
+			}
 		})
 	}
 }
