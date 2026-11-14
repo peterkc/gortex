@@ -198,7 +198,6 @@ func (idx *Indexer) runIncrementalResolutionCatchup(
 ) []string {
 	files = appendUniqueSorted(nil, files...)
 	if len(files) == 0 {
-		idx.retireDeferredStdlibCandidates(batch)
 		return nil
 	}
 	idx.observeIncrementalCatchup("resolve", files)

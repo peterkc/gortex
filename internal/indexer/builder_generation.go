@@ -2481,14 +2481,6 @@ func orphanedStdlibStubs(base LayerBase, repoPrefix string, covered map[string]s
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
-	var sourceIDs []string
-	for _, nodes := range base.GetFileNodesByPaths(paths) {
-		for _, node := range nodes {
-			if node != nil {
-				sourceIDs = append(sourceIDs, node.ID)
-			}
-		}
-	}
 	var ids []string
 	collect := func(edge *graph.Edge) {
 		if edge == nil {
@@ -2500,19 +2492,28 @@ func orphanedStdlibStubs(base LayerBase, repoPrefix string, covered map[string]s
 			}
 		}
 	}
-	for _, edges := range base.GetOutEdgesByNodeIDs(appendUniqueSorted(nil, sourceIDs...)) {
-		for _, edge := range edges {
-			if edge == nil {
-				continue
-			}
-			if _, replaced := covered[edge.FilePath]; replaced {
-				collect(edge)
-			}
-		}
-	}
 	if reader, ok := graph.RecordedEdgesOf(base); ok {
 		for _, edge := range reader.RecordedEdgesAt(paths) {
 			collect(edge)
+		}
+	} else {
+		var sourceIDs []string
+		for _, nodes := range base.GetFileNodesByPaths(paths) {
+			for _, node := range nodes {
+				if node != nil {
+					sourceIDs = append(sourceIDs, node.ID)
+				}
+			}
+		}
+		for _, edges := range base.GetOutEdgesByNodeIDs(appendUniqueSorted(nil, sourceIDs...)) {
+			for _, edge := range edges {
+				if edge == nil {
+					continue
+				}
+				if _, replaced := covered[edge.FilePath]; replaced {
+					collect(edge)
+				}
+			}
 		}
 	}
 	ids = appendUniqueSorted(nil, ids...)

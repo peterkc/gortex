@@ -617,7 +617,7 @@ func TestExternalLifetimeIncrementalDeferredEmptyFrontier(t *testing.T) {
 			}
 			require.NotNil(t, store.GetNode(a.ID), "not retired before catch-up")
 			require.Len(t, batch.stdlibCandidates, 3)
-			require.Nil(t, idx.runIncrementalResolutionCatchup(nil, batch, func([]string) { t.Fatal("empty frontier must not resolve") }))
+			idx.retireDeferredStdlibCandidates(batch)
 			require.Empty(t, batch.stdlibCandidates)
 			require.Empty(t, store.AllNodes())
 			require.Empty(t, store.AllEdges())
