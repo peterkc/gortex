@@ -10,11 +10,11 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
+	"github.com/zzet/gortex/internal/storage/backend"
 )
 
 // Engine is the public entry point for the Gortex code intelligence engine.
@@ -23,9 +23,10 @@ import (
 // background bookkeeping that keeps its write-ahead log in check — so every
 // Engine must be closed when the caller is done with it. See Close.
 type Engine struct {
-	store   *store_sqlite.Store
-	indexer *indexer.Indexer
-	query   *query.Engine
+	store      graph.Store
+	closeStore func() error
+	indexer    *indexer.Indexer
+	query      *query.Engine
 
 	// tmpDir is non-empty when New created the store in a temp directory it
 	// owns; Close removes it.
@@ -38,8 +39,9 @@ type Option func(*settings)
 // settings collects everything the options can influence before the Engine
 // and its store are constructed.
 type settings struct {
-	index     config.IndexConfig
-	storePath string
+	index       config.IndexConfig
+	storePath   string
+	backendName string
 }
 
 // WithWorkers sets the number of parallel parsing workers.
@@ -87,7 +89,7 @@ func New(opts ...Option) (*Engine, error) {
 		}
 	}
 
-	st, err := store_sqlite.Open(path)
+	st, closeStore, err := backend.OpenRaw(set.backendName, path)
 	if err != nil {
 		if tmpDir != "" {
 			_ = os.RemoveAll(tmpDir)
@@ -99,10 +101,11 @@ func New(opts ...Option) (*Engine, error) {
 	languages.RegisterAll(reg)
 
 	return &Engine{
-		store:   st,
-		indexer: indexer.New(st, reg, set.index, zap.NewNop()),
-		query:   query.NewEngine(st),
-		tmpDir:  tmpDir,
+		store:      st,
+		closeStore: closeStore,
+		indexer:    indexer.New(st, reg, set.index, zap.NewNop()),
+		query:      query.NewEngine(st),
+		tmpDir:     tmpDir,
 	}, nil
 }
 
@@ -116,8 +119,9 @@ func (e *Engine) Close() error {
 	}
 	var err error
 	if e.store != nil {
-		err = e.store.Close()
+		err = e.closeStore()
 		e.store = nil
+		e.closeStore = nil
 	}
 	if e.tmpDir != "" {
 		if rmErr := os.RemoveAll(e.tmpDir); rmErr != nil && err == nil {

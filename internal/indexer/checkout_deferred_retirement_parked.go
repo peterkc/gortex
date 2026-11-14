@@ -8,7 +8,8 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -139,13 +140,13 @@ type retirementPark struct {
 // retirementStillReferenced reports a refusal for a reference the catalog
 // still holds.
 func retirementStillReferenced(err error) bool {
-	return errors.Is(err, store_sqlite.ErrCatalogGenerationReferenced)
+	return errors.Is(err, storage.ErrCatalogGenerationReferenced)
 }
 
 // retirementRefusedOnlyBased reports a refusal that says the generation was
 // held by nothing but generations built on it.
 func retirementRefusedOnlyBased(err error) bool {
-	var referenced *store_sqlite.GenerationReferencedError
+	var referenced *storage.GenerationReferencedError
 	return errors.As(err, &referenced) && referenced.Refs.OnlyBased()
 }
 
@@ -329,14 +330,14 @@ func (l *CheckoutLifecycle) owedRetirementSet() map[int64]struct{} {
 }
 
 // The Store reports every committed release of a generation reference
-// (store_sqlite.OnGenerationReferencesReleased): a removal's base, whichever
+// (storage.OnGenerationReferencesReleased): a removal's base, whichever
 // path removed it, and the catalog writes that drop a route, ref view or
 // dedicated reference.
 func init() {
-	store_sqlite.OnGenerationReferencesReleased(noteRetirementStoreRelease)
+	storage.OnGenerationReferencesReleased(noteRetirementStoreRelease)
 }
 
-func noteRetirementStoreRelease(release store_sqlite.GenerationReferenceRelease) {
+func noteRetirementStoreRelease(release storage.GenerationReferenceRelease) {
 	switch {
 	case release.Any:
 		noteRetirementReferenceReleased()
@@ -358,14 +359,14 @@ var retirementOwedCounted struct {
 }
 
 type retirementOwedKey struct {
-	store *store_sqlite.Store
+	store graph.Store
 	id    int64
 }
 
 const retirementOwedCountedMax = 4096
 
 // countRetirementOwed counts a generation becoming owed a retirement, once.
-func countRetirementOwed(store *store_sqlite.Store, generationID int64, why string) {
+func countRetirementOwed(store graph.Store, generationID int64, why string) {
 	key := retirementOwedKey{store: store, id: generationID}
 	retirementOwedCounted.mu.Lock()
 	if _, counted := retirementOwedCounted.ids[key]; counted {

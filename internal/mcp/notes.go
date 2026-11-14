@@ -32,7 +32,7 @@ const maxNotesCap = 5000
 type notesManager struct {
 	mu      sync.Mutex
 	store   persistence.NoteStore
-	sidecar *persistence.SidecarStore
+	sidecar noteRecords
 	repoKey string
 }
 
@@ -57,8 +57,9 @@ func newNotesManager(cacheDir, repoPath string) *notesManager {
 // once. Used by the daemon path where the sidecar is opened once and
 // shared across managers.
 func newNotesManagerFromSidecar(sidecar *persistence.SidecarStore, repoKey, legacyDir string) *notesManager {
-	nm := &notesManager{sidecar: sidecar, repoKey: repoKey}
+	nm := &notesManager{repoKey: repoKey}
 	if sidecar != nil {
+		nm.sidecar = sidecar
 		_ = sidecar.MigrateLegacyNotes(repoKey, legacyDir)
 		if rows, err := sidecar.LoadNotesRows(repoKey); err == nil {
 			nm.store.Entries = rows

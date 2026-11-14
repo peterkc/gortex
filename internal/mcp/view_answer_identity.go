@@ -3,8 +3,8 @@ package mcp
 import (
 	"context"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // worktreeAnswerIdentity is the exact stack a worktree-view answer was read
@@ -40,7 +40,7 @@ type worktreeAnswerIdentity struct {
 // layer may sit on a chain of this checkout's earlier working-tree
 // generations, so its immediate base is not necessarily the commit layer. A
 // catalog read that fails leaves the affected fields out rather than guessing.
-func (s *Server) worktreeAnswerIdentity(ctx context.Context, checkout store_sqlite.Checkout, view *graphview.RepoView) *worktreeAnswerIdentity {
+func (s *Server) worktreeAnswerIdentity(ctx context.Context, checkout storage.Checkout, view *graphview.RepoView) *worktreeAnswerIdentity {
 	if view == nil {
 		return nil
 	}
@@ -54,7 +54,7 @@ func (s *Server) worktreeAnswerIdentity(ctx context.Context, checkout store_sqli
 			identity.dirtyGenerationID = layer.Generation
 		}
 	}
-	if s == nil || s.materializer == nil || s.materializer.Catalog == nil {
+	if s == nil || s.materializer == nil || (s.materializer.Catalog == nil || s.materializer.Catalog.IsNilMaterializerCatalog()) {
 		return identity
 	}
 	catalog := s.materializer.Catalog

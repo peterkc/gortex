@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -26,6 +27,7 @@ func TestPerformanceIdleRetirementWorkerCadenceHoldsTheLaneAtLeastHalfTheTime(t 
 		generations, nodes, burst = 4, 1000, 10*deferredRetirementBurstDuration
 	}
 	l, _, ids := idleRetirementLifecycle(t, generations, nodes)
+	nativeStore := l.store.(*store_sqlite.Store)
 	// Short idle bursts make the fixture's drain many passes long, so the
 	// cadence between passes is what the duty measures.
 	l.retirementIdleBurst = burst
@@ -43,7 +45,7 @@ func TestPerformanceIdleRetirementWorkerCadenceHoldsTheLaneAtLeastHalfTheTime(t 
 	wall := time.Since(started)
 	require.NoError(t, ctx.Err(), "the drain did not finish")
 	for _, id := range ids {
-		requireGenerationRetired(t, l.store, id)
+		requireGenerationRetired(t, nativeStore, id)
 	}
 	var held time.Duration
 	var rows int64

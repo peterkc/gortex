@@ -166,7 +166,7 @@ func TestDedicatedBaseRuntimeAuthorizedReregistrationRevokesOldSlot(t *testing.T
 
 func TestDedicatedBaseRuntimePhysicalTailIsPartOfOwnerDrain(t *testing.T) {
 	b, request, claim := privateClaimedDedicatedFixture(t)
-	r := &dedicatedBaseRuntime{store: b.Store}
+	r := &dedicatedBaseRuntime{catalog: testCatalog(b.Store), store: b.Store}
 	publisher := &dedicatedBasePublisher{runtime: r, authority: claim.Desire.Authority}
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
@@ -343,7 +343,7 @@ func TestDedicatedBaseRuntimeConcurrentOwnerDrain(t *testing.T) {
 
 func TestDedicatedBaseRuntimeClosedPublisherSkipsObserverAndCatalogWrites(t *testing.T) {
 	b, request, claim := privateClaimedDedicatedFixture(t)
-	r := &dedicatedBaseRuntime{store: b.Store}
+	r := &dedicatedBaseRuntime{catalog: testCatalog(b.Store), store: b.Store}
 	publisher := &dedicatedBasePublisher{runtime: r, authority: claim.Desire.Authority}
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
@@ -352,7 +352,7 @@ func TestDedicatedBaseRuntimeClosedPublisherSkipsObserverAndCatalogWrites(t *tes
 		t.Fatal(err)
 	}
 	awaitDedicatedDrain(t, drained)
-	check, err := installDedicatedWriteAudit(ctx, b.Store, request.StorePath)
+	check, err := installDedicatedWriteAudit(ctx, b.Store.(*store_sqlite.Store), request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +376,7 @@ func TestDedicatedBaseRuntimeClosedPublisherSkipsObserverAndCatalogWrites(t *tes
 
 func TestDedicatedBaseRuntimeHeldPublisherCannotReopenRetrackedOwner(t *testing.T) {
 	b, request, claim := privateClaimedDedicatedFixture(t)
-	r := &dedicatedBaseRuntime{store: b.Store}
+	r := &dedicatedBaseRuntime{catalog: testCatalog(b.Store), store: b.Store}
 	graphID, owner := claim.Desire.Authority.GraphID, claim.Desire.Authority.Owner
 	if err := r.RegisterDedicatedBaseOwner(graphID, owner); err != nil {
 		t.Fatal(err)
@@ -397,7 +397,7 @@ func TestDedicatedBaseRuntimeHeldPublisherCannotReopenRetrackedOwner(t *testing.
 	if err := r.RegisterDedicatedBaseOwner(graphID, owner); err != nil {
 		t.Fatal(err)
 	}
-	check, err := installDedicatedWriteAudit(t.Context(), b.Store, request.StorePath)
+	check, err := installDedicatedWriteAudit(t.Context(), b.Store.(*store_sqlite.Store), request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +441,7 @@ func BenchmarkDedicatedBaseRuntimeOwnerAdmission(b *testing.B) {
 // confirmed healthy slot is an independent positive control and must survive.
 func TestDedicatedBaseRuntimeInvalidInstallsDoNotRetainSlots(t *testing.T) {
 	b, request, claim := privateClaimedDedicatedFixture(t)
-	r := &dedicatedBaseRuntime{store: b.Store}
+	r := &dedicatedBaseRuntime{catalog: testCatalog(b.Store), store: b.Store}
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
 	authority := claim.Desire.Authority
@@ -450,7 +450,7 @@ func TestDedicatedBaseRuntimeInvalidInstallsDoNotRetainSlots(t *testing.T) {
 	if err != nil || healthy == nil || healthy.admission == nil || healthy.authority != authority {
 		t.Fatalf("healthy install control: publisher=%+v err=%v", healthy, err)
 	}
-	check, err := installDedicatedWriteAudit(ctx, b.Store, request.StorePath)
+	check, err := installDedicatedWriteAudit(ctx, b.Store.(*store_sqlite.Store), request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -496,11 +496,11 @@ func TestDedicatedBaseRuntimeConcurrentInvalidAndValidInstallPreservesSlot(t *te
 	authority := claim.Desire.Authority
 	valid := store_sqlite.AcquireDedicatedBaseAuthorityRequest{GraphID: authority.GraphID, Owner: authority.Owner, Token: authority.Token}
 	// Establish catalog fixture validity independently of the empty test runtime.
-	control := &dedicatedBaseRuntime{store: b.Store}
+	control := &dedicatedBaseRuntime{catalog: testCatalog(b.Store), store: b.Store}
 	if publisher, err := control.install(ctx, valid); err != nil || publisher == nil || publisher.authority != authority {
 		t.Fatalf("healthy authority control: publisher=%+v err=%v", publisher, err)
 	}
-	r := &dedicatedBaseRuntime{store: b.Store}
+	r := &dedicatedBaseRuntime{catalog: testCatalog(b.Store), store: b.Store}
 	unlock, err := r.acquire(ctx, authority.GraphID)
 	if err != nil {
 		t.Fatal(err)
@@ -538,7 +538,7 @@ func TestDedicatedBaseRuntimeConcurrentInvalidAndValidInstallPreservesSlot(t *te
 	if !counted {
 		t.Fatal("concurrent installs did not share an unconfirmed counted slot")
 	}
-	check, err := installDedicatedWriteAudit(ctx, b.Store, request.StorePath)
+	check, err := installDedicatedWriteAudit(ctx, b.Store.(*store_sqlite.Store), request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}

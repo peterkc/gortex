@@ -1,19 +1,14 @@
 package store_sqlite
 
+import "github.com/zzet/gortex/internal/storage"
+
 import (
 	"context"
 	"database/sql"
 	"fmt"
 )
 
-// BeginIntentTransitionRequest is the durable admission record for a mode
-// change. When TrackingIntent is present, the reason the checkout is becoming
-// dedicated and the transition that will do it are committed together.
-type BeginIntentTransitionRequest struct {
-	Transition     IntentTransition
-	Incarnation    string
-	TrackingIntent *TrackingIntent
-}
+type BeginIntentTransitionRequest = storage.BeginIntentTransitionRequest
 
 // BeginIntentTransitionWithTrackingIntent records a transition and its
 // optional tracking intent in one transaction. No worker may begin before this
@@ -22,14 +17,14 @@ type BeginIntentTransitionRequest struct {
 func (c *Catalog) BeginIntentTransitionWithTrackingIntent(
 	ctx context.Context, req BeginIntentTransitionRequest,
 ) (IntentTransition, bool, error) {
-	if err := req.Transition.validate(); err != nil {
+	if err := validateIntentTransition(req.Transition); err != nil {
 		return IntentTransition{}, false, err
 	}
 	if err := requireCatalogID("incarnation", req.Incarnation); err != nil {
 		return IntentTransition{}, false, err
 	}
 	if req.TrackingIntent != nil {
-		if err := req.TrackingIntent.validate(); err != nil {
+		if err := validateTrackingIntent(*req.TrackingIntent); err != nil {
 			return IntentTransition{}, false, err
 		}
 		if req.TrackingIntent.CheckoutID != req.Transition.CheckoutID {

@@ -2,6 +2,8 @@ package store_sqlite
 
 import (
 	"encoding/binary"
+
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Per-edit write-ahead-log accounting.
@@ -23,35 +25,12 @@ import (
 // appended while this edit ran", which is exactly the log growth a reader
 // pinned across the edit would hold.
 
-// WALWriteMark is one sample of the log position.
-type WALWriteMark struct {
-	// Valid is false when the store has no readable wal-index (an in-memory
-	// database, a closed store, a store not in WAL mode yet).
-	Valid bool
-	// MxFrame is the number of valid frames in the log.
-	MxFrame uint32
-	// Salt identifies the log incarnation; a reset changes it.
-	Salt [8]byte
-	// PageSize is the database page size recorded in the wal-index header.
-	PageSize uint32
-}
+type WALWriteMark = storage.WALWriteMark
 
-// WALWriteDelta is the log growth between two marks.
-type WALWriteDelta struct {
-	// Valid is false when either mark was unreadable.
-	Valid bool `json:"valid"`
-	// Frames is the number of frames appended between the marks.
-	Frames int64 `json:"frames"`
-	// Bytes is Frames times the on-disk frame size (page plus the 24-byte
-	// frame header).
-	Bytes int64 `json:"bytes"`
-	// Reset reports that the log was reset between the marks; Frames and
-	// Bytes then count only the frames since the reset.
-	Reset bool `json:"reset,omitempty"`
-}
+type WALWriteDelta = storage.WALWriteDelta
 
 // walFrameHeaderBytes is the fixed header in front of every WAL frame.
-const walFrameHeaderBytes = 24
+const walFrameHeaderBytes = storage.WALFrameHeaderBytes
 
 // WALWriteMark samples the store's write-ahead-log position. It costs one
 // small file read and never blocks a writer or a reader.
@@ -88,25 +67,5 @@ func readWALWriteMark(dbPath string) WALWriteMark {
 
 // WALWrittenBetween is the log growth from before to after.
 func WALWrittenBetween(before, after WALWriteMark) WALWriteDelta {
-	if !before.Valid || !after.Valid {
-		return WALWriteDelta{}
-	}
-	delta := WALWriteDelta{Valid: true}
-	switch {
-	case before.Salt == after.Salt && after.MxFrame >= before.MxFrame:
-		delta.Frames = int64(after.MxFrame - before.MxFrame)
-	default:
-		// The log was reset (the salt moved, or mxFrame went backwards on an
-		// uninitialised header): only the frames since the reset are known.
-		delta.Reset = true
-		delta.Frames = int64(after.MxFrame)
-	}
-	pageSize := after.PageSize
-	if pageSize == 0 {
-		pageSize = before.PageSize
-	}
-	if pageSize > 0 {
-		delta.Bytes = delta.Frames * int64(pageSize+walFrameHeaderBytes)
-	}
-	return delta
+	return storage.WALWrittenBetween(before, after)
 }

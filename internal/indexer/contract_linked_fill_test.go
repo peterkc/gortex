@@ -46,7 +46,7 @@ func TestContractLinkedFillReacquiresMovedAncestryAndResumesPartialCache(t *test
 		require.NoError(t, err)
 		session, err := newContractDeltaSession(cache, snapshot, f.options.Config)
 		require.NoError(t, err)
-		report, runErr := RunContractFollowup(t.Context(), ContractFollowupRequest{RebuildReason: ContractFollowupUnknownInterval, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: f.options.Registry, Config: f.options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: f.options.Materializer.Leases, Yield: f.options.Yield, Logger: zap.NewNop(), ScratchParent: scratch, OtherActorWaiting: func() bool { return true }, delta: session, convergenceHooks: &contractConvergenceHooks{beforeExtract: func(path string) { extracted[path]++ }}})
+		report, runErr := RunContractFollowup(t.Context(), ContractFollowupRequest{OpenEvidence: openTestEvidenceStore, RebuildReason: ContractFollowupUnknownInterval, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: f.options.Registry, Config: f.options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: f.options.Materializer.Leases, Yield: f.options.Yield, Logger: zap.NewNop(), ScratchParent: scratch, OtherActorWaiting: func() bool { return true }, delta: session, convergenceHooks: &contractConvergenceHooks{beforeExtract: func(path string) { extracted[path]++ }}})
 		cache = session.cache
 		return report, runErr
 	}

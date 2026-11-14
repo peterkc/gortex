@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Folding a chain in steps.
@@ -46,14 +48,14 @@ import (
 var (
 	// ErrChainFoldStale refuses a fold whose chain is not what it was: a
 	// member missing, not ready, or being retired, or `to` not building.
-	ErrChainFoldStale = errors.New("store_sqlite: chain fold: the chain is stale")
+	ErrChainFoldStale = storage.ErrChainFoldStale
 	// ErrChainFoldBusy refuses a second fold on the same store.
-	ErrChainFoldBusy = errors.New("store_sqlite: chain fold: another fold is running")
+	ErrChainFoldBusy = storage.ErrChainFoldBusy
 	// ErrChainFoldYielded reports a step rolled back for an edit; step again.
-	ErrChainFoldYielded = errors.New("store_sqlite: chain fold: the step gave way to an edit")
+	ErrChainFoldYielded = storage.ErrChainFoldYielded
 	// ErrChainFoldWALMark reports a step not started over the log's mark;
 	// step again once the log is down.
-	ErrChainFoldWALMark = errors.New("store_sqlite: chain fold: the log is over its mark")
+	ErrChainFoldWALMark = storage.ErrChainFoldWALMark
 )
 
 // Vars, not consts, only so the in-package cases can change them.
@@ -81,18 +83,7 @@ var (
 
 // ChainFoldRequest names the chain (oldest first) and the empty building
 // generation the fold writes; Owner identifies the caller in logs.
-type ChainFoldRequest struct {
-	Chain []int64
-	To    int64
-	Owner string
-	// StepTarget may request smaller transactions for a fold sharing the writer
-	// with frequent interactive edits. Zero retains the default target.
-	StepTarget time.Duration
-	// BuildFlight optionally borrows the caller's live destination leader.
-	// The caller retains it across Begin retries and through publication/landing;
-	// neither a refused Begin nor Release completes borrowed ownership.
-	BuildFlight *PayloadBuildFlight
-}
+type ChainFoldRequest = storage.ChainFoldRequest
 
 // chainFoldPhase is where in a member the fold is.
 type chainFoldPhase int
@@ -212,7 +203,10 @@ func (s *Store) BeginChainFold(ctx context.Context, req ChainFoldRequest) (*Chai
 			return fail(fmt.Errorf("%w: member %d is not ready", ErrChainFoldStale, id))
 		}
 	}
-	flight := req.BuildFlight
+	flight, native := req.BuildFlight.(*PayloadBuildFlight)
+	if req.BuildFlight != nil && !native {
+		return fail(fmt.Errorf("%w: foreign payload build flight", ErrCatalogInvalidValue))
+	}
 	borrowed := flight != nil
 	if borrowed {
 		if err := s.validatePayloadBuildFlight(flight, req.To); err != nil {
@@ -307,6 +301,15 @@ func (s *Store) BeginChainFold(ctx context.Context, req ChainFoldRequest) (*Chai
 		return fail(err)
 	}
 	return f, nil
+}
+
+// BeginChainFoldHandle returns the native fold without boxing a nil pointer.
+func (s *Store) BeginChainFoldHandle(ctx context.Context, req ChainFoldRequest) (ChainFoldHandle, error) {
+	fold, err := s.BeginChainFold(ctx, req)
+	if fold == nil {
+		return nil, err
+	}
+	return fold, err
 }
 
 // chainFoldKeys is the column list a table's rows are paged by within one

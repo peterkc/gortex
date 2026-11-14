@@ -9,7 +9,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/reach"
 )
 
@@ -99,12 +98,6 @@ type mutationFanoutOwningReceiptStore interface {
 	BeginMutationReceiptOwningFanout() graph.MutationReceiptToken
 	RecordMutationFanoutTruncationIn(graph.MutationReceiptToken, graph.ReceiptFanoutTruncation)
 }
-
-// The daemon holds exactly one graph.Store — *store_sqlite.Store
-// (serverstack openSqliteBackend) — so if that backend ever stopped satisfying
-// the capability, every shipped mutation would silently fall back to the
-// store-wide axis. Fail to compile instead.
-var _ mutationFanoutOwningReceiptStore = (*store_sqlite.Store)(nil)
 
 // closeReceiptFanoutFacts closes a per-Indexer fan-out observation and returns
 // the RAW per-pass facts it saw, in the shape the receipt axis carries.

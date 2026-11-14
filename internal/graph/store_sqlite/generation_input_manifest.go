@@ -1,5 +1,7 @@
 package store_sqlite
 
+import "github.com/zzet/gortex/internal/storage"
+
 import (
 	"context"
 	"database/sql"
@@ -19,41 +21,30 @@ import (
 // sealed with the payload by PublishPayloadGeneration. Reads are allowed at any
 // state — a published parent's manifest is exactly what the next build reads.
 
-// InputManifestVersion is the manifest format this build writes. A reader
-// treats a manifest of any other version as unusable, never as empty.
-const InputManifestVersion = 1
+const InputManifestVersion = storage.InputManifestVersion
 
-// InputManifestEntryState is what the sample found at one path.
-type InputManifestEntryState string
+type InputManifestEntryState = storage.InputManifestEntryState
 
 const (
-	// InputManifestPresent: the path exists in the working tree with content
-	// that differs from HEAD (or HEAD lacks it).
-	InputManifestPresent InputManifestEntryState = "present"
-	// InputManifestAbsent: the path is gone from the working tree.
-	InputManifestAbsent InputManifestEntryState = "absent"
-	// InputManifestOpaque: the path is a symlink, submodule or other entry
-	// whose content the sampler does not hash.
-	InputManifestOpaque InputManifestEntryState = "opaque"
-	// InputManifestHeadEqual: the path was dirty in git's view but its bytes
-	// and mode equal HEAD's.
-	InputManifestHeadEqual InputManifestEntryState = "head_equal"
+	InputManifestPresent   = storage.InputManifestPresent
+	InputManifestAbsent    = storage.InputManifestAbsent
+	InputManifestOpaque    = storage.InputManifestOpaque
+	InputManifestHeadEqual = storage.InputManifestHeadEqual
 )
 
 var inputManifestEntryStates = []InputManifestEntryState{
 	InputManifestPresent, InputManifestAbsent, InputManifestOpaque, InputManifestHeadEqual,
 }
 
-// InputManifestAdmission is the builder's admission verdict for one path.
-type InputManifestAdmission string
+type InputManifestAdmission = storage.InputManifestAdmission
 
 const (
-	InputManifestAdmitted        InputManifestAdmission = "admitted"
-	InputManifestExcluded        InputManifestAdmission = "excluded"
-	InputManifestUnknownLanguage InputManifestAdmission = "unknown_language"
-	InputManifestOversized       InputManifestAdmission = "oversized"
-	InputManifestUnreadable      InputManifestAdmission = "unreadable"
-	InputManifestNotApplicable   InputManifestAdmission = "not_applicable"
+	InputManifestAdmitted        = storage.InputManifestAdmitted
+	InputManifestExcluded        = storage.InputManifestExcluded
+	InputManifestUnknownLanguage = storage.InputManifestUnknownLanguage
+	InputManifestOversized       = storage.InputManifestOversized
+	InputManifestUnreadable      = storage.InputManifestUnreadable
+	InputManifestNotApplicable   = storage.InputManifestNotApplicable
 )
 
 var inputManifestAdmissions = []InputManifestAdmission{
@@ -61,40 +52,14 @@ var inputManifestAdmissions = []InputManifestAdmission{
 	InputManifestOversized, InputManifestUnreadable, InputManifestNotApplicable,
 }
 
-// InputManifestEntry is one path of a generation's admitted-input manifest.
-// FilePath is git-relative and canonical (path.Clean, forward slashes), the
-// same spelling as the builder's change set.
-type InputManifestEntry struct {
-	FilePath      string
-	State         InputManifestEntryState
-	Admission     InputManifestAdmission
-	Mode          string
-	ContentSHA256 string
-}
+type InputManifestEntry = storage.InputManifestEntry
 
-// InputManifestMeta declares a generation's manifest complete. EntryCount is
-// the number of entry rows the manifest carries; WriteInputManifest stamps it
-// from the entries it writes and refuses a caller value that disagrees.
-type InputManifestMeta struct {
-	ManifestVersion int
-	IsFull          bool
-	EntryCount      int
-	PolicyDigest    string
-}
+type InputManifestMeta = storage.InputManifestMeta
 
-// Manifest errors, distinguishable without matching on strings.
 var (
-	// ErrInputManifestAtBaseGeneration means a manifest was written or read
-	// through a handle pinned to the base generation, which has no sample.
-	ErrInputManifestAtBaseGeneration = errors.New("store_sqlite: input manifests require a derived view generation")
-
-	// ErrInputManifestInvalid means a manifest write carried a value outside
-	// its vocabulary, a non-canonical or duplicate path, or inconsistent meta.
-	ErrInputManifestInvalid = errors.New("store_sqlite: invalid input manifest")
-
-	// ErrInputManifestIncomplete means a stored manifest's entry rows disagree
-	// with its meta row, so it must not be used as a planning input.
-	ErrInputManifestIncomplete = errors.New("store_sqlite: input manifest entries disagree with its meta")
+	ErrInputManifestAtBaseGeneration = storage.ErrInputManifestAtBaseGeneration
+	ErrInputManifestInvalid          = storage.ErrInputManifestInvalid
+	ErrInputManifestIncomplete       = storage.ErrInputManifestIncomplete
 )
 
 // inputManifestChunk bounds rows per multi-row INSERT: the entry row binds 6

@@ -32,13 +32,13 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer"
 	gortexmcp "github.com/zzet/gortex/internal/mcp"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
 	internalserver "github.com/zzet/gortex/internal/server"
+	"github.com/zzet/gortex/internal/storage/backend"
 )
 
 // toolCall is one synthetic MCP request the bench fires per
@@ -153,13 +153,13 @@ func buildInProcessServer(repoRoot string) (graph.Store, *gortexmcp.Server, func
 	if err != nil {
 		die("temp store dir: %v", err)
 	}
-	g, err := store_sqlite.Open(filepath.Join(tmpDir, "bench.sqlite"))
+	g, closeBackend, err := backend.OpenRaw("", filepath.Join(tmpDir, "bench.sqlite"))
 	if err != nil {
 		_ = os.RemoveAll(tmpDir)
 		die("open store: %v", err)
 	}
 	cleanup := func() {
-		_ = g.Close()
+		_ = closeBackend()
 		_ = os.RemoveAll(tmpDir)
 	}
 	reg := parser.NewRegistry()

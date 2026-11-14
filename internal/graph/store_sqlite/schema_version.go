@@ -1,5 +1,7 @@
 package store_sqlite
 
+import "github.com/zzet/gortex/internal/storage"
+
 import (
 	"database/sql"
 	"errors"
@@ -55,41 +57,20 @@ type schemaMigration struct {
 	preserveAnalysis bool
 }
 
-// MigrationPhase identifies one observable boundary in an in-place schema
-// migration. Observers are advisory: they must not block the migration or
-// mutate the graph database.
-type MigrationPhase string
+type MigrationPhase = storage.MigrationPhase
 
 const (
-	MigrationStarted  MigrationPhase = "started"
-	MigrationFinished MigrationPhase = "finished"
-	MigrationFailed   MigrationPhase = "failed"
-
-	// The backup phases report the pre-upgrade backup Open takes under
-	// WithUpgradeBackup, once, before the first step starts. Version is the
-	// schema version being backed up and Detail carries the backup path
-	// (created, kept) or the reason none was taken (skipped).
-	MigrationBackupCreated MigrationPhase = "backup_created"
-	MigrationBackupKept    MigrationPhase = "backup_kept"
-	MigrationBackupSkipped MigrationPhase = "backup_skipped"
+	MigrationStarted       = storage.MigrationStarted
+	MigrationFinished      = storage.MigrationFinished
+	MigrationFailed        = storage.MigrationFailed
+	MigrationBackupCreated = storage.MigrationBackupCreated
+	MigrationBackupKept    = storage.MigrationBackupKept
+	MigrationBackupSkipped = storage.MigrationBackupSkipped
 )
 
-// MigrationProgress describes one schema migration step. Elapsed is measured
-// from the start of the current step and Error is populated only for a failed
-// step. The error is intended for logs and transient startup state; callers
-// should avoid persisting it as durable graph data.
-type MigrationProgress struct {
-	Version int
-	Name    string
-	Phase   MigrationPhase
-	Elapsed time.Duration
-	Error   error
-	Detail  string
-}
+type MigrationProgress = storage.MigrationProgress
 
-// MigrationObserver receives synchronous migration boundaries. It may be nil.
-// Implementations should return promptly; a slow observer delays store Open.
-type MigrationObserver func(MigrationProgress)
+type MigrationObserver = storage.MigrationObserver
 
 // schemaMigrations is the ordered, forward-only registry. Version 1 is the
 // implicit baseline (no entry): a v1 store is reconciled entirely by schemaSQL's

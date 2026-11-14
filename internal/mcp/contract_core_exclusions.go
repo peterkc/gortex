@@ -6,7 +6,6 @@ import (
 	"sync"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 // contractCoreOwnedKinds are the endpoint kinds whose adjacency belongs to the
@@ -54,7 +53,7 @@ type contractCoreExclusionEntry struct {
 type contractCoreExclusionCache struct {
 	limit int
 	// read is the bounded identity read; tests observe it.
-	read    func(*store_sqlite.Store, context.Context, []graph.NodeKind, int) ([]string, bool, error)
+	read    func(exclusionSource, context.Context, []graph.NodeKind, int) ([]string, bool, error)
 	mu      sync.Mutex
 	clock   uint64
 	entries map[contractCoreExclusionKey]*contractCoreExclusionEntry
@@ -72,16 +71,16 @@ func newContractCoreExclusionCache(limit int) *contractCoreExclusionCache {
 // its mutation revision. Any other reader (an overlay, a scoped or stacked
 // view) keeps per-batch lookups, which apply its own masks; so does a handle
 // without a core.
-func contractCoreExclusionSource(reader graph.Reader) (*store_sqlite.Store, contractCoreExclusionKey, uint64, bool) {
-	store, ok := reader.(*store_sqlite.Store)
-	if !ok || store == nil {
+func contractCoreExclusionSource(reader graph.Reader) (exclusionSource, contractCoreExclusionKey, uint64, bool) {
+	store, ok := reader.(exclusionSource)
+	if !ok || store.IsNilGenerationHandle() || !store.SharesSymbolSearchCore(reader) {
 		return nil, contractCoreExclusionKey{}, 0, false
 	}
 	core := store.SymbolSearchCoreKey()
 	if core == nil {
 		return nil, contractCoreExclusionKey{}, 0, false
 	}
-	revision, ok := readerSearchMutationRevision(store)
+	revision, ok := readerSearchMutationRevision(reader)
 	if !ok {
 		return nil, contractCoreExclusionKey{}, 0, false
 	}
@@ -109,7 +108,7 @@ func (c *contractCoreExclusionCache) owned(ctx context.Context, reader graph.Rea
 	if !read {
 		return ids, false, nil
 	}
-	readSet := (*store_sqlite.Store).NodeIDsByKindsBoundedContext
+	readSet := exclusionSource.NodeIDsByKindsBoundedContext
 	if c.read != nil {
 		readSet = c.read
 	}
@@ -124,7 +123,7 @@ func (c *contractCoreExclusionCache) owned(ctx context.Context, reader graph.Rea
 			set[id] = struct{}{}
 		}
 	}
-	if after, ok := readerSearchMutationRevision(store); ok && after == revision {
+	if after, ok := readerSearchMutationRevision(reader); ok && after == revision {
 		c.settle(key, revision, set, false)
 	} else {
 		c.settle(key, revision, nil, false)

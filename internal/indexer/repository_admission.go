@@ -4,16 +4,16 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // DedicatedBaseCleanupRuntime is the shared publisher owner, not a temporary
 // per-build facade. Install it before Seed/Register can expose any owner.
 type DedicatedBaseCleanupRuntime interface {
-	RegisterDedicatedBaseOwner(string, store_sqlite.DedicatedBaseOwner) error
-	CloseDedicatedBaseOwner(string, store_sqlite.DedicatedBaseOwner) (<-chan struct{}, error)
-	FinalizeDedicatedBaseOwner(string, store_sqlite.DedicatedBaseOwner, <-chan struct{}) error
+	RegisterDedicatedBaseOwner(string, storage.DedicatedBaseOwner) error
+	CloseDedicatedBaseOwner(string, storage.DedicatedBaseOwner) (<-chan struct{}, error)
+	FinalizeDedicatedBaseOwner(string, storage.DedicatedBaseOwner, <-chan struct{}) error
 	CloseDedicatedBaseAdmission() <-chan struct{}
 }
 
@@ -52,7 +52,7 @@ func (l *CheckoutLifecycle) DedicatedBasePublisherRuntime() DedicatedBaseCleanup
 
 var repositoryAlreadyDrained = func() <-chan struct{} { done := make(chan struct{}); close(done); return done }()
 
-func (l *CheckoutLifecycle) closeRepositoryPublisher(identity store_sqlite.RepositoryCleanupIdentity, expected *graphview.RepositoryDrain) (<-chan struct{}, error) {
+func (l *CheckoutLifecycle) closeRepositoryPublisher(identity storage.RepositoryCleanupIdentity, expected *graphview.RepositoryDrain) (<-chan struct{}, error) {
 	l.repositoryAdmissionMu.Lock()
 	defer l.repositoryAdmissionMu.Unlock()
 	if expected == nil || l.repositoryClosing[identity.GraphID] != expected || l.repositoryOwners[identity.GraphID] != repositoryCleanupOwner(identity) {
@@ -65,7 +65,7 @@ func (l *CheckoutLifecycle) closeRepositoryPublisher(identity store_sqlite.Repos
 	// Registration/finalization use this same lock. The bounded runtime hook
 	// must run inside it so a stale callback cannot close a replacement slot
 	// after the handle check but before the tuple-only runtime close call.
-	return runtime.CloseDedicatedBaseOwner(identity.GraphID, store_sqlite.DedicatedBaseOwner{CheckoutID: identity.CheckoutID, Incarnation: identity.Incarnation})
+	return runtime.CloseDedicatedBaseOwner(identity.GraphID, storage.DedicatedBaseOwner{CheckoutID: identity.CheckoutID, Incarnation: identity.Incarnation})
 }
 
 func (l *CheckoutLifecycle) stopRepositoryPublishers() <-chan struct{} {
@@ -98,10 +98,10 @@ func (l *CheckoutLifecycle) RegisterRepositoryOwner(ctx context.Context, graphID
 	if !found {
 		return fmt.Errorf("%w: graph %s", graphview.ErrRepositoryOwnerUnknown, graphID)
 	}
-	if graph.State == store_sqlite.DedicatedGraphClosing {
+	if graph.State == storage.DedicatedGraphClosing {
 		return fmt.Errorf("%w: graph %s", graphview.ErrRepositoryAdmissionClosed, graphID)
 	}
-	if graph.State != store_sqlite.DedicatedGraphReady {
+	if graph.State != storage.DedicatedGraphReady {
 		return fmt.Errorf("%w: graph %s is not ready", graphview.ErrRepositoryOwnerUnknown, graphID)
 	}
 	checkout, found, err := l.catalog.GetCheckout(ctx, graph.OwnerCheckoutID)
@@ -125,7 +125,7 @@ func (l *CheckoutLifecycle) RegisterRepositoryOwner(ctx context.Context, graphID
 		if l.dedicatedBaseCleanupRuntime == nil {
 			return nil
 		}
-		return l.dedicatedBaseCleanupRuntime.RegisterDedicatedBaseOwner(graphID, store_sqlite.DedicatedBaseOwner{CheckoutID: owner.CheckoutID, Incarnation: owner.Incarnation})
+		return l.dedicatedBaseCleanupRuntime.RegisterDedicatedBaseOwner(graphID, storage.DedicatedBaseOwner{CheckoutID: owner.CheckoutID, Incarnation: owner.Incarnation})
 	}); err != nil {
 		return err
 	}
@@ -173,18 +173,18 @@ func (l *CheckoutLifecycle) AcquireAllRepositoryReads() (*graphview.RepositoryRe
 	return l.leases.AcquireAllRepositoryReads()
 }
 
-func repositoryCleanupOwner(identity store_sqlite.RepositoryCleanupIdentity) graphview.RepositoryOwner {
+func repositoryCleanupOwner(identity storage.RepositoryCleanupIdentity) graphview.RepositoryOwner {
 	return graphview.RepositoryOwner{GraphID: identity.GraphID, CheckoutID: identity.CheckoutID, Incarnation: identity.Incarnation, RepoPrefix: identity.RepoPrefix}
 }
 
 // closeRepositoryAdmission serializes catalog fencing and process admission
 // with registration. The durable closing write comes first: any read admitted
 // in the narrow interval must still be pinned before payload can be purged.
-func (l *CheckoutLifecycle) closeRepositoryAdmission(ctx context.Context, graphID string) (store_sqlite.RepositoryCleanupIdentity, *graphview.RepositoryDrain, bool, error) {
+func (l *CheckoutLifecycle) closeRepositoryAdmission(ctx context.Context, graphID string) (storage.RepositoryCleanupIdentity, *graphview.RepositoryDrain, bool, error) {
 	l.repositoryAdmissionMu.Lock()
 	defer l.repositoryAdmissionMu.Unlock()
 	if l.repositoryAdmissionsClosed {
-		return store_sqlite.RepositoryCleanupIdentity{}, nil, false, graphview.ErrRepositoryAdmissionsStopped
+		return storage.RepositoryCleanupIdentity{}, nil, false, graphview.ErrRepositoryAdmissionsStopped
 	}
 	identity, found, err := l.catalog.BeginRepositoryCleanup(ctx, graphID)
 	if err != nil || !found {
@@ -194,7 +194,7 @@ func (l *CheckoutLifecycle) closeRepositoryAdmission(ctx context.Context, graphI
 	return identity, drain, true, err
 }
 
-func (l *CheckoutLifecycle) restoreRepositoryAdmissionLocked(identity store_sqlite.RepositoryCleanupIdentity) (*graphview.RepositoryDrain, error) {
+func (l *CheckoutLifecycle) restoreRepositoryAdmissionLocked(identity storage.RepositoryCleanupIdentity) (*graphview.RepositoryDrain, error) {
 	owner := repositoryCleanupOwner(identity)
 	if previous, exists := l.repositoryOwners[owner.GraphID]; exists {
 		if previous != owner {

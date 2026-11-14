@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 )
 
@@ -368,10 +367,11 @@ func markWorktreeRouteMoved(view *requestView) {
 // pinned generation handles. Every handle is a store over the same database
 // and Catalog() rebases it (store_sqlite/catalog.go:35), so this needs no
 // second store and cannot outlive the view's lease.
-func viewRouteCatalog(view *requestView) *store_sqlite.Catalog {
+func viewRouteCatalog(view *requestView) checkoutRouteReader {
 	for _, source := range view.materialized.GenerationSources() {
-		if source.Handle != nil {
-			return source.Handle.Catalog()
+		if source.Handle != nil && !source.Handle.IsNilGenerationHandle() {
+			catalog, _ := source.Handle.(checkoutRouteReader)
+			return catalog
 		}
 	}
 	return nil

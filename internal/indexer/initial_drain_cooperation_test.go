@@ -148,15 +148,16 @@ func TestInitialClaimedDrainCancellationDoesNotPublish(t *testing.T) {
 	if slices != 2 || !errors.Is(err, context.Canceled) {
 		t.Fatalf("initial drain did not stop: slices=%d err=%v", slices, err)
 	}
-	_, present, stateErr := builder.Store.AtGeneration(claim.GenerationID).GetRepoIndexState(request.RepoPrefix)
+	nativeStore := builder.Store.(*store_sqlite.Store)
+	_, present, stateErr := nativeStore.AtGeneration(claim.GenerationID).GetRepoIndexState(request.RepoPrefix)
 	if stateErr != nil || present {
 		t.Fatalf("canceled final slice recorded successful index provenance: present=%t err=%v", present, stateErr)
 	}
-	row, found, err := builder.Store.Catalog().GetViewGeneration(t.Context(), claim.GenerationID)
+	row, found, err := nativeStore.Catalog().GetViewGeneration(t.Context(), claim.GenerationID)
 	if err != nil || !found || row.State != store_sqlite.ViewGenerationBuilding {
 		t.Fatalf("canceled initial reservation was published or lost: row=%+v found=%t err=%v", row, found, err)
 	}
-	if _, err := builder.Store.Catalog().AdoptDedicatedBaseGeneration(t.Context(),
+	if _, err := nativeStore.Catalog().AdoptDedicatedBaseGeneration(t.Context(),
 		store_sqlite.AdoptDedicatedBaseGenerationRequest{Claim: claim}); err == nil {
 		t.Fatal("canceled initial generation was adoptable")
 	}

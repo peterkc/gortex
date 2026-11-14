@@ -42,7 +42,7 @@ func TestBuildCommitLayerNeverFetchesPromisedRenameBlobs(t *testing.T) {
 	defer store.Close()
 	registry := parser.NewRegistry()
 	languages.RegisterAll(registry)
-	builder := &SparseGenerationBuilder{
+	builder := &SparseGenerationBuilder{Catalog: testCatalog(store),
 		Store:    store,
 		Registry: registry,
 		Config:   config.Default().Index,

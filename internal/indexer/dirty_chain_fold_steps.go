@@ -61,9 +61,6 @@ type chainFoldSteps interface {
 	// Release drops the fold's lease and owner references (after the publish,
 	// or to give up and resume later).
 	Release(ctx context.Context) error
-	// Abandon marks the target failed and drops the cursor; the sweep deletes
-	// what the steps wrote.
-	Abandon(ctx context.Context) error
 }
 
 // chainFoldBackend is what the coordinator needs from the store.

@@ -14,11 +14,11 @@ func TestContractBatchProjectionWitnessRefusesLateBindingAcrossCohort(t *testing
 			ctx := t.Context()
 			targets := []ContractAttachmentPublishTarget{attachmentBatchTarget(t, s, "one"), attachmentBatchTarget(t, s, "two")}
 			site := graph.SemanticBindingSite{RepoPrefix: "two", FilePath: "two/handler.go", Line: 7, Name: "value"}
-			h := targets[1].Store
+			h := targets[1].Store.(*Store)
 			require.NoError(t, h.ReplaceSemanticBindingTypes("two", []graph.SemanticBindingType{{Site: site, TypeName: "Before"}}))
 			for i := range targets {
 				var err error
-				targets[i].ProjectionWitness, err = s.CapturePayloadInputWitness(ctx, []int64{targets[i].Store.viewGen})
+				targets[i].ProjectionWitness, err = s.CapturePayloadInputWitness(ctx, []int64{targets[i].Store.(*Store).viewGen})
 				require.NoError(t, err)
 			}
 			rows := []graph.SemanticBindingType{{Site: site, TypeName: "After"}}
@@ -51,20 +51,20 @@ func TestContractBatchProjectionWitnessExactSelectionAndUnselectedWrites(t *test
 			s := openCatalogStore(t)
 			ctx := t.Context()
 			target := attachmentBatchTarget(t, s, "one")
-			sibling := attachmentBatchTarget(t, s, "unrelated").Store.viewGen
+			sibling := attachmentBatchTarget(t, s, "unrelated").Store.(*Store).viewGen
 			var err error
 			switch mode {
 			case "extra_generation":
-				target.ProjectionWitness, err = s.CapturePayloadInputWitness(ctx, []int64{target.Store.viewGen, sibling})
+				target.ProjectionWitness, err = s.CapturePayloadInputWitness(ctx, []int64{target.Store.(*Store).viewGen, sibling})
 			case "sibling":
 				target.ProjectionWitness, err = s.CapturePayloadInputWitness(ctx, []int64{sibling})
 			case "foreign":
 				other := openCatalogStore(t)
 				foreign := attachmentBatchTarget(t, other, "one")
-				require.Equal(t, target.Store.viewGen, foreign.Store.viewGen)
-				target.ProjectionWitness, err = other.CapturePayloadInputWitness(ctx, []int64{foreign.Store.viewGen})
+				require.Equal(t, target.Store.(*Store).viewGen, foreign.Store.(*Store).viewGen)
+				target.ProjectionWitness, err = other.CapturePayloadInputWitness(ctx, []int64{foreign.Store.(*Store).viewGen})
 			default:
-				target.ProjectionWitness, err = s.CapturePayloadInputWitness(ctx, []int64{target.Store.viewGen})
+				target.ProjectionWitness, err = s.CapturePayloadInputWitness(ctx, []int64{target.Store.(*Store).viewGen})
 			}
 			require.NoError(t, err)
 			if mode == "unselected" {

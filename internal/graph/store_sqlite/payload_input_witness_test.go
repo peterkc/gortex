@@ -97,7 +97,7 @@ func TestPayloadInputWitnessDoesNotHoldBuildGate(t *testing.T) {
 		t.Fatal("capture retained write gate during simulated slow build")
 	}
 	s.writeMu.Lock()
-	err = w.validateLocked(s, t.Context())
+	err = validatePayloadInputWitnessLocked(w, s, t.Context())
 	s.writeMu.Unlock()
 	require.True(t, errors.Is(err, ErrPayloadInputChanged))
 }

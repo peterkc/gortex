@@ -5,14 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // RebaseViewGenerationRequest moves one generation from one base to another.
-type RebaseViewGenerationRequest struct {
-	GenerationID int64
-	FromBase     int64
-	ToBase       int64
-}
+type RebaseViewGenerationRequest = storage.RebaseViewGenerationRequest
 
 // RebaseViewGeneration re-parents a layer onto a content-equal base: the fold
 // of the chain it was written over. One guarded transaction:

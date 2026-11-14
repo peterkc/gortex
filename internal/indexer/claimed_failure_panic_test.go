@@ -38,7 +38,8 @@ func TestClaimedPanickedPhysicalLeaderMarksAttemptFailed(t *testing.T) {
 	if recovered != marker || generationID <= 0 {
 		t.Fatalf("physical panic was changed or not reached: recovered=%#v generation=%d", recovered, generationID)
 	}
-	catalog := f.builder.Store.Catalog()
+	nativeStore := f.builder.Store.(*store_sqlite.Store)
+	catalog := nativeStore.Catalog()
 	row, found, err := catalog.GetViewGeneration(ctx, generationID)
 	if err != nil || !found || row.State != store_sqlite.ViewGenerationFailed {
 		t.Fatalf("panicked payload did not finish abandonment: %+v found=%v err=%v", row, found, err)
@@ -51,7 +52,7 @@ func TestClaimedPanickedPhysicalLeaderMarksAttemptFailed(t *testing.T) {
 	if err != nil || !found || binding.ActiveGenerationID != 0 {
 		t.Fatalf("panicked initial build moved active pointer: %+v found=%v err=%v", binding, found, err)
 	}
-	if f.builder.Store.PayloadBuildFlightActive(generationID) {
+	if nativeStore.PayloadBuildFlightActive(generationID) {
 		t.Fatal("panic left its physical flight active")
 	}
 	retry := f.ensure(t, ctx)

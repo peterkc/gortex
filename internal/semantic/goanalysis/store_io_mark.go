@@ -2,18 +2,18 @@ package goanalysis
 
 import (
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // storeIOMarker is the store's cumulative wait and VFS counters
-// (store_sqlite.ReaderWaitMark); the apply's log line reports the difference
+// (storage.ReaderWaitMark); the apply's log line reports the difference
 // across the apply, so its store reads and writes stand beside its wall
 // time, CPU and faults.
 type storeIOMarker interface {
-	ReaderWaitMark() store_sqlite.ReaderWaitMark
+	ReaderWaitMark() storage.ReaderWaitMark
 }
 
-func storeIOMarkOf(g graph.Store) *store_sqlite.ReaderWaitMark {
+func storeIOMarkOf(g graph.Store) *storage.ReaderWaitMark {
 	m, ok := g.(storeIOMarker)
 	if !ok {
 		return nil
@@ -24,7 +24,7 @@ func storeIOMarkOf(g graph.Store) *store_sqlite.ReaderWaitMark {
 
 // storeIOSince renders the store's reads and writes since start, in ms and
 // counts; nil when the store keeps no counters.
-func storeIOSince(g graph.Store, start *store_sqlite.ReaderWaitMark) map[string]float64 {
+func storeIOSince(g graph.Store, start *storage.ReaderWaitMark) map[string]float64 {
 	if start == nil {
 		return nil
 	}

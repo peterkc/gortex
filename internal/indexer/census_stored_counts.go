@@ -7,8 +7,17 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
+
+// SetCensusCatalog installs the catalog paired with the native graph. Call during setup.
+func (idx *Indexer) SetCensusCatalog(catalog viewGenerationCatalog) {
+	idx.censusCatalog = catalog
+}
+
+// SetCensusCatalog supplies the same catalog to each per-repository Indexer. Call during setup.
+func (mi *MultiIndexer) SetCensusCatalog(catalog viewGenerationCatalog) {
+	mi.censusCatalog = catalog
+}
 
 // The startup census's counts, reused.
 //
@@ -63,7 +72,7 @@ func (idx *Indexer) storedCensusCounts(ctx context.Context) (state graph.RepoInd
 	if !ok {
 		return state, 0, false, false
 	}
-	if st, isStore := idx.graph.(*store_sqlite.Store); isStore {
+	if st, isStore := idx.graph.(generationIdentity); isStore && st.SharesSymbolSearchCore(idx.graph) {
 		generation = st.ViewGeneration()
 	}
 	state, found, err := reader.GetRepoIndexState(idx.repoPrefix)
@@ -73,17 +82,20 @@ func (idx *Indexer) storedCensusCounts(ctx context.Context) (state graph.RepoInd
 	if found && (state.NodeCount > 0 || state.EdgeCount > 0) {
 		return state, generation, true, true
 	}
-	st, isStore := idx.graph.(*store_sqlite.Store)
-	if found || !isStore || generation <= 0 {
+	st, isStore := idx.graph.(generationStoreSource)
+	if found || !isStore || generation <= 0 || idx.censusCatalog == nil {
 		return state, generation, found, false
 	}
 	// An output generation with no state of its own: a clean copy of its
 	// parent carries the parent's rows, so the parent's counts describe it.
-	row, rowFound, err := st.Catalog().GetViewGeneration(ctx, generation)
+	row, rowFound, err := idx.censusCatalog.GetViewGeneration(ctx, generation)
 	if err != nil || !rowFound {
 		return state, generation, false, false
 	}
-	parent := st.AtGeneration(row.BaseGenerationID)
+	parent, ok := st.AtGenerationStore(row.BaseGenerationID).(graph.RepoIndexStateReader)
+	if !ok {
+		return state, generation, false, false
+	}
 	parentState, parentFound, err := parent.GetRepoIndexState(idx.repoPrefix)
 	if err != nil || !parentFound || (parentState.NodeCount == 0 && parentState.EdgeCount == 0) {
 		return state, generation, false, false

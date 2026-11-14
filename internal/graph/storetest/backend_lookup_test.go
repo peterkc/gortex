@@ -1,10 +1,10 @@
-// Package backendtest holds the contract suite's backend adapters: one
-// storetest.Backend per name in storetest.Backends. Only tests import it. It
-// sits outside storetest because a backend package's own tests import
+// These external tests hold the contract suite's backend adapters: one
+// storetest.Backend per name in storetest.Backends. The adapters sit
+// outside storetest because a backend package's own tests import
 // storetest, so storetest cannot import a backend; this package can, and one
 // test binary can therefore open every listed backend, as K13's backend pairs
 // need.
-package backendtest
+package storetest_test
 
 import "github.com/zzet/gortex/internal/graph/storetest"
 

@@ -9,7 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/gitstate"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // healRacyIndex runs once when a coordinator starts — on registration, on
@@ -132,7 +132,7 @@ func (l *CheckoutLifecycle) healFamilyRacyIndexes(ctx context.Context, familyID 
 		if ctx.Err() != nil {
 			return
 		}
-		if checkout.RootPath == "" || checkout.State != store_sqlite.CheckoutStateReady {
+		if checkout.RootPath == "" || checkout.State != storage.CheckoutStateReady {
 			continue
 		}
 		sampler, err := gitstate.NewDirtySampler(checkout.RootPath, "", "")

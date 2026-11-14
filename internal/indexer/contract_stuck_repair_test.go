@@ -47,7 +47,7 @@ func newContractRepairFixture(t *testing.T, adjust func(*contractRepairFixture, 
 	var repair atomic.Pointer[ContractStuckRepair]
 	capture := job.options
 	capture.SuspectStuck = func(repo string, paths []string) { repair.Load().Suspect(repo, paths) }
-	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: job.store, Leases: job.options.Materializer.Leases, Registry: job.options.Registry, Config: job.options.Config, Logger: logger,
+	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(job.store), OpenEvidence: openTestEvidenceStore, Store: job.store, Leases: job.options.Materializer.Leases, Registry: job.options.Registry, Config: job.options.Config, Logger: logger,
 		Capture: NewContractFollowupSourceCapture(capture), Inputs: NewContractPrimaryInputCapture(job.options.Materializer), Yield: job.options.Yield})
 	require.NoError(t, err)
 	f.c = c
@@ -58,7 +58,7 @@ func newContractRepairFixture(t *testing.T, adjust func(*contractRepairFixture, 
 		c.Published(ctx, repo, checkout)
 	}})
 	// The test seams are set before the repair starts.
-	r, err := newContractStuckRepair(ContractStuckRepairOptions{Store: job.store, MultiIndexer: job.mi, Baseline: job.options, Coordinator: c, Logger: logger, Period: contractRepairTestPeriod}, func(r *ContractStuckRepair) {
+	r, err := newContractStuckRepair(ContractStuckRepairOptions{Catalog: testCatalog(job.store), Store: job.store, MultiIndexer: job.mi, Baseline: job.options, Coordinator: c, Logger: logger, Period: contractRepairTestPeriod}, func(r *ContractStuckRepair) {
 		if adjust != nil {
 			adjust(f, r)
 		}
@@ -773,7 +773,7 @@ func TestContractStuckRepairRetainsRestartLeftRetries(t *testing.T) {
 	job.store.ForgetContractReceiptWritesForTest("fixture", "", []string{row.FilePath})
 	var attempts atomic.Int64
 	envelopes := repairCount("stuck_envelope")
-	r, err := newContractStuckRepair(ContractStuckRepairOptions{Store: job.store, MultiIndexer: job.mi, Baseline: job.options, Period: contractRepairTestPeriod}, func(r *ContractStuckRepair) {
+	r, err := newContractStuckRepair(ContractStuckRepairOptions{Catalog: testCatalog(job.store), Store: job.store, MultiIndexer: job.mi, Baseline: job.options, Period: contractRepairTestPeriod}, func(r *ContractStuckRepair) {
 		r.reindex = func(context.Context, string, []string) error {
 			attempts.Add(1)
 			return errors.New("injected failure before staging")
@@ -807,7 +807,7 @@ func TestContractStuckRepairRestartLeftRow(t *testing.T) {
 	require.Zero(t, state.Seq, "no write of this process")
 	require.False(t, state.Writing)
 	repaired := repairCount("stuck_receipt")
-	r, err := NewContractStuckRepair(ContractStuckRepairOptions{Store: job.store, MultiIndexer: job.mi, Baseline: job.options, Period: contractRepairTestPeriod})
+	r, err := NewContractStuckRepair(ContractStuckRepairOptions{Catalog: testCatalog(job.store), Store: job.store, MultiIndexer: job.mi, Baseline: job.options, Period: contractRepairTestPeriod})
 	require.NoError(t, err)
 	t.Cleanup(r.Close)
 	// The repair is counted as it starts; its reindex accepts the receipt.
@@ -903,7 +903,7 @@ func TestContractPendingHeaderRepairWithoutAnActor(t *testing.T) {
 	require.True(t, found)
 	require.False(t, state.Accepted)
 	headers := repairCount("pending_header")
-	r, err := NewContractStuckRepair(ContractStuckRepairOptions{Store: job.store, MultiIndexer: job.mi, Baseline: job.options, Period: contractRepairTestPeriod})
+	r, err := NewContractStuckRepair(ContractStuckRepairOptions{Catalog: testCatalog(job.store), Store: job.store, MultiIndexer: job.mi, Baseline: job.options, Period: contractRepairTestPeriod})
 	require.NoError(t, err)
 	t.Cleanup(r.Close)
 	require.Eventually(t, func() bool {
@@ -936,7 +936,7 @@ func TestContractHeaderRepairRetriesFailedBaselinesWithoutAnActor(t *testing.T) 
 				require.False(t, job.mi.contractBaselineActive("fixture"))
 			}
 			headers := repairCount("pending_header")
-			r, err := NewContractStuckRepair(ContractStuckRepairOptions{Store: job.store, MultiIndexer: job.mi, Baseline: options, Period: contractRepairTestPeriod})
+			r, err := NewContractStuckRepair(ContractStuckRepairOptions{Catalog: testCatalog(job.store), Store: job.store, MultiIndexer: job.mi, Baseline: options, Period: contractRepairTestPeriod})
 			require.NoError(t, err)
 			t.Cleanup(r.Close)
 			require.Eventually(t, func() bool {
@@ -984,7 +984,7 @@ func TestContractHeaderRepairWaitsForALiveBaseline(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	state := &contractRepoRepair{repo: "fixture", pendingKey: current.InputVersion + "\x00" + current.InputFingerprint, pendingSince: time.Now().Add(-2 * contractRepairTestPeriod)}
-	r := &ContractStuckRepair{options: ContractStuckRepairOptions{Store: job.store, MultiIndexer: job.mi, Baseline: job.options, Logger: zap.NewNop()}, period: contractRepairTestPeriod}
+	r := &ContractStuckRepair{options: ContractStuckRepairOptions{Catalog: testCatalog(job.store), Store: job.store, MultiIndexer: job.mi, Baseline: job.options, Logger: zap.NewNop()}, period: contractRepairTestPeriod}
 	headers := repairCount("pending_header")
 	require.NoError(t, job.mi.withRepositoryMutationLanes(t.Context(), []string{"fixture"}, func() error {
 		r.repairHeader(withHeldRepositoryLanes(t.Context(), []string{"fixture"}), state)
@@ -1275,7 +1275,7 @@ func TestContractRepairOrphanCandidateStartsAtItsGraceBoundary(t *testing.T) {
 	require.Len(t, windows, 1)
 	mark := windows[0].MarkedAt
 	require.False(t, mark.IsZero())
-	r := &ContractStuckRepair{options: ContractStuckRepairOptions{Store: f.store}, period: time.Hour}
+	r := &ContractStuckRepair{options: ContractStuckRepairOptions{Catalog: testCatalog(f.store), Store: f.store}, period: time.Hour}
 	boundary := mark.Add(contractRepairOrphanGrace)
 	require.Less(t, boundary.Sub(windows[0].OpenedAt), r.period, "ordinary age eligibility must not mask orphan grace")
 	require.Empty(t, r.stuckWindows("fixture", boundary.Add(-time.Nanosecond)))

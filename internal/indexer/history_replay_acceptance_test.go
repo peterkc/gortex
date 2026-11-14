@@ -168,7 +168,7 @@ func TestAcceptanceHistoryReplayRealRepository(t *testing.T) {
 // defaults, so the coordinator builds what the base index was built with.
 func replayRealCoordinator(t *testing.T, f *coordinatorFixture, full *config.Config, logger *zap.Logger) *CheckoutCoordinator {
 	t.Helper()
-	coordinator, err := NewCheckoutCoordinator(CheckoutCoordinatorConfig{
+	coordinator, err := NewCheckoutCoordinator(CheckoutCoordinatorConfig{Catalog: testCatalog(f.store),
 		CheckoutID:   f.checkoutID,
 		CheckoutRoot: f.worktree,
 		FamilyID:     f.familyID,
@@ -176,7 +176,7 @@ func replayRealCoordinator(t *testing.T, f *coordinatorFixture, full *config.Con
 		WorkspaceID:  builderRepoPrefix,
 		ProjectID:    builderRepoPrefix,
 		Store:        f.store,
-		Builder: &SparseGenerationBuilder{
+		Builder: &SparseGenerationBuilder{Catalog: testCatalog(f.store),
 			Store: f.store, Registry: builderRegistry(), Config: full.Index, Logger: logger,
 		},
 		Leases:         f.leases,

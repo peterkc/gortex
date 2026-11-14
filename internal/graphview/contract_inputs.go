@@ -5,7 +5,6 @@ import (
 	"reflect"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 // SelectedContractInputs captures contract-specific input authority from the
@@ -19,7 +18,7 @@ type SelectedContractInputs struct {
 	dependencies   []*SelectedContractInputs
 	selection      *SelectedContractInputs
 	companion      bool
-	store          *store_sqlite.Store
+	store          graph.Store
 	core           graph.Reader
 	repo, checkout string
 }
@@ -29,7 +28,7 @@ type SelectedContractInputs struct {
 // companion-repo input changes cannot be hidden by an unchanged local receipt.
 func ComposeSelectedContractInputs(repo, checkout string, dependencies ...*SelectedContractInputs) (*SelectedContractInputs, error) {
 	var witnesses []graph.ContractInputWitness
-	var store *store_sqlite.Store
+	var store graph.Store
 	for _, input := range dependencies {
 		if input == nil {
 			return nil, graph.ErrContractInputVector
@@ -50,7 +49,7 @@ func ComposeSelectedContractInputs(repo, checkout string, dependencies ...*Selec
 }
 
 type contractInputSource struct {
-	handle *store_sqlite.Store
+	handle contractInputHandle
 	actor  string
 }
 
@@ -68,18 +67,27 @@ func (m *Materializer) CaptureContractInputs(ctx context.Context, view *RepoView
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if m == nil || m.Store == nil {
+	if m == nil || m.Store == nil || m.Store.IsNilGenerationHandle() {
 		return nil, NewViewError(CodeRequiredCapabilityIncomplete, "selected contract input authority is unavailable")
+	}
+	baseStore := m.Store.AtGenerationStore(BaseCorpusGeneration)
+	var base contractInputHandle
+	if view == nil || view.ComposesBaseCorpus() {
+		var ok bool
+		base, ok = baseStore.(contractInputHandle)
+		if !ok {
+			return nil, graph.ErrContractInputVector
+		}
 	}
 	var sources []contractInputSource
 	if view == nil {
-		sources = append(sources, contractInputSource{handle: m.Store.AtGeneration(BaseCorpusGeneration)})
+		sources = append(sources, contractInputSource{handle: base})
 	} else {
 		if view.contractStore != m.Store || view.ID.RepoPrefix != repo {
 			return nil, NewViewError(CodeRequiredCapabilityIncomplete, "contract inputs belong to a different selected store")
 		}
 		if view.ComposesBaseCorpus() {
-			sources = append(sources, contractInputSource{handle: m.Store.AtGeneration(BaseCorpusGeneration)})
+			sources = append(sources, contractInputSource{handle: base})
 		}
 		for _, source := range view.sources {
 			sources = append(sources, contractInputSource{handle: source.Handle, actor: source.CheckoutID})
@@ -99,7 +107,7 @@ func (m *Materializer) CaptureContractInputs(ctx context.Context, view *RepoView
 	if err != nil {
 		return nil, err
 	}
-	var core graph.Reader = m.Store.AtGeneration(BaseCorpusGeneration)
+	var core graph.Reader = baseStore
 	if view != nil {
 		core = view.Reader
 	}
@@ -119,7 +127,12 @@ func (m *Materializer) CaptureContractCompanionInputs(ctx context.Context, view 
 	if err != nil {
 		return nil, err
 	}
-	sources := []contractInputSource{{handle: m.Store.AtGeneration(BaseCorpusGeneration)}}
+	baseStore := m.Store.AtGenerationStore(BaseCorpusGeneration)
+	base, ok := baseStore.(contractInputHandle)
+	if !ok {
+		return nil, graph.ErrContractInputVector
+	}
+	sources := []contractInputSource{{handle: base}}
 	for _, source := range view.sources {
 		sources = append(sources, contractInputSource{handle: source.Handle, actor: source.CheckoutID})
 	}
@@ -134,7 +147,7 @@ func (m *Materializer) CaptureContractCompanionInputs(ctx context.Context, view 
 	if err != nil {
 		return nil, err
 	}
-	return &SelectedContractInputs{State: state, Witnesses: witnesses, sources: sources, selection: selection, companion: true, store: m.Store, core: m.Store.AtGeneration(BaseCorpusGeneration), repo: repo, checkout: checkout}, nil
+	return &SelectedContractInputs{State: state, Witnesses: witnesses, sources: sources, selection: selection, companion: true, store: m.Store, core: baseStore, repo: repo, checkout: checkout}, nil
 }
 
 // SourceReaders returns the captured core reader for each admitted repository.

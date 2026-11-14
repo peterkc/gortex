@@ -34,7 +34,7 @@ func TestCheckoutLifecycleSeedRestoresReadyOwnersAndCoordinators(t *testing.T) {
 	var automaticID string
 	var owners []store_sqlite.DedicatedGraph
 	for _, phase := range []string{"initial", "restart"} {
-		runtime := &dedicatedBaseRuntime{store: f.store}
+		runtime := &dedicatedBaseRuntime{catalog: testCatalog(f.store), store: f.store}
 		require.NoError(t, f.lc.SetDedicatedBaseCleanupRuntime(runtime))
 		gate := NewViewBuildGate()
 		f.lc.SetBuildGate(gate)

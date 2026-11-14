@@ -12,8 +12,8 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Enrichment after publication.
@@ -125,7 +125,7 @@ type derivedDebtLayer struct {
 	// removes (nothing is owed for a file that is gone).
 	covered []string
 	deleted []string
-	rows    map[string]store_sqlite.ProducerCompleteness
+	rows    map[string]storage.ProducerCompleteness
 }
 
 // derivedDebt is the debt of a routed chain, per producer, bottom-up:
@@ -152,11 +152,11 @@ func derivedDebt(layers []derivedDebtLayer) map[graphview.CapabilityID]DerivedDe
 				continue
 			}
 			switch {
-			case row.State == store_sqlite.ProducerStateComplete:
+			case row.State == storage.ProducerStateComplete:
 				for _, p := range g.covered {
 					delete(owed, p)
 				}
-			case row.State == store_sqlite.ProducerStateIncomplete && row.Reason == graphview.ReasonDeferredToFollowup:
+			case row.State == storage.ProducerStateIncomplete && row.Reason == graphview.ReasonDeferredToFollowup:
 				for _, p := range g.covered {
 					if _, already := owed[p]; !already {
 						owed[p] = g.createdAt
@@ -186,7 +186,7 @@ func (c *CheckoutCoordinator) derivedDebtLayers(ctx context.Context, top int64) 
 	slices.Reverse(chain)
 	out := make([]derivedDebtLayer, 0, len(chain))
 	for _, id := range chain {
-		handle := c.store.AtGeneration(id)
+		handle := generationAt(c.store, id)
 		rows, err := handle.ProducerStates()
 		if err != nil {
 			return nil, err
@@ -195,12 +195,12 @@ func (c *CheckoutCoordinator) derivedDebtLayers(ctx context.Context, top int64) 
 		if err != nil {
 			return nil, err
 		}
-		layer := derivedDebtLayer{generation: id, rows: map[string]store_sqlite.ProducerCompleteness{}}
+		layer := derivedDebtLayer{generation: id, rows: map[string]storage.ProducerCompleteness{}}
 		for _, r := range rows {
 			layer.rows[r.Producer] = r
 		}
 		for _, m := range masks {
-			if m.Mode == store_sqlite.OwnershipDelete {
+			if m.Mode == storage.OwnershipDelete {
 				layer.deleted = append(layer.deleted, m.FilePath)
 				continue
 			}
@@ -224,7 +224,7 @@ func (c *CheckoutCoordinator) PendingDerived(ctx context.Context) (map[graphview
 		return nil, 0, nil
 	}
 	route, found, err := c.catalog.GetCheckoutRoute(ctx, c.checkoutID)
-	if err != nil || !found || route.State != store_sqlite.RouteActive || route.DirtyGenerationID <= 0 {
+	if err != nil || !found || route.State != storage.RouteActive || route.DirtyGenerationID <= 0 {
 		return nil, 0, err
 	}
 	layers, err := c.derivedDebtLayers(ctx, route.DirtyGenerationID)
@@ -489,7 +489,7 @@ func (c *CheckoutCoordinator) runEnrichmentFollowupBuild(ctx context.Context, st
 	})()
 
 	route, found, err := c.catalog.GetCheckoutRoute(ctx, c.checkoutID)
-	if err != nil || !found || route.State != store_sqlite.RouteActive || route.DirtyGenerationID <= 0 {
+	if err != nil || !found || route.State != storage.RouteActive || route.DirtyGenerationID <= 0 {
 		return c.noteFollowup(followupNotNeeded, 0, 0, started, err)
 	}
 	top := route.DirtyGenerationID
@@ -600,10 +600,10 @@ func (c *CheckoutCoordinator) installEnrichmentFollowup(ctx context.Context, top
 	}
 	defer c.cycleMu.Unlock()
 	route, found, err := c.catalog.GetCheckoutRoute(ctx, c.checkoutID)
-	if err != nil || !found || route.State != store_sqlite.RouteActive || route.DirtyGenerationID != top {
+	if err != nil || !found || route.State != storage.RouteActive || route.DirtyGenerationID != top {
 		return false
 	}
-	if err := c.flip(ctx, &route, store_sqlite.RouteSlotDirty, built.GenerationID); err != nil {
+	if err := c.flip(ctx, &route, storage.RouteSlotDirty, built.GenerationID); err != nil {
 		return false
 	}
 	c.retainDirty(ctx, built.Key, built.GenerationID)
@@ -613,7 +613,7 @@ func (c *CheckoutCoordinator) installEnrichmentFollowup(ctx context.Context, top
 // buildEnrichmentFollowup builds the follow-up over parent (the routed top):
 // the working tree's state again, with paths forced into the change set,
 // enrichment on and their clone rows recomputed.
-func (c *CheckoutCoordinator) buildEnrichmentFollowup(ctx context.Context, route store_sqlite.CheckoutRoute, parent dirtyParentSelection, paths []string) (dirtyLayerBuild, error) {
+func (c *CheckoutCoordinator) buildEnrichmentFollowup(ctx context.Context, route storage.CheckoutRoute, parent dirtyParentSelection, paths []string) (dirtyLayerBuild, error) {
 	commit, found, err := c.catalog.GetViewGeneration(ctx, route.CommitGenerationID)
 	if err != nil || !found {
 		return dirtyLayerBuild{}, err

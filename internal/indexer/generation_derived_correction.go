@@ -12,11 +12,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zzet/gortex/internal/storage"
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -92,7 +92,7 @@ type derivationEnv struct {
 // the generation from a materializer of the lifecycle's own and a parser from
 // the repository's indexer and configuration. reason names why a generation
 // cannot be corrected here when ok is false.
-func (l *CheckoutLifecycle) derivationEnvFor(ctx context.Context, row store_sqlite.ViewGeneration) (env derivationEnv, reason string, ok bool) {
+func (l *CheckoutLifecycle) derivationEnvFor(ctx context.Context, row storage.ViewGeneration) (env derivationEnv, reason string, ok bool) {
 	if l.derivationEnvHook != nil {
 		env, ok = l.derivationEnvHook(row)
 		if !ok {
@@ -103,7 +103,7 @@ func (l *CheckoutLifecycle) derivationEnvFor(ctx context.Context, row store_sqli
 	l.coordMu.Lock()
 	c := l.coordinators[row.CheckoutID]
 	l.coordMu.Unlock()
-	if c != nil && c.builder != nil && c.builder.Store != nil {
+	if c != nil && c.builder != nil && (c.builder.Store != nil && !c.builder.Store.IsNilGenerationHandle()) {
 		generationID := row.GenerationID
 		store := c.builder.Store
 		env = derivationEnv{
@@ -111,7 +111,7 @@ func (l *CheckoutLifecycle) derivationEnvFor(ctx context.Context, row store_sqli
 				return c.generationLayerReader(ctx, generationID)
 			},
 			parser: func() *Indexer {
-				return derivationParser(store, generationID, c.builder.Registry, c.builder.Config, c.logger, c.repoPrefix, c.root)
+				return derivationParser(store, c.catalog, generationID, c.builder.Registry, c.builder.Config, c.logger, c.repoPrefix, c.root)
 			},
 		}
 		if row.ProvenanceCommitOID != "" && c.root != "" {
@@ -169,7 +169,7 @@ func (l *CheckoutLifecycle) derivationEnvFor(ctx context.Context, row store_sqli
 		registry, prefix, index := l.mi.registry, dedicated.RepoPrefix, cfg.Index
 		store := l.store
 		env.parser = func() *Indexer {
-			return derivationParser(store, generationID, registry, index, l.logger, prefix, root)
+			return derivationParser(store, l.catalog, generationID, registry, index, l.logger, prefix, root)
 		}
 	}
 	if row.ProvenanceCommitOID != "" && root != "" {
@@ -186,10 +186,11 @@ func (l *CheckoutLifecycle) derivationEnvFor(ctx context.Context, row store_sqli
 // that one is the indexer's cold-index staging buffer only (see the graph
 // package's New fence), and anything held in it would die with the process.
 func derivationParser(
-	store *store_sqlite.Store, generationID int64, registry *parser.Registry, cfg config.IndexConfig,
+	store GenerationBuilderStore, catalog CheckoutCatalog, generationID int64, registry *parser.Registry, cfg config.IndexConfig,
 	logger *zap.Logger, repoPrefix, root string,
 ) *Indexer {
-	idx := New(store.AtGeneration(generationID), registry, cfg, logger)
+	idx := New(generationAt(store, generationID), registry, cfg, logger)
+	idx.SetCensusCatalog(catalog)
 	idx.SetRepoPrefix(repoPrefix)
 	idx.rootPath = root
 	return idx
@@ -244,9 +245,9 @@ func (l *CheckoutLifecycle) CorrectStaleDerivations(ctx context.Context) (Derive
 			switch {
 			case !found:
 				report.Skipped++
-				l.logCorrectionSkip(store_sqlite.ViewGeneration{GenerationID: g.GenerationID}, pass.name, "no_catalog_row")
+				l.logCorrectionSkip(storage.ViewGeneration{GenerationID: g.GenerationID}, pass.name, "no_catalog_row")
 				continue
-			case row.State != store_sqlite.ViewGenerationReady:
+			case row.State != storage.ViewGenerationReady:
 				report.Skipped++
 				l.logCorrectionSkip(row, pass.name, "state_"+string(row.State))
 				continue
@@ -294,7 +295,7 @@ func (l *CheckoutLifecycle) CorrectStaleDerivations(ctx context.Context) (Derive
 }
 
 // logCorrectionSkip names why a stale generation was left stale.
-func (l *CheckoutLifecycle) logCorrectionSkip(row store_sqlite.ViewGeneration, pass, reason string) {
+func (l *CheckoutLifecycle) logCorrectionSkip(row storage.ViewGeneration, pass, reason string) {
 	if l.logger == nil {
 		return
 	}
@@ -310,7 +311,7 @@ func (l *CheckoutLifecycle) logCorrectionSkip(row store_sqlite.ViewGeneration, p
 // correction waits and starts over (it never finished, so the stamp has not
 // moved and every chunk it wrote is re-derived and replaced the same way).
 func (l *CheckoutLifecycle) correctGenerationYielding(
-	ctx context.Context, pass string, from, to int, row store_sqlite.ViewGeneration, env derivationEnv, memo *derivationMemo, report *DerivedCorrectionReport,
+	ctx context.Context, pass string, from, to int, row storage.ViewGeneration, env derivationEnv, memo *derivationMemo, report *DerivedCorrectionReport,
 ) (bool, error) {
 	coordinators := l.coordinatorSnapshot()
 	for {
@@ -405,7 +406,7 @@ func newDerivationMemo() *derivationMemo {
 // derivationContentKey names a generation's content for the memo: two
 // generations with the same key hold the same rows over the same view. The
 // empty key (no tree or no base) is never shared.
-func derivationContentKey(row store_sqlite.ViewGeneration) string {
+func derivationContentKey(row storage.ViewGeneration) string {
 	if row.TreeOID == "" || row.BaseGenerationID <= 0 {
 		return ""
 	}
@@ -427,20 +428,20 @@ type derivationGenerationStats struct {
 // correctGeneration re-derives one pass's rows of one generation and moves
 // its stamp.
 func (l *CheckoutLifecycle) correctGeneration(
-	ctx context.Context, pass string, from, to int, row store_sqlite.ViewGeneration, env derivationEnv, memo *derivationMemo, report *DerivedCorrectionReport,
+	ctx context.Context, pass string, from, to int, row storage.ViewGeneration, env derivationEnv, memo *derivationMemo, report *DerivedCorrectionReport,
 ) error {
 	started := time.Now()
 	kinds := capabilityDerivedEdgeKinds
 	if pass == derivationPassFileFingerprints {
 		kinds = []graph.EdgeKind{fileFingerprintCorrectionKind}
 	}
-	correction, err := l.store.BeginDerivedCorrection(ctx, store_sqlite.DerivedCorrectionRequest{
+	correction, err := l.store.BeginDerivedCorrectionHandle(ctx, storage.DerivedCorrectionRequest{
 		GenerationID: row.GenerationID, Pass: pass, FromVersion: from, ToVersion: to, EdgeKinds: kinds,
 	})
 	if err != nil {
 		return err
 	}
-	own := l.store.AtGeneration(row.GenerationID)
+	own := generationAt(l.store, row.GenerationID)
 	var stats derivationGenerationStats
 	switch pass {
 	case derivationPassFileFingerprints:
@@ -482,8 +483,8 @@ func (l *CheckoutLifecycle) correctGeneration(
 // and a file parsed at a tree is not parsed again for another generation of
 // the same tree.
 func correctFileFingerprints(
-	ctx context.Context, correction *store_sqlite.DerivedCorrection, own *store_sqlite.Store, env derivationEnv,
-	row store_sqlite.ViewGeneration, memo *derivationMemo, report *DerivedCorrectionReport, stats *derivationGenerationStats,
+	ctx context.Context, correction storage.DerivedCorrectionHandle, own generationPayloadStore, env derivationEnv,
+	row storage.ViewGeneration, memo *derivationMemo, report *DerivedCorrectionReport, stats *derivationGenerationStats,
 ) error {
 	var files []*graph.Node
 	for node := range own.NodesByKind(graph.KindFile) {
@@ -623,8 +624,8 @@ func sameCapabilityRows(a, b []*graph.Edge) bool {
 // the stamp and nothing else. A source the generation does not speak for
 // would duplicate the rows below it; it is counted, not written.
 func correctCapabilityRows(
-	ctx context.Context, correction *store_sqlite.DerivedCorrection, own *store_sqlite.Store, env derivationEnv,
-	row store_sqlite.ViewGeneration, memo *derivationMemo, report *DerivedCorrectionReport, stats *derivationGenerationStats,
+	ctx context.Context, correction storage.DerivedCorrectionHandle, own generationPayloadStore, env derivationEnv,
+	row storage.ViewGeneration, memo *derivationMemo, report *DerivedCorrectionReport, stats *derivationGenerationStats,
 ) error {
 	if env.view == nil {
 		return errors.New("indexer: no view of the generation to re-derive over")
@@ -707,7 +708,7 @@ func correctCapabilityRows(
 		sourceSet[id] = struct{}{}
 	}
 	diffStarted := time.Now()
-	layer, err := graphview.NewGenerationLayer(own)
+	layer, err := graphview.NewGenerationLayer(own.(graphview.GenerationLayerHandle))
 	if err != nil {
 		return err
 	}

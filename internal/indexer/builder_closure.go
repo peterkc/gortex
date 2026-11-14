@@ -1551,7 +1551,7 @@ type closureQualNameLookup interface {
 // unwrapping one composition layer on the way.
 //
 // Every base the coordinator hands a build is one of two shapes: the store
-// itself (checkout_coordinator.go:1773, a *store_sqlite.Store, taken only when the
+// itself (checkout_coordinator.go:1773, a native generation store, taken only when the
 // base generation is zero) or the commitLayerBase ancestryLayerBase mints
 // (:2143-2145), which is what the commit-layer build (:1788) and the
 // dirty-layer reader (:2128) both take — EVERY incremental build.

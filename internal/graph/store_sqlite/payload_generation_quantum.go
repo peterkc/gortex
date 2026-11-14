@@ -1,8 +1,9 @@
 package store_sqlite
 
+import "github.com/zzet/gortex/internal/storage"
+
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -15,19 +16,9 @@ const (
 	payloadRetirementQuantumWriterPoll = time.Millisecond
 )
 
-// ErrPayloadRetirementWriteWanted means a real writer preempted a retirement
-// quantum. Its interrupted transaction rolled back and can be resumed.
-var ErrPayloadRetirementWriteWanted = errors.New("store_sqlite: retirement quantum yielded to a waiting writer")
+var ErrPayloadRetirementWriteWanted = storage.ErrPayloadRetirementWriteWanted
 
-// PayloadRetirementProgress reports committed work, including empty-source
-// proofs that advanced the sealed generation's resume cursor. A refusal never
-// reports deletion or catalog removal. Partial progress remains valid with err.
-type PayloadRetirementProgress struct {
-	RowsDeleted     int64
-	ChunksCommitted int64
-	StepsAdvanced   int
-	CatalogRemoved  bool
-}
+type PayloadRetirementProgress = storage.PayloadRetirementProgress
 
 // RetirePayloadGenerationQuantum performs at most one 16-row payload
 // transaction under a 250 ms context, retaining all normal retirement fences.

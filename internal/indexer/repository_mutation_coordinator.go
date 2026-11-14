@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 const repositoryMutationPathCap = 2048
@@ -278,7 +278,7 @@ func executeRepositoryMutation(executor repositoryMutationExecutor, paths []stri
 		if recovered == nil {
 			return
 		}
-		storageErr, ok := store_sqlite.StorageErrorFromPanic(recovered)
+		storageErr, ok := storage.StorageErrorFromPanic(recovered)
 		if !ok {
 			panic(recovered)
 		}
@@ -379,7 +379,7 @@ func (c *repositoryMutationCoordinator) runExclusiveMode(
 		if recovered == nil {
 			return
 		}
-		storageErr, ok := store_sqlite.StorageErrorFromPanic(recovered)
+		storageErr, ok := storage.StorageErrorFromPanic(recovered)
 		if !ok {
 			panic(recovered)
 		}
@@ -1120,7 +1120,7 @@ const (
 	// meta onto an already-built payload rather than extracting it, and they
 	// write the CORPUS — generation zero — because every derived generation a
 	// reader can reach is published, and publication seals the payload
-	// (store_sqlite.ErrPayloadGenerationSealed). There is deliberately no
+	// (storage.ErrPayloadGenerationSealed). There is deliberately no
 	// checkout-axis enrichment entry: an enrichment raised under a routed view
 	// is refused at the request surface rather than being redirected here.
 	//

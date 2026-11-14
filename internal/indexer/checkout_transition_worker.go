@@ -9,8 +9,8 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/reconcile"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 const (
@@ -22,7 +22,7 @@ const (
 // The catalog row is the authority; this value only coalesces workers inside
 // one process and carries the result to a wait-by-default caller.
 type modeTransitionRun struct {
-	transition store_sqlite.IntentTransition
+	transition storage.IntentTransition
 	done       chan struct{}
 	outcome    modeTransitionOutcome
 }
@@ -38,7 +38,7 @@ type modeTransitionOutcome struct {
 // the worker. A client disconnect therefore changes only whether that client
 // waits; it cannot orphan the transition.
 func (l *CheckoutLifecycle) scheduleModeTransition(
-	transition store_sqlite.IntentTransition,
+	transition storage.IntentTransition,
 ) *modeTransitionRun {
 	l.transitionMu.Lock()
 	if running := l.transitionRuns[transition.TransitionID]; running != nil {
@@ -78,7 +78,7 @@ func (l *CheckoutLifecycle) scheduleModeTransition(
 }
 
 func (l *CheckoutLifecycle) executeModeTransition(
-	ctx context.Context, transition store_sqlite.IntentTransition,
+	ctx context.Context, transition storage.IntentTransition,
 ) modeTransitionOutcome {
 	if gate := l.buildGate(); gate != nil {
 		if err := gate.WaitUntilOpen(ctx); err != nil {
@@ -106,7 +106,7 @@ func (l *CheckoutLifecycle) executeModeTransition(
 }
 
 func (l *CheckoutLifecycle) executePromotionTransition(
-	ctx context.Context, transition store_sqlite.IntentTransition,
+	ctx context.Context, transition storage.IntentTransition,
 ) (PromoteResult, error) {
 	return l.promoteCheckoutTransition(ctx, transition)
 }
@@ -168,7 +168,7 @@ func (l *CheckoutLifecycle) resumeModeTransitions(ctx context.Context) (int, err
 // the guarded tuple written by AuthorizeDemotion: owned graph, primary graph,
 // and primary epoch.
 func (l *CheckoutLifecycle) executeDemotionTransition(
-	ctx context.Context, transition store_sqlite.IntentTransition,
+	ctx context.Context, transition storage.IntentTransition,
 ) error {
 	standing, found, err := l.catalog.GetIntentTransition(ctx, transition.CheckoutID)
 	if err != nil {
@@ -185,9 +185,9 @@ func (l *CheckoutLifecycle) executeDemotionTransition(
 		// request; require its complete demotion identity and an unclaimed
 		// automatic checkout before touching configuration.
 		if transition.Cause == demotionTransitionCause &&
-			transition.RequestedMode == store_sqlite.CheckoutModeAutomatic &&
+			transition.RequestedMode == storage.CheckoutModeAutomatic &&
 			checkout.CheckoutID == transition.CheckoutID &&
-			checkout.EffectiveMode == store_sqlite.CheckoutModeAutomatic &&
+			checkout.EffectiveMode == storage.CheckoutModeAutomatic &&
 			checkout.ActiveIntentTransitionID == "" {
 			prefix := l.ResolvePrefix(checkout.RootPath)
 			if _, _, err := l.evictRepoChecked(ctx, prefix, checkout.RootPath, reconcile.CauseDemotion); err != nil {
@@ -196,29 +196,29 @@ func (l *CheckoutLifecycle) executeDemotionTransition(
 			return nil
 		}
 		return fmt.Errorf("%w: demotion transition %s is no longer standing",
-			store_sqlite.ErrCatalogStaleGuard, transition.TransitionID)
+			storage.ErrCatalogStaleGuard, transition.TransitionID)
 	}
 	if standing.TransitionID != transition.TransitionID ||
 		standing.Cause != demotionTransitionCause ||
-		standing.RequestedMode != store_sqlite.CheckoutModeAutomatic {
+		standing.RequestedMode != storage.CheckoutModeAutomatic {
 		return fmt.Errorf("%w: demotion transition %s was replaced",
-			store_sqlite.ErrCatalogStaleGuard, transition.TransitionID)
+			storage.ErrCatalogStaleGuard, transition.TransitionID)
 	}
 	transition = standing
 	if err := l.catalog.UpdateIntentTransitionProgress(ctx, transition.CheckoutID,
-		transition.TransitionID, store_sqlite.IntentTransitionRunning, "", l.clock().Unix()); err != nil {
+		transition.TransitionID, storage.IntentTransitionRunning, "", l.clock().Unix()); err != nil {
 		return err
 	}
 	checkout, err := l.checkoutStateOf(ctx, transition.CheckoutID)
 	if err != nil {
 		return l.deferModeTransition(ctx, transition, err)
 	}
-	if checkout.EffectiveMode == store_sqlite.CheckoutModeAutomatic {
+	if checkout.EffectiveMode == storage.CheckoutModeAutomatic {
 		if checkout.CheckoutID != transition.CheckoutID ||
 			checkout.ActiveIntentTransitionID != transition.TransitionID {
 			return l.deferModeTransition(ctx, transition, fmt.Errorf(
 				"%w: demotion transition %s no longer owns checkout %s",
-				store_sqlite.ErrCatalogStaleGuard, transition.TransitionID, checkout.CheckoutID))
+				storage.ErrCatalogStaleGuard, transition.TransitionID, checkout.CheckoutID))
 		}
 		prefix := l.ResolvePrefix(checkout.RootPath)
 		if _, _, err := l.evictRepoChecked(ctx, prefix, checkout.RootPath, reconcile.CauseDemotion); err != nil {
@@ -243,7 +243,7 @@ func (l *CheckoutLifecycle) executeDemotionTransition(
 			"indexer: demotion transition %s has invalid primary epoch: %w",
 			transition.TransitionID, err))
 	}
-	var owned *store_sqlite.DedicatedGraph
+	var owned *storage.DedicatedGraph
 	if parts[0] != "" {
 		graph, found, err := l.catalog.GetDedicatedGraph(ctx, parts[0])
 		if err != nil {
@@ -266,13 +266,13 @@ func (l *CheckoutLifecycle) executeDemotionTransition(
 }
 
 func (l *CheckoutLifecycle) deferModeTransition(
-	ctx context.Context, transition store_sqlite.IntentTransition, cause error,
+	ctx context.Context, transition storage.IntentTransition, cause error,
 ) error {
 	if cause == nil {
 		return nil
 	}
 	if err := l.catalog.UpdateIntentTransitionProgress(ctx, transition.CheckoutID,
-		transition.TransitionID, store_sqlite.IntentTransitionPending,
+		transition.TransitionID, storage.IntentTransitionPending,
 		cause.Error(), l.clock().Unix()); err != nil && !errors.Is(err, context.Canceled) {
 		l.logger.Warn("checkout lifecycle: could not defer mode transition",
 			zap.String("transition", transition.TransitionID), zap.Error(err))

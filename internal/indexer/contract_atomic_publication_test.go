@@ -51,7 +51,7 @@ func TestContractCoordinatorRetiresDuplicateLoserAndKeepsWinner(t *testing.T) {
 		}
 		return ContractAcceptedSource{Bytes: append([]byte(nil), f.sources[file.Path]...), SourceFingerprint: file.SourceFingerprint, Policy: file.Policy}, nil
 	}
-	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
+	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(f.store), OpenEvidence: openTestEvidenceStore, Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
 		panic("unused")
 	}, Yield: func(ctx context.Context) error { return ctx.Err() }})
 	require.NoError(t, err)

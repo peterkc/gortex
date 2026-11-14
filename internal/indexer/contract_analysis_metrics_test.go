@@ -56,7 +56,7 @@ func TestContractAnalysisCountsRequestsAndJobs(t *testing.T) {
 		return snapshot, []ContractFollowupTarget{{Key: a.Snapshot.Key, Work: a.Snapshot.Work, Catalog: f.store}}, nil
 	}
 	core, logs := observer.New(zapcore.InfoLevel)
-	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: capture, Logger: zap.New(core), Yield: func(ctx context.Context) error { return ctx.Err() }})
+	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(f.store), OpenEvidence: openTestEvidenceStore, Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: capture, Logger: zap.New(core), Yield: func(ctx context.Context) error { return ctx.Err() }})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 
@@ -138,7 +138,7 @@ func TestContractJobLogCountsSharedPublicationOnce(t *testing.T) {
 	f := newContractWorkerFixture(t)
 	a := f.request(t, "repo-a", "metrics-shared-a")
 	b := f.request(t, "repo-b", "metrics-shared-b")
-	batch, err := RunContractFollowupBatch(t.Context(), ContractFollowupBatchRequest{
+	batch, err := RunContractFollowupBatch(t.Context(), ContractFollowupBatchRequest{OpenEvidence: openTestEvidenceStore,
 		Snapshot: a.Snapshot,
 		Targets: []ContractFollowupTarget{
 			{Key: a.Snapshot.Key, Work: a.Snapshot.Work, Payload: a.Payload, Catalog: a.Catalog},

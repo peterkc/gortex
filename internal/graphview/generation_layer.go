@@ -9,7 +9,7 @@ import (
 	"sync"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // GenerationLayer reads one persisted payload generation as an overlay
@@ -43,7 +43,7 @@ import (
 //     and — should a row nevertheless be carried at one — never served
 //     from this layer, so a carried context row can no more shadow the
 //     layer below than duplicate it. Publish validation refuses the
-//     mask over payload (store_sqlite.ValidateGenerationMasks), which
+//     mask over payload (storage.ValidateGenerationMasks), which
 //     makes that last defence a second lock rather than the only one.
 //   - A node tombstone removes one identity the generation did not
 //     re-emit and whose file it does not claim.
@@ -97,9 +97,9 @@ import (
 //
 // A GenerationLayer is safe for concurrent reads from one request.
 type GenerationLayer struct {
-	handle *store_sqlite.Store
+	handle GenerationLayerHandle
 	// Checked projections reject masks materialized before a row correction.
-	inputRevision store_sqlite.PayloadInputRevision
+	inputRevision storage.PayloadInputRevision
 	// Set by the materializer before publication. A healthy checkout must
 	// not inherit filesystem failures from its designated primary.
 	failureRepoPrefix string
@@ -110,7 +110,7 @@ type GenerationLayer struct {
 	// A mask also carries the repo prefix, which is not part of this key:
 	// every path in the graph is already repo-prefixed, so the prefix
 	// column repeats what the path says rather than qualifying it.
-	covered map[string]store_sqlite.OwnershipMode
+	covered map[string]storage.OwnershipMode
 	// paths is covered's key set in sorted order, built once because
 	// FilePaths promises that order.
 	paths []string
@@ -197,15 +197,15 @@ var _ graph.OverlayLayerReader = (*GenerationLayer)(nil)
 // overlay.
 // ProjectionHandle borrows the exact physical input of this immutable layer.
 // The caller must already own the view/lease; it is not a new selection.
-func (l *GenerationLayer) ProjectionHandle() *store_sqlite.Store { return l.handle }
+func (l *GenerationLayer) ProjectionHandle() GenerationLayerHandle { return l.handle }
 
 // ProjectionRevision is the input revision at which this layer materialized its
 // masks. It carries no store ownership and never substitutes for checked reads.
-func (l *GenerationLayer) ProjectionRevision() store_sqlite.PayloadInputRevision {
+func (l *GenerationLayer) ProjectionRevision() storage.PayloadInputRevision {
 	return l.inputRevision
 }
 
-func NewGenerationLayer(handle *store_sqlite.Store) (*GenerationLayer, error) {
+func NewGenerationLayer(handle GenerationLayerHandle) (*GenerationLayer, error) {
 	return NewGenerationLayerContext(context.Background(), handle)
 }
 
@@ -213,8 +213,8 @@ func NewGenerationLayer(handle *store_sqlite.Store) (*GenerationLayer, error) {
 // honoring cancellation across every mask read. NewGenerationLayer preserves
 // the historical background-context behavior for callers without a request
 // lifetime to propagate.
-func NewGenerationLayerContext(ctx context.Context, handle *store_sqlite.Store) (*GenerationLayer, error) {
-	if handle == nil {
+func NewGenerationLayerContext(ctx context.Context, handle GenerationLayerHandle) (*GenerationLayer, error) {
+	if handle == nil || handle.IsNilGenerationHandle() {
 		return nil, fmt.Errorf("graphview: generation layer needs a store handle")
 	}
 	if ctx == nil {
@@ -241,7 +241,7 @@ func NewGenerationLayerContext(ctx context.Context, handle *store_sqlite.Store) 
 	}
 	var tombstones []string
 	for _, mask := range identityMasks {
-		if mask.Kind == store_sqlite.NodeIdentityMaskLegacy {
+		if mask.Kind == storage.NodeIdentityMaskLegacy {
 			tombstones = append(tombstones, mask.NodeID)
 		}
 	}
@@ -262,7 +262,7 @@ func NewGenerationLayerContext(ctx context.Context, handle *store_sqlite.Store) 
 	l := &GenerationLayer{
 		inputRevision: inputRevision,
 		handle:        handle,
-		covered:       make(map[string]store_sqlite.OwnershipMode, len(fileMasks)),
+		covered:       make(map[string]storage.OwnershipMode, len(fileMasks)),
 		removed:       make(map[string]struct{}, len(tombstones)),
 		removedID:     slices.Clone(tombstones),
 		edgeSources:   make(map[string]struct{}, len(edgeSources)),
@@ -272,9 +272,9 @@ func NewGenerationLayerContext(ctx context.Context, handle *store_sqlite.Store) 
 	}
 	for _, mask := range fileMasks {
 		switch mask.Mode {
-		case store_sqlite.OwnershipReplace, store_sqlite.OwnershipDelete:
+		case storage.OwnershipReplace, storage.OwnershipDelete:
 			l.covered[mask.FilePath] = mask.Mode
-		case store_sqlite.OwnershipContext:
+		case storage.OwnershipContext:
 			if l.contextPaths == nil {
 				l.contextPaths = make(map[string]struct{})
 			}
@@ -343,7 +343,7 @@ func (l *GenerationLayer) HasFile(graphPath string) bool {
 // deletion, so nothing below shows through and the layer itself carries
 // nothing for it either.
 func (l *GenerationLayer) IsTombstone(graphPath string) bool {
-	return l.covered[graphPath] == store_sqlite.OwnershipDelete
+	return l.covered[graphPath] == storage.OwnershipDelete
 }
 
 // FilePaths lists every claimed path in sorted order. A context path is not
@@ -695,7 +695,7 @@ func (l *GenerationLayer) loadNodes() {
 // neither is a file this layer answers from its own payload.
 func (l *GenerationLayer) FileNodes(graphPath string) []*graph.Node {
 	mode, claimed := l.covered[graphPath]
-	if !claimed || mode == store_sqlite.OwnershipDelete {
+	if !claimed || mode == storage.OwnershipDelete {
 		return nil
 	}
 	l.mu.Lock()

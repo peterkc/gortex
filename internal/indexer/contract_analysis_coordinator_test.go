@@ -13,6 +13,22 @@ import (
 	"github.com/zzet/gortex/internal/graphview"
 )
 
+func TestContractAnalysisCoordinatorRefusesMissingEvidenceOpener(t *testing.T) {
+	f := newContractWorkerFixture(t)
+	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{
+		Store: f.store, Catalog: f.store.Catalog(), Leases: f.leases, Registry: f.registry,
+		Yield: func(ctx context.Context) error { return ctx.Err() },
+		Capture: func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
+			panic("constructor must not capture")
+		},
+	})
+	if c != nil {
+		t.Cleanup(func() { require.NoError(t, c.Close()) })
+	}
+	require.EqualError(t, err, "contract analysis coordinator: evidence opener required")
+	require.Nil(t, c)
+}
+
 // scheduleAndWait schedules inputs for the actor of repos and waits on the
 // promise of the seq it answered.
 func scheduleAndWait(t *testing.T, ctx context.Context, c *ContractAnalysisCoordinator, repos []string, repo string, inputs *graphview.SelectedContractInputs) (ContractScheduleResult, ContractActorStatus) {
@@ -133,7 +149,7 @@ func TestContractAnalysisCoordinatorCoalescesOwnedCohortAndPublishesBothTargets(
 		}
 		return snapshot, []ContractFollowupTarget{{Key: a.Snapshot.Key, Work: a.Snapshot.Work, Catalog: f.store}, {Key: b.Snapshot.Key, Work: b.Snapshot.Work, Catalog: f.store}}, nil
 	}
-	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: capture, Yield: ContractAnalysisYield(func() bool { return true })})
+	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(f.store), OpenEvidence: openTestEvidenceStore, Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: capture, Yield: ContractAnalysisYield(func() bool { return true })})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +237,7 @@ func TestContractAnalysisCoordinatorBaselineRaceAndCancellation(t *testing.T) {
 	var c *ContractAnalysisCoordinator
 	var baselineCalls atomic.Int64
 	var err error
-	c, err = NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
+	c, err = NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(f.store), OpenEvidence: openTestEvidenceStore, Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
 		t.Error("unknown baseline captured")
 		return ContractFollowupSnapshot{}, nil, errors.New("unsupported")
 	}, ReconcileBaseline: func(ctx context.Context, _ *graphview.RepoView, repo, checkout string) (bool, error) {
@@ -262,7 +278,7 @@ func TestContractAnalysisCoordinatorCloseJoinsAdmissionRelease(t *testing.T) {
 	f := newContractWorkerFixture(t)
 	releasing := make(chan struct{})
 	resume := make(chan struct{})
-	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
+	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(f.store), OpenEvidence: openTestEvidenceStore, Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
 		return ContractFollowupSnapshot{Release: func() { close(releasing); <-resume }}, []ContractFollowupTarget{{Key: graph.ContractAttachmentKey{RepoPrefix: "repo-a", InputVersion: "v", InputFingerprint: "f"}, Catalog: f.store}}, nil
 	}, Yield: func(ctx context.Context) error { return ctx.Err() }})
 	if err != nil {
@@ -299,7 +315,7 @@ func TestContractAnalysisCoordinatorCloseJoinsAdmissionRelease(t *testing.T) {
 
 func TestContractAnalysisCoordinatorPendingAcceptanceWaitsWithoutCapture(t *testing.T) {
 	f := newContractWorkerFixture(t)
-	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
+	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(f.store), OpenEvidence: openTestEvidenceStore, Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
 		t.Error("pending input was captured for analysis")
 		return ContractFollowupSnapshot{}, nil, errors.New("pending")
 	}, Yield: ContractAnalysisYield(nil)})

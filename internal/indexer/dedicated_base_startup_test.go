@@ -24,7 +24,7 @@ import (
 // owner is registered.
 func installStartupPublisherRuntime(t *testing.T, f *lifecycleFixture) *DedicatedBaseRuntime {
 	t.Helper()
-	runtime, err := NewDedicatedBaseRuntime(f.store, f.lc.ViewLeases())
+	runtime, err := NewDedicatedBaseRuntime(f.store, testCatalog(f.store), f.lc.ViewLeases())
 	require.NoError(t, err)
 	require.NoError(t, f.lc.SetDedicatedBaseCleanupRuntime(runtime))
 	return runtime
@@ -116,7 +116,7 @@ func TestInitialBasePublisherRequiresTheSharedLeaseDomain(t *testing.T) {
 	t.Run("private manager refused", func(t *testing.T) {
 		f := newLifecycleFixture(t)
 		defer f.close()
-		private, err := NewDedicatedBaseRuntime(f.store, graphview.NewLeaseManager())
+		private, err := NewDedicatedBaseRuntime(f.store, testCatalog(f.store), graphview.NewLeaseManager())
 		require.NoError(t, err)
 		require.NoError(t, f.lc.SetDedicatedBaseCleanupRuntime(private))
 
@@ -901,7 +901,7 @@ func TestInitialBasePublisherPublicationContextIsCancelledByAdmissionClose(t *te
 	dir := t.TempDir()
 	store := builderOpenStoreAt(t, filepath.Join(dir, "store.sqlite"))
 	t.Cleanup(func() { _ = store.Close() })
-	runtime, err := NewDedicatedBaseRuntime(store, graphview.NewLeaseManager())
+	runtime, err := NewDedicatedBaseRuntime(store, testCatalog(store), graphview.NewLeaseManager())
 	require.NoError(t, err)
 
 	ctx, cancel, release := runtime.publicationContext(context.Background())
@@ -1021,7 +1021,8 @@ func TestTheStartupPublisherBuildsInsideOneGenerationBulkWindow(t *testing.T) {
 				require.NoError(t, os.WriteFile(filepath.Join(request.RootPath, "uncommitted.go"), []byte(uncommitted), 0o600))
 			}
 			store := runtime.store
-			require.NoError(t, store.CheckpointWAL())
+			nativeStore := store.(*store_sqlite.Store)
+			require.NoError(t, nativeStore.CheckpointWAL())
 
 			var (
 				windowGeneration int64
@@ -1034,8 +1035,8 @@ func TestTheStartupPublisherBuildsInsideOneGenerationBulkWindow(t *testing.T) {
 			)
 			observation.PrePublish = func(context.Context, int64) error {
 				hooks++
-				windowGeneration, windowHeld = store.InGenerationBulkLoad()
-				cacheSize, autoCheckpoint, shapeHeld = store.GenerationBulkLoadShape()
+				windowGeneration, windowHeld = nativeStore.InGenerationBulkLoad()
+				cacheSize, autoCheckpoint, shapeHeld = nativeStore.GenerationBulkLoadShape()
 				walAtPrePublish = walBytes(t, request.StorePath+"-wal")
 				return nil
 			}
@@ -1057,7 +1058,7 @@ func TestTheStartupPublisherBuildsInsideOneGenerationBulkWindow(t *testing.T) {
 			// else: nothing in the process will adopt a leaked generation
 			// window, so a build that returns still holding one strands the
 			// store's writer behind an unbounded log.
-			generation, stillHeld := store.InGenerationBulkLoad()
+			generation, stillHeld := nativeStore.InGenerationBulkLoad()
 			require.Falsef(t, stillHeld, "the build returned still holding the window on generation %d", generation)
 
 			// The write audit proper: the shape is read back off the pinned

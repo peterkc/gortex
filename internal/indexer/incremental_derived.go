@@ -4,10 +4,10 @@ import (
 	"context"
 	"time"
 
+	"github.com/zzet/gortex/internal/storage"
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/entrypoints"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/reach"
 	"github.com/zzet/gortex/internal/resolver"
 )
@@ -85,7 +85,7 @@ type IncrementalDerivedReport struct {
 	// set beside the pass's wall time, it says whether a slow pass worked or
 	// waited.
 	PassCPUMs       map[string]int64
-	PassWrites      map[string]store_sqlite.VFSIOSplit
+	PassWrites      map[string]storage.VFSIOSplit
 	FrameworkMs     int64
 	ExternalCallsMs int64
 	CrossRepoMs     int64
@@ -119,6 +119,7 @@ func (idx *Indexer) runStandaloneIncrementalDerivedPassesWithPrior(
 	}
 	prefix := idx.RepoPrefix()
 	mi := NewMultiIndexer(idx.graph, idx.registry, idx.search, nil, logger)
+	mi.writeCounters = idx.writeCounters
 	mi.indexers[prefix] = idx
 	mi.repos[prefix] = &RepoMetadata{
 		RepoPrefix: prefix,
@@ -261,13 +262,19 @@ func (mi *MultiIndexer) runIncrementalDerivedPassesWithPriorTopologyHeld(
 	// like the *_ms fields.
 	report.PassFaults = map[string]int64{}
 	faultsAt, cpuAt := editDeltaProcessIO(), processCPUTime()
-	writesAt := mi.writeCounterMark()
-	report.PassWrites = make(map[string]store_sqlite.VFSIOSplit)
+	sampleWrites := mi.writeCounterSource()
+	var writesAt storage.VFSIOMark
+	if sampleWrites != nil {
+		writesAt = sampleWrites()
+		report.PassWrites = make(map[string]storage.VFSIOSplit)
+	}
 	notePassFaults := func(pass string) {
 		now, cpu := editDeltaProcessIO(), processCPUTime()
-		writes := mi.writeCounterMark()
-		report.PassWrites[pass] = addVFSIOSplit(report.PassWrites[pass], writes.Since(writesAt))
-		writesAt = writes
+		if sampleWrites != nil {
+			writes := sampleWrites()
+			report.PassWrites[pass] = addVFSIOSplit(report.PassWrites[pass], writes.Since(writesAt))
+			writesAt = writes
+		}
 		if f := now.since(faultsAt).majorFaults; f > 0 {
 			report.PassFaults[pass] += f
 		}
@@ -554,8 +561,12 @@ func (mi *MultiIndexer) logIncrementalDerived(report IncrementalDerivedReport, p
 		zap.Any("derived_cpu_ms", report.PassCPUMs),
 		zap.Int("hierarchy_republished", report.HierarchyRepublished),
 		zap.Int64("duration_ms", report.DurationMs)}
-	for _, family := range []string{"prelude", "hierarchy", "tests", "capability", "framework", "external_calls", "cross_repo", "contracts"} {
-		fields = append(fields, writeCounterFields(family+"_", report.PassWrites[family])...)
+	if report.PassWrites == nil {
+		fields = append(fields, zap.Bool("write_counters_unavailable", true))
+	} else {
+		for _, family := range []string{"prelude", "hierarchy", "tests", "capability", "framework", "external_calls", "cross_repo", "contracts"} {
+			fields = append(fields, writeCounterFields(family+"_", report.PassWrites[family])...)
+		}
 	}
 	mi.logger.Info("incremental derived passes complete", fields...)
 }

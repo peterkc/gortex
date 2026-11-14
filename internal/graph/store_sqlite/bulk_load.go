@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Compile-time assertion: *Store satisfies graph.BulkLoader.
@@ -520,12 +521,7 @@ func (s *Store) beginBulkLoadLocked() (outcome, reason string) {
 	return "engaged", "cold_store"
 }
 
-// ErrGenerationBulkLoadPopulated refuses a generation-scoped bulk window over
-// a generation that already holds payload rows. The window's whole licence is
-// that nothing can be reading or colliding with the rows it is about to write;
-// a generation with rows has neither property, and a second window over one is
-// the caller's bug, not a condition to work around.
-var ErrGenerationBulkLoadPopulated = errors.New("store_sqlite: generation already holds payload rows")
+var ErrGenerationBulkLoadPopulated = storage.ErrGenerationBulkLoadPopulated
 
 // BeginGenerationBulkLoad opens the bulk write shape for ONE payload
 // generation that holds no rows yet, and reports whether it engaged.
@@ -841,7 +837,7 @@ func (s *Store) oweWALDrainAfterPublication(result walCheckpointResult, boundary
 // ErrGenerationBulkCheckpointBusy reports that a periodic checkpoint still
 // owns the physical checkpoint path, so a generation build must retry instead
 // of falling back to writes that compete with that checkpoint.
-var ErrGenerationBulkCheckpointBusy = errors.New("store_sqlite: generation bulk checkpoint is still active")
+var ErrGenerationBulkCheckpointBusy = storage.ErrGenerationBulkCheckpointBusy
 
 // InGenerationBulkLoad reports the generation whose bulk window this store is
 // currently holding, and whether it holds one at all.

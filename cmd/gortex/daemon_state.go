@@ -19,7 +19,6 @@ import (
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/intern"
 	gortexmcp "github.com/zzet/gortex/internal/mcp"
@@ -28,6 +27,7 @@ import (
 	"github.com/zzet/gortex/internal/progress"
 	"github.com/zzet/gortex/internal/semantic/lsp"
 	"github.com/zzet/gortex/internal/serverstack"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // daemonState is the bundle of long-lived objects the daemon owns. One
@@ -99,11 +99,11 @@ var buildDaemonStateForStart = buildDaemonState
 // buildDaemonState builds the daemon's stack through the shared
 // serverstack constructor and returns the long-lived daemonState the
 // warmup loop and controller share.
-func buildDaemonState(logger *zap.Logger, observers ...store_sqlite.MigrationObserver) (*daemonState, error) {
+func buildDaemonState(logger *zap.Logger, observers ...storage.MigrationObserver) (*daemonState, error) {
 	return buildDaemonStateWithUpgradeCheckpoint(logger, nil, observers...)
 }
 
-func buildDaemonStateWithUpgradeCheckpoint(logger *zap.Logger, checkpoint func(string, int), observers ...store_sqlite.MigrationObserver) (*daemonState, error) {
+func buildDaemonStateWithUpgradeCheckpoint(logger *zap.Logger, checkpoint func(string, int), observers ...storage.MigrationObserver) (*daemonState, error) {
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
@@ -114,13 +114,13 @@ func buildDaemonStateWithUpgradeCheckpoint(logger *zap.Logger, checkpoint func(s
 	// re-exec'd child re-parses the same flags.
 	applyToolPresetFlags(cfg, daemonTools, daemonToolsMode)
 
-	var migrationObserver store_sqlite.MigrationObserver
+	var migrationObserver storage.MigrationObserver
 	if len(observers) > 0 {
 		migrationObserver = observers[0]
 	}
 	migrated := false
-	observeMigration := func(progress store_sqlite.MigrationProgress) {
-		if progress.Phase == store_sqlite.MigrationStarted {
+	observeMigration := func(progress storage.MigrationProgress) {
+		if progress.Phase == storage.MigrationStarted {
 			migrated = true
 		}
 		if migrationObserver != nil {
@@ -245,39 +245,39 @@ func (r *daemonStartupReporter) heartbeat() {
 	}
 }
 
-func (r *daemonStartupReporter) ObserveMigration(progress store_sqlite.MigrationProgress) {
+func (r *daemonStartupReporter) ObserveMigration(progress storage.MigrationProgress) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	switch progress.Phase {
-	case store_sqlite.MigrationStarted:
+	case storage.MigrationStarted:
 		r.state.StartupPhase = daemon.StartupMigrating
 		r.state.MigrationVersion = progress.Version
 		r.state.MigrationName = progress.Name
 		r.state.StartupError = ""
 		r.logger.Info("daemon: schema migration starting",
 			zap.Int("version", progress.Version), zap.String("name", progress.Name))
-	case store_sqlite.MigrationFinished:
+	case storage.MigrationFinished:
 		r.logger.Info("daemon: schema migration complete",
 			zap.Int("version", progress.Version), zap.String("name", progress.Name),
 			zap.Duration("elapsed", progress.Elapsed))
 		// A step finishes before its transaction commits and before Open
 		// recreates indexes and stamps the schema. Keep the upgrade refusal
 		// phase until the successful builder return records StoreOpened.
-	case store_sqlite.MigrationFailed:
+	case storage.MigrationFailed:
 		r.logger.Error("daemon: schema migration failed",
 			zap.Int("version", progress.Version), zap.String("name", progress.Name),
 			zap.Duration("elapsed", progress.Elapsed), zap.Error(progress.Error))
 		r.state.StartupPhase = daemon.StartupFailed
 		r.state.StartupError = boundedStartupError(progress.Error)
-	case store_sqlite.MigrationBackupCreated:
+	case storage.MigrationBackupCreated:
 		r.logger.Info("daemon: backed up the store before its schema upgrade",
 			zap.Int("from_version", progress.Version), zap.String("backup", progress.Detail),
 			zap.Duration("elapsed", progress.Elapsed))
-	case store_sqlite.MigrationBackupKept:
+	case storage.MigrationBackupKept:
 		r.logger.Info("daemon: kept the existing pre-upgrade store backup",
 			zap.Int("from_version", progress.Version), zap.String("backup", progress.Detail))
-	case store_sqlite.MigrationBackupSkipped:
+	case storage.MigrationBackupSkipped:
 		r.logger.Warn("daemon: upgrading the store schema without a backup",
 			zap.Int("from_version", progress.Version), zap.String("reason", progress.Detail))
 	}
@@ -353,7 +353,7 @@ func boundedStartupError(err error) string {
 	// rendered from the typed fields only, never from the wrapped chain; the
 	// path is this daemon's own resolved store, the same value BackendPath
 	// records once it serves.
-	var short *store_sqlite.InsufficientUpgradeSpaceError
+	var short *storage.InsufficientUpgradeSpaceError
 	if errors.As(err, &short) {
 		return short.Error() + " (--backend-path starts the daemon on another volume)"
 	}
@@ -1710,7 +1710,7 @@ func reconcileFileCount(res *indexer.IndexResult) int {
 // generic, opt-in capability probe: a backend implements NeedsRebuild() bool
 // to participate. The on-disk sqlite store does — it reports true for the one
 // open in which it dropped an incompatible-schema database and recreated it
-// empty (see store_sqlite.Store.NeedsRebuild). The in-memory store does not.
+// empty (see the backend's NeedsRebuild). The in-memory store does not.
 func storeNeedsRebuild(g any) bool {
 	rb, ok := g.(interface{ NeedsRebuild() bool })
 	return ok && rb.NeedsRebuild()

@@ -6,12 +6,12 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 func (s *Server) handleCheckoutControlReindex(ctx context.Context, req mcp.CallToolRequest, control *checkoutControlScope, paths []string) (*mcp.CallToolResult, error) {
-	if control.Checkout.State != store_sqlite.CheckoutStateReady {
+	if control.Checkout.State != storage.CheckoutStateReady {
 		return mcp.NewToolResultError(graphview.NewViewError(graphview.CodeCheckoutInaccessible,
 			fmt.Sprintf("checkout %q is %s", control.Checkout.CheckoutID, control.Checkout.State)).Error()), nil
 	}

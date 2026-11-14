@@ -47,7 +47,7 @@ func newDedicatedPublicationFixture(t testing.TB) *dedicatedPublicationFixture {
 	if err = f.c.UpsertDedicatedGraph(ctx, f.graph); err != nil {
 		t.Fatal(err)
 	}
-	f.authority, err = f.c.AcquireDedicatedBaseAuthority(ctx, AcquireDedicatedBaseAuthorityRequest{GraphID: f.graph.GraphID, Owner: DedicatedBaseOwner{f.owner.CheckoutID, f.owner.Incarnation}, Token: "authority-1"})
+	f.authority, err = f.c.AcquireDedicatedBaseAuthority(ctx, AcquireDedicatedBaseAuthorityRequest{GraphID: f.graph.GraphID, Owner: DedicatedBaseOwner{CheckoutID: f.owner.CheckoutID, Incarnation: f.owner.Incarnation}, Token: "authority-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func (f *dedicatedPublicationFixture) publish(t testing.TB, claim DedicatedBaseB
 }
 func (f *dedicatedPublicationFixture) adopt(t testing.TB, claim DedicatedBaseBuildClaim) DedicatedBaseAdoption {
 	t.Helper()
-	out, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{claim})
+	out, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{Claim: claim})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func TestDedicatedPublicationDesireABAAndPolicyChange(t *testing.T) {
 	f.publish(t, b)
 	f.adopt(t, b)
 	f.observe(t, aIdentity)
-	if _, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{a}); !errors.Is(err, ErrCatalogStaleGuard) {
+	if _, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{Claim: a}); !errors.Is(err, ErrCatalogStaleGuard) {
 		t.Fatalf("old A epoch published: %v", err)
 	}
 	reused := f.claim(t, "a-new-epoch", b.GenerationID, b.GenerationID)
@@ -269,7 +269,7 @@ func TestDedicatedPublicationTakeoverCannotJoinOldWriter(t *testing.T) {
 		t.Fatalf("unverified old writer reused: %+v", newClaim)
 	}
 	f.publish(t, old)
-	if _, err = f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{old}); !errors.Is(err, ErrCatalogStaleGuard) {
+	if _, err = f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{Claim: old}); !errors.Is(err, ErrCatalogStaleGuard) {
 		t.Fatalf("old writer adopted: %v", err)
 	}
 	f.publish(t, newClaim)
@@ -296,7 +296,7 @@ func TestDedicatedPublicationAuthorityTakeoverReusesReadyCandidate(t *testing.T)
 func TestDedicatedPublicationFailureAndStaleGuardRollback(t *testing.T) {
 	f := newDedicatedPublicationFixture(t)
 	a := f.claim(t, "attempt-a", 0, 0)
-	if err := f.c.FailDedicatedBaseBuild(context.Background(), FailDedicatedBaseBuildRequest{a, "interrupted"}); err != nil {
+	if err := f.c.FailDedicatedBaseBuild(context.Background(), FailDedicatedBaseBuildRequest{Claim: a, Error: "interrupted"}); err != nil {
 		t.Fatal(err)
 	}
 	b := f.claim(t, "attempt-b", 0, 0)
@@ -305,11 +305,11 @@ func TestDedicatedPublicationFailureAndStaleGuardRollback(t *testing.T) {
 	}
 	f.publish(t, a)
 	f.publish(t, b)
-	if _, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{a}); !errors.Is(err, ErrCatalogStaleGuard) {
+	if _, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{Claim: a}); !errors.Is(err, ErrCatalogStaleGuard) {
 		t.Fatal(err)
 	}
 	f.exec(t, `UPDATE dedicated_graphs SET active_generation_id=? WHERE graph_id=?`, a.GenerationID, f.graph.GraphID)
-	if _, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{b}); !errors.Is(err, ErrCatalogStaleGuard) {
+	if _, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{Claim: b}); !errors.Is(err, ErrCatalogStaleGuard) {
 		t.Fatalf("stale pointer accepted: %v", err)
 	}
 	p, _, err := f.c.DedicatedBasePublication(context.Background(), f.graph.GraphID)
@@ -349,7 +349,7 @@ func TestDedicatedPublicationAuthorizationRejectsUnsupportedOwners(t *testing.T)
 			c := f.claim(t, "a", 0, 0)
 			f.publish(t, c)
 			f.exec(t, tc.query, tc.args...)
-			if _, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{c}); !errors.Is(err, ErrCatalogStaleGuard) {
+			if _, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{Claim: c}); !errors.Is(err, ErrCatalogStaleGuard) {
 				t.Fatalf("unsupported owner authorized: %v", err)
 			}
 		})
@@ -380,7 +380,7 @@ func TestDedicatedPublicationCandidateRejectionMatrix(t *testing.T) {
 			c := f.claim(t, "a", 0, 0)
 			f.publish(t, c)
 			f.exec(t, tc.query, c.GenerationID)
-			if _, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{c}); !errors.Is(err, ErrDedicatedBaseCandidate) {
+			if _, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{Claim: c}); !errors.Is(err, ErrDedicatedBaseCandidate) {
 				t.Fatalf("bad candidate accepted: %v", err)
 			}
 			if f.active(t) != 0 {
@@ -401,7 +401,7 @@ func TestDedicatedPublicationAncestryAndCascade(t *testing.T) {
 	b := f.claim(t, "b", a.GenerationID, a.GenerationID)
 	f.publish(t, b)
 	f.exec(t, `UPDATE view_generations SET resolver_version='wrong-parent-policy' WHERE generation_id=?`, a.GenerationID)
-	if _, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{b}); !errors.Is(err, ErrDedicatedBaseCandidate) {
+	if _, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{Claim: b}); !errors.Is(err, ErrDedicatedBaseCandidate) {
 		t.Fatalf("incompatible ancestor accepted: %v", err)
 	}
 	if err := f.c.DeleteDedicatedGraph(context.Background(), f.graph.GraphID); err != nil {
@@ -410,7 +410,7 @@ func TestDedicatedPublicationAncestryAndCascade(t *testing.T) {
 	if _, found, err := f.c.DedicatedBasePublication(context.Background(), f.graph.GraphID); err != nil || found {
 		t.Fatalf("publication not cascaded: found=%v err=%v", found, err)
 	}
-	if _, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{b}); !errors.Is(err, ErrCatalogStaleGuard) {
+	if _, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{Claim: b}); !errors.Is(err, ErrCatalogStaleGuard) {
 		t.Fatalf("deleted graph resurrected: %v", err)
 	}
 }
@@ -517,7 +517,7 @@ func TestDedicatedPublicationDetectsExternalPointerClobber(t *testing.T) {
 	if _, err := f.c.ClaimDedicatedBaseBuild(context.Background(), ClaimDedicatedBaseBuildRequest{Desire: f.desire, AttemptToken: "retry"}); !errors.Is(err, ErrCatalogStaleGuard) {
 		t.Fatalf("clobber disguised by new claim: %v", err)
 	}
-	if _, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{claim}); !errors.Is(err, ErrCatalogStaleGuard) {
+	if _, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{Claim: claim}); !errors.Is(err, ErrCatalogStaleGuard) {
 		t.Fatalf("clobber disguised by old adoption: %v", err)
 	}
 }
@@ -538,7 +538,7 @@ func TestDedicatedPublicationRecreatedOwnerFloor(t *testing.T) {
 		t.Fatal(err)
 	}
 	var err error
-	f.authority, err = f.c.AcquireDedicatedBaseAuthority(context.Background(), AcquireDedicatedBaseAuthorityRequest{GraphID: f.graph.GraphID, Owner: DedicatedBaseOwner{f.owner.CheckoutID, f.owner.Incarnation}, Token: "new-owner-authority"})
+	f.authority, err = f.c.AcquireDedicatedBaseAuthority(context.Background(), AcquireDedicatedBaseAuthorityRequest{GraphID: f.graph.GraphID, Owner: DedicatedBaseOwner{CheckoutID: f.owner.CheckoutID, Incarnation: f.owner.Incarnation}, Token: "new-owner-authority"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -576,7 +576,7 @@ func TestDedicatedPublicationGenerationIDsRemainMonotonicAfterDeleteAndReopen(t 
 		t.Fatal("high-water provenance requires durable AUTOINCREMENT IDs")
 	}
 	first := f.claim(t, "first", 0, 0)
-	if err := f.c.FailDedicatedBaseBuild(context.Background(), FailDedicatedBaseBuildRequest{first, "remove private candidate"}); err != nil {
+	if err := f.c.FailDedicatedBaseBuild(context.Background(), FailDedicatedBaseBuildRequest{Claim: first, Error: "remove private candidate"}); err != nil {
 		t.Fatal(err)
 	}
 	f.exec(t, `DELETE FROM view_generations`)
@@ -610,7 +610,7 @@ func TestDedicatedPublicationRejectsGraphBindingChanges(t *testing.T) {
 				f.exec(t, `UPDATE checkouts SET family_id='new-family' WHERE checkout_id=?`, f.owner.CheckoutID)
 				f.exec(t, `UPDATE dedicated_graphs SET family_id='new-family' WHERE graph_id=?`, f.graph.GraphID)
 			}
-			if _, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{claim}); !errors.Is(err, ErrCatalogStaleGuard) {
+			if _, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{Claim: claim}); !errors.Is(err, ErrCatalogStaleGuard) {
 				t.Fatalf("old binding adopted: %v", err)
 			}
 			if _, err := f.c.AcquireDedicatedBaseAuthority(context.Background(), AcquireDedicatedBaseAuthorityRequest{GraphID: f.graph.GraphID, Owner: f.authority.Owner, ExpectedEpoch: f.authority.Epoch, ExpectedToken: f.authority.Token, Token: "takeover"}); !errors.Is(err, ErrCatalogStaleGuard) {
@@ -883,7 +883,7 @@ func TestDedicatedIdentityUpsertConcurrentAdoption(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		<-start
-		_, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{claim})
+		_, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{Claim: claim})
 		errs <- err
 	}()
 	for range n {
@@ -1301,7 +1301,7 @@ func TestDedicatedBaseAdoptionHeadAdvanceIsAtomicWithThePointer(t *testing.T) {
 	// Another actor moved the pointer between this attempt's claim and its
 	// adoption. The adoption is refused as stale.
 	f.exec(t, `UPDATE dedicated_graphs SET active_generation_id=987654 WHERE graph_id=?`, f.graph.GraphID)
-	_, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{claim})
+	_, err := f.c.AdoptDedicatedBaseGeneration(context.Background(), AdoptDedicatedBaseGenerationRequest{Claim: claim})
 	if err == nil {
 		t.Fatal("a clobbered pointer adopted anyway")
 	}
@@ -1720,7 +1720,7 @@ func TestDedicatedBaseAdoptionCannotRelabelBelowThePublicationFloor(t *testing.T
 	f.exec(t, `UPDATE dedicated_graphs SET active_generation_id=? WHERE graph_id=?`, legacy.GenerationID, f.graph.GraphID)
 	var err error
 	f.authority, err = f.c.AcquireDedicatedBaseAuthority(ctx, AcquireDedicatedBaseAuthorityRequest{
-		GraphID: f.graph.GraphID, Owner: DedicatedBaseOwner{f.owner.CheckoutID, f.owner.Incarnation}, Token: "authority-2"})
+		GraphID: f.graph.GraphID, Owner: DedicatedBaseOwner{CheckoutID: f.owner.CheckoutID, Incarnation: f.owner.Incarnation}, Token: "authority-2"})
 	if err != nil {
 		t.Fatal(err)
 	}

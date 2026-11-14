@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/pathkey"
 	"github.com/zzet/gortex/internal/reconcile"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // The administrative read model.
@@ -206,7 +206,7 @@ func (l *CheckoutLifecycle) FamiliesOverview(ctx context.Context, familyFilter s
 
 // familyOverview assembles one family's entry.
 func (l *CheckoutLifecycle) familyOverview(
-	ctx context.Context, family store_sqlite.RepositoryFamily,
+	ctx context.Context, family storage.RepositoryFamily,
 ) (FamilyOverview, error) {
 	out := FamilyOverview{
 		FamilyID:      family.FamilyID,
@@ -265,7 +265,7 @@ func (l *CheckoutLifecycle) familyOverview(
 
 // checkoutOverview assembles one checkout's entry.
 func (l *CheckoutLifecycle) checkoutOverview(
-	ctx context.Context, checkout store_sqlite.Checkout, graphID string,
+	ctx context.Context, checkout storage.Checkout, graphID string,
 ) (CheckoutOverview, error) {
 	out := CheckoutOverview{
 		CheckoutID:      checkout.CheckoutID,
@@ -341,7 +341,7 @@ func (l *CheckoutLifecycle) checkoutOverview(
 }
 
 // routeOverviewOf projects one route row.
-func routeOverviewOf(route store_sqlite.CheckoutRoute) *RouteOverview {
+func routeOverviewOf(route storage.CheckoutRoute) *RouteOverview {
 	return &RouteOverview{
 		GraphID:            route.GraphID,
 		CommitGenerationID: route.CommitGenerationID,
@@ -353,7 +353,7 @@ func routeOverviewOf(route store_sqlite.CheckoutRoute) *RouteOverview {
 }
 
 // refViewOverview projects one ref-view row.
-func refViewOverview(view store_sqlite.RefView) RefViewOverview {
+func refViewOverview(view storage.RefView) RefViewOverview {
 	return RefViewOverview{
 		RefViewID:          view.RefViewID,
 		GraphID:            view.GraphID,
@@ -408,28 +408,28 @@ func (l *CheckoutLifecycle) resolveFamilyID(ctx context.Context, selector string
 // It is what lets every administrative surface take the selector a user
 // actually has to hand — usually a directory — instead of an opaque graph
 // identifier they would first have to look up.
-func (l *CheckoutLifecycle) ResolveGraph(ctx context.Context, selector string) (store_sqlite.DedicatedGraph, error) {
+func (l *CheckoutLifecycle) ResolveGraph(ctx context.Context, selector string) (storage.DedicatedGraph, error) {
 	if l == nil || l.catalog == nil {
-		return store_sqlite.DedicatedGraph{}, errNoCatalog
+		return storage.DedicatedGraph{}, errNoCatalog
 	}
 	if selector == "" {
-		return store_sqlite.DedicatedGraph{}, fmt.Errorf("%w: no target given", ErrCheckoutNotTracked)
+		return storage.DedicatedGraph{}, fmt.Errorf("%w: no target given", ErrCheckoutNotTracked)
 	}
 	if dedicated, found, err := l.catalog.GetDedicatedGraph(ctx, selector); err != nil {
-		return store_sqlite.DedicatedGraph{}, err
+		return storage.DedicatedGraph{}, err
 	} else if found {
 		return dedicated, nil
 	}
 	prefix := l.ResolvePrefix(selector)
 	if prefix == "" {
-		return store_sqlite.DedicatedGraph{}, fmt.Errorf("%w: %s", ErrCheckoutNotTracked, selector)
+		return storage.DedicatedGraph{}, fmt.Errorf("%w: %s", ErrCheckoutNotTracked, selector)
 	}
 	dedicated, found, err := l.catalog.GetDedicatedGraph(ctx, GraphIDFor(prefix))
 	if err != nil {
-		return store_sqlite.DedicatedGraph{}, err
+		return storage.DedicatedGraph{}, err
 	}
 	if !found {
-		return store_sqlite.DedicatedGraph{}, fmt.Errorf(
+		return storage.DedicatedGraph{}, fmt.Errorf(
 			"%w: corpus %s has no dedicated graph", ErrCheckoutNotTracked, prefix)
 	}
 	return dedicated, nil
@@ -526,7 +526,7 @@ func (l *CheckoutLifecycle) ExplainView(ctx context.Context, path string) (ViewB
 	if err != nil {
 		return out, err
 	}
-	var owned, primary *store_sqlite.DedicatedGraph
+	var owned, primary *storage.DedicatedGraph
 	for i := range graphs {
 		if graphs[i].OwnerCheckoutID == checkout.CheckoutID {
 			owned = &graphs[i]
@@ -539,7 +539,7 @@ func (l *CheckoutLifecycle) ExplainView(ctx context.Context, path string) (ViewB
 		out.PrimaryGraphID = primary.GraphID
 	}
 
-	if checkout.State != store_sqlite.CheckoutStateReady {
+	if checkout.State != storage.CheckoutStateReady {
 		// Grace is read-only and never exact. Prefer the family's primary even
 		// when this checkout used to be dedicated; if the missing checkout owns
 		// that primary, the same corpus remains a fallback rather than being
@@ -556,7 +556,7 @@ func (l *CheckoutLifecycle) ExplainView(ctx context.Context, path string) (ViewB
 		return out, nil
 	}
 
-	if checkout.EffectiveMode != store_sqlite.CheckoutModeAutomatic {
+	if checkout.EffectiveMode != storage.CheckoutModeAutomatic {
 		out.Reason = "the checkout is dedicated, so its own corpus answers directly"
 		out.Chain = append(out.Chain, "mode is "+string(checkout.EffectiveMode)+": no layers are composed")
 		if owned != nil {
@@ -600,20 +600,20 @@ func (l *CheckoutLifecycle) ExplainView(ctx context.Context, path string) (ViewB
 // to itself.
 func (l *CheckoutLifecycle) checkoutForPath(
 	ctx context.Context, path string,
-) (store_sqlite.Checkout, bool, error) {
+) (storage.Checkout, bool, error) {
 	families, err := l.catalog.ListRepositoryFamilies(ctx)
 	if err != nil {
-		return store_sqlite.Checkout{}, false, err
+		return storage.Checkout{}, false, err
 	}
 	spellings := pathSpellings(path)
 	var (
-		best  store_sqlite.Checkout
+		best  storage.Checkout
 		found bool
 	)
 	for _, family := range families {
 		checkouts, err := l.catalog.ListCheckouts(ctx, family.FamilyID)
 		if err != nil {
-			return store_sqlite.Checkout{}, false, err
+			return storage.Checkout{}, false, err
 		}
 		for _, checkout := range checkouts {
 			if checkout.RootPath == "" {

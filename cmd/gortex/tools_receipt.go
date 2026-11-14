@@ -218,10 +218,11 @@ func attachReceiptPartB(receipt *contextBudgetReceipt) {
 		receipt.Note = "set GORTEX_SESSION_ID to capture this session's CLI verbs and safety steps"
 	}
 
-	sc, err := persistence.OpenSidecar(receiptSidecarPath())
-	if err != nil || sc == nil {
+	native, err := persistence.OpenSidecar(receiptSidecarPath())
+	if err != nil || native == nil {
 		return
 	}
+	var sc cliEventReader = native
 	defer func() { _ = sc.Close() }()
 
 	var events []persistence.CLIEvent

@@ -9,10 +9,10 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/pathkey"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Request-level freshness knobs. They are arguments of the request
@@ -407,7 +407,7 @@ func (s *Server) checkoutFreshness() checkoutFreshnessWaiter {
 // it published describes the tree it sampled.
 func (s *Server) awaitCheckoutFreshness(
 	ctx context.Context,
-	checkout store_sqlite.Checkout,
+	checkout storage.Checkout,
 	deadline time.Time,
 ) (bool, string) {
 	// One nil check for the whole wait. The helpers below and
@@ -785,7 +785,7 @@ func exactnessWithdrawnRefusal(reason string) error {
 // by that root and is never refused for a discovery pending elsewhere. The one
 // exception is a path inside a nested worktree that discovery has not
 // registered yet: only such a path is observed, so only it can be refused.
-func (s *Server) checkoutForRequestPath(ctx context.Context, path string) (store_sqlite.Checkout, bool, error) {
+func (s *Server) checkoutForRequestPath(ctx context.Context, path string) (storage.Checkout, bool, error) {
 	checkout, found, err := s.registeredCheckoutForPath(ctx, path)
 	if err != nil {
 		return checkout, false, err
@@ -801,7 +801,7 @@ func (s *Server) checkoutForRequestPath(ctx context.Context, path string) (store
 		// Registered catalog positives above remain usable. An unresolved configured
 		// identity is not a reason to allocate a checkout-observation job on a miss;
 		// startup admission will report identity-pending without guessing ownership.
-		return store_sqlite.Checkout{}, false, parentErr
+		return storage.Checkout{}, false, parentErr
 	}
 	// CWD observation establishes a session's scope. A different explicit
 	// path must pass that scope before allocation or coordinator activation,
@@ -815,10 +815,10 @@ func (s *Server) checkoutForRequestPath(ctx context.Context, path string) (store
 	}
 	observed, present, observeErr := s.lifecycle.ObserveCheckoutPath(ctx, path, authorize...)
 	if observeErr != nil {
-		return store_sqlite.Checkout{}, false, observeErr
+		return storage.Checkout{}, false, observeErr
 	}
 	if !present {
-		return store_sqlite.Checkout{}, false, parentErr
+		return storage.Checkout{}, false, parentErr
 	}
 	return observed, true, nil
 }

@@ -5,7 +5,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Which generation a retirement burst serves.
@@ -39,7 +39,7 @@ const (
 
 // retirementShapes reads the candidates' shapes for one burst; nil when the
 // catalog cannot answer, which leaves the cursor to choose.
-func (l *CheckoutLifecycle) retirementShapes(ctx context.Context, ordered []int64) map[int64]store_sqlite.RetirementCandidateShape {
+func (l *CheckoutLifecycle) retirementShapes(ctx context.Context, ordered []int64) map[int64]storage.RetirementCandidateShape {
 	if l.catalog == nil || len(ordered) == 0 {
 		return nil
 	}
@@ -53,7 +53,7 @@ func (l *CheckoutLifecycle) retirementShapes(ctx context.Context, ordered []int6
 // pickDeferredRetirement chooses the generation a burst serves next from the
 // newest-first candidates.
 func (l *CheckoutLifecycle) pickDeferredRetirement(
-	ordered []int64, shapes map[int64]store_sqlite.RetirementCandidateShape, now time.Time,
+	ordered []int64, shapes map[int64]storage.RetirementCandidateShape, now time.Time,
 ) int64 {
 	if len(ordered) == 0 {
 		return 0
@@ -80,7 +80,7 @@ func (l *CheckoutLifecycle) pickDeferredRetirement(
 		return l.nextDeferredRetirement(candidates)
 	}
 	for _, id := range ordered {
-		if shape, ok := shapes[id]; ok && shape.State == store_sqlite.ViewGenerationRetiring {
+		if shape, ok := shapes[id]; ok && shape.State == storage.ViewGenerationRetiring {
 			return id
 		}
 	}

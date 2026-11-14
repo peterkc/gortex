@@ -10,8 +10,8 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/gitstate"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/reconcile"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // ErrCheckoutMoved reports that a checkout changed state under an operation
@@ -62,7 +62,7 @@ type PromoteResult struct {
 // replaced or unknown ownership is retained rather than purged by prefix. The
 // journalled intent stays pending, which is what Retryable means.
 func (l *CheckoutLifecycle) PromoteCheckout(
-	ctx context.Context, checkoutID string, source store_sqlite.IntentSourceKind,
+	ctx context.Context, checkoutID string, source storage.IntentSourceKind,
 ) (PromoteResult, error) {
 	out, run, err := l.startPromoteCheckout(ctx, checkoutID, source)
 	if err != nil || run == nil {
@@ -80,14 +80,14 @@ func (l *CheckoutLifecycle) PromoteCheckout(
 // lifecycle-owned worker has been scheduled. PromoteCheckout is the
 // wait-by-default compatibility wrapper.
 func (l *CheckoutLifecycle) StartPromoteCheckout(
-	ctx context.Context, checkoutID string, source store_sqlite.IntentSourceKind,
+	ctx context.Context, checkoutID string, source storage.IntentSourceKind,
 ) (PromoteResult, error) {
 	out, _, err := l.startPromoteCheckout(ctx, checkoutID, source)
 	return out, err
 }
 
 func (l *CheckoutLifecycle) startPromoteCheckout(
-	ctx context.Context, checkoutID string, source store_sqlite.IntentSourceKind,
+	ctx context.Context, checkoutID string, source storage.IntentSourceKind,
 ) (PromoteResult, *modeTransitionRun, error) {
 	if l == nil || l.mi == nil {
 		return PromoteResult{}, nil, errors.New("indexer: checkout lifecycle is not wired")
@@ -100,19 +100,19 @@ func (l *CheckoutLifecycle) startPromoteCheckout(
 		return PromoteResult{}, nil, err
 	}
 	out := PromoteResult{CheckoutID: checkoutID}
-	if checkout.EffectiveMode == store_sqlite.CheckoutModeDedicated {
+	if checkout.EffectiveMode == storage.CheckoutModeDedicated {
 		out.Prefix = l.prefixForCheckout(ctx, checkoutID)
 		out.GraphID = GraphIDFor(out.Prefix)
 		return out, nil, nil
 	}
-	if checkout.State != store_sqlite.CheckoutStateReady {
+	if checkout.State != storage.CheckoutStateReady {
 		return out, nil, fmt.Errorf("%w: checkout %s is %s, not ready",
 			ErrCheckoutMoved, checkoutID, checkout.State)
 	}
 
-	var intent *store_sqlite.TrackingIntent
+	var intent *storage.TrackingIntent
 	if source != TrackSourceImplicit {
-		intent = &store_sqlite.TrackingIntent{
+		intent = &storage.TrackingIntent{
 			IntentID:      uuid.NewV7().String(),
 			CheckoutID:    checkoutID,
 			SourceKind:    source,
@@ -122,7 +122,7 @@ func (l *CheckoutLifecycle) startPromoteCheckout(
 		}
 	}
 	transition, err := l.beginModeChange(ctx, checkout,
-		store_sqlite.CheckoutModeDedicated, promotionTransitionCause, intent)
+		storage.CheckoutModeDedicated, promotionTransitionCause, intent)
 	if err != nil {
 		return out, nil, err
 	}
@@ -132,11 +132,11 @@ func (l *CheckoutLifecycle) startPromoteCheckout(
 }
 
 func (l *CheckoutLifecycle) promoteCheckoutTransition(
-	ctx context.Context, transition store_sqlite.IntentTransition,
+	ctx context.Context, transition storage.IntentTransition,
 ) (PromoteResult, error) {
 	out := PromoteResult{CheckoutID: transition.CheckoutID, TransitionID: transition.TransitionID}
 	if transition.Cause != promotionTransitionCause ||
-		transition.RequestedMode != store_sqlite.CheckoutModeDedicated {
+		transition.RequestedMode != storage.CheckoutModeDedicated {
 		return out, fmt.Errorf("indexer: transition %s is not a promotion", transition.TransitionID)
 	}
 	standing, found, err := l.catalog.GetIntentTransition(ctx, transition.CheckoutID)
@@ -148,9 +148,9 @@ func (l *CheckoutLifecycle) promoteCheckoutTransition(
 		if checkoutErr != nil {
 			return out, checkoutErr
 		}
-		if checkout.EffectiveMode != store_sqlite.CheckoutModeDedicated {
+		if checkout.EffectiveMode != storage.CheckoutModeDedicated {
 			return out, fmt.Errorf("%w: promotion transition %s is no longer standing",
-				store_sqlite.ErrCatalogStaleGuard, transition.TransitionID)
+				storage.ErrCatalogStaleGuard, transition.TransitionID)
 		}
 		out.Prefix = l.prefixForCheckout(ctx, checkout.CheckoutID)
 		if out.Prefix == "" {
@@ -161,20 +161,20 @@ func (l *CheckoutLifecycle) promoteCheckoutTransition(
 	}
 	if standing.TransitionID != transition.TransitionID ||
 		standing.Cause != promotionTransitionCause ||
-		standing.RequestedMode != store_sqlite.CheckoutModeDedicated {
+		standing.RequestedMode != storage.CheckoutModeDedicated {
 		return out, fmt.Errorf("%w: promotion transition %s was replaced",
-			store_sqlite.ErrCatalogStaleGuard, transition.TransitionID)
+			storage.ErrCatalogStaleGuard, transition.TransitionID)
 	}
 	transition = standing
 	if err := l.catalog.UpdateIntentTransitionProgress(ctx, transition.CheckoutID,
-		transition.TransitionID, store_sqlite.IntentTransitionRunning, "", l.clock().Unix()); err != nil {
+		transition.TransitionID, storage.IntentTransitionRunning, "", l.clock().Unix()); err != nil {
 		return out, err
 	}
 	checkout, err := l.checkoutStateOf(ctx, transition.CheckoutID)
 	if err != nil {
 		return out, l.promotionFailed(ctx, &out, transition, err)
 	}
-	if checkout.EffectiveMode == store_sqlite.CheckoutModeDedicated {
+	if checkout.EffectiveMode == storage.CheckoutModeDedicated {
 		out.Prefix = l.prefixForCheckout(ctx, checkout.CheckoutID)
 		if out.Prefix == "" {
 			return out, l.promotionFailed(ctx, &out, transition,
@@ -189,7 +189,7 @@ func (l *CheckoutLifecycle) promoteCheckoutTransition(
 		}
 		return out, nil
 	}
-	if checkout.State != store_sqlite.CheckoutStateReady {
+	if checkout.State != storage.CheckoutStateReady {
 		return out, l.promotionFailed(ctx, &out, transition, fmt.Errorf(
 			"%w: checkout %s is %s, not ready", ErrCheckoutMoved,
 			checkout.CheckoutID, checkout.State))
@@ -212,7 +212,7 @@ func (l *CheckoutLifecycle) promoteCheckoutTransition(
 	}
 
 	out.GraphID = GraphIDFor(out.Prefix)
-	row := store_sqlite.DedicatedGraph{
+	row := storage.DedicatedGraph{
 		GraphID:         out.GraphID,
 		OwnerCheckoutID: checkout.CheckoutID,
 		RepoPrefix:      out.Prefix,
@@ -242,7 +242,7 @@ func (l *CheckoutLifecycle) promoteCheckoutTransition(
 // the owner recheck and publication. Untrack/retrack cannot substitute a new
 // corpus between that check and the mode flip. No filesystem work or catalog
 // call runs under mi.mu.
-func (l *CheckoutLifecycle) publishPromotedCorpus(ctx context.Context, checkout store_sqlite.Checkout, row store_sqlite.DedicatedGraph, owned prefixOwnerWitness) error {
+func (l *CheckoutLifecycle) publishPromotedCorpus(ctx context.Context, checkout storage.Checkout, row storage.DedicatedGraph, owned prefixOwnerWitness) error {
 	l.mi.mu.RLock()
 	err := l.mi.validatePrefixCleanupOwnerLocked(row.RepoPrefix, &owned)
 	idx := l.mi.indexers[row.RepoPrefix]
@@ -269,7 +269,7 @@ func (l *CheckoutLifecycle) publishPromotedCorpus(ctx context.Context, checkout 
 				return err
 			}
 			if found && (binding.OwnerCheckoutID != checkout.CheckoutID || binding.FamilyID != checkout.FamilyID) {
-				return fmt.Errorf("%w: promotion graph %s belongs to another checkout", store_sqlite.ErrCatalogStaleGuard, row.GraphID)
+				return fmt.Errorf("%w: promotion graph %s belongs to another checkout", storage.ErrCatalogStaleGuard, row.GraphID)
 			}
 			if err := l.catalog.UpsertDedicatedGraph(ctx, row); err != nil {
 				return err
@@ -314,7 +314,7 @@ func sampleCheckout(ctx context.Context, root string) (checkoutSample, error) {
 // not hold still for a third, and the promotion has to fail while the
 // automatic view is still there to fall back on.
 func (l *CheckoutLifecycle) indexPromotedCorpus(
-	ctx context.Context, checkout store_sqlite.Checkout, prefix string,
+	ctx context.Context, checkout storage.Checkout, prefix string,
 ) (*IndexResult, int, prefixOwnerWitness, error) {
 	resampled := 0
 	var owned prefixOwnerWitness
@@ -379,14 +379,14 @@ func (l *CheckoutLifecycle) indexPromotedCorpus(
 // not a promotion to undo. Returning the failure would run the rollback over a
 // corpus every reader has already been pointed at, and would journal a retry
 // that finds the checkout dedicated and does nothing.
-func (l *CheckoutLifecycle) serveFromOwnCorpus(ctx context.Context, checkout store_sqlite.Checkout) error {
+func (l *CheckoutLifecycle) serveFromOwnCorpus(ctx context.Context, checkout storage.Checkout) error {
 	l.dropCoordinator(checkout.CheckoutID)
-	err := l.catalog.UpdateCheckoutState(ctx, store_sqlite.UpdateCheckoutStateRequest{
+	err := l.catalog.UpdateCheckoutState(ctx, storage.UpdateCheckoutStateRequest{
 		CheckoutID:    checkout.CheckoutID,
 		Incarnation:   checkout.Incarnation,
-		State:         store_sqlite.CheckoutStateReady,
-		DesiredMode:   store_sqlite.CheckoutModeDedicated,
-		EffectiveMode: store_sqlite.CheckoutModeDedicated,
+		State:         storage.CheckoutStateReady,
+		DesiredMode:   storage.CheckoutModeDedicated,
+		EffectiveMode: storage.CheckoutModeDedicated,
 		LastSeen:      l.clock().Unix(),
 	})
 	if err != nil {
@@ -414,7 +414,7 @@ func (l *CheckoutLifecycle) withdrawAutomaticRoute(ctx context.Context, checkout
 		withdraw = l.routeBarrier
 	}
 	if err := withdraw(ctx, checkoutID); err != nil &&
-		!errors.Is(err, store_sqlite.ErrCatalogNotFound) {
+		!errors.Is(err, storage.ErrCatalogNotFound) {
 		l.logger.Warn("checkout lifecycle: could not withdraw a promoted checkout's automatic route",
 			zap.String("checkout", checkoutID), zap.Error(err))
 	}
@@ -423,7 +423,7 @@ func (l *CheckoutLifecycle) withdrawAutomaticRoute(ctx context.Context, checkout
 // rollbackPromotion undoes what a failed promotion built. The automatic view
 // was never touched, so putting the corpus and the graph row back the way they
 // were is the whole of it.
-func (l *CheckoutLifecycle) rollbackPromotion(ctx context.Context, prefix, graphID string, checkout store_sqlite.Checkout, owned prefixOwnerWitness) error {
+func (l *CheckoutLifecycle) rollbackPromotion(ctx context.Context, prefix, graphID string, checkout storage.Checkout, owned prefixOwnerWitness) error {
 	if prefix == "" || owned.meta == nil || owned.prefix != prefix {
 		return errPrefixIdentityUnknown
 	}
@@ -451,11 +451,11 @@ func (l *CheckoutLifecycle) rollbackPromotion(ctx context.Context, prefix, graph
 			return err
 		}
 		if published {
-			return fmt.Errorf("%w: promotion rollback refuses published graph %s", store_sqlite.ErrCatalogStaleGuard, binding.GraphID)
+			return fmt.Errorf("%w: promotion rollback refuses published graph %s", storage.ErrCatalogStaleGuard, binding.GraphID)
 		}
 	}
 	if graphID != "" && graphID != GraphIDFor(prefix) {
-		return fmt.Errorf("%w: promotion rollback graph/prefix mismatch", store_sqlite.ErrCatalogStaleGuard)
+		return fmt.Errorf("%w: promotion rollback graph/prefix mismatch", storage.ErrCatalogStaleGuard)
 	}
 	if _, _, err := l.mi.purgeRepoOwnedChecked(ctx, owned, func() { l.detachWatcher(prefix) }); err != nil {
 		return fmt.Errorf("indexer: purge owned rolled-back repository %q: %w", prefix, err)
@@ -472,7 +472,7 @@ func (l *CheckoutLifecycle) rollbackPromotion(ctx context.Context, prefix, graph
 
 // rollbackPromotionOrLog retains cleanup errors alongside the primary failure.
 // Unknown/replaced ownership is a refusal to purge, never a successful cleanup.
-func (l *CheckoutLifecycle) rollbackPromotionOrLog(ctx context.Context, prefix, graphID string, checkout store_sqlite.Checkout, owned prefixOwnerWitness) error {
+func (l *CheckoutLifecycle) rollbackPromotionOrLog(ctx context.Context, prefix, graphID string, checkout storage.Checkout, owned prefixOwnerWitness) error {
 	err := l.rollbackPromotion(ctx, prefix, graphID, checkout, owned)
 	if err != nil {
 		l.logger.Warn("checkout lifecycle: could not roll back a failed promotion",
@@ -485,13 +485,13 @@ func (l *CheckoutLifecycle) rollbackPromotionOrLog(ctx context.Context, prefix, 
 // attempt left behind rather than refusing to start beside it.
 func (l *CheckoutLifecycle) beginModeChange(
 	ctx context.Context,
-	checkout store_sqlite.Checkout,
-	requested store_sqlite.CheckoutMode,
+	checkout storage.Checkout,
+	requested storage.CheckoutMode,
 	cause string,
-	trackingIntent *store_sqlite.TrackingIntent,
-) (store_sqlite.IntentTransition, error) {
+	trackingIntent *storage.TrackingIntent,
+) (storage.IntentTransition, error) {
 	now := l.clock().Unix()
-	transition := store_sqlite.IntentTransition{
+	transition := storage.IntentTransition{
 		TransitionID:       uuid.NewV7().String(),
 		CheckoutID:         checkout.CheckoutID,
 		Cause:              cause,
@@ -499,17 +499,17 @@ func (l *CheckoutLifecycle) beginModeChange(
 		PriorEffectiveMode: checkout.EffectiveMode,
 		RequestedMode:      requested,
 		PriorCheckoutState: checkout.State,
-		State:              store_sqlite.IntentTransitionPending,
+		State:              storage.IntentTransitionPending,
 		CreatedAt:          now,
 		LastProgress:       now,
 	}
 	standing, _, err := l.catalog.BeginIntentTransitionWithTrackingIntent(ctx,
-		store_sqlite.BeginIntentTransitionRequest{
+		storage.BeginIntentTransitionRequest{
 			Transition: transition, Incarnation: checkout.Incarnation,
 			TrackingIntent: trackingIntent,
 		})
 	if err != nil {
-		return store_sqlite.IntentTransition{}, err
+		return storage.IntentTransition{}, err
 	}
 	return standing, nil
 }
@@ -518,7 +518,7 @@ func (l *CheckoutLifecycle) beginModeChange(
 // what makes the same call a retry rather than a second request — and says so
 // on the result, since nothing about the checkout changed.
 func (l *CheckoutLifecycle) promotionFailed(
-	ctx context.Context, out *PromoteResult, transition store_sqlite.IntentTransition, cause error,
+	ctx context.Context, out *PromoteResult, transition storage.IntentTransition, cause error,
 ) error {
 	lastError := cause.Error()
 	var collision *PrefixCollisionError
@@ -527,7 +527,7 @@ func (l *CheckoutLifecycle) promotionFailed(
 			collision.Prefix, collision.ExistingPath)
 	}
 	err := l.catalog.UpdateIntentTransitionProgress(ctx, out.CheckoutID, transition.TransitionID,
-		store_sqlite.IntentTransitionPending, lastError, l.clock().Unix())
+		storage.IntentTransitionPending, lastError, l.clock().Unix())
 	if err != nil {
 		l.logger.Warn("checkout lifecycle: could not journal a failed promotion",
 			zap.String("checkout", out.CheckoutID), zap.Error(err))

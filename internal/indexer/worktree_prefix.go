@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 
 	"github.com/zzet/gortex/internal/gitstate"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/pathkey"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // The naming rule for a worktree that gets a corpus of its own.
@@ -177,16 +177,16 @@ func (l *CheckoutLifecycle) prefixHolder(ctx context.Context) func(string) (stri
 // checkoutStateOf reads one checkout row, reporting the not-tracked error
 // rather than a bare bool so every flow refuses an unknown identity the same
 // way.
-func (l *CheckoutLifecycle) checkoutStateOf(ctx context.Context, checkoutID string) (store_sqlite.Checkout, error) {
+func (l *CheckoutLifecycle) checkoutStateOf(ctx context.Context, checkoutID string) (storage.Checkout, error) {
 	if l.catalog == nil {
-		return store_sqlite.Checkout{}, errNoCatalog
+		return storage.Checkout{}, errNoCatalog
 	}
 	checkout, found, err := l.catalog.GetCheckout(ctx, checkoutID)
 	if err != nil {
-		return store_sqlite.Checkout{}, err
+		return storage.Checkout{}, err
 	}
 	if !found {
-		return store_sqlite.Checkout{}, fmt.Errorf("%w: checkout %s", ErrCheckoutNotTracked, checkoutID)
+		return storage.Checkout{}, fmt.Errorf("%w: checkout %s", ErrCheckoutNotTracked, checkoutID)
 	}
 	return checkout, nil
 }

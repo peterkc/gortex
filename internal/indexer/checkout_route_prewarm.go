@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // RoutePrewarmer loads, before a route flip, what the first request on the
@@ -17,15 +17,15 @@ type RoutePrewarmer func(ctx context.Context, generations []int64)
 // prewarmRoute runs the installed prewarmer for the stack a flip of slot to
 // generationID will route. It runs before the flip, on the flip's goroutine,
 // so a request that reads the flipped route finds its masks loaded.
-func (c *CheckoutCoordinator) prewarmRoute(ctx context.Context, route *store_sqlite.CheckoutRoute, slot store_sqlite.RouteSlot, generationID int64) {
+func (c *CheckoutCoordinator) prewarmRoute(ctx context.Context, route *storage.CheckoutRoute, slot storage.RouteSlot, generationID int64) {
 	if c == nil || c.prewarm == nil || route == nil || generationID <= 0 {
 		return
 	}
 	commit, dirty := route.CommitGenerationID, route.DirtyGenerationID
 	switch slot {
-	case store_sqlite.RouteSlotCommit:
+	case storage.RouteSlotCommit:
 		commit = generationID
-	case store_sqlite.RouteSlotDirty:
+	case storage.RouteSlotDirty:
 		dirty = generationID
 	default:
 		return

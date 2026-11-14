@@ -17,10 +17,10 @@ import (
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/fixtures"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/search"
+	"github.com/zzet/gortex/internal/storage"
 	"go.uber.org/zap"
 )
 
@@ -60,7 +60,7 @@ type ContractFollowupSnapshot struct {
 	// CaptureProjectionWitness captures exact selected physical inputs immediately
 	// before this job reads them. This callback and its job-local witness never
 	// enter the owned actor checkpoint; frozen/custom snapshots may omit it.
-	CaptureProjectionWitness func(context.Context) (*store_sqlite.PayloadInputWitness, error)
+	CaptureProjectionWitness func(context.Context) (*storage.PayloadInputWitness, error)
 	// projectionProofRequired is enabled only by a carried-value consumer. The
 	// original physical convergence path must not be pinned to one job-start
 	// generation revision: it can legitimately re-prove moving reads in R0/R1.
@@ -112,7 +112,7 @@ type ContractFollowupSnapshot struct {
 	ReceiptWindowClose func(map[string]ContractReceiptStamp) (time.Time, bool)
 	// WindowLastCloses reports the primary paths last known closes before the
 	// proof ended, plus paths whose bounded history has no such close.
-	WindowLastCloses func([]string, time.Time) ([]store_sqlite.ContractCoreWindowClose, []string)
+	WindowLastCloses func([]string, time.Time) ([]storage.ContractCoreWindowClose, []string)
 	// ReceiptContents reads the contract content of each stamped path's
 	// receipt row and of its accepted predecessor, keyed by receipt
 	// fingerprint. Nil means no move is known to keep a file's contract
@@ -149,11 +149,13 @@ const (
 )
 
 type ContractFollowupRequest struct {
-	Snapshot ContractFollowupSnapshot
+	OpenEvidence func(string) (graph.Store, error)
+	Snapshot     ContractFollowupSnapshot
 	// Explicit full rebuild reason makes boundary-edit cost visible. Unchanged
 	// identity reuses the exact attachment upstream and must schedule no worker.
 	RebuildReason          ContractFollowupRebuildReason
-	Payload, Catalog       *store_sqlite.Store
+	Payload                generationPayloadStore
+	Catalog                contractPublicationStore
 	Registry               *parser.Registry
 	Config                 config.IndexConfig
 	Logger                 *zap.Logger
@@ -226,14 +228,16 @@ type ContractFollowupReport struct {
 // ContractFollowupTarget reserves one independently published repository payload.
 // Catalog is the exact selected receiver handle, not an actor-latest lookup.
 type ContractFollowupTarget struct {
-	Key              graph.ContractAttachmentKey
-	Work             []graph.ContractWork
-	Payload, Catalog *store_sqlite.Store
+	Key     graph.ContractAttachmentKey
+	Work    []graph.ContractWork
+	Payload generationPayloadStore
+	Catalog contractPublicationStore
 }
 
 // ContractFollowupBatchRequest uses one proof-bound cohort and source lifetime.
 // Snapshot.Key/Work are ignored; target keys and work remain independent.
 type ContractFollowupBatchRequest struct {
+	OpenEvidence           func(string) (graph.Store, error)
 	Snapshot               ContractFollowupSnapshot
 	Targets                []ContractFollowupTarget
 	RebuildReason          ContractFollowupRebuildReason
@@ -273,8 +277,8 @@ type ContractFollowupBatchReport struct {
 }
 
 type contractFollowupPrepared struct {
-	projectionWitness *store_sqlite.PayloadInputWitness
-	publications      []store_sqlite.ContractAttachmentPublishTarget
+	projectionWitness *storage.PayloadInputWitness
+	publications      []storage.ContractAttachmentPublishTarget
 	proof             *ContractPublishedCohort
 	coverage          contractCoveredWork
 	work              []graph.ContractWork
@@ -282,7 +286,7 @@ type contractFollowupPrepared struct {
 	matched           []contracts.CrossLink
 	evidence          *contractFollowupEvidence
 	report            ContractFollowupReport
-	scratch           *store_sqlite.Store
+	scratch           contractEvidenceStore
 	scratchDir        string
 }
 
@@ -300,7 +304,7 @@ func RunContractFollowupBatch(ctx context.Context, req ContractFollowupBatchRequ
 	seen := make(map[graph.ContractAttachmentKey]bool)
 	payloads := make(map[int64]bool)
 	for _, target := range req.Targets {
-		if target.Payload == nil || target.Catalog == nil || target.Payload.ViewGeneration() <= 0 || seen[target.Key] || payloads[target.Payload.ViewGeneration()] {
+		if (target.Payload == nil || target.Payload.IsNilGenerationHandle()) || (target.Catalog == nil || target.Catalog.IsNilGenerationHandle()) || target.Payload.ViewGeneration() <= 0 || seen[target.Key] || payloads[target.Payload.ViewGeneration()] {
 			return batch, fmt.Errorf("contract followup batch: invalid or duplicate target")
 		}
 		seen[target.Key] = true
@@ -376,7 +380,7 @@ func RunContractFollowupBatch(ctx context.Context, req ContractFollowupBatchRequ
 				return ctx.Err()
 			}
 		}
-		single := ContractFollowupRequest{Snapshot: snap, RebuildReason: req.RebuildReason, Payload: target.Payload, Catalog: target.Catalog, Registry: req.Registry, Config: req.Config, Logger: req.Logger, Leases: req.Leases, WorkspaceID: req.WorkspaceID, ProjectID: req.ProjectID, RepoConfigs: req.RepoConfigs, ScratchParent: req.ScratchParent, Yield: yield,
+		single := ContractFollowupRequest{OpenEvidence: req.OpenEvidence, Snapshot: snap, RebuildReason: req.RebuildReason, Payload: target.Payload, Catalog: target.Catalog, Registry: req.Registry, Config: req.Config, Logger: req.Logger, Leases: req.Leases, WorkspaceID: req.WorkspaceID, ProjectID: req.ProjectID, RepoConfigs: req.RepoConfigs, ScratchParent: req.ScratchParent, Yield: yield,
 			PublishedEpoch: req.PublishedEpoch, WaitPublished: req.WaitPublished, OtherActorWaiting: req.OtherActorWaiting, convergenceHooks: req.convergenceHooks, delta: req.delta}
 		report, targetErr := buildContractFollowupPrepared(ctx, single, prepared)
 		batch.Targets[i].Report = report
@@ -386,7 +390,7 @@ func RunContractFollowupBatch(ctx context.Context, req ContractFollowupBatchRequ
 		if priority[target.Key.RepoPrefix] {
 			candidate := prepared.publications[len(prepared.publications)-1]
 			started := time.Now()
-			results, publishErr := candidate.Store.PublishContractAttachmentsWithInputsContext(ctx, []store_sqlite.ContractAttachmentPublishTarget{candidate}, started.Unix())
+			results, publishErr := candidate.Store.(contractPublicationStore).PublishContractAttachmentsWithInputsContext(ctx, []storage.ContractAttachmentPublishTarget{candidate}, started.Unix())
 			if publishErr != nil {
 				return fail(contractProjectionPublicationError(publishErr))
 			}
@@ -403,7 +407,7 @@ func RunContractFollowupBatch(ctx context.Context, req ContractFollowupBatchRequ
 	// for any exact key already committed above. This is the complete cohort's
 	// coherent validation point, not a claim all targets first became ready here.
 	started := time.Now()
-	results, publishErr := prepared.publications[0].Store.PublishContractAttachmentsWithInputsContext(ctx, prepared.publications, started.Unix())
+	results, publishErr := prepared.publications[0].Store.(contractPublicationStore).PublishContractAttachmentsWithInputsContext(ctx, prepared.publications, started.Unix())
 	if publishErr != nil {
 		return fail(contractProjectionPublicationError(publishErr))
 	}
@@ -450,7 +454,7 @@ func runContractFollowupPrepared(ctx context.Context, req ContractFollowupReques
 		defer req.Snapshot.Release()
 		req.Snapshot.Release = func() {}
 	}
-	if req.Leases != nil && req.Payload != nil && req.Payload.ViewGeneration() > 0 {
+	if req.Leases != nil && (req.Payload != nil && !req.Payload.IsNilGenerationHandle()) && req.Payload.ViewGeneration() > 0 {
 		lease := req.Leases.Acquire(req.Payload.ViewGeneration())
 		defer lease.Release()
 	}
@@ -469,7 +473,7 @@ func runContractFollowupPrepared(ctx context.Context, req ContractFollowupReques
 	return report, nil
 }
 
-func acceptContractPublication(report *ContractFollowupReport, result store_sqlite.ContractAttachmentPublication, elapsed time.Duration) {
+func acceptContractPublication(report *ContractFollowupReport, result storage.ContractAttachmentPublication, elapsed time.Duration) {
 	report.PayloadGeneration = result.PayloadGeneration
 	report.UnusedPayloadGeneration = result.UnusedPayloadGeneration
 	report.PublishDuration, report.Published = elapsed, true
@@ -480,7 +484,7 @@ func buildContractFollowupPrepared(ctx context.Context, req ContractFollowupRequ
 	if snap.Release != nil {
 		defer snap.Release()
 	}
-	if ctx == nil || snap.Release == nil || snap.Core == nil || snap.ReadAccepted == nil || snap.ReadCoreFile == nil || req.Payload == nil || req.Catalog == nil || req.Leases == nil || req.Yield == nil {
+	if ctx == nil || snap.Release == nil || snap.Core == nil || snap.ReadAccepted == nil || snap.ReadCoreFile == nil || (req.Payload == nil || req.Payload.IsNilGenerationHandle()) || (req.Catalog == nil || req.Catalog.IsNilGenerationHandle()) || req.Leases == nil || req.Yield == nil {
 		return report, fmt.Errorf("contract followup: incomplete selected handoff")
 	}
 	if err := ctx.Err(); err != nil {
@@ -550,7 +554,7 @@ func buildContractFollowupPrepared(ctx context.Context, req ContractFollowupRequ
 			scopes[file.RepoPrefix] = [2]string{file.WorkspaceID, file.ProjectID}
 		}
 		prepareStart := time.Now()
-		var nameWitness *store_sqlite.PayloadInputWitness
+		var nameWitness *storage.PayloadInputWitness
 		if req.delta != nil && snap.positiveNameCapture != nil && snap.CaptureProjectionWitness != nil {
 			budget := min(int64(1<<20), req.delta.retainedBudget())
 			if req.delta.cache != nil {
@@ -760,7 +764,7 @@ func buildContractFollowupPrepared(ctx context.Context, req ContractFollowupRequ
 	if coverageErr != nil {
 		return report, coverageErr
 	}
-	if err := req.Payload.SetProducerState(store_sqlite.ProducerCompleteness{Producer: "graph.contracts", State: store_sqlite.ProducerStateComplete}); err != nil {
+	if err := req.Payload.SetProducerState(storage.ProducerCompleteness{Producer: "graph.contracts", State: storage.ProducerStateComplete}); err != nil {
 		return report, err
 	}
 	tokens := make([]string, 0, len(covered))
@@ -769,7 +773,7 @@ func buildContractFollowupPrepared(ctx context.Context, req ContractFollowupRequ
 	}
 	attachment := graph.ContractAttachment{RepoPrefix: snap.Key.RepoPrefix, CheckoutID: snap.Key.CheckoutID, InputVersion: snap.Key.InputVersion, InputFingerprint: snap.Key.InputFingerprint, PayloadGeneration: generation, CompletedTokens: tokens}
 	report.PayloadDuration = time.Since(payloadStart)
-	prepared.publications = append(prepared.publications, store_sqlite.ContractAttachmentPublishTarget{
+	prepared.publications = append(prepared.publications, storage.ContractAttachmentPublishTarget{
 		Store: req.Catalog, Expected: logical, Witnesses: snap.Inputs, Attachment: attachment, Work: covered, ProjectionWitness: prepared.projectionWitness,
 	})
 	return report, nil
@@ -1130,7 +1134,7 @@ func (e *contractFollowupEvidence) AddBatch(nodes []*graph.Node, edges []*graph.
 // lookup is checked and sticky; writes target the private scratch store.
 type contractFollowupEvidence struct {
 	graph.Store
-	scratch                    *store_sqlite.Store
+	scratch                    contractEvidenceStore
 	writtenNodes, writtenEdges int
 	outputIDs                  map[string]bool
 	outputEdges                map[string]*graph.Edge
@@ -1897,7 +1901,7 @@ func (e *contractFollowupEvidence) constantValues(ids []string) (map[string]stri
 // Selected row movement is the existing stale/supersession path, not a new
 // failure/retirement policy. Keep the store cause available to diagnostics.
 func contractProjectionPublicationError(err error) error {
-	if errors.Is(err, store_sqlite.ErrPayloadInputChanged) {
+	if errors.Is(err, storage.ErrPayloadInputChanged) {
 		return fmt.Errorf("%w: %w", graph.ErrContractProjectionStale, err)
 	}
 	return err

@@ -12,7 +12,7 @@ import (
 
 func TestWriteMasksPreservesMetadataHeavyPayloadAndOrphanClaims(t *testing.T) {
 	store := builderOpenStore(t, "light-mask-parity")
-	builder := &SparseGenerationBuilder{Store: store, Logger: zap.NewNop()}
+	builder := &SparseGenerationBuilder{Catalog: testCatalog(store), Store: store, Logger: zap.NewNop()}
 	covered := builderGraphPath(builderRepoPrefix, "covered.go")
 	extra := builderGraphPath(builderRepoPrefix, "payload-only.go")
 	contextPath := builderGraphPath(builderRepoPrefix, "context.go")

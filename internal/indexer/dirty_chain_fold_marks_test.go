@@ -87,7 +87,7 @@ func installDaemonBuildLaneBusy(f *coordinatorFixture, c *CheckoutCoordinator) {
 func TestSteppedFoldStepsBetweenTheEditingAndTheFoldMark(t *testing.T) {
 	f, c, l := mcpChainFixtureDefaults(t, builderTreeA())
 	installDaemonBuildLaneBusy(f, c)
-	probe := &walMarkProbe{inner: storeChainFoldBackend{store: f.store}, store: f.store, mark: foldMarksEditingMark}
+	probe := &walMarkProbe{inner: storeChainFoldBackend{store: f.store, catalog: testCatalog(f.store)}, store: f.store, mark: foldMarksEditingMark}
 	c.compaction.mu.Lock()
 	c.compaction.backend = probe
 	c.compaction.mu.Unlock()

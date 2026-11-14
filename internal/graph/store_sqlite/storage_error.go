@@ -1,5 +1,7 @@
 package store_sqlite
 
+import "github.com/zzet/gortex/internal/storage"
+
 import (
 	"context"
 	"errors"
@@ -8,27 +10,7 @@ import (
 	sqlite "modernc.org/sqlite"
 )
 
-// StorageError identifies a failure reported by the persistent graph store.
-// It is both returned by checked write capabilities and used as the payload of
-// legacy Store-method panics. That distinction lets index/build boundaries
-// recover storage failures without swallowing programmer or extractor panics.
-type StorageError struct {
-	err error
-}
-
-func (e *StorageError) Error() string {
-	if e == nil || e.err == nil {
-		return "store_sqlite: storage operation failed"
-	}
-	return "store_sqlite: " + e.err.Error()
-}
-
-func (e *StorageError) Unwrap() error {
-	if e == nil {
-		return nil
-	}
-	return e.err
-}
+type StorageError = storage.StorageError
 
 // isSQLiteFullFailure recognizes the actual SQLite driver cause, not errors
 // that merely resemble a full-volume failure or implement a Code method.
@@ -71,18 +53,14 @@ func wrapStorageError(err error) error {
 	if errors.As(err, &wrapped) {
 		return err
 	}
-	return &StorageError{err: err}
+	return &StorageError{Err: err}
 }
 
 // StorageErrorFromPanic recognizes only panics emitted by the SQLite store.
 // Arbitrary error-valued, runtime, parser, and programmer panics deliberately
 // return ok=false and must continue propagating.
 func StorageErrorFromPanic(recovered any) (err error, ok bool) {
-	storageErr, ok := recovered.(*StorageError)
-	if !ok || storageErr == nil {
-		return nil, false
-	}
-	return storageErr, true
+	return storage.StorageErrorFromPanic(recovered)
 }
 
 // SafeStorageFailureReason returns a bounded, path-free message suitable for

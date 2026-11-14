@@ -250,7 +250,7 @@ func newPrimaryDesignationBenchmarkLifecycle(
 		b.Fatal(err)
 	}
 	mi := NewMultiIndexer(store, newTestRegistry(), search.NewNull(), manager, zap.NewNop())
-	lifecycle, err := NewCheckoutLifecycle(CheckoutLifecycleConfig{
+	lifecycle, err := NewCheckoutLifecycle(CheckoutLifecycleConfig{Catalog: testCatalog(store),
 		MultiIndexer: mi, ConfigManager: manager, Graph: store, Logger: zap.NewNop(),
 	})
 	if err != nil {

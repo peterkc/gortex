@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 // Derivation stamps: which version of each derived pass wrote a generation's
@@ -59,8 +58,8 @@ var derivationStampsForBuild = currentDerivationStamps
 // stampBuiltGeneration records, on a building generation, the versions its
 // rows were derived with. It runs before publication (a published generation
 // refuses the write).
-func stampBuiltGeneration(ctx context.Context, handle *store_sqlite.Store) error {
-	if handle == nil {
+func stampBuiltGeneration(ctx context.Context, handle generationPayloadStore) error {
+	if handle == nil || handle.IsNilGenerationHandle() {
 		return nil
 	}
 	stamps := derivationStampsForBuild()
@@ -77,13 +76,13 @@ func stampBuiltGeneration(ctx context.Context, handle *store_sqlite.Store) error
 // each pass had across the chain it folds: its rows are theirs, so a pass one
 // of them was not stamped for is left unstamped (read as version 0) and the
 // correction re-derives it.
-func stampFoldedGeneration(ctx context.Context, store *store_sqlite.Store, chain []int64, handle *store_sqlite.Store) error {
-	if store == nil || handle == nil || len(chain) == 0 {
+func stampFoldedGeneration(ctx context.Context, store GenerationBuilderStore, chain []int64, handle generationPayloadStore) error {
+	if store == nil || store.IsNilGenerationHandle() || handle == nil || handle.IsNilGenerationHandle() || len(chain) == 0 {
 		return nil
 	}
 	folded := currentDerivationStamps()
 	for _, generationID := range chain {
-		stamps, err := store.AtGeneration(generationID).DerivationStamps(ctx)
+		stamps, err := generationAt(store, generationID).DerivationStamps(ctx)
 		if err != nil {
 			return fmt.Errorf("indexer: read derivation stamps of generation %d: %w", generationID, err)
 		}

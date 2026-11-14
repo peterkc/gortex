@@ -8,8 +8,8 @@ import (
 	"unsafe"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // contractInventoryProjection belongs to one captured job, with its existing
@@ -27,9 +27,9 @@ type contractInventoryProjectionEntry struct {
 	trusted       bool
 	physicalReads int
 	core          graph.Reader
-	handles       []*store_sqlite.Store
-	revisions     []store_sqlite.PayloadInputRevision
-	composition   []store_sqlite.PayloadInputRevision
+	handles       []generationPayloadStore
+	revisions     []storage.PayloadInputRevision
+	composition   []storage.PayloadInputRevision
 	rows          map[string]graph.FileMetaRow
 	bytes         int64
 }
@@ -43,8 +43,8 @@ type contractInventoryValues struct {
 }
 
 type contractInventoryValueEntry struct {
-	revisions   []store_sqlite.PayloadInputRevision
-	composition []store_sqlite.PayloadInputRevision
+	revisions   []storage.PayloadInputRevision
+	composition []storage.PayloadInputRevision
 	rows        map[string]graph.FileMetaRow
 	bytes       int64
 	// The current capture's physical projection reads, independent of the
@@ -96,7 +96,7 @@ func (p *contractInventoryProjection) seed(values *contractInventoryValues) {
 	}
 }
 
-func newContractInventoryProjection(readers map[string]graph.Reader, handles map[string][]*store_sqlite.Store) *contractInventoryProjection {
+func newContractInventoryProjection(readers map[string]graph.Reader, handles map[string][]generationPayloadStore) *contractInventoryProjection {
 	p := &contractInventoryProjection{entries: make(map[string]*contractInventoryProjectionEntry, len(readers))}
 	for repo, reader := range readers {
 		p.entries[repo] = &contractInventoryProjectionEntry{core: reader, handles: slices.Clone(handles[repo]), trusted: contractInventoryCompositionCovered(reader, handles[repo])}
@@ -104,8 +104,8 @@ func newContractInventoryProjection(readers map[string]graph.Reader, handles map
 	return p
 }
 
-func contractInventoryRevisions(ctx context.Context, handles []*store_sqlite.Store) ([]store_sqlite.PayloadInputRevision, error) {
-	out := make([]store_sqlite.PayloadInputRevision, len(handles))
+func contractInventoryRevisions(ctx context.Context, handles []generationPayloadStore) ([]storage.PayloadInputRevision, error) {
+	out := make([]storage.PayloadInputRevision, len(handles))
 	for i, handle := range handles {
 		var err error
 		out[i], err = handle.PayloadInputRevisionContext(ctx)
@@ -160,7 +160,7 @@ func (p *contractInventoryProjection) readSnapshot(ctx context.Context, repo str
 		return nil, err
 	}
 	if entry.trusted && known && slices.Equal(before, after) {
-		charge := contractInventoryRowsCharge(rows) + contractDeltaAllocation(int64(cap(after)+cap(composition))*int64(unsafe.Sizeof(store_sqlite.PayloadInputRevision{})))
+		charge := contractInventoryRowsCharge(rows) + contractDeltaAllocation(int64(cap(after)+cap(composition))*int64(unsafe.Sizeof(storage.PayloadInputRevision{})))
 		if charge <= int64(contractFollowupCompactLimit)-p.bytes {
 			entry.rows = cloneContractInventoryRows(rows)
 			entry.revisions = after
@@ -197,13 +197,13 @@ func cloneContractInventoryRows(rows map[string]graph.FileMetaRow) map[string]gr
 // physical clocks. Never unwrap one merely because it exposes a borrowed core.
 // The actual built-in overlay composition must consist only of the supplied
 // physical stores and generation layers; an editor/memory layer falls back.
-func contractInventoryCompositionCovered(reader graph.Reader, handles []*store_sqlite.Store) bool {
-	covered := func(h *store_sqlite.Store) bool {
-		if h == nil {
+func contractInventoryCompositionCovered(reader graph.Reader, handles []generationPayloadStore) bool {
+	covered := func(h generationPayloadStore) bool {
+		if h == nil || h.IsNilGenerationHandle() {
 			return false
 		}
 		for _, input := range handles {
-			if input != nil && input.PayloadInputRevision() == h.PayloadInputRevision() {
+			if (input != nil && !input.IsNilGenerationHandle()) && input.PayloadInputRevision() == h.PayloadInputRevision() {
 				return true
 			}
 		}
@@ -215,11 +215,15 @@ func contractInventoryCompositionCovered(reader graph.Reader, handles []*store_s
 			return false
 		}
 		switch v := r.(type) {
-		case *store_sqlite.Store:
-			return covered(v)
+		case generationPayloadStore:
+			return (v != nil && !v.IsNilGenerationHandle()) && v.SharesSymbolSearchCore(r) && covered(v)
 		case *graph.OverlaidView:
 			layer, ok := v.LayerReader().(*graphview.GenerationLayer)
-			return ok && layer != nil && covered(layer.ProjectionHandle()) && visit(v.Base(), depth+1)
+			if !ok || layer == nil {
+				return false
+			}
+			handle, ok := layer.ProjectionHandle().(generationPayloadStore)
+			return ok && covered(handle) && visit(v.Base(), depth+1)
 		default:
 			return false
 		}
@@ -229,19 +233,24 @@ func contractInventoryCompositionCovered(reader graph.Reader, handles []*store_s
 
 // The same physical handle set may serve a different overlay precedence.
 // Record the exact built-in leaf-to-layer chain without retaining its readers.
-func contractInventoryCompositionValues(reader graph.Reader, depth int) ([]store_sqlite.PayloadInputRevision, bool) {
+func contractInventoryCompositionValues(reader graph.Reader, depth int) ([]storage.PayloadInputRevision, bool) {
 	if depth > graphview.MaxGenerationAncestryDepth+graphview.MaxDirtyChainDepth {
 		return nil, false
 	}
-	switch r := reader.(type) {
-	case *store_sqlite.Store:
-		if r == nil {
+	if r, ok := reader.(generationPayloadStore); ok {
+		if r.IsNilGenerationHandle() || !r.SharesSymbolSearchCore(reader) {
 			return nil, false
 		}
-		return []store_sqlite.PayloadInputRevision{r.PayloadInputRevision()}, true
+		return []storage.PayloadInputRevision{r.PayloadInputRevision()}, true
+	}
+	switch r := reader.(type) {
 	case *graph.OverlaidView:
 		layer, ok := r.LayerReader().(*graphview.GenerationLayer)
-		if !ok || layer == nil || layer.ProjectionHandle() == nil || layer.ProjectionRevision() != layer.ProjectionHandle().PayloadInputRevision() {
+		if !ok || layer == nil {
+			return nil, false
+		}
+		handle := layer.ProjectionHandle()
+		if handle == nil || handle.IsNilGenerationHandle() || layer.ProjectionRevision() != handle.PayloadInputRevision() {
 			return nil, false
 		}
 		base, ok := contractInventoryCompositionValues(r.Base(), depth+1)

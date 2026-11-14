@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/reconcile"
+	"github.com/zzet/gortex/internal/storage"
 	"go.uber.org/zap"
 )
 
@@ -62,7 +62,7 @@ type repositoryCleanupState struct {
 	mu            sync.Mutex
 	graphID       string
 	cause         string
-	identity      store_sqlite.RepositoryCleanupIdentity
+	identity      storage.RepositoryCleanupIdentity
 	owner         *graphview.RepositoryDrain
 	refs          *repositoryRefViewDrain
 	lane          *repositoryCleanupLane
@@ -270,13 +270,12 @@ func (l *CheckoutLifecycle) releaseRepositoryGraph(ctx context.Context, graphID 
 	// Newest-first retirement removes child references before parents. Its
 	// existing atomic fence also catches an allocated-before-Join late owner.
 	for _, id := range ids {
-		if err := payload.RetirePayloadGeneration(ctx, id, l.leases.InUse); err != nil && !errors.Is(err, store_sqlite.ErrCatalogNotFound) {
+		if err := payload.RetirePayloadGeneration(ctx, id, l.leases.InUse); err != nil && !errors.Is(err, storage.ErrCatalogNotFound) {
 			// A sweep that stopped on its own budget is a YIELD, not a
 			// failure: the generation keeps its retiring fence, its rows are
 			// a strict subset of what they were, and the next pass resumes
-			// from the chunk this one stopped on
-			// (store_sqlite/payload_generation_sweep.go:72-85, which names
-			// this call site as the one caller that could not resume it).
+			// from the chunk this one stopped on (see
+			// storage.ErrPayloadSweepBudgetExhausted).
 			// Reported as any other error it would reach reconcile/saga.go,
 			// which skips DeleteDedicatedGraph and turns a slow untrack into
 			// a failed one; reported as pending it goes back on the cleanup
@@ -287,7 +286,7 @@ func (l *CheckoutLifecycle) releaseRepositoryGraph(ctx context.Context, graphID 
 			// error only for a pure pending chain, so joining the store's
 			// sentinel here would make a yield a hard untrack error again.
 			// The yield's own text is carried instead.
-			if errors.Is(err, store_sqlite.ErrPayloadSweepBudgetExhausted) {
+			if errors.Is(err, storage.ErrPayloadSweepBudgetExhausted) {
 				return fmt.Errorf("%w: graph %s generation %d retirement yielded on its sweep budget: %v",
 					ErrRepositoryCleanupPending, graphID, id, err)
 			}
@@ -484,7 +483,7 @@ func (l *CheckoutLifecycle) finalizeRepositoryCleanupState(ctx context.Context, 
 	// closure. Its exact channel capability also fences direct runtime owner
 	// replacement; a matching owner tuple is not sufficient authority.
 	if l.dedicatedBaseCleanupRuntime != nil {
-		owner := store_sqlite.DedicatedBaseOwner{CheckoutID: identity.CheckoutID, Incarnation: identity.Incarnation}
+		owner := storage.DedicatedBaseOwner{CheckoutID: identity.CheckoutID, Incarnation: identity.Incarnation}
 		if err := l.dedicatedBaseCleanupRuntime.FinalizeDedicatedBaseOwner(identity.GraphID, owner, state.publisher); err != nil {
 			return false, err
 		}

@@ -842,7 +842,7 @@ func newTwoRepoServer(t *testing.T) (*Server, string) {
 	eng.SetSearch(backend)
 
 	flagVal := true
-	srv := NewServer(eng, store, nil, nil, zap.NewNop(), nil, MultiRepoOptions{
+	srv := NewServer(eng, store, nil, nil, zap.NewNop(), nil, MultiRepoOptions{Catalog: store.Catalog(),
 		MultiIndexer:        mi,
 		ConfigManager:       cm,
 		ScopeIntentDefaults: &flagVal,

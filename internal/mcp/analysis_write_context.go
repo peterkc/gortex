@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 func bindAnalysisWriteContext(writer graph.AnalysisGenerationStore, ctx context.Context) graph.AnalysisGenerationStore {
@@ -13,7 +12,7 @@ func bindAnalysisWriteContext(writer graph.AnalysisGenerationStore, ctx context.
 	// method while overriding publication or writes; its promoted method would
 	// return the raw Store and erase those semantics. Unknown/decorated writers
 	// retain their existing owned fallback, without an interruptibility claim.
-	if store, ok := writer.(*store_sqlite.Store); ok {
+	if store, ok := writer.(analysisWriteBinder); ok && (store.IsNilGenerationHandle() || store.SharesSymbolSearchCore(writer)) {
 		return store.BindAnalysisWriteContext(ctx)
 	}
 	return writer // Legacy writer remains actually owned, without a bound claim.

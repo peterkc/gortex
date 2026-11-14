@@ -9,7 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -83,9 +83,9 @@ type Materializer struct {
 	// indexed corpus through it and derives one pinned handle per routed
 	// generation, so which generation the handle it was given happens to
 	// be on does not matter.
-	Store *store_sqlite.Store
+	Store MaterializerStore
 	// Catalog answers what the checkout is routed to.
-	Catalog *store_sqlite.Catalog
+	Catalog materializerCatalog
 	// Leases pins the generations a materialized view reads. Retirement
 	// consults the same manager, so a generation under a live view
 	// cannot be swept.
@@ -97,7 +97,7 @@ type Materializer struct {
 	// diagnosable. nil silences it.
 	Logger *zap.Logger
 
-	newGenerationLayer       func(context.Context, *store_sqlite.Store) (*GenerationLayer, error)
+	newGenerationLayer       func(context.Context, GenerationLayerHandle) (*GenerationLayer, error)
 	contractAttachmentReader graph.ContractAttachmentReader
 
 	// layerCache keeps each published generation's masks across requests so
@@ -131,7 +131,7 @@ type GenerationSource struct {
 	CheckoutID string
 	// Handle is pinned to Generation, so every index it queries answers
 	// with that generation's rows alone.
-	Handle *store_sqlite.Store
+	Handle GenerationSourceHandle
 	// Layer is the same ownership contract the composed reader applies
 	// for this generation: which paths it claims and which identities it
 	// speaks for.
@@ -154,7 +154,7 @@ type RepoView struct {
 	CheckoutRouteEpoch int64
 	// checkoutRoute is the exact row already pinned by materialization. It
 	// supplies refused-mutation policy evidence without a later catalog read.
-	checkoutRoute store_sqlite.CheckoutRoute
+	checkoutRoute storage.CheckoutRoute
 	// Reader is the composed graph: the indexed corpus with the
 	// checkout's routed generations stacked on it.
 	Reader graph.Reader
@@ -165,16 +165,16 @@ type RepoView struct {
 	sources     []GenerationSource
 	// contractStore is used only by lazy contract consumers, never by ordinary
 	// view materialization. It derives the inherited mutable-corpus handle.
-	contractStore *store_sqlite.Store
+	contractStore MaterializerStore
 	lease         *Lease
 	closeOnce     sync.Once
 }
 
 // CheckoutMutationRoute returns the immutable route pinned by this checkout
 // view. Ref views or manually assembled handles have no such evidence.
-func (v *RepoView) CheckoutMutationRoute() (store_sqlite.CheckoutRoute, bool) {
+func (v *RepoView) CheckoutMutationRoute() (storage.CheckoutRoute, bool) {
 	if v == nil || v.checkoutRoute.RouteEpoch <= 0 || v.checkoutRoute.RouteEpoch != v.CheckoutRouteEpoch {
-		return store_sqlite.CheckoutRoute{}, false
+		return storage.CheckoutRoute{}, false
 	}
 	return v.checkoutRoute, true
 }
@@ -420,7 +420,7 @@ func (m *Materializer) MaterializeCheckout(ctx context.Context, checkoutID strin
 func (m *Materializer) pinCheckoutRoute(
 	ctx context.Context,
 	checkoutID string,
-	route store_sqlite.CheckoutRoute,
+	route storage.CheckoutRoute,
 	generations []int64,
 ) (*Lease, bool, error) {
 	provisional := m.Leases.Acquire(generations...)
@@ -700,7 +700,7 @@ func (m *Materializer) generationAncestry(ctx context.Context, generations []int
 func (m *Materializer) dirtyChain(ctx context.Context, top, lower int64, seen map[int64]struct{}) ([]int64, int64, error) {
 	var (
 		chain []int64
-		head  store_sqlite.ViewGeneration
+		head  storage.ViewGeneration
 	)
 	for generationID := top; ; {
 		if _, duplicate := seen[generationID]; duplicate {
@@ -754,7 +754,7 @@ func (m *Materializer) dirtyChain(ctx context.Context, top, lower int64, seen ma
 // layer and graph, built under the same extraction, resolution and dependency
 // policy. A chain spliced across checkouts or policies would compose payload
 // no build of this checkout ever derived.
-func sameDirtyChain(head, parent store_sqlite.ViewGeneration) error {
+func sameDirtyChain(head, parent storage.ViewGeneration) error {
 	mismatch := ""
 	switch {
 	case parent.GenerationKind != dirtyGenerationKind:
@@ -876,9 +876,9 @@ func (m *Materializer) recordMaterialization(
 // a read.
 func (m *Materializer) validate() error {
 	switch {
-	case m == nil || m.Store == nil:
+	case m == nil || m.Store == nil || m.Store.IsNilGenerationHandle():
 		return NewViewError(CodeInvalidViewSelector, "materializer needs a store")
-	case m.Catalog == nil:
+	case m.Catalog == nil || m.Catalog.IsNilMaterializerCatalog():
 		return NewViewError(CodeInvalidViewSelector, "materializer needs a catalog")
 	case m.Leases == nil:
 		return NewViewError(CodeInvalidViewSelector, "materializer needs a lease manager")
@@ -890,7 +890,7 @@ func (m *Materializer) validate() error {
 // route reads the checkout's current route. A route that does not exist
 // or has retired is a checkout nothing can be read from — the failure is
 // about the checkout, not about the selector that named it.
-func (m *Materializer) route(ctx context.Context, checkoutID string) (store_sqlite.CheckoutRoute, error) {
+func (m *Materializer) route(ctx context.Context, checkoutID string) (storage.CheckoutRoute, error) {
 	route, found, err := m.Catalog.GetCheckoutRoute(ctx, checkoutID)
 	switch {
 	case err != nil:
@@ -899,7 +899,7 @@ func (m *Materializer) route(ctx context.Context, checkoutID string) (store_sqli
 	case !found:
 		return route, NewViewError(CodeCheckoutInaccessible,
 			fmt.Sprintf("checkout %q is not routed", checkoutID))
-	case route.State == store_sqlite.RouteRetired:
+	case route.State == storage.RouteRetired:
 		return route, NewViewError(CodeCheckoutInaccessible,
 			fmt.Sprintf("the route of checkout %q has retired", checkoutID))
 	default:
@@ -958,9 +958,9 @@ func (m *Materializer) assemble(
 		routedLayer[generationID] = struct{}{}
 	}
 
-	handles := make([]*store_sqlite.Store, 0, len(ancestry))
+	handles := make([]GenerationSourceHandle, 0, len(ancestry))
 	sources := make([]GenerationSource, 0, len(ancestry))
-	open := func(generationID int64) (*store_sqlite.Store, *GenerationLayer, store_sqlite.ViewGeneration, error) {
+	open := func(generationID int64) (GenerationSourceHandle, *GenerationLayer, storage.ViewGeneration, error) {
 		handle, layer, row, openErr := m.openGeneration(ctx, generationID)
 		if openErr == nil {
 			layer.failureRepoPrefix = repoPrefix
@@ -993,7 +993,7 @@ func (m *Materializer) assemble(
 	if commitIndex > 0 || firstRow.GenerationKind == "dedicated" {
 		base = firstHandle
 	} else {
-		base = graph.NewOverlaidViewWithLayer(m.Store.AtGeneration(0), firstLayer)
+		base = graph.NewOverlaidViewWithLayer(m.Store.AtGenerationStore(0), firstLayer)
 	}
 
 	var (
@@ -1052,7 +1052,7 @@ func (m *Materializer) assemble(
 // returns the handle pinned to it, the layer over that handle, and the
 // catalog row the identity is built from.
 func (m *Materializer) openGeneration(ctx context.Context, generationID int64) (
-	*store_sqlite.Store, *GenerationLayer, store_sqlite.ViewGeneration, error,
+	GenerationSourceHandle, *GenerationLayer, storage.ViewGeneration, error,
 ) {
 	row, err := m.servableGeneration(ctx, generationID)
 	if err != nil {
@@ -1061,12 +1061,17 @@ func (m *Materializer) openGeneration(ctx context.Context, generationID int64) (
 		m.ForgetGeneration(generationID)
 		return nil, nil, row, err
 	}
-	handle := m.Store.AtGeneration(generationID)
+	rawHandle := m.Store.AtGenerationStore(generationID)
+	handle, sourceOK := rawHandle.(GenerationSourceHandle)
+	if !sourceOK {
+		return nil, nil, row, NewViewError(CodeCheckoutInaccessible, "generation handle lacks source reads")
+	}
+	var readHandle GenerationLayerHandle = handle
 	var layer *GenerationLayer
 	if newLayer := m.newGenerationLayer; newLayer != nil {
-		layer, err = newLayer(ctx, handle)
+		layer, err = newLayer(ctx, readHandle)
 	} else {
-		layer, err = m.layerCacheFor().open(ctx, layerCacheKeyFor(m.Store, generationID, row), handle, NewGenerationLayerContext)
+		layer, err = m.layerCacheFor().open(ctx, layerCacheKeyFor(m.Store, generationID, row), readHandle, NewGenerationLayerContext)
 	}
 	if err != nil {
 		return nil, nil, row, WrapViewError(CodeCheckoutInaccessible,
@@ -1084,7 +1089,7 @@ func (m *Materializer) openGeneration(ctx context.Context, generationID int64) (
 // polls. Anything else is content that is going away or never arrived,
 // and serving from it would mean answering out of a payload the sweep
 // may already be deleting.
-func (m *Materializer) servableGeneration(ctx context.Context, generationID int64) (store_sqlite.ViewGeneration, error) {
+func (m *Materializer) servableGeneration(ctx context.Context, generationID int64) (storage.ViewGeneration, error) {
 	row, found, err := m.Catalog.GetViewGeneration(ctx, generationID)
 	if err != nil {
 		return row, WrapViewError(CodeCheckoutInaccessible,
@@ -1095,9 +1100,9 @@ func (m *Materializer) servableGeneration(ctx context.Context, generationID int6
 			fmt.Sprintf("generation %d is not in the catalog", generationID))
 	}
 	switch row.State {
-	case store_sqlite.ViewGenerationReady, store_sqlite.ViewGenerationSuperseded:
+	case storage.ViewGenerationReady, storage.ViewGenerationSuperseded:
 		return row, nil
-	case store_sqlite.ViewGenerationBuilding:
+	case storage.ViewGenerationBuilding:
 		return row, NewViewError(CodeViewBuilding,
 			fmt.Sprintf("generation %d is still building", generationID))
 	default:
@@ -1109,7 +1114,7 @@ func (m *Materializer) servableGeneration(ctx context.Context, generationID int6
 // dirtyLayerRef names the working-tree layer of a checkout's stack. A
 // generation that names no layer cannot be identified, and an identity
 // that cannot be built is a view that cannot be cached or compared.
-func dirtyLayerRef(row store_sqlite.ViewGeneration) (LayerRef, error) {
+func dirtyLayerRef(row storage.ViewGeneration) (LayerRef, error) {
 	if row.LayerID == "" {
 		return LayerRef{}, NewViewError(CodeCheckoutInaccessible,
 			fmt.Sprintf("generation %d names no layer", row.GenerationID))
@@ -1174,7 +1179,7 @@ func dirtyLayerRef(row store_sqlite.ViewGeneration) (LayerRef, error) {
 // So the top layer's declaration is authoritative, and its silence is a
 // denial rather than an inheritance: StateUnavailable, which is what
 // Completeness.State already reports for a capability nothing declared.
-func (m *Materializer) completeness(generations []*store_sqlite.Store) (Completeness, error) {
+func (m *Materializer) completeness(generations []GenerationSourceHandle) (Completeness, error) {
 	known := KnownCapabilities()
 	out := make(Completeness, len(known))
 	for _, id := range known {
@@ -1208,7 +1213,7 @@ func (m *Materializer) completeness(generations []*store_sqlite.Store) (Complete
 				}
 				continue
 			}
-			if id != CapContracts && row.State == store_sqlite.ProducerStateIncomplete && row.Reason == ReasonDeferredToFollowup {
+			if id != CapContracts && row.State == storage.ProducerStateIncomplete && row.Reason == ReasonDeferredToFollowup {
 				satisfied, err := followupSatisfied(generations, stack, index, id)
 				if err != nil {
 					return nil, WrapViewError(CodeCheckoutInaccessible,
@@ -1242,17 +1247,17 @@ func (m *Materializer) completeness(generations []*store_sqlite.Store) (Complete
 // caller sees. The two vocabularies are one-to-one: a producer is the
 // thing that populates a capability, so how far along it is IS how far
 // along the capability is.
-func capabilityStateOf(state store_sqlite.ProducerState) CapabilityState {
+func capabilityStateOf(state storage.ProducerState) CapabilityState {
 	switch state {
-	case store_sqlite.ProducerStateComplete:
+	case storage.ProducerStateComplete:
 		return StateComplete
-	case store_sqlite.ProducerStateIncomplete:
+	case storage.ProducerStateIncomplete:
 		return StateIncomplete
-	case store_sqlite.ProducerStateBuilding:
+	case storage.ProducerStateBuilding:
 		return StateBuilding
-	case store_sqlite.ProducerStateUnavailable:
+	case storage.ProducerStateUnavailable:
 		return StateUnavailable
-	case store_sqlite.ProducerStateDisabledByConfig:
+	case storage.ProducerStateDisabledByConfig:
 		return StateDisabledByConfig
 	default:
 		return CapabilityState("")
@@ -1263,13 +1268,13 @@ func capabilityStateOf(state store_sqlite.ProducerState) CapabilityState {
 // reads it: its producer rows, and (read on demand) the paths its file masks
 // cover.
 type producerLayer struct {
-	rows    []store_sqlite.ProducerCompleteness
+	rows    []storage.ProducerCompleteness
 	covered map[string]struct{}
 	deleted map[string]struct{}
 	read    bool
 }
 
-func (l *producerLayer) coveredPaths(handle *store_sqlite.Store) (map[string]struct{}, error) {
+func (l *producerLayer) coveredPaths(handle producerGeneration) (map[string]struct{}, error) {
 	if l.read {
 		return l.covered, nil
 	}
@@ -1280,7 +1285,7 @@ func (l *producerLayer) coveredPaths(handle *store_sqlite.Store) (map[string]str
 	l.covered = make(map[string]struct{}, len(masks))
 	l.deleted = make(map[string]struct{})
 	for _, m := range masks {
-		if m.Mode == store_sqlite.OwnershipDelete {
+		if m.Mode == storage.OwnershipDelete {
 			l.deleted[m.FilePath] = struct{}{}
 			continue
 		}
@@ -1298,7 +1303,7 @@ func (l *producerLayer) coveredPaths(handle *store_sqlite.Store) (map[string]str
 // above owes nothing either). Nothing sealed is rewritten: a view whose stack
 // lacks the follow-up's layer still reads incomplete, and an older binary,
 // which does not apply this rule, reads incomplete too (the cautious side).
-func followupSatisfied(generations []*store_sqlite.Store, stack []producerLayer, index int, id CapabilityID) (bool, error) {
+func followupSatisfied(generations []GenerationSourceHandle, stack []producerLayer, index int, id CapabilityID) (bool, error) {
 	owed, err := stack[index].coveredPaths(generations[index])
 	if err != nil {
 		return false, err
@@ -1317,7 +1322,7 @@ func followupSatisfied(generations []*store_sqlite.Store, stack []producerLayer,
 		}
 		complete := false
 		for _, row := range stack[j].rows {
-			if CapabilityID(row.Producer) == id && row.State == store_sqlite.ProducerStateComplete {
+			if CapabilityID(row.Producer) == id && row.State == storage.ProducerStateComplete {
 				complete = true
 				break
 			}

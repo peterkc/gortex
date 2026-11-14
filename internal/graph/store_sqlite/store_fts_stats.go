@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/zzet/gortex/internal/storage"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,17 +25,7 @@ import (
 // statistics it chooses and keep that ranking when a new top generation is
 // published.
 
-// SymbolFTSStats are the corpus statistics bm25 reads: the number of
-// documents, the total number of tokens, and a stamp naming the state they
-// were read from.
-type SymbolFTSStats struct {
-	Rows   int64
-	Tokens int64
-	Stamp  string
-	// Lo and Hi are a generation's first and last document rowid
-	// (SymbolFTSGenerationStats only; 0 when it has none).
-	Lo, Hi int64
-}
+type SymbolFTSStats = storage.SymbolFTSStats
 
 // SymbolFTSStats reads the whole shared table's statistics from its averages
 // record (one row read), stamped with the table's corpus stamp.
@@ -221,15 +212,7 @@ func ftsPrefixTerm(prefix string) string {
 	return `tokens : "` + strings.ReplaceAll(prefix, `"`, `""`) + `" *`
 }
 
-// SymbolFTSRow is one document of a generation: its node, repository, token
-// text and token count (FTS5's own per-document size).
-type SymbolFTSRow struct {
-	RowID      int64
-	NodeID     string
-	RepoPrefix string
-	Tokens     string
-	TokenCount int
-}
+type SymbolFTSRow = storage.SymbolFTSRow
 
 // SymbolFTSGenerationRows returns one generation's documents in rowid order,
 // after afterRowID, up to limit (≤ 0: 1,000): every document when match is

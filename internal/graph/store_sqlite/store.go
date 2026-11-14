@@ -3806,7 +3806,7 @@ func panicOnFatal(err error) {
 	// Keep sealed lifecycle refusals and actual SQLite-full failures typed so
 	// index/build recovery recognizes them without absorbing other panics.
 	if errors.Is(err, ErrPayloadGenerationSealed) || isSQLiteFullFailure(err) {
-		panic(&StorageError{err: err})
+		panic(&StorageError{Err: err})
 	}
 	panic(fmt.Errorf("store_sqlite: %w", err))
 }

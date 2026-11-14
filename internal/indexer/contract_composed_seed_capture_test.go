@@ -41,7 +41,7 @@ func TestContractComposedCaptureSeedsStaySparseAndMatchCold(t *testing.T) {
 	snapshot.Work = targets[0].Work
 	_, payload, err := f.store.BeginPayloadGeneration(ctx, store_sqlite.PayloadGenerationRequest{OwnerKind: "dedicated_graph", GraphID: "contract-linked-seeds", LayerID: "seed-job", GenerationKind: "contract_analysis", ConfigHash: "job-config", ExtractorVersions: `{"go":"1"}`, ResolverVersion: "contract-only", CreatedAt: time.Now().UnixNano()})
 	require.NoError(t, err)
-	report, err := RunContractFollowup(ctx, ContractFollowupRequest{RebuildReason: ContractFollowupUnknownInterval, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: f.options.Registry, Config: f.options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: f.options.Materializer.Leases, Logger: zap.NewNop(), Yield: f.options.Yield, PublishedEpoch: f.epoch.Load, WaitPublished: f.waitPublished, convergenceHooks: &contractConvergenceHooks{guard: func(value *contractReadGuard) { guard = value }}})
+	report, err := RunContractFollowup(ctx, ContractFollowupRequest{OpenEvidence: openTestEvidenceStore, RebuildReason: ContractFollowupUnknownInterval, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: f.options.Registry, Config: f.options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: f.options.Materializer.Leases, Logger: zap.NewNop(), Yield: f.options.Yield, PublishedEpoch: f.epoch.Load, WaitPublished: f.waitPublished, convergenceHooks: &contractConvergenceHooks{guard: func(value *contractReadGuard) { guard = value }}})
 	require.NoError(t, err)
 	require.True(t, report.Published)
 	require.Zero(t, loaded["fixture/unrelated.go"], "an unrelated file must not become enrichment evidence merely because the core is composed")

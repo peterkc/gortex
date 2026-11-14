@@ -34,7 +34,7 @@ func (f *coordinatorFixture) secondWorktreeCoordinator(t *testing.T, commit stri
 	if err := f.catalog.AllocateCheckout(context.Background(), checkout); err != nil {
 		t.Fatalf("allocate the second checkout: %v", err)
 	}
-	coordinator, err := NewCheckoutCoordinator(CheckoutCoordinatorConfig{
+	coordinator, err := NewCheckoutCoordinator(CheckoutCoordinatorConfig{Catalog: testCatalog(f.store),
 		CheckoutID: checkout.CheckoutID, CheckoutRoot: root, FamilyID: f.familyID,
 		RepoPrefix: builderRepoPrefix, WorkspaceID: builderRepoPrefix, ProjectID: builderRepoPrefix,
 		Store: f.store, Builder: builderNewBuilder(f.store), Leases: f.leases,

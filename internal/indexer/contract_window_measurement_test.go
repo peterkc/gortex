@@ -16,7 +16,7 @@ import (
 
 func TestContractWindowScopeDistinguishesRepeatedInputAttempts(t *testing.T) {
 	core, logs := observer.New(zapcore.InfoLevel)
-	req := ContractFollowupRequest{Logger: zap.New(core), Snapshot: ContractFollowupSnapshot{Key: graph.ContractAttachmentKey{RepoPrefix: "repo", InputVersion: "same", InputFingerprint: "same"}}}
+	req := ContractFollowupRequest{OpenEvidence: openTestEvidenceStore, Logger: zap.New(core), Snapshot: ContractFollowupSnapshot{Key: graph.ContractAttachmentKey{RepoPrefix: "repo", InputVersion: "same", InputFingerprint: "same"}}}
 	for range 2 {
 		c := newContractConvergence(t.Context(), req, nil, map[string]bool{"repo": true}, &ContractFollowupReport{})
 		c.blockedSince = time.Now()

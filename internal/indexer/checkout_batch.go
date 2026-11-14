@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/gitstate"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/pathkey"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // CheckoutBatchFile binds every written or removed entry to one publication.
@@ -197,7 +197,7 @@ func (m *CheckoutMutation) PrepareRecovery(ctx context.Context) error {
 		return err
 	}
 	m.refreshReserved = true
-	if m.route.State == store_sqlite.RouteActive {
+	if m.route.State == storage.RouteActive {
 		withdrawn := c.holdWithdrawnDirty(ctx, m.route)
 		if err := c.clearDirtySlot(ctx, &m.route); err != nil {
 			c.releaseCheckoutRefreshReservation()

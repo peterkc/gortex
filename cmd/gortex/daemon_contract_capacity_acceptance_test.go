@@ -137,10 +137,11 @@ func TestContractCapacityTwoFourActorsMCPRetryAndSuccess(t *testing.T) {
 	materializer := state.mcpServer.Materializer()
 	cfg := state.configManager.GetRepoConfig("").Index
 	yield := contractAnalysisYield(state.mcpServer.ContractAnalysisShouldYield)
-	capture := indexer.ContractFollowupCaptureOptions{Context: ctx, Store: state.graph.(*store_sqlite.Store), Materializer: materializer, MultiIndexer: state.multiIndexer, Registry: state.indexer.Registry(), Config: cfg, Logger: zap.NewNop(), Yield: yield}
-	coordinator, err = indexer.NewContractAnalysisCoordinator(indexer.ContractAnalysisCoordinatorOptions{
-		QueueCapacity: 2, JobSlots: 1, RequireRepoConfigs: true,
-		Store: state.graph.(*store_sqlite.Store), Leases: materializer.Leases, Registry: state.indexer.Registry(), Config: cfg, Logger: zap.NewNop(),
+	nativeStore := state.graph.(*store_sqlite.Store)
+	capture := indexer.ContractFollowupCaptureOptions{Catalog: nativeStore.Catalog(), Context: ctx, Store: nativeStore, Materializer: materializer, MultiIndexer: state.multiIndexer, Registry: state.indexer.Registry(), Config: cfg, Logger: zap.NewNop(), Yield: yield}
+	coordinator, err = indexer.NewContractAnalysisCoordinator(indexer.ContractAnalysisCoordinatorOptions{Catalog: nativeStore.Catalog(),
+		OpenEvidence: openDaemonContractEvidence, QueueCapacity: 2, JobSlots: 1, RequireRepoConfigs: true,
+		Store: nativeStore, Leases: materializer.Leases, Registry: state.indexer.Registry(), Config: cfg, Logger: zap.NewNop(),
 		Capture: indexer.NewContractFollowupSourceCapture(capture), Inputs: indexer.NewContractPrimaryInputCapture(materializer),
 		Yield: func(ctx context.Context) error {
 			enteredOnce.Do(func() { close(entered) })
@@ -232,7 +233,6 @@ func TestContractCapacityTwoFourActorsMCPRetryAndSuccess(t *testing.T) {
 		require.False(t, response.isError, response.text)
 		assertRoute(response.repo, "after", response.payload)
 	}
-	store := state.graph.(*store_sqlite.Store)
 	for i := 0; i < 4; i++ {
 		repo := fmt.Sprintf("capacity%d", i)
 		payload, failed, text, err := call(ctx, repo, true, time.Minute)
@@ -256,7 +256,7 @@ func TestContractCapacityTwoFourActorsMCPRetryAndSuccess(t *testing.T) {
 		require.Equal(t, "", target.Key.CheckoutID)
 		require.Equal(t, inputs.State.InputVersion, target.Key.InputVersion)
 		require.Equal(t, inputs.State.InputFingerprint, target.Key.InputFingerprint)
-		header, err := store.GetContractAttachmentContext(ctx, target.Key)
+		header, err := nativeStore.GetContractAttachmentContext(ctx, target.Key)
 		require.NoError(t, err)
 		require.NotNil(t, header)
 		require.Equal(t, target.PayloadGeneration, header.PayloadGeneration)

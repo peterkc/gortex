@@ -20,7 +20,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 const unresolvedPrefix = "unresolved::"
@@ -315,8 +315,8 @@ type Resolver struct {
 	goPackageOwnershipInventory bool
 	goPackageOwnershipPrepared  map[string]GoPackageOwnershipLookup
 	graph                       graph.Store
-	writeCounters               func() store_sqlite.VFSIOMark
-	writeCounterDefault         atomic.Pointer[func() store_sqlite.VFSIOMark]
+	writeCounters               func() storage.VFSIOMark
+	writeCounterDefault         atomic.Pointer[func() storage.VFSIOMark]
 	logger                      *zap.Logger
 	dirIndex                    map[string][]graph.FileNodeIdentity
 	lastDirIndex                map[string][]graph.FileNodeIdentity
@@ -3305,16 +3305,17 @@ func incrementalAdmissionSummary(frontier incrementalFileFrontier, sources map[s
 // wait-lock phase precedes r.mu.Lock, so it must not inspect r.graph while
 // SetGraph retargets it. Each phase captures one source for both endpoints.
 func (r *Resolver) setDefaultWriteCounterSource(g graph.Store) {
-	sample := store_sqlite.WriteMark
-	if source, ok := g.(interface{ WriteMark() store_sqlite.VFSIOMark }); ok {
-		sample = source.WriteMark
+	if source, ok := g.(interface{ WriteMark() storage.VFSIOMark }); ok {
+		sample := source.WriteMark
+		r.writeCounterDefault.Store(&sample)
+	} else {
+		r.writeCounterDefault.Store(nil)
 	}
-	r.writeCounterDefault.Store(&sample)
 }
 
 // SetWriteCounterSource preserves the underlying store's WAL-position fallback
 // when the resolver reads through a delta graph. Install before using the resolver.
-func (r *Resolver) SetWriteCounterSource(sample func() store_sqlite.VFSIOMark) {
+func (r *Resolver) SetWriteCounterSource(sample func() storage.VFSIOMark) {
 	r.writeCounters = sample
 }
 
@@ -3325,19 +3326,29 @@ func (r *Resolver) startIncrementalPhase(logger *zap.Logger, phase string) func(
 	started, faults := time.Now(), processMajorFaults()
 	sample := r.writeCounters
 	if sample == nil {
-		sample = store_sqlite.WriteMark
 		if current := r.writeCounterDefault.Load(); current != nil {
 			sample = *current
 		}
 	}
-	writes := sample()
-	logger.Info("resolver: incremental phase starting", zap.String("phase", phase), zap.Int64("phase_wal_bytes", 0), zap.Int64("phase_main_bytes", 0), zap.Int64("phase_rows", 0), zap.Int64("phase_txns", 0), zap.Bool("phase_wal_bytes_reset", false))
+	var writes storage.VFSIOMark
+	startFields := []zap.Field{zap.String("phase", phase)}
+	if sample == nil {
+		startFields = append(startFields, zap.Bool("phase_write_counters_unavailable", true))
+	} else {
+		writes = sample()
+		startFields = append(startFields, zap.Int64("phase_wal_bytes", 0), zap.Int64("phase_main_bytes", 0), zap.Int64("phase_rows", 0), zap.Int64("phase_txns", 0), zap.Bool("phase_wal_bytes_reset", false))
+	}
+	logger.Info("resolver: incremental phase starting", startFields...)
 	return func(fields ...zap.Field) time.Duration {
 		elapsed := time.Since(started)
 		fields = append(fields, zap.String("phase", phase), zap.Duration("elapsed", elapsed),
 			zap.Int64("major_faults", processMajorFaults()-faults))
-		d := sample().Since(writes)
-		fields = append(fields, zap.Int64("phase_wal_bytes", d.WALBytes()), zap.Int64("phase_main_bytes", d.WriterMainWriteBytes+d.OtherMainWriteBytes), zap.Int64("phase_rows", d.Rows.Total()), zap.Int64("phase_txns", d.Transactions), zap.Bool("phase_wal_bytes_reset", d.WALReset))
+		if sample == nil {
+			fields = append(fields, zap.Bool("phase_write_counters_unavailable", true))
+		} else {
+			d := sample().Since(writes)
+			fields = append(fields, zap.Int64("phase_wal_bytes", d.WALBytes()), zap.Int64("phase_main_bytes", d.WriterMainWriteBytes+d.OtherMainWriteBytes), zap.Int64("phase_rows", d.Rows.Total()), zap.Int64("phase_txns", d.Transactions), zap.Bool("phase_wal_bytes_reset", d.WALReset))
+		}
 		logger.Info("resolver: incremental phase complete", fields...)
 		return elapsed
 	}

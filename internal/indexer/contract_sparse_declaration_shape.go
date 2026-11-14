@@ -4,7 +4,7 @@ import (
 	"slices"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // contractSparseDeclarationShape describes ONLY the sparse suffix's exact
@@ -15,32 +15,32 @@ import (
 type contractSparseDeclarationShape struct {
 	files map[string]bool
 	ids   map[string]bool
-	names map[string][]store_sqlite.ContractProjectionDeclaration
+	names map[string][]storage.ContractProjectionDeclaration
 }
 
 type contractSparseDeclarationLayer struct {
 	files, context, ids map[string]bool
-	rows                []store_sqlite.ContractProjectionDeclaration
+	rows                []storage.ContractProjectionDeclaration
 }
 
 // sparseDeclarationShape preserves the production exact-name visitor's
 // overlay-first order. A multiset is insufficient when a fold changes order.
 // Its input is bottom-to-top, with each checked physical footprint ordered by
 // ID. It neither queries an unleased prefix nor expands a mask from stale rows.
-func sparseDeclarationShape(footprints []store_sqlite.ContractProjectionFootprint) contractSparseDeclarationShape {
-	out := contractSparseDeclarationShape{files: map[string]bool{}, ids: map[string]bool{}, names: map[string][]store_sqlite.ContractProjectionDeclaration{}}
+func sparseDeclarationShape(footprints []storage.ContractProjectionFootprint) contractSparseDeclarationShape {
+	out := contractSparseDeclarationShape{files: map[string]bool{}, ids: map[string]bool{}, names: map[string][]storage.ContractProjectionDeclaration{}}
 	layers := make([]contractSparseDeclarationLayer, len(footprints))
 	for i, footprint := range footprints {
 		layer := contractSparseDeclarationLayer{files: map[string]bool{}, context: map[string]bool{}, ids: map[string]bool{}, rows: footprint.Declarations}
 		for _, mask := range footprint.Files {
 			switch mask.Mode {
-			case store_sqlite.OwnershipReplace, store_sqlite.OwnershipDelete:
+			case storage.OwnershipReplace, storage.OwnershipDelete:
 				layer.files[mask.FilePath], out.files[mask.FilePath] = true, true
-			case store_sqlite.OwnershipContext:
+			case storage.OwnershipContext:
 				layer.context[mask.FilePath] = true
 			}
 		}
-		rows := make(map[string]store_sqlite.ContractProjectionDeclaration, len(layer.rows))
+		rows := make(map[string]storage.ContractProjectionDeclaration, len(layer.rows))
 		for _, row := range layer.rows {
 			rows[row.ID] = row
 		}
@@ -49,7 +49,7 @@ func sparseDeclarationShape(footprints []store_sqlite.ContractProjectionFootprin
 			// Match GenerationLayer's explicit identity ownership: legacy
 			// always claims; a replacement at context-only path claims
 			// nothing. An independent covered-file claim still claims the ID.
-			if mask.Kind == store_sqlite.NodeIdentityMaskLegacy || present && (layer.files[row.FilePath] || !layer.context[row.FilePath]) {
+			if mask.Kind == storage.NodeIdentityMaskLegacy || present && (layer.files[row.FilePath] || !layer.context[row.FilePath]) {
 				layer.ids[mask.NodeID], out.ids[mask.NodeID] = true, true
 			}
 		}

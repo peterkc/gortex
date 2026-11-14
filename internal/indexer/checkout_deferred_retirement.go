@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -258,10 +258,10 @@ func (l *CheckoutLifecycle) SweepDeferredRetirements(ctx context.Context) (retir
 		case retireErr == nil:
 			retired = 1
 			l.removeOwedRetirement(generationID)
-		case errors.Is(retireErr, store_sqlite.ErrCatalogNotFound):
+		case errors.Is(retireErr, storage.ErrCatalogNotFound):
 			l.removeOwedRetirement(generationID)
-		case errors.Is(retireErr, store_sqlite.ErrPayloadSweepBudgetExhausted),
-			errors.Is(retireErr, store_sqlite.ErrPayloadGenerationInUse):
+		case errors.Is(retireErr, storage.ErrPayloadSweepBudgetExhausted),
+			errors.Is(retireErr, storage.ErrPayloadGenerationInUse):
 			stillPending = true
 			retireErr = nil
 		case retirementStillReferenced(retireErr):
@@ -397,7 +397,7 @@ var deferredRetirementScans atomic.Int64
 // stand-downs a scan should precede.
 var deferredRetirementFirstSightings atomic.Int64
 
-type deferredGenerationList func(context.Context, store_sqlite.ViewGenerationFilter) ([]store_sqlite.ViewGeneration, error)
+type deferredGenerationList func(context.Context, storage.ViewGenerationFilter) ([]storage.ViewGeneration, error)
 
 func (l *CheckoutLifecycle) discoverDeferredRetirements(
 	ctx context.Context,
@@ -428,7 +428,7 @@ func (l *CheckoutLifecycle) discoverDeferredRetirementsWith(
 		seen[generationID] = struct{}{}
 	}
 	var out []int64
-	collect := func(row store_sqlite.ViewGeneration) {
+	collect := func(row storage.ViewGeneration) {
 		if row.GenerationID <= 0 {
 			return
 		}
@@ -438,15 +438,15 @@ func (l *CheckoutLifecycle) discoverDeferredRetirementsWith(
 		seen[row.GenerationID] = struct{}{}
 		out = append(out, row.GenerationID)
 	}
-	var dedicated []store_sqlite.ViewGeneration
+	var dedicated []storage.ViewGeneration
 	const pageSize = 512
 
 	var before int64
 	for {
-		rows, scanErr := list(ctx, store_sqlite.ViewGenerationFilter{
-			States: []store_sqlite.ViewGenerationState{
-				store_sqlite.ViewGenerationSuperseded,
-				store_sqlite.ViewGenerationRetiring,
+		rows, scanErr := list(ctx, storage.ViewGenerationFilter{
+			States: []storage.ViewGenerationState{
+				storage.ViewGenerationSuperseded,
+				storage.ViewGenerationRetiring,
 			},
 			BeforeGenerationID: before,
 			Limit:              pageSize,
@@ -474,21 +474,21 @@ func (l *CheckoutLifecycle) discoverDeferredRetirementsWith(
 
 	const abandonedBuildingGrace = time.Minute
 	abandonedBefore := l.clock().Add(-abandonedBuildingGrace).Unix()
-	scanState := func(state store_sqlite.ViewGenerationState, label string) error {
+	scanState := func(state storage.ViewGenerationState, label string) error {
 		var cursor int64
 		for {
-			rows, scanErr := list(ctx, store_sqlite.ViewGenerationFilter{
-				States:             []store_sqlite.ViewGenerationState{state},
+			rows, scanErr := list(ctx, storage.ViewGenerationFilter{
+				States:             []storage.ViewGenerationState{state},
 				BeforeGenerationID: cursor,
 				Limit:              pageSize,
 			})
 			for _, row := range rows {
-				if state == store_sqlite.ViewGenerationBuilding &&
+				if state == storage.ViewGenerationBuilding &&
 					row.CreatedAt >= l.buildingRecoveryCutoff &&
 					row.CreatedAt > abandonedBefore {
 					continue
 				}
-				if state == store_sqlite.ViewGenerationBuilding && l.store.PayloadBuildFlightActive(row.GenerationID) {
+				if state == storage.ViewGenerationBuilding && l.store.PayloadBuildFlightActive(row.GenerationID) {
 					continue
 				}
 				collect(row)
@@ -502,17 +502,17 @@ func (l *CheckoutLifecycle) discoverDeferredRetirementsWith(
 			cursor = rows[len(rows)-1].GenerationID
 		}
 	}
-	if scanErr := scanState(store_sqlite.ViewGenerationFailed, "failed"); scanErr != nil {
+	if scanErr := scanState(storage.ViewGenerationFailed, "failed"); scanErr != nil {
 		return out, scanErr
 	}
-	if scanErr := scanState(store_sqlite.ViewGenerationBuilding, "building"); scanErr != nil {
+	if scanErr := scanState(storage.ViewGenerationBuilding, "building"); scanErr != nil {
 		return out, scanErr
 	}
 
 	before = 0
 	for {
-		rows, scanErr := list(ctx, store_sqlite.ViewGenerationFilter{
-			States:             []store_sqlite.ViewGenerationState{store_sqlite.ViewGenerationReady},
+		rows, scanErr := list(ctx, storage.ViewGenerationFilter{
+			States:             []storage.ViewGenerationState{storage.ViewGenerationReady},
 			MissingGraph:       true,
 			BeforeGenerationID: before,
 			Limit:              pageSize,
@@ -529,11 +529,11 @@ func (l *CheckoutLifecycle) discoverDeferredRetirementsWith(
 		before = rows[len(rows)-1].GenerationID
 	}
 
-	routes := map[string]store_sqlite.CheckoutRoute{}
+	routes := map[string]storage.CheckoutRoute{}
 	before = 0
 	for {
-		layers, scanErr := list(ctx, store_sqlite.ViewGenerationFilter{
-			States:             []store_sqlite.ViewGenerationState{store_sqlite.ViewGenerationReady},
+		layers, scanErr := list(ctx, storage.ViewGenerationFilter{
+			States:             []storage.ViewGenerationState{storage.ViewGenerationReady},
 			OwnerKind:          checkoutLayerOwnerKind,
 			BeforeGenerationID: before,
 			Limit:              pageSize,
@@ -544,7 +544,9 @@ func (l *CheckoutLifecycle) discoverDeferredRetirementsWith(
 			}
 		}
 		candidates, routeErr := readyLayerRetirementCandidates(
-			ctx, layers, served, routes, l.catalog.GetCheckoutRoutes,
+			ctx, layers, served, routes, func(ctx context.Context, ids []string) (map[string]storage.CheckoutRoute, error) {
+				return l.catalog.GetCheckoutRoutes(ctx, ids)
+			},
 		)
 		if routeErr != nil {
 			return out, fmt.Errorf("read checkout routes: %w", routeErr)
@@ -567,14 +569,14 @@ func (l *CheckoutLifecycle) discoverDeferredRetirementsWith(
 	return out, nil
 }
 
-type deferredDedicatedInference func(context.Context, []store_sqlite.ViewGeneration) []store_sqlite.ViewGeneration
+type deferredDedicatedInference func(context.Context, []storage.ViewGeneration) []storage.ViewGeneration
 
 func inferDeferredDedicatedCandidates(
 	ctx context.Context,
-	dedicated []store_sqlite.ViewGeneration,
+	dedicated []storage.ViewGeneration,
 	discoveryErr error,
 	infer deferredDedicatedInference,
-) []store_sqlite.ViewGeneration {
+) []storage.ViewGeneration {
 	if discoveryErr != nil || infer == nil {
 		return nil
 	}

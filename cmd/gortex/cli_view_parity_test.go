@@ -150,12 +150,12 @@ func newParityFixture(t *testing.T) *parityFixture {
 	}
 	f.upsertWorktree(t, store_sqlite.CheckoutStateReady, store_sqlite.CheckoutModeAutomatic)
 
-	lifecycle, err := indexer.NewCheckoutLifecycle(indexer.CheckoutLifecycleConfig{
+	lifecycle, err := indexer.NewCheckoutLifecycle(withPairedCatalog(indexer.CheckoutLifecycleConfig{
 		MultiIndexer:  mi,
 		ConfigManager: cm,
 		Graph:         store,
 		Logger:        zap.NewNop(),
-	})
+	}))
 	require.NoError(t, err)
 
 	// Door 1: the MCP dispatcher — what an agent's tools/call reaches.
@@ -166,7 +166,7 @@ func newParityFixture(t *testing.T) *parityFixture {
 	// same way: two materializers would give the two doors different lease
 	// managers, which is not the shape whose parity is being asserted.
 	srv := gortexmcp.NewServer(query.NewEngine(store), store, idx, nil, zap.NewNop(), nil,
-		gortexmcp.MultiRepoOptions{MultiIndexer: mi, ConfigManager: cm})
+		gortexmcp.MultiRepoOptions{Catalog: store.Catalog(), MultiIndexer: mi, ConfigManager: cm})
 	srv.SetMaterializer(&graphview.Materializer{
 		Store:   store,
 		Catalog: catalog,

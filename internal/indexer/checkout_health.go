@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -77,7 +77,7 @@ type ViewsHealth struct {
 	// Both are exactly what CoordinatorStartFailures above already has — it
 	// reached the wire by adding a daemon-side mirror plus one projection line
 	// — and both files belong to the daemon lane rather than to this one.
-	StorageFailures []store_sqlite.StorageFailure `json:"storage_failures,omitempty"`
+	StorageFailures []storage.StorageFailure `json:"storage_failures,omitempty"`
 	// PublicationStalls names the checkouts whose latest cycles published
 	// nothing (CheckoutPublicationStall): consecutive_nonpublishing_cycles,
 	// last_publication_age_s, stall_reason and change_set_size. A checkout
@@ -151,7 +151,7 @@ func (l *CheckoutLifecycle) ViewsHealth(ctx context.Context) (ViewsHealth, error
 		}
 	}
 
-	generations, err := l.catalog.ListViewGenerations(ctx, store_sqlite.ViewGenerationFilter{})
+	generations, err := l.catalog.ListViewGenerations(ctx, storage.ViewGenerationFilter{})
 	if err != nil {
 		return out, err
 	}

@@ -7,9 +7,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/pathkey"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // checkoutFreshnessProver is the optional half of the freshness waiter: prove,
@@ -34,7 +34,7 @@ const (
 func (s *Server) proveCheckoutFresh(
 	ctx context.Context,
 	waiter checkoutFreshnessWaiter,
-	checkout store_sqlite.Checkout,
+	checkout storage.Checkout,
 	deadline time.Time,
 	trace *freshnessTrace,
 ) (proved, fresh bool) {
@@ -169,7 +169,7 @@ type checkoutFreshnessProofRefresher interface {
 func requestFreshnessTicket(
 	ctx context.Context,
 	waiter checkoutFreshnessWaiter,
-	checkout store_sqlite.Checkout,
+	checkout storage.Checkout,
 	trace *freshnessTrace,
 ) (*indexer.CheckoutRefreshTicket, error) {
 	ctx = indexer.WithPublicationRecord(ctx, trace.beginRecord(checkout.CheckoutID))
@@ -254,7 +254,7 @@ func (t *freshnessTrace) noteTicketEnd(fresh bool) {
 
 // notePublished records the dirty generation the successful wait's route
 // names on the phase record.
-func (t *freshnessTrace) notePublished(route store_sqlite.CheckoutRoute) {
+func (t *freshnessTrace) notePublished(route storage.CheckoutRoute) {
 	if t == nil {
 		return
 	}

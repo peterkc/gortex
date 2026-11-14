@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/zzet/gortex/internal/graph"
 	"log"
 	"math"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -35,15 +37,15 @@ import (
 var (
 	// ErrPayloadGenerationSealed means a write was attempted through a handle
 	// whose generation is no longer building.
-	ErrPayloadGenerationSealed = errors.New("store_sqlite: payload generation is published and no longer writable")
+	ErrPayloadGenerationSealed = storage.ErrPayloadGenerationSealed
 
 	// ErrPayloadGenerationInUse means retirement was refused because a lease
 	// holder still reads the generation.
-	ErrPayloadGenerationInUse = errors.New("store_sqlite: payload generation is leased")
+	ErrPayloadGenerationInUse = storage.ErrPayloadGenerationInUse
 
 	// ErrPayloadGenerationIncomplete means a publish was refused because a
 	// producer has not finished contributing to the generation.
-	ErrPayloadGenerationIncomplete = errors.New("store_sqlite: payload generation has a producer still building")
+	ErrPayloadGenerationIncomplete = storage.ErrPayloadGenerationIncomplete
 
 	// ErrPayloadGenerationRetired means a derived-plane write was attempted
 	// through a handle whose generation is being retired, or has already been
@@ -367,30 +369,7 @@ func (s *Store) setPayloadSeal(generationID int64, state int32) {
 	}
 }
 
-// PayloadGenerationRequest describes the generation to begin: who owns it,
-// which layer it is built over, and the fingerprint of the inputs that
-// produced it. The fingerprint fields are what make two begins for the same
-// layer the same build.
-type PayloadGenerationRequest struct {
-	OwnerKind      string
-	GraphID        string
-	LayerID        string
-	CheckoutID     string
-	GenerationKind string
-
-	// BaseGenerationID is the layer beneath this one, 0 for the base corpus.
-	BaseGenerationID int64
-
-	LowerViewFingerprint string
-	TreeOID              string
-	ProvenanceCommitOID  string
-	ConfigHash           string
-	ExtractorVersions    string
-	ResolverVersion      string
-	DependencyRevision   string
-
-	CreatedAt int64 // unix seconds
-}
+type PayloadGenerationRequest = storage.PayloadGenerationRequest
 
 // BeginPayloadGeneration creates a building generation and returns its id
 // together with the handle to write it through. Writers then populate the
@@ -403,6 +382,15 @@ type PayloadGenerationRequest struct {
 func (s *Store) BeginPayloadGeneration(ctx context.Context, req PayloadGenerationRequest) (int64, *Store, error) {
 	generationID, handle, _, err := s.BeginPayloadGenerationWithStatus(ctx, req)
 	return generationID, handle, err
+}
+
+// BeginPayloadGenerationStore returns the native generation handle as a graph.Store.
+func (s *Store) BeginPayloadGenerationStore(ctx context.Context, req PayloadGenerationRequest) (int64, graph.Store, error) {
+	id, handle, err := s.BeginPayloadGeneration(ctx, req)
+	if handle == nil {
+		return id, nil, err
+	}
+	return id, handle, err
 }
 
 // BeginPayloadGenerationWithStatus is BeginPayloadGeneration with the catalog's
@@ -442,6 +430,15 @@ func (s *Store) BeginPayloadGenerationWithStatus(
 		return 0, nil, false, err
 	}
 	return generationID, handle, adopted, nil
+}
+
+// BeginPayloadGenerationStoreWithStatus returns the native generation handle as a graph.Store.
+func (s *Store) BeginPayloadGenerationStoreWithStatus(ctx context.Context, req PayloadGenerationRequest) (int64, graph.Store, bool, error) {
+	id, handle, adopted, err := s.BeginPayloadGenerationWithStatus(ctx, req)
+	if handle == nil {
+		return id, nil, adopted, err
+	}
+	return id, handle, adopted, err
 }
 
 // PublishPayloadGeneration validates a building generation and moves it to
@@ -539,6 +536,15 @@ func (s *Store) PreparePayloadGenerationPublication(ctx context.Context, generat
 		return nil, fmt.Errorf("%w: generation %d", ErrCatalogNotFound, generationID)
 	}
 	return &PreparedPayloadGenerationPublication{store: s, generationID: generationID, ownerKind: row.OwnerKind}, nil
+}
+
+// PreparePayloadGenerationPublicationHandle retains the native publication object.
+func (s *Store) PreparePayloadGenerationPublicationHandle(ctx context.Context, generationID int64) (PreparedPayloadPublication, error) {
+	publication, err := s.PreparePayloadGenerationPublication(ctx, generationID)
+	if publication == nil {
+		return nil, err
+	}
+	return publication, err
 }
 
 // Publish validates and seals the current payload, then publishes it only if

@@ -3,22 +3,22 @@ package reconcile
 import (
 	"context"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 const (
-	CauseUntrack               = store_sqlite.CleanupCauseUntrack
-	CauseForget                = store_sqlite.CleanupCauseForget
-	CauseReloadRemoved         = store_sqlite.CleanupCauseReloadRemoved
-	CauseDemotion              = store_sqlite.CleanupCauseDemotion
-	CauseReconcileRemoval      = store_sqlite.CleanupCauseReconcileRemoval
-	CauseReconcileAvailability = store_sqlite.CleanupCauseReconcileAvailability
+	CauseUntrack               = storage.CleanupCauseUntrack
+	CauseForget                = storage.CleanupCauseForget
+	CauseReloadRemoved         = storage.CleanupCauseReloadRemoved
+	CauseDemotion              = storage.CleanupCauseDemotion
+	CauseReconcileRemoval      = storage.CleanupCauseReconcileRemoval
+	CauseReconcileAvailability = storage.CleanupCauseReconcileAvailability
 )
 
 // ConfigRemovalAllowed names the only authorized reasons to persist untracking.
 // Unknown causes, including legacy missing causes, always keep configuration.
 func ConfigRemovalAllowed(cause string) bool {
-	return store_sqlite.CleanupCauseAllowsConfigRemoval(cause)
+	return storage.CleanupCauseAllowsConfigRemoval(cause)
 }
 
 func (r *Reconciler) inferCleanupCause(ctx context.Context, target sagaTarget) (string, error) {

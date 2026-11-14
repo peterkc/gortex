@@ -3,12 +3,12 @@ package daemon
 import (
 	"time"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // WALReclaimStatusFrom renders only the existing I/O-free counter snapshot.
 // Both status and live index health use this conversion.
-func WALReclaimStatusFrom(st store_sqlite.WALReclaimStats) *WALReclaimStatus {
+func WALReclaimStatusFrom(st storage.WALReclaimStats) *WALReclaimStatus {
 	out := &WALReclaimStatus{
 		EditBurstGateClosures:   st.EditBurstGateClosures,
 		DeferredEditBurst:       st.DeferredEditBurst,
@@ -78,9 +78,9 @@ func WALReclaimStatusFrom(st store_sqlite.WALReclaimStats) *WALReclaimStatus {
 	return out
 }
 
-func walHistogramStatus(h store_sqlite.DurationHistogram) WALDurationHistogramStatus {
-	bounds := make([]float64, len(store_sqlite.DurationHistogramBounds))
-	for i, bound := range store_sqlite.DurationHistogramBounds {
+func walHistogramStatus(h storage.DurationHistogram) WALDurationHistogramStatus {
+	bounds := make([]float64, len(storage.DurationHistogramBounds))
+	for i, bound := range storage.DurationHistogramBounds {
 		bounds[i] = walDurationMS(bound)
 	}
 	return WALDurationHistogramStatus{
@@ -93,7 +93,7 @@ func walHistogramStatus(h store_sqlite.DurationHistogram) WALDurationHistogramSt
 func walDurationMS(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
 
 // WALCheckpointStatusFrom shares the cheap live counter conversion.
-func WALCheckpointStatusFrom(st store_sqlite.WALPassiveStats) *WALCheckpointStatus {
+func WALCheckpointStatusFrom(st storage.WALPassiveStats) *WALCheckpointStatus {
 	out := &WALCheckpointStatus{
 		Attempts: st.Attempts, Complete: st.Complete, Incomplete: st.Incomplete, ZeroProgress: st.ZeroProgress,
 		DeferredBuildLane: st.DeferredBuildLane, LongestBuildLaneDeferralMS: walDurationMS(st.LongestBuildLaneDeferral),

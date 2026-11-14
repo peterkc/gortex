@@ -21,9 +21,9 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/excludes"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/pathguard"
 	"github.com/zzet/gortex/internal/pathkey"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // ChangeKind describes the type of filesystem change.
@@ -1494,7 +1494,7 @@ func (w *Watcher) guardWatcherPanic(op string) {
 }
 
 func watcherStoragePanicError(op string, recovered any) (error, bool) {
-	storageErr, ok := store_sqlite.StorageErrorFromPanic(recovered)
+	storageErr, ok := storage.StorageErrorFromPanic(recovered)
 	if !ok {
 		return nil, false
 	}
@@ -2317,7 +2317,7 @@ func (w *Watcher) runPointMutationObserved(path string, kind ChangeKind, generat
 	} else {
 		patchErr = w.patchGraphWithReceiptStateObserved(path, kind, generation, false, &fanout, publication)
 	}
-	var storageErr *store_sqlite.StorageError
+	var storageErr *storage.StorageError
 	if errors.As(patchErr, &storageErr) {
 		w.logWatcherStorageFailure("patch "+path, patchErr)
 	}
@@ -3154,7 +3154,11 @@ func (w *Watcher) patchGraphWithReceiptStateRawModern(
 	}
 
 	start := time.Now()
-	writes := idx.writeCounterMark()
+	sampleWrites := idx.writeCounters
+	var writes storage.VFSIOMark
+	if sampleWrites != nil {
+		writes = sampleWrites()
+	}
 	kind = w.reconcileKindWithDisk(path, kind)
 	// This is the identity duplicate gate for native watcher events. A Darwin
 	// startup replay already checked the persisted receipt, so it bypasses this
@@ -3314,7 +3318,7 @@ func (w *Watcher) patchGraphWithReceiptStateRawModern(
 				zap.String("delta_class", classification),
 				zap.Int64("ms", ev.DurationMs),
 				zap.Int("incident_edges", priorEdges),
-				zap.Inline(patchWriteLog{split: idx.writeCounterMark().Since(writes)}),
+				zap.Inline(patchWriteLogSince(sampleWrites, writes)),
 				zap.Inline(laps))
 		} else {
 			// Keep the ordinary native log path free of new timing snapshots,
@@ -3325,7 +3329,7 @@ func (w *Watcher) patchGraphWithReceiptStateRawModern(
 				zap.String("delta_class", classification),
 				zap.Int64("ms", ev.DurationMs),
 				zap.Int("incident_edges", priorEdges),
-				zap.Inline(patchWriteLog{split: idx.writeCounterMark().Since(writes)}))
+				zap.Inline(patchWriteLogSince(sampleWrites, writes)))
 		}
 	}
 	if superseded {

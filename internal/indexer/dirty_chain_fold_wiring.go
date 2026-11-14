@@ -7,9 +7,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/zzet/gortex/internal/storage"
 	"go.uber.org/zap"
-
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 // The stepped chain fold, wired into the compactor.
@@ -52,13 +51,16 @@ var compactionYieldsToEdits = map[string]bool{
 const compactionYieldCheckoutMutation = "synchronous checkout mutation"
 
 // storeChainFoldBackend is chainFoldBackend over the store.
-type storeChainFoldBackend struct{ store *store_sqlite.Store }
+type storeChainFoldBackend struct {
+	store   CheckoutGenerationStore
+	catalog CheckoutCatalog
+}
 
 // foldDestinationOwnership belongs to one compaction attempt, rather than
 // one Begin call. Its Store flight protects the output even with no reader
 // lease manager, across retry gaps and publication-to-landing handoff.
 type foldDestinationOwnership struct {
-	flight *store_sqlite.PayloadBuildFlight
+	flight storage.PayloadBuildFlightHandle
 }
 
 type foldDestinationOwnershipKey struct{}
@@ -70,11 +72,11 @@ func (b storeChainFoldBackend) BeginChainFold(ctx context.Context, chain []int64
 	if fold, _ := ctx.Value(importFoldPublicationKey{}).(*importFoldPublication); fold != nil {
 		target = 10 * time.Millisecond
 	}
-	var flight *store_sqlite.PayloadBuildFlight
+	var flight storage.PayloadBuildFlightHandle
 	if destination, _ := ctx.Value(foldDestinationOwnershipKey{}).(*foldDestinationOwnership); destination != nil {
 		flight = destination.flight
 	}
-	fold, err := b.store.BeginChainFold(ctx, store_sqlite.ChainFoldRequest{Chain: chain, To: to, Owner: owner, StepTarget: target, BuildFlight: flight})
+	fold, err := b.store.BeginChainFoldHandle(ctx, storage.ChainFoldRequest{Chain: chain, To: to, Owner: owner, StepTarget: target, BuildFlight: flight})
 	if err != nil {
 		return nil, err
 	}
@@ -91,13 +93,13 @@ func (b storeChainFoldBackend) RebaseViewGeneration(ctx context.Context, generat
 }
 
 func (b storeChainFoldBackend) rebaseViewGeneration(ctx context.Context, generationID, fromBase, toBase int64) error {
-	return b.store.Catalog().RebaseViewGeneration(ctx, store_sqlite.RebaseViewGenerationRequest{
+	return b.catalog.RebaseViewGeneration(ctx, storage.RebaseViewGenerationRequest{
 		GenerationID: generationID, FromBase: fromBase, ToBase: toBase,
 	})
 }
 
 func (storeChainFoldBackend) StepRetryable(err error) bool {
-	return errors.Is(err, store_sqlite.ErrChainFoldYielded) || errors.Is(err, store_sqlite.ErrChainFoldWALMark)
+	return errors.Is(err, storage.ErrChainFoldYielded) || errors.Is(err, storage.ErrChainFoldWALMark)
 }
 
 // foldBackend is the coordinator's backend: the store's, unless a test
@@ -106,7 +108,7 @@ func (c *CheckoutCoordinator) foldBackend() chainFoldBackend {
 	if c.compaction.backend != nil {
 		return c.compaction.backend
 	}
-	return storeChainFoldBackend{store: c.store}
+	return storeChainFoldBackend{store: c.store, catalog: c.catalog}
 }
 
 // foldingChain is the chain (oldest first) a stepped fold of this checkout is
@@ -122,14 +124,14 @@ func (c *CheckoutCoordinator) foldingChain() []int64 {
 
 // copyChainInSteps is the stepped copier: the store's ChainFold, stepped to
 // its end. While it runs the chain is published as the folding chain.
-func (c *CheckoutCoordinator) copyChainInSteps(ctx context.Context, oldestFirst []int64, to int64) (store_sqlite.GenerationCopyCounts, func(context.Context, bool), error) {
+func (c *CheckoutCoordinator) copyChainInSteps(ctx context.Context, oldestFirst []int64, to int64) (storage.GenerationCopyCounts, func(context.Context, bool), error) {
 	if destination, _ := ctx.Value(foldDestinationOwnershipKey{}).(*foldDestinationOwnership); destination != nil {
-		flight, leader, ready, err := c.store.JoinPayloadBuildFlight(ctx, to, false)
+		flight, leader, ready, err := c.store.JoinPayloadBuildFlightHandle(ctx, to, false)
 		if err != nil {
-			return store_sqlite.GenerationCopyCounts{}, nil, err
+			return storage.GenerationCopyCounts{}, nil, err
 		}
 		if !leader || ready {
-			return store_sqlite.GenerationCopyCounts{}, nil, fmt.Errorf("%w: generation %d", errFoldDestinationNotOwned, to)
+			return storage.GenerationCopyCounts{}, nil, fmt.Errorf("%w: generation %d", errFoldDestinationNotOwned, to)
 		}
 		destination.flight = flight
 	}
@@ -137,7 +139,7 @@ func (c *CheckoutCoordinator) copyChainInSteps(ctx context.Context, oldestFirst 
 	watch := c.newFoldStepWatch(to)
 	fold, beginRetries, err := beginChainFoldWatched(ctx, backend, oldestFirst, to, c.checkoutID, watch)
 	if err != nil {
-		return store_sqlite.GenerationCopyCounts{}, nil, err
+		return storage.GenerationCopyCounts{}, nil, err
 	}
 	c.compaction.mu.Lock()
 	c.compaction.foldingChain = slices.Clone(oldestFirst)
@@ -161,9 +163,9 @@ func (c *CheckoutCoordinator) copyChainInSteps(ctx context.Context, oldestFirst 
 		}
 	}, watch)
 	retries += beginRetries
-	var counts store_sqlite.GenerationCopyCounts
+	var counts storage.GenerationCopyCounts
 	if stepped, ok := fold.(interface {
-		Counts() (store_sqlite.GenerationCopyCounts, int, int)
+		Counts() (storage.GenerationCopyCounts, int, int)
 	}); ok {
 		counts, _, _ = stepped.Counts()
 	}
@@ -210,7 +212,7 @@ func (c *CheckoutCoordinator) landSteppedFold(ctx context.Context, commitGenerat
 		return foldLanding{kind: foldLandByEdit}, true
 	}
 	route, found, err := c.catalog.GetCheckoutRoute(ctx, c.checkoutID)
-	if err != nil || !found || route.State != store_sqlite.RouteActive ||
+	if err != nil || !found || route.State != storage.RouteActive ||
 		route.CommitGenerationID != commitGeneration || route.DirtyGenerationID <= 0 {
 		c.setPreferredDirtyParent(built.GenerationID, "folded while the route moved on")
 		return foldLanding{kind: foldLandMoved}, false
@@ -218,7 +220,7 @@ func (c *CheckoutCoordinator) landSteppedFold(ctx context.Context, commitGenerat
 	routed := c.dirtyChainMembers(ctx, route.DirtyGenerationID)
 	slices.Reverse(routed)
 	flip := func(ctx context.Context, to int64) error {
-		if err := c.flip(ctx, &route, store_sqlite.RouteSlotDirty, to); err != nil {
+		if err := c.flip(ctx, &route, storage.RouteSlotDirty, to); err != nil {
 			return err
 		}
 		markPublicationPhase(ctx, PublicationRouteFlipped)
@@ -252,7 +254,7 @@ func (c *CheckoutCoordinator) landSteppedFold(ctx context.Context, commitGenerat
 // parentChainBound is the depth bound parent selection walks the route's chain
 // under: with the stepped fold, the physical cap (an edit chains until it and
 // the background fold keeps the chain short); otherwise the effective bound.
-func (c *CheckoutCoordinator) parentChainBound(_ context.Context, _ store_sqlite.CheckoutRoute) int {
+func (c *CheckoutCoordinator) parentChainBound(_ context.Context, _ storage.CheckoutRoute) int {
 	if steppedChainFoldEnabled {
 		return maxChainWalkDepth
 	}
@@ -262,7 +264,7 @@ func (c *CheckoutCoordinator) parentChainBound(_ context.Context, _ store_sqlite
 // foldAtCap is the fold an edit makes when it finds the routed chain at the
 // physical cap: the layers above a running fold, or the whole chain when none
 // runs, inline, bounded and unverified (foldInlineAtCap). 0 when refused.
-func (c *CheckoutCoordinator) foldAtCap(ctx context.Context, route store_sqlite.CheckoutRoute, commitGeneration int64) int64 {
+func (c *CheckoutCoordinator) foldAtCap(ctx context.Context, route storage.CheckoutRoute, commitGeneration int64) int64 {
 	if !foldChainAtBoundEnabled || route.DirtyGenerationID <= 0 {
 		return 0
 	}
@@ -296,7 +298,7 @@ func (c *CheckoutCoordinator) foldAtCap(ctx context.Context, route store_sqlite.
 // longer cancels it; only ctx (the coordinator's shutdown or a transition of
 // the checkout) does.
 func (c *CheckoutCoordinator) compactDirtyChainStepped(
-	ctx context.Context, trigger CheckoutCycle, commit store_sqlite.ViewGeneration, route store_sqlite.CheckoutRoute,
+	ctx context.Context, trigger CheckoutCycle, commit storage.ViewGeneration, route storage.CheckoutRoute,
 	report *DirtyChainCompaction, stopYielding, releaseLane func(),
 ) string {
 	destination := &foldDestinationOwnership{}
@@ -309,7 +311,11 @@ func (c *CheckoutCoordinator) compactDirtyChainStepped(
 		if report.Canceled && err == nil {
 			err = ctx.Err()
 		}
-		destination.flight.Complete(err)
+		// The flight is set only after the copier joins as leader; an
+		// attempt canceled or refused before that owns nothing to release.
+		if destination.flight != nil {
+			destination.flight.Complete(err)
+		}
 	}()
 	k := &c.compaction
 	k.mu.Lock()
@@ -329,7 +335,7 @@ func (c *CheckoutCoordinator) compactDirtyChainStepped(
 		return ""
 	}
 	var folded []int64
-	copier := func(ctx context.Context, oldestFirst []int64, to int64) (store_sqlite.GenerationCopyCounts, func(context.Context, bool), error) {
+	copier := func(ctx context.Context, oldestFirst []int64, to int64) (storage.GenerationCopyCounts, func(context.Context, bool), error) {
 		folded = slices.Clone(oldestFirst)
 		return c.copyChainInSteps(ctx, oldestFirst, to)
 	}
@@ -338,7 +344,7 @@ func (c *CheckoutCoordinator) compactDirtyChainStepped(
 	started := time.Now()
 	built, err := c.flattenDirtyChainOver(ctx, commit, commit, route.DirtyGenerationID, copier)
 	report.BuildDuration = time.Since(started)
-	if err != nil || route.State == store_sqlite.RoutePending {
+	if err != nil || route.State == storage.RoutePending {
 		// Pending-source folds are offered only through the guarded parent
 		// handoff below, never through an edit's route-landing publication.
 		c.settleFoldPublication(pub, dirtyLayerBuild{}, nil)
@@ -348,7 +354,7 @@ func (c *CheckoutCoordinator) compactDirtyChainStepped(
 	switch {
 	case err == nil:
 		report.GenerationID = built.GenerationID
-		if route.State == store_sqlite.RoutePending {
+		if route.State == storage.RoutePending {
 			if c.leases != nil {
 				pin := c.leases.Acquire(built.GenerationID)
 				defer pin.Release()
@@ -376,7 +382,7 @@ func (c *CheckoutCoordinator) compactDirtyChainStepped(
 		}
 	case ctx.Err() != nil:
 		report.Outcome, report.Canceled = dirtyChainCompactionCanceled, true
-	case errors.Is(err, errFlattenRefused), errors.Is(err, store_sqlite.ErrChainFoldBusy), errors.Is(err, store_sqlite.ErrChainFoldStale),
+	case errors.Is(err, errFlattenRefused), errors.Is(err, storage.ErrChainFoldBusy), errors.Is(err, storage.ErrChainFoldStale),
 		errors.Is(err, errChainFoldStarved), errors.Is(err, errFoldDestinationNotOwned):
 		c.logger.Debug("checkout coordinator: stepped chain fold refused; the chain stays routed",
 			zap.String("checkout", c.checkoutID), zap.Error(err))

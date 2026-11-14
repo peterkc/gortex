@@ -29,7 +29,8 @@ func TestDedicatedBaseAdvanceRevisionChangeRootsNewChain(t *testing.T) {
 			if initial.Claim.BaseGenerationID != 0 {
 				t.Fatalf("initial publication is not a full root: %+v", initial.Claim)
 			}
-			initialRow, found, err := f.builder.Store.Catalog().GetViewGeneration(ctx, initial.Claim.GenerationID)
+			nativeStore := f.builder.Store.(*store_sqlite.Store)
+			initialRow, found, err := nativeStore.Catalog().GetViewGeneration(ctx, initial.Claim.GenerationID)
 			if err != nil || !found || initialRow.DependencyRevision != "cohort-v1:a" {
 				t.Fatalf("fixture did not persist the observed revision: %+v found=%v err=%v", initialRow, found, err)
 			}
@@ -42,7 +43,7 @@ func TestDedicatedBaseAdvanceRevisionChangeRootsNewChain(t *testing.T) {
 			if next.Claim.GenerationID == initial.Claim.GenerationID || next.Report.Coalesced {
 				t.Fatalf("advancement did not allocate fresh output: %+v", next)
 			}
-			nextRow, found, err := f.builder.Store.Catalog().GetViewGeneration(ctx, next.Claim.GenerationID)
+			nextRow, found, err := nativeStore.Catalog().GetViewGeneration(ctx, next.Claim.GenerationID)
 			if err != nil || !found {
 				t.Fatalf("advanced row: found=%v err=%v", found, err)
 			}
@@ -72,7 +73,7 @@ func TestDedicatedBaseAdvanceRevisionChangeRootsNewChain(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			check, err := installDedicatedWriteAudit(ctx, f.builder.Store, f.request.StorePath)
+			check, err := installDedicatedWriteAudit(ctx, nativeStore, f.request.StorePath)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -96,7 +97,8 @@ func TestDedicatedBaseAdvanceRevisionPlanningWritesNothing(t *testing.T) {
 	defer cancel()
 	f.identity.DependencyRevision = "cohort-v1:a"
 	initial := f.ensure(t, ctx)
-	catalog := f.builder.Store.Catalog()
+	nativeStore := f.builder.Store.(*store_sqlite.Store)
+	catalog := nativeStore.Catalog()
 	active, found, err := catalog.GetViewGeneration(ctx, initial.Claim.GenerationID)
 	if err != nil || !found {
 		t.Fatalf("active row: found=%v err=%v", found, err)
@@ -162,7 +164,7 @@ func TestDedicatedBaseAdvanceRevisionPlanningWritesNothing(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("broken head row: found=%v err=%v", found, err)
 	}
-	check, err := installDedicatedWriteAudit(ctx, f.builder.Store, f.request.StorePath)
+	check, err := installDedicatedWriteAudit(ctx, nativeStore, f.request.StorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +251,8 @@ func TestDedicatedBaseAdvanceNonHomogeneousChainStillPublishesAsRoot(t *testing.
 			f := newDedicatedAdvanceFixture(t)
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
-			catalog := f.builder.Store.Catalog()
+			nativeStore := f.builder.Store.(*store_sqlite.Store)
+			catalog := nativeStore.Catalog()
 			f.identity.DependencyRevision = "cohort-v1:a"
 			initial := f.ensure(t, ctx)
 			rootID := initial.Claim.GenerationID
@@ -278,7 +281,7 @@ func TestDedicatedBaseAdvanceNonHomogeneousChainStillPublishesAsRoot(t *testing.
 			// The initial full root scheduled Store maintenance before returning.
 			// Join it before this fixture's second SQLite connection takes the
 			// writer lock for the reconstructed mixed-head pointer.
-			if err := f.builder.Store.AwaitMaintenanceIdle(ctx); err != nil {
+			if err := nativeStore.AwaitMaintenanceIdle(ctx); err != nil {
 				t.Fatal(err)
 			}
 			setDedicatedActiveGeneration(t, ctx, f.request.StorePath, f.publisher.authority.GraphID, mixedID)
@@ -314,7 +317,7 @@ func TestDedicatedBaseAdvanceNonHomogeneousChainStillPublishesAsRoot(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
-			check, err := installDedicatedWriteAudit(ctx, f.builder.Store, f.request.StorePath)
+			check, err := installDedicatedWriteAudit(ctx, nativeStore, f.request.StorePath)
 			if err != nil {
 				t.Fatal(err)
 			}

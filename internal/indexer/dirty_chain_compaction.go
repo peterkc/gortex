@@ -10,10 +10,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/zzet/gortex/internal/storage"
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/gitstate"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 )
 
@@ -351,7 +351,7 @@ func (c *CheckoutCoordinator) activeChainForFoldReplacement(ctx context.Context,
 		return nil
 	}
 	route, found, err := c.catalog.GetCheckoutRoute(ctx, c.checkoutID)
-	if err != nil || !found || route.State != store_sqlite.RouteActive ||
+	if err != nil || !found || route.State != storage.RouteActive ||
 		route.CommitGenerationID != trigger.CommitGenerationID || route.DirtyGenerationID != trigger.DirtyGenerationID {
 		return nil
 	}
@@ -467,7 +467,7 @@ func (c *CheckoutCoordinator) takePreferredDirtyParent() int64 {
 // anything else selects over the route as before.
 func (c *CheckoutCoordinator) selectDirtyParentForSlot(
 	ctx context.Context,
-	route store_sqlite.CheckoutRoute,
+	route storage.CheckoutRoute,
 	commitGeneration int64,
 	sample gitstate.DirtySnapshot,
 	out *CheckoutCycle,
@@ -527,7 +527,7 @@ func (c *CheckoutCoordinator) selectDirtyParentForSlot(
 // edit then builds direct as before). The fold is filed in the reuse cache so
 // it owes no retirement while the edit stands on it; the edit's route flip
 // then releases the old chain to the sweep.
-func (c *CheckoutCoordinator) foldChainAtBound(ctx context.Context, route store_sqlite.CheckoutRoute, commitGeneration int64) int64 {
+func (c *CheckoutCoordinator) foldChainAtBound(ctx context.Context, route storage.CheckoutRoute, commitGeneration int64) int64 {
 	if !foldChainAtBoundEnabled {
 		return 0
 	}
@@ -559,7 +559,7 @@ var foldChainAtBoundEnabled = true
 // so the withdrawal owes it no retirement and the edit's build can stand on
 // it. It returns 0 (and holds nothing) when the routed generation is not a
 // servable layer rooted at the routed commit generation.
-func (c *CheckoutCoordinator) holdWithdrawnDirty(ctx context.Context, route store_sqlite.CheckoutRoute) int64 {
+func (c *CheckoutCoordinator) holdWithdrawnDirty(ctx context.Context, route storage.CheckoutRoute) int64 {
 	if c == nil || route.DirtyGenerationID <= 0 || route.CommitGenerationID <= 0 {
 		return 0
 	}
@@ -587,7 +587,7 @@ func (c *CheckoutCoordinator) deferFailedGeneration(ctx context.Context, generat
 	lookup := context.WithoutCancel(ctx)
 	row, found, err := c.catalog.GetViewGeneration(lookup, generationID)
 	if err != nil || !found ||
-		(row.State != store_sqlite.ViewGenerationFailed && row.State != store_sqlite.ViewGenerationSuperseded) {
+		(row.State != storage.ViewGenerationFailed && row.State != storage.ViewGenerationSuperseded) {
 		return
 	}
 	c.deferRetire(generationID, "failed working-tree build")
@@ -809,7 +809,7 @@ func (c *CheckoutCoordinator) compactDirtyChainOnce(parent context.Context, trig
 		report.Outcome = dirtyChainCompactionNotNeeded
 		return ""
 	}
-	if route.State != store_sqlite.RouteActive || route.DirtyGenerationID <= 0 {
+	if route.State != storage.RouteActive || route.DirtyGenerationID <= 0 {
 		parent, releaseParent := c.withdrawnCompactionParent(ctx, route, trigger)
 		defer releaseParent()
 		if parent == 0 {
@@ -908,7 +908,7 @@ func (c *CheckoutCoordinator) installCompactedDirty(ctx context.Context, commitG
 		func() {
 			defer c.cycleMu.Unlock()
 			route, found, err := c.catalog.GetCheckoutRoute(ctx, c.checkoutID)
-			if err != nil || !found || route.State != store_sqlite.RouteActive ||
+			if err != nil || !found || route.State != storage.RouteActive ||
 				route.CommitGenerationID != commitGeneration || route.DirtyGenerationID <= 0 ||
 				route.DirtyGenerationID == built.GenerationID {
 				return
@@ -918,7 +918,7 @@ func (c *CheckoutCoordinator) installCompactedDirty(ctx context.Context, commitG
 				return
 			}
 			previous = route.DirtyGenerationID
-			if err := c.flip(ctx, &route, store_sqlite.RouteSlotDirty, built.GenerationID); err != nil {
+			if err := c.flip(ctx, &route, storage.RouteSlotDirty, built.GenerationID); err != nil {
 				return
 			}
 			markPublicationPhase(ctx, PublicationRouteFlipped)
@@ -1007,7 +1007,7 @@ func (c *CheckoutCoordinator) checkoutLanguageCensusContext(ctx context.Context,
 	census := map[string]int{}
 	add := func(generationID int64, published bool) error {
 		counted++
-		handle := c.store.AtGeneration(generationID)
+		handle := generationAt(c.store, generationID)
 		var counts map[string]int
 		var err error
 		if published {
@@ -1039,7 +1039,7 @@ func (c *CheckoutCoordinator) checkoutLanguageCensusContext(ctx context.Context,
 		if !found {
 			return nil, fmt.Errorf("indexer: census generation %d is missing", id)
 		}
-		if err := add(id, row.State == store_sqlite.ViewGenerationReady); err != nil {
+		if err := add(id, row.State == storage.ViewGenerationReady); err != nil {
 			return nil, err
 		}
 		if row.BaseGenerationID <= 0 {

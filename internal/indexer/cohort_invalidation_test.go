@@ -424,7 +424,7 @@ func TestARefViewMemoFollowsTheWorkspaceTopology(t *testing.T) {
 
 	builder := builderNewBuilder(f.store)
 	builder.Admissions = idx
-	manager, err := NewRefViewManager(RefViewManagerConfig{
+	manager, err := NewRefViewManager(RefViewManagerConfig{Catalog: testCatalog(f.store),
 		Store:          f.store,
 		Builder:        builder,
 		Config:         config.Default().Index,
@@ -941,7 +941,7 @@ func TestARefViewDropsAHeldRefusalWhenTheWorkspaceMembershipMoves(t *testing.T) 
 	builder.Admissions = mi.indexers[builderRepoPrefix]
 
 	build := func() *RefViewManager {
-		manager, err := NewRefViewManager(RefViewManagerConfig{
+		manager, err := NewRefViewManager(RefViewManagerConfig{Catalog: testCatalog(f.store),
 			Store:          f.store,
 			Builder:        builder,
 			Config:         config.Default().Index,

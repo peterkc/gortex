@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/zzet/gortex/internal/gitstate"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Saga errors.
@@ -112,7 +112,7 @@ type sagaTarget struct {
 	Cause     string `json:"cause,omitempty"`
 	Root      string `json:"root,omitempty"`
 	// Exact persisted snapshot for one-time legacy recovery; never serialized.
-	journalSnapshot *store_sqlite.CleanupEntry
+	journalSnapshot *storage.CleanupEntry
 	Kind            sagaKind  `json:"kind"`
 	Phase           sagaPhase `json:"phase"`
 	CheckoutID      string    `json:"checkout_id,omitempty"`
@@ -175,7 +175,7 @@ func (r *Reconciler) forgetCheckout(ctx context.Context, checkoutID, incarnation
 	if ok {
 		if existing.Incarnation != incarnation {
 			return fmt.Errorf("%w: checkout %s is at incarnation %s, not %s",
-				store_sqlite.ErrCatalogStaleGuard, checkoutID, existing.Incarnation, incarnation)
+				storage.ErrCatalogStaleGuard, checkoutID, existing.Incarnation, incarnation)
 		}
 		target.FamilyID = existing.FamilyID
 		owned, err := r.ownedGraph(ctx, existing.FamilyID, checkoutID)
@@ -230,11 +230,11 @@ func (r *Reconciler) retirePrimaryClosure(ctx context.Context, graphID string, p
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("%w: family %s", store_sqlite.ErrCatalogNotFound, graph.FamilyID)
+		return fmt.Errorf("%w: family %s", storage.ErrCatalogNotFound, graph.FamilyID)
 	}
 	if family.PrimaryEpoch != primaryEpoch {
 		return fmt.Errorf("%w: family %s is at primary epoch %d, not %d",
-			store_sqlite.ErrCatalogStaleGuard, family.FamilyID, family.PrimaryEpoch, primaryEpoch)
+			storage.ErrCatalogStaleGuard, family.FamilyID, family.PrimaryEpoch, primaryEpoch)
 	}
 	target.FamilyID = graph.FamilyID
 	target.CheckoutID = graph.OwnerCheckoutID
@@ -262,7 +262,7 @@ func (r *Reconciler) Resume(ctx context.Context) error {
 	}
 	var errs []error
 	for _, entry := range entries {
-		if entry.Phase == store_sqlite.CleanupPhaseDone {
+		if entry.Phase == storage.CleanupPhaseDone {
 			continue
 		}
 		// A nested saga may have finished (and deleted) this entry after the
@@ -375,28 +375,28 @@ func (r *Reconciler) runSaga(ctx context.Context, target sagaTarget) error {
 	id := target.cleanupID()
 	for _, phase := range plan[start:] {
 		target.Phase = phase
-		if err := r.persistPhase(ctx, id, target, store_sqlite.CleanupPhaseDeleting); err != nil {
+		if err := r.persistPhase(ctx, id, target, storage.CleanupPhaseDeleting); err != nil {
 			return err
 		}
 		if target.Kind != sagaPurgeLayers {
 			if err := r.beginRepositoryCleanup(ctx, target.GraphID, target.Cause); err != nil {
-				return errors.Join(err, r.persistPhase(ctx, id, target, store_sqlite.CleanupPhaseFailed))
+				return errors.Join(err, r.persistPhase(ctx, id, target, storage.CleanupPhaseFailed))
 			}
 		}
 		if err := r.runPhase(ctx, target); err != nil {
 			if r.cleanupDeferred(err) {
 				target.Deferred = true
 			}
-			return errors.Join(err, r.persistPhase(ctx, id, target, store_sqlite.CleanupPhaseFailed))
+			return errors.Join(err, r.persistPhase(ctx, id, target, storage.CleanupPhaseFailed))
 		}
 	}
 	if target.Kind == sagaPurgeLayers {
-		return r.persistPhase(ctx, id, target, store_sqlite.CleanupPhaseDone)
+		return r.persistPhase(ctx, id, target, storage.CleanupPhaseDone)
 	}
 	if target.AttemptID != "" {
 		return r.catalog.DeleteCleanupAttempt(ctx, id, target.AttemptID)
 	}
-	if err := r.catalog.DeleteCleanupEntry(ctx, id); err != nil && !errors.Is(err, store_sqlite.ErrCatalogNotFound) {
+	if err := r.catalog.DeleteCleanupEntry(ctx, id); err != nil && !errors.Is(err, storage.ErrCatalogNotFound) {
 		return err
 	}
 	return nil
@@ -590,7 +590,7 @@ func (r *Reconciler) forgetDependents(ctx context.Context, target sagaTarget) er
 			// rooted in the graph have been dropped.
 			continue
 		}
-		if checkout.EffectiveMode != store_sqlite.CheckoutModeAutomatic {
+		if checkout.EffectiveMode != storage.CheckoutModeAutomatic {
 			continue
 		}
 		if err := r.forgetCheckout(ctx, checkout.CheckoutID, checkout.Incarnation, target.Cause); err != nil {
@@ -654,7 +654,7 @@ func (r *Reconciler) forgetFamilyCheckouts(ctx context.Context, target sagaTarge
 	if err != nil {
 		return err
 	}
-	slices.SortStableFunc(checkouts, func(a, b store_sqlite.Checkout) int {
+	slices.SortStableFunc(checkouts, func(a, b storage.Checkout) int {
 		return boolOrder(a.AdminName == gitstate.MainAdminName) - boolOrder(b.AdminName == gitstate.MainAdminName)
 	})
 	for _, checkout := range checkouts {
@@ -679,7 +679,7 @@ func (r *Reconciler) deleteFamilyRow(ctx context.Context, target sagaTarget) err
 // records it as done for this exact incarnation. It is what an expiring
 // availability grace calls, and the journal entry is what stops a restart from
 // purging the same incarnation a second time.
-func (r *Reconciler) purgeLayersOnce(ctx context.Context, checkout store_sqlite.Checkout, causes ...string) error {
+func (r *Reconciler) purgeLayersOnce(ctx context.Context, checkout storage.Checkout, causes ...string) error {
 	cause := CauseReconcileAvailability
 	if len(causes) > 0 {
 		cause = causes[0]
@@ -695,19 +695,19 @@ func (r *Reconciler) purgeLayersOnce(ctx context.Context, checkout store_sqlite.
 	if err != nil {
 		return err
 	}
-	if present && entry.Phase == store_sqlite.CleanupPhaseDone {
+	if present && entry.Phase == storage.CleanupPhaseDone {
 		return nil
 	}
 	return r.runSaga(ctx, target)
 }
 
 // persistPhase writes a journal entry at one phase.
-func (r *Reconciler) persistPhase(ctx context.Context, id string, target sagaTarget, phase store_sqlite.CleanupPhase) error {
+func (r *Reconciler) persistPhase(ctx context.Context, id string, target sagaTarget, phase storage.CleanupPhase) error {
 	payload, err := json.Marshal(target)
 	if err != nil {
 		return fmt.Errorf("%w: encoding %s: %w", ErrSagaTarget, target.Kind, err)
 	}
-	return r.persistCleanupEntry(ctx, store_sqlite.CleanupEntry{
+	return r.persistCleanupEntry(ctx, storage.CleanupEntry{
 		CleanupID:       id,
 		OpaqueTargetIDs: string(payload),
 		Reason:          string(target.Kind),
@@ -721,7 +721,7 @@ func (r *Reconciler) persistPhase(ctx context.Context, id string, target sagaTar
 // reported as absent, because there is nothing left to resume from it.
 func (r *Reconciler) loadSagaTarget(ctx context.Context, id string) (sagaTarget, bool, error) {
 	entry, present, err := r.catalog.GetCleanupEntry(ctx, id)
-	if err != nil || !present || entry.Phase == store_sqlite.CleanupPhaseDone {
+	if err != nil || !present || entry.Phase == storage.CleanupPhaseDone {
 		return sagaTarget{}, false, err
 	}
 	target, err := decodeSagaTarget(entry)
@@ -732,7 +732,7 @@ func (r *Reconciler) loadSagaTarget(ctx context.Context, id string) (sagaTarget,
 }
 
 // decodeSagaTarget reads a journal entry's opaque payload.
-func decodeSagaTarget(entry store_sqlite.CleanupEntry) (sagaTarget, error) {
+func decodeSagaTarget(entry storage.CleanupEntry) (sagaTarget, error) {
 	var target sagaTarget
 	if err := json.Unmarshal([]byte(entry.OpaqueTargetIDs), &target); err != nil {
 		return sagaTarget{}, fmt.Errorf("%w: entry %s: %w", ErrSagaTarget, entry.CleanupID, err)
@@ -748,7 +748,7 @@ func decodeSagaTarget(entry store_sqlite.CleanupEntry) (sagaTarget, error) {
 // again after a crash, and a row it removed the first time being missing the
 // second time is the phase working, not failing.
 func ignoreNotFound(err error) error {
-	if errors.Is(err, store_sqlite.ErrCatalogNotFound) {
+	if errors.Is(err, storage.ErrCatalogNotFound) {
 		return nil
 	}
 	return err

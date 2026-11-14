@@ -5,7 +5,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // An apply step's wall time is its work, its waits and the time it was
@@ -25,11 +25,12 @@ type writeLockWaiter interface {
 type applyLapSplit struct {
 	cpu  time.Duration
 	wait time.Duration
-	// store is the store's cumulative waits (store_sqlite.ReaderWaitMark),
+	// store is the store's cumulative waits (storage.ReaderWaitMark),
 	// when the indexer has a source for them; blockReads the process's block
 	// reads.
-	store      store_sqlite.ReaderWaitMark
-	blockReads int64
+	store         storage.ReaderWaitMark
+	writeCounters bool
+	blockReads    int64
 	// sched is the process's scheduler-latency histogram
 	// (sched_latency_mark.go): the runnable waits of every goroutine.
 	sched schedMark
@@ -39,8 +40,10 @@ func (idx *Indexer) applyLapSplitMark() applyLapSplit {
 	mark := applyLapSplit{cpu: processCPUTime(), blockReads: editDeltaProcessIO().blockReads, sched: readSchedMark()}
 	if idx.storeWaits != nil {
 		mark.store = idx.storeWaits()
-	} else {
+		mark.writeCounters = true
+	} else if idx.writeCounters != nil {
 		mark.store.VFS = idx.writeCounterMark()
+		mark.writeCounters = true
 	}
 	if w, ok := idx.graph.(writeLockWaiter); ok {
 		mark.wait = w.WriteLockWait()
@@ -52,11 +55,15 @@ func (idx *Indexer) applyLapSplitMark() applyLapSplit {
 // to now.
 func applyLapSplitFields(name string, start, now applyLapSplit) []zap.Field {
 	waits, waited := now.sched.since(start.sched)
-	return append(append([]zap.Field{
+	fields := append([]zap.Field{
 		zap.Float64(name+"_cpu_ms", float64((now.cpu-start.cpu).Microseconds())/1000),
 		zap.Float64(name+"_lock_wait_ms", float64((now.wait-start.wait).Microseconds())/1000),
 		zap.Int64(name+"_block_reads", now.blockReads-start.blockReads),
-	}, append(storeWaitFields(name+"_", now.store.Split(start.store)), schedWaitFields(name+"_", waits, waited)...)...), writeCounterFields(name+"_", now.store.VFS.Since(start.store.VFS))...)
+	}, append(storeWaitFields(name+"_", now.store.Split(start.store)), schedWaitFields(name+"_", waits, waited)...)...)
+	if !start.writeCounters || !now.writeCounters {
+		return append(fields, zap.Bool(name+"_write_counters_unavailable", true))
+	}
+	return append(fields, writeCounterFields(name+"_", now.store.VFS.Since(start.store.VFS))...)
 }
 
 // schedWaitFields renders the process's runnable waits that ended over a
@@ -73,7 +80,7 @@ func schedWaitFields(prefix string, waits int64, total time.Duration) []zap.Fiel
 // and read pool, as before), then each kind on its own — the writer pool,
 // SQLite's busy-handler and WAL read-lock retry sleeps with their counts, and
 // the read transactions' wall time with their count.
-func storeWaitFields(prefix string, w store_sqlite.ReaderWaitSplit) []zap.Field {
+func storeWaitFields(prefix string, w storage.ReaderWaitSplit) []zap.Field {
 	ms := func(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
 	return []zap.Field{
 		zap.Float64(prefix+"reader_wait_ms", ms(w.Gate+w.ReadPool)),
@@ -103,7 +110,7 @@ func storeWaitFields(prefix string, w store_sqlite.ReaderWaitSplit) []zap.Field 
 }
 
 // storeWaitMillis is storeWaitFields as a map, for a per-phase log field.
-func storeWaitMillis(w store_sqlite.ReaderWaitSplit) map[string]float64 {
+func storeWaitMillis(w storage.ReaderWaitSplit) map[string]float64 {
 	ms := func(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
 	return map[string]float64{
 		"reader_wait_ms": ms(w.Gate + w.ReadPool), "writer_pool_wait_ms": ms(w.WriterPool),
@@ -134,12 +141,12 @@ func storeWaitMillis(w store_sqlite.ReaderWaitSplit) map[string]float64 {
 }
 
 // addVFSIOSplit sums two laps of the store's VFS counters.
-func addVFSIOSplit(a, b store_sqlite.VFSIOSplit) store_sqlite.VFSIOSplit {
-	return store_sqlite.VFSIOSplit{
+func addVFSIOSplit(a, b storage.VFSIOSplit) storage.VFSIOSplit {
+	return storage.VFSIOSplit{
 		OtherWALWriteBytes:   a.OtherWALWriteBytes + b.OtherWALWriteBytes,
 		WALReset:             a.WALReset || b.WALReset,
-		Reindex:              store_sqlite.ReindexWriteCounts{Updated: a.Reindex.Updated + b.Reindex.Updated, Deleted: a.Reindex.Deleted + b.Reindex.Deleted, Inserted: a.Reindex.Inserted + b.Reindex.Inserted, FastPath: a.Reindex.FastPath + b.Reindex.FastPath, Generic: a.Reindex.Generic + b.Reindex.Generic, ReceiptFallback: a.Reindex.ReceiptFallback + b.Reindex.ReceiptFallback},
-		Rows:                 store_sqlite.RowWriteCounts{Nodes: a.Rows.Nodes + b.Rows.Nodes, Edges: a.Rows.Edges + b.Rows.Edges, SymbolFTS: a.Rows.SymbolFTS + b.Rows.SymbolFTS, ContentFTS: a.Rows.ContentFTS + b.Rows.ContentFTS},
+		Reindex:              storage.ReindexWriteCounts{Updated: a.Reindex.Updated + b.Reindex.Updated, Deleted: a.Reindex.Deleted + b.Reindex.Deleted, Inserted: a.Reindex.Inserted + b.Reindex.Inserted, FastPath: a.Reindex.FastPath + b.Reindex.FastPath, Generic: a.Reindex.Generic + b.Reindex.Generic, ReceiptFallback: a.Reindex.ReceiptFallback + b.Reindex.ReceiptFallback},
+		Rows:                 storage.RowWriteCounts{Nodes: a.Rows.Nodes + b.Rows.Nodes, Edges: a.Rows.Edges + b.Rows.Edges, SymbolFTS: a.Rows.SymbolFTS + b.Rows.SymbolFTS, ContentFTS: a.Rows.ContentFTS + b.Rows.ContentFTS},
 		Transactions:         a.Transactions + b.Transactions,
 		WriterMainWrites:     a.WriterMainWrites + b.WriterMainWrites,
 		WriterMainWriteTime:  a.WriterMainWriteTime + b.WriterMainWriteTime,

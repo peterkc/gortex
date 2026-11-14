@@ -3,7 +3,6 @@ package indexer
 import (
 	"context"
 	"fmt"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 // The background owner receives this only after ordinary core/source/output
@@ -29,8 +28,8 @@ func (idx *Indexer) beginInstalledContractCoreInputs(ctx context.Context) (func(
 	if hooks == nil || idx.contractCoreInputs != nil {
 		return func() {}, nil
 	}
-	store, ok := idx.graph.(*store_sqlite.Store)
-	if !ok || store.ViewGeneration() != 0 {
+	store, ok := idx.graph.(primaryContractCoreStore)
+	if !ok || !store.SharesSymbolSearchCore(idx.graph) || store.ViewGeneration() != 0 {
 		return nil, fmt.Errorf("contract core runtime: primary mutation lacks its physical store")
 	}
 	backend, err := newPrimaryContractCoreStorageBackend(ctx, store, idx.repoPrefix)

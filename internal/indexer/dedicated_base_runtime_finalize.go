@@ -3,7 +3,7 @@ package indexer
 import (
 	"fmt"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // FinalizeDedicatedBaseOwner reclaims a completed local owner slot only after
@@ -13,7 +13,7 @@ import (
 // This method does no SQL, does not wait, and never reopens shutdown admission.
 // Missing state is an idempotent no-op, so a later lifecycle finalizer failure
 // can be retried without retaining an unbounded finalized-capability registry.
-func (r *dedicatedBaseRuntime) FinalizeDedicatedBaseOwner(graphID string, owner store_sqlite.DedicatedBaseOwner, drained <-chan struct{}) error {
+func (r *dedicatedBaseRuntime) FinalizeDedicatedBaseOwner(graphID string, owner storage.DedicatedBaseOwner, drained <-chan struct{}) error {
 	if r == nil || graphID == "" || owner.CheckoutID == "" || owner.Incarnation == "" || drained == nil {
 		return fmt.Errorf("%w: finalization requires exact graph/owner and drain capability", errDedicatedBaseRuntimeInput)
 	}
@@ -24,7 +24,7 @@ func (r *dedicatedBaseRuntime) FinalizeDedicatedBaseOwner(graphID string, owner 
 		return nil
 	}
 	if state.owner != owner || state.drained != drained {
-		return fmt.Errorf("%w: publisher drain does not identify the current owner slot", store_sqlite.ErrCatalogStaleGuard)
+		return fmt.Errorf("%w: publisher drain does not identify the current owner slot", storage.ErrCatalogStaleGuard)
 	}
 	if !state.closing || state.active != 0 || !state.drainedClosed {
 		return fmt.Errorf("%w: publisher owner has not closed and drained", errDedicatedBaseRuntimeClosed)

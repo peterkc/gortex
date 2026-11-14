@@ -15,7 +15,7 @@ import (
 // unchanged on every backend in Backends.
 //
 //	storetest_test.TestStorageContract    each name in Backends
-//	        | backendtest adapter (storetest.Backend)
+//	        | test adapter (storetest.Backend)
 //	        v
 //	RunStorageContract
 //	        | name in Backends?      no -> fail
@@ -37,8 +37,8 @@ func Backends() []string { return []string{"sqlite"} }
 // of hanging until the package timeout.
 const caseDeadline = 2 * time.Minute
 
-// Backend is one backend's entry into the suite. Package backendtest holds
-// one per listed name.
+// Backend is one backend's entry into the suite. The external test package
+// holds one per listed name.
 type Backend struct {
 	// Name is the backend's name in Backends and in the expectation table.
 	Name string

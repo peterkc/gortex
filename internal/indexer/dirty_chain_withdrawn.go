@@ -3,15 +3,15 @@ package indexer
 import (
 	"context"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // A mutation withdraws its route before writing but retains its accepted dirty
 // predecessor for the next build. Background compaction may copy that immutable
 // predecessor too; it cannot publish a serving route for the newer disk state.
-func (c *CheckoutCoordinator) withdrawnCompactionParent(ctx context.Context, route store_sqlite.CheckoutRoute, trigger CheckoutCycle) (int64, func()) {
+func (c *CheckoutCoordinator) withdrawnCompactionParent(ctx context.Context, route storage.CheckoutRoute, trigger CheckoutCycle) (int64, func()) {
 	release := func() {}
-	if ctx.Err() != nil || !steppedChainFoldEnabled || route.State != store_sqlite.RoutePending ||
+	if ctx.Err() != nil || !steppedChainFoldEnabled || route.State != storage.RoutePending ||
 		route.DirtyGenerationID != 0 || trigger.DirtyGenerationID <= 0 || route.CommitGenerationID != trigger.CommitGenerationID {
 		return 0, release
 	}
@@ -48,17 +48,17 @@ func (c *CheckoutCoordinator) withdrawnCompactionParent(ctx context.Context, rou
 // The verified fold can become the lease's next parent before landing acquires
 // cycleMu. Otherwise a source lease holding that lock could refresh on the old
 // deep chain while the completed fold waited for the very same lock.
-func (c *CheckoutCoordinator) offerWithdrawnCompactionParent(ctx context.Context, source store_sqlite.CheckoutRoute, built dirtyLayerBuild) bool {
+func (c *CheckoutCoordinator) offerWithdrawnCompactionParent(ctx context.Context, source storage.CheckoutRoute, built dirtyLayerBuild) bool {
 	if ctx.Err() != nil {
 		return false
 	}
 	route, found, err := c.catalog.GetCheckoutRoute(ctx, c.checkoutID)
-	if err != nil || !found || route.State != store_sqlite.RoutePending || route.DirtyGenerationID != 0 ||
+	if err != nil || !found || route.State != storage.RoutePending || route.DirtyGenerationID != 0 ||
 		route.RouteEpoch != source.RouteEpoch || route.CommitGenerationID != source.CommitGenerationID || route.GraphID != source.GraphID {
 		return false
 	}
 	row, found, err := c.catalog.GetViewGeneration(ctx, built.GenerationID)
-	if err != nil || !found || row.State != store_sqlite.ViewGenerationReady ||
+	if err != nil || !found || row.State != storage.ViewGenerationReady ||
 		row.CheckoutID != c.checkoutID || row.GraphID != source.GraphID || row.BaseGenerationID != source.CommitGenerationID {
 		return false
 	}

@@ -5,22 +5,11 @@ import (
 	"log"
 	"sync"
 	"time"
+
+	"github.com/zzet/gortex/internal/storage"
 )
 
-// WALPassiveStats describes the real periodic PASSIVE producer since open.
-// Refusals are not admitted Attempts. FramesBackfilledTotal is an observed
-// prefix-advance lower bound; reset/unreadable observations are counted
-// separately instead of being invented as zero-progress checkpoints.
-type WALPassiveStats struct {
-	Attempts, Complete, Incomplete, ZeroProgress     int64
-	DeferredBuildLane                                int64
-	LongestBuildLaneDeferral                         time.Duration
-	RefusedLease, RefusedInflight, StoodAsideReclaim int64
-	YieldCancelled, Failed                           int64
-	FramesBackfilledTotal, FramesUnobserved          int64
-	LastOKAt                                         time.Time
-	LastOutcome                                      string
-}
+type WALPassiveStats = storage.WALPassiveStats
 
 type walPassiveState struct {
 	mu             sync.Mutex

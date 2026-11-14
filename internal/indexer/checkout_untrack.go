@@ -9,8 +9,8 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/reconcile"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // UntrackPlan names what an untrack of one checkout will actually do. Untrack
@@ -156,13 +156,13 @@ func (l *CheckoutLifecycle) PreviewUntrack(ctx context.Context, pathOrPrefix str
 	}
 	out.CheckoutID, out.Incarnation = checkout.CheckoutID, checkout.Incarnation
 	out.FamilyID = checkout.FamilyID
-	out.Accessible = checkout.State == store_sqlite.CheckoutStateReady
+	out.Accessible = checkout.State == storage.CheckoutStateReady
 
 	graphs, err := l.catalog.ListDedicatedGraphs(ctx, checkout.FamilyID)
 	if err != nil {
 		return out, err
 	}
-	var owned, primary *store_sqlite.DedicatedGraph
+	var owned, primary *storage.DedicatedGraph
 	for i := range graphs {
 		if graphs[i].OwnerCheckoutID == checkout.CheckoutID {
 			owned = &graphs[i]
@@ -216,7 +216,7 @@ func (l *CheckoutLifecycle) PreviewUntrack(ctx context.Context, pathOrPrefix str
 		return out, err
 	}
 	if !found {
-		return out, fmt.Errorf("%w: family %s", store_sqlite.ErrCatalogNotFound, checkout.FamilyID)
+		return out, fmt.Errorf("%w: family %s", storage.ErrCatalogNotFound, checkout.FamilyID)
 	}
 	out.Plan = UntrackPlanDemote
 	out.PrimaryEpoch = family.PrimaryEpoch
@@ -300,8 +300,8 @@ func (l *CheckoutLifecycle) PreviewForget(ctx context.Context, pathOrPrefix stri
 // on what it is reading.
 func (l *CheckoutLifecycle) demote(
 	ctx context.Context,
-	checkout store_sqlite.Checkout,
-	owned *store_sqlite.DedicatedGraph,
+	checkout storage.Checkout,
+	owned *storage.DedicatedGraph,
 	authorization reconcile.DemotionAuthorization,
 ) error {
 	coordinator, err := l.buildCoordinator(ctx, authorization.PrimaryGraphID, checkout)
@@ -332,7 +332,7 @@ func (l *CheckoutLifecycle) demote(
 		l.oweRetirement(coordinator.DrainRetirements()...)
 		l.oweRoutedGenerations(ctx, checkout.CheckoutID)
 		if deleteErr := l.catalog.DeleteCheckoutRoute(ctx, checkout.CheckoutID); deleteErr != nil &&
-			!errors.Is(deleteErr, store_sqlite.ErrCatalogNotFound) {
+			!errors.Is(deleteErr, storage.ErrCatalogNotFound) {
 			l.logger.Warn("checkout lifecycle: could not withdraw a rolled-back route",
 				zap.String("checkout", checkout.CheckoutID), zap.Error(deleteErr))
 		}
@@ -373,7 +373,7 @@ func (l *CheckoutLifecycle) demote(
 // graphGenerations lists the payload generations built over one graph, so a
 // retirement can offer them once nothing routes to them any more.
 func (l *CheckoutLifecycle) graphGenerations(ctx context.Context, graphID string) []int64 {
-	rows, err := l.catalog.ListViewGenerations(ctx, store_sqlite.ViewGenerationFilter{GraphID: graphID})
+	rows, err := l.catalog.ListViewGenerations(ctx, storage.ViewGenerationFilter{GraphID: graphID})
 	if err != nil {
 		l.logger.Debug("checkout lifecycle: could not list a graph's generations",
 			zap.String("graph", graphID), zap.Error(err))

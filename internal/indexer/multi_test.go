@@ -16,6 +16,7 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/search"
@@ -53,7 +54,7 @@ func TestReconcilePhaseTimingOutcomes(t *testing.T) {
 	for _, outcome := range []string{"complete", "error", "aborted"} {
 		t.Run(outcome, func(t *testing.T) {
 			core, logs := observer.New(zap.InfoLevel)
-			timing := startReconcilePhase(zap.New(core), "repo", "test", zap.Int("files", 3))
+			timing := startReconcilePhaseWithWrites(store_sqlite.WriteMark, zap.New(core), "repo", "test", zap.Int("files", 3))
 			switch outcome {
 			case "complete":
 				timing.complete(nil)
