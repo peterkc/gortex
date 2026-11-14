@@ -332,6 +332,42 @@ func TestExternalLifetimeMultiIndexer(t *testing.T) {
 	}
 }
 
+// Given warm cleanup candidates captured by a deferred run, when the repository
+// is untracked before cleanup admission, then that cleanup does not abort the run
+// or recreate any row in the now-empty SQLite graph.
+func TestExternalLifetimeMultiIndexerUntrackAfterSnapshot(t *testing.T) {
+	dir := builderTempDir(t, "multi-untrack")
+	tree := externalLifetimeTree("ToLower")
+	tree["one.go"] = "package fixture\nfunc One() {}\n"
+	tree["two.go"] = "package fixture\nfunc Two() {}\n"
+	builderWriteTree(t, dir, tree)
+	entry := config.RepoEntry{Path: dir, Name: "repo"}
+	store := builderOpenStore(t, "multi-untrack")
+	mi := externalLifetimeMultiIndexer(t, store)
+	_, err := mi.TrackRepo(entry)
+	require.NoError(t, err)
+	priorMtimes := mi.FileMtimes("repo")
+	require.NoError(t, mi.Close(context.Background()))
+	bumpMtime(t, filepath.Join(dir, "util.go"), externalLifetimeTree("ToUpper")["util.go"])
+	warm := externalLifetimeMultiIndexer(t, store)
+	warm.BeginParallelBatch()
+	defer warm.ResetBatch()
+	result, err := warm.ReconcileRepoCtx(context.Background(), entry, priorMtimes)
+	require.NoError(t, err)
+	require.False(t, result.FullRetrack)
+	run := warm.BeginDeferredPasses(context.Background(), nil)
+	defer run.FinishTailResult()
+	run.Wait()
+	require.False(t, run.attemptAborted)
+	warm.UntrackRepo("repo")
+	require.Nil(t, warm.GetIndexer("repo"))
+	run.finishStdlibCandidates()
+	require.False(t, run.attemptAborted, "an untracked repository has no remaining cleanup")
+	clean := builderOpenStore(t, "multi-untrack-clean")
+	externalLifetimeRows(t, "nodes", builderRenderNodes(store.AllNodes()), builderRenderNodes(clean.AllNodes()))
+	externalLifetimeRows(t, "edges", builderRenderEdges(store.AllEdges()), builderRenderEdges(clean.AllEdges()))
+}
+
 func externalLifetimeRequireBase(t *testing.T, reader graph.Reader) {
 	t.Helper()
 	id := builderRepoPrefix + "::stdlib::strings::ToLower"

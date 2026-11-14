@@ -221,10 +221,6 @@ type MultiIndexer struct {
 	// serially after the loop. Independent of deferGlobalPasses — that
 	// flag covers a separate (cheaper) set of O(global) walks.
 	deferResolve bool
-	// deferredStdlibBatches survive parallel warm reconcile until the workspace
-	// resolver finishes. Only candidate IDs and replacement paths are retained.
-	// Guarded by mi.mu.
-	deferredStdlibBatches map[*Indexer]*reparsePendingEnrichmentBatch
 
 	// batchChangedPrefixes scopes the per-repo clone-detection and
 	// clone-index Rebuild passes in the shared global-pass pipeline to the repos that
@@ -687,7 +683,9 @@ type DeferredPassesRun struct {
 	// already-resolved cross-repo edges still require receipt-guided catch-up.
 	unresolvedCounter graph.UnresolvedInsertionCounter
 	unresolvedBase    uint64
-	stdlibBatches     map[*Indexer]*reparsePendingEnrichmentBatch
+
+	// stdlibIndexers is the admitted cohort with parked warm-reconcile cleanup.
+	stdlibIndexers []*Indexer
 }
 
 // SnapshotUnresolvedBase re-bases the deferred window's unresolved-write
@@ -759,18 +757,11 @@ func (mi *MultiIndexer) beginDeferredPasses(_ context.Context, applyGate <-chan 
 		poolDone:      make(chan struct{}),
 		restoreGCTune: applyIndexGCTuning(mi.logger),
 	}
-	mi.mu.RLock()
-	for _, idx := range indexers {
-		if batch := mi.deferredStdlibBatches[idx]; batch != nil {
-			if run.stdlibBatches == nil {
-				run.stdlibBatches = make(map[*Indexer]*reparsePendingEnrichmentBatch)
-			}
-			run.stdlibBatches[idx] = batch
-		}
-	}
-	mi.mu.RUnlock()
 	for _, idx := range indexers {
 		err := mi.withDeferredRepositoryMutation(idx, lanesHeld, func() {
+			if len(idx.deferredStdlibCandidates) > 0 {
+				run.stdlibIndexers = append(run.stdlibIndexers, idx)
+			}
 			enrich := idx.semanticMgr != nil && idx.semanticMgr.Enabled() && idx.semanticMgr.HasProviders() &&
 				(idx.pendingEnrich.Load() || forced)
 			if !enrich && idx.pendingContractReg == nil {
@@ -876,23 +867,23 @@ func (r *DeferredPassesRun) FinishTailResult() DeferredPassesResult {
 }
 
 func (r *DeferredPassesRun) finishStdlibCandidates() {
-	for idx, batch := range r.stdlibBatches {
+	for _, idx := range r.stdlibIndexers {
 		err := r.mi.withDeferredRepositoryMutation(idx, r.lanesHeld, func() {
-			r.mi.mu.Lock()
-			if r.mi.deferredStdlibBatches[idx] != batch {
-				r.mi.mu.Unlock()
+			ids, paths := idx.deferredStdlibCandidates, idx.deferredStdlibCandidatePaths
+			idx.deferredStdlibCandidates, idx.deferredStdlibCandidatePaths = nil, nil
+			if len(ids) == 0 {
 				return
 			}
-			delete(r.mi.deferredStdlibBatches, idx)
-			r.mi.mu.Unlock()
 			finishTopologyMutation := reach.BeginRepoTopologyMutation(idx.graph, idx.repoPrefix)
 			changed := false
 			defer func() { finishTopologyMutation(changed, []string{}) }()
-			n, e := idx.retireDeferredStdlibCandidates(batch)
+			n, e := idx.retireStdlibCandidates(ids, paths)
 			changed = n+e > 0
 		})
 		if err != nil {
-			r.attemptAborted = true
+			if !errors.Is(err, errRepositoryMutationCoordinatorClosed) {
+				r.attemptAborted = true
+			}
 			r.mi.logger.Warn("deferred stdlib cleanup admission failed", zap.String("repo", idx.repoPrefix), zap.Error(err))
 		}
 	}
@@ -3465,19 +3456,8 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 				})
 			}
 		} else if !result.FullRetrack && batch != nil && len(batch.stdlibCandidates) > 0 {
-			mi.mu.Lock()
-			if mi.deferredStdlibBatches == nil {
-				mi.deferredStdlibBatches = make(map[*Indexer]*reparsePendingEnrichmentBatch)
-			}
-			pending := &reparsePendingEnrichmentBatch{}
-			if previous := mi.deferredStdlibBatches[idx]; previous != nil {
-				pending.stdlibCandidates = append(pending.stdlibCandidates, previous.stdlibCandidates...)
-				pending.stdlibCandidatePaths = append(pending.stdlibCandidatePaths, previous.stdlibCandidatePaths...)
-			}
-			pending.stdlibCandidates = appendUniqueSorted(pending.stdlibCandidates, batch.stdlibCandidates...)
-			pending.stdlibCandidatePaths = appendUniqueSorted(pending.stdlibCandidatePaths, batch.stdlibCandidatePaths...)
-			mi.deferredStdlibBatches[idx] = pending
-			mi.mu.Unlock()
+			idx.deferredStdlibCandidates = batch.stdlibCandidates
+			idx.deferredStdlibCandidatePaths = batch.stdlibCandidatePaths
 		} else if result.FullRetrack {
 			if !batchMode.deferResolve {
 				mi.runCrossRepoResolveFiles(mi.npmConsumerFilesForRepo(prefix))

@@ -530,6 +530,11 @@ type Indexer struct {
 	// both stages call runDeferredGoMod, but only the first may do the work.
 	deferredGoModDone bool
 
+	// Park warm-reconcile candidates until the workspace resolver finishes.
+	// Read and written only under the repository mutation lane.
+	deferredStdlibCandidates     []string
+	deferredStdlibCandidatePaths []string
+
 	// pendingEnrich is raised by an index pass that did real work — IndexCtx
 	// that observed files (or a whole-repo re-track) and any
 	// IncrementalReindexPaths pass that re-indexed or evicted at least one file. It
