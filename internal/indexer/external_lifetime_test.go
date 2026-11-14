@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -92,12 +93,11 @@ func TestExternalLifetimeIncremental(t *testing.T) {
 
 type externalLifetimeProbeFailureExtractor struct {
 	parser.Extractor
-	calls int
+	calls atomic.Int32
 }
 
 func (e *externalLifetimeProbeFailureExtractor) Extract(path string, src []byte) (*parser.ExtractionResult, error) {
-	e.calls++
-	if e.calls == 1 {
+	if e.calls.Add(1) == 1 {
 		return nil, fmt.Errorf("forced delta probe failure")
 	}
 	return e.Extractor.Extract(path, src)
@@ -120,12 +120,13 @@ func TestExternalLifetimeIncrementalFallback(t *testing.T) {
 			idx := externalLifetimeIndexer(t, store)
 			goExtractor, ok := idx.registry.GetByLanguage("go")
 			require.True(t, ok)
-			failing := &externalLifetimeProbeFailureExtractor{Extractor: goExtractor, calls: 1}
+			failing := &externalLifetimeProbeFailureExtractor{Extractor: goExtractor}
+			failing.calls.Store(1)
 			idx.registry.Register(failing)
 			_, err := idx.Index(dir)
 			require.NoError(t, err)
 			externalLifetimeRequireBase(t, store)
-			failing.calls = 0
+			failing.calls.Store(0)
 			path := filepath.Join(dir, "util.go")
 			bumpMtime(t, path, strings.Replace(body, "ToLower", "ToUpper", 1))
 			var result *IndexResult
@@ -137,12 +138,14 @@ func TestExternalLifetimeIncrementalFallback(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, 1, result.StaleFileCount)
 			require.Empty(t, result.FailedFiles)
-			require.Equal(t, 2, failing.calls, "failed probe must be followed by fallback extraction")
+			require.Equal(t, int32(2), failing.calls.Load(), "failed probe must be followed by fallback extraction")
 			clean := builderOpenStore(t, "fallback-clean")
 			cleanIdx := externalLifetimeIndexer(t, clean)
 			// Extractor identity participates in the contract config stamp.
 			// Use the same wrapper, with its one forced failure already spent.
-			cleanIdx.registry.Register(&externalLifetimeProbeFailureExtractor{Extractor: goExtractor, calls: 1})
+			cleanExtractor := &externalLifetimeProbeFailureExtractor{Extractor: goExtractor}
+			cleanExtractor.calls.Store(1)
+			cleanIdx.registry.Register(cleanExtractor)
 			_, err = cleanIdx.Index(dir)
 			require.NoError(t, err)
 			externalLifetimeCompare(t, store, clean)
