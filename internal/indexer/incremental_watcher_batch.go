@@ -585,7 +585,8 @@ func (mi *MultiIndexer) resolveIncrementalRepoMutation(
 	receipt *graph.MutationReceipt,
 	batch *reparsePendingEnrichmentBatch,
 ) []string {
-	return mi.resolveIncrementalRepoMutationMode(repoPrefix, result, receipt, batch, false)
+	files, _, _ := mi.resolveIncrementalRepoMutationMode(repoPrefix, result, receipt, batch, false)
+	return files
 }
 
 func (mi *MultiIndexer) resolveIncrementalRepoMutationMode(
@@ -594,7 +595,7 @@ func (mi *MultiIndexer) resolveIncrementalRepoMutationMode(
 	receipt *graph.MutationReceipt,
 	batch *reparsePendingEnrichmentBatch,
 	exactPointSemantic bool,
-) []string {
+) ([]string, int, int) {
 	files, needed, _ := incrementalResolutionFrontier(result, receipt)
 	wide := false
 	if result == nil || result.DeletedFileCount > 0 {
@@ -681,11 +682,12 @@ func (mi *MultiIndexer) resolveIncrementalRepoMutationMode(
 		}
 		cross.end()
 	}
+	var nodesRemoved, edgesRemoved int
 	if idx != nil {
-		idx.retireDeferredStdlibCandidates(batch)
+		nodesRemoved, edgesRemoved = idx.retireDeferredStdlibCandidates(batch)
 	}
 	if wide {
-		return nil
+		return nil, nodesRemoved, edgesRemoved
 	}
-	return crossRepoFiles
+	return crossRepoFiles, nodesRemoved, edgesRemoved
 }

@@ -2581,7 +2581,10 @@ func (mi *MultiIndexer) incrementalEvictRepoRaw(repoPrefix, path string) (nodesR
 		)
 	}
 	if result.DeletedFileCount > 0 {
-		topologyFrontier = mi.resolveIncrementalRepoMutation(repoPrefix, result, nil, eviction.batch)
+		frontier, n, e := mi.resolveIncrementalRepoMutationMode(repoPrefix, result, nil, eviction.batch, false)
+		topologyFrontier = frontier
+		eviction.nodesRemoved += n
+		eviction.edgesRemoved += e
 	}
 
 	fileMtimes := idx.publishFileMtimes()
@@ -2663,7 +2666,7 @@ func (mi *MultiIndexer) incrementalReindexRepoRawMode(repoPrefix string, paths [
 	// changed/definition file frontier; only an incomplete receipt falls back to
 	// conservative scoped-global resolution. Derived invalidations run once
 	// below after both binding layers are current.
-	frontier := mi.resolveIncrementalRepoMutationMode(
+	frontier, _, _ := mi.resolveIncrementalRepoMutationMode(
 		repoPrefix, result, receipt, batch, mode.exactPointSemantic,
 	)
 	// Module changes and full retracks may rebind edges outside the frontier.

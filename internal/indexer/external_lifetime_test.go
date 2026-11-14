@@ -759,6 +759,34 @@ func TestExternalLifetimeIncrementalImportOnly(t *testing.T) {
 	require.Empty(t, store.AllEdges())
 }
 
+// Given a MultiIndexer forced deletion, when its complete shared resolver tail
+// retires the last stdlib references, then returned counts include every removed
+// node and edge, and the entire graph equals a fresh SQLite index.
+func TestExternalLifetimeMultiIndexerForcedDeletion(t *testing.T) {
+	dir := builderTempDir(t, "multi-forced-deletion")
+	tree := externalLifetimeTree("ToLower")
+	tree["types.go"] = "package fixture\nvar Kept string\n"
+	builderWriteTree(t, dir, tree)
+	entry := config.RepoEntry{Path: dir, Name: "repo"}
+	store := builderOpenStore(t, "multi-forced-deletion")
+	mi := externalLifetimeMultiIndexer(t, store)
+	_, err := mi.TrackRepo(entry)
+	require.NoError(t, err)
+	beforeNodes, beforeEdges := store.NodeCount(), store.EdgeCount()
+	require.NoError(t, os.Remove(filepath.Join(dir, "util.go")))
+	n, e, err := mi.incrementalEvictRepoRaw("repo", "util.go")
+	require.NoError(t, err)
+	require.Equal(t, beforeNodes-store.NodeCount(), n)
+	require.Equal(t, beforeEdges-store.EdgeCount(), e)
+	require.Nil(t, store.GetNode("repo::stdlib::strings::ToLower"))
+	require.Nil(t, store.GetNode("repo::module::go:strings"))
+	clean := builderOpenStore(t, "multi-forced-deletion-clean")
+	_, err = externalLifetimeMultiIndexer(t, clean).TrackRepo(entry)
+	require.NoError(t, err)
+	externalLifetimeRows(t, "nodes", builderRenderNodes(store.AllNodes()), builderRenderNodes(clean.AllNodes()))
+	externalLifetimeRows(t, "edges", builderRenderEdges(store.AllEdges()), builderRenderEdges(clean.AllEdges()))
+}
+
 // Given an explicit deletion, when the complete forced-eviction tail finishes,
 // then returned removal counts include retired stdlib rows exactly once.
 func TestExternalLifetimeIncrementalForcedDeletion(t *testing.T) {
