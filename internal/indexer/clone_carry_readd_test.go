@@ -151,3 +151,35 @@ func cloneCarryCorpus(t *testing.T, store graph.Store) []graph.CloneCorpusRow {
 	require.Less(t, len(rows), 10, "fixture must fit in one corpus page")
 	return rows
 }
+
+func TestCloneCarryMemoryUnchangedSave(t *testing.T) {
+	t.Setenv("GORTEX_SHADOW_MAX_FILES", "0")
+	// Given finalized clone rows and node signatures from a cold in-memory build.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	writeFile(t, path, cloneRepoSource)
+	store := graph.New()
+	_, err := newTestIndexer(store).Index(dir)
+	require.NoError(t, err)
+	cold := cloneCarryCorpus(t, store)
+	require.Len(t, cold, 3)
+	for _, row := range cold {
+		require.True(t, row.Finalized)
+		require.NotEmpty(t, row.Signature)
+		require.Equal(t, row.Signature, store.GetNode(row.NodeID).Meta[cloneSigMetaKey])
+	}
+
+	// When a fresh indexer saves a comment without changing any function body.
+	bumpMtime(t, path, cloneRepoSource+"\n// Body-unchanged save.\n")
+	result, err := newTestIndexer(store).IncrementalReindexPaths(dir, nil)
+	require.NoError(t, err)
+	require.Empty(t, result.FailedFiles)
+
+	// Then complete corpus rows and node signatures stay equal to the cold build.
+	require.Equal(t, cold, cloneCarryCorpus(t, store))
+	for _, row := range cold {
+		node := store.GetNode(row.NodeID)
+		require.NotNil(t, node)
+		require.Equal(t, row.Signature, node.Meta[cloneSigMetaKey], row.NodeID)
+	}
+}
