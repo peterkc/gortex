@@ -885,9 +885,9 @@ func (r *DeferredPassesRun) finishStdlibCandidates() {
 			}
 			delete(r.mi.deferredStdlibBatches, idx)
 			r.mi.mu.Unlock()
-			finishTopologyMutation := reach.BeginTopologyMutation(idx.graph)
+			finishTopologyMutation := reach.BeginRepoTopologyMutation(idx.graph, idx.repoPrefix)
 			changed := false
-			defer func() { finishTopologyMutation(changed) }()
+			defer func() { finishTopologyMutation(changed, []string{}) }()
 			n, e := idx.retireDeferredStdlibCandidates(batch)
 			changed = n+e > 0
 		})
