@@ -683,6 +683,9 @@ type DeferredPassesRun struct {
 	// already-resolved cross-repo edges still require receipt-guided catch-up.
 	unresolvedCounter graph.UnresolvedInsertionCounter
 	unresolvedBase    uint64
+
+	// stdlibIndexers is the admitted cohort with parked warm-reconcile cleanup.
+	stdlibIndexers []*Indexer
 }
 
 // SnapshotUnresolvedBase re-bases the deferred window's unresolved-write
@@ -756,6 +759,9 @@ func (mi *MultiIndexer) beginDeferredPasses(_ context.Context, applyGate <-chan 
 	}
 	for _, idx := range indexers {
 		err := mi.withDeferredRepositoryMutation(idx, lanesHeld, func() {
+			if len(idx.deferredStdlibCandidates) > 0 {
+				run.stdlibIndexers = append(run.stdlibIndexers, idx)
+			}
 			enrich := idx.semanticMgr != nil && idx.semanticMgr.Enabled() && idx.semanticMgr.HasProviders() &&
 				(idx.pendingEnrich.Load() || forced)
 			if !enrich && idx.pendingContractReg == nil {
@@ -839,6 +845,9 @@ func (r *DeferredPassesRun) FinishTailResult() DeferredPassesResult {
 	noNewUnresolved := r.unresolvedCounter != nil &&
 		r.unresolvedCounter.UnresolvedEdgeInsertions() == r.unresolvedBase
 	mode, crossRepoComplete := r.mi.resolveDeferredMutations(mutationReceipt, r.catchupNeeded, scope, noNewUnresolved)
+	if crossRepoComplete && !r.attemptAborted {
+		r.finishStdlibCandidates()
+	}
 	crossRepoComplete = crossRepoComplete && !r.attemptAborted
 	var mutationRevision uint64
 	var mutationRevisionKnown bool
@@ -854,6 +863,29 @@ func (r *DeferredPassesRun) FinishTailResult() DeferredPassesResult {
 		CrossRepoComplete:              crossRepoComplete,
 		CrossRepoMutationRevision:      mutationRevision,
 		CrossRepoMutationRevisionKnown: mutationRevisionKnown,
+	}
+}
+
+func (r *DeferredPassesRun) finishStdlibCandidates() {
+	for _, idx := range r.stdlibIndexers {
+		err := r.mi.withDeferredRepositoryMutation(idx, r.lanesHeld, func() {
+			ids, paths := idx.deferredStdlibCandidates, idx.deferredStdlibCandidatePaths
+			idx.deferredStdlibCandidates, idx.deferredStdlibCandidatePaths = nil, nil
+			if len(ids) == 0 {
+				return
+			}
+			finishTopologyMutation := reach.BeginRepoTopologyMutation(idx.graph, idx.repoPrefix)
+			changed := false
+			defer func() { finishTopologyMutation(changed, []string{}) }()
+			n, e := idx.retireStdlibCandidates(ids, paths)
+			changed = n+e > 0
+		})
+		if err != nil {
+			if !errors.Is(err, errRepositoryMutationCoordinatorClosed) {
+				r.attemptAborted = true
+			}
+			r.mi.logger.Warn("deferred stdlib cleanup admission failed", zap.String("repo", idx.repoPrefix), zap.Error(err))
+		}
 	}
 }
 
@@ -2540,7 +2572,10 @@ func (mi *MultiIndexer) incrementalEvictRepoRaw(repoPrefix, path string) (nodesR
 		)
 	}
 	if result.DeletedFileCount > 0 {
-		topologyFrontier = mi.resolveIncrementalRepoMutation(repoPrefix, result, nil, eviction.batch)
+		frontier, n, e := mi.resolveIncrementalRepoMutationMode(repoPrefix, result, nil, eviction.batch, false)
+		topologyFrontier = frontier
+		eviction.nodesRemoved += n
+		eviction.edgesRemoved += e
 	}
 
 	fileMtimes := idx.publishFileMtimes()
@@ -2622,7 +2657,7 @@ func (mi *MultiIndexer) incrementalReindexRepoRawMode(repoPrefix string, paths [
 	// changed/definition file frontier; only an incomplete receipt falls back to
 	// conservative scoped-global resolution. Derived invalidations run once
 	// below after both binding layers are current.
-	frontier := mi.resolveIncrementalRepoMutationMode(
+	frontier, _, _ := mi.resolveIncrementalRepoMutationMode(
 		repoPrefix, result, receipt, batch, mode.exactPointSemantic,
 	)
 	// Module changes and full retracks may rebind edges outside the frontier.
@@ -3420,6 +3455,9 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 					prefix: result.DerivedInvalidation,
 				})
 			}
+		} else if !result.FullRetrack && batch != nil && len(batch.stdlibCandidates) > 0 {
+			idx.deferredStdlibCandidates = batch.stdlibCandidates
+			idx.deferredStdlibCandidatePaths = batch.stdlibCandidatePaths
 		} else if result.FullRetrack {
 			if !batchMode.deferResolve {
 				mi.runCrossRepoResolveFiles(mi.npmConsumerFilesForRepo(prefix))

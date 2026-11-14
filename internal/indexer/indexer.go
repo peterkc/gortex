@@ -530,6 +530,12 @@ type Indexer struct {
 	// both stages call runDeferredGoMod, but only the first may do the work.
 	deferredGoModDone bool
 
+	// Park candidates until the warm workspace resolver or the per-file delta's
+	// unchanged-file restatement finishes. Warm runs hold the repository lane;
+	// a delta's private Indexer owns its candidates throughout the build.
+	deferredStdlibCandidates     []string
+	deferredStdlibCandidatePaths []string
+
 	// pendingEnrich is raised by an index pass that did real work — IndexCtx
 	// that observed files (or a whole-repo re-track) and any
 	// IncrementalReindexPaths pass that re-indexed or evicted at least one file. It
