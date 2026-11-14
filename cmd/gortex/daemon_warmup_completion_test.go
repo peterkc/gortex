@@ -134,6 +134,10 @@ func TestWarmupCompletion(t *testing.T) {
 			if failResolve {
 				require.Len(t, logs.FilterMessage("daemon: warmup resolve failed").All(), 1, "injection must reach the real resolver")
 				assert.False(t, controller.enriched.Load())
+				// Then health retains the same queryable but unenriched outcome.
+				health := buildDaemonHealthSnapshot(time.Now(), controller, state, nil)
+				assert.Equal(t, true, health["ready"])
+				assert.Equal(t, false, health["enriched"])
 				assert.Equal(t, "warmup_incomplete", phase)
 				assert.Empty(t, logs.FilterMessage("daemon: enrichment complete").All())
 				assert.Len(t, logs.FilterMessage("daemon: warmup summary").All(), 1)

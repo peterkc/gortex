@@ -111,7 +111,7 @@ type warmupState struct {
 	// !known as "not warming, proceed normally".
 	known bool
 	// ready is true once the daemon has made the graph queryable. Expensive
-	// whole-graph work remains deferred until enriched is also true.
+	// whole-graph work remains deferred while startup passes are running.
 	ready bool
 	// enriched is true only after the daemon publishes its terminal
 	// enrichment_complete phase.
@@ -128,11 +128,12 @@ type warmupState struct {
 // daemon has not yet reached `ready`.
 func (w warmupState) warming() bool { return w.known && !w.ready }
 
-// enrichmentIncomplete is intentionally stricter than warming: queryable
-// `ready` is published before deferred/global startup passes finish. Only
-// whole-graph consumers use this predicate; ordinary graph lookups remain
-// available as soon as ready is true.
-func (w warmupState) enrichmentIncomplete() bool { return w.known && !w.enriched }
+// enrichmentIncomplete reports whether startup passes are still running.
+// Queryable `ready` precedes their completion. A terminal warmup_incomplete
+// releases whole-graph consumers without claiming enrichment succeeded.
+func (w warmupState) enrichmentIncomplete() bool {
+	return w.known && !w.enriched && w.phase != "warmup_incomplete"
+}
 
 // warmupStateFromSnapshot derives a warmupState from a readiness
 // broadcaster payload (the `{phase, ready, ...}` map the broadcaster
