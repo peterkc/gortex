@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -93,12 +95,17 @@ func TestExternalLifetimeIncremental(t *testing.T) {
 
 type externalLifetimeProbeFailureExtractor struct {
 	parser.Extractor
-	calls atomic.Int32
+	calls     atomic.Int32
+	onExtract func(int32)
 }
 
 func (e *externalLifetimeProbeFailureExtractor) Extract(path string, src []byte) (*parser.ExtractionResult, error) {
-	if e.calls.Add(1) == 1 {
+	call := e.calls.Add(1)
+	if call == 1 {
 		return nil, fmt.Errorf("forced delta probe failure")
+	}
+	if e.onExtract != nil {
+		e.onExtract(call)
 	}
 	return e.Extractor.Extract(path, src)
 }
@@ -143,6 +150,84 @@ func TestExternalLifetimeIncrementalFallback(t *testing.T) {
 			cleanIdx := externalLifetimeIndexer(t, clean)
 			// Extractor identity participates in the contract config stamp.
 			// Use the same wrapper, with its one forced failure already spent.
+			cleanExtractor := &externalLifetimeProbeFailureExtractor{Extractor: goExtractor}
+			cleanExtractor.calls.Store(1)
+			cleanIdx.registry.Register(cleanExtractor)
+			_, err = cleanIdx.Index(dir)
+			require.NoError(t, err)
+			externalLifetimeCompare(t, store, clean)
+		})
+	}
+}
+
+// Given a forced fallback, when its first indexFile applies the replacement but
+// rejects the read version, then the successful retry equals a fresh SQLite
+// index after either synchronous or deferred resolution.
+func TestExternalLifetimeIncrementalFallbackVersionChange(t *testing.T) {
+	for _, deferred := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deferred=%t", deferred), func(t *testing.T) {
+			dir := builderTempDir(t, "fallback-version-change")
+			body := "package fixture\n\nimport \"strings\"\n\nfunc NormalizeID(id string) string { return strings.ToLower(id) }\n"
+			builderWriteTree(t, dir, map[string]string{
+				"go.mod":   externalLifetimeTree("ToLower")["go.mod"],
+				"util.go":  body,
+				"other.go": "package fixture\nimport \"strings\"\nfunc Other(id string) string { return strings.TrimSpace(id) }\n",
+			})
+			store := builderOpenStore(t, "fallback-version-change")
+			idx := externalLifetimeIndexer(t, store)
+			goExtractor, ok := idx.registry.GetByLanguage("go")
+			require.True(t, ok)
+			failing := &externalLifetimeProbeFailureExtractor{Extractor: goExtractor}
+			failing.calls.Store(1)
+			idx.registry.Register(failing)
+			_, err := idx.Index(dir)
+			require.NoError(t, err)
+			externalLifetimeRequireBase(t, store)
+			path := filepath.Join(dir, "util.go")
+			edited := strings.Replace(body, "ToLower", "ToUpper", 1)
+			bumpMtime(t, path, edited)
+			failing.calls.Store(0)
+			var observations struct {
+				sync.Mutex
+				mutationErr error
+				retryErr    error
+				retried     bool
+			}
+			failing.onExtract = func(call int32) {
+				observations.Lock()
+				defer observations.Unlock()
+				if call == 2 {
+					// The fallback owns the earlier read. Change its receipt without
+					// changing source, so indexFile applies and then rejects it.
+					info, statErr := os.Stat(path)
+					observations.mutationErr = statErr
+					if statErr == nil {
+						mtime := info.ModTime().Add(time.Second)
+						observations.mutationErr = os.Chtimes(path, mtime, mtime)
+					}
+				}
+				if call == 3 {
+					observations.retryErr = idx.fileIndexFailureError(path)
+					observations.retried = true
+				}
+			}
+			var result *IndexResult
+			if deferred {
+				result, err = idx.incrementalWatcherPaths(dir, []string{path}, incrementalPathMode{detectDeletions: true})
+			} else {
+				result, err = idx.incrementalReindexPathsMode(dir, []string{path}, incrementalPathMode{detectDeletions: true})
+			}
+			require.NoError(t, err)
+			observations.Lock()
+			mutationErr, retryErr, retried := observations.mutationErr, observations.retryErr, observations.retried
+			observations.Unlock()
+			require.NoError(t, mutationErr)
+			require.True(t, retried, "the first fallback must fail its read receipt before retry")
+			require.ErrorIs(t, retryErr, errFileVersionChanged)
+			require.Equal(t, int32(3), failing.calls.Load())
+			require.Empty(t, result.FailedFiles)
+			clean := builderOpenStore(t, "fallback-version-change-clean")
+			cleanIdx := externalLifetimeIndexer(t, clean)
 			cleanExtractor := &externalLifetimeProbeFailureExtractor{Extractor: goExtractor}
 			cleanExtractor.calls.Store(1)
 			cleanIdx.registry.Register(cleanExtractor)

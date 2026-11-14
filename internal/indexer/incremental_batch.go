@@ -563,10 +563,11 @@ func (idx *Indexer) reindexIncrementalFallback(
 	resolve := markerBatch == nil || !markerBatch.deferResolverCatchup
 	paths := []string{fallback.graphPath}
 	stdlibCandidates := idx.capturePathStdlibCandidates(paths)
-	if err := idx.indexFile(fallback.filePath, resolve, markerBatch); err != nil {
+	err := idx.indexFile(fallback.filePath, resolve, markerBatch)
+	idx.settleStdlibCandidates(stdlibCandidates, paths, markerBatch)
+	if err != nil {
 		return err
 	}
-	idx.settleStdlibCandidates(stdlibCandidates, paths, markerBatch)
 	freshNodes := idx.graph.GetFileNodesByPaths(paths)[fallback.graphPath]
 	freshDerived := storedDerivedFingerprints(freshNodes)
 	freshGraph := storedExtractionGraphFingerprints(freshNodes)
