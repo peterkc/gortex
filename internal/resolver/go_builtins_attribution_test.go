@@ -358,3 +358,23 @@ func TestCompactGoBuiltinTargetReindexesRejectsNonTargetIdentityChanges(t *testi
 		})
 	}
 }
+
+// Given every Go builtin the attribution pass knows, when the write funnel
+// materializes the same stub ID lazily, then both constructors store the same
+// builtin_kind, so the stored row does not depend on which one runs first.
+func TestGoBuiltinStubNodesMatchAttributionKind(t *testing.T) {
+	var names []string
+	for _, table := range []map[string]struct{}{goBuiltinFuncs, goBuiltinTypes, goBuiltinConsts} {
+		for name := range table {
+			names = append(names, name)
+		}
+	}
+	for _, repoPrefix := range []string{"", "repo"} {
+		for _, name := range names {
+			id, _, kind := goBuiltinTarget(repoPrefix, name)
+			stubs := graph.BuiltinStubNodes([]*graph.Edge{{From: "pkg/foo.go::Run", To: id, Kind: graph.EdgeCalls}})
+			require.Len(t, stubs, 1, id)
+			assert.Equal(t, kind, stubs[0].Meta["builtin_kind"], "%s: lazy stub and attribution disagree", id)
+		}
+	}
+}

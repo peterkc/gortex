@@ -44,7 +44,8 @@ import (
 // Lua/Luau requires bind by path in the Lua pass instead of the generic import
 // cascade, changing import edges for an unchanged corpus.
 // Stdlib retirement changes stored dirty-layer and sparse-builder identity tombstones.
-const ResolutionSemanticsVersion = 8
+// Lazily materialized function builtins store builtin_kind "func", not "".
+const ResolutionSemanticsVersion = 9
 
 // resolverVersionDomain versions the ENCODING below, not the contract. Two
 // fingerprints that disagree about how the preimage is rendered must not be
