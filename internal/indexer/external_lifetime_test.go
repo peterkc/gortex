@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/parser"
 )
 
 func externalLifetimeTree(call string) map[string]string {
@@ -91,6 +92,66 @@ func TestExternalLifetimeIncremental(t *testing.T) {
 		require.NoError(t, err)
 		externalLifetimeCompare(t, store, clean)
 	})
+}
+
+type externalLifetimeProbeFailureExtractor struct {
+	parser.Extractor
+	calls int
+}
+
+func (e *externalLifetimeProbeFailureExtractor) Extract(path string, src []byte) (*parser.ExtractionResult, error) {
+	e.calls++
+	if e.calls == 1 {
+		return nil, fmt.Errorf("forced delta probe failure")
+	}
+	return e.Extractor.Extract(path, src)
+}
+
+// Given a failed delta probe, when the per-file fallback replaces ToLower with
+// ToUpper without nested calls, then the whole graph equals a fresh SQLite
+// index after either synchronous or deferred resolution.
+func TestExternalLifetimeIncrementalFallback(t *testing.T) {
+	for _, deferred := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deferred=%t", deferred), func(t *testing.T) {
+			dir := builderTempDir(t, "fallback")
+			body := "package fixture\n\nimport \"strings\"\n\nfunc NormalizeID(id string) string { return strings.ToLower(id) }\n"
+			builderWriteTree(t, dir, map[string]string{
+				"go.mod":   externalLifetimeTree("ToLower")["go.mod"],
+				"util.go":  body,
+				"other.go": "package fixture\nimport \"strings\"\nfunc Other(id string) string { return strings.TrimSpace(id) }\n",
+			})
+			store := builderOpenStore(t, "fallback")
+			idx := externalLifetimeIndexer(t, store)
+			goExtractor, ok := idx.registry.GetByLanguage("go")
+			require.True(t, ok)
+			failing := &externalLifetimeProbeFailureExtractor{Extractor: goExtractor, calls: 1}
+			idx.registry.Register(failing)
+			_, err := idx.Index(dir)
+			require.NoError(t, err)
+			externalLifetimeRequireBase(t, store)
+			failing.calls = 0
+			path := filepath.Join(dir, "util.go")
+			bumpMtime(t, path, strings.Replace(body, "ToLower", "ToUpper", 1))
+			var result *IndexResult
+			if deferred {
+				result, err = idx.IncrementalReindexPaths(dir, []string{path})
+			} else {
+				result, err = idx.incrementalReindexPathsMode(dir, []string{path}, incrementalPathMode{detectDeletions: true})
+			}
+			require.NoError(t, err)
+			require.Equal(t, 1, result.StaleFileCount)
+			require.Empty(t, result.FailedFiles)
+			require.Equal(t, 2, failing.calls, "failed probe must be followed by fallback extraction")
+			clean := builderOpenStore(t, "fallback-clean")
+			cleanIdx := externalLifetimeIndexer(t, clean)
+			// Extractor identity participates in the contract config stamp.
+			// Use the same wrapper, with its one forced failure already spent.
+			cleanIdx.registry.Register(&externalLifetimeProbeFailureExtractor{Extractor: goExtractor, calls: 1})
+			_, err = cleanIdx.Index(dir)
+			require.NoError(t, err)
+			externalLifetimeCompare(t, store, clean)
+		})
+	}
 }
 
 func externalLifetimeRequireBase(t *testing.T, reader graph.Reader) {

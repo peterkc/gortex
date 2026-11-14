@@ -561,10 +561,13 @@ func (idx *Indexer) reindexIncrementalFallback(
 	// inert rows, including when applying its new read fails.
 	delete(idx.inertReparsed, fallback.graphPath)
 	resolve := markerBatch == nil || !markerBatch.deferResolverCatchup
+	paths := []string{fallback.graphPath}
+	stdlibCandidates := idx.capturePathStdlibCandidates(paths)
 	if err := idx.indexFile(fallback.filePath, resolve, markerBatch); err != nil {
 		return err
 	}
-	freshNodes := idx.graph.GetFileNodesByPaths([]string{fallback.graphPath})[fallback.graphPath]
+	idx.settleStdlibCandidates(stdlibCandidates, paths, markerBatch)
+	freshNodes := idx.graph.GetFileNodesByPaths(paths)[fallback.graphPath]
 	freshDerived := storedDerivedFingerprints(freshNodes)
 	freshGraph := storedExtractionGraphFingerprints(freshNodes)
 	semanticChanged := fallback.storedGraph.semantic == "" || freshGraph.semantic == "" ||
