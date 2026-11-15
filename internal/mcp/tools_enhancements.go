@@ -3482,7 +3482,7 @@ func (s *Server) buildIndexHealthBasePayloadCtx(ctx context.Context) (map[string
 	// Per-file rollup from the files sidecar (when the backend records it):
 	// the files that failed to parse, with their error locations + node
 	// counts. Bounded so a pathological repo can't bloat the payload.
-	filesWithErrors, indexedFileCount := s.buildIndexHealthFileRollup(repoPrefixes)
+	filesWithErrors, indexedFileCount, fileMetadataErr := s.buildIndexHealthFileRollup(repoPrefixes)
 
 	// Density plausibility: even a trivial source file yields a file node
 	// plus at least one symbol, so a populated graph averaging barely more
@@ -3790,6 +3790,16 @@ func (s *Server) buildIndexHealthBasePayloadCtx(ctx context.Context) (map[string
 		result["learned_tools"] = n
 		result["learned_tool_names"] = s.LearnedToolNames()
 	}
+	result["file_metadata_available"] = fileMetadataErr == nil
+	if fileMetadataErr != nil {
+		result["file_metadata_error"] = fileMetadataErr.Error()
+		msg := "File metadata is unavailable; indexed-file totals and per-file parse diagnostics are unknown."
+		if recommendation == "" {
+			recommendation = msg
+		} else {
+			recommendation = msg + " " + recommendation
+		}
+	}
 	if indexedFileCount > 0 {
 		result["indexed_file_count"] = indexedFileCount
 	}
@@ -3979,16 +3989,17 @@ func (s *Server) missingTrackedRepoPaths() []string {
 // and returns the files that recorded parse errors — each with its error
 // locations + node count — plus the total indexed-file count. The error list
 // is bounded so a badly-broken repo can't bloat the index_health payload.
-func (s *Server) buildIndexHealthFileRollup(repoPrefixes map[string]struct{}) (filesWithErrors []map[string]any, indexedFileCount int) {
+// Missing support or an unreadable repository cannot certify a partial total.
+func (s *Server) buildIndexHealthFileRollup(repoPrefixes map[string]struct{}) (filesWithErrors []map[string]any, indexedFileCount int, err error) {
 	reader, ok := s.graph.(graph.FileMetaReader)
 	if !ok {
-		return nil, 0
+		return nil, 0, fmt.Errorf("index_health: file metadata unavailable: %w", errors.ErrUnsupported)
 	}
 	const maxErrorFiles = 100
 	for prefix := range repoPrefixes {
 		rows, err := reader.FileMetasForRepo(prefix)
 		if err != nil {
-			continue
+			return nil, 0, fmt.Errorf("index_health: read file metadata for repository %q: %w", prefix, err)
 		}
 		indexedFileCount += len(rows)
 		for _, r := range rows {
@@ -4006,7 +4017,7 @@ func (s *Server) buildIndexHealthFileRollup(repoPrefixes map[string]struct{}) (f
 			filesWithErrors = append(filesWithErrors, entry)
 		}
 	}
-	return filesWithErrors, indexedFileCount
+	return filesWithErrors, indexedFileCount, nil
 }
 
 // emptyTrackedRepos names every tracked repository whose last index pass

@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/indexer/source"
 	"github.com/zzet/gortex/internal/query"
@@ -375,4 +377,152 @@ func TestIndexFileFailures_EmptyHealthBaselineWithoutIndexer(t *testing.T) {
 	require.Equal(t, float64(0), result["health_score"])
 	require.NotContains(t, result, indexHealthLivenessCeilingKey)
 	require.Contains(t, baseline, indexHealthLivenessCeilingKey)
+}
+
+// Keep the healthy failure ledger while deliberately hiding FileMetaReader.
+type healthFileMetadataStoreOnly struct{ graph.Store }
+
+func (s healthFileMetadataStoreOnly) FileIndexFailuresForRepo(repo string) ([]graph.FileIndexFailure, error) {
+	return s.Store.(graph.FileIndexFailureReader).FileIndexFailuresForRepo(repo)
+}
+
+type healthFileMetadataReadFailure struct {
+	healthFileMetadataStoreOnly
+	err error
+}
+
+func (s *healthFileMetadataReadFailure) FileMetasForRepo(repo string) ([]graph.FileMetaRow, error) {
+	if repo == "beta" && s.err != nil {
+		return nil, s.err
+	}
+	return s.Store.(graph.FileMetaReader).FileMetasForRepo(repo)
+}
+
+func TestIndexHealthFileMetadataUnavailable(t *testing.T) {
+	for _, mode := range []string{"missing", "read failure"} {
+		t.Run(mode, func(t *testing.T) {
+			// Given independent healthy graph/ledger evidence and two repositories' metadata.
+			g := graph.New()
+			for _, repo := range []string{"alpha", "beta"} {
+				file := repo + "/a.go"
+				g.AddBatch([]*graph.Node{
+					{ID: file, Kind: graph.KindFile, FilePath: file, RepoPrefix: repo, Language: "go"},
+					{ID: file + "::A", Kind: graph.KindFunction, FilePath: file, RepoPrefix: repo, Language: "go"},
+				}, []*graph.Edge{{From: file, To: file + "::A", Kind: graph.EdgeContains, FilePath: file}})
+				require.NoError(t, g.SetFileMetas(repo, []graph.FileMetaRow{{FilePath: file, NodeCount: 2, Errors: `["line 1"]`}}))
+			}
+			var store graph.Store = healthFileMetadataStoreOnly{Store: g}
+			if mode == "read failure" {
+				store = &healthFileMetadataReadFailure{healthFileMetadataStoreOnly: healthFileMetadataStoreOnly{Store: g}, err: fmt.Errorf("injected file metadata failure\nsecond line")}
+			}
+			idx := indexer.New(g, testRegistry(), config.Default().Index, zap.NewNop())
+			srv := NewServer(query.NewEngine(g), store, idx, nil, zap.NewNop(), nil)
+			// When the full health payload reads absent or only partly readable metadata.
+			payload, err := srv.buildIndexHealthPayloadCtx(context.Background())
+			require.NoError(t, err)
+			require.Equal(t, "degraded", payload["status"], "a healthy ledger cannot certify unavailable metadata")
+			require.Equal(t, false, payload["index_complete"])
+			require.Equal(t, false, payload["file_metadata_available"])
+			require.NotEmpty(t, payload["file_metadata_error"])
+			require.NotContains(t, payload, "indexed_file_count", "a partial count is not a complete total")
+			require.NotContains(t, payload, "files_with_parse_errors", "partial diagnostics must not look complete")
+			require.Equal(t, 4, payload["node_count"], "unrelated graph evidence stays useful")
+			require.Equal(t, float64(100), payload["health_score"], "unknown metadata must not invent a parse failure")
+			require.Equal(t, true, payload["language_coverage"].(map[string]bool)["go"])
+			// The same error must survive response-time ledger refresh and every renderer.
+			baseline, err := srv.buildIndexHealthBasePayloadCtx(context.Background())
+			require.NoError(t, err)
+			srv.indexHealth.mu.Lock()
+			srv.indexHealth.payload, srv.indexHealth.updatedAt = baseline, time.Now()
+			srv.indexHealth.mu.Unlock()
+			for _, format := range []string{"json", "toon", "compact"} {
+				args := map[string]any{"format": format}
+				if format == "compact" {
+					args["compact"] = true
+				}
+				result, err := srv.handleIndexHealth(context.Background(), makeReq("index_health", args))
+				require.NoError(t, err)
+				require.False(t, result.IsError, "independent health evidence remains available")
+				body := result.Content[0].(mcplib.TextContent).Text
+				if format == "compact" {
+					require.Contains(t, body, "status=degraded")
+					require.Contains(t, body, "file_metadata=unavailable")
+				} else {
+					require.Contains(t, body, "file_metadata_available")
+					require.Contains(t, body, "file_metadata_error")
+					require.NotContains(t, body, "\nsecond line", "multiline errors must remain encoded values")
+				}
+			}
+			require.NotContains(t, baseline, "status", "response decoration must not mutate the shared cache")
+			// After capability/read recovery and the normal cache rebuild, no warning leaks.
+			srv.graph = g
+			healthy, err := srv.buildIndexHealthPayloadCtx(context.Background())
+			require.NoError(t, err)
+			require.Equal(t, "ready", healthy["status"])
+			require.Equal(t, true, healthy["index_complete"])
+			require.Equal(t, true, healthy["file_metadata_available"])
+			require.NotContains(t, healthy, "file_metadata_error")
+			require.Equal(t, 2, healthy["indexed_file_count"])
+		})
+	}
+}
+
+func TestIndexHealthFileRollupPreservesErrors(t *testing.T) {
+	g := graph.New()
+	require.NoError(t, g.SetFileMetas("alpha", []graph.FileMetaRow{{FilePath: "alpha/a.go", Errors: `["line 1"]`}}))
+	for _, cause := range []error{errors.New("injected metadata read failure"), context.Canceled} {
+		// Given one readable repository and one failed metadata read.
+		reader := &healthFileMetadataReadFailure{healthFileMetadataStoreOnly: healthFileMetadataStoreOnly{Store: g}, err: cause}
+		srv := &Server{graph: reader}
+		// When a complete rollup is requested, then no partial count/rows escape.
+		rows, count, err := srv.buildIndexHealthFileRollup(map[string]struct{}{"alpha": {}, "beta": {}})
+		require.ErrorIs(t, err, cause)
+		require.Nil(t, rows)
+		require.Zero(t, count)
+	}
+	// Missing support has its own stable cause, distinct from a valid empty table.
+	srv := &Server{graph: healthFileMetadataStoreOnly{Store: g}}
+	rows, count, err := srv.buildIndexHealthFileRollup(map[string]struct{}{"alpha": {}})
+	require.ErrorIs(t, err, errors.ErrUnsupported)
+	require.Nil(t, rows)
+	require.Zero(t, count)
+}
+
+func TestIndexHealthFileRollupSupportedCounts(t *testing.T) {
+	for _, backend := range []string{"graph", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			// Given native metadata support, even an empty table is available.
+			var store graph.Store = graph.New()
+			if backend == "sqlite" {
+				disk, err := store_sqlite.Open(filepath.Join(t.TempDir(), "metadata.sqlite"))
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, disk.Close()) })
+				store = disk
+			}
+			srv := &Server{graph: store}
+			repos := map[string]struct{}{"": {}, "beta": {}}
+			rows, count, err := srv.buildIndexHealthFileRollup(repos)
+			require.NoError(t, err)
+			require.Empty(t, rows)
+			require.Zero(t, count)
+			writer := store.(graph.FileMetaWriter)
+			require.NoError(t, writer.SetFileMetas("", []graph.FileMetaRow{{FilePath: "a.go", NodeCount: 2, Errors: `["line 7","line 8"]`}}))
+			require.NoError(t, writer.SetFileMetas("beta", []graph.FileMetaRow{{FilePath: "beta/b.go", NodeCount: 3, Errors: `invalid-json`}}))
+			// When prefix-separated rows are read repeatedly, then existing values survive.
+			for range 2 {
+				rows, count, err = srv.buildIndexHealthFileRollup(repos)
+				require.NoError(t, err)
+				require.Equal(t, 2, count)
+				require.ElementsMatch(t, []map[string]any{
+					{"file": "a.go", "node_count": 2, "errors": []string{"line 7", "line 8"}},
+					{"file": "beta/b.go", "node_count": 3},
+				}, rows)
+			}
+			// No requested repositories is a supported, successful no-op.
+			rows, count, err = srv.buildIndexHealthFileRollup(nil)
+			require.NoError(t, err)
+			require.Empty(t, rows)
+			require.Zero(t, count)
+		})
+	}
 }
