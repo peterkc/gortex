@@ -66,6 +66,34 @@ func (f *watcherExcludeFilter) ShouldInclude(path string) bool {
 	return !m.MatchRelEither(rel)
 }
 
+// ShouldSkipDir reports whether a manual backend rescan can omit a whole
+// directory. Unlike event admission, the walk knows the entry is a directory,
+// so directory-only rules must use the matcher's directory form.
+func (f *watcherExcludeFilter) ShouldSkipDir(path string) bool {
+	if f == nil || f.w == nil {
+		return false
+	}
+	m := f.w.currentExcludeMatcher()
+	if m == nil {
+		return false
+	}
+	path = filepath.Clean(path)
+	rel := path
+	if root := f.w.indexer.rootPath; root != "" {
+		var err error
+		rel, err = filepath.Rel(root, path)
+		if err != nil {
+			return false
+		}
+	}
+	// Startup probes live at the watch root or directly inside its .git
+	// directory. MCP config folders likewise need their child events.
+	if filepath.Base(path) == ".git" || isProbeMarkerPath(path) || excludes.IsAgentConfigMCPDir(rel) {
+		return false
+	}
+	return m.MatchRel(filepath.ToSlash(rel) + "/")
+}
+
 // isProbeMarkerPath reports whether path names a watcher handshake probe.
 // Single definition so the backend filter and every event-loop consumer
 // agree on what a probe looks like.
