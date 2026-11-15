@@ -324,9 +324,9 @@ func (mi *MultiIndexer) finalizeRepositoryCleanupRoot(identity store_sqlite.Repo
 	return nil
 }
 
-func (mi *MultiIndexer) checkRepositoryTrackAdmission(ctx context.Context, prefix, root, canonical string) error {
+func (mi *MultiIndexer) checkRepositoryTrackAdmission(ctx context.Context, root, canonical string) error {
 	mi.mu.RLock()
-	snapshot := prefixOwnerSnapshot{requested: prefix, root: root, closing: mi.repositoryCleanupRootSnapshotLocked()}
+	snapshot := prefixOwnerSnapshot{root: root, closing: mi.repositoryCleanupRootSnapshotLocked()}
 	mi.mu.RUnlock()
 	return mi.checkClosingTrackRoots(ctx, snapshot, canonical)
 }
@@ -338,7 +338,7 @@ func (mi *MultiIndexer) checkClosingTrackRoots(ctx context.Context, snapshot pre
 		return nil
 	}
 	for _, closed := range snapshot.closing {
-		if closed.prefix == snapshot.requested || pathkey.EqualPaths(closed.root, snapshot.root) {
+		if pathkey.EqualPaths(closed.root, snapshot.root) {
 			return graphview.ErrRepositoryAdmissionClosed
 		}
 	}

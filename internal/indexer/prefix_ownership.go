@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/pathkey"
 )
 
@@ -193,6 +194,17 @@ func (mi *MultiIndexer) observePrefixOwnershipBefore(ctx context.Context, prefix
 		observation, err := mi.samplePrefixOwnership(budget, snapshot, candidate)
 		if ctx.Err() != nil {
 			return prefixOwnershipObservation{}, ctx.Err()
+		}
+		// A requested basename is only a hint until an existing alias resolves.
+		resolvedPrefix := observation.registeredPrefix
+		if resolvedPrefix == "" {
+			resolvedPrefix = snapshot.requested
+		}
+		for _, closed := range snapshot.closing {
+			if closed.prefix == resolvedPrefix {
+				err = graphview.ErrRepositoryAdmissionClosed
+				break
+			}
 		}
 		mi.mu.RLock()
 		current := snapshot.matchesLocked(mi)

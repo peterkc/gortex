@@ -196,6 +196,66 @@ func TestPendingCleanupRefusesTrackAliasesBeforeSideEffects(t *testing.T) {
 	}
 }
 
+func TestPendingCleanupPreservesRegisteredSameBasename(t *testing.T) {
+	for _, surface := range []string{"preflight", "register", "raw_track", "raw_reconcile", "implicit"} {
+		for _, naming := range []string{"configured", "registry_only"} {
+			t.Run(surface+"/"+naming, func(t *testing.T) {
+				// Given unrelated foo roots, one closing and one indexed as foo-y.
+				f := newLifecycleFixture(t)
+				t.Cleanup(f.close)
+				closing := f.gitRepo("foo")
+				other := filepath.Join(t.TempDir(), "foo")
+				require.NoError(t, os.Rename(f.gitRepo("independent"), other))
+				tracked, err := f.lc.Register(t.Context(), config.RepoEntry{Path: closing}, TrackSourceCLI)
+				require.NoError(t, err)
+				require.NoError(t, tracked.CatalogErr)
+				existing, err := f.lc.Register(t.Context(), config.RepoEntry{Path: other, Name: "foo-y"}, TrackSourceCLI)
+				require.NoError(t, err)
+				require.NoError(t, existing.CatalogErr)
+				f.lc.EnableDeferredRepositoryCleanup()
+				out, err := f.lc.Untrack(t.Context(), closing)
+				require.NoError(t, err)
+				require.True(t, out.Pending)
+				if naming == "registry_only" {
+					require.NoError(t, f.cm.Global().RemoveRepo(other))
+				}
+				metadata := f.mi.GetMetadata(existing.Prefix)
+				payload := f.store.AllNodes()
+				entry := config.RepoEntry{Path: other}
+
+				// When a caller resolves the existing root from its basename hint.
+				var indexed *IndexResult
+				var registration RegisterResult
+				switch surface {
+				case "preflight":
+					err = f.lc.PreflightTrack(t.Context(), entry)
+				case "register":
+					registration, err = f.lc.Register(t.Context(), entry, TrackSourceCLI)
+				case "raw_track":
+					indexed, err = f.mi.TrackRepoCtx(t.Context(), entry)
+				case "raw_reconcile":
+					indexed, err = f.mi.ReconcileRepoCtx(t.Context(), entry, map[string]int64{"independent.go": 1})
+				case "implicit":
+					err = f.lc.RecordImplicit(t.Context(), other)
+				}
+
+				// Then foo-y remains admitted without reopening or reindexing foo.
+				require.NoError(t, err)
+				require.Nil(t, indexed)
+				if surface == "register" {
+					require.NoError(t, registration.CatalogErr)
+					require.True(t, registration.AlreadyTracked)
+					require.Equal(t, existing.Prefix, registration.Prefix)
+					require.Equal(t, existing.GraphID, registration.GraphID)
+				}
+				require.Same(t, metadata, f.mi.GetMetadata(existing.Prefix))
+				require.ElementsMatch(t, payload, f.store.AllNodes())
+				require.True(t, f.lc.RepositoryAdmissionClosed(tracked.Prefix))
+			})
+		}
+	}
+}
+
 func TestPendingCleanupAllowsDistinctNestedAndUnrelatedRoots(t *testing.T) {
 	// Given a closing parent root held before physical release.
 	f := newLifecycleFixture(t)

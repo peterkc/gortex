@@ -3030,7 +3030,7 @@ func (mi *MultiIndexer) prepareTrackRepoContext(ctx context.Context, entry confi
 		return nil, fmt.Errorf("%s; pass force to track it anyway", reason)
 	}
 	admissionCtx, cancelAdmission := context.WithDeadline(ctx, before)
-	admissionErr := mi.checkRepositoryTrackAdmission(admissionCtx, config.ResolvePrefix(entry), absPath, "")
+	admissionErr := mi.checkRepositoryTrackAdmission(admissionCtx, absPath, "")
 	cancelAdmission()
 	if admissionErr != nil {
 		return nil, admissionErr
@@ -3257,7 +3257,7 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 		return nil, fmt.Errorf("path is not a directory: %s", absPath)
 	}
 	admissionCtx, cancelAdmission := context.WithDeadline(ctx, before)
-	admissionErr := mi.checkRepositoryTrackAdmission(admissionCtx, config.ResolvePrefix(entry), absPath, "")
+	admissionErr := mi.checkRepositoryTrackAdmission(admissionCtx, absPath, "")
 	cancelAdmission()
 	if admissionErr != nil {
 		return nil, admissionErr
