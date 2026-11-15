@@ -2,9 +2,11 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/query"
 )
@@ -125,4 +127,30 @@ func fetchAndMergeBM25TimedContext(ctx context.Context, eng *query.Engine, origi
 		}
 	}
 	return merged, primaryCount
+}
+
+func decorateSearchFailureResult(result *mcp.CallToolResult, channels []string) *mcp.CallToolResult {
+	if result == nil || result.IsError || len(channels) == 0 {
+		return result
+	}
+	message := "Search channel failure: " + strings.Join(channels, ", ") + ". Results are partial; recall may be incomplete."
+	warning := map[string]any{"failed_channels": channels, "message": message}
+	result = mergeResultMeta(result, map[string]any{"search_complete": false, "search_warning": warning})
+	body, ok := singleTextContent(result)
+	if !ok {
+		return result
+	}
+	if text, gcx := injectGCXHeaderMeta(body, map[string]any{"search_complete": false, "search_failed_channels": strings.Join(channels, ","), "search_warning_message": message}); gcx {
+		return rebuildTextResult(result, text)
+	}
+	var payload map[string]json.RawMessage
+	if json.Unmarshal([]byte(body), &payload) == nil && payload != nil {
+		payload["search_complete"] = json.RawMessage("false")
+		payload["search_warning"], _ = json.Marshal(warning)
+		if data, err := json.Marshal(payload); err == nil {
+			return rebuildTextResult(result, string(data))
+		}
+	}
+	quoted, _ := json.Marshal(message)
+	return rebuildTextResult(result, strings.TrimRight(body, "\n")+"\nsearch_incomplete: "+string(quoted)+"\n")
 }

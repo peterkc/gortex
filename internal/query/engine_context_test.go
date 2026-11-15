@@ -2,6 +2,7 @@ package query
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -183,5 +184,59 @@ func TestGatherAndRankedReturnBeforeBackendWorkWhenCanceled(t *testing.T) {
 	}
 	if backend.calls != 0 {
 		t.Fatalf("canceled gather/ranked invoked backend %d times", backend.calls)
+	}
+}
+
+type requestFailureSymbolStore struct {
+	graph.SymbolSearcher
+	calls, searches int
+	err             error
+}
+
+func (*requestFailureSymbolStore) SymbolFTSCount() (int, error) { return 1, nil }
+func (s *requestFailureSymbolStore) SearchSymbolBundlesPathScopedContext(context.Context, string, []string, []string, int) ([]graph.SymbolBundle, error) {
+	s.calls++
+	return nil, s.err
+}
+func (s *requestFailureSymbolStore) SearchSymbolBundlesContext(context.Context, string, int) ([]graph.SymbolBundle, error) {
+	s.calls++
+	return nil, s.err
+}
+func (s *requestFailureSymbolStore) SearchSymbols(string, int) ([]graph.SymbolHit, error) {
+	s.searches++
+	return nil, s.err
+}
+
+type requestFailureVectorBackend struct {
+	*search.SymbolSearcherBackend
+	vectorCalls int
+}
+
+func (b *requestFailureVectorBackend) VectorChannelOnlyContext(context.Context, string, int) ([]string, search.ChannelTimings) {
+	b.vectorCalls++
+	return []string{"vector"}, search.ChannelTimings{}
+}
+func TestFailedBundleRetainsVectorAndExactWithoutTextReplay(t *testing.T) {
+	g := graph.New()
+	g.AddBatch([]*graph.Node{{ID: "exact", Name: "needle", Kind: graph.KindFunction, FilePath: "r/a.go"}, {ID: "vector", Name: "other", Kind: graph.KindFunction, FilePath: "r/b.go"}}, nil)
+	source := &requestFailureSymbolStore{err: errors.New("bundle failed")}
+	backend := &requestFailureVectorBackend{SymbolSearcherBackend: search.NewSymbolSearcherBackend(source)}
+	engine := NewEngine(g)
+	engine.SetSearch(search.NewSwappable(backend))
+	engine.SetRerank(nil)
+	observed := 0
+	ctx := search.WithSearchFailureObserver(context.Background(), func(channel string, err error) {
+		if channel == "text" && errors.Is(err, source.err) {
+			observed++
+		}
+	})
+	// Given a failed primary text bundle, retain independent vector and exact candidates without replay.
+	got := engine.SearchSymbolsRankedContext(ctx, "needle", 5, QueryOptions{}, nil)
+	seen := map[string]bool{}
+	for _, candidate := range got {
+		seen[candidate.Node.ID] = true
+	}
+	if !seen["exact"] || !seen["vector"] || source.calls != 1 || source.searches != 0 || backend.vectorCalls != 1 || observed != 1 {
+		t.Fatalf("candidates=%v bundle=%d replay=%d vector=%d failures=%d", seen, source.calls, source.searches, backend.vectorCalls, observed)
 	}
 }

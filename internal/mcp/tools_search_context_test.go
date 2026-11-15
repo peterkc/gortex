@@ -2,8 +2,10 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -201,5 +203,82 @@ func TestSearchSymbolsScopedContextMatchesLegacyHelper(t *testing.T) {
 	}
 	if calls := backend.legacyBundleCalls.Load() + backend.legacySearchCalls.Load(); calls != 0 {
 		t.Fatalf("scoped helpers fell back to contextless backend %d times", calls)
+	}
+}
+
+type searchSymbolsFaultStore struct {
+	graph.SymbolSearcher
+	err                      error
+	bundleCalls, symbolCalls atomic.Int32
+}
+
+func (*searchSymbolsFaultStore) SymbolFTSCount() (int, error) { return 1, nil }
+func (s *searchSymbolsFaultStore) SearchSymbols(_ string, _ int) ([]graph.SymbolHit, error) {
+	s.symbolCalls.Add(1)
+	return nil, s.err
+}
+func (s *searchSymbolsFaultStore) SearchSymbolsContext(context.Context, string, int) ([]graph.SymbolHit, error) {
+	s.symbolCalls.Add(1)
+	return nil, s.err
+}
+func (s *searchSymbolsFaultStore) SearchSymbolBundlesContext(context.Context, string, int) ([]graph.SymbolBundle, error) {
+	s.bundleCalls.Add(1)
+	return nil, s.err
+}
+
+func TestSearchSymbolsWarnsForFailedTextAndKeepsIndependentEvidence(t *testing.T) {
+	for _, format := range []string{"json", "compact", "toon", "gcx"} {
+		t.Run(format, func(t *testing.T) {
+			g := graph.New()
+			g.AddNode(&graph.Node{ID: "repo/main.go::needle", Name: "needle pipeline", Kind: graph.KindFunction, FilePath: "repo/main.go", RepoPrefix: "repo"})
+			source := &searchSymbolsFaultStore{err: errors.New("private backend failure")}
+			eng := query.NewEngine(g)
+			eng.SetSearch(search.NewSwappable(search.NewSymbolSearcherBackend(source)))
+			eng.SetRerank(nil)
+			srv := NewServer(eng, g, nil, nil, zap.NewNop(), nil)
+			req := searchSymbolsContextRequest("needle pipeline")
+			args := req.Params.Arguments.(map[string]any)
+			args["format"] = format
+			if format == "compact" {
+				args["compact"] = true
+			}
+			// Given failed text ranking and a valid exact-name tier, keep the hit and name the failed channel.
+			result, err := srv.handleSearchSymbols(context.Background(), req)
+			if err != nil || result == nil || result.IsError {
+				t.Fatalf("partial search=%#v/%v", result, err)
+			}
+			if source.bundleCalls.Load() == 0 && source.symbolCalls.Load() == 0 {
+				t.Fatal("fixture did not execute the faulting adapter")
+			}
+			body := resultText(result)
+			if !strings.Contains(body, "needle") {
+				t.Fatalf("independent exact evidence lost: %s", body)
+			}
+			if result.Meta == nil || result.Meta.AdditionalFields["search_complete"] != false || !strings.Contains(body, "text") {
+				t.Fatalf("failed text channel is not visible: %s / %#v", body, result.Meta)
+			}
+			if format == "json" && !json.Valid([]byte(body)) {
+				t.Fatalf("warning broke structured JSON: %s", body)
+			}
+			warning, _ := result.Meta.AdditionalFields["search_warning"].(map[string]any)
+			if !reflect.DeepEqual(warning["failed_channels"], []string{"text"}) {
+				t.Fatalf("failed channel names=%#v", warning)
+			}
+			if strings.Contains(body, "private backend failure") {
+				t.Fatal("backend details leaked into the warning")
+			}
+			if source.symbolCalls.Load() != 0 {
+				t.Fatalf("failed bundle query was replayed: %d", source.symbolCalls.Load())
+			}
+			// When the same shared adapter succeeds on a later request, no prior warning may leak.
+			source.err = nil
+			healthy, err := srv.handleSearchSymbols(context.Background(), req)
+			if err != nil || healthy == nil || healthy.IsError {
+				t.Fatalf("healthy search=%#v/%v", healthy, err)
+			}
+			if healthy.Meta != nil && healthy.Meta.AdditionalFields["search_complete"] == false {
+				t.Fatalf("cross-request warning leak: %#v", healthy.Meta)
+			}
+		})
 	}
 }

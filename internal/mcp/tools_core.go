@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -18,6 +19,7 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/query"
+	"github.com/zzet/gortex/internal/search"
 	"github.com/zzet/gortex/internal/search/rerank"
 	"github.com/zzet/gortex/internal/telemetry"
 )
@@ -1779,7 +1781,27 @@ func (s *Server) handleGetSymbol(ctx context.Context, req mcp.CallToolRequest) (
 	}, resolved)
 }
 
-func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolRequest) (searchResult *mcp.CallToolResult, searchErr error) {
+	var failureMu sync.Mutex
+	failedChannels := make(map[string]bool)
+	ctx = search.WithSearchFailureObserver(ctx, func(channel string, _ error) {
+		failureMu.Lock()
+		failedChannels[channel] = true
+		failureMu.Unlock()
+	})
+	defer func() {
+		if searchErr != nil {
+			return
+		}
+		failureMu.Lock()
+		channels := make([]string, 0, len(failedChannels))
+		for channel := range failedChannels {
+			channels = append(channels, channel)
+		}
+		failureMu.Unlock()
+		sort.Strings(channels)
+		searchResult = decorateSearchFailureResult(searchResult, channels)
+	}()
 	if result, err, handled := s.continueSymbolPage(ctx, req); handled {
 		return result, err
 	}

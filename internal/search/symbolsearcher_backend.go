@@ -128,7 +128,9 @@ type ScopedSymbolBundleSearcherBackend interface {
 // daemon's search_symbols path already tolerates an empty primary
 // hit set (it falls through to the exact-name / substring tiers in
 // query.Engine.gatherBackendCandidates), so returning an error
-// surface here would force every caller to grow its own fallback.
+// surface here would force every caller to grow its own fallback. Context-free
+// callers retain this best-effort contract; request-aware callers can observe
+// actual failures with WithSearchFailureObserver without losing other tiers.
 func (b *SymbolSearcherBackend) Search(query string, limit int) []SearchResult {
 	if b == nil || b.s == nil || strings.TrimSpace(query) == "" {
 		return nil
