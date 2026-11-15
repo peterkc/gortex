@@ -2418,13 +2418,16 @@ func renderDaemonViews(w io.Writer, st daemon.StatusResponse) {
 	if v == nil {
 		return
 	}
-	if v.Families == 0 && v.Coordinators == 0 && v.Leases == 0 &&
+	if v.Families == 0 && v.Coordinators == 0 && v.Leases == 0 && v.CleanupPending == 0 &&
 		len(v.Counters) == 0 && len(v.CoordinatorStartFailures) == 0 && len(v.StorageFailures) == 0 {
 		return
 	}
 	fmt.Fprintln(w, "\nviews:")
 	fmt.Fprintf(w, "  families=%d  coordinators=%d  leases=%d\n",
 		v.Families, v.Coordinators, v.Leases)
+	if v.CleanupPending > 0 {
+		fmt.Fprintf(w, "  cleanup_pending=%d\n", v.CleanupPending)
+	}
 	for _, section := range []struct {
 		label  string
 		counts map[string]int

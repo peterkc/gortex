@@ -329,3 +329,34 @@ func TestTheViewCountersReachTheStatusPayload(t *testing.T) {
 	require.Equal(t, baseline+1, after.Views.Counters[key],
 		"the committed-base reuse counter does not reach `daemon status`")
 }
+
+func TestDaemonStatusRendersCleanupOnlyDebtAndOmitsZero(t *testing.T) {
+	// Given pending cleanup is the only remaining view-lifecycle work.
+	status := daemon.StatusResponse{Views: &daemon.ViewsStatus{CleanupPending: 7}}
+	var text bytes.Buffer
+
+	// When the actual one-shot text renderer displays status.
+	require.NoError(t, renderDaemonStatusTo(&text, status, "text"))
+
+	// Then cleanup-only debt earns the views block and its exact count.
+	require.Contains(t, text.String(), "views:")
+	require.Contains(t, text.String(), "cleanup_pending=7")
+	var wire bytes.Buffer
+	require.NoError(t, renderDaemonStatusTo(&wire, status, "json"))
+	var decoded struct {
+		Views struct {
+			CleanupPending int `json:"cleanup_pending"`
+		} `json:"views"`
+	}
+	require.NoError(t, json.Unmarshal(wire.Bytes(), &decoded))
+	require.Equal(t, 7, decoded.Views.CleanupPending)
+
+	// Then no-work output stays sparse in both formats.
+	status = daemon.StatusResponse{Views: &daemon.ViewsStatus{Families: 1}}
+	text.Reset()
+	require.NoError(t, renderDaemonStatusTo(&text, status, "text"))
+	require.NotContains(t, text.String(), "cleanup_pending")
+	wire.Reset()
+	require.NoError(t, renderDaemonStatusTo(&wire, status, "json"))
+	require.NotContains(t, wire.String(), "cleanup_pending")
+}

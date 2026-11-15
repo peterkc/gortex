@@ -1952,6 +1952,7 @@ func viewsStatusFromHealth(health indexer.ViewsHealth) *daemon.ViewsStatus {
 		StorageFailures:   viewsStorageFailures(health.StorageFailures),
 		PublicationStalls: viewsPublicationStalls(health.PublicationStalls),
 		RetirementBacklog: viewsRetirementBacklog(health.RetirementBacklog),
+		CleanupPending:    health.CleanupPending,
 		Counters:          health.Counters,
 	}
 }
