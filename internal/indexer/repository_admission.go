@@ -315,6 +315,8 @@ func (mi *MultiIndexer) finalizeRepositoryCleanupRoot(identity store_sqlite.Repo
 	if previous, found := mi.repositoryCleanupRoots[identity.GraphID]; found && previous != closed {
 		return graphview.ErrRepositoryOwnerConflict
 	}
+	// Clear stale warmup failures before a successor can register this root.
+	mi.forgetRepoLoad(identity.RootPath)
 	delete(mi.repositoryCleanupRoots, identity.GraphID)
 	if len(mi.repositoryCleanupRoots) == 0 {
 		mi.repositoryCleanupRoots = nil

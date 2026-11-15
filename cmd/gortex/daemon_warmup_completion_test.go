@@ -472,11 +472,20 @@ func (s *cleanupWarmupMtimes) LoadFileMtimes(prefix string) map[string]int64 {
 }
 
 func TestWarmupPendingCleanupRefusesWarmAndColdConfiguredTargets(t *testing.T) {
-	for _, mode := range []string{"warm", "cold"} {
+	for _, mode := range []string{"warm", "cold", "configured_symlink"} {
 		t.Run(mode, func(t *testing.T) {
 			// Given stale persisted config whose closing graph still owns its
 			// prefix, with either warm sidecar data or no prior mtimes.
 			f := newDaemonCleanupFixture(t)
+			configuredRoot := f.root
+			if mode == "configured_symlink" {
+				configuredRoot = filepath.Join(t.TempDir(), "configured-link")
+				require.NoError(t, os.Symlink(f.root, configuredRoot))
+				_, err := f.state.configManager.Global().RemoveRepoAndSaveIfPresent(f.root)
+				require.NoError(t, err)
+				require.NoError(t, f.state.configManager.Global().AddRepo(config.RepoEntry{Path: configuredRoot, Name: f.tracked.Prefix}))
+				require.NoError(t, f.state.configManager.Global().Save())
+			}
 			if mode == "cold" {
 				require.NoError(t, f.store.ReplaceFileMtimes(f.tracked.Prefix, nil))
 			} else {
@@ -484,6 +493,10 @@ func TestWarmupPendingCleanupRefusesWarmAndColdConfiguredTargets(t *testing.T) {
 			}
 			g := &cleanupWarmupMtimes{Store: f.store}
 			f.restart(g)
+			publisher, err := indexer.NewDedicatedBaseRuntime(f.store, f.state.lifecycle.ViewLeases())
+			require.NoError(t, err)
+			finalizer := &warmupCleanupFinalizer{DedicatedBaseRuntime: publisher, finalized: make(chan string, 2)}
+			require.NoError(t, f.state.lifecycle.SetDedicatedBaseCleanupRuntime(finalizer))
 			require.NoError(t, f.state.lifecycle.Seed(t.Context()))
 			require.True(t, f.state.lifecycle.RepositoryAdmissionClosed(f.tracked.Prefix))
 			var loadCalls atomic.Int64
@@ -507,7 +520,7 @@ func TestWarmupPendingCleanupRefusesWarmAndColdConfiguredTargets(t *testing.T) {
 			require.Zero(t, loadCalls.Load())
 			require.Zero(t, timings.filesReindexed)
 			require.Nil(t, f.state.multiIndexer.GetMetadata(f.tracked.Prefix))
-			load, found := f.state.multiIndexer.RepoLoadFor(f.root)
+			load, found := f.state.multiIndexer.RepoLoadFor(configuredRoot)
 			require.True(t, found)
 			require.True(t, load.State.Unavailable())
 			require.False(t, load.State.Loading())
@@ -517,6 +530,27 @@ func TestWarmupPendingCleanupRefusesWarmAndColdConfiguredTargets(t *testing.T) {
 			require.NoError(t, err)
 			for _, intent := range intents {
 				require.False(t, intent.Active)
+			}
+
+			// When readiness releases that cleanup and its captured owners finalize,
+			// no live metadata is available to remove the failed warmup record.
+			publishReadinessPhase(f.state, "ready", true, nil)
+			f.state.lifecycle.MarkRepositoryCleanupReady()
+			select {
+			case graphID := <-finalizer.finalized:
+				require.Equal(t, f.tracked.GraphID, graphID)
+			case <-time.After(10 * time.Second):
+				t.Fatal("repository cleanup did not finalize after ready")
+			}
+			require.NoError(t, f.state.lifecycle.Close())
+
+			// Then canonical and configured spellings no longer carry a stale
+			// pending-load refusal in the dispatcher before its checkout probe.
+			for _, root := range []string{f.root, configuredRoot} {
+				_, found := f.state.multiIndexer.RepoLoadFor(root)
+				require.False(t, found, "finalized cleanup left a load record for %s", root)
+				_, pending := f.state.multiIndexer.PendingRepoForPath(filepath.Join(root, "main.go"))
+				require.False(t, pending, "finalized cleanup still refuses a session in %s", root)
 			}
 		})
 	}
