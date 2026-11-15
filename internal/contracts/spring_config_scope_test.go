@@ -1,6 +1,7 @@
 package contracts
 
 import (
+	"errors"
 	"fmt"
 	"iter"
 	"os"
@@ -29,11 +30,11 @@ func TestBindSpringConfigIsolatesRepositoriesRootsAndIDs(t *testing.T) {
 
 	scopeA := SpringConfigScope{RepoPrefix: "repo-a", RepoRoot: rootA, WorkspaceID: "ws"}
 	scopeB := SpringConfigScope{RepoPrefix: "repo-b", RepoRoot: rootB, WorkspaceID: "ws"}
-	if got := BindSpringConfig(g, scopeA); got == 0 {
-		t.Fatal("repo-a binding added nothing")
+	if got, err := BindSpringConfig(g, scopeA); err != nil || got == 0 {
+		t.Fatalf("repo-a binding added nothing (err=%v)", err)
 	}
-	if got := BindSpringConfig(g, scopeB); got == 0 {
-		t.Fatal("repo-b binding added nothing")
+	if got, err := BindSpringConfig(g, scopeB); err != nil || got == 0 {
+		t.Fatalf("repo-b binding added nothing (err=%v)", err)
 	}
 
 	sharedA := scopedSpringConfigKeyID(scopeA, "shared.value")
@@ -62,11 +63,11 @@ func TestBindSpringConfigIsolatesRepositoriesRootsAndIDs(t *testing.T) {
 	if !hasReadsConfigEdge(g, readerB, sharedB) || hasReadsConfigEdge(g, readerB, sharedA) {
 		t.Fatalf("repo-b reader crossed repository boundary: %v", g.GetOutEdges(readerB))
 	}
-	if got := BindSpringConfig(g, scopeA); got != 0 {
-		t.Fatalf("warm repo-a replay added %d rows, want 0", got)
+	if got, err := BindSpringConfig(g, scopeA); err != nil || got != 0 {
+		t.Fatalf("warm repo-a replay added %d rows, want 0 (err=%v)", got, err)
 	}
-	if got := BindSpringConfig(g, scopeB); got != 0 {
-		t.Fatalf("warm repo-b replay added %d rows, want 0", got)
+	if got, err := BindSpringConfig(g, scopeB); err != nil || got != 0 {
+		t.Fatalf("warm repo-b replay added %d rows, want 0 (err=%v)", got, err)
 	}
 }
 
@@ -86,8 +87,8 @@ func TestBindSpringConfigMigratesScopedLegacyID(t *testing.T) {
 		{ID: legacyID, Kind: graph.KindConfigKey, Name: "app.value", FilePath: filePath, Meta: map[string]any{"source": "spring", "value_redacted": true}},
 	}, []*graph.Edge{{From: readerID, To: legacyID, Kind: graph.EdgeReadsConfig, FilePath: "repo-a/Reader.java", Line: 8}})
 
-	if got := BindSpringConfig(g, scope); got == 0 {
-		t.Fatal("migration added no qualified rows")
+	if got, err := BindSpringConfig(g, scope); err != nil || got == 0 {
+		t.Fatalf("migration added no qualified rows (err=%v)", err)
 	}
 	desiredID := scopedSpringConfigKeyID(scope, "app.value")
 	if g.GetNode(legacyID) != nil {
@@ -123,8 +124,8 @@ func TestBindSpringConfigUsesConstantBatchOperations(t *testing.T) {
 	counting := &springCountingStore{Store: base}
 	scope := SpringConfigScope{RepoPrefix: "repo", RepoRoot: root, WorkspaceID: "ws"}
 
-	if got := BindSpringConfig(counting, scope); got != count*2 {
-		t.Fatalf("cold binding added %d rows, want %d", got, count*2)
+	if got, err := BindSpringConfig(counting, scope); err != nil || got != count*2 {
+		t.Fatalf("cold binding added %d rows, want %d (err=%v)", got, count*2, err)
 	}
 	if counting.fileProjections != 1 || counting.readerProjections != 1 || counting.nodeBatches != 1 ||
 		counting.edgeCandidateBatches != 1 || counting.outEdgeBatches != 1 || counting.addBatches != 1 {
@@ -133,8 +134,8 @@ func TestBindSpringConfigUsesConstantBatchOperations(t *testing.T) {
 	if counting.globalScans != 0 || counting.pointReads != 0 || counting.pointWrites != 0 {
 		t.Fatalf("cold binding used global/point operations: %+v", counting)
 	}
-	if got := BindSpringConfig(counting, scope); got != 0 {
-		t.Fatalf("warm binding added %d rows, want 0", got)
+	if got, err := BindSpringConfig(counting, scope); err != nil || got != 0 {
+		t.Fatalf("warm binding added %d rows, want 0 (err=%v)", got, err)
 	}
 	if counting.fileProjections != 2 || counting.readerProjections != 2 || counting.nodeBatches != 2 ||
 		counting.edgeCandidateBatches != 2 || counting.outEdgeBatches != 2 || counting.addBatches != 1 {
@@ -223,4 +224,66 @@ func (s *springCountingStore) AddEdge(edge *graph.Edge) {
 func (s *springCountingStore) NodesByKind(kind graph.NodeKind) iter.Seq[*graph.Node] {
 	s.globalScans++
 	return s.Store.NodesByKind(kind)
+}
+
+type springExactRemovalOnlyStore struct {
+	graph.Store
+	remover  graph.ExactEdgeBatchRemover
+	removals int
+}
+
+func (s *springExactRemovalOnlyStore) RemoveEdgesExact(edges []*graph.Edge) int {
+	s.removals++
+	return s.remover.RemoveEdgesExact(edges)
+}
+
+type springConfigEvictionOnlyStore struct {
+	graph.Store
+	evicter   graph.ConfigNodeBatchEvicter
+	evictions int
+}
+
+func (s *springConfigEvictionOnlyStore) EvictConfigNodesByIDs(ids []string) (int, int) {
+	s.evictions++
+	return s.evicter.EvictConfigNodesByIDs(ids)
+}
+
+func TestBindSpringConfigRefusesIncompleteLegacyMigration(t *testing.T) {
+	for _, missing := range []string{"config node eviction", "exact edge removal"} {
+		t.Run(missing, func(t *testing.T) {
+			// Given legacy rows and one missing cleanup capability, when binding
+			// runs, then it refuses before either cleanup or replacement mutation.
+			root := t.TempDir()
+			writeSpringConfigFile(t, root, "application.yml", "app.value: hidden\n")
+			scope := SpringConfigScope{RepoPrefix: "repo", RepoRoot: root, WorkspaceID: "ws"}
+			base := graph.New()
+			legacyID := springConfigKeyID("app.value")
+			base.AddBatch([]*graph.Node{
+				{ID: "repo/application.yml", Kind: graph.KindFile, FilePath: "repo/application.yml", RepoPrefix: "repo", WorkspaceID: "ws"},
+				{ID: "repo::Reader", Kind: graph.KindType, FilePath: "repo/Reader.java", RepoPrefix: "repo", WorkspaceID: "ws", Meta: map[string]any{"spring_config_keys": []string{"app.value"}}},
+				{ID: legacyID, Kind: graph.KindConfigKey, FilePath: "repo/application.yml", Meta: map[string]any{"source": "spring"}},
+			}, []*graph.Edge{{From: "repo::Reader", To: legacyID, Kind: graph.EdgeReadsConfig, FilePath: "repo/Reader.java"}})
+			counting := &springCountingStore{Store: base}
+			exact := &springExactRemovalOnlyStore{Store: counting, remover: base}
+			evicter := &springConfigEvictionOnlyStore{Store: counting, evicter: base}
+			var store graph.Store
+			if missing == "config node eviction" {
+				store = exact
+			} else {
+				store = evicter
+			}
+
+			got, err := BindSpringConfig(store, scope)
+			if !errors.Is(err, errors.ErrUnsupported) || got != 0 {
+				t.Errorf("binding = %d, %v, want zero and ErrUnsupported", got, err)
+			}
+			if counting.addBatches != 0 || exact.removals != 0 || evicter.evictions != 0 {
+				t.Fatalf("partial migration: adds=%d removals=%d evictions=%d", counting.addBatches, exact.removals, evicter.evictions)
+			}
+			if base.GetNode(legacyID) == nil || !hasReadsConfigEdge(base, "repo::Reader", legacyID) ||
+				base.GetNode(scopedSpringConfigKeyID(scope, "app.value")) != nil {
+				t.Fatal("refused migration changed the legacy graph")
+			}
+		})
+	}
 }

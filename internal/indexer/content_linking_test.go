@@ -24,6 +24,14 @@ type allNodesCountingGraph struct {
 	allNodesCalls int
 }
 
+// This success spy preserves Graph's live candidate pointers explicitly.
+func (s *allNodesCountingGraph) MarkEdgesCrossRepo(edges []*graph.Edge) int {
+	for _, edge := range edges {
+		edge.CrossRepo = true
+	}
+	return len(edges)
+}
+
 func (g *allNodesCountingGraph) AllNodes() []*graph.Node {
 	g.allNodesCalls++
 	return g.Graph.AllNodes()
@@ -74,7 +82,9 @@ func TestContentLinkingAndGlobalPassAvoidAllNodesWithCrossRepoParity(t *testing.
 
 	global := &allNodesCountingGraph{Graph: contentLinkFixture()}
 	newIndexer(global).linkContentToCode()
-	resolver.DetectCrossRepoEdges(global)
+	if _, err := resolver.DetectCrossRepoEdges(global); err != nil {
+		t.Fatal(err)
+	}
 	require.Zero(t, global.allNodesCalls, "the automatic global cold path must never request a node snapshot")
 	require.Equal(t, want, contentLinkTargets(global, graph.EdgeMotivates))
 	require.Equal(t, []string{"repoB/pkg/b.go::SharedSymbol"},

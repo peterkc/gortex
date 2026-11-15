@@ -15,7 +15,7 @@ func TestEveryGenericFrameworkSynthesizerDeclaresItsSeed(t *testing.T) {
 	for _, s := range defaultFrameworkSynthesizers() {
 		registered[s.Name()] = true
 		sf, ok := s.(synthFunc)
-		if !ok || sf.scopedFn != nil {
+		if !ok || sf.scopedFn != nil || sf.checkedScopedFn != nil {
 			continue
 		}
 		if _, declared := frameworkSynthSeedDeclarations[sf.name]; !declared {

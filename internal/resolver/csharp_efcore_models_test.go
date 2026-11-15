@@ -1,13 +1,31 @@
 package resolver
 
 import (
+	"context"
+	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
+
+func efResolveModels(t *testing.T, g graph.Store) int {
+	t.Helper()
+	count, err := ResolveCSharpEFCoreModels(g)
+	require.NoError(t, err)
+	return count
+}
+
+func efResolveModelsScoped(t *testing.T, g graph.Store, scope map[string]bool) int {
+	t.Helper()
+	count, err := ResolveCSharpEFCoreModelsScoped(g, scope)
+	require.NoError(t, err)
+	return count
+}
 
 func efModelsTableEdges(g graph.Store) []*graph.Edge {
 	var out []*graph.Edge
@@ -136,14 +154,14 @@ func TestResolveCSharpEFCoreModels_DbSetConventionIsIdempotent(t *testing.T) {
 	g := graph.New()
 	entity := efAddEntity(g, "Domain/Widget.cs::Widget", "", "", "Widget", "", "")
 	efAddDbSet(g, "Data/Ctx.cs::Ctx.StockWidgets", "", "", "Widget", "StockWidgets")
-	require.Equal(t, 1, ResolveCSharpEFCoreModels(g))
+	require.Equal(t, 1, efResolveModels(t, g))
 	edge := efOnlyModelEdgeFrom(t, g, entity.ID)
 	assert.Equal(t, "db::orm::StockWidgets", edge.To)
 	assert.Equal(t, "dbset", edge.Meta["binding"])
 	assert.Equal(t, "StockWidgets", edge.Meta["table_name"])
 	assert.Equal(t, "convention", edge.Meta["derivation"])
 	require.NotNil(t, g.GetNode("db::orm::StockWidgets"))
-	assert.Equal(t, 0, ResolveCSharpEFCoreModels(g))
+	assert.Equal(t, 0, efResolveModels(t, g))
 	assert.Len(t, efModelEdgesFrom(g, entity.ID), 1)
 }
 
@@ -152,7 +170,7 @@ func TestResolveCSharpEFCoreModels_UnusedConfigurationIsInert(t *testing.T) {
 	entity := efAddEntity(g, "Domain/Widget.cs::Widget", "", "", "Widget", "", "")
 	efAddConfig(g, "Config/WidgetConfig.cs::WidgetConfig", "", "", "WidgetConfig", "Widget", "fluent_widgets", "", "table")
 	efAddDbSet(g, "Data/Ctx.cs::Ctx.Widgets", "", "", "Widget", "Widgets")
-	require.Equal(t, 1, ResolveCSharpEFCoreModels(g))
+	require.Equal(t, 1, efResolveModels(t, g))
 	edge := efOnlyModelEdgeFrom(t, g, entity.ID)
 	assert.Equal(t, "db::orm::Widgets", edge.To)
 	assert.Equal(t, "dbset", edge.Meta["binding"])
@@ -179,7 +197,7 @@ func TestResolveCSharpEFCoreModels_ActivationAndInlineFollowSourceOrder(t *testi
 			entity := efAddEntity(g, "Domain/Widget.cs::Widget", "", "", "Widget", "", "")
 			efAddConfig(g, "Config/WidgetConfig.cs::WidgetConfig", "", "", "WidgetConfig", "Widget", "config_widgets", "", "table")
 			efAddActionFile(g, "Data/Ctx.cs", "", "", tt.actions)
-			require.Equal(t, 1, ResolveCSharpEFCoreModels(g))
+			require.Equal(t, 1, efResolveModels(t, g))
 			edge := efOnlyModelEdgeFrom(t, g, entity.ID)
 			assert.Equal(t, "db::orm::"+tt.want, edge.To)
 			assert.Equal(t, "fluent", edge.Meta["binding"])
@@ -193,11 +211,11 @@ func TestResolveCSharpEFCoreModels_AssemblyAgreementCoalesces(t *testing.T) {
 	efAddConfig(g, "Config/A.cs::AConfig", "", "", "AConfig", "Widget", "widgets", "sales", "table")
 	efAddConfig(g, "Config/B.cs::BConfig", "", "", "BConfig", "Widget", "widgets", "sales", "table")
 	efAddActionFile(g, "Data/Ctx.cs", "", "", []map[string]any{efApplyAssemblyAction("Ctx", 0, 10)})
-	require.Equal(t, 1, ResolveCSharpEFCoreModels(g))
+	require.Equal(t, 1, efResolveModels(t, g))
 	edge := efOnlyModelEdgeFrom(t, g, entity.ID)
 	assert.Equal(t, "db::orm::sales.widgets", edge.To)
 	assert.Equal(t, "fluent", edge.Meta["binding"])
-	assert.Equal(t, 0, ResolveCSharpEFCoreModels(g))
+	assert.Equal(t, 0, efResolveModels(t, g))
 }
 
 func TestResolveCSharpEFCoreModels_AssemblyConflictBlocksFallbackUntilLaterOverride(t *testing.T) {
@@ -208,13 +226,13 @@ func TestResolveCSharpEFCoreModels_AssemblyConflictBlocksFallbackUntilLaterOverr
 	efAddConfig(g, "Config/A.cs::AConfig", "", "", "AConfig", "Widget", "widgets_a", "", "table")
 	efAddConfig(g, "Config/B.cs::BConfig", "", "", "BConfig", "Widget", "widgets_b", "", "table")
 	file := efAddActionFile(g, "Data/Ctx.cs", "", "", []map[string]any{efApplyAssemblyAction("Ctx", 0, 10)})
-	require.Equal(t, 1, ResolveCSharpEFCoreModels(g))
+	require.Equal(t, 1, efResolveModels(t, g))
 	assert.Empty(t, efModelEdgesFrom(g, entity.ID), "rejection blocks both attribute and DbSet fallback")
 	file.Meta["ef_fluent"] = []map[string]any{
 		efApplyAssemblyAction("Ctx", 0, 10),
 		efMappingAction("Ctx", "Widget", "later_widgets", "", "view", 1, 11),
 	}
-	require.Equal(t, 1, ResolveCSharpEFCoreModels(g))
+	require.Equal(t, 1, efResolveModels(t, g))
 	edge := efOnlyModelEdgeFrom(t, g, entity.ID)
 	assert.Equal(t, "db::orm::later_widgets", edge.To)
 	assert.Equal(t, "view", edge.Meta["relation"])
@@ -228,7 +246,7 @@ func TestResolveCSharpEFCoreModels_ExactRepositoryWorkspaceAndEntityBoundary(t *
 	efAddActionFile(g, "repo-a/ws-1/Ctx.cs", "repo-a", "ws-1", []map[string]any{efMappingAction("Ctx", "Widget", "widgets_a", "", "table", 0, 10)})
 	efAddActionFile(g, "repo-b/ws-1/Ctx.cs", "repo-b", "ws-1", []map[string]any{efMappingAction("Ctx", "Widget", "widgets_b", "", "table", 0, 10)})
 	efAddActionFile(g, "repo-a/ws-2/Ctx.cs", "repo-a", "ws-2", []map[string]any{efMappingAction("Ctx", "Widget", "widgets_c", "", "table", 0, 10)})
-	require.Equal(t, 3, ResolveCSharpEFCoreModels(g))
+	require.Equal(t, 3, efResolveModels(t, g))
 	assert.Equal(t, "repo-a/db::orm::widgets_a", efOnlyModelEdgeFrom(t, g, entityA.ID).To)
 	assert.Equal(t, "repo-b/db::orm::widgets_b", efOnlyModelEdgeFrom(t, g, entityB.ID).To)
 	assert.Equal(t, "repo-a/db::orm::widgets_c", efOnlyModelEdgeFrom(t, g, entityC.ID).To)
@@ -239,7 +257,7 @@ func TestResolveCSharpEFCoreModels_AmbiguousEntityWithinBoundaryIsRejected(t *te
 	efAddEntity(g, "repo-a/Domain/Widget.cs::Widget", "repo-a", "ws", "Widget", "", "")
 	efAddEntity(g, "repo-a/Legacy/Widget.cs::Widget", "repo-a", "ws", "Widget", "", "")
 	efAddActionFile(g, "repo-a/Data/Ctx.cs", "repo-a", "ws", []map[string]any{efMappingAction("Ctx", "Widget", "widgets", "", "table", 0, 10)})
-	assert.Equal(t, 0, ResolveCSharpEFCoreModels(g))
+	assert.Equal(t, 0, efResolveModels(t, g))
 	assert.Empty(t, efModelsTableEdges(g))
 }
 
@@ -251,12 +269,12 @@ func TestResolveCSharpEFCoreModelsScoped_ConfigOnlyChangeReconcilesOneRepository
 	entityB := efAddEntity(g, "repo-b/Domain/Widget.cs::Widget", "repo-b", "ws", "Widget", "", "")
 	efAddConfig(g, "repo-b/Config/WidgetConfig.cs::WidgetConfig", "repo-b", "ws", "WidgetConfig", "Widget", "widgets_b", "", "table")
 	efAddActionFile(g, "repo-b/Data/Ctx.cs", "repo-b", "ws", []map[string]any{efApplyConfigAction("Ctx", "WidgetConfig", 0, 10)})
-	require.Equal(t, 2, ResolveCSharpEFCoreModels(g))
+	require.Equal(t, 2, efResolveModels(t, g))
 	configA.Meta["ef_config_table"] = "widgets_a_v2"
-	require.Equal(t, 1, ResolveCSharpEFCoreModelsScoped(g, map[string]bool{"repo-a": true}))
+	require.Equal(t, 1, efResolveModelsScoped(t, g, map[string]bool{"repo-a": true}))
 	assert.Equal(t, "repo-a/db::orm::widgets_a_v2", efOnlyModelEdgeFrom(t, g, entityA.ID).To)
 	assert.Equal(t, "repo-b/db::orm::widgets_b", efOnlyModelEdgeFrom(t, g, entityB.ID).To)
-	assert.Equal(t, 0, ResolveCSharpEFCoreModelsScoped(g, map[string]bool{"repo-a": true}))
+	assert.Equal(t, 0, efResolveModelsScoped(t, g, map[string]bool{"repo-a": true}))
 }
 
 func TestResolveCSharpEFCoreModels_RemovalRestoresAttributeOrDbSetAndDeletesOtherwise(t *testing.T) {
@@ -265,10 +283,10 @@ func TestResolveCSharpEFCoreModels_RemovalRestoresAttributeOrDbSetAndDeletesOthe
 		entity := efAddEntity(g, "repo-a/Domain/Widget.cs::Widget", "repo-a", "ws", "Widget", "attribute_widgets", "catalog")
 		efAddConfig(g, "repo-a/Config/WidgetConfig.cs::WidgetConfig", "repo-a", "ws", "WidgetConfig", "Widget", "fluent_widgets", "sales", "table")
 		file := efAddActionFile(g, "repo-a/Data/Ctx.cs", "repo-a", "ws", []map[string]any{efApplyConfigAction("Ctx", "WidgetConfig", 0, 10)})
-		require.Equal(t, 1, ResolveCSharpEFCoreModels(g))
+		require.Equal(t, 1, efResolveModels(t, g))
 		assert.Equal(t, "repo-a/db::orm::sales.fluent_widgets", efOnlyModelEdgeFrom(t, g, entity.ID).To)
 		file.Meta["ef_fluent"] = []map[string]any{}
-		require.Equal(t, 1, ResolveCSharpEFCoreModelsScoped(g, map[string]bool{"repo-a": true}))
+		require.Equal(t, 1, efResolveModelsScoped(t, g, map[string]bool{"repo-a": true}))
 		edge := efOnlyModelEdgeFrom(t, g, entity.ID)
 		assert.Equal(t, "repo-a/db::orm::catalog.attribute_widgets", edge.To)
 		assert.Equal(t, "attribute", edge.Meta["binding"])
@@ -279,10 +297,10 @@ func TestResolveCSharpEFCoreModels_RemovalRestoresAttributeOrDbSetAndDeletesOthe
 		efAddConfig(g, "repo-a/Config/WidgetConfig.cs::WidgetConfig", "repo-a", "ws", "WidgetConfig", "Widget", "fluent_widgets", "", "table")
 		efAddDbSet(g, "repo-a/Data/Ctx.cs::Ctx.Widgets", "repo-a", "ws", "Widget", "Widgets")
 		file := efAddActionFile(g, "repo-a/Data/Ctx.cs", "repo-a", "ws", []map[string]any{efApplyConfigAction("Ctx", "WidgetConfig", 0, 10)})
-		require.Equal(t, 1, ResolveCSharpEFCoreModels(g))
+		require.Equal(t, 1, efResolveModels(t, g))
 		assert.Equal(t, "repo-a/db::orm::fluent_widgets", efOnlyModelEdgeFrom(t, g, entity.ID).To)
 		file.Meta["ef_fluent"] = []map[string]any{}
-		require.Equal(t, 1, ResolveCSharpEFCoreModelsScoped(g, map[string]bool{"repo-a": true}))
+		require.Equal(t, 1, efResolveModelsScoped(t, g, map[string]bool{"repo-a": true}))
 		edge := efOnlyModelEdgeFrom(t, g, entity.ID)
 		assert.Equal(t, "repo-a/db::orm::Widgets", edge.To)
 		assert.Equal(t, "dbset", edge.Meta["binding"])
@@ -292,9 +310,9 @@ func TestResolveCSharpEFCoreModels_RemovalRestoresAttributeOrDbSetAndDeletesOthe
 		entity := efAddEntity(g, "repo-a/Domain/Widget.cs::Widget", "repo-a", "ws", "Widget", "", "")
 		efAddConfig(g, "repo-a/Config/WidgetConfig.cs::WidgetConfig", "repo-a", "ws", "WidgetConfig", "Widget", "fluent_widgets", "", "table")
 		file := efAddActionFile(g, "repo-a/Data/Ctx.cs", "repo-a", "ws", []map[string]any{efApplyConfigAction("Ctx", "WidgetConfig", 0, 10)})
-		require.Equal(t, 1, ResolveCSharpEFCoreModels(g))
+		require.Equal(t, 1, efResolveModels(t, g))
 		file.Meta["ef_fluent"] = []map[string]any{}
-		require.Equal(t, 1, ResolveCSharpEFCoreModelsScoped(g, map[string]bool{"repo-a": true}))
+		require.Equal(t, 1, efResolveModelsScoped(t, g, map[string]bool{"repo-a": true}))
 		assert.Empty(t, efModelEdgesFrom(g, entity.ID))
 	})
 }
@@ -304,13 +322,13 @@ func TestResolveCSharpEFCoreModels_DuplicateSiblingProjectionsCoalesce(t *testin
 	entity := efAddEntity(g, "repo-a/Domain/Widget.cs::Widget", "repo-a", "ws", "Widget", "", "")
 	efAddConfig(g, "repo-a/Config/WidgetConfig.cs::WidgetConfig", "repo-a", "ws", "WidgetConfig", "Widget", "widgets", "", "table")
 	efAddActionFile(g, "repo-a/Data/Ctx.cs", "repo-a", "ws", []map[string]any{efApplyConfigAction("Ctx", "WidgetConfig", 0, 10)})
-	require.Equal(t, 1, ResolveCSharpEFCoreModels(g))
+	require.Equal(t, 1, efResolveModels(t, g))
 	efAddOwnedProjection(g, entity, "stale_widgets", "", "table", "fluent")
 	require.Len(t, efModelEdgesFrom(g, entity.ID), 2)
-	require.Equal(t, 1, ResolveCSharpEFCoreModelsScoped(g, map[string]bool{"repo-a": true}))
+	require.Equal(t, 1, efResolveModelsScoped(t, g, map[string]bool{"repo-a": true}))
 	edge := efOnlyModelEdgeFrom(t, g, entity.ID)
 	assert.Equal(t, "repo-a/db::orm::widgets", edge.To)
-	assert.Equal(t, 0, ResolveCSharpEFCoreModelsScoped(g, map[string]bool{"repo-a": true}))
+	assert.Equal(t, 0, efResolveModelsScoped(t, g, map[string]bool{"repo-a": true}))
 }
 
 func TestResolveCSharpEFCoreModels_ToTableToViewSameTargetIsSemanticReplacement(t *testing.T) {
@@ -319,16 +337,102 @@ func TestResolveCSharpEFCoreModels_ToTableToViewSameTargetIsSemanticReplacement(
 	file := efAddActionFile(g, "repo-a/Data/Ctx.cs", "repo-a", "ws", []any{
 		efMappingAction("Ctx", "Tally", "tallies", "", "table", 0, 10),
 	})
-	require.Equal(t, 1, ResolveCSharpEFCoreModels(g))
+	require.Equal(t, 1, efResolveModels(t, g))
 	before := efOnlyModelEdgeFrom(t, g, entity.ID)
 	assert.Equal(t, "repo-a/db::orm::tallies", before.To)
 	assert.Equal(t, "table", before.Meta["relation"])
 	file.Meta["ef_fluent"] = []any{
 		efMappingAction("Ctx", "Tally", "tallies", "", "view", 0, 10),
 	}
-	require.Equal(t, 1, ResolveCSharpEFCoreModelsScoped(g, map[string]bool{"repo-a": true}))
+	require.Equal(t, 1, efResolveModelsScoped(t, g, map[string]bool{"repo-a": true}))
 	after := efOnlyModelEdgeFrom(t, g, entity.ID)
 	assert.Equal(t, before.To, after.To)
 	assert.Equal(t, "view", after.Meta["relation"])
-	assert.Equal(t, 0, ResolveCSharpEFCoreModelsScoped(g, map[string]bool{"repo-a": true}))
+	assert.Equal(t, 0, efResolveModelsScoped(t, g, map[string]bool{"repo-a": true}))
+}
+
+type efReplacementFailureStore struct {
+	graph.Store
+	err error
+}
+
+func (s *efReplacementFailureStore) ReplaceDerivedContracts(graph.DerivedContractReplacement) (graph.DerivedContractReplaceResult, error) {
+	return graph.DerivedContractReplaceResult{}, s.err
+}
+
+func TestResolveCSharpEFCoreModels_ReplacementFailureIsVisible(t *testing.T) {
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthCSharpEFCoreModels})
+	require.NoError(t, err)
+	for _, failure := range []error{errors.ErrUnsupported, errors.New("EF replacement failed"), context.Canceled} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			// Given a mapping delta and absent/failed replacement, when full,
+			// scoped or registry EF entry points run, then refusal preserves the old rows.
+			base := graph.New()
+			entity := efAddEntity(base, "repo/Widget.cs::Widget", "repo", "ws", "Widget", "new_widgets", "")
+			efAddOwnedProjection(base, entity, "old_widgets", "", "table", "attribute")
+			var store graph.Store = &frameworkScopeTrapStore{Store: base}
+			if failure != errors.ErrUnsupported {
+				store = &efReplacementFailureStore{Store: store, err: failure}
+			}
+			scope := map[string]bool{"repo": true}
+			count, err := ResolveCSharpEFCoreModels(store)
+			assert.Zero(t, count)
+			assert.ErrorIs(t, err, failure)
+			count, err = ResolveCSharpEFCoreModelsScoped(store, scope)
+			assert.Zero(t, count)
+			assert.ErrorIs(t, err, failure)
+			for _, report := range []FrameworkSynthReport{
+				RunFrameworkSynthesizersWithSelection(store, selection),
+				RunFrameworkSynthesizersScopedForFilesWithSelection(store, scope, []string{entity.FilePath}, false, selection),
+				RunFrameworkSynthesizersScopedWithCensusAndSelection(store, scope, true, selection),
+			} {
+				assert.Zero(t, report.Total)
+				assert.ErrorIs(t, report.Err, failure)
+				assert.True(t, report.Incomplete)
+				assert.Equal(t, []string{SynthCSharpEFCoreModels}, report.Refused)
+			}
+			assert.Equal(t, "repo/db::orm::old_widgets", efOnlyModelEdgeFrom(t, base, entity.ID).To)
+			assert.Nil(t, base.GetNode("repo/db::orm::new_widgets"))
+		})
+	}
+}
+
+func TestResolveCSharpEFCoreModels_UnchangedMappingNeedsNoReplacer(t *testing.T) {
+	// Given a complete mapping with no delta, when a stripped wrapper runs EF,
+	// then no replacement capability is needed and no refusal is reported.
+	base := graph.New()
+	efAddEntity(base, "repo/Widget.cs::Widget", "repo", "ws", "Widget", "widgets", "")
+	require.Equal(t, 1, efResolveModels(t, base))
+	store := &frameworkScopeTrapStore{Store: base}
+	assert.Zero(t, efResolveModels(t, store))
+	assert.Zero(t, efResolveModelsScoped(t, store, map[string]bool{"repo": true}))
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthCSharpEFCoreModels})
+	require.NoError(t, err)
+	report := RunFrameworkSynthesizersWithSelection(store, selection)
+	assert.NoError(t, report.Err)
+	assert.False(t, report.Incomplete)
+	assert.Empty(t, report.Refused)
+}
+
+func TestResolveCSharpEFCoreModels_SQLiteReplacementAndReversion(t *testing.T) {
+	// Given supported SQLite, when fluent facts change, disappear and return,
+	// then projection order/reversion and repeat counts keep their base behavior.
+	store, err := store_sqlite.Open(filepath.Join(t.TempDir(), "ef.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	entity := efAddEntity(store, "repo/Widget.cs::Widget", "repo", "ws", "Widget", "attribute_widgets", "")
+	file := efAddActionFile(store, "repo/Ctx.cs", "repo", "ws", []map[string]any{
+		efMappingAction("Ctx", "Widget", "fluent_widgets", "", "table", 0, 10),
+	})
+	for _, table := range []string{"fluent_widgets", "changed_widgets", "attribute_widgets", "fluent_widgets"} {
+		if table == "attribute_widgets" {
+			file.Meta["ef_fluent"] = []map[string]any{}
+		} else {
+			file.Meta["ef_fluent"] = []map[string]any{efMappingAction("Ctx", "Widget", table, "", "table", 0, 10)}
+		}
+		store.AddNode(file)
+		assert.Equal(t, 1, efResolveModelsScoped(t, store, map[string]bool{"repo": true}))
+		assert.Equal(t, "repo/db::orm::"+table, efOnlyModelEdgeFrom(t, store, entity.ID).To)
+		assert.Zero(t, efResolveModelsScoped(t, store, map[string]bool{"repo": true}))
+	}
 }

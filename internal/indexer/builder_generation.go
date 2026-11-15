@@ -1252,7 +1252,11 @@ func (b *SparseGenerationBuilder) runEnrichment(
 		}
 		enrichable := func(language string) bool { return b.Semantic.ProviderForLanguage(language) != nil }
 		censusStarted := time.Now()
-		clears, baseRead := chainClearsEnrichmentFloor(handle, req.RepoPrefix, stage.ChainCensus, base, floor, enrichable)
+		clears, baseRead, currentCensusErr := chainClearsEnrichmentFloor(handle, req.RepoPrefix, stage.ChainCensus, base, floor, enrichable)
+		if currentCensusErr != nil {
+			out.Reason = "the current language census could not be read: " + currentCensusErr.Error()
+			return
+		}
 		if censusErr != nil {
 			out.Reason = "the committed language census could not be read: " + censusErr.Error()
 			return
@@ -1369,11 +1373,14 @@ func goModuleManifestPath(p string) bool {
 // whatever its count, so it must not veto the languages that can. base is
 // called at most once, and only when the generation's own files and the
 // chain leave a judged language below the floor; baseRead reports whether it
-// was.
-func chainClearsEnrichmentFloor(handle graph.Store, repoPrefix string, chain map[string]map[string]int, base func() map[string]int, floor int, enrichable func(string) bool) (clears, baseRead bool) {
+// was. Missing exact file counts return an error, not proof that the floor clears.
+func chainClearsEnrichmentFloor(handle graph.Store, repoPrefix string, chain map[string]map[string]int, base func() map[string]int, floor int, enrichable func(string) bool) (clears, baseRead bool, err error) {
+	if _, exact := handle.(graph.RepoLanguageFileCountReader); !exact {
+		return false, false, fmt.Errorf("indexer: enrichment floor census requires file-aware counts: %w", errors.ErrUnsupported)
+	}
 	own := map[string]map[string]int{}
 	for _, row := range graph.ReadRepoLanguageFileCounts(handle, []string{repoPrefix}) {
-		if row.Language == "" || row.Count <= 0 {
+		if row.FilePath == "" || row.Language == "" || row.Count <= 0 {
 			continue
 		}
 		if own[row.FilePath] == nil {
@@ -1384,7 +1391,7 @@ func chainClearsEnrichmentFloor(handle graph.Store, repoPrefix string, chain map
 	totals := map[string]int{}
 	present := map[string]bool{}
 	add := func(file string, languages map[string]int, mine bool) {
-		if semantic.IsLowValueForEnrichment(file, nil) || semantic.IsFixtureCensusPath(file) {
+		if file == "" || semantic.IsLowValueForEnrichment(file, nil) || semantic.IsFixtureCensusPath(file) {
 			return
 		}
 		for language, count := range languages {
@@ -1408,7 +1415,7 @@ func chainClearsEnrichmentFloor(handle graph.Store, repoPrefix string, chain map
 		}
 	}
 	if len(present) == 0 {
-		return false, false
+		return false, false, nil
 	}
 	below := func() bool {
 		for language := range present {
@@ -1419,15 +1426,15 @@ func chainClearsEnrichmentFloor(handle graph.Store, repoPrefix string, chain map
 		return false
 	}
 	if !below() {
-		return true, false
+		return true, false, nil
 	}
 	if base == nil {
-		return false, false
+		return false, false, nil
 	}
 	for language, count := range base() {
 		totals[language] += count
 	}
-	return !below(), true
+	return !below(), true, nil
 }
 
 // enrichmentBaseCensus is the stage's committed-state census as a deferred

@@ -14,6 +14,14 @@ type deferredScanCountingStore struct {
 	unresolvedScans atomic.Int64
 }
 
+// This success spy preserves Graph's live candidate pointers explicitly.
+func (s *deferredScanCountingStore) MarkEdgesCrossRepo(edges []*graph.Edge) int {
+	for _, edge := range edges {
+		edge.CrossRepo = true
+	}
+	return len(edges)
+}
+
 func (s *deferredScanCountingStore) EdgesWithUnresolvedTarget() iter.Seq[*graph.Edge] {
 	s.unresolvedScans.Add(1)
 	return s.Graph.EdgesWithUnresolvedTarget()

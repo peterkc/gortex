@@ -1248,9 +1248,16 @@ func warmupDaemonStateContext(ctx context.Context, state *daemonState, logger *z
 	phaseStart = time.Now()
 	finishBackfill := startWarmupStep(logger, "workspace_backfill_before_derived")
 	backfillRevisionBefore, backfillRevisionBeforeKnown := state.multiIndexer.GraphMutationRevision()
-	backfilledNodes, backfilledContracts, backfillResolutionAffected := state.multiIndexer.BackfillWorkspaceSlugsWithImpact()
+	backfilledNodes, backfilledContracts, backfillResolutionAffected, backfillErr := state.multiIndexer.BackfillWorkspaceSlugsWithImpact()
 	backfillRevisionAfter, backfillRevisionAfterKnown := state.multiIndexer.GraphMutationRevision()
-	timings.workspaceBackfill = finishBackfill(zap.Int("nodes", backfilledNodes), zap.Int("contracts", backfilledContracts), zap.Int("resolution_affected", backfillResolutionAffected))
+	backfillFields := []zap.Field{zap.Int("nodes", backfilledNodes), zap.Int("contracts", backfilledContracts), zap.Int("resolution_affected", backfillResolutionAffected)}
+	if backfillErr != nil {
+		timings.resolveErr = backfillErr
+		resolveOK = false
+		logger.Warn("daemon: workspace slug backfill incomplete", zap.String("step", "workspace_backfill_before_derived"), zap.Error(backfillErr))
+		backfillFields = append(backfillFields, zap.String("outcome", "incomplete"), zap.Error(backfillErr))
+	}
+	timings.workspaceBackfill = finishBackfill(backfillFields...)
 	if backfilledNodes+backfilledContracts > 0 {
 		logger.Info("daemon: backfilled workspace/project slugs from .gortex.yaml",
 			zap.Int("nodes", backfilledNodes),
@@ -1282,7 +1289,7 @@ func warmupDaemonStateContext(ctx context.Context, state *daemonState, logger *z
 		backfillRevisionAfterKnown:    backfillRevisionAfterKnown,
 		backfillResolutionAffected:    backfillResolutionAffected,
 	}, backfilledContracts)
-	if globalResolveAction != warmGlobalResolveNone {
+	if backfillErr == nil && globalResolveAction != warmGlobalResolveNone {
 		phaseStart = time.Now()
 		logger.Info("daemon: warmup phase start", zap.String("phase", "global_resolve"), zap.Bool("full_cross_repo", globalResolveAction == warmGlobalResolveFull))
 		publishReadinessPhase(state, "global_resolve", true, nil)
@@ -1352,7 +1359,11 @@ func warmupDaemonStateContext(ctx context.Context, state *daemonState, logger *z
 		// invalidation families carried by the reconciled files.
 		state.multiIndexer.ResetBatch()
 		report := state.multiIndexer.RunIncrementalDerivedPasses(ctx, deltaPlans)
-		logger.Info("daemon: exact warm derived passes complete", zap.Any("report", report))
+		if report.Incomplete {
+			logger.Warn("daemon: exact warm derived passes incomplete", zap.Any("report", report))
+		} else {
+			logger.Info("daemon: exact warm derived passes complete", zap.Any("report", report))
+		}
 	default:
 		state.multiIndexer.EndBatchContext(ctx)
 	}
@@ -1360,30 +1371,39 @@ func warmupDaemonStateContext(ctx context.Context, state *daemonState, logger *z
 		return nil, timings
 	}
 	finishPostBackfill := startWarmupStep(logger, "workspace_backfill_after_derived")
-	postBatchNodes, postBatchContracts, postBatchResolutionAffected := state.multiIndexer.BackfillWorkspaceSlugsWithImpact()
-	finishPostBackfill(zap.Int("nodes", postBatchNodes), zap.Int("contracts", postBatchContracts), zap.Int("resolution_affected", postBatchResolutionAffected))
+	postBatchNodes, postBatchContracts, postBatchResolutionAffected, postBackfillErr := state.multiIndexer.BackfillWorkspaceSlugsWithImpact()
+	postBackfillFields := []zap.Field{zap.Int("nodes", postBatchNodes), zap.Int("contracts", postBatchContracts), zap.Int("resolution_affected", postBatchResolutionAffected)}
+	if postBackfillErr != nil {
+		timings.resolveErr = postBackfillErr
+		resolveOK = false
+		logger.Warn("daemon: workspace slug backfill incomplete", zap.String("step", "workspace_backfill_after_derived"), zap.Error(postBackfillErr))
+		postBackfillFields = append(postBackfillFields, zap.String("outcome", "incomplete"), zap.Error(postBackfillErr))
+	}
+	finishPostBackfill(postBackfillFields...)
 	if postBatchNodes+postBatchContracts > 0 {
 		logger.Info("daemon: backfilled workspace/project slugs after derived passes",
 			zap.Int("nodes", postBatchNodes),
 			zap.Int("contracts", postBatchContracts),
 			zap.Int("resolution_affected", postBatchResolutionAffected))
 	}
-	switch selectWarmGlobalResolveAction(false, warmGlobalResolveSafety{
-		backfillResolutionAffected: postBatchResolutionAffected,
-	}, postBatchContracts) {
-	case warmGlobalResolveContracts:
-		reconciled := state.multiIndexer.ReconcileContractEdges()
-		logger.Info("daemon: reconciled post-batch contract edges",
-			zap.Int("contract_edges", reconciled))
-	case warmGlobalResolveFull:
-		if err := state.multiIndexer.RunGlobalResolveContext(ctx); err != nil {
-			timings.resolveErr = err
-			resolveOK = false
-			if ctx.Err() == nil {
-				logger.Warn("daemon: warmup post-batch resolve incomplete", zap.Error(err))
+	if postBackfillErr == nil {
+		switch selectWarmGlobalResolveAction(false, warmGlobalResolveSafety{
+			backfillResolutionAffected: postBatchResolutionAffected,
+		}, postBatchContracts) {
+		case warmGlobalResolveContracts:
+			reconciled := state.multiIndexer.ReconcileContractEdges()
+			logger.Info("daemon: reconciled post-batch contract edges",
+				zap.Int("contract_edges", reconciled))
+		case warmGlobalResolveFull:
+			if err := state.multiIndexer.RunGlobalResolveContext(ctx); err != nil {
+				timings.resolveErr = err
+				resolveOK = false
+				if ctx.Err() == nil {
+					logger.Warn("daemon: warmup post-batch resolve incomplete", zap.Error(err))
+				}
 			}
+			logger.Info("daemon: post-batch workspace eligibility change forced full cross-repo catch-up")
 		}
-		logger.Info("daemon: post-batch workspace eligibility change forced full cross-repo catch-up")
 	}
 	timings.endBatch = time.Since(phaseStart)
 	logger.Info("daemon: warmup phase done",

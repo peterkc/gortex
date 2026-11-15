@@ -46,8 +46,14 @@ func TestScopedCapabilityProjectionMatchesInMemoryAndPreservesProvenance(t *test
 	seed(memory)
 	seed(sqlite)
 
-	memoryReads, memoryExec, memoryFields := synthesizeCapabilityEdgesScoped(memory, map[string]bool{"a": true})
-	sqliteReads, sqliteExec, sqliteFields := synthesizeCapabilityEdgesScoped(sqlite, map[string]bool{"a": true})
+	memoryReads, memoryExec, memoryFields, memoryErr := synthesizeCapabilityEdgesScoped(memory, map[string]bool{"a": true})
+	if memoryErr != nil {
+		t.Fatal(memoryErr)
+	}
+	sqliteReads, sqliteExec, sqliteFields, sqliteErr := synthesizeCapabilityEdgesScoped(sqlite, map[string]bool{"a": true})
+	if sqliteErr != nil {
+		t.Fatal(sqliteErr)
+	}
 	memoryCounts := [3]int{memoryReads, memoryExec, memoryFields}
 	sqliteCounts := [3]int{sqliteReads, sqliteExec, sqliteFields}
 	if memoryCounts != sqliteCounts {
@@ -75,6 +81,21 @@ func TestScopedCapabilityProjectionMatchesInMemoryAndPreservesProvenance(t *test
 			return out[i].To < out[j].To
 		})
 		return out
+	}
+	// Given exact scoped eviction on both backends, when a duplicate file
+	// frontier repeats, then counts/provenance match and unrelated sources stay untouched.
+	for _, store := range []graph.Store{memory, sqlite} {
+		for range 2 {
+			re, ep, fa, err := synthesizeCapabilityEdgesScoped(store, map[string]bool{"a": true}, "source.go", "", "source.go")
+			if err != nil || [3]int{re, ep, fa} != memoryCounts {
+				t.Fatalf("repeated scoped counts = (%d,%d,%d), %v, want %v", re, ep, fa, err, memoryCounts)
+			}
+			for _, edge := range store.GetOutEdges("b-src") {
+				if edge.Kind != graph.EdgeReads {
+					t.Fatalf("changed unrelated source: %+v", edge)
+				}
+			}
+		}
 	}
 	memoryEdges, sqliteEdges := snapshot(memory), snapshot(sqlite)
 	if !reflect.DeepEqual(memoryEdges, sqliteEdges) {

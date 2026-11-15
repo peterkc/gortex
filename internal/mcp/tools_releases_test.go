@@ -117,3 +117,81 @@ func TestAnalyzeReleases_ErrorsWhenNoMeta(t *testing.T) {
 	require.NotEmpty(t, out["error"])
 	assert.Equal(t, "enrich_releases", out["suggestion"])
 }
+
+type releaseRowsCountingStore struct {
+	graph.Store
+	reads int
+}
+
+func (s *releaseRowsCountingStore) ReleaseRows(repo string) []graph.ReleaseEnrichment {
+	s.reads++
+	return s.Store.(graph.ReleaseEnrichmentReader).ReleaseRows(repo)
+}
+
+func TestAnalyzeReleases_LoadsSidecarOnlyWhenNeeded(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		args          map[string]any
+		emptyTimeline bool
+		wantReads     int
+	}{
+		{name: "timeline", wantReads: 0},
+		{name: "unknown tag", args: map[string]any{"tag": "v99"}, wantReads: 0},
+		{name: "matched tag", args: map[string]any{"tag": "v0.2"}, wantReads: 1},
+		{name: "empty timeline", emptyTimeline: true, wantReads: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Given supported release enrichment, when only the node timeline
+			// is needed, then no sidecar load occurs; row-consuming paths load once.
+			srv := seedReleasesGraph(t)
+			if tc.emptyTimeline {
+				srv.graph = graph.New()
+			} else {
+				require.NoError(t, srv.graph.(graph.ReleaseEnrichmentWriter).BulkSetReleases("", []graph.ReleaseEnrichment{{NodeID: "a.go", AddedIn: "v0.2"}}))
+			}
+			store := &releaseRowsCountingStore{Store: srv.graph}
+			srv.graph = store
+			out := callAnalyzeReleases(t, srv, tc.args)
+			assert.Equal(t, tc.wantReads, store.reads)
+			assert.NotContains(t, out, "enrichment_unavailable", "the cheap support check must preserve supported availability")
+			switch tc.name {
+			case "timeline":
+				assert.EqualValues(t, 2, out["total"])
+			case "unknown tag", "empty timeline":
+				assert.NotEmpty(t, out["error"])
+				assert.Equal(t, "enrich_releases", out["suggestion"])
+			case "matched tag":
+				require.Len(t, out["releases"].([]any), 1)
+				row := out["releases"].([]any)[0].(map[string]any)
+				assert.Equal(t, []any{"a.go", "b.go"}, row["files"], "the loaded sidecar must override a.go's older node-local tag")
+				assert.EqualValues(t, 2, out["file_hits"])
+			}
+		})
+	}
+}
+
+func TestAnalyzeReleases_UnavailableTagFilter(t *testing.T) {
+	for _, tag := range []string{"v0.2", "absent"} {
+		t.Run(tag, func(t *testing.T) {
+			// Given no release sidecar, when a tag is requested, then retain
+			// the KindRelease existence check and disclose unavailable file enrichment.
+			srv := seedReleasesGraph(t)
+			srv.graph = struct{ graph.Store }{Store: srv.graph}
+			out := callAnalyzeReleases(t, srv, map[string]any{"tag": tag})
+			assert.Equal(t, []any{"release"}, out["enrichment_unavailable"])
+			switch tag {
+			case "v0.2":
+				assert.NotContains(t, out, "error")
+				assert.NotContains(t, out, "suggestion")
+				require.Len(t, out["releases"].([]any), 1)
+				row := out["releases"].([]any)[0].(map[string]any)
+				assert.Equal(t, []any{"b.go"}, row["files"], "retain node-local file metadata")
+			default:
+				assert.Equal(t, "no KindRelease node for tag \"absent\"; run `enrich_releases` first", out["error"])
+				assert.Equal(t, "enrich_releases", out["suggestion"])
+				assert.Empty(t, out["releases"])
+				assert.EqualValues(t, 0, out["total"])
+			}
+		})
+	}
+}

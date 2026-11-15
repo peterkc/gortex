@@ -2,7 +2,10 @@ package indexer
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -45,14 +48,20 @@ func TestAdmissionFloorReadsTheBaseCensusOnlyWhenOwnFilesFallShort(t *testing.T)
 	// serves contracts, so they do not send the check to the base census.
 	handle := floorCensusHandle{rows: []graph.RepoLanguageFileCount{row("config.go", "go", 458), row("config.go", "contract", 2)}}
 	base, calls := counting(map[string]int{"go": 180000, "contract": 1})
-	clears, read := chainClearsEnrichmentFloor(handle, "r", nil, base, floor, goOnly)
+	clears, read, err := chainClearsEnrichmentFloor(handle, "r", nil, base, floor, goOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !clears || read || *calls != 0 {
 		t.Fatalf("own Go nodes clear the floor: clears=%v baseRead=%v calls=%d, want true/false/0", clears, read, *calls)
 	}
 
 	// Judging every language (no provider filter), the contract language is
 	// short and only the base census can decide: it is read exactly once.
-	clears, read = chainClearsEnrichmentFloor(handle, "r", nil, base, floor, nil)
+	clears, read, err = chainClearsEnrichmentFloor(handle, "r", nil, base, floor, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if clears || !read || *calls != 1 {
 		t.Fatalf("unfiltered contract language: clears=%v baseRead=%v calls=%d, want false/true/1", clears, read, *calls)
 	}
@@ -62,7 +71,10 @@ func TestAdmissionFloorReadsTheBaseCensusOnlyWhenOwnFilesFallShort(t *testing.T)
 	small := floorCensusHandle{rows: []graph.RepoLanguageFileCount{row("tiny.go", "go", 5)}}
 	chain := map[string]map[string]int{"r/other.go": {"go": 5}}
 	base, calls = counting(map[string]int{"go": 180000})
-	clears, read = chainClearsEnrichmentFloor(small, "r", chain, base, floor, goOnly)
+	clears, read, err = chainClearsEnrichmentFloor(small, "r", chain, base, floor, goOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !clears || !read || *calls != 1 {
 		t.Fatalf("short edit over a Go checkout: clears=%v baseRead=%v calls=%d, want true/true/1", clears, read, *calls)
 	}
@@ -70,19 +82,22 @@ func TestAdmissionFloorReadsTheBaseCensusOnlyWhenOwnFilesFallShort(t *testing.T)
 	// The chain alone lifts the small edit over the floor: no base read.
 	bigChain := map[string]map[string]int{"r/other.go": {"go": 40}}
 	base, calls = counting(map[string]int{"go": 180000})
-	clears, read = chainClearsEnrichmentFloor(small, "r", bigChain, base, floor, goOnly)
+	clears, read, err = chainClearsEnrichmentFloor(small, "r", bigChain, base, floor, goOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !clears || read || *calls != 0 {
 		t.Fatalf("chain clears the floor: clears=%v baseRead=%v calls=%d, want true/false/0", clears, read, *calls)
 	}
 
 	// No base census at all: a short language keeps the floor.
-	if clears, read := chainClearsEnrichmentFloor(small, "r", chain, nil, floor, goOnly); clears || read {
+	if clears, read, err := chainClearsEnrichmentFloor(small, "r", chain, nil, floor, goOnly); err != nil || clears || read {
 		t.Fatalf("short edit without a base census: clears=%v baseRead=%v, want false/false", clears, read)
 	}
 
 	// A generation carrying only languages no provider serves does not clear.
 	contractOnly := floorCensusHandle{rows: []graph.RepoLanguageFileCount{row("api.yaml", "contract", 40)}}
-	if clears, _ := chainClearsEnrichmentFloor(contractOnly, "r", nil, nil, floor, goOnly); clears {
+	if clears, _, err := chainClearsEnrichmentFloor(contractOnly, "r", nil, nil, floor, goOnly); err != nil || clears {
 		t.Fatal("a generation with no enrichable language cleared the floor")
 	}
 }
@@ -153,5 +168,92 @@ func TestEnrichmentRefusesACanceledCommittedCensus(t *testing.T) {
 	}
 	if provider.retains != 0 {
 		t.Fatal("provider ran after failed committed census")
+	}
+}
+
+func TestFloorCensusRefusesAggregateFileReplacement(t *testing.T) {
+	g := graph.New()
+	for i := 0; i < 2; i++ {
+		g.AddNode(&graph.Node{ID: fmt.Sprintf("r/f.go::F%d", i), Kind: graph.KindFunction, RepoPrefix: "r", FilePath: "r/f.go", Language: "go"})
+	}
+	exact := floorCensusHandle{Store: g, rows: []graph.RepoLanguageFileCount{{RepoPrefix: "r", FilePath: "r/f.go", Language: "go", Count: 2}}}
+	chain := map[string]map[string]int{"r/f.go": {"go": 100}}
+	// Given a small replacement of an older large file, the exact census must not double-count it.
+	clears, _, err := chainClearsEnrichmentFloor(exact, "r", chain, nil, 16, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clears {
+		t.Fatal("supported exact replacement cleared the floor")
+	}
+	// When file identity is hidden, aggregate totals are not proof that the floor cleared.
+	clears, baseRead, err := chainClearsEnrichmentFloor(struct{ graph.Store }{exact.Store}, "r", chain, nil, 16, nil)
+	if clears || baseRead || !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("aggregate replacement proof: clears=%t read=%t error=%v", clears, baseRead, err)
+	}
+}
+
+func TestFloorCensusIgnoresPathlessSyntheticRows(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		rows  []graph.RepoLanguageFileCount
+		chain map[string]map[string]int
+		want  bool
+	}{
+		{"own pathless is not a file", []graph.RepoLanguageFileCount{{RepoPrefix: "r", Language: "c", Count: 100}}, nil, false},
+		{"chain pathless cannot lift a floor", []graph.RepoLanguageFileCount{{RepoPrefix: "r", FilePath: "r/f.go", Language: "go", Count: 2}}, map[string]map[string]int{"": {"go": 100}}, false},
+		{"own pathless cannot veto source", []graph.RepoLanguageFileCount{{RepoPrefix: "r", FilePath: "r/f.go", Language: "go", Count: 20}, {RepoPrefix: "r", Language: "c", Count: 1}}, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Given synthetic counts lack file identity, they can neither clear nor veto a source-file floor.
+			exact := floorCensusHandle{rows: tc.rows}
+			clears, _, err := chainClearsEnrichmentFloor(exact, "r", tc.chain, nil, 16, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if clears != tc.want {
+				t.Fatalf("pathless counts: clears%t want%t", clears, tc.want)
+			}
+		})
+	}
+}
+
+func TestDirtyLanguageCensusIgnoresPathlessRows(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reverse=%t", reverse), func(t *testing.T) {
+			store, err := store_sqlite.Open(filepath.Join(t.TempDir(), "dirty-census.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			create := func(parent int64, name, synthetic string, count int) int64 {
+				t.Helper()
+				id, err := store.Catalog().CreateViewGeneration(context.Background(), store_sqlite.ViewGeneration{OwnerKind: "checkout", CheckoutID: "census", LayerID: name, GenerationKind: DirtyLayerGenerationKind, BaseGenerationID: parent, TreeOID: name, ConfigHash: "h", ExtractorVersions: "{}", ResolverVersion: "r", LowerViewFingerprint: name, State: store_sqlite.ViewGenerationBuilding})
+				if err != nil {
+					t.Fatal(err)
+				}
+				nodes := []*graph.Node{{ID: "r/shared.go::F", Kind: graph.KindFunction, FilePath: "r/shared.go", RepoPrefix: "r", Language: "go"}, {ID: name + "::one", Kind: graph.KindFunction, RepoPrefix: "r", Language: synthetic}, {ID: name + "::two", Kind: graph.KindFunction, RepoPrefix: "r", Language: synthetic}}
+				for i := 1; i < count; i++ {
+					nodes = append(nodes, &graph.Node{ID: fmt.Sprintf("r/shared.go::F%d", i), Kind: graph.KindFunction, FilePath: "r/shared.go", RepoPrefix: "r", Language: "go"})
+				}
+				nodes = append(nodes, &graph.Node{ID: name + "/unique.go::F", Kind: graph.KindFunction, FilePath: name + "/unique.go", RepoPrefix: "r", Language: "go"})
+				if err := store.AtGeneration(id).AddBatchChecked(nodes, nil); err != nil {
+					t.Fatal(err)
+				}
+				return id
+			}
+			a, b := "c", "python"
+			if reverse {
+				a, b = b, a
+			}
+			parent := create(0, "parent", a, 3)
+			top := create(parent, "top", b, 1)
+			// Given repeated pathless nodes in opposite generation orders, only real filenames compose.
+			got := dirtyChainLanguageCensus(context.Background(), store, top, "r")
+			want := map[string]map[string]int{"r/shared.go": {"go": 1}, "top/unique.go": {"go": 1}, "parent/unique.go": {"go": 1}}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("dirty census=%v want%v", got, want)
+			}
+		})
 	}
 }

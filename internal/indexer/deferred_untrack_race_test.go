@@ -97,11 +97,15 @@ func TestBackfillWorkspaceSlugsRacesUntrackRepo(t *testing.T) {
 	// The reader runs until the registry writes are done rather than for a
 	// fixed count, so the overlap does not depend on their relative speed.
 	var stop atomic.Bool
+	var backfillErr atomic.Value
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for !stop.Load() {
-			mi.BackfillWorkspaceSlugsWithImpact()
+			if _, _, _, err := mi.BackfillWorkspaceSlugsWithImpact(); err != nil {
+				backfillErr.Store(err)
+				return
+			}
 		}
 	}()
 	mi.UntrackRepo("repo-b")
@@ -111,4 +115,5 @@ func TestBackfillWorkspaceSlugsRacesUntrackRepo(t *testing.T) {
 	mi.UntrackRepo("repo-c")
 	stop.Store(true)
 	<-done
+	require.Nil(t, backfillErr.Load())
 }

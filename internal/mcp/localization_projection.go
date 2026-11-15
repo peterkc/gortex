@@ -63,7 +63,8 @@ func (s *Server) localizationNodeScopeWithTests(
 
 // boundedLocalizationExactName deliberately has no Reader.FindNodesByName
 // fallback. A backend without the typed capability returns no localization
-// evidence instead of reintroducing an unbounded full-row read.
+// evidence instead of reintroducing an unbounded full-row read. False means
+// unknown optional evidence, not an exhaustive negative name result.
 func boundedLocalizationExactName(
 	ctx context.Context,
 	reader graph.Reader,
@@ -85,7 +86,8 @@ func boundedLocalizationExactName(
 // boundedLocalizationFileNodes performs one metadata-free file projection
 // under the request-wide localization budget. Incomplete pages are not usable
 // evidence: ranked-file recovery makes uniqueness and ownership decisions, so
-// accepting a prefix could fabricate an unambiguous declaration.
+// accepting a prefix could fabricate an unambiguous declaration. False means
+// unknown optional evidence, not proof that the file is empty.
 func boundedLocalizationFileNodes(
 	ctx context.Context,
 	reader graph.Reader,

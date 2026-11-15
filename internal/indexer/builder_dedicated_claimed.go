@@ -968,15 +968,12 @@ func writeCopiedGenerationIndexState(
 	zeroState graph.RepoIndexState,
 	counts GenerationCopyCounts,
 ) error {
-	writer, ok := graph.Store(handle).(graph.RepoIndexStateWriter)
-	if !ok {
-		return nil
-	}
+	// This concrete SQLite handle always supports durable index state.
 	state := zeroState
 	state.RepoPrefix = repoPrefix
 	state.IndexedAt = time.Now().Unix()
 	state.NodeCount, state.EdgeCount = int(counts.Nodes), int(counts.Edges)
-	if err := writer.SetRepoIndexState(state); err != nil {
+	if err := handle.SetRepoIndexState(state); err != nil {
 		return fmt.Errorf("indexer: record copied generation %d index state: %w", handle.ViewGeneration(), err)
 	}
 	return nil

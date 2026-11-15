@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"errors"
 	"fmt"
 	"iter"
 	"path/filepath"
@@ -42,8 +43,9 @@ type FrameworkSynthesizer interface {
 	// synthesizer lands (lower-kebab, e.g. "grpc-stub", "event-channel").
 	Name() string
 	// Synthesize runs the pass over g and returns the number of edges the
-	// synthesizer owns (landed on a real target) after this run.
-	Synthesize(g graph.Store) int
+	// synthesizer owns (landed on a real target) after this run, or an error
+	// when the pass cannot complete.
+	Synthesize(g graph.Store) (int, error)
 }
 
 // Edge.Meta keys stamped by StampSynthesized.
@@ -296,21 +298,43 @@ type synthFunc struct {
 	// edge kinds. Used only when a full-census run armed the pass's
 	// collectors; every other invocation keeps fn / scopedFn.
 	candFn func(graph.Store, *frameworkPassCandidates) int
+
+	checkedFn       func(graph.Store) (int, error)
+	checkedScopedFn func(graph.Store, map[string]bool) (int, error)
 }
 
-func (s synthFunc) Name() string                 { return s.name }
-func (s synthFunc) Synthesize(g graph.Store) int { return s.fn(g) }
+func (s synthFunc) Name() string { return s.name }
+func (s synthFunc) Synthesize(g graph.Store) (int, error) {
+	if s.checkedFn != nil {
+		return s.checkedFn(g)
+	}
+	return s.fn(g), nil
+}
 
 // synthesizeScoped preserves the legacy entry point used by focused tests. A
 // non-nil scope never reaches fn with the unfiltered store.
-func (s synthFunc) synthesizeScoped(g graph.Store, scope map[string]bool) int {
-	if scope == nil {
-		return runLegacyFrameworkSynth(g, s.fn)
+func (s synthFunc) synthesizeScoped(g graph.Store, scope map[string]bool) (int, error) {
+	if scope != nil {
+		if s.checkedScopedFn != nil {
+			return s.checkedScopedFn(g, scope)
+		}
+		if s.scopedFn != nil {
+			return s.scopedFn(g, scope), nil
+		}
+		g = newFrameworkScopedStore(g, scope, nil)
 	}
-	if s.scopedFn != nil {
-		return s.scopedFn(g, scope)
-	}
-	return runLegacyFrameworkSynth(newFrameworkScopedStore(g, scope, nil), s.fn)
+	return runCheckedFrameworkSynthWithCache(g, nil, s.Synthesize)
+}
+
+// Preserve checked errors through the count-only batch/cache adapter.
+func runCheckedFrameworkSynthWithCache(g graph.Store, cache *frameworkFullReadCache, fn func(graph.Store) (int, error)) (int, error) {
+	var err error
+	n := runLegacyFrameworkSynthWithCache(g, cache, func(store graph.Store) int {
+		var count int
+		count, err = fn(store)
+		return count
+	})
+	return n, err
 }
 
 // frameworkSynthLanguageFamilies is deliberately conservative. An absent
@@ -1137,7 +1161,7 @@ func defaultFrameworkSynthesizers() []FrameworkSynthesizer {
 		// into the models_table layer. Position-independent: it reads
 		// only its own stamps and models_table itself, and no other
 		// pass consumes models_table during synthesis.
-		synthFunc{name: SynthCSharpEFCoreModels, fn: ResolveCSharpEFCoreModels, scopedFn: ResolveCSharpEFCoreModelsScoped},
+		synthFunc{name: SynthCSharpEFCoreModels, checkedFn: ResolveCSharpEFCoreModels, checkedScopedFn: ResolveCSharpEFCoreModelsScoped},
 		// Sidekiq job dispatch: Worker.perform_async(...) → the worker's
 		// perform, namespace-aware. Include-gated, typed tier.
 		synthFunc{name: SynthSidekiq, fn: ResolveSidekiqCalls},
@@ -1251,6 +1275,10 @@ type SynthCount struct {
 // FrameworkSynthReport is the aggregate result of one
 // RunFrameworkSynthesizers invocation.
 type FrameworkSynthReport struct {
+	Err        error    `json:"-"`
+	Refused    []string `json:"refused,omitempty"`
+	Incomplete bool     `json:"incomplete,omitempty"`
+
 	// Total preserves the legacy sum of per-pass attempted/landed counts. It is
 	// not a durable inserted-edge delta; callers should label it accordingly.
 	Total int          `json:"total"`
@@ -1308,7 +1336,7 @@ type FrameworkSynthReport struct {
 // driver consults it only when a scope is armed; a synthesizer that does not
 // implement it runs whole-graph, which is always correct.
 type scopedSynthesizer interface {
-	synthesizeScoped(g graph.Store, scope map[string]bool) int
+	synthesizeScoped(g graph.Store, scope map[string]bool) (int, error)
 }
 
 // RunFrameworkSynthesizers runs every registered framework synthesizer
@@ -1490,6 +1518,7 @@ func runFrameworkSynthesizersScoped(
 		}
 		start, startFaults := time.Now(), processMajorFaults()
 		var n int
+		var passErr error
 		var bundle *frameworkPassCandidates
 		var passScope *frameworkScopedStore
 		if shouldRunFrameworkSynthesizer(s, executionScope, candidates) {
@@ -1504,7 +1533,9 @@ func runFrameworkSynthesizersScoped(
 						return sf.candFn(store, bundle)
 					})
 				case executionScope == nil:
-					n = runLegacyFrameworkSynthWithCache(g, fullReadCache, sf.fn)
+					n, passErr = runCheckedFrameworkSynthWithCache(g, fullReadCache, sf.Synthesize)
+				case sf.checkedScopedFn != nil:
+					n, passErr = sf.checkedScopedFn(g, executionScope)
 				case sf.scopedFn != nil:
 					n = sf.scopedFn(g, executionScope)
 				case candidateGated:
@@ -1524,17 +1555,22 @@ func runFrameworkSynthesizersScoped(
 					})
 				default:
 					passScope = genericSeed.passStore(sf.name)
-					n = runLegacyFrameworkSynth(passScope, sf.fn)
+					n, passErr = runCheckedFrameworkSynthWithCache(passScope, nil, sf.Synthesize)
 				}
 			} else if ss, ok := s.(scopedSynthesizer); ok {
-				n = runLegacyFrameworkSynthWithCache(g, fullReadCache, func(store graph.Store) int {
+				n, passErr = runCheckedFrameworkSynthWithCache(g, fullReadCache, func(store graph.Store) (int, error) {
 					return ss.synthesizeScoped(store, executionScope)
 				})
 			} else if executionScope == nil {
-				n = runLegacyFrameworkSynthWithCache(g, fullReadCache, s.Synthesize)
+				n, passErr = runCheckedFrameworkSynthWithCache(g, fullReadCache, s.Synthesize)
 			} else {
 				panic("framework partial run has an unscoped synthesizer: " + s.Name())
 			}
+		}
+		if passErr != nil {
+			rep.Err = errors.Join(rep.Err, fmt.Errorf("framework synthesizer %s: %w", s.Name(), passErr))
+			rep.Refused = append(rep.Refused, s.Name())
+			rep.Incomplete = true
 		}
 		count := SynthCount{Name: s.Name(), Edges: n, Millis: time.Since(start).Milliseconds(), Faults: processMajorFaults() - startFaults}
 		if passScope != nil {

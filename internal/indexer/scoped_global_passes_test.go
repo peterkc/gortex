@@ -178,14 +178,18 @@ func capabilityFixture() *graph.Graph {
 // (it never runs the whole-graph KindField scan that seeds fieldIDs).
 func TestSynthesizeCapabilityEdgesScoped_ParityAndFewerReads(t *testing.T) {
 	full := newIdxCountingStore(capabilityFixture())
-	synthesizeCapabilityEdges(full)
+	if _, _, _, err := synthesizeCapabilityEdges(full); err != nil {
+		t.Fatal(err)
+	}
 	wantA := accessesFieldFrom(full.Store, "repoA")
 	if !wantA["repoA::a.go::Foo.set->repoA::a.go::Foo.count"] {
 		t.Fatalf("unscoped pass did not emit repo A's accesses_field edge: %v", wantA)
 	}
 
 	scoped := newIdxCountingStore(capabilityFixture())
-	synthesizeCapabilityEdgesScoped(scoped, map[string]bool{"repoA": true})
+	if _, _, _, err := synthesizeCapabilityEdgesScoped(scoped, map[string]bool{"repoA": true}); err != nil {
+		t.Fatal(err)
+	}
 	gotA := accessesFieldFrom(scoped.Store, "repoA")
 	if len(gotA) != len(wantA) {
 		t.Fatalf("scoped capability repo-A edges = %v, want %v", gotA, wantA)

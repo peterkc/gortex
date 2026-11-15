@@ -36,6 +36,7 @@ func exploreBoundedNodeIDs(ids []string, limit int) ([]string, bool) {
 // exploreNodesByIDsBounded exact-refetches only an already-bounded identity
 // cohort. SQLite receives the request context; overlay and in-memory readers
 // retain their exact-ID batch path with cancellation checked on both sides.
+// False means unusable optional evidence, not proof that the IDs are absent.
 func exploreNodesByIDsBounded(
 	ctx context.Context,
 	reader graph.Reader,
@@ -75,6 +76,8 @@ func exploreNodesByIDsBounded(
 	return nodes, true
 }
 
+// exploreIncomingSourcesBounded reads optional recovery evidence. False means
+// unknown, not an exhaustive empty incoming set; callers still check truncation.
 func exploreIncomingSourcesBounded(
 	ctx context.Context,
 	reader graph.Reader,
@@ -109,7 +112,8 @@ const (
 // exploreBoundedEdgeIdentities reads one complete metadata-free adjacency
 // cohort. Optional capabilities fail closed: operational errors, sticky request
 // cancellation, truncated keys, foreign endpoints, and malformed identities
-// discard the whole projection rather than exposing a usable prefix.
+// discard the whole projection rather than exposing a usable prefix. False
+// does not certify empty adjacency or invalidate independently ranked evidence.
 func exploreBoundedEdgeIdentities(
 	ctx context.Context,
 	reader graph.Reader,

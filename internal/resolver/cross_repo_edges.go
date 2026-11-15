@@ -1,6 +1,8 @@
 package resolver
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -30,22 +32,24 @@ const crossRepoAddBatchSize = 4096
 // by InferImplements / InferOverrides).
 //
 // Returns the count of cross-repo relationships found this pass — the
-// number of parallel edges that exist after it, modulo graph dedup.
-func DetectCrossRepoEdges(g graph.Store) int {
-	edges, _ := DetectCrossRepoEdgesWithSkip(g)
-	return edges
+// number of parallel edges that exist after it, modulo graph dedup. Required
+// flag persistence failures return an error before materialization changes rows.
+func DetectCrossRepoEdges(g graph.Store) (int, error) {
+	edges, _, err := DetectCrossRepoEdgesWithSkip(g)
+	return edges, err
 }
 
 // DetectCrossRepoEdgesWithSkip runs DetectCrossRepoEdges and also reports
 // whether it skipped the scan because the store holds fewer than two repos.
-func DetectCrossRepoEdgesWithSkip(g graph.Store) (edges int, skipped bool) {
+func DetectCrossRepoEdgesWithSkip(g graph.Store) (edges int, skipped bool, err error) {
 	if g == nil {
-		return 0, false
+		return 0, false, nil
 	}
 	if !hasMultipleRepoPrefixes(g) {
-		return 0, true
+		return 0, true, nil
 	}
-	return materializeCrossRepoCandidates(g, crossRepoCandidates(g)), false
+	edges, err = materializeCrossRepoCandidates(g, crossRepoCandidates(g))
+	return edges, false, err
 }
 
 func hasMultipleRepoPrefixes(g graph.Store) bool {
@@ -66,9 +70,9 @@ func hasMultipleRepoPrefixes(g graph.Store) bool {
 // DetectCrossRepoEdgesForRepos materializes only relationships incident to the
 // changed repository frontier. SQLite pushes the prefix predicate into one
 // endpoint join; the in-memory backend uses one batched endpoint projection.
-func DetectCrossRepoEdgesForRepos(g graph.Store, repoPrefixes []string) int {
+func DetectCrossRepoEdgesForRepos(g graph.Store, repoPrefixes []string) (int, error) {
 	if g == nil || len(repoPrefixes) == 0 {
-		return 0
+		return 0, nil
 	}
 	return materializeCrossRepoCandidates(g, crossRepoCandidatesForRepos(g, repoPrefixes))
 }
@@ -78,9 +82,9 @@ func DetectCrossRepoEdgesForRepos(g graph.Store, repoPrefixes []string) int {
 // once for the whole batch; no graph-wide candidate layer or endpoint N+1
 // crosses into memory. This is the ResolveAll settle path—global indexer
 // passes retain DetectCrossRepoEdges for newly inferred hierarchy edges.
-func DetectCrossRepoEdgesForReindexes(g graph.Store, batch []graph.EdgeReindex) int {
+func DetectCrossRepoEdgesForReindexes(g graph.Store, batch []graph.EdgeReindex) (int, error) {
 	if g == nil || len(batch) == 0 {
-		return 0
+		return 0, nil
 	}
 	ids := make([]string, 0, len(batch)*2)
 	seen := make(map[string]struct{}, len(batch)*2)
@@ -139,9 +143,9 @@ func crossRepoReindexes(batch []graph.EdgeReindex) []graph.EdgeReindex {
 	return out
 }
 
-func materializeCrossRepoCandidates(g graph.Store, rows []graph.CrossRepoCandidateRow) int {
+func materializeCrossRepoCandidates(g graph.Store, rows []graph.CrossRepoCandidateRow) (int, error) {
 	if len(rows) == 0 {
-		return 0
+		return 0, nil
 	}
 
 	type pendingRelationship struct {
@@ -166,7 +170,6 @@ func materializeCrossRepoCandidates(g graph.Store, rows []graph.CrossRepoCandida
 		if !e.CrossRepo {
 			baseToMark = append(baseToMark, e)
 		}
-		e.CrossRepo = true
 		parallel := graph.Edge{
 			From:            e.From,
 			To:              e.To,
@@ -186,14 +189,26 @@ func materializeCrossRepoCandidates(g graph.Store, rows []graph.CrossRepoCandida
 		}
 	}
 	if len(pending) == 0 {
-		return 0
+		return 0, nil
 	}
 
 	// Keep the bool flag on the base edge consistent with the dedicated kind.
 	// SQLite candidate rows are compact projections rather than live pointers,
 	// so persist only this promoted column with a set-oriented marker.
-	if marker, ok := g.(graph.CrossRepoFlagMarker); ok && len(baseToMark) > 0 {
-		marker.MarkEdgesCrossRepo(baseToMark)
+	if len(baseToMark) > 0 {
+		marker, hasMarker := g.(graph.CrossRepoFlagMarker)
+		// Graph.CrossRepoCandidates and its adjacency rows carry resident
+		// pointers. Only the raw Graph proves this live-pointer contract;
+		// unknown wrappers may return detached rows even when backed by Graph.
+		if _, live := g.(*graph.Graph); !live && !hasMarker {
+			return 0, fmt.Errorf("resolver: cross-repo edge materialization requires base flag persistence: %w", errors.ErrUnsupported)
+		}
+		for _, edge := range baseToMark {
+			edge.CrossRepo = true
+		}
+		if hasMarker {
+			marker.MarkEdgesCrossRepo(baseToMark)
+		}
 	}
 
 	existing := g.GetEdgeCandidates(nil, sites)
@@ -226,7 +241,7 @@ func materializeCrossRepoCandidates(g graph.Store, rows []graph.CrossRepoCandida
 		}
 		g.AddBatch(nil, additions[start:end])
 	}
-	return len(pending)
+	return len(pending), nil
 }
 
 // crossRepoCandidates returns every edge whose Kind has a parallel

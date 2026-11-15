@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -18,6 +19,7 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/query"
+	"github.com/zzet/gortex/internal/search"
 	"github.com/zzet/gortex/internal/search/rerank"
 	"github.com/zzet/gortex/internal/telemetry"
 )
@@ -1779,7 +1781,36 @@ func (s *Server) handleGetSymbol(ctx context.Context, req mcp.CallToolRequest) (
 	}, resolved)
 }
 
-func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolRequest) (searchResult *mcp.CallToolResult, searchErr error) {
+	var failureMu sync.Mutex
+	failedChannels := make(map[string]bool)
+	if refill, _ := ctx.Value(symbolPageRefillKey{}).(*symbolPageRefill); refill != nil {
+		if warning, ok := refill.sequence.template["search_warning"].(map[string]any); ok {
+			for _, channel := range symbolTemplateFailureChannels(warning) {
+				failedChannels[channel] = true
+			}
+		}
+	}
+	ctx = search.WithSearchFailureObserver(ctx, func(channel string, _ error) {
+		failureMu.Lock()
+		failedChannels[channel] = true
+		failureMu.Unlock()
+	})
+	failureChannels := func() []string {
+		failureMu.Lock()
+		channels := make([]string, 0, len(failedChannels))
+		for channel := range failedChannels {
+			channels = append(channels, channel)
+		}
+		failureMu.Unlock()
+		sort.Strings(channels)
+		return channels
+	}
+	defer func() {
+		if searchErr == nil {
+			searchResult = decorateSearchFailureResult(searchResult, failureChannels())
+		}
+	}()
 	if result, err, handled := s.continueSymbolPage(ctx, req); handled {
 		return result, err
 	}
@@ -2725,6 +2756,10 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 		return nil, err
 	}
 	if offset == 0 && !isCompact(req) && !s.isGCX(ctx, req) && !s.isTOON(ctx, req) {
+		if warning := searchFailureWarning(failureChannels()); warning != nil {
+			resp["search_complete"] = false
+			resp["search_warning"] = warning
+		}
 		return s.publishSymbolPage(ctx, req, resp, nodes, rerankBreakdown, pageHorizon, pageMore, resolved, q)
 	}
 	publishSearchState()

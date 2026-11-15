@@ -89,9 +89,9 @@ func (s *Server) handleGetKnowledgeGaps(ctx context.Context, req mcp.CallToolReq
 
 	disconnected := s.collectDisconnected(ctx, scoped, pathPrefix, perCategoryLimit, degreeByID)
 	thin, singleFile := s.collectCommunityGaps(thinSize, pathPrefix, perCategoryLimit)
-	untested := s.collectUntestedHotspots(ctx, scoped, pathPrefix, hotspotLimit, minCov, perCategoryLimit, degreeByID)
+	untested, coverageAvailable := s.collectUntestedHotspots(ctx, scoped, pathPrefix, hotspotLimit, minCov, perCategoryLimit, degreeByID)
 
-	return s.respondJSONOrTOON(ctx, req, map[string]any{
+	payload := map[string]any{
 		"disconnected_nodes":      disconnected,
 		"thin_communities":        thin,
 		"single_file_communities": singleFile,
@@ -108,7 +108,13 @@ func (s *Server) handleGetKnowledgeGaps(ctx context.Context, req mcp.CallToolReq
 			"hotspot_limit":       hotspotLimit,
 			"limit_per_category":  perCategoryLimit,
 		},
-	})
+	}
+	unavailable := unavailableEnrichment{}
+	if !coverageAvailable {
+		unavailable = append(unavailable, "coverage")
+	}
+	unavailable.apply(payload)
+	return s.respondJSONOrTOON(ctx, req, payload)
 }
 
 // scopedFunctionDegrees returns the per-node in/out degree map and
@@ -281,7 +287,7 @@ func (s *Server) collectCommunityGaps(thinSize int, pathPrefix string, limit int
 // falls back to NodeDegreeAggregator (the older IN-list shape) for
 // backends that only publish that one, and finally to per-node
 // GetInEdges for everyone else.
-func (s *Server) collectUntestedHotspots(ctx context.Context, scoped []*graph.Node, pathPrefix string, hotspotLimit int, minCov float64, limit int, degreeByID map[string]graph.NodeDegreeRow) []gapUntestedHotspot {
+func (s *Server) collectUntestedHotspots(ctx context.Context, scoped []*graph.Node, pathPrefix string, hotspotLimit int, minCov float64, limit int, degreeByID map[string]graph.NodeDegreeRow) ([]gapUntestedHotspot, bool) {
 	type ranked struct {
 		node  *graph.Node
 		fanIn int
@@ -330,7 +336,7 @@ func (s *Server) collectUntestedHotspots(ctx context.Context, scoped []*graph.No
 	}
 
 	out := make([]gapUntestedHotspot, 0)
-	covRows := s.coverageByID()
+	covRows, available := coverageRowsByID(s.readerFor(ctx))
 	for _, c := range candidates {
 		// A "hotspot" with zero callers isn't a hotspot — drop it.
 		// Disconnected functions are already covered by the
@@ -361,5 +367,5 @@ func (s *Server) collectUntestedHotspots(ctx context.Context, scoped []*graph.No
 	if len(out) > limit {
 		out = out[:limit]
 	}
-	return out
+	return out, available
 }

@@ -183,7 +183,9 @@ func TestGoModuleDeferredPublishLeavesParallelsToBatch(t *testing.T) {
 	idx.deferResolve.Store(true)
 	require.NoError(t, mi.postPublishGoModules(t.Context(), idx, false))
 	assert.Empty(t, revisionCallTargets(g, "a/main.go::Caller", graph.EdgeCrossRepoCalls))
-	resolver.DetectCrossRepoEdges(g)
+	if _, err := resolver.DetectCrossRepoEdges(g); err != nil {
+		t.Fatal(err)
+	}
 	assert.Equal(t, []string{"b/lib.go::Hello"}, revisionCallTargets(g, "a/main.go::Caller", graph.EdgeCrossRepoCalls))
 }
 

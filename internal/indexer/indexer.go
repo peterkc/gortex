@@ -1620,6 +1620,10 @@ func (idx *Indexer) runDeferredContracts() {
 	idx.extractExternalModulesForCensus(reg)
 	idx.extractDIContracts(reg)
 	idx.commitContracts(reg)
+	if err := idx.contractInputError(); err != nil {
+		idx.logger.Warn("indexer: deferred contract commit refused", zap.String("repo", idx.repoPrefix), zap.Error(err))
+		return
+	}
 	if b != nil {
 		b.contractsReady = true
 		idx.finishColdManifests(b)
@@ -4795,6 +4799,9 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 		if idx.contractCoreInputs == nil {
 			idx.extractDIContracts(contractReg)
 			idx.commitContracts(contractReg)
+			if err := idx.contractInputError(); err != nil {
+				return nil, err
+			}
 		}
 		if coldManifests != nil {
 			coldManifests.contractsReady = true
@@ -4820,7 +4827,11 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 			if ctrl := entrypoints.PropagateEntryPointsDownHierarchy(idx.graph); ctrl > 0 {
 				idx.logger.Info("entry-point hierarchy stamped", zap.Int("stamped", ctrl))
 			}
-			if re, ep, fa := synthesizeCapabilityEdges(idx.graph); re > 0 || ep > 0 || fa > 0 {
+			re, ep, fa, err := synthesizeCapabilityEdges(idx.graph)
+			if err != nil {
+				return nil, err
+			}
+			if re > 0 || ep > 0 || fa > 0 {
 				idx.logger.Info("capability edges emitted",
 					zap.Int("reads_env", re),
 					zap.Int("executes_process", ep),
@@ -4851,9 +4862,13 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 			// deferGlobalPasses; the batch caller folds it into
 			// shared multi-repository global-pass pipeline.
 			reporter.Report("framework dispatch synthesis", 0, 0)
-			if rep := resolver.RunFrameworkSynthesizersWithSelection(
+			rep := resolver.RunFrameworkSynthesizersWithSelection(
 				idx.graph, idx.frameworkSynthesizerSelection(),
-			); rep.Total > 0 {
+			)
+			if rep.Err != nil {
+				return nil, rep.Err
+			}
+			if rep.Total > 0 {
 				idx.logger.Info("framework dispatch calls synthesized",
 					zap.Int("edges", rep.Total),
 					zap.Any("per_synthesizer", rep.Per),
@@ -5076,7 +5091,10 @@ func (idx *Indexer) cleanCensusResult(ctx context.Context, detected int, started
 
 	// The tree is proven unchanged: the counts stored at the last index
 	// are reused instead of counted (census_stored_counts.go).
-	nodes, edges := idx.cleanCensusRepoCounts(ctx)
+	nodes, edges, err := idx.cleanCensusRepoCounts(ctx)
+	if err != nil {
+		return nil, err
+	}
 	fileCount := idx.trackedFileCount()
 	if fileCount == 0 {
 		fileCount = detected
@@ -5921,7 +5939,10 @@ func (idx *Indexer) ResolveAll() {
 	// Framework dynamic-dispatch synthesis (gRPC / Temporal / event
 	// channels / native bridges) depends on InferImplements (the
 	// interface-satisfaction signals) having run first.
-	resolver.RunFrameworkSynthesizersWithSelection(idx.graph, idx.frameworkSynthesizerSelection())
+	if report := resolver.RunFrameworkSynthesizersWithSelection(idx.graph, idx.frameworkSynthesizerSelection()); report.Err != nil {
+		idx.logger.Warn("indexer: framework passes refused", zap.Strings("passes", report.Refused),
+			zap.Bool("incomplete", report.Incomplete), zap.Error(report.Err))
+	}
 	// External-call placeholder synthesis (opt-in) — runs after the
 	// resolver and stub passes so only genuinely un-indexed external
 	// targets remain to materialise.
@@ -7992,7 +8013,10 @@ func (idx *Indexer) commitContracts(reg *contracts.Registry) {
 	if idx.contractAnalysisOnly {
 		springScope.ReadSource = idx.readAcceptedContractSource
 	}
-	contracts.BindSpringConfig(idx.graph, springScope)
+	if _, err := contracts.BindSpringConfig(idx.graph, springScope); err != nil {
+		idx.rememberContractInputError(err)
+		return
+	}
 
 	// Trace response variables back to their call-site return types.
 	// Handles `source, err := h.svc.Get(...)` → response_type is
@@ -8016,6 +8040,9 @@ func (idx *Indexer) commitContracts(reg *contracts.Registry) {
 	// instead of the bare type-symbol-ID, which answers nothing about
 	// the wire format.
 	idx.inlineEnvelopeShapes(reg)
+	if idx.contractInputError() != nil {
+		return
+	}
 
 	all := reg.All()
 	// Dependency identities were seeded before resolution. Persist their full
@@ -10379,6 +10406,9 @@ func (idx *Indexer) extractContracts() {
 	idx.extractGoModContracts(reg)
 	idx.extractDIContracts(reg)
 	idx.commitContracts(reg)
+	if err := idx.contractInputError(); err != nil {
+		idx.logger.Warn("indexer: contract extraction commit refused", zap.String("repo", idx.repoPrefix), zap.Error(err))
+	}
 }
 
 // IsStale returns true if the file at relPath has been modified on disk since

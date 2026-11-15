@@ -1,5 +1,10 @@
 package graph
 
+import (
+	"errors"
+	"fmt"
+)
+
 // Side tables of a delta.
 //
 // A delta's per-file side tables — symbol full-text documents, the files
@@ -11,77 +16,116 @@ package graph
 // for a covered path is exactly that path's rows in the published generation.
 //
 // Reads are answered where the rows live. The reference-fact read composes
-// the delta's own facts (for its covered paths) over the view below's; every
-// other side-table read the engine makes on the per-save path is either not
-// needed by a delta (whole-repository maintenance: normalization reconcile,
-// repository resets, bulk windows) or answers from the generation alone, which
-// the engine already treats as "nothing recorded" — the conservative answer.
+// the delta's own facts (for its covered paths) over the view below's. The
+// other reads in this file answer from the generation alone. Missing support is
+// a checked error, not authoritative empty data. Advisory probes may retain
+// conservative fallback behavior; required writes and content scans also record
+// refusal so an ignored error cannot publish an incomplete delta.
 // DeltaWriterCapabilities lists every capability and its decision; the
 // indexer's checklist test fails when the per-save engine asserts one that is
 // not on the list.
 
-// sidecarOr returns the sidecar as T when it implements it.
+// sidecarAs returns the sidecar as T when it implements it.
 func sidecarAs[T any](dw *DeltaWriter) (T, bool) {
 	v, ok := dw.sidecar.(T)
 	return v, ok
 }
 
+// deltaSidecarError keeps read failures checked without making an advisory
+// probe (for example ContentRepoHasRows) poison a supported fallback.
+func deltaSidecarError(op string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("graph: delta sidecar %s: %w", op, err)
+}
+
+// sidecarWriteResult preserves failures even when a legacy engine ignores its
+// returned error. The existing delta owner refuses Unsupported before publish.
+func (dw *DeltaWriter) sidecarWriteResult(op string, err error) error {
+	err = deltaSidecarError(op, err)
+	if err != nil {
+		dw.noteUnsupported(err.Error())
+	}
+	return err
+}
+
 // BulkSetFileMtimes implements FileMtimeWriter on the generation.
 func (dw *DeltaWriter) BulkSetFileMtimes(repoPrefix string, mtimes map[string]int64) error {
 	if w, ok := sidecarAs[FileMtimeWriter](dw); ok {
-		return w.BulkSetFileMtimes(repoPrefix, mtimes)
+		return dw.sidecarWriteResult("BulkSetFileMtimes", w.BulkSetFileMtimes(repoPrefix, mtimes))
 	}
-	return nil
+	if len(mtimes) == 0 {
+		return nil
+	}
+	return dw.sidecarWriteResult("BulkSetFileMtimes", errors.ErrUnsupported)
 }
 
 // ReplaceFileMtimes implements FileMtimeReplacer on the generation.
 func (dw *DeltaWriter) ReplaceFileMtimes(repoPrefix string, mtimes map[string]int64) error {
 	if w, ok := sidecarAs[FileMtimeReplacer](dw); ok {
-		return w.ReplaceFileMtimes(repoPrefix, mtimes)
+		return dw.sidecarWriteResult("ReplaceFileMtimes", w.ReplaceFileMtimes(repoPrefix, mtimes))
 	}
-	return nil
+	if len(mtimes) == 0 {
+		return nil
+	}
+	return dw.sidecarWriteResult("ReplaceFileMtimes", errors.ErrUnsupported)
 }
 
 // DeleteFileMtimes implements FileMtimeDeleter on the generation.
 func (dw *DeltaWriter) DeleteFileMtimes(repoPrefix string, paths []string) error {
 	if w, ok := sidecarAs[FileMtimeDeleter](dw); ok {
-		return w.DeleteFileMtimes(repoPrefix, paths)
+		return dw.sidecarWriteResult("DeleteFileMtimes", w.DeleteFileMtimes(repoPrefix, paths))
 	}
-	return nil
+	if len(paths) == 0 {
+		return nil
+	}
+	return dw.sidecarWriteResult("DeleteFileMtimes", errors.ErrUnsupported)
 }
 
 // BatchUpsertSymbolFTS implements SymbolFTSBatchUpserter on the generation.
 func (dw *DeltaWriter) BatchUpsertSymbolFTS(items []SymbolFTSItem) error {
 	if w, ok := sidecarAs[SymbolFTSBatchUpserter](dw); ok {
-		return w.BatchUpsertSymbolFTS(items)
+		return dw.sidecarWriteResult("BatchUpsertSymbolFTS", w.BatchUpsertSymbolFTS(items))
 	}
-	return nil
+	if len(items) == 0 {
+		return nil
+	}
+	return dw.sidecarWriteResult("BatchUpsertSymbolFTS", errors.ErrUnsupported)
 }
 
-// BatchDeleteSymbolFTS implements SymbolFTSBatchDeleter on the generation. A
-// document the generation does not hold is the layer below's, hidden by the
-// covering file mask; deleting it here is a no-op by construction.
+// BatchDeleteSymbolFTS implements SymbolFTSBatchDeleter on the generation.
+// A lower-layer file mask does not prove an unknown sidecar has no own rows.
 func (dw *DeltaWriter) BatchDeleteSymbolFTS(nodeIDs []string) error {
 	if w, ok := sidecarAs[SymbolFTSBatchDeleter](dw); ok {
-		return w.BatchDeleteSymbolFTS(nodeIDs)
+		return dw.sidecarWriteResult("BatchDeleteSymbolFTS", w.BatchDeleteSymbolFTS(nodeIDs))
 	}
-	return nil
+	if len(nodeIDs) == 0 {
+		return nil
+	}
+	return dw.sidecarWriteResult("BatchDeleteSymbolFTS", errors.ErrUnsupported)
 }
 
 // BulkSetRefFacts implements RefFactsWriter on the generation.
 func (dw *DeltaWriter) BulkSetRefFacts(repoPrefix string, facts []RefFact) error {
 	if w, ok := sidecarAs[RefFactsWriter](dw); ok {
-		return w.BulkSetRefFacts(repoPrefix, facts)
+		return dw.sidecarWriteResult("BulkSetRefFacts", w.BulkSetRefFacts(repoPrefix, facts))
 	}
-	return nil
+	if len(facts) == 0 {
+		return nil
+	}
+	return dw.sidecarWriteResult("BulkSetRefFacts", errors.ErrUnsupported)
 }
 
 // DeleteRefFactsByFiles implements RefFactsWriter on the generation.
 func (dw *DeltaWriter) DeleteRefFactsByFiles(repoPrefix string, files []string) error {
 	if w, ok := sidecarAs[RefFactsWriter](dw); ok {
-		return w.DeleteRefFactsByFiles(repoPrefix, files)
+		return dw.sidecarWriteResult("DeleteRefFactsByFiles", w.DeleteRefFactsByFiles(repoPrefix, files))
 	}
-	return nil
+	if len(files) == 0 {
+		return nil
+	}
+	return dw.sidecarWriteResult("DeleteRefFactsByFiles", errors.ErrUnsupported)
 }
 
 // LoadRefFactsByFiles implements RefFactsReader: the delta's own facts for
@@ -96,20 +140,25 @@ func (dw *DeltaWriter) LoadRefFactsByFiles(repoPrefix string, files []string) ([
 		}
 	}
 	var out []RefFact
-	if len(own) > 0 {
+	// An empty file filter requests both layers' complete repository facts.
+	if len(own) > 0 || len(files) == 0 {
 		if r, ok := sidecarAs[RefFactsReader](dw); ok {
 			facts, err := r.LoadRefFactsByFiles(repoPrefix, own)
 			if err != nil {
-				return nil, err
+				return nil, deltaSidecarError("LoadRefFactsByFiles", err)
 			}
 			out = append(out, facts...)
+		} else if dw.sidecar != nil {
+			return nil, deltaSidecarError("LoadRefFactsByFiles (generation)", errors.ErrUnsupported)
 		}
+		// With no generation sidecar at all, there cannot be own fact rows.
+		// An unknown non-nil adapter does not provide that proof.
 	}
 	if len(rest) > 0 || len(files) == 0 {
 		if r, ok := dw.below.(RefFactsReader); ok {
 			facts, err := r.LoadRefFactsByFiles(repoPrefix, rest)
 			if err != nil {
-				return nil, err
+				return nil, deltaSidecarError("LoadRefFactsByFiles", err)
 			}
 			for _, fact := range facts {
 				if len(files) == 0 && dw.layer.HasFile(fact.FilePath) {
@@ -117,6 +166,8 @@ func (dw *DeltaWriter) LoadRefFactsByFiles(repoPrefix string, files []string) ([
 				}
 				out = append(out, fact)
 			}
+		} else {
+			return nil, deltaSidecarError("LoadRefFactsByFiles (below)", errors.ErrUnsupported)
 		}
 	}
 	return out, nil
@@ -126,6 +177,9 @@ func (dw *DeltaWriter) LoadRefFactsByFiles(repoPrefix string, files []string) ([
 // uncovered paths plus the delta's own.
 func (dw *DeltaWriter) LoadRefFactsByTargets(repoPrefix string, targetIDs []string) (map[string][]RefFact, error) {
 	out := make(map[string][]RefFact)
+	if len(targetIDs) == 0 {
+		return out, nil
+	}
 	if r, ok := dw.below.(RefFactsReader); ok {
 		load := r.LoadRefFactsByTargets
 		if dw.baseCache != nil {
@@ -155,7 +209,7 @@ func (dw *DeltaWriter) LoadRefFactsByTargets(repoPrefix string, targetIDs []stri
 		}
 		below, err := load(repoPrefix, targetIDs)
 		if err != nil {
-			return nil, err
+			return nil, deltaSidecarError("LoadRefFactsByTargets", err)
 		}
 		for file, facts := range below {
 			if dw.layer.HasFile(file) {
@@ -163,84 +217,103 @@ func (dw *DeltaWriter) LoadRefFactsByTargets(repoPrefix string, targetIDs []stri
 			}
 			out[file] = append(out[file], facts...)
 		}
+	} else {
+		return nil, deltaSidecarError("LoadRefFactsByTargets (below)", errors.ErrUnsupported)
 	}
 	if r, ok := sidecarAs[RefFactsReader](dw); ok {
 		own, err := r.LoadRefFactsByTargets(repoPrefix, targetIDs)
 		if err != nil {
-			return nil, err
+			return nil, deltaSidecarError("LoadRefFactsByTargets", err)
 		}
 		for file, facts := range own {
 			out[file] = append(out[file], facts...)
 		}
+	} else if dw.sidecar != nil {
+		return nil, deltaSidecarError("LoadRefFactsByTargets (generation)", errors.ErrUnsupported)
 	}
+	// A nil sidecar proves the own table absent, as in graph-only deltas.
 	return out, nil
 }
 
 // SetFileMetas implements FileMetaWriter on the generation.
 func (dw *DeltaWriter) SetFileMetas(repoPrefix string, rows []FileMetaRow) error {
 	if w, ok := sidecarAs[FileMetaWriter](dw); ok {
-		return w.SetFileMetas(repoPrefix, rows)
+		return dw.sidecarWriteResult("SetFileMetas", w.SetFileMetas(repoPrefix, rows))
 	}
-	return nil
+	if len(rows) == 0 {
+		return nil
+	}
+	return dw.sidecarWriteResult("SetFileMetas", errors.ErrUnsupported)
 }
 
 // DeleteFileMetasByFiles implements FileMetaWriter on the generation.
 func (dw *DeltaWriter) DeleteFileMetasByFiles(repoPrefix string, files []string) error {
 	if w, ok := sidecarAs[FileMetaWriter](dw); ok {
-		return w.DeleteFileMetasByFiles(repoPrefix, files)
+		return dw.sidecarWriteResult("DeleteFileMetasByFiles", w.DeleteFileMetasByFiles(repoPrefix, files))
 	}
-	return nil
+	if len(files) == 0 {
+		return nil
+	}
+	return dw.sidecarWriteResult("DeleteFileMetasByFiles", errors.ErrUnsupported)
 }
 
 // ReplaceFileIndexFailures implements FileIndexFailureWriter on the
 // generation.
 func (dw *DeltaWriter) ReplaceFileIndexFailures(repoPrefix string, failures []FileIndexFailure) error {
 	if w, ok := sidecarAs[FileIndexFailureWriter](dw); ok {
-		return w.ReplaceFileIndexFailures(repoPrefix, failures)
+		return dw.sidecarWriteResult("ReplaceFileIndexFailures", w.ReplaceFileIndexFailures(repoPrefix, failures))
 	}
-	return nil
+	return dw.sidecarWriteResult("ReplaceFileIndexFailures", errors.ErrUnsupported)
 }
 
 // ReplaceContentFiles implements ContentFTSBatchReplacer on the generation.
 func (dw *DeltaWriter) ReplaceContentFiles(repoPrefix string, files []ContentFTSFileReplacement) error {
 	if w, ok := sidecarAs[ContentFTSBatchReplacer](dw); ok {
-		return w.ReplaceContentFiles(repoPrefix, files)
+		return dw.sidecarWriteResult("ReplaceContentFiles", w.ReplaceContentFiles(repoPrefix, files))
 	}
-	return nil
+	if len(files) == 0 {
+		return nil
+	}
+	return dw.sidecarWriteResult("ReplaceContentFiles", errors.ErrUnsupported)
 }
 
 // BulkSetCloneShingles implements CloneShingleWriter on the generation.
 func (dw *DeltaWriter) BulkSetCloneShingles(repoPrefix string, rows map[string][]uint64) error {
 	if w, ok := sidecarAs[CloneShingleWriter](dw); ok {
-		return w.BulkSetCloneShingles(repoPrefix, rows)
+		return dw.sidecarWriteResult("BulkSetCloneShingles", w.BulkSetCloneShingles(repoPrefix, rows))
 	}
-	return nil
+	if len(rows) == 0 {
+		return nil
+	}
+	return dw.sidecarWriteResult("BulkSetCloneShingles", errors.ErrUnsupported)
 }
 
 // DeleteCloneShingles implements CloneShingleWriter on the generation.
 func (dw *DeltaWriter) DeleteCloneShingles(nodeIDs []string) error {
 	if w, ok := sidecarAs[CloneShingleWriter](dw); ok {
-		return w.DeleteCloneShingles(nodeIDs)
+		return dw.sidecarWriteResult("DeleteCloneShingles", w.DeleteCloneShingles(nodeIDs))
 	}
-	return nil
+	if len(nodeIDs) == 0 {
+		return nil
+	}
+	return dw.sidecarWriteResult("DeleteCloneShingles", errors.ErrUnsupported)
 }
 
 // WipeContent implements ContentSearcher on the generation.
 func (dw *DeltaWriter) WipeContent(repoPrefix string) error {
 	if w, ok := sidecarAs[ContentSearcher](dw); ok {
-		return w.WipeContent(repoPrefix)
+		return dw.sidecarWriteResult("WipeContent", w.WipeContent(repoPrefix))
 	}
-	return nil
+	return dw.sidecarWriteResult("WipeContent", errors.ErrUnsupported)
 }
 
-// WipeContentFile implements ContentSearcher on the generation: a content row
-// the generation does not hold is the layer below's, hidden by the covering
-// file mask.
+// WipeContentFile implements ContentSearcher on the generation. A covering
+// file mask hides lower rows, not rows an unknown sidecar may already hold.
 func (dw *DeltaWriter) WipeContentFile(filePath string) error {
 	if w, ok := sidecarAs[ContentSearcher](dw); ok {
-		return w.WipeContentFile(filePath)
+		return dw.sidecarWriteResult("WipeContentFile", w.WipeContentFile(filePath))
 	}
-	return nil
+	return dw.sidecarWriteResult("WipeContentFile", errors.ErrUnsupported)
 }
 
 // WipeContentFileInRepo is the repository-scoped WipeContentFile.
@@ -248,9 +321,13 @@ func (dw *DeltaWriter) WipeContentFileInRepo(repoPrefix, filePath string) error 
 	if w, ok := sidecarAs[interface {
 		WipeContentFileInRepo(repoPrefix, filePath string) error
 	}](dw); ok {
-		return w.WipeContentFileInRepo(repoPrefix, filePath)
+		return dw.sidecarWriteResult("WipeContentFileInRepo", w.WipeContentFileInRepo(repoPrefix, filePath))
 	}
-	return dw.WipeContentFile(filePath)
+	// The existing legacy fallback is valid only with an actual content writer.
+	if w, ok := sidecarAs[ContentSearcher](dw); ok {
+		return dw.sidecarWriteResult("WipeContentFileInRepo", w.WipeContentFile(filePath))
+	}
+	return dw.sidecarWriteResult("WipeContentFileInRepo", errors.ErrUnsupported)
 }
 
 // ContentRepoHasRows reports whether the generation holds content rows for
@@ -259,42 +336,47 @@ func (dw *DeltaWriter) ContentRepoHasRows(repoPrefix string) (bool, error) {
 	if r, ok := sidecarAs[interface {
 		ContentRepoHasRows(repoPrefix string) (bool, error)
 	}](dw); ok {
-		return r.ContentRepoHasRows(repoPrefix)
+		present, err := r.ContentRepoHasRows(repoPrefix)
+		return present, deltaSidecarError("ContentRepoHasRows", err)
 	}
-	return false, nil
+	return false, deltaSidecarError("ContentRepoHasRows", errors.ErrUnsupported)
 }
 
 // AppendContent implements ContentSearcher on the generation.
 func (dw *DeltaWriter) AppendContent(repoPrefix string, items []ContentFTSItem) error {
 	if w, ok := sidecarAs[ContentSearcher](dw); ok {
-		return w.AppendContent(repoPrefix, items)
+		return dw.sidecarWriteResult("AppendContent", w.AppendContent(repoPrefix, items))
 	}
-	return nil
+	if len(items) == 0 {
+		return nil
+	}
+	return dw.sidecarWriteResult("AppendContent", errors.ErrUnsupported)
 }
 
 // SearchContent implements ContentSearcher over the generation's own rows. The
 // per-save engine writes content; it does not search it.
 func (dw *DeltaWriter) SearchContent(query, repoPrefix string, limit int) ([]ContentHit, error) {
 	if r, ok := sidecarAs[ContentSearcher](dw); ok {
-		return r.SearchContent(query, repoPrefix, limit)
+		hits, err := r.SearchContent(query, repoPrefix, limit)
+		return hits, deltaSidecarError("SearchContent", err)
 	}
-	return nil, nil
+	return nil, deltaSidecarError("SearchContent", errors.ErrUnsupported)
 }
 
 // BuildContentIndex implements ContentSearcher on the generation.
 func (dw *DeltaWriter) BuildContentIndex() error {
 	if w, ok := sidecarAs[ContentSearcher](dw); ok {
-		return w.BuildContentIndex()
+		return dw.sidecarWriteResult("BuildContentIndex", w.BuildContentIndex())
 	}
-	return nil
+	return dw.sidecarWriteResult("BuildContentIndex", errors.ErrUnsupported)
 }
 
 // ScanContent implements ContentSearcher over the generation's own rows.
 func (dw *DeltaWriter) ScanContent(repoPrefix string, fn func(nodeID, filePath, body string) bool) error {
 	if r, ok := sidecarAs[ContentSearcher](dw); ok {
-		return r.ScanContent(repoPrefix, fn)
+		return dw.sidecarWriteResult("ScanContent", r.ScanContent(repoPrefix, fn))
 	}
-	return nil
+	return dw.sidecarWriteResult("ScanContent", errors.ErrUnsupported)
 }
 
 var (

@@ -128,6 +128,9 @@ var resolveProfileStarted atomic.Bool
 
 // ResolveStats holds counts from a resolution pass.
 type ResolveStats struct {
+	CrossRepoError error `json:"-"`
+	Incomplete     bool  `json:"incomplete,omitempty"`
+
 	Resolved   int `json:"resolved"`
 	Unresolved int `json:"unresolved"`
 	External   int `json:"external"`
@@ -1304,7 +1307,10 @@ func (r *Resolver) ResolveAllContext(ctx context.Context) (*ResolveStats, error)
 				}
 				// Without a cold shadow this pass can bind straight into another
 				// tracked repository; give those calls their parallel here.
-				DetectCrossRepoEdgesForReindexes(r.graph, crossRepoReindexes(reindexBatch))
+				if _, err := DetectCrossRepoEdgesForReindexes(r.graph, crossRepoReindexes(reindexBatch)); err != nil {
+					total.CrossRepoError, total.Incomplete = err, true
+					return resolveError(err)
+				}
 				reindexTotal += len(reindexBatch)
 				if pageRevisionKnown {
 					// Ignore this pass's own committed mutations. A later delta

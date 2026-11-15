@@ -961,7 +961,10 @@ func (mi *MultiIndexer) resolveDeferredMutations(receipt *graph.MutationReceipt,
 			mi.logger.Error("DEFERRED-TIMING fallback cross-repo resolve failed", zap.Error(err))
 			return deferredResolveFailed, false
 		}
-		resolver.DetectCrossRepoEdges(mi.graph)
+		if _, err := resolver.DetectCrossRepoEdges(mi.graph); err != nil {
+			mi.logger.Warn("DEFERRED-TIMING fallback cross-repo materialization refused", zap.Error(err))
+			return deferredResolveFailed, false
+		}
 		return deferredResolveFallback, true
 	}
 
@@ -998,7 +1001,9 @@ func (mi *MultiIndexer) resolveDeferredMutations(receipt *graph.MutationReceipt,
 		// Resolve only files that can create or bind unresolved edges. Resolved
 		// edge sources still materialise their cross_repo_* generation without
 		// repeating the substantially larger name-resolution frontier.
-		mi.runCrossRepoResolveMutationFrontiers(resolutionFiles, receipt.ChangedFiles, receipt.DefinitionFiles)
+		if !mi.runCrossRepoResolveMutationFrontiers(resolutionFiles, receipt.ChangedFiles, receipt.DefinitionFiles) {
+			return deferredResolveFailed, false
+		}
 		return deferredResolveExact, true
 	}
 	if !fallbackNeeded {
@@ -1235,7 +1240,9 @@ func (mi *MultiIndexer) RunPreEnrichResolve(ctx context.Context, scope map[strin
 	}
 	// Stamp legacy nodes after master resolution so synthetic nodes created by
 	// attribution participate in the cross-workspace boundary check below.
-	mi.BackfillWorkspaceSlugs()
+	if _, _, err := mi.BackfillWorkspaceSlugs(); err != nil {
+		return err
+	}
 	// Cross-repo references resolve here so a multi-repo workspace is fully
 	// resolved, not just within each repo. Whole-graph so inbound references
 	// from unchanged repos into the changed repos bind too.
@@ -1276,7 +1283,10 @@ func (mi *MultiIndexer) RunPreEnrichResolveFiles(ctx context.Context, files []st
 	// fills and WorkspaceID=RepoPrefix fills preserve the resolver's existing
 	// fallback semantics, so only an effective workspace-boundary change needs
 	// to escalate this exact frontier to a graph-wide pass.
-	_, _, resolutionAffected := mi.backfillWorkspaceSlugsWithImpact()
+	_, _, resolutionAffected, err := mi.backfillWorkspaceSlugsWithImpact()
+	if err != nil {
+		return err
+	}
 	if err := context.Cause(ctx); err != nil {
 		return err
 	}
@@ -1287,9 +1297,12 @@ func (mi *MultiIndexer) RunPreEnrichResolveFiles(ctx context.Context, files []st
 		return context.Cause(ctx)
 	}
 	if cr := mi.newCrossRepoResolver(); cr != nil {
-		_, admission := cr.ResolveMutationFrontiersBounded(files, files, files)
+		stats, admission := cr.ResolveMutationFrontiersBounded(files, files, files)
 		mi.finishGoModuleCalls(cr)
 		mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
+		if stats.MaterializationError != nil {
+			return stats.MaterializationError
+		}
 		if admission.Refusal != nil {
 			return mi.runCrossRepoResolveContext(ctx, false)
 		}
@@ -1938,12 +1951,17 @@ func (mi *MultiIndexer) runGlobalGraphPassesTopologyHeld(
 	}
 	passStart("capability_edges")
 	capStart := time.Now()
-	capRe, capEp, capFa := synthesizeCapabilityEdgesScoped(mi.graph, scanPrefixes)
-	mi.logger.Info("global pass: capability edges",
-		zap.Int("reads_env", capRe),
-		zap.Int("executes_process", capEp),
-		zap.Int("accesses_field", capFa),
-		zap.Duration("elapsed", time.Since(capStart)))
+	capRe, capEp, capFa, capErr := synthesizeCapabilityEdgesScoped(mi.graph, scanPrefixes)
+	if capErr != nil {
+		mi.logger.Warn("global pass: capability edges refused", zap.String("pass", "capability_edges"),
+			zap.Bool("incomplete", true), zap.Error(capErr))
+	} else {
+		mi.logger.Info("global pass: capability edges",
+			zap.Int("reads_env", capRe),
+			zap.Int("executes_process", capEp),
+			zap.Int("accesses_field", capFa),
+			zap.Duration("elapsed", time.Since(capStart)))
+	}
 	// Clone detection is PER-REPOSITORY: each tracked repo gets its own
 	// finalise + detect over its own nodes (scoped by RepoPrefix), so no
 	// cross-repo candidate pair is ever formed and each repo's boilerplate
@@ -2043,7 +2061,12 @@ func (mi *MultiIndexer) runGlobalGraphPassesTopologyHeld(
 		censusEligible,
 		mi.frameworkSynthesizerSelection(changedPrefixes),
 	)
+	if fwRep.Err != nil {
+		mi.logger.Warn("global pass: framework dispatch synthesis refused", zap.Strings("passes", fwRep.Refused),
+			zap.Bool("incomplete", fwRep.Incomplete), zap.Error(fwRep.Err))
+	}
 	mi.logger.Info("global pass: framework dispatch synthesis",
+		zap.Bool("incomplete", fwRep.Incomplete),
 		zap.Int("edges", fwRep.Total),
 		zap.Any("per_synthesizer", fwRep.Per),
 		zap.Int64("census_ms", fwRep.CensusMillis),
@@ -2078,19 +2101,29 @@ func (mi *MultiIndexer) runGlobalGraphPassesTopologyHeld(
 	crStart := time.Now()
 	crossRepoEdges := 0
 	skipped := false
+	var crossRepoErr error
 	if fullCoverage {
-		crossRepoEdges, skipped = resolver.DetectCrossRepoEdgesWithSkip(mi.graph)
+		crossRepoEdges, skipped, crossRepoErr = resolver.DetectCrossRepoEdgesWithSkip(mi.graph)
 	} else {
-		crossRepoEdges = resolver.DetectCrossRepoEdgesForRepos(mi.graph, scanRepoPrefixes)
+		crossRepoEdges, crossRepoErr = resolver.DetectCrossRepoEdgesForRepos(mi.graph, scanRepoPrefixes)
 	}
 	fields := []zap.Field{zap.Int("edges", crossRepoEdges)}
 	if skipped {
 		fields = append(fields, zap.String("skipped", "single_repo"))
 	}
 	fields = append(fields, zap.Duration("elapsed", time.Since(crStart)))
-	mi.logger.Info("global pass: cross-repo edges", fields...)
-	mi.logger.Info("global passes complete",
-		zap.Duration("total", time.Since(globalStart)))
+	if crossRepoErr != nil {
+		fields = append(fields, zap.Bool("incomplete", true), zap.Error(crossRepoErr))
+		mi.logger.Warn("global pass: cross-repo edges refused", fields...)
+	} else {
+		mi.logger.Info("global pass: cross-repo edges", fields...)
+	}
+	if fwRep.Incomplete || capErr != nil || crossRepoErr != nil {
+		mi.logger.Warn("global passes incomplete", zap.Duration("total", time.Since(globalStart)))
+	} else {
+		mi.logger.Info("global passes complete",
+			zap.Duration("total", time.Since(globalStart)))
+	}
 }
 
 // externalCallSynthesisEnabled resolves whether external-call placeholder

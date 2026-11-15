@@ -2,14 +2,18 @@ package indexer
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/parser"
@@ -204,4 +208,111 @@ func TestContractMarkerIsNoOpWithoutCapableStore(t *testing.T) {
 	_, err := idx.Index(dir)
 	require.NoError(t, err)
 	require.NotZero(t, handlesRouteEdgeCount(g))
+}
+
+// Keep graph behavior and completion-state telemetry, but hide cleanup methods.
+type springContractStateStore struct {
+	graph.Store
+	graph.ContractStateStore
+}
+
+func TestSpringMigrationFailureRefusesContractCompletion(t *testing.T) {
+	for _, deferred := range []bool{false, true} {
+		name := "inline"
+		if deferred {
+			name = "deferred"
+		}
+		t.Run(name, func(t *testing.T) {
+			// Given legacy Spring rows without cleanup support, when the real
+			// index/contract tail runs, then it reports failure and marks no completion.
+			root := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(root, "application.yml"), []byte("app.value: hidden\n"), 0600))
+			base := newContractStateGraph()
+			base.AddBatch([]*graph.Node{
+				{ID: "repo/application.yml", Kind: graph.KindFile, Name: "application.yml", FilePath: "repo/application.yml", Language: "yaml", RepoPrefix: "repo"},
+				{ID: "cfg::spring::app.value", Kind: graph.KindConfigKey, FilePath: "repo/application.yml", Meta: map[string]any{"source": "spring"}},
+			}, nil)
+			store := &springContractStateStore{Store: base, ContractStateStore: base}
+			core, logs := observer.New(zap.WarnLevel)
+			idx := New(store, newTestRegistry(), config.Default().Index, zap.New(core))
+			t.Cleanup(idx.Close)
+			idx.SetRepoPrefix("repo")
+			idx.SetDeferResolve(deferred)
+			idx.SetDeferGlobalPasses(true)
+			result, err := idx.IndexCtx(t.Context(), root)
+			if deferred {
+				require.NoError(t, err)
+				pending := idx.pendingContractReg
+				require.NotNil(t, pending)
+				idx.runDeferredContracts()
+				assert.Same(t, pending, idx.pendingContractReg, "failed deferred work must remain pending")
+				assert.Len(t, logs.FilterMessage("indexer: deferred contract commit refused").All(), 1)
+			} else {
+				assert.ErrorIs(t, err, errors.ErrUnsupported)
+				assert.Nil(t, result)
+			}
+			assert.ErrorIs(t, idx.contractInputError(), errors.ErrUnsupported)
+			_, complete, readErr := store.GetContractState("repo")
+			require.NoError(t, readErr)
+			assert.False(t, complete, "refused migration must not publish a completion marker")
+			assert.NotNil(t, base.GetNode("cfg::spring::app.value"))
+			assert.Nil(t, base.GetNode("cfg::spring::repo::repo::app.value"))
+		})
+	}
+}
+
+func TestContractInputFailureRefusesRowsAndCompletion(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		name := "source_available"
+		if failed {
+			name = "source_read_fails"
+		}
+		t.Run(name, func(t *testing.T) {
+			g := newContractStateGraph()
+			g.AddBatch([]*graph.Node{
+				{ID: "repo/router.go::register", Name: "register", Kind: graph.KindFunction, FilePath: "repo/router.go", RepoPrefix: "repo", Language: "go"},
+				{ID: "repo/handler.go::serve", Name: "serve", Kind: graph.KindFunction, FilePath: "repo/handler.go", RepoPrefix: "repo", Language: "go", StartLine: 3, EndLine: 3},
+			}, nil)
+			core, logs := observer.New(zap.WarnLevel)
+			idx := New(g, newTestRegistry(), config.Default().Index, zap.New(core))
+			t.Cleanup(idx.Close)
+			idx.SetRootPath(t.TempDir())
+			idx.SetRepoPrefix("repo")
+			idx.contractAnalysisOnly = true
+			readFailure := errors.New("accepted handler source failed")
+			var paths []string
+			idx.contractAcceptedFileSource = func(path string) ([]byte, error) {
+				paths = append(paths, path)
+				if failed {
+					return nil, readFailure
+				}
+				return []byte("package app\nimport \"net/http\"\nfunc serve(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) }\n"), nil
+			}
+			reg := contracts.NewRegistry()
+			reg.Add(contracts.Contract{ID: "http::GET::/users", Type: contracts.ContractHTTP, Role: contracts.RoleProvider, FilePath: "repo/router.go", SymbolID: "repo/router.go::register", Line: 1, RepoPrefix: "repo", Meta: map[string]any{"handler_ident": "serve"}})
+			idx.pendingContractReg = reg
+			// Given accepted handler source fails during non-Spring enrichment,
+			// when the deferred caller commits, then refusal precedes rows and tier completion.
+			idx.runDeferredContracts()
+			require.Contains(t, paths, "repo/handler.go", "the commit must actually read the accepted handler source")
+			_, complete, err := g.GetContractState("repo")
+			require.NoError(t, err)
+			if failed {
+				assert.ErrorIs(t, idx.contractInputError(), readFailure)
+				assert.Len(t, logs.FilterMessage("indexer: deferred contract commit refused").All(), 1)
+				assert.Same(t, reg, idx.pendingContractReg)
+				assert.Nil(t, idx.contractRegistry, "refused input must not become the committed registry")
+				assert.Len(t, g.AllNodes(), 2, "no contract rows may be published after input failure")
+				assert.Empty(t, g.AllEdges(), "no contract edges may be published after input failure")
+				assert.False(t, complete, "refused input must not publish a tier completion marker")
+			} else {
+				require.NoError(t, idx.contractInputError())
+				require.NotNil(t, g.GetNode("http::GET::/users"))
+				require.Positive(t, handlesRouteEdgeCount(g))
+				require.True(t, complete)
+				require.Nil(t, idx.pendingContractReg)
+				require.Empty(t, logs.FilterMessage("indexer: deferred contract commit refused").All())
+			}
+		})
+	}
 }

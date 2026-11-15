@@ -963,9 +963,11 @@ func (e *Engine) gatherBackendCandidates(ctx context.Context, query string, limi
 		bundles := answer.bundles
 		scopedAnswered := answer.authoritative && len(repoAllowList(opts.RepoAllow)) > 0
 		bundleHandled = answer.authoritative
-		if answer.failed || ctx.Err() != nil {
+		if ctx.Err() != nil {
 			return nil
 		}
+		// A failed bundle is handled text work, not failure of the whole search.
+		// Preserve independent vector and exact/substring evidence without replay.
 		if timings != nil {
 			timings.BundleMS += time.Since(bundleStart).Milliseconds()
 		}

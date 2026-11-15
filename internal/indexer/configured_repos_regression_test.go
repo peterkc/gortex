@@ -158,7 +158,9 @@ cross_workspace_deps:
 	_, err = f.mi.TrackRepoCtx(t.Context(), selected[0])
 	require.NoError(t, err)
 	f.store.AddNode(&graph.Node{ID: "src/legacy.go::Legacy", Name: "Legacy", Kind: graph.KindFunction, FilePath: "src/legacy.go", RepoPrefix: "src"})
-	f.mi.BackfillWorkspaceSlugs()
+	if _, _, err := f.mi.BackfillWorkspaceSlugs(); err != nil {
+		t.Fatal(err)
+	}
 	node := f.store.GetNode("src/legacy.go::Legacy")
 	require.NotNil(t, node)
 	assert.Equal(t, "owner-ws", node.WorkspaceID)

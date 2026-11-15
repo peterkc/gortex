@@ -262,7 +262,9 @@ func TestExternalLifetimeMultiIndexer(t *testing.T) {
 			_, err := mi.TrackRepo(entry)
 			require.NoError(t, err)
 			if mode != "save" {
-				mi.BackfillWorkspaceSlugs()
+				if _, _, err := mi.BackfillWorkspaceSlugs(); err != nil {
+					t.Fatal(err)
+				}
 			}
 			externalLifetimeRequireBase(t, store)
 			priorMtimes := mi.FileMtimes("repo")
@@ -318,7 +320,9 @@ func TestExternalLifetimeMultiIndexer(t *testing.T) {
 			if mode != "save" {
 				// Warmup's workspace resolve backfills synthetic-node stamps.
 				// Compare with the same completed workspace boundary, not Track alone.
-				cleanMI.BackfillWorkspaceSlugs()
+				if _, _, err := cleanMI.BackfillWorkspaceSlugs(); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if mode == "warm-unchanged" {
 				require.Equal(t, beforeNodes, builderRenderNodes(store.AllNodes()))

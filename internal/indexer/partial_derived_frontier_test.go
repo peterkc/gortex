@@ -223,17 +223,23 @@ func TestPartialCapabilityEdgesReconcileBoundedReceiverFrontier(t *testing.T) {
 	const helper = changedFile + "::State.helper"
 	const caller = "repoA::caller.go::State.run"
 	oracle := capabilityFrontierFixture(false, 0)
-	synthesizeCapabilityEdges(oracle)
+	if _, _, _, err := synthesizeCapabilityEdges(oracle); err != nil {
+		t.Fatal(err)
+	}
 	want := capabilityEdgesForSources(oracle, helper, caller)
 
 	fixture := capabilityFrontierFixture(true, 1500)
-	synthesizeCapabilityEdges(fixture)
+	if _, _, _, err := synthesizeCapabilityEdges(fixture); err != nil {
+		t.Fatal(err)
+	}
 	if before := capabilityEdgesForSources(fixture, helper, caller); len(before) <= len(want) {
 		t.Fatalf("fixture did not create stale direct/transitive capabilities: before=%v want=%v", before, want)
 	}
 	fixture.RemoveEdge(helper, "repoA::state.go::State.value", graph.EdgeWrites)
 	counted := &partialDerivedCountingStore{Store: fixture}
-	synthesizeCapabilityEdgesScoped(counted, map[string]bool{"repoA": true}, changedFile)
+	if _, _, _, err := synthesizeCapabilityEdgesScoped(counted, map[string]bool{"repoA": true}, changedFile); err != nil {
+		t.Fatal(err)
+	}
 	got := capabilityEdgesForSources(counted.Store, helper, caller)
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("partial capabilities = %v, want full-pass parity %v", got, want)

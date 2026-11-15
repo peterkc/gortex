@@ -17,14 +17,29 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
-// CrossRepoStats holds counts from a cross-repo resolution pass.
+// CrossRepoStats holds counts and materialization status from a cross-repo pass.
 type CrossRepoStats struct {
+	MaterializationError error `json:"-"`
+	Incomplete           bool  `json:"incomplete,omitempty"`
+
 	Resolved        int            `json:"resolved"`
 	Unresolved      int            `json:"unresolved"`
 	CrossRepoEdges  int            `json:"cross_repo_edges"`
 	ByRepo          map[string]int `json:"by_repo"`
 	peakPendingPage int
 	peakLookupKeys  int
+}
+
+func (cr *CrossRepoResolver) recordMaterializationRefusal(stats *CrossRepoStats, err error) {
+	if stats != nil {
+		if stats.MaterializationError != nil {
+			return
+		}
+		stats.MaterializationError = err
+		stats.Incomplete = true
+	}
+	cr.logger.Warn("cross-repo materialization refused", zap.String("pass", "cross_repo_edges"),
+		zap.Bool("incomplete", true), zap.Error(err))
 }
 
 // CrossWorkspaceDepRule names one allowed dependency from a source
@@ -584,7 +599,10 @@ func (cr *CrossRepoResolver) ResolveAllContext(ctx context.Context) (*CrossRepoS
 				// (placeholderSourceIndex.deferRepoints).
 				cr.placeholderSrcIdx.deferRepoints(cr.graph, scBatch)
 				reindexTotal += len(scBatch)
-				DetectCrossRepoEdgesForReindexes(cr.graph, scBatch)
+				if _, err := DetectCrossRepoEdgesForReindexes(cr.graph, scBatch); err != nil {
+					stats.MaterializationError, stats.Incomplete = err, true
+					return stats, err
+				}
 			}
 			if cr.validateLiveness && (hi < len(pending) || !streamDone) {
 				revBefore, revKnown := loadMutationRevision(cr.graph)
@@ -639,7 +657,9 @@ func (cr *CrossRepoResolver) ResolveForRepo(repoPrefix string) *CrossRepoStats {
 	// of warmup on a multi-repo workspace where this method runs
 	// once per tracked repo.
 	stats := cr.resolveScopedLocked(cr.graph.GetRepoEdges(repoPrefix))
-	DetectCrossRepoEdgesForRepos(cr.graph, []string{repoPrefix})
+	if _, err := DetectCrossRepoEdgesForRepos(cr.graph, []string{repoPrefix}); err != nil {
+		cr.recordMaterializationRefusal(stats, err)
+	}
 	return stats
 }
 
@@ -684,7 +704,9 @@ func (cr *CrossRepoResolver) ResolveForFile(repoPrefix, relPath string) *CrossRe
 		edges = append(edges, es...)
 	}
 	stats := cr.resolveScopedLocked(edges)
-	DetectCrossRepoEdgesForFiles(cr.graph, []string{graphPath})
+	if _, err := DetectCrossRepoEdgesForFiles(cr.graph, []string{graphPath}); err != nil {
+		cr.recordMaterializationRefusal(stats, err)
+	}
 	return stats
 }
 

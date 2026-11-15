@@ -38,6 +38,14 @@ type warmupResolveFailureStore struct {
 	refuseIncoming   atomic.Bool
 	incomingRefusals atomic.Int64
 	forceImpact      atomic.Bool
+	failCapability   atomic.Bool
+}
+
+func (s *warmupResolveFailureStore) EvictEdgesFromSourcesByKinds(ctx context.Context, sources []string, kinds []graph.EdgeKind) (int, error) {
+	if s.failCapability.Load() {
+		return 0, errors.ErrUnsupported
+	}
+	return s.Store.EvictEdgesFromSourcesByKinds(ctx, sources, kinds)
 }
 
 func (s *warmupResolveFailureStore) BeginUnresolvedEdgeScan(ctx context.Context) (graph.UnresolvedEdgeScan, error) {
@@ -211,7 +219,7 @@ func TestWarmupCompletion(t *testing.T) {
 }
 
 func TestWarmupCompletionAfterExactFrontierRefusal(t *testing.T) {
-	for _, phase := range []string{"same_repo", "cross_repo"} {
+	for _, phase := range []string{"same_repo", "cross_repo", "capability"} {
 		t.Run(phase, func(t *testing.T) {
 			// Given a persisted repository with one offline file change.
 			t.Setenv("GORTEX_ENRICH_OVERLAP", "1")
@@ -264,17 +272,26 @@ func TestWarmupCompletionAfterExactFrontierRefusal(t *testing.T) {
 				controller.MarkReady(time.Millisecond)
 				publishReadinessPhase(state, "ready", true, nil)
 				g.refuseIncoming.Store(phase == "cross_repo")
+				g.failCapability.Store(phase == "capability")
 			})
 
-			// When the exact warmup resolve encounters the bounded refusal.
+			// When exact warmup encounters a bounded resolve refusal or a capability write failure.
 			mw, warmup := warmupDaemonStateContext(t.Context(), state, logger, markReady, func(context.Context, *indexer.MultiWatcher) error { return nil })
 			if mw != nil {
 				t.Cleanup(func() { require.NoError(t, mw.Stop()) })
 			}
 
-			// Then the full-pass fallback publishes ready and completes startup relations.
+			// Then resolve fallback or best-effort derived work leaves warmup queryable.
 			require.NoError(t, warmup.resolveErr)
-			require.Positive(t, g.incomingRefusals.Load(), "the bounded refusal must be exercised")
+			if phase == "capability" {
+				// Given a failed capability write, when exact warmup joins its
+				// best-effort passes, then its report is incomplete, not silently complete.
+				require.Len(t, logs.FilterMessage("incremental derived passes refused").All(), 1)
+				require.Len(t, logs.FilterMessage("daemon: exact warm derived passes incomplete").All(), 1)
+				require.Empty(t, logs.FilterMessage("daemon: exact warm derived passes complete").All())
+			} else {
+				require.Positive(t, g.incomingRefusals.Load(), "the bounded refusal must be exercised")
+			}
 			frontiers := logs.FilterMessage("daemon: warmup delta frontier").All()
 			require.Len(t, frontiers, 1)
 			require.Equal(t, true, frontiers[0].ContextMap()["exact"])
@@ -321,4 +338,58 @@ func TestWarmupCompletionStopsOnCanceledContext(t *testing.T) {
 			assert.Zero(t, logs.Len(), "a canceled startup must not log a warmup outcome")
 		})
 	}
+}
+
+func TestWarmupCompletionRefusesUnsupportedWorkspaceBackfill(t *testing.T) {
+	// Given a configured repository behind a store with no slug backfiller,
+	// when isolated warmup joins, then readiness remains possible but enrichment
+	// and cross-workspace completion are not claimed.
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "repo")
+	require.NoError(t, os.Mkdir(repo, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "main.go"), []byte("package main\nfunc main() {}\n"), 0o644))
+	backend, err := store_sqlite.Open(filepath.Join(dir, "store.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, backend.Close()) })
+	store := &struct{ graph.Store }{Store: backend}
+	cm, err := config.NewConfigManager(filepath.Join(dir, "config.yaml"))
+	require.NoError(t, err)
+	require.NoError(t, cm.Global().AddRepo(config.RepoEntry{Path: repo, Workspace: "shared"}))
+	core, logs := observer.New(zap.InfoLevel)
+	logger := zap.New(core)
+	reg := parser.NewRegistry()
+	reg.Register(languages.NewGoExtractor())
+	idx := indexer.New(store, reg, config.Default().Index, logger)
+	mi := indexer.NewMultiIndexer(store, reg, idx.Search(), cm, logger)
+	t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
+	srv := gortexmcp.NewServer(query.NewEngine(store), store, idx, nil, logger, nil)
+	state := &daemonState{graph: store, indexer: idx, multiIndexer: mi, configManager: cm, mcpServer: srv}
+	controller := &realController{graph: store}
+	mw, warmup := warmupDaemonStateContext(t.Context(), state, logger, sync.OnceFunc(func() { controller.MarkReady(time.Millisecond) }), func(context.Context, *indexer.MultiWatcher) error { return nil })
+	if mw != nil {
+		t.Cleanup(func() { require.NoError(t, mw.Stop()) })
+	}
+	require.ErrorIs(t, warmup.resolveErr, errors.ErrUnsupported)
+	require.Len(t, logs.FilterMessage("daemon: workspace slug backfill incomplete").All(), 2)
+	refusedSteps := 0
+	for _, entry := range logs.FilterMessage("daemon: warmup step complete").All() {
+		step := entry.ContextMap()["step"]
+		if step == "workspace_backfill_before_derived" || step == "workspace_backfill_after_derived" {
+			refusedSteps++
+			require.Equal(t, "incomplete", entry.ContextMap()["outcome"])
+			require.NotEmpty(t, entry.ContextMap()["error"])
+		}
+	}
+	require.Equal(t, 2, refusedSteps)
+	require.Empty(t, logs.FilterMessage("daemon: warmup global resolve incomplete").All(), "failed stamping must not continue cross-workspace resolution")
+	for _, entry := range logs.FilterMessage("daemon: warmup phase start").All() {
+		require.NotEqual(t, "global_resolve", entry.ContextMap()["phase"])
+	}
+	publishWarmupCompletion(t.Context(), state, controller, logger, indexer.NewViewBuildGate(), warmup, time.Millisecond, time.Second)
+	require.True(t, controller.ready.Load())
+	require.False(t, controller.enriched.Load())
+	require.True(t, mi.RelationsPending())
+	phase, _ := srv.ReadinessPhase()
+	require.Equal(t, "warmup_incomplete", phase)
+	require.Empty(t, logs.FilterMessage("daemon: enrichment complete").All())
 }

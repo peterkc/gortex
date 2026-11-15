@@ -67,6 +67,8 @@ type inspectionViolation struct {
 	Line       int    `json:"line,omitempty"`
 	Message    string `json:"message"`
 	SymbolID   string `json:"symbol_id,omitempty"`
+
+	EnrichmentUnavailable string `json:"enrichment_unavailable,omitempty"`
 }
 
 // inspectionSpec is the registry entry. run returns the inspector's
@@ -217,7 +219,12 @@ func (s *Server) handleRunInspections(ctx context.Context, req mcp.CallToolReque
 		raw := sp.Run(ctx, s, scope)
 		// Apply per-call filters: severity + cap.
 		filtered := make([]inspectionViolation, 0, len(raw))
+		warnings := make([]inspectionViolation, 0)
 		for _, v := range raw {
+			if v.EnrichmentUnavailable != "" {
+				warnings = append(warnings, v)
+				continue
+			}
 			if severity != "" && strings.ToLower(v.Severity) != severity {
 				continue
 			}
@@ -228,14 +235,18 @@ func (s *Server) handleRunInspections(ctx context.Context, req mcp.CallToolReque
 			filtered = filtered[:maxPer]
 			truncated = true
 		}
-		results = append(results, map[string]any{
+		row := map[string]any{
 			"inspection": sp.ID,
 			"category":   sp.Category,
 			"severity":   sp.Severity,
 			"violations": filtered,
 			"total":      len(filtered),
 			"truncated":  truncated,
-		})
+		}
+		if len(warnings) > 0 {
+			row["warnings"] = warnings
+		}
+		results = append(results, row)
 		byInspection[sp.ID] = len(filtered)
 		totalViolations += len(filtered)
 	}
@@ -362,7 +373,10 @@ func runTodosInspection(ctx context.Context, s *Server, scope inspectionScope) [
 
 func runCoverageGapsInspection(ctx context.Context, s *Server, scope inspectionScope) []inspectionViolation {
 	out := make([]inspectionViolation, 0)
-	covRows := coverageRowsByID(s.readerFor(ctx))
+	covRows, available := coverageRowsByID(s.readerFor(ctx))
+	if !available {
+		out = append(out, inspectionViolation{Inspection: "coverage_gaps", Severity: "warning", EnrichmentUnavailable: "coverage", Message: "coverage enrichment unavailable; using only node-local metadata"})
+	}
 	for _, n := range s.scopedNodesByKinds(ctx, inspectionCallableKinds) {
 		if !scope.keep(n.FilePath) {
 			continue
@@ -392,7 +406,10 @@ func runStaleCodeInspection(ctx context.Context, s *Server, scope inspectionScop
 	out := make([]inspectionViolation, 0)
 	now := time.Now().Unix()
 	cutoff := now - staleInspectionDays*24*3600
-	blame := blameRowsByID(s.readerFor(ctx))
+	blame, available := blameRowsByID(s.readerFor(ctx))
+	if !available {
+		out = append(out, inspectionViolation{Inspection: "stale_code", Severity: "warning", EnrichmentUnavailable: "blame", Message: "blame enrichment unavailable; using only node-local metadata"})
+	}
 	for _, n := range s.scopedNodesByKinds(ctx, inspectionCallableKinds) {
 		if !scope.keep(n.FilePath) {
 			continue
