@@ -568,6 +568,12 @@ func (w *watcher) sendToChannel(event WatchEvent) {
 	}
 }
 
+// directoryFilter can prune a subtree only when no descendant needs delivery.
+// Event-only PathFilters (including regex filters) need not satisfy this contract.
+type directoryFilter interface {
+	ShouldSkipDir(path string) bool
+}
+
 // scanDirectory performs a manual scan of a directory and emits events for its contents
 func (w *watcher) scanDirectory(path string) {
 	if w.isShuttingDown.Load() {
@@ -581,6 +587,25 @@ func (w *watcher) scanDirectory(path string) {
 		ctx = context.Background()
 	}
 
+	// Keep routes to more specific watches open even when a parent filter
+	// excludes their ancestors. Build the set once, not once per walked entry.
+	watchAncestors := make(map[string]struct{})
+	scanRoot := filepath.Clean(path)
+	w.pathMu.RLock()
+	for watchedDir := range w.watchedPaths {
+		if !isSubpath(scanRoot, watchedDir) {
+			continue
+		}
+		for dir := filepath.Dir(watchedDir); ; dir = filepath.Dir(dir) {
+			watchAncestors[dir] = struct{}{}
+			if dir == scanRoot {
+				break
+			}
+		}
+	}
+	w.pathMu.RUnlock()
+	globalFilter, _ := w.filter.(directoryFilter)
+
 	const scanYieldEvery = 512
 	scanned := 0
 	err := filepath.WalkDir(path, func(filePath string, d os.DirEntry, err error) error {
@@ -591,8 +616,25 @@ func (w *watcher) scanDirectory(path string) {
 			return nil // Skip files with errors
 		}
 
-		// Don't emit event for the root path being scanned
+		var parentWatch *WatchPath
+		skipDir := false
+		if d.IsDir() {
+			parentWatch = w.findMostSpecificWatchPath(filePath)
+			if _, leadsToWatch := watchAncestors[filepath.Clean(filePath)]; !leadsToWatch {
+				skipDir = globalFilter != nil && globalFilter.ShouldSkipDir(filePath)
+				if !skipDir && parentWatch != nil {
+					if filter, ok := parentWatch.filter.(directoryFilter); ok {
+						skipDir = filter.ShouldSkipDir(filePath)
+					}
+				}
+			}
+		}
+
+		// Don't emit event for the root path being scanned.
 		if filePath == path {
+			if skipDir {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 
@@ -614,13 +656,9 @@ func (w *watcher) scanDirectory(path string) {
 			Time:  time.Now(),
 		})
 
-		// If it's a directory and we are not recursive, don't walk into it
-		if d.IsDir() {
-			parentWatch := w.findMostSpecificWatchPath(filePath)
-
-			if parentWatch != nil && parentWatch.Depth == WatchTopLevel {
-				return filepath.SkipDir
-			}
+		// Preserve the directory event, but skip excluded or non-recursive contents.
+		if d.IsDir() && (skipDir || (parentWatch != nil && parentWatch.Depth == WatchTopLevel)) {
+			return filepath.SkipDir
 		}
 
 		return nil

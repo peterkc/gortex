@@ -24,6 +24,9 @@ serialization and join semantics.
 - Join the run goroutine before `close` returns.
 - Make concurrent `close` callers wait for the same completed shutdown.
 - Add deterministic regression tests for the in-flight-add interleaving.
+- Let manual rescans prune excluded subtrees through an optional directory
+  filter, while preserving routes to nested watches and event-only filters.
+- Add deterministic manual-rescan regression tests.
 - Remove one unused logging helper and annotate cross-platform helpers so the
   vendored package satisfies Gortex's host-platform lint configuration.
 
