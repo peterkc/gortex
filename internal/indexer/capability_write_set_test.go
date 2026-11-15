@@ -1,6 +1,8 @@
 package indexer
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -223,6 +225,12 @@ func TestCollapseCapabilityIdentitiesIsOrderIndependent(t *testing.T) {
 type adjacencyRecordingStore struct {
 	graph.Store
 	out, in map[string]struct{}
+	adds    int
+}
+
+func (s *adjacencyRecordingStore) AddBatch(nodes []*graph.Node, edges []*graph.Edge) {
+	s.adds++
+	s.Store.AddBatch(nodes, edges)
 }
 
 func (s *adjacencyRecordingStore) GetOutEdgesByNodeIDs(ids []string) map[string][]*graph.Edge {
@@ -263,7 +271,10 @@ func TestCapabilityPassReadsOnlyTheChangedSourcesInputs(t *testing.T) {
 	}
 	want := capabilityRows(t, store)
 	rec := &adjacencyRecordingStore{Store: store, out: map[string]struct{}{}, in: map[string]struct{}{}}
-	synthesizeCapabilityEdgesForFilesWithPrior(rec, prior, []string{file})
+	forwarding := &capabilityEvictionStore{Store: rec, evicter: store}
+	if _, _, _, err := synthesizeCapabilityEdgesForFilesWithPrior(forwarding, prior, []string{file}); err != nil {
+		t.Fatal(err)
+	}
 	for id := range rec.out {
 		if !strings.HasPrefix(id, file+"::") && id != file {
 			t.Errorf("the capability pass read the adjacency of %s, outside the changed file", id)
@@ -332,5 +343,100 @@ func TestPerSaveCapabilityIgnoresRowsAnOlderDerivationWrote(t *testing.T) {
 	}
 	if !seen {
 		t.Fatal("no derived pass ran")
+	}
+}
+
+// Embed only Store so absent optional methods cannot be promoted accidentally.
+type capabilityEvictionStore struct {
+	graph.Store
+	evicter graph.ScopedEdgeKindEvicter
+	failure error
+}
+
+func (s *capabilityEvictionStore) EvictEdgesFromSourcesByKinds(ctx context.Context, sources []string, kinds []graph.EdgeKind) (int, error) {
+	if s.failure != nil {
+		return 0, s.failure
+	}
+	return s.evicter.EvictEdgesFromSourcesByKinds(ctx, sources, kinds)
+}
+
+func TestCapabilityReplacementRefusalIsVisible(t *testing.T) {
+	for _, failure := range []error{errors.ErrUnsupported, errors.New("capability eviction failed"), context.Canceled} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			// Given prepared capability rows and missing or failed eviction, when
+			// file/prior synthesis runs, then no replacement lands and refusal is visible.
+			base := graph.New()
+			base.AddBatch([]*graph.Node{
+				{ID: "repo/a.go::F", Kind: graph.KindFunction, FilePath: "repo/a.go", RepoPrefix: "repo"},
+				{ID: "repo/a.go::field", Kind: graph.KindField, FilePath: "repo/a.go", RepoPrefix: "repo"},
+			}, []*graph.Edge{
+				{From: "repo/a.go::F", To: "cfg::env::TOKEN", Kind: graph.EdgeReadsConfig, FilePath: "repo/a.go"},
+				{From: "repo/a.go::F", To: "unresolved::exec.Command", Kind: graph.EdgeCalls, FilePath: "repo/a.go"},
+				{From: "repo/a.go::F", To: "repo/a.go::field", Kind: graph.EdgeWrites, FilePath: "repo/a.go"},
+				{From: "repo/a.go::F", To: "cfg::env::OLD", Kind: graph.EdgeReadsEnv, FilePath: "repo/a.go"},
+			})
+			rec := &adjacencyRecordingStore{Store: base, out: map[string]struct{}{}, in: map[string]struct{}{}}
+			var store graph.Store = rec
+			if failure != errors.ErrUnsupported {
+				store = &capabilityEvictionStore{Store: rec, failure: failure}
+			}
+			before := base.EdgeCount()
+			if re, ep, fa, err := synthesizeCapabilityEdgesForFiles(store, []string{"repo/a.go"}); !errors.Is(err, failure) || re+ep+fa != 0 {
+				t.Fatalf("file replacement = (%d,%d,%d), %v, want zero and %v", re, ep, fa, err, failure)
+			}
+			prior := newCapabilityPrior()
+			prior.files["repo/a.go"] = struct{}{}
+			if re, ep, fa, err := synthesizeCapabilityEdgesForFilesWithPrior(store, prior, []string{"repo/a.go"}); !errors.Is(err, failure) || re+ep+fa != 0 {
+				t.Fatalf("prior replacement = (%d,%d,%d), %v, want zero and %v", re, ep, fa, err, failure)
+			}
+			if rec.adds != 0 || base.GetNode("string::process::exec.Command") != nil {
+				t.Fatal("refused replacement added rows")
+			}
+			if got := base.EdgeCount(); got != before {
+				t.Fatal("refused replacement changed capability rows")
+			}
+			core, logs := observer.New(zap.InfoLevel)
+			mi := &MultiIndexer{graph: store, indexers: map[string]*Indexer{}, logger: zap.New(core)}
+			report := mi.RunIncrementalDerivedPasses(t.Context(), map[string]DerivedInvalidationPlan{
+				"repo": {Flags: DerivedInvalidatesRuntime, Files: []string{"repo/a.go"}},
+			})
+			if !report.Incomplete || !errors.Is(report.CapabilityError, failure) || report.Capability != 0 {
+				t.Fatalf("report did not retain capability refusal: %+v", report)
+			}
+			refusals := logs.FilterMessage("incremental derived passes refused").All()
+			if len(refusals) != 1 {
+				t.Fatal("capability failure looked like a complete empty pass")
+			}
+			if fields := refusals[0].ContextMap(); fields["pass"] != "capability_edges" || fields["incomplete"] != true {
+				t.Fatalf("refusal omitted named incomplete pass: %v", fields)
+			}
+			logs.TakeAll()
+			priorReport := mi.runIncrementalDerivedPassesWithPriorTopologyHeld(t.Context(), map[string]DerivedInvalidationPlan{
+				"repo": {Files: []string{"repo/a.go"}, BodyOnlyFiles: 1},
+			}, prior)
+			if !priorReport.Incomplete || !errors.Is(priorReport.CapabilityError, failure) || logs.FilterMessage("incremental derived passes refused").Len() != 1 {
+				t.Fatalf("prior-only pass hid refusal: %+v", priorReport)
+			}
+		})
+	}
+}
+
+func TestCapabilityReplacementWithoutSourcesNeedsNoEviction(t *testing.T) {
+	// Given no actual sources behind duplicate/empty/unknown file names, when
+	// either file entry runs, then missing eviction remains a successful no-op.
+	store := &adjacencyRecordingStore{Store: graph.New(), out: map[string]struct{}{}, in: map[string]struct{}{}}
+	for _, files := range [][]string{nil, {"", ""}, {"repo/missing.go", "repo/missing.go", ""}} {
+		if re, ep, fa, err := synthesizeCapabilityEdgesForFiles(store, files); err != nil || re+ep+fa != 0 {
+			t.Fatalf("no-source file replacement = (%d,%d,%d), %v", re, ep, fa, err)
+		}
+		if re, ep, fa, err := synthesizeCapabilityEdgesForFilesWithPrior(store, newCapabilityPrior(), files); err != nil || re+ep+fa != 0 {
+			t.Fatalf("no-source prior replacement = (%d,%d,%d), %v", re, ep, fa, err)
+		}
+	}
+	if re, ep, fa, err := writeCapabilityEdgesForSources(store, nil, nil, nil, nil); err != nil || re+ep+fa != 0 {
+		t.Fatalf("empty source replacement = (%d,%d,%d), %v", re, ep, fa, err)
+	}
+	if store.adds != 0 {
+		t.Fatal("empty source replacement wrote rows")
 	}
 }

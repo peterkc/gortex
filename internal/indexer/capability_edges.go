@@ -124,7 +124,7 @@ func processExecMechanism(callee string) string {
 // It runs after the resolver (so call/field targets are settled) and is
 // idempotent — AddEdge dedupes by edge key and a reindex re-derives from
 // the current base edges. Returns per-kind counts for telemetry.
-func synthesizeCapabilityEdges(g graph.Store) (readsEnv, execProc, fieldAccess int) {
+func synthesizeCapabilityEdges(g graph.Store) (readsEnv, execProc, fieldAccess int, err error) {
 	return synthesizeCapabilityEdgesScoped(g, nil)
 }
 
@@ -144,9 +144,9 @@ func synthesizeCapabilityEdges(g graph.Store) (readsEnv, execProc, fieldAccess i
 // whole-graph — their transitive fixpoint lives in indirectMutationEdges (a
 // file this pass does not own) and re-affirming an unchanged repo's indirect
 // edges is idempotent via the add() dedup.
-func synthesizeCapabilityEdgesScoped(g graph.Store, changedPrefixes map[string]bool, changedFiles ...string) (readsEnv, execProc, fieldAccess int) {
+func synthesizeCapabilityEdgesScoped(g graph.Store, changedPrefixes map[string]bool, changedFiles ...string) (readsEnv, execProc, fieldAccess int, err error) {
 	if g == nil {
-		return 0, 0, 0
+		return 0, 0, 0, nil
 	}
 	g.ResolveMutex().Lock()
 	defer g.ResolveMutex().Unlock()
@@ -323,5 +323,5 @@ func synthesizeCapabilityEdgesScoped(g graph.Store, changedPrefixes map[string]b
 		})
 	}
 	g.AddBatch(nodes, collapseCapabilityIdentities(edges))
-	return readsEnv, execProc, fieldAccess
+	return readsEnv, execProc, fieldAccess, nil
 }

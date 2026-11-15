@@ -1,6 +1,8 @@
 package indexer
 
 import (
+	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,7 +18,7 @@ import (
 func synthesizeCapabilityEdgesForFiles(
 	g graph.Store,
 	changedFiles []string,
-) (readsEnv, execProc, fieldAccess int) {
+) (readsEnv, execProc, fieldAccess int, err error) {
 	files := make([]string, 0, len(changedFiles))
 	seenFiles := make(map[string]struct{}, len(changedFiles))
 	for _, file := range changedFiles {
@@ -30,7 +32,7 @@ func synthesizeCapabilityEdgesForFiles(
 		files = append(files, file)
 	}
 	if len(files) == 0 {
-		return 0, 0, 0
+		return 0, 0, 0, nil
 	}
 
 	fileNodes := g.GetFileNodesByPaths(files)
@@ -48,7 +50,7 @@ func synthesizeCapabilityEdgesForFiles(
 		}
 	}
 	if len(changedNodes) == 0 {
-		return 0, 0, 0
+		return 0, 0, 0, nil
 	}
 	indirect, impactedMethods := indirectMutationEdgesForMethods(g, seedMethods)
 	return writeCapabilityEdgesForSources(g, changedNodes, nil, indirect, impactedMethods)
@@ -115,15 +117,15 @@ func synthesizeCapabilityEdgesForFilesWithPrior(
 	g graph.Store,
 	prior *capabilityPrior,
 	changedFiles []string,
-) (readsEnv, execProc, fieldAccess int) {
+) (readsEnv, execProc, fieldAccess int, err error) {
 	if g == nil {
-		return 0, 0, 0
+		return 0, 0, 0, nil
 	}
 	g.ResolveMutex().Lock()
 	defer g.ResolveMutex().Unlock()
 	_, changedNodes, seedMethods := changedFileCapabilityNodes(g, changedFiles)
 	if len(changedNodes) == 0 && len(prior.restoration) == 0 {
-		return 0, 0, 0
+		return 0, 0, 0, nil
 	}
 	changedIDs := make(map[string]struct{}, len(changedNodes))
 	changedByID := make(map[string]*graph.Node, len(changedNodes))
@@ -390,7 +392,7 @@ func writeCapabilityEdgesForSources(
 	extraSources []*graph.Node,
 	indirect []indirectMutSpec,
 	impactedMethods map[string]*graph.Node,
-) (readsEnv, execProc, fieldAccess int) {
+) (readsEnv, execProc, fieldAccess int, err error) {
 	sourceSet := make(map[string]struct{}, len(changedNodes)+len(extraSources)+len(impactedMethods))
 	sourceIDs := make([]string, 0, len(changedNodes)+len(extraSources)+len(impactedMethods))
 	for _, group := range [][]*graph.Node{changedNodes, extraSources} {
@@ -418,7 +420,7 @@ func writeCapabilityEdgesForSources(
 		sourceIDs = append(sourceIDs, id)
 	}
 	if len(sourceIDs) == 0 {
-		return 0, 0, 0
+		return 0, 0, 0, nil
 	}
 	adjacency := g.GetOutEdgesByNodeIDs(sourceIDs)
 
@@ -525,8 +527,11 @@ func writeCapabilityEdgesForSources(
 	_, supported, err := graph.EvictEdgesFromSourcesByKindsBackground(g, sourceIDs, []graph.EdgeKind{
 		graph.EdgeReadsEnv, graph.EdgeExecutesProcess, graph.EdgeAccessesField,
 	})
-	if err != nil || !supported {
-		return 0, 0, 0
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("indexer: replace capability edges: %w", err)
+	}
+	if !supported {
+		return 0, 0, 0, fmt.Errorf("indexer: replace capability edges requires scoped eviction: %w", errors.ErrUnsupported)
 	}
 	nodes := make([]*graph.Node, 0, len(procNodes))
 	for _, node := range procNodes {
@@ -540,7 +545,7 @@ func writeCapabilityEdgesForSources(
 		})
 	}
 	g.AddBatch(nodes, collapseCapabilityIdentities(edges))
-	return readsEnv, execProc, fieldAccess
+	return readsEnv, execProc, fieldAccess, nil
 }
 
 // collapseCapabilityIdentities keeps one row per stored edge identity (from,

@@ -38,6 +38,14 @@ type warmupResolveFailureStore struct {
 	refuseIncoming   atomic.Bool
 	incomingRefusals atomic.Int64
 	forceImpact      atomic.Bool
+	failCapability   atomic.Bool
+}
+
+func (s *warmupResolveFailureStore) EvictEdgesFromSourcesByKinds(ctx context.Context, sources []string, kinds []graph.EdgeKind) (int, error) {
+	if s.failCapability.Load() {
+		return 0, errors.ErrUnsupported
+	}
+	return s.Store.EvictEdgesFromSourcesByKinds(ctx, sources, kinds)
 }
 
 func (s *warmupResolveFailureStore) BeginUnresolvedEdgeScan(ctx context.Context) (graph.UnresolvedEdgeScan, error) {
@@ -211,7 +219,7 @@ func TestWarmupCompletion(t *testing.T) {
 }
 
 func TestWarmupCompletionAfterExactFrontierRefusal(t *testing.T) {
-	for _, phase := range []string{"same_repo", "cross_repo"} {
+	for _, phase := range []string{"same_repo", "cross_repo", "capability"} {
 		t.Run(phase, func(t *testing.T) {
 			// Given a persisted repository with one offline file change.
 			t.Setenv("GORTEX_ENRICH_OVERLAP", "1")
@@ -264,17 +272,26 @@ func TestWarmupCompletionAfterExactFrontierRefusal(t *testing.T) {
 				controller.MarkReady(time.Millisecond)
 				publishReadinessPhase(state, "ready", true, nil)
 				g.refuseIncoming.Store(phase == "cross_repo")
+				g.failCapability.Store(phase == "capability")
 			})
 
-			// When the exact warmup resolve encounters the bounded refusal.
+			// When exact warmup encounters a bounded resolve refusal or a capability write failure.
 			mw, warmup := warmupDaemonStateContext(t.Context(), state, logger, markReady, func(context.Context, *indexer.MultiWatcher) error { return nil })
 			if mw != nil {
 				t.Cleanup(func() { require.NoError(t, mw.Stop()) })
 			}
 
-			// Then the full-pass fallback publishes ready and completes startup relations.
+			// Then resolve fallback or best-effort derived work leaves warmup queryable.
 			require.NoError(t, warmup.resolveErr)
-			require.Positive(t, g.incomingRefusals.Load(), "the bounded refusal must be exercised")
+			if phase == "capability" {
+				// Given a failed capability write, when exact warmup joins its
+				// best-effort passes, then its report is incomplete, not silently complete.
+				require.Len(t, logs.FilterMessage("incremental derived passes refused").All(), 1)
+				require.Len(t, logs.FilterMessage("daemon: exact warm derived passes incomplete").All(), 1)
+				require.Empty(t, logs.FilterMessage("daemon: exact warm derived passes complete").All())
+			} else {
+				require.Positive(t, g.incomingRefusals.Load(), "the bounded refusal must be exercised")
+			}
 			frontiers := logs.FilterMessage("daemon: warmup delta frontier").All()
 			require.Len(t, frontiers, 1)
 			require.Equal(t, true, frontiers[0].ContextMap()["exact"])

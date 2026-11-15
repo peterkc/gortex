@@ -1938,12 +1938,17 @@ func (mi *MultiIndexer) runGlobalGraphPassesTopologyHeld(
 	}
 	passStart("capability_edges")
 	capStart := time.Now()
-	capRe, capEp, capFa := synthesizeCapabilityEdgesScoped(mi.graph, scanPrefixes)
-	mi.logger.Info("global pass: capability edges",
-		zap.Int("reads_env", capRe),
-		zap.Int("executes_process", capEp),
-		zap.Int("accesses_field", capFa),
-		zap.Duration("elapsed", time.Since(capStart)))
+	capRe, capEp, capFa, capErr := synthesizeCapabilityEdgesScoped(mi.graph, scanPrefixes)
+	if capErr != nil {
+		mi.logger.Warn("global pass: capability edges refused", zap.String("pass", "capability_edges"),
+			zap.Bool("incomplete", true), zap.Error(capErr))
+	} else {
+		mi.logger.Info("global pass: capability edges",
+			zap.Int("reads_env", capRe),
+			zap.Int("executes_process", capEp),
+			zap.Int("accesses_field", capFa),
+			zap.Duration("elapsed", time.Since(capStart)))
+	}
 	// Clone detection is PER-REPOSITORY: each tracked repo gets its own
 	// finalise + detect over its own nodes (scoped by RepoPrefix), so no
 	// cross-repo candidate pair is ever formed and each repo's boilerplate

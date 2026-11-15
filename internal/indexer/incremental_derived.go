@@ -13,8 +13,8 @@ import (
 )
 
 // IncrementalDerivedReport exposes the work selected by the changed-file
-// invalidation plans. It is intentionally count-only so telemetry remains
-// bounded even for a large workspace.
+// invalidation plans. Counts and named pass refusals keep telemetry bounded
+// even for a large workspace.
 type IncrementalDerivedReport struct {
 	Repos          int
 	Files          int
@@ -25,6 +25,9 @@ type IncrementalDerivedReport struct {
 	TestSymbols    int
 	TestEdges      int
 	Capability     int
+
+	CapabilityError error
+	Incomplete      bool
 	// EntryPointHierarchy counts entry-point stamps (aspnet:controller
 	// today) propagated down resolved extends chains on declaration-shape
 	// changes.
@@ -384,9 +387,9 @@ func (mi *MultiIndexer) runIncrementalDerivedPassesWithPriorTopologyHeld(
 		phase = time.Now()
 		var readsEnv, execProc, fields int
 		if prior.covers(merged.Files) {
-			readsEnv, execProc, fields = synthesizeCapabilityEdgesForFilesWithPrior(mi.graph, prior, merged.Files)
+			readsEnv, execProc, fields, report.CapabilityError = synthesizeCapabilityEdgesForFilesWithPrior(mi.graph, prior, merged.Files)
 		} else {
-			readsEnv, execProc, fields = synthesizeCapabilityEdgesScoped(mi.graph, scopedPrefixes, merged.Files...)
+			readsEnv, execProc, fields, report.CapabilityError = synthesizeCapabilityEdgesScoped(mi.graph, scopedPrefixes, merged.Files...)
 		}
 		report.Capability = readsEnv + execProc + fields
 		report.CapabilityMs = time.Since(phase).Milliseconds()
@@ -398,10 +401,14 @@ func (mi *MultiIndexer) runIncrementalDerivedPassesWithPriorTopologyHeld(
 		// nothing else re-derives them. The prior bounds that to the files and
 		// the sources whose rows the eviction deleted.
 		phase = time.Now()
-		readsEnv, execProc, fields := synthesizeCapabilityEdgesForFilesWithPrior(mi.graph, prior, merged.Files)
+		readsEnv, execProc, fields, err := synthesizeCapabilityEdgesForFilesWithPrior(mi.graph, prior, merged.Files)
+		report.CapabilityError = err
 		report.Capability = readsEnv + execProc + fields
 		report.CapabilityMs = time.Since(phase).Milliseconds()
 		notePassFaults("capability")
+	}
+	if report.CapabilityError != nil {
+		report.Incomplete = true
 	}
 	frameworkRuns := merged.Flags.Has(DerivedInvalidatesDeclarations) ||
 		merged.Flags.Has(DerivedInvalidatesImports) ||
@@ -514,6 +521,7 @@ func (mi *MultiIndexer) logIncrementalDerived(report IncrementalDerivedReport, p
 		zap.Int("test_edges", report.TestEdges),
 		zap.Int("entrypoint_hierarchy", report.EntryPointHierarchy),
 		zap.Int("capability_edges", report.Capability),
+		zap.Bool("incomplete", report.Incomplete),
 		// Keep framework_edges for log consumers, and add the accurate label:
 		// synthesizers report attempted/landed candidates, including idempotent
 		// rows that may already be durable.
@@ -556,6 +564,11 @@ func (mi *MultiIndexer) logIncrementalDerived(report IncrementalDerivedReport, p
 		zap.Int64("duration_ms", report.DurationMs)}
 	for _, family := range []string{"prelude", "hierarchy", "tests", "capability", "framework", "external_calls", "cross_repo", "contracts"} {
 		fields = append(fields, writeCounterFields(family+"_", report.PassWrites[family])...)
+	}
+	if report.CapabilityError != nil {
+		fields = append(fields, zap.String("pass", "capability_edges"), zap.Error(report.CapabilityError))
+		mi.logger.Warn("incremental derived passes refused", fields...)
+		return
 	}
 	mi.logger.Info("incremental derived passes complete", fields...)
 }

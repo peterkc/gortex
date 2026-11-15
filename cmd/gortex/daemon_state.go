@@ -1352,7 +1352,11 @@ func warmupDaemonStateContext(ctx context.Context, state *daemonState, logger *z
 		// invalidation families carried by the reconciled files.
 		state.multiIndexer.ResetBatch()
 		report := state.multiIndexer.RunIncrementalDerivedPasses(ctx, deltaPlans)
-		logger.Info("daemon: exact warm derived passes complete", zap.Any("report", report))
+		if report.Incomplete {
+			logger.Warn("daemon: exact warm derived passes incomplete", zap.Any("report", report))
+		} else {
+			logger.Info("daemon: exact warm derived passes complete", zap.Any("report", report))
+		}
 	default:
 		state.multiIndexer.EndBatchContext(ctx)
 	}

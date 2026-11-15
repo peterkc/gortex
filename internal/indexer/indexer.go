@@ -4827,7 +4827,11 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 			if ctrl := entrypoints.PropagateEntryPointsDownHierarchy(idx.graph); ctrl > 0 {
 				idx.logger.Info("entry-point hierarchy stamped", zap.Int("stamped", ctrl))
 			}
-			if re, ep, fa := synthesizeCapabilityEdges(idx.graph); re > 0 || ep > 0 || fa > 0 {
+			re, ep, fa, err := synthesizeCapabilityEdges(idx.graph)
+			if err != nil {
+				return nil, err
+			}
+			if re > 0 || ep > 0 || fa > 0 {
 				idx.logger.Info("capability edges emitted",
 					zap.Int("reads_env", re),
 					zap.Int("executes_process", ep),
