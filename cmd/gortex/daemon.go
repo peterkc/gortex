@@ -897,6 +897,11 @@ func publishWarmupCompletion(ctx context.Context, state *daemonState, controller
 			// Keep storage details in the daemon log, not the readiness channel.
 			"error": "warmup resolve failed; check the daemon log",
 		})
+		// This fallback serves requests even when compute-ready was skipped.
+		// Publish its readiness before allowing physical cleanup to start.
+		if ctx.Err() == nil && state.lifecycle != nil {
+			state.lifecycle.MarkRepositoryCleanupReady()
+		}
 		logWarmupSummary(logger, warmup, queryable, elapsed)
 		return
 	}

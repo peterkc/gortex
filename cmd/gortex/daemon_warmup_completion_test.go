@@ -746,3 +746,98 @@ func TestDaemonCleanupWaitsWhenWarmupFailsBeforeReady(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, journal)
 }
+
+func TestDaemonCleanupReleaseFollowsResolveFailureCompletion(t *testing.T) {
+	for _, completion := range []string{"resolve_failure", "canceled_completion"} {
+		t.Run(completion, func(t *testing.T) {
+			// Given an interrupted cleanup and a warmup resolve failure that
+			// skipped compute-ready but still permits the completion fallback.
+			f := newDaemonCleanupFixture(t)
+			_, err := f.state.configManager.Global().RemoveRepoAndSaveIfPresent(f.root)
+			require.NoError(t, err)
+			healthy := startupPublicationRepo(t, t.TempDir(), "resolve-failure-healthy")
+			require.NoError(t, f.state.configManager.Global().AddRepo(config.RepoEntry{Path: healthy, Name: "healthy"}))
+			require.NoError(t, f.state.configManager.Global().Save())
+			g := &heldWarmupCleanupPurge{Store: f.store, entered: make(chan warmupCleanupPurgeEntry, 2), release: make(chan struct{})}
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(g.release) }) }
+			t.Cleanup(release)
+			f.restart(g)
+			g.server = f.state.mcpServer
+			publisher, err := indexer.NewDedicatedBaseRuntime(f.store, f.state.lifecycle.ViewLeases())
+			require.NoError(t, err)
+			finalizer := &warmupCleanupFinalizer{DedicatedBaseRuntime: publisher, finalized: make(chan string, 2)}
+			require.NoError(t, f.state.lifecycle.SetDedicatedBaseCleanupRuntime(finalizer))
+			require.NoError(t, f.state.lifecycle.Seed(t.Context()))
+			g.failResolve.Store(true)
+			controller := &realController{graph: g}
+			markReady := sync.OnceFunc(func() {
+				controller.MarkReady(time.Millisecond)
+				publishReadinessPhase(f.state, "ready", true, nil)
+				f.state.lifecycle.MarkRepositoryCleanupReady()
+			})
+			watcher, warmup := warmupDaemonStateContext(t.Context(), f.state, zap.NewNop(), markReady, nil)
+			if watcher != nil {
+				t.Cleanup(func() { require.NoError(t, watcher.Stop()) })
+				require.NoError(t, watcher.Stop())
+			}
+			require.ErrorIs(t, warmup.resolveErr, errCleanupWarmupResolve)
+			require.True(t, warmup.canFinalize(t.Context()))
+			require.False(t, controller.ready.Load())
+			require.NotNil(t, f.store.GetNode(f.nodeID))
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if completion == "canceled_completion" {
+				cancel()
+			}
+			viewBuilds := indexer.NewViewBuildGate()
+
+			// When the real final publisher chooses usable-but-unenriched status.
+			publishWarmupCompletion(ctx, f.state, controller, zap.NewNop(), viewBuilds, warmup, 0, time.Second)
+
+			if completion == "canceled_completion" {
+				// Then cancellation retains the closed barrier and durable work.
+				require.False(t, viewBuilds.IsOpen())
+				release() // A regression must not leave teardown waiting on the spy.
+				require.NoError(t, f.state.lifecycle.Close())
+				g.mu.Lock()
+				entries := append([]warmupCleanupPurgeEntry(nil), g.entries...)
+				g.mu.Unlock()
+				require.Empty(t, entries)
+				require.NotNil(t, f.store.GetNode(f.nodeID))
+				journal, err := f.store.Catalog().ListCleanupEntries(t.Context())
+				require.NoError(t, err)
+				require.NotEmpty(t, journal)
+				return
+			}
+
+			// Then the fallback publishes readiness before waking physical cleanup,
+			// without claiming successful enrichment or needing another sweep.
+			require.True(t, controller.ready.Load())
+			require.False(t, controller.enriched.Load())
+			require.True(t, viewBuilds.IsOpen())
+			phase, ready := f.state.mcpServer.ReadinessPhase()
+			require.Equal(t, "warmup_incomplete", phase)
+			require.True(t, ready)
+			select {
+			case entry := <-g.entered:
+				require.Equal(t, warmupCleanupPurgeEntry{prefix: f.tracked.Prefix, source: "repository_cleanup", ready: true}, entry)
+			case <-time.After(10 * time.Second):
+				t.Fatal("resolve-failure completion did not release pending cleanup")
+			}
+			require.NotNil(t, f.store.GetNode(f.nodeID))
+			release()
+			select {
+			case graphID := <-finalizer.finalized:
+				require.Equal(t, f.tracked.GraphID, graphID)
+			case <-time.After(10 * time.Second):
+				t.Fatal("resolve-failure completion did not finalize cleanup")
+			}
+			require.NoError(t, f.state.lifecycle.Close())
+			require.Nil(t, f.store.GetNode(f.nodeID))
+			journal, err := f.store.Catalog().ListCleanupEntries(t.Context())
+			require.NoError(t, err)
+			require.Empty(t, journal)
+		})
+	}
+}
