@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -174,8 +175,9 @@ func TestImplementationRecoveryHasNoLegacyAdjacencyFallback(t *testing.T) {
 	reader := &exploreImplementationLegacyOnlyReader{Reader: base}
 	server := exploreImplementationTestServer(reader)
 	method := exploreTarget{node: base.GetNode("repo/storage/storage.go::Storage.load"), score: 1}
-	if got := server.expandImplementationTargets(context.Background(), []exploreTarget{method}, graph.LocalizationNodeScope{}); len(got) != 1 {
-		t.Fatalf("unsupported expansion returned %d targets", len(got))
+	// Given unavailable optional adjacency, retain every field of the ordinary ranked evidence.
+	if got := server.expandImplementationTargets(context.Background(), []exploreTarget{method}, graph.LocalizationNodeScope{}); !reflect.DeepEqual(got, []exploreTarget{method}) {
+		t.Fatalf("unsupported expansion changed ranked evidence: %#v", got)
 	}
 	if !exploreImplementationAnswerBlocked(
 		context.Background(), "find the concrete implementation", []exploreTarget{method}, reader, graph.LocalizationNodeScope{},
@@ -189,8 +191,8 @@ func TestImplementationRecoveryHasNoLegacyAdjacencyFallback(t *testing.T) {
 		{node: foldBase.GetNode("repo/mw/persist.ts::PersistOptions.serialize")},
 		{node: foldBase.GetNode("repo/mw/persist.ts::PersistOptions.hydrate")},
 	}
-	if got := exploreImplementationTestServer(foldReader).foldMemberOwners(context.Background(), members, graph.LocalizationNodeScope{}); len(got) != len(members) {
-		t.Fatalf("unsupported owner fold returned %d targets", len(got))
+	if got := exploreImplementationTestServer(foldReader).foldMemberOwners(context.Background(), members, graph.LocalizationNodeScope{}); !reflect.DeepEqual(got, members) {
+		t.Fatalf("unsupported owner fold changed ranked evidence: %#v", got)
 	}
 }
 

@@ -610,6 +610,8 @@ func (s *Server) mapExploreSourceLiteralMatchesContext(
 		}
 	}
 
+	// These maps hold optional callee proof, not exhaustive adjacency.
+	// Missing, failed or incomplete proof retains the enclosing declaration.
 	siteEdges := make(map[graph.EdgeSourceSite][]graph.EdgeIdentity)
 	calleeNodes := map[string]*graph.Node{}
 	if len(ownerSites) > 0 {
@@ -713,7 +715,8 @@ func (s *Server) mapExploreSourceLiteralMatchesContext(
 // current-view instantiation adjacency for the already-bounded literal callee
 // cohort. The full per-key projection cap is intentional: a truncated page may
 // consist entirely of durable edges hidden by an overlay, so truncation can
-// never be treated as a positive witness.
+// never be treated as a positive witness. Nil means no additional alignment
+// proof, not proof that construction is absent.
 func projectExploreSourceLiteralConstructionAlignment(
 	ctx context.Context,
 	reader graph.Reader,

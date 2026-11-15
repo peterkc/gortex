@@ -2,11 +2,13 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/query"
 )
 
 type legacyOnlyExploreReader struct{ graph.Reader }
@@ -188,5 +190,44 @@ func TestExploreDivergentDefaultOwnerUsesRequestScopeAndOverlayView(t *testing.T
 	)
 	if len(got) != 1 || got[0].node.ID != fixture.write.ID {
 		t.Fatalf("reader without bounded capability used legacy full-row fallback: %#v", got)
+	}
+}
+
+func TestOptionalBoundedRecoveryCannotCertifyRequiredNameAbsence(t *testing.T) {
+	ctx := context.Background()
+	base := graph.New()
+	node := &graph.Node{ID: "src/a.go::Owner", Name: "Owner", Kind: graph.KindType, FilePath: "src/a.go"}
+	base.AddNode(node)
+	exact := &exactNameAnchorCountingReader{Reader: base}
+	stripped := legacyOnlyExploreReader{Reader: exact}
+	for _, test := range []struct {
+		name   string
+		reader graph.Reader
+		usable bool
+	}{
+		{"supported", exact, true}, {"stripped", stripped, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// Given a known node, optional recovery needs bounded proof, never a legacy full-row read.
+			// When proof is unavailable, false means unknown; it cannot certify that Owner is absent.
+			byName, usable := boundedLocalizationExactName(ctx, test.reader, "Owner", graph.LocalizationNodeScope{}, 4)
+			if usable != test.usable || (usable && (len(byName.Nodes) != 1 || byName.Nodes[0].ID != node.ID)) {
+				t.Fatalf("optional exact projection=%#v/%t", byName, usable)
+			}
+			byFile, usable := boundedLocalizationFileNodes(ctx, test.reader, localizationFileBudgetFor(ctx), node.FilePath, graph.LocalizationNodeScope{}, 4)
+			if usable != test.usable || (usable && (len(byFile.Nodes) != 1 || byFile.Nodes[0].ID != node.ID)) {
+				t.Fatalf("optional file projection=%#v/%t", byFile, usable)
+			}
+		})
+	}
+	// Given a required coherent name read, the same missing proof must remain a visible refusal.
+	nodes, more, err := nameOnlySymbolCandidates(ctx, stripped, "Owner", 4, query.QueryOptions{})
+	if !errors.Is(err, projectionSuperseded) || len(nodes) != 0 || more {
+		t.Fatalf("required stripped read=%#v/%t/%v", nodes, more, err)
+	}
+	view := graph.NewOverlaidView(stripped, graph.NewOverlayLayer())
+	nodes, more, err = nameOnlySymbolCandidates(ctx, view, "Owner", 4, query.QueryOptions{})
+	if err == nil || err.Error() != "graph: selected base lacks coherent folded-name candidates" || len(nodes) != 0 || more {
+		t.Fatalf("required overlay read=%#v/%t/%v", nodes, more, err)
 	}
 }

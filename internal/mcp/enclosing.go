@@ -286,7 +286,8 @@ func (s *Server) buildFileSymbolIndexForPathsScopedContext(
 // applies request/session scope before each storage cap, and shares one strict
 // node budget across the request. Saturated and unavailable paths retain an
 // explicit marker so an exact lookup cannot fall through to a compatibility
-// alias and misattribute an omitted narrower declaration.
+// alias and misattribute an omitted narrower declaration. A saturated marker
+// means unknown contents, not an empty complete file.
 func (s *Server) buildFileSymbolIndexForOrderedPathsScopedContext(
 	ctx context.Context,
 	paths []string,

@@ -9,6 +9,8 @@ import (
 
 // The selected reader must certify selection and retained payloads as one
 // coherent view. Process cache tokens do not certify a paged SQL snapshot.
+// Unlike optional recovery, this required read refuses unavailable proof:
+// successful emptiness would certify absence.
 func nameOnlySymbolCandidates(ctx context.Context, reader graph.Reader, needle string, horizon int, scope query.QueryOptions) ([]*graph.Node, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
