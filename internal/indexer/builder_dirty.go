@@ -489,7 +489,9 @@ func dirtyChainLanguageCensus(ctx context.Context, store *store_sqlite.Store, to
 		}
 		generation := map[string]map[string]int{}
 		for _, count := range graph.ReadRepoLanguageFileCounts(store.AtGeneration(id), []string{repoPrefix}) {
-			if count.Language == "" || count.Count <= 0 {
+			// AtGeneration returns concrete SQLite with exact projection support.
+			// Synthetic pathless rows cannot participate in newest-file-wins composition.
+			if count.FilePath == "" || count.Language == "" || count.Count <= 0 {
 				continue
 			}
 			if generation[count.FilePath] == nil {

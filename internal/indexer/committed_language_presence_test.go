@@ -44,3 +44,22 @@ func TestCommittedGoPresenceUsesCheckedReaderAndGraphFallback(t *testing.T) {
 		t.Fatalf("pre-cancel got%t/%v called%t", got, err, checked.called)
 	}
 }
+
+func TestCommittedGoPresenceAllowsAggregateOnlyCounts(t *testing.T) {
+	g := graph.New()
+	g.AddBatch([]*graph.Node{{ID: "g", Kind: graph.KindFunction, RepoPrefix: "go", FilePath: "main.go", Language: "go"}, {ID: "r", Kind: graph.KindFunction, RepoPrefix: "rust", FilePath: "main.rs", Language: "rust"}, {ID: "synthetic", Kind: graph.KindFunction, RepoPrefix: "pathless-go", Language: "go"}}, nil)
+	var adapter graph.Store = struct{ graph.Store }{g}
+	// Given an aggregate-only adapter, positive Go presence needs no file attribution or exclusion proof.
+	for _, repo := range []string{"go", "rust", "absent", "pathless-go"} {
+		want := repo == "go" || repo == "pathless-go"
+		got, err := carriesGoFilesContext(context.Background(), adapter, repo)
+		if err != nil || got != want {
+			t.Fatalf("aggregate presence %q=%t/%v want%t", repo, got, err, want)
+		}
+		for _, row := range graph.ReadRepoLanguageFileCounts(adapter, []string{repo}) {
+			if row.FilePath != "" {
+				t.Fatalf("fixture did not strip exact projection: %+v", row)
+			}
+		}
+	}
+}

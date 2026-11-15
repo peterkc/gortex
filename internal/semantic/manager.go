@@ -383,7 +383,10 @@ func (m *Manager) EnrichAll(g graph.Store, roots map[string]string, opts EnrichO
 	// gate — providers fall through to their own per-pass gate as before.
 	// nodeCounts (enrichable nodes per repo) feeds the size-scaled per-repo
 	// deadline — see enrichRepoTimeout.
-	present, nodeCounts, langCounts := m.repoLanguages(g, roots)
+	present, nodeCounts, langCounts, err := m.repoLanguages(g, roots)
+	if err != nil {
+		return nil, partial, err
+	}
 	if floor := opts.MinLanguageNodes; floor > 0 {
 		below := make(map[string]int)
 		for lang, count := range langCounts {
@@ -597,7 +600,14 @@ func (m *Manager) EnrichAll(g graph.Store, roots map[string]string, opts EnrichO
 // filters), which sizes the per-repo enrichment deadline — see
 // enrichRepoTimeout. The third counts them per language across all repos — the
 // composition signal EnrichAll orders providers by (primary language first).
-func (m *Manager) repoLanguages(g graph.Store, roots map[string]string) (map[string]bool, map[string]int, map[string]int) {
+// Nonempty roots require exact file counts for path exclusions. Synthetic
+// pathless rows do not establish membership in a source file.
+func (m *Manager) repoLanguages(g graph.Store, roots map[string]string) (map[string]bool, map[string]int, map[string]int, error) {
+	if len(roots) > 0 {
+		if _, exact := g.(graph.RepoLanguageFileCountReader); !exact {
+			return nil, nil, nil, fmt.Errorf("semantic: repository language census requires file-aware counts: %w", errors.ErrUnsupported)
+		}
+	}
 	present := make(map[string]bool)
 	counts := make(map[string]int, len(roots))
 	// langCounts is the enrichable-node count per language across all repos —
@@ -614,7 +624,7 @@ func (m *Manager) repoLanguages(g graph.Store, roots map[string]string) (map[str
 	// repo/file/language columns without decoding Meta, docs, or signatures;
 	// content sections are filtered before rows cross the database boundary.
 	for _, row := range graph.ReadRepoLanguageFileCounts(g, repoPrefixes) {
-		if _, tracked := roots[row.RepoPrefix]; !tracked || row.Language == "" || row.Count <= 0 {
+		if _, tracked := roots[row.RepoPrefix]; !tracked || row.FilePath == "" || row.Language == "" || row.Count <= 0 {
 			continue
 		}
 		// Generated / vendored files don't make a language "present" — a
@@ -633,7 +643,7 @@ func (m *Manager) repoLanguages(g graph.Store, roots map[string]string) (map[str
 		counts[row.RepoPrefix] += row.Count
 		langCounts[row.Language] += row.Count
 	}
-	return present, counts, langCounts
+	return present, counts, langCounts, nil
 }
 
 // anyLangPresent reports whether any of langs is in the present set.

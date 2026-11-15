@@ -325,7 +325,8 @@ func carriesGoFilesContext(ctx context.Context, handle graph.Store, repoPrefix s
 	}); ok {
 		return reader.RepoHasLanguageContext(ctx, repoPrefix, "go")
 	}
-	// Adapter stores retain the existing compact file-count contract.
+	// This asks only for positive Go presence, not file identity or exclusions.
+	// Aggregate-only adapters therefore retain the compact fallback here.
 	present := false
 	for _, row := range graph.ReadRepoLanguageFileCounts(handle, []string{repoPrefix}) {
 		if row.Language == "go" && row.Count > 0 {
