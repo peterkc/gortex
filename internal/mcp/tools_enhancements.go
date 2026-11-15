@@ -1259,7 +1259,11 @@ func (s *Server) handleAnalyzeStaleCode(ctx context.Context, req mcp.CallToolReq
 	// Push the kind filter into the storage layer; the meta gate
 	// (last_authored.timestamp) stays in Go since the meta column is
 	// opaque to the query layer.
-	blame := blameRowsByID(s.readerFor(ctx))
+	blame, available := blameRowsByID(s.readerFor(ctx))
+	unavailable := unavailableEnrichment{}
+	if !available {
+		unavailable = append(unavailable, "blame")
+	}
 	for _, n := range s.scopedNodesByKinds(ctx, allowedKindsSlice(allowedKinds)) {
 		la, ok := lastAuthoredFrom(blame, n)
 		if !ok || la.Timestamp == 0 {
@@ -1298,16 +1302,19 @@ func (s *Server) handleAnalyzeStaleCode(ctx context.Context, req mcp.CallToolReq
 			}
 			fmt.Fprintf(&b, " %s\n", r.ID)
 		}
-		if len(rows) == 0 {
+		if len(rows) == 0 && available {
 			b.WriteString("no stale code matched\n")
 		}
+		b.WriteString(unavailable.line())
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return s.respondJSONOrTOON(ctx, req, map[string]any{
+	payload := map[string]any{
 		"stale":          rows,
 		"total":          len(rows),
 		"older_than_day": olderThanDays,
-	})
+	}
+	unavailable.apply(payload)
+	return s.respondJSONOrTOON(ctx, req, payload)
 }
 
 // allowedKindsSlice returns the keys of an analyzer's allowedKinds
@@ -1403,7 +1410,11 @@ func (s *Server) handleAnalyzeOwnership(ctx context.Context, req mcp.CallToolReq
 	// Kind pushdown — owners are derived from the blame meta on
 	// function/method (or wider) nodes; the analyzer scans tens of
 	// thousands of irrelevant nodes without it on a disk backend.
-	ownBlame := blameRowsByID(s.readerFor(ctx))
+	ownBlame, available := blameRowsByID(s.readerFor(ctx))
+	unavailable := unavailableEnrichment{}
+	if !available {
+		unavailable = append(unavailable, "blame")
+	}
 	// Tallied inside the scan the answer is computed from, so the caveat can
 	// never disagree with the number it accompanies: candidates counts every
 	// symbol that passed the kind and path filters, stamped the subset
@@ -1485,6 +1496,9 @@ func (s *Server) handleAnalyzeOwnership(ctx context.Context, req mcp.CallToolReq
 	// look like the answer. This is the same argument the route inventory
 	// case makes — 130 of 153 rows is the reading that gets acted on.
 	state := ownershipDataState(candidatesByRepo, stampedByRepo, len(byEmail), len(rows))
+	if !available {
+		state = dataStateCaveat{}
+	}
 	if len(rows) > 0 && state.State == dataStateComplete {
 		state = dataStateCaveat{}
 	}
@@ -1494,12 +1508,13 @@ func (s *Server) handleAnalyzeOwnership(ctx context.Context, req mcp.CallToolReq
 		for _, r := range rows {
 			fmt.Fprintf(&b, "%-5d %-3d %s\n", r.Symbols, r.Files, r.Email)
 		}
-		if len(rows) == 0 {
+		if len(rows) == 0 && available {
 			b.WriteString("no owners matched\n")
 		}
 		if state.State != "" {
 			b.WriteString(state.line())
 		}
+		b.WriteString(unavailable.line())
 		return mcp.NewToolResultText(b.String()), nil
 	}
 	payload := map[string]any{
@@ -1509,6 +1524,7 @@ func (s *Server) handleAnalyzeOwnership(ctx context.Context, req mcp.CallToolReq
 	if state.State != "" {
 		payload[dataStateCaveatKey] = state.payload()
 	}
+	unavailable.apply(payload)
 	return s.respondJSONOrTOON(ctx, req, payload)
 }
 
@@ -1583,7 +1599,11 @@ func (s *Server) handleAnalyzeCoverageGaps(ctx context.Context, req mcp.CallTool
 		Hit     int     `json:"hit"`
 	}
 	var rows []gapRow
-	covRows := coverageRowsByID(s.readerFor(ctx))
+	covRows, available := coverageRowsByID(s.readerFor(ctx))
+	unavailable := unavailableEnrichment{}
+	if !available {
+		unavailable = append(unavailable, "coverage")
+	}
 	// Kind pushdown — coverage_pct only ever lands on executable
 	// kinds, so the IN-list IS the candidate set.
 	for _, n := range s.scopedNodesByKinds(ctx, allowedKindsSlice(allowedKinds)) {
@@ -1642,17 +1662,20 @@ func (s *Server) handleAnalyzeCoverageGaps(ctx context.Context, req mcp.CallTool
 		for _, r := range rows {
 			fmt.Fprintf(&b, "%5.1f%% %s:%d  %s\n", r.Pct, r.File, r.Line, r.ID)
 		}
-		if len(rows) == 0 {
+		if len(rows) == 0 && available {
 			b.WriteString("no coverage gaps matched\n")
 		}
+		b.WriteString(unavailable.line())
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return s.respondJSONOrTOON(ctx, req, map[string]any{
+	payload := map[string]any{
 		"gaps":    rows,
 		"total":   len(rows),
 		"min_pct": minPct,
 		"max_pct": maxPct,
-	})
+	}
+	unavailable.apply(payload)
+	return s.respondJSONOrTOON(ctx, req, payload)
 }
 
 // handleAnalyzeStaleFlags lists feature flags whose every toggling
@@ -1707,7 +1730,11 @@ func (s *Server) handleAnalyzeStaleFlags(ctx context.Context, req mcp.CallToolRe
 	// flag GetInEdges; pushing that into a single query join is a
 	// separate follow-up since the join semantics differ per flag.
 	reader := s.readerFor(ctx)
-	flagBlame := blameRowsByID(reader)
+	flagBlame, available := blameRowsByID(reader)
+	unavailable := unavailableEnrichment{}
+	if !available {
+		unavailable = append(unavailable, "blame")
+	}
 	for _, n := range s.scopedNodesByKinds(ctx, []graph.NodeKind{graph.KindFlag}) {
 		provider, _ := n.Meta["provider"].(string)
 		if providerFilter != "" && provider != providerFilter {
@@ -1792,17 +1819,20 @@ func (s *Server) handleAnalyzeStaleFlags(ctx context.Context, req mcp.CallToolRe
 			}
 			fmt.Fprintf(&b, "%4dd  %s (%s) — %d callers\n", r.AgeDays, r.Name, r.Provider, r.Callers)
 		}
-		if len(rows) == 0 {
+		if len(rows) == 0 && available {
 			b.WriteString("no stale flags matched\n")
 		}
+		b.WriteString(unavailable.line())
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return s.respondJSONOrTOON(ctx, req, map[string]any{
+	payload := map[string]any{
 		"flags":          rows,
 		"total":          len(rows),
 		"unscored":       unscored,
 		"older_than_day": olderThanDays,
-	})
+	}
+	unavailable.apply(payload)
+	return s.respondJSONOrTOON(ctx, req, payload)
 }
 
 // stringFromMeta is a tiny helper for safe meta string extraction.
@@ -2054,7 +2084,11 @@ func (s *Server) handleAnalyzeCoverageSummary(ctx context.Context, req mcp.CallT
 		sumPct float64 // running sum, hidden from JSON
 	}
 	byDir := map[string]*dirStats{}
-	covRows := coverageRowsByID(s.readerFor(ctx))
+	covRows, available := coverageRowsByID(s.readerFor(ctx))
+	unavailable := unavailableEnrichment{}
+	if !available {
+		unavailable = append(unavailable, "coverage")
+	}
 
 	// Kind pushdown — coverage_pct only lives on executable kinds.
 	for _, n := range s.scopedNodesByKinds(ctx, allowedKindsSlice(allowedKinds)) {
@@ -2105,15 +2139,18 @@ func (s *Server) handleAnalyzeCoverageSummary(ctx context.Context, req mcp.CallT
 			fmt.Fprintf(&b, "%5.1f%% %3d sym (%d cov / %d part / %d unc)  %s\n",
 				r.AvgPct, r.Symbols, r.Covered, r.Partial, r.Uncovered, r.Dir)
 		}
-		if len(rows) == 0 {
+		if len(rows) == 0 && available {
 			b.WriteString("no coverage data\n")
 		}
+		b.WriteString(unavailable.line())
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return s.respondJSONOrTOON(ctx, req, map[string]any{
+	payload := map[string]any{
 		"directories": rows,
 		"total":       len(rows),
-	})
+	}
+	unavailable.apply(payload)
+	return s.respondJSONOrTOON(ctx, req, payload)
 }
 
 // roundTwoDecimal rounds to 2 decimal places, mirroring the
@@ -2214,6 +2251,11 @@ func (s *Server) handleAnalyzeReleases(ctx context.Context, req mcp.CallToolRequ
 	// an overlay-active request grades the timeline against the state it
 	// reads rather than mixing buffers with the indexed node set.
 	reader := s.readerFor(ctx)
+	relByID, available := releaseRowsByID(reader)
+	unavailable := unavailableEnrichment{}
+	if !available {
+		unavailable = append(unavailable, "release")
+	}
 	releaseByTag := map[string]*releaseRow{}
 	for _, n := range reader.AllNodes() {
 		if n.Kind != graph.KindRelease {
@@ -2259,14 +2301,16 @@ func (s *Server) handleAnalyzeReleases(ctx context.Context, req mcp.CallToolRequ
 			}
 		}
 		if row == nil {
-			return s.respondJSONOrTOON(ctx, req, map[string]any{
-				"error":      fmt.Sprintf("no KindRelease node for tag %q; run `enrich_releases` first", tagFilter),
-				"suggestion": "enrich_releases",
-				"releases":   []releaseRow{},
-				"total":      0,
-			})
+			payload := map[string]any{
+				"releases": []releaseRow{}, "total": 0,
+			}
+			if available {
+				payload["error"] = fmt.Sprintf("no KindRelease node for tag %q; run `enrich_releases` first", tagFilter)
+				payload["suggestion"] = "enrich_releases"
+			}
+			unavailable.apply(payload)
+			return s.respondJSONOrTOON(ctx, req, payload)
 		}
-		relByID := releaseRowsByID(reader)
 		for _, n := range reader.AllNodes() {
 			if n.Kind != graph.KindFile || n.FilePath == "" {
 				continue
@@ -2284,12 +2328,14 @@ func (s *Server) handleAnalyzeReleases(ctx context.Context, req mcp.CallToolRequ
 			row.Files = append(row.Files, n.FilePath)
 		}
 		sort.Strings(row.Files)
-		return s.respondJSONOrTOON(ctx, req, map[string]any{
+		payload := map[string]any{
 			"releases":  []releaseRow{*row},
 			"total":     1,
 			"tag":       tagFilter,
 			"file_hits": len(row.Files),
-		})
+		}
+		unavailable.apply(payload)
+		return s.respondJSONOrTOON(ctx, req, payload)
 	}
 
 	// No tag filter: return the timeline. Use `order` (oldest=0) so
@@ -2301,7 +2347,7 @@ func (s *Server) handleAnalyzeReleases(ctx context.Context, req mcp.CallToolRequ
 		// (an unlikely combination; surface as an empty timeline);
 		// otherwise return the structured error.
 		hasAnyAddedIn := false
-		if relByID := releaseRowsByID(reader); len(relByID) > 0 {
+		if len(relByID) > 0 {
 			hasAnyAddedIn = true
 		} else {
 			for _, n := range reader.AllNodes() {
@@ -2316,7 +2362,7 @@ func (s *Server) handleAnalyzeReleases(ctx context.Context, req mcp.CallToolRequ
 				}
 			}
 		}
-		if !hasAnyAddedIn {
+		if !hasAnyAddedIn && available {
 			return s.respondJSONOrTOON(ctx, req, map[string]any{
 				"error":      "no release timeline in scope; run `enrich_releases` (or `gortex enrich releases`) to populate KindRelease nodes and meta.added_in",
 				"suggestion": "enrich_releases",
@@ -2335,10 +2381,12 @@ func (s *Server) handleAnalyzeReleases(ctx context.Context, req mcp.CallToolRequ
 		}
 		return rows[i].Tag < rows[j].Tag
 	})
-	return s.respondJSONOrTOON(ctx, req, map[string]any{
+	payload := map[string]any{
 		"releases": rows,
 		"total":    len(rows),
-	})
+	}
+	unavailable.apply(payload)
+	return s.respondJSONOrTOON(ctx, req, payload)
 }
 
 // releaseKey builds the lookup key from a (repoPrefix, tag) pair so
@@ -2687,6 +2735,7 @@ func (s *Server) handleFindHotspots(ctx context.Context, req mcp.CallToolRequest
 	if mode == "" {
 		mode = "complexity"
 	}
+	unavailable := unavailableEnrichment{}
 	if mode != "complexity" {
 		windowDays := 30
 		if v, ok := req.GetArguments()["window_days"].(float64); ok && v > 0 {
@@ -2696,7 +2745,11 @@ func (s *Server) handleFindHotspots(ctx context.Context, req mcp.CallToolRequest
 		if direction == "" {
 			direction = "adds"
 		}
-		entries = rerankHotspots(entries, s.graph, mode, direction, windowDays)
+		var available bool
+		entries, available = rerankHotspots(entries, s.graph, mode, direction, windowDays)
+		if !available {
+			unavailable = append(unavailable, "blame")
+		}
 	}
 
 	// hotspots reads s.graph directly, bypassing the scoped-node
@@ -2754,7 +2807,7 @@ func (s *Server) handleFindHotspots(ctx context.Context, req mcp.CallToolRequest
 				Score:          e.ComplexityScore,
 			})
 		}
-		return s.gcxResponseWithBudget(req)(encodeAnalyze("hotspots", items))
+		return s.gcxResponseWithBudget(req)(unavailable.gcx(encodeAnalyze("hotspots", items)))
 	}
 
 	if isCompact(req) {
@@ -2766,14 +2819,17 @@ func (s *Server) handleFindHotspots(ctx context.Context, req mcp.CallToolRequest
 		if truncated {
 			fmt.Fprintf(&b, "... truncated (%d total)\n", totalCount)
 		}
+		b.WriteString(unavailable.line())
 		return mcp.NewToolResultText(b.String()), nil
 	}
 
-	return s.respondJSONOrTOON(ctx, req, map[string]any{
+	payload := map[string]any{
 		"hotspots":  entries,
 		"total":     totalCount,
 		"truncated": truncated,
-	})
+	}
+	unavailable.apply(payload)
+	return s.respondJSONOrTOON(ctx, req, payload)
 }
 
 // ---------------------------------------------------------------------------
@@ -5269,31 +5325,52 @@ func (s *Server) handleAuditAgentConfig(ctx context.Context, req mcp.CallToolReq
 	return s.respondJSONOrTOON(ctx, req, report)
 }
 
-// coverageByID batch-loads the coverage sidecar off the base store.
-// Handlers that must honour the caller's buffers pass their request
-// reader to coverageRowsByID instead.
-func (s *Server) coverageByID() map[string]graph.CoverageEnrichment {
-	return coverageRowsByID(s.graph)
+// unavailableEnrichment formats request-local missing-sidecar disclosures.
+// Node-local legacy metadata remains usable; unavailable is not an empty table.
+type unavailableEnrichment []string
+
+func (u unavailableEnrichment) apply(payload map[string]any) {
+	if len(u) > 0 {
+		payload["enrichment_unavailable"] = []string(u)
+	}
+}
+
+func (u unavailableEnrichment) line() string {
+	if len(u) == 0 {
+		return ""
+	}
+	return "enrichment_unavailable: " + strings.Join(u, ", ") + " (sidecar unavailable; node-local metadata only)\n"
+}
+
+// Add the disclosure before the existing GCX budget trims rows, not afterward.
+func (u unavailableEnrichment) gcx(payload []byte, err error) ([]byte, error) {
+	if err != nil || len(u) == 0 {
+		return payload, err
+	}
+	body, _ := injectGCXHeaderMeta(string(payload), map[string]any{"enrichment_unavailable": strings.Join(u, ",")})
+	return []byte(body), nil
 }
 
 // coverageRowsByID batch-loads the coverage sidecar (change A) into an
-// id->row map; nil when the reader lacks the capability (callers then
-// fall back to Node.Meta). One read per handler call, not per-node.
+// id->row map and capability availability; nil,false means unavailable.
+// Callers still fall back to Node.Meta. Supported empty readers return true.
+// These slice-only storage APIs cannot report I/O errors through this flag.
+// One read per handler call, not per-node.
 //
 // An overlay view has no sidecar, so an overlay-active request gets nil
 // and each row falls back to the node's own meta — the buffer's symbols
 // simply carry no coverage rather than borrowing the indexed numbers.
-func coverageRowsByID(g graph.Reader) map[string]graph.CoverageEnrichment {
+func coverageRowsByID(g graph.Reader) (map[string]graph.CoverageEnrichment, bool) {
 	r, ok := contractCoreSelectedReader(g).(graph.CoverageEnrichmentReader)
 	if !ok {
-		return nil
+		return nil, false
 	}
 	rows := r.CoverageRows("")
 	m := make(map[string]graph.CoverageEnrichment, len(rows))
 	for _, e := range rows {
 		m[e.NodeID] = e
 	}
-	return m
+	return m, true
 }
 
 // coveragePctFrom returns a node's coverage %, preferring the sidecar map
@@ -5309,20 +5386,20 @@ func coveragePctFrom(cov map[string]graph.CoverageEnrichment, n *graph.Node) (fl
 }
 
 // releaseRowsByID batch-loads the release sidecar (change A) into an
-// id->tag map; nil when the reader lacks the capability. An overlay
+// id->tag map and availability; nil,false means unavailable. An overlay
 // view has none, so an overlay-active request falls back to each
 // node's meta.
-func releaseRowsByID(g graph.Reader) map[string]string {
+func releaseRowsByID(g graph.Reader) (map[string]string, bool) {
 	r, ok := contractCoreSelectedReader(g).(graph.ReleaseEnrichmentReader)
 	if !ok {
-		return nil
+		return nil, false
 	}
 	rows := r.ReleaseRows("")
 	m := make(map[string]string, len(rows))
 	for _, e := range rows {
 		m[e.NodeID] = e.AddedIn
 	}
-	return m
+	return m, true
 }
 
 // addedInFrom returns a node's "added_in" tag, preferring the sidecar
@@ -5340,18 +5417,18 @@ func addedInFrom(rel map[string]string, n *graph.Node) (string, bool) {
 }
 
 // blameRowsByID batch-loads the blame sidecar (change A) into an
-// id->row map; nil when the backend lacks the capability.
-func blameRowsByID(g graph.Reader) map[string]graph.BlameEnrichment {
+// id->row map and availability; nil,false means unavailable.
+func blameRowsByID(g graph.Reader) (map[string]graph.BlameEnrichment, bool) {
 	r, ok := contractCoreSelectedReader(g).(graph.BlameEnrichmentReader)
 	if !ok {
-		return nil
+		return nil, false
 	}
 	rows := r.BlameRows("")
 	m := make(map[string]graph.BlameEnrichment, len(rows))
 	for _, e := range rows {
 		m[e.NodeID] = e
 	}
-	return m
+	return m, true
 }
 
 // lastAuthoredFrom returns a node's blame, preferring the sidecar map and

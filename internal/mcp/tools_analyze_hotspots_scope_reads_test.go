@@ -122,7 +122,9 @@ func TestHotspotsScopeSkipsInvisibleRepoReads(t *testing.T) {
 						require.NotEmpty(t, entries)
 					}
 					if tc.mode != "" {
-						entries = rerankHotspots(entries, s.graph, tc.mode, "adds", 30)
+						var available bool
+						entries, available = rerankHotspots(entries, s.graph, tc.mode, "adds", 30)
+						require.True(t, available)
 					}
 					// The base implementation hydrates every entry before filtering.
 					kept := entries

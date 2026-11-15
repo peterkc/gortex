@@ -3,12 +3,17 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"path/filepath"
 	"testing"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/zzet/gortex/internal/analysis"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 // The quality analyzers (untested symbols, clones, dead code, the
@@ -283,12 +288,329 @@ func TestSidecarRowsDropCapabilityUnderOverlay(t *testing.T) {
 		{NodeID: qualityAlphaID, RepoPrefix: qualityRepo, AddedIn: "v1.4"},
 	}))
 
-	cov := coverageRowsByID(srv.graph)
+	cov, available := coverageRowsByID(srv.graph)
+	require.True(t, available)
 	require.Contains(t, cov, qualityAlphaID)
 	assert.Equal(t, 42.0, cov[qualityAlphaID].CoveragePct)
-	assert.Equal(t, "v1.4", releaseRowsByID(srv.graph)[qualityAlphaID])
+	rel, available := releaseRowsByID(srv.graph)
+	require.True(t, available)
+	assert.Equal(t, "v1.4", rel[qualityAlphaID])
 
 	viewCtx := overlayCtx(t, srv, layer)
-	assert.Nil(t, coverageRowsByID(srv.readerFor(viewCtx)), "coverage sidecar served base's rows under an overlay")
-	assert.Nil(t, releaseRowsByID(srv.readerFor(viewCtx)), "release sidecar served base's rows under an overlay")
+	cov, available = coverageRowsByID(srv.readerFor(viewCtx))
+	assert.False(t, available)
+	assert.Nil(t, cov, "coverage sidecar served base's rows under an overlay")
+	rel, available = releaseRowsByID(srv.readerFor(viewCtx))
+	assert.False(t, available)
+	assert.Nil(t, rel, "release sidecar served base's rows under an overlay")
+}
+
+func TestEnrichmentUnavailableToolResults(t *testing.T) {
+	for _, tc := range []struct {
+		name, enrichment string
+		run              func(*Server, context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error)
+		args             map[string]any
+	}{
+		{"coverage gaps", "coverage", (*Server).handleAnalyzeCoverageGaps, nil},
+		{"coverage summary", "coverage", (*Server).handleAnalyzeCoverageSummary, nil},
+		{"stale code", "blame", (*Server).handleAnalyzeStaleCode, nil},
+		{"ownership", "blame", (*Server).handleAnalyzeOwnership, nil},
+		{"stale flags", "blame", (*Server).handleAnalyzeStaleFlags, nil},
+		{"releases", "release", (*Server).handleAnalyzeReleases, nil},
+		{"release files", "release", (*Server).handleAnalyzeReleases, map[string]any{"tag": "v1"}},
+		{"health score", "coverage", (*Server).handleAnalyzeHealthScore, nil},
+		{"health rollup", "blame", (*Server).handleAnalyzeHealthScore, map[string]any{"roll_up": "file"}},
+		{"knowledge gaps", "coverage", (*Server).handleGetKnowledgeGaps, nil},
+		{"replay", "coverage", (*Server).handleReplayEpisode, map[string]any{"anchor_symbol": qualityAlphaID}},
+		{"reviewers", "blame", (*Server).handleSuggestReviewers, map[string]any{"ids": qualityAlphaID}},
+		{"hotspot novelty", "blame", (*Server).handleFindHotspots, map[string]any{"mode": "novelty"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := overlayQualityFixture(t)
+			srv.graph.AddNode(&graph.Node{ID: "release-v1", Kind: graph.KindRelease, Name: "v1"})
+			for i := 0; i < 5; i++ {
+				srv.graph.AddNode(&graph.Node{ID: fmt.Sprintf("extra%d", i), Kind: graph.KindFunction})
+			}
+			installCommunitiesForTest(srv, &analysis.CommunityResult{})
+			srv.hotspots = []analysis.HotspotEntry{{ID: qualityAlphaID, ComplexityScore: 10}}
+			srv.hotspotsReady = true
+			native := srv.graph
+			// Given a supported empty sidecar, its absence of rows is not unavailability.
+			result, err := tc.run(srv, context.Background(), makeReq("analyze", tc.args))
+			require.NoError(t, err)
+			require.False(t, result.IsError, toolResultText(result))
+			require.NotContains(t, toolResultText(result), "enrichment_unavailable")
+			// When only the optional enrichment methods disappear, all renderers disclose it.
+			srv.graph = struct{ graph.Store }{native}
+			for _, format := range []string{"json", "toon", "compact", "gcx"} {
+				args := map[string]any{"format": format, "max_bytes": float64(0)}
+				for key, val := range tc.args {
+					args[key] = val
+				}
+				if format == "compact" {
+					args["format"] = "json"
+					args["compact"] = true
+				}
+				result, err = tc.run(srv, context.Background(), makeReq("analyze", args))
+				require.NoError(t, err)
+				require.False(t, result.IsError, toolResultText(result))
+				body := toolResultText(result)
+				require.Contains(t, body, "enrichment_unavailable", format)
+				require.Contains(t, body, tc.enrichment, format)
+				if format == "json" {
+					var payload map[string]any
+					require.NoError(t, json.Unmarshal([]byte(body), &payload))
+					require.Contains(t, payload, "enrichment_unavailable")
+				}
+			}
+			// Then the next supported request does not inherit a request-local warning.
+			srv.graph = native
+			result, err = tc.run(srv, context.Background(), makeReq("analyze", tc.args))
+			require.NoError(t, err)
+			require.NotContains(t, toolResultText(result), "enrichment_unavailable")
+		})
+	}
+}
+
+func TestEnrichmentUnavailableInspectionsAreNotViolations(t *testing.T) {
+	srv, _ := overlayQualityFixture(t)
+	srv.graph = struct{ graph.Store }{srv.graph}
+	// Given no coverage/blame reader, even an error-only capped inspection must disclose unknown evidence.
+	result, err := srv.handleRunInspections(context.Background(), makeReq("run_inspections", map[string]any{"inspections": "coverage_gaps,stale_code", "severity": "error", "max_per_inspection": float64(1)}))
+	require.NoError(t, err)
+	require.False(t, result.IsError, toolResultText(result))
+	var payload struct {
+		Results []struct {
+			Warnings   []inspectionViolation `json:"warnings"`
+			Violations []inspectionViolation `json:"violations"`
+			Total      int                   `json:"total"`
+		} `json:"results"`
+		Summary struct {
+			Total int `json:"total_violations"`
+		} `json:"summary"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(toolResultText(result)), &payload))
+	require.Len(t, payload.Results, 2)
+	for _, row := range payload.Results {
+		require.Len(t, row.Warnings, 1)
+		require.Empty(t, row.Violations)
+		require.Zero(t, row.Total)
+		require.Equal(t, "warning", row.Warnings[0].Severity)
+		require.Contains(t, row.Warnings[0].Message, "enrichment unavailable")
+	}
+	require.Zero(t, payload.Summary.Total)
+	result, err = srv.handleRunInspections(context.Background(), makeReq("run_inspections", map[string]any{"inspections": "coverage_gaps,stale_code", "severity": "error", "format": "toon"}))
+	require.NoError(t, err)
+	require.Contains(t, toolResultText(result), "enrichment_unavailable")
+	require.Contains(t, toolResultText(result), "coverage enrichment unavailable")
+	require.Contains(t, toolResultText(result), "blame enrichment unavailable")
+}
+
+func TestEnrichmentUnavailableKeepsLegacyAndNativeValues(t *testing.T) {
+	for _, backend := range []string{"graph", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			srv, _ := overlayQualityFixture(t)
+			n := *srv.graph.GetNode(qualityAlphaID)
+			n.Meta = map[string]any{"coverage_pct": 10.0, "coverage": map[string]any{"num_stmt": 1, "hit": 0}, "last_authored": map[string]any{"email": "legacy@example.com", "commit": "legacy", "timestamp": int64(1)}}
+			srv.graph.AddNode(&n)
+			srv.graph.AddNode(&graph.Node{ID: qualitySvcFl, Kind: graph.KindFile, FilePath: qualitySvcFl, RepoPrefix: qualityRepo, Meta: map[string]any{"added_in": "legacy-v0"}})
+			srv.graph.AddNode(&graph.Node{ID: "v1", Name: "v1", Kind: graph.KindRelease})
+			if backend == "sqlite" {
+				disk, err := store_sqlite.Open(filepath.Join(t.TempDir(), "enrichment.sqlite"))
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, disk.Close()) })
+				disk.AddBatch(srv.graph.AllNodes(), srv.graph.AllEdges())
+				srv.graph = disk
+			}
+			// Given a supported empty sidecar, preserve node-local legacy values.
+			cov, available := coverageRowsByID(srv.graph)
+			require.True(t, available)
+			require.Empty(t, cov)
+			node := srv.graph.GetNode(qualityAlphaID)
+			pct, ok := coveragePctFrom(cov, node)
+			require.True(t, ok)
+			require.Equal(t, 10.0, pct)
+			rel, available := releaseRowsByID(srv.graph)
+			require.True(t, available)
+			require.Empty(t, rel)
+			tag, ok := addedInFrom(rel, srv.graph.GetNode(qualitySvcFl))
+			require.True(t, ok)
+			require.Equal(t, "legacy-v0", tag)
+			authors, available := blameRowsByID(srv.graph)
+			require.True(t, available)
+			require.Empty(t, authors)
+			author, ok := lastAuthoredFrom(authors, node)
+			require.True(t, ok)
+			require.Equal(t, "legacy@example.com", author.Email)
+			require.NoError(t, srv.graph.(graph.CoverageEnrichmentWriter).BulkSetCoverage(qualityRepo, []graph.CoverageEnrichment{{NodeID: qualityAlphaID, RepoPrefix: qualityRepo, CoveragePct: 80, NumStmt: 10, Hit: 8}}))
+			require.NoError(t, srv.graph.(graph.ReleaseEnrichmentWriter).BulkSetReleases(qualityRepo, []graph.ReleaseEnrichment{{NodeID: qualitySvcFl, RepoPrefix: qualityRepo, AddedIn: "v1"}}))
+			require.NoError(t, srv.graph.(graph.BlameEnrichmentWriter).BulkSetBlame(qualityRepo, []graph.BlameEnrichment{{NodeID: qualityAlphaID, RepoPrefix: qualityRepo, Email: "sidecar@example.com", Commit: "sidecar", Timestamp: 2}}))
+			// When sidecars are present, their values win on both real backends.
+			for range 2 {
+				cov, available = coverageRowsByID(srv.graph)
+				require.True(t, available)
+				pct, ok = coveragePctFrom(cov, node)
+				require.True(t, ok)
+				require.Equal(t, 80.0, pct)
+				rel, available = releaseRowsByID(srv.graph)
+				require.True(t, available)
+				tag, ok = addedInFrom(rel, srv.graph.GetNode(qualitySvcFl))
+				require.True(t, ok)
+				require.Equal(t, "v1", tag)
+				authors, available = blameRowsByID(srv.graph)
+				require.True(t, available)
+				author, ok = lastAuthoredFrom(authors, node)
+				require.True(t, ok)
+				require.Equal(t, "sidecar@example.com", author.Email)
+			}
+			native := srv.graph
+			result, err := srv.handleAnalyzeCoverageGaps(context.Background(), makeReq("analyze", nil))
+			require.NoError(t, err)
+			var coverage struct {
+				Gaps []struct {
+					Pct        float64 `json:"coverage_pct"`
+					Statements int     `json:"num_stmt"`
+				} `json:"gaps"`
+				Unavailable []string `json:"enrichment_unavailable"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(toolResultText(result)), &coverage))
+			require.Len(t, coverage.Gaps, 1)
+			require.Equal(t, 80.0, coverage.Gaps[0].Pct)
+			require.Equal(t, 10, coverage.Gaps[0].Statements)
+			require.Empty(t, coverage.Unavailable)
+			// Then a stripped reader keeps legacy values and calls them out as incomplete enrichment.
+			srv.graph = struct{ graph.Store }{native}
+			result, err = srv.handleAnalyzeCoverageGaps(context.Background(), makeReq("analyze", nil))
+			require.NoError(t, err)
+			require.NoError(t, json.Unmarshal([]byte(toolResultText(result)), &coverage))
+			require.Len(t, coverage.Gaps, 1)
+			require.Equal(t, 10.0, coverage.Gaps[0].Pct)
+			require.Equal(t, 1, coverage.Gaps[0].Statements)
+			require.Equal(t, []string{"coverage"}, coverage.Unavailable)
+			result, err = srv.handleRunInspections(context.Background(), makeReq("run_inspections", map[string]any{"inspections": "coverage_gaps,stale_code", "severity": "info", "max_per_inspection": float64(1)}))
+			require.NoError(t, err)
+			var inspection struct {
+				Results []struct {
+					Warnings   []inspectionViolation `json:"warnings"`
+					Violations []inspectionViolation `json:"violations"`
+					Total      int                   `json:"total"`
+				} `json:"results"`
+				Summary struct {
+					Total int `json:"total_violations"`
+				} `json:"summary"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(toolResultText(result)), &inspection))
+			require.Equal(t, 2, inspection.Summary.Total)
+			for _, row := range inspection.Results {
+				require.Len(t, row.Warnings, 1)
+				require.Len(t, row.Violations, 1)
+				require.Equal(t, 1, row.Total)
+			}
+		})
+	}
+}
+
+func TestEnrichmentUnavailableOverlayDoesNotBorrowBase(t *testing.T) {
+	srv, layer := overlayQualityFixture(t)
+	require.NoError(t, srv.graph.(graph.CoverageEnrichmentWriter).BulkSetCoverage(qualityRepo, []graph.CoverageEnrichment{{NodeID: qualityAlphaID, CoveragePct: 100}}))
+	require.NoError(t, srv.graph.(graph.BlameEnrichmentWriter).BulkSetBlame(qualityRepo, []graph.BlameEnrichment{{NodeID: qualityAlphaID, Email: "base@example.com", Timestamp: 4102444800}}))
+	layer.AddNode(qualitySvcFl, &graph.Node{ID: qualityAlphaID, Name: "alpha", Kind: graph.KindFunction, FilePath: qualitySvcFl, RepoPrefix: qualityRepo, Meta: map[string]any{"coverage_pct": 25.0, "last_authored": map[string]any{"email": "buffer@example.com", "timestamp": int64(1)}}})
+	layer.AddEdge(&graph.Edge{From: qualityAlphaID, To: qualityAlphaID, Kind: graph.EdgeCalls, FilePath: qualitySvcFl})
+	ctx := overlayCtx(t, srv, layer)
+	for _, tc := range []struct {
+		run      func(*Server, context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error)
+		key, pct string
+		args     map[string]any
+	}{
+		{(*Server).handleGetKnowledgeGaps, "untested_hotspots", "coverage_pct", nil},
+		{(*Server).handleReplayEpisode, "coverage_gaps", "coverage_pct", map[string]any{"anchor_symbol": qualityAlphaID}},
+		{(*Server).handleAnalyzeCoverageGaps, "gaps", "coverage_pct", nil},
+	} {
+		// Given a base sidecar says fully covered, only buffer-local legacy values may grade the overlay.
+		result, err := tc.run(srv, ctx, makeReq("analyze", tc.args))
+		require.NoError(t, err)
+		var payload map[string]any
+		require.NoError(t, json.Unmarshal([]byte(toolResultText(result)), &payload))
+		require.Equal(t, []any{"coverage"}, payload["enrichment_unavailable"])
+		found := false
+		for _, raw := range payload[tc.key].([]any) {
+			row := raw.(map[string]any)
+			if row["id"] == qualityAlphaID {
+				found = true
+				require.Equal(t, 25.0, row[tc.pct])
+			}
+		}
+		require.True(t, found, "base sidecar must not erase the buffer-local coverage gap")
+	}
+	result, err := srv.handleAnalyzeStaleCode(ctx, makeReq("analyze", nil))
+	require.NoError(t, err)
+	require.Contains(t, toolResultText(result), "buffer@example.com")
+	require.NotContains(t, toolResultText(result), "base@example.com")
+	require.Contains(t, toolResultText(result), "enrichment_unavailable")
+	cov, available := coverageRowsByID(srv.graph)
+	require.True(t, available)
+	require.Equal(t, 100.0, cov[qualityAlphaID].CoveragePct, "overlay requests leave base sidecars unchanged")
+}
+
+func TestEnrichmentUnavailableEmptyReleaseAndIrrelevantHotspotModes(t *testing.T) {
+	srv, _ := overlayQualityFixture(t)
+	result, err := srv.handleAnalyzeReleases(context.Background(), makeReq("analyze", nil))
+	require.NoError(t, err)
+	require.Contains(t, toolResultText(result), "no release timeline in scope", "supported empty retains the existing response")
+	srv.graph = struct{ graph.Store }{srv.graph}
+	for _, args := range []map[string]any{nil, {"tag": "absent"}} {
+		// An unavailable reader cannot certify that no release enrichment has run.
+		result, err = srv.handleAnalyzeReleases(context.Background(), makeReq("analyze", args))
+		require.NoError(t, err)
+		var payload map[string]any
+		require.NoError(t, json.Unmarshal([]byte(toolResultText(result)), &payload))
+		require.Contains(t, payload, "enrichment_unavailable")
+		require.NotContains(t, payload, "error")
+		require.NotContains(t, payload, "suggestion")
+	}
+	for _, mode := range []string{"complexity", "directional"} {
+		_, available := rerankHotspots([]analysis.HotspotEntry{{ID: qualityAlphaID, ComplexityScore: 10}}, srv.graph, mode, "adds", 30)
+		require.True(t, available, "blame is irrelevant to this ranking mode")
+	}
+}
+
+func TestEnrichmentUnavailableGCXBudget(t *testing.T) {
+	srv, _ := overlayQualityFixture(t)
+	srv.graph = struct{ graph.Store }{srv.graph}
+	result, err := srv.handleAnalyzeHealthScore(context.Background(), makeReq("analyze", map[string]any{"format": "gcx", "max_bytes": float64(512)}))
+	require.NoError(t, err)
+	require.False(t, result.IsError, toolResultText(result))
+	require.LessOrEqual(t, len(toolResultText(result)), 512)
+	require.Contains(t, toolResultText(result), "enrichment_unavailable=coverage,blame")
+}
+
+func TestEnrichmentUnavailableNamesOnlyTheMissingSidecar(t *testing.T) {
+	for _, missing := range []string{"coverage", "blame"} {
+		t.Run(missing, func(t *testing.T) {
+			srv, _ := overlayQualityFixture(t)
+			native := srv.graph
+			// Given one reader is deliberately retained and its supported empty table is valid.
+			if missing == "blame" {
+				srv.graph = struct {
+					graph.Store
+					graph.CoverageEnrichmentReader
+				}{native, native.(graph.CoverageEnrichmentReader)}
+			} else {
+				srv.graph = struct {
+					graph.Store
+					graph.BlameEnrichmentReader
+				}{native, native.(graph.BlameEnrichmentReader)}
+			}
+			result, err := srv.handleAnalyzeHealthScore(context.Background(), makeReq("analyze", nil))
+			require.NoError(t, err)
+			var payload struct {
+				Unavailable []string         `json:"enrichment_unavailable"`
+				Symbols     []healthScoreRow `json:"symbols"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(toolResultText(result)), &payload))
+			// Then only the missing enrichment is marked; structural rows remain useful.
+			require.Equal(t, []string{missing}, payload.Unavailable)
+			require.NotEmpty(t, payload.Symbols)
+		})
+	}
 }
