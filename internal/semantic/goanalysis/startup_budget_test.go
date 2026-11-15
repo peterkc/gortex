@@ -652,7 +652,7 @@ func startupWarmupAdmission(t *testing.T) {
 		// When all attempts are deterministically blocked in their admission or driver.
 		close(release)
 		for range routes {
-			<-done
+			require.NoError(t, <-done)
 		}
 		// Then flags alone cannot satisfy this cross-route exclusion assertion.
 		require.EqualValues(t, 1, startedBeforeRelease)
@@ -710,8 +710,8 @@ func startupWarmupPreemption(t *testing.T) {
 		// assertion cannot strand the fixture goroutines.
 		cancel()
 		close(cleanup)
-		<-background
-		<-front
+		require.ErrorIs(t, <-background, context.Canceled)
+		require.NoError(t, <-front)
 		require.True(t, cancelled, "foreground must preempt the different module's listing")
 		require.False(t, ranBeforeJoin, "foreground must wait for owned child cleanup")
 		require.False(t, early.Load())
