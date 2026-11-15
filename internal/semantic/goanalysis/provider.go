@@ -2169,6 +2169,49 @@ func loadFilePackages(cfg *packages.Config, load func(*packages.Config, ...strin
 	return pkgs, nil
 }
 
+// boundCompilerSubprocess limits each Go command without changing the daemon's
+// environment. An explicit invalid -p still reaches Go's own rejection path.
+func boundCompilerSubprocess(cfg *packages.Config) {
+	flags := append([]string(nil), cfg.BuildFlags...)
+	hasParallelism := false
+	for i := 0; i < len(flags); i++ {
+		flag := flags[i]
+		switch {
+		case flag == "-p":
+			hasParallelism = true
+			if i+1 < len(flags) {
+				i++
+				if n, err := strconv.Atoi(flags[i]); err == nil && n > 1 {
+					flags[i] = "1"
+				}
+			}
+		case strings.HasPrefix(flag, "-p="):
+			hasParallelism = true
+			if n, err := strconv.Atoi(strings.TrimPrefix(flag, "-p=")); err == nil && n > 1 {
+				flags[i] = "-p=1"
+			}
+		}
+	}
+	if !hasParallelism {
+		flags = append(flags, "-p=1")
+	}
+	cfg.BuildFlags = flags
+	env := cfg.Env
+	if env == nil {
+		env = os.Environ()
+	}
+	procs := 2
+	for _, entry := range env {
+		if value, ok := strings.CutPrefix(entry, "GOMAXPROCS="); ok {
+			procs = 2
+			if n, err := strconv.Atoi(value); err == nil && n == 1 {
+				procs = 1
+			}
+		}
+	}
+	cfg.Env = append(append([]string(nil), env...), "GOMAXPROCS="+strconv.Itoa(procs))
+}
+
 // loadCompilerProgram is loadPackagesContext with the load's size and the
 // unfiltered package list. parseFile, when non-nil, replaces go/packages'
 // parser for the source-checked packages.
@@ -2209,6 +2252,8 @@ func (p *Provider) loadCompilerProgram(ctx context.Context, dir string, parseFil
 		Overlay:   committedOverlay(ctx),
 		Env:       committedEnv(ctx),
 	}
+
+	boundCompilerSubprocess(cfg)
 
 	load := p.packagesLoad
 	if load == nil {

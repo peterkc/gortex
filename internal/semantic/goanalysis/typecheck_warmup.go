@@ -386,37 +386,20 @@ func (p *Provider) SetWarmupIdle(touched, untouched time.Duration) {
 	r.mu.Unlock()
 }
 
-// warmupBuildFlags keeps the warm-up's go command to a small build
-// parallelism — a quarter of the CPUs, at most GOMAXPROCS, at least one —
-// and runs every tool it invokes at the lowest priority (lowPriorityToolexec).
+// warmupBuildFlags bounds compiler parallelism and runs tools at the lowest
+// priority (lowPriorityToolexec).
 func warmupBuildFlags() []string {
-	n := runtime.NumCPU() / 4
-	if procs := runtime.GOMAXPROCS(0); n > procs {
-		n = procs
-	}
-	if n < 1 {
-		n = 1
-	}
-	flags := []string{"-p=" + strconv.Itoa(n)}
+	flags := []string{"-p=1"}
 	if wrapper := lowPriorityToolexec(); wrapper != "" {
 		flags = append(flags, "-toolexec="+wrapper)
 	}
 	return flags
 }
 
-// targetedWarmupBuildFlags is the build flags of a targeted batch (one
-// dirty or recently touched package): a quarter of the CPUs, not capped at
-// GOMAXPROCS, at normal scheduling priority. Such a batch compiles the
-// export data of exactly the packages the checkout's next delta would
-// otherwise compile in its own listing, synchronously and at full
-// priority; the lowest priority made that same compile 5-10x slower on a
-// busy host (mcp's closure: 53 s at background QoS, 5 s at normal).
+// targetedWarmupBuildFlags uses the same compiler bound at normal priority:
+// these exports are on the checkout's next edit's critical path.
 func targetedWarmupBuildFlags() []string {
-	n := runtime.NumCPU() / 4
-	if n < 1 {
-		n = 1
-	}
-	return []string{"-p=" + strconv.Itoa(n)}
+	return []string{"-p=1"}
 }
 
 // lowPriorityToolexec is the -toolexec wrapper that runs a warm-up's

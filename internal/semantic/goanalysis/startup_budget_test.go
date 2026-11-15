@@ -3,6 +3,7 @@ package goanalysis
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"go/token"
 	"os"
 	"os/exec"
@@ -15,10 +16,21 @@ import (
 	"golang.org/x/tools/go/packages"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/semantic"
 )
 
-// TestStartupGoDriverHelper forwards to the real Go command. Its append-only
-// record observes go/packages' driver, rather than only counting Load calls.
+type startupDriverRecord struct {
+	Kind       string
+	Event      string
+	Command    string
+	Args       []string
+	GOMAXPROCS string
+	PID        int
+	ExitCode   int
+}
+
+// TestStartupGoDriverHelper forwards the real command and records its owned
+// child through exit. These records observe the actual driver/tool boundary.
 func TestStartupGoDriverHelper(t *testing.T) {
 	if os.Getenv("STARTUP_GO_DRIVER_HELPER") != "1" {
 		return
@@ -30,7 +42,35 @@ func TestStartupGoDriverHelper(t *testing.T) {
 			break
 		}
 	}
-	record, err := json.Marshal(args)
+	kind, command := "go", os.Getenv("STARTUP_REAL_GO")
+	if len(args) > 1 {
+		switch args[0] {
+		case "startup-tool":
+			kind, command, args = "tool", args[1], args[2:]
+		case "startup-cc":
+			kind, command, args = "cc", args[1], args[2:]
+		}
+	}
+	record := startupDriverRecord{Kind: kind, Event: "start", Command: command, Args: args, GOMAXPROCS: os.Getenv("GOMAXPROCS"), PID: os.Getpid()}
+	startupWriteDriverRecord(record)
+	cmd := exec.Command(command, args...)
+	cmd.Env = os.Environ()
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	err := cmd.Run()
+	code := 0
+	if err != nil {
+		code = 94
+		if exit, ok := err.(*exec.ExitError); ok {
+			code = exit.ExitCode()
+		}
+	}
+	record.Event, record.ExitCode = "exit", code
+	startupWriteDriverRecord(record)
+	os.Exit(code)
+}
+
+func startupWriteDriverRecord(record startupDriverRecord) {
+	data, err := json.Marshal(record)
 	if err != nil {
 		os.Exit(91)
 	}
@@ -38,22 +78,12 @@ func TestStartupGoDriverHelper(t *testing.T) {
 	if err != nil {
 		os.Exit(92)
 	}
-	_, err = f.Write(append(record, '\n'))
+	data = append(data, '\n')
+	n, err := f.Write(data)
 	closeErr := f.Close()
-	if err != nil || closeErr != nil {
+	if err != nil || closeErr != nil || n != len(data) {
 		os.Exit(93)
 	}
-	cmd := exec.Command(os.Getenv("STARTUP_REAL_GO"), args...)
-	cmd.Env = os.Environ()
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	err = cmd.Run()
-	if err == nil {
-		os.Exit(0)
-	}
-	if exit, ok := err.(*exec.ExitError); ok {
-		os.Exit(exit.ExitCode())
-	}
-	os.Exit(94)
 }
 
 func startupDriverLog(t *testing.T) string {
@@ -77,15 +107,25 @@ func startupDriverLog(t *testing.T) string {
 	return log
 }
 
-func startupDriverQueries(t *testing.T, log string) [][]string {
+func startupDriverRecords(t *testing.T, log string) []startupDriverRecord {
 	t.Helper()
 	data, err := os.ReadFile(log)
 	require.NoError(t, err)
-	var queries [][]string
+	var records []startupDriverRecord
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		var args []string
-		require.NoError(t, json.Unmarshal([]byte(line), &args))
-		if len(args) == 0 || args[0] != "list" {
+		var record startupDriverRecord
+		require.NoError(t, json.Unmarshal([]byte(line), &record))
+		records = append(records, record)
+	}
+	return records
+}
+
+func startupDriverQueries(t *testing.T, log string) [][]string {
+	t.Helper()
+	var queries [][]string
+	for _, record := range startupDriverRecords(t, log) {
+		args := record.Args
+		if record.Kind != "go" || record.Event != "start" || len(args) == 0 || args[0] != "list" {
 			continue
 		}
 		for i, arg := range args {
@@ -314,6 +354,220 @@ func TestStartupGoQueryGrouping(t *testing.T) {
 			}
 			slices.Sort(expectedDirectories)
 			require.Equal(t, expectedDirectories, directoryPatterns)
+		})
+	}
+}
+
+func startupEnvValue(env []string, key string) string {
+	var value string
+	for _, entry := range env {
+		name, v, ok := strings.Cut(entry, "=")
+		if ok && name == key {
+			value = v
+		}
+	}
+	return value
+}
+
+func TestStartupGoSubprocessBudget(t *testing.T) {
+	t.Run("preserve explicit flags and caller slices", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			flags []string
+			want  []string
+		}{
+			{"strict", []string{"-p=1", "-tags=keep"}, []string{"-p=1", "-tags=keep", "-trimpath"}},
+			{"separate", []string{"-p", "1", "-tags=keep"}, []string{"-p", "1", "-tags=keep", "-trimpath"}},
+			{"larger", []string{"-p=8", "-tags=keep"}, []string{"-p=1", "-tags=keep", "-trimpath"}},
+			{"larger separate", []string{"-p", "8", "-tags=keep"}, []string{"-p", "1", "-tags=keep", "-trimpath"}},
+			{"invalid stays invalid", []string{"-p=0", "-tags=keep"}, []string{"-p=0", "-tags=keep", "-trimpath"}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				p := newTestProvider(t)
+				t.Cleanup(func() { require.NoError(t, p.Close()) })
+				before := slices.Clone(tc.flags)
+				var got []string
+				p.packagesLoad = func(cfg *packages.Config, _ ...string) ([]*packages.Package, error) {
+					got = slices.Clone(cfg.BuildFlags)
+					return nil, errors.New("captured")
+				}
+				_, err := p.runListing(t.Context(), t.TempDir(), []string{"."}, tc.flags)
+				require.Error(t, err)
+				require.Equal(t, tc.want, got)
+				require.Equal(t, before, tc.flags)
+			})
+		}
+	})
+	t.Run("cold and warm cgo process boundary", startupCgoBoundary)
+
+	t.Run("bounded Config on every route", func(t *testing.T) {
+		root := typecheckCacheFixture(t)
+		t.Setenv("GOFLAGS", "-mod=readonly -tags=startup_budget")
+		t.Setenv("STARTUP_UNRELATED", "keep-me")
+		for _, procs := range []string{"2", "1"} {
+			t.Run("GOMAXPROCS="+procs, func(t *testing.T) {
+				t.Setenv("GOMAXPROCS", procs)
+				for _, route := range []string{"partial", "full", "checkout", "committed", "background", "targeted"} {
+					t.Run(route, func(t *testing.T) {
+						p := newTestProvider(t)
+						t.Cleanup(func() { require.NoError(t, p.Close()) })
+						ctx := t.Context()
+						if route == "committed" {
+							ctx = semantic.WithCheckoutCompilerScope(ctx, semantic.CheckoutCompilerScope{HandleRoots: true, Committed: true, GoWorkOff: true, Preempt: func() {}})
+						}
+						var configs []packages.Config
+						var metadata []packages.Config
+						failed := errors.New("startup config boundary reached")
+						p.packagesLoad = func(cfg *packages.Config, _ ...string) ([]*packages.Package, error) {
+							captured := *cfg
+							captured.BuildFlags = slices.Clone(cfg.BuildFlags)
+							captured.Env = slices.Clone(cfg.Env)
+							if cfg.Mode&(packages.NeedTypes|packages.NeedExportFile) == 0 {
+								metadata = append(metadata, captured)
+								return []*packages.Package{{ID: "example.com/scope", PkgPath: "example.com/scope", Name: "scope", GoFiles: []string{filepath.Join(root, "api/api.go")}, Module: &packages.Module{Main: true, Path: "example.com/scope"}}}, nil
+							}
+							configs = append(configs, captured)
+							return nil, failed
+						}
+						// Given each production path with unrelated environment/build flags.
+						// When its real compiler/export Config reaches the driver boundary.
+						switch route {
+						case "partial":
+							_, _ = p.EnrichFilesContext(ctx, graph.New(), "", root, []string{"api/api.go"})
+						case "full":
+							_, _ = p.EnrichRepoContext(ctx, scopeHandleGraph(), "", root, nil)
+						case "checkout":
+							_, _ = p.EnrichRepoContext(semantic.WithCheckoutCompilerScope(ctx, cachedScope), scopeHandleGraph(), "", root, nil)
+						case "committed":
+							_, _ = p.EnrichRepoContext(ctx, scopeHandleGraph(), "", root, nil)
+						case "background":
+							_, _ = p.runListing(ctx, root, []string{"./api"}, append(warmupBuildFlags(), "-tags=startup_budget"))
+						case "targeted":
+							_, _ = p.runListing(ctx, root, []string{"./api"}, append(targetedWarmupBuildFlags(), "-tags=startup_budget"))
+						}
+						// Then the compiler limits are explicit and stricter runtime settings survive.
+						require.NotEmpty(t, configs, "route must reach an expensive load")
+						for _, cfg := range configs {
+							require.Contains(t, cfg.BuildFlags, "-p=1")
+							require.Equal(t, procs, startupEnvValue(cfg.Env, "GOMAXPROCS"))
+							require.Equal(t, "keep-me", startupEnvValue(cfg.Env, "STARTUP_UNRELATED"))
+							require.Equal(t, "-mod=readonly -tags=startup_budget", startupEnvValue(cfg.Env, "GOFLAGS"))
+							require.Equal(t, ctx.Done(), cfg.Context.Done(), "the manager cancellation must propagate")
+							if route == "committed" {
+								require.Equal(t, "off", startupEnvValue(cfg.Env, "GOWORK"))
+							}
+							if route == "background" || route == "targeted" {
+								require.Contains(t, cfg.BuildFlags, "-tags=startup_budget")
+								require.Contains(t, cfg.BuildFlags, "-trimpath")
+							}
+						}
+						for _, cfg := range metadata {
+							require.Zero(t, cfg.Mode&(packages.NeedTypes|packages.NeedExportFile))
+							require.Empty(t, cfg.BuildFlags, "metadata-only Config is not changed by compiler tuning")
+							if route != "committed" {
+								require.Nil(t, cfg.Env, "metadata Config retains its native environment policy")
+							}
+						}
+					})
+				}
+			})
+		}
+	})
+}
+
+func startupCgoBoundary(t *testing.T) {
+	// Given a private empty build cache and a cgo package whose export load
+	// invokes the compiler and the configured C compiler, not only metadata.
+	root := resolvedTempDir(t)
+	writeGoMod(t, root, "example.com/startupcgo")
+	writeFile(t, root, "cgo/cgo.go", "package cgo\n/*\nint answer(void) { return 42; }\n*/\nimport \"C\"\ntype Number int\nvar Value = Number(C.answer())\n")
+	cc, err := exec.LookPath("cc")
+	require.NoError(t, err, "the bounded cgo fixture needs the already installed compiler")
+	log := startupDriverLog(t)
+	t.Setenv("GOFLAGS", "-mod=readonly")
+	t.Setenv("GOCACHE", resolvedTempDir(t))
+	binary, err := os.Executable()
+	require.NoError(t, err)
+	tools := resolvedTempDir(t)
+	prefix := "#!/bin/sh\nexec \"" + binary + "\" -test.run='^TestStartupGoDriverHelper$' -- "
+	tool := filepath.Join(tools, "tool")
+	require.NoError(t, os.WriteFile(tool, []byte(prefix+"startup-tool \"$@\"\n"), 0o700))
+	ccShim := filepath.Join(tools, "cc")
+	require.NoError(t, os.WriteFile(ccShim, []byte(prefix+"startup-cc \""+cc+"\" \"$@\"\n"), 0o700))
+	t.Setenv("CC", ccShim)
+	p := newTestProvider(t)
+	t.Cleanup(func() { require.NoError(t, p.Close()) })
+	p.packagesLoad = func(cfg *packages.Config, patterns ...string) ([]*packages.Package, error) {
+		if cfg.Mode&(packages.NeedTypes|packages.NeedExportFile) != 0 {
+			cfg.BuildFlags = append(slices.Clone(cfg.BuildFlags), "-toolexec="+tool)
+		}
+		return packages.Load(cfg, patterns...)
+	}
+	for _, cache := range []string{"cold", "warm"} {
+		t.Run(cache, func(t *testing.T) {
+			require.NoError(t, os.WriteFile(log, nil, 0o600))
+			// When the production compiler boundary loads one bounded pattern chunk.
+			pkgs, fset, err := p.loadPackagesContext(t.Context(), root, filepath.Join(root, "cgo"))
+			require.NoError(t, err)
+			require.Len(t, pkgs, 1)
+			require.Empty(t, pkgs[0].Errors)
+			rows := buildSemanticBindingTypes(pkgs, fset, root, "")
+			require.Len(t, rows, 2)
+			for _, row := range rows {
+				require.Equal(t, "Number", row.TypeName)
+			}
+			records := startupDriverRecords(t, log)
+			data, err := json.Marshal(records)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("HOME"), "startup-cgo-"+cache+".json"), data, 0o600))
+			active, maxActive, expensive, metadata, compiler, cCompiler := 0, 0, 0, 0, 0, 0
+			started := map[int]bool{}
+			for _, record := range records {
+				expensiveGo := record.Kind == "go" && slices.Contains(record.Args, "-export=true")
+				switch record.Event {
+				case "start":
+					require.False(t, started[record.PID], "helper PID must start once")
+					started[record.PID] = true
+					require.Equal(t, "2", record.GOMAXPROCS, "child runtimes receive their bound")
+					if expensiveGo {
+						require.Contains(t, record.Args, "-p=1")
+						active++
+						expensive++
+						maxActive = max(maxActive, active)
+					} else if record.Kind == "go" {
+						metadata++
+						require.NotContains(t, record.Args, "-export=true")
+					}
+					if record.Kind == "tool" && filepath.Base(record.Command) == "compile" && !slices.Contains(record.Args, "-V=full") {
+						compiler++
+					}
+					if record.Kind == "cc" {
+						cCompiler++
+					}
+				case "exit":
+					require.True(t, started[record.PID], "every helper exit must join its start")
+					delete(started, record.PID)
+					// Native cgo feature/name probes intentionally compile invalid C.
+					// They must join, but only their owning Go/cgo command must succeed.
+					if record.Kind != "cc" {
+						require.Zero(t, record.ExitCode)
+					}
+					if expensiveGo {
+						active--
+					}
+				}
+			}
+			// Then every helper/child has exited before return. A cold export load
+			// actually compiles; the warm hit is not substituted for cold evidence.
+			require.Empty(t, started)
+			require.Zero(t, active)
+			require.Equal(t, 1, maxActive, "a sub-limit pattern list has one expensive driver go command")
+			require.Positive(t, expensive)
+			require.Positive(t, metadata)
+			if cache == "cold" {
+				require.Positive(t, compiler)
+				require.Positive(t, cCompiler)
+			}
 		})
 	}
 }

@@ -523,6 +523,7 @@ func (p *Provider) runListing(ctx context.Context, loadDir string, patterns, bui
 		// declaration positions are restored only from listed checkout files.
 		BuildFlags: append(append([]string(nil), buildFlags...), "-trimpath"),
 	}
+	boundCompilerSubprocess(cfg)
 	load := p.packagesLoad
 	if load == nil {
 		load = packages.Load
