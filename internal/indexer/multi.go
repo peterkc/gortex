@@ -2048,7 +2048,12 @@ func (mi *MultiIndexer) runGlobalGraphPassesTopologyHeld(
 		censusEligible,
 		mi.frameworkSynthesizerSelection(changedPrefixes),
 	)
+	if fwRep.Err != nil {
+		mi.logger.Warn("global pass: framework dispatch synthesis refused", zap.Strings("passes", fwRep.Refused),
+			zap.Bool("incomplete", fwRep.Incomplete), zap.Error(fwRep.Err))
+	}
 	mi.logger.Info("global pass: framework dispatch synthesis",
+		zap.Bool("incomplete", fwRep.Incomplete),
 		zap.Int("edges", fwRep.Total),
 		zap.Any("per_synthesizer", fwRep.Per),
 		zap.Int64("census_ms", fwRep.CensusMillis),
@@ -2094,8 +2099,12 @@ func (mi *MultiIndexer) runGlobalGraphPassesTopologyHeld(
 	}
 	fields = append(fields, zap.Duration("elapsed", time.Since(crStart)))
 	mi.logger.Info("global pass: cross-repo edges", fields...)
-	mi.logger.Info("global passes complete",
-		zap.Duration("total", time.Since(globalStart)))
+	if fwRep.Incomplete || capErr != nil {
+		mi.logger.Warn("global passes incomplete", zap.Duration("total", time.Since(globalStart)))
+	} else {
+		mi.logger.Info("global passes complete",
+			zap.Duration("total", time.Since(globalStart)))
+	}
 }
 
 // externalCallSynthesisEnabled resolves whether external-call placeholder

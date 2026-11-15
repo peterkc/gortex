@@ -76,8 +76,8 @@ func TestLegacyFrameworkBoundaryBatches100EdgesAndPreservesPayload(t *testing.T)
 		return 101
 	}}
 
-	if got := synth.synthesizeScoped(counting, nil); got != 101 {
-		t.Fatalf("synth count = %d, want 101", got)
+	if got, err := synth.synthesizeScoped(counting, nil); err != nil || got != 101 {
+		t.Fatalf("synth count = %d, %v, want 101, nil", got, err)
 	}
 	if counting.addEdgeCalls != 0 || counting.addBatchCalls != 1 {
 		t.Fatalf("backend writes = AddEdge:%d AddBatch:%d, want 0/1", counting.addEdgeCalls, counting.addBatchCalls)
@@ -136,8 +136,11 @@ func TestFrameworkEdgeBatchReadYourWritesAndOrdering(t *testing.T) {
 		store.AddEdge(&graph.Edge{From: "two", To: "three", Kind: graph.EdgeCalls})
 		return 1
 	}}
-	if first.synthesizeScoped(counting, nil) != 1 || second.synthesizeScoped(counting, nil) != 1 {
-		t.Fatal("unexpected synthesizer count")
+	if got, err := first.synthesizeScoped(counting, nil); err != nil || got != 1 {
+		t.Fatalf("first synth count = %d, %v, want 1, nil", got, err)
+	}
+	if got, err := second.synthesizeScoped(counting, nil); err != nil || got != 1 {
+		t.Fatalf("second synth count = %d, %v, want 1, nil", got, err)
 	}
 	if counting.addBatchCalls != 2 || counting.addEdgeCalls != 0 || g.EdgeCount() != 2 {
 		t.Fatalf("writes = AddBatch:%d AddEdge:%d stored:%d, want 2/0/2", counting.addBatchCalls, counting.addEdgeCalls, g.EdgeCount())
@@ -181,8 +184,8 @@ func TestFrameworkPartialLegacyPathBatchesWrites(t *testing.T) {
 		store.AddEdge(&graph.Edge{From: "repo::one", To: "repo::two", Kind: graph.EdgeCalls})
 		return 1
 	}}
-	if got := synth.synthesizeScoped(counting, map[string]bool{"repo": true}); got != 1 {
-		t.Fatalf("partial count = %d, want 1", got)
+	if got, err := synth.synthesizeScoped(counting, map[string]bool{"repo": true}); err != nil || got != 1 {
+		t.Fatalf("partial count = %d, %v, want 1, nil", got, err)
 	}
 	if counting.addEdgeCalls != 0 || counting.addBatchCalls != 1 || g.EdgeCount() != 1 {
 		t.Fatalf("partial writes = AddEdge:%d AddBatch:%d stored:%d, want 0/1/1", counting.addEdgeCalls, counting.addBatchCalls, g.EdgeCount())

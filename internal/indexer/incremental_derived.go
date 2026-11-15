@@ -28,6 +28,9 @@ type IncrementalDerivedReport struct {
 
 	CapabilityError error
 	Incomplete      bool
+
+	FrameworkError   error
+	FrameworkRefused []string
 	// EntryPointHierarchy counts entry-point stamps (aspnet:controller
 	// today) propagated down resolved extends chains on declaration-shape
 	// changes.
@@ -462,6 +465,11 @@ func (mi *MultiIndexer) runIncrementalDerivedPassesWithPriorTopologyHeld(
 			frameworkSelection,
 		)
 		report.Framework = framework.Total
+		report.FrameworkError = framework.Err
+		report.FrameworkRefused = framework.Refused
+		if framework.Incomplete {
+			report.Incomplete = true
+		}
 		report.FrameworkPer = framework.Per
 		report.FrameworkGated = framework.Gated
 		report.FrameworkReceiverGated = framework.ReceiverGated
@@ -564,6 +572,13 @@ func (mi *MultiIndexer) logIncrementalDerived(report IncrementalDerivedReport, p
 		zap.Int64("duration_ms", report.DurationMs)}
 	for _, family := range []string{"prelude", "hierarchy", "tests", "capability", "framework", "external_calls", "cross_repo", "contracts"} {
 		fields = append(fields, writeCounterFields(family+"_", report.PassWrites[family])...)
+	}
+	if report.FrameworkError != nil {
+		mi.logger.Warn("incremental framework passes refused", zap.Any("report", report),
+			zap.Strings("passes", report.FrameworkRefused), zap.Error(report.FrameworkError))
+		if report.CapabilityError == nil {
+			return
+		}
 	}
 	if report.CapabilityError != nil {
 		fields = append(fields, zap.String("pass", "capability_edges"), zap.Error(report.CapabilityError))
