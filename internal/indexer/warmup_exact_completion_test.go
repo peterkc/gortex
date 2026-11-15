@@ -22,6 +22,11 @@ type warmupIncomingRefusalStore struct {
 	reads  atomic.Int64
 }
 
+// The incoming-refusal fixture keeps its real backend's slug capability.
+func (s *warmupIncomingRefusalStore) BackfillWorkspaceSlugsWithImpact(slugs []graph.WorkspaceSlug) graph.WorkspaceSlugBackfillResult {
+	return s.Store.(graph.WorkspaceSlugImpactBackfiller).BackfillWorkspaceSlugsWithImpact(slugs)
+}
+
 func (s *warmupIncomingRefusalStore) GetInEdgesByNodeIDs(ids []string) map[string][]*graph.Edge {
 	s.reads.Add(1)
 	rows := s.Store.GetInEdgesByNodeIDs(ids)

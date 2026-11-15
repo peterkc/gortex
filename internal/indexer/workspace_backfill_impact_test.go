@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -126,10 +127,16 @@ func TestBackfillWorkspaceSlugsWithImpactPreservesLegacyCounts(t *testing.T) {
 				tc := tc
 				t.Run(tc.name, func(t *testing.T) {
 					legacyMulti, _, _ := newWorkspaceBackfillFixture(t, factory, tc.workspaceConfig, true)
-					legacyNodes, legacyContracts := legacyMulti.BackfillWorkspaceSlugs()
+					legacyNodes, legacyContracts, err := legacyMulti.BackfillWorkspaceSlugs()
+					if err != nil {
+						t.Fatal(err)
+					}
 
 					exactMulti, store, registry := newWorkspaceBackfillFixture(t, factory, tc.workspaceConfig, true)
-					nodes, contractCount, resolutionAffected := exactMulti.BackfillWorkspaceSlugsWithImpact()
+					nodes, contractCount, resolutionAffected, err := exactMulti.BackfillWorkspaceSlugsWithImpact()
+					if err != nil {
+						t.Fatal(err)
+					}
 					if nodes != legacyNodes || contractCount != legacyContracts {
 						t.Fatalf("exact counts = (%d, %d), legacy = (%d, %d)", nodes, contractCount, legacyNodes, legacyContracts)
 					}
@@ -155,7 +162,10 @@ func TestBackfillWorkspaceSlugsWithImpactPreservesLegacyCounts(t *testing.T) {
 						t.Fatalf("contract slugs = (%q, %q), want (%q, %q)", allContracts[0].WorkspaceID, allContracts[0].ProjectID, tc.wantWorkspace, tc.wantProject)
 					}
 
-					secondNodes, secondContracts, secondAffected := exactMulti.BackfillWorkspaceSlugsWithImpact()
+					secondNodes, secondContracts, secondAffected, err := exactMulti.BackfillWorkspaceSlugsWithImpact()
+					if err != nil {
+						t.Fatal(err)
+					}
 					if secondNodes != 0 || secondContracts != 0 || secondAffected != 0 {
 						t.Fatalf("idempotent backfill = (%d, %d, %d), want zeros", secondNodes, secondContracts, secondAffected)
 					}
@@ -195,11 +205,78 @@ func TestBackfillWorkspaceSlugsWithImpactUnknownBackendFailsClosed(t *testing.T)
 		configMgr: configManager,
 	}
 
-	nodes, contractCount, resolutionAffected := multi.BackfillWorkspaceSlugsWithImpact()
+	nodes, contractCount, resolutionAffected, err := multi.BackfillWorkspaceSlugsWithImpact()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if nodes != 7 || contractCount != 0 || resolutionAffected != 7 {
 		t.Fatalf("legacy result = (%d, %d, %d), want (7, 0, 7)", nodes, contractCount, resolutionAffected)
 	}
 	if len(legacy.seen) != 1 || legacy.seen[0].RepoPrefix != workspaceBackfillTestPrefix {
 		t.Fatalf("legacy backend received slugs = %+v", legacy.seen)
+	}
+}
+
+func TestBackfillWorkspaceSlugsRequiresBackendBeforeContracts(t *testing.T) {
+	for _, exact := range []bool{false, true} {
+		t.Run(map[bool]string{false: "legacy_entry", true: "impact_entry"}[exact], func(t *testing.T) {
+			// Given configured graph nodes and contracts behind an interface-only
+			// store, when backfill runs, then contracts must not stamp independently.
+			mi, base, registry := newWorkspaceBackfillFixture(t, workspaceBackfillStoreFactories()[0], "workspace: shared\nproject: application\n", true)
+			mi.graph = &struct{ graph.Store }{Store: base}
+			var nodes, contractCount, affected int
+			var err error
+			if exact {
+				nodes, contractCount, affected, err = mi.BackfillWorkspaceSlugsWithImpact()
+			} else {
+				nodes, contractCount, err = mi.BackfillWorkspaceSlugs()
+			}
+			if nodes != 0 || contractCount != 0 || affected != 0 {
+				t.Fatalf("refused backfill reported changes: %d, %d, %d", nodes, contractCount, affected)
+			}
+			if !errors.Is(err, errors.ErrUnsupported) {
+				t.Fatalf("backfill error = %v, want unsupported", err)
+			}
+			node := base.GetNode(workspaceBackfillTestPrefix + "/file.go::Function")
+			if node.WorkspaceID != "" || node.ProjectID != "" {
+				t.Fatal("unsupported backfill changed graph slugs")
+			}
+			all := registry.All()
+			if len(all) != 1 || all[0].WorkspaceID != "" || all[0].ProjectID != "" {
+				t.Fatal("unsupported graph backfill independently stamped contract slugs")
+			}
+			// Restoring the supported backend permits the same request to stamp.
+			mi.graph = base
+			nodes, contractCount, affected, err = mi.BackfillWorkspaceSlugsWithImpact()
+			if err != nil || nodes != 1 || contractCount != 1 || affected != 1 {
+				t.Fatalf("supported follow-up result = %d, %d, %d, %v", nodes, contractCount, affected, err)
+			}
+		})
+	}
+}
+
+func TestBackfillWorkspaceSlugsNoWorkNeedsNoBackend(t *testing.T) {
+	configManager := newTestConfigManager(t)
+	store := &struct{ graph.Store }{Store: graph.New()}
+	for name, mi := range map[string]*MultiIndexer{
+		"nil":             nil,
+		"no_graph":        {configMgr: configManager},
+		"no_config":       {graph: store},
+		"no_repositories": {graph: store, configMgr: configManager},
+		"nil_repository":  {graph: store, configMgr: configManager, repos: map[string]*RepoMetadata{"repo": nil}},
+		"empty_prefix":    {graph: store, configMgr: configManager, repos: map[string]*RepoMetadata{"": {RootPath: t.TempDir()}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// Given no usable node-stamp work, when either public entry runs,
+			// then it remains a successful empty pass without optional capabilities.
+			nodes, contracts, err := mi.BackfillWorkspaceSlugs()
+			if err != nil || nodes != 0 || contracts != 0 {
+				t.Fatalf("legacy no-work result = %d, %d, %v", nodes, contracts, err)
+			}
+			nodes, contracts, affected, err := mi.BackfillWorkspaceSlugsWithImpact()
+			if err != nil || nodes != 0 || contracts != 0 || affected != 0 {
+				t.Fatalf("impact no-work result = %d, %d, %d, %v", nodes, contracts, affected, err)
+			}
+		})
 	}
 }

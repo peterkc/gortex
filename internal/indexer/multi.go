@@ -1240,7 +1240,9 @@ func (mi *MultiIndexer) RunPreEnrichResolve(ctx context.Context, scope map[strin
 	}
 	// Stamp legacy nodes after master resolution so synthetic nodes created by
 	// attribution participate in the cross-workspace boundary check below.
-	mi.BackfillWorkspaceSlugs()
+	if _, _, err := mi.BackfillWorkspaceSlugs(); err != nil {
+		return err
+	}
 	// Cross-repo references resolve here so a multi-repo workspace is fully
 	// resolved, not just within each repo. Whole-graph so inbound references
 	// from unchanged repos into the changed repos bind too.
@@ -1281,7 +1283,10 @@ func (mi *MultiIndexer) RunPreEnrichResolveFiles(ctx context.Context, files []st
 	// fills and WorkspaceID=RepoPrefix fills preserve the resolver's existing
 	// fallback semantics, so only an effective workspace-boundary change needs
 	// to escalate this exact frontier to a graph-wide pass.
-	_, _, resolutionAffected := mi.backfillWorkspaceSlugsWithImpact()
+	_, _, resolutionAffected, err := mi.backfillWorkspaceSlugsWithImpact()
+	if err != nil {
+		return err
+	}
 	if err := context.Cause(ctx); err != nil {
 		return err
 	}

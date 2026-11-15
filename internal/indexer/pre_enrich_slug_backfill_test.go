@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -115,7 +116,37 @@ func newPreEnrichSlugFixture(t *testing.T, stamped bool) (*MultiIndexer, *graph.
 	if stamped {
 		// AddBatch may materialize repository-owned builtins. Stamp the complete
 		// fixture so this case represents a graph after its one-time migration.
-		mi.BackfillWorkspaceSlugs()
+		if _, _, err := mi.BackfillWorkspaceSlugs(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return mi, store, call
+}
+
+func TestRunPreEnrichResolveRefusesMissingWorkspaceBackfill(t *testing.T) {
+	for _, exact := range []bool{false, true} {
+		t.Run(map[bool]string{false: "full", true: "exact"}[exact], func(t *testing.T) {
+			// Given an absent node backfiller, when pre-enrichment reaches the
+			// stamp boundary, then refusal stops the subsequent cross-workspace scan.
+			mi, base, _ := newPreEnrichSlugFixture(t, false)
+			counting := &deferredScanCountingStore{Graph: base}
+			mi.graph = &struct{ graph.Store }{Store: counting}
+			var err error
+			if exact {
+				err = mi.RunPreEnrichResolveFiles(t.Context(), []string{"c/c.go"}, nil)
+			} else {
+				err = mi.RunPreEnrichResolve(t.Context(), nil, nil)
+			}
+			require.ErrorIs(t, err, errors.ErrUnsupported)
+			// The full master scans pending rows and terminal stamps. A
+			// cross-repo pass would add a third scan. The exact master adds none.
+			wantScans := int64(2)
+			if exact {
+				wantScans = 0
+			}
+			require.Equal(t, wantScans, counting.unresolvedScans.Load())
+			require.Empty(t, base.GetNode("a/a.go::Call").WorkspaceID)
+			require.Empty(t, base.GetNode("b/b.go::Serve").WorkspaceID)
+		})
+	}
 }
