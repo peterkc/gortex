@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -216,6 +217,9 @@ type checkoutWarmup struct {
 // warmupRegistry tracks the provider's warm-ups and its interactive
 // compiler loads, which warm-ups yield to.
 type warmupRegistry struct {
+	// startup counts daemon startup windows. During a window every expensive
+	// load shares the provider's existing exclusive large-program lease.
+	startup atomic.Int32
 	mu      sync.Mutex
 	entries map[string]*checkoutWarmup
 	// loads counts the interactive compiler loads running per module
@@ -430,12 +434,58 @@ func isExecutable(path string) bool {
 	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
 }
 
+// preemptStartupListings is called before a foreground pass waits for the
+// exclusive lease: waiting until loadCompilerProgram would wait behind the
+// very listing that must yield. The listing releases only after its driver joins.
+func (p *Provider) preemptStartupListings() {
+	r := &p.warm
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range r.entries {
+		if e.cancel != nil {
+			e.cancel()
+			e.cancel = nil
+			e.status.Preemptions++
+			e.status.State = warmupPreempted
+			r.notifyLocked()
+		}
+	}
+	for dir, cancel := range r.relistCancel {
+		cancel()
+		delete(r.relistCancel, dir)
+	}
+}
+
+// acquireStartupListing shares admission with compiler programs only during
+// startup. A cache-miss listing already carries its caller's lease.
+func (p *Provider) acquireStartupListing(ctx context.Context) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if p.warm.startup.Load() == 0 || ctx.Value(startupCompilerAdmission{}) == p {
+		return func() {}, nil
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		release, err := p.acquireHeavyBlocking(ctx, true)
+		if err != nil {
+			return nil, err
+		}
+		if p.committed.interactive.Load() == 0 {
+			return release, nil
+		}
+		release()
+	}
+}
+
 // beginCompilerLoad marks an interactive compiler load over the module
 // directory dir: it preempts that directory's running warm-up and export
 // relist, and holds new ones back until the load ends. The returned func
 // ends the load.
 //
-// Policy: a load never preempts, nor holds back, another module directory's
+// Outside startup, a load never preempts, nor holds back, another module directory's
 // warm-up. A daemon runs a checkout's whole-module load for minutes (a cold
 // primary: 606 s measured); cancelling a worktree's warm-up for it threw
 // away the listing in flight and kept the worktree cold until long after
@@ -452,7 +502,7 @@ func (p *Provider) beginCompilerLoad(dir string) func() {
 	}
 	r.loads[dir]++
 	for _, e := range r.entries {
-		if e.cancel != nil && filepath.Clean(e.loadDir) == dir {
+		if e.cancel != nil && (r.startup.Load() > 0 || filepath.Clean(e.loadDir) == dir) {
 			e.cancel()
 			e.cancel = nil
 			e.status.Preemptions++
@@ -486,6 +536,9 @@ func (p *Provider) beginCompilerLoad(dir string) func() {
 // compiler loads (running, or ended within the quiet period); the caller
 // holds r.mu.
 func (r *warmupRegistry) loadWaitLocked(dir string) time.Duration {
+	if r.startup.Load() > 0 && len(r.loads) > 0 {
+		return r.quietPeriod()
+	}
 	dir = filepath.Clean(dir)
 	if r.loads[dir] > 0 {
 		return r.quietPeriod()

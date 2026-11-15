@@ -775,6 +775,16 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 				deferredRetirements.MarkReady()
 			}
 		})
+		// The initial committed-base join is part of startup too. On an
+		// interrupted join, existing publications keep their own load leases.
+		if state.indexer != nil && state.indexer.SemanticManager() != nil {
+			for _, provider := range state.indexer.SemanticManager().AllProviders() {
+				if startup, ok := provider.(interface{ BeginStartupWarmup() func() }); ok {
+					defer startup.BeginStartupWarmup()()
+				}
+			}
+		}
+
 		mw, warmup := warmupDaemonStateContext(ctx, state, logger, markReady, controller.startAndAttachWatcher)
 		if !warmup.canFinalize(ctx) {
 			if warmup != nil && warmup.err != nil {

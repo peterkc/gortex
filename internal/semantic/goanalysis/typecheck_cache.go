@@ -510,6 +510,11 @@ type tcListing struct {
 // runListing runs the metadata+export listing of patterns in loadDir and
 // records the manifest of every mutable package it lists.
 func (p *Provider) runListing(ctx context.Context, loadDir string, patterns, buildFlags []string) (*tcListing, error) {
+	release, err := p.acquireStartupListing(ctx)
+	if err != nil {
+		return &tcListing{}, err
+	}
+	defer release()
 	cfg := &packages.Config{
 		Context: ctx,
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |

@@ -302,6 +302,19 @@ func committedEnv(ctx context.Context) []string {
 // pass hands the overlay to the go command.
 func (p *Provider) ReadsCommittedTree() bool { return true }
 
+// BeginStartupWarmup starts the startup-only exclusive compiler policy before
+// startup dispatch. The owner releases it after its existing startup join, even
+// if that join is interrupted. Already admitted loads retain their own leases
+// until their children and compiler state join; release adds no second wait.
+func (p *Provider) BeginStartupWarmup() func() {
+	p.warm.startup.Add(1)
+	return sync.OnceFunc(func() { p.warm.startup.Add(-1) })
+}
+
+// startupCompilerAdmission marks a lease already owned by the calling pass.
+// Cache-miss listings share it instead of recursively taking the same gate.
+type startupCompilerAdmission struct{}
+
 // acquireHeavy admits one compiler program.
 //
 // A committed tree's pass (a dedicated base, its advance, a commit layer)
@@ -310,7 +323,16 @@ func (p *Provider) ReadsCommittedTree() bool { return true }
 // holding it before it waits. A committed pass that is preempted publishes its generation without
 // the type checker's facts and says so; an edit never waits minutes behind it.
 func (p *Provider) acquireHeavy(ctx context.Context, large bool) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	preempt := committedPreempt(ctx)
+	if p.warm.startup.Load() > 0 {
+		large = true
+		if preempt == nil {
+			p.preemptStartupListings()
+		}
+	}
 	if preempt == nil {
 		p.committed.interactive.Add(1)
 		defer p.committed.interactive.Add(-1)
@@ -740,6 +762,9 @@ func (p *Provider) enrichRepoContext(ctx context.Context, g graph.Store, repoPre
 	releaseAdmission, err := p.acquireHeavy(ctx, largeAdmission)
 	if err != nil {
 		return nil, err
+	}
+	if p.warm.startup.Load() > 0 {
+		ctx = context.WithValue(ctx, startupCompilerAdmission{}, p)
 	}
 	var (
 		pkgs                       []*packages.Package
@@ -1621,6 +1646,11 @@ func (p *Provider) EnrichFilesContext(ctx context.Context, g graph.Store, repoPr
 	// relativization base for graph paths.
 	fileLoadDir, _ := goLoadDir(absRoot)
 	pkgs, fset, err := p.loadPackagesContext(ctx, fileLoadDir, patterns...)
+	defer func() {
+		clearGoPackageCompilerRoots(pkgs)
+		pkgs = nil
+		fset = nil
+	}()
 	if err != nil {
 		return nil, fmt.Errorf("load packages for %d files: %w", len(requestedFiles), err)
 	}

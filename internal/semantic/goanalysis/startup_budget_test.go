@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/tools/go/packages"
@@ -370,6 +372,14 @@ func startupEnvValue(env []string, key string) string {
 }
 
 func TestStartupGoSubprocessBudget(t *testing.T) {
+	t.Run("warmup reservation spans apply barrier", startupWarmupApplyBarrier)
+
+	t.Run("interrupted startup join does not wait for publication", startupInterruptedJoin)
+
+	t.Run("shared warmup admission", startupWarmupAdmission)
+	t.Run("foreground preempts another module and joins", startupWarmupPreemption)
+	t.Run("joined owner releases and restores outside behavior", startupWarmupTerminal)
+
 	t.Run("preserve explicit flags and caller slices", func(t *testing.T) {
 		for _, tc := range []struct {
 			name  string
@@ -570,4 +580,300 @@ func startupCgoBoundary(t *testing.T) {
 			}
 		})
 	}
+}
+
+func startupRunRoute(ctx context.Context, p *Provider, route, root string) error {
+	switch route {
+	case "partial":
+		_, err := p.EnrichFilesContext(ctx, graph.New(), "", root, []string{"api/api.go"})
+		return err
+	case "full":
+		_, err := p.EnrichRepoContext(ctx, scopeHandleGraph(), "", root, nil)
+		return err
+	case "checkout":
+		_, err := p.EnrichRepoContext(semantic.WithCheckoutCompilerScope(ctx, cachedScope), scopeHandleGraph(), "", root, nil)
+		return err
+	case "committed":
+		ctx = semantic.WithCheckoutCompilerScope(ctx, semantic.CheckoutCompilerScope{HandleRoots: true, Committed: true, Preempt: func() {}})
+		_, err := p.EnrichRepoContext(ctx, scopeHandleGraph(), "", root, nil)
+		return err
+	case "background":
+		_, err := p.runListing(ctx, root, []string{"./api"}, warmupBuildFlags())
+		return err
+	case "targeted":
+		_, err := p.runListing(ctx, root, []string{"./api"}, targetedWarmupBuildFlags())
+		return err
+	}
+	panic("unknown startup fixture route")
+}
+
+func startupFakeMetadata(cfg *packages.Config) []*packages.Package {
+	return []*packages.Package{{ID: "example.com/scope", PkgPath: "example.com/scope", Name: "scope", GoFiles: []string{filepath.Join(cfg.Dir, "api/api.go")}, Module: &packages.Module{Main: true, Path: "example.com/scope"}}}
+}
+
+func startupWarmupAdmission(t *testing.T) {
+	routes := []string{"partial", "full", "checkout", "committed", "background", "targeted"}
+	var roots []string
+	for range routes {
+		roots = append(roots, typecheckCacheFixture(t))
+	}
+	synctest.Test(t, func(t *testing.T) {
+		p := newTestProvider(t)
+		p.heavyGate = make(chan struct{}, 2)
+		p.compilerGC = func() {}
+		t.Cleanup(func() { require.NoError(t, p.Close()) })
+		end := p.BeginStartupWarmup()
+		defer end()
+		release := make(chan struct{})
+		var active, peak, starts atomic.Int32
+		p.packagesLoad = func(cfg *packages.Config, _ ...string) ([]*packages.Package, error) {
+			if cfg.Mode&(packages.NeedTypes|packages.NeedExportFile) == 0 {
+				return startupFakeMetadata(cfg), nil
+			}
+			n := active.Add(1)
+			for old := peak.Load(); n > old && !peak.CompareAndSwap(old, n); old = peak.Load() {
+			}
+			starts.Add(1)
+			select {
+			case <-release:
+			case <-cfg.Context.Done():
+			}
+			active.Add(-1)
+			return nil, cfg.Context.Err()
+		}
+		done := make(chan error, len(routes))
+		// Given independent heavy-gate callers and independent listing callers in
+		// different modules, with the ordinary heavy gate deliberately set to two.
+		for i, route := range routes {
+			go func() { done <- startupRunRoute(t.Context(), p, route, roots[i]) }()
+		}
+		synctest.Wait()
+		startedBeforeRelease := starts.Load()
+		// When all attempts are deterministically blocked in their admission or driver.
+		close(release)
+		for range routes {
+			<-done
+		}
+		// Then flags alone cannot satisfy this cross-route exclusion assertion.
+		require.EqualValues(t, 1, startedBeforeRelease)
+		require.EqualValues(t, 1, peak.Load())
+		require.Zero(t, active.Load())
+	})
+}
+
+func startupWarmupPreemption(t *testing.T) {
+	roots := []string{typecheckCacheFixture(t), typecheckCacheFixture(t)}
+	synctest.Test(t, func(t *testing.T) {
+		p := newTestProvider(t)
+		p.heavyGate = make(chan struct{}, 2)
+		t.Cleanup(func() { require.NoError(t, p.Close()) })
+		end := p.BeginStartupWarmup()
+		defer end()
+		bgCtx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		e := &checkoutWarmup{loadDir: roots[0], cancel: cancel}
+		p.warm.entries = map[string]*checkoutWarmup{roots[0]: e}
+		p.warm.active = e
+		cleanup := make(chan struct{})
+		childJoined := make(chan struct{})
+		var foreground, early atomic.Bool
+		p.packagesLoad = func(cfg *packages.Config, _ ...string) ([]*packages.Package, error) {
+			if cfg.Mode&(packages.NeedTypes|packages.NeedExportFile) == 0 {
+				return startupFakeMetadata(cfg), nil
+			}
+			if cfg.Dir == roots[0] {
+				<-cfg.Context.Done()
+				<-cleanup
+				close(childJoined)
+				return nil, cfg.Context.Err()
+			}
+			foreground.Store(true)
+			select {
+			case <-childJoined:
+			default:
+				early.Store(true)
+			}
+			return nil, nil
+		}
+		background := make(chan error, 1)
+		go func() {
+			_, err := p.runListing(bgCtx, roots[0], []string{"./api"}, warmupBuildFlags())
+			background <- err
+		}()
+		synctest.Wait()
+		front := make(chan error, 1)
+		go func() { front <- startupRunRoute(t.Context(), p, "partial", roots[1]) }()
+		synctest.Wait()
+		cancelled := bgCtx.Err() != nil
+		ranBeforeJoin := foreground.Load()
+		// Complete cleanup even on the flags-only/base behavior so the failed
+		// assertion cannot strand the fixture goroutines.
+		cancel()
+		close(cleanup)
+		<-background
+		<-front
+		require.True(t, cancelled, "foreground must preempt the different module's listing")
+		require.False(t, ranBeforeJoin, "foreground must wait for owned child cleanup")
+		require.False(t, early.Load())
+		require.True(t, foreground.Load())
+	})
+}
+
+func startupWarmupTerminal(t *testing.T) {
+	root := typecheckCacheFixture(t)
+	for _, outcome := range []string{"success", "failure", "cancel"} {
+		t.Run(outcome, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				p := newTestProvider(t)
+				p.heavyGate = make(chan struct{}, 2)
+				t.Cleanup(func() { require.NoError(t, p.Close()) })
+				end := p.BeginStartupWarmup()
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				release := make(chan struct{})
+				p.packagesLoad = func(cfg *packages.Config, _ ...string) ([]*packages.Package, error) {
+					<-release
+					switch outcome {
+					case "failure":
+						return nil, errors.New("driver failed")
+					case "cancel":
+						return nil, cfg.Context.Err()
+					}
+					return nil, nil
+				}
+				loadDone := make(chan error, 1)
+				go func() { _, err := p.runListing(ctx, root, []string{"./api"}, nil); loadDone <- err }()
+				synctest.Wait()
+				ended := make(chan struct{})
+				var loadErr error
+				go func() { loadErr = <-loadDone; end(); close(ended) }()
+				synctest.Wait()
+				returnedEarly := false
+				select {
+				case <-ended:
+					returnedEarly = true
+				default:
+				}
+				if outcome == "cancel" {
+					cancel()
+				}
+				close(release)
+				<-ended
+				err := loadErr
+				end() // release is idempotent
+				require.False(t, returnedEarly, "the window owner joins its load before policy release")
+				if outcome == "success" {
+					require.NoError(t, err)
+				} else {
+					require.Error(t, err)
+				}
+				// Outside warmup, both ordinary heavy slots remain available and
+				// module-local listings stay outside that gate.
+				first, err := p.acquireHeavy(t.Context(), false)
+				require.NoError(t, err)
+				second, err := p.acquireHeavy(t.Context(), false)
+				require.NoError(t, err)
+				listed := make(chan error, 1)
+				go func() { _, err := p.runListing(t.Context(), root, []string{"./api"}, nil); listed <- err }()
+				synctest.Wait()
+				outsideCompleted := false
+				select {
+				case <-listed:
+					outsideCompleted = true
+				default:
+				}
+				first()
+				second()
+				if !outsideCompleted {
+					<-listed
+				}
+				require.True(t, outsideCompleted, "outside-warmup listing admission must stay unchanged")
+			})
+		})
+	}
+}
+
+func startupWarmupApplyBarrier(t *testing.T) {
+	t.Setenv("GORTEX_GOTYPES_NEEDDEPS", "1")
+	root := typecheckCacheFixture(t)
+	synctest.Test(t, func(t *testing.T) {
+		p := newTestProvider(t)
+		p.heavyGate = make(chan struct{}, 2)
+		p.compilerGC = func() {}
+		t.Cleanup(func() { require.NoError(t, p.Close()) })
+		end := p.BeginStartupWarmup()
+		defer end()
+		gate := make(chan struct{})
+		var loads atomic.Int32
+		p.packagesLoad = func(*packages.Config, ...string) ([]*packages.Package, error) {
+			loads.Add(1)
+			return []*packages.Package{{ID: "example.com/scope/api", GoFiles: []string{filepath.Join(root, "api/api.go")}}}, nil
+		}
+		full := make(chan error, 1)
+		go func() {
+			_, err := p.enrichRepoContext(semantic.WithApplyGate(t.Context(), gate), graph.New(), "", root)
+			full <- err
+		}()
+		synctest.Wait()
+		partial := make(chan error, 1)
+		go func() { partial <- startupRunRoute(t.Context(), p, "partial", root) }()
+		synctest.Wait()
+		before := loads.Load()
+		close(gate)
+		<-full
+		<-partial
+		require.EqualValues(t, 1, before, "a second load must not overlap the retained program at apply")
+		require.EqualValues(t, 2, loads.Load())
+	})
+}
+
+func startupInterruptedJoin(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := newTestProvider(t)
+		p.heavyGate = make(chan struct{}, 2)
+		t.Cleanup(func() { require.NoError(t, p.Close()) })
+		end := p.BeginStartupWarmup()
+		// Given a publication whose independent context outlives the cancelled
+		// startup join, its already admitted load keeps both original reservations.
+		committed := semantic.WithCheckoutCompilerScope(t.Context(), semantic.CheckoutCompilerScope{Committed: true, Preempt: func() {}})
+		publication, err := p.acquireHeavy(committed, false)
+		require.NoError(t, err)
+		ended := make(chan struct{})
+		go func() { end(); close(ended) }()
+		synctest.Wait()
+		policyReleased := false
+		select {
+		case <-ended:
+			policyReleased = true
+		default:
+		}
+		heldPublication := len(p.largeGate) == 1 && len(p.heavyGate) == 1
+		later := make(chan func(), 1)
+		go func() {
+			release, err := p.acquireHeavy(t.Context(), false)
+			if err != nil {
+				panic(err)
+			}
+			later <- release
+		}()
+		synctest.Wait()
+		var laterRelease func()
+		select {
+		case laterRelease = <-later:
+		default:
+		}
+		laterAdmitted := laterRelease != nil
+		publication()
+		<-ended
+		if laterRelease == nil {
+			laterRelease = <-later
+		}
+		laterRelease()
+		end()
+		// Then policy release does not perform a second publication wait or revoke
+		// the publication's lease. Later live work sees ordinary admission.
+		require.True(t, policyReleased)
+		require.True(t, heldPublication)
+		require.True(t, laterAdmitted)
+	})
 }
