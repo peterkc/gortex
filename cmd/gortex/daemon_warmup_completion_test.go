@@ -22,6 +22,7 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/indexer"
 	gortexmcp "github.com/zzet/gortex/internal/mcp"
 	"github.com/zzet/gortex/internal/parser"
@@ -392,4 +393,356 @@ func TestWarmupCompletionRefusesUnsupportedWorkspaceBackfill(t *testing.T) {
 	phase, _ := srv.ReadinessPhase()
 	require.Equal(t, "warmup_incomplete", phase)
 	require.Empty(t, logs.FilterMessage("daemon: enrichment complete").All())
+}
+
+// daemonCleanupFixture keeps a real interrupted untrack and its stale config
+// across a fresh MI/lifecycle, as daemon startup does. It never opens readiness
+// during setup, so no physical cleanup can escape the test's observations.
+type daemonCleanupFixture struct {
+	t       *testing.T
+	store   *store_sqlite.Store
+	state   *daemonState
+	root    string
+	tracked indexer.RegisterResult
+	nodeID  string
+}
+
+func newDaemonCleanupFixture(t *testing.T) *daemonCleanupFixture {
+	t.Helper()
+	base := t.TempDir()
+	store, err := store_sqlite.Open(filepath.Join(base, "cleanup.sqlite"))
+	require.NoError(t, err)
+	cm, err := config.NewConfigManager(filepath.Join(base, "config.yaml"))
+	require.NoError(t, err)
+	f := &daemonCleanupFixture{t: t, store: store}
+	f.open(store, cm)
+	t.Cleanup(func() {
+		require.NoError(t, f.state.lifecycle.Close())
+		require.NoError(t, f.state.multiIndexer.Close(context.Background()))
+		require.NoError(t, f.store.Close())
+	})
+	f.root = startupPublicationRepo(t, base, "closing")
+	f.tracked, err = f.state.lifecycle.Register(t.Context(), config.RepoEntry{Path: f.root, Name: "closing"}, indexer.TrackSourceCLI)
+	require.NoError(t, err)
+	require.NoError(t, f.tracked.CatalogErr)
+	f.nodeID = "closing/pending.go::PendingOldSentinel"
+	store.AddNode(&graph.Node{ID: f.nodeID, Name: "PendingOldSentinel", Kind: graph.KindFunction, FilePath: "closing/pending.go", RepoPrefix: "closing"})
+	out, err := f.state.lifecycle.Untrack(t.Context(), f.root)
+	require.NoError(t, err)
+	require.True(t, out.Pending)
+	return f
+}
+
+func (f *daemonCleanupFixture) open(g graph.Store, cm *config.ConfigManager) {
+	f.t.Helper()
+	registry := parser.NewRegistry()
+	registry.Register(languages.NewGoExtractor())
+	logger := zap.NewNop()
+	idx := indexer.New(g, registry, config.Default().Index, logger)
+	mi := indexer.NewMultiIndexer(g, registry, idx.Search(), cm, logger)
+	lifecycle, err := indexer.NewCheckoutLifecycle(indexer.CheckoutLifecycleConfig{
+		MultiIndexer: mi, ConfigManager: cm, Graph: f.store, Logger: logger,
+	})
+	require.NoError(f.t, err)
+	lifecycle.EnableDeferredRepositoryCleanup()
+	lifecycle.EnableDeferredSeedRetirements()
+	srv := gortexmcp.NewServer(query.NewEngine(g), g, idx, nil, logger, nil, gortexmcp.MultiRepoOptions{
+		MultiIndexer: mi, ConfigManager: cm, CheckoutLifecycle: lifecycle,
+	})
+	f.state = &daemonState{graph: g, indexer: idx, multiIndexer: mi, configManager: cm, lifecycle: lifecycle, mcpServer: srv}
+}
+
+func (f *daemonCleanupFixture) restart(g graph.Store) {
+	f.t.Helper()
+	require.NoError(f.t, f.state.lifecycle.Close())
+	require.NoError(f.t, f.state.multiIndexer.Close(context.Background()))
+	cm, err := config.NewConfigManager(f.state.configManager.Global().ConfigPath())
+	require.NoError(f.t, err)
+	f.open(g, cm)
+}
+
+type cleanupWarmupMtimes struct {
+	*store_sqlite.Store
+	loads atomic.Int64
+}
+
+func (s *cleanupWarmupMtimes) LoadFileMtimes(prefix string) map[string]int64 {
+	s.loads.Add(1)
+	return s.Store.LoadFileMtimes(prefix)
+}
+
+func TestWarmupPendingCleanupRefusesWarmAndColdConfiguredTargets(t *testing.T) {
+	for _, mode := range []string{"warm", "cold"} {
+		t.Run(mode, func(t *testing.T) {
+			// Given stale persisted config whose closing graph still owns its
+			// prefix, with either warm sidecar data or no prior mtimes.
+			f := newDaemonCleanupFixture(t)
+			if mode == "cold" {
+				require.NoError(t, f.store.ReplaceFileMtimes(f.tracked.Prefix, nil))
+			} else {
+				require.NotEmpty(t, f.store.LoadFileMtimes(f.tracked.Prefix))
+			}
+			g := &cleanupWarmupMtimes{Store: f.store}
+			f.restart(g)
+			require.NoError(t, f.state.lifecycle.Seed(t.Context()))
+			require.True(t, f.state.lifecycle.RepositoryAdmissionClosed(f.tracked.Prefix))
+			var loadCalls atomic.Int64
+			original := warmupLoadRepo
+			t.Cleanup(func() { warmupLoadRepo = original })
+			warmupLoadRepo = func(ctx context.Context, a warmupRepoAccounting, state *daemonState, entry config.RepoEntry, prior map[string]int64, deferrable bool, logger *zap.Logger) (string, error) {
+				loadCalls.Add(1)
+				return original(ctx, a, state, entry, prior, deferrable, logger)
+			}
+			g.loads.Store(0)
+
+			// When warmup visits that job, before either raw MI loading path.
+			watcher, timings := warmupDaemonStateContext(t.Context(), f.state, zap.NewNop(), nil, nil)
+			if watcher != nil {
+				t.Cleanup(func() { require.NoError(t, watcher.Stop()) })
+			}
+
+			// Then it never reads prior mtimes, indexes or records changed work,
+			// and FinishRepoLoad gives the client a terminal cleanup reason.
+			require.Zero(t, g.loads.Load())
+			require.Zero(t, loadCalls.Load())
+			require.Zero(t, timings.filesReindexed)
+			require.Nil(t, f.state.multiIndexer.GetMetadata(f.tracked.Prefix))
+			load, found := f.state.multiIndexer.RepoLoadFor(f.root)
+			require.True(t, found)
+			require.True(t, load.State.Unavailable())
+			require.False(t, load.State.Loading())
+			require.Equal(t, indexer.ErrRepositoryCleanupPending.Error(), load.Reason)
+			require.NotNil(t, f.store.GetNode(f.nodeID))
+			intents, err := f.store.Catalog().ListTrackingIntents(t.Context(), f.tracked.CheckoutID)
+			require.NoError(t, err)
+			for _, intent := range intents {
+				require.False(t, intent.Active)
+			}
+		})
+	}
+}
+
+type warmupCleanupPurgeEntry struct {
+	prefix string
+	source string
+	ready  bool
+}
+
+// Physical entry records what the real readiness broadcaster had published.
+// Legacy cleanup can then be held without holding a SQLite transaction.
+type heldWarmupCleanupPurge struct {
+	*store_sqlite.Store
+	server      *gortexmcp.Server
+	entered     chan warmupCleanupPurgeEntry
+	release     chan struct{}
+	mu          sync.Mutex
+	entries     []warmupCleanupPurgeEntry
+	failResolve atomic.Bool
+}
+
+func (s *heldWarmupCleanupPurge) record(prefix, source string) warmupCleanupPurgeEntry {
+	_, ready := s.server.ReadinessPhase()
+	entry := warmupCleanupPurgeEntry{prefix: prefix, source: source, ready: ready}
+	s.mu.Lock()
+	s.entries = append(s.entries, entry)
+	s.mu.Unlock()
+	return entry
+}
+
+func (s *heldWarmupCleanupPurge) PurgeRepo(prefix string) error {
+	entry := s.record(prefix, "repository_cleanup")
+	s.entered <- entry
+	<-s.release
+	return s.Store.PurgeRepo(prefix)
+}
+
+func (s *heldWarmupCleanupPurge) PurgeRepoContext(ctx context.Context, prefix string) error {
+	s.record(prefix, "orphan_maintenance")
+	return s.Store.PurgeRepoContext(ctx, prefix)
+}
+
+var errCleanupWarmupResolve = errors.New("injected cleanup warmup resolve failure")
+
+func (s *heldWarmupCleanupPurge) BeginUnresolvedEdgeScan(ctx context.Context) (graph.UnresolvedEdgeScan, error) {
+	if s.failResolve.Swap(false) {
+		return graph.UnresolvedEdgeScan{}, errCleanupWarmupResolve
+	}
+	return s.Store.BeginUnresolvedEdgeScan(ctx)
+}
+
+type warmupCleanupFinalizer struct {
+	*indexer.DedicatedBaseRuntime
+	finalized chan string
+}
+
+func (o *warmupCleanupFinalizer) FinalizeDedicatedBaseOwner(graphID string, owner store_sqlite.DedicatedBaseOwner, drained <-chan struct{}) error {
+	if err := o.DedicatedBaseRuntime.FinalizeDedicatedBaseOwner(graphID, owner, drained); err != nil {
+		return err
+	}
+	o.finalized <- graphID
+	return nil
+}
+
+func TestDaemonSeedAndWarmupReachReadyBeforeRepositoryPurgeCompletes(t *testing.T) {
+	for _, mode := range []string{"tracked_repository", "last_repository_removed"} {
+		t.Run(mode, func(t *testing.T) {
+			// Given an interrupted untrack absent from config and, optionally,
+			// another configured repo with a symbol that only warmup can index.
+			f := newDaemonCleanupFixture(t)
+			cm := f.state.configManager
+			removed, err := cm.Global().RemoveRepoAndSaveIfPresent(f.root)
+			require.NoError(t, err)
+			require.True(t, removed)
+			if mode == "tracked_repository" {
+				root := startupPublicationRepo(t, t.TempDir(), "healthy")
+				require.NoError(t, os.WriteFile(filepath.Join(root, "main.go"), []byte("package healthy\nfunc TrackedAfterReadySentinel() {}\n"), 0o600))
+				require.NoError(t, cm.Global().AddRepo(config.RepoEntry{Path: root, Name: "healthy"}))
+				require.NoError(t, cm.Global().Save())
+			}
+			g := &heldWarmupCleanupPurge{Store: f.store, entered: make(chan warmupCleanupPurgeEntry, 2), release: make(chan struct{})}
+			f.restart(g)
+			g.server = f.state.mcpServer
+			publisher, err := indexer.NewDedicatedBaseRuntime(f.store, f.state.lifecycle.ViewLeases())
+			require.NoError(t, err)
+			finalizer := &warmupCleanupFinalizer{DedicatedBaseRuntime: publisher, finalized: make(chan string, 2)}
+			require.NoError(t, f.state.lifecycle.SetDedicatedBaseCleanupRuntime(finalizer))
+			controller := &realController{graph: g}
+			task := newDaemonWarmup(t.Context())
+			readyReturned, continueWarmup := make(chan struct{}), make(chan struct{})
+			var releaseOnce, continueOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(g.release) }) }
+			continueReady := func() { continueOnce.Do(func() { close(continueWarmup) }) }
+			t.Cleanup(func() { task.cancel(); release(); continueReady(); task.wait() })
+			type result struct {
+				seedErr error
+				watcher *indexer.MultiWatcher
+				timings *warmupTimings
+			}
+			completed := make(chan result, 1)
+			markReady := sync.OnceFunc(func() {
+				controller.MarkReady(time.Millisecond)
+				publishReadinessPhase(f.state, "ready", true, nil)
+				// This is the daemon's real post-publication release signal,
+				// not a test substitute for the repository cleanup runtime.
+				f.state.lifecycle.MarkRepositoryCleanupReady()
+				close(readyReturned)
+				select {
+				case <-continueWarmup:
+				case <-task.ctx.Done():
+				}
+			})
+
+			// When actual Seed and warmup run with the physical purge held.
+			require.True(t, task.start(func(ctx context.Context) {
+				seedErr := f.state.lifecycle.Seed(ctx)
+				if seedErr != nil {
+					completed <- result{seedErr: seedErr}
+					return
+				}
+				watcher, timings := warmupDaemonStateContext(ctx, f.state, zap.NewNop(), markReady, nil)
+				completed <- result{watcher: watcher, timings: timings}
+			}))
+			select {
+			case <-readyReturned:
+			case <-time.After(20 * time.Second):
+				t.Fatal("Seed and warmup did not reach ready while cleanup was held")
+			}
+			var physical warmupCleanupPurgeEntry
+			select {
+			case physical = <-g.entered:
+			case <-time.After(10 * time.Second):
+				t.Fatal("ready did not start the held repository purge")
+			}
+
+			// Then ready is published before physical entry, and the old
+			// graph stays unreadable while a real tracked-repo query works.
+			require.True(t, controller.ready.Load())
+			require.Equal(t, warmupCleanupPurgeEntry{prefix: f.tracked.Prefix, source: "repository_cleanup", ready: true}, physical)
+			g.mu.Lock()
+			entries := append([]warmupCleanupPurgeEntry(nil), g.entries...)
+			g.mu.Unlock()
+			require.Equal(t, []warmupCleanupPurgeEntry{physical}, entries, "orphan maintenance bypassed the pending saga")
+			require.NotNil(t, f.store.GetNode(f.nodeID), "held physical purge completed before the tracked query")
+			_, err = f.state.lifecycle.AcquireRepositoryRead(f.tracked.GraphID)
+			require.ErrorIs(t, err, graphview.ErrRepositoryAdmissionClosed)
+			if mode == "tracked_repository" {
+				read, err := f.state.lifecycle.AcquireRepositoryRead(indexer.GraphIDFor("healthy"))
+				require.NoError(t, err)
+				symbols := query.NewEngine(g).FindSymbols("TrackedAfterReadySentinel", graph.KindFunction)
+				read.Release()
+				require.Len(t, symbols, 1)
+				require.Equal(t, "TrackedAfterReadySentinel", symbols[0].Name)
+				require.Equal(t, "healthy", symbols[0].RepoPrefix)
+			}
+
+			// When the held purge and warmup tail are released and joined,
+			// the same journal finalizes even when no configured repo remains.
+			release()
+			continueReady()
+			task.wait()
+			out := <-completed
+			require.NoError(t, out.seedErr)
+			require.True(t, out.timings.canFinalize(task.ctx))
+			if out.watcher != nil {
+				t.Cleanup(func() { require.NoError(t, out.watcher.Stop()) })
+				require.NoError(t, out.watcher.Stop())
+			}
+			select {
+			case graphID := <-finalizer.finalized:
+				require.Equal(t, f.tracked.GraphID, graphID)
+			case <-time.After(10 * time.Second):
+				t.Fatal("the held cleanup never finalized after ready")
+			}
+			require.NoError(t, f.state.lifecycle.Close())
+			require.Nil(t, f.store.GetNode(f.nodeID))
+			journal, err := f.store.Catalog().ListCleanupEntries(t.Context())
+			require.NoError(t, err)
+			require.Empty(t, journal)
+			_, found, err := f.store.Catalog().GetRepositoryFamily(t.Context(), f.tracked.FamilyID)
+			require.NoError(t, err)
+			require.False(t, found)
+		})
+	}
+}
+
+func TestDaemonCleanupWaitsWhenWarmupFailsBeforeReady(t *testing.T) {
+	// Given a pending untrack and a healthy repo whose resolve step fails.
+	f := newDaemonCleanupFixture(t)
+	_, err := f.state.configManager.Global().RemoveRepoAndSaveIfPresent(f.root)
+	require.NoError(t, err)
+	healthy := startupPublicationRepo(t, t.TempDir(), "resolve-failure-healthy")
+	require.NoError(t, f.state.configManager.Global().AddRepo(config.RepoEntry{Path: healthy, Name: "healthy"}))
+	require.NoError(t, f.state.configManager.Global().Save())
+	g := &heldWarmupCleanupPurge{Store: f.store, entered: make(chan warmupCleanupPurgeEntry, 2), release: make(chan struct{})}
+	close(g.release)
+	f.restart(g)
+	g.server = f.state.mcpServer
+	require.NoError(t, f.state.lifecycle.Seed(t.Context()))
+	g.failResolve.Store(true)
+	controller := &realController{graph: g}
+	markReady := sync.OnceFunc(func() {
+		controller.MarkReady(time.Millisecond)
+		publishReadinessPhase(f.state, "ready", true, nil)
+		f.state.lifecycle.MarkRepositoryCleanupReady()
+	})
+
+	// When warmup returns its failed outcome and lifecycle shutdown joins.
+	watcher, timings := warmupDaemonStateContext(t.Context(), f.state, zap.NewNop(), markReady, nil)
+	if watcher != nil {
+		t.Cleanup(func() { require.NoError(t, watcher.Stop()) })
+		require.NoError(t, watcher.Stop())
+	}
+	require.NoError(t, f.state.lifecycle.Close())
+
+	// Then no false ready or forced purge occurs, and recovery remains durable.
+	require.ErrorIs(t, timings.resolveErr, errCleanupWarmupResolve)
+	require.False(t, controller.ready.Load())
+	g.mu.Lock()
+	entries := append([]warmupCleanupPurgeEntry(nil), g.entries...)
+	g.mu.Unlock()
+	require.Empty(t, entries)
+	require.NotNil(t, f.store.GetNode(f.nodeID))
+	journal, err := f.store.Catalog().ListCleanupEntries(t.Context())
+	require.NoError(t, err)
+	require.NotEmpty(t, journal)
 }

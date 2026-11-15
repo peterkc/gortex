@@ -4617,6 +4617,9 @@ func (l *CheckoutLifecycle) evictRepoChecked(
 	if prefix == "" {
 		return 0, 0, nil
 	}
+	if cause == reconcile.CauseDemotion && l.deferRepositoryCleanupRelease() {
+		return 0, 0, ErrRepositoryCleanupPending
+	}
 	// Read BEFORE the purge: once the registry stops serving the prefix its
 	// workspace is unreadable, and the siblings that just lost a cohort member
 	// would then never be told.

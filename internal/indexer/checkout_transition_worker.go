@@ -190,7 +190,22 @@ func (l *CheckoutLifecycle) executeDemotionTransition(
 			checkout.EffectiveMode == store_sqlite.CheckoutModeAutomatic &&
 			checkout.ActiveIntentTransitionID == "" {
 			prefix := l.ResolvePrefix(checkout.RootPath)
-			if _, _, err := l.evictRepoChecked(ctx, prefix, checkout.RootPath, reconcile.CauseDemotion); err != nil {
+			_, _, err := l.evictRepoChecked(ctx, prefix, checkout.RootPath, reconcile.CauseDemotion)
+			if onlyRepositoryCleanupPending(err) {
+				// No durable transition remains to rediscover this input. Keep
+				// its existing worker until ready or lifecycle cancellation.
+				if ready := l.repositoryCleanupReadySignal(); ready != nil {
+					select {
+					case <-ready:
+					case <-ctx.Done():
+					}
+					err = ctx.Err()
+					if err == nil {
+						_, _, err = l.evictRepoChecked(ctx, prefix, checkout.RootPath, reconcile.CauseDemotion)
+					}
+				}
+			}
+			if err != nil {
 				return fmt.Errorf("indexer: recover demotion configuration: %w", err)
 			}
 			return nil
@@ -219,6 +234,13 @@ func (l *CheckoutLifecycle) executeDemotionTransition(
 			return l.deferModeTransition(ctx, transition, fmt.Errorf(
 				"%w: demotion transition %s no longer owns checkout %s",
 				store_sqlite.ErrCatalogStaleGuard, transition.TransitionID, checkout.CheckoutID))
+		}
+		// A fresh startup may not have registered the old prefix at all.
+		// Its empty-prefix no-op must not complete this durable transition
+		// before the journalled graph release is allowed to run.
+		if l.deferRepositoryCleanupRelease() {
+			return l.deferModeTransition(ctx, transition, fmt.Errorf(
+				"indexer: persist cleanup-pending demotion configuration: %w", ErrRepositoryCleanupPending))
 		}
 		prefix := l.ResolvePrefix(checkout.RootPath)
 		if _, _, err := l.evictRepoChecked(ctx, prefix, checkout.RootPath, reconcile.CauseDemotion); err != nil {

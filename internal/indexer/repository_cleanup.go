@@ -120,6 +120,16 @@ func (l *CheckoutLifecycle) MarkRepositoryCleanupReady() {
 	}
 }
 
+func (l *CheckoutLifecycle) deferRepositoryCleanupRelease() bool {
+	l.repositoryCleanupMu.Lock()
+	deferred := l.repositoryCleanupReady != nil && !channelClosed(l.repositoryCleanupReady)
+	if deferred {
+		l.repositoryCleanupDeferred = true
+	}
+	l.repositoryCleanupMu.Unlock()
+	return deferred
+}
+
 func (l *CheckoutLifecycle) repositoryCleanupReadySignal() <-chan struct{} {
 	l.repositoryCleanupMu.Lock()
 	defer l.repositoryCleanupMu.Unlock()
@@ -301,13 +311,7 @@ func (l *CheckoutLifecycle) releaseRepositoryGraph(ctx context.Context, graphID 
 	if state.payloadPurged {
 		return nil
 	}
-	l.repositoryCleanupMu.Lock()
-	deferred := l.repositoryCleanupReady != nil && !channelClosed(l.repositoryCleanupReady)
-	if deferred {
-		l.repositoryCleanupDeferred = true
-	}
-	l.repositoryCleanupMu.Unlock()
-	if deferred {
+	if l.deferRepositoryCleanupRelease() {
 		return fmt.Errorf("%w: graph %s", ErrRepositoryCleanupPending, graphID)
 	}
 	if !channelClosed(state.producersDone) {
