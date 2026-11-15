@@ -84,7 +84,7 @@ func (p Policy) SelectedMatrix(module string, byTarget map[string][]string) Matr
 			}
 		}
 		if t.GOOS == "darwin" && groups.has("indexer") {
-			groups.add("rest")
+			groups.add("store") // owns the macOS watcher race tests
 		}
 		for _, part := range p.Partitions {
 			items, _ := ParsePartition(part, p)
