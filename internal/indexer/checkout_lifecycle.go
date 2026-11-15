@@ -184,6 +184,8 @@ type CheckoutLifecycle struct {
 	repositoryCleanupMu         sync.Mutex
 	repositoryCleanup           *repositoryCleanupRuntime
 	repositoryCleanupClosed     bool
+	repositoryCleanupReady      chan struct{}
+	repositoryCleanupDeferred   bool
 	rec                         *reconcile.Reconciler
 	logger                      *zap.Logger
 	now                         func() time.Time
@@ -4362,17 +4364,33 @@ func (l *CheckoutLifecycle) Seed(ctx context.Context) error {
 	}
 	stageCompleted("restore_repository_admissions", started, nil)
 
-	// Finish cleanup that committed before a crash before reading config. A
-	// demotion may have flipped modes and journalled graph retirement while its
-	// stale config entry was still on disk; seeding that entry first would
-	// recreate the intent and graph the cleanup is about to remove.
-	// A teardown still waiting on a reader is the cleanup runtime's to finish.
+	// Resume committed cleanup before reading config. A demotion may have
+	// flipped modes while stale config was still on disk; restore its closing
+	// admission before that entry can recreate intent or a graph. Physical
+	// release may remain with the cleanup runtime until readers drain or the
+	// daemon publishes ready.
 	started = stageStarted("resume_reconciler")
-	if err := l.rec.Resume(ctx); err != nil && !onlyRepositoryCleanupPending(err) {
-		stageCompleted("resume_reconciler", started, err)
-		errs = append(errs, err)
-	} else {
-		stageCompleted("resume_reconciler", started, nil)
+	resumeErr := l.rec.Resume(ctx)
+	if onlyRepositoryCleanupPending(resumeErr) {
+		resumeErr = nil
+	}
+	l.repositoryCleanupMu.Lock()
+	deferred := l.repositoryCleanupDeferred && !channelClosed(l.repositoryCleanupReady)
+	l.repositoryCleanupMu.Unlock()
+	var resumeFields []zap.Field
+	if deferred {
+		pending, err := l.repositoryCleanupPendingCount(ctx)
+		if err != nil {
+			resumeErr = errors.Join(resumeErr, err)
+		} else if pending != 0 {
+			resumeFields = append(resumeFields,
+				zap.String("resume", "post_ready_repository_cleanup"),
+				zap.Int("cleanup_pending", pending))
+		}
+	}
+	stageCompleted("resume_reconciler", started, resumeErr, resumeFields...)
+	if resumeErr != nil {
+		errs = append(errs, resumeErr)
 	}
 	// A crash can leave a populated generation in building state before any
 	// cleanup journal exists. Daemons install a post-ready worker before opting

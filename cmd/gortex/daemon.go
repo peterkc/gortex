@@ -407,6 +407,9 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		retirementWorker = startDeferredRetirementWorker(
 			state.lifecycle.SweepDeferredRetirements, logger)
 		lifecycle := state.lifecycle
+		// Install the repository-release barrier before janitor or Seed replay.
+		// Its existing runtime remains owned and joined by the lifecycle.
+		lifecycle.EnableDeferredRepositoryCleanup()
 		// Stacks the startup correction will change are warmed after it,
 		// not before (their caches would be orphaned).
 		lifecycle.DeferPrewarmsUntilCorrected(warmupTask.ctx)
@@ -764,6 +767,9 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 			})
 			if ctx.Err() != nil {
 				return
+			}
+			if state.lifecycle != nil {
+				state.lifecycle.MarkRepositoryCleanupReady()
 			}
 			if deferredRetirements != nil {
 				deferredRetirements.MarkReady()

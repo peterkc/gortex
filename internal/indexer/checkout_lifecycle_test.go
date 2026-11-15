@@ -14,9 +14,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/gitstate"
+	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/reconcile"
@@ -1327,4 +1329,114 @@ func TestCheckoutLifecycleReloadKeepsNonGitImplicitLiveRepo(t *testing.T) {
 	require.Equal(t, 1, removed.Removed)
 	require.Nil(t, f.mi.GetMetadata("implicit"))
 	require.Empty(t, f.store.GetFileNodes("implicit/lib.go"))
+}
+
+func TestCheckoutLifecycleSeedDefersRepositoryReleaseAcrossRestarts(t *testing.T) {
+	// Given a journalled sole-primary closure whose stale config still exists.
+	core, logs := observer.New(zap.InfoLevel)
+	f := newLifecycleFixture(t, zap.New(core))
+	t.Cleanup(f.close)
+	root := f.gitRepo("seed-release-restart")
+	tracked, err := f.lc.Register(t.Context(), config.RepoEntry{Path: root, Name: "seed-release-restart"}, TrackSourceCLI)
+	require.NoError(t, err)
+	require.NoError(t, tracked.CatalogErr)
+	node := sentinelNode(tracked.Prefix, "RestartReadySentinel")
+	f.store.AddBatch([]*graph.Node{node}, nil)
+	f.lc.EnableDeferredRepositoryCleanup()
+	out, err := f.lc.Untrack(t.Context(), root)
+	require.NoError(t, err)
+	require.True(t, out.Pending)
+	drainedCleanupState(t, f.lc, tracked.GraphID)
+	entries, err := f.catalog.ListCleanupEntries(t.Context())
+	require.NoError(t, err)
+	require.NotEmpty(t, entries)
+	var cleanupIDs []string
+	for _, entry := range entries {
+		cleanupIDs = append(cleanupIDs, entry.CleanupID)
+	}
+
+	// When two fresh lifecycles resume before their daemon becomes ready.
+	var cleanupObserver *cleanupReadyObserver
+	for restart := 0; restart < 2; restart++ {
+		f.restart()
+		cleanupObserver = observeCleanupReady(t, f)
+		f.lc.EnableDeferredRepositoryCleanup()
+		f.lc.EnableDeferredSeedRetirements()
+		logs.TakeAll()
+		require.NoError(t, f.lc.Seed(t.Context()))
+
+		// Then each startup keeps the same cleanup reservation and journal
+		// targets, does not revive intent, and reports the deferred work.
+		require.True(t, f.lc.RepositoryAdmissionClosed(tracked.Prefix))
+		_, readErr := f.lc.AcquireRepositoryRead(tracked.GraphID)
+		require.ErrorIs(t, readErr, graphview.ErrRepositoryAdmissionClosed)
+		require.NotNil(t, f.store.GetNode(node.ID))
+		pending, err := f.catalog.ListCleanupEntries(t.Context())
+		require.NoError(t, err)
+		var pendingIDs []string
+		for _, entry := range pending {
+			pendingIDs = append(pendingIDs, entry.CleanupID)
+		}
+		require.ElementsMatch(t, cleanupIDs, pendingIDs)
+		intents, err := f.catalog.ListTrackingIntents(t.Context(), tracked.CheckoutID)
+		require.NoError(t, err)
+		for _, intent := range intents {
+			require.False(t, intent.Active)
+		}
+		stages := logs.FilterMessage("checkout lifecycle seed stage completed").FilterField(zap.String("stage", "resume_reconciler")).All()
+		require.Len(t, stages, 1)
+		require.Equal(t, "success", stages[0].ContextMap()["outcome"])
+		require.Equal(t, "post_ready_repository_cleanup", stages[0].ContextMap()["resume"])
+		require.EqualValues(t, len(pending), stages[0].ContextMap()["cleanup_pending"])
+	}
+
+	// When only the final startup publishes ready, its existing runtime
+	// finishes the same durable release instead of needing another Seed.
+	state := drainedCleanupState(t, f.lc, tracked.GraphID)
+	f.lc.MarkRepositoryCleanupReady()
+	f.lc.MarkRepositoryCleanupReady()
+	awaitCleanupReadyFinalization(t, cleanupObserver, state)
+	require.Len(t, logs.FilterMessage("repository cleanup released after ready").All(), 1)
+	require.Nil(t, f.store.GetNode(node.ID))
+}
+
+func TestCheckoutLifecycleSeedWithoutRepositoryCleanupKeepsBaseLogs(t *testing.T) {
+	// Given a configured checkout and no pending cleanup, capture the base
+	// Seed's identities and stage sequence before the daemon-only opt-in.
+	core, logs := observer.New(zap.InfoLevel)
+	f := newLifecycleFixture(t, zap.New(core))
+	t.Cleanup(f.close)
+	root := f.gitRepo("seed-no-cleanup")
+	require.NoError(t, f.cm.Global().AddRepo(config.RepoEntry{Path: root, Name: "seed-no-cleanup"}))
+	require.NoError(t, f.cm.Global().Save())
+	require.NoError(t, f.lc.Seed(t.Context()))
+	before := f.checkoutOf("seed-no-cleanup")
+	baseline := logs.TakeAll()
+	var baseStages []string
+	for _, entry := range baseline {
+		if entry.Message == "checkout lifecycle seed stage completed" {
+			baseStages = append(baseStages, entry.ContextMap()["stage"].(string))
+		}
+	}
+
+	// When the same Seed runs with the repository-cleanup barrier enabled.
+	f.lc.EnableDeferredRepositoryCleanup()
+	require.NoError(t, f.lc.Seed(t.Context()))
+	f.lc.MarkRepositoryCleanupReady()
+	after := f.checkoutOf("seed-no-cleanup")
+	var daemonStages []string
+	for _, entry := range logs.All() {
+		fields := entry.ContextMap()
+		require.NotEqual(t, "post_ready_repository_cleanup", fields["resume"])
+		require.NotContains(t, fields, "cleanup_pending")
+		require.NotEqual(t, "repository cleanup released after ready", entry.Message)
+		if entry.Message == "checkout lifecycle seed stage completed" {
+			daemonStages = append(daemonStages, fields["stage"].(string))
+		}
+	}
+
+	// Then no-work logs and catalog identity/clocks are unchanged.
+	require.Equal(t, baseStages, daemonStages)
+	require.Equal(t, before, after)
+	require.Nil(t, f.mi.GetMetadata("seed-no-cleanup"))
 }
