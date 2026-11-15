@@ -528,10 +528,13 @@ func (mi *MultiIndexer) runCrossRepoResolveContext(ctx context.Context, reconcil
 	mi.mu.RUnlock()
 	for _, idx := range indexers {
 		edges := idx.resolver.TakeDeferredGoModuleEdges()
-		if err := cr.ResolveDeferredGoModuleEdges(edges); err != nil {
+		err := cr.ResolveDeferredGoModuleEdges(edges)
+		mi.synthesizeDeferredGoModuleCalls(idx, edges)
+		if err != nil {
+			mi.finishGoModuleCalls(cr)
+			mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 			return err
 		}
-		mi.synthesizeDeferredGoModuleCalls(idx, edges)
 	}
 	if _, err := cr.ResolveAllContext(ctx); err != nil {
 		return err
@@ -711,13 +714,11 @@ func (mi *MultiIndexer) resolveDeferredGoModules(idx *Indexer) error {
 		return nil
 	}
 	cr := mi.newCrossRepoResolver()
-	if err := cr.ResolveDeferredGoModuleEdges(edges); err != nil {
-		return err
-	}
+	err := cr.ResolveDeferredGoModuleEdges(edges)
 	mi.synthesizeDeferredGoModuleCalls(idx, edges)
 	mi.finishGoModuleCalls(cr)
 	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
-	return nil
+	return err
 }
 
 func (mi *MultiIndexer) resolveIncomingGoModules(repo string) error {

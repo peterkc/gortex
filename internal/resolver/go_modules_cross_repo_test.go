@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"errors"
 	"fmt"
 	"iter"
 	"path/filepath"
@@ -1066,6 +1067,88 @@ func TestGoModuleSourceRecoverySkipsRefusedCallers(t *testing.T) {
 				} else {
 					assert.Empty(t, cr.TakeGoModuleSourceFiles(), "no call of this caller can bind into the package")
 				}
+			})
+		}
+	}
+}
+
+// goModuleUnmarkedStore injects a lost CrossRepo column on applied reindexes.
+// It exposes only Store, so the materializer cannot repair the flag with a marker.
+type goModuleUnmarkedStore struct {
+	graph.Store
+	batches, maxBatch int
+}
+
+func (s *goModuleUnmarkedStore) ReindexEdges(batch []graph.EdgeReindex) {
+	s.batches++
+	s.maxBatch = max(s.maxBatch, len(batch))
+	for _, row := range batch {
+		row.Edge.CrossRepo = false
+	}
+	s.Store.ReindexEdges(batch)
+}
+
+func TestGoModuleMaterializationRefusalFinishesTakenWork(t *testing.T) {
+	for _, operation := range []string{"deferred", "deferred_identities", "retry"} {
+		for _, supported := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/native_flag_persistence_%t", operation, supported), func(t *testing.T) {
+				// Given more than one chunk already taken from a deferred queue,
+				// when flag materialization refuses, then all base bindings finish.
+				base := graph.New()
+				base.AddBatch([]*graph.Node{
+					{ID: "a/main_test.go::TestFn", Name: "TestFn", Kind: graph.KindFunction, RepoPrefix: "a", WorkspaceID: "shared", FilePath: "a/main_test.go", Language: "go"},
+					{ID: "b/lib.go::Fn", Name: "Fn", Kind: graph.KindFunction, RepoPrefix: "b", WorkspaceID: "shared", FilePath: "b/lib.go", Language: "go"},
+				}, nil)
+				var edges []*graph.Edge
+				for line := 1; line <= externalCallMutationChunk+1; line++ {
+					edge := &graph.Edge{From: "a/main_test.go::TestFn", To: "dep::example.org/lib::Fn", Kind: graph.EdgeCalls, FilePath: "a/main_test.go", Line: line}
+					base.AddEdge(edge)
+					edges = append(edges, edge)
+				}
+				var store graph.Store = base
+				unmarked := &goModuleUnmarkedStore{Store: base}
+				if !supported {
+					store = unmarked
+				}
+				cr := NewCrossRepo(store)
+				modules := map[string]string{"b": "example.org/lib"}
+				cr.SetGoModules(modules)
+				var err error
+				switch operation {
+				case "deferred":
+					err = cr.ResolveDeferredGoModuleEdges(edges)
+				case "deferred_identities":
+					identities := make([]graph.EdgeIdentity, len(edges))
+					for i, edge := range edges {
+						identities[i] = graph.EdgeIdentityFor(edge)
+					}
+					err = cr.ResolveDeferredGoModuleEdgeIdentities(identities)
+				default:
+					state := &GoModuleDepRetry{modules: modules, revision: 1, complete: true, pending: make(map[graph.EdgeIdentity]*graph.Edge)}
+					for _, edge := range edges {
+						state.pending[graph.EdgeIdentityFor(edge)] = edge
+					}
+					cr.SetGoModuleDepRetry(state, 1)
+					err = cr.RetryGoModuleDeps(t.Context())
+					assert.Empty(t, state.pending, "the taken queue must be finished, not abandoned")
+				}
+				if supported {
+					assert.NoError(t, err)
+				} else {
+					assert.ErrorIs(t, err, errors.ErrUnsupported)
+					assert.Equal(t, 2, unmarked.batches, "finish the second bounded chunk after refusal")
+					assert.LessOrEqual(t, unmarked.maxBatch, externalCallMutationChunk)
+				}
+				calls := 0
+				for _, edge := range base.GetOutEdges("a/main_test.go::TestFn") {
+					if edge.Kind != graph.EdgeCalls {
+						continue
+					}
+					calls++
+					assert.Equal(t, "b/lib.go::Fn", edge.To, "no taken row may remain unresolved")
+				}
+				assert.Equal(t, externalCallMutationChunk+1, calls)
+				assert.Equal(t, []string{"a/main_test.go"}, cr.TakeRetargetedTestCallFiles(), "completed base work keeps its independent test tail")
 			})
 		}
 	}

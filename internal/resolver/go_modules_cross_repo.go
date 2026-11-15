@@ -98,13 +98,12 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 	state.pending = nil
 	state.mu.Unlock()
 	var deferred []*graph.Edge
+	// This queue is already taken. Finish its base bindings before returning
+	// a refusal from the independent cross-repository materialization layer.
 	for _, edge := range pending {
 		deferred = append(deferred, edge)
 		if len(deferred) == externalCallMutationChunk {
 			cr.resolveGoModuleEdgesLocked(deferred, stats)
-			if stats.MaterializationError != nil {
-				return stats.MaterializationError
-			}
 			deferred = deferred[:0]
 		}
 	}
@@ -365,16 +364,14 @@ func (cr *CrossRepoResolver) ResolveDeferredGoModuleEdges(edges []*graph.Edge) e
 		cr.mu.Lock()
 		cr.resolveGoModuleEdgesLocked(edges[start:end], stats)
 		cr.mu.Unlock()
-		if stats.MaterializationError != nil {
-			return stats.MaterializationError
-		}
 	}
-	return nil
+	return stats.MaterializationError
 }
 
 // ResolveDeferredGoModuleEdgeIdentities refetches only current exact rows.
 // The shared lookup retains its optional-finder and wrapper fallback checks.
 func (cr *CrossRepoResolver) ResolveDeferredGoModuleEdgeIdentities(identities []graph.EdgeIdentity) error {
+	var materializationErr error
 	for start := 0; start < len(identities); start += 512 {
 		page := identities[start:min(start+512, len(identities))]
 		current := findFrameworkEdgesByIdentities(cr.graph, page)
@@ -382,11 +379,11 @@ func (cr *CrossRepoResolver) ResolveDeferredGoModuleEdgeIdentities(identities []
 		for _, edge := range current {
 			edges = append(edges, edge)
 		}
-		if err := cr.ResolveDeferredGoModuleEdges(edges); err != nil {
-			return err
+		if err := cr.ResolveDeferredGoModuleEdges(edges); err != nil && materializationErr == nil {
+			materializationErr = err
 		}
 	}
-	return nil
+	return materializationErr
 }
 
 func goModuleEdgeSpec(e *graph.Edge) string {

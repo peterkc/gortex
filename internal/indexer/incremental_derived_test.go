@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -14,6 +15,8 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/resolver"
+	"github.com/zzet/gortex/internal/search"
 )
 
 func TestRunIncrementalDerivedPassesBodyOnlySkipsGlobalFamilies(t *testing.T) {
@@ -194,5 +197,145 @@ func TestCrossRepoMaterializationRefusalReachesCoordinators(t *testing.T) {
 				require.NotEqual(t, graph.EdgeCrossRepoCalls, edge.Kind)
 			}
 		})
+	}
+}
+
+func TestPreEnrichMaterializationRefusalFinishesIndependentTails(t *testing.T) {
+	t.Setenv("GORTEX_SYNTH_EXTERNAL_CALLS", "1")
+	for _, supported := range []bool{false, true} {
+		t.Run(map[bool]string{false: "without_marker", true: "native_graph"}[supported], func(t *testing.T) {
+			// Given base resolution and an independent missing flag capability,
+			// when the exact pass refuses, then Go terminals and test edges remain complete.
+			base := graph.New()
+			base.AddBatch([]*graph.Node{
+				{ID: "a/a_test.go", Kind: graph.KindFile, Name: "a_test.go", FilePath: "a/a_test.go", RepoPrefix: "a", WorkspaceID: "shared", Language: "go"},
+				{ID: "a/a_test.go::TestA", Kind: graph.KindFunction, Name: "TestA", FilePath: "a/a_test.go", RepoPrefix: "a", WorkspaceID: "shared", Language: "go"},
+				{ID: "b/b.go", Kind: graph.KindFile, Name: "b.go", FilePath: "b/b.go", RepoPrefix: "b", WorkspaceID: "shared", Language: "go"},
+				{ID: "b/b.go::B", Kind: graph.KindFunction, Name: "B", FilePath: "b/b.go", RepoPrefix: "b", WorkspaceID: "shared", Language: "go"},
+			}, []*graph.Edge{{From: "a/a_test.go", To: "b/b.go", Kind: graph.EdgeImports, FilePath: "a/a_test.go", Line: 1}})
+			var store graph.Store = base
+			if !supported {
+				store = &struct {
+					graph.Store
+					graph.ScopedEdgeKindEvicter
+				}{Store: base, ScopedEdgeKindEvicter: base}
+			}
+			idx := New(store, newTestRegistry(), config.Default().Index, zap.NewNop())
+			t.Cleanup(idx.Close)
+			mi := &MultiIndexer{graph: store, indexers: map[string]*Indexer{"a": idx}, logger: zap.NewNop()}
+			hookCalls := 0
+			err := mi.RunPreEnrichResolveFiles(t.Context(), []string{"a/a_test.go"}, func() {
+				hookCalls++
+				base.AddBatch(nil, []*graph.Edge{
+					{From: "a/a_test.go::TestA", To: "b/b.go::B", Kind: graph.EdgeCalls, FilePath: "a/a_test.go", Line: 3},
+					{From: "a/a_test.go::TestA", To: graph.UnresolvedMarker + "B", Kind: graph.EdgeCalls, FilePath: "a/a_test.go", Line: 4},
+					{From: "a/a_test.go::TestA", To: graph.UnresolvedMarker + "extern::example.org/missing::Missing", Kind: graph.EdgeCalls, FilePath: "a/a_test.go", Line: 5, Meta: map[string]any{"go_import": "example.org/missing::Missing"}},
+				})
+			})
+			if supported {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, errors.ErrUnsupported)
+			}
+			require.Equal(t, 1, hookCalls)
+			require.NotNil(t, findEdge(base, graph.EdgeCalls, "a/a_test.go::TestA", "b/b.go::B"), "cross-repo resolution must have run")
+			assert.NotNil(t, findEdge(base, graph.EdgeTests, "a/a_test.go::TestA", "b/b.go::B"), "retargeted test projection must finish before returning refusal")
+			assert.NotNil(t, base.GetNode("external-call::dep::example.org/missing"), "demoted Go-call synthesis must finish before returning refusal")
+			require.NotNil(t, findEdge(base, graph.EdgeCalls, "a/a_test.go::TestA", "external-call::dep::example.org/missing"))
+		})
+	}
+}
+
+// deferredUnmarkedStore applies target changes but injects a missing promoted flag.
+// The missing marker must refuse only materialization, not independent queue tails.
+type deferredUnmarkedStore struct {
+	graph.Store
+	graph.ScopedEdgeKindEvicter
+}
+
+func (s *deferredUnmarkedStore) ReindexEdges(batch []graph.EdgeReindex) {
+	for _, row := range batch {
+		row.Edge.CrossRepo = false
+	}
+	s.Store.ReindexEdges(batch)
+}
+
+func TestDeferredGoModuleMaterializationRefusalKeepsSynthesis(t *testing.T) {
+	t.Setenv("GORTEX_SYNTH_EXTERNAL_CALLS", "1")
+	for _, operation := range []string{"deferred_owner", "global_owner", "untrack_owner"} {
+		for _, supported := range []bool{false, true} {
+			t.Run(operation+map[bool]string{false: "/without_marker", true: "/native_graph"}[supported], func(t *testing.T) {
+				// Given a published shadow queue with a bound and a missing symbol,
+				// when materialization refuses, then taken work still gets its tails.
+				base := graph.New()
+				var store graph.Store = base
+				if !supported {
+					store = &deferredUnmarkedStore{Store: base, ScopedEdgeKindEvicter: base}
+				}
+				library := t.TempDir()
+				writeFile(t, filepath.Join(library, "go.mod"), "module example.org/lib\n")
+				cm := newTestConfigManager(t)
+				cm.Global().Repos = []config.RepoEntry{{Name: "b", Path: library, Workspace: "shared"}}
+				mi := NewMultiIndexer(store, newTestRegistry(), search.NewNull(), cm, zap.NewNop())
+				t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
+				shadow := graph.New()
+				shadow.AddNode(&graph.Node{ID: "a/a_test.go", Name: "a_test.go", Kind: graph.KindFile, RepoPrefix: "a", WorkspaceID: "shared", FilePath: "a/a_test.go", Language: "go"})
+				shadow.AddNode(&graph.Node{ID: "a/a_test.go::TestA", Name: "TestA", Kind: graph.KindFunction, RepoPrefix: "a", WorkspaceID: "shared", FilePath: "a/a_test.go", Language: "go"})
+				names := []string{"Fn", "Missing"}
+				if operation == "untrack_owner" {
+					names = make([]string, 513)
+					for i := range names {
+						names[i] = "Fn"
+					}
+					names[len(names)-1] = "Missing"
+				}
+				for line, name := range names {
+					shadow.AddEdge(&graph.Edge{From: "a/a_test.go::TestA", To: graph.UnresolvedMarker + "extern::example.org/lib::" + name, Kind: graph.EdgeCalls, FilePath: "a/a_test.go", Line: line + 1, Meta: map[string]any{"go_import": "example.org/lib::" + name}})
+				}
+				r := resolver.New(shadow)
+				r.SetGoModules(map[string]string{"b": "example.org/lib"})
+				r.SetDeferGoModuleMisses(true)
+				r.ResolveAll()
+				base.AddBatch(shadow.AllNodes(), shadow.AllEdges())
+				base.AddNode(&graph.Node{ID: "b/lib.go::Fn", Name: "Fn", Kind: graph.KindFunction, RepoPrefix: "b", WorkspaceID: "shared", FilePath: "b/lib.go", Language: "go"})
+				r.SetGraph(store)
+				r.SetDeferGoModuleMisses(false)
+				idx := New(store, newTestRegistry(), config.Default().Index, zap.NewNop())
+				idx.resolver = r
+				mi.indexers["a"] = idx
+				var err error
+				switch operation {
+				case "deferred_owner":
+					err = mi.resolveDeferredGoModules(idx)
+				case "untrack_owner":
+					queued := r.TakeDeferredGoModuleEdges()
+					parked := make([]graph.EdgeIdentity, len(queued))
+					for i, edge := range queued {
+						parked[i] = graph.EdgeIdentityFor(edge)
+					}
+					require.Len(t, parked, 513, "exercise more than one 512-ID page")
+					err = mi.finalizeUntrackedGoModuleCalls(parked)
+				default:
+					err = mi.runCrossRepoResolveContext(t.Context(), false)
+				}
+				if supported {
+					require.NoError(t, err)
+				} else {
+					require.ErrorIs(t, err, errors.ErrUnsupported)
+				}
+				assert.Empty(t, r.TakeDeferredGoModuleEdges(), "the published queue was taken")
+				bound := 0
+				for _, edge := range base.GetOutEdges("a/a_test.go::TestA") {
+					if edge.Kind == graph.EdgeCalls && edge.To == "b/lib.go::Fn" {
+						bound++
+					}
+				}
+				assert.Equal(t, len(names)-1, bound, "every page of the taken queue must bind")
+				assert.NotNil(t, findEdge(base, graph.EdgeCalls, "a/a_test.go::TestA", "b/lib.go::Fn"), "base binding remains applied")
+				assert.NotNil(t, findEdge(base, graph.EdgeTests, "a/a_test.go::TestA", "b/lib.go::Fn"), "test projection must finish before returning the refusal")
+				assert.NotNil(t, base.GetNode("external-call::dep::example.org/lib"), "synthesize the missing symbol from the taken queue")
+				assert.NotNil(t, findEdge(base, graph.EdgeCalls, "a/a_test.go::TestA", "external-call::dep::example.org/lib"))
+			})
+		}
 	}
 }
