@@ -132,6 +132,10 @@ type MultiIndexer struct {
 	// derived-contract cleanup have all succeeded.
 	pendingRepositoryUntracks map[string]*repositoryUntrackState
 
+	// Closing catalog roots survive MI lane finalization until the lifecycle
+	// has finalized its captured publisher and owner registrations as well.
+	repositoryCleanupRoots map[string]repositoryCleanupRoot
+
 	// repositoryMutations owns one stable mutation lane per repository prefix.
 	// The slot survives Indexer replacement so an explicit re-index cannot race
 	// an old watcher instance on a second lane.
@@ -3025,6 +3029,12 @@ func (mi *MultiIndexer) prepareTrackRepoContext(ctx context.Context, entry confi
 	if reason, blocked := unsafeRootBlocked(absPath, entry.Force); blocked {
 		return nil, fmt.Errorf("%s; pass force to track it anyway", reason)
 	}
+	admissionCtx, cancelAdmission := context.WithDeadline(ctx, before)
+	admissionErr := mi.checkRepositoryTrackAdmission(admissionCtx, config.ResolvePrefix(entry), absPath, "")
+	cancelAdmission()
+	if admissionErr != nil {
+		return nil, admissionErr
+	}
 	entry, err = mi.resolveConfiguredTrackAnchor(ctx, entry, absPath, before)
 	if err != nil {
 		return nil, err
@@ -3245,6 +3255,12 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 	}
 	if candidate.info == nil || !candidate.info.IsDir() {
 		return nil, fmt.Errorf("path is not a directory: %s", absPath)
+	}
+	admissionCtx, cancelAdmission := context.WithDeadline(ctx, before)
+	admissionErr := mi.checkRepositoryTrackAdmission(admissionCtx, config.ResolvePrefix(entry), absPath, "")
+	cancelAdmission()
+	if admissionErr != nil {
+		return nil, admissionErr
 	}
 	entry, err = mi.resolveConfiguredTrackAnchor(ctx, entry, absPath, before)
 	if err != nil {

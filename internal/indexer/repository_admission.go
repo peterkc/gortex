@@ -6,6 +6,7 @@ import (
 
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
+	"github.com/zzet/gortex/internal/pathkey"
 )
 
 // DedicatedBaseCleanupRuntime is the shared publisher owner, not a temporary
@@ -208,6 +209,11 @@ func (l *CheckoutLifecycle) restoreRepositoryAdmissionLocked(identity store_sqli
 			return l.leases.CloseRepositoryRegistration(drain.Registration())
 		}
 	}
+	if l.mi != nil {
+		if err := l.mi.reserveRepositoryCleanupRoot(identity); err != nil {
+			return nil, err
+		}
+	}
 	// Registration hands back the identity of the object it opened (idempotent
 	// for an already open identical owner), and only that object is closed.
 	registration, err := l.leases.RegisterRepositoryOwnerHandle(owner, nil)
@@ -280,4 +286,71 @@ func (l *CheckoutLifecycle) stopRepositoryAdmissions() <-chan struct{} {
 		return repositoryAlreadyDrained
 	}
 	return l.leases.ShutdownRepositoryAdmissions()
+}
+
+type repositoryCleanupRoot struct {
+	graphID string
+	prefix  string
+	root    string
+}
+
+func (mi *MultiIndexer) reserveRepositoryCleanupRoot(identity store_sqlite.RepositoryCleanupIdentity) error {
+	closed := repositoryCleanupRoot{graphID: identity.GraphID, prefix: identity.RepoPrefix, root: identity.RootPath}
+	mi.mu.Lock()
+	defer mi.mu.Unlock()
+	if previous, found := mi.repositoryCleanupRoots[identity.GraphID]; found && previous != closed {
+		return graphview.ErrRepositoryOwnerConflict
+	}
+	if mi.repositoryCleanupRoots == nil {
+		mi.repositoryCleanupRoots = make(map[string]repositoryCleanupRoot)
+	}
+	mi.repositoryCleanupRoots[identity.GraphID] = closed
+	return nil
+}
+
+func (mi *MultiIndexer) finalizeRepositoryCleanupRoot(identity store_sqlite.RepositoryCleanupIdentity) error {
+	closed := repositoryCleanupRoot{graphID: identity.GraphID, prefix: identity.RepoPrefix, root: identity.RootPath}
+	mi.mu.Lock()
+	defer mi.mu.Unlock()
+	if previous, found := mi.repositoryCleanupRoots[identity.GraphID]; found && previous != closed {
+		return graphview.ErrRepositoryOwnerConflict
+	}
+	delete(mi.repositoryCleanupRoots, identity.GraphID)
+	if len(mi.repositoryCleanupRoots) == 0 {
+		mi.repositoryCleanupRoots = nil
+	}
+	return nil
+}
+
+func (mi *MultiIndexer) checkRepositoryTrackAdmission(ctx context.Context, prefix, root, canonical string) error {
+	mi.mu.RLock()
+	snapshot := prefixOwnerSnapshot{requested: prefix, root: root, closing: mi.repositoryCleanupRootSnapshotLocked()}
+	mi.mu.RUnlock()
+	return mi.checkClosingTrackRoots(ctx, snapshot, canonical)
+}
+
+// checkClosingTrackRoots observes only the candidate, never every closed or
+// unrelated configured root. Catalog root paths already use canonical spelling.
+func (mi *MultiIndexer) checkClosingTrackRoots(ctx context.Context, snapshot prefixOwnerSnapshot, canonical string) error {
+	if len(snapshot.closing) == 0 {
+		return nil
+	}
+	for _, closed := range snapshot.closing {
+		if closed.prefix == snapshot.requested || pathkey.EqualPaths(closed.root, snapshot.root) {
+			return graphview.ErrRepositoryAdmissionClosed
+		}
+	}
+	if canonical == "" {
+		facts, err := mi.prefixStats.canonical(ctx, snapshot.root)
+		if err != nil {
+			return trackNamingFailure(ctx, err)
+		}
+		canonical = facts.canonical
+	}
+	for _, closed := range snapshot.closing {
+		if pathkey.EqualPaths(closed.root, canonical) {
+			return graphview.ErrRepositoryAdmissionClosed
+		}
+	}
+	return nil
 }

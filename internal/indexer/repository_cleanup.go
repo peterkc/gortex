@@ -568,6 +568,9 @@ func (l *CheckoutLifecycle) finalizeRepositoryCleanupState(ctx context.Context, 
 	if err := l.leases.FinalizeRepositoryCleanup(state.owner); err != nil {
 		return false, err
 	}
+	if err := l.mi.finalizeRepositoryCleanupRoot(identity); err != nil {
+		return false, err
+	}
 	delete(l.repositoryOwners, identity.GraphID)
 	delete(l.repositoryClosing, identity.GraphID)
 	if len(l.repositoryOwners) == 0 {

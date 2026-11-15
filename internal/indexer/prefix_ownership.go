@@ -114,13 +114,14 @@ type prefixOwnerSnapshot struct {
 	root      string
 	owner     prefixOwnerWitness
 	aliases   []prefixOwnerWitness
+	closing   []repositoryCleanupRoot
 }
 
 // prefixOwnerSnapshotLocked performs no filesystem operations. Only the
 // requested owner and cheap lexical same-root candidates can require stats;
 // it never stats every registered root on a track.
 func (mi *MultiIndexer) prefixOwnerSnapshotLocked(prefix, root string) prefixOwnerSnapshot {
-	out := prefixOwnerSnapshot{requested: prefix, root: root}
+	out := prefixOwnerSnapshot{requested: prefix, root: root, closing: mi.repositoryCleanupRootSnapshotLocked()}
 	if owner := mi.repos[prefix]; owner != nil {
 		out.owner = prefixOwnerWitness{prefix: prefix, root: owner.RootPath, meta: owner}
 	}
@@ -135,7 +136,7 @@ func (mi *MultiIndexer) prefixOwnerSnapshotLocked(prefix, root string) prefixOwn
 
 func (s prefixOwnerSnapshot) matchesLocked(mi *MultiIndexer) bool {
 	next := mi.prefixOwnerSnapshotLocked(s.requested, s.root)
-	if s.owner != next.owner || len(s.aliases) != len(next.aliases) {
+	if s.owner != next.owner || len(s.aliases) != len(next.aliases) || len(s.closing) != len(next.closing) {
 		return false
 	}
 	for i := range s.aliases {
@@ -143,7 +144,21 @@ func (s prefixOwnerSnapshot) matchesLocked(mi *MultiIndexer) bool {
 			return false
 		}
 	}
+	for i := range s.closing {
+		if s.closing[i] != next.closing[i] {
+			return false
+		}
+	}
 	return true
+}
+
+func (mi *MultiIndexer) repositoryCleanupRootSnapshotLocked() []repositoryCleanupRoot {
+	var roots []repositoryCleanupRoot
+	for _, closed := range mi.repositoryCleanupRoots {
+		roots = append(roots, closed)
+	}
+	sort.Slice(roots, func(i, j int) bool { return roots[i].graphID < roots[j].graphID })
+	return roots
 }
 
 type prefixOwnershipObservation struct {
@@ -194,6 +209,9 @@ func (mi *MultiIndexer) observePrefixOwnershipBefore(ctx context.Context, prefix
 
 func (mi *MultiIndexer) samplePrefixOwnership(ctx context.Context, snapshot prefixOwnerSnapshot, candidate *prefixStatResult) (prefixOwnershipObservation, error) {
 	out := prefixOwnershipObservation{snapshot: snapshot}
+	if err := mi.checkClosingTrackRoots(ctx, snapshot, ""); err != nil {
+		return out, err
+	}
 	for _, alias := range snapshot.aliases {
 		if alias.root == snapshot.root {
 			out.registeredPrefix = alias.prefix
