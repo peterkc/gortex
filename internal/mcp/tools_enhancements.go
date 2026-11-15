@@ -2252,7 +2252,7 @@ func (s *Server) handleAnalyzeReleases(ctx context.Context, req mcp.CallToolRequ
 	// reads rather than mixing buffers with the indexed node set.
 	reader := s.readerFor(ctx)
 	// Timeline-only calls need support information, not the sidecar rows.
-	_, available := enrichmentRowsReader(reader).(graph.ReleaseEnrichmentReader)
+	_, available := enrichmentRowsReader(contractCoreSelectedReader(reader)).(graph.ReleaseEnrichmentReader)
 	unavailable := unavailableEnrichment{}
 	if !available {
 		unavailable = append(unavailable, "release")
@@ -5355,7 +5355,6 @@ func (u unavailableEnrichment) gcx(payload []byte, err error) ([]byte, error) {
 // indexed corpus. Callers join sidecars by selected node IDs. Overlays stay
 // wrapped so they cannot borrow enrichment from the corpus they replace.
 func enrichmentRowsReader(g graph.Reader) graph.Reader {
-	g = contractCoreSelectedReader(g)
 	switch r := g.(type) {
 	case *baseGraphReader:
 		return r.base
@@ -5376,7 +5375,7 @@ func enrichmentRowsReader(g graph.Reader) graph.Reader {
 // and each row falls back to the node's own meta — the buffer's symbols
 // simply carry no coverage rather than borrowing the indexed numbers.
 func coverageRowsByID(g graph.Reader) (map[string]graph.CoverageEnrichment, bool) {
-	r, ok := enrichmentRowsReader(g).(graph.CoverageEnrichmentReader)
+	r, ok := enrichmentRowsReader(contractCoreSelectedReader(g)).(graph.CoverageEnrichmentReader)
 	if !ok {
 		return nil, false
 	}
@@ -5405,7 +5404,7 @@ func coveragePctFrom(cov map[string]graph.CoverageEnrichment, n *graph.Node) (fl
 // view has none, so an overlay-active request falls back to each
 // node's meta.
 func releaseRowsByID(g graph.Reader) (map[string]string, bool) {
-	r, ok := enrichmentRowsReader(g).(graph.ReleaseEnrichmentReader)
+	r, ok := enrichmentRowsReader(contractCoreSelectedReader(g)).(graph.ReleaseEnrichmentReader)
 	if !ok {
 		return nil, false
 	}
@@ -5434,7 +5433,7 @@ func addedInFrom(rel map[string]string, n *graph.Node) (string, bool) {
 // blameRowsByID batch-loads the blame sidecar (change A) into an
 // id->row map and availability; nil,false means unavailable.
 func blameRowsByID(g graph.Reader) (map[string]graph.BlameEnrichment, bool) {
-	r, ok := enrichmentRowsReader(g).(graph.BlameEnrichmentReader)
+	r, ok := enrichmentRowsReader(contractCoreSelectedReader(g)).(graph.BlameEnrichmentReader)
 	if !ok {
 		return nil, false
 	}
