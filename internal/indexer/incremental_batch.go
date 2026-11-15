@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/resolver"
 )
@@ -185,6 +186,16 @@ func (idx *Indexer) reindexIncrementalFilesBatched(
 		idx.logger.Debug("incremental reindex: failed to index file",
 			zap.String("file", filePath), zap.Error(idx.fileIndexFailureError(filePath)))
 	}
+	if errors.Is(idx.contractRestatementErr, store_sqlite.ErrWarmupWALPressure) {
+		// The reconcile already fails with this error (its caller returns it
+		// before using the result). A retry pass would only meet the same
+		// refusal after a second full wait. The first pass's file-failure
+		// notes are kept rather than cleared by a retry. Only a warm
+		// reconcile's own indexer has the boundary, and a failed reconcile
+		// never installs it, so leaving its reparsedThisRun unraised loses
+		// nothing. Other restatement errors keep the retry pass and the flag.
+		return invalidation, reparsed, failed, versionChanged
+	}
 	if len(failed) == 0 {
 		if len(reparsed) > 0 {
 			idx.reparsedThisRun.Store(true)
@@ -343,7 +354,7 @@ func (idx *Indexer) reindexIncrementalChunk(
 		if markerBatch != nil {
 			repair = markerBatch.readRepair
 		}
-		probe, probeOK, admissionBusy := idx.prepareFileDeltaWithAdmissionObserved(filePath, len(stages) > 0, repair)
+		probe, probeOK, admissionBusy := idx.prepareFileDeltaWithAdmissionObserved(filePath, len(stages) > 0, repair, markerBatch.relationsReadFrontier())
 		if admissionBusy {
 			break
 		}
@@ -411,7 +422,7 @@ func (idx *Indexer) reindexIncrementalChunk(
 		if acceptPreparedSnapshot {
 			prepared, ok = idx.takePreparedSnapshot(filePath)
 		} else {
-			prepared, ok = idx.takePreparedRefresh(filePath)
+			prepared, ok = idx.takePreparedRefresh(filePath, markerBatch.relationsReadFrontier())
 		}
 		if !ok || prepared == nil || prepared.result == nil {
 			prepared.release()
@@ -560,6 +571,9 @@ func (idx *Indexer) reindexIncrementalFallback(
 	// on. The combined fallback has no proof for restating the old graph's
 	// inert rows, including when applying its new read fails.
 	delete(idx.inertReparsed, fallback.graphPath)
+	// Exceptional fallback has no read-bound point coverage; keep the original
+	// ticket cap rather than borrowing a previous prepared receipt.
+	markerBatch.relationsReadFrontier().invalidate(fallback.filePath)
 	resolve := markerBatch == nil || !markerBatch.deferResolverCatchup
 	paths := []string{fallback.graphPath}
 	stdlibCandidates := idx.capturePathStdlibCandidates(paths)
@@ -1203,7 +1217,7 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 		idx.observeIncrementalCatchup("dataflow", paths)
 		idx.materializeDataflowParamsForStages(stages)
 	} else {
-		markerBatch.recordDeferredResolverEvidence(idx.resolver.EvidenceScoping(), stagePriorDeclarations(stages), priorPending)
+		markerBatch.recordDeferredResolverEvidence(idx.resolver.EvidenceScoping(), paths, stagePriorDeclarations(stages), priorPending)
 	}
 
 	// A global-using edit changes every dependent file's visibility
@@ -1892,6 +1906,7 @@ func (idx *Indexer) recordFileReadVersionsBatched(receipts []fileReadReceipt) (f
 			continue
 		}
 		keep(receipt)
+		receipt.readVersion.relationsRead.accept(receipt.absPath, receipt.readVersion)
 	}
 	if len(mtimes) == 0 {
 		return fresh, stale
