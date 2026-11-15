@@ -18,14 +18,18 @@ func TestSpringConfigAcceptedSourceDoesNotReadCurrentFilesystem(t *testing.T) {
 		}
 		return []byte("server:\n  port: 8080\n"), nil
 	}}
-	BindSpringConfig(g, scope)
+	if _, err := BindSpringConfig(g, scope); err != nil {
+		t.Fatal(err)
+	}
 	if calls != 1 || g.GetNode(scopedSpringConfigKeyID(scope, "server.port")) == nil {
 		t.Fatal("accepted config source was not materialized")
 	}
 	failed := graph.New()
 	failed.AddNode(&graph.Node{ID: "repo/application.yml", Kind: graph.KindFile, Name: "application.yml", FilePath: "repo/application.yml", Language: "yaml", RepoPrefix: "repo", WorkspaceID: "workspace"})
 	scope.ReadSource = func(string) ([]byte, error) { return nil, errors.New("accepted bytes unavailable") }
-	BindSpringConfig(failed, scope)
+	if _, err := BindSpringConfig(failed, scope); err != nil {
+		t.Fatal(err)
+	}
 	if failed.GetNode(scopedSpringConfigKeyID(scope, "server.port")) != nil {
 		t.Fatal("failed accepted source invented config key")
 	}

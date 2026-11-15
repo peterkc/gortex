@@ -1,6 +1,8 @@
 package contracts
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -152,10 +154,11 @@ func ExtractSpringConfigKeys(filePath string, src []byte, profile string) []*gra
 // @Value / @ConfigurationProperties bean) to the key it reads — with relaxed
 // canonicalization so spelling differences still bind, and a `*` suffix
 // (@ConfigurationProperties prefix) fanning out to every key under the prefix.
-// Returns the number of nodes + edges added.
-func BindSpringConfig(g graph.Store, scope SpringConfigScope) int {
+// Returns the number of nodes + edges added. Legacy migration requires both
+// cleanup capabilities before any graph mutation.
+func BindSpringConfig(g graph.Store, scope SpringConfigScope) (int, error) {
 	if g == nil || scope.RepoRoot == "" {
-		return 0
+		return 0, nil
 	}
 
 	type target struct {
@@ -164,7 +167,7 @@ func BindSpringConfig(g graph.Store, scope SpringConfigScope) int {
 	}
 	projectedFiles := graph.ReadRepoFilePaths(g, scope.RepoPrefix, scope.WorkspaceID, []string{"java"}, []string{".yml", ".yaml", ".properties"})
 	if len(projectedFiles) == 0 {
-		return 0
+		return 0, nil
 	}
 	currentFiles := make(map[string]struct{}, len(projectedFiles))
 	desiredNodes := make(map[string]*graph.Node)
@@ -293,9 +296,9 @@ func BindSpringConfig(g graph.Store, scope SpringConfigScope) int {
 		}
 	}
 
+	var staleEdges []*graph.Edge
 	if scope.RepoPrefix != "" && len(readerIDs) > 0 {
 		outgoing := g.GetOutEdgesByNodeIDs(readerIDs)
-		var staleEdges []*graph.Edge
 		for _, readerID := range readerIDs {
 			for _, edge := range outgoing[readerID] {
 				if edge == nil || edge.Kind != graph.EdgeReadsConfig {
@@ -306,13 +309,11 @@ func BindSpringConfig(g graph.Store, scope SpringConfigScope) int {
 				}
 			}
 		}
-		if remover, ok := g.(graph.ExactEdgeBatchRemover); ok && len(staleEdges) > 0 {
-			remover.RemoveEdgesExact(staleEdges)
-		}
 	}
 
+	var staleNodes []string
 	if scope.RepoPrefix != "" && len(legacyIDs) > 0 {
-		staleNodes := make([]string, 0, len(legacyIDs))
+		staleNodes = make([]string, 0, len(legacyIDs))
 		for id := range legacyIDs {
 			node := existingNodes[id]
 			if node == nil || node.Kind != graph.KindConfigKey || node.Meta == nil || node.Meta["source"] != "spring" {
@@ -325,15 +326,27 @@ func BindSpringConfig(g graph.Store, scope SpringConfigScope) int {
 			}
 		}
 		sort.Strings(staleNodes)
-		if evicter, ok := g.(graph.ConfigNodeBatchEvicter); ok && len(staleNodes) > 0 {
-			evicter.EvictConfigNodesByIDs(staleNodes)
-		}
+	}
+
+	remover, canRemove := g.(graph.ExactEdgeBatchRemover)
+	if len(staleEdges) > 0 && !canRemove {
+		return 0, fmt.Errorf("contracts: Spring config migration requires exact edge removal: %w", errors.ErrUnsupported)
+	}
+	evicter, canEvict := g.(graph.ConfigNodeBatchEvicter)
+	if len(staleNodes) > 0 && !canEvict {
+		return 0, fmt.Errorf("contracts: Spring config migration requires config node eviction: %w", errors.ErrUnsupported)
+	}
+	if len(staleEdges) > 0 {
+		remover.RemoveEdgesExact(staleEdges)
+	}
+	if len(staleNodes) > 0 {
+		evicter.EvictConfigNodesByIDs(staleNodes)
 	}
 
 	if len(pendingNodes) > 0 || len(pendingEdges) > 0 {
 		g.AddBatch(pendingNodes, pendingEdges)
 	}
-	return len(pendingNodes) + len(pendingEdges)
+	return len(pendingNodes) + len(pendingEdges), nil
 }
 
 // springReaderNodes returns the repository/workspace-scoped nodes carrying a

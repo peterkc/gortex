@@ -2,12 +2,15 @@ package indexer
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
@@ -204,4 +207,55 @@ func TestContractMarkerIsNoOpWithoutCapableStore(t *testing.T) {
 	_, err := idx.Index(dir)
 	require.NoError(t, err)
 	require.NotZero(t, handlesRouteEdgeCount(g))
+}
+
+// Keep graph behavior and completion-state telemetry, but hide cleanup methods.
+type springContractStateStore struct {
+	graph.Store
+	graph.ContractStateStore
+}
+
+func TestSpringMigrationFailureRefusesContractCompletion(t *testing.T) {
+	for _, deferred := range []bool{false, true} {
+		name := "inline"
+		if deferred {
+			name = "deferred"
+		}
+		t.Run(name, func(t *testing.T) {
+			// Given legacy Spring rows without cleanup support, when the real
+			// index/contract tail runs, then it reports failure and marks no completion.
+			root := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(root, "application.yml"), []byte("app.value: hidden\n"), 0600))
+			base := newContractStateGraph()
+			base.AddBatch([]*graph.Node{
+				{ID: "repo/application.yml", Kind: graph.KindFile, Name: "application.yml", FilePath: "repo/application.yml", Language: "yaml", RepoPrefix: "repo"},
+				{ID: "cfg::spring::app.value", Kind: graph.KindConfigKey, FilePath: "repo/application.yml", Meta: map[string]any{"source": "spring"}},
+			}, nil)
+			store := &springContractStateStore{Store: base, ContractStateStore: base}
+			core, logs := observer.New(zap.WarnLevel)
+			idx := New(store, newTestRegistry(), config.Default().Index, zap.New(core))
+			t.Cleanup(idx.Close)
+			idx.SetRepoPrefix("repo")
+			idx.SetDeferResolve(deferred)
+			idx.SetDeferGlobalPasses(true)
+			result, err := idx.IndexCtx(t.Context(), root)
+			if deferred {
+				require.NoError(t, err)
+				pending := idx.pendingContractReg
+				require.NotNil(t, pending)
+				idx.runDeferredContracts()
+				assert.Same(t, pending, idx.pendingContractReg, "failed deferred work must remain pending")
+				assert.Len(t, logs.FilterMessage("indexer: deferred contract commit refused").All(), 1)
+			} else {
+				assert.ErrorIs(t, err, errors.ErrUnsupported)
+				assert.Nil(t, result)
+			}
+			assert.ErrorIs(t, idx.contractInputError(), errors.ErrUnsupported)
+			_, complete, readErr := store.GetContractState("repo")
+			require.NoError(t, readErr)
+			assert.False(t, complete, "refused migration must not publish a completion marker")
+			assert.NotNil(t, base.GetNode("cfg::spring::app.value"))
+			assert.Nil(t, base.GetNode("cfg::spring::repo::repo::app.value"))
+		})
+	}
 }

@@ -48,8 +48,8 @@ func TestSpringConfigValueBindingRelaxed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if n := BindSpringConfig(g, SpringConfigScope{RepoRoot: root}); n == 0 {
-		t.Fatal("BindSpringConfig added nothing")
+	if n, err := BindSpringConfig(g, SpringConfigScope{RepoRoot: root}); err != nil || n == 0 {
+		t.Fatalf("BindSpringConfig added nothing (err=%v)", err)
 	}
 
 	// Config-key nodes exist, canonicalized, value-redacted.

@@ -1620,6 +1620,10 @@ func (idx *Indexer) runDeferredContracts() {
 	idx.extractExternalModulesForCensus(reg)
 	idx.extractDIContracts(reg)
 	idx.commitContracts(reg)
+	if err := idx.contractInputError(); err != nil {
+		idx.logger.Warn("indexer: deferred contract commit refused", zap.String("repo", idx.repoPrefix), zap.Error(err))
+		return
+	}
 	if b != nil {
 		b.contractsReady = true
 		idx.finishColdManifests(b)
@@ -4795,6 +4799,9 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 		if idx.contractCoreInputs == nil {
 			idx.extractDIContracts(contractReg)
 			idx.commitContracts(contractReg)
+			if err := idx.contractInputError(); err != nil {
+				return nil, err
+			}
 		}
 		if coldManifests != nil {
 			coldManifests.contractsReady = true
@@ -7995,7 +8002,10 @@ func (idx *Indexer) commitContracts(reg *contracts.Registry) {
 	if idx.contractAnalysisOnly {
 		springScope.ReadSource = idx.readAcceptedContractSource
 	}
-	contracts.BindSpringConfig(idx.graph, springScope)
+	if _, err := contracts.BindSpringConfig(idx.graph, springScope); err != nil {
+		idx.rememberContractInputError(err)
+		return
+	}
 
 	// Trace response variables back to their call-site return types.
 	// Handles `source, err := h.svc.Get(...)` → response_type is
@@ -10382,6 +10392,9 @@ func (idx *Indexer) extractContracts() {
 	idx.extractGoModContracts(reg)
 	idx.extractDIContracts(reg)
 	idx.commitContracts(reg)
+	if err := idx.contractInputError(); err != nil {
+		idx.logger.Warn("indexer: contract extraction commit refused", zap.String("repo", idx.repoPrefix), zap.Error(err))
+	}
 }
 
 // IsStale returns true if the file at relPath has been modified on disk since

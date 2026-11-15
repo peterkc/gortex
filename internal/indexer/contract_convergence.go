@@ -3582,13 +3582,15 @@ func (c *contractConvergence) enrichFrom(r0 ContractFollowupScan, clock uint64) 
 			}
 			routerProofs = append(routerProofs, contractRouterProof{repo: repo, records: before, digest: digest})
 		}
-		contracts.BindSpringConfig(evidence, contracts.SpringConfigScope{RepoPrefix: repo, RepoRoot: idx.rootPath, WorkspaceID: idx.workspaceID, ReadSource: func(path string) ([]byte, error) {
+		if _, err := contracts.BindSpringConfig(evidence, contracts.SpringConfigScope{RepoPrefix: repo, RepoRoot: idx.rootPath, WorkspaceID: idx.workspaceID, ReadSource: func(path string) ([]byte, error) {
 			data, err := reader.read(path)
 			if err != nil {
 				idx.rememberContractInputError(err)
 			}
 			return data, err
-		}})
+		}}); err != nil {
+			return false, err
+		}
 		idx.resolveCallReturnTypes(local)
 		idx.snapshotContractShapes(local)
 		idx.inlineEnvelopeShapes(local)
