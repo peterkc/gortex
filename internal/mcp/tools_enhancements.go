@@ -5351,6 +5351,21 @@ func (u unavailableEnrichment) gcx(payload []byte, err error) ([]byte, error) {
 	return []byte(body), nil
 }
 
+// enrichmentRowsReader unwraps only base selectors, which filter the same
+// indexed corpus. Callers join sidecars by selected node IDs. Overlays stay
+// wrapped so they cannot borrow enrichment from the corpus they replace.
+func enrichmentRowsReader(g graph.Reader) graph.Reader {
+	g = contractCoreSelectedReader(g)
+	switch r := g.(type) {
+	case *baseGraphReader:
+		return r.base
+	case *baseGraphContentReader:
+		return r.base
+	default:
+		return g
+	}
+}
+
 // coverageRowsByID batch-loads the coverage sidecar (change A) into an
 // id->row map and capability availability; nil,false means unavailable.
 // Callers still fall back to Node.Meta. Supported empty readers return true.
@@ -5361,7 +5376,7 @@ func (u unavailableEnrichment) gcx(payload []byte, err error) ([]byte, error) {
 // and each row falls back to the node's own meta — the buffer's symbols
 // simply carry no coverage rather than borrowing the indexed numbers.
 func coverageRowsByID(g graph.Reader) (map[string]graph.CoverageEnrichment, bool) {
-	r, ok := contractCoreSelectedReader(g).(graph.CoverageEnrichmentReader)
+	r, ok := enrichmentRowsReader(g).(graph.CoverageEnrichmentReader)
 	if !ok {
 		return nil, false
 	}
@@ -5390,7 +5405,7 @@ func coveragePctFrom(cov map[string]graph.CoverageEnrichment, n *graph.Node) (fl
 // view has none, so an overlay-active request falls back to each
 // node's meta.
 func releaseRowsByID(g graph.Reader) (map[string]string, bool) {
-	r, ok := contractCoreSelectedReader(g).(graph.ReleaseEnrichmentReader)
+	r, ok := enrichmentRowsReader(g).(graph.ReleaseEnrichmentReader)
 	if !ok {
 		return nil, false
 	}
@@ -5419,7 +5434,7 @@ func addedInFrom(rel map[string]string, n *graph.Node) (string, bool) {
 // blameRowsByID batch-loads the blame sidecar (change A) into an
 // id->row map and availability; nil,false means unavailable.
 func blameRowsByID(g graph.Reader) (map[string]graph.BlameEnrichment, bool) {
-	r, ok := contractCoreSelectedReader(g).(graph.BlameEnrichmentReader)
+	r, ok := enrichmentRowsReader(g).(graph.BlameEnrichmentReader)
 	if !ok {
 		return nil, false
 	}

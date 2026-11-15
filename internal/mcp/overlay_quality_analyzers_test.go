@@ -327,9 +327,9 @@ func TestEnrichmentUnavailableToolResults(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, _ := overlayQualityFixture(t)
-			srv.graph.AddNode(&graph.Node{ID: "release-v1", Kind: graph.KindRelease, Name: "v1"})
+			srv.graph.AddNode(&graph.Node{ID: "release-v1", Kind: graph.KindRelease, Name: "v1", RepoPrefix: qualityRepo})
 			for i := 0; i < 5; i++ {
-				srv.graph.AddNode(&graph.Node{ID: fmt.Sprintf("extra%d", i), Kind: graph.KindFunction})
+				srv.graph.AddNode(&graph.Node{ID: fmt.Sprintf("extra%d", i), Kind: graph.KindFunction, RepoPrefix: qualityRepo})
 			}
 			installCommunitiesForTest(srv, &analysis.CommunityResult{})
 			srv.hotspots = []analysis.HotspotEntry{{ID: qualityAlphaID, ComplexityScore: 10}}
@@ -340,6 +340,28 @@ func TestEnrichmentUnavailableToolResults(t *testing.T) {
 			require.NoError(t, err)
 			require.False(t, result.IsError, toolResultText(result))
 			require.NotContains(t, toolResultText(result), "enrichment_unavailable")
+			require.NoError(t, srv.graph.(graph.CoverageEnrichmentWriter).BulkSetCoverage(qualityRepo, []graph.CoverageEnrichment{{NodeID: qualityAlphaID, RepoPrefix: qualityRepo, CoveragePct: 42, NumStmt: 50, Hit: 21}}))
+			require.NoError(t, srv.graph.(graph.BlameEnrichmentWriter).BulkSetBlame(qualityRepo, []graph.BlameEnrichment{{NodeID: qualityAlphaID, RepoPrefix: qualityRepo, Email: "selector@example.com", Commit: "base-selector", Timestamp: 1}}))
+			require.NoError(t, srv.graph.(graph.ReleaseEnrichmentWriter).BulkSetReleases(qualityRepo, []graph.ReleaseEnrichment{{NodeID: qualitySvcFl, RepoPrefix: qualityRepo, AddedIn: "v1"}}))
+			// Given a named base selector, its narrowed corpus still owns these sidecars.
+			baseCtx := withRequestView(context.Background(), &requestView{reader: newBaseGraphReader(native, qualityRepo), baseNarrowed: true})
+			result, err = tc.run(srv, baseCtx, makeReq("analyze", tc.args))
+			require.NoError(t, err)
+			require.False(t, result.IsError, toolResultText(result))
+			require.NotContains(t, toolResultText(result), "enrichment_unavailable", "base selector must not hide existing enrichment")
+			if key := map[string]string{"coverage gaps": "gaps", "knowledge gaps": "untested_hotspots", "replay": "coverage_gaps"}[tc.name]; key != "" {
+				var payload map[string]any
+				require.NoError(t, json.Unmarshal([]byte(toolResultText(result)), &payload))
+				found := false
+				for _, raw := range payload[key].([]any) {
+					row := raw.(map[string]any)
+					if row["id"] == qualityAlphaID {
+						found = true
+						require.Equal(t, 42.0, row["coverage_pct"])
+					}
+				}
+				require.True(t, found, "base selector must retain the sidecar-backed coverage row")
+			}
 			// When only the optional enrichment methods disappear, all renderers disclose it.
 			srv.graph = struct{ graph.Store }{native}
 			for _, format := range []string{"json", "toon", "compact", "gcx"} {
@@ -445,25 +467,39 @@ func TestEnrichmentUnavailableKeepsLegacyAndNativeValues(t *testing.T) {
 			require.NoError(t, srv.graph.(graph.CoverageEnrichmentWriter).BulkSetCoverage(qualityRepo, []graph.CoverageEnrichment{{NodeID: qualityAlphaID, RepoPrefix: qualityRepo, CoveragePct: 80, NumStmt: 10, Hit: 8}}))
 			require.NoError(t, srv.graph.(graph.ReleaseEnrichmentWriter).BulkSetReleases(qualityRepo, []graph.ReleaseEnrichment{{NodeID: qualitySvcFl, RepoPrefix: qualityRepo, AddedIn: "v1"}}))
 			require.NoError(t, srv.graph.(graph.BlameEnrichmentWriter).BulkSetBlame(qualityRepo, []graph.BlameEnrichment{{NodeID: qualityAlphaID, RepoPrefix: qualityRepo, Email: "sidecar@example.com", Commit: "sidecar", Timestamp: 2}}))
-			// When sidecars are present, their values win on both real backends.
-			for range 2 {
-				cov, available = coverageRowsByID(srv.graph)
+			baseReader := newBaseGraphReader(srv.graph, qualityRepo)
+			if backend == "graph" {
+				require.IsType(t, &baseGraphReader{}, baseReader)
+			} else {
+				require.IsType(t, &baseGraphContentReader{}, baseReader)
+			}
+			// When sidecars are present, raw and base-selector readers keep the same values.
+			for _, reader := range []graph.Reader{srv.graph, baseReader} {
+				cov, available = coverageRowsByID(reader)
 				require.True(t, available)
 				pct, ok = coveragePctFrom(cov, node)
 				require.True(t, ok)
 				require.Equal(t, 80.0, pct)
-				rel, available = releaseRowsByID(srv.graph)
+				rel, available = releaseRowsByID(reader)
 				require.True(t, available)
 				tag, ok = addedInFrom(rel, srv.graph.GetNode(qualitySvcFl))
 				require.True(t, ok)
 				require.Equal(t, "v1", tag)
-				authors, available = blameRowsByID(srv.graph)
+				authors, available = blameRowsByID(reader)
 				require.True(t, available)
 				author, ok = lastAuthoredFrom(authors, node)
 				require.True(t, ok)
 				require.Equal(t, "sidecar@example.com", author.Email)
 			}
 			native := srv.graph
+			// A base selector must not invent capabilities missing from its underlying store.
+			missingBase := newBaseGraphReader(struct{ graph.Store }{native}, qualityRepo)
+			_, available = coverageRowsByID(missingBase)
+			require.False(t, available)
+			_, available = blameRowsByID(missingBase)
+			require.False(t, available)
+			_, available = releaseRowsByID(missingBase)
+			require.False(t, available)
 			result, err := srv.handleAnalyzeCoverageGaps(context.Background(), makeReq("analyze", nil))
 			require.NoError(t, err)
 			var coverage struct {
