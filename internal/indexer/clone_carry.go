@@ -100,10 +100,9 @@ func (idx *Indexer) carryCloneRowsOfUnchangedBodies(stages []*incrementalBatchSt
 			}
 		}
 	}
-	// DeltaWriter forwards legacy shingle writes, but its sidecar can retain
-	// the exact token count too. The latter is required when a later follow-up
-	// composes this generation with unchanged clone partners.
-	var corpusWriter graph.CloneCorpusWriter
+	// Prefer the full corpus writer to retain exact token counts. DeltaWriter
+	// forwards only legacy shingle writes, so use its full-row sidecar instead.
+	corpusWriter, _ := idx.graph.(graph.CloneCorpusWriter)
 	if dw, ok := idx.graph.(*graph.DeltaWriter); ok {
 		corpusWriter, _ = dw.Sidecar().(graph.CloneCorpusWriter)
 	}

@@ -1000,14 +1000,24 @@ func (g *Graph) BulkSetCloneCorpus(repoPrefix string, rows []CloneCorpusRow) err
 		if row.NodeID == "" {
 			continue
 		}
-		cp := append([]uint64(nil), row.Shingles...)
-		g.cloneShingles[row.NodeID] = cloneShingleEntry{
-			repoPrefix: repoPrefix,
-			shingles:   cp,
-			signature:  row.Signature,
+		prefix := repoPrefix
+		if row.RepoPrefix != "" {
+			prefix = row.RepoPrefix
+		}
+		entry := cloneShingleEntry{
+			repoPrefix: prefix,
+			shingles:   append([]uint64(nil), row.Shingles...),
 			tokenCount: row.TokenCount,
 			finalized:  row.Finalized,
 		}
+		if row.Finalized {
+			entry.signature = row.Signature
+		} else if prior := g.cloneShingles[row.NodeID]; prior.repoPrefix == prefix &&
+			slices.Equal(prior.shingles, row.Shingles) && prior.tokenCount == row.TokenCount {
+			entry.signature = prior.signature
+			entry.finalized = prior.finalized
+		}
+		g.cloneShingles[row.NodeID] = entry
 	}
 	return nil
 }
