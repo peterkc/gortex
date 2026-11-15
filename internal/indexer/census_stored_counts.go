@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 
 	"go.uber.org/zap"
@@ -35,12 +36,15 @@ var cleanCensusCounts atomic.Int64
 // cleanCensusRepoCounts is the node and edge count a clean census reports:
 // the stored counts when the state holds them, otherwise one count, stored
 // when no state row exists at all.
-func (idx *Indexer) cleanCensusRepoCounts(ctx context.Context) (nodes, edges int) {
-	stored, generation, found, usable := idx.storedCensusCounts(ctx)
+func (idx *Indexer) cleanCensusRepoCounts(ctx context.Context) (nodes, edges int, err error) {
+	stored, generation, found, usable, err := idx.storedCensusCounts(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
 	if usable {
 		idx.lastRepoCounts.Store(&repoCountSnapshot{nodes: stored.NodeCount, edges: stored.EdgeCount})
 		idx.logCensusCounts("stored", generation, stored.NodeCount, stored.EdgeCount)
-		return stored.NodeCount, stored.EdgeCount
+		return stored.NodeCount, stored.EdgeCount, nil
 	}
 	cleanCensusCounts.Add(1)
 	nodes, edges = idx.repoNodeEdgeCount()
@@ -51,44 +55,52 @@ func (idx *Indexer) cleanCensusRepoCounts(ctx context.Context) (nodes, edges int
 		idx.persistRepoIndexState(nil, idx.rootPath, "", nodes, edges)
 	}
 	idx.logCensusCounts("counted", generation, nodes, edges)
-	return nodes, edges
+	return nodes, edges, nil
 }
 
 // storedCensusCounts reads the repository's stored state at the indexer's
 // generation, or at its parent when the generation holds none. found reports
 // that a state row exists at the generation read; usable that it carries
 // counts.
-func (idx *Indexer) storedCensusCounts(ctx context.Context) (state graph.RepoIndexState, generation int64, found, usable bool) {
+func (idx *Indexer) storedCensusCounts(ctx context.Context) (state graph.RepoIndexState, generation int64, found, usable bool, err error) {
 	reader, ok := idx.graph.(graph.RepoIndexStateReader)
 	if !ok {
-		return state, 0, false, false
+		// Ephemeral stores need no durable cache: actual counting supplies the
+		// answer, and persistRepoIndexState skips the unsupported durable write.
+		return state, 0, false, false, nil
 	}
 	if st, isStore := idx.graph.(*store_sqlite.Store); isStore {
 		generation = st.ViewGeneration()
 	}
-	state, found, err := reader.GetRepoIndexState(idx.repoPrefix)
+	state, found, err = reader.GetRepoIndexState(idx.repoPrefix)
 	if err != nil {
-		return state, generation, false, false
+		return state, generation, false, false, fmt.Errorf("indexer: read clean census index state: %w", err)
 	}
 	if found && (state.NodeCount > 0 || state.EdgeCount > 0) {
-		return state, generation, true, true
+		return state, generation, true, true, nil
 	}
 	st, isStore := idx.graph.(*store_sqlite.Store)
 	if found || !isStore || generation <= 0 {
-		return state, generation, found, false
+		return state, generation, found, false, nil
 	}
 	// An output generation with no state of its own: a clean copy of its
 	// parent carries the parent's rows, so the parent's counts describe it.
 	row, rowFound, err := st.Catalog().GetViewGeneration(ctx, generation)
-	if err != nil || !rowFound {
-		return state, generation, false, false
+	if err != nil {
+		return state, generation, false, false, fmt.Errorf("indexer: read clean census generation: %w", err)
+	}
+	if !rowFound {
+		return state, generation, false, false, nil
 	}
 	parent := st.AtGeneration(row.BaseGenerationID)
 	parentState, parentFound, err := parent.GetRepoIndexState(idx.repoPrefix)
-	if err != nil || !parentFound || (parentState.NodeCount == 0 && parentState.EdgeCount == 0) {
-		return state, generation, false, false
+	if err != nil {
+		return state, generation, false, false, fmt.Errorf("indexer: read clean census parent index state: %w", err)
 	}
-	return parentState, row.BaseGenerationID, true, true
+	if !parentFound || (parentState.NodeCount == 0 && parentState.EdgeCount == 0) {
+		return state, generation, false, false, nil
+	}
+	return parentState, row.BaseGenerationID, true, true, nil
 }
 
 func (idx *Indexer) logCensusCounts(source string, generation int64, nodes, edges int) {
