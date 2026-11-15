@@ -32,7 +32,7 @@ func checkCIResult(needs map[string]ciNeed, event string) error {
 		return fmt.Errorf("empty test selection was not explicitly validated")
 	}
 	expected := map[string]string{
-		"test": "success", "smoke": "success", "build-native": "success",
+		"test": "success", "smoke": "success", "build-native": "success", "build-native-macos": "success",
 		"lint": "success", "build-linux-static": "success", "build-onnx": "success",
 		"benchmark": "skipped", "parser-stress": "skipped",
 	}
@@ -41,6 +41,7 @@ func checkCIResult(needs map[string]ciNeed, event string) error {
 	}
 	if mode == "full" {
 		expected["smoke"] = "skipped"
+		expected["build-native-macos"] = "skipped"
 	}
 	if event == "pull_request" {
 		expected["benchmark"] = "success"
@@ -49,7 +50,7 @@ func checkCIResult(needs map[string]ciNeed, event string) error {
 		expected["parser-stress"] = "success"
 	}
 	// Stable ordering also makes receipts with multiple failures diagnostic.
-	for _, name := range []string{"test", "smoke", "build-native", "lint", "build-linux-static", "build-onnx", "benchmark", "parser-stress"} {
+	for _, name := range []string{"test", "smoke", "build-native", "build-native-macos", "lint", "build-linux-static", "build-onnx", "benchmark", "parser-stress"} {
 		if err := require(name, expected[name]); err != nil {
 			return err
 		}

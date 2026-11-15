@@ -22,6 +22,7 @@ func affectedPRNeeds() map[string]ciNeed {
 		"test":               {Result: "success"},
 		"smoke":              {Result: "success"},
 		"build-native":       {Result: "success"},
+		"build-native-macos": {Result: "success"},
 		"lint":               {Result: "success"},
 		"build-linux-static": {Result: "success"},
 		"build-onnx":         {Result: "success"},
@@ -60,11 +61,11 @@ func TestCIResultGateAcceptsValidReceipts(t *testing.T) {
 			outputs: map[string]string{"has_tests": "false", "empty_ok": "true"},
 			results: map[string]string{"test": "skipped"}},
 		{name: "full PR", event: "pull_request", outputs: map[string]string{"mode": "full"},
-			results: map[string]string{"smoke": "skipped"}},
+			results: map[string]string{"smoke": "skipped", "build-native-macos": "skipped"}},
 		{name: "full main", event: "push", outputs: map[string]string{"mode": "full"},
-			results: map[string]string{"smoke": "skipped", "benchmark": "skipped"}},
+			results: map[string]string{"smoke": "skipped", "build-native-macos": "skipped", "benchmark": "skipped"}},
 		{name: "full manual", event: "workflow_dispatch", outputs: map[string]string{"mode": "full"},
-			results: map[string]string{"smoke": "skipped", "benchmark": "skipped", "parser-stress": "success"}},
+			results: map[string]string{"smoke": "skipped", "build-native-macos": "skipped", "benchmark": "skipped", "parser-stress": "success"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			needs := affectedPRNeeds()
@@ -153,7 +154,7 @@ func assertCIWorkflowWiring(t *testing.T, input string) {
 		"CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}",
 		"fetch-depth: 0", "--selection test-selection.json",
 		"needs.plan.outputs.mode == 'full'", "name: affected-coverage-",
-		"  build-native:\n", "  lint:\n", "  build-linux-static:\n", "  build-onnx:\n", "  ci-result:\n",
+		"  build-native:\n", "  build-native-macos:\n", "  lint:\n", "  build-linux-static:\n", "  build-onnx:\n", "  ci-result:\n",
 		"if: always()", "go test -count=1 ./scripts/ci-result", "run: go run ./scripts/ci-result",
 		"go test -count=1 ./internal/citest", "go run ./scripts/ci-select --output test-selection.json",
 		"go run ./scripts/ci-test --selection test-selection.json",
