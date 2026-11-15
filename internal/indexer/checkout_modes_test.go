@@ -1411,6 +1411,14 @@ func TestLegacyDemotionRecoveryWaitsForReadinessOrCancellation(t *testing.T) {
 				node.FilePath = prefix + "/payload.txt"
 				f.store.AddNode(node)
 				f.lc.EnableDeferredRepositoryCleanup()
+				var gitHeldAtRemoval []bool
+				core, _ := observer.New(zap.InfoLevel)
+				f.lc.logger = zap.New(core, zap.Hooks(func(entry zapcore.Entry) error {
+					if entry.Message == "config: removed tracked repo" {
+						gitHeldAtRemoval = append(gitHeldAtRemoval, f.lc.gitWork.busy())
+					}
+					return nil
+				}))
 				transition := store_sqlite.IntentTransition{TransitionID: "legacy-captured-input", CheckoutID: checkout.CheckoutID,
 					Cause: demotionTransitionCause, RequestedMode: store_sqlite.CheckoutModeAutomatic}
 
@@ -1433,6 +1441,11 @@ func TestLegacyDemotionRecoveryWaitsForReadinessOrCancellation(t *testing.T) {
 				journal, err := f.catalog.ListCleanupEntries(t.Context())
 				require.NoError(t, err)
 				require.Empty(t, journal)
+				refreshDone, admitted := f.lc.gitWork.refresh(t.Context(), racyIndexEditWait)
+				if admitted {
+					refreshDone()
+				}
+				require.True(t, admitted, "readiness wait blocked the racy-index refresh")
 
 				// When readiness opens or lifecycle cancellation joins the worker.
 				switch ending {
@@ -1448,10 +1461,12 @@ func TestLegacyDemotionRecoveryWaitsForReadinessOrCancellation(t *testing.T) {
 				switch ending {
 				case "ready":
 					require.NoError(t, run.outcome.err)
+					require.Equal(t, []bool{true}, gitHeldAtRemoval, "physical recovery lost its Git-work hold")
 					require.Nil(t, f.store.GetNode(node.ID))
 					require.False(t, f.configLists(root))
 				case "cancel":
 					require.ErrorIs(t, run.outcome.err, context.Canceled)
+					require.Empty(t, gitHeldAtRemoval)
 					require.NotNil(t, f.store.GetNode(node.ID))
 					require.True(t, f.configLists(root))
 					// A second process has no captured input or durable record to

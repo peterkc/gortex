@@ -86,11 +86,6 @@ func (l *CheckoutLifecycle) executeModeTransition(
 		}
 	}
 
-	// A transition runs git in the checkouts it moves (the builds it starts
-	// sample and list them); no racily clean index refresh may hold their
-	// index lock meanwhile.
-	release := l.gitWork.hold()
-	defer release()
 	switch transition.Cause {
 	case promotionTransitionCause:
 		result, err := l.executePromotionTransition(ctx, transition)
@@ -108,6 +103,9 @@ func (l *CheckoutLifecycle) executeModeTransition(
 func (l *CheckoutLifecycle) executePromotionTransition(
 	ctx context.Context, transition store_sqlite.IntentTransition,
 ) (PromoteResult, error) {
+	// The builds sample and list checkouts; no index refresh may overlap Git.
+	release := l.gitWork.hold()
+	defer release()
 	return l.promoteCheckoutTransition(ctx, transition)
 }
 
@@ -190,21 +188,19 @@ func (l *CheckoutLifecycle) executeDemotionTransition(
 			checkout.EffectiveMode == store_sqlite.CheckoutModeAutomatic &&
 			checkout.ActiveIntentTransitionID == "" {
 			prefix := l.ResolvePrefix(checkout.RootPath)
-			_, _, err := l.evictRepoChecked(ctx, prefix, checkout.RootPath, reconcile.CauseDemotion)
-			if onlyRepositoryCleanupPending(err) {
-				// No durable transition remains to rediscover this input. Keep
-				// its existing worker until ready or lifecycle cancellation.
-				if ready := l.repositoryCleanupReadySignal(); ready != nil {
-					select {
-					case <-ready:
-					case <-ctx.Done():
-					}
-					err = ctx.Err()
-					if err == nil {
-						_, _, err = l.evictRepoChecked(ctx, prefix, checkout.RootPath, reconcile.CauseDemotion)
-					}
+			// Keep the captured input until ready without blocking index refreshes.
+			if prefix != "" && l.deferRepositoryCleanupRelease() {
+				select {
+				case <-l.repositoryCleanupReadySignal():
+				case <-ctx.Done():
+				}
+				if err := ctx.Err(); err != nil {
+					return fmt.Errorf("indexer: recover demotion configuration: %w", err)
 				}
 			}
+			release := l.gitWork.hold()
+			defer release()
+			_, _, err := l.evictRepoChecked(ctx, prefix, checkout.RootPath, reconcile.CauseDemotion)
 			if err != nil {
 				return fmt.Errorf("indexer: recover demotion configuration: %w", err)
 			}
@@ -213,6 +209,9 @@ func (l *CheckoutLifecycle) executeDemotionTransition(
 		return fmt.Errorf("%w: demotion transition %s is no longer standing",
 			store_sqlite.ErrCatalogStaleGuard, transition.TransitionID)
 	}
+	// Modern demotion still commits its automatic route before readiness.
+	release := l.gitWork.hold()
+	defer release()
 	if standing.TransitionID != transition.TransitionID ||
 		standing.Cause != demotionTransitionCause ||
 		standing.RequestedMode != store_sqlite.CheckoutModeAutomatic {
