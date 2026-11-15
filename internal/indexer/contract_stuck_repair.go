@@ -692,7 +692,11 @@ func (r *ContractStuckRepair) driftedRow(ctx context.Context, store generationPa
 	if err != nil || !contractCensusFileOnDisk(root, repo, path) {
 		return false
 	}
-	rows, err := store.(fileMetaPathContextReader).FileMetasByPathsContext(ctx, repo, []string{path})
+	reader, ok := store.(fileMetaPathContextReader)
+	if !ok {
+		return false
+	}
+	rows, err := reader.FileMetasByPathsContext(ctx, repo, []string{path})
 	row, ok := rows[path]
 	if err != nil || !ok || row.ContentHash == "" {
 		return false

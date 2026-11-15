@@ -81,6 +81,15 @@ func TestContractRepairTakesADriftedRowOnlyWhileTheBytesDiffer(t *testing.T) {
 	require.False(t, f.r.driftedRow(t.Context(), store, "fixture", helper), "a deleted file is not drifted")
 }
 
+func TestContractRepairDeclinesDriftWithoutFileMetadataReader(t *testing.T) {
+	f := newContractRepairFixture(t, nil)
+	driftContractFile(t, f.contractJobFixture, "helper.go", jobHelper+"// drifted\n")
+	store := struct{ generationPayloadStore }{f.store.AtGeneration(0)}
+	_, supports := any(store).(fileMetaPathContextReader)
+	require.False(t, supports, "the wrapper must hide path metadata reads")
+	require.False(t, f.r.driftedRow(t.Context(), store, "fixture", "fixture/helper.go"))
+}
+
 // Drift alone, with every receipt at the current policy, is repaired by one
 // forced reindex of the reported file, without a baseline rebuild.
 func TestContractDriftedFileIsReindexedWithoutABaselineRebuild(t *testing.T) {
