@@ -595,14 +595,19 @@ func TestEnrichmentUnavailableEmptyReleaseAndIrrelevantHotspotModes(t *testing.T
 	require.Contains(t, toolResultText(result), "no release timeline in scope", "supported empty retains the existing response")
 	srv.graph = struct{ graph.Store }{srv.graph}
 	for _, args := range []map[string]any{nil, {"tag": "absent"}} {
-		// An unavailable reader cannot certify that no release enrichment has run.
+		// Sidecar availability does not determine whether a KindRelease tag exists.
 		result, err = srv.handleAnalyzeReleases(context.Background(), makeReq("analyze", args))
 		require.NoError(t, err)
 		var payload map[string]any
 		require.NoError(t, json.Unmarshal([]byte(toolResultText(result)), &payload))
 		require.Contains(t, payload, "enrichment_unavailable")
-		require.NotContains(t, payload, "error")
-		require.NotContains(t, payload, "suggestion")
+		if args == nil {
+			require.NotContains(t, payload, "error")
+			require.NotContains(t, payload, "suggestion")
+		} else {
+			require.Equal(t, "no KindRelease node for tag \"absent\"; run `enrich_releases` first", payload["error"])
+			require.Equal(t, "enrich_releases", payload["suggestion"])
+		}
 	}
 	for _, mode := range []string{"complexity", "directional"} {
 		_, available := rerankHotspots([]analysis.HotspotEntry{{ID: qualityAlphaID, ComplexityScore: 10}}, srv.graph, mode, "adds", 30)

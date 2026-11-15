@@ -2251,7 +2251,8 @@ func (s *Server) handleAnalyzeReleases(ctx context.Context, req mcp.CallToolRequ
 	// an overlay-active request grades the timeline against the state it
 	// reads rather than mixing buffers with the indexed node set.
 	reader := s.readerFor(ctx)
-	relByID, available := releaseRowsByID(reader)
+	// Timeline-only calls need support information, not the sidecar rows.
+	_, available := enrichmentRowsReader(reader).(graph.ReleaseEnrichmentReader)
 	unavailable := unavailableEnrichment{}
 	if !available {
 		unavailable = append(unavailable, "release")
@@ -2302,15 +2303,14 @@ func (s *Server) handleAnalyzeReleases(ctx context.Context, req mcp.CallToolRequ
 		}
 		if row == nil {
 			payload := map[string]any{
-				"releases": []releaseRow{}, "total": 0,
-			}
-			if available {
-				payload["error"] = fmt.Sprintf("no KindRelease node for tag %q; run `enrich_releases` first", tagFilter)
-				payload["suggestion"] = "enrich_releases"
+				"error":      fmt.Sprintf("no KindRelease node for tag %q; run `enrich_releases` first", tagFilter),
+				"suggestion": "enrich_releases",
+				"releases":   []releaseRow{}, "total": 0,
 			}
 			unavailable.apply(payload)
 			return s.respondJSONOrTOON(ctx, req, payload)
 		}
+		relByID, _ := releaseRowsByID(reader)
 		for _, n := range reader.AllNodes() {
 			if n.Kind != graph.KindFile || n.FilePath == "" {
 				continue
@@ -2347,7 +2347,7 @@ func (s *Server) handleAnalyzeReleases(ctx context.Context, req mcp.CallToolRequ
 		// (an unlikely combination; surface as an empty timeline);
 		// otherwise return the structured error.
 		hasAnyAddedIn := false
-		if len(relByID) > 0 {
+		if relByID, _ := releaseRowsByID(reader); len(relByID) > 0 {
 			hasAnyAddedIn = true
 		} else {
 			for _, n := range reader.AllNodes() {
