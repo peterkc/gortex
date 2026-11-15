@@ -2022,7 +2022,7 @@ func (l *CheckoutLifecycle) runFamilyRetry(familyID string, deadline int64) {
 		barrier()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	_, err := l.ReconcileFamily(ctx, familyID)
+	_, err := l.reconcileFamily(ctx, familyID, !l.deferRepositoryCleanupRelease())
 	cancel()
 	if err == nil || errors.Is(err, store_sqlite.ErrCatalogNotFound) {
 		return
