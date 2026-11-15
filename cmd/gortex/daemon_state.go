@@ -648,6 +648,9 @@ func warmupDaemonStateContext(ctx context.Context, state *daemonState, logger *z
 				if ctx.Err() != nil {
 					return nil, timings
 				}
+				if state.lifecycle != nil && state.lifecycle.RepositoryAdmissionClosed(prefix) {
+					continue // The cleanup journal owns this closing prefix's purge.
+				}
 				finishPurge := startWarmupStep(logger, "orphan_prefix_purge", zap.String("repo", prefix))
 				purge := purger.PurgeRepo
 				if scoped, ok := state.graph.(interface {
@@ -825,6 +828,11 @@ func warmupDaemonStateContext(ctx context.Context, state *daemonState, logger *z
 				state.multiIndexer.FinishRepoLoad(entry.Path, jobErr)
 			}
 		}()
+		prefix := warmupRepoPrefix(state, entry, "")
+		if state.lifecycle != nil && state.lifecycle.RepositoryAdmissionClosed(prefix) {
+			jobErr = indexer.ErrRepositoryCleanupPending
+			return
+		}
 		// Route repos the store already knows through ReconcileRepoCtx — it
 		// calls IncrementalReindexPaths, which evicts files deleted while the
 		// daemon was down and re-indexes only files whose mtime changed. Repos

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"iter"
@@ -21,6 +22,7 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer"
 	gortexmcp "github.com/zzet/gortex/internal/mcp"
+	"github.com/zzet/gortex/internal/testenv"
 )
 
 // The CLI enrich path declares BASE as its output generation.
@@ -683,4 +685,103 @@ func TestControllerCochangeUsesSharedTerminalMaintenanceAdmission(t *testing.T) 
 	require.ErrorIs(t, err, context.Canceled)
 	after := mi.ResolvedOutputGenerationAuthority().Stats()
 	require.Equal(t, before.Issued, after.Issued, "control path bypassed the shared close gate")
+}
+
+func TestViewsCleanupPendingProjectionPreservesItsValue(t *testing.T) {
+	// Given a typed census containing pending cleanup beside existing fields.
+	health := indexer.ViewsHealth{Families: 2, RefViews: map[string]int{"ready": 4}, CleanupPending: 7}
+
+	// When the production typed projection builds the status payload.
+	status := viewsStatusFromHealth(health)
+	body, err := json.Marshal(status)
+	require.NoError(t, err)
+	var counts struct {
+		CleanupPending int `json:"cleanup_pending"`
+	}
+	require.NoError(t, json.Unmarshal(body, &counts))
+
+	// Then the actual value, not merely its field declaration, reaches status.
+	require.Equal(t, 7, counts.CleanupPending)
+	require.Equal(t, 2, status.Families)
+	require.Equal(t, 4, status.RefViews["ready"])
+}
+
+func TestCleanupJournalCountAndReadFailureReachControllerStatus(t *testing.T) {
+	// Given a real controller with nested, generation-zero-only journal debt.
+	c, _, catalog, dir := buildCatalogController(t)
+	require.NoError(t, catalog.UpsertCleanupEntry(t.Context(), store_sqlite.CleanupEntry{
+		CleanupID: "deferred-child", OpaqueTargetIDs: `{"kind":"forget_checkout","checkout_id":"old-checkout"}`,
+		Reason: "forget_checkout", Phase: store_sqlite.CleanupPhaseFailed,
+		LastError: indexer.ErrRepositoryCleanupPending.Error(),
+	}))
+	require.NoError(t, catalog.UpsertCleanupEntry(t.Context(), store_sqlite.CleanupEntry{
+		CleanupID: "deferred-parent", OpaqueTargetIDs: `{"kind":"forget_family","family_id":"old-family"}`,
+		Reason: "forget_family", Phase: store_sqlite.CleanupPhasePending,
+	}))
+	transport := testenv.ShortTempDir(t)
+	socket := filepath.Join(transport, "s")
+	t.Setenv("GORTEX_DAEMON_SOCKET", socket)
+	t.Setenv("GORTEX_DAEMON_PIDFILE", filepath.Join(transport, "p"))
+	d := daemon.New(socket, "test", nil)
+	d.Controller = c
+	require.NoError(t, d.Listen())
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- d.Serve() }()
+	t.Cleanup(func() {
+		shutdownErr := d.Shutdown()
+		select {
+		case err := <-serveDone:
+			require.NoError(t, shutdownErr)
+			require.NoError(t, err)
+		case <-time.After(2 * time.Second):
+			require.NoError(t, shutdownErr)
+			t.Error("status test daemon did not join")
+		}
+	})
+	client, err := daemon.DialTo(socket, daemon.Handshake{Mode: daemon.ModeControl, ClientName: "cli"})
+	require.NoError(t, err)
+	defer client.Close()
+
+	// When the real control connection reads the controller's actual census.
+	response, err := client.Control(daemon.ControlStatus, daemon.StatusParams{})
+	require.NoError(t, err)
+	require.True(t, response.OK, response.ErrorMsg)
+	var status daemon.StatusResponse
+	require.NoError(t, json.Unmarshal(response.Result, &status))
+	require.NotNil(t, status.Views)
+	body, err := json.Marshal(status.Views)
+	require.NoError(t, err)
+	var counts struct {
+		CleanupPending int `json:"cleanup_pending"`
+	}
+	require.NoError(t, json.Unmarshal(body, &counts))
+	require.Equal(t, 2, counts.CleanupPending)
+
+	// Given that journal alone becomes unreadable while other lists work.
+	db, err := sql.Open("sqlite", filepath.Join(dir, "store.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	_, err = db.Exec("ALTER TABLE cleanup_journal RENAME TO unreadable_cleanup_journal")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := db.Exec("ALTER TABLE unreadable_cleanup_journal RENAME TO cleanup_journal")
+		require.NoError(t, err)
+	})
+	_, err = catalog.ListRepositoryFamilies(t.Context())
+	require.NoError(t, err)
+	_, err = catalog.ListViewGenerations(t.Context(), store_sqlite.ViewGenerationFilter{})
+	require.NoError(t, err)
+
+	// Then the whole views block is unavailable, not an invented zero count.
+	response, err = client.Control(daemon.ControlStatus, daemon.StatusParams{})
+	require.NoError(t, err)
+	require.True(t, response.OK, response.ErrorMsg)
+	status = daemon.StatusResponse{}
+	require.NoError(t, json.Unmarshal(response.Result, &status))
+	require.Nil(t, status.Views)
+	body, err = json.Marshal(status)
+	require.NoError(t, err)
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(body, &fields))
+	require.NotContains(t, fields, "views")
 }

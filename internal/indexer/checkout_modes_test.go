@@ -11,11 +11,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/zzet/gortex/internal/config"
@@ -1279,5 +1281,319 @@ func TestSetPrimaryDropsDependentCoordinatorsBeforeTheEpochMoves(t *testing.T) {
 		assert.Equal(t, tracked.GraphID, route.GraphID)
 		assert.NotZero(t, route.CommitGenerationID)
 		assert.NotZero(t, route.DirtyGenerationID)
+	}
+}
+
+func TestDeferredRepositoryCleanupPreventsDemotionPurgeBypass(t *testing.T) {
+	// Given an authorized dedicated-to-automatic demotion in a pre-ready daemon.
+	f := newFamilyFixture(t, "deferred-demotion-bypass")
+	t.Cleanup(f.close)
+	ctx := t.Context()
+	tracked, err := f.lc.Register(ctx, config.RepoEntry{Path: f.worktree}, TrackSourceCLI)
+	require.NoError(t, err)
+	require.NoError(t, tracked.CatalogErr)
+	checkout := f.checkoutOf(tracked.Prefix)
+	owned, primary, err := f.lc.familyGraphsFor(ctx, checkout)
+	require.NoError(t, err)
+	require.NotNil(t, owned)
+	require.NotNil(t, primary)
+	preview, err := f.lc.PreviewUntrack(ctx, f.worktree)
+	require.NoError(t, err)
+	authorization, err := f.lc.rec.AuthorizeDemotion(ctx, checkout, owned.GraphID, primary.GraphID, preview.PrimaryEpoch)
+	require.NoError(t, err)
+	payload := &cleanupReadyPayload{Store: f.store}
+	f.mi.graph = payload
+	f.lc.EnableDeferredRepositoryCleanup()
+
+	// When the transition builds its automatic route and commits that flip.
+	err = f.lc.demote(ctx, checkout, owned, authorization)
+
+	// Then pending graph release must not be bypassed through direct MI purge.
+	_, purged := payload.calls()
+	require.Empty(t, purged, "demotion bypassed the pre-ready repository-release barrier")
+	if err != nil {
+		require.True(t, onlyRepositoryCleanupPending(err), "unexpected demotion error: %v", err)
+	}
+}
+
+func TestDeferredDemotionRetainsOwedGenerationsUntilReady(t *testing.T) {
+	// Given a dedicated worktree with positive payload that demotion will owe.
+	f := newFamilyFixture(t, "deferred-demotion-generation")
+	t.Cleanup(f.close)
+	tracked, err := f.lc.Register(t.Context(), config.RepoEntry{Path: f.worktree}, TrackSourceCLI)
+	require.NoError(t, err)
+	require.NoError(t, tracked.CatalogErr)
+	generationID, handle, err := f.store.BeginPayloadGeneration(t.Context(), store_sqlite.PayloadGenerationRequest{
+		OwnerKind: checkoutLayerOwnerKind, GraphID: tracked.GraphID, CheckoutID: tracked.CheckoutID,
+		GenerationKind: "commit", LayerID: "demotion-owed", TreeOID: "demotion-tree", ConfigHash: "demotion-config",
+	})
+	require.NoError(t, err)
+	handle.AddBatch([]*graph.Node{sentinelNode(tracked.Prefix, "DeferredDemotionPositive")}, nil)
+	require.NoError(t, f.store.PublishPayloadGeneration(t.Context(), generationID, 1))
+	f.lc.EnableDeferredRepositoryCleanup()
+	removed := make(chan struct{}, 1)
+	core, _ := observer.New(zap.InfoLevel)
+	f.lc.logger = zap.New(core, zap.Hooks(func(entry zapcore.Entry) error {
+		if entry.Message == "config: removed tracked repo" {
+			select {
+			case removed <- struct{}{}:
+			default:
+			}
+		}
+		return nil
+	}))
+	preview, err := f.lc.PreviewUntrack(t.Context(), f.worktree)
+	require.NoError(t, err)
+
+	// When the owned transition commits the automatic route before ready.
+	out, err := f.lc.StartApplyUntrack(t.Context(), preview)
+	require.NoError(t, err)
+	outcome := awaitModeTransition(t, f.lc, out.TransitionID)
+
+	// Then no direct retirement continuation deletes the old graph's payload,
+	// and the committed route/coordinator and pending transition remain.
+	generation, found, err := f.catalog.GetViewGeneration(t.Context(), generationID)
+	require.NoError(t, err)
+	require.True(t, found, "demotion swept the owed generation before ready")
+	require.Equal(t, tracked.GraphID, generation.GraphID)
+	require.True(t, onlyRepositoryCleanupPending(outcome.err), "demotion outcome: %v", outcome.err)
+	transition, found, err := f.catalog.GetIntentTransition(t.Context(), tracked.CheckoutID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, store_sqlite.IntentTransitionPending, transition.State)
+	checkout, found, err := f.catalog.GetCheckout(t.Context(), tracked.CheckoutID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, store_sqlite.CheckoutModeAutomatic, checkout.EffectiveMode)
+	route, routed := f.routeOf(tracked.CheckoutID)
+	require.True(t, routed)
+	require.Equal(t, f.primaryGraph, route.GraphID)
+	require.NotNil(t, lifecycleCoordinator(t, f.lc, tracked.CheckoutID))
+	require.True(t, f.configLists(f.worktree))
+
+	// When ready opens, the existing cleanup runtime resumes the graph.
+	// Its config finalizer records progress after physical retirement/purge.
+	f.lc.MarkRepositoryCleanupReady()
+	select {
+	case <-removed:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the existing runtime did not resume demotion cleanup after ready")
+	}
+	_, found, err = f.catalog.GetViewGeneration(t.Context(), generationID)
+	require.NoError(t, err)
+	require.False(t, found)
+}
+
+func TestLegacyDemotionRecoveryWaitsForReadinessOrCancellation(t *testing.T) {
+	for _, ending := range []string{"ready", "cancel"} {
+		t.Run(ending, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				// Given captured legacy recovery with neither durable row: only
+				// the already-owned worker can retain this exact in-process input.
+				f := newLifecycleFixture(t)
+				t.Cleanup(f.close)
+				root := t.TempDir()
+				const prefix = "legacy-demotion"
+				require.NoError(t, f.catalog.UpsertRepositoryFamily(t.Context(), store_sqlite.RepositoryFamily{
+					FamilyID: "legacy-family", CommonDirIdentity: filepath.Join(root, ".git"), State: "active",
+				}))
+				checkout := store_sqlite.Checkout{CheckoutID: "legacy-checkout", Incarnation: "legacy-incarnation", FamilyID: "legacy-family",
+					RootPath: root, GitDir: filepath.Join(root, ".git"), AdminName: "wt", State: store_sqlite.CheckoutStateReady,
+					DesiredMode: store_sqlite.CheckoutModeAutomatic, EffectiveMode: store_sqlite.CheckoutModeAutomatic}
+				require.NoError(t, f.catalog.UpsertCheckout(t.Context(), checkout))
+				f.mi.mu.Lock()
+				f.mi.repos[prefix] = &RepoMetadata{RepoPrefix: prefix, RootPath: root}
+				f.mi.indexers[prefix] = nil
+				f.mi.mu.Unlock()
+				require.NoError(t, f.cm.Global().AddRepo(config.RepoEntry{Path: root, Name: prefix}))
+				require.NoError(t, f.cm.Global().Save())
+				node := sentinelNode(prefix, "LegacyDemotionPayload")
+				node.FilePath = prefix + "/payload.txt"
+				f.store.AddNode(node)
+				f.lc.EnableDeferredRepositoryCleanup()
+				var gitHeldAtRemoval []bool
+				core, _ := observer.New(zap.InfoLevel)
+				f.lc.logger = zap.New(core, zap.Hooks(func(entry zapcore.Entry) error {
+					if entry.Message == "config: removed tracked repo" {
+						gitHeldAtRemoval = append(gitHeldAtRemoval, f.lc.gitWork.busy())
+					}
+					return nil
+				}))
+				transition := store_sqlite.IntentTransition{TransitionID: "legacy-captured-input", CheckoutID: checkout.CheckoutID,
+					Cause: demotionTransitionCause, RequestedMode: store_sqlite.CheckoutModeAutomatic}
+
+				// When the existing worker reaches physical recovery before ready.
+				run := f.lc.scheduleModeTransition(transition)
+				synctest.Wait()
+
+				// Then it keeps that captured input alive without purging or
+				// manufacturing a transition, cleanup journal, or new scheduler.
+				require.NotNil(t, f.store.GetNode(node.ID))
+				require.True(t, f.configLists(root))
+				select {
+				case <-run.done:
+					t.Fatal("legacy recovery completed before readiness")
+				default:
+				}
+				_, found, err := f.catalog.GetIntentTransition(t.Context(), checkout.CheckoutID)
+				require.NoError(t, err)
+				require.False(t, found)
+				journal, err := f.catalog.ListCleanupEntries(t.Context())
+				require.NoError(t, err)
+				require.Empty(t, journal)
+				refreshDone, admitted := f.lc.gitWork.refresh(t.Context(), racyIndexEditWait)
+				if admitted {
+					refreshDone()
+				}
+				require.True(t, admitted, "readiness wait blocked the racy-index refresh")
+
+				// When readiness opens or lifecycle cancellation joins the worker.
+				switch ending {
+				case "ready":
+					f.lc.MarkRepositoryCleanupReady()
+				case "cancel":
+					require.NoError(t, f.lc.Close())
+				}
+				synctest.Wait()
+				<-run.done
+
+				// Then only readiness permits the captured recovery to purge.
+				switch ending {
+				case "ready":
+					require.NoError(t, run.outcome.err)
+					require.Equal(t, []bool{true}, gitHeldAtRemoval, "physical recovery lost its Git-work hold")
+					require.Nil(t, f.store.GetNode(node.ID))
+					require.False(t, f.configLists(root))
+				case "cancel":
+					require.ErrorIs(t, run.outcome.err, context.Canceled)
+					require.Empty(t, gitHeldAtRemoval)
+					require.NotNil(t, f.store.GetNode(node.ID))
+					require.True(t, f.configLists(root))
+					// A second process has no captured input or durable record to
+					// replay. The approved limit keeps its payload rather than
+					// manufacturing cleanup authority when ready opens again.
+					f.restart()
+					f.lc.EnableDeferredRepositoryCleanup()
+					require.NoError(t, f.lc.Seed(t.Context()))
+					f.lc.MarkRepositoryCleanupReady()
+					require.NoError(t, f.lc.Close())
+					require.NotNil(t, f.store.GetNode(node.ID))
+					journal, err := f.catalog.ListCleanupEntries(t.Context())
+					require.NoError(t, err)
+					require.Empty(t, journal)
+				}
+			})
+		})
+	}
+}
+
+func TestDeferredDemotionKeepsCommitFailureAndOwedPayload(t *testing.T) {
+	// Given a stale demotion authorization and unreferenced positive payload.
+	f := newFamilyFixture(t, "deferred-demotion-commit-error")
+	t.Cleanup(f.close)
+	tracked, err := f.lc.Register(t.Context(), config.RepoEntry{Path: f.worktree}, TrackSourceCLI)
+	require.NoError(t, err)
+	require.NoError(t, tracked.CatalogErr)
+	checkout := f.checkoutOf(tracked.Prefix)
+	owned, primary, err := f.lc.familyGraphsFor(t.Context(), checkout)
+	require.NoError(t, err)
+	preview, err := f.lc.PreviewUntrack(t.Context(), f.worktree)
+	require.NoError(t, err)
+	authorization, err := f.lc.rec.AuthorizeDemotion(t.Context(), checkout, owned.GraphID, primary.GraphID, preview.PrimaryEpoch)
+	require.NoError(t, err)
+	generationID, handle, err := f.store.BeginPayloadGeneration(t.Context(), store_sqlite.PayloadGenerationRequest{
+		OwnerKind: checkoutLayerOwnerKind, GraphID: tracked.GraphID, CheckoutID: tracked.CheckoutID,
+		GenerationKind: "commit", LayerID: "failed-demotion-owed", TreeOID: "failed-demotion-tree", ConfigHash: "failed-demotion-config",
+	})
+	require.NoError(t, err)
+	handle.AddBatch([]*graph.Node{sentinelNode(tracked.Prefix, "FailedDemotionPositive")}, nil)
+	require.NoError(t, f.store.PublishPayloadGeneration(t.Context(), generationID, 1))
+	f.lc.EnableDeferredRepositoryCleanup()
+	checkout.Incarnation = "stale-incarnation"
+
+	// When commit refuses the stale identity and rolls its automatic route back.
+	err = f.lc.demote(t.Context(), checkout, owned, authorization)
+
+	// Then the original refusal survives; rollback does not use a general
+	// retirement sweep to cross the pre-ready physical-release boundary.
+	require.ErrorIs(t, err, store_sqlite.ErrCatalogStaleGuard)
+	require.False(t, onlyRepositoryCleanupPending(err))
+	_, found, readErr := f.catalog.GetViewGeneration(t.Context(), generationID)
+	require.NoError(t, readErr)
+	require.True(t, found, "rollback swept physical debt before ready")
+	_, routed := f.routeOf(tracked.CheckoutID)
+	require.False(t, routed)
+}
+
+func TestDeferredDemotionRestartKeepsStaleConfigFromRevivingIntent(t *testing.T) {
+	for _, window := range []string{"authorization_before_commit", "committed_automatic"} {
+		t.Run(window, func(t *testing.T) {
+			// Given stale persisted dedicated config and an authorized demotion,
+			// either before its mode commit or after its graph release deferred.
+			f := newFamilyFixture(t, "deferred-demotion-restart")
+			t.Cleanup(f.close)
+			tracked, err := f.lc.Register(t.Context(), config.RepoEntry{Path: f.worktree}, TrackSourceCLI)
+			require.NoError(t, err)
+			require.NoError(t, tracked.CatalogErr)
+			checkout := f.checkoutOf(tracked.Prefix)
+			owned, primary, err := f.lc.familyGraphsFor(t.Context(), checkout)
+			require.NoError(t, err)
+			preview, err := f.lc.PreviewUntrack(t.Context(), f.worktree)
+			require.NoError(t, err)
+			authorization, err := f.lc.rec.AuthorizeDemotion(t.Context(), checkout, owned.GraphID, primary.GraphID, preview.PrimaryEpoch)
+			require.NoError(t, err)
+			f.lc.EnableDeferredRepositoryCleanup()
+			if window == "committed_automatic" {
+				err = f.lc.demote(t.Context(), checkout, owned, authorization)
+				require.True(t, onlyRepositoryCleanupPending(err), "committed demotion: %v", err)
+			}
+			require.True(t, f.configLists(f.worktree))
+
+			// When a fresh stack restores config/transition identity, registers
+			// the healthy primary, then runs the transition before ready.
+			f.restart()
+			observer := observeCleanupReady(t, f.lifecycleFixture)
+			f.lc.EnableDeferredRepositoryCleanup()
+			f.lc.EnableDeferredSeedRetirements()
+			gate := NewViewBuildGate()
+			f.lc.SetBuildGate(gate)
+			require.NoError(t, f.lc.Seed(t.Context()))
+			restored, err := f.lc.Register(t.Context(), config.RepoEntry{Path: f.main, Name: f.mainPrefix}, TrackSourceCLI)
+			require.NoError(t, err)
+			require.NoError(t, restored.CatalogErr)
+			gate.Open()
+			outcome := awaitModeTransition(t, f.lc, authorization.Transition.TransitionID)
+
+			// Then neither window reactivates explicit intent or loses the
+			// surviving primary route, and old-graph cleanup remains pending.
+			require.True(t, onlyRepositoryCleanupPending(outcome.err), "replayed demotion: %v", outcome.err)
+			intents, err := f.catalog.ListTrackingIntents(t.Context(), checkout.CheckoutID)
+			require.NoError(t, err)
+			for _, intent := range intents {
+				require.False(t, intent.Active)
+			}
+			automatic, found, err := f.catalog.GetCheckout(t.Context(), checkout.CheckoutID)
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, store_sqlite.CheckoutModeAutomatic, automatic.EffectiveMode)
+			route, routed := f.routeOf(checkout.CheckoutID)
+			require.True(t, routed)
+			require.Equal(t, f.primaryGraph, route.GraphID)
+			require.True(t, f.configLists(f.worktree))
+			require.True(t, f.lc.RepositoryAdmissionClosed(tracked.Prefix))
+			state := drainedCleanupState(t, f.lc, tracked.GraphID)
+
+			// Then the existing runtime and transition replay finish after ready,
+			// including the final local reservation and stale config removal.
+			f.lc.MarkRepositoryCleanupReady()
+			awaitCleanupReadyFinalization(t, observer, state)
+			_, found, err = f.catalog.GetDedicatedGraph(t.Context(), tracked.GraphID)
+			require.NoError(t, err)
+			require.False(t, found)
+			_, found, err = f.catalog.GetIntentTransition(t.Context(), checkout.CheckoutID)
+			require.NoError(t, err)
+			require.False(t, found)
+			require.False(t, f.configLists(f.worktree))
+		})
 	}
 }

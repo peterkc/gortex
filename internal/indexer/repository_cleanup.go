@@ -14,8 +14,9 @@ import (
 )
 
 // ErrRepositoryCleanupPending means logical withdrawal is committed but a
-// captured reader/producer still owns payload. ReleaseGraph must return it;
-// returning nil would authorize the reconciler to delete the graph too early.
+// captured reader/producer still owns payload, or daemon readiness defers its
+// release. ReleaseGraph must return it; returning nil would authorize the
+// reconciler to delete the graph too early.
 var ErrRepositoryCleanupPending = errors.New("indexer: repository cleanup is pending")
 
 // Suppress only a pure ownership deferral. errors.Is alone would incorrectly
@@ -85,6 +86,68 @@ type repositoryCleanupRuntime struct {
 	waiters sync.WaitGroup
 	states  map[string]*repositoryCleanupState
 	closed  bool
+}
+
+// EnableDeferredRepositoryCleanup keeps physical repository release off the
+// daemon's readiness path. Install it before any cleanup replay or janitor starts.
+// Other lifecycle users keep their synchronous/reader-drain cleanup contract.
+func (l *CheckoutLifecycle) EnableDeferredRepositoryCleanup() {
+	if l == nil {
+		return
+	}
+	l.repositoryCleanupMu.Lock()
+	if !l.repositoryCleanupClosed && l.repositoryCleanupReady == nil {
+		l.repositoryCleanupReady = make(chan struct{})
+	}
+	l.repositoryCleanupMu.Unlock()
+}
+
+// MarkRepositoryCleanupReady opens the daemon-only release barrier. It performs
+// no catalog work and does not wait for cleanup; the lifecycle owns that runtime.
+func (l *CheckoutLifecycle) MarkRepositoryCleanupReady() {
+	if l == nil {
+		return
+	}
+	l.repositoryCleanupMu.Lock()
+	opened := !l.repositoryCleanupClosed && l.repositoryCleanupReady != nil && !channelClosed(l.repositoryCleanupReady)
+	deferred := l.repositoryCleanupDeferred
+	if opened {
+		close(l.repositoryCleanupReady)
+	}
+	l.repositoryCleanupMu.Unlock()
+	if opened && deferred && l.logger != nil {
+		l.logger.Info("repository cleanup released after ready")
+	}
+}
+
+func (l *CheckoutLifecycle) deferRepositoryCleanupRelease() bool {
+	l.repositoryCleanupMu.Lock()
+	deferred := l.repositoryCleanupReady != nil && !channelClosed(l.repositoryCleanupReady)
+	if deferred {
+		l.repositoryCleanupDeferred = true
+	}
+	l.repositoryCleanupMu.Unlock()
+	return deferred
+}
+
+func (l *CheckoutLifecycle) repositoryCleanupReadySignal() <-chan struct{} {
+	l.repositoryCleanupMu.Lock()
+	defer l.repositoryCleanupMu.Unlock()
+	return l.repositoryCleanupReady
+}
+
+func (l *CheckoutLifecycle) repositoryCleanupPendingCount(ctx context.Context) (int, error) {
+	entries, err := l.catalog.ListCleanupEntries(ctx)
+	if err != nil {
+		return 0, err
+	}
+	pending := 0
+	for _, entry := range entries {
+		if entry.Phase != store_sqlite.CleanupPhaseDone {
+			pending++
+		}
+	}
+	return pending, nil
 }
 
 func (r *repositoryCleanupRuntime) signal() {
@@ -248,6 +311,9 @@ func (l *CheckoutLifecycle) releaseRepositoryGraph(ctx context.Context, graphID 
 	if state.payloadPurged {
 		return nil
 	}
+	if l.deferRepositoryCleanupRelease() {
+		return fmt.Errorf("%w: graph %s", ErrRepositoryCleanupPending, graphID)
+	}
 	if !channelClosed(state.producersDone) {
 		return fmt.Errorf("%w: graph %s", ErrRepositoryCleanupPending, graphID)
 	}
@@ -364,6 +430,16 @@ func (l *CheckoutLifecycle) runRepositoryCleanup(runtime *repositoryCleanupRunti
 			return
 		case <-runtime.wake:
 		case <-retry:
+		}
+		// A pre-ready wake may already have been consumed when its owners
+		// drain. Wait here, without a retry timer, so opening readiness also
+		// resumes that exact wake. Shutdown cancels and joins this same worker.
+		if ready := l.repositoryCleanupReadySignal(); ready != nil {
+			select {
+			case <-ready:
+			case <-runtime.ctx.Done():
+				return
+			}
 		}
 		if runtime.ctx.Err() != nil {
 			return
@@ -490,6 +566,9 @@ func (l *CheckoutLifecycle) finalizeRepositoryCleanupState(ctx context.Context, 
 		}
 	}
 	if err := l.leases.FinalizeRepositoryCleanup(state.owner); err != nil {
+		return false, err
+	}
+	if err := l.mi.finalizeRepositoryCleanupRoot(identity); err != nil {
 		return false, err
 	}
 	delete(l.repositoryOwners, identity.GraphID)

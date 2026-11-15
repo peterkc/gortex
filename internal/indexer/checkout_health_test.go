@@ -2,12 +2,16 @@ package indexer
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 // The view census is what a person reads when a daemon is not serving what
@@ -73,4 +77,72 @@ func TestAViewCensusStatesWhyACheckoutHasNoBuildLoop(t *testing.T) {
 		"a checkout that recovered its build loop is still reported as having none")
 	require.Positive(t, health.Coordinators,
 		"the recovered build loop is not counted, so the reason and the count disagree")
+}
+
+func TestViewsHealthCountsEveryUnfinishedCleanupJournalRow(t *testing.T) {
+	// Given journal rows in every state, including nested work for one target,
+	// with no payload generations that could otherwise expose the debt.
+	f := newLifecycleFixture(t)
+	t.Cleanup(f.close)
+	phases := []store_sqlite.CleanupPhase{
+		store_sqlite.CleanupPhasePending, store_sqlite.CleanupPhaseGrace,
+		store_sqlite.CleanupPhaseDeleting, store_sqlite.CleanupPhaseFailed, store_sqlite.CleanupPhaseDone,
+	}
+	for i, phase := range phases {
+		require.NoError(t, f.catalog.UpsertCleanupEntry(t.Context(), store_sqlite.CleanupEntry{
+			CleanupID: fmt.Sprintf("cleanup-%d", i), OpaqueTargetIDs: `{"checkout_id":"same-target"}`,
+			Reason: "forget_checkout", Phase: phase, LastError: ErrRepositoryCleanupPending.Error(),
+		}))
+	}
+
+	// When the real census reads the journal.
+	health, err := f.lc.ViewsHealth(t.Context())
+	require.NoError(t, err)
+	require.Empty(t, health.Generations)
+	body, err := json.Marshal(health)
+	require.NoError(t, err)
+	var counts struct {
+		CleanupPending int `json:"cleanup_pending"`
+	}
+	require.NoError(t, json.Unmarshal(body, &counts))
+
+	// Then every non-done row counts, including failed-as-pending deferral;
+	// the value is a saga count, not a distinct-repository count.
+	require.Equal(t, 4, counts.CleanupPending)
+	for i := range phases {
+		require.NoError(t, f.catalog.UpsertCleanupEntry(t.Context(), store_sqlite.CleanupEntry{
+			CleanupID: fmt.Sprintf("cleanup-%d", i), OpaqueTargetIDs: `{"checkout_id":"same-target"}`,
+			Reason: "forget_checkout", Phase: store_sqlite.CleanupPhaseDone,
+		}))
+	}
+	health, err = f.lc.ViewsHealth(t.Context())
+	require.NoError(t, err)
+	body, err = json.Marshal(health)
+	require.NoError(t, err)
+	require.NotContains(t, string(body), "cleanup_pending")
+}
+
+func TestViewsHealthRejectsAnUnreadableCleanupJournal(t *testing.T) {
+	// Given only the journal read fails; the existing census tables still work.
+	f := newLifecycleFixture(t)
+	t.Cleanup(f.close)
+	db, err := sql.Open("sqlite", f.dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	_, err = db.Exec("ALTER TABLE cleanup_journal RENAME TO unreadable_cleanup_journal")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := db.Exec("ALTER TABLE unreadable_cleanup_journal RENAME TO cleanup_journal")
+		require.NoError(t, err)
+	})
+	_, err = f.catalog.ListRepositoryFamilies(t.Context())
+	require.NoError(t, err)
+	_, err = f.catalog.ListViewGenerations(t.Context(), store_sqlite.ViewGenerationFilter{})
+	require.NoError(t, err)
+
+	// When the real census reaches that failed read.
+	_, err = f.lc.ViewsHealth(t.Context())
+
+	// Then it reports unavailable, never successful zero cleanup debt.
+	require.ErrorContains(t, err, "cleanup_journal")
 }

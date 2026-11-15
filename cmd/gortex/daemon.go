@@ -407,6 +407,9 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		retirementWorker = startDeferredRetirementWorker(
 			state.lifecycle.SweepDeferredRetirements, logger)
 		lifecycle := state.lifecycle
+		// Install the repository-release barrier before janitor or Seed replay.
+		// Its existing runtime remains owned and joined by the lifecycle.
+		lifecycle.EnableDeferredRepositoryCleanup()
 		// Stacks the startup correction will change are warmed after it,
 		// not before (their caches would be orphaned).
 		lifecycle.DeferPrewarmsUntilCorrected(warmupTask.ctx)
@@ -765,6 +768,9 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 			if ctx.Err() != nil {
 				return
 			}
+			if state.lifecycle != nil {
+				state.lifecycle.MarkRepositoryCleanupReady()
+			}
 			if deferredRetirements != nil {
 				deferredRetirements.MarkReady()
 			}
@@ -891,6 +897,11 @@ func publishWarmupCompletion(ctx context.Context, state *daemonState, controller
 			// Keep storage details in the daemon log, not the readiness channel.
 			"error": "warmup resolve failed; check the daemon log",
 		})
+		// This fallback serves requests even when compute-ready was skipped.
+		// Publish its readiness before allowing physical cleanup to start.
+		if ctx.Err() == nil && state.lifecycle != nil {
+			state.lifecycle.MarkRepositoryCleanupReady()
+		}
 		logWarmupSummary(logger, warmup, queryable, elapsed)
 		return
 	}
@@ -2412,13 +2423,16 @@ func renderDaemonViews(w io.Writer, st daemon.StatusResponse) {
 	if v == nil {
 		return
 	}
-	if v.Families == 0 && v.Coordinators == 0 && v.Leases == 0 &&
+	if v.Families == 0 && v.Coordinators == 0 && v.Leases == 0 && v.CleanupPending == 0 &&
 		len(v.Counters) == 0 && len(v.CoordinatorStartFailures) == 0 && len(v.StorageFailures) == 0 {
 		return
 	}
 	fmt.Fprintln(w, "\nviews:")
 	fmt.Fprintf(w, "  families=%d  coordinators=%d  leases=%d\n",
 		v.Families, v.Coordinators, v.Leases)
+	if v.CleanupPending > 0 {
+		fmt.Fprintf(w, "  cleanup_pending=%d\n", v.CleanupPending)
+	}
 	for _, section := range []struct {
 		label  string
 		counts map[string]int
