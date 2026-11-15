@@ -358,10 +358,8 @@ func (mi *MultiIndexer) finalizeUntrackedGoModuleCalls(parked []graph.EdgeIdenti
 		return nil
 	}
 	cr := mi.newCrossRepoResolver()
-	if err := cr.ResolveDeferredGoModuleEdgeIdentities(parked); err != nil {
-		return err
-	}
+	err := cr.ResolveDeferredGoModuleEdgeIdentities(parked)
 	mi.finishGoModuleCalls(cr)
 	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
-	return nil
+	return err
 }

@@ -49,7 +49,8 @@ func buildHotspotRerankFixture(t *testing.T, now time.Time) (graph.Store, []anal
 
 func TestRerankHotspots_ComplexityIsPassThrough(t *testing.T) {
 	g, entries := buildHotspotRerankFixture(t, time.Now())
-	out := rerankHotspots(entries, g, "complexity", "", 30)
+	out, available := rerankHotspots(entries, g, "complexity", "", 30)
+	assert.True(t, available)
 	// Same order, same scores.
 	assert.Len(t, out, 3)
 	for i, e := range out {
@@ -60,7 +61,8 @@ func TestRerankHotspots_ComplexityIsPassThrough(t *testing.T) {
 func TestRerankHotspots_NoveltyPromotesRecent(t *testing.T) {
 	now := time.Now()
 	g, entries := buildHotspotRerankFixture(t, now)
-	out := rerankHotspots(entries, g, "novelty", "", 30)
+	out, available := rerankHotspots(entries, g, "novelty", "", 30)
+	assert.True(t, available)
 	// 'fresh' (2 days old) ranks first; 'stale' (90 days) drops to 0.
 	assert.Equal(t, "fresh", out[0].ID)
 	var staleScore float64
@@ -74,13 +76,15 @@ func TestRerankHotspots_NoveltyPromotesRecent(t *testing.T) {
 
 func TestRerankHotspots_DirectionalAddsRewardsRecent(t *testing.T) {
 	g, entries := buildHotspotRerankFixture(t, time.Now())
-	out := rerankHotspots(entries, g, "directional", "adds", 30)
+	out, available := rerankHotspots(entries, g, "directional", "adds", 30)
+	assert.True(t, available)
 	assert.Equal(t, "fresh", out[0].ID, "adds direction promotes the newest addition")
 }
 
 func TestRerankHotspots_DirectionalStableRewardsOld(t *testing.T) {
 	g, entries := buildHotspotRerankFixture(t, time.Now())
-	out := rerankHotspots(entries, g, "directional", "stable", 30)
+	out, available := rerankHotspots(entries, g, "directional", "stable", 30)
+	assert.True(t, available)
 	// stale (90 days) saturates frac=1.0 (clamped), midway and fresh
 	// are < 1.0 — stale wins.
 	assert.Equal(t, "stale", out[0].ID, "stable direction promotes the oldest addition")
@@ -91,7 +95,9 @@ func TestRerankHotspots_MissingMetaScoresZero(t *testing.T) {
 	g.AddNode(&graph.Node{ID: "nometa", Name: "NoMeta", Kind: graph.KindFunction, FilePath: "x.go"})
 	entries := []analysis.HotspotEntry{{ID: "nometa", Name: "NoMeta", ComplexityScore: 10.0}}
 
-	out := rerankHotspots(entries, g, "novelty", "", 30)
+	out, available := rerankHotspots(entries, g, "novelty", "", 30)
+
+	assert.True(t, available)
 	for _, e := range out {
 		if e.ID == "nometa" {
 			assert.InDelta(t, 0.0, e.ComplexityScore, 1e-6, "missing meta -> zero weight under novelty")
@@ -102,7 +108,8 @@ func TestRerankHotspots_MissingMetaScoresZero(t *testing.T) {
 func TestRerankHotspots_MissingNodeDropped(t *testing.T) {
 	g := graph.New()
 	entries := []analysis.HotspotEntry{{ID: "doesnotexist", Name: "X", ComplexityScore: 5.0}}
-	out := rerankHotspots(entries, g, "novelty", "", 30)
+	out, available := rerankHotspots(entries, g, "novelty", "", 30)
+	assert.True(t, available)
 	assert.Empty(t, out, "entries whose node is missing from the graph are dropped")
 }
 

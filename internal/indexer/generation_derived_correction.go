@@ -678,7 +678,9 @@ func correctCapabilityRows(
 			files = append(files, file)
 		}
 		sort.Strings(files)
-		synthesizeCapabilityEdgesScoped(dw, nil, files...)
+		if _, _, _, err := synthesizeCapabilityEdgesScoped(dw, nil, files...); err != nil {
+			return err
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}

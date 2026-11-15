@@ -220,8 +220,15 @@ func (s *Server) handleAnalyzeHealthScore(ctx context.Context, req mcp.CallToolR
 
 	now := time.Now()
 
-	covRows := coverageRowsByID(reader)
-	blame := blameRowsByID(reader)
+	covRows, coverageAvailable := coverageRowsByID(reader)
+	blame, blameAvailable := blameRowsByID(reader)
+	unavailable := unavailableEnrichment{}
+	if !coverageAvailable {
+		unavailable = append(unavailable, "coverage")
+	}
+	if !blameAvailable {
+		unavailable = append(unavailable, "blame")
+	}
 	rows := make([]healthScoreRow, 0, 128)
 	for _, n := range scoped {
 		if n == nil {
@@ -386,7 +393,7 @@ func (s *Server) handleAnalyzeHealthScore(ctx context.Context, req mcp.CallToolR
 					CountF:   r.GradeCount["F"],
 				})
 			}
-			return s.gcxResponseWithBudget(req)(encodeAnalyze("health_score.rollup", items))
+			return s.gcxResponseWithBudget(req)(unavailable.gcx(encodeAnalyze("health_score.rollup", items)))
 		}
 		if isCompact(req) {
 			var b strings.Builder
@@ -397,14 +404,17 @@ func (s *Server) handleAnalyzeHealthScore(ctx context.Context, req mcp.CallToolR
 			if len(rollupRows) == 0 {
 				b.WriteString("no rollup rows\n")
 			}
+			b.WriteString(unavailable.line())
 			return mcp.NewToolResultText(b.String()), nil
 		}
-		return s.respondJSONOrTOON(ctx, req, map[string]any{
+		payload := map[string]any{
 			"rollup":       rollupRows,
 			"scope":        rollUp,
 			"distribution": distribution,
 			"weights":      healthWeightsMap(),
-		})
+		}
+		unavailable.apply(payload)
+		return s.respondJSONOrTOON(ctx, req, payload)
 	}
 
 	if s.isGCX(ctx, req) {
@@ -430,7 +440,7 @@ func (s *Server) handleAnalyzeHealthScore(ctx context.Context, req mcp.CallToolR
 				AxesUsed:      r.AxesUsed,
 			})
 		}
-		return s.gcxResponseWithBudget(req)(encodeAnalyze("health_score", items))
+		return s.gcxResponseWithBudget(req)(unavailable.gcx(encodeAnalyze("health_score", items)))
 	}
 
 	if isCompact(req) {
@@ -442,6 +452,7 @@ func (s *Server) handleAnalyzeHealthScore(ctx context.Context, req mcp.CallToolR
 		if len(rows) == 0 {
 			b.WriteString("no health-scored symbols\n")
 		}
+		b.WriteString(unavailable.line())
 		return mcp.NewToolResultText(b.String()), nil
 	}
 
@@ -455,6 +466,7 @@ func (s *Server) handleAnalyzeHealthScore(ctx context.Context, req mcp.CallToolR
 	if truncated {
 		resp["limit"] = limit
 	}
+	unavailable.apply(resp)
 	return s.respondJSONOrTOON(ctx, req, resp)
 }
 

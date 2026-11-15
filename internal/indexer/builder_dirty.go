@@ -493,7 +493,9 @@ func dirtyChainLanguageCensus(ctx context.Context, store generationStoreSource, 
 		}
 		generation := map[string]map[string]int{}
 		for _, count := range graph.ReadRepoLanguageFileCounts(store.AtGenerationStore(id), []string{repoPrefix}) {
-			if count.Language == "" || count.Count <= 0 {
+			// Generation-scoped counts must carry exact file paths.
+			// Synthetic pathless rows cannot participate in newest-file-wins composition.
+			if count.FilePath == "" || count.Language == "" || count.Count <= 0 {
 				continue
 			}
 			if generation[count.FilePath] == nil {

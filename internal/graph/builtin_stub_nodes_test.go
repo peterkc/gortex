@@ -70,3 +70,27 @@ func TestGraphAddBatchMaterializesBuiltinStubs(t *testing.T) {
 	assert.Equal(t, countAfterFirst, g.NodeCount(), "re-adding an edge to a seen stub must not create nodes")
 	require.NotNil(t, g.GetNode("web::builtin::ts::array::push"))
 }
+
+// Given function-shaped builtin IDs with no category segment, in any language,
+// when the write funnel materializes them, then builtin_kind is "func", the
+// value the Go attribution pass stores; category IDs keep their category.
+func TestBuiltinStubNodesNamesFunctionBuiltins(t *testing.T) {
+	stubs := BuiltinStubNodes([]*Edge{
+		{From: "pkg/a.go::Run", To: "repo::builtin::go::append", Kind: EdgeCalls},
+		{From: "pkg/a.go::Run", To: "builtin::go::len", Kind: EdgeCalls},
+		{From: "pkg/a.py::run", To: "builtin::py::len", Kind: EdgeCalls},
+		{From: "pkg/a.go::Run", To: "builtin::go::type::string", Kind: EdgeTypedAs},
+		{From: "pkg/a.go::Run", To: "builtin::go::const::nil", Kind: EdgeReferences},
+	})
+	kinds := map[string]any{}
+	for _, n := range stubs {
+		kinds[n.ID] = n.Meta["builtin_kind"]
+	}
+	assert.Equal(t, map[string]any{
+		"repo::builtin::go::append": "func",
+		"builtin::go::len":          "func",
+		"builtin::py::len":          "func",
+		"builtin::go::type::string": "type",
+		"builtin::go::const::nil":   "const",
+	}, kinds)
+}

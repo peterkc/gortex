@@ -23,7 +23,7 @@ func TestDetectCrossRepoEdgesForFilesUsesExactIncidentFrontier(t *testing.T) {
 		{From: "c/c.go::Call", To: "d/d.go::Serve", Kind: graph.EdgeCalls, FilePath: "c/c.go", Line: 4},
 	})
 
-	if got := DetectCrossRepoEdgesForFiles(g, []string{"b/b.go"}); got != 1 {
+	if got, err := DetectCrossRepoEdgesForFiles(g, []string{"b/b.go"}); err != nil || got != 1 {
 		t.Fatalf("emitted = %d, want incident edge only", got)
 	}
 	crossKind, ok := graph.CrossRepoKindFor(graph.EdgeCalls)
@@ -64,7 +64,7 @@ func TestDetectCrossRepoEdgesForMutationFilesSeparatesRoles(t *testing.T) {
 
 	t.Run("edge source", func(t *testing.T) {
 		g := newFixture()
-		if got := DetectCrossRepoEdgesForMutationFiles(g, []string{"repoF/edge-source.go"}, nil); got != 1 {
+		if got, err := DetectCrossRepoEdgesForMutationFiles(g, []string{"repoF/edge-source.go"}, nil); err != nil || got != 1 {
 			t.Fatalf("emitted = %d, want edge-source edge only", got)
 		}
 		if !hasEdgeKindTo(g.GetOutEdges("repoA/a.go::A"), crossKind, "repoB/b.go::B") {
@@ -77,7 +77,7 @@ func TestDetectCrossRepoEdgesForMutationFilesSeparatesRoles(t *testing.T) {
 
 	t.Run("definition", func(t *testing.T) {
 		g := newFixture()
-		if got := DetectCrossRepoEdgesForMutationFiles(g, nil, []string{"repoD/definition.go"}); got != 1 {
+		if got, err := DetectCrossRepoEdgesForMutationFiles(g, nil, []string{"repoD/definition.go"}); err != nil || got != 1 {
 			t.Fatalf("emitted = %d, want definition-incident edge only", got)
 		}
 		if !hasEdgeKindTo(g.GetOutEdges("repoD/definition.go::D"), crossKind, "repoE/e.go::E") {

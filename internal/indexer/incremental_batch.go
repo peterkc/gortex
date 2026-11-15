@@ -13,6 +13,7 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/resolver"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // A scoped warm reconcile can cover thousands of files after a branch switch,
@@ -164,6 +165,15 @@ func (idx *Indexer) reindexIncrementalFilesBatched(
 		zap.Int("deleted_files", len(deletedFiles)))
 	defer deleteTiming.abort()
 	deletion := markerBatch.publicationStamps().beginPatchLap(patchApply)
+	var deletedStdlibCandidates []string
+	if len(deletedFiles) > 0 {
+		var paths []string
+		for _, path := range deletedFiles {
+			paths = append(paths, idx.prefixPath(idx.relKey(path)))
+		}
+		deletedStdlibCandidates = idx.capturePathStdlibCandidates(paths)
+	}
+	defer func() { idx.settleStdlibCandidates(deletedStdlibCandidates, nil, markerBatch) }()
 	idx.evictDeletedFilesBatched(deletedFiles, &invalidation)
 	deletion.end()
 	deleteTiming.complete(nil)
@@ -175,6 +185,16 @@ func (idx *Indexer) reindexIncrementalFilesBatched(
 	for _, filePath := range failed {
 		idx.logger.Debug("incremental reindex: failed to index file",
 			zap.String("file", filePath), zap.Error(idx.fileIndexFailureError(filePath)))
+	}
+	if errors.Is(idx.contractRestatementErr, storage.ErrWarmupWALPressure) {
+		// The reconcile already fails with this error (its caller returns it
+		// before using the result). A retry pass would only meet the same
+		// refusal after a second full wait. The first pass's file-failure
+		// notes are kept rather than cleared by a retry. Only a warm
+		// reconcile's own indexer has the boundary, and a failed reconcile
+		// never installs it, so leaving its reparsedThisRun unraised loses
+		// nothing. Other restatement errors keep the retry pass and the flag.
+		return invalidation, reparsed, failed, versionChanged
 	}
 	if len(failed) == 0 {
 		if len(reparsed) > 0 {
@@ -334,7 +354,7 @@ func (idx *Indexer) reindexIncrementalChunk(
 		if markerBatch != nil {
 			repair = markerBatch.readRepair
 		}
-		probe, probeOK, admissionBusy := idx.prepareFileDeltaWithAdmissionObserved(filePath, len(stages) > 0, repair)
+		probe, probeOK, admissionBusy := idx.prepareFileDeltaWithAdmissionObserved(filePath, len(stages) > 0, repair, markerBatch.relationsReadFrontier())
 		if admissionBusy {
 			break
 		}
@@ -402,7 +422,7 @@ func (idx *Indexer) reindexIncrementalChunk(
 		if acceptPreparedSnapshot {
 			prepared, ok = idx.takePreparedSnapshot(filePath)
 		} else {
-			prepared, ok = idx.takePreparedRefresh(filePath)
+			prepared, ok = idx.takePreparedRefresh(filePath, markerBatch.relationsReadFrontier())
 		}
 		if !ok || prepared == nil || prepared.result == nil {
 			prepared.release()
@@ -551,11 +571,18 @@ func (idx *Indexer) reindexIncrementalFallback(
 	// on. The combined fallback has no proof for restating the old graph's
 	// inert rows, including when applying its new read fails.
 	delete(idx.inertReparsed, fallback.graphPath)
+	// Exceptional fallback has no read-bound point coverage; keep the original
+	// ticket cap rather than borrowing a previous prepared receipt.
+	markerBatch.relationsReadFrontier().invalidate(fallback.filePath)
 	resolve := markerBatch == nil || !markerBatch.deferResolverCatchup
-	if err := idx.indexFile(fallback.filePath, resolve, markerBatch); err != nil {
+	paths := []string{fallback.graphPath}
+	stdlibCandidates := idx.capturePathStdlibCandidates(paths)
+	err := idx.indexFile(fallback.filePath, resolve, markerBatch)
+	idx.settleStdlibCandidates(stdlibCandidates, paths, markerBatch)
+	if err != nil {
 		return err
 	}
-	freshNodes := idx.graph.GetFileNodesByPaths([]string{fallback.graphPath})[fallback.graphPath]
+	freshNodes := idx.graph.GetFileNodesByPaths(paths)[fallback.graphPath]
 	freshDerived := storedDerivedFingerprints(freshNodes)
 	freshGraph := storedExtractionGraphFingerprints(freshNodes)
 	semanticChanged := fallback.storedGraph.semantic == "" || freshGraph.semantic == "" ||
@@ -1164,6 +1191,7 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 	// Retained contracts keep existing rows; actual orphans are deleted there.
 	idx.deleteSymbolFTS(oldFTSNodeIDs)
 	idx.applyLap("fts_delete")
+	stdlibCandidates := idx.captureStdlibCandidates(paths, view.outByNode)
 	idx.evictFileIdentities(paths, legacyIDs, legacyPaths)
 	idx.applyLap("evict")
 	// The carried in-edges ride the same AddBatch as the fresh payload: the
@@ -1189,7 +1217,7 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 		idx.observeIncrementalCatchup("dataflow", paths)
 		idx.materializeDataflowParamsForStages(stages)
 	} else {
-		markerBatch.recordDeferredResolverEvidence(idx.resolver.EvidenceScoping(), stagePriorDeclarations(stages), priorPending)
+		markerBatch.recordDeferredResolverEvidence(idx.resolver.EvidenceScoping(), paths, stagePriorDeclarations(stages), priorPending)
 	}
 
 	// A global-using edit changes every dependent file's visibility
@@ -1235,6 +1263,7 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 		idx.applyLap("affected_plan")
 	}
 	idx.enrichAndMarkIncrementalStages(stages, markerBatch)
+	idx.settleStdlibCandidates(stdlibCandidates, paths, markerBatch)
 	idx.applyLap("enrich_mark")
 }
 
@@ -1877,6 +1906,7 @@ func (idx *Indexer) recordFileReadVersionsBatched(receipts []fileReadReceipt) (f
 			continue
 		}
 		keep(receipt)
+		receipt.readVersion.relationsRead.accept(receipt.absPath, receipt.readVersion)
 	}
 	if len(mtimes) == 0 {
 		return fresh, stale
@@ -2453,8 +2483,9 @@ func (idx *Indexer) evictFileIncrementalRaw(relPath string) forcedFileEviction {
 	// recover this file's records from a sibling's canonical scalar payload.
 	idx.ensureIncrementalContractRegistry()
 	var invalidation DerivedInvalidationPlan
-	nodesRemoved, edgesRemoved := idx.evictDeletedFilesBatched([]string{relPath}, &invalidation)
 	graphPath := idx.prefixPath(relPath)
+	batch.stdlibCandidates = idx.capturePathStdlibCandidates([]string{graphPath})
+	nodesRemoved, edgesRemoved := idx.evictDeletedFilesBatched([]string{relPath}, &invalidation)
 	idx.removeIncrementalContractsForFile(graphPath, &invalidation)
 	invalidation.Files = appendUniqueSorted(invalidation.Files, dependencyFiles...)
 

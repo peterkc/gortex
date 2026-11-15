@@ -2,6 +2,7 @@ package query
 
 import (
 	"context"
+	"sync/atomic"
 
 	"github.com/zzet/gortex/internal/search"
 )
@@ -40,9 +41,11 @@ func requestSymbolBundles(ctx context.Context, backend search.Backend, query str
 	if backend == nil || ctx.Err() != nil {
 		return requestBundleAnswer{supported: true, authoritative: true, failed: true}
 	}
+	var failed atomic.Bool
+	ctx = search.WithSearchFailureObserver(ctx, func(string, error) { failed.Store(true) })
 	if contextual, ok := backend.(search.ContextSymbolBundleSearcherBackend); ok {
 		bundles := contextual.SearchSymbolBundlesContext(ctx, query, limit)
-		if ctx.Err() != nil {
+		if failed.Load() || ctx.Err() != nil {
 			return requestBundleAnswer{supported: true, authoritative: true, failed: true}
 		}
 		return requestBundleAnswer{bundles: bundles, supported: true, authoritative: bundles != nil}
@@ -63,9 +66,11 @@ func requestScopedSymbolBundles(ctx context.Context, backend search.Backend, que
 	if backend == nil || ctx.Err() != nil {
 		return requestBundleAnswer{supported: true, authoritative: true, failed: true}
 	}
+	var failed atomic.Bool
+	ctx = search.WithSearchFailureObserver(ctx, func(string, error) { failed.Store(true) })
 	if contextual, ok := backend.(search.ScopedContextSymbolBundleSearcherBackend); ok {
 		bundles := contextual.SearchSymbolBundlesScopedContext(ctx, query, repoAllow, limit)
-		if ctx.Err() != nil {
+		if failed.Load() || ctx.Err() != nil {
 			return requestBundleAnswer{supported: true, authoritative: true, failed: true}
 		}
 		return requestBundleAnswer{bundles: bundles, supported: true, authoritative: bundles != nil}

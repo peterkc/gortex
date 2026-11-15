@@ -51,7 +51,7 @@ func TestEmitTestEdgesUsesSingleBatchWrite(t *testing.T) {
 func TestCapabilityEdgesUseSingleBatchWrite(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		run  func(graph.Store) (int, int, int)
+		run  func(graph.Store) (int, int, int, error)
 	}{
 		{
 			name: "global",
@@ -59,7 +59,7 @@ func TestCapabilityEdgesUseSingleBatchWrite(t *testing.T) {
 		},
 		{
 			name: "scoped",
-			run: func(store graph.Store) (int, int, int) {
+			run: func(store graph.Store) (int, int, int, error) {
 				return synthesizeCapabilityEdgesScoped(store, map[string]bool{"repo": true})
 			},
 		},
@@ -74,7 +74,10 @@ func TestCapabilityEdgesUseSingleBatchWrite(t *testing.T) {
 			)
 			store := &batchCountingStore{Store: base}
 
-			readsEnv, execProc, fieldAccess := tc.run(store)
+			readsEnv, execProc, fieldAccess, err := tc.run(store)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if readsEnv != 1 || execProc != 0 || fieldAccess != 0 {
 				t.Fatalf("counts = (%d, %d, %d), want (1, 0, 0)", readsEnv, execProc, fieldAccess)
 			}

@@ -10,7 +10,8 @@ import (
 // localizationFileDeclarations carries a bounded declaration page together with
 // the count observed while scanning the file. DeclaredKnown distinguishes an
 // exact count from a saturation lower bound. Truncated means Nodes is only a
-// prefix and Declared is therefore an "at least" count.
+// prefix and Declared is therefore an "at least" count. Unavailable reads also
+// set Truncated: an empty prefix then does not prove that the file is empty.
 type localizationFileDeclarations struct {
 	Nodes         []*graph.Node
 	Declared      int

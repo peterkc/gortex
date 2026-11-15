@@ -28,7 +28,10 @@ func TestSynthesizeCapabilityEdges(t *testing.T) {
 	// A normal call must NOT produce executes_process.
 	g.AddEdge(&graph.Edge{From: "svc.go::Load", To: "unresolved::fmt.Println", Kind: graph.EdgeCalls, FilePath: "svc.go", Line: 8})
 
-	re, ep, fa := synthesizeCapabilityEdges(g)
+	re, ep, fa, err := synthesizeCapabilityEdges(g)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if re != 1 {
 		t.Errorf("reads_env count = %d, want 1", re)
 	}
@@ -83,7 +86,9 @@ func TestSynthesizeCapabilityEdges(t *testing.T) {
 		return n
 	}
 	before := countCap()
-	synthesizeCapabilityEdges(g)
+	if _, _, _, err := synthesizeCapabilityEdges(g); err != nil {
+		t.Fatal(err)
+	}
 	if after := countCap(); after != before {
 		t.Errorf("second pass created duplicate capability edges: before=%d after=%d", before, after)
 	}
@@ -106,7 +111,10 @@ func TestSynthesizeCapabilityEdges_ResolvedExecForms(t *testing.T) {
 		g := graph.New()
 		g.AddNode(&graph.Node{ID: "a.go::F", Kind: graph.KindFunction, Name: "F", FilePath: "a.go"})
 		g.AddEdge(&graph.Edge{From: "a.go::F", To: to, Kind: graph.EdgeCalls, FilePath: "a.go", Line: 1})
-		_, ep, _ := synthesizeCapabilityEdges(g)
+		_, ep, _, err := synthesizeCapabilityEdges(g)
+		if err != nil {
+			t.Fatal(err)
+		}
 		var got string
 		for _, e := range g.AllEdges() {
 			if e.Kind == graph.EdgeExecutesProcess {

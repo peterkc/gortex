@@ -31,11 +31,17 @@ func TestBindSpringConfigGraphSQLiteParity(t *testing.T) {
 			store := factory(t)
 			store.AddBatch([]*graph.Node{
 				{ID: "repo/" + rel, Kind: graph.KindFile, FilePath: "repo/" + rel, RepoPrefix: "repo", WorkspaceID: "ws"},
-				{ID: "repo::Reader", Kind: graph.KindType, FilePath: "repo/Reader.java", StartLine: 7, RepoPrefix: "repo", WorkspaceID: "ws", Meta: map[string]any{"spring_config_keys": []string{"app.value"}}},
-			}, nil)
+				{ID: "repo::Reader", Kind: graph.KindType, FilePath: "repo/Reader.java", StartLine: 7, RepoPrefix: "repo", WorkspaceID: "ws", Meta: map[string]any{"spring_config_keys": []string{"app.value", "app.value"}}},
+				{ID: "cfg::spring::app.value", Kind: graph.KindConfigKey, FilePath: "repo/" + rel, Meta: map[string]any{"source": "spring"}},
+			}, []*graph.Edge{{From: "repo::Reader", To: "cfg::spring::app.value", Kind: graph.EdgeReadsConfig, FilePath: "repo/Reader.java", Line: 7}})
 
-			if got := contracts.BindSpringConfig(store, scope); got != 2 {
-				t.Fatalf("cold BindSpringConfig = %d, want 2", got)
+			// Given supported cleanup and duplicate hints, when legacy rows migrate
+			// and binding repeats, then only the scoped rows remain, without duplicates.
+			if got, err := contracts.BindSpringConfig(store, scope); err != nil || got != 2 {
+				t.Fatalf("cold BindSpringConfig = %d, want 2 (err=%v)", got, err)
+			}
+			if store.GetNode("cfg::spring::app.value") != nil || hasScopedReadsConfigEdge(store, "repo::Reader", "cfg::spring::app.value") {
+				t.Fatal("legacy rows survived supported migration")
 			}
 			const desired = "cfg::spring::ws::repo::app.value"
 			node := store.GetNode(desired)
@@ -45,8 +51,8 @@ func TestBindSpringConfigGraphSQLiteParity(t *testing.T) {
 			if !hasScopedReadsConfigEdge(store, "repo::Reader", desired) {
 				t.Fatalf("reads_config edge to %q missing: %#v", desired, store.GetOutEdges("repo::Reader"))
 			}
-			if got := contracts.BindSpringConfig(store, scope); got != 0 {
-				t.Fatalf("warm BindSpringConfig = %d, want 0", got)
+			if got, err := contracts.BindSpringConfig(store, scope); err != nil || got != 0 {
+				t.Fatalf("warm BindSpringConfig = %d, want 0 (err=%v)", got, err)
 			}
 		})
 	}

@@ -198,6 +198,8 @@ func (s *Server) exploreQualifiedLeafCandidate(
 		}
 	}
 	if len(endpoints) > 0 {
+		// Ownership promotion is optional. Unavailable proof means unknown,
+		// not an absent owner; do not widen to legacy adjacency.
 		bounded, ok := reader.(graph.BoundedEdgeExistenceReader)
 		if !ok {
 			return nil

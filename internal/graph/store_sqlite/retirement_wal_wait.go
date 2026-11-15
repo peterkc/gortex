@@ -2,9 +2,14 @@ package store_sqlite
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
+
+	"github.com/zzet/gortex/internal/storage"
 )
+
+var ErrWarmupWALPressure = storage.ErrWarmupWALPressure
 
 // Retirement yields to the WAL reclaim.
 //
@@ -123,7 +128,17 @@ func (s *Store) AwaitWarmupWAL(ctx context.Context) error {
 	}
 	s.warmupWALWaiters.Add(1)
 	defer s.warmupWALWaiters.Add(-1)
-	return s.waitForWALReclaim(ctx, retirementWALWaitMax, ready)
+	if err := s.waitForWALReclaim(ctx, retirementWALWaitMax, ready); err != nil {
+		if ctx.Err() == nil {
+			// Name the reclaim's last attempt, so a refusal says what kept
+			// the log over its mark (a reader, an edit burst, a busy lane).
+			st := s.WALReclaimStats()
+			return fmt.Errorf("%w (wal_bytes=%d mark=%d reclaim_last=%s/%s): %w",
+				ErrWarmupWALPressure, s.retirementLogBytes(), mark, st.LastOutcome, st.LastReason, err)
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Store) waitForWALReclaim(ctx context.Context, maxWait time.Duration, ready func() bool) error {

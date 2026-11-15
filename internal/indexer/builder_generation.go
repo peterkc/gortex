@@ -1257,7 +1257,11 @@ func (b *SparseGenerationBuilder) runEnrichment(
 		}
 		enrichable := func(language string) bool { return b.Semantic.ProviderForLanguage(language) != nil }
 		censusStarted := time.Now()
-		clears, baseRead := chainClearsEnrichmentFloor(handle, req.RepoPrefix, stage.ChainCensus, base, floor, enrichable)
+		clears, baseRead, currentCensusErr := chainClearsEnrichmentFloor(handle, req.RepoPrefix, stage.ChainCensus, base, floor, enrichable)
+		if currentCensusErr != nil {
+			out.Reason = "the current language census could not be read: " + currentCensusErr.Error()
+			return
+		}
 		if censusErr != nil {
 			out.Reason = "the committed language census could not be read: " + censusErr.Error()
 			return
@@ -1281,7 +1285,7 @@ func (b *SparseGenerationBuilder) runEnrichment(
 	}
 	pass, err := func() (pass semantic.CheckoutEnrichReport, err error) {
 		if finishMotion != nil {
-			defer func() { finishMotion(err) }()
+			defer func() { finishMotion(errors.Join(err, pass.ProviderTerminalError())) }()
 		}
 		return b.Semantic.EnrichCheckoutContext(ctx, handle, semantic.CheckoutEnrichRequest{
 			RepoPrefix:       req.RepoPrefix,
@@ -1374,11 +1378,14 @@ func goModuleManifestPath(p string) bool {
 // whatever its count, so it must not veto the languages that can. base is
 // called at most once, and only when the generation's own files and the
 // chain leave a judged language below the floor; baseRead reports whether it
-// was.
-func chainClearsEnrichmentFloor(handle graph.Store, repoPrefix string, chain map[string]map[string]int, base func() map[string]int, floor int, enrichable func(string) bool) (clears, baseRead bool) {
+// was. Missing exact file counts return an error, not proof that the floor clears.
+func chainClearsEnrichmentFloor(handle graph.Store, repoPrefix string, chain map[string]map[string]int, base func() map[string]int, floor int, enrichable func(string) bool) (clears, baseRead bool, err error) {
+	if _, exact := handle.(graph.RepoLanguageFileCountReader); !exact {
+		return false, false, fmt.Errorf("indexer: enrichment floor census requires file-aware counts: %w", errors.ErrUnsupported)
+	}
 	own := map[string]map[string]int{}
 	for _, row := range graph.ReadRepoLanguageFileCounts(handle, []string{repoPrefix}) {
-		if row.Language == "" || row.Count <= 0 {
+		if row.FilePath == "" || row.Language == "" || row.Count <= 0 {
 			continue
 		}
 		if own[row.FilePath] == nil {
@@ -1389,7 +1396,7 @@ func chainClearsEnrichmentFloor(handle graph.Store, repoPrefix string, chain map
 	totals := map[string]int{}
 	present := map[string]bool{}
 	add := func(file string, languages map[string]int, mine bool) {
-		if semantic.IsLowValueForEnrichment(file, nil) || semantic.IsFixtureCensusPath(file) {
+		if file == "" || semantic.IsLowValueForEnrichment(file, nil) || semantic.IsFixtureCensusPath(file) {
 			return
 		}
 		for language, count := range languages {
@@ -1413,7 +1420,7 @@ func chainClearsEnrichmentFloor(handle graph.Store, repoPrefix string, chain map
 		}
 	}
 	if len(present) == 0 {
-		return false, false
+		return false, false, nil
 	}
 	below := func() bool {
 		for language := range present {
@@ -1424,15 +1431,15 @@ func chainClearsEnrichmentFloor(handle graph.Store, repoPrefix string, chain map
 		return false
 	}
 	if !below() {
-		return true, false
+		return true, false, nil
 	}
 	if base == nil {
-		return false, false
+		return false, false, nil
 	}
 	for language, count := range base() {
 		totals[language] += count
 	}
-	return !below(), true
+	return !below(), true, nil
 }
 
 // enrichmentBaseCensus is the stage's committed-state census as a deferred
@@ -2429,7 +2436,9 @@ func (b *SparseGenerationBuilder) writeMasks(
 		for _, rel := range plan.deleted {
 			claimed[builderGraphPath(req.RepoPrefix, rel)] = struct{}{}
 		}
-		orphans := graph.OrphanedPathlessStubs(req.Base, claimed, nodes, handle.AllEdges())
+		edges := handle.AllEdges()
+		orphans := graph.OrphanedPathlessStubs(req.Base, claimed, nodes, edges)
+		orphans = appendUniqueSorted(orphans, orphanedStdlibStubs(req.Base, req.RepoPrefix, claimed, nodes, edges)...)
 		tombstones = append(tombstones, orphans...)
 		report.OrphanStubTombstones = len(orphans)
 	}
@@ -2473,6 +2482,121 @@ func (b *SparseGenerationBuilder) writeMasks(
 	}
 	sort.Strings(report.PlannedNotCovered)
 	return nil
+}
+
+// orphanedStdlibStubs extends the edge-free orphan rule to attributed stdlib
+// membership. Only the files being replaced seed candidates; every surviving
+// reference, including an outgoing edge recorded in another file, keeps a stub.
+func orphanedStdlibStubs(base LayerBase, repoPrefix string, covered map[string]struct{}, payloadNodes []*graph.Node, payloadEdges []*graph.Edge) []string {
+	paths := make([]string, 0, len(covered))
+	for path := range covered {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	var ids []string
+	collect := func(edge *graph.Edge) {
+		if edge == nil {
+			return
+		}
+		for _, id := range []string{edge.From, edge.To} {
+			if strings.HasPrefix(id, repoPrefix+"::stdlib::") || strings.HasPrefix(id, repoPrefix+"::module::go:") {
+				ids = append(ids, id)
+			}
+		}
+	}
+	if reader, ok := graph.RecordedEdgesOf(base); ok {
+		for _, edge := range reader.RecordedEdgesAt(paths) {
+			collect(edge)
+		}
+	} else {
+		var sourceIDs []string
+		for _, nodes := range base.GetFileNodesByPaths(paths) {
+			for _, node := range nodes {
+				if node != nil {
+					sourceIDs = append(sourceIDs, node.ID)
+				}
+			}
+		}
+		for _, edges := range base.GetOutEdgesByNodeIDs(appendUniqueSorted(nil, sourceIDs...)) {
+			for _, edge := range edges {
+				if edge == nil {
+					continue
+				}
+				if _, replaced := covered[edge.FilePath]; replaced {
+					collect(edge)
+				}
+			}
+		}
+	}
+	ids = appendUniqueSorted(nil, ids...)
+	if len(ids) == 0 {
+		return nil
+	}
+	nodes := base.GetNodesByIDs(ids)
+	var parents []string
+	for _, node := range nodes {
+		if ownedStdlibNode(node, repoPrefix) && node.Kind != graph.KindModule {
+			parents = append(parents, stdlibModuleID(node))
+		}
+	}
+	parents = appendUniqueSorted(nil, parents...)
+	for id, node := range base.GetNodesByIDs(parents) {
+		nodes[id] = node
+	}
+	ids = appendUniqueSorted(ids, parents...)
+	keep := make(map[string]bool)
+	for _, node := range payloadNodes {
+		if node != nil {
+			keep[node.ID] = true
+		}
+	}
+	for _, edge := range payloadEdges {
+		if edge != nil {
+			keep[edge.From], keep[edge.To] = true, true
+		}
+	}
+	var candidates []string
+	for _, id := range ids {
+		if !keep[id] && ownedStdlibNode(nodes[id], repoPrefix) {
+			candidates = append(candidates, id)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	in, out := base.GetInEdgesByNodeIDs(candidates), base.GetOutEdgesByNodeIDs(candidates)
+	doomed := make(map[string]bool)
+	allRetired := func(id string, edges []*graph.Edge) bool {
+		for _, edge := range edges {
+			if edge == nil {
+				return false
+			}
+			if _, replaced := covered[edge.FilePath]; replaced {
+				continue
+			}
+			if edge.FilePath == "" && edge.Kind == graph.EdgeMemberOf && edge.Origin == graph.OriginASTResolved &&
+				ownedStdlibNode(nodes[edge.From], repoPrefix) && nodes[edge.From].Kind != graph.KindModule &&
+				edge.To == stdlibModuleID(nodes[edge.From]) && (edge.From == id || doomed[edge.From]) {
+				continue
+			}
+			return false
+		}
+		return true
+	}
+	var orphans []string
+	for _, id := range candidates {
+		if nodes[id].Kind != graph.KindModule && allRetired(id, in[id]) && allRetired(id, out[id]) {
+			doomed[id] = true
+			orphans = append(orphans, id)
+		}
+	}
+	for _, id := range candidates {
+		if nodes[id].Kind == graph.KindModule && allRetired(id, in[id]) && allRetired(id, out[id]) {
+			orphans = append(orphans, id)
+		}
+	}
+	sort.Strings(orphans)
+	return orphans
 }
 
 // unclaimedEdgeSources returns the replacement markers for every edge source

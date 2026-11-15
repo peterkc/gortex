@@ -144,7 +144,9 @@ func (cr *CrossRepoResolver) resolveMutationFrontiersBounded(resolutionFiles, ed
 			cr.logger.Error("cross-repo resolve: retry Go module terminals", zap.Error(err))
 		}
 	}
-	DetectCrossRepoEdgesForMutationFiles(cr.graph, edgeSourceFiles, definitionFiles)
+	if _, err := DetectCrossRepoEdgesForMutationFiles(cr.graph, edgeSourceFiles, definitionFiles); err != nil {
+		cr.recordMaterializationRefusal(stats, err)
+	}
 	return stats, admission
 }
 
@@ -152,15 +154,15 @@ func (cr *CrossRepoResolver) resolveMutationFrontiersBounded(resolutionFiles, ed
 // edges incident to nodes in the exact changed-file frontier. Inspecting both
 // incoming and outgoing edges covers unchanged callers rebound to a changed
 // target as well as new calls emitted by the changed source file.
-func DetectCrossRepoEdgesForFiles(g graph.Store, filePaths []string) int {
+func DetectCrossRepoEdgesForFiles(g graph.Store, filePaths []string) (int, error) {
 	return DetectCrossRepoEdgesForMutationFiles(g, filePaths, filePaths)
 }
 
 // DetectCrossRepoEdgesForMutationFiles materializes resolved base edges using
 // the narrow query shape for each mutation role.
-func DetectCrossRepoEdgesForMutationFiles(g graph.Store, edgeSourceFiles, definitionFiles []string) int {
+func DetectCrossRepoEdgesForMutationFiles(g graph.Store, edgeSourceFiles, definitionFiles []string) (int, error) {
 	if g == nil || len(edgeSourceFiles) == 0 && len(definitionFiles) == 0 {
-		return 0
+		return 0, nil
 	}
 	return materializeCrossRepoCandidates(g, crossRepoCandidatesForMutationFiles(g, edgeSourceFiles, definitionFiles))
 }

@@ -2,6 +2,7 @@ package query
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -16,13 +17,17 @@ type pathBundleBackend struct {
 	pathLimit    int
 	answer       []search.SymbolBundle
 	handled      bool
+	failure      *search.SymbolSearcherBackend
 }
 
-func (b *pathBundleBackend) SearchSymbolBundlesPathScopedContext(_ context.Context, _ string, repos, paths []string, limit int) ([]search.SymbolBundle, bool) {
+func (b *pathBundleBackend) SearchSymbolBundlesPathScopedContext(ctx context.Context, q string, repos, paths []string, limit int) ([]search.SymbolBundle, bool) {
 	b.pathCalls++
 	b.paths = paths
 	b.repos = repos
 	b.pathLimit = limit
+	if b.failure != nil {
+		return b.failure.SearchSymbolBundlesPathScopedContext(ctx, q, repos, paths, limit)
+	}
 	return b.answer, b.handled
 }
 
@@ -37,11 +42,14 @@ func TestGatherPathBundleScopeIsAuthoritativeAndFallbackIsConservative(t *testin
 			eng.SetSearch(b)
 			eng.SetRerank(nil)
 			opts := QueryOptions{RepoAllow: map[string]bool{"repo": true}, SearchPathPrefixes: []string{"target"}, SkipVectorChannel: true, SkipInnerRerank: true, SymbolSearchStats: &SymbolSearchStats{}, SearchNodeFilter: func(n *graph.Node) bool { return n.FilePath == "repo/target/a.go" }}
+			var failureErr error
 			switch mode {
 			case "match":
 				b.answer = []search.SymbolBundle{{Node: node}}
 			case "failure":
 				b.answer = nil
+				failureErr = errors.New("path operation failed")
+				b.failure = search.NewSymbolSearcherBackend(&requestFailureSymbolStore{err: failureErr})
 			case "unsupported":
 				b.handled = false
 			case "composed":
@@ -49,10 +57,17 @@ func TestGatherPathBundleScopeIsAuthoritativeAndFallbackIsConservative(t *testin
 			case "overlay":
 				eng.overlay = &graph.OverlayLayer{}
 			}
-			got := eng.GatherSymbolCandidatesContext(context.Background(), "needle", 1, opts, nil)
+			var failures []string
+			ctx := search.WithSearchFailureObserver(context.Background(), func(channel string, err error) {
+				if errors.Is(err, failureErr) {
+					failures = append(failures, channel)
+				}
+			})
+			got := eng.GatherSymbolCandidatesContext(ctx, "needle", 1, opts, nil)
 			if mode == "failure" {
-				if len(got) != 0 || b.scopedCalls != 0 || b.unscopedCalls != 0 || b.searchCalls != 0 {
-					t.Fatalf("failed query fell back: got%v backend%+v", got, b)
+				// A failed text operation must not replay, but independent in-scope exact evidence survives.
+				if len(got) != 1 || got[0].Node.ID != node.ID || !reflect.DeepEqual(failures, []string{"text"}) || b.scopedCalls != 0 || b.unscopedCalls != 0 || b.searchCalls != 0 {
+					t.Fatalf("failed text lost exact evidence, warning or replayed: got%v failures%v backend%+v", got, failures, b)
 				}
 			} else if len(got) != 1 || got[0].Node.ID != node.ID { // authoritative zero can still use in-scope exact/substring supplements
 				t.Fatalf("mode%s results%v", mode, got)

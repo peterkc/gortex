@@ -23,7 +23,8 @@ const (
 // exploreTypedAnchorBatchReader deliberately exposes only exact batched node
 // hydration. Every adjacency stage below requires the optional metadata-free
 // bounded capabilities; unsupported readers fail the whole projection closed
-// rather than falling back to legacy full-row edge reads.
+// rather than falling back to legacy full-row edge reads. This discards only
+// extra typed proof, not ordinary ranked candidates. False does not prove absence.
 type exploreTypedAnchorBatchReader interface {
 	GetNodesByIDs([]string) map[string]*graph.Node
 }

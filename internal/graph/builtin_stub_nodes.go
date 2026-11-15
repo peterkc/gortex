@@ -52,6 +52,14 @@ func BuiltinStubNodes(edges []*Edge) []*Node {
 		if lang == "" || name == "" {
 			continue
 		}
+		// The category segments name the kind (`type`, `const`, `array`);
+		// a function ID has none, and go_builtins_attribution stores "func"
+		// for it. Both constructors must agree, or the stored row depends on
+		// which one runs first.
+		kind := strings.Join(segments[1:len(segments)-1], "::")
+		if kind == "" {
+			kind = "func"
+		}
 		out = append(out, &Node{
 			ID:         e.To,
 			Kind:       KindBuiltin,
@@ -60,7 +68,7 @@ func BuiltinStubNodes(edges []*Edge) []*Node {
 			RepoPrefix: repoPrefix,
 			Meta: map[string]any{
 				"builtin":      true,
-				"builtin_kind": strings.Join(segments[1:len(segments)-1], "::"),
+				"builtin_kind": kind,
 			},
 		})
 	}

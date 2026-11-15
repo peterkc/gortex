@@ -1,6 +1,8 @@
 package resolver
 
 import (
+	"errors"
+	"fmt"
 	"reflect"
 	"regexp"
 	"sort"
@@ -27,7 +29,7 @@ const (
 // ResolveCSharpEFCoreModels is the full/cold entry point. Incremental callers
 // use ResolveCSharpEFCoreModelsScoped so a configuration-only edit reconciles
 // the complete projection for every entity in the changed repository.
-func ResolveCSharpEFCoreModels(g graph.Store) int {
+func ResolveCSharpEFCoreModels(g graph.Store) (int, error) {
 	return ResolveCSharpEFCoreModelsScoped(g, nil)
 }
 
@@ -36,9 +38,9 @@ func ResolveCSharpEFCoreModels(g graph.Store) int {
 // A non-nil scope is repository-bounded but still reads every current
 // models_table sibling for each affected entity, enabling deletion, reversion,
 // and duplicate coalescing.
-func ResolveCSharpEFCoreModelsScoped(g graph.Store, scope map[string]bool) int {
+func ResolveCSharpEFCoreModelsScoped(g graph.Store, scope map[string]bool) (int, error) {
 	if g == nil {
-		return 0
+		return 0, nil
 	}
 
 	nodes := csharpEFNodesForScope(g, scope)
@@ -158,7 +160,7 @@ func ResolveCSharpEFCoreModelsScoped(g graph.Store, scope map[string]bool) int {
 	}
 
 	if changed == 0 {
-		return 0
+		return 0, nil
 	}
 	nodeBatch := make([]*graph.Node, 0, len(addNodes))
 	for _, node := range addNodes {
@@ -184,15 +186,18 @@ func ResolveCSharpEFCoreModelsScoped(g graph.Store, scope map[string]bool) int {
 		}
 		replacementStore = batch.Store
 	}
+	if _, ok := replacementStore.(graph.DerivedContractReplacer); !ok {
+		return 0, fmt.Errorf("resolver: replace EF Core models requires derived contract replacement: %w", errors.ErrUnsupported)
+	}
 	_, err := graph.ReplaceDerivedContracts(replacementStore, graph.DerivedContractReplacement{
 		RemoveEdges: removeEdges,
 		Nodes:       nodeBatch,
 		Edges:       edgeBatch,
 	})
 	if err != nil {
-		return 0
+		return 0, fmt.Errorf("resolver: replace EF Core models: %w", err)
 	}
-	return changed
+	return changed, nil
 }
 
 func csharpEFNodesForScope(g graph.Store, scope map[string]bool) []*graph.Node {

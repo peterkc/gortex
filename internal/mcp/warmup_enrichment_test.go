@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
@@ -43,16 +45,95 @@ func TestWarmupStateDistinguishesQueryableFromEnriched(t *testing.T) {
 		{name: "queryable", snapshot: map[string]any{"phase": "ready", "ready": true}, incomplete: true},
 		{name: "post-ready derived pass", snapshot: map[string]any{"phase": "end_batch", "ready": true}, incomplete: true},
 		{name: "terminal phase implies enriched", snapshot: map[string]any{"phase": "enrichment_complete", "ready": true}, incomplete: false},
+		{name: "terminal incomplete stops waiting", snapshot: map[string]any{"phase": "warmup_incomplete", "ready": true, "enriched": false}, incomplete: false},
 		{name: "explicit enriched flag", snapshot: map[string]any{"phase": "future_terminal", "ready": true, "enriched": true}, incomplete: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Given the last published startup phase.
+			// When admission checks whether startup work is still pending.
 			got := warmupStateFromSnapshot(tt.snapshot).enrichmentIncomplete()
+			// Then only an unfinished startup keeps whole-graph work waiting.
 			if got != tt.incomplete {
 				t.Fatalf("enrichmentIncomplete() = %v, want %v", got, tt.incomplete)
 			}
 		})
 	}
+}
+
+func TestWarmupIncompletePreservesReadinessState(t *testing.T) {
+	// Given a terminal warmup failure published with its degraded state.
+	s := serverAtEnrichmentPhase("end_batch", true, false)
+	s.PublishReadiness("warmup_incomplete", true, map[string]any{
+		"enriched": false,
+		"error":    "pre-enrichment resolve failed; check the daemon log",
+	})
+
+	// When tool admission reads the startup state.
+	state := s.warmupSnapshot()
+	_, warming := s.checkWarmupFastPath("search_symbols")
+	phase, ready := s.ReadinessPhase()
+
+	// Then startup is no longer running, without claiming enrichment succeeded.
+	require.False(t, state.enrichmentIncomplete())
+	require.False(t, state.enriched)
+	require.False(t, warming)
+	require.True(t, ready)
+	require.Equal(t, "warmup_incomplete", phase)
+	snapshot := s.readinessBroadcaster.snapshot()
+	require.Equal(t, false, snapshot["enriched"])
+	require.Equal(t, "pre-enrichment resolve failed; check the daemon log", snapshot["error"])
+}
+
+func TestAnalyzeAdmissionAfterWarmupIncomplete(t *testing.T) {
+	// Given startup ended without enrichment and no analysis is active.
+	s := serverAtEnrichmentPhase("warmup_incomplete", true, false)
+
+	// When an expensive analysis requests admission.
+	release, err := s.acquireAnalyzeAdmission(t.Context(), "hotspots")
+
+	// Then it runs instead of waiting for an enrichment phase that cannot arrive.
+	require.NoError(t, err)
+	t.Cleanup(release)
+	_, err = s.acquireAnalyzeAdmission(t.Context(), "cycles")
+	require.ErrorIs(t, err, errAnalysisBusy, "terminal warmup must not bypass the concurrency limit")
+}
+
+func TestAnalyzerResourcesAfterWarmupIncomplete(t *testing.T) {
+	for uri := range enrichmentDeferredResources {
+		t.Run(uri, func(t *testing.T) {
+			// Given startup ended without enrichment.
+			s := serverAtEnrichmentPhase("warmup_incomplete", true, false)
+			var called atomic.Bool
+			handler := s.boundResourceHandler(uri, func(context.Context, mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+				called.Store(true)
+				return []mcp.ResourceContents{mcp.TextResourceContents{URI: uri, Text: "whole-graph result"}}, nil
+			})
+
+			// When a whole-graph resource is requested.
+			contents, err := handler(t.Context(), mcp.ReadResourceRequest{})
+
+			// Then its handler runs and returns data, not an enrichment-wait envelope.
+			require.NoError(t, err)
+			require.True(t, called.Load())
+			require.Equal(t, []mcp.ResourceContents{mcp.TextResourceContents{URI: uri, Text: "whole-graph result"}}, contents)
+		})
+	}
+}
+
+func TestWakeupAfterWarmupIncomplete(t *testing.T) {
+	// Given startup ended without enrichment and a queryable persisted graph.
+	s := newWakeupTestServer(t)
+	s.readinessBroadcaster = serverAtEnrichmentPhase("warmup_incomplete", true, false).readinessBroadcaster
+
+	// When wakeup is requested.
+	text, _ := callWakeupHandler(t, s, map[string]any{})
+
+	// Then the graph digest runs without an enrichment-wait envelope.
+	require.Contains(t, text, "# Codebase wakeup")
+	require.Contains(t, text, "**Scale.**")
+	require.NotContains(t, text, "enrichment_complete")
+	require.NotContains(t, text, `"warming"`)
 }
 
 func TestAnalyzeAdmissionDefersOnlyExpensiveKindsUntilEnriched(t *testing.T) {

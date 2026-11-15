@@ -117,6 +117,9 @@ func compactIndexHealth(payload map[string]any, updatedAt time.Time, refreshing 
 	}
 	line := fmt.Sprintf("health=%v nodes=%v stale=%d failures=%d status=%s age=%ds failed_files=%d unreadable_files=%d\n",
 		payload["health_score"], payload["node_count"], len(stale), parseFailureCount, status, int(time.Since(updatedAt).Seconds()), failedFiles, unreadableFiles)
+	if payload["file_metadata_available"] == false {
+		line += "file_metadata=unavailable\n"
+	}
 	if storage, ok := payload["storage"].(map[string]any); ok {
 		if checkpoint, ok := storage["wal_checkpoint"].(*daemon.WALCheckpointStatus); ok {
 			line += fmt.Sprintf("wal_checkpoint: scope=physical_store_since_open attempts=%d complete=%d incomplete=%d zero_progress=%d last_outcome=%s\n", checkpoint.Attempts, checkpoint.Complete, checkpoint.Incomplete, checkpoint.ZeroProgress, checkpoint.LastOutcome)

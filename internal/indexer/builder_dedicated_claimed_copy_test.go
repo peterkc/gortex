@@ -459,6 +459,8 @@ func assertCopiedInventory(t *testing.T, got BuildReport, builder *SparseGenerat
 // The re-parsed arm is the oracle again: the two bases describe the same
 // commit, so they must record the same commit, the same clean bit and the same
 // extractor versions.
+// Given a clean indexed SQLite generation, when it is copied, then the copy
+// records its own timestamp and preserves the accepted provenance and counts.
 func TestClaimedDedicatedBaseCopyRecordsItsOwnIndexState(t *testing.T) {
 	builder, request, claim, logs := claimedCopyFixture(t)
 	indexGenerationZero(t, builder, request)
@@ -536,6 +538,35 @@ func TestClaimedDedicatedBaseCopyRecordsItsOwnIndexState(t *testing.T) {
 	if skew := time.Since(time.Unix(copied.IndexedAt, 0)); skew > 10*time.Minute || skew < -time.Minute {
 		t.Fatalf("the copied generation stamped %s away from now; the stamp is not this build's",
 			skew)
+	}
+}
+
+// Given a copied and published SQLite generation, when its provenance is written
+// again, then the write error keeps its identity and the recorded state stays intact.
+func TestCopiedGenerationIndexStateRefusesSealedDestination(t *testing.T) {
+	builder, request, claim, _ := claimedCopyFixture(t)
+	indexGenerationZero(t, builder, request)
+	id := buildClaimedBase(t, builder, ClaimedDedicatedBaseRequest{
+		Claim: claim, RootPath: request.RootPath, WorkspaceID: request.WorkspaceID,
+		ProjectID: request.ProjectID, CopySource: &copyProbe{store: builder.Store.(*store_sqlite.Store)},
+	})
+	handle := generationAt(builder.Store, id)
+	before, found, err := handle.GetRepoIndexState(request.RepoPrefix)
+	if err != nil || !found {
+		t.Fatalf("copied state: found=%v err=%v", found, err)
+	}
+
+	err = writeCopiedGenerationIndexState(handle, request.RepoPrefix,
+		graph.RepoIndexState{IndexedSHA: "must-not-replace"}, GenerationCopyCounts{Nodes: 99, Edges: 100})
+	if !errors.Is(err, store_sqlite.ErrPayloadGenerationSealed) {
+		t.Fatalf("write copied state = %v, want ErrPayloadGenerationSealed", err)
+	}
+	if want := fmt.Sprintf("indexer: record copied generation %d index state:", id); !strings.HasPrefix(err.Error(), want) {
+		t.Fatalf("write copied state = %v, want context %q", err, want)
+	}
+	after, found, err := handle.GetRepoIndexState(request.RepoPrefix)
+	if err != nil || !found || after != before {
+		t.Fatalf("rejected write changed state: before=%+v after=%+v found=%v err=%v", before, after, found, err)
 	}
 }
 

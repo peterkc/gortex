@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -407,5 +408,59 @@ func TestCloneFollowupRequiresNamedRepo(t *testing.T) {
 	if _, err := prepareCloneFollowup(context.Background(), nil, nil, nil, "", 0.82); err == nil ||
 		!strings.Contains(err.Error(), "non-empty repository prefix") {
 		t.Fatalf("empty-prefix clone follow-up = %v, want a fail-closed error", err)
+	}
+}
+
+func TestCloneFollowupRejectsIgnoredSidecarFailure(t *testing.T) {
+	for _, supported := range []bool{false, true} {
+		t.Run(fmt.Sprint(supported), func(t *testing.T) {
+			// Given a pinned empty ancestry and a per-file clone writer.
+			current := builderOpenStore(t, "ignored-clone-sidecar")
+			base := commitLayerBase{Reader: graph.New(), cloneCorpusBase: current}
+			memory := graph.New()
+			var sidecar any = &struct{ graph.Store }{Store: memory}
+			if supported {
+				sidecar = memory
+			}
+			dw := graph.NewDeltaWriter(base, sidecar)
+			// When a legacy clone caller ignores the write's error.
+			_ = dw.BulkSetCloneShingles("repo", map[string][]uint64{"a": {1, 2}})
+			projection, err := prepareCloneFollowup(context.Background(), base, dw, current, "repo", 0.82)
+			// Then the real pre-publication consumer refuses it, not a fabricated check.
+			if supported {
+				if err != nil || projection == nil {
+					t.Fatalf("supported follow-up = %v, %v", projection, err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "BulkSetCloneShingles") || projection != nil {
+				t.Fatalf("ignored sidecar error allowed projection: %v, %v", projection, err)
+			}
+		})
+	}
+}
+
+func TestDeltaWriterContentPresenceFallbackStillWipes(t *testing.T) {
+	// Given a real legacy content writer without the optional presence/scoped methods.
+	own := builderOpenStore(t, "delta-legacy-content")
+	if err := own.AppendContent("repo", []graph.ContentFTSItem{{NodeID: "section", FilePath: "a.md", Body: "body"}}); err != nil {
+		t.Fatal(err)
+	}
+	legacy := &struct{ graph.ContentSearcher }{ContentSearcher: own}
+	dw := graph.NewDeltaWriter(graph.New(), legacy)
+	// When the presence optimization is unavailable, the native consumer wipes conservatively.
+	var recorded []string
+	wipe, projectionErr, ok := prepareFullContentFileWiper(dw, "repo", func(path string) { recorded = append(recorded, path) })
+	if !ok || !errors.Is(projectionErr, errors.ErrUnsupported) {
+		t.Fatalf("presence probe = %v, %v", ok, projectionErr)
+	}
+	if err := wipe("a.md"); err != nil {
+		t.Fatal(err)
+	}
+	// Then the supported legacy write ran; an advisory error does not refuse publication.
+	present, err := own.ContentRepoHasRows("repo")
+	if err != nil || present {
+		t.Fatalf("content survived conservative wipe: %v, %v", present, err)
+	}
+	if !reflect.DeepEqual(recorded, []string{"a.md"}) || len(dw.Unsupported()) != 0 {
+		t.Fatalf("fallback recorded=%v/refused=%v", recorded, dw.Unsupported())
 	}
 }

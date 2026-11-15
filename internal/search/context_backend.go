@@ -94,6 +94,34 @@ func liveSearchContext(ctx context.Context) context.Context {
 	return ctx
 }
 
+type searchFailureObserverKey struct{}
+
+// WithSearchFailureObserver observes actual channel failures in this request.
+// Observers compose and must support concurrent calls. Missing optimizations
+// with working fallbacks are not failures; no backend stores request state.
+func WithSearchFailureObserver(ctx context.Context, observe func(channel string, err error)) context.Context {
+	ctx = liveSearchContext(ctx)
+	if observe == nil {
+		return ctx
+	}
+	previous, _ := ctx.Value(searchFailureObserverKey{}).(func(string, error))
+	return context.WithValue(ctx, searchFailureObserverKey{}, func(channel string, err error) {
+		if previous != nil {
+			previous(channel, err)
+		}
+		observe(channel, err)
+	})
+}
+
+func recordSearchFailure(ctx context.Context, channel string, err error) {
+	if err == nil {
+		return
+	}
+	if observe, _ := ctx.Value(searchFailureObserverKey{}).(func(string, error)); observe != nil {
+		observe(channel, err)
+	}
+}
+
 func symbolHitsToSearchResults(hits []graph.SymbolHit) []SearchResult {
 	if len(hits) == 0 {
 		return nil
@@ -143,6 +171,7 @@ func (b *SymbolSearcherBackend) SearchViewBatchContext(ctx context.Context, quer
 		return empty, true
 	}
 	hitsByGeneration, err := searchViewGenerations(ctx, batcher, query, viewGens, limit)
+	recordSearchFailure(ctx, "text", err)
 	if err != nil || ctx.Err() != nil {
 		return empty, true
 	}
@@ -155,6 +184,7 @@ func (b *SymbolSearcherBackend) SearchViewBatchContext(ctx context.Context, quer
 
 // SearchContext forwards a live request context to a capable graph searcher.
 // A canceled request never enters the legacy background-context fallback.
+// Missing context support is not failure when legacy symbol search works.
 func (b *SymbolSearcherBackend) SearchContext(ctx context.Context, query string, limit int) []SearchResult {
 	ctx = liveSearchContext(ctx)
 	if b == nil || b.s == nil || strings.TrimSpace(query) == "" || ctx.Err() != nil {
@@ -169,6 +199,7 @@ func (b *SymbolSearcherBackend) SearchContext(ctx context.Context, query string,
 	} else {
 		hits, err = b.s.SearchSymbols(query, limit)
 	}
+	recordSearchFailure(ctx, "text", err)
 	if err != nil || ctx.Err() != nil {
 		return nil
 	}
@@ -183,14 +214,21 @@ func (b *SymbolSearcherBackend) SearchSymbolBundlesContext(ctx context.Context, 
 	if b == nil || b.s == nil || strings.TrimSpace(query) == "" || ctx.Err() != nil {
 		return nil
 	}
+	var bundles []SymbolBundle
+	var err error
 	if searcher, ok := b.s.(contextSymbolBundleSearcher); ok {
-		bundles, err := searcher.SearchSymbolBundlesContext(ctx, query, limit)
-		if err != nil || ctx.Err() != nil {
-			return nil
-		}
-		return bundles
+		bundles, err = searcher.SearchSymbolBundlesContext(ctx, query, limit)
+	} else if legacy, ok := b.s.(graph.SymbolBundleSearcher); ok {
+		// Missing context optimization is supported by the equivalent legacy call.
+		bundles, err = legacy.SearchSymbolBundles(query, limit)
+	} else {
+		return nil
 	}
-	return b.SearchSymbolBundles(query, limit)
+	recordSearchFailure(ctx, "text", err)
+	if err != nil || ctx.Err() != nil {
+		return nil
+	}
+	return bundles
 }
 
 // SearchSymbolBundlesScopedContext forwards the repository scope inside the
@@ -201,17 +239,23 @@ func (b *SymbolSearcherBackend) SearchSymbolBundlesScopedContext(ctx context.Con
 	if b == nil || b.s == nil || strings.TrimSpace(query) == "" || ctx.Err() != nil {
 		return nil
 	}
+	var bundles []SymbolBundle
+	var err error
 	if searcher, ok := b.s.(scopedContextSymbolBundleSearcher); ok {
-		bundles, err := searcher.SearchSymbolBundlesRepoScopedContext(ctx, query, repoAllow, limit)
-		if err != nil || ctx.Err() != nil {
-			return nil
-		}
-		if bundles == nil {
-			return []SymbolBundle{}
-		}
-		return bundles
+		bundles, err = searcher.SearchSymbolBundlesRepoScopedContext(ctx, query, repoAllow, limit)
+	} else if legacy, ok := b.s.(graph.ScopedSymbolBundleSearcher); ok {
+		bundles, err = legacy.SearchSymbolBundlesRepoScoped(query, repoAllow, limit)
+	} else {
+		return nil
 	}
-	return b.SearchSymbolBundlesScoped(query, repoAllow, limit)
+	recordSearchFailure(ctx, "text", err)
+	if err != nil || ctx.Err() != nil {
+		return nil
+	}
+	if bundles == nil {
+		return []SymbolBundle{}
+	}
+	return bundles
 }
 
 // SearchContext preserves HybridBackend's adaptive text/vector fusion while
@@ -285,6 +329,7 @@ func (h *HybridBackend) VectorChannelOnlyContext(ctx context.Context, query stri
 	embedStart := time.Now()
 	queryVector, err := h.embedder.Embed(embedCtx, query)
 	stats.EmbedMS = time.Since(embedStart).Milliseconds()
+	recordSearchFailure(ctx, "vector", err)
 	if err != nil || queryVector == nil || ctx.Err() != nil {
 		return nil, stats
 	}
@@ -617,6 +662,7 @@ func (b *SymbolSearcherBackend) SearchSymbolBundlesPathScopedContext(ctx context
 		return nil, false
 	}
 	bundles, err := source.SearchSymbolBundlesPathScopedContext(ctx, query, repos, paths, limit)
+	recordSearchFailure(ctx, "text", err)
 	if err != nil || ctx.Err() != nil {
 		return nil, true
 	}

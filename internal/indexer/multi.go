@@ -686,6 +686,9 @@ type DeferredPassesRun struct {
 	// already-resolved cross-repo edges still require receipt-guided catch-up.
 	unresolvedCounter graph.UnresolvedInsertionCounter
 	unresolvedBase    uint64
+
+	// stdlibIndexers is the admitted cohort with parked warm-reconcile cleanup.
+	stdlibIndexers []*Indexer
 }
 
 // SnapshotUnresolvedBase re-bases the deferred window's unresolved-write
@@ -759,6 +762,9 @@ func (mi *MultiIndexer) beginDeferredPasses(_ context.Context, applyGate <-chan 
 	}
 	for _, idx := range indexers {
 		err := mi.withDeferredRepositoryMutation(idx, lanesHeld, func() {
+			if len(idx.deferredStdlibCandidates) > 0 {
+				run.stdlibIndexers = append(run.stdlibIndexers, idx)
+			}
 			enrich := idx.semanticMgr != nil && idx.semanticMgr.Enabled() && idx.semanticMgr.HasProviders() &&
 				(idx.pendingEnrich.Load() || forced)
 			if !enrich && idx.pendingContractReg == nil {
@@ -842,6 +848,9 @@ func (r *DeferredPassesRun) FinishTailResult() DeferredPassesResult {
 	noNewUnresolved := r.unresolvedCounter != nil &&
 		r.unresolvedCounter.UnresolvedEdgeInsertions() == r.unresolvedBase
 	mode, crossRepoComplete := r.mi.resolveDeferredMutations(mutationReceipt, r.catchupNeeded, scope, noNewUnresolved)
+	if crossRepoComplete && !r.attemptAborted {
+		r.finishStdlibCandidates()
+	}
 	crossRepoComplete = crossRepoComplete && !r.attemptAborted
 	var mutationRevision uint64
 	var mutationRevisionKnown bool
@@ -857,6 +866,29 @@ func (r *DeferredPassesRun) FinishTailResult() DeferredPassesResult {
 		CrossRepoComplete:              crossRepoComplete,
 		CrossRepoMutationRevision:      mutationRevision,
 		CrossRepoMutationRevisionKnown: mutationRevisionKnown,
+	}
+}
+
+func (r *DeferredPassesRun) finishStdlibCandidates() {
+	for _, idx := range r.stdlibIndexers {
+		err := r.mi.withDeferredRepositoryMutation(idx, r.lanesHeld, func() {
+			ids, paths := idx.deferredStdlibCandidates, idx.deferredStdlibCandidatePaths
+			idx.deferredStdlibCandidates, idx.deferredStdlibCandidatePaths = nil, nil
+			if len(ids) == 0 {
+				return
+			}
+			finishTopologyMutation := reach.BeginRepoTopologyMutation(idx.graph, idx.repoPrefix)
+			changed := false
+			defer func() { finishTopologyMutation(changed, []string{}) }()
+			n, e := idx.retireStdlibCandidates(ids, paths)
+			changed = n+e > 0
+		})
+		if err != nil {
+			if !errors.Is(err, errRepositoryMutationCoordinatorClosed) {
+				r.attemptAborted = true
+			}
+			r.mi.logger.Warn("deferred stdlib cleanup admission failed", zap.String("repo", idx.repoPrefix), zap.Error(err))
+		}
 	}
 }
 
@@ -932,7 +964,10 @@ func (mi *MultiIndexer) resolveDeferredMutations(receipt *graph.MutationReceipt,
 			mi.logger.Error("DEFERRED-TIMING fallback cross-repo resolve failed", zap.Error(err))
 			return deferredResolveFailed, false
 		}
-		resolver.DetectCrossRepoEdges(mi.graph)
+		if _, err := resolver.DetectCrossRepoEdges(mi.graph); err != nil {
+			mi.logger.Warn("DEFERRED-TIMING fallback cross-repo materialization refused", zap.Error(err))
+			return deferredResolveFailed, false
+		}
 		return deferredResolveFallback, true
 	}
 
@@ -969,7 +1004,9 @@ func (mi *MultiIndexer) resolveDeferredMutations(receipt *graph.MutationReceipt,
 		// Resolve only files that can create or bind unresolved edges. Resolved
 		// edge sources still materialise their cross_repo_* generation without
 		// repeating the substantially larger name-resolution frontier.
-		mi.runCrossRepoResolveMutationFrontiers(resolutionFiles, receipt.ChangedFiles, receipt.DefinitionFiles)
+		if !mi.runCrossRepoResolveMutationFrontiers(resolutionFiles, receipt.ChangedFiles, receipt.DefinitionFiles) {
+			return deferredResolveFailed, false
+		}
 		return deferredResolveExact, true
 	}
 	if !fallbackNeeded {
@@ -1081,22 +1118,22 @@ func (mi *MultiIndexer) runMasterResolveHookedContext(ctx context.Context, scope
 	return err
 }
 
-func (mi *MultiIndexer) runMasterResolveFiles(files []string, useLSP bool) {
-	mi.runMasterResolveFilesWithEvidence(files, useLSP, nil)
+func (mi *MultiIndexer) runMasterResolveFiles(files []string, useLSP bool) *resolver.ResolveStats {
+	return mi.runMasterResolveFilesWithEvidence(files, useLSP, nil)
 }
 
 // runMasterResolveFilesWithEvidence is runMasterResolveFiles for a repository
 // mutation's catch-up: evidence, when non-nil, is the repository's resolver
 // holding the mutation's pre-eviction evidence (resolveWithDeferredEvidence),
 // which the master resolver inherits for this one resolve.
-func (mi *MultiIndexer) runMasterResolveFilesWithEvidence(files []string, useLSP bool, evidence *resolver.Resolver) {
-	mi.runMasterResolveFilesObserved(files, useLSP, evidence, nil)
+func (mi *MultiIndexer) runMasterResolveFilesWithEvidence(files []string, useLSP bool, evidence *resolver.Resolver) *resolver.ResolveStats {
+	return mi.runMasterResolveFilesObserved(files, useLSP, evidence, nil)
 }
 
-func (mi *MultiIndexer) runMasterResolveFilesObserved(files []string, useLSP bool, evidence *resolver.Resolver, observe func(time.Time, time.Time)) {
+func (mi *MultiIndexer) runMasterResolveFilesObserved(files []string, useLSP bool, evidence *resolver.Resolver, observe func(time.Time, time.Time)) *resolver.ResolveStats {
 	master := mi.newMasterResolver(useLSP)
 	if master == nil {
-		return
+		return nil
 	}
 	master.InheritIncrementalEvidence(evidence)
 	mt := time.Now()
@@ -1108,6 +1145,7 @@ func (mi *MultiIndexer) runMasterResolveFilesObserved(files []string, useLSP boo
 		zap.Int("pending_scanned", stats.PendingBefore),
 		zap.Int("pending_admitted", stats.PendingAfter))
 	mi.reconcileRetargetedTestCalls(master.TakeRetargetedTestCallFiles())
+	return stats
 }
 
 // reconcileRetargetedTestCalls re-runs the scoped test projection over the
@@ -1205,7 +1243,9 @@ func (mi *MultiIndexer) RunPreEnrichResolve(ctx context.Context, scope map[strin
 	}
 	// Stamp legacy nodes after master resolution so synthetic nodes created by
 	// attribution participate in the cross-workspace boundary check below.
-	mi.BackfillWorkspaceSlugs()
+	if _, _, err := mi.BackfillWorkspaceSlugs(); err != nil {
+		return err
+	}
 	// Cross-repo references resolve here so a multi-repo workspace is fully
 	// resolved, not just within each repo. Whole-graph so inbound references
 	// from unchanged repos into the changed repos bind too.
@@ -1220,8 +1260,20 @@ func (mi *MultiIndexer) RunPreEnrichResolveFiles(ctx context.Context, files []st
 	if err := context.Cause(ctx); err != nil {
 		return err
 	}
+	masterRefused := false
 	if len(files) > 0 {
-		mi.runMasterResolveFiles(files, true)
+		stats := mi.runMasterResolveFiles(files, true)
+		masterRefused = stats != nil && stats.IncomingAdmissionRefused
+		if masterRefused {
+			// Keep the full pass's early readiness boundary and the exact
+			// path's callback when the full pass has no pending work.
+			if onComputeDone != nil {
+				onComputeDone = sync.OnceFunc(onComputeDone)
+			}
+			if err := mi.runMasterResolveHookedContext(ctx, nil, true, onComputeDone); err != nil {
+				return err
+			}
+		}
 	}
 	if err := context.Cause(ctx); err != nil {
 		return err
@@ -1234,14 +1286,30 @@ func (mi *MultiIndexer) RunPreEnrichResolveFiles(ctx context.Context, files []st
 	// fills and WorkspaceID=RepoPrefix fills preserve the resolver's existing
 	// fallback semantics, so only an effective workspace-boundary change needs
 	// to escalate this exact frontier to a graph-wide pass.
-	_, _, resolutionAffected := mi.backfillWorkspaceSlugsWithImpact()
+	_, _, resolutionAffected, err := mi.backfillWorkspaceSlugsWithImpact()
+	if err != nil {
+		return err
+	}
 	if err := context.Cause(ctx); err != nil {
 		return err
 	}
-	if resolutionAffected > 0 {
+	if masterRefused || resolutionAffected > 0 {
 		return mi.runCrossRepoResolveContext(ctx, false)
 	}
-	mi.runCrossRepoResolveFiles(files)
+	if len(files) == 0 {
+		return context.Cause(ctx)
+	}
+	if cr := mi.newCrossRepoResolver(); cr != nil {
+		stats, admission := cr.ResolveMutationFrontiersBounded(files, files, files)
+		mi.finishGoModuleCalls(cr)
+		mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
+		if stats.MaterializationError != nil {
+			return stats.MaterializationError
+		}
+		if admission.Refusal != nil {
+			return mi.runCrossRepoResolveContext(ctx, false)
+		}
+	}
 	return context.Cause(ctx)
 }
 
@@ -1886,12 +1954,17 @@ func (mi *MultiIndexer) runGlobalGraphPassesTopologyHeld(
 	}
 	passStart("capability_edges")
 	capStart := time.Now()
-	capRe, capEp, capFa := synthesizeCapabilityEdgesScoped(mi.graph, scanPrefixes)
-	mi.logger.Info("global pass: capability edges",
-		zap.Int("reads_env", capRe),
-		zap.Int("executes_process", capEp),
-		zap.Int("accesses_field", capFa),
-		zap.Duration("elapsed", time.Since(capStart)))
+	capRe, capEp, capFa, capErr := synthesizeCapabilityEdgesScoped(mi.graph, scanPrefixes)
+	if capErr != nil {
+		mi.logger.Warn("global pass: capability edges refused", zap.String("pass", "capability_edges"),
+			zap.Bool("incomplete", true), zap.Error(capErr))
+	} else {
+		mi.logger.Info("global pass: capability edges",
+			zap.Int("reads_env", capRe),
+			zap.Int("executes_process", capEp),
+			zap.Int("accesses_field", capFa),
+			zap.Duration("elapsed", time.Since(capStart)))
+	}
 	// Clone detection is PER-REPOSITORY: each tracked repo gets its own
 	// finalise + detect over its own nodes (scoped by RepoPrefix), so no
 	// cross-repo candidate pair is ever formed and each repo's boilerplate
@@ -1991,7 +2064,12 @@ func (mi *MultiIndexer) runGlobalGraphPassesTopologyHeld(
 		censusEligible,
 		mi.frameworkSynthesizerSelection(changedPrefixes),
 	)
+	if fwRep.Err != nil {
+		mi.logger.Warn("global pass: framework dispatch synthesis refused", zap.Strings("passes", fwRep.Refused),
+			zap.Bool("incomplete", fwRep.Incomplete), zap.Error(fwRep.Err))
+	}
 	mi.logger.Info("global pass: framework dispatch synthesis",
+		zap.Bool("incomplete", fwRep.Incomplete),
 		zap.Int("edges", fwRep.Total),
 		zap.Any("per_synthesizer", fwRep.Per),
 		zap.Int64("census_ms", fwRep.CensusMillis),
@@ -2026,19 +2104,29 @@ func (mi *MultiIndexer) runGlobalGraphPassesTopologyHeld(
 	crStart := time.Now()
 	crossRepoEdges := 0
 	skipped := false
+	var crossRepoErr error
 	if fullCoverage {
-		crossRepoEdges, skipped = resolver.DetectCrossRepoEdgesWithSkip(mi.graph)
+		crossRepoEdges, skipped, crossRepoErr = resolver.DetectCrossRepoEdgesWithSkip(mi.graph)
 	} else {
-		crossRepoEdges = resolver.DetectCrossRepoEdgesForRepos(mi.graph, scanRepoPrefixes)
+		crossRepoEdges, crossRepoErr = resolver.DetectCrossRepoEdgesForRepos(mi.graph, scanRepoPrefixes)
 	}
 	fields := []zap.Field{zap.Int("edges", crossRepoEdges)}
 	if skipped {
 		fields = append(fields, zap.String("skipped", "single_repo"))
 	}
 	fields = append(fields, zap.Duration("elapsed", time.Since(crStart)))
-	mi.logger.Info("global pass: cross-repo edges", fields...)
-	mi.logger.Info("global passes complete",
-		zap.Duration("total", time.Since(globalStart)))
+	if crossRepoErr != nil {
+		fields = append(fields, zap.Bool("incomplete", true), zap.Error(crossRepoErr))
+		mi.logger.Warn("global pass: cross-repo edges refused", fields...)
+	} else {
+		mi.logger.Info("global pass: cross-repo edges", fields...)
+	}
+	if fwRep.Incomplete || capErr != nil || crossRepoErr != nil {
+		mi.logger.Warn("global passes incomplete", zap.Duration("total", time.Since(globalStart)))
+	} else {
+		mi.logger.Info("global passes complete",
+			zap.Duration("total", time.Since(globalStart)))
+	}
 }
 
 // externalCallSynthesisEnabled resolves whether external-call placeholder
@@ -2543,7 +2631,10 @@ func (mi *MultiIndexer) incrementalEvictRepoRaw(repoPrefix, path string) (nodesR
 		)
 	}
 	if result.DeletedFileCount > 0 {
-		topologyFrontier = mi.resolveIncrementalRepoMutation(repoPrefix, result, nil, eviction.batch)
+		frontier, n, e := mi.resolveIncrementalRepoMutationMode(repoPrefix, result, nil, eviction.batch, false)
+		topologyFrontier = frontier
+		eviction.nodesRemoved += n
+		eviction.edgesRemoved += e
 	}
 
 	fileMtimes := idx.publishFileMtimes()
@@ -2625,7 +2716,7 @@ func (mi *MultiIndexer) incrementalReindexRepoRawMode(repoPrefix string, paths [
 	// changed/definition file frontier; only an incomplete receipt falls back to
 	// conservative scoped-global resolution. Derived invalidations run once
 	// below after both binding layers are current.
-	frontier := mi.resolveIncrementalRepoMutationMode(
+	frontier, _, _ := mi.resolveIncrementalRepoMutationMode(
 		repoPrefix, result, receipt, batch, mode.exactPointSemantic,
 	)
 	// Module changes and full retracks may rebind edges outside the frontier.
@@ -3117,6 +3208,13 @@ func (mi *MultiIndexer) trackPreparedRepoSourceCtx(
 	return result, nil
 }
 
+// awaitWarmupWAL is a restored indexer's warmup write boundary. A package
+// variable only so the in-package cases can inject a refusal; production never
+// assigns it.
+var awaitWarmupWAL = func(store warmupWALWaiter, ctx context.Context) error {
+	return store.AwaitWarmupWAL(ctx)
+}
+
 // ReconcileRepoCtx registers a repo that already has nodes in the graph
 // (typically restored from a daemon snapshot) and brings it back into
 // agreement with the filesystem without a full re-index. priorMtimes
@@ -3214,7 +3312,7 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 	idx.SetRootPath(absPath)
 	idx.SetFileMtimes(priorMtimes)
 	if store, ok := mi.graph.(warmupWALWaiter); ok && store.SharesSymbolSearchCore(mi.graph) {
-		idx.warmupWriteBoundary = func() error { return store.AwaitWarmupWAL(ctx) }
+		idx.warmupWriteBoundary = func() error { return awaitWarmupWAL(store, ctx) }
 		defer func() {
 			if idx.warmupWriteBoundary != nil {
 				idx.warmupWriteBoundary = nil
@@ -3423,6 +3521,9 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 					prefix: result.DerivedInvalidation,
 				})
 			}
+		} else if !result.FullRetrack && batch != nil && len(batch.stdlibCandidates) > 0 {
+			idx.deferredStdlibCandidates = batch.stdlibCandidates
+			idx.deferredStdlibCandidatePaths = batch.stdlibCandidatePaths
 		} else if result.FullRetrack {
 			if !batchMode.deferResolve {
 				mi.runCrossRepoResolveFiles(mi.npmConsumerFilesForRepo(prefix))

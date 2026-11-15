@@ -62,7 +62,8 @@ func TestDetectCrossRepoEdgesSingleRepoSkipsCandidates(t *testing.T) {
 				}
 				store.AddNode(&graph.Node{ID: "repo/b.go::B", Kind: graph.KindFunction, FilePath: "repo/b.go", RepoPrefix: prefix})
 				store.AddEdge(&graph.Edge{From: "repo/a.go::A", To: "repo/b.go::B", Kind: graph.EdgeCalls, FilePath: "repo/a.go", Line: 1})
-				edges, skipped := DetectCrossRepoEdgesWithSkip(store)
+				edges, skipped, err := DetectCrossRepoEdgesWithSkip(store)
+				assert.NoError(t, err)
 				assert.Zero(t, edges)
 				assert.True(t, skipped)
 				assert.Zero(t, store.candidateCalls)
@@ -74,12 +75,12 @@ func TestDetectCrossRepoEdgesSingleRepoSkipsCandidates(t *testing.T) {
 			store := newCrossRepoCandidateStore(t, backend)
 			store.AddNode(&graph.Node{ID: "repo/a.go::A", Kind: graph.KindFunction, FilePath: "repo/a.go", RepoPrefix: "repo"})
 			store.prefixes = []string{"", "repo", "repo", ""}
-			assert.Zero(t, DetectCrossRepoEdges(store))
+			assert.Zero(t, detectCrossRepoEdges(t, store))
 			assert.Zero(t, store.candidateCalls)
 		})
 		t.Run(backend+"/empty", func(t *testing.T) {
 			store := newCrossRepoCandidateStore(t, backend)
-			assert.Zero(t, DetectCrossRepoEdges(store))
+			assert.Zero(t, detectCrossRepoEdges(t, store))
 			assert.Zero(t, store.candidateCalls)
 		})
 	}
@@ -91,7 +92,7 @@ func TestDetectCrossRepoEdgesSecondPrefixFileRunsCandidates(t *testing.T) {
 			store := newCrossRepoCandidateStore(t, backend)
 			store.AddNode(&graph.Node{ID: "a/a.go::A", Kind: graph.KindFunction, FilePath: "a/a.go", RepoPrefix: "a"})
 			store.AddNode(&graph.Node{ID: "b/b.go", Kind: graph.KindFile, FilePath: "b/b.go", RepoPrefix: "b"})
-			assert.Zero(t, DetectCrossRepoEdges(store))
+			assert.Zero(t, detectCrossRepoEdges(t, store))
 			assert.Equal(t, 1, store.candidateCalls)
 		})
 	}
@@ -104,7 +105,7 @@ func TestDetectCrossRepoEdgesSingleRepoIgnoresOtherGeneration(t *testing.T) {
 	store.Store = sqlite.AtGeneration(1)
 	store.AddNode(&graph.Node{ID: "current/a.go::A", Kind: graph.KindFunction, FilePath: "current/a.go", RepoPrefix: "current"})
 	require.Equal(t, []string{"current"}, store.RepoPrefixes())
-	assert.Zero(t, DetectCrossRepoEdges(store))
+	assert.Zero(t, detectCrossRepoEdges(t, store))
 	assert.Zero(t, store.candidateCalls)
 }
 
@@ -132,9 +133,11 @@ func TestDetectCrossRepoEdgesMultiRepoMatchesUnguardedPass(t *testing.T) {
 			seedCrossRepoDifferentialFixture(guarded)
 			seedCrossRepoDifferentialFixture(baseline)
 			// The parent commit's complete implementation, without the prefix guard.
-			want := materializeCrossRepoCandidates(baseline, crossRepoCandidates(baseline))
+			want, err := materializeCrossRepoCandidates(baseline, crossRepoCandidates(baseline))
+			require.NoError(t, err)
 			require.Equal(t, 3, want)
-			edges, skipped := DetectCrossRepoEdgesWithSkip(guarded)
+			edges, skipped, err := DetectCrossRepoEdgesWithSkip(guarded)
+			assert.NoError(t, err)
 			assert.Equal(t, want, edges)
 			assert.False(t, skipped)
 			require.Len(t, guarded.AllEdges(), 7)
@@ -143,7 +146,7 @@ func TestDetectCrossRepoEdgesMultiRepoMatchesUnguardedPass(t *testing.T) {
 			assert.ElementsMatch(t, baseline.AllEdges(), guarded.AllEdges())
 			assert.Equal(t, 1, baseline.candidateCalls)
 			assert.Equal(t, baseline.candidateCalls, guarded.candidateCalls)
-			assert.Equal(t, want, DetectCrossRepoEdges(guarded))
+			assert.Equal(t, want, detectCrossRepoEdges(t, guarded))
 			assert.Equal(t, 2, guarded.candidateCalls)
 			assert.ElementsMatch(t, baseline.AllEdges(), guarded.AllEdges())
 		})

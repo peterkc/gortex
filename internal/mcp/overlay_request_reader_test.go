@@ -154,10 +154,10 @@ func TestBlameRowsByIDDropsCapabilityUnderOverlay(t *testing.T) {
 		t.Fatalf("BulkSetBlame: %v", err)
 	}
 
-	if rows := blameRowsByID(server.graph); len(rows) != 1 || rows[overlayReaderKeptID].Commit != "c0ffee" {
+	if rows, available := blameRowsByID(server.graph); !available || len(rows) != 1 || rows[overlayReaderKeptID].Commit != "c0ffee" {
 		t.Fatalf("blameRowsByID over the base store = %v, want the seeded row", rows)
 	}
-	if rows := blameRowsByID(server.readerFor(overlayCtx(t, server, layer))); rows != nil {
+	if rows, available := blameRowsByID(server.readerFor(overlayCtx(t, server, layer))); available || rows != nil {
 		t.Fatalf("blameRowsByID served base's sidecar under an overlay: %v", rows)
 	}
 }

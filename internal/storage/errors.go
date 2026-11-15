@@ -80,3 +80,11 @@ var ErrGenerationBulkCheckpointBusy = errors.New("store_sqlite: generation bulk 
 // pass all offer a refused retirement again. Repository cleanup maps a budget
 // yield to ErrRepositoryCleanupPending so an untrack can resume it too.
 var ErrPayloadSweepBudgetExhausted = errors.New("store_sqlite: payload generation sweep yielded on its budget")
+
+// ErrWarmupWALPressure marks an AwaitWarmupWAL refusal that came from the WAL
+// reclaim not reaching its mark in time, not from the caller's context. It is
+// transient by construction: the reclaim is blocked by concurrent warm-up
+// readers and writers, so a caller may retry the refused work once they are
+// gone. An error AwaitWarmupWAL returns carrying it also matches
+// context.DeadlineExceeded.
+var ErrWarmupWALPressure = errors.New("warmup WAL reclaim did not reach its mark in time")

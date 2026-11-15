@@ -14,7 +14,7 @@ import (
 // score by a recency weight derived from the blame / releases
 // substrate.
 //
-// Substrate dependency (silent when missing):
+// Substrate dependency (missing novelty blame is reported as unavailable):
 //
 //	novelty     reads meta.last_authored.timestamp. Symbols touched
 //	            within window_days get weight >0 (rising toward 1
@@ -29,14 +29,19 @@ import (
 //
 // We don't fail when the meta is absent — the analyzer treats this
 // as a soft ranker, not a strict filter, so callers get *some*
-// ranking even on un-enriched graphs (the unweighted baseline).
-func rerankHotspots(entries []analysis.HotspotEntry, g graph.Store, mode, direction string, windowDays int) []analysis.HotspotEntry {
+// ranking even on un-enriched graphs. The availability result only concerns
+// novelty's blame sidecar; directional and complexity do not need it.
+func rerankHotspots(entries []analysis.HotspotEntry, g graph.Store, mode, direction string, windowDays int) ([]analysis.HotspotEntry, bool) {
 	if windowDays <= 0 {
 		windowDays = 30
 	}
 	now := time.Now().UTC()
 	window := time.Duration(windowDays) * 24 * time.Hour
-	blame := blameRowsByID(g)
+	var blame map[string]graph.BlameEnrichment
+	available := true
+	if mode == "novelty" {
+		blame, available = blameRowsByID(g)
+	}
 
 	weighted := make([]analysis.HotspotEntry, 0, len(entries))
 	for _, e := range entries {
@@ -65,7 +70,7 @@ func rerankHotspots(entries []analysis.HotspotEntry, g graph.Store, mode, direct
 		}
 		return weighted[i].ID < weighted[j].ID
 	})
-	return weighted
+	return weighted, available
 }
 
 // noveltyWeight returns 1.0 - days_since_last_authored / windowDays,

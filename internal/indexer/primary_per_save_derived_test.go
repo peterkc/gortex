@@ -482,7 +482,9 @@ func TestCapabilityPriorRestoresDeletedIncomingAccesses(t *testing.T) {
 		prior.writes[node.ID] = writes
 	}
 	prior.restoration[source] = map[string]struct{}{}
-	synthesizeCapabilityEdgesForFilesWithPrior(store, prior, []string{"repo/pkg/state.go"})
+	if _, _, _, err := synthesizeCapabilityEdgesForFilesWithPrior(store, prior, []string{"repo/pkg/state.go"}); err != nil {
+		t.Fatal(err)
+	}
 	if got := capabilityRows(t, store); fmt.Sprint(got) != fmt.Sprint(want) {
 		onlyGot, onlyWant := diffRows(got, want)
 		t.Fatalf("restoration did not re-derive the deleted access\nextra: %v\nmissing: %v", onlyGot, onlyWant)

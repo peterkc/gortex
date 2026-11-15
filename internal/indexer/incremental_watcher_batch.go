@@ -37,7 +37,7 @@ func (idx *Indexer) incrementalReindexPathsWithReceiptMode(
 	paths []string,
 	mode incrementalPathMode,
 ) (result *IndexResult, receipt *graph.MutationReceipt, batch *reparsePendingEnrichmentBatch, err error) {
-	batch = &reparsePendingEnrichmentBatch{deferResolverCatchup: true, publication: mode.publication, readRepair: mode.readRepair}
+	batch = &reparsePendingEnrichmentBatch{deferResolverCatchup: true, publication: mode.publication, readRepair: mode.readRepair, relationsRead: mode.relationsRead}
 	receiptStore, _ := idx.graph.(graph.MutationReceiptStore)
 	if receiptStore == nil {
 		result, err = idx.incrementalReindexPathsMode(root, paths, mode, batch)
@@ -336,6 +336,9 @@ func (idx *Indexer) incrementalEvictWatcherPath(path string) (nodesRemoved, edge
 		idx.observeIncrementalCatchup("resolve", nil)
 		idx.ResolveAll()
 	}
+	n, e := idx.retireDeferredStdlibCandidates(eviction.batch)
+	eviction.nodesRemoved += n
+	eviction.edgesRemoved += e
 	if evictedGlobals {
 		idx.reresolveCSharpGlobalUsingDependents(
 			[]string{graphPath}, map[string]struct{}{graphPath: {}})
@@ -403,6 +406,7 @@ func (idx *Indexer) incrementalWatcherPaths(root string, paths []string, mode in
 		idx.ResolveAll()
 		resolve.end()
 	}
+	idx.retireDeferredStdlibCandidates(batch)
 	if mode.forceExplicitFiles || !idx.deferGlobalPasses.Load() {
 		if mode.exactPointSemantic {
 			idx.runIncrementalPointSemantic(result.DerivedInvalidation.Files)
@@ -573,7 +577,8 @@ func (mi *MultiIndexer) resolveIncrementalRepoMutation(
 	receipt *graph.MutationReceipt,
 	batch *reparsePendingEnrichmentBatch,
 ) []string {
-	return mi.resolveIncrementalRepoMutationMode(repoPrefix, result, receipt, batch, false)
+	files, _, _ := mi.resolveIncrementalRepoMutationMode(repoPrefix, result, receipt, batch, false)
+	return files
 }
 
 func (mi *MultiIndexer) resolveIncrementalRepoMutationMode(
@@ -582,7 +587,7 @@ func (mi *MultiIndexer) resolveIncrementalRepoMutationMode(
 	receipt *graph.MutationReceipt,
 	batch *reparsePendingEnrichmentBatch,
 	exactPointSemantic bool,
-) []string {
+) ([]string, int, int) {
 	files, needed, _ := incrementalResolutionFrontier(result, receipt)
 	wide := false
 	if result == nil || result.DeletedFileCount > 0 {
@@ -669,8 +674,12 @@ func (mi *MultiIndexer) resolveIncrementalRepoMutationMode(
 		}
 		cross.end()
 	}
-	if wide {
-		return nil
+	var nodesRemoved, edgesRemoved int
+	if idx != nil {
+		nodesRemoved, edgesRemoved = idx.retireDeferredStdlibCandidates(batch)
 	}
-	return crossRepoFiles
+	if wide {
+		return nil, nodesRemoved, edgesRemoved
+	}
+	return crossRepoFiles, nodesRemoved, edgesRemoved
 }

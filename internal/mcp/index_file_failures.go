@@ -305,8 +305,12 @@ func (s *Server) refreshIndexHealthFileFailures(ctx context.Context, baseline ma
 	for key, value := range indexFileFailureSummary(failures) {
 		result[key] = value
 	}
-	result["index_complete"] = len(failures) == 0 && readErr == nil
+	fileMetadataUnavailable := baseline["file_metadata_available"] == false
+	result["index_complete"] = len(failures) == 0 && readErr == nil && !fileMetadataUnavailable
 	result["status"] = "ready"
+	if fileMetadataUnavailable {
+		result["status"] = "degraded"
+	}
 	recommendation, _ := baseline["recommendation"].(string)
 	if score, ok := result["health_score"].(float64); ok {
 		if score >= 80 {

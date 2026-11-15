@@ -34,6 +34,7 @@ import (
 	"github.com/zzet/gortex/internal/modules"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/crashpool"
+	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/parser/tsalias"
 	"github.com/zzet/gortex/internal/pathguard"
 	"github.com/zzet/gortex/internal/pathkey"
@@ -531,6 +532,12 @@ type Indexer struct {
 	// a pre-enrichment resolve and then the deferred enrichment/contract drain;
 	// both stages call runDeferredGoMod, but only the first may do the work.
 	deferredGoModDone bool
+
+	// Park candidates until the warm workspace resolver or the per-file delta's
+	// unchanged-file restatement finishes. Warm runs hold the repository lane;
+	// a delta's private Indexer owns its candidates throughout the build.
+	deferredStdlibCandidates     []string
+	deferredStdlibCandidatePaths []string
 
 	// pendingEnrich is raised by an index pass that did real work — IndexCtx
 	// that observed files (or a whole-repo re-track) and any
@@ -1615,6 +1622,10 @@ func (idx *Indexer) runDeferredContracts() {
 	idx.extractExternalModulesForCensus(reg)
 	idx.extractDIContracts(reg)
 	idx.commitContracts(reg)
+	if err := idx.contractInputError(); err != nil {
+		idx.logger.Warn("indexer: deferred contract commit refused", zap.String("repo", idx.repoPrefix), zap.Error(err))
+		return
+	}
 	if b != nil {
 		b.contractsReady = true
 		idx.finishColdManifests(b)
@@ -4790,6 +4801,9 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 		if idx.contractCoreInputs == nil {
 			idx.extractDIContracts(contractReg)
 			idx.commitContracts(contractReg)
+			if err := idx.contractInputError(); err != nil {
+				return nil, err
+			}
 		}
 		if coldManifests != nil {
 			coldManifests.contractsReady = true
@@ -4815,7 +4829,11 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 			if ctrl := entrypoints.PropagateEntryPointsDownHierarchy(idx.graph); ctrl > 0 {
 				idx.logger.Info("entry-point hierarchy stamped", zap.Int("stamped", ctrl))
 			}
-			if re, ep, fa := synthesizeCapabilityEdges(idx.graph); re > 0 || ep > 0 || fa > 0 {
+			re, ep, fa, err := synthesizeCapabilityEdges(idx.graph)
+			if err != nil {
+				return nil, err
+			}
+			if re > 0 || ep > 0 || fa > 0 {
 				idx.logger.Info("capability edges emitted",
 					zap.Int("reads_env", re),
 					zap.Int("executes_process", ep),
@@ -4846,9 +4864,13 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 			// deferGlobalPasses; the batch caller folds it into
 			// shared multi-repository global-pass pipeline.
 			reporter.Report("framework dispatch synthesis", 0, 0)
-			if rep := resolver.RunFrameworkSynthesizersWithSelection(
+			rep := resolver.RunFrameworkSynthesizersWithSelection(
 				idx.graph, idx.frameworkSynthesizerSelection(),
-			); rep.Total > 0 {
+			)
+			if rep.Err != nil {
+				return nil, rep.Err
+			}
+			if rep.Total > 0 {
 				idx.logger.Info("framework dispatch calls synthesized",
 					zap.Int("edges", rep.Total),
 					zap.Any("per_synthesizer", rep.Per),
@@ -5071,7 +5093,10 @@ func (idx *Indexer) cleanCensusResult(ctx context.Context, detected int, started
 
 	// The tree is proven unchanged: the counts stored at the last index
 	// are reused instead of counted (census_stored_counts.go).
-	nodes, edges := idx.cleanCensusRepoCounts(ctx)
+	nodes, edges, err := idx.cleanCensusRepoCounts(ctx)
+	if err != nil {
+		return nil, err
+	}
 	fileCount := idx.trackedFileCount()
 	if fileCount == 0 {
 		fileCount = detected
@@ -5916,7 +5941,10 @@ func (idx *Indexer) ResolveAll() {
 	// Framework dynamic-dispatch synthesis (gRPC / Temporal / event
 	// channels / native bridges) depends on InferImplements (the
 	// interface-satisfaction signals) having run first.
-	resolver.RunFrameworkSynthesizersWithSelection(idx.graph, idx.frameworkSynthesizerSelection())
+	if report := resolver.RunFrameworkSynthesizersWithSelection(idx.graph, idx.frameworkSynthesizerSelection()); report.Err != nil {
+		idx.logger.Warn("indexer: framework passes refused", zap.Strings("passes", report.Refused),
+			zap.Bool("incomplete", report.Incomplete), zap.Error(report.Err))
+	}
 	// External-call placeholder synthesis (opt-in) — runs after the
 	// resolver and stub passes so only genuinely un-indexed external
 	// targets remain to materialise.
@@ -7122,9 +7150,10 @@ type incrementalPathMode struct {
 	// publication carries only a canonical point attempt's local collector.
 	// Existing batch/reconcile/direct callers leave it nil. No live receipt or
 	// mutable Indexer tracing state is installed by this per-call observation.
-	publication *PublicationStamps
-	readRepair  *ReadRepairObservation
-	onRelations func() // resolver and file publication complete, before derived work
+	publication   *PublicationStamps
+	readRepair    *ReadRepairObservation
+	relationsRead *relationsReadFrontier // optional point-only validated read coverage
+	onRelations   func()                 // resolver and file publication complete, before derived work
 }
 
 // indexedFilesAbsentFromDisk returns the repo-relative keys of files the graph
@@ -7986,7 +8015,10 @@ func (idx *Indexer) commitContracts(reg *contracts.Registry) {
 	if idx.contractAnalysisOnly {
 		springScope.ReadSource = idx.readAcceptedContractSource
 	}
-	contracts.BindSpringConfig(idx.graph, springScope)
+	if _, err := contracts.BindSpringConfig(idx.graph, springScope); err != nil {
+		idx.rememberContractInputError(err)
+		return
+	}
 
 	// Trace response variables back to their call-site return types.
 	// Handles `source, err := h.svc.Get(...)` → response_type is
@@ -8010,6 +8042,9 @@ func (idx *Indexer) commitContracts(reg *contracts.Registry) {
 	// instead of the bare type-symbol-ID, which answers nothing about
 	// the wire format.
 	idx.inlineEnvelopeShapes(reg)
+	if idx.contractInputError() != nil {
+		return
+	}
 
 	all := reg.All()
 	// Dependency identities were seeded before resolution. Persist their full
@@ -8142,6 +8177,11 @@ func (idx *Indexer) routerPrefixScanFiles(reg *contracts.Registry) []string {
 // bytes they see come from the same place the parse pipeline read: the
 // installed content source when there is one, and the working tree otherwise.
 func (idx *Indexer) contractFileSrc(filePath string) []byte {
+	// A node with no file has no source in either mode. Answer that here so
+	// an analysis-only read never asks the census about an empty path.
+	if filePath == "" {
+		return nil
+	}
 	if idx.contractAnalysisOnly {
 		data, _ := idx.readAcceptedContractSource(filePath)
 		return data
@@ -8218,6 +8258,7 @@ func (idx *Indexer) resolveProviderHandlers(reg *contracts.Registry) {
 		registrationLine   int
 		trail              string
 		fallback           string
+		handlerClass       string
 		repoHint           string
 		// srcDir is the directory of the contract's registration site
 		// (the file with the HandleFunc call). Used by lookupHandler
@@ -8229,12 +8270,15 @@ func (idx *Indexer) resolveProviderHandlers(reg *contracts.Registry) {
 		srcDir string
 	}
 	var todo []pending
+	classResolvers := make(map[string]func(string, int) string)
+	qualifiedClasses := false
 	for _, c := range reg.All() {
 		if c.Role != contracts.RoleProvider || c.Type != contracts.ContractHTTP {
 			continue
 		}
 		trail, _ := c.Meta["handler_trail"].(string)
 		fallback, _ := c.Meta["handler_ident"].(string)
+		handlerClass, _ := c.Meta["handler_class"].(string)
 		if trail == "" && fallback == "" {
 			continue
 		}
@@ -8242,6 +8286,22 @@ func (idx *Indexer) resolveProviderHandlers(reg *contracts.Registry) {
 		// initial file-scoped pass worked.
 		if src, _ := c.Meta["schema_source"].(string); src == "extracted" || src == "partial" {
 			continue
+		}
+		if !strings.HasSuffix(c.FilePath, ".php") {
+			// Class-scoped selection relies on PHP namespace identity; other
+			// frameworks keep the name-based lookup.
+			handlerClass = ""
+		}
+		if handlerClass != "" {
+			resolve, seen := classResolvers[c.FilePath]
+			if !seen {
+				resolve = languages.PHPClassNameResolver(idx.contractFileSrc(c.FilePath))
+				classResolvers[c.FilePath] = resolve
+			}
+			if resolve != nil {
+				handlerClass = resolve(handlerClass, c.Line)
+			}
+			qualifiedClasses = qualifiedClasses || strings.Contains(handlerClass, `\`)
 		}
 		// srcDir goes through path.Dir, not filepath.Dir: c.FilePath is a
 		// graph path, slash-separated on every platform, and filepath.Dir
@@ -8254,6 +8314,7 @@ func (idx *Indexer) resolveProviderHandlers(reg *contracts.Registry) {
 			registrationLine:   c.Line,
 			trail:              trail,
 			fallback:           fallback,
+			handlerClass:       handlerClass,
 			repoHint:           c.RepoPrefix,
 			srcDir:             path.Dir(c.FilePath),
 		})
@@ -8303,6 +8364,9 @@ func (idx *Indexer) resolveProviderHandlers(reg *contracts.Registry) {
 		if len(candidates) == 0 && p.fallback != "" {
 			candidates = []string{p.fallback}
 		}
+		if p.handlerClass != "" {
+			candidates = append(candidates, p.handlerClass[strings.LastIndex(p.handlerClass, `\`)+1:])
+		}
 		for _, ident := range candidates {
 			name := handlerLookupName(ident)
 			if name == "" {
@@ -8327,6 +8391,32 @@ func (idx *Indexer) resolveProviderHandlers(reg *contracts.Registry) {
 		// generic point-lookup door.
 		handlerCandidates = make(map[string][]*graph.Node)
 	}
+	if projectedHandlers && qualifiedClasses {
+		// Namespace identity is absent from declaration projections. Use the
+		// single hydration batch before selection, including potential handlers,
+		// so FQN selection and later enrichment see the same scratch-first rows.
+		var ids []string
+		for _, nodes := range handlerCandidates {
+			for _, n := range nodes {
+				ids = append(ids, n.ID)
+			}
+		}
+		full := idx.graph.GetNodesByIDs(ids)
+		for _, nodes := range handlerCandidates {
+			for i, n := range nodes {
+				// A stub with no file keeps its declaration: selection still
+				// sees it, and the handler loop below skips it unenriched.
+				if n.FilePath == "" {
+					continue
+				}
+				if nodes[i] = contractHydrateHandler(n, full[n.ID]); nodes[i] == nil {
+					idx.rememberContractInputError(graph.ErrContractProjectionStale)
+					return
+				}
+			}
+		}
+		projectedHandlers = false
+	}
 
 	type resolvedPending struct {
 		pending pending
@@ -8337,15 +8427,17 @@ func (idx *Indexer) resolveProviderHandlers(reg *contracts.Registry) {
 	seenHandlerPaths := make(map[string]struct{})
 	for _, p := range todo {
 		handler := idx.resolveInnermostHandlerFromCandidates(
-			p.trail, p.fallback, p.repoHint, p.srcDir, handlerCandidates,
+			p.trail, p.fallback, p.repoHint, p.srcDir, p.handlerClass, handlerCandidates,
 		)
-		if handler == nil {
+		// A handler with no file, such as a stdlib or dependency stub, has no
+		// body to enrich from: the contract keeps its registration. So does a
+		// handler in another repository, which the name lookup falls back to
+		// when the route's own repository declares nothing by that name: a
+		// contract's owner must be in its own repository's namespace.
+		if handler == nil || handler.FilePath == "" || handler.RepoPrefix != p.repoHint {
 			continue
 		}
 		resolvedTodo = append(resolvedTodo, resolvedPending{pending: p, handler: handler})
-		if handler.FilePath == "" {
-			continue
-		}
 		if _, seen := seenHandlerPaths[handler.FilePath]; seen {
 			continue
 		}
@@ -8478,21 +8570,68 @@ func (idx *Indexer) resolveProviderHandlers(reg *contracts.Registry) {
 }
 
 func (idx *Indexer) resolveInnermostHandlerFromCandidates(
-	trail, fallback, repoHint, srcDir string,
+	trail, fallback, repoHint, srcDir, handlerClass string,
 	byName map[string][]*graph.Node,
 ) *graph.Node {
+	var owner *graph.Node
+	if handlerClass != "" {
+		short := handlerClass[strings.LastIndex(handlerClass, `\`)+1:]
+		classes := byName[short]
+		if byName == nil {
+			classes = idx.graph.FindNodesByName(short)
+		}
+		count := 0
+		for _, n := range classes {
+			if n != nil && n.Kind == graph.KindType {
+				if short != handlerClass {
+					ns, _ := n.Meta["scope_ns"].(string)
+					if strings.Trim(ns+`\`+n.Name, `\`) != strings.TrimPrefix(handlerClass, `\`) {
+						continue
+					}
+				}
+				owner = n
+				count++
+				if count > 1 {
+					// A namesake may inherit the action, so matching only
+					// the declaring method's short class name is unsafe.
+					return nil
+				}
+			}
+		}
+		if count == 0 {
+			// An unknown controller gives no evidence for a name-only
+			// fallback; an unrelated method may share the action name.
+			return nil
+		}
+	}
 	candidates := contracts.HandlerCandidatesInTrail(trail)
 	if len(candidates) == 0 && fallback != "" {
 		candidates = []string{fallback}
 	}
 	var best *graph.Node
 	for _, ident := range candidates {
-		var n *graph.Node
-		if byName == nil {
-			n = idx.lookupHandler(ident, repoHint, srcDir)
-		} else {
-			n = lookupHandlerFromCandidates(ident, repoHint, srcDir, byName)
+		name := handlerLookupName(ident)
+		if name == "" {
+			continue
 		}
+		nodes := byName[name]
+		if byName == nil {
+			nodes = idx.graph.FindNodesByName(name)
+		}
+		if owner != nil {
+			var owned []*graph.Node
+			for _, n := range nodes {
+				if n != nil && n.Kind == graph.KindMethod && n.ID == owner.ID+"."+name {
+					owned = append(owned, n)
+				}
+			}
+			// A controller may inherit the action from a base class. Keep
+			// the original name-only fallback when its own method is absent.
+			if len(owned) > 0 {
+				nodes = owned
+			}
+		}
+		n := pickHandlerCandidate(nodes, repoHint, srcDir)
 		if n != nil {
 			best = n
 		}
@@ -10269,6 +10408,9 @@ func (idx *Indexer) extractContracts() {
 	idx.extractGoModContracts(reg)
 	idx.extractDIContracts(reg)
 	idx.commitContracts(reg)
+	if err := idx.contractInputError(); err != nil {
+		idx.logger.Warn("indexer: contract extraction commit refused", zap.String("repo", idx.repoPrefix), zap.Error(err))
+	}
 }
 
 // IsStale returns true if the file at relPath has been modified on disk since

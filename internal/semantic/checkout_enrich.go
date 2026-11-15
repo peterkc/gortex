@@ -42,6 +42,10 @@ type CheckoutEnrichRequest struct {
 // which capabilities are whole, and what did not run decides what the
 // generation must not claim.
 type CheckoutEnrichReport struct {
+	// terminalError retains observed provider outcomes even when the public
+	// result is a live-context optional partial. An owned build attempt must
+	// retain that identity until it unarms against a concurrent cancellation.
+	terminalError error
 	// Ran lists the languages a provider enriched, sorted.
 	Ran []string
 	// Starved lists the languages the workspace cap could not admit, sorted.
@@ -65,6 +69,10 @@ type CheckoutEnrichReport struct {
 	Compiler *CompilerLoadStats
 }
 
+// ProviderTerminalError is private pass evidence for the owning build's
+// cancellation guard, not the public optional-partial result or completeness.
+func (r CheckoutEnrichReport) ProviderTerminalError() error { return r.terminalError }
+
 // EnrichCheckout runs the language-server enrichment stage over one routed
 // checkout's payload.
 //
@@ -74,10 +82,10 @@ type CheckoutEnrichReport struct {
 // checkout's, so the servers read the branch and the uncommitted edits the
 // generation describes rather than the primary's tree.
 //
-// It never returns an error for work it merely could not do. A language the
-// cap refused, a checkout with nothing enrichable in it and enrichment being
-// switched off are all reported in the report and leave the caller's build
-// intact; only a request that names no checkout is refused.
+// Ordinary no-work outcomes are reported without an error: a language the
+// cap refused, a checkout with nothing enrichable in it, or enrichment being
+// switched off. A request naming no checkout or lacking a file-aware language
+// census is refused before workspace admission.
 func (m *Manager) EnrichCheckout(g graph.Store, req CheckoutEnrichRequest) (CheckoutEnrichReport, error) {
 	return m.EnrichCheckoutContext(context.Background(), g, req)
 }
@@ -108,7 +116,10 @@ func (m *Manager) EnrichCheckoutContext(ctx context.Context, g graph.Store, req 
 	}
 
 	roots := map[string]string{req.RepoPrefix: req.Root}
-	languages := m.enrichableLanguages(g, roots, req.MinLanguageNodes)
+	languages, err := m.enrichableLanguages(g, roots, req.MinLanguageNodes)
+	if err != nil {
+		return report, err
+	}
 	if len(languages) == 0 {
 		report.Reason = "the generation carries no symbols worth enriching"
 		return report, nil
@@ -165,6 +176,7 @@ func (m *Manager) EnrichCheckoutContext(ctx context.Context, g graph.Store, req 
 	}
 
 	compiler := req.Compiler
+	var terminalErrors []error
 	results, partial, err := m.EnrichAll(g, roots, EnrichOptions{
 		RepoState: map[string]RepoEnrichState{req.RepoPrefix: {
 			SHA:        req.Fingerprint,
@@ -175,7 +187,9 @@ func (m *Manager) EnrichCheckoutContext(ctx context.Context, g graph.Store, req 
 		CheckoutScope:     &compiler,
 		CommittedTreeOnly: committed,
 		Context:           ctx,
+		terminalErrors:    &terminalErrors,
 	})
+	report.terminalError = errors.Join(terminalErrors...)
 	for _, result := range results {
 		if result == nil || result.Compiler == nil {
 			continue
@@ -222,8 +236,11 @@ func (m *Manager) CheckoutWorkspaces() *CheckoutWorkspaces {
 // languages the graph holds symbol-bearing nodes in, minus the ones below the
 // admission floor. It is the same census EnrichAll runs, lifted ahead of it so
 // the workspace cap decides per language before any provider is asked for.
-func (m *Manager) enrichableLanguages(g graph.Store, roots map[string]string, floor int) []string {
-	present, _, langCounts := m.repoLanguages(g, roots)
+func (m *Manager) enrichableLanguages(g graph.Store, roots map[string]string, floor int) ([]string, error) {
+	present, _, langCounts, err := m.repoLanguages(g, roots)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]string, 0, len(present))
 	for language := range present {
 		if floor > 0 && langCounts[language] < floor {
@@ -232,7 +249,7 @@ func (m *Manager) enrichableLanguages(g graph.Store, roots map[string]string, fl
 		out = append(out, language)
 	}
 	sort.Strings(out)
-	return out
+	return out, nil
 }
 
 // enrichedLanguages collapses a pass's results into the sorted language set it

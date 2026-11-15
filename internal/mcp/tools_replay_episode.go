@@ -86,10 +86,10 @@ func (s *Server) handleReplayEpisode(ctx context.Context, req mcp.CallToolReques
 
 	timeline := s.replayTimeline(ctx, radius, windowDays, limit)
 	callers := s.replayCallers(ctx, radius, anchor, limit)
-	coverage := s.replayCoverageGaps(ctx, radius, limit)
+	coverage, coverageAvailable := s.replayCoverageGaps(ctx, radius, limit)
 	memories := s.replayMemories(radius, limit)
 
-	return s.respondJSONOrTOON(ctx, req, map[string]any{
+	payload := map[string]any{
 		"anchor": map[string]any{
 			"id":        anchorNode.ID,
 			"name":      anchorNode.Name,
@@ -102,7 +102,13 @@ func (s *Server) handleReplayEpisode(ctx context.Context, req mcp.CallToolReques
 		"callers":       callers,
 		"coverage_gaps": coverage,
 		"memories":      memories,
-	})
+	}
+	unavailable := unavailableEnrichment{}
+	if !coverageAvailable {
+		unavailable = append(unavailable, "coverage")
+	}
+	unavailable.apply(payload)
+	return s.respondJSONOrTOON(ctx, req, payload)
 }
 
 // walkCallers performs a bounded BFS over EdgeCalls (and dispatch
@@ -245,14 +251,14 @@ func (s *Server) replayCallers(ctx context.Context, radius map[string]int, ancho
 	return rows
 }
 
-func (s *Server) replayCoverageGaps(ctx context.Context, radius map[string]int, limit int) []replayCoverageRow {
+func (s *Server) replayCoverageGaps(ctx context.Context, radius map[string]int, limit int) ([]replayCoverageRow, bool) {
 	// Batch-fetch the radius — same rationale as replayTimeline.
 	ids := make([]string, 0, len(radius))
 	for id := range radius {
 		ids = append(ids, id)
 	}
 	nodeByID := s.readerFor(ctx).GetNodesByIDs(ids)
-	covRows := s.coverageByID()
+	covRows, available := coverageRowsByID(s.readerFor(ctx))
 	rows := make([]replayCoverageRow, 0)
 	for id := range radius {
 		n := nodeByID[id]
@@ -282,7 +288,7 @@ func (s *Server) replayCoverageGaps(ctx context.Context, radius map[string]int, 
 	if len(rows) > limit {
 		rows = rows[:limit]
 	}
-	return rows
+	return rows, available
 }
 
 // replayMemories returns incident-tagged memories whose anchor
