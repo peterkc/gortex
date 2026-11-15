@@ -8040,6 +8040,9 @@ func (idx *Indexer) commitContracts(reg *contracts.Registry) {
 	// instead of the bare type-symbol-ID, which answers nothing about
 	// the wire format.
 	idx.inlineEnvelopeShapes(reg)
+	if idx.contractInputError() != nil {
+		return
+	}
 
 	all := reg.All()
 	// Dependency identities were seeded before resolution. Persist their full
