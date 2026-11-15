@@ -1601,13 +1601,19 @@ func (p *Provider) EnrichFilesContext(ctx context.Context, g graph.Store, repoPr
 		return &semantic.EnrichResult{Provider: p.Name(), Language: "go"}, nil
 	}
 
+	// Use canonical source paths for directory queries while keeping absRoot as
+	// the binding-index owner (callers may release that owner through a symlink).
+	sourceRoot := absRoot
+	if resolved, err := filepath.EvalSymlinks(absRoot); err == nil {
+		sourceRoot = resolved
+	}
 	patterns := make([]string, 0, len(requestedFiles))
 	for _, graphPath := range requestedFiles {
 		relPath := graphPath
 		if prefix != "" {
 			relPath = strings.TrimPrefix(relPath, prefix+"/")
 		}
-		patterns = append(patterns, "file="+filepath.Join(absRoot, filepath.FromSlash(relPath)))
+		patterns = append(patterns, "file="+filepath.Join(sourceRoot, filepath.FromSlash(relPath)))
 	}
 	// The file= patterns are absolute, but Dir still selects the module whose
 	// build list resolves them: a repository whose module lives in a
@@ -1619,7 +1625,7 @@ func (p *Provider) EnrichFilesContext(ctx context.Context, g graph.Store, repoPr
 		return nil, fmt.Errorf("load packages for %d files: %w", len(requestedFiles), err)
 	}
 
-	rows := buildSemanticBindingTypes(pkgs, fset, absRoot, repoPrefix)
+	rows := buildSemanticBindingTypes(pkgs, fset, sourceRoot, repoPrefix)
 	loadedSet := make(map[string]struct{}, len(requestedFiles))
 	for _, filePath := range requestedFiles {
 		loadedSet[filePath] = struct{}{}
@@ -1635,7 +1641,7 @@ func (p *Provider) EnrichFilesContext(ctx context.Context, g graph.Store, repoPr
 			if syntax == nil {
 				continue
 			}
-			relPath := relativePath(fset.Position(syntax.Pos()).Filename, absRoot)
+			relPath := relativePath(fset.Position(syntax.Pos()).Filename, sourceRoot)
 			if relPath == "" {
 				continue
 			}
@@ -2099,6 +2105,70 @@ type compilerProgram struct {
 	files    int
 }
 
+// loadFilePackages queries ordinary directories once. The Go driver
+// otherwise repeats a directory query for each file= pattern. Only uncovered
+// files use that driver's ad-hoc fallback, together in the original order so
+// its command-line-arguments package merging remains unchanged.
+func loadFilePackages(cfg *packages.Config, load func(*packages.Config, ...string) ([]*packages.Package, error), filePatterns []string) ([]*packages.Package, error) {
+	if resolved, err := filepath.EvalSymlinks(cfg.Dir); err == nil {
+		cfg.Dir = resolved
+	}
+	requested := make(map[string]bool, len(filePatterns))
+	directories := make(map[string]bool)
+	for _, pattern := range filePatterns {
+		file := strings.TrimPrefix(pattern, "file=")
+		requested[file] = true
+		directories[filepath.Dir(file)] = true
+	}
+	patterns := make([]string, 0, len(directories))
+	for directory := range directories {
+		patterns = append(patterns, directory)
+	}
+	sort.Strings(patterns)
+	roots, err := load(cfg, patterns...)
+	if err != nil {
+		return nil, err
+	}
+	covered := make(map[string]bool, len(requested))
+	var pkgs []*packages.Package
+	for _, pkg := range roots {
+		keep := false
+		for _, file := range pkg.GoFiles {
+			if requested[file] {
+				keep = true
+				covered[file] = true
+			}
+		}
+		// A build-excluded file in an otherwise valid ordinary package is
+		// covered but deliberately not a root of a file= query. A directory
+		// containing only excluded files still needs the ad-hoc fallback.
+		if len(pkg.GoFiles) > 0 {
+			for _, file := range pkg.IgnoredFiles {
+				if requested[file] {
+					covered[file] = true
+				}
+			}
+		}
+		if keep {
+			pkgs = append(pkgs, pkg)
+		}
+	}
+	var fallback []string
+	for _, pattern := range filePatterns {
+		if !covered[strings.TrimPrefix(pattern, "file=")] {
+			fallback = append(fallback, pattern)
+		}
+	}
+	if len(fallback) > 0 {
+		extra, err := load(cfg, fallback...)
+		if err != nil {
+			return nil, err
+		}
+		pkgs = append(pkgs, extra...)
+	}
+	return pkgs, nil
+}
+
 // loadCompilerProgram is loadPackagesContext with the load's size and the
 // unfiltered package list. parseFile, when non-nil, replaces go/packages'
 // parser for the source-checked packages.
@@ -2144,7 +2214,20 @@ func (p *Provider) loadCompilerProgram(ctx context.Context, dir string, parseFil
 	if load == nil {
 		load = packages.Load
 	}
-	pkgs, err := load(cfg, patterns...)
+	fileQueries := len(patterns) > 0
+	for _, pattern := range patterns {
+		if !strings.HasPrefix(pattern, "file=") {
+			fileQueries = false
+			break
+		}
+	}
+	var pkgs []*packages.Package
+	var err error
+	if fileQueries {
+		pkgs, err = loadFilePackages(cfg, load, patterns)
+	} else {
+		pkgs, err = load(cfg, patterns...)
+	}
 	if err != nil {
 		return compilerProgram{}, err
 	}
