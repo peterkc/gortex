@@ -144,3 +144,55 @@ func TestFrameworkReplacementRefusalReachesOwners(t *testing.T) {
 		})
 	}
 }
+
+func TestCrossRepoMaterializationRefusalReachesCoordinators(t *testing.T) {
+	for _, operation := range []string{"incremental", "global_full", "global_scoped", "deferred", "deferred_exact", "pre_enrich"} {
+		t.Run(operation, func(t *testing.T) {
+			// Given an unmarked cross-repo base edge behind an unknown wrapper,
+			// when a best-effort owner runs, then its result is explicitly incomplete.
+			base := graph.New()
+			base.AddBatch([]*graph.Node{
+				{ID: "a/a.go::A", Kind: graph.KindFunction, FilePath: "a/a.go", RepoPrefix: "a"},
+				{ID: "b/b.go::B", Kind: graph.KindFunction, FilePath: "b/b.go", RepoPrefix: "b"},
+			}, []*graph.Edge{{From: "a/a.go::A", To: "b/b.go::B", Kind: graph.EdgeCalls, FilePath: "a/a.go", Line: 3}})
+			store := &residualBatchCountingStore{Store: base}
+			core, logs := observer.New(zap.InfoLevel)
+			mi := &MultiIndexer{graph: store, indexers: map[string]*Indexer{}, logger: zap.New(core)}
+			switch operation {
+			case "incremental":
+				report := mi.RunIncrementalDerivedPasses(t.Context(), map[string]DerivedInvalidationPlan{
+					"b": {Flags: DerivedInvalidatesDeclarations, Files: []string{"b/b.go"}},
+				})
+				require.ErrorIs(t, report.CrossRepoError, errors.ErrUnsupported)
+				require.True(t, report.Incomplete)
+				require.Zero(t, report.CrossRepo)
+				require.Len(t, logs.FilterMessage("incremental cross-repo materialization refused").All(), 1)
+				require.Empty(t, logs.FilterMessage("incremental derived passes complete").All())
+			case "global_full", "global_scoped":
+				var scope map[string]struct{}
+				if operation == "global_scoped" {
+					scope = map[string]struct{}{"b": {}}
+				}
+				mi.runGlobalGraphPassesTopologyHeld(t.Context(), scope, false)
+				require.Len(t, logs.FilterMessage("global pass: cross-repo edges refused").All(), 1)
+				require.Len(t, logs.FilterMessage("global passes incomplete").All(), 1)
+				require.Empty(t, logs.FilterMessage("global passes complete").All())
+			case "pre_enrich":
+				require.ErrorIs(t, mi.RunPreEnrichResolveFiles(t.Context(), []string{"b/b.go"}, nil), errors.ErrUnsupported)
+			case "deferred_exact":
+				mode, complete := mi.resolveDeferredMutations(&graph.MutationReceipt{Complete: true, ChangedFiles: []string{"a/a.go"}}, true, nil, false)
+				require.Equal(t, deferredResolveFailed, mode)
+				require.False(t, complete)
+			case "deferred":
+				mode, complete := mi.resolveDeferredMutations(nil, true, nil, false)
+				require.Equal(t, deferredResolveFailed, mode)
+				require.False(t, complete)
+				require.Len(t, logs.FilterMessage("DEFERRED-TIMING fallback cross-repo materialization refused").All(), 1)
+			}
+			for _, edge := range base.GetOutEdges("a/a.go::A") {
+				require.False(t, edge.CrossRepo)
+				require.NotEqual(t, graph.EdgeCrossRepoCalls, edge.Kind)
+			}
+		})
+	}
+}

@@ -438,7 +438,7 @@ func TestResolveTemporalCalls_GoCrossRepoFlowsThroughDetector(t *testing.T) {
 	ResolveTemporalCalls(b.g)
 	require.Equal(t, activity.ID, call.To)
 
-	emitted := DetectCrossRepoEdges(b.g)
+	emitted := detectCrossRepoEdges(t, b.g)
 	assert.GreaterOrEqual(t, emitted, 1, "resolved cross-repo Temporal call must materialise a cross_repo_calls edge")
 	cr := firstOutEdgeByKind(b.g, "wf/workflow.go::WF", graph.EdgeCrossRepoCalls)
 	require.NotNil(t, cr)

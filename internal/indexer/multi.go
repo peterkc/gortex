@@ -961,7 +961,10 @@ func (mi *MultiIndexer) resolveDeferredMutations(receipt *graph.MutationReceipt,
 			mi.logger.Error("DEFERRED-TIMING fallback cross-repo resolve failed", zap.Error(err))
 			return deferredResolveFailed, false
 		}
-		resolver.DetectCrossRepoEdges(mi.graph)
+		if _, err := resolver.DetectCrossRepoEdges(mi.graph); err != nil {
+			mi.logger.Warn("DEFERRED-TIMING fallback cross-repo materialization refused", zap.Error(err))
+			return deferredResolveFailed, false
+		}
 		return deferredResolveFallback, true
 	}
 
@@ -998,7 +1001,9 @@ func (mi *MultiIndexer) resolveDeferredMutations(receipt *graph.MutationReceipt,
 		// Resolve only files that can create or bind unresolved edges. Resolved
 		// edge sources still materialise their cross_repo_* generation without
 		// repeating the substantially larger name-resolution frontier.
-		mi.runCrossRepoResolveMutationFrontiers(resolutionFiles, receipt.ChangedFiles, receipt.DefinitionFiles)
+		if !mi.runCrossRepoResolveMutationFrontiers(resolutionFiles, receipt.ChangedFiles, receipt.DefinitionFiles) {
+			return deferredResolveFailed, false
+		}
 		return deferredResolveExact, true
 	}
 	if !fallbackNeeded {
@@ -1287,7 +1292,10 @@ func (mi *MultiIndexer) RunPreEnrichResolveFiles(ctx context.Context, files []st
 		return context.Cause(ctx)
 	}
 	if cr := mi.newCrossRepoResolver(); cr != nil {
-		_, admission := cr.ResolveMutationFrontiersBounded(files, files, files)
+		stats, admission := cr.ResolveMutationFrontiersBounded(files, files, files)
+		if stats.MaterializationError != nil {
+			return stats.MaterializationError
+		}
 		mi.finishGoModuleCalls(cr)
 		mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 		if admission.Refusal != nil {
@@ -2088,18 +2096,24 @@ func (mi *MultiIndexer) runGlobalGraphPassesTopologyHeld(
 	crStart := time.Now()
 	crossRepoEdges := 0
 	skipped := false
+	var crossRepoErr error
 	if fullCoverage {
-		crossRepoEdges, skipped = resolver.DetectCrossRepoEdgesWithSkip(mi.graph)
+		crossRepoEdges, skipped, crossRepoErr = resolver.DetectCrossRepoEdgesWithSkip(mi.graph)
 	} else {
-		crossRepoEdges = resolver.DetectCrossRepoEdgesForRepos(mi.graph, scanRepoPrefixes)
+		crossRepoEdges, crossRepoErr = resolver.DetectCrossRepoEdgesForRepos(mi.graph, scanRepoPrefixes)
 	}
 	fields := []zap.Field{zap.Int("edges", crossRepoEdges)}
 	if skipped {
 		fields = append(fields, zap.String("skipped", "single_repo"))
 	}
 	fields = append(fields, zap.Duration("elapsed", time.Since(crStart)))
-	mi.logger.Info("global pass: cross-repo edges", fields...)
-	if fwRep.Incomplete || capErr != nil {
+	if crossRepoErr != nil {
+		fields = append(fields, zap.Bool("incomplete", true), zap.Error(crossRepoErr))
+		mi.logger.Warn("global pass: cross-repo edges refused", fields...)
+	} else {
+		mi.logger.Info("global pass: cross-repo edges", fields...)
+	}
+	if fwRep.Incomplete || capErr != nil || crossRepoErr != nil {
 		mi.logger.Warn("global passes incomplete", zap.Duration("total", time.Since(globalStart)))
 	} else {
 		mi.logger.Info("global passes complete",

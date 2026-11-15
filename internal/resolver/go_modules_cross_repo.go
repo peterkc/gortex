@@ -102,10 +102,16 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 		deferred = append(deferred, edge)
 		if len(deferred) == externalCallMutationChunk {
 			cr.resolveGoModuleEdgesLocked(deferred, stats)
+			if stats.MaterializationError != nil {
+				return stats.MaterializationError
+			}
 			deferred = deferred[:0]
 		}
 	}
 	cr.resolveGoModuleEdgesLocked(deferred, stats)
+	if stats.MaterializationError != nil {
+		return stats.MaterializationError
+	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if len(cr.goModules) == 0 {
@@ -124,7 +130,7 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 	repos := make(map[string]goModuleRepoFacts)
 	flush := func() {
 		if len(batch) > 0 {
-			if !cr.applyGoModuleReindexes(batch) {
+			if !cr.applyGoModuleReindexes(batch, stats) {
 				cr.logger.Warn("Go module terminal batch dropped; queued for a later module pass")
 				if state.pending == nil {
 					state.pending = make(map[graph.EdgeIdentity]*graph.Edge)
@@ -140,7 +146,7 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 	}
 	collect := externalCallCandidateEdges(cr.graph)
 	collect(func(row externalCallCandidate) bool {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || stats.MaterializationError != nil {
 			return false
 		}
 		e := row.edge
@@ -211,6 +217,9 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 	flush()
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if stats.MaterializationError != nil {
+		return stats.MaterializationError
 	}
 	state.modules, state.revision, state.complete = maps.Clone(cr.goModules), cr.goModuleRevision, true
 	state.replacements = maps.Clone(cr.goModuleReplacements)
@@ -308,7 +317,7 @@ func (cr *CrossRepoResolver) goModuleIncomingEdgesBounded(nodesByFile map[string
 }
 
 // applyGoModuleReindexes never publishes derived work for a dropped batch.
-func (cr *CrossRepoResolver) applyGoModuleReindexes(batch []graph.EdgeReindex) bool {
+func (cr *CrossRepoResolver) applyGoModuleReindexes(batch []graph.EdgeReindex, stats *CrossRepoStats) bool {
 	if len(batch) == 0 {
 		return true
 	}
@@ -322,7 +331,9 @@ func (cr *CrossRepoResolver) applyGoModuleReindexes(batch []graph.EdgeReindex) b
 		cr.graph.ReindexEdges(batch)
 	}
 	cr.removeRetargetedGoModuleParallels(batch)
-	DetectCrossRepoEdgesForReindexes(cr.graph, batch)
+	if _, err := DetectCrossRepoEdgesForReindexes(cr.graph, batch); err != nil {
+		cr.recordMaterializationRefusal(stats, err)
+	}
 	// Provider restubs park returned-value sources on the bare symbol,
 	// while the call retains its package-qualified import, even as a terminal.
 	sourceReindexes := slices.Clone(batch)
@@ -348,11 +359,15 @@ func (cr *CrossRepoResolver) applyGoModuleReindexes(batch []graph.EdgeReindex) b
 // ResolveDeferredGoModuleEdges needs no directory, dependency or whole-repo frontier.
 // Each bounded batch releases the shared resolve lock before the next one starts.
 func (cr *CrossRepoResolver) ResolveDeferredGoModuleEdges(edges []*graph.Edge) error {
+	stats := &CrossRepoStats{ByRepo: make(map[string]int)}
 	for start := 0; start < len(edges); start += externalCallMutationChunk {
 		end := min(start+externalCallMutationChunk, len(edges))
 		cr.mu.Lock()
-		cr.resolveGoModuleEdgesLocked(edges[start:end], nil)
+		cr.resolveGoModuleEdgesLocked(edges[start:end], stats)
 		cr.mu.Unlock()
+		if stats.MaterializationError != nil {
+			return stats.MaterializationError
+		}
 	}
 	return nil
 }
@@ -457,7 +472,7 @@ func (cr *CrossRepoResolver) resolveGoModuleEdgesLocked(edges []*graph.Edge, sta
 		batch = append(batch, graph.EdgeReindex{Edge: &copy, OldTo: e.To, RefreshIdentity: true, OldFilePath: e.FilePath, OldLine: e.Line})
 	}
 	batch = cr.filterLiveReindex(batch)
-	if !cr.applyGoModuleReindexes(batch) {
+	if !cr.applyGoModuleReindexes(batch, stats) {
 		cr.logger.Warn("Go module rebind batch dropped; queued for a later module pass")
 		if cr.goModuleRetry == nil {
 			cr.goModuleRetry = &GoModuleDepRetry{}
@@ -574,6 +589,9 @@ func (cr *CrossRepoResolver) recheckGoModuleBindings(ctx context.Context, previo
 				edges = append(edges, e)
 				if len(edges) == externalCallMutationChunk {
 					cr.resolveGoModuleEdgesLocked(edges, stats)
+					if stats.MaterializationError != nil {
+						return
+					}
 					edges = edges[:0]
 				}
 			}
@@ -585,6 +603,9 @@ func (cr *CrossRepoResolver) recheckGoModuleBindings(ctx context.Context, previo
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if stats.MaterializationError != nil {
+			return stats.MaterializationError
+		}
 		ids = append(ids, n.ID)
 		if len(ids) == externalCallMutationChunk {
 			flush()
@@ -593,7 +614,10 @@ func (cr *CrossRepoResolver) recheckGoModuleBindings(ctx context.Context, previo
 	if len(ids) > 0 {
 		flush()
 	}
-	return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return stats.MaterializationError
 }
 
 // SetGoModuleReplacements supplies caller-local replacement restrictions.
@@ -857,7 +881,9 @@ func (cr *CrossRepoResolver) RestoreGoModuleSourceCalls(edges []*graph.Edge) {
 		added = append(added, graph.EdgeReindex{Edge: e})
 		cr.noteRetargetedCall(e)
 	}
-	DetectCrossRepoEdgesForReindexes(cr.graph, added)
+	if _, err := DetectCrossRepoEdgesForReindexes(cr.graph, added); err != nil {
+		cr.recordMaterializationRefusal(nil, err)
+	}
 }
 
 // Invalidate schedules the module tail after a topology change without replacing

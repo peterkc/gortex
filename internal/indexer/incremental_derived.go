@@ -31,6 +31,7 @@ type IncrementalDerivedReport struct {
 
 	FrameworkError   error
 	FrameworkRefused []string
+	CrossRepoError   error
 	// EntryPointHierarchy counts entry-point stamps (aspnet:controller
 	// today) propagated down resolved extends chains on declaration-shape
 	// changes.
@@ -496,7 +497,10 @@ func (mi *MultiIndexer) runIncrementalDerivedPassesWithPriorTopologyHeld(
 		report.ExternalCallsMs = time.Since(phase).Milliseconds()
 		notePassFaults("external_calls")
 		phase = time.Now()
-		report.CrossRepo = resolver.DetectCrossRepoEdgesForFiles(mi.graph, merged.Files)
+		report.CrossRepo, report.CrossRepoError = resolver.DetectCrossRepoEdgesForFiles(mi.graph, merged.Files)
+		if report.CrossRepoError != nil {
+			report.Incomplete = true
+		}
 		report.CrossRepoMs = time.Since(phase).Milliseconds()
 		notePassFaults("cross_repo")
 	}
@@ -572,6 +576,13 @@ func (mi *MultiIndexer) logIncrementalDerived(report IncrementalDerivedReport, p
 		zap.Int64("duration_ms", report.DurationMs)}
 	for _, family := range []string{"prelude", "hierarchy", "tests", "capability", "framework", "external_calls", "cross_repo", "contracts"} {
 		fields = append(fields, writeCounterFields(family+"_", report.PassWrites[family])...)
+	}
+	if report.CrossRepoError != nil {
+		mi.logger.Warn("incremental cross-repo materialization refused", zap.Any("report", report),
+			zap.String("pass", "cross_repo_edges"), zap.Error(report.CrossRepoError))
+		if report.FrameworkError == nil && report.CapabilityError == nil {
+			return
+		}
 	}
 	if report.FrameworkError != nil {
 		mi.logger.Warn("incremental framework passes refused", zap.Any("report", report),

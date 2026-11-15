@@ -242,7 +242,7 @@ func TestResolveGRPCStubCalls_CrossRepo(t *testing.T) {
 	ResolveGRPCStubCalls(b.g)
 	require.Equal(t, methods["GetUser"], call.To)
 
-	emitted := DetectCrossRepoEdges(b.g)
+	emitted := detectCrossRepoEdges(t, b.g)
 	assert.Equal(t, 1, emitted, "resolved cross-repo gRPC call must materialise a cross_repo_calls edge")
 	cr := firstOutEdgeByKind(b.g, "cli/main.go::run", graph.EdgeCrossRepoCalls)
 	require.NotNil(t, cr)

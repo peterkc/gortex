@@ -74,7 +74,7 @@ func TestDetectCrossRepoEdgesForReindexesScopesToBatch(t *testing.T) {
 	untouched := &graph.Edge{From: "a::caller", To: "c::untouched", Kind: graph.EdgeCalls, FilePath: "a.go", Line: 2}
 	store.AddBatch(nil, []*graph.Edge{changed, untouched})
 
-	if got := DetectCrossRepoEdgesForReindexes(store, []graph.EdgeReindex{{Edge: changed, OldTo: "unresolved::target"}}); got != 1 {
+	if got, err := DetectCrossRepoEdgesForReindexes(store, []graph.EdgeReindex{{Edge: changed, OldTo: "unresolved::target"}}); err != nil || got != 1 {
 		t.Fatalf("materialized=%d, want 1", got)
 	}
 	crossKind, _ := graph.CrossRepoKindFor(graph.EdgeCalls)
