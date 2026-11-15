@@ -777,15 +777,21 @@ func startupWarmupTerminal(t *testing.T) {
 				go func() { _, err := p.runListing(t.Context(), root, []string{"./api"}, nil); listed <- err }()
 				synctest.Wait()
 				outsideCompleted := false
+				var listingErr error
 				select {
-				case <-listed:
+				case listingErr = <-listed:
 					outsideCompleted = true
 				default:
 				}
 				first()
 				second()
 				if !outsideCompleted {
-					<-listed
+					listingErr = <-listed
+				}
+				if outcome == "failure" {
+					require.Error(t, listingErr)
+				} else {
+					require.NoError(t, listingErr)
 				}
 				require.True(t, outsideCompleted, "outside-warmup listing admission must stay unchanged")
 			})
@@ -820,8 +826,8 @@ func startupWarmupApplyBarrier(t *testing.T) {
 		synctest.Wait()
 		before := loads.Load()
 		close(gate)
-		<-full
-		<-partial
+		require.NoError(t, <-full)
+		require.NoError(t, <-partial)
 		require.EqualValues(t, 1, before, "a second load must not overlap the retained program at apply")
 		require.EqualValues(t, 2, loads.Load())
 	})
