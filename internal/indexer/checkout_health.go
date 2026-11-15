@@ -88,6 +88,8 @@ type ViewsHealth struct {
 	// (checkout_deferred_retirement_backlog.go); nil when nothing is owed,
 	// parked or retiring.
 	RetirementBacklog *RetirementBacklog `json:"retirement_backlog,omitempty"`
+	// CleanupPending counts every unfinished journal row, not repositories.
+	CleanupPending int `json:"cleanup_pending,omitempty"`
 	// Counters is the view-lifecycle metric registry, flattened: series key to
 	// value. Zero-valued series are omitted except the registered idle
 	// producer's deferred count, whose presence reports availability.
@@ -96,8 +98,8 @@ type ViewsHealth struct {
 
 // ViewsHealth counts what the view lifecycle currently holds.
 //
-// It is four catalog listings and a lease read — bounded by the number of
-// families, graphs and generations rather than by corpus size — so it is
+// It uses catalog listings and a lease read — bounded by families, graphs,
+// generations and cleanup entries rather than corpus size — so it is
 // cheap enough for a status payload. A listing that fails aborts the census
 // and surfaces the error rather than leaving that part at zero: in a census
 // a zero is a fact, so a partly-read one would report "no ref views exist"
@@ -171,6 +173,10 @@ func (l *CheckoutLifecycle) ViewsHealth(ctx context.Context) (ViewsHealth, error
 	}
 	if backlog := l.retirementBacklogFrom(generations, time.Now()); !backlog.Empty() {
 		out.RetirementBacklog = &backlog
+	}
+	out.CleanupPending, err = l.repositoryCleanupPendingCount(ctx)
+	if err != nil {
+		return out, err
 	}
 	return out, nil
 }

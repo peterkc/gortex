@@ -880,6 +880,8 @@ type ViewsStatus struct {
 	// debt and when a generation was last removed. Absent when nothing is
 	// owed, parked or retiring.
 	RetirementBacklog *RetirementBacklog `json:"retirement_backlog,omitempty"`
+	// CleanupPending counts unfinished journal rows, including nested sagas.
+	CleanupPending int `json:"cleanup_pending,omitempty"`
 	// Counters is the view-lifecycle metric registry flattened to series key
 	// and value, zero-valued series omitted. Every label in a key comes from
 	// a fixed vocabulary, so the map's size is a property of the build rather

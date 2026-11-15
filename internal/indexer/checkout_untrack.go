@@ -337,7 +337,9 @@ func (l *CheckoutLifecycle) demote(
 				zap.String("checkout", checkout.CheckoutID), zap.Error(deleteErr))
 		}
 		_ = coordinator.Close()
-		l.sweepRetirements(ctx)
+		if !l.deferRepositoryCleanupRelease() {
+			l.sweepRetirements(ctx)
+		}
 		return commitErr
 	}
 	l.installCoordinator(checkout.CheckoutID, coordinator)
@@ -358,15 +360,21 @@ func (l *CheckoutLifecycle) demote(
 	if _, _, err := l.evictRepoChecked(ctx, prefix, checkout.RootPath, reconcile.CauseDemotion); err != nil {
 		// Publication already committed. Keep the automatic route live and the
 		// transition standing so restart can retry only the external cleanup.
-		l.sweepRetirements(ctx)
+		if !l.deferRepositoryCleanupRelease() {
+			l.sweepRetirements(ctx)
+		}
 		return fmt.Errorf("indexer: persist demoted checkout configuration: %w", err)
 	}
 	if err := l.catalog.CompleteIntentTransition(ctx, checkout.CheckoutID,
 		authorization.Transition.TransitionID); err != nil {
-		l.sweepRetirements(ctx)
+		if !l.deferRepositoryCleanupRelease() {
+			l.sweepRetirements(ctx)
+		}
 		return fmt.Errorf("indexer: complete demotion transition: %w", err)
 	}
-	l.sweepRetirements(ctx)
+	if !l.deferRepositoryCleanupRelease() {
+		l.sweepRetirements(ctx)
+	}
 	return nil
 }
 

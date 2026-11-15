@@ -155,6 +155,9 @@ func (l *CheckoutLifecycle) prepareRegistrationNaming(ctx context.Context, entry
 	if err != nil {
 		return entry, facts, trackNamingFailure(ctx, err)
 	}
+	if err := l.mi.checkRepositoryTrackAdmission(budget, entry.Path, facts.canonical); err != nil {
+		return entry, facts, err
+	}
 	configured, err := l.mi.configuredTrackEntryWithCanonical(budget, entry.Path, facts.canonical, before, config.ResolvePrefix(entry))
 	if err != nil {
 		return entry, facts, err

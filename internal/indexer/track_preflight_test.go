@@ -5,11 +5,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/graphview"
 )
 
 func TestTrackPreflightCollisionDoesNotPublishWorkspace(t *testing.T) {
@@ -114,4 +118,320 @@ func TestColdKnownConfiguredOwnerStillReturnsTypedCollision(t *testing.T) {
 	require.Equal(t, owner, collision.ExistingPath)
 	require.Equal(t, "present", collision.OwnerState)
 	require.Empty(t, mi.AllMetadata())
+}
+
+func TestPendingCleanupRefusesTrackAliasesBeforeSideEffects(t *testing.T) {
+	for _, surface := range []string{"preflight", "register", "raw_track", "raw_reconcile"} {
+		for _, alias := range []string{"same_root", "renamed_prefix", "symlink", "reserved_prefix"} {
+			t.Run(surface+"/"+alias, func(t *testing.T) {
+				// Given a real pending release whose config entry is already gone.
+				f := newLifecycleFixture(t)
+				t.Cleanup(f.close)
+				root := f.gitRepo("closing-track")
+				tracked, err := f.lc.Register(t.Context(), config.RepoEntry{Path: root, Name: "held"}, TrackSourceCLI)
+				require.NoError(t, err)
+				require.NoError(t, tracked.CatalogErr)
+				f.lc.EnableDeferredRepositoryCleanup()
+				out, err := f.lc.Untrack(t.Context(), root)
+				require.NoError(t, err)
+				require.True(t, out.Pending)
+				require.NoError(t, f.cm.Global().RemoveRepo(root))
+				entry := config.RepoEntry{Path: root, Name: tracked.Prefix}
+				switch alias {
+				case "renamed_prefix":
+					entry.Name = "replacement-name"
+				case "symlink":
+					entry.Path = filepath.Join(t.TempDir(), "renamed-link")
+					require.NoError(t, os.Symlink(root, entry.Path))
+					entry.Name = "replacement-name"
+				case "reserved_prefix":
+					entry.Path = f.gitRepo("different-root")
+				}
+				before, revision := f.cm.Global().ReposSnapshot(), f.cm.Revision()
+				configBytes, err := os.ReadFile(f.cfgPath)
+				require.NoError(t, err)
+				metadata := f.mi.GetMetadata(tracked.Prefix)
+				payload := f.store.AllNodes()
+				hookCalls, catalogCalls := 0, 0
+				f.mi.SetOnRepoTracked(func(string, string) { hookCalls++ })
+				f.lc.afterRegisterTrack = func() { catalogCalls++ }
+				f.watcher.mu.Lock()
+				watcherCalls := len(f.watcher.calls)
+				f.watcher.mu.Unlock()
+
+				// When any real or advisory registration door receives the alias.
+				switch surface {
+				case "preflight":
+					err = f.lc.PreflightTrack(t.Context(), entry)
+				case "register":
+					_, err = f.lc.Register(t.Context(), entry, TrackSourceCLI)
+				case "raw_track":
+					_, err = f.mi.TrackRepoCtx(t.Context(), entry)
+				case "raw_reconcile":
+					_, err = f.mi.ReconcileRepoCtx(t.Context(), entry, map[string]int64{"main.go": 1})
+				}
+
+				// Then refusal precedes physical indexing and every publication.
+				require.ErrorIs(t, err, graphview.ErrRepositoryAdmissionClosed)
+				require.Zero(t, hookCalls)
+				require.Zero(t, catalogCalls)
+				require.Same(t, metadata, f.mi.GetMetadata(tracked.Prefix))
+				require.ElementsMatch(t, payload, f.store.AllNodes())
+				require.Equal(t, before, f.cm.Global().ReposSnapshot())
+				require.Equal(t, revision, f.cm.Revision())
+				afterBytes, err := os.ReadFile(f.cfgPath)
+				require.NoError(t, err)
+				require.Equal(t, configBytes, afterBytes)
+				f.watcher.mu.Lock()
+				gotWatcherCalls := len(f.watcher.calls)
+				f.watcher.mu.Unlock()
+				require.Equal(t, watcherCalls, gotWatcherCalls)
+				intents, err := f.catalog.ListTrackingIntents(t.Context(), tracked.CheckoutID)
+				require.NoError(t, err)
+				for _, intent := range intents {
+					require.False(t, intent.Active)
+				}
+			})
+		}
+	}
+}
+
+func TestPendingCleanupPreservesRegisteredSameBasename(t *testing.T) {
+	for _, surface := range []string{"preflight", "register", "raw_track", "raw_reconcile", "implicit"} {
+		for _, naming := range []string{"configured", "registry_only"} {
+			t.Run(surface+"/"+naming, func(t *testing.T) {
+				// Given unrelated foo roots, one closing and one indexed as foo-y.
+				f := newLifecycleFixture(t)
+				t.Cleanup(f.close)
+				closing := f.gitRepo("foo")
+				other := filepath.Join(t.TempDir(), "foo")
+				require.NoError(t, os.Rename(f.gitRepo("independent"), other))
+				tracked, err := f.lc.Register(t.Context(), config.RepoEntry{Path: closing}, TrackSourceCLI)
+				require.NoError(t, err)
+				require.NoError(t, tracked.CatalogErr)
+				existing, err := f.lc.Register(t.Context(), config.RepoEntry{Path: other, Name: "foo-y"}, TrackSourceCLI)
+				require.NoError(t, err)
+				require.NoError(t, existing.CatalogErr)
+				f.lc.EnableDeferredRepositoryCleanup()
+				out, err := f.lc.Untrack(t.Context(), closing)
+				require.NoError(t, err)
+				require.True(t, out.Pending)
+				if naming == "registry_only" {
+					require.NoError(t, f.cm.Global().RemoveRepo(other))
+				}
+				metadata := f.mi.GetMetadata(existing.Prefix)
+				payload := f.store.AllNodes()
+				entry := config.RepoEntry{Path: other}
+
+				// When a caller resolves the existing root from its basename hint.
+				var indexed *IndexResult
+				var registration RegisterResult
+				switch surface {
+				case "preflight":
+					err = f.lc.PreflightTrack(t.Context(), entry)
+				case "register":
+					registration, err = f.lc.Register(t.Context(), entry, TrackSourceCLI)
+				case "raw_track":
+					indexed, err = f.mi.TrackRepoCtx(t.Context(), entry)
+				case "raw_reconcile":
+					indexed, err = f.mi.ReconcileRepoCtx(t.Context(), entry, map[string]int64{"independent.go": 1})
+				case "implicit":
+					err = f.lc.RecordImplicit(t.Context(), other)
+				}
+
+				// Then foo-y remains admitted without reopening or reindexing foo.
+				require.NoError(t, err)
+				require.Nil(t, indexed)
+				if surface == "register" {
+					require.NoError(t, registration.CatalogErr)
+					require.True(t, registration.AlreadyTracked)
+					require.Equal(t, existing.Prefix, registration.Prefix)
+					require.Equal(t, existing.GraphID, registration.GraphID)
+				}
+				require.Same(t, metadata, f.mi.GetMetadata(existing.Prefix))
+				require.ElementsMatch(t, payload, f.store.AllNodes())
+				require.True(t, f.lc.RepositoryAdmissionClosed(tracked.Prefix))
+			})
+		}
+	}
+}
+
+func TestPendingCleanupAllowsDistinctNestedAndUnrelatedRoots(t *testing.T) {
+	// Given a closing parent root held before physical release.
+	f := newLifecycleFixture(t)
+	t.Cleanup(f.close)
+	root := f.gitRepo("closing-parent")
+	tracked, err := f.lc.Register(t.Context(), config.RepoEntry{Path: root}, TrackSourceCLI)
+	require.NoError(t, err)
+	require.NoError(t, tracked.CatalogErr)
+	f.lc.EnableDeferredRepositoryCleanup()
+	out, err := f.lc.Untrack(t.Context(), root)
+	require.NoError(t, err)
+	require.True(t, out.Pending)
+
+	// When distinct repositories inside and outside that root register.
+	nested := f.gitRepo("nested")
+	nestedPath := filepath.Join(root, "nested")
+	require.NoError(t, os.Rename(nested, nestedPath))
+	for _, path := range []string{nestedPath, f.gitRepo("unrelated")} {
+		entry := config.RepoEntry{Path: path, Name: filepath.Base(path)}
+		require.NoError(t, f.lc.PreflightTrack(t.Context(), entry))
+		registered, err := f.lc.Register(t.Context(), entry, TrackSourceCLI)
+
+		// Then exact identity, not ancestor containment or a global fence,
+		// admits their independent corpus and watcher while the parent waits.
+		require.NoError(t, err)
+		require.NoError(t, registered.CatalogErr)
+		require.NotNil(t, registered.Index)
+		require.True(t, f.watcher.isAttached(registered.Prefix))
+	}
+	require.True(t, f.lc.RepositoryAdmissionClosed(tracked.Prefix))
+}
+
+func TestPreparedTrackRechecksCleanupRootUnderItsMutationLane(t *testing.T) {
+	// Given a prepared alias which predates the cleanup reservation.
+	f := newLifecycleFixture(t)
+	t.Cleanup(f.close)
+	root := f.gitRepo("prepared-closing")
+	tracked, err := f.lc.Register(t.Context(), config.RepoEntry{Path: root, Name: "held"}, TrackSourceCLI)
+	require.NoError(t, err)
+	require.NoError(t, tracked.CatalogErr)
+	alias := filepath.Join(t.TempDir(), "prepared-link")
+	require.NoError(t, os.Symlink(root, alias))
+	require.NoError(t, f.cm.Global().RemoveRepo(root))
+	prepared, err := f.mi.prepareTrackRepoContext(t.Context(), config.RepoEntry{Path: alias, Name: "prepared-alias"})
+	require.NoError(t, err)
+	require.NotNil(t, prepared)
+	f.lc.EnableDeferredRepositoryCleanup()
+	out, err := f.lc.Untrack(t.Context(), root)
+	require.NoError(t, err)
+	require.True(t, out.Pending)
+	revision := f.cm.Revision()
+	payload := f.store.AllNodes()
+
+	// When that stale preparation reaches its distinct prefix's actual lane.
+	result, err := f.mi.trackPreparedRepoSourceCtx(t.Context(), prepared, nil)
+
+	// Then preparation is not authority to parse or publish after closure.
+	require.ErrorIs(t, err, graphview.ErrRepositoryAdmissionClosed)
+	require.Nil(t, result)
+	require.Nil(t, f.mi.GetMetadata(prepared.prefix))
+	require.ElementsMatch(t, payload, f.store.AllNodes())
+	require.Equal(t, revision, f.cm.Revision())
+}
+
+func TestRestartRestoresCleanupRootBeforeTrackPreparation(t *testing.T) {
+	// Given durable closing identity and a journal, with stale config removed.
+	f := newLifecycleFixture(t)
+	t.Cleanup(f.close)
+	root := f.gitRepo("restarted-closing")
+	tracked, err := f.lc.Register(t.Context(), config.RepoEntry{Path: root, Name: "held"}, TrackSourceCLI)
+	require.NoError(t, err)
+	require.NoError(t, tracked.CatalogErr)
+	f.lc.EnableDeferredRepositoryCleanup()
+	out, err := f.lc.Untrack(t.Context(), root)
+	require.NoError(t, err)
+	require.True(t, out.Pending)
+	require.NoError(t, f.cm.Global().RemoveRepo(root))
+	require.NoError(t, f.cm.Global().Save())
+	alias := filepath.Join(t.TempDir(), "restarted-link")
+	require.NoError(t, os.Symlink(root, alias))
+
+	// When startup restores it without a live MI metadata entry.
+	f.restart()
+	f.lc.EnableDeferredRepositoryCleanup()
+	require.NoError(t, f.lc.Seed(t.Context()))
+	require.Nil(t, f.mi.GetMetadata(tracked.Prefix))
+	revision := f.cm.Revision()
+	entry := config.RepoEntry{Path: alias, Name: "fresh-name"}
+
+	// Then both advisory and actual raw registration retain the same fence.
+	require.ErrorIs(t, f.lc.PreflightTrack(t.Context(), entry), graphview.ErrRepositoryAdmissionClosed)
+	_, err = f.mi.TrackRepoCtx(t.Context(), entry)
+	require.ErrorIs(t, err, graphview.ErrRepositoryAdmissionClosed)
+	require.Nil(t, f.mi.GetMetadata(entry.Name))
+	require.Equal(t, revision, f.cm.Revision())
+}
+
+type heldTrackCleanupPublisher struct {
+	*cleanupReadyObserver
+	held      atomic.Bool
+	attempted chan struct{}
+	once      sync.Once
+}
+
+func (p *heldTrackCleanupPublisher) FinalizeDedicatedBaseOwner(graphID string, owner store_sqlite.DedicatedBaseOwner, drained <-chan struct{}) error {
+	if p.held.Load() {
+		p.once.Do(func() { close(p.attempted) })
+		return fmt.Errorf("test publisher finalization is held")
+	}
+	return p.cleanupReadyObserver.FinalizeDedicatedBaseOwner(graphID, owner, drained)
+}
+
+func TestTrackReservationLastsThroughFullCleanupFinalization(t *testing.T) {
+	// Given physical purge can finish, but publisher finalization still fails.
+	f := newLifecycleFixture(t)
+	t.Cleanup(f.close)
+	runtime, err := NewDedicatedBaseRuntime(f.store, testCatalog(f.store), f.lc.ViewLeases())
+	require.NoError(t, err)
+	observer := &cleanupReadyObserver{DedicatedBaseRuntime: runtime, finalized: make(chan string, 8)}
+	publisher := &heldTrackCleanupPublisher{cleanupReadyObserver: observer, attempted: make(chan struct{})}
+	publisher.held.Store(true)
+	require.NoError(t, f.lc.SetDedicatedBaseCleanupRuntime(publisher))
+	root := f.gitRepo("finalizing-track")
+	tracked, err := f.lc.Register(t.Context(), config.RepoEntry{Path: root, Name: "held"}, TrackSourceCLI)
+	require.NoError(t, err)
+	require.NoError(t, tracked.CatalogErr)
+	f.lc.EnableDeferredRepositoryCleanup()
+	out, err := f.lc.Untrack(t.Context(), root)
+	require.NoError(t, err)
+	require.True(t, out.Pending)
+	old := drainedCleanupState(t, f.lc, tracked.GraphID)
+	f.lc.MarkRepositoryCleanupReady()
+	select {
+	case <-publisher.attempted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("cleanup never reached held publisher finalization")
+	}
+	old.mu.Lock()
+	purged, finalized := old.payloadPurged, old.finalized
+	old.mu.Unlock()
+	require.True(t, purged)
+	require.False(t, finalized)
+	require.Nil(t, f.mi.existingRepositoryMutationCoordinator(tracked.Prefix), "the earlier MI finalizer already released its lane")
+
+	// When an alias retries after lane deletion but before full finalization.
+	alias := filepath.Join(t.TempDir(), "finalizing-link")
+	require.NoError(t, os.Symlink(root, alias))
+	entry := config.RepoEntry{Path: alias, Name: "fresh-name"}
+	require.ErrorIs(t, f.lc.PreflightTrack(t.Context(), entry), graphview.ErrRepositoryAdmissionClosed)
+	_, err = f.mi.TrackRepoCtx(t.Context(), entry)
+	require.ErrorIs(t, err, graphview.ErrRepositoryAdmissionClosed)
+	_, err = f.mi.TrackRepoCtx(t.Context(), config.RepoEntry{Path: root, Name: tracked.Prefix})
+	require.ErrorIs(t, err, graphview.ErrRepositoryAdmissionClosed)
+
+	// Then only successful full finalization lets the path register again.
+	publisher.held.Store(false)
+	f.lc.repositoryCleanup.signal()
+	awaitCleanupReadyFinalization(t, observer, old)
+	retracked, err := f.lc.Register(t.Context(), config.RepoEntry{Path: root, Name: tracked.Prefix}, TrackSourceCLI)
+	require.NoError(t, err)
+	require.NoError(t, retracked.CatalogErr)
+	require.NotNil(t, retracked.Index)
+	pin := f.lc.ViewLeases().AcquireBaseCorpus(retracked.Prefix)
+	t.Cleanup(pin.Release)
+	out, err = f.lc.Untrack(t.Context(), root)
+	require.NoError(t, err)
+	require.True(t, out.Pending)
+	next := cleanupReadyState(t, f.lc, retracked.GraphID)
+	require.NotSame(t, old, next)
+	require.NotSame(t, old.owner, next.owner)
+
+	// An old finalization retry has no authority over that replacement fence.
+	finished, err := f.lc.finalizeRepositoryCleanupState(t.Context(), old)
+	require.NoError(t, err)
+	require.True(t, finished)
+	require.ErrorIs(t, f.lc.PreflightTrack(t.Context(), entry), graphview.ErrRepositoryAdmissionClosed)
+	pin.Release()
+	awaitCleanupReadyFinalization(t, observer, next)
 }

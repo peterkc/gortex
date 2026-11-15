@@ -17,8 +17,7 @@ import (
 // the same defect from the user's side — the reason still reaches nobody — so
 // the wire is pinned here, at the door `gortex daemon status` actually dials.
 
-// censusController answers status with a views census that carries one stated
-// reason, and nothing else it does not need.
+// censusController answers status with a build-loop failure and pending cleanup count.
 type censusController struct {
 	*fakeController
 }
@@ -26,9 +25,10 @@ type censusController struct {
 func (c *censusController) Status(_ context.Context) (StatusResponse, error) {
 	return StatusResponse{
 		Views: &ViewsStatus{
-			Families:     1,
-			Checkouts:    map[string]int{"ready": 3},
-			Coordinators: 1,
+			Families:       1,
+			Checkouts:      map[string]int{"ready": 3},
+			Coordinators:   1,
+			CleanupPending: 3,
 			CoordinatorStartFailures: []CoordinatorStartFailure{{
 				CheckoutID: "chk-1",
 				RootPath:   "/tmp/worktree-a",
@@ -72,6 +72,7 @@ func TestStatusCarriesTheCoordinatorStartReasonsOverTheWire(t *testing.T) {
 	// "three checkouts, one coordinator", not instead of it.
 	require.Equal(t, 3, st.Views.Checkouts["ready"])
 	require.Equal(t, 1, st.Views.Coordinators)
+	require.Equal(t, 3, st.Views.CleanupPending)
 }
 
 // TestAHealthyViewCensusOmitsTheFailureKey pins the ordinary answer. The field
@@ -82,6 +83,7 @@ func TestAHealthyViewCensusOmitsTheFailureKey(t *testing.T) {
 	body, err := json.Marshal(&ViewsStatus{Families: 1, Coordinators: 1})
 	require.NoError(t, err)
 	require.NotContains(t, string(body), "coordinator_start_failures")
+	require.NotContains(t, string(body), "cleanup_pending")
 }
 
 // TestEnrichResultsReportASupersededRunWithoutFailing pins the wire half of the
