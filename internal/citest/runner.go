@@ -621,21 +621,23 @@ func RunPartition(ctx context.Context, opts RunOptions) (report Report, err erro
 					return report, err
 				}
 			}
-			if runtime.GOOS == "darwin" && !opts.Race && (selected == nil || selected.has(large["indexer"])) {
-				dir, err := planner.exec(ctx, planner.Env, "go", "list", "-f", "{{.Dir}}", large["indexer"])
-				if err != nil {
-					return report, err
-				}
-				if err := j.runPackage("indexer", large["indexer"], Partition{Group: "indexer", Count: 1}, dir, true, darwinRaceTests); err != nil {
-					return report, err
-				}
-			}
 		} else if selected == nil || selected.has(large[part.Group]) {
 			dir, err := planner.exec(ctx, planner.Env, "go", "list", "-f", "{{.Dir}}", large[part.Group])
 			if err != nil {
 				return report, err
 			}
 			if err := j.runPackage(part.Group, large[part.Group], part, dir, opts.Race, nil); err != nil {
+				return report, err
+			}
+		}
+		// The macOS store job is the shortest macOS job, so it also owns the
+		// watcher race tests that macOS otherwise runs without -race.
+		if part.Group == "store" && runtime.GOOS == "darwin" && !opts.Race && (selected == nil || selected.has(large["indexer"])) {
+			dir, err := planner.exec(ctx, planner.Env, "go", "list", "-f", "{{.Dir}}", large["indexer"])
+			if err != nil {
+				return report, err
+			}
+			if err := j.runPackage("indexer", large["indexer"], Partition{Group: "indexer", Count: 1}, dir, true, darwinRaceTests); err != nil {
 				return report, err
 			}
 		}

@@ -254,19 +254,44 @@ func TestRunnerCorruptManifestFailsBeforeTestExecution(t *testing.T) {
 		t.Fatalf("corrupt manifest reached execution: %v %s", err, &out)
 	}
 }
-func TestRunnerDarwinSelectedIndexerKeepsRestWatcherRace(t *testing.T) {
+
+// The macOS store job owns the watcher race tests, so an indexer change runs
+// them there without the store package, and the rest job no longer runs them.
+func TestRunnerDarwinSelectedIndexerKeepsStoreWatcherRace(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("native macOS watcher-race contract")
 	}
 	f := newFixture(t)
 	m := f.plan(f.change("internal/indexer/value.go"))
+	path := writeManifest(t, f, m)
 	var out bytes.Buffer
-	report, err := RunPartition(t.Context(), RunOptions{Root: f.root, Partition: "rest", SelectionFile: writeManifest(t, f, m), Target: nativeTarget(t), Workers: 2, Env: fixtureEnv(), Output: &out})
+	report, err := RunPartition(t.Context(), RunOptions{Root: f.root, Partition: "store", SelectionFile: path, Target: nativeTarget(t), Workers: 2, Env: fixtureEnv(), Output: &out})
 	if err != nil {
 		t.Fatalf("%v\n%s", err, &out)
 	}
-	if len(report.Durations) != 1 || !strings.Contains(out.String(), "indexer-race:1/1 TestWatchFixture") || strings.Contains(out.String(), "rest: done") {
-		t.Fatal("watcher owner was lost or unrelated rest work ran")
+	if len(report.Durations) != 1 || !strings.Contains(out.String(), "indexer-race:1/1 TestWatchFixture") || strings.Contains(out.String(), "TestStore") {
+		t.Fatalf("watcher owner was lost or unrelated store work ran\n%s", &out)
+	}
+	out.Reset()
+	_, err = RunPartition(t.Context(), RunOptions{Root: f.root, Partition: "rest", SelectionFile: path, Target: nativeTarget(t), Workers: 2, Env: fixtureEnv(), Output: &out})
+	if err == nil || !strings.Contains(err.Error(), "absent from the validated selection matrix") || strings.Contains(out.String(), "indexer-race") {
+		t.Fatalf("rest still owns the watcher race tests: %v\n%s", err, &out)
+	}
+}
+
+// A store-only change runs the store package and not the watcher race tests.
+func TestRunnerDarwinStoreOnlyChangeSkipsWatcherRace(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("native macOS watcher-race contract")
+	}
+	f := newFixture(t)
+	m := f.plan(f.change("internal/graph/store_sqlite/value.go"))
+	var out bytes.Buffer
+	if _, err := RunPartition(t.Context(), RunOptions{Root: f.root, Partition: "store", SelectionFile: writeManifest(t, f, m), Target: nativeTarget(t), Workers: 2, Env: fixtureEnv(), Output: &out}); err != nil {
+		t.Fatalf("%v\n%s", err, &out)
+	}
+	if !strings.Contains(out.String(), "TestStore") || strings.Contains(out.String(), "indexer-race") {
+		t.Fatalf("store-only change ran the wrong tests\n%s", &out)
 	}
 }
 func TestRunnerCancellationReapsOwnedGoTestChildAndRetainsLogs(t *testing.T) {

@@ -388,8 +388,13 @@ func TestSelectionDarwinIndexerKeepsWatcherRaceOwner(t *testing.T) {
 			mac = append(mac, row.Partition)
 		}
 	}
-	if !slices.Equal(mac, []string{"indexer:1/2", "indexer:2/2", "rest"}) {
+	if !slices.Equal(mac, []string{"indexer:1/2", "indexer:2/2", "store"}) {
 		t.Fatal(mac)
+	}
+	for _, row := range m.Matrix.Include {
+		if row.OS != "macos-latest" && row.Partition == "store" {
+			t.Fatalf("only macOS adds a store row for an indexer change: %v", row)
+		}
 	}
 }
 func TestPlannerCancellationAndInvalidMetadataDoNotBecomeEmptySuccess(t *testing.T) {

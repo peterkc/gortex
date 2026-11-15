@@ -159,12 +159,26 @@ jobs:
           retention-days: 7
 
   build-native:
-    # build-onnx already builds default Linux; always build the other OSes.
+    # build-onnx already builds default Linux; always build Windows here.
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go build -o gortex ./cmd/gortex/
+
+  build-native-macos:
+    # A full run already compiles and links cmd/gortex on macOS in its rest
+    # tests. Skipping this job then keeps a full run to the five macOS jobs
+    # that GitHub runs at the same time, so no macOS test job waits for it.
+    needs: plan
+    if: needs.plan.outputs.mode == 'affected'
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -331,7 +345,7 @@ jobs:
   ci-result:
     name: CI result
     if: always()
-    needs: [plan, test, smoke, build-native, lint, build-linux-static, build-onnx, benchmark, parser-stress]
+    needs: [plan, test, smoke, build-native, build-native-macos, lint, build-linux-static, build-onnx, benchmark, parser-stress]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
