@@ -129,12 +129,29 @@ func fetchAndMergeBM25TimedContext(ctx context.Context, eng *query.Engine, origi
 	return merged, primaryCount
 }
 
+func searchFailureWarning(channels []string) map[string]any {
+	if len(channels) == 0 {
+		return nil
+	}
+	return map[string]any{"failed_channels": channels, "message": "Search channel failure: " + strings.Join(channels, ", ") + ". Results are partial; recall may be incomplete."}
+}
+
+// symbolTemplateFailureChannels reads the JSON-copied pagination warning.
+func symbolTemplateFailureChannels(warning map[string]any) []string {
+	values := warning["failed_channels"].([]any)
+	channels := make([]string, len(values))
+	for i, value := range values {
+		channels[i] = value.(string)
+	}
+	return channels
+}
+
 func decorateSearchFailureResult(result *mcp.CallToolResult, channels []string) *mcp.CallToolResult {
 	if result == nil || result.IsError || len(channels) == 0 {
 		return result
 	}
-	message := "Search channel failure: " + strings.Join(channels, ", ") + ". Results are partial; recall may be incomplete."
-	warning := map[string]any{"failed_channels": channels, "message": message}
+	warning := searchFailureWarning(channels)
+	message := warning["message"].(string)
 	result = mergeResultMeta(result, map[string]any{"search_complete": false, "search_warning": warning})
 	body, ok := singleTextContent(result)
 	if !ok {

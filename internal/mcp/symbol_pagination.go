@@ -651,6 +651,11 @@ func (s *Server) renderSymbolSequence(ctx context.Context, req mcplib.CallToolRe
 	if entry.nextPage > 0 && identity != entry.identity {
 		return symbolPageError("view changed during page preparation"), nil
 	}
+	// The template was JSON-copied before publication. Reapply its warning
+	// after shaping so every stored page keeps both body and metadata fields.
+	if warning, ok := template["search_warning"].(map[string]any); ok {
+		result = decorateSearchFailureResult(result, symbolTemplateFailureChannels(warning))
+	}
 	// Cache publication is the handler's commit boundary, not client delivery:
 	// a lost transport reply can replay this exact committed page via its cursor.
 	replay := symbolPageReplay{cloneSymbolResult(result), published}

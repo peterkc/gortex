@@ -12,9 +12,12 @@ import (
 	"time"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/search"
 	"github.com/zzet/gortex/internal/search/rerank"
@@ -281,4 +284,84 @@ func TestSearchSymbolsWarnsForFailedTextAndKeepsIndependentEvidence(t *testing.T
 			}
 		})
 	}
+
+	t.Run("fresh exact pages", func(t *testing.T) {
+		stack, _ := freshSymbolFixture(t)
+		writeViewRepo(t, stack.worktreeRoot, "main-ws", map[string]string{
+			"page1.go": "package repo\nfunc NeedleOne() {}\n",
+			"page2.go": "package repo\nfunc NeedleTwo() {}\n",
+		})
+		generation, handle, err := stack.store.BeginPayloadGeneration(context.Background(), store_sqlite.PayloadGenerationRequest{OwnerKind: "dedicated_graph", GraphID: stack.graphID, LayerID: "search-warning", CheckoutID: viewTestWorktree, GenerationKind: "dirty", BaseGenerationID: stack.commit, TreeOID: "tree-search-warning"})
+		require.NoError(t, err)
+		nodes := []*graph.Node{viewFileNode("repo/page1.go", 3), viewFileNode("repo/page2.go", 3), viewRepoNode("repo/page1.go::NeedleOne", "NeedleOne", graph.KindFunction, "repo/page1.go", 2), viewRepoNode("repo/page2.go::NeedleTwo", "NeedleTwo", graph.KindFunction, "repo/page2.go", 2)}
+		for _, node := range nodes {
+			node.WorkspaceID = "main-ws"
+			node.ProjectID = "repo"
+		}
+		require.NoError(t, handle.AddBatchChecked(nodes, nil))
+		require.NoError(t, handle.SetFileMasks([]store_sqlite.FileMask{{RepoPrefix: "repo", FilePath: "repo/page1.go", Mode: store_sqlite.OwnershipReplace}, {RepoPrefix: "repo", FilePath: "repo/page2.go", Mode: store_sqlite.OwnershipReplace}}))
+		require.NoError(t, stack.store.PublishPayloadGeneration(context.Background(), generation, 5000))
+		stack.dirty = generation
+		routeViewCheckout(t, stack.store, stack.graphID, stack.commit, stack.dirty, store_sqlite.RouteActive)
+		source := &searchSymbolsFaultStore{err: errors.New("private paged backend failure")}
+		stack.srv.engine.SetSearch(search.NewSwappable(search.NewSymbolSearcherBackend(source)))
+		stack.srv.engine.SetRerank(nil)
+		args := map[string]any{"query": "Needle", "limit": 1, "max_bytes": 0, "assist": "off", "format": "json", "view": map[string]any{"kind": "auto"}, requireExactArgName: true, requireFreshArgName: true}
+		ctx := WithSessionCWD(WithSessionID(context.Background(), viewTestSession), stack.worktreeRoot)
+		handler := stack.srv.wrapToolHandler(func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+			if req.GetString("cursor", "") == "" && ctx.Value(freshSymbolAttemptKey{}) == nil {
+				return nil, errors.New("fixture did not enter a fresh-exact attempt")
+			}
+			return stack.srv.handleSearchSymbols(ctx, req)
+		})
+		// Given failed text in a fresh-exact paged search, both publication and replay must retain its warning.
+		first, err := handler(ctx, makeReq("search_symbols", args))
+		require.NoError(t, err)
+		require.False(t, first.IsError, resultText(first))
+		require.Positive(t, source.bundleCalls.Load(), "the faulting adapter must actually run")
+		require.Zero(t, source.symbolCalls.Load(), "failed text must not replay")
+		firstBody := decodeJSONResult(t, first)
+		cursor, ok := firstBody["next_cursor"].(string)
+		require.True(t, ok, "first page: %#v", firstBody)
+		require.NotEmpty(t, cursor)
+		assert.Equal(t, false, firstBody["search_complete"])
+		firstWarning, _ := firstBody["search_warning"].(map[string]any)
+		assert.Equal(t, []any{"text"}, firstWarning["failed_channels"])
+		assert.Equal(t, "Search channel failure: text. Results are partial; recall may be incomplete.", firstWarning["message"])
+		require.NotNil(t, first.Meta)
+		assert.Equal(t, false, first.Meta.AdditionalFields["search_complete"])
+		assert.NotContains(t, resultText(first), "private paged backend failure")
+		// A new healthy query must not deduplicate against the incomplete sequence.
+		source.err = nil
+		healthy, err := handler(ctx, makeReq("search_symbols", args))
+		require.NoError(t, err)
+		require.False(t, healthy.IsError, resultText(healthy))
+		assert.NotContains(t, decodeJSONResult(t, healthy), "search_warning")
+		if healthy.Meta != nil {
+			assert.NotEqual(t, false, healthy.Meta.AdditionalFields["search_complete"])
+		}
+		calls := source.bundleCalls.Load() + source.symbolCalls.Load()
+		continuedArgs := cloneFreshSymbolArguments(args)
+		continuedArgs["cursor"] = cursor
+		second, err := handler(ctx, makeReq("search_symbols", continuedArgs))
+		require.NoError(t, err)
+		require.False(t, second.IsError, resultText(second))
+		secondBody := decodeJSONResult(t, second)
+		assert.Equal(t, false, secondBody["search_complete"])
+		secondWarning, _ := secondBody["search_warning"].(map[string]any)
+		assert.Equal(t, []any{"text"}, secondWarning["failed_channels"])
+		require.NotNil(t, second.Meta)
+		assert.Equal(t, false, second.Meta.AdditionalFields["search_complete"])
+		assert.Equal(t, calls, source.bundleCalls.Load()+source.symbolCalls.Load(), "continuation must not search again")
+		assert.NotEqual(t, firstBody["results"], secondBody["results"], "the second page must advance")
+		replay, err := handler(ctx, makeReq("search_symbols", continuedArgs))
+		require.NoError(t, err)
+		require.False(t, replay.IsError, resultText(replay))
+		replayBody := decodeJSONResult(t, replay)
+		assert.Equal(t, false, replayBody["search_complete"])
+		assert.Equal(t, secondBody["search_warning"], replayBody["search_warning"])
+		assert.Equal(t, calls, source.bundleCalls.Load()+source.symbolCalls.Load(), "replay must not search again")
+		require.Zero(t, stack.leases.Held())
+	})
+
 }
