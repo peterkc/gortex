@@ -287,7 +287,10 @@ func TestStartupGoQueryGrouping(t *testing.T) {
 		alias   bool
 		reverse bool
 		binding string
+		noTests bool
 	}{
+		{name: "default excludes requested test files", files: combined, noTests: true},
+		{name: "default only requested test files", files: []string{"alpha/a_test.go", "alpha/external_test.go"}, noTests: true},
 		{name: "ordinary and special", files: combined},
 		{name: "reversed aliases", files: combined, reverse: true},
 		{name: "symlinked root", files: combined, alias: true},
@@ -320,7 +323,7 @@ func TestStartupGoQueryGrouping(t *testing.T) {
 			// base's mixed command-line-arguments package and missing N rows (gtx-0m7).
 			baseSet := token.NewFileSet()
 			basePkgs, err := packages.Load(&packages.Config{
-				Context: context.Background(), Dir: loadRoot, Tests: true, Fset: baseSet,
+				Context: context.Background(), Dir: loadRoot, Tests: !tc.noTests, Fset: baseSet,
 				Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedSyntax | packages.NeedModule,
 			}, baselinePatterns...)
 			require.NoError(t, err)
@@ -353,7 +356,7 @@ func TestStartupGoQueryGrouping(t *testing.T) {
 			}
 			slices.Sort(expectedFiles)
 			candidate := newTestProvider(t)
-			candidate.includeTest = true
+			candidate.includeTest = !tc.noTests
 			t.Cleanup(func() { require.NoError(t, candidate.Close()) })
 			canonicalRoot, err := filepath.EvalSymlinks(loadRoot)
 			require.NoError(t, err)

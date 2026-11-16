@@ -2166,24 +2166,14 @@ func loadFilePackages(cfg *packages.Config, load func(*packages.Config, ...strin
 	if err != nil {
 		return nil, err
 	}
-	covered := make(map[string]bool, len(requested))
+	coveredDirs := make(map[string]bool, len(directories))
 	var pkgs []*packages.Package
 	for _, pkg := range roots {
 		keep := false
 		for _, file := range pkg.GoFiles {
+			coveredDirs[filepath.Dir(file)] = true
 			if requested[file] {
 				keep = true
-				covered[file] = true
-			}
-		}
-		// A build-excluded file in an otherwise valid ordinary package is
-		// covered but deliberately not a root of a file= query. A directory
-		// containing only excluded files still needs the ad-hoc fallback.
-		if len(pkg.GoFiles) > 0 {
-			for _, file := range pkg.IgnoredFiles {
-				if requested[file] {
-					covered[file] = true
-				}
 			}
 		}
 		if keep {
@@ -2192,7 +2182,9 @@ func loadFilePackages(cfg *packages.Config, load func(*packages.Config, ...strin
 	}
 	var fallback []string
 	for _, pattern := range filePatterns {
-		if !covered[strings.TrimPrefix(pattern, "file=")] {
+		// A valid directory also covers excluded files and test files when
+		// Tests is false, matching the driver's file= ad-hoc rule.
+		if !coveredDirs[filepath.Dir(strings.TrimPrefix(pattern, "file="))] {
 			fallback = append(fallback, pattern)
 		}
 	}
