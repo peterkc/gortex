@@ -115,16 +115,23 @@ func newClosureFixture(t *testing.T, count int, options ...Option) closureFixtur
 	shared.Meta["contract_owner_record"] = false // retained legacy scalar gets its removed marker
 	nodes = append(nodes, shared, node("env::CHAIN", "records/chain.env", "repo", graph.KindContract),
 		node("env::TAIL", "records/tail.env", "repo", graph.KindContract),
+		node("env::FOREIGN_ONLY", "records/foreign.env", "repo", graph.KindContract),
+		node("env::REFERENCED", "records/referenced.env", "repo", graph.KindContract),
 		node("other/live", "other/live.go", "other", graph.KindFunction))
 	edges = append(edges, owner(fixture.roots[0], shared.ID, "records/root.env", "repo", graph.EdgeProvides),
 		owner("repo/source00", shared.ID, fixture.files[0], "repo", graph.EdgeProvides),
 		owner("other/live", shared.ID, "other/live.go", "other", graph.EdgeConsumes),
 		owner("env::CHAIN", "env::TAIL", "records/chain.env", "repo", graph.EdgeProvides),
 		owner("other/live", "env::TAIL", "other/live.go", "wrong-owner", graph.EdgeProvides),
-		&graph.Edge{From: "other/live", To: "env::CHAIN", Kind: graph.EdgeReferences, FilePath: "other/live.go", Line: 11})
+		&graph.Edge{From: "other/live", To: "env::CHAIN", Kind: graph.EdgeReferences, FilePath: "other/live.go", Line: 11},
+		&graph.Edge{From: fixture.roots[0], To: "env::REFERENCED", Kind: graph.EdgeReferences, FilePath: "records/root.env", Line: 12})
 	for _, generation := range []int64{0, 7} {
 		h := s.AtGeneration(generation)
-		require.NoError(t, h.AddBatchCheckedContext(t.Context(), nodes, edges))
+		generationEdges := edges
+		if generation == 7 {
+			generationEdges = append(slices.Clone(edges), owner(fixture.roots[0], "env::FOREIGN_ONLY", "records/root.env", "repo", graph.EdgeProvides))
+		}
+		require.NoError(t, h.AddBatchCheckedContext(t.Context(), nodes, generationEdges))
 		var documents []graph.SymbolFTSItem
 		for _, n := range nodes {
 			if n.Kind == graph.KindContract {
@@ -137,7 +144,7 @@ func newClosureFixture(t *testing.T, count int, options ...Option) closureFixtur
 			{Site: graph.SemanticBindingSite{RepoPrefix: "repo", FilePath: "repo/keep.go", Line: 8, Name: "kept"}, TypeName: "ExactKept"},
 		}))
 		require.NoError(t, h.BulkSetFileMtimes("repo", map[string]int64{fixture.files[0]: 123, "repo/keep.go": 456}))
-		require.NoError(t, h.SetRepoIndexState(graph.RepoIndexState{RepoPrefix: "repo", IndexedSHA: "committed-tree", IndexedAt: 42, WorkspaceFP: "fingerprint", ExtractorVersions: `{"go":3}`, NodeCount: len(nodes), EdgeCount: len(edges)}))
+		require.NoError(t, h.SetRepoIndexState(graph.RepoIndexState{RepoPrefix: "repo", IndexedSHA: "committed-tree", IndexedAt: 42, WorkspaceFP: "fingerprint", ExtractorVersions: `{"go":3}`, NodeCount: len(nodes), EdgeCount: len(generationEdges)}))
 		require.NoError(t, h.ReplaceFileIndexFailures("repo", []graph.FileIndexFailure{{Path: fixture.files[0], RepoPrefix: "repo", Error: "pending parser update"}}))
 	}
 	return fixture
@@ -290,7 +297,8 @@ func TestContractFileEvictionClosurePreservesCompleteRows(t *testing.T) {
 	for _, count := range []int{1, 32} {
 		for _, regime := range []string{"none", "repaired", "fresh"} {
 			t.Run(fmt.Sprintf("files=%d/%s", count, regime), func(t *testing.T) {
-				// Given equal complete fixtures, one uses the actual previous query.
+				// Given equal fixtures with an owner edge only in generation 7 and a
+				// non-owner edge to an otherwise unowned contract, one uses the old query.
 				candidate, previous := newClosureFixture(t, count), newClosureFixture(t, count)
 				calls := useOldClosureQuery(t, previous.store)
 				closureStatistics(t, candidate.store, regime)
@@ -313,6 +321,8 @@ func TestContractFileEvictionClosurePreservesCompleteRows(t *testing.T) {
 				require.Equal(t, beforeForeignEdges, closureRows(t, candidate.store.db, `SELECT * FROM edges WHERE view_gen=7`))
 				require.Nil(t, candidate.store.GetNode("env::CHAIN"))
 				require.Nil(t, candidate.store.GetNode("env::TAIL"))
+				require.NotNil(t, candidate.store.GetNode("env::FOREIGN_ONLY"), "foreign-generation ownership must not extend this closure")
+				require.NotNil(t, candidate.store.GetNode("env::REFERENCED"), "a reference must not extend the owner closure")
 				retained := candidate.store.GetNode("env::SHARED")
 				require.NotNil(t, retained)
 				require.Equal(t, true, retained.Meta["contract_owner_removed"])
