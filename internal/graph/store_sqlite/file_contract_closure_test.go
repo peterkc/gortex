@@ -56,12 +56,19 @@ func (c *closureConn) ExecContext(ctx context.Context, query string, args []driv
 func useOldClosureQuery(t *testing.T, s *Store) *int {
 	t.Helper()
 	calls := new(int)
+	// Join the checkpoint loop first: its goroutine reads writerDB.
+	s.stopCheckpointLoop()
+	s.writeMu.Lock()
 	original := s.writerDB
-	s.writerDB = sql.OpenDB(closureConnector{driver: original.Driver(), dsn: sqliteWriterDSN(s.dbPath), calls: calls})
-	s.writerDB.SetMaxOpenConns(1)
+	writer := sql.OpenDB(closureConnector{driver: original.Driver(), dsn: sqliteWriterDSN(s.dbPath), calls: calls})
+	writer.SetMaxOpenConns(1)
+	s.writerDB = writer
+	s.writeMu.Unlock()
 	t.Cleanup(func() {
-		require.NoError(t, s.writerDB.Close())
+		s.writeMu.Lock()
 		s.writerDB = original
+		s.writeMu.Unlock()
+		require.NoError(t, writer.Close())
 	})
 	return calls
 }
