@@ -777,10 +777,17 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		})
 		// The initial committed-base join is part of startup too. On an
 		// interrupted join, existing publications keep their own load leases.
+		var startupGoReleases []func()
+		releaseStartupGo := func() {
+			for _, release := range startupGoReleases {
+				release()
+			}
+		}
+		defer releaseStartupGo()
 		if state.indexer != nil && state.indexer.SemanticManager() != nil {
 			for _, provider := range state.indexer.SemanticManager().AllProviders() {
 				if startup, ok := provider.(interface{ BeginStartupWarmup() func() }); ok {
-					defer startup.BeginStartupWarmup()()
+					startupGoReleases = append(startupGoReleases, startup.BeginStartupWarmup())
 				}
 			}
 		}
@@ -808,6 +815,7 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 			zap.Int("published", baseReport.published), zap.Int("owner_only", baseReport.ownerOnly),
 			zap.Int("uncommitted", baseReport.uncommitted),
 			zap.Int("failed", baseReport.failed), zap.Error(baseErr))
+		releaseStartupGo()
 		if baseErr != nil {
 			logger.Warn("daemon: known committed base preparation incomplete; view builds remain available for recovery", zap.Error(baseErr))
 			if ctx.Err() != nil || baseReport.interrupted {
