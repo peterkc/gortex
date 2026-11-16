@@ -2,6 +2,7 @@ package store_sqlite
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 )
@@ -122,16 +123,11 @@ func (s *Store) PurgeRepoContext(ctx context.Context, prefix string) (err error)
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM nodes WHERE repo_prefix = ? LIMIT 1)`, prefix).Scan(&hasNodes); err != nil {
 		return err
 	}
-	// Delete every edge touching this repo's nodes, across all generations.
-	// Each uncorrelated subquery builds the ID set once, so to_id needs at
-	// most one edges scan rather than one scan per bound-variable batch.
+	// Bound each statement's in-memory rollback journal while visiting the
+	// incoming-edge table only once, rather than once per node-ID batch.
 	if hasNodes {
-		for _, col := range []string{"from_id", "to_id"} {
-			res, err := tx.ExecContext(ctx, `DELETE FROM edges WHERE `+col+` IN (SELECT id FROM nodes WHERE repo_prefix = ?)`, prefix)
-			noteTableRows("edges", res, err)
-			if err != nil {
-				return fmt.Errorf("store_sqlite: PurgeRepo edges: %w", err)
-			}
+		if err := purgeRepoEdgesTxContext(ctx, tx, prefix); err != nil {
+			return fmt.Errorf("store_sqlite: PurgeRepo edges: %w", err)
 		}
 	}
 	changed := hasNodes
@@ -166,6 +162,95 @@ func (s *Store) PurgeRepoContext(ctx context.Context, prefix string) (err error)
 		s.markMutationReceiptsIncompleteLocked()
 	}
 	return nil
+}
+
+const purgeEdgeChunkRows = 10000
+
+// purgeRepoEdgesTxContext keeps outgoing deletes on the from_id index and
+// incoming deletes on bounded primary-key ranges. The TEMP set and all edge
+// changes belong to the caller's transaction, including rollback on error.
+func purgeRepoEdgesTxContext(ctx context.Context, tx *sql.Tx, prefix string) error {
+	ids, err := repoNodeIDsTxContext(ctx, tx, prefix)
+	if err != nil {
+		return err
+	}
+	const batchSize = 900
+	for start := 0; start < len(ids); start += batchSize {
+		batch := ids[start:minInt(start+batchSize, len(ids))]
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
+		args := make([]any, len(batch))
+		for i, id := range batch {
+			args[i] = id
+		}
+		res, err := tx.ExecContext(ctx, `DELETE FROM edges WHERE from_id IN (`+placeholders+`)`, args...)
+		noteTableRows("edges", res, err)
+		if err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE purge_node_ids(id TEXT PRIMARY KEY) WITHOUT ROWID`); err != nil {
+		return err
+	}
+	insert, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO purge_node_ids(id) VALUES (?)`)
+	if err != nil {
+		return err
+	}
+	defer insert.Close() //nolint:errcheck // transaction owns rollback on error
+	for _, id := range ids {
+		if _, err := insert.ExecContext(ctx, id); err != nil {
+			return err
+		}
+	}
+	// A fixed final key avoids an extra empty DELETE for exact-size chunks.
+	// The owned writer transaction prevents additions during this pass.
+	var last sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT MAX(id) FROM edges`).Scan(&last); err != nil {
+		return err
+	}
+	for lower := int64(0); last.Valid && lower < last.Int64; {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		upper := last.Int64
+		err := tx.QueryRowContext(ctx, `SELECT id FROM edges WHERE id > ? ORDER BY id LIMIT 1 OFFSET ?`, lower, purgeEdgeChunkRows-1).Scan(&upper)
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		res, err := tx.ExecContext(ctx, `DELETE FROM edges WHERE id > ? AND id <= ? AND to_id IN (SELECT id FROM purge_node_ids)`, lower, upper)
+		noteTableRows("edges", res, err)
+		if err != nil {
+			return err
+		}
+		lower = upper
+	}
+	_, err = tx.ExecContext(ctx, `DROP TABLE purge_node_ids`)
+	return err
+}
+
+// repoNodeIDsTx returns every node id in repoPrefix, read inside tx. The
+// caller holds writeMu. Rows are fully drained + closed before the caller
+// issues writes on the same tx — SQLite forbids an open read cursor while
+// writing on the same connection.
+func repoNodeIDsTxContext(ctx context.Context, tx *sql.Tx, repoPrefix string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM nodes WHERE repo_prefix = ?`, repoPrefix)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	_ = rows.Close()
+	return ids, nil
 }
 
 // orphanScanTables are the tables OrphanRepoPrefixes unions DISTINCT
