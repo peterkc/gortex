@@ -77,6 +77,10 @@ func TestPerSaveFrontierPlansLockedAcrossStatisticsRegimes(t *testing.T) {
 	if !ok {
 		t.Fatal("no cross-repository frontier query")
 	}
+	repoQuery, repoArgs, ok := s.crossRepoCandidatesQuery(graph.BaseKindsForCrossRepo(), []string{"repo"}, nil, nil)
+	if !ok {
+		t.Fatal("no cross-repository repo query")
+	}
 	filesJSON, _ := projectionJSON(files)
 	scoped := evictFilesPredicate + ` AND view_gen = ?`
 	contractArgs := []any{s.viewGen, string(graph.KindContract), filesJSON, s.viewGen, filesJSON, s.viewGen,
@@ -98,6 +102,22 @@ func TestPerSaveFrontierPlansLockedAcrossStatisticsRegimes(t *testing.T) {
 					if strings.Contains(line, "edges_by_kind") {
 						t.Errorf("cross_repo_frontier: an arm walks edges by kind (%s):\n%s", trimPlanLine(line), strings.Join(cross, "\n"))
 					}
+				}
+				// Given a repository frontier under each statistics regime, when
+				// its query is planned, then both arms start at repo-keyed nodes
+				// and seek incident edges instead of walking the generation.
+				repos := explainOnConn(t, ctx, conn, repoQuery, repoArgs...)
+				assertNoGenerationWalk(t, "cross_repo_repos", repos, "n", "e")
+				assertCrossRepoEndpointPrimaryKeys(t, "cross_repo_repos", repos)
+				repoSearches := 0
+				for _, line := range repos {
+					trimmed := trimPlanLine(line)
+					if strings.HasPrefix(trimmed, "SEARCH n USING ") && strings.Contains(trimmed, "(repo_prefix=?") && !strings.Contains(trimmed, "id=?") {
+						repoSearches++
+					}
+				}
+				if repoSearches != 2 {
+					t.Errorf("cross_repo_repos: want two repo-keyed node searches, got %d:\n%s", repoSearches, strings.Join(repos, "\n"))
 				}
 				contract := explainOnConn(t, ctx, conn, contractFileEvictionFrontierSQL(scoped), contractArgs...)
 				assertNoGenerationWalk(t, "contract_eviction_frontier", contract, "nodes", "edges")

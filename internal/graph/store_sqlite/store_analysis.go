@@ -542,19 +542,19 @@ CROSS JOIN nodes nt INDEXED BY ` + nodesPrimaryKeyIndexName + ` ON nt.id = e.to_
 		q = `WITH candidate_edges(id) AS (
   SELECT e.id
   FROM nodes n
-  JOIN edges e ON e.from_id = n.id AND e.view_gen = n.view_gen
+  CROSS JOIN edges e ON e.from_id = n.id AND e.view_gen = n.view_gen
   WHERE n.repo_prefix IN (SELECT CAST(value AS TEXT) FROM json_each(?))
     AND e.kind IN (` + inPlaceholders(len(uniq)) + `)
     AND n.view_gen = ?
   UNION
   SELECT e.id
   FROM nodes n
-  JOIN edges e ON e.to_id = n.id AND e.view_gen = n.view_gen
+  CROSS JOIN edges e ON e.to_id = n.id AND e.view_gen = n.view_gen
   WHERE n.repo_prefix IN (SELECT CAST(value AS TEXT) FROM json_each(?))
     AND e.kind IN (` + inPlaceholders(len(uniq)) + `)
     AND n.view_gen = ?
 )
-` + fmt.Sprintf(projection, `candidate_edges ce JOIN edges e ON e.id = ce.id`)
+` + fmt.Sprintf(projection, `candidate_edges ce CROSS JOIN edges e ON e.id = ce.id`)
 		args = append(args, scopeJSON)
 		args = appendKinds(args)
 		args = append(args, s.viewGen)
