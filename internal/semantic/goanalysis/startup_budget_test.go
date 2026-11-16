@@ -260,6 +260,7 @@ func startupMembership(pkgs []*packages.Package, fset *token.FileSet, root strin
 }
 
 func TestStartupGoQueryGrouping(t *testing.T) {
+	t.Run("outside load directory uses bounded fallback", startupOutsideLoadDirectory)
 	// Given ordinary packages, siblings, both test roots and special files.
 	root := resolvedTempDir(t)
 	writeGoMod(t, root, "example.com/startup")
@@ -1462,3 +1463,35 @@ scripts/ci-result
 scripts/ci-select
 scripts/ci-test
 `
+
+func startupOutsideLoadDirectory(t *testing.T) {
+	root := resolvedTempDir(t)
+	module := filepath.Join(root, "backend")
+	writeGoMod(t, module, "example.com/backend")
+	writeFile(t, root, "backend/a.go", "package backend\ntype Inner struct{}\nvar Value = Inner{}\n")
+	writeFile(t, root, "outside/a.go", "package main\ntype Outer struct{}\nvar Value = Outer{}\n")
+	dir, count := goLoadDir(root)
+	require.Equal(t, 1, count)
+	require.Equal(t, module, dir)
+	log := startupDriverLog(t)
+	p := newTestProvider(t)
+	t.Cleanup(func() { require.NoError(t, p.Close()) })
+	baseSet := token.NewFileSet()
+	baseline, err := packages.Load(&packages.Config{Context: t.Context(), Dir: module, Fset: baseSet, Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedSyntax | packages.NeedModule}, "file="+filepath.Join(root, "backend/a.go"), "file="+filepath.Join(root, "outside/a.go"))
+	require.NoError(t, err)
+	var queries [][]string
+	p.packagesLoad = func(cfg *packages.Config, patterns ...string) ([]*packages.Package, error) {
+		queries = append(queries, slices.Clone(patterns))
+		return packages.Load(cfg, patterns...)
+	}
+	store := &startupBindingStore{Store: graph.New()}
+	_, err = p.EnrichFilesContext(t.Context(), store, "repo", root, []string{"repo/backend/a.go", "repo/outside/a.go"})
+	require.NoError(t, err)
+	require.Equal(t, buildSemanticBindingTypes(baseline, baseSet, root, "repo"), store.rows)
+	require.Len(t, store.rows, 4)
+	require.Equal(t, []string{"repo/backend/a.go", "repo/outside/a.go"}, store.files)
+	require.Equal(t, [][]string{{"./.", "./../outside"}, {"file=" + filepath.Join(root, "outside/a.go")}}, queries)
+	// The relative parent-directory query returns a driver error package with
+	// no covering GoFiles, so only that file receives the unchanged file= fallback.
+	require.NotEmpty(t, startupDriverQueries(t, log))
+}
