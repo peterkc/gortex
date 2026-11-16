@@ -2155,7 +2155,11 @@ func loadFilePackages(cfg *packages.Config, load func(*packages.Config, ...strin
 	}
 	patterns := make([]string, 0, len(directories))
 	for directory := range directories {
-		patterns = append(patterns, directory)
+		rel, err := filepath.Rel(cfg.Dir, directory)
+		if err != nil {
+			return nil, fmt.Errorf("relative package directory: %w", err)
+		}
+		patterns = append(patterns, "./"+filepath.ToSlash(rel))
 	}
 	sort.Strings(patterns)
 	roots, err := load(cfg, patterns...)
@@ -2200,6 +2204,32 @@ func loadFilePackages(cfg *packages.Config, load func(*packages.Config, ...strin
 		pkgs = append(pkgs, extra...)
 	}
 	return pkgs, nil
+}
+
+// loadCompilerPackages keeps one importer universe per typed load. The pinned
+// driver dispatches 16,383-character chunks concurrently; larger lists retain
+// that native behavior and expose their fan-out instead of splitting types.
+func (p *Provider) loadCompilerPackages(cfg *packages.Config, patterns ...string) ([]*packages.Package, error) {
+	const driverArgMax = 16383
+	chunks, chars, total := 1, 0, 0
+	for _, pattern := range patterns {
+		total += len(pattern) + 1
+		chars += len(pattern) + 1
+		if chars > driverArgMax {
+			chunks++
+			chars = len(pattern)
+		}
+	}
+	if chunks > 1 && p.logger != nil {
+		p.logger.Info("go-types: package load uses native driver chunks",
+			zap.Int("driver_chunks", chunks), zap.Int("patterns", len(patterns)),
+			zap.Int("pattern_bytes", total), zap.String("module_dir", cfg.Dir))
+	}
+	load := p.packagesLoad
+	if load == nil {
+		load = packages.Load
+	}
+	return load(cfg, patterns...)
 }
 
 // boundCompilerSubprocess limits each Go command without changing the daemon's
@@ -2288,10 +2318,7 @@ func (p *Provider) loadCompilerProgram(ctx context.Context, dir string, parseFil
 
 	boundCompilerSubprocess(cfg)
 
-	load := p.packagesLoad
-	if load == nil {
-		load = packages.Load
-	}
+	load := p.loadCompilerPackages
 	fileQueries := len(patterns) > 0
 	for _, pattern := range patterns {
 		if !strings.HasPrefix(pattern, "file=") {

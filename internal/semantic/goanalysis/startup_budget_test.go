@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"go/token"
+	"go/types"
 	"io"
 	"net"
 	"os"
@@ -19,6 +20,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/tools/go/packages"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -415,7 +418,9 @@ func TestStartupGoQueryGrouping(t *testing.T) {
 			require.Equal(t, expectedFallback, fallback, "only uncovered special files use file=, together in base order")
 			var expectedDirectories []string
 			for dir := range directories {
-				expectedDirectories = append(expectedDirectories, dir)
+				rel, err := filepath.Rel(canonicalRoot, dir)
+				require.NoError(t, err)
+				expectedDirectories = append(expectedDirectories, "./"+filepath.ToSlash(rel))
 			}
 			slices.Sort(expectedDirectories)
 			require.Equal(t, expectedDirectories, directoryPatterns)
@@ -447,6 +452,28 @@ func TestStartupGoSubprocessBudget(t *testing.T) {
 	t.Run("cancelled admission never dispatches", startupCancelledAdmission)
 
 	t.Run("owned compiler cleanup on cancel deadline and failure", startupOwnedProcessCleanup)
+
+	t.Run("native multi-chunk typed load", startupNativeChunks)
+	t.Run("216 directory baseline fits one chunk", startupBaselinePatterns)
+
+	t.Run("empty and disabled work starts no driver", func(t *testing.T) {
+		p := newTestProvider(t)
+		t.Cleanup(func() { require.NoError(t, p.Close()) })
+		calls := 0
+		p.packagesLoad = func(*packages.Config, ...string) ([]*packages.Package, error) {
+			calls++
+			return nil, errors.New("unexpected driver")
+		}
+		_, err := p.EnrichFilesContext(t.Context(), graph.New(), "", t.TempDir(), nil)
+		require.NoError(t, err)
+		mgr := semantic.NewManager(semantic.Config{Enabled: false}, zap.NewNop())
+		mgr.RegisterProvider(p)
+		t.Cleanup(func() { require.NoError(t, mgr.Close()) })
+		result, err := mgr.EnrichFilesContext(t.Context(), graph.New(), "", t.TempDir(), "go", []string{"file.go"})
+		require.NoError(t, err)
+		require.Nil(t, result)
+		require.Zero(t, calls)
+	})
 
 	t.Run("preserve explicit flags and caller slices", func(t *testing.T) {
 		for _, tc := range []struct {
@@ -1122,3 +1149,316 @@ func startupOwnedProcessCleanup(t *testing.T) {
 		})
 	}
 }
+
+func startupNativeChunks(t *testing.T) {
+	root := resolvedTempDir(t)
+	writeGoMod(t, root, "example.com/identity")
+	writeFile(t, root, "api/api.go", "package api\ntype Value struct{}\ntype Service interface { Apply(Value) }\n")
+	writeFile(t, root, "impl/impl.go", "package impl\nimport \"example.com/identity/api\"\ntype Impl struct{}\nfunc (Impl) Apply(api.Value) {}\n")
+	log := startupDriverLog(t)
+	logs, observed := observer.New(zap.InfoLevel)
+	p := NewProvider(ModeTypeCheck, false, zap.New(logs))
+	t.Cleanup(func() { require.NoError(t, p.Close()) })
+	end := p.BeginStartupWarmup()
+	defer end()
+	var patterns []string
+	for range 1600 {
+		patterns = append(patterns, "./api", "./impl")
+	}
+	// Given a 20,800-byte two-chunk list, preserve a single typed Load and
+	// therefore one importer universe even though the native driver may overlap.
+	loads := 0
+	p.packagesLoad = func(cfg *packages.Config, query ...string) ([]*packages.Package, error) {
+		loads++
+		return packages.Load(cfg, query...)
+	}
+	pkgs, _, err := p.loadPackagesContext(t.Context(), root, patterns...)
+	require.NoError(t, err)
+	require.Equal(t, 1, loads)
+	require.Len(t, pkgs, 2)
+	var apiPkg, implPkg *packages.Package
+	for _, pkg := range pkgs {
+		require.Empty(t, pkg.Errors)
+		switch pkg.PkgPath {
+		case "example.com/identity/api":
+			apiPkg = pkg
+		case "example.com/identity/impl":
+			implPkg = pkg
+		}
+	}
+	require.NotNil(t, apiPkg)
+	require.NotNil(t, implPkg)
+	iface := apiPkg.Types.Scope().Lookup("Service").Type().Underlying().(*types.Interface)
+	require.True(t, types.Implements(implPkg.Types.Scope().Lookup("Impl").Type(), iface), "typed chunks must share named-type identity")
+	logged := observed.FilterMessage("go-types: package load uses native driver chunks").All()
+	require.Len(t, logged, 1)
+	require.EqualValues(t, 2, logged[0].ContextMap()["driver_chunks"])
+	records := startupDriverRecords(t, log)
+	active, peak, expensive, metadata := 0, 0, 0, 0
+	pending := map[int]bool{}
+	for _, record := range records {
+		export := record.Kind == "go" && slices.Contains(record.Args, "-export=true")
+		switch record.Event {
+		case "start":
+			pending[record.PID] = true
+			if export {
+				expensive++
+				active++
+				peak = max(peak, active)
+				require.Contains(t, record.Args, "-p=1")
+				require.Equal(t, "2", record.GOMAXPROCS)
+			} else if record.Kind == "go" {
+				metadata++
+				require.NotContains(t, record.Args, "-export=true")
+			}
+		case "exit":
+			require.Contains(t, pending, record.PID)
+			delete(pending, record.PID)
+			if export {
+				active--
+			}
+			require.Zero(t, record.ExitCode)
+		}
+	}
+	require.Equal(t, 2, expensive)
+	require.LessOrEqual(t, peak, 2, "D8 permits native overlap up to the logged chunk count")
+	require.Positive(t, peak)
+	require.Positive(t, metadata)
+	require.Zero(t, active)
+	require.Empty(t, pending)
+	evidence, err := json.Marshal(records)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("HOME"), "startup-native-chunks.json"), evidence, 0o600))
+}
+
+func startupBaselinePatterns(t *testing.T) {
+	// Immutable 216-directory baseline from git ls-files at 7b45667e. This is
+	// pattern-size evidence only; the test does not compile the real repository.
+	directories := strings.Fields(startupGortexDirectoryBaseline)
+	require.Len(t, directories, 216)
+	bytes := 0
+	for _, directory := range directories {
+		bytes += len("./"+directory) + 1
+	}
+	require.Equal(t, 5290, bytes)
+	require.LessOrEqual(t, bytes, 16383)
+}
+
+const startupGortexDirectoryBaseline = `
+bench/baselines
+bench/check-budgets
+bench/daemon-latency
+bench/fixtures/mktypos
+bench/index-perf
+bench/index-perf/testdata/fixture
+bench/load
+bench/perf
+bench/receiptproof
+bench/release-gate
+bench/token-efficiency
+bench/wire-format
+cmd/gortex
+internal/agents
+internal/agents/agentstest
+internal/agents/aider
+internal/agents/antigravity
+internal/agents/claudecode
+internal/agents/cline
+internal/agents/codex
+internal/agents/continuedev
+internal/agents/copilotcli
+internal/agents/cursor
+internal/agents/gemini
+internal/agents/hermes
+internal/agents/internalutil
+internal/agents/kilocode
+internal/agents/kimi
+internal/agents/kiro
+internal/agents/ohmypi
+internal/agents/openclaw
+internal/agents/opencode
+internal/agents/pi
+internal/agents/skillpack
+internal/agents/vscode
+internal/agents/windsurf
+internal/agents/zed
+internal/analysis
+internal/analyzer
+internal/artifacts
+internal/astquery
+internal/audit
+internal/blame
+internal/callpath
+internal/cfg
+internal/churn
+internal/citest
+internal/claudemd
+internal/clones
+internal/cochange
+internal/codegen
+internal/codeowners
+internal/config
+internal/contracts
+internal/coverage
+internal/daemon
+internal/dataflow
+internal/docs
+internal/doctor
+internal/elide
+internal/embedding
+internal/entrypoints
+internal/eval
+internal/eval/packeval
+internal/eval/parity
+internal/eval/parity/golden
+internal/eval/quality
+internal/eval/recall
+internal/eval/stdbench
+internal/excludes
+internal/exporter
+internal/fixtures
+internal/forge
+internal/gitcmd
+internal/githooks
+internal/gitstate
+internal/graph
+internal/graph/overlaytest
+internal/graph/store_sqlite
+internal/graph/storetest
+internal/graph/storetest/backendtest
+internal/graphpath
+internal/graphview
+internal/hooks
+internal/indexer
+internal/indexer/merkle
+internal/indexer/source
+internal/intern
+internal/licenses
+internal/lint
+internal/llm
+internal/llm/agent
+internal/llm/cmd/agentdemo
+internal/llm/cmd/bench
+internal/llm/cmd/daemonprobe
+internal/llm/cmd/llmtest
+internal/llm/conversationlog
+internal/llm/provider
+internal/llm/provider/agentcli
+internal/llm/provider/anthropic
+internal/llm/provider/azure
+internal/llm/provider/bedrock
+internal/llm/provider/claudecli
+internal/llm/provider/codex
+internal/llm/provider/copilot
+internal/llm/provider/cursor
+internal/llm/provider/deepseek
+internal/llm/provider/gemini
+internal/llm/provider/httpx
+internal/llm/provider/local
+internal/llm/provider/ollama
+internal/llm/provider/openai
+internal/llm/provider/openaicompat
+internal/llm/provider/opencode
+internal/llm/registry
+internal/llm/svc
+internal/localizationauth
+internal/lspuri
+internal/mcp
+internal/mcp/streamable
+internal/modelhint
+internal/modules
+internal/parser
+internal/parser/crashpool
+internal/parser/forest
+internal/parser/languages
+internal/parser/tsalias
+internal/parser/tsitter
+internal/parser/tsitter/bash
+internal/parser/tsitter/c
+internal/parser/tsitter/cpp
+internal/parser/tsitter/csharp
+internal/parser/tsitter/css
+internal/parser/tsitter/dart
+internal/parser/tsitter/dockerfile
+internal/parser/tsitter/elixir
+internal/parser/tsitter/golang
+internal/parser/tsitter/hcl
+internal/parser/tsitter/html
+internal/parser/tsitter/java
+internal/parser/tsitter/javascript
+internal/parser/tsitter/kotlin
+internal/parser/tsitter/lua
+internal/parser/tsitter/markdown
+internal/parser/tsitter/mql
+internal/parser/tsitter/ocaml
+internal/parser/tsitter/orgmode
+internal/parser/tsitter/php
+internal/parser/tsitter/protobuf
+internal/parser/tsitter/python
+internal/parser/tsitter/ruby
+internal/parser/tsitter/rust
+internal/parser/tsitter/scala
+internal/parser/tsitter/sql
+internal/parser/tsitter/swift
+internal/parser/tsitter/toml
+internal/parser/tsitter/tsx
+internal/parser/tsitter/typescript
+internal/parser/tsitter/yaml
+internal/pathguard
+internal/pathkey
+internal/persistence
+internal/platform
+internal/procio
+internal/profiles
+internal/progress
+internal/progress/demo
+internal/query
+internal/reach
+internal/reconcile
+internal/releases
+internal/resolver
+internal/respbudget
+internal/review
+internal/routeguard
+internal/runtimeactivity
+internal/savings
+internal/search
+internal/search/packstrategy
+internal/search/rerank
+internal/search/trigram
+internal/semantic
+internal/semantic/goanalysis
+internal/semantic/lsp
+internal/semantic/scip
+internal/semantic/tstypes
+internal/server
+internal/server/hub
+internal/serverstack
+internal/skills
+internal/sql
+internal/sqliteconn
+internal/telemetry
+internal/testdsn
+internal/testenv
+internal/testpath
+internal/testutil/gitpromisor
+internal/testutil/parityresiduals
+internal/thirdparty/fsnotify
+internal/thirdparty/fsnotify/internal
+internal/thirdparty/fswatcher
+internal/thirdparty/go-pointer
+internal/thirdparty/renameio
+internal/todos
+internal/tokens
+internal/toolref
+internal/tui
+internal/version
+internal/viewmetrics
+internal/wiki
+internal/workflowtest
+internal/workspace
+pkg/gortex
+scripts/ci-result
+scripts/ci-select
+scripts/ci-test
+`

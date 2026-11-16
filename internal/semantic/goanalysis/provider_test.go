@@ -672,7 +672,7 @@ func TestEnrichFilesUsesOneLoadForSameAndDifferentPackages(t *testing.T) {
 			require.Equal(t, 1, loadCalls)
 			directories := make(map[string]bool)
 			for _, relPath := range tc.want {
-				directories[filepath.Join(root, filepath.Dir(filepath.FromSlash(relPath)))] = true
+				directories["./"+filepath.ToSlash(filepath.Dir(filepath.FromSlash(relPath)))] = true
 			}
 			wantPatterns := make([]string, 0, len(directories))
 			for dir := range directories {

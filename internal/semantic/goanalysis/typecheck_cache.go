@@ -529,10 +529,7 @@ func (p *Provider) runListing(ctx context.Context, loadDir string, patterns, bui
 		BuildFlags: append(append([]string(nil), buildFlags...), "-trimpath"),
 	}
 	boundCompilerSubprocess(cfg)
-	load := p.packagesLoad
-	if load == nil {
-		load = packages.Load
-	}
+	load := p.loadCompilerPackages
 	out := &tcListing{start: time.Now(), manifests: map[string]*tcManifest{}}
 	roots, err := load(cfg, patterns...)
 	out.elapsed = time.Since(out.start)
