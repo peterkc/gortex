@@ -465,19 +465,18 @@ func (p *Provider) acquireStartupListing(ctx context.Context) (func(), error) {
 	if p.warm.startup.Load() == 0 || ctx.Value(startupCompilerAdmission{}) == p {
 		return func() {}, nil
 	}
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		release, err := p.acquireHeavyBlocking(ctx, true)
-		if err != nil {
-			return nil, err
-		}
-		if p.committed.interactive.Load() == 0 {
-			return release, nil
-		}
-		release()
+	release, err := p.acquireHeavyBlocking(ctx, true)
+	if err != nil {
+		return nil, err
 	}
+	// Foreground admission cancels every registered background attempt before
+	// waiting. A queued attempt may win the gate concurrently with that
+	// cancellation, but must not dispatch after it. No retry/spin is needed.
+	if err := ctx.Err(); err != nil {
+		release()
+		return nil, err
+	}
+	return release, nil
 }
 
 // beginCompilerLoad marks an interactive compiler load over the module

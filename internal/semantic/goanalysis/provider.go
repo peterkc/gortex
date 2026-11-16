@@ -1691,6 +1691,9 @@ func (p *Provider) EnrichFilesContext(ctx context.Context, g graph.Store, repoPr
 		}
 	}
 	rows = filtered
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	_, persistentBindings := g.(graph.SemanticBindingTypeStore)
 	if writer, ok := g.(graph.SemanticBindingTypeWriter); ok {
 		if err := writer.ReplaceSemanticBindingTypesForFiles(repoPrefix, loadedFiles, rows); err != nil {
@@ -2302,6 +2305,9 @@ func (p *Provider) loadCompilerProgram(ctx context.Context, dir string, parseFil
 		pkgs, err = loadFilePackages(cfg, load, patterns)
 	} else {
 		pkgs, err = load(cfg, patterns...)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return compilerProgram{}, ctxErr
 	}
 	if err != nil {
 		return compilerProgram{}, err

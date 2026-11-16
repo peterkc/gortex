@@ -5,14 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"go/token"
+	"io"
+	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/tools/go/packages"
@@ -44,6 +48,10 @@ func TestStartupGoDriverHelper(t *testing.T) {
 			break
 		}
 	}
+	if len(args) > 0 && args[0] == "startup-owned-compiler" {
+		startupOwnedCompiler()
+		return
+	}
 	kind, command := "go", os.Getenv("STARTUP_REAL_GO")
 	if len(args) > 1 {
 		switch args[0] {
@@ -55,6 +63,10 @@ func TestStartupGoDriverHelper(t *testing.T) {
 	}
 	record := startupDriverRecord{Kind: kind, Event: "start", Command: command, Args: args, GOMAXPROCS: os.Getenv("GOMAXPROCS"), PID: os.Getpid()}
 	startupWriteDriverRecord(record)
+	if kind == "go" && slices.Contains(args, "-export=true") && os.Getenv("STARTUP_DRIVER_CONTROL") != "" {
+		startupControlledDriver(record)
+		return
+	}
 	cmd := exec.Command(command, args...)
 	cmd.Env = os.Environ()
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -65,6 +77,57 @@ func TestStartupGoDriverHelper(t *testing.T) {
 		if exit, ok := err.(*exec.ExitError); ok {
 			code = exit.ExitCode()
 		}
+	}
+	record.Event, record.ExitCode = "exit", code
+	startupWriteDriverRecord(record)
+	os.Exit(code)
+}
+
+// The helper compiler is in the real go/packages driver's process group.
+// Readiness is a socket receipt; cancellation signals that group, and the
+// driver helper waits for this child before it reports its own terminal exit.
+func startupOwnedCompiler() {
+	interrupts := make(chan os.Signal, 1)
+	signal.Notify(interrupts, os.Interrupt)
+	record := startupDriverRecord{Kind: "compiler-helper", Event: "start", PID: os.Getpid(), GOMAXPROCS: os.Getenv("GOMAXPROCS")}
+	startupWriteDriverRecord(record)
+	conn, err := net.Dial("tcp", os.Getenv("STARTUP_DRIVER_CONTROL"))
+	if err != nil {
+		os.Exit(95)
+	}
+	if _, err := conn.Write([]byte{1}); err != nil {
+		os.Exit(96)
+	}
+	released := make(chan struct{})
+	go func() { var one [1]byte; _, _ = conn.Read(one[:]); close(released) }()
+	select {
+	case <-interrupts:
+	case <-released:
+	}
+	if err := conn.Close(); err != nil {
+		os.Exit(97)
+	}
+	record.Event = "exit"
+	startupWriteDriverRecord(record)
+	os.Exit(0)
+}
+
+func startupControlledDriver(record startupDriverRecord) {
+	interrupts := make(chan os.Signal, 1)
+	signal.Notify(interrupts, os.Interrupt)
+	binary, err := os.Executable()
+	if err != nil {
+		os.Exit(98)
+	}
+	cmd := exec.Command(binary, "-test.run=^TestStartupGoDriverHelper$", "--", "startup-owned-compiler")
+	cmd.Env = os.Environ()
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	code := 1
+	if err := cmd.Run(); err != nil {
+		code = 99
+	}
+	if _, err := os.Stderr.WriteString("go: no such tool \"startup-fixture-compiler\"\n"); err != nil {
+		os.Exit(100)
 	}
 	record.Event, record.ExitCode = "exit", code
 	startupWriteDriverRecord(record)
@@ -379,6 +442,11 @@ func TestStartupGoSubprocessBudget(t *testing.T) {
 	t.Run("shared warmup admission", startupWarmupAdmission)
 	t.Run("foreground preempts another module and joins", startupWarmupPreemption)
 	t.Run("joined owner releases and restores outside behavior", startupWarmupTerminal)
+
+	t.Run("cancellation cannot become successful publication", startupCancelledSuccess)
+	t.Run("cancelled admission never dispatches", startupCancelledAdmission)
+
+	t.Run("owned compiler cleanup on cancel deadline and failure", startupOwnedProcessCleanup)
 
 	t.Run("preserve explicit flags and caller slices", func(t *testing.T) {
 		for _, tc := range []struct {
@@ -882,4 +950,175 @@ func startupInterruptedJoin(t *testing.T) {
 		require.True(t, heldPublication)
 		require.True(t, laterAdmitted)
 	})
+}
+
+func startupCancelledSuccess(t *testing.T) {
+	root := typecheckCacheFixture(t)
+	for _, route := range []string{"partial", "full", "checkout", "background", "targeted"} {
+		t.Run(route, func(t *testing.T) {
+			p := newTestProvider(t)
+			p.compilerGC = func() {}
+			t.Cleanup(func() { require.NoError(t, p.Close()) })
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			store := &startupBindingStore{Store: graph.New()}
+			p.packagesLoad = func(cfg *packages.Config, _ ...string) ([]*packages.Package, error) {
+				if cfg.Mode&(packages.NeedTypes|packages.NeedExportFile) == 0 {
+					return startupFakeMetadata(cfg), nil
+				}
+				cancel()
+				return nil, nil // cancellation raced a nominally successful driver return
+			}
+			var result *semantic.EnrichResult
+			var err error
+			switch route {
+			case "partial":
+				result, err = p.EnrichFilesContext(ctx, store, "", root, []string{"api/api.go"})
+			case "full":
+				result, err = p.EnrichRepoContext(ctx, store, "", root, nil)
+			case "checkout":
+				result, err = p.EnrichRepoContext(semantic.WithCheckoutCompilerScope(ctx, cachedScope), scopeHandleGraph(), "", root, nil)
+			case "background", "targeted":
+				_, err = p.runListing(ctx, root, []string{"./api"}, nil)
+			}
+			require.ErrorIs(t, err, context.Canceled)
+			require.Nil(t, result, "failed work cannot return a successful enrichment result")
+			require.Nil(t, store.files, "cancelled work cannot replace fresh bindings")
+			require.Nil(t, store.rows)
+		})
+	}
+}
+
+func startupCancelledAdmission(t *testing.T) {
+	root := typecheckCacheFixture(t)
+	synctest.Test(t, func(t *testing.T) {
+		p := newTestProvider(t)
+		t.Cleanup(func() { require.NoError(t, p.Close()) })
+		end := p.BeginStartupWarmup()
+		defer end()
+		held, err := p.acquireHeavy(t.Context(), false)
+		require.NoError(t, err)
+		var calls atomic.Int32
+		p.packagesLoad = func(*packages.Config, ...string) ([]*packages.Package, error) { calls.Add(1); return nil, nil }
+		ctx, cancel := context.WithCancel(t.Context())
+		queued := make(chan error, 1)
+		go func() { _, err := p.runListing(ctx, root, []string{"./api"}, nil); queued <- err }()
+		synctest.Wait()
+		cancel()
+		held()
+		require.ErrorIs(t, <-queued, context.Canceled)
+		require.Zero(t, calls.Load(), "preempted listing must not dispatch after admission races cancellation")
+		next, err := p.acquireHeavy(t.Context(), false)
+		require.NoError(t, err)
+		next()
+		before, cancelBefore := context.WithCancel(t.Context())
+		cancelBefore()
+		result, err := p.EnrichFilesContext(before, graph.New(), "", root, []string{"api/api.go"})
+		require.ErrorIs(t, err, context.Canceled)
+		require.Nil(t, result)
+		require.Zero(t, calls.Load())
+	})
+}
+
+func startupOwnedProcessCleanup(t *testing.T) {
+	for _, tc := range []struct{ route, outcome string }{
+		{"partial", "cancel"}, {"partial", "deadline"}, {"partial", "failure"},
+		{"full", "cancel"}, {"checkout", "cancel"}, {"committed", "cancel"},
+		{"background", "cancel"}, {"targeted", "cancel"},
+	} {
+		t.Run(tc.route+" "+tc.outcome, func(t *testing.T) {
+			root := typecheckCacheFixture(t)
+			log := startupDriverLog(t)
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, listener.Close()) })
+			require.NoError(t, listener.(*net.TCPListener).SetDeadline(time.Now().Add(10*time.Second)))
+			t.Setenv("STARTUP_DRIVER_CONTROL", listener.Addr().String())
+			p := newTestProvider(t)
+			p.compilerGC = func() {}
+			t.Cleanup(func() { require.NoError(t, p.Close()) })
+			end := p.BeginStartupWarmup()
+			defer end()
+			ctx, cancel := context.WithCancel(t.Context())
+			if tc.outcome == "deadline" {
+				cancel()
+				ctx, cancel = context.WithTimeout(t.Context(), 2*time.Second)
+			}
+			defer cancel()
+			store := &startupBindingStore{Store: graph.New()}
+			done := make(chan error, 1)
+			var result *semantic.EnrichResult
+			go func() {
+				if tc.route == "partial" {
+					var err error
+					result, err = p.EnrichFilesContext(ctx, store, "", root, []string{"api/api.go"})
+					done <- err
+					return
+				}
+				done <- startupRunRoute(ctx, p, tc.route, root)
+			}()
+			// Given an admitted real package driver with an owned compiler helper,
+			// await its deterministic readiness, not a sleep or a warm-cache hit.
+			conn, err := listener.Accept()
+			if err != nil {
+				cancel()
+				require.Error(t, <-done)
+				require.NoError(t, err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+			var ready [1]byte
+			_, err = io.ReadFull(conn, ready[:])
+			require.NoError(t, err)
+			require.Equal(t, byte(1), ready[0])
+			switch tc.outcome {
+			case "cancel":
+				cancel()
+			case "failure":
+				_, err = conn.Write([]byte{1})
+				require.NoError(t, err)
+			}
+			err = <-done
+			switch tc.outcome {
+			case "cancel":
+				require.ErrorIs(t, err, context.Canceled)
+			case "deadline":
+				require.ErrorIs(t, err, context.DeadlineExceeded)
+			case "failure":
+				require.Error(t, err)
+			}
+			// Then the returned failure is visible and neither bindings nor a
+			// successful result/freshness claim can be published by the partial route.
+			require.Nil(t, result)
+			require.Nil(t, store.files)
+			require.Nil(t, store.rows)
+			records := startupDriverRecords(t, log)
+			evidence, marshalErr := json.Marshal(records)
+			require.NoError(t, marshalErr)
+			require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("HOME"), "startup-cleanup-"+tc.route+"-"+tc.outcome+".json"), evidence, 0o600))
+			started := map[int]string{}
+			compilerStarts, driverStarts := 0, 0
+			for _, record := range records {
+				switch record.Event {
+				case "start":
+					started[record.PID] = record.Kind
+					if record.Kind == "compiler-helper" {
+						compilerStarts++
+					}
+					if record.Kind == "go" && slices.Contains(record.Args, "-export=true") {
+						driverStarts++
+					}
+				case "exit":
+					require.Contains(t, started, record.PID)
+					delete(started, record.PID)
+				}
+			}
+			require.Equal(t, 1, compilerStarts)
+			require.Equal(t, 1, driverStarts)
+			require.Empty(t, started, "every owned process must finish before the pass returns")
+			// A following real pass must reacquire the released exclusive reservation.
+			t.Setenv("STARTUP_DRIVER_CONTROL", "")
+			_, err = p.EnrichFilesContext(t.Context(), graph.New(), "", root, []string{"api/api.go"})
+			require.NoError(t, err)
+		})
+	}
 }

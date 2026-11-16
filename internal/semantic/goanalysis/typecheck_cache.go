@@ -536,6 +536,9 @@ func (p *Provider) runListing(ctx context.Context, loadDir string, patterns, bui
 	out := &tcListing{start: time.Now(), manifests: map[string]*tcManifest{}}
 	roots, err := load(cfg, patterns...)
 	out.elapsed = time.Since(out.start)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return out, ctxErr
+	}
 	if err != nil {
 		return out, err
 	}
