@@ -2,7 +2,6 @@ package store_sqlite
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 )
@@ -118,18 +117,24 @@ func (s *Store) PurgeRepoContext(ctx context.Context, prefix string) (err error)
 	defer owner.finish(&err)
 	tx := owner.tx
 
-	// Collect this repo's node IDs first for edge deletion. Vectors are removed
-	// below by repo_prefix so synthetic chunk rows are covered too. Edge deletion
-	// semantics mirror scope eviction's (store.go): delete every edge touching
-	// one of these nodes, then the nodes themselves.
-	ids, err := repoNodeIDsTxContext(ctx, tx, prefix)
-	if err != nil {
+	// Observe node presence in the purge transaction, like the former ID read.
+	var hasNodes bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM nodes WHERE repo_prefix = ? LIMIT 1)`, prefix).Scan(&hasNodes); err != nil {
 		return err
 	}
-	if err := deleteByIDColumnsTxContext(ctx, tx, "edges", []string{"from_id", "to_id"}, ids); err != nil {
-		return fmt.Errorf("store_sqlite: PurgeRepo edges: %w", err)
+	// Delete every edge touching this repo's nodes, across all generations.
+	// Each uncorrelated subquery builds the ID set once, so to_id needs at
+	// most one edges scan rather than one scan per bound-variable batch.
+	if hasNodes {
+		for _, col := range []string{"from_id", "to_id"} {
+			res, err := tx.ExecContext(ctx, `DELETE FROM edges WHERE `+col+` IN (SELECT id FROM nodes WHERE repo_prefix = ?)`, prefix)
+			noteTableRows("edges", res, err)
+			if err != nil {
+				return fmt.Errorf("store_sqlite: PurgeRepo edges: %w", err)
+			}
+		}
 	}
-	changed := len(ids) > 0
+	changed := hasNodes
 	for _, table := range purgeSidecarTables {
 		res, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE repo_prefix = ?`, prefix)
 		noteTableRows(table, res, err)
@@ -155,7 +160,7 @@ func (s *Store) PurgeRepoContext(ctx context.Context, prefix string) (err error)
 	s.firstIndexDrainsMu.Lock()
 	delete(s.firstIndexDrains, prefix)
 	s.firstIndexDrainsMu.Unlock()
-	s.finishAnalysisMutationLocked(len(ids) > 0)
+	s.finishAnalysisMutationLocked(hasNodes)
 	if changed {
 		s.payloadInputAdminRevision.Add(1)
 		s.markMutationReceiptsIncompleteLocked()
@@ -376,60 +381,6 @@ func (s *Store) RekeyRepoPrefix(oldPrefix, newPrefix string) error {
 	if changed {
 		s.payloadInputAdminRevision.Add(1)
 		s.markMutationReceiptsIncompleteLocked()
-	}
-	return nil
-}
-
-// repoNodeIDsTx returns every node id in repoPrefix, read inside tx. The
-// caller holds writeMu. Rows are fully drained + closed before the caller
-// issues writes on the same tx — SQLite forbids an open read cursor while
-// writing on the same connection.
-func repoNodeIDsTxContext(ctx context.Context, tx *sql.Tx, repoPrefix string) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM nodes WHERE repo_prefix = ?`, repoPrefix)
-	if err != nil {
-		return nil, err
-	}
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, err
-	}
-	_ = rows.Close()
-	return ids, nil
-}
-
-// deleteByIDColumnsTx deletes rows from table where ANY of cols matches one
-// of ids, chunked so each statement stays under SQLite's 999 bound-variable
-// limit. Mirrors scope eviction's separate from_id/to_id edge deletes
-// (store.go) — the semantics source for edge eviction. Empty ids is a no-op.
-func deleteByIDColumnsTxContext(ctx context.Context, tx *sql.Tx, table string, cols, ids []string) error {
-	if len(ids) == 0 {
-		return nil
-	}
-	const chunk = 900
-	for _, col := range cols {
-		for start := 0; start < len(ids); start += chunk {
-			end := minInt(start+chunk, len(ids))
-			batch := ids[start:end]
-			placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
-			args := make([]any, len(batch))
-			for i, id := range batch {
-				args[i] = id
-			}
-			result, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE `+col+` IN (`+placeholders+`)`, args...)
-			noteTableRows(table, result, err)
-			if err != nil {
-				return err
-			}
-		}
 	}
 	return nil
 }
