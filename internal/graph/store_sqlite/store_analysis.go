@@ -513,17 +513,15 @@ func (s *Store) crossRepoCandidatesQuery(baseKinds []graph.EdgeKind, repoPrefixe
 	if len(uniq) == 0 {
 		return "", nil, false
 	}
-	// The projection is the authoritative generation filter: both endpoint
-	// joins pair with the edge's generation and the edge itself is bound, so
-	// a candidate id the frontier CTE produced for another generation cannot
-	// survive here. The CTE arms pair their own node joins for the same
-	// reason, which costs no extra bind.
+	// Bound each frontier arm to the selected generation before endpoint
+	// reads. The projection keeps its generation check and pins both
+	// endpoints to their exact physical primary keys.
 	const projection = `SELECT e.from_id, e.to_id, e.kind, e.file_path, e.line,
        e.confidence, e.confidence_label, e.origin, e.tier, e.cross_repo,
        nf.repo_prefix, nt.repo_prefix
 FROM %s
-JOIN nodes nf ON nf.id = e.from_id AND nf.view_gen = e.view_gen
-JOIN nodes nt ON nt.id = e.to_id AND nt.view_gen = e.view_gen
+CROSS JOIN nodes nf INDEXED BY ` + nodesPrimaryKeyIndexName + ` ON nf.id = e.from_id AND nf.view_gen = e.view_gen
+CROSS JOIN nodes nt INDEXED BY ` + nodesPrimaryKeyIndexName + ` ON nt.id = e.to_id AND nt.view_gen = e.view_gen
 	WHERE nf.repo_prefix <> '' AND nt.repo_prefix <> ''
   AND nf.repo_prefix <> nt.repo_prefix
   AND e.view_gen = ?`
@@ -547,18 +545,22 @@ JOIN nodes nt ON nt.id = e.to_id AND nt.view_gen = e.view_gen
   JOIN edges e ON e.from_id = n.id AND e.view_gen = n.view_gen
   WHERE n.repo_prefix IN (SELECT CAST(value AS TEXT) FROM json_each(?))
     AND e.kind IN (` + inPlaceholders(len(uniq)) + `)
+    AND n.view_gen = ?
   UNION
   SELECT e.id
   FROM nodes n
   JOIN edges e ON e.to_id = n.id AND e.view_gen = n.view_gen
   WHERE n.repo_prefix IN (SELECT CAST(value AS TEXT) FROM json_each(?))
     AND e.kind IN (` + inPlaceholders(len(uniq)) + `)
+    AND n.view_gen = ?
 )
 ` + fmt.Sprintf(projection, `candidate_edges ce JOIN edges e ON e.id = ce.id`)
 		args = append(args, scopeJSON)
 		args = appendKinds(args)
+		args = append(args, s.viewGen)
 		args = append(args, scopeJSON)
 		args = appendKinds(args)
+		args = append(args, s.viewGen)
 		args = append(args, s.viewGen)
 	} else if len(edgeSourceFiles) > 0 || len(incidentNodeFiles) > 0 {
 		candidateQueries := make([]string, 0, 3)
@@ -568,11 +570,13 @@ JOIN nodes nt ON nt.id = e.to_id AND nt.view_gen = e.view_gen
 				return "", nil, false
 			}
 			candidateQueries = append(candidateQueries, `SELECT e.id
-  FROM edges e
+  FROM edges e INDEXED BY edges_by_file
   WHERE e.file_path IN (SELECT CAST(value AS TEXT) FROM json_each(?))
-    AND e.kind IN (`+inPlaceholders(len(uniq))+`)`)
+    AND e.kind IN (`+inPlaceholders(len(uniq))+`)
+    AND e.view_gen = ?`)
 			args = append(args, scopeJSON)
 			args = appendKinds(args)
+			args = append(args, s.viewGen)
 		}
 		if len(incidentNodeFiles) > 0 {
 			scopeJSON, ok := projectionJSON(incidentNodeFiles)
@@ -590,16 +594,20 @@ JOIN nodes nt ON nt.id = e.to_id AND nt.view_gen = e.view_gen
   FROM nodes n
   CROSS JOIN edges e ON e.from_id = n.id AND e.view_gen = n.view_gen
   WHERE n.file_path IN (SELECT CAST(value AS TEXT) FROM json_each(?))
-    AND e.kind IN (`+inPlaceholders(len(uniq))+`)`)
+    AND e.kind IN (`+inPlaceholders(len(uniq))+`)
+    AND n.view_gen = ?`)
 			args = append(args, scopeJSON)
 			args = appendKinds(args)
+			args = append(args, s.viewGen)
 			candidateQueries = append(candidateQueries, `SELECT e.id
   FROM nodes n
   CROSS JOIN edges e ON e.to_id = n.id AND e.view_gen = n.view_gen
   WHERE n.file_path IN (SELECT CAST(value AS TEXT) FROM json_each(?))
-    AND e.kind IN (`+inPlaceholders(len(uniq))+`)`)
+    AND e.kind IN (`+inPlaceholders(len(uniq))+`)
+    AND n.view_gen = ?`)
 			args = append(args, scopeJSON)
 			args = appendKinds(args)
+			args = append(args, s.viewGen)
 		}
 		// CROSS JOIN pins the frontier CTE as the driving loop. With a plain
 		// JOIN the planner drove from edges_by_to on view_gen alone (every
@@ -625,6 +633,10 @@ func (s *Store) crossRepoCandidates(baseKinds []graph.EdgeKind, repoPrefixes, ed
 		return nil
 	}
 	rows, err := s.db.Query(q, args...)
+	const fileIndexHint = "FROM edges e INDEXED BY edges_by_file"
+	if err != nil && isNoSuchIndexErr(err) && strings.Contains(q, fileIndexHint) {
+		rows, err = s.db.Query(strings.Replace(q, fileIndexHint, "FROM edges e", 1), args...)
+	}
 	if err != nil {
 		panicOnFatal(err)
 		return nil

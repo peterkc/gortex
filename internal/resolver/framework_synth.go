@@ -582,19 +582,45 @@ func frameworkFileFrontierNodes(g graph.Store, prefixes, filePaths []string, kin
 			seen[file] = struct{}{}
 			files = append(files, file)
 		}
-		byFile := g.GetFileNodesByPaths(files)
+		requestedKinds := make([]graph.NodeKind, 0, len(kinds))
+		seenKind := make(map[graph.NodeKind]struct{}, len(kinds))
+		for _, kind := range kinds {
+			if kind == "" {
+				continue
+			}
+			if _, dup := seenKind[kind]; dup {
+				continue
+			}
+			seenKind[kind] = struct{}{}
+			requestedKinds = append(requestedKinds, kind)
+		}
+		if len(kinds) > 0 && len(requestedKinds) == 0 {
+			return
+		}
 		byID := make(map[string]*graph.Node)
-		for _, file := range files {
-			for _, node := range byFile[file] {
-				if node == nil || node.ID == "" {
-					continue
+		addNode := func(node *graph.Node) {
+			if node == nil || node.ID == "" {
+				return
+			}
+			if len(wantRepo) > 0 {
+				if _, ok := wantRepo[node.RepoPrefix]; !ok {
+					return
 				}
-				if len(wantRepo) > 0 {
-					if _, ok := wantRepo[node.RepoPrefix]; !ok {
-						continue
-					}
+			}
+			byID[node.ID] = node
+		}
+		if stream, ok := g.(graph.NodesInFilesByKindStreamer); ok && len(requestedKinds) > 0 {
+			for _, nodes := range stream.NodesInFilesByKindSeq(files, requestedKinds) {
+				for _, node := range nodes {
+					addNode(node)
 				}
-				byID[node.ID] = node
+			}
+		} else {
+			byFile := g.GetFileNodesByPaths(files)
+			for _, file := range files {
+				for _, node := range byFile[file] {
+					addNode(node)
+				}
 			}
 		}
 		ids := make([]string, 0, len(byID))
@@ -610,15 +636,7 @@ func frameworkFileFrontierNodes(g graph.Store, prefixes, filePaths []string, kin
 			}
 			return
 		}
-		seenKind := make(map[graph.NodeKind]struct{}, len(kinds))
-		for _, kind := range kinds {
-			if kind == "" {
-				continue
-			}
-			if _, dup := seenKind[kind]; dup {
-				continue
-			}
-			seenKind[kind] = struct{}{}
+		for _, kind := range requestedKinds {
 			for _, id := range ids {
 				if node := byID[id]; node.Kind == kind && !yield(node) {
 					return

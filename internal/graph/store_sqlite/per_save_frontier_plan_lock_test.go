@@ -87,6 +87,7 @@ func TestPerSaveFrontierPlansLockedAcrossStatisticsRegimes(t *testing.T) {
 				regime.apply(t, ctx, conn)
 				cross := explainOnConn(t, ctx, conn, crossQuery, crossArgs...)
 				assertNoGenerationWalk(t, "cross_repo_frontier", cross, "e")
+				assertCrossRepoEndpointPrimaryKeys(t, "cross_repo_frontier", cross)
 				if joined := strings.Join(cross, "\n"); !strings.Contains(joined, "SCAN ce") {
 					t.Errorf("cross_repo_frontier: the frontier CTE does not drive:\n%s", joined)
 				}
