@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"github.com/zzet/gortex/internal/graph"
+	"io"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -334,8 +335,10 @@ func TestPurgeRepo_EdgeRowsMatchLegacyAcrossGenerations(t *testing.T) {
 }
 
 type purgeEdgeStatement struct {
-	query string
-	args  []any
+	query        string
+	args         []any
+	plan         []string
+	rowsAffected int64
 }
 
 // This test-only driver observes real ExecContext calls without changing SQL.
@@ -359,77 +362,160 @@ type purgeEdgeConn struct {
 }
 
 func (c *purgeEdgeConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	if strings.HasPrefix(query, "DELETE FROM edges WHERE ") {
-		statement := purgeEdgeStatement{query: query}
-		for _, arg := range args {
-			statement.args = append(statement.args, arg.Value)
-		}
-		*c.statements = append(*c.statements, statement)
+	result, err := c.Conn.(driver.ExecerContext).ExecContext(ctx, query, args)
+	if err != nil || !strings.HasPrefix(query, "DELETE FROM edges WHERE ") {
+		return result, err
 	}
-	return c.Conn.(driver.ExecerContext).ExecContext(ctx, query, args)
+	statement := purgeEdgeStatement{query: query}
+	for _, arg := range args {
+		statement.args = append(statement.args, arg.Value)
+	}
+	statement.rowsAffected, err = result.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	// Explain on the same connection while the purge's TEMP table still exists.
+	rows, err := c.Conn.(driver.QueryerContext).QueryContext(ctx, `EXPLAIN QUERY PLAN `+query, args)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck // read cursor only
+	values := make([]driver.Value, 4)
+	for {
+		err := rows.Next(values)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		statement.plan = append(statement.plan, values[3].(string))
+	}
+	*c.statements = append(*c.statements, statement)
+	return result, nil
 }
 
-func TestPurgeRepo_EdgeDeletePlansAreConstant(t *testing.T) {
+func TestPurgeRepo_EdgeDeletePlansAreBounded(t *testing.T) {
 	for _, count := range []int{1, 2000} {
-		t.Run(strconv.Itoa(count), func(t *testing.T) {
-			// Given more than two legacy 900-ID batches and edges in both directions.
-			s := openPurgeStore(t)
-			tx, err := s.writerDB.Begin()
-			require.NoError(t, err)
-			defer tx.Rollback() //nolint:errcheck // rollback after commit is a no-op
-			for i := range count {
-				id := strconv.Itoa(i)
-				_, err := tx.Exec(`INSERT INTO nodes (id, kind, name, file_path, repo_prefix) VALUES (?, 'function', 'A', 'a.go', 'repoA')`, id)
+		for _, edgeCount := range []int{30000, 30001} {
+			t.Run(strconv.Itoa(count)+"/"+strconv.Itoa(edgeCount), func(t *testing.T) {
+				// Given multiple incoming-edge chunks with gapped rowids, a whole
+				// chunk with no matches, and an exact or partial final chunk.
+				s := openPurgeStore(t)
+				tx, err := s.writerDB.Begin()
 				require.NoError(t, err)
-				_, err = tx.Exec(`INSERT INTO edges (from_id, to_id, kind) VALUES (?, 'other', 'calls'), ('other', ?, 'calls')`, id, id)
+				defer tx.Rollback() //nolint:errcheck // rollback after commit is a no-op
+				for i := range count {
+					id := strconv.Itoa(i)
+					_, err := tx.Exec(`INSERT INTO nodes (id, kind, name, file_path, repo_prefix) VALUES (?, 'function', 'A', 'a.go', 'repoA')`, id)
+					require.NoError(t, err)
+					_, err = tx.Exec(`INSERT INTO edges (from_id, to_id, kind) VALUES (?, 'other', 'calls')`, id)
+					require.NoError(t, err)
+				}
+				_, err = tx.Exec(`WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM n WHERE i+1 < ?)
+INSERT INTO edges (id, from_id, to_id, kind, line)
+SELECT 100000+i*3, 'other', CASE WHEN i >= 10000 AND i < 20000 THEN 'kept' ELSE '0' END, 'calls', i FROM n`, edgeCount)
 				require.NoError(t, err)
-			}
-			require.NoError(t, tx.Commit())
-			var statements []purgeEdgeStatement
-			// Join the checkpoint loop first: its goroutine reads writerDB.
-			s.stopCheckpointLoop()
-			writer := sql.OpenDB(purgeEdgeConnector{dsn: s.dbPath, statements: &statements})
-			writer.SetMaxOpenConns(1)
-			s.writeMu.Lock()
-			original := s.writerDB
-			s.writerDB = writer
-			s.writeMu.Unlock()
-			t.Cleanup(func() {
+				require.NoError(t, tx.Commit())
+				var statements []purgeEdgeStatement
+				// Join the checkpoint loop first: its goroutine reads writerDB.
+				s.stopCheckpointLoop()
+				writer := sql.OpenDB(purgeEdgeConnector{dsn: s.dbPath, statements: &statements})
+				writer.SetMaxOpenConns(1)
 				s.writeMu.Lock()
-				s.writerDB = original
+				original := s.writerDB
+				s.writerDB = writer
 				s.writeMu.Unlock()
-				require.NoError(t, writer.Close())
-			})
+				t.Cleanup(func() {
+					s.writeMu.Lock()
+					s.writerDB = original
+					s.writeMu.Unlock()
+					require.NoError(t, writer.Close())
+				})
 
-			// When the actual purge executes, then each column has one DELETE and
-			// no correlated subquery or repeated full edges scan in its query plan.
-			require.NoError(t, s.PurgeRepo("repoA"))
-			var plans [][]string
-			for _, statement := range statements {
-				rows, err := s.db.Query(`EXPLAIN QUERY PLAN `+statement.query, statement.args...)
-				require.NoError(t, err)
-				var plan []string
-				scans := 0
-				for rows.Next() {
-					var id, parent, unused int
-					var detail string
-					require.NoError(t, rows.Scan(&id, &parent, &unused, &detail))
-					plan = append(plan, detail)
-					require.NotContains(t, detail, "CORRELATED")
-					if strings.HasPrefix(detail, "SCAN edges") {
-						scans++
+				// When the purge executes, then outgoing deletes use bounded ID
+				// seeks and incoming deletes visit each primary-key chunk once.
+				require.NoError(t, s.PurgeRepo("repoA"))
+				fromStatements, toStatements, emptyChunks := 0, 0, 0
+				var previousUpper int64
+				for _, statement := range statements {
+					for _, detail := range statement.plan {
+						require.NotContains(t, detail, "CORRELATED")
+						require.NotContains(t, detail, "SCAN edges")
+					}
+					switch strings.Fields(statement.query)[4] {
+					case "from_id":
+						require.True(t, strings.HasPrefix(statement.query, "DELETE FROM edges WHERE from_id IN ("))
+						fromStatements++
+						require.NotEmpty(t, statement.args)
+						require.LessOrEqual(t, len(statement.args), 900)
+						require.Equal(t, len(statement.args), strings.Count(statement.query, "?"))
+						require.Contains(t, strings.Join(statement.plan, "\n"), "SEARCH edges")
+					case "id":
+						require.True(t, strings.HasPrefix(statement.query, "DELETE FROM edges WHERE id > ? AND id <= ? AND to_id IN ("))
+						toStatements++
+						require.Len(t, statement.args, 2)
+						require.Equal(t, previousUpper, statement.args[0])
+						previousUpper = statement.args[1].(int64)
+						wantUpper := int64(100000 + (minInt(toStatements*10000, edgeCount)-1)*3)
+						require.Equal(t, wantUpper, previousUpper, "each range must cover at most 10,000 fixture rows")
+						require.Contains(t, statement.plan, "SEARCH edges USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)")
+						require.LessOrEqual(t, statement.rowsAffected, int64(10000))
+						if statement.rowsAffected == 0 {
+							emptyChunks++
+						}
+					default:
+						t.Fatalf("unbounded edge DELETE: %s; plan: %v", statement.query, statement.plan)
 					}
 				}
-				require.NoError(t, rows.Err())
-				require.NoError(t, rows.Close())
-				require.LessOrEqual(t, scans, 1, "%v", plan)
-				plans = append(plans, plan)
-			}
-			require.Equal(t, 2, len(statements), "edge DELETEs must be constant in N; EXPLAIN: %v", plans)
-			var remaining int
-			require.NoError(t, s.db.QueryRow(`SELECT COUNT(*) FROM edges`).Scan(&remaining))
-			require.Zero(t, remaining)
-		})
+				// The exact multiple must not add an empty tail statement. The
+				// empty middle chunk must not end the scan before later matches.
+				require.Equal(t, (count+899)/900, fromStatements)
+				require.Equal(t, (edgeCount+9999)/10000, toStatements)
+				require.Equal(t, 1, emptyChunks)
+				var remaining int
+				require.NoError(t, s.db.QueryRow(`SELECT COUNT(*) FROM edges`).Scan(&remaining))
+				require.Equal(t, 10000, remaining)
+			})
+		}
+	}
+}
+
+func TestPurgeRepo_TempIDsDoNotLeakAcrossWriterReuse(t *testing.T) {
+	installShadowDeleteFunction(t)
+	s := openPurgeStore(t)
+	seedRepoRows(t, s.writerDB, "gone")
+	seedRepoRows(t, s.writerDB, "next")
+	shadowDeleteTrigger(t, s, "nodes", "OLD.repo_prefix")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reached := false
+	shadowDeleteObserver.Store(&shadowDeleteProbe{fire: func(prefix string) {
+		if prefix == "gone" {
+			reached = true
+			cancel()
+		}
+	}})
+
+	// Given cancellation in the final node DELETE, after edge work and
+	// TEMP-table cleanup, the rollback must leave the same writer reusable.
+	err := s.PurgeRepoContext(ctx, "gone")
+	require.True(t, reached)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, countByPrefix(t, s.db, "nodes", "gone"))
+	var tempTables int
+	require.NoError(t, s.writerDB.QueryRow(`SELECT count(*) FROM temp.sqlite_master WHERE name='purge_node_ids'`).Scan(&tempTables))
+	require.Zero(t, tempTables)
+	_, err = s.writerDB.Exec(`DROP TRIGGER test_shadow_delete`)
+	require.NoError(t, err)
+
+	// When purging again after rollback, then both it and a later completed
+	// purge succeed without a name clash or residual TEMP IDs on the writer.
+	for _, prefix := range []string{"gone", "next"} {
+		require.NoError(t, s.PurgeRepo(prefix))
+		require.Zero(t, countByPrefix(t, s.db, "nodes", prefix))
+		require.NoError(t, s.writerDB.QueryRow(`SELECT count(*) FROM temp.sqlite_master WHERE name='purge_node_ids'`).Scan(&tempTables))
+		require.Zero(t, tempTables)
 	}
 }
 
