@@ -386,12 +386,19 @@ func TestPurgeRepo_EdgeDeletePlansAreConstant(t *testing.T) {
 			}
 			require.NoError(t, tx.Commit())
 			var statements []purgeEdgeStatement
+			// Join the checkpoint loop first: its goroutine reads writerDB.
+			s.stopCheckpointLoop()
+			writer := sql.OpenDB(purgeEdgeConnector{dsn: s.dbPath, statements: &statements})
+			writer.SetMaxOpenConns(1)
+			s.writeMu.Lock()
 			original := s.writerDB
-			s.writerDB = sql.OpenDB(purgeEdgeConnector{dsn: s.dbPath, statements: &statements})
-			s.writerDB.SetMaxOpenConns(1)
+			s.writerDB = writer
+			s.writeMu.Unlock()
 			t.Cleanup(func() {
-				require.NoError(t, s.writerDB.Close())
+				s.writeMu.Lock()
 				s.writerDB = original
+				s.writeMu.Unlock()
+				require.NoError(t, writer.Close())
 			})
 
 			// When the actual purge executes, then each column has one DELETE and
