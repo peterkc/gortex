@@ -13,7 +13,7 @@ import (
 // Count full rows returned by the production reads, not a modeled query.
 type frameworkFileReadCounter struct {
 	graph.Store
-	rows int
+	rows  int
 	reads int
 	files []string
 }
@@ -30,9 +30,9 @@ func (s *frameworkFileReadCounter) GetFileNodesByPaths(files []string) map[strin
 
 type frameworkKindReadCounter struct {
 	*frameworkFileReadCounter
-	stream graph.NodesInFilesByKindStreamer
+	stream      graph.NodesInFilesByKindStreamer
 	streamReads int
-	kinds []graph.NodeKind
+	kinds       []graph.NodeKind
 }
 
 func (s *frameworkKindReadCounter) NodesInFilesByKindSeq(files []string, kinds []graph.NodeKind) iter.Seq2[string, []*graph.Node] {
@@ -54,7 +54,7 @@ func newFrameworkKindReadCounter(t *testing.T) *frameworkKindReadCounter {
 	store := openFrameworkScopedSQLiteStore(t)
 	return &frameworkKindReadCounter{
 		frameworkFileReadCounter: &frameworkFileReadCounter{Store: store},
-		stream: store.(graph.NodesInFilesByKindStreamer),
+		stream:                   store.(graph.NodesInFilesByKindStreamer),
 	}
 }
 
@@ -113,9 +113,9 @@ func TestFrameworkFileFrontierKindReadKeepsUnfilteredAndEmptyInputs(t *testing.T
 	// Given empty inputs, when no usable kind or file is requested, then do
 	// not read. An omitted kind list still performs the unfiltered census.
 	for _, tc := range []struct {
-		name string
-		files []string
-		kinds []graph.NodeKind
+		name     string
+		files    []string
+		kinds    []graph.NodeKind
 		wantRows int
 	}{
 		{"no_files", nil, []graph.NodeKind{graph.KindFunction}, 0},

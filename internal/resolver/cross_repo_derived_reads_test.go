@@ -29,8 +29,8 @@ func TestCrossRepoDerivedReadChangeMatchesAllCallerForms(t *testing.T) {
 				store, legacy := open(), open()
 				for _, phase := range []struct {
 					name, owner string
-					present bool
-					want int
+					present     bool
+					want        int
 				}{
 					{"initial", "b", true, 4},
 					{"changed_target_unchanged_source", "c", true, 4},
@@ -93,12 +93,12 @@ func seedDerivedCrossRepoRows(g graph.Store, targetRepo string, present bool) {
 	}
 	var edges []*graph.Edge
 	for i, kind := range graph.BaseKindsForCrossRepo() {
-		edge := &graph.Edge{From: nodes[0].ID, To: "b/target.go::target", Kind: kind, FilePath: "edge-source.go", Line: i+1, Confidence: 0.8, Origin: graph.OriginASTResolved, Meta: map[string]any{"opaque": "retain"}}
+		edge := &graph.Edge{From: nodes[0].ID, To: "b/target.go::target", Kind: kind, FilePath: "edge-source.go", Line: i + 1, Confidence: 0.8, Origin: graph.OriginASTResolved, Meta: map[string]any{"opaque": "retain"}}
 		copy := *edge
 		edges = append(edges, edge, &copy)
 	}
 	for i, target := range []string{"a/source.go::local", "unresolved::missing", "external::pkg", "loose"} {
-		edges = append(edges, &graph.Edge{From: nodes[0].ID, To: target, Kind: graph.EdgeCalls, FilePath: "edge-source.go", Line: 10+i})
+		edges = append(edges, &graph.Edge{From: nodes[0].ID, To: target, Kind: graph.EdgeCalls, FilePath: "edge-source.go", Line: 10 + i})
 	}
 	edges = append(edges, &graph.Edge{From: nodes[0].ID, To: "b/target.go::target", Kind: graph.EdgeReferences, FilePath: "edge-source.go", Line: 20})
 	g.AddBatch(nodes, edges)

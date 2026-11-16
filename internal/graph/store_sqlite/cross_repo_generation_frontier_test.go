@@ -39,7 +39,7 @@ func TestCrossRepoFrontierConstrainsGenerationBeforeEndpointReads(t *testing.T) 
 				targetRepo = "a"
 			}
 			for _, scope := range []struct {
-				name string
+				name                      string
 				repos, sources, incidents []string
 			}{
 				{"repo_source", []string{"a", "a", ""}, nil, nil},
@@ -107,7 +107,7 @@ func TestCrossRepoEndpointPlansUseExactPrimaryKeys(t *testing.T) {
 				}
 				reloadPlannerStats(t, ctx, conn)
 				for _, scope := range []struct {
-					name string
+					name                      string
 					repos, sources, incidents []string
 				}{
 					{"full", nil, nil, nil},
