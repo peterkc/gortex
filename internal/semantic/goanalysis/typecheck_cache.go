@@ -1573,10 +1573,12 @@ func (p *Provider) loadCheckoutProgramCached(ctx context.Context, loadDir, diges
 		}
 		if check.missReason != "" {
 			stats.ValidateMs += time.Since(validateStart).Milliseconds()
-			if !listed && !targetedWaited && (check.missReason == "root_unlisted" || check.missReason == "cold") {
+			if !listed && !targetedWaited && ctx.Value(startupCompilerAdmission{}) != p && (check.missReason == "root_unlisted" || check.missReason == "cold") {
 				// The warm-up is listing this root's package right now
 				// (a dirty or recently touched package): wait for that
 				// listing, bounded, instead of listing it a second time.
+				// A pass holding startup admission must list itself: the
+				// warm-up cannot get that lease until the pass returns.
 				targetedWaited = true
 				st.mu.Unlock()
 				waited, outcome := p.waitTargetedListing(ctx, filepath.Clean(loadDir), plan.rootDirs, targetedWaitBound())

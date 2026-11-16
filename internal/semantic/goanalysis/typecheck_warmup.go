@@ -991,10 +991,20 @@ func (p *Provider) runWarmup(e *checkoutWarmup) {
 			r.notifyLocked()
 			r.mu.Unlock()
 		}
-		listCtx, stalled := p.backgroundListingDeadline(ctx, !targetedBatch && !escalated)
-		listing, err := p.runListing(listCtx, e.loadDir, batch, flags)
+		// Admission wait is not a stalled compiler: arm the deadline only
+		// after acquiring the lease and carry it through runListing.
+		releaseListing, err := p.acquireStartupListing(ctx)
+		var listing *tcListing
+		var stall bool
+		if err == nil {
+			listCtx, stalled := p.backgroundListingDeadline(ctx, !targetedBatch && !escalated)
+			listCtx = context.WithValue(listCtx, startupCompilerAdmission{}, p)
+			listing, err = p.runListing(listCtx, e.loadDir, batch, flags)
+			stall = stalled()
+			releaseListing()
+		}
 		preempted := ctx.Err() != nil
-		stall := stalled() && !preempted
+		stall = stall && !preempted
 		cancel()
 		if stall {
 			// A background listing that has not finished within the stall
