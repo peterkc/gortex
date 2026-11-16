@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -269,4 +270,72 @@ func TestResolverHelper_OwnedPool_SpawnFailureIsSticky(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, spawns, "a poisoned owned pool must not retry the spawn")
+}
+
+// Given a typed router acquisition, checkout cleanup must respect its pin.
+func TestRouterPinnedWorkspaceProviderSurvivesCheckoutClose(t *testing.T) {
+	root := t.TempDir()
+	r := NewRouter(root, zap.NewNop())
+	t.Cleanup(func() { require.NoError(t, r.Close()) })
+	spec := &ServerSpec{Name: "pin-fixture", Languages: []string{"go"}}
+	r.RegisterSpec(spec)
+	injectProvider(r, spec.Name, root, time.Now(), 0)
+	r.avail[spec.Name] = true
+	p, release, err := r.AcquireSpecWorkspace(spec, root)
+	require.NoError(t, err)
+	// When cleanup races this use, it must keep the same usable provider.
+	assert.Equal(t, 1, r.Stats()[0].InUse)
+	assert.Zero(t, r.CloseCheckoutWorkspace("go", root))
+	assert.False(t, p.closed)
+	other, releaseOther, err := r.AcquireSpecWorkspace(spec, root)
+	require.NoError(t, err)
+	require.Same(t, p, other)
+	release()
+	release()
+	assert.Equal(t, 1, r.Stats()[0].InUse, "repeated release cannot consume another caller's pin")
+	assert.Zero(t, r.CloseCheckoutWorkspace("go", root))
+	releaseOther()
+	assert.Equal(t, 1, r.CloseCheckoutWorkspace("go", root))
+	assert.True(t, p.closed)
+	require.NoError(t, r.Close())
+	_, releaseClosed, err := r.AcquireSpecWorkspace(spec, root)
+	require.Error(t, err)
+	assert.Nil(t, releaseClosed)
+}
+
+func TestLazyResolverHelperHoldsRouterPinDuringCall(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+			// Given a router-backed helper and an existing provider.
+			root := t.TempDir()
+			r := NewRouter(root, zap.NewNop())
+			t.Cleanup(func() { require.NoError(t, r.Close()) })
+			spec := &ServerSpec{Name: "helper-pin-fixture", Languages: []string{"go"}}
+			r.RegisterSpec(spec)
+			injectProvider(r, spec.Name, root, time.Now(), 0)
+			r.avail[spec.Name] = true
+			h := NewPinnedLazyResolverHelper(func() (*Provider, func(), error) {
+				if fail {
+					return nil, nil, errors.New("lookup failed")
+				}
+				return r.AcquireSpecWorkspace(spec, root)
+			}, root, []string{".ts"}, time.Second, zap.NewNop())
+			p, release, ok := h.acquire("main.ts")
+			if fail {
+				require.False(t, ok)
+				assert.Zero(t, r.Stats()[0].InUse)
+				return
+			}
+			require.True(t, ok)
+			// When cleanup runs during this call, the provider stays open.
+			assert.Equal(t, 1, r.Stats()[0].InUse)
+			assert.Zero(t, r.CloseCheckoutWorkspace("go", root))
+			assert.False(t, p.closed)
+			release()
+			if stats := r.Stats(); assert.Len(t, stats, 1) {
+				assert.Zero(t, stats[0].InUse)
+			}
+			assert.Equal(t, 1, r.CloseCheckoutWorkspace("go", root))
+		})
+	}
 }

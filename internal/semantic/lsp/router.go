@@ -582,6 +582,16 @@ func (r *Router) ForSpecWorkspace(spec *ServerSpec, workspace string) (*Provider
 	return r.forSpecWorkspace(spec, workspace, false)
 }
 
+// AcquireSpecWorkspace pins the selected provider until release is called.
+// The release is idempotent; errors acquire no pin and return no release.
+func (r *Router) AcquireSpecWorkspace(spec *ServerSpec, workspace string) (*Provider, func(), error) {
+	p, err := r.forSpecWorkspace(spec, workspace, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	return p, sync.OnceFunc(func() { r.ReleaseSpecWorkspace(spec.Name, workspace) }), nil
+}
+
 // forSpecWorkspace is ForSpecWorkspace with an optional in-use pin. When pin
 // is true the returned provider's inUse count is incremented in the SAME
 // locked section that looks it up or publishes it — so a concurrent spawn's

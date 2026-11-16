@@ -45,10 +45,11 @@ func (s *Server) enrichNodeOnDemand(ctx context.Context, node *graph.Node) {
 	// enrichment. A request reading a checkout of its own is not stamped at all
 	// rather than having the shared corpus enriched behind its back from a
 	// language server rooted in a different tree.
-	_, out, provider := s.lspEnrichmentTarget(ctx, EnrichProducerSemanticType, node)
+	_, out, provider, release := s.lspEnrichmentTarget(ctx, EnrichProducerSemanticType, node)
 	if out == nil {
 		return
 	}
+	defer release()
 	if _, err := provider.EnrichNode(out.Store, out.Root, node); err != nil {
 		out.Abandon()
 		return
@@ -67,14 +68,14 @@ func (s *Server) enrichNodeOnDemand(ctx context.Context, node *graph.Node) {
 // can back off separately from an output refusal.
 func (s *Server) lspEnrichmentTarget(
 	ctx context.Context, producer string, node *graph.Node,
-) (string, *EnrichmentOutput, *lsp.Provider) {
+) (string, *EnrichmentOutput, *lsp.Provider, func()) {
 	absPath, err := s.absolutePath(node.FilePath)
 	if err != nil {
-		return "", nil, nil
+		return "", nil, nil, nil
 	}
 	root, err := s.workspaceRootFor(absPath)
 	if err != nil {
-		return "", nil, nil
+		return "", nil, nil, nil
 	}
 	noteRefusal := func() {
 		requestViewFromContext(ctx).noteDegraded([]graphview.CapabilityStatus{
@@ -83,11 +84,11 @@ func (s *Server) lspEnrichmentTarget(
 	}
 	if requestViewFromContext(ctx).readsOwnCheckout() {
 		noteRefusal()
-		return "", nil, nil
+		return "", nil, nil, nil
 	}
 	start, _, err := s.lspProviderStartForPath(absPath)
 	if err != nil {
-		return absPath, nil, nil
+		return absPath, nil, nil, nil
 	}
 	// Selection above is inert. From here, even a failed or abandoned output
 	// admission can supersede a standing receipt, and startup can own a client.
@@ -98,18 +99,18 @@ func (s *Server) lspEnrichmentTarget(
 	out, err := s.beginEnrichmentOutput(ctx, producer, node.RepoPrefix, root)
 	if err != nil {
 		noteRefusal()
-		return "", nil, nil
+		return "", nil, nil, nil
 	}
 	if out.Root == "" {
 		out.Abandon()
-		return "", nil, nil
+		return "", nil, nil, nil
 	}
-	provider, err := start()
+	provider, release, err := start()
 	if err != nil || provider == nil {
 		out.Abandon()
-		return absPath, nil, nil
+		return absPath, nil, nil, nil
 	}
-	return absPath, out, provider
+	return absPath, out, provider, release
 }
 
 // lspEnrichmentCapability names what an on-demand enrichment would have served
@@ -172,7 +173,7 @@ func (s *Server) confirmSymbolRefsAt(ctx context.Context, node *graph.Node, now 
 	if claim == nil {
 		return
 	}
-	path, out, provider := s.lspEnrichmentTarget(ctx, EnrichProducerSymbolRefs, node)
+	path, out, provider, release := s.lspEnrichmentTarget(ctx, EnrichProducerSymbolRefs, node)
 	if out == nil {
 		// Admission refusal, particularly a routed view, must leave the primary
 		// symbol eligible. Only remove our own claim, never a later epoch's entry.
@@ -184,6 +185,7 @@ func (s *Server) confirmSymbolRefsAt(ctx context.Context, node *graph.Node, now 
 		}
 		return
 	}
+	defer release()
 	count, err := provider.ConfirmSymbolRefs(out.Store, out.Root, node)
 	accepted := false
 	if err != nil {
@@ -275,10 +277,11 @@ func (s *Server) handleGetDiagnostics(ctx context.Context, req mcp.CallToolReque
 	wait := req.GetBool("wait", false)
 	timeoutMs := req.GetInt("timeout_ms", 5000)
 
-	provider, absPath, err := s.lspProviderForPath(path)
+	provider, absPath, release, err := s.lspProviderForPath(path)
 	if err != nil {
 		return s.lspNoProviderResult(path, err), nil
 	}
+	defer release()
 
 	if err := provider.EnsureFileOpen(filepath.Dir(absPath), filepath.Base(absPath)); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("open document: %v", err)), nil
@@ -309,10 +312,11 @@ func (s *Server) handleGetCodeActions(ctx context.Context, req mcp.CallToolReque
 	rng := rangeFromRequest(req)
 	only := splitCSV(req.GetString("only", ""))
 
-	provider, absPath, err := s.lspProviderForPath(path)
+	provider, absPath, release, err := s.lspProviderForPath(path)
 	if err != nil {
 		return s.lspNoProviderResult(path, err), nil
 	}
+	defer release()
 	if err := provider.EnsureFileOpen(filepath.Dir(absPath), filepath.Base(absPath)); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("open document: %v", err)), nil
 	}
@@ -385,10 +389,11 @@ func (s *Server) handleApplyCodeAction(ctx context.Context, req mcp.CallToolRequ
 	rng := rangeFromRequest(req)
 	only := splitCSV(req.GetString("only", ""))
 
-	provider, absPath, err := s.lspProviderForPath(path)
+	provider, absPath, release, err := s.lspProviderForPath(path)
 	if err != nil {
 		return s.lspNoProviderResult(path, err), nil
 	}
+	defer release()
 	if err := provider.EnsureFileOpen(filepath.Dir(absPath), filepath.Base(absPath)); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("open document: %v", err)), nil
 	}
@@ -428,10 +433,11 @@ func (s *Server) handleFixAllInFile(ctx context.Context, req mcp.CallToolRequest
 	if cerr := s.guardCallerPath(ctx, path); cerr != nil {
 		return mcp.NewToolResultError(cerr.Error()), nil
 	}
-	provider, absPath, err := s.lspProviderForPath(path)
+	provider, absPath, release, err := s.lspProviderForPath(path)
 	if err != nil {
 		return s.lspNoProviderResult(path, err), nil
 	}
+	defer release()
 	if err := provider.EnsureFileOpen(filepath.Dir(absPath), filepath.Base(absPath)); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("open document: %v", err)), nil
 	}
@@ -458,7 +464,7 @@ func (s *Server) handleFixAllInFile(ctx context.Context, req mcp.CallToolRequest
 
 // lspProviderForPath resolves the right *lsp.Provider for the given
 // file path. The path may be repo-relative or absolute. Returns the
-// *lsp.Provider, the absolute path it routed to, and an error when no
+// *lsp.Provider, the absolute path it routed to, its per-use release, and an error when no
 // provider applies.
 //
 // Resolution order: when SemanticManager().LSPRouter() returns a
@@ -466,20 +472,21 @@ func (s *Server) handleFixAllInFile(ctx context.Context, req mcp.CallToolRequest
 // eviction). Otherwise we fall back to scanning eagerly-registered
 // Providers via Manager.AllProviders() — the legacy path that still
 // covers user-defined daemons (`pc.Daemon` without a registry spec).
-func (s *Server) lspProviderForPath(path string) (*lsp.Provider, string, error) {
+func (s *Server) lspProviderForPath(path string) (*lsp.Provider, string, func(), error) {
 	start, abs, err := s.lspProviderStartForPath(path)
 	if err != nil {
-		return nil, abs, err
+		return nil, abs, nil, err
 	}
-	provider, err := start()
-	return provider, abs, err
+	provider, release, err := start()
+	return provider, abs, release, err
 }
 
 // lspProviderStartForPath selects a candidate without spawning or opening a
-// client. The returned closure captures that selection: availability changes
+// client. A successful start returns a release the holder must call.
+// The returned closure captures that selection: availability changes
 // after this point can fail startup, but never select a new effectful path.
 // Callers that write must admit their output before invoking it.
-func (s *Server) lspProviderStartForPath(path string) (func() (*lsp.Provider, error), string, error) {
+func (s *Server) lspProviderStartForPath(path string) (func() (*lsp.Provider, func(), error), string, error) {
 	if s.semanticMgr == nil {
 		return nil, "", errors.New("semantic manager not configured")
 	}
@@ -498,12 +505,12 @@ func (s *Server) lspProviderStartForPath(path string) (func() (*lsp.Provider, er
 		if err != nil {
 			return nil, abs, err
 		}
-		return func() (*lsp.Provider, error) {
-			provider, err := r.ForSpecWorkspace(spec, root)
+		return func() (*lsp.Provider, func(), error) {
+			provider, release, err := r.AcquireSpecWorkspace(spec, root)
 			if err != nil {
-				return nil, fmt.Errorf("router spawn %s: %w", spec.Name, err)
+				return nil, nil, fmt.Errorf("router spawn %s: %w", spec.Name, err)
 			}
-			return provider, nil
+			return provider, release, nil
 		}, abs, nil
 	}
 	// A router-unavailable spec can still have a legacy custom daemon.
@@ -516,11 +523,11 @@ func (s *Server) lspProviderStartForPath(path string) (func() (*lsp.Provider, er
 		if err != nil {
 			return nil, abs, err
 		}
-		return func() (*lsp.Provider, error) {
+		return func() (*lsp.Provider, func(), error) {
 			if err := provider.EnsureClient(root); err != nil {
-				return nil, fmt.Errorf("ensure client %s: %w", spec.Name, err)
+				return nil, nil, fmt.Errorf("ensure client %s: %w", spec.Name, err)
 			}
-			return provider, nil
+			return provider, func() {}, nil
 		}, abs, nil
 	}
 	return nil, abs, fmt.Errorf("no LSP provider registered for languages %v", spec.Languages)

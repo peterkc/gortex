@@ -125,9 +125,9 @@ func csharpResolverHelperEnabled() bool {
 // small tracked-workspace counts).
 func BuildResolverLSPHelper(router *lsp.Router, spec *lsp.ServerSpec, absRoot string, poolSize int, logger *zap.Logger) *lsp.ResolverHelper {
 	if poolSize <= 1 {
-		return lsp.NewLazyResolverHelper(
-			func() (*lsp.Provider, error) {
-				return router.ForSpecWorkspace(spec, absRoot)
+		return lsp.NewPinnedLazyResolverHelper(
+			func() (*lsp.Provider, func(), error) {
+				return router.AcquireSpecWorkspace(spec, absRoot)
 			},
 			absRoot,
 			spec.Extensions,
