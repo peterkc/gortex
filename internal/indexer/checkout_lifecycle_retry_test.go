@@ -115,7 +115,9 @@ func TestFamilyRetryDefersClosingGenerationRetirementUntilReady(t *testing.T) {
 
 				// When its real timer fires while cleanup release is still deferred.
 				<-fired
-				f.lc.retryWG.Wait()
+				// Retry admission remains open, so use bubble quiescence rather than
+				// the shutdown WaitGroup, which the next timer can reuse.
+				synctest.Wait()
 
 				// Then neither an owed generation nor an interrupted release is swept.
 				requireGenerationStateWithPayload(t, f.store, owed, store_sqlite.ViewGenerationFailed)
@@ -130,7 +132,7 @@ func TestFamilyRetryDefersClosingGenerationRetirementUntilReady(t *testing.T) {
 				case "ready":
 					f.lc.MarkRepositoryCleanupReady()
 					<-fired
-					f.lc.retryWG.Wait()
+					synctest.Wait()
 				case "explicit_reconcile":
 					_, err = f.lc.ReconcileFamily(t.Context(), retryFamily)
 				case "explicit_sweep":
