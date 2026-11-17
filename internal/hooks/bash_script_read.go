@@ -517,19 +517,19 @@ func scriptWrites(scripts []analyzedScript, dirs commandDirs) []BashWrite {
 // enrichBashScriptRead answers inline Python that reads indexed source.
 // answered is false when the command runs no such script, so the caller
 // falls through to its own verdict.
-// The deadline bounds the analysis; a zero one is inlineScriptTime from now.
+// The deadline bounds the analysis; a zero one starts after command scanning.
 // What only the extra analysis sees is answered by enrichBashCommand after
 // this, with its own budget.
 func enrichBashScriptRead(cmd, cwd string, scopeProbe fileScopeProbe, deadline time.Time) (enrichResult, bool) {
 	started := time.Now()
-	if deadline.IsZero() {
-		deadline = started.Add(inlineScriptTime)
-	}
 	scripts := pythonScriptsAt(cmd)
 	if len(scripts) == 0 {
 		return enrichResult{}, false
 	}
 	dirs := newCommandDirs(cmd)
+	if deadline.IsZero() {
+		deadline = time.Now().Add(inlineScriptTime)
+	}
 	return scriptReadAnswer(analyzeInlineScripts(scripts, deadline, false), false, dirs, cwd, scopeProbe, started)
 }
 
