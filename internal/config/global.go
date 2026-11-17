@@ -371,8 +371,12 @@ func LoadGlobal(configPath ...string) (*GlobalConfig, error) {
 	return gc, nil
 }
 
-// SetConfigPath overrides the file path used by Save().
+// SetConfigPath overrides the file path used by Save(). It takes the save
+// lock, so a save running on another goroutine sees either path, never a
+// torn write.
 func (gc *GlobalConfig) SetConfigPath(path string) {
+	globalConfigMu.Lock()
+	defer globalConfigMu.Unlock()
 	gc.configPath = path
 }
 
