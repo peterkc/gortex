@@ -116,19 +116,33 @@ func (f *fixture) pullRequestEvent(head string) Event {
 	f.git("reset", "--hard", tested)
 	return Event{Name: "pull_request", Base: f.base, Head: tested, Ref: "refs/pull/17/merge", Author: "fixture-author", PullRequest: &PullRequest{Number: 17, Head: head, Base: f.base, BaseRef: "main"}}
 }
+
+// nativeTarget is only for tests that execute a policy target's packages.
 func nativeTarget(t *testing.T) string {
 	t.Helper()
 	p, err := LoadPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
+	runner, ok := policyRunner(p, runtime.GOOS, runtime.GOARCH)
+	if !ok {
+		t.Skipf("executing a CI policy target's packages requires its native runner; host %s/%s has none", runtime.GOOS, runtime.GOARCH)
+	}
+	return runner
+}
+func policyRunner(p Policy, goos, goarch string) (string, bool) {
 	for _, target := range p.Targets {
-		if target.GOOS == runtime.GOOS && target.GOARCH == runtime.GOARCH {
-			return target.Runner
+		if target.GOOS == goos && target.GOARCH == goarch {
+			return target.Runner, true
 		}
 	}
-	t.Fatalf("unsupported native target %s/%s", runtime.GOOS, runtime.GOARCH)
-	return ""
+	return "", false
+}
+
+// Validation reads Go metadata but does not execute the target's packages.
+func (f *fixture) useLinuxValidationTarget() string {
+	f.planner.Env = withEnv(f.planner.Env, map[string]string{"GOOS": "linux", "GOARCH": "amd64", "CGO_ENABLED": "1"})
+	return "ubuntu-24.04"
 }
 func requireAffected(t *testing.T, m Manifest) {
 	t.Helper()
@@ -172,15 +186,19 @@ func TestSelectionTestOnlyAndAddedPackage(t *testing.T) {
 	m := f.plan(f.change("consumer/value_test.go"))
 	requireAffected(t, m)
 	want := []string{"example.org/fixture/consumer", "example.org/fixture/indirect"}
-	if !slices.Equal(m.Packages[nativeTarget(t)], want) {
-		t.Fatalf("test-only selection %v", m.Packages)
+	for _, target := range m.Targets {
+		if names := m.Packages[target.Runner]; !slices.Equal(names, want) {
+			t.Fatalf("%s test-only selection %v", target.Runner, names)
+		}
 	}
 	f.git("reset", "--hard", f.base)
 	f.pkg("newpkg", "import \"example.org/fixture/leaf\"\nfunc Value()int{return leaf.Value()}", "TestNew")
 	m = f.plan(f.commit())
 	requireAffected(t, m)
-	if !slices.Equal(m.Packages[nativeTarget(t)], []string{"example.org/fixture/newpkg"}) {
-		t.Fatal(m.Packages)
+	for _, target := range m.Targets {
+		if names := m.Packages[target.Runner]; !slices.Equal(names, []string{"example.org/fixture/newpkg"}) {
+			t.Fatalf("%s added-package selection %v", target.Runner, names)
+		}
 	}
 }
 func TestSelectionResourcesDependenciesAndCIAlwaysFull(t *testing.T) {
@@ -334,7 +352,7 @@ func TestManifestRejectsStaleCorruptIncompleteAndContextMismatch(t *testing.T) {
 	f := newFixture(t)
 	m := f.plan(f.change("leaf/value.go"))
 	requireAffected(t, m)
-	target := nativeTarget(t)
+	target := f.useLinuxValidationTarget()
 	census := m.Census[target]
 	if _, err := f.planner.Validate(t.Context(), m, target, census); err != nil {
 		t.Fatal(err)
@@ -363,7 +381,7 @@ func TestManifestRejectsStaleCorruptIncompleteAndContextMismatch(t *testing.T) {
 	if _, err := f.planner.Validate(t.Context(), m, target, census[:len(census)-1]); err == nil {
 		t.Fatal("changed census accepted")
 	}
-	f.planner.Env = withEnv(os.Environ(), map[string]string{"GOARCH": "unsupported"})
+	f.planner.Env = withEnv(f.planner.Env, map[string]string{"GOARCH": "unsupported"})
 	if _, err := f.planner.Validate(t.Context(), m, target, census); err == nil {
 		t.Fatal("changed context accepted")
 	}
@@ -423,7 +441,7 @@ func TestManifestAffectedEmptyNeverMeansFull(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireAffected(t, m)
-	target := nativeTarget(t)
+	target := f.useLinuxValidationTarget()
 	names, err := f.planner.Validate(t.Context(), m, target, m.Census[target])
 	if err != nil || names == nil || len(names) != 0 {
 		t.Fatalf("empty affected selection lost its distinction: %v %v", names, err)
@@ -432,5 +450,39 @@ func TestManifestAffectedEmptyNeverMeansFull(t *testing.T) {
 	m.SHA256 = m.Seal()
 	if _, err := f.planner.Validate(t.Context(), m, target, m.Census[target]); err == nil {
 		t.Fatal("null affected package list accepted")
+	}
+}
+
+func TestManifestUnlistedHostFullAndAffectedModes(t *testing.T) {
+	// Given an unlisted native host, full mode needs no policy census, but
+	// affected mode must not use another target's package census.
+	f := newFixture(t)
+	affected := f.plan(f.change("leaf/value.go"))
+	requireAffected(t, affected)
+	full, err := f.planner.Plan(t.Context(), Event{Name: "workflow_dispatch", Head: affected.Head})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.planner.Env = withEnv(f.planner.Env, map[string]string{"GOOS": "linux", "GOARCH": "arm64", "CGO_ENABLED": "1"})
+	for _, tc := range []struct {
+		name, target, wantError string
+		manifest                Manifest
+	}{
+		{"full", "ubuntu-24.04", "", full},
+		{"affected unknown target", "linux/arm64", "unknown selection target", affected},
+		{"affected borrowed runner", "ubuntu-24.04", "native build context changed; use CI_FULL_TESTS=true to run full", affected},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := f.planner.Validate(t.Context(), tc.manifest, tc.target, affected.Census["ubuntu-24.04"])
+			if tc.wantError == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.wantError {
+				t.Fatalf("validation error = %v, want %q", err, tc.wantError)
+			}
+		})
 	}
 }

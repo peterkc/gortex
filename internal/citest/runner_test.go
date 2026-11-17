@@ -192,6 +192,7 @@ func writeManifest(t *testing.T, f *fixture, m Manifest) string {
 	return path
 }
 func TestRunnerRealFullVersusAffectedExecutionAndCoverage(t *testing.T) {
+	target := nativeTarget(t)
 	f := newFixture(t)
 	head := f.change("leaf/value.go")
 	affected := f.plan(head)
@@ -200,7 +201,6 @@ func TestRunnerRealFullVersusAffectedExecutionAndCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	target := nativeTarget(t)
 	executed := map[string]set{}
 	for _, manifest := range []Manifest{affected, full} {
 		selection := writeManifest(t, f, manifest)
@@ -246,10 +246,12 @@ func TestRunnerRealFullVersusAffectedExecutionAndCoverage(t *testing.T) {
 func TestRunnerCorruptManifestFailsBeforeTestExecution(t *testing.T) {
 	f := newFixture(t)
 	m := f.plan(f.change("leaf/value.go"))
-	m.Packages[nativeTarget(t)] = []string{}
+	// Integrity is checked before native-target metadata or test execution.
+	const target = "ubuntu-24.04"
+	m.Packages[target] = []string{}
 	path := writeManifest(t, f, m)
 	var out bytes.Buffer
-	report, err := RunPartition(t.Context(), RunOptions{Root: f.root, Partition: "rest", SelectionFile: path, Target: nativeTarget(t), Workers: 2, Env: fixtureEnv(), Output: &out})
+	report, err := RunPartition(t.Context(), RunOptions{Root: f.root, Partition: "rest", SelectionFile: path, Target: target, Workers: 2, Env: fixtureEnv(), Output: &out})
 	if err == nil || !strings.Contains(err.Error(), "integrity") || report.Scratch != "" || strings.Contains(out.String(), "partition rest:") {
 		t.Fatalf("corrupt manifest reached execution: %v %s", err, &out)
 	}
@@ -298,8 +300,7 @@ func TestRunnerCancellationReapsOwnedGoTestChildAndRetainsLogs(t *testing.T) {
 	f := newFixture(t)
 	f.pkg("hang", "func Value()int{return 42}", "TestValue")
 	f.write("hang/heartbeat_test.go", "package hang\nimport(\"os\";\"testing\";\"time\")\nfunc TestHeartbeat(t *testing.T){for { _=os.WriteFile(os.Getenv(\"CI_HEARTBEAT\"),[]byte(time.Now().Format(time.RFC3339Nano)),0600);time.Sleep(10*time.Millisecond)}}\n")
-	m := f.plan(f.commit())
-	requireAffected(t, m)
+	// Cancellation is independent of affected selection and its policy targets.
 	heartbeat := filepath.Join(f.root, "heartbeat")
 	env := withEnv(fixtureEnv(), map[string]string{"CI_HEARTBEAT": heartbeat})
 	ctx, cancel := context.WithCancel(t.Context())
@@ -309,10 +310,8 @@ func TestRunnerCancellationReapsOwnedGoTestChildAndRetainsLogs(t *testing.T) {
 		err    error
 	}
 	done := make(chan outcome, 1)
-	manifestPath := writeManifest(t, f, m)
-	target := nativeTarget(t)
 	go func() {
-		report, err := RunPartition(ctx, RunOptions{Root: f.root, Partition: "rest", SelectionFile: manifestPath, Target: target, Workers: 1, Windows: runtime.GOOS == "windows", Env: env, Output: io.Discard, Budget: 3 * time.Minute})
+		report, err := RunPartition(ctx, RunOptions{Root: f.root, Partition: "rest", Workers: 1, Windows: runtime.GOOS == "windows", Env: env, Output: io.Discard, Budget: 3 * time.Minute})
 		done <- outcome{report, err}
 	}()
 	deadline := time.NewTimer(90 * time.Second)

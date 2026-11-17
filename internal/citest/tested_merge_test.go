@@ -94,7 +94,7 @@ func TestSelectionUsesVerifiedTestedMergeBaseAndMergedDependencies(t *testing.T)
 			t.Errorf("%s census omitted main's new dependency", target)
 		}
 	}
-	target := nativeTarget(t)
+	target := f.useLinuxValidationTarget()
 	if _, err := f.planner.Validate(t.Context(), m, target, m.Census[target]); err != nil {
 		t.Fatal(err)
 	}
