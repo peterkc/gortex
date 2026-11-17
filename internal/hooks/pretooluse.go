@@ -1461,6 +1461,10 @@ func enrichBashWithProbe(toolInput map[string]any, cwd string, probe fileScopePr
 	return enrichBashCommand(cmd, cwd, probe, 0, time.Time{})
 }
 
+// maxBashCommand bounds shell scanning before the inline-Python budgets
+// apply. Larger commands get no opinion, like oversized inline scripts.
+const maxBashCommand = 256 << 10
+
 // enrichBashCommand answers one command at the given nesting depth: 0 for
 // the command the agent typed, 1 for a command it runs as text (`bash -c`,
 // a Python os.system), whose own nested commands are not examined.
@@ -1473,6 +1477,9 @@ func enrichBashWithProbe(toolInput map[string]any, cwd string, probe fileScopePr
 // gives each part its own; a nested command gets the deadline of the
 // command it is nested in.
 func enrichBashCommand(cmd, cwd string, probe fileScopeProbe, depth int, deadline time.Time) enrichResult {
+	if len(cmd) > maxBashCommand {
+		return enrichResult{}
+	}
 	r := enrichBashShapes(cmd, cwd, probe, deadline)
 	if r.deny {
 		return r
