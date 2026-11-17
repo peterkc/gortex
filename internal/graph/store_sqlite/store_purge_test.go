@@ -1,13 +1,21 @@
 package store_sqlite
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
+	"encoding/json"
 	"github.com/zzet/gortex/internal/graph"
+	"io"
 	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"modernc.org/sqlite"
 )
 
 // openPurgeStore opens a throwaway on-disk store for the hygiene tests.
@@ -225,4 +233,308 @@ func TestContentCrashWindow(t *testing.T) {
 	// net; a zero-content walk routes to WipeContent instead).
 	require.NoError(t, s.DeleteContentFilesForRepoNotIn("r", nil))
 	assert.Equal(t, 1, countFile("f1.md"), "empty keep never wipes")
+}
+
+// purgeTableRows compares every column, including generation and physical IDs.
+func purgeTableRows(t *testing.T, db *sql.DB) map[string][]string {
+	t.Helper()
+	out := make(map[string][]string)
+	for _, table := range append([]string{"nodes", "edges"}, purgeSidecarTables...) {
+		rows, err := db.Query(`SELECT * FROM ` + table)
+		require.NoError(t, err)
+		columns, err := rows.Columns()
+		require.NoError(t, err)
+		out[table] = nil
+		for rows.Next() {
+			values := make([]any, len(columns))
+			targets := make([]any, len(columns))
+			for i := range values {
+				targets[i] = &values[i]
+			}
+			require.NoError(t, rows.Scan(targets...))
+			encoded, err := json.Marshal(values)
+			require.NoError(t, err)
+			out[table] = append(out[table], string(encoded))
+		}
+		require.NoError(t, rows.Err())
+		require.NoError(t, rows.Close())
+		slices.Sort(out[table])
+	}
+	return out
+}
+
+func seedPurgeEdgeFixture(t *testing.T, s *Store) []string {
+	t.Helper()
+	seedRepoRows(t, s.writerDB, "repoA")
+	seedRepoRows(t, s.writerDB, "repoB")
+	ids := []string{"repoA::a.go::X", "quote'\"::路径::λ", "positive-only::A"}
+	for _, gen := range []int{0, 7, 11} {
+		for _, id := range ids {
+			if gen == 0 && (id == ids[0] || id == ids[2]) {
+				continue
+			}
+			_, err := s.writerDB.Exec(`INSERT INTO nodes (id, view_gen, kind, name, file_path, repo_prefix) VALUES (?, ?, 'function', 'A', 'a.go', 'repoA')`, id, gen)
+			require.NoError(t, err)
+		}
+		for _, id := range ids {
+			for _, endpoints := range [][2]string{{id, id}, {id, "repoB::a.go::X"}, {"repoB::a.go::X", id}} {
+				_, err := s.writerDB.Exec(`INSERT INTO edges (from_id, to_id, kind, view_gen) VALUES (?, ?, 'calls', ?)`, endpoints[0], endpoints[1], gen)
+				require.NoError(t, err)
+			}
+		}
+		_, err := s.writerDB.Exec(`INSERT INTO edges (from_id, to_id, kind, view_gen) VALUES ('repoB::a.go::X', 'repoB::a.go::X', 'calls', ?)`, gen)
+		require.NoError(t, err)
+	}
+	_, err := s.writerDB.Exec(`INSERT INTO file_mtimes (view_gen, repo_prefix, file_path, mtime_ns) VALUES (7, 'repoA', 'positive.go', 42), (11, 'repoB', 'retained.go', 43)`)
+	require.NoError(t, err)
+	return ids
+}
+
+func TestPurgeRepo_EdgeRowsMatchLegacyAcrossGenerations(t *testing.T) {
+	// Given identical stores with duplicate and odd IDs, all edge directions,
+	// positive-only nodes, and sidecars in base and positive generations.
+	s := openPurgeStore(t)
+	legacy := openPurgeStore(t)
+	ids := seedPurgeEdgeFixture(t, s)
+	seedPurgeEdgeFixture(t, legacy)
+	require.Equal(t, purgeTableRows(t, legacy.db), purgeTableRows(t, s.db))
+
+	// Freeze the base implementation's semantics independently of purge helpers:
+	// delete edges by the fixture's known IDs, then sidecars and nodes by prefix.
+	tx, err := legacy.writerDB.Begin()
+	require.NoError(t, err)
+	defer tx.Rollback() //nolint:errcheck // rollback after commit is a no-op
+	for _, col := range []string{"from_id", "to_id"} {
+		for _, id := range ids {
+			_, err := tx.Exec(`DELETE FROM edges WHERE `+col+` = ?`, id)
+			require.NoError(t, err)
+		}
+	}
+	for _, table := range append(slices.Clone(purgeSidecarTables), "nodes") {
+		_, err := tx.Exec(`DELETE FROM ` + table + ` WHERE repo_prefix = 'repoA'`)
+		require.NoError(t, err)
+	}
+	require.NoError(t, tx.Commit())
+	want := purgeTableRows(t, legacy.db)
+	require.Len(t, want["edges"], 4, "three B→B generations and B→global survive")
+
+	// When purge runs through a positive-generation handle, then the complete
+	// surviving rows match the base operation, not just their counts.
+	before := s.WriteMark()
+	require.NoError(t, s.AtGeneration(7).PurgeRepo("repoA"))
+	require.Equal(t, want, purgeTableRows(t, s.db))
+	require.Equal(t, int64(28), s.WriteMark().Since(before).Rows.Edges, "each deleted edge is counted once")
+	for _, table := range append([]string{"nodes"}, purgeSidecarTables...) {
+		require.Zero(t, countByPrefix(t, s.db, table, "repoA"), table)
+	}
+	// Repeating a completed purge is a no-op, with no new mutation witness.
+	revision := s.payloadInputAdminRevision.Load()
+	require.NoError(t, s.PurgeRepo("repoA"))
+	require.Equal(t, revision, s.payloadInputAdminRevision.Load())
+	require.Equal(t, want, purgeTableRows(t, s.db))
+}
+
+type purgeEdgeStatement struct {
+	query        string
+	args         []any
+	plan         []string
+	rowsAffected int64
+}
+
+// This test-only driver observes real ExecContext calls without changing SQL.
+type purgeEdgeConnector struct {
+	dsn        string
+	statements *[]purgeEdgeStatement
+}
+
+func (c purgeEdgeConnector) Driver() driver.Driver { return &sqlite.Driver{} }
+func (c purgeEdgeConnector) Connect(context.Context) (driver.Conn, error) {
+	conn, err := c.Driver().Open(c.dsn)
+	if err != nil {
+		return nil, err
+	}
+	return &purgeEdgeConn{Conn: conn, statements: c.statements}, nil
+}
+
+type purgeEdgeConn struct {
+	driver.Conn
+	statements *[]purgeEdgeStatement
+}
+
+func (c *purgeEdgeConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	result, err := c.Conn.(driver.ExecerContext).ExecContext(ctx, query, args)
+	if err != nil || !strings.HasPrefix(query, "DELETE FROM edges WHERE ") {
+		return result, err
+	}
+	statement := purgeEdgeStatement{query: query}
+	for _, arg := range args {
+		statement.args = append(statement.args, arg.Value)
+	}
+	statement.rowsAffected, err = result.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	// Explain on the same connection while the purge's TEMP table still exists.
+	rows, err := c.Conn.(driver.QueryerContext).QueryContext(ctx, `EXPLAIN QUERY PLAN `+query, args)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck // read cursor only
+	values := make([]driver.Value, 4)
+	for {
+		err := rows.Next(values)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		statement.plan = append(statement.plan, values[3].(string))
+	}
+	*c.statements = append(*c.statements, statement)
+	return result, nil
+}
+
+func TestPurgeRepo_EdgeDeletePlansAreBounded(t *testing.T) {
+	for _, count := range []int{1, 2000} {
+		for _, edgeCount := range []int{30000, 30001} {
+			t.Run(strconv.Itoa(count)+"/"+strconv.Itoa(edgeCount), func(t *testing.T) {
+				// Given multiple incoming-edge chunks with gapped rowids, a whole
+				// chunk with no matches, and an exact or partial final chunk.
+				s := openPurgeStore(t)
+				tx, err := s.writerDB.Begin()
+				require.NoError(t, err)
+				defer tx.Rollback() //nolint:errcheck // rollback after commit is a no-op
+				for i := range count {
+					id := strconv.Itoa(i)
+					_, err := tx.Exec(`INSERT INTO nodes (id, kind, name, file_path, repo_prefix) VALUES (?, 'function', 'A', 'a.go', 'repoA')`, id)
+					require.NoError(t, err)
+					_, err = tx.Exec(`INSERT INTO edges (from_id, to_id, kind) VALUES (?, 'other', 'calls')`, id)
+					require.NoError(t, err)
+				}
+				_, err = tx.Exec(`WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM n WHERE i+1 < ?)
+INSERT INTO edges (id, from_id, to_id, kind, line)
+SELECT 100000+i*3, 'other', CASE WHEN i >= 10000 AND i < 20000 THEN 'kept' ELSE '0' END, 'calls', i FROM n`, edgeCount)
+				require.NoError(t, err)
+				require.NoError(t, tx.Commit())
+				var statements []purgeEdgeStatement
+				// Join the checkpoint loop first: its goroutine reads writerDB.
+				s.stopCheckpointLoop()
+				writer := sql.OpenDB(purgeEdgeConnector{dsn: s.dbPath, statements: &statements})
+				writer.SetMaxOpenConns(1)
+				s.writeMu.Lock()
+				original := s.writerDB
+				s.writerDB = writer
+				s.writeMu.Unlock()
+				t.Cleanup(func() {
+					s.writeMu.Lock()
+					s.writerDB = original
+					s.writeMu.Unlock()
+					require.NoError(t, writer.Close())
+				})
+
+				// When the purge executes, then outgoing deletes use bounded ID
+				// seeks and incoming deletes visit each primary-key chunk once.
+				require.NoError(t, s.PurgeRepo("repoA"))
+				fromStatements, toStatements, emptyChunks := 0, 0, 0
+				var previousUpper int64
+				for _, statement := range statements {
+					for _, detail := range statement.plan {
+						require.NotContains(t, detail, "CORRELATED")
+						require.NotContains(t, detail, "SCAN edges")
+					}
+					switch strings.Fields(statement.query)[4] {
+					case "from_id":
+						require.True(t, strings.HasPrefix(statement.query, "DELETE FROM edges WHERE from_id IN ("))
+						fromStatements++
+						require.NotEmpty(t, statement.args)
+						require.LessOrEqual(t, len(statement.args), 900)
+						require.Equal(t, len(statement.args), strings.Count(statement.query, "?"))
+						require.Contains(t, strings.Join(statement.plan, "\n"), "SEARCH edges")
+					case "id":
+						require.True(t, strings.HasPrefix(statement.query, "DELETE FROM edges WHERE id > ? AND id <= ? AND to_id IN ("))
+						toStatements++
+						require.Len(t, statement.args, 2)
+						require.Equal(t, previousUpper, statement.args[0])
+						previousUpper = statement.args[1].(int64)
+						wantUpper := int64(100000 + (minInt(toStatements*10000, edgeCount)-1)*3)
+						require.Equal(t, wantUpper, previousUpper, "each range must cover at most 10,000 fixture rows")
+						require.Contains(t, statement.plan, "SEARCH edges USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)")
+						require.LessOrEqual(t, statement.rowsAffected, int64(10000))
+						if statement.rowsAffected == 0 {
+							emptyChunks++
+						}
+					default:
+						t.Fatalf("unbounded edge DELETE: %s; plan: %v", statement.query, statement.plan)
+					}
+				}
+				// The exact multiple must not add an empty tail statement. The
+				// empty middle chunk must not end the scan before later matches.
+				require.Equal(t, (count+899)/900, fromStatements)
+				require.Equal(t, (edgeCount+9999)/10000, toStatements)
+				require.Equal(t, 1, emptyChunks)
+				var remaining int
+				require.NoError(t, s.db.QueryRow(`SELECT COUNT(*) FROM edges`).Scan(&remaining))
+				require.Equal(t, 10000, remaining)
+			})
+		}
+	}
+}
+
+func TestPurgeRepo_TempIDsDoNotLeakAcrossWriterReuse(t *testing.T) {
+	installShadowDeleteFunction(t)
+	s := openPurgeStore(t)
+	seedRepoRows(t, s.writerDB, "gone")
+	seedRepoRows(t, s.writerDB, "next")
+	shadowDeleteTrigger(t, s, "nodes", "OLD.repo_prefix")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reached := false
+	shadowDeleteObserver.Store(&shadowDeleteProbe{fire: func(prefix string) {
+		if prefix == "gone" {
+			reached = true
+			cancel()
+		}
+	}})
+
+	// Given cancellation in the final node DELETE, after edge work and
+	// TEMP-table cleanup, the rollback must leave the same writer reusable.
+	err := s.PurgeRepoContext(ctx, "gone")
+	require.True(t, reached)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, countByPrefix(t, s.db, "nodes", "gone"))
+	var tempTables int
+	require.NoError(t, s.writerDB.QueryRow(`SELECT count(*) FROM temp.sqlite_master WHERE name='purge_node_ids'`).Scan(&tempTables))
+	require.Zero(t, tempTables)
+	_, err = s.writerDB.Exec(`DROP TRIGGER test_shadow_delete`)
+	require.NoError(t, err)
+
+	// When purging again after rollback, then both it and a later completed
+	// purge succeed without a name clash or residual TEMP IDs on the writer.
+	for _, prefix := range []string{"gone", "next"} {
+		require.NoError(t, s.PurgeRepo(prefix))
+		require.Zero(t, countByPrefix(t, s.db, "nodes", prefix))
+		require.NoError(t, s.writerDB.QueryRow(`SELECT count(*) FROM temp.sqlite_master WHERE name='purge_node_ids'`).Scan(&tempTables))
+		require.Zero(t, tempTables)
+	}
+}
+
+func TestPurgeRepo_MissingPrefixPreservesRowsAndAnalysis(t *testing.T) {
+	// Given a different repo and a ready persisted analysis generation.
+	s := openPurgeStore(t)
+	seedRepoRows(t, s.writerDB, "repoB")
+	generation := buildMinimalAnalysisGeneration(t, s, "purge-missing", 0, true)
+	before := purgeTableRows(t, s.db)
+	analysisRevision := s.AnalysisMutationRevision()
+	payloadRevision := s.payloadInputAdminRevision.Load()
+
+	// When a missing prefix is purged, then neither rows nor analysis change.
+	require.NoError(t, s.PurgeRepo("missing"))
+	require.Equal(t, before, purgeTableRows(t, s.db))
+	require.Equal(t, analysisRevision, s.AnalysisMutationRevision())
+	require.Equal(t, payloadRevision, s.payloadInputAdminRevision.Load())
+	require.True(t, s.analysisGenerationPresent)
+	var state int
+	require.NoError(t, s.db.QueryRow(`SELECT state FROM analysis_generations WHERE generation_id = ?`, generation).Scan(&state))
+	require.Equal(t, analysisGenerationReady, state)
 }
