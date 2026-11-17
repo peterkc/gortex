@@ -151,3 +151,30 @@ func TestPolicyFullLayoutAndInvalidShards(t *testing.T) {
 		})
 	}
 }
+
+func TestPolicyRunnerMatchesOnlyListedTargets(t *testing.T) {
+	// Given the three CI runners, when matching a native host, then both
+	// GOOS and GOARCH must match; sharing only one must not borrow a runner.
+	p, err := LoadPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		goos, goarch, runner string
+	}{
+		{"linux", "amd64", "ubuntu-24.04"},
+		{"darwin", "arm64", "macos-latest"},
+		{"windows", "amd64", "windows-latest"},
+		{"linux", "arm64", ""},
+		{"windows", "arm64", ""},
+		{"darwin", "amd64", ""},
+		{"freebsd", "amd64", ""},
+	} {
+		t.Run(tc.goos+"/"+tc.goarch, func(t *testing.T) {
+			got, ok := policyRunner(p, tc.goos, tc.goarch)
+			if got != tc.runner || ok != (tc.runner != "") {
+				t.Fatalf("runner = %q, %t; want %q, %t", got, ok, tc.runner, tc.runner != "")
+			}
+		})
+	}
+}

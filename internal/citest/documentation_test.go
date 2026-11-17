@@ -22,7 +22,7 @@ func TestDocumentationMixedChangeRetainsGoClosure(t *testing.T) {
 	}
 	mixed.EmptyOK = true
 	mixed.SHA256 = mixed.Seal()
-	target := nativeTarget(t)
+	target := f.useLinuxValidationTarget()
 	if _, err := f.planner.Validate(t.Context(), mixed, target, mixed.Census[target]); err == nil {
 		t.Fatal("nonempty package selection accepted an empty-selection flag")
 	}
@@ -41,7 +41,7 @@ func TestDocumentationOnlySelectionIsExplicitSealedAndValidated(t *testing.T) {
 			t.Fatalf("%s not explicitly empty: %v", target, names)
 		}
 	}
-	target := nativeTarget(t)
+	target := f.useLinuxValidationTarget()
 	if selected, err := f.planner.Validate(t.Context(), m, target, m.Census[target]); err != nil || len(selected) != 0 {
 		t.Fatalf("verified empty selection refused: %v %v", selected, err)
 	}

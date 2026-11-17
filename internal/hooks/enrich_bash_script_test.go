@@ -401,8 +401,47 @@ func TestPythonScriptsAt_PositionsAdvance(t *testing.T) {
 	}
 }
 
-// Work is bounded: the daemon probe budget covers the whole command, and a
-// pathological script finishes quickly or gets no opinion.
+// Given an inherited deadline that has expired, neither Python pass nor
+// nested commands may renew it. Shell reads keep their independent answer.
+func TestEnrichBash_InlinePythonInheritedDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name, command string
+		wantShellRead bool
+	}{
+		{"Python read", `python3 -c "print(open('a.go').read())"`, false},
+		{"wrapped Python read", `nohup python3 -c "print(open('a.go').read())"`, false},
+		{"nested shell read", `bash -c 'cat a.go'`, false},
+		{"shell read", `cat a.go`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			probes := 0
+			probe := func(string, string) fileIndexStatus {
+				probes++
+				return indexedStatus(12)
+			}
+			// When the same command is inspected repeatedly with that deadline,
+			// then Python and nested commands stay silent without probing.
+			for range 2 {
+				r := enrichBashCommand(tc.command, "/repo", probe, 0, time.Unix(1, 0))
+				switch {
+				case tc.wantShellRead:
+					if !r.deny || !strings.Contains(r.reason, "Bash `cat a.go` reads indexed source") {
+						t.Fatalf("want the independent shell read deny, got %+v", r)
+					}
+				case r != (enrichResult{}) || probes != 0:
+					t.Fatalf("expired deadline: result = %+v, probes = %d; want no opinion and no probes", r, probes)
+				}
+			}
+			if tc.wantShellRead && probes != 2 {
+				t.Fatalf("shell reads made %d probes, want two", probes)
+			}
+		})
+	}
+}
+
+// Work is bounded by command bytes before shell scanning, and by script
+// bytes, steps, time and probes during Python analysis. Assertions check
+// byte and probe limits, not how much analysis fits the time budget.
 func TestEnrichBash_InlinePythonIsBounded(t *testing.T) {
 	redirectTelemetry(t)
 	probes := 0
@@ -418,6 +457,57 @@ func TestEnrichBash_InlinePythonIsBounded(t *testing.T) {
 	if probes > bashWriteProbeLimit {
 		t.Errorf("200 one-liners made %d probes, want at most %d", probes, bashWriteProbeLimit)
 	}
+
+	// Given an indexed read or write, commands at the size limit still get
+	// their usual answer. One byte above it gets no opinion and no probes,
+	// even when called again or followed by a small command.
+	for _, command := range []string{
+		"cat a.go",
+		`python3 -c "print(open('a.go').read())"`,
+		`nohup python3 -c "print(open('a.go').read())"`,
+		`bash -c 'cat a.go'`,
+		`bash -c 'python3 -c "print(open(\"a.go\").read())"'`,
+		"echo x > a.go",
+	} {
+		t.Run(command, func(t *testing.T) {
+			probes := 0
+			probe := func(string, string) fileIndexStatus {
+				probes++
+				return indexedStatus(12)
+			}
+			stubFileIndexScopeBy(t, probe)
+			want := enrichBashWithProbe(map[string]any{"command": command}, "/repo", probe)
+			if want == (enrichResult{}) || probes != 1 {
+				t.Fatalf("small command: result = %+v, probes = %d; want an indexed answer and one probe", want, probes)
+			}
+			for _, size := range []int{maxBashCommand - 1, maxBashCommand, maxBashCommand + 1, maxBashCommand + 1, len(command)} {
+				probes = 0
+				cmd := command + strings.Repeat(" ", size-len(command))
+				r := enrichBashWithProbe(map[string]any{"command": cmd}, "/repo", probe)
+				switch {
+				case size > maxBashCommand:
+					if r != (enrichResult{}) || probes != 0 {
+						t.Errorf("%d-byte command: result = %+v, probes = %d; want no opinion and no probes", size, r, probes)
+					}
+				case r != want || probes != 1:
+					t.Errorf("%d-byte command: result = %+v, probes = %d; want %+v and one probe", size, r, probes, want)
+				}
+			}
+		})
+	}
+	// Given the observed slow shell input with a source read at its end,
+	// the command-size bound must reject it before it can probe that read.
+	t.Run("continued statements past the command limit", func(t *testing.T) {
+		cmd := "python3 -c 1\n" + strings.Repeat("echo a \\\nb\n", 50000) + "cat a.go"
+		probes := 0
+		probe := func(string, string) fileIndexStatus {
+			probes++
+			return indexedStatus(12)
+		}
+		if r := enrichBashWithProbe(map[string]any{"command": cmd}, "/repo", probe); r != (enrichResult{}) || probes != 0 {
+			t.Fatalf("%d-byte command: result = %+v, probes = %d; want no opinion and no probes", len(cmd), r, probes)
+		}
+	})
 	if testing.Short() {
 		return
 	}
@@ -431,15 +521,15 @@ func TestEnrichBash_InlinePythonIsBounded(t *testing.T) {
 		blocks.WriteString(strings.Repeat(" ", i) + "if a:\n")
 	}
 	blocks.WriteString(strings.Repeat(" ", 350) + "open(p)\n")
-	for _, cmd := range []string{
+	for i, cmd := range []string{
 		"python3 - <<'PY'\nx=" + nested + "\nPY",
 		"python3 - <<'PY'\n" + strings.Repeat("p=p\n", 60000) + "PY",
 		"python3 - <<'PY'\nwhile True:\n" + strings.Repeat("    p=p\n", 40000) + "PY",
 		// A literal that doubles each line, and a very long attribute chain.
 		"python3 -c \"p='ab'\n" + strings.Repeat("p=p+p+p+p+p+p+p+p\n", 12) + "print(open(p).read())\"",
 		"python3 -c 'x" + strings.Repeat(".a", 100000) + "()'",
-		// Deep nesting up to the size cap, twice: the command's deadline
-		// covers both.
+		// Deep nesting up to the script size cap, twice: together they
+		// exceed the command size cap.
 		strings.Repeat("python3 - <<'PY'\na='x'\n"+strings.Repeat(deep, 40)+"PY\n", 2),
 		"python3 - <<'PY'\np='a.go'\n" + strings.Repeat(blocks.String(), 4) + "PY",
 		// Thousands of backslash-continued statements, which the segment
@@ -448,10 +538,11 @@ func TestEnrichBash_InlinePythonIsBounded(t *testing.T) {
 		// A script that keeps the parser's error recovery busy.
 		"python3 - <<'PY'\n" + strings.Repeat("a[b(c{d\n", 32000) + "PY",
 	} {
-		start := time.Now()
-		enrichBash(map[string]any{"command": cmd}, "/repo")
-		if d := time.Since(start); d > 10*time.Second {
-			t.Errorf("a %d-byte script took %s", len(cmd), d)
-		}
+		t.Run(fmt.Sprintf("pathological/%d", i), func(t *testing.T) {
+			probes = 0
+			if r := enrichBash(map[string]any{"command": cmd}, "/repo"); r != (enrichResult{}) || probes > bashWriteProbeLimit {
+				t.Errorf("%d-byte script: result = %+v, probes = %d; want no opinion and at most %d probes", len(cmd), r, probes, bashWriteProbeLimit)
+			}
+		})
 	}
 }
