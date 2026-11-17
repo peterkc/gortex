@@ -401,8 +401,47 @@ func TestPythonScriptsAt_PositionsAdvance(t *testing.T) {
 	}
 }
 
+// Given an inherited deadline that has expired, neither Python pass nor
+// nested commands may renew it. Shell reads keep their independent answer.
+func TestEnrichBash_InlinePythonInheritedDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name, command string
+		wantShellRead bool
+	}{
+		{"Python read", `python3 -c "print(open('a.go').read())"`, false},
+		{"wrapped Python read", `nohup python3 -c "print(open('a.go').read())"`, false},
+		{"nested shell read", `bash -c 'cat a.go'`, false},
+		{"shell read", `cat a.go`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			probes := 0
+			probe := func(string, string) fileIndexStatus {
+				probes++
+				return indexedStatus(12)
+			}
+			// When the same command is inspected repeatedly with that deadline,
+			// then Python and nested commands stay silent without probing.
+			for range 2 {
+				r := enrichBashCommand(tc.command, "/repo", probe, 0, time.Unix(1, 0))
+				switch {
+				case tc.wantShellRead:
+					if !r.deny || !strings.Contains(r.reason, "Bash `cat a.go` reads indexed source") {
+						t.Fatalf("want the independent shell read deny, got %+v", r)
+					}
+				case r != (enrichResult{}) || probes != 0:
+					t.Fatalf("expired deadline: result = %+v, probes = %d; want no opinion and no probes", r, probes)
+				}
+			}
+			if tc.wantShellRead && probes != 2 {
+				t.Fatalf("shell reads made %d probes, want two", probes)
+			}
+		})
+	}
+}
+
 // Work is bounded by command bytes before shell scanning, and by script
-// bytes, steps and probes during Python analysis, not by machine speed.
+// bytes, steps, time and probes during Python analysis. Assertions check
+// byte and probe limits, not how much analysis fits the time budget.
 func TestEnrichBash_InlinePythonIsBounded(t *testing.T) {
 	redirectTelemetry(t)
 	probes := 0
@@ -425,7 +464,9 @@ func TestEnrichBash_InlinePythonIsBounded(t *testing.T) {
 	for _, command := range []string{
 		"cat a.go",
 		`python3 -c "print(open('a.go').read())"`,
+		`nohup python3 -c "print(open('a.go').read())"`,
 		`bash -c 'cat a.go'`,
+		`bash -c 'python3 -c "print(open(\"a.go\").read())"'`,
 		"echo x > a.go",
 	} {
 		t.Run(command, func(t *testing.T) {

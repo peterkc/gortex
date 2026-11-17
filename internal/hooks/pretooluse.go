@@ -1473,7 +1473,7 @@ const maxBashCommand = 256 << 10
 // their analysis and probes share nothing with what follows. Only a
 // command they do not deny is looked at again for what they cannot see —
 // os.open, scripts behind a wrapper, nested commands — in a second
-// analysis with its own budget, starting when it begins. A zero deadline
+// analysis with its own budget, starting after command scanning. A zero deadline
 // gives each part its own; a nested command gets the deadline of the
 // command it is nested in.
 func enrichBashCommand(cmd, cwd string, probe fileScopeProbe, depth int, deadline time.Time) enrichResult {
@@ -1484,15 +1484,15 @@ func enrichBashCommand(cmd, cwd string, probe fileScopeProbe, depth int, deadlin
 	if r.deny {
 		return r
 	}
-	if deadline.IsZero() {
-		deadline = time.Now().Add(inlineScriptTime)
-	}
 	pyScripts, shells := inlineScriptsAt(cmd, true)
 	if len(pyScripts) == 0 && len(shells) == 0 {
 		return r
 	}
-	scripts := analyzeInlineScripts(pyScripts, deadline, true)
 	dirs := newCommandDirs(cmd)
+	if deadline.IsZero() {
+		deadline = time.Now().Add(inlineScriptTime)
+	}
+	scripts := analyzeInlineScripts(pyScripts, deadline, true)
 	var nested []nestedCommand
 	if depth == 0 {
 		nested = nestedCommands(shells, scripts, dirs, cwd)
