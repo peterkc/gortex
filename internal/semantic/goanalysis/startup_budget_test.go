@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -156,6 +157,9 @@ func startupWriteDriverRecord(record startupDriverRecord) {
 
 func startupDriverLog(t *testing.T) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake-go shim is a POSIX shell script")
+	}
 	realGo, err := exec.LookPath("go")
 	require.NoError(t, err)
 	binary, err := os.Executable()
