@@ -510,6 +510,11 @@ type tcListing struct {
 // runListing runs the metadata+export listing of patterns in loadDir and
 // records the manifest of every mutable package it lists.
 func (p *Provider) runListing(ctx context.Context, loadDir string, patterns, buildFlags []string) (*tcListing, error) {
+	release, err := p.acquireStartupListing(ctx)
+	if err != nil {
+		return &tcListing{}, err
+	}
+	defer release()
 	cfg := &packages.Config{
 		Context: ctx,
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
@@ -523,13 +528,14 @@ func (p *Provider) runListing(ctx context.Context, loadDir string, patterns, bui
 		// declaration positions are restored only from listed checkout files.
 		BuildFlags: append(append([]string(nil), buildFlags...), "-trimpath"),
 	}
-	load := p.packagesLoad
-	if load == nil {
-		load = packages.Load
-	}
+	boundCompilerSubprocess(cfg)
+	load := p.loadCompilerPackages
 	out := &tcListing{start: time.Now(), manifests: map[string]*tcManifest{}}
 	roots, err := load(cfg, patterns...)
 	out.elapsed = time.Since(out.start)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return out, ctxErr
+	}
 	if err != nil {
 		return out, err
 	}
@@ -1567,10 +1573,12 @@ func (p *Provider) loadCheckoutProgramCached(ctx context.Context, loadDir, diges
 		}
 		if check.missReason != "" {
 			stats.ValidateMs += time.Since(validateStart).Milliseconds()
-			if !listed && !targetedWaited && (check.missReason == "root_unlisted" || check.missReason == "cold") {
+			if !listed && !targetedWaited && ctx.Value(startupCompilerAdmission{}) != p && (check.missReason == "root_unlisted" || check.missReason == "cold") {
 				// The warm-up is listing this root's package right now
 				// (a dirty or recently touched package): wait for that
 				// listing, bounded, instead of listing it a second time.
+				// A pass holding startup admission must list itself: the
+				// warm-up cannot get that lease until the pass returns.
 				targetedWaited = true
 				st.mu.Unlock()
 				waited, outcome := p.waitTargetedListing(ctx, filepath.Clean(loadDir), plan.rootDirs, targetedWaitBound())

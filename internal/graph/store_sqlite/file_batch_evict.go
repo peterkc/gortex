@@ -386,6 +386,10 @@ SELECT to_id FROM edges WHERE from_id IN (SELECT id FROM nodes WHERE ` + scoped 
 WHERE view_gen = ? AND kind = ? AND id IN (` + affected + `)`
 }
 
+const contractFileEvictionClosureSQL = `SELECT e.to_id FROM json_each(?) AS doomed
+CROSS JOIN edges AS e ON e.from_id = CAST(doomed.value AS TEXT)
+WHERE e.view_gen = ? AND e.kind IN (?, ?, ?)`
+
 func (s *Store) planContractFileEvictionTx(tx *sql.Tx, predicate string, arg any, scoped string, scopeArgs []any, extraIDsJSON string) (contractFileEvictionPlan, error) {
 	var plan contractFileEvictionPlan
 	if predicate != evictFilePredicate && predicate != evictFilesPredicate {
@@ -563,11 +567,9 @@ WHERE owner.to_id IN (SELECT CAST(value AS TEXT) FROM json_each(?))
 		pending = nil
 		for start := 0; start < len(newlyDoomed); start += 128 {
 			chunkJSON, _ := projectionJSON(newlyDoomed[start:min(start+128, len(newlyDoomed))])
-			// Discover target IDs first so a high-fan-in canonical is not
-			// repeatedly decoded when many doomed owners name it.
-			rows, err = tx.Query(`SELECT DISTINCT to_id FROM edges
-WHERE from_id IN (SELECT CAST(value AS TEXT) FROM json_each(?))
-  AND view_gen = ? AND kind IN (?, ?, ?)`, chunkJSON, s.viewGen,
+			// Drive target discovery from doomed sources; the discovered set
+			// prevents repeated payload decoding for high-fan-in canonicals.
+			rows, err = tx.Query(contractFileEvictionClosureSQL, chunkJSON, s.viewGen,
 				string(graph.EdgeProvides), string(graph.EdgeConsumes), string(graph.EdgeHandlesRoute))
 			if err != nil {
 				return plan, err

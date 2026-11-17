@@ -1,8 +1,20 @@
 package serverstack
 
 import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/zzet/gortex/internal/lspuri"
+	"go.uber.org/zap"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/zzet/gortex/internal/semantic/lsp"
@@ -112,5 +124,122 @@ func TestCSharpResolverHelperOptIn(t *testing.T) {
 		if csharpResolverHelperEnabled() {
 			t.Fatalf("%q should disable the resolve-time C# helper", v)
 		}
+	}
+}
+
+func TestBuildResolverLSPHelperHoldsRouterPinDuringCall(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+			// Given the production default-mode helper and a real protocol peer.
+			root := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(root, "main.ts"), []byte("target();\n"), 0o600))
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			unblock := sync.OnceFunc(func() { close(release) })
+			var conn net.Conn
+			accepted := make(chan struct{})
+			go func() {
+				defer close(done)
+				c, err := ln.Accept()
+				conn = c
+				close(accepted)
+				if err != nil {
+					return
+				}
+				defer c.Close()
+				reader := bufio.NewReader(c)
+				for {
+					size := 0
+					for {
+						line, err := reader.ReadString('\n')
+						if err != nil {
+							return
+						}
+						if line == "\r\n" {
+							break
+						}
+						if strings.HasPrefix(line, "Content-Length:") {
+							size, _ = strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:")))
+						}
+					}
+					body := make([]byte, size)
+					if _, err := io.ReadFull(reader, body); err != nil {
+						return
+					}
+					var req struct {
+						ID     json.RawMessage
+						Method string
+					}
+					if json.Unmarshal(body, &req) != nil {
+						return
+					}
+					if len(req.ID) == 0 {
+						continue
+					}
+					var result any
+					switch req.Method {
+					case "initialize":
+						result = map[string]any{"capabilities": map[string]any{"definitionProvider": true}}
+					case "textDocument/definition":
+						close(entered)
+						<-release
+						result = []lsp.Location{{URI: lspuri.PathToURI(filepath.Join(root, "main.ts")), Range: lsp.Range{Start: lsp.Position{Line: 0}}}}
+					}
+					reply := map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result}
+					if fail && req.Method == "textDocument/definition" {
+						delete(reply, "result")
+						reply["error"] = map[string]any{"code": -32603, "message": "injected definition error"}
+					}
+					response, _ := json.Marshal(reply)
+					if _, err := fmt.Fprintf(c, "Content-Length: %d\r\n\r\n%s", len(response), response); err != nil {
+						return
+					}
+				}
+			}()
+			router := lsp.NewRouter(root, zap.NewNop())
+			t.Cleanup(func() {
+				unblock()
+				_ = router.Close()
+				_ = ln.Close()
+				<-accepted
+				if conn != nil {
+					_ = conn.Close()
+				}
+				<-done
+			})
+			spec := &lsp.ServerSpec{Name: "definition-pin", Languages: []string{"typescript"}, Extensions: []string{".ts"}, Connect: &lsp.ConnectSpec{Network: "tcp", Address: ln.Addr().String()}}
+			router.RegisterSpec(spec)
+			helper := BuildResolverLSPHelper(router, spec, root, 1, zap.NewNop())
+			type answer struct {
+				path string
+				line int
+				ok   bool
+			}
+			answerCh := make(chan answer, 1)
+			go func() { p, n, ok := helper.Definition("main.ts", 1, "target"); answerCh <- answer{p, n, ok} }()
+			select {
+			case <-entered:
+			case <-t.Context().Done():
+				t.Fatal("definition never entered")
+			}
+			// When cleanup runs during Definition, its pin keeps the provider open.
+			stats := router.Stats()
+			require.Len(t, stats, 1)
+			assert.Equal(t, 1, stats[0].InUse)
+			assert.Zero(t, router.CloseCheckoutWorkspace("typescript", root))
+			unblock()
+			got := <-answerCh
+			assert.Equal(t, !fail, got.ok)
+			if !fail {
+				assert.Equal(t, "main.ts", got.path)
+				assert.Equal(t, 1, got.line)
+			}
+			stats = router.Stats()
+			if assert.Len(t, stats, 1) {
+				assert.Zero(t, stats[0].InUse)
+			}
+			assert.Equal(t, 1, router.CloseCheckoutWorkspace("typescript", root))
+		})
 	}
 }

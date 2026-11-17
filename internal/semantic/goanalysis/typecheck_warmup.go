@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -216,6 +217,9 @@ type checkoutWarmup struct {
 // warmupRegistry tracks the provider's warm-ups and its interactive
 // compiler loads, which warm-ups yield to.
 type warmupRegistry struct {
+	// startup counts daemon startup windows. During a window every expensive
+	// load shares the provider's existing exclusive large-program lease.
+	startup atomic.Int32
 	mu      sync.Mutex
 	entries map[string]*checkoutWarmup
 	// loads counts the interactive compiler loads running per module
@@ -386,37 +390,20 @@ func (p *Provider) SetWarmupIdle(touched, untouched time.Duration) {
 	r.mu.Unlock()
 }
 
-// warmupBuildFlags keeps the warm-up's go command to a small build
-// parallelism — a quarter of the CPUs, at most GOMAXPROCS, at least one —
-// and runs every tool it invokes at the lowest priority (lowPriorityToolexec).
+// warmupBuildFlags bounds compiler parallelism and runs tools at the lowest
+// priority (lowPriorityToolexec).
 func warmupBuildFlags() []string {
-	n := runtime.NumCPU() / 4
-	if procs := runtime.GOMAXPROCS(0); n > procs {
-		n = procs
-	}
-	if n < 1 {
-		n = 1
-	}
-	flags := []string{"-p=" + strconv.Itoa(n)}
+	flags := []string{"-p=1"}
 	if wrapper := lowPriorityToolexec(); wrapper != "" {
 		flags = append(flags, "-toolexec="+wrapper)
 	}
 	return flags
 }
 
-// targetedWarmupBuildFlags is the build flags of a targeted batch (one
-// dirty or recently touched package): a quarter of the CPUs, not capped at
-// GOMAXPROCS, at normal scheduling priority. Such a batch compiles the
-// export data of exactly the packages the checkout's next delta would
-// otherwise compile in its own listing, synchronously and at full
-// priority; the lowest priority made that same compile 5-10x slower on a
-// busy host (mcp's closure: 53 s at background QoS, 5 s at normal).
+// targetedWarmupBuildFlags uses the same compiler bound at normal priority:
+// these exports are on the checkout's next edit's critical path.
 func targetedWarmupBuildFlags() []string {
-	n := runtime.NumCPU() / 4
-	if n < 1 {
-		n = 1
-	}
-	return []string{"-p=" + strconv.Itoa(n)}
+	return []string{"-p=1"}
 }
 
 // lowPriorityToolexec is the -toolexec wrapper that runs a warm-up's
@@ -447,12 +434,57 @@ func isExecutable(path string) bool {
 	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
 }
 
+// preemptStartupListings is called before a foreground pass waits for the
+// exclusive lease: waiting until loadCompilerProgram would wait behind the
+// very listing that must yield. The listing releases only after its driver joins.
+func (p *Provider) preemptStartupListings() {
+	r := &p.warm
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range r.entries {
+		if e.cancel != nil {
+			e.cancel()
+			e.cancel = nil
+			e.status.Preemptions++
+			e.status.State = warmupPreempted
+			r.notifyLocked()
+		}
+	}
+	for dir, cancel := range r.relistCancel {
+		cancel()
+		delete(r.relistCancel, dir)
+	}
+}
+
+// acquireStartupListing shares admission with compiler programs only during
+// startup. A cache-miss listing already carries its caller's lease.
+func (p *Provider) acquireStartupListing(ctx context.Context) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if p.warm.startup.Load() == 0 || ctx.Value(startupCompilerAdmission{}) == p {
+		return func() {}, nil
+	}
+	release, err := p.acquireHeavyBlocking(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	// Foreground admission cancels every registered background attempt before
+	// waiting. A queued attempt may win the gate concurrently with that
+	// cancellation, but must not dispatch after it. No retry/spin is needed.
+	if err := ctx.Err(); err != nil {
+		release()
+		return nil, err
+	}
+	return release, nil
+}
+
 // beginCompilerLoad marks an interactive compiler load over the module
 // directory dir: it preempts that directory's running warm-up and export
 // relist, and holds new ones back until the load ends. The returned func
 // ends the load.
 //
-// Policy: a load never preempts, nor holds back, another module directory's
+// Outside startup, a load never preempts, nor holds back, another module directory's
 // warm-up. A daemon runs a checkout's whole-module load for minutes (a cold
 // primary: 606 s measured); cancelling a worktree's warm-up for it threw
 // away the listing in flight and kept the worktree cold until long after
@@ -469,7 +501,7 @@ func (p *Provider) beginCompilerLoad(dir string) func() {
 	}
 	r.loads[dir]++
 	for _, e := range r.entries {
-		if e.cancel != nil && filepath.Clean(e.loadDir) == dir {
+		if e.cancel != nil && (r.startup.Load() > 0 || filepath.Clean(e.loadDir) == dir) {
 			e.cancel()
 			e.cancel = nil
 			e.status.Preemptions++
@@ -503,6 +535,9 @@ func (p *Provider) beginCompilerLoad(dir string) func() {
 // compiler loads (running, or ended within the quiet period); the caller
 // holds r.mu.
 func (r *warmupRegistry) loadWaitLocked(dir string) time.Duration {
+	if r.startup.Load() > 0 && len(r.loads) > 0 {
+		return r.quietPeriod()
+	}
 	dir = filepath.Clean(dir)
 	if r.loads[dir] > 0 {
 		return r.quietPeriod()
@@ -956,10 +991,20 @@ func (p *Provider) runWarmup(e *checkoutWarmup) {
 			r.notifyLocked()
 			r.mu.Unlock()
 		}
-		listCtx, stalled := p.backgroundListingDeadline(ctx, !targetedBatch && !escalated)
-		listing, err := p.runListing(listCtx, e.loadDir, batch, flags)
+		// Admission wait is not a stalled compiler: arm the deadline only
+		// after acquiring the lease and carry it through runListing.
+		releaseListing, err := p.acquireStartupListing(ctx)
+		var listing *tcListing
+		var stall bool
+		if err == nil {
+			listCtx, stalled := p.backgroundListingDeadline(ctx, !targetedBatch && !escalated)
+			listCtx = context.WithValue(listCtx, startupCompilerAdmission{}, p)
+			listing, err = p.runListing(listCtx, e.loadDir, batch, flags)
+			stall = stalled()
+			releaseListing()
+		}
 		preempted := ctx.Err() != nil
-		stall := stalled() && !preempted
+		stall = stall && !preempted
 		cancel()
 		if stall {
 			// A background listing that has not finished within the stall
