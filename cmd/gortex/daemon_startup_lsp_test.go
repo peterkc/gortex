@@ -176,7 +176,10 @@ func TestStartupLSPReleaseLifecycle(t *testing.T) {
 			savedSpec := *spec
 			t.Cleanup(func() { *spec = savedSpec })
 			spec.Command, spec.Args = exe, []string{"-test.run=^TestStartupLSPReleaseLifecycle$"}
-			spec.Env = []string{startupLSPChildEnv + "=1", "GORTEX_STARTUP_LSP_TEST_TRACE=" + trace}
+			// Keep race detection enabled, but exclude its artificial exit sleep
+			// from the owned child's graceful-stop budget, as in the router tests.
+			spec.Env = []string{startupLSPChildEnv + "=1", "GORTEX_STARTUP_LSP_TEST_TRACE=" + trace,
+				"GORACE=" + os.Getenv("GORACE") + " atexit_sleep_ms=0"}
 			spec.AlternativeCommands = nil
 			router := lsp.NewRouter(roots[0], zap.NewNop())
 			router.RegisterSpec(spec)
@@ -328,7 +331,8 @@ func TestStartupLSPReleaseLifecycle(t *testing.T) {
 		require.NoError(t, err)
 		spec := &lsp.ServerSpec{Name: "exit-status-fixture", Command: exe,
 			Args: []string{"-test.run=^TestStartupLSPReleaseLifecycle$"}, Languages: []string{"typescript"},
-			Env: []string{startupLSPChildEnv + "=1", "GORTEX_STARTUP_LSP_TEST_TRACE=" + trace, "GORTEX_STARTUP_LSP_TEST_EXIT=7"}}
+			Env: []string{startupLSPChildEnv + "=1", "GORTEX_STARTUP_LSP_TEST_TRACE=" + trace, "GORTEX_STARTUP_LSP_TEST_EXIT=7",
+				"GORACE=" + os.Getenv("GORACE") + " atexit_sleep_ms=0"}}
 		router := lsp.NewRouter(root, zap.NewNop())
 		router.RegisterSpec(spec)
 		t.Cleanup(func() { _ = router.Close() })
