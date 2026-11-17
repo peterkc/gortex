@@ -7,6 +7,7 @@ import (
 	"iter"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -669,10 +670,15 @@ func TestEnrichFilesUsesOneLoadForSameAndDifferentPackages(t *testing.T) {
 			_, err := provider.EnrichFiles(graph.New(), "repo", root, tc.files)
 			require.NoError(t, err)
 			require.Equal(t, 1, loadCalls)
-			wantPatterns := make([]string, 0, len(tc.want))
+			directories := make(map[string]bool)
 			for _, relPath := range tc.want {
-				wantPatterns = append(wantPatterns, "file="+filepath.Join(root, filepath.FromSlash(relPath)))
+				directories["./"+filepath.ToSlash(filepath.Dir(filepath.FromSlash(relPath)))] = true
 			}
+			wantPatterns := make([]string, 0, len(directories))
+			for dir := range directories {
+				wantPatterns = append(wantPatterns, dir)
+			}
+			slices.Sort(wantPatterns)
 			assert.Equal(t, wantPatterns, gotPatterns)
 			assert.NotContains(t, gotPatterns, "./...")
 		})

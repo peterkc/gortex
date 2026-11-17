@@ -302,6 +302,19 @@ func committedEnv(ctx context.Context) []string {
 // pass hands the overlay to the go command.
 func (p *Provider) ReadsCommittedTree() bool { return true }
 
+// BeginStartupWarmup starts the startup-only exclusive compiler policy before
+// startup dispatch. The owner releases it after its existing startup join, even
+// if that join is interrupted. Already admitted loads retain their own leases
+// until their children and compiler state join; release adds no second wait.
+func (p *Provider) BeginStartupWarmup() func() {
+	p.warm.startup.Add(1)
+	return sync.OnceFunc(func() { p.warm.startup.Add(-1) })
+}
+
+// startupCompilerAdmission marks a lease already owned by the calling pass.
+// Cache-miss listings share it instead of recursively taking the same gate.
+type startupCompilerAdmission struct{}
+
 // acquireHeavy admits one compiler program.
 //
 // A committed tree's pass (a dedicated base, its advance, a commit layer)
@@ -310,7 +323,16 @@ func (p *Provider) ReadsCommittedTree() bool { return true }
 // holding it before it waits. A committed pass that is preempted publishes its generation without
 // the type checker's facts and says so; an edit never waits minutes behind it.
 func (p *Provider) acquireHeavy(ctx context.Context, large bool) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	preempt := committedPreempt(ctx)
+	if p.warm.startup.Load() > 0 {
+		large = true
+		if preempt == nil {
+			p.preemptStartupListings()
+		}
+	}
 	if preempt == nil {
 		p.committed.interactive.Add(1)
 		defer p.committed.interactive.Add(-1)
@@ -740,6 +762,9 @@ func (p *Provider) enrichRepoContext(ctx context.Context, g graph.Store, repoPre
 	releaseAdmission, err := p.acquireHeavy(ctx, largeAdmission)
 	if err != nil {
 		return nil, err
+	}
+	if p.warm.startup.Load() > 0 {
+		ctx = context.WithValue(ctx, startupCompilerAdmission{}, p)
 	}
 	var (
 		pkgs                       []*packages.Package
@@ -1601,13 +1626,19 @@ func (p *Provider) EnrichFilesContext(ctx context.Context, g graph.Store, repoPr
 		return &semantic.EnrichResult{Provider: p.Name(), Language: "go"}, nil
 	}
 
+	// Use canonical source paths for directory queries while keeping absRoot as
+	// the binding-index owner (callers may release that owner through a symlink).
+	sourceRoot := absRoot
+	if resolved, err := filepath.EvalSymlinks(absRoot); err == nil {
+		sourceRoot = resolved
+	}
 	patterns := make([]string, 0, len(requestedFiles))
 	for _, graphPath := range requestedFiles {
 		relPath := graphPath
 		if prefix != "" {
 			relPath = strings.TrimPrefix(relPath, prefix+"/")
 		}
-		patterns = append(patterns, "file="+filepath.Join(absRoot, filepath.FromSlash(relPath)))
+		patterns = append(patterns, "file="+filepath.Join(sourceRoot, filepath.FromSlash(relPath)))
 	}
 	// The file= patterns are absolute, but Dir still selects the module whose
 	// build list resolves them: a repository whose module lives in a
@@ -1615,11 +1646,16 @@ func (p *Provider) EnrichFilesContext(ctx context.Context, g graph.Store, repoPr
 	// relativization base for graph paths.
 	fileLoadDir, _ := goLoadDir(absRoot)
 	pkgs, fset, err := p.loadPackagesContext(ctx, fileLoadDir, patterns...)
+	defer func() {
+		clearGoPackageCompilerRoots(pkgs)
+		pkgs = nil
+		fset = nil
+	}()
 	if err != nil {
 		return nil, fmt.Errorf("load packages for %d files: %w", len(requestedFiles), err)
 	}
 
-	rows := buildSemanticBindingTypes(pkgs, fset, absRoot, repoPrefix)
+	rows := buildSemanticBindingTypes(pkgs, fset, sourceRoot, repoPrefix)
 	loadedSet := make(map[string]struct{}, len(requestedFiles))
 	for _, filePath := range requestedFiles {
 		loadedSet[filePath] = struct{}{}
@@ -1635,7 +1671,7 @@ func (p *Provider) EnrichFilesContext(ctx context.Context, g graph.Store, repoPr
 			if syntax == nil {
 				continue
 			}
-			relPath := relativePath(fset.Position(syntax.Pos()).Filename, absRoot)
+			relPath := relativePath(fset.Position(syntax.Pos()).Filename, sourceRoot)
 			if relPath == "" {
 				continue
 			}
@@ -1655,6 +1691,9 @@ func (p *Provider) EnrichFilesContext(ctx context.Context, g graph.Store, repoPr
 		}
 	}
 	rows = filtered
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	_, persistentBindings := g.(graph.SemanticBindingTypeStore)
 	if writer, ok := g.(graph.SemanticBindingTypeWriter); ok {
 		if err := writer.ReplaceSemanticBindingTypesForFiles(repoPrefix, loadedFiles, rows); err != nil {
@@ -2099,6 +2138,135 @@ type compilerProgram struct {
 	files    int
 }
 
+// loadFilePackages queries ordinary directories once. The Go driver
+// otherwise repeats a directory query for each file= pattern. Only uncovered
+// files use that driver's ad-hoc fallback, together in the original order so
+// its command-line-arguments package merging remains unchanged.
+func loadFilePackages(cfg *packages.Config, load func(*packages.Config, ...string) ([]*packages.Package, error), filePatterns []string) ([]*packages.Package, error) {
+	if resolved, err := filepath.EvalSymlinks(cfg.Dir); err == nil {
+		cfg.Dir = resolved
+	}
+	requested := make(map[string]bool, len(filePatterns))
+	directories := make(map[string]bool)
+	for _, pattern := range filePatterns {
+		file := strings.TrimPrefix(pattern, "file=")
+		requested[file] = true
+		directories[filepath.Dir(file)] = true
+	}
+	patterns := make([]string, 0, len(directories))
+	for directory := range directories {
+		rel, err := filepath.Rel(cfg.Dir, directory)
+		if err != nil {
+			return nil, fmt.Errorf("relative package directory: %w", err)
+		}
+		patterns = append(patterns, "./"+filepath.ToSlash(rel))
+	}
+	sort.Strings(patterns)
+	roots, err := load(cfg, patterns...)
+	if err != nil {
+		return nil, err
+	}
+	coveredDirs := make(map[string]bool, len(directories))
+	var pkgs []*packages.Package
+	for _, pkg := range roots {
+		keep := false
+		for _, file := range pkg.GoFiles {
+			coveredDirs[filepath.Dir(file)] = true
+			if requested[file] {
+				keep = true
+			}
+		}
+		if keep {
+			pkgs = append(pkgs, pkg)
+		}
+	}
+	var fallback []string
+	for _, pattern := range filePatterns {
+		// A valid directory also covers excluded files and test files when
+		// Tests is false, matching the driver's file= ad-hoc rule.
+		if !coveredDirs[filepath.Dir(strings.TrimPrefix(pattern, "file="))] {
+			fallback = append(fallback, pattern)
+		}
+	}
+	if len(fallback) > 0 {
+		extra, err := load(cfg, fallback...)
+		if err != nil {
+			return nil, err
+		}
+		pkgs = append(pkgs, extra...)
+	}
+	return pkgs, nil
+}
+
+// loadCompilerPackages keeps one importer universe per typed load. The pinned
+// driver dispatches 16,383-character chunks concurrently; larger lists retain
+// that native behavior and expose their fan-out instead of splitting types.
+func (p *Provider) loadCompilerPackages(cfg *packages.Config, patterns ...string) ([]*packages.Package, error) {
+	const driverArgMax = 16383
+	chunks, chars, total := 1, 0, 0
+	for _, pattern := range patterns {
+		total += len(pattern) + 1
+		chars += len(pattern) + 1
+		if chars > driverArgMax {
+			chunks++
+			chars = len(pattern)
+		}
+	}
+	if chunks > 1 && p.logger != nil {
+		p.logger.Info("go-types: package load uses native driver chunks",
+			zap.Int("driver_chunks", chunks), zap.Int("patterns", len(patterns)),
+			zap.Int("pattern_bytes", total), zap.String("module_dir", cfg.Dir))
+	}
+	load := p.packagesLoad
+	if load == nil {
+		load = packages.Load
+	}
+	return load(cfg, patterns...)
+}
+
+// boundCompilerSubprocess limits each Go command without changing the daemon's
+// environment. An explicit invalid -p still reaches Go's own rejection path.
+func boundCompilerSubprocess(cfg *packages.Config) {
+	flags := append([]string(nil), cfg.BuildFlags...)
+	hasParallelism := false
+	for i := 0; i < len(flags); i++ {
+		flag := flags[i]
+		switch {
+		case flag == "-p":
+			hasParallelism = true
+			if i+1 < len(flags) {
+				i++
+				if n, err := strconv.Atoi(flags[i]); err == nil && n > 1 {
+					flags[i] = "1"
+				}
+			}
+		case strings.HasPrefix(flag, "-p="):
+			hasParallelism = true
+			if n, err := strconv.Atoi(strings.TrimPrefix(flag, "-p=")); err == nil && n > 1 {
+				flags[i] = "-p=1"
+			}
+		}
+	}
+	if !hasParallelism {
+		flags = append(flags, "-p=1")
+	}
+	cfg.BuildFlags = flags
+	env := cfg.Env
+	if env == nil {
+		env = os.Environ()
+	}
+	procs := 2
+	for _, entry := range env {
+		if value, ok := strings.CutPrefix(entry, "GOMAXPROCS="); ok {
+			procs = 2
+			if n, err := strconv.Atoi(value); err == nil && n == 1 {
+				procs = 1
+			}
+		}
+	}
+	cfg.Env = append(append([]string(nil), env...), "GOMAXPROCS="+strconv.Itoa(procs))
+}
+
 // loadCompilerProgram is loadPackagesContext with the load's size and the
 // unfiltered package list. parseFile, when non-nil, replaces go/packages'
 // parser for the source-checked packages.
@@ -2140,11 +2308,26 @@ func (p *Provider) loadCompilerProgram(ctx context.Context, dir string, parseFil
 		Env:       committedEnv(ctx),
 	}
 
-	load := p.packagesLoad
-	if load == nil {
-		load = packages.Load
+	boundCompilerSubprocess(cfg)
+
+	load := p.loadCompilerPackages
+	fileQueries := len(patterns) > 0
+	for _, pattern := range patterns {
+		if !strings.HasPrefix(pattern, "file=") {
+			fileQueries = false
+			break
+		}
 	}
-	pkgs, err := load(cfg, patterns...)
+	var pkgs []*packages.Package
+	var err error
+	if fileQueries {
+		pkgs, err = loadFilePackages(cfg, load, patterns)
+	} else {
+		pkgs, err = load(cfg, patterns...)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return compilerProgram{}, ctxErr
+	}
 	if err != nil {
 		return compilerProgram{}, err
 	}

@@ -74,6 +74,7 @@ type ResolverHelper struct {
 	// It selects the per-call lookup path in acquire and makes Close a
 	// no-op. See the type comment for why the two modes must differ.
 	routerBacked bool
+	lookupPinned func() (*Provider, func(), error)
 
 	// mu serialises Definition in router-backed mode, where every call
 	// runs against the single router-cached provider for this (spec,
@@ -221,6 +222,14 @@ func NewResolverHelper(provider *Provider, workspaceRoot string, timeout time.Du
 func NewLazyResolverHelper(lookup func() (*Provider, error), workspaceRoot string, extensions []string, timeout time.Duration, logger *zap.Logger) *ResolverHelper {
 	h := NewPooledResolverHelper(lookup, workspaceRoot, extensions, timeout, 1, logger)
 	h.routerBacked = true
+	return h
+}
+
+// NewPinnedLazyResolverHelper holds a router pin for each Definition call.
+// lookup returns one provider and the release for that exact acquisition.
+func NewPinnedLazyResolverHelper(lookup func() (*Provider, func(), error), workspaceRoot string, extensions []string, timeout time.Duration, logger *zap.Logger) *ResolverHelper {
+	h := NewLazyResolverHelper(nil, workspaceRoot, extensions, timeout, logger)
+	h.lookupPinned = lookup
 	return h
 }
 
@@ -374,14 +383,26 @@ func (h *ResolverHelper) borrow() (*Provider, func()) {
 func (h *ResolverHelper) acquire(relPath string) (*Provider, func(), bool) {
 	if h.routerBacked {
 		h.mu.Lock()
-		p, err := h.spawnFn()
+		var p *Provider
+		var release func()
+		var err error
+		if h.lookupPinned != nil {
+			p, release, err = h.lookupPinned()
+		} else {
+			p, err = h.spawnFn()
+		}
 		if err != nil || p == nil {
 			h.mu.Unlock()
 			h.logger.Debug("resolve-time LSP: provider lookup failed",
 				zap.String("path", relPath), zap.Error(err))
 			return nil, nil, false
 		}
-		return p, func() { h.mu.Unlock() }, true
+		return p, func() {
+			if release != nil {
+				release()
+			}
+			h.mu.Unlock()
+		}, true
 	}
 
 	if err := h.ensurePool(); err != nil {
@@ -410,7 +431,7 @@ func (h *ResolverHelper) SupportsPath(relPath string) bool {
 	if h == nil || relPath == "" {
 		return false
 	}
-	if h.provider == nil && h.spawnFn == nil {
+	if h.provider == nil && h.spawnFn == nil && h.lookupPinned == nil {
 		return false
 	}
 	ext := strings.ToLower(filepath.Ext(relPath))

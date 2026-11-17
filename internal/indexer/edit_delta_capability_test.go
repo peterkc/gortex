@@ -165,6 +165,7 @@ var editDeltaAbsentCapabilities = map[string]string{
 	"graph.NodeSearchKeyScanner":                           "read accelerator: without it the caller takes the Store/Reader form, which DeltaWriter answers through the composed view (a cost, not a different answer)",
 	"graph.NodesByKindsScanner":                            "read accelerator: without it the caller takes the Store/Reader form, which DeltaWriter answers through the composed view (a cost, not a different answer)",
 	"graph.NodesByKindsSequencer":                          "read accelerator: without it the caller takes the Store/Reader form, which DeltaWriter answers through the composed view (a cost, not a different answer)",
+	"graph.NodesInFilesByKindStreamer":                     "read accelerator: without it the caller takes the Store/Reader form, which DeltaWriter answers through the composed view (a cost, not a different answer)",
 	"graph.OverlayDetachedFileSummaryReader":               "composition contract of an overlay layer, a composed view or a reader wrapper; asserted on those objects, never on the store the engine writes",
 	"graph.OverlayDetachedNodeReader":                      "composition contract of an overlay layer, a composed view or a reader wrapper; asserted on those objects, never on the store the engine writes",
 	"graph.OverlayLayerEdgeEndpointReader":                 "composition contract of an overlay layer, a composed view or a reader wrapper; asserted on those objects, never on the store the engine writes",

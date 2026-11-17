@@ -1176,13 +1176,14 @@ func (s *Server) simulateDiagnosticsAtStep(ctx context.Context, sim *simulation,
 		// The provider is selected off the canonical-checkout spelling so the
 		// SERVER stays repo-rooted; every path handed to it below is still the
 		// view's (simulationLSPAnchorPath).
-		provider, _, perr := s.lspProviderForPath(s.simulationLSPAnchorPath(ctx, absPath))
+		provider, _, release, perr := s.lspProviderForPath(s.simulationLSPAnchorPath(ctx, absPath))
 		if perr != nil || provider == nil {
 			continue
 		}
 		// Open the file on the LSP server (idempotent — keeps base
 		// content visible to other sessions until the change pass).
 		if err := provider.EnsureFileOpen(filepath.Dir(absPath), filepath.Base(absPath)); err != nil {
+			release()
 			continue
 		}
 		// Read the on-disk authoritative content so we can restore.
@@ -1201,6 +1202,7 @@ func (s *Server) simulateDiagnosticsAtStep(ctx context.Context, sim *simulation,
 			simContent = ov.Content
 		}
 		if err := provider.PushSimulatedContent(absPath, simContent); err != nil {
+			release()
 			continue
 		}
 		diags := provider.WaitForDiagnostics(absPath, timeout)
@@ -1209,6 +1211,7 @@ func (s *Server) simulateDiagnosticsAtStep(ctx context.Context, sim *simulation,
 		// the version monotonically (the simulated push already
 		// did) — no leaks.
 		_ = provider.PushSimulatedContent(absPath, original)
+		release()
 		out = append(out, map[string]any{
 			"path":        overlayPath,
 			"server":      provider.Name(),

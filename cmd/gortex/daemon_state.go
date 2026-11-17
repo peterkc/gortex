@@ -688,6 +688,7 @@ func warmupDaemonStateContext(ctx context.Context, state *daemonState, logger *z
 	// helpers are lazy: language servers are not spawned until the
 	// resolver asks for a supported edge resolution. Time helper construction
 	// separately so repository discovery is visible even when no server starts.
+	var startupTypeScriptWorkspaces []string
 	finishHelpers := startWarmupStep(logger, "resolver_helper_registration", zap.Int("repos", len(repos)))
 	if state.resolverLSPRegistry != nil && state.lspRouter != nil {
 		poolSize := lsp.ResolverPoolSizeFromEnv(1)
@@ -717,6 +718,9 @@ func warmupDaemonStateContext(ctx context.Context, state *daemonState, logger *z
 				switch spec {
 				case "typescript-language-server", "tsgo":
 					tsRepos++
+					if poolSize <= 1 {
+						startupTypeScriptWorkspaces = append(startupTypeScriptWorkspaces, absRoot)
+					}
 				case "pyright", "pyrefly":
 					pythonRepos++
 				}
@@ -1152,6 +1156,14 @@ func warmupDaemonStateContext(ctx context.Context, state *daemonState, logger *z
 		publishReadinessPhase(state, "resolve_done", false, map[string]any{
 			"elapsed_ms": time.Since(phaseStart).Milliseconds(),
 		})
+	}
+
+	// Startup's resolver calls have released their per-use pins. Close only
+	// unused router-backed TypeScript providers before heavy enrichment starts;
+	// active callers keep their pins and later resolution recreates lazily.
+	// Helper-owned pools are not in this list and keep their existing lifetime.
+	for _, workspace := range startupTypeScriptWorkspaces {
+		state.lspRouter.CloseCheckoutWorkspace("typescript", workspace)
 	}
 
 	// The resolve phase is over: parked enrichment applies may now take the
