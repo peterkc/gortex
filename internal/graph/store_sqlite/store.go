@@ -63,6 +63,9 @@ type backgroundCheckpointCoordination struct {
 	generationLease generationBulkCheckpointLease
 	boundGeneration int64
 	active          *backgroundCheckpointAttempt
+
+	foregroundGate     sqliteWriteGate
+	foregroundReserved bool
 }
 
 type storeCore struct {
@@ -1195,7 +1198,8 @@ var errGenerationBulkCheckpointCoordination = errors.New("store_sqlite: generati
 
 // beginBackgroundCheckpointAttempt registers the one background checkpoint
 // attempt. It is refused (errWALCheckpointDeferredBulk) while a generation
-// bulk window holds the lease or another attempt runs, and — for a yielding
+// bulk window holds the lease, a foreground checkpoint is reserved, or another
+// attempt runs, and — for a yielding
 // attempt with a build-lane predicate installed — while a mutation cycle holds
 // the lane (errWALCheckpointYieldedToCycle); a yielding attempt is also
 // cancelled with that cause when a cycle takes the lane (see
@@ -1230,9 +1234,9 @@ func (s *Store) beginCheckpointAttempt(policy checkpointCyclePolicy, reclaim boo
 
 	coordination := &s.backgroundCheckpoint
 	coordination.mu.Lock()
-	if (coordination.generationLease != 0 && !overridesLease) || coordination.active != nil {
+	if coordination.foregroundReserved || (coordination.generationLease != 0 && !overridesLease) || coordination.active != nil {
 		refusal := errWALCheckpointDeferredBulk
-		if coordination.generationLease == 0 || overridesLease {
+		if coordination.foregroundReserved || coordination.generationLease == 0 || overridesLease {
 			refusal = errWALCheckpointInFlight
 		}
 		coordination.mu.Unlock()
@@ -1278,6 +1282,41 @@ func (s *Store) finishBackgroundCheckpointAttempt(attempt *backgroundCheckpointA
 		coordination.mu.Unlock()
 		close(attempt.done)
 	})
+}
+
+// reserveForegroundCheckpoint serializes foreground checkpoints and joins any
+// background checkpoint before the caller takes writeMu. Cancellation alone
+// does not release SQLite's checkpoint lock while an xSync is still in flight.
+func (s *Store) reserveForegroundCheckpoint(ctx context.Context) error {
+	coordination := &s.backgroundCheckpoint
+	if err := coordination.foregroundGate.LockContext(ctx); err != nil {
+		return err
+	}
+	coordination.mu.Lock()
+	coordination.foregroundReserved = true
+	attempt := coordination.active
+	if attempt != nil {
+		attempt.cancel(errWALCheckpointDeferredBulk)
+	}
+	coordination.mu.Unlock()
+	if attempt == nil {
+		return nil
+	}
+	select {
+	case <-attempt.done:
+		return nil
+	case <-ctx.Done():
+		s.releaseForegroundCheckpoint()
+		return ctx.Err()
+	}
+}
+
+func (s *Store) releaseForegroundCheckpoint() {
+	coordination := &s.backgroundCheckpoint
+	coordination.mu.Lock()
+	coordination.foregroundReserved = false
+	coordination.mu.Unlock()
+	coordination.foregroundGate.Unlock()
 }
 
 func (s *Store) runBackgroundCheckpointAttempt(run func(context.Context) (complete, retry bool)) (complete, retry bool) {
@@ -1783,6 +1822,10 @@ func (s *Store) checkpointWALWithContext(ctx context.Context) error {
 }
 
 func (s *Store) checkpointWALWithContextResult(ctx context.Context) (walCheckpointResult, error) {
+	if err := s.reserveForegroundCheckpoint(ctx); err != nil {
+		return walCheckpointResult{}, err
+	}
+	defer s.releaseForegroundCheckpoint()
 	if err := s.writeMu.LockContext(ctx); err != nil {
 		return walCheckpointResult{}, err
 	}

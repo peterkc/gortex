@@ -891,6 +891,10 @@ func (s *Store) drainWALResidue(ctx context.Context) error {
 	if s.dbPath == "" || s.db == s.writerDB {
 		return s.checkpointWALWithContext(ctx)
 	}
+	if err := s.reserveForegroundCheckpoint(ctx); err != nil {
+		return err
+	}
+	defer s.releaseForegroundCheckpoint()
 	ckpt, err := openWALReclaimCheckpointDB(s.dbPath)
 	if err != nil {
 		return err
