@@ -1,6 +1,6 @@
 # Telemetry & privacy
 
-Gortex can collect **anonymous usage statistics** — coarse, bucketed counts of *which* tools and commands run. That anonymous rollup is **opt-in and OFF by default**: nothing is buffered or sent until you explicitly enable it, and even when enabled nothing is transmitted unless an ingest endpoint is configured. Separate, non-transmitted hook diagnostics may be written locally as described below. Neither path records code, file paths, file names, symbol names, or repository names.
+Gortex can collect **anonymous usage statistics** — coarse, bucketed counts of *which* tools and commands run. That anonymous rollup is **opt-in and OFF by default**: nothing is buffered or sent until you explicitly enable it, and even when enabled nothing is transmitted unless an ingest endpoint is configured. Separate, non-transmitted hook diagnostics may be written locally as described below. Neither the rollup nor hook diagnostics record code, file paths, file names, symbol names, or repository names. The optional ONNX Runtime backend has separate telemetry controls and data, described below.
 
 ## Quick control
 
@@ -27,7 +27,15 @@ Consent resolves through a fixed four-rung precedence (**highest wins**):
 | 3 | Saved choice | The persisted `telemetry.enabled` value from `gortex telemetry on/off`. |
 | 4 | Default | **Off.** |
 
-An unrecognised or empty value at a rung falls through to the next rung rather than being treated as a decision. To turn telemetry off everywhere, set `DO_NOT_TRACK=1` or `GORTEX_TELEMETRY=0`.
+An unrecognised or empty value at a rung falls through to the next rung rather than being treated as a decision. To turn this rollup off, set `DO_NOT_TRACK=1` or `GORTEX_TELEMETRY=0`.
+
+## ONNX Runtime telemetry
+
+The optional `embeddings_onnx` backend loads a user-installed ONNX Runtime library. Official Runtime builds from 1.29 onward include Microsoft usage telemetry on Linux and macOS. It can include a hashed device identifier, the process launch path, CPU and OS information, and model names. This is separate from Gortex's anonymous rollup and its no-paths guarantee.
+
+Gortex keeps ONNX Runtime telemetry **off by default** by setting `ORT_DISABLE_TELEMETRY=1` before loading the library and calling its telemetry-off API after environment creation. A sandboxed Runtime 1.31.0 check created no device-id or queue files by default; the opt-in control created both. To permit it, set `GORTEX_ONNX_TELEMETRY=1` in the daemon's environment before starting it. Permission does not force telemetry on: an inherited `ORT_DISABLE_TELEMETRY=1` still wins because Gortex leaves that variable unchanged when you opt in.
+
+For this backend, `DO_NOT_TRACK` forces telemetry off even with `GORTEX_ONNX_TELEMETRY=1`: after trimming whitespace and ignoring case, any value other than empty, `0`, or `false` asserts it. `GORTEX_TELEMETRY=0` and `gortex telemetry off` control only Gortex's anonymous rollup; they do **not** cover ONNX Runtime. The default pure-Go backends do not load ONNX Runtime. See [Semantic search](semantic-search.md) for backend setup.
 
 ## What is collected
 
@@ -79,7 +87,7 @@ rate and makes another high-skip regression visible.
 
 A dimension guard (`^[A-Za-z0-9_.<>+-]{1,32}$`) drops any token containing a path separator, whitespace, or over 32 characters, so even a caller that mistakenly passed a path or symbol name as a dimension cannot leak it — only the bare metric key is recorded.
 
-### Never collected
+### Never collected by Gortex's anonymous rollup
 
 Code or source content; file paths or names; symbol or repository names; IP-derived data; hostnames, usernames, or MAC addresses; exact counts.
 
@@ -89,7 +97,7 @@ A random UUIDv4 minted on first use and stored at `~/.gortex/telemetry/install-i
 
 ## Where state lives
 
-All telemetry state is under `~/.gortex/telemetry/` (`<data-dir>/telemetry`; honours XDG / data-dir overrides). It lives under the durable data dir, not the cache, so a cache wipe never resets the install id or drops unsent days. Contents:
+All state for Gortex's anonymous rollup is under `~/.gortex/telemetry/` (`<data-dir>/telemetry`; honours XDG / data-dir overrides). It lives under the durable data dir, not the cache, so a cache wipe never resets the install id or drops unsent days. Contents:
 
 - per-UTC-day rollup files — the buffered daily aggregates
 - `install-id` — the anonymous id

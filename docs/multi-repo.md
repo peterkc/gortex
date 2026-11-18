@@ -210,6 +210,7 @@ watch:
 
 Environment variables:
 
+- `GORTEX_ONNX_TELEMETRY=1` — permit telemetry from the optional `embeddings_onnx` backend (off by default). Set it in the daemon's environment before starting it. An asserted `DO_NOT_TRACK` still forces off; `GORTEX_TELEMETRY` controls a separate rollup. See [ONNX Runtime telemetry](telemetry.md#onnx-runtime-telemetry).
 - `GORTEX_RECONCILE_INTERVAL` — janitor tick that walks every tracked repo and runs the full-tree `IncrementalReindexPaths` pipeline against disk. Insurance against fsnotify gaps on NFS/SMB mounts, inotify watch-limit exhaustion, or daemon downtime where edits happened offline. Default `1h`; `"0"` or `"off"` disables; otherwise any Go duration string (e.g., `15m`).
 - The daemon also watches each tracked repo's `.git/HEAD`, so branch switches and rebases reconcile incrementally (via `git diff --name-status`) rather than by re-indexing every changed file individually — no configuration needed.
 - `GORTEX_WARMUP_FULL_RETRACK=1` — force every repo through a whole-repo re-track (evict + re-parse every file) on the next warm restart instead of the default scoped reconcile. An escape hatch for when the on-disk change census itself is suspect.

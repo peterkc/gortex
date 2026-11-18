@@ -1,31 +1,40 @@
 package embedding
 
-import "strings"
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
 
-// ONNX Runtime 1.29 and later send usage telemetry by default on Linux and
-// macOS. Gortex keeps it off unless the user opts in with
-// GORTEX_ONNX_TELEMETRY=1. Only the embeddings_onnx backend loads the library.
 const (
 	onnxTelemetryOptInEnv  = "GORTEX_ONNX_TELEMETRY"
 	ortDisableTelemetryEnv = "ORT_DISABLE_TELEMETRY"
 )
 
-// onnxTelemetryAllowed reports whether the user opted in to ONNX Runtime
-// telemetry.
-func onnxTelemetryAllowed(getenv func(string) string) bool {
-	return strings.TrimSpace(getenv(onnxTelemetryOptInEnv)) == "1"
-}
-
-// disableONNXTelemetryEnv sets ORT_DISABLE_TELEMETRY=1 unless the user opted
-// in, and reports whether telemetry stays off. Call it before the library
-// loads: ONNX Runtime reads the variable from the C environment, which
-// os.Setenv also updates in a cgo binary.
-func disableONNXTelemetryEnv(getenv func(string) string, setenv func(string, string) error) (bool, error) {
-	if onnxTelemetryAllowed(getenv) {
-		return false, nil
+// initializeONNXEnvironment opts out before loading the library. The caller owns
+// the environment after success; a failed telemetry-off call destroys it here.
+func initializeONNXEnvironment(libPath string, getenv func(string) string, setenv func(string, string) error,
+	setLibraryPath func(string), initialize, disableTelemetry, destroy func() error,
+) error {
+	// Mirror internal/telemetry/consent.go's doNotTrackAsserted rule. Its
+	// parser is unexported, and GORTEX_TELEMETRY has separate consent semantics.
+	dnt := strings.ToLower(strings.TrimSpace(getenv("DO_NOT_TRACK")))
+	telemetryOff := strings.TrimSpace(getenv(onnxTelemetryOptInEnv)) != "1" || (dnt != "" && dnt != "0" && dnt != "false")
+	if telemetryOff {
+		// os.Setenv also updates the C environment in a cgo binary.
+		if err := setenv(ortDisableTelemetryEnv, "1"); err != nil {
+			return fmt.Errorf("ONNX Runtime telemetry opt-out: %w", err)
+		}
 	}
-	if err := setenv(ortDisableTelemetryEnv, "1"); err != nil {
-		return true, err
+	setLibraryPath(libPath)
+	if err := initialize(); err != nil {
+		return fmt.Errorf("ONNX Runtime init: %w", err)
 	}
-	return true, nil
+	if telemetryOff {
+		// This API needs the OrtEnv, so it only stops events after env creation.
+		if err := disableTelemetry(); err != nil {
+			return errors.Join(fmt.Errorf("ONNX Runtime telemetry opt-out: %w", err), destroy())
+		}
+	}
+	return nil
 }

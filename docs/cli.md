@@ -30,7 +30,7 @@ gortex docs [path]           Generate a "living docs" bundle (recent changes + o
 gortex export [path]         Export the graph to Cypher, GraphML, or Mermaid (--format mermaid --scope all)
 gortex githook <sub>         install / uninstall / status — manage post-commit, post-merge, and post-checkout hooks
 gortex clean                 Remove Gortex files from a project
-gortex telemetry <sub>       on / off / status — control anonymous, opt-in usage telemetry (off by default; honours DO_NOT_TRACK)
+gortex telemetry <sub>       on / off / status — control anonymous, opt-in usage telemetry (off by default; honours DO_NOT_TRACK). ONNX Runtime is separate: GORTEX_ONNX_TELEMETRY=1 in the daemon environment permits it; DO_NOT_TRACK still forces it off
 gortex guide [topic]         Print the reference guide (providers, capabilities, tokens, analyze, search_ast, resources, workflow) — same content as the gortex://guide resource
 gortex version               Print version
 ```
