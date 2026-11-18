@@ -5,7 +5,7 @@ import (
 	"sync"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // ContractServedSources pins the positive generations of admitted current core
@@ -28,7 +28,7 @@ type ContractServedSources struct {
 // must retain the originating request view and repository scope until Close;
 // generation pins alone do not own their composed readers or base-corpus owner.
 func (m *Materializer) AcquireContractServedSources(ctx context.Context, inputs *SelectedContractInputs) (*ContractServedSources, error) {
-	if m == nil || m.Store == nil || m.Leases == nil || m.Catalog == nil || inputs == nil || inputs.store != m.Store {
+	if m == nil || (m.Store == nil || m.Store.IsNilGenerationHandle()) || m.Leases == nil || (m.Catalog == nil || m.Catalog.IsNilMaterializerCatalog()) || inputs == nil || inputs.store != m.Store {
 		return nil, graph.ErrContractInputVector
 	}
 	if err := inputs.Validate(ctx); err != nil {
@@ -71,7 +71,7 @@ func (s *ContractServedSources) Validate(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if !found || row.State != store_sqlite.ViewGenerationReady && row.State != store_sqlite.ViewGenerationSuperseded {
+		if !found || row.State != storage.ViewGenerationReady && row.State != storage.ViewGenerationSuperseded {
 			return graph.ErrContractProjectionStale
 		}
 	}

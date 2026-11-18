@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/gitstate"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Reasons a CheckoutFreshProof could not prove the route current. They are
@@ -136,13 +136,13 @@ func (l *CheckoutLifecycle) ProveCheckoutFresh(ctx context.Context, checkoutID, 
 	return c.proveFresh(ctx, checkout, rootInfo)
 }
 
-func (c *CheckoutCoordinator) proveFresh(ctx context.Context, checkout store_sqlite.Checkout, rootInfo os.FileInfo) (CheckoutFreshProof, error) {
+func (c *CheckoutCoordinator) proveFresh(ctx context.Context, checkout storage.Checkout, rootInfo os.FileInfo) (CheckoutFreshProof, error) {
 	proof := CheckoutFreshProof{Incarnation: checkout.Incarnation}
 	route, found, err := c.catalog.GetCheckoutRoute(ctx, c.checkoutID)
 	if err != nil {
 		return proof, err
 	}
-	if !found || route.State != store_sqlite.RouteActive || route.CommitGenerationID <= 0 || route.DirtyGenerationID <= 0 {
+	if !found || route.State != storage.RouteActive || route.CommitGenerationID <= 0 || route.DirtyGenerationID <= 0 {
 		proof.Reason = FreshProofRouteNotActive
 		return proof, nil
 	}
@@ -310,10 +310,10 @@ func freshRequestSince(ctx context.Context, fallback time.Time) time.Time {
 
 // freshProofCheckoutReady is the checkout-row predicate a refresh ticket must
 // pass before it completes (completeCheckoutRefreshTickets).
-func freshProofCheckoutReady(checkout store_sqlite.Checkout) bool {
-	return checkout.State == store_sqlite.CheckoutStateReady &&
-		checkout.EffectiveMode == store_sqlite.CheckoutModeAutomatic &&
-		checkout.DesiredMode == store_sqlite.CheckoutModeAutomatic &&
+func freshProofCheckoutReady(checkout storage.Checkout) bool {
+	return checkout.State == storage.CheckoutStateReady &&
+		checkout.EffectiveMode == storage.CheckoutModeAutomatic &&
+		checkout.DesiredMode == storage.CheckoutModeAutomatic &&
 		checkout.ActiveIntentTransitionID == "" &&
 		checkout.UnavailableSince == 0 &&
 		checkout.RemovalDetectedAt == 0

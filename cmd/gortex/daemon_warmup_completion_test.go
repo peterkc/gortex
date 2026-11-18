@@ -441,7 +441,7 @@ func (f *daemonCleanupFixture) open(g graph.Store, cm *config.ConfigManager) {
 	idx := indexer.New(g, registry, config.Default().Index, logger)
 	mi := indexer.NewMultiIndexer(g, registry, idx.Search(), cm, logger)
 	lifecycle, err := indexer.NewCheckoutLifecycle(indexer.CheckoutLifecycleConfig{
-		MultiIndexer: mi, ConfigManager: cm, Graph: f.store, Logger: logger,
+		MultiIndexer: mi, ConfigManager: cm, Graph: f.store, Catalog: f.store.Catalog(), Logger: logger,
 	})
 	require.NoError(f.t, err)
 	lifecycle.EnableDeferredRepositoryCleanup()
@@ -493,7 +493,7 @@ func TestWarmupPendingCleanupRefusesWarmAndColdConfiguredTargets(t *testing.T) {
 			}
 			g := &cleanupWarmupMtimes{Store: f.store}
 			f.restart(g)
-			publisher, err := indexer.NewDedicatedBaseRuntime(f.store, f.state.lifecycle.ViewLeases())
+			publisher, err := indexer.NewDedicatedBaseRuntime(f.store, f.store.Catalog(), f.state.lifecycle.ViewLeases())
 			require.NoError(t, err)
 			finalizer := &warmupCleanupFinalizer{DedicatedBaseRuntime: publisher, finalized: make(chan string, 2)}
 			require.NoError(t, f.state.lifecycle.SetDedicatedBaseCleanupRuntime(finalizer))
@@ -636,7 +636,7 @@ func TestDaemonSeedAndWarmupReachReadyBeforeRepositoryPurgeCompletes(t *testing.
 			g := &heldWarmupCleanupPurge{Store: f.store, entered: make(chan warmupCleanupPurgeEntry, 2), release: make(chan struct{})}
 			f.restart(g)
 			g.server = f.state.mcpServer
-			publisher, err := indexer.NewDedicatedBaseRuntime(f.store, f.state.lifecycle.ViewLeases())
+			publisher, err := indexer.NewDedicatedBaseRuntime(f.store, f.store.Catalog(), f.state.lifecycle.ViewLeases())
 			require.NoError(t, err)
 			finalizer := &warmupCleanupFinalizer{DedicatedBaseRuntime: publisher, finalized: make(chan string, 2)}
 			require.NoError(t, f.state.lifecycle.SetDedicatedBaseCleanupRuntime(finalizer))
@@ -798,7 +798,7 @@ func TestDaemonCleanupReleaseFollowsResolveFailureCompletion(t *testing.T) {
 			t.Cleanup(release)
 			f.restart(g)
 			g.server = f.state.mcpServer
-			publisher, err := indexer.NewDedicatedBaseRuntime(f.store, f.state.lifecycle.ViewLeases())
+			publisher, err := indexer.NewDedicatedBaseRuntime(f.store, f.store.Catalog(), f.state.lifecycle.ViewLeases())
 			require.NoError(t, err)
 			finalizer := &warmupCleanupFinalizer{DedicatedBaseRuntime: publisher, finalized: make(chan string, 2)}
 			require.NoError(t, f.state.lifecycle.SetDedicatedBaseCleanupRuntime(finalizer))

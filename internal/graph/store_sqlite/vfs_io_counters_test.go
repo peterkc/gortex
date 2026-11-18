@@ -67,13 +67,13 @@ func TestWriteSplitOtherWALAndPositionFallback(t *testing.T) {
 	after.WriteBytes[vfsFileWAL][0] = 64
 	after.WriteBytes[vfsFileWAL][1] = 128
 	require.Equal(t, int64(192), after.Since(before).WALBytes(), "other store writers must remain visible")
-	before = VFSIOMark{fallbackWAL: WALWriteMark{Valid: true, MxFrame: 10, PageSize: 4096}}
-	after = VFSIOMark{fallbackWAL: WALWriteMark{Valid: true, MxFrame: 12, PageSize: 4096}}
+	before = VFSIOMark{FallbackWAL: WALWriteMark{Valid: true, MxFrame: 10, PageSize: 4096}}
+	after = VFSIOMark{FallbackWAL: WALWriteMark{Valid: true, MxFrame: 12, PageSize: 4096}}
 	d := after.Since(before)
 	require.Equal(t, int64(2*(4096+24)), d.WALBytes())
 	require.False(t, d.WALReset)
-	after.fallbackWAL.Salt[0] = 1
-	after.fallbackWAL.MxFrame = 1
+	after.FallbackWAL.Salt[0] = 1
+	after.FallbackWAL.MxFrame = 1
 	d = after.Since(before)
 	require.Equal(t, int64(4096+24), d.WALBytes(), "only the new incarnation is countable")
 	require.True(t, d.WALReset)

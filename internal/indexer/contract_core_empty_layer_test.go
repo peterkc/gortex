@@ -17,23 +17,24 @@ func TestContractCoreEmptyDirtyLayerCarriesSelectedHeader(t *testing.T) {
 	builder.SetContractCoreRuntime(ContractCoreRuntimeHooks{})
 	base, _, err := builder.BuildClaimedDedicatedBase(ctx, ClaimedDedicatedBaseRequest{Claim: claim, RootPath: request.RootPath, WorkspaceID: request.WorkspaceID, ProjectID: request.ProjectID})
 	require.NoError(t, err)
-	parent, found, err := builder.Store.AtGeneration(base).ContractInputStateContext(ctx, request.RepoPrefix, request.Identity.CheckoutID)
+	nativeStore := builder.Store.(*store_sqlite.Store)
+	parent, found, err := nativeStore.AtGeneration(base).ContractInputStateContext(ctx, request.RepoPrefix, request.Identity.CheckoutID)
 	require.NoError(t, err)
 	require.True(t, found)
 	require.True(t, parent.Accepted)
 	identity := builderDirtyIdentity()
 	identity.GraphID, identity.CheckoutID = request.Identity.GraphID, request.Identity.CheckoutID
 	identity.BaseGenerationID = base
-	generation, report, err := builder.BuildDirtyLayer(ctx, DirtyLayerRequest{Identity: identity, Base: builder.Store.AtGeneration(base), CheckoutRoot: request.RootPath, RepoPrefix: request.RepoPrefix, WorkspaceID: request.WorkspaceID, ProjectID: request.ProjectID})
+	generation, report, err := builder.BuildDirtyLayer(ctx, DirtyLayerRequest{Identity: identity, Base: nativeStore.AtGeneration(base), CheckoutRoot: request.RootPath, RepoPrefix: request.RepoPrefix, WorkspaceID: request.WorkspaceID, ProjectID: request.ProjectID})
 	require.NoError(t, err)
 	require.Empty(t, report.IndexedPaths, "the ordinary clean dirty delta must have no indexed paths")
 	require.Zero(t, report.DeleteMasks)
-	top := builder.Store.AtGeneration(generation)
+	top := nativeStore.AtGeneration(generation)
 	carried, found, err := top.ContractInputStateContext(ctx, request.RepoPrefix, request.Identity.CheckoutID)
 	require.NoError(t, err)
 	require.True(t, found, "an empty published positive layer must carry its selected contract identity")
 	require.Equal(t, parent, carried)
-	mat := &graphview.Materializer{Store: builder.Store, Catalog: builder.Store.Catalog(), Leases: graphview.NewLeaseManager()}
+	mat := &graphview.Materializer{Store: nativeStore, Catalog: nativeStore.Catalog(), Leases: graphview.NewLeaseManager()}
 	view, err := mat.MaterializeRefView(ctx, request.Identity.GraphID, generation)
 	require.NoError(t, err)
 	defer view.Close()
@@ -62,7 +63,8 @@ func TestContractCoreEmptySparseCommitLayerCarriesSelectedHeader(t *testing.T) {
 	builder.SetContractCoreRuntime(ContractCoreRuntimeHooks{})
 	base, _, err := builder.BuildClaimedDedicatedBase(ctx, ClaimedDedicatedBaseRequest{Claim: claim, RootPath: request.RootPath, WorkspaceID: request.WorkspaceID, ProjectID: request.ProjectID})
 	require.NoError(t, err)
-	parent, found, err := builder.Store.AtGeneration(base).ContractInputStateContext(ctx, request.RepoPrefix, request.Identity.CheckoutID)
+	nativeStore := builder.Store.(*store_sqlite.Store)
+	parent, found, err := nativeStore.AtGeneration(base).ContractInputStateContext(ctx, request.RepoPrefix, request.Identity.CheckoutID)
 	require.NoError(t, err)
 	require.True(t, found)
 	require.True(t, parent.Accepted)
@@ -70,7 +72,7 @@ func TestContractCoreEmptySparseCommitLayerCarriesSelectedHeader(t *testing.T) {
 	identity.GraphID, identity.CheckoutID = request.Identity.GraphID, request.Identity.CheckoutID
 	identity.BaseGenerationID = base
 	generation, report, err := builder.BuildCommitLayer(ctx, CommitLayerRequest{
-		Identity: identity, Base: builder.Store.AtGeneration(base), RepoDir: request.RootPath,
+		Identity: identity, Base: nativeStore.AtGeneration(base), RepoDir: request.RootPath,
 		BaseTreeOID: request.Identity.TreeOID, TargetTreeOID: request.Identity.TreeOID,
 		RootPath: request.RootPath, RepoPrefix: request.RepoPrefix, WorkspaceID: request.WorkspaceID, ProjectID: request.ProjectID,
 	})
@@ -79,16 +81,16 @@ func TestContractCoreEmptySparseCommitLayerCarriesSelectedHeader(t *testing.T) {
 	require.False(t, report.Coalesced, "ready reuse must not satisfy the initialization regression")
 	require.Empty(t, report.IndexedPaths)
 	require.Zero(t, report.DeleteMasks)
-	row, found, err := builder.Store.Catalog().GetViewGeneration(ctx, generation)
+	row, found, err := nativeStore.Catalog().GetViewGeneration(ctx, generation)
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, CommitLayerGenerationKind, row.GenerationKind)
-	top := builder.Store.AtGeneration(generation)
+	top := nativeStore.AtGeneration(generation)
 	carried, found, err := top.ContractInputStateContext(ctx, request.RepoPrefix, request.Identity.CheckoutID)
 	require.NoError(t, err)
 	require.True(t, found, "the fresh sparse empty layer must have its own physical certified header")
 	require.Equal(t, parent, carried)
-	mat := &graphview.Materializer{Store: builder.Store, Catalog: builder.Store.Catalog(), Leases: graphview.NewLeaseManager()}
+	mat := &graphview.Materializer{Store: nativeStore, Catalog: nativeStore.Catalog(), Leases: graphview.NewLeaseManager()}
 	view, err := mat.MaterializeRefView(ctx, request.Identity.GraphID, generation)
 	require.NoError(t, err)
 	defer view.Close()
@@ -166,7 +168,8 @@ func TestContractCoreEmptyDirtyLayerSourceFenceStillRejects(t *testing.T) {
 	builder.SetContractCoreRuntime(ContractCoreRuntimeHooks{})
 	base, _, err := builder.BuildClaimedDedicatedBase(ctx, ClaimedDedicatedBaseRequest{Claim: claim, RootPath: request.RootPath})
 	require.NoError(t, err)
-	physical := builder.Store.AtGeneration(base)
+	nativeStore := builder.Store.(*store_sqlite.Store)
+	physical := nativeStore.AtGeneration(base)
 	parent, found, err := physical.ContractInputStateContext(ctx, request.RepoPrefix, request.Identity.CheckoutID)
 	require.NoError(t, err)
 	require.True(t, found)
@@ -180,7 +183,7 @@ func TestContractCoreEmptyDirtyLayerSourceFenceStillRejects(t *testing.T) {
 	})
 	require.ErrorIs(t, err, ErrDirtySnapshotChanged)
 	require.Empty(t, report.IndexedPaths)
-	row, found, err := builder.Store.Catalog().GetViewGeneration(ctx, generation)
+	row, found, err := nativeStore.Catalog().GetViewGeneration(ctx, generation)
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, store_sqlite.ViewGenerationFailed, row.State)
@@ -189,7 +192,7 @@ func TestContractCoreEmptyDirtyLayerSourceFenceStillRejects(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, parent, unchanged)
-	mat := &graphview.Materializer{Store: builder.Store, Catalog: builder.Store.Catalog(), Leases: graphview.NewLeaseManager()}
+	mat := &graphview.Materializer{Store: nativeStore, Catalog: nativeStore.Catalog(), Leases: graphview.NewLeaseManager()}
 	view, err := mat.MaterializeRefView(ctx, request.Identity.GraphID, generation)
 	require.Error(t, err)
 	require.Nil(t, view, "the private carried header cannot make a source-rejected layer selectable")

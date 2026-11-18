@@ -5,8 +5,8 @@ import (
 	"fmt"
 
 	"github.com/zzet/gortex/internal/gitstate"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/pathkey"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // ObserveCheckout records only the selected working copy in an already known
@@ -29,7 +29,7 @@ func (r *Reconciler) ObserveCheckoutWithAdmission(ctx context.Context, familyID,
 		return CheckoutReport{}, err
 	}
 	if !found {
-		return CheckoutReport{}, fmt.Errorf("%w: family %s", store_sqlite.ErrCatalogNotFound, familyID)
+		return CheckoutReport{}, fmt.Errorf("%w: family %s", storage.ErrCatalogNotFound, familyID)
 	}
 	var inv *gitstate.FamilyInventory
 	if len(sampled) == 0 {
@@ -51,7 +51,7 @@ func (r *Reconciler) ObserveCheckoutWithAdmission(ctx context.Context, familyID,
 		}
 	}
 	if selected == nil || selected.Bare {
-		return CheckoutReport{}, fmt.Errorf("%w: selected path is not a working copy in this family", store_sqlite.ErrCatalogNotFound)
+		return CheckoutReport{}, fmt.Errorf("%w: selected path is not a working copy in this family", storage.ErrCatalogNotFound)
 	}
 	if entry, found, err := r.observedCheckout(ctx, familyID, selected); err != nil || found {
 		return entry, err
@@ -84,7 +84,7 @@ func (r *Reconciler) observedCheckout(ctx context.Context, familyID string, reco
 			continue
 		}
 		if !pathkey.EqualPaths(pathkey.CanonicalExistingRoot(checkout.RootPath), pathkey.CanonicalExistingRoot(record.Path)) {
-			return CheckoutReport{}, false, fmt.Errorf("%w: checkout admin name moved; wait for topology reconciliation", store_sqlite.ErrCatalogStaleGuard)
+			return CheckoutReport{}, false, fmt.Errorf("%w: checkout admin name moved; wait for topology reconciliation", storage.ErrCatalogStaleGuard)
 		}
 		return CheckoutReport{CheckoutID: checkout.CheckoutID, Incarnation: checkout.Incarnation, AdminName: checkout.AdminName, RootPath: checkout.RootPath, Main: record.IsMain, Durable: true, State: checkout.State, Action: ActionObserved}, true, nil
 	}

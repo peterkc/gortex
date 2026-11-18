@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // A follow-up is the one place a working-tree delta may pay the full clone
@@ -105,7 +105,7 @@ func cloneFollowupEdgeDiff(dw *graph.DeltaWriter, scratch *graph.Graph, visible 
 // applied to the DeltaWriter; the signature projection waits until after
 // semantic enrichment and is small enough to retain across that stage.
 func prepareCloneFollowup(
-	ctx context.Context, below LayerBase, dw *graph.DeltaWriter, current *store_sqlite.Store,
+	ctx context.Context, below LayerBase, dw *graph.DeltaWriter, current generationPayloadStore,
 	repo string, threshold float64,
 ) (*cloneFollowupProjection, error) {
 	if repo == "" {
@@ -116,7 +116,7 @@ func prepareCloneFollowup(
 		return nil, fmt.Errorf("clone follow-up requires a pinned composed ancestry, got %T", below)
 	}
 	type source struct {
-		handle *store_sqlite.Store
+		handle generationPayloadStore
 		layer  graph.OverlayLayerReader
 		rows   map[string]graph.CloneCorpusRow
 	}
@@ -124,15 +124,15 @@ func prepareCloneFollowup(
 	// roots deliberately omit it, even if generation zero has matching IDs.
 	sources := make([]source, 0, len(base.cloneSources)+2)
 	baseIndex := -1
-	if base.cloneCorpusBase != nil {
+	if base.cloneCorpusBase != nil && !base.cloneCorpusBase.IsNilGenerationHandle() {
 		baseIndex = len(sources)
 		sources = append(sources, source{handle: base.cloneCorpusBase, rows: map[string]graph.CloneCorpusRow{}})
 	}
 	for _, generation := range base.cloneSources {
-		if generation.Handle == nil || generation.Layer == nil {
+		if (generation.Handle == nil || generation.Handle.IsNilGenerationHandle()) || generation.Layer == nil {
 			return nil, fmt.Errorf("clone follow-up has an unpinned generation source")
 		}
-		sources = append(sources, source{handle: generation.Handle, layer: generation.Layer, rows: map[string]graph.CloneCorpusRow{}})
+		sources = append(sources, source{handle: generation.Handle.(generationPayloadStore), layer: generation.Layer, rows: map[string]graph.CloneCorpusRow{}})
 	}
 	currentIndex := len(sources)
 	sources = append(sources, source{handle: current, rows: map[string]graph.CloneCorpusRow{}})
@@ -337,7 +337,7 @@ func prepareCloneFollowup(
 // generation if enrichment wrote one, otherwise from the pinned parent; only
 // clone_sig changes. Identity claims publish those rows without claiming the
 // partner's file or its unrelated outgoing adjacency.
-func (p *cloneFollowupProjection) apply(ctx context.Context, handle *store_sqlite.Store, below LayerBase) (int, error) {
+func (p *cloneFollowupProjection) apply(ctx context.Context, handle generationPayloadStore, below LayerBase) (int, error) {
 	if p == nil {
 		return 0, nil
 	}
@@ -350,7 +350,7 @@ func (p *cloneFollowupProjection) apply(ctx context.Context, handle *store_sqlit
 	}
 	coveredPaths := make(map[string]struct{}, len(masks))
 	for _, mask := range masks {
-		if mask.Mode == store_sqlite.OwnershipReplace {
+		if mask.Mode == storage.OwnershipReplace {
 			coveredPaths[mask.FilePath] = struct{}{}
 		}
 	}

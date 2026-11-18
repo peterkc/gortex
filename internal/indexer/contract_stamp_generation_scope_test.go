@@ -22,14 +22,14 @@ func TestContractStampUnroutedGenerationDoesNotMoveLeasedRows(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, inputs.State.Accepted)
 	require.NoError(t, inputs.Validate(t.Context()))
-	var handles []*store_sqlite.Store
+	var handles []generationPayloadStore
 	if view.ComposesBaseCorpus() {
 		handles = append(handles, f.store.AtGeneration(0))
 	}
 	for _, source := range view.GenerationSources() {
-		handles = append(handles, source.Handle)
+		handles = append(handles, source.Handle.(*store_sqlite.Store))
 	}
-	scanner := newContractStampScanner(inputs, map[string][]*store_sqlite.Store{"fixture": handles}, nil)
+	scanner := newContractStampScanner(inputs, map[string][]generationPayloadStore{"fixture": handles}, nil)
 	const path = "fixture/consts.go"
 	before, err := scanner.scan(t.Context(), []string{path})
 	require.NoError(t, err)
@@ -84,14 +84,14 @@ func TestContractStampPublishedPendingRowsAndMutableABAStayGuarded(t *testing.T)
 				view := w.view(t)
 				inputs, err := f.options.Materializer.CaptureContractInputs(t.Context(), view, "fixture", contractLinkedCheckout)
 				require.NoError(t, err)
-				var handles []*store_sqlite.Store
+				var handles []generationPayloadStore
 				if view.ComposesBaseCorpus() {
 					handles = append(handles, f.store.AtGeneration(0))
 				}
 				for _, source := range view.GenerationSources() {
-					handles = append(handles, source.Handle)
+					handles = append(handles, source.Handle.(*store_sqlite.Store))
 				}
-				scanner = newContractStampScanner(inputs, map[string][]*store_sqlite.Store{"fixture": handles}, nil)
+				scanner = newContractStampScanner(inputs, map[string][]generationPayloadStore{"fixture": handles}, nil)
 				handle, actor = f.store.AtGeneration(w.commit), contractLinkedCheckout
 				selected = view.Reader
 			}
@@ -170,7 +170,7 @@ func TestContractStampPendingBeforePublicationKeepsItsOpenWindow(t *testing.T) {
 	// This deliberately partial fixture has no selected-input authority. It
 	// checks that publication alone cannot bless a pending row's core writes.
 	inputs := &graphview.SelectedContractInputs{Witnesses: []graph.ContractInputWitness{{GenerationID: generation, State: graph.ContractInputState{RepoPrefix: "fixture", CheckoutID: contractLinkedCheckout}}}}
-	scanner := newContractStampScanner(inputs, map[string][]*store_sqlite.Store{"fixture": {handle}}, nil)
+	scanner := newContractStampScanner(inputs, map[string][]generationPayloadStore{"fixture": {handle}}, nil)
 	scan, err := scanner.scan(t.Context(), []string{path})
 	require.NoError(t, err)
 	require.False(t, scan.Settled)

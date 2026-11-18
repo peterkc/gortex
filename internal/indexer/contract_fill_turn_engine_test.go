@@ -55,14 +55,14 @@ func TestContractFillTurnEngineReleasesOnSecondChunkDemandOrCancel(t *testing.T)
 				}
 				return inputs, source, err
 			}
-			options := ContractAnalysisCoordinatorOptions{
+			options := ContractAnalysisCoordinatorOptions{Catalog: testCatalog(f.store), OpenEvidence: openTestEvidenceStore,
 				Store: f.store, Leases: f.options.Materializer.Leases, Registry: f.options.Registry,
 				Config: f.options.Config, Yield: f.options.Yield, LinkedInputs: ownedInputs,
 				LinkedPolicy: ContractLinkedIdle, Now: now, ScratchParent: t.TempDir(),
 				Demand: func() (bool, uint64) { return false, calls.Load() },
-				RetireReservation: func(ctx context.Context, catalog *store_sqlite.Store, generation int64, inUse func(int64) bool) error {
+				RetireReservation: func(ctx context.Context, catalog ContractReservationStore, generation int64, inUse func(int64) bool) error {
 					retired.Add(1)
-					return catalog.RetirePayloadGeneration(ctx, generation, inUse)
+					return catalog.(*store_sqlite.Store).RetirePayloadGeneration(ctx, generation, inUse)
 				},
 			}
 			options.Capture = func(ctx context.Context, source *ContractCaptureSource, inputs *graphview.SelectedContractInputs, repo, checkout string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {

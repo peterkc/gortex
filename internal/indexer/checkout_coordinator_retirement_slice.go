@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -67,14 +67,14 @@ func (c *CheckoutCoordinator) retirePayloadGenerationSlice(
 
 	err = c.store.RetirePayloadGenerationSlice(ctx, generationID, c.retirementInUse, maxElapsed)
 	switch {
-	case err == nil, errors.Is(err, store_sqlite.ErrCatalogNotFound):
+	case err == nil, errors.Is(err, storage.ErrCatalogNotFound):
 		c.mu.Lock()
 		delete(c.backlog, generationID)
 		c.mu.Unlock()
 		viewmetrics.Count(viewmetrics.GenerationSweepCollectedTotal, viewmetrics.SweepCheckout)
 		return true, false, nil
-	case errors.Is(err, store_sqlite.ErrPayloadSweepBudgetExhausted),
-		errors.Is(err, store_sqlite.ErrPayloadGenerationInUse):
+	case errors.Is(err, storage.ErrPayloadSweepBudgetExhausted),
+		errors.Is(err, storage.ErrPayloadGenerationInUse):
 		return false, true, nil
 	default:
 		return false, true, err

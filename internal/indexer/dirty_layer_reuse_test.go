@@ -9,7 +9,6 @@ import (
 
 	"github.com/zzet/gortex/internal/gitstate"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 // The in-process half of working-tree-layer reuse.
@@ -428,7 +427,7 @@ func TestAncestryRefFactsUnionsWithoutDoublingARow(t *testing.T) {
 	facts := seedCorpusRefFacts(t, f)
 	corpus := f.store.AtGeneration(0)
 
-	composed := ancestryRefFacts{handles: []*store_sqlite.Store{corpus, corpus}}
+	composed := ancestryRefFacts{handles: []generationPayloadStore{corpus, corpus}}
 	forward, err := composed.LoadRefFactsByFiles(builderRepoPrefix, nil)
 	if err != nil {
 		t.Fatalf("compose the forward facts: %v", err)

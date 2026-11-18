@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 func warmupWALFixture(t *testing.T) (*Store, *sql.DB) {
@@ -229,6 +230,7 @@ func TestWarmupWALRefusalIsTypedOnlyForReclaimTimeout(t *testing.T) {
 	retirementWALWaitMax = 50 * time.Millisecond
 	err = s.AwaitWarmupWAL(t.Context())
 	require.ErrorIs(t, err, ErrWarmupWALPressure)
+	require.ErrorIs(t, err, storage.ErrWarmupWALPressure)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 
 	retirementWALWaitMax = time.Minute
@@ -237,4 +239,5 @@ func TestWarmupWALRefusalIsTypedOnlyForReclaimTimeout(t *testing.T) {
 	err = s.AwaitWarmupWAL(ctx)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.NotErrorIs(t, err, ErrWarmupWALPressure)
+	require.NotErrorIs(t, err, storage.ErrWarmupWALPressure)
 }

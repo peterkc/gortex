@@ -17,7 +17,6 @@ import (
 
 	"github.com/zzet/gortex/internal/gitstate"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/crashpool"
 )
@@ -778,8 +777,8 @@ func (idx *Indexer) rawEdgesPriorCompleted(graphPath string, prior []*graph.Node
 	if idx == nil || (idx.contractCoreRuntime.Load() == nil && idx.contractCoreInputs == nil) {
 		return false
 	}
-	physical, ok := idx.graph.(*store_sqlite.Store)
-	if !ok || physical.ViewGeneration() != 0 {
+	physical, ok := idx.graph.(generationPayloadStore)
+	if !ok || !physical.SharesSymbolSearchCore(idx.graph) || physical.ViewGeneration() != 0 {
 		return false
 	}
 	input, known := storedContractDependencyInputs(prior)

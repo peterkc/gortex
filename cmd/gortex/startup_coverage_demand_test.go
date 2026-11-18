@@ -53,7 +53,7 @@ func TestStartupCoverageDemandsActivateNoCheckoutBeforeReady(t *testing.T) {
 	registry.Register(languages.NewGoExtractor())
 	newLifecycle := func() (*indexer.MultiIndexer, *indexer.CheckoutLifecycle) {
 		mi := indexer.NewMultiIndexer(store, registry, search.NewNull(), cm, zap.NewNop())
-		lc, err := indexer.NewCheckoutLifecycle(indexer.CheckoutLifecycleConfig{Graph: store, MultiIndexer: mi, ConfigManager: cm, Logger: zap.NewNop()})
+		lc, err := indexer.NewCheckoutLifecycle(indexer.CheckoutLifecycleConfig{Catalog: store.Catalog(), Graph: store, MultiIndexer: mi, ConfigManager: cm, Logger: zap.NewNop()})
 		require.NoError(t, err)
 		return mi, lc
 	}

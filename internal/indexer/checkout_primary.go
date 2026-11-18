@@ -9,8 +9,8 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/reconcile"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // rebuildBudget bounds how long one automatic checkout may take to rebuild its
@@ -86,7 +86,7 @@ func (l *CheckoutLifecycle) PreviewSetPrimary(ctx context.Context, graphID strin
 		return out, err
 	}
 	if !found {
-		return out, fmt.Errorf("%w: family %s", store_sqlite.ErrCatalogNotFound, dedicated.FamilyID)
+		return out, fmt.Errorf("%w: family %s", storage.ErrCatalogNotFound, dedicated.FamilyID)
 	}
 	out.PrimaryEpoch = family.PrimaryEpoch
 
@@ -116,7 +116,7 @@ func (l *CheckoutLifecycle) PreviewSetPrimary(ctx context.Context, graphID strin
 	switch {
 	case !ownerFound:
 		out.Blockers = append(out.Blockers, "graph "+graphID+" has no owning checkout")
-	case owner.State != store_sqlite.CheckoutStateReady:
+	case owner.State != storage.CheckoutStateReady:
 		out.Blockers = append(out.Blockers,
 			"checkout "+owner.AdminName+" is "+string(owner.State)+", so its corpus cannot be the family base")
 	}
@@ -126,7 +126,7 @@ func (l *CheckoutLifecycle) PreviewSetPrimary(ctx context.Context, graphID strin
 		return out, err
 	}
 	for _, checkout := range checkouts {
-		if checkout.EffectiveMode != store_sqlite.CheckoutModeAutomatic {
+		if checkout.EffectiveMode != storage.CheckoutModeAutomatic {
 			continue
 		}
 		detail := "checkout " + checkout.AdminName + " rebuilds its layers over " + dedicated.RepoPrefix
@@ -198,7 +198,7 @@ func (l *CheckoutLifecycle) SetPrimary(ctx context.Context, graphID string) (Set
 		l.dropCoordinator(dependent.ID)
 	}
 
-	err = l.catalog.SetPrimaryDedicatedGraph(ctx, store_sqlite.SetPrimaryDedicatedGraphRequest{
+	err = l.catalog.SetPrimaryDedicatedGraph(ctx, storage.SetPrimaryDedicatedGraphRequest{
 		FamilyID:             preview.FamilyID,
 		GraphID:              graphID,
 		ExpectedPrimaryEpoch: preview.PrimaryEpoch,
@@ -238,7 +238,7 @@ func (l *CheckoutLifecycle) SetPrimary(ctx context.Context, graphID string) (Set
 // repeated here rather than left to the caller's sweep of the dependents,
 // because a reconciliation running beside the move can put one back.
 func (l *CheckoutLifecycle) rehomeCheckout(
-	ctx context.Context, checkout store_sqlite.Checkout, graphID string,
+	ctx context.Context, checkout storage.Checkout, graphID string,
 ) error {
 	l.dropCoordinator(checkout.CheckoutID)
 	coordinator, err := l.buildCoordinator(ctx, graphID, checkout)

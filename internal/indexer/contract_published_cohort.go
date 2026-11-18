@@ -9,7 +9,7 @@ import (
 	"sync"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // ErrContractPublishedCohortAbsent permits restart recovery only when no owned
@@ -121,7 +121,7 @@ func contractPublishedCohortComplete(cohort *ContractPublishedCohort) bool {
 // under the same boundary key. Its validated input/ack proof does not supply
 // historical source stamps. Preserve an already-retained predecessor instead
 // of relabeling the winner with newer preparation stamps.
-func contractPublishedResults(proof *ContractPublishedCohort, submitted []store_sqlite.ContractAttachmentPublishTarget, results []store_sqlite.ContractAttachmentPublication) *ContractPublishedCohort {
+func contractPublishedResults(proof *ContractPublishedCohort, submitted []storage.ContractAttachmentPublishTarget, results []storage.ContractAttachmentPublication) *ContractPublishedCohort {
 	if proof == nil || len(submitted) != len(results) || len(submitted) != len(proof.ExpectedTargets) {
 		return nil
 	}
@@ -200,14 +200,14 @@ func (c *ContractAnalysisCoordinator) AcquireLastPublishedCohort(ctx context.Con
 	}
 	fail := func(err error) (*ContractPublishedCohort, func(), error) { release(); return nil, nil, err }
 	for generation := range generations {
-		state, found, err := c.options.Store.Catalog().GetViewGeneration(ctx, generation)
+		state, found, err := c.options.Catalog.GetViewGeneration(ctx, generation)
 		if err != nil {
 			return fail(err)
 		}
-		if !found || state.State == store_sqlite.ViewGenerationRetiring {
+		if !found || state.State == storage.ViewGenerationRetiring {
 			return fail(graph.ErrContractPredecessorRetired)
 		}
-		if state.State != store_sqlite.ViewGenerationReady && state.State != store_sqlite.ViewGenerationSuperseded {
+		if state.State != storage.ViewGenerationReady && state.State != storage.ViewGenerationSuperseded {
 			return fail(graph.ErrContractProjectionStale)
 		}
 	}
@@ -222,13 +222,13 @@ func (c *ContractAnalysisCoordinator) AcquireLastPublishedCohort(ctx context.Con
 		if current.PayloadGeneration != target.PayloadGeneration {
 			return fail(graph.ErrContractProjectionStale)
 		}
-		states, err := c.options.Store.AtGeneration(target.PayloadGeneration).ProducerStates()
+		states, err := generationAt(c.options.Store, target.PayloadGeneration).ProducerStates()
 		if err != nil {
 			return fail(err)
 		}
 		complete := false
 		for _, state := range states {
-			complete = complete || state.Producer == "graph.contracts" && state.State == store_sqlite.ProducerStateComplete
+			complete = complete || state.Producer == "graph.contracts" && state.State == storage.ProducerStateComplete
 		}
 		if !complete {
 			return fail(graph.ErrContractProjectionIncomplete)

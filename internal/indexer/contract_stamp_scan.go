@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // ContractReceiptStamp is the winning receipt row of one file in a job's
@@ -51,7 +51,7 @@ func (s ContractReceiptStamp) quiescent() bool {
 // contractReceiptRowsComplete reports, for an unaccepted receipt row, whether
 // its file's core rows are complete by the rule a job proves its reads by: the
 // capture admits such a row exactly when the job's stamp of it is quiescent.
-func contractReceiptRowsComplete(state store_sqlite.ContractReceiptWriteState) bool {
+func contractReceiptRowsComplete(state storage.ContractReceiptWriteState) bool {
 	return ContractReceiptStamp{Seq: state.Seq, Settled: state.Settled, Writing: state.Writing}.quiescent()
 }
 
@@ -97,7 +97,7 @@ func (s ContractReceiptStamp) envelope(path string) bool {
 // contractScanLayer is one physical generation of a repository's selected
 // chain and the actors whose rows it selects.
 type contractScanLayer struct {
-	handle *store_sqlite.Store
+	handle generationPayloadStore
 	actors []string
 }
 
@@ -108,8 +108,8 @@ func (l contractScanLayer) claims(ctx context.Context, repo string, wanted []str
 	if l.handle.ViewGeneration() <= 0 {
 		return nil
 	}
-	claimed := func(mode store_sqlite.OwnershipMode) bool {
-		return mode == store_sqlite.OwnershipReplace || mode == store_sqlite.OwnershipDelete
+	claimed := func(mode storage.OwnershipMode) bool {
+		return mode == storage.OwnershipReplace || mode == storage.OwnershipDelete
 	}
 	if !full {
 		masks, err := l.handle.FileMasksForContext(ctx, repo, wanted)
@@ -171,7 +171,7 @@ func (s *contractStampScanner) at(phase string) {
 	}
 }
 
-func newContractStampScanner(inputs *graphview.SelectedContractInputs, handlesByRepo map[string][]*store_sqlite.Store, census func(context.Context) (map[string]bool, error)) *contractStampScanner {
+func newContractStampScanner(inputs *graphview.SelectedContractInputs, handlesByRepo map[string][]generationPayloadStore, census func(context.Context) (map[string]bool, error)) *contractStampScanner {
 	s := &contractStampScanner{inputs: inputs, census: census, chains: make(map[string][]contractScanLayer), last: make(map[string]contractRepoScan)}
 	for repo, handles := range handlesByRepo {
 		s.repos = append(s.repos, repo)
@@ -243,7 +243,7 @@ func (s *contractStampScanner) scan(ctx context.Context, paths []string) (Contra
 	}
 	s.at("sample")
 	type winner struct {
-		stamp store_sqlite.ContractBoundaryReceiptStamp
+		stamp storage.ContractBoundaryReceiptStamp
 		gen   int64
 		actor string
 	}
@@ -315,11 +315,11 @@ func (s *contractStampScanner) scan(ctx context.Context, paths []string) (Contra
 			var known bool
 			immutable, known = s.immutable[g.gen]
 			if !known {
-				generation, found, stateErr := chain[0].handle.Catalog().GetViewGeneration(ctx, g.gen)
+				generation, found, stateErr := chain[0].handle.ViewGenerationRecord(ctx, g.gen)
 				if stateErr != nil {
 					return ContractFollowupScan{}, stateErr
 				}
-				immutable = found && (generation.State == store_sqlite.ViewGenerationReady || generation.State == store_sqlite.ViewGenerationSuperseded)
+				immutable = found && (generation.State == storage.ViewGenerationReady || generation.State == storage.ViewGenerationSuperseded)
 				if s.immutable == nil {
 					s.immutable = make(map[int64]bool)
 				}
@@ -335,7 +335,7 @@ func (s *contractStampScanner) scan(ctx context.Context, paths []string) (Contra
 				// in another generation cannot overlap its reads. Receipt
 				// identity/acceptance, selected-input and lease fences remain.
 				// Unaccepted or mutable rows keep every original seq/window.
-				state = store_sqlite.ContractReceiptWriteState{}
+				state = storage.ContractReceiptWriteState{}
 			}
 			out.Stamps[path] = ContractReceiptStamp{Generation: w.gen, Actor: w.actor, Fingerprint: w.stamp.Fingerprint,
 				SourceFingerprint: w.stamp.SourceFingerprint, Accepted: w.stamp.Accepted, Seq: state.Seq, Settled: state.Settled && !w.stamp.Accepted,
@@ -420,14 +420,14 @@ func (s *contractStampScanner) selectedReceiptRows(ctx context.Context, stamps m
 	}
 	out := make(map[string]*graph.ContractBoundaryReceipt, len(stamps))
 	for g, paths := range groups {
-		var handle *store_sqlite.Store
+		var handle generationPayloadStore
 		for _, layer := range s.chains[g.repo] {
 			if layer.handle.ViewGeneration() == g.gen {
 				handle = layer.handle
 				break
 			}
 		}
-		if handle == nil {
+		if handle == nil || handle.IsNilGenerationHandle() {
 			continue
 		}
 		sort.Strings(paths)

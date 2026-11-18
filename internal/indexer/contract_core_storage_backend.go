@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Capture callbacks are installed by the selected-view owner, which retains
@@ -29,7 +29,7 @@ type contractCoreStorageCapture struct {
 // until its outer core/source acceptance fence.
 type contractCoreStorageBackend struct {
 	mu              sync.Mutex
-	store           *store_sqlite.Store
+	store           contractCoreStore
 	repo, checkout  string
 	generation      int64
 	capture         contractCoreStorageCapture
@@ -54,10 +54,10 @@ type contractCoreStorageBackend struct {
 	stagedSeqs map[string]uint64
 	// windowGaps holds the quiet gaps the stagings' windows recorded, for the
 	// journal's window lines.
-	windowGaps []store_sqlite.ContractCoreWindowGap
+	windowGaps []storage.ContractCoreWindowGap
 }
 
-func newContractCoreStorageBackend(store *store_sqlite.Store, repo, checkout string, generation int64, cumulative, expected *graph.ContractInputState, capture contractCoreStorageCapture) (*contractCoreStorageBackend, error) {
+func newContractCoreStorageBackend(store contractCoreStore, repo, checkout string, generation int64, cumulative, expected *graph.ContractInputState, capture contractCoreStorageCapture) (*contractCoreStorageBackend, error) {
 	if store == nil || capture.Prior == nil || capture.Dependents == nil || generation < 0 || store.ViewGeneration() != generation {
 		return nil, fmt.Errorf("contract core storage: incomplete selected capture")
 	}
@@ -76,7 +76,7 @@ func newContractCoreStorageBackend(store *store_sqlite.Store, repo, checkout str
 
 // The primary lane owns exactly physical0. Sparse builders supply their actual
 // selected, leased predecessor callbacks instead of using this constructor.
-func newPrimaryContractCoreStorageBackend(ctx context.Context, store *store_sqlite.Store, repo string) (*contractCoreStorageBackend, error) {
+func newPrimaryContractCoreStorageBackend(ctx context.Context, store contractCoreStore, repo string) (*contractCoreStorageBackend, error) {
 	if ctx == nil || store == nil || store.ViewGeneration() != 0 {
 		return nil, fmt.Errorf("contract core storage: missing primary context/store")
 	}
@@ -354,7 +354,7 @@ func (b *contractCoreStorageBackend) BeginBoundaryMutation(ctx context.Context, 
 
 // takeWindowGaps returns, once, the quiet gaps the windows this mutation's
 // stagings opened recorded, with the repository they belong to.
-func (b *contractCoreStorageBackend) takeWindowGaps() (string, []store_sqlite.ContractCoreWindowGap) {
+func (b *contractCoreStorageBackend) takeWindowGaps() (string, []storage.ContractCoreWindowGap) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	gaps := b.windowGaps

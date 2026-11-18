@@ -3,8 +3,6 @@ package mcp
 import (
 	"context"
 	"time"
-
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 // retireDeadPendingSourceIncarnations consumes authoritative catalog evidence,
@@ -26,14 +24,9 @@ func (s *Server) retireDeadPendingSourceIncarnations() {
 	if len(identities) == 0 {
 		return
 	}
-	var catalog *store_sqlite.Catalog
-	if s.materializer != nil {
-		catalog = s.materializer.Catalog
-	}
+	var catalog checkoutRecordReader = s.checkoutCatalog()
 	if catalog == nil {
-		if store, ok := s.graph.(*store_sqlite.Store); ok {
-			catalog = store.Catalog()
-		}
+		catalog, _ = s.graph.(checkoutRecordReader)
 	}
 	if catalog == nil {
 		return

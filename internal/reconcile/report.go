@@ -1,6 +1,6 @@
 package reconcile
 
-import "github.com/zzet/gortex/internal/graph/store_sqlite"
+import "github.com/zzet/gortex/internal/storage"
 
 // CheckoutAction names what a reconciliation pass did about one checkout.
 // The report exists so a caller — a later daemon wiring, or a test — can
@@ -69,7 +69,7 @@ type CheckoutReport struct {
 	Action CheckoutAction
 	// State is the checkout's lifecycle state after the pass. It is empty for
 	// an ephemeral observation, which has no state to be in.
-	State store_sqlite.CheckoutState
+	State storage.CheckoutState
 	// Classification is the verdict the action followed from.
 	Classification Classification
 	// RetryAt is the Unix deadline when this family must be reconciled again

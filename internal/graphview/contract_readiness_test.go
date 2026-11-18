@@ -37,16 +37,16 @@ func TestContractReadinessScopedDebtAndExactAcknowledgments(t *testing.T) {
 	complete.State = graph.ContractWorkComplete
 	upper := contractWorkGeneration(t, s, complete)
 	selection := ContractSelection{RepoPrefixes: []string{"repo"}, FilePaths: []string{deleted.FilePath}}
-	r, err := readContractReadiness(context.Background(), s, []*store_sqlite.Store{lower, upper}, "repo", selection)
+	r, err := readContractReadiness(context.Background(), s, []contractReadinessHandle{lower, upper}, "repo", selection)
 	require.NoError(t, err)
 	require.Equal(t, ContractReadiness{State: StateIncomplete, Pending: 1}, r, "old deletion acknowledgment cannot clear newer accepted work")
 	selection.FilePaths = []string{"/repo/unrelated.go"}
-	r, err = readContractReadiness(context.Background(), s, []*store_sqlite.Store{lower, upper}, "repo", selection)
+	r, err = readContractReadiness(context.Background(), s, []contractReadinessHandle{lower, upper}, "repo", selection)
 	require.NoError(t, err)
 	require.Equal(t, StateComplete, r.State, "unrelated scoped contract data remains usable")
 	selection.FilePaths = nil
 	selection.Groups = newer.Scope.Groups
-	r, err = readContractReadiness(context.Background(), s, []*store_sqlite.Store{lower, upper}, "repo", selection)
+	r, err = readContractReadiness(context.Background(), s, []contractReadinessHandle{lower, upper}, "repo", selection)
 	require.NoError(t, err)
 	require.Equal(t, StateIncomplete, r.State, "matching companions retain old/new group debt")
 }
@@ -75,7 +75,7 @@ func TestContractReadinessRejectsMismatchedCrossLayerAcknowledgment(t *testing.T
 				ack.State = graph.ContractWorkPending
 			}
 			upper := contractWorkGeneration(t, s, ack)
-			r, err := readContractReadiness(context.Background(), nil, []*store_sqlite.Store{lower, upper}, "repo", ContractSelection{RepoPrefixes: []string{"repo"}})
+			r, err := readContractReadiness(context.Background(), nil, []contractReadinessHandle{lower, upper}, "repo", ContractSelection{RepoPrefixes: []string{"repo"}})
 			require.Error(t, err)
 			require.Equal(t, ContractReadiness{}, r)
 		})

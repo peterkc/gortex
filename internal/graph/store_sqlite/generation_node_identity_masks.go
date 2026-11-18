@@ -8,22 +8,17 @@ import (
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/storage"
 )
 
-// NodeIdentityMaskKind separates node identity from outgoing-set ownership.
-// Legacy is deliberately stronger: it retains ALL old tombstone behavior,
-// including a same-generation row carried underneath the tombstone.
-type NodeIdentityMaskKind string
+type NodeIdentityMaskKind = storage.NodeIdentityMaskKind
 
 const (
-	NodeIdentityMaskLegacy  NodeIdentityMaskKind = "legacy_tombstone"
-	NodeIdentityMaskReplace NodeIdentityMaskKind = "identity_replace"
+	NodeIdentityMaskLegacy  = storage.NodeIdentityMaskLegacy
+	NodeIdentityMaskReplace = storage.NodeIdentityMaskReplace
 )
 
-type NodeIdentityMask struct {
-	NodeID string
-	Kind   NodeIdentityMaskKind
-}
+type NodeIdentityMask = storage.NodeIdentityMask
 
 // SetNodeIdentityReplacements declares explicit complete node-row replacement,
 // independent of file ownership and outgoing adjacency. Publish refuses a

@@ -372,7 +372,7 @@ func TestTrackReservationLastsThroughFullCleanupFinalization(t *testing.T) {
 	// Given physical purge can finish, but publisher finalization still fails.
 	f := newLifecycleFixture(t)
 	t.Cleanup(f.close)
-	runtime, err := NewDedicatedBaseRuntime(f.store, f.lc.ViewLeases())
+	runtime, err := NewDedicatedBaseRuntime(f.store, testCatalog(f.store), f.lc.ViewLeases())
 	require.NoError(t, err)
 	observer := &cleanupReadyObserver{DedicatedBaseRuntime: runtime, finalized: make(chan string, 8)}
 	publisher := &heldTrackCleanupPublisher{cleanupReadyObserver: observer, attempted: make(chan struct{})}

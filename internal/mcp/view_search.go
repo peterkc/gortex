@@ -143,14 +143,14 @@ func (v *requestView) bindSources(sources []graphview.GenerationSource, base gra
 		content = append(content, viewContentSource{searcher: baseContent})
 	}
 	for _, source := range sources {
-		if source.Handle == nil {
+		if source.Handle == nil || source.Handle.IsNilGenerationHandle() {
 			continue
 		}
 		candidates = append(candidates, query.ViewLayerSource{
 			Search: search.NewSymbolSearcherBackend(source.Handle),
 			Layer:  source.Layer,
 		})
-		content = append(content, viewContentSource{searcher: source.Handle, layer: source.Layer})
+		content = append(content, viewContentSource{searcher: source.Handle.(contentQuerier), layer: source.Layer})
 	}
 	if len(candidates) == 0 {
 		return

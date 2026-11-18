@@ -1,5 +1,7 @@
 package store_sqlite
 
+import "github.com/zzet/gortex/internal/storage"
+
 import (
 	"context"
 	"database/sql"
@@ -9,25 +11,7 @@ import (
 	"time"
 )
 
-// GenerationCopyCounts is what one row-level generation copy moved.
-//
-// Nodes and Edges are the two payload tables a caller reports on; Rows is the
-// total across every generation-keyed table the copy touched, including the
-// sidecars and the FTS projections. The authoritative description of what
-// landed is the destination generation's own payload, which a caller reads
-// back rather than trusting these numbers — they exist for the build report
-// and the log line.
-//
-// The indexer's GenerationPayloadCopier interface aliases this type, so this
-// declaration is what makes *Store satisfy it.
-type GenerationCopyCounts struct {
-	Nodes int64
-	Edges int64
-	Rows  int64
-	// WALBytes is the log the copy's committed transaction appended (0 for
-	// a rolled-back one: SQLite undoes its frames).
-	WALBytes int64
-}
+type GenerationCopyCounts = storage.GenerationCopyCounts
 
 // logGenerationCopy writes one line per copy or fold: rows, the WAL it
 // appended, the outcome and how long it held the write gate.

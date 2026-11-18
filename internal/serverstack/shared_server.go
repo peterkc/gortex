@@ -19,7 +19,6 @@ import (
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/embedding"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/indexer"
 	gortexmcp "github.com/zzet/gortex/internal/mcp"
@@ -34,6 +33,8 @@ import (
 	"github.com/zzet/gortex/internal/semantic/lsp"
 	"github.com/zzet/gortex/internal/semantic/scip"
 	"github.com/zzet/gortex/internal/semantic/tstypes"
+	"github.com/zzet/gortex/internal/storage"
+	"github.com/zzet/gortex/internal/storage/backend"
 	"github.com/zzet/gortex/internal/telemetry"
 )
 
@@ -82,13 +83,13 @@ type SharedServerConfig struct {
 	Global            *config.GlobalConfig // loaded ~/.gortex/config.yaml
 	Logger            *zap.Logger
 	Version           string
-	MigrationObserver store_sqlite.MigrationObserver
+	MigrationObserver storage.MigrationObserver
 	// Set only by the acceptance-tagged per-invocation configurator.
-	sqliteUpgradeOption store_sqlite.Option
-	Embedder            EmbedderRequest
-	SideStores          SideStores
-	ScopeWorkspace      string
-	ScopeProject        string
+	upgradeHook    backend.UpgradeHook
+	Embedder       EmbedderRequest
+	SideStores     SideStores
+	ScopeWorkspace string
+	ScopeProject   string
 	// ActiveProject names the project the MCP server should start scoped
 	// to (multi-repo mode hint). Empty leaves it unset.
 	ActiveProject string
@@ -342,6 +343,10 @@ func (s *SharedServer) installTelemetrySender(srv *gortexmcp.Server, store *tele
 	s.addCleanup("telemetry_sender", func() error { owner.Close(); return nil })
 }
 
+type backendCatalogProvider interface {
+	BackendCatalog() any
+}
+
 // NewSharedServer builds the whole server stack — graph.Store ->
 // parser.Registry -> indexer -> query.Engine -> mcp.Server plus every
 // side-effect init — through one wiring shared by the daemon, the HTTP
@@ -428,18 +433,25 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 		// they free counts toward an upgrade's free-space check. Only under
 		// the lock: a partial copy can be in progress only while some process
 		// holds it.
-		pruneStoreUpgradeBackups(storePath, logger, time.Now())
+		pruneStoreUpgradeBackups(cfg.Backend, storePath, logger, time.Now())
 	}
 
 	// allowRebuild is gated on actually holding the store lock: only then may
 	// the sqlite backend rebuild a supported older schema when necessary.
-	g, backendCleanup, err := openBackendWithUpgradeOption(cfg.Backend, storePath, logger, storeLockHeld, cfg.sqliteUpgradeOption, cfg.MigrationObserver)
+	g, backendCleanup, err := openBackendWithUpgradeHook(cfg.Backend, storePath, logger, storeLockHeld, cfg.upgradeHook, cfg.MigrationObserver)
 	if err != nil {
 		// Backend initialization can fail after the store lock was acquired.
 		return nil, errors.Join(err, s.Close())
 	}
 	s.addCleanup("backend", backendCleanup)
 	s.Graph = g
+
+	var catalog indexer.CheckoutCatalog
+	if provider, ok := g.(backendCatalogProvider); ok {
+		if native, ok := provider.BackendCatalog().(indexer.CheckoutCatalog); ok && !native.IsNilMaterializerCatalog() {
+			catalog = native
+		}
+	}
 
 	reg := parser.NewRegistry()
 	languages.RegisterAll(reg)
@@ -448,6 +460,9 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	languages.RegisterFallbackChunkers(reg, conf.Index.FallbackChunkers, logger)
 
 	idx := indexer.New(g, reg, conf.Index, logger)
+	if catalog != nil {
+		idx.SetCensusCatalog(catalog)
+	}
 	s.Indexer = idx
 
 	// Semantic enrichment (opt-in). A daemon-managed LSP router owns
@@ -708,6 +723,9 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	var mi *indexer.MultiIndexer
 	if cm != nil {
 		mi = indexer.NewMultiIndexer(g, reg, idx.Search(), cm, logger)
+		if catalog != nil {
+			mi.SetCensusCatalog(catalog)
+		}
 		if embedder != nil {
 			mi.SetEmbedder(embedder)
 			mi.SetEmbeddingChunkOptions(EmbeddingChunkOptions(conf))
@@ -748,6 +766,7 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 				zap.String("value", conf.Views.RetainInactive))
 		}
 		lifecycle, lerr := indexer.NewCheckoutLifecycle(indexer.CheckoutLifecycleConfig{
+			Catalog:       catalog,
 			MultiIndexer:  mi,
 			ConfigManager: cm,
 			Graph:         g,
@@ -785,8 +804,8 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 		// retirement sweep that uses the lifecycle's manager as its in-use
 		// predicate. Installing it does not publish anything; it only gives the
 		// publisher/drain half a live owner.
-		if store, ok := g.(*store_sqlite.Store); ok {
-			runtime, rerr := indexer.NewDedicatedBaseRuntime(store, lifecycle.ViewLeases())
+		if store, ok := g.(indexer.GenerationBuilderStore); ok && catalog != nil {
+			runtime, rerr := indexer.NewDedicatedBaseRuntime(store, catalog, lifecycle.ViewLeases())
 			if rerr != nil {
 				_ = s.Close()
 				return nil, fmt.Errorf("build dedicated base publisher runtime: %w", rerr)
@@ -899,14 +918,16 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	// manager would be invisible to the sweep and its generations could be
 	// deleted mid-read. A backend without a catalog hands the server nothing
 	// and every request stays on the base corpus.
-	if store, ok := g.(*store_sqlite.Store); ok {
+	if store, ok := g.(graphview.MaterializerStore); ok && !store.IsNilGenerationHandle() && catalog != nil {
 		leases := s.CheckoutLifecycle.ViewLeases()
 		if leases == nil {
+			// If loading global config failed there is no lifecycle, so no
+			// lease manager exists yet. Keep the standalone read path.
 			leases = graphview.NewLeaseManager()
 		}
 		srv.SetMaterializer(&graphview.Materializer{
 			Store:   store,
-			Catalog: store.Catalog(),
+			Catalog: catalog,
 			Leases:  leases,
 			Logger:  logger,
 		})

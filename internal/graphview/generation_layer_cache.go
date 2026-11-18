@@ -7,7 +7,7 @@ import (
 	"sync"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // defaultLayerCacheEntries bounds how many generations' mask sets one
@@ -43,16 +43,18 @@ type layerCacheKey struct {
 	createdAt       int64
 	publishedAt     int64
 	correctionEpoch uint64
-	inputRevision   store_sqlite.PayloadInputRevision
+	inputRevision   storage.PayloadInputRevision
 }
 
 // layerCacheKeyFor is the cache key of generation's catalog row at the
 // correction epoch and exact own-generation input revision reported now.
-func layerCacheKeyFor(store *store_sqlite.Store, generation int64, row store_sqlite.ViewGeneration) layerCacheKey {
+func layerCacheKeyFor(store layerCacheSource, generation int64, row storage.ViewGeneration) layerCacheKey {
 	key := layerCacheKey{generation: generation, createdAt: row.CreatedAt, publishedAt: row.PublishedAt}
-	if store != nil {
+	if store != nil && !store.IsNilGenerationHandle() {
 		key.correctionEpoch = store.GenerationCorrectionEpoch(generation)
-		key.inputRevision = store.AtGeneration(generation).PayloadInputRevision()
+		if handle, ok := store.AtGenerationStore(generation).(GenerationLayerHandle); ok {
+			key.inputRevision = handle.PayloadInputRevision()
+		}
 	}
 	return key
 }
@@ -111,8 +113,8 @@ func layerMaskWeight(l *GenerationLayer) int {
 func (c *generationLayerCache) open(
 	ctx context.Context,
 	key layerCacheKey,
-	handle *store_sqlite.Store,
-	load func(context.Context, *store_sqlite.Store) (*GenerationLayer, error),
+	handle GenerationLayerHandle,
+	load func(context.Context, GenerationLayerHandle) (*GenerationLayer, error),
 ) (*GenerationLayer, error) {
 	loads, staleHits := 0, 0
 	for {
@@ -272,7 +274,7 @@ func (l *GenerationLayer) masksOnly() *GenerationLayer {
 // withHandle builds a fresh layer over handle sharing this template's
 // read-only mask state. The maps and slices it shares are never written after
 // NewGenerationLayerContext returns; every per-request cache starts empty.
-func (l *GenerationLayer) withHandle(handle *store_sqlite.Store) *GenerationLayer {
+func (l *GenerationLayer) withHandle(handle GenerationLayerHandle) *GenerationLayer {
 	out := l.masksOnly()
 	out.handle = handle
 	out.nodeByID = make(map[string]*graph.Node)

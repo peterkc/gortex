@@ -164,7 +164,7 @@ func TestSharedServerInstallsPublisherRuntimeBeforeOwnerRegistration(t *testing.
 
 	// And the seam is now closed: this is the state that goes red without the
 	// guard — an install attempted after the first bindDedicatedGraph.
-	late, err := indexer.NewDedicatedBaseRuntime(store, lifecycle.ViewLeases())
+	late, err := indexer.NewDedicatedBaseRuntime(store, store.Catalog(), lifecycle.ViewLeases())
 	if err != nil {
 		t.Fatalf("NewDedicatedBaseRuntime: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestSharedServerCloseDrainsPublisherRuntime(t *testing.T) {
 		t.Fatal("shutdown left the publisher runtime's admitted actors unjoined")
 	}
 	// Control: closure is what refused the registration above, not the tuple.
-	fresh, err := indexer.NewDedicatedBaseRuntime(store, graphview.NewLeaseManager())
+	fresh, err := indexer.NewDedicatedBaseRuntime(store, store.Catalog(), graphview.NewLeaseManager())
 	if err != nil {
 		t.Fatalf("NewDedicatedBaseRuntime: %v", err)
 	}

@@ -5,8 +5,6 @@ import (
 	"errors"
 	"testing"
 	"time"
-
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 func TestNewGenerationLayerContextRejectsCanceledContext(t *testing.T) {
@@ -25,7 +23,7 @@ func TestMaterializeCheckoutCancellationAfterLeaseReleasesLease(t *testing.T) {
 	materializer := newTestMaterializer(store)
 
 	entered := make(chan struct{})
-	materializer.newGenerationLayer = func(ctx context.Context, _ *store_sqlite.Store) (*GenerationLayer, error) {
+	materializer.newGenerationLayer = func(ctx context.Context, _ GenerationLayerHandle) (*GenerationLayer, error) {
 		close(entered)
 		<-ctx.Done()
 		return nil, ctx.Err()

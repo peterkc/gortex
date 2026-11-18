@@ -119,7 +119,7 @@ type Observation struct {
 // persistently failing.
 type Store struct {
 	mu        sync.Mutex
-	sc        *persistence.SidecarStore
+	sc        ledgerRecords
 	mem       File    // in-memory accumulation when sc == nil
 	memEvents []Event // in-memory event log when sc == nil
 
@@ -260,7 +260,9 @@ func Open(dbPath string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open savings ledger: %w", err)
 	}
-	s.sc = sc
+	if sc != nil {
+		s.sc = sc
+	}
 	s.flushEvery, s.flushEveryFromEnv = flushInterval()
 	s.flushMax = DefaultFlushMax
 	// Every sidecar-backed Store joins the registry for its shared handle,
@@ -283,7 +285,7 @@ func Open(dbPath string) (*Store, error) {
 // fresh registry entry rather than inheriting stale peers.
 var (
 	openStoresMu sync.Mutex
-	openStores   = map[*persistence.SidecarStore]map[*Store]struct{}{}
+	openStores   = map[ledgerRecords]map[*Store]struct{}{}
 )
 
 func registerStore(sc *persistence.SidecarStore, s *Store) {
@@ -304,7 +306,7 @@ func registerStore(sc *persistence.SidecarStore, s *Store) {
 // shared handle itself is closed: the handle is dead for every holder, and a
 // later OpenSidecar on the same path allocates a different *SidecarStore, so
 // retaining the entry would only keep closed stores reachable forever.
-func forgetSidecar(sc *persistence.SidecarStore) {
+func forgetSidecar(sc ledgerRecords) {
 	if sc == nil {
 		return
 	}

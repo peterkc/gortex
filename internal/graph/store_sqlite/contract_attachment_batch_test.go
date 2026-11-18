@@ -34,7 +34,7 @@ func assertAttachmentBatchDistinct(t *testing.T, targets []ContractAttachmentPub
 	t.Helper()
 	cores, payloads := map[int64]bool{}, map[int64]bool{}
 	for _, target := range targets {
-		core, payload := target.Store.viewGen, target.Attachment.PayloadGeneration
+		core, payload := target.Store.(*Store).viewGen, target.Attachment.PayloadGeneration
 		if cores[core] || payloads[payload] || payload <= 0 || core == payload {
 			t.Fatalf("fixture aliases core/payload reservations: core=%d payload=%d", core, payload)
 		}
@@ -90,7 +90,7 @@ func TestContractAttachmentBatchRollsBackLaterRefusal(t *testing.T) {
 			assertAttachmentBatchDistinct(t, targets)
 			switch refusal {
 			case "stale-witness":
-				if _, err := s.writerDB.Exec(`UPDATE generation_contract_input_state SET input_fingerprint='moved' WHERE view_gen=?`, targets[1].Store.viewGen); err != nil {
+				if _, err := s.writerDB.Exec(`UPDATE generation_contract_input_state SET input_fingerprint='moved' WHERE view_gen=?`, targets[1].Store.(*Store).viewGen); err != nil {
 					t.Fatal(err)
 				}
 			case "bad-ack":
@@ -250,7 +250,7 @@ func TestContractAttachmentDuplicateProofAndLegacyCleanupCustody(t *testing.T) {
 			var err error
 			switch corrupt {
 			case "legacy-singleton":
-				err = target.Store.PublishContractAttachmentWithInputsContext(ctx, target.Expected, target.Witnesses, target.Attachment, target.Work, 2)
+				err = target.Store.(*Store).PublishContractAttachmentWithInputsContext(ctx, target.Expected, target.Witnesses, target.Attachment, target.Work, 2)
 			case "forged-file":
 				target.Work[0].FilePath = "forged.go"
 			case "forged-scope":

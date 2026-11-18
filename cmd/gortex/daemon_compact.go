@@ -10,8 +10,8 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/platform"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Guarded one-time store compaction at daemon boot.
@@ -123,12 +123,12 @@ func maybeCompactStoreContext(ctx context.Context, g graph.Store, migrated bool,
 		// reclaim at the next boot. Distinguishing the two is what keeps the
 		// warning meaningful — an operator seeing it should be able to trust
 		// that VACUUM actually tried and lost.
-		if errors.Is(err, store_sqlite.ErrMaintenanceBusy) {
+		if errors.Is(err, storage.ErrMaintenanceBusy) {
 			logger.Info("daemon: store compaction deferred — the store was busy",
 				zap.String("reason", "busy"), zap.Duration("elapsed", time.Since(start)), zap.Error(err))
 			return
 		}
-		if errors.Is(err, store_sqlite.ErrVacuumTempDirectory) {
+		if errors.Is(err, storage.ErrVacuumTempDirectory) {
 			logger.Info("daemon: store compaction skipped — temporary volume unconfirmed",
 				zap.String("reason", "temp_directory_unconfirmed"), zap.Error(err))
 			return

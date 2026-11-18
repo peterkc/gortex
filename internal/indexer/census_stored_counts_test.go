@@ -208,10 +208,11 @@ func TestCleanCensusReusesParentStateCounts(t *testing.T) {
 	// counts, then a clean census reuses those counts without stamping the child.
 	builder, request, claim, _ := claimedCopyFixture(t)
 	parentState := graph.RepoIndexState{RepoPrefix: request.RepoPrefix, NodeCount: 7, EdgeCount: 11}
-	require.NoError(t, builder.Store.AtGeneration(0).SetRepoIndexState(parentState))
-	handle := builder.Store.AtGeneration(claim.GenerationID)
+	require.NoError(t, generationAt(builder.Store, 0).SetRepoIndexState(parentState))
+	handle := generationAt(builder.Store, claim.GenerationID)
 	core, logs := observer.New(zap.InfoLevel)
 	idx := New(handle, newTestRegistry(), config.Default().Index, zap.New(core))
+	idx.SetCensusCatalog(builder.Catalog)
 	t.Cleanup(idx.Close)
 	idx.SetRepoPrefix(request.RepoPrefix)
 	idx.SetRootPath(request.RootPath)
@@ -231,8 +232,9 @@ func TestCleanCensusRefusesCatalogCancellation(t *testing.T) {
 	// Given no own state and a canceled catalog read, when a clean census runs,
 	// then cancellation is returned without counting or writing a new state row.
 	builder, request, claim, _ := claimedCopyFixture(t)
-	handle := builder.Store.AtGeneration(claim.GenerationID)
+	handle := generationAt(builder.Store, claim.GenerationID)
 	idx := New(handle, newTestRegistry(), config.Default().Index, zap.NewNop())
+	idx.SetCensusCatalog(builder.Catalog)
 	t.Cleanup(idx.Close)
 	idx.SetRepoPrefix(request.RepoPrefix)
 	idx.SetRootPath(request.RootPath)
@@ -253,7 +255,7 @@ func TestCleanCensusRefusesParentStateReadFailure(t *testing.T) {
 	// Given a parent whose stored counts cannot be decoded, when the child has
 	// no own state, then the read error refuses counting and child restamping.
 	builder, request, claim, _ := claimedCopyFixture(t)
-	require.NoError(t, builder.Store.AtGeneration(0).SetRepoIndexState(graph.RepoIndexState{
+	require.NoError(t, generationAt(builder.Store, 0).SetRepoIndexState(graph.RepoIndexState{
 		RepoPrefix: request.RepoPrefix, NodeCount: 7, EdgeCount: 11,
 	}))
 	db, err := sql.Open("sqlite", request.StorePath)
@@ -261,8 +263,9 @@ func TestCleanCensusRefusesParentStateReadFailure(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	_, err = db.Exec("UPDATE repo_index_state SET node_count = 'unreadable' WHERE view_gen = 0 AND repo_prefix = ?", request.RepoPrefix)
 	require.NoError(t, err)
-	handle := builder.Store.AtGeneration(claim.GenerationID)
+	handle := generationAt(builder.Store, claim.GenerationID)
 	idx := New(handle, newTestRegistry(), config.Default().Index, zap.NewNop())
+	idx.SetCensusCatalog(builder.Catalog)
 	t.Cleanup(idx.Close)
 	idx.SetRepoPrefix(request.RepoPrefix)
 	idx.SetRootPath(request.RootPath)
@@ -277,4 +280,42 @@ func TestCleanCensusRefusesParentStateReadFailure(t *testing.T) {
 	_, found, err := handle.GetRepoIndexState(request.RepoPrefix)
 	require.NoError(t, err)
 	assert.False(t, found)
+}
+
+// The generation source must not turn an unavailable parent cache into a
+// successful row count, which would hide the missing capability.
+type censusParentWithoutStateReaderStore struct {
+	generationPayloadStore
+}
+
+func (s *censusParentWithoutStateReaderStore) SharesSymbolSearchCore(any) bool { return true }
+func (s *censusParentWithoutStateReaderStore) AtGenerationStore(int64) graph.Store {
+	return &residualBatchCountingStore{Store: graph.New()}
+}
+
+func TestCleanCensusRefusesMissingGenerationCapabilities(t *testing.T) {
+	for _, missing := range []string{"catalog", "parent reader"} {
+		t.Run(missing, func(t *testing.T) {
+			// Given a child without own state and a missing generation capability,
+			// when a clean census runs, then it refuses without counting or restamping.
+			builder, request, claim, _ := claimedCopyFixture(t)
+			handle := generationAt(builder.Store, claim.GenerationID)
+			store := &censusParentWithoutStateReaderStore{generationPayloadStore: handle}
+			idx := New(store, newTestRegistry(), config.Default().Index, zap.NewNop())
+			t.Cleanup(idx.Close)
+			idx.SetRepoPrefix(request.RepoPrefix)
+			idx.SetRootPath(request.RootPath)
+			if missing == "parent reader" {
+				idx.SetCensusCatalog(builder.Catalog)
+			}
+			counted := cleanCensusCounts.Load()
+			result, err := idx.cleanCensusResult(t.Context(), 1, time.Now())
+			require.ErrorIs(t, err, errors.ErrUnsupported)
+			require.Nil(t, result)
+			require.Equal(t, counted, cleanCensusCounts.Load())
+			_, found, err := handle.GetRepoIndexState(request.RepoPrefix)
+			require.NoError(t, err)
+			require.False(t, found)
+		})
+	}
 }

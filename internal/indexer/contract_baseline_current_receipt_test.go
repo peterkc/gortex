@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -75,7 +76,7 @@ func currentReceiptBaselineFixture(t *testing.T, helpers []string) (ContractFoll
 	_, err = leases.CaptureInitialRawRepositorySource(ctx, registration, "accepted-current-source")
 	require.NoError(t, err)
 	mi.SetOutputGenerationAuthority(NewOutputGenerationAuthority(leases))
-	options := ContractFollowupCaptureOptions{Context: ctx, Store: store, Materializer: &graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: leases}, MultiIndexer: mi, Registry: idx.registry, Config: idx.config, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }}
+	options := ContractFollowupCaptureOptions{Catalog: testCatalog(store), Context: ctx, Store: store, Materializer: &graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: leases}, MultiIndexer: mi, Registry: idx.registry, Config: idx.config, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }}
 	spy.reads.Store(0)
 	return options, spy, idx, original
 }
@@ -91,7 +92,8 @@ func TestContractBaselineReusesCurrentAcceptedReceiptThroughAttachment(t *testin
 			spy.forbid.Store(true)
 			require.NoError(t, reconcilePrimaryContractBaseline(t.Context(), options, "fixture"), "valid current receipts should not be reparsed")
 			require.Zero(t, spy.reads.Load())
-			current, _, err := options.Store.ContractBoundaryReceiptContext(t.Context(), "fixture", "", original.FilePath)
+			nativeStore := options.Store.(*store_sqlite.Store)
+			current, _, err := nativeStore.ContractBoundaryReceiptContext(t.Context(), "fixture", "", original.FilePath)
 			require.NoError(t, err)
 			require.JSONEq(t, string(original.Payload), string(current.Payload), "all local records and public dependencies must survive reuse")
 			inputs, err := options.Materializer.CaptureContractInputs(t.Context(), nil, "fixture", "")
@@ -110,7 +112,7 @@ func TestContractBaselineReusesCurrentAcceptedReceiptThroughAttachment(t *testin
 			var admission sync.Mutex
 			var jobs sync.WaitGroup
 			options.BaselineAdmissionMu, options.BaselineJobs = &admission, &jobs
-			coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: options.Store, Leases: options.Materializer.Leases, Registry: options.Registry, Config: options.Config, Capture: NewContractFollowupSourceCapture(options), Inputs: NewContractPrimaryInputCapture(options.Materializer), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
+			coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(options.Store), OpenEvidence: openTestEvidenceStore, Store: nativeStore, Leases: options.Materializer.Leases, Registry: options.Registry, Config: options.Config, Capture: NewContractFollowupSourceCapture(options), Inputs: NewContractPrimaryInputCapture(options.Materializer), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
 			require.NoError(t, err)
 			defer coordinator.Close()
 			// This test proves receipt reuse through real asynchronous publication,
@@ -157,7 +159,7 @@ func TestContractCaptureWorkerCountChangePublishesAcceptedReceipts(t *testing.T)
 	defer snapshot.Release()
 	require.Len(t, targets, 1)
 	snapshot.Release()
-	coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{
+	coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(options.Store), OpenEvidence: openTestEvidenceStore,
 		Store: options.Store, Leases: options.Materializer.Leases, Registry: options.Registry,
 		Config: options.Config, Capture: NewContractFollowupSourceCapture(options),
 		Inputs: NewContractPrimaryInputCapture(options.Materializer), Yield: options.Yield,
@@ -179,7 +181,7 @@ func TestContractCaptureWorkerCountChangePublishesAcceptedReceipts(t *testing.T)
 	}
 	require.Contains(t, ids, "http::GET::/reused-current")
 	require.NoError(t, analysis.Validate(ctx))
-	current, _, err := options.Store.ContractBoundaryReceiptContext(ctx, "fixture", "", original.FilePath)
+	current, _, err := options.Store.(*store_sqlite.Store).ContractBoundaryReceiptContext(ctx, "fixture", "", original.FilePath)
 	require.NoError(t, err)
 	require.JSONEq(t, string(original.Payload), string(current.Payload))
 	require.Zero(t, spy.reads.Load(), "accepted receipts must remain reusable without reparsing")
@@ -190,16 +192,16 @@ func TestContractPolicyUpgradeRepairsAcceptedBaseline(t *testing.T) {
 		t.Run(fmt.Sprintf("pending_%t", pendingHeader), func(t *testing.T) {
 			options, spy, _, original := currentReceiptBaselineFixture(t, nil)
 			require.NoError(t, reconcilePrimaryContractBaseline(t.Context(), options, "fixture"))
-			baseline, err := options.Store.ContractBoundaryReceiptBaselineContext(t.Context(), "fixture", "")
+			baseline, err := options.Store.(*store_sqlite.Store).ContractBoundaryReceiptBaselineContext(t.Context(), "fixture", "")
 			require.NoError(t, err)
 			require.NotNil(t, baseline)
 			if pendingHeader {
-				current, _, err := options.Store.ContractInputStateContext(t.Context(), "fixture", "")
+				current, _, err := options.Store.(*store_sqlite.Store).ContractInputStateContext(t.Context(), "fixture", "")
 				require.NoError(t, err)
 				pending := current
 				pending.InputFingerprint += "-policy"
 				pending.Accepted = false
-				require.NoError(t, options.Store.BeginContractInputMutationContext(t.Context(), &current, pending, nil))
+				require.NoError(t, options.Store.(*store_sqlite.Store).BeginContractInputMutationContext(t.Context(), &current, pending, nil))
 			}
 			// Keep the accepted receipts and baseline, then start the new runtime
 			// with a different extraction policy and unchanged source bytes.
@@ -207,14 +209,14 @@ func TestContractPolicyUpgradeRepairsAcceptedBaseline(t *testing.T) {
 			// The existing core indexer can still carry the previous configuration.
 			var repair atomic.Pointer[ContractStuckRepair]
 			options.SuspectStuck = func(repo string, paths []string) { repair.Load().Suspect(repo, paths) }
-			coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{
+			coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(options.Store), OpenEvidence: openTestEvidenceStore,
 				Store: options.Store, Leases: options.Materializer.Leases, Registry: options.Registry,
 				Config: options.Config, Capture: NewContractFollowupSourceCapture(options),
 				Inputs: NewContractPrimaryInputCapture(options.Materializer), Yield: options.Yield,
 			})
 			require.NoError(t, err)
 			options.MultiIndexer.SetContractCoreRuntime(ContractCoreRuntimeHooks{Published: coordinator.Published})
-			runner, err := NewContractStuckRepair(ContractStuckRepairOptions{
+			runner, err := NewContractStuckRepair(ContractStuckRepairOptions{Catalog: testCatalog(options.Store),
 				Store: options.Store, MultiIndexer: options.MultiIndexer, Baseline: options,
 				Coordinator: coordinator, Period: 50 * time.Millisecond,
 			})
@@ -231,7 +233,7 @@ func TestContractPolicyUpgradeRepairsAcceptedBaseline(t *testing.T) {
 			nodes, err := analysis.NodesByKindsContext(ctx, []graph.NodeKind{graph.KindContract})
 			require.NoError(t, err)
 			require.NotEmpty(t, nodes)
-			current, _, err := options.Store.ContractBoundaryReceiptContext(ctx, "fixture", "", original.FilePath)
+			current, _, err := options.Store.(*store_sqlite.Store).ContractBoundaryReceiptContext(ctx, "fixture", "", original.FilePath)
 			require.NoError(t, err)
 			require.True(t, current.Accepted)
 			require.NotEqual(t, original.Payload, current.Payload)
@@ -265,14 +267,14 @@ func TestContractBaselineRepairBacksOffAfterFailure(t *testing.T) {
 		attempts++
 		return errors.New("injected persistent baseline failure")
 	}
-	r := &ContractStuckRepair{options: ContractStuckRepairOptions{Store: options.Store, MultiIndexer: options.MultiIndexer, Baseline: options, Logger: zap.NewNop()}, period: time.Hour}
-	current, found, err := options.Store.ContractInputStateContext(t.Context(), "fixture", "")
+	r := &ContractStuckRepair{options: ContractStuckRepairOptions{Catalog: testCatalog(options.Store), Store: options.Store, MultiIndexer: options.MultiIndexer, Baseline: options, Logger: zap.NewNop()}, period: time.Hour}
+	current, found, err := options.Store.(*store_sqlite.Store).ContractInputStateContext(t.Context(), "fixture", "")
 	require.NoError(t, err)
 	require.True(t, found)
 	state := &contractRepoRepair{repo: "fixture", rebuildBaseline: true, pendingKey: current.InputVersion + "\x00" + current.InputFingerprint}
 	pass := func() {
 		t.Helper()
-		current, _, err := options.Store.ContractInputStateContext(t.Context(), "fixture", "")
+		current, _, err := options.Store.(*store_sqlite.Store).ContractInputStateContext(t.Context(), "fixture", "")
 		require.NoError(t, err)
 		require.NoError(t, options.MultiIndexer.withRepositoryMutationLanes(t.Context(), []string{"fixture"}, func() error {
 			ctx := withHeldRepositoryLanes(t.Context(), []string{"fixture"})
@@ -303,7 +305,7 @@ func TestContractBaselineRepairBacksOffAfterFailure(t *testing.T) {
 	failing = false
 	state.headerRetryAt = time.Now().Add(-time.Second)
 	pass()
-	current, found, err = options.Store.ContractInputStateContext(t.Context(), "fixture", "")
+	current, found, err = options.Store.(*store_sqlite.Store).ContractInputStateContext(t.Context(), "fixture", "")
 	require.NoError(t, err)
 	require.True(t, found && current.Accepted, "a later successful retry must accept the baseline")
 	require.False(t, state.retry)
@@ -417,13 +419,14 @@ func TestContractBaselineCurrentReceiptFallbackReconstructsAcceptedFacts(t *test
 				require.NoError(t, err)
 				row.Fingerprint = contractInputHash(row.Payload)
 			}
-			require.NoError(t, options.Store.SetContractBoundaryReceiptsContext(t.Context(), []graph.ContractBoundaryReceipt{row}))
+			nativeStore := options.Store.(*store_sqlite.Store)
+			require.NoError(t, nativeStore.SetContractBoundaryReceiptsContext(t.Context(), []graph.ContractBoundaryReceipt{row}))
 			if mode != "pending_previous" {
-				require.NoError(t, options.Store.AcceptContractBoundaryReceiptsContext(t.Context(), []graph.ContractBoundaryReceipt{row}))
+				require.NoError(t, nativeStore.AcceptContractBoundaryReceiptsContext(t.Context(), []graph.ContractBoundaryReceipt{row}))
 			}
 			require.NoError(t, reconcilePrimaryContractBaseline(t.Context(), options, "fixture"))
 			require.EqualValues(t, 1, spy.reads.Load(), "unproved current must fall back to one actual accepted extraction")
-			repaired, _, err := options.Store.ContractBoundaryReceiptContext(t.Context(), "fixture", "", row.FilePath)
+			repaired, _, err := nativeStore.ContractBoundaryReceiptContext(t.Context(), "fixture", "", row.FilePath)
 			require.NoError(t, err)
 			require.True(t, repaired.Accepted)
 			var got contractBoundaryReceipt
@@ -451,6 +454,7 @@ func TestContractBaselineCurrentReceiptRetainsCancellationAndCensusCAS(t *testin
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			changed := false
+			nativeStore := options.Store.(*store_sqlite.Store)
 			options.Yield = func(ctx context.Context) error {
 				if !changed {
 					changed = true
@@ -461,21 +465,21 @@ func TestContractBaselineCurrentReceiptRetainsCancellationAndCensusCAS(t *testin
 						row := *original
 						row.Accepted = false
 						row.Scope.Causes = []string{"newer-receipt"}
-						if err := options.Store.SetContractBoundaryReceiptsContext(ctx, []graph.ContractBoundaryReceipt{row}); err != nil {
+						if err := nativeStore.SetContractBoundaryReceiptsContext(ctx, []graph.ContractBoundaryReceipt{row}); err != nil {
 							return err
 						}
-						if err := options.Store.AcceptContractBoundaryReceiptsContext(ctx, []graph.ContractBoundaryReceipt{row}); err != nil {
+						if err := nativeStore.AcceptContractBoundaryReceiptsContext(ctx, []graph.ContractBoundaryReceipt{row}); err != nil {
 							return err
 						}
 					case "census_changed":
-						rows, err := options.Store.FileMetasByPaths("fixture", []string{original.FilePath})
+						rows, err := nativeStore.FileMetasByPaths("fixture", []string{original.FilePath})
 						if err != nil {
 							return err
 						}
 						row, exists := rows[original.FilePath]
 						require.True(t, exists)
 						row.Size++
-						if err := options.Store.SetFileMetas("fixture", []graph.FileMetaRow{row}); err != nil {
+						if err := nativeStore.SetFileMetas("fixture", []graph.FileMetaRow{row}); err != nil {
 							return err
 						}
 					case "source_changed":
@@ -489,14 +493,14 @@ func TestContractBaselineCurrentReceiptRetainsCancellationAndCensusCAS(t *testin
 							return err
 						}
 					case "key_moved":
-						current, found, err := options.Store.ContractInputStateContext(ctx, "fixture", "")
+						current, found, err := nativeStore.ContractInputStateContext(ctx, "fixture", "")
 						if err != nil {
 							return err
 						}
 						require.True(t, found)
 						next := current
 						next.InputFingerprint = contractInputHash([]byte("concurrent-boundary-save"))
-						if err := options.Store.BeginContractInputMutationContext(ctx, &current, next, nil); err != nil {
+						if err := nativeStore.BeginContractInputMutationContext(ctx, &current, next, nil); err != nil {
 							return err
 						}
 					}
@@ -506,7 +510,7 @@ func TestContractBaselineCurrentReceiptRetainsCancellationAndCensusCAS(t *testin
 			err := reconcilePrimaryContractBaseline(ctx, options, "fixture")
 			require.True(t, changed)
 			require.Zero(t, spy.reads.Load())
-			baseline, baselineErr := options.Store.ContractBoundaryReceiptBaselineContext(t.Context(), "fixture", "")
+			baseline, baselineErr := nativeStore.ContractBoundaryReceiptBaselineContext(t.Context(), "fixture", "")
 			require.NoError(t, baselineErr)
 			switch mode {
 			case "canceled":
@@ -518,13 +522,13 @@ func TestContractBaselineCurrentReceiptRetainsCancellationAndCensusCAS(t *testin
 			default:
 				require.NoError(t, err)
 				require.NotNil(t, baseline)
-				state, found, err := options.Store.ContractInputStateContext(t.Context(), "fixture", "")
+				state, found, err := nativeStore.ContractInputStateContext(t.Context(), "fixture", "")
 				require.NoError(t, err)
 				require.True(t, found)
 				require.True(t, state.Accepted)
 			}
 			if mode == "receipt_changed" {
-				kept, _, err := options.Store.ContractBoundaryReceiptContext(t.Context(), "fixture", "", original.FilePath)
+				kept, _, err := nativeStore.ContractBoundaryReceiptContext(t.Context(), "fixture", "", original.FilePath)
 				require.NoError(t, err)
 				require.Equal(t, []string{"newer-receipt"}, kept.Scope.Causes, "the concurrently rewritten row is skipped and kept as it stands")
 			}

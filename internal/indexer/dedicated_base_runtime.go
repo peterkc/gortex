@@ -10,8 +10,8 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -23,7 +23,7 @@ var errDedicatedBaseAdvanceRequired = errors.New("dedicated base requires increm
 type dedicatedBaseAdvanceRequiredError struct {
 	GraphID            string
 	ActiveGenerationID int64
-	Active, Observed   store_sqlite.DedicatedBaseIdentity
+	Active, Observed   storage.DedicatedBaseIdentity
 }
 
 func (e *dedicatedBaseAdvanceRequiredError) Error() string {
@@ -37,7 +37,9 @@ func (e *dedicatedBaseAdvanceRequiredError) Unwrap() error { return errDedicated
 // observation callers. It retains no observed config, builder or content source.
 // Startup must call it directly, not through a gate that startup itself opens.
 type dedicatedBaseRuntime struct {
-	store *store_sqlite.Store
+	// Construction keeps store and catalog interfaces free of typed nils.
+	store   GenerationBuilderStore
+	catalog CheckoutCatalog
 	// leases is the SHARED view-lease domain — the lifecycle's own manager,
 	// the one request readers and retirement already agree on. It is held so
 	// advancement triggers cannot invent a private one: ensureCurrent refuses a
@@ -163,40 +165,43 @@ func (r *DedicatedBaseRuntime) CloseDedicatedBaseAdmission() <-chan struct{} {
 // an owner against a handle that carries no runtime is a wiring defect, and a
 // silent success would leave the publisher half unowned exactly as a nil
 // installation would.
-func (r *DedicatedBaseRuntime) RegisterDedicatedBaseOwner(graphID string, owner store_sqlite.DedicatedBaseOwner) error {
+func (r *DedicatedBaseRuntime) RegisterDedicatedBaseOwner(graphID string, owner storage.DedicatedBaseOwner) error {
 	if r == nil || r.dedicatedBaseRuntime == nil {
 		return fmt.Errorf("%w: registration requires an installed runtime", errDedicatedBaseRuntimeInput)
 	}
 	return r.dedicatedBaseRuntime.RegisterDedicatedBaseOwner(graphID, owner)
 }
 
-func (r *DedicatedBaseRuntime) CloseDedicatedBaseOwner(graphID string, owner store_sqlite.DedicatedBaseOwner) (<-chan struct{}, error) {
+func (r *DedicatedBaseRuntime) CloseDedicatedBaseOwner(graphID string, owner storage.DedicatedBaseOwner) (<-chan struct{}, error) {
 	if r == nil || r.dedicatedBaseRuntime == nil {
 		return nil, fmt.Errorf("%w: closing requires an installed runtime", errDedicatedBaseRuntimeInput)
 	}
 	return r.dedicatedBaseRuntime.CloseDedicatedBaseOwner(graphID, owner)
 }
 
-func (r *DedicatedBaseRuntime) FinalizeDedicatedBaseOwner(graphID string, owner store_sqlite.DedicatedBaseOwner, drained <-chan struct{}) error {
+func (r *DedicatedBaseRuntime) FinalizeDedicatedBaseOwner(graphID string, owner storage.DedicatedBaseOwner, drained <-chan struct{}) error {
 	if r == nil || r.dedicatedBaseRuntime == nil {
 		return fmt.Errorf("%w: finalization requires an installed runtime", errDedicatedBaseRuntimeInput)
 	}
 	return r.dedicatedBaseRuntime.FinalizeDedicatedBaseOwner(graphID, owner, drained)
 }
 
-// NewDedicatedBaseRuntime builds that one runtime. Both inputs are mandatory
-// and neither has a safe default: a nil store cannot acquire authority, and a
-// substituted lease manager silently degrades advancement (see the leases
-// field). Callers install the result before any owner can be registered —
+// NewDedicatedBaseRuntime builds that one runtime. The store, its paired catalog,
+// and the shared view leases are mandatory. A substituted lease manager silently
+// degrades advancement (see the leases field). Callers install the result before
+// any owner can be registered —
 // SetDedicatedBaseCleanupRuntime refuses a late installation.
-func NewDedicatedBaseRuntime(store *store_sqlite.Store, leases *graphview.LeaseManager) (*DedicatedBaseRuntime, error) {
-	if store == nil {
+func NewDedicatedBaseRuntime(store GenerationBuilderStore, catalog CheckoutCatalog, leases *graphview.LeaseManager) (*DedicatedBaseRuntime, error) {
+	if store == nil || store.IsNilGenerationHandle() {
 		return nil, fmt.Errorf("%w: publisher runtime requires the stack's store", errDedicatedBaseRuntimeInput)
+	}
+	if catalog == nil || catalog.IsNilMaterializerCatalog() {
+		return nil, fmt.Errorf("%w: publisher runtime requires the stack's catalog", errDedicatedBaseRuntimeInput)
 	}
 	if leases == nil {
 		return nil, fmt.Errorf("%w: publisher runtime requires the shared view leases", errDedicatedBaseRuntimeInput)
 	}
-	return &DedicatedBaseRuntime{dedicatedBaseRuntime: &dedicatedBaseRuntime{store: store, leases: leases}}, nil
+	return &DedicatedBaseRuntime{dedicatedBaseRuntime: &dedicatedBaseRuntime{store: store, catalog: catalog, leases: leases}}, nil
 }
 
 // ViewLeases exposes the shared lease domain this runtime was installed with,
@@ -215,7 +220,7 @@ type dedicatedBaseObservationGate struct {
 
 type dedicatedBasePublisher struct {
 	runtime   *dedicatedBaseRuntime
-	authority store_sqlite.DedicatedBaseAuthority
+	authority storage.DedicatedBaseAuthority
 	admission *dedicatedBaseOwnerAdmission
 }
 
@@ -224,7 +229,7 @@ type dedicatedBasePublisher struct {
 // immutable snapshot for this call's build; copying its struct is not a freeze.
 // Identity must include all output-affecting workspace/project configuration.
 type dedicatedBaseObservation struct {
-	Identity                   store_sqlite.DedicatedBaseIdentity
+	Identity                   storage.DedicatedBaseIdentity
 	ExpectedActiveGenerationID int64
 	RootPath                   string
 	WorkspaceID                string
@@ -236,9 +241,9 @@ type dedicatedBaseObservation struct {
 }
 
 type dedicatedBaseResult struct {
-	Claim    store_sqlite.DedicatedBaseBuildClaim
+	Claim    storage.DedicatedBaseBuildClaim
 	Report   BuildReport
-	Adoption store_sqlite.DedicatedBaseAdoption
+	Adoption storage.DedicatedBaseAdoption
 }
 
 func (r *dedicatedBaseRuntime) acquire(ctx context.Context, graphID string) (func(), error) {
@@ -285,7 +290,7 @@ func (r *dedicatedBaseRuntime) acquire(ctx context.Context, graphID string) (fun
 
 // install is an owner-installation operation, NEVER a per-poll operation. The
 // canonical owner and explicit expected authority fence come from its caller.
-func (r *dedicatedBaseRuntime) install(ctx context.Context, req store_sqlite.AcquireDedicatedBaseAuthorityRequest) (*dedicatedBasePublisher, error) {
+func (r *dedicatedBaseRuntime) install(ctx context.Context, req storage.AcquireDedicatedBaseAuthorityRequest) (*dedicatedBasePublisher, error) {
 	if r == nil || r.store == nil {
 		return nil, fmt.Errorf("%w: installation requires a store", errDedicatedBaseRuntimeInput)
 	}
@@ -299,7 +304,7 @@ func (r *dedicatedBaseRuntime) install(ctx context.Context, req store_sqlite.Acq
 		return nil, err
 	}
 	defer release()
-	authority, err := r.store.Catalog().AcquireDedicatedBaseAuthority(ctx, req)
+	authority, err := r.catalog.AcquireDedicatedBaseAuthority(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -326,13 +331,13 @@ func (p *dedicatedBasePublisher) ensureObserved(ctx context.Context, observe fun
 	}
 	// Idempotent release also handles errors and panics in caller observation.
 	defer release()
-	catalog := r.store.Catalog()
+	catalog := r.catalog
 	publication, found, err := catalog.DedicatedBasePublication(ctx, p.authority.GraphID)
 	if err != nil {
 		return out, err
 	}
 	if !found || publication.Desire.Authority != p.authority {
-		return out, fmt.Errorf("%w: publisher authority changed", store_sqlite.ErrCatalogStaleGuard)
+		return out, fmt.Errorf("%w: publisher authority changed", storage.ErrCatalogStaleGuard)
 	}
 	if err := r.confirmOwner(p.authority.GraphID, p.authority.Owner); err != nil {
 		return out, err
@@ -351,7 +356,7 @@ func (p *dedicatedBasePublisher) ensureObserved(ctx context.Context, observe fun
 		return out, err
 	}
 	if !found || graph.ActiveGenerationID != observation.ExpectedActiveGenerationID {
-		return out, fmt.Errorf("%w: observed active generation changed", store_sqlite.ErrCatalogStaleGuard)
+		return out, fmt.Errorf("%w: observed active generation changed", storage.ErrCatalogStaleGuard)
 	}
 	var parentID int64
 	if graph.ActiveGenerationID > 0 {
@@ -360,9 +365,9 @@ func (p *dedicatedBasePublisher) ensureObserved(ctx context.Context, observe fun
 			return out, err
 		}
 		if !found {
-			return out, fmt.Errorf("%w: active generation missing", store_sqlite.ErrDedicatedBaseCandidate)
+			return out, fmt.Errorf("%w: active generation missing", storage.ErrDedicatedBaseCandidate)
 		}
-		activeIdentity := store_sqlite.DedicatedBaseIdentity{TreeOID: active.TreeOID, ConfigHash: active.ConfigHash,
+		activeIdentity := storage.DedicatedBaseIdentity{TreeOID: active.TreeOID, ConfigHash: active.ConfigHash,
 			ExtractorVersions: active.ExtractorVersions, ResolverVersion: active.ResolverVersion,
 			DependencyRevision: active.DependencyRevision}
 		if activeIdentity != identity && leases == nil {
@@ -370,7 +375,7 @@ func (p *dedicatedBasePublisher) ensureObserved(ctx context.Context, observe fun
 				ActiveGenerationID: active.GenerationID, Active: activeIdentity, Observed: identity}
 		}
 		if leases == nil && (active.BaseGenerationID != 0 || active.LayerID != "" || active.LowerViewFingerprint != "") {
-			return out, fmt.Errorf("%w: initial runtime cannot consume active ancestry", store_sqlite.ErrDedicatedBaseCandidate)
+			return out, fmt.Errorf("%w: initial runtime cannot consume active ancestry", storage.ErrDedicatedBaseCandidate)
 		}
 		if activeIdentity != identity {
 			parentID, err = dedicatedBaseParentForAdvance(ctx, catalog, p.authority, active, identity)
@@ -381,7 +386,7 @@ func (p *dedicatedBasePublisher) ensureObserved(ctx context.Context, observe fun
 	}
 	// The runtime gate covers its own adoption calls, but external publishers
 	// still require the catalog's authority/desire/active-pointer CAS fences.
-	desire, err := catalog.RecordDedicatedBaseDesire(ctx, store_sqlite.RecordDedicatedBaseDesireRequest{
+	desire, err := catalog.RecordDedicatedBaseDesire(ctx, storage.RecordDedicatedBaseDesireRequest{
 		Authority: p.authority, ExpectedDesiredEpoch: publication.Desire.Epoch, Identity: identity,
 	})
 	if err != nil {
@@ -391,7 +396,7 @@ func (p *dedicatedBasePublisher) ensureObserved(ctx context.Context, observe fun
 	if _, err := rand.Read(token[:]); err != nil {
 		return out, fmt.Errorf("indexer: generate dedicated base attempt token: %w", err)
 	}
-	claimRequest := store_sqlite.ClaimDedicatedBaseBuildRequest{
+	claimRequest := storage.ClaimDedicatedBaseBuildRequest{
 		Desire: desire, ExpectedActiveGenerationID: graph.ActiveGenerationID, AttemptToken: hex.EncodeToString(token[:]),
 		ProvenanceCommitOID: observation.ProvenanceCommitOID, CreatedAt: observation.CreatedAt,
 		BaseGenerationID: parentID,
@@ -410,7 +415,7 @@ func (p *dedicatedBasePublisher) ensureObserved(ctx context.Context, observe fun
 	if r.leases != nil {
 		inUse = r.leases.InUse
 	}
-	if retired, retireErr := retireReplacedDedicatedClaim(ctx, r.store, publication.Claim, publication.AttemptState, out.Claim, inUse); retireErr != nil {
+	if retired, retireErr := retireReplacedDedicatedClaim(ctx, r.store, r.catalog, publication.Claim, publication.AttemptState, out.Claim, inUse); retireErr != nil {
 		observation.Builder.Logger.Warn("dedicated base: could not retire a replaced failed claim; the retirement sweep collects it",
 			zap.Int64("generation", publication.Claim.GenerationID), zap.Error(retireErr))
 	} else if retired {
@@ -418,7 +423,7 @@ func (p *dedicatedBasePublisher) ensureObserved(ctx context.Context, observe fun
 			zap.Int64("generation", publication.Claim.GenerationID), zap.Int64("claim", out.Claim.GenerationID))
 	}
 	if leases == nil && (out.Claim.BaseGenerationID != 0 || out.Claim.LayerID != "" || out.Claim.LowerViewFingerprint != "") {
-		return out, fmt.Errorf("%w: initial runtime cannot consume a claimed delta", store_sqlite.ErrDedicatedBaseCandidate)
+		return out, fmt.Errorf("%w: initial runtime cannot consume a claimed delta", storage.ErrDedicatedBaseCandidate)
 	}
 	release() // No graph observation gate across physical work or follower waits.
 	id, report, err := p.buildObservedClaim(ctx, observation, out.Claim, leases)
@@ -429,7 +434,7 @@ func (p *dedicatedBasePublisher) ensureObserved(ctx context.Context, observe fun
 		return out, err
 	}
 	if id != out.Claim.GenerationID {
-		return out, fmt.Errorf("%w: builder returned a different generation", store_sqlite.ErrDedicatedBaseCandidate)
+		return out, fmt.Errorf("%w: builder returned a different generation", storage.ErrDedicatedBaseCandidate)
 	}
 	adoptRelease, err := r.acquire(ctx, p.authority.GraphID)
 	if err != nil {
@@ -438,7 +443,7 @@ func (p *dedicatedBasePublisher) ensureObserved(ctx context.Context, observe fun
 	defer adoptRelease()
 	// Every successful path, including ready replay and followers, reaches this
 	// same guard. A PrePublish callback cannot replace final adoption fencing.
-	out.Adoption, err = catalog.AdoptDedicatedBaseGeneration(ctx, store_sqlite.AdoptDedicatedBaseGenerationRequest{Claim: out.Claim})
+	out.Adoption, err = catalog.AdoptDedicatedBaseGeneration(ctx, storage.AdoptDedicatedBaseGenerationRequest{Claim: out.Claim})
 	if err != nil {
 		return out, err
 	}

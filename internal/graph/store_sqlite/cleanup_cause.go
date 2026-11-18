@@ -1,21 +1,14 @@
 package store_sqlite
 
-// Cleanup causes are persisted in the existing journal's opaque JSON. Unknown
-// causes never authorize removal of the user's tracking configuration.
+import "github.com/zzet/gortex/internal/storage"
+
 const (
-	CleanupCauseUntrack               = "untrack"
-	CleanupCauseForget                = "forget"
-	CleanupCauseReloadRemoved         = "reload_removed_from_config"
-	CleanupCauseDemotion              = "demotion"
-	CleanupCauseReconcileRemoval      = "reconcile_removal"
-	CleanupCauseReconcileAvailability = "reconcile_availability"
+	CleanupCauseUntrack               = storage.CleanupCauseUntrack
+	CleanupCauseForget                = storage.CleanupCauseForget
+	CleanupCauseReloadRemoved         = storage.CleanupCauseReloadRemoved
+	CleanupCauseDemotion              = storage.CleanupCauseDemotion
+	CleanupCauseReconcileRemoval      = storage.CleanupCauseReconcileRemoval
+	CleanupCauseReconcileAvailability = storage.CleanupCauseReconcileAvailability
 )
 
-// CleanupCauseAllowsConfigRemoval reports whether a cause authorizes untracking.
-func CleanupCauseAllowsConfigRemoval(cause string) bool {
-	switch cause {
-	case CleanupCauseUntrack, CleanupCauseForget, CleanupCauseReloadRemoved, CleanupCauseDemotion:
-		return true
-	}
-	return false
-}
+var CleanupCauseAllowsConfigRemoval = storage.CleanupCauseAllowsConfigRemoval

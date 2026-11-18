@@ -1074,7 +1074,7 @@ func TestStorageFaultAttachmentSeal(t *testing.T) {
 			s := c.reopen(t)
 			before := point == FaultPayloadWriteBeforeCommit || point == FaultSealBeforeCommit || point == FaultCatalogBeforeCommit
 			for i := range targets {
-				targets[i].Store = s.AtGeneration(targets[i].Store.viewGen)
+				targets[i].Store = s.AtGeneration(targets[i].Store.(*Store).viewGen)
 			}
 			if before {
 				assertAttachmentBatchUnpublished(t, s, targets)

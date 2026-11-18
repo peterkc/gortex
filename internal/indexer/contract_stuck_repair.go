@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/viewmetrics"
 	"go.uber.org/zap"
 )
@@ -66,7 +65,8 @@ const contractBaselineReconcileCause = "namespace_baseline_reconciliation"
 
 // ContractStuckRepairOptions wires the repair to the runtime it repairs.
 type ContractStuckRepairOptions struct {
-	Store        *store_sqlite.Store
+	Store        CheckoutGenerationStore
+	Catalog      CheckoutCatalog
 	MultiIndexer *MultiIndexer
 	// Baseline is the capture runtime the namespace header repair rebuilds
 	// the baseline with.
@@ -141,7 +141,7 @@ func NewContractStuckRepair(options ContractStuckRepairOptions) (*ContractStuckR
 // newContractStuckRepair is NewContractStuckRepair with adjust, which tests
 // use to set the repair's seams, run before the repair starts.
 func newContractStuckRepair(options ContractStuckRepairOptions, adjust func(*ContractStuckRepair)) (*ContractStuckRepair, error) {
-	if options.Store == nil || options.MultiIndexer == nil {
+	if options.Store == nil || options.Store.IsNilGenerationHandle() || options.MultiIndexer == nil {
 		return nil, fmt.Errorf("contract stuck repair: incomplete options")
 	}
 	if options.Logger == nil {
@@ -464,7 +464,7 @@ func (r *ContractStuckRepair) repairHeld(ctx context.Context, state *contractRep
 		r.mu.Unlock()
 	}()
 	repo := state.repo
-	store := r.options.Store.AtGeneration(0)
+	store := generationAt(r.options.Store, 0)
 	r.mu.Lock()
 	suspects, detected, scan := state.suspects, state.detected, state.scan
 	state.suspects, state.detected, state.scan = make(map[string]bool), make(map[string]bool), false
@@ -607,7 +607,7 @@ func (r *ContractStuckRepair) logRepair(repo, kind string, paths []string, err e
 }
 
 // unacceptedRows lists the repository's unaccepted primary receipt rows.
-func (r *ContractStuckRepair) unacceptedRows(ctx context.Context, store *store_sqlite.Store, repo string) []string {
+func (r *ContractStuckRepair) unacceptedRows(ctx context.Context, store generationPayloadStore, repo string) []string {
 	stamps, err := store.ContractBoundaryReceiptStampsContext(ctx, repo, "", nil)
 	if err != nil {
 		return nil
@@ -624,7 +624,7 @@ func (r *ContractStuckRepair) unacceptedRows(ctx context.Context, store *store_s
 // inFlight reports whether path is still in flight: its primary core-write
 // window is open, whatever its age, or its row was left by an earlier
 // process.
-func (r *ContractStuckRepair) inFlight(ctx context.Context, store *store_sqlite.Store, repo, path string) bool {
+func (r *ContractStuckRepair) inFlight(ctx context.Context, store generationPayloadStore, repo, path string) bool {
 	if store.ContractReceiptWriteStates(repo, "", []string{path})[path].Writing {
 		return true
 	}
@@ -634,7 +634,7 @@ func (r *ContractStuckRepair) inFlight(ctx context.Context, store *store_sqlite.
 // restartLeft reports whether path's primary row is unaccepted and no
 // mutation of this process wrote it: an earlier process stopped mid-body or
 // mid-accept. A failure envelope is never stuck.
-func (r *ContractStuckRepair) restartLeft(ctx context.Context, store *store_sqlite.Store, repo, path string) bool {
+func (r *ContractStuckRepair) restartLeft(ctx context.Context, store generationPayloadStore, repo, path string) bool {
 	row, _, err := store.ContractBoundaryReceiptContext(ctx, repo, "", path)
 	if err != nil || row == nil || row.Accepted || contractReceiptIsFailureEnvelope(row) {
 		return false
@@ -651,7 +651,7 @@ func (r *ContractStuckRepair) restartLeft(ctx context.Context, store *store_sqli
 // baseline, is the baseline rebuild's to replace, not a forced reindex's. A
 // file gone from disk needs no row: its deletion, once indexed, takes it out
 // of the census.
-func (r *ContractStuckRepair) absentRow(ctx context.Context, store *store_sqlite.Store, repo, path string) bool {
+func (r *ContractStuckRepair) absentRow(ctx context.Context, store generationPayloadStore, repo, path string) bool {
 	row, known, err := store.ContractBoundaryReceiptForVersionContext(ctx, repo, "", path, contractBoundaryReceiptVersion)
 	if err != nil || row != nil || !known {
 		return false
@@ -671,7 +671,7 @@ func contractCensusFileOnDisk(root, repo, path string) bool {
 
 // unrepaired reports whether a repair left path in flight or still without a
 // row, so its attempts keep counting toward the envelope.
-func (r *ContractStuckRepair) unrepaired(ctx context.Context, store *store_sqlite.Store, repo, path string) bool {
+func (r *ContractStuckRepair) unrepaired(ctx context.Context, store generationPayloadStore, repo, path string) bool {
 	return r.inFlight(ctx, store, repo, path) || r.absentRow(ctx, store, repo, path) || r.driftedRow(ctx, store, repo, path)
 }
 
@@ -684,7 +684,7 @@ func (r *ContractStuckRepair) unrepaired(ctx context.Context, store *store_sqlit
 // The bytes are compared after the indexer's own source transforms, the
 // pipeline the forced reindex writes the row with, so a reindex always
 // clears what this reports. A file whose save is writing is left to it.
-func (r *ContractStuckRepair) driftedRow(ctx context.Context, store *store_sqlite.Store, repo, path string) bool {
+func (r *ContractStuckRepair) driftedRow(ctx context.Context, store generationPayloadStore, repo, path string) bool {
 	if repo == "" || store.ContractReceiptWriteStates(repo, "", []string{path})[path].Writing {
 		return false
 	}
@@ -692,7 +692,11 @@ func (r *ContractStuckRepair) driftedRow(ctx context.Context, store *store_sqlit
 	if err != nil || !contractCensusFileOnDisk(root, repo, path) {
 		return false
 	}
-	rows, err := store.FileMetasByPathsContext(ctx, repo, []string{path})
+	reader, ok := store.(fileMetaPathContextReader)
+	if !ok {
+		return false
+	}
+	rows, err := reader.FileMetasByPathsContext(ctx, repo, []string{path})
 	row, ok := rows[path]
 	if err != nil || !ok || row.ContentHash == "" {
 		return false
@@ -798,7 +802,7 @@ func (r *ContractStuckRepair) realEvict(repo, rel string) error {
 // job's.
 func (r *ContractStuckRepair) repairHeader(ctx context.Context, state *contractRepoRepair) {
 	repo := state.repo
-	store := r.options.Store.AtGeneration(0)
+	store := generationAt(r.options.Store, 0)
 	current, found, err := store.ContractInputStateContext(ctx, repo, "")
 	if err != nil {
 		return

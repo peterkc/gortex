@@ -2,13 +2,13 @@ package store_sqlite
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -48,24 +48,11 @@ import (
 // slower than the caller can afford, because the disk is busy or the rows are
 // wide.
 //
-// These are *ceilings on the pathological case*, not fair-share slices, and the
-// difference is load-bearing. A yield is only free for a caller that offers the
-// generation again: the coordinator backlog, the lifecycle's owed set and the
-// ref-view retention pass all do, but the repository-cleanup path does not —
-// internal/indexer/repository_cleanup.go:264 returns any retirement error that
-// is not ErrCatalogNotFound, and only ErrRepositoryCleanupPending is mapped
-// onto a retryable untrack. A default small enough to fire on an ordinary
-// retirement would therefore turn untracking a large repository from "this
-// takes a while" into "this failed". So the defaults are set well above the
-// payload any real generation carries — roughly sixty-four million rows, or
-// ten minutes of continuous deleting, against the low millions a very large
-// repository's whole graph amounts to — and what they actually stop is a sweep
-// that is not converging at all.
-//
-// Lowering them into a scheduler slice is a real improvement and a separate
-// change: it needs repository_cleanup.go to map ErrPayloadSweepBudgetExhausted
-// onto its pending sentinel first. TestTheDefaultSweepBudgetIsACeilingNotASlice
-// states that dependency where someone lowering these numbers will read it.
+// These are ceilings on the pathological case, not fair-share slices. The
+// defaults allow roughly sixty-four million rows or ten minutes of continuous
+// deleting. Callers resume yielded generations; repository cleanup maps
+// ErrPayloadSweepBudgetExhausted to ErrRepositoryCleanupPending for untrack.
+// TestTheDefaultSweepBudgetIsACeilingNotASlice pins the default budget's scale.
 const (
 	payloadSweepMaxRows    = 64_000_000
 	payloadSweepMaxChunks  = 4_000_000 // chunks are time-sized, down to payloadSweepMinBatch rows
@@ -77,15 +64,11 @@ const (
 // retiring fence, its payload rows are a strict subset of what they were, and
 // the next pass continues from the step this one stopped on.
 //
-// Most callers resume it without needing to know that is what they are doing —
-// the coordinator backlog, the lifecycle's owed set and the ref-view retention
-// pass all offer a refused retirement again. One does not:
-// internal/indexer/repository_cleanup.go:264 propagates every retirement error
-// but ErrCatalogNotFound, and an untrack only reports a retryable "pending" for
-// ErrRepositoryCleanupPending. That is why the default budget above is a
-// runaway ceiling rather than a slice, and it is the reason to fix before
-// lowering it.
-var ErrPayloadSweepBudgetExhausted = errors.New("store_sqlite: payload generation sweep yielded on its budget")
+// Callers resume yielded generations: the coordinator backlog, the
+// lifecycle's owed set and the ref-view retention pass offer a refused
+// retirement again, and repository cleanup maps this error to
+// ErrRepositoryCleanupPending so an untrack retries.
+var ErrPayloadSweepBudgetExhausted = storage.ErrPayloadSweepBudgetExhausted
 
 // payloadSweepBudget bounds one sweep pass. A zero or negative field is
 // unbounded on that axis, which is what a caller that must finish (a test
@@ -272,18 +255,7 @@ func (p *payloadSweepState) failureReason() string {
 	return p.reason
 }
 
-// StorageFailure is one payload generation's last storage-layer maintenance
-// failure: the generation it happened to, and the bounded, path-free sentence
-// SafeStorageFailureReason renders for it.
-//
-// It carries no error, no path and no SQL. A readiness payload is read by a
-// person and shipped off a machine, and the full cause — which is kept on the
-// *StorageError the failing call returned, and logged by the caller — belongs
-// in the daemon log rather than in a status poll.
-type StorageFailure struct {
-	GenerationID int64  `json:"generation_id"`
-	Reason       string `json:"reason"`
-}
+type StorageFailure = storage.StorageFailure
 
 // RecordStorageFailure states that a generation's storage maintenance failed,
 // and reports whether the error was a storage failure at all.

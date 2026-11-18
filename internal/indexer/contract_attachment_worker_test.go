@@ -115,7 +115,7 @@ func (f *contractWorkerFixture) request(t *testing.T, repo, layer string) Contra
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := ContractFollowupRequest{RebuildReason: ContractFollowupColdBaseline, Payload: payload, Catalog: f.store, Registry: f.registry, Config: f.cfg, Leases: f.leases, Yield: func(ctx context.Context) error { return ctx.Err() }}
+	req := ContractFollowupRequest{OpenEvidence: openTestEvidenceStore, RebuildReason: ContractFollowupColdBaseline, Payload: payload, Catalog: f.store, Registry: f.registry, Config: f.cfg, Leases: f.leases, Yield: func(ctx context.Context) error { return ctx.Err() }}
 	req.Snapshot = ContractFollowupSnapshot{Key: graph.ContractAttachmentKey{RepoPrefix: repo, InputVersion: state.InputVersion, InputFingerprint: state.InputFingerprint}, Core: f.store, Inputs: append([]graph.ContractInputWitness(nil), f.inputs...), Work: []graph.ContractWork{f.work[repo]}, Files: append([]ContractFollowupFile(nil), f.files...), Release: func() { f.releases++ }}
 	req.Snapshot.ReadAccepted = func(ctx context.Context, file ContractFollowupFile) (ContractAcceptedSource, error) {
 		if err := ctx.Err(); err != nil {
@@ -183,7 +183,8 @@ func TestContractFollowupNonemptyCrossRepoShapesAndScopedOwners(t *testing.T) {
 			t.Fatal("shared canonical differs across selected cohort attachments")
 		}
 		var bridges []*graph.Node
-		for node := range req.Payload.NodesByKindsSeq(graph.KindContractBridge) {
+		nativeStore := req.Payload.(*store_sqlite.Store)
+		for node := range nativeStore.NodesByKindsSeq(graph.KindContractBridge) {
 			bridges = append(bridges, node)
 		}
 		if len(bridges) != 1 {
@@ -194,7 +195,7 @@ func TestContractFollowupNonemptyCrossRepoShapesAndScopedOwners(t *testing.T) {
 		} else if !reflect.DeepEqual(firstBridge, bridges[0]) {
 			t.Fatal("complete bridge group differs across owners")
 		}
-		p, err := req.Payload.LayerContractRepoProjectionContext(context.Background(), req.Snapshot.Key.RepoPrefix)
+		p, err := nativeStore.LayerContractRepoProjectionContext(context.Background(), req.Snapshot.Key.RepoPrefix)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -299,7 +300,7 @@ func TestContractFollowupBatchBuildsCohortOnceAndCleansScratch(t *testing.T) {
 		coreReads++
 		return core(ctx, file)
 	}
-	batch, err := RunContractFollowupBatch(context.Background(), ContractFollowupBatchRequest{Snapshot: a.Snapshot, Targets: []ContractFollowupTarget{{Key: a.Snapshot.Key, Work: a.Snapshot.Work, Payload: a.Payload, Catalog: a.Catalog}, {Key: b.Snapshot.Key, Work: b.Snapshot.Work, Payload: b.Payload, Catalog: b.Catalog}}, RebuildReason: a.RebuildReason, Registry: a.Registry, Config: a.Config, Leases: a.Leases, Yield: a.Yield, ScratchParent: scratchParent})
+	batch, err := RunContractFollowupBatch(context.Background(), ContractFollowupBatchRequest{OpenEvidence: openTestEvidenceStore, Snapshot: a.Snapshot, Targets: []ContractFollowupTarget{{Key: a.Snapshot.Key, Work: a.Snapshot.Work, Payload: a.Payload, Catalog: a.Catalog}, {Key: b.Snapshot.Key, Work: b.Snapshot.Work, Payload: b.Payload, Catalog: b.Catalog}}, RebuildReason: a.RebuildReason, Registry: a.Registry, Config: a.Config, Leases: a.Leases, Yield: a.Yield, ScratchParent: scratchParent})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +343,11 @@ func TestContractFollowupScratchFailureRefusesPublicationAndCleans(t *testing.T)
 			// failure is injected into the one the extraction is using.
 			var scratch *store_sqlite.Store
 			opened := 0
-			req.convergenceHooks = &contractConvergenceHooks{openedEvidence: func(store *store_sqlite.Store) { scratch = store; opened++ }}
+			req.convergenceHooks = &contractConvergenceHooks{openedEvidence: func(rawStore contractEvidenceStore) {
+				store := rawStore.(*store_sqlite.Store)
+				scratch = store
+				opened++
+			}}
 			yield := req.Yield
 			req.Yield = func(ctx context.Context) error {
 				if !once {
@@ -454,7 +459,8 @@ export class ConfigService { constructor(@Inject(DATABASE_URL) private readonly 
 	if !report.Published {
 		t.Fatal("DI analysis not published")
 	}
-	projection, err := req.Payload.LayerContractRepoProjectionContext(context.Background(), "repo-a")
+	nativeStore := req.Payload.(*store_sqlite.Store)
+	projection, err := nativeStore.LayerContractRepoProjectionContext(context.Background(), "repo-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,7 +470,7 @@ export class ConfigService { constructor(@Inject(DATABASE_URL) private readonly 
 		if row.Edge.To != "di::DATABASE_URL" {
 			continue
 		}
-		targets, fetchErr := req.Payload.GetNodesByIDsContext(context.Background(), []string{row.Edge.To})
+		targets, fetchErr := nativeStore.GetNodesByIDsContext(context.Background(), []string{row.Edge.To})
 		if fetchErr != nil {
 			t.Fatal(fetchErr)
 		}
@@ -494,7 +500,7 @@ func TestContractFollowupBatchTargetFailureRollsBackCohort(t *testing.T) {
 	b := f.request(t, "repo-b", "batch-independent-b")
 	bad := b.Snapshot.Work[0]
 	bad.Token = "uncaptured-token"
-	batch, err := RunContractFollowupBatch(context.Background(), ContractFollowupBatchRequest{Snapshot: a.Snapshot, Targets: []ContractFollowupTarget{{Key: a.Snapshot.Key, Work: a.Snapshot.Work, Payload: a.Payload, Catalog: a.Catalog}, {Key: b.Snapshot.Key, Work: []graph.ContractWork{bad}, Payload: b.Payload, Catalog: b.Catalog}}, RebuildReason: a.RebuildReason, Registry: a.Registry, Config: a.Config, Leases: a.Leases, Yield: a.Yield, ScratchParent: t.TempDir()})
+	batch, err := RunContractFollowupBatch(context.Background(), ContractFollowupBatchRequest{OpenEvidence: openTestEvidenceStore, Snapshot: a.Snapshot, Targets: []ContractFollowupTarget{{Key: a.Snapshot.Key, Work: a.Snapshot.Work, Payload: a.Payload, Catalog: a.Catalog}, {Key: b.Snapshot.Key, Work: []graph.ContractWork{bad}, Payload: b.Payload, Catalog: b.Catalog}}, RebuildReason: a.RebuildReason, Registry: a.Registry, Config: a.Config, Leases: a.Leases, Yield: a.Yield, ScratchParent: t.TempDir()})
 	if err == nil || len(batch.Targets) != 2 {
 		t.Fatalf("invalid later target did not refuse cohort: %#v %v", batch, err)
 	}
@@ -568,7 +574,8 @@ func TestContractFollowupRetainsDerivedSpringBeanCallsOnlyInAnalysis(t *testing.
 		t.Fatalf("Spring analysis failed=%#v %v", report, err)
 	}
 	source := "repo-a/OrderService.java::OrderService"
-	rows, truncated, err := req.Payload.GetOutEdgesByNodeIDsWithMetadataContext(context.Background(), []string{source}, graph.ContractProjectionRowLimit)
+	nativeStore := req.Payload.(*store_sqlite.Store)
+	rows, truncated, err := nativeStore.GetOutEdgesByNodeIDsWithMetadataContext(context.Background(), []string{source}, graph.ContractProjectionRowLimit)
 	if err != nil || truncated {
 		t.Fatalf("Spring outgoing proof unavailable=%v %v", truncated, err)
 	}
@@ -576,7 +583,7 @@ func TestContractFollowupRetainsDerivedSpringBeanCallsOnlyInAnalysis(t *testing.
 	for _, edge := range rows[source] {
 		if edge.Kind == graph.EdgeCalls && edge.Meta["via"] == "spring.Bean" {
 			links++
-			endpoints, readErr := req.Payload.GetNodesByIDsContext(context.Background(), []string{edge.From, edge.To})
+			endpoints, readErr := nativeStore.GetNodesByIDsContext(context.Background(), []string{edge.From, edge.To})
 			if readErr != nil || endpoints[edge.From] == nil || endpoints[edge.To] == nil {
 				t.Fatalf("derived Spring call endpoint unavailable=%#v %v", endpoints, readErr)
 			}
@@ -609,13 +616,14 @@ func TestContractFollowupIndexesSyntheticSearchOnlyInPayload(t *testing.T) {
 	if !report.Published || report.SymbolDocuments < 2 || report.FTSDuration < 0 {
 		t.Fatalf("missing actual analysis FTS=%#v", report)
 	}
-	hits, err := req.Payload.SearchSymbolsContext(context.Background(), "items", 20)
+	nativeStore := req.Payload.(*store_sqlite.Store)
+	hits, err := nativeStore.SearchSymbolsContext(context.Background(), "items", 20)
 	if err != nil {
 		t.Fatal(err)
 	}
 	endpoint, bridge := false, false
 	for _, hit := range hits {
-		nodes, err := req.Payload.GetNodesByIDsContext(context.Background(), []string{hit.NodeID})
+		nodes, err := nativeStore.GetNodesByIDsContext(context.Background(), []string{hit.NodeID})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -636,11 +644,11 @@ func TestContractFollowupIndexesSyntheticSearchOnlyInPayload(t *testing.T) {
 	if !endpoint || !bridge {
 		t.Fatalf("actual worker canonical/bridge not searchable: %#v", hits)
 	}
-	count, err := req.Payload.SymbolFTSCount()
+	count, err := nativeStore.SymbolFTSCount()
 	if err != nil || count != report.SymbolDocuments {
 		t.Fatalf("FTS document count mismatch=%d %#v %v", count, report, err)
 	}
-	mode, known, err := req.Payload.GetSymbolFTSNormalization("repo-a")
+	mode, known, err := nativeStore.GetSymbolFTSNormalization("repo-a")
 	if err != nil || !known || mode != search.FTSNormalizationMode() {
 		t.Fatalf("normalization not certified=%s %v %v", mode, known, err)
 	}

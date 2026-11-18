@@ -109,7 +109,7 @@ func (o *cleanupReadyObserver) FinalizeDedicatedBaseOwner(graphID string, owner 
 
 func observeCleanupReady(t *testing.T, f *lifecycleFixture) *cleanupReadyObserver {
 	t.Helper()
-	runtime, err := NewDedicatedBaseRuntime(f.store, f.lc.ViewLeases())
+	runtime, err := NewDedicatedBaseRuntime(f.store, testCatalog(f.store), f.lc.ViewLeases())
 	require.NoError(t, err)
 	observer := &cleanupReadyObserver{DedicatedBaseRuntime: runtime, finalized: make(chan string, 8)}
 	require.NoError(t, f.lc.SetDedicatedBaseCleanupRuntime(observer))

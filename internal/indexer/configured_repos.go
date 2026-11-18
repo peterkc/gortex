@@ -8,7 +8,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/config"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/pathkey"
 )
 
@@ -33,10 +32,7 @@ func (mi *MultiIndexer) ResolveConfiguredRepos(ctx context.Context, entries []co
 			owners[prefix] = meta.RootPath
 		}
 	}
-	var catalog *store_sqlite.Catalog
-	if provider, ok := mi.graph.(interface{ Catalog() *store_sqlite.Catalog }); ok {
-		catalog = provider.Catalog()
-	}
+	catalog, _ := mi.graph.(configuredRepositoryStore)
 	type registeredRoot struct{ root, prefix string }
 	registeredRoots := make(map[string][]registeredRoot, len(metadata))
 	for prefix, meta := range metadata {
@@ -174,8 +170,7 @@ func (mi *MultiIndexer) configuredPrefixCollisionBefore(ctx context.Context, pre
 		if !configured {
 			return nil // live ownership is checked separately at admission
 		}
-	} else if provider, ok := mi.graph.(interface{ Catalog() *store_sqlite.Catalog }); ok && provider.Catalog() != nil {
-		catalog := provider.Catalog()
+	} else if catalog, ok := mi.graph.(configuredRepositoryStore); ok {
 		binding, found, err := catalog.GetDedicatedGraph(budget, GraphIDFor(prefix))
 		if err != nil {
 			mi.logger.Warn("reading configured repository owner; using config order", zap.Error(err))

@@ -23,7 +23,7 @@ const demoteAfterSessions = 3
 // surface.
 type promotedToolsManager struct {
 	mu      sync.Mutex
-	sidecar *persistence.SidecarStore
+	sidecar promotionRecords
 	repoKey string
 	epoch   int64
 	live    map[string]persistence.PromotedToolEntry

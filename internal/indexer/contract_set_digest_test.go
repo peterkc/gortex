@@ -7,7 +7,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/contracts"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
 )
@@ -70,7 +69,7 @@ func TestContractRouterProofAllowsTornEnrichmentToRecheck(t *testing.T) {
 	waits := 0
 	hooks := &contractConvergenceHooks{
 		beforeR1: func([]string) { armed = true },
-		openedEvidence: func(*store_sqlite.Store) {
+		openedEvidence: func(contractEvidenceStore) {
 			if armed && !staged {
 				staged = true
 				f.stageInFlight("fixture/serve.go")

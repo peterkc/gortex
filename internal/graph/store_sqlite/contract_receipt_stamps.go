@@ -1,5 +1,7 @@
 package store_sqlite
 
+import "github.com/zzet/gortex/internal/storage"
+
 import (
 	"context"
 	"database/sql"
@@ -97,18 +99,7 @@ type contractCoreWindowSpan struct {
 // contractCoreWindowGapRing bounds the gaps kept per path.
 const contractCoreWindowGapRing = 16
 
-// ContractCoreWindowGap is the quiet gap before one core-write window of a
-// path opened: Quiet runs from the close of the path's previous window to
-// this window's open, and OpenPrev is how long that previous window was
-// open. Seq is the write seq that opened this window.
-type ContractCoreWindowGap struct {
-	Path            string
-	Checkout        string
-	ClosedAt        time.Time
-	Seq             uint64
-	OpenedAt        time.Time
-	Quiet, OpenPrev time.Duration
-}
+type ContractCoreWindowGap = storage.ContractCoreWindowGap
 
 func (w *contractReceiptWriteSequence) clock() time.Time {
 	if w.now != nil {
@@ -396,11 +387,7 @@ func (s *Store) SettleContractReceiptWrites(repo, checkout string, seqs map[stri
 // ContractReceiptWriteState is one path's write seq, whether the mutation
 // that wrote it settled it, and whether a core-write window of the path is
 // open.
-type ContractReceiptWriteState struct {
-	Seq     uint64
-	Settled bool
-	Writing bool
-}
+type ContractReceiptWriteState = storage.ContractReceiptWriteState
 
 // ContractReceiptWriteStates returns the write state of each path of one
 // repository and actor. A path never written in this process has seq 0, is
@@ -460,12 +447,7 @@ func (s *Store) ContractReceiptWriteSeqs(repo, checkout string, paths []string) 
 // ContractCoreWindow is one open core-write window of a primary path: the
 // write seq that opened it and when. MarkedAt is when a failed mutation
 // marked it orphaned, zero for a window not marked.
-type ContractCoreWindow struct {
-	Checkout, Path string
-	OpenerSeq      uint64
-	OpenedAt       time.Time
-	MarkedAt       time.Time
-}
+type ContractCoreWindow = storage.ContractCoreWindow
 
 // OrphanContractCoreWrites marks the core-write windows one repository and
 // actor's mutation opened at the given write seqs and left open: its body
@@ -571,10 +553,7 @@ func (s *Store) ContractCoreWindowGaps(repo string, paths []string, since time.T
 
 // ContractBoundaryReceiptStamp is a receipt row's identity without its
 // payload: what a contract job compares before and after a read.
-type ContractBoundaryReceiptStamp struct {
-	FilePath, Fingerprint, SourceFingerprint string
-	Accepted                                 bool
-}
+type ContractBoundaryReceiptStamp = storage.ContractBoundaryReceiptStamp
 
 // ContractBoundaryReceiptStampsContext reads the non-payload columns of this
 // generation's receipt rows for one repository and actor: every row when
@@ -794,13 +773,7 @@ func (s *Store) ContractCoreWindowClosedAt(repo, checkout, path string, seq uint
 
 // ContractCoreWindowClose is one bounded-history close used to associate a
 // proof interval with a writer's next open, or identify a censored gap.
-type ContractCoreWindowClose struct {
-	Repo       string `json:"repo"`
-	Checkout   string `json:"checkout"`
-	Path       string `json:"path"`
-	OpenerSeq  uint64 `json:"opener_seq"`
-	ClosedAtNS int64  `json:"closed_at_ns"`
-}
+type ContractCoreWindowClose = storage.ContractCoreWindowClose
 
 // ContractCoreWindowLastClose returns the newest retained close at or before
 // the bound for one path, without substituting a later event.

@@ -5,23 +5,23 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/pathkey"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // RegisteredCheckoutForPath binds an ordinary registered CWD without reading
 // the other repositories' families. A lexical match keeps CheckoutForPath's
 // precedence: only a complete lexical miss may resolve canonical aliases.
-func RegisteredCheckoutForPath(ctx context.Context, catalog *store_sqlite.Catalog, path string) (store_sqlite.Checkout, bool, error) {
-	if catalog == nil || path == "" {
-		return store_sqlite.Checkout{}, false, nil
+func RegisteredCheckoutForPath(ctx context.Context, catalog checkoutBindingCatalog, path string) (storage.Checkout, bool, error) {
+	if catalog == nil || catalog.IsNilMaterializerCatalog() || path == "" {
+		return storage.Checkout{}, false, nil
 	}
 	cleaned := filepath.Clean(path)
 	// A repo-root CWD is the common case and needs only one seek. Its exact
 	// root is necessarily more specific than every lexical ancestor.
 	candidates, err := catalog.CheckoutsByRootPaths(ctx, []string{cleaned})
 	if err != nil {
-		return store_sqlite.Checkout{}, false, WrapViewError(CodeCheckoutInaccessible,
+		return storage.Checkout{}, false, WrapViewError(CodeCheckoutInaccessible,
 			"read registered checkout roots", err)
 	}
 	if best, found := checkoutForPathSpelling(candidates, cleaned, false); found {
@@ -36,7 +36,7 @@ func RegisteredCheckoutForPath(ctx context.Context, catalog *store_sqlite.Catalo
 	}
 	candidates, err = catalog.CheckoutsByRootPaths(ctx, ancestors)
 	if err != nil {
-		return store_sqlite.Checkout{}, false, WrapViewError(CodeCheckoutInaccessible,
+		return storage.Checkout{}, false, WrapViewError(CodeCheckoutInaccessible,
 			"read registered checkout roots", err)
 	}
 	if best, found := checkoutForPathSpelling(candidates, cleaned, false); found {
@@ -48,7 +48,7 @@ func RegisteredCheckoutForPath(ctx context.Context, catalog *store_sqlite.Catalo
 	// catalog discovery only for a complete indexed lexical miss.
 	families, err := catalog.ListRepositoryFamilies(ctx)
 	if err != nil {
-		return store_sqlite.Checkout{}, false, err
+		return storage.Checkout{}, false, err
 	}
 	ids := make([]string, len(families))
 	for i, family := range families {
@@ -68,22 +68,22 @@ func RegisteredCheckoutForPath(ctx context.Context, catalog *store_sqlite.Catalo
 // ordinary case for every directory nobody has tracked.
 func CheckoutForPath(
 	ctx context.Context,
-	catalog *store_sqlite.Catalog,
+	catalog checkoutBindingCatalog,
 	familyIDs []string,
 	path string,
-) (store_sqlite.Checkout, bool, error) {
-	if catalog == nil || path == "" {
-		return store_sqlite.Checkout{}, false, nil
+) (storage.Checkout, bool, error) {
+	if catalog == nil || catalog.IsNilMaterializerCatalog() || path == "" {
+		return storage.Checkout{}, false, nil
 	}
 	cleaned := filepath.Clean(path)
-	var candidates []store_sqlite.Checkout
+	var candidates []storage.Checkout
 	for _, familyID := range familyIDs {
 		if familyID == "" {
 			continue
 		}
 		checkouts, err := catalog.ListCheckouts(ctx, familyID)
 		if err != nil {
-			return store_sqlite.Checkout{}, false, WrapViewError(CodeCheckoutInaccessible,
+			return storage.Checkout{}, false, WrapViewError(CodeCheckoutInaccessible,
 				fmt.Sprintf("list the checkouts of family %q", familyID), err)
 		}
 		candidates = append(candidates, checkouts...)
@@ -99,9 +99,9 @@ func CheckoutForPath(
 	return best, found, nil
 }
 
-func checkoutForPathSpelling(checkouts []store_sqlite.Checkout, path string, canonicalRoots bool) (store_sqlite.Checkout, bool) {
+func checkoutForPathSpelling(checkouts []storage.Checkout, path string, canonicalRoots bool) (storage.Checkout, bool) {
 	var (
-		best    store_sqlite.Checkout
+		best    storage.Checkout
 		bestLen = -1
 	)
 	for _, checkout := range checkouts {
@@ -124,16 +124,16 @@ func checkoutForPathSpelling(checkouts []store_sqlite.Checkout, path string, can
 // graph rather than from a dedicated one. A dedicated checkout and the
 // primary are read from the indexed corpus directly, so neither has a
 // composed view to route to.
-func ServesAutomaticView(checkout store_sqlite.Checkout) bool {
-	return checkout.State == store_sqlite.CheckoutStateReady &&
-		checkout.EffectiveMode == store_sqlite.CheckoutModeAutomatic
+func ServesAutomaticView(checkout storage.Checkout) bool {
+	return checkout.State == storage.CheckoutStateReady &&
+		checkout.EffectiveMode == storage.CheckoutModeAutomatic
 }
 
 // RouteReady reports whether a route can serve a composed view: it must be
 // active and name both generation slots. A route missing the working-tree
 // slot is mid-build — serving the commit generation alone would answer out
 // of a state of the world the checkout is not in.
-func RouteReady(route store_sqlite.CheckoutRoute) bool {
-	return route.State == store_sqlite.RouteActive &&
+func RouteReady(route storage.CheckoutRoute) bool {
+	return route.State == storage.RouteActive &&
 		route.CommitGenerationID > 0 && route.DirtyGenerationID > 0
 }

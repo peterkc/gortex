@@ -11,9 +11,9 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/resolver"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // A scoped warm reconcile can cover thousands of files after a branch switch,
@@ -186,7 +186,7 @@ func (idx *Indexer) reindexIncrementalFilesBatched(
 		idx.logger.Debug("incremental reindex: failed to index file",
 			zap.String("file", filePath), zap.Error(idx.fileIndexFailureError(filePath)))
 	}
-	if errors.Is(idx.contractRestatementErr, store_sqlite.ErrWarmupWALPressure) {
+	if errors.Is(idx.contractRestatementErr, storage.ErrWarmupWALPressure) {
 		// The reconcile already fails with this error (its caller returns it
 		// before using the result). A retry pass would only meet the same
 		// refusal after a second full wait. The first pass's file-failure
@@ -1970,11 +1970,14 @@ func (idx *Indexer) materializeDataflowParamsForStages(stages []*incrementalBatc
 // switch does not retain 1,000 parse trees or issue one query per file.
 func (idx *Indexer) materializeDataflowParamsForFiles(graphPaths []string) {
 	graphPaths = appendUniqueSorted(nil, graphPaths...)
-	legs := newRefFactLegs(idx.writeCounterMark)
-	writes := idx.writeCounterMark()
+	legs := newRefFactLegs(idx.writeCounters)
+	writes := legs.writes
 	defer func() {
 		if idx.logger != nil && len(graphPaths) > 0 {
-			fields := append(legs.fields(len(graphPaths)), writeCounterFields("dataflow_", idx.writeCounterMark().Since(writes))...)
+			fields := legs.fields(len(graphPaths))
+			if legs.sampleWrites != nil {
+				fields = append(fields, writeCounterFields("dataflow_", legs.sampleWrites().Since(writes))...)
+			}
 			if p := idx.dataflowParams; p != nil {
 				fields = append(fields, zap.Int("param_hits", p.hits), zap.Int("param_misses", p.misses))
 			}

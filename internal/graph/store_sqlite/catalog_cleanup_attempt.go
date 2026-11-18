@@ -55,7 +55,7 @@ func setCleanupAttempt(entry CleanupEntry, id string) (CleanupEntry, error) {
 // must reload/re-authorize; it cannot overwrite the winning cleanup attempt.
 // Generic UpsertCleanupEntry remains available for its existing callers.
 func (c *Catalog) CreateCleanupAttempt(ctx context.Context, entry CleanupEntry, expected string) error {
-	if err := entry.validate(); err != nil {
+	if err := validateCleanupEntry(entry); err != nil {
 		return err
 	}
 	if err := requireCleanupAttempt(entry, expected); err != nil {
@@ -126,7 +126,7 @@ func (c *Catalog) GetCleanupAttempt(ctx context.Context, cleanupID, expected str
 // AdvanceCleanupAttempt never creates a journal. The load, token comparison,
 // and write share the mutation gate and one SQLite transaction.
 func (c *Catalog) AdvanceCleanupAttempt(ctx context.Context, entry CleanupEntry, expected string) error {
-	if err := entry.validate(); err != nil {
+	if err := validateCleanupEntry(entry); err != nil {
 		return err
 	}
 	if err := requireCleanupAttempt(entry, expected); err != nil {

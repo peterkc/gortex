@@ -14,6 +14,7 @@ import (
 
 	sqlite "modernc.org/sqlite"
 
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -189,7 +190,7 @@ func catalogBoolInt(value bool) int {
 // REPLACE: REPLACE deletes the existing row first, which would cascade
 // through every checkout that references it.
 func (c *Catalog) UpsertRepositoryFamily(ctx context.Context, family RepositoryFamily) error {
-	if err := family.validate(); err != nil {
+	if err := validateRepositoryFamily(family); err != nil {
 		return err
 	}
 	_, err := c.exec(ctx, `
@@ -275,7 +276,7 @@ const checkoutColumns = `incarnation, family_id, root_path, git_dir, admin_name,
 
 // UpsertCheckout writes one checkout row.
 func (c *Catalog) UpsertCheckout(ctx context.Context, checkout Checkout) error {
-	if err := checkout.validate(); err != nil {
+	if err := validateCheckout(checkout); err != nil {
 		return err
 	}
 	_, err := c.exec(ctx, `
@@ -328,7 +329,7 @@ ON CONFLICT(checkout_id) DO UPDATE SET
 // as a read before it, because a separate read would leave open the very
 // window it is meant to close.
 func (c *Catalog) AllocateCheckout(ctx context.Context, checkout Checkout) error {
-	if err := checkout.validate(); err != nil {
+	if err := validateCheckout(checkout); err != nil {
 		return err
 	}
 	// The guard is keyed on the administrative name, so an allocation without
@@ -599,63 +600,15 @@ func (c *Catalog) UpdateCheckoutObservation(ctx context.Context, req UpdateCheck
 	return err
 }
 
-// CheckoutObservationVerdict is what an observation write did with the request
-// it was given. It is the diagnostic the error cannot carry: a refused
-// observation is not a failed write, and an accepted one that had to adopt a
-// stepped-back clock is not an ordinary one.
-type CheckoutObservationVerdict string
+type CheckoutObservationVerdict = storage.CheckoutObservationVerdict
 
 const (
-	// CheckoutObservationApplied: this observation was the newest the row had
-	// seen, and every column it stated landed.
-	CheckoutObservationApplied CheckoutObservationVerdict = "applied"
-	// CheckoutObservationFenced: a newer observation holds the row, so nothing
-	// was written. The row is intact and the caller's pass is simply not the
-	// one that counts.
-	CheckoutObservationFenced CheckoutObservationVerdict = "fenced"
-	// CheckoutObservationRebased: passes kept arriving behind the row's clock,
-	// which is a host clock that moved and not an observer that is late, so the
-	// fence adopted the new clock domain rather than refusing forever. The
-	// write landed.
-	CheckoutObservationRebased CheckoutObservationVerdict = "rebased"
+	CheckoutObservationApplied = storage.CheckoutObservationApplied
+	CheckoutObservationFenced  = storage.CheckoutObservationFenced
+	CheckoutObservationRebased = storage.CheckoutObservationRebased
 )
 
-// CheckoutObservationReport is the diagnostic half of an observation write: it
-// says what the write actually recorded, which the error alone cannot, because
-// a refused observation is not a refused row.
-type CheckoutObservationReport struct {
-	// Verdict says whether the write landed, and why not when it did not.
-	Verdict CheckoutObservationVerdict
-	// Position is the monotonic observation position the row stands at after
-	// the call: this write's, when it landed, and the newer observation's when
-	// it was refused. It never moves backwards, not even when the host clock
-	// does.
-	Position int64
-	// FencedBy and FencingObservation name the observation that refused this
-	// one — its position and the pass clock it was accepted at. Both are 0
-	// when nothing refused anything.
-	FencedBy           int64
-	FencingObservation int64
-	// HeadRef, HeadCommit and HeadTree are the head facts the row holds after
-	// the call, whether this request stated them or the fence kept them.
-	HeadRef, HeadCommit, HeadTree string
-	// HeadRefused says the head axis alone was held back: the rest of the
-	// request landed, but the head the row carries was published by an
-	// adoption this sample is behind, so the sample's head was not written.
-	// The row keeps the published head and the refusal is traced durably in
-	// last_error.
-	HeadRefused bool
-	// HeadEpoch is the clock at which an adoption published the head the row
-	// holds, and 0 when no adoption published it — the sequence a sample has
-	// to reference before it may move that head.
-	HeadEpoch int64
-}
-
-// Fenced reports the refusal, which is the one verdict a caller has to branch
-// on: its sample was superseded and nothing it stated was written.
-func (r CheckoutObservationReport) Fenced() bool {
-	return r.Verdict == CheckoutObservationFenced
-}
+type CheckoutObservationReport = storage.CheckoutObservationReport
 
 // UpdateCheckoutObservationWithReport is UpdateCheckoutObservation with the
 // fence's verdict preserved. See UpdateCheckoutObservation for the contract;
@@ -687,7 +640,7 @@ func (c *Catalog) UpdateCheckoutObservationAtHeadEpoch(
 	req UpdateCheckoutObservationRequest,
 	headEpoch int64,
 ) (CheckoutObservationReport, error) {
-	if err := req.validate(); err != nil {
+	if err := validateUpdateCheckoutObservationRequest(req); err != nil {
 		return CheckoutObservationReport{}, err
 	}
 	subject := fmt.Sprintf("checkout %s incarnation %s", req.CheckoutID, req.Incarnation)
@@ -807,7 +760,7 @@ UPDATE checkouts
 // moved on — and because both production observers already handle that error
 // correctly for a refusal. A caller that wants the distinction tests this
 // sentinel, or reads CheckoutObservationReport.Verdict.
-var ErrCatalogObservationFenced = fmt.Errorf("%w: superseded by a newer observation", ErrCatalogStaleGuard)
+var ErrCatalogObservationFenced = storage.ErrCatalogObservationFenced
 
 // CheckoutHeadRefusedMarker prefixes the durable trace a refused head write
 // leaves in the checkout's last_error.
@@ -1162,7 +1115,7 @@ func (c *Catalog) DeleteCheckout(ctx context.Context, checkoutID string) error {
 // same source for the same checkout updates the existing row rather than
 // adding a duplicate.
 func (c *Catalog) UpsertTrackingIntent(ctx context.Context, intent TrackingIntent) error {
-	if err := intent.validate(); err != nil {
+	if err := validateTrackingIntent(intent); err != nil {
 		return err
 	}
 	_, err := c.exec(ctx, `
@@ -1308,7 +1261,7 @@ UPDATE tracking_intents SET active = 0, revoked_at = ?
 // written — UNIQUE(checkout_id) is the enforcement, the pre-check only turns
 // it into a typed error.
 func (c *Catalog) BeginIntentTransition(ctx context.Context, transition IntentTransition) error {
-	if err := transition.validate(); err != nil {
+	if err := validateIntentTransition(transition); err != nil {
 		return err
 	}
 	return c.withTx(ctx, func(tx *sql.Tx) error {
@@ -1703,7 +1656,7 @@ func viewGenerationInsertArgs(generation ViewGeneration) []any {
 // row is written exactly once; afterwards only PublishViewGeneration may
 // change it, and only out of the building state.
 func (c *Catalog) CreateViewGeneration(ctx context.Context, generation ViewGeneration) (int64, error) {
-	if err := generation.validate(); err != nil {
+	if err := validateViewGeneration(generation); err != nil {
 		return 0, err
 	}
 	var generationID int64
@@ -2060,7 +2013,7 @@ SELECT generation_id FROM view_generations
 // The lookup and the insert run in one transaction under the mutation gate,
 // which is what makes the check-then-insert atomic against a concurrent begin.
 func (c *Catalog) AdoptOrCreateViewGeneration(ctx context.Context, generation ViewGeneration) (int64, bool, error) {
-	if err := generation.validate(); err != nil {
+	if err := validateViewGeneration(generation); err != nil {
 		return 0, false, err
 	}
 	if generation.State != ViewGenerationBuilding {
@@ -2175,28 +2128,7 @@ UPDATE generation_producer_completeness SET state = ?, reason = ?
 		string(ProducerStateUnavailable), reason, generationID, producer, string(ProducerStateUnavailable))
 }
 
-// ViewGenerationReferences is which kinds of pointer still name a generation.
-// It is the reference guard's verdict broken out by holder, so a refused
-// retirement can say why it was refused instead of only that it was.
-type ViewGenerationReferences struct {
-	// Routed is a checkout route naming the generation in either slot.
-	Routed bool
-	// RefViewed is a ref view serving it as its active generation.
-	RefViewed bool
-	// Based is another generation naming it as the layer beneath.
-	Based bool
-	// GraphActive is a dedicated graph's active pointer.
-	GraphActive bool
-	// DedicatedPublication is the graph's current build/publication association.
-	DedicatedPublication bool
-	ContractAttached     bool
-}
-
-// Any reports whether any pointer names the generation. It is the boolean the
-// delete guard enforces.
-func (r ViewGenerationReferences) Any() bool {
-	return r.Routed || r.RefViewed || r.Based || r.GraphActive || r.DedicatedPublication || r.ContractAttached
-}
+type ViewGenerationReferences = storage.ViewGenerationReferences
 
 // ViewGenerationReferenced reports whether anything still points at a
 // generation. It asks exactly what DeleteViewGeneration's guard asks, so a
@@ -2314,7 +2246,7 @@ func (c *Catalog) deleteViewGeneration(ctx context.Context, generationID int64) 
 
 // UpsertViewLayer writes one layer row.
 func (c *Catalog) UpsertViewLayer(ctx context.Context, layer ViewLayer) error {
-	if err := layer.validate(); err != nil {
+	if err := validateViewLayer(layer); err != nil {
 		return err
 	}
 	_, err := c.exec(ctx, `
@@ -2359,7 +2291,7 @@ SELECT kind, graph_id, checkout_id, target_ref, target_commit, target_tree
 // Repointing an existing route is FlipCheckoutRoute's job: this write does not
 // compare-and-set, so it is for installing a route, not for moving one.
 func (c *Catalog) UpsertCheckoutRoute(ctx context.Context, route CheckoutRoute) error {
-	if err := route.validate(); err != nil {
+	if err := validateCheckoutRoute(route); err != nil {
 		return err
 	}
 	var previous []int64
@@ -2704,7 +2636,7 @@ func refViewInsertArgs(view RefView) []any {
 // second row for the same (graph, selector, profile) is a constraint failure,
 // not a duplicate view.
 func (c *Catalog) UpsertRefView(ctx context.Context, view RefView) error {
-	if err := view.validate(); err != nil {
+	if err := validateRefView(view); err != nil {
 		return err
 	}
 	return c.withTx(ctx, func(tx *sql.Tx) error {
@@ -2749,7 +2681,7 @@ ON CONFLICT(ref_view_id) DO UPDATE SET
 // The insert declines the conflict instead, so an existing row is read back
 // exactly as it stands.
 func (c *Catalog) GetOrCreateRefView(ctx context.Context, view RefView) (RefView, error) {
-	if err := view.validate(); err != nil {
+	if err := validateRefView(view); err != nil {
 		return RefView{}, err
 	}
 	err := c.withTx(ctx, func(tx *sql.Tx) error {
@@ -3043,7 +2975,7 @@ func refViewBuildInsertArgs(build RefViewBuild) []any {
 // for the same ref view, tree, base and fingerprint fails rather than racing
 // the first to produce the same generation twice.
 func (c *Catalog) UpsertRefViewBuild(ctx context.Context, build RefViewBuild) error {
-	if err := build.validate(); err != nil {
+	if err := validateRefViewBuild(build); err != nil {
 		return err
 	}
 	return c.withTx(ctx, func(tx *sql.Tx) error {
@@ -3099,7 +3031,7 @@ func (c *Catalog) ClaimRefViewBuild(
 	build RefViewBuild,
 	abandonedBefore int64,
 ) (RefViewBuild, error) {
-	if err := build.validate(); err != nil {
+	if err := validateRefViewBuild(build); err != nil {
 		return RefViewBuild{}, err
 	}
 	if build.State != ViewGenerationBuilding {
@@ -3284,14 +3216,7 @@ func scanRefViewBuild(scan func(...any) error, build *RefViewBuild) error {
 	return nil
 }
 
-// RefViewBuildKey names one coalescing slot: the four columns the partial
-// unique index on the in-flight builds is keyed by.
-type RefViewBuildKey struct {
-	RefViewID        string
-	DesiredTree      string
-	BaseGenerationID int64
-	BuildFingerprint string
-}
+type RefViewBuildKey = storage.RefViewBuildKey
 
 // InFlightRefViewBuild returns the attempt holding one coalescing slot.
 //
@@ -3352,7 +3277,7 @@ func (c *Catalog) GetRefViewBuild(ctx context.Context, buildID string) (RefViewB
 // UpsertCleanupEntry writes one deferred-deletion record. The journal has no
 // foreign keys, so an entry outlives the rows it names.
 func (c *Catalog) UpsertCleanupEntry(ctx context.Context, entry CleanupEntry) error {
-	if err := entry.validate(); err != nil {
+	if err := validateCleanupEntry(entry); err != nil {
 		return err
 	}
 	_, err := c.exec(ctx, `
@@ -3432,3 +3357,6 @@ func (c *Catalog) DeleteCleanupEntry(ctx context.Context, cleanupID string) erro
 	return c.deleteOne(ctx, fmt.Sprintf("cleanup entry %s", cleanupID),
 		`DELETE FROM cleanup_journal WHERE cleanup_id = ?`, cleanupID)
 }
+
+// IsNilMaterializerCatalog reports pointer absence, not catalog liveness.
+func (c *Catalog) IsNilMaterializerCatalog() bool { return c == nil }

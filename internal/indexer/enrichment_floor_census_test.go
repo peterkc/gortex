@@ -249,7 +249,7 @@ func TestDirtyLanguageCensusIgnoresPathlessRows(t *testing.T) {
 			parent := create(0, "parent", a, 3)
 			top := create(parent, "top", b, 1)
 			// Given repeated pathless nodes in opposite generation orders, only real filenames compose.
-			got := dirtyChainLanguageCensus(context.Background(), store, top, "r")
+			got := dirtyChainLanguageCensus(context.Background(), store, store.Catalog(), top, "r")
 			want := map[string]map[string]int{"r/shared.go": {"go": 1}, "top/unique.go": {"go": 1}, "parent/unique.go": {"go": 1}}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("dirty census=%v want%v", got, want)

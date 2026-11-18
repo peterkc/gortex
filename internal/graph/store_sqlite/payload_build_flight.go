@@ -118,6 +118,15 @@ func (s *Store) JoinPayloadBuildFlight(
 	}
 }
 
+// JoinPayloadBuildFlightHandle returns the native flight without boxing a nil pointer.
+func (s *Store) JoinPayloadBuildFlightHandle(ctx context.Context, generationID int64, adopted bool) (PayloadBuildFlightHandle, bool, bool, error) {
+	flight, leader, ready, err := s.JoinPayloadBuildFlight(ctx, generationID, adopted)
+	if flight == nil {
+		return nil, leader, ready, err
+	}
+	return flight, leader, ready, err
+}
+
 // Wait waits for the physical writer without transferring cancellation to it.
 // A canceled follower leaves the flight intact for the leader and other
 // followers.

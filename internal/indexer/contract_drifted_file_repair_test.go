@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 // driftContractFile rewrites a primary census file's bytes on disk without
@@ -34,14 +35,14 @@ func TestContractPolicyRepairReindexesADriftedFile(t *testing.T) {
 	options.Config.HTTPClientAliases = []string{"apiGet"}
 	var repair atomic.Pointer[ContractStuckRepair]
 	options.SuspectStuck = func(repo string, paths []string) { repair.Load().Suspect(repo, paths) }
-	coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{
+	coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(options.Store), OpenEvidence: openTestEvidenceStore,
 		Store: options.Store, Leases: options.Materializer.Leases, Registry: options.Registry,
 		Config: options.Config, Capture: NewContractFollowupSourceCapture(options),
 		Inputs: NewContractPrimaryInputCapture(options.Materializer), Yield: options.Yield,
 	})
 	require.NoError(t, err)
 	options.MultiIndexer.SetContractCoreRuntime(ContractCoreRuntimeHooks{Published: coordinator.Published})
-	runner, err := NewContractStuckRepair(ContractStuckRepairOptions{
+	runner, err := NewContractStuckRepair(ContractStuckRepairOptions{Catalog: testCatalog(options.Store),
 		Store: options.Store, MultiIndexer: options.MultiIndexer, Baseline: options,
 		Coordinator: coordinator, Period: 50 * time.Millisecond,
 	})
@@ -54,11 +55,11 @@ func TestContractPolicyRepairReindexesADriftedFile(t *testing.T) {
 	attached := scheduleUntilAttached(t, ctx, coordinator, options.Materializer, []string{"fixture"}, "fixture")
 	require.True(t, attached.State.Accepted)
 	require.Equal(t, repaired+1, repairCount("stuck_receipt"), "one forced reindex rewrote the drifted file")
-	current, _, err := options.Store.ContractBoundaryReceiptContext(ctx, "fixture", "", original.FilePath)
+	current, _, err := options.Store.(*store_sqlite.Store).ContractBoundaryReceiptContext(ctx, "fixture", "", original.FilePath)
 	require.NoError(t, err)
 	require.True(t, current.Accepted)
 	require.Equal(t, contractInputHash([]byte(drifted)), current.SourceFingerprint, "the receipt is of the bytes on disk")
-	rows, err := options.Store.FileMetasByPaths("fixture", []string{original.FilePath})
+	rows, err := options.Store.(*store_sqlite.Store).FileMetasByPaths("fixture", []string{original.FilePath})
 	require.NoError(t, err)
 	require.Equal(t, contentHashForSource([]byte(drifted)), rows[original.FilePath].ContentHash, "the row describes the bytes on disk")
 }
@@ -83,6 +84,15 @@ func TestContractRepairTakesADriftedRowOnlyWhileTheBytesDiffer(t *testing.T) {
 	driftContractFile(t, f.contractJobFixture, "helper.go", jobHelper+"// drifted again\n")
 	require.NoError(t, os.Remove(filepath.Join(f.root, "helper.go")))
 	require.False(t, f.r.driftedRow(t.Context(), store, "fixture", helper), "a deleted file is not drifted")
+}
+
+func TestContractRepairDeclinesDriftWithoutFileMetadataReader(t *testing.T) {
+	f := newContractRepairFixture(t, nil)
+	driftContractFile(t, f.contractJobFixture, "helper.go", jobHelper+"// drifted\n")
+	store := struct{ generationPayloadStore }{f.store.AtGeneration(0)}
+	_, supports := any(store).(fileMetaPathContextReader)
+	require.False(t, supports, "the wrapper must hide path metadata reads")
+	require.False(t, f.r.driftedRow(t.Context(), store, "fixture", "fixture/helper.go"))
 }
 
 // Drift alone, with every receipt at the current policy, is repaired by one

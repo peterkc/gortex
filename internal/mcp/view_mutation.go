@@ -8,9 +8,9 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/indexer"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // prepareRoutedViewMutation establishes authority for the small set of tools
@@ -168,7 +168,7 @@ func awaitRouteRecompositionTickets(ctx context.Context, request func(context.Co
 			if !open {
 				return false
 			}
-			if !errors.Is(result.Err, store_sqlite.ErrGenerationBulkCheckpointBusy) {
+			if !errors.Is(result.Err, storage.ErrGenerationBulkCheckpointBusy) {
 				return result.Err == nil
 			}
 		case <-ctx.Done():

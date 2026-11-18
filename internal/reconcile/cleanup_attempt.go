@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 func newCleanupAttemptID() (string, error) {
@@ -37,7 +37,7 @@ func (r *Reconciler) prepareCleanupExecution(ctx context.Context, target sagaTar
 		if err != nil {
 			return target, nil, err
 		}
-		var entry store_sqlite.CleanupEntry
+		var entry storage.CleanupEntry
 		if target.journalSnapshot != nil {
 			entry, err = r.catalog.UpgradeCleanupAttempt(ctx, *target.journalSnapshot, attemptID)
 		} else {
@@ -45,7 +45,7 @@ func (r *Reconciler) prepareCleanupExecution(ctx context.Context, target sagaTar
 			var payload []byte
 			payload, err = json.Marshal(target)
 			if err == nil {
-				entry = store_sqlite.CleanupEntry{CleanupID: target.cleanupID(), OpaqueTargetIDs: string(payload), Reason: string(target.Kind), Phase: store_sqlite.CleanupPhasePending, PrimaryEpoch: target.PrimaryEpoch, LastProgress: r.now().Unix()}
+				entry = storage.CleanupEntry{CleanupID: target.cleanupID(), OpaqueTargetIDs: string(payload), Reason: string(target.Kind), Phase: storage.CleanupPhasePending, PrimaryEpoch: target.PrimaryEpoch, LastProgress: r.now().Unix()}
 				err = r.catalog.CreateCleanupAttempt(ctx, entry, attemptID)
 			}
 		}
@@ -73,12 +73,12 @@ func (r *Reconciler) prepareCleanupExecution(ctx context.Context, target sagaTar
 	}
 	if current.cleanupID() != target.cleanupID() || current.AttemptID != target.AttemptID || current.Kind != target.Kind {
 		release()
-		return target, nil, fmt.Errorf("%w: cleanup execution identity changed", store_sqlite.ErrCatalogStaleGuard)
+		return target, nil, fmt.Errorf("%w: cleanup execution identity changed", storage.ErrCatalogStaleGuard)
 	}
 	return current, release, nil
 }
 
-func (r *Reconciler) persistCleanupEntry(ctx context.Context, entry store_sqlite.CleanupEntry, target sagaTarget) error {
+func (r *Reconciler) persistCleanupEntry(ctx context.Context, entry storage.CleanupEntry, target sagaTarget) error {
 	if target.AttemptID != "" {
 		return r.catalog.AdvanceCleanupAttempt(ctx, entry, target.AttemptID)
 	}

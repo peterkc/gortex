@@ -7,7 +7,7 @@ import (
 
 	"uuid"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 const explicitUntrackDemotionCause = "explicit_untrack_demote"
@@ -18,7 +18,7 @@ const explicitUntrackDemotionCause = "explicit_untrack_demote"
 // epoch after the replacement layers have been built.
 type DemotionAuthorization struct {
 	Revocation IntentRevocation
-	Transition store_sqlite.IntentTransition
+	Transition storage.IntentTransition
 
 	OwnedGraphID   string
 	PrimaryGraphID string
@@ -47,7 +47,7 @@ func (r *Reconciler) ForgetCheckoutExplicit(
 		GraphID:     graphID,
 	}
 	revocation, authorized, err := r.authorizeExplicitCleanup(ctx, target,
-		store_sqlite.UntrackAuthorizationForget)
+		storage.UntrackAuthorizationForget)
 	if err != nil {
 		return revocation, err
 	}
@@ -73,7 +73,7 @@ func (r *Reconciler) RetirePrimaryClosureExplicit(
 		PrimaryEpoch: primaryEpoch,
 	}
 	revocation, authorized, err := r.authorizeExplicitCleanup(ctx, target,
-		store_sqlite.UntrackAuthorizationPrimaryClosure)
+		storage.UntrackAuthorizationPrimaryClosure)
 	if err != nil {
 		return revocation, err
 	}
@@ -83,7 +83,7 @@ func (r *Reconciler) RetirePrimaryClosureExplicit(
 func (r *Reconciler) authorizeExplicitCleanup(
 	ctx context.Context,
 	target sagaTarget,
-	plan store_sqlite.UntrackAuthorizationPlan,
+	plan storage.UntrackAuthorizationPlan,
 ) (IntentRevocation, sagaTarget, error) {
 	// This method is the explicit authorization boundary, including callers
 	// that construct a target directly. Its durable cause is never inferred.
@@ -92,7 +92,7 @@ func (r *Reconciler) authorizeExplicitCleanup(
 	if err != nil {
 		return IntentRevocation{}, sagaTarget{}, err
 	}
-	req := store_sqlite.AuthorizeUntrackRequest{
+	req := storage.AuthorizeUntrackRequest{
 		Plan:           plan,
 		CheckoutID:     target.CheckoutID,
 		Incarnation:    target.Incarnation,
@@ -102,7 +102,7 @@ func (r *Reconciler) authorizeExplicitCleanup(
 		RevocableKinds: revocableIntentKinds,
 		Cleanup:        &entry,
 	}
-	if plan == store_sqlite.UntrackAuthorizationPrimaryClosure {
+	if plan == storage.UntrackAuthorizationPrimaryClosure {
 		req.PrimaryGraphID = target.GraphID
 		req.ExpectedPrimaryEpoch = target.PrimaryEpoch
 	}
@@ -133,26 +133,26 @@ func (r *Reconciler) authorizeExplicitCleanup(
 // visible.
 func (r *Reconciler) AuthorizeDemotion(
 	ctx context.Context,
-	checkout store_sqlite.Checkout,
+	checkout storage.Checkout,
 	ownedGraphID, primaryGraphID string,
 	primaryEpoch int64,
 ) (DemotionAuthorization, error) {
 	now := r.now().Unix()
-	transition := store_sqlite.IntentTransition{
+	transition := storage.IntentTransition{
 		TransitionID:       uuid.NewV7().String(),
 		CheckoutID:         checkout.CheckoutID,
 		Cause:              explicitUntrackDemotionCause,
 		PriorDesiredMode:   checkout.DesiredMode,
 		PriorEffectiveMode: checkout.EffectiveMode,
-		RequestedMode:      store_sqlite.CheckoutModeAutomatic,
+		RequestedMode:      storage.CheckoutModeAutomatic,
 		PriorCheckoutState: checkout.State,
 		SourceSnapshotHash: fmt.Sprintf("%s:%s:%d", ownedGraphID, primaryGraphID, primaryEpoch),
-		State:              store_sqlite.IntentTransitionRunning,
+		State:              storage.IntentTransitionRunning,
 		CreatedAt:          now,
 		LastProgress:       now,
 	}
-	result, err := r.catalog.AuthorizeUntrack(ctx, store_sqlite.AuthorizeUntrackRequest{
-		Plan:                 store_sqlite.UntrackAuthorizationDemote,
+	result, err := r.catalog.AuthorizeUntrack(ctx, storage.AuthorizeUntrackRequest{
+		Plan:                 storage.UntrackAuthorizationDemote,
 		CheckoutID:           checkout.CheckoutID,
 		Incarnation:          checkout.Incarnation,
 		FamilyID:             checkout.FamilyID,
@@ -195,10 +195,10 @@ func (r *Reconciler) AuthorizeDemotion(
 // that already-durable cleanup failed.
 func (r *Reconciler) CommitAuthorizedDemotion(
 	ctx context.Context,
-	checkout store_sqlite.Checkout,
+	checkout storage.Checkout,
 	authorization DemotionAuthorization,
 ) (DemotionCommitResult, error) {
-	var cleanup *store_sqlite.CleanupEntry
+	var cleanup *storage.CleanupEntry
 	if authorization.OwnedGraphID != "" {
 		target := sagaTarget{
 			Kind:       sagaRetireGraph,
@@ -213,7 +213,7 @@ func (r *Reconciler) CommitAuthorizedDemotion(
 		}
 		cleanup = &entry
 	}
-	if err := r.catalog.CommitAuthorizedDemotion(ctx, store_sqlite.CommitAuthorizedDemotionRequest{
+	if err := r.catalog.CommitAuthorizedDemotion(ctx, storage.CommitAuthorizedDemotionRequest{
 		CheckoutID:           checkout.CheckoutID,
 		Incarnation:          checkout.Incarnation,
 		FamilyID:             checkout.FamilyID,
@@ -222,7 +222,7 @@ func (r *Reconciler) CommitAuthorizedDemotion(
 		PrimaryGraphID:       authorization.PrimaryGraphID,
 		ExpectedPrimaryEpoch: authorization.PrimaryEpoch,
 		RequiredPrimaryState: GraphStateReady,
-		State:                store_sqlite.CheckoutStateReady,
+		State:                storage.CheckoutStateReady,
 		LastSeen:             r.now().Unix(),
 		Cleanup:              cleanup,
 	}); err != nil {
@@ -235,24 +235,24 @@ func (r *Reconciler) CommitAuthorizedDemotion(
 	return result, r.RetireDedicatedGraph(ctx, authorization.OwnedGraphID)
 }
 
-func (r *Reconciler) pendingCleanupEntry(target sagaTarget) (store_sqlite.CleanupEntry, error) {
+func (r *Reconciler) pendingCleanupEntry(target sagaTarget) (storage.CleanupEntry, error) {
 	if target.AttemptID == "" {
 		var err error
 		target.AttemptID, err = newCleanupAttemptID()
 		if err != nil {
-			return store_sqlite.CleanupEntry{}, err
+			return storage.CleanupEntry{}, err
 		}
 	}
 	payload, err := json.Marshal(target)
 	if err != nil {
-		return store_sqlite.CleanupEntry{}, fmt.Errorf(
+		return storage.CleanupEntry{}, fmt.Errorf(
 			"%w: encoding %s: %w", ErrSagaTarget, target.Kind, err)
 	}
-	return store_sqlite.CleanupEntry{
+	return storage.CleanupEntry{
 		CleanupID:       target.cleanupID(),
 		OpaqueTargetIDs: string(payload),
 		Reason:          string(target.Kind),
-		Phase:           store_sqlite.CleanupPhasePending,
+		Phase:           storage.CleanupPhasePending,
 		PrimaryEpoch:    target.PrimaryEpoch,
 		LastProgress:    r.now().Unix(),
 	}, nil

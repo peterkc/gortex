@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Closure is everything retiring one primary dedicated graph would take with
@@ -55,7 +55,7 @@ func (r *Reconciler) PrimaryClosure(ctx context.Context, graphID string) (Closur
 		return Closure{}, err
 	}
 	if !ok {
-		return Closure{}, fmt.Errorf("%w: dedicated graph %s", store_sqlite.ErrCatalogNotFound, graphID)
+		return Closure{}, fmt.Errorf("%w: dedicated graph %s", storage.ErrCatalogNotFound, graphID)
 	}
 	out := Closure{
 		GraphID:         dedicated.GraphID,
@@ -68,7 +68,7 @@ func (r *Reconciler) PrimaryClosure(ctx context.Context, graphID string) (Closur
 		return Closure{}, err
 	}
 	if !ok {
-		return Closure{}, fmt.Errorf("%w: family %s", store_sqlite.ErrCatalogNotFound, dedicated.FamilyID)
+		return Closure{}, fmt.Errorf("%w: family %s", storage.ErrCatalogNotFound, dedicated.FamilyID)
 	}
 	out.PrimaryEpoch = family.PrimaryEpoch
 
@@ -84,7 +84,7 @@ func (r *Reconciler) PrimaryClosure(ctx context.Context, graphID string) (Closur
 	}
 	for _, checkout := range checkouts {
 		if checkout.CheckoutID == dedicated.OwnerCheckoutID ||
-			checkout.EffectiveMode != store_sqlite.CheckoutModeAutomatic {
+			checkout.EffectiveMode != storage.CheckoutModeAutomatic {
 			continue
 		}
 		out.Dependents = append(out.Dependents, Dependent{
@@ -164,7 +164,7 @@ func (r *Reconciler) PrimaryClosure(ctx context.Context, graphID string) (Closur
 
 // checkoutStack enumerates one checkout's route and the layers built for it.
 func (r *Reconciler) checkoutStack(
-	ctx context.Context, checkout store_sqlite.Checkout,
+	ctx context.Context, checkout storage.Checkout,
 ) ([]Dependent, error) {
 	var out []Dependent
 	route, present, err := r.catalog.GetCheckoutRoute(ctx, checkout.CheckoutID)
@@ -178,7 +178,7 @@ func (r *Reconciler) checkoutStack(
 			Detail: "queries for checkout " + checkout.AdminName + " are routed to graph " + route.GraphID,
 		})
 	}
-	layers, err := r.catalog.ListViewGenerations(ctx, store_sqlite.ViewGenerationFilter{
+	layers, err := r.catalog.ListViewGenerations(ctx, storage.ViewGenerationFilter{
 		CheckoutID: checkout.CheckoutID,
 	})
 	if err != nil {

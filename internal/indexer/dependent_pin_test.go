@@ -95,7 +95,7 @@ func newUnpublishedCommittedBaseFixture(t *testing.T) *committedBaseFixture {
 	out := &committedBaseFixture{
 		coordinatorFixture: f,
 		publisher: &dedicatedBasePublisher{
-			runtime:   &dedicatedBaseRuntime{store: f.store},
+			runtime:   &dedicatedBaseRuntime{catalog: testCatalog(f.store), store: f.store},
 			authority: authority,
 		},
 		identity: store_sqlite.DedicatedBaseIdentity{
@@ -199,7 +199,7 @@ func (f *committedBaseFixture) pinDependent(t *testing.T, adminName string) (*Ch
 	if err := f.catalog.AllocateCheckout(context.Background(), checkout); err != nil {
 		t.Fatalf("allocate %s: %v", adminName, err)
 	}
-	coordinator, err := NewCheckoutCoordinator(CheckoutCoordinatorConfig{
+	coordinator, err := NewCheckoutCoordinator(CheckoutCoordinatorConfig{Catalog: testCatalog(f.store),
 		CheckoutID:     checkout.CheckoutID,
 		CheckoutRoot:   root,
 		FamilyID:       f.familyID,
@@ -288,7 +288,7 @@ func TestACommittedBaseAdvanceCostsAPinnedDependentNothing(t *testing.T) {
 	// Keep the initial full-registry setup and independent oracle unchanged;
 	// subsequent subject builders each own a fresh Go extractor.
 	f.newBuilder = func(store *store_sqlite.Store) *SparseGenerationBuilder {
-		return &SparseGenerationBuilder{
+		return &SparseGenerationBuilder{Catalog: testCatalog(store),
 			Store: store, Registry: builderGoRegistry(),
 			Config: config.Default().Index, Logger: zap.NewNop(),
 		}

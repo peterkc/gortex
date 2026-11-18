@@ -58,7 +58,7 @@ func TestReconcileRefusedByWarmupWALConvergesOnRetry(t *testing.T) {
 	real := awaitWarmupWAL
 	t.Cleanup(func() { awaitWarmupWAL = real })
 	boundaryCalls := 0
-	awaitWarmupWAL = func(store *store_sqlite.Store, ctx context.Context) error {
+	awaitWarmupWAL = func(store warmupWALWaiter, ctx context.Context) error {
 		boundaryCalls++
 		if boundaryCalls == 2 {
 			return fmt.Errorf("%w: %w", store_sqlite.ErrWarmupWALPressure, context.DeadlineExceeded)

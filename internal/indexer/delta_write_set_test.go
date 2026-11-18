@@ -221,7 +221,8 @@ func newDeltaWriteSetFixtureWithRegistry(t testing.TB, tree map[string]string, r
 	request.Identity.TreeOID = git("rev-parse", "HEAD^{tree}")
 	request.Identity.ProvenanceCommitOID = git("rev-parse", "HEAD")
 
-	catalog := builder.Store.Catalog()
+	nativeStore := builder.Store.(*store_sqlite.Store)
+	catalog := nativeStore.Catalog()
 	authority, err := catalog.AcquireDedicatedBaseAuthority(ctx, store_sqlite.AcquireDedicatedBaseAuthorityRequest{
 		GraphID: request.Identity.GraphID,
 		Owner:   store_sqlite.DedicatedBaseOwner{CheckoutID: request.Identity.CheckoutID, Incarnation: "private-incarnation"},
@@ -253,7 +254,7 @@ func newDeltaWriteSetFixtureWithRegistry(t testing.TB, tree map[string]string, r
 	if _, err := catalog.AdoptDedicatedBaseGeneration(ctx, store_sqlite.AdoptDedicatedBaseGenerationRequest{Claim: claim}); err != nil {
 		t.Fatal(err)
 	}
-	materializer := &graphview.Materializer{Store: builder.Store, Catalog: catalog,
+	materializer := &graphview.Materializer{Store: nativeStore, Catalog: catalog,
 		Leases: graphview.NewLeaseManager(), Logger: builder.Logger}
 	view, err := materializer.MaterializeRefView(ctx, claim.Desire.Authority.GraphID, id)
 	if err != nil {
@@ -280,7 +281,7 @@ func (f deltaWriteSetFixture) advance(t *testing.T, tree map[string]string) (int
 		"-c", "commit.gpgsign=false", "commit", "-qm", "ten-file edit")
 	target := f.git("rev-parse", "HEAD^{tree}")
 
-	catalog := f.builder.Store.Catalog()
+	catalog := f.builder.Store.(*store_sqlite.Store).Catalog()
 	p, _, err := catalog.DedicatedBasePublication(ctx, f.baseClaim.Desire.Authority.GraphID)
 	if err != nil {
 		t.Fatal(err)
@@ -323,8 +324,9 @@ func TestDedicatedDeltaWriteSetIsTheChangeNotTheClosure(t *testing.T) {
 	fixture := newDeltaWriteSetFixture(t, deltaWriteSetTree(leaves, false))
 	generationID, report := fixture.advance(t, deltaWriteSetTree(leaves, true))
 
-	handle := fixture.builder.Store.AtGeneration(generationID)
-	carried := deltaWriteSetPayloadPaths(t, fixture.builder.Store, fixture.request.RepoPrefix, generationID)
+	nativeStore := fixture.builder.Store.(*store_sqlite.Store)
+	handle := nativeStore.AtGeneration(generationID)
+	carried := deltaWriteSetPayloadPaths(t, nativeStore, fixture.request.RepoPrefix, generationID)
 	t.Logf("write set: closure=%d truncated=%v cap=%d | pass produced %d nodes / %d edges | "+
 		"generation carries %d paths, %d nodes, %d edges | context masks=%d retained=%d in_memory=%v",
 		len(report.ClosurePaths), report.ClosureTruncated, report.ClosureCap,
@@ -377,8 +379,9 @@ func TestDedicatedDeltaWriteSetOnACrossPackageCorpus(t *testing.T) {
 	after := deltaWriteSetStoreBytes(t, fixture.request.StorePath)
 	t.Logf("store bytes across the one delta: %d -> %d (%+d)", before, after, after-before)
 
-	handle := fixture.builder.Store.AtGeneration(generationID)
-	carried := deltaWriteSetPayloadPaths(t, fixture.builder.Store, fixture.request.RepoPrefix, generationID)
+	nativeStore := fixture.builder.Store.(*store_sqlite.Store)
+	handle := nativeStore.AtGeneration(generationID)
+	carried := deltaWriteSetPayloadPaths(t, nativeStore, fixture.request.RepoPrefix, generationID)
 	nodes := len(handle.AllNodes())
 	t.Logf("write set: closure=%d truncated=%v cap=%d | pass produced %d nodes / %d edges | "+
 		"generation carries %d paths, %d nodes, %d edges | context masks=%d retained=%d in_memory=%v",
@@ -725,7 +728,7 @@ func TestCommittedBaseClosureCapReachesTheBuild(t *testing.T) {
 		}
 		// The knowingly incomplete generation says WHY it is incomplete, and
 		// the reason names the bound an operator can move.
-		states, err := fixture.builder.Store.AtGeneration(generationID).ProducerStates()
+		states, err := fixture.builder.Store.(*store_sqlite.Store).AtGeneration(generationID).ProducerStates()
 		if err != nil {
 			t.Fatalf("ProducerStates: %v", err)
 		}

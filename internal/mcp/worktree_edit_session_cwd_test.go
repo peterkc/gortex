@@ -34,7 +34,7 @@ import (
 // but no generation stack can serve it anymore.
 func retireRoute(t *testing.T, stack *viewStack) {
 	t.Helper()
-	require.NoError(t, stack.srv.materializer.Catalog.UpsertCheckoutRoute(
+	require.NoError(t, any(stack.srv.materializer.Catalog).(*store_sqlite.Catalog).UpsertCheckoutRoute(
 		context.Background(), store_sqlite.CheckoutRoute{
 			CheckoutID: viewTestWorktree,
 			GraphID:    stack.graphID,
