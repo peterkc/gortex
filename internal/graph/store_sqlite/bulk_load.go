@@ -1507,6 +1507,7 @@ func (s *Store) checkpointBulkWALContext(ctx context.Context) error {
 // checkpointBulkWALResult runs after FlushBulk releases its pinned writer.
 // Reserve before writeMu so the background owner can finish its writer steps.
 // The ordinary Close path already joins its background workers before SQL.
+// The unregistered writer-free residue PASSIVE can still overlap this checkpoint.
 func (s *Store) checkpointBulkWALResult(ctx context.Context) (walCheckpointResult, error) {
 	if err := s.reserveForegroundCheckpoint(ctx); err != nil {
 		return walCheckpointResult{}, err

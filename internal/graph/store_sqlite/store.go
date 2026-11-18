@@ -64,8 +64,9 @@ type backgroundCheckpointCoordination struct {
 	boundGeneration int64
 	active          *backgroundCheckpointAttempt
 
-	foregroundGate     sqliteWriteGate
-	foregroundReserved bool
+	foregroundGate sqliteWriteGate
+	// foregroundReserved is also read by the page pacer without mu.
+	foregroundReserved atomic.Bool
 }
 
 type storeCore struct {
@@ -1234,9 +1235,9 @@ func (s *Store) beginCheckpointAttempt(policy checkpointCyclePolicy, reclaim boo
 
 	coordination := &s.backgroundCheckpoint
 	coordination.mu.Lock()
-	if coordination.foregroundReserved || (coordination.generationLease != 0 && !overridesLease) || coordination.active != nil {
+	if coordination.foregroundReserved.Load() || (coordination.generationLease != 0 && !overridesLease) || coordination.active != nil {
 		refusal := errWALCheckpointDeferredBulk
-		if coordination.foregroundReserved || coordination.generationLease == 0 || overridesLease {
+		if coordination.foregroundReserved.Load() || coordination.generationLease == 0 || overridesLease {
 			refusal = errWALCheckpointInFlight
 		}
 		coordination.mu.Unlock()
@@ -1295,7 +1296,7 @@ func (s *Store) reserveForegroundCheckpoint(ctx context.Context) error {
 		return err
 	}
 	coordination.mu.Lock()
-	coordination.foregroundReserved = true
+	coordination.foregroundReserved.Store(true)
 	attempt := coordination.active
 	coordination.mu.Unlock()
 	if attempt == nil {
@@ -1313,7 +1314,7 @@ func (s *Store) reserveForegroundCheckpoint(ctx context.Context) error {
 func (s *Store) releaseForegroundCheckpoint() {
 	coordination := &s.backgroundCheckpoint
 	coordination.mu.Lock()
-	coordination.foregroundReserved = false
+	coordination.foregroundReserved.Store(false)
 	coordination.mu.Unlock()
 	coordination.foregroundGate.Unlock()
 }

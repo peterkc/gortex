@@ -56,71 +56,75 @@ func TestForegroundCheckpointJoinsInternalCheckpoint(t *testing.T) {
 			require.True(t, exit.durabilityCheckpoint)
 			require.Nil(t, s.bulkConn, "durability runs after releasing the bulk pin")
 			growWAL(t, s, 1)
-			entered, release := stallReclaimCheckpointSync(t, db)
-			ctx, cancel := context.WithTimeout(t.Context(), checkpointWaitTimeout)
-			probe := &checkpointJoinProbe{Context: ctx, entered: make(chan struct{}), proceed: make(chan struct{})}
-			var releaseOnce, proceedOnce sync.Once
-			unpark := func() { releaseOnce.Do(func() { close(release) }) }
-			proceed := func() { proceedOnce.Do(func() { close(probe.proceed) }) }
-			backgroundDone, foregroundDone := make(chan struct{}), make(chan struct{})
-			backgroundResult := make(chan checkpointAttemptResult, 1)
-			foregroundResult := make(chan error, 1)
-			t.Cleanup(func() {
-				cancel()
+			synctest.Test(t, func(t *testing.T) {
+				s.stopCheckpoint = nil
+				entered, release := stallReclaimCheckpointSync(t, db)
+				ctx, cancel := context.WithTimeout(t.Context(), checkpointWaitTimeout)
+				probe := &checkpointJoinProbe{Context: ctx, entered: make(chan struct{}), proceed: make(chan struct{})}
+				var releaseOnce, proceedOnce sync.Once
+				unpark := func() { releaseOnce.Do(func() { close(release) }) }
+				proceed := func() { proceedOnce.Do(func() { close(probe.proceed) }) }
+				backgroundDone, foregroundDone := make(chan struct{}), make(chan struct{})
+				backgroundResult := make(chan checkpointAttemptResult, 1)
+				foregroundResult := make(chan error, 1)
+				t.Cleanup(func() {
+					cancel()
+					proceed()
+					unpark()
+					waitCheckpointSignal(t, backgroundDone)
+					waitCheckpointSignal(t, foregroundDone)
+				})
+				attempt, err := s.beginCheckpointAttempt(checkpointIgnoresCycle, background == "reclaim")
+				require.NoError(t, err)
+				go func() {
+					defer close(backgroundDone)
+					defer s.finishBackgroundCheckpointAttempt(attempt)
+					var err error
+					if background == "reclaim" {
+						_, err = s.pacedPassive(attempt.ctx, db, attempt)
+					} else {
+						_, err = checkpointWALOnceOn(attempt.ctx, db, "PASSIVE")
+					}
+					backgroundResult <- checkpointAttemptResult{complete: err == nil, cause: context.Cause(attempt.ctx)}
+				}()
+				waitCheckpointSignal(t, entered)
+				go func() {
+					defer close(foregroundDone)
+					// Same checkpoint path finishBulkWindowExit calls, with a
+					// deadline-bearing context that exposes the join select.
+					foregroundResult <- s.checkpointBulkWALContext(probe)
+				}()
+				waitCheckpointSignal(t, probe.entered)
+				require.NoError(t, attempt.ctx.Err(), "durability must not cancel the parked pass")
+				locked := s.writeMu.TryLock()
+				if locked {
+					s.writeMu.Unlock()
+				}
+				require.True(t, locked, "join must precede writeMu and checkpoint SQL")
 				proceed()
+				synctest.Wait()
+				select {
+				case <-foregroundDone:
+					t.Fatal("durability returned before the parked SQLite call joined")
+				default:
+				}
 				unpark()
 				waitCheckpointSignal(t, backgroundDone)
 				waitCheckpointSignal(t, foregroundDone)
+				out := <-backgroundResult
+				require.True(t, out.complete, "parked pass must finish normally")
+				require.NoError(t, out.cause, "context must remain live until the pass returns")
+				require.NoError(t, <-foregroundResult)
+				require.Zero(t, walFileSize(s.dbPath+"-wal"))
+				var count int
+				require.NoError(t, s.db.QueryRowContext(ctx, `SELECT count(*) FROM wal_churn`).Scan(&count))
+				require.Equal(t, 4000, count)
+				growWAL(t, s, 1)
+				p := passiveCheckpointer{store: s, db: db}
+				complete, retry := p.run(false)
+				require.True(t, complete)
+				require.False(t, retry)
 			})
-			attempt, err := s.beginCheckpointAttempt(checkpointIgnoresCycle, background == "reclaim")
-			require.NoError(t, err)
-			go func() {
-				defer close(backgroundDone)
-				defer s.finishBackgroundCheckpointAttempt(attempt)
-				var err error
-				if background == "reclaim" {
-					_, err = s.pacedPassive(attempt.ctx, db, attempt)
-				} else {
-					_, err = checkpointWALOnceOn(attempt.ctx, db, "PASSIVE")
-				}
-				backgroundResult <- checkpointAttemptResult{complete: err == nil, cause: context.Cause(attempt.ctx)}
-			}()
-			waitCheckpointSignal(t, entered)
-			go func() {
-				defer close(foregroundDone)
-				// Same checkpoint path finishBulkWindowExit calls, with a
-				// deadline-bearing context that exposes the join select.
-				foregroundResult <- s.checkpointBulkWALContext(probe)
-			}()
-			waitCheckpointSignal(t, probe.entered)
-			require.NoError(t, attempt.ctx.Err(), "durability must not cancel the parked pass")
-			locked := s.writeMu.TryLock()
-			if locked {
-				s.writeMu.Unlock()
-			}
-			require.True(t, locked, "join must precede writeMu and checkpoint SQL")
-			select {
-			case <-foregroundDone:
-				t.Fatal("durability returned before the parked SQLite call joined")
-			default:
-			}
-			proceed()
-			unpark()
-			waitCheckpointSignal(t, backgroundDone)
-			waitCheckpointSignal(t, foregroundDone)
-			out := <-backgroundResult
-			require.True(t, out.complete, "parked pass must finish normally")
-			require.NoError(t, out.cause, "context must remain live until the pass returns")
-			require.NoError(t, <-foregroundResult)
-			require.Zero(t, walFileSize(s.dbPath+"-wal"))
-			var count int
-			require.NoError(t, s.db.QueryRowContext(ctx, `SELECT count(*) FROM wal_churn`).Scan(&count))
-			require.Equal(t, 4000, count)
-			growWAL(t, s, 1)
-			p := passiveCheckpointer{store: s, db: db}
-			complete, retry := p.run(false)
-			require.True(t, complete)
-			require.False(t, retry)
 		})
 	}
 }
@@ -180,7 +184,7 @@ func TestForegroundCheckpointCancellationReleasesReservation(t *testing.T) {
 		result := make(chan error, 1)
 		go func() { result <- s.checkpointBulkWALContext(ctx) }()
 		synctest.Wait()
-		require.True(t, s.backgroundCheckpoint.foregroundReserved)
+		require.True(t, s.backgroundCheckpoint.foregroundReserved.Load())
 		cancel()
 		synctest.Wait()
 		require.ErrorIs(t, <-result, context.Canceled)
@@ -260,8 +264,6 @@ func TestForegroundCheckpointPreservesExternalCheckpointBusy(t *testing.T) {
 }
 
 func TestCloseJoinsWhileForegroundCheckpointIsReserved(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), checkpointWaitTimeout)
-	defer cancel()
 	t.Setenv("GORTEX_SQLITE_CLOSE_CHECKPOINT", "full")
 	t.Setenv("GORTEX_SQLITE_WAL_RECLAIM_MB", "0")
 	t.Setenv("GORTEX_SQLITE_LAZY_INDEXES", "off")
@@ -274,43 +276,42 @@ func TestCloseJoinsWhileForegroundCheckpointIsReserved(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = closeStore() })
 	seedWALChurnTable(t, s)
-	entered, release := stallReclaimCheckpointSync(t, s.writerDB)
-	foregroundDone, closeDone := make(chan struct{}), make(chan struct{})
-	foregroundResult, closeResult := make(chan error, 1), make(chan error, 1)
-	var once sync.Once
-	unpark := func() { once.Do(func() { close(release) }) }
-	t.Cleanup(func() {
-		unpark()
-		waitCheckpointSignal(t, foregroundDone)
+	s.BeginBulkLoad()
+	require.NotNil(t, s.bulkConn)
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), checkpointWaitTimeout)
+		defer cancel()
+		require.NoError(t, s.reserveForegroundCheckpoint(ctx))
+		reserved := true
+		defer func() {
+			if reserved {
+				s.releaseForegroundCheckpoint()
+			}
+		}()
+		closeDone := make(chan struct{})
+		closeResult := make(chan error, 1)
+		go func() {
+			defer close(closeDone)
+			closeResult <- closeStore()
+		}()
+		synctest.Wait()
+		require.Nil(t, s.bulkConn, "Close must release its bulk pin before checkpoint admission")
+		require.EqualValues(t, 1, s.backgroundCheckpoint.foregroundGate.waiting(), "bulk Close must queue for the durability reservation")
+		select {
+		case <-closeDone:
+			t.Fatal("Close bypassed the existing durability reservation")
+		default:
+		}
+		s.releaseForegroundCheckpoint()
+		reserved = false
 		waitCheckpointSignal(t, closeDone)
+		require.NoError(t, <-closeResult)
+		select {
+		case <-s.checkpointDone:
+		default:
+			t.Fatal("Close returned without joining checkpoint workers")
+		}
 	})
-	go func() {
-		defer close(foregroundDone)
-		foregroundResult <- s.checkpointBulkWALContext(ctx)
-	}()
-	waitCheckpointSignal(t, entered)
-	go func() {
-		defer close(closeDone)
-		closeResult <- closeStore()
-	}()
-	// Close has begun joining its actual workers while foreground SQL is
-	// still parked and holds both the reservation and the writer gate.
-	waitCheckpointSignal(t, s.stopCheckpoint)
-	select {
-	case <-closeDone:
-		t.Fatal("Close returned before the foreground checkpoint released its writer")
-	default:
-	}
-	unpark()
-	waitCheckpointSignal(t, foregroundDone)
-	waitCheckpointSignal(t, closeDone)
-	require.NoError(t, <-foregroundResult)
-	require.NoError(t, <-closeResult)
-	select {
-	case <-s.checkpointDone:
-	default:
-		t.Fatal("Close returned without joining checkpoint workers")
-	}
 }
 
 func TestQueuedForegroundCheckpointCancellationDoesNotReleaseOwner(t *testing.T) {
@@ -368,6 +369,78 @@ func TestCancelledResidueWaiterLeavesBackgroundAttemptLive(t *testing.T) {
 		synctest.Wait()
 		require.ErrorIs(t, <-result, context.Canceled)
 		require.NoError(t, attempt.ctx.Err())
-		require.False(t, s.backgroundCheckpoint.foregroundReserved)
+		require.False(t, s.backgroundCheckpoint.foregroundReserved.Load())
 	})
+}
+
+// Exercise the actual paced PASSIVE with an announced writer that cannot end
+// until durability completes. Fake time exposes both pause and budget waits.
+func TestBulkDurabilityResumesPausableCheckpoint(t *testing.T) {
+	for _, phase := range []string{"pause", "budget"} {
+		t.Run(phase, func(t *testing.T) {
+			s, db := foregroundCheckpointFixture(t)
+			setCopyBudget(t, 1<<20, 0, 0)
+			t.Setenv("GORTEX_SQLITE_WAL_COPY_BUDGET_MB", "1")
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+				defer cancel()
+				// The fixture's workers are already joined. The owned watcher
+				// and copy use only this bubble's attempt/context channels.
+				s.stopCheckpoint = nil
+				var attempt *backgroundCheckpointAttempt
+				var announceOnce sync.Once
+				var unannounce func()
+				defer func() {
+					if unannounce != nil {
+						unannounce()
+					}
+				}()
+				s.SetBuildLaneBusy(func() bool {
+					// Announce on the first paced page, after admission while
+					// idle, so pacedPassive cannot reject before it starts.
+					if phase == "pause" && attempt != nil && attempt.copy.copying.Load() {
+						announceOnce.Do(func() { unannounce = s.AnnounceWrite() })
+					}
+					return false
+				})
+				var err error
+				attempt, err = s.beginCheckpointAttempt(checkpointYieldsToCycle, true)
+				require.NoError(t, err)
+				defer s.finishBackgroundCheckpointAttempt(attempt)
+				copyCtx, cancelCopy := context.WithTimeout(attempt.ctx, time.Second)
+				defer cancelCopy()
+				attempt.copy.pausable.Store(true)
+				attempt.copy.walPath = s.dbPath + "-wal"
+				s.walCopy.sawBusy(time.Now())
+				copyDone := make(chan struct{})
+				copyResult := make(chan checkpointAttemptResult, 1)
+				go func() {
+					defer close(copyDone)
+					defer s.finishBackgroundCheckpointAttempt(attempt)
+					_, err := s.pacedPassive(copyCtx, db, attempt)
+					copyResult <- checkpointAttemptResult{complete: err == nil, cause: context.Cause(copyCtx)}
+				}()
+				synctest.Wait()
+				require.True(t, attempt.copy.copying.Load(), "real copy must be parked in its page pacer")
+				if phase == "budget" {
+					unannounce = s.AnnounceWrite()
+				}
+				require.True(t, s.buildLaneBusy(), "the announcement, not the lane predicate, blocks the copy")
+				started := time.Now()
+				result := make(chan error, 1)
+				go func() { result <- s.checkpointBulkWALContext(ctx) }()
+				require.NoError(t, <-result)
+				waitCheckpointSignal(t, copyDone)
+				out := <-copyResult
+				require.True(t, out.complete)
+				require.NoError(t, out.cause, "durability must finish the pass, not interrupt it")
+				require.Less(t, time.Since(started), 50*time.Millisecond, "durability waited for edit/pause/budget limits")
+				if phase == "pause" {
+					require.Positive(t, attempt.copy.pauses)
+				}
+				require.Less(t, attempt.copy.budgetNs, 50*time.Millisecond)
+				require.Zero(t, walFileSize(s.dbPath+"-wal"))
+			})
+		})
+	}
 }

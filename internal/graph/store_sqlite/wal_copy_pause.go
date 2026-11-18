@@ -253,10 +253,15 @@ func (p *walCopyPacer) beforeWrite(n int64) {
 		// A request is pending: the pass does not pause at all.
 		p.resumeForRequest()
 	}
-	if busy && !p.noPause && !p.overran && !p.stopped() && !walCopyInterruptInsteadOfPause {
+	if busy && !p.noPause && !p.overran && !st.backgroundCheckpoint.foregroundReserved.Load() && !p.stopped() && !walCopyInterruptInsteadOfPause {
 		start := time.Now()
 		p.pauses++
 		for polls := 0; st.buildLaneBusy() && !p.stopped(); polls++ {
+			// Durability joins this pass. An announced writer may itself be
+			// waiting for durability, so neither pause nor budget may delay it.
+			if st.backgroundCheckpoint.foregroundReserved.Load() {
+				break
+			}
 			if p.pauseNs+time.Since(start) >= walCopyPauseMax {
 				p.overran = true
 				st.walCopy.overruns.Add(1)
@@ -295,10 +300,13 @@ func (p *walCopyPacer) beforeWrite(n int64) {
 	// consume the background editing allowance before it can make progress.
 	// Recheck actual writer demand for every page and inside an existing wait.
 	warmupWaiting := st.warmupWALWaiters.Load() > 0 && !st.writeWanted()
-	if p.rate > 0 && !p.overPacingMark && !warmupWaiting && st.walCopy.editing(now) && !p.stopped() {
+	if p.rate > 0 && !p.overPacingMark && !warmupWaiting && !st.backgroundCheckpoint.foregroundReserved.Load() && st.walCopy.editing(now) && !p.stopped() {
 		if wait := st.walCopy.take(now, n, p.rate); wait > 0 {
 			deadline := now.Add(wait)
 			for time.Now().Before(deadline) && !p.stopped() {
+				if st.backgroundCheckpoint.foregroundReserved.Load() {
+					break
+				}
 				if st.warmupWALWaiters.Load() > 0 && !st.writeWanted() {
 					break
 				}
