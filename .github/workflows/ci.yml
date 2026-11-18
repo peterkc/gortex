@@ -301,13 +301,9 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install ONNX Runtime
-        run: |
-          wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-linux-x64-1.24.4.tgz
-          tar xzf onnxruntime-linux-x64-1.24.4.tgz
-          sudo cp onnxruntime-linux-x64-1.24.4/lib/libonnxruntime.so* /usr/local/lib/
-          sudo ldconfig
-
+      # No ONNX Runtime install: yalue/onnxruntime_go ships the C headers and
+      # loads libonnxruntime with dlopen at run time, so the build needs no
+      # library on the runner.
       - name: Build with ONNX tag
         run: go build -tags embeddings_onnx -o gortex-onnx ./cmd/gortex/
 
