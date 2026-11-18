@@ -206,6 +206,11 @@ func TestQueryMicroCaptureHelper(t *testing.T) {
 	}
 	signal.Ignore(os.Interrupt)
 	if mode == "success" {
+		// runtime.GC wakes its waiter before the cycle prints its gctrace line
+		// (runtime/mgc.go gcMarkTermination), so exiting right after one GC
+		// can lose the line. The second GC cannot start until the first cycle
+		// releases gcsema, which happens after the print.
+		runtime.GC()
 		runtime.GC()
 		fmt.Println(os.Getenv("GODEBUG") + "|" + os.Getenv("GOTRACEBACK"))
 		os.Exit(0)
