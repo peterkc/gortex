@@ -2911,17 +2911,7 @@ func collectIncrementalFileFrontierKeys(
 	if g == nil {
 		return frontier
 	}
-	seenPaths := make(map[string]struct{}, len(filePaths))
-	for _, path := range filePaths {
-		if path == "" {
-			continue
-		}
-		if _, duplicate := seenPaths[path]; duplicate {
-			continue
-		}
-		seenPaths[path] = struct{}{}
-		frontier.paths = append(frontier.paths, path)
-	}
+	frontier.paths = incrementalFilePaths(filePaths)
 	if len(frontier.paths) == 0 {
 		return frontier
 	}
@@ -2944,17 +2934,6 @@ func collectIncrementalFileFrontierKeys(
 		}
 	}
 
-	seenStubKeys := make(map[string]struct{})
-	appendStubKey := func(key string) {
-		if key == "" {
-			return
-		}
-		if _, duplicate := seenStubKeys[key]; duplicate {
-			return
-		}
-		seenStubKeys[key] = struct{}{}
-		frontier.stubKeys = append(frontier.stubKeys, key)
-	}
 	for _, path := range frontier.paths {
 		for _, node := range frontier.nodesByFile[path] {
 			if node == nil {
@@ -2965,24 +2944,21 @@ func collectIncrementalFileFrontierKeys(
 					frontier.pending = append(frontier.pending, edge)
 				}
 			}
-			if node.Name == "" || !graph.IsReferenceableSymbol(node.Kind) {
-				continue
-			}
-			// The four name-owned forms are one contract. This builder is
-			// the batched incremental path's incoming leg, and it was the
-			// last one still hand-building the bare pair: a member
-			// reference parked under a wildcard form stayed pending until
-			// the next whole-graph resolve.
-			for _, key := range graph.UnresolvedNameCandidateIDs(node) {
-				appendStubKey(key)
-			}
 		}
 	}
+	var extra []string
 	if extraKeys != nil {
-		for _, key := range extraKeys(frontier.paths, frontier.nodesByFile) {
-			appendStubKey(key)
-		}
+		extra = extraKeys(frontier.paths, frontier.nodesByFile)
 	}
+	frontier.stubKeys = incomingStubKeys(func(yield func(*graph.Node) bool) {
+		for _, path := range frontier.paths {
+			for _, node := range frontier.nodesByFile[path] {
+				if !yield(node) {
+					return
+				}
+			}
+		}
+	}, extra)
 	frontier.outgoingPending = len(frontier.pending)
 	frontier.outgoingCollect = time.Since(outgoingStarted)
 	if carryFor != nil {
@@ -3010,12 +2986,7 @@ func collectIncrementalFileFrontierKeys(
 		// read in full: a carried key admits only restubbed references, and
 		// the restub mark rides the edge Meta, which the identity projection
 		// omits.
-		idsByStub, fact, err := graph.AdmitIncomingRowsBounded(
-			context.Background(),
-			func(keys []string) map[string][]graph.EdgeIdentity {
-				return graph.InEdgeIdentitiesByNodeIDs(g, keys)
-			},
-			frontier.stubKeys, nil)
+		idsByStub, fact, err := admitIncomingIdentities(context.Background(), g, frontier.stubKeys)
 		frontier.incomingAdmission, frontier.incomingRefusal = fact, err
 		frontier.incomingIDs = time.Since(incomingStarted)
 		parked := make([]string, 0)
@@ -3051,12 +3022,7 @@ func collectIncrementalFileFrontierKeys(
 			}
 		}
 	} else if lightweightIncoming {
-		inByStub, fact, err := graph.AdmitIncomingRowsBounded(
-			context.Background(),
-			func(keys []string) map[string][]graph.EdgeIdentity {
-				return graph.InEdgeIdentitiesByNodeIDs(g, keys)
-			},
-			frontier.stubKeys, nil)
+		inByStub, fact, err := admitIncomingIdentities(context.Background(), g, frontier.stubKeys)
 		frontier.incomingAdmission, frontier.incomingRefusal = fact, err
 		for _, key := range frontier.stubKeys {
 			for _, identity := range inByStub[key] {
