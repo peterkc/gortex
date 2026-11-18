@@ -63,6 +63,10 @@ type backgroundCheckpointCoordination struct {
 	generationLease generationBulkCheckpointLease
 	boundGeneration int64
 	active          *backgroundCheckpointAttempt
+
+	foregroundGate sqliteWriteGate
+	// foregroundReserved is also read by the page pacer without mu.
+	foregroundReserved atomic.Bool
 }
 
 type storeCore struct {
@@ -117,9 +121,9 @@ type storeCore struct {
 	// fence transaction, seal, writer drain) this store ran; a fenced
 	// continuation skips them (RetirePayloadGenerationQuantumFenced).
 	retirementPreambles atomic.Int64
-	// backgroundCheckpoint coordinates the periodic PASSIVE worker with the
-	// generation-scoped bulk owner before either touches the physical writer.
-	// It lives on the shared core so every AtGeneration handle sees one token.
+	// backgroundCheckpoint coordinates background PASSIVE/reclaim attempts,
+	// generation bulk leases and the final bulk durability checkpoint.
+	// It lives on the shared core so every AtGeneration handle shares admission.
 	backgroundCheckpoint backgroundCheckpointCoordination
 	// db is the bounded, logically read-dedicated pool for on-disk stores.
 	// writerDB is a separate read-write pool capped at one physical connection. In-memory
@@ -1194,11 +1198,12 @@ func sqliteCheckpointDSN(path string) string {
 var errGenerationBulkCheckpointCoordination = errors.New("store_sqlite: generation bulk checkpoint coordination")
 
 // beginBackgroundCheckpointAttempt registers the one background checkpoint
-// attempt. It is refused (errWALCheckpointDeferredBulk) while a generation
-// bulk window holds the lease or another attempt runs, and — for a yielding
-// attempt with a build-lane predicate installed — while a mutation cycle holds
-// the lane (errWALCheckpointYieldedToCycle); a yielding attempt is also
-// cancelled with that cause when a cycle takes the lane (see
+// attempt. A generation bulk lease refuses ordinary attempts with
+// errWALCheckpointDeferredBulk. A bulk durability reservation or active attempt
+// refuses every policy with errWALCheckpointInFlight. A yielding attempt with
+// a build-lane predicate installed is refused while a mutation cycle holds
+// the lane (errWALCheckpointYieldedToCycle). A cycle also cancels an admitted
+// yielding attempt before copying starts; copying passes pause instead (see
 // checkpoint_cycle_yield.go).
 func (s *Store) beginBackgroundCheckpointAttempt(policy checkpointCyclePolicy) (*backgroundCheckpointAttempt, error) {
 	return s.beginCheckpointAttempt(policy, false)
@@ -1212,8 +1217,8 @@ func (s *Store) beginCheckpointAttempt(policy checkpointCyclePolicy, reclaim boo
 		return nil, errWALCheckpointYieldedToCycle
 	}
 	// Let background PASSIVE finish so SQLite can record WAL backfill progress.
-	// Shutdown, generation bulk admission and (for a yielding attempt) a
-	// mutation cycle cancel the attempt explicitly.
+	// Shutdown and generation bulk admission cancel explicitly. A mutation
+	// cycle cancels a yielding attempt only before its paced copy starts.
 	base, timeoutCancel := context.WithCancel(context.Background())
 	ctx, cancel := context.WithCancelCause(base)
 	attempt := &backgroundCheckpointAttempt{
@@ -1230,9 +1235,9 @@ func (s *Store) beginCheckpointAttempt(policy checkpointCyclePolicy, reclaim boo
 
 	coordination := &s.backgroundCheckpoint
 	coordination.mu.Lock()
-	if (coordination.generationLease != 0 && !overridesLease) || coordination.active != nil {
+	if coordination.foregroundReserved.Load() || (coordination.generationLease != 0 && !overridesLease) || coordination.active != nil {
 		refusal := errWALCheckpointDeferredBulk
-		if coordination.generationLease == 0 || overridesLease {
+		if coordination.foregroundReserved.Load() || coordination.generationLease == 0 || overridesLease {
 			refusal = errWALCheckpointInFlight
 		}
 		coordination.mu.Unlock()
@@ -1278,6 +1283,40 @@ func (s *Store) finishBackgroundCheckpointAttempt(attempt *backgroundCheckpointA
 		coordination.mu.Unlock()
 		close(attempt.done)
 	})
+}
+
+// reserveForegroundCheckpoint serializes bulk durability checkpoints and joins
+// an active background attempt before taking writeMu, without interrupting its
+// copy or losing nBackfill. Ordinary FlushBulk has no deadline: it waits out the
+// attempt's bounded work, just as its own TRUNCATE accepts a slow filesystem sync.
+// Close may supply a legacy context cap, which also bounds this join.
+func (s *Store) reserveForegroundCheckpoint(ctx context.Context) error {
+	coordination := &s.backgroundCheckpoint
+	if err := coordination.foregroundGate.LockContext(ctx); err != nil {
+		return err
+	}
+	coordination.mu.Lock()
+	coordination.foregroundReserved.Store(true)
+	attempt := coordination.active
+	coordination.mu.Unlock()
+	if attempt == nil {
+		return nil
+	}
+	select {
+	case <-attempt.done:
+		return nil
+	case <-ctx.Done():
+		s.releaseForegroundCheckpoint()
+		return ctx.Err()
+	}
+}
+
+func (s *Store) releaseForegroundCheckpoint() {
+	coordination := &s.backgroundCheckpoint
+	coordination.mu.Lock()
+	coordination.foregroundReserved.Store(false)
+	coordination.mu.Unlock()
+	coordination.foregroundGate.Unlock()
 }
 
 func (s *Store) runBackgroundCheckpointAttempt(run func(context.Context) (complete, retry bool)) (complete, retry bool) {
