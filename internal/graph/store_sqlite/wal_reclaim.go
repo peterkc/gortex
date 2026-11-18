@@ -34,9 +34,10 @@ import (
 //     It runs OUTSIDE the lane and with no timeout of its own: SQLite
 //     publishes backfill progress (nBackfill) only when a checkpoint pass
 //     completes, so a pass interrupted by a deadline copies pages and records
-//     nothing. Only shutdown, a generation bulk window opening (the lease
-//     cancels the attempt) or a mutation cycle taking the build lane
-//     (checkpoint_cycle_yield.go) stops it. This is what lets a store that reopened
+//     nothing. Shutdown and generation lease acquisition can cancel it; a
+//     mutation cycle yields ordinary attempts before copying starts (copying
+//     passes pause instead; checkpoint_cycle_yield.go). Bulk finalization joins
+//     without cancellation. This is what lets a store that reopened
 //     over a huge recovered log (nBackfill restarts at zero after a crash or a
 //     killed shutdown) catch up in one pass instead of never;
 //  2. take the write gate (bounded wait) so the application writer is idle,
@@ -54,12 +55,11 @@ import (
 // Readers are therefore paused at most drain deadline + TRUNCATE budget.
 //
 // Coordination: the reclaim registers as the background checkpoint attempt,
-// so it is refused while a generation bulk window holds the checkpoint lease
-// and a bulk window opening mid-reclaim cancels it (the lease acquisition
-// waits for it exactly as it waits for the background PASSIVE). It enters the
-// maintenance lane as a whole-file job, so it never interleaves with VACUUM or
-// the TRUNCATE drain. Lock order is the lane's: lane token, then writeMu, then
-// the read gate; every wait is bounded, so no cycle can hold anyone forever.
+// so ordinary attempts defer to a generation bulk lease; ceiling-qualified
+// attempts can override it. Generation lease acquisition cancels and joins the active attempt.
+// Final bulk durability instead reserves admission and joins without cancelling.
+// The writer-free copy precedes the maintenance lane and can overlap its jobs;
+// later maintenance steps take the lane token, then writeMu, then the read gate.
 
 // maintenanceWALReclaim is the lane job kind of the bounded reclaim. Like the
 // TRUNCATE drain it is a whole-file priority job.
