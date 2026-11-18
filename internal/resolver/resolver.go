@@ -199,10 +199,9 @@ type ResolveStats struct {
 // fact on the pass stats. Refused is set only for the typed limit error: a
 // cancellation is a different outcome and must not read as "the bound fired".
 //
-// Every consumer of a bounded admission calls this before acting on what the
-// admission returned — including the consumers whose leg then collapses to
-// "nothing to do", because a refused leg and an empty leg are the same shape
-// and only this fact separates them.
+// Resolve passes record their bounded admissions before acting on the returned
+// rows, including an empty leg: only this fact separates refusal from no work.
+// Warmup preflight returns the admission fact directly to its fallback caller.
 //
 // keys is the key set the admission read for, and it is what keeps Dropped a
 // count of references rather than of refusals: a pass that runs both incoming
@@ -237,7 +236,7 @@ func recordIncomingAdmission(stats *ResolveStats, keys []string, fact graph.Inco
 // incomingAdmissionChargeKey is the identity of one admission's key set: the
 // deduplicated keys in sorted order, hashed so the bookkeeping entry stays a
 // fixed 64 hex characters whatever the frontier's size. The two legs of a pass
-// build their stub keys independently (the frontier's appendStubKey walk vs
+// build their stub keys independently (the frontier's incomingStubKeys walk vs
 // resolveIncomingLocked's per-node walk), so they agree on the SET and not on
 // the order — sorting is what makes them the same charge.
 //
@@ -271,10 +270,8 @@ func incomingAdmissionChargeKey(keys []string) string {
 	return hex.EncodeToString(sum.Sum(nil))
 }
 
-// logIncomingAdmissionRefusal is the one Warn shape every bounded incoming leg
-// uses. Nothing else in the package logs a refusal, so a leg that forgets the
-// fact is visible as a missing call site rather than as a differently worded
-// log line. A nil error is not a refusal and logs nothing.
+// logIncomingAdmissionRefusal keeps the Warn shape shared by resolver incoming
+// legs and warmup preflight. A nil error logs nothing.
 func logIncomingAdmissionRefusal(logger *zap.Logger, leg string, stubKeys int, fact graph.IncomingSourceAdmission, err error) {
 	if err == nil || logger == nil {
 		return
@@ -2911,17 +2908,7 @@ func collectIncrementalFileFrontierKeys(
 	if g == nil {
 		return frontier
 	}
-	seenPaths := make(map[string]struct{}, len(filePaths))
-	for _, path := range filePaths {
-		if path == "" {
-			continue
-		}
-		if _, duplicate := seenPaths[path]; duplicate {
-			continue
-		}
-		seenPaths[path] = struct{}{}
-		frontier.paths = append(frontier.paths, path)
-	}
+	frontier.paths = incrementalFilePaths(filePaths)
 	if len(frontier.paths) == 0 {
 		return frontier
 	}
@@ -2944,17 +2931,6 @@ func collectIncrementalFileFrontierKeys(
 		}
 	}
 
-	seenStubKeys := make(map[string]struct{})
-	appendStubKey := func(key string) {
-		if key == "" {
-			return
-		}
-		if _, duplicate := seenStubKeys[key]; duplicate {
-			return
-		}
-		seenStubKeys[key] = struct{}{}
-		frontier.stubKeys = append(frontier.stubKeys, key)
-	}
 	for _, path := range frontier.paths {
 		for _, node := range frontier.nodesByFile[path] {
 			if node == nil {
@@ -2965,24 +2941,21 @@ func collectIncrementalFileFrontierKeys(
 					frontier.pending = append(frontier.pending, edge)
 				}
 			}
-			if node.Name == "" || !graph.IsReferenceableSymbol(node.Kind) {
-				continue
-			}
-			// The four name-owned forms are one contract. This builder is
-			// the batched incremental path's incoming leg, and it was the
-			// last one still hand-building the bare pair: a member
-			// reference parked under a wildcard form stayed pending until
-			// the next whole-graph resolve.
-			for _, key := range graph.UnresolvedNameCandidateIDs(node) {
-				appendStubKey(key)
-			}
 		}
 	}
+	var extra []string
 	if extraKeys != nil {
-		for _, key := range extraKeys(frontier.paths, frontier.nodesByFile) {
-			appendStubKey(key)
-		}
+		extra = extraKeys(frontier.paths, frontier.nodesByFile)
 	}
+	frontier.stubKeys = incomingStubKeys(func(yield func(*graph.Node) bool) {
+		for _, path := range frontier.paths {
+			for _, node := range frontier.nodesByFile[path] {
+				if !yield(node) {
+					return
+				}
+			}
+		}
+	}, extra)
 	frontier.outgoingPending = len(frontier.pending)
 	frontier.outgoingCollect = time.Since(outgoingStarted)
 	if carryFor != nil {
@@ -3010,12 +2983,7 @@ func collectIncrementalFileFrontierKeys(
 		// read in full: a carried key admits only restubbed references, and
 		// the restub mark rides the edge Meta, which the identity projection
 		// omits.
-		idsByStub, fact, err := graph.AdmitIncomingRowsBounded(
-			context.Background(),
-			func(keys []string) map[string][]graph.EdgeIdentity {
-				return graph.InEdgeIdentitiesByNodeIDs(g, keys)
-			},
-			frontier.stubKeys, nil)
+		idsByStub, fact, err := admitIncomingIdentities(context.Background(), g, frontier.stubKeys)
 		frontier.incomingAdmission, frontier.incomingRefusal = fact, err
 		frontier.incomingIDs = time.Since(incomingStarted)
 		parked := make([]string, 0)
@@ -3051,12 +3019,7 @@ func collectIncrementalFileFrontierKeys(
 			}
 		}
 	} else if lightweightIncoming {
-		inByStub, fact, err := graph.AdmitIncomingRowsBounded(
-			context.Background(),
-			func(keys []string) map[string][]graph.EdgeIdentity {
-				return graph.InEdgeIdentitiesByNodeIDs(g, keys)
-			},
-			frontier.stubKeys, nil)
+		inByStub, fact, err := admitIncomingIdentities(context.Background(), g, frontier.stubKeys)
 		frontier.incomingAdmission, frontier.incomingRefusal = fact, err
 		for _, key := range frontier.stubKeys {
 			for _, identity := range inByStub[key] {
