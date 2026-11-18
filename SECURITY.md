@@ -136,10 +136,21 @@ from](#what-gortex-does-not-protect-you-from) for what this boundary is not.
 
 ### Network access
 
-- **No telemetry.** Gortex sends no usage data, analytics, or crash reports, and
-  performs no update or "phone-home" checks. With no LLM provider, federation, or
-  forge tooling configured, Gortex makes **no outbound network requests.**
+- **Telemetry is opt-in.** Gortex's anonymous rollup and the optional ONNX
+  Runtime backend's usage telemetry are off by default. Gortex performs no update
+  checks. With none of the outbound features below enabled, Gortex makes
+  **no outbound network requests.**
 - Outbound network access happens only through these **opt-in** features:
+  - **Anonymous usage rollup**: requires consent and a configured
+    `GORTEX_TELEMETRY_ENDPOINT`; no endpoint is built in. See
+    [Telemetry & privacy](docs/telemetry.md).
+  - **ONNX Runtime telemetry** (`embeddings_onnx` backend only): requires
+    `GORTEX_ONNX_TELEMETRY=1` in the daemon's environment. An asserted
+    `DO_NOT_TRACK` still forces it off, and an inherited
+    `ORT_DISABLE_TELEMETRY=1` still wins. Runtime may send a hashed device ID,
+    process launch path, CPU/OS information, and model names to Microsoft.
+    `GORTEX_TELEMETRY=0` and `gortex telemetry off` do not control it; see
+    [ONNX Runtime telemetry](docs/telemetry.md#onnx-runtime-telemetry).
   - **LLM providers** (`llm.provider`): the `ask` agent and `search_symbols`
     assist modes can call an LLM. The default provider is `local` (in-process,
     no network). When configured for a hosted provider (Anthropic, OpenAI, Azure

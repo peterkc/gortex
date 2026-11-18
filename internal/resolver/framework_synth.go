@@ -1336,9 +1336,10 @@ type FrameworkSynthReport struct {
 	// synthesizers, owned the pass. It must never be silent again.
 	CensusMillis int64 `json:"census_ms,omitempty"`
 	// ScopeMillis times the scoped seed's reads: the changed files' nodes and
-	// every declared part the passes loaded (each once per run). ScopeRows
-	// counts the rows those reads returned; ScopeBytes the bounded legacy
-	// seed's retained bytes when a legacy pass built it. Each SynthCount
+	// cached declared parts, plus streamed gate and name-extraction reads.
+	// Source-owned incoming rows are counted but not cached. ScopeRows counts
+	// rows consumed by these reads, including repeated streams; ScopeBytes is
+	// the bounded legacy seed's retained bytes when a legacy pass built it. Each SynthCount
 	// reports its own view plus its private expansion.
 	ScopeMillis int64 `json:"scope_ms,omitempty"`
 	ScopeRows   int   `json:"scope_rows,omitempty"`
@@ -1502,8 +1503,8 @@ func runFrameworkSynthesizersScoped(
 	var fullReadCache *frameworkFullReadCache
 	if executionScope != nil {
 		// Each pass reads the parts of the change its declaration names,
-		// loaded once on first use (framework_seed_declarations.go); the
-		// seed's time and rows are reported after the loop.
+		// cached on first use or streamed (framework_seed_declarations.go).
+		// The seed's time and consumed rows are reported after the loop.
 		genericSeed = newFrameworkDeclaredSeed(g, executionScope, filePaths)
 	} else {
 		// Node declarations are immutable throughout the framework registry.

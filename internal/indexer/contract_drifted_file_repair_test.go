@@ -70,6 +70,11 @@ func TestContractPolicyRepairReindexesADriftedFile(t *testing.T) {
 func TestContractRepairTakesADriftedRowOnlyWhileTheBytesDiffer(t *testing.T) {
 	const helper = "fixture/helper.go"
 	f := newContractRepairFixture(t, nil)
+	// This test drives realReindex directly, outside the repository lane the
+	// repair's own passes hold. Stop the live repair first: its startup scan
+	// would otherwise take the direct reindex's open window as stuck and
+	// reindex the same file beside it.
+	f.r.Close()
 	store := f.store.AtGeneration(0)
 	require.False(t, f.r.driftedRow(t.Context(), store, "fixture", helper), "an indexed file is not drifted")
 	driftContractFile(t, f.contractJobFixture, "helper.go", jobHelper+"// drifted\n")
