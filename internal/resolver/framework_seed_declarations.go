@@ -23,11 +23,11 @@ import (
 //     target name — so the pass's node enumeration sees them;
 //   - every node the changed nodes share an edge with (endpoints).
 //
-// Each synthesizer declares which of them it needs, and the run's seed loads
-// each part once, on the first pass that asks for it, with no row cap: a
-// part is exactly the rows its declaration names, so a change touching a
-// widely-referenced file pays for the incoming rows only when a pass that
-// re-decides them runs, and for no name or endpoint read a pass does not use.
+// Each synthesizer declares which of them it needs. The run's seed caches
+// incoming rows from outside the changed nodes, endpoints and named nodes on
+// first use, with no row cap. Source-owned edges stream from the file projection
+// for candidate gates and name extraction; only their join tokens survive name
+// extraction. A change pays for no name or endpoint read a pass does not use.
 // A pass sees only its own declared parts plus the files' own nodes, so one
 // pass's declaration never widens another pass's candidates.
 //
@@ -41,7 +41,7 @@ import (
 type frameworkSeedDeclaration struct {
 	// legacy selects the bounded shared seed (see above).
 	legacy bool
-	// incoming lists the edge kinds of rows recorded outside the changed
+	// incoming lists the edge kinds of rows sourced outside the changed
 	// files that point at one of their nodes and that the pass enumerates as
 	// candidates.
 	incoming []graph.EdgeKind
@@ -274,7 +274,7 @@ func (d frameworkSeedDeclaration) needsNodes() bool {
 }
 
 // frameworkDeclaredSeed is one scoped run's seed: the changed files' nodes,
-// read at construction, and the declared parts, each read once on first use.
+// read at construction, and the cached incoming, endpoint and named-node parts.
 // Views handed to passes share its outputs overlay.
 type frameworkDeclaredSeed struct {
 	store   graph.Store
@@ -286,8 +286,6 @@ type frameworkDeclaredSeed struct {
 
 	incomingRead bool
 	incoming     map[graph.EdgeKind][]*graph.Edge
-
-	fileEdges map[graph.EdgeKind][]*graph.Edge
 
 	endpointsRead bool
 	endpoints     map[string]*graph.Node
@@ -311,7 +309,6 @@ func newFrameworkDeclaredSeed(store graph.Store, repos map[string]bool, filePath
 			removed: make(map[graph.EdgeIdentity]struct{}),
 		},
 		fileNodes: make(map[string]*graph.Node),
-		fileEdges: make(map[graph.EdgeKind][]*graph.Edge),
 		names:     make(map[string][]*graph.Node),
 	}
 	if store != nil && len(d.scope.filePaths) > 0 {
@@ -395,15 +392,15 @@ func (d *frameworkDeclaredSeed) legacySeed() *frameworkScopedSeed {
 	return d.legacy
 }
 
-// incomingOf returns the rows recorded outside the changed files that point
+// incomingOf returns the rows sourced outside the changed files that point
 // at one of their nodes, of one kind. The incident read runs once per run.
 func (d *frameworkDeclaredSeed) incomingOf(kind graph.EdgeKind) []*graph.Edge {
 	d.readIncoming()
 	return d.incoming[kind]
 }
 
-// readIncoming runs the incident read: every row into a changed node, by
-// kind.
+// readIncoming reads every kind into the changed nodes once, retaining only
+// outside-source rows. The source-owned file projection serves the rest.
 func (d *frameworkDeclaredSeed) readIncoming() {
 	if !d.incomingRead {
 		d.incomingRead = true
@@ -416,37 +413,16 @@ func (d *frameworkDeclaredSeed) readIncoming() {
 					if edge == nil {
 						continue
 					}
-					d.incoming[edge.Kind] = append(d.incoming[edge.Kind], edge)
 					d.rows++
+					if _, own := d.fileNodes[edge.From]; own {
+						continue // already served by the source-owned file projection
+					}
+					d.incoming[edge.Kind] = append(d.incoming[edge.Kind], edge)
 				}
 			}
 		}
 		d.elapsed += time.Since(started)
 	}
-}
-
-// fileEdgesOf returns the edges out of the changed nodes of one kind, as the
-// scoped projection the pass itself reads serves them.
-func (d *frameworkDeclaredSeed) fileEdgesOf(kind graph.EdgeKind) []*graph.Edge {
-	if edges, ok := d.fileEdges[kind]; ok {
-		return edges
-	}
-	started := time.Now()
-	var edges []*graph.Edge
-	if d.store != nil && len(d.fileIDs) > 0 {
-		for row := range graph.EdgesInScopeSeq(d.store, d.scope.repoPrefixes, d.scope.filePaths, kind) {
-			if row.Edge != nil {
-				edges = append(edges, row.Edge)
-			}
-		}
-	}
-	if edges == nil {
-		edges = []*graph.Edge{}
-	}
-	d.fileEdges[kind] = edges
-	d.rows += len(edges)
-	d.elapsed += time.Since(started)
-	return edges
 }
 
 // endpointNodes returns every node a changed node shares an edge with.
@@ -516,28 +492,39 @@ func (d *frameworkDeclaredSeed) declaredNames(decl frameworkSeedDeclaration) []s
 		}
 	}
 	if decl.nameEdge != nil {
-		for _, kind := range decl.nameKinds {
-			candidates := d.fileEdgesOf(kind)
-			if decl.declaresIncoming(kind) {
-				candidates = append(append([]*graph.Edge(nil), candidates...), d.incomingOf(kind)...)
+		note := func(edge *graph.Edge) {
+			if edge == nil || edge.Meta == nil || !decl.nameEdge(edge) {
+				return
 			}
-			for _, edge := range candidates {
-				if edge == nil || edge.Meta == nil || !decl.nameEdge(edge) {
-					continue
+			if graph.IsUnresolvedTarget(edge.To) {
+				addDeclaredFrameworkToken(tokens, graph.UnresolvedName(edge.To))
+			}
+			if decl.nameKeys == nil {
+				for _, value := range edge.Meta {
+					addDeclaredFrameworkToken(tokens, value)
 				}
-				if graph.IsUnresolvedTarget(edge.To) {
-					addDeclaredFrameworkToken(tokens, graph.UnresolvedName(edge.To))
+				return
+			}
+			for _, key := range decl.nameKeys {
+				if value, ok := edge.Meta[key]; ok {
+					addDeclaredFrameworkToken(tokens, value)
 				}
-				if decl.nameKeys == nil {
-					for _, value := range edge.Meta {
-						addDeclaredFrameworkToken(tokens, value)
+			}
+		}
+		for _, kind := range decl.nameKinds {
+			if d.store != nil && len(d.fileIDs) > 0 {
+				started := time.Now()
+				for row := range graph.EdgesInScopeSeq(d.store, d.scope.repoPrefixes, d.scope.filePaths, kind) {
+					if row.Edge != nil {
+						d.rows++
+						note(row.Edge)
 					}
-					continue
 				}
-				for _, key := range decl.nameKeys {
-					if value, ok := edge.Meta[key]; ok {
-						addDeclaredFrameworkToken(tokens, value)
-					}
+				d.elapsed += time.Since(started)
+			}
+			if decl.declaresIncoming(kind) {
+				for _, edge := range d.incomingOf(kind) {
+					note(edge)
 				}
 			}
 		}
@@ -704,9 +691,23 @@ func (d *frameworkDeclaredSeed) passCandidate(name string) (bool, *graph.Edge) {
 		return false, nil
 	}
 	for _, kind := range kinds {
-		for _, edge := range d.fileEdgesOf(kind) {
-			if edge != nil && edge.Meta != nil && selects(edge) {
-				return true, edge
+		if d.store != nil && len(d.fileIDs) > 0 {
+			// Stream the kind instead of caching it: a gate needs one witness,
+			// and a cached kind stayed on the seed for the whole registry run.
+			started := time.Now()
+			var witness *graph.Edge
+			for row := range graph.EdgesInScopeSeq(d.store, d.scope.repoPrefixes, d.scope.filePaths, kind) {
+				if row.Edge != nil {
+					d.rows++
+				}
+				if edge := row.Edge; edge != nil && edge.Meta != nil && selects(edge) {
+					witness = edge
+					break
+				}
+			}
+			d.elapsed += time.Since(started)
+			if witness != nil {
+				return true, witness
 			}
 		}
 		if decl.declaresIncoming(kind) {
