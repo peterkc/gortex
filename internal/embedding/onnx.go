@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -43,7 +44,7 @@ type ONNXProvider struct {
 	mu sync.Mutex
 }
 
-func newONNXProvider() (Provider, error) {
+func newONNXProvider() (_ Provider, err error) {
 	modelDir := findONNXModelDir()
 	if modelDir == "" {
 		return nil, fmt.Errorf("ONNX model not found; this backend never auto-downloads — manually place model.onnx + vocab.txt in ~/.gortex/models/gte-small/ (plus `brew install onnxruntime` or the distro equivalent); see docs/semantic-search.md")
@@ -65,52 +66,51 @@ func newONNXProvider() (Provider, error) {
 	if libPath == "" {
 		return nil, fmt.Errorf("libonnxruntime not found; install via: brew install onnxruntime")
 	}
-	ort.SetSharedLibraryPath(libPath)
-	if err := ort.InitializeEnvironment(); err != nil {
-		return nil, fmt.Errorf("ONNX Runtime init: %w", err)
+	if err := initializeONNXEnvironment(libPath, os.Getenv, os.Setenv, ort.SetSharedLibraryPath,
+		func() error { return ort.InitializeEnvironment() }, ort.DisableTelemetry, ort.DestroyEnvironment); err != nil {
+		return nil, err
 	}
+	p := &ONNXProvider{vocab: vocab}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, p.Close())
+		}
+	}()
 
 	// Pre-allocate fixed-size tensors.
 	shape := ort.Shape{1, onnxMaxSeqLen}
 	outputShape := ort.Shape{1, onnxMaxSeqLen, onnxDims}
 
-	inputIDs, err := ort.NewEmptyTensor[int64](shape)
+	p.inputIDs, err = ort.NewEmptyTensor[int64](shape)
 	if err != nil {
 		return nil, fmt.Errorf("input_ids tensor: %w", err)
 	}
-	attMask, err := ort.NewEmptyTensor[int64](shape)
+	p.attentionMask, err = ort.NewEmptyTensor[int64](shape)
 	if err != nil {
 		return nil, fmt.Errorf("attention_mask tensor: %w", err)
 	}
-	tokenTypes, err := ort.NewEmptyTensor[int64](shape)
+	p.tokenTypeIDs, err = ort.NewEmptyTensor[int64](shape)
 	if err != nil {
 		return nil, fmt.Errorf("token_type_ids tensor: %w", err)
 	}
-	output, err := ort.NewEmptyTensor[float32](outputShape)
+	p.output, err = ort.NewEmptyTensor[float32](outputShape)
 	if err != nil {
 		return nil, fmt.Errorf("output tensor: %w", err)
 	}
 
 	// Create session once with fixed shapes.
-	session, err := ort.NewAdvancedSession(modelPath,
+	p.session, err = ort.NewAdvancedSession(modelPath,
 		[]string{"input_ids", "attention_mask", "token_type_ids"},
 		[]string{"last_hidden_state"},
-		[]ort.ArbitraryTensor{inputIDs, attMask, tokenTypes},
-		[]ort.ArbitraryTensor{output},
+		[]ort.ArbitraryTensor{p.inputIDs, p.attentionMask, p.tokenTypeIDs},
+		[]ort.ArbitraryTensor{p.output},
 		nil,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("ONNX session: %w", err)
 	}
 
-	return &ONNXProvider{
-		vocab:         vocab,
-		session:       session,
-		inputIDs:      inputIDs,
-		attentionMask: attMask,
-		tokenTypeIDs:  tokenTypes,
-		output:        output,
-	}, nil
+	return p, nil
 }
 
 func (p *ONNXProvider) Embed(_ context.Context, text string) ([]float32, error) {
