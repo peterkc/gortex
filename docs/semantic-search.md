@@ -86,6 +86,8 @@ go build -tags "embeddings_gomlx XLA" ./cmd/gortex/   # needs libtokenizers.a on
 
 The `embeddings_onnx` backend (GTE-small) **never auto-downloads**: place `model.onnx` and `vocab.txt` in `~/.gortex/models/gte-small/` yourself and install the ONNX Runtime native library (`brew install onnxruntime`, or the distro equivalent). Without both, the backend reports "ONNX model not found" and the local chain falls through to the pure-Go Hugot backend.
 
+ONNX Runtime 1.29 and later send usage telemetry by default on Linux and macOS. Gortex turns it off when it loads the library: it sets `ORT_DISABLE_TELEMETRY=1` in its own process, replacing any value already set, and calls the library's telemetry-off function. To leave telemetry on, set `GORTEX_ONNX_TELEMETRY=1`. The default pure-Go backends never load ONNX Runtime.
+
 The GoMLX/XLA backend requires **both** tags — `embeddings_gomlx` alone links a disabled XLA stub and always falls through to the pure-Go backend; the `XLA` tag is what compiles the real XLA session. It also statically links the rust tokenizer, so the build needs `libtokenizers.a` on the linker path (a prebuilt archive from [daulet/tokenizers](https://github.com/daulet/tokenizers) releases, at `/usr/lib` or `/usr/local/lib`); `make build-gomlx` downloads it for you. At runtime the XLA/PJRT plugin auto-downloads (~100 MB). XLA/PJRT runtime viability is platform-dependent and still experimental — if the plugin fails to load, the local chain degrades to the pure-Go Hugot backend and the startup log names the failed backend (see Troubleshooting). The default pure-Go backend needs no tags and no native libraries, and is the reliable path.
 
 | Build tag | Backend | Model | Extra dependency | Status |

@@ -65,9 +65,20 @@ func newONNXProvider() (Provider, error) {
 	if libPath == "" {
 		return nil, fmt.Errorf("libonnxruntime not found; install via: brew install onnxruntime")
 	}
+	telemetryOff, err := disableONNXTelemetryEnv(os.Getenv, os.Setenv)
+	if err != nil {
+		return nil, fmt.Errorf("ONNX Runtime telemetry opt-out: %w", err)
+	}
 	ort.SetSharedLibraryPath(libPath)
 	if err := ort.InitializeEnvironment(); err != nil {
 		return nil, fmt.Errorf("ONNX Runtime init: %w", err)
+	}
+	if telemetryOff {
+		// The variable is the switch measured to work; the API call covers
+		// a library that ignores it.
+		if err := ort.DisableTelemetry(); err != nil {
+			return nil, fmt.Errorf("ONNX Runtime telemetry opt-out: %w", err)
+		}
 	}
 
 	// Pre-allocate fixed-size tensors.
