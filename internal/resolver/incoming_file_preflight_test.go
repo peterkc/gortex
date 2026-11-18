@@ -3,6 +3,7 @@ package resolver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"path/filepath"
 	"strings"
@@ -33,7 +34,7 @@ func TestIncomingFilePreflightMatchesCollectorAdmission(t *testing.T) {
 					store = disk
 				}
 				files := []string{changed, changed, "", "missing.go"}
-				fact, err := PreflightIncomingFiles(t.Context(), store, files)
+				fact, err := PreflightIncomingFiles(t.Context(), store, files, nil)
 				frontier := New(store).collectIncrementalFileFrontier(files)
 				require.Equal(t, frontier.incomingAdmission, fact)
 				var preflightLimit, collectorLimit *graph.BoundedLocalizationLimitError
@@ -50,32 +51,40 @@ func TestIncomingFilePreflightCanceledAdmissionDoesNotRefuse(t *testing.T) {
 	store, file := incomingFanOutGraph(t, 1)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	fact, err := PreflightIncomingFiles(ctx, store, []string{file})
+	fact, err := PreflightIncomingFiles(ctx, store, []string{file}, nil)
 	require.ErrorIs(t, err, context.Canceled)
 	require.False(t, fact.Refused)
 }
 
-type preflightProjectionStore struct {
+type preflightFileIndexStore struct {
 	graph.Store
 	graph.ScopedProjectionSequencer
-	t                                                *testing.T
-	summaries, summaryRows, identities, identityRows int
+	graph.NodesInFilesByKindStreamer
+	t                                             *testing.T
+	fileReads, fileRows, identities, identityRows int
 }
 
-func (s *preflightProjectionStore) NodesLightInScopeSeq(repos, files []string) iter.Seq[*graph.Node] {
-	s.summaries++
-	return func(yield func(*graph.Node) bool) {
-		for node := range s.ScopedProjectionSequencer.NodesLightInScopeSeq(repos, files) {
-			s.summaryRows++
-			require.Nil(s.t, node.Meta, "preflight must not decode retrieval payloads")
-			if !yield(node) {
+func (s *preflightFileIndexStore) NodesLightInScopeSeq(_, _ []string) iter.Seq[*graph.Node] {
+	s.t.Fatal("preflight used generation-scanning scoped projection")
+	return nil
+}
+
+func (s *preflightFileIndexStore) NodesInFilesByKindSeq(files []string, kinds []graph.NodeKind) iter.Seq2[string, []*graph.Node] {
+	s.fileReads++
+	return func(yield func(string, []*graph.Node) bool) {
+		for file, nodes := range s.NodesInFilesByKindStreamer.NodesInFilesByKindSeq(files, kinds) {
+			s.fileRows += len(nodes)
+			for _, node := range nodes {
+				require.True(s.t, graph.IsReferenceableSymbol(node.Kind))
+			}
+			if !yield(file, nodes) {
 				return
 			}
 		}
 	}
 }
 
-func (s *preflightProjectionStore) GetInEdgeIdentitiesByNodeIDs(ids []string) map[string][]graph.EdgeIdentity {
+func (s *preflightFileIndexStore) GetInEdgeIdentitiesByNodeIDs(ids []string) map[string][]graph.EdgeIdentity {
 	s.identities++
 	rows := graph.InEdgeIdentitiesByNodeIDs(s.Store, ids)
 	for _, batch := range rows {
@@ -84,29 +93,59 @@ func (s *preflightProjectionStore) GetInEdgeIdentitiesByNodeIDs(ids []string) ma
 	return rows
 }
 
-func (s *preflightProjectionStore) GetFileNodesByPaths([]string) map[string][]*graph.Node {
+func (s *preflightFileIndexStore) GetFileNodesByPaths([]string) map[string][]*graph.Node {
 	s.t.Fatal("preflight hydrated file-node payloads")
 	return nil
 }
 
-func (s *preflightProjectionStore) GetOutEdgesByNodeIDs([]string) map[string][]*graph.Edge {
+func (s *preflightFileIndexStore) GetOutEdgesByNodeIDs([]string) map[string][]*graph.Edge {
 	s.t.Fatal("preflight read outgoing adjacency")
 	return nil
 }
 
-func TestIncomingFilePreflightReadsOnlyCompactRows(t *testing.T) {
+func TestIncomingFilePreflightReadsFileIndexRows(t *testing.T) {
 	memory, changed := incomingFanOutGraph(t, 64)
 	memory.GetNode(changed + "::Close").Meta = map[string]any{"doc": strings.Repeat("payload", 1024)}
 	disk, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.sqlite"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, disk.Close()) })
 	disk.AddBatch(memory.AllNodes(), memory.AllEdges())
-	store := &preflightProjectionStore{Store: disk, ScopedProjectionSequencer: disk, t: t}
-	fact, err := PreflightIncomingFiles(t.Context(), store, []string{changed})
+	store := &preflightFileIndexStore{Store: disk, ScopedProjectionSequencer: disk, NodesInFilesByKindStreamer: disk, t: t}
+	fact, err := PreflightIncomingFiles(t.Context(), store, []string{changed}, nil)
 	require.NoError(t, err)
 	require.False(t, fact.Refused)
-	require.Equal(t, 1, store.summaries)
-	require.Equal(t, 2, store.summaryRows)
+	require.Equal(t, 1, store.fileReads)
+	require.Equal(t, 1, store.fileRows)
 	require.Equal(t, 1, store.identities)
 	require.Equal(t, 64, store.identityRows)
+}
+
+// The fallback must bound each file read too, and stop before another chunk.
+type preflightCancelFileStore struct {
+	graph.Store
+	cancel context.CancelFunc
+	t      *testing.T
+	reads  int
+}
+
+func (s *preflightCancelFileStore) GetFileNodesByPaths(files []string) map[string][]*graph.Node {
+	s.reads++
+	require.LessOrEqual(s.t, len(files), 256, "fallback file read must be chunked")
+	s.cancel()
+	return s.Store.GetFileNodesByPaths(files)
+}
+
+func TestIncomingFilePreflightStopsBetweenFileChunks(t *testing.T) {
+	store, file := incomingFanOutGraph(t, 1)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	wrapped := &preflightCancelFileStore{Store: store, cancel: cancel, t: t}
+	files := []string{file}
+	for i := 0; i < 2000; i++ {
+		files = append(files, fmt.Sprintf("missing/%d.go", i))
+	}
+	fact, err := PreflightIncomingFiles(ctx, wrapped, files, nil)
+	require.ErrorIs(t, err, context.Canceled)
+	require.False(t, fact.Refused)
+	require.Equal(t, 1, wrapped.reads)
 }

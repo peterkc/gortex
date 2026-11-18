@@ -5,20 +5,43 @@ import (
 	"iter"
 
 	"github.com/zzet/gortex/internal/graph"
+	"go.uber.org/zap"
 )
 
 // PreflightIncomingFiles checks the warmup fallback predicate without hydrating
-// outgoing nodes or edges. It has no mutation evidence: warmup checks the current
-// declarations only. Ordinary incremental resolves keep their existing reads.
-func PreflightIncomingFiles(ctx context.Context, g graph.Store, filePaths []string) (graph.IncomingSourceAdmission, error) {
+// outgoing adjacency. File-index reads stay bounded to one chunk at a time.
+// It has no mutation evidence: warmup checks current declarations only.
+// Ordinary incremental resolves keep their existing reads.
+func PreflightIncomingFiles(ctx context.Context, g graph.Store, filePaths []string, logger *zap.Logger) (graph.IncomingSourceAdmission, error) {
 	paths := incrementalFilePaths(filePaths)
 	if g == nil || len(paths) == 0 {
 		return graph.IncomingSourceAdmission{}, nil
 	}
 	g.ResolveMutex().Lock()
 	defer g.ResolveMutex().Unlock()
-	keys := incomingStubKeys(graph.NodesLightInScopeSeq(g, nil, paths), nil)
+	// Reuse the file-index reader rather than the files-only scoped summary,
+	// which SQLite must serve by scanning the generation once per page.
+	const fileChunkSize = 256
+	nodes := func(yield func(*graph.Node) bool) {
+		for start := 0; start < len(paths); start += fileChunkSize {
+			if ctx.Err() != nil {
+				return
+			}
+			chunk := paths[start:min(start+fileChunkSize, len(paths))]
+			for node := range frameworkFileFrontierNodes(g, nil, chunk,
+				graph.KindFunction, graph.KindMethod, graph.KindType, graph.KindInterface,
+				graph.KindVariable, graph.KindConstant, graph.KindField, graph.KindEnumMember) {
+				if !yield(node) {
+					return
+				}
+			}
+		}
+	}
+	keys := incomingStubKeys(nodes, nil)
 	_, fact, err := admitIncomingIdentities(ctx, g, keys)
+	if fact.Refused {
+		logIncomingAdmissionRefusal(logger, "preparation", len(keys), fact, err)
+	}
 	return fact, err
 }
 

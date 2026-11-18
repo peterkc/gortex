@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
@@ -20,6 +22,7 @@ type preEnrichHydrationStore struct {
 	*warmupIncomingRefusalStore
 	graph.UnresolvedEdgePager
 	graph.ScopedProjectionSequencer
+	graph.NodesInFilesByKindStreamer
 	fullStarted    atomic.Bool
 	fileHydrations atomic.Int64
 	outgoingReads  atomic.Int64
@@ -68,7 +71,7 @@ func newPreEnrichHydrationFixture(t *testing.T, refuse bool) (*MultiIndexer, *pr
 	})
 	incoming := &warmupIncomingRefusalStore{Store: disk}
 	incoming.refuse.Store(refuse)
-	store := &preEnrichHydrationStore{warmupIncomingRefusalStore: incoming, UnresolvedEdgePager: disk, ScopedProjectionSequencer: disk}
+	store := &preEnrichHydrationStore{warmupIncomingRefusalStore: incoming, UnresolvedEdgePager: disk, ScopedProjectionSequencer: disk, NodesInFilesByKindStreamer: disk}
 	manager, err := config.NewConfigManager(filepath.Join(t.TempDir(), "config.yaml"))
 	require.NoError(t, err)
 	mi := NewMultiIndexer(store, newTestRegistry(), search.NewNull(), manager, zap.NewNop())
@@ -107,4 +110,88 @@ func TestPreEnrichAdmittedDeltaKeepsExactInlineLSP(t *testing.T) {
 		assert.EqualValues(t, 1, helper.calls.Load(), "small exact pass retains inline LSP")
 	}))
 	require.Equal(t, 1, hooks)
+}
+
+type preEnrichLateRefusalStore struct {
+	*preEnrichHydrationStore
+	incomingReads int
+}
+
+func (s *preEnrichLateRefusalStore) GetInEdgesByNodeIDs(ids []string) map[string][]*graph.Edge {
+	s.incomingReads++
+	s.refuse.Store(s.incomingReads > 1)
+	return s.warmupIncomingRefusalStore.GetInEdgesByNodeIDs(ids)
+}
+
+func TestPreEnrichLateRefusalStillRunsFullResolve(t *testing.T) {
+	// Given preflight admits, when a later incoming read refuses, then the
+	// whole-graph fallback still runs and readiness fires exactly once.
+	mi, base, _ := newPreEnrichHydrationFixture(t, false)
+	mi.SetResolverLSPHelper(nil)
+	store := &preEnrichLateRefusalStore{preEnrichHydrationStore: base}
+	mi.graph = store
+	hooks := 0
+	require.NoError(t, mi.RunPreEnrichResolveFiles(t.Context(), []string{"repo/caller.ts"}, func() {
+		hooks++
+		assert.True(t, store.fullStarted.Load(), "late refusal must select the whole-graph pass")
+	}))
+	require.Greater(t, store.incomingReads, 1)
+	require.Equal(t, 1, hooks)
+	full, fullStore, _ := newPreEnrichHydrationFixture(t, false)
+	full.SetResolverLSPHelper(nil)
+	require.NoError(t, full.RunPreEnrichResolve(t.Context(), nil, nil))
+	require.ElementsMatch(t, fullStore.AllEdges(), store.AllEdges())
+}
+
+type preEnrichCancelReadStore struct {
+	*preEnrichHydrationStore
+	cancel context.CancelCauseFunc
+	cause  error
+}
+
+func (s *preEnrichCancelReadStore) GetInEdgesByNodeIDs(ids []string) map[string][]*graph.Edge {
+	rows := s.preEnrichHydrationStore.GetInEdgesByNodeIDs(ids)
+	s.cancel(s.cause)
+	return rows
+}
+
+func TestPreEnrichCancellationDuringPreflightReturnsCause(t *testing.T) {
+	// Given an incoming read cancels with a cause, when preflight returns,
+	// then startup preserves that cause and does not start resolve or readiness.
+	mi, base, _ := newPreEnrichHydrationFixture(t, false)
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	cause := errors.New("preflight read canceled")
+	mi.graph = &preEnrichCancelReadStore{preEnrichHydrationStore: base, cancel: cancel, cause: cause}
+	hooks := 0
+	err := mi.RunPreEnrichResolveFiles(ctx, []string{"repo/caller.ts"}, func() { hooks++ })
+	require.ErrorIs(t, err, cause)
+	require.Zero(t, hooks)
+	require.False(t, base.fullStarted.Load())
+	require.Zero(t, base.fileHydrations.Load())
+	require.Zero(t, base.outgoingReads.Load())
+}
+
+func TestPreEnrichPreflightRefusalKeepsPreparationWarning(t *testing.T) {
+	// Given preflight refuses, when startup falls back, then retain the same
+	// preparation Warn message and fields that the exact pass used to emit.
+	mi, _, _ := newPreEnrichHydrationFixture(t, true)
+	core, logs := observer.New(zap.WarnLevel)
+	mi.logger = zap.New(core)
+	require.NoError(t, mi.RunPreEnrichResolveFiles(t.Context(), []string{"repo/caller.ts"}, nil))
+	entries := logs.FilterMessage("resolver: incoming stub admission refused").All()
+	var preparation []observer.LoggedEntry
+	for _, entry := range entries {
+		if entry.ContextMap()["leg"] == "preparation" {
+			preparation = append(preparation, entry)
+		}
+	}
+	require.Len(t, preparation, 1)
+	fields := preparation[0].ContextMap()
+	require.Equal(t, zap.WarnLevel, preparation[0].Level)
+	require.EqualValues(t, 4, fields["stub_keys"])
+	require.EqualValues(t, graph.MaxIncomingSourceCandidateRows+1, fields["inspected"])
+	require.EqualValues(t, graph.MaxIncomingSourceCandidateRows+1, fields["dropped"])
+	require.EqualValues(t, graph.MaxIncomingSourceCandidateRows, fields["limit"])
+	require.NotEmpty(t, fields["error"])
 }

@@ -1263,13 +1263,16 @@ func (mi *MultiIndexer) RunPreEnrichResolveFiles(ctx context.Context, files []st
 	}
 	masterRefused := false
 	if len(files) > 0 {
-		admission, err := resolver.PreflightIncomingFiles(ctx, mi.graph, files)
+		admission, err := resolver.PreflightIncomingFiles(ctx, mi.graph, files, mi.logger)
 		if admission.Refused {
 			masterRefused = true
 			mi.logger.Info("resolver: pre-enrichment incoming preparation selects full resolve",
 				zap.Int("files", len(files)), zap.Int("inspected", admission.Inspected), zap.Int("limit", admission.Limit))
 		} else {
 			if err != nil {
+				if cause := context.Cause(ctx); cause != nil {
+					return cause
+				}
 				return err
 			}
 			stats := mi.runMasterResolveFiles(files, true)

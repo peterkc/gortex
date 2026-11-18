@@ -199,10 +199,9 @@ type ResolveStats struct {
 // fact on the pass stats. Refused is set only for the typed limit error: a
 // cancellation is a different outcome and must not read as "the bound fired".
 //
-// Every consumer of a bounded admission calls this before acting on what the
-// admission returned — including the consumers whose leg then collapses to
-// "nothing to do", because a refused leg and an empty leg are the same shape
-// and only this fact separates them.
+// Resolve passes record their bounded admissions before acting on the returned
+// rows, including an empty leg: only this fact separates refusal from no work.
+// Warmup preflight returns the admission fact directly to its fallback caller.
 //
 // keys is the key set the admission read for, and it is what keeps Dropped a
 // count of references rather than of refusals: a pass that runs both incoming
@@ -237,7 +236,7 @@ func recordIncomingAdmission(stats *ResolveStats, keys []string, fact graph.Inco
 // incomingAdmissionChargeKey is the identity of one admission's key set: the
 // deduplicated keys in sorted order, hashed so the bookkeeping entry stays a
 // fixed 64 hex characters whatever the frontier's size. The two legs of a pass
-// build their stub keys independently (the frontier's appendStubKey walk vs
+// build their stub keys independently (the frontier's incomingStubKeys walk vs
 // resolveIncomingLocked's per-node walk), so they agree on the SET and not on
 // the order — sorting is what makes them the same charge.
 //
@@ -271,10 +270,8 @@ func incomingAdmissionChargeKey(keys []string) string {
 	return hex.EncodeToString(sum.Sum(nil))
 }
 
-// logIncomingAdmissionRefusal is the one Warn shape every bounded incoming leg
-// uses. Nothing else in the package logs a refusal, so a leg that forgets the
-// fact is visible as a missing call site rather than as a differently worded
-// log line. A nil error is not a refusal and logs nothing.
+// logIncomingAdmissionRefusal keeps the Warn shape shared by resolver incoming
+// legs and warmup preflight. A nil error logs nothing.
 func logIncomingAdmissionRefusal(logger *zap.Logger, leg string, stubKeys int, fact graph.IncomingSourceAdmission, err error) {
 	if err == nil || logger == nil {
 		return
