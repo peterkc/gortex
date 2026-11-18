@@ -416,6 +416,9 @@ func (d *frameworkDeclaredSeed) readIncoming() {
 					if edge == nil {
 						continue
 					}
+					if _, own := d.fileNodes[edge.From]; own {
+						continue // already served by the source-owned file projection
+					}
 					d.incoming[edge.Kind] = append(d.incoming[edge.Kind], edge)
 					d.rows++
 				}
@@ -704,9 +707,20 @@ func (d *frameworkDeclaredSeed) passCandidate(name string) (bool, *graph.Edge) {
 		return false, nil
 	}
 	for _, kind := range kinds {
-		for _, edge := range d.fileEdgesOf(kind) {
-			if edge != nil && edge.Meta != nil && selects(edge) {
-				return true, edge
+		if d.store != nil && len(d.fileIDs) > 0 {
+			// Stream the kind instead of caching it: a gate needs one witness,
+			// and a cached kind stayed on the seed for the whole registry run.
+			started := time.Now()
+			var witness *graph.Edge
+			for row := range graph.EdgesInScopeSeq(d.store, d.scope.repoPrefixes, d.scope.filePaths, kind) {
+				if edge := row.Edge; edge != nil && edge.Meta != nil && selects(edge) {
+					witness = edge
+					break
+				}
+			}
+			d.elapsed += time.Since(started)
+			if witness != nil {
+				return true, witness
 			}
 		}
 		if decl.declaresIncoming(kind) {
