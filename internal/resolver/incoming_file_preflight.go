@@ -7,6 +7,21 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
+// PreflightIncomingFiles checks the warmup fallback predicate without hydrating
+// outgoing nodes or edges. It has no mutation evidence: warmup checks the current
+// declarations only. Ordinary incremental resolves keep their existing reads.
+func PreflightIncomingFiles(ctx context.Context, g graph.Store, filePaths []string) (graph.IncomingSourceAdmission, error) {
+	paths := incrementalFilePaths(filePaths)
+	if g == nil || len(paths) == 0 {
+		return graph.IncomingSourceAdmission{}, nil
+	}
+	g.ResolveMutex().Lock()
+	defer g.ResolveMutex().Unlock()
+	keys := incomingStubKeys(graph.NodesLightInScopeSeq(g, nil, paths), nil)
+	_, fact, err := admitIncomingIdentities(ctx, g, keys)
+	return fact, err
+}
+
 func incrementalFilePaths(filePaths []string) []string {
 	var paths []string
 	seen := make(map[string]struct{}, len(filePaths))
