@@ -39,10 +39,11 @@ import (
 // and moves nBackfill. The wait is inside the VFS write, below SQLite: the
 // statement is not interrupted and nothing it did is lost.
 //
-// What a paused pass holds, and why nothing waits on it:
+// What a paused pass holds:
 //   - the WAL checkpointer lock (WAL_CKPT_LOCK). Only another checkpoint
-//     takes it; the store runs one background checkpoint at a time, and the
-//     writer never checkpoints (wal_autocheckpoint is 0).
+//     takes it. The store admits one background attempt at a time. Final bulk
+//     durability joins it before TRUNCATE; deadline callers can encounter busy.
+//     Automatic writer checkpoints remain disabled (wal_autocheckpoint is 0).
 //   - read-mark 0, exclusively, while it copies. A reader takes mark 0 only
 //     when the log is completely backfilled, which it is not while a pass
 //     runs (nBackfill moves at the pass's end); readers use marks 1..4. A
@@ -64,8 +65,8 @@ import (
 //   - between edits, while the checkout is being edited (the lane was busy
 //     within walCopyEditSession), the copy is limited to walCopyBudget bytes
 //     written to the database file per minute; idle, it runs at full speed;
-//   - shutdown and a bulk window end any pause at once (the statement is
-//     then interrupted as before; the copy loop stops at its next page).
+//   - shutdown and generation lease acquisition end a pause by interrupting
+//     the statement; final bulk durability waits for the pass without cancelling.
 //
 // The pacer is found by the libc TLS of the connection that runs the
 // statement: modernc passes the connection's TLS down to every VFS call, so

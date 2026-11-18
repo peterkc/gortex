@@ -1486,7 +1486,7 @@ func (s *Store) checkpointBulkWAL() error {
 // retains its existing unlimited individual checkpoint and retry policy.
 func (s *Store) checkpointBulkWALContext(ctx context.Context) error {
 	started := time.Now()
-	result, err := s.checkpointWALWithContextResult(ctx)
+	result, err := s.checkpointBulkWALResult(ctx)
 	s.emitBulkFinalizeEvent(bulkFinalizeEvent{
 		Stage: "checkpoint", Name: "wal_truncate", Elapsed: time.Since(started),
 		Busy: result.Busy, WALFrames: result.WALFrames,
@@ -1502,6 +1502,17 @@ func (s *Store) checkpointBulkWALContext(ctx context.Context) error {
 		return fmt.Errorf("store_sqlite: bulk checkpoint: %w", err)
 	}
 	return nil
+}
+
+// checkpointBulkWALResult runs after FlushBulk releases its pinned writer.
+// Reserve before writeMu so the background owner can finish its writer steps.
+// The ordinary Close path already joins its background workers before SQL.
+func (s *Store) checkpointBulkWALResult(ctx context.Context) (walCheckpointResult, error) {
+	if err := s.reserveForegroundCheckpoint(ctx); err != nil {
+		return walCheckpointResult{}, err
+	}
+	defer s.releaseForegroundCheckpoint()
+	return s.checkpointWALWithContextResult(ctx)
 }
 
 // checkpointBulkWALPassiveLocked is a best-effort repository boundary while
