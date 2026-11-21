@@ -13,7 +13,7 @@ var (
 	_ graph.AtomicVectorCorpusInstaller = (*BuildStore)(nil)
 )
 
-func vectorUnsupported() error { return fmt.Errorf("Pebble vector family: %w", errors.ErrUnsupported) }
+func vectorUnsupported() error { return fmt.Errorf("pebble vector family: %w", errors.ErrUnsupported) }
 
 func (b *BuildStore) UpsertEmbedding(string, []float32) error       { return vectorUnsupported() }
 func (b *BuildStore) BulkUpsertEmbeddings([]graph.VectorItem) error { return vectorUnsupported() }

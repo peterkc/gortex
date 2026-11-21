@@ -200,7 +200,7 @@ func publishGold(ctx context.Context, db *pebble.DB, rows *sortedRuns, seal *gol
 				return err
 			}
 			if len(paths) >= goldFileCap {
-				return fmt.Errorf("Pebble publish exceeds %d tables", goldFileCap)
+				return fmt.Errorf("pebble publish exceeds %d tables", goldFileCap)
 			}
 			path := filepath.Join(rows.dir, fmt.Sprintf("gold-%04d.sst", len(paths)))
 			w, err = newTable(path, rows.options.MakeWriterOptions(goldLevel, rows.format))

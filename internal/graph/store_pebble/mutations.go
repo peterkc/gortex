@@ -8,12 +8,13 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
+// withWrites records the first mutation error so Publish can return it.
 func (b *BuildStore) withWrites(write func() error) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.first == nil {
 		if err := write(); err != nil {
-			b.first = fmt.Errorf("Pebble build mutation: %w", err)
+			b.first = fmt.Errorf("pebble build mutation: %w", err)
 		}
 	}
 	return b.first
@@ -70,7 +71,7 @@ func (b *BuildStore) noteRevision() error {
 }
 
 func (b *BuildStore) SetEdgeProvenance(e *graph.Edge, origin string) (changed bool) {
-	b.withWrites(func() error {
+	_ = b.withWrites(func() error {
 		var err error
 		changed, err = b.setEdgeProvenance(e, origin)
 		return err
@@ -104,7 +105,7 @@ func (b *BuildStore) setEdgeProvenance(e *graph.Edge, origin string) (bool, erro
 }
 
 func (b *BuildStore) SetEdgeProvenanceBatch(batch []graph.EdgeProvenanceUpdate) (changed int) {
-	b.withWrites(func() error {
+	_ = b.withWrites(func() error {
 		for _, item := range batch {
 			ok, err := b.setEdgeProvenance(item.Edge, item.NewOrigin)
 			if err != nil {
@@ -120,7 +121,7 @@ func (b *BuildStore) SetEdgeProvenanceBatch(batch []graph.EdgeProvenanceUpdate) 
 }
 
 func (b *BuildStore) RemoveEdge(from, to string, kind graph.EdgeKind) (removed bool) {
-	b.withWrites(func() error {
+	_ = b.withWrites(func() error {
 		prefix := keyStrings([]byte{familyEdge, edgeOut}, from, string(kind), to)
 		return pendingVisit(context.Background(), b.pending, prefix, func(r row) error {
 			e, err := decodeEdge(r.value)
@@ -138,7 +139,7 @@ func (b *BuildStore) RemoveEdge(from, to string, kind graph.EdgeKind) (removed b
 }
 
 func (b *BuildStore) evictBy(prefix []byte) (nodes, edges int) {
-	b.withWrites(func() error {
+	_ = b.withWrites(func() error {
 		var err error
 		nodes, edges, err = b.evict(prefix)
 		return err
@@ -162,7 +163,7 @@ func (b *BuildStore) ReindexEdge(e *graph.Edge, oldTo string) {
 }
 
 func (b *BuildStore) ReindexEdges(batch []graph.EdgeReindex) {
-	b.withWrites(func() error {
+	_ = b.withWrites(func() error {
 		// Store's convergence guarantee is per bounded chunk, as in SQLite.
 		for i := 0; i < len(batch); i += 256 {
 			if err := b.reindexChunk(batch[i:min(i+256, len(batch))]); err != nil {
@@ -258,7 +259,7 @@ func (b *BuildStore) PersistEdgeAttributes(e *graph.Edge) {
 }
 
 func (b *BuildStore) PersistEdgeAttributesBatch(edges []*graph.Edge) {
-	b.withWrites(func() error {
+	_ = b.withWrites(func() error {
 		for _, e := range edges {
 			if e == nil {
 				continue

@@ -155,7 +155,7 @@ func searchPostingRanges(repo, term string, paths []string) []searchRange {
 // SearchContent refuses the deferred content FTS family (D64). This reader
 // does not implement the write side of graph.ContentSearcher.
 func (s *Snapshot) SearchContent(_, _ string, _ int) ([]graph.ContentHit, error) {
-	return nil, fmt.Errorf("Pebble content search: %w", errors.ErrUnsupported)
+	return nil, fmt.Errorf("pebble content search: %w", errors.ErrUnsupported)
 }
 
 func (s *Snapshot) SearchSymbols(q string, limit int) ([]graph.SymbolHit, error) {
