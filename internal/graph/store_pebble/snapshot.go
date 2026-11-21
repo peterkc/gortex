@@ -251,6 +251,15 @@ func (s *Snapshot) GetInEdgesByNodeIDsFromRepos(ids, repos []string) (map[string
 		}
 		seen[id] = struct{}{}
 		for _, repo := range ordered {
+			if s.profile != FullProfile {
+				off, err := point(s, countKey("off incoming owner", id, repo), decodeCount)
+				if err != nil {
+					return nil, false, err
+				}
+				if off > 0 {
+					return nil, false, groupOffError{localNodeGroup, s.profile}
+				}
+			}
 			if err := scan(context.Background(), s, keyStrings([]byte{familyEdge, edgeInRepo}, id, repo), func(_, raw []byte) (bool, error) {
 				e, err := decodeEdge(raw)
 				if err != nil {
@@ -303,6 +312,10 @@ func (s *Snapshot) AllEdges() []*graph.Edge {
 
 func (s *Snapshot) NodesByKind(kind graph.NodeKind) iter.Seq[*graph.Node] {
 	return func(yield func(*graph.Node) bool) {
+		if err := s.requireNodeGroups(kind); err != nil {
+			s.retain(err)
+			return
+		}
 		s.indexedNodes(keyStrings([]byte{familyNodeKind}, string(kind)), yield)
 	}
 }
@@ -314,6 +327,10 @@ func (s *Snapshot) EdgesByKind(kind graph.EdgeKind) iter.Seq[*graph.Edge] {
 }
 
 func (s *Snapshot) scanEdgeKind(kind graph.EdgeKind, decode decodeRow[*graph.Edge], yield func(*graph.Edge) bool) {
+	if err := s.requireEdgeGroups(kind); err != nil {
+		s.retain(err)
+		return
+	}
 	decodeRows(s, keyStrings([]byte{familyEdge, edgeKind}, string(kind)), func(key []byte) (*graph.Edge, error) {
 		e, err := point(s, key, decode)
 		if err == nil && e == nil {

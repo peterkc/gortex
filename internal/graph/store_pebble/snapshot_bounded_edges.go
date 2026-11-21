@@ -43,6 +43,9 @@ func (s *Snapshot) FindExistingEdgeEndpoints(ctx context.Context, endpoints []gr
 		if len(seen) > limit {
 			return nil, &graph.BoundedLocalizationLimitError{Resource: resource, Limit: limit}
 		}
+		if err := s.requireEdgeGroups(e.Kind); err != nil {
+			return nil, err
+		}
 	}
 	found := make(map[graph.TypedEdgeEndpoint]struct{})
 	for key := range seen {
@@ -81,6 +84,9 @@ func (s *Snapshot) FindIncomingSourcesBounded(ctx context.Context, ids []string,
 		return graph.BoundedIncomingSourceProjection{}, err
 	}
 	const maxInt = int(^uint(0) >> 1)
+	if err := s.requireEdgeGroups(kind); err != nil {
+		return graph.BoundedIncomingSourceProjection{}, err
+	}
 	if limit == maxInt {
 		return graph.BoundedIncomingSourceProjection{}, &graph.BoundedLocalizationLimitError{Resource: "incoming-source sentinel", Limit: maxInt - 1}
 	}
@@ -135,6 +141,9 @@ func checkAdjacency(ctx context.Context, keys, kinds, limit int) error {
 }
 
 func (s *Snapshot) boundedIdentities(ctx context.Context, kinds []graph.EdgeKind, limit int, budget *adjacencyBudget, prefix func(graph.EdgeKind) []byte) ([]graph.EdgeIdentity, bool, error) {
+	if err := s.requireEdgeGroups(kinds...); err != nil {
+		return nil, false, err
+	}
 	seen := make(map[graph.EdgeIdentity]struct{})
 	for kind := range uniqueNonempty(kinds) {
 		err := scan(ctx, s, prefix(kind), func(_, raw []byte) (bool, error) {

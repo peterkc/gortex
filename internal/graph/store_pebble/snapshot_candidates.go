@@ -81,6 +81,10 @@ func (s *Snapshot) DeadCodeCandidates(kinds []graph.NodeKind, allowed map[graph.
 	var out []*graph.Node
 	for kind := range uniqueNonempty(kinds) {
 		useKinds := slices.Collect(uniqueNonempty(allowed[kind]))
+		if err := s.requireNodeGroups(kind); err != nil {
+			s.retain(err)
+			return nil
+		}
 		prefix := keyStrings([]byte{familyNodeKind}, string(kind))
 		decodeRows(s, prefix, func(raw []byte) (string, error) { return string(raw), nil }, func(id string) bool {
 			n := 0
@@ -101,6 +105,10 @@ func (s *Snapshot) DeadCodeCandidates(kinds []graph.NodeKind, allowed map[graph.
 }
 
 func (s *Snapshot) ExtractCandidates(kinds []graph.EdgeKind, minLines, minCallers, minFanOut int, pathPrefix string) []graph.ExtractCandidateRow {
+	if err := s.requireEdgeGroups(kinds...); err != nil {
+		s.retain(err)
+		return nil
+	}
 	kinds = slices.Collect(uniqueNonempty(kinds))
 	if len(kinds) == 0 {
 		return nil

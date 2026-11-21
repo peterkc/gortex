@@ -86,8 +86,8 @@ func (b *BuildStore) setEdgeProvenance(e *graph.Edge, origin string) (bool, erro
 	if old.Origin == origin {
 		return false, nil
 	}
-	old.Origin = origin
-	if e.Tier != "" {
+	old.Origin, old.Tier = origin, e.Tier
+	if old.Tier != "" {
 		old.Tier = graph.ResolvedBy(origin)
 	}
 	if err := b.putEdge(old); err != nil {

@@ -120,6 +120,10 @@ func nodeSummary(n *graph.Node) *graph.Node {
 // already capped response. Cursor lifetime is owned by this iteration.
 func (s *Snapshot) nodesInScope(repos, files []string, kinds []graph.NodeKind, decode decodeRow[*graph.Node]) iter.Seq[*graph.Node] {
 	return func(yield func(*graph.Node) bool) {
+		if err := s.requireNodeGroups(kinds...); err != nil {
+			s.retain(err)
+			return
+		}
 		if len(repos) == 0 && len(files) == 0 {
 			return
 		}

@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	metaFlatMagic0  = 0x00
-	metaFlatVersion = 0x01
+	metaFlatMagic0     = 0x00
+	metaFlatVersion    = 0x01
+	metaMaxNativeDepth = 63
 )
 
 // Flat value type tags. The byte after a key selects the value layout.
@@ -88,7 +89,7 @@ func appendMetaString(buf []byte, s string) []byte {
 // appendMetaValue keeps modeled producer types exact and encodes other
 // JSON-compatible values as individual leaves, without widening their siblings.
 func appendMetaValue(buf []byte, v any, depth int) ([]byte, bool) {
-	if depth > 63 {
+	if depth > metaMaxNativeDepth {
 		return appendMetaJSON(buf, v)
 	}
 	switch vv := v.(type) {
@@ -221,7 +222,7 @@ func decodeMetaFast(b []byte) (map[string]any, error) {
 		return nil, invalid("metadata revision")
 	}
 	d := &metaDecoder{buf: b[2:]} // skip magic + version
-	m, err := d.readMap()
+	m, err := d.readMap(0)
 	if err != nil {
 		return nil, err
 	}
@@ -302,7 +303,7 @@ func (d *metaDecoder) readCount() (int, error) {
 	return int(n), nil
 }
 
-func (d *metaDecoder) readMap() (map[string]any, error) {
+func (d *metaDecoder) readMap(depth int) (map[string]any, error) {
 	count, err := d.readCount()
 	if err != nil {
 		return nil, err
@@ -314,7 +315,7 @@ func (d *metaDecoder) readMap() (map[string]any, error) {
 		if err != nil {
 			return nil, err
 		}
-		val, err := d.readValue(key)
+		val, err := d.readValue(key, depth+1)
 		if err != nil {
 			return nil, err
 		}
@@ -327,10 +328,13 @@ func (d *metaDecoder) readMap() (map[string]any, error) {
 	return m, nil
 }
 
-func (d *metaDecoder) readValue(key string) (any, error) {
+func (d *metaDecoder) readValue(key string, depth int) (any, error) {
 	tag, err := d.readByte()
 	if err != nil {
 		return nil, err
+	}
+	if depth > metaMaxNativeDepth && tag != metaTagJSON {
+		return nil, invalid("metadata nesting exceeds native depth")
 	}
 	switch tag {
 	case metaTagNil:
@@ -466,7 +470,7 @@ func (d *metaDecoder) readValue(key string) (any, error) {
 		}
 		return out, nil
 	case metaTagMap:
-		return d.readMap()
+		return d.readMap(depth + 1)
 	case metaTagMapSlice:
 		count, err := d.readCount()
 		if err != nil {
@@ -474,7 +478,7 @@ func (d *metaDecoder) readValue(key string) (any, error) {
 		}
 		out := make([]map[string]any, 0, count)
 		for i := 0; i < count; i++ {
-			mm, err := d.readMap()
+			mm, err := d.readMap(depth + 1)
 			if err != nil {
 				return nil, err
 			}
@@ -488,7 +492,7 @@ func (d *metaDecoder) readValue(key string) (any, error) {
 		}
 		out := make([]any, 0, count)
 		for i := 0; i < count; i++ {
-			e, err := d.readValue(key)
+			e, err := d.readValue(key, depth+1)
 			if err != nil {
 				return nil, err
 			}

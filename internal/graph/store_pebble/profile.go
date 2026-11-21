@@ -47,6 +47,37 @@ func (p Profile) keepsEdge(kind graph.EdgeKind) bool {
 	return p == FullProfile || edgeGroup(kind) == ""
 }
 
+const localNodeGroup = "locals and parameters"
+
+func (s *Snapshot) requireNodeGroups(kinds ...graph.NodeKind) error {
+	for _, kind := range kinds {
+		if !s.profile.keepsNode(kind) {
+			return groupOffError{localNodeGroup, s.profile}
+		}
+	}
+	return nil
+}
+
+func (s *Snapshot) requireEdgeGroups(kinds ...graph.EdgeKind) error {
+	for _, kind := range kinds {
+		if !s.profile.keepsEdge(kind) {
+			return groupOffError{edgeGroup(kind), s.profile}
+		}
+	}
+	return nil
+}
+
+func (s *Snapshot) requireDeadCodeGroups(kind graph.NodeKind, incoming []graph.EdgeKind) error {
+	if err := s.requireNodeGroups(kind); err != nil {
+		return err
+	}
+	if len(incoming) == 0 {
+		// A raw incoming scan without kinds needs the complete edge group.
+		return s.requireEdgeGroups(graph.EdgeContains)
+	}
+	return s.requireEdgeGroups(incoming...)
+}
+
 func (p Profile) keepsNode(kind graph.NodeKind) bool {
 	if p == FullProfile {
 		return true

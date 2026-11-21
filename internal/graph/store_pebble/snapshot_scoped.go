@@ -17,6 +17,10 @@ var (
 )
 
 func (s *Snapshot) FileEditingContext(path string, kinds []graph.NodeKind) *graph.FileEditingContextResult {
+	if err := s.requireNodeGroups(kinds...); err != nil {
+		s.retain(err)
+		return nil
+	}
 	return graph.FileEditingContextOf(s, path, kinds)
 }
 
@@ -71,6 +75,10 @@ func (s *Snapshot) NodesByKindInRepos(kind graph.NodeKind, repos []string) iter.
 		return s.NodesByKind(kind)
 	}
 	return func(yield func(*graph.Node) bool) {
+		if err := s.requireNodeGroups(kind); err != nil {
+			s.retain(err)
+			return
+		}
 		seen := make(map[string]bool, len(repos))
 		for _, repo := range repos {
 			if seen[repo] {
@@ -98,6 +106,10 @@ func (s *Snapshot) DeadCodeCandidatesInReposFiltered(kinds []graph.NodeKind, inc
 	var out []*graph.Node
 	for kind := range uniqueNonempty(kinds) {
 		useKinds := slices.Collect(uniqueNonempty(incoming[kind]))
+		if err := s.requireDeadCodeGroups(kind, useKinds); err != nil {
+			s.retain(err)
+			return nil, err
+		}
 		for n := range s.NodesByKindInRepos(kind, repos) {
 			used := false
 			prefix := keyStrings([]byte{familyEdge, edgeIn}, n.ID)

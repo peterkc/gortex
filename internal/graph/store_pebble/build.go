@@ -26,6 +26,7 @@ type BuildStore struct {
 	published     bool
 	first         error
 	readErr       error
+	cleanupErr    error
 	resolveMu     sync.Mutex
 }
 
@@ -42,6 +43,13 @@ func OpenBuild(path string, profile Profile) (*BuildStore, error) {
 	if path == "" {
 		return nil, invalid("empty private head path")
 	}
+	pendingPath := filepath.Join(path, "pending")
+	if _, err := os.Lstat(pendingPath); !os.IsNotExist(err) {
+		if err != nil {
+			return nil, err
+		}
+		return nil, &os.PathError{Op: "open", Path: pendingPath, Err: os.ErrExist}
+	}
 	options := headOptions()
 	options.ErrorIfExists = true
 	db, err := pebble.Open(path, options)
@@ -56,7 +64,7 @@ func OpenBuild(path string, profile Profile) (*BuildStore, error) {
 }
 
 func (b *BuildStore) Close() error {
-	return errors.Join(b.pending.Close(), os.RemoveAll(filepath.Join(b.scratchParent, "pending")), b.db.Close())
+	return errors.Join(b.cleanupErr, b.pending.Close(), os.RemoveAll(filepath.Join(b.scratchParent, "pending")), b.db.Close())
 }
 
 // OpenSnapshot returns a new read-only request over the published bytes.
@@ -92,14 +100,17 @@ func nodeIndexKeys(n *graph.Node) [][]byte {
 	return keys
 }
 
-func edgeIndexRows(e *graph.Edge, id [16]byte, repo string, outKey, value []byte) []row {
+func edgeIndexRows(e *graph.Edge, id [16]byte, owner sourceOwner, outKey, value []byte) []row {
 	kind := string(e.Kind)
-	return []row{
+	rows := []row{
 		{append(keyStrings([]byte{familyEdge, edgeIn}, e.To, kind), id[:]...), value},
-		{append(keyStrings([]byte{familyEdge, edgeInRepo}, e.To, repo), id[:]...), value},
 		{append(appendKeyLine(keyStrings([]byte{familyEdge, edgeOutKind}, e.From, kind), e.Line), id[:]...), value},
 		{append(appendKeyLine(keyStrings([]byte{familyEdge, edgeKind}, kind, e.From), e.Line), id[:]...), outKey},
 	}
+	if owner.present {
+		rows = append(rows, row{append(keyStrings([]byte{familyEdge, edgeInRepo}, e.To, owner.repo), id[:]...), value})
+	}
+	return rows
 }
 
 func (b *BuildStore) Publish(ctx context.Context) (err error) {
@@ -112,11 +123,20 @@ func (b *BuildStore) Publish(ctx context.Context) (err error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	dir, err := os.MkdirTemp(b.scratchParent, "gold-")
+	dir, err := os.MkdirTemp(filepath.Join(b.scratchParent, "pending"), "gold-")
 	if err != nil {
 		return err
 	}
-	defer func() { err = errors.Join(err, os.RemoveAll(dir)) }()
+	defer func() {
+		if cleanupErr := os.RemoveAll(dir); cleanupErr != nil {
+			if err == nil {
+				// Publication is already visible. Close reports the cleanup failure.
+				b.cleanupErr = errors.Join(b.cleanupErr, cleanupErr)
+			} else {
+				err = errors.Join(err, cleanupErr)
+			}
+		}
+	}()
 	format := b.db.FormatMajorVersion().MaxTableFormat()
 	gold := sortedRuns{dir: dir, name: "graph", options: b.options, format: format, limit: goldBufferBytes}
 	refs := sortedRuns{dir: dir, name: "refs", options: b.options, format: format, limit: goldBufferBytes}
@@ -139,12 +159,18 @@ func (b *BuildStore) Publish(ctx context.Context) (err error) {
 	return nil
 }
 
-func (b *BuildStore) keptOwner(id string) (string, error) {
+type sourceOwner struct {
+	repo         string
+	present, off bool
+}
+
+func (b *BuildStore) keptOwner(id string) (sourceOwner, error) {
 	n, err := pendingGet(b.pending, pendingNodeKey(id), decodeNodeLight)
-	if n == nil || err != nil || !b.profile.keepsNode(n.Kind) {
-		return "", err
+	if n == nil || err != nil {
+		return sourceOwner{}, err
 	}
-	return n.RepoPrefix, nil
+	kept := b.profile.keepsNode(n.Kind)
+	return sourceOwner{repo: n.RepoPrefix, present: kept, off: !kept}, nil
 }
 
 func (b *BuildStore) writeRows(ctx context.Context, gold *sortedRuns) error {
@@ -204,16 +230,25 @@ func (b *BuildStore) writeRows(ctx context.Context, gold *sortedRuns) error {
 		if !b.profile.keepsEdge(e.Kind) {
 			return nil
 		}
-		repo, err := b.keptOwner(e.From)
+		owner, err := b.keptOwner(e.From)
 		if err != nil {
 			return err
+		}
+		if owner.off {
+			if err := addCounts(countKey("off incoming owner", e.To, owner.repo)); err != nil {
+				return err
+			}
+		}
+		repo := owner.repo
+		if !owner.present {
+			repo = "" // Preserve the existing edge accounting for omitted sources.
 		}
 		id := edgeIdentity(e)
 		key, value := outEdgeKey(e, id), bytes.Clone(r.value)
 		if err := gold.add(key, value); err != nil {
 			return err
 		}
-		for _, pair := range edgeIndexRows(e, id, repo, key, value) {
+		for _, pair := range edgeIndexRows(e, id, owner, key, value) {
 			if err := gold.add(pair.key, pair.value); err != nil {
 				return err
 			}

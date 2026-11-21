@@ -12,7 +12,7 @@ import (
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/search/fts5token"
 )
 
 func (b *BuildStore) UpsertSymbolFTS(id, text string) error {
@@ -36,6 +36,9 @@ func (b *BuildStore) UpsertSymbolFTS(id, text string) error {
 }
 
 func (b *BuildStore) BulkUpsertSymbolFTS(repo string, items []graph.SymbolFTSItem) (err error) {
+	if len(items) == 0 {
+		return nil
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.first != nil {
@@ -56,11 +59,7 @@ func (b *BuildStore) BulkUpsertSymbolFTS(repo string, items []graph.SymbolFTSIte
 		}
 	}()
 	prefix := []byte{familySymbol}
-	if repo == "" {
-		if err := b.pending.DeleteRange(prefix, prefixEnd(prefix), pebble.NoSync); err != nil {
-			return err
-		}
-	} else if err := pendingVisit(context.Background(), b.pending, prefix, func(r row) error {
+	if err := pendingVisit(context.Background(), b.pending, prefix, func(r row) error {
 		id, _, err := readKeyString(r.key[1:])
 		if err != nil {
 			return err
@@ -121,7 +120,7 @@ func (b *BuildStore) writeSymbols(ctx context.Context, gold *sortedRuns) error {
 		if len(ids) == 0 {
 			return nil
 		}
-		tokens, err := store_sqlite.SymbolFTSTokenize(ctx, texts)
+		tokens, err := fts5token.SymbolFTSTokenize(ctx, texts)
 		if err != nil {
 			return err
 		}
@@ -134,9 +133,10 @@ func (b *BuildStore) writeSymbols(ctx context.Context, gold *sortedRuns) error {
 			if n == nil {
 				return invalid("symbol document has no source node")
 			}
+			// Keep the full ranking corpus; an off-group winner must not become a dangling graph hit.
 			stats.Rows++
 			stats.Count++
-			d := searchDoc{Rowid: stats.Rows, Length: int64(len(terms)), NodePresent: true, ID: id, Repo: n.RepoPrefix, Path: searchPath(n.FilePath, n.RepoPrefix), Name: n.Name, Kind: string(n.Kind)}
+			d := searchDoc{Rowid: stats.Rows, Length: int64(len(terms)), NodePresent: b.profile.keepsNode(n.Kind), ID: id, Repo: n.RepoPrefix, Path: searchPath(n.FilePath, n.RepoPrefix), Name: n.Name, Kind: string(n.Kind)}
 			freq := make(map[string]int64)
 			for _, term := range terms {
 				freq[term]++

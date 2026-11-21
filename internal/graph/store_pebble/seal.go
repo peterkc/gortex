@@ -10,7 +10,7 @@ import (
 type goldSeal struct {
 	refs sortedRuns
 	// Resolve owners from private input keys, never from the serving DB.
-	owner                              func(string) (string, error)
+	owner                              func(string) (sourceOwner, error)
 	nodes, edges, nodeCount, edgeCount int
 }
 
@@ -31,11 +31,11 @@ func (s *goldSeal) visit(r row) error {
 		if err != nil {
 			return err
 		}
-		repo, err := s.owner(n.ID)
+		owner, err := s.owner(n.ID)
 		if err != nil {
 			return err
 		}
-		if n.ID == "" || repo != n.RepoPrefix || !bytes.Equal(r.key, keyStrings([]byte{familyNode}, n.ID)) {
+		if n.ID == "" || !owner.present || owner.repo != n.RepoPrefix || !bytes.Equal(r.key, keyStrings([]byte{familyNode}, n.ID)) {
 			return invalid("node ID and owner projection do not match")
 		}
 		s.nodes++
@@ -60,11 +60,11 @@ func (s *goldSeal) visit(r row) error {
 			return invalid("outgoing edge identity mismatch")
 		}
 		s.edges++
-		repo, err := s.owner(e.From)
+		owner, err := s.owner(e.From)
 		if err != nil {
 			return err
 		}
-		for _, pair := range edgeIndexRows(e, id, repo, r.key, r.value) {
+		for _, pair := range edgeIndexRows(e, id, owner, r.key, r.value) {
 			if err := s.relation(pair.key, pair.value, false); err != nil {
 				return err
 			}

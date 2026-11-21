@@ -107,6 +107,10 @@ func (s *Snapshot) DeadCodeCandidatesInScopeFiltered(kinds []graph.NodeKind, inc
 	for _, kind := range kinds {
 		start := len(out)
 		allow := slices.Collect(uniqueNonempty(incoming[kind]))
+		if err := s.requireDeadCodeGroups(kind, allow); err != nil {
+			s.retain(err)
+			return nil, err
+		}
 		for n := range s.NodesByKindInScope(kind, repos, scope) {
 			if !exclude.Allows(n) {
 				continue

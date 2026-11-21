@@ -45,6 +45,9 @@ func (s *Snapshot) GetNodeIDsByKindsContext(ctx context.Context, ids []string, k
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if err := s.requireNodeGroups(kinds...); err != nil {
+		return nil, err
+	}
 	out := make(map[string]struct{})
 	if len(kinds) == 0 {
 		return out, nil

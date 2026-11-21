@@ -35,6 +35,10 @@ func uniqueNonempty[K ~string](items []K) iter.Seq[K] {
 }
 
 func (s *Snapshot) AllEdgesLight(kinds ...graph.EdgeKind) []*graph.Edge {
+	if err := s.requireEdgeGroups(kinds...); err != nil {
+		s.retain(err)
+		return nil
+	}
 	if len(kinds) == 0 {
 		return listRows(s, []byte{familyEdge, edgeOut}, decodeEdgeLight)
 	}
@@ -50,6 +54,10 @@ func (s *Snapshot) AllEdgesLight(kinds ...graph.EdgeKind) []*graph.Edge {
 
 func (s *Snapshot) EdgesByKinds(kinds []graph.EdgeKind) iter.Seq[*graph.Edge] {
 	return func(yield func(*graph.Edge) bool) {
+		if err := s.requireEdgeGroups(kinds...); err != nil {
+			s.retain(err)
+			return
+		}
 		for kind := range uniqueNonempty(kinds) {
 			for e := range s.EdgesByKind(kind) {
 				if !yield(e) {
@@ -61,6 +69,10 @@ func (s *Snapshot) EdgesByKinds(kinds []graph.EdgeKind) iter.Seq[*graph.Edge] {
 }
 
 func (s *Snapshot) NodesByKinds(kinds []graph.NodeKind) []*graph.Node {
+	if err := s.requireNodeGroups(kinds...); err != nil {
+		s.retain(err)
+		return nil
+	}
 	var out []*graph.Node
 	for kind := range uniqueNonempty(kinds) {
 		out = slices.AppendSeq(out, s.NodesByKind(kind))
@@ -69,6 +81,10 @@ func (s *Snapshot) NodesByKinds(kinds []graph.NodeKind) []*graph.Node {
 }
 
 func (s *Snapshot) NodeIDsByKinds(kinds []graph.NodeKind) []string {
+	if err := s.requireNodeGroups(kinds...); err != nil {
+		s.retain(err)
+		return nil
+	}
 	var out []string
 	for kind := range uniqueNonempty(kinds) {
 		decodeRows(s, keyStrings([]byte{familyNodeKind}, string(kind)), func(raw []byte) (string, error) { return string(raw), nil }, func(id string) bool {

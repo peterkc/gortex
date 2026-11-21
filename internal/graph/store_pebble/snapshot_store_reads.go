@@ -27,7 +27,7 @@ func (s *Snapshot) GetNodesByQualNames(names []string) map[string][]*graph.Node 
 func (s *Snapshot) FindNodesByNameInRepo(name, repo string) []*graph.Node {
 	var out []*graph.Node
 	s.indexedNodes(keyStrings([]byte{familyName, nameExact}, name), func(n *graph.Node) bool {
-		if repo == "" || n.RepoPrefix == repo {
+		if n.RepoPrefix == repo {
 			out = append(out, n)
 		}
 		return true
@@ -58,10 +58,16 @@ func (s *Snapshot) GetFileNodesByPaths(paths []string) map[string][]*graph.Node 
 }
 
 func (s *Snapshot) GetRepoNodesByLanguage(repo, language string) []*graph.Node {
+	if language == "" {
+		return nil
+	}
 	return s.findIndexedNodes(keyStrings([]byte{familyName, nameRepoLanguage}, repo, language))
 }
 
 func (s *Snapshot) GetNodesByLanguage(language string) []*graph.Node {
+	if language == "" {
+		return nil
+	}
 	return s.findIndexedNodes(keyStrings([]byte{familyName, nameLanguage}, language))
 }
 

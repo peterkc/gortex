@@ -74,9 +74,10 @@ func searchASCII(q string) bool {
 }
 
 type searchScored struct {
-	ID    string
-	Rowid int64
-	Score float64
+	ID      string
+	NodeOff bool
+	Rowid   int64
+	Score   float64
 }
 type searchTop []searchScored
 
@@ -217,9 +218,6 @@ func (s *Snapshot) memo(key string) ([]graph.SymbolHit, bool) {
 }
 
 func (s *Snapshot) saveMemo(key string, hits []graph.SymbolHit) {
-	if len(hits) > searchMemoRows {
-		return
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i, e := range s.searchMemo {
@@ -252,9 +250,6 @@ func (s *Snapshot) search(ctx context.Context, q string, repos, paths []string, 
 	}
 	if limit <= 0 {
 		limit = 20
-	}
-	if !searchASCII(q) {
-		return nil, fmt.Errorf("non-ASCII FTS query: %w", errors.ErrUnsupported)
 	}
 	stats, err := point(s, searchKey("stats"), searchReadStats)
 	if err != nil {
@@ -292,6 +287,9 @@ func (s *Snapshot) search(ctx context.Context, q string, repos, paths []string, 
 			slices.SortFunc(hits, func(a, b graph.SymbolHit) int { return strings.Compare(a.NodeID, b.NodeID) })
 			return hits[:min(len(hits), limit)], nil
 		}
+	}
+	if !searchASCII(q) {
+		return nil, fmt.Errorf("non-ASCII FTS query: %w", errors.ErrUnsupported)
 	}
 	phrases, ok := search.FTSRankTerms(q)
 	if !ok {
@@ -369,7 +367,7 @@ func (s *Snapshot) search(ctx context.Context, q string, repos, paths []string, 
 							}
 							freq, first := searchFreq(d, phrases)
 							if first == term {
-								searchKeep(top, searchScored{ID: d.ID, Rowid: d.Rowid, Score: searchScore(freq, idf, d.Length, avg)}, limit)
+								searchKeep(top, searchScored{ID: d.ID, NodeOff: !d.NodePresent, Rowid: d.Rowid, Score: searchScore(freq, idf, d.Length, avg)}, limit)
 							}
 							return nil
 						})
@@ -389,6 +387,9 @@ func (s *Snapshot) search(ctx context.Context, q string, repos, paths []string, 
 	sort.Slice(*top, func(i, j int) bool { return searchBetter((*top)[i], (*top)[j]) })
 	var hits []graph.SymbolHit
 	for _, v := range *top {
+		if v.NodeOff {
+			return nil, groupOffError{localNodeGroup, s.profile}
+		}
 		if v.ID != "" {
 			hits = append(hits, graph.SymbolHit{NodeID: v.ID, Score: v.Score})
 		}

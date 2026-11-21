@@ -27,6 +27,14 @@ func (s *Snapshot) lightNode(id string) *graph.Node {
 
 func (s *Snapshot) EdgeAdjacencyForKinds(edgeKinds []graph.EdgeKind, nodeKinds []graph.NodeKind) iter.Seq[[2]string] {
 	return func(yield func([2]string) bool) {
+		if err := s.requireEdgeGroups(edgeKinds...); err != nil {
+			s.retain(err)
+			return
+		}
+		if err := s.requireNodeGroups(nodeKinds...); err != nil {
+			s.retain(err)
+			return
+		}
 		if len(nodeKinds) == 0 {
 			return
 		}
@@ -52,6 +60,10 @@ func (s *Snapshot) EdgeAdjacencyForKinds(edgeKinds []graph.EdgeKind, nodeKinds [
 }
 
 func (s *Snapshot) InEdgeCountsByKind(kinds []graph.EdgeKind) map[string]int {
+	if err := s.requireEdgeGroups(kinds...); err != nil {
+		s.retain(err)
+		return nil
+	}
 	var out map[string]int
 	for kind := range uniqueNonempty(kinds) {
 		if out == nil {
@@ -116,6 +128,10 @@ func (s *Snapshot) NodeDegreeByKinds(kinds []graph.NodeKind, pathPrefix string) 
 }
 
 func (s *Snapshot) NodesInFilesByKind(paths []string, kinds []graph.NodeKind) []*graph.Node {
+	if err := s.requireNodeGroups(kinds...); err != nil {
+		s.retain(err)
+		return nil
+	}
 	if len(kinds) == 0 {
 		return nil
 	}

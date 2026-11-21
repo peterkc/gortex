@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -15,11 +16,19 @@ import (
 // (including groups omitted by the profile) plus pending mutations. It is
 // never a reader source and needs neither a WAL nor crash recovery.
 func openPending(dir string) (*pebble.DB, error) {
-	return pebble.Open(filepath.Join(dir, "pending"), &pebble.Options{
+	path := filepath.Join(dir, "pending")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		return nil, err
+	}
+	db, err := pebble.Open(path, &pebble.Options{
 		CacheSize:  buildBlockCacheBytes,
 		DisableWAL: true, ErrorIfExists: true, MemTableSize: 4 << 20,
 		MemTableStopWritesThreshold: 2,
 	})
+	if err != nil {
+		return nil, errors.Join(err, os.RemoveAll(path))
+	}
+	return db, nil
 }
 
 func pendingGet[T any](db *pebble.DB, key []byte, decode decodeRow[T]) (v T, err error) {

@@ -122,6 +122,10 @@ func (s *Snapshot) FileImportCounts(scope []string) []graph.FileImportCountRow {
 }
 
 func (s *Snapshot) ReachableForwardByKinds(seeds []string, kinds []graph.EdgeKind) map[string]bool {
+	if err := s.requireEdgeGroups(kinds...); err != nil {
+		s.retain(err)
+		return nil
+	}
 	if len(seeds) == 0 {
 		return nil
 	}
