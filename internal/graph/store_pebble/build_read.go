@@ -10,7 +10,7 @@ import (
 
 // ErrUnpublishedBuild signals that this handle cannot serve a pending read.
 // OpenSnapshot returns a separate handle after the first publish.
-var ErrUnpublishedBuild = errors.New("Pebble build has no readable snapshot; use the published snapshot")
+var ErrUnpublishedBuild = errors.New("pebble build has no readable snapshot; use the published snapshot")
 
 // graph.Store's legacy read methods cannot return errors. Keep the first
 // refusal separate from mutation failure so a read attempt cannot poison a

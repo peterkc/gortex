@@ -58,7 +58,7 @@ func (s *sortedRuns) flush() (err error) {
 		return nil
 	}
 	if len(s.paths) >= goldFileCap {
-		return fmt.Errorf("Pebble %s exceeds %d sorted runs", s.name, goldFileCap)
+		return fmt.Errorf("pebble %s exceeds %d sorted runs", s.name, goldFileCap)
 	}
 	slices.SortFunc(s.rows, func(a, b row) int { return bytes.Compare(a.key, b.key) })
 	path := filepath.Join(s.dir, fmt.Sprintf("%s-%04d.sst", s.name, len(s.paths)))

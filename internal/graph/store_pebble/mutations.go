@@ -20,11 +20,13 @@ func (b *BuildStore) withWrites(write func() error) error {
 }
 
 func (b *BuildStore) AddNode(n *graph.Node) {
-	b.withWrites(func() error { return b.writeNode(n) })
+	// withWrites saves the first mutation error for Publish.
+	_ = b.withWrites(func() error { return b.writeNode(n) })
 }
 
 func (b *BuildStore) AddBatch(nodes []*graph.Node, edges []*graph.Edge) {
-	b.withWrites(func() error {
+	// withWrites saves the first mutation error for Publish.
+	_ = b.withWrites(func() error {
 		for _, n := range nodes {
 			if err := b.writeNode(n); err != nil {
 				return err
@@ -40,7 +42,8 @@ func (b *BuildStore) AddBatch(nodes []*graph.Node, edges []*graph.Edge) {
 }
 
 func (b *BuildStore) AddEdge(e *graph.Edge) {
-	b.withWrites(func() error { return b.addEdge(e) })
+	// withWrites saves the first mutation error for Publish.
+	_ = b.withWrites(func() error { return b.addEdge(e) })
 }
 
 func (b *BuildStore) addEdge(e *graph.Edge) error {

@@ -10,7 +10,7 @@ import (
 // D64 defers the enrichment family. Value-only readers must retain the
 // refusal for the request owner instead of reporting a successful empty read.
 func enrichmentUnsupported(family string) error {
-	return fmt.Errorf("Pebble %s enrichment: %w", family, errors.ErrUnsupported)
+	return fmt.Errorf("pebble %s enrichment: %w", family, errors.ErrUnsupported)
 }
 
 var (

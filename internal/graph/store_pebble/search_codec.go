@@ -312,7 +312,9 @@ func checkSymbolRow(r row) error {
 		}
 	case "prefix-df":
 		c := recordCursor{buf: r.value}
-		if c.integer() <= 0 || c.integer() <= 0 {
+		count := c.integer()
+		id := c.integer()
+		if count <= 0 || id <= 0 {
 			return invalid("zero symbol prefix count or ID")
 		}
 		err = c.finish()

@@ -44,7 +44,7 @@ func TestSnapshotNodeProjectionParity(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, wantMembership, gotMembership)
 	require.Len(t, gotMembership, 2)
-	none, err := s.GetNodeIDsByKindsContext(nil, ids, nil)
+	none, err := s.GetNodeIDsByKindsContext(context.TODO(), ids, nil)
 	require.NoError(t, err)
 	require.Empty(t, none)
 	wantPresence, err := sql.GetNodePresenceByIDsContext(ctx, ids)
