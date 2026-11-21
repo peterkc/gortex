@@ -50,7 +50,6 @@ var commitExempt = map[string]string{
 	"schema_version.go:applyInPlaceMigrationsWith":                        "schema migration; its crash points are the upgrade hook",
 	"row_counters.go:EnsureRowCounters":                                   "row-counter maintenance: counter tables and triggers only",
 	"row_counters.go:CheckRowCounters":                                    "row-counter maintenance: counter tables only",
-	"store_fts_tokenize.go:SymbolFTSTokenize":                             "scratch :memory: database, not the store",
 }
 
 // TestStorageFaultPayloadCommitsUseTheHelpers holds every payload and catalog
