@@ -620,6 +620,11 @@ type SymbolSearcher interface {
 	UpsertSymbolFTS(nodeID, tokens string) error
 	BulkUpsertSymbolFTS(repoPrefix string, items []SymbolFTSItem) error
 	BuildSymbolIndex() error
+	SymbolSearchReader
+}
+
+// SymbolSearchReader is the read side of SymbolSearcher for published snapshots.
+type SymbolSearchReader interface {
 	SearchSymbols(query string, limit int) ([]SymbolHit, error)
 }
 

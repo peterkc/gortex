@@ -284,3 +284,55 @@ func fileConstructsStagingGraph(filePath string) (bool, error) {
 	})
 	return found, nil
 }
+
+// TestPebbleKeyBytesStayInStore enforces the §17.6 package boundary. The
+// private key codec has no exports. No other caller may open the raw keyspace
+// or construct tables through a direct Pebble import.
+func TestPebbleKeyBytesStayInStore(t *testing.T) {
+	root, err := findRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if p == filepath.Join(root, "internal", "graph", "store_pebble") {
+				return filepath.SkipDir
+			}
+			if _, skip := fenceSkippedDirs[d.Name()]; skip {
+				return filepath.SkipDir
+			}
+			nested, err := nestedGitCheckout(root, p)
+			if err != nil {
+				return err
+			}
+			if nested {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), ".go") {
+			return nil
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), p, nil, parser.ImportsOnly)
+		if err != nil {
+			return err
+		}
+		for _, imp := range f.Imports {
+			name, err := strconv.Unquote(imp.Path.Value)
+			if err != nil {
+				return err
+			}
+			if name == "github.com/cockroachdb/pebble" || strings.HasPrefix(name, "github.com/cockroachdb/pebble/") {
+				rel, _ := filepath.Rel(root, p)
+				t.Errorf("%s imports Pebble outside store_pebble: %s", rel, name)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

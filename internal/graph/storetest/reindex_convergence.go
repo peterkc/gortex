@@ -77,14 +77,20 @@ func RunReindexConvergencePayload(t *testing.T, factory Factory) {
 				if reverse && len(batch) == 2 {
 					batch[0], batch[1] = batch[1], batch[0]
 				}
-				receipts := s.(graph.MutationReceiptStore)
-				token := receipts.BeginMutationReceipt()
+				receipts, reportsReceipts := s.(graph.MutationReceiptStore)
+				var token graph.MutationReceiptToken
+				if reportsReceipts {
+					token = receipts.BeginMutationReceipt()
+				}
 				if shape == "single_stationary" {
 					s.ReindexEdge(batch[0].Edge, batch[0].OldTo)
 				} else {
 					s.ReindexEdges(batch)
 				}
-				receipt := receipts.EndMutationReceipt(token)
+				var receipt graph.MutationReceipt
+				if reportsReceipts {
+					receipt = receipts.EndMutationReceipt(token)
+				}
 				for name, rows := range map[string][]*graph.Edge{
 					"all": s.AllEdges(), "out": s.GetOutEdges("caller"), "in": s.GetInEdges(destination.To),
 				} {
@@ -107,6 +113,12 @@ func RunReindexConvergencePayload(t *testing.T, factory Factory) {
 				}
 				if err := s.VerifyEdgeIdentities(); err != nil {
 					t.Fatal(err)
+				}
+				if !reportsReceipts {
+					t.Run("MutationReceipt", func(t *testing.T) {
+						t.Skip("backend does not implement graph.MutationReceiptStore")
+					})
+					return
 				}
 				var wantFiles []string
 				if wantWork {

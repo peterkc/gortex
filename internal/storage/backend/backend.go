@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/storage"
 )
@@ -27,10 +28,12 @@ type UpgradeHook struct{ option store_sqlite.Option }
 type registration struct {
 	open    func(string, OpenOptions) (graph.Store, func() error, error)
 	offline any
+	private bool
 }
 
 var backends = map[string]registration{
 	"sqlite": {open: openSQLite, offline: store_sqlite.OfflineMaintenance{}},
+	"pebble": {private: true},
 }
 
 // RepoIndexStateBaseViewGen is the scope of the SQLite freshness probe.
@@ -62,6 +65,9 @@ func selectBackend(name string) (registration, error) {
 	if !ok {
 		return registration{}, fmt.Errorf("unknown backend %q (expected: sqlite)", name)
 	}
+	if selected.private {
+		return registration{}, fmt.Errorf("backend %q is private to builds: %w", name, errors.ErrUnsupported)
+	}
 	return selected, nil
 }
 
@@ -79,6 +85,11 @@ func Open(name, path string, options OpenOptions) (graph.Store, func() error, er
 		return nil, nil, err
 	}
 	return selected.open(path, options)
+}
+
+// OpenPebbleBuild bypasses production selection only for a private, new head.
+func OpenPebbleBuild(path string, profile store_pebble.Profile) (*store_pebble.BuildStore, error) {
+	return store_pebble.OpenBuild(path, profile)
 }
 
 func openSQLite(path string, options OpenOptions) (graph.Store, func() error, error) {

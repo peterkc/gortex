@@ -92,6 +92,14 @@ type Semantics struct {
 	// rather than discovered when a first-match helper picks a different edge
 	// on one backend than the other.
 	AdjacencyLineOrdered bool
+
+	// CanonicalIncomingTies selects D61's canonical identity tie order
+	// within an incoming edge kind instead of SQLite's arrival order.
+	CanonicalIncomingTies bool
+
+	// ConcurrentSnapshotReads replaces the live-read fixture for a backend
+	// whose visibility contract requires a published reader (D38).
+	ConcurrentSnapshotReads func(*testing.T)
 }
 
 // RunConformance runs the full conformance suite against the Store
@@ -192,7 +200,13 @@ func RunConformance(t *testing.T, factory Factory, semantics Semantics) {
 	t.Run("EdgePersistRoundTrip", func(t *testing.T) { testEdgePersistRoundTrip(t, factory) })
 	t.Run("ReadAliasing", func(t *testing.T) { testReadAliasing(t, factory, semantics) })
 	t.Run("IteratorReentrancy", func(t *testing.T) { testIteratorReentrancy(t, factory) })
-	t.Run("ConcurrentReadsDuringWrite", func(t *testing.T) { testConcurrentReadsDuringWrite(t, factory) })
+	t.Run("ConcurrentReadsDuringWrite", func(t *testing.T) {
+		if semantics.ConcurrentSnapshotReads != nil {
+			semantics.ConcurrentSnapshotReads(t)
+			return
+		}
+		testConcurrentReadsDuringWrite(t, factory)
+	})
 	t.Run("ReadOrdering", func(t *testing.T) { testReadOrdering(t, factory, semantics) })
 	t.Run("AttributeOnlyReindex", func(t *testing.T) { testAttributeOnlyReindex(t, factory) })
 	t.Run("MutationReceipts", func(t *testing.T) { testMutationReceipts(t, factory) })
@@ -3135,6 +3149,11 @@ func testThrowerErrorSurfacer(t *testing.T, factory Factory) {
 	if a.Throws != 3 {
 		t.Fatalf("ThrowA.Throws = %d, want 3", a.Throws)
 	}
+	// The lowest-line throw also arrives first here, so both backends
+	// can assert the canonical location without changing SQLite's writer.
+	if a.FilePath != "pkg/keep/a.go" || a.Line != 10 {
+		t.Fatalf("ThrowA location = %s:%d, want pkg/keep/a.go:10", a.FilePath, a.Line)
+	}
 	gotTargets := append([]string(nil), a.ErrorTargets...)
 	sort.Strings(gotTargets)
 	if fmt.Sprint(gotTargets) != fmt.Sprint([]string{"ErrIO", "ErrTimeout"}) {
@@ -4295,7 +4314,10 @@ func testReleaseEnrichmentSidecar(t *testing.T, factory Factory) {
 	if !ok {
 		t.Skip("backend does not implement graph.ReleaseEnrichmentWriter")
 	}
-	r := s.(graph.ReleaseEnrichmentReader)
+	r, ok := s.(graph.ReleaseEnrichmentReader)
+	if !ok {
+		t.Skip("backend implements ReleaseEnrichmentWriter but not ReleaseEnrichmentReader")
+	}
 	if err := w.BulkSetReleases("repoA", nil); err != nil {
 		t.Fatalf("BulkSetReleases(nil): %v", err)
 	}
@@ -4340,7 +4362,10 @@ func testBlameEnrichmentSidecar(t *testing.T, factory Factory) {
 	if !ok {
 		t.Skip("backend does not implement graph.BlameEnrichmentWriter")
 	}
-	r := s.(graph.BlameEnrichmentReader)
+	r, ok := s.(graph.BlameEnrichmentReader)
+	if !ok {
+		t.Skip("backend implements BlameEnrichmentWriter but not BlameEnrichmentReader")
+	}
 	if err := w.BulkSetBlame("repoA", nil); err != nil {
 		t.Fatalf("BulkSetBlame(nil): %v", err)
 	}
@@ -4850,10 +4875,9 @@ func testConcurrentReadsDuringWrite(t *testing.T, factory Factory) {
 //     must sort rather than trust the read.
 //
 //  2. GetInEdges is stable per backend and, on a line-ordered backend,
-//     grouped by edge kind. Ordering WITHIN a kind is insertion order, not
-//     line order: the reverse-adjacency index carries the row id, not the
-//     line, and buying a line order here would cost a sort on every in-edge
-//     read. Callers that need a total order over in-edges must sort.
+//     grouped by edge kind. SQLite uses arrival order within a kind; Pebble
+//     uses canonical edge identity (D61). Neither promises source line order.
+//     Callers that need a portable order over in-edges must sort.
 //
 //  3. AllNodes / AllEdges are NOT ordered at all. The staging graph walks
 //     hash-map shards, so it hands back a fresh permutation per call by
@@ -4936,12 +4960,12 @@ func testReadOrdering(t *testing.T, factory Factory, semantics Semantics) {
 		t.Fatalf("GetInEdges(b) is not stable across calls: %v then %v", render(in, nil), got)
 	}
 	if semantics.AdjacencyLineOrdered {
-		// Grouped by kind, insertion order within a kind — deliberately NOT
-		// line order (line 10 stays behind line 30 because it was written
-		// second).
 		wantIn := []string{"b|calls|30", "b|calls|10", "b|calls|5", "b|references|20"}
+		if semantics.CanonicalIncomingTies {
+			wantIn = []string{"b|calls|5", "b|calls|30", "b|calls|10", "b|references|20"}
+		}
 		if got := render(in, nil); fmt.Sprint(got) != fmt.Sprint(wantIn) {
-			t.Fatalf("GetInEdges(b) = %v, want %v (grouped by kind, insertion order within a kind)", got, wantIn)
+			t.Fatalf("GetInEdges(b) = %v, want %v (grouped by kind, CanonicalIncomingTies=%t)", got, wantIn, semantics.CanonicalIncomingTies)
 		}
 	} else {
 		wantIn := []string{"b|calls|30", "b|references|20", "b|calls|10", "b|calls|5"}

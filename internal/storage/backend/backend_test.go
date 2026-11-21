@@ -1,6 +1,8 @@
 package backend
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -51,4 +53,29 @@ func TestOpenRawRefusesNamesBeforeOpening(t *testing.T) {
 			t.Fatalf("name check differs: %v", check)
 		}
 	}
+}
+
+func TestPebbleBuildOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private")
+	for _, rawName := range []string{"pebble", " PEBBLE "} {
+		if err := CheckName(rawName); !errors.Is(err, errors.ErrUnsupported) {
+			t.Fatalf("production name was not refused: %v", err)
+		}
+		s, closeStore, err := OpenRaw(rawName, path)
+		if s != nil || closeStore != nil || !errors.Is(err, errors.ErrUnsupported) {
+			t.Fatalf("production open = %v, %v, %v", s, closeStore == nil, err)
+		}
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("production refusal touched the store: %v", err)
+	}
+	b, err := OpenPebbleBuild(path, "full")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := b.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 }
