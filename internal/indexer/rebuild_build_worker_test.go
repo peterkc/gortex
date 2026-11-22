@@ -404,6 +404,33 @@ func TestRebuildBuildReplyRequiresCoverage(t *testing.T) {
 	}
 }
 
+func TestRebuildBuildViewRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		cause, want error
+		code        uint8
+	}{
+		{"view error alone", store_pebble.ErrRebuildView, store_pebble.ErrRebuildView, 21},
+		{"denied", fmt.Errorf("%w: %w: %w", store_pebble.ErrRebuildView, errRebuildResolverNamespace, errRebuildResolverInputDenied), errRebuildResolverInputDenied, 29},
+		{"unproved namespace", fmt.Errorf("%w: %w", store_pebble.ErrRebuildView, errRebuildResolverNamespace), errRebuildResolverNamespace, 30},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var reply, acks bytes.Buffer
+			r := buildRefusal(tc.cause)
+			require.Equal(t, tc.code, r.Refusal)
+			require.NoError(t, writeRebuildBuildReply(&reply, r))
+			err := receiveRebuildStages(t.Context(), t.TempDir(), rebuildBuildRequest{}, &reply, &acks,
+				func(context.Context, store_pebble.StageTables) error {
+					t.Fatal("a refusal must not publish")
+					return nil
+				})
+			require.ErrorIs(t, err, ErrRebuildWorker)
+			require.ErrorIs(t, err, tc.want)
+			require.Empty(t, acks.Bytes())
+		})
+	}
+}
+
 func TestRebuildBuildCppIncludeRefusal(t *testing.T) {
 	var reply bytes.Buffer
 	cause := errors.Join(store_pebble.ErrRebuildFileImports, resolver.ErrRebuildCppIncludeInput)

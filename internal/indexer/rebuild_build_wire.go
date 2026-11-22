@@ -172,7 +172,11 @@ func buildRefusal(err error) rebuildBuildReply {
 	for i, kind := range rebuildFailureKinds[1:] {
 		if errors.Is(err, kind) {
 			r.Refusal = uint8(i + 2)
-			break
+			// The view wraps reducer errors as well as read failures.
+			// Keep its code only when there is no more specific cause.
+			if kind != store_pebble.ErrRebuildView {
+				break
+			}
 		}
 	}
 	return r
