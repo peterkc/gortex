@@ -148,8 +148,8 @@ func TestRebuildBuildFrozenInputsRejectBeforeStage(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			lease := t.TempDir()
 			bound, err := captureRebuildBuildInputs(ctx, lease, src, map[string]*rebuildInput{"go.mod": nil, "package.json": nil}, req,
-				func(left *int64, emit func(rebuildSidecarRow) error) error {
-					return writeRebuildNamespaceFact(left, rebuildNamespaceRow{key: ".", kind: rebuildNamespaceClose}, emit)
+				func(_ *int64, emit func(rebuildSidecarRow) error) error {
+					return writeRebuildNamespaceFact(rebuildNamespaceRow{key: ".", kind: rebuildNamespaceClose}, emit)
 				})
 			require.NoError(t, err)
 			path := filepath.Join(lease, rebuildInputSidecarName)

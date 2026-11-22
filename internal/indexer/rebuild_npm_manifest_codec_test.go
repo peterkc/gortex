@@ -235,10 +235,9 @@ func rebuildNpmCodecTestRow(t *testing.T, key, text string, left *int64) rebuild
 func writeRebuildNpmCodecTestSidecar(t *testing.T, boundary []rebuildNamespaceRow, rows ...rebuildSidecarRow) (string, rebuildDigest) {
 	t.Helper()
 	lease := t.TempDir()
-	left := int64(rebuildCppRawLimit)
 	digest, err := writeRebuildInputSidecar(t.Context(), lease, func(emit func(rebuildSidecarRow) error) error {
 		for _, row := range boundary {
-			if err := writeRebuildNamespaceFact(&left, row, emit); err != nil {
+			if err := writeRebuildNamespaceFact(row, emit); err != nil {
 				return err
 			}
 		}

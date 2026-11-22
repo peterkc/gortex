@@ -15,10 +15,9 @@ import (
 func recordTestRebuildWorkspaceGlob(t *testing.T, rows []rebuildNamespaceRow) func() *rebuildWorkspaceGlob {
 	t.Helper()
 	lease := t.TempDir()
-	left := int64(rebuildCppRawLimit)
 	digest, err := writeRebuildInputSidecar(t.Context(), lease, func(emit func(rebuildSidecarRow) error) error {
 		for _, row := range rows {
-			if err := writeRebuildNamespaceFact(&left, row, emit); err != nil {
+			if err := writeRebuildNamespaceFact(row, emit); err != nil {
 				return err
 			}
 		}

@@ -29,21 +29,15 @@ func TestRebuildInputSidecarNamespace(t *testing.T) {
 	liveName := filepath.Join(live, "dir", "missing.js")
 	require.NoError(t, os.WriteFile(liveName, nil, 0o600))
 	lease := t.TempDir()
-	left := int64(rebuildCppRawLimit)
 	digest, err := writeRebuildInputSidecar(ctx, lease, func(emit func(rebuildSidecarRow) error) error {
 		for _, row := range rows {
-			if err := writeRebuildNamespaceFact(&left, row, emit); err != nil {
+			if err := writeRebuildNamespaceFact(row, emit); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
 	require.NoError(t, err)
-	var charge int64
-	for _, row := range rows {
-		charge += int64(len(row.key)) + 1
-	}
-	require.Equal(t, int64(rebuildCppRawLimit)-charge, left)
 
 	for _, mutate := range []func(){func() {}, func() { require.NoError(t, os.Remove(liveName)) }} {
 		mutate()
@@ -70,14 +64,6 @@ func TestRebuildInputSidecarNamespace(t *testing.T) {
 }
 
 func TestRebuildInputSidecarNamespaceRefusals(t *testing.T) {
-	row := rebuildNamespaceRow{".", rebuildNamespaceCloseExact}
-	left := int64(1)
-	err := writeRebuildNamespaceFact(&left, row, func(rebuildSidecarRow) error {
-		t.Fatal("over-cap row was sent")
-		return nil
-	})
-	require.ErrorIs(t, err, errRebuildCppCaptureLimit)
-	require.Equal(t, int64(1), left)
 	require.ErrorIs(t, (rebuildSidecarRow{Kind: rebuildNamespaceRegularFact, Path: []byte(".")}).check(), errRebuildInputSidecar)
 	require.ErrorIs(t, (rebuildSidecarRow{Kind: rebuildNamespaceCloseExactFact, Path: []byte("."), Digest: rebuildDigest{1}}).check(), errRebuildInputSidecar)
 	lease := t.TempDir()
