@@ -71,7 +71,7 @@ func TestRebuildClassificationFileGraph(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, h.Close()) }()
 	var sent []store_pebble.Stage
-	err = buildRebuildStages(ctx, lease, zap.NewNop(), store_pebble.OpenWorkerBuild, store_pebble.RebuildLinkOptions{}, func(tables store_pebble.StageTables) error {
+	err = buildRebuildStages(ctx, lease, zap.NewNop(), store_pebble.OpenWorkerBuild, rebuildTestLinkOptions(t), func(tables store_pebble.StageTables) error {
 		sent = append(sent, tables.Witness.Stage)
 		require.Equal(t, req.Witness.FrozenInputs, tables.Witness.FrozenInputs)
 		_, err := h.PublishStage(ctx, tables)
@@ -170,7 +170,7 @@ func TestRebuildClassificationContentSkipFileGraph(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, h.Close()) })
 	var sent []store_pebble.Stage
-	err = buildRebuildStages(ctx, lease, zap.NewNop(), store_pebble.OpenWorkerBuild, store_pebble.RebuildLinkOptions{}, func(tables store_pebble.StageTables) error {
+	err = buildRebuildStages(ctx, lease, zap.NewNop(), store_pebble.OpenWorkerBuild, rebuildTestLinkOptions(t), func(tables store_pebble.StageTables) error {
 		sent = append(sent, tables.Witness.Stage)
 		require.Equal(t, req.Witness.FrozenInputs, tables.Witness.FrozenInputs)
 		_, err := h.PublishStage(ctx, tables)
