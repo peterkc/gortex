@@ -58,7 +58,7 @@ func TestFreezeRebuildRegularLeaf(t *testing.T) {
 			t.Cleanup(idx.Close)
 			remaining := tc.cap
 			var rows []rebuildSidecarRow
-			input, err := idx.freezeRebuildRegularLeaf(ctx, src.FrozenRoot(), tc.name, tc.listed,
+			input, _, err := idx.freezeRebuildRegularLeaf(ctx, src.FrozenRoot(), tc.name, tc.listed,
 				tc.member, idx.newContentAdmissionGate(), parserLimit, &remaining, func(row rebuildSidecarRow) error {
 					require.NoError(t, row.check())
 					rows = append(rows, row)
@@ -104,7 +104,7 @@ func TestFreezeRebuildRegularLeafPreservesContentSkips(t *testing.T) {
 		var rows []rebuildSidecarRow
 		// A known-name asset skip is decided before the parse byte limit
 		// and produces no input, even with no room for a content read.
-		input, err := idx.freezeRebuildRegularLeaf(ctx, src.FrozenRoot(), key, 0, tc.member, idx.newContentAdmissionGate(), 1, &raw,
+		input, _, err := idx.freezeRebuildRegularLeaf(ctx, src.FrozenRoot(), key, 0, tc.member, idx.newContentAdmissionGate(), 1, &raw,
 			func(row rebuildSidecarRow) error { rows = append(rows, row); return row.check() })
 		require.NoError(t, err)
 		require.Nil(t, input)
@@ -193,4 +193,60 @@ func TestFreezeRebuildCheckoutRootManifestLinks(t *testing.T) {
 	m, err = readCheckedRebuildRootManifest(ctx, src, epoch, "go.mod", 128)
 	require.ErrorIs(t, err, ErrBuildInputChanged)
 	require.Nil(t, m)
+}
+
+func TestRebuildCheckoutGoConfigObservations(t *testing.T) {
+	ctx := t.Context()
+	dir, src := rebuildInputFixture(t)
+	const mod = "module example.org/rootmod\n"
+	const childMod = "module example.org/sub\n"
+	for key, body := range map[string]string{
+		"go.mod": mod, "sub/go.mod": childMod, "sub/lib.go": "package sub\n",
+		"spare/go.mod": "module example.org/unused\n",
+	} {
+		file := filepath.Join(dir, filepath.FromSlash(key))
+		require.NoError(t, os.MkdirAll(filepath.Dir(file), 0o700))
+		require.NoError(t, os.WriteFile(file, []byte(body), 0o600))
+	}
+	reg := parser.NewRegistry()
+	reg.Register(languages.NewGoExtractor())
+	idx := New(graph.New(), reg, config.Default().Index, zap.NewNop())
+	t.Cleanup(idx.Close)
+	raw := int64(rebuildCppRawLimit)
+	epoch, err := freezeRebuildCheckoutInputs(ctx, src.FrozenRoot(), nil, nil, &raw,
+		func(key string, mode fs.FileMode, member rebuildGitMember, raw *int64, emit func(rebuildSidecarRow) error) (rebuildCheckoutLeaf, error) {
+			return idx.freezeRebuildCheckoutLeaf(ctx, src.FrozenRoot(), key, mode, member, nil, 1024, raw, emit)
+		}, func(row rebuildSidecarRow) error { return row.check() })
+	require.NoError(t, err)
+	require.Len(t, epoch.files, 1)
+	require.Len(t, epoch.admitted, 1)
+	require.Len(t, epoch.goConfigs, 3)
+	// Removing an unconsulted manifest does not force a read or refusal.
+	require.NoError(t, os.Remove(filepath.Join(dir, "spare", "go.mod")))
+	left := int64(len(mod) + len(childMod))
+	goRows := make(map[string]rebuildSidecarRow)
+	name, err := captureRebuildCheckoutResolverInputs(ctx, src, epoch, true, &left, func(row rebuildSidecarRow) error {
+		if row.Kind == rebuildGoManifestFact {
+			goRows[string(row.Path)] = row
+		}
+		return row.check()
+	})
+	require.NoError(t, err)
+	require.Equal(t, "rootmod", name)
+	require.Zero(t, left, "one body allowance per consulted config")
+	require.NotContains(t, goRows, "spare/go.mod")
+	for key, body := range map[string]string{"go.mod": mod, "sub/go.mod": childMod} {
+		row := goRows[key]
+		require.Equal(t, rebuildDigest(blake3.Sum256([]byte(body))), row.Digest)
+		require.NotNil(t, row.Config)
+		require.Equal(t, strings.TrimSpace(strings.TrimPrefix(body, "module ")), row.Config.OwnerModule)
+	}
+	left = int64(len(mod) + len(childMod))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "sub", "go.mod"), []byte(childMod+"\n"), 0o600))
+	name, err = captureRebuildCheckoutResolverInputs(ctx, src, epoch, true, &left, func(rebuildSidecarRow) error {
+		t.Fatal("emitted a manifest after selected config drift")
+		return nil
+	})
+	require.ErrorIs(t, err, ErrBuildInputChanged)
+	require.Empty(t, name)
 }

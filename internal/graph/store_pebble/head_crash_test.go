@@ -75,7 +75,7 @@ func TestHeadPublicationCrash(t *testing.T) {
 func prepareHeadCrashFixture(t *testing.T, headDir, lease string) (Witness, StageTables) {
 	t.Helper()
 	ctx := t.Context()
-	const incarnation = 4
+	const incarnation = testHeadIncarnation
 	manifest, err := PrepareManifest(ctx, t.TempDir(), []ManifestFile{{
 		Path: "a.go", Language: "go", Kind: 'f', Size: 64, Content: HeadDigest{3}, Extractor: HeadDigest{4},
 	}}, Witness{Input: HeadDigest{1}, Recipe: HeadDigest{2}, Stage: StageManifest, Profile: FullProfile}, incarnation)

@@ -46,8 +46,8 @@ func decodeManifestFile(path string, b []byte) (ManifestFile, error) {
 
 // PrepareManifest writes only immutable worker files in the owned stage
 // directory. The daemon supplies the stage's witness at ingest.
-func PrepareManifest(ctx context.Context, dir string, files []ManifestFile, w Witness, incarnation uint64) (StageTables, error) {
-	if w.Stage != StageManifest || len(w.Families) != 0 || incarnation == 0 {
+func PrepareManifest(ctx context.Context, dir string, files []ManifestFile, w Witness, incarnation string) (StageTables, error) {
+	if w.Stage != StageManifest || len(w.Families) != 0 || incarnation == "" {
 		return StageTables{}, invalid("unexpected manifest stage")
 	}
 	if _, err := encodeWitness(w); err != nil {

@@ -21,7 +21,7 @@ var ErrSearchSeal = errors.New("pebble search stage seal failed")
 // The worker must finish all graph mutations before calling and must discard
 // its lease on error. Dir is a fresh, absolute stage directory owned by that lease.
 func (b *BuildStore) PrepareSearch(
-	ctx context.Context, dir string, derived Witness, incarnation uint64,
+	ctx context.Context, dir string, derived Witness, incarnation string,
 	render func(*graph.Node) (string, bool),
 ) (tables StageTables, err error) {
 	defer func() {
@@ -30,7 +30,7 @@ func (b *BuildStore) PrepareSearch(
 			err = fmt.Errorf("%w: %w", ErrSearchSeal, err)
 		}
 	}()
-	if !filepath.IsAbs(dir) || derived.Stage != StageDerived || derived.Profile != b.profile || incarnation == 0 || render == nil {
+	if !filepath.IsAbs(dir) || derived.Stage != StageDerived || derived.Profile != b.profile || incarnation == "" || render == nil {
 		return StageTables{}, invalid("search needs its derived witness, stage directory and document renderer")
 	}
 	if slices.ContainsFunc(derived.Families, func(f FamilyWitness) bool { return f.Family == familySymbol }) {

@@ -22,7 +22,7 @@ import (
 // The process owns workDir and never opens a serving head.
 type rebuildFileStages struct {
 	workDir     string
-	incarnation uint64
+	incarnation string
 	inputs      []rebuildInput
 	recipes     map[string]rebuildDigest
 	bounds      rebuildTransformBounds
@@ -91,7 +91,7 @@ func (idx *Indexer) buildRebuildFileStages(
 	job rebuildFileStages, send func(store_pebble.StageTables) error,
 ) (rebuildParsedCounts, error) {
 	var counts rebuildParsedCounts
-	if !filepath.IsAbs(job.workDir) || job.incarnation == 0 {
+	if !filepath.IsAbs(job.workDir) || job.incarnation == "" {
 		return counts, errors.New("invalid build worker lease")
 	}
 	root, err := rebuildInputRoot(job.inputs)

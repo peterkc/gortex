@@ -99,6 +99,11 @@ func readCheckedRebuildRootManifest(ctx context.Context, src *source.FilesystemS
 	if (kind == rebuildNamespaceAbsent || kind == rebuildNamespaceDirectory) && claimed == nil {
 		return nil, nil
 	}
+	if kind == rebuildNamespaceRegular && claimed == nil && name == "go.mod" {
+		if obs, ok := epoch.goConfigs[name]; ok {
+			return readRebuildGoConfigObservation(ctx, obs, limit)
+		}
+	}
 	if kind != rebuildNamespaceRegular || claimed == nil || claimed.Path != name || claimed.Kind != merkle.RegularFile {
 		return nil, fmt.Errorf("%w: mismatched admitted identity for %s", errRebuildProjectNameInput, name)
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 
 	"github.com/zeebo/blake3"
 	"github.com/zzet/gortex/internal/indexer/merkle"
@@ -20,31 +21,31 @@ var errRebuildLeafAdmission = errors.New("unproved rebuild file admission")
 // Stub facts and the returned parse input remain tentative until sidecar seal.
 func (idx *Indexer) freezeRebuildRegularLeaf(ctx context.Context, root *os.Root, key string, listed fs.FileMode,
 	member rebuildGitMember, content *contentAdmissionGate, fileBytes int64, raw *int64, emit func(rebuildSidecarRow) error,
-) (*rebuildInput, error) {
+) (*rebuildInput, source.FrozenRootPath, error) {
 	if !listed.IsRegular() || (member != rebuildGitTracked && member != rebuildGitUntracked) {
-		return nil, nil
+		return nil, source.FrozenRootPath{}, nil
 	}
 	if root == nil || !validRebuildNamespaceKey(key) || fileBytes <= 0 || raw == nil || *raw < 0 || *raw > rebuildCppRawLimit || emit == nil {
-		return nil, errRebuildLeafAdmission
+		return nil, source.FrozenRootPath{}, errRebuildLeafAdmission
 	}
 	obs, err := source.ObserveFrozenLiteralRootPath(ctx, root, key)
 	if err != nil {
-		return nil, rebuildLeafReadError(key, err)
+		return nil, obs, rebuildLeafReadError(key, err)
 	}
 	size := obs.Info().Size()
 	if obs.Path() != key || !obs.Info().Mode().IsRegular() || size < 0 {
-		return nil, fmt.Errorf("%w: listed regular file changed: %q", ErrBuildInputChanged, key)
+		return nil, obs, fmt.Errorf("%w: listed regular file changed: %q", ErrBuildInputChanged, key)
 	}
 	lang, named := idx.registry.DetectLanguage(key)
 	var prefix []byte
 	if !named {
 		need := min(size, sniffPrefixBytes)
 		if need > *raw {
-			return nil, fmt.Errorf("%w: classification prefix for %q", errRebuildCppCaptureLimit, key)
+			return nil, obs, fmt.Errorf("%w: classification prefix for %q", errRebuildCppCaptureLimit, key)
 		}
 		prefix, err = obs.ReadPrefix(ctx, need)
 		if err != nil {
-			return nil, rebuildLeafReadError(key, err)
+			return nil, obs, rebuildLeafReadError(key, err)
 		}
 		*raw -= int64(len(prefix))
 		lang, _ = idx.registry.DetectLanguageContent(key, prefix)
@@ -54,7 +55,11 @@ func (idx *Indexer) freezeRebuildRegularLeaf(ctx context.Context, root *os.Root,
 	}
 	maxSize := idx.config.MaxFileSize
 	if lang == "" || maxSize > 0 && size > maxSize {
-		return nil, emit(rebuildClassificationSidecarRow(key, lang, size, maxSize, prefix, !named))
+		row := rebuildClassificationSidecarRow(key, lang, size, maxSize, prefix, !named)
+		if lang != "" {
+			obs = source.FrozenRootPath{} // A parse size skip cannot authorize a resolver body read.
+		}
+		return nil, obs, emit(row)
 	}
 	// Native applies the asset tracking gate before the content gate.
 	reason := ""
@@ -66,26 +71,26 @@ func (idx *Indexer) freezeRebuildRegularLeaf(ctx context.Context, root *os.Root,
 	if reason != "" {
 		row, err := rebuildContentSkipSidecarRow(skippedFile{relPath: key, lang: lang, size: size, reason: reason}, maxSize, prefix, !named)
 		if err != nil {
-			return nil, err
+			return nil, obs, err
 		}
-		return nil, emit(row)
+		return nil, source.FrozenRootPath{}, emit(row)
 	}
 	if size > fileBytes {
-		return nil, fmt.Errorf("%w: source bytes for %q exceed parser envelope", ErrBuildTransformBounds, key)
+		return nil, obs, fmt.Errorf("%w: source bytes for %q exceed parser envelope", ErrBuildTransformBounds, key)
 	}
 	data := prefix
 	if named || int64(len(prefix)) != size {
 		data, err = readRebuildClassifiedBody(ctx, obs, fileBytes, prefix)
 		if err != nil {
-			return nil, err
+			return nil, obs, err
 		}
 	}
 	if !named {
 		if err := emit(rebuildClassificationSidecarRow(key, lang, size, maxSize, prefix, true)); err != nil {
-			return nil, err
+			return nil, obs, err
 		}
 	}
-	return &rebuildInput{Path: key, Language: lang, Kind: merkle.RegularFile, Size: size, Content: blake3.Sum256(data)}, nil
+	return &rebuildInput{Path: key, Language: lang, Kind: merkle.RegularFile, Size: size, Content: blake3.Sum256(data)}, obs, nil
 }
 
 // freezeRebuildCheckoutLeaf classifies the owner's Git/path-authorized leaf.
@@ -103,12 +108,16 @@ func (idx *Indexer) freezeRebuildCheckoutLeaf(ctx context.Context, root *os.Root
 	if !mode.IsRegular() {
 		return rebuildCheckoutLeaf{}, nil
 	}
-	input, err := idx.freezeRebuildRegularLeaf(ctx, root, key, mode, member, content, fileBytes, raw, emit)
+	input, obs, err := idx.freezeRebuildRegularLeaf(ctx, root, key, mode, member, content, fileBytes, raw, emit)
 	if err != nil {
 		return rebuildCheckoutLeaf{}, err
 	}
 	if input == nil {
-		return rebuildCheckoutLeaf{typeOnly: true}, nil
+		leaf := rebuildCheckoutLeaf{typeOnly: true}
+		if base := path.Base(key); obs.Info() != nil && (base == "go.mod" || base == "go.work") {
+			leaf.goConfig = &obs
+		}
+		return leaf, nil
 	}
 	return rebuildCheckoutLeaf{input: input, parse: true}, nil
 }

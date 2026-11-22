@@ -22,7 +22,7 @@ type FileGraphBase struct {
 	paths       []string
 	witness     Witness
 	digest      HeadDigest
-	incarnation uint64
+	incarnation string
 }
 
 // RetainFileGraph links a PrepareFileGraph result before the owner can ingest
@@ -33,7 +33,7 @@ func (b *BuildStore) RetainFileGraph(ctx context.Context, stage StageTables) (ba
 		return FileGraphBase{}, err
 	}
 	w := stage.Witness
-	if w.Stage != StageFileGraph || w.Profile != b.profile || stage.Incarnation == 0 || !filepath.IsAbs(stage.Dir) {
+	if w.Stage != StageFileGraph || w.Profile != b.profile || stage.Incarnation == "" || !filepath.IsAbs(stage.Dir) {
 		return FileGraphBase{}, invalid("relations needs its file-graph stage")
 	}
 	if len(stage.Files) >= goldFileCap {

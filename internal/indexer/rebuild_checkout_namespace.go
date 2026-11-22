@@ -27,13 +27,15 @@ type rebuildCheckoutInputs struct {
 	namespace *rebuildResolverNamespace
 	admitted  map[string]*rebuildInput
 	files     []rebuildInput
+	goConfigs map[string]source.FrozenRootPath
 	digest    store_pebble.HeadDigest
 }
 
 type rebuildCheckoutLeaf struct {
 	input    *rebuildInput
 	parse    bool
-	typeOnly bool // exact regular-name evidence; no identity for reading bytes
+	typeOnly bool                   // exact regular-name evidence; no identity for reading bytes
+	goConfig *source.FrozenRootPath // non-parse Go config, read only if consulted
 }
 
 type rebuildCheckoutFreeze func(string, fs.FileMode, rebuildGitMember, *int64, func(rebuildSidecarRow) error) (rebuildCheckoutLeaf, error)
@@ -59,7 +61,20 @@ func freezeRebuildCheckoutInputs(ctx context.Context, root *os.Root, flat *exclu
 			if !mode.IsRegular() || leaf.input != nil || leaf.parse {
 				return false, fmt.Errorf("%w: contradictory regular type evidence for %q", ErrBuildInputChanged, key)
 			}
+			if obs := leaf.goConfig; obs != nil {
+				base := path.Base(key)
+				if (base != "go.mod" && base != "go.work") || obs.Path() != key || obs.Info() == nil || !obs.Info().Mode().IsRegular() {
+					return false, fmt.Errorf("%w: invalid Go config observation for %q", ErrBuildInputChanged, key)
+				}
+				if out.goConfigs == nil {
+					out.goConfigs = make(map[string]source.FrozenRootPath)
+				}
+				out.goConfigs[key] = *obs
+			}
 			return true, nil
+		}
+		if leaf.goConfig != nil {
+			return false, fmt.Errorf("%w: unexpected Go config observation for %q", ErrBuildInputChanged, key)
 		}
 		if leaf.input == nil && !leaf.parse {
 			return false, nil

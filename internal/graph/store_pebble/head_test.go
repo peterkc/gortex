@@ -3,11 +3,43 @@ package store_pebble
 import (
 	"bytes"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/zeebo/blake3"
 )
+
+const (
+	testHeadIncarnation        = "0198abcd-0123-7abc-8def-0123456789ab"
+	testReplacementIncarnation = "0198abcd-0123-7abc-8def-0123456789ac"
+)
+
+func TestOpenHeadRejectsInvalidIncarnation(t *testing.T) {
+	for name, incarnation := range map[string]string{
+		"empty":         "",
+		"zero":          "00000000-0000-0000-0000-000000000000",
+		"uppercase":     strings.ToUpper(testHeadIncarnation),
+		"wrong version": "0198abcd-0123-4abc-8def-0123456789ab",
+		"wrong variant": "0198abcd-0123-7abc-0def-0123456789ab",
+		"unhyphenated":  strings.ReplaceAll(testHeadIncarnation, "-", ""),
+		"braced":        "{" + testHeadIncarnation + "}",
+		"urn":           "urn:uuid:" + testHeadIncarnation,
+		"malformed":     "z198abcd-0123-7abc-8def-0123456789ab",
+		"overlong":      strings.Repeat("x", 4096),
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "head")
+			h, err := OpenHead(path, incarnation, FullProfile)
+			if h != nil {
+				t.Cleanup(func() { require.NoError(t, h.Close()) })
+			}
+			require.ErrorIs(t, err, ErrInvalidIncarnation)
+			require.Nil(t, h)
+			require.NoDirExists(t, path)
+		})
+	}
+}
 
 func makeStageTable(t *testing.T, h *Head, dir, name string, key, value []byte) {
 	t.Helper()
@@ -54,10 +86,10 @@ func TestManifestFrozenInputWitness(t *testing.T) {
 	_, err = decodeWitness(raw)
 	require.Error(t, err, "an explicit zero reference is not canonical")
 
-	h, err := OpenHead(filepath.Join(t.TempDir(), "head"), 1, w.Profile)
+	h, err := OpenHead(filepath.Join(t.TempDir(), "head"), testHeadIncarnation, w.Profile)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, h.Close()) })
-	stage, err := PrepareManifest(ctx, t.TempDir(), nil, w, 1)
+	stage, err := PrepareManifest(ctx, t.TempDir(), nil, w, testHeadIncarnation)
 	require.NoError(t, err)
 	base, err := h.PublishStage(ctx, stage)
 	require.NoError(t, err)
@@ -66,7 +98,7 @@ func TestManifestFrozenInputWitness(t *testing.T) {
 	require.Equal(t, w.FrozenInputs, got.FrozenInputs)
 
 	got.Stage, got.FrozenInputs = StageFileGraph, HeadDigest{4}
-	_, err = h.PublishStage(ctx, StageTables{Dir: t.TempDir(), Base: base, Witness: got, Incarnation: 1})
+	_, err = h.PublishStage(ctx, StageTables{Dir: t.TempDir(), Base: base, Witness: got, Incarnation: testHeadIncarnation})
 	require.ErrorIs(t, err, ErrStaleBase)
 }
 
@@ -91,10 +123,10 @@ func TestManifestGitPolicyWitness(t *testing.T) {
 	_, err = decodeWitness(raw)
 	require.ErrorIs(t, err, errInvalidRecord)
 
-	h, err := OpenHead(filepath.Join(t.TempDir(), "head"), 1, w.Profile)
+	h, err := OpenHead(filepath.Join(t.TempDir(), "head"), testHeadIncarnation, w.Profile)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, h.Close()) })
-	stage, err := PrepareManifest(ctx, t.TempDir(), nil, w, 1)
+	stage, err := PrepareManifest(ctx, t.TempDir(), nil, w, testHeadIncarnation)
 	require.NoError(t, err)
 	base, err := h.PublishStage(ctx, stage)
 	require.NoError(t, err)
@@ -102,7 +134,7 @@ func TestManifestGitPolicyWitness(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, got.UsesGitIgnorePolicy)
 	got.Stage, got.UsesGitIgnorePolicy = StageFileGraph, false
-	_, err = h.PublishStage(ctx, StageTables{Dir: t.TempDir(), Base: base, Witness: got, Incarnation: 1})
+	_, err = h.PublishStage(ctx, StageTables{Dir: t.TempDir(), Base: base, Witness: got, Incarnation: testHeadIncarnation})
 	require.ErrorIs(t, err, ErrStaleBase)
 
 	w.Stage = StageRelations
@@ -118,14 +150,14 @@ func TestManifestGitPolicyWitness(t *testing.T) {
 
 func TestStageHeadOrderAndPinnedView(t *testing.T) {
 	ctx := t.Context()
-	h, err := OpenHead(filepath.Join(t.TempDir(), "head"), 7, FullProfile)
+	h, err := OpenHead(filepath.Join(t.TempDir(), "head"), testHeadIncarnation, FullProfile)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, h.Close()) })
 	require.ErrorIs(t, stageRead(t, h).RequireStage(StageManifest), ErrNotPublished)
 
 	dir := t.TempDir()
 	w := Witness{Input: HeadDigest{1}, Recipe: HeadDigest{2}, Profile: FullProfile, Stage: StageFileGraph}
-	input := StageTables{Dir: dir, Incarnation: 7, Witness: w}
+	input := StageTables{Dir: dir, Incarnation: testHeadIncarnation, Witness: w}
 	_, err = h.PublishStage(ctx, input)
 	require.ErrorIs(t, err, ErrStageOrder)
 	require.ErrorIs(t, stageRead(t, h).RequireStage(StageManifest), ErrNotPublished)
@@ -157,20 +189,24 @@ func TestStageHeadOrderAndPinnedView(t *testing.T) {
 	input.Base = base
 	_, err = h.PublishStage(ctx, input)
 	require.ErrorIs(t, err, ErrStageTableLimit)
-	input.Files = nil
-	input.Incarnation = 6
-	_, err = h.PublishStage(ctx, input)
-	require.ErrorIs(t, err, ErrStaleBase)
-	input.Incarnation = 7
-	input.Base = HeadDigest{99}
-	_, err = h.PublishStage(ctx, input)
-	require.ErrorIs(t, err, ErrStaleBase)
-	require.ErrorAs(t, stageRead(t, h).RequireStage(StageFileGraph), &pending)
-
 	fileKey, fileValue := []byte("Nname"), []byte("new declaration")
 	makeStageTable(t, h, dir, "file.sst", fileKey, fileValue)
 	input.Files = []string{"file.sst"}
 	input.Witness.Families = append(input.Witness.Families, FamilyWitness{Family: fileKey[0], Count: 1, Digest: blake3.Sum256(fileValue)})
+	input.Incarnation = testReplacementIncarnation
+	_, err = h.PublishStage(ctx, input)
+	require.ErrorIs(t, err, ErrStaleBase)
+	unchanged := stageRead(t, h)
+	require.ErrorAs(t, unchanged.RequireStage(StageFileGraph), &pending)
+	notPublished, err := point(unchanged, fileKey, copyValue)
+	require.NoError(t, err)
+	require.Nil(t, notPublished)
+	require.FileExists(t, filepath.Join(dir, "file.sst"))
+
+	input.Incarnation = testHeadIncarnation
+	input.Base = HeadDigest{99}
+	_, err = h.PublishStage(ctx, input)
+	require.ErrorIs(t, err, ErrStaleBase)
 	input.Base = base
 	fileBase, err := h.PublishStage(ctx, input)
 	require.NoError(t, err)

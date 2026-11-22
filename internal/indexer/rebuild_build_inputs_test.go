@@ -141,7 +141,7 @@ func TestRebuildBuildFrozenInputsRejectBeforeStage(t *testing.T) {
 	ctx := t.Context()
 	root, src := rebuildInputFixture(t)
 	req := rebuildBuildRequest{
-		Root: root, ParseDir: t.TempDir(), ParseLimit: 1024, Incarnation: 1,
+		Root: root, ParseDir: t.TempDir(), ParseLimit: 1024, Incarnation: rebuildTestIncarnation,
 		Bounds:  rebuildTransformBounds{CaptureBytes: 10, FileBytes: 1024},
 		Witness: store_pebble.Witness{Recipe: store_pebble.HeadDigest{1}, Stage: store_pebble.StageManifest, Profile: store_pebble.FullProfile},
 	}

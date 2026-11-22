@@ -25,7 +25,7 @@ func TestRebuildLanguageCoverageStages(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
 			headDir := filepath.Join(t.TempDir(), "head")
-			head, err := OpenHead(headDir, 1, FullProfile)
+			head, err := OpenHead(headDir, testHeadIncarnation, FullProfile)
 			require.NoError(t, err)
 			t.Cleanup(func() {
 				if head != nil {
@@ -52,11 +52,11 @@ func TestRebuildLanguageCoverageStages(t *testing.T) {
 					File: graph.FileMetaRow{FilePath: path, Size: 10, ContentHash: "content", NodeCount: 1}}))
 			}
 			w := Witness{Input: HeadDigest{1}, Recipe: HeadDigest{2}, FrozenInputs: HeadDigest{9}, Profile: FullProfile, Stage: StageManifest}
-			manifest, err := PrepareManifest(ctx, t.TempDir(), files, w, 1)
+			manifest, err := PrepareManifest(ctx, t.TempDir(), files, w, testHeadIncarnation)
 			require.NoError(t, err)
 			_, err = head.PublishStage(ctx, manifest)
 			require.NoError(t, err)
-			fileGraph, err := worker.PrepareFileGraph(ctx, t.TempDir(), manifest.Witness, 1)
+			fileGraph, err := worker.PrepareFileGraph(ctx, t.TempDir(), manifest.Witness, testHeadIncarnation)
 			require.NoError(t, err)
 			base, err := worker.RetainFileGraph(ctx, fileGraph)
 			require.NoError(t, err)
@@ -133,7 +133,7 @@ func TestRebuildLanguageCoverageStages(t *testing.T) {
 			require.NoError(t, pinned.Close())
 			pinned = nil
 
-			derived := StageTables{Dir: t.TempDir(), Incarnation: 1, Base: digest, Witness: relations.Witness}
+			derived := StageTables{Dir: t.TempDir(), Incarnation: testHeadIncarnation, Base: digest, Witness: relations.Witness}
 			derived.Witness.Stage = StageDerived // this fixture has no derived rows
 			bad = derived
 			bad.Witness.Relations = nil
@@ -142,7 +142,7 @@ func TestRebuildLanguageCoverageStages(t *testing.T) {
 			assertHead(relations.Witness, tc.edges)
 			_, err = head.PublishStage(ctx, derived)
 			require.NoError(t, err)
-			search, err := worker.PrepareSearch(ctx, t.TempDir(), derived.Witness, 1, func(n *graph.Node) (string, bool) {
+			search, err := worker.PrepareSearch(ctx, t.TempDir(), derived.Witness, testHeadIncarnation, func(n *graph.Node) (string, bool) {
 				return n.Name, !slices.Contains(tc.deferred, n.Language)
 			})
 			require.NoError(t, err)
@@ -156,7 +156,7 @@ func TestRebuildLanguageCoverageStages(t *testing.T) {
 			require.NoError(t, head.Close())
 			head = nil
 
-			head, err = OpenHead(headDir, 1, FullProfile)
+			head, err = OpenHead(headDir, testHeadIncarnation, FullProfile)
 			require.NoError(t, err)
 			assertHead(search.Witness, tc.edges)
 			s := stageRead(t, head)
@@ -182,7 +182,7 @@ func TestRebuildLanguageCoverageStages(t *testing.T) {
 
 			// A validly encoded delta with a worsening or unproved claim must
 			// refuse even when it references the exact current base.
-			bad = StageTables{Dir: t.TempDir(), Incarnation: 1, Base: digest, Witness: search.Witness}
+			bad = StageTables{Dir: t.TempDir(), Incarnation: testHeadIncarnation, Base: digest, Witness: search.Witness}
 			bad.Witness.Input = HeadDigest{42}
 			for _, coverage := range []*RelationCoverage{nil, {DeferredLanguages: []string{"rust"}}} {
 				bad.Witness.Relations = coverage

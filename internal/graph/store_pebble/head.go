@@ -10,11 +10,13 @@ import (
 	"sync"
 
 	"github.com/cockroachdb/pebble/v2"
+	"github.com/google/uuid"
 	"github.com/zeebo/blake3"
 )
 
 var (
 	ErrStaleBase          = errors.New("stale publication base")
+	ErrInvalidIncarnation = errors.New("checkout incarnation must be a canonical UUIDv7")
 	ErrStageOrder         = errors.New("publication stage is repeated or out of order")
 	ErrStageTableLimit    = errors.New("publication exceeds the SST file limit")
 	ErrCoverageRegression = errors.New("publication would reduce relation coverage")
@@ -26,16 +28,31 @@ var (
 type Head struct {
 	db          *pebble.DB
 	options     *pebble.Options
-	incarnation uint64
+	incarnation string
 	profile     Profile
 }
 
 // The bound is across all heads owned by one daemon, not per checkout.
 var ingestMu sync.Mutex
 
-func OpenHead(path string, incarnation uint64, profile Profile) (*Head, error) {
-	if incarnation == 0 || (profile != DefaultProfile && profile != FullProfile) {
-		return nil, invalid("head incarnation or profile")
+// ValidateIncarnation checks the exact catalog spelling, without normalizing it.
+func ValidateIncarnation(incarnation string) error {
+	if len(incarnation) != 36 {
+		return ErrInvalidIncarnation
+	}
+	id, err := uuid.Parse(incarnation)
+	if err != nil || id.Version() != 7 || id.Variant() != uuid.RFC4122 || id.String() != incarnation {
+		return ErrInvalidIncarnation
+	}
+	return nil
+}
+
+func OpenHead(path string, incarnation string, profile Profile) (*Head, error) {
+	if err := ValidateIncarnation(incarnation); err != nil {
+		return nil, err
+	}
+	if profile != DefaultProfile && profile != FullProfile {
+		return nil, invalid("head profile")
 	}
 	options := headOptions()
 	db, err := pebble.Open(path, options)
@@ -59,7 +76,7 @@ func (h *Head) Checkpoint(dir string) error { return h.db.Checkpoint(dir) }
 type StageTables struct {
 	Dir         string
 	Files       []string
-	Incarnation uint64
+	Incarnation string
 	Base        HeadDigest
 	Witness     Witness
 }

@@ -13,9 +13,9 @@ func TestParsedFileGraphPublishesDeclarationsWithoutRelations(t *testing.T) {
 	w := Witness{Input: HeadDigest{1}, Recipe: HeadDigest{2}, Profile: FullProfile, Stage: StageManifest}
 	manifest, err := PrepareManifest(ctx, t.TempDir(), []ManifestFile{{
 		Path: "a.go", Language: "go", Size: 64, Kind: 'f', Content: HeadDigest{3}, Extractor: HeadDigest{4},
-	}}, w, 1)
+	}}, w, testHeadIncarnation)
 	require.NoError(t, err)
-	h, err := OpenHead(filepath.Join(t.TempDir(), "head"), 1, FullProfile)
+	h, err := OpenHead(filepath.Join(t.TempDir(), "head"), testHeadIncarnation, FullProfile)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, h.Close()) })
 	base, err := h.PublishStage(ctx, manifest)
@@ -29,7 +29,7 @@ func TestParsedFileGraphPublishesDeclarationsWithoutRelations(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, worker.Close()) })
 	dir := t.TempDir()
-	unsaved, err := worker.PrepareFileGraph(ctx, dir, manifest.Witness, 1)
+	unsaved, err := worker.PrepareFileGraph(ctx, dir, manifest.Witness, testHeadIncarnation)
 	require.ErrorContains(t, err, "not every admitted file")
 	require.Empty(t, unsaved.Files)
 	decl := &graph.Node{ID: "a.go::F", Name: "F", FilePath: "a.go", Language: "go", Kind: graph.KindFunction}
@@ -41,7 +41,7 @@ func TestParsedFileGraphPublishesDeclarationsWithoutRelations(t *testing.T) {
 		File:  receipt,
 	}
 	require.NoError(t, worker.AddParsedFile("", facts))
-	stage, err := worker.PrepareFileGraph(ctx, dir, manifest.Witness, 1)
+	stage, err := worker.PrepareFileGraph(ctx, dir, manifest.Witness, testHeadIncarnation)
 	require.NoError(t, err)
 	require.Equal(t, base, stage.Base)
 	require.NotEmpty(t, stage.Files)

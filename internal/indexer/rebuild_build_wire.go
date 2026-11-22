@@ -37,7 +37,7 @@ type rebuildBuildRequest struct {
 	Policy         rebuildParsePolicy
 	Recipes        map[string]rebuildDigest
 	Bounds         rebuildTransformBounds
-	Incarnation    uint64
+	Incarnation    string
 	ProjectName    string
 	BaseRecipe     store_pebble.HeadDigest
 	Witness        store_pebble.Witness
@@ -105,9 +105,12 @@ func readRebuildBuildRequest(ctx context.Context, dir string) (req rebuildBuildR
 	}
 	dec := gob.NewDecoder(io.LimitReader(f, rebuildRequestBytes))
 	if err := dec.Decode(&req); err != nil {
+		return req, nil, fmt.Errorf("%w: decode request: %w", errRebuildBuildWire, err)
+	}
+	if err := store_pebble.ValidateIncarnation(req.Incarnation); err != nil {
 		return req, nil, err
 	}
-	if !filepath.IsAbs(req.Root) || !filepath.IsAbs(req.ParseDir) || req.Files < 0 || req.Incarnation == 0 ||
+	if !filepath.IsAbs(req.Root) || !filepath.IsAbs(req.ParseDir) || req.Files < 0 ||
 		req.ParseLimit <= 0 || req.Bounds.CaptureBytes <= 0 || req.Bounds.FileBytes < req.Bounds.CaptureBytes || req.Bounds.Dir != "" ||
 		req.Witness.Stage != store_pebble.StageManifest || len(req.Witness.Families) != 0 {
 		return req, nil, fmt.Errorf("%w: request identity or bounds", errRebuildBuildWire)
@@ -150,7 +153,7 @@ var rebuildFailureKinds = [...]error{
 	resolver.ErrRebuildCppIncludeInput, store_pebble.ErrRebuildFileImports,
 	store_pebble.ErrRebuildLinkInputSize, store_pebble.ErrRebuildLink,
 	store_pebble.ErrRebuildPlaceholderSources, resolver.ErrRebuildCrossPackageGuard, store_pebble.ErrRebuildView,
-	errRebuildInputSidecar, errRebuildGraphPathCollision,
+	errRebuildInputSidecar, errRebuildGraphPathCollision, store_pebble.ErrInvalidIncarnation,
 }
 
 func buildRefusal(err error) rebuildBuildReply {

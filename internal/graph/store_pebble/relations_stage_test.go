@@ -186,12 +186,12 @@ func relationsStageFixture(t *testing.T, profile Profile) (*BuildStore, *Head, F
 	worker, err := OpenBuild(filepath.Join(dir, "working"), profile)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, worker.Close()) })
-	head, err := OpenHead(filepath.Join(dir, "head"), 1, profile)
+	head, err := OpenHead(filepath.Join(dir, "head"), testHeadIncarnation, profile)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, head.Close()) })
 	file := ManifestFile{Path: "old.go", Language: "go", Size: 17, Kind: 'f', Content: HeadDigest{3}, Extractor: HeadDigest{4}}
 	w := Witness{Input: HeadDigest{1}, Recipe: HeadDigest{2}, Profile: profile, Stage: StageManifest}
-	manifest, err := PrepareManifest(ctx, t.TempDir(), []ManifestFile{file}, w, 1)
+	manifest, err := PrepareManifest(ctx, t.TempDir(), []ManifestFile{file}, w, testHeadIncarnation)
 	require.NoError(t, err)
 	_, err = head.PublishStage(ctx, manifest)
 	require.NoError(t, err)
@@ -199,7 +199,7 @@ func relationsStageFixture(t *testing.T, profile Profile) (*BuildStore, *Head, F
 	raw := &graph.Edge{From: declared.ID, To: "unresolved::Raw", Kind: graph.EdgeCalls, FilePath: file.Path, Line: 2}
 	receipt := graph.FileMetaRow{FilePath: file.Path, Size: 17, ContentHash: "content", NodeCount: 1, Errors: "[1:7]"}
 	require.NoError(t, worker.AddParsedFile(declared.RepoPrefix, ParseFacts{Nodes: []*graph.Node{declared}, Edges: []*graph.Edge{raw}, File: receipt}))
-	stage, err := worker.PrepareFileGraph(ctx, t.TempDir(), manifest.Witness, 1)
+	stage, err := worker.PrepareFileGraph(ctx, t.TempDir(), manifest.Witness, testHeadIncarnation)
 	require.NoError(t, err)
 	require.NotEmpty(t, stage.Files)
 	base, err := worker.RetainFileGraph(ctx, stage)

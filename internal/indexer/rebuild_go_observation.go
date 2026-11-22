@@ -26,18 +26,24 @@ type rebuildRootManifest struct {
 // same enumeration of root. The manifest map supplies positives only; only
 // the namespace can prove a miss. Emitted rows belong to the owning lease.
 func captureRebuildGoObservations(ctx context.Context, root *os.Root, n *rebuildResolverNamespace,
-	inputs []rebuildInput, manifests map[string]*rebuildInput, rootMod *rebuildRootManifest, rawRemaining *int64, emit func(rebuildGoManifest) error,
+	inputs []rebuildInput, manifests map[string]*rebuildInput, rootMod *rebuildRootManifest,
+	goConfigs map[string]source.FrozenRootPath, rawRemaining *int64, emit func(rebuildGoManifest) error,
 ) error {
 	if root == nil || n == nil || !n.frozen || n.entries["."].close == rebuildNamespaceUnknown {
 		return fmt.Errorf("%w: Go capture requires a held root and frozen, closed root namespace", errRebuildResolverNamespace)
 	}
+	var materialized *rebuildRootManifest // observed resolver-only bytes for the current probe
 	read := func(ctx context.Context, in rebuildInput) ([]byte, error) {
 		if in.Path == "go.mod" && rootMod != nil {
 			return rootMod.data, nil
 		}
+		if materialized != nil && materialized.target == in {
+			return materialized.data, nil
+		}
 		return readRebuildGoObservedManifest(ctx, root, in)
 	}
 	observe := func(ctx context.Context, name string) (*rebuildInput, error) {
+		materialized = nil
 		entry := n.entries[name]
 		switch entry.kind {
 		case rebuildNamespaceDenied:
@@ -76,6 +82,18 @@ func captureRebuildGoObservations(ctx context.Context, root *os.Root, n *rebuild
 		if kind == rebuildNamespaceAbsent && claimed == nil {
 			return nil, nil
 		}
+		if obs, ok := goConfigs[name]; ok && kind == rebuildNamespaceRegular && claimed == nil {
+			if name == "go.mod" && rootMod != nil {
+				materialized = rootMod
+			} else {
+				var err error
+				materialized, err = readRebuildGoConfigObservation(ctx, obs, *rawRemaining)
+				if err != nil {
+					return nil, err
+				}
+			}
+			claimed = &materialized.target
+		}
 		if kind != rebuildNamespaceRegular || claimed == nil || claimed.Path != name || claimed.Language == "" ||
 			claimed.Kind != merkle.RegularFile || claimed.Size < 0 || claimed.Content == (rebuildDigest{}) {
 			return nil, fmt.Errorf("%w: namespace and admitted regular manifest identity do not match", errRebuildGoEvidence)
@@ -113,6 +131,26 @@ func captureRebuildGoObservations(ctx context.Context, root *os.Root, n *rebuild
 		}
 	}
 	return captureRebuildGoManifests(ctx, inputs, rawRemaining, observe, read, emit)
+}
+
+// readRebuildGoConfigObservation materializes one already checked, admitted
+// non-parse file. The normalizer charges the body once; the observation is
+// owner-only and never enters the sidecar or worker wire.
+func readRebuildGoConfigObservation(ctx context.Context, obs source.FrozenRootPath, limit int64) (*rebuildRootManifest, error) {
+	key, info := obs.Path(), obs.Info()
+	if info == nil || !info.Mode().IsRegular() || info.Size() < 0 {
+		return nil, fmt.Errorf("%w: no checked config identity %q", errRebuildGoEvidence, key)
+	}
+	if info.Size() > min(limit, rebuildGoManifestLimit) {
+		return nil, fmt.Errorf("%w: %q", errRebuildGoCaptureLimit, key)
+	}
+	data, err := obs.Read(ctx, info.Size())
+	if err != nil {
+		return nil, rebuildLeafReadError(key, err)
+	}
+	return &rebuildRootManifest{target: rebuildInput{
+		Path: key, Language: "manifest", Kind: merkle.RegularFile, Size: int64(len(data)), Content: blake3.Sum256(data),
+	}, data: data}, nil
 }
 
 func readRebuildGoObservedManifest(ctx context.Context, root *os.Root, frozen rebuildInput) ([]byte, error) {

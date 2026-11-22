@@ -254,7 +254,7 @@ func TestRebuildProjectNameRecipeRequest(t *testing.T) {
 	ctx := t.Context()
 	root, src := rebuildInputFixture(t)
 	req := rebuildBuildRequest{
-		Root: root, ParseDir: t.TempDir(), ParseLimit: 1024, Incarnation: 1,
+		Root: root, ParseDir: t.TempDir(), ParseLimit: 1024, Incarnation: rebuildTestIncarnation,
 		Bounds:  rebuildTransformBounds{CaptureBytes: 10, FileBytes: 1024},
 		Witness: store_pebble.Witness{Stage: store_pebble.StageManifest, Input: store_pebble.HeadDigest{1}, Recipe: store_pebble.HeadDigest{2}},
 	}

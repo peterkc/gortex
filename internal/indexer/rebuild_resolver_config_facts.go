@@ -54,7 +54,7 @@ func captureRebuildCheckoutResolverInputs(ctx context.Context, src *source.Files
 		}
 	}
 	if err := captureRebuildResolverConfigRows(ctx, src.FrozenRoot(), literalRoot, epoch.namespace,
-		epoch.files, epoch.admitted, rootMod, raw, emit); err != nil {
+		epoch.files, epoch.admitted, rootMod, epoch.goConfigs, raw, emit); err != nil {
 		return "", err
 	}
 	writeNpm := func(key string, identity rebuildInput, data []byte) error {
@@ -137,7 +137,7 @@ func captureRebuildCheckoutResolverInputs(ctx context.Context, src *source.Files
 // Followed manifest rows belong to the owner, not this config projection.
 func captureRebuildResolverConfigRows(ctx context.Context, root *os.Root, literalRoot bool, ns *rebuildResolverNamespace,
 	inputs []rebuildInput, identities map[string]*rebuildInput, rootMod *rebuildRootManifest,
-	rawRemaining *int64, emit func(rebuildSidecarRow) error,
+	goConfigs map[string]source.FrozenRootPath, rawRemaining *int64, emit func(rebuildSidecarRow) error,
 ) error {
 	if emit == nil {
 		return fmt.Errorf("%w: missing resolver config row sink", errRebuildInputSidecar)
@@ -170,7 +170,7 @@ func captureRebuildResolverConfigRows(ctx context.Context, root *os.Root, litera
 		}
 	}
 	if goUsed {
-		if err := captureRebuildGoObservations(ctx, root, ns, inputs, identities, rootMod, rawRemaining, func(row rebuildGoManifest) error {
+		if err := captureRebuildGoObservations(ctx, root, ns, inputs, identities, rootMod, goConfigs, rawRemaining, func(row rebuildGoManifest) error {
 			return emit(rebuildGoManifestSidecarRow(row))
 		}); err != nil {
 			return err

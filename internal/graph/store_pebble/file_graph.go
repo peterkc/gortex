@@ -94,13 +94,13 @@ func (b *BuildStore) AddParsedFile(repo string, f ParseFacts) error {
 // PrepareFileGraph seals declarations and file metadata against the exact
 // manifest witness. The worker calls this before running any resolver pass.
 // The daemon owns the stage's private directory lease and reception.
-func (b *BuildStore) PrepareFileGraph(ctx context.Context, dir string, manifest Witness, incarnation uint64) (StageTables, error) {
+func (b *BuildStore) PrepareFileGraph(ctx context.Context, dir string, manifest Witness, incarnation string) (StageTables, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.first != nil {
 		return StageTables{}, b.first
 	}
-	if !filepath.IsAbs(dir) || incarnation == 0 || manifest.Profile != b.profile || manifest.Stage != StageManifest ||
+	if !filepath.IsAbs(dir) || incarnation == "" || manifest.Profile != b.profile || manifest.Stage != StageManifest ||
 		len(manifest.Families) != 1 || manifest.Families[0].Family != familyManifest {
 		return StageTables{}, invalid("file graph needs its manifest witness")
 	}

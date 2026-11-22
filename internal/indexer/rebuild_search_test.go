@@ -18,12 +18,12 @@ func TestRebuildSearchRendersFinalFacts(t *testing.T) {
 	build, err := store_pebble.OpenBuild(filepath.Join(t.TempDir(), "working"), store_pebble.FullProfile)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, build.Close()) })
-	head, err := store_pebble.OpenHead(filepath.Join(t.TempDir(), "head"), 1, store_pebble.FullProfile)
+	head, err := store_pebble.OpenHead(filepath.Join(t.TempDir(), "head"), rebuildTestIncarnation, store_pebble.FullProfile)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, head.Close()) })
 	manifest, err := store_pebble.PrepareManifest(ctx, t.TempDir(), []store_pebble.ManifestFile{{Path: path, Kind: 'f', Language: "go"}}, store_pebble.Witness{
 		Input: store_pebble.HeadDigest{1}, Recipe: store_pebble.HeadDigest{2}, Stage: store_pebble.StageManifest, Profile: store_pebble.FullProfile,
-	}, 1)
+	}, rebuildTestIncarnation)
 	require.NoError(t, err)
 	_, err = head.PublishStage(ctx, manifest)
 	require.NoError(t, err)
@@ -42,7 +42,7 @@ func TestRebuildSearchRendersFinalFacts(t *testing.T) {
 		Nodes: nodes, File: graph.FileMetaRow{FilePath: path, NodeCount: len(nodes)},
 		Symbols: []graph.SymbolFTSItem{{NodeID: decl.ID, Tokens: "receiptstale"}},
 	}))
-	fileGraph, err := build.PrepareFileGraph(ctx, t.TempDir(), manifest.Witness, 1)
+	fileGraph, err := build.PrepareFileGraph(ctx, t.TempDir(), manifest.Witness, rebuildTestIncarnation)
 	require.NoError(t, err)
 	retained, err := build.RetainFileGraph(ctx, fileGraph)
 	require.NoError(t, err)
@@ -58,14 +58,14 @@ func TestRebuildSearchRendersFinalFacts(t *testing.T) {
 	require.NoError(t, err)
 	derived := relations.Witness
 	derived.Stage = store_pebble.StageDerived // No derived rows for this fixture.
-	_, err = head.PublishStage(ctx, store_pebble.StageTables{Dir: t.TempDir(), Incarnation: 1, Base: digest, Witness: derived})
+	_, err = head.PublishStage(ctx, store_pebble.StageTables{Dir: t.TempDir(), Incarnation: rebuildTestIncarnation, Base: digest, Witness: derived})
 	require.NoError(t, err)
 
 	idx := &Indexer{config: config.IndexConfig{
 		IndexProse: true,
 		SkipSearch: []config.SkipEmbedRule{{Language: "yaml", Kinds: []string{"function"}}},
 	}}
-	stage, err := idx.prepareRebuildSearch(ctx, build, t.TempDir(), derived, 1, "workbench")
+	stage, err := idx.prepareRebuildSearch(ctx, build, t.TempDir(), derived, rebuildTestIncarnation, "workbench")
 	require.NoError(t, err)
 	_, err = head.PublishStage(ctx, stage)
 	require.NoError(t, err)

@@ -12,7 +12,7 @@ import (
 // drain, it includes eligible unowned nodes in a named repo's final union.
 func (idx *Indexer) prepareRebuildSearch(
 	ctx context.Context, build *store_pebble.BuildStore, dir string,
-	derived store_pebble.Witness, incarnation uint64, projectName string,
+	derived store_pebble.Witness, incarnation string, projectName string,
 ) (store_pebble.StageTables, error) {
 	return build.PrepareSearch(ctx, dir, derived, incarnation, func(n *graph.Node) (string, bool) {
 		if !idx.shouldIndexForSearch(n) {

@@ -3,6 +3,7 @@ package indexer
 import (
 	"bytes"
 	"context"
+	"encoding/gob"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,8 @@ import (
 	"github.com/zzet/gortex/internal/resolver"
 	"go.uber.org/zap"
 )
+
+const rebuildTestIncarnation = "0198abcd-0123-7abc-8def-0123456789ab"
 
 func TestRebuildBuildChildStages(t *testing.T) {
 	for _, tc := range []struct {
@@ -47,7 +50,7 @@ func TestRebuildBuildChildStages(t *testing.T) {
 			require.Len(t, raw, 32)
 			cfg := config.Default().Index
 			req := rebuildBuildRequest{
-				Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: 2,
+				Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: rebuildTestIncarnation,
 				Recipes: map[string]rebuildDigest{"go": {1}}, Policy: freezeRebuildParsePolicy(root, cfg),
 				Bounds: rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 64 << 10},
 				Witness: store_pebble.Witness{Input: store_pebble.HeadDigest(raw), Recipe: store_pebble.HeadDigest{2},
@@ -86,6 +89,7 @@ func TestRebuildBuildChildStages(t *testing.T) {
 					}
 					return runRebuildBuild(ctx, exe, []string{"-test.run=^TestRebuildBuildChildEntry$", "--"}, lease, headDir, bound, cfg, inputs,
 						func(ctx context.Context, tables store_pebble.StageTables) error {
+							require.Equal(t, req.Incarnation, tables.Incarnation)
 							if _, err := h.PublishStage(ctx, tables); err != nil {
 								return err
 							}
@@ -225,7 +229,7 @@ func TestRebuildWorkerDiagnosticBound(t *testing.T) {
 func TestRebuildBuildRequestPreservesPathBytesAndSetting(t *testing.T) {
 	dir, src := rebuildInputFixture(t)
 	req := rebuildBuildRequest{Root: dir, ParseDir: dir, ParseLimit: 4096,
-		Bounds: rebuildTransformBounds{CaptureBytes: 10, FileBytes: 1024}, Incarnation: 1,
+		Bounds: rebuildTransformBounds{CaptureBytes: 10, FileBytes: 1024}, Incarnation: rebuildTestIncarnation,
 		Witness: store_pebble.Witness{Stage: store_pebble.StageManifest, Recipe: store_pebble.HeadDigest{2}},
 	}
 	req, err := captureProjectNameTest(t, src, map[string]*rebuildInput{"go.mod": nil, "package.json": nil}, req)
@@ -238,10 +242,52 @@ func TestRebuildBuildRequestPreservesPathBytesAndSetting(t *testing.T) {
 	got, gotInputs, err := readRebuildBuildRequest(t.Context(), dir)
 	require.NoError(t, err)
 	require.Equal(t, inputs, gotInputs)
+	require.Equal(t, rebuildTestIncarnation, got.Incarnation)
 	var cfgGot config.IndexConfig
 	require.NoError(t, json.Unmarshal(got.Config, &cfgGot))
 	require.NotNil(t, cfgGot.SynthesizeExternalCalls)
 	require.False(t, *cfgGot.SynthesizeExternalCalls)
+}
+
+func TestRebuildBuildRequestRejectsInvalidIncarnation(t *testing.T) {
+	dir, src := rebuildInputFixture(t)
+	req := rebuildBuildRequest{Root: dir, ParseDir: dir, ParseLimit: 4096,
+		Bounds: rebuildTransformBounds{CaptureBytes: 10, FileBytes: 1024}, Incarnation: strings.ToUpper(rebuildTestIncarnation),
+		Witness: store_pebble.Witness{Stage: store_pebble.StageManifest, Recipe: store_pebble.HeadDigest{2}},
+	}
+	req, err := captureProjectNameTest(t, src, map[string]*rebuildInput{"go.mod": nil, "package.json": nil}, req)
+	require.NoError(t, err)
+	req.Files = 1 // The worker must refuse the identity before trying to decode the missing record.
+	for _, tc := range []struct {
+		name   string
+		header any
+		want   error
+	}{
+		{"noncanonical", req, store_pebble.ErrInvalidIncarnation},
+		{"old numeric field", struct{ Incarnation uint64 }{7}, errRebuildBuildWire},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lease := t.TempDir()
+			var request, reply, acks bytes.Buffer
+			require.NoError(t, gob.NewEncoder(&request).Encode(tc.header))
+			require.NoError(t, os.WriteFile(filepath.Join(lease, rebuildRequestName), request.Bytes(), 0o600))
+			in, owner, err := os.Pipe()
+			require.NoError(t, err)
+			defer owner.Close()
+			err = RunRebuildBuildWorker(t.Context(), lease, in, &reply, zap.NewNop())
+			require.ErrorIs(t, err, tc.want)
+			err = receiveRebuildStages(t.Context(), lease, req, &reply, &acks, func(context.Context, store_pebble.StageTables) error {
+				t.Fatal("an invalid request must not publish")
+				return nil
+			})
+			require.ErrorIs(t, err, ErrRebuildWorker)
+			require.ErrorIs(t, err, tc.want)
+			require.Empty(t, acks.Bytes())
+			entries, err := os.ReadDir(lease)
+			require.NoError(t, err)
+			require.Len(t, entries, 1, "the worker must not create its private store or stages")
+		})
+	}
 }
 
 func TestRebuildBuildMalformedStageDoesNotPublish(t *testing.T) {

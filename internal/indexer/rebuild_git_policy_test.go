@@ -79,7 +79,7 @@ func TestRebuildGitPolicyMismatchRefusesBeforeBuild(t *testing.T) {
 			input, err := hex.DecodeString(emptyRoot)
 			require.NoError(t, err)
 			req := rebuildBuildRequest{
-				Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: 1,
+				Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: rebuildTestIncarnation,
 				BaseRecipe: store_pebble.HeadDigest{1},
 				Policy:     freezeRebuildParsePolicy(root, cfg), Bounds: rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 1024},
 				Witness: store_pebble.Witness{

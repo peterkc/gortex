@@ -160,7 +160,7 @@ func TestRebuildTSAliasConfigsPostParseProbeReplay(t *testing.T) {
 	capture := func(epoch rebuildCheckoutInputs, raw *int64, emit func(rebuildSidecarRow) error) (string, error) {
 		denied := input
 		denied.Path = "hidden/never-read.ts"
-		require.ErrorIs(t, captureRebuildResolverConfigRows(ctx, src.FrozenRoot(), true, epoch.namespace, []rebuildInput{denied}, epoch.admitted, nil, raw,
+		require.ErrorIs(t, captureRebuildResolverConfigRows(ctx, src.FrozenRoot(), true, epoch.namespace, []rebuildInput{denied}, epoch.admitted, nil, nil, raw,
 			func(rebuildSidecarRow) error { t.Fatal("emitted facts for denied caller"); return nil }), errRebuildResolverInputDenied)
 		return captureRebuildCheckoutResolverInputs(ctx, src, epoch, true, raw, emit)
 	}

@@ -16,7 +16,7 @@ var ErrPublicationWitness = errors.New("pebble publication witness refused")
 // This value does not define a catalog format.
 type LocalPublicationRecord struct {
 	Version       HeadDigest
-	Incarnation   uint64
+	Incarnation   string
 	WitnessDigest HeadDigest
 	EventID       *uint64
 }
@@ -34,7 +34,7 @@ func (h *Head) ReconcilePublication(saved *LocalPublicationRecord) (Witness, Loc
 	return w, record, nil
 }
 
-func (s *Snapshot) reconcilePublication(incarnation uint64, saved *LocalPublicationRecord) (Witness, LocalPublicationRecord, error) {
+func (s *Snapshot) reconcilePublication(incarnation string, saved *LocalPublicationRecord) (Witness, LocalPublicationRecord, error) {
 	var digest HeadDigest
 	w, err := point(s, publicationWitnessKey, func(raw []byte) (Witness, error) {
 		digest = blake3.Sum256(raw)

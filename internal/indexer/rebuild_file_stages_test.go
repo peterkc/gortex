@@ -43,7 +43,7 @@ func TestRebuildFileStagesRetainFrozenFactsAcrossEdit(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, digest, 32)
 			job := rebuildFileStages{
-				workDir: t.TempDir(), incarnation: 3,
+				workDir: t.TempDir(), incarnation: rebuildTestIncarnation,
 				inputs: inputs, recipes: map[string]rebuildDigest{"go": {5}},
 				witness: store_pebble.Witness{
 					Input: store_pebble.HeadDigest(digest), Recipe: store_pebble.HeadDigest{8},
@@ -63,7 +63,7 @@ func TestRebuildFileStagesRetainFrozenFactsAcrossEdit(t *testing.T) {
 				require.NoError(t, err)
 				require.False(t, reused)
 			}
-			h, err := store_pebble.OpenHead(filepath.Join(t.TempDir(), "head"), 3, store_pebble.FullProfile)
+			h, err := store_pebble.OpenHead(filepath.Join(t.TempDir(), "head"), rebuildTestIncarnation, store_pebble.FullProfile)
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, h.Close()) })
 			var stages []store_pebble.Stage
@@ -129,7 +129,7 @@ func TestRebuildFileStagesExtractorCensus(t *testing.T) {
 	store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
 	recipe := rebuildDigest{5}
 	job := rebuildFileStages{
-		incarnation: 3,
+		incarnation: rebuildTestIncarnation,
 		recipes:     map[string]rebuildDigest{"c": recipe, "go": recipe, "javascript": recipe, "typescript": recipe},
 	}
 	for _, f := range []struct{ path, raw string }{
@@ -392,7 +392,7 @@ func TestRebuildFileStagesRefusesNFCPathCollision(t *testing.T) {
 			require.Len(t, digest, 32)
 			lease := t.TempDir()
 			job := rebuildFileStages{
-				workDir: lease, incarnation: 2, inputs: tc.inputs,
+				workDir: lease, incarnation: rebuildTestIncarnation, inputs: tc.inputs,
 				recipes: map[string]rebuildDigest{"go": {1}}, classifications: tc.rows,
 				witness: store_pebble.Witness{Input: store_pebble.HeadDigest(digest), Profile: store_pebble.FullProfile, Stage: store_pebble.StageManifest},
 			}

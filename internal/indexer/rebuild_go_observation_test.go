@@ -69,7 +69,7 @@ func TestRebuildGoObservationRows(t *testing.T) {
 			require.NoError(t, namespace.freeze())
 			before := raw
 			var rows []rebuildGoManifest
-			err = captureRebuildGoObservations(t.Context(), root, &namespace, inputs, manifests, nil, &raw, func(row rebuildGoManifest) error {
+			err = captureRebuildGoObservations(t.Context(), root, &namespace, inputs, manifests, nil, nil, &raw, func(row rebuildGoManifest) error {
 				rows = append(rows, row)
 				return nil
 			})
@@ -136,7 +136,7 @@ func TestRebuildGoObservationAuthorityRefusals(t *testing.T) {
 			}
 			require.NoError(t, namespace.freeze())
 			raw := int64(rebuildGoManifestLimit)
-			err = captureRebuildGoObservations(t.Context(), root, &namespace, nil, map[string]*rebuildInput{"go.mod": tc.claim}, nil, &raw,
+			err = captureRebuildGoObservations(t.Context(), root, &namespace, nil, map[string]*rebuildInput{"go.mod": tc.claim}, nil, nil, &raw,
 				func(row rebuildGoManifest) error { t.Fatalf("emitted an unproved row: %+v", row); return nil })
 			require.ErrorIs(t, err, tc.want)
 			require.NotErrorIs(t, err, ErrBuildInputChanged)
@@ -195,7 +195,7 @@ func TestRebuildGoObservationDriftAndLimits(t *testing.T) {
 				require.NoError(t, os.WriteFile(file, []byte(tc.live), 0o600))
 			}
 			raw = tc.raw
-			err = captureRebuildGoObservations(t.Context(), src.FrozenRoot(), &namespace, inputs, map[string]*rebuildInput{tc.key: &in}, nil, &raw,
+			err = captureRebuildGoObservations(t.Context(), src.FrozenRoot(), &namespace, inputs, map[string]*rebuildInput{tc.key: &in}, nil, nil, &raw,
 				func(row rebuildGoManifest) error {
 					t.Fatalf("emitted a row for changed or oversized input: %+v", row)
 					return nil
@@ -262,7 +262,7 @@ func TestRebuildGoObservationFollowedRootReplay(t *testing.T) {
 			return err
 		}
 		return captureRebuildGoObservations(t.Context(), src.FrozenRoot(), &namespace, inputs,
-			map[string]*rebuildInput{"go.mod": &link}, &followed, &raw, func(row rebuildGoManifest) error {
+			map[string]*rebuildInput{"go.mod": &link}, &followed, nil, &raw, func(row rebuildGoManifest) error {
 				captured = append(captured, row)
 				return emit(rebuildGoManifestSidecarRow(row))
 			})
@@ -321,7 +321,7 @@ func TestRebuildGoObservationFollowedRootRefusals(t *testing.T) {
 			require.NoError(t, namespace.add(rebuildNamespaceRow{key: ".", kind: rebuildNamespaceCloseExact}))
 			require.NoError(t, namespace.freeze())
 			raw := tc.raw
-			err := captureRebuildGoObservations(t.Context(), root, &namespace, nil, map[string]*rebuildInput{"go.mod": &link}, tc.binding, &raw,
+			err := captureRebuildGoObservations(t.Context(), root, &namespace, nil, map[string]*rebuildInput{"go.mod": &link}, tc.binding, nil, &raw,
 				func(row rebuildGoManifest) error { t.Fatalf("emitted an unproved row: %+v", row); return nil })
 			require.ErrorIs(t, err, tc.want)
 			require.Equal(t, tc.raw, raw)
@@ -341,7 +341,7 @@ func TestRebuildGoObservationFollowedRootRefusals(t *testing.T) {
 		require.NoError(t, namespace.freeze())
 		raw := int64(rebuildGoManifestLimit)
 		inputs := []rebuildInput{rebuildGoTestInput("nested/a.go", "go", "package a\n")}
-		err := captureRebuildGoObservations(t.Context(), root, &namespace, inputs, map[string]*rebuildInput{"go.mod": &link}, &valid, &raw,
+		err := captureRebuildGoObservations(t.Context(), root, &namespace, inputs, map[string]*rebuildInput{"go.mod": &link}, &valid, nil, &raw,
 			func(row rebuildGoManifest) error { t.Fatalf("emitted before refusal: %+v", row); return nil })
 		require.ErrorIs(t, err, errRebuildResolverNamespace)
 	})
