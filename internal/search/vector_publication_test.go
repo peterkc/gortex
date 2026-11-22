@@ -81,18 +81,8 @@ func TestNewDelegatedVectorHasNoHeapIndexAndUsesDurableStats(t *testing.T) {
 	}}
 	backend := NewDelegatedVector(384, delegate, 17, 2)
 
-	if backend.graph != nil {
-		t.Fatal("delegated backend allocated an in-process HNSW graph")
-	}
 	if got := backend.Count(); got != 17 {
 		t.Fatalf("Count() = %d, want complete durable count 17", got)
-	}
-	backend.Add("process-local-write", []float32{1, 0})
-	if got := backend.Count(); got != 17 {
-		t.Fatalf("Count() = %d after delegated Add, want unchanged durable count 17", got)
-	}
-	if backend.graph != nil {
-		t.Fatal("delegated Add allocated an in-process HNSW graph")
 	}
 	if !backend.HasChunks() {
 		t.Fatal("HasChunks() = false, want durable chunk metadata")
@@ -229,8 +219,7 @@ func TestCloseWaitsForActiveVectorUpdate(t *testing.T) {
 func TestAcquireBackendPinsReplacementUntilRelease(t *testing.T) {
 	text := &publicationTestTextBackend{}
 	embedder := &publicationTestEmbedder{}
-	oldVector := NewVector(2)
-	oldVector.Add("old-symbol", []float32{1, 0})
+	oldVector := NewDelegatedVector(2, &publicationTestDelegate{hits: []graph.VectorHit{{NodeID: "old-symbol"}}}, 1, 0)
 	swappable := NewSwappable(NewHybrid(text, oldVector, embedder))
 
 	pinned, release := swappable.AcquireBackend()
@@ -253,7 +242,7 @@ func TestAcquireBackendPinsReplacementUntilRelease(t *testing.T) {
 		t.Fatal("replacement completed while AcquireBackend pin was held")
 	case <-time.After(50 * time.Millisecond):
 	}
-	if oldVector.SizeBytes() == 0 {
+	if oldVector.Count() != 1 {
 		t.Fatal("pinned backend was retired before release")
 	}
 
@@ -264,8 +253,8 @@ func TestAcquireBackendPinsReplacementUntilRelease(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("replacement did not complete after AcquireBackend release")
 	}
-	if got := oldVector.SizeBytes(); got != 0 {
-		t.Fatalf("retired vector retains %d bytes after release", got)
+	if got := oldVector.Count(); got != 0 {
+		t.Fatalf("retired vector still reports %d rows after release", got)
 	}
 
 	swappable.Close()
@@ -276,8 +265,7 @@ func TestAcquireBackendPinsReplacementUntilRelease(t *testing.T) {
 
 func TestReplaceHybridVectorWaitsForReadersAndTransfersTextOwnership(t *testing.T) {
 	text := &publicationTestTextBackend{}
-	oldVector := NewVector(2)
-	oldVector.Add("old-symbol", []float32{1, 0})
+	oldVector := NewDelegatedVector(2, &publicationTestDelegate{hits: []graph.VectorHit{{NodeID: "old-symbol"}}}, 1, 0)
 	oldEmbedder := &publicationTestEmbedder{
 		started: make(chan struct{}),
 		release: make(chan struct{}),
@@ -311,7 +299,7 @@ func TestReplaceHybridVectorWaitsForReadersAndTransfersTextOwnership(t *testing.
 		t.Fatal("replacement completed while an old-backend reader was active")
 	case <-time.After(50 * time.Millisecond):
 	}
-	if oldVector.SizeBytes() == 0 {
+	if oldVector.Count() != 1 {
 		t.Fatal("old vector was retired before its active reader completed")
 	}
 
@@ -325,8 +313,8 @@ func TestReplaceHybridVectorWaitsForReadersAndTransfersTextOwnership(t *testing.
 		t.Fatal("replacement did not complete after the old reader drained")
 	}
 
-	if got := oldVector.SizeBytes(); got != 0 {
-		t.Fatalf("retired vector retains %d bytes, want zero", got)
+	if got := oldVector.Count(); got != 0 {
+		t.Fatalf("retired vector still reports %d rows, want zero", got)
 	}
 	if got := text.closes(); got != 0 {
 		t.Fatalf("transferred text backend closed %d times during replacement", got)
@@ -362,10 +350,8 @@ func TestReplaceHybridVectorWaitsForReadersAndTransfersTextOwnership(t *testing.
 func TestReplaceHybridVectorFlattensAndSupportsRepeatedReplacement(t *testing.T) {
 	text := &publicationTestTextBackend{}
 	embedder := &publicationTestEmbedder{}
-	first := NewVector(2)
-	first.Add("first", []float32{1, 0})
-	second := NewVector(2)
-	second.Add("second", []float32{1, 0})
+	first := NewDelegatedVector(2, &publicationTestDelegate{}, 1, 0)
+	second := NewDelegatedVector(2, &publicationTestDelegate{}, 2, 0)
 	legacyNested := NewHybrid(NewHybrid(text, first, embedder), second, embedder)
 	swappable := NewSwappable(legacyNested)
 

@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/zzet/gortex/internal/graph"
 )
 
 // mapText is a map-backed text Backend for the hybrid fixtures. The
@@ -57,8 +59,7 @@ func (m *mapText) Search(query string, limit int) []SearchResult {
 
 // fixedEmbedder is a deterministic test embedding provider: every query
 // embeds to the same constant vector, so HybridBackend.Search exercises
-// the vector channel without any model. The vector backend is what
-// decides ranking via the indexed vectors.
+// the vector channel without any model.
 type fixedEmbedder struct{ dims int }
 
 func (f fixedEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
@@ -86,20 +87,12 @@ func (f fixedEmbedder) Close() error    { return nil }
 // and no synthetic "#chunk" ID ever leaks into the results.
 func TestHybridSearch_DeChunksToParent(t *testing.T) {
 	const dims = 3
-	vec := NewVector(dims)
-	// Two symbols. "big.go::Big" is sub-chunked into three chunk
-	// vectors; "small.go::Small" has a single plain vector. All chunk
-	// vectors of Big point the same direction so a query hits several
-	// of them at once — the case de-chunking must collapse.
-	vec.Add("big.go::Big#chunk0", []float32{1, 0, 0})
-	vec.Add("big.go::Big#chunk1", []float32{0.99, 0.01, 0})
-	vec.Add("big.go::Big#chunk2", []float32{0.98, 0.02, 0})
-	vec.Add("small.go::Small", []float32{0.5, 0.5, 0})
-	vec.SetChunkMap(map[string]string{
-		"big.go::Big#chunk0": "big.go::Big",
-		"big.go::Big#chunk1": "big.go::Big",
-		"big.go::Big#chunk2": "big.go::Big",
-	})
+	vec := NewDelegatedVector(dims, &publicationTestDelegate{hits: []graph.VectorHit{
+		{NodeID: "big.go::Big#chunk0", ParentID: "big.go::Big"},
+		{NodeID: "big.go::Big#chunk1", ParentID: "big.go::Big"},
+		{NodeID: "big.go::Big#chunk2", ParentID: "big.go::Big"},
+		{NodeID: "small.go::Small"},
+	}}, 4, 3)
 
 	text := newMapText()
 	text.Add("big.go::Big", "Big", "big.go", "")
@@ -117,60 +110,36 @@ func TestHybridSearch_DeChunksToParent(t *testing.T) {
 	}
 	assert.Equal(t, 1, seen["big.go::Big"],
 		"the sub-chunked symbol must appear exactly once despite owning three chunk vectors")
-	assert.LessOrEqual(t, seen["small.go::Small"], 1)
+	assert.Equal(t, 1, seen["small.go::Small"])
 }
 
 // TestHybridSearch_DeChunkPreservesOrder asserts the de-chunk step
 // keeps a symbol at the rank of its best-scoring chunk.
 func TestHybridSearch_DeChunkPreservesOrder(t *testing.T) {
 	const dims = 3
-	vec := NewVector(dims)
-	// The query vector is {1,0,0}. "A" owns the closest chunk; "B"
-	// owns a chunk slightly further away. A must therefore outrank B.
-	vec.Add("a.go::A#chunk0", []float32{1, 0, 0})
-	vec.Add("b.go::B#chunk0", []float32{0.7, 0.7, 0})
-	vec.SetChunkMap(map[string]string{
-		"a.go::A#chunk0": "a.go::A",
-		"b.go::B#chunk0": "b.go::B",
-	})
+	vec := NewDelegatedVector(dims, &publicationTestDelegate{hits: []graph.VectorHit{
+		{NodeID: "a.go::A#chunk0", ParentID: "a.go::A"},
+		{NodeID: "b.go::B#chunk0", ParentID: "b.go::B"},
+		{NodeID: "c.go::C"},
+	}}, 3, 2)
 
 	// Empty text backend so only the vector channel decides ordering.
 	h := NewHybrid(newMapText(), vec, fixedEmbedder{dims: dims})
-
-	got := h.dechunkVectorIDs(vec.Search([]float32{1, 0, 0}, 8), 8)
+	got, _ := h.VectorChannelOnly("anything", 1)
 	require.Len(t, got, 2)
 	assert.Equal(t, "a.go::A", got[0], "the symbol with the nearest chunk must rank first")
 	assert.Equal(t, "b.go::B", got[1])
 }
 
-// TestHybridSearch_NoChunkMapUnaffected asserts that when no symbol is
-// chunked, search behaves exactly as before — IDs pass through.
-func TestHybridSearch_NoChunkMapUnaffected(t *testing.T) {
+// TestHybridSearch_UnchunkedIDsPassThrough checks the plain-symbol route.
+func TestHybridSearch_UnchunkedIDsPassThrough(t *testing.T) {
 	const dims = 3
-	vec := NewVector(dims)
-	vec.Add("a.go::A", []float32{1, 0, 0})
-	vec.Add("b.go::B", []float32{0, 1, 0})
-	require.False(t, vec.HasChunks(), "no SetChunkMap → HasChunks must be false")
+	vec := NewDelegatedVector(dims, &publicationTestDelegate{hits: []graph.VectorHit{
+		{NodeID: "a.go::A"}, {NodeID: "b.go::B"},
+	}}, 2, 0)
+	require.False(t, vec.HasChunks())
 
 	h := NewHybrid(newMapText(), vec, fixedEmbedder{dims: dims})
-	results := h.Search("anything", 10)
-	for _, r := range results {
-		assert.NotContains(t, r.ID, "#chunk")
-	}
-}
-
-// TestVectorBackend_ResolveChunk covers the chunk → parent lookup in
-// isolation: a mapped ID resolves to its parent, an unmapped ID passes
-// through unchanged.
-func TestVectorBackend_ResolveChunk(t *testing.T) {
-	v := NewVector(2)
-	v.SetChunkMap(map[string]string{"f.go::F#chunk1": "f.go::F"})
-
-	parent, isChunk := v.ResolveChunk("f.go::F#chunk1")
-	assert.True(t, isChunk)
-	assert.Equal(t, "f.go::F", parent)
-
-	plain, isChunk := v.ResolveChunk("g.go::G")
-	assert.False(t, isChunk)
-	assert.Equal(t, "g.go::G", plain, "an unmapped ID must pass through unchanged")
+	got, _ := h.VectorChannelOnly("anything", 1)
+	require.Equal(t, []string{"a.go::A", "b.go::B"}, got)
 }

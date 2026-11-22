@@ -71,6 +71,10 @@ func NewFilesystemSource(root string) (*FilesystemSource, error) {
 // worktree path, prefixed so it cannot be confused with a tree source.
 func (s *FilesystemSource) Identity() string { return "fs:" + s.path }
 
+// FrozenRoot borrows the same root held by the enumerating source. The
+// caller must not close it or outlive the source.
+func (s *FilesystemSource) FrozenRoot() *os.Root { return s.root }
+
 // Close releases the root handle. It is idempotent; later calls return
 // the first close error.
 func (s *FilesystemSource) Close() error {
@@ -224,7 +228,7 @@ func (s *FilesystemSource) stat(rel string) (FileMeta, error) {
 			return FileMeta{}, mapRootError(rel, err)
 		}
 		meta.Symlink = true
-		meta.SymlinkTarget = filepath.ToSlash(target)
+		meta.SymlinkTarget = target
 	case mode.IsRegular():
 	default:
 		return FileMeta{}, fmt.Errorf("%s: not a file: %w", rel, ErrNotInSource)

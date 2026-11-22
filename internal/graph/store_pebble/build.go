@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,6 +35,23 @@ var _ graph.Store = (*BuildStore)(nil)
 
 // OpenBuild opens a new private head. It refuses an existing head.
 func OpenBuild(path string, profile Profile) (*BuildStore, error) {
+	return openBuild(path, profile, nil)
+}
+
+// OpenWorkerBuild is only for the isolated build worker process. On a Pebble
+// background error it exits instead of leaving a caller waiting for a flush.
+// The owner must reap the child and remove its lease.
+func OpenWorkerBuild(path string, profile Profile) (*BuildStore, error) {
+	var once sync.Once
+	return openBuild(path, profile, func(err error) {
+		once.Do(func() {
+			_, _ = fmt.Fprintf(os.Stderr, "rebuild build worker: Pebble scratch background error: %q\n", err.Error())
+			os.Exit(1)
+		})
+	})
+}
+
+func openBuild(path string, profile Profile, onBackgroundError func(error)) (*BuildStore, error) {
 	if profile == "" {
 		profile = DefaultProfile
 	}
@@ -52,11 +70,14 @@ func OpenBuild(path string, profile Profile) (*BuildStore, error) {
 	}
 	options := headOptions()
 	options.ErrorIfExists = true
+	if onBackgroundError != nil {
+		options.AddEventListener(pebble.EventListener{BackgroundError: onBackgroundError})
+	}
 	db, err := pebble.Open(path, options)
 	if err != nil {
 		return nil, err
 	}
-	pending, err := openPending(path)
+	pending, err := openPending(path, onBackgroundError)
 	if err != nil {
 		return nil, errors.Join(err, db.Close())
 	}
@@ -141,7 +162,7 @@ func (b *BuildStore) Publish(ctx context.Context) (err error) {
 	gold := sortedRuns{dir: dir, name: "graph", options: b.options, format: format, limit: goldBufferBytes}
 	refs := sortedRuns{dir: dir, name: "refs", options: b.options, format: format, limit: goldBufferBytes}
 	seal := &goldSeal{refs: refs, owner: b.keptOwner}
-	if err := b.writeRows(ctx, &gold); err != nil {
+	if err := b.writeRows(ctx, &gold, StageSearch); err != nil {
 		return err
 	}
 	if err := b.writeSymbols(ctx, &gold); err != nil {
@@ -173,7 +194,7 @@ func (b *BuildStore) keptOwner(id string) (sourceOwner, error) {
 	return sourceOwner{repo: n.RepoPrefix, present: kept, off: !kept}, nil
 }
 
-func (b *BuildStore) writeRows(ctx context.Context, gold *sortedRuns) error {
+func (b *BuildStore) writeRows(ctx context.Context, gold *sortedRuns, stage Stage) error {
 	// Counters include per-node adjacency totals, so they must spill too.
 	// Reset just the derived counter keys. Legacy logical rows stay intact.
 	prefix := []byte{familyCount}
@@ -217,6 +238,11 @@ func (b *BuildStore) writeRows(ctx context.Context, gold *sortedRuns) error {
 		return nil
 	}); err != nil {
 		return err
+	}
+	if stage == StageFileGraph {
+		return pendingVisit(ctx, b.pending, prefix, func(r row) error {
+			return gold.add(bytes.Clone(r.key), bytes.Clone(r.value))
+		})
 	}
 	if err := pendingVisit(ctx, b.pending, []byte{familyEdge, edgeOut}, func(r row) error {
 		e, err := decodeEdge(r.value)

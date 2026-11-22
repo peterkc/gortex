@@ -85,6 +85,9 @@ func (s *goldSeal) visit(r row) error {
 	case familySymbol:
 		return checkSymbolRow(r)
 	case familyFileMeta:
+		if len(r.key) > 1 && r.key[1] == fileMetaRows {
+			return checkFileMetaRow(r)
+		}
 		return checkShingleRow(r)
 	default:
 		return invalid("unexpected graph family at seal")

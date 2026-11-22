@@ -178,6 +178,24 @@ func (p *Pool) Submit(relPath, language string, content []byte) Result {
 // A crashed or hung worker is killed, replaced, and reported via Result.Crashed;
 // the pool stays at full strength so the caller can keep submitting.
 func (p *Pool) SubmitWithOptions(relPath, language string, content []byte, temporalEnvHelpers []string) Result {
+	return p.submit(relPath, language, content, temporalEnvHelpers, false, nil)
+}
+
+// SubmitFullFacts asks the existing parse worker for the exact per-file
+// receipt fields as well as the graph rows. With a rebuild option, the worker
+// instead returns one compact parse-store entry, including those receipts.
+func (p *Pool) SubmitFullFacts(relPath, language string, content []byte, temporalEnvHelpers []string, rebuild ...RebuildFileOptions) Result {
+	switch len(rebuild) {
+	case 0:
+		return p.submit(relPath, language, content, temporalEnvHelpers, true, nil)
+	case 1:
+		return p.submit(relPath, language, content, temporalEnvHelpers, true, &rebuild[0])
+	default:
+		return Result{Err: "crashpool: expected at most one rebuild file option"}
+	}
+}
+
+func (p *Pool) submit(relPath, language string, content []byte, temporalEnvHelpers []string, fullFacts bool, rebuild *RebuildFileOptions) Result {
 	p.mu.Lock()
 	closed := p.closed
 	p.mu.Unlock()
@@ -196,6 +214,8 @@ func (p *Pool) SubmitWithOptions(relPath, language string, content []byte, tempo
 		Language:           language,
 		Content:            content,
 		TemporalEnvHelpers: parser.NewExtractionOptions(temporalEnvHelpers).TemporalEnvHelpers(),
+		FullFacts:          fullFacts,
+		RebuildFile:        rebuild,
 	}
 	var resp extractResponse
 	done := make(chan error, 1)
@@ -215,12 +235,15 @@ func (p *Pool) SubmitWithOptions(relPath, language string, content []byte, tempo
 			return Result{Panicked: true, Err: resp.Err}
 		}
 		return Result{
-			Nodes:        resp.Nodes,
-			Edges:        resp.Edges,
-			ParseErrors:  resp.ParseErrors,
-			ParseChecked: resp.Err == "" && resp.ParseChecked && resp.ParseErrors >= 0,
-			HasParseErr:  resp.HasParseErr,
-			Err:          resp.Err,
+			Nodes:               resp.Nodes,
+			Edges:               resp.Edges,
+			ParseErrors:         resp.ParseErrors,
+			ParseChecked:        resp.Err == "" && resp.ParseChecked && resp.ParseErrors >= 0,
+			HasParseErr:         resp.HasParseErr,
+			ConstValues:         resp.ConstValues,
+			ParseErrorLocations: resp.ParseErrorLocations,
+			RebuildEntry:        resp.RebuildEntry,
+			Err:                 resp.Err,
 		}
 	case <-timer.C:
 		// Worker hung. Killing it unblocks the roundTrip goroutine

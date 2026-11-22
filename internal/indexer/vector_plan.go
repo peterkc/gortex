@@ -15,6 +15,26 @@ import (
 	"go.uber.org/zap"
 )
 
+// ErrVectorInstall identifies a failed durable replacement; the underlying
+// storage or cancellation error remains available through errors.Is.
+var ErrVectorInstall = errors.New("durable vector corpus install failed")
+
+// vectorCorpusCapabilities checks the actual publication target. Some stores
+// implement the interfaces only to return a typed refusal, without a vector family.
+func vectorCorpusCapabilities(store graph.Store) (graph.AtomicVectorCorpusInstaller, graph.VectorSearcher, error) {
+	if support, ok := store.(interface{ VectorCorpusSupport() error }); ok {
+		if err := support.VectorCorpusSupport(); err != nil {
+			return nil, nil, err
+		}
+	}
+	installer, hasInstaller := store.(graph.AtomicVectorCorpusInstaller)
+	searcher, hasSearcher := store.(graph.VectorSearcher)
+	if !hasInstaller || !hasSearcher {
+		return nil, nil, fmt.Errorf("store %T lacks durable vector corpus installation or search: %w", store, errors.ErrUnsupported)
+	}
+	return installer, searcher, nil
+}
+
 // preparedVectorPlan is the immutable hand-off between embedding and vector
 // publication. It owns only IDs and the vectors the provider returned (each
 // vector has exactly one owner, the plan item): graph nodes and source
@@ -23,15 +43,13 @@ type preparedVectorPlan struct {
 	repoPrefix   string
 	dims         int
 	items        []graph.VectorCorpusItem
-	chunkMap     map[string]string
 	dropped      int
 	droppedIDs   []string
 	embeddedText int
 }
 
-// Release drops every potentially large reference held by the plan. Heap
-// vector publication copies the chunk map first; durable publication copies
-// vectors into its transaction before this method runs.
+// Release drops every potentially large reference held by the plan. Durable
+// publication copies vectors into its transaction before this method runs.
 func (p *preparedVectorPlan) Release() {
 	if p == nil {
 		return
@@ -42,8 +60,6 @@ func (p *preparedVectorPlan) Release() {
 		p.items[i].Vec = nil
 	}
 	p.items = nil
-	clear(p.chunkMap)
-	p.chunkMap = nil
 	clear(p.droppedIDs)
 	p.droppedIDs = nil
 	p.repoPrefix = ""
@@ -55,13 +71,16 @@ func (p *preparedVectorPlan) Release() {
 // prepareSearchIndex prepares the vector corpus without mutating either the
 // durable vector store or the active vector backend. The caller decides when
 // publication is safe.
-func (idx *Indexer) prepareSearchIndex(ctx context.Context) (*preparedVectorPlan, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func (idx *Indexer) prepareSearchIndex(ctx context.Context, durable graph.Store) (*preparedVectorPlan, error) {
 	idx.lastVectorBuildErr = nil
 	if idx.embedder == nil {
 		return nil, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if _, _, err := vectorCorpusCapabilities(durable); err != nil {
+		return nil, err
 	}
 
 	// Content sections belong to content search, not symbol/vector search.
@@ -190,12 +209,6 @@ func (idx *Indexer) prepareVectorPlan(ctx context.Context, nodes []*graph.Node) 
 			ParentID: parentID,
 			Vec:      vec,
 		})
-		if parentID != "" {
-			if plan.chunkMap == nil {
-				plan.chunkMap = make(map[string]string)
-			}
-			plan.chunkMap[ids[i]] = parentID
-		}
 	}
 	if len(plan.items) == 0 {
 		dropped := plan.dropped
@@ -206,10 +219,13 @@ func (idx *Indexer) prepareVectorPlan(ctx context.Context, nodes []*graph.Node) 
 }
 
 // prepareSearchIndexForPublication retains the previous vector publication on
-// provider, cap, or validation failures. Parent cancellation is different: it
-// aborts the index operation and must not publish anything.
-func (idx *Indexer) prepareSearchIndexForPublication(ctx context.Context) (*preparedVectorPlan, error) {
-	plan, err := idx.prepareSearchIndex(ctx)
+// unsupported, provider, cap, or validation failures. Parent cancellation is
+// different: it aborts the index operation and must not publish anything.
+func (idx *Indexer) prepareSearchIndexForPublication(ctx context.Context, durable graph.Store) (*preparedVectorPlan, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	plan, err := idx.prepareSearchIndex(ctx, durable)
 	if err == nil {
 		return plan, nil
 	}
@@ -221,9 +237,8 @@ func (idx *Indexer) prepareSearchIndexForPublication(ctx context.Context) (*prep
 	return nil, nil
 }
 
-// installVectorPlan publishes one complete plan. Expensive embedding happens
-// before SerializeVectorUpdate; the shared lane spans only durable replacement
-// and the matching process-local publication.
+// installVectorPlan publishes one complete plan. The shared lane spans durable
+// replacement and publication of the matching delegate, not embedding.
 func (idx *Indexer) installVectorPlan(ctx context.Context, durable graph.Store, plan *preparedVectorPlan) error {
 	if plan == nil {
 		return nil
@@ -239,87 +254,57 @@ func (idx *Indexer) installVectorPlan(ctx context.Context, durable graph.Store, 
 			idx.lastVectorBuildErr = err
 			return err
 		}
-
-		installer, hasInstaller := durable.(graph.AtomicVectorCorpusInstaller)
-		vectorSearcher, hasVectorSearcher := durable.(graph.VectorSearcher)
-		var nativeErr error
-		if hasInstaller && hasVectorSearcher {
-			stats, err := installer.ReplaceVectorCorpus(ctx, plan.repoPrefix, plan.dims, plan.items)
-			if err == nil {
-				dims := stats.Dims
-				if dims <= 0 {
-					dims = plan.dims
-				}
-				delegated := search.NewDelegatedVector(
-					dims,
-					&vectorSearcherDelegate{s: vectorSearcher},
-					stats.VectorCount,
-					stats.ChunkCount,
-				)
-				sw.ReplaceHybridVector(delegated, idx.embedder)
-				idx.lastVectorBuildErr = nil
-				idx.logVectorPublication("durable vector corpus published", plan, stats.VectorCount, stats.ChunkCount, true)
-				return nil
-			}
+		installer, vectorSearcher, err := vectorCorpusCapabilities(durable)
+		if err != nil {
+			idx.lastVectorBuildErr = err
+			return err
+		}
+		stats, err := installer.ReplaceVectorCorpus(ctx, plan.repoPrefix, plan.dims, plan.items)
+		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				idx.lastVectorBuildErr = ctxErr
-				return ctxErr
+				err = ctxErr
 			}
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				idx.lastVectorBuildErr = err
-				return err
-			}
-			nativeErr = fmt.Errorf("durable vector corpus install failed: %w", err)
-		} else if hasInstaller != hasVectorSearcher {
-			nativeErr = fmt.Errorf("durable vector backend exposes an incomplete atomic corpus capability")
+			idx.lastVectorBuildErr = fmt.Errorf("%w: %w", ErrVectorInstall, err)
+			return idx.lastVectorBuildErr
 		}
-
-		// A repository-local heap cannot replace a process-global vector channel:
-		// it would hide every sibling repository. Preserve the last committed
-		// delegate in multi-repo mode and surface the degraded install instead.
-		if idx.repositoryMutationOwner != nil {
-			if nativeErr == nil {
-				nativeErr = fmt.Errorf("durable atomic vector corpus installation is unavailable in multi-repository mode")
-			}
-			idx.lastVectorBuildErr = nativeErr
-			idx.logger.Warn("vector publication retained previous global corpus",
-				zap.String("repo", plan.repoPrefix), zap.Error(nativeErr))
-			return nil
+		// A successful replacement committed. Publish its matching delegate even
+		// if the context was canceled after the commit.
+		dims := stats.Dims
+		if dims <= 0 {
+			dims = plan.dims
 		}
-
-		heap := search.NewVector(plan.dims)
-		for _, item := range plan.items {
-			heap.Add(item.NodeID, item.Vec)
-		}
-		if len(plan.chunkMap) > 0 {
-			chunks := make(map[string]string, len(plan.chunkMap))
-			for child, parent := range plan.chunkMap {
-				chunks[child] = parent
-			}
-			heap.SetChunkMap(chunks)
-		}
-		sw.ReplaceHybridVector(heap, idx.embedder)
-		if nativeErr != nil {
-			idx.lastVectorBuildErr = nativeErr
-			idx.logger.Warn("durable vector install failed; published process-local fallback",
-				zap.String("repo", plan.repoPrefix), zap.Error(nativeErr),
-				zap.String("restart_behavior", "durable corpus remains at its previous generation"))
-		} else {
-			idx.lastVectorBuildErr = nil
-		}
-		idx.logVectorPublication("process-local vector corpus published", plan, heap.Count(), len(plan.chunkMap), false)
+		delegated := search.NewDelegatedVector(
+			dims,
+			&vectorSearcherDelegate{s: vectorSearcher},
+			stats.VectorCount,
+			stats.ChunkCount,
+		)
+		sw.ReplaceHybridVector(delegated, idx.embedder)
+		idx.lastVectorBuildErr = nil
+		idx.logVectorPublication(plan, stats.VectorCount, stats.ChunkCount)
 		return nil
 	})
 }
 
-func (idx *Indexer) logVectorPublication(message string, plan *preparedVectorPlan, vectors, chunks int, delegated bool) {
+// Graph indexing can finish when the optional vector install fails. The last
+// complete publication remains active and LastVectorBuildError exposes the cause.
+func (idx *Indexer) installVectorPlanForPublication(ctx context.Context, durable graph.Store, plan *preparedVectorPlan) error {
+	err := idx.installVectorPlan(ctx, durable, plan)
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	idx.logger.Warn("vector index install failed; retaining previous vector publication", zap.Error(err))
+	return nil
+}
+
+func (idx *Indexer) logVectorPublication(plan *preparedVectorPlan, vectors, chunks int) {
 	fields := []zap.Field{
 		zap.String("repo", plan.repoPrefix),
 		zap.Int("vectors", vectors),
 		zap.Int("chunk_vectors", chunks),
 		zap.Int("dimensions", plan.dims),
 		zap.Int("dropped", plan.dropped),
-		zap.Bool("delegated", delegated),
+		zap.Bool("delegated", true),
 	}
 	if len(plan.droppedIDs) > 0 {
 		fields = append(fields, zap.Strings("dropped_sample_ids", plan.droppedIDs))
@@ -329,7 +314,7 @@ func (idx *Indexer) logVectorPublication(message string, plan *preparedVectorPla
 			fields = append(fields, zap.Int64("embed_tokens", tokens))
 		}
 	}
-	idx.logger.Info(message, fields...)
+	idx.logger.Info("durable vector corpus published", fields...)
 }
 
 // restoreDurableVectorBackend republishes an existing complete durable corpus
@@ -339,12 +324,8 @@ func (idx *Indexer) restoreDurableVectorBackend(ctx context.Context, durable gra
 	if idx.embedder == nil {
 		return false, nil
 	}
-	installer, ok := durable.(graph.AtomicVectorCorpusInstaller)
-	if !ok {
-		return false, nil
-	}
-	vectorSearcher, ok := durable.(graph.VectorSearcher)
-	if !ok {
+	installer, vectorSearcher, err := vectorCorpusCapabilities(durable)
+	if err != nil {
 		return false, nil
 	}
 	if ctx == nil {
@@ -353,7 +334,7 @@ func (idx *Indexer) restoreDurableVectorBackend(ctx context.Context, durable gra
 
 	restored := false
 	sw := idx.swappable()
-	err := sw.SerializeVectorUpdate(func() error {
+	err = sw.SerializeVectorUpdate(func() error {
 		queryDims := idx.embedder.Dimensions()
 		stats, err := installer.VectorCorpusStatsForRepo(ctx, idx.repoPrefix, queryDims)
 		if err != nil {
@@ -382,11 +363,11 @@ func (idx *Indexer) restoreDurableVectorBackend(ctx context.Context, durable gra
 }
 
 func (idx *Indexer) buildSearchIndexCtx(ctx context.Context) error {
-	plan, err := idx.prepareSearchIndexForPublication(ctx)
+	plan, err := idx.prepareSearchIndexForPublication(ctx, idx.graph)
 	if err != nil || plan == nil {
 		return err
 	}
-	return idx.installVectorPlan(ctx, idx.graph, plan)
+	return idx.installVectorPlanForPublication(ctx, idx.graph, plan)
 }
 
 // publishVectorCorpusAfterRepoRemoval runs inside the shared Swappable vector

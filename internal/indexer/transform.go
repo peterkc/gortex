@@ -3,6 +3,7 @@ package indexer
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -93,8 +94,17 @@ func newTransformPipeline(rules []config.TransformRule, reg *parser.Registry, lo
 // that errors is logged and skipped — the bytes from the previous
 // stage are kept, so one failing processor never drops a file.
 func (p *transformPipeline) run(path string, src []byte) []byte {
+	out, _ := p.runWith(path, src, func(t contentTransform, path string, data []byte) ([]byte, error) {
+		return t.apply(path, data)
+	})
+	return out
+}
+
+// runWith keeps the same ordering for the legacy caller and the bounded
+// worker. A worker's limit refusal cannot degrade to untransformed bytes.
+func (p *transformPipeline) runWith(path string, src []byte, apply func(contentTransform, string, []byte) ([]byte, error)) ([]byte, error) {
 	if p == nil {
-		return src
+		return src, nil
 	}
 	out := src
 	// Offset-preserving pre-parse slot first: these neutralise parser-hostile
@@ -117,15 +127,18 @@ func (p *transformPipeline) run(path string, src []byte) []byte {
 		if !t.matches(path) {
 			continue
 		}
-		res, err := t.apply(path, out)
+		res, err := apply(t, path, out)
 		if err != nil {
+			if errors.Is(err, ErrBuildTransformBounds) {
+				return nil, fmt.Errorf("transform %s (%s): %w", path, t.name(), err)
+			}
 			p.logger.Warn("indexer: content transform failed; keeping untransformed bytes",
 				zap.String("transform", t.name()), zap.String("file", path), zap.Error(err))
 			continue
 		}
 		out = res
 	}
-	return out
+	return out, nil
 }
 
 // prepareCoordinateStable applies only source preparation whose output keeps

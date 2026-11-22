@@ -21,12 +21,21 @@ import (
 // parent (Pool) owns the lifecycle: a worker is expected to run until
 // its stdin is closed or it is killed.
 func RunWorker(r io.Reader, w io.Writer) error {
+	return RunWorkerWithRebuild(r, w, nil)
+}
+
+// RebuildFileHandler produces a complete portable entry inside the worker.
+type RebuildFileHandler func(reg *parser.Registry, path string, ext parser.Extractor, content []byte, options parser.ExtractionOptions, frozen RebuildFileOptions) ([]byte, error)
+
+// RunWorkerWithRebuild serves the same protocol with an optional strict
+// rebuild handler. Ordinary requests never use it.
+func RunWorkerWithRebuild(r io.Reader, w io.Writer, rebuild RebuildFileHandler) error {
 	reg := parser.NewRegistry()
 	languages.RegisterAll(reg)
 	registerWorkerGrammars(reg)
 	registerWorkerExtractorPlugins(reg)
 	registerWorkerFallbackChunkers(reg)
-	return serveWorker(reg, r, w)
+	return serveWorker(reg, r, w, rebuild)
 }
 
 // registerWorkerGrammars loads the custom tree-sitter grammars the
@@ -83,7 +92,7 @@ func registerWorkerFallbackChunkers(reg *parser.Registry) {
 
 // serveWorker is the decode/extract/encode loop, factored out of
 // RunWorker so tests can drive it with an in-memory registry.
-func serveWorker(reg *parser.Registry, r io.Reader, w io.Writer) error {
+func serveWorker(reg *parser.Registry, r io.Reader, w io.Writer, rebuild ...RebuildFileHandler) error {
 	dec := gob.NewDecoder(r)
 	enc := gob.NewEncoder(w)
 	for {
@@ -94,11 +103,44 @@ func serveWorker(reg *parser.Registry, r io.Reader, w io.Writer) error {
 			}
 			return err
 		}
-		resp := serveOne(reg, req)
+		var resp extractResponse
+		if req.RebuildFile != nil {
+			resp.Seq = req.Seq
+			if len(rebuild) == 0 || rebuild[0] == nil || !req.FullFacts {
+				resp.Err = "crashpool: strict rebuild file handler unavailable"
+			} else {
+				entry, err := serveRebuildFile(reg, req, rebuild[0])
+				if err != nil {
+					resp.Err = err.Error()
+				} else {
+					resp.RebuildEntry = entry
+				}
+			}
+		} else {
+			resp = serveOne(reg, req)
+		}
 		if err := enc.Encode(&resp); err != nil {
 			return err
 		}
 	}
+}
+
+func serveRebuildFile(reg *parser.Registry, req extractRequest, rebuild RebuildFileHandler) ([]byte, error) {
+	ext, ok := reg.GetByLanguage(req.Language)
+	if !ok || ext == nil {
+		return nil, fmt.Errorf("crashpool: no extractor for language %s", req.Language)
+	}
+	if actual := fmt.Sprintf("%T", ext); actual != req.RebuildFile.Extractor {
+		return nil, fmt.Errorf("crashpool: rebuild extractor differs: got %q, want %q", actual, req.RebuildFile.Extractor)
+	}
+	entry, err := rebuild(reg, req.RelPath, ext, req.Content, parser.NewExtractionOptions(req.TemporalEnvHelpers), *req.RebuildFile)
+	if err != nil {
+		return nil, err
+	}
+	if len(entry) == 0 || len(entry) > req.RebuildFile.EntryLimit {
+		return nil, fmt.Errorf("crashpool: rebuild entry has %d bytes, limit %d", len(entry), req.RebuildFile.EntryLimit)
+	}
+	return entry, nil
 }
 
 // serveOne runs one extraction under panic recovery. A Go panic in an
@@ -113,6 +155,8 @@ func serveOne(reg *parser.Registry, req extractRequest) (resp extractResponse) {
 		if rec := recover(); rec != nil {
 			resp.Nodes = nil
 			resp.Edges = nil
+			resp.ConstValues = nil
+			resp.ParseErrorLocations = nil
 			resp.Err = fmt.Sprintf("extractor panic: %v\n%s", rec, debug.Stack())
 			resp.Panicked = true
 			resp.ParseChecked, resp.ParseErrors = false, 0
@@ -133,6 +177,12 @@ func serveOne(reg *parser.Registry, req extractRequest) (resp extractResponse) {
 	if result != nil {
 		resp.Nodes = result.Nodes
 		resp.Edges = result.Edges
+		if req.FullFacts {
+			resp.ConstValues = result.ConstValues
+			if result.Tree != nil {
+				resp.ParseErrorLocations = result.Tree.ParseErrorLocations()
+			}
+		}
 		if result.ParseChecked && result.ParseErrors >= 0 {
 			resp.ParseChecked, resp.ParseErrors = true, result.ParseErrors
 			resp.HasParseErr = result.ParseErrors > 0

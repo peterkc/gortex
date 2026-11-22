@@ -379,7 +379,7 @@ func TestSealRefusesMisfiledSecondary(t *testing.T) {
 	format := b.db.FormatMajorVersion().MaxTableFormat()
 	rows := sortedRuns{dir: scratch, name: "original", options: b.options, format: format, limit: 128}
 	seal := goldSeal{refs: sortedRuns{dir: scratch, name: "refs", options: b.options, format: format, limit: 128}, owner: b.keptOwner}
-	if err := b.writeRows(t.Context(), &rows); err != nil {
+	if err := b.writeRows(t.Context(), &rows, StageSearch); err != nil {
 		t.Fatal(err)
 	}
 	broken := sortedRuns{dir: scratch, name: "bad", options: b.options, format: format, limit: 128}

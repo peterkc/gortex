@@ -221,7 +221,6 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/ansi v0.11.9
 	github.com/cockroachdb/pebble/v2 v2.1.7
-	github.com/coder/hnsw v0.6.1
 	github.com/davalillo/tree-sitter-mql5 v0.2.0
 	github.com/fwcd/tree-sitter-kotlin v0.0.0-20260411204054-55622a49bd59
 	github.com/go-viper/mapstructure/v2 v2.5.0
@@ -364,8 +363,6 @@ require (
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
-	github.com/viterin/partial v1.1.0 // indirect
-	github.com/viterin/vek v0.4.3 // indirect
 	github.com/xo/terminfo v1.0.0 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/zeebo/assert v1.3.0 // indirect
@@ -386,9 +383,7 @@ replace github.com/tree-sitter/tree-sitter-elixir => github.com/elixir-lang/tree
 // throughput to one goroutine at a time. See internal/thirdparty/go-pointer.
 replace github.com/mattn/go-pointer => ./internal/thirdparty/go-pointer
 
-// Vendored copy of github.com/google/renameio v1.0.1 with an added
-// Windows implementation. Upstream v1.0.1 builds only on non-Windows
-// platforms (tempfile.go / writefile.go are `+build !windows`), which
-// blocked the Windows build because github.com/coder/hnsw imports it
-// unconditionally. See internal/thirdparty/renameio.
+// Global config uses this copy of github.com/google/renameio v1.0.1
+// because upstream v1.0.1 lacks a Windows implementation.
+// See internal/thirdparty/renameio.
 replace github.com/google/renameio => ./internal/thirdparty/renameio

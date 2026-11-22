@@ -168,12 +168,16 @@ func TestBlockMaxSkipUsesStrictConservativeBound(t *testing.T) {
 	if rounded >= factor {
 		t.Fatal("fixture must round down without upward correction")
 	}
-	block, err := searchPackBlock([][]byte{searchPackDoc(searchDoc{
-		Rowid: 1, Length: length, NodePresent: true, ID: "doc", Terms: []searchTerm{{"x", freq}},
-	})}, avgdl, func(string) (uint32, error) { return 1, nil })
+	scratch, err := searchDocBounds(searchDoc{Length: length, NodePresent: true, Terms: []searchTerm{{"x", freq}}}, avgdl, func(string) (uint32, error) { return 1, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
+	maxima := make(map[uint32]float32)
+	present, err := mergeSearchDocBounds(scratch, maxima)
+	if err != nil || !present || len(maxima) != 1 {
+		t.Fatalf("bounds = %v, node present = %t, error = %v", maxima, present, err)
+	}
+	block := searchPackBlock([]searchPosting{{Rowid: 1, NodePresent: present}}, maxima)
 	bound := float64(math.Nextafter32(float32(factor), float32(math.Inf(1))))
 	for _, tc := range []struct {
 		threshold float64

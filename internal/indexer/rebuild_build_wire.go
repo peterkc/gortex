@@ -1,0 +1,208 @@
+package indexer
+
+import (
+	"bytes"
+	"context"
+	"encoding/binary"
+	"encoding/gob"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+
+	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/graph/store_pebble"
+	"github.com/zzet/gortex/internal/resolver"
+)
+
+const (
+	rebuildRequestName  = "request"
+	rebuildRequestBytes = 64 << 20 // control data, not parsed file content
+	rebuildReplyBytes   = 1 << 20  // witness, SST basenames, or one refusal
+)
+
+var (
+	ErrRebuildWorker           = errors.New("rebuild worker failed")
+	errRebuildBuildIncomplete  = errors.New("rebuild worker stopped before the complete head")
+	errRebuildBuildWire        = errors.New("invalid rebuild worker transport")
+	errRebuildBuildRequestSize = errors.New("rebuild request exceeds its byte limit")
+)
+
+type rebuildBuildRequest struct {
+	Root, ParseDir string
+	ParseLimit     int
+	Config         []byte
+	Policy         rebuildParsePolicy
+	Recipes        map[string]rebuildDigest
+	Bounds         rebuildTransformBounds
+	Incarnation    uint64
+	ProjectName    string
+	BaseRecipe     store_pebble.HeadDigest
+	Witness        store_pebble.Witness
+	Files          int
+}
+
+// New process, same effective settings. JSON keeps the difference between a
+// nil *bool and a configured false, which gob would flatten to a zero value.
+// Input path bytes and policy files instead travel in gob without UTF-8 folding.
+func writeRebuildBuildRequest(ctx context.Context, dir string, req rebuildBuildRequest, cfg config.IndexConfig, inputs []rebuildInput) (err error) {
+	if err := req.checkProjectRecipe(); err != nil {
+		return err
+	}
+	req.Config, err = json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	req.Files = len(inputs)
+	f, err := os.OpenFile(filepath.Join(dir, rebuildRequestName), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, f.Close()) }()
+	enc := gob.NewEncoder(&rebuildRequestWriter{out: f, left: rebuildRequestBytes})
+	if err := enc.Encode(&req); err != nil {
+		return err
+	}
+	for _, input := range inputs {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := enc.Encode(&input); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type rebuildRequestWriter struct {
+	out  io.Writer
+	left int
+}
+
+func (w *rebuildRequestWriter) Write(p []byte) (int, error) {
+	if len(p) > w.left {
+		return 0, errRebuildBuildRequestSize
+	}
+	n, err := w.out.Write(p)
+	w.left -= n
+	return n, err
+}
+
+func readRebuildBuildRequest(ctx context.Context, dir string) (req rebuildBuildRequest, inputs []rebuildInput, err error) {
+	f, err := os.Open(filepath.Join(dir, rebuildRequestName))
+	if err != nil {
+		return req, nil, err
+	}
+	defer func() { err = errors.Join(err, f.Close()) }()
+	st, err := f.Stat()
+	if err != nil {
+		return req, nil, err
+	}
+	if !st.Mode().IsRegular() || st.Size() > rebuildRequestBytes {
+		return req, nil, errRebuildBuildRequestSize
+	}
+	dec := gob.NewDecoder(io.LimitReader(f, rebuildRequestBytes))
+	if err := dec.Decode(&req); err != nil {
+		return req, nil, err
+	}
+	if !filepath.IsAbs(req.Root) || !filepath.IsAbs(req.ParseDir) || req.Files < 0 || req.Incarnation == 0 ||
+		req.ParseLimit <= 0 || req.Bounds.CaptureBytes <= 0 || req.Bounds.FileBytes < req.Bounds.CaptureBytes || req.Bounds.Dir != "" ||
+		req.Witness.Stage != store_pebble.StageManifest || len(req.Witness.Families) != 0 {
+		return req, nil, fmt.Errorf("%w: request identity or bounds", errRebuildBuildWire)
+	}
+	if err := req.checkProjectRecipe(); err != nil {
+		return req, nil, err
+	}
+	// Count is not an allocation hint supplied by the peer. Charge each
+	// append to a record that actually decoded within the request file cap.
+	for range req.Files {
+		if err := ctx.Err(); err != nil {
+			return req, nil, err
+		}
+		var input rebuildInput
+		if err := dec.Decode(&input); err != nil {
+			return req, nil, err
+		}
+		inputs = append(inputs, input)
+	}
+	if err := dec.Decode(nil); err != io.EOF {
+		return req, nil, fmt.Errorf("%w: trailing or unreadable request data: %v", errRebuildBuildWire, err)
+	}
+	return req, inputs, nil
+}
+
+type rebuildBuildReply struct {
+	Files   []string
+	Base    store_pebble.HeadDigest
+	Witness store_pebble.Witness
+	Refusal uint8
+	Detail  string
+}
+
+var rebuildFailureKinds = [...]error{
+	ErrRebuildWorker, ErrBuildInputChanged, ErrBuildTransformBounds, errParseEntryCorrupt,
+	errParseEntryConflict, errParseEntryTooLarge, store_pebble.ErrStageTableLimit,
+	errRebuildBuildIncomplete, errRebuildBuildWire, errRebuildBuildRequestSize,
+	store_pebble.ErrRelationsSeal, store_pebble.ErrRebuildReexports,
+	store_pebble.ErrRebuildTemporalConst, store_pebble.ErrSearchSeal,
+	resolver.ErrRebuildCppIncludeInput, store_pebble.ErrRebuildFileImports,
+	store_pebble.ErrRebuildLinkInputSize, store_pebble.ErrRebuildLink,
+	store_pebble.ErrRebuildPlaceholderSources, resolver.ErrRebuildCrossPackageGuard, store_pebble.ErrRebuildView,
+	errRebuildInputSidecar,
+}
+
+func buildRefusal(err error) rebuildBuildReply {
+	r := rebuildBuildReply{Refusal: 1, Detail: err.Error()}
+	if len(r.Detail) > 8<<10 {
+		r.Detail = r.Detail[:8<<10]
+	}
+	for i, kind := range rebuildFailureKinds[1:] {
+		if errors.Is(err, kind) {
+			r.Refusal = uint8(i + 2)
+			break
+		}
+	}
+	return r
+}
+
+func writeRebuildBuildReply(out io.Writer, r rebuildBuildReply) error {
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(&r); err != nil {
+		return err
+	}
+	if buf.Len() > rebuildReplyBytes {
+		return fmt.Errorf("%w: stage frame too large", errRebuildBuildWire)
+	}
+	var size [4]byte
+	binary.BigEndian.PutUint32(size[:], uint32(buf.Len()))
+	if _, err := out.Write(size[:]); err != nil {
+		return err
+	}
+	_, err := buf.WriteTo(out)
+	return err
+}
+
+func readRebuildBuildReply(in io.Reader) (r rebuildBuildReply, err error) {
+	var size [4]byte
+	if _, err := io.ReadFull(in, size[:]); err != nil {
+		return r, err
+	}
+	n := binary.BigEndian.Uint32(size[:])
+	if n == 0 || n > rebuildReplyBytes {
+		return r, fmt.Errorf("%w: stage frame length %d", errRebuildBuildWire, n)
+	}
+	raw := make([]byte, n)
+	if _, err := io.ReadFull(in, raw); err != nil {
+		return r, fmt.Errorf("%w: truncated stage frame: %w", errRebuildBuildWire, err)
+	}
+	dec := gob.NewDecoder(bytes.NewReader(raw))
+	if err := dec.Decode(&r); err != nil {
+		return r, fmt.Errorf("%w: decode stage: %w", errRebuildBuildWire, err)
+	}
+	if err := dec.Decode(nil); err != io.EOF {
+		return r, fmt.Errorf("%w: trailing or unreadable stage data: %v", errRebuildBuildWire, err)
+	}
+	return r, nil
+}

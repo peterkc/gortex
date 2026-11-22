@@ -741,10 +741,6 @@ func TestPreparedVectorsAreDroppedForWithheldIdentities(t *testing.T) {
 			{NodeID: withheld, Vec: []float32{1, 1}},
 			{NodeID: withheld + "#chunk0", ParentID: withheld, Vec: []float32{0, 0}},
 		},
-		chunkMap: map[string]string{
-			kept + "#chunk0":     kept,
-			withheld + "#chunk0": withheld,
-		},
 	}
 
 	pruneVectorPlanToCorpus(plan, corpus)
@@ -752,18 +748,15 @@ func TestPreparedVectorsAreDroppedForWithheldIdentities(t *testing.T) {
 	var survivors []string
 	for _, item := range plan.items {
 		survivors = append(survivors, item.NodeID)
+		if item.NodeID == kept+"#chunk0" && item.ParentID != kept {
+			t.Errorf("surviving chunk parent = %q, want %q", item.ParentID, kept)
+		}
 	}
 	sort.Strings(survivors)
 	want := []string{kept, kept + "#chunk0"}
 	sort.Strings(want)
 	if !slices.Equal(survivors, want) {
 		t.Fatalf("prepared vectors after pruning = %v, want %v", survivors, want)
-	}
-	if _, present := plan.chunkMap[withheld+"#chunk0"]; present {
-		t.Errorf("the chunk map still routes a withheld identity's sub-chunk")
-	}
-	if plan.chunkMap[kept+"#chunk0"] != kept {
-		t.Errorf("the surviving identity lost its chunk mapping: %v", plan.chunkMap)
 	}
 }
 

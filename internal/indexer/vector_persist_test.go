@@ -234,7 +234,7 @@ func TestBulkLoad_FlushFailureDoesNotPublishVectors(t *testing.T) {
 	}
 }
 
-func TestBulkLoad_NativeVectorFailureFallsBackWithoutReembedding(t *testing.T) {
+func TestBulkLoad_NativeVectorFailureDoesNotPublish(t *testing.T) {
 	t.Setenv("GORTEX_SHADOW_MAX_FILES", "1000000")
 	t.Setenv("GORTEX_SHADOW_MAX_BYTES", "1073741824")
 	t.Setenv("GORTEX_STREAMING_FLUSH", "0")
@@ -247,17 +247,22 @@ func TestBulkLoad_NativeVectorFailureFallsBackWithoutReembedding(t *testing.T) {
 	emb := &poolEmbedder{}
 	idx := newVectorPersistIndexer(t, probe, emb)
 
-	_, err = idx.IndexCtx(context.Background(), dir)
-	require.NoError(t, err, "single-repository indexing may degrade to the prepared heap fallback")
-	require.Equal(t, int32(1), emb.calls, "fallback must reuse the prepared vectors without a second paid pass")
+	before, release := idx.swappable().AcquireBackend()
+	release()
+	_, err = idx.IndexCtx(t.Context(), dir)
+	require.NoError(t, err, "the graph build remains usable after an optional vector failure")
+	require.Positive(t, base.NodeCount())
+	require.Equal(t, int32(1), emb.calls, "failed installation must not re-embed")
+	require.Equal(t, int32(1), probe.replaceCalls.Load())
+	require.ErrorIs(t, idx.LastVectorBuildError(), ErrVectorInstall)
 	require.ErrorIs(t, idx.LastVectorBuildError(), probe.replaceErr)
+	stats, err := base.VectorCorpusStats(t.Context(), 3)
+	require.NoError(t, err)
+	require.Zero(t, stats.VectorCount)
 
-	backend, release := idx.swappable().AcquireBackend()
+	after, release := idx.swappable().AcquireBackend()
 	defer release()
-	hybrid, ok := backend.(*search.HybridBackend)
-	require.True(t, ok)
-	require.Greater(t, hybrid.VectorIndex().Count(), 0)
-	require.Greater(t, hybrid.VectorSizeBytes(), uint64(0), "fallback must be the process-local heap backend")
+	require.Same(t, before, after, "a failed vector replacement must not publish a search backend")
 }
 
 func TestDirectSQLiteIndexPublishesDelegatedVectorCorpus(t *testing.T) {

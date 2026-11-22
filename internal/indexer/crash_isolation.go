@@ -37,6 +37,10 @@ func (idx *Indexer) newParsePool(workers int) (*crashpool.Pool, error) {
 	if err != nil {
 		return nil, err
 	}
+	return idx.newParsePoolFromExecutable(exe, workers)
+}
+
+func (idx *Indexer) newParsePoolFromExecutable(exe string, workers int) (*crashpool.Pool, error) {
 	cfg := crashpool.Config{
 		Argv:    []string{exe, "__parse-worker"},
 		Workers: workers,

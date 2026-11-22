@@ -9,11 +9,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/embedding"
-	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/search"
@@ -23,8 +22,7 @@ import (
 // indexer wire up a HybridBackend in tests without pulling in the
 // static-vector asset or a real ONNX runtime. It emits a 4-dim
 // vector whose first element is the text length — enough for the
-// vector backend to accept the adds and for Search to return
-// something non-empty.
+// durable store to install and search it.
 type stubEmbedder struct{}
 
 func (stubEmbedder) Embed(_ context.Context, text string) ([]float32, error) {
@@ -44,21 +42,18 @@ func (stubEmbedder) Close() error    { return nil }
 
 // indexedVectorBackend indexes dir with the given chunk options and returns
 // the published vector backend, pinned for the remainder of the test.
-func indexedVectorBackend(t *testing.T, dir string, opts embedding.ChunkOptions) *search.VectorBackend {
+func indexedVectorBackend(t *testing.T, dir string, opts embedding.ChunkOptions) (*search.VectorBackend, *store_sqlite.Store) {
 	t.Helper()
-	g := graph.New()
 	reg := parser.NewRegistry()
 	reg.Register(languages.NewGoExtractor())
 
 	cfg := config.Default().Index
 	cfg.Workers = 1
 
-	idx := New(g, reg, cfg, zap.NewNop())
-	idx.SetEmbedder(stubEmbedder{})
-	idx.SetEmbeddingChunkOptions(opts)
-
-	_, err := idx.Index(dir)
-	require.NoError(t, err)
+	idx, store := newFTSIndexer(t, dir, reg, cfg, func(idx *Indexer) {
+		idx.SetEmbedder(stubEmbedder{})
+		idx.SetEmbeddingChunkOptions(opts)
+	})
 
 	sw, ok := idx.Search().(*search.Swappable)
 	require.True(t, ok)
@@ -66,12 +61,12 @@ func indexedVectorBackend(t *testing.T, dir string, opts embedding.ChunkOptions)
 	t.Cleanup(release)
 	hyb, ok := backend.(*search.HybridBackend)
 	require.True(t, ok, "an embedder-equipped index must produce a HybridBackend")
-	return hyb.VectorIndex()
+	return hyb.VectorIndex(), store
 }
 
 // TestVectorPublication_LongSymbolYieldsMultipleChunks proves that a function
 // whose source span exceeds the chunk threshold is split into several chunk
-// vectors and the chunk → parent mapping is recorded on the vector backend.
+// vectors and the durable rows retain each chunk's parent.
 func TestVectorPublication_LongSymbolYieldsMultipleChunks(t *testing.T) {
 	dir := t.TempDir()
 	var b strings.Builder
@@ -83,40 +78,23 @@ func TestVectorPublication_LongSymbolYieldsMultipleChunks(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "big.go"), []byte(b.String()), 0o644))
 
 	// Low threshold + small window so BigFunc is forced to split.
-	vec := indexedVectorBackend(t, dir, embedding.ChunkOptions{ThresholdLines: 20, WindowLines: 15})
+	vec, store := indexedVectorBackend(t, dir, embedding.ChunkOptions{ThresholdLines: 20, WindowLines: 15})
 
 	require.True(t, vec.HasChunks(),
 		"a long function past the threshold must produce chunk vectors")
 
-	// At least two of BigFunc's chunk vectors must resolve back to it.
-	chunkCount := 0
-	for i := 0; i < 20; i++ {
-		id := bigFuncChunkID(i)
-		if parent, isChunk := vec.ResolveChunk(id); isChunk {
-			assert.Equal(t, "big.go::BigFunc", parent)
+	hits, err := store.SimilarTo([]float32{1, 0, 0, 0}, vec.Count())
+	require.NoError(t, err)
+	require.Len(t, hits, vec.Count())
+	var chunkCount int
+	for _, hit := range hits {
+		if strings.HasPrefix(hit.NodeID, "big.go::BigFunc#chunk") {
+			assert.Equal(t, "big.go::BigFunc", hit.ParentID)
 			chunkCount++
 		}
 	}
 	assert.GreaterOrEqual(t, chunkCount, 2,
 		"BigFunc must be split into at least two chunk vectors")
-}
-
-// bigFuncChunkID builds the synthetic chunk ID vector preparation stamps on
-// BigFunc's i-th window.
-func bigFuncChunkID(i int) string {
-	return "big.go::BigFunc#chunk" + itoa(i)
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var digits []byte
-	for i > 0 {
-		digits = append([]byte{byte('0' + i%10)}, digits...)
-		i /= 10
-	}
-	return string(digits)
 }
 
 // TestVectorPublication_ShortSymbolStaysWhole proves the inverse: a file of
@@ -136,7 +114,7 @@ func AlsoTiny() {
 `
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "small.go"), []byte(src), 0o644))
 
-	vec := indexedVectorBackend(t, dir, embedding.ChunkOptions{ThresholdLines: 60, WindowLines: 40})
+	vec, _ := indexedVectorBackend(t, dir, embedding.ChunkOptions{ThresholdLines: 60, WindowLines: 40})
 	assert.False(t, vec.HasChunks(),
 		"a file of only short functions must produce no chunk vectors")
 	assert.Greater(t, vec.Count(), 0, "the symbols must still be embedded")

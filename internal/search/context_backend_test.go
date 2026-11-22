@@ -230,8 +230,7 @@ type searchFailureEmbedder struct {
 
 func (e searchFailureEmbedder) Embed(context.Context, string) ([]float32, error) { return nil, e.err }
 func TestHybridFailureObserverNamesVectorAndRetainsText(t *testing.T) {
-	vector := NewVector(2)
-	vector.Add("vector", []float32{1, 0})
+	vector := NewDelegatedVector(2, &publicationTestDelegate{}, 1, 0)
 	cause := errors.New("embedding failed")
 	text := &contextBackendStub{results: []SearchResult{{ID: "text", Score: 2}}}
 	backend := NewSwappable(NewHybrid(text, vector, searchFailureEmbedder{fixedEmbedder{dims: 2}, cause}))

@@ -106,8 +106,8 @@ func symbolPrefixes(term string, visit func(string)) {
 // writeSymbols assigns IDs in canonical logical node order. Prefix frequencies
 // spill to the same private index rather than growing with the corpus heap.
 func (b *BuildStore) writeSymbols(ctx context.Context, gold *sortedRuns) error {
-	dfPrefix, idPrefix := []byte{'D'}, []byte{'I'}
-	for _, prefix := range [][]byte{dfPrefix, idPrefix} {
+	dfPrefix, idPrefix, docPrefix := []byte{'D'}, []byte{'I'}, []byte{'B'}
+	for _, prefix := range [][]byte{dfPrefix, idPrefix, docPrefix} {
 		if err := b.pending.DeleteRange(prefix, prefixEnd(prefix), pebble.NoSync); err != nil {
 			return err
 		}
@@ -157,9 +157,15 @@ func (b *BuildStore) writeSymbols(ctx context.Context, gold *sortedRuns) error {
 			if err := gold.add(binary.BigEndian.AppendUint64(searchKey("doc"), uint64(d.Rowid)), value); err != nil {
 				return err
 			}
+			if len(d.Terms) > 0 {
+				key := binary.BigEndian.AppendUint64(bytes.Clone(docPrefix), uint64(d.Rowid))
+				if err := b.pending.Set(key, value, pebble.NoSync); err != nil {
+					return err
+				}
+			}
 			for _, term := range d.Terms {
 				key := binary.BigEndian.AppendUint64(searchKey("post", d.Repo, term.Text, d.Path), uint64(d.Rowid))
-				if err := postings.add(key, value); err != nil {
+				if err := postings.add(key, nil); err != nil {
 					return err
 				}
 			}
@@ -226,20 +232,34 @@ func (b *BuildStore) writeSymbols(ctx context.Context, gold *sortedRuns) error {
 	}); err != nil {
 		return err
 	}
-	var block [][]byte
+	avgdl := float64(stats.Tokens) / float64(stats.Rows)
+	prefixID := func(prefix string) (uint32, error) {
+		id, err := pendingGet(b.pending, keyStrings(bytes.Clone(idPrefix), prefix), decodeCount)
+		return uint32(id), err
+	}
+	if err := pendingVisit(ctx, b.pending, docPrefix, func(r row) error {
+		doc, err := searchReadDoc(r.value)
+		if err != nil {
+			return err
+		}
+		bounds, err := searchDocBounds(doc, avgdl, prefixID)
+		if err != nil {
+			return err
+		}
+		return b.pending.Set(r.key, bounds, pebble.NoSync)
+	}); err != nil {
+		return fmt.Errorf("prepare symbol bounds: %w", err)
+	}
+	var block []searchPosting
+	maxima := make(map[uint32]float32)
 	var group, start, termKey []byte
 	flush := func() error {
 		if len(block) == 0 {
 			return nil
 		}
-		value, err := searchPackBlock(block, float64(stats.Tokens)/float64(stats.Rows), func(prefix string) (uint32, error) {
-			id, err := pendingGet(b.pending, keyStrings([]byte{'I'}, prefix), decodeCount)
-			return uint32(id), err
-		})
-		if err != nil {
-			return err
-		}
+		value := searchPackBlock(block, maxima)
 		block = block[:0]
+		clear(maxima)
 		return gold.add(start, value)
 	}
 	lead := searchKey("post")
@@ -270,10 +290,25 @@ func (b *BuildStore) writeSymbols(ctx context.Context, gold *sortedRuns) error {
 			}
 			termKey = k
 		}
-		block = append(block, bytes.Clone(r.value))
+		id := int64(binary.BigEndian.Uint64(r.key[len(key):]))
+		boundKey := binary.BigEndian.AppendUint64(bytes.Clone(docPrefix), uint64(id))
+		posting, err := pendingGet(b.pending, boundKey, func(raw []byte) (searchPosting, error) {
+			present, err := mergeSearchDocBounds(raw, maxima)
+			return searchPosting{Rowid: id, NodePresent: present}, err
+		})
+		if err != nil {
+			return err
+		}
+		if posting.Rowid <= 0 {
+			return invalid("missing symbol document bounds")
+		}
+		block = append(block, posting)
 		return nil
 	}); err != nil {
 		return fmt.Errorf("build symbol postings: %w", err)
 	}
-	return flush()
+	if err := flush(); err != nil {
+		return err
+	}
+	return b.pending.DeleteRange(docPrefix, prefixEnd(docPrefix), pebble.NoSync)
 }

@@ -203,7 +203,7 @@ func TestContractCoreCosineRefinementReadsSelectedVectors(t *testing.T) {
 
 	embedder := fixedQueryEmbedder{vec: []float32{1, 0, 0}}
 	engine := query.NewEngine(store)
-	engine.SetSearch(search.NewSwappable(search.NewHybrid(search.NewNull(), search.NewVector(3), embedder)))
+	engine.SetSearch(search.NewSwappable(search.NewHybrid(search.NewNull(), search.NewDelegatedVector(3, store, 3, 0), embedder)))
 	refine := func(r graph.Reader) []string {
 		var cands []*rerank.Candidate
 		for _, n := range nodes {

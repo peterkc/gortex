@@ -15,6 +15,10 @@ var (
 
 func vectorUnsupported() error { return fmt.Errorf("pebble vector family: %w", errors.ErrUnsupported) }
 
+// VectorCorpusSupport lets callers check availability without reading statistics
+// or preparing a corpus. The stubs still return typed errors when called directly.
+func (*BuildStore) VectorCorpusSupport() error { return vectorUnsupported() }
+
 func (b *BuildStore) UpsertEmbedding(string, []float32) error       { return vectorUnsupported() }
 func (b *BuildStore) BulkUpsertEmbeddings([]graph.VectorItem) error { return vectorUnsupported() }
 func (b *BuildStore) BuildVectorIndex(int) error                    { return vectorUnsupported() }

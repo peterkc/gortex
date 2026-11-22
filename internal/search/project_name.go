@@ -26,13 +26,41 @@ func DetectProjectName(root string) string {
 // readFile, so a caller that accounts for every working-copy read it makes
 // sees these too.
 func DetectProjectNameWith(root string, readFile func(string) ([]byte, error)) string {
-	if name := projectNameFromGoMod(root, readFile); name != "" {
-		return qualifyProjectName(name)
+	name, _ := manifestProjectName(func(path string) ([]byte, error) {
+		data, err := readFile(filepath.Join(root, path))
+		if err != nil {
+			return nil, nil // legacy detection treats any read error as absence
+		}
+		return data, nil
+	})
+	if name == "" {
+		name = filepath.Base(root)
 	}
-	if name := projectNameFromPackageJSON(root, readFile); name != "" {
-		return qualifyProjectName(name)
+	return qualifyProjectName(name)
+}
+
+// PortableProjectName derives the indexed name from verified root manifest
+// bytes. The reader takes a repository-relative filename and returns (nil,
+// nil) for a manifest absent from the frozen inputs. It must return an error
+// for an unverified read. There is no checkout-basename fallback.
+func PortableProjectName(readFile func(string) ([]byte, error)) (string, error) {
+	name, err := manifestProjectName(readFile)
+	return qualifyProjectName(name), err
+}
+
+func manifestProjectName(readFile func(string) ([]byte, error)) (string, error) {
+	data, err := readFile("go.mod")
+	if err != nil {
+		return "", err
 	}
-	return qualifyProjectName(filepath.Base(root))
+	if name := projectNameFromGoMod(data); name != "" {
+		return name, nil
+	}
+	data, err = readFile("package.json")
+	if err != nil {
+		return "", err
+	}
+	return projectNameFromPackageJSON(data), nil
 }
 
 func qualifyProjectName(name string) string {
@@ -43,11 +71,7 @@ func qualifyProjectName(name string) string {
 	return name
 }
 
-func projectNameFromGoMod(root string, readFile func(string) ([]byte, error)) string {
-	data, err := readFile(filepath.Join(root, "go.mod"))
-	if err != nil {
-		return ""
-	}
+func projectNameFromGoMod(data []byte) string {
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if rest, ok := strings.CutPrefix(line, "module "); ok {
@@ -61,11 +85,7 @@ func projectNameFromGoMod(root string, readFile func(string) ([]byte, error)) st
 	return ""
 }
 
-func projectNameFromPackageJSON(root string, readFile func(string) ([]byte, error)) string {
-	data, err := readFile(filepath.Join(root, "package.json"))
-	if err != nil {
-		return ""
-	}
+func projectNameFromPackageJSON(data []byte) string {
 	var pkg struct {
 		Name string `json:"name"`
 	}

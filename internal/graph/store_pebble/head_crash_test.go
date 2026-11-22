@@ -1,0 +1,198 @@
+package store_pebble
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/cockroachdb/pebble/v2"
+	"github.com/cockroachdb/pebble/v2/vfs"
+	"github.com/stretchr/testify/require"
+	"github.com/zeebo/blake3"
+	"github.com/zzet/gortex/internal/graph"
+)
+
+const headCrashPhaseEnv = "GORTEX_TEST_HEAD_INGEST_CRASH_PHASE"
+const headCrashDecl = "a.go::OnlyInFileGraph"
+
+// Given a committed manifest and a sealed file graph, kill the head owner
+// before the second version edit reaches the MANIFEST, or immediately after
+// PublishStage returns. Restart with the same stale local record in both cases.
+func TestHeadPublicationCrash(t *testing.T) {
+	for _, phase := range []string{"during", "after"} {
+		t.Run(phase, func(t *testing.T) {
+			lease := t.TempDir()
+			headDir := filepath.Join(lease, "head")
+			old, next := prepareHeadCrashFixture(t, headDir, lease)
+			digest := func(w Witness) HeadDigest {
+				raw, err := encodeWitness(w)
+				require.NoError(t, err)
+				return blake3.Sum256(raw)
+			}
+			event := uint64(5)
+			saved := LocalPublicationRecord{Version: old.Version(), Incarnation: next.Incarnation, WitnessDigest: digest(old), EventID: &event}
+			killHeadCrashChild(t, lease, phase)
+
+			h, err := OpenHead(headDir, next.Incarnation, old.Profile)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, h.Close()) })
+			w, record, err := h.ReconcilePublication(&saved)
+			require.NoError(t, err)
+			view := stageRead(t, h)
+			manifest, err := view.ManifestFile("a.go")
+			require.NoError(t, err)
+			require.Equal(t, HeadDigest{3}, manifest.Content)
+			if phase == "during" {
+				require.Equal(t, old, w)
+				require.Equal(t, saved, record)
+				require.Nil(t, view.GetNode(headCrashDecl))
+				require.ErrorAs(t, view.RequireStage(StageFileGraph), new(*ErrStagePending))
+			} else {
+				require.Equal(t, next.Witness, w)
+				require.Equal(t, LocalPublicationRecord{Version: saved.Version, Incarnation: saved.Incarnation, WitnessDigest: digest(next.Witness)}, record)
+				require.NoError(t, view.RequireStage(StageFileGraph))
+				n := view.GetNode(headCrashDecl)
+				require.NotNil(t, n)
+				require.Equal(t, headCrashDecl, n.ID)
+				meta, err := view.FileMetadata("", "a.go")
+				require.NoError(t, err)
+				require.Equal(t, 1, meta.NodeCount)
+			}
+			require.NoError(t, view.ReadError())
+		})
+	}
+}
+
+func prepareHeadCrashFixture(t *testing.T, headDir, lease string) (Witness, StageTables) {
+	t.Helper()
+	ctx := t.Context()
+	const incarnation = 4
+	manifest, err := PrepareManifest(ctx, t.TempDir(), []ManifestFile{{
+		Path: "a.go", Language: "go", Kind: 'f', Size: 64, Content: HeadDigest{3}, Extractor: HeadDigest{4},
+	}}, Witness{Input: HeadDigest{1}, Recipe: HeadDigest{2}, Stage: StageManifest, Profile: FullProfile}, incarnation)
+	require.NoError(t, err)
+	h, err := OpenHead(headDir, incarnation, FullProfile)
+	require.NoError(t, err)
+	base, publishErr := h.PublishStage(ctx, manifest)
+	require.NoError(t, h.Close())
+	require.NoError(t, publishErr)
+
+	b, err := OpenBuild(filepath.Join(t.TempDir(), "work"), FullProfile)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, b.Close()) }()
+	require.NoError(t, b.AddParsedFile("", ParseFacts{
+		Nodes: []*graph.Node{{ID: headCrashDecl, Name: "OnlyInFileGraph", Kind: graph.KindFunction, FilePath: "a.go", Language: "go"}},
+		File:  graph.FileMetaRow{FilePath: "a.go", ContentHash: "digest", Size: 64, NodeCount: 1},
+	}))
+	next, err := b.PrepareFileGraph(ctx, t.TempDir(), manifest.Witness, incarnation)
+	require.NoError(t, err)
+	require.NotEmpty(t, next.Files)
+	require.Equal(t, base, next.Base)
+	request, err := json.Marshal(next)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(lease, "stage.json"), request, 0o600))
+	return manifest.Witness, next
+}
+
+func killHeadCrashChild(t *testing.T, lease, phase string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	exe, err := os.Executable()
+	require.NoError(t, err)
+	cmd := exec.CommandContext(ctx, exe, "-test.run=^TestHeadPublicationCrashChild$", "--", lease)
+	cmd.Env = append(os.Environ(), headCrashPhaseEnv+"="+phase)
+	cmd.Stderr = os.Stderr
+	out, err := cmd.StdoutPipe()
+	require.NoError(t, err)
+	in, err := cmd.StdinPipe()
+	require.NoError(t, err)
+	defer in.Close()
+	require.NoError(t, cmd.Start())
+	reaped := false
+	defer func() {
+		if !reaped {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	}()
+	line, err := bufio.NewReader(out).ReadString('\n')
+	require.NoError(t, err)
+	require.Equal(t, phase+"\n", line, "child must reach the exact crash point")
+	require.NoError(t, ctx.Err())
+	require.NoError(t, cmd.Process.Kill())
+	err = cmd.Wait()
+	reaped = true
+	var exit *exec.ExitError
+	require.ErrorAs(t, err, &exit)
+	require.False(t, exit.Success())
+}
+
+func TestHeadPublicationCrashChild(t *testing.T) {
+	phase := os.Getenv(headCrashPhaseEnv)
+	if phase != "during" && phase != "after" {
+		t.Skip("isolated crash fixture child")
+	}
+	lease := os.Args[len(os.Args)-1]
+	request, err := os.ReadFile(filepath.Join(lease, "stage.json"))
+	require.NoError(t, err)
+	var stage StageTables
+	require.NoError(t, json.Unmarshal(request, &stage))
+	stop := func(point string) {
+		_, err := fmt.Fprintln(os.Stdout, point)
+		require.NoError(t, err)
+		_, _ = io.Copy(io.Discard, os.Stdin) // held open until the parent kills this child
+		t.Fatal("owner pipe closed before the crash fixture killed the child")
+	}
+	options := headOptions()
+	fs := &headCrashFS{FS: options.FS, beforeManifestWrite: func() { stop("during") }}
+	options.FS = fs
+	db, err := pebble.Open(filepath.Join(lease, "head"), options)
+	require.NoError(t, err)
+	h := &Head{db: db, options: options, incarnation: stage.Incarnation, profile: stage.Witness.Profile}
+	defer func() { require.NoError(t, h.Close()) }()
+	fs.armed.Store(phase == "during")
+	_, err = h.PublishStage(t.Context(), stage)
+	require.NoError(t, err)
+	if phase == "after" {
+		stop("after")
+	}
+	t.Fatal("ingest returned without reaching the armed MANIFEST write")
+}
+
+// Only new MANIFEST writes in this isolated child are armed. Pebble's
+// record.Writer flushes each version edit through this descriptor.
+type headCrashFS struct {
+	vfs.FS
+	armed               atomic.Bool
+	beforeManifestWrite func()
+}
+
+func (fs *headCrashFS) Create(name string, category vfs.DiskWriteCategory) (vfs.File, error) {
+	f, err := fs.FS.Create(name, category)
+	if err == nil && strings.HasPrefix(filepath.Base(name), "MANIFEST-") {
+		return &headCrashFile{File: f, fs: fs}, nil
+	}
+	return f, err
+}
+
+type headCrashFile struct {
+	vfs.File
+	fs *headCrashFS
+}
+
+func (f *headCrashFile) Write(p []byte) (int, error) {
+	if f.fs.armed.Swap(false) {
+		f.fs.beforeManifestWrite()
+	}
+	return f.File.Write(p)
+}

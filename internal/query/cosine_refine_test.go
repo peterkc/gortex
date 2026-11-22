@@ -43,6 +43,7 @@ func (f *fakeEmbedder) Close() error    { return nil }
 // the IDs GetEmbeddings was asked for, so a test can assert the stage
 // only fetched the bounded head window.
 type fakeVectorSearcher struct {
+	hits       []graph.VectorHit
 	vecs       map[string][]float32
 	askedFor   []string
 	getCalled  bool
@@ -53,7 +54,7 @@ func (f *fakeVectorSearcher) UpsertEmbedding(string, []float32) error       { re
 func (f *fakeVectorSearcher) BulkUpsertEmbeddings([]graph.VectorItem) error { return nil }
 func (f *fakeVectorSearcher) BuildVectorIndex(int) error                    { return nil }
 func (f *fakeVectorSearcher) SimilarTo([]float32, int) ([]graph.VectorHit, error) {
-	return nil, nil
+	return f.hits, nil
 }
 
 func (f *fakeVectorSearcher) GetEmbeddings(ids []string) map[string][]float32 {
@@ -261,7 +262,7 @@ func (emptyTextBackend) Close()                                   {}
 // on — and returns nil for a plain text backend that carries none.
 func TestBackendEmbedder_UnwrapsSwappable(t *testing.T) {
 	emb := &fakeEmbedder{queryVec: []float32{1, 0, 0}}
-	hybrid := search.NewHybrid(emptyTextBackend{}, search.NewVector(3), emb)
+	hybrid := search.NewHybrid(emptyTextBackend{}, search.NewDelegatedVector(3, &fakeVectorSearcher{}, 0, 0), emb)
 	sw := search.NewSwappable(hybrid)
 
 	if got := backendEmbedder(sw); got != emb {

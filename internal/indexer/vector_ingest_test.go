@@ -12,7 +12,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/config"
-	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/search"
@@ -88,7 +87,7 @@ func indexWithEmbedder(t *testing.T, emb interface {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte(vectorIngestFixture), 0o644))
 
-	g := graph.New()
+	g := newFTSStore(t)
 	reg := parser.NewRegistry()
 	reg.Register(languages.NewGoExtractor())
 

@@ -161,8 +161,8 @@ func TestGatherSymbolCandidates_VectorOnlyHybridUsesBackend(t *testing.T) {
 	}
 	g.AddNode(n)
 
-	vector := search.NewVector(2)
-	vector.Add(n.ID, []float32{1, 0})
+	delegate := &fakeVectorSearcher{hits: []graph.VectorHit{{NodeID: n.ID}}}
+	vector := search.NewDelegatedVector(2, delegate, 1, 0)
 	backend := search.NewSwappable(search.NewNull())
 	backend.ReplaceHybridVector(vector, &fakeEmbedder{queryVec: []float32{1, 0}})
 	defer backend.Close()

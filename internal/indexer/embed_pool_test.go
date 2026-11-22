@@ -165,7 +165,7 @@ func TestEmbedAllChunks_AbortsOnError(t *testing.T) {
 // abort contract: when embedding fails, vector publication leaves the search
 // backend text-only — no HybridBackend is swapped in.
 func TestBuildSearchIndexCtx_AbortOnEmbedErrorKeepsTextOnly(t *testing.T) {
-	g := graph.New()
+	g := newVectorPlanTestStore()
 	// Two function nodes; their embed metadata text is
 	// "function <Name> ...". poolEmbedder fails on an exact text
 	// match, so failing on a metadata string aborts the embed.
@@ -177,7 +177,9 @@ func TestBuildSearchIndexCtx_AbortOnEmbedErrorKeepsTextOnly(t *testing.T) {
 	idx.SetEmbedder(emb)
 
 	require.NoError(t, idx.buildSearchIndexCtx(context.Background()))
-	require.Error(t, idx.LastVectorBuildError())
+	require.ErrorContains(t, idx.LastVectorBuildError(), "poolEmbedder: injected failure")
+	require.Equal(t, int32(1), emb.calls)
+	require.Zero(t, g.replaceCalls)
 
 	// The backend must NOT be a HybridBackend — embedding aborted, so
 	// the search stays text-only.

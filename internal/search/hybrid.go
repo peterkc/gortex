@@ -10,7 +10,7 @@ import (
 )
 
 // HybridBackend combines text search (the store-native FTS adapter)
-// with vector search (HNSW) using query-adaptive, α-weighted
+// with durable vector search using query-adaptive, α-weighted
 // Reciprocal Rank Fusion (RRF). Identifier-shaped queries lean toward the
 // text channel, where exact-token matches are most reliable; natural-language
 // queries give semantic similarity more weight so synonymous wording can surface.
@@ -37,12 +37,10 @@ func (h *HybridBackend) Add(id string, fields ...string) {
 	h.text.Add(id, fields...)
 }
 
-// Remove removes a symbol from the text backend.
+// Remove removes a symbol from the text backend. Vector corpus changes are
+// published through the durable store, not this adapter.
 func (h *HybridBackend) Remove(id string) {
 	h.text.Remove(id)
-	// Note: coder/hnsw doesn't support removal. The vector index
-	// is rebuilt on full re-index. Stale vectors are harmless —
-	// they won't match graph nodes and will be filtered out.
 }
 
 // Search runs both text and vector search and fuses them with adaptive
@@ -78,7 +76,7 @@ type ChannelTimings struct {
 	VectorSearchMS int64
 }
 
-// VectorChannelOnly returns the vector-channel IDs (embedder + ANN
+// VectorChannelOnly returns the vector-channel IDs (embedder + vector
 // search) WITHOUT re-running the text search. Used by the engine
 // when the text channel has already been satisfied via the bundle
 // path — the bundle returns Nodes + edges + scores already, so
@@ -104,12 +102,12 @@ func (h *HybridBackend) VectorChannelOnly(query string, limit int) ([]string, Ch
 	vecStart := time.Now()
 	rawVecIDs := h.vector.Search(queryVec, fetch)
 	stats.VectorSearchMS = time.Since(vecStart).Milliseconds()
-	return h.dechunkVectorIDs(rawVecIDs, limit*2), stats
+	return limitVectorIDs(rawVecIDs, limit*2), stats
 }
 
 // SearchChannelsTimed is SearchChannels with a per-phase timing
 // breakdown so callers can prove which sub-step (text FTS vs
-// vector embed vs vector ANN) actually cost wall-clock time.
+// vector embed vs vector search) actually cost wall-clock time.
 // Used by the MCP search_symbols handler's debug-log
 // instrumentation; production callers that don't care just use
 // SearchChannels.
@@ -180,7 +178,7 @@ func (h *HybridBackend) searchChannels(query string, limit int) ([]SearchResult,
 		if err == nil && queryVec != nil {
 			// When symbols are sub-chunked, one symbol owns several
 			// vectors, so a fixed top-k under-counts distinct symbols.
-			// Over-fetch, then de-chunk down to limit*2 distinct symbols.
+			// Over-fetch, then retain up to limit*2 distinct symbols.
 			fetch := limit * 2
 			if h.vector.HasChunks() {
 				fetch = limit * 8
@@ -188,32 +186,18 @@ func (h *HybridBackend) searchChannels(query string, limit int) ([]SearchResult,
 			vecStart := time.Now()
 			rawVecIDs := h.vector.Search(queryVec, fetch)
 			stats.VectorSearchMS = time.Since(vecStart).Milliseconds()
-			vecIDs = h.dechunkVectorIDs(rawVecIDs, limit*2)
+			vecIDs = limitVectorIDs(rawVecIDs, limit*2)
 		}
 	}
 	return textResults, vecIDs, stats
 }
 
-// dechunkVectorIDs maps raw vector-search hits — which may be synthetic
-// chunk IDs — back to their parent symbol IDs, drops duplicates so a
-// symbol appears once, and truncates to want results. Rank order is
-// preserved: the first (best-ranked) chunk hit fixes the symbol's
-// position. When no symbol is chunked this is a cheap copy + truncate.
-func (h *HybridBackend) dechunkVectorIDs(rawIDs []string, want int) []string {
-	out := make([]string, 0, len(rawIDs))
-	seen := make(map[string]struct{}, len(rawIDs))
-	for _, raw := range rawIDs {
-		symbolID, _ := h.vector.ResolveChunk(raw)
-		if _, dup := seen[symbolID]; dup {
-			continue
-		}
-		seen[symbolID] = struct{}{}
-		out = append(out, symbolID)
-		if len(out) >= want {
-			break
-		}
+// limitVectorIDs caps the ordered, deduplicated IDs from the vector backend.
+func limitVectorIDs(ids []string, want int) []string {
+	if ids == nil {
+		return []string{}
 	}
-	return out
+	return ids[:min(len(ids), max(want, 0))]
 }
 
 // Count reports the corpus visible to hybrid retrieval. A positive text count
@@ -236,7 +220,7 @@ func (h *HybridBackend) Count() int {
 
 // Close releases resources owned by the hybrid. The embedding provider and a
 // delegated vector searcher are externally owned; VectorBackend.Close only
-// releases process-local vector state.
+// detaches the delegate.
 func (h *HybridBackend) Close() {
 	if h == nil {
 		return

@@ -18,8 +18,7 @@ func (b *hybridCountTextBackend) Count() int                      { return b.cou
 func (*hybridCountTextBackend) Close()                            {}
 
 func TestHybridCountUsesVectorWhenTextIsEmpty(t *testing.T) {
-	vector := NewVector(2)
-	vector.Add("semantic-only", []float32{1, 0})
+	vector := NewDelegatedVector(2, &publicationTestDelegate{}, 1, 0)
 
 	hybrid := NewHybrid(NewNull(), vector, nil)
 	require.Equal(t, 1, hybrid.Count(), "a populated vector channel is a searchable corpus")

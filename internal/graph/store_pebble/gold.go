@@ -13,6 +13,7 @@ import (
 	"github.com/cockroachdb/pebble/v2/objstorage/objstorageprovider"
 	"github.com/cockroachdb/pebble/v2/sstable"
 	"github.com/cockroachdb/pebble/v2/vfs"
+	"github.com/zeebo/blake3"
 )
 
 const goldBufferBytes = 64 << 20
@@ -27,6 +28,22 @@ func newTable(path string, opts sstable.WriterOptions) (*sstable.Writer, error) 
 		return nil, err
 	}
 	return sstable.NewWriter(objstorageprovider.NewFileWritable(file), opts), nil
+}
+
+func openGoldTable(ctx context.Context, path string, opts *pebble.Options) (*sstable.Reader, error) {
+	f, err := vfs.Default.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	readable, err := sstable.NewSimpleReadable(f)
+	if err != nil {
+		return nil, errors.Join(err, f.Close())
+	}
+	table, err := sstable.NewReader(ctx, readable, opts.MakeReaderOptions())
+	if err != nil {
+		return nil, errors.Join(err, readable.Close())
+	}
+	return table, nil
 }
 
 // sortedRuns owns its private scratch SSTs. The caller removes their scratch
@@ -112,22 +129,14 @@ func (s *sortedRuns) merge(ctx context.Context, visit func(row) error) (err erro
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		f, err := vfs.Default.Open(path)
-		if err != nil {
-			return err
-		}
-		readable, err := sstable.NewSimpleReadable(f)
-		if err != nil {
-			return errors.Join(err, f.Close())
-		}
-		table, err := sstable.NewReader(ctx, readable, s.options.MakeReaderOptions())
-		if err != nil {
-			return errors.Join(err, readable.Close())
+		table, openErr := openGoldTable(ctx, path, s.options)
+		if openErr != nil {
+			return openErr
 		}
 		defer func() { err = errors.Join(err, table.Close()) }()
-		i, err := table.NewIter(sstable.NoTransforms, nil, nil, sstable.TableBlobContext{})
-		if err != nil {
-			return err
+		i, iterErr := table.NewIter(sstable.NoTransforms, nil, nil, sstable.TableBlobContext{})
+		if iterErr != nil {
+			return iterErr
 		}
 		defer func() { err = errors.Join(err, i.Close()) }()
 		if kv := i.First(); kv != nil {
@@ -167,11 +176,54 @@ func (s *sortedRuns) merge(ctx context.Context, visit func(row) error) (err erro
 	return nil
 }
 
-// publishGold writes the selected rows once, emitting non-overlapping SSTs.
-// Validation observes the actual sorted bytes before Ingest is allowed.
+// publishGold is the b1 private full-result writer. The staged path uses the
+// same merge to hand sealed tables to the process that owns the live head.
 func publishGold(ctx context.Context, db *pebble.DB, rows *sortedRuns, seal *goldSeal) (err error) {
+	base := db.NewSnapshot()
+	defer func() { err = errors.Join(err, base.Close()) }()
+	paths, err := writeGoldTables(ctx, base, rows, goldFileCap, seal.visit, seal.finish)
+	if err != nil {
+		return err
+	}
+	if len(paths) == 0 {
+		return ctx.Err()
+	}
+	return db.Ingest(ctx, paths)
+}
+
+// writeGoldTables streams an exact difference. With no base, it emits sets
+// only. Visit and finish validate the final logical stream, not the delta.
+func writeGoldTables(
+	ctx context.Context, base pebble.Reader, rows *sortedRuns, maxTables int,
+	visit func(row) error, finish func(context.Context) error,
+) ([]string, error) {
+	var old goldBaseCursor
+	if base != nil {
+		it, err := base.NewIterWithContext(ctx, nil)
+		if err != nil {
+			return nil, err
+		}
+		old = it
+	}
+	return writeGoldDiff(ctx, old, rows, maxTables, visit, finish)
+}
+
+// goldBaseCursor covers a private Pebble snapshot or ordered, retained SSTs.
+// Key and value are borrowed until the next move. The diff owns the cursor.
+type goldBaseCursor interface {
+	First() bool
+	Next() bool
+	Key() []byte
+	ValueAndErr() ([]byte, error)
+	Error() error
+	Close() error
+}
+
+func writeGoldDiff(
+	ctx context.Context, old goldBaseCursor, rows *sortedRuns, maxTables int,
+	visit func(row) error, finish func(context.Context) error,
+) (paths []string, err error) {
 	var w *sstable.Writer
-	var paths []string
 	closeTable := func() error {
 		if w == nil {
 			return nil
@@ -181,16 +233,11 @@ func publishGold(ctx context.Context, db *pebble.DB, rows *sortedRuns, seal *gol
 		return old.Close()
 	}
 	defer func() { err = errors.Join(err, closeTable()) }()
-	// Compare the sealed stream with the last serving sequence. The old
-	// iterator participates only in the delta, never in seal validation.
-	base := db.NewSnapshot()
-	defer func() { err = errors.Join(err, base.Close()) }()
-	old, err := base.NewIterWithContext(ctx, nil)
-	if err != nil {
-		return err
+	live := false
+	if old != nil {
+		defer func() { err = errors.Join(err, old.Close()) }()
+		live = old.First()
 	}
-	defer func() { err = errors.Join(err, old.Close()) }()
-	live := old.First()
 	write := func(key, value []byte, remove bool) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -199,8 +246,8 @@ func publishGold(ctx context.Context, db *pebble.DB, rows *sortedRuns, seal *gol
 			if err := closeTable(); err != nil {
 				return err
 			}
-			if len(paths) >= goldFileCap {
-				return fmt.Errorf("pebble publish exceeds %d tables", goldFileCap)
+			if len(paths) >= maxTables {
+				return fmt.Errorf("%w: at most %d data tables", ErrStageTableLimit, maxTables)
 			}
 			path := filepath.Join(rows.dir, fmt.Sprintf("gold-%04d.sst", len(paths)))
 			w, err = newTable(path, rows.options.MakeWriterOptions(goldLevel, rows.format))
@@ -214,15 +261,26 @@ func publishGold(ctx context.Context, db *pebble.DB, rows *sortedRuns, seal *gol
 		}
 		return w.Set(key, value)
 	}
+	advance := func() bool {
+		for ok := old.Next(); ok; ok = old.Next() {
+			if !bytes.Equal(old.Key(), publicationWitnessKey) {
+				return true
+			}
+		}
+		return false
+	}
+	if live && bytes.Equal(old.Key(), publicationWitnessKey) {
+		live = advance()
+	}
 	if err := rows.merge(ctx, func(r row) error {
-		if err := seal.visit(r); err != nil {
+		if err := visit(r); err != nil {
 			return err
 		}
 		for live && bytes.Compare(old.Key(), r.key) < 0 {
 			if err := write(old.Key(), nil, true); err != nil {
 				return err
 			}
-			live = old.Next()
+			live = advance()
 		}
 		if live && bytes.Equal(old.Key(), r.key) {
 			value, err := old.ValueAndErr()
@@ -234,30 +292,54 @@ func publishGold(ctx context.Context, db *pebble.DB, rows *sortedRuns, seal *gol
 					return err
 				}
 			}
-			live = old.Next()
+			live = advance()
 			return nil
 		}
 		return write(r.key, r.value, false)
 	}); err != nil {
-		return err
+		return nil, err
 	}
 	for live {
 		if err := write(old.Key(), nil, true); err != nil {
-			return err
+			return nil, err
 		}
-		live = old.Next()
+		live = advance()
 	}
-	if err := old.Error(); err != nil {
-		return err
+	if old != nil {
+		if err := old.Error(); err != nil {
+			return nil, err
+		}
 	}
 	if err := closeTable(); err != nil {
-		return err
+		return nil, err
 	}
-	if err := seal.finish(ctx); err != nil {
-		return err
+	if err := finish(ctx); err != nil {
+		return nil, err
 	}
-	if len(paths) == 0 {
-		return ctx.Err()
+	return paths, nil
+}
+
+// goldWitness records one digest per family in a complete ordered stream.
+type goldWitness struct {
+	digest   *blake3.Hasher
+	families []FamilyWitness
+	current  FamilyWitness
+}
+
+func (w *goldWitness) add(r row) {
+	if r.key[0] != w.current.Family {
+		w.flush()
+		w.current = FamilyWitness{Family: r.key[0]}
+		w.digest.Reset()
 	}
-	return db.Ingest(ctx, paths)
+	w.current.Count++
+	writeWitnessRow(w.digest, r.key, r.value)
+}
+
+func (w *goldWitness) flush() {
+	if w.current.Count != 0 {
+		w.current.Digest = HeadDigest(w.digest.Sum(nil))
+		w.families = append(w.families, w.current)
+		w.current = FamilyWitness{}
+	}
 }

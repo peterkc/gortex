@@ -1,0 +1,208 @@
+package store_pebble
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"sync"
+
+	"github.com/cockroachdb/pebble/v2"
+	"github.com/zeebo/blake3"
+)
+
+var (
+	ErrStaleBase          = errors.New("stale publication base")
+	ErrStageOrder         = errors.New("publication stage is repeated or out of order")
+	ErrStageTableLimit    = errors.New("publication exceeds the SST file limit")
+	ErrCoverageRegression = errors.New("publication would reduce relation coverage")
+)
+
+// Head is the daemon-owned writable side of one checkout head. The catalog
+// owns its lifetime and must drain its pins before closing it. The worker
+// receives a read-only checkpoint or owns private files, never this handle.
+type Head struct {
+	db          *pebble.DB
+	options     *pebble.Options
+	incarnation uint64
+	profile     Profile
+}
+
+// The bound is across all heads owned by one daemon, not per checkout.
+var ingestMu sync.Mutex
+
+func OpenHead(path string, incarnation uint64, profile Profile) (*Head, error) {
+	if incarnation == 0 || (profile != DefaultProfile && profile != FullProfile) {
+		return nil, invalid("head incarnation or profile")
+	}
+	options := headOptions()
+	db, err := pebble.Open(path, options)
+	if err != nil {
+		return nil, err
+	}
+	return &Head{db: db, options: options, incarnation: incarnation, profile: profile}, nil
+}
+
+func (h *Head) Close() error { return h.db.Close() }
+
+func (h *Head) OpenSnapshot() *Snapshot {
+	return &Snapshot{snap: h.db.NewSnapshot(), profile: h.profile}
+}
+
+func (h *Head) Checkpoint(dir string) error { return h.db.Checkpoint(dir) }
+
+// StageTables is an owned, sealed set of non-overlapping SST files in Dir.
+// Files are simple names: only the daemon supplies the leased directory.
+// Base is the digest of the exact previous witness value, not its version.
+type StageTables struct {
+	Dir         string
+	Files       []string
+	Incarnation uint64
+	Base        HeadDigest
+	Witness     Witness
+}
+
+func (h *Head) PublishStage(ctx context.Context, tables StageTables) (HeadDigest, error) {
+	return h.publish(ctx, tables, false)
+}
+
+func (h *Head) PublishDelta(ctx context.Context, tables StageTables) (HeadDigest, error) {
+	return h.publish(ctx, tables, true)
+}
+
+func (h *Head) publish(ctx context.Context, tables StageTables, delta bool) (HeadDigest, error) {
+	var zero HeadDigest
+	if len(tables.Files) >= goldFileCap { // one table reserved for the witness
+		return zero, fmt.Errorf("%w: %d files plus witness, maximum %d", ErrStageTableLimit, len(tables.Files), goldFileCap)
+	}
+	if tables.Dir == "" || !filepath.IsAbs(tables.Dir) {
+		return zero, invalid("invalid stage table directory")
+	}
+	if tables.Witness.Profile != h.profile {
+		return zero, invalid("publication profile differs from head")
+	}
+	raw, err := encodeWitness(tables.Witness)
+	if err != nil {
+		return zero, err
+	}
+	ingestMu.Lock()
+	defer ingestMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return zero, err
+	}
+	if tables.Incarnation != h.incarnation {
+		return zero, fmt.Errorf("%w: checkout incarnation changed", ErrStaleBase)
+	}
+	prior, base, err := h.currentWitness()
+	if err != nil {
+		return zero, err
+	}
+	if delta {
+		if prior.Stage != StageSearch || tables.Witness.Stage != StageSearch {
+			return zero, fmt.Errorf("%w: edit delta requires a complete base and result", ErrStageOrder)
+		}
+	} else {
+		if prior.Stage != 0 && (tables.Witness.Version() != prior.Version() || tables.Witness.FrozenInputs != prior.FrozenInputs) {
+			return zero, fmt.Errorf("%w: stage belongs to a different version", ErrStaleBase)
+		}
+		if tables.Witness.Stage != prior.Stage+1 {
+			return zero, fmt.Errorf("%w: got %s after %s", ErrStageOrder, tables.Witness.Stage, prior.Stage)
+		}
+	}
+	if base != tables.Base {
+		return zero, fmt.Errorf("%w: publication witness changed", ErrStaleBase)
+	}
+	if delta {
+		if !tables.Witness.CoversRelationsAtLeast(prior) {
+			return zero, ErrCoverageRegression
+		}
+	} else if prior.Stage >= StageRelations {
+		next := tables.Witness.Relations
+		if (prior.Relations == nil) != (next == nil) ||
+			(next != nil && !slices.Equal(next.DeferredLanguages, prior.Relations.DeferredLanguages)) {
+			return zero, invalid("publication relation coverage changed after relations stage")
+		}
+	}
+
+	paths := make([]string, 0, len(tables.Files)+1)
+	seen := make(map[string]struct{}, len(tables.Files))
+	for _, file := range tables.Files {
+		if filepath.Base(file) != file || file == "." || filepath.Ext(file) != ".sst" {
+			return zero, invalid("publication table name")
+		}
+		if _, duplicate := seen[file]; duplicate {
+			return zero, invalid("repeated table in one publication")
+		}
+		seen[file] = struct{}{}
+		path := filepath.Join(tables.Dir, file)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return zero, err
+		}
+		if !info.Mode().IsRegular() {
+			return zero, invalid("publication table is not a regular file")
+		}
+		paths = append(paths, path)
+	}
+	witnessPath, err := h.writeWitness(tables.Dir, raw)
+	if err != nil {
+		return zero, err
+	}
+	// The build directory's owner removes the unpublished stage's files after
+	// refusal. Ingest consumes its inputs on success, including the witness.
+	if err := h.db.Ingest(ctx, append(paths, witnessPath)); err != nil {
+		return zero, err
+	}
+	return blake3.Sum256(raw), nil
+}
+
+// CoversRelationsAtLeast compares proved coverage in validated witnesses.
+// A legacy witness proves none. The replacement owner must also check stage
+// order and head identity.
+func (w Witness) CoversRelationsAtLeast(prior Witness) bool {
+	if prior.Relations == nil {
+		return true
+	}
+	if w.Relations == nil {
+		return false
+	}
+	for _, id := range w.Relations.DeferredLanguages {
+		if _, found := slices.BinarySearch(prior.Relations.DeferredLanguages, id); !found {
+			return false
+		}
+	}
+	return true
+}
+
+func (h *Head) currentWitness() (Witness, HeadDigest, error) {
+	var zero HeadDigest
+	value, closer, err := h.db.Get(publicationWitnessKey)
+	if errors.Is(err, pebble.ErrNotFound) {
+		return Witness{}, zero, nil
+	}
+	if err != nil {
+		return Witness{}, zero, err
+	}
+	w, err := decodeWitness(value)
+	digest := blake3.Sum256(value)
+	return w, digest, errors.Join(err, closer.Close())
+}
+
+func (h *Head) writeWitness(dir string, raw []byte) (string, error) {
+	f, err := os.CreateTemp(dir, "witness-*.sst")
+	if err != nil {
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+	format := h.db.FormatMajorVersion().MaxTableFormat()
+	w, err := newTable(f.Name(), h.options.MakeWriterOptions(goldLevel, format))
+	if err != nil {
+		return "", err
+	}
+	err = errors.Join(w.Set(publicationWitnessKey, raw), w.Close())
+	return f.Name(), err
+}

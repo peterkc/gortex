@@ -14,24 +14,32 @@ import (
 // The scratch index holds compact keys, not graph objects. Pebble flushes its
 // bounded memtables to sorted runs. It keeps the last publish's logical rows
 // (including groups omitted by the profile) plus pending mutations. It is
-// never a reader source and needs neither a WAL nor crash recovery.
-func openPending(dir string) (*pebble.DB, error) {
+// never a serving reader source and needs neither a WAL nor crash recovery.
+func openPending(dir string, onBackgroundError func(error)) (*pebble.DB, error) {
 	path := filepath.Join(dir, "pending")
 	if err := os.Mkdir(path, 0o700); err != nil {
 		return nil, err
 	}
-	db, err := pebble.Open(path, &pebble.Options{
-		CacheSize:  buildBlockCacheBytes,
-		DisableWAL: true, ErrorIfExists: true, MemTableSize: 4 << 20,
-		MemTableStopWritesThreshold: 2,
-	})
+	db, err := pebble.Open(path, pendingOptions(onBackgroundError))
 	if err != nil {
 		return nil, errors.Join(err, os.RemoveAll(path))
 	}
 	return db, nil
 }
 
-func pendingGet[T any](db *pebble.DB, key []byte, decode decodeRow[T]) (v T, err error) {
+func pendingOptions(onBackgroundError func(error)) *pebble.Options {
+	options := &pebble.Options{
+		CacheSize:  buildBlockCacheBytes,
+		DisableWAL: true, ErrorIfExists: true, MemTableSize: 4 << 20,
+		MemTableStopWritesThreshold: 2,
+	}
+	if onBackgroundError != nil {
+		options.AddEventListener(pebble.EventListener{BackgroundError: onBackgroundError})
+	}
+	return options
+}
+
+func pendingGet[T any](db pebble.Reader, key []byte, decode decodeRow[T]) (v T, err error) {
 	raw, closer, err := db.Get(key)
 	if errors.Is(err, pebble.ErrNotFound) {
 		return v, nil
@@ -43,7 +51,9 @@ func pendingGet[T any](db *pebble.DB, key []byte, decode decodeRow[T]) (v T, err
 	return decode(raw)
 }
 
-func pendingVisit(ctx context.Context, db *pebble.DB, prefix []byte, visit func(row) error) (err error) {
+func pendingVisit(ctx context.Context, db interface {
+	NewIterWithContext(context.Context, *pebble.IterOptions) (*pebble.Iterator, error)
+}, prefix []byte, visit func(row) error) (err error) {
 	it, err := db.NewIterWithContext(ctx, &pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
 	if err != nil {
 		return err
@@ -128,6 +138,9 @@ func (b *BuildStore) writeNode(n *graph.Node) error {
 		return err
 	}
 	if err := batch.Set(pendingNodeKey(n.ID), value, nil); err != nil {
+		return err
+	}
+	if err := updateRebuildCandidates(batch, prev, n); err != nil {
 		return err
 	}
 	return batch.Commit(pebble.NoSync)
@@ -215,6 +228,9 @@ func (b *BuildStore) evict(prefix []byte) (nodes, edges int, err error) {
 			if err := batch.Delete(k, nil); err != nil {
 				return err
 			}
+		}
+		if err := updateRebuildCandidates(batch, n, nil); err != nil {
+			return err
 		}
 		if err := batch.Commit(pebble.NoSync); err != nil {
 			return err

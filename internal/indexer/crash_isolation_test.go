@@ -34,7 +34,7 @@ func TestMain(m *testing.M) {
 		os.Exit(code)
 	}
 	if os.Getenv(crashWorkerEnv) == "1" {
-		_ = crashpool.RunWorker(os.Stdin, os.Stdout)
+		_ = RunRebuildParseWorker(os.Stdin, os.Stdout)
 		os.Exit(0)
 	}
 	os.Exit(m.Run())

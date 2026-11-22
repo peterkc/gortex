@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,8 +25,10 @@ import (
 // was hashed. The mtime gates re-hashing: an unchanged mtime lets Build
 // reuse the prior hash without re-reading the file.
 type FileNode struct {
-	Hash  string `json:"hash"`
-	Mtime int64  `json:"mtime"`
+	// Kind names a typed leaf. Zero preserves the original regular-file tag.
+	Kind  FileKind `json:"kind,omitempty"`
+	Hash  string   `json:"hash"`
+	Mtime int64    `json:"mtime"`
 	// Salt is an opaque per-file discriminator mixed into the leaf
 	// hash. It carries the language extractor version, so a file whose
 	// content is unchanged but whose extractor logic was upgraded still
@@ -33,6 +36,20 @@ type FileNode struct {
 	// pre-salt leaf exactly, so adopting salts is zero-cost and fully
 	// back-compatible until a language's extractor version is bumped.
 	Salt string `json:"salt,omitempty"`
+}
+
+type FileKind byte
+
+const (
+	RegularFile FileKind = 'f'
+	Symlink     FileKind = 'l'
+)
+
+func (n FileNode) tag() FileKind {
+	if n.Kind == 0 {
+		return RegularFile
+	}
+	return n.Kind
 }
 
 // leaf is the value mixed into the parent directory's hash for this
@@ -56,6 +73,13 @@ type Tree struct {
 	// Dirs maps a forward-slash repo-relative directory ("" is the
 	// repo root) to the aggregate hash of its subtree.
 	Dirs map[string]string `json:"dirs"`
+}
+
+// FromKnownFiles aggregates the supplied identities without reading disk.
+func FromKnownFiles(files map[string]FileNode) *Tree {
+	t := &Tree{Files: maps.Clone(files), Dirs: make(map[string]string)}
+	t.aggregate()
+	return t
 }
 
 // MergeScope combines a rebuilt scope with untouched leaves from the previous
@@ -196,7 +220,7 @@ func (t *Tree) aggregate() {
 	for rel, node := range t.Files {
 		d := parentDir(rel)
 		markDir(d)
-		files[d] = append(files[d], baseName(rel)+"\x00f"+node.leaf())
+		files[d] = append(files[d], baseName(rel)+"\x00"+string(rune(node.tag()))+node.leaf())
 	}
 
 	// Deepest directories first, so a directory's child-dir hashes are
@@ -243,7 +267,7 @@ func (t *Tree) Diff(prior *Tree) (changed, removed []string) {
 	}
 	for rel, node := range t.Files {
 		pn, ok := prior.Files[rel]
-		if !ok || pn.leaf() != node.leaf() || node.Hash == "" {
+		if !ok || pn.tag() != node.tag() || pn.leaf() != node.leaf() || node.Hash == "" {
 			changed = append(changed, rel)
 		}
 	}

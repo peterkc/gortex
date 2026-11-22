@@ -316,7 +316,7 @@ func (h *HybridBackend) searchChannelsContext(ctx context.Context, query string,
 }
 
 // VectorChannelOnlyContext derives the existing five-second embedding budget
-// from the request context. The ANN implementation itself has no context API,
+// from the request context. The vector delegate has no context API,
 // so cancellation is checked immediately before and after that bounded call.
 func (h *HybridBackend) VectorChannelOnlyContext(ctx context.Context, query string, limit int) ([]string, ChannelTimings) {
 	var stats ChannelTimings
@@ -343,7 +343,7 @@ func (h *HybridBackend) VectorChannelOnlyContext(ctx context.Context, query stri
 	if ctx.Err() != nil {
 		return nil, stats
 	}
-	return h.dechunkVectorIDs(rawIDs, limit*2), stats
+	return limitVectorIDs(rawIDs, limit*2), stats
 }
 
 // SearchSymbolBundlesContext forwards the context-aware text bundle path; the

@@ -4,7 +4,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
+	"slices"
 	"sort"
 )
 
@@ -110,43 +112,51 @@ func searchUpper32(factor float64) float32 {
 	return upper
 }
 
-func searchPackBlock(docs [][]byte, avgdl float64, prefixID func(string) (uint32, error)) ([]byte, error) {
-	maxima := map[uint32]float64{}
-	documents := make([]searchDoc, len(docs))
-	for i, v := range docs {
-		d, err := searchReadDoc(v)
+// searchDocBounds prepares conservative bounds once per document. Each posting
+// later merges these numbers without redoing prefix resolution or scoring.
+func searchDocBounds(d searchDoc, avgdl float64, prefixID func(string) (uint32, error)) ([]byte, error) {
+	freqs := make(map[string]int64)
+	for _, t := range d.Terms {
+		symbolPrefixes(t.Text, func(p string) { freqs[p] += t.Freq })
+	}
+	out := appendBool(nil, d.NodePresent)
+	for _, prefix := range slices.Sorted(maps.Keys(freqs)) {
+		id, err := prefixID(prefix)
 		if err != nil {
 			return nil, err
 		}
-		documents[i] = d
-		frequencies := map[string]int64{}
-		for _, term := range d.Terms {
-			for n := 1; n <= len(term.Text); n++ {
-				if term.Text[n-1] >= 128 {
-					break
-				}
-				frequencies[term.Text[:n]] += term.Freq
-			}
+		if id == 0 {
+			return nil, fmt.Errorf("search codec: missing prefix ID for %q", prefix)
 		}
-		for prefix, freq := range frequencies {
-			id, err := prefixID(prefix)
-			if err != nil {
-				return nil, err
-			}
-			if id == 0 {
-				return nil, fmt.Errorf("search codec: missing prefix ID for %q", prefix)
-			}
-			factor := searchFactor(float64(freq), d.Length, avgdl)
-			if factor > maxima[id] {
-				maxima[id] = factor
-			}
+		upper := searchUpper32(searchFactor(float64(freqs[prefix]), d.Length, avgdl))
+		out = binary.LittleEndian.AppendUint32(out, id)
+		out = binary.LittleEndian.AppendUint32(out, math.Float32bits(upper))
+	}
+	return out, nil
+}
+
+// mergeSearchDocBounds consumes one private scratch value while its DB.Get
+// handle is open. A document with no ASCII prefixes still has one flag byte.
+func mergeSearchDocBounds(raw []byte, maxima map[uint32]float32) (bool, error) {
+	if len(raw) == 0 || raw[0] > 1 || (len(raw)-1)%8 != 0 {
+		return false, invalid("search document bounds")
+	}
+	present := raw[0] == 1
+	for raw = raw[1:]; len(raw) != 0; raw = raw[8:] {
+		id := binary.LittleEndian.Uint32(raw)
+		bits := binary.LittleEndian.Uint32(raw[4:])
+		if id == 0 || bits&0x80000000 != 0 || bits&0x7f800000 == 0x7f800000 {
+			return false, invalid("search document prefix bound")
+		}
+		if upper := math.Float32frombits(bits); upper > maxima[id] {
+			maxima[id] = upper
 		}
 	}
-	var ids []uint32
-	for id := range maxima {
-		ids = append(ids, id)
-	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return present, nil
+}
+
+func searchPackBlock(postings []searchPosting, maxima map[uint32]float32) []byte {
+	ids := slices.Sorted(maps.Keys(maxima))
 	width := 1
 	if len(ids) > 0 && ids[len(ids)-1] > math.MaxUint8 {
 		width = 2
@@ -164,15 +174,15 @@ func searchPackBlock(docs [][]byte, avgdl float64, prefixID func(string) (uint32
 		case 4:
 			b = binary.LittleEndian.AppendUint32(b, id)
 		}
-		b = binary.LittleEndian.AppendUint32(b, math.Float32bits(searchUpper32(maxima[id])))
+		b = binary.LittleEndian.AppendUint32(b, math.Float32bits(maxima[id]))
 	}
-	b = binary.AppendVarint(b, int64(len(docs)))
-	for _, d := range documents {
-		ref := binary.AppendVarint([]byte{0x59}, d.Rowid)
-		ref = appendBool(ref, d.NodePresent)
+	b = binary.AppendVarint(b, int64(len(postings)))
+	for _, p := range postings {
+		ref := binary.AppendVarint([]byte{0x59}, p.Rowid)
+		ref = appendBool(ref, p.NodePresent)
 		b = appendBytes(b, ref)
 	}
-	return b, nil
+	return b
 }
 
 func searchPrefixID(b []byte, width int) uint32 {

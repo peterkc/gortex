@@ -16,6 +16,7 @@ import (
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/parser/languages"
 )
 
 const testWorkerEnv = "GORTEX_CRASHPOOL_TESTWORKER"
@@ -303,4 +304,31 @@ func TestPoolNativeSyntaxVerdictRoundTrip(t *testing.T) {
 			require.False(t, result.HasParseErr)
 		}
 	}
+}
+
+func TestPoolFullFactsMatchesNativeFileReceipt(t *testing.T) {
+	const path = "events.go"
+	src := []byte("package sample\nconst Label = \"orders\"\nfunc Broken() { value := }\n")
+	native, err := parser.Extract(languages.NewGoExtractor(), path, src, parser.ExtractionOptions{})
+	require.NoError(t, err)
+	t.Cleanup(native.ReleaseTree)
+	require.NotEmpty(t, native.ConstValues, "fixture must save a constant")
+	require.NotNil(t, native.Tree)
+	locations := native.Tree.ParseErrorLocations()
+	require.NotEmpty(t, locations, "fixture must save parse-error locations")
+
+	pool := newTestPool(t, "real", Config{Workers: 1})
+	ordinary := pool.Submit(path, "go", src)
+	require.False(t, ordinary.Bad(), ordinary.Err)
+	require.Empty(t, ordinary.ConstValues)
+	require.Empty(t, ordinary.ParseErrorLocations)
+	full := pool.SubmitFullFacts(path, "go", src, nil)
+	require.False(t, full.Bad(), full.Err)
+	require.Equal(t, native.ConstValues, full.ConstValues)
+	require.Equal(t, locations, full.ParseErrorLocations)
+
+	unknown := pool.SubmitFullFacts(path, "unsupported-language", src, nil)
+	require.True(t, unknown.Bad())
+	require.Empty(t, unknown.ConstValues)
+	require.Empty(t, unknown.ParseErrorLocations)
 }

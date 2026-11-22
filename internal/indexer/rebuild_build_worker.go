@@ -1,0 +1,269 @@
+package indexer
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"time"
+
+	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/graph/store_pebble"
+	"github.com/zzet/gortex/internal/indexer/source"
+	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/parser/languages"
+	"github.com/zzet/gortex/internal/platform"
+	"go.uber.org/zap"
+)
+
+const rebuildStageAck byte = 1
+
+// runRebuildBuild starts a worker in the owner's prepared input lease. The
+// process never outlives this call. publish can refuse any stage.
+func runRebuildBuild(
+	ctx context.Context, exe string, args []string, lease string, req rebuildBuildRequest,
+	cfg config.IndexConfig, inputs []rebuildInput, publish func(context.Context, store_pebble.StageTables) error,
+) (err error) {
+	if !filepath.IsAbs(exe) || !filepath.IsAbs(lease) || publish == nil {
+		return fmt.Errorf("%w: binary, build lease or publisher", errRebuildBuildWire)
+	}
+	if err := writeRebuildBuildRequest(ctx, lease, req, cfg, inputs); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe, append(append([]string(nil), args...), lease)...)
+	platform.ConfigureBackgroundCommand(cmd)
+	acks, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	defer acks.Close()
+	out, childOut, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	var diagnostic rebuildWorkerDiagnostic
+	cmd.Stdout, cmd.Stderr = childOut, io.MultiWriter(&diagnostic, os.Stderr)
+	cmd.WaitDelay = time.Second // bound orphaned stderr after exit, as for transforms
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("%w: start process: %w", ErrRebuildWorker, errors.Join(err, childOut.Close()))
+	}
+	defer func() {
+		if err != nil {
+			cancel()
+		}
+		if waitErr := cmd.Wait(); waitErr != nil {
+			exit := fmt.Errorf("%w: child exit: %w", ErrRebuildWorker, waitErr)
+			if last := diagnostic.lastLine(); last != "" {
+				exit = fmt.Errorf("%w; last stderr line: %q", exit, last)
+			}
+			err = errors.Join(err, exit)
+		}
+	}()
+	if err := childOut.Close(); err != nil {
+		return err
+	}
+	stop := context.AfterFunc(ctx, func() { _ = out.Close() })
+	defer stop()
+	return receiveRebuildStages(ctx, lease, req, out, acks, publish)
+}
+
+// Keep only the start of the latest nonblank diagnostic, not a worker log.
+// os/exec writes on one goroutine; the owner reads it only after Wait.
+const rebuildDiagnosticBytes = 4 << 10
+
+type rebuildWorkerDiagnostic struct {
+	line, previous []byte
+}
+
+func (d *rebuildWorkerDiagnostic) Write(p []byte) (int, error) {
+	n := len(p)
+	for len(p) > 0 {
+		line, rest, ended := bytes.Cut(p, []byte{'\n'})
+		take := min(len(line), rebuildDiagnosticBytes-len(d.line))
+		d.line = append(d.line, line[:take]...)
+		if ended {
+			if len(bytes.TrimSpace(d.line)) != 0 {
+				d.line, d.previous = d.previous, d.line
+			}
+			d.line = d.line[:0]
+		}
+		p = rest
+	}
+	return n, nil
+}
+
+func (d *rebuildWorkerDiagnostic) lastLine() string {
+	if line := bytes.TrimSpace(d.line); len(line) != 0 {
+		return string(line)
+	}
+	return string(bytes.TrimSpace(d.previous))
+}
+
+func receiveRebuildStages(
+	ctx context.Context, lease string, req rebuildBuildRequest, in io.Reader, acks io.Writer,
+	publish func(context.Context, store_pebble.StageTables) error,
+) error {
+	next := store_pebble.StageManifest
+	for {
+		r, err := readRebuildBuildReply(in)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err == io.EOF {
+			if next != store_pebble.StageSearch+1 {
+				return fmt.Errorf("%w: %w: missing %s", ErrRebuildWorker, errRebuildBuildIncomplete, next)
+			}
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("%w: read stage: %w", ErrRebuildWorker, err)
+		}
+		if r.Refusal != 0 {
+			if int(r.Refusal) > len(rebuildFailureKinds) || r.Witness.Stage != 0 || len(r.Files) != 0 {
+				return fmt.Errorf("%w: malformed refusal", errRebuildBuildWire)
+			}
+			return fmt.Errorf("%w: %w: %s", ErrRebuildWorker, rebuildFailureKinds[r.Refusal-1], r.Detail)
+		}
+		if next > store_pebble.StageSearch || r.Witness.Stage != next {
+			return fmt.Errorf("%w: expected %s, got %s", store_pebble.ErrStageOrder, next, r.Witness.Stage)
+		}
+		if r.Witness.Version() != req.Witness.Version() || r.Witness.Profile != req.Witness.Profile ||
+			r.Witness.FrozenInputs != req.Witness.FrozenInputs {
+			return fmt.Errorf("%w: stage %s does not belong to the leased version", store_pebble.ErrStaleBase, next)
+		}
+		if (next >= store_pebble.StageRelations) != (r.Witness.Relations != nil) {
+			return fmt.Errorf("%w: unexpected relation coverage at %s", errRebuildBuildWire, next)
+		}
+		// Do not trust any directory or incarnation received from the child.
+		dir := filepath.Join(lease, next.String())
+		st, err := os.Lstat(dir)
+		if err != nil {
+			return fmt.Errorf("%w: stage directory: %w", errRebuildBuildWire, err)
+		}
+		if !st.IsDir() {
+			return fmt.Errorf("%w: invalid stage directory", errRebuildBuildWire)
+		}
+		tables := store_pebble.StageTables{Dir: dir, Files: r.Files, Base: r.Base, Witness: r.Witness, Incarnation: req.Incarnation}
+		if err := publish(ctx, tables); err != nil {
+			return err
+		}
+		if _, err := acks.Write([]byte{rebuildStageAck}); err != nil {
+			return fmt.Errorf("%w: acknowledge %s: %w", ErrRebuildWorker, next, err)
+		}
+		next++
+	}
+}
+
+// RunRebuildBuildWorker is the hidden command's process entry point. Only
+// the owner pipe can acknowledge an ingest. Its EOF cancels work even if the
+// worker is between stages. The lease belongs to the owner, never to a child
+// asked to clean arbitrary paths after a failure.
+func RunRebuildBuildWorker(ctx context.Context, lease string, in *os.File, output io.Writer, logger *zap.Logger) error {
+	if !filepath.IsAbs(lease) {
+		return fmt.Errorf("%w: build worker needs an absolute lease directory", errRebuildBuildWire)
+	}
+	ctx, cancel := context.WithCancelCause(ctx)
+	acks := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var packet [1]byte
+		for {
+			if _, err := io.ReadFull(in, packet[:]); err != nil {
+				cancel(fmt.Errorf("%w: owner pipe: %w", errRebuildBuildWire, err))
+				return
+			}
+			if packet[0] != rebuildStageAck {
+				cancel(fmt.Errorf("%w: invalid stage acknowledgment", errRebuildBuildWire))
+				return
+			}
+			select {
+			case acks <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	defer func() {
+		cancel(nil)
+		_ = in.Close()
+		<-done
+	}()
+	send := func(tables store_pebble.StageTables) error {
+		if err := context.Cause(ctx); err != nil {
+			return err
+		}
+		r := rebuildBuildReply{Files: tables.Files, Base: tables.Base, Witness: tables.Witness}
+		if err := writeRebuildBuildReply(output, r); err != nil {
+			return err
+		}
+		select {
+		case <-acks:
+			return context.Cause(ctx)
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		}
+	}
+	if err := buildRebuildStages(ctx, lease, logger, store_pebble.OpenWorkerBuild, send); err != nil {
+		return errors.Join(err, writeRebuildBuildReply(output, buildRefusal(err)))
+	}
+	return nil
+}
+
+func buildRebuildStages(
+	ctx context.Context, lease string, logger *zap.Logger,
+	openBuild func(string, store_pebble.Profile) (*store_pebble.BuildStore, error),
+	send func(store_pebble.StageTables) error,
+) (err error) {
+	req, inputs, err := readRebuildBuildRequest(ctx, lease)
+	if err != nil {
+		return err
+	}
+	digest := rebuildDigest(req.Witness.FrozenInputs)
+	if digest != (rebuildDigest{}) {
+		if err := visitRebuildInputSidecar(ctx, lease, digest, func(rebuildSidecarRow) error { return nil }); err != nil {
+			return err
+		}
+	}
+	var cfg config.IndexConfig
+	if err := json.Unmarshal(req.Config, &cfg); err != nil {
+		return fmt.Errorf("read frozen index config: %w", err)
+	}
+	src, err := source.NewFilesystemSource(req.Root)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, src.Close()) }()
+	reg := parser.NewRegistry()
+	languages.RegisterAll(reg)
+	languages.RegisterCustomGrammars(reg, cfg.Grammars, logger)
+	languages.RegisterExtractorPlugins(reg, cfg.ExtractorPlugins, logger)
+	languages.RegisterFallbackChunkers(reg, cfg.FallbackChunkers, logger)
+	private, err := openBuild(filepath.Join(lease, "working"), req.Witness.Profile)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, private.Close()) }()
+	idx := New(private, reg, cfg, logger)
+	defer idx.Close()
+	idx.installRebuildParsePolicy(req.Policy)
+	idx.SetRootPath(req.Root)
+	idx.SetContentSource(src)
+	req.Bounds.Dir = lease
+	job := rebuildFileStages{workDir: lease, incarnation: req.Incarnation, inputs: inputs, recipes: req.Recipes, bounds: req.Bounds, witness: req.Witness}
+	store := rebuildParseStore{dir: req.ParseDir, limit: req.ParseLimit}
+	if _, err := idx.buildRebuildFileStages(ctx, src, store, private, job, send); err != nil {
+		return err
+	}
+	// Sealing a prefix is not a complete build. This changes only when the
+	// exact relation, derived and search reducers are wired to this store.
+	return errRebuildBuildIncomplete
+}

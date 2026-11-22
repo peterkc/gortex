@@ -83,7 +83,6 @@ func assertVectorPlanReleased(t *testing.T, plan *preparedVectorPlan) {
 	assert.Empty(t, plan.repoPrefix)
 	assert.Zero(t, plan.dims)
 	assert.Nil(t, plan.items)
-	assert.Nil(t, plan.chunkMap)
 	assert.Nil(t, plan.droppedIDs)
 	assert.Zero(t, plan.dropped)
 	assert.Zero(t, plan.embeddedText)
@@ -96,7 +95,6 @@ func TestPreparedVectorPlanReleaseClearsOwnedState(t *testing.T) {
 		items: []graph.VectorCorpusItem{
 			{NodeID: "repo/a", Vec: []float32{1, 0, 0}},
 		},
-		chunkMap:     map[string]string{"repo/a#chunk0": "repo/a"},
 		dropped:      1,
 		droppedIDs:   []string{"repo/b"},
 		embeddedText: 2,
@@ -122,7 +120,6 @@ func TestInstallVectorPlanPublishesDelegatedBackendAndReleasesPlan(t *testing.T)
 			{NodeID: "repo/a", Vec: []float32{1, 0, 0}},
 			{NodeID: "repo/b#chunk0", ParentID: "repo/b", Vec: []float32{0, 1, 0}},
 		},
-		chunkMap: map[string]string{"repo/b#chunk0": "repo/b"},
 	}
 
 	require.NoError(t, idx.installVectorPlan(context.Background(), store, plan))
@@ -138,90 +135,76 @@ func TestInstallVectorPlanPublishesDelegatedBackendAndReleasesPlan(t *testing.T)
 	require.Zero(t, hybrid.VectorSizeBytes())
 }
 
-func TestInstallVectorPlanCancellationKeepsPublicationAndReleasesPlan(t *testing.T) {
-	store := newVectorPlanTestStore()
-	idx := vectorPlanTestIndexer(store)
-	before, release := idx.swappable().AcquireBackend()
-	release()
-	plan := &preparedVectorPlan{
-		repoPrefix: "repo",
-		dims:       3,
-		items: []graph.VectorCorpusItem{
-			{NodeID: "repo/a", Vec: []float32{1, 0, 0}},
-		},
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+func TestInstallVectorPlanFailureKeepsPublicationAndReleasesPlan(t *testing.T) {
+	cause := errors.New("native install failed")
+	for _, tt := range []struct {
+		name  string
+		err   error
+		multi bool
+		pre   bool
+	}{
+		{name: "backend failure", err: cause},
+		{name: "multi-repo backend failure", err: cause, multi: true},
+		{name: "canceled by installer", err: context.Canceled},
+		{name: "canceled before install", err: context.Canceled, pre: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			base := newFTSStore(t)
+			base.AddBatch([]*graph.Node{
+				{ID: "A/a", RepoPrefix: "A", Name: "a", Kind: graph.KindFunction},
+				{ID: "A/b", RepoPrefix: "A", Name: "b", Kind: graph.KindFunction},
+				{ID: "B/b", RepoPrefix: "B", Name: "b", Kind: graph.KindFunction},
+			}, nil)
+			store := newVectorPublicationProbeStore(base)
+			idx := vectorPlanTestIndexer(store)
+			t.Cleanup(idx.swappable().Close)
+			initial := &preparedVectorPlan{
+				repoPrefix: "A", dims: 3,
+				items: []graph.VectorCorpusItem{{NodeID: "A/a", Vec: []float32{1, 0, 0}}},
+			}
+			require.NoError(t, idx.installVectorPlan(t.Context(), store, initial))
+			before, release := idx.swappable().AcquireBackend()
+			release()
 
-	err := idx.installVectorPlan(ctx, store, plan)
-	require.ErrorIs(t, err, context.Canceled)
-	assertVectorPlanReleased(t, plan)
-	require.Zero(t, store.replaceCalls)
-	after, release := idx.swappable().AcquireBackend()
-	release()
-	if after != before {
-		t.Fatal("cancelled install changed the active search backend")
-	}
-}
+			if tt.multi {
+				idx.repositoryMutationOwner = &MultiIndexer{}
+			}
+			store.replaceErr = tt.err
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			wantCalls := int32(2)
+			if tt.pre {
+				cancel()
+				wantCalls = 1
+			}
+			plan := &preparedVectorPlan{
+				repoPrefix: "A", dims: 3,
+				items: []graph.VectorCorpusItem{{NodeID: "A/b", Vec: []float32{0, 1, 0}}},
+			}
+			if tt.multi {
+				plan.repoPrefix = "B"
+				plan.items[0].NodeID = "B/b"
+			}
+			err := idx.installVectorPlan(ctx, store, plan)
+			require.ErrorIs(t, err, tt.err)
+			if !tt.pre {
+				require.ErrorIs(t, err, ErrVectorInstall)
+			}
+			require.Equal(t, err, idx.LastVectorBuildError())
+			require.Equal(t, wantCalls, store.replaceCalls.Load())
+			assertVectorPlanReleased(t, plan)
+			stats, err := base.VectorCorpusStats(t.Context(), 3)
+			require.NoError(t, err)
+			require.Equal(t, 1, stats.VectorCount)
+			require.Equal(t, map[string][]float32{"A/a": {1, 0, 0}}, base.GetEmbeddings([]string{"A/a", "A/b", "B/b"}))
 
-func TestInstallVectorPlanNativeFailureUsesPreparedHeapWithoutReembedding(t *testing.T) {
-	store := newVectorPlanTestStore()
-	store.replaceErr = errors.New("native install failed")
-	emb := &poolEmbedder{}
-	idx := New(store, parser.NewRegistry(), config.Default().Index, zap.NewNop())
-	idx.SetEmbedder(emb)
-	plan := &preparedVectorPlan{
-		repoPrefix: "repo",
-		dims:       3,
-		items: []graph.VectorCorpusItem{
-			{NodeID: "repo/a", Vec: []float32{1, 0, 0}},
-		},
-	}
-
-	require.NoError(t, idx.installVectorPlan(context.Background(), store, plan))
-	assertVectorPlanReleased(t, plan)
-	require.Zero(t, emb.calls, "heap fallback must reuse the plan without embedding")
-	require.ErrorIs(t, idx.LastVectorBuildError(), store.replaceErr)
-
-	backend, release := idx.swappable().AcquireBackend()
-	defer release()
-	hybrid, ok := backend.(*search.HybridBackend)
-	require.True(t, ok)
-	require.Equal(t, 1, hybrid.VectorIndex().Count())
-	require.Greater(t, hybrid.VectorSizeBytes(), uint64(0))
-}
-
-func TestInstallVectorPlanMultiRepoFailurePreservesGlobalPublication(t *testing.T) {
-	store := newVectorPlanTestStore()
-	store.replaceStats = graph.VectorCorpusStats{VectorCount: 2, ChunkCount: 1, Dims: 3}
-	idx := vectorPlanTestIndexer(store)
-	initial := &preparedVectorPlan{
-		repoPrefix: "A",
-		dims:       3,
-		items: []graph.VectorCorpusItem{
-			{NodeID: "A/a", Vec: []float32{1, 0, 0}},
-		},
-	}
-	require.NoError(t, idx.installVectorPlan(context.Background(), store, initial))
-	before, release := idx.swappable().AcquireBackend()
-	release()
-
-	idx.repositoryMutationOwner = &MultiIndexer{}
-	store.replaceErr = errors.New("repo B install failed")
-	plan := &preparedVectorPlan{
-		repoPrefix: "B",
-		dims:       3,
-		items: []graph.VectorCorpusItem{
-			{NodeID: "B/b", Vec: []float32{0, 1, 0}},
-		},
-	}
-	require.NoError(t, idx.installVectorPlan(context.Background(), store, plan))
-	assertVectorPlanReleased(t, plan)
-	require.ErrorIs(t, idx.LastVectorBuildError(), store.replaceErr)
-	after, release := idx.swappable().AcquireBackend()
-	release()
-	if after != before {
-		t.Fatal("a repository-local fallback replaced the shared global vector publication")
+			after, release := idx.swappable().AcquireBackend()
+			defer release()
+			require.Same(t, before, after, "failed install must not replace the published delegate")
+			published := after.(*search.HybridBackend).VectorIndex()
+			require.Equal(t, 1, published.Count())
+			require.Equal(t, []string{"A/a"}, published.Search([]float32{1, 0, 0}, 2))
+		})
 	}
 }
 

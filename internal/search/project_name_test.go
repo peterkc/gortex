@@ -1,6 +1,7 @@
 package search
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -71,5 +72,60 @@ func TestDetectProjectNameWithReadsThroughTheReader(t *testing.T) {
 	})
 	if got != "widgets" || len(read) != 2 || read[0] != "go.mod" || read[1] != "package.json" {
 		t.Fatalf("DetectProjectNameWith = %q reading %v, want widgets reading go.mod then package.json", got, read)
+	}
+}
+
+func TestPortableProjectNameRelocation(t *testing.T) {
+	const indexed = "widgetalpha/run.py"
+	for _, dir := range []string{"widgetalpha", "widgetbeta"} {
+		t.Run(dir, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), dir)
+			legacy := DetectProjectNameWith(root, func(string) ([]byte, error) { return nil, os.ErrNotExist })
+			want := indexed
+			if dir == "widgetalpha" {
+				want = "run.py"
+			}
+			if got := StripProjectNameFromPath(indexed, legacy); got != want {
+				t.Fatalf("legacy path = %q, want %q", got, want)
+			}
+			portable, err := PortableProjectName(func(string) ([]byte, error) { return nil, nil })
+			if err != nil || portable != "" || StripProjectNameFromPath(indexed, portable) != indexed {
+				t.Fatalf("portable name = %q, err = %v; must keep %q", portable, err, indexed)
+			}
+		})
+	}
+}
+
+func TestPortableProjectNameFrozenSelection(t *testing.T) {
+	changed := errors.New("frozen manifest changed")
+	for _, tt := range []struct {
+		name, goMod, pkg, want string
+		readErr                error
+		reads                  int
+	}{
+		{name: "module first", goMod: "module example.org/widgetalpha\n", want: "widgetalpha", reads: 1},
+		{name: "short module stops", goMod: "module example.org/cli\n", pkg: `{"name":"widgetbeta"}`, reads: 1},
+		{name: "scoped package", pkg: `{"name":"@example/widgetbeta"}`, want: "widgetbeta", reads: 2},
+		{name: "bad package", pkg: `{"name":`, reads: 2},
+		{name: "changed input is not absence", readErr: changed, pkg: `{"name":"widgetbeta"}`, reads: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reads := 0
+			got, err := PortableProjectName(func(path string) ([]byte, error) {
+				reads++
+				switch path {
+				case "go.mod":
+					return []byte(tt.goMod), tt.readErr
+				case "package.json":
+					return []byte(tt.pkg), nil
+				default:
+					t.Fatalf("unexpected input %q", path)
+					return nil, nil
+				}
+			})
+			if got != tt.want || !errors.Is(err, tt.readErr) || reads != tt.reads {
+				t.Fatalf("name = %q, err = %v, reads = %d; want %q, %v, %d", got, err, reads, tt.want, tt.readErr, tt.reads)
+			}
+		})
 	}
 }

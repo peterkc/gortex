@@ -1,0 +1,316 @@
+package indexer
+
+import (
+	"bytes"
+	"context"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/graph/store_pebble"
+	"github.com/zzet/gortex/internal/resolver"
+	"go.uber.org/zap"
+)
+
+func TestRebuildBuildChildStages(t *testing.T) {
+	for _, edit := range []bool{false, true} {
+		name := "sealed prefix is not complete"
+		if edit {
+			name = "uncached edit crosses process boundary"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			root, src := rebuildInputFixture(t)
+			const rel = "sample.go"
+			require.NoError(t, os.WriteFile(filepath.Join(root, rel), []byte("package p\nfunc Frozen() {}\n"), 0o600))
+			in, _, err := readRebuildInput(ctx, src, rel, "go", 1024)
+			require.NoError(t, err)
+			inputs := []rebuildInput{in}
+			digest, err := rebuildInputRoot(inputs)
+			require.NoError(t, err)
+			raw, err := hex.DecodeString(digest)
+			require.NoError(t, err)
+			require.Len(t, raw, 32)
+			cfg := config.Default().Index
+			req := rebuildBuildRequest{
+				Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: 2,
+				Recipes: map[string]rebuildDigest{"go": {1}}, Policy: freezeRebuildParsePolicy(root, cfg),
+				Bounds: rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 64 << 10},
+				Witness: store_pebble.Witness{Input: store_pebble.HeadDigest(raw), Recipe: store_pebble.HeadDigest{2},
+					Profile: store_pebble.FullProfile, Stage: store_pebble.StageManifest},
+			}
+			manifests := map[string]*rebuildInput{"go.mod": nil, "package.json": nil}
+			if !edit {
+				require.NoError(t, os.WriteFile(filepath.Join(root, "go-target"), []byte("module example.org/widgets\n"), 0o600))
+				require.NoError(t, os.Symlink("go-target", filepath.Join(root, "go.mod")))
+				link, _, err := readRebuildInput(ctx, src, "go.mod", "manifest", 1024)
+				require.NoError(t, err)
+				manifests["go.mod"] = &link
+			}
+			leases := t.TempDir()
+			other := filepath.Join(leases, "unowned")
+			require.NoError(t, os.WriteFile(other, []byte("keep"), 0o600))
+			exe, err := os.Executable()
+			require.NoError(t, err)
+			t.Setenv("GORTEX_TEST_REBUILD_BUILD_CHILD", "1")
+			h, err := store_pebble.OpenHead(filepath.Join(t.TempDir(), "head"), req.Incarnation, req.Witness.Profile)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, h.Close()) })
+			var pinned *store_pebble.Snapshot
+			var ref store_pebble.HeadDigest
+			err = withRebuildBuildInputs(ctx, leases, src, manifests, req, nil,
+				func(lease string, bound rebuildBuildRequest) error {
+					ref = bound.Witness.FrozenInputs
+					if !edit {
+						require.NotEmpty(t, ref)
+						// The child must not need the followed manifest's bytes.
+						require.NoError(t, os.Remove(filepath.Join(root, "go-target")))
+					}
+					return runRebuildBuild(ctx, exe, []string{"-test.run=^TestRebuildBuildChildEntry$", "--"}, lease, bound, cfg, inputs,
+						func(ctx context.Context, tables store_pebble.StageTables) error {
+							if _, err := h.PublishStage(ctx, tables); err != nil {
+								return err
+							}
+							if tables.Witness.Stage == store_pebble.StageManifest {
+								pinned = h.OpenSnapshot()
+								t.Cleanup(func() { require.NoError(t, pinned.Close()) })
+								if edit {
+									return os.WriteFile(filepath.Join(root, rel), []byte("package p\nfunc Other() {}\n"), 0o600)
+								}
+							}
+							return nil
+						})
+				})
+			require.ErrorIs(t, err, ErrRebuildWorker)
+			require.NotNil(t, pinned, "the earlier stage must really publish")
+			published, publicationErr := pinned.Publication()
+			require.NoError(t, publicationErr)
+			require.Equal(t, ref, published.FrozenInputs)
+			nManifest := 0
+			require.NoError(t, pinned.ManifestFiles(ctx, func(f store_pebble.ManifestFile) error {
+				nManifest++
+				require.Equal(t, in.Path, f.Path)
+				require.Equal(t, store_pebble.HeadDigest(in.Content), f.Content)
+				return nil
+			}))
+			require.Equal(t, 1, nManifest)
+			var pending *store_pebble.ErrStagePending
+			require.ErrorAs(t, pinned.RequireStage(store_pebble.StageFileGraph), &pending)
+			latest := h.OpenSnapshot()
+			t.Cleanup(func() { require.NoError(t, latest.Close()) })
+			saved, e := os.ReadDir(req.ParseDir)
+			require.NoError(t, e)
+			if edit {
+				require.ErrorIs(t, err, ErrBuildInputChanged)
+				require.Empty(t, saved)
+				require.ErrorAs(t, latest.RequireStage(store_pebble.StageFileGraph), &pending)
+			} else {
+				require.ErrorIs(t, err, errRebuildBuildIncomplete)
+				require.Len(t, saved, 1)
+				require.NoError(t, latest.RequireStage(store_pebble.StageFileGraph))
+				require.Len(t, latest.FindNodesByName("Frozen"), 1)
+				require.ErrorAs(t, latest.RequireStage(store_pebble.StageRelations), &pending)
+			}
+			entries, err := os.ReadDir(leases)
+			require.NoError(t, err)
+			require.Len(t, entries, 1, "the owner must remove only its build lease after reaping")
+			require.Equal(t, "unowned", entries[0].Name())
+		})
+	}
+}
+
+func TestRebuildBuildChildEntry(t *testing.T) {
+	if os.Getenv("GORTEX_TEST_REBUILD_BUILD_CHILD") != "1" {
+		t.Skip("worker entry point")
+	}
+	if err := RunRebuildBuildWorker(t.Context(), os.Args[len(os.Args)-1], os.Stdin, os.Stdout, zap.NewNop()); err != nil {
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+func TestRebuildBuildFatalChildDiagnostic(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	root, src := rebuildInputFixture(t)
+	parent := t.TempDir()
+	unowned := filepath.Join(parent, "unowned")
+	require.NoError(t, os.WriteFile(unowned, []byte("keep"), 0o600))
+	exe, err := os.Executable()
+	require.NoError(t, err)
+	t.Setenv("GORTEX_TEST_REBUILD_BUILD_FATAL", "1")
+	req := rebuildBuildRequest{Root: root, Witness: store_pebble.Witness{Recipe: store_pebble.HeadDigest{1}}}
+	err = withRebuildBuildInputs(ctx, parent, src, map[string]*rebuildInput{"go.mod": nil, "package.json": nil}, req, nil,
+		func(lease string, bound rebuildBuildRequest) error {
+			return runRebuildBuild(ctx, exe, []string{"-test.run=^TestRebuildBuildFatalChildEntry$", "--"}, lease, bound, config.Default().Index, nil,
+				func(context.Context, store_pebble.StageTables) error {
+					t.Fatal("failed child did not complete a stage")
+					return nil
+				})
+		})
+	require.ErrorIs(t, err, ErrRebuildWorker)
+	var exit *exec.ExitError
+	require.ErrorAs(t, err, &exit)
+	require.Equal(t, 79, exit.ExitCode())
+	require.ErrorContains(t, err, "MANIFEST sync failed: planted scratch error")
+	require.NotContains(t, err.Error(), "earlier diagnostic")
+	entries, err := os.ReadDir(parent)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, "unowned", entries[0].Name())
+}
+
+func TestRebuildBuildFatalChildEntry(t *testing.T) {
+	if os.Getenv("GORTEX_TEST_REBUILD_BUILD_FATAL") != "1" {
+		t.Skip("isolated fatal worker fixture")
+	}
+	_, err := fmt.Fprint(os.Stderr, "earlier diagnostic\nMANIFEST sync failed: planted scratch error\n\n")
+	require.NoError(t, err)
+	os.Exit(79)
+}
+
+func TestRebuildWorkerDiagnosticBound(t *testing.T) {
+	var diagnostic rebuildWorkerDiagnostic
+	for _, chunk := range []string{"old\nnew ", "cause ", strings.Repeat("x", 2*rebuildDiagnosticBytes), "\n \n"} {
+		n, err := diagnostic.Write([]byte(chunk))
+		require.NoError(t, err)
+		require.Len(t, chunk, n)
+	}
+	line := diagnostic.lastLine()
+	require.Len(t, line, rebuildDiagnosticBytes)
+	require.True(t, strings.HasPrefix(line, "new cause "))
+	_, err := diagnostic.Write([]byte("unterminated"))
+	require.NoError(t, err)
+	require.Equal(t, "unterminated", diagnostic.lastLine())
+}
+
+func TestRebuildBuildRequestPreservesPathBytesAndSetting(t *testing.T) {
+	dir, src := rebuildInputFixture(t)
+	req := rebuildBuildRequest{Root: dir, ParseDir: dir, ParseLimit: 4096,
+		Bounds: rebuildTransformBounds{CaptureBytes: 10, FileBytes: 1024}, Incarnation: 1,
+		Witness: store_pebble.Witness{Stage: store_pebble.StageManifest, Recipe: store_pebble.HeadDigest{2}},
+	}
+	req, err := captureProjectNameTest(t, src, map[string]*rebuildInput{"go.mod": nil, "package.json": nil}, req)
+	require.NoError(t, err)
+	disabled := false
+	cfg := config.Default().Index
+	cfg.SynthesizeExternalCalls = &disabled
+	inputs := []rebuildInput{{Path: "source\xff.go", Language: "go"}}
+	require.NoError(t, writeRebuildBuildRequest(t.Context(), dir, req, cfg, inputs))
+	got, gotInputs, err := readRebuildBuildRequest(t.Context(), dir)
+	require.NoError(t, err)
+	require.Equal(t, inputs, gotInputs)
+	var cfgGot config.IndexConfig
+	require.NoError(t, json.Unmarshal(got.Config, &cfgGot))
+	require.NotNil(t, cfgGot.SynthesizeExternalCalls)
+	require.False(t, *cfgGot.SynthesizeExternalCalls)
+}
+
+func TestRebuildBuildMalformedStageDoesNotPublish(t *testing.T) {
+	lease := t.TempDir()
+	for name, expected := range map[string]error{
+		"skip manifest":      store_pebble.ErrStageOrder,
+		"wrong input digest": store_pebble.ErrStaleBase,
+		"invalid frame":      errRebuildBuildWire,
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := rebuildBuildRequest{Witness: store_pebble.Witness{
+				Input: store_pebble.HeadDigest{1}, Stage: store_pebble.StageManifest, Profile: store_pebble.FullProfile,
+			}}
+			var in, acks bytes.Buffer
+			w := req.Witness
+			switch name {
+			case "skip manifest":
+				w.Stage = store_pebble.StageFileGraph
+			case "wrong input digest":
+				w.Input = store_pebble.HeadDigest{2}
+			case "invalid frame":
+				in.Write([]byte{0xff, 0xff, 0xff, 0xff})
+			}
+			if in.Len() == 0 {
+				require.NoError(t, writeRebuildBuildReply(&in, rebuildBuildReply{Witness: w}))
+			}
+			calls := 0
+			err := receiveRebuildStages(t.Context(), lease, req, &in, &acks, func(context.Context, store_pebble.StageTables) error {
+				calls++
+				return nil
+			})
+			require.ErrorIs(t, err, expected)
+			require.Zero(t, calls)
+			require.Zero(t, acks.Len())
+		})
+	}
+}
+
+func TestRebuildBuildReplyRequiresCoverage(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		stage    store_pebble.Stage
+		coverage *store_pebble.RelationCoverage
+		wantAcks int
+		wantErr  error
+	}{
+		{"manifest claim", store_pebble.StageManifest, &store_pebble.RelationCoverage{}, 0, errRebuildBuildWire},
+		{"file_graph claim", store_pebble.StageFileGraph, &store_pebble.RelationCoverage{}, 1, errRebuildBuildWire},
+		{"relations without claim", store_pebble.StageRelations, nil, 2, errRebuildBuildWire},
+		{"relations with empty claim", store_pebble.StageRelations, &store_pebble.RelationCoverage{}, 3, errRebuildBuildIncomplete},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lease := t.TempDir()
+			w := store_pebble.Witness{
+				Input: store_pebble.HeadDigest{1}, Recipe: store_pebble.HeadDigest{2},
+				Profile: store_pebble.FullProfile, Stage: store_pebble.StageManifest,
+			}
+			req := rebuildBuildRequest{Witness: w}
+			var replies, acks bytes.Buffer
+			for stage := store_pebble.StageManifest; stage <= tc.stage; stage++ {
+				require.NoError(t, os.Mkdir(filepath.Join(lease, stage.String()), 0o700))
+				w.Stage = stage
+				if stage == tc.stage {
+					w.Relations = tc.coverage
+				}
+				require.NoError(t, writeRebuildBuildReply(&replies, rebuildBuildReply{Witness: w}))
+			}
+			var offered []store_pebble.Stage
+			err := receiveRebuildStages(t.Context(), lease, req, &replies, &acks, func(_ context.Context, got store_pebble.StageTables) error {
+				offered = append(offered, got.Witness.Stage)
+				if got.Witness.Stage == store_pebble.StageRelations {
+					require.Equal(t, tc.coverage, got.Witness.Relations)
+				}
+				return nil
+			})
+			require.ErrorIs(t, err, tc.wantErr)
+			want := []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph, store_pebble.StageRelations}
+			require.Len(t, offered, tc.wantAcks)
+			for i, stage := range offered {
+				require.Equal(t, want[i], stage)
+			}
+			require.True(t, bytes.Equal(bytes.Repeat([]byte{rebuildStageAck}, tc.wantAcks), acks.Bytes()))
+		})
+	}
+}
+
+func TestRebuildBuildCppIncludeRefusal(t *testing.T) {
+	var reply bytes.Buffer
+	cause := errors.Join(store_pebble.ErrRebuildFileImports, resolver.ErrRebuildCppIncludeInput)
+	require.NoError(t, writeRebuildBuildReply(&reply, buildRefusal(cause)))
+	var acks bytes.Buffer
+	err := receiveRebuildStages(t.Context(), t.TempDir(), rebuildBuildRequest{}, &reply, &acks,
+		func(context.Context, store_pebble.StageTables) error {
+			t.Fatal("an include refusal must not publish")
+			return nil
+		})
+	require.ErrorIs(t, err, ErrRebuildWorker)
+	require.ErrorIs(t, err, resolver.ErrRebuildCppIncludeInput)
+	require.Empty(t, acks.Bytes())
+}

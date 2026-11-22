@@ -456,11 +456,8 @@ type Indexer struct {
 	embedAPIConcurrency int
 
 	// lastVectorBuildErr records why the most recent vector prepare/install
-	// pass did not publish a vector index (chunk-embed failure,
-	// all-vectors-invalid, or the symbol-count guard). Nil after a build that
-	// produced a vector index. Read via LastVectorBuildError once a build has
-	// finished — it lets `gortex eval embedders` report the real cause instead
-	// of a bare "no vector data".
+	// pass did not publish a durable vector corpus. Read via LastVectorBuildError
+	// once a build has finished.
 	lastVectorBuildErr error
 
 	// semanticMgr is the optional semantic enrichment manager.
@@ -672,6 +669,8 @@ type Indexer struct {
 	// absent file produces empty rules and a no-op pass.
 	codeownersOnce  sync.Once
 	codeownersRules []codeowners.Rule
+	// Set only after a fresh rebuild indexer installs both frozen parse inputs.
+	frozenRebuildParsePolicy atomic.Pointer[rebuildParsePolicy]
 
 	// cloneIndex maintains the clone-detection CMS + length-stratified
 	// LSH live across single-file edits, so a steady-state reindex
@@ -1876,11 +1875,9 @@ func (idx *Indexer) SetEmbeddingMaxSymbols(n int) { idx.embedMaxSymbols = n }
 // default. Has no effect on in-process embedders.
 func (idx *Indexer) SetEmbeddingAPIConcurrency(n int) { idx.embedAPIConcurrency = n }
 
-// LastVectorBuildError returns why the most recent index build produced no
-// vector index (chunk-embed failure, all vectors invalid, or the symbol-count
-// guard), or nil when a vector index was built or the embedder was unset. Read
-// it after an index build completes; it is not safe to call concurrently with
-// one.
+// LastVectorBuildError reports why the last vector build did not publish a
+// corpus. It is nil after success or when no embedder was configured. Read it
+// after the index build completes, not concurrently with the build.
 func (idx *Indexer) LastVectorBuildError() error { return idx.lastVectorBuildErr }
 
 // SetSemanticManager sets the semantic enrichment manager.
@@ -1950,9 +1947,6 @@ func pruneVectorPlanToCorpus(plan *preparedVectorPlan, corpus *graph.Graph) *pre
 			owner = item.NodeID
 		}
 		if owner != "" && corpus.GetNode(owner) == nil {
-			if plan.chunkMap != nil {
-				delete(plan.chunkMap, item.NodeID)
-			}
 			dropped++
 			continue
 		}
@@ -3768,7 +3762,7 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 				if retErr == nil {
 					plan := deferredVectorPlan
 					deferredVectorPlan = nil
-					if err := idx.installVectorPlan(ctx, diskTarget, plan); err != nil {
+					if err := idx.installVectorPlanForPublication(ctx, diskTarget, plan); err != nil {
 						retErr = fmt.Errorf("indexer: publish vector corpus after shadow drain: %w", err)
 					}
 				} else {
@@ -4778,14 +4772,18 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 	// Prepare embeddings exactly once. Cold-shadow publication is deferred until
 	// the graph has drained and ownership validation can see durable nodes;
 	// direct and streaming paths already point at the durable store here.
-	vectorPlan, vectorErr := idx.prepareSearchIndexForPublication(ctx)
+	vectorTarget := idx.graph
+	if shadowTaken {
+		vectorTarget = diskTarget
+	}
+	vectorPlan, vectorErr := idx.prepareSearchIndexForPublication(ctx, vectorTarget)
 	if vectorErr != nil {
 		return nil, vectorErr
 	}
 	if shadowTaken {
 		deferredVectorPlan = vectorPlan
 	} else if vectorPlan != nil {
-		if err := idx.installVectorPlan(ctx, idx.graph, vectorPlan); err != nil {
+		if err := idx.installVectorPlanForPublication(ctx, idx.graph, vectorPlan); err != nil {
 			return nil, fmt.Errorf("indexer: publish vector corpus: %w", err)
 		}
 	}
@@ -5062,9 +5060,8 @@ func (idx *Indexer) scopedPassRepoCounts() (nodes, edges int, cached bool) {
 
 // cleanCensusResult publishes the same zero-delta state as the full-root
 // incremental pipeline after ChangedSinceMtimes has already proved the tree
-// unchanged. The store already owns the native text corpus, but the process-local
-// vector channel must still be restored from durable corpus statistics (or rebuilt
-// once when migration left that corpus empty).
+// unchanged. The store already owns the native text corpus. Where durable
+// vectors are supported, restore their delegate (or rebuild an empty corpus).
 func (idx *Indexer) cleanCensusResult(ctx context.Context, detected int, started time.Time) (*IndexResult, error) {
 	if idx.totalDetected == 0 {
 		idx.totalDetected = detected
