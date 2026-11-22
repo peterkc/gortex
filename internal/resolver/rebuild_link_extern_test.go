@@ -222,6 +222,13 @@ func TestRebuildGoExternEmptyTrackedNativeRows(t *testing.T) {
 	require.EqualValues(t, 2, stats.External)
 	require.EqualValues(t, 0, stats.Unresolved)
 	require.Equal(t, want, rebuildVueSortedRows(g.AllEdges()))
+	externalIDs := []string{"dep::" + pkg + "::Missing", "repo::stdlib::sdk/sub::Missing"}
+	for _, id := range externalIDs {
+		require.Nil(t, g.GetNode(id)) // the main resolver does not materialize terminals
+	}
+	r.attributeGoExternalCalls()
+	wantAfterAttribution := rebuildVueSortedRows(g.AllEdges())
+	require.Len(t, wantAfterAttribution, len(want)+len(externalIDs))
 
 	ctx, b, opts := frontierFixture(t, 1, 0)
 	b.AddBatch(nodes, input)
@@ -237,11 +244,12 @@ func TestRebuildGoExternEmptyTrackedNativeRows(t *testing.T) {
 		},
 	}))
 	require.Equal(t, 6, checks) // Edge file suffix, not source language.
-	require.Equal(t, want, rebuildFnPointerSaved(t, b))
-	for _, id := range []string{"dep::" + pkg + "::Missing", "repo::stdlib::sdk/sub::Missing"} {
+	require.Equal(t, wantAfterAttribution, rebuildFnPointerSaved(t, b))
+	for _, id := range externalIDs {
 		saved, err := b.RebuildView().Node(ctx, id)
 		require.NoError(t, err)
-		require.Nil(t, saved)
+		require.NotNil(t, saved)
+		require.Equal(t, g.GetNode(id), saved)
 	}
 	checkFrontierScratch(t, opts.ScratchParent)
 }

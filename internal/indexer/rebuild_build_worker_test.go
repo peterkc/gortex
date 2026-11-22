@@ -413,6 +413,7 @@ func TestRebuildBuildViewRefusal(t *testing.T) {
 		{"view error alone", store_pebble.ErrRebuildView, store_pebble.ErrRebuildView, 21},
 		{"denied", fmt.Errorf("%w: %w: %w", store_pebble.ErrRebuildView, errRebuildResolverNamespace, errRebuildResolverInputDenied), errRebuildResolverInputDenied, 29},
 		{"unproved namespace", fmt.Errorf("%w: %w", store_pebble.ErrRebuildView, errRebuildResolverNamespace), errRebuildResolverNamespace, 30},
+		{"external recording path", fmt.Errorf("%w: %w", store_pebble.ErrRebuildView, resolver.ErrRebuildGoExternalRecordingPath), resolver.ErrRebuildGoExternalRecordingPath, 35},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var reply, acks bytes.Buffer

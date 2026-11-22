@@ -210,6 +210,14 @@ func TestRebuildFrozenMainGoExtern(t *testing.T) {
 						precise.Meta = map[string]any{"go_import": pkg + "::Bind"}
 						stub.To = "stdlib::" + terminal // root claim sdk does not register a tracked module
 					}
+					want := map[int]graph.Edge{1: first, 2: precise, 3: stub}
+					if !tc.refuse {
+						want[0] = graph.Edge{From: stub.To, To: "module::go:sdk/sub", Kind: graph.EdgeMemberOf, Origin: graph.OriginASTResolved}
+						symbol, err := build.RebuildView().Node(ctx, stub.To)
+						require.NoError(t, err)
+						require.Equal(t, &graph.Node{ID: stub.To, Name: "Missing", Kind: graph.KindFunction, Language: "go",
+							Meta: map[string]any{"external": true, "module_path": "sdk/sub", "module_role": "stdlib"}}, symbol)
+					}
 					saved := make(map[int]graph.Edge)
 					n := 0
 					require.NoError(t, build.RebuildView().VisitEdges(ctx, func(edge *graph.Edge) error {
@@ -217,8 +225,8 @@ func TestRebuildFrozenMainGoExtern(t *testing.T) {
 						n++
 						return nil
 					}))
-					require.Equal(t, 3, n)
-					require.Equal(t, map[int]graph.Edge{1: first, 2: precise, 3: stub}, saved)
+					require.Equal(t, len(want), n)
+					require.Equal(t, want, saved)
 					return nil
 				})
 			require.NoError(t, err)

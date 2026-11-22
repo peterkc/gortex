@@ -18,42 +18,8 @@ func (b *BuildStore) RebuildGoBuiltins(ctx context.Context, reconcileSources boo
 	selectBuiltin func(*graph.Edge, func(string) (*graph.Node, error)) (*graph.Node, error),
 	sameBuiltin func(have, want *graph.Node) bool,
 ) (err error) {
-	view := b.RebuildView()
 	const maxRowBytes = 16 << 20
-	hasGo := false
-	err = view.read(ctx, func(snap *pebble.Snapshot) (err error) {
-		it, err := snap.NewIterWithContext(ctx, &pebble.IterOptions{
-			LowerBound: []byte{familyNode}, UpperBound: []byte{familyNode + 1},
-		})
-		if err != nil {
-			return err
-		}
-		defer func() { err = errors.Join(err, it.Close()) }()
-		for ok := it.First(); ok; ok = it.Next() {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			raw, err := it.ValueAndErr()
-			if err != nil {
-				return err
-			}
-			if len(it.Key())+len(raw) > maxRowBytes {
-				return fmt.Errorf("%w: Go builtin language probe", ErrRebuildLinkInputSize)
-			}
-			n, err := decodeNodeLight(raw)
-			if err != nil {
-				return err
-			}
-			if !bytes.Equal(it.Key(), pendingNodeKey(n.ID)) {
-				return invalid("Go builtin language probe node identity does not match key")
-			}
-			if n.Language == "go" && n.Name != "" {
-				hasGo = true
-				break
-			}
-		}
-		return it.Error()
-	})
+	hasGo, err := b.rebuildHasNamedGo(ctx)
 	if err != nil || !hasGo {
 		return err
 	}
@@ -135,6 +101,46 @@ func (b *BuildStore) RebuildGoBuiltins(ctx context.Context, reconcileSources boo
 	}
 	_, err = b.rebuildAttribution(ctx, planTarget, materialize, afterApply)
 	return err
+}
+
+func (b *BuildStore) rebuildHasNamedGo(ctx context.Context) (bool, error) {
+	view := b.RebuildView()
+	const maxRowBytes = 16 << 20
+	hasGo := false
+	err := view.read(ctx, func(snap *pebble.Snapshot) (err error) {
+		it, err := snap.NewIterWithContext(ctx, &pebble.IterOptions{
+			LowerBound: []byte{familyNode}, UpperBound: []byte{familyNode + 1},
+		})
+		if err != nil {
+			return err
+		}
+		defer func() { err = errors.Join(err, it.Close()) }()
+		for ok := it.First(); ok; ok = it.Next() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			raw, err := it.ValueAndErr()
+			if err != nil {
+				return err
+			}
+			if len(it.Key())+len(raw) > maxRowBytes {
+				return fmt.Errorf("%w: Go builtin language probe", ErrRebuildLinkInputSize)
+			}
+			n, err := decodeNodeLight(raw)
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(it.Key(), pendingNodeKey(n.ID)) {
+				return invalid("Go builtin language probe node identity does not match key")
+			}
+			if n.Language == "go" && n.Name != "" {
+				hasGo = true
+				break
+			}
+		}
+		return it.Error()
+	})
+	return hasGo, err
 }
 
 func (b *BuildStore) reconcileBuiltinSources(ctx context.Context, spillBytes int, plan []byte) (err error) {

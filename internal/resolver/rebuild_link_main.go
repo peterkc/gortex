@@ -45,7 +45,7 @@ type RebuildMainInputs struct {
 // frozen import facts, then reconciles placeholder sources unless disabled
 // and checks weak cross-package bindings. A nonempty original frontier also
 // enables Go receiver, bare-name scope, dataflow callee, generic parameter,
-// and Go builtin attribution. It does not publish.
+// Go builtin, and Go external-call attribution. It does not publish.
 // SelectCallers is required. On error the owner must discard the private build.
 func RunRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts store_pebble.RebuildLinkOptions, in RebuildMainInputs) error {
 	if in.SelectCallers == nil {
@@ -141,7 +141,10 @@ func runRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts st
 	if _, err := build.RebuildGenericParams(ctx); err != nil {
 		return err
 	}
-	return runRebuildGoBuiltins(ctx, build, reconcileSources, opts.SpillBytes)
+	if err := runRebuildGoBuiltins(ctx, build, reconcileSources, opts.SpillBytes); err != nil {
+		return err
+	}
+	return runRebuildGoExternalCalls(ctx, build)
 }
 
 func reduceRebuildMainPage(ctx context.Context, f *rebuildLinkFrontier, page []*graph.Edge) ([]graph.EdgeReindex, error) {

@@ -162,6 +162,7 @@ var rebuildFailureKinds = [...]error{
 	errRebuildCallerAttribution, errRebuildGoEvidence, tsalias.ErrFrozenAliasUnproved, tsalias.ErrFrozenAliasPath,
 	errRebuildResolverInputDenied, errRebuildResolverNamespace, errRebuildNpmInput, store_pebble.ErrRebuildImportDirectories,
 	errRebuildCrossRepoUnavailable, store_pebble.ErrRebuildAttributionChain,
+	resolver.ErrRebuildGoExternalRecordingPath,
 }
 
 func buildRefusal(err error) rebuildBuildReply {
