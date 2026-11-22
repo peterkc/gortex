@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"errors"
+	"maps"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -218,5 +219,96 @@ func TestRebuildMainFrozenPlaceholderPolicy(t *testing.T) {
 	want := *token
 	want.To, want.Confidence = target, 0.9
 	require.Equal(t, []*graph.Edge{&want, flow}, rebuildFnPointerSaved(t, build))
+	checkFrontierScratch(t, opts.ScratchParent)
+}
+
+// The guard must use the import resolved by main and undo the unreachable
+// call and its source repoint, without changing the reachable call site.
+func TestRebuildMainCrossPackageGuard(t *testing.T) {
+	t.Setenv("GORTEX_RESOLVE_FROM_RECONCILE", "1")
+	ctx, build, opts := frontierFixture(t, 1, 0)
+	opts.SpillBytes = 256 // smaller than one guard record
+	const file, caller = "app/main.ts", "app/main.ts::Caller"
+	const barrel = "entry/index.ts"
+	const keep, drop = "lib/impl.ts::owner.Keep", "other/impl.ts::owner.Drop"
+	nodes := []*graph.Node{
+		typeTestNode(file, "main.ts", graph.KindFile, "typescript", file),
+		typeTestNode(caller, "Caller", graph.KindFunction, "typescript", file),
+		typeTestNode(barrel, "index.ts", graph.KindFile, "typescript", barrel),
+		// Not file::Name export keys: both calls reach the weak name tier.
+		typeTestNode(keep, "Keep", graph.KindFunction, "typescript", "lib/impl.ts"),
+		typeTestNode(drop, "Drop", graph.KindFunction, "typescript", "other/impl.ts"),
+	}
+	imp := rebuildImportTestEdge(file, file, "../entry/index", 1)
+	reexport := &graph.Edge{From: barrel, To: keep, Kind: graph.EdgeReExports, FilePath: barrel, Line: 1}
+	makeCall := func(name string, line int) *graph.Edge {
+		return &graph.Edge{From: caller, To: "unresolved::" + name, Kind: graph.EdgeCalls, FilePath: file, Line: line,
+			Origin: graph.OriginASTInferred, Confidence: 0.6, ConfidenceLabel: "INFERRED", Meta: map[string]any{"payload": name}}
+	}
+	keptCall, droppedCall := makeCall("Keep", 2), makeCall("Drop", 3)
+	makeFlow := func(e *graph.Edge) *graph.Edge {
+		return &graph.Edge{From: e.To, To: caller, Kind: graph.EdgeArgOf, FilePath: file, Line: e.Line}
+	}
+	keptFlow, droppedFlow := makeFlow(keptCall), makeFlow(droppedCall)
+	edges := []*graph.Edge{imp, reexport, keptCall, droppedCall, keptFlow, droppedFlow}
+	build.AddBatch(nodes, edges)
+
+	g := graph.New()
+	g.AddBatch(nodes, nil)
+	for _, e := range edges {
+		copy := *e
+		copy.Meta = maps.Clone(e.Meta)
+		g.AddEdge(&copy)
+	}
+	r := New(g)
+	r.bulkMode = true
+	r.buildDirIndexes()
+	pending := []*graph.Edge{imp, keptCall, droppedCall}
+	slices.SortFunc(pending, compareRebuildImportEdges)
+	require.NoError(t, r.warmLookupCache(pending))
+	var moves []graph.EdgeReindex
+	var jobs []reindexJob
+	for _, old := range pending {
+		e := *old
+		e.Meta = maps.Clone(old.Meta)
+		oldTo, changed := r.resolveEdge(&e, &ResolveStats{})
+		require.True(t, changed, old.To)
+		clearEdgeTerminal(&e)
+		moves = append(moves, graph.EdgeReindex{Edge: &e, OldTo: oldTo, OldKind: old.Kind})
+		jobs = append(jobs, reindexJob{edge: &e, newTo: e.To, oldTo: oldTo, kind: e.Kind, origin: e.Origin, confidence: e.Confidence})
+	}
+	r.clearLookupCache()
+	g.ReindexEdges(moves)
+	r.placeholderSrcIdx.deferRepoints(g, moves)
+	require.Equal(t, 2, r.placeholderSrcIdx.applyDeferred(g))
+	spool, err := newResolveGuardSpool()
+	require.NoError(t, err)
+	defer spool.close()
+	require.NoError(t, spool.appendJobs([][]reindexJob{jobs}))
+	records, done, err := spool.nextPage(resolvePendingPageRows)
+	require.NoError(t, err)
+	require.True(t, done)
+	require.Len(t, records, 2)
+	guardJobs := guardJobsFromRecords(g, records)
+	require.Len(t, guardJobs, 2)
+	closure := r.buildImportClosure()
+	r.warmGuardLookupCache(guardJobs)
+	require.Equal(t, 1, r.guardCrossPackageCallEdges(guardJobs, closure))
+	r.clearLookupCache()
+	want := rebuildVueSortedRows(g.AllEdges())
+
+	require.NoError(t, RunRebuildMain(ctx, build, opts, RebuildMainInputs{
+		SelectCallers: func(page []*graph.Edge) ([]*graph.Edge, error) { return page, nil },
+	}))
+	got := rebuildFnPointerSaved(t, build)
+	require.Equal(t, want, got)
+	require.Len(t, got, len(edges))
+	require.Equal(t, barrel, rebuildFnPointerSavedAt(t, got, graph.EdgeImports, file, 1).To)
+	require.Equal(t, keep, rebuildFnPointerSavedAt(t, got, graph.EdgeCalls, caller, 2).To)
+	reverted := rebuildFnPointerSavedAt(t, got, graph.EdgeCalls, caller, 3)
+	require.Equal(t, droppedCall.To, reverted.To)
+	require.Equal(t, map[string]any{"payload": "Drop", "guard_reverted": true}, reverted.Meta)
+	require.Equal(t, caller, rebuildFnPointerSavedAt(t, got, graph.EdgeArgOf, keep, 2).To)
+	require.Equal(t, droppedFlow, rebuildFnPointerSavedAt(t, got, graph.EdgeArgOf, droppedFlow.From, 3))
 	checkFrontierScratch(t, opts.ScratchParent)
 }

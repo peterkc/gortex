@@ -32,14 +32,15 @@ type resolveGuardRecord struct {
 }
 
 type resolveGuardSpool struct {
-	records []resolveGuardRecord
-	readAt  int
-	bytes   int
-	file    *os.File
-	writer  *bufio.Writer
-	encoder *gob.Encoder
-	decoder *gob.Decoder
-	count   int
+	scratchParent string // empty retains the native default temporary directory
+	records       []resolveGuardRecord
+	readAt        int
+	bytes         int
+	file          *os.File
+	writer        *bufio.Writer
+	encoder       *gob.Encoder
+	decoder       *gob.Decoder
+	count         int
 }
 
 // A resolveGuardRecord occupies 280 bytes on 64-bit Go before the bytes
@@ -119,7 +120,7 @@ func (s *resolveGuardSpool) append(record resolveGuardRecord) error {
 }
 
 func (s *resolveGuardSpool) spill() error {
-	file, err := os.CreateTemp("", "gortex-resolve-guard-*")
+	file, err := os.CreateTemp(s.scratchParent, "gortex-resolve-guard-*")
 	if err != nil {
 		return err
 	}

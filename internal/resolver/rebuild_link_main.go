@@ -42,8 +42,8 @@ type RebuildMainInputs struct {
 }
 
 // RunRebuildMain resolves selected pending edges in a private build using
-// frozen import facts, then reconciles placeholder sources unless disabled.
-// It does not publish.
+// frozen import facts, then reconciles placeholder sources unless disabled
+// and checks weak cross-package bindings. It does not publish.
 // SelectCallers is required. On error the owner must discard the private build.
 func RunRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts store_pebble.RebuildLinkOptions, in RebuildMainInputs) error {
 	if in.SelectCallers == nil {
@@ -53,9 +53,9 @@ func RunRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts st
 }
 
 // runRebuildMain consumes the cold resolver frontier and applies complete old
-// keys in page order. It does not publish. A failed page, reconciliation or
-// cleanup invalidates the entire private build, including earlier pages.
-// This draft has no deferred LSP, guard or tail dispatcher yet.
+// keys in page order. Any error invalidates the entire private build,
+// including earlier pages. This path does not install an LSP helper or
+// retry queue, and later attribution passes are not yet dispatched.
 func runRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts store_pebble.RebuildLinkOptions,
 	reconcileSources bool, in RebuildMainInputs,
 ) (err error) {
@@ -67,8 +67,10 @@ func runRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts st
 		externalNpmDependency:    in.ExternalNpmDependency,
 		dependencyContractsReady: in.DependencyContractsReady,
 	}
+	guard := newRebuildCrossPackageGuard(opts.ScratchParent, opts.SpillBytes)
 	var placeholder *store_pebble.RebuildPlaceholderSources
 	defer func() {
+		err = errors.Join(err, guard.Close())
 		if placeholder != nil {
 			err = errors.Join(err, placeholder.Close())
 		}
@@ -82,22 +84,31 @@ func runRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts st
 		if err := build.ApplyLinkReindexes(ctx, moves); err != nil {
 			return err
 		}
-		if !reconcileSources {
-			return nil
-		}
-		// Native's lazy census sees the first successful commit, including
-		// any kind promotion. It must not be refreshed between pages.
-		if placeholder == nil {
-			placeholder, err = build.CapturePlaceholderSources(ctx, opts.SpillBytes)
-			if err != nil {
+		if reconcileSources {
+			// Native's lazy census sees the first successful commit, including
+			// any kind promotion. It must not be refreshed between pages.
+			if placeholder == nil {
+				placeholder, err = build.CapturePlaceholderSources(ctx, opts.SpillBytes)
+				if err != nil {
+					return err
+				}
+			}
+			if err := placeholder.Record(ctx, moves); err != nil {
 				return err
 			}
 		}
-		return placeholder.Record(ctx, moves)
+		return guard.Append(ctx, moves)
 	})
-	if err == nil && placeholder != nil {
-		_, err = placeholder.Apply(ctx)
+	if err != nil {
+		return err
 	}
+	if placeholder != nil {
+		if _, err := placeholder.Apply(ctx); err != nil {
+			return err
+		}
+	}
+	// Keep native order: the guard sees settled imports and source repoints.
+	_, err = guard.Apply(ctx, build, reconcileSources, nil)
 	return err
 }
 

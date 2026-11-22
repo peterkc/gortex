@@ -90,7 +90,8 @@ func (f rebuildGuardFixture) private(t *testing.T, spillAt int, refresh func([]l
 	ctx := t.Context()
 	b := rebuildFnPointerBuild(t)
 	b.AddBatch(f.nodes, f.edges)
-	g := newRebuildCrossPackageGuard(spillAt)
+	scratch := t.TempDir()
+	g := newRebuildCrossPackageGuard(scratch, spillAt)
 	t.Cleanup(func() { require.NoError(t, g.Close()) })
 	require.NoError(t, g.Append(ctx, f.moves))
 	stats, err := g.Apply(ctx, b, true, refresh)
@@ -98,6 +99,7 @@ func (f rebuildGuardFixture) private(t *testing.T, spillAt int, refresh func([]l
 	name := ""
 	if g.spool.file != nil {
 		name = g.spool.file.Name()
+		require.Equal(t, scratch, filepath.Dir(name))
 	}
 	require.NoError(t, g.Close())
 	if name != "" {
@@ -281,7 +283,7 @@ func TestRebuildCrossPackageGuardReadFailure(t *testing.T) {
 	e := f.job("caller.ts", "target", "caller.ts", "unresolved::target", graph.EdgeCalls, 2)
 	b := rebuildFnPointerBuild(t)
 	b.AddBatch(f.nodes, f.edges)
-	g := newRebuildCrossPackageGuard(1)
+	g := newRebuildCrossPackageGuard(t.TempDir(), 1)
 	t.Cleanup(func() { require.NoError(t, g.Close()) })
 	require.NoError(t, g.Append(t.Context(), f.moves))
 	require.NotNil(t, g.spool.file)

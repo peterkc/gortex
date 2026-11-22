@@ -29,8 +29,8 @@ type rebuildGuardStats struct {
 	SpillBytes                                  int64
 }
 
-func newRebuildCrossPackageGuard(spillAt int) *rebuildCrossPackageGuard {
-	return &rebuildCrossPackageGuard{spillAt: spillAt}
+func newRebuildCrossPackageGuard(scratchParent string, spillAt int) *rebuildCrossPackageGuard {
+	return &rebuildCrossPackageGuard{spool: resolveGuardSpool{scratchParent: scratchParent}, spillAt: spillAt}
 }
 
 // Append runs after a successful main reindex page. Keep all intended moves
