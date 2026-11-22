@@ -107,7 +107,7 @@ func TestRebuildMemberNativeRows(t *testing.T) {
 			build.AddBatch(ordered, edges)
 			slices.Reverse(ordered)
 			want := rebuildMemberNativeSaved(t, ordered, edges, len(cases)-3)
-			require.NoError(t, runRebuildMain(ctx, build, opts, false, rebuildMainImportInputs{}))
+			require.NoError(t, runRebuildMain(ctx, build, opts, false, RebuildMainInputs{}))
 			got := rebuildFnPointerSaved(t, build)
 			require.Equal(t, want, got)
 			require.Len(t, got, len(cases))
@@ -203,7 +203,7 @@ func TestRebuildMemberRefusesMissingEvidence(t *testing.T) {
 			})
 			want := rebuildFnPointerSaved(t, build)
 			require.Len(t, want, 2)
-			err := runRebuildLinkFrontier(ctx, build, opts, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
+			err := runRebuildLinkFrontier(ctx, build, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
 				require.Len(t, page, 2)
 				moves, err := rebuildMemberTestMoves(ctx, f, page[:1])
 				require.NoError(t, err)

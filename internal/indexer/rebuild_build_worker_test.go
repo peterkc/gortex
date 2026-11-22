@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -170,7 +171,31 @@ func TestRebuildBuildChildEntry(t *testing.T) {
 	if os.Getenv("GORTEX_TEST_REBUILD_BUILD_CHILD") != "1" {
 		t.Skip("worker entry point")
 	}
-	if err := RunRebuildBuildWorker(t.Context(), os.Args[len(os.Args)-1], os.Stdin, os.Stdout, zap.NewNop()); err != nil {
+	if err := RunRebuildBuildWorker(t.Context(), os.Args[len(os.Args)-1], os.Stdin, os.Stdout, zap.NewNop(), rebuildTestLinkOptions(t)); err != nil {
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+func rebuildTestLinkOptions(t *testing.T) store_pebble.RebuildLinkOptions {
+	t.Helper()
+	binary, err := os.Executable()
+	require.NoError(t, err)
+	return store_pebble.RebuildLinkOptions{
+		Binary: binary, WorkerArgs: []string{"-test.run=^TestRebuildBuildLinkEntry$", "--"}, Partitions: 1, SpillBytes: 1 << 20,
+	}
+}
+
+func TestRebuildBuildLinkEntry(t *testing.T) {
+	if os.Getenv("GORTEX_TEST_REBUILD_BUILD_CHILD") != "1" {
+		t.Skip("worker entry point")
+	}
+	spill, err := strconv.Atoi(os.Args[len(os.Args)-1])
+	if err == nil {
+		err = store_pebble.RunRebuildLinkWorker(t.Context(), os.Args[len(os.Args)-2], spill, os.Stdin, os.Stdout)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	os.Exit(0)
@@ -279,7 +304,7 @@ func TestRebuildBuildRequestRejectsInvalidIncarnation(t *testing.T) {
 			in, owner, err := os.Pipe()
 			require.NoError(t, err)
 			defer owner.Close()
-			err = RunRebuildBuildWorker(t.Context(), lease, in, &reply, zap.NewNop())
+			err = RunRebuildBuildWorker(t.Context(), lease, in, &reply, zap.NewNop(), store_pebble.RebuildLinkOptions{})
 			require.ErrorIs(t, err, tc.want)
 			err = receiveRebuildStages(t.Context(), lease, req, &reply, &acks, func(context.Context, store_pebble.StageTables) error {
 				t.Fatal("an invalid request must not publish")
@@ -395,12 +420,15 @@ func TestRebuildBuildCppIncludeRefusal(t *testing.T) {
 }
 
 func TestRunRebuildCheckout(t *testing.T) {
-	for _, mismatch := range []bool{false, true} {
-		name := "verified checkout builds exact prefix"
-		if mismatch {
-			name = "supplied input root differs"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		mismatch, denied bool
+	}{
+		{name: "verified checkout builds exact prefix"},
+		{name: "supplied input root differs", mismatch: true},
+		{name: "denied link input keeps file graph", denied: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			root, src := rebuildInputFixture(t)
@@ -410,11 +438,16 @@ func TestRunRebuildCheckout(t *testing.T) {
 			require.NoError(t, os.WriteFile(filepath.Join(root, "large.go"), []byte(strings.Repeat("x", 129)), 0o600))
 			require.NoError(t, os.Mkdir(filepath.Join(root, "excluded"), 0o700))
 			require.NoError(t, os.WriteFile(filepath.Join(root, "excluded", "secret.go"), []byte("package hidden"), 0o600))
+			if tc.denied {
+				writeRebuildTSAliasFixtureFile(t, root, "caller.ts", `import "@lib/x"`)
+				writeRebuildTSAliasFixtureFile(t, root, "tsconfig.json", `{"compilerOptions":{"paths":{"@lib/*":["./excluded/*"]}}}`)
+				writeRebuildTSAliasFixtureFile(t, root, "excluded/x.ts", "export {}")
+			}
 			cfg := config.Default().Index
 			cfg.MaxFileSize = 128
 			req := rebuildBuildRequest{
 				Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: rebuildTestIncarnation,
-				Policy: freezeRebuildParsePolicy(root, cfg), Recipes: map[string]rebuildDigest{"go": {1}},
+				Policy: freezeRebuildParsePolicy(root, cfg), Recipes: map[string]rebuildDigest{"go": {1}, "typescript": {2}},
 				Bounds:  rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 64 << 10},
 				Witness: store_pebble.Witness{Recipe: store_pebble.HeadDigest{2}, Profile: store_pebble.FullProfile, Stage: store_pebble.StageManifest},
 			}
@@ -432,7 +465,7 @@ func TestRunRebuildCheckout(t *testing.T) {
 			h, err := store_pebble.OpenHead(headDir, req.Incarnation, req.Witness.Profile)
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, h.Close()) })
-			if mismatch {
+			if tc.mismatch {
 				req.Witness.Input[0] = 1
 				exe = filepath.Join(root, "not-a-binary")
 			}
@@ -440,7 +473,7 @@ func TestRunRebuildCheckout(t *testing.T) {
 			err = idx.runRebuildCheckout(ctx, src, req, excludes.New([]string{"excluded/"}), false,
 				exe, []string{"-test.run=^TestRebuildBuildChildEntry$", "--"}, leases, headDir,
 				func(ctx context.Context, offer store_pebble.StageTables) error {
-					require.False(t, mismatch, "a mismatched epoch must not reach the child")
+					require.False(t, tc.mismatch, "a mismatched epoch must not reach the child")
 					stages = append(stages, offer.Witness.Stage)
 					if offer.Witness.Stage == store_pebble.StageManifest {
 						ref := rebuildDigest(offer.Witness.FrozenInputs)
@@ -456,20 +489,28 @@ func TestRunRebuildCheckout(t *testing.T) {
 			require.Equal(t, "unowned", entries[0].Name())
 			s := h.OpenSnapshot()
 			defer func() { require.NoError(t, s.Close()) }()
-			if mismatch {
+			if tc.mismatch {
 				require.ErrorIs(t, err, ErrBuildInputChanged)
 				require.Empty(t, stages)
 				require.ErrorIs(t, s.RequireStage(store_pebble.StageManifest), store_pebble.ErrNotPublished)
 				return
 			}
-			require.ErrorIs(t, err, errRebuildBuildIncomplete)
+			wantRefusal := errRebuildBuildIncomplete
+			wantPaths := []string{"sample.go"}
+			if tc.denied {
+				wantRefusal = errRebuildResolverInputDenied
+				wantPaths = []string{"caller.ts", "sample.go"}
+			}
+			require.ErrorIs(t, err, wantRefusal)
 			require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, stages)
+			var pending *store_pebble.ErrStagePending
+			require.ErrorAs(t, s.RequireStage(store_pebble.StageRelations), &pending)
 			var paths []string
 			require.NoError(t, s.ManifestFiles(ctx, func(f store_pebble.ManifestFile) error {
 				paths = append(paths, f.Path)
 				return nil
 			}))
-			require.Equal(t, []string{"sample.go"}, paths)
+			require.Equal(t, wantPaths, paths)
 			require.NotNil(t, s.GetNode("sample.go::Frozen"))
 			stub := s.GetNode("large.go")
 			require.NotNil(t, stub)

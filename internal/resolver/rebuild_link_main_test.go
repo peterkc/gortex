@@ -1,12 +1,14 @@
 package resolver
 
 import (
+	"errors"
 	"path/filepath"
 	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
@@ -64,7 +66,7 @@ func TestRebuildMainTokenAndSource(t *testing.T) {
 	want := sql.AllEdges()
 	slices.SortFunc(want, compareRebuildImportEdges)
 
-	require.NoError(t, runRebuildMain(ctx, build, opts, true, rebuildMainImportInputs{}))
+	require.NoError(t, runRebuildMain(ctx, build, opts, true, RebuildMainInputs{}))
 	got := rebuildFnPointerSaved(t, build)
 	require.Equal(t, want, got)
 	for _, e := range got {
@@ -108,7 +110,7 @@ func TestRebuildMainBareAndVueDispatch(t *testing.T) {
 	ref := rebuildVueTestRef(vueFile, "Panel", "Panel", 2)
 	render := rebuildVueTestRender(jsxFile, "Child", 3)
 	build.AddBatch(nodes, []*graph.Edge{read, rust, imp, ref, render})
-	require.NoError(t, runRebuildMain(ctx, build, opts, false, rebuildMainImportInputs{}))
+	require.NoError(t, runRebuildMain(ctx, build, opts, false, RebuildMainInputs{}))
 	want := rebuildVueSortedRows([]*graph.Edge{&promoted, rust, imp, rebuildVueTestSaved(ref, panelID, true), rebuildVueTestSaved(render, jsxID, false)})
 	require.Equal(t, want, rebuildFnPointerSaved(t, build))
 	checkFrontierScratch(t, opts.ScratchParent)
@@ -122,7 +124,77 @@ func TestRebuildMainRefusesIncompletePage(t *testing.T) {
 	build.AddNode(&graph.Node{ID: "empty-repo", Name: "Run", QualName: "empty-repo", Kind: graph.KindMethod})
 	build.AddBatch(nil, []*graph.Edge{unsupported, token})
 	want := rebuildFnPointerSaved(t, build)
-	require.ErrorIs(t, runRebuildMain(ctx, build, opts, true, rebuildMainImportInputs{}), errRebuildMainRule)
+	require.ErrorIs(t, runRebuildMain(ctx, build, opts, true, RebuildMainInputs{}), errRebuildMainRule)
+	require.Equal(t, want, rebuildFnPointerSaved(t, build))
+	checkFrontierScratch(t, opts.ScratchParent)
+}
+
+func TestRunRebuildMainSelectsCallers(t *testing.T) {
+	ctx, build, opts := frontierFixture(t, 2, 0)
+	const caller, deferredCaller, candidate = "repo/src/main.ts", "repo/legacy/caller.py", "repo/legacy/provider.py"
+	selected := rebuildImportTestEdge(caller, caller, "package::Item", 7)
+	deferred := rebuildImportTestEdge(deferredCaller, deferredCaller, "rewritten::Item", 7)
+	build.AddBatch([]*graph.Node{
+		rebuildImportTestNode(caller, "repo", "repo", "", "typescript", graph.KindFile),
+		rebuildImportTestNode(deferredCaller, "repo", "repo", "", "python", graph.KindFile),
+		rebuildImportTestNode(candidate, "repo", "repo", "rewritten::Item", "python", graph.KindPackage),
+	}, []*graph.Edge{selected, deferred})
+
+	require.NoError(t, RunRebuildMain(ctx, build, opts, RebuildMainInputs{
+		SelectCallers: func(page []*graph.Edge) ([]*graph.Edge, error) {
+			require.Equal(t, []*graph.Edge{deferred, selected}, page)
+			return page[1:], nil
+		},
+		PathAlias: func(file, _ string) (string, error) {
+			require.Equal(t, caller, file)
+			return "", nil
+		},
+		RewriteNpm: func(file, spec string) (string, error) {
+			require.Equal(t, caller, file)
+			require.Equal(t, "package::Item", spec)
+			return "rewritten::Item", nil
+		},
+	}))
+	// The link still finds a deferred-language node in the frozen candidate
+	// partitions. The selected old key disappears; the deferred row is exact.
+	want := []*graph.Edge{deferred, rebuildImportTestMove(selected, candidate, false)}
+	require.Equal(t, want, rebuildFnPointerSaved(t, build))
+	checkFrontierScratch(t, opts.ScratchParent)
+}
+
+func TestRunRebuildMainSkipsCandidateStartup(t *testing.T) {
+	ctx, build, opts := frontierFixture(t, 1, resolvePendingPageRows+1)
+	build.AddNode(&graph.Node{ID: "caller", Language: "python", FilePath: "caller.py"})
+	opts.Binary = filepath.Join(opts.ScratchParent, "must-not-start")
+	want := rebuildFnPointerSaved(t, build)
+	require.Len(t, want, resolvePendingPageRows+1)
+	require.ErrorContains(t, RunRebuildMain(ctx, build, opts, RebuildMainInputs{}), "missing caller selector")
+
+	seen := 0
+	require.NoError(t, RunRebuildMain(ctx, build, opts, RebuildMainInputs{
+		SelectCallers: func(page []*graph.Edge) ([]*graph.Edge, error) {
+			end := min(seen+resolvePendingPageRows, len(want))
+			require.Equal(t, want[seen:end], page)
+			seen = end
+			return nil, nil
+		},
+	}))
+	require.Equal(t, len(want), seen)
+	require.Equal(t, want, rebuildFnPointerSaved(t, build))
+	checkFrontierScratch(t, opts.ScratchParent)
+
+	rejected := errors.New("receipt selection refused")
+	calls := 0
+	err := RunRebuildMain(ctx, build, opts, RebuildMainInputs{
+		SelectCallers: func(page []*graph.Edge) ([]*graph.Edge, error) {
+			calls++
+			require.Equal(t, want[:resolvePendingPageRows], page)
+			return page, rejected
+		},
+	})
+	require.ErrorIs(t, err, rejected)
+	require.NotErrorIs(t, err, store_pebble.ErrRebuildLink)
+	require.Equal(t, 1, calls)
 	require.Equal(t, want, rebuildFnPointerSaved(t, build))
 	checkFrontierScratch(t, opts.ScratchParent)
 }

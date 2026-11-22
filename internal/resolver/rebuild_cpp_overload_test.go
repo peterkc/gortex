@@ -107,7 +107,7 @@ func TestRebuildCppOverloadNativeRows(t *testing.T) {
 			require.Equal(t, graph.EdgeReferences, e.Kind)
 		}
 	}
-	require.NoError(t, runRebuildMain(ctx, b, opts, false, rebuildMainImportInputs{}))
+	require.NoError(t, runRebuildMain(ctx, b, opts, false, RebuildMainInputs{}))
 	require.Equal(t, native, rebuildFnPointerSaved(t, b))
 	checkFrontierScratch(t, opts.ScratchParent)
 }
@@ -123,7 +123,7 @@ func TestRebuildCppOverloadReplayPageError(t *testing.T) {
 	_, langs := resolverCompatibleLanguages("cpp")
 	req := store_pebble.LinkRequest{Kind: store_pebble.LinkName, Key: "process", RepoPrefix: "repo", Languages: langs}
 	fault := errors.New("candidate replay canceled after the first page")
-	err := runRebuildLinkFrontier(ctx, b, opts, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
+	err := runRebuildLinkFrontier(ctx, b, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
 		require.Len(t, page, 1)
 		state := rebuildCppOverload{argHints: scopePositionalArgHints(e.Meta)}
 		stats, err := f.candidates(ctx, []store_pebble.LinkRequest{req}, func(_ int, n *graph.Node) error {

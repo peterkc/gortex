@@ -174,7 +174,7 @@ func receiveRebuildStages(
 // the owner pipe can acknowledge an ingest. Its EOF cancels work even if the
 // worker is between stages. The lease belongs to the owner, never to a child
 // asked to clean arbitrary paths after a failure.
-func RunRebuildBuildWorker(ctx context.Context, lease string, in *os.File, output io.Writer, logger *zap.Logger) error {
+func RunRebuildBuildWorker(ctx context.Context, lease string, in *os.File, output io.Writer, logger *zap.Logger, link store_pebble.RebuildLinkOptions) error {
 	if !filepath.IsAbs(lease) {
 		return fmt.Errorf("%w: build worker needs an absolute lease directory", errRebuildBuildWire)
 	}
@@ -220,7 +220,7 @@ func RunRebuildBuildWorker(ctx context.Context, lease string, in *os.File, outpu
 			return context.Cause(ctx)
 		}
 	}
-	if err := buildRebuildStages(ctx, lease, logger, store_pebble.OpenWorkerBuild, send); err != nil {
+	if err := buildRebuildStages(ctx, lease, logger, store_pebble.OpenWorkerBuild, link, send); err != nil {
 		return errors.Join(err, writeRebuildBuildReply(output, buildRefusal(err)))
 	}
 	return nil
@@ -229,7 +229,7 @@ func RunRebuildBuildWorker(ctx context.Context, lease string, in *os.File, outpu
 func buildRebuildStages(
 	ctx context.Context, lease string, logger *zap.Logger,
 	openBuild func(string, store_pebble.Profile) (*store_pebble.BuildStore, error),
-	send func(store_pebble.StageTables) error,
+	link store_pebble.RebuildLinkOptions, send func(store_pebble.StageTables) error,
 ) (err error) {
 	req, inputs, err := readRebuildBuildRequest(ctx, lease)
 	if err != nil {
@@ -291,10 +291,14 @@ func buildRebuildStages(
 		witness: req.Witness, classifications: classifications,
 	}
 	store := rebuildParseStore{dir: req.ParseDir, limit: req.ParseLimit}
-	if _, err := idx.buildRebuildFileStages(ctx, src, store, private, job, send); err != nil {
+	counts, err := idx.buildRebuildFileStages(ctx, src, store, private, job, send)
+	if err != nil {
 		return err
 	}
-	// Sealing a prefix is not a complete build. This changes only when the
-	// exact relation, derived and search reducers are wired to this store.
+	if err := runRebuildFrozenMain(ctx, lease, rebuildDigest(req.Witness.FrozenInputs), private, counts.census, link); err != nil {
+		return err
+	}
+	// Main only changes private scratch. Relation projection, its tails,
+	// and dependent derived and search stages are still incomplete.
 	return errRebuildBuildIncomplete
 }

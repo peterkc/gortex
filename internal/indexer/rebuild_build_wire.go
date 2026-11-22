@@ -14,6 +14,7 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
+	"github.com/zzet/gortex/internal/parser/tsalias"
 	"github.com/zzet/gortex/internal/resolver"
 )
 
@@ -154,6 +155,8 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildLinkInputSize, store_pebble.ErrRebuildLink,
 	store_pebble.ErrRebuildPlaceholderSources, resolver.ErrRebuildCrossPackageGuard, store_pebble.ErrRebuildView,
 	errRebuildInputSidecar, errRebuildGraphPathCollision, store_pebble.ErrInvalidIncarnation,
+	errRebuildCallerAttribution, errRebuildGoEvidence, tsalias.ErrFrozenAliasUnproved, tsalias.ErrFrozenAliasPath,
+	errRebuildResolverInputDenied, errRebuildResolverNamespace, errRebuildNpmInput,
 }
 
 func buildRefusal(err error) rebuildBuildReply {

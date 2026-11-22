@@ -81,7 +81,7 @@ func rebuildVueWorkingRows(t *testing.T, nodes []*graph.Node, edges []*graph.Edg
 	t.Helper()
 	ctx, b, opts := frontierFixture(t, 1, 0)
 	b.AddBatch(nodes, edges)
-	err := runRebuildLinkFrontier(ctx, b, opts, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
+	err := runRebuildLinkFrontier(ctx, b, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
 		var moves []graph.EdgeReindex
 		for _, old := range page {
 			if old.Kind == graph.EdgeImports {

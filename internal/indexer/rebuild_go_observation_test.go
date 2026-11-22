@@ -282,7 +282,8 @@ func TestRebuildGoObservationFollowedRootReplay(t *testing.T) {
 	nearest, err := rebuildGoNearest(".", goFacts.lookup)
 	require.NoError(t, err)
 	require.Equal(t, want, nearest, "a positive loose claim is still a strict non-certificate")
-	got, err := rebuildGoOwnership(candidate, func(string) (bool, error) { return true, nil }, goFacts.lookup)
+	got, err := rebuildGoOwnership(candidate, func(string) (bool, error) { return true, nil },
+		func(rel string) (string, error) { return rel, nil }, goFacts.lookup)
 	require.NoError(t, err)
 	require.Equal(t, resolver.GoPackageOwnershipUnknown, got)
 }

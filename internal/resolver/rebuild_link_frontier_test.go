@@ -87,7 +87,7 @@ func TestRebuildLinkFrontierPages(t *testing.T) {
 			b.AddNode(&graph.Node{ID: "outside", Name: "Run", QualName: "pkg.Run", RepoPrefix: "z-repo"})
 			var sizes []int
 			rows := 0
-			err := runRebuildLinkFrontier(ctx, b, opts, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
+			err := runRebuildLinkFrontier(ctx, b, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
 				sizes = append(sizes, len(page))
 				for _, e := range page {
 					rows++
@@ -126,10 +126,10 @@ func TestRebuildLinkFrontierEmpty(t *testing.T) {
 	b.AddEdge(&graph.Edge{From: "caller", Kind: graph.EdgeCalls, To: "initial"})
 	opts.Binary = filepath.Join(opts.ScratchParent, "must-not-start")
 	noPage := func(*rebuildLinkFrontier, []*graph.Edge) error { return errors.New("unexpected pending page") }
-	require.NoError(t, runRebuildLinkFrontier(ctx, b, opts, noPage))
+	require.NoError(t, runRebuildLinkFrontier(ctx, b, opts, nil, noPage))
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	err := runRebuildLinkFrontier(canceled, b, opts, noPage)
+	err := runRebuildLinkFrontier(canceled, b, opts, nil, noPage)
 	require.ErrorIs(t, err, store_pebble.ErrRebuildView)
 	require.ErrorIs(t, err, context.Canceled)
 	checkFrontierScratch(t, opts.ScratchParent)
@@ -145,7 +145,7 @@ func TestRebuildLinkFrontierFailure(t *testing.T) {
 			b.AddBatch([]*graph.Node{{ID: "a", Name: "A"}, {ID: "b", Name: "B"}}, nil)
 			reject := errors.New("refused private page")
 			pages, visits := 0, 0
-			err := runRebuildLinkFrontier(ctx, b, opts, func(f *rebuildLinkFrontier, _ []*graph.Edge) error {
+			err := runRebuildLinkFrontier(ctx, b, opts, nil, func(f *rebuildLinkFrontier, _ []*graph.Edge) error {
 				pages++
 				if pages == 2 && mode == "reducer" {
 					return reject

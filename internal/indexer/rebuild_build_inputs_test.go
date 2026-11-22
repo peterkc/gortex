@@ -164,7 +164,7 @@ func TestRebuildBuildFrozenInputsRejectBeforeStage(t *testing.T) {
 				bound.Witness.Recipe = rebuildProjectRecipe(bound.BaseRecipe, bound.ProjectName, bound.Witness.FrozenInputs)
 			}
 			require.NoError(t, writeRebuildBuildRequest(ctx, lease, bound, config.Default().Index, nil))
-			err = buildRebuildStages(ctx, lease, zap.NewNop(), store_pebble.OpenBuild, func(store_pebble.StageTables) error {
+			err = buildRebuildStages(ctx, lease, zap.NewNop(), store_pebble.OpenBuild, store_pebble.RebuildLinkOptions{}, func(store_pebble.StageTables) error {
 				t.Fatal("worker sent a stage without verified inputs")
 				return nil
 			})

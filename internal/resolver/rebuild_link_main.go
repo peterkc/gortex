@@ -13,20 +13,47 @@ import (
 
 var errRebuildMainRule = errors.New("rebuild main resolution rule not implemented")
 
+// RebuildMainInputs supplies the receipt selection and frozen import facts.
+type RebuildMainInputs struct {
+	// SelectCallers must return an order-preserving subset of each pending
+	// page. The page and its edges are borrowed: do not modify or retain them.
+	SelectCallers func([]*graph.Edge) ([]*graph.Edge, error)
+	// PathAlias maps a caller path and module to a graph stem. RewriteNpm
+	// maps a caller path and raw import payload to a new payload. An empty
+	// result with no error means a proved miss. Both are required at use.
+	PathAlias, RewriteNpm func(string, string) (string, error)
+	// GoOwnership supplies ownership evidence when a Go import needs it.
+	GoOwnership func(GoImportCandidate) (GoPackageOwnershipResult, error)
+}
+
+// RunRebuildMain resolves selected pending edges in a private build using
+// frozen import facts. It does not reconcile placeholder sources or publish.
+// SelectCallers is required. On error the owner must discard the private build.
+func RunRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts store_pebble.RebuildLinkOptions, in RebuildMainInputs) error {
+	if in.SelectCallers == nil {
+		return errors.New("run rebuild main: missing caller selector")
+	}
+	return runRebuildMain(ctx, build, opts, false, in)
+}
+
 // runRebuildMain consumes the cold resolver frontier and applies complete old
 // keys in page order. It does not publish. A failed page, reconciliation or
 // cleanup invalidates the entire private build, including earlier pages.
 // This draft has no deferred LSP, guard or tail dispatcher yet.
 func runRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts store_pebble.RebuildLinkOptions,
-	reconcileSources bool, imports rebuildMainImportInputs,
+	reconcileSources bool, in RebuildMainInputs,
 ) (err error) {
+	imports := rebuildMainImportInputs{
+		jsts:        rebuildJSTSImportInputs{pathAlias: in.PathAlias, rewriteNpm: in.RewriteNpm},
+		goOwnership: in.GoOwnership,
+	}
 	var placeholder *store_pebble.RebuildPlaceholderSources
 	defer func() {
 		if placeholder != nil {
 			err = errors.Join(err, placeholder.Close())
 		}
 	}()
-	err = runRebuildLinkFrontier(ctx, build, opts, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
+	err = runRebuildLinkFrontier(ctx, build, opts, in.SelectCallers, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
 		f.imports = imports
 		moves, err := reduceRebuildMainPage(ctx, f, page)
 		if err != nil || len(moves) == 0 {

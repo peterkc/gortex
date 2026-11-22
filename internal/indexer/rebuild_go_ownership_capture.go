@@ -16,6 +16,7 @@ import (
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer/merkle"
+	"github.com/zzet/gortex/internal/pathkey"
 	"github.com/zzet/gortex/internal/resolver"
 )
 
@@ -275,9 +276,10 @@ func rebuildGoNearest(dir string, lookup func(string) (rebuildGoManifest, error)
 // rebuildGoOwnership evaluates the native same-repo ownership gate against
 // two enclosed graph identities. hasGoFile must use the checked KindFile/go
 // inventory of this parse epoch, with exact graph paths and explicit negatives.
-// A miss from a partial inventory is an error, not native Unknown.
+// A miss from a partial inventory is an error, not native Unknown. rawPath
+// must map a graph-relative file to its exact admitted receipt path or refuse.
 func rebuildGoOwnership(candidate resolver.GoImportCandidate, hasGoFile func(string) (bool, error),
-	manifest func(string) (rebuildGoManifest, error),
+	rawPath func(string) (string, error), manifest func(string) (rebuildGoManifest, error),
 ) (resolver.GoPackageOwnershipResult, error) {
 	unknown := resolver.GoPackageOwnershipUnknown
 	if candidate.CandidateRepoPrefix != candidate.ImporterRepoPrefix || module.CheckImportPath(candidate.ImportPath) != nil {
@@ -298,16 +300,27 @@ func rebuildGoOwnership(candidate resolver.GoImportCandidate, hasGoFile func(str
 		if err != nil || !ok {
 			return "", err
 		}
-		dir := path.Dir(rel)
-		owner, err := rebuildGoNearest(dir, manifest)
+		if rawPath == nil {
+			return "", fmt.Errorf("%w: no raw receipt lookup for %q", errRebuildGoEvidence, rel)
+		}
+		raw, err := rawPath(rel)
+		if err != nil {
+			return "", fmt.Errorf("%w: raw receipt for %q: %w", errRebuildGoEvidence, rel, err)
+		}
+		if !rebuildGoLocalPath(raw) || pathkey.Normalize(raw) != rel {
+			return "", fmt.Errorf("%w: raw receipt %q does not prove Go file %q", errRebuildGoEvidence, raw, rel)
+		}
+		owner, err := rebuildGoNearest(path.Dir(raw), manifest)
 		if err != nil || owner.OwnerModule == "" {
 			return "", err
 		}
-		suffix := dir
-		if base := path.Dir(owner.Path); base != "." {
-			suffix = strings.TrimPrefix(dir, base)
+		// The raw owner is a proved ancestor. Drop its component count from
+		// the graph directory to keep the native suffix spelling.
+		suffix := path.Dir(rel)
+		for base := path.Dir(owner.Path); base != "."; base = path.Dir(base) {
+			_, suffix, _ = strings.Cut(suffix, "/")
 		}
-		return path.Join(owner.OwnerModule, strings.TrimPrefix(suffix, "/")), nil
+		return path.Join(owner.OwnerModule, suffix), nil
 	}
 	if importer, err := packageOf(candidate.ImporterFilePath); err != nil || importer == "" {
 		return unknown, err

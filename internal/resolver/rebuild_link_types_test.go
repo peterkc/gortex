@@ -66,7 +66,7 @@ func checkRebuildTypeRows(t *testing.T, nodes []*graph.Node, edges []*graph.Edge
 
 	ctx, b, opts := frontierFixture(t, 1, 0)
 	b.AddBatch(nodes, edges)
-	err = runRebuildMain(ctx, b, opts, false, rebuildMainImportInputs{})
+	err = runRebuildMain(ctx, b, opts, false, RebuildMainInputs{})
 	if refusal != "" {
 		require.ErrorIs(t, err, store_pebble.ErrRebuildLink)
 		require.ErrorContains(t, err, refusal)

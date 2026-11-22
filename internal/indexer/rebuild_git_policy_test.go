@@ -93,7 +93,7 @@ func TestRebuildGitPolicyMismatchRefusesBeforeBuild(t *testing.T) {
 				func(string, store_pebble.Profile) (*store_pebble.BuildStore, error) {
 					t.Fatal("mismatched Git proof reached private store")
 					return nil, nil
-				}, func(store_pebble.StageTables) error {
+				}, store_pebble.RebuildLinkOptions{}, func(store_pebble.StageTables) error {
 					t.Fatal("mismatched Git proof reached publication")
 					return nil
 				})

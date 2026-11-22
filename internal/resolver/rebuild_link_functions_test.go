@@ -132,7 +132,7 @@ func TestRebuildFunctionNativeRows(t *testing.T) {
 	want := sql.AllEdges()
 	slices.SortFunc(want, compareRebuildImportEdges)
 
-	require.NoError(t, runRebuildLinkFrontier(ctx, build, opts, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
+	require.NoError(t, runRebuildLinkFrontier(ctx, build, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
 		var moves []graph.EdgeReindex
 		for _, original := range page {
 			before, e := *original, *original
@@ -185,7 +185,7 @@ func TestRebuildFunctionRefusesMissingRule(t *testing.T) {
 					Meta: map[string]any{"resolution": "using_static"}},
 			})
 			want := rebuildFnPointerSaved(t, build)
-			err := runRebuildLinkFrontier(ctx, build, opts, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
+			err := runRebuildLinkFrontier(ctx, build, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
 				require.Len(t, page, 2)
 				first, later := *page[0], *page[1]
 				require.NoError(t, resolveRebuildFunction(ctx, f, &first, "Run"))

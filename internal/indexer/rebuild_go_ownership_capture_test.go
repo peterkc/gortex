@@ -151,6 +151,11 @@ func TestRebuildGoOwnershipNativeAndRelocated(t *testing.T) {
 				got, err := rebuildGoOwnership(candidate, func(file string) (bool, error) {
 					_, ok := files[file]
 					return ok, nil
+				}, func(rel string) (string, error) {
+					if _, ok := files["r/"+rel]; !ok {
+						t.Fatalf("raw provenance queried for graph nonmember %q", rel)
+					}
+					return rel, nil // graph and receipt paths are identical in this fixture
 				}, func(name string) (rebuildGoManifest, error) { return byPath[name], nil })
 				if err != nil || got != tc.want || got != native(candidate) {
 					t.Fatalf("%s %s compact=%t: got %v, native %v, want %v, err %v", tc.file, tc.wantImport, compact, got, native(candidate), tc.want, err)
@@ -161,6 +166,90 @@ func TestRebuildGoOwnershipNativeAndRelocated(t *testing.T) {
 		if _, err := rebuildGoNearest("shared", func(name string) (rebuildGoManifest, error) { return byPath[name], nil }); !errors.Is(err, errRebuildGoEvidence) {
 			t.Fatalf("missing negative fell through to an outer module: %v", err)
 		}
+	}
+}
+
+func TestRebuildGoOwnershipRawAncestry(t *testing.T) {
+	const raw = "cafe\u0301"
+	const nfc = "caf\u00e9"
+	candidate := resolver.GoImportCandidate{
+		ImportPath: "example.org/raw/pkg", ImporterRepoPrefix: "r", ImporterFilePath: "r/caller.go",
+		CandidateRepoPrefix: "r", CandidateFilePath: "r/" + nfc + "/pkg/b.go",
+	}
+	for _, omitRawModule := range []bool{false, true} {
+		rows := rebuildGoManifests{
+			"go.work":            {Path: "go.work"},
+			"go.mod":             {Path: "go.mod", Present: true, OwnerModule: "example.org/root"},
+			raw + "/pkg/go.work": {Path: raw + "/pkg/go.work"},
+			raw + "/go.work":     {Path: raw + "/go.work"},
+			raw + "/pkg/go.mod":  {Path: raw + "/pkg/go.mod"},
+			raw + "/go.mod":      {Path: raw + "/go.mod", Present: true, OwnerModule: "example.org/raw"},
+			nfc + "/pkg/go.work": {Path: nfc + "/pkg/go.work"},
+			nfc + "/go.work":     {Path: nfc + "/go.work"},
+			nfc + "/pkg/go.mod":  {Path: nfc + "/pkg/go.mod"},
+			nfc + "/go.mod":      {Path: nfc + "/go.mod", Present: true, OwnerModule: "example.org/decoy"},
+		}
+		want := resolver.GoPackageOwnershipExact
+		var wantErr error
+		if omitRawModule {
+			delete(rows, raw+"/go.mod")
+			want, wantErr = resolver.GoPackageOwnershipUnknown, errRebuildGoEvidence
+		}
+		var graphFiles, origins, probes []string
+		got, err := rebuildGoOwnership(candidate, func(file string) (bool, error) {
+			graphFiles = append(graphFiles, file)
+			return file == candidate.ImporterFilePath || file == candidate.CandidateFilePath, nil
+		}, func(rel string) (string, error) {
+			origins = append(origins, rel)
+			if rel == nfc+"/pkg/b.go" {
+				return raw + "/pkg/b.go", nil
+			}
+			return rel, nil // the importer has an ASCII receipt path
+		}, func(name string) (rebuildGoManifest, error) {
+			probes = append(probes, name)
+			return rows.lookup(name)
+		})
+		if got != want || !errors.Is(err, wantErr) {
+			t.Fatalf("omit raw module=%t: got %v, %v; want %v, %v", omitRawModule, got, err, want, wantErr)
+		}
+		if !slices.Equal(graphFiles, []string{"r/caller.go", "r/" + nfc + "/pkg/b.go"}) ||
+			!slices.Equal(origins, []string{"caller.go", nfc + "/pkg/b.go"}) ||
+			!slices.Equal(probes, []string{"go.work", "go.mod", raw + "/pkg/go.work", raw + "/go.work", "go.work", raw + "/pkg/go.mod", raw + "/go.mod"}) {
+			t.Fatalf("omit raw module=%t: graph files %q, origins %q, probes %q", omitRawModule, graphFiles, origins, probes)
+		}
+	}
+}
+
+func TestRebuildGoOwnershipRawProvenanceRefusals(t *testing.T) {
+	conflict := errors.New("conflicting raw receipts")
+	candidate := resolver.GoImportCandidate{ImporterFilePath: "caller.go", CandidateFilePath: "pkg/b.go", ImportPath: "example.org/root/pkg"}
+	for _, tc := range []struct {
+		name, raw string
+		cause     error
+		noLookup  bool
+	}{
+		{name: "missing provider", noLookup: true},
+		{name: "missing receipt"},
+		{name: "different graph key", raw: "other.go"},
+		{name: "escaping receipt", raw: "../caller.go"},
+		{name: "conflicting receipts", raw: "caller.go", cause: conflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			origin := func(string) (string, error) { return tc.raw, tc.cause }
+			if tc.noLookup {
+				origin = nil
+			}
+			got, err := rebuildGoOwnership(candidate, func(file string) (bool, error) {
+				return file == candidate.ImporterFilePath, nil
+			}, origin, func(name string) (rebuildGoManifest, error) {
+				t.Fatalf("manifest %q queried without raw provenance", name)
+				return rebuildGoManifest{}, nil
+			})
+			if got != resolver.GoPackageOwnershipUnknown || !errors.Is(err, errRebuildGoEvidence) ||
+				(tc.cause != nil && !errors.Is(err, tc.cause)) {
+				t.Fatalf("got %v, %v; want Unknown with frozen Go evidence refusal (cause %v)", got, err, tc.cause)
+			}
+		})
 	}
 }
 

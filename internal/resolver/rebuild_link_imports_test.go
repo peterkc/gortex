@@ -143,7 +143,7 @@ func TestRebuildImportNativeRows(t *testing.T) {
 		}
 	}
 	b.AddBatch(nodes, input)
-	require.NoError(t, runRebuildMain(ctx, b, opts, false, rebuildMainImportInputs{}))
+	require.NoError(t, runRebuildMain(ctx, b, opts, false, RebuildMainInputs{}))
 	require.Equal(t, want, rebuildFnPointerSaved(t, b))
 }
 
@@ -182,12 +182,12 @@ func TestRebuildImportWithCheckedJSTSInputs(t *testing.T) {
 	}))
 	ctx, b, opts := frontierFixture(t, 1, 0)
 	b.AddBatch(nodes, edges)
-	require.NoError(t, runRebuildMain(ctx, b, opts, false, rebuildMainImportInputs{jsts: rebuildJSTSImportInputs{
-		pathAlias: func(file, module string) (string, error) { return pathAlias(file, module), nil },
-		rewriteNpm: func(file, spec string) (string, error) {
+	require.NoError(t, runRebuildMain(ctx, b, opts, false, RebuildMainInputs{
+		PathAlias: func(file, module string) (string, error) { return pathAlias(file, module), nil },
+		RewriteNpm: func(file, spec string) (string, error) {
 			return rewrite(file, spec), nil
 		},
-	}}))
+	}))
 	require.Equal(t, want, rebuildFnPointerSaved(t, b))
 }
 
@@ -217,7 +217,7 @@ func TestRebuildImportWithCheckedGoOwnership(t *testing.T) {
 	}))
 	ctx, b, opts := frontierFixture(t, 1, 0)
 	b.AddBatch(nodes, []*graph.Edge{edge})
-	in := rebuildMainImportInputs{goOwnership: func(q GoImportCandidate) (GoPackageOwnershipResult, error) {
+	in := RebuildMainInputs{GoOwnership: func(q GoImportCandidate) (GoPackageOwnershipResult, error) {
 		if q.CandidateID == right.ID {
 			return GoPackageOwnershipUnknown, errRebuildMainRule
 		}
@@ -225,7 +225,7 @@ func TestRebuildImportWithCheckedGoOwnership(t *testing.T) {
 	}}
 	require.ErrorIs(t, runRebuildMain(ctx, b, opts, false, in), errRebuildMainRule)
 	require.Equal(t, []*graph.Edge{edge}, rebuildFnPointerSaved(t, b))
-	in.goOwnership = func(q GoImportCandidate) (GoPackageOwnershipResult, error) { return owner(q), nil }
+	in.GoOwnership = func(q GoImportCandidate) (GoPackageOwnershipResult, error) { return owner(q), nil }
 	require.NoError(t, runRebuildMain(ctx, b, opts, false, in))
 	require.Equal(t, want, rebuildFnPointerSaved(t, b))
 }
@@ -316,7 +316,7 @@ func TestRebuildImportRefusesUnprovedInputs(t *testing.T) {
 			nodes := append(tc.nodes, file(tc.caller, tc.lang), file("a/start.ts", "typescript"), file("a/keep.ts", "typescript"))
 			first := rebuildImportTestEdge("a/start.ts", "a/start.ts", "./keep", 1)
 			b.AddBatch(nodes, []*graph.Edge{first})
-			require.NoError(t, runRebuildMain(ctx, b, opts, false, rebuildMainImportInputs{}))
+			require.NoError(t, runRebuildMain(ctx, b, opts, false, RebuildMainInputs{}))
 			saved := rebuildImportTestMove(first, "a/keep.ts", false)
 			require.Equal(t, []*graph.Edge{saved}, rebuildFnPointerSaved(t, b))
 
@@ -347,7 +347,7 @@ func TestRebuildImportRefusesUnprovedInputs(t *testing.T) {
 			before = rebuildVueSortedRows(before)
 			native := rebuildImportNativeRows(t, nodes, before, tc.configure)
 			require.Equal(t, rebuildVueSortedRows(wantNative), native)
-			err := runRebuildMain(ctx, b, opts, false, rebuildMainImportInputs{})
+			err := runRebuildMain(ctx, b, opts, false, RebuildMainInputs{})
 			require.ErrorIs(t, err, errRebuildMainRule)
 			require.ErrorContains(t, err, tc.missing)
 			require.Equal(t, before, rebuildFnPointerSaved(t, b))

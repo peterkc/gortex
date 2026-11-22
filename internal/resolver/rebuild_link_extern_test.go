@@ -101,7 +101,7 @@ func TestRebuildExternNativeRows(t *testing.T) {
 	}
 	ctx, b, opts := frontierFixture(t, 1, 0)
 	b.AddBatch(nodes, input)
-	require.NoError(t, runRebuildLinkFrontier(ctx, b, opts, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
+	require.NoError(t, runRebuildLinkFrontier(ctx, b, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
 		b.AddNode(late) // not in the immutable candidate partitions
 		moves, err := reduceRebuildMainPage(ctx, f, page)
 		if err != nil {
@@ -191,7 +191,7 @@ func TestRebuildExternRefusesIncompletePage(t *testing.T) {
 			wantFirst := rebuildImportTestMove(first, "repo/keep", false)
 			require.Equal(t, rebuildVueSortedRows([]*graph.Edge{wantFirst, wantBlocked}), rebuildImportNativeRows(t, nodes, before, tc.configure))
 			pages := 0
-			err := runRebuildLinkFrontier(ctx, b, opts, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
+			err := runRebuildLinkFrontier(ctx, b, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
 				pages++
 				require.Equal(t, before, page)
 				firstMove, err := reduceRebuildMainPage(ctx, f, page[:1])

@@ -21,7 +21,14 @@ var rebuildBuildWorkerCmd = &cobra.Command{
 	PersistentPreRun:  skipWorkerHooks,
 	PersistentPostRun: skipWorkerHooks,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return indexer.RunRebuildBuildWorker(cmd.Context(), args[0], os.Stdin, os.Stdout, newLogger())
+		binary, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		link := store_pebble.RebuildLinkOptions{
+			Binary: binary, WorkerArgs: []string{rebuildLinkWorkerCommand}, Partitions: 1, SpillBytes: 1 << 20,
+		}
+		return indexer.RunRebuildBuildWorker(cmd.Context(), args[0], os.Stdin, os.Stdout, newLogger(), link)
 	},
 }
 
