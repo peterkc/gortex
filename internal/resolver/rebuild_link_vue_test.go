@@ -64,6 +64,16 @@ func rebuildVueSQLiteExpected(edges []*graph.Edge) []*graph.Edge {
 	return out
 }
 
+// Preserve full edge payloads and the native adjacency order (line, insertion ID).
+func rebuildVueFullRows(t *testing.T, nodes []*graph.Node, edges []*graph.Edge, alias PathAliasResolver) []*graph.Edge {
+	t.Helper()
+	full := graph.New()
+	ordered := slices.Clone(edges)
+	slices.SortStableFunc(ordered, func(a, b *graph.Edge) int { return cmp.Compare(a.Line, b.Line) })
+	full.AddBatch(nodes, ordered)
+	return rebuildVueResolveRows(t, full, alias)
+}
+
 func rebuildVueResolveRows(t *testing.T, g graph.Store, alias PathAliasResolver) []*graph.Edge {
 	t.Helper()
 	var pending []*graph.Edge
@@ -181,6 +191,7 @@ func TestRebuildVueTemplateNativeRows(t *testing.T) {
 		edges, want = append(edges, e), append(want, rebuildVueTestSaved(e, tc.id, tc.bound))
 	}
 	want = rebuildVueSortedRows(want)
+	require.Equal(t, want, rebuildVueFullRows(t, nodes, edges, nil))
 	require.Equal(t, rebuildVueSQLiteExpected(want), rebuildVueNativeRows(t, nodes, edges, nil))
 	got, err := rebuildVueWorkingRows(t, nodes, edges)
 	require.NoError(t, err)
@@ -247,14 +258,7 @@ func TestRebuildVueRenderedNativeRows(t *testing.T) {
 		require.Equal(t, rebuildVueSortedRows(sqliteWant), rebuildVueNativeRows(t, nodes, edges, nil))
 	})
 
-	// Also compare the native resolver on the full input payload that Pebble
-	// can store. In-memory adjacency is insertion ordered; insert by the
-	// SQLite adjacency order (line, insertion ID) for this fixture only.
-	full := graph.New()
-	ordered := slices.Clone(edges)
-	slices.SortStableFunc(ordered, func(a, b *graph.Edge) int { return cmp.Compare(a.Line, b.Line) })
-	full.AddBatch(nodes, ordered)
-	require.Equal(t, want, rebuildVueResolveRows(t, full, nil))
+	require.Equal(t, want, rebuildVueFullRows(t, nodes, edges, nil))
 	got, err := rebuildVueWorkingRows(t, nodes, edges)
 	require.NoError(t, err)
 	require.Equal(t, want, got)
@@ -302,14 +306,17 @@ func TestRebuildVueTemplateMissingAliasEvidence(t *testing.T) {
 			localResolved := rebuildVueTestSaved(local, "ui/local.ts::Local", false)
 			edges := []*graph.Edge{imp, ref, local}
 			wantRaw := rebuildVueSortedRows(edges)
-			require.Equal(t, rebuildVueSQLiteExpected(rebuildVueSortedRows([]*graph.Edge{imp, ref, localResolved})),
-				rebuildVueNativeRows(t, nodes, edges, nil))
-			withAlias := rebuildVueNativeRows(t, nodes, edges, func(caller, path string) string {
+			noAlias := rebuildVueSortedRows([]*graph.Edge{imp, ref, localResolved})
+			withAlias := rebuildVueSortedRows([]*graph.Edge{imp, rebuildVueTestSaved(ref, targetID, true), localResolved})
+			alias := func(caller, path string) string {
 				require.Equal(t, file, caller)
 				require.Equal(t, spec, path)
 				return targetFile
-			})
-			require.Equal(t, rebuildVueSQLiteExpected(rebuildVueSortedRows([]*graph.Edge{imp, rebuildVueTestSaved(ref, targetID, true), localResolved})), withAlias)
+			}
+			require.Equal(t, noAlias, rebuildVueFullRows(t, nodes, edges, nil))
+			require.Equal(t, withAlias, rebuildVueFullRows(t, nodes, edges, alias))
+			require.Equal(t, rebuildVueSQLiteExpected(noAlias), rebuildVueNativeRows(t, nodes, edges, nil))
+			require.Equal(t, rebuildVueSQLiteExpected(withAlias), rebuildVueNativeRows(t, nodes, edges, alias))
 			got, err := rebuildVueWorkingRows(t, nodes, edges)
 			require.ErrorIs(t, err, errRebuildMainRule)
 			require.ErrorContains(t, err, "needs frozen path-alias evidence")
