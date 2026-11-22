@@ -13,6 +13,12 @@ import (
 // newRebuildWorkspaceMembers freezes exact member roots for the private
 // unprefixed graph. A manifest's existence suffices; never read its body.
 func newRebuildWorkspaceMembers(ctx context.Context, g *rebuildWorkspaceGlob, manifest *modules.WorkspaceManifest) (map[string]struct{}, error) {
+	return collectRebuildWorkspaceMembers(ctx, g, manifest, nil)
+}
+
+func collectRebuildWorkspaceMembers(ctx context.Context, g *rebuildWorkspaceGlob, manifest *modules.WorkspaceManifest,
+	visit func(modules.WorkspaceMember),
+) (map[string]struct{}, error) {
 	members := make(map[string]struct{})
 	if manifest == nil {
 		return members, ctx.Err()
@@ -78,6 +84,9 @@ func newRebuildWorkspaceMembers(ctx context.Context, g *rebuildWorkspaceGlob, ma
 			}
 			if ok {
 				members[dir] = struct{}{}
+				if visit != nil {
+					visit(modules.WorkspaceMember{Dir: dir, ManifestPath: key})
+				}
 			}
 		}
 	}

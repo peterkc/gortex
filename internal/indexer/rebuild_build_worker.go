@@ -340,7 +340,11 @@ func buildRebuildStages(
 	// Legacy test/standalone captures without a checkout namespace were never
 	// qualified to continue through the full native cold tail.
 	if exactCheckout && cfg.Coverage.IsEnabled("modules") {
-		if err := runRebuildModules(ctx, lease, rebuildDigest(req.Witness.FrozenInputs), private, inputs); err != nil {
+		digest := rebuildDigest(req.Witness.FrozenInputs)
+		if err := runRebuildModules(ctx, lease, digest, private, inputs); err != nil {
+			return err
+		}
+		if err := runRebuildPackageWorkspace(ctx, lease, digest, private); err != nil {
 			return err
 		}
 	}

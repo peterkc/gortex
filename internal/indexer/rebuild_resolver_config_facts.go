@@ -165,7 +165,7 @@ func captureRebuildCheckoutFacts(ctx context.Context, src *source.FilesystemSour
 			}
 		}
 	}
-	if !goUsed && !jsUsed {
+	if !goUsed && !jsUsed && !captureModules {
 		return name, ctx.Err()
 	}
 	// If the selector did not need package.json, capture only a positive
