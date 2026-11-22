@@ -309,6 +309,10 @@ func TestRebuildMainCrossPackageGuard(t *testing.T) {
 	require.Equal(t, droppedCall.To, reverted.To)
 	require.Equal(t, map[string]any{"payload": "Drop", "guard_reverted": true}, reverted.Meta)
 	require.Equal(t, caller, rebuildFnPointerSavedAt(t, got, graph.EdgeArgOf, keep, 2).To)
-	require.Equal(t, droppedFlow, rebuildFnPointerSavedAt(t, got, graph.EdgeArgOf, droppedFlow.From, 3))
+	// The native guard restores the caller's repository namespace even
+	// when main accepted a bare source placeholder in the input.
+	restoredFlow := *droppedFlow
+	restoredFlow.From = "repo/unresolved::Drop"
+	require.Equal(t, &restoredFlow, rebuildFnPointerSavedAt(t, got, graph.EdgeArgOf, restoredFlow.From, 3))
 	checkFrontierScratch(t, opts.ScratchParent)
 }
