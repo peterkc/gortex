@@ -631,6 +631,13 @@ func (mi *MultiIndexer) GraphMutationRevision() (uint64, bool) {
 	return revisioner.MutationRevision(), true
 }
 
+// RunDeferredPassesAllResult is the result-bearing orchestration form used by
+// lifecycle callers that must decide whether a later global safety sweep is
+// still required.
+func (mi *MultiIndexer) RunDeferredPassesAllResult(ctx context.Context) DeferredPassesResult {
+	return mi.BeginDeferredPasses(ctx, nil).FinishTailResult()
+}
+
 // current requires this Indexer's repository mutation lane to be held.
 func (a *deferredPassAttempt) current() bool {
 	return a.indexer.deferredAttempt == a && a.indexer.pendingContractReg == a.registry
@@ -711,6 +718,21 @@ func (r *DeferredPassesRun) BeginApplyMutationReceipt() {
 	}
 	r.receiptToken = r.receiptStore.BeginMutationReceipt()
 	r.receiptOpen = true
+}
+
+// BeginDeferredPasses selects the repos with deferred work, prepares the
+// mutation-receipt window, materialises go.mod dependencies, and launches the
+// enrichment pool on its own goroutine. The caller must call FinishTailResult (which
+// joins the pool) exactly once. applyGate, when non-nil, parks every
+// provider's graph-apply phase until the caller closes it — the caller MUST
+// first call BeginApplyMutationReceipt after its resolve phase, then close the
+// gate, or FinishTailResult deadlocks.
+//
+// Without an apply gate the receipt opens here. With overlap, delaying it until
+// the apply boundary excludes resolver writes while still observing every
+// semantic apply and contract commit, preserving an exact file frontier.
+func (mi *MultiIndexer) BeginDeferredPasses(ctx context.Context, applyGate <-chan struct{}) *DeferredPassesRun {
+	return mi.beginRegisteredDeferredPasses(ctx, applyGate, deferredEnrichOptions{})
 }
 
 // BeginStartupDeferredPasses prepares exports only for startup partial files.
