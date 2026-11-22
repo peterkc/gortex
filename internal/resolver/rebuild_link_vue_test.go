@@ -68,7 +68,13 @@ func rebuildVueSQLiteExpected(edges []*graph.Edge) []*graph.Edge {
 func rebuildVueFullRows(t *testing.T, nodes []*graph.Node, edges []*graph.Edge, alias PathAliasResolver) []*graph.Edge {
 	t.Helper()
 	full := graph.New()
-	ordered := slices.Clone(edges)
+	// The graph stores edge pointers and rewrites them in place on reindex.
+	ordered := make([]*graph.Edge, 0, len(edges))
+	for _, edge := range edges {
+		copy := *edge
+		copy.Meta = maps.Clone(edge.Meta)
+		ordered = append(ordered, &copy)
+	}
 	slices.SortStableFunc(ordered, func(a, b *graph.Edge) int { return cmp.Compare(a.Line, b.Line) })
 	full.AddBatch(nodes, ordered)
 	return rebuildVueResolveRows(t, full, alias)
@@ -315,6 +321,7 @@ func TestRebuildVueTemplateMissingAliasEvidence(t *testing.T) {
 			}
 			require.Equal(t, noAlias, rebuildVueFullRows(t, nodes, edges, nil))
 			require.Equal(t, withAlias, rebuildVueFullRows(t, nodes, edges, alias))
+			require.Equal(t, "unresolved::Panel", ref.To, "the full-field oracle must not retarget its input")
 			require.Equal(t, rebuildVueSQLiteExpected(noAlias), rebuildVueNativeRows(t, nodes, edges, nil))
 			require.Equal(t, rebuildVueSQLiteExpected(withAlias), rebuildVueNativeRows(t, nodes, edges, alias))
 			got, err := rebuildVueWorkingRows(t, nodes, edges)
