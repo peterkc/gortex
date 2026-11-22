@@ -88,11 +88,12 @@ func (idx *Indexer) buildRebuildFileStages(
 	// Order is part of shared-node behavior. The native first-file-wins
 	// rule uses the exact path bytes, not the walk or worker completion order.
 	slices.SortFunc(job.inputs, func(a, b rebuildInput) int { return strings.Compare(a.Path, b.Path) })
+	content := idx.newContentAdmissionGate()
 	for key, fact := range job.classifications {
 		if err := ctx.Err(); err != nil {
 			return counts, err
 		}
-		if err := idx.checkRebuildClassification(key, fact); err != nil {
+		if err := idx.checkRebuildClassification(key, fact, content); err != nil {
 			return counts, err
 		}
 	}
@@ -161,17 +162,24 @@ func (idx *Indexer) buildRebuildFileStages(
 		return counts, fmt.Errorf("%w: %d files and %d receipts for %d admitted inputs (manifest %d)",
 			errRebuildCallerAttribution, len(census.byPath), total, len(job.inputs), census.admitted)
 	}
-	// Native emits size skips after parsing. Write just their nodes; a
-	// skip has no parse receipt, no raw edges and no manifest parse leaf.
+	// Native emits size and content skips after parsing. Write just their
+	// nodes; a skip has no parse receipt, raw edges or manifest parse leaf.
 	for key, fact := range job.classifications {
 		if err := ctx.Err(); err != nil {
 			return counts, err
 		}
-		if fact.sizeSkipped() {
-			n := sizeSkipNode(skippedFile{relPath: key, lang: fact.Language, size: fact.Size}, fact.MaxFileSize)
-			idx.applyRepoPrefix([]*graph.Node{n}, nil)
-			private.AddNode(n)
+		var n *graph.Node
+		sf := skippedFile{relPath: key, lang: fact.Language, size: fact.Size, reason: fact.ContentSkipReason}
+		switch {
+		case fact.sizeSkipped():
+			n = sizeSkipNode(sf, fact.MaxFileSize)
+		case sf.reason != "":
+			n = contentSkipNode(sf)
+		default:
+			continue
 		}
+		idx.applyRepoPrefix([]*graph.Node{n}, nil)
+		private.AddNode(n)
 	}
 	graphDir := filepath.Join(job.workDir, store_pebble.StageFileGraph.String())
 	if err := os.Mkdir(graphDir, 0o700); err != nil {

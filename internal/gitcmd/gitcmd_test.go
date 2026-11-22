@@ -328,6 +328,43 @@ esac
 	}
 }
 
+func TestRunNoLazyBoundedStdin(t *testing.T) {
+	withFakeGit(t, `
+test "$GIT_OPTIONAL_LOCKS" = 0 && test "$GIT_NO_LAZY_FETCH" = 1 &&
+  test "$GIT_TERMINAL_PROMPT" = 0 && test "$GITCMD_FIXTURE_POLICY" = keep || exit 3
+cat || exit 4
+case "$1" in
+warn) printf 'warning' >&2 ;;
+status-one) exit 1 ;;
+esac
+`)
+	t.Setenv("GIT_OPTIONAL_LOCKS", "1")
+	t.Setenv("GIT_NO_LAZY_FETCH", "0")
+	t.Setenv("GIT_TERMINAL_PROMPT", "1")
+	t.Setenv("GITCMD_FIXTURE_POLICY", "keep")
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	input := []byte(" sp ace\n\xff\x00dir/\x00")
+	limit := int64(len(input))
+	out, warned, err := RunNoLazyBoundedStdin(ctx, "", input, limit, "echo")
+	if err != nil || warned || string(out) != string(input) {
+		t.Fatalf("stdin round trip: got %q, stderr=%t, err=%v", out, warned, err)
+	}
+	out, warned, err = RunNoLazyBoundedStdin(ctx, "", input, limit, "warn")
+	if err != nil || !warned || string(out) != string(input) {
+		t.Fatalf("successful stderr reported: got %q, stderr=%t, err=%v", out, warned, err)
+	}
+	out, warned, err = RunNoLazyBoundedStdin(ctx, "", input, limit, "status-one")
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || warned || string(out) != string(input) {
+		t.Fatalf("status one keeps bounded output: got %q, stderr=%t, err=%v", out, warned, err)
+	}
+	out, _, err = RunNoLazyBoundedStdin(ctx, "", input, limit-1, "echo")
+	if out != nil || !errors.Is(err, ErrOutputLimit) {
+		t.Fatalf("output cap: got %q, %v", out, err)
+	}
+}
+
 // TestRunPassesDirAsDashC ensures the -C dir flag is prepended when a
 // dir is supplied and omitted when it is empty.
 func TestRunPassesDirAsDashC(t *testing.T) {

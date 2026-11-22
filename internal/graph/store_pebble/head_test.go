@@ -70,6 +70,52 @@ func TestManifestFrozenInputWitness(t *testing.T) {
 	require.ErrorIs(t, err, ErrStaleBase)
 }
 
+func TestManifestGitPolicyWitness(t *testing.T) {
+	ctx := t.Context()
+	w := Witness{Input: HeadDigest{1}, Recipe: HeadDigest{2}, Profile: FullProfile, Stage: StageManifest, UsesGitIgnorePolicy: true}
+	_, err := encodeWitness(w)
+	require.ErrorIs(t, err, errInvalidRecord)
+	w.FrozenInputs = HeadDigest{3}
+	unmarked := w
+	unmarked.UsesGitIgnorePolicy = false
+	require.NotEqual(t, w.Version(), unmarked.Version())
+	raw, err := encodeWitness(w)
+	require.NoError(t, err)
+	require.Equal(t, witnessGitPolicyFormat, raw[0])
+	got, err := decodeWitness(raw)
+	require.NoError(t, err)
+	require.Equal(t, w, got)
+	_, err = decodeWitness(raw[:len(raw)-1])
+	require.ErrorIs(t, err, errInvalidRecord)
+	raw[len(raw)-1] = 2
+	_, err = decodeWitness(raw)
+	require.ErrorIs(t, err, errInvalidRecord)
+
+	h, err := OpenHead(filepath.Join(t.TempDir(), "head"), 1, w.Profile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, h.Close()) })
+	stage, err := PrepareManifest(ctx, t.TempDir(), nil, w, 1)
+	require.NoError(t, err)
+	base, err := h.PublishStage(ctx, stage)
+	require.NoError(t, err)
+	got, err = stageRead(t, h).Publication()
+	require.NoError(t, err)
+	require.True(t, got.UsesGitIgnorePolicy)
+	got.Stage, got.UsesGitIgnorePolicy = StageFileGraph, false
+	_, err = h.PublishStage(ctx, StageTables{Dir: t.TempDir(), Base: base, Witness: got, Incarnation: 1})
+	require.ErrorIs(t, err, ErrStaleBase)
+
+	w.Stage = StageRelations
+	for _, c := range []*RelationCoverage{nil, {}, {DeferredLanguages: []string{"python"}}} {
+		w.Relations = c
+		raw, err := encodeWitness(w)
+		require.NoError(t, err)
+		got, err := decodeWitness(raw)
+		require.NoError(t, err)
+		require.Equal(t, w, got)
+	}
+}
+
 func TestStageHeadOrderAndPinnedView(t *testing.T) {
 	ctx := t.Context()
 	h, err := OpenHead(filepath.Join(t.TempDir(), "head"), 7, FullProfile)

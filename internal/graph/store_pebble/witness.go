@@ -81,13 +81,14 @@ type FamilyWitness struct {
 // Witness describes the portable rows in a published head. Local progress,
 // event IDs, checkout incarnation and paths are never mixed into these bytes.
 type Witness struct {
-	Input, Recipe HeadDigest
-	FrozenInputs  HeadDigest // optional digest of the private build-input sidecar
-	Dependencies  []HeadDigest
-	Profile       Profile
-	Stage         Stage
-	Families      []FamilyWitness   // ascending, unique family tags
-	Relations     *RelationCoverage // nil before relations or in legacy witnesses
+	Input, Recipe       HeadDigest
+	FrozenInputs        HeadDigest // optional digest of the private build-input sidecar
+	UsesGitIgnorePolicy bool       // membership depends on operator-owned Git ignore policy
+	Dependencies        []HeadDigest
+	Profile             Profile
+	Stage               Stage
+	Families            []FamilyWitness   // ascending, unique family tags
+	Relations           *RelationCoverage // nil before relations or in legacy witnesses
 }
 
 // Version identifies the complete input and recipe. The witness digest also
@@ -99,15 +100,19 @@ func (w Witness) Version() HeadDigest {
 	for _, d := range w.Dependencies {
 		_, _ = h.Write(d[:])
 	}
+	if w.UsesGitIgnorePolicy {
+		_, _ = h.Write([]byte("gortex/git-ignore-policy/v1\x00"))
+	}
 	return HeadDigest(h.Sum(nil))
 }
 
 var publicationWitnessKey = []byte{familyWitness}
 
 const (
-	witnessFormat         byte = 1
-	witnessInputsFormat   byte = 2
-	witnessCoverageFormat byte = 3
+	witnessFormat          byte = 1
+	witnessInputsFormat    byte = 2
+	witnessCoverageFormat  byte = 3
+	witnessGitPolicyFormat byte = 4
 )
 
 func encodeWitness(w Witness) ([]byte, error) {
@@ -124,6 +129,12 @@ func encodeWitness(w Witness) ([]byte, error) {
 			return nil, invalid("relation coverage before relations stage")
 		}
 		format = witnessCoverageFormat
+	}
+	if w.UsesGitIgnorePolicy {
+		if w.FrozenInputs == (HeadDigest{}) {
+			return nil, invalid("Git policy witness without frozen inputs")
+		}
+		format = witnessGitPolicyFormat
 	}
 	b := []byte{format, byte(w.Stage)}
 	b = appendMetaString(b, string(w.Profile))
@@ -149,6 +160,13 @@ func encodeWitness(w Witness) ([]byte, error) {
 	if format >= witnessInputsFormat {
 		b = append(b, w.FrozenInputs[:]...)
 	}
+	if w.UsesGitIgnorePolicy {
+		coverage := byte(0)
+		if w.Relations != nil {
+			coverage = 1
+		}
+		b = append(b, coverage)
+	}
 	if w.Relations != nil {
 		ids := w.Relations.DeferredLanguages
 		b = binary.AppendUvarint(b, uint64(len(ids)))
@@ -165,7 +183,7 @@ func encodeWitness(w Witness) ([]byte, error) {
 }
 
 func decodeWitness(raw []byte) (Witness, error) {
-	if len(raw) < 2 || raw[0] < witnessFormat || raw[0] > witnessCoverageFormat {
+	if len(raw) < 2 || raw[0] < witnessFormat || raw[0] > witnessGitPolicyFormat {
 		return Witness{}, invalid("publication witness format")
 	}
 	d := recordCursor{buf: raw[2:]}
@@ -209,7 +227,16 @@ func decodeWitness(raw []byte) (Witness, error) {
 		w.FrozenInputs = HeadDigest(d.buf[:len(w.FrozenInputs)])
 		d.buf = d.buf[len(w.FrozenInputs):]
 	}
-	if raw[0] == witnessCoverageFormat {
+	hasCoverage := raw[0] == witnessCoverageFormat
+	if raw[0] == witnessGitPolicyFormat {
+		w.UsesGitIgnorePolicy = true
+		if len(d.buf) == 0 || d.buf[0] > 1 {
+			return Witness{}, invalid("publication relation coverage flag")
+		}
+		hasCoverage = d.buf[0] != 0
+		d.buf = d.buf[1:]
+	}
+	if hasCoverage {
 		count, n := binary.Uvarint(d.buf)
 		if n <= 0 || count > uint64((len(d.buf)-n)/2) { // nonempty, length-framed IDs
 			return Witness{}, invalid("publication deferred language count")

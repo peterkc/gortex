@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/zzet/gortex/internal/platform"
 	"golang.org/x/sync/semaphore"
@@ -121,8 +122,20 @@ var ErrOutputLimit = errors.New("git output exceeds capture limit")
 // stdout at maxStdout bytes and stderr at 16 KiB. If either overflows, no
 // stdout is usable, even if Git exited successfully after writing it.
 func RunNoLazyBounded(ctx context.Context, dir string, maxStdout int64, args ...string) ([]byte, error) {
+	out, _, err := runNoLazyBounded(ctx, dir, maxStdout, nil, args...)
+	return out, err
+}
+
+// RunNoLazyBoundedStdin runs the same bounded capture with caller-bounded
+// stdin. It reports whether Git wrote to stderr, even with a zero exit status.
+// Supply a context with a deadline to bound the process and semaphore wait.
+func RunNoLazyBoundedStdin(ctx context.Context, dir string, stdin []byte, maxStdout int64, args ...string) (out []byte, wroteStderr bool, err error) {
+	return runNoLazyBounded(ctx, dir, maxStdout, bytes.NewReader(stdin), args...)
+}
+
+func runNoLazyBounded(ctx context.Context, dir string, maxStdout int64, stdin io.Reader, args ...string) ([]byte, bool, error) {
 	if maxStdout < 0 {
-		return nil, ErrOutputLimit
+		return nil, false, ErrOutputLimit
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -130,15 +143,21 @@ func RunNoLazyBounded(ctx context.Context, dir string, maxStdout int64, args ...
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stdout := boundedOutput{remaining: maxStdout, cancel: cancel}
-	stderr := boundedOutput{remaining: 16 << 10, cancel: cancel}
+	const maxStderr = 16 << 10
+	stderr := boundedOutput{remaining: maxStderr, cancel: cancel}
 	out, err := run(ctx, dir, noLazyGitEnv(), func(cmd *exec.Cmd) {
 		stdout.dst, stderr.dst = cmd.Stdout, cmd.Stderr
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		if stdin != nil {
+			cmd.Stdin = stdin
+			cmd.WaitDelay = time.Second // Bound pipe teardown after cancellation or Git exit.
+		}
 	}, args...)
+	wroteStderr := stderr.remaining != maxStderr || stderr.overflow
 	if stdout.overflow || stderr.overflow {
-		return nil, ErrOutputLimit
+		return nil, wroteStderr, ErrOutputLimit
 	}
-	return out, err
+	return out, wroteStderr, err
 }
 
 type boundedOutput struct {
