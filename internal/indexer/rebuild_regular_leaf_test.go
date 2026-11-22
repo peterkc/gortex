@@ -220,7 +220,7 @@ func TestRebuildCheckoutGoConfigObservations(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, epoch.files, 1)
 	require.Len(t, epoch.admitted, 1)
-	require.Len(t, epoch.goConfigs, 3)
+	require.Len(t, epoch.configObservations, 3)
 	// Removing an unconsulted manifest does not force a read or refusal.
 	require.NoError(t, os.Remove(filepath.Join(dir, "spare", "go.mod")))
 	left := int64(len(mod) + len(childMod))
@@ -247,6 +247,69 @@ func TestRebuildCheckoutGoConfigObservations(t *testing.T) {
 		t.Fatal("emitted a manifest after selected config drift")
 		return nil
 	})
+	require.ErrorIs(t, err, ErrBuildInputChanged)
+	require.Empty(t, name)
+}
+
+func TestRebuildCheckoutJSConfigObservations(t *testing.T) {
+	ctx := t.Context()
+	root, src := rebuildInputFixture(t)
+	const rootNpm = `{"name":"fixture-npm","workspaces":["pkg/*"]}`
+	const innerNpm = `{"name":"inner-npm","dependencies":{"dep":"1.2.3"}}`
+	const tsConfig = `{"compilerOptions":{"baseUrl":".","paths":{"@a/*":["lib/*"]}}}`
+	for key, body := range map[string]string{
+		"package.json": rootNpm, "pkg/inner/package.json": innerNpm,
+		"tsconfig.json": tsConfig, "unused/jsconfig.json": `{"compilerOptions":{}}`,
+		"main.ts": "export const A = 1", "lib/x.ts": "export const X = 2",
+	} {
+		file := filepath.Join(root, filepath.FromSlash(key))
+		require.NoError(t, os.MkdirAll(filepath.Dir(file), 0o700))
+		require.NoError(t, os.WriteFile(file, []byte(body), 0o600))
+	}
+	reg := parser.NewRegistry()
+	reg.Register(languages.NewTypeScriptExtractor())
+	idx := New(graph.New(), reg, config.Default().Index, zap.NewNop())
+	t.Cleanup(idx.Close)
+	var epoch rebuildCheckoutInputs
+	lease := t.TempDir()
+	digest, err := writeRebuildInputSidecar(ctx, lease, func(emit func(rebuildSidecarRow) error) error {
+		raw := int64(rebuildCppRawLimit)
+		var err error
+		epoch, err = freezeRebuildCheckoutInputs(ctx, src.FrozenRoot(), nil, nil, &raw,
+			func(key string, mode fs.FileMode, member rebuildGitMember, raw *int64, emit func(rebuildSidecarRow) error) (rebuildCheckoutLeaf, error) {
+				return idx.freezeRebuildCheckoutLeaf(ctx, src.FrozenRoot(), key, mode, member, nil, 1024, raw, emit)
+			}, emit)
+		if err != nil {
+			return err
+		}
+		require.Len(t, epoch.files, 2)
+		require.Len(t, epoch.admitted, 2)
+		require.Len(t, epoch.configObservations, 4)
+		require.NoError(t, os.Remove(filepath.Join(root, "unused", "jsconfig.json")))
+		before := raw
+		name, err := captureRebuildCheckoutResolverInputs(ctx, src, epoch, true, &raw, emit)
+		if err == nil {
+			require.Equal(t, "fixture-npm", name)
+			require.EqualValues(t, len(rootNpm)+len(innerNpm)+len(tsConfig), before-raw)
+		}
+		return err
+	})
+	require.NoError(t, err)
+	_, aliases, err := openRebuildResolverConfigFacts(ctx, lease, digest)
+	require.NoError(t, err)
+	alias, err := aliases.resolve(epoch.namespace, "main.ts", "@a/x")
+	require.NoError(t, err)
+	require.EqualValues(t, "lib/x", alias)
+	_, npm, _, err := openRebuildNpmManifestFacts(ctx, lease, digest)
+	require.NoError(t, err)
+	require.Len(t, npm, 2)
+	require.Equal(t, "fixture-npm", npm["package.json"].Manifest.name)
+	require.Equal(t, "inner-npm", npm["pkg/inner/package.json"].Manifest.name)
+	require.Equal(t, rebuildDigest(blake3.Sum256([]byte(innerNpm))), npm["pkg/inner/package.json"].Digest)
+
+	require.NoError(t, os.WriteFile(filepath.Join(root, "pkg", "inner", "package.json"), []byte(innerNpm+"\n"), 0o600))
+	raw := int64(rebuildCppRawLimit)
+	name, err := captureRebuildCheckoutResolverInputs(ctx, src, epoch, true, &raw, func(rebuildSidecarRow) error { return nil })
 	require.ErrorIs(t, err, ErrBuildInputChanged)
 	require.Empty(t, name)
 }

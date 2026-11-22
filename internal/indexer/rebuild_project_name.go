@@ -99,9 +99,17 @@ func readCheckedRebuildRootManifest(ctx context.Context, src *source.FilesystemS
 	if (kind == rebuildNamespaceAbsent || kind == rebuildNamespaceDirectory) && claimed == nil {
 		return nil, nil
 	}
-	if kind == rebuildNamespaceRegular && claimed == nil && name == "go.mod" {
-		if obs, ok := epoch.goConfigs[name]; ok {
-			return readRebuildGoConfigObservation(ctx, obs, limit)
+	if kind == rebuildNamespaceRegular && claimed == nil {
+		if obs, ok := epoch.configObservations[name]; ok {
+			capErr := errRebuildCppCaptureLimit
+			if name == "go.mod" {
+				limit, capErr = min(limit, rebuildGoManifestLimit), errRebuildGoCaptureLimit
+			}
+			m, err := readRebuildConfigObservation(ctx, obs, min(limit, rebuildCppEntryLimit))
+			if errors.Is(err, source.ErrRegularFileTooLarge) {
+				err = errors.Join(capErr, err)
+			}
+			return m, err
 		}
 	}
 	if kind != rebuildNamespaceRegular || claimed == nil || claimed.Path != name || claimed.Kind != merkle.RegularFile {

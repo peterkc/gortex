@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path"
 
 	"github.com/zeebo/blake3"
 	"github.com/zzet/gortex/internal/indexer/merkle"
@@ -114,8 +113,8 @@ func (idx *Indexer) freezeRebuildCheckoutLeaf(ctx context.Context, root *os.Root
 	}
 	if input == nil {
 		leaf := rebuildCheckoutLeaf{typeOnly: true}
-		if base := path.Base(key); obs.Info() != nil && (base == "go.mod" || base == "go.work") {
-			leaf.goConfig = &obs
+		if obs.Info() != nil && isRebuildResolverConfig(key) {
+			leaf.configObservation = &obs
 		}
 		return leaf, nil
 	}

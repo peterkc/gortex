@@ -55,7 +55,7 @@ func (rows rebuildTSAliasConfigs) resolve(n *rebuildResolverNamespace, caller, s
 // identities contains independently admitted, frozen regular config identities.
 // A positive name/type alone does not authorize reading its bytes.
 func captureRebuildTSAliasConfigs(ctx context.Context, root *os.Root, literalRoot bool, n *rebuildResolverNamespace,
-	inputs []rebuildInput, identities map[string]*rebuildInput, rawRemaining *int64,
+	inputs []rebuildInput, identities map[string]*rebuildInput, configObservations map[string]source.FrozenRootPath, rawRemaining *int64,
 ) (rebuildTSAliasConfigs, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -111,7 +111,7 @@ func captureRebuildTSAliasConfigs(ctx context.Context, root *os.Root, literalRoo
 						return fmt.Errorf("%w: config identity conflicts with listing for %q", ErrBuildInputChanged, key)
 					}
 				case rebuildNamespaceRegular:
-					if err := readRebuildTSAliasConfig(ctx, root, identities[key], rawRemaining, &row); err != nil {
+					if err := readRebuildTSAliasConfig(ctx, root, identities[key], configObservations[key], rawRemaining, &row); err != nil {
 						return err
 					}
 				case rebuildNamespaceDenied:
@@ -160,27 +160,42 @@ func captureRebuildTSAliasConfigs(ctx context.Context, root *os.Root, literalRoo
 	return rows, nil
 }
 
-func readRebuildTSAliasConfig(ctx context.Context, root *os.Root, in *rebuildInput, rawRemaining *int64, row *rebuildTSAliasFact) error {
+func readRebuildTSAliasConfig(ctx context.Context, root *os.Root, in *rebuildInput, obs source.FrozenRootPath,
+	rawRemaining *int64, row *rebuildTSAliasFact,
+) error {
 	key := row.Path
-	if in == nil || in.Path != key || in.Kind != merkle.RegularFile || in.Size < 0 || in.Content == (rebuildDigest{}) {
-		return fmt.Errorf("%w: no admitted regular identity for config %q", tsalias.ErrFrozenAliasUnproved, key)
-	}
-	if in.Size > min(*rawRemaining, tsalias.MaxFrozenAliasConfigBytes) {
-		return fmt.Errorf("%w: raw config %q", errRebuildTSAliasCaptureLimit, key)
-	}
-	observed, err := source.ObserveFrozenLiteralRootPath(ctx, root, key)
-	if err != nil {
-		return fmt.Errorf("%w: observe config %q: %w", ErrBuildInputChanged, key, err)
-	}
-	if observed.Path() != key || !observed.Info().Mode().IsRegular() || observed.Info().Size() != in.Size {
-		return fmt.Errorf("%w: config identity %q", ErrBuildInputChanged, key)
-	}
-	data, err := observed.Read(ctx, in.Size)
-	if err != nil {
+	limit := min(*rawRemaining, tsalias.MaxFrozenAliasConfigBytes)
+	var data []byte
+	if in == nil && obs.Info() != nil && obs.Path() == key {
+		m, err := readRebuildConfigObservation(ctx, obs, limit)
+		if errors.Is(err, source.ErrRegularFileTooLarge) {
+			return fmt.Errorf("%w: raw config %q", errRebuildTSAliasCaptureLimit, key)
+		}
+		if err != nil {
+			return fmt.Errorf("%w: read config %q: %w", tsalias.ErrFrozenAliasUnproved, key, err)
+		}
+		in, data = &m.target, m.data
+	} else {
+		if in == nil || in.Path != key || in.Kind != merkle.RegularFile || in.Size < 0 || in.Content == (rebuildDigest{}) {
+			return fmt.Errorf("%w: no admitted regular identity for config %q", tsalias.ErrFrozenAliasUnproved, key)
+		}
+		if in.Size > limit {
+			return fmt.Errorf("%w: raw config %q", errRebuildTSAliasCaptureLimit, key)
+		}
+		observed, err := source.ObserveFrozenLiteralRootPath(ctx, root, key)
+		if err != nil {
+			return fmt.Errorf("%w: observe config %q: %w", ErrBuildInputChanged, key, err)
+		}
+		if observed.Path() != key || !observed.Info().Mode().IsRegular() || observed.Info().Size() != in.Size {
+			return fmt.Errorf("%w: config identity %q", ErrBuildInputChanged, key)
+		}
+		data, err = observed.Read(ctx, in.Size)
 		if errors.Is(err, source.ErrFrozenRootChanged) {
 			return fmt.Errorf("%w: read config %q: %w", ErrBuildInputChanged, key, err)
 		}
-		return fmt.Errorf("%w: read config %q: %w", tsalias.ErrFrozenAliasUnproved, key, err)
+		if err != nil {
+			return fmt.Errorf("%w: read config %q: %w", tsalias.ErrFrozenAliasUnproved, key, err)
+		}
 	}
 	*rawRemaining -= int64(len(data))
 	if int64(len(data)) != in.Size || rebuildDigest(blake3.Sum256(data)) != in.Content {

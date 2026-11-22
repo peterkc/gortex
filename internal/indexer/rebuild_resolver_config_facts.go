@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -15,6 +16,15 @@ import (
 	"github.com/zzet/gortex/internal/parser/tsalias"
 	"github.com/zzet/gortex/internal/search"
 )
+
+func isRebuildResolverConfig(key string) bool {
+	switch path.Base(key) {
+	case "go.mod", "go.work", "jsconfig.json", "tsconfig.json", "package.json":
+		return true
+	default:
+		return false
+	}
+}
 
 // captureRebuildCheckoutResolverInputs binds root name selection and the Go,
 // TS/JS and npm facts before the owner offers the lease for reuse. Reads of a
@@ -54,7 +64,7 @@ func captureRebuildCheckoutResolverInputs(ctx context.Context, src *source.Files
 		}
 	}
 	if err := captureRebuildResolverConfigRows(ctx, src.FrozenRoot(), literalRoot, epoch.namespace,
-		epoch.files, epoch.admitted, rootMod, epoch.goConfigs, raw, emit); err != nil {
+		epoch.files, epoch.admitted, rootMod, epoch.configObservations, raw, emit); err != nil {
 		return "", err
 	}
 	writeNpm := func(key string, identity rebuildInput, data []byte) error {
@@ -104,7 +114,7 @@ func captureRebuildCheckoutResolverInputs(ctx context.Context, src *source.Files
 	// If the selector did not need package.json, capture only a positive
 	// admitted candidate. The namespace carries denied/unknown answers to
 	// replay; they must not prevent parsing or invent a negative.
-	if !pkgConsulted && epoch.admitted[npmPath] != nil {
+	if _, observed := epoch.configObservations[npmPath]; !pkgConsulted && (epoch.admitted[npmPath] != nil || observed) {
 		if _, err := readPackage(); err != nil {
 			return "", err
 		}
@@ -117,14 +127,39 @@ func captureRebuildCheckoutResolverInputs(ctx context.Context, src *source.Files
 			nested = append(nested, key)
 		}
 	}
+	for key := range epoch.configObservations {
+		if key != npmPath && path.Base(key) == npmPath {
+			nested = append(nested, key)
+		}
+	}
 	slices.Sort(nested)
 	for _, key := range nested {
-		in := *epoch.admitted[key]
-		data, err := readCheckedRebuildRegularManifest(ctx, src, in, min(*raw, rebuildNpmFactBytes-int64(len(key))))
+		limit := min(*raw, rebuildNpmFactBytes-int64(len(key)))
+		if in := epoch.admitted[key]; in != nil {
+			data, err := readCheckedRebuildRegularManifest(ctx, src, *in, limit)
+			if err != nil {
+				return "", err
+			}
+			if err := writeNpm(key, *in, data); err != nil {
+				return "", err
+			}
+			continue
+		}
+		kind, err := epoch.namespace.lookup(key)
 		if err != nil {
 			return "", err
 		}
-		if err := writeNpm(key, in, data); err != nil {
+		if kind != rebuildNamespaceRegular {
+			return "", fmt.Errorf("%w: npm observation %q is not a checked regular file", errRebuildResolverNamespace, key)
+		}
+		m, err := readRebuildConfigObservation(ctx, epoch.configObservations[key], limit)
+		if err != nil {
+			if errors.Is(err, source.ErrRegularFileTooLarge) {
+				err = errors.Join(errRebuildCppCaptureLimit, err)
+			}
+			return "", err
+		}
+		if err := writeNpm(key, m.target, m.data); err != nil {
 			return "", err
 		}
 	}
@@ -137,7 +172,7 @@ func captureRebuildCheckoutResolverInputs(ctx context.Context, src *source.Files
 // Followed manifest rows belong to the owner, not this config projection.
 func captureRebuildResolverConfigRows(ctx context.Context, root *os.Root, literalRoot bool, ns *rebuildResolverNamespace,
 	inputs []rebuildInput, identities map[string]*rebuildInput, rootMod *rebuildRootManifest,
-	goConfigs map[string]source.FrozenRootPath, rawRemaining *int64, emit func(rebuildSidecarRow) error,
+	configObservations map[string]source.FrozenRootPath, rawRemaining *int64, emit func(rebuildSidecarRow) error,
 ) error {
 	if emit == nil {
 		return fmt.Errorf("%w: missing resolver config row sink", errRebuildInputSidecar)
@@ -170,7 +205,7 @@ func captureRebuildResolverConfigRows(ctx context.Context, root *os.Root, litera
 		}
 	}
 	if goUsed {
-		if err := captureRebuildGoObservations(ctx, root, ns, inputs, identities, rootMod, goConfigs, rawRemaining, func(row rebuildGoManifest) error {
+		if err := captureRebuildGoObservations(ctx, root, ns, inputs, identities, rootMod, configObservations, rawRemaining, func(row rebuildGoManifest) error {
 			return emit(rebuildGoManifestSidecarRow(row))
 		}); err != nil {
 			return err
@@ -179,7 +214,7 @@ func captureRebuildResolverConfigRows(ctx context.Context, root *os.Root, litera
 	if !tsUsed {
 		return ctx.Err()
 	}
-	configs, err := captureRebuildTSAliasConfigs(ctx, root, literalRoot, ns, inputs, identities, rawRemaining)
+	configs, err := captureRebuildTSAliasConfigs(ctx, root, literalRoot, ns, inputs, identities, configObservations, rawRemaining)
 	if err != nil {
 		return err
 	}

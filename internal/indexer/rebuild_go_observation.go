@@ -27,7 +27,7 @@ type rebuildRootManifest struct {
 // the namespace can prove a miss. Emitted rows belong to the owning lease.
 func captureRebuildGoObservations(ctx context.Context, root *os.Root, n *rebuildResolverNamespace,
 	inputs []rebuildInput, manifests map[string]*rebuildInput, rootMod *rebuildRootManifest,
-	goConfigs map[string]source.FrozenRootPath, rawRemaining *int64, emit func(rebuildGoManifest) error,
+	configObservations map[string]source.FrozenRootPath, rawRemaining *int64, emit func(rebuildGoManifest) error,
 ) error {
 	if root == nil || n == nil || !n.frozen || n.entries["."].close == rebuildNamespaceUnknown {
 		return fmt.Errorf("%w: Go capture requires a held root and frozen, closed root namespace", errRebuildResolverNamespace)
@@ -82,13 +82,16 @@ func captureRebuildGoObservations(ctx context.Context, root *os.Root, n *rebuild
 		if kind == rebuildNamespaceAbsent && claimed == nil {
 			return nil, nil
 		}
-		if obs, ok := goConfigs[name]; ok && kind == rebuildNamespaceRegular && claimed == nil {
+		if obs, ok := configObservations[name]; ok && kind == rebuildNamespaceRegular && claimed == nil {
 			if name == "go.mod" && rootMod != nil {
 				materialized = rootMod
 			} else {
 				var err error
-				materialized, err = readRebuildGoConfigObservation(ctx, obs, *rawRemaining)
+				materialized, err = readRebuildConfigObservation(ctx, obs, min(*rawRemaining, rebuildGoManifestLimit))
 				if err != nil {
+					if errors.Is(err, source.ErrRegularFileTooLarge) {
+						err = errors.Join(errRebuildGoCaptureLimit, err)
+					}
 					return nil, err
 				}
 			}
@@ -133,16 +136,16 @@ func captureRebuildGoObservations(ctx context.Context, root *os.Root, n *rebuild
 	return captureRebuildGoManifests(ctx, inputs, rawRemaining, observe, read, emit)
 }
 
-// readRebuildGoConfigObservation materializes one already checked, admitted
+// readRebuildConfigObservation materializes one already checked, admitted
 // non-parse file. The normalizer charges the body once; the observation is
 // owner-only and never enters the sidecar or worker wire.
-func readRebuildGoConfigObservation(ctx context.Context, obs source.FrozenRootPath, limit int64) (*rebuildRootManifest, error) {
+func readRebuildConfigObservation(ctx context.Context, obs source.FrozenRootPath, limit int64) (*rebuildRootManifest, error) {
 	key, info := obs.Path(), obs.Info()
 	if info == nil || !info.Mode().IsRegular() || info.Size() < 0 {
-		return nil, fmt.Errorf("%w: no checked config identity %q", errRebuildGoEvidence, key)
+		return nil, fmt.Errorf("%w: no checked config identity %q", errRebuildResolverNamespace, key)
 	}
-	if info.Size() > min(limit, rebuildGoManifestLimit) {
-		return nil, fmt.Errorf("%w: %q", errRebuildGoCaptureLimit, key)
+	if info.Size() > limit {
+		return nil, fmt.Errorf("%w: config %q", source.ErrRegularFileTooLarge, key)
 	}
 	data, err := obs.Read(ctx, info.Size())
 	if err != nil {

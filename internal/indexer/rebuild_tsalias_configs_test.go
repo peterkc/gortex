@@ -77,7 +77,7 @@ func TestRebuildTSAliasConfigsNativeReplay(t *testing.T) {
 				wantRaw += in.Size
 			}
 			raw := namespaceRaw
-			rows, err := captureRebuildTSAliasConfigs(ctx, src.FrozenRoot(), true, &ns, callers, identities, &raw)
+			rows, err := captureRebuildTSAliasConfigs(ctx, src.FrozenRoot(), true, &ns, callers, identities, nil, &raw)
 			require.NoError(t, err)
 			require.Equal(t, namespaceRaw-wantRaw, raw)
 			require.Len(t, rows, 14) // seven directories, two exact candidate names each
@@ -252,7 +252,7 @@ func TestRebuildTSAliasConfigsRefusals(t *testing.T) {
 			}
 			raw := tc.remaining
 			rows, err := captureRebuildTSAliasConfigs(t.Context(), src.FrozenRoot(), true, &ns,
-				[]rebuildInput{{Path: "main.ts", Language: "typescript"}}, ids, &raw)
+				[]rebuildInput{{Path: "main.ts", Language: "typescript"}}, ids, nil, &raw)
 			require.Nil(t, rows)
 			require.ErrorIs(t, err, tc.want)
 			require.ErrorContains(t, err, tc.text)
@@ -279,7 +279,7 @@ func TestRebuildTSAliasConfigsNormalizedCap(t *testing.T) {
 	require.NoError(t, ns.freeze())
 	raw := int64(2 * len(body))
 	rows, err := captureRebuildTSAliasConfigs(t.Context(), src.FrozenRoot(), true, &ns,
-		[]rebuildInput{{Path: "main.ts", Language: "typescript"}}, ids, &raw)
+		[]rebuildInput{{Path: "main.ts", Language: "typescript"}}, ids, nil, &raw)
 	require.Nil(t, rows)
 	require.ErrorIs(t, err, errRebuildTSAliasCaptureLimit)
 	require.ErrorContains(t, err, `retained normalized config "tsconfig.json"`)
