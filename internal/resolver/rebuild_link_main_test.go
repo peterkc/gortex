@@ -66,7 +66,7 @@ func TestRebuildMainTokenAndSource(t *testing.T) {
 	want := sql.AllEdges()
 	slices.SortFunc(want, compareRebuildImportEdges)
 
-	require.NoError(t, runRebuildMain(ctx, build, opts, true, RebuildMainInputs{}))
+	require.NoError(t, RunRebuildMain(ctx, build, opts, RebuildMainInputs{SelectCallers: func(page []*graph.Edge) ([]*graph.Edge, error) { return page, nil }}))
 	got := rebuildFnPointerSaved(t, build)
 	require.Equal(t, want, got)
 	for _, e := range got {
@@ -197,5 +197,26 @@ func TestRunRebuildMainSkipsCandidateStartup(t *testing.T) {
 	require.NotErrorIs(t, err, store_pebble.ErrRebuildLink)
 	require.Equal(t, 1, calls)
 	require.Equal(t, want, rebuildFnPointerSaved(t, build))
+	checkFrontierScratch(t, opts.ScratchParent)
+}
+
+func TestRebuildMainFrozenPlaceholderPolicy(t *testing.T) {
+	t.Setenv("GORTEX_RESOLVE_FROM_RECONCILE", "1")
+	ctx, build, opts := frontierFixture(t, 1, 0)
+	const source, file = "repo/caller", "repo/caller.ts"
+	const target, pending = "repo/Token", "unresolved::TOKEN"
+	token := &graph.Edge{From: source, To: pending, Kind: graph.EdgeProvides, FilePath: file, Line: 3}
+	flow := &graph.Edge{From: pending, To: source, Kind: graph.EdgeArgOf, FilePath: file, Line: 3}
+	build.AddBatch([]*graph.Node{
+		{ID: source, Name: "caller", Kind: graph.KindVariable, Language: "typescript", RepoPrefix: "repo", FilePath: file},
+		{ID: target, Name: "TOKEN", Kind: graph.KindVariable, Language: "typescript", RepoPrefix: "repo", FilePath: "repo/value.ts"},
+	}, []*graph.Edge{token, flow})
+	require.NoError(t, RunRebuildMain(ctx, build, opts, RebuildMainInputs{
+		SelectCallers:          func(page []*graph.Edge) ([]*graph.Edge, error) { return page, nil },
+		SkipPlaceholderSources: true,
+	}))
+	want := *token
+	want.To, want.Confidence = target, 0.9
+	require.Equal(t, []*graph.Edge{&want, flow}, rebuildFnPointerSaved(t, build))
 	checkFrontierScratch(t, opts.ScratchParent)
 }

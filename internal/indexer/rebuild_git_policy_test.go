@@ -87,7 +87,7 @@ func TestRebuildGitPolicyMismatchRefusesBeforeBuild(t *testing.T) {
 					Stage: store_pebble.StageManifest, Profile: store_pebble.DefaultProfile, UsesGitIgnorePolicy: tc.marked,
 				},
 			}
-			req.Witness.Recipe = rebuildProjectRecipe(req.BaseRecipe, "", req.Witness.FrozenInputs)
+			req.Witness.Recipe = req.projectRecipe()
 			require.NoError(t, writeRebuildBuildRequest(ctx, lease, req, cfg, nil))
 			err = buildRebuildStages(ctx, lease, zap.NewNop(),
 				func(string, store_pebble.Profile) (*store_pebble.BuildStore, error) {

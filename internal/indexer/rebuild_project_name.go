@@ -273,14 +273,19 @@ func rebuildManifestLinkError(path string, err error) error {
 	return fmt.Errorf("%w: %s: %w", errRebuildProjectNameInput, path, err)
 }
 
-func rebuildProjectRecipe(base store_pebble.HeadDigest, name string, inputs store_pebble.HeadDigest) store_pebble.HeadDigest {
+func (req rebuildBuildRequest) projectRecipe() store_pebble.HeadDigest {
 	h := blake3.New()
 	// The tracked set is exactly empty, so no dependency export was read.
 	// Bind that policy alongside the inputs, not an unverified locator.
-	_, _ = h.Write([]byte("gortex/rebuild/project-name/v3\x00tracked-set:0\x00dependency-exports:ABSENT\x00"))
-	_, _ = h.Write(inputs[:])
-	_, _ = h.Write(base[:])
-	_, _ = h.Write([]byte(name))
+	_, _ = h.Write([]byte("gortex/rebuild/project-name/v4\x00tracked-set:0\x00dependency-exports:ABSENT\x00"))
+	if req.SkipPlaceholderSources {
+		_, _ = h.Write([]byte{1})
+	} else {
+		_, _ = h.Write([]byte{0})
+	}
+	_, _ = h.Write(req.Witness.FrozenInputs[:])
+	_, _ = h.Write(req.BaseRecipe[:])
+	_, _ = h.Write([]byte(req.ProjectName))
 	return store_pebble.HeadDigest(h.Sum(nil))
 }
 
@@ -295,7 +300,7 @@ func (req rebuildBuildRequest) checkProjectRecipe() error {
 	if err := req.checkTrackedRepos(); err != nil {
 		return err
 	}
-	if req.BaseRecipe == (store_pebble.HeadDigest{}) || req.Witness.Recipe != rebuildProjectRecipe(req.BaseRecipe, req.ProjectName, req.Witness.FrozenInputs) {
+	if req.BaseRecipe == (store_pebble.HeadDigest{}) || req.Witness.Recipe != req.projectRecipe() {
 		return fmt.Errorf("%w: project name, frozen inputs and witness recipe do not match", errRebuildBuildWire)
 	}
 	return nil

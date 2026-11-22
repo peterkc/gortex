@@ -295,7 +295,7 @@ func buildRebuildStages(
 	if err != nil {
 		return err
 	}
-	if err := runRebuildFrozenMain(ctx, lease, rebuildDigest(req.Witness.FrozenInputs), private, counts.census, link); err != nil {
+	if err := runRebuildFrozenMain(ctx, lease, rebuildDigest(req.Witness.FrozenInputs), private, counts.census, link, req.SkipPlaceholderSources); err != nil {
 		return err
 	}
 	// Main only changes private scratch. Relation projection, its tails,

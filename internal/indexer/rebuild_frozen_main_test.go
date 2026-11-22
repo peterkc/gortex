@@ -102,7 +102,7 @@ require (
 						byPath:            langs,
 						originByGraphPath: map[string]string{callerKey: callerRaw, configKey: configRaw, target: target},
 					}
-					err = runRebuildFrozenMain(ctx, lease, rebuildDigest(bound.Witness.FrozenInputs), build, census, link)
+					err = runRebuildFrozenMain(ctx, lease, rebuildDigest(bound.Witness.FrozenInputs), build, census, link, bound.SkipPlaceholderSources)
 					if denied {
 						require.ErrorIs(t, err, errRebuildResolverInputDenied)
 						require.Equal(t, buildRefusal(err).Refusal, buildRefusal(errRebuildResolverInputDenied).Refusal)

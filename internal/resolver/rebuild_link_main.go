@@ -34,16 +34,19 @@ type RebuildMainInputs struct {
 	// DependencyContractsReady certifies that all dependency contracts from
 	// the frozen root go.mod input were seeded before the frontier opened.
 	DependencyContractsReady bool
+	// SkipPlaceholderSources carries the frozen native reconciliation setting.
+	SkipPlaceholderSources bool
 }
 
 // RunRebuildMain resolves selected pending edges in a private build using
-// frozen import facts. It does not reconcile placeholder sources or publish.
+// frozen import facts, then reconciles placeholder sources unless disabled.
+// It does not publish.
 // SelectCallers is required. On error the owner must discard the private build.
 func RunRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts store_pebble.RebuildLinkOptions, in RebuildMainInputs) error {
 	if in.SelectCallers == nil {
 		return errors.New("run rebuild main: missing caller selector")
 	}
-	return runRebuildMain(ctx, build, opts, false, in)
+	return runRebuildMain(ctx, build, opts, !in.SkipPlaceholderSources, in)
 }
 
 // runRebuildMain consumes the cold resolver frontier and applies complete old

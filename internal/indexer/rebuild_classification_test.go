@@ -370,7 +370,7 @@ func writeRebuildClassificationTestRequest(t *testing.T, lease, root string, cfg
 			Profile: store_pebble.DefaultProfile, Stage: store_pebble.StageManifest,
 		},
 	}
-	req.Witness.Recipe = rebuildProjectRecipe(req.BaseRecipe, req.ProjectName, req.Witness.FrozenInputs)
+	req.Witness.Recipe = req.projectRecipe()
 	require.NoError(t, writeRebuildBuildRequest(t.Context(), lease, req, cfg, inputs))
 	return req
 }

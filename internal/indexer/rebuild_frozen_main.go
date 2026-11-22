@@ -13,7 +13,7 @@ import (
 // filesystem-shaped queries from the exact receipt origin and the sealed
 // sidecar. Unproved input is an error, not an unresolved import result.
 func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDigest,
-	build *store_pebble.BuildStore, census *rebuildExtractorCensus, opts store_pebble.RebuildLinkOptions,
+	build *store_pebble.BuildStore, census *rebuildExtractorCensus, opts store_pebble.RebuildLinkOptions, skipPlaceholderSources bool,
 ) error {
 	var goFacts rebuildGoManifests
 	var aliases rebuildTSAliasConfigs
@@ -90,6 +90,7 @@ func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDiges
 	return resolver.RunRebuildMain(ctx, build, opts, resolver.RebuildMainInputs{
 		SelectCallers:            census.selectPendingCallers,
 		DependencyContractsReady: dependencyContractsReady,
+		SkipPlaceholderSources:   skipPlaceholderSources,
 		PathAlias: func(file, spec string) (string, error) {
 			caller, err := rawPath(file)
 			if err != nil {

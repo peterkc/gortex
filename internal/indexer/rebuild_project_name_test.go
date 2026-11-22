@@ -400,3 +400,31 @@ func TestRebuildBuildRefusesTrackedRepos(t *testing.T) {
 	refusal := buildRefusal(err)
 	require.Equal(t, errRebuildCrossRepoUnavailable, rebuildFailureKinds[int(refusal.Refusal)-1])
 }
+
+func TestRebuildFrozenPlaceholderPolicy(t *testing.T) {
+	ctx := t.Context()
+	root, src := rebuildInputFixture(t)
+	req := rebuildBuildRequest{
+		Root: root, ParseDir: t.TempDir(), ParseLimit: 1024, Incarnation: rebuildTestIncarnation,
+		Bounds:  rebuildTransformBounds{CaptureBytes: 10, FileBytes: 1024},
+		Witness: store_pebble.Witness{Stage: store_pebble.StageManifest, Input: store_pebble.HeadDigest{1}, Recipe: store_pebble.HeadDigest{2}},
+	}
+	manifests := map[string]*rebuildInput{"go.mod": nil, "package.json": nil}
+	t.Setenv("GORTEX_RESOLVE_FROM_RECONCILE", "0")
+	disabled, err := captureProjectNameTest(t, src, manifests, req)
+	require.NoError(t, err)
+	require.True(t, disabled.SkipPlaceholderSources)
+	t.Setenv("GORTEX_RESOLVE_FROM_RECONCILE", "false") // only literal 0 disables native
+	enabled, err := captureProjectNameTest(t, src, manifests, req)
+	require.NoError(t, err)
+	require.False(t, enabled.SkipPlaceholderSources)
+	require.Equal(t, disabled.Witness.Input, enabled.Witness.Input)
+	require.NotEqual(t, disabled.Witness.Version(), enabled.Witness.Version())
+	lease := t.TempDir()
+	require.NoError(t, writeRebuildBuildRequest(ctx, lease, disabled, config.Default().Index, nil))
+	replay, _, err := readRebuildBuildRequest(ctx, lease)
+	require.NoError(t, err)
+	require.True(t, replay.SkipPlaceholderSources)
+	replay.SkipPlaceholderSources = false
+	require.ErrorIs(t, replay.checkProjectRecipe(), errRebuildBuildWire)
+}

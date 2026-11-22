@@ -143,6 +143,7 @@ func sealRebuildBuildInputs(ctx context.Context, lease string, src *source.Files
 		req.Witness.FrozenInputs != (store_pebble.HeadDigest{}) || req.Witness.UsesGitIgnorePolicy || src == nil || req.Root != src.FrozenRoot().Name() {
 		return rebuildBuildRequest{}, fmt.Errorf("%w: capture needs an unbound recipe and the enumerating root", errRebuildBuildWire)
 	}
+	req.SkipPlaceholderSources = os.Getenv("GORTEX_RESOLVE_FROM_RECONCILE") == "0"
 	var name string
 	var input store_pebble.HeadDigest
 	var hasRows bool
@@ -167,6 +168,6 @@ func sealRebuildBuildInputs(ctx context.Context, lease string, src *source.Files
 	}
 	req.ProjectName, req.BaseRecipe = name, req.Witness.Recipe
 	req.Witness.Input, req.Witness.FrozenInputs = input, store_pebble.HeadDigest(digest)
-	req.Witness.Recipe = rebuildProjectRecipe(req.BaseRecipe, name, req.Witness.FrozenInputs)
+	req.Witness.Recipe = req.projectRecipe()
 	return req, nil
 }

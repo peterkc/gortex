@@ -33,18 +33,19 @@ var (
 )
 
 type rebuildBuildRequest struct {
-	Root, ParseDir string
-	ParseLimit     int
-	Config         []byte
-	Policy         rebuildParsePolicy
-	Recipes        map[string]rebuildDigest
-	Bounds         rebuildTransformBounds
-	Incarnation    string
-	ProjectName    string
-	BaseRecipe     store_pebble.HeadDigest
-	Witness        store_pebble.Witness
-	Files          int
-	TrackedRepos   []string // b2 accepts only the frozen empty set
+	Root, ParseDir         string
+	ParseLimit             int
+	Config                 []byte
+	Policy                 rebuildParsePolicy
+	Recipes                map[string]rebuildDigest
+	Bounds                 rebuildTransformBounds
+	Incarnation            string
+	ProjectName            string
+	BaseRecipe             store_pebble.HeadDigest
+	Witness                store_pebble.Witness
+	Files                  int
+	TrackedRepos           []string // b2 accepts only the frozen empty set
+	SkipPlaceholderSources bool
 }
 
 // New process, same effective settings. JSON keeps the difference between a
