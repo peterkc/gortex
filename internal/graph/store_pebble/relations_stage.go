@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/cockroachdb/pebble/v2/sstable"
@@ -107,7 +108,8 @@ func (b *BuildStore) PrepareRelations(ctx context.Context, dir string, base File
 	if base.build != b || !filepath.IsAbs(dir) {
 		return StageTables{}, invalid("relations needs a retained file graph from this build and an absolute stage directory")
 	}
-	if err := b.checkRelationsEndpoints(ctx); err != nil {
+	external, err := b.checkRelationsEndpoints(ctx)
+	if err != nil {
 		return StageTables{}, err
 	}
 	format := b.db.FormatMajorVersion().MaxTableFormat()
@@ -116,6 +118,11 @@ func (b *BuildStore) PrepareRelations(ctx context.Context, dir string, base File
 	seal := &goldSeal{refs: refs, owner: b.keptOwner}
 	if err := b.writeRows(ctx, &gold, StageRelations); err != nil {
 		return StageTables{}, err
+	}
+	if external != 0 {
+		if err := gold.add(countKey("external import endpoints"), encodeCount(external)); err != nil {
+			return StageTables{}, err
+		}
 	}
 	w := base.witness
 	w.Stage = StageRelations
@@ -149,11 +156,23 @@ func (b *BuildStore) PrepareRelations(ctx context.Context, dir string, base File
 	return StageTables{Dir: dir, Files: paths, Incarnation: base.incarnation, Base: base.digest, Witness: w}, nil
 }
 
-func (b *BuildStore) checkRelationsEndpoints(ctx context.Context) error {
+const rebuildExternalImportPrefix = "external::"
+
+// RebuildExternalImportTarget spells a native terminal import key without a
+// target node. Keep the effective specifier verbatim, including ::export.
+func RebuildExternalImportTarget(specifier string) (string, bool) {
+	if specifier == "" || strings.ContainsRune(specifier, 0) {
+		return "", false
+	}
+	return rebuildExternalImportPrefix + specifier, true
+}
+
+func (b *BuildStore) checkRelationsEndpoints(ctx context.Context) (int, error) {
+	external := 0
 	// The same lock covers this private lookup and the final node projection.
 	// A saved logical node may be omitted by the profile; an unknown ID may
 	// not. Native unresolved targets carry no declared node by design.
-	check := func(id string, unresolvedTarget bool) error {
+	check := func(id string, target bool) error {
 		if graph.IsProxyID(id) {
 			return invalid("proxy relations endpoint")
 		}
@@ -170,12 +189,22 @@ func (b *BuildStore) checkRelationsEndpoints(ctx context.Context) error {
 			}
 			return nil
 		}
-		if unresolvedTarget && graph.IsUnresolvedTarget(id) && graph.UnresolvedName(id) != "" {
-			return nil
+		if target {
+			if graph.IsUnresolvedTarget(id) && graph.UnresolvedName(id) != "" {
+				return nil
+			}
+			if specifier, ok := strings.CutPrefix(id, rebuildExternalImportPrefix); ok {
+				key, valid := RebuildExternalImportTarget(specifier)
+				if !valid || key != id {
+					return invalid("malformed external import endpoint")
+				}
+				external++
+				return nil
+			}
 		}
 		return fmt.Errorf("%w: dangling relations endpoint %q", errInvalidRecord, id)
 	}
-	return pendingVisit(ctx, b.pending, []byte{familyEdge, edgeOut}, func(r row) error {
+	err := pendingVisit(ctx, b.pending, []byte{familyEdge, edgeOut}, func(r row) error {
 		e, err := decodeEdgeLight(r.value)
 		if err != nil {
 			return err
@@ -188,6 +217,7 @@ func (b *BuildStore) checkRelationsEndpoints(ctx context.Context) error {
 		}
 		return check(e.To, true)
 	})
+	return external, err
 }
 
 // fileGraphCursor streams non-overlapping SSTs in their writer order, with

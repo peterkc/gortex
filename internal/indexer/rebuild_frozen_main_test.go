@@ -34,6 +34,16 @@ func TestRebuildFrozenMain(t *testing.T) {
 			const target = "shared/x.ts"
 			const spec = "@lib/x"
 			const pending = "unresolved::import::" + spec
+			const seed = "dep::example.org/seed"
+			const collision = "dep::example.org/collision"
+			const indirect = "dep::example.org/indirect"
+			writeRebuildTSAliasFixtureFile(t, root, "go.mod", `module example.org/root
+require (
+	example.org/seed v1.0.0
+	example.org/collision v1.0.0
+	example.org/indirect v1.0.0 // indirect
+)
+`)
 			writeRebuildTSAliasFixtureFile(t, root, callerRaw, `import "@lib/x"`)
 			writeRebuildTSAliasFixtureFile(t, root, configRaw, `{"compilerOptions":{"paths":{"@lib/*":["../first/*","../shared/*"]}}}`)
 			writeRebuildTSAliasFixtureFile(t, root, target, "export {}")
@@ -72,6 +82,7 @@ func TestRebuildFrozenMain(t *testing.T) {
 						native := tsalias.Load(root)
 						require.Equal(t, "first/x", tsalias.Resolve(native.FindForFile(callerRaw), spec))
 					}
+					require.NoError(t, os.Remove(filepath.Join(root, "go.mod")))
 					build, err := store_pebble.OpenBuild(filepath.Join(lease, "working"), store_pebble.FullProfile)
 					require.NoError(t, err)
 					defer func() { require.NoError(t, build.Close()) }()
@@ -80,6 +91,8 @@ func TestRebuildFrozenMain(t *testing.T) {
 					build.AddNode(&graph.Node{ID: configKey, Kind: graph.KindFile, FilePath: configKey, Language: "json"})
 					edge := graph.Edge{From: callerKey, To: pending, Kind: graph.EdgeImports, FilePath: callerKey, Line: 3}
 					build.AddEdge(&edge)
+					existing := &graph.Node{ID: collision, Name: "retained", Kind: graph.KindFunction, FilePath: target, Language: "typescript"}
+					build.AddNode(existing)
 					census := &rebuildExtractorCensus{admitted: 3,
 						byPath:            langs,
 						originByGraphPath: map[string]string{callerKey: callerRaw, configKey: configRaw, target: target},
@@ -92,6 +105,17 @@ func TestRebuildFrozenMain(t *testing.T) {
 						require.NoError(t, err)
 						edge.To = target
 					}
+					view := build.RebuildView()
+					seeded, readErr := view.Node(ctx, seed)
+					require.NoError(t, readErr)
+					require.Equal(t, &graph.Node{ID: seed, Kind: graph.KindContract, Name: seed, FilePath: "go.mod", Language: "contract",
+						Meta: map[string]any{"type": "dependency", "role": "consumer"}}, seeded)
+					kept, readErr := view.Node(ctx, collision)
+					require.NoError(t, readErr)
+					require.Equal(t, existing, kept)
+					omitted, readErr := view.Node(ctx, indirect)
+					require.NoError(t, readErr)
+					require.Nil(t, omitted)
 					var edges []graph.Edge
 					require.NoError(t, build.RebuildView().VisitEdges(ctx, func(e *graph.Edge) error {
 						edges = append(edges, *e)

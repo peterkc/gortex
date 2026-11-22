@@ -41,6 +41,9 @@ func withRebuildCheckoutBuildInputs(ctx context.Context, leases string, src *sou
 	capture func(rebuildCheckoutInputs, *int64, func(rebuildSidecarRow) error) (string, error),
 	consume func(string, rebuildBuildRequest, []rebuildInput) error,
 ) error {
+	if err := req.checkTrackedRepos(); err != nil {
+		return err
+	}
 	if capture == nil || consume == nil {
 		return fmt.Errorf("%w: missing checkout capture or consumer", errRebuildBuildWire)
 	}
@@ -85,6 +88,9 @@ func (idx *Indexer) runRebuildCheckout(ctx context.Context, src *source.Filesyst
 	flat *excludes.Matcher, gitCheckout bool, exe string, args []string, leases, headDir string,
 	publish func(context.Context, store_pebble.StageTables) error,
 ) error {
+	if err := req.checkTrackedRepos(); err != nil {
+		return err
+	}
 	if src == nil || req.Bounds.FileBytes <= 0 || publish == nil {
 		return fmt.Errorf("%w: missing checkout build authority or file bound", errRebuildBuildWire)
 	}
@@ -130,6 +136,9 @@ func captureRebuildBuildInputs(ctx context.Context, lease string, src *source.Fi
 func sealRebuildBuildInputs(ctx context.Context, lease string, src *source.FilesystemSource, req rebuildBuildRequest,
 	capture func(*int64, func(rebuildSidecarRow) error) (string, store_pebble.HeadDigest, error),
 ) (rebuildBuildRequest, error) {
+	if err := req.checkTrackedRepos(); err != nil {
+		return rebuildBuildRequest{}, err
+	}
 	if req.Witness.Recipe == (store_pebble.HeadDigest{}) || req.BaseRecipe != (store_pebble.HeadDigest{}) ||
 		req.Witness.FrozenInputs != (store_pebble.HeadDigest{}) || req.Witness.UsesGitIgnorePolicy || src == nil || req.Root != src.FrozenRoot().Name() {
 		return rebuildBuildRequest{}, fmt.Errorf("%w: capture needs an unbound recipe and the enumerating root", errRebuildBuildWire)

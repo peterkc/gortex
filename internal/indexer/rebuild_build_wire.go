@@ -25,10 +25,11 @@ const (
 )
 
 var (
-	ErrRebuildWorker           = errors.New("rebuild worker failed")
-	errRebuildBuildIncomplete  = errors.New("rebuild worker stopped before the complete head")
-	errRebuildBuildWire        = errors.New("invalid rebuild worker transport")
-	errRebuildBuildRequestSize = errors.New("rebuild request exceeds its byte limit")
+	ErrRebuildWorker               = errors.New("rebuild worker failed")
+	errRebuildBuildIncomplete      = errors.New("rebuild worker stopped before the complete head")
+	errRebuildBuildWire            = errors.New("invalid rebuild worker transport")
+	errRebuildBuildRequestSize     = errors.New("rebuild request exceeds its byte limit")
+	errRebuildCrossRepoUnavailable = errors.New("cross-repository linking not available in b2")
 )
 
 type rebuildBuildRequest struct {
@@ -43,6 +44,7 @@ type rebuildBuildRequest struct {
 	BaseRecipe     store_pebble.HeadDigest
 	Witness        store_pebble.Witness
 	Files          int
+	TrackedRepos   []string // b2 accepts only the frozen empty set
 }
 
 // New process, same effective settings. JSON keeps the difference between a
@@ -157,6 +159,7 @@ var rebuildFailureKinds = [...]error{
 	errRebuildInputSidecar, errRebuildGraphPathCollision, store_pebble.ErrInvalidIncarnation,
 	errRebuildCallerAttribution, errRebuildGoEvidence, tsalias.ErrFrozenAliasUnproved, tsalias.ErrFrozenAliasPath,
 	errRebuildResolverInputDenied, errRebuildResolverNamespace, errRebuildNpmInput, store_pebble.ErrRebuildImportDirectories,
+	errRebuildCrossRepoUnavailable,
 }
 
 func buildRefusal(err error) rebuildBuildReply {

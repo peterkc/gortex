@@ -25,6 +25,18 @@ func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDiges
 		goFacts, aliases, err = openRebuildResolverConfigFacts(ctx, lease, digest)
 		return err
 	}
+	// A legacy sidecar without a root observation cannot certify a bridge
+	// miss. New checked checkout captures always include this row.
+	if digest != (rebuildDigest{}) {
+		if err := loadConfigs(); err != nil {
+			return err
+		}
+		if root, ok := goFacts["go.mod"]; ok {
+			if err := seedRebuildDependencyContracts(ctx, build, root); err != nil {
+				return err
+			}
+		}
+	}
 	var ns *rebuildResolverNamespace
 	var manifests map[string]rebuildNpmManifestFact
 	var followed rebuildDigest

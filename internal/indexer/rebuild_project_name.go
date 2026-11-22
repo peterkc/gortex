@@ -275,18 +275,26 @@ func rebuildManifestLinkError(path string, err error) error {
 
 func rebuildProjectRecipe(base store_pebble.HeadDigest, name string, inputs store_pebble.HeadDigest) store_pebble.HeadDigest {
 	h := blake3.New()
-	if inputs == (store_pebble.HeadDigest{}) {
-		_, _ = h.Write([]byte("gortex/rebuild/project-name/v1\x00"))
-	} else {
-		_, _ = h.Write([]byte("gortex/rebuild/project-name/v2\x00"))
-		_, _ = h.Write(inputs[:])
-	}
+	// The tracked set is exactly empty, so no dependency export was read.
+	// Bind that policy alongside the inputs, not an unverified locator.
+	_, _ = h.Write([]byte("gortex/rebuild/project-name/v3\x00tracked-set:0\x00dependency-exports:ABSENT\x00"))
+	_, _ = h.Write(inputs[:])
 	_, _ = h.Write(base[:])
 	_, _ = h.Write([]byte(name))
 	return store_pebble.HeadDigest(h.Sum(nil))
 }
 
+func (req rebuildBuildRequest) checkTrackedRepos() error {
+	if len(req.TrackedRepos) != 0 || len(req.Witness.Dependencies) != 0 {
+		return errRebuildCrossRepoUnavailable
+	}
+	return nil
+}
+
 func (req rebuildBuildRequest) checkProjectRecipe() error {
+	if err := req.checkTrackedRepos(); err != nil {
+		return err
+	}
 	if req.BaseRecipe == (store_pebble.HeadDigest{}) || req.Witness.Recipe != rebuildProjectRecipe(req.BaseRecipe, req.ProjectName, req.Witness.FrozenInputs) {
 		return fmt.Errorf("%w: project name, frozen inputs and witness recipe do not match", errRebuildBuildWire)
 	}

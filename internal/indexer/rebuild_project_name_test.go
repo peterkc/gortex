@@ -370,3 +370,33 @@ func TestRebuildProjectNameRecipeRequest(t *testing.T) {
 	require.ErrorIs(t, err, errRebuildBuildWire)
 	require.Empty(t, inputs)
 }
+
+func TestRebuildBuildRefusesTrackedRepos(t *testing.T) {
+	ctx := t.Context()
+	root, src := rebuildInputFixture(t)
+	req := rebuildBuildRequest{
+		Root: root, ParseDir: t.TempDir(), ParseLimit: 1024, Incarnation: rebuildTestIncarnation,
+		Bounds:  rebuildTransformBounds{CaptureBytes: 10, FileBytes: 1024},
+		Witness: store_pebble.Witness{Stage: store_pebble.StageManifest, Input: store_pebble.HeadDigest{1}, Recipe: store_pebble.HeadDigest{2}},
+	}
+	bound, err := captureProjectNameTest(t, src, map[string]*rebuildInput{"go.mod": nil, "package.json": nil}, req)
+	require.NoError(t, err)
+	bound.TrackedRepos = []string{"other/repo"}
+	lease := t.TempDir()
+	_, err = captureProjectNameTest(t, src, nil, bound)
+	require.ErrorIs(t, err, errRebuildCrossRepoUnavailable)
+	require.ErrorIs(t, writeRebuildBuildRequest(ctx, lease, bound, config.Default().Index, nil), errRebuildCrossRepoUnavailable)
+	request := filepath.Join(lease, rebuildRequestName)
+	_, err = os.Stat(request)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	file, err := os.Create(request)
+	require.NoError(t, err)
+	err = gob.NewEncoder(file).Encode(bound)
+	require.NoError(t, file.Close())
+	require.NoError(t, err)
+	_, inputs, err := readRebuildBuildRequest(ctx, lease)
+	require.ErrorIs(t, err, errRebuildCrossRepoUnavailable)
+	require.Empty(t, inputs)
+	refusal := buildRefusal(err)
+	require.Equal(t, errRebuildCrossRepoUnavailable, rebuildFailureKinds[int(refusal.Refusal)-1])
+}

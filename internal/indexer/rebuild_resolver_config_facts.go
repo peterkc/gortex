@@ -59,11 +59,27 @@ func captureRebuildCheckoutResolverInputs(ctx context.Context, src *source.Files
 		}
 		return m, err
 	}
-	var rootMod *rebuildRootManifest
+	goLimit := int64(rebuildCppEntryLimit)
 	if goUsed {
-		var err error
-		rootMod, err = readRoot(goPath, rebuildGoManifestLimit)
-		if err != nil {
+		goLimit = rebuildGoManifestLimit
+	}
+	rootMod, err := readRoot(goPath, goLimit)
+	if err != nil {
+		return "", err
+	}
+	if !goUsed {
+		// Native seeds root dependencies even without a Go parse receipt.
+		// No Go ownership queries are needed in this case.
+		row := rebuildGoManifest{Path: goPath}
+		if rootMod != nil {
+			row.Present, row.Digest = true, rootMod.target.Content
+			*raw -= int64(len(rootMod.data))
+			row.DirectDeps, err = rebuildGoDirectDeps(rootMod.data)
+			if err != nil {
+				return "", err
+			}
+		}
+		if err := emit(rebuildGoManifestSidecarRow(row)); err != nil {
 			return "", err
 		}
 	}
@@ -96,14 +112,6 @@ func captureRebuildCheckoutResolverInputs(ctx context.Context, src *source.Files
 	name, err := search.PortableProjectName(func(key string) ([]byte, error) {
 		if key == npmPath {
 			return readPackage()
-		}
-		if !goUsed {
-			m, err := readRoot(goPath, rebuildCppEntryLimit)
-			if err != nil || m == nil {
-				return nil, err
-			}
-			*raw -= int64(len(m.data))
-			return m.data, nil
 		}
 		if rootMod == nil {
 			return nil, nil

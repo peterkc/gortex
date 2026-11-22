@@ -213,18 +213,23 @@ func captureRebuildGoManifest(ctx context.Context, name string, rawRemaining *in
 		return -1
 	})
 	row.Replace = slices.Compact(row.Replace)
-	for _, dep := range (&contracts.GoModExtractor{}).Extract(name, data, nil, nil) {
-		mp := strings.TrimPrefix(dep.ID, "dep::")
-		if mp != "" && !strings.Contains(mp, "::") {
-			if !rebuildGoModulePath(mp) {
-				return row, fmt.Errorf("%w: unsupported root dependency spelling", errRebuildGoEvidence)
-			}
-			row.DirectDeps = append(row.DirectDeps, mp)
+	row.DirectDeps, err = rebuildGoDirectDeps(data)
+	return row, err
+}
+
+// Minimal native dependency seeds need the module IDs only. The tracked
+// set is empty; version, line and full contract rows belong to the later pass.
+func rebuildGoDirectDeps(data []byte) ([]string, error) {
+	var deps []string
+	for _, dep := range (&contracts.GoModExtractor{}).Extract("go.mod", data, nil, nil) {
+		mp, ok := strings.CutPrefix(dep.ID, "dep::")
+		if !ok || !rebuildGoModulePath(mp) || strings.Contains(mp, "::") {
+			return nil, fmt.Errorf("%w: unsupported root dependency spelling", errRebuildGoEvidence)
 		}
+		deps = append(deps, mp)
 	}
-	slices.Sort(row.DirectDeps)
-	row.DirectDeps = slices.Compact(row.DirectDeps)
-	return row, nil
+	slices.Sort(deps)
+	return slices.Compact(deps), nil
 }
 
 func rebuildGoLocalPath(name string) bool {

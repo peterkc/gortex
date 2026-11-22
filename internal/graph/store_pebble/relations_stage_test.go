@@ -85,6 +85,26 @@ func TestRelationsStagePublishesExactDiff(t *testing.T) {
 	require.ErrorIs(t, err, ErrStageOrder)
 }
 
+func TestRelationsStageKeepsExternalImportEndpoint(t *testing.T) {
+	ctx := t.Context()
+	worker, head, base, _, raw, _, _ := relationsStageFixture(t, FullProfile)
+	key, ok := RebuildExternalImportTarget("@scope/pkg/sub::Export")
+	require.True(t, ok)
+	require.Equal(t, "external::@scope/pkg/sub::Export", key)
+	require.True(t, worker.RemoveEdge(raw.From, raw.To, raw.Kind))
+	edge := *raw
+	edge.Kind, edge.To = graph.EdgeImports, key
+	worker.AddEdge(&edge)
+	tables, err := worker.PrepareRelations(ctx, t.TempDir(), base)
+	require.NoError(t, err)
+	_, err = head.PublishStage(ctx, tables)
+	require.NoError(t, err)
+	current := stageRead(t, head)
+	require.Nil(t, current.GetNode(key))
+	require.Equal(t, []*graph.Edge{&edge}, current.GetInEdges(key))
+	require.Equal(t, 1, current.count("external import endpoints"))
+}
+
 func TestRelationsStageRefusesDanglingOrProxyEndpoint(t *testing.T) {
 	for _, tc := range []struct {
 		label     string
@@ -95,6 +115,8 @@ func TestRelationsStageRefusesDanglingOrProxyEndpoint(t *testing.T) {
 	}{
 		{label: "unknown source", from: "missing.go::Missing", message: "dangling relations endpoint"},
 		{label: "unknown target", to: "missing.go::Missing", message: "dangling relations endpoint"},
+		{label: "empty external payload", to: "external::", message: "malformed external import endpoint"},
+		{label: "external source is not a node", from: "external::outside", message: "dangling relations endpoint"},
 		{label: "proxy ID", to: graph.ProxyNodeID("remote", "pkg.go::F"), message: "proxy edge cannot be published"},
 		{label: "proxy node", to: "local.go::Proxy", proxyNode: true, message: "proxy relations endpoint"},
 	} {
