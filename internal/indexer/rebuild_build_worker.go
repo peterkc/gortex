@@ -138,7 +138,17 @@ func receiveRebuildStages(
 			if int(r.Refusal) > len(rebuildFailureKinds) || r.Witness.Stage != 0 || len(r.Files) != 0 {
 				return fmt.Errorf("%w: malformed refusal", errRebuildBuildWire)
 			}
-			return fmt.Errorf("%w: %w: %s", ErrRebuildWorker, rebuildFailureKinds[r.Refusal-1], r.Detail)
+			cause := rebuildFailureKinds[r.Refusal-1]
+			if (cause == store_pebble.ErrRebuildAttributionChain) != (r.AttributionChains > 0) {
+				return fmt.Errorf("%w: invalid attribution chain count", errRebuildBuildWire)
+			}
+			if r.AttributionChains != 0 {
+				return fmt.Errorf("%w: %w: attribution_chains=%d: %s", ErrRebuildWorker, cause, r.AttributionChains, r.Detail)
+			}
+			return fmt.Errorf("%w: %w: %s", ErrRebuildWorker, cause, r.Detail)
+		}
+		if r.AttributionChains != 0 {
+			return fmt.Errorf("%w: attribution chain count on a stage offer", errRebuildBuildWire)
 		}
 		if next > store_pebble.StageSearch || r.Witness.Stage != next {
 			return fmt.Errorf("%w: expected %s, got %s", store_pebble.ErrStageOrder, next, r.Witness.Stage)

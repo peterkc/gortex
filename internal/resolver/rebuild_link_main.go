@@ -43,8 +43,8 @@ type RebuildMainInputs struct {
 
 // RunRebuildMain resolves selected pending edges in a private build using
 // frozen import facts, then reconciles placeholder sources unless disabled
-// and checks weak cross-package bindings. It then fixes Go method receivers
-// if the original frontier was nonempty. It does not publish.
+// and checks weak cross-package bindings. A nonempty original frontier also
+// enables Go receiver and bare-name scope attribution. It does not publish.
 // SelectCallers is required. On error the owner must discard the private build.
 func RunRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts store_pebble.RebuildLinkOptions, in RebuildMainInputs) error {
 	if in.SelectCallers == nil {
@@ -125,7 +125,10 @@ func runRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts st
 	if !hadPending {
 		return nil
 	}
-	_, err = build.RebuildGoMethodReceivers(ctx)
+	if _, err := build.RebuildGoMethodReceivers(ctx); err != nil {
+		return err
+	}
+	_, err = build.RebuildBareNameScope(ctx)
 	return err
 }
 

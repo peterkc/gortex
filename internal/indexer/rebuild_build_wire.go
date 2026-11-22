@@ -141,11 +141,12 @@ func readRebuildBuildRequest(ctx context.Context, dir string) (req rebuildBuildR
 }
 
 type rebuildBuildReply struct {
-	Files   []string
-	Base    store_pebble.HeadDigest
-	Witness store_pebble.Witness
-	Refusal uint8
-	Detail  string
+	Files             []string
+	Base              store_pebble.HeadDigest
+	Witness           store_pebble.Witness
+	Refusal           uint8
+	Detail            string
+	AttributionChains uint64 // present only on a refused attribution pass
 }
 
 var rebuildFailureKinds = [...]error{
@@ -160,7 +161,7 @@ var rebuildFailureKinds = [...]error{
 	errRebuildInputSidecar, errRebuildGraphPathCollision, store_pebble.ErrInvalidIncarnation,
 	errRebuildCallerAttribution, errRebuildGoEvidence, tsalias.ErrFrozenAliasUnproved, tsalias.ErrFrozenAliasPath,
 	errRebuildResolverInputDenied, errRebuildResolverNamespace, errRebuildNpmInput, store_pebble.ErrRebuildImportDirectories,
-	errRebuildCrossRepoUnavailable,
+	errRebuildCrossRepoUnavailable, store_pebble.ErrRebuildAttributionChain,
 }
 
 func buildRefusal(err error) rebuildBuildReply {
@@ -182,6 +183,9 @@ func buildRefusal(err error) rebuildBuildReply {
 				break
 			}
 		}
+	}
+	if chain, ok := errors.AsType[*store_pebble.RebuildAttributionChainError](err); ok {
+		r.AttributionChains = chain.Count
 	}
 	return r
 }

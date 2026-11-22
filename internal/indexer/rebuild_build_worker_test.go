@@ -431,6 +431,47 @@ func TestRebuildBuildViewRefusal(t *testing.T) {
 	}
 }
 
+func TestRebuildBuildAttributionChainRefusal(t *testing.T) {
+	old := graph.EdgeIdentity{From: "p.go::Caller", Kind: graph.EdgeReferences, To: "unresolved::Old", FilePath: "p.go", Line: 8}
+	dst := old
+	dst.To = "p.go::Caller#local:old::unresolved::New"
+	cause := &store_pebble.RebuildAttributionChainError{Count: 2, Old: old, Destination: dst}
+	valid := buildRefusal(fmt.Errorf("%w: %w", store_pebble.ErrRebuildView, cause))
+	require.Equal(t, uint64(2), valid.AttributionChains)
+	require.Equal(t, store_pebble.ErrRebuildAttributionChain, rebuildFailureKinds[valid.Refusal-1])
+	missing := valid
+	missing.AttributionChains = 0
+	unrelated := buildRefusal(errRebuildBuildIncomplete)
+	unrelated.AttributionChains = 2
+	for _, tc := range []struct {
+		name  string
+		reply rebuildBuildReply
+		want  error
+	}{
+		{"exact refused count", valid, store_pebble.ErrRebuildAttributionChain},
+		{"missing count", missing, errRebuildBuildWire},
+		{"count on unrelated refusal", unrelated, errRebuildBuildWire},
+		{"count on stage offer", rebuildBuildReply{AttributionChains: 2}, errRebuildBuildWire},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var reply, acks bytes.Buffer
+			require.NoError(t, writeRebuildBuildReply(&reply, tc.reply))
+			err := receiveRebuildStages(t.Context(), t.TempDir(), rebuildBuildRequest{}, &reply, &acks,
+				func(context.Context, store_pebble.StageTables) error {
+					t.Fatal("chain refusal must not publish")
+					return nil
+				})
+			require.ErrorIs(t, err, tc.want)
+			require.Empty(t, acks.Bytes())
+			if tc.want == store_pebble.ErrRebuildAttributionChain {
+				require.ErrorContains(t, err, "attribution_chains=2")
+				require.ErrorContains(t, err, old.To)
+				require.ErrorContains(t, err, dst.To)
+			}
+		})
+	}
+}
+
 func TestRebuildBuildCppIncludeRefusal(t *testing.T) {
 	var reply bytes.Buffer
 	cause := errors.Join(store_pebble.ErrRebuildFileImports, resolver.ErrRebuildCppIncludeInput)
