@@ -85,6 +85,16 @@ running daemon. To recover from an unwanted warmup, stop first, then run
 `gortex untrack /absolute/path/to/unwanted-repository`, and start the daemon
 again. See [Recovering from a runaway warmup](onboarding.md#recovering-from-a-runaway-warmup).
 
+For pending files at startup, Go export preparation has a separate 480-second
+limit before the configured partial enrichment timeout (120 seconds by default).
+This preparation does not run for full rebuilds or ordinary watch/file requests.
+If required enrichment fails, remains partial, loses completion ownership or is
+superseded, independent languages still run. The daemon stays queryable but reports
+`warmup_incomplete` and `enriched=false`, with warmup incomplete and enrichment pending.
+With `enrich_on_watch=false`, failed file work waits for a later startup without an
+automatic retry. With watch enrichment enabled, later file events can trigger another
+pass. A later pass does not promote the startup status to enriched.
+
 ## Repository prefix collisions
 
 A repository prefix identifies one indexed root. By default, it is the directory

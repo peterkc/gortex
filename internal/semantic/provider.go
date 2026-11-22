@@ -52,6 +52,19 @@ type ContextFileBatchEnricher interface {
 	EnrichFilesContext(ctx context.Context, g graph.Store, repoPrefix, repoRoot string, filePaths []string) (*EnrichResult, error)
 }
 
+// FileBatchExportAdmission optionally keeps one compiler lease across startup
+// preparation and binding. The decorator carries that lease into each stage's
+// own context without carrying the preparation deadline into binding.
+type FileBatchExportAdmission interface {
+	AcquireFileExportAdmission(context.Context) (decorate func(context.Context) context.Context, release func(), err error)
+}
+
+// FileBatchExportPreparer prepares native exports without publishing graph state.
+// Only the explicit startup file entry point uses this optional capability.
+type FileBatchExportPreparer interface {
+	PrepareFileExportsContext(ctx context.Context, repoPrefix, repoRoot string, filePaths []string) error
+}
+
 // RepoScopedProvider is an optional interface a Provider MAY implement to
 // receive the repo prefix of the enrichment root alongside the root path.
 // In a multi-repo daemon the shared graph holds file nodes from every

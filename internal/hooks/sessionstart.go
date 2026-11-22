@@ -358,7 +358,7 @@ func renderDaemonReadiness(s *daemon.StatusResponse) string {
 	case s.Ready && s.EnrichmentComplete:
 		fmt.Fprintf(&sb, "✓ Gortex daemon ready (v%s, uptime %s). ", daemonVersionLabel(s.Version), formatDuration(s.UptimeSeconds))
 	case s.Ready:
-		fmt.Fprintf(&sb, "✓ Gortex daemon ready — references queryable (v%s, uptime %s); semantic enrichment still running. ",
+		fmt.Fprintf(&sb, "✓ Gortex daemon ready — references queryable (v%s, uptime %s); warmup incomplete; semantic enrichment pending. ",
 			daemonVersionLabel(s.Version), formatDuration(s.UptimeSeconds))
 	default:
 		fmt.Fprintf(&sb, "⏳ Gortex daemon warming up (v%s, %s elapsed). Enforcement is partial until ready. ",

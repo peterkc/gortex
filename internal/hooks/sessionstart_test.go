@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/profiles"
 	"github.com/zzet/gortex/internal/toolref"
@@ -662,4 +663,12 @@ func TestSessionStartSharedDegradedGuidanceAcrossStates(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSessionStartPendingWarmupWording(t *testing.T) {
+	status := sessionStartStatusFromProbe(daemon.ProbeResponse{Ready: true, Enriched: false})
+	message := renderDaemonReadiness(status)
+	require.Contains(t, message, "warmup incomplete")
+	require.Contains(t, message, "enrichment pending")
+	require.NotContains(t, message, "still running")
 }

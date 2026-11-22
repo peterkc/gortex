@@ -374,6 +374,7 @@ type warmupTimings struct {
 	// the outer startup owner even when its context remains live.
 	err               error
 	resolveErr        error // pre-enrichment resolve failure: ready, but warmup_incomplete
+	enrichErr         error // joined required enrichment failure, distinct from resolution
 	prelude           time.Duration
 	prepareResolve    time.Duration
 	contractRehydrate time.Duration
@@ -1091,7 +1092,7 @@ func warmupDaemonStateContext(ctx context.Context, state *daemonState, logger *z
 		// FinishTail joins pool lanes that may be parked on the gate: the
 		// gate MUST open on every path that reaches it, including panics.
 		defer openApplyGate()
-		deferredRun = state.multiIndexer.BeginDeferredPasses(ctx, applyGate)
+		deferredRun = state.multiIndexer.BeginStartupDeferredPasses(ctx, applyGate)
 		logger.Info("daemon: deferred enrichment pool started ahead of resolve")
 	}
 
@@ -1196,7 +1197,7 @@ func warmupDaemonStateContext(ctx context.Context, state *daemonState, logger *z
 			deferredFinished = true
 			deferredResult = deferredRun.FinishTailResult()
 		} else {
-			deferredResult = state.multiIndexer.RunDeferredPassesAllResult(ctx)
+			deferredResult = state.multiIndexer.BeginStartupDeferredPasses(ctx, nil).FinishTailResult()
 		}
 		if ctx.Err() != nil {
 			return nil, timings
@@ -1205,6 +1206,7 @@ func warmupDaemonStateContext(ctx context.Context, state *daemonState, logger *z
 		// prefixed strings after the main parse generation was released. Every
 		// deferred lane is joined here, so rotate that tail generation too.
 		rotateColdInternGeneration(logger, "deferred_passes_all")
+		timings.enrichErr = deferredResult.EnrichErr
 		timings.enrichScheduled = deferredResult.EnrichScheduled
 		timings.enrich = time.Since(phaseStart)
 		logger.Info("daemon: warmup phase done",

@@ -1,6 +1,8 @@
 package indexer
 
 import (
+	"errors"
+	"fmt"
 	"path/filepath"
 	"sort"
 
@@ -218,4 +220,51 @@ func (idx *Indexer) clearPendingEnrich(generation uint64) bool {
 	idx.deferredEnrichFull = false
 	idx.pendingEnrich.Store(false)
 	return true
+}
+
+// deferredEnrichOutcome is published by the pool's completion channel, then
+// consumed under the repository mutation lane before contract finalization.
+type deferredEnrichOutcome struct {
+	generation uint64
+	files      []string
+	completed  []string
+	full       bool
+	sha        string
+	dirty      bool
+	err        error
+}
+
+type deferredEnrichOptions struct{ PrepareFileExports bool }
+
+// finishDeferredFileEnrich requires repository mutation ownership. Keeping the
+// generation check and durable discharge in that lane prevents a newer watcher
+// payload from being erased between the check and the write.
+func (idx *Indexer) finishDeferredFileEnrich(outcome deferredEnrichOutcome) error {
+	if outcome.full {
+		if !idx.clearPendingEnrich(outcome.generation) {
+			return fmt.Errorf("%s: enrichment generation superseded", idx.repoPrefix)
+		}
+		// The repository owner excludes newer durable writes through discharge.
+		idx.dischargePendingEnrichFrontier(idx.pendingEnrichFrontier())
+		idx.semanticMgr.RecordRepoEnrichmentComplete(idx.graph, idx.repoPrefix, outcome.sha, outcome.dirty)
+		return nil
+	}
+	if len(outcome.files) == 0 {
+		return outcome.err
+	}
+	idx.deferredEnrichMu.Lock()
+	defer idx.deferredEnrichMu.Unlock()
+	if idx.deferredEnrichGeneration != outcome.generation {
+		return errors.Join(outcome.err, fmt.Errorf("%s: enrichment generation superseded", idx.repoPrefix))
+	}
+	idx.dischargePendingEnrichFrontier(outcome.completed)
+	for _, file := range outcome.completed {
+		delete(idx.deferredEnrichFiles, file)
+	}
+	if len(idx.deferredEnrichFiles) == 0 {
+		idx.deferredEnrichFiles = nil
+		idx.deferredEnrichFull = false
+		idx.pendingEnrich.Store(false)
+	}
+	return outcome.err
 }

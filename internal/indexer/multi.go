@@ -610,6 +610,7 @@ func (mi *MultiIndexer) SeedPendingEnrichAll() int {
 // whether a later safety sweep is redundant.
 type DeferredPassesResult struct {
 	EnrichScheduled                int
+	EnrichErr                      error
 	ExactCrossRepoComplete         bool
 	CrossRepoComplete              bool
 	CrossRepoMutationRevision      uint64
@@ -628,13 +629,6 @@ func (mi *MultiIndexer) GraphMutationRevision() (uint64, bool) {
 		return 0, false
 	}
 	return revisioner.MutationRevision(), true
-}
-
-// RunDeferredPassesAllResult is the result-bearing orchestration form used by
-// lifecycle callers that must decide whether a later global safety sweep is
-// still required.
-func (mi *MultiIndexer) RunDeferredPassesAllResult(ctx context.Context) DeferredPassesResult {
-	return mi.BeginDeferredPasses(ctx, nil).FinishTailResult()
 }
 
 // current requires this Indexer's repository mutation lane to be held.
@@ -671,6 +665,7 @@ type DeferredPassesRun struct {
 	lanesHeld       bool
 	attemptAborted  bool
 	enrichScheduled int
+	enrichErr       error
 	catchupNeeded   bool
 	catchupKnown    bool
 	catchupScope    map[string]struct{}
@@ -718,30 +713,24 @@ func (r *DeferredPassesRun) BeginApplyMutationReceipt() {
 	r.receiptOpen = true
 }
 
-// BeginDeferredPasses selects the repos with deferred work, prepares the
-// mutation-receipt window, materialises go.mod dependencies, and launches the
-// enrichment pool on its own goroutine. The caller must call FinishTailResult (which
-// joins the pool) exactly once. applyGate, when non-nil, parks every
-// provider's graph-apply phase until the caller closes it — the caller MUST
-// first call BeginApplyMutationReceipt after its resolve phase, then close the
-// gate, or FinishTailResult deadlocks.
-//
-// Without an apply gate the receipt opens here. With overlap, delaying it until
-// the apply boundary excludes resolver writes while still observing every
-// semantic apply and contract commit, preserving an exact file frontier.
-func (mi *MultiIndexer) BeginDeferredPasses(ctx context.Context, applyGate <-chan struct{}) *DeferredPassesRun {
+// BeginStartupDeferredPasses prepares exports only for startup partial files.
+// FinishTailResult must join this run exactly once. With applyGate, the caller
+// opens BeginApplyMutationReceipt after resolve, then closes the gate before joining.
+func (mi *MultiIndexer) BeginStartupDeferredPasses(ctx context.Context, applyGate <-chan struct{}) *DeferredPassesRun {
+	return mi.beginRegisteredDeferredPasses(ctx, applyGate, deferredEnrichOptions{PrepareFileExports: true})
+}
+
+func (mi *MultiIndexer) beginRegisteredDeferredPasses(ctx context.Context, applyGate <-chan struct{}, options deferredEnrichOptions) *DeferredPassesRun {
 	mi.mu.RLock()
 	indexers := make([]*Indexer, 0, len(mi.indexers))
 	for _, idx := range mi.indexers {
 		indexers = append(indexers, idx)
 	}
 	mi.mu.RUnlock()
-	return mi.beginDeferredPasses(ctx, applyGate, indexers, false)
+	return mi.beginDeferredPassesOptions(ctx, applyGate, indexers, false, options)
 }
 
-// The lanes-held route receives only completed cold indexers already covered
-// by the caller's mutation lanes; the public route coordinates each indexer.
-func (mi *MultiIndexer) beginDeferredPasses(_ context.Context, applyGate <-chan struct{}, indexers []*Indexer, lanesHeld bool) *DeferredPassesRun {
+func (mi *MultiIndexer) beginDeferredPassesOptions(ctx context.Context, applyGate <-chan struct{}, indexers []*Indexer, lanesHeld bool, options deferredEnrichOptions) *DeferredPassesRun {
 	indexers = append([]*Indexer(nil), indexers...)
 	sort.Slice(indexers, func(i, j int) bool {
 		return indexers[i].repoPrefix < indexers[j].repoPrefix
@@ -762,12 +751,15 @@ func (mi *MultiIndexer) beginDeferredPasses(_ context.Context, applyGate <-chan 
 		restoreGCTune: applyIndexGCTuning(mi.logger),
 	}
 	for _, idx := range indexers {
+		requiresEnrichment := func() bool {
+			return idx.semanticMgr != nil && idx.semanticMgr.Enabled() && idx.semanticMgr.HasProviders() &&
+				(idx.pendingEnrich.Load() || forced)
+		}
 		err := mi.withDeferredRepositoryMutation(idx, lanesHeld, func() {
 			if len(idx.deferredStdlibCandidates) > 0 {
 				run.stdlibIndexers = append(run.stdlibIndexers, idx)
 			}
-			enrich := idx.semanticMgr != nil && idx.semanticMgr.Enabled() && idx.semanticMgr.HasProviders() &&
-				(idx.pendingEnrich.Load() || forced)
+			enrich := requiresEnrichment()
 			if !enrich && idx.pendingContractReg == nil {
 				return
 			}
@@ -785,6 +777,9 @@ func (mi *MultiIndexer) beginDeferredPasses(_ context.Context, applyGate <-chan 
 		})
 		if err != nil {
 			run.attemptAborted = true
+			if requiresEnrichment() {
+				run.enrichErr = errors.Join(run.enrichErr, fmt.Errorf("%s: required enrichment admission: %w", idx.repoPrefix, err))
+			}
 			mi.logger.Warn("deferred attempt admission failed", zap.String("repo", idx.repoPrefix), zap.Error(err))
 		}
 	}
@@ -811,8 +806,14 @@ func (mi *MultiIndexer) beginDeferredPasses(_ context.Context, applyGate <-chan 
 		if err != nil {
 			mi.logger.Warn("deferred dependency admission failed", zap.String("repo", attempt.indexer.repoPrefix), zap.Error(err))
 		}
-		if !owned {
+		if !owned || err != nil {
 			run.attemptAborted = true
+			if attempt.enrich {
+				if err == nil {
+					err = errors.New("attempt superseded")
+				}
+				run.enrichErr = errors.Join(run.enrichErr, fmt.Errorf("%s: required enrichment attempt: %w", attempt.indexer.repoPrefix, err))
+			}
 			continue
 		}
 		started = append(started, attempt)
@@ -822,9 +823,15 @@ func (mi *MultiIndexer) beginDeferredPasses(_ context.Context, applyGate <-chan 
 		}
 	}
 	run.attempts = started
+	attemptsByIndexer := make(map[*Indexer]*deferredPassAttempt, len(started))
+	for _, attempt := range started {
+		attemptsByIndexer[attempt.indexer] = attempt
+	}
 	go func() {
 		defer close(run.poolDone)
-		mi.runDeferredEnrichPool(run.workIndexers)
+		mi.runDeferredEnrichPoolWork(run.workIndexers, func(idx *Indexer) {
+			attemptsByIndexer[idx].outcome = idx.runDeferredEnrichContext(ctx, options)
+		})
 	}()
 	return run
 }
@@ -863,6 +870,7 @@ func (r *DeferredPassesRun) FinishTailResult() DeferredPassesResult {
 	}
 	return DeferredPassesResult{
 		EnrichScheduled:                r.enrichScheduled,
+		EnrichErr:                      r.enrichErr,
 		ExactCrossRepoComplete:         crossRepoComplete && mode != deferredResolveFallback,
 		CrossRepoComplete:              crossRepoComplete,
 		CrossRepoMutationRevision:      mutationRevision,
@@ -901,6 +909,7 @@ func (r *DeferredPassesRun) finishOwnedContractTails() {
 				return
 			}
 			idx := attempt.indexer
+			r.enrichErr = errors.Join(r.enrichErr, idx.finishDeferredFileEnrich(attempt.outcome))
 			idx.runDeferredContractsAndReleaseSemanticState()
 			r.mi.refreshColdCensusMetadata(idx)
 			idx.SetSkipResolveInDeferred(false)
@@ -911,8 +920,14 @@ func (r *DeferredPassesRun) finishOwnedContractTails() {
 		if err != nil {
 			r.mi.logger.Warn("deferred contract admission failed", zap.String("repo", attempt.indexer.repoPrefix), zap.Error(err))
 		}
-		if !owned {
+		if !owned || err != nil {
 			r.attemptAborted = true
+			if attempt.enrich {
+				if err == nil {
+					err = errors.New("completion lost ownership")
+				}
+				r.enrichErr = errors.Join(r.enrichErr, fmt.Errorf("%s: required enrichment completion: %w", attempt.indexer.repoPrefix, err))
+			}
 		}
 	}
 }
@@ -1397,7 +1412,7 @@ func (mi *MultiIndexer) RunDeferredGoModAll() {
 // waits on admission without burning a per-repo deadline.
 // Everything else — LSP sweeps, tree-sitter type providers, the other
 // languages of the same repo — flows through the pool lanes.
-func (mi *MultiIndexer) runDeferredEnrichPool(indexers []*Indexer) {
+func (mi *MultiIndexer) runDeferredEnrichPoolWork(indexers []*Indexer, enrich func(*Indexer)) {
 	if len(indexers) == 0 {
 		return
 	}
@@ -1461,7 +1476,7 @@ func (mi *MultiIndexer) runDeferredEnrichPool(indexers []*Indexer) {
 		laneMu.Lock()
 		lanes[lane] = laneWork{repo: idx.repoPrefix, since: time.Now()}
 		laneMu.Unlock()
-		idx.runDeferredEnrich()
+		enrich(idx)
 		laneMu.Lock()
 		delete(lanes, lane)
 		laneMu.Unlock()

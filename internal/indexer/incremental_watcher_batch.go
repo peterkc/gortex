@@ -234,7 +234,10 @@ func (idx *Indexer) runIncrementalWatcherSemantic(graphPaths []string) []string 
 		pendingFiles = appendUniqueSorted(nil, graphPaths...)
 	}
 	idx.observeIncrementalCatchup("semantic", pendingFiles)
-	idx.runDeferredEnrich()
+	outcome := idx.runDeferredEnrichContext(context.Background(), deferredEnrichOptions{})
+	// The residual ledger, not this error, decides what the watcher reports as
+	// pending; runDeferredEnrichContext already logged each failed language.
+	_ = idx.finishDeferredFileEnrich(outcome)
 	if idx.pendingEnrich.Load() {
 		return pendingFiles
 	}

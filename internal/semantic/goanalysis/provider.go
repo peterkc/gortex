@@ -326,6 +326,9 @@ func (p *Provider) acquireHeavy(ctx context.Context, large bool) (func(), error)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if ctx.Value(startupCompilerAdmission{}) == p {
+		return func() {}, nil
+	}
 	preempt := committedPreempt(ctx)
 	if p.warm.startup.Load() > 0 {
 		large = true
@@ -1601,6 +1604,10 @@ func (p *Provider) EnrichFilesContext(ctx context.Context, g graph.Store, repoPr
 		return nil, err
 	}
 	defer release()
+	p.logger.Info("go-types: file binding admitted",
+		zap.String("stage", "binding"),
+		zap.Duration("admission_wait", time.Since(start)),
+	)
 
 	absRoot, sourceRoot, requestedFiles, patterns, fileLoadDir, err := fileCompilerInputs(repoPrefix, repoRoot, filePaths)
 	if err != nil {
@@ -2180,6 +2187,15 @@ func (p *Provider) loadCompilerPackages(cfg *packages.Config, patterns ...string
 		p.logger.Info("go-types: package load uses native driver chunks",
 			zap.Int("driver_chunks", chunks), zap.Int("patterns", len(patterns)),
 			zap.Int("pattern_bytes", total), zap.String("module_dir", cfg.Dir))
+	}
+	if p.logger != nil {
+		p.logger.Debug("go-types: package driver dispatch",
+			zap.Uint("load_mode", uint(cfg.Mode)),
+			zap.Int("patterns", len(patterns)),
+			zap.Int("driver_chunks", chunks),
+			zap.Bool("file_fallback", len(patterns) > 0 && strings.HasPrefix(patterns[0], "file=")),
+			zap.String("module_dir", cfg.Dir),
+		)
 	}
 	load := p.packagesLoad
 	if load == nil {
