@@ -42,7 +42,13 @@ func attributionIdentityText(id graph.EdgeIdentity) string {
 // reads only immutable facts and receives no metadata. Its empty result is no move.
 // The private plan lets a chain proof join exact keys across page boundaries
 // before any graph writes, without retaining the move set in memory.
-func (b *BuildStore) rebuildAttributionMoves(ctx context.Context, target func(*graph.Edge) (string, error)) (moved int, err error) {
+func (b *BuildStore) rebuildAttributionMoves(ctx context.Context, target func(*graph.Edge) (string, error)) (int, error) {
+	return b.rebuildAttribution(ctx, target, nil, nil)
+}
+
+func (b *BuildStore) rebuildAttribution(ctx context.Context, target func(*graph.Edge) (string, error),
+	beforeApply func() error, afterApply func([]byte) error,
+) (moved int, err error) {
 	const maxPageBytes = 16 << 20
 	view := b.RebuildView()
 	if err := view.mutationError(); err != nil {
@@ -120,6 +126,11 @@ func (b *BuildStore) rebuildAttributionMoves(ctx context.Context, target func(*g
 	if chain.Count > 0 {
 		return 0, &chain
 	}
+	if beforeApply != nil {
+		if err := beforeApply(); err != nil {
+			return 0, err
+		}
+	}
 
 	// Planned keys are already ordered by the entire old identity. After the
 	// chain check, a prior page's destination is stationary for later pages.
@@ -166,6 +177,11 @@ func (b *BuildStore) rebuildAttributionMoves(ctx context.Context, target func(*g
 	}); err != nil {
 		return 0, err
 	}
-	err = apply()
+	if err := apply(); err != nil {
+		return 0, err
+	}
+	if moved != 0 && afterApply != nil {
+		err = afterApply(prefix)
+	}
 	return moved, err
 }

@@ -44,8 +44,8 @@ type RebuildMainInputs struct {
 // RunRebuildMain resolves selected pending edges in a private build using
 // frozen import facts, then reconciles placeholder sources unless disabled
 // and checks weak cross-package bindings. A nonempty original frontier also
-// enables Go receiver, bare-name scope, dataflow callee, and generic parameter
-// attribution. It does not publish.
+// enables Go receiver, bare-name scope, dataflow callee, generic parameter,
+// and Go builtin attribution. It does not publish.
 // SelectCallers is required. On error the owner must discard the private build.
 func RunRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts store_pebble.RebuildLinkOptions, in RebuildMainInputs) error {
 	if in.SelectCallers == nil {
@@ -118,6 +118,9 @@ func runRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts st
 		if _, err := placeholder.Apply(ctx); err != nil {
 			return err
 		}
+		if err := placeholder.Close(); err != nil {
+			return err
+		}
 	}
 	// Keep native order: the guard sees settled imports and source repoints.
 	if _, err := guard.Apply(ctx, build, reconcileSources, nil); err != nil {
@@ -135,8 +138,10 @@ func runRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts st
 	if _, err := build.RebuildDataflowCallees(ctx); err != nil {
 		return err
 	}
-	_, err = build.RebuildGenericParams(ctx)
-	return err
+	if _, err := build.RebuildGenericParams(ctx); err != nil {
+		return err
+	}
+	return runRebuildGoBuiltins(ctx, build, reconcileSources, opts.SpillBytes)
 }
 
 func reduceRebuildMainPage(ctx context.Context, f *rebuildLinkFrontier, page []*graph.Edge) ([]graph.EdgeReindex, error) {

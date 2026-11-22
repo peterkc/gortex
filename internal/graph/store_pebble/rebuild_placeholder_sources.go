@@ -92,27 +92,34 @@ func (p *RebuildPlaceholderSources) Record(ctx context.Context, batch []graph.Ed
 			}
 			// At most the two source forms for this one reference.
 			for _, rp := range graph.PlaceholderSourceRepoints(batch[i : i+1]) {
-				if rp.NewFrom == rp.OldFrom || rp.OldFrom == "" || rp.NewFrom == "" {
-					continue
-				}
-				site := placeholderSite(rp.OldFrom, rp.FilePath, rp.Line)
-				before := p.stats.Claimed
-				if err := pendingVisit(ctx, p.build.pending, site, func(r row) error {
-					key := binary.BigEndian.AppendUint64(bytes.Clone(placeholderMoves), uint64(p.stats.Claimed))
-					p.stats.Claimed++
-					return p.put(append(key, r.key[len(site):]...), []byte(rp.NewFrom))
-				}); err != nil {
+				if err := p.claim(ctx, rp); err != nil {
 					return err
-				}
-				if p.stats.Claimed > before {
-					if err := p.build.pending.DeleteRange(site, prefixEnd(site), pebble.NoSync); err != nil {
-						return err
-					}
 				}
 			}
 		}
 		return ctx.Err()
 	}))
+}
+
+// claim records the first repoint of this exact site in the saved census.
+// The caller holds the build's write lock.
+func (p *RebuildPlaceholderSources) claim(ctx context.Context, rp graph.PlaceholderRepoint) error {
+	if rp.NewFrom == rp.OldFrom || rp.OldFrom == "" || rp.NewFrom == "" {
+		return nil
+	}
+	site := placeholderSite(rp.OldFrom, rp.FilePath, rp.Line)
+	before := p.stats.Claimed
+	if err := pendingVisit(ctx, p.build.pending, site, func(r row) error {
+		key := binary.BigEndian.AppendUint64(bytes.Clone(placeholderMoves), uint64(p.stats.Claimed))
+		p.stats.Claimed++
+		return p.put(append(key, r.key[len(site):]...), []byte(rp.NewFrom))
+	}); err != nil {
+		return err
+	}
+	if p.stats.Claimed > before {
+		return p.build.pending.DeleteRange(site, prefixEnd(site), pebble.NoSync)
+	}
+	return nil
 }
 
 func (p *RebuildPlaceholderSources) link(ri graph.EdgeReindex) error {
