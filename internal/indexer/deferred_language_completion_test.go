@@ -12,11 +12,29 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
+	"path"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 )
+
+// seedSlashIndexedFile seeds a pending file under its slash-separated graph
+// path, which these tests compare with literal "r/..." paths on every OS.
+func seedSlashIndexedFile(t *testing.T, g graph.Store, repoPrefix, relPath string) string {
+	t.Helper()
+	graphPath := path.Join(repoPrefix, relPath)
+	g.AddBatch([]*graph.Node{{
+		ID:         graphPath,
+		Kind:       graph.KindFile,
+		Name:       path.Base(relPath),
+		FilePath:   graphPath,
+		Language:   "go",
+		RepoPrefix: repoPrefix,
+		Meta:       map[string]any{graph.MetaReparsePendingEnrichment: true},
+	}}, nil)
+	return graphPath
+}
 
 type deferredLanguageProvider struct {
 	language  string
@@ -178,8 +196,8 @@ func TestDeferredFileLanguageCompletion(t *testing.T) {
 			idx.SetRepoPrefix("r")
 			idx.SetRootPath(t.TempDir())
 			idx.SetSemanticManager(mgr)
-			goPath := seedWatchIndexedFile(t, store, "r", "a.go")
-			tsPath := seedWatchIndexedFile(t, store, "r", "a.ts")
+			goPath := seedSlashIndexedFile(t, store, "r", "a.go")
+			tsPath := seedSlashIndexedFile(t, store, "r", "a.ts")
 			node := store.GetFileNodes(tsPath)[0]
 			node.Language = "typescript"
 			store.AddBatch([]*graph.Node{node}, nil)
@@ -221,8 +239,8 @@ func deferredLanguageFixture(t *testing.T, g graph.Store) (*Indexer, *MultiIndex
 	idx.SetRepoPrefix("r")
 	idx.SetRootPath(t.TempDir())
 	idx.SetSemanticManager(mgr)
-	ga := seedWatchIndexedFile(t, g, "r", "a.go")
-	gb := seedWatchIndexedFile(t, g, "r", "a.ts")
+	ga := seedSlashIndexedFile(t, g, "r", "a.go")
+	gb := seedSlashIndexedFile(t, g, "r", "a.ts")
 	node := g.GetFileNodes(gb)[0]
 	node.Language = "typescript"
 	g.AddBatch([]*graph.Node{node}, nil)
@@ -247,7 +265,7 @@ func deferredLanguageCallers(t *testing.T) {
 					a.fail = false
 					a.partial = true
 				}
-				noWork := []string{"r/gone.go", "r/go.mod", "r/go.work", seedWatchIndexedFile(t, g, "r", "none.rb")}
+				noWork := []string{"r/gone.go", "r/go.mod", "r/go.work", seedSlashIndexedFile(t, g, "r", "none.rb")}
 				node := g.GetFileNodes("r/none.rb")[0]
 				node.Language = "ruby"
 				g.AddBatch([]*graph.Node{node}, nil)
@@ -345,7 +363,7 @@ func deferredLanguageGeneration(t *testing.T) {
 				case "full":
 					idx.markPendingEnrichFull()
 				case "new":
-					seedWatchIndexedFile(t, idx.graph, "r", "new.go")
+					seedSlashIndexedFile(t, idx.graph, "r", "new.go")
 					idx.markPendingEnrichFiles([]string{"r/new.go"})
 				case "attempt":
 					idx.deferredAttempt = &deferredPassAttempt{indexer: idx}
@@ -407,7 +425,7 @@ func deferredLanguageOwnedDischarge(t *testing.T, full bool) {
 		coordinator.batchAdmissionHook = func() { close(queued) }
 		go func() {
 			done <- idx.coordinateRepositoryMutation(t.Context(), OutputEntryDeferredPasses, func() error {
-				seedWatchIndexedFile(t, g.Store, "r", "a.go")
+				seedSlashIndexedFile(t, g.Store, "r", "a.go")
 				idx.markPendingEnrichFiles([]string{"r/a.go"})
 				return nil
 			})
