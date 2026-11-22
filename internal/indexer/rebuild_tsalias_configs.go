@@ -40,6 +40,12 @@ func (rows rebuildTSAliasConfigs) config(rel string) (*tsalias.FrozenAliasConfig
 	return row.Config, err
 }
 
+// resolve re-evaluates a post-parse alias from the verified sidecar. Native
+// probe order and fallback remain in tsalias; there is no live resolver read.
+func (rows rebuildTSAliasConfigs) resolve(n *rebuildResolverNamespace, caller, spec string) (tsalias.FrozenAliasStem, error) {
+	return tsalias.ResolveFrozenAlias(caller, spec, rows.config, n.probeFile)
+}
+
 // captureRebuildTSAliasConfigs collects only config candidates in the literal
 // ancestry of admitted TS/JS files. The namespace, caller list and identities
 // must describe the same owner epoch before reuse. literalRoot certifies that
@@ -108,6 +114,8 @@ func captureRebuildTSAliasConfigs(ctx context.Context, root *os.Root, literalRoo
 					if err := readRebuildTSAliasConfig(ctx, root, identities[key], rawRemaining, &row); err != nil {
 						return err
 					}
+				case rebuildNamespaceDenied:
+					return fmt.Errorf("%w: config leaf %q: %w", tsalias.ErrFrozenAliasUnproved, key, errRebuildResolverInputDenied)
 				default:
 					// WalkDir offers link/special leaves to ReadFile. Neither a
 					// denied leaf nor a non-regular type proves no scope.

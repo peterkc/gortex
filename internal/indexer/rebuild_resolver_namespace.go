@@ -13,7 +13,10 @@ const (
 	rebuildNamespaceKeyBytesLimit = 16 << 20
 )
 
-var errRebuildResolverNamespace = errors.New("unproved frozen resolver namespace")
+var (
+	errRebuildResolverNamespace   = errors.New("unproved frozen resolver namespace")
+	errRebuildResolverInputDenied = errors.New("frozen resolver input denied by admission")
+)
 
 type rebuildNamespaceKind uint8
 
@@ -23,8 +26,8 @@ const (
 	rebuildNamespaceDirectory
 	rebuildNamespaceDenied
 	rebuildNamespaceUnsupported // Symlink or special object. Never a followed-stat result.
-	rebuildNamespaceClose       // Exhaustive, but native name equality is unproved.
-	rebuildNamespaceCloseExact  // Exhaustive, with byte-exact native name equality.
+	rebuildNamespaceClose       // Exhaustive, but not bound for stat-style probes.
+	rebuildNamespaceCloseExact  // Exhaustive, with canonical byte-exact lookup (AC-54).
 	rebuildNamespaceAbsent      // Lookup result only; never a row.
 )
 
@@ -135,7 +138,48 @@ func (n *rebuildResolverNamespace) lookup(key string) (rebuildNamespaceKind, err
 			return rebuildNamespaceAbsent, nil
 		}
 	}
+	// An opaque subtree carries only its boundary entry. An unlisted
+	// descendant of one is denied, not an unknown admission decision.
+	for ancestor := key; ; {
+		if n.entries[ancestor].kind == rebuildNamespaceDenied {
+			return rebuildNamespaceUnknown, fmt.Errorf("%w: %w", errRebuildResolverNamespace, errRebuildResolverInputDenied)
+		}
+		cut := strings.LastIndexByte(ancestor, '/')
+		if cut < 0 {
+			break
+		}
+		ancestor = ancestor[:cut]
+	}
 	return rebuildNamespaceUnknown, fmt.Errorf("%w: no checked answer for key", errRebuildResolverNamespace)
+}
+
+// probeFile interprets a checked slash path with stat-style file semantics.
+// A missing component in a byte-exact closed parent, or a regular ancestor,
+// proves that the full path is not a file. Unknown or opaque paths refuse.
+func (n *rebuildResolverNamespace) probeFile(key string) (bool, error) {
+	if n != nil && n.frozen && n.entries["."].close != rebuildNamespaceUnknown && key == "." {
+		return false, nil // the held checkout root is a directory
+	}
+	if n == nil || !n.frozen || !validRebuildNamespaceKey(key) {
+		return false, fmt.Errorf("%w: invalid frozen file probe %q", errRebuildResolverNamespace, key)
+	}
+	for start := 0; ; {
+		end := len(key)
+		if i := strings.IndexByte(key[start:], '/'); i >= 0 {
+			end = start + i
+		}
+		kind, err := n.lookup(key[:end])
+		if err != nil {
+			return false, err
+		}
+		if end == len(key) {
+			return kind == rebuildNamespaceRegular, nil
+		}
+		if kind != rebuildNamespaceDirectory {
+			return false, nil
+		}
+		start = end + 1
+	}
 }
 
 func validRebuildNamespaceKey(key string) bool {

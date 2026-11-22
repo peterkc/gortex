@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -29,6 +30,8 @@ const (
 	rebuildNamespaceUnsupportedFact
 	rebuildNamespaceCloseFact
 	rebuildNamespaceCloseExactFact
+	rebuildGoManifestFact
+	rebuildTSAliasConfigFact
 )
 
 var errRebuildInputSidecar = errors.New("invalid frozen build input sidecar")
@@ -37,11 +40,12 @@ var errRebuildInputSidecar = errors.New("invalid frozen build input sidecar")
 // not turn into a different name on replay. Followed manifests carry only the
 // logical root name and the verified bytes' digest, never the target path.
 type rebuildSidecarRow struct {
-	Kind    rebuildCppFactKind `json:"kind"`
-	Path    []byte             `json:"path"`
-	Present bool               `json:"present,omitempty"`
-	Digest  rebuildDigest      `json:"digest,omitzero"`
-	Dirs    [][]byte           `json:"dirs,omitempty"`
+	Kind    rebuildCppFactKind            `json:"kind"`
+	Path    []byte                        `json:"path"`
+	Present bool                          `json:"present,omitempty"`
+	Digest  rebuildDigest                 `json:"digest,omitzero"`
+	Dirs    [][]byte                      `json:"dirs,omitempty"`
+	Config  *rebuildResolverConfigPayload `json:"config,omitempty"`
 }
 
 func rebuildSidecarCppRow(f rebuildCppFact) rebuildSidecarRow {
@@ -53,6 +57,12 @@ func rebuildSidecarCppRow(f rebuildCppFact) rebuildSidecarRow {
 }
 
 func (r rebuildSidecarRow) check() error {
+	if r.isResolverConfig() {
+		return r.checkResolverConfig()
+	}
+	if r.Config != nil {
+		return fmt.Errorf("%w: unexpected resolver config payload", errRebuildInputSidecar)
+	}
 	if ns, ok := r.namespaceRow(); ok {
 		closing := ns.kind == rebuildNamespaceClose || ns.kind == rebuildNamespaceCloseExact
 		if (validRebuildNamespaceKey(ns.key) || closing && ns.key == ".") &&
@@ -206,6 +216,14 @@ func visitRebuildInputSidecar(ctx context.Context, lease string, expected rebuil
 		}
 		if err := row.check(); err != nil {
 			return err
+		}
+		if row.isResolverConfig() {
+			// Refuse ambiguous fields (including duplicate JSON keys and null
+			// payload members). Only the new row kinds require canonical bytes.
+			encoded, err := json.Marshal(row)
+			if err != nil || !bytes.Equal(encoded, line[:len(line)-1]) {
+				return fmt.Errorf("%w: noncanonical resolver config row", errRebuildInputSidecar)
+			}
 		}
 		if err := visit(row); err != nil {
 			return err

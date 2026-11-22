@@ -24,13 +24,14 @@ import (
 const rebuildStageAck byte = 1
 
 // runRebuildBuild starts a worker in the owner's prepared input lease. The
-// process never outlives this call. publish can refuse any stage.
+// process never outlives this call. The caller pins the directory owning
+// the published witness for the duration of the run. publish can refuse any stage.
 func runRebuildBuild(
-	ctx context.Context, exe string, args []string, lease string, req rebuildBuildRequest,
+	ctx context.Context, exe string, args []string, lease, headDir string, req rebuildBuildRequest,
 	cfg config.IndexConfig, inputs []rebuildInput, publish func(context.Context, store_pebble.StageTables) error,
 ) (err error) {
-	if !filepath.IsAbs(exe) || !filepath.IsAbs(lease) || publish == nil {
-		return fmt.Errorf("%w: binary, build lease or publisher", errRebuildBuildWire)
+	if !filepath.IsAbs(exe) || !filepath.IsAbs(lease) || !filepath.IsAbs(headDir) || publish == nil {
+		return fmt.Errorf("%w: binary, build lease, head directory or publisher", errRebuildBuildWire)
 	}
 	if err := writeRebuildBuildRequest(ctx, lease, req, cfg, inputs); err != nil {
 		return err
@@ -72,7 +73,14 @@ func runRebuildBuild(
 	}
 	stop := context.AfterFunc(ctx, func() { _ = out.Close() })
 	defer stop()
-	return receiveRebuildStages(ctx, lease, req, out, acks, publish)
+	return receiveRebuildStages(ctx, lease, req, out, acks, func(ctx context.Context, tables store_pebble.StageTables) error {
+		if tables.Witness.Stage == store_pebble.StageManifest {
+			if err := retainRebuildInputSidecar(ctx, headDir, lease, rebuildDigest(tables.Witness.FrozenInputs)); err != nil {
+				return fmt.Errorf("%w: retain the manifest's frozen inputs: %w", ErrRebuildWorker, err)
+			}
+		}
+		return publish(ctx, tables)
+	})
 }
 
 // Keep only the start of the latest nonblank diagnostic, not a worker log.

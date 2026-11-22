@@ -51,7 +51,8 @@ func TestRebuildResolverNamespaceReplay(t *testing.T) {
 		for _, key := range []string{"ignored", "ignored/secret.ts", "ignored/unseen.ts"} {
 			kind, err := n.lookup(key)
 			require.ErrorIs(t, err, errRebuildResolverNamespace, "%s", key)
-			require.Equal(t, rebuildNamespaceUnknown, kind)
+			require.ErrorIs(t, err, errRebuildResolverInputDenied, "%s", key)
+			require.Equal(t, rebuildNamespaceUnknown, kind, "%s", key)
 		}
 	}
 	var captured rebuildResolverNamespace
@@ -82,6 +83,8 @@ func TestRebuildResolverNamespaceLookupRefusals(t *testing.T) {
 	var n rebuildResolverNamespace
 	for _, row := range []rebuildNamespaceRow{
 		{"exact", rebuildNamespaceDirectory},
+		{"exact/Foo.ts", rebuildNamespaceRegular},
+		{"exact/caf\u00e9.ts", rebuildNamespaceRegular},
 		{"open", rebuildNamespaceDirectory},
 		{"aliases", rebuildNamespaceDirectory},
 		{"aliases/Seen.ts", rebuildNamespaceRegular},
@@ -105,6 +108,7 @@ func TestRebuildResolverNamespaceLookupRefusals(t *testing.T) {
 	} {
 		kind, err := n.lookup(key)
 		require.ErrorIs(t, err, errRebuildResolverNamespace, "%s", key)
+		require.NotErrorIs(t, err, errRebuildResolverInputDenied, "%s", key)
 		require.Equal(t, rebuildNamespaceUnknown, kind, "%s", key)
 	}
 	for _, key := range []string{"exact", "open", "aliases"} {
@@ -112,15 +116,53 @@ func TestRebuildResolverNamespaceLookupRefusals(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, rebuildNamespaceDirectory, kind)
 	}
-	for _, key := range []string{"aliases/Seen.ts", "aliases/byte-\xff.ts"} {
+	for _, key := range []string{"aliases/Seen.ts", "aliases/byte-\xff.ts", "exact/Foo.ts", "exact/caf\u00e9.ts"} {
 		kind, err := n.lookup(key)
 		require.NoError(t, err)
 		require.Equal(t, rebuildNamespaceRegular, kind)
 	}
 	require.ErrorIs(t, n.add(rebuildNamespaceRow{"exact/no", rebuildNamespaceRegular}), errRebuildResolverNamespace)
-	kind, err := n.lookup("exact/no")
-	require.NoError(t, err)
-	require.Equal(t, rebuildNamespaceAbsent, kind)
+	for _, key := range []string{"exact/no", "exact/foo.ts", "exact/cafe\u0301.ts"} {
+		kind, err := n.lookup(key)
+		require.NoError(t, err, "%s", key)
+		require.Equal(t, rebuildNamespaceAbsent, kind, "%s", key)
+	}
+}
+
+func TestRebuildResolverNamespaceFileProbe(t *testing.T) {
+	var n rebuildResolverNamespace
+	for _, row := range []rebuildNamespaceRow{
+		{"exact", rebuildNamespaceDirectory},
+		{"exact/Foo.ts", rebuildNamespaceRegular},
+		{"exact/opaque", rebuildNamespaceDenied},
+		{"exact/link", rebuildNamespaceUnsupported},
+		{"exact", rebuildNamespaceCloseExact},
+		{"open", rebuildNamespaceDirectory},
+		{".", rebuildNamespaceCloseExact},
+	} {
+		require.NoError(t, n.add(row))
+	}
+	_, err := n.probeFile("exact/Foo.ts")
+	require.ErrorIs(t, err, errRebuildResolverNamespace)
+	require.NoError(t, n.freeze())
+	for key, want := range map[string]bool{
+		"exact/Foo.ts": true, "exact/foo.ts": false, "exact/Foo.ts/child.ts": false,
+		"absent/parent/index.ts": false, "exact": false, ".": false,
+	} {
+		got, err := n.probeFile(key)
+		require.NoError(t, err, "%q", key)
+		require.Equal(t, want, got, "%q", key)
+	}
+	for _, key := range []string{"exact/opaque/leaf.ts", "exact/link/leaf.ts", "open/no.ts", "open/../no.ts"} {
+		got, err := n.probeFile(key)
+		require.False(t, got)
+		require.ErrorIs(t, err, errRebuildResolverNamespace, "%q", key)
+		if key == "exact/opaque/leaf.ts" {
+			require.ErrorIs(t, err, errRebuildResolverInputDenied)
+		} else {
+			require.NotErrorIs(t, err, errRebuildResolverInputDenied)
+		}
+	}
 }
 
 func TestRebuildResolverNamespaceRejectsRows(t *testing.T) {

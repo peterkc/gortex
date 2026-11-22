@@ -45,7 +45,7 @@ func TestFrozenRootDirectoryLiteral(t *testing.T) {
 	err := VisitFrozenDirectory(t.Context(), root, ".", func(name string, mode fs.FileMode) error {
 		got[name] = mode
 		return nil
-	})
+	}, nil)
 	if err != nil || len(got) != 4 || got["asset"] != fs.ModeDir || got["empty"] != fs.ModeDir || got["link"] != fs.ModeSymlink {
 		t.Fatalf("literal listing = %v, %v", got, err)
 	}
@@ -56,10 +56,10 @@ func TestFrozenRootDirectoryLiteral(t *testing.T) {
 		t.Fatal("unexpected child visit")
 		return nil
 	}
-	if err := VisitFrozenDirectory(t.Context(), root, "empty", reject); err != nil {
+	if err := VisitFrozenDirectory(t.Context(), root, "empty", reject, nil); err != nil {
 		t.Fatalf("empty directory did not close: %v", err)
 	}
-	if err := VisitFrozenDirectory(t.Context(), root, "link", reject); !errors.Is(err, ErrFrozenRootPath) {
+	if err := VisitFrozenDirectory(t.Context(), root, "link", reject, nil); !errors.Is(err, ErrFrozenRootPath) {
 		t.Fatalf("link was not refused: %v", err)
 	}
 }
@@ -68,11 +68,15 @@ func TestFrozenRootDirectoryRefusesDrift(t *testing.T) {
 	working := t.TempDir()
 	regularWrite(t, working, "child/one", "")
 	root := testFrozenRoot(t, working)
+	var visited bool
 	err := VisitFrozenDirectory(t.Context(), root, "child", func(string, fs.FileMode) error {
-		if err := os.Rename(filepath.Join(working, "child"), filepath.Join(working, "moved")); err != nil {
-			t.Fatal(err)
-		}
+		visited = true
 		return nil
+	}, func() error {
+		if !visited {
+			t.Fatal("classified the directory before listing its entries")
+		}
+		return os.Rename(filepath.Join(working, "child"), filepath.Join(working, "moved"))
 	})
 	if !errors.Is(err, ErrFrozenRootChanged) {
 		t.Fatalf("renamed directory closed without a drift refusal: %v", err)

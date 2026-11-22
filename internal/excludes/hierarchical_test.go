@@ -1,6 +1,8 @@
 package excludes
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -18,8 +20,17 @@ func mkIgnore(t *testing.T, path, content string) {
 
 func TestHierarchical_RootLevel(t *testing.T) {
 	root := t.TempDir()
-	mkIgnore(t, filepath.Join(root, ".gortexignore"), "*.gen.go\nbuild/\n")
+	const rules = "*.gen.go\nbuild/\n"
+	ignore := filepath.Join(root, ".gortexignore")
+	mkIgnore(t, ignore, rules)
 	h := NewHierarchical(root, ".gortexignore")
+	observed := 0
+	h.ObserveReads(func(path string, data []byte, err error) {
+		observed++
+		if path != ignore || string(data) != rules || err != nil {
+			t.Errorf("disk read = (%q, %q, %v), want (%q, %q, nil)", path, data, err, ignore, rules)
+		}
+	})
 
 	if !h.Match(filepath.Join(root, "foo.gen.go"), false) {
 		t.Error("root .gortexignore should exclude foo.gen.go")
@@ -32,6 +43,9 @@ func TestHierarchical_RootLevel(t *testing.T) {
 	}
 	if !h.Match(filepath.Join(root, "pkg", "sub", "foo.gen.go"), false) {
 		t.Error("root pattern should reach a deeply nested foo.gen.go")
+	}
+	if observed != 1 {
+		t.Errorf("disk reads observed = %d, want 1", observed)
 	}
 }
 
@@ -213,5 +227,63 @@ func TestHierarchicalCachesFolderOnlyAfterParent(t *testing.T) {
 	h.mu.RUnlock()
 	if !ok {
 		t.Fatal("sub not cached after root")
+	}
+}
+
+func TestHierarchicalWithReader(t *testing.T) {
+	root := t.TempDir()
+	ignore := filepath.Join(root, ".gortexignore")
+	mkIgnore(t, ignore, "disk.go\n")
+	for _, tc := range []struct {
+		name    string
+		data    string
+		err     error
+		matched bool
+	}{
+		{name: "present", data: "# comment\r\n virtual.go \r\n", matched: true},
+		{name: "absent", err: fs.ErrNotExist},
+		{name: "unreadable", data: "virtual.go\n", err: errors.New("read refused")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reads, observed, diagnosed := 0, 0, 0
+			h := NewHierarchicalWithReader(root, []string{".gortexignore"}, func(path string) ([]byte, error) {
+				reads++
+				if path != ignore {
+					t.Errorf("reader path = %q, want %q", path, ignore)
+				}
+				if tc.data == "" {
+					return nil, tc.err
+				}
+				return []byte(tc.data), tc.err
+			}, func(dir string, _ *Matcher) {
+				diagnosed++
+				if dir != root {
+					t.Errorf("diagnostics directory = %q, want %q", dir, root)
+				}
+			})
+			h.ObserveReads(func(path string, data []byte, err error) {
+				observed++
+				if path != ignore || string(data) != tc.data || err != tc.err {
+					t.Errorf("observed (%q, %q, %v), want (%q, %q, %v)", path, data, err, ignore, tc.data, tc.err)
+				}
+			})
+			wantDiagnosed := 0
+			if tc.matched {
+				wantDiagnosed = 1
+			}
+			for cycle := 1; cycle <= 2; cycle++ {
+				if got := h.Match(filepath.Join(root, "virtual.go"), false); got != tc.matched {
+					t.Errorf("Match(virtual.go) = %v, want %v", got, tc.matched)
+				}
+				if h.Match(filepath.Join(root, "disk.go"), false) {
+					t.Error("supplied reader must not fall back to the disk rules")
+				}
+				if reads != cycle || observed != cycle || diagnosed != cycle*wantDiagnosed {
+					t.Errorf("cycle %d: reads/observed/diagnosed = %d/%d/%d, want %d/%d/%d",
+						cycle, reads, observed, diagnosed, cycle, cycle, cycle*wantDiagnosed)
+				}
+				h.Forget(root)
+			}
+		})
 	}
 }

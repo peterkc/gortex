@@ -23,6 +23,7 @@ import (
 type Hierarchical struct {
 	root      string
 	filenames []string
+	readFile  func(string) ([]byte, error)
 
 	mu    sync.RWMutex
 	cache map[string]*Matcher // abs dir -> compiled matcher; nil value = directory has no ignore files
@@ -57,12 +58,22 @@ func NewHierarchical(root string, filenames ...string) *Hierarchical {
 // NewHierarchicalWithDiagnostics reports each loaded list once, when cached.
 // diagnose must not call back into the hierarchical matcher.
 func NewHierarchicalWithDiagnostics(root string, filenames []string, diagnose func(string, *Matcher)) *Hierarchical {
+	return NewHierarchicalWithReader(root, filenames, os.ReadFile, diagnose)
+}
+
+// NewHierarchicalWithReader calls readFile with the joined ignore-file path.
+// readFile must be non-nil, safe for concurrent use, and enforce any required
+// confinement and size limits. Read errors reach ObserveReads but supply no
+// patterns. Callers that need a checked decision must reject unexpected read
+// errors before using the result. diagnose behaves as in NewHierarchicalWithDiagnostics.
+func NewHierarchicalWithReader(root string, filenames []string, readFile func(string) ([]byte, error), diagnose func(string, *Matcher)) *Hierarchical {
 	if abs, err := filepath.Abs(root); err == nil {
 		root = abs
 	}
 	return &Hierarchical{
 		root:      filepath.Clean(root),
 		filenames: filenames,
+		readFile:  readFile,
 		cache:     make(map[string]*Matcher),
 		diagnose:  diagnose,
 	}
@@ -171,7 +182,7 @@ func (h *Hierarchical) dirMatcher(dir string) *Matcher {
 
 	var patterns []string
 	for _, name := range h.filenames {
-		patterns = append(patterns, readIgnoreFile(filepath.Join(dir, name), h.observe)...)
+		patterns = append(patterns, h.readIgnoreFile(filepath.Join(dir, name))...)
 	}
 	if len(patterns) > 0 {
 		m = New(patterns)
@@ -203,11 +214,11 @@ func (h *Hierarchical) cached(dir string) bool {
 // non-comment lines as gitignore-syntax patterns. A missing or
 // unreadable file yields nil — honoring ignore files is a convenience,
 // never a hard requirement, so a missing or permission-denied file
-// silently no-ops. observe, when set, is handed what the read found.
-func readIgnoreFile(path string, observe func(string, []byte, error)) []string {
-	data, err := os.ReadFile(path)
-	if observe != nil {
-		observe(path, data, err)
+// silently no-ops. The observer, when set, is handed what the read found.
+func (h *Hierarchical) readIgnoreFile(path string) []string {
+	data, err := h.readFile(path)
+	if h.observe != nil {
+		h.observe(path, data, err)
 	}
 	if err != nil {
 		return nil

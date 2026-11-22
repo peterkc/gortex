@@ -10,7 +10,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/zeebo/blake3"
+	"github.com/zzet/gortex/internal/indexer/merkle"
 	"github.com/zzet/gortex/internal/indexer/source"
+	"github.com/zzet/gortex/internal/resolver"
 )
 
 func TestRebuildGoObservationRows(t *testing.T) {
@@ -66,7 +69,7 @@ func TestRebuildGoObservationRows(t *testing.T) {
 			require.NoError(t, namespace.freeze())
 			before := raw
 			var rows []rebuildGoManifest
-			err = captureRebuildGoObservations(t.Context(), root, &namespace, inputs, manifests, &raw, func(row rebuildGoManifest) error {
+			err = captureRebuildGoObservations(t.Context(), root, &namespace, inputs, manifests, nil, &raw, func(row rebuildGoManifest) error {
 				rows = append(rows, row)
 				return nil
 			})
@@ -133,7 +136,7 @@ func TestRebuildGoObservationAuthorityRefusals(t *testing.T) {
 			}
 			require.NoError(t, namespace.freeze())
 			raw := int64(rebuildGoManifestLimit)
-			err = captureRebuildGoObservations(t.Context(), root, &namespace, nil, map[string]*rebuildInput{"go.mod": tc.claim}, &raw,
+			err = captureRebuildGoObservations(t.Context(), root, &namespace, nil, map[string]*rebuildInput{"go.mod": tc.claim}, nil, &raw,
 				func(row rebuildGoManifest) error { t.Fatalf("emitted an unproved row: %+v", row); return nil })
 			require.ErrorIs(t, err, tc.want)
 			require.NotErrorIs(t, err, ErrBuildInputChanged)
@@ -192,7 +195,7 @@ func TestRebuildGoObservationDriftAndLimits(t *testing.T) {
 				require.NoError(t, os.WriteFile(file, []byte(tc.live), 0o600))
 			}
 			raw = tc.raw
-			err = captureRebuildGoObservations(t.Context(), src.FrozenRoot(), &namespace, inputs, map[string]*rebuildInput{tc.key: &in}, &raw,
+			err = captureRebuildGoObservations(t.Context(), src.FrozenRoot(), &namespace, inputs, map[string]*rebuildInput{tc.key: &in}, nil, &raw,
 				func(row rebuildGoManifest) error {
 					t.Fatalf("emitted a row for changed or oversized input: %+v", row)
 					return nil
@@ -201,4 +204,145 @@ func TestRebuildGoObservationDriftAndLimits(t *testing.T) {
 			require.Equal(t, tc.raw, raw)
 		})
 	}
+}
+
+func TestRebuildGoObservationFollowedRootReplay(t *testing.T) {
+	const mod = "module example.org/root\n"
+	const target = "root.manifest"
+	checkout := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(checkout, target), []byte(mod), 0o600))
+	require.NoError(t, os.Symlink(target, filepath.Join(checkout, "go.mod")))
+	const goSrc = "package a\n"
+	inputs := []rebuildInput{rebuildGoTestInput("a.go", "go", goSrc), rebuildGoTestInput("b.go", "go", goSrc)}
+	for _, in := range inputs {
+		require.NoError(t, os.WriteFile(filepath.Join(checkout, in.Path), []byte(goSrc), 0o600))
+	}
+	src, err := source.NewFilesystemSource(checkout)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, src.Close()) })
+	link, _, err := readRebuildInput(t.Context(), src, "go.mod", "manifest", 1024)
+	require.NoError(t, err)
+	require.Equal(t, merkle.Symlink, link.Kind)
+
+	candidate := resolver.GoImportCandidate{ImporterFilePath: "a.go", CandidateFilePath: "b.go", ImportPath: "example.org/root"}
+	native, err := goPackageOwnershipFromFiles(t.Context(), src, "", map[string]string{"a.go": "", "b.go": ""})
+	require.NoError(t, err)
+	require.Equal(t, resolver.GoPackageOwnershipUnknown, native(candidate))
+
+	// Stand in for the owner: resolve once, then share this checked read and
+	// the actual followed-manifest row with the normalizer. The fixture's
+	// only link target is a known admitted in-checkout regular file.
+	entry, err := src.ResolveFrozenRootLink(t.Context(), "go.mod", func(raw string) error {
+		if int64(len(raw)) != link.Size || blake3.Sum256([]byte(raw)) != link.Content {
+			return ErrBuildInputChanged
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, target, entry.Path())
+	data, err := entry.Read(t.Context(), rebuildGoManifestLimit)
+	require.NoError(t, err)
+	require.Equal(t, mod, string(data))
+	effective := rebuildGoTestInput(target, "manifest", mod)
+	followed := rebuildFollowedGoMod{link: link, target: effective, data: data,
+		row: rebuildSidecarRow{Kind: rebuildFollowedManifest, Path: []byte("go.mod"), Present: true, Digest: effective.Content}}
+	require.NotEqual(t, link.Content, followed.row.Digest)
+
+	var namespace rebuildResolverNamespace
+	raw := int64(rebuildCppRawLimit)
+	require.NoError(t, captureRebuildResolverDirectory(t.Context(), src.FrozenRoot(), ".", true,
+		func(string, fs.FileMode) (bool, error) { return true, nil }, &namespace, &raw, func(rebuildSidecarRow) error { return nil }))
+	require.NoError(t, namespace.freeze())
+	require.NoError(t, os.WriteFile(filepath.Join(checkout, target), []byte("module example.org/edit\n"), 0o600))
+	before := raw
+	lease := t.TempDir()
+	var captured []rebuildGoManifest
+	digest, err := writeRebuildInputSidecar(t.Context(), lease, func(emit func(rebuildSidecarRow) error) error {
+		if err := emit(followed.row); err != nil {
+			return err
+		}
+		return captureRebuildGoObservations(t.Context(), src.FrozenRoot(), &namespace, inputs,
+			map[string]*rebuildInput{"go.mod": &link}, &followed, &raw, func(row rebuildGoManifest) error {
+				captured = append(captured, row)
+				return emit(rebuildGoManifestSidecarRow(row))
+			})
+	})
+	require.NoError(t, err)
+	want := rebuildGoManifest{Path: "go.mod", Present: true, Digest: blake3.Sum256([]byte(mod)), RootClaim: "example.org/root"}
+	require.Equal(t, []rebuildGoManifest{want, {Path: "go.work"}}, captured)
+	require.Equal(t, int64(len(mod)), before-raw)
+
+	require.NoError(t, os.Remove(filepath.Join(checkout, target)))
+	require.NoError(t, os.Remove(filepath.Join(checkout, "go.mod")))
+	goFacts, _, err := openRebuildResolverConfigFacts(t.Context(), lease, digest)
+	require.NoError(t, err)
+	require.Len(t, goFacts, 2)
+	require.Equal(t, captured[0], goFacts["go.mod"])
+	require.Equal(t, captured[1], goFacts["go.work"])
+	nearest, err := rebuildGoNearest(".", goFacts.lookup)
+	require.NoError(t, err)
+	require.Equal(t, want, nearest, "a positive loose claim is still a strict non-certificate")
+	got, err := rebuildGoOwnership(candidate, func(string) (bool, error) { return true, nil }, goFacts.lookup)
+	require.NoError(t, err)
+	require.Equal(t, resolver.GoPackageOwnershipUnknown, got)
+}
+
+func TestRebuildGoObservationFollowedRootRefusals(t *testing.T) {
+	const mod = "module example.org/root\n"
+	link := rebuildGoTestInput("go.mod", "manifest", "root.manifest")
+	link.Kind = merkle.Symlink
+	target := rebuildGoTestInput("root.manifest", "manifest", mod)
+	valid := rebuildFollowedGoMod{link: link, target: target, data: []byte(mod),
+		row: rebuildSidecarRow{Kind: rebuildFollowedManifest, Path: []byte("go.mod"), Present: true, Digest: target.Content}}
+	root, err := os.OpenRoot(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, root.Close())
+	wrongLink, wrongRow, changedDigest, changedBytes := valid, valid, valid, valid
+	wrongLink.link.Content[0] ^= 1
+	wrongRow.row.Path = []byte("package.json")
+	changedDigest.target.Content[0] ^= 1
+	changedBytes.data = []byte("module example.org/edit\n")
+	for _, tc := range []struct {
+		name    string
+		binding *rebuildFollowedGoMod
+		raw     int64
+		want    error
+	}{
+		{"unproved target", nil, rebuildGoManifestLimit, errRebuildResolverNamespace},
+		{"different original link", &wrongLink, rebuildGoManifestLimit, errRebuildGoEvidence},
+		{"wrong followed row", &wrongRow, rebuildGoManifestLimit, errRebuildGoEvidence},
+		{"target does not match followed digest", &changedDigest, rebuildGoManifestLimit, ErrBuildInputChanged},
+		{"checked bytes no longer match target", &changedBytes, rebuildGoManifestLimit, ErrBuildInputChanged},
+		{"target exceeds remaining raw limit", &valid, int64(len(mod) - 1), errRebuildGoCaptureLimit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var namespace rebuildResolverNamespace
+			require.NoError(t, namespace.add(rebuildNamespaceRow{key: "go.mod", kind: rebuildNamespaceUnsupported}))
+			require.NoError(t, namespace.add(rebuildNamespaceRow{key: ".", kind: rebuildNamespaceCloseExact}))
+			require.NoError(t, namespace.freeze())
+			raw := tc.raw
+			err := captureRebuildGoObservations(t.Context(), root, &namespace, nil, map[string]*rebuildInput{"go.mod": &link}, tc.binding, &raw,
+				func(row rebuildGoManifest) error { t.Fatalf("emitted an unproved row: %+v", row); return nil })
+			require.ErrorIs(t, err, tc.want)
+			require.Equal(t, tc.raw, raw)
+		})
+	}
+	t.Run("nested link remains unsupported with a valid root binding", func(t *testing.T) {
+		var namespace rebuildResolverNamespace
+		for _, row := range []rebuildNamespaceRow{
+			{key: "go.mod", kind: rebuildNamespaceUnsupported},
+			{key: "nested", kind: rebuildNamespaceDirectory},
+			{key: "nested/go.mod", kind: rebuildNamespaceUnsupported},
+			{key: "nested", kind: rebuildNamespaceCloseExact},
+			{key: ".", kind: rebuildNamespaceCloseExact},
+		} {
+			require.NoError(t, namespace.add(row))
+		}
+		require.NoError(t, namespace.freeze())
+		raw := int64(rebuildGoManifestLimit)
+		inputs := []rebuildInput{rebuildGoTestInput("nested/a.go", "go", "package a\n")}
+		err := captureRebuildGoObservations(t.Context(), root, &namespace, inputs, map[string]*rebuildInput{"go.mod": &link}, &valid, &raw,
+			func(row rebuildGoManifest) error { t.Fatalf("emitted before refusal: %+v", row); return nil })
+		require.ErrorIs(t, err, errRebuildResolverNamespace)
+	})
 }

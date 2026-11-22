@@ -124,6 +124,66 @@ func TestRebuildTSAliasConfigsNativeReplay(t *testing.T) {
 	}
 }
 
+func TestRebuildTSAliasConfigsPostParseProbeReplay(t *testing.T) {
+	ctx := t.Context()
+	root := t.TempDir()
+	src, ids := newRebuildTSAliasFixture(t, root, map[string]string{
+		"tsconfig.json": `{"compilerOptions":{"paths":{"@lib/*":["missing/*","shared/*"]}}}`,
+		"app/main.ts":   `import "@lib/x"`,
+		"shared/x.ts":   "export {}",
+	})
+	const caller, spec = "app/main.ts", "@lib/x"
+	native := tsalias.Load(root)
+	require.Equal(t, "shared/x", tsalias.Resolve(native.FindForFile(caller), spec))
+	cfg, input := ids["tsconfig.json"], ids[caller]
+	input.Language = "typescript"
+	lease := t.TempDir()
+	digest, err := writeRebuildInputSidecar(ctx, lease, func(emit func(rebuildSidecarRow) error) error {
+		raw := int64(rebuildCppRawLimit)
+		ns, err := captureRebuildCheckoutNamespace(ctx, src.FrozenRoot(), nil, &raw, func(key string, _ fs.FileMode) (bool, error) {
+			_, ok := ids[key]
+			return ok, nil
+		}, emit)
+		if err != nil {
+			return err
+		}
+		rows, err := captureRebuildTSAliasConfigs(ctx, src.FrozenRoot(), true, ns, []rebuildInput{input},
+			map[string]*rebuildInput{"tsconfig.json": &cfg}, &raw)
+		if err != nil {
+			return err
+		}
+		for _, key := range []string{"app/jsconfig.json", "app/tsconfig.json", "jsconfig.json", "tsconfig.json"} {
+			fact, err := rows.lookup(key)
+			if err != nil {
+				return err
+			}
+			row, err := rebuildTSAliasConfigSidecarRow(fact)
+			if err != nil {
+				return err
+			}
+			if err := emit(row); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	// Only after sealing the input does the parser's import become a
+	// resolver query. A new live lookup chooses a different expansion.
+	require.NoError(t, os.Remove(filepath.Join(root, "shared/x.ts")))
+	writeRebuildTSAliasFixtureFile(t, root, "missing/x.ts", "export {}")
+	native = tsalias.Load(root)
+	require.Equal(t, "missing/x", tsalias.Resolve(native.FindForFile(caller), spec))
+	_, configs, err := openRebuildResolverConfigFacts(ctx, lease, digest)
+	require.NoError(t, err)
+	ns, err := openRebuildResolverNamespace(ctx, lease, digest)
+	require.NoError(t, err)
+	stem, err := configs.resolve(ns, caller, spec)
+	require.NoError(t, err)
+	require.Equal(t, tsalias.FrozenAliasStem("shared/x"), stem)
+}
+
 func TestRebuildTSAliasConfigsRefusals(t *testing.T) {
 	const key = "jsconfig.json"
 	const initial = `{"compilerOptions":{"paths":{"x":["a"]}}}`

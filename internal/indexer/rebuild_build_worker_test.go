@@ -22,12 +22,16 @@ import (
 )
 
 func TestRebuildBuildChildStages(t *testing.T) {
-	for _, edit := range []bool{false, true} {
-		name := "sealed prefix is not complete"
-		if edit {
-			name = "uncached edit crosses process boundary"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		edit        bool
+		badRetained bool
+	}{
+		{name: "sealed prefix is not complete"},
+		{name: "uncached edit crosses process boundary", edit: true},
+		{name: "sidecar collision prevents manifest publication", badRetained: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			root, src := rebuildInputFixture(t)
@@ -50,7 +54,7 @@ func TestRebuildBuildChildStages(t *testing.T) {
 					Profile: store_pebble.FullProfile, Stage: store_pebble.StageManifest},
 			}
 			manifests := map[string]*rebuildInput{"go.mod": nil, "package.json": nil}
-			if !edit {
+			if !tc.edit {
 				require.NoError(t, os.WriteFile(filepath.Join(root, "go-target"), []byte("module example.org/widgets\n"), 0o600))
 				require.NoError(t, os.Symlink("go-target", filepath.Join(root, "go.mod")))
 				link, _, err := readRebuildInput(ctx, src, "go.mod", "manifest", 1024)
@@ -63,7 +67,8 @@ func TestRebuildBuildChildStages(t *testing.T) {
 			exe, err := os.Executable()
 			require.NoError(t, err)
 			t.Setenv("GORTEX_TEST_REBUILD_BUILD_CHILD", "1")
-			h, err := store_pebble.OpenHead(filepath.Join(t.TempDir(), "head"), req.Incarnation, req.Witness.Profile)
+			headDir := filepath.Join(t.TempDir(), "head")
+			h, err := store_pebble.OpenHead(headDir, req.Incarnation, req.Witness.Profile)
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, h.Close()) })
 			var pinned *store_pebble.Snapshot
@@ -71,12 +76,15 @@ func TestRebuildBuildChildStages(t *testing.T) {
 			err = withRebuildBuildInputs(ctx, leases, src, manifests, req, nil,
 				func(lease string, bound rebuildBuildRequest) error {
 					ref = bound.Witness.FrozenInputs
-					if !edit {
+					if !tc.edit {
 						require.NotEmpty(t, ref)
 						// The child must not need the followed manifest's bytes.
 						require.NoError(t, os.Remove(filepath.Join(root, "go-target")))
 					}
-					return runRebuildBuild(ctx, exe, []string{"-test.run=^TestRebuildBuildChildEntry$", "--"}, lease, bound, cfg, inputs,
+					if tc.badRetained {
+						require.NoError(t, os.Mkdir(retainedRebuildInputPath(headDir, rebuildDigest(ref)), 0o700))
+					}
+					return runRebuildBuild(ctx, exe, []string{"-test.run=^TestRebuildBuildChildEntry$", "--"}, lease, headDir, bound, cfg, inputs,
 						func(ctx context.Context, tables store_pebble.StageTables) error {
 							if _, err := h.PublishStage(ctx, tables); err != nil {
 								return err
@@ -84,7 +92,7 @@ func TestRebuildBuildChildStages(t *testing.T) {
 							if tables.Witness.Stage == store_pebble.StageManifest {
 								pinned = h.OpenSnapshot()
 								t.Cleanup(func() { require.NoError(t, pinned.Close()) })
-								if edit {
+								if tc.edit {
 									return os.WriteFile(filepath.Join(root, rel), []byte("package p\nfunc Other() {}\n"), 0o600)
 								}
 							}
@@ -92,6 +100,21 @@ func TestRebuildBuildChildStages(t *testing.T) {
 						})
 				})
 			require.ErrorIs(t, err, ErrRebuildWorker)
+			entries, leaseErr := os.ReadDir(leases)
+			require.NoError(t, leaseErr)
+			require.Len(t, entries, 1, "the owner must remove only its build lease after reaping")
+			require.Equal(t, "unowned", entries[0].Name())
+			if tc.badRetained {
+				require.ErrorIs(t, err, errRebuildInputSidecar)
+				require.Nil(t, pinned, "the owner must not offer the manifest to the publisher")
+				latest := h.OpenSnapshot()
+				t.Cleanup(func() { require.NoError(t, latest.Close()) })
+				require.ErrorIs(t, latest.RequireStage(store_pebble.StageManifest), store_pebble.ErrNotPublished)
+				collision, statErr := os.Lstat(retainedRebuildInputPath(headDir, rebuildDigest(ref)))
+				require.NoError(t, statErr)
+				require.True(t, collision.IsDir())
+				return
+			}
 			require.NotNil(t, pinned, "the earlier stage must really publish")
 			published, publicationErr := pinned.Publication()
 			require.NoError(t, publicationErr)
@@ -110,7 +133,7 @@ func TestRebuildBuildChildStages(t *testing.T) {
 			t.Cleanup(func() { require.NoError(t, latest.Close()) })
 			saved, e := os.ReadDir(req.ParseDir)
 			require.NoError(t, e)
-			if edit {
+			if tc.edit {
 				require.ErrorIs(t, err, ErrBuildInputChanged)
 				require.Empty(t, saved)
 				require.ErrorAs(t, latest.RequireStage(store_pebble.StageFileGraph), &pending)
@@ -121,10 +144,15 @@ func TestRebuildBuildChildStages(t *testing.T) {
 				require.Len(t, latest.FindNodesByName("Frozen"), 1)
 				require.ErrorAs(t, latest.RequireStage(store_pebble.StageRelations), &pending)
 			}
-			entries, err := os.ReadDir(leases)
-			require.NoError(t, err)
-			require.Len(t, entries, 1, "the owner must remove only its build lease after reaping")
-			require.Equal(t, "unowned", entries[0].Name())
+			if ref != (store_pebble.HeadDigest{}) {
+				fresh := t.TempDir()
+				require.NoError(t, restoreRebuildInputSidecar(ctx, headDir, fresh, rebuildDigest(published.FrozenInputs)))
+				require.NoError(t, visitRebuildInputSidecar(ctx, fresh, rebuildDigest(published.FrozenInputs), func(row rebuildSidecarRow) error {
+					require.Equal(t, rebuildFollowedManifest, row.Kind)
+					require.Equal(t, "go.mod", string(row.Path))
+					return nil
+				}))
+			}
 		})
 	}
 }
@@ -152,7 +180,7 @@ func TestRebuildBuildFatalChildDiagnostic(t *testing.T) {
 	req := rebuildBuildRequest{Root: root, Witness: store_pebble.Witness{Recipe: store_pebble.HeadDigest{1}}}
 	err = withRebuildBuildInputs(ctx, parent, src, map[string]*rebuildInput{"go.mod": nil, "package.json": nil}, req, nil,
 		func(lease string, bound rebuildBuildRequest) error {
-			return runRebuildBuild(ctx, exe, []string{"-test.run=^TestRebuildBuildFatalChildEntry$", "--"}, lease, bound, config.Default().Index, nil,
+			return runRebuildBuild(ctx, exe, []string{"-test.run=^TestRebuildBuildFatalChildEntry$", "--"}, lease, parent, bound, config.Default().Index, nil,
 				func(context.Context, store_pebble.StageTables) error {
 					t.Fatal("failed child did not complete a stage")
 					return nil

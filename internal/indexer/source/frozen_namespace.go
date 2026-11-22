@@ -25,11 +25,12 @@ func ObserveFrozenLiteralRootPath(ctx context.Context, root *os.Root, rel string
 // VisitFrozenDirectory supplies the immediate child names and types for one
 // directory the caller's admission policy has allowed. It does not descend,
 // follow links, read contents, or distinguish Git-admitted and denied names.
-// The visitor receives tentative entries in filesystem order. Only a nil
-// result marks the listing complete, including an empty directory. The caller
+// The visitor receives tentative entries in filesystem order. If finish is
+// set, it classifies the complete tentative listing before the final checks.
+// Only a nil result marks the listing complete, including an empty directory. The caller
 // must discard observations on failure and may not infer case/Unicode lookup
 // equality from a successful listing. The checks do not make an atomic snapshot.
-func VisitFrozenDirectory(ctx context.Context, root *os.Root, rel string, visit func(name string, mode fs.FileMode) error) (err error) {
+func VisitFrozenDirectory(ctx context.Context, root *os.Root, rel string, visit func(name string, mode fs.FileMode) error, finish func() error) (err error) {
 	if visit == nil {
 		return fmt.Errorf("missing directory visitor: %w", ErrFrozenRootPath)
 	}
@@ -66,6 +67,11 @@ func VisitFrozenDirectory(ctx context.Context, root *os.Root, rel string, visit 
 			}
 		}
 		if errors.Is(readErr, io.EOF) {
+			if finish != nil {
+				if err := finish(); err != nil {
+					return err
+				}
+			}
 			return errors.Join(obs.checkDescriptor(dir), obs.checkCurrent(ctx))
 		}
 	}
