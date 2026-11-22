@@ -1,7 +1,6 @@
 package store_pebble
 
 import (
-	"context"
 	"testing"
 
 	"github.com/cockroachdb/pebble/v2"

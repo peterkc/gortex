@@ -1,12 +1,10 @@
 package resolver
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
 
 func rebuildExternTestNode(id, name, file, repo, workspace, lang string, kind graph.NodeKind) *graph.Node {
