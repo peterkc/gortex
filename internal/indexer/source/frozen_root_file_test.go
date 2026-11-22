@@ -83,6 +83,40 @@ func TestFrozenRootDirectoryRefusesDrift(t *testing.T) {
 	}
 }
 
+func TestFrozenRootLinkRechecksTargetAdmission(t *testing.T) {
+	ctx := t.Context()
+	working := t.TempDir()
+	regularWrite(t, working, "allowed", "module example/allowed\n")
+	testFrozenSymlink(t, working, "go.mod", "allowed")
+	src, err := NewFilesystemSource(working)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = src.Close() })
+	denied := errors.New("target not admitted")
+	var visited []string
+	obs, err := src.ResolveFrozenRootLink(ctx, "go.mod", func(string) error { return nil }, func(name string) (fs.FileMode, error) {
+		visited = append(visited, name)
+		if name != "allowed" {
+			return 0, denied
+		}
+		return 0, nil
+	})
+	if err != nil || !slices.Equal(visited, []string{"allowed"}) {
+		t.Fatalf("initial visit = %v, %v", visited, err)
+	}
+	if err := os.Remove(filepath.Join(working, "go.mod")); err != nil {
+		t.Fatal(err)
+	}
+	// The new target is not even on disk. Admission must fail first.
+	testFrozenSymlink(t, working, "go.mod", "denied")
+	visited = nil
+	data, err := obs.Read(ctx, 1024)
+	if data != nil || !errors.Is(err, denied) || !errors.Is(err, ErrFrozenRootChanged) || !slices.Equal(visited, []string{"denied"}) {
+		t.Fatalf("changed target admission = %v, %q, %v", visited, data, err)
+	}
+}
+
 func TestFrozenRootPathReadRelocated(t *testing.T) {
 	for _, name := range []string{"repo", "repo[1]"} {
 		t.Run(name, func(t *testing.T) {

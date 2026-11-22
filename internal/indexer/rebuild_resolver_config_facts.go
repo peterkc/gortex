@@ -3,12 +3,83 @@ package indexer
 import (
 	"context"
 	"fmt"
+	"maps"
+	"os"
 	"path"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/zzet/gortex/internal/indexer/merkle"
 	"github.com/zzet/gortex/internal/parser/tsalias"
 )
+
+// captureRebuildResolverConfigRows writes the selected callers' normalized
+// configs into the same lease as their checked namespace. The enumerating
+// owner must supply inputs and manifest identities from that namespace epoch.
+// Followed manifest rows belong to the owner, not this config projection.
+func captureRebuildResolverConfigRows(ctx context.Context, root *os.Root, literalRoot bool, ns *rebuildResolverNamespace,
+	inputs []rebuildInput, identities map[string]*rebuildInput, followed *rebuildFollowedGoMod,
+	rawRemaining *int64, emit func(rebuildSidecarRow) error,
+) error {
+	if emit == nil {
+		return fmt.Errorf("%w: missing resolver config row sink", errRebuildInputSidecar)
+	}
+	var goUsed, tsUsed bool
+	for _, in := range inputs {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		switch in.Language {
+		case "go":
+			goUsed = true
+		case "typescript", "javascript":
+			tsUsed = true
+		default:
+			continue
+		}
+		if in.Kind != merkle.RegularFile || ns == nil {
+			return fmt.Errorf("%w: unproved selected caller %q", errRebuildResolverNamespace, in.Path)
+		}
+		kind, err := ns.lookup(in.Path)
+		if err != nil {
+			return err
+		}
+		if ns.entries[path.Dir(in.Path)].close == rebuildNamespaceUnknown {
+			return fmt.Errorf("%w: unclosed selected caller parent %q", errRebuildResolverNamespace, in.Path)
+		}
+		if kind != rebuildNamespaceRegular {
+			return fmt.Errorf("%w: caller %q differs from namespace", ErrBuildInputChanged, in.Path)
+		}
+	}
+	if goUsed {
+		if err := captureRebuildGoObservations(ctx, root, ns, inputs, identities, followed, rawRemaining, func(row rebuildGoManifest) error {
+			return emit(rebuildGoManifestSidecarRow(row))
+		}); err != nil {
+			return err
+		}
+	}
+	if !tsUsed {
+		return ctx.Err()
+	}
+	configs, err := captureRebuildTSAliasConfigs(ctx, root, literalRoot, ns, inputs, identities, rawRemaining)
+	if err != nil {
+		return err
+	}
+	for _, key := range slices.Sorted(maps.Keys(configs)) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		row, err := rebuildTSAliasConfigSidecarRow(configs[key])
+		if err != nil {
+			return err
+		}
+		if err := emit(row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // Paths and content digests belong to the row, not the normalized payload.
 // The payload strings have already been parsed as module paths or JSON strings.

@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/zzet/gortex/internal/excludes"
+	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/parser/tsalias"
 )
 
@@ -131,57 +133,59 @@ func TestRebuildTSAliasConfigsPostParseProbeReplay(t *testing.T) {
 		"tsconfig.json": `{"compilerOptions":{"paths":{"@lib/*":["missing/*","shared/*"]}}}`,
 		"app/main.ts":   `import "@lib/x"`,
 		"shared/x.ts":   "export {}",
+		"go.mod":        "module example.org/fixture\n",
+		"a.go":          "package fixture\n",
 	})
+	require.NoError(t, os.Mkdir(filepath.Join(root, "hidden"), 0o700))
 	const caller, spec = "app/main.ts", "@lib/x"
 	native := tsalias.Load(root)
 	require.Equal(t, "shared/x", tsalias.Resolve(native.FindForFile(caller), spec))
-	cfg, input := ids["tsconfig.json"], ids[caller]
-	input.Language = "typescript"
-	lease := t.TempDir()
-	digest, err := writeRebuildInputSidecar(ctx, lease, func(emit func(rebuildSidecarRow) error) error {
-		raw := int64(rebuildCppRawLimit)
-		ns, err := captureRebuildCheckoutNamespace(ctx, src.FrozenRoot(), nil, &raw, func(key string, _ fs.FileMode) (bool, error) {
+	cfg, mod := ids["tsconfig.json"], ids["go.mod"]
+	input, goInput := ids[caller], ids["a.go"]
+	input.Language, goInput.Language = "typescript", "go"
+	inputs := []rebuildInput{input, goInput}
+	identities := map[string]*rebuildInput{"go.mod": &mod, "tsconfig.json": &cfg}
+	capture := func(raw *int64, emit func(rebuildSidecarRow) error) error {
+		ns, err := captureRebuildCheckoutNamespace(ctx, src.FrozenRoot(), excludes.New([]string{"hidden/"}), raw, func(key string, _ fs.FileMode) (bool, error) {
 			_, ok := ids[key]
 			return ok, nil
 		}, emit)
 		if err != nil {
 			return err
 		}
-		rows, err := captureRebuildTSAliasConfigs(ctx, src.FrozenRoot(), true, ns, []rebuildInput{input},
-			map[string]*rebuildInput{"tsconfig.json": &cfg}, &raw)
-		if err != nil {
-			return err
-		}
-		for _, key := range []string{"app/jsconfig.json", "app/tsconfig.json", "jsconfig.json", "tsconfig.json"} {
-			fact, err := rows.lookup(key)
-			if err != nil {
-				return err
-			}
-			row, err := rebuildTSAliasConfigSidecarRow(fact)
-			if err != nil {
-				return err
-			}
-			if err := emit(row); err != nil {
-				return err
-			}
-		}
+		denied := input
+		denied.Path = "hidden/never-read.ts"
+		require.ErrorIs(t, captureRebuildResolverConfigRows(ctx, src.FrozenRoot(), true, ns, []rebuildInput{denied}, identities, nil, raw,
+			func(rebuildSidecarRow) error { t.Fatal("emitted facts for denied caller"); return nil }), errRebuildResolverInputDenied)
+		return captureRebuildResolverConfigRows(ctx, src.FrozenRoot(), true, ns, inputs, identities, nil, raw, emit)
+	}
+	req := rebuildBuildRequest{Root: root, Witness: store_pebble.Witness{Recipe: store_pebble.HeadDigest{1}}}
+	err := withRebuildBuildInputs(ctx, t.TempDir(), src, identities, req, capture, func(lease string, bound rebuildBuildRequest) error {
+		require.NoError(t, bound.checkProjectRecipe())
+		require.Equal(t, "fixture", bound.ProjectName)
+		digest := rebuildDigest(bound.Witness.FrozenInputs)
+		require.NotZero(t, digest)
+
+		// Only after sealing the input does the parser's import become a
+		// resolver query. A new live lookup chooses a different expansion.
+		require.NoError(t, os.Remove(filepath.Join(root, "shared/x.ts")))
+		writeRebuildTSAliasFixtureFile(t, root, "missing/x.ts", "export {}")
+		native = tsalias.Load(root)
+		require.Equal(t, "missing/x", tsalias.Resolve(native.FindForFile(caller), spec))
+		goFacts, configs, err := openRebuildResolverConfigFacts(ctx, lease, digest)
+		require.NoError(t, err)
+		module, err := goFacts.lookup("go.mod")
+		require.NoError(t, err)
+		require.Equal(t, "example.org/fixture", module.OwnerModule)
+		require.Equal(t, mod.Content, module.Digest)
+		ns, err := openRebuildResolverNamespace(ctx, lease, digest)
+		require.NoError(t, err)
+		stem, err := configs.resolve(ns, caller, spec)
+		require.NoError(t, err)
+		require.Equal(t, tsalias.FrozenAliasStem("shared/x"), stem)
 		return nil
 	})
 	require.NoError(t, err)
-
-	// Only after sealing the input does the parser's import become a
-	// resolver query. A new live lookup chooses a different expansion.
-	require.NoError(t, os.Remove(filepath.Join(root, "shared/x.ts")))
-	writeRebuildTSAliasFixtureFile(t, root, "missing/x.ts", "export {}")
-	native = tsalias.Load(root)
-	require.Equal(t, "missing/x", tsalias.Resolve(native.FindForFile(caller), spec))
-	_, configs, err := openRebuildResolverConfigFacts(ctx, lease, digest)
-	require.NoError(t, err)
-	ns, err := openRebuildResolverNamespace(ctx, lease, digest)
-	require.NoError(t, err)
-	stem, err := configs.resolve(ns, caller, spec)
-	require.NoError(t, err)
-	require.Equal(t, tsalias.FrozenAliasStem("shared/x"), stem)
 }
 
 func TestRebuildTSAliasConfigsRefusals(t *testing.T) {

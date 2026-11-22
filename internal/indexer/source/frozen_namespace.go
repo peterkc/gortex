@@ -19,7 +19,7 @@ func ObserveFrozenLiteralRootPath(ctx context.Context, root *os.Root, rel string
 	if path.Clean(rel) != rel || !filepath.IsLocal(filepath.FromSlash(rel)) || strings.ContainsAny(rel, "\\\x00") {
 		return FrozenRootPath{}, fmt.Errorf("invalid literal path: %w", ErrFrozenRootPath)
 	}
-	return resolveFrozenRootPath(ctx, root, rel, nil, true)
+	return resolveFrozenRootPath(ctx, root, rel, nil, true, nil)
 }
 
 // VisitFrozenDirectory supplies the immediate child names and types for one

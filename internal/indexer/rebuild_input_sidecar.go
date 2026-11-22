@@ -32,6 +32,7 @@ const (
 	rebuildNamespaceCloseExactFact
 	rebuildGoManifestFact
 	rebuildTSAliasConfigFact
+	rebuildNpmManifestRow
 )
 
 var errRebuildInputSidecar = errors.New("invalid frozen build input sidecar")
@@ -46,6 +47,7 @@ type rebuildSidecarRow struct {
 	Digest  rebuildDigest                 `json:"digest,omitzero"`
 	Dirs    [][]byte                      `json:"dirs,omitempty"`
 	Config  *rebuildResolverConfigPayload `json:"config,omitempty"`
+	NPM     *rebuildNpmManifestPayload    `json:"npm,omitempty"`
 }
 
 func rebuildSidecarCppRow(f rebuildCppFact) rebuildSidecarRow {
@@ -57,6 +59,12 @@ func rebuildSidecarCppRow(f rebuildCppFact) rebuildSidecarRow {
 }
 
 func (r rebuildSidecarRow) check() error {
+	if r.Kind == rebuildNpmManifestRow {
+		return r.checkNpmManifest()
+	}
+	if r.NPM != nil {
+		return fmt.Errorf("%w: unexpected npm manifest payload", errRebuildInputSidecar)
+	}
 	if r.isResolverConfig() {
 		return r.checkResolverConfig()
 	}
@@ -217,12 +225,16 @@ func visitRebuildInputSidecar(ctx context.Context, lease string, expected rebuil
 		if err := row.check(); err != nil {
 			return err
 		}
-		if row.isResolverConfig() {
+		if row.isResolverConfig() || row.Kind == rebuildNpmManifestRow {
 			// Refuse ambiguous fields (including duplicate JSON keys and null
 			// payload members). Only the new row kinds require canonical bytes.
 			encoded, err := json.Marshal(row)
 			if err != nil || !bytes.Equal(encoded, line[:len(line)-1]) {
-				return fmt.Errorf("%w: noncanonical resolver config row", errRebuildInputSidecar)
+				name := "resolver config"
+				if row.Kind == rebuildNpmManifestRow {
+					name = "npm manifest"
+				}
+				return fmt.Errorf("%w: noncanonical %s row", errRebuildInputSidecar, name)
 			}
 		}
 		if err := visit(row); err != nil {
@@ -273,10 +285,19 @@ func writeRebuildNamespaceFact(rawRemaining *int64, row rebuildNamespaceRow, emi
 // openRebuildResolverNamespace returns no view until the enclosing sidecar's
 // entire digest has been checked and all namespace rows have passed replay.
 func openRebuildResolverNamespace(ctx context.Context, lease string, expected rebuildDigest) (*rebuildResolverNamespace, error) {
+	return visitRebuildResolverNamespace(ctx, lease, expected, nil)
+}
+
+// Visit other rows in the same stream as the namespace. They remain tentative
+// until both the byte digest and the namespace have passed.
+func visitRebuildResolverNamespace(ctx context.Context, lease string, expected rebuildDigest, visit func(rebuildSidecarRow) error) (*rebuildResolverNamespace, error) {
 	var n rebuildResolverNamespace
 	if err := visitRebuildInputSidecar(ctx, lease, expected, func(row rebuildSidecarRow) error {
 		if ns, ok := row.namespaceRow(); ok {
 			return n.add(ns)
+		}
+		if visit != nil {
+			return visit(row)
 		}
 		return nil
 	}); err != nil {

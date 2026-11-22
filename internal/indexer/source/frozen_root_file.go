@@ -27,11 +27,12 @@ const (
 // It borrows the caller's root and does not keep any other descriptor open.
 // Only Path and derived facts, not the observation, belong in frozen inputs.
 type FrozenRootPath struct {
-	root    *os.Root
-	name    string
-	entry   frozenRootEntry
-	links   []frozenRootLink
-	literal bool
+	root        *os.Root
+	name        string
+	entry       frozenRootEntry
+	links       []frozenRootLink
+	literal     bool
+	admitTarget func(string) (fs.FileMode, error)
 }
 
 func (p FrozenRootPath) Path() string      { return p.entry.path }
@@ -54,6 +55,7 @@ type frozenRootWalk struct {
 	bytesLeft     int
 	checkRootLink func(string) error
 	literal       bool
+	admitTarget   func(string) (fs.FileMode, error)
 }
 
 // ResolveFrozenRootPath resolves links in traversal order, without cleaning
@@ -63,19 +65,25 @@ type frozenRootWalk struct {
 // Other spellings, including aliases, cannot be proven here and are refused.
 // Only a missing requested component, not a dangling link target, is absence.
 func ResolveFrozenRootPath(ctx context.Context, root *os.Root, name string) (FrozenRootPath, error) {
-	return resolveFrozenRootPath(ctx, root, name, nil, false)
+	return resolveFrozenRootPath(ctx, root, name, nil, false, nil)
 }
 
 // ResolveFrozenRootLink checks the requested literal root link's raw target
 // before resolving it. The checker runs before any target lookup or read.
-func (s *FilesystemSource) ResolveFrozenRootLink(ctx context.Context, name string, check func(string) error) (FrozenRootPath, error) {
+// If supplied, admitTarget verifies each target path before its lookup and
+// returns the expected entry type. The same gate protects later rechecks.
+func (s *FilesystemSource) ResolveFrozenRootLink(ctx context.Context, name string, check func(string) error,
+	admitTarget func(string) (fs.FileMode, error),
+) (FrozenRootPath, error) {
 	if !filepath.IsLocal(name) || name == "." || path.Base(filepath.ToSlash(name)) != name || check == nil {
 		return FrozenRootPath{}, fmt.Errorf("expected a literal root link and target check: %w", ErrFrozenRootPath)
 	}
-	return resolveFrozenRootPath(ctx, s.root, name, check, false)
+	return resolveFrozenRootPath(ctx, s.root, name, check, false, admitTarget)
 }
 
-func resolveFrozenRootPath(ctx context.Context, root *os.Root, name string, check func(string) error, literal bool) (FrozenRootPath, error) {
+func resolveFrozenRootPath(ctx context.Context, root *os.Root, name string, check func(string) error, literal bool,
+	admitTarget func(string) (fs.FileMode, error),
+) (FrozenRootPath, error) {
 	if ctx == nil || root == nil {
 		return FrozenRootPath{}, fmt.Errorf("nil context or root: %w", ErrFrozenRootPath)
 	}
@@ -95,6 +103,7 @@ func resolveFrozenRootPath(ctx context.Context, root *os.Root, name string, chec
 		bytesLeft:     maxFrozenRootPathBytes,
 		checkRootLink: check,
 		literal:       literal,
+		admitTarget:   admitTarget,
 	}
 	if err := walk.resolve(ctx, name, false); err != nil {
 		return FrozenRootPath{}, err
@@ -102,7 +111,7 @@ func resolveFrozenRootPath(ctx context.Context, root *os.Root, name string, chec
 	if err := ctx.Err(); err != nil {
 		return FrozenRootPath{}, err
 	}
-	return FrozenRootPath{root: root, name: name, entry: walk.last(), links: walk.links, literal: literal}, nil
+	return FrozenRootPath{root: root, name: name, entry: walk.last(), links: walk.links, literal: literal, admitTarget: admitTarget}, nil
 }
 
 func (w *frozenRootWalk) last() frozenRootEntry { return w.stack[len(w.stack)-1] }
@@ -175,6 +184,15 @@ func (w *frozenRootWalk) visit(ctx context.Context, name string, fromLink bool) 
 		return fmt.Errorf("resolved prefixes exceed the path budget: %w", ErrFrozenRootPath)
 	}
 	w.bytesLeft -= len(name)
+	var expected fs.FileMode
+	checked := fromLink && w.admitTarget != nil
+	if checked {
+		var err error
+		expected, err = w.admitTarget(name)
+		if err != nil {
+			return err
+		}
+	}
 	native := filepath.FromSlash(name)
 	info, err := w.root.Lstat(native)
 	if err != nil {
@@ -190,6 +208,9 @@ func (w *frozenRootWalk) visit(ctx context.Context, name string, fromLink bool) 
 			return regularFileAbsent(name, err)
 		}
 		return fmt.Errorf("%w: %w", ErrFrozenRootPath, mapRootError(name, err))
+	}
+	if checked && info.Mode().Type() != expected.Type() {
+		return fmt.Errorf("%s: target type differs from admission: %w", name, ErrFrozenRootChanged)
 	}
 	entry := frozenRootEntry{path: name, info: info}
 	if info.Mode()&fs.ModeSymlink == 0 {
@@ -310,12 +331,15 @@ func (p FrozenRootPath) checkDescriptor(f *os.File) error {
 }
 
 func (p FrozenRootPath) checkCurrent(ctx context.Context) error {
-	current, err := resolveFrozenRootPath(ctx, p.root, p.name, nil, p.literal)
+	current, err := resolveFrozenRootPath(ctx, p.root, p.name, nil, p.literal, p.admitTarget)
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
 	if err != nil {
 		// Missing now is a changed witness, not a negative frozen input.
+		if p.admitTarget != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%s: recheck observed path: %w: %w", p.Path(), ErrFrozenRootChanged, err)
+		}
 		return fmt.Errorf("%s: recheck observed path: %w: %v", p.Path(), ErrFrozenRootChanged, err)
 	}
 	if !sameFrozenRootEntry(p.entry, current.entry) || !slices.EqualFunc(p.links, current.links, func(a, b frozenRootLink) bool {

@@ -37,6 +37,9 @@ type npmAliasIndex struct {
 	// or a nil answer — reads the working copy, which is what the live
 	// index does.
 	trees func(root string) manifestTree
+	// frozenManifest is set only for a rebuild's single checked checkout.
+	// Empty facts never fall back to the live tree.
+	frozenManifest func(rel string) npmResolverManifest
 
 	mu sync.Mutex
 	// aliasCache memoises one parsed package.json: disk path → the
@@ -58,6 +61,15 @@ type npmAliasIndex struct {
 	// root manifests' `workspaces` globs. A non-nil empty map records "built,
 	// no workspaces" so it is not re-scanned.
 	wsNames map[string]string
+}
+
+// npmResolverManifest contains only the native resolver's manifest projections.
+type npmResolverManifest struct {
+	aliases      map[string]string
+	dependencies map[string]string
+	exports      *packageExports
+	name         string
+	workspaces   []string
 }
 
 // packageExports is one package.json's parsed `exports` field: the
@@ -228,6 +240,9 @@ func (x *npmAliasIndex) locate(callerFile string) (root, relDir string, ok bool)
 // The manifest is read out of the root's tree, so a build indexing a
 // committed snapshot resolves aliases from that snapshot's manifests.
 func (x *npmAliasIndex) aliasesFor(root, rel string) map[string]string {
+	if x.frozenManifest != nil {
+		return x.frozenManifest(rel).aliases
+	}
 	tree := x.tree(root)
 	absPath := joinPath(root, rel)
 	x.mu.Lock()
@@ -237,17 +252,23 @@ func (x *npmAliasIndex) aliasesFor(root, rel string) map[string]string {
 	}
 	var aliases map[string]string
 	if src, ok := tree.readFile(rel); ok {
-		for _, spec := range modules.ParsePackageJSON(src) {
-			if spec.Ecosystem != "npm" || spec.Alias == "" {
-				continue
-			}
-			if aliases == nil {
-				aliases = map[string]string{}
-			}
-			aliases[spec.Path] = spec.Alias
-		}
+		aliases = npmResolverAliases(modules.ParsePackageJSON(src))
 	}
 	x.aliasCache[absPath] = aliases
+	return aliases
+}
+
+func npmResolverAliases(specs []modules.Spec) map[string]string {
+	var aliases map[string]string
+	for _, spec := range specs {
+		if spec.Ecosystem != "npm" || spec.Alias == "" {
+			continue
+		}
+		if aliases == nil {
+			aliases = map[string]string{}
+		}
+		aliases[spec.Path] = spec.Alias
+	}
 	return aliases
 }
 
@@ -327,6 +348,9 @@ func npmSpecResolvesInRepo(version string) bool {
 // optionalDependencies entry, and aliasesFor discards all but the aliased
 // ones.
 func (x *npmAliasIndex) dependenciesFor(root, rel string) map[string]string {
+	if x.frozenManifest != nil {
+		return x.frozenManifest(rel).dependencies
+	}
 	tree := x.tree(root)
 	absPath := joinPath(root, rel)
 	x.mu.Lock()
@@ -336,17 +360,23 @@ func (x *npmAliasIndex) dependenciesFor(root, rel string) map[string]string {
 	}
 	var deps map[string]string
 	if src, ok := tree.readFile(rel); ok {
-		for _, spec := range modules.ParsePackageJSON(src) {
-			if spec.Ecosystem != "npm" || spec.Path == "" {
-				continue
-			}
-			if deps == nil {
-				deps = map[string]string{}
-			}
-			deps[spec.Path] = spec.Version
-		}
+		deps = npmResolverDependencies(modules.ParsePackageJSON(src))
 	}
 	x.depsCache[absPath] = deps
+	return deps
+}
+
+func npmResolverDependencies(specs []modules.Spec) map[string]string {
+	var deps map[string]string
+	for _, spec := range specs {
+		if spec.Ecosystem != "npm" || spec.Path == "" {
+			continue
+		}
+		if deps == nil {
+			deps = map[string]string{}
+		}
+		deps[spec.Path] = spec.Version
+	}
 	return deps
 }
 
@@ -355,6 +385,9 @@ func (x *npmAliasIndex) dependenciesFor(root, rel string) map[string]string {
 // nil result records "read, but no usable `exports` field / missing
 // file" so a miss is not re-parsed on every import edge.
 func (x *npmAliasIndex) exportsFor(root, rel string) *packageExports {
+	if x.frozenManifest != nil {
+		return x.frozenManifest(rel).exports
+	}
 	tree := x.tree(root)
 	absPath := joinPath(root, rel)
 	x.mu.Lock()
@@ -667,50 +700,61 @@ func (x *npmAliasIndex) workspaceNames() map[string]string {
 	names := map[string]string{}
 	for prefix, root := range x.roots {
 		tree := x.tree(root)
-		for _, pkgDir := range workspacePackageDirs(tree) {
-			src, ok := tree.readFile(joinRel(pkgDir, "package.json"))
-			if !ok {
-				continue
+		var patterns []string
+		if x.frozenManifest != nil {
+			patterns = x.frozenManifest("package.json").workspaces
+		} else if src, ok := tree.readFile("package.json"); ok {
+			patterns = parseNpmWorkspacePatterns(src)
+		}
+		for _, pkgDir := range workspacePackageDirs(tree, patterns) {
+			manifest := joinRel(pkgDir, "package.json")
+			var name string
+			if x.frozenManifest != nil {
+				name = x.frozenManifest(manifest).name
+			} else if src, ok := tree.readFile(manifest); ok {
+				name = parseNpmPackageName(src)
 			}
-			var m struct {
-				Name string `json:"name"`
-			}
-			if json.Unmarshal(src, &m) != nil || m.Name == "" {
+			if name == "" {
 				continue
 			}
 			dir := pkgDir
 			if prefix != "" {
 				dir = prefix + "/" + pkgDir
 			}
-			names[m.Name] = dir
+			names[name] = dir
 		}
 	}
 	x.wsNames = names
 	return names
 }
 
-// workspacePackageDirs returns the repo-relative directories of every workspace
-// package declared by the root package.json's `workspaces` field (npm/yarn
-// array form and the yarn `{ "packages": [...] }` object form), expanding each
-// glob against tree — the same snapshot the manifest itself was read from, so
-// a committed build never discovers a workspace the checkout grew after the
-// tree it indexes.
-func workspacePackageDirs(tree manifestTree) []string {
-	src, ok := tree.readFile("package.json")
-	if !ok {
-		return nil
+// workspacePackageDirs expands each pattern against the same snapshot as the manifest.
+func workspacePackageDirs(tree manifestTree, patterns []string) []string {
+	var dirs []string
+	for _, glob := range patterns {
+		dirs = append(dirs, tree.matchDirs(glob)...)
 	}
+	return dirs
+}
+
+func parseNpmPackageName(src []byte) string {
+	var m struct {
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(src, &m) != nil {
+		return ""
+	}
+	return m.Name
+}
+
+func parseNpmWorkspacePatterns(src []byte) []string {
 	var m struct {
 		Workspaces json.RawMessage `json:"workspaces"`
 	}
 	if json.Unmarshal(src, &m) != nil {
 		return nil
 	}
-	var dirs []string
-	for _, glob := range parseWorkspacesField(m.Workspaces) {
-		dirs = append(dirs, tree.matchDirs(glob)...)
-	}
-	return dirs
+	return parseWorkspacesField(m.Workspaces)
 }
 
 // parseWorkspacesField normalises the two `workspaces` shapes (a bare array of

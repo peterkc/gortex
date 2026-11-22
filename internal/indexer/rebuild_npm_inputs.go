@@ -13,14 +13,15 @@ var errRebuildNpmInput = errors.New("unproved frozen npm input")
 
 const rebuildNpmFactBytes = 1 << 20
 
-// Each callback returns a miss only for a proved negative. No callback may
-// read an ignored, non-admitted or out-of-root path. The caller owns checked
-// traversal and the shared raw/encoded sidecar limits, and must apply limit
-// before reading or collecting results. The same callbacks can replay facts.
+// All inputs come from one verified frozen sidecar. A manifest row is a
+// positive fact even when it has no useful fields. File and glob callbacks
+// return misses only for proved negatives and must not consult live files.
 type rebuildNpmInputs struct {
-	readFile  func(context.Context, string, int) ([]byte, bool, error)
-	isFile    func(context.Context, string) (bool, error)
-	matchDirs func(context.Context, string, int) ([]string, error)
+	namespace    *rebuildResolverNamespace
+	manifests    map[string]rebuildNpmManifestFact
+	followedRoot rebuildDigest // verified target digest for a root package.json symlink
+	isFile       func(context.Context, string) (bool, error)
+	matchDirs    func(context.Context, string, int) ([]string, error)
 }
 
 // A legacy manifestTree reports misses without errors. Keep a sticky error
@@ -28,20 +29,22 @@ type rebuildNpmInputs struct {
 // as a missing manifest or proceeding to the next native probe. Use one
 // instance serially for a lease; discard it after any error.
 type rebuildNpmLookup struct {
-	ctx context.Context
-	in  rebuildNpmInputs
-	idx *npmAliasIndex
-	err error
+	ctx           context.Context
+	in            rebuildNpmInputs
+	idx           *npmAliasIndex
+	err           error
+	workspaceLeft int // bound the whole workspaceNames pre-expansion, including repeats
 }
 
 func newRebuildNpmLookup(ctx context.Context, in rebuildNpmInputs) *rebuildNpmLookup {
-	x := &rebuildNpmLookup{ctx: ctx, in: in}
-	if in.readFile == nil || in.isFile == nil || in.matchDirs == nil {
-		x.err = fmt.Errorf("%w: missing checked callback", errRebuildNpmInput)
+	x := &rebuildNpmLookup{ctx: ctx, in: in, workspaceLeft: rebuildNpmFactBytes}
+	if in.namespace == nil || !in.namespace.frozen || in.isFile == nil || in.matchDirs == nil {
+		x.err = fmt.Errorf("%w: missing checked npm inputs", errRebuildNpmInput)
 	}
 	// A fixed cache namespace, not the checkout path. The provider always
 	// returns x, so npmAliasIndex.tree cannot fall back to a disk tree.
 	x.idx = newNpmAliasIndexWithTrees(map[string]string{"": x.root()}, func(string) manifestTree { return x })
+	x.idx.frozenManifest = x.manifest
 	return x
 }
 
@@ -99,19 +102,36 @@ func (x *rebuildNpmLookup) begin(op, rel string) bool {
 	return x.err == nil
 }
 
-func (x *rebuildNpmLookup) readFile(rel string) ([]byte, bool) {
+func (x *rebuildNpmLookup) manifest(rel string) npmResolverManifest {
 	if !x.begin("manifest", rel) {
-		return nil, false
+		return npmResolverManifest{}
 	}
-	data, present, err := x.in.readFile(x.ctx, rel, rebuildNpmFactBytes-len(rel))
-	if err == nil && (len(data) > rebuildNpmFactBytes-len(rel) || !present && len(data) != 0) {
-		err = errors.New("invalid manifest fact")
+	ns := x.in.namespace
+	fact, present := x.in.manifests[rel]
+	if rel == "package.json" && x.in.followedRoot != (rebuildDigest{}) &&
+		ns.entries[rel].kind == rebuildNamespaceUnsupported && present && fact.Path == rel && fact.Digest == x.in.followedRoot {
+		return fact.Manifest
 	}
+	kind, err := ns.lookup(rel)
 	if err != nil {
 		x.fail("manifest", rel, err)
-		return nil, false
+		return npmResolverManifest{}
 	}
-	return data, present
+	switch {
+	case rel == "package.json" && x.in.followedRoot != (rebuildDigest{}):
+		// A followed target proof contradicts this namespace answer.
+	case kind == rebuildNamespaceAbsent && !present:
+		return npmResolverManifest{}
+	case kind == rebuildNamespaceRegular && present && fact.Path == rel && fact.Digest != (rebuildDigest{}):
+		return fact.Manifest
+	}
+	x.fail("manifest", rel, fmt.Errorf("%w: namespace and manifest fact disagree", errRebuildResolverNamespace))
+	return npmResolverManifest{}
+}
+
+func (x *rebuildNpmLookup) readFile(string) ([]byte, bool) {
+	x.unsupported("raw manifest read")
+	return nil, false
 }
 
 func (x *rebuildNpmLookup) isFile(rel string) bool {
@@ -133,11 +153,19 @@ func (x *rebuildNpmLookup) matchDirs(pattern string) []string {
 	if !x.begin("workspace glob", pattern) {
 		return nil
 	}
-	left := rebuildNpmFactBytes - len(pattern)
+	left := x.workspaceLeft - len(pattern)
+	if left < 0 {
+		x.fail("workspace glob", pattern, errRebuildCppCaptureLimit)
+		return nil
+	}
 	dirs, err := x.in.matchDirs(x.ctx, pattern, left)
 	if err == nil {
 		for i, dir := range dirs {
-			if len(dir) >= left || path.Clean(dir) != dir || !filepath.IsLocal(filepath.FromSlash(dir)) ||
+			if len(dir) >= left {
+				err = errRebuildCppCaptureLimit
+				break
+			}
+			if path.Clean(dir) != dir || !filepath.IsLocal(filepath.FromSlash(dir)) ||
 				strings.ContainsRune(dir, 0) || i > 0 && dirs[i-1] >= dir {
 				err = errors.New("invalid ordered workspace directories")
 				break
@@ -149,6 +177,7 @@ func (x *rebuildNpmLookup) matchDirs(pattern string) []string {
 		x.fail("workspace glob", pattern, err)
 		return nil
 	}
+	x.workspaceLeft = left
 	return dirs
 }
 

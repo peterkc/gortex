@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"encoding/gob"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -101,6 +102,65 @@ func TestRebuildProjectNameRefusesUnverified(t *testing.T) {
 		require.Equal(t, "linkedname", bound.ProjectName)
 		require.NotEmpty(t, bound.Witness.FrozenInputs)
 	})
+}
+
+func TestRebuildCheckedManifestLink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating a symlink requires a Windows privilege the test runner may not have")
+	}
+	const data = "module example.org/checked\n"
+	for _, tc := range []struct {
+		name, linkTarget string
+		admitted         bool
+		limit            int64
+		want             error
+	}{
+		{"admitted", "manifests/module.txt", true, 1024, nil},
+		{"no admitted identity", "manifests/module.txt", false, 1024, errRebuildResolverInputDenied},
+		{"opaque target directory", "ignored/data", true, 1024, errRebuildResolverInputDenied},
+		{"outside", "../outside", true, 1024, source.ErrOutsideRoot},
+		{"dangling", "manifests/missing", true, 1024, errRebuildResolverNamespace},
+		{"second link unsupported", "second", true, 1024, errRebuildResolverNamespace},
+		{"over caller limit", "manifests/module.txt", true, 1, errRebuildCppCaptureLimit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			root, src := rebuildInputFixture(t)
+			const targetPath = "manifests/module.txt"
+			require.NoError(t, os.Mkdir(filepath.Join(root, "manifests"), 0o700))
+			target := freezeProjectNameTestManifest(t, src, root, targetPath, data)
+			require.NoError(t, os.Mkdir(filepath.Join(root, "ignored"), 0o700))
+			require.NoError(t, os.Symlink("ignored/data", filepath.Join(root, "second")))
+			require.NoError(t, os.Symlink(tc.linkTarget, filepath.Join(root, "go.mod")))
+			link, _, err := readRebuildInput(ctx, src, "go.mod", "manifest", 1024)
+			require.NoError(t, err)
+			var ns rebuildResolverNamespace
+			left := int64(rebuildCppRawLimit)
+			for _, dir := range []string{".", "manifests"} {
+				require.NoError(t, captureRebuildResolverDirectory(ctx, src.FrozenRoot(), dir, true,
+					func(key string, _ fs.FileMode) (bool, error) { return key != "ignored", nil },
+					&ns, &left, func(rebuildSidecarRow) error { return nil }))
+			}
+			require.NoError(t, ns.freeze())
+			admitted := make(map[string]*rebuildInput)
+			if tc.admitted {
+				admitted[targetPath] = target
+			}
+			got, checked, row, err := readCheckedRebuildManifestLink(ctx, src, &ns, link, admitted, tc.limit)
+			if tc.want != nil {
+				require.ErrorIs(t, err, tc.want)
+				require.Empty(t, got)
+				require.Nil(t, checked)
+				require.Empty(t, row)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, *target, got)
+			require.Equal(t, data, string(checked))
+			require.Equal(t, rebuildSidecarRow{Kind: rebuildFollowedManifest, Path: []byte("go.mod"), Present: true, Digest: target.Content}, row)
+			require.NotEqual(t, link.Content, row.Digest)
+		})
+	}
 }
 
 func TestRebuildProjectNameRecipeRequest(t *testing.T) {

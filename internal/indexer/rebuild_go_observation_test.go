@@ -237,7 +237,7 @@ func TestRebuildGoObservationFollowedRootReplay(t *testing.T) {
 			return ErrBuildInputChanged
 		}
 		return nil
-	})
+	}, nil)
 	require.NoError(t, err)
 	require.Equal(t, target, entry.Path())
 	data, err := entry.Read(t.Context(), rebuildGoManifestLimit)

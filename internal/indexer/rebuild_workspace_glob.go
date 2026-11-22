@@ -78,7 +78,7 @@ func (g *rebuildWorkspaceGlob) matchDirs(ctx context.Context, pattern string, li
 	left := min(limit, rebuildNpmFactBytes-len(pattern))
 	add := func(key string) error {
 		if len(key) >= left {
-			return fmt.Errorf("%w: workspace glob result cap", errRebuildResolverNamespace)
+			return fmt.Errorf("%w: workspace glob result cap: %w", errRebuildResolverNamespace, errRebuildCppCaptureLimit)
 		}
 		left -= len(key) + 1
 		dirs = append(dirs, key)
