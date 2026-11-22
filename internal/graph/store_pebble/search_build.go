@@ -103,9 +103,16 @@ func symbolPrefixes(term string, visit func(string)) {
 	}
 }
 
+type searchExactSource uint8
+
+const (
+	exactFromNodes searchExactSource = iota
+	exactFromDocuments
+)
+
 // writeSymbols assigns IDs in canonical logical node order. Prefix frequencies
 // spill to the same private index rather than growing with the corpus heap.
-func (b *BuildStore) writeSymbols(ctx context.Context, gold *sortedRuns) error {
+func (b *BuildStore) writeSymbols(ctx context.Context, gold *sortedRuns, exactSource searchExactSource) error {
 	dfPrefix, idPrefix, docPrefix := []byte{'D'}, []byte{'I'}, []byte{'B'}
 	for _, prefix := range [][]byte{dfPrefix, idPrefix, docPrefix} {
 		if err := b.pending.DeleteRange(prefix, prefixEnd(prefix), pebble.NoSync); err != nil {
@@ -114,6 +121,12 @@ func (b *BuildStore) writeSymbols(ctx context.Context, gold *sortedRuns) error {
 	}
 	var stats searchStats
 	repos := make(map[string]struct{})
+	writeExact := func(n *graph.Node) error {
+		if searchExactKind(string(n.Kind)) && b.profile.keepsNode(n.Kind) {
+			return gold.add(searchKey("exact", n.RepoPrefix, n.Name, n.ID), []byte(n.ID))
+		}
+		return nil
+	}
 	postings := sortedRuns{dir: gold.dir, name: "posts", options: gold.options, format: gold.format, limit: goldBufferBytes}
 	ids, texts := make([]string, 0, 256), make([]string, 0, 256)
 	writeDocs := func() error {
@@ -132,6 +145,12 @@ func (b *BuildStore) writeSymbols(ctx context.Context, gold *sortedRuns) error {
 			}
 			if n == nil {
 				return invalid("symbol document has no source node")
+			}
+			// A selected document can have no terms and still match its exact name.
+			if exactSource == exactFromDocuments {
+				if err := writeExact(n); err != nil {
+					return err
+				}
 			}
 			// Keep the full ranking corpus; an off-group winner must not become a dangling graph hit.
 			stats.Rows++
@@ -192,18 +211,18 @@ func (b *BuildStore) writeSymbols(ctx context.Context, gold *sortedRuns) error {
 	if err := writeDocs(); err != nil {
 		return err
 	}
-	if err := pendingVisit(ctx, b.pending, []byte{familyNode}, func(r row) error {
-		n, err := decodeNode(r.value)
-		if err != nil {
+	if exactSource == exactFromNodes {
+		// Legacy Publish also exposes exact names of nodes with no symbol document.
+		if err := pendingVisit(ctx, b.pending, []byte{familyNode}, func(r row) error {
+			n, err := decodeNode(r.value)
+			if err != nil {
+				return err
+			}
+			repos[n.RepoPrefix] = struct{}{}
+			return writeExact(n)
+		}); err != nil {
 			return err
 		}
-		repos[n.RepoPrefix] = struct{}{}
-		if searchExactKind(string(n.Kind)) && b.profile.keepsNode(n.Kind) {
-			return gold.add(searchKey("exact", n.RepoPrefix, n.Name, n.ID), []byte(n.ID))
-		}
-		return nil
-	}); err != nil {
-		return err
 	}
 	stats.Repos = slices.Sorted(maps.Keys(repos))
 	if err := gold.add(searchKey("stats"), searchPackStats(stats)); err != nil {

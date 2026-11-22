@@ -16,8 +16,8 @@ import (
 var ErrSearchSeal = errors.New("pebble search stage seal failed")
 
 // PrepareSearch replaces private symbol documents from the final logical node
-// union and seals only the search family. Render returns the text and whether
-// a node belongs in the ranking corpus, even if the profile omits its row.
+// union and seals only the search family. Render selects the input for both
+// exact and ranked search. Profile-hidden documents still affect ranking.
 // The worker must finish all graph mutations before calling and must discard
 // its lease on error. Dir is a fresh, absolute stage directory owned by that lease.
 func (b *BuildStore) PrepareSearch(
@@ -64,7 +64,7 @@ func (b *BuildStore) PrepareSearch(
 	defer b.mu.Unlock()
 	format := b.db.FormatMajorVersion().MaxTableFormat()
 	gold := sortedRuns{dir: dir, name: "search", options: b.options, format: format, limit: goldBufferBytes}
-	if err := b.writeSymbols(ctx, &gold); err != nil {
+	if err := b.writeSymbols(ctx, &gold, exactFromDocuments); err != nil {
 		return StageTables{}, err
 	}
 	stream := goldWitness{digest: blake3.New()}

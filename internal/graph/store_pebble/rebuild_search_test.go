@@ -3,7 +3,6 @@ package store_pebble
 import (
 	"bytes"
 	"path/filepath"
-	"slices"
 	"testing"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -15,17 +14,38 @@ func TestRebuildSearchStageMatchesLegacySeal(t *testing.T) {
 	for _, profile := range []Profile{DefaultProfile, FullProfile} {
 		t.Run(string(profile), func(t *testing.T) {
 			ctx := t.Context()
-			worker, head, base, declaration, _, _, _ := relationsStageFixture(t, profile)
-			nodes := []*graph.Node{
-				{ID: "src.go::Run", Name: "Run", Kind: graph.KindFunction, RepoPrefix: "new", FilePath: "new/src.go"},
-				{ID: "src.go::Run#param:p", Name: "p", Kind: graph.KindParam, RepoPrefix: "new", FilePath: "new/src.go"},
-				{ID: "external-call::dep::example.org/lib", Name: "Lib", Kind: graph.KindModule},
-			}
-			worker.AddBatch(nodes, nil)
+			worker := newBuild(t, profile)
+			head, err := OpenHead(filepath.Join(t.TempDir(), "head"), testHeadIncarnation, profile)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, head.Close()) })
+			const path, repo, language = "new/src.py", "new", "python"
+			manifest, err := PrepareManifest(ctx, t.TempDir(), []ManifestFile{{Path: path, Kind: 'f', Language: language}}, Witness{
+				Input: HeadDigest{1}, Recipe: HeadDigest{2}, Stage: StageManifest, Profile: profile,
+			}, testHeadIncarnation)
+			require.NoError(t, err)
+			_, err = head.PublishStage(ctx, manifest)
+			require.NoError(t, err)
+			retained := &graph.Node{ID: path + "::Retained", Name: "Retained", Kind: graph.KindFunction, RepoPrefix: repo, FilePath: path, Language: language}
+			noTerms := &graph.Node{ID: path + "::NoTerms", Name: "NoTerms", Kind: graph.KindFunction, RepoPrefix: repo, FilePath: path, Language: language}
+			param := &graph.Node{ID: path + "::Retained#param:p", Name: "p", Kind: graph.KindParam, RepoPrefix: repo, FilePath: path, Language: language}
+			require.NoError(t, worker.AddParsedFile(repo, ParseFacts{
+				Nodes: []*graph.Node{retained, noTerms, param}, File: graph.FileMetaRow{FilePath: path, NodeCount: 3},
+			}))
+			fileGraph, err := worker.PrepareFileGraph(ctx, t.TempDir(), manifest.Witness, manifest.Incarnation)
+			require.NoError(t, err)
+			base, err := worker.RetainFileGraph(ctx, fileGraph)
+			require.NoError(t, err)
+			_, err = head.PublishStage(ctx, fileGraph)
+			require.NoError(t, err)
+
+			module := &graph.Node{ID: "external-call::dep::example.org/lib", Name: "Lib", Kind: graph.KindModule}
+			linked := &graph.Node{ID: "excluded/src.py::LinkAlias", Name: "LinkAlias", Kind: graph.KindFunction, RepoPrefix: "excluded", FilePath: "excluded/src.py", Language: language}
+			worker.AddBatch([]*graph.Node{module, linked}, nil)
 			derived := publishRebuildSearchDerived(t, worker, head, base)
 			pinned := stageRead(t, head)
-			require.NoError(t, worker.UpsertSymbolFTS(declaration.ID, "stale receipt"))
-			wantTokens := map[string]string{nodes[0].ID: "run arg", nodes[1].ID: "arg", nodes[2].ID: "lib"}
+			require.NoError(t, worker.UpsertSymbolFTS(linked.ID, "linkalias"))
+			// Declare the corpus explicitly, rather than classifying by language.
+			wantTokens := map[string]string{retained.ID: "retained arg", noTerms.ID: "...", param.ID: "arg", module.ID: "lib"}
 			stage, err := worker.PrepareSearch(ctx, t.TempDir(), derived.Witness, derived.Incarnation, func(n *graph.Node) (string, bool) {
 				text, ok := wantTokens[n.ID]
 				return text, ok
@@ -50,12 +70,37 @@ func TestRebuildSearchStageMatchesLegacySeal(t *testing.T) {
 			require.Equal(t, StageDerived, pending.Published)
 			require.Empty(t, rebuildSearchRows(t, pinned, []byte{familySymbol}))
 
-			// Independent, explicit token rows in reverse node and document order.
-			legacy, err := OpenBuild(filepath.Join(t.TempDir(), "legacy"), profile)
-			require.NoError(t, err)
-			t.Cleanup(func() { require.NoError(t, legacy.Close()) })
-			legacy.AddNode(declaration)
-			for _, n := range slices.Backward(nodes) {
+			require.NotNil(t, current.GetNode(linked.ID), "the link-derived candidate is a graph node, not a search document")
+			for _, tc := range []struct {
+				query, id string
+				exact     bool
+			}{
+				{query: "Retained", id: retained.ID, exact: true},
+				{query: "retained retained", id: retained.ID}, // Two terms bypass exact lookup.
+				{query: "NoTerms", id: noTerms.ID, exact: true},
+				{query: "noterms noterms"},
+				{query: "LinkAlias"},
+				{query: "linkalias linkalias"},
+			} {
+				hits, err := current.SearchSymbols(tc.query, 10)
+				require.NoError(t, err, tc.query)
+				if tc.id == "" {
+					require.Empty(t, hits, tc.query)
+					continue
+				}
+				require.Len(t, hits, 1, tc.query)
+				require.Equal(t, tc.id, hits[0].NodeID, tc.query)
+				if tc.exact {
+					require.Equal(t, float64(100), hits[0].Score, tc.query)
+				} else {
+					require.Positive(t, hits[0].Score, tc.query)
+					require.Less(t, hits[0].Score, float64(100), tc.query)
+				}
+			}
+
+			// The legacy oracle contains exactly the declared corpus.
+			legacy := newBuild(t, profile)
+			for _, n := range []*graph.Node{module, param, noTerms, retained} {
 				legacy.AddNode(n)
 				require.NoError(t, legacy.UpsertSymbolFTS(n.ID, wantTokens[n.ID]))
 			}
@@ -68,14 +113,14 @@ func TestRebuildSearchStageMatchesLegacySeal(t *testing.T) {
 			require.Equal(t, rebuildSearchRows(t, oracle, []byte{familySymbol}), saved)
 			stats, err := point(current, searchKey("stats"), searchReadStats)
 			require.NoError(t, err)
-			require.Equal(t, searchStats{Rows: 3, Tokens: 4, Count: 3, Repos: []string{"", "new", "old"}}, stats)
+			require.Equal(t, searchStats{Rows: 4, Tokens: 4, Count: 4, Repos: []string{"", repo}}, stats)
 			docs := make(map[string]bool)
 			for _, r := range rebuildSearchRows(t, current, searchKey("doc")) {
 				d, err := searchReadDoc(r.value)
 				require.NoError(t, err)
 				docs[d.ID] = d.NodePresent
 			}
-			require.Equal(t, map[string]bool{nodes[0].ID: true, nodes[1].ID: profile == FullProfile, nodes[2].ID: true}, docs)
+			require.Equal(t, map[string]bool{retained.ID: true, noTerms.ID: true, param.ID: profile == FullProfile, module.ID: true}, docs)
 		})
 	}
 }

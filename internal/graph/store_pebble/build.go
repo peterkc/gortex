@@ -165,7 +165,7 @@ func (b *BuildStore) Publish(ctx context.Context) (err error) {
 	if err := b.writeRows(ctx, &gold, StageSearch); err != nil {
 		return err
 	}
-	if err := b.writeSymbols(ctx, &gold); err != nil {
+	if err := b.writeSymbols(ctx, &gold, exactFromNodes); err != nil {
 		return err
 	}
 	if err := pendingVisit(ctx, b.pending, []byte{familyFileMeta, shingleRows}, func(r row) error {
