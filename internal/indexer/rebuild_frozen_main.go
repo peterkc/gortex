@@ -27,6 +27,7 @@ func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDiges
 	}
 	// A legacy sidecar without a root observation cannot certify a bridge
 	// miss. New checked checkout captures always include this row.
+	dependencyContractsReady := false
 	if digest != (rebuildDigest{}) {
 		if err := loadConfigs(); err != nil {
 			return err
@@ -35,6 +36,7 @@ func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDiges
 			if err := seedRebuildDependencyContracts(ctx, build, root); err != nil {
 				return err
 			}
+			dependencyContractsReady = true
 		}
 	}
 	var ns *rebuildResolverNamespace
@@ -86,7 +88,8 @@ func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDiges
 	view := build.RebuildView()
 	opts.ScratchParent = lease
 	return resolver.RunRebuildMain(ctx, build, opts, resolver.RebuildMainInputs{
-		SelectCallers: census.selectPendingCallers,
+		SelectCallers:            census.selectPendingCallers,
+		DependencyContractsReady: dependencyContractsReady,
 		PathAlias: func(file, spec string) (string, error) {
 			caller, err := rawPath(file)
 			if err != nil {

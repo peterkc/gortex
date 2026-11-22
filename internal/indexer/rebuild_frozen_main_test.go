@@ -91,6 +91,11 @@ require (
 					build.AddNode(&graph.Node{ID: configKey, Kind: graph.KindFile, FilePath: configKey, Language: "json"})
 					edge := graph.Edge{From: callerKey, To: pending, Kind: graph.EdgeImports, FilePath: callerKey, Line: 3}
 					build.AddEdge(&edge)
+					dep := graph.Edge{From: callerKey, To: "unresolved::import::example.org/seed/child", Kind: graph.EdgeImports,
+						FilePath: callerKey, Line: 4}
+					if !denied {
+						build.AddEdge(&dep)
+					}
 					existing := &graph.Node{ID: collision, Name: "retained", Kind: graph.KindFunction, FilePath: target, Language: "typescript"}
 					build.AddNode(existing)
 					census := &rebuildExtractorCensus{admitted: 3,
@@ -121,7 +126,12 @@ require (
 						edges = append(edges, *e)
 						return nil
 					}))
-					require.Equal(t, []graph.Edge{edge}, edges)
+					want := []graph.Edge{edge}
+					if !denied {
+						dep.To = seed
+						want = append([]graph.Edge{dep}, want...)
+					}
+					require.Equal(t, want, edges)
 					return nil
 				})
 			require.NoError(t, err)

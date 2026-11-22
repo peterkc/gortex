@@ -31,6 +31,9 @@ type RebuildMainInputs struct {
 	// ExternalNpmDependency uses the graph caller path and effective module
 	// specifier without its export suffix. False with no error is a proved negative.
 	ExternalNpmDependency func(caller, specifier string) (bool, error)
+	// DependencyContractsReady certifies that all dependency contracts from
+	// the frozen root go.mod input were seeded before the frontier opened.
+	DependencyContractsReady bool
 }
 
 // RunRebuildMain resolves selected pending edges in a private build using
@@ -51,10 +54,11 @@ func runRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts st
 	reconcileSources bool, in RebuildMainInputs,
 ) (err error) {
 	imports := rebuildMainImportInputs{
-		jsts:                  rebuildJSTSImportInputs{pathAlias: in.PathAlias, rewriteNpm: in.RewriteNpm},
-		goOwnership:           in.GoOwnership,
-		workspaceMembership:   in.WorkspaceMembership,
-		externalNpmDependency: in.ExternalNpmDependency,
+		jsts:                     rebuildJSTSImportInputs{pathAlias: in.PathAlias, rewriteNpm: in.RewriteNpm},
+		goOwnership:              in.GoOwnership,
+		workspaceMembership:      in.WorkspaceMembership,
+		externalNpmDependency:    in.ExternalNpmDependency,
+		dependencyContractsReady: in.DependencyContractsReady,
 	}
 	var placeholder *store_pebble.RebuildPlaceholderSources
 	defer func() {

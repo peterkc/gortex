@@ -480,11 +480,12 @@ func TestRebuildImportFileDirectoryBareJSTS(t *testing.T) {
 	}
 	edge := rebuildImportTestEdge(caller, caller, spec, 3)
 	for _, tc := range []struct {
-		name, missing   string
-		proof, external bool
+		name, missing          string
+		proof, external, ready bool
 	}{
-		{name: "Unproved", missing: "checked external npm dependency result"},
+		{name: "Unproved", ready: true, missing: "checked external npm dependency result"},
 		{name: "External", proof: true, external: true, missing: "native file-directory buckets"},
+		{name: "ExternalWithCompleteContracts", proof: true, external: true, ready: true},
 		{name: "IndexOnly", proof: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -505,7 +506,7 @@ func TestRebuildImportFileDirectoryBareJSTS(t *testing.T) {
 			ctx, b, opts := frontierFixture(t, 1, 0)
 			b.AddBatch(nodes, []*graph.Edge{edge})
 			noRewrite := func(_, _ string) (string, error) { return "", nil }
-			in := RebuildMainInputs{PathAlias: noRewrite, RewriteNpm: noRewrite}
+			in := RebuildMainInputs{PathAlias: noRewrite, RewriteNpm: noRewrite, DependencyContractsReady: tc.ready}
 			if tc.proof {
 				in.ExternalNpmDependency = func(file, module string) (bool, error) { return declaresExternal(file, module), nil }
 			}
@@ -517,6 +518,11 @@ func TestRebuildImportFileDirectoryBareJSTS(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 				require.Equal(t, wantNative, rebuildFnPointerSaved(t, b))
+				if tc.external {
+					n, err := b.RebuildView().Node(ctx, nativeTo)
+					require.NoError(t, err)
+					require.Nil(t, n, "terminal import must not create a node")
+				}
 			}
 			checkFrontierScratch(t, opts.ScratchParent)
 		})
@@ -552,4 +558,174 @@ func TestRebuildImportDirectoryFrontierBorrow(t *testing.T) {
 	}))
 	require.Equal(t, 2, pages)
 	checkFrontierScratch(t, opts.ScratchParent)
+}
+
+// Native dependency contracts match the longest whole path prefix within
+// the caller's repo, but only after the directory tier misses.
+func TestRebuildImportDependencyContracts(t *testing.T) {
+	const caller, sdk = "repo/app/main.go", "example.test/sdk"
+	const dirTarget = "repo/lib/local/pkg.go"
+	const dep = "dep::" + sdk
+	const nested = dep + "/nested"
+	nodes := []*graph.Node{
+		rebuildImportTestNode(caller, "repo", "app", "", "go", graph.KindFile),
+		rebuildImportTestNode(dirTarget, "repo", "app", "", "go", graph.KindFile),
+		rebuildImportTestNode(dep, "repo", "", dep, "contract", graph.KindContract),
+		rebuildImportTestNode(nested, "repo", "", nested, "contract", graph.KindContract),
+		rebuildImportTestNode(nested+"/foreign", "elsewhere", "", nested+"/foreign", "contract", graph.KindContract),
+		rebuildImportTestNode(nested+"/wrong-kind", "repo", "", "", "go", graph.KindPackage),
+		rebuildImportTestNode(nested+"::tracked", "repo", "", "", "contract", graph.KindContract),
+		rebuildImportTestNode(dep+"/local", "repo", "", dep+"/local", "contract", graph.KindContract),
+	}
+	var edges, want []*graph.Edge
+	for i, tc := range []struct{ spec, to string }{
+		{sdk, dep},
+		{sdk + "/nested/tool", nested},
+		{sdk + "/nestedly/tool", dep},
+		{sdk + "/nested/foreign/tool", nested},
+		{sdk + "/nested/wrong-kind/tool", nested},
+		{sdk + "/nested::tracked/tool", dep},
+		{sdk + "/local", dirTarget},
+		{sdk + "ish/tool", "external::" + sdk + "ish/tool"},
+	} {
+		edge := rebuildImportTestEdge(caller, caller, tc.spec, i+1)
+		edge.CrossRepo = tc.spec == sdk // native does not clear an existing flag
+		edges = append(edges, edge)
+		want = append(want, rebuildImportTestMove(edge, tc.to, false))
+	}
+	want = rebuildVueSortedRows(want)
+	owner := func(GoImportCandidate) GoPackageOwnershipResult { return GoPackageOwnershipUnknown }
+	require.Equal(t, want, rebuildImportNativeRows(t, nodes, edges, func(r *Resolver) {
+		r.SetGoPackageOwnership(owner)
+		r.SetWorkspaceMembership(func(string) string { return "" })
+	}))
+	ctx, b, opts := frontierFixture(t, 1, 0)
+	b.AddBatch(nodes, edges)
+	require.NoError(t, RunRebuildMain(ctx, b, opts, RebuildMainInputs{
+		SelectCallers:            func(page []*graph.Edge) ([]*graph.Edge, error) { return page, nil },
+		GoOwnership:              func(q GoImportCandidate) (GoPackageOwnershipResult, error) { return owner(q), nil },
+		DependencyContractsReady: true,
+	}))
+	require.Equal(t, want, rebuildFnPointerSaved(t, b))
+	checkFrontierScratch(t, opts.ScratchParent)
+}
+
+// The rewritten full spelling excludes synthesized external calls, but
+// native's package-prefix retry accepts them. Ambiguity only stops a miss.
+func TestRebuildImportRewrittenPackagePrefix(t *testing.T) {
+	const caller = "repo/app/main.ts"
+	const full = "@scope/hit/Part::Export"
+	const prefix = externalCallPrefix + "fixture:prefix"
+	const dep = "dep::example.test/sdk"
+	nodes := []*graph.Node{
+		rebuildImportTestNode(caller, "repo", "app", "", "typescript", graph.KindFile),
+		rebuildImportTestNode(externalCallPrefix+"fixture:full", "repo", "app", full, "typescript", graph.KindPackage),
+		rebuildImportTestNode(prefix, "repo", "app", "@scope/hit", "typescript", graph.KindPackage),
+		rebuildImportTestNode("elsewhere/prefix", "elsewhere", "app", "@scope/hit", "typescript", graph.KindPackage),
+		rebuildImportTestNode("elsewhere/only", "elsewhere", "app", "@scope/foreign", "typescript", graph.KindPackage),
+		rebuildImportTestNode("repo/npm-package", "repo", "app", "example.test", "typescript", graph.KindPackage),
+		rebuildImportTestNode(dep, "repo", "", dep, "contract", graph.KindContract),
+	}
+	for _, qualified := range []string{full, "@scope/full/Part::Export", "@scope/prefix"} {
+		for _, repo := range []string{"foreign-a", "foreign-b"} {
+			nodes = append(nodes, rebuildImportTestNode(repo+"/"+qualified, repo, "app", qualified, "typescript", graph.KindPackage))
+		}
+	}
+	var edges, want []*graph.Edge
+	rewrites := make(map[string]string)
+	for i, tc := range []struct {
+		raw, effective, to string
+		crossRepo          bool
+	}{
+		{"hit/Part::Export", full, prefix, false},
+		{"dep/Part::Export", "example.test/sdk/Part::Export", dep, false}, // dependency bridge before npm retry
+		{"foreign/Part::Export", "@scope/foreign/Part::Export", "elsewhere/only", true},
+		{"full/Part::Export", "@scope/full/Part::Export", "", false},     // full ambiguity, retry miss
+		{"prefix/Part::Export", "@scope/prefix/Part::Export", "", false}, // retry ambiguity
+		{"missing/Part::Export", "@scope/missing/Part::Export", "external::@scope/missing/Part::Export", false},
+		{"@scope/hit/Other::Export", "", "external::@scope/hit/Other::Export", false},
+		{"@scope/hit/Same::Export", "@scope/hit/Same::Export", "external::@scope/hit/Same::Export", false},
+	} {
+		rewrites[tc.raw] = tc.effective
+		edge := rebuildImportTestEdge(caller, caller, tc.raw, i+1)
+		edges = append(edges, edge)
+		if tc.to == "" {
+			want = append(want, edge)
+		} else {
+			want = append(want, rebuildImportTestMove(edge, tc.to, tc.crossRepo))
+		}
+	}
+	want = rebuildVueSortedRows(want)
+	rewrite := func(file, raw string) string {
+		require.Equal(t, caller, file)
+		require.Contains(t, rewrites, raw) // raw spelling includes the export suffix
+		return rewrites[raw]
+	}
+	require.Equal(t, want, rebuildImportNativeRows(t, nodes, edges, func(r *Resolver) {
+		r.SetNpmAliasResolver(rewrite)
+		r.SetWorkspaceMembership(func(string) string { return "" })
+	}))
+	// Only Pebble retains the full saved binding payload.
+	for _, rows := range [][]*graph.Edge{edges, want} {
+		for _, e := range rows {
+			e.Context, e.Alias, e.Via = "import binding", "LocalName", "fixture"
+		}
+	}
+	ctx, b, opts := frontierFixture(t, 1, 0)
+	b.AddBatch(nodes, edges)
+	in := RebuildMainInputs{
+		PathAlias:                func(_, _ string) (string, error) { return "", nil },
+		RewriteNpm:               func(file, spec string) (string, error) { return rewrite(file, spec), nil },
+		ExternalNpmDependency:    func(_, _ string) (bool, error) { return false, nil },
+		DependencyContractsReady: true,
+	}
+	require.NoError(t, runRebuildMain(ctx, b, opts, false, in))
+	require.Equal(t, want, rebuildFnPointerSaved(t, b))
+	checkFrontierScratch(t, opts.ScratchParent)
+}
+
+func TestRebuildImportPostDirectoryRefusals(t *testing.T) {
+	t.Run("PrefixBudget", func(t *testing.T) {
+		ctx, b, opts := frontierFixture(t, 1, 0)
+		// Each key fits alone. Repeated full-component probes exhaust the
+		// shared budget without mutating the private graph.
+		spec := strings.Repeat("/", 4096)
+		id, err := lookupRebuildDepModule(ctx, b.RebuildView(), "", spec)
+		require.Empty(t, id)
+		require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+		checkFrontierScratch(t, opts.ScratchParent)
+	})
+	const first, caller = "repo/a.ts", "repo/b.ts"
+	for _, tc := range []struct {
+		name, spec, reason string
+		ready              bool
+	}{
+		{name: "UnprovedContracts", spec: "example.test/sdk/Part::Export", reason: "native file-directory buckets"},
+		{name: "Empty", ready: true, reason: "terminal result"},
+		{name: "NUL", spec: "./missing\x00::Export", ready: true, reason: "valid native external target"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, b, opts := frontierFixture(t, 1, 0)
+			before := []*graph.Edge{
+				rebuildImportTestEdge(first, first, "./found", 1),
+				rebuildImportTestEdge(caller, caller, tc.spec, 2),
+			}
+			b.AddBatch([]*graph.Node{
+				rebuildImportTestNode(first, "repo", "", "", "typescript", graph.KindFile),
+				rebuildImportTestNode(caller, "repo", "", "", "typescript", graph.KindFile),
+				rebuildImportTestNode("repo/found.ts", "repo", "", "", "typescript", graph.KindFile),
+				rebuildImportTestNode("dep::example.test/sdk", "repo", "", "dep::example.test/sdk", "contract", graph.KindContract),
+			}, before)
+			noRewrite := func(_, _ string) (string, error) { return "", nil }
+			err := runRebuildMain(ctx, b, opts, false, RebuildMainInputs{
+				PathAlias: noRewrite, RewriteNpm: noRewrite,
+				ExternalNpmDependency:    func(_, _ string) (bool, error) { return false, nil },
+				DependencyContractsReady: tc.ready,
+			})
+			require.ErrorIs(t, err, errRebuildMainRule)
+			require.ErrorContains(t, err, tc.reason)
+			require.Equal(t, before, rebuildFnPointerSaved(t, b))
+			checkFrontierScratch(t, opts.ScratchParent)
+		})
+	}
 }
