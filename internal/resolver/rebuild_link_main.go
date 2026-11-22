@@ -43,7 +43,8 @@ type RebuildMainInputs struct {
 
 // RunRebuildMain resolves selected pending edges in a private build using
 // frozen import facts, then reconciles placeholder sources unless disabled
-// and checks weak cross-package bindings. It does not publish.
+// and checks weak cross-package bindings. It then fixes Go method receivers
+// if the original frontier was nonempty. It does not publish.
 // SelectCallers is required. On error the owner must discard the private build.
 func RunRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts store_pebble.RebuildLinkOptions, in RebuildMainInputs) error {
 	if in.SelectCallers == nil {
@@ -75,7 +76,17 @@ func runRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts st
 			err = errors.Join(err, placeholder.Close())
 		}
 	}()
-	err = runRebuildLinkFrontier(ctx, build, opts, in.SelectCallers, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
+	hadPending := false
+	selectCallers := func(page []*graph.Edge) ([]*graph.Edge, error) {
+		// Native's cold tail is enabled by the original pending stream,
+		// even if receipt selection keeps nothing or main moves no rows.
+		hadPending = true
+		if in.SelectCallers == nil {
+			return page, nil
+		}
+		return in.SelectCallers(page)
+	}
+	err = runRebuildLinkFrontier(ctx, build, opts, selectCallers, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
 		f.imports = imports
 		moves, err := reduceRebuildMainPage(ctx, f, page)
 		if err != nil || len(moves) == 0 {
@@ -108,7 +119,13 @@ func runRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts st
 		}
 	}
 	// Keep native order: the guard sees settled imports and source repoints.
-	_, err = guard.Apply(ctx, build, reconcileSources, nil)
+	if _, err := guard.Apply(ctx, build, reconcileSources, nil); err != nil {
+		return err
+	}
+	if !hadPending {
+		return nil
+	}
+	_, err = build.RebuildGoMethodReceivers(ctx)
 	return err
 }
 
