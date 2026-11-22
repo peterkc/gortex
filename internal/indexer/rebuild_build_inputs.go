@@ -36,8 +36,8 @@ func withRebuildBuildInputs(ctx context.Context, leases string, src *source.File
 // withRebuildCheckoutBuildInputs binds the one owner's checked walk, identity
 // and resolver facts before handing anything to reuse or worker dispatch.
 func withRebuildCheckoutBuildInputs(ctx context.Context, leases string, src *source.FilesystemSource,
-	req rebuildBuildRequest, flat *excludes.Matcher,
-	freeze func(string, fs.FileMode) (*rebuildInput, bool, error),
+	req rebuildBuildRequest, flat *excludes.Matcher, gitCheckout bool,
+	freeze func(string, fs.FileMode, rebuildGitMember) (*rebuildInput, bool, error),
 	capture func(rebuildCheckoutInputs, *int64, func(rebuildSidecarRow) error) (string, error),
 	consume func(string, rebuildBuildRequest, []rebuildInput) error,
 ) error {
@@ -48,8 +48,19 @@ func withRebuildCheckoutBuildInputs(ctx context.Context, leases string, src *sou
 		var epoch rebuildCheckoutInputs
 		bound, err := sealRebuildBuildInputs(ctx, lease, src, req,
 			func(raw *int64, emit func(rebuildSidecarRow) error) (string, store_pebble.HeadDigest, error) {
+				var git *rebuildGitInventory
+				if gitCheckout {
+					inventory, err := readRebuildGitInventory(ctx, src.FrozenRoot(), raw)
+					if err != nil {
+						return "", store_pebble.HeadDigest{}, err
+					}
+					if err := emit(inventory.sidecarRow()); err != nil {
+						return "", store_pebble.HeadDigest{}, err
+					}
+					git = &inventory
+				}
 				var err error
-				epoch, err = freezeRebuildCheckoutInputs(ctx, src.FrozenRoot(), flat, raw, freeze, emit)
+				epoch, err = freezeRebuildCheckoutInputs(ctx, src.FrozenRoot(), flat, git, raw, freeze, emit)
 				if err != nil {
 					return "", store_pebble.HeadDigest{}, err
 				}
@@ -62,6 +73,7 @@ func withRebuildCheckoutBuildInputs(ctx context.Context, leases string, src *sou
 		if err != nil {
 			return err
 		}
+		bound.Witness.UsesGitIgnorePolicy = gitCheckout
 		return consume(lease, bound, epoch.files)
 	})
 }
@@ -94,7 +106,7 @@ func sealRebuildBuildInputs(ctx context.Context, lease string, src *source.Files
 	capture func(*int64, func(rebuildSidecarRow) error) (string, store_pebble.HeadDigest, error),
 ) (rebuildBuildRequest, error) {
 	if req.Witness.Recipe == (store_pebble.HeadDigest{}) || req.BaseRecipe != (store_pebble.HeadDigest{}) ||
-		req.Witness.FrozenInputs != (store_pebble.HeadDigest{}) || src == nil || req.Root != src.FrozenRoot().Name() {
+		req.Witness.FrozenInputs != (store_pebble.HeadDigest{}) || req.Witness.UsesGitIgnorePolicy || src == nil || req.Root != src.FrozenRoot().Name() {
 		return rebuildBuildRequest{}, fmt.Errorf("%w: capture needs an unbound recipe and the enumerating root", errRebuildBuildWire)
 	}
 	var name string

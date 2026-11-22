@@ -144,7 +144,7 @@ func TestRebuildTSAliasConfigsPostParseProbeReplay(t *testing.T) {
 	mod := ids["go.mod"]
 	input, goInput := ids[caller], ids["a.go"]
 	input.Language, goInput.Language = "typescript", "go"
-	freeze := func(key string, _ fs.FileMode) (*rebuildInput, bool, error) {
+	freeze := func(key string, _ fs.FileMode, _ rebuildGitMember) (*rebuildInput, bool, error) {
 		switch key {
 		case caller:
 			return &input, true, nil
@@ -169,7 +169,7 @@ func TestRebuildTSAliasConfigsPostParseProbeReplay(t *testing.T) {
 	leases := t.TempDir()
 	wrong := req
 	wrong.Witness.Input[0] = 1
-	err := withRebuildCheckoutBuildInputs(ctx, leases, src, wrong, flat, freeze,
+	err := withRebuildCheckoutBuildInputs(ctx, leases, src, wrong, flat, false, freeze,
 		func(rebuildCheckoutInputs, *int64, func(rebuildSidecarRow) error) (string, error) {
 			t.Fatal("captured resolver values against a different input root")
 			return "", nil
@@ -182,7 +182,7 @@ func TestRebuildTSAliasConfigsPostParseProbeReplay(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, entries)
 
-	err = withRebuildCheckoutBuildInputs(ctx, leases, src, req, flat, freeze, capture, func(lease string, bound rebuildBuildRequest, frozen []rebuildInput) error {
+	err = withRebuildCheckoutBuildInputs(ctx, leases, src, req, flat, false, freeze, capture, func(lease string, bound rebuildBuildRequest, frozen []rebuildInput) error {
 		require.NoError(t, bound.checkProjectRecipe())
 		require.Equal(t, "fixture", bound.ProjectName)
 		require.ElementsMatch(t, []rebuildInput{input, goInput}, frozen)

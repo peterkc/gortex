@@ -31,10 +31,10 @@ type rebuildResolverListedEntry struct {
 	mode fs.FileMode
 }
 
-// listed receives a checked, sorted immediate listing before classification.
+// prepare receives a checked, sorted immediate listing with its budget reserved.
 // Its entries are tentative until every classification and emit succeeds.
 func captureRebuildResolverDirectoryWithListing(ctx context.Context, root *os.Root, dir string, exactNames bool,
-	listed func([]rebuildResolverListedEntry), allowed func(string, fs.FileMode) (bool, error),
+	prepare func([]rebuildResolverListedEntry) error, allowed func(string, fs.FileMode) (bool, error),
 	n *rebuildResolverNamespace, rawRemaining *int64, emit func(rebuildSidecarRow) error,
 ) error {
 	if n == nil || n.frozen || n.invalid != nil || allowed == nil || rawRemaining == nil ||
@@ -77,8 +77,10 @@ func captureRebuildResolverDirectoryWithListing(ctx context.Context, root *os.Ro
 		// Reserve the checked listing and closing row before any such read.
 		*rawRemaining = left
 		slices.SortFunc(entries, func(a, b rebuildResolverListedEntry) int { return strings.Compare(a.key, b.key) })
-		if listed != nil {
-			listed(entries)
+		if prepare != nil {
+			if err := prepare(entries); err != nil {
+				return err
+			}
 		}
 		rows = make([]rebuildNamespaceRow, 0, len(entries)+1)
 		for _, e := range entries {

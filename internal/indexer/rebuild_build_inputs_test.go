@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -172,4 +173,26 @@ func TestRebuildBuildFrozenInputsRejectBeforeStage(t *testing.T) {
 			require.ErrorIs(t, err, os.ErrNotExist)
 		})
 	}
+}
+
+func TestRebuildCheckoutGitRequiredRefusesBeforeConsumer(t *testing.T) {
+	dir, src := rebuildInputFixture(t)
+	leases := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "source.go"), nil, 0o600))
+	req := rebuildBuildRequest{Root: dir, Witness: store_pebble.Witness{Recipe: store_pebble.HeadDigest{1}}}
+	err := withRebuildCheckoutBuildInputs(t.Context(), leases, src, req, nil, true,
+		func(string, fs.FileMode, rebuildGitMember) (*rebuildInput, bool, error) {
+			t.Fatal("Git refusal must not fall back to leaf capture")
+			return nil, false, nil
+		}, func(rebuildCheckoutInputs, *int64, func(rebuildSidecarRow) error) (string, error) {
+			t.Fatal("Git refusal reached resolver capture")
+			return "", nil
+		}, func(string, rebuildBuildRequest, []rebuildInput) error {
+			t.Fatal("Git refusal reached the build consumer")
+			return nil
+		})
+	require.ErrorIs(t, err, errRebuildGitMembership)
+	entries, err := os.ReadDir(leases)
+	require.NoError(t, err)
+	require.Empty(t, entries)
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -34,14 +35,15 @@ type rebuildCheckoutInputs struct {
 // callback owns effective admission and checked content or link-text identity;
 // a listed name alone cannot authorize bytes. Discard emitted rows on error.
 func freezeRebuildCheckoutInputs(ctx context.Context, root *os.Root, flat *excludes.Matcher,
-	rawRemaining *int64, freeze func(string, fs.FileMode) (*rebuildInput, bool, error), emit func(rebuildSidecarRow) error,
+	git *rebuildGitInventory, rawRemaining *int64,
+	freeze func(string, fs.FileMode, rebuildGitMember) (*rebuildInput, bool, error), emit func(rebuildSidecarRow) error,
 ) (rebuildCheckoutInputs, error) {
 	if freeze == nil {
 		return rebuildCheckoutInputs{}, fmt.Errorf("%w: missing leaf admission", errRebuildResolverNamespace)
 	}
 	out := rebuildCheckoutInputs{admitted: make(map[string]*rebuildInput)}
-	ns, err := captureRebuildCheckoutNamespace(ctx, root, flat, rawRemaining, func(key string, mode fs.FileMode) (bool, error) {
-		input, parse, err := freeze(key, mode)
+	ns, err := captureRebuildCheckoutNamespace(ctx, root, flat, git, rawRemaining, func(key string, mode fs.FileMode, member rebuildGitMember) (bool, error) {
+		input, parse, err := freeze(key, mode, member)
 		if err != nil {
 			return false, err
 		}
@@ -82,13 +84,15 @@ func freezeRebuildCheckoutInputs(ctx context.Context, root *os.Root, flat *exclu
 }
 
 // captureRebuildCheckoutNamespace is the owner's checked disk walk. Use the
-// effective root exclusions from the same Git-aware setup as the ordinary
-// walk. leaf supplies the remaining owner admission for open regular files
+// configured Gortex excludes, not a matcher with Git rules already merged.
+// A nil inventory is an explicitly selected non-Git walk, not a Git failure
+// fallback. leaf supplies the remaining owner admission for open regular files
 // and no-follow symlink identities; it may retain checked identities
 // for the same build. All outputs, including emitted rows, are tentative
 // until the owner has sealed this enumeration and its build inputs together.
 func captureRebuildCheckoutNamespace(ctx context.Context, root *os.Root, flat *excludes.Matcher,
-	rawRemaining *int64, leaf func(string, fs.FileMode) (bool, error), emit func(rebuildSidecarRow) error,
+	git *rebuildGitInventory, rawRemaining *int64,
+	leaf func(string, fs.FileMode, rebuildGitMember) (bool, error), emit func(rebuildSidecarRow) error,
 ) (*rebuildResolverNamespace, error) {
 	if root == nil || !filepath.IsAbs(root.Name()) || leaf == nil || emit == nil {
 		return nil, fmt.Errorf("%w: missing checkout walk authority", errRebuildResolverNamespace)
@@ -97,6 +101,7 @@ func captureRebuildCheckoutNamespace(ctx context.Context, root *os.Root, flat *e
 	var dir string
 	var listing []rebuildResolverListedEntry
 	var policyErr error
+	var admitted map[string]rebuildGitMember
 	absRoot := root.Name()
 	checkedRead := func(abs string) ([]byte, error) {
 		if policyErr != nil {
@@ -125,13 +130,40 @@ func captureRebuildCheckoutNamespace(ctx context.Context, root *os.Root, flat *e
 	rules := pathExclusionRules{
 		flat: flat, perFolder: excludes.NewHierarchicalWithReader(absRoot, dirIgnoreFiles, checkedRead, nil), parentsOpen: true,
 	}
+	prepare := func(entries []rebuildResolverListedEntry) error {
+		listing = entries
+		if dir != "." {
+			marker := path.Join(dir, ".git")
+			if _, found := slices.BinarySearchFunc(listing, marker, func(e rebuildResolverListedEntry, key string) int {
+				return strings.Compare(e.key, key)
+			}); found {
+				return fmt.Errorf("%w: nested Git marker appeared in %q", ErrBuildInputChanged, dir)
+			}
+		}
+		allowed := make([]rebuildResolverListedEntry, 0, len(entries))
+		for _, e := range entries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			denied := rules.match(filepath.Join(absRoot, filepath.FromSlash(e.key)), absRoot, e.mode.IsDir())
+			if policyErr != nil {
+				return policyErr
+			}
+			if !denied {
+				allowed = append(allowed, e)
+			}
+		}
+		var err error
+		admitted, err = prepareRebuildGitDirectory(ctx, root, git, allowed, rawRemaining, emit)
+		return err
+	}
 	classify := func(key string, mode fs.FileMode) (bool, error) {
-		denied := rules.match(filepath.Join(absRoot, filepath.FromSlash(key)), absRoot, mode.IsDir())
-		if policyErr != nil || denied {
-			return false, policyErr
+		member := admitted[key]
+		if member == 0 {
+			return false, nil
 		}
 		if mode.IsRegular() || mode&fs.ModeSymlink != 0 {
-			return leaf(key, mode)
+			return leaf(key, mode, member)
 		}
 		return true, nil // directories and unsupported entry types; no leaf read
 	}
@@ -143,13 +175,18 @@ func captureRebuildCheckoutNamespace(ctx context.Context, root *os.Root, flat *e
 		dir, listing = dirs[i], nil
 		dirs[i] = ""
 		if err := captureRebuildResolverDirectoryWithListing(ctx, root, dir, true,
-			func(entries []rebuildResolverListedEntry) { listing = entries }, classify, &n, rawRemaining,
+			prepare, classify, &n, rawRemaining,
 			func(row rebuildSidecarRow) error {
 				if row.Kind == rebuildNamespaceDirectoryFact {
 					dirs = append(dirs, string(row.Path))
 				}
 				return emit(row)
 			}); err != nil {
+			return nil, err
+		}
+	}
+	if git != nil {
+		if err := git.checkRoot(root); err != nil {
 			return nil, err
 		}
 	}

@@ -188,8 +188,8 @@ func TestRebuildCheckoutManifestCapture(t *testing.T) {
 			lease := t.TempDir()
 			digest, err := writeRebuildInputSidecar(ctx, lease, func(emit func(rebuildSidecarRow) error) error {
 				nsBudget := int64(rebuildCppRawLimit)
-				epoch, err := freezeRebuildCheckoutInputs(ctx, src.FrozenRoot(), nil, &nsBudget,
-					func(key string, _ fs.FileMode) (*rebuildInput, bool, error) {
+				epoch, err := freezeRebuildCheckoutInputs(ctx, src.FrozenRoot(), nil, nil, &nsBudget,
+					func(key string, _ fs.FileMode, _ rebuildGitMember) (*rebuildInput, bool, error) {
 						lang := map[string]string{"a.go": "go", "main.ts": "typescript"}[key]
 						parse := lang != ""
 						if !parse {

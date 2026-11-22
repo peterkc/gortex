@@ -46,8 +46,8 @@ func TestRebuildCheckoutNamespaceCapture(t *testing.T) {
 			var captured *rebuildResolverNamespace
 			var charged int64
 			digest, err := writeRebuildInputSidecar(ctx, lease, func(emit func(rebuildSidecarRow) error) error {
-				ns, err := captureRebuildCheckoutNamespace(ctx, root, excludes.New([]string{"node_modules/"}), &raw,
-					func(rel string, mode fs.FileMode) (bool, error) {
+				ns, err := captureRebuildCheckoutNamespace(ctx, root, excludes.New([]string{"node_modules/"}), nil, &raw,
+					func(rel string, mode fs.FileMode, _ rebuildGitMember) (bool, error) {
 						require.True(t, mode.IsRegular())
 						admitted = append(admitted, rel)
 						return rel != "unadmitted.ts", nil
@@ -101,8 +101,8 @@ func TestFreezeRebuildCheckoutInputs(t *testing.T) {
 			require.NoError(t, os.Symlink("main.ts", filepath.Join(root, "alias.ts")))
 			raw := int64(rebuildCppRawLimit)
 			var keys []string
-			out, err := freezeRebuildCheckoutInputs(ctx, src.FrozenRoot(), excludes.New([]string{"ignored/"}), &raw,
-				func(key string, _ fs.FileMode) (*rebuildInput, bool, error) {
+			out, err := freezeRebuildCheckoutInputs(ctx, src.FrozenRoot(), excludes.New([]string{"ignored/"}), nil, &raw,
+				func(key string, _ fs.FileMode, _ rebuildGitMember) (*rebuildInput, bool, error) {
 					keys = append(keys, key)
 					lang, parse := "typescript", key != "go.mod"
 					if !parse {
@@ -159,7 +159,7 @@ func TestRebuildCheckoutNamespacePolicyRefusal(t *testing.T) {
 			root, err := os.OpenRoot(work)
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, root.Close()) })
-			ns, err := captureRebuildCheckoutNamespace(t.Context(), root, nil, &raw, func(string, fs.FileMode) (bool, error) {
+			ns, err := captureRebuildCheckoutNamespace(t.Context(), root, nil, nil, &raw, func(string, fs.FileMode, rebuildGitMember) (bool, error) {
 				t.Fatal("the owner consumed an unproved ignore policy")
 				return false, nil
 			}, func(rebuildSidecarRow) error {
@@ -169,6 +169,43 @@ func TestRebuildCheckoutNamespacePolicyRefusal(t *testing.T) {
 			require.ErrorIs(t, err, errRebuildIgnorePolicy)
 			require.ErrorIs(t, err, cause)
 			require.Nil(t, ns)
+		})
+	}
+}
+
+func TestRebuildCheckoutNestedMarker(t *testing.T) {
+	for _, late := range []bool{false, true} {
+		name := "opaque without following marker"
+		if late {
+			name = "appeared after parent listing"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir, src := rebuildInputFixture(t)
+			require.NoError(t, os.Mkdir(filepath.Join(dir, "nested"), 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "nested", "source.go"), nil, 0o600))
+			marker := filepath.Join(dir, "nested", ".git")
+			if !late {
+				require.NoError(t, os.Symlink("../absent", marker))
+			}
+			raw := int64(rebuildCppRawLimit)
+			ns, err := captureRebuildCheckoutNamespace(t.Context(), src.FrozenRoot(), nil, nil, &raw,
+				func(string, fs.FileMode, rebuildGitMember) (bool, error) {
+					t.Fatal("opened a leaf in a nested checkout")
+					return false, nil
+				}, func(row rebuildSidecarRow) error {
+					if late && row.Kind == rebuildNamespaceDirectoryFact && string(row.Path) == "nested" {
+						require.NoError(t, os.Symlink("../absent", marker))
+					}
+					return nil
+				})
+			if late {
+				require.ErrorIs(t, err, ErrBuildInputChanged)
+				require.Nil(t, ns)
+				return
+			}
+			require.NoError(t, err)
+			_, err = ns.lookup("nested/source.go")
+			require.ErrorIs(t, err, errRebuildResolverInputDenied)
 		})
 	}
 }
