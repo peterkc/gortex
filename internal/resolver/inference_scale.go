@@ -327,6 +327,14 @@ func visitImplementationMatches(
 	return comparisons
 }
 
+func methodSetImplementationEdge(owner *graph.Node, iface string) *graph.Edge {
+	return &graph.Edge{
+		From: owner.ID, To: iface, Kind: graph.EdgeImplements,
+		FilePath: owner.FilePath, Line: owner.StartLine,
+		Meta: map[string]any{"via": MetaViaMethodSetInference},
+	}
+}
+
 func (r *Resolver) inferImplements(scopeTypes, scopeIfaces map[string]bool) int {
 	return r.inferImplementationsByRepo(scopeTypes, scopeIfaces)
 }
@@ -370,14 +378,7 @@ func (r *Resolver) inferImplementationsByRepo(scopeTypes, scopeIfaces map[string
 				return
 			}
 			existing[key] = struct{}{}
-			batch = append(batch, &graph.Edge{
-				From:     typeInfo.node.ID,
-				To:       iface.id,
-				Kind:     graph.EdgeImplements,
-				FilePath: typeInfo.node.FilePath,
-				Line:     typeInfo.node.StartLine,
-				Meta:     map[string]any{"via": MetaViaMethodSetInference},
-			})
+			batch = append(batch, methodSetImplementationEdge(typeInfo.node, iface.id))
 			added++
 			if len(batch) == inferenceMutationBatchSize {
 				flush()

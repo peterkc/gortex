@@ -18,6 +18,7 @@ import (
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/platform"
+	"github.com/zzet/gortex/internal/resolver"
 	"go.uber.org/zap"
 )
 
@@ -324,6 +325,9 @@ func buildRebuildStages(
 		return err
 	}
 	if err := runRebuildReturnsTo(ctx, private, receipts); err != nil {
+		return err
+	}
+	if err := resolver.RunRebuildImplements(ctx, private, receipts); err != nil {
 		return err
 	}
 	// The supported tails only changed private scratch. Relation projection

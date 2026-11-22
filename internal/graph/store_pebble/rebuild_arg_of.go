@@ -13,9 +13,9 @@ import (
 
 // ErrRebuildUnknownProvenance refuses a D72 lift when its input cannot be
 // proved independent of deferred or cross-recording-path receipt rows.
-var ErrRebuildUnknownProvenance = errors.New("rebuild dataflow lift: unknown provenance")
+var ErrRebuildUnknownProvenance = errors.New("rebuild: unknown provenance")
 
-// RebuildUnknownProvenanceError counts affected dataflow rows, not possible
+// RebuildUnknownProvenanceError counts affected output rows, not possible
 // producers or contenders. First names the lowest affected key.
 type RebuildUnknownProvenanceError struct {
 	Count uint64
