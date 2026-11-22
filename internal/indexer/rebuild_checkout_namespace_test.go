@@ -53,7 +53,7 @@ func TestRebuildCheckoutNamespaceCapture(t *testing.T) {
 			var charged int64
 			digest, err := writeRebuildInputSidecar(ctx, lease, func(emit func(rebuildSidecarRow) error) error {
 				ns, err := captureRebuildCheckoutNamespace(ctx, root, excludes.New([]string{"node_modules/"}), nil, &raw,
-					func(rel string, mode fs.FileMode, _ rebuildGitMember) (bool, error) {
+					func(rel string, mode fs.FileMode, _ rebuildGitMember, _ bool) (bool, error) {
 						require.True(t, mode.IsRegular())
 						admitted = append(admitted, rel)
 						return rel != "unadmitted.ts", nil
@@ -165,7 +165,7 @@ func TestRebuildCheckoutNamespacePolicyRefusal(t *testing.T) {
 			root, err := os.OpenRoot(work)
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, root.Close()) })
-			ns, err := captureRebuildCheckoutNamespace(t.Context(), root, nil, nil, &raw, func(string, fs.FileMode, rebuildGitMember) (bool, error) {
+			ns, err := captureRebuildCheckoutNamespace(t.Context(), root, nil, nil, &raw, func(string, fs.FileMode, rebuildGitMember, bool) (bool, error) {
 				t.Fatal("the owner consumed an unproved ignore policy")
 				return false, nil
 			}, func(rebuildSidecarRow) error {
@@ -195,7 +195,7 @@ func TestRebuildCheckoutNestedMarker(t *testing.T) {
 			}
 			raw := int64(rebuildCppRawLimit)
 			ns, err := captureRebuildCheckoutNamespace(t.Context(), src.FrozenRoot(), nil, nil, &raw,
-				func(string, fs.FileMode, rebuildGitMember) (bool, error) {
+				func(string, fs.FileMode, rebuildGitMember, bool) (bool, error) {
 					t.Fatal("opened a leaf in a nested checkout")
 					return false, nil
 				}, func(row rebuildSidecarRow) error {

@@ -7,13 +7,21 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/zeebo/blake3"
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/excludes"
+	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/indexer/source"
+	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/search"
+	"go.uber.org/zap"
 )
 
 func freezeProjectNameTestManifest(t *testing.T, src source.ContentSource, root, path, contents string) *rebuildInput {
@@ -147,7 +155,7 @@ func TestRebuildCheckedManifestLink(t *testing.T) {
 			if tc.admitted {
 				admitted[targetPath] = target
 			}
-			got, checked, row, err := readCheckedRebuildManifestLink(ctx, src, &ns, link, admitted, tc.limit)
+			got, checked, row, err := readCheckedRebuildManifestLink(ctx, src, &ns, link, admitted, nil, tc.limit)
 			if tc.want != nil {
 				require.ErrorIs(t, err, tc.want)
 				require.Empty(t, got)
@@ -181,28 +189,41 @@ func TestRebuildCheckoutManifestCapture(t *testing.T) {
 			for _, leaf := range []struct{ key, contents string }{
 				{"go.manifest", goMod}, {"npm.manifest", pkg}, {"a.go", "package main\n"}, {"main.ts", `import "alias/x"`},
 			} {
-				freezeProjectNameTestManifest(t, src, root, leaf.key, leaf.contents)
+				require.NoError(t, os.WriteFile(filepath.Join(root, leaf.key), []byte(leaf.contents), 0o600))
 			}
 			require.NoError(t, os.Symlink("go.manifest", filepath.Join(root, "go.mod")))
 			require.NoError(t, os.Symlink("npm.manifest", filepath.Join(root, "package.json")))
+			goTarget := filepath.Join(root, "go.manifest")
+			stamp := time.Unix(1700000000, 0)
+			require.NoError(t, os.Chtimes(goTarget, stamp, stamp))
+			reg := parser.NewRegistry()
+			languages.RegisterAll(reg)
+			idx := New(graph.New(), reg, config.Default().Index, zap.NewNop())
+			t.Cleanup(idx.Close)
 			lease := t.TempDir()
 			digest, err := writeRebuildInputSidecar(ctx, lease, func(emit func(rebuildSidecarRow) error) error {
 				nsBudget := int64(rebuildCppRawLimit)
 				epoch, err := freezeRebuildCheckoutInputs(ctx, src.FrozenRoot(), nil, nil, &nsBudget,
-					func(key string, _ fs.FileMode, _ rebuildGitMember, _ *int64, _ func(rebuildSidecarRow) error) (rebuildCheckoutLeaf, error) {
-						lang := map[string]string{"a.go": "go", "main.ts": "typescript"}[key]
-						parse := lang != ""
-						if !parse {
-							lang = "manifest"
-						}
-						in, _, err := readRebuildInput(ctx, src, key, lang, 1024)
-						return rebuildCheckoutLeaf{input: &in, parse: parse}, err
+					func(key string, mode fs.FileMode, member rebuildGitMember, raw *int64, emit func(rebuildSidecarRow) error) (rebuildCheckoutLeaf, error) {
+						return idx.freezeRebuildCheckoutLeaf(ctx, src.FrozenRoot(), key, mode, member, nil, 1024, raw, emit)
 					}, emit)
 				if err != nil {
 					return err
 				}
+				require.Len(t, epoch.files, 2)
+				require.Equal(t, "a.go", epoch.files[0].Path)
+				require.Equal(t, "main.ts", epoch.files[1].Path)
+				require.Len(t, epoch.manifestTargets, 2)
+				require.NotContains(t, epoch.admitted, "go.manifest")
+				require.NotContains(t, epoch.admitted, "npm.manifest")
 				if reject {
-					require.NoError(t, os.WriteFile(filepath.Join(root, "go.manifest"), []byte("module example.org/editedname\n"), 0o600))
+					// Preserve file identity, size and mtime so only the frozen
+					// classification prefix can catch the change.
+					require.NoError(t, os.WriteFile(goTarget, []byte("module example.org/editedname\n"), 0o600))
+					require.NoError(t, os.Chtimes(goTarget, stamp, stamp))
+					info, err := os.Lstat(goTarget)
+					require.NoError(t, err)
+					require.True(t, sameRebuildPathMetadata(info, epoch.manifestTargets["go.manifest"].info))
 				}
 				raw := int64(len(goMod) + len(pkg))
 				selected, err := captureRebuildCheckoutResolverInputs(ctx, src, epoch, true, &raw, func(row rebuildSidecarRow) error {
@@ -230,6 +251,7 @@ func TestRebuildCheckoutManifestCapture(t *testing.T) {
 			goFacts, _, err := openRebuildResolverConfigFacts(ctx, lease, digest)
 			require.NoError(t, err)
 			require.Equal(t, "example.org/sharedname", goFacts["go.mod"].RootClaim)
+			require.Equal(t, rebuildDigest(blake3.Sum256([]byte(goMod))), goFacts["go.mod"].Digest)
 			require.Empty(t, goFacts["go.mod"].OwnerModule, "the native strict Go probe stops at this link")
 			ns, manifests, followed, err := openRebuildNpmManifestFacts(ctx, lease, digest)
 			require.NoError(t, err)
@@ -246,6 +268,51 @@ func TestRebuildCheckoutManifestCapture(t *testing.T) {
 			got, err := lookup.rewrite("main.ts", "alias/x")
 			require.NoError(t, err)
 			require.Equal(t, "actual/x", got)
+		})
+	}
+}
+
+func TestRebuildCheckoutManifestTargetRefusals(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating a symlink requires a Windows privilege the test runner may not have")
+	}
+	for _, tc := range []struct {
+		name, target, link string
+		deny               bool
+		limit              int64
+		want               error
+	}{
+		{"denied", "target", "target", true, 64, errRebuildResolverInputDenied},
+		{"wrong spelling", "target", "Target", false, 64, errRebuildResolverNamespace},
+		{"size skipped parser", "target.go", "target.go", false, 64, errRebuildResolverInputDenied},
+		{"over cap", "target", "target", false, 1, errRebuildCppCaptureLimit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			root, src := rebuildInputFixture(t)
+			require.NoError(t, os.WriteFile(filepath.Join(root, tc.target), []byte(strings.Repeat("x", 40)), 0o600))
+			require.NoError(t, os.Symlink(tc.link, filepath.Join(root, "go.mod")))
+			cfg := config.Default().Index
+			cfg.MaxFileSize = 32
+			reg := parser.NewRegistry()
+			languages.RegisterAll(reg)
+			idx := New(graph.New(), reg, cfg, zap.NewNop())
+			t.Cleanup(idx.Close)
+			var flat *excludes.Matcher
+			if tc.deny {
+				flat = excludes.New([]string{tc.target})
+			}
+			raw := int64(rebuildCppRawLimit)
+			epoch, err := freezeRebuildCheckoutInputs(ctx, src.FrozenRoot(), flat, nil, &raw,
+				func(key string, mode fs.FileMode, member rebuildGitMember, raw *int64, emit func(rebuildSidecarRow) error) (rebuildCheckoutLeaf, error) {
+					require.False(t, tc.deny && key == tc.target, "denied target must not be classified")
+					return idx.freezeRebuildCheckoutLeaf(ctx, src.FrozenRoot(), key, mode, member, nil, 1024, raw, emit)
+				}, func(rebuildSidecarRow) error { return nil })
+			require.NoError(t, err)
+			require.Empty(t, epoch.files)
+			m, err := readCheckedRebuildRootManifest(ctx, src, epoch, "go.mod", tc.limit)
+			require.ErrorIs(t, err, tc.want)
+			require.Nil(t, m)
 		})
 	}
 }

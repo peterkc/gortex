@@ -15,36 +15,41 @@ import (
 
 var errRebuildLeafAdmission = errors.New("unproved rebuild file admission")
 
+type rebuildNonparseObservation struct {
+	source.FrozenRootPath
+	prefixDigest rebuildDigest
+}
+
 // freezeRebuildRegularLeaf runs after Git and path policy have admitted the
 // listed name. It never follows a link or opens a body to classify a skip.
 // Stub facts and the returned parse input remain tentative until sidecar seal.
 func (idx *Indexer) freezeRebuildRegularLeaf(ctx context.Context, root *os.Root, key string, listed fs.FileMode,
 	member rebuildGitMember, content *contentAdmissionGate, fileBytes int64, raw *int64, emit func(rebuildSidecarRow) error,
-) (*rebuildInput, source.FrozenRootPath, error) {
+) (*rebuildInput, rebuildNonparseObservation, error) {
 	if !listed.IsRegular() || (member != rebuildGitTracked && member != rebuildGitUntracked) {
-		return nil, source.FrozenRootPath{}, nil
+		return nil, rebuildNonparseObservation{}, nil
 	}
 	if root == nil || !validRebuildNamespaceKey(key) || fileBytes <= 0 || raw == nil || *raw < 0 || *raw > rebuildCppRawLimit || emit == nil {
-		return nil, source.FrozenRootPath{}, errRebuildLeafAdmission
+		return nil, rebuildNonparseObservation{}, errRebuildLeafAdmission
 	}
 	obs, err := source.ObserveFrozenLiteralRootPath(ctx, root, key)
 	if err != nil {
-		return nil, obs, rebuildLeafReadError(key, err)
+		return nil, rebuildNonparseObservation{}, rebuildLeafReadError(key, err)
 	}
 	size := obs.Info().Size()
 	if obs.Path() != key || !obs.Info().Mode().IsRegular() || size < 0 {
-		return nil, obs, fmt.Errorf("%w: listed regular file changed: %q", ErrBuildInputChanged, key)
+		return nil, rebuildNonparseObservation{}, fmt.Errorf("%w: listed regular file changed: %q", ErrBuildInputChanged, key)
 	}
 	lang, named := idx.registry.DetectLanguage(key)
 	var prefix []byte
 	if !named {
 		need := min(size, sniffPrefixBytes)
 		if need > *raw {
-			return nil, obs, fmt.Errorf("%w: classification prefix for %q", errRebuildCppCaptureLimit, key)
+			return nil, rebuildNonparseObservation{}, fmt.Errorf("%w: classification prefix for %q", errRebuildCppCaptureLimit, key)
 		}
 		prefix, err = obs.ReadPrefix(ctx, need)
 		if err != nil {
-			return nil, obs, rebuildLeafReadError(key, err)
+			return nil, rebuildNonparseObservation{}, rebuildLeafReadError(key, err)
 		}
 		*raw -= int64(len(prefix))
 		lang, _ = idx.registry.DetectLanguageContent(key, prefix)
@@ -55,10 +60,11 @@ func (idx *Indexer) freezeRebuildRegularLeaf(ctx context.Context, root *os.Root,
 	maxSize := idx.config.MaxFileSize
 	if lang == "" || maxSize > 0 && size > maxSize {
 		row := rebuildClassificationSidecarRow(key, lang, size, maxSize, prefix, !named)
-		if lang != "" {
-			obs = source.FrozenRootPath{} // A parse size skip cannot authorize a resolver body read.
+		var nonparse rebuildNonparseObservation
+		if lang == "" { // A parse size skip cannot authorize a resolver body read.
+			nonparse = rebuildNonparseObservation{obs, row.Classification.PrefixDigest}
 		}
-		return nil, obs, emit(row)
+		return nil, nonparse, emit(row)
 	}
 	// Native applies the asset tracking gate before the content gate.
 	reason := ""
@@ -70,26 +76,26 @@ func (idx *Indexer) freezeRebuildRegularLeaf(ctx context.Context, root *os.Root,
 	if reason != "" {
 		row, err := rebuildContentSkipSidecarRow(skippedFile{relPath: key, lang: lang, size: size, reason: reason}, maxSize, prefix, !named)
 		if err != nil {
-			return nil, obs, err
+			return nil, rebuildNonparseObservation{}, err
 		}
-		return nil, source.FrozenRootPath{}, emit(row)
+		return nil, rebuildNonparseObservation{}, emit(row)
 	}
 	if size > fileBytes {
-		return nil, obs, fmt.Errorf("%w: source bytes for %q exceed parser envelope", ErrBuildTransformBounds, key)
+		return nil, rebuildNonparseObservation{}, fmt.Errorf("%w: source bytes for %q exceed parser envelope", ErrBuildTransformBounds, key)
 	}
 	data := prefix
 	if named || int64(len(prefix)) != size {
 		data, err = readRebuildClassifiedBody(ctx, obs, fileBytes, prefix)
 		if err != nil {
-			return nil, obs, err
+			return nil, rebuildNonparseObservation{}, err
 		}
 	}
 	if !named {
 		if err := emit(rebuildClassificationSidecarRow(key, lang, size, maxSize, prefix, true)); err != nil {
-			return nil, obs, err
+			return nil, rebuildNonparseObservation{}, err
 		}
 	}
-	return &rebuildInput{Path: key, Language: lang, Kind: merkle.RegularFile, Size: size, Content: blake3.Sum256(data)}, obs, nil
+	return &rebuildInput{Path: key, Language: lang, Kind: merkle.RegularFile, Size: size, Content: blake3.Sum256(data)}, rebuildNonparseObservation{}, nil
 }
 
 // freezeRebuildCheckoutLeaf classifies the owner's Git/path-authorized leaf.
@@ -112,11 +118,7 @@ func (idx *Indexer) freezeRebuildCheckoutLeaf(ctx context.Context, root *os.Root
 		return rebuildCheckoutLeaf{}, err
 	}
 	if input == nil {
-		leaf := rebuildCheckoutLeaf{typeOnly: true}
-		if obs.Info() != nil && isRebuildResolverConfig(key) {
-			leaf.configObservation = &obs
-		}
-		return leaf, nil
+		return rebuildCheckoutLeaf{typeOnly: true, nonparse: obs}, nil
 	}
 	return rebuildCheckoutLeaf{input: input, parse: true}, nil
 }

@@ -28,14 +28,15 @@ type rebuildCheckoutInputs struct {
 	admitted           map[string]*rebuildInput
 	files              []rebuildInput
 	configObservations map[string]source.FrozenRootPath
+	manifestTargets    map[string]rebuildManifestTarget
 	digest             store_pebble.HeadDigest
 }
 
 type rebuildCheckoutLeaf struct {
-	input             *rebuildInput
-	parse             bool
-	typeOnly          bool                   // exact regular-name evidence; no identity for reading bytes
-	configObservation *source.FrozenRootPath // non-parse resolver config, read only if consulted
+	input    *rebuildInput
+	parse    bool
+	typeOnly bool                       // exact regular-name evidence; no identity for reading bytes
+	nonparse rebuildNonparseObservation // owner-only; no authority from parser skips
 }
 
 type rebuildCheckoutFreeze func(string, fs.FileMode, rebuildGitMember, *int64, func(rebuildSidecarRow) error) (rebuildCheckoutLeaf, error)
@@ -52,7 +53,7 @@ func freezeRebuildCheckoutInputs(ctx context.Context, root *os.Root, flat *exclu
 		return rebuildCheckoutInputs{}, fmt.Errorf("%w: missing leaf admission", errRebuildResolverNamespace)
 	}
 	out := rebuildCheckoutInputs{admitted: make(map[string]*rebuildInput)}
-	ns, err := captureRebuildCheckoutNamespace(ctx, root, flat, git, rawRemaining, func(key string, mode fs.FileMode, member rebuildGitMember) (bool, error) {
+	ns, err := captureRebuildCheckoutNamespace(ctx, root, flat, git, rawRemaining, func(key string, mode fs.FileMode, member rebuildGitMember, hasRootLink bool) (bool, error) {
 		leaf, err := freeze(key, mode, member, rawRemaining, emit)
 		if err != nil {
 			return false, err
@@ -61,19 +62,28 @@ func freezeRebuildCheckoutInputs(ctx context.Context, root *os.Root, flat *exclu
 			if !mode.IsRegular() || leaf.input != nil || leaf.parse {
 				return false, fmt.Errorf("%w: contradictory regular type evidence for %q", ErrBuildInputChanged, key)
 			}
-			if obs := leaf.configObservation; obs != nil {
-				if !isRebuildResolverConfig(key) || obs.Path() != key || obs.Info() == nil || !obs.Info().Mode().IsRegular() {
-					return false, fmt.Errorf("%w: invalid resolver config observation for %q", ErrBuildInputChanged, key)
+			if obs := leaf.nonparse; obs.Info() != nil {
+				if obs.Path() != key || !obs.Info().Mode().IsRegular() || obs.prefixDigest == (rebuildDigest{}) {
+					return false, fmt.Errorf("%w: invalid nonparse observation for %q", ErrBuildInputChanged, key)
 				}
-				if out.configObservations == nil {
-					out.configObservations = make(map[string]source.FrozenRootPath)
+				if isRebuildResolverConfig(key) {
+					if out.configObservations == nil {
+						out.configObservations = make(map[string]source.FrozenRootPath)
+					}
+					out.configObservations[key] = obs.FrozenRootPath
 				}
-				out.configObservations[key] = *obs
+				// Keep metadata and a digest, not bodies, under the namespace cap.
+				if hasRootLink {
+					if out.manifestTargets == nil {
+						out.manifestTargets = make(map[string]rebuildManifestTarget)
+					}
+					out.manifestTargets[key] = rebuildManifestTarget{obs.Info(), obs.prefixDigest}
+				}
 			}
 			return true, nil
 		}
-		if leaf.configObservation != nil {
-			return false, fmt.Errorf("%w: unexpected resolver config observation for %q", ErrBuildInputChanged, key)
+		if leaf.nonparse.Info() != nil {
+			return false, fmt.Errorf("%w: unexpected nonparse observation for %q", ErrBuildInputChanged, key)
 		}
 		if leaf.input == nil && !leaf.parse {
 			return false, nil
@@ -117,11 +127,12 @@ func freezeRebuildCheckoutInputs(ctx context.Context, root *os.Root, flat *exclu
 // A nil inventory is an explicitly selected non-Git walk, not a Git failure
 // fallback. leaf supplies the remaining owner admission for open regular files
 // and no-follow symlink identities; it may retain checked identities
-// for the same build. All outputs, including emitted rows, are tentative
+// for the same build. Its bool reports an admitted root manifest link in the
+// root listing. All outputs, including emitted rows, are tentative
 // until the owner has sealed this enumeration and its build inputs together.
 func captureRebuildCheckoutNamespace(ctx context.Context, root *os.Root, flat *excludes.Matcher,
 	git *rebuildGitInventory, rawRemaining *int64,
-	leaf func(string, fs.FileMode, rebuildGitMember) (bool, error), emit func(rebuildSidecarRow) error,
+	leaf func(string, fs.FileMode, rebuildGitMember, bool) (bool, error), emit func(rebuildSidecarRow) error,
 ) (*rebuildResolverNamespace, error) {
 	if root == nil || !filepath.IsAbs(root.Name()) || leaf == nil || emit == nil {
 		return nil, fmt.Errorf("%w: missing checkout walk authority", errRebuildResolverNamespace)
@@ -131,6 +142,7 @@ func captureRebuildCheckoutNamespace(ctx context.Context, root *os.Root, flat *e
 	var listing []rebuildResolverListedEntry
 	var policyErr error
 	var admitted map[string]rebuildGitMember
+	var hasRootLink bool
 	absRoot := root.Name()
 	checkedRead := func(abs string) ([]byte, error) {
 		if policyErr != nil {
@@ -184,7 +196,18 @@ func captureRebuildCheckoutNamespace(ctx context.Context, root *os.Root, flat *e
 		}
 		var err error
 		admitted, err = prepareRebuildGitDirectory(ctx, root, git, allowed, rawRemaining, emit)
-		return err
+		if err != nil {
+			return err
+		}
+		if dir == "." {
+			for _, e := range allowed {
+				if (e.key == "go.mod" || e.key == "package.json") && e.mode&fs.ModeSymlink != 0 && admitted[e.key] != 0 {
+					hasRootLink = true
+					break
+				}
+			}
+		}
+		return nil
 	}
 	classify := func(key string, mode fs.FileMode) (bool, error) {
 		member := admitted[key]
@@ -192,7 +215,7 @@ func captureRebuildCheckoutNamespace(ctx context.Context, root *os.Root, flat *e
 			return false, nil
 		}
 		if mode.IsRegular() || mode&fs.ModeSymlink != 0 {
-			return leaf(key, mode, member)
+			return leaf(key, mode, member, hasRootLink)
 		}
 		return true, nil // directories and unsupported entry types; no leaf read
 	}

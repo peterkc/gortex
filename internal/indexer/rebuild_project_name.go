@@ -86,7 +86,7 @@ func readCheckedRebuildRootManifest(ctx context.Context, src *source.FilesystemS
 	claimed := epoch.admitted[name]
 	if ns.entries[name].kind == rebuildNamespaceUnsupported && claimed != nil &&
 		claimed.Path == name && claimed.Kind == merkle.Symlink {
-		target, data, row, err := readCheckedRebuildManifestLink(ctx, src, ns, *claimed, epoch.admitted, limit)
+		target, data, row, err := readCheckedRebuildManifestLink(ctx, src, ns, *claimed, epoch.admitted, epoch.manifestTargets, limit)
 		if err != nil {
 			return nil, err
 		}
@@ -136,12 +136,19 @@ func readCheckedRebuildRegularManifest(ctx context.Context, src *source.Filesyst
 	return data, nil
 }
 
-// readCheckedRebuildManifestLink uses only a frozen namespace and the owner's
-// admitted regular target identities to authorize the root link traversal.
+// A nonparse target carries the metadata and checked prefix of an admitted leaf.
+// It gains a content identity only when a consulted root link reads its body.
+type rebuildManifestTarget struct {
+	info         fs.FileInfo
+	prefixDigest rebuildDigest
+}
+
+// readCheckedRebuildManifestLink uses the frozen namespace and exact admitted
+// identities or nonparse observations to authorize root link traversal.
 // The caller shares these checked bytes across the applicable consumers and
 // charges them once to the owning sidecar. No bytes or row are usable on error.
 func readCheckedRebuildManifestLink(ctx context.Context, src *source.FilesystemSource, ns *rebuildResolverNamespace,
-	link rebuildInput, admitted map[string]*rebuildInput, limit int64,
+	link rebuildInput, admitted map[string]*rebuildInput, nonparse map[string]rebuildManifestTarget, limit int64,
 ) (rebuildInput, []byte, rebuildSidecarRow, error) {
 	if src == nil || ns == nil || !ns.frozen || ns.entries["."].close != rebuildNamespaceCloseExact ||
 		(link.Path != "go.mod" && link.Path != "package.json") || link.Kind != merkle.Symlink ||
@@ -161,10 +168,13 @@ func readCheckedRebuildManifestLink(ctx context.Context, src *source.FilesystemS
 			return fs.ModeDir, nil
 		case rebuildNamespaceRegular:
 			target := admitted[key]
-			if target == nil || target.Path != key || target.Kind != merkle.RegularFile || target.Content == (rebuildDigest{}) || target.Size < 0 {
-				return 0, fmt.Errorf("%w: target lacks admitted identity", errRebuildResolverInputDenied)
+			if target != nil && target.Path == key && target.Kind == merkle.RegularFile && target.Content != (rebuildDigest{}) && target.Size >= 0 {
+				return 0, nil
 			}
-			return 0, nil
+			if observed, ok := nonparse[key]; target == nil && ok && observed.info != nil && observed.info.Mode().IsRegular() && observed.prefixDigest != (rebuildDigest{}) {
+				return 0, nil
+			}
+			return 0, fmt.Errorf("%w: target %q lacks admitted identity", errRebuildResolverInputDenied, key)
 		default:
 			return 0, fmt.Errorf("%w: target %q not present", errRebuildResolverNamespace, key)
 		}
@@ -172,21 +182,37 @@ func readCheckedRebuildManifestLink(ctx context.Context, src *source.FilesystemS
 	if err != nil {
 		return rebuildInput{}, nil, rebuildSidecarRow{}, err
 	}
-	target := admitted[entry.Path()]
-	if target == nil || !entry.Info().Mode().IsRegular() {
+	key := entry.Path()
+	target := admitted[key]
+	observed := nonparse[key]
+	if !entry.Info().Mode().IsRegular() || (target == nil && observed.info == nil) {
 		return rebuildInput{}, nil, rebuildSidecarRow{}, fmt.Errorf("%w: target is not an admitted file: %w", errRebuildProjectNameInput, errRebuildResolverInputDenied)
 	}
-	if limit < 0 || target.Size > min(limit, rebuildCppEntryLimit) {
-		return rebuildInput{}, nil, rebuildSidecarRow{}, fmt.Errorf("%w: target %q: %w", errRebuildProjectNameInput, entry.Path(), errRebuildCppCaptureLimit)
+	if target == nil && !sameRebuildPathMetadata(observed.info, entry.Info()) {
+		return rebuildInput{}, nil, rebuildSidecarRow{}, fmt.Errorf("%w: manifest target %q metadata changed", ErrBuildInputChanged, key)
 	}
-	data, err := entry.Read(ctx, min(limit, rebuildCppEntryLimit))
+	size := entry.Info().Size()
+	if target != nil {
+		size = target.Size
+	}
+	maxBytes := min(limit, rebuildCppEntryLimit)
+	if maxBytes < 0 || size > maxBytes {
+		return rebuildInput{}, nil, rebuildSidecarRow{}, fmt.Errorf("%w: target %q: %w", errRebuildProjectNameInput, key, errRebuildCppCaptureLimit)
+	}
+	data, err := entry.Read(ctx, maxBytes)
 	if err != nil {
 		return rebuildInput{}, nil, rebuildSidecarRow{}, rebuildManifestLinkError(link.Path, err)
 	}
-	if target.Size != int64(len(data)) || rebuildDigest(blake3.Sum256(data)) != target.Content {
-		return rebuildInput{}, nil, rebuildSidecarRow{}, fmt.Errorf("%w: verified target differs from admitted identity", ErrBuildInputChanged)
+	digest := rebuildDigest(blake3.Sum256(data))
+	if target == nil {
+		if rebuildDigest(blake3.Sum256(data[:min(len(data), sniffPrefixBytes)])) != observed.prefixDigest {
+			return rebuildInput{}, nil, rebuildSidecarRow{}, fmt.Errorf("%w: manifest target %q prefix changed", ErrBuildInputChanged, key)
+		}
+		target = &rebuildInput{Path: key, Language: "manifest", Kind: merkle.RegularFile, Size: int64(len(data)), Content: digest}
+	} else if target.Size != int64(len(data)) || digest != target.Content {
+		return rebuildInput{}, nil, rebuildSidecarRow{}, fmt.Errorf("%w: verified target %q differs from admitted identity", ErrBuildInputChanged, key)
 	}
-	return *target, data, rebuildSidecarRow{Kind: rebuildFollowedManifest, Path: []byte(link.Path), Present: true, Digest: target.Content}, nil
+	return *target, data, rebuildSidecarRow{Kind: rebuildFollowedManifest, Path: []byte(link.Path), Present: true, Digest: digest}, nil
 }
 
 // freezeRebuildRootManifestLink records a root link as a leaf without opening

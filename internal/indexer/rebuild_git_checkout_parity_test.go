@@ -101,7 +101,7 @@ func TestRebuildGitCheckoutNativeParity(t *testing.T) {
 	require.NoError(t, err)
 	var got, gotTracked []string
 	ns, err := captureRebuildCheckoutNamespace(ctx, root, excludes.New([]string{"gortex-only/"}), &inventory, &raw,
-		func(rel string, mode fs.FileMode, member rebuildGitMember) (bool, error) {
+		func(rel string, mode fs.FileMode, member rebuildGitMember, _ bool) (bool, error) {
 			require.True(t, mode.IsRegular(), "%q", rel)
 			if member == rebuildGitTracked {
 				gotTracked = append(gotTracked, rel)
