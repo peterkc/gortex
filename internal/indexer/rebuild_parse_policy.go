@@ -62,7 +62,8 @@ func (idx *Indexer) installRebuildParsePolicy(policy rebuildParsePolicy) {
 // uses. CODEOWNERS is last-match-wins; preserving the resulting owner order also
 // preserves extraction order. Only the Go extractor reads the Temporal list.
 func (idx *Indexer) rebuildExtractorRecipe(base rebuildDigest, input rebuildInput) rebuildDigest {
-	b := append([]byte{'r', 1}, base[:]...)
+	// v2 requires a receipt with the effective extractor ID.
+	b := append([]byte{'r', 2}, base[:]...)
 	appendList := func(values []string) {
 		b = binary.AppendUvarint(b, uint64(len(values)))
 		for _, value := range values {

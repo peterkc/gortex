@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -11,15 +12,79 @@ import (
 	"strings"
 
 	"github.com/zzet/gortex/internal/excludes"
+	"github.com/zzet/gortex/internal/graph/store_pebble"
+	"github.com/zzet/gortex/internal/indexer/merkle"
 	"github.com/zzet/gortex/internal/indexer/source"
 )
 
 var errRebuildIgnorePolicy = errors.New("unproved frozen checkout ignore policy")
 
+// rebuildCheckoutInputs binds one walk's checked listings and admitted
+// identities to the same parse input root. It belongs to the owner only.
+// A leaf may be resolver input without appearing in the parse manifest.
+type rebuildCheckoutInputs struct {
+	namespace *rebuildResolverNamespace
+	admitted  map[string]*rebuildInput
+	files     []rebuildInput
+	digest    store_pebble.HeadDigest
+}
+
+// freezeRebuildCheckoutInputs gets each positive identity at the admission
+// boundary, before its parent listing closes. A nil input means denied. The
+// callback owns effective admission and checked content or link-text identity;
+// a listed name alone cannot authorize bytes. Discard emitted rows on error.
+func freezeRebuildCheckoutInputs(ctx context.Context, root *os.Root, flat *excludes.Matcher,
+	rawRemaining *int64, freeze func(string, fs.FileMode) (*rebuildInput, bool, error), emit func(rebuildSidecarRow) error,
+) (rebuildCheckoutInputs, error) {
+	if freeze == nil {
+		return rebuildCheckoutInputs{}, fmt.Errorf("%w: missing leaf admission", errRebuildResolverNamespace)
+	}
+	out := rebuildCheckoutInputs{admitted: make(map[string]*rebuildInput)}
+	ns, err := captureRebuildCheckoutNamespace(ctx, root, flat, rawRemaining, func(key string, mode fs.FileMode) (bool, error) {
+		input, parse, err := freeze(key, mode)
+		if err != nil {
+			return false, err
+		}
+		if input == nil && !parse {
+			return false, nil
+		}
+		want := merkle.RegularFile
+		if mode&fs.ModeSymlink != 0 {
+			want = merkle.Symlink
+		}
+		if input == nil || input.Path != key || input.Kind != want || input.Size < 0 ||
+			input.Content == (rebuildDigest{}) || input.Language == "" {
+			return false, fmt.Errorf("%w: leaf identity differs from checked entry %q", ErrBuildInputChanged, key)
+		}
+		value := *input
+		out.admitted[key] = &value
+		if parse {
+			out.files = append(out.files, value)
+		}
+		return true, nil
+	}, emit)
+	if err != nil {
+		return rebuildCheckoutInputs{}, err
+	}
+	inputRoot, err := rebuildInputRoot(out.files)
+	if err != nil {
+		return rebuildCheckoutInputs{}, err
+	}
+	n, err := hex.Decode(out.digest[:], []byte(inputRoot))
+	if err != nil || n != len(out.digest) {
+		return rebuildCheckoutInputs{}, fmt.Errorf("%w: invalid input root digest", errRebuildBuildWire)
+	}
+	if err := ctx.Err(); err != nil {
+		return rebuildCheckoutInputs{}, err
+	}
+	out.namespace = ns
+	return out, nil
+}
+
 // captureRebuildCheckoutNamespace is the owner's checked disk walk. Use the
 // effective root exclusions from the same Git-aware setup as the ordinary
 // walk. leaf supplies the remaining owner admission for open regular files
-// and the two special root manifest links; it may retain checked identities
+// and no-follow symlink identities; it may retain checked identities
 // for the same build. All outputs, including emitted rows, are tentative
 // until the owner has sealed this enumeration and its build inputs together.
 func captureRebuildCheckoutNamespace(ctx context.Context, root *os.Root, flat *excludes.Matcher,
@@ -65,7 +130,7 @@ func captureRebuildCheckoutNamespace(ctx context.Context, root *os.Root, flat *e
 		if policyErr != nil || denied {
 			return false, policyErr
 		}
-		if mode.IsRegular() || mode&fs.ModeSymlink != 0 && (key == "go.mod" || key == "package.json") {
+		if mode.IsRegular() || mode&fs.ModeSymlink != 0 {
 			return leaf(key, mode)
 		}
 		return true, nil // directories and unsupported entry types; no leaf read

@@ -62,6 +62,7 @@ func Again() { another := }
 	require.Positive(t, facts.File.NodeCount)
 	require.NotEmpty(t, facts.Edges)
 	require.NotEmpty(t, facts.Symbols)
+	require.Equal(t, "go", facts.EffectiveLanguage)
 	require.Equal(t, len(content), facts.File.Size)
 	require.Equal(t, contentHashForSource(content), facts.File.ContentHash)
 	require.Contains(t, facts.Constants, graph.ConstantValueRow{FilePath: path, NodeID: path + "::Label", Value: "orders"})
@@ -214,11 +215,110 @@ func TestPendingRebuildFileRequiresWorkerForGeneratedC(t *testing.T) {
 	// A frozen Git path need not be valid UTF-8, even if the host filesystem
 	// does not allow such names. Exercise the transport without a disk path.
 	input.Path = "vendor-\xff/parser.c"
-	entry, err = idx.submitPendingRebuildFile(ctx, input, ext, content, idx.frozenRebuildParsePolicy.Load(), exe, store.limit)
+	entry, err = idx.submitPendingRebuildFile(ctx, input.Path, ext, content, idx.frozenRebuildParsePolicy.Load(), exe, store.limit)
 	require.NoError(t, err)
 	facts, err = store_pebble.DecodeParseFacts(entry)
 	require.NoError(t, err)
 	require.Equal(t, input.Path, facts.File.FilePath)
 	require.Equal(t, input.Path+"::tree_sitter_demo", facts.Nodes[1].ID)
 	require.Equal(t, contentHashForSource(content), facts.File.ContentHash)
+}
+
+func TestPendingRebuildFileEffectiveLanguage(t *testing.T) {
+	ctx := t.Context()
+	root, src := rebuildInputFixture(t)
+	exe, err := os.Executable()
+	require.NoError(t, err)
+	t.Setenv(crashWorkerEnv, "1")
+
+	cfg := config.Default().Index
+	reg := parser.NewRegistry()
+	reg.Register(languages.NewTypeScriptExtractor())
+	reg.Register(languages.NewJavaScriptExtractor())
+	reg.Register(languages.NewCExtractor())
+	reg.Register(languages.NewCppExtractor())
+	idx := New(graph.New(), reg, cfg, zap.NewNop())
+	idx.installRebuildParsePolicy(rebuildParsePolicy{})
+	idx.SetRootPath(root)
+	t.Cleanup(idx.Close)
+	idx.transforms.transforms = append(idx.transforms.transforms, rebuildHeaderTestTransform{})
+
+	recipe := rebuildDigest{1}
+	bounds := rebuildTransformBounds{FileBytes: 1 << 20}
+	for _, tc := range []struct {
+		path, raw, prepared, walk, effective string
+		noDefinitions, skipped               bool
+	}{
+		{path: "main.tsx", raw: "export function Entry(): number { return 1; }\n", walk: "typescript", effective: "typescript"},
+		{path: "main.jsx", raw: "export function Entry() { return 1; }\n", walk: "javascript", effective: "javascript"},
+		{path: "empty.js", raw: "// No declarations\n", walk: "javascript", effective: "javascript", noDefinitions: true},
+		{path: "header.h", raw: "namespace demo {}\n", prepared: "int Entry(void) { return 1; }\n", walk: "c", effective: "cpp"},
+		{path: "binary.h", raw: "namespace demo {}\x00", walk: "c", effective: "cpp", noDefinitions: true, skipped: true},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			file := filepath.Join(root, tc.path)
+			require.NoError(t, os.WriteFile(file, []byte(tc.raw), 0o600))
+			walk, ok := reg.DetectLanguage(tc.path)
+			require.True(t, ok)
+			require.Equal(t, tc.walk, walk)
+			input, _, err := readRebuildInput(ctx, src, tc.path, walk, 1024)
+			require.NoError(t, err)
+			store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+			pending := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+			key := input.parseKey(idx.rebuildExtractorRecipe(recipe, input))
+			_, reused, err := idx.loadRebuildFile(ctx, src, store, input, recipe, bounds)
+			require.NoError(t, err)
+			require.False(t, reused)
+			normalEntry, err := store.read(key)
+			require.NoError(t, err)
+			_, reused, err = idx.loadPendingRebuildFile(ctx, src, pending, input, recipe, bounds, exe)
+			require.NoError(t, err)
+			require.False(t, reused)
+			pendingEntry, err := pending.read(key)
+			require.NoError(t, err)
+			require.Equal(t, normalEntry, pendingEntry)
+			facts, err := store_pebble.DecodeParseFacts(pendingEntry)
+			require.NoError(t, err)
+			require.Equal(t, tc.path, facts.File.FilePath)
+			require.Equal(t, tc.effective, facts.EffectiveLanguage)
+			expectedContent := tc.raw
+			if tc.prepared != "" {
+				expectedContent = tc.prepared
+			}
+			require.Equal(t, contentHashForSource([]byte(expectedContent)), facts.File.ContentHash)
+			if tc.noDefinitions {
+				require.Empty(t, facts.Symbols)
+			} else {
+				require.NotEmpty(t, facts.Symbols)
+			}
+			if tc.skipped {
+				require.Len(t, facts.Nodes, 1)
+				require.Equal(t, true, facts.Nodes[0].Meta["skipped_due_to_binary"])
+			}
+
+			if tc.path == "header.h" {
+				// The live edit no longer has the marker. Passing no source
+				// proves neither replay path even probes the checkout.
+				require.NoError(t, os.WriteFile(file, []byte(tc.prepared), 0o600))
+				cached, reused, err := idx.loadRebuildFile(ctx, nil, store, input, recipe, bounds)
+				require.NoError(t, err)
+				require.True(t, reused)
+				require.Equal(t, facts, cached)
+				cached, reused, err = idx.loadPendingRebuildFile(ctx, nil, pending, input, recipe, bounds, "")
+				require.NoError(t, err)
+				require.True(t, reused)
+				require.Equal(t, facts, cached)
+			}
+		})
+	}
+}
+
+// Erase the C++ marker so a probe of prepared bytes would select C.
+type rebuildHeaderTestTransform struct{}
+
+func (rebuildHeaderTestTransform) name() string             { return "test-erase-language-marker" }
+func (rebuildHeaderTestTransform) matches(path string) bool { return path == "header.h" }
+func (rebuildHeaderTestTransform) asLanguage() string       { return "" }
+func (rebuildHeaderTestTransform) apply(string, []byte) ([]byte, error) {
+	return []byte("int Entry(void) { return 1; }\n"), nil
 }

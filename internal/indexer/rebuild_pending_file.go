@@ -34,8 +34,8 @@ func (idx *Indexer) loadPendingRebuildFile(ctx context.Context, src source.Conte
 		return store_pebble.ParseFacts{}, false, fmt.Errorf("%w: %s: %w: transform policy unavailable", ErrPendingRebuildFile, input.Path, ErrBuildTransformBounds)
 	}
 	facts, reused, err := idx.loadRebuildFileWith(ctx, src, store, input, recipe, bounds,
-		func(ctx context.Context, input rebuildInput, ext parser.Extractor, prepared []byte) (store_pebble.ParseFacts, []byte, error) {
-			entry, err := idx.submitPendingRebuildFile(ctx, input, ext, prepared, policy, parserExe, store.limit)
+		func(ctx context.Context, rel string, ext parser.Extractor, prepared []byte) (store_pebble.ParseFacts, []byte, error) {
+			entry, err := idx.submitPendingRebuildFile(ctx, rel, ext, prepared, policy, parserExe, store.limit)
 			if err != nil {
 				return store_pebble.ParseFacts{}, nil, err
 			}
@@ -46,8 +46,11 @@ func (idx *Indexer) loadPendingRebuildFile(ctx context.Context, src source.Conte
 			if err != nil {
 				return store_pebble.ParseFacts{}, nil, fmt.Errorf("decode parser worker entry: %w", err)
 			}
-			if facts.File.FilePath != input.Path {
+			if facts.File.FilePath != rel {
 				return store_pebble.ParseFacts{}, nil, errors.New("parser worker entry has a different file identity")
+			}
+			if facts.EffectiveLanguage != ext.Language() {
+				return store_pebble.ParseFacts{}, nil, fmt.Errorf("parser worker effective language differs: got %q, want %q", facts.EffectiveLanguage, ext.Language())
 			}
 			return facts, entry, nil
 		})
@@ -57,7 +60,7 @@ func (idx *Indexer) loadPendingRebuildFile(ctx context.Context, src source.Conte
 	return facts, reused, nil
 }
 
-func (idx *Indexer) submitPendingRebuildFile(ctx context.Context, input rebuildInput, ext parser.Extractor, prepared []byte, policy *rebuildParsePolicy, exe string, entryLimit int) ([]byte, error) {
+func (idx *Indexer) submitPendingRebuildFile(ctx context.Context, rel string, ext parser.Extractor, prepared []byte, policy *rebuildParsePolicy, exe string, entryLimit int) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -75,7 +78,7 @@ func (idx *Indexer) submitPendingRebuildFile(ctx context.Context, input rebuildI
 		return nil, fmt.Errorf("start parser worker: %w", err)
 	}
 	defer pool.Close()
-	resp := pool.SubmitFullFacts(input.Path, input.Language, prepared, idx.extractionOptionsValue().TemporalEnvHelpers(), crashpool.RebuildFileOptions{
+	resp := pool.SubmitFullFacts(rel, ext.Language(), prepared, idx.extractionOptionsValue().TemporalEnvHelpers(), crashpool.RebuildFileOptions{
 		IndexConfigJSON: cfg, Codeowners: policy.Codeowners, Extractor: fmt.Sprintf("%T", ext), EntryLimit: entryLimit,
 	})
 	if resp.Bad() {
@@ -103,7 +106,7 @@ func servePendingRebuildFile(reg *parser.Registry, path string, ext parser.Extra
 	idx.installRebuildParsePolicy(rebuildParsePolicy{
 		Codeowners: frozen.Codeowners, TemporalEnvHelpers: options.TemporalEnvHelpers(),
 	})
-	facts, err := idx.extractPreparedRebuildFile(context.Background(), rebuildInput{Path: path, Language: ext.Language()}, ext, prepared)
+	facts, err := idx.extractPreparedRebuildFile(context.Background(), path, ext, prepared)
 	if err != nil {
 		return nil, err
 	}

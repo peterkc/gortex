@@ -9,7 +9,10 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
-const parseFactsFormat byte = 1
+const (
+	parseFactsFormat             byte = 1
+	parseFactsWithLanguageFormat byte = 2
+)
 
 // ParseFacts is the portable part of a file extraction. Content declarations
 // and unresolved scope facts live in Nodes, Edges and their typed metadata.
@@ -21,6 +24,9 @@ type ParseFacts struct {
 	Constants []graph.ConstantValueRow
 	Shingles  map[string][]uint64
 	Symbols   []graph.SymbolFTSItem
+	// EffectiveLanguage is the B2 extractor ID chosen before transforms.
+	// Legacy entries have no language authority and leave this empty.
+	EffectiveLanguage string
 }
 
 // EncodeParseFacts reuses the graph store's node, edge and metadata codecs.
@@ -84,11 +90,15 @@ func EncodeParseFacts(f ParseFacts) ([]byte, error) {
 		b = appendMetaString(b, item.NodeID)
 		b = appendMetaString(b, item.Tokens)
 	}
+	if f.EffectiveLanguage != "" {
+		b[0] = parseFactsWithLanguageFormat
+		b = appendMetaString(b, f.EffectiveLanguage)
+	}
 	return b, nil
 }
 
 func DecodeParseFacts(raw []byte) (ParseFacts, error) {
-	if len(raw) == 0 || raw[0] != parseFactsFormat {
+	if len(raw) == 0 || (raw[0] != parseFactsFormat && raw[0] != parseFactsWithLanguageFormat) {
 		return ParseFacts{}, invalid("parse facts format")
 	}
 	d := recordCursor{buf: raw[1:]}
@@ -147,6 +157,12 @@ func DecodeParseFacts(raw []byte) (ParseFacts, error) {
 			return ParseFacts{}, invalid("parse symbol without a node")
 		}
 		f.Symbols = append(f.Symbols, graph.SymbolFTSItem{NodeID: id, Tokens: tokens})
+	}
+	if raw[0] == parseFactsWithLanguageFormat {
+		f.EffectiveLanguage = d.str()
+		if f.EffectiveLanguage == "" {
+			return ParseFacts{}, invalid("missing effective parse language")
+		}
 	}
 	if err := d.finish(); err != nil {
 		return ParseFacts{}, fmt.Errorf("parse facts: %w", err)

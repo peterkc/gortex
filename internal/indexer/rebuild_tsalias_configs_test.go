@@ -3,6 +3,7 @@
 package indexer
 
 import (
+	"encoding/hex"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -143,26 +144,56 @@ func TestRebuildTSAliasConfigsPostParseProbeReplay(t *testing.T) {
 	cfg, mod := ids["tsconfig.json"], ids["go.mod"]
 	input, goInput := ids[caller], ids["a.go"]
 	input.Language, goInput.Language = "typescript", "go"
-	inputs := []rebuildInput{input, goInput}
 	identities := map[string]*rebuildInput{"go.mod": &mod, "tsconfig.json": &cfg}
-	capture := func(raw *int64, emit func(rebuildSidecarRow) error) error {
-		ns, err := captureRebuildCheckoutNamespace(ctx, src.FrozenRoot(), excludes.New([]string{"hidden/"}), raw, func(key string, _ fs.FileMode) (bool, error) {
-			_, ok := ids[key]
-			return ok, nil
-		}, emit)
-		if err != nil {
-			return err
+	freeze := func(key string, _ fs.FileMode) (*rebuildInput, bool, error) {
+		switch key {
+		case caller:
+			return &input, true, nil
+		case "a.go":
+			return &goInput, true, nil
 		}
+		id, ok := ids[key]
+		if !ok {
+			return nil, false, nil
+		}
+		return &id, false, nil
+	}
+	capture := func(epoch rebuildCheckoutInputs, raw *int64, emit func(rebuildSidecarRow) error) (string, error) {
 		denied := input
 		denied.Path = "hidden/never-read.ts"
-		require.ErrorIs(t, captureRebuildResolverConfigRows(ctx, src.FrozenRoot(), true, ns, []rebuildInput{denied}, identities, nil, raw,
+		require.ErrorIs(t, captureRebuildResolverConfigRows(ctx, src.FrozenRoot(), true, epoch.namespace, []rebuildInput{denied}, epoch.admitted, nil, raw,
 			func(rebuildSidecarRow) error { t.Fatal("emitted facts for denied caller"); return nil }), errRebuildResolverInputDenied)
-		return captureRebuildResolverConfigRows(ctx, src.FrozenRoot(), true, ns, inputs, identities, nil, raw, emit)
+		name, err := readRebuildProjectName(ctx, src, identities, raw, emit)
+		if err != nil {
+			return "", err
+		}
+		return name, captureRebuildResolverConfigRows(ctx, src.FrozenRoot(), true, epoch.namespace, epoch.files, epoch.admitted, nil, raw, emit)
 	}
 	req := rebuildBuildRequest{Root: root, Witness: store_pebble.Witness{Recipe: store_pebble.HeadDigest{1}}}
-	err := withRebuildBuildInputs(ctx, t.TempDir(), src, identities, req, capture, func(lease string, bound rebuildBuildRequest) error {
+	flat := excludes.New([]string{"hidden/"})
+	leases := t.TempDir()
+	wrong := req
+	wrong.Witness.Input[0] = 1
+	err := withRebuildCheckoutBuildInputs(ctx, leases, src, wrong, flat, freeze,
+		func(rebuildCheckoutInputs, *int64, func(rebuildSidecarRow) error) (string, error) {
+			t.Fatal("captured resolver values against a different input root")
+			return "", nil
+		}, func(string, rebuildBuildRequest, []rebuildInput) error {
+			t.Fatal("an unbound checkout reached the consumer")
+			return nil
+		})
+	require.ErrorIs(t, err, ErrBuildInputChanged)
+	entries, err := os.ReadDir(leases)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+
+	err = withRebuildCheckoutBuildInputs(ctx, leases, src, req, flat, freeze, capture, func(lease string, bound rebuildBuildRequest, frozen []rebuildInput) error {
 		require.NoError(t, bound.checkProjectRecipe())
 		require.Equal(t, "fixture", bound.ProjectName)
+		require.ElementsMatch(t, []rebuildInput{input, goInput}, frozen)
+		want, err := rebuildInputRoot(frozen)
+		require.NoError(t, err)
+		require.Equal(t, want, hex.EncodeToString(bound.Witness.Input[:]))
 		digest := rebuildDigest(bound.Witness.FrozenInputs)
 		require.NotZero(t, digest)
 

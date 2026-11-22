@@ -26,6 +26,7 @@ func TestParseFactsStoreCodec(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, read.Nodes, 2)
 	require.Len(t, read.Edges, 1)
+	require.Equal(t, byte(1), packed[0], "ordinary facts retain the legacy format")
 	require.Equal(t, f, read)
 	again, err := EncodeParseFacts(read)
 	require.NoError(t, err)
@@ -42,4 +43,33 @@ func TestParseFactsStoreCodec(t *testing.T) {
 	f.File.NodeCount = 0
 	_, err = EncodeParseFacts(f)
 	require.ErrorIs(t, err, errInvalidRecord)
+}
+
+func TestParseFactsStoreCodecEffectiveLanguage(t *testing.T) {
+	f := ParseFacts{
+		File: graph.FileMetaRow{FilePath: "header.h", NodeCount: 2},
+		Nodes: []*graph.Node{
+			{ID: "header.h::Z", Kind: graph.KindFunction, Name: "Z"},
+			{ID: "header.h::A", Kind: graph.KindFunction, Name: "A"},
+		},
+	}
+	legacy, err := EncodeParseFacts(f)
+	require.NoError(t, err)
+	f.EffectiveLanguage = "cpp"
+	packed, err := EncodeParseFacts(f)
+	require.NoError(t, err)
+	require.Equal(t, byte(2), packed[0])
+	require.Equal(t, legacy[1:], packed[1:len(legacy)], "the portable rows retain their encoding and order")
+	decoded, err := DecodeParseFacts(packed)
+	require.NoError(t, err)
+	require.Equal(t, f, decoded)
+	for _, invalid := range [][]byte{
+		packed[:len(legacy)],                         // language missing
+		append(bytes.Clone(packed[:len(legacy)]), 0), // language explicitly empty
+		packed[:len(packed)-1],                       // language truncated
+		append(bytes.Clone(packed), 0),               // trailing data
+	} {
+		_, err := DecodeParseFacts(invalid)
+		require.ErrorIs(t, err, errInvalidRecord)
+	}
 }

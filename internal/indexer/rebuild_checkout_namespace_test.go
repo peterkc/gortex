@@ -3,6 +3,7 @@
 package indexer
 
 import (
+	"encoding/hex"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/excludes"
+	"github.com/zzet/gortex/internal/indexer/merkle"
 	"github.com/zzet/gortex/internal/indexer/source"
 )
 
@@ -79,6 +81,59 @@ func TestRebuildCheckoutNamespaceCapture(t *testing.T) {
 				_, err := replay.lookup(rel)
 				require.ErrorIs(t, err, errRebuildResolverInputDenied, "%q", rel)
 			}
+		})
+	}
+}
+
+func TestFreezeRebuildCheckoutInputs(t *testing.T) {
+	for _, bad := range []bool{false, true} {
+		name := "parse root excludes resolver-only input"
+		if bad {
+			name = "mismatched identity refuses"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			root, src := rebuildInputFixture(t)
+			require.NoError(t, os.Mkdir(filepath.Join(root, "ignored"), 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(root, "ignored", "child.ts"), nil, 0o600))
+			require.NoError(t, os.WriteFile(filepath.Join(root, "main.ts"), []byte("export {}"), 0o600))
+			require.NoError(t, os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.org/demo\n"), 0o600))
+			require.NoError(t, os.Symlink("main.ts", filepath.Join(root, "alias.ts")))
+			raw := int64(rebuildCppRawLimit)
+			var keys []string
+			out, err := freezeRebuildCheckoutInputs(ctx, src.FrozenRoot(), excludes.New([]string{"ignored/"}), &raw,
+				func(key string, _ fs.FileMode) (*rebuildInput, bool, error) {
+					keys = append(keys, key)
+					lang, parse := "typescript", key != "go.mod"
+					if !parse {
+						lang = "manifest"
+					}
+					in, _, err := readRebuildInput(ctx, src, key, lang, 1024)
+					if bad && key == "alias.ts" {
+						in.Kind = merkle.RegularFile
+					}
+					return &in, parse, err
+				}, func(rebuildSidecarRow) error {
+					require.False(t, bad, "no rows from a failed root classification")
+					return nil
+				})
+			if bad {
+				require.ErrorIs(t, err, ErrBuildInputChanged)
+				require.Empty(t, out)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, []string{"alias.ts", "go.mod", "main.ts"}, keys)
+			require.Len(t, out.admitted, 3)
+			require.Len(t, out.files, 2)
+			require.Equal(t, merkle.Symlink, out.admitted["alias.ts"].Kind)
+			want, err := rebuildInputRoot([]rebuildInput{*out.admitted["main.ts"], *out.admitted["alias.ts"]})
+			require.NoError(t, err)
+			require.Equal(t, want, hex.EncodeToString(out.digest[:]))
+			_, err = out.namespace.lookup("ignored/child.ts")
+			require.ErrorIs(t, err, errRebuildResolverInputDenied)
+			_, err = out.namespace.lookup("alias.ts")
+			require.ErrorIs(t, err, errRebuildResolverNamespace, "a parse link is not resolver file authority")
 		})
 	}
 }
