@@ -3,6 +3,7 @@ package resolver
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -22,10 +23,15 @@ func resolveRebuildExtern(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 	}
 	importPath, symbol := spec[:sep], spec[sep+2:]
 	goPath := strings.HasSuffix(edge.FilePath, ".go")
-	if goPath && importPath != "" {
-		// Tracked modules can keep even a complete name miss pending in the
-		// cold shadow. A directory hit also cannot rule out the earlier tier.
-		return rebuildExternNeeds(edge, spec, "Go module identities/replacements, package ownership and cold deferral")
+	if goPath {
+		if check := f.imports.checkGoExtern; check != nil {
+			if err := check(importPath); err != nil {
+				return err
+			}
+		} else if importPath != "" {
+			// A tracked module can keep even a complete name miss pending.
+			return rebuildExternNeeds(edge, spec, "Go module identities/replacements, package ownership and cold deferral")
+		}
 	}
 
 	var caller *graph.Node
@@ -62,39 +68,78 @@ func resolveRebuildExtern(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 	}
 
 	preferLocal := repo != "" && language == "go"
-	var match, foreignFallback *graph.Node
+	var precise, match, foreignFallback *graph.Node
 	if err := visitRebuildExternCandidates(ctx, f, symbol, languages, func(n *graph.Node) error {
+		if precise != nil || (!goPath && match != nil) {
+			return nil
+		}
 		switch n.Kind {
 		case graph.KindFunction, graph.KindMethod, graph.KindType, graph.KindInterface:
 		default:
 			return nil // includes transient KindContract rows, not extern definitions
 		}
+		var preciseHit bool
 		if goPath && n.RepoPrefix == repo && (n.Language == "" || n.Language == "go") {
-			// An empty import path cannot defer, but a viable local
-			// definition can still bind via a caller replacement.
-			return rebuildExternNeeds(edge, spec, "Go module/replacement eligibility for an empty import path")
+			if f.imports.checkGoExtern == nil {
+				return rebuildExternNeeds(edge, spec, "Go module/replacement eligibility for an empty import path")
+			}
+			// Reuse native's same-repo predicate. The checked root claim is
+			// not a tracked module and there is no replacement directory.
+			one := [1]*graph.Node{n}
+			preciseHit = goModulePreciseLocal(nil, importPath, one[:], repo, "") != nil
 		}
-		if match != nil {
-			return nil
-		}
-		dir := filePathDir(n.FilePath)
+		var dirHit bool
 		cross := repo != "" && n.RepoPrefix != "" && n.RepoPrefix != repo
-		if !cross {
-			if strings.HasSuffix(dir, "/"+lastPathComponent(importPath)) || dir == importPath || strings.HasSuffix(dir, importPath) {
-				match = n
+		if match == nil && (!cross || !preferLocal || foreignFallback == nil) {
+			dir := filePathDir(n.FilePath)
+			if cross {
+				dirHit = dirMatchesImport(dir, importPath)
+			} else {
+				dirHit = strings.HasSuffix(dir, "/"+lastPathComponent(importPath)) || dir == importPath || strings.HasSuffix(dir, importPath)
 			}
+		}
+		if !preciseHit && !dirHit {
 			return nil
 		}
-		if dirMatchesImport(dir, importPath) {
-			if !preferLocal {
-				match = n
-			} else if foreignFallback == nil {
-				foreignFallback = n
+		if rebuildImportNeedsGoOwnership(caller, n) {
+			if f.imports.goOwnership == nil {
+				return rebuildExternNeeds(edge, spec, "Go package ownership")
 			}
+			owner, err := f.imports.goOwnership(GoImportCandidate{
+				ImportPath: importPath, ImporterRepoPrefix: repo, ImporterFilePath: caller.FilePath,
+				CandidateID: n.ID, CandidateRepoPrefix: n.RepoPrefix, CandidateFilePath: n.FilePath, CandidateNode: n,
+			})
+			if err != nil {
+				return err
+			}
+			switch owner {
+			case GoPackageOwnershipDifferent:
+				return nil
+			case GoPackageOwnershipExact, GoPackageOwnershipUnknown:
+			default:
+				return rebuildExternNeeds(edge, spec, "valid Go package ownership")
+			}
+		}
+		switch {
+		case preciseHit:
+			precise = n
+		case cross && preferLocal:
+			foreignFallback = n
+		default:
+			match = n
 		}
 		return nil
 	}); err != nil {
 		return err
+	}
+	if precise != nil {
+		// The native binder clones only when it can stamp go_import. A
+		// preexisting malformed spec can still carry terminal/restub keys.
+		if !strings.Contains(goModuleEdgeSpec(edge), "::") {
+			edge.Meta = maps.Clone(edge.Meta)
+		}
+		bindGoModuleEdge(edge, precise, repo, "", nil)
+		return nil
 	}
 	if match == nil {
 		match = foreignFallback
@@ -103,9 +148,6 @@ func resolveRebuildExtern(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 		cross := repo != "" && match.RepoPrefix != "" && match.RepoPrefix != repo
 		if cross && candidateWorkspaceID(caller) != candidateWorkspaceID(match) {
 			return rebuildExternNeeds(edge, spec, "cross-workspace dependency eligibility")
-		}
-		if rebuildImportNeedsGoOwnership(caller, match) {
-			return rebuildExternNeeds(edge, spec, "Go package ownership")
 		}
 		edge.To = match.ID
 		if cross || preferLocal {

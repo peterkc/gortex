@@ -1,6 +1,9 @@
 package resolver
 
 import (
+	"errors"
+	"maps"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -111,6 +114,163 @@ func TestRebuildExternNativeRows(t *testing.T) {
 		return b.ApplyLinkReindexes(ctx, moves)
 	}))
 	require.Equal(t, want, rebuildFnPointerSaved(t, b))
+	checkFrontierScratch(t, opts.ScratchParent)
+}
+
+// Compare full rows with the native bulk reducer, configured as an
+// owner-backed checkout with no tracked module identities.
+func TestRebuildGoExternEmptyTrackedNativeRows(t *testing.T) {
+	const caller, tsCaller, repo = "repo/main.go", "repo/view.ts", "repo"
+	const pkg = "example.test/sdk/pkg"
+	n := rebuildExternTestNode
+	nodes := []*graph.Node{
+		n(caller, "caller", caller, repo, "app", "go", graph.KindFunction),
+		n(tsCaller, "callerTS", tsCaller, repo, "app", "typescript", graph.KindFunction),
+		n("repo/0-different", "Bind", "repo/other/"+pkg+"/wrong.go", repo, "app", "go", graph.KindFunction),
+		n("repo/1-loose", "Bind", "repo/loose/pkg/loose.go", repo, "app", "go", graph.KindFunction),
+		n("repo/2-precise", "Bind", "repo/"+pkg+"/first.go", repo, "app", "go", graph.KindMethod),
+		n("repo/3-precise", "Bind", "repo/"+pkg+"/last.go", repo, "app", "go", graph.KindType),
+		n("repo/0-wrong-loose", "Loose", "repo/wrong/pkg/a.go", repo, "app", "go", graph.KindFunction),
+		n("repo/4-unknown", "Loose", "repo/other/pkg/b.go", repo, "app", "go", graph.KindInterface),
+		n("repo/z-blank", "Lang", "repo/"+pkg+"/blank.go", repo, "app", "", graph.KindFunction),
+		n("repo/a-go", "Lang", "repo/"+pkg+"/typed.go", repo, "app", "go", graph.KindFunction),
+		n("repo/ts", "Bind", "repo/"+pkg+"/only.ts", repo, "app", "typescript", graph.KindFunction),
+	}
+	slices.Reverse(nodes)
+	owner := func(q GoImportCandidate) GoPackageOwnershipResult {
+		require.Equal(t, pkg, q.ImportPath)
+		require.Equal(t, caller, q.ImporterFilePath)
+		require.Equal(t, repo, q.ImporterRepoPrefix)
+		require.NotNil(t, q.CandidateNode)
+		require.Equal(t, q.CandidateNode.ID, q.CandidateID)
+		require.Equal(t, q.CandidateNode.FilePath, q.CandidateFilePath)
+		require.Equal(t, q.CandidateNode.RepoPrefix, q.CandidateRepoPrefix)
+		switch q.CandidateID {
+		case "repo/0-different", "repo/0-wrong-loose":
+			return GoPackageOwnershipDifferent
+		case "repo/2-precise", "repo/3-precise":
+			return GoPackageOwnershipExact
+		default:
+			return GoPackageOwnershipUnknown
+		}
+	}
+	var input, want, nativeInput []*graph.Edge
+	for i, tc := range []struct {
+		from, file, spec, to       string
+		precise, keepCross, restub bool
+	}{
+		{caller, caller, pkg + "::Bind", "repo/2-precise", true, false, false},
+		{caller, caller, pkg + "::Loose", "repo/4-unknown", false, false, false},
+		{caller, caller, pkg + "::Lang", "repo/z-blank", true, false, true},
+		{caller, "repo/site.txt", pkg + "::Bind", "repo/1-loose", false, false, false},
+		{tsCaller, caller, pkg + "::Bind", "repo/ts", false, true, false},
+		{caller, caller, pkg + "::Missing", "dep::" + pkg + "::Missing", false, true, false},
+		{caller, caller, "sdk/sub::Missing", "repo::stdlib::sdk/sub::Missing", false, true, false},
+	} {
+		e := rebuildExternTestEdge(tc.from, tc.file, tc.spec, i+1)
+		e.Alias, e.Context, e.Via, e.CrossRepo = "local", "argument", "source", true
+		if tc.restub {
+			stub := e.To
+			e.To, e.Origin, e.Tier, e.Confidence = tc.to, graph.OriginASTResolved, "verified", 0.8
+			graph.StashRestubProvenance(e)
+			e.To = stub
+		}
+		input = append(input, e)
+		saved := rebuildImportTestMove(e, tc.to, false)
+		saved.CrossRepo = tc.keepCross
+		if tc.precise {
+			saved.Confidence, saved.ConfidenceLabel, saved.Origin = 0, "", ""
+			saved.Meta["go_import"] = tc.spec
+			if tc.restub {
+				require.True(t, graph.RestoreRestubProvenance(saved))
+				require.Equal(t, graph.OriginASTResolved, saved.Origin)
+				require.Equal(t, "verified", saved.Tier)
+				require.Equal(t, 0.8, saved.Confidence)
+			}
+		}
+		want = append(want, saved)
+		copy := *e
+		copy.Meta = maps.Clone(e.Meta)
+		nativeInput = append(nativeInput, &copy)
+	}
+	want = rebuildVueSortedRows(want)
+	g := graph.New()
+	g.AddBatch(nodes, nativeInput)
+	r := New(g)
+	r.bulkMode = true
+	r.SetDeferGoModuleMisses(true)
+	r.SetGoModuleReplacementLookup(func() map[string][]GoModuleReplacement {
+		return map[string][]GoModuleReplacement{repo: {{Module: "example.test/sdk"}}}
+	})
+	r.refreshGoModules()
+	r.SetGoPackageOwnership(owner)
+	r.buildDirIndexes()
+	require.NoError(t, r.warmLookupCache(nativeInput))
+	defer r.clearLookupCache()
+	var moves []graph.EdgeReindex
+	var stats ResolveStats
+	for _, old := range nativeInput {
+		copy := *old
+		copy.Meta = maps.Clone(old.Meta)
+		oldTo, changed := r.resolveEdge(&copy, &stats)
+		require.True(t, changed)
+		clearEdgeTerminal(&copy)
+		moves = append(moves, graph.EdgeReindex{Edge: &copy, OldTo: oldTo, OldKind: old.Kind})
+	}
+	g.ReindexEdges(moves)
+	require.EqualValues(t, 5, stats.Resolved)
+	require.EqualValues(t, 2, stats.External)
+	require.EqualValues(t, 0, stats.Unresolved)
+	require.Equal(t, want, rebuildVueSortedRows(g.AllEdges()))
+
+	ctx, b, opts := frontierFixture(t, 1, 0)
+	b.AddBatch(nodes, input)
+	checks := 0
+	require.NoError(t, runRebuildMain(ctx, b, opts, false, RebuildMainInputs{
+		CheckGoExtern: func(path string) error {
+			require.Contains(t, []string{pkg, "sdk/sub"}, path)
+			checks++
+			return nil
+		},
+		GoOwnership: func(q GoImportCandidate) (GoPackageOwnershipResult, error) {
+			return owner(q), nil
+		},
+	}))
+	require.Equal(t, 6, checks) // Edge file suffix, not source language.
+	require.Equal(t, want, rebuildFnPointerSaved(t, b))
+	for _, id := range []string{"dep::" + pkg + "::Missing", "repo::stdlib::sdk/sub::Missing"} {
+		saved, err := b.RebuildView().Node(ctx, id)
+		require.NoError(t, err)
+		require.Nil(t, saved)
+	}
+	checkFrontierScratch(t, opts.ScratchParent)
+}
+
+func TestRebuildGoExternUnprovedOwnershipRefusesPage(t *testing.T) {
+	const file = "main.go"
+	const pkg = "example.test/pkg"
+	n := rebuildExternTestNode
+	ctx, b, opts := frontierFixture(t, 1, 0)
+	first := rebuildExternTestEdge(file, file, "a-malformed", 1)
+	blocked := rebuildExternTestEdge(file, file, pkg+"::Bind", 2)
+	before := rebuildVueSortedRows([]*graph.Edge{first, blocked})
+	b.AddBatch([]*graph.Node{
+		n(file, "caller", file, "", "", "go", graph.KindFunction),
+		n("bind", "Bind", pkg+"/bind.go", "", "", "go", graph.KindFunction),
+	}, before)
+	unproved := errors.New("unproved candidate package")
+	calls := 0
+	err := runRebuildMain(ctx, b, opts, false, RebuildMainInputs{
+		CheckGoExtern: func(string) error { return nil },
+		GoOwnership: func(q GoImportCandidate) (GoPackageOwnershipResult, error) {
+			calls++
+			require.Equal(t, "bind", q.CandidateID)
+			return GoPackageOwnershipUnknown, unproved
+		},
+	})
+	require.ErrorIs(t, err, unproved)
+	require.Equal(t, 1, calls)
+	require.Equal(t, before, rebuildFnPointerSaved(t, b))
 	checkFrontierScratch(t, opts.ScratchParent)
 }
 

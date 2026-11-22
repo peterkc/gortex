@@ -149,6 +149,19 @@ func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDiges
 			}
 			return rebuildWorkspaceMember(workspaceMembers, file), nil
 		},
+		CheckGoExtern: func(importPath string) error {
+			if err := loadConfigs(); err != nil {
+				return err
+			}
+			row, err := goFacts.lookup("go.mod")
+			if err != nil {
+				return err
+			}
+			// The worker has already rejected tracked repositories and dependency
+			// exports. A versioned replacement has no local directory constraint.
+			_, err = row.rootReplaceBlocked(importPath)
+			return err
+		},
 		GoOwnership: func(candidate resolver.GoImportCandidate) (resolver.GoPackageOwnershipResult, error) {
 			hasGoFile := func(file string) (bool, error) {
 				n, err := view.Node(ctx, file)

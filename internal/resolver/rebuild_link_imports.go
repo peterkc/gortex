@@ -13,6 +13,7 @@ import (
 type rebuildMainImportInputs struct {
 	jsts                     rebuildJSTSImportInputs
 	goOwnership              func(GoImportCandidate) (GoPackageOwnershipResult, error)
+	checkGoExtern            func(string) error
 	workspaceMembership      func(string) (string, error)
 	externalNpmDependency    func(string, string) (bool, error)
 	dependencyContractsReady bool

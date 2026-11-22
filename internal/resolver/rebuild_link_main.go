@@ -25,6 +25,9 @@ type RebuildMainInputs struct {
 	PathAlias, RewriteNpm func(string, string) (string, error)
 	// GoOwnership supplies ownership evidence when a Go import needs it.
 	GoOwnership func(GoImportCandidate) (GoPackageOwnershipResult, error)
+	// CheckGoExtern proves empty tracked-module input and a checked root
+	// with no applicable local replacement. A nil callback proves neither.
+	CheckGoExtern func(importPath string) error
 	// WorkspaceMembership returns the package-manager member of a graph file.
 	// An empty result with no error proves no membership. This is not Node.WorkspaceID.
 	WorkspaceMembership func(file string) (string, error)
@@ -59,6 +62,7 @@ func runRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts st
 	imports := rebuildMainImportInputs{
 		jsts:                     rebuildJSTSImportInputs{pathAlias: in.PathAlias, rewriteNpm: in.RewriteNpm},
 		goOwnership:              in.GoOwnership,
+		checkGoExtern:            in.CheckGoExtern,
 		workspaceMembership:      in.WorkspaceMembership,
 		externalNpmDependency:    in.ExternalNpmDependency,
 		dependencyContractsReady: in.DependencyContractsReady,

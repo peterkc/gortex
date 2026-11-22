@@ -138,3 +138,90 @@ require (
 		})
 	}
 }
+
+// Replay the same checkout facts after the live root manifest disagrees.
+// A checked negative or versioned replacement permits the precise local
+// rule. An applicable local replacement refuses before any page move saves.
+func TestRebuildFrozenMainGoExtern(t *testing.T) {
+	const caller, pkg = "main.go", "example.org/lib/pkg"
+	const candidate = pkg + "/bind.go"
+	const from, to = caller + "::Caller", candidate + "::Bind"
+	const terminal = "sdk/sub::Missing"
+	const versioned = "module sdk\nreplace example.org/lib => example.org/other v1.0.0\n"
+	const local = "module sdk\nreplace example.org/lib => ./replacement\n"
+	for _, tc := range []struct {
+		name, frozen, later string
+		refuse              bool
+	}{
+		{"versioned", versioned, local, false},
+		{"local", local, versioned, true},
+		{"checked absence", "", local, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			root, src := rebuildInputFixture(t)
+			writeRebuildTSAliasFixtureFile(t, root, caller, "package main\nfunc Caller() {}\n")
+			writeRebuildTSAliasFixtureFile(t, root, candidate, "package pkg\nfunc Bind() {}\n")
+			writeRebuildTSAliasFixtureFile(t, root, "example.org/lib/go.mod", "module example.org/lib\n")
+			if tc.frozen != "" {
+				writeRebuildTSAliasFixtureFile(t, root, "go.mod", tc.frozen)
+			}
+			reg := parser.NewRegistry()
+			languages.RegisterAll(reg)
+			idx := New(graph.New(), reg, config.Default().Index, zap.NewNop())
+			t.Cleanup(idx.Close)
+			req := rebuildBuildRequest{Root: root, Witness: store_pebble.Witness{Recipe: store_pebble.HeadDigest{1}}}
+			t.Setenv("GORTEX_TEST_REBUILD_BUILD_CHILD", "1")
+			link := rebuildTestLinkOptions(t)
+			err := withRebuildCheckoutBuildInputs(ctx, t.TempDir(), src, req, nil, false,
+				func(key string, mode fs.FileMode, member rebuildGitMember, raw *int64, emit func(rebuildSidecarRow) error) (rebuildCheckoutLeaf, error) {
+					return idx.freezeRebuildCheckoutLeaf(ctx, src.FrozenRoot(), key, mode, member, nil, 1024, raw, emit)
+				}, func(epoch rebuildCheckoutInputs, raw *int64, emit func(rebuildSidecarRow) error) (string, error) {
+					return captureRebuildCheckoutResolverInputs(ctx, src, epoch, true, raw, emit)
+				}, func(lease string, bound rebuildBuildRequest, inputs []rebuildInput) error {
+					require.Len(t, inputs, 2)
+					writeRebuildTSAliasFixtureFile(t, root, "go.mod", tc.later)
+					build, err := store_pebble.OpenBuild(filepath.Join(lease, "working"), store_pebble.FullProfile)
+					require.NoError(t, err)
+					defer func() { require.NoError(t, build.Close()) }()
+					first := graph.Edge{From: from, To: "unresolved::extern::a-malformed", Kind: graph.EdgeCalls, FilePath: caller, Line: 1}
+					precise := graph.Edge{From: from, To: "unresolved::extern::" + pkg + "::Bind", Kind: graph.EdgeCalls, FilePath: caller, Line: 2,
+						Origin: graph.OriginASTInferred, Confidence: 0.5}
+					stub := graph.Edge{From: from, To: "unresolved::extern::" + terminal, Kind: graph.EdgeCalls, FilePath: caller, Line: 3}
+					build.AddBatch([]*graph.Node{
+						{ID: caller, FilePath: caller, Language: "go", Kind: graph.KindFile},
+						{ID: from, Name: "Caller", FilePath: caller, Language: "go", Kind: graph.KindFunction},
+						{ID: candidate, FilePath: candidate, Language: "go", Kind: graph.KindFile},
+						{ID: to, Name: "Bind", FilePath: candidate, Language: "go", Kind: graph.KindFunction},
+					}, []*graph.Edge{&first, &precise, &stub})
+					census := &rebuildExtractorCensus{admitted: 2,
+						byPath:            map[string]string{caller: "go", candidate: "go"},
+						originByGraphPath: map[string]string{caller: caller, candidate: candidate},
+					}
+					err = runRebuildFrozenMain(ctx, lease, rebuildDigest(bound.Witness.FrozenInputs), build, census, link, bound.SkipPlaceholderSources)
+					if tc.refuse {
+						require.ErrorIs(t, err, errRebuildGoEvidence)
+						require.ErrorContains(t, err, "local Go replacement")
+						require.Equal(t, buildRefusal(errRebuildGoEvidence).Refusal, buildRefusal(err).Refusal)
+					} else {
+						require.NoError(t, err)
+						first.To = "external::a-malformed"
+						precise.To, precise.Origin, precise.Confidence = to, "", 0
+						precise.Meta = map[string]any{"go_import": pkg + "::Bind"}
+						stub.To = "stdlib::" + terminal // root claim sdk does not register a tracked module
+					}
+					saved := make(map[int]graph.Edge)
+					n := 0
+					require.NoError(t, build.RebuildView().VisitEdges(ctx, func(edge *graph.Edge) error {
+						saved[edge.Line] = *edge
+						n++
+						return nil
+					}))
+					require.Equal(t, 3, n)
+					require.Equal(t, map[int]graph.Edge{1: first, 2: precise, 3: stub}, saved)
+					return nil
+				})
+			require.NoError(t, err)
+		})
+	}
+}
