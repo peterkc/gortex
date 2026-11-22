@@ -142,13 +142,22 @@ func receiveRebuildStages(
 			if (cause == store_pebble.ErrRebuildAttributionChain) != (r.AttributionChains > 0) {
 				return fmt.Errorf("%w: invalid attribution chain count", errRebuildBuildWire)
 			}
+			if (cause == store_pebble.ErrRebuildUnknownProvenance) != (r.UnknownProvenance > 0) {
+				return fmt.Errorf("%w: invalid unknown provenance count", errRebuildBuildWire)
+			}
 			if r.AttributionChains != 0 {
 				return fmt.Errorf("%w: %w: attribution_chains=%d: %s", ErrRebuildWorker, cause, r.AttributionChains, r.Detail)
+			}
+			if r.UnknownProvenance != 0 {
+				return fmt.Errorf("%w: %w: unknown_provenance=%d: %s", ErrRebuildWorker, cause, r.UnknownProvenance, r.Detail)
 			}
 			return fmt.Errorf("%w: %w: %s", ErrRebuildWorker, cause, r.Detail)
 		}
 		if r.AttributionChains != 0 {
 			return fmt.Errorf("%w: attribution chain count on a stage offer", errRebuildBuildWire)
+		}
+		if r.UnknownProvenance != 0 {
+			return fmt.Errorf("%w: unknown provenance count on a stage offer", errRebuildBuildWire)
 		}
 		if next > store_pebble.StageSearch || r.Witness.Stage != next {
 			return fmt.Errorf("%w: expected %s, got %s", store_pebble.ErrStageOrder, next, r.Witness.Stage)
@@ -308,7 +317,12 @@ func buildRebuildStages(
 	if err := runRebuildFrozenMain(ctx, lease, rebuildDigest(req.Witness.FrozenInputs), private, counts.census, link, req.SkipPlaceholderSources); err != nil {
 		return err
 	}
-	// Main only changes private scratch. Relation projection, its tails,
-	// and dependent derived and search stages are still incomplete.
+	// Deferred file imports stay off. Like native cold materialization,
+	// this pass is independent of whether main had a pending frontier.
+	if err := runRebuildArgOf(ctx, private, idx.rebuildArgReceipts(ctx, job, store, counts.census)); err != nil {
+		return err
+	}
+	// The supported tails only changed private scratch. Relation projection
+	// and its remaining tails, derived and search stages are incomplete.
 	return errRebuildBuildIncomplete
 }

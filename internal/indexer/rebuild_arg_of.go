@@ -1,0 +1,46 @@
+package indexer
+
+import (
+	"context"
+	"fmt"
+	"iter"
+
+	"github.com/zzet/gortex/internal/graph/store_pebble"
+)
+
+func runRebuildArgOf(ctx context.Context, build *store_pebble.BuildStore, receipts iter.Seq2[store_pebble.ParseFacts, error]) error {
+	return build.RebuildArgOf(ctx, receipts, argOfRewriteTarget, intFromMeta)
+}
+
+// Read the same admitted entries that assembled the private graph. Nothing
+// here opens checkout files or extracts a missing receipt again.
+func (idx *Indexer) rebuildArgReceipts(ctx context.Context, job rebuildFileStages, store rebuildParseStore,
+	census *rebuildExtractorCensus,
+) iter.Seq2[store_pebble.ParseFacts, error] {
+	return func(yield func(store_pebble.ParseFacts, error) bool) {
+		for _, input := range job.inputs {
+			if err := ctx.Err(); err != nil {
+				yield(store_pebble.ParseFacts{}, err)
+				return
+			}
+			recipe := idx.rebuildExtractorRecipe(job.recipes[input.Language], input)
+			raw, err := store.read(input.parseKey(recipe))
+			if err != nil {
+				yield(store_pebble.ParseFacts{}, fmt.Errorf("%w: reload %q for argument lift: %w", errParseEntryCorrupt, input.Path, err))
+				return
+			}
+			facts, err := store_pebble.DecodeParseFacts(raw)
+			if err != nil {
+				yield(store_pebble.ParseFacts{}, fmt.Errorf("%w: decode %q for argument lift: %w", errParseEntryCorrupt, input.Path, err))
+				return
+			}
+			if facts.File.FilePath != input.Path || facts.EffectiveLanguage != census.byPath[input.Path] {
+				yield(store_pebble.ParseFacts{}, fmt.Errorf("%w: receipt attribution changed for %q", errParseEntryCorrupt, input.Path))
+				return
+			}
+			if !yield(facts, nil) {
+				return
+			}
+		}
+	}
+}

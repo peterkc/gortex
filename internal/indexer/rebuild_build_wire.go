@@ -147,6 +147,7 @@ type rebuildBuildReply struct {
 	Refusal           uint8
 	Detail            string
 	AttributionChains uint64 // present only on a refused attribution pass
+	UnknownProvenance uint64 // present only on a refused provenance check
 }
 
 var rebuildFailureKinds = [...]error{
@@ -162,7 +163,7 @@ var rebuildFailureKinds = [...]error{
 	errRebuildCallerAttribution, errRebuildGoEvidence, tsalias.ErrFrozenAliasUnproved, tsalias.ErrFrozenAliasPath,
 	errRebuildResolverInputDenied, errRebuildResolverNamespace, errRebuildNpmInput, store_pebble.ErrRebuildImportDirectories,
 	errRebuildCrossRepoUnavailable, store_pebble.ErrRebuildAttributionChain,
-	resolver.ErrRebuildGoExternalRecordingPath,
+	resolver.ErrRebuildGoExternalRecordingPath, store_pebble.ErrRebuildUnknownProvenance,
 }
 
 func buildRefusal(err error) rebuildBuildReply {
@@ -187,6 +188,9 @@ func buildRefusal(err error) rebuildBuildReply {
 	}
 	if chain, ok := errors.AsType[*store_pebble.RebuildAttributionChainError](err); ok {
 		r.AttributionChains = chain.Count
+	}
+	if unknown, ok := errors.AsType[*store_pebble.RebuildUnknownProvenanceError](err); ok {
+		r.UnknownProvenance = unknown.Count
 	}
 	return r
 }

@@ -473,6 +473,39 @@ func TestRebuildBuildAttributionChainRefusal(t *testing.T) {
 	}
 }
 
+func TestRebuildBuildUnknownProvenanceRefusal(t *testing.T) {
+	cause := &store_pebble.RebuildUnknownProvenanceError{Count: 2}
+	valid := buildRefusal(errors.Join(store_pebble.ErrRebuildView, cause))
+	require.Equal(t, uint8(36), valid.Refusal)
+	require.Equal(t, uint64(2), valid.UnknownProvenance)
+	missing := valid
+	missing.UnknownProvenance = 0
+	unrelated := buildRefusal(errRebuildBuildIncomplete)
+	unrelated.UnknownProvenance = 2
+	for _, tc := range []struct {
+		name  string
+		reply rebuildBuildReply
+		want  error
+	}{
+		{"exact refused count", valid, store_pebble.ErrRebuildUnknownProvenance},
+		{"missing count", missing, errRebuildBuildWire},
+		{"count on unrelated refusal", unrelated, errRebuildBuildWire},
+		{"count on stage offer", rebuildBuildReply{UnknownProvenance: 2}, errRebuildBuildWire},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var reply, acks bytes.Buffer
+			require.NoError(t, writeRebuildBuildReply(&reply, tc.reply))
+			err := receiveRebuildStages(t.Context(), t.TempDir(), rebuildBuildRequest{}, &reply, &acks,
+				func(context.Context, store_pebble.StageTables) error {
+					t.Fatal("unknown provenance must not publish")
+					return nil
+				})
+			require.ErrorIs(t, err, tc.want)
+			require.Empty(t, acks.Bytes())
+		})
+	}
+}
+
 func TestRebuildBuildCppIncludeRefusal(t *testing.T) {
 	var reply bytes.Buffer
 	cause := errors.Join(store_pebble.ErrRebuildFileImports, resolver.ErrRebuildCppIncludeInput)

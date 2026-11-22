@@ -438,3 +438,28 @@ func TestRebuildViewStreamsLinkPartition(t *testing.T) {
 		return it.Error()
 	}, "a", "b")
 }
+
+func TestApplyLinkArgumentRefresh(t *testing.T) {
+	ctx := t.Context()
+	b := newBuild(t, FullProfile)
+	old := graph.Edge{From: "caller", To: "callee", Kind: graph.EdgeArgOf, FilePath: "a.go", Line: 6}
+	stationary := old
+	stationary.To, stationary.Origin = "callee#param:x", graph.OriginASTResolved
+	b.AddEdge(&old)
+	b.AddEdge(&stationary)
+	move := old
+	move.To = stationary.To
+	if err := b.applyRebuildLinkReindexes(ctx, []graph.EdgeReindex{{Edge: &move, OldTo: old.To,
+		RefreshIdentity: true, OldFrom: old.From, OldFilePath: old.FilePath, OldLine: old.Line}}, true); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := b.pendingEdge(pendingEdgeKey(&old)); err != nil || got != nil {
+		t.Fatalf("old edge survived: %+v, %v", got, err)
+	}
+	if got, err := b.pendingEdge(pendingEdgeKey(&stationary)); err != nil || got == nil || got.Origin != stationary.Origin {
+		t.Fatalf("stationary payload changed: %+v, %v", got, err)
+	}
+	if count, err := pendingGet(b.pending, revisionKey, decodeCount); err != nil || count != 1 {
+		t.Fatalf("losing refresh has revision count %d, %v", count, err)
+	}
+}

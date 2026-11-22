@@ -179,6 +179,10 @@ func linkPendingTarget(id string) bool {
 // legacy mutation adapter this must not split the page at 256 rows.
 // On error the caller must abandon the private build.
 func (b *BuildStore) ApplyLinkReindexes(ctx context.Context, moves []graph.EdgeReindex) error {
+	return b.applyRebuildLinkReindexes(ctx, moves, false)
+}
+
+func (b *BuildStore) applyRebuildLinkReindexes(ctx context.Context, moves []graph.EdgeReindex, liftArgOf bool) error {
 	err := b.withWrites(func() error {
 		if len(moves) > rebuildLinkPendingRows {
 			return invalid("link edge move page exceeds row bound")
@@ -188,7 +192,15 @@ func (b *BuildStore) ApplyLinkReindexes(ctx context.Context, moves []graph.EdgeR
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if move.Edge == nil || move.OldTo == "" || move.Edge.To == "" || move.RefreshIdentity || move.OldFrom != "" {
+			if move.Edge == nil || move.OldTo == "" || move.Edge.To == "" || move.RefreshIdentity != liftArgOf {
+				return invalid("link edge move must replace an exact target or kind")
+			}
+			if liftArgOf {
+				if move.Edge.Kind != graph.EdgeArgOf || move.OldKind != "" || move.OldFrom != move.Edge.From ||
+					move.OldFilePath != move.Edge.FilePath || move.OldLine != move.Edge.Line || move.Edge.To == move.OldTo {
+					return invalid("argument lift must refresh only the target")
+				}
+			} else if move.OldFrom != "" {
 				return invalid("link edge move must replace an exact target or kind")
 			}
 			old := *move.Edge

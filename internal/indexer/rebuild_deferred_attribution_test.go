@@ -1,10 +1,13 @@
 package indexer
 
 import (
+	"context"
+	"encoding/hex"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/config"
@@ -142,16 +145,77 @@ func TestRebuildDeferredAttribution(t *testing.T) {
 	}
 }
 
+// A settled row from a real plugin receipt must refuse across the worker
+// pipe even when the main resolver has no pending caller to select.
+func TestRebuildDeferredArgOfRefusal(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	root, src := rebuildInputFixture(t)
+	const deferred, goPath = "t95deferred", "z.go"
+	t.Setenv(rebuildDeferredProbeEnv, "arg_lift")
+	t.Setenv("GORTEX_TEST_REBUILD_BUILD_CHILD", "1")
+	link := rebuildTestLinkOptions(t)
+	cfg := config.Default().Index
+	cfg.ExtractorPlugins = []config.ExtractorPluginSpec{{
+		Language: deferred, Extensions: []string{".t95deferred"}, Command: link.Binary,
+		Args: []string{"-test.run=^TestRebuildDeferredAttributionPlugin$"},
+	}}
+	var inputs []rebuildInput
+	for _, file := range []struct{ path, language, body string }{
+		{rebuildDeferredProbePath, deferred, "custom source\n"},
+		{goPath, "go", "package p\nfunc Sink(value int) {}\n"},
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(root, file.path), []byte(file.body), 0o600))
+		in, _, err := readRebuildInput(ctx, src, file.path, file.language, 1024)
+		require.NoError(t, err)
+		inputs = append(inputs, in)
+	}
+	digest, err := rebuildInputRoot(inputs)
+	require.NoError(t, err)
+	raw, err := hex.DecodeString(digest)
+	require.NoError(t, err)
+	require.Len(t, raw, 32)
+	req := rebuildBuildRequest{
+		Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: rebuildTestIncarnation,
+		Recipes: map[string]rebuildDigest{"go": {1}, deferred: {2}}, Policy: freezeRebuildParsePolicy(root, cfg),
+		Bounds: rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 64 << 10},
+		Witness: store_pebble.Witness{Input: store_pebble.HeadDigest(raw), Recipe: store_pebble.HeadDigest{2},
+			Profile: store_pebble.FullProfile, Stage: store_pebble.StageManifest},
+	}
+	leases, headDir := t.TempDir(), t.TempDir()
+	var stages []store_pebble.Stage
+	err = withRebuildBuildInputs(ctx, leases, src, map[string]*rebuildInput{"go.mod": nil, "package.json": nil}, req, nil,
+		func(lease string, bound rebuildBuildRequest) error {
+			return runRebuildBuild(ctx, link.Binary, []string{"-test.run=^TestRebuildBuildChildEntry$", "--"}, lease, headDir, bound, cfg, inputs,
+				func(_ context.Context, offer store_pebble.StageTables) error {
+					stages = append(stages, offer.Witness.Stage)
+					return nil
+				})
+		})
+	require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+	require.ErrorContains(t, err, "unknown_provenance=1")
+	require.ErrorContains(t, err, `"arg_of","z.go::Sink","z.go",2`)
+	require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, stages)
+	entries, err := os.ReadDir(leases)
+	require.NoError(t, err)
+	require.Empty(t, entries, "the owner must discard the refused working store")
+}
+
 func TestRebuildDeferredAttributionPlugin(t *testing.T) {
-	if os.Getenv(rebuildDeferredProbeEnv) != "1" {
+	mode := os.Getenv(rebuildDeferredProbeEnv)
+	if mode != "1" && mode != "arg_lift" {
 		t.Skip("extractor plugin entry point")
 	}
 	require.Equal(t, rebuildDeferredProbePath, os.Getenv("GORTEX_FILE_PATH"))
 	raw, err := io.ReadAll(os.Stdin)
 	require.NoError(t, err)
 	require.Equal(t, "custom source\n", string(raw))
-	const document = `{"nodes":[{"kind":"function","name":"Deferred"}],"edges":[` +
+	document := `{"nodes":[{"kind":"function","name":"Deferred"}],"edges":[` +
 		`{"from":"unresolved::len","to":"unresolved::len","kind":"arg_of","file_path":"z.go","line":2}]}`
+	if mode == "arg_lift" {
+		document = `{"nodes":[{"kind":"function","name":"Deferred"}],"edges":[` +
+			`{"from":"a.t95deferred::Deferred","to":"z.go::Sink","kind":"arg_of","file_path":"z.go","line":2,"meta":{"arg_position":0}}]}`
+	}
 	_, err = os.Stdout.WriteString(document)
 	require.NoError(t, err)
 	os.Exit(0)

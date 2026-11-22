@@ -43,11 +43,11 @@ func attributionIdentityText(id graph.EdgeIdentity) string {
 // The private plan lets a chain proof join exact keys across page boundaries
 // before any graph writes, without retaining the move set in memory.
 func (b *BuildStore) rebuildAttributionMoves(ctx context.Context, target func(*graph.Edge) (string, error)) (int, error) {
-	return b.rebuildAttribution(ctx, target, nil, nil)
+	return b.rebuildAttribution(ctx, target, nil, nil, false)
 }
 
 func (b *BuildStore) rebuildAttribution(ctx context.Context, target func(*graph.Edge) (string, error),
-	beforeApply func() error, afterApply func([]byte) error,
+	beforeApply func() error, afterApply func([]byte) error, liftArgOf bool,
 ) (moved int, err error) {
 	const maxPageBytes = 16 << 20
 	view := b.RebuildView()
@@ -74,14 +74,22 @@ func (b *BuildStore) rebuildAttribution(ctx context.Context, target func(*graph.
 		if len(r.key)+len(r.value) > maxPageBytes {
 			return fmt.Errorf("%w: attribution edge", ErrRebuildLinkInputSize)
 		}
-		e, err := decodeEdgeLight(r.value)
+		decode := decodeEdgeLight
+		if liftArgOf {
+			kind, err := rebuildAttributionEdgeKind(r.key)
+			if err != nil || kind != graph.EdgeArgOf {
+				return err
+			}
+			decode = decodeEdge
+		}
+		e, err := decode(r.value)
 		if err != nil {
 			return err
 		}
 		if !bytes.Equal(r.key, pendingEdgeKey(e)) {
 			return invalid("attribution edge identity does not match key")
 		}
-		if !graph.IsUnresolvedTarget(e.To) {
+		if !liftArgOf && !graph.IsUnresolvedTarget(e.To) {
 			return nil
 		}
 		to, err := target(e)
@@ -95,11 +103,16 @@ func (b *BuildStore) rebuildAttribution(ctx context.Context, target func(*graph.
 	}); err != nil {
 		return 0, err
 	}
+	if beforeApply != nil && liftArgOf {
+		if err := beforeApply(); err != nil {
+			return 0, err
+		}
+	}
 	var chain RebuildAttributionChainError
 	if err := pendingVisit(ctx, b.pending, prefix, func(r row) error {
 		to := string(r.value)
-		if !graph.IsUnresolvedTarget(to) {
-			return nil // both attribution reducers only move unresolved old targets
+		if !liftArgOf && !graph.IsUnresolvedTarget(to) {
+			return nil // unresolved-target reducers cannot move a resolved old target
 		}
 		oldKey := r.key[len(prefix):]
 		e, err := pendingGet(b.pending, oldKey, decodeEdgeLight)
@@ -126,7 +139,7 @@ func (b *BuildStore) rebuildAttribution(ctx context.Context, target func(*graph.
 	if chain.Count > 0 {
 		return 0, &chain
 	}
-	if beforeApply != nil {
+	if beforeApply != nil && !liftArgOf {
 		if err := beforeApply(); err != nil {
 			return 0, err
 		}
@@ -140,7 +153,7 @@ func (b *BuildStore) rebuildAttribution(ctx context.Context, target func(*graph.
 		if len(page) == 0 {
 			return nil
 		}
-		if err := b.ApplyLinkReindexes(ctx, page); err != nil {
+		if err := b.applyRebuildLinkReindexes(ctx, page, liftArgOf); err != nil {
 			return err
 		}
 		moved += len(page)
@@ -172,7 +185,11 @@ func (b *BuildStore) rebuildAttribution(ctx context.Context, target func(*graph.
 		}
 		old := e.To
 		e.To = to
-		page = append(page, graph.EdgeReindex{Edge: e, OldTo: old})
+		move := graph.EdgeReindex{Edge: e, OldTo: old, RefreshIdentity: liftArgOf}
+		if liftArgOf {
+			move.OldFrom, move.OldFilePath, move.OldLine = e.From, e.FilePath, e.Line
+		}
+		page = append(page, move)
 		return nil
 	}); err != nil {
 		return 0, err
