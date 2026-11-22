@@ -76,7 +76,9 @@ func TestRebuildModuleInputPolicy(t *testing.T) {
 					require.NoError(t, err)
 					defer func() { require.NoError(t, b.Close()) }()
 					require.NoError(t, runRebuildModules(ctx, lease, digest, b, inputs))
-					require.NotNil(t, b.GetNode("module::go:example.test/lib@v1.2.3"))
+					n, err := b.RebuildView().Node(ctx, "module::go:example.test/lib@v1.2.3")
+					require.NoError(t, err)
+					require.NotNil(t, n)
 					return nil
 				})
 			if tc.wantErr != nil {
