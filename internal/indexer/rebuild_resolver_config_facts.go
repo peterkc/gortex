@@ -19,7 +19,7 @@ import (
 )
 
 func isRebuildResolverConfig(key string) bool {
-	if key == rebuildPnpmWorkspaceFile || key == rebuildCargoWorkspaceFile {
+	if key == rebuildPnpmWorkspaceFile || key == rebuildCargoWorkspaceFile || isRebuildModuleLock(key) {
 		return true
 	}
 	switch path.Base(key) {
@@ -35,6 +35,12 @@ func isRebuildResolverConfig(key string) bool {
 // root manifest are shared; only its normalizer (or name-only read) charges it.
 func captureRebuildCheckoutResolverInputs(ctx context.Context, src *source.FilesystemSource, epoch rebuildCheckoutInputs,
 	literalRoot bool, raw *int64, emit func(rebuildSidecarRow) error,
+) (string, error) {
+	return captureRebuildCheckoutFacts(ctx, src, epoch, literalRoot, false, raw, emit)
+}
+
+func captureRebuildCheckoutFacts(ctx context.Context, src *source.FilesystemSource, epoch rebuildCheckoutInputs,
+	literalRoot, captureModules bool, raw *int64, emit func(rebuildSidecarRow) error,
 ) (string, error) {
 	if src == nil || epoch.namespace == nil || raw == nil || *raw < 0 || *raw > rebuildCppRawLimit || emit == nil {
 		return "", fmt.Errorf("%w: incomplete checkout resolver capture", errRebuildInputSidecar)
@@ -57,6 +63,9 @@ func captureRebuildCheckoutResolverInputs(ctx context.Context, src *source.Files
 		if err == nil && m != nil && m.row.Kind != 0 {
 			err = emit(m.row)
 		}
+		if err != nil && captureModules {
+			err = fmt.Errorf("%w: %s: %w", errRebuildModuleInput, name, err)
+		}
 		return m, err
 	}
 	goLimit := int64(rebuildCppEntryLimit)
@@ -66,6 +75,11 @@ func captureRebuildCheckoutResolverInputs(ctx context.Context, src *source.Files
 	rootMod, err := readRoot(goPath, goLimit)
 	if err != nil {
 		return "", err
+	}
+	if captureModules {
+		if err := emitRebuildModuleFact(goPath, rootMod, emit); err != nil {
+			return "", err
+		}
 	}
 	if !goUsed {
 		// Native seeds root dependencies even without a Go parse receipt.
@@ -103,8 +117,16 @@ func captureRebuildCheckoutResolverInputs(ctx context.Context, src *source.Files
 	readPackage := func() ([]byte, error) {
 		pkgConsulted = true
 		m, err := readRoot(npmPath, rebuildNpmFactBytes-int64(len(npmPath)))
-		if err != nil || m == nil {
+		if err != nil {
 			return nil, err
+		}
+		if captureModules {
+			if err := emitRebuildModuleFact(npmPath, m, emit); err != nil {
+				return nil, err
+			}
+		}
+		if m == nil {
+			return nil, nil
 		}
 		pkgHasWorkspaces = len(modules.ParsePackageJSONWorkspaces(m.data)) != 0
 		return m.data, writeNpm(npmPath, m.target, m.data)
@@ -120,6 +142,28 @@ func captureRebuildCheckoutResolverInputs(ctx context.Context, src *source.Files
 	})
 	if err != nil {
 		return "", err
+	}
+	if captureModules {
+		if !pkgConsulted {
+			if _, err := readPackage(); err != nil {
+				return "", err
+			}
+		}
+		for _, spec := range rootManifests() {
+			if !isRebuildModuleLock(spec.path) {
+				continue
+			}
+			m, err := readRoot(spec.path, rebuildCppEntryLimit)
+			if err != nil {
+				return "", err
+			}
+			if m != nil {
+				*raw -= int64(len(m.data))
+			}
+			if err := emitRebuildModuleFact(spec.path, m, emit); err != nil {
+				return "", err
+			}
+		}
 	}
 	if !goUsed && !jsUsed {
 		return name, ctx.Err()

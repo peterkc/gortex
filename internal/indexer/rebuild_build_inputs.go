@@ -103,7 +103,7 @@ func (idx *Indexer) runRebuildCheckout(ctx context.Context, src *source.Filesyst
 		func(key string, mode fs.FileMode, member rebuildGitMember, raw *int64, emit func(rebuildSidecarRow) error) (rebuildCheckoutLeaf, error) {
 			return idx.freezeRebuildCheckoutLeaf(ctx, root, key, mode, member, gate, int64(req.Bounds.FileBytes), raw, emit)
 		}, func(epoch rebuildCheckoutInputs, raw *int64, emit func(rebuildSidecarRow) error) (string, error) {
-			return captureRebuildCheckoutResolverInputs(ctx, src, epoch, true, raw, emit)
+			return captureRebuildCheckoutFacts(ctx, src, epoch, true, idx.config.Coverage.IsEnabled("modules"), raw, emit)
 		}, func(lease string, bound rebuildBuildRequest, inputs []rebuildInput) error {
 			return runRebuildBuild(ctx, exe, args, lease, headDir, bound, idx.config, inputs, publish)
 		})

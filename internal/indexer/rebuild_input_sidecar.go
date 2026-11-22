@@ -37,6 +37,7 @@ const (
 	rebuildGitIndexStampRow
 	rebuildGitIgnoreVerdictRow
 	rebuildWorkspaceConfigRow
+	rebuildModuleFact
 )
 
 var errRebuildInputSidecar = errors.New("invalid frozen build input sidecar")
@@ -53,6 +54,7 @@ type rebuildSidecarRow struct {
 	Config    *rebuildResolverConfigPayload `json:"config,omitempty"`
 	NPM       *rebuildNpmManifestPayload    `json:"npm,omitempty"`
 	Workspace *rebuildWorkspacePayload      `json:"workspace,omitempty"`
+	Module    *rebuildModulePayload         `json:"module,omitempty"`
 
 	Classification *rebuildClassificationFact `json:"classification,omitempty"`
 	GitVersion     string                     `json:"git_version,omitempty"`
@@ -68,6 +70,12 @@ func rebuildSidecarCppRow(f rebuildCppFact) rebuildSidecarRow {
 }
 
 func (r rebuildSidecarRow) check() error {
+	if r.Kind == rebuildModuleFact {
+		return r.checkModuleFact()
+	}
+	if r.Module != nil {
+		return fmt.Errorf("%w: unexpected module payload", errRebuildInputSidecar)
+	}
 	if r.Kind == rebuildWorkspaceConfigRow {
 		return r.checkWorkspaceConfig()
 	}
@@ -254,7 +262,7 @@ func visitRebuildInputSidecar(ctx context.Context, lease string, expected rebuil
 			return err
 		}
 		if row.isResolverConfig() || row.Kind == rebuildNpmManifestRow || row.Kind == rebuildClassificationRow || row.Kind == rebuildWorkspaceConfigRow ||
-			row.Kind == rebuildGitIndexStampRow || row.Kind == rebuildGitIgnoreVerdictRow {
+			row.Kind == rebuildGitIndexStampRow || row.Kind == rebuildGitIgnoreVerdictRow || row.Kind == rebuildModuleFact {
 			// Refuse ambiguous fields (including duplicate JSON keys and null
 			// payload members). Only the new row kinds require canonical bytes.
 			encoded, err := json.Marshal(row)
@@ -265,6 +273,8 @@ func visitRebuildInputSidecar(ctx context.Context, lease string, expected rebuil
 					name = "npm manifest"
 				case rebuildWorkspaceConfigRow:
 					name = "workspace declaration"
+				case rebuildModuleFact:
+					return fmt.Errorf("%w: noncanonical module row", errRebuildModuleInput)
 				case rebuildClassificationRow:
 					name = "classification"
 				case rebuildGitIndexStampRow, rebuildGitIgnoreVerdictRow:

@@ -966,6 +966,20 @@ func LinkImportsIn(g graph.Store, importNodes []*graph.Node, specs []Spec, ownMo
 	if g == nil || len(specs) == 0 || len(importNodes) == 0 {
 		return 0
 	}
+	match := ModuleImportMatcher(specs, ownModulePath)
+	edges := make([]*graph.Edge, 0, len(importNodes))
+	for _, n := range importNodes {
+		if e := match(n); e != nil {
+			edges = append(edges, e)
+		}
+	}
+	g.AddBatch(nil, edges)
+	return len(edges)
+}
+
+// ModuleImportMatcher prepares the native per-manifest join for streamed
+// import nodes. It returns nil for a non-import or a node with no match.
+func ModuleImportMatcher(specs []Spec, ownModulePath string) func(*graph.Node) *graph.Edge {
 	// Index specs by path once. When two specs share a path (which
 	// should not happen in a well-formed manifest), the first wins —
 	// matching the previous sorted-slice implementation.
@@ -977,35 +991,31 @@ func LinkImportsIn(g graph.Store, importNodes []*graph.Node, specs []Spec, ownMo
 		specByPath[s.Path] = s
 	}
 
-	edges := make([]*graph.Edge, 0, len(importNodes))
-	for _, n := range importNodes {
+	return func(n *graph.Node) *graph.Edge {
 		if n.Kind != graph.KindImport {
-			continue
+			return nil
 		}
 		importPath, _ := n.Meta["path"].(string)
 		if importPath == "" {
-			continue
+			return nil
 		}
 		if ownModulePath != "" && (importPath == ownModulePath ||
 			strings.HasPrefix(importPath, ownModulePath+"/")) {
-			continue
+			return nil
 		}
 		spec, ok, _ := matchLongestPrefix(importPath, specByPath)
 		if !ok {
-			continue
+			return nil
 		}
-		moduleID := ModuleNodeID(spec.Ecosystem, spec.Path, spec.Version)
-		edges = append(edges, &graph.Edge{
+		return &graph.Edge{
 			From:     n.ID,
-			To:       moduleID,
+			To:       ModuleNodeID(spec.Ecosystem, spec.Path, spec.Version),
 			Kind:     graph.EdgeDependsOnModule,
 			FilePath: n.FilePath,
 			Line:     n.StartLine,
 			Origin:   graph.OriginASTResolved,
-		})
+		}
 	}
-	g.AddBatch(nil, edges)
-	return len(edges)
 }
 
 // matchLongestPrefix returns the spec whose path is the longest exact

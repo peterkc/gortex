@@ -80,7 +80,7 @@ func readCheckedRebuildRootManifest(ctx context.Context, src *source.FilesystemS
 ) (*rebuildRootManifest, error) {
 	ns := epoch.namespace
 	if src == nil || ns == nil || !ns.frozen || ns.entries["."].close != rebuildNamespaceCloseExact ||
-		(name != "go.mod" && name != "package.json" && name != rebuildPnpmWorkspaceFile && name != rebuildCargoWorkspaceFile) {
+		(name != "go.mod" && name != "package.json" && name != rebuildPnpmWorkspaceFile && name != rebuildCargoWorkspaceFile && !isRebuildModuleLock(name)) {
 		return nil, fmt.Errorf("%w: missing checked root manifest authority", errRebuildProjectNameInput)
 	}
 	claimed := epoch.admitted[name]

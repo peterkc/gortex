@@ -257,10 +257,14 @@ func buildRebuildStages(
 	}
 	var classifications map[string]rebuildClassificationFact
 	var gitPolicy rebuildGitPolicyProof
+	var exactCheckout bool
 	if digest := rebuildDigest(req.Witness.FrozenInputs); digest != (rebuildDigest{}) {
 		if err := visitRebuildInputSidecar(ctx, lease, digest, func(row rebuildSidecarRow) error {
 			if err := gitPolicy.add(row); err != nil {
 				return err
+			}
+			if row.Kind == rebuildNamespaceCloseExactFact && string(row.Path) == "." {
+				exactCheckout = true
 			}
 			if row.Classification == nil {
 				return nil
@@ -332,6 +336,13 @@ func buildRebuildStages(
 	}
 	if err := resolver.RunRebuildOverrides(ctx, private, receipts); err != nil {
 		return err
+	}
+	// Legacy test/standalone captures without a checkout namespace were never
+	// qualified to continue through the full native cold tail.
+	if exactCheckout && cfg.Coverage.IsEnabled("modules") {
+		if err := runRebuildModules(ctx, lease, rebuildDigest(req.Witness.FrozenInputs), private, inputs); err != nil {
+			return err
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.
