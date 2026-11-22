@@ -276,11 +276,7 @@ func rebuildFnPointerNative(t *testing.T, nodes []*graph.Node, edges []*graph.Ed
 			require.NoError(t, g.AddBatchChecked(nil, []*graph.Edge{e}))
 		}
 	}
-	streams := &frameworkStreamCandidates{
-		perPass:         make(map[string]*frameworkPassCandidateIdentities),
-		callsCollectors: []frameworkCandidateCollector{{name: SynthFnPointerDispatch, pred: fnPtrDispatchCandidateEdge}},
-		refsCollectors:  []frameworkCandidateCollector{{name: SynthFnPointerDispatch, pred: fnPtrRegCandidateEdge}},
-	}
+	streams := newFrameworkStreamCandidates(g, map[string]int{"c": 1}, nil)
 	collectFrameworkEdgeCensus(g, streams)
 	ids := streams.perPass[SynthFnPointerDispatch]
 	require.NotNil(t, ids)
