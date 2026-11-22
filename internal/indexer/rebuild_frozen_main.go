@@ -44,6 +44,24 @@ func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDiges
 		return raw, nil
 	}
 	var npm *rebuildNpmLookup
+	loadNpm := func() error {
+		if npm != nil {
+			return nil
+		}
+		if err := loadNamespace(); err != nil {
+			return err
+		}
+		glob, err := newRebuildWorkspaceGlob(ctx, ns)
+		if err != nil {
+			return err
+		}
+		npm = newRebuildNpmLookup(ctx, rebuildNpmInputs{
+			namespace: ns, manifests: manifests, followedRoot: followed,
+			isFile:    func(_ context.Context, key string) (bool, error) { return ns.probeFile(key) },
+			matchDirs: glob.matchDirs,
+		})
+		return nil
+	}
 	view := build.RebuildView()
 	opts.ScratchParent = lease
 	return resolver.RunRebuildMain(ctx, build, opts, resolver.RebuildMainInputs{
@@ -70,21 +88,20 @@ func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDiges
 			if err != nil {
 				return "", err
 			}
-			if err := loadNamespace(); err != nil {
+			if err := loadNpm(); err != nil {
 				return "", err
 			}
-			if npm == nil {
-				glob, err := newRebuildWorkspaceGlob(ctx, ns)
-				if err != nil {
-					return "", err
-				}
-				npm = newRebuildNpmLookup(ctx, rebuildNpmInputs{
-					namespace: ns, manifests: manifests, followedRoot: followed,
-					isFile:    func(_ context.Context, key string) (bool, error) { return ns.probeFile(key) },
-					matchDirs: glob.matchDirs,
-				})
-			}
 			return npm.rewrite(caller, spec)
+		},
+		ExternalNpmDependency: func(file, spec string) (bool, error) {
+			caller, err := rawPath(file)
+			if err != nil {
+				return false, err
+			}
+			if err := loadNpm(); err != nil {
+				return false, err
+			}
+			return npm.declaresExternal(caller, spec)
 		},
 		GoOwnership: func(candidate resolver.GoImportCandidate) (resolver.GoPackageOwnershipResult, error) {
 			hasGoFile := func(file string) (bool, error) {

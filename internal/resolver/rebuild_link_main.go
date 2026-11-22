@@ -14,6 +14,7 @@ import (
 var errRebuildMainRule = errors.New("rebuild main resolution rule not implemented")
 
 // RebuildMainInputs supplies the receipt selection and frozen import facts.
+// Callbacks must not change the private node view.
 type RebuildMainInputs struct {
 	// SelectCallers must return an order-preserving subset of each pending
 	// page. The page and its edges are borrowed: do not modify or retain them.
@@ -24,6 +25,12 @@ type RebuildMainInputs struct {
 	PathAlias, RewriteNpm func(string, string) (string, error)
 	// GoOwnership supplies ownership evidence when a Go import needs it.
 	GoOwnership func(GoImportCandidate) (GoPackageOwnershipResult, error)
+	// WorkspaceMembership returns the package-manager member of a graph file.
+	// An empty result with no error proves no membership. This is not Node.WorkspaceID.
+	WorkspaceMembership func(file string) (string, error)
+	// ExternalNpmDependency uses the graph caller path and effective module
+	// specifier without its export suffix. False with no error is a proved negative.
+	ExternalNpmDependency func(caller, specifier string) (bool, error)
 }
 
 // RunRebuildMain resolves selected pending edges in a private build using
@@ -44,8 +51,10 @@ func runRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts st
 	reconcileSources bool, in RebuildMainInputs,
 ) (err error) {
 	imports := rebuildMainImportInputs{
-		jsts:        rebuildJSTSImportInputs{pathAlias: in.PathAlias, rewriteNpm: in.RewriteNpm},
-		goOwnership: in.GoOwnership,
+		jsts:                  rebuildJSTSImportInputs{pathAlias: in.PathAlias, rewriteNpm: in.RewriteNpm},
+		goOwnership:           in.GoOwnership,
+		workspaceMembership:   in.WorkspaceMembership,
+		externalNpmDependency: in.ExternalNpmDependency,
 	}
 	var placeholder *store_pebble.RebuildPlaceholderSources
 	defer func() {

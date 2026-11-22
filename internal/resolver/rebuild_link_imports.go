@@ -11,8 +11,10 @@ import (
 )
 
 type rebuildMainImportInputs struct {
-	jsts        rebuildJSTSImportInputs
-	goOwnership func(GoImportCandidate) (GoPackageOwnershipResult, error)
+	jsts                  rebuildJSTSImportInputs
+	goOwnership           func(GoImportCandidate) (GoPackageOwnershipResult, error)
+	workspaceMembership   func(string) (string, error)
+	externalNpmDependency func(string, string) (bool, error)
 }
 
 // resolveRebuildImport is the ordinary main import reducer. It changes only
@@ -30,9 +32,9 @@ func resolveRebuildImport(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 	if source != nil {
 		repo = source.RepoPrefix
 	}
-	bind := func(n *graph.Node) {
-		edge.To = n.ID
-		if repo != "" && n.RepoPrefix != "" && n.RepoPrefix != repo {
+	bind := func(id, targetRepo string) {
+		edge.To = id
+		if repo != "" && targetRepo != "" && targetRepo != repo {
 			edge.CrossRepo = true
 		}
 	}
@@ -45,7 +47,7 @@ func resolveRebuildImport(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 			return err
 		}
 		if target != nil {
-			bind(target)
+			bind(target.ID, target.RepoPrefix)
 			return nil
 		}
 		spec = effective
@@ -79,7 +81,7 @@ func resolveRebuildImport(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 				if rebuildImportNeedsGoOwnership(source, n) {
 					return rebuildImportNeeds(edge, spec, "Go package ownership")
 				}
-				bind(n)
+				bind(n.ID, n.RepoPrefix)
 				return nil
 			}
 		}
@@ -148,21 +150,185 @@ func resolveRebuildImport(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 	}
 	switch {
 	case sameWorkspace != nil:
-		bind(sameWorkspace)
+		bind(sameWorkspace.ID, sameWorkspace.RepoPrefix)
 	case sameRepo != nil:
-		bind(sameRepo)
+		bind(sameRepo.ID, sameRepo.RepoPrefix)
 	case foreign != nil && !ambiguousForeign:
-		bind(foreign)
+		bind(foreign.ID, foreign.RepoPrefix)
 	default:
-		// A qualified miss or ambiguity still reaches the directory buckets
-		// before the dependency-contract bridge or terminal decision. The
-		// tail basename index cannot attest those buckets or their ordering.
+		// Source authority is required for this tier. Do not expand the
+		// projected pass to deferred languages or to a missing source.
+		if source != nil && (source.Language == "go" && f.imports.goOwnership != nil ||
+			source.Language == "typescript" || source.Language == "javascript") {
+			file, err := resolveRebuildImportDirectory(ctx, f, edge, source, spec)
+			if err != nil {
+				return err
+			}
+			if file.ID != "" {
+				bind(file.ID, file.RepoPrefix)
+				return nil
+			}
+		}
+		// A directory miss or bypass doesn't prove the downstream
+		// dependency bridge, npm retry or terminal result.
 		if source != nil && source.Language == "go" {
 			return rebuildImportNeeds(edge, spec, "native file-directory buckets with Go package ownership and workspace membership")
 		}
 		return rebuildImportNeeds(edge, spec, "native file-directory buckets and workspace membership")
 	}
 	return nil
+}
+
+// resolveRebuildImportDirectory walks the native cold Indexer's two buckets.
+// That Indexer always installs workspace collection, so neither a folder nor
+// exact Go ownership can stop the walk. Keep only the winning rank and first
+// ordered identities; for a relevant tie, replay the frozen buckets rather
+// than retaining a candidate list.
+func resolveRebuildImportDirectory(ctx context.Context, f *rebuildLinkFrontier, edge *graph.Edge, source *graph.Node, spec string) (graph.FileNodeIdentity, error) {
+	var same, foreign graph.FileNodeIdentity
+	caller := jsTSImportCallerFile(edge)
+	bareJSTS := isJSTSBareSpecifier(caller, spec)
+	if bareJSTS {
+		if f.imports.externalNpmDependency == nil {
+			return same, rebuildImportNeeds(edge, spec, "checked external npm dependency result")
+		}
+		module, _ := splitImportSpecSymbol(spec)
+		external, err := f.imports.externalNpmDependency(caller, module)
+		if err != nil || external {
+			return same, err
+		}
+	}
+	dirs, err := f.importDirectories(ctx)
+	if err != nil {
+		return same, err
+	}
+	walk := func(visit func(graph.FileNodeIdentity) (bool, error)) error {
+		more := true
+		visitBucket := func(file graph.FileNodeIdentity) (bool, error) {
+			var err error
+			more, err = visit(file)
+			return more, err
+		}
+		if err := dirs.VisitExactDirectory(ctx, spec, visitBucket); err != nil || !more {
+			return err
+		}
+		last := spec[strings.LastIndexByte(spec, '/')+1:]
+		return dirs.VisitLastDirectoryComponent(ctx, last, visitBucket)
+	}
+
+	const (
+		rejected = iota
+		fallback
+		folderMatch
+		exactOwnership
+	)
+	rank := func(file graph.FileNodeIdentity) (int, error) {
+		owner := GoPackageOwnershipUnknown
+		// Native compact candidates have no CandidateNode. The provider's
+		// Go file inventory, not the projected row's language, owns this gate.
+		if source.Language == "go" && file.RepoPrefix == source.RepoPrefix && file.FilePath != "" {
+			var err error
+			owner, err = f.imports.goOwnership(GoImportCandidate{
+				ImportPath: spec, ImporterRepoPrefix: source.RepoPrefix, ImporterFilePath: source.FilePath,
+				CandidateID: file.ID, CandidateRepoPrefix: file.RepoPrefix, CandidateFilePath: file.FilePath,
+			})
+			if err != nil {
+				return rejected, err
+			}
+			switch owner {
+			case GoPackageOwnershipDifferent:
+				return rejected, nil
+			case GoPackageOwnershipExact, GoPackageOwnershipUnknown:
+			default:
+				return rejected, rebuildImportNeeds(edge, spec, "valid Go package ownership")
+			}
+		}
+		if bareJSTS && !isJSTSDirEntryPoint(file.FilePath) {
+			return rejected, nil
+		}
+		if owner == GoPackageOwnershipExact {
+			return exactOwnership, nil
+		}
+		dir := filePathDir(file.FilePath)
+		if dir == file.RepoPrefix {
+			dir = ""
+		} else if file.RepoPrefix != "" {
+			dir = strings.TrimPrefix(dir, file.RepoPrefix+"/")
+		}
+		if file.Language == source.Language && dirMatchesImport(dir, spec) {
+			return folderMatch, nil
+		}
+		return fallback, nil
+	}
+
+	bestRank := rejected
+	tied := false
+	isSameRepo := func(file graph.FileNodeIdentity) bool {
+		return source.RepoPrefix == "" || file.RepoPrefix == source.RepoPrefix
+	}
+	if err := walk(func(file graph.FileNodeIdentity) (bool, error) {
+		quality, err := rank(file)
+		if err != nil || quality == rejected {
+			return err == nil, err
+		}
+		if !isSameRepo(file) {
+			if foreign.ID == "" && dirMatchesImport(filePathDir(file.FilePath), spec) {
+				foreign = file
+			}
+			return true, nil
+		}
+		if quality > bestRank {
+			same, bestRank, tied = file, quality, false
+		} else if quality == bestRank && file.FilePath != same.FilePath {
+			tied = true
+		}
+		return true, nil
+	}); err != nil {
+		return graph.FileNodeIdentity{}, err
+	}
+	if same.ID == "" {
+		return foreign, nil
+	}
+	// Several IDs at one path cannot give native a unique workspace match.
+	if !tied || edge.FilePath == "" {
+		return same, nil
+	}
+	workspace := f.imports.workspaceMembership
+	if workspace == nil {
+		return graph.FileNodeIdentity{}, rebuildImportNeeds(edge, spec, "checked workspace membership for equally ranked directory candidates")
+	}
+	callerWorkspace, err := workspace(edge.FilePath) // native uses the raw edge path, not the JS/TS fallback
+	if err != nil || callerWorkspace == "" {
+		return same, err
+	}
+	// Preserve exact/last duplicates. Native workspace arbitration counts
+	// visits, not distinct IDs, and falls back to the first row on a second match.
+	var match graph.FileNodeIdentity
+	if err := walk(func(file graph.FileNodeIdentity) (bool, error) {
+		if !isSameRepo(file) {
+			return true, nil
+		}
+		quality, err := rank(file)
+		if err != nil || quality != bestRank {
+			return err == nil, err
+		}
+		member, err := workspace(file.FilePath)
+		if err != nil || member != callerWorkspace {
+			return err == nil, err
+		}
+		if match.ID != "" {
+			match = graph.FileNodeIdentity{}
+			return false, nil
+		}
+		match = file
+		return true, nil
+	}); err != nil {
+		return graph.FileNodeIdentity{}, err
+	}
+	if match.ID != "" {
+		return match, nil
+	}
+	return same, nil
 }
 
 // Non-Go callers never use the native Go gate. In both pinned cold ownership

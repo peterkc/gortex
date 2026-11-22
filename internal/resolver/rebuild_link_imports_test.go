@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
@@ -353,4 +354,202 @@ func TestRebuildImportRefusesUnprovedInputs(t *testing.T) {
 			require.Equal(t, before, rebuildFnPointerSaved(t, b))
 		})
 	}
+}
+
+// Given a qualified-name miss, the directory rank, bucket order and checked
+// workspace result must match the cold resolver on the same saved rows.
+func TestRebuildImportFileDirectories(t *testing.T) {
+	const caller, spec = "repo/app/main.go", "example.test/pkg"
+	for _, tc := range []struct {
+		name, spec, want string
+		files            []*graph.Node
+		owner            func(GoImportCandidate) GoPackageOwnershipResult
+		workspace        WorkspaceMembership
+		crossRepo        bool
+		missingWorkspace bool
+	}{
+		{
+			name: "FolderOverFallback", spec: spec, want: "repo/pkg/folder.go",
+			files: []*graph.Node{
+				rebuildImportTestNode("repo/aaa/pkg/first.go", "repo", "", "", "go", graph.KindFile),
+				rebuildImportTestNode("repo/pkg/different.go", "repo", "", "", "go", graph.KindFile),
+				rebuildImportTestNode("repo/pkg/folder.go", "repo", "", "", "go", graph.KindFile),
+			},
+			owner: func(q GoImportCandidate) GoPackageOwnershipResult {
+				if q.CandidateFilePath == "repo/pkg/different.go" {
+					return GoPackageOwnershipDifferent
+				}
+				return GoPackageOwnershipUnknown
+			},
+		},
+		{
+			name: "ExactOverFolder", spec: spec, want: "repo/z/pkg/exact.go",
+			files: []*graph.Node{
+				rebuildImportTestNode("repo/pkg/folder.go", "repo", "", "", "go", graph.KindFile),
+				rebuildImportTestNode("repo/z/pkg/exact.go", "repo", "", "", "go", graph.KindFile),
+			},
+			owner: func(q GoImportCandidate) GoPackageOwnershipResult {
+				if q.CandidateFilePath == "repo/z/pkg/exact.go" {
+					return GoPackageOwnershipExact
+				}
+				return GoPackageOwnershipUnknown
+			},
+		},
+		{
+			name: "WorkspaceTie", spec: spec, want: "repo/app/pkg/other.go", missingWorkspace: true,
+			files: []*graph.Node{
+				rebuildImportTestNode("repo/app/pkg/other.go", "repo", "saved-app", "", "go", graph.KindFile),
+				rebuildImportTestNode("repo/aaa/pkg/first.go", "repo", "saved-app", "", "go", graph.KindFile),
+			},
+			workspace: func(file string) string {
+				if strings.HasPrefix(file, "repo/app/") {
+					return "pkg-manager-app"
+				}
+				return "pkg-manager-other"
+			},
+		},
+		{
+			name: "SamePathIDTie", spec: spec, want: "first-id",
+			files: []*graph.Node{
+				{ID: "second-id", FilePath: "repo/pkg/shared.go", RepoPrefix: "repo", Language: "go", Kind: graph.KindFile},
+				{ID: "first-id", FilePath: "repo/pkg/shared.go", RepoPrefix: "repo", Language: "go", Kind: graph.KindFile},
+			},
+		},
+		{
+			name: "ExactBucketBeforeLastAndIDTie", spec: "shared/pkg", want: "z-id-first", crossRepo: true,
+			files: []*graph.Node{
+				{ID: "a-id-later-bucket", FilePath: "aaa/shared/pkg/first.go", RepoPrefix: "aaa", Language: "go", Kind: graph.KindFile},
+				{ID: "b-id-later-path", FilePath: "shared/pkg/z.go", RepoPrefix: "shared", Language: "go", Kind: graph.KindFile},
+				{ID: "z-id-second", FilePath: "shared/pkg/a.go", RepoPrefix: "shared", Language: "go", Kind: graph.KindFile},
+				{ID: "z-id-first", FilePath: "shared/pkg/a.go", RepoPrefix: "shared", Language: "go", Kind: graph.KindFile},
+				{ID: "not-precise", FilePath: "aaa/pkg/a.go", RepoPrefix: "aaa", Language: "go", Kind: graph.KindFile},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nodes := append(tc.files, rebuildImportTestNode(caller, "repo", "saved-app", "", "go", graph.KindFile))
+			edge := rebuildImportTestEdge(caller, caller, tc.spec, 11)
+			want := []*graph.Edge{rebuildImportTestMove(edge, tc.want, tc.crossRepo)}
+			owner := func(q GoImportCandidate) GoPackageOwnershipResult {
+				require.Equal(t, tc.spec, q.ImportPath)
+				require.Equal(t, caller, q.ImporterFilePath)
+				require.Nil(t, q.CandidateNode, "directory ownership receives the compact file identity")
+				if tc.owner != nil {
+					return tc.owner(q)
+				}
+				return GoPackageOwnershipUnknown
+			}
+			workspace := tc.workspace
+			if workspace == nil {
+				workspace = func(string) string { return "" }
+			}
+			require.Equal(t, want, rebuildImportNativeRows(t, nodes, []*graph.Edge{edge}, func(r *Resolver) {
+				r.SetGoPackageOwnership(owner)
+				r.SetWorkspaceMembership(workspace)
+			}))
+			ctx, b, opts := frontierFixture(t, 1, 0)
+			opts.SpillBytes = 1
+			b.AddBatch(nodes, []*graph.Edge{edge})
+			in := RebuildMainInputs{GoOwnership: func(q GoImportCandidate) (GoPackageOwnershipResult, error) {
+				return owner(q), nil
+			}}
+			if tc.missingWorkspace {
+				err := runRebuildMain(ctx, b, opts, false, in)
+				require.ErrorIs(t, err, errRebuildMainRule)
+				require.ErrorContains(t, err, "workspace membership")
+				require.Equal(t, []*graph.Edge{edge}, rebuildFnPointerSaved(t, b))
+				checkFrontierScratch(t, opts.ScratchParent)
+				in.WorkspaceMembership = func(file string) (string, error) { return workspace(file), nil }
+			}
+			require.NoError(t, runRebuildMain(ctx, b, opts, false, in))
+			require.Equal(t, want, rebuildFnPointerSaved(t, b))
+			checkFrontierScratch(t, opts.ScratchParent)
+		})
+	}
+}
+
+// A plausible index.ts is not local evidence until the native external
+// dependency query has a checked negative. Neither refusal changes the old key.
+func TestRebuildImportFileDirectoryBareJSTS(t *testing.T) {
+	const caller, spec = "repo/app/main.ts", "pkg"
+	const entry = "repo/lib/pkg/index.ts"
+	nodes := []*graph.Node{
+		rebuildImportTestNode(caller, "repo", "", "", "typescript", graph.KindFile),
+		rebuildImportTestNode("repo/lib/pkg/arbitrary.ts", "repo", "", "", "typescript", graph.KindFile),
+		rebuildImportTestNode(entry, "repo", "", "", "typescript", graph.KindFile),
+	}
+	edge := rebuildImportTestEdge(caller, caller, spec, 3)
+	for _, tc := range []struct {
+		name, missing   string
+		proof, external bool
+	}{
+		{name: "Unproved", missing: "checked external npm dependency result"},
+		{name: "External", proof: true, external: true, missing: "native file-directory buckets"},
+		{name: "IndexOnly", proof: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			declaresExternal := func(file, module string) bool {
+				require.Equal(t, caller, file)
+				require.Equal(t, spec, module)
+				return tc.external
+			}
+			nativeTo := entry
+			if tc.external {
+				nativeTo = "external::" + spec
+			}
+			wantNative := []*graph.Edge{rebuildImportTestMove(edge, nativeTo, false)}
+			require.Equal(t, wantNative, rebuildImportNativeRows(t, nodes, []*graph.Edge{edge}, func(r *Resolver) {
+				r.SetNpmDependencyLookup(declaresExternal)
+				r.SetWorkspaceMembership(func(string) string { return "" })
+			}))
+			ctx, b, opts := frontierFixture(t, 1, 0)
+			b.AddBatch(nodes, []*graph.Edge{edge})
+			noRewrite := func(_, _ string) (string, error) { return "", nil }
+			in := RebuildMainInputs{PathAlias: noRewrite, RewriteNpm: noRewrite}
+			if tc.proof {
+				in.ExternalNpmDependency = func(file, module string) (bool, error) { return declaresExternal(file, module), nil }
+			}
+			err := runRebuildMain(ctx, b, opts, false, in)
+			if tc.missing != "" {
+				require.ErrorIs(t, err, errRebuildMainRule)
+				require.ErrorContains(t, err, tc.missing)
+				require.Equal(t, []*graph.Edge{edge}, rebuildFnPointerSaved(t, b))
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, wantNative, rebuildFnPointerSaved(t, b))
+			}
+			checkFrontierScratch(t, opts.ScratchParent)
+		})
+	}
+}
+
+func TestRebuildImportDirectoryFrontierBorrow(t *testing.T) {
+	ctx, b, opts := frontierFixture(t, 1, resolvePendingPageRows+1)
+	const file = "repo/pkg/file.go"
+	b.AddNode(rebuildImportTestNode(file, "repo", "", "", "go", graph.KindFile))
+	var first *store_pebble.RebuildImportDirectories
+	pages := 0
+	require.NoError(t, runRebuildLinkFrontier(ctx, b, opts, nil, func(f *rebuildLinkFrontier, _ []*graph.Edge) error {
+		dirs, err := f.importDirectories(ctx)
+		if err != nil {
+			return err
+		}
+		if first == nil {
+			first = dirs
+		} else {
+			require.Same(t, first, dirs)
+		}
+		var found string
+		if err := dirs.VisitExactDirectory(ctx, "repo/pkg", func(row graph.FileNodeIdentity) (bool, error) {
+			found = row.ID
+			return false, nil
+		}); err != nil {
+			return err
+		}
+		require.Equal(t, file, found)
+		pages++
+		return nil
+	}))
+	require.Equal(t, 2, pages)
+	checkFrontierScratch(t, opts.ScratchParent)
 }

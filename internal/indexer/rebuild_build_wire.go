@@ -156,7 +156,7 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildPlaceholderSources, resolver.ErrRebuildCrossPackageGuard, store_pebble.ErrRebuildView,
 	errRebuildInputSidecar, errRebuildGraphPathCollision, store_pebble.ErrInvalidIncarnation,
 	errRebuildCallerAttribution, errRebuildGoEvidence, tsalias.ErrFrozenAliasUnproved, tsalias.ErrFrozenAliasPath,
-	errRebuildResolverInputDenied, errRebuildResolverNamespace, errRebuildNpmInput,
+	errRebuildResolverInputDenied, errRebuildResolverNamespace, errRebuildNpmInput, store_pebble.ErrRebuildImportDirectories,
 }
 
 func buildRefusal(err error) rebuildBuildReply {
