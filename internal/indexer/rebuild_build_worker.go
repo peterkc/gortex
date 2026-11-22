@@ -330,6 +330,9 @@ func buildRebuildStages(
 	if err := resolver.RunRebuildImplements(ctx, private, receipts); err != nil {
 		return err
 	}
+	if err := resolver.RunRebuildOverrides(ctx, private, receipts); err != nil {
+		return err
+	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.
 	return errRebuildBuildIncomplete

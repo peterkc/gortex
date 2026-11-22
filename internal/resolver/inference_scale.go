@@ -479,6 +479,14 @@ func collectOverrideMethodsProjected(store graph.Store) (map[string]map[string]*
 	return byType, true
 }
 
+func methodOverrideEdge(child *graph.Node, parentID, origin string) *graph.Edge {
+	return &graph.Edge{
+		From: child.ID, To: parentID, Kind: graph.EdgeOverrides,
+		FilePath: child.FilePath, Line: child.StartLine, Confidence: 1,
+		ConfidenceLabel: "EXTRACTED", Origin: origin,
+	}
+}
+
 func (r *Resolver) flushOverrideCandidates(candidates []overrideCandidate) int {
 	if len(candidates) == 0 {
 		return 0
@@ -527,16 +535,7 @@ func (r *Resolver) flushOverrideCandidates(candidates []overrideCandidate) int {
 			}
 			continue
 		}
-		edge := &graph.Edge{
-			From:            candidate.from.ID,
-			To:              candidate.to.ID,
-			Kind:            graph.EdgeOverrides,
-			FilePath:        candidate.from.FilePath,
-			Line:            candidate.from.StartLine,
-			Confidence:      1.0,
-			ConfidenceLabel: "EXTRACTED",
-			Origin:          candidate.origin,
-		}
+		edge := methodOverrideEdge(candidate.from, candidate.to.ID, candidate.origin)
 		staged[key] = edge
 		edges = append(edges, edge)
 		added++
