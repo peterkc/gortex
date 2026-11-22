@@ -34,6 +34,8 @@ const (
 	rebuildTSAliasConfigFact
 	rebuildNpmManifestRow
 	rebuildClassificationRow
+	rebuildGitIndexStampRow
+	rebuildGitIgnoreVerdictRow
 )
 
 var errRebuildInputSidecar = errors.New("invalid frozen build input sidecar")
@@ -51,6 +53,8 @@ type rebuildSidecarRow struct {
 	NPM     *rebuildNpmManifestPayload    `json:"npm,omitempty"`
 
 	Classification *rebuildClassificationFact `json:"classification,omitempty"`
+	GitVersion     string                     `json:"git_version,omitempty"`
+	GitVerdict     rebuildGitIgnoreVerdict    `json:"git_verdict,omitempty"`
 }
 
 func rebuildSidecarCppRow(f rebuildCppFact) rebuildSidecarRow {
@@ -62,6 +66,12 @@ func rebuildSidecarCppRow(f rebuildCppFact) rebuildSidecarRow {
 }
 
 func (r rebuildSidecarRow) check() error {
+	if r.Kind == rebuildGitIndexStampRow || r.Kind == rebuildGitIgnoreVerdictRow {
+		return r.checkGitPolicy()
+	}
+	if r.GitVersion != "" || r.GitVerdict != 0 {
+		return fmt.Errorf("%w: unexpected Git policy fields", errRebuildInputSidecar)
+	}
 	if r.Kind == rebuildClassificationRow {
 		return r.checkClassification()
 	}
@@ -235,7 +245,8 @@ func visitRebuildInputSidecar(ctx context.Context, lease string, expected rebuil
 		if err := row.check(); err != nil {
 			return err
 		}
-		if row.isResolverConfig() || row.Kind == rebuildNpmManifestRow || row.Kind == rebuildClassificationRow {
+		if row.isResolverConfig() || row.Kind == rebuildNpmManifestRow || row.Kind == rebuildClassificationRow ||
+			row.Kind == rebuildGitIndexStampRow || row.Kind == rebuildGitIgnoreVerdictRow {
 			// Refuse ambiguous fields (including duplicate JSON keys and null
 			// payload members). Only the new row kinds require canonical bytes.
 			encoded, err := json.Marshal(row)
@@ -246,6 +257,8 @@ func visitRebuildInputSidecar(ctx context.Context, lease string, expected rebuil
 					name = "npm manifest"
 				case rebuildClassificationRow:
 					name = "classification"
+				case rebuildGitIndexStampRow, rebuildGitIgnoreVerdictRow:
+					name = "Git policy"
 				}
 				return fmt.Errorf("%w: noncanonical %s row", errRebuildInputSidecar, name)
 			}

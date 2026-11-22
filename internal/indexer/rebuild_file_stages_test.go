@@ -1,15 +1,20 @@
 package indexer
 
 import (
+	"bytes"
+	"context"
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
+	"github.com/zzet/gortex/internal/indexer/merkle"
 	"github.com/zzet/gortex/internal/indexer/source"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
@@ -107,6 +112,7 @@ func TestRebuildFileStagesRetainFrozenFactsAcrossEdit(t *testing.T) {
 
 func TestRebuildFileStagesExtractorCensus(t *testing.T) {
 	ctx := t.Context()
+	const raw, key = "cafe\u0301.go", "caf\u00e9.go"
 	root, src := rebuildInputFixture(t)
 	reg := parser.NewRegistry()
 	reg.Register(languages.NewGoExtractor())
@@ -129,7 +135,7 @@ func TestRebuildFileStagesExtractorCensus(t *testing.T) {
 	for _, f := range []struct{ path, raw string }{
 		{"main.tsx", "export function View() { return <div/>; }\n"},
 		{"main.jsx", "export function View() { return <div/>; }\n"},
-		{"main.go", "package p\nfunc Work() {}\n"},
+		{raw, "package p\nconst Label = \"orders\"\nfunc Work() { Pending() }\n"},
 		{"header.h", "namespace demo {}\n"},
 		{"empty.go", ""},
 		{"binary.h", "namespace demo {}\x00"},
@@ -140,6 +146,19 @@ func TestRebuildFileStagesExtractorCensus(t *testing.T) {
 		input, _, err := readRebuildInput(ctx, src, f.path, lang, 1024)
 		require.NoError(t, err)
 		job.inputs = append(job.inputs, input)
+		if f.path == raw {
+			// With no CODEOWNERS, the canonical name's r2 recipe matches
+			// the old recipe for the raw name. Do not reuse that payload.
+			old := input
+			old.Path = key
+			legacyKey := input.parseKey(idx.rebuildExtractorRecipe(recipe, old))
+			require.NotEqual(t, legacyKey, input.parseKey(idx.rebuildExtractorRecipe(recipe, input)))
+			payload, err := store_pebble.EncodeParseFacts(store_pebble.ParseFacts{
+				File: graph.FileMetaRow{FilePath: raw}, EffectiveLanguage: "go",
+			})
+			require.NoError(t, err)
+			require.NoError(t, store.write(legacyKey, payload))
+		}
 		if f.path == "empty.go" {
 			// A serialized successful receipt without even a file node.
 			payload, err := store_pebble.EncodeParseFacts(store_pebble.ParseFacts{
@@ -181,9 +200,36 @@ func TestRebuildFileStagesExtractorCensus(t *testing.T) {
 		require.EqualValues(t, 6, counts.census.admitted)
 		require.Equal(t, map[string]uint64{"cpp": 2, "go": 2, "javascript": 1, "typescript": 1}, counts.census.byID)
 		require.Equal(t, map[string]string{
-			"binary.h": "cpp", "empty.go": "go", "header.h": "cpp", "main.go": "go",
+			"binary.h": "cpp", "empty.go": "go", "header.h": "cpp", raw: "go",
 			"main.jsx": "javascript", "main.tsx": "typescript",
 		}, counts.census.byPath)
+		require.Equal(t, raw, counts.census.originByGraphPath[key])
+		for _, notKey := range []string{raw, "Caf\u00e9.go"} {
+			selected, err := counts.census.selectPendingCallers([]*graph.Edge{{FilePath: notKey}})
+			require.ErrorIs(t, err, errRebuildCallerAttribution)
+			require.Nil(t, selected)
+		}
+
+		view := private.RebuildView()
+		calls := 0
+		require.NoError(t, view.VisitLinkPendingPages(ctx, 64, 16<<10, func(page []*graph.Edge) error {
+			selected, err := counts.census.selectPendingCallers(page)
+			if err != nil {
+				return err
+			}
+			for _, e := range selected {
+				if e.Kind == graph.EdgeCalls && e.From == key+"::Work" && e.To == "unresolved::Pending" {
+					require.Equal(t, key, e.FilePath)
+					calls++
+				}
+			}
+			return nil
+		}))
+		require.Equal(t, 1, calls)
+		constant, err := view.ConstantValue(ctx, key+"::Label")
+		require.NoError(t, err)
+		require.NotNil(t, constant)
+		require.Equal(t, graph.ConstantValueRow{FilePath: key, NodeID: key + "::Label", Value: "orders"}, constant.ConstantValueRow)
 
 		s := h.OpenSnapshot()
 		defer func() { require.NoError(t, s.Close()) }()
@@ -192,7 +238,18 @@ func TestRebuildFileStagesExtractorCensus(t *testing.T) {
 			manifest = append(manifest, f.Path+":"+f.Language)
 			return nil
 		}))
-		require.Equal(t, []string{"binary.h:c", "empty.go:go", "header.h:c", "main.go:go", "main.jsx:javascript", "main.tsx:typescript"}, manifest)
+		require.Equal(t, []string{"binary.h:c", raw + ":go", "empty.go:go", "header.h:c", "main.jsx:javascript", "main.tsx:typescript"}, manifest)
+		file := s.GetNode(key)
+		require.NotNil(t, file)
+		require.Equal(t, key, file.FilePath)
+		require.Nil(t, s.GetNode(raw))
+		decl := s.GetNode(key + "::Work")
+		require.NotNil(t, decl)
+		require.Equal(t, key, decl.FilePath)
+		meta, err := s.FileMetadata("", key)
+		require.NoError(t, err)
+		require.Equal(t, key, meta.FilePath)
+		require.Positive(t, meta.NodeCount)
 		empty, err := s.FileMetadata("", "empty.go")
 		require.NoError(t, err)
 		require.Zero(t, empty.NodeCount)
@@ -203,6 +260,17 @@ func TestRebuildFileStagesExtractorCensus(t *testing.T) {
 		return witnesses
 	}
 	first := build(src, 5, 1)
+	for _, input := range job.inputs {
+		if input.Path == raw {
+			payload, err := store.read(input.parseKey(idx.rebuildExtractorRecipe(recipe, input)))
+			require.NoError(t, err)
+			facts, err := store_pebble.DecodeParseFacts(payload)
+			require.NoError(t, err)
+			require.Equal(t, raw, facts.File.FilePath)
+			require.Contains(t, facts.Constants, graph.ConstantValueRow{FilePath: raw, NodeID: key + "::Label", Value: "orders"})
+		}
+	}
+	require.NoError(t, os.Remove(filepath.Join(root, raw)))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "header.h"), []byte("int edited(void);\n"), 0o600))
 	// No source is supplied on replay, so even a live content probe cannot succeed.
 	require.Equal(t, first, build(nil, 0, 6))
@@ -216,6 +284,9 @@ func TestRebuildSelectPendingCallers(t *testing.T) {
 			"a.go": "go", "b.h": "cpp", "c.jsx": "javascript", "d.tsx": "typescript", "e.vue": "vue", "f.md": "markdown",
 		},
 		byID: map[string]uint64{"go": 1, "cpp": 1, "javascript": 1, "typescript": 1, "vue": 1, "markdown": 1},
+		originByGraphPath: map[string]string{
+			"a.go": "a.go", "b.h": "b.h", "c.jsx": "c.jsx", "d.tsx": "d.tsx", "e.vue": "e.vue", "f.md": "f.md",
+		},
 	}
 	private, err := store_pebble.OpenBuild(filepath.Join(t.TempDir(), "working"), store_pebble.FullProfile)
 	require.NoError(t, err)
@@ -284,5 +355,76 @@ func TestRebuildSelectPendingCallers(t *testing.T) {
 	}
 	for _, path := range []string{"b.h", "e.vue", "f.md"} {
 		require.Equal(t, graph.Edge{From: "source", Kind: graph.EdgeCalls, To: pending, FilePath: path, Line: 1}, saved[path])
+	}
+}
+
+func TestRebuildFileStagesRefusesNFCPathCollision(t *testing.T) {
+	ctx := t.Context()
+	// An escaped pair exceeds the generic detail limit but both complete raw
+	// names still fit in the worker's typed refusal. No such paths are opened.
+	prefix := strings.Repeat(strings.Repeat("\x01", 200)+"/", 12)
+	a, b := prefix+"cafe\u0301.go", prefix+"caf\u00e9.go"
+	input := func(path string) rebuildInput {
+		return rebuildInput{Path: path, Language: "go", Kind: merkle.RegularFile, Size: 24, Content: rebuildDigest{1}}
+	}
+	cfg := config.Default().Index
+	cfg.MaxFileSize = 128
+	reg := parser.NewRegistry()
+	reg.Register(languages.NewGoExtractor())
+	idx := New(graph.New(), reg, cfg, zap.NewNop())
+	t.Cleanup(idx.Close)
+	var detail string
+	for _, tc := range []struct {
+		name   string
+		inputs []rebuildInput
+		rows   map[string]rebuildClassificationFact
+	}{
+		{name: "two parses", inputs: []rebuildInput{input(a), input(b)}},
+		{name: "reversed parses", inputs: []rebuildInput{input(b), input(a)}},
+		{name: "parse and skip", inputs: []rebuildInput{input(a)}, rows: map[string]rebuildClassificationFact{b: {Language: "go", Size: 129, MaxFileSize: 128}}},
+		{name: "two skips", rows: map[string]rebuildClassificationFact{a: {Language: "go", Size: 129, MaxFileSize: 128}, b: {Language: "go", Size: 129, MaxFileSize: 128}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, err := rebuildInputRoot(tc.inputs)
+			require.NoError(t, err)
+			digest, err := hex.DecodeString(root)
+			require.NoError(t, err)
+			require.Len(t, digest, 32)
+			lease := t.TempDir()
+			job := rebuildFileStages{
+				workDir: lease, incarnation: 2, inputs: tc.inputs,
+				recipes: map[string]rebuildDigest{"go": {1}}, classifications: tc.rows,
+				witness: store_pebble.Witness{Input: store_pebble.HeadDigest(digest), Profile: store_pebble.FullProfile, Stage: store_pebble.StageManifest},
+			}
+			store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+			sent := 0
+			counts, err := idx.buildRebuildFileStages(ctx, nil, store, nil, job, func(store_pebble.StageTables) error {
+				sent++
+				return nil
+			})
+			require.ErrorIs(t, err, errRebuildGraphPathCollision)
+			require.Zero(t, counts)
+			require.Zero(t, sent)
+			if detail == "" {
+				detail = err.Error()
+			}
+			require.EqualError(t, err, detail)
+			var reply, acks bytes.Buffer
+			require.NoError(t, writeRebuildBuildReply(&reply, buildRefusal(err)))
+			err = receiveRebuildStages(ctx, lease, rebuildBuildRequest{}, &reply, &acks, func(context.Context, store_pebble.StageTables) error {
+				t.Fatal("collision must not offer a stage")
+				return nil
+			})
+			require.ErrorIs(t, err, errRebuildGraphPathCollision)
+			require.ErrorContains(t, err, strconv.Quote(a))
+			require.ErrorContains(t, err, strconv.Quote(b))
+			require.Zero(t, acks.Len())
+			entries, err := os.ReadDir(lease)
+			require.NoError(t, err)
+			require.Empty(t, entries)
+			entries, err = os.ReadDir(store.dir)
+			require.NoError(t, err)
+			require.Empty(t, entries)
+		})
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/indexer/source"
 	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/pathkey"
 	"go.uber.org/zap"
 )
 
@@ -77,7 +78,7 @@ func (idx *Indexer) loadRebuildFileWith(ctx context.Context, src source.ContentS
 			ext, _ = idx.registry.GetByLanguage(lang)
 		}
 	}
-	prepared, spilled, err := idx.transforms.runRebuild(ctx, rel, raw, bounds)
+	prepared, spilled, err := idx.transforms.runRebuild(ctx, pathkey.Normalize(rel), raw, bounds)
 	if err != nil {
 		return facts, false, err
 	}
@@ -126,10 +127,11 @@ func possibleRebuildLanguageRefinement(path, lang string) bool {
 // extractPreparedRebuildFile runs only inside the build worker or the strict
 // parse worker. The caller already selected the extractor from frozen input.
 func (idx *Indexer) extractPreparedRebuildFile(ctx context.Context, rel string, ext parser.Extractor, prepared []byte) (store_pebble.ParseFacts, error) {
+	graphPath := pathkey.Normalize(rel)
 	lang := ext.Language()
 	admission := newNativeParseExtractionAdmission(0, nil, idx.nativeParseAdmission.Load())
 	result, skipped, err := idx.extractFileCtxWithRawLease(ctx, admission, nil, nil, nil,
-		filepath.Join(idx.rootPath, filepath.FromSlash(rel)), rel, lang, ext, prepared)
+		filepath.Join(idx.rootPath, filepath.FromSlash(rel)), graphPath, lang, ext, prepared)
 	if result != nil {
 		defer result.ReleaseTree()
 	}
@@ -141,13 +143,23 @@ func (idx *Indexer) extractPreparedRebuildFile(ctx context.Context, rel string, 
 	}
 	if !skipped {
 		if !extractionDispositionFor(result).omitSecondarySourceScans() {
-			idx.applyCoverageDomains(rel, lang, prepared, result)
+			idx.applyCoverageDomains(graphPath, lang, prepared, result)
 		}
 		stampExtractionGraphFingerprint(result)
-		idx.stampContractDependencyInputs(rel, lang, prepared, result)
+		idx.stampContractDependencyInputs(graphPath, lang, prepared, result)
 	}
+	// ParseFacts v2 stores the literal receipt origin in File.FilePath and
+	// derives every constant's FilePath from it on decode. Their node IDs,
+	// like other graph facts, were minted with the NFC key by the extractor.
 	meta, _ := idx.prepareFileMeta(rel, prepared, result)
 	constants, _ := idx.prepareConstValues(result)
+	if graphPath != rel {
+		for i := range constants {
+			if constants[i].FilePath == graphPath {
+				constants[i].FilePath = rel
+			}
+		}
+	}
 	facts := store_pebble.ParseFacts{
 		Nodes: result.Nodes, Edges: result.Edges, File: meta, Constants: constants, EffectiveLanguage: lang,
 	}

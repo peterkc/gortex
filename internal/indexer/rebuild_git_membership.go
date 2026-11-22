@@ -72,8 +72,7 @@ func readRebuildGitInventory(ctx context.Context, root *os.Root) (rebuildGitInve
 		return rebuildGitInventory{}, err
 	}
 	v, ended := strings.CutSuffix(string(version), "\n")
-	if !ended || !strings.HasPrefix(v, "git version ") || len(v) == len("git version ") ||
-		strings.ContainsFunc(v, func(c rune) bool { return c < ' ' || c > '~' }) {
+	if !ended || !validRebuildGitVersion(v) {
 		return rebuildGitInventory{}, fmt.Errorf("%w: malformed Git version", errRebuildGitMembership)
 	}
 	tracked, err := run(rebuildCppRawLimit, "ls-files", "--stage", "-z")

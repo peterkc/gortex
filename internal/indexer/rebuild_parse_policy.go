@@ -10,6 +10,7 @@ import (
 	"github.com/zzet/gortex/internal/codeowners"
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/pathkey"
 )
 
 // rebuildParsePolicy travels with the build request. The child compiles the
@@ -62,8 +63,13 @@ func (idx *Indexer) installRebuildParsePolicy(policy rebuildParsePolicy) {
 // uses. CODEOWNERS is last-match-wins; preserving the resulting owner order also
 // preserves extraction order. Only the Go extractor reads the Temporal list.
 func (idx *Indexer) rebuildExtractorRecipe(base rebuildDigest, input rebuildInput) rebuildDigest {
-	// v2 requires a receipt with the effective extractor ID.
-	b := append([]byte{'r', 2}, base[:]...)
+	graphPath := pathkey.Normalize(input.Path)
+	version := byte(2) // v2 requires the effective extractor ID.
+	if graphPath != input.Path {
+		// Only changed spellings can have stale raw-keyed graph facts.
+		version = 3
+	}
+	b := append([]byte{'r', version}, base[:]...)
 	appendList := func(values []string) {
 		b = binary.AppendUvarint(b, uint64(len(values)))
 		for _, value := range values {
@@ -73,7 +79,7 @@ func (idx *Indexer) rebuildExtractorRecipe(base rebuildDigest, input rebuildInpu
 	}
 	var owners []string
 	if idx.config.Coverage.IsEnabled("ownership") {
-		owners = codeowners.MatchFile(input.Path, idx.loadCodeownersRules())
+		owners = codeowners.MatchFile(graphPath, idx.loadCodeownersRules())
 	}
 	appendList(owners)
 	if input.Language == "go" {

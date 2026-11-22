@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/indexer/source"
+	"github.com/zzet/gortex/internal/pathkey"
 )
 
 // rebuildFileStages carries the enumerator's frozen inputs into the worker.
@@ -34,7 +36,10 @@ type rebuildParsedCounts struct {
 	census         *rebuildExtractorCensus
 }
 
-var errRebuildCallerAttribution = errors.New("rebuild caller attribution is unproved")
+var (
+	errRebuildCallerAttribution  = errors.New("rebuild caller attribution is unproved")
+	errRebuildGraphPathCollision = errors.New("rebuild inputs share an NFC graph path")
+)
 
 // rebuildExtractorCensus is complete only after exact file assembly. It
 // retains one literal path key per admitted input and counts its effective
@@ -43,13 +48,15 @@ type rebuildExtractorCensus struct {
 	admitted uint64
 	byPath   map[string]string
 	byID     map[string]uint64
+
+	originByGraphPath map[string]string // exact graph key → literal path; stubs have no receipt in byPath
 }
 
 // selectPendingCallers selects a main-link page before starting workers or
 // applying changes. It borrows the page's edges in their original order.
 // This does not filter the candidate source, check endpoints or publish rows.
 func (c *rebuildExtractorCensus) selectPendingCallers(page []*graph.Edge) ([]*graph.Edge, error) {
-	if c == nil || c.byPath == nil || uint64(len(c.byPath)) != c.admitted {
+	if c == nil || c.originByGraphPath == nil || c.byPath == nil || uint64(len(c.byPath)) != c.admitted {
 		return nil, fmt.Errorf("%w: incomplete extractor census", errRebuildCallerAttribution)
 	}
 	var selected []*graph.Edge
@@ -58,7 +65,7 @@ func (c *rebuildExtractorCensus) selectPendingCallers(page []*graph.Edge) ([]*gr
 			return nil, fmt.Errorf("%w: nil pending edge", errRebuildCallerAttribution)
 		}
 		// JSX uses the javascript extractor; TSX uses typescript.
-		switch c.byPath[edge.FilePath] {
+		switch c.byPath[c.originByGraphPath[edge.FilePath]] {
 		case "":
 			return nil, fmt.Errorf("%w: no admitted receipt for %q", errRebuildCallerAttribution, edge.FilePath)
 		case "go", "javascript", "typescript":
@@ -66,6 +73,15 @@ func (c *rebuildExtractorCensus) selectPendingCallers(page []*graph.Edge) ([]*gr
 		}
 	}
 	return selected, nil
+}
+
+func recordRebuildGraphPath(origins map[string]string, raw string) error {
+	key := pathkey.Normalize(raw)
+	if prior, ok := origins[key]; ok && prior != raw {
+		return fmt.Errorf("%w: %q and %q", errRebuildGraphPathCollision, min(prior, raw), max(prior, raw))
+	}
+	origins[key] = raw
+	return nil
 }
 
 // buildRebuildFileStages sends the manifest before opening a source file.
@@ -88,17 +104,30 @@ func (idx *Indexer) buildRebuildFileStages(
 	// Order is part of shared-node behavior. The native first-file-wins
 	// rule uses the exact path bytes, not the walk or worker completion order.
 	slices.SortFunc(job.inputs, func(a, b rebuildInput) int { return strings.Compare(a.Path, b.Path) })
+	// Check all graph-producing names before sending any stage or reading a
+	// parse source. Sorted raw names make refusals repeatable.
+	origins := make(map[string]string, len(job.inputs))
+	classified := slices.Sorted(maps.Keys(job.classifications))
 	content := idx.newContentAdmissionGate()
-	for key, fact := range job.classifications {
+	for _, key := range classified {
 		if err := ctx.Err(); err != nil {
 			return counts, err
 		}
+		fact := job.classifications[key]
 		if err := idx.checkRebuildClassification(key, fact, content); err != nil {
 			return counts, err
+		}
+		if fact.sizeSkipped() || fact.ContentSkipReason != "" {
+			if err := recordRebuildGraphPath(origins, key); err != nil {
+				return counts, err
+			}
 		}
 	}
 	files := make([]store_pebble.ManifestFile, 0, len(job.inputs))
 	for _, input := range job.inputs {
+		if err := ctx.Err(); err != nil {
+			return counts, err
+		}
 		rel := input.Path
 		// Cache hits do not pass through readRebuildInput's path check.
 		if rel == "." || path.Clean(rel) != rel || !filepath.IsLocal(filepath.FromSlash(rel)) ||
@@ -107,6 +136,9 @@ func (idx *Indexer) buildRebuildFileStages(
 		}
 		if fact, ok := job.classifications[rel]; ok && !fact.matchesParseInput(input) {
 			return counts, fmt.Errorf("%w: classification contradicts admitted parse input %q", errRebuildInputSidecar, rel)
+		}
+		if err := recordRebuildGraphPath(origins, rel); err != nil {
+			return counts, err
 		}
 		base, ok := job.recipes[input.Language]
 		if !ok || base == (rebuildDigest{}) {
@@ -131,9 +163,10 @@ func (idx *Indexer) buildRebuildFileStages(
 	// Do not retain receipt payloads or read the source again. Each key below
 	// borrows the path from the admitted inputs bounded by rebuildRequestBytes.
 	census := rebuildExtractorCensus{
-		admitted: manifest.Witness.Families[0].Count,
-		byPath:   make(map[string]string, len(job.inputs)),
-		byID:     make(map[string]uint64),
+		admitted:          manifest.Witness.Families[0].Count,
+		byPath:            make(map[string]string, len(job.inputs)),
+		byID:              make(map[string]uint64),
+		originByGraphPath: origins,
 	}
 	for _, input := range job.inputs {
 		facts, reused, err := idx.loadRebuildFile(ctx, src, store, input, job.recipes[input.Language], job.bounds)
@@ -142,6 +175,14 @@ func (idx *Indexer) buildRebuildFileStages(
 		}
 		if facts.File.FilePath != input.Path || facts.EffectiveLanguage == "" {
 			return counts, fmt.Errorf("%w: missing receipt attribution for %q", errParseEntryCorrupt, input.Path)
+		}
+		// The cache already holds the raw receipt. Only the fresh, owned
+		// facts passed to the graph use NFC for these store keys.
+		if key := pathkey.Normalize(input.Path); key != input.Path {
+			facts.File.FilePath = key
+			for i := range facts.Constants {
+				facts.Constants[i].FilePath = key
+			}
 		}
 		if err := private.AddParsedFile("", facts); err != nil {
 			return counts, err
@@ -164,12 +205,13 @@ func (idx *Indexer) buildRebuildFileStages(
 	}
 	// Native emits size and content skips after parsing. Write just their
 	// nodes; a skip has no parse receipt, raw edges or manifest parse leaf.
-	for key, fact := range job.classifications {
+	for _, key := range classified {
 		if err := ctx.Err(); err != nil {
 			return counts, err
 		}
+		fact := job.classifications[key]
 		var n *graph.Node
-		sf := skippedFile{relPath: key, lang: fact.Language, size: fact.Size, reason: fact.ContentSkipReason}
+		sf := skippedFile{relPath: pathkey.Normalize(key), lang: fact.Language, size: fact.Size, reason: fact.ContentSkipReason}
 		switch {
 		case fact.sizeSkipped():
 			n = sizeSkipNode(sf, fact.MaxFileSize)

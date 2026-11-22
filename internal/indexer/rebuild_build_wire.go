@@ -150,13 +150,18 @@ var rebuildFailureKinds = [...]error{
 	resolver.ErrRebuildCppIncludeInput, store_pebble.ErrRebuildFileImports,
 	store_pebble.ErrRebuildLinkInputSize, store_pebble.ErrRebuildLink,
 	store_pebble.ErrRebuildPlaceholderSources, resolver.ErrRebuildCrossPackageGuard, store_pebble.ErrRebuildView,
-	errRebuildInputSidecar,
+	errRebuildInputSidecar, errRebuildGraphPathCollision,
 }
 
 func buildRefusal(err error) rebuildBuildReply {
 	r := rebuildBuildReply{Refusal: 1, Detail: err.Error()}
-	if len(r.Detail) > 8<<10 {
-		r.Detail = r.Detail[:8<<10]
+	limit := 8 << 10
+	if errors.Is(err, errRebuildGraphPathCollision) {
+		// Keep both quoted names even when all admitted path bytes need escaping.
+		limit = 8*rebuildNamespaceKeyLimit + 128
+	}
+	if len(r.Detail) > limit {
+		r.Detail = r.Detail[:limit]
 	}
 	for i, kind := range rebuildFailureKinds[1:] {
 		if errors.Is(err, kind) {

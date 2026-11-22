@@ -236,8 +236,12 @@ func buildRebuildStages(
 		return err
 	}
 	var classifications map[string]rebuildClassificationFact
+	var gitPolicy rebuildGitPolicyProof
 	if digest := rebuildDigest(req.Witness.FrozenInputs); digest != (rebuildDigest{}) {
 		if err := visitRebuildInputSidecar(ctx, lease, digest, func(row rebuildSidecarRow) error {
+			if err := gitPolicy.add(row); err != nil {
+				return err
+			}
 			if row.Classification == nil {
 				return nil
 			}
@@ -253,6 +257,9 @@ func buildRebuildStages(
 		}); err != nil {
 			return err
 		}
+	}
+	if err := gitPolicy.check(req.Witness.UsesGitIgnorePolicy); err != nil {
+		return err
 	}
 	var cfg config.IndexConfig
 	if err := json.Unmarshal(req.Config, &cfg); err != nil {

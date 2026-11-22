@@ -26,7 +26,8 @@ func TestRebuildClassificationFileGraph(t *testing.T) {
 	lease := t.TempDir()
 	cfg := config.Default().Index
 	cfg.MaxFileSize = 128
-	const big, named, unrecognized, empty, parsed = "large.custom", "large.go", "plain.custom", "empty.custom", "small.custom"
+	const big, named, unrecognized, empty, parsed = "large.custom", "large-e\u0301.go", "plain.custom", "empty.custom", "small.custom"
+	const sizeKey = "large-\u00e9.go"
 	const shebang = "#!/usr/bin/env python3\n"
 	bigData := shebang + strings.Repeat("# padding\n", 60)
 	smallData := shebang + "def frozen_declaration():\n    return 1\n"
@@ -81,7 +82,8 @@ func TestRebuildClassificationFileGraph(t *testing.T) {
 	s := h.OpenSnapshot()
 	defer func() { require.NoError(t, s.Close()) }()
 	require.NoError(t, s.RequireStage(store_pebble.StageFileGraph))
-	for name, lang := range map[string]string{big: "python", named: "go"} {
+	require.Nil(t, s.GetNode(named))
+	for name, lang := range map[string]string{big: "python", sizeKey: "go"} {
 		want := &graph.Node{
 			ID: name, Kind: graph.KindFile, Name: name, FilePath: name, Language: lang,
 			Meta: map[string]any{
@@ -126,7 +128,8 @@ func TestRebuildClassificationContentSkipFileGraph(t *testing.T) {
 	idx := New(graph.New(), newAssetTestRegistry(), cfg, zap.NewNop())
 	t.Cleanup(idx.Close)
 	gate := idx.newContentAdmissionGate()
-	const named, untracked, sniffed = "large.gif", "untracked.gif", "prefixed.t60rawasset"
+	const named, untracked, sniffed = "large-e\u0301.gif", "untracked.gif", "prefixed.t60rawasset"
+	const contentKey = "large-\u00e9.gif"
 	data := []byte(strings.Repeat("x", 600))
 	size := int64(len(data))
 	lang, ok := idx.registry.DetectLanguage(named)
@@ -179,7 +182,11 @@ func TestRebuildClassificationContentSkipFileGraph(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, s.Close()) })
 	require.NoError(t, s.RequireStage(store_pebble.StageFileGraph))
 	require.Len(t, s.AllNodes(), len(reasons))
+	require.Nil(t, s.GetNode(named))
 	for key, reason := range reasons {
+		if key == named {
+			key = contentKey
+		}
 		require.Equal(t, &graph.Node{
 			ID: key, Kind: graph.KindFile, Name: key, FilePath: key, Language: "image", StartLine: 1,
 			Meta: map[string]any{"skip_reason": reason, "skipped_due_to_content": true, "file_size_bytes": size},

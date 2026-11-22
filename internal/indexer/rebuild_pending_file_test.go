@@ -16,12 +16,21 @@ import (
 )
 
 func TestPendingRebuildFileSavesNativeReceipt(t *testing.T) {
+	t.Run("ASCII", func(t *testing.T) {
+		checkPendingRebuildFileNativeReceipt(t, "events.go", "events.go")
+	})
+	t.Run("NFD", func(t *testing.T) {
+		checkPendingRebuildFileNativeReceipt(t, "events-e\u0301.go", "events-\u00e9.go")
+	})
+}
+
+func checkPendingRebuildFileNativeReceipt(t *testing.T, path, graphPath string) {
+	t.Helper()
 	ctx := t.Context()
 	root, src := rebuildInputFixture(t)
 	exe, err := os.Executable()
 	require.NoError(t, err)
 	t.Setenv(crashWorkerEnv, "1") // TestMain runs the same entry point as __parse-worker.
-	const path = "events.go"
 	content := []byte(`package sample
 const Label = "orders"
 func Broken() { value := }
@@ -36,7 +45,7 @@ func Again() { another := }
 	cfg := config.Default().Index
 	require.True(t, cfg.Coverage.IsEnabled("ownership"), "test the default ownership policy")
 	owners := filepath.Join(root, "CODEOWNERS")
-	require.NoError(t, os.WriteFile(owners, []byte("* @frozen\n"), 0o600))
+	require.NoError(t, os.WriteFile(owners, []byte("* @wrong\n/"+graphPath+" @frozen\n"), 0o600))
 	reg := parser.NewRegistry()
 	goExtractor := languages.NewGoExtractor()
 	reg.Register(goExtractor)
@@ -65,17 +74,41 @@ func Again() { another := }
 	require.Equal(t, "go", facts.EffectiveLanguage)
 	require.Equal(t, len(content), facts.File.Size)
 	require.Equal(t, contentHashForSource(content), facts.File.ContentHash)
-	require.Contains(t, facts.Constants, graph.ConstantValueRow{FilePath: path, NodeID: path + "::Label", Value: "orders"})
+	require.Equal(t, path, facts.File.FilePath)
+	require.Contains(t, facts.Constants, graph.ConstantValueRow{FilePath: path, NodeID: graphPath + "::Label", Value: "orders"})
+	var fileNode *graph.Node
+	for _, n := range facts.Nodes {
+		if n.Kind == graph.KindFile {
+			fileNode = n
+			break
+		}
+	}
+	require.NotNil(t, fileNode)
+	require.Equal(t, graphPath, fileNode.ID)
+	require.Equal(t, graphPath, fileNode.FilePath)
+	var definesLabel bool
+	for _, e := range facts.Edges {
+		if e.Kind == graph.EdgeDefines && e.From == graphPath && e.To == graphPath+"::Label" {
+			require.Equal(t, graphPath, e.FilePath)
+			definesLabel = true
+		}
+	}
+	require.True(t, definesLabel)
 	var locations []string
 	require.NoError(t, json.Unmarshal([]byte(facts.File.Errors), &locations))
 	require.Greater(t, len(locations), 1, "fixture must distinguish ordering of parse errors")
-	native, err := parser.Extract(goExtractor, path, content, idx.extractionOptionsValue())
+	native, err := parser.Extract(goExtractor, graphPath, content, idx.extractionOptionsValue())
 	require.NoError(t, err)
 	t.Cleanup(native.ReleaseTree)
 	require.NotNil(t, native.Tree)
 	require.Equal(t, native.Tree.ParseErrorLocations(), locations)
 
-	_, reused, err = idx.loadRebuildFile(ctx, src, nativeStore, input, recipe, bounds)
+	// Rebuild the same raw relative name under another root. A relocated
+	// parse must produce the exact pending receipt without reading the edit.
+	otherRoot, otherSrc := rebuildInputFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(otherRoot, path), append([]byte{0xef, 0xbb, 0xbf}, content...), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, path), []byte("package sample\nfunc Edited() {}\n"), 0o600))
+	_, reused, err = idx.loadRebuildFile(ctx, otherSrc, nativeStore, input, recipe, bounds)
 	require.NoError(t, err)
 	require.False(t, reused)
 	nativeEntry, err := nativeStore.read(key)
@@ -89,7 +122,6 @@ func Again() { another := }
 	}
 	require.Equal(t, []string{"team::frozen"}, savedOwners)
 
-	require.NoError(t, os.WriteFile(filepath.Join(root, path), []byte("package sample\nfunc Edited() {}\n"), 0o600))
 	missingExe := filepath.Join(t.TempDir(), "missing-gortex")
 	cached, reused, err := idx.loadPendingRebuildFile(ctx, src, store, input, recipe, bounds, missingExe)
 	require.NoError(t, err, "matching cache hit must not read the edited input or spawn a parser")
