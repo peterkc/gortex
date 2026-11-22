@@ -133,3 +133,64 @@ func TestReadRebuildClassifiedBodyRefusesDrift(t *testing.T) {
 	require.ErrorIs(t, err, ErrBuildInputChanged)
 	require.Nil(t, data)
 }
+
+func TestFreezeRebuildCheckoutRootManifestLinks(t *testing.T) {
+	ctx := t.Context()
+	dir, src := rebuildInputFixture(t)
+	const target = "fixture.go"
+	const body = "module example.org/fixture\n"
+	const outside = "../outside.json"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, target), []byte(body), 0o600))
+	require.NoError(t, os.Symlink(target, filepath.Join(dir, "go.mod")))
+	require.NoError(t, os.Symlink(outside, filepath.Join(dir, "package.json")))
+	require.NoError(t, os.Symlink(outside, filepath.Join(dir, "unrelated.go")))
+
+	reg := parser.NewRegistry()
+	reg.Register(languages.NewGoExtractor())
+	idx := New(graph.New(), reg, config.Default().Index, zap.NewNop())
+	t.Cleanup(idx.Close)
+	gate := idx.newContentAdmissionGate()
+	raw := int64(rebuildCppRawLimit)
+	epoch, err := freezeRebuildCheckoutInputs(ctx, src.FrozenRoot(), nil, nil, &raw,
+		func(key string, mode fs.FileMode, member rebuildGitMember, raw *int64, emit func(rebuildSidecarRow) error) (rebuildCheckoutLeaf, error) {
+			return idx.freezeRebuildCheckoutLeaf(ctx, src.FrozenRoot(), key, mode, member, gate, 128, raw, emit)
+		}, func(row rebuildSidecarRow) error { return row.check() })
+	require.NoError(t, err)
+	require.Len(t, epoch.files, 1)
+	require.Equal(t, target, epoch.files[0].Path)
+	require.Equal(t, &rebuildInput{Path: "go.mod", Language: "manifest", Kind: merkle.Symlink,
+		Size: int64(len(target)), Content: blake3.Sum256([]byte(target))}, epoch.admitted["go.mod"])
+	require.Equal(t, &rebuildInput{Path: "package.json", Language: "manifest", Kind: merkle.Symlink,
+		Size: int64(len(outside)), Content: blake3.Sum256([]byte(outside))}, epoch.admitted["package.json"])
+	_, err = epoch.namespace.lookup("unrelated.go")
+	require.ErrorIs(t, err, errRebuildResolverInputDenied)
+	require.NotContains(t, epoch.admitted, "unrelated.go")
+
+	m, err := readCheckedRebuildRootManifest(ctx, src, epoch, "go.mod", 128)
+	require.NoError(t, err)
+	require.NotNil(t, m)
+	require.Equal(t, body, string(m.data))
+	require.Equal(t, *epoch.admitted[target], m.target)
+	require.Equal(t, m.target.Content, m.row.Digest)
+
+	m, err = readCheckedRebuildRootManifest(ctx, src, epoch, "package.json", 128)
+	require.ErrorIs(t, err, source.ErrOutsideRoot)
+	require.Nil(t, m)
+
+	small := int64(len(target) - 1)
+	leaf, err := freezeRebuildRootManifestLink(ctx, src.FrozenRoot(), "go.mod", &small)
+	require.ErrorIs(t, err, errRebuildCppCaptureLimit)
+	require.Empty(t, leaf)
+	require.EqualValues(t, len(target)-1, small)
+	before := int64(len(target))
+	leaf, err = freezeRebuildRootManifestLink(ctx, src.FrozenRoot(), "go.mod", &before)
+	require.NoError(t, err)
+	require.Zero(t, before)
+	require.Equal(t, epoch.admitted["go.mod"], leaf.input)
+
+	require.NoError(t, os.Remove(filepath.Join(dir, "go.mod")))
+	require.NoError(t, os.Symlink("unrelated.go", filepath.Join(dir, "go.mod")))
+	m, err = readCheckedRebuildRootManifest(ctx, src, epoch, "go.mod", 128)
+	require.ErrorIs(t, err, ErrBuildInputChanged)
+	require.Nil(t, m)
+}

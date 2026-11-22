@@ -235,7 +235,7 @@ func TestFreezeRebuildCheckoutRegularLeaves(t *testing.T) {
 	var classified []string
 	epoch, err := freezeRebuildCheckoutInputs(ctx, src.FrozenRoot(), excludes.New([]string{"denied/"}), nil, &raw,
 		func(key string, mode fs.FileMode, member rebuildGitMember, raw *int64, emit func(rebuildSidecarRow) error) (rebuildCheckoutLeaf, error) {
-			return idx.freezeRebuildCheckoutRegularLeaf(ctx, src.FrozenRoot(), key, mode, member, gate, 128, raw, emit)
+			return idx.freezeRebuildCheckoutLeaf(ctx, src.FrozenRoot(), key, mode, member, gate, 128, raw, emit)
 		}, func(row rebuildSidecarRow) error {
 			if row.Kind == rebuildClassificationRow {
 				classified = append(classified, string(row.Path))

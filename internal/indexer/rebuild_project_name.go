@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 
 	"github.com/zeebo/blake3"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
@@ -173,6 +174,40 @@ func readCheckedRebuildManifestLink(ctx context.Context, src *source.FilesystemS
 		return rebuildInput{}, nil, rebuildSidecarRow{}, fmt.Errorf("%w: verified target differs from admitted identity", ErrBuildInputChanged)
 	}
 	return *target, data, rebuildSidecarRow{Kind: rebuildFollowedManifest, Path: []byte(link.Path), Present: true, Digest: target.Content}, nil
+}
+
+// freezeRebuildRootManifestLink records a root link as a leaf without opening
+// its target. Following it later needs a separate checked target identity.
+func freezeRebuildRootManifestLink(ctx context.Context, root *os.Root, key string, raw *int64) (rebuildCheckoutLeaf, error) {
+	if err := ctx.Err(); err != nil {
+		return rebuildCheckoutLeaf{}, err
+	}
+	if root == nil || raw == nil || *raw < 0 || *raw > rebuildCppRawLimit || (key != "go.mod" && key != "package.json") {
+		return rebuildCheckoutLeaf{}, errRebuildProjectNameInput
+	}
+	before, err := root.Lstat(key)
+	if err != nil || before.Mode()&fs.ModeSymlink == 0 {
+		return rebuildCheckoutLeaf{}, fmt.Errorf("%w: expected literal root manifest link %q: %v", ErrBuildInputChanged, key, err)
+	}
+	limit := min(*raw, rebuildCppEntryLimit)
+	if before.Size() > limit {
+		return rebuildCheckoutLeaf{}, fmt.Errorf("%w: root manifest link %q", errRebuildCppCaptureLimit, key)
+	}
+	target, err := root.Readlink(key)
+	if err != nil {
+		return rebuildCheckoutLeaf{}, fmt.Errorf("%w: read literal manifest link %q: %w", ErrBuildInputChanged, key, err)
+	}
+	after, err := root.Lstat(key)
+	if err != nil || !sameRebuildPathMetadata(before, after) || int64(len(target)) != before.Size() || target == "" {
+		return rebuildCheckoutLeaf{}, fmt.Errorf("%w: root manifest link changed: %q: %v", ErrBuildInputChanged, key, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return rebuildCheckoutLeaf{}, err
+	}
+	*raw -= int64(len(target))
+	return rebuildCheckoutLeaf{input: &rebuildInput{
+		Path: key, Language: "manifest", Kind: merkle.Symlink, Size: int64(len(target)), Content: blake3.Sum256([]byte(target)),
+	}}, nil
 }
 
 func observeRebuildManifestLink(ctx context.Context, src *source.FilesystemSource, link rebuildInput,
