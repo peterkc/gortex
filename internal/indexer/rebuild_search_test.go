@@ -52,7 +52,7 @@ func TestRebuildSearchRendersFinalFacts(t *testing.T) {
 	linked.QualName = "linkedqualifier"
 	global := &graph.Node{ID: "external-call::dep::example.org/lib", Kind: graph.KindModule, Name: "lib", QualName: "globalanchor", Language: "go"}
 	build.AddBatch([]*graph.Node{global, &linked}, nil)
-	relations, err := build.PrepareRelations(ctx, t.TempDir(), retained)
+	relations, err := build.PrepareRelations(ctx, t.TempDir(), retained, nil)
 	require.NoError(t, err)
 	digest, err := head.PublishStage(ctx, relations)
 	require.NoError(t, err)

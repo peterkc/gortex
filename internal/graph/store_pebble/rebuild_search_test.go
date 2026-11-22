@@ -101,7 +101,7 @@ func TestRebuildSearchStageCorruptNodeDoesNotChangeHead(t *testing.T) {
 func publishRebuildSearchDerived(t *testing.T, worker *BuildStore, head *Head, base FileGraphBase) StageTables {
 	t.Helper()
 	ctx := t.Context()
-	relations, err := worker.PrepareRelations(ctx, t.TempDir(), base)
+	relations, err := worker.PrepareRelations(ctx, t.TempDir(), base, nil)
 	require.NoError(t, err)
 	digest, err := head.PublishStage(ctx, relations)
 	require.NoError(t, err)

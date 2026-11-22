@@ -34,7 +34,7 @@ func TestRelationsStagePublishesExactDiff(t *testing.T) {
 	unresolved.To, unresolved.Line = "unresolved::StillExternal", linked.Line+1
 	worker.AddEdge(&unresolved)
 
-	tables, err := worker.PrepareRelations(ctx, t.TempDir(), base)
+	tables, err := worker.PrepareRelations(ctx, t.TempDir(), base, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, tables.Files)
 	_, err = head.PublishStage(ctx, tables)
@@ -95,7 +95,7 @@ func TestRelationsStageKeepsExternalImportEndpoint(t *testing.T) {
 	edge := *raw
 	edge.Kind, edge.To = graph.EdgeImports, key
 	worker.AddEdge(&edge)
-	tables, err := worker.PrepareRelations(ctx, t.TempDir(), base)
+	tables, err := worker.PrepareRelations(ctx, t.TempDir(), base, nil)
 	require.NoError(t, err)
 	_, err = head.PublishStage(ctx, tables)
 	require.NoError(t, err)
@@ -103,6 +103,55 @@ func TestRelationsStageKeepsExternalImportEndpoint(t *testing.T) {
 	require.Nil(t, current.GetNode(key))
 	require.Equal(t, []*graph.Edge{&edge}, current.GetInEdges(key))
 	require.Equal(t, 1, current.count("external import endpoints"))
+}
+
+func TestRelationsStageGoArgumentSourceReceipt(t *testing.T) {
+	keys := graph.UnresolvedNameCandidateIDsForName("Field", "")
+	for _, tc := range []struct {
+		name, source, origin, extractor string
+		kind                            graph.EdgeKind
+		keep                            bool
+	}{
+		{"selector", keys[1], graph.OriginASTInferred, "go", graph.EdgeArgOf, true},
+		{"bare", keys[0], graph.OriginASTInferred, "go", graph.EdgeArgOf, true},
+		{"foreign receipt", keys[1], graph.OriginASTInferred, "typescript", graph.EdgeArgOf, false},
+		{"no receipt", keys[1], graph.OriginASTInferred, "", graph.EdgeArgOf, false},
+		{"wrong kind", keys[1], graph.OriginASTInferred, "go", graph.EdgeReferences, false},
+		{"wrong origin", keys[1], graph.OriginASTResolved, "go", graph.EdgeArgOf, false},
+		{"malformed", keys[1] + ".Field", graph.OriginASTInferred, "go", graph.EdgeArgOf, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			worker, head, base, declared, raw, file, _ := relationsStageFixture(t, FullProfile)
+			edge := &graph.Edge{From: tc.source, To: declared.ID, Kind: tc.kind, FilePath: file.Path, Line: raw.Line,
+				Origin: tc.origin, Meta: map[string]any{"arg_position": int64(0)}}
+			worker.AddEdge(edge)
+			tables, err := worker.PrepareRelations(ctx, t.TempDir(), base, func(key string) string {
+				if key == file.Path {
+					return tc.extractor
+				}
+				return ""
+			})
+			if !tc.keep {
+				require.ErrorIs(t, err, ErrRelationsSeal)
+				require.ErrorContains(t, err, "dangling relations endpoint")
+				require.Empty(t, tables)
+				saved := stageRead(t, head)
+				w, err := saved.Publication()
+				require.NoError(t, err)
+				require.Equal(t, StageFileGraph, w.Stage)
+				require.Zero(t, saved.EdgeCount())
+				return
+			}
+			require.NoError(t, err)
+			_, err = head.PublishStage(ctx, tables)
+			require.NoError(t, err)
+			saved := stageRead(t, head)
+			require.Nil(t, saved.GetNode(tc.source))
+			require.Equal(t, []*graph.Edge{edge}, saved.GetInEdges(declared.ID))
+			require.Equal(t, 1, saved.count("go dataflow source endpoints"))
+		})
+	}
 }
 
 func TestRelationsStageRefusesDanglingOrProxyEndpoint(t *testing.T) {
@@ -139,7 +188,7 @@ func TestRelationsStageRefusesDanglingOrProxyEndpoint(t *testing.T) {
 				linked.To = declared.ID
 				worker.AddEdge(&linked)
 			}
-			tables, err := worker.PrepareRelations(t.Context(), t.TempDir(), base)
+			tables, err := worker.PrepareRelations(t.Context(), t.TempDir(), base, nil)
 			require.ErrorContains(t, err, tc.message)
 			require.ErrorIs(t, err, ErrRelationsSeal)
 			require.ErrorIs(t, err, errInvalidRecord)
@@ -166,7 +215,7 @@ func TestRelationsStageKeepsProfileOmittedEndpointAccounting(t *testing.T) {
 	worker.AddBatch([]*graph.Node{param}, []*graph.Edge{edge})
 	require.True(t, worker.RemoveEdge(raw.From, raw.To, raw.Kind))
 
-	tables, err := worker.PrepareRelations(ctx, t.TempDir(), base)
+	tables, err := worker.PrepareRelations(ctx, t.TempDir(), base, nil)
 	require.NoError(t, err)
 	_, err = head.PublishStage(ctx, tables)
 	require.NoError(t, err)
@@ -192,7 +241,7 @@ func TestRelationsStageRefusesIncompleteRetainedBase(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, base.paths)
 	base.paths = base.paths[:len(base.paths)-1]
-	tables, err := worker.PrepareRelations(t.Context(), t.TempDir(), base)
+	tables, err := worker.PrepareRelations(t.Context(), t.TempDir(), base, nil)
 	require.ErrorIs(t, err, ErrRelationsSeal)
 	require.ErrorContains(t, err, "retained file-graph rows differ from their witness")
 	require.Empty(t, tables)

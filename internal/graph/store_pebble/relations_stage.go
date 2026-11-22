@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/token"
 	"os"
 	"path/filepath"
 	"slices"
@@ -93,7 +94,9 @@ var ErrRelationsSeal = errors.New("pebble relations stage seal failed")
 // only after all link mutations finish, including replacing/removing raw
 // parse edges as dictated by the linker. It does not run or certify linking.
 // dir is a fresh, owned stage directory. The lease owner cleans it on error.
-func (b *BuildStore) PrepareRelations(ctx context.Context, dir string, base FileGraphBase) (tables StageTables, err error) {
+// extractorOf returns the frozen parse receipt ID for an exact graph file
+// key, or empty for no receipt. It must not read or mutate the store.
+func (b *BuildStore) PrepareRelations(ctx context.Context, dir string, base FileGraphBase, extractorOf func(string) string) (tables StageTables, err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	defer func() {
@@ -108,7 +111,7 @@ func (b *BuildStore) PrepareRelations(ctx context.Context, dir string, base File
 	if base.build != b || !filepath.IsAbs(dir) {
 		return StageTables{}, invalid("relations needs a retained file graph from this build and an absolute stage directory")
 	}
-	external, err := b.checkRelationsEndpoints(ctx)
+	endpoints, err := b.checkRelationsEndpoints(ctx, extractorOf)
 	if err != nil {
 		return StageTables{}, err
 	}
@@ -119,8 +122,13 @@ func (b *BuildStore) PrepareRelations(ctx context.Context, dir string, base File
 	if err := b.writeRows(ctx, &gold, StageRelations); err != nil {
 		return StageTables{}, err
 	}
-	if external != 0 {
-		if err := gold.add(countKey("external import endpoints"), encodeCount(external)); err != nil {
+	if endpoints.externalImports != 0 {
+		if err := gold.add(countKey("external import endpoints"), encodeCount(endpoints.externalImports)); err != nil {
+			return StageTables{}, err
+		}
+	}
+	if endpoints.goArguments != 0 {
+		if err := gold.add(countKey("go dataflow source endpoints"), encodeCount(endpoints.goArguments)); err != nil {
 			return StageTables{}, err
 		}
 	}
@@ -167,12 +175,29 @@ func RebuildExternalImportTarget(specifier string) (string, bool) {
 	return rebuildExternalImportPrefix + specifier, true
 }
 
-func (b *BuildStore) checkRelationsEndpoints(ctx context.Context) (int, error) {
-	external := 0
+type relationsEndpointCounts struct {
+	externalImports, goArguments int
+}
+
+// Ordinary Go argument sources can be unresolved identifiers or selectors.
+// The built-in Go extractor is the only producer of these AST arg_of rows.
+// Match exact native name IDs, not the general unresolved namespace.
+func rebuildGoArgumentSource(e *graph.Edge, extractorOf func(string) string) bool {
+	if extractorOf == nil || e.Kind != graph.EdgeArgOf || e.Origin != graph.OriginASTInferred ||
+		e.FilePath == "" || e.Line <= 0 || extractorOf(e.FilePath) != "go" {
+		return false
+	}
+	name := strings.TrimPrefix(graph.UnresolvedName(e.From), "*.")
+	return token.IsIdentifier(name) && name != "_" &&
+		slices.Contains(graph.UnresolvedNameCandidateIDsForName(name, ""), e.From)
+}
+
+func (b *BuildStore) checkRelationsEndpoints(ctx context.Context, extractorOf func(string) string) (relationsEndpointCounts, error) {
+	var counts relationsEndpointCounts
 	// The same lock covers this private lookup and the final node projection.
 	// A saved logical node may be omitted by the profile; an unknown ID may
 	// not. Native unresolved targets carry no declared node by design.
-	check := func(id string, target bool) error {
+	check := func(id string, e *graph.Edge, target bool) error {
 		if graph.IsProxyID(id) {
 			return invalid("proxy relations endpoint")
 		}
@@ -198,9 +223,13 @@ func (b *BuildStore) checkRelationsEndpoints(ctx context.Context) (int, error) {
 				if !valid || key != id {
 					return invalid("malformed external import endpoint")
 				}
-				external++
+				counts.externalImports++
 				return nil
 			}
+		}
+		if !target && rebuildGoArgumentSource(e, extractorOf) {
+			counts.goArguments++
+			return nil
 		}
 		return fmt.Errorf("%w: dangling relations endpoint %q", errInvalidRecord, id)
 	}
@@ -212,12 +241,12 @@ func (b *BuildStore) checkRelationsEndpoints(ctx context.Context) (int, error) {
 		if !bytes.Equal(r.key, pendingEdgeKey(e)) {
 			return invalid("working edge identity does not match key")
 		}
-		if err := check(e.From, false); err != nil {
+		if err := check(e.From, e, false); err != nil {
 			return err
 		}
-		return check(e.To, true)
+		return check(e.To, e, true)
 	})
-	return external, err
+	return counts, err
 }
 
 // fileGraphCursor streams non-overlapping SSTs in their writer order, with

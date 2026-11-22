@@ -55,7 +55,7 @@ func TestHeadReconcilePublicationAfterMissedRecord(t *testing.T) {
 		pinned := stageRead(t, h)
 
 		worker.ReindexEdge(linked, raw.To)
-		relations, err := worker.PrepareRelations(ctx, t.TempDir(), base)
+		relations, err := worker.PrepareRelations(ctx, t.TempDir(), base, nil)
 		require.NoError(t, err)
 		require.NotEmpty(t, relations.Files)
 		digest, err := h.PublishStage(ctx, relations)

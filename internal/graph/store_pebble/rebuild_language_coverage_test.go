@@ -96,7 +96,7 @@ func TestRebuildLanguageCoverageStages(t *testing.T) {
 			}
 			assertFileGraph()
 
-			relations, err := worker.PrepareRelations(ctx, t.TempDir(), base)
+			relations, err := worker.PrepareRelations(ctx, t.TempDir(), base, nil)
 			require.NoError(t, err)
 			relations.Witness.Relations = &RelationCoverage{DeferredLanguages: tc.deferred}
 			bad = relations
