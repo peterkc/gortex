@@ -10,7 +10,97 @@ import (
 	"path/filepath"
 
 	"github.com/zeebo/blake3"
+	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
+
+const rebuildCheckpointName = "checkpoint"
+
+// checkpointRebuildHead uses the owner's pinned head directory and exact head
+// identity. The owner provides an existing, durable lease directory and holds
+// it exclusively until the result is accepted or discarded. The owner handles
+// cleanup of incomplete candidates and only registers a successful result.
+func checkpointRebuildHead(ctx context.Context, head *store_pebble.Head, headDir, leaseDir, incarnation string, profile store_pebble.Profile) (store_pebble.LocalPublicationRecord, error) {
+	var zero store_pebble.LocalPublicationRecord
+	if err := ctx.Err(); err != nil {
+		return zero, err
+	}
+	if err := store_pebble.ValidateIncarnation(incarnation); err != nil {
+		return zero, err
+	}
+	dest, err := freshRebuildCheckpointPath(headDir, leaseDir)
+	if err != nil {
+		return zero, err
+	}
+	if err := head.Checkpoint(dest); err != nil {
+		return zero, fmt.Errorf("checkpoint rebuild head: %w", err)
+	}
+	// Only the destination can say which witness Pebble captured.
+	checkpoint, err := store_pebble.OpenHead(dest, incarnation, profile)
+	if err != nil {
+		return zero, fmt.Errorf("open rebuild checkpoint: %w", err)
+	}
+	w, record, err := checkpoint.ReconcilePublication(nil)
+	if err := errors.Join(err, checkpoint.Close()); err != nil {
+		return zero, fmt.Errorf("read rebuild checkpoint witness: %w", err)
+	}
+	digest := rebuildDigest(w.FrozenInputs)
+	if err := copyRebuildInputSidecar(ctx, retainedRebuildInputPath(headDir, digest), retainedRebuildInputPath(dest, digest), digest); err != nil {
+		return zero, fmt.Errorf("retain rebuild checkpoint sidecar: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return zero, err
+	}
+	return record, nil
+}
+
+func freshRebuildCheckpointPath(headDir, leaseDir string) (string, error) {
+	if !filepath.IsAbs(headDir) || filepath.Clean(headDir) != headDir ||
+		!filepath.IsAbs(leaseDir) || filepath.Clean(leaseDir) != leaseDir {
+		return "", fmt.Errorf("checkpoint requires clean absolute owner paths: %w", os.ErrInvalid)
+	}
+	lease, err := os.Lstat(leaseDir)
+	if err != nil {
+		return "", fmt.Errorf("inspect checkpoint lease: %w", err)
+	}
+	if !lease.IsDir() || filepath.Dir(leaseDir) == leaseDir {
+		return "", fmt.Errorf("checkpoint lease must be a private directory: %w", os.ErrInvalid)
+	}
+	head, err := os.Stat(headDir)
+	if err != nil {
+		return "", fmt.Errorf("inspect checkpoint source directory: %w", err)
+	}
+	if !head.IsDir() {
+		return "", fmt.Errorf("checkpoint source is not a directory: %w", os.ErrInvalid)
+	}
+	// Check the physical ancestors, not a string prefix which can miss aliases.
+	realLease, err := filepath.EvalSymlinks(leaseDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve checkpoint lease: %w", err)
+	}
+	for dir := realLease; ; dir = filepath.Dir(dir) {
+		info, err := os.Stat(dir)
+		if err != nil {
+			return "", fmt.Errorf("inspect checkpoint lease ancestor: %w", err)
+		}
+		if os.SameFile(info, head) {
+			return "", fmt.Errorf("checkpoint lease is inside the source head: %w", os.ErrInvalid)
+		}
+		if dir == filepath.Dir(dir) {
+			break
+		}
+	}
+	dest := filepath.Join(leaseDir, rebuildCheckpointName)
+	// Lstat also refuses dangling links, which Pebble's Stat misses. Its
+	// error cleanup is safe only while the caller exclusively holds the name.
+	_, err = os.Lstat(dest)
+	if err == nil {
+		return "", fmt.Errorf("checkpoint destination %q: %w", dest, os.ErrExist)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("inspect checkpoint destination: %w", err)
+	}
+	return dest, nil
+}
 
 // retainRebuildInputSidecar runs under the head owner's directory pin, before
 // publishing a witness with this digest. The lease input has already passed
