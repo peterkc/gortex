@@ -30,26 +30,41 @@ type rebuildCheckoutInputs struct {
 	digest    store_pebble.HeadDigest
 }
 
-// freezeRebuildCheckoutInputs gets each positive identity at the admission
-// boundary, before its parent listing closes. A nil input means denied. The
-// callback owns effective admission and checked content or link-text identity;
-// a listed name alone cannot authorize bytes. Discard emitted rows on error.
+type rebuildCheckoutLeaf struct {
+	input    *rebuildInput
+	parse    bool
+	typeOnly bool // exact regular-name evidence; no identity for reading bytes
+}
+
+type rebuildCheckoutFreeze func(string, fs.FileMode, rebuildGitMember, *int64, func(rebuildSidecarRow) error) (rebuildCheckoutLeaf, error)
+
+// freezeRebuildCheckoutInputs separates checked names from content identities
+// and parse inputs before the parent listing closes. A zero leaf means denied.
+// The callback can charge and emit classification facts in the owner's lease.
+// Discard all outputs and emitted rows on error.
 func freezeRebuildCheckoutInputs(ctx context.Context, root *os.Root, flat *excludes.Matcher,
 	git *rebuildGitInventory, rawRemaining *int64,
-	freeze func(string, fs.FileMode, rebuildGitMember) (*rebuildInput, bool, error), emit func(rebuildSidecarRow) error,
+	freeze rebuildCheckoutFreeze, emit func(rebuildSidecarRow) error,
 ) (rebuildCheckoutInputs, error) {
 	if freeze == nil {
 		return rebuildCheckoutInputs{}, fmt.Errorf("%w: missing leaf admission", errRebuildResolverNamespace)
 	}
 	out := rebuildCheckoutInputs{admitted: make(map[string]*rebuildInput)}
 	ns, err := captureRebuildCheckoutNamespace(ctx, root, flat, git, rawRemaining, func(key string, mode fs.FileMode, member rebuildGitMember) (bool, error) {
-		input, parse, err := freeze(key, mode, member)
+		leaf, err := freeze(key, mode, member, rawRemaining, emit)
 		if err != nil {
 			return false, err
 		}
-		if input == nil && !parse {
+		if leaf.typeOnly {
+			if !mode.IsRegular() || leaf.input != nil || leaf.parse {
+				return false, fmt.Errorf("%w: contradictory regular type evidence for %q", ErrBuildInputChanged, key)
+			}
+			return true, nil
+		}
+		if leaf.input == nil && !leaf.parse {
 			return false, nil
 		}
+		input := leaf.input
 		want := merkle.RegularFile
 		if mode&fs.ModeSymlink != 0 {
 			want = merkle.Symlink
@@ -60,7 +75,7 @@ func freezeRebuildCheckoutInputs(ctx context.Context, root *os.Root, flat *exclu
 		}
 		value := *input
 		out.admitted[key] = &value
-		if parse {
+		if leaf.parse {
 			out.files = append(out.files, value)
 		}
 		return true, nil

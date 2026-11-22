@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -37,7 +36,7 @@ func withRebuildBuildInputs(ctx context.Context, leases string, src *source.File
 // and resolver facts before handing anything to reuse or worker dispatch.
 func withRebuildCheckoutBuildInputs(ctx context.Context, leases string, src *source.FilesystemSource,
 	req rebuildBuildRequest, flat *excludes.Matcher, gitCheckout bool,
-	freeze func(string, fs.FileMode, rebuildGitMember) (*rebuildInput, bool, error),
+	freeze rebuildCheckoutFreeze,
 	capture func(rebuildCheckoutInputs, *int64, func(rebuildSidecarRow) error) (string, error),
 	consume func(string, rebuildBuildRequest, []rebuildInput) error,
 ) error {

@@ -189,14 +189,14 @@ func TestRebuildCheckoutManifestCapture(t *testing.T) {
 			digest, err := writeRebuildInputSidecar(ctx, lease, func(emit func(rebuildSidecarRow) error) error {
 				nsBudget := int64(rebuildCppRawLimit)
 				epoch, err := freezeRebuildCheckoutInputs(ctx, src.FrozenRoot(), nil, nil, &nsBudget,
-					func(key string, _ fs.FileMode, _ rebuildGitMember) (*rebuildInput, bool, error) {
+					func(key string, _ fs.FileMode, _ rebuildGitMember, _ *int64, _ func(rebuildSidecarRow) error) (rebuildCheckoutLeaf, error) {
 						lang := map[string]string{"a.go": "go", "main.ts": "typescript"}[key]
 						parse := lang != ""
 						if !parse {
 							lang = "manifest"
 						}
 						in, _, err := readRebuildInput(ctx, src, key, lang, 1024)
-						return &in, parse, err
+						return rebuildCheckoutLeaf{input: &in, parse: parse}, err
 					}, emit)
 				if err != nil {
 					return err

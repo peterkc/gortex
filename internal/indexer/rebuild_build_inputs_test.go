@@ -181,9 +181,9 @@ func TestRebuildCheckoutGitRequiredRefusesBeforeConsumer(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "source.go"), nil, 0o600))
 	req := rebuildBuildRequest{Root: dir, Witness: store_pebble.Witness{Recipe: store_pebble.HeadDigest{1}}}
 	err := withRebuildCheckoutBuildInputs(t.Context(), leases, src, req, nil, true,
-		func(string, fs.FileMode, rebuildGitMember) (*rebuildInput, bool, error) {
+		func(string, fs.FileMode, rebuildGitMember, *int64, func(rebuildSidecarRow) error) (rebuildCheckoutLeaf, error) {
 			t.Fatal("Git refusal must not fall back to leaf capture")
-			return nil, false, nil
+			return rebuildCheckoutLeaf{}, nil
 		}, func(rebuildCheckoutInputs, *int64, func(rebuildSidecarRow) error) (string, error) {
 			t.Fatal("Git refusal reached resolver capture")
 			return "", nil

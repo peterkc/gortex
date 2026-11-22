@@ -7,12 +7,18 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/excludes"
+	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer/merkle"
 	"github.com/zzet/gortex/internal/indexer/source"
+	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/parser/languages"
+	"go.uber.org/zap"
 )
 
 func TestRebuildCheckoutNamespaceCapture(t *testing.T) {
@@ -102,7 +108,7 @@ func TestFreezeRebuildCheckoutInputs(t *testing.T) {
 			raw := int64(rebuildCppRawLimit)
 			var keys []string
 			out, err := freezeRebuildCheckoutInputs(ctx, src.FrozenRoot(), excludes.New([]string{"ignored/"}), nil, &raw,
-				func(key string, _ fs.FileMode, _ rebuildGitMember) (*rebuildInput, bool, error) {
+				func(key string, _ fs.FileMode, _ rebuildGitMember, _ *int64, _ func(rebuildSidecarRow) error) (rebuildCheckoutLeaf, error) {
 					keys = append(keys, key)
 					lang, parse := "typescript", key != "go.mod"
 					if !parse {
@@ -112,7 +118,7 @@ func TestFreezeRebuildCheckoutInputs(t *testing.T) {
 					if bad && key == "alias.ts" {
 						in.Kind = merkle.RegularFile
 					}
-					return &in, parse, err
+					return rebuildCheckoutLeaf{input: &in, parse: parse}, err
 				}, func(rebuildSidecarRow) error {
 					require.False(t, bad, "no rows from a failed root classification")
 					return nil
@@ -208,4 +214,55 @@ func TestRebuildCheckoutNestedMarker(t *testing.T) {
 			require.ErrorIs(t, err, errRebuildResolverInputDenied)
 		})
 	}
+}
+
+func TestFreezeRebuildCheckoutRegularLeaves(t *testing.T) {
+	ctx := t.Context()
+	dir, src := rebuildInputFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte("package demo\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "large.go"), []byte(strings.Repeat("x", 129)), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "plain.b2raw"), []byte("not a source file\n"), 0o600))
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "denied"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "denied", "hidden.go"), nil, 0o600))
+	cfg := config.Default().Index
+	cfg.MaxFileSize = 128
+	reg := parser.NewRegistry()
+	reg.Register(languages.NewGoExtractor())
+	idx := New(graph.New(), reg, cfg, zap.NewNop())
+	t.Cleanup(idx.Close)
+	gate := idx.newContentAdmissionGate()
+	raw := int64(rebuildCppRawLimit)
+	var classified []string
+	epoch, err := freezeRebuildCheckoutInputs(ctx, src.FrozenRoot(), excludes.New([]string{"denied/"}), nil, &raw,
+		func(key string, mode fs.FileMode, member rebuildGitMember, raw *int64, emit func(rebuildSidecarRow) error) (rebuildCheckoutLeaf, error) {
+			return idx.freezeRebuildCheckoutRegularLeaf(ctx, src.FrozenRoot(), key, mode, member, gate, 128, raw, emit)
+		}, func(row rebuildSidecarRow) error {
+			if row.Kind == rebuildClassificationRow {
+				classified = append(classified, string(row.Path))
+			}
+			return nil
+		})
+	require.NoError(t, err)
+	require.Equal(t, []string{"large.go", "plain.b2raw"}, classified)
+	require.Len(t, epoch.files, 1)
+	require.Len(t, epoch.admitted, 1)
+	require.Equal(t, "main.go", epoch.files[0].Path)
+	require.Equal(t, epoch.files[0], *epoch.admitted["main.go"])
+	for _, key := range classified {
+		present, err := epoch.namespace.probeFile(key)
+		require.NoError(t, err)
+		require.True(t, present, "type-only evidence for %q", key)
+		require.NotContains(t, epoch.admitted, key)
+	}
+	_, err = epoch.namespace.lookup("denied/hidden.go")
+	require.ErrorIs(t, err, errRebuildResolverInputDenied)
+	bad, err := freezeRebuildCheckoutInputs(ctx, src.FrozenRoot(), excludes.New([]string{"denied/"}), nil, &raw,
+		func(string, fs.FileMode, rebuildGitMember, *int64, func(rebuildSidecarRow) error) (rebuildCheckoutLeaf, error) {
+			return rebuildCheckoutLeaf{typeOnly: true, parse: true}, nil
+		}, func(rebuildSidecarRow) error {
+			t.Fatal("emitted a row after contradictory type-only proof")
+			return nil
+		})
+	require.ErrorIs(t, err, ErrBuildInputChanged)
+	require.Empty(t, bad)
 }

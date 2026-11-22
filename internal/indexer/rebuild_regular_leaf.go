@@ -88,6 +88,25 @@ func (idx *Indexer) freezeRebuildRegularLeaf(ctx context.Context, root *os.Root,
 	return &rebuildInput{Path: key, Language: lang, Kind: merkle.RegularFile, Size: size, Content: blake3.Sum256(data)}, nil
 }
 
+// freezeRebuildCheckoutRegularLeaf is the owner's regular-file route. A size
+// or content skip can prove a file exists without making its bytes available
+// to the parser or a resolver config reader.
+func (idx *Indexer) freezeRebuildCheckoutRegularLeaf(ctx context.Context, root *os.Root, key string, mode fs.FileMode,
+	member rebuildGitMember, content *contentAdmissionGate, fileBytes int64, raw *int64, emit func(rebuildSidecarRow) error,
+) (rebuildCheckoutLeaf, error) {
+	if !mode.IsRegular() || (member != rebuildGitTracked && member != rebuildGitUntracked) {
+		return rebuildCheckoutLeaf{}, nil
+	}
+	input, err := idx.freezeRebuildRegularLeaf(ctx, root, key, mode, member, content, fileBytes, raw, emit)
+	if err != nil {
+		return rebuildCheckoutLeaf{}, err
+	}
+	if input == nil {
+		return rebuildCheckoutLeaf{typeOnly: true}, nil
+	}
+	return rebuildCheckoutLeaf{input: input, parse: true}, nil
+}
+
 func readRebuildClassifiedBody(ctx context.Context, obs source.FrozenRootPath, limit int64, prefix []byte) ([]byte, error) {
 	data, err := obs.Read(ctx, limit)
 	if err != nil {

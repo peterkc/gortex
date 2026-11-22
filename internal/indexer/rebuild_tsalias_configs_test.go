@@ -144,18 +144,18 @@ func TestRebuildTSAliasConfigsPostParseProbeReplay(t *testing.T) {
 	mod := ids["go.mod"]
 	input, goInput := ids[caller], ids["a.go"]
 	input.Language, goInput.Language = "typescript", "go"
-	freeze := func(key string, _ fs.FileMode, _ rebuildGitMember) (*rebuildInput, bool, error) {
+	freeze := func(key string, _ fs.FileMode, _ rebuildGitMember, _ *int64, _ func(rebuildSidecarRow) error) (rebuildCheckoutLeaf, error) {
 		switch key {
 		case caller:
-			return &input, true, nil
+			return rebuildCheckoutLeaf{input: &input, parse: true}, nil
 		case "a.go":
-			return &goInput, true, nil
+			return rebuildCheckoutLeaf{input: &goInput, parse: true}, nil
 		}
 		id, ok := ids[key]
 		if !ok {
-			return nil, false, nil
+			return rebuildCheckoutLeaf{}, nil
 		}
-		return &id, false, nil
+		return rebuildCheckoutLeaf{input: &id}, nil
 	}
 	capture := func(epoch rebuildCheckoutInputs, raw *int64, emit func(rebuildSidecarRow) error) (string, error) {
 		denied := input
