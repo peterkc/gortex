@@ -179,10 +179,10 @@ func linkPendingTarget(id string) bool {
 // legacy mutation adapter this must not split the page at 256 rows.
 // On error the caller must abandon the private build.
 func (b *BuildStore) ApplyLinkReindexes(ctx context.Context, moves []graph.EdgeReindex) error {
-	return b.applyRebuildLinkReindexes(ctx, moves, false)
+	return b.applyRebuildLinkReindexes(ctx, moves, "")
 }
 
-func (b *BuildStore) applyRebuildLinkReindexes(ctx context.Context, moves []graph.EdgeReindex, liftArgOf bool) error {
+func (b *BuildStore) applyRebuildLinkReindexes(ctx context.Context, moves []graph.EdgeReindex, refreshKind graph.EdgeKind) error {
 	err := b.withWrites(func() error {
 		if len(moves) > rebuildLinkPendingRows {
 			return invalid("link edge move page exceeds row bound")
@@ -192,19 +192,34 @@ func (b *BuildStore) applyRebuildLinkReindexes(ctx context.Context, moves []grap
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if move.Edge == nil || move.OldTo == "" || move.Edge.To == "" || move.RefreshIdentity != liftArgOf {
+			if move.Edge == nil || move.OldTo == "" || move.Edge.To == "" || move.RefreshIdentity != (refreshKind != "") {
 				return invalid("link edge move must replace an exact target or kind")
 			}
-			if liftArgOf {
-				if move.Edge.Kind != graph.EdgeArgOf || move.OldKind != "" || move.OldFrom != move.Edge.From ||
-					move.OldFilePath != move.Edge.FilePath || move.OldLine != move.Edge.Line || move.Edge.To == move.OldTo {
-					return invalid("argument lift must refresh only the target")
+			if move.RefreshIdentity {
+				if move.Edge.Kind != refreshKind || move.OldKind != "" || move.OldFrom == "" ||
+					move.OldFilePath != move.Edge.FilePath || move.OldLine != move.Edge.Line {
+					return invalid("dataflow lift must keep kind and recording site")
+				}
+				switch refreshKind {
+				case graph.EdgeArgOf:
+					if move.OldFrom != move.Edge.From || move.Edge.To == move.OldTo {
+						return invalid("argument lift must refresh only the target")
+					}
+				case graph.EdgeReturnsTo:
+					if move.Edge.From == "" || move.OldFrom == move.Edge.From || move.Edge.To != move.OldTo {
+						return invalid("return lift must refresh only the source")
+					}
+				default:
+					return invalid("unexpected dataflow lift kind")
 				}
 			} else if move.OldFrom != "" {
 				return invalid("link edge move must replace an exact target or kind")
 			}
 			old := *move.Edge
 			old.To = move.OldTo
+			if move.RefreshIdentity {
+				old.From = move.OldFrom
+			}
 			if move.OldKind != "" {
 				old.Kind = move.OldKind
 			}

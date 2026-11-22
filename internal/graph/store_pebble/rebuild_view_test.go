@@ -450,7 +450,7 @@ func TestApplyLinkArgumentRefresh(t *testing.T) {
 	move := old
 	move.To = stationary.To
 	if err := b.applyRebuildLinkReindexes(ctx, []graph.EdgeReindex{{Edge: &move, OldTo: old.To,
-		RefreshIdentity: true, OldFrom: old.From, OldFilePath: old.FilePath, OldLine: old.Line}}, true); err != nil {
+		RefreshIdentity: true, OldFrom: old.From, OldFilePath: old.FilePath, OldLine: old.Line}}, graph.EdgeArgOf); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := b.pendingEdge(pendingEdgeKey(&old)); err != nil || got != nil {

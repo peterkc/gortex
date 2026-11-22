@@ -319,7 +319,11 @@ func buildRebuildStages(
 	}
 	// Deferred file imports stay off. Like native cold materialization,
 	// this pass is independent of whether main had a pending frontier.
-	if err := runRebuildArgOf(ctx, private, idx.rebuildArgReceipts(ctx, job, store, counts.census)); err != nil {
+	receipts := idx.rebuildDataflowReceipts(ctx, job, store, counts.census)
+	if err := runRebuildArgOf(ctx, private, receipts); err != nil {
+		return err
+	}
+	if err := runRebuildReturnsTo(ctx, private, receipts); err != nil {
 		return err
 	}
 	// The supported tails only changed private scratch. Relation projection

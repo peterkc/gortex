@@ -99,7 +99,7 @@ func (b *BuildStore) RebuildGoBuiltins(ctx context.Context, reconcileSources boo
 	if reconcileSources {
 		afterApply = func(plan []byte) error { return b.reconcileBuiltinSources(ctx, spillBytes, plan) }
 	}
-	_, err = b.rebuildAttribution(ctx, planTarget, materialize, afterApply, false)
+	_, err = b.rebuildAttribution(ctx, planTarget, materialize, afterApply, "")
 	return err
 }
 

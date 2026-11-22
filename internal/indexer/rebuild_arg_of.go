@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"iter"
 
+	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
 
@@ -12,9 +13,16 @@ func runRebuildArgOf(ctx context.Context, build *store_pebble.BuildStore, receip
 	return build.RebuildArgOf(ctx, receipts, argOfRewriteTarget, intFromMeta)
 }
 
+func runRebuildReturnsTo(ctx context.Context, build *store_pebble.BuildStore, receipts iter.Seq2[store_pebble.ParseFacts, error]) error {
+	return build.RebuildReturnsTo(ctx, receipts, func(e *graph.Edge) (string, int, string, bool) {
+		caller, line, text, ok := returnsToRewriteTarget(e)
+		return caller, line, recordedCallTargetName(text), ok
+	}, resolvedCallTargetName)
+}
+
 // Read the same admitted entries that assembled the private graph. Nothing
 // here opens checkout files or extracts a missing receipt again.
-func (idx *Indexer) rebuildArgReceipts(ctx context.Context, job rebuildFileStages, store rebuildParseStore,
+func (idx *Indexer) rebuildDataflowReceipts(ctx context.Context, job rebuildFileStages, store rebuildParseStore,
 	census *rebuildExtractorCensus,
 ) iter.Seq2[store_pebble.ParseFacts, error] {
 	return func(yield func(store_pebble.ParseFacts, error) bool) {
@@ -26,12 +34,12 @@ func (idx *Indexer) rebuildArgReceipts(ctx context.Context, job rebuildFileStage
 			recipe := idx.rebuildExtractorRecipe(job.recipes[input.Language], input)
 			raw, err := store.read(input.parseKey(recipe))
 			if err != nil {
-				yield(store_pebble.ParseFacts{}, fmt.Errorf("%w: reload %q for argument lift: %w", errParseEntryCorrupt, input.Path, err))
+				yield(store_pebble.ParseFacts{}, fmt.Errorf("%w: reload %q for dataflow lift: %w", errParseEntryCorrupt, input.Path, err))
 				return
 			}
 			facts, err := store_pebble.DecodeParseFacts(raw)
 			if err != nil {
-				yield(store_pebble.ParseFacts{}, fmt.Errorf("%w: decode %q for argument lift: %w", errParseEntryCorrupt, input.Path, err))
+				yield(store_pebble.ParseFacts{}, fmt.Errorf("%w: decode %q for dataflow lift: %w", errParseEntryCorrupt, input.Path, err))
 				return
 			}
 			if facts.File.FilePath != input.Path || facts.EffectiveLanguage != census.byPath[input.Path] {

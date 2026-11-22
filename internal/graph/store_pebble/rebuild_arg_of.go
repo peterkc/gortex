@@ -13,10 +13,10 @@ import (
 
 // ErrRebuildUnknownProvenance refuses a D72 lift when its input cannot be
 // proved independent of deferred or cross-recording-path receipt rows.
-var ErrRebuildUnknownProvenance = errors.New("rebuild argument lift: unknown provenance")
+var ErrRebuildUnknownProvenance = errors.New("rebuild dataflow lift: unknown provenance")
 
-// RebuildUnknownProvenanceError counts affected argument rows, not possible
-// producers or parameter contenders. First names the lowest affected key.
+// RebuildUnknownProvenanceError counts affected dataflow rows, not possible
+// producers or contenders. First names the lowest affected key.
 type RebuildUnknownProvenanceError struct {
 	Count uint64
 	First graph.EdgeIdentity
@@ -218,6 +218,6 @@ func (b *BuildStore) RebuildArgOf(ctx context.Context, receipts iter.Seq2[ParseF
 			return &refused
 		}
 		return nil
-	}, nil, true)
+	}, nil, graph.EdgeArgOf)
 	return err
 }
