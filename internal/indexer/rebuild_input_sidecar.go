@@ -33,6 +33,7 @@ const (
 	rebuildGoManifestFact
 	rebuildTSAliasConfigFact
 	rebuildNpmManifestRow
+	rebuildClassificationRow
 )
 
 var errRebuildInputSidecar = errors.New("invalid frozen build input sidecar")
@@ -48,6 +49,8 @@ type rebuildSidecarRow struct {
 	Dirs    [][]byte                      `json:"dirs,omitempty"`
 	Config  *rebuildResolverConfigPayload `json:"config,omitempty"`
 	NPM     *rebuildNpmManifestPayload    `json:"npm,omitempty"`
+
+	Classification *rebuildClassificationFact `json:"classification,omitempty"`
 }
 
 func rebuildSidecarCppRow(f rebuildCppFact) rebuildSidecarRow {
@@ -59,6 +62,12 @@ func rebuildSidecarCppRow(f rebuildCppFact) rebuildSidecarRow {
 }
 
 func (r rebuildSidecarRow) check() error {
+	if r.Kind == rebuildClassificationRow {
+		return r.checkClassification()
+	}
+	if r.Classification != nil {
+		return fmt.Errorf("%w: unexpected classification payload", errRebuildInputSidecar)
+	}
 	if r.Kind == rebuildNpmManifestRow {
 		return r.checkNpmManifest()
 	}
@@ -207,6 +216,7 @@ func visitRebuildInputSidecar(ctx context.Context, lease string, expected rebuil
 	if err != nil || string(magic) != rebuildInputSidecarMagic {
 		return fmt.Errorf("%w: sidecar format", errRebuildInputSidecar)
 	}
+	prefixLeft := int64(rebuildCppRawLimit)
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -225,16 +235,27 @@ func visitRebuildInputSidecar(ctx context.Context, lease string, expected rebuil
 		if err := row.check(); err != nil {
 			return err
 		}
-		if row.isResolverConfig() || row.Kind == rebuildNpmManifestRow {
+		if row.isResolverConfig() || row.Kind == rebuildNpmManifestRow || row.Kind == rebuildClassificationRow {
 			// Refuse ambiguous fields (including duplicate JSON keys and null
 			// payload members). Only the new row kinds require canonical bytes.
 			encoded, err := json.Marshal(row)
 			if err != nil || !bytes.Equal(encoded, line[:len(line)-1]) {
 				name := "resolver config"
-				if row.Kind == rebuildNpmManifestRow {
+				switch row.Kind {
+				case rebuildNpmManifestRow:
 					name = "npm manifest"
+				case rebuildClassificationRow:
+					name = "classification"
 				}
 				return fmt.Errorf("%w: noncanonical %s row", errRebuildInputSidecar, name)
+			}
+		}
+		if fact := row.Classification; fact != nil {
+			// Other raw-input charges still belong to capture. Check the
+			// portion replay can recover from the normalized payloads.
+			prefixLeft -= fact.PrefixBytes
+			if prefixLeft < 0 {
+				return fmt.Errorf("%w: classification prefix replay cap: %w", errRebuildInputSidecar, errRebuildCppCaptureLimit)
 			}
 		}
 		if err := visit(row); err != nil {

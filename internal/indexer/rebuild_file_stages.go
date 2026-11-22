@@ -25,6 +25,8 @@ type rebuildFileStages struct {
 	recipes     map[string]rebuildDigest
 	bounds      rebuildTransformBounds
 	witness     store_pebble.Witness
+
+	classifications map[string]rebuildClassificationFact // from the verified sidecar only
 }
 
 type rebuildParsedCounts struct {
@@ -86,6 +88,14 @@ func (idx *Indexer) buildRebuildFileStages(
 	// Order is part of shared-node behavior. The native first-file-wins
 	// rule uses the exact path bytes, not the walk or worker completion order.
 	slices.SortFunc(job.inputs, func(a, b rebuildInput) int { return strings.Compare(a.Path, b.Path) })
+	for key, fact := range job.classifications {
+		if err := ctx.Err(); err != nil {
+			return counts, err
+		}
+		if err := idx.checkRebuildClassification(key, fact); err != nil {
+			return counts, err
+		}
+	}
 	files := make([]store_pebble.ManifestFile, 0, len(job.inputs))
 	for _, input := range job.inputs {
 		rel := input.Path
@@ -93,6 +103,9 @@ func (idx *Indexer) buildRebuildFileStages(
 		if rel == "." || path.Clean(rel) != rel || !filepath.IsLocal(filepath.FromSlash(rel)) ||
 			filepath.ToSlash(rel) != rel || strings.IndexByte(rel, 0) >= 0 {
 			return counts, fmt.Errorf("%w: invalid admitted path %q", errRebuildCallerAttribution, rel)
+		}
+		if fact, ok := job.classifications[rel]; ok && !fact.matchesParseInput(input) {
+			return counts, fmt.Errorf("%w: classification contradicts admitted parse input %q", errRebuildInputSidecar, rel)
 		}
 		base, ok := job.recipes[input.Language]
 		if !ok || base == (rebuildDigest{}) {
@@ -147,6 +160,18 @@ func (idx *Indexer) buildRebuildFileStages(
 	if total != census.admitted || uint64(len(census.byPath)) != census.admitted || census.admitted != uint64(len(job.inputs)) {
 		return counts, fmt.Errorf("%w: %d files and %d receipts for %d admitted inputs (manifest %d)",
 			errRebuildCallerAttribution, len(census.byPath), total, len(job.inputs), census.admitted)
+	}
+	// Native emits size skips after parsing. Write just their nodes; a
+	// skip has no parse receipt, no raw edges and no manifest parse leaf.
+	for key, fact := range job.classifications {
+		if err := ctx.Err(); err != nil {
+			return counts, err
+		}
+		if fact.sizeSkipped() {
+			n := sizeSkipNode(skippedFile{relPath: key, lang: fact.Language, size: fact.Size}, fact.MaxFileSize)
+			idx.applyRepoPrefix([]*graph.Node{n}, nil)
+			private.AddNode(n)
+		}
 	}
 	graphDir := filepath.Join(job.workDir, store_pebble.StageFileGraph.String())
 	if err := os.Mkdir(graphDir, 0o700); err != nil {

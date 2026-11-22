@@ -5,6 +5,7 @@ package source
 import (
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -159,6 +160,139 @@ func TestFrozenRootPathReadRelocated(t *testing.T) {
 				t.Fatalf("read directory = %v, %v", names, err)
 			}
 		})
+	}
+}
+
+func TestFrozenRootPathReadPrefix(t *testing.T) {
+	prefix := "#!/bin/sh\n" + strings.Repeat("x", 502)
+	dir := t.TempDir()
+	regularWrite(t, dir, "large", prefix+strings.Repeat("y", 1024))
+	regularWrite(t, dir, "short", "#!")
+	regularWrite(t, dir, "empty", "")
+	root := testFrozenRoot(t, dir)
+	ctx := t.Context()
+
+	for _, tc := range []struct {
+		name  string
+		limit int64
+		want  string
+	}{
+		{"large", 4, "#!/b"},
+		{"short", 512, "#!"},
+		{"empty", 512, ""},
+	} {
+		obs, err := ObserveFrozenLiteralRootPath(ctx, root, tc.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := obs.ReadPrefix(ctx, tc.limit)
+		if err != nil || string(got) != tc.want {
+			t.Fatalf("prefix for %s (limit %d) = %q, %v; want %q", tc.name, tc.limit, got, err, tc.want)
+		}
+	}
+
+	obs, err := ObserveFrozenLiteralRootPath(ctx, root, "large")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := obs.Read(ctx, 512); got != nil || !errors.Is(err, ErrRegularFileTooLarge) {
+		t.Fatalf("ordinary full read of oversized file = %q, %v", got, err)
+	}
+
+	// A duplicate shares the offset even after ReadPrefix closes its fd.
+	// Returning 512 bytes after reading the body would still fail this check.
+	var offsetFD int
+	got, err := obs.readPrefixWithOpen(ctx, 512, func(root *os.Root, name string) (*os.File, error) {
+		f, err := openRootRegularFile(root, name)
+		if err != nil {
+			return nil, err
+		}
+		fd, err := unix.Dup(int(f.Fd()))
+		if err != nil {
+			_ = f.Close()
+			t.Fatal(err)
+		}
+		unix.CloseOnExec(fd)
+		t.Cleanup(func() { _ = unix.Close(fd) })
+		offsetFD = fd
+		return f, nil
+	})
+	if err != nil || string(got) != prefix {
+		t.Fatalf("descriptor prefix = %q, %v", got, err)
+	}
+	if offset, err := unix.Seek(offsetFD, 0, io.SeekCurrent); err != nil || offset != 512 {
+		t.Fatalf("descriptor consumed %d bytes, %v; want 512", offset, err)
+	}
+}
+
+func TestFrozenRootPathReadPrefixRefusals(t *testing.T) {
+	dir := t.TempDir()
+	regularWrite(t, dir, "target", "not for a followed observation")
+	testFrozenSymlink(t, dir, "link", "target")
+	root := testFrozenRoot(t, dir)
+	ctx := t.Context()
+	link, err := ResolveFrozenRootPath(ctx, root, "link")
+	if err != nil || link.Path() != "target" {
+		t.Fatalf("linked observation = %q, %v", link.Path(), err)
+	}
+	directory, err := ObserveFrozenLiteralRootPath(ctx, root, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	regular, err := ObserveFrozenLiteralRootPath(ctx, root, "target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		obs   FrozenRootPath
+		limit int64
+		want  error
+	}{
+		{"followed link", link, 512, ErrFrozenRootPath},
+		{"directory", directory, 512, ErrNotRegularFile},
+		{"missing observation", FrozenRootPath{}, 512, ErrFrozenRootPath},
+		{"negative limit", regular, -1, ErrFrozenRootPath},
+		{"exceeded limit", regular, 513, ErrFrozenRootPath},
+	} {
+		got, err := tc.obs.readPrefixWithOpen(ctx, tc.limit, func(*os.Root, string) (*os.File, error) {
+			t.Fatalf("opened %s before refusing it", tc.name)
+			return nil, nil
+		})
+		if got != nil || !errors.Is(err, tc.want) {
+			t.Fatalf("prefix for %s = %q, %v; want %v", tc.name, got, err, tc.want)
+		}
+	}
+}
+
+func TestFrozenRootPathReadPrefixDrift(t *testing.T) {
+	dir := t.TempDir()
+	regularWrite(t, dir, "script", "#!/bin/sh\n")
+	root := testFrozenRoot(t, dir)
+	ctx := t.Context()
+	obs, err := ObserveFrozenLiteralRootPath(ctx, root, "script")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := obs.readPrefixWithOpen(ctx, 512, func(root *os.Root, name string) (*os.File, error) {
+		f, err := openRootRegularFile(root, name)
+		if err != nil {
+			return nil, err
+		}
+		// Keep the opened inode and metadata unchanged, but make the
+		// current path reach it through a symlink.
+		if err := root.Rename("script", "saved"); err != nil {
+			_ = f.Close()
+			t.Fatal(err)
+		}
+		if err := os.Symlink("saved", filepath.Join(dir, "script")); err != nil {
+			_ = f.Close()
+			t.Fatal(err)
+		}
+		return f, nil
+	})
+	if got != nil || !errors.Is(err, ErrFrozenRootChanged) || errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("prefix after path drift = %q, %v", got, err)
 	}
 }
 

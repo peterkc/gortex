@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -113,6 +114,51 @@ func RunNoLazy(ctx context.Context, dir string, args ...string) ([]byte, error) 
 	return run(ctx, dir, noLazyGitEnv(), nil, args...)
 }
 
+// ErrOutputLimit says the command exceeded a caller's local capture bound.
+var ErrOutputLimit = errors.New("git output exceeds capture limit")
+
+// RunNoLazyBounded has RunNoLazy's local-only process and limiter. It caps
+// stdout at maxStdout bytes and stderr at 16 KiB. If either overflows, no
+// stdout is usable, even if Git exited successfully after writing it.
+func RunNoLazyBounded(ctx context.Context, dir string, maxStdout int64, args ...string) ([]byte, error) {
+	if maxStdout < 0 {
+		return nil, ErrOutputLimit
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stdout := boundedOutput{remaining: maxStdout, cancel: cancel}
+	stderr := boundedOutput{remaining: 16 << 10, cancel: cancel}
+	out, err := run(ctx, dir, noLazyGitEnv(), func(cmd *exec.Cmd) {
+		stdout.dst, stderr.dst = cmd.Stdout, cmd.Stderr
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	}, args...)
+	if stdout.overflow || stderr.overflow {
+		return nil, ErrOutputLimit
+	}
+	return out, err
+}
+
+type boundedOutput struct {
+	dst       io.Writer
+	remaining int64
+	cancel    context.CancelFunc
+	overflow  bool
+}
+
+func (w *boundedOutput) Write(p []byte) (int, error) {
+	if int64(len(p)) > w.remaining {
+		w.overflow = true
+		w.cancel()
+		return 0, ErrOutputLimit
+	}
+	n, err := w.dst.Write(p)
+	w.remaining -= int64(n)
+	return n, err
+}
+
 func run(ctx context.Context, dir string, env []string, configure func(*exec.Cmd), args ...string) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -138,12 +184,12 @@ func run(ctx context.Context, dir string, env []string, configure func(*exec.Cmd
 		cmd.Env = env
 	}
 	platform.ConfigureBackgroundCommand(cmd)
-	if configure != nil {
-		configure(cmd)
-	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	if configure != nil {
+		configure(cmd)
+	}
 	if err := cmd.Run(); err != nil {
 		name := "git"
 		if len(args) > 0 {

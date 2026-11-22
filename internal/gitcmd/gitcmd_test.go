@@ -302,6 +302,32 @@ exit 1
 	}
 }
 
+func TestRunNoLazyBounded(t *testing.T) {
+	withFakeGit(t, `
+test "$GIT_OPTIONAL_LOCKS" = 0 && test "$GIT_NO_LAZY_FETCH" = 1 || exit 3
+case "$1" in
+exact) printf ' a\000b\n' ;;
+failed) printf 'cause' >&2; exit 2 ;;
+noisy) printf '%17000s' '' >&2 ;;
+esac
+`)
+	ctx := t.Context()
+	if got, err := RunNoLazyBounded(ctx, "", 5, "exact"); err != nil || string(got) != " a\x00b\n" {
+		t.Fatalf("exact bound: got %q, %v", got, err)
+	}
+	for _, args := range []struct {
+		command string
+		limit   int64
+	}{{"exact", 4}, {"noisy", 5}, {"exact", -1}} {
+		if got, err := RunNoLazyBounded(ctx, "", args.limit, args.command); got != nil || !errors.Is(err, ErrOutputLimit) {
+			t.Fatalf("%s with limit %d: got %q, %v; want output refusal", args.command, args.limit, got, err)
+		}
+	}
+	if _, err := RunNoLazyBounded(ctx, "", 5, "failed"); err == nil || !strings.Contains(err.Error(), "cause") {
+		t.Fatalf("expected bounded stderr diagnostic, got %v", err)
+	}
+}
+
 // TestRunPassesDirAsDashC ensures the -C dir flag is prepended when a
 // dir is supplied and omitted when it is empty.
 func TestRunPassesDirAsDashC(t *testing.T) {

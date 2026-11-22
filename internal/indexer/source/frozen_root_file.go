@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -269,6 +270,43 @@ func (p FrozenRootPath) readWithOpen(ctx context.Context, maxBytes int64, openFi
 	}
 	if int64(len(data)) != size {
 		return nil, fmt.Errorf("%s: read length differs from observed size: %w", p.Path(), ErrFrozenRootChanged)
+	}
+	if err := p.checkDescriptor(f); err != nil {
+		return nil, err
+	}
+	if err := p.checkCurrent(ctx); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// ReadPrefix returns up to maxBytes (0–512) from an observed literal regular
+// path. The caller must already have authorized reading the path. As with Read,
+// these checks are not an atomic snapshot.
+func (p FrozenRootPath) ReadPrefix(ctx context.Context, maxBytes int64) ([]byte, error) {
+	return p.readPrefixWithOpen(ctx, maxBytes, openRootRegularFile)
+}
+
+func (p FrozenRootPath) readPrefixWithOpen(ctx context.Context, maxBytes int64, openFile func(*os.Root, string) (*os.File, error)) ([]byte, error) {
+	info := p.Info()
+	if maxBytes < 0 || maxBytes > 512 || !p.literal || info == nil {
+		return nil, fmt.Errorf("invalid prefix limit or missing literal observation: %w", ErrFrozenRootPath)
+	}
+	if err := regularMetadataError(regularDescriptorMeta(p.Path(), info), math.MaxInt64); err != nil {
+		return nil, err
+	}
+	f, err := p.openVerified(ctx, openFile)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	data := make([]byte, min(maxBytes, info.Size()))
+	if _, err := io.ReadFull(regularContextReader{ctx: ctx, reader: f}, data); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, fmt.Errorf("%s: prefix shorter than observed: %w", p.Path(), ErrFrozenRootChanged)
+		}
+		return nil, err
 	}
 	if err := p.checkDescriptor(f); err != nil {
 		return nil, err

@@ -235,9 +235,22 @@ func buildRebuildStages(
 	if err != nil {
 		return err
 	}
-	digest := rebuildDigest(req.Witness.FrozenInputs)
-	if digest != (rebuildDigest{}) {
-		if err := visitRebuildInputSidecar(ctx, lease, digest, func(rebuildSidecarRow) error { return nil }); err != nil {
+	var classifications map[string]rebuildClassificationFact
+	if digest := rebuildDigest(req.Witness.FrozenInputs); digest != (rebuildDigest{}) {
+		if err := visitRebuildInputSidecar(ctx, lease, digest, func(row rebuildSidecarRow) error {
+			if row.Classification == nil {
+				return nil
+			}
+			key := string(row.Path)
+			if _, duplicate := classifications[key]; duplicate {
+				return fmt.Errorf("%w: repeated classification for %q", errRebuildInputSidecar, key)
+			}
+			if classifications == nil {
+				classifications = make(map[string]rebuildClassificationFact)
+			}
+			classifications[key] = *row.Classification
+			return nil
+		}); err != nil {
 			return err
 		}
 	}
@@ -266,7 +279,10 @@ func buildRebuildStages(
 	idx.SetRootPath(req.Root)
 	idx.SetContentSource(src)
 	req.Bounds.Dir = lease
-	job := rebuildFileStages{workDir: lease, incarnation: req.Incarnation, inputs: inputs, recipes: req.Recipes, bounds: req.Bounds, witness: req.Witness}
+	job := rebuildFileStages{
+		workDir: lease, incarnation: req.Incarnation, inputs: inputs, recipes: req.Recipes, bounds: req.Bounds,
+		witness: req.Witness, classifications: classifications,
+	}
 	store := rebuildParseStore{dir: req.ParseDir, limit: req.ParseLimit}
 	if _, err := idx.buildRebuildFileStages(ctx, src, store, private, job, send); err != nil {
 		return err
