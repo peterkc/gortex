@@ -62,14 +62,20 @@ func captureRebuildResolverDirectoryWithListing(ctx context.Context, root *os.Ro
 	var rows []rebuildNamespaceRow
 	err := source.VisitFrozenDirectory(ctx, root, dir, func(name string, mode fs.FileMode) error {
 		key := path.Join(dir, name)
-		if !validRebuildNamespaceKey(key) || len(entries) >= room || len(key) > keys || int64(len(key))+1 > left {
+		if !validRebuildNamespaceKey(key) || len(entries) >= room || len(key) > keys {
 			return fmt.Errorf("%w: directory fact key or capture cap", errRebuildResolverNamespace)
+		}
+		if int64(len(key))+1 > left {
+			return fmt.Errorf("%w: namespace raw input cap: %w", errRebuildInputSidecar, errRebuildCppCaptureLimit)
 		}
 		keys -= len(key)
 		left -= int64(len(key)) + 1
 		entries = append(entries, rebuildResolverListedEntry{key: key, mode: mode})
 		return nil
 	}, func() error {
+		// Classification may read policy or sniff bytes from this budget.
+		// Reserve the checked listing and closing row before any such read.
+		*rawRemaining = left
 		slices.SortFunc(entries, func(a, b rebuildResolverListedEntry) int { return strings.Compare(a.key, b.key) })
 		if listed != nil {
 			listed(entries)
@@ -109,7 +115,7 @@ func captureRebuildResolverDirectoryWithListing(ctx context.Context, root *os.Ro
 		if err := n.add(row); err != nil {
 			return err
 		}
-		if err := writeRebuildNamespaceFact(rawRemaining, row, emit); err != nil {
+		if err := writeRebuildNamespaceFact(row, emit); err != nil {
 			return err
 		}
 	}

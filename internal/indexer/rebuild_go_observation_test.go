@@ -244,7 +244,7 @@ func TestRebuildGoObservationFollowedRootReplay(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, mod, string(data))
 	effective := rebuildGoTestInput(target, "manifest", mod)
-	followed := rebuildFollowedGoMod{link: link, target: effective, data: data,
+	followed := rebuildRootManifest{link: link, target: effective, data: data,
 		row: rebuildSidecarRow{Kind: rebuildFollowedManifest, Path: []byte("go.mod"), Present: true, Digest: effective.Content}}
 	require.NotEqual(t, link.Content, followed.row.Digest)
 
@@ -292,7 +292,7 @@ func TestRebuildGoObservationFollowedRootRefusals(t *testing.T) {
 	link := rebuildGoTestInput("go.mod", "manifest", "root.manifest")
 	link.Kind = merkle.Symlink
 	target := rebuildGoTestInput("root.manifest", "manifest", mod)
-	valid := rebuildFollowedGoMod{link: link, target: target, data: []byte(mod),
+	valid := rebuildRootManifest{link: link, target: target, data: []byte(mod),
 		row: rebuildSidecarRow{Kind: rebuildFollowedManifest, Path: []byte("go.mod"), Present: true, Digest: target.Content}}
 	root, err := os.OpenRoot(t.TempDir())
 	require.NoError(t, err)
@@ -304,7 +304,7 @@ func TestRebuildGoObservationFollowedRootRefusals(t *testing.T) {
 	changedBytes.data = []byte("module example.org/edit\n")
 	for _, tc := range []struct {
 		name    string
-		binding *rebuildFollowedGoMod
+		binding *rebuildRootManifest
 		raw     int64
 		want    error
 	}{

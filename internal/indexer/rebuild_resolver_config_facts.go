@@ -11,15 +11,132 @@ import (
 	"unicode/utf8"
 
 	"github.com/zzet/gortex/internal/indexer/merkle"
+	"github.com/zzet/gortex/internal/indexer/source"
 	"github.com/zzet/gortex/internal/parser/tsalias"
+	"github.com/zzet/gortex/internal/search"
 )
+
+// captureRebuildCheckoutResolverInputs binds root name selection and the Go,
+// TS/JS and npm facts before the owner offers the lease for reuse. Reads of a
+// root manifest are shared; only its normalizer (or name-only read) charges it.
+func captureRebuildCheckoutResolverInputs(ctx context.Context, src *source.FilesystemSource, epoch rebuildCheckoutInputs,
+	literalRoot bool, raw *int64, emit func(rebuildSidecarRow) error,
+) (string, error) {
+	if src == nil || epoch.namespace == nil || raw == nil || *raw < 0 || *raw > rebuildCppRawLimit || emit == nil {
+		return "", fmt.Errorf("%w: incomplete checkout resolver capture", errRebuildInputSidecar)
+	}
+	var goUsed, jsUsed bool
+	for _, in := range epoch.files {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		switch in.Language {
+		case "go":
+			goUsed = true
+		case "javascript", "typescript":
+			jsUsed = true
+		}
+	}
+	const goPath, npmPath = "go.mod", "package.json"
+	readRoot := func(name string, limit int64) (*rebuildRootManifest, error) {
+		m, err := readCheckedRebuildRootManifest(ctx, src, epoch, name, min(limit, *raw))
+		if err == nil && m != nil && m.row.Kind != 0 {
+			err = emit(m.row)
+		}
+		return m, err
+	}
+	var rootMod *rebuildRootManifest
+	if goUsed {
+		var err error
+		rootMod, err = readRoot(goPath, rebuildGoManifestLimit)
+		if err != nil {
+			return "", err
+		}
+	}
+	if err := captureRebuildResolverConfigRows(ctx, src.FrozenRoot(), literalRoot, epoch.namespace,
+		epoch.files, epoch.admitted, rootMod, raw, emit); err != nil {
+		return "", err
+	}
+	writeNpm := func(key string, identity rebuildInput, data []byte) error {
+		identity.Path = key // a root link retains the effective target identity under the logical key
+		fact, err := normalizeRebuildNpmManifest(key, identity, data, raw)
+		if err != nil {
+			return err
+		}
+		row, err := rebuildNpmManifestSidecarRow(fact)
+		if err != nil {
+			return err
+		}
+		return emit(row)
+	}
+	pkgConsulted := false
+	readPackage := func() ([]byte, error) {
+		pkgConsulted = true
+		m, err := readRoot(npmPath, rebuildNpmFactBytes-int64(len(npmPath)))
+		if err != nil || m == nil {
+			return nil, err
+		}
+		return m.data, writeNpm(npmPath, m.target, m.data)
+	}
+	name, err := search.PortableProjectName(func(key string) ([]byte, error) {
+		if key == npmPath {
+			return readPackage()
+		}
+		if !goUsed {
+			m, err := readRoot(goPath, rebuildCppEntryLimit)
+			if err != nil || m == nil {
+				return nil, err
+			}
+			*raw -= int64(len(m.data))
+			return m.data, nil
+		}
+		if rootMod == nil {
+			return nil, nil
+		}
+		return rootMod.data, nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if !jsUsed {
+		return name, ctx.Err()
+	}
+	// If the selector did not need package.json, capture only a positive
+	// admitted candidate. The namespace carries denied/unknown answers to
+	// replay; they must not prevent parsing or invent a negative.
+	if !pkgConsulted && epoch.admitted[npmPath] != nil {
+		if _, err := readPackage(); err != nil {
+			return "", err
+		}
+	}
+	// A post-parse npm probe may name any admitted nested package manifest.
+	// Emit one positive fact per regular manifest; the namespace owns misses.
+	var nested []string
+	for key, in := range epoch.admitted {
+		if key != npmPath && path.Base(key) == npmPath && in.Kind == merkle.RegularFile {
+			nested = append(nested, key)
+		}
+	}
+	slices.Sort(nested)
+	for _, key := range nested {
+		in := *epoch.admitted[key]
+		data, err := readCheckedRebuildRegularManifest(ctx, src, in, min(*raw, rebuildNpmFactBytes-int64(len(key))))
+		if err != nil {
+			return "", err
+		}
+		if err := writeNpm(key, in, data); err != nil {
+			return "", err
+		}
+	}
+	return name, ctx.Err()
+}
 
 // captureRebuildResolverConfigRows writes the selected callers' normalized
 // configs into the same lease as their checked namespace. The enumerating
 // owner must supply inputs and manifest identities from that namespace epoch.
 // Followed manifest rows belong to the owner, not this config projection.
 func captureRebuildResolverConfigRows(ctx context.Context, root *os.Root, literalRoot bool, ns *rebuildResolverNamespace,
-	inputs []rebuildInput, identities map[string]*rebuildInput, followed *rebuildFollowedGoMod,
+	inputs []rebuildInput, identities map[string]*rebuildInput, rootMod *rebuildRootManifest,
 	rawRemaining *int64, emit func(rebuildSidecarRow) error,
 ) error {
 	if emit == nil {
@@ -53,7 +170,7 @@ func captureRebuildResolverConfigRows(ctx context.Context, root *os.Root, litera
 		}
 	}
 	if goUsed {
-		if err := captureRebuildGoObservations(ctx, root, ns, inputs, identities, followed, rawRemaining, func(row rebuildGoManifest) error {
+		if err := captureRebuildGoObservations(ctx, root, ns, inputs, identities, rootMod, rawRemaining, func(row rebuildGoManifest) error {
 			return emit(rebuildGoManifestSidecarRow(row))
 		}); err != nil {
 			return err

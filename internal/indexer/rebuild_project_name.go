@@ -71,6 +71,57 @@ func readRebuildProjectNameLink(ctx context.Context, src *source.FilesystemSourc
 	return data, nil
 }
 
+// readCheckedRebuildRootManifest observes only one logical name from the
+// admitted epoch. Regular targets and root links use the same digest proof.
+// A nil result is a checked nonfile. The caller charges any returned bytes.
+func readCheckedRebuildRootManifest(ctx context.Context, src *source.FilesystemSource, epoch rebuildCheckoutInputs,
+	name string, limit int64,
+) (*rebuildRootManifest, error) {
+	ns := epoch.namespace
+	if src == nil || ns == nil || !ns.frozen || ns.entries["."].close != rebuildNamespaceCloseExact ||
+		(name != "go.mod" && name != "package.json") {
+		return nil, fmt.Errorf("%w: missing checked root manifest authority", errRebuildProjectNameInput)
+	}
+	claimed := epoch.admitted[name]
+	if ns.entries[name].kind == rebuildNamespaceUnsupported && claimed != nil &&
+		claimed.Path == name && claimed.Kind == merkle.Symlink {
+		target, data, row, err := readCheckedRebuildManifestLink(ctx, src, ns, *claimed, epoch.admitted, limit)
+		if err != nil {
+			return nil, err
+		}
+		return &rebuildRootManifest{link: *claimed, target: target, row: row, data: data}, nil
+	}
+	kind, err := ns.lookup(name)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", errRebuildProjectNameInput, name, err)
+	}
+	if (kind == rebuildNamespaceAbsent || kind == rebuildNamespaceDirectory) && claimed == nil {
+		return nil, nil
+	}
+	if kind != rebuildNamespaceRegular || claimed == nil || claimed.Path != name || claimed.Kind != merkle.RegularFile {
+		return nil, fmt.Errorf("%w: mismatched admitted identity for %s", errRebuildProjectNameInput, name)
+	}
+	data, err := readCheckedRebuildRegularManifest(ctx, src, *claimed, limit)
+	if err != nil {
+		return nil, err
+	}
+	return &rebuildRootManifest{target: *claimed, data: data}, nil
+}
+
+func readCheckedRebuildRegularManifest(ctx context.Context, src *source.FilesystemSource, in rebuildInput, limit int64) ([]byte, error) {
+	if in.Size > min(limit, rebuildCppEntryLimit) {
+		return nil, fmt.Errorf("%w: manifest %q", errRebuildCppCaptureLimit, in.Path)
+	}
+	data, err := readRebuildGoObservedManifest(ctx, src.FrozenRoot(), in)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) != in.Size || rebuildDigest(blake3.Sum256(data)) != in.Content {
+		return nil, fmt.Errorf("%w: %q", ErrBuildInputChanged, in.Path)
+	}
+	return data, nil
+}
+
 // readCheckedRebuildManifestLink uses only a frozen namespace and the owner's
 // admitted regular target identities to authorize the root link traversal.
 // The caller shares these checked bytes across the applicable consumers and

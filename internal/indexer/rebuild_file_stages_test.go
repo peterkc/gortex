@@ -10,6 +10,7 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
+	"github.com/zzet/gortex/internal/indexer/source"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
 	"go.uber.org/zap"
@@ -87,6 +88,9 @@ func TestRebuildFileStagesRetainFrozenFactsAcrossEdit(t *testing.T) {
 			if !precache {
 				require.ErrorIs(t, err, ErrBuildInputChanged)
 				require.Zero(t, counts.reused)
+				selected, selectErr := counts.census.selectPendingCallers([]*graph.Edge{{FilePath: "a.go"}})
+				require.ErrorIs(t, selectErr, errRebuildCallerAttribution)
+				require.Nil(t, selected)
 				require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest}, stages)
 				var stagePending *store_pebble.ErrStagePending
 				require.ErrorAs(t, s.RequireStage(store_pebble.StageFileGraph), &stagePending)
@@ -98,5 +102,187 @@ func TestRebuildFileStagesRetainFrozenFactsAcrossEdit(t *testing.T) {
 			require.Len(t, s.FindNodesByName("Frozen"), 2)
 			require.Empty(t, s.FindNodesByName("Edited"))
 		})
+	}
+}
+
+func TestRebuildFileStagesExtractorCensus(t *testing.T) {
+	ctx := t.Context()
+	root, src := rebuildInputFixture(t)
+	reg := parser.NewRegistry()
+	reg.Register(languages.NewGoExtractor())
+	reg.Register(languages.NewCExtractor())
+	reg.Register(languages.NewCppExtractor())
+	reg.Register(languages.NewJavaScriptExtractor())
+	reg.Register(languages.NewTypeScriptExtractor())
+	cfg := config.Default().Index
+	idx := New(graph.New(), reg, cfg, zap.NewNop())
+	idx.installRebuildParsePolicy(freezeRebuildParsePolicy(root, cfg))
+	idx.SetRootPath(root)
+	t.Cleanup(idx.Close)
+
+	store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+	recipe := rebuildDigest{5}
+	job := rebuildFileStages{
+		incarnation: 3,
+		recipes:     map[string]rebuildDigest{"c": recipe, "go": recipe, "javascript": recipe, "typescript": recipe},
+	}
+	for _, f := range []struct{ path, raw string }{
+		{"main.tsx", "export function View() { return <div/>; }\n"},
+		{"main.jsx", "export function View() { return <div/>; }\n"},
+		{"main.go", "package p\nfunc Work() {}\n"},
+		{"header.h", "namespace demo {}\n"},
+		{"empty.go", ""},
+		{"binary.h", "namespace demo {}\x00"},
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(root, f.path), []byte(f.raw), 0o600))
+		lang, ok := reg.DetectLanguage(f.path)
+		require.True(t, ok)
+		input, _, err := readRebuildInput(ctx, src, f.path, lang, 1024)
+		require.NoError(t, err)
+		job.inputs = append(job.inputs, input)
+		if f.path == "empty.go" {
+			// A serialized successful receipt without even a file node.
+			payload, err := store_pebble.EncodeParseFacts(store_pebble.ParseFacts{
+				File: graph.FileMetaRow{FilePath: f.path, ContentHash: contentHashForSource(nil)}, EffectiveLanguage: "go",
+			})
+			require.NoError(t, err)
+			require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(recipe, input)), payload))
+		}
+	}
+	rootHex, err := rebuildInputRoot(job.inputs)
+	require.NoError(t, err)
+	digest, err := hex.DecodeString(rootHex)
+	require.NoError(t, err)
+	job.witness = store_pebble.Witness{
+		Input: store_pebble.HeadDigest(digest), Recipe: store_pebble.HeadDigest{8},
+		Profile: store_pebble.FullProfile, Stage: store_pebble.StageManifest,
+	}
+	build := func(src source.ContentSource, wantParsed, wantReused uint64) []store_pebble.Witness {
+		t.Helper()
+		job.workDir = t.TempDir()
+		private, err := store_pebble.OpenBuild(filepath.Join(job.workDir, "working"), job.witness.Profile)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, private.Close()) }()
+		h, err := store_pebble.OpenHead(filepath.Join(t.TempDir(), "head"), job.incarnation, job.witness.Profile)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, h.Close()) }()
+		var witnesses []store_pebble.Witness
+		counts, err := idx.buildRebuildFileStages(ctx, src, store, private, job, func(tables store_pebble.StageTables) error {
+			witnesses = append(witnesses, tables.Witness)
+			_, err := h.PublishStage(ctx, tables)
+			return err
+		})
+		require.NoError(t, err)
+		require.Len(t, witnesses, 2)
+		require.Equal(t, store_pebble.StageFileGraph, witnesses[1].Stage)
+		require.Equal(t, wantParsed, counts.parsed)
+		require.Equal(t, wantReused, counts.reused)
+		require.NotNil(t, counts.census)
+		require.EqualValues(t, 6, counts.census.admitted)
+		require.Equal(t, map[string]uint64{"cpp": 2, "go": 2, "javascript": 1, "typescript": 1}, counts.census.byID)
+		require.Equal(t, map[string]string{
+			"binary.h": "cpp", "empty.go": "go", "header.h": "cpp", "main.go": "go",
+			"main.jsx": "javascript", "main.tsx": "typescript",
+		}, counts.census.byPath)
+
+		s := h.OpenSnapshot()
+		defer func() { require.NoError(t, s.Close()) }()
+		var manifest []string
+		require.NoError(t, s.ManifestFiles(ctx, func(f store_pebble.ManifestFile) error {
+			manifest = append(manifest, f.Path+":"+f.Language)
+			return nil
+		}))
+		require.Equal(t, []string{"binary.h:c", "empty.go:go", "header.h:c", "main.go:go", "main.jsx:javascript", "main.tsx:typescript"}, manifest)
+		empty, err := s.FileMetadata("", "empty.go")
+		require.NoError(t, err)
+		require.Zero(t, empty.NodeCount)
+		skipped, err := private.RebuildView().Node(ctx, "binary.h")
+		require.NoError(t, err)
+		require.NotNil(t, skipped)
+		require.Equal(t, true, skipped.Meta["skipped_due_to_binary"])
+		return witnesses
+	}
+	first := build(src, 5, 1)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "header.h"), []byte("int edited(void);\n"), 0o600))
+	// No source is supplied on replay, so even a live content probe cannot succeed.
+	require.Equal(t, first, build(nil, 0, 6))
+}
+
+func TestRebuildSelectPendingCallers(t *testing.T) {
+	ctx := t.Context()
+	census := &rebuildExtractorCensus{
+		admitted: 6,
+		byPath: map[string]string{
+			"a.go": "go", "b.h": "cpp", "c.jsx": "javascript", "d.tsx": "typescript", "e.vue": "vue", "f.md": "markdown",
+		},
+		byID: map[string]uint64{"go": 1, "cpp": 1, "javascript": 1, "typescript": 1, "vue": 1, "markdown": 1},
+	}
+	private, err := store_pebble.OpenBuild(filepath.Join(t.TempDir(), "working"), store_pebble.FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, private.Close()) })
+	view := private.RebuildView()
+	// Both endpoint nodes are off-language, even for supported caller paths.
+	private.AddNode(&graph.Node{ID: "source", Kind: graph.KindFunction, Name: "Caller", FilePath: "b.h", Language: "cpp"})
+	private.AddNode(&graph.Node{ID: "target", Kind: graph.KindFunction, Name: "Target", FilePath: "e.vue", Language: "vue"})
+	const pending = "unresolved::Target"
+	for _, path := range []string{"f.md", "e.vue", "d.tsx", "c.jsx", "b.h", "a.go"} {
+		private.AddEdge(&graph.Edge{From: "source", Kind: graph.EdgeCalls, To: pending, FilePath: path, Line: 1})
+	}
+	visitPending := func(yield func([]*graph.Edge) error) error {
+		return view.VisitLinkPendingPages(ctx, 10, 4096, yield)
+	}
+	var seen []string
+	require.NoError(t, visitPending(func(page []*graph.Edge) error {
+		require.Len(t, page, 6)
+		incomplete := *census
+		incomplete.admitted++
+		unproved, err := incomplete.selectPendingCallers(page)
+		require.ErrorIs(t, err, errRebuildCallerAttribution)
+		require.Nil(t, unproved)
+		for _, invalid := range []*graph.Edge{nil, {}, {FilePath: "./a.go"}, {FilePath: "../a.go"},
+			{FilePath: "A.go"}, {FilePath: "unknown.go"}, {FilePath: "a.go\x00"}} {
+			// A supported first row must not leak through a later refusal.
+			selected, err := census.selectPendingCallers([]*graph.Edge{page[0], invalid})
+			require.ErrorIs(t, err, errRebuildCallerAttribution)
+			require.Nil(t, selected)
+		}
+		selected, err := census.selectPendingCallers(page)
+		require.NoError(t, err)
+		for _, e := range selected {
+			seen = append(seen, e.FilePath)
+		}
+		// A deferred-only page is valid and schedules no work.
+		deferred, err := census.selectPendingCallers(page[4:])
+		require.NoError(t, err)
+		require.Empty(t, deferred)
+
+		// This is the unfiltered candidate source used by StartRebuildLink.
+		var candidates []string
+		require.NoError(t, view.VisitNodes(ctx, func(n *graph.Node) error {
+			candidates = append(candidates, n.ID+":"+n.Language)
+			return nil
+		}))
+		require.Equal(t, []string{"source:cpp", "target:vue"}, candidates)
+		// Exercise the selected input only, not D72 endpoint projection.
+		var moves []graph.EdgeReindex
+		for _, e := range selected {
+			updated := *e
+			updated.To = "target"
+			moves = append(moves, graph.EdgeReindex{Edge: &updated, OldTo: e.To})
+		}
+		return private.ApplyLinkReindexes(ctx, moves)
+	}))
+	require.Equal(t, []string{"a.go", "c.jsx", "d.tsx"}, seen)
+	saved := make(map[string]graph.Edge)
+	require.NoError(t, view.VisitEdges(ctx, func(e *graph.Edge) error {
+		saved[e.FilePath] = *e
+		return nil
+	}))
+	require.Len(t, saved, 6)
+	for _, path := range []string{"a.go", "c.jsx", "d.tsx"} {
+		require.Equal(t, "target", saved[path].To)
+	}
+	for _, path := range []string{"b.h", "e.vue", "f.md"} {
+		require.Equal(t, graph.Edge{From: "source", Kind: graph.EdgeCalls, To: pending, FilePath: path, Line: 1}, saved[path])
 	}
 }

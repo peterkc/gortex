@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"context"
 	"encoding/gob"
 	"io/fs"
 	"os"
@@ -159,6 +160,92 @@ func TestRebuildCheckedManifestLink(t *testing.T) {
 			require.Equal(t, data, string(checked))
 			require.Equal(t, rebuildSidecarRow{Kind: rebuildFollowedManifest, Path: []byte("go.mod"), Present: true, Digest: target.Content}, row)
 			require.NotEqual(t, link.Content, row.Digest)
+		})
+	}
+}
+
+func TestRebuildCheckoutManifestCapture(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating a symlink requires a Windows privilege the test runner may not have")
+	}
+	const goMod = "module example.org/sharedname\n"
+	const pkg = `{"name":"ignoredbygo","dependencies":{"alias":"npm:actual@1.0.0"}}`
+	for _, reject := range []bool{false, true} {
+		name := "shares the verified target bytes"
+		if reject {
+			name = "changed target refuses"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			root, src := rebuildInputFixture(t)
+			for _, leaf := range []struct{ key, contents string }{
+				{"go.manifest", goMod}, {"npm.manifest", pkg}, {"a.go", "package main\n"}, {"main.ts", `import "alias/x"`},
+			} {
+				freezeProjectNameTestManifest(t, src, root, leaf.key, leaf.contents)
+			}
+			require.NoError(t, os.Symlink("go.manifest", filepath.Join(root, "go.mod")))
+			require.NoError(t, os.Symlink("npm.manifest", filepath.Join(root, "package.json")))
+			lease := t.TempDir()
+			digest, err := writeRebuildInputSidecar(ctx, lease, func(emit func(rebuildSidecarRow) error) error {
+				nsBudget := int64(rebuildCppRawLimit)
+				epoch, err := freezeRebuildCheckoutInputs(ctx, src.FrozenRoot(), nil, &nsBudget,
+					func(key string, _ fs.FileMode) (*rebuildInput, bool, error) {
+						lang := map[string]string{"a.go": "go", "main.ts": "typescript"}[key]
+						parse := lang != ""
+						if !parse {
+							lang = "manifest"
+						}
+						in, _, err := readRebuildInput(ctx, src, key, lang, 1024)
+						return &in, parse, err
+					}, emit)
+				if err != nil {
+					return err
+				}
+				if reject {
+					require.NoError(t, os.WriteFile(filepath.Join(root, "go.manifest"), []byte("module example.org/editedname\n"), 0o600))
+				}
+				raw := int64(len(goMod) + len(pkg))
+				selected, err := captureRebuildCheckoutResolverInputs(ctx, src, epoch, true, &raw, func(row rebuildSidecarRow) error {
+					if row.Kind == rebuildGoManifestFact && string(row.Path) == "go.mod" {
+						// The selector must use the exact bytes already read
+						// and charged by the Go config path, not reopen them.
+						require.NoError(t, os.Remove(filepath.Join(root, "go.manifest")))
+					}
+					return emit(row)
+				})
+				if !reject {
+					require.NoError(t, err)
+					require.Equal(t, "sharedname", selected)
+					require.Zero(t, raw, "charge each logical manifest once")
+				}
+				return err
+			})
+			if reject {
+				require.ErrorIs(t, err, ErrBuildInputChanged)
+				require.Zero(t, digest)
+				return
+			}
+			require.NoError(t, err)
+			require.NoError(t, os.Remove(filepath.Join(root, "npm.manifest")))
+			goFacts, _, err := openRebuildResolverConfigFacts(ctx, lease, digest)
+			require.NoError(t, err)
+			require.Equal(t, "example.org/sharedname", goFacts["go.mod"].RootClaim)
+			require.Empty(t, goFacts["go.mod"].OwnerModule, "the native strict Go probe stops at this link")
+			ns, manifests, followed, err := openRebuildNpmManifestFacts(ctx, lease, digest)
+			require.NoError(t, err)
+			require.NotZero(t, followed)
+			require.Equal(t, followed, manifests["package.json"].Digest)
+			lookup := newRebuildNpmLookup(ctx, rebuildNpmInputs{
+				namespace: ns, manifests: manifests, followedRoot: followed, isFile: func(_ context.Context, key string) (bool, error) {
+					return ns.probeFile(key)
+				}, matchDirs: func(context.Context, string, int) ([]string, error) {
+					t.Fatal("fixture declares no workspace globs")
+					return nil, nil
+				},
+			})
+			got, err := lookup.rewrite("main.ts", "alias/x")
+			require.NoError(t, err)
+			require.Equal(t, "actual/x", got)
 		})
 	}
 }

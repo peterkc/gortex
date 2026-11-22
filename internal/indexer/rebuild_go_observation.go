@@ -12,11 +12,10 @@ import (
 	"github.com/zzet/gortex/internal/indexer/source"
 )
 
-// rebuildFollowedGoMod is the owner's same-epoch proof for the one root
-// go.mod link. link hashes the link text; target hashes the admitted regular
-// file. row is the existing followed-manifest row in the same transaction.
-// The owner lends data to this call and leaves its raw charge to Go capture.
-type rebuildFollowedGoMod struct {
+// rebuildRootManifest holds checked bytes for a consulted root manifest.
+// target is the admitted regular identity. For a followed manifest, link
+// binds the original symlink and row binds the target digest.
+type rebuildRootManifest struct {
 	link, target rebuildInput
 	data         []byte
 	row          rebuildSidecarRow
@@ -27,14 +26,14 @@ type rebuildFollowedGoMod struct {
 // same enumeration of root. The manifest map supplies positives only; only
 // the namespace can prove a miss. Emitted rows belong to the owning lease.
 func captureRebuildGoObservations(ctx context.Context, root *os.Root, n *rebuildResolverNamespace,
-	inputs []rebuildInput, manifests map[string]*rebuildInput, followed *rebuildFollowedGoMod, rawRemaining *int64, emit func(rebuildGoManifest) error,
+	inputs []rebuildInput, manifests map[string]*rebuildInput, rootMod *rebuildRootManifest, rawRemaining *int64, emit func(rebuildGoManifest) error,
 ) error {
 	if root == nil || n == nil || !n.frozen || n.entries["."].close == rebuildNamespaceUnknown {
 		return fmt.Errorf("%w: Go capture requires a held root and frozen, closed root namespace", errRebuildResolverNamespace)
 	}
 	read := func(ctx context.Context, in rebuildInput) ([]byte, error) {
-		if in.Path == "go.mod" && followed != nil {
-			return followed.data, nil
+		if in.Path == "go.mod" && rootMod != nil {
+			return rootMod.data, nil
 		}
 		return readRebuildGoObservedManifest(ctx, root, in)
 	}
@@ -44,7 +43,7 @@ func captureRebuildGoObservations(ctx context.Context, root *os.Root, n *rebuild
 		case rebuildNamespaceDenied:
 			return nil, fmt.Errorf("%w: %w", errRebuildResolverNamespace, errRebuildResolverInputDenied)
 		case rebuildNamespaceUnsupported:
-			if name != "go.mod" || followed == nil {
+			if name != "go.mod" || rootMod == nil || rootMod.link.Kind != merkle.Symlink {
 				return nil, fmt.Errorf("%w: symlink or special manifest", errRebuildResolverNamespace)
 			}
 		}
@@ -52,9 +51,9 @@ func captureRebuildGoObservations(ctx context.Context, root *os.Root, n *rebuild
 			return nil, fmt.Errorf("%w: manifest parent is not a closed admitted directory", errRebuildResolverNamespace)
 		}
 		claimed := manifests[name]
-		if name == "go.mod" && followed != nil {
-			target, row := followed.target, followed.row
-			if entry.kind != rebuildNamespaceUnsupported || claimed == nil || *claimed != followed.link ||
+		if name == "go.mod" && rootMod != nil && rootMod.link.Kind == merkle.Symlink {
+			target, row := rootMod.target, rootMod.row
+			if entry.kind != rebuildNamespaceUnsupported || claimed == nil || *claimed != rootMod.link ||
 				claimed.Kind != merkle.Symlink || claimed.Path != name || claimed.Language == "" || claimed.Size <= 0 ||
 				claimed.Content == (rebuildDigest{}) || !validRebuildNamespaceKey(target.Path) || target.Path == name ||
 				target.Kind != merkle.RegularFile || target.Size < 0 || row.Kind != rebuildFollowedManifest || string(row.Path) != name {
@@ -82,6 +81,9 @@ func captureRebuildGoObservations(ctx context.Context, root *os.Root, n *rebuild
 			return nil, fmt.Errorf("%w: namespace and admitted regular manifest identity do not match", errRebuildGoEvidence)
 		}
 		in := *claimed
+		if name == "go.mod" && rootMod != nil && (rootMod.target != in || rootMod.row.Kind != 0 || rootMod.link != (rebuildInput{})) {
+			return nil, fmt.Errorf("%w: invalid regular root go.mod binding", errRebuildGoEvidence)
+		}
 		if path.Base(name) == "go.work" {
 			// The manifest collector does not call read for a workspace
 			// boundary. Verify and charge its bytes without parsing them.
@@ -99,7 +101,7 @@ func captureRebuildGoObservations(ctx context.Context, root *os.Root, n *rebuild
 		}
 		return &in, nil
 	}
-	if emit != nil && followed != nil {
+	if emit != nil && rootMod != nil && rootMod.link.Kind == merkle.Symlink {
 		yield := emit
 		emit = func(row rebuildGoManifest) error {
 			if row.Path == "go.mod" {

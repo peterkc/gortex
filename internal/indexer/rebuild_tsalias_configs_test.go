@@ -141,10 +141,9 @@ func TestRebuildTSAliasConfigsPostParseProbeReplay(t *testing.T) {
 	const caller, spec = "app/main.ts", "@lib/x"
 	native := tsalias.Load(root)
 	require.Equal(t, "shared/x", tsalias.Resolve(native.FindForFile(caller), spec))
-	cfg, mod := ids["tsconfig.json"], ids["go.mod"]
+	mod := ids["go.mod"]
 	input, goInput := ids[caller], ids["a.go"]
 	input.Language, goInput.Language = "typescript", "go"
-	identities := map[string]*rebuildInput{"go.mod": &mod, "tsconfig.json": &cfg}
 	freeze := func(key string, _ fs.FileMode) (*rebuildInput, bool, error) {
 		switch key {
 		case caller:
@@ -163,11 +162,7 @@ func TestRebuildTSAliasConfigsPostParseProbeReplay(t *testing.T) {
 		denied.Path = "hidden/never-read.ts"
 		require.ErrorIs(t, captureRebuildResolverConfigRows(ctx, src.FrozenRoot(), true, epoch.namespace, []rebuildInput{denied}, epoch.admitted, nil, raw,
 			func(rebuildSidecarRow) error { t.Fatal("emitted facts for denied caller"); return nil }), errRebuildResolverInputDenied)
-		name, err := readRebuildProjectName(ctx, src, identities, raw, emit)
-		if err != nil {
-			return "", err
-		}
-		return name, captureRebuildResolverConfigRows(ctx, src.FrozenRoot(), true, epoch.namespace, epoch.files, epoch.admitted, nil, raw, emit)
+		return captureRebuildCheckoutResolverInputs(ctx, src, epoch, true, raw, emit)
 	}
 	req := rebuildBuildRequest{Root: root, Witness: store_pebble.Witness{Recipe: store_pebble.HeadDigest{1}}}
 	flat := excludes.New([]string{"hidden/"})

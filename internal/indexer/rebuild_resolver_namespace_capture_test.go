@@ -70,6 +70,41 @@ func TestRebuildResolverDirectoryCapture(t *testing.T) {
 	}
 }
 
+func TestRebuildResolverDirectoryReservesRawBeforeClassification(t *testing.T) {
+	const key = "present"
+	work := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(work, key), nil, 0o600))
+	root, err := os.OpenRoot(work)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, root.Close()) })
+	const listingBytes = len(key) + 1 + len(".") + 1
+	for _, read := range []bool{false, true} {
+		var n rebuildResolverNamespace
+		remaining := int64(listingBytes)
+		emitted := 0
+		err := captureRebuildResolverDirectory(t.Context(), root, ".", true, func(got string, _ fs.FileMode) (bool, error) {
+			require.Equal(t, key, got)
+			require.Zero(t, remaining, "classification cannot spend its containing listing's budget")
+			if read {
+				return false, errRebuildCppCaptureLimit
+			}
+			return true, nil
+		}, &n, &remaining, func(rebuildSidecarRow) error {
+			emitted++
+			return nil
+		})
+		if read {
+			require.ErrorIs(t, err, errRebuildCppCaptureLimit)
+			require.Empty(t, n.entries)
+			require.Zero(t, emitted)
+			continue
+		}
+		require.NoError(t, err)
+		require.Zero(t, remaining, "emitting the reserved rows does not charge twice")
+		require.Equal(t, 2, emitted)
+	}
+}
+
 func TestRebuildResolverDirectoryCaptureRefusals(t *testing.T) {
 	work := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(work, "present"), nil, 0o600))

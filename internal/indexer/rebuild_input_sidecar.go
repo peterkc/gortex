@@ -265,18 +265,10 @@ func (r rebuildSidecarRow) namespaceRow() (rebuildNamespaceRow, bool) {
 	return rebuildNamespaceRow{key: string(r.Path), kind: rebuildNamespaceFactKinds[r.Kind-rebuildNamespaceRegularFact]}, true
 }
 
-func writeRebuildNamespaceFact(rawRemaining *int64, row rebuildNamespaceRow, emit func(rebuildSidecarRow) error) error {
-	charge := int64(len(row.key)) + 1
-	if charge > *rawRemaining {
-		return fmt.Errorf("%w: namespace raw input cap: %w", errRebuildInputSidecar, errRebuildCppCaptureLimit)
-	}
+func writeRebuildNamespaceFact(row rebuildNamespaceRow, emit func(rebuildSidecarRow) error) error {
 	for i, local := range rebuildNamespaceFactKinds {
 		if local == row.kind {
-			if err := emit(rebuildSidecarRow{Kind: rebuildNamespaceRegularFact + rebuildCppFactKind(i), Path: []byte(row.key)}); err != nil {
-				return err
-			}
-			*rawRemaining -= charge
-			return nil
+			return emit(rebuildSidecarRow{Kind: rebuildNamespaceRegularFact + rebuildCppFactKind(i), Path: []byte(row.key)})
 		}
 	}
 	return fmt.Errorf("%w: unknown namespace kind", errRebuildInputSidecar)
