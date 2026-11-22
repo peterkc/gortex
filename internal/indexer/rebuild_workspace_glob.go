@@ -44,6 +44,11 @@ func newRebuildWorkspaceGlob(ctx context.Context, ns *rebuildResolverNamespace) 
 // keeps directories in the order of diskManifestTree.match. Clean the pattern
 // as native Join does, but never include the checkout root in the pattern.
 func (g *rebuildWorkspaceGlob) matchDirs(ctx context.Context, pattern string, limit int) ([]string, error) {
+	work := rebuildNpmFactBytes
+	return g.matchDirsWithWork(ctx, pattern, limit, &work, false)
+}
+
+func (g *rebuildWorkspaceGlob) matchDirsWithWork(ctx context.Context, pattern string, limit int, work *int, literal bool) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -58,14 +63,16 @@ func (g *rebuildWorkspaceGlob) matchDirs(ctx context.Context, pattern string, li
 		return nil, fmt.Errorf("%w: nonlocal workspace glob", errRebuildResolverNamespace)
 	}
 	p = filepath.Clean(p)
-	if _, err := filepath.Match(p, ""); err != nil {
-		return nil, nil // native diskManifestTree.match suppresses malformed patterns
+	if !literal {
+		if _, err := filepath.Match(p, ""); err != nil {
+			return nil, nil // native diskManifestTree.match suppresses malformed patterns
+		}
 	}
 	p = filepath.ToSlash(p)
 	// ToSlash already converted the Windows separator; a remaining backslash
 	// has the same escape meaning as in filepath.Glob on non-Windows hosts.
 	prefix, suffix := p, ""
-	if first := strings.IndexAny(p, `*?[\`); first >= 0 {
+	if first := strings.IndexAny(p, `*?[\`); first >= 0 && !literal {
 		cut := strings.LastIndexByte(p[:first], '/') + 1
 		prefix, suffix = strings.TrimSuffix(p[:cut], "/"), p[cut:]
 		// The right-to-left recursion in Go 1.27 Glob refuses at depth 10000.
@@ -113,17 +120,16 @@ func (g *rebuildWorkspaceGlob) matchDirs(ctx context.Context, pattern string, li
 
 	// Bound the work of the pinned Match (which may retry a chunk at each
 	// byte of a name). Charge before each scan, independently of result size.
-	work := rebuildNpmFactBytes
 	var visit func(string, string) error
 	visit = func(dir, suffix string) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		segment, rest, more := strings.Cut(suffix, "/")
-		if len(segment) >= work {
+		if len(segment) >= *work {
 			return fmt.Errorf("%w: workspace glob work cap", errRebuildResolverNamespace)
 		}
-		work -= len(segment) + 1
+		*work -= len(segment) + 1
 		if _, err := filepath.Match(segment, ""); err != nil {
 			return err
 		}
@@ -136,10 +142,10 @@ func (g *rebuildWorkspaceGlob) matchDirs(ctx context.Context, pattern string, li
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if len(segment)+1 > work/(len(key)+1) {
+			if len(segment)+1 > *work/(len(key)+1) {
 				return fmt.Errorf("%w: workspace glob work cap", errRebuildResolverNamespace)
 			}
-			work -= (len(segment) + 1) * (len(key) + 1)
+			*work -= (len(segment) + 1) * (len(key) + 1)
 			matched, err := filepath.Match(segment, path.Base(key))
 			if err != nil {
 				return err

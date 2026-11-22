@@ -36,6 +36,7 @@ const (
 	rebuildClassificationRow
 	rebuildGitIndexStampRow
 	rebuildGitIgnoreVerdictRow
+	rebuildWorkspaceConfigRow
 )
 
 var errRebuildInputSidecar = errors.New("invalid frozen build input sidecar")
@@ -44,13 +45,14 @@ var errRebuildInputSidecar = errors.New("invalid frozen build input sidecar")
 // not turn into a different name on replay. Followed manifests carry only the
 // logical root name and the verified bytes' digest, never the target path.
 type rebuildSidecarRow struct {
-	Kind    rebuildCppFactKind            `json:"kind"`
-	Path    []byte                        `json:"path"`
-	Present bool                          `json:"present,omitempty"`
-	Digest  rebuildDigest                 `json:"digest,omitzero"`
-	Dirs    [][]byte                      `json:"dirs,omitempty"`
-	Config  *rebuildResolverConfigPayload `json:"config,omitempty"`
-	NPM     *rebuildNpmManifestPayload    `json:"npm,omitempty"`
+	Kind      rebuildCppFactKind            `json:"kind"`
+	Path      []byte                        `json:"path"`
+	Present   bool                          `json:"present,omitempty"`
+	Digest    rebuildDigest                 `json:"digest,omitzero"`
+	Dirs      [][]byte                      `json:"dirs,omitempty"`
+	Config    *rebuildResolverConfigPayload `json:"config,omitempty"`
+	NPM       *rebuildNpmManifestPayload    `json:"npm,omitempty"`
+	Workspace *rebuildWorkspacePayload      `json:"workspace,omitempty"`
 
 	Classification *rebuildClassificationFact `json:"classification,omitempty"`
 	GitVersion     string                     `json:"git_version,omitempty"`
@@ -66,6 +68,12 @@ func rebuildSidecarCppRow(f rebuildCppFact) rebuildSidecarRow {
 }
 
 func (r rebuildSidecarRow) check() error {
+	if r.Kind == rebuildWorkspaceConfigRow {
+		return r.checkWorkspaceConfig()
+	}
+	if r.Workspace != nil {
+		return fmt.Errorf("%w: unexpected workspace payload", errRebuildInputSidecar)
+	}
 	if r.Kind == rebuildGitIndexStampRow || r.Kind == rebuildGitIgnoreVerdictRow {
 		return r.checkGitPolicy()
 	}
@@ -245,7 +253,7 @@ func visitRebuildInputSidecar(ctx context.Context, lease string, expected rebuil
 		if err := row.check(); err != nil {
 			return err
 		}
-		if row.isResolverConfig() || row.Kind == rebuildNpmManifestRow || row.Kind == rebuildClassificationRow ||
+		if row.isResolverConfig() || row.Kind == rebuildNpmManifestRow || row.Kind == rebuildClassificationRow || row.Kind == rebuildWorkspaceConfigRow ||
 			row.Kind == rebuildGitIndexStampRow || row.Kind == rebuildGitIgnoreVerdictRow {
 			// Refuse ambiguous fields (including duplicate JSON keys and null
 			// payload members). Only the new row kinds require canonical bytes.
@@ -255,6 +263,8 @@ func visitRebuildInputSidecar(ctx context.Context, lease string, expected rebuil
 				switch row.Kind {
 				case rebuildNpmManifestRow:
 					name = "npm manifest"
+				case rebuildWorkspaceConfigRow:
+					name = "workspace declaration"
 				case rebuildClassificationRow:
 					name = "classification"
 				case rebuildGitIndexStampRow, rebuildGitIgnoreVerdictRow:

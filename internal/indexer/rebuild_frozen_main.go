@@ -43,16 +43,24 @@ func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDiges
 		}
 		return raw, nil
 	}
-	var npm *rebuildNpmLookup
-	loadNpm := func() error {
-		if npm != nil {
+	var glob *rebuildWorkspaceGlob
+	loadGlob := func() error {
+		if glob != nil {
 			return nil
 		}
 		if err := loadNamespace(); err != nil {
 			return err
 		}
-		glob, err := newRebuildWorkspaceGlob(ctx, ns)
-		if err != nil {
+		var err error
+		glob, err = newRebuildWorkspaceGlob(ctx, ns)
+		return err
+	}
+	var npm *rebuildNpmLookup
+	loadNpm := func() error {
+		if npm != nil {
+			return nil
+		}
+		if err := loadGlob(); err != nil {
 			return err
 		}
 		npm = newRebuildNpmLookup(ctx, rebuildNpmInputs{
@@ -62,6 +70,7 @@ func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDiges
 		})
 		return nil
 	}
+	var workspaceMembers map[string]struct{} // nil until one checked lookup builds the membership index
 	view := build.RebuildView()
 	opts.ScratchParent = lease
 	return resolver.RunRebuildMain(ctx, build, opts, resolver.RebuildMainInputs{
@@ -102,6 +111,27 @@ func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDiges
 				return false, err
 			}
 			return npm.declaresExternal(caller, spec)
+		},
+		WorkspaceMembership: func(file string) (string, error) {
+			if workspaceMembers == nil {
+				if err := loadNamespace(); err != nil {
+					return "", err
+				}
+				manifest, err := openRebuildWorkspaceManifest(ctx, lease, digest, ns, manifests["package.json"], followed)
+				if err != nil {
+					return "", err
+				}
+				if manifest != nil {
+					if err := loadGlob(); err != nil {
+						return "", err
+					}
+				}
+				workspaceMembers, err = newRebuildWorkspaceMembers(ctx, glob, manifest)
+				if err != nil {
+					return "", err
+				}
+			}
+			return rebuildWorkspaceMember(workspaceMembers, file), nil
 		},
 		GoOwnership: func(candidate resolver.GoImportCandidate) (resolver.GoPackageOwnershipResult, error) {
 			hasGoFile := func(file string) (bool, error) {

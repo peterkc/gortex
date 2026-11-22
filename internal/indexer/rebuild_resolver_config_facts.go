@@ -13,11 +13,15 @@ import (
 
 	"github.com/zzet/gortex/internal/indexer/merkle"
 	"github.com/zzet/gortex/internal/indexer/source"
+	"github.com/zzet/gortex/internal/modules"
 	"github.com/zzet/gortex/internal/parser/tsalias"
 	"github.com/zzet/gortex/internal/search"
 )
 
 func isRebuildResolverConfig(key string) bool {
+	if key == rebuildPnpmWorkspaceFile || key == rebuildCargoWorkspaceFile {
+		return true
+	}
 	switch path.Base(key) {
 	case "go.mod", "go.work", "jsconfig.json", "tsconfig.json", "package.json":
 		return true
@@ -79,13 +83,14 @@ func captureRebuildCheckoutResolverInputs(ctx context.Context, src *source.Files
 		}
 		return emit(row)
 	}
-	pkgConsulted := false
+	var pkgConsulted, pkgHasWorkspaces bool
 	readPackage := func() ([]byte, error) {
 		pkgConsulted = true
 		m, err := readRoot(npmPath, rebuildNpmFactBytes-int64(len(npmPath)))
 		if err != nil || m == nil {
 			return nil, err
 		}
+		pkgHasWorkspaces = len(modules.ParsePackageJSONWorkspaces(m.data)) != 0
 		return m.data, writeNpm(npmPath, m.target, m.data)
 	}
 	name, err := search.PortableProjectName(func(key string) ([]byte, error) {
@@ -108,7 +113,7 @@ func captureRebuildCheckoutResolverInputs(ctx context.Context, src *source.Files
 	if err != nil {
 		return "", err
 	}
-	if !jsUsed {
+	if !goUsed && !jsUsed {
 		return name, ctx.Err()
 	}
 	// If the selector did not need package.json, capture only a positive
@@ -118,6 +123,17 @@ func captureRebuildCheckoutResolverInputs(ctx context.Context, src *source.Files
 		if _, err := readPackage(); err != nil {
 			return "", err
 		}
+	}
+	// Read lower-priority workspace declarations only after a proved miss
+	// at package.json. An unproved root will refuse when membership is used.
+	if kind, err := epoch.namespace.lookup(npmPath); !pkgHasWorkspaces &&
+		(pkgConsulted || err == nil && (kind == rebuildNamespaceAbsent || kind == rebuildNamespaceDirectory)) {
+		if err := captureRebuildWorkspaceConfigs(ctx, src, epoch, raw, emit); err != nil {
+			return "", err
+		}
+	}
+	if !jsUsed {
+		return name, ctx.Err()
 	}
 	// A post-parse npm probe may name any admitted nested package manifest.
 	// Emit one positive fact per regular manifest; the namespace owns misses.
