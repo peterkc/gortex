@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -75,6 +76,31 @@ func withRebuildCheckoutBuildInputs(ctx context.Context, leases string, src *sou
 		bound.Witness.UsesGitIgnorePolicy = gitCheckout
 		return consume(lease, bound, epoch.files)
 	})
+}
+
+// runRebuildCheckout composes the checked owner epoch and private worker.
+// The caller supplies the checkout classification and Gortex-only excludes.
+// It owns the candidate head and decides whether to accept each stage.
+func (idx *Indexer) runRebuildCheckout(ctx context.Context, src *source.FilesystemSource, req rebuildBuildRequest,
+	flat *excludes.Matcher, gitCheckout bool, exe string, args []string, leases, headDir string,
+	publish func(context.Context, store_pebble.StageTables) error,
+) error {
+	if src == nil || req.Bounds.FileBytes <= 0 || publish == nil {
+		return fmt.Errorf("%w: missing checkout build authority or file bound", errRebuildBuildWire)
+	}
+	root := src.FrozenRoot()
+	if err := checkRebuildGitWorktreeRoot(root); err != nil {
+		return err
+	}
+	gate := idx.newContentAdmissionGate()
+	return withRebuildCheckoutBuildInputs(ctx, leases, src, req, flat, gitCheckout,
+		func(key string, mode fs.FileMode, member rebuildGitMember, raw *int64, emit func(rebuildSidecarRow) error) (rebuildCheckoutLeaf, error) {
+			return idx.freezeRebuildCheckoutLeaf(ctx, root, key, mode, member, gate, int64(req.Bounds.FileBytes), raw, emit)
+		}, func(epoch rebuildCheckoutInputs, raw *int64, emit func(rebuildSidecarRow) error) (string, error) {
+			return captureRebuildCheckoutResolverInputs(ctx, src, epoch, true, raw, emit)
+		}, func(lease string, bound rebuildBuildRequest, inputs []rebuildInput) error {
+			return runRebuildBuild(ctx, exe, args, lease, headDir, bound, idx.config, inputs, publish)
+		})
 }
 
 func withRebuildInputLease(leases string, use func(string) error) (err error) {

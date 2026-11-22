@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,7 +18,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/excludes"
+	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
+	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/resolver"
 	"go.uber.org/zap"
 )
@@ -387,4 +392,89 @@ func TestRebuildBuildCppIncludeRefusal(t *testing.T) {
 	require.ErrorIs(t, err, ErrRebuildWorker)
 	require.ErrorIs(t, err, resolver.ErrRebuildCppIncludeInput)
 	require.Empty(t, acks.Bytes())
+}
+
+func TestRunRebuildCheckout(t *testing.T) {
+	for _, mismatch := range []bool{false, true} {
+		name := "verified checkout builds exact prefix"
+		if mismatch {
+			name = "supplied input root differs"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			root, src := rebuildInputFixture(t)
+			const mod = "module example.org/widgets\n"
+			require.NoError(t, os.WriteFile(filepath.Join(root, "go.mod"), []byte(mod), 0o600))
+			require.NoError(t, os.WriteFile(filepath.Join(root, "sample.go"), []byte("package p\nfunc Frozen() {}\n"), 0o600))
+			require.NoError(t, os.WriteFile(filepath.Join(root, "large.go"), []byte(strings.Repeat("x", 129)), 0o600))
+			require.NoError(t, os.Mkdir(filepath.Join(root, "excluded"), 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(root, "excluded", "secret.go"), []byte("package hidden"), 0o600))
+			cfg := config.Default().Index
+			cfg.MaxFileSize = 128
+			req := rebuildBuildRequest{
+				Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: rebuildTestIncarnation,
+				Policy: freezeRebuildParsePolicy(root, cfg), Recipes: map[string]rebuildDigest{"go": {1}},
+				Bounds:  rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 64 << 10},
+				Witness: store_pebble.Witness{Recipe: store_pebble.HeadDigest{2}, Profile: store_pebble.FullProfile, Stage: store_pebble.StageManifest},
+			}
+			reg := parser.NewRegistry()
+			languages.RegisterAll(reg)
+			idx := New(graph.New(), reg, cfg, zap.NewNop())
+			t.Cleanup(idx.Close)
+			exe, err := os.Executable()
+			require.NoError(t, err)
+			t.Setenv("GORTEX_TEST_REBUILD_BUILD_CHILD", "1")
+			leases := t.TempDir()
+			unowned := filepath.Join(leases, "unowned")
+			require.NoError(t, os.WriteFile(unowned, []byte("keep"), 0o600))
+			headDir := filepath.Join(t.TempDir(), "head")
+			h, err := store_pebble.OpenHead(headDir, req.Incarnation, req.Witness.Profile)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, h.Close()) })
+			if mismatch {
+				req.Witness.Input[0] = 1
+				exe = filepath.Join(root, "not-a-binary")
+			}
+			var stages []store_pebble.Stage
+			err = idx.runRebuildCheckout(ctx, src, req, excludes.New([]string{"excluded/"}), false,
+				exe, []string{"-test.run=^TestRebuildBuildChildEntry$", "--"}, leases, headDir,
+				func(ctx context.Context, offer store_pebble.StageTables) error {
+					require.False(t, mismatch, "a mismatched epoch must not reach the child")
+					stages = append(stages, offer.Witness.Stage)
+					if offer.Witness.Stage == store_pebble.StageManifest {
+						ref := rebuildDigest(offer.Witness.FrozenInputs)
+						require.NotZero(t, ref)
+						require.NoError(t, streamRebuildInputSidecar(retainedRebuildInputPath(headDir, ref), io.Discard, ref))
+					}
+					_, err := h.PublishStage(ctx, offer)
+					return err
+				})
+			entries, leaseErr := os.ReadDir(leases)
+			require.NoError(t, leaseErr)
+			require.Len(t, entries, 1)
+			require.Equal(t, "unowned", entries[0].Name())
+			s := h.OpenSnapshot()
+			defer func() { require.NoError(t, s.Close()) }()
+			if mismatch {
+				require.ErrorIs(t, err, ErrBuildInputChanged)
+				require.Empty(t, stages)
+				require.ErrorIs(t, s.RequireStage(store_pebble.StageManifest), store_pebble.ErrNotPublished)
+				return
+			}
+			require.ErrorIs(t, err, errRebuildBuildIncomplete)
+			require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, stages)
+			var paths []string
+			require.NoError(t, s.ManifestFiles(ctx, func(f store_pebble.ManifestFile) error {
+				paths = append(paths, f.Path)
+				return nil
+			}))
+			require.Equal(t, []string{"sample.go"}, paths)
+			require.NotNil(t, s.GetNode("sample.go::Frozen"))
+			stub := s.GetNode("large.go")
+			require.NotNil(t, stub)
+			require.Equal(t, true, stub.Meta["skipped_due_to_size"])
+			require.Nil(t, s.GetNode("excluded/secret.go"))
+		})
+	}
 }
