@@ -209,15 +209,8 @@ func (idx *Indexer) buildRebuildFileStages(
 		if err := ctx.Err(); err != nil {
 			return counts, err
 		}
-		fact := job.classifications[key]
-		var n *graph.Node
-		sf := skippedFile{relPath: pathkey.Normalize(key), lang: fact.Language, size: fact.Size, reason: fact.ContentSkipReason}
-		switch {
-		case fact.sizeSkipped():
-			n = sizeSkipNode(sf, fact.MaxFileSize)
-		case sf.reason != "":
-			n = contentSkipNode(sf)
-		default:
+		n := rebuildCheckedSkipNode(key, job.classifications[key])
+		if n == nil {
 			continue
 		}
 		idx.applyRepoPrefix([]*graph.Node{n}, nil)

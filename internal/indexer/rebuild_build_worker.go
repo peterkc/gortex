@@ -348,6 +348,9 @@ func buildRebuildStages(
 			return err
 		}
 	}
+	if err := runRebuildTestFiles(ctx, private, receipts, classifications); err != nil {
+		return err
+	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.
 	return errRebuildBuildIncomplete
