@@ -29,11 +29,13 @@ func TestRebuildFrozenMain(t *testing.T) {
 			const callerDir = "cafe\u0301"
 			const callerRaw = callerDir + "/main.ts"
 			const callerKey = "caf\u00e9/main.ts"
+			const configRaw = callerDir + "/tsconfig.json"
+			const configKey = "caf\u00e9/tsconfig.json"
 			const target = "shared/x.ts"
 			const spec = "@lib/x"
 			const pending = "unresolved::import::" + spec
 			writeRebuildTSAliasFixtureFile(t, root, callerRaw, `import "@lib/x"`)
-			writeRebuildTSAliasFixtureFile(t, root, callerDir+"/tsconfig.json", `{"compilerOptions":{"paths":{"@lib/*":["../first/*","../shared/*"]}}}`)
+			writeRebuildTSAliasFixtureFile(t, root, configRaw, `{"compilerOptions":{"paths":{"@lib/*":["../first/*","../shared/*"]}}}`)
 			writeRebuildTSAliasFixtureFile(t, root, target, "export {}")
 			var flat *excludes.Matcher
 			if denied {
@@ -58,7 +60,12 @@ func TestRebuildFrozenMain(t *testing.T) {
 				}, func(epoch rebuildCheckoutInputs, raw *int64, emit func(rebuildSidecarRow) error) (string, error) {
 					return captureRebuildCheckoutResolverInputs(ctx, src, epoch, true, raw, emit)
 				}, func(lease string, bound rebuildBuildRequest, inputs []rebuildInput) error {
-					require.Len(t, inputs, 2)
+					require.Len(t, inputs, 3)
+					langs := make(map[string]string, len(inputs))
+					for _, input := range inputs {
+						langs[input.Path] = input.Language
+					}
+					require.Equal(t, map[string]string{callerRaw: "typescript", configRaw: "json", target: "typescript"}, langs)
 					if !denied {
 						require.NoError(t, os.Remove(filepath.Join(root, target)))
 						writeRebuildTSAliasFixtureFile(t, root, "first/x.ts", "export {}")
@@ -70,11 +77,12 @@ func TestRebuildFrozenMain(t *testing.T) {
 					defer func() { require.NoError(t, build.Close()) }()
 					build.AddNode(&graph.Node{ID: callerKey, Kind: graph.KindFile, FilePath: callerKey, Language: "typescript"})
 					build.AddNode(&graph.Node{ID: target, Kind: graph.KindFile, FilePath: target, Language: "typescript"})
+					build.AddNode(&graph.Node{ID: configKey, Kind: graph.KindFile, FilePath: configKey, Language: "json"})
 					edge := graph.Edge{From: callerKey, To: pending, Kind: graph.EdgeImports, FilePath: callerKey, Line: 3}
 					build.AddEdge(&edge)
-					census := &rebuildExtractorCensus{admitted: 2,
-						byPath:            map[string]string{callerRaw: "typescript", target: "typescript"},
-						originByGraphPath: map[string]string{callerKey: callerRaw, target: target},
+					census := &rebuildExtractorCensus{admitted: 3,
+						byPath:            langs,
+						originByGraphPath: map[string]string{callerKey: callerRaw, configKey: configRaw, target: target},
 					}
 					err = runRebuildFrozenMain(ctx, lease, rebuildDigest(bound.Witness.FrozenInputs), build, census, link)
 					if denied {

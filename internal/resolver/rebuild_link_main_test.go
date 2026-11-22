@@ -99,6 +99,7 @@ func TestRebuildMainBareAndVueDispatch(t *testing.T) {
 		typeTestNode(goID, "Run", graph.KindFunction, "go", goFile),
 		typeTestNode(panelFile, "Panel.vue", graph.KindFile, "vue", panelFile),
 		typeTestNode(panelID, "Panel", graph.KindFunction, "vue", panelFile),
+		typeTestNode(jsxFile+"::Source", "Source", graph.KindFunction, "typescript", jsxFile),
 		typeTestNode(jsxID, "Child", graph.KindFunction, "typescript", "ui/Child.tsx"),
 	}
 	read := &graph.Edge{From: "go", To: "unresolved::Run", Kind: graph.EdgeReads, FilePath: goFile, Line: 1}

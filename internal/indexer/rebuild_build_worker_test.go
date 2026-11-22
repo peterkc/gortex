@@ -421,12 +421,13 @@ func TestRebuildBuildCppIncludeRefusal(t *testing.T) {
 
 func TestRunRebuildCheckout(t *testing.T) {
 	for _, tc := range []struct {
-		name             string
-		mismatch, denied bool
+		name                             string
+		mismatch, denied, omitJSONRecipe bool
 	}{
 		{name: "verified checkout builds exact prefix"},
 		{name: "supplied input root differs", mismatch: true},
 		{name: "denied link input keeps file graph", denied: true},
+		{name: "missing JSON recipe refuses before manifest", denied: true, omitJSONRecipe: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -447,9 +448,12 @@ func TestRunRebuildCheckout(t *testing.T) {
 			cfg.MaxFileSize = 128
 			req := rebuildBuildRequest{
 				Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: rebuildTestIncarnation,
-				Policy: freezeRebuildParsePolicy(root, cfg), Recipes: map[string]rebuildDigest{"go": {1}, "typescript": {2}},
+				Policy: freezeRebuildParsePolicy(root, cfg), Recipes: map[string]rebuildDigest{"go": {1}, "typescript": {2}, "json": {3}},
 				Bounds:  rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 64 << 10},
 				Witness: store_pebble.Witness{Recipe: store_pebble.HeadDigest{2}, Profile: store_pebble.FullProfile, Stage: store_pebble.StageManifest},
+			}
+			if tc.omitJSONRecipe {
+				delete(req.Recipes, "json")
 			}
 			reg := parser.NewRegistry()
 			languages.RegisterAll(reg)
@@ -495,11 +499,18 @@ func TestRunRebuildCheckout(t *testing.T) {
 				require.ErrorIs(t, s.RequireStage(store_pebble.StageManifest), store_pebble.ErrNotPublished)
 				return
 			}
+			if tc.omitJSONRecipe {
+				require.ErrorIs(t, err, ErrRebuildWorker)
+				require.ErrorContains(t, err, "extractor recipe missing for json")
+				require.Empty(t, stages)
+				require.ErrorIs(t, s.RequireStage(store_pebble.StageManifest), store_pebble.ErrNotPublished)
+				return
+			}
 			wantRefusal := errRebuildBuildIncomplete
 			wantPaths := []string{"sample.go"}
 			if tc.denied {
 				wantRefusal = errRebuildResolverInputDenied
-				wantPaths = []string{"caller.ts", "sample.go"}
+				wantPaths = []string{"caller.ts", "sample.go", "tsconfig.json"}
 			}
 			require.ErrorIs(t, err, wantRefusal)
 			require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, stages)

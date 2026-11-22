@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"cmp"
 	"maps"
 	"path/filepath"
 	"slices"
@@ -48,10 +49,30 @@ func rebuildVueNativeRows(t *testing.T, nodes []*graph.Node, edges []*graph.Edge
 	for _, e := range edges {
 		require.NoError(t, g.AddBatchChecked(nil, []*graph.Edge{e}))
 	}
+	return rebuildVueResolveRows(t, g, alias)
+}
+
+// The SQLite edge columns do not carry Context, Via or Alias. State the
+// exact expected persisted difference without projecting any actual rows.
+func rebuildVueSQLiteExpected(edges []*graph.Edge) []*graph.Edge {
+	out := make([]*graph.Edge, 0, len(edges))
+	for _, edge := range edges {
+		e := *edge
+		e.Context, e.Via, e.Alias = "", "", ""
+		out = append(out, &e)
+	}
+	return out
+}
+
+func rebuildVueResolveRows(t *testing.T, g graph.Store, alias PathAliasResolver) []*graph.Edge {
+	t.Helper()
 	var pending []*graph.Edge
 	for _, e := range g.AllEdges() {
 		if e.Kind != graph.EdgeImports {
-			pending = append(pending, e)
+			// The in-memory graph lends live row pointers.
+			copy := *e
+			copy.Meta = maps.Clone(e.Meta)
+			pending = append(pending, &copy)
 		}
 	}
 	r := New(g)
@@ -160,7 +181,7 @@ func TestRebuildVueTemplateNativeRows(t *testing.T) {
 		edges, want = append(edges, e), append(want, rebuildVueTestSaved(e, tc.id, tc.bound))
 	}
 	want = rebuildVueSortedRows(want)
-	require.Equal(t, want, rebuildVueNativeRows(t, nodes, edges, nil))
+	require.Equal(t, rebuildVueSQLiteExpected(want), rebuildVueNativeRows(t, nodes, edges, nil))
 	got, err := rebuildVueWorkingRows(t, nodes, edges)
 	require.NoError(t, err)
 	require.Equal(t, want, got)
@@ -214,7 +235,26 @@ func TestRebuildVueRenderedNativeRows(t *testing.T) {
 		edges, want = append(edges, e), append(want, rebuildVueTestSaved(e, tc.id, tc.bound))
 	}
 	want = rebuildVueSortedRows(want)
-	require.Equal(t, want, rebuildVueNativeRows(t, nodes, edges, nil))
+	t.Run("SQLite persistence loses aliases before resolution", func(t *testing.T) {
+		// Native SQLite loses the import aliases before resolution. Ava then
+		// takes the local fallback instead of either aliased Avatar import.
+		sqliteWant := rebuildVueSQLiteExpected(want)
+		for i, edge := range sqliteWant {
+			if edge.Kind == graph.EdgeRendersChild && edge.Line == 10 {
+				sqliteWant[i] = rebuildVueTestSaved(edges[len(imports)], "ui/local.tsx::Ava", false)
+			}
+		}
+		require.Equal(t, rebuildVueSortedRows(sqliteWant), rebuildVueNativeRows(t, nodes, edges, nil))
+	})
+
+	// Also compare the native resolver on the full input payload that Pebble
+	// can store. In-memory adjacency is insertion ordered; insert by the
+	// SQLite adjacency order (line, insertion ID) for this fixture only.
+	full := graph.New()
+	ordered := slices.Clone(edges)
+	slices.SortStableFunc(ordered, func(a, b *graph.Edge) int { return cmp.Compare(a.Line, b.Line) })
+	full.AddBatch(nodes, ordered)
+	require.Equal(t, want, rebuildVueResolveRows(t, full, nil))
 	got, err := rebuildVueWorkingRows(t, nodes, edges)
 	require.NoError(t, err)
 	require.Equal(t, want, got)
@@ -262,14 +302,14 @@ func TestRebuildVueTemplateMissingAliasEvidence(t *testing.T) {
 			localResolved := rebuildVueTestSaved(local, "ui/local.ts::Local", false)
 			edges := []*graph.Edge{imp, ref, local}
 			wantRaw := rebuildVueSortedRows(edges)
-			require.Equal(t, rebuildVueSortedRows([]*graph.Edge{imp, ref, localResolved}),
+			require.Equal(t, rebuildVueSQLiteExpected(rebuildVueSortedRows([]*graph.Edge{imp, ref, localResolved})),
 				rebuildVueNativeRows(t, nodes, edges, nil))
 			withAlias := rebuildVueNativeRows(t, nodes, edges, func(caller, path string) string {
 				require.Equal(t, file, caller)
 				require.Equal(t, spec, path)
 				return targetFile
 			})
-			require.Equal(t, rebuildVueSortedRows([]*graph.Edge{imp, rebuildVueTestSaved(ref, targetID, true), localResolved}), withAlias)
+			require.Equal(t, rebuildVueSQLiteExpected(rebuildVueSortedRows([]*graph.Edge{imp, rebuildVueTestSaved(ref, targetID, true), localResolved})), withAlias)
 			got, err := rebuildVueWorkingRows(t, nodes, edges)
 			require.ErrorIs(t, err, errRebuildMainRule)
 			require.ErrorContains(t, err, "needs frozen path-alias evidence")
