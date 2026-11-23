@@ -492,6 +492,99 @@ func TestRebuildBuildMalformedStageDoesNotPublish(t *testing.T) {
 	}
 }
 
+func TestRebuildBuildLostAckKeepsIngestedStage(t *testing.T) {
+	ctx := t.Context()
+	req := rebuildBuildRequest{Incarnation: rebuildTestIncarnation, Witness: store_pebble.Witness{
+		Input: store_pebble.HeadDigest{1}, Recipe: store_pebble.HeadDigest{2},
+		Profile: store_pebble.FullProfile, Stage: store_pebble.StageManifest,
+	}}
+	headDir := filepath.Join(t.TempDir(), "head")
+	leases := t.TempDir()
+	file := store_pebble.ManifestFile{Path: "a.go", Language: "go", Kind: 'f', Size: 10,
+		Content: store_pebble.HeadDigest{3}, Extractor: store_pebble.HeadDigest{4}}
+	node := &graph.Node{ID: "a.go::F", Name: "F", Kind: graph.KindFunction, FilePath: file.Path, Language: "go"}
+	var saved store_pebble.LocalPublicationRecord
+	var committed store_pebble.Witness
+	var committedDigest store_pebble.HeadDigest
+
+	func() {
+		h, err := store_pebble.OpenHead(headDir, req.Incarnation, req.Witness.Profile)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, h.Close()) }()
+		readAck, writeAck, err := os.Pipe()
+		require.NoError(t, err)
+		defer readAck.Close()
+		defer writeAck.Close()
+
+		err = withRebuildInputLease(leases, func(lease string) error {
+			build, err := store_pebble.OpenBuild(filepath.Join(lease, "working"), req.Witness.Profile)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, build.Close()) }()
+			require.NoError(t, build.AddParsedFile("", store_pebble.ParseFacts{
+				Nodes: []*graph.Node{node}, File: graph.FileMetaRow{FilePath: file.Path, ContentHash: "content", Size: 10, NodeCount: 1},
+			}))
+			manifestDir := filepath.Join(lease, store_pebble.StageManifest.String())
+			fileGraphDir := filepath.Join(lease, store_pebble.StageFileGraph.String())
+			require.NoError(t, os.Mkdir(manifestDir, 0o700))
+			require.NoError(t, os.Mkdir(fileGraphDir, 0o700))
+			manifest, err := store_pebble.PrepareManifest(ctx, manifestDir, []store_pebble.ManifestFile{file}, req.Witness, req.Incarnation)
+			require.NoError(t, err)
+			fileGraph, err := build.PrepareFileGraph(ctx, fileGraphDir, manifest.Witness, req.Incarnation)
+			require.NoError(t, err)
+			var offers bytes.Buffer
+			for _, tables := range []store_pebble.StageTables{manifest, fileGraph} {
+				require.NoError(t, writeRebuildBuildReply(&offers, rebuildBuildReply{Witness: tables.Witness, Base: tables.Base, Files: tables.Files}))
+			}
+			var pinned *store_pebble.Snapshot
+			defer func() {
+				if pinned != nil {
+					require.NoError(t, pinned.Close())
+				}
+			}()
+			return receiveRebuildStages(ctx, lease, req, &offers, writeAck, func(ctx context.Context, tables store_pebble.StageTables) error {
+				digest, err := h.PublishStage(ctx, tables)
+				if err != nil {
+					return err
+				}
+				if tables.Witness.Stage == store_pebble.StageManifest {
+					pinned = h.OpenSnapshot()
+					event := uint64(5)
+					saved = store_pebble.LocalPublicationRecord{Version: tables.Witness.Version(), Incarnation: req.Incarnation, WitnessDigest: digest, EventID: &event}
+					return nil
+				}
+				committed, committedDigest = fileGraph.Witness, digest
+				require.ErrorAs(t, pinned.RequireStage(store_pebble.StageFileGraph), new(*store_pebble.ErrStagePending))
+				require.Nil(t, pinned.GetNode(node.ID))
+				// The commit has landed. Only the next ACK write fails.
+				return writeAck.Close()
+			})
+		})
+		require.ErrorIs(t, err, ErrRebuildWorker)
+		require.ErrorIs(t, err, os.ErrClosed)
+		require.ErrorContains(t, err, "acknowledge file_graph")
+		acks, err := io.ReadAll(readAck)
+		require.NoError(t, err)
+		require.Equal(t, []byte{rebuildStageAck}, acks)
+	}()
+	entries, err := os.ReadDir(leases)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+
+	h, err := store_pebble.OpenHead(headDir, req.Incarnation, req.Witness.Profile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, h.Close()) })
+	w, recovered, err := h.ReconcilePublication(&saved)
+	require.NoError(t, err)
+	require.Equal(t, store_pebble.StageFileGraph, w.Stage)
+	require.Equal(t, committed, w)
+	require.Equal(t, store_pebble.LocalPublicationRecord{Version: saved.Version, Incarnation: saved.Incarnation, WitnessDigest: committedDigest}, recovered)
+	latest := h.OpenSnapshot()
+	t.Cleanup(func() { require.NoError(t, latest.Close()) })
+	require.Equal(t, node, latest.GetNode(node.ID))
+	require.ErrorAs(t, latest.RequireStage(store_pebble.StageRelations), new(*store_pebble.ErrStagePending))
+	require.NoError(t, latest.ReadError())
+}
+
 func TestRebuildBuildReplyRequiresCoverage(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
