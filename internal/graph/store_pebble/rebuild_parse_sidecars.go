@@ -80,7 +80,8 @@ func (v RebuildView) ConstantValue(ctx context.Context, id string) (*graph.Scope
 }
 
 // CheckRebuildCloneInput binds one receipt row to the live node and exact
-// shingle sidecar in the private build's empty-repo corpus.
+// shingle sidecar in the private build's empty-repo corpus. Nil shingles
+// instead require an absent sidecar for a signature-only input.
 func (v RebuildView) CheckRebuildCloneInput(ctx context.Context, expected *graph.Node, shingles []uint64) error {
 	return v.read(ctx, func(snap *pebble.Snapshot) error {
 		key := pendingNodeKey(expected.ID)
@@ -98,6 +99,16 @@ func (v RebuildView) CheckRebuildCloneInput(ctx context.Context, expected *graph
 			return invalid("clone input node differs from receipt")
 		}
 		key = shingleKey("", expected.ID)
+		if shingles == nil {
+			present, err := pendingGet(snap, key, fnPointerPresent)
+			if err != nil {
+				return err
+			}
+			if present {
+				return invalid("signature-only clone has a shingle sidecar")
+			}
+			return nil
+		}
 		match, err := pendingGet(snap, key, func(raw []byte) (bool, error) {
 			if len(key)+len(raw) > 16<<20 {
 				return false, ErrRebuildLinkInputSize

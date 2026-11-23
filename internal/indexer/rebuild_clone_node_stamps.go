@@ -18,6 +18,9 @@ func visitRebuildCloneNodeStamps(ctx context.Context, view store_pebble.RebuildV
 	receipts iter.Seq2[store_pebble.ParseFacts, error], yield func(*graph.Node) error,
 ) (rebuildCloneSignatureCounts, error) {
 	return visitRebuildCloneSignatures(ctx, view, receipts, func(row rebuildCloneInput, sig clones.Signature, kept bool) error {
+		if row.Signed != nil {
+			return nil // native leaves signature-only metadata untouched
+		}
 		n, err := view.Node(ctx, row.ID)
 		if err != nil {
 			return err
