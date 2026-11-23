@@ -141,3 +141,110 @@ func TestRebuildFileGraphSharedClaims(t *testing.T) {
 		})
 	}
 }
+
+// Each step assembles a new private head from frozen receipts. Keep the old
+// receipts in the same cache so edits and deletes must follow the new manifest.
+func TestRebuildFileGraphSharedClaimLifecycle(t *testing.T) {
+	const id = "col::generic::users.email"
+	reg := parser.NewRegistry()
+	reg.Register(languages.NewGoExtractor())
+	idx := New(graph.New(), reg, config.Default().Index, zap.NewNop())
+	idx.installRebuildParsePolicy(rebuildParsePolicy{})
+	t.Cleanup(idx.Close)
+	store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+	recipe := rebuildDigest{5}
+	type saved struct {
+		input rebuildInput
+		facts store_pebble.ParseFacts
+	}
+	freeze := func(path string, version byte, line int) saved {
+		t.Helper()
+		n := &graph.Node{ID: path + "::use", Kind: graph.KindFunction, Name: "use", FilePath: path, Language: "go"}
+		f := store_pebble.ParseFacts{
+			File:  graph.FileMetaRow{FilePath: path, Size: 1, ContentHash: hex.EncodeToString([]byte{version})},
+			Nodes: []*graph.Node{n}, EffectiveLanguage: "go",
+		}
+		if line != 0 {
+			f.Nodes = append(f.Nodes, &graph.Node{
+				ID: id, Kind: graph.KindColumn, Name: "email", FilePath: path, Language: "go", StartLine: line,
+				Meta: map[string]any{"table": "users", "column": "email", "dialect": "generic"},
+			})
+			f.Edges = []*graph.Edge{{From: n.ID, To: id, Kind: graph.EdgeReadsCol, FilePath: path, Line: line, Origin: graph.OriginTextMatched}}
+		}
+		f.File.NodeCount = len(f.Nodes)
+		in := rebuildInput{Path: path, Language: "go", Kind: merkle.RegularFile, Size: 1, Content: rebuildDigest{version}}
+		raw, err := store_pebble.EncodeParseFacts(f)
+		require.NoError(t, err)
+		require.NoError(t, store.write(in.parseKey(idx.rebuildExtractorRecipe(recipe, in)), raw))
+		return saved{input: in, facts: f}
+	}
+	a, aEdited := freeze("a.go", 1, 5), freeze("a.go", 2, 7)
+	b, bEdited := freeze("b.go", 3, 11), freeze("b.go", 4, 13)
+	control := freeze("control.go", 5, 0)
+	for _, tc := range []struct {
+		name   string
+		claims []saved // expected raw site order, independent of the input order
+		winner *graph.Node
+	}{
+		{"initial", []saved{a, b}, a.facts.Nodes[1]},
+		{"loser_edited", []saved{a, bEdited}, a.facts.Nodes[1]},
+		{"winner_edited", []saved{aEdited, bEdited}, aEdited.facts.Nodes[1]},
+		{"winner_deleted", []saved{bEdited}, bEdited.facts.Nodes[1]},
+		{"last_claimant_deleted", nil, nil},
+		{"claimants_readded", []saved{aEdited, bEdited}, aEdited.facts.Nodes[1]},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			build, workDir := openRebuildTestFileStore(t)
+			inputs := []rebuildInput{control.input}
+			for i := len(tc.claims) - 1; i >= 0; i-- {
+				inputs = append(inputs, tc.claims[i].input)
+			}
+			root, err := rebuildInputRoot(inputs)
+			require.NoError(t, err)
+			digest, err := hex.DecodeString(root)
+			require.NoError(t, err)
+			job := rebuildFileStages{
+				workDir: workDir, incarnation: rebuildTestIncarnation,
+				inputs: inputs, recipes: map[string]rebuildDigest{"go": recipe},
+				witness: store_pebble.Witness{
+					Input: store_pebble.HeadDigest(digest), Recipe: store_pebble.HeadDigest{8},
+					Profile: store_pebble.FullProfile, Stage: store_pebble.StageManifest,
+				},
+			}
+			head, err := store_pebble.OpenHead(filepath.Join(t.TempDir(), "head"), job.incarnation, job.witness.Profile)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, head.Close()) })
+			counts, err := idx.buildRebuildFileStages(ctx, nil, store, build, job, func(tables store_pebble.StageTables) error {
+				_, err := head.PublishStage(ctx, tables)
+				return err
+			})
+			require.NoError(t, err)
+			require.Zero(t, counts.parsed)
+			require.EqualValues(t, len(inputs), counts.reused)
+			require.EqualValues(t, max(0, len(tc.claims)-1), counts.claims.AcceptedColumns)
+			var wantEdges []*graph.Edge
+			wantNodes := []*graph.Node{control.facts.Nodes[0]}
+			if tc.winner != nil {
+				wantNodes = append(wantNodes, tc.winner)
+			}
+			byFile := map[string][]*graph.Node{}
+			for _, r := range tc.claims {
+				wantNodes = append(wantNodes, r.facts.Nodes[0])
+				wantEdges = append(wantEdges, r.facts.Edges...)
+				byFile[r.input.Path] = []*graph.Node{r.facts.Nodes[0]}
+			}
+			if tc.winner != nil {
+				byFile[tc.winner.FilePath] = append(byFile[tc.winner.FilePath], tc.winner)
+			}
+			requireRebuildTestFileRows(t, build, wantNodes, wantEdges)
+			s := head.OpenSnapshot()
+			t.Cleanup(func() { require.NoError(t, s.Close()) })
+			require.NoError(t, s.RequireStage(store_pebble.StageFileGraph))
+			require.Equal(t, tc.winner, s.GetNode(id))
+			for _, path := range []string{"a.go", "b.go"} {
+				require.ElementsMatch(t, byFile[path], s.GetFileNodes(path))
+			}
+		})
+	}
+}
