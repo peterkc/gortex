@@ -2,7 +2,6 @@ package indexer
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/zzet/gortex/internal/clones"
 	"github.com/zzet/gortex/internal/graph"
@@ -24,20 +23,6 @@ func visitRebuildDiffusedCloneEdges(ctx context.Context, build *store_pebble.Bui
 			}
 			return score
 		}, func(pair clones.Pair) error {
-			a, err := view.Node(ctx, pair.A)
-			if err != nil {
-				return err
-			}
-			b, err := view.Node(ctx, pair.B)
-			if err != nil {
-				return err
-			}
-			if a == nil || b == nil {
-				return fmt.Errorf("%w: missing checked clone endpoint in pair %q, %q", store_pebble.ErrRebuildView, pair.A, pair.B)
-			}
-			if err := yield(cloneRelationEdge(graph.EdgeSemanticallyRelated, a, b, pair.Similarity)); err != nil {
-				return err
-			}
-			return yield(cloneRelationEdge(graph.EdgeSemanticallyRelated, b, a, pair.Similarity))
+			return yieldRebuildClonePairEdges(ctx, view, graph.EdgeSemanticallyRelated, pair, yield)
 		})
 }
