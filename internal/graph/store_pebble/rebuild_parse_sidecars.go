@@ -79,6 +79,49 @@ func (v RebuildView) ConstantValue(ctx context.Context, id string) (*graph.Scope
 	return result, nil
 }
 
+// CheckRebuildCloneInput binds one receipt row to the live node and exact
+// shingle sidecar in the private build's empty-repo corpus.
+func (v RebuildView) CheckRebuildCloneInput(ctx context.Context, expected *graph.Node, shingles []uint64) error {
+	return v.read(ctx, func(snap *pebble.Snapshot) error {
+		key := pendingNodeKey(expected.ID)
+		n, err := pendingGet(snap, key, func(raw []byte) (*graph.Node, error) {
+			if len(key)+len(raw) > 16<<20 {
+				return nil, ErrRebuildLinkInputSize
+			}
+			return decodeNodeLight(raw)
+		})
+		if err != nil {
+			return err
+		}
+		if n == nil || n.ID != expected.ID || n.Kind != expected.Kind || n.FilePath != expected.FilePath ||
+			n.StartLine != expected.StartLine || n.EndLine != expected.EndLine || n.Language != expected.Language || n.RepoPrefix != "" {
+			return invalid("clone input node differs from receipt")
+		}
+		key = shingleKey("", expected.ID)
+		match, err := pendingGet(snap, key, func(raw []byte) (bool, error) {
+			if len(key)+len(raw) > 16<<20 {
+				return false, ErrRebuildLinkInputSize
+			}
+			if len(raw)%8 != 0 || len(raw)/8 != len(shingles) {
+				return false, nil
+			}
+			for i, sh := range shingles {
+				if binary.LittleEndian.Uint64(raw[i*8:]) != sh {
+					return false, nil
+				}
+			}
+			return true, nil
+		})
+		if err != nil {
+			return err
+		}
+		if !match {
+			return invalid("clone input shingles differ from receipt")
+		}
+		return nil
+	})
+}
+
 // VisitCloneShingles streams one exact repo's saved shingle sets (including
 // the empty repo prefix). Yields are tentative, as for other RebuildView visits.
 func (v RebuildView) VisitCloneShingles(ctx context.Context, repo string, yield func(string, []uint64) error) error {
@@ -87,6 +130,9 @@ func (v RebuildView) VisitCloneShingles(ctx context.Context, repo string, yield 
 		id, tail, err := readKeyString(r.key[len(prefix):])
 		if err != nil || id == "" || len(tail) != 0 || len(r.value)%8 != 0 {
 			return invalid("invalid clone shingle row")
+		}
+		if len(r.key)+len(r.value) > 16<<20 {
+			return ErrRebuildLinkInputSize
 		}
 		values := make([]uint64, len(r.value)/8)
 		for i := range values {
