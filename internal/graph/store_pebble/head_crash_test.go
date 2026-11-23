@@ -23,6 +23,7 @@ import (
 
 const headCrashPhaseEnv = "GORTEX_TEST_HEAD_INGEST_CRASH_PHASE"
 const headCrashDecl = "a.go::OnlyInFileGraph"
+const headCrashAfterSelectedIngest = "after-selected-ingest"
 
 // Given a committed manifest and a sealed file graph, kill the head owner
 // before the second version edit reaches the MANIFEST, or immediately after
@@ -128,6 +129,36 @@ func TestRouteCatalogCrash(t *testing.T) {
 	}
 }
 
+func TestRouteCatalogRecoversSelectedStage(t *testing.T) {
+	lease := t.TempDir()
+	want, stage := prepareRouteCrashFixture(t, lease)
+	require.NotNil(t, want.Publication.EventID)
+	killHeadCrashChild(t, lease, headCrashAfterSelectedIngest)
+
+	catalog, err := openRouteCatalog(filepath.Join(lease, "catalog"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, catalog.Close()) })
+	row, err := catalog.lookup(lease)
+	require.NoError(t, err)
+	require.Equal(t, want, row) // The selected locator and its old record did not change.
+
+	head, err := OpenHead(row.Serving.Directory, row.Incarnation, stage.Witness.Profile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, head.Close()) })
+	witness, record, err := head.ReconcilePublication(&row.Publication)
+	require.NoError(t, err)
+	require.Equal(t, stage.Witness, witness)
+	raw, err := encodeWitness(stage.Witness)
+	require.NoError(t, err)
+	require.Equal(t, LocalPublicationRecord{
+		Version: row.Publication.Version, Incarnation: row.Incarnation, WitnessDigest: blake3.Sum256(raw),
+	}, record, "recovery must drop the old watcher mark")
+	view := stageRead(t, head)
+	require.NoError(t, view.RequireStage(StageFileGraph))
+	require.NotNil(t, view.GetNode(headCrashDecl))
+	require.NoError(t, view.ReadError())
+}
+
 func prepareRouteCrashFixture(t *testing.T, lease string) (routeCheckout, StageTables) {
 	t.Helper()
 	old := routeLocator{Lease: routeTestOldLease, Directory: filepath.Join(lease, "old")}
@@ -224,7 +255,7 @@ func TestHeadPublicationCrashChild(t *testing.T) {
 	phase := os.Getenv(headCrashPhaseEnv)
 	lease := os.Args[len(os.Args)-1]
 	switch phase {
-	case "during", "after", "before-switch", "after-switch":
+	case "during", "after", "before-switch", "after-switch", headCrashAfterSelectedIngest:
 	default:
 		t.Skip("isolated crash fixture child")
 	}
@@ -232,7 +263,8 @@ func TestHeadPublicationCrashChild(t *testing.T) {
 	require.NoError(t, err)
 	var stage StageTables
 	require.NoError(t, json.Unmarshal(request, &stage))
-	if phase == "before-switch" || phase == "after-switch" {
+	switch phase {
+	case "before-switch", "after-switch", headCrashAfterSelectedIngest:
 		crashRouteCatalogChild(t, lease, phase, stage)
 		return
 	}
@@ -263,6 +295,11 @@ func crashRouteCatalogChild(t *testing.T, lease, phase string, stage StageTables
 	old, err := OpenHead(row.Serving.Directory, row.Incarnation, FullProfile)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, old.Close()) }()
+	if phase == headCrashAfterSelectedIngest {
+		publishRouteTestStage(t, old, stage)
+		waitForHeadCrash(t, phase)
+		return
+	}
 	next, err := OpenHead(row.Candidate.Directory, row.Incarnation, FullProfile)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, next.Close()) }()
