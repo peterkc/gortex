@@ -124,7 +124,7 @@ func censusRebuildCloneInputs(ctx context.Context, build *store_pebble.BuildStor
 	receipts iter.Seq2[store_pebble.ParseFacts, error], maxScratchBytes uint64, yield func(rebuildCloneInput) error,
 ) (store_pebble.RebuildShadowedIDStats, error) {
 	var inputErr error
-	stats, err := build.CountRebuildShadowedIDs(ctx, maxScratchBytes, func(claim func(string, uint64) error) error {
+	stats, err := build.CountRebuildShadowedIDs(ctx, maxScratchBytes, func(claimNode func(string, uint64) error, claimEdge func(graph.EdgeIdentity, uint64) error) error {
 		var claimErr error
 		checked := func(next func(store_pebble.ParseFacts, error) bool) {
 			var prior string
@@ -141,7 +141,14 @@ func censusRebuildCloneInputs(ctx context.Context, build *store_pebble.BuildStor
 					prior = facts.File.FilePath
 					ordinal++
 					for _, n := range facts.Nodes {
-						if err = claim(n.ID, ordinal); err != nil {
+						if err = claimNode(n.ID, ordinal); err != nil {
+							break
+						}
+					}
+				}
+				if err == nil {
+					for _, e := range facts.Edges {
+						if err = claimEdge(graph.EdgeIdentityFor(e), ordinal); err != nil {
 							break
 						}
 					}
@@ -163,10 +170,10 @@ func censusRebuildCloneInputs(ctx context.Context, build *store_pebble.BuildStor
 	if err != nil {
 		return store_pebble.RebuildShadowedIDStats{}, err
 	}
-	if stats.Shadowed != 0 {
-		// This is a separate refusal, not a sum with possible predecessors.
-		return store_pebble.RebuildShadowedIDStats{}, fmt.Errorf("clone receipt shadowed_id=%d: %w",
-			stats.Shadowed, &store_pebble.RebuildUnknownProvenanceError{Count: stats.Shadowed})
+	if count := stats.Shadowed + stats.ShadowedEdges; count != 0 {
+		// These disjoint claim domains are separate from possible predecessors.
+		return store_pebble.RebuildShadowedIDStats{}, fmt.Errorf("clone receipt shadowed_id=%d shadowed_edge=%d: %w",
+			stats.Shadowed, stats.ShadowedEdges, &store_pebble.RebuildUnknownProvenanceError{Count: count})
 	}
 	if inputErr != nil {
 		return store_pebble.RebuildShadowedIDStats{}, inputErr

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/pebble/v2"
+	"github.com/zzet/gortex/internal/graph"
 )
 
 // RebuildShadowedIDStats describes a complete receipt census. ScratchBytes
@@ -15,16 +16,17 @@ import (
 // the pending DB's observed L0 flush volume during the census; it can include
 // other pending families. PeakRowBytes accounts for the largest encoded write.
 type RebuildShadowedIDStats struct {
-	Shadowed, ScratchBytes, SpillBytes, PeakRowBytes uint64
+	Shadowed, ShadowedEdges, ScratchBytes, SpillBytes, PeakRowBytes uint64
 }
 
-// CountRebuildShadowedIDs counts IDs claimed by different receipts without
-// keeping claimants in memory. Use the same nonzero ordinal for every claim in
-// a receipt and a different ordinal for each other receipt. The producer must
+// CountRebuildShadowedIDs counts node IDs and complete edge identities
+// claimed by different receipts without keeping claimants in memory. Use the
+// same nonzero ordinal for every claim in a receipt and a different ordinal
+// for each other receipt. The producer must
 // propagate sink errors. Only this pass owns the scratch range; no graph row
 // changes, and no successful count is returned on capacity or cleanup failure.
 func (b *BuildStore) CountRebuildShadowedIDs(ctx context.Context, maxScratchBytes uint64,
-	claims func(func(id string, receipt uint64) error) error,
+	claims func(node func(string, uint64) error, edge func(graph.EdgeIdentity, uint64) error) error,
 ) (stats RebuildShadowedIDStats, err error) {
 	prefix := []byte{'g', 'H'}
 	occupied, err := rebuildGuardHasPrefix(ctx, b.pending, prefix)
@@ -44,22 +46,14 @@ func (b *BuildStore) CountRebuildShadowedIDs(ctx context.Context, maxScratchByte
 		stats.SpillBytes = b.pending.Metrics().Levels[0].TableBytesFlushed - before
 	}()
 	const maxRowBytes = 16 << 20
-	if err := claims(func(id string, receipt uint64) error {
+	remember := func(key []byte, receipt uint64, shadowed *uint64) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if id == "" || receipt == 0 {
-			return invalid("empty node ID or receipt ordinal")
+		if receipt == 0 {
+			return invalid("empty shadowed ID receipt ordinal")
 		}
-		// Account for embedded NUL escaping and the key terminator before
-		// allocating the row. The value is one fixed-width receipt ordinal.
-		rowBytes := uint64(len(prefix)+len(id)+strings.Count(id, "\x00")+2) + 8
-		if rowBytes > maxRowBytes {
-			return fmt.Errorf("%w: shadowed ID scratch row", ErrRebuildLinkInputSize)
-		}
-		key := make([]byte, len(prefix), int(rowBytes)-8)
-		copy(key, prefix)
-		key = appendKeyString(key, id)
+		rowBytes := uint64(len(key)) + 8
 		present := false
 		first, err := pendingGet(b.pending, key, func(v []byte) (uint64, error) {
 			if len(v) != 8 {
@@ -88,11 +82,46 @@ func (b *BuildStore) CountRebuildShadowedIDs(ctx context.Context, maxScratchByte
 		stats.ScratchBytes += rowBytes
 		stats.PeakRowBytes = max(stats.PeakRowBytes, rowBytes)
 		if present {
-			stats.Shadowed++
+			(*shadowed)++
 		}
 		return nil
-	}); err != nil {
+	}
+	claimNode := func(id string, receipt uint64) error {
+		if id == "" {
+			return invalid("empty shadowed node ID")
+		}
+		size := len(prefix) + rebuildShadowedKeyStringBytes(id)
+		if size+8 > maxRowBytes {
+			return fmt.Errorf("%w: shadowed ID scratch row", ErrRebuildLinkInputSize)
+		}
+		key := make([]byte, len(prefix), size)
+		copy(key, prefix)
+		return remember(appendKeyString(key, id), receipt, &stats.Shadowed)
+	}
+	// An empty first string cannot be a node ID. Use it to separate the
+	// two key types without another range or changing node scratch costs.
+	edgePrefix := keyStrings([]byte{'g', 'H'}, "")
+	claimEdge := func(edge graph.EdgeIdentity, receipt uint64) error {
+		size := len(edgePrefix) + rebuildShadowedKeyStringBytes(edge.From) + rebuildShadowedKeyStringBytes(string(edge.Kind)) +
+			rebuildShadowedKeyStringBytes(edge.To) + rebuildShadowedKeyStringBytes(edge.FilePath) + 8 // line
+		if size+8 > maxRowBytes {
+			return fmt.Errorf("%w: shadowed edge scratch row", ErrRebuildLinkInputSize)
+		}
+		key := make([]byte, len(edgePrefix), size)
+		copy(key, edgePrefix)
+		key = appendKeyString(key, edge.From)
+		key = appendKeyString(key, string(edge.Kind))
+		key = appendKeyString(key, edge.To)
+		key = appendKeyString(key, edge.FilePath)
+		return remember(appendKeyLine(key, edge.Line), receipt, &stats.ShadowedEdges)
+	}
+	if err := claims(claimNode, claimEdge); err != nil {
 		return stats, err
 	}
 	return stats, ctx.Err()
+}
+
+func rebuildShadowedKeyStringBytes(s string) int {
+	// Match appendKeyString, including NUL escaping and the terminator.
+	return len(s) + strings.Count(s, "\x00") + 2
 }

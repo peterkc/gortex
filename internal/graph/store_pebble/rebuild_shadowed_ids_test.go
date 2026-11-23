@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/zzet/gortex/internal/graph"
 )
 
 func TestRebuildShadowedIDsExact(t *testing.T) {
@@ -28,7 +29,7 @@ func TestRebuildShadowedIDsExact(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := newBuild(t, FullProfile)
-			stats, err := b.CountRebuildShadowedIDs(t.Context(), tc.bytes, func(emit func(string, uint64) error) error {
+			stats, err := b.CountRebuildShadowedIDs(t.Context(), tc.bytes, func(emit func(string, uint64) error, _ func(graph.EdgeIdentity, uint64) error) error {
 				for _, c := range tc.claims {
 					if err := emit(c.id, c.receipt); err != nil {
 						return err
@@ -47,7 +48,7 @@ func TestRebuildShadowedIDsExact(t *testing.T) {
 
 func TestRebuildShadowedIDsFailureClearsScratch(t *testing.T) {
 	receiptErr := errors.New("planted shadowed ID receipt error")
-	claimTwice := func(emit func(string, uint64) error) error {
+	claimTwice := func(emit func(string, uint64) error, _ func(graph.EdgeIdentity, uint64) error) error {
 		if err := emit("x", 1); err != nil {
 			return err
 		}
@@ -66,8 +67,8 @@ func TestRebuildShadowedIDsFailureClearsScratch(t *testing.T) {
 			b := newBuild(t, FullProfile)
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			stats, err := b.CountRebuildShadowedIDs(ctx, tc.limit, func(emit func(string, uint64) error) error {
-				if err := claimTwice(emit); err != nil {
+			stats, err := b.CountRebuildShadowedIDs(ctx, tc.limit, func(emit func(string, uint64) error, _ func(graph.EdgeIdentity, uint64) error) error {
+				if err := claimTwice(emit, nil); err != nil {
 					return err
 				}
 				switch tc.name {
@@ -89,6 +90,33 @@ func TestRebuildShadowedIDsFailureClearsScratch(t *testing.T) {
 			requireRebuildShadowedScratchEmpty(t, b)
 		})
 	}
+}
+
+func TestRebuildShadowedEdgesShareScratchLimit(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	key := graph.EdgeIdentity{From: "x", Kind: graph.EdgeCalls, To: "y", FilePath: "z", Line: -1}
+	claim := func(node func(string, uint64) error, edge func(graph.EdgeIdentity, uint64) error) error {
+		if err := node("x", 1); err != nil {
+			return err
+		}
+		for _, receipt := range []uint64{1, 1, 2, 3} {
+			if err := edge(key, receipt); err != nil {
+				return err
+			}
+		}
+		return node("x", 2)
+	}
+	// Two 13-byte node writes share the same budget as two 36-byte
+	// edge writes. Same-receipt and already-counted claims cost nothing.
+	stats, err := b.CountRebuildShadowedIDs(t.Context(), 97, claim)
+	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+	require.Zero(t, stats)
+	requireRebuildShadowedScratchEmpty(t, b)
+
+	stats, err = b.CountRebuildShadowedIDs(t.Context(), 98, claim)
+	require.NoError(t, err)
+	require.Equal(t, RebuildShadowedIDStats{Shadowed: 1, ShadowedEdges: 1, ScratchBytes: 98, PeakRowBytes: 36}, stats)
+	requireRebuildShadowedScratchEmpty(t, b)
 }
 
 func requireRebuildShadowedScratchEmpty(t *testing.T, b *BuildStore) {
