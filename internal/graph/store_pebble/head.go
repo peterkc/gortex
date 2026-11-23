@@ -30,6 +30,7 @@ type Head struct {
 	options     *pebble.Options
 	incarnation string
 	profile     Profile
+	directory   string
 }
 
 // The bound is across all heads owned by one daemon, not per checkout.
@@ -59,7 +60,7 @@ func OpenHead(path string, incarnation string, profile Profile) (*Head, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Head{db: db, options: options, incarnation: incarnation, profile: profile}, nil
+	return &Head{db: db, options: options, incarnation: incarnation, profile: profile, directory: filepath.Clean(path)}, nil
 }
 
 func (h *Head) Close() error { return h.db.Close() }
