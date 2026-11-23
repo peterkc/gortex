@@ -246,6 +246,18 @@ func RunRebuildBuildWorker(ctx context.Context, lease string, in *os.File, outpu
 	return nil
 }
 
+// The worker and its native comparison must not install either provider
+// path. Check the dependencies after construction, not provider availability.
+func (idx *Indexer) checkRebuildProvidersOff() error {
+	if idx.SemanticManager() != nil {
+		return fmt.Errorf("%w: semantic manager installed for rebuild", errRebuildBuildWire)
+	}
+	if idx.resolver == nil || idx.resolver.LSPHelper() != nil {
+		return fmt.Errorf("%w: rebuild requires a resolver with no LSP helper", errRebuildBuildWire)
+	}
+	return nil
+}
+
 func buildRebuildStages(
 	ctx context.Context, lease string, logger *zap.Logger,
 	openBuild func(string, store_pebble.Profile) (*store_pebble.BuildStore, error),
@@ -306,6 +318,9 @@ func buildRebuildStages(
 	defer func() { err = errors.Join(err, private.Close()) }()
 	idx := New(private, reg, cfg, logger)
 	defer idx.Close()
+	if err := idx.checkRebuildProvidersOff(); err != nil {
+		return err
+	}
 	idx.installRebuildParsePolicy(req.Policy)
 	idx.SetRootPath(req.Root)
 	idx.SetContentSource(src)

@@ -46,6 +46,7 @@ type rebuildBuildRequest struct {
 	Files                  int
 	TrackedRepos           []string // b2 accepts only the frozen empty set
 	SkipPlaceholderSources bool
+	ProvidersOff           bool // required D2 semantic and resolver-LSP policy
 }
 
 // New process, same effective settings. JSON keeps the difference between a

@@ -155,6 +155,8 @@ func sealRebuildBuildInputs(ctx context.Context, lease string, src *source.Files
 		return rebuildBuildRequest{}, err
 	}
 	req.SkipPlaceholderSources = os.Getenv("GORTEX_RESOLVE_FROM_RECONCILE") == "0"
+	// D2 keeps providers out of the build even if the owner uses them later.
+	req.ProvidersOff = true
 	var name string
 	var input store_pebble.HeadDigest
 	var hasRows bool

@@ -10,6 +10,9 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
+	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/parser/languages"
+	"go.uber.org/zap"
 )
 
 func TestRebuildSearchRendersFinalFacts(t *testing.T) {
@@ -110,9 +113,16 @@ func Caller() { library.Hello() }
 			t.Setenv("GORTEX_SHADOW_MAX_BYTES", "1073741824")
 			t.Setenv("GORTEX_STREAMING_FLUSH", "0")
 			s := newFTSStore(t)
-			idx := newTestIndexer(s)
+			cfg := config.Default()
+			cfg.Index.Workers = 2
+			cfg.Semantic.Enabled = false // D2: keep providers out of the native cold comparison.
+			reg := parser.NewRegistry()
+			reg.Register(languages.NewGoExtractor())
+			idx := New(s, reg, cfg.Index, zap.NewNop())
 			t.Cleanup(idx.Close)
 			idx.SetRepoPrefix(repo)
+			require.False(t, cfg.Semantic.Enabled)
+			require.NoError(t, idx.checkRebuildProvidersOff())
 			_, err := idx.IndexCtx(t.Context(), root)
 			require.NoError(t, err)
 			node := s.GetNode(external)

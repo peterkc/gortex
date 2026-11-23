@@ -273,10 +273,50 @@ func TestRebuildBuildRequestPreservesPathBytesAndSetting(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, inputs, gotInputs)
 	require.Equal(t, rebuildTestIncarnation, got.Incarnation)
+	require.True(t, got.ProvidersOff)
 	var cfgGot config.IndexConfig
 	require.NoError(t, json.Unmarshal(got.Config, &cfgGot))
 	require.NotNil(t, cfgGot.SynthesizeExternalCalls)
 	require.False(t, *cfgGot.SynthesizeExternalCalls)
+}
+
+func TestRebuildBuildRequestRequiresProvidersOff(t *testing.T) {
+	dir, src := rebuildInputFixture(t)
+	req := rebuildBuildRequest{Root: dir, ParseDir: dir, ParseLimit: 4096,
+		Bounds: rebuildTransformBounds{CaptureBytes: 10, FileBytes: 1024}, Incarnation: rebuildTestIncarnation,
+		Witness: store_pebble.Witness{Stage: store_pebble.StageManifest, Recipe: store_pebble.HeadDigest{2}},
+	}
+	bound, err := captureProjectNameTest(t, src, map[string]*rebuildInput{"go.mod": nil, "package.json": nil}, req)
+	require.NoError(t, err)
+	require.True(t, bound.ProvidersOff)
+	bound.ProvidersOff = false
+	require.NotEqual(t, bound.Witness.Recipe, bound.projectRecipe(0))
+	// Missing policy must refuse even when the recipe matches the header.
+	// Neither request boundary should rely on opening the store.
+	bound.Witness.Recipe = bound.projectRecipe(0)
+	lease := t.TempDir()
+	err = writeRebuildBuildRequest(t.Context(), lease, bound, config.Default().Index, nil)
+	require.ErrorIs(t, err, errRebuildBuildWire)
+	require.ErrorContains(t, err, "resolver LSP off policy")
+	var encoded bytes.Buffer
+	require.NoError(t, gob.NewEncoder(&encoded).Encode(bound))
+	require.NoError(t, os.WriteFile(filepath.Join(lease, rebuildRequestName), encoded.Bytes(), 0o600))
+	_, inputs, err := readRebuildBuildRequest(t.Context(), lease)
+	require.ErrorIs(t, err, errRebuildBuildWire)
+	require.ErrorContains(t, err, "resolver LSP off policy")
+	require.Empty(t, inputs)
+}
+
+func TestRebuildProvidersOffRejectsInstalledLSP(t *testing.T) {
+	idx := newTestIndexer(graph.New())
+	t.Cleanup(idx.Close)
+	require.NoError(t, idx.checkRebuildProvidersOff())
+	helper := &preEnrichLSP{}
+	idx.SetResolverLSPHelper(helper)
+	err := idx.checkRebuildProvidersOff()
+	require.ErrorIs(t, err, errRebuildBuildWire)
+	require.ErrorContains(t, err, "no LSP helper")
+	require.Zero(t, helper.calls.Load())
 }
 
 func TestRebuildBuildRequestRejectsInvalidIncarnation(t *testing.T) {

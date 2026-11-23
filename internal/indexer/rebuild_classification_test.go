@@ -363,7 +363,7 @@ func writeRebuildClassificationTestRequest(t *testing.T, lease, root string, cfg
 	require.Len(t, raw, 32)
 	req := rebuildBuildRequest{
 		Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: rebuildTestIncarnation,
-		BaseRecipe: store_pebble.HeadDigest{2}, Recipes: map[string]rebuildDigest{"python": {1}, "bash": {1}},
+		BaseRecipe: store_pebble.HeadDigest{2}, ProvidersOff: true, Recipes: map[string]rebuildDigest{"python": {1}, "bash": {1}},
 		Policy: freezeRebuildParsePolicy(root, cfg), Bounds: rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 64 << 10},
 		Witness: store_pebble.Witness{
 			Input: store_pebble.HeadDigest(raw), FrozenInputs: store_pebble.HeadDigest(frozen),

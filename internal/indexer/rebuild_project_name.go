@@ -282,11 +282,14 @@ func (req rebuildBuildRequest) projectRecipe(cloneThreshold float64) store_pebbl
 	h := blake3.New()
 	// The tracked set is exactly empty, so no dependency export was read.
 	// Bind that policy alongside the inputs, not an unverified locator.
-	_, _ = h.Write([]byte("gortex/rebuild/project-name/v5\x00tracked-set:0\x00dependency-exports:ABSENT\x00"))
+	_, _ = h.Write([]byte("gortex/rebuild/project-name/v6\x00tracked-set:0\x00dependency-exports:ABSENT\x00"))
 	if req.SkipPlaceholderSources {
 		_, _ = h.Write([]byte{1})
 	} else {
 		_, _ = h.Write([]byte{0})
+	}
+	if req.ProvidersOff {
+		_, _ = h.Write([]byte("semantic:off\x00resolver-lsp:off\x00"))
 	}
 	// A threshold change can alter direct and diffused relations without
 	// changing a parse receipt. Bind the effective native cutoff here.
@@ -312,6 +315,9 @@ func (req rebuildBuildRequest) checkTrackedRepos() error {
 func (req rebuildBuildRequest) checkProjectRecipe() error {
 	if err := req.checkTrackedRepos(); err != nil {
 		return err
+	}
+	if !req.ProvidersOff {
+		return fmt.Errorf("%w: missing frozen semantic and resolver LSP off policy", errRebuildBuildWire)
 	}
 	threshold, err := req.recipeCloneThreshold()
 	if err != nil {
