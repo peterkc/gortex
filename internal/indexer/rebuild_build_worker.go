@@ -372,6 +372,29 @@ func buildRebuildStages(
 	if err := runRebuildDirectCapabilities(ctx, private, receipts); err != nil {
 		return err
 	}
+	if exactCheckout {
+		namespace, err := openRebuildResolverNamespace(ctx, lease, rebuildDigest(req.Witness.FrozenInputs))
+		if err != nil {
+			return err
+		}
+		predecessors := rebuildClonePredecessors{namespace: namespace, modules: cfg.Coverage.IsEnabled("modules")}
+		// Native cold detection still banks pre-signed callables when raw
+		// clone extraction is disabled.
+		stats, err := applyRebuildCloneRelations(ctx, private, receipts, predecessors, cfg.Coverage.ClonesThreshold())
+		if err != nil {
+			return err
+		}
+		logger.Info("rebuild clone relations applied to private build",
+			zap.Int("raw_bodies", stats.Signatures.Corpus),
+			zap.Int("kept_signatures", stats.Signatures.Kept),
+			zap.Int("signed_only", stats.Signatures.Signed),
+			zap.Uint64("clone_pairs", stats.Direct.Pairs),
+			zap.Int("diffused_pairs", stats.Diffused),
+			zap.Bool("diffusion_capped", stats.DiffusionCapped),
+			zap.Uint64("claim_scratch_bytes", stats.Signatures.Claims.ScratchBytes),
+			zap.Uint64("claim_observed_pending_flush_bytes", stats.Signatures.Claims.SpillBytes),
+			zap.Uint64("claim_peak_row_bytes", stats.Signatures.Claims.PeakRowBytes))
+	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.
 	return errRebuildBuildIncomplete

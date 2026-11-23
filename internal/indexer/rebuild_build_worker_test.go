@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/zzet/gortex/internal/clones"
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/excludes"
 	"github.com/zzet/gortex/internal/graph"
@@ -26,6 +27,7 @@ import (
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/resolver"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 const rebuildTestIncarnation = "0198abcd-0123-7abc-8def-0123456789ab"
@@ -163,6 +165,100 @@ func TestRebuildBuildChildStages(t *testing.T) {
 					return nil
 				}))
 			}
+		})
+	}
+}
+
+func TestRebuildBuildPrivateCloneTail(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		exact, shadowed bool
+	}{
+		{name: "signed_only_with_extraction_off", exact: true},
+		{name: "refuses_shadow_before_apply", exact: true, shadowed: true},
+		{name: "legacy_capture_stops_before_clones", shadowed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			root, src := rebuildInputFixture(t)
+			lease := t.TempDir()
+			cfg := config.Default().Index
+			off := false
+			cfg.Coverage.Modules.Enabled, cfg.Coverage.Clones.Enabled = &off, &off
+			req := rebuildBuildRequest{
+				Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: rebuildTestIncarnation,
+				BaseRecipe: store_pebble.HeadDigest{1}, ProvidersOff: true, Recipes: map[string]rebuildDigest{"go": {1}},
+				Policy: freezeRebuildParsePolicy(root, cfg), Bounds: rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 1024},
+				Witness: store_pebble.Witness{Stage: store_pebble.StageManifest, Profile: store_pebble.FullProfile},
+			}
+			// Use checked cached receipts so this test exercises the build
+			// worker rather than tree-sitter or an external extractor process.
+			idx := &Indexer{config: cfg}
+			idx.installRebuildParsePolicy(req.Policy)
+			store := rebuildParseStore{dir: req.ParseDir, limit: req.ParseLimit}
+			sig := clones.EncodeSignature(clones.Signature{1})
+			var inputs []rebuildInput
+			for _, path := range []string{"a.go", "b.go"} {
+				require.NoError(t, os.WriteFile(filepath.Join(root, path), []byte("package p\n"), 0o600))
+				input, _, err := readRebuildInput(ctx, src, path, "go", 1024)
+				require.NoError(t, err)
+				inputs = append(inputs, input)
+				n := &graph.Node{ID: path + "::F", Kind: graph.KindFunction, Name: "F", FilePath: path, Language: "go",
+					StartLine: 1, EndLine: 2, Meta: map[string]any{cloneSigMetaKey: sig, cloneTokensMetaKey: 80}}
+				if tc.shadowed && path == "a.go" {
+					n.ID, n.FilePath, n.Kind, n.Meta = "b.go::F", "b.go", graph.KindVariable, nil
+				}
+				payload, err := store_pebble.EncodeParseFacts(rebuildCloneClaimFixture(path, n))
+				require.NoError(t, err)
+				require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(req.Recipes["go"], input)), payload))
+			}
+			inputRoot, err := rebuildInputRoot(inputs)
+			require.NoError(t, err)
+			bytes, err := hex.DecodeString(inputRoot)
+			require.NoError(t, err)
+			req.Witness.Input = store_pebble.HeadDigest(bytes)
+			if tc.exact {
+				digest, err := writeRebuildInputSidecar(ctx, lease, func(emit func(rebuildSidecarRow) error) error {
+					for _, in := range inputs {
+						if err := emit(rebuildSidecarRow{Kind: rebuildNamespaceRegularFact, Path: []byte(in.Path)}); err != nil {
+							return err
+						}
+					}
+					return emit(rebuildSidecarRow{Kind: rebuildNamespaceCloseExactFact, Path: []byte(".")})
+				})
+				require.NoError(t, err)
+				req.Witness.FrozenInputs = store_pebble.HeadDigest(digest)
+			}
+			req.Witness.Recipe = req.projectRecipe(cfg.Coverage.ClonesThreshold())
+			require.NoError(t, writeRebuildBuildRequest(ctx, lease, req, cfg, inputs))
+			core, logs := observer.New(zap.InfoLevel)
+			var sent []store_pebble.Stage
+			err = buildRebuildStages(ctx, lease, zap.New(core), store_pebble.OpenBuild, rebuildTestLinkOptions(t), func(tables store_pebble.StageTables) error {
+				sent = append(sent, tables.Witness.Stage)
+				return nil
+			})
+			require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, sent)
+			applied := logs.FilterMessage("rebuild clone relations applied to private build").All()
+			if tc.exact && tc.shadowed {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+				reply := buildRefusal(err)
+				require.Equal(t, uint8(36), reply.Refusal)
+				require.EqualValues(t, 1, reply.UnknownProvenance)
+				require.Contains(t, reply.Detail, "shadowed_id=1")
+				require.Empty(t, applied)
+				return
+			}
+			require.ErrorIs(t, err, errRebuildBuildIncomplete)
+			if !tc.exact {
+				require.Empty(t, applied)
+				return
+			}
+			require.Len(t, applied, 1)
+			fields := applied[0].ContextMap()
+			require.EqualValues(t, 0, fields["raw_bodies"])
+			require.EqualValues(t, 2, fields["signed_only"])
+			require.EqualValues(t, 1, fields["clone_pairs"])
+			require.EqualValues(t, 38, fields["claim_scratch_bytes"])
 		})
 	}
 }

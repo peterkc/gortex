@@ -134,7 +134,7 @@ func TestRebuildCloneShadowedReceiptCensusMustComplete(t *testing.T) {
 			limit := uint64(rebuildCloneClaimBytes)
 			if tc.name == "capacity" {
 				// Allow the first claim and its shadow marker, not the third row.
-				limit = 2 * (len(id) + 12)
+				limit = uint64(2 * (len(id) + 12))
 			}
 			replay := func(yield func(store_pebble.ParseFacts, error) bool) {
 				for facts, err := range receipts {

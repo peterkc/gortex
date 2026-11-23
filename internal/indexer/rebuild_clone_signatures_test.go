@@ -75,7 +75,7 @@ func TestRebuildCloneSignaturesMatchNative(t *testing.T) {
 				return nil
 			})
 			require.NoError(t, err)
-			require.Equal(t, rebuildCloneSignatureCounts{Corpus: len(inputs), Kept: len(tc.kept), Claims: counts.Claims}, counts)
+			require.Equal(t, rebuildCloneSignatureCounts{Corpus: len(inputs), Kept: len(tc.kept), Claims: store_pebble.RebuildShadowedIDStats{ScratchBytes: 57, PeakRowBytes: 19}}, counts)
 			require.ElementsMatch(t, tc.kept, keptIDs)
 			require.ElementsMatch(t, inputs, gotInputs, "every input, including each drop, is finalized once")
 			require.ElementsMatch(t, want, got, "native corpus rows include finalized empty stamps")

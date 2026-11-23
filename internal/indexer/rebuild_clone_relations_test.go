@@ -39,7 +39,10 @@ func TestRebuildCloneRelationsNativeParity(t *testing.T) {
 	require.NotContains(t, wantStamp.Meta, cloneShinglesMetaKey)
 	require.Contains(t, wantStamp.Meta, cloneSigMetaKey)
 	wantStats := rebuildCloneRelationStats{
-		Signatures: rebuildCloneSignatureCounts{Corpus: 1, Kept: 1, Signed: 3},
+		Signatures: rebuildCloneSignatureCounts{
+			Corpus: 1, Kept: 1, Signed: 3,
+			Claims: store_pebble.RebuildShadowedIDStats{ScratchBytes: 76, PeakRowBytes: 19},
+		},
 		Direct: store_pebble.RebuildClonePairStats{
 			Pairs:              uint64(native.Pairs),
 			SkippedBuckets:     uint64(native.SkippedBuckets),
@@ -123,9 +126,7 @@ func TestRebuildCloneRelationsNativeParity(t *testing.T) {
 			// Retry on the same build: leftover pair or diffusion scratch refuses entry.
 			stats, err := visit("")
 			require.NoError(t, err)
-			want := wantStats
-			want.Signatures.Claims = stats.Signatures.Claims
-			require.Equal(t, want, stats)
+			require.Equal(t, wantStats, stats)
 			require.Equal(t, 2, passes)
 			require.Equal(t, []*graph.Node{wantStamp}, stamps)
 			require.ElementsMatch(t, wantEdges, edges, "complete directed native edge rows")
@@ -142,9 +143,7 @@ func TestRebuildCloneRelationsNativeParity(t *testing.T) {
 		require.NoError(t, ns.freeze())
 		stats, err := applyRebuildCloneRelations(t.Context(), build, receipts, rebuildClonePredecessors{namespace: &ns, modules: true}, threshold)
 		require.NoError(t, err)
-		want := wantStats
-		want.Signatures.Claims = stats.Signatures.Claims
-		require.Equal(t, want, stats)
+		require.Equal(t, wantStats, stats)
 		view := build.RebuildView()
 		var nodes []*graph.Node
 		require.NoError(t, view.VisitNodes(t.Context(), func(n *graph.Node) error {

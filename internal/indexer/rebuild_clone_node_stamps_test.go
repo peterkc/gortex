@@ -44,7 +44,7 @@ func TestRebuildCloneNodeStampsMatchNative(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	require.Equal(t, rebuildCloneSignatureCounts{Corpus: 3, Kept: 1, Claims: counts.Claims}, counts)
+	require.Equal(t, rebuildCloneSignatureCounts{Corpus: 3, Kept: 1, Claims: store_pebble.RebuildShadowedIDStats{ScratchBytes: 57, PeakRowBytes: 19}}, counts)
 	want := []*graph.Node{oracle.GetNode("a.go::F"), oracle.GetNode("b.go::F"), oracle.GetNode("c.rs::F")}
 	require.ElementsMatch(t, want, got, "full native rows, including dropped bodies")
 	for _, n := range got {
