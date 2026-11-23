@@ -161,7 +161,7 @@ func TestRebuildBuildFrozenInputsRejectBeforeStage(t *testing.T) {
 				require.NoError(t, os.Truncate(path, int64(len(rebuildInputSidecarMagic))))
 			case "wrong digest":
 				bound.Witness.FrozenInputs = store_pebble.HeadDigest{99}
-				bound.Witness.Recipe = bound.projectRecipe()
+				bound.Witness.Recipe = bound.projectRecipe(0)
 			}
 			require.NoError(t, writeRebuildBuildRequest(ctx, lease, bound, config.Default().Index, nil))
 			err = buildRebuildStages(ctx, lease, zap.NewNop(), store_pebble.OpenBuild, store_pebble.RebuildLinkOptions{}, func(store_pebble.StageTables) error {

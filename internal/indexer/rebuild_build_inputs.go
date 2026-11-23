@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -98,6 +99,12 @@ func (idx *Indexer) runRebuildCheckout(ctx context.Context, src *source.Filesyst
 	if err := checkRebuildGitWorktreeRoot(root); err != nil {
 		return err
 	}
+	// The owner seals the recipe from the same config the child receives.
+	var err error
+	req.Config, err = json.Marshal(idx.config)
+	if err != nil {
+		return err
+	}
 	gate := idx.newContentAdmissionGate()
 	return withRebuildCheckoutBuildInputs(ctx, leases, src, req, flat, gitCheckout,
 		func(key string, mode fs.FileMode, member rebuildGitMember, raw *int64, emit func(rebuildSidecarRow) error) (rebuildCheckoutLeaf, error) {
@@ -143,6 +150,10 @@ func sealRebuildBuildInputs(ctx context.Context, lease string, src *source.Files
 		req.Witness.FrozenInputs != (store_pebble.HeadDigest{}) || req.Witness.UsesGitIgnorePolicy || src == nil || req.Root != src.FrozenRoot().Name() {
 		return rebuildBuildRequest{}, fmt.Errorf("%w: capture needs an unbound recipe and the enumerating root", errRebuildBuildWire)
 	}
+	threshold, err := req.recipeCloneThreshold()
+	if err != nil {
+		return rebuildBuildRequest{}, err
+	}
 	req.SkipPlaceholderSources = os.Getenv("GORTEX_RESOLVE_FROM_RECONCILE") == "0"
 	var name string
 	var input store_pebble.HeadDigest
@@ -168,6 +179,6 @@ func sealRebuildBuildInputs(ctx context.Context, lease string, src *source.Files
 	}
 	req.ProjectName, req.BaseRecipe = name, req.Witness.Recipe
 	req.Witness.Input, req.Witness.FrozenInputs = input, store_pebble.HeadDigest(digest)
-	req.Witness.Recipe = req.projectRecipe()
+	req.Witness.Recipe = req.projectRecipe(threshold)
 	return req, nil
 }

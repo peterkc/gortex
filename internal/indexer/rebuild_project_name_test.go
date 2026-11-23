@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"encoding/gob"
+	"encoding/json"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/zeebo/blake3"
+	"github.com/zzet/gortex/internal/clones"
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/excludes"
 	"github.com/zzet/gortex/internal/graph"
@@ -427,4 +429,59 @@ func TestRebuildFrozenPlaceholderPolicy(t *testing.T) {
 	require.True(t, replay.SkipPlaceholderSources)
 	replay.SkipPlaceholderSources = false
 	require.ErrorIs(t, replay.checkProjectRecipe(), errRebuildBuildWire)
+}
+
+func TestRebuildCloneCutoffRecipe(t *testing.T) {
+	ctx := t.Context()
+	root, src := rebuildInputFixture(t)
+	req := rebuildBuildRequest{
+		Root: root, ParseDir: t.TempDir(), ParseLimit: 1024, Incarnation: rebuildTestIncarnation,
+		Bounds:  rebuildTransformBounds{CaptureBytes: 10, FileBytes: 1024},
+		Witness: store_pebble.Witness{Stage: store_pebble.StageManifest, Input: store_pebble.HeadDigest{1}, Recipe: store_pebble.HeadDigest{2}},
+	}
+	configAt := func(cutoff float64) config.IndexConfig {
+		cfg := config.Default().Index
+		cfg.Coverage.Clones.Threshold = cutoff
+		return cfg
+	}
+	bind := func(cutoff float64) rebuildBuildRequest {
+		input := req
+		var err error
+		input.Config, err = json.Marshal(configAt(cutoff))
+		require.NoError(t, err)
+		bound, err := captureProjectNameTest(t, src, map[string]*rebuildInput{"go.mod": nil, "package.json": nil}, input)
+		require.NoError(t, err)
+		return bound
+	}
+	defaults := bind(0)
+	require.Equal(t, defaults.Witness.Version(), bind(clones.DefaultThreshold).Witness.Version())
+	require.Equal(t, bind(1).Witness.Version(), bind(2).Witness.Version(), "native maximum is 1")
+	strict := bind(0.95)
+	require.Equal(t, defaults.Witness.Input, strict.Witness.Input)
+	require.Equal(t, defaults.Witness.FrozenInputs, strict.Witness.FrozenInputs)
+	require.NotEqual(t, defaults.Witness.Version(), strict.Witness.Version())
+
+	lease := t.TempDir()
+	require.ErrorIs(t, writeRebuildBuildRequest(ctx, lease, strict, configAt(0), nil), errRebuildBuildWire)
+	_, err := os.Stat(filepath.Join(lease, rebuildRequestName))
+	require.ErrorIs(t, err, os.ErrNotExist, "changed cutoff must refuse before creating a request")
+	require.NoError(t, writeRebuildBuildRequest(ctx, lease, strict, configAt(0.95), nil))
+	got, _, err := readRebuildBuildRequest(ctx, lease)
+	require.NoError(t, err)
+	require.Equal(t, strict.Witness.Version(), got.Witness.Version())
+	threshold, err := got.recipeCloneThreshold()
+	require.NoError(t, err)
+	require.Equal(t, 0.95, threshold)
+
+	// A stale raw request can bypass the owner writer, not the child check.
+	got.Config = defaults.Config
+	badLease := t.TempDir()
+	f, err := os.Create(filepath.Join(badLease, rebuildRequestName))
+	require.NoError(t, err)
+	encodeErr := gob.NewEncoder(f).Encode(got)
+	require.NoError(t, f.Close())
+	require.NoError(t, encodeErr)
+	_, inputs, err := readRebuildBuildRequest(ctx, badLease)
+	require.ErrorIs(t, err, errRebuildBuildWire)
+	require.Empty(t, inputs)
 }

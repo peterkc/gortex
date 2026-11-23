@@ -548,6 +548,7 @@ func TestRunRebuildCheckout(t *testing.T) {
 			}
 			cfg := config.Default().Index
 			cfg.MaxFileSize = 128
+			cfg.Coverage.Clones.Threshold = 0.95 // the owner must seal this before dispatch
 			req := rebuildBuildRequest{
 				Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: rebuildTestIncarnation,
 				Policy: freezeRebuildParsePolicy(root, cfg), Recipes: map[string]rebuildDigest{"go": {1}, "typescript": {2}, "json": {3}},

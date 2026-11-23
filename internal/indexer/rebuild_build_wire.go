@@ -52,11 +52,11 @@ type rebuildBuildRequest struct {
 // nil *bool and a configured false, which gob would flatten to a zero value.
 // Input path bytes and policy files instead travel in gob without UTF-8 folding.
 func writeRebuildBuildRequest(ctx context.Context, dir string, req rebuildBuildRequest, cfg config.IndexConfig, inputs []rebuildInput) (err error) {
-	if err := req.checkProjectRecipe(); err != nil {
-		return err
-	}
 	req.Config, err = json.Marshal(cfg)
 	if err != nil {
+		return err
+	}
+	if err := req.checkProjectRecipe(); err != nil {
 		return err
 	}
 	req.Files = len(inputs)

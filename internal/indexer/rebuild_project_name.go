@@ -2,12 +2,17 @@ package indexer
 
 import (
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 
 	"github.com/zeebo/blake3"
+	"github.com/zzet/gortex/internal/clones"
+	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/indexer/merkle"
 	"github.com/zzet/gortex/internal/indexer/source"
@@ -273,16 +278,24 @@ func rebuildManifestLinkError(path string, err error) error {
 	return fmt.Errorf("%w: %s: %w", errRebuildProjectNameInput, path, err)
 }
 
-func (req rebuildBuildRequest) projectRecipe() store_pebble.HeadDigest {
+func (req rebuildBuildRequest) projectRecipe(cloneThreshold float64) store_pebble.HeadDigest {
 	h := blake3.New()
 	// The tracked set is exactly empty, so no dependency export was read.
 	// Bind that policy alongside the inputs, not an unverified locator.
-	_, _ = h.Write([]byte("gortex/rebuild/project-name/v4\x00tracked-set:0\x00dependency-exports:ABSENT\x00"))
+	_, _ = h.Write([]byte("gortex/rebuild/project-name/v5\x00tracked-set:0\x00dependency-exports:ABSENT\x00"))
 	if req.SkipPlaceholderSources {
 		_, _ = h.Write([]byte{1})
 	} else {
 		_, _ = h.Write([]byte{0})
 	}
+	// A threshold change can alter direct and diffused relations without
+	// changing a parse receipt. Bind the effective native cutoff here.
+	if cloneThreshold <= 0 {
+		cloneThreshold = clones.DefaultThreshold
+	}
+	var score [8]byte
+	binary.BigEndian.PutUint64(score[:], math.Float64bits(cloneThreshold))
+	_, _ = h.Write(score[:])
 	_, _ = h.Write(req.Witness.FrozenInputs[:])
 	_, _ = h.Write(req.BaseRecipe[:])
 	_, _ = h.Write([]byte(req.ProjectName))
@@ -300,8 +313,27 @@ func (req rebuildBuildRequest) checkProjectRecipe() error {
 	if err := req.checkTrackedRepos(); err != nil {
 		return err
 	}
-	if req.BaseRecipe == (store_pebble.HeadDigest{}) || req.Witness.Recipe != req.projectRecipe() {
-		return fmt.Errorf("%w: project name, frozen inputs and witness recipe do not match", errRebuildBuildWire)
+	threshold, err := req.recipeCloneThreshold()
+	if err != nil {
+		return err
+	}
+	if req.BaseRecipe == (store_pebble.HeadDigest{}) || req.Witness.Recipe != req.projectRecipe(threshold) {
+		return fmt.Errorf("%w: project name, frozen inputs, clone cutoff and witness recipe do not match", errRebuildBuildWire)
 	}
 	return nil
+}
+
+// recipeCloneThreshold reads only the config field this part of the recipe
+// owns. An unconfigured capture uses the native default.
+func (req rebuildBuildRequest) recipeCloneThreshold() (float64, error) {
+	if len(req.Config) == 0 {
+		return 0, nil
+	}
+	var frozen struct {
+		Coverage struct{ Clones config.ClonesConfig }
+	}
+	if err := json.Unmarshal(req.Config, &frozen); err != nil {
+		return 0, fmt.Errorf("%w: read frozen clone settings: %w", errRebuildBuildWire, err)
+	}
+	return (config.CoverageConfig{Clones: frozen.Coverage.Clones}).ClonesThreshold(), nil
 }
