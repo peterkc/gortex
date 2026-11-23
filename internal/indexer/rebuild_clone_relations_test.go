@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"errors"
+	"fmt"
 	"maps"
 	"testing"
 
@@ -89,7 +90,7 @@ func TestRebuildCloneRelationsNativeParity(t *testing.T) {
 						}
 					}
 				}
-				return visitRebuildCloneRelations(t.Context(), build, replay, threshold, func(n *graph.Node) error {
+				return visitRebuildCloneRelations(t.Context(), build, replay, rebuildClonePredecessors{}, threshold, func(n *graph.Node) error {
 					require.Empty(t, edges, "node stamps must precede edges")
 					stamps = append(stamps, n)
 					if failAt == "node_error" {
@@ -133,7 +134,11 @@ func TestRebuildCloneRelationsNativeParity(t *testing.T) {
 	t.Run("apply", func(t *testing.T) {
 		build, _ := openRebuildTestFileStore(t)
 		receipts := seedRebuildCloneInputReceipts(t, build, facts...)
-		stats, err := applyRebuildCloneRelations(t.Context(), build, receipts, threshold)
+		var ns rebuildResolverNamespace
+		require.NoError(t, ns.add(rebuildNamespaceRow{key: "requirements.txt", kind: rebuildNamespaceRegular}))
+		require.NoError(t, ns.add(rebuildNamespaceRow{key: ".", kind: rebuildNamespaceCloseExact}))
+		require.NoError(t, ns.freeze())
+		stats, err := applyRebuildCloneRelations(t.Context(), build, receipts, rebuildClonePredecessors{namespace: &ns, modules: true}, threshold)
 		require.NoError(t, err)
 		require.Equal(t, wantStats, stats)
 		view := build.RebuildView()
@@ -150,6 +155,58 @@ func TestRebuildCloneRelationsNativeParity(t *testing.T) {
 		}))
 		require.ElementsMatch(t, wantEdges, edges)
 	})
+}
+
+func TestRebuildCloneRootManifestPredecessors(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		kind         rebuildNamespaceKind
+		modules      bool
+		composerLock bool
+		want         uint64
+	}{
+		{name: "regular", kind: rebuildNamespaceRegular, modules: true, want: 1},
+		{name: "two_ids", kind: rebuildNamespaceRegular, modules: true, composerLock: true, want: 2},
+		{name: "opaque", kind: rebuildNamespaceUnsupported, modules: true, want: 1},
+		{name: "absence", modules: true},
+		{name: "directory", kind: rebuildNamespaceDirectory, modules: true},
+		{name: "modules_off", kind: rebuildNamespaceRegular},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var ns rebuildResolverNamespace
+			if tc.kind != rebuildNamespaceUnknown {
+				require.NoError(t, ns.add(rebuildNamespaceRow{key: "requirements.txt", kind: tc.kind}))
+			}
+			if tc.composerLock {
+				require.NoError(t, ns.add(rebuildNamespaceRow{key: "composer.lock", kind: rebuildNamespaceRegular}))
+			}
+			require.NoError(t, ns.add(rebuildNamespaceRow{key: ".", kind: rebuildNamespaceCloseExact}))
+			require.NoError(t, ns.freeze())
+
+			facts := rebuildCloneRelationFixture(t)
+			// A plugin can supply this literal ID for a same-path signed callable.
+			facts[1].Nodes[0].ID = "requirements.txt"
+			facts[2].Nodes[0].ID = "composer.lock"
+			build, _ := openRebuildTestFileStore(t)
+			receipts := seedRebuildCloneInputReceipts(t, build, facts...)
+			predecessors := rebuildClonePredecessors{namespace: &ns, modules: tc.modules}
+			stats, err := applyRebuildCloneRelations(t.Context(), build, receipts, predecessors, 0.82)
+			if tc.want == 0 {
+				require.NoError(t, err)
+				require.EqualValues(t, 2, stats.Direct.Pairs)
+				return
+			}
+			require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+			reply := buildRefusal(err)
+			require.Equal(t, uint8(36), reply.Refusal)
+			require.Equal(t, tc.want, reply.UnknownProvenance)
+			require.Contains(t, reply.Detail, fmt.Sprintf("root_manifest=%d", tc.want))
+			require.Zero(t, stats)
+			requireRebuildTestFileRows(t, build, []*graph.Node{
+				facts[0].Nodes[0], facts[1].Nodes[0], facts[2].Nodes[0], facts[3].Nodes[0],
+			}, nil)
+		})
+	}
 }
 
 func rebuildCloneRelationFixture(t *testing.T) []store_pebble.ParseFacts {

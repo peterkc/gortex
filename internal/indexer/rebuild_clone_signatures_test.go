@@ -61,7 +61,7 @@ func TestRebuildCloneSignaturesMatchNative(t *testing.T) {
 			var got []graph.CloneCorpusRow
 			var gotInputs []rebuildCloneInput
 			var keptIDs []string
-			counts, err := visitRebuildCloneSignatures(t.Context(), build.RebuildView(), receipts, func(row rebuildCloneInput, sig clones.Signature, kept bool) error {
+			counts, err := visitRebuildCloneSignatures(t.Context(), build.RebuildView(), receipts, rebuildClonePredecessors{}, func(row rebuildCloneInput, sig clones.Signature, kept bool) error {
 				stamp := ""
 				if kept {
 					stamp = clones.EncodeSignature(sig)
@@ -89,7 +89,7 @@ func TestRebuildCloneSignaturesAcceptsCompleteEmpty(t *testing.T) {
 		EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: "empty.go"},
 	})
 	calls := 0
-	counts, err := visitRebuildCloneSignatures(t.Context(), build.RebuildView(), receipts, func(rebuildCloneInput, clones.Signature, bool) error {
+	counts, err := visitRebuildCloneSignatures(t.Context(), build.RebuildView(), receipts, rebuildClonePredecessors{}, func(rebuildCloneInput, clones.Signature, bool) error {
 		calls++
 		return nil
 	})
@@ -139,7 +139,7 @@ func TestRebuildCloneSignaturesRejectsIncompletePass(t *testing.T) {
 					}
 				}
 			}
-			counts, err := visitRebuildCloneSignatures(t.Context(), build.RebuildView(), faulty, func(rebuildCloneInput, clones.Signature, bool) error {
+			counts, err := visitRebuildCloneSignatures(t.Context(), build.RebuildView(), faulty, rebuildClonePredecessors{}, func(rebuildCloneInput, clones.Signature, bool) error {
 				calls++
 				if tc.wantErr == callbackErr {
 					return callbackErr

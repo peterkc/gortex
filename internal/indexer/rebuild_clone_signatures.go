@@ -9,6 +9,28 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
 
+// rebuildClonePredecessors holds frozen evidence for native writes missing
+// from the private build. This check currently covers omitted root files.
+type rebuildClonePredecessors struct {
+	namespace *rebuildResolverNamespace
+	modules   bool
+}
+
+func (p rebuildClonePredecessors) mayReplaceWithRootManifest(id string) bool {
+	if !p.modules {
+		return false
+	}
+	// These six roots from native rootManifests are not replayed. The
+	// worker uses unprefixed graph keys. An opaque name is not absence.
+	switch id {
+	case "pyproject.toml", "requirements.txt", "Cargo.toml", "pom.xml", "composer.json", "composer.lock":
+		present, err := p.namespace.probeFile(id)
+		return present || err != nil
+	default:
+		return false
+	}
+}
+
 type rebuildCloneSignatureCounts struct {
 	Corpus, Kept, Signed int
 }
@@ -20,11 +42,19 @@ type rebuildCloneSignatureCounts struct {
 // callback with kept=false is a finalized drop. All callbacks are tentative
 // until the visitor returns nil; the callback must not mutate the view.
 func visitRebuildCloneSignatures(ctx context.Context, view store_pebble.RebuildView,
-	receipts iter.Seq2[store_pebble.ParseFacts, error], yield func(row rebuildCloneInput, sig clones.Signature, kept bool) error,
+	receipts iter.Seq2[store_pebble.ParseFacts, error], predecessors rebuildClonePredecessors,
+	yield func(row rebuildCloneInput, sig clones.Signature, kept bool) error,
 ) (rebuildCloneSignatureCounts, error) {
 	cms := clones.NewCMS(65536, 4)
 	corpus, signed := 0, 0
+	var rootManifests uint64
 	if err := visitRebuildCloneInputs(ctx, view, receipts, func(row rebuildCloneInput) error {
+		// The checked cohort contains each ID once. Count possible
+		// replacements before the second pass banks or emits any row.
+		if predecessors.mayReplaceWithRootManifest(row.ID) {
+			rootManifests++
+			return nil
+		}
 		if row.Signed != nil {
 			signed++
 			return nil
@@ -36,6 +66,10 @@ func visitRebuildCloneSignatures(ctx context.Context, view store_pebble.RebuildV
 		return ctx.Err()
 	}); err != nil {
 		return rebuildCloneSignatureCounts{}, err
+	}
+	if rootManifests != 0 {
+		return rebuildCloneSignatureCounts{}, fmt.Errorf("clone predecessor root_manifest=%d: %w", rootManifests,
+			&store_pebble.RebuildUnknownProvenanceError{Count: rootManifests})
 	}
 	if corpus == 0 && signed == 0 {
 		return rebuildCloneSignatureCounts{}, nil

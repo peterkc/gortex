@@ -19,7 +19,7 @@ func visitRebuildDirectCloneEdges(ctx context.Context, build *store_pebble.Build
 	receipts iter.Seq2[store_pebble.ParseFacts, error], threshold float64, yield func(*graph.Edge) error,
 ) (store_pebble.RebuildClonePairStats, error) {
 	view := build.RebuildView()
-	_, stats, err := visitRebuildClonePairs(ctx, build, receipts, threshold, nil, func(pair clones.Pair) error {
+	_, stats, err := visitRebuildClonePairs(ctx, build, receipts, rebuildClonePredecessors{}, threshold, nil, func(pair clones.Pair) error {
 		return yieldRebuildClonePairEdges(ctx, view, graph.EdgeSimilarTo, pair, yield)
 	})
 	return stats, err
@@ -28,12 +28,12 @@ func visitRebuildDirectCloneEdges(ctx context.Context, build *store_pebble.Build
 // applyRebuildCloneRelations changes only the worker's private build. The
 // lease owner must discard it on error. No serving stage is sealed here.
 func applyRebuildCloneRelations(ctx context.Context, build *store_pebble.BuildStore,
-	receipts iter.Seq2[store_pebble.ParseFacts, error], threshold float64,
+	receipts iter.Seq2[store_pebble.ParseFacts, error], predecessors rebuildClonePredecessors, threshold float64,
 ) (rebuildCloneRelationStats, error) {
 	var stats rebuildCloneRelationStats
 	err := build.ApplyRebuildCloneRelations(ctx, func(nodes func(*graph.Node) error, edges func(*graph.Edge) error) error {
 		var err error
-		stats, err = visitRebuildCloneRelations(ctx, build, receipts, threshold, nodes, edges)
+		stats, err = visitRebuildCloneRelations(ctx, build, receipts, predecessors, threshold, nodes, edges)
 		return err
 	})
 	if err != nil {
@@ -54,14 +54,14 @@ type rebuildCloneRelationStats struct {
 // them only after pair production and cleanup complete. Node and edge sinks
 // must not modify the working view and must discard tentative rows on failure.
 func visitRebuildCloneRelations(ctx context.Context, build *store_pebble.BuildStore,
-	receipts iter.Seq2[store_pebble.ParseFacts, error], threshold float64,
+	receipts iter.Seq2[store_pebble.ParseFacts, error], predecessors rebuildClonePredecessors, threshold float64,
 	yieldNode func(*graph.Node) error, yieldEdge func(*graph.Edge) error,
 ) (rebuildCloneRelationStats, error) {
 	view := build.RebuildView()
 	var stats rebuildCloneRelationStats
 	pairs, capped, err := visitRebuildDiffusedCloneEdges(ctx, build, func(stage func(clones.Pair) error) error {
 		var err error
-		stats.Signatures, stats.Direct, err = visitRebuildClonePairs(ctx, build, receipts, threshold, yieldNode, func(pair clones.Pair) error {
+		stats.Signatures, stats.Direct, err = visitRebuildClonePairs(ctx, build, receipts, predecessors, threshold, yieldNode, func(pair clones.Pair) error {
 			if err := yieldRebuildClonePairEdges(ctx, view, graph.EdgeSimilarTo, pair, yieldEdge); err != nil {
 				return err
 			}
@@ -77,7 +77,7 @@ func visitRebuildCloneRelations(ctx context.Context, build *store_pebble.BuildSt
 }
 
 func visitRebuildClonePairs(ctx context.Context, build *store_pebble.BuildStore,
-	receipts iter.Seq2[store_pebble.ParseFacts, error], threshold float64,
+	receipts iter.Seq2[store_pebble.ParseFacts, error], predecessors rebuildClonePredecessors, threshold float64,
 	yieldNode func(*graph.Node) error, yieldPair func(clones.Pair) error,
 ) (rebuildCloneSignatureCounts, store_pebble.RebuildClonePairStats, error) {
 	view := build.RebuildView()
@@ -85,7 +85,7 @@ func visitRebuildClonePairs(ctx context.Context, build *store_pebble.BuildStore,
 	items := func(yield func(clones.Item, error) bool) {
 		stopped := errors.New("clone pair consumer stopped")
 		var err error
-		signatures, err = visitRebuildCloneSignatures(ctx, view, receipts, func(row rebuildCloneInput, sig clones.Signature, kept bool) error {
+		signatures, err = visitRebuildCloneSignatures(ctx, view, receipts, predecessors, func(row rebuildCloneInput, sig clones.Signature, kept bool) error {
 			if yieldNode != nil {
 				if err := yieldRebuildCloneNodeStamp(ctx, view, row, sig, kept, yieldNode); err != nil {
 					return err

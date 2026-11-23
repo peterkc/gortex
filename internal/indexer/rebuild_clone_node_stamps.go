@@ -17,7 +17,7 @@ import (
 func visitRebuildCloneNodeStamps(ctx context.Context, view store_pebble.RebuildView,
 	receipts iter.Seq2[store_pebble.ParseFacts, error], yield func(*graph.Node) error,
 ) (rebuildCloneSignatureCounts, error) {
-	return visitRebuildCloneSignatures(ctx, view, receipts, func(row rebuildCloneInput, sig clones.Signature, kept bool) error {
+	return visitRebuildCloneSignatures(ctx, view, receipts, rebuildClonePredecessors{}, func(row rebuildCloneInput, sig clones.Signature, kept bool) error {
 		return yieldRebuildCloneNodeStamp(ctx, view, row, sig, kept, yield)
 	})
 }
