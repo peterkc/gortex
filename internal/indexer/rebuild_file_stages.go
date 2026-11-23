@@ -34,6 +34,7 @@ type rebuildFileStages struct {
 type rebuildParsedCounts struct {
 	parsed, reused uint64
 	census         *rebuildExtractorCensus
+	claims         store_pebble.RebuildSharedClaimStats
 }
 
 var (
@@ -101,8 +102,8 @@ func (idx *Indexer) buildRebuildFileStages(
 	if root != hex.EncodeToString(job.witness.Input[:]) {
 		return counts, errors.New("build inputs do not match the frozen root")
 	}
-	// Order is part of shared-node behavior. The native first-file-wins
-	// rule uses the exact path bytes, not the walk or worker completion order.
+	// Use literal path order to assign stable receipt ordinals. Shared-node
+	// placement is decided separately from the stamped node paths.
 	slices.SortFunc(job.inputs, func(a, b rebuildInput) int { return strings.Compare(a.Path, b.Path) })
 	// Check all graph-producing names before sending any stage or reading a
 	// parse source. Sorted raw names make refusals repeatable.
@@ -176,17 +177,7 @@ func (idx *Indexer) buildRebuildFileStages(
 		if facts.File.FilePath != input.Path || facts.EffectiveLanguage == "" {
 			return counts, fmt.Errorf("%w: missing receipt attribution for %q", errParseEntryCorrupt, input.Path)
 		}
-		// The cache already holds the raw receipt. Only the fresh, owned
-		// facts passed to the graph use NFC for these store keys.
-		if key := pathkey.Normalize(input.Path); key != input.Path {
-			facts.File.FilePath = key
-			for i := range facts.Constants {
-				facts.Constants[i].FilePath = key
-			}
-		}
-		if err := private.AddParsedFile("", facts); err != nil {
-			return counts, err
-		}
+
 		census.byPath[input.Path] = facts.EffectiveLanguage
 		census.byID[facts.EffectiveLanguage]++
 		if reused {
@@ -202,6 +193,36 @@ func (idx *Indexer) buildRebuildFileStages(
 	if total != census.admitted || uint64(len(census.byPath)) != census.admitted || census.admitted != uint64(len(job.inputs)) {
 		return counts, fmt.Errorf("%w: %d files and %d receipts for %d admitted inputs (manifest %d)",
 			errRebuildCallerAttribution, len(census.byPath), total, len(job.inputs), census.admitted)
+	}
+	// Qualify every raw claim before any graph row is materialized. The
+	// parse store refuses different bytes at an existing immutable key.
+	// Later passes also use these same checked receipt keys, not the source.
+	receipts := idx.rebuildDataflowReceipts(ctx, job, store, &census)
+	counts.claims, err = private.ReduceRebuildSharedClaims(ctx, rebuildCloneClaimBytes, receipts,
+		func(keep func(string, uint64) (bool, error)) error {
+			var ordinal uint64
+			for facts, err := range receipts {
+				if err != nil {
+					return err
+				}
+				ordinal++
+				// Only the fresh replay value uses NFC for these store keys.
+				if key := pathkey.Normalize(facts.File.FilePath); key != facts.File.FilePath {
+					facts.File.FilePath = key
+					for i := range facts.Constants {
+						facts.Constants[i].FilePath = key
+					}
+				}
+				if err := private.AddParsedFileSelected("", facts, func(id string) (bool, error) {
+					return keep(id, ordinal)
+				}); err != nil {
+					return err
+				}
+			}
+			return ctx.Err()
+		})
+	if err != nil {
+		return counts, err
 	}
 	// Native emits size and content skips after parsing. Write just their
 	// nodes; a skip has no parse receipt, raw edges or manifest parse leaf.

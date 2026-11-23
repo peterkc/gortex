@@ -11,11 +11,14 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
 
-// rebuildClonePredecessors holds frozen evidence for native writes missing
-// from the private build. Later writer checks still gate the worker splice.
+// rebuildClonePredecessors holds evidence from the preceding stages and
+// the possible native writers left out of the private build.
 type rebuildClonePredecessors struct {
 	namespace *rebuildResolverNamespace
 	modules   bool
+	// Set only from the file-graph writer for the same immutable receipts.
+	// Standalone clone callers still need the raw collision census.
+	fileClaims *store_pebble.RebuildSharedClaimStats
 }
 
 func (p rebuildClonePredecessors) mayReplaceWithRootManifest(id string) bool {
@@ -165,7 +168,7 @@ func visitRebuildCloneSignatures(ctx context.Context, build *store_pebble.BuildS
 	cms := clones.NewCMS(65536, 4)
 	corpus, signed := 0, 0
 	var affected, rootManifests, rootModules, contracts, builtins, goModules, processes uint64
-	claimStats, err := censusRebuildCloneInputs(ctx, build, receipts, rebuildCloneClaimBytes, func(row rebuildCloneInput) error {
+	collect := func(row rebuildCloneInput) error {
 		// The checked cohort contains each ID once. Count possible
 		// replacements before the second pass banks or emits any row.
 		manifest := predecessors.mayReplaceWithRootManifest(row.ID)
@@ -205,7 +208,18 @@ func visitRebuildCloneSignatures(ctx context.Context, build *store_pebble.BuildS
 			cms.Add(shingle)
 		}
 		return ctx.Err()
-	})
+	}
+	var claimStats store_pebble.RebuildShadowedIDStats
+	var err error
+	if prior := predecessors.fileClaims; prior != nil {
+		// None of the accepted shared families is callable, and the early
+		// writer rejects contested shingle sidecars. Still verify the live
+		// clone cohort and every retained shingle against the same receipts.
+		claimStats = prior.RebuildShadowedIDStats
+		err = visitRebuildCloneInputs(ctx, build.RebuildView(), receipts, collect)
+	} else {
+		claimStats, err = censusRebuildCloneInputs(ctx, build, receipts, rebuildCloneClaimBytes, collect)
+	}
 	if err != nil {
 		return rebuildCloneSignatureCounts{}, err
 	}

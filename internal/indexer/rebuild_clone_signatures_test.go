@@ -12,6 +12,40 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
 
+func TestRebuildCloneSignaturesUseFileGraphClaimProof(t *testing.T) {
+	a := rebuildCloneInputFixture(rebuildCloneInput{
+		ID: "a.go::F", FilePath: "a.go", Language: "go", Line: 3, Tokens: 80,
+		Shingles: []uint64{1, 2, 3, 4, 5, 6, 7, 8},
+	}, "go")
+	shared := &graph.Node{ID: "string::error_msg::shared", Kind: graph.KindString, FilePath: "a.go"}
+	other := *shared
+	other.FilePath = "b.go"
+	a.Nodes = append(a.Nodes, shared)
+	a.File.NodeCount++
+	b := store_pebble.ParseFacts{
+		File:              graph.FileMetaRow{FilePath: "b.go", NodeCount: 1},
+		EffectiveLanguage: "go", Nodes: []*graph.Node{&other},
+	}
+	build, _ := openRebuildTestFileStore(t)
+	receipts := seedRebuildCloneInputReceipts(t, build, a, b)
+	proof, err := build.ReduceRebuildSharedClaims(t.Context(), rebuildCloneClaimBytes, receipts, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, proof.AcceptedStrings)
+	var ids []string
+	yield := func(row rebuildCloneInput, _ clones.Signature, _ bool) error {
+		ids = append(ids, row.ID)
+		return nil
+	}
+	_, err = visitRebuildCloneSignatures(t.Context(), build, receipts, rebuildClonePredecessors{}, yield)
+	var refusal *store_pebble.RebuildUnknownProvenanceError
+	require.ErrorAs(t, err, &refusal)
+	require.Empty(t, ids)
+	counts, err := visitRebuildCloneSignatures(t.Context(), build, receipts, rebuildClonePredecessors{fileClaims: &proof}, yield)
+	require.NoError(t, err)
+	require.Equal(t, proof.RebuildShadowedIDStats, counts.Claims)
+	require.Equal(t, []string{"a.go::F"}, ids)
+}
+
 func TestRebuildCloneSignaturesMatchNative(t *testing.T) {
 	// Only the deferred Rust body shares a hash with either Go body. At the
 	// corpus floor the Go bodies have seven and eight surviving hashes.

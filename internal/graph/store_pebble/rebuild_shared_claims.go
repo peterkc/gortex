@@ -132,6 +132,18 @@ func (b *BuildStore) qualifyRebuildSharedClaims(ctx context.Context, receipts it
 				last[n.ID] = n
 			}
 		}
+		// These sidecars belong to per-file declarations, never to any of
+		// the declared shared families. They cannot follow a losing claim.
+		for _, c := range f.Constants {
+			if _, contested := last[c.NodeID]; contested {
+				last[c.NodeID] = nil
+			}
+		}
+		for id := range f.Shingles {
+			if _, contested := last[id]; contested {
+				last[id] = nil
+			}
+		}
 		for _, n := range f.Nodes {
 			winner, seen := last[n.ID]
 			if !seen {

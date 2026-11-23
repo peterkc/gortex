@@ -331,6 +331,18 @@ func buildRebuildStages(
 	}
 	store := rebuildParseStore{dir: req.ParseDir, limit: req.ParseLimit}
 	counts, err := idx.buildRebuildFileStages(ctx, src, store, private, job, send)
+	if c := counts.claims; err == nil || c != (store_pebble.RebuildSharedClaimStats{}) {
+		logger.Info("rebuild file graph receipt claims",
+			zap.Uint64("shadowed_id", c.Shadowed),
+			zap.Uint64("shadowed_edge", c.ShadowedEdges),
+			zap.Uint64("unexplained_id", c.UnexplainedNodes),
+			zap.Uint64("accepted_string", c.AcceptedStrings),
+			zap.Uint64("accepted_annotation", c.AcceptedAnnotations),
+			zap.Uint64("accepted_column", c.AcceptedColumns),
+			zap.Uint64("claim_scratch_bytes", c.ScratchBytes),
+			zap.Uint64("claim_observed_pending_flush_bytes", c.SpillBytes),
+			zap.Uint64("claim_peak_row_bytes", c.PeakRowBytes))
+	}
 	if err != nil {
 		return err
 	}
@@ -377,7 +389,9 @@ func buildRebuildStages(
 		if err != nil {
 			return err
 		}
-		predecessors := rebuildClonePredecessors{namespace: namespace, modules: cfg.Coverage.IsEnabled("modules")}
+		predecessors := rebuildClonePredecessors{
+			namespace: namespace, modules: cfg.Coverage.IsEnabled("modules"), fileClaims: &counts.claims,
+		}
 		// Native cold detection still banks pre-signed callables when raw
 		// clone extraction is disabled.
 		stats, err := applyRebuildCloneRelations(ctx, private, receipts, predecessors, cfg.Coverage.ClonesThreshold())

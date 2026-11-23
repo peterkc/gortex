@@ -58,6 +58,17 @@ func checkFileMetaRow(r row) error {
 // AddParsedFile takes one cached extraction. Raw edges enter private scratch,
 // not the file-graph stage. The caller supplies files in manifest order.
 func (b *BuildStore) AddParsedFile(repo string, f ParseFacts) error {
+	return b.addParsedFile(repo, f, nil)
+}
+
+// AddParsedFileSelected replays a qualified receipt. Keep must be the node
+// selection from ReduceRebuildSharedClaims. Edges, sidecars and the original
+// per-file extraction count are not filtered.
+func (b *BuildStore) AddParsedFileSelected(repo string, f ParseFacts, keep func(string) (bool, error)) error {
+	return b.addParsedFile(repo, f, keep)
+}
+
+func (b *BuildStore) addParsedFile(repo string, f ParseFacts, keep func(string) (bool, error)) error {
 	return b.withWrites(func() error {
 		if f.File.NodeCount != len(f.Nodes) {
 			return invalid("file metadata does not count its extracted nodes")
@@ -75,6 +86,15 @@ func (b *BuildStore) AddParsedFile(repo string, f ParseFacts) error {
 			return err
 		}
 		for _, n := range f.Nodes {
+			if keep != nil {
+				selected, err := keep(n.ID)
+				if err != nil {
+					return err
+				}
+				if !selected {
+					continue
+				}
+			}
 			if err := b.writeNode(n); err != nil {
 				return err
 			}
