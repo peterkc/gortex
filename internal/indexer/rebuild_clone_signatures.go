@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/zzet/gortex/internal/clones"
+	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
 
@@ -82,6 +83,67 @@ func (p rebuildClonePredecessors) mayReplaceWithContract(id string) bool {
 	}
 }
 
+// These IDs cover explicit Go builtin writes and the implicit Graph
+// AddBatch sentinel writes. The latter use settled edge destinations,
+// which may differ from the raw receipts. Match the native constructor's
+// first-infix split and first/last nonempty segments without allocating a node.
+func isRebuildCloneBuiltinID(id string) bool {
+	if !graph.IsBuiltinStub(id) {
+		return false
+	}
+	const prefix = graph.StubKindBuiltin + "::"
+	const infix = "::" + prefix
+	var rest string
+	if i := strings.Index(id, infix); i > 0 {
+		rest = id[i+len(infix):]
+	} else {
+		var ok bool
+		if rest, ok = strings.CutPrefix(id, prefix); !ok {
+			return false
+		}
+	}
+	lang, tail, ok := strings.Cut(rest, "::")
+	if !ok || lang == "" {
+		return false
+	}
+	for {
+		_, next, ok := strings.Cut(tail, "::")
+		if !ok {
+			return tail != ""
+		}
+		tail = next
+	}
+}
+
+// Native Go extern attribution can replace a module after an edge binds to
+// an external. The function IDs it materializes are insert-only.
+func isRebuildCloneGoModuleID(id string) bool {
+	const prefix = "module::go:"
+	if name, ok := strings.CutPrefix(id, prefix); ok {
+		return name != ""
+	}
+	repo, rest, ok := strings.Cut(id, "::")
+	return ok && repo != "" && strings.HasPrefix(rest, prefix) && len(rest) > len(prefix)
+}
+
+func isRebuildCloneProcessID(id string) bool {
+	mechanism, ok := strings.CutPrefix(id, "string::process::")
+	if !ok || mechanism == "" {
+		return false
+	}
+	for _, name := range processExecAPIs {
+		if name == mechanism {
+			return true
+		}
+	}
+	for _, name := range processExecBareNames {
+		if name == mechanism {
+			return true
+		}
+	}
+	return false
+}
+
 type rebuildCloneSignatureCounts struct {
 	Corpus, Kept, Signed int
 }
@@ -98,7 +160,7 @@ func visitRebuildCloneSignatures(ctx context.Context, view store_pebble.RebuildV
 ) (rebuildCloneSignatureCounts, error) {
 	cms := clones.NewCMS(65536, 4)
 	corpus, signed := 0, 0
-	var affected, rootManifests, rootModules, contracts uint64
+	var affected, rootManifests, rootModules, contracts, builtins, goModules, processes uint64
 	if err := visitRebuildCloneInputs(ctx, view, receipts, func(row rebuildCloneInput) error {
 		// The checked cohort contains each ID once. Count possible
 		// replacements before the second pass banks or emits any row.
@@ -114,7 +176,19 @@ func visitRebuildCloneSignatures(ctx context.Context, view store_pebble.RebuildV
 		if contract {
 			contracts++
 		}
-		if manifest || module || contract {
+		builtin := isRebuildCloneBuiltinID(row.ID)
+		goModule := isRebuildCloneGoModuleID(row.ID)
+		process := isRebuildCloneProcessID(row.ID)
+		if builtin {
+			builtins++
+		}
+		if goModule {
+			goModules++
+		}
+		if process {
+			processes++
+		}
+		if manifest || module || contract || builtin || goModule || process {
 			affected++
 			return nil
 		}
@@ -131,8 +205,9 @@ func visitRebuildCloneSignatures(ctx context.Context, view store_pebble.RebuildV
 		return rebuildCloneSignatureCounts{}, err
 	}
 	if affected != 0 {
-		return rebuildCloneSignatureCounts{}, fmt.Errorf("clone predecessor root_manifest=%d root_module=%d contract=%d: %w",
-			rootManifests, rootModules, contracts, &store_pebble.RebuildUnknownProvenanceError{Count: affected})
+		return rebuildCloneSignatureCounts{}, fmt.Errorf("clone predecessor root_manifest=%d root_module=%d contract=%d builtin=%d go_module=%d process=%d: %w",
+			rootManifests, rootModules, contracts, builtins, goModules, processes,
+			&store_pebble.RebuildUnknownProvenanceError{Count: affected})
 	}
 	if corpus == 0 && signed == 0 {
 		return rebuildCloneSignatureCounts{}, nil

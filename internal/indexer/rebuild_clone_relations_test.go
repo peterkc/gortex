@@ -252,6 +252,34 @@ func TestRebuildCloneModuleAndContractPredecessors(t *testing.T) {
 	}
 }
 
+func TestRebuildCloneDynamicIDPredecessors(t *testing.T) {
+	for _, id := range []string{
+		"builtin::go::len", "repo::builtin::ts::array::push", "builtin::go:::",
+		"builtin::go::", "builtin::::len", "::builtin::go::len", "module::builtin::ts::m",
+		"builtin::ts::builtin::go::len", "builtin::ts::builtin::len",
+	} {
+		native := graph.BuiltinStubNodes([]*graph.Edge{{To: id}})
+		require.Equal(t, len(native) == 1, isRebuildCloneBuiltinID(id), id)
+	}
+
+	facts := rebuildCloneRelationFixture(t)
+	facts[1].Nodes[0].ID = "repo::builtin::ts::array::push"
+	facts[2].Nodes[0].ID = "module::go:os/exec"
+	facts[3].Nodes[0].ID = "string::process::Command::new"
+	build, _ := openRebuildTestFileStore(t)
+	receipts := seedRebuildCloneInputReceipts(t, build, facts...)
+	stats, err := applyRebuildCloneRelations(t.Context(), build, receipts, rebuildClonePredecessors{}, 0.82)
+	require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+	reply := buildRefusal(err)
+	require.Equal(t, uint8(36), reply.Refusal)
+	require.Equal(t, uint64(3), reply.UnknownProvenance)
+	require.Contains(t, reply.Detail, "builtin=1 go_module=1 process=1")
+	require.Zero(t, stats)
+	requireRebuildTestFileRows(t, build, []*graph.Node{
+		facts[0].Nodes[0], facts[1].Nodes[0], facts[2].Nodes[0], facts[3].Nodes[0],
+	}, nil)
+}
+
 func rebuildCloneRelationFixture(t *testing.T) []store_pebble.ParseFacts {
 	t.Helper()
 	shingles := []uint64{1, 3, 5, 7, 11, 13, 17, 19}
