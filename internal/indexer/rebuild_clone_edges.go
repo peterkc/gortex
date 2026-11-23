@@ -25,6 +25,23 @@ func visitRebuildDirectCloneEdges(ctx context.Context, build *store_pebble.Build
 	return stats, err
 }
 
+// applyRebuildCloneRelations changes only the worker's private build. The
+// lease owner must discard it on error. No serving stage is sealed here.
+func applyRebuildCloneRelations(ctx context.Context, build *store_pebble.BuildStore,
+	receipts iter.Seq2[store_pebble.ParseFacts, error], threshold float64,
+) (rebuildCloneRelationStats, error) {
+	var stats rebuildCloneRelationStats
+	err := build.ApplyRebuildCloneRelations(ctx, func(nodes func(*graph.Node) error, edges func(*graph.Edge) error) error {
+		var err error
+		stats, err = visitRebuildCloneRelations(ctx, build, receipts, threshold, nodes, edges)
+		return err
+	})
+	if err != nil {
+		return rebuildCloneRelationStats{}, err
+	}
+	return stats, nil
+}
+
 type rebuildCloneRelationStats struct {
 	Signatures      rebuildCloneSignatureCounts
 	Direct          store_pebble.RebuildClonePairStats

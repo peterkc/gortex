@@ -129,6 +129,27 @@ func TestRebuildCloneRelationsNativeParity(t *testing.T) {
 			assertUnchanged()
 		})
 	}
+
+	t.Run("apply", func(t *testing.T) {
+		build, _ := openRebuildTestFileStore(t)
+		receipts := seedRebuildCloneInputReceipts(t, build, facts...)
+		stats, err := applyRebuildCloneRelations(t.Context(), build, receipts, threshold)
+		require.NoError(t, err)
+		require.Equal(t, wantStats, stats)
+		view := build.RebuildView()
+		var nodes []*graph.Node
+		require.NoError(t, view.VisitNodes(t.Context(), func(n *graph.Node) error {
+			nodes = append(nodes, n)
+			return nil
+		}))
+		require.ElementsMatch(t, oracle.AllNodes(), nodes)
+		var edges []*graph.Edge
+		require.NoError(t, view.VisitEdges(t.Context(), func(e *graph.Edge) error {
+			edges = append(edges, e)
+			return nil
+		}))
+		require.ElementsMatch(t, wantEdges, edges)
+	})
 }
 
 func rebuildCloneRelationFixture(t *testing.T) []store_pebble.ParseFacts {
