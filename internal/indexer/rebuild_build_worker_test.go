@@ -237,17 +237,19 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 				sent = append(sent, tables.Witness.Stage)
 				return nil
 			})
-			require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, sent)
 			applied := logs.FilterMessage("rebuild clone relations applied to private build").All()
-			if tc.exact && tc.shadowed {
+			if tc.shadowed {
+				// Receipt validation precedes file_graph for both checkout modes.
+				require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest}, sent)
 				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
 				reply := buildRefusal(err)
 				require.Equal(t, uint8(36), reply.Refusal)
 				require.EqualValues(t, 1, reply.UnknownProvenance)
-				require.Contains(t, reply.Detail, "shadowed_id=1")
+				require.Contains(t, reply.Detail, "receipt shadowed_id=1 unexplained_id=1 shadowed_edge=0:")
 				require.Empty(t, applied)
 				return
 			}
+			require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, sent)
 			require.ErrorIs(t, err, errRebuildBuildIncomplete)
 			if !tc.exact {
 				require.Empty(t, applied)
