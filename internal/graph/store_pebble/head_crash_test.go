@@ -72,6 +72,89 @@ func TestHeadPublicationCrash(t *testing.T) {
 	}
 }
 
+// Candidate ingest and route selection are separate durable commits. A kill
+// at either boundary must leave an entire catalog row and both heads readable.
+func TestRouteCatalogCrash(t *testing.T) {
+	for _, phase := range []string{"before-switch", "after-switch"} {
+		t.Run(phase, func(t *testing.T) {
+			lease := t.TempDir()
+			want, stage := prepareRouteCrashFixture(t, lease)
+			old, next, oldRecord := want.Serving, want.Candidate, want.Publication
+			raw, err := encodeWitness(stage.Witness)
+			require.NoError(t, err)
+			event := uint64(100) + uint64(stage.Witness.Stage)
+			nextRecord := LocalPublicationRecord{
+				Version: stage.Witness.Version(), Incarnation: stage.Incarnation,
+				WitnessDigest: blake3.Sum256(raw), EventID: &event,
+			}
+			require.Equal(t, oldRecord.Version, nextRecord.Version)
+			require.NotEqual(t, oldRecord.WitnessDigest, nextRecord.WitnessDigest)
+
+			killHeadCrashChild(t, lease, phase)
+
+			if phase == "after-switch" {
+				want.Serving, want.Candidate, want.Publication = next, routeLocator{}, nextRecord
+			}
+			catalog, err := openRouteCatalog(filepath.Join(lease, "catalog"))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, catalog.Close()) })
+			got, err := catalog.lookup(lease)
+			require.NoError(t, err)
+			require.Equal(t, want, got)
+
+			oldHead, err := OpenHead(old.Directory, got.Incarnation, FullProfile)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, oldHead.Close()) })
+			oldWitness, record, err := oldHead.ReconcilePublication(&oldRecord)
+			require.NoError(t, err)
+			require.Equal(t, StageManifest, oldWitness.Stage)
+			require.Equal(t, oldRecord, record)
+			oldView := stageRead(t, oldHead)
+			require.Nil(t, oldView.GetNode(headCrashDecl))
+			require.NoError(t, oldView.ReadError())
+
+			// Even before selection, the candidate's ingest survived loss of its owner.
+			nextHead, err := OpenHead(next.Directory, got.Incarnation, FullProfile)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, nextHead.Close()) })
+			live, record, err := nextHead.ReconcilePublication(&nextRecord)
+			require.NoError(t, err)
+			require.Equal(t, stage.Witness, live)
+			require.Equal(t, nextRecord, record)
+			nextView := stageRead(t, nextHead)
+			require.NotNil(t, nextView.GetNode(headCrashDecl))
+			require.NoError(t, nextView.ReadError())
+		})
+	}
+}
+
+func prepareRouteCrashFixture(t *testing.T, lease string) (routeCheckout, StageTables) {
+	t.Helper()
+	old := routeLocator{Lease: routeTestOldLease, Directory: filepath.Join(lease, "old")}
+	next := routeLocator{Lease: routeTestNewLease, Directory: filepath.Join(lease, "next")}
+	_, stage := prepareHeadCrashFixture(t, old.Directory, lease)
+	inc := stage.Incarnation
+	h, err := OpenHead(old.Directory, inc, FullProfile)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, h.Close()) }()
+	_, record, err := h.ReconcilePublication(nil)
+	require.NoError(t, err)
+	event := uint64(5)
+	record.EventID = &event
+	require.NoError(t, h.Checkpoint(next.Directory))
+
+	ctx := t.Context()
+	catalog, err := openRouteCatalog(filepath.Join(lease, "catalog"))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, catalog.Close()) }()
+	var unrouted routeLocator
+	require.NoError(t, catalog.initCheckout(ctx, lease, inc))
+	require.NoError(t, catalog.registerCandidate(ctx, lease, inc, unrouted, old))
+	require.NoError(t, catalog.switchHead(ctx, lease, inc, unrouted, old, nil, h, record))
+	require.NoError(t, catalog.registerCandidate(ctx, lease, inc, old, next))
+	return routeCheckout{Incarnation: inc, Serving: old, Candidate: next, Publication: record}, stage
+}
+
 func prepareHeadCrashFixture(t *testing.T, headDir, lease string) (Witness, StageTables) {
 	t.Helper()
 	ctx := t.Context()
@@ -139,22 +222,22 @@ func killHeadCrashChild(t *testing.T, lease, phase string) {
 
 func TestHeadPublicationCrashChild(t *testing.T) {
 	phase := os.Getenv(headCrashPhaseEnv)
-	if phase != "during" && phase != "after" {
+	lease := os.Args[len(os.Args)-1]
+	switch phase {
+	case "during", "after", "before-switch", "after-switch":
+	default:
 		t.Skip("isolated crash fixture child")
 	}
-	lease := os.Args[len(os.Args)-1]
 	request, err := os.ReadFile(filepath.Join(lease, "stage.json"))
 	require.NoError(t, err)
 	var stage StageTables
 	require.NoError(t, json.Unmarshal(request, &stage))
-	stop := func(point string) {
-		_, err := fmt.Fprintln(os.Stdout, point)
-		require.NoError(t, err)
-		_, _ = io.Copy(io.Discard, os.Stdin) // held open until the parent kills this child
-		t.Fatal("owner pipe closed before the crash fixture killed the child")
+	if phase == "before-switch" || phase == "after-switch" {
+		crashRouteCatalogChild(t, lease, phase, stage)
+		return
 	}
 	options := headOptions()
-	fs := &headCrashFS{FS: options.FS, beforeManifestWrite: func() { stop("during") }}
+	fs := &headCrashFS{FS: options.FS, beforeManifestWrite: func() { waitForHeadCrash(t, "during") }}
 	options.FS = fs
 	db, err := pebble.Open(filepath.Join(lease, "head"), options)
 	require.NoError(t, err)
@@ -164,9 +247,40 @@ func TestHeadPublicationCrashChild(t *testing.T) {
 	_, err = h.PublishStage(t.Context(), stage)
 	require.NoError(t, err)
 	if phase == "after" {
-		stop("after")
+		waitForHeadCrash(t, "after")
 	}
 	t.Fatal("ingest returned without reaching the armed MANIFEST write")
+}
+
+func crashRouteCatalogChild(t *testing.T, lease, phase string, stage StageTables) {
+	t.Helper()
+	ctx := t.Context()
+	catalog, err := openRouteCatalog(filepath.Join(lease, "catalog"))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, catalog.Close()) }()
+	row, err := catalog.lookup(lease)
+	require.NoError(t, err)
+	old, err := OpenHead(row.Serving.Directory, row.Incarnation, FullProfile)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, old.Close()) }()
+	next, err := OpenHead(row.Candidate.Directory, row.Incarnation, FullProfile)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, next.Close()) }()
+	publication := publishRouteTestStage(t, next, stage)
+	if phase == "before-switch" {
+		waitForHeadCrash(t, phase)
+		return
+	}
+	require.NoError(t, catalog.switchHead(ctx, lease, row.Incarnation, row.Serving, row.Candidate, old, next, publication))
+	waitForHeadCrash(t, phase)
+}
+
+func waitForHeadCrash(t *testing.T, point string) {
+	t.Helper()
+	_, err := fmt.Fprintln(os.Stdout, point)
+	require.NoError(t, err)
+	_, _ = io.Copy(io.Discard, os.Stdin) // held open until the parent kills this child
+	t.Fatal("owner pipe closed before the crash fixture killed the child")
 }
 
 // Only new MANIFEST writes in this isolated child are armed. Pebble's
