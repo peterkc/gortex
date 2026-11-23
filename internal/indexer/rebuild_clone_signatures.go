@@ -145,7 +145,7 @@ func isRebuildCloneProcessID(id string) bool {
 }
 
 // Bound cumulative encoded claim writes separately from clone pair scratch.
-const rebuildCloneClaimBytes = 128 << 20
+const rebuildCloneClaimBytes = 512 << 20
 
 type rebuildCloneSignatureCounts struct {
 	Corpus, Kept, Signed int

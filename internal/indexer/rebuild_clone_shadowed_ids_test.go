@@ -10,6 +10,12 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
 
+func TestRebuildClaimScratchAllowance(t *testing.T) {
+	// T168 measured 261,065,794 logical bytes on Gortex. This policy
+	// check pins the approved allowance without a corpus-sized allocation.
+	require.EqualValues(t, 512<<20, rebuildCloneClaimBytes)
+}
+
 func TestRebuildCloneShadowedReceiptIDs(t *testing.T) {
 	for _, tc := range []struct {
 		name, id               string

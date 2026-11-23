@@ -27,8 +27,19 @@ type RebuildShadowedIDStats struct {
 // changes, and no successful count is returned on capacity or cleanup failure.
 func (b *BuildStore) CountRebuildShadowedIDs(ctx context.Context, maxScratchBytes uint64,
 	claims func(node func(string, uint64) error, edge func(graph.EdgeIdentity, uint64) error) error,
+) (RebuildShadowedIDStats, error) {
+	return b.censusRebuildClaims(ctx, maxScratchBytes, claims, nil)
+}
+
+const rebuildClaimRowBytes = 16 << 20
+
+var rebuildClaimPrefix = []byte{'g', 'H'}
+
+func (b *BuildStore) censusRebuildClaims(ctx context.Context, maxScratchBytes uint64,
+	claims func(node func(string, uint64) error, edge func(graph.EdgeIdentity, uint64) error) error,
+	finish func(*RebuildShadowedIDStats, func([]byte, []byte) error) error,
 ) (stats RebuildShadowedIDStats, err error) {
-	prefix := []byte{'g', 'H'}
+	prefix := rebuildClaimPrefix
 	occupied, err := rebuildGuardHasPrefix(ctx, b.pending, prefix)
 	if err != nil {
 		return stats, err
@@ -45,7 +56,21 @@ func (b *BuildStore) CountRebuildShadowedIDs(ctx context.Context, maxScratchByte
 		}
 		stats.SpillBytes = b.pending.Metrics().Levels[0].TableBytesFlushed - before
 	}()
-	const maxRowBytes = 16 << 20
+	put := func(key, value []byte) error {
+		rowBytes := uint64(len(key)) + uint64(len(value))
+		if rowBytes > rebuildClaimRowBytes {
+			return fmt.Errorf("%w: shadowed ID scratch row", ErrRebuildLinkInputSize)
+		}
+		if rowBytes > maxScratchBytes-stats.ScratchBytes {
+			return fmt.Errorf("%w: shadowed ID scratch exceeds %d bytes", ErrRebuildLinkInputSize, maxScratchBytes)
+		}
+		if err := b.pending.Set(key, value, pebble.NoSync); err != nil {
+			return err
+		}
+		stats.ScratchBytes += rowBytes
+		stats.PeakRowBytes = max(stats.PeakRowBytes, rowBytes)
+		return nil
+	}
 	remember := func(key []byte, receipt uint64, shadowed *uint64) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -53,7 +78,6 @@ func (b *BuildStore) CountRebuildShadowedIDs(ctx context.Context, maxScratchByte
 		if receipt == 0 {
 			return invalid("empty shadowed ID receipt ordinal")
 		}
-		rowBytes := uint64(len(key)) + 8
 		present := false
 		first, err := pendingGet(b.pending, key, func(v []byte) (uint64, error) {
 			if len(v) != 8 {
@@ -68,19 +92,14 @@ func (b *BuildStore) CountRebuildShadowedIDs(ctx context.Context, maxScratchByte
 		if present && (first == 0 || first == receipt) {
 			return nil // already counted, or another claim from the same file
 		}
-		if rowBytes > maxScratchBytes-stats.ScratchBytes {
-			return fmt.Errorf("%w: shadowed ID scratch exceeds %d bytes", ErrRebuildLinkInputSize, maxScratchBytes)
-		}
 		if present {
 			receipt = 0 // counted; a third claimant cannot count again
 		}
 		var value [8]byte
 		binary.BigEndian.PutUint64(value[:], receipt)
-		if err := b.pending.Set(key, value[:], pebble.NoSync); err != nil {
+		if err := put(key, value[:]); err != nil {
 			return err
 		}
-		stats.ScratchBytes += rowBytes
-		stats.PeakRowBytes = max(stats.PeakRowBytes, rowBytes)
 		if present {
 			(*shadowed)++
 		}
@@ -91,7 +110,7 @@ func (b *BuildStore) CountRebuildShadowedIDs(ctx context.Context, maxScratchByte
 			return invalid("empty shadowed node ID")
 		}
 		size := len(prefix) + rebuildShadowedKeyStringBytes(id)
-		if size+8 > maxRowBytes {
+		if size+8 > rebuildClaimRowBytes {
 			return fmt.Errorf("%w: shadowed ID scratch row", ErrRebuildLinkInputSize)
 		}
 		key := make([]byte, len(prefix), size)
@@ -104,7 +123,7 @@ func (b *BuildStore) CountRebuildShadowedIDs(ctx context.Context, maxScratchByte
 	claimEdge := func(edge graph.EdgeIdentity, receipt uint64) error {
 		size := len(edgePrefix) + rebuildShadowedKeyStringBytes(edge.From) + rebuildShadowedKeyStringBytes(string(edge.Kind)) +
 			rebuildShadowedKeyStringBytes(edge.To) + rebuildShadowedKeyStringBytes(edge.FilePath) + 8 // line
-		if size+8 > maxRowBytes {
+		if size+8 > rebuildClaimRowBytes {
 			return fmt.Errorf("%w: shadowed edge scratch row", ErrRebuildLinkInputSize)
 		}
 		key := make([]byte, len(edgePrefix), size)
@@ -117,6 +136,14 @@ func (b *BuildStore) CountRebuildShadowedIDs(ctx context.Context, maxScratchByte
 	}
 	if err := claims(claimNode, claimEdge); err != nil {
 		return stats, err
+	}
+	if err := ctx.Err(); err != nil {
+		return stats, err
+	}
+	if finish != nil {
+		if err := finish(&stats, put); err != nil {
+			return stats, err
+		}
 	}
 	return stats, ctx.Err()
 }
