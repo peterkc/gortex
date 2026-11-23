@@ -85,7 +85,7 @@ func TestRebuildSignedCloneInputsNativeParity(t *testing.T) {
 			require.ElementsMatch(t, oracle.AllEdges(), edges, "full directed native edge rows")
 
 			var stamps []*graph.Node
-			counts, err := visitRebuildCloneNodeStamps(t.Context(), view, receipts, func(n *graph.Node) error {
+			counts, err := visitRebuildCloneNodeStamps(t.Context(), build, receipts, func(n *graph.Node) error {
 				stamps = append(stamps, n)
 				return nil
 			})

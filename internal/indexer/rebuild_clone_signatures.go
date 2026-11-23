@@ -144,8 +144,12 @@ func isRebuildCloneProcessID(id string) bool {
 	return false
 }
 
+// Bound cumulative encoded claim writes separately from clone pair scratch.
+const rebuildCloneClaimBytes = 128 << 20
+
 type rebuildCloneSignatureCounts struct {
 	Corpus, Kept, Signed int
+	Claims               store_pebble.RebuildShadowedIDStats
 }
 
 // visitRebuildCloneSignatures finalizes each body from the same immutable
@@ -154,14 +158,14 @@ type rebuildCloneSignatureCounts struct {
 // already finalized and an item even when there are no raw bodies. A
 // callback with kept=false is a finalized drop. All callbacks are tentative
 // until the visitor returns nil; the callback must not mutate the view.
-func visitRebuildCloneSignatures(ctx context.Context, view store_pebble.RebuildView,
+func visitRebuildCloneSignatures(ctx context.Context, build *store_pebble.BuildStore,
 	receipts iter.Seq2[store_pebble.ParseFacts, error], predecessors rebuildClonePredecessors,
 	yield func(row rebuildCloneInput, sig clones.Signature, kept bool) error,
 ) (rebuildCloneSignatureCounts, error) {
 	cms := clones.NewCMS(65536, 4)
 	corpus, signed := 0, 0
 	var affected, rootManifests, rootModules, contracts, builtins, goModules, processes uint64
-	if err := visitRebuildCloneInputs(ctx, view, receipts, func(row rebuildCloneInput) error {
+	claimStats, err := censusRebuildCloneInputs(ctx, build, receipts, rebuildCloneClaimBytes, func(row rebuildCloneInput) error {
 		// The checked cohort contains each ID once. Count possible
 		// replacements before the second pass banks or emits any row.
 		manifest := predecessors.mayReplaceWithRootManifest(row.ID)
@@ -201,7 +205,8 @@ func visitRebuildCloneSignatures(ctx context.Context, view store_pebble.RebuildV
 			cms.Add(shingle)
 		}
 		return ctx.Err()
-	}); err != nil {
+	})
+	if err != nil {
 		return rebuildCloneSignatureCounts{}, err
 	}
 	if affected != 0 {
@@ -209,13 +214,13 @@ func visitRebuildCloneSignatures(ctx context.Context, view store_pebble.RebuildV
 			rootManifests, rootModules, contracts, builtins, goModules, processes,
 			&store_pebble.RebuildUnknownProvenanceError{Count: affected})
 	}
+	counts := rebuildCloneSignatureCounts{Claims: claimStats}
 	if corpus == 0 && signed == 0 {
-		return rebuildCloneSignatureCounts{}, nil
+		return counts, nil
 	}
 	useFilter := corpus >= cmsMinCorpus
 	threshold := max(uint32(1), uint32(float64(corpus)*cmsBoilerplateRatio))
-	var counts rebuildCloneSignatureCounts
-	if err := visitRebuildCloneInputs(ctx, view, receipts, func(row rebuildCloneInput) error {
+	if err := visitRebuildCloneInputs(ctx, build.RebuildView(), receipts, func(row rebuildCloneInput) error {
 		if row.Signed != nil {
 			counts.Signed++
 			return yield(row, *row.Signed, true)

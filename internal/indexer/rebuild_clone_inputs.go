@@ -35,8 +35,8 @@ func visitRebuildCloneInputs(ctx context.Context, view store_pebble.RebuildView,
 			return err
 		}
 		path := facts.File.FilePath
-		if path <= prior || facts.EffectiveLanguage == "" {
-			return fmt.Errorf("%w: out-of-order or unattributed clone receipt %q", errParseEntryCorrupt, path)
+		if err := checkRebuildCloneReceipt(facts, prior); err != nil {
+			return err
 		}
 		prior = path
 		file := pathkey.Normalize(path)
@@ -113,6 +113,71 @@ func visitRebuildCloneInputs(ctx context.Context, view store_pebble.RebuildView,
 	}
 	if matched != saved {
 		return fmt.Errorf("%w: clone receipt cohort %d differs from working cohort %d", errParseEntryCorrupt, matched, saved)
+	}
+	return nil
+}
+
+// censusRebuildCloneInputs feeds every claim before clone eligibility checks.
+// If a settled row no longer matches, finish the same receipt replay without
+// checking more live rows: the complete census can explain that mismatch.
+func censusRebuildCloneInputs(ctx context.Context, build *store_pebble.BuildStore,
+	receipts iter.Seq2[store_pebble.ParseFacts, error], maxScratchBytes uint64, yield func(rebuildCloneInput) error,
+) (store_pebble.RebuildShadowedIDStats, error) {
+	var inputErr error
+	stats, err := build.CountRebuildShadowedIDs(ctx, maxScratchBytes, func(claim func(string, uint64) error) error {
+		var claimErr error
+		checked := func(next func(store_pebble.ParseFacts, error) bool) {
+			var prior string
+			var ordinal uint64
+			visiting := true
+			for facts, err := range receipts {
+				if err == nil {
+					err = ctx.Err()
+				}
+				if err == nil {
+					err = checkRebuildCloneReceipt(facts, prior)
+				}
+				if err == nil {
+					prior = facts.File.FilePath
+					ordinal++
+					for _, n := range facts.Nodes {
+						if err = claim(n.ID, ordinal); err != nil {
+							break
+						}
+					}
+				}
+				if err != nil {
+					claimErr = err
+				}
+				if visiting {
+					visiting = next(facts, err)
+				}
+				if err != nil {
+					return
+				}
+			}
+		}
+		inputErr = visitRebuildCloneInputs(ctx, build.RebuildView(), checked, yield)
+		return claimErr
+	})
+	if err != nil {
+		return store_pebble.RebuildShadowedIDStats{}, err
+	}
+	if stats.Shadowed != 0 {
+		// This is a separate refusal, not a sum with possible predecessors.
+		return store_pebble.RebuildShadowedIDStats{}, fmt.Errorf("clone receipt shadowed_id=%d: %w",
+			stats.Shadowed, &store_pebble.RebuildUnknownProvenanceError{Count: stats.Shadowed})
+	}
+	if inputErr != nil {
+		return store_pebble.RebuildShadowedIDStats{}, inputErr
+	}
+	return stats, nil
+}
+
+func checkRebuildCloneReceipt(facts store_pebble.ParseFacts, prior string) error {
+	path := facts.File.FilePath
+	if path <= prior || facts.EffectiveLanguage == "" {
+		return fmt.Errorf("%w: out-of-order or unattributed clone receipt %q", errParseEntryCorrupt, path)
 	}
 	return nil
 }

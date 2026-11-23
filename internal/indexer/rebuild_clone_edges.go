@@ -85,7 +85,7 @@ func visitRebuildClonePairs(ctx context.Context, build *store_pebble.BuildStore,
 	items := func(yield func(clones.Item, error) bool) {
 		stopped := errors.New("clone pair consumer stopped")
 		var err error
-		signatures, err = visitRebuildCloneSignatures(ctx, view, receipts, predecessors, func(row rebuildCloneInput, sig clones.Signature, kept bool) error {
+		signatures, err = visitRebuildCloneSignatures(ctx, build, receipts, predecessors, func(row rebuildCloneInput, sig clones.Signature, kept bool) error {
 			if yieldNode != nil {
 				if err := yieldRebuildCloneNodeStamp(ctx, view, row, sig, kept, yieldNode); err != nil {
 					return err

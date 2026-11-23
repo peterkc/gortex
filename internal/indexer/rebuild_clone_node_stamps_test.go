@@ -39,12 +39,12 @@ func TestRebuildCloneNodeStampsMatchNative(t *testing.T) {
 	require.Equal(t, live.ID, items[0].ID)
 
 	var got []*graph.Node
-	counts, err := visitRebuildCloneNodeStamps(t.Context(), view, receipts, func(n *graph.Node) error {
+	counts, err := visitRebuildCloneNodeStamps(t.Context(), build, receipts, func(n *graph.Node) error {
 		got = append(got, n)
 		return nil
 	})
 	require.NoError(t, err)
-	require.Equal(t, rebuildCloneSignatureCounts{Corpus: 3, Kept: 1}, counts)
+	require.Equal(t, rebuildCloneSignatureCounts{Corpus: 3, Kept: 1, Claims: counts.Claims}, counts)
 	want := []*graph.Node{oracle.GetNode("a.go::F"), oracle.GetNode("b.go::F"), oracle.GetNode("c.rs::F")}
 	require.ElementsMatch(t, want, got, "full native rows, including dropped bodies")
 	for _, n := range got {
@@ -67,7 +67,7 @@ func TestRebuildCloneNodeStampsPropagateSinkError(t *testing.T) {
 	view := build.RebuildView()
 	sinkErr := errors.New("node stamp sink failed")
 	calls := 0
-	counts, err := visitRebuildCloneNodeStamps(t.Context(), view, receipts, func(n *graph.Node) error {
+	counts, err := visitRebuildCloneNodeStamps(t.Context(), build, receipts, func(n *graph.Node) error {
 		calls++
 		if calls == 2 {
 			n.Meta["test_labels"].([]string)[0] = "changed by failing sink"
@@ -100,7 +100,7 @@ func TestRebuildCloneNodeStampsRejectLiveMetadataDrift(t *testing.T) {
 			require.NoError(t, visitRebuildCloneInputs(t.Context(), view, receipts, func(rebuildCloneInput) error { return nil }),
 				"the receipt and the sidecar still agree; only the live metadata differs")
 
-			counts, err := visitRebuildCloneNodeStamps(t.Context(), view, receipts, func(n *graph.Node) error {
+			counts, err := visitRebuildCloneNodeStamps(t.Context(), build, receipts, func(n *graph.Node) error {
 				require.NotEqual(t, changed.ID, n.ID, "do not yield the inconsistent node")
 				return nil
 			})

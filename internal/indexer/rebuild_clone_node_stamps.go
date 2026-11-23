@@ -14,10 +14,11 @@ import (
 // visitRebuildCloneNodeStamps prepares replacement metadata for the checked
 // raw-body cohort only. It does not settle signature-only inputs or write to
 // the working graph or shingle sidecar. Discard tentative rows on failure.
-func visitRebuildCloneNodeStamps(ctx context.Context, view store_pebble.RebuildView,
+func visitRebuildCloneNodeStamps(ctx context.Context, build *store_pebble.BuildStore,
 	receipts iter.Seq2[store_pebble.ParseFacts, error], yield func(*graph.Node) error,
 ) (rebuildCloneSignatureCounts, error) {
-	return visitRebuildCloneSignatures(ctx, view, receipts, rebuildClonePredecessors{}, func(row rebuildCloneInput, sig clones.Signature, kept bool) error {
+	view := build.RebuildView()
+	return visitRebuildCloneSignatures(ctx, build, receipts, rebuildClonePredecessors{}, func(row rebuildCloneInput, sig clones.Signature, kept bool) error {
 		return yieldRebuildCloneNodeStamp(ctx, view, row, sig, kept, yield)
 	})
 }

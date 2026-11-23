@@ -61,7 +61,7 @@ func TestRebuildCloneSignaturesMatchNative(t *testing.T) {
 			var got []graph.CloneCorpusRow
 			var gotInputs []rebuildCloneInput
 			var keptIDs []string
-			counts, err := visitRebuildCloneSignatures(t.Context(), build.RebuildView(), receipts, rebuildClonePredecessors{}, func(row rebuildCloneInput, sig clones.Signature, kept bool) error {
+			counts, err := visitRebuildCloneSignatures(t.Context(), build, receipts, rebuildClonePredecessors{}, func(row rebuildCloneInput, sig clones.Signature, kept bool) error {
 				stamp := ""
 				if kept {
 					stamp = clones.EncodeSignature(sig)
@@ -75,7 +75,7 @@ func TestRebuildCloneSignaturesMatchNative(t *testing.T) {
 				return nil
 			})
 			require.NoError(t, err)
-			require.Equal(t, rebuildCloneSignatureCounts{Corpus: len(inputs), Kept: len(tc.kept)}, counts)
+			require.Equal(t, rebuildCloneSignatureCounts{Corpus: len(inputs), Kept: len(tc.kept), Claims: counts.Claims}, counts)
 			require.ElementsMatch(t, tc.kept, keptIDs)
 			require.ElementsMatch(t, inputs, gotInputs, "every input, including each drop, is finalized once")
 			require.ElementsMatch(t, want, got, "native corpus rows include finalized empty stamps")
@@ -89,7 +89,7 @@ func TestRebuildCloneSignaturesAcceptsCompleteEmpty(t *testing.T) {
 		EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: "empty.go"},
 	})
 	calls := 0
-	counts, err := visitRebuildCloneSignatures(t.Context(), build.RebuildView(), receipts, rebuildClonePredecessors{}, func(rebuildCloneInput, clones.Signature, bool) error {
+	counts, err := visitRebuildCloneSignatures(t.Context(), build, receipts, rebuildClonePredecessors{}, func(rebuildCloneInput, clones.Signature, bool) error {
 		calls++
 		return nil
 	})
@@ -139,7 +139,7 @@ func TestRebuildCloneSignaturesRejectsIncompletePass(t *testing.T) {
 					}
 				}
 			}
-			counts, err := visitRebuildCloneSignatures(t.Context(), build.RebuildView(), faulty, rebuildClonePredecessors{}, func(rebuildCloneInput, clones.Signature, bool) error {
+			counts, err := visitRebuildCloneSignatures(t.Context(), build, faulty, rebuildClonePredecessors{}, func(rebuildCloneInput, clones.Signature, bool) error {
 				calls++
 				if tc.wantErr == callbackErr {
 					return callbackErr

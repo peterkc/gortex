@@ -123,7 +123,9 @@ func TestRebuildCloneRelationsNativeParity(t *testing.T) {
 			// Retry on the same build: leftover pair or diffusion scratch refuses entry.
 			stats, err := visit("")
 			require.NoError(t, err)
-			require.Equal(t, wantStats, stats)
+			want := wantStats
+			want.Signatures.Claims = stats.Signatures.Claims
+			require.Equal(t, want, stats)
 			require.Equal(t, 2, passes)
 			require.Equal(t, []*graph.Node{wantStamp}, stamps)
 			require.ElementsMatch(t, wantEdges, edges, "complete directed native edge rows")
@@ -140,7 +142,9 @@ func TestRebuildCloneRelationsNativeParity(t *testing.T) {
 		require.NoError(t, ns.freeze())
 		stats, err := applyRebuildCloneRelations(t.Context(), build, receipts, rebuildClonePredecessors{namespace: &ns, modules: true}, threshold)
 		require.NoError(t, err)
-		require.Equal(t, wantStats, stats)
+		want := wantStats
+		want.Signatures.Claims = stats.Signatures.Claims
+		require.Equal(t, want, stats)
 		view := build.RebuildView()
 		var nodes []*graph.Node
 		require.NoError(t, view.VisitNodes(t.Context(), func(n *graph.Node) error {
