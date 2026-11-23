@@ -59,17 +59,20 @@ func (idx *Indexer) installRebuildParsePolicy(policy rebuildParsePolicy) {
 	}
 }
 
-// rebuildExtractorRecipe folds in only the repository-local policy this file
-// uses. CODEOWNERS is last-match-wins; preserving the resulting owner order also
-// preserves extraction order. Only the Go extractor reads the Temporal list.
+// rebuildExtractorRecipe binds the settings that apply during extraction.
+// CODEOWNERS is last-match-wins; the owner order is preserved. Only the Go
+// extractor reads the Temporal list. Clone scoring thresholds apply later.
 func (idx *Indexer) rebuildExtractorRecipe(base rebuildDigest, input rebuildInput) rebuildDigest {
 	graphPath := pathkey.Normalize(input.Path)
-	version := byte(2) // v2 requires the effective extractor ID.
+	version := byte(4) // v4 binds effective clone extraction to the receipt.
 	if graphPath != input.Path {
-		// Only changed spellings can have stale raw-keyed graph facts.
-		version = 3
+		version = 5 // Keep the NFC graph-key variant distinct.
 	}
-	b := append([]byte{'r', version}, base[:]...)
+	cloneMode := byte(0)
+	if idx.config.Coverage.IsEnabled("clones") {
+		cloneMode = 1
+	}
+	b := append([]byte{'r', version, cloneMode}, base[:]...)
 	appendList := func(values []string) {
 		b = binary.AppendUvarint(b, uint64(len(values)))
 		for _, value := range values {

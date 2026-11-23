@@ -3,6 +3,7 @@ package indexer
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -79,6 +80,74 @@ func TestRebuildFileFactsRemainReachableAfterSourceEdit(t *testing.T) {
 	require.False(t, reused)
 	_, err = store.read(waitingKey)
 	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestRebuildFileBindsCloneExtractionRecipe(t *testing.T) {
+	ctx := t.Context()
+	root, src := rebuildInputFixture(t)
+	const path = "a.go"
+	file := filepath.Join(root, path)
+	original := []byte("package p\nfunc A(){" + strings.Repeat(";", 73) + "}\nfunc B(){" + strings.Repeat(";", 74) + "}\nfunc Tiny(){}\n")
+	require.NoError(t, os.WriteFile(file, original, 0o600))
+	input, _, err := readRebuildInput(ctx, src, path, "go", 1<<20)
+	require.NoError(t, err)
+	newIndexer := func(toggle *bool, threshold float64) *Indexer {
+		cfg := config.Default().Index
+		cfg.Coverage.Clones.Enabled = toggle
+		cfg.Coverage.Clones.Threshold = threshold
+		reg := parser.NewRegistry()
+		reg.Register(languages.NewGoExtractor())
+		idx := New(graph.New(), reg, cfg, zap.NewNop())
+		idx.installRebuildParsePolicy(freezeRebuildParsePolicy(root, cfg))
+		idx.SetRootPath(root)
+		t.Cleanup(idx.Close)
+		return idx
+	}
+	yes, no := true, false
+	defaultOn := newIndexer(nil, 0)
+	explicitOn := newIndexer(&yes, 0.95)
+	off := newIndexer(&no, 0)
+	base := rebuildDigest{1}
+	onRecipe := defaultOn.rebuildExtractorRecipe(base, input)
+	require.Equal(t, onRecipe, explicitOn.rebuildExtractorRecipe(base, input))
+	require.NotEqual(t, onRecipe, off.rebuildExtractorRecipe(base, input))
+	store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+	facts, reused, err := defaultOn.loadRebuildFile(ctx, src, store, input, base, rebuildTransformBounds{})
+	require.NoError(t, err)
+	require.False(t, reused)
+	require.Len(t, facts.Shingles, 2)
+	require.Len(t, facts.Shingles[path+"::A"], 7)
+	require.Equal(t, facts.Shingles[path+"::A"], facts.Shingles[path+"::B"])
+	counts := make(map[string]any)
+	for _, n := range facts.Nodes {
+		if n.Kind == graph.KindFunction {
+			counts[n.ID] = n.Meta[cloneTokensMetaKey]
+		}
+	}
+	require.Equal(t, map[string]any{path + "::A": 79, path + "::B": 80, path + "::Tiny": nil}, counts)
+	encoded, err := store_pebble.EncodeParseFacts(facts)
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(file, []byte("package p\nfunc Replacement(){}\n"), 0o600))
+	cached, reused, err := explicitOn.loadRebuildFile(ctx, src, store, input, base, rebuildTransformBounds{})
+	require.NoError(t, err)
+	require.True(t, reused)
+	replayed, err := store_pebble.EncodeParseFacts(cached)
+	require.NoError(t, err)
+	require.Equal(t, encoded, replayed)
+	_, reused, err = off.loadRebuildFile(ctx, src, store, input, base, rebuildTransformBounds{})
+	require.ErrorIs(t, err, ErrBuildInputChanged)
+	require.False(t, reused)
+
+	require.NoError(t, os.WriteFile(file, original, 0o600))
+	disabled, reused, err := off.loadRebuildFile(ctx, src, store, input, base, rebuildTransformBounds{})
+	require.NoError(t, err)
+	require.False(t, reused)
+	require.Empty(t, disabled.Shingles)
+	for _, n := range disabled.Nodes {
+		require.NotContains(t, n.Meta, cloneBodyMetaKey)
+		require.NotContains(t, n.Meta, cloneTokensMetaKey)
+	}
 }
 
 func TestRebuildFileRefusesUnboundEffectiveLanguage(t *testing.T) {
