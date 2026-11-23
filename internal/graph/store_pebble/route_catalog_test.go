@@ -144,6 +144,43 @@ func TestRouteCatalogSwitchHead(t *testing.T) {
 	assertRoute(want)
 }
 
+func TestRouteCatalogRejectsSupersededCandidate(t *testing.T) {
+	ctx := t.Context()
+	checkout := t.TempDir()
+	inc := testHeadIncarnation
+	catalog, err := openRouteCatalog(filepath.Join(t.TempDir(), "catalog"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, catalog.Close()) })
+	require.NoError(t, catalog.initCheckout(ctx, checkout, inc))
+
+	oldLoc, old, oldManifest := newRouteTestHead(t, checkout, routeTestOldLease, 1)
+	var unrouted routeLocator
+	require.NoError(t, catalog.registerCandidate(ctx, checkout, inc, unrouted, oldLoc))
+	oldRecord := publishRouteTestStage(t, old, oldManifest)
+	require.NoError(t, catalog.switchHead(ctx, checkout, inc, unrouted, oldLoc, nil, old, oldRecord))
+
+	firstLoc, first, firstManifest := newRouteTestHead(t, checkout, routeTestNewLease, 2)
+	require.NoError(t, catalog.registerCandidate(ctx, checkout, inc, oldLoc, firstLoc))
+	firstRecord := publishRouteTestStage(t, first, firstManifest)
+
+	const replacementLease = "0198abcd-0123-7abc-8def-0123456789b0"
+	nextLoc, next, nextManifest := newRouteTestHead(t, checkout, replacementLease, 2)
+	require.NoError(t, catalog.registerCandidate(ctx, checkout, inc, oldLoc, nextLoc))
+	nextRecord := publishRouteTestStage(t, next, nextManifest)
+	require.Equal(t, firstRecord, nextRecord, "the lease and directory must fence even byte-identical publications")
+
+	err = catalog.switchHead(ctx, checkout, inc, oldLoc, firstLoc, old, first, firstRecord)
+	require.ErrorIs(t, err, ErrStaleBase)
+	got, err := catalog.lookup(checkout)
+	require.NoError(t, err)
+	require.Equal(t, routeCheckout{Incarnation: inc, Serving: oldLoc, Candidate: nextLoc, Publication: oldRecord}, got)
+
+	require.NoError(t, catalog.switchHead(ctx, checkout, inc, oldLoc, nextLoc, old, next, nextRecord))
+	got, err = catalog.lookup(checkout)
+	require.NoError(t, err)
+	require.Equal(t, routeCheckout{Incarnation: inc, Serving: nextLoc, Publication: nextRecord}, got)
+}
+
 func TestRouteCatalogRefusesCoverageRegression(t *testing.T) {
 	ctx := t.Context()
 	checkout := t.TempDir()
