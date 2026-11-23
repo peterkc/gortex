@@ -209,6 +209,49 @@ func TestRebuildCloneRootManifestPredecessors(t *testing.T) {
 	}
 }
 
+func TestRebuildCloneModuleAndContractPredecessors(t *testing.T) {
+	for _, tc := range []struct {
+		name, root string
+		modules    bool
+		count      uint64
+		detail     string
+	}{
+		{"all_domains", "requirements.txt", true, 3, "root_manifest=1 root_module=1 contract=1"},
+		{"checked_root_absent", "pom.xml", true, 1, "root_manifest=0 root_module=0 contract=1"},
+		{"modules_off", "requirements.txt", false, 1, "root_manifest=0 root_module=0 contract=1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var ns rebuildResolverNamespace
+			require.NoError(t, ns.add(rebuildNamespaceRow{key: tc.root, kind: rebuildNamespaceRegular}))
+			require.NoError(t, ns.add(rebuildNamespaceRow{key: ".", kind: rebuildNamespaceCloseExact}))
+			require.NoError(t, ns.freeze())
+			// Check a raw input too: dropping a body later does not remove it
+			// from the affected population or from the native CMS calculation.
+			raw := rebuildCloneInputFixture(rebuildCloneInput{
+				ID: "http::GET::/app", FilePath: "a.go", Language: "go", Line: 3,
+				Tokens: 40, Shingles: []uint64{1, 3, 5, 7, 11, 13, 17, 19},
+			}, "go")
+			facts := rebuildCloneRelationFixture(t)
+			facts[0] = raw
+			facts[1].Nodes[0].ID = "requirements.txt"
+			facts[2].Nodes[0].ID = "module::pypi:example@1"
+			build, _ := openRebuildTestFileStore(t)
+			receipts := seedRebuildCloneInputReceipts(t, build, facts...)
+			predecessors := rebuildClonePredecessors{namespace: &ns, modules: tc.modules}
+			stats, err := applyRebuildCloneRelations(t.Context(), build, receipts, predecessors, 0.82)
+			require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+			reply := buildRefusal(err)
+			require.Equal(t, uint8(36), reply.Refusal)
+			require.Equal(t, tc.count, reply.UnknownProvenance)
+			require.Contains(t, reply.Detail, tc.detail)
+			require.Zero(t, stats)
+			requireRebuildTestFileRows(t, build, []*graph.Node{
+				facts[0].Nodes[0], facts[1].Nodes[0], facts[2].Nodes[0], facts[3].Nodes[0],
+			}, nil)
+		})
+	}
+}
+
 func rebuildCloneRelationFixture(t *testing.T) []store_pebble.ParseFacts {
 	t.Helper()
 	shingles := []uint64{1, 3, 5, 7, 11, 13, 17, 19}
