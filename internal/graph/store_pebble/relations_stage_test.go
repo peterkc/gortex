@@ -85,6 +85,39 @@ func TestRelationsStagePublishesExactDiff(t *testing.T) {
 	require.ErrorIs(t, err, ErrStageOrder)
 }
 
+func TestRelationsStageRefusesUnreadableTable(t *testing.T) {
+	ctx := t.Context()
+	worker, head, base, declared, raw, _, _ := relationsStageFixture(t, FullProfile)
+	prior := stageRead(t, head)
+	require.NoError(t, prior.RequireStage(StageFileGraph))
+	priorRows := relationsSavedRows(t, prior)
+
+	target := &graph.Node{ID: "synth::F", Kind: graph.KindFunction, Name: "F", FilePath: "synth.go", Language: "go"}
+	worker.AddBatch([]*graph.Node{target}, nil)
+	linked := *raw
+	linked.To = target.ID
+	worker.ReindexEdge(&linked, raw.To)
+	tables, err := worker.PrepareRelations(ctx, t.TempDir(), base, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, tables.Files)
+
+	// A regular file passes the owner's path checks. Ingest must refuse the
+	// whole input, including the valid tables and the publication witness.
+	const unreadable = "unreadable.sst"
+	require.NoError(t, os.WriteFile(filepath.Join(tables.Dir, unreadable), []byte("not an SST"), 0o600))
+	tables.Files = append(tables.Files, unreadable)
+	digest, err := head.PublishStage(ctx, tables)
+	require.ErrorContains(t, err, "file size is too small")
+	require.Equal(t, HeadDigest{}, digest)
+
+	current := stageRead(t, head)
+	require.NoError(t, current.RequireStage(StageFileGraph))
+	require.ErrorAs(t, current.RequireStage(StageRelations), new(*ErrStagePending))
+	require.Equal(t, priorRows, relationsSavedRows(t, current))
+	require.Equal(t, declared, current.GetNode(declared.ID))
+	require.NoError(t, current.ReadError())
+}
+
 func TestRelationsStageKeepsExternalImportEndpoint(t *testing.T) {
 	ctx := t.Context()
 	worker, head, base, _, raw, _, _ := relationsStageFixture(t, FullProfile)
