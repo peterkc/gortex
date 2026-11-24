@@ -144,6 +144,23 @@ func (h *Head) publish(ctx context.Context, tables StageTables, delta bool) (Hea
 		}
 	}
 
+	if !delta && tables.Witness.Stage == StageDerived {
+		if len(tables.Witness.Unsupported) == 0 || len(tables.Files) != 0 || !slices.Equal(tables.Witness.Families, prior.Families) {
+			return zero, invalid("D64 derived stage must only declare unsupported families")
+		}
+	}
+	if tables.Witness.Stage == StageSearch && (!delta || len(prior.Unsupported) != 0) {
+		if len(prior.Unsupported) == 0 || !slices.Equal(tables.Witness.Unsupported, prior.Unsupported) {
+			return zero, invalid("publication changed D64 unsupported families")
+		}
+		if !delta {
+			before := slices.DeleteFunc(slices.Clone(tables.Witness.Families), func(f FamilyWitness) bool { return f.Family == familySymbol })
+			if !slices.Equal(before, prior.Families) {
+				return zero, invalid("search changed a non-symbol family")
+			}
+		}
+	}
+
 	paths := make([]string, 0, len(tables.Files)+1)
 	seen := make(map[string]struct{}, len(tables.Files))
 	for _, file := range tables.Files {

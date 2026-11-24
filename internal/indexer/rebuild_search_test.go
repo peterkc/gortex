@@ -59,16 +59,17 @@ func TestRebuildSearchRendersFinalFacts(t *testing.T) {
 	require.NoError(t, err)
 	digest, err := head.PublishStage(ctx, relations)
 	require.NoError(t, err)
-	derived := relations.Witness
-	derived.Stage = store_pebble.StageDerived // No derived rows for this fixture.
-	_, err = head.PublishStage(ctx, store_pebble.StageTables{Dir: t.TempDir(), Incarnation: rebuildTestIncarnation, Base: digest, Witness: derived})
+	derived, err := store_pebble.PrepareDeferredDerived(t.TempDir(), relations)
+	require.NoError(t, err)
+	require.Equal(t, digest, derived.Base)
+	_, err = head.PublishStage(ctx, derived)
 	require.NoError(t, err)
 
 	idx := &Indexer{config: config.IndexConfig{
 		IndexProse: true,
 		SkipSearch: []config.SkipEmbedRule{{Language: "yaml", Kinds: []string{"function"}}},
 	}}
-	stage, err := idx.prepareRebuildSearch(ctx, build, t.TempDir(), derived, rebuildTestIncarnation, "workbench")
+	stage, err := idx.prepareRebuildSearch(ctx, build, t.TempDir(), derived.Witness, rebuildTestIncarnation, "workbench")
 	require.NoError(t, err)
 	_, err = head.PublishStage(ctx, stage)
 	require.NoError(t, err)

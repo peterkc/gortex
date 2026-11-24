@@ -33,6 +33,9 @@ func (b *BuildStore) PrepareSearch(
 	if !filepath.IsAbs(dir) || derived.Stage != StageDerived || derived.Profile != b.profile || incarnation == "" || render == nil {
 		return StageTables{}, invalid("search needs its derived witness, stage directory and document renderer")
 	}
+	if len(derived.Unsupported) == 0 {
+		return StageTables{}, invalid("search needs D64 unsupported family declarations")
+	}
 	if slices.ContainsFunc(derived.Families, func(f FamilyWitness) bool { return f.Family == familySymbol }) {
 		return StageTables{}, invalid("search family already in derived witness")
 	}

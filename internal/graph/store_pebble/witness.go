@@ -87,8 +87,9 @@ type Witness struct {
 	Dependencies        []HeadDigest
 	Profile             Profile
 	Stage               Stage
-	Families            []FamilyWitness   // ascending, unique family tags
-	Relations           *RelationCoverage // nil before relations or in legacy witnesses
+	Families            []FamilyWitness     // ascending, unique family tags
+	Relations           *RelationCoverage   // nil before relations or in legacy witnesses
+	Unsupported         []UnsupportedFamily // exact D64 declarations from derived onward
 }
 
 // Version identifies the complete input and recipe. The witness digest also
@@ -113,6 +114,7 @@ const (
 	witnessInputsFormat    byte = 2
 	witnessCoverageFormat  byte = 3
 	witnessGitPolicyFormat byte = 4
+	witnessD64Format       byte = 5
 )
 
 func encodeWitness(w Witness) ([]byte, error) {
@@ -135,6 +137,12 @@ func encodeWitness(w Witness) ([]byte, error) {
 			return nil, invalid("Git policy witness without frozen inputs")
 		}
 		format = witnessGitPolicyFormat
+	}
+	if len(w.Unsupported) != 0 {
+		if w.Stage < StageDerived || !slices.Equal(w.Unsupported, d64Unsupported[:]) {
+			return nil, invalid("publication D64 unsupported families")
+		}
+		format = witnessD64Format
 	}
 	b := []byte{format, byte(w.Stage)}
 	b = appendMetaString(b, string(w.Profile))
@@ -160,10 +168,13 @@ func encodeWitness(w Witness) ([]byte, error) {
 	if format >= witnessInputsFormat {
 		b = append(b, w.FrozenInputs[:]...)
 	}
-	if w.UsesGitIgnorePolicy {
+	if format == witnessD64Format || w.UsesGitIgnorePolicy {
 		coverage := byte(0)
+		if format == witnessD64Format && w.UsesGitIgnorePolicy {
+			coverage = 2
+		}
 		if w.Relations != nil {
-			coverage = 1
+			coverage |= 1
 		}
 		b = append(b, coverage)
 	}
@@ -179,11 +190,15 @@ func encodeWitness(w Witness) ([]byte, error) {
 			prev = id
 		}
 	}
+	for _, f := range w.Unsupported {
+		b = appendMetaString(b, f.Family)
+		b = appendMetaString(b, f.Reason)
+	}
 	return b, nil
 }
 
 func decodeWitness(raw []byte) (Witness, error) {
-	if len(raw) < 2 || raw[0] < witnessFormat || raw[0] > witnessGitPolicyFormat {
+	if len(raw) < 2 || raw[0] < witnessFormat || raw[0] > witnessD64Format {
 		return Witness{}, invalid("publication witness format")
 	}
 	d := recordCursor{buf: raw[2:]}
@@ -228,12 +243,16 @@ func decodeWitness(raw []byte) (Witness, error) {
 		d.buf = d.buf[len(w.FrozenInputs):]
 	}
 	hasCoverage := raw[0] == witnessCoverageFormat
-	if raw[0] == witnessGitPolicyFormat {
-		w.UsesGitIgnorePolicy = true
-		if len(d.buf) == 0 || d.buf[0] > 1 {
+	if raw[0] >= witnessGitPolicyFormat {
+		maxFlag := byte(1)
+		if raw[0] == witnessD64Format {
+			maxFlag = 3
+		}
+		if len(d.buf) == 0 || d.buf[0] > maxFlag {
 			return Witness{}, invalid("publication relation coverage flag")
 		}
-		hasCoverage = d.buf[0] != 0
+		w.UsesGitIgnorePolicy = raw[0] == witnessGitPolicyFormat || d.buf[0]&2 != 0
+		hasCoverage = d.buf[0]&1 != 0
 		d.buf = d.buf[1:]
 	}
 	if hasCoverage {
@@ -249,6 +268,15 @@ func decodeWitness(raw []byte) (Witness, error) {
 				return Witness{}, d.err
 			}
 			w.Relations.DeferredLanguages = append(w.Relations.DeferredLanguages, id)
+		}
+	}
+	if raw[0] == witnessD64Format {
+		for range d64Unsupported {
+			f := UnsupportedFamily{Family: d.str(), Reason: d.str()}
+			if d.err != nil {
+				return Witness{}, d.err
+			}
+			w.Unsupported = append(w.Unsupported, f)
 		}
 	}
 	encoded, err := encodeWitness(w)

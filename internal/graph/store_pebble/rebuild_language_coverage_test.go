@@ -3,6 +3,7 @@ package store_pebble
 import (
 	"bytes"
 	"encoding/gob"
+	"errors"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -133,12 +134,32 @@ func TestRebuildLanguageCoverageStages(t *testing.T) {
 			require.NoError(t, pinned.Close())
 			pinned = nil
 
-			derived := StageTables{Dir: t.TempDir(), Incarnation: testHeadIncarnation, Base: digest, Witness: relations.Witness}
-			derived.Witness.Stage = StageDerived // this fixture has no derived rows
+			derived, err := PrepareDeferredDerived(t.TempDir(), relations)
+			require.NoError(t, err)
+			require.Equal(t, digest, derived.Base)
 			bad = derived
 			bad.Witness.Relations = nil
 			_, err = head.PublishStage(ctx, bad)
 			require.ErrorIs(t, err, errInvalidRecord)
+			assertHead(relations.Witness, tc.edges)
+			wantUnsupported := []UnsupportedFamily{
+				{"analysis_cache", "D64"}, {"blame", "D64"}, {"churn", "D64"},
+				{"content_search", "D64"}, {"contracts", "D64"}, {"coverage", "D64"}, {"releases", "D64"},
+			}
+			require.Equal(t, wantUnsupported, derived.Witness.Unsupported)
+			require.Equal(t, relations.Witness.Families, derived.Witness.Families)
+			bad = derived
+			bad.Witness.Unsupported = nil
+			_, err = head.PublishStage(ctx, bad)
+			require.ErrorIs(t, err, errInvalidRecord)
+			bad = derived
+			bad.Witness.Families = append(slices.Clone(bad.Witness.Families), FamilyWitness{Family: 'Z'})
+			_, err = head.PublishStage(ctx, bad)
+			require.ErrorIs(t, err, errInvalidRecord, "even an empty complete family is a claim")
+			bad = derived
+			bad.Files = []string{"not-needed.sst"}
+			_, err = head.PublishStage(ctx, bad)
+			require.ErrorIs(t, err, errInvalidRecord, "a no-data transition must not ingest data tables")
 			assertHead(relations.Witness, tc.edges)
 			_, err = head.PublishStage(ctx, derived)
 			require.NoError(t, err)
@@ -148,6 +169,11 @@ func TestRebuildLanguageCoverageStages(t *testing.T) {
 			require.NoError(t, err)
 			bad = search
 			bad.Witness.Relations = &RelationCoverage{DeferredLanguages: []string{"unexpected"}}
+			_, err = head.PublishStage(ctx, bad)
+			require.ErrorIs(t, err, errInvalidRecord)
+			assertHead(derived.Witness, tc.edges)
+			bad = search
+			bad.Witness.Unsupported = nil
 			_, err = head.PublishStage(ctx, bad)
 			require.ErrorIs(t, err, errInvalidRecord)
 			assertHead(derived.Witness, tc.edges)
@@ -162,6 +188,10 @@ func TestRebuildLanguageCoverageStages(t *testing.T) {
 			s := stageRead(t, head)
 			got, err := s.Publication()
 			require.NoError(t, err)
+			require.Equal(t, wantUnsupported, got.Unsupported)
+			hits, err := s.SearchContent("", "decl", 10)
+			require.ErrorIs(t, err, errors.ErrUnsupported)
+			require.Nil(t, hits)
 			if tc.edges > 0 {
 				require.NoError(t, got.RequireRelationCoverage([]string{"go"}))
 				require.Len(t, s.GetOutEdges("go.input::declaration"), 1)
@@ -189,6 +219,10 @@ func TestRebuildLanguageCoverageStages(t *testing.T) {
 				_, err = head.PublishDelta(ctx, bad)
 				require.ErrorIs(t, err, ErrCoverageRegression)
 			}
+			bad.Witness.Relations = search.Witness.Relations
+			bad.Witness.Unsupported = nil
+			_, err = head.PublishDelta(ctx, bad)
+			require.ErrorIs(t, err, errInvalidRecord)
 			assertHead(search.Witness, tc.edges)
 		})
 	}

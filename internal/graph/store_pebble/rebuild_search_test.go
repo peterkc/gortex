@@ -150,9 +150,9 @@ func publishRebuildSearchDerived(t *testing.T, worker *BuildStore, head *Head, b
 	require.NoError(t, err)
 	digest, err := head.PublishStage(ctx, relations)
 	require.NoError(t, err)
-	w := relations.Witness
-	w.Stage = StageDerived // This fixture has no derived rows.
-	derived := StageTables{Dir: t.TempDir(), Incarnation: relations.Incarnation, Base: digest, Witness: w}
+	derived, err := PrepareDeferredDerived(t.TempDir(), relations)
+	require.NoError(t, err)
+	require.Equal(t, digest, derived.Base)
 	_, err = head.PublishStage(ctx, derived)
 	require.NoError(t, err)
 	return derived
