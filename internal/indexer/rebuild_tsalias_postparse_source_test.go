@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -71,6 +72,37 @@ void c_entry(void) {
 				require.NoError(t, err)
 				require.NoError(t, build.AddParsedFile("", facts))
 			}
+			// Seal the same three parse receipts before any linking; all heads
+			// below are test-local and have no production publication route.
+			var files []store_pebble.ManifestFile
+			for _, input := range inputs {
+				files = append(files, store_pebble.ManifestFile{
+					Path: input.Path, Language: input.Language, Kind: byte(input.Kind), Size: input.Size,
+					Content: store_pebble.HeadDigest(input.Content), Extractor: store_pebble.HeadDigest(idx.rebuildExtractorRecipe(recipe, input)),
+				})
+			}
+			witness := bound.Witness
+			witness.Stage, witness.Profile = store_pebble.StageManifest, store_pebble.FullProfile
+			manifest, err := store_pebble.PrepareManifest(ctx, t.TempDir(), files, witness, rebuildTestIncarnation)
+			require.NoError(t, err)
+			require.Equal(t, uint64(3), manifest.Witness.Families[0].Count)
+			headDir := filepath.Join(t.TempDir(), "head")
+			head, err := store_pebble.OpenHead(headDir, rebuildTestIncarnation, store_pebble.FullProfile)
+			require.NoError(t, err)
+			defer func() {
+				if head != nil {
+					require.NoError(t, head.Close())
+				}
+			}()
+			_, err = head.PublishStage(ctx, manifest)
+			require.NoError(t, err)
+			fileGraph, err := build.PrepareFileGraph(ctx, t.TempDir(), manifest.Witness, rebuildTestIncarnation)
+			require.NoError(t, err)
+			retained, err := build.RetainFileGraph(ctx, fileGraph)
+			require.NoError(t, err)
+			_, err = head.PublishStage(ctx, fileGraph)
+			require.NoError(t, err)
+
 			view := build.RebuildView()
 			imports := func() []*graph.Edge {
 				var rows []*graph.Edge
@@ -161,6 +193,135 @@ void c_entry(void) {
 				n, err := view.Node(ctx, before.ID)
 				require.NoError(t, err)
 				require.Equal(t, before, n, "deferred declaration %q", before.ID)
+			}
+			// This test-only chain includes the unproved raw C pending row;
+			// it is NOT a D72 relation selection proof or a production route.
+			relations, err := build.PrepareRelations(ctx, t.TempDir(), retained, nil)
+			require.NoError(t, err)
+			require.Nil(t, relations.Witness.Relations, "relation selection remains unproved")
+			_, err = head.PublishStage(ctx, relations)
+			require.NoError(t, err)
+			derived, err := store_pebble.PrepareDeferredDerived(t.TempDir(), relations)
+			require.NoError(t, err)
+			_, err = head.PublishStage(ctx, derived)
+			require.NoError(t, err)
+
+			// Select from the full final native Graph, not the raw parse
+			// receipts or the changed live replay. No language-wide filter:
+			// both independent C declarations remain searchable.
+			nativeNodes := native.AllNodes()
+			slices.SortFunc(nativeNodes, func(a, b *graph.Node) int { return strings.Compare(a.ID, b.ID) })
+			var selected []*graph.Node
+			var items []graph.SymbolFTSItem
+			want := make(map[string]string)
+			for _, n := range nativeNodes {
+				if !idx.shouldIndexForSearch(n) {
+					continue
+				}
+				text := ftsTokensFor(n, bound.ProjectName)
+				require.NotContains(t, want, n.ID)
+				want[n.ID] = text
+				selected = append(selected, n)
+				items = append(items, graph.SymbolFTSItem{NodeID: n.ID, Tokens: text})
+			}
+			for _, id := range []string{cOld.From, cNew.To, target + "::chosen"} {
+				require.NotEmpty(t, want[id], id)
+			}
+			got := make(map[string]string)
+			require.NoError(t, view.VisitNodes(ctx, func(n *graph.Node) error {
+				if idx.shouldIndexForSearch(n) {
+					require.NotContains(t, got, n.ID)
+					got[n.ID] = ftsTokensFor(n, bound.ProjectName)
+				}
+				return nil
+			}))
+			require.Equal(t, want, got, "entire selected document membership and rendered token rows")
+
+			// SQLite is only the native rank engine. Its nodes and FTS rows
+			// come from the selected final Graph, and it receives no edges.
+			// Canonical ID insertion order matches the Pebble document rowids.
+			rank := newFTSStore(t)
+			require.NoError(t, rank.AddBatchCheckedContext(ctx, selected, nil))
+			require.NoError(t, rank.BatchUpsertSymbolFTS(items))
+			const limit = 100
+			require.Less(t, len(want), limit)
+			rows, next, err := rank.SymbolFTSGenerationRows(ctx, 0, "", 0, limit)
+			require.NoError(t, err)
+			require.Zero(t, next)
+			require.Len(t, rows, len(want))
+			for i, row := range rows {
+				require.Equal(t, items[i].NodeID, row.NodeID)
+				require.Equal(t, items[i].Tokens, row.Tokens)
+				require.Equal(t, selected[i].RepoPrefix, row.RepoPrefix)
+			}
+			t.Logf("same-receipt native selected symbol documents (%d): %v", len(rows), rows)
+
+			stage, err := idx.prepareRebuildSearch(ctx, build, t.TempDir(), derived.Witness, rebuildTestIncarnation, bound.ProjectName)
+			require.NoError(t, err)
+			// Independently supplied native-selected inputs must seal the same
+			// complete symbol family (documents, stats, postings and exact names).
+			// This is not another native parse or relation oracle.
+			expected, err := store_pebble.OpenBuild(filepath.Join(t.TempDir(), "native-search"), store_pebble.FullProfile)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, expected.Close()) }()
+			expected.AddBatch(selected, nil)
+			expectedStage, err := expected.PrepareSearch(ctx, t.TempDir(), derived.Witness, rebuildTestIncarnation, func(n *graph.Node) (string, bool) {
+				text, ok := want[n.ID]
+				return text, ok
+			})
+			require.NoError(t, err)
+			require.NotEmpty(t, expectedStage.Files)
+			require.Equal(t, expectedStage.Witness.Families, stage.Witness.Families, "selected search gold rows")
+			_, err = head.PublishStage(ctx, stage)
+			require.NoError(t, err)
+			require.NoError(t, head.Close())
+			head = nil
+			head, err = store_pebble.OpenHead(headDir, rebuildTestIncarnation, store_pebble.FullProfile)
+			require.NoError(t, err)
+			snapshot := head.OpenSnapshot()
+			defer func() { require.NoError(t, snapshot.Close()) }()
+			saved, err := snapshot.Publication()
+			require.NoError(t, err)
+			require.Equal(t, stage.Witness, saved)
+			require.Nil(t, saved.Relations)
+			var unproved *store_pebble.ErrLinksNotAvailable
+			require.ErrorAs(t, saved.RequireRelationCoverage(nil), &unproved)
+			require.Equal(t, []*graph.Edge{before}, slices.Collect(snapshot.EdgesByKind(graph.EdgeCalls)), "test head includes the raw C before-value")
+			require.ElementsMatch(t, nativeImports, slices.Collect(snapshot.EdgesByKind(graph.EdgeImports)))
+			require.NoError(t, snapshot.ReadError())
+			for _, tc := range []struct {
+				query string
+				ids   []string
+				exact bool
+			}{
+				{"c_entry", []string{cOld.From}, true},
+				{"c_leaf", []string{cNew.To}, true},
+				{"chosen", []string{target + "::chosen"}, true},
+				{"entry leaf", []string{cOld.From, cNew.To}, false},
+				{"entry chosen", []string{cOld.From, target + "::chosen"}, false},
+				{"shared main", []string{cOld.From, cNew.To, target + "::chosen"}, false},
+			} {
+				wantHits, err := rank.SearchSymbolsRepoScopedContext(ctx, tc.query, nil, limit)
+				require.NoError(t, err)
+				gotHits, err := snapshot.SearchSymbolsRepoScopedContext(ctx, tc.query, nil, limit)
+				require.NoError(t, err)
+				require.Less(t, len(wantHits), limit)
+				for _, id := range tc.ids {
+					require.True(t, slices.ContainsFunc(wantHits, func(h graph.SymbolHit) bool { return h.NodeID == id }), "%s: missing %s", tc.query, id)
+				}
+				for _, hit := range wantHits {
+					if tc.exact {
+						require.Equal(t, float64(100), hit.Score, tc.query)
+					} else {
+						require.Positive(t, hit.Score, tc.query)
+						require.Less(t, hit.Score, float64(100), tc.query)
+					}
+				}
+				if tc.exact {
+					require.Len(t, wantHits, len(tc.ids), tc.query)
+				}
+				require.Equal(t, wantHits, gotHits, "raw ordered rank IDs and scores for %q", tc.query)
+				t.Logf("raw selected rank %q (%d): %v", tc.query, len(gotHits), gotHits)
 			}
 			return nil
 		})
