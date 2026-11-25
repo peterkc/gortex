@@ -3,6 +3,7 @@ package resolver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -10,12 +11,47 @@ import (
 )
 
 type rebuildLinkFrontier struct {
-	view            store_pebble.RebuildView
-	link            *store_pebble.RebuildLink
-	opts            store_pebble.RebuildLinkOptions
-	imports         rebuildMainImportInputs
-	importDirs      *store_pebble.RebuildImportDirectories
-	closeImportDirs func() error
+	view                          store_pebble.RebuildView
+	link                          *store_pebble.RebuildLink
+	opts                          store_pebble.RebuildLinkOptions
+	imports                       rebuildMainImportInputs
+	importDirs                    *store_pebble.RebuildImportDirectories
+	closeImportDirs               func() error
+	pageReach                     map[string]map[string]struct{} // borrowed for one precommit page
+	pageReachDirs, pageReachBytes int
+}
+
+// reachableDirectories returns the precommit direct-import set for one file.
+func (f *rebuildLinkFrontier) reachableDirectories(ctx context.Context, file string) (map[string]struct{}, error) {
+	if file == "" {
+		return nil, nil
+	}
+	if dirs, ok := f.pageReach[file]; ok {
+		return dirs, nil
+	}
+	// Bound the retained page independently of the per-file projection. It
+	// contains only directory strings, never candidate or graph rows.
+	if len(f.pageReach) >= resolvePendingPageRows {
+		return nil, fmt.Errorf("%w: direct-import page file count", store_pebble.ErrRebuildLinkInputSize)
+	}
+	dirs, err := f.directImportDirectories(ctx, file)
+	if err != nil {
+		return nil, err
+	}
+	charge := len(file)
+	for dir := range dirs {
+		charge += len(dir)
+	}
+	if len(dirs) > 16384-f.pageReachDirs || charge > 16<<20-f.pageReachBytes {
+		return nil, fmt.Errorf("%w: direct-import page directories", store_pebble.ErrRebuildLinkInputSize)
+	}
+	if f.pageReach == nil {
+		f.pageReach = make(map[string]map[string]struct{})
+	}
+	f.pageReach[file] = dirs
+	f.pageReachDirs += len(dirs)
+	f.pageReachBytes += charge
+	return dirs, nil
 }
 
 // candidates streams one bounded request page. Visits are tentative until it
@@ -87,6 +123,10 @@ func runRebuildLinkFrontier(ctx context.Context, build *store_pebble.BuildStore,
 			}
 			f.link = link
 		}
+		// All main resolutions in a page see the committed pre-page graph.
+		// A subsequent page must read imports changed by the previous apply.
+		f.pageReach = nil
+		f.pageReachDirs, f.pageReachBytes = 0, 0
 		return reduce(&f, page)
 	})
 }

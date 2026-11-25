@@ -69,6 +69,94 @@ func (v RebuildView) VisitNodes(ctx context.Context, yield func(*graph.Node) err
 	})
 }
 
+const (
+	rebuildDirectImportReadRows  = 16 << 10
+	rebuildDirectImportReadBytes = 16 << 20
+)
+
+// VisitFileImportTargets streams direct imports from every saved node in file.
+// Source ownership comes from the exact file index, not the edge's recording
+// site. Resolved target placements come from the same snapshot. Unresolved,
+// external, missing and pathless targets have an empty targetFile.
+// The caller must discard tentative results on any error.
+func (v RebuildView) VisitFileImportTargets(ctx context.Context, file string, yield func(targetID, targetFile string) error) error {
+	if file == "" || yield == nil {
+		return fmt.Errorf("%w: file imports require a file and visitor", ErrRebuildView)
+	}
+	if len(file) > rebuildDirectImportReadBytes {
+		return fmt.Errorf("%w: file import path", ErrRebuildLinkInputSize)
+	}
+	return v.read(ctx, func(snap *pebble.Snapshot) error {
+		rows, remaining := 0, rebuildDirectImportReadBytes
+		chargeBytes := func(size int) error {
+			if size > remaining {
+				return fmt.Errorf("%w: file import read bytes", ErrRebuildLinkInputSize)
+			}
+			remaining -= size
+			return nil
+		}
+		chargeRow := func(key, value []byte) error {
+			if rows == rebuildDirectImportReadRows {
+				return fmt.Errorf("%w: file import read rows", ErrRebuildLinkInputSize)
+			}
+			rows++
+			return chargeBytes(len(key) + len(value))
+		}
+		readNode := func(id string) (*graph.Node, error) {
+			key := pendingNodeKey(id)
+			if err := chargeRow(key, nil); err != nil {
+				return nil, err
+			}
+			n, err := pendingGet(snap, key, func(raw []byte) (*graph.Node, error) {
+				if err := chargeBytes(len(raw)); err != nil {
+					return nil, err
+				}
+				return decodeNodeLight(raw)
+			})
+			if err == nil && n != nil && n.ID != id {
+				return nil, invalid("working import node ID does not match key")
+			}
+			return n, err
+		}
+		return pendingVisit(ctx, snap, keyStrings([]byte{familyFile}, file), func(r row) error {
+			if err := chargeRow(r.key, r.value); err != nil {
+				return err
+			}
+			id := string(r.value)
+			if id == "" || !bytes.Equal(r.key, keyStrings([]byte{familyFile}, file, id)) {
+				return invalid("working import file index identity does not match key")
+			}
+			n, err := readNode(id)
+			if err != nil {
+				return err
+			}
+			if n == nil || n.FilePath != file {
+				return invalid("working import source does not own indexed file")
+			}
+			return pendingVisit(ctx, snap, guardOutgoing(id, graph.EdgeImports), func(r row) error {
+				if err := chargeRow(r.key, r.value); err != nil {
+					return err
+				}
+				e, err := guardLightEdge(r)
+				if err != nil {
+					return err
+				}
+				targetFile := ""
+				if !graph.IsUnresolvedTarget(e.To) && !strings.HasPrefix(e.To, "external::") {
+					target, err := readNode(e.To)
+					if err != nil {
+						return err
+					}
+					if target != nil {
+						targetFile = target.FilePath
+					}
+				}
+				return yield(e.To, targetFile)
+			})
+		})
+	})
+}
+
 // VisitEdges streams all saved edges in (from, kind, to, file, line) order.
 // Origin is mutable data, not part of the pending identity. This storage
 // order is not the native order for first-wins reducers or the P3 comparator.

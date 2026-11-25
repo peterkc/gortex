@@ -33,8 +33,18 @@ func resolveRebuildMember(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 	// filters. Even non-callable name matches count for these filters and for
 	// the preceding direct-import filter. No summary holds parsed nodes.
 	scope := newRebuildFunctionScope(edge, caller, name)
-	all := rebuildMemberChoices{scope: scope}
-	typed, arity, typedArity := all, all, all
+	all := newRebuildMemberGroup(scope)
+	reachable := newRebuildMemberGroup(scope)
+	// D71 Go callers require the native direct-import cut. Other callers
+	// retain the existing refusal path until their domain is proved.
+	goReach := lang == "go"
+	var dirs map[string]struct{}
+	if goReach && name != "" {
+		dirs, err = f.reachableDirectories(ctx, edge.FilePath)
+		if err != nil {
+			return err
+		}
+	}
 	_, hasTypeArgs := metaIntValue(edge.Meta["type_arg_count"])
 	_, hasArgs := metaIntValue(edge.Meta["arg_count"])
 	member, _ := edge.Meta["member_call"].(bool)
@@ -64,24 +74,18 @@ func resolveRebuildMember(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 					keepFirstRebuildField(&fields[3], n.ID)
 				}
 			}
-			if all.count == 0 {
+			if all.all.count == 0 {
 				firstDir = candidateDir
 			}
 			mixedDirs = mixedDirs || firstDir != candidateDir
 			exact := receiver != "" && recv == receiver && n.Kind == graph.KindMethod
 			callerMethod := !member && callerRecv != "" && recv == callerRecv && n.Kind == graph.KindMethod
 			locality := !isCSharpExtension(n) && (!member || n.ID != edge.From)
-			all.consider(n, candidateDir == dir, exact, callerMethod, locality)
 			typeOK := hasTypeArgs && csharpAcceptsTypeArgCount(edge, n)
 			argOK := hasArgs && csharpMethodAcceptsArgCount(edge, n)
-			if typeOK {
-				typed.consider(n, candidateDir == dir, exact, callerMethod, locality)
-			}
-			if argOK {
-				arity.consider(n, candidateDir == dir, exact, callerMethod, locality)
-				if typeOK {
-					typedArity.consider(n, candidateDir == dir, exact, callerMethod, locality)
-				}
+			all.consider(n, candidateDir == dir, exact, callerMethod, locality, typeOK, argOK)
+			if _, ok := dirs[candidateDir]; ok {
+				reachable.consider(n, candidateDir == dir, exact, callerMethod, locality, typeOK, argOK)
 			}
 			return nil
 		})
@@ -103,27 +107,27 @@ func resolveRebuildMember(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 		return refuse("PHP property or FQN receiver lookup")
 	}
 
-	raw, withArity := &all, &arity
-	if all.count > 1 && typed.count != 0 {
-		raw, withArity = &typed, &typedArity
-	}
-	if raw.count > 1 && withArity.count != 0 {
-		raw = withArity
+	raw := all.narrow()
+	filtered := raw
+	// Native first filters the whole compatible name group, then applies
+	// applicability independently to both groups. A filter miss keeps all.
+	if reachable.all.count != 0 {
+		filtered = reachable.narrow()
 	}
 	// With one candidate directory, reachability keeps all or discards all
 	// and then restores all. With no recorded edge path native skips it.
 	// Otherwise scope (unlike the exact tiers) sees the filtered group.
-	reachMayNarrow := edge.FilePath != "" && mixedDirs
+	reachMayNarrow := !goReach && edge.FilePath != "" && mixedDirs
 	e := *edge
 	picked := false
 	if raw.count != 0 {
 		if reachMayNarrow {
-			pick, missing := all.scope.pick()
-			if pick.id != "" || missing != "" || all.scope.cppCount != 0 {
+			pick, missing := all.all.scope.pick()
+			if pick.id != "" || missing != "" || all.all.scope.cppCount != 0 {
 				return refuse("scope selection needs native page direct-import reachability")
 			}
 		} else {
-			pick, missing := raw.scope.pick()
+			pick, missing := filtered.scope.pick()
 			if missing != "" {
 				return refuse(missing)
 			}
@@ -149,18 +153,36 @@ func resolveRebuildMember(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 				e.To, e.Confidence, e.Origin = raw.exact, 0.85, graph.OriginASTResolved
 			case receiver != "" && lang == "php":
 				return refuse("PHP in-repo receiver and inherited dispatch evidence")
-			case reachMayNarrow && (all.method || all.locality):
+			case reachMayNarrow && (all.all.method || all.all.locality):
 				return refuse("native page direct-import reachability")
 			case receiver != "" && raw.method:
 				return refuse("native first-use useClass bindings")
-			case raw.callerMethod:
+			case filtered.callerMethod:
 				return refuse("caller-receiver method fallback")
 			case lang == "csharp" && raw.extension:
 				return refuse("C# extension visibility and hierarchy evidence")
-			case receiver == "" && raw.methodCount > 1:
+			case receiver == "" && filtered.methodCount > 1:
 				return nil // native leaves an untyped ambiguous member unresolved
-			case raw.locality:
+			case filtered.locality && !goReach:
 				return refuse("method locality or interface dispatch fallback")
+			case filtered.locality:
+				// The preceding DI and receiver guards still own typed dispatch.
+				// This is the native first reachable method/function fallback.
+				if filtered.methodCount == 1 && loneMemberLang(filtered.firstMethodLanguage) && e.Origin == "" {
+					e.Origin = graph.OriginASTInferred
+					if e.Confidence == 0 {
+						e.Confidence = 0.7
+					}
+				}
+				for _, id := range [...]string{filtered.dirMethod, filtered.firstMethod, filtered.dirFunc, filtered.firstFunc} {
+					if id != "" {
+						picked, e.To = true, id
+						if e.Origin == "" {
+							e.Origin = graph.OriginTextMatched
+						}
+						break
+					}
+				}
 			}
 		}
 	}
@@ -201,10 +223,47 @@ func keepFirstRebuildField(dst *string, id string) {
 	}
 }
 
+// Each group independently keeps the four applicability summaries; no
+// candidate nodes survive the callback.
+type rebuildMemberGroup struct {
+	all, typed, arity, typedArity rebuildMemberChoices
+}
+
+func newRebuildMemberGroup(scope rebuildFunctionScope) rebuildMemberGroup {
+	base := rebuildMemberChoices{scope: scope}
+	return rebuildMemberGroup{base, base, base, base}
+}
+
+func (g *rebuildMemberGroup) consider(n *graph.Node, sameDir, exact, callerMethod, locality, typeOK, argOK bool) {
+	g.all.consider(n, sameDir, exact, callerMethod, locality)
+	if typeOK {
+		g.typed.consider(n, sameDir, exact, callerMethod, locality)
+	}
+	if argOK {
+		g.arity.consider(n, sameDir, exact, callerMethod, locality)
+		if typeOK {
+			g.typedArity.consider(n, sameDir, exact, callerMethod, locality)
+		}
+	}
+}
+
+func (g *rebuildMemberGroup) narrow() *rebuildMemberChoices {
+	choices, withArity := &g.all, &g.arity
+	if choices.count > 1 && g.typed.count != 0 {
+		choices, withArity = &g.typed, &g.typedArity
+	}
+	if choices.count > 1 && withArity.count != 0 {
+		choices = withArity
+	}
+	return choices
+}
+
 type rebuildMemberChoices struct {
 	scope                                                rebuildFunctionScope
 	count, methodCount                                   int
 	exact, localExact                                    string
+	dirMethod, firstMethod, firstMethodLanguage          string
+	dirFunc, firstFunc                                   string
 	ambiguous, method, callerMethod, extension, locality bool
 }
 
@@ -218,6 +277,19 @@ func (s *rebuildMemberChoices) consider(n *graph.Node, sameDir, exact, callerMet
 		s.locality = true
 		if n.Kind == graph.KindMethod {
 			s.methodCount++
+			if s.firstMethod == "" {
+				s.firstMethod, s.firstMethodLanguage = n.ID, n.Language
+			}
+			if sameDir && s.dirMethod == "" {
+				s.dirMethod = n.ID
+			}
+		} else {
+			if s.firstFunc == "" {
+				s.firstFunc = n.ID
+			}
+			if sameDir && s.dirFunc == "" {
+				s.dirFunc = n.ID
+			}
 		}
 	}
 	if exact {
