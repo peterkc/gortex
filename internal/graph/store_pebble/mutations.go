@@ -138,6 +138,37 @@ func (b *BuildStore) RemoveEdge(from, to string, kind graph.EdgeKind) (removed b
 	return removed
 }
 
+// RemoveEdgesExact deletes only the requested full identities. The existing
+// pending point read supplies the saved row for its paired reverse deletion;
+// nil, absent and repeated identities are no-ops. Mutation errors are latched
+// by withWrites and surfaced by the checked build readers and stage seals.
+func (b *BuildStore) RemoveEdgesExact(edges []*graph.Edge) (removed int) {
+	_ = b.withWrites(func() error {
+		for _, e := range edges {
+			if e == nil {
+				continue
+			}
+			key := pendingEdgeKey(e)
+			stored, err := b.pendingEdge(key)
+			if err != nil {
+				return err
+			}
+			if stored == nil {
+				continue
+			}
+			if !bytes.Equal(key, pendingEdgeKey(stored)) {
+				return invalid("working removal edge identity does not match key")
+			}
+			if err := b.deleteEdge(key, stored); err != nil {
+				return err
+			}
+			removed++
+		}
+		return nil
+	})
+	return removed
+}
+
 func (b *BuildStore) evictBy(prefix []byte) (nodes, edges int) {
 	_ = b.withWrites(func() error {
 		var err error
@@ -252,6 +283,7 @@ func (b *BuildStore) reindexChunk(batch []graph.EdgeReindex) error {
 var (
 	_ graph.EdgePersister          = (*BuildStore)(nil)
 	_ graph.EdgeMetaBatchPersister = (*BuildStore)(nil)
+	_ graph.ExactEdgeBatchRemover  = (*BuildStore)(nil)
 )
 
 func (b *BuildStore) PersistEdgeAttributes(e *graph.Edge) {

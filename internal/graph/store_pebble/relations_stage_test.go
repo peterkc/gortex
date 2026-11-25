@@ -7,6 +7,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/cockroachdb/pebble/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/zeebo/blake3"
 	"github.com/zzet/gortex/internal/graph"
@@ -83,6 +84,144 @@ func TestRelationsStagePublishesExactDiff(t *testing.T) {
 	require.Zero(t, pinned.EdgeCount())
 	_, err = head.PublishStage(ctx, tables)
 	require.ErrorIs(t, err, ErrStageOrder)
+}
+
+func TestRelationsStageRemoveEdgesExactRejectsMismatchedIdentity(t *testing.T) {
+	ctx := t.Context()
+	worker, _, base, _, raw, _, _ := relationsStageFixture(t, FullProfile)
+	wrong := *raw
+	wrong.Line++
+	data, err := encodeEdge(&wrong)
+	require.NoError(t, err)
+	key := pendingEdgeKey(raw)
+	require.NoError(t, worker.pending.Set(key, data, pebble.NoSync))
+	require.Zero(t, graph.RemoveEdgesExact(worker, []*graph.Edge{raw}))
+	// The mutation must not erase either key or mask the bad record.
+	stored, err := worker.pendingEdge(key)
+	require.NoError(t, err)
+	require.Equal(t, &wrong, stored)
+	_, err = worker.RebuildView().Edge(ctx, graph.EdgeIdentityFor(raw))
+	require.ErrorIs(t, err, ErrRebuildView)
+	require.ErrorIs(t, err, errInvalidRecord)
+	_, err = worker.PrepareRelations(ctx, t.TempDir(), base, nil)
+	require.ErrorIs(t, err, ErrRelationsSeal)
+	require.ErrorIs(t, err, errInvalidRecord)
+}
+
+func TestRelationsStageRemoveEdgesExact(t *testing.T) {
+	ctx := t.Context()
+	worker, head, base, declared, raw, file, receipt := relationsStageFixture(t, FullProfile)
+	pinned := stageRead(t, head)
+	prior, err := pinned.Publication()
+	require.NoError(t, err)
+	require.Equal(t, StageFileGraph, prior.Stage)
+	priorRows := relationsSavedRows(t, pinned)
+	require.NotEmpty(t, priorRows)
+
+	target := &graph.Node{ID: "target.go::Target", Name: "Target", Kind: graph.KindFunction, RepoPrefix: "target", FilePath: "target.go", Language: "go"}
+	worker.AddNode(target)
+	require.True(t, worker.RemoveEdge(raw.From, raw.To, raw.Kind))
+	first := *raw
+	first.To, first.Origin, first.Confidence = target.ID, graph.OriginASTResolved, 0.95
+	first.Meta = map[string]any{"route": "direct", "position": int64(1), "semantic": true}
+	second := first
+	second.Line, second.Origin, second.Confidence = first.Line+1, graph.OriginASTInferred, 0.65
+	second.Meta = map[string]any{"route": "receiver", "position": int64(2), "semantic": false}
+	nodes := []*graph.Node{declared, target}
+	edges := []*graph.Edge{&first, &second}
+	worker.AddBatch(nil, edges)
+	native := graph.New()
+	native.AddBatch(nodes, edges)
+
+	view := worker.RebuildView()
+	var before []*graph.Edge
+	require.NoError(t, view.VisitEdges(ctx, func(e *graph.Edge) error {
+		before = append(before, e)
+		return nil
+	}))
+	require.ElementsMatch(t, edges, before)
+	require.ElementsMatch(t, native.AllEdges(), before)
+	require.ElementsMatch(t, nodes, native.AllNodes())
+	var selected *graph.Edge
+	for _, e := range before {
+		if e.Line == first.Line {
+			selected = e
+		}
+	}
+	require.Equal(t, &first, selected)
+	absent := first
+	absent.Line = second.Line + 1
+	remove := []*graph.Edge{nil, &absent, selected, selected}
+	require.Equal(t, 1, graph.RemoveEdgesExact(native, remove))
+	require.Equal(t, 1, graph.RemoveEdgesExact(worker, remove))
+	require.Zero(t, graph.RemoveEdgesExact(native, remove))
+	require.Zero(t, graph.RemoveEdgesExact(worker, remove))
+
+	var after []*graph.Edge
+	require.NoError(t, view.VisitEdges(ctx, func(e *graph.Edge) error {
+		after = append(after, e)
+		return nil
+	}))
+	want := []*graph.Edge{&second}
+	require.Equal(t, want, after)
+	require.Equal(t, native.AllEdges(), after)
+	var privateNodes []*graph.Node
+	require.NoError(t, view.VisitNodes(ctx, func(n *graph.Node) error {
+		privateNodes = append(privateNodes, n)
+		return nil
+	}))
+	require.ElementsMatch(t, nodes, privateNodes)
+
+	tables, err := worker.PrepareRelations(ctx, t.TempDir(), base, nil)
+	require.NoError(t, err)
+	_, err = head.PublishStage(ctx, tables)
+	require.NoError(t, err)
+	current := stageRead(t, head)
+	w, err := current.Publication()
+	require.NoError(t, err)
+	require.Equal(t, StageRelations, w.Stage)
+	require.Equal(t, prior.Version(), w.Version())
+	require.Equal(t, w.Families, relationsSavedWitness(t, current))
+	require.ElementsMatch(t, nodes, current.AllNodes())
+	require.ElementsMatch(t, native.AllNodes(), current.AllNodes())
+	require.Equal(t, want, current.AllEdges())
+	require.Equal(t, native.GetOutEdges(declared.ID), current.GetOutEdges(declared.ID))
+	require.Equal(t, want, current.GetOutEdges(declared.ID))
+	require.Equal(t, native.GetInEdges(target.ID), current.GetInEdges(target.ID))
+	require.Equal(t, want, current.GetInEdges(target.ID))
+	require.Equal(t, want, slices.Collect(current.EdgesByKind(first.Kind)))
+	require.Equal(t, want, slices.Collect(native.EdgesByKind(first.Kind)))
+	require.Equal(t, want, current.GetRepoEdges(declared.RepoPrefix))
+	require.Equal(t, want, native.GetRepoEdges(declared.RepoPrefix))
+	require.Empty(t, current.GetRepoEdges(target.RepoPrefix))
+	require.Empty(t, current.GetInEdges(raw.To))
+	require.Equal(t, 2, current.NodeCount())
+	require.Equal(t, 1, current.EdgeCount())
+	require.Equal(t, native.EdgeCount(), current.EdgeCount())
+	require.Equal(t, 1, current.count("out total", declared.ID))
+	require.Equal(t, 1, current.count("in total", target.ID))
+	require.Equal(t, 1, current.count("out kind", declared.ID, string(first.Kind)))
+	require.Equal(t, 1, current.count("in kind", target.ID, string(first.Kind)))
+	require.Equal(t, 1, current.count("edge kind", string(first.Kind)))
+	require.Equal(t, 1, current.count("repo edges", declared.RepoPrefix))
+	require.Zero(t, current.count("repo edges", target.RepoPrefix))
+	seenFile, err := current.ManifestFile(file.Path)
+	require.NoError(t, err)
+	require.Equal(t, file, seenFile)
+	seenReceipt, err := current.FileMetadata(declared.RepoPrefix, file.Path)
+	require.NoError(t, err)
+	require.Equal(t, receipt, seenReceipt)
+	require.NoError(t, current.ReadError())
+
+	oldWitness, err := pinned.Publication()
+	require.NoError(t, err)
+	require.Equal(t, prior, oldWitness)
+	require.Equal(t, priorRows, relationsSavedRows(t, pinned))
+	require.Equal(t, prior.Families, relationsSavedWitness(t, pinned))
+	require.Equal(t, declared, pinned.GetNode(declared.ID))
+	require.Nil(t, pinned.GetNode(target.ID))
+	require.Zero(t, pinned.EdgeCount())
+	require.NoError(t, pinned.ReadError())
 }
 
 func TestRelationsStageRefusesUnreadableTable(t *testing.T) {
