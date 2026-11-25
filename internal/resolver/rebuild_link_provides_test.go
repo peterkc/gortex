@@ -4,12 +4,16 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
+	"github.com/zzet/gortex/internal/parser/languages"
 )
 
 func rebuildProvidesTestEdge(from, file, target, abstract string, line int) *graph.Edge {
@@ -122,6 +126,160 @@ func TestRebuildProvidesStationarity(t *testing.T) {
 				sibling := *provider
 				sibling.To = "defs.php::Impl"
 				sibling.Meta = nil // could win and erase the moving pair
+				build.AddEdge(&sibling)
+			}
+			err := checkRebuildProvidesStationarity(ctx, build.RebuildView())
+			if tc.wantRefusal {
+				require.ErrorIs(t, err, errRebuildMainRule)
+				require.ErrorContains(t, err, "useClass stationarity")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+// The frozen Laravel bind emits two distinct token targets at one recording
+// site. Resolve both through the native dispatcher, then apply those actual
+// reindexes to the private build and compare the complete census on both sides.
+func TestRebuildProvidesStationarityLaravel(t *testing.T) {
+	ctx, build, _ := frontierFixture(t, 1, 0)
+	const providerPath = "app/Providers/AppServiceProvider.php"
+	const abstractPath = "app/Repositories/UserRepository.php"
+	const concretePath = "app/Repositories/EloquentUserRepository.php"
+	const fixture = "../../bench/fixtures/di/laravel"
+	g := graph.New()
+	var providers []*graph.Edge
+	for _, path := range []string{providerPath, abstractPath, concretePath} {
+		src, err := os.ReadFile(filepath.Join(fixture, path))
+		require.NoError(t, err)
+		result, err := languages.NewPHPExtractor().Extract(path, src)
+		require.NoError(t, err)
+		for _, n := range result.Nodes {
+			n.RepoPrefix = "repo"
+		}
+		build.AddBatch(result.Nodes, nil)
+		g.AddBatch(result.Nodes, nil)
+		for _, e := range result.Edges {
+			if e.Kind == graph.EdgeProvides && e.Meta[graph.MetaDIOrigin] == "bind" {
+				providers = append(providers, e)
+			}
+		}
+	}
+	require.Len(t, providers, 2)
+	wantOld := map[string]string{
+		"unresolved::EloquentUserRepository": graph.DIBindingUseClass,
+		"unresolved::UserRepository":         "bind",
+	}
+	gotOld := make(map[string]string)
+	for _, e := range providers {
+		require.Equal(t, providerPath+"::AppServiceProvider", e.From)
+		require.Equal(t, providerPath, e.FilePath)
+		require.Equal(t, 21, e.Line)
+		switch e.To {
+		case "unresolved::EloquentUserRepository":
+			require.Equal(t, "UserRepository", e.Meta[graph.MetaDIProvidesFor])
+		case "unresolved::UserRepository":
+			require.Equal(t, "UserRepository", e.Meta[graph.MetaDIToken])
+		}
+		binding, ok := e.Meta[graph.MetaDIBinding].(string)
+		require.True(t, ok)
+		gotOld[e.To] = binding
+		g.AddEdge(cloneFrameworkEdge(e))
+		build.AddEdge(e)
+	}
+	require.Equal(t, wantOld, gotOld)
+	require.NoError(t, checkRebuildProvidesStationarity(ctx, build.RebuildView()))
+
+	native := New(g)
+	want := map[string]map[string]struct{}{"UserRepository": {"EloquentUserRepository": {}}}
+	native.buildProvidesForIndex()
+	require.Equal(t, want, native.providesForIdx)
+	before, err := captureRebuildProvides(ctx, build.RebuildView())
+	require.NoError(t, err)
+	require.Equal(t, native.providesForIdx, before)
+
+	// Complete old-key order for the two rows at this same site is To order.
+	slices.SortFunc(providers, func(a, b *graph.Edge) int { return strings.Compare(a.To, b.To) })
+	wantTargets := map[string]string{
+		"unresolved::EloquentUserRepository": concretePath + "::EloquentUserRepository",
+		"unresolved::UserRepository":         abstractPath + "::UserRepository",
+	}
+	var moves []graph.EdgeReindex
+	var stats ResolveStats
+	for _, e := range providers {
+		resolved := cloneFrameworkEdge(e)
+		oldTo, changed := native.resolveEdge(resolved, &stats)
+		require.True(t, changed)
+		require.Equal(t, e.To, oldTo)
+		require.Equal(t, wantTargets[oldTo], resolved.To)
+		require.Equal(t, graph.EdgeProvides, resolved.Kind)
+		moves = append(moves, graph.EdgeReindex{Edge: resolved, OldTo: oldTo, OldKind: e.Kind})
+	}
+	require.Equal(t, 2, stats.Resolved)
+	require.NoError(t, build.ApplyLinkReindexes(ctx, moves))
+	g.ReindexEdges(moves)
+
+	wantResolved := []string{concretePath + "::EloquentUserRepository", abstractPath + "::UserRepository"}
+	var nativeTargets, privateTargets []string
+	for e := range g.EdgesByKind(graph.EdgeProvides) {
+		nativeTargets = append(nativeTargets, e.To)
+	}
+	require.NoError(t, build.RebuildView().VisitEdges(ctx, func(e *graph.Edge) error {
+		if e.Kind == graph.EdgeProvides {
+			privateTargets = append(privateTargets, e.To)
+		}
+		return nil
+	}))
+	require.ElementsMatch(t, wantResolved, nativeTargets)
+	require.ElementsMatch(t, wantResolved, privateTargets)
+	native.buildProvidesForIndex()
+	after, err := captureRebuildProvides(ctx, build.RebuildView())
+	require.NoError(t, err)
+	require.Equal(t, before, native.providesForIdx)
+	require.Equal(t, before, after)
+}
+
+func TestRebuildProvidesStationarityDestinations(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		classTarget     string
+		ordinaryTargets []string
+		otherSite       string
+		wantRefusal     bool
+	}{
+		{name: "pending-class-disjoint-bound-ordinary", classTarget: "unresolved::Impl", ordinaryTargets: []string{"defs.php::Other"}},
+		{name: "bound-class-disjoint-pending-ordinary", classTarget: "defs.php::Impl", ordinaryTargets: []string{"unresolved::Other"}},
+		{name: "bound-class-competing-pending-ordinary", classTarget: "defs.php::Impl", ordinaryTargets: []string{"unresolved::Impl"}, wantRefusal: true},
+		{name: "pending-class-competing-qualified-ordinary", classTarget: "unresolved::Impl", ordinaryTargets: []string{"repo::unresolved::Impl"}, wantRefusal: true},
+		{name: "qualified-class-competing-pending-ordinary", classTarget: "repo::unresolved::Impl", ordinaryTargets: []string{"unresolved::Impl"}, wantRefusal: true},
+		{name: "ordinary-only-overlap", classTarget: "unresolved::Impl", ordinaryTargets: []string{"unresolved::Other", "repo::unresolved::Other"}},
+		{name: "unsupported-sibling-dispatch", classTarget: "defs.php::Impl", ordinaryTargets: []string{"unresolved::*.Impl"}, wantRefusal: true},
+		{name: "different-from", classTarget: "unresolved::Impl", ordinaryTargets: []string{"defs.php::Impl"}, otherSite: "from"},
+		{name: "different-file", classTarget: "unresolved::Impl", ordinaryTargets: []string{"defs.php::Impl"}, otherSite: "file"},
+		{name: "different-line", classTarget: "unresolved::Impl", ordinaryTargets: []string{"defs.php::Impl"}, otherSite: "line"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, build, _ := frontierFixture(t, 1, 0)
+			provider := rebuildProvidesTestEdge("module", "module.php", tc.classTarget, "Abstract", 1)
+			build.AddBatch([]*graph.Node{
+				{ID: provider.From, Language: "php", RepoPrefix: "repo", FilePath: provider.FilePath},
+				{ID: "other-module", Language: "php", RepoPrefix: "repo", FilePath: provider.FilePath},
+				{ID: "defs.php::Impl", Name: "Impl", Language: "php", RepoPrefix: "repo", FilePath: "defs.php"},
+				{ID: "defs.php::Other", Name: "Other", Language: "php", RepoPrefix: "repo", FilePath: "defs.php"},
+			}, []*graph.Edge{provider})
+			for _, target := range tc.ordinaryTargets {
+				sibling := *provider
+				sibling.To = target
+				sibling.Meta = map[string]any{graph.MetaDIBinding: "bind"}
+				switch tc.otherSite {
+				case "from":
+					sibling.From = "other-module"
+				case "file":
+					sibling.FilePath = "other.php"
+				case "line":
+					sibling.Line++
+				}
 				build.AddEdge(&sibling)
 			}
 			err := checkRebuildProvidesStationarity(ctx, build.RebuildView())
