@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"fmt"
 	"maps"
 	"path/filepath"
 	"slices"
@@ -311,6 +312,135 @@ func TestRebuildFunctionValueRefRefusesOtherNonBareRows(t *testing.T) {
 			before := cloneFrameworkEdge(e)
 			// Refusal occurs before any view or candidate access.
 			require.ErrorIs(t, resolveRebuildFunction(t.Context(), nil, e, tc.target), errRebuildMainRule)
+			require.Equal(t, before, e)
+		})
+	}
+}
+
+// Actual Go extraction supplies the marker and channel expression provenance.
+// The same full-name native lookup must preserve each miss, including payload,
+// and a compatible hit deliberately remains outside the private rule.
+func TestRebuildFunctionGoFullNameMiss(t *testing.T) {
+	const file = "src/executor.go"
+	facts, err := languages.NewGoExtractor().Extract(file, []byte(`package sample
+ type Dispatcher struct { Name string; C chan int }
+ func (p *Dispatcher) Done() chan int { return p.C }
+ func Run(p *Dispatcher) {
+     _ = Dispatcher{Name: "activity"}
+     <-p.Done()
+     <-p.C
+     p.C <- 1
+ }
+`))
+	require.NoError(t, err)
+	defer facts.ReleaseTree()
+	for _, n := range facts.Nodes {
+		n.RepoPrefix = "repo"
+	}
+	for _, tc := range []struct {
+		label, target, suffix, family string
+		kind                          graph.EdgeKind
+	}{
+		{"marker", "temporal-executor::Dispatcher::Name", "Name", "temporal executor-field", graph.EdgeCalls},
+		{"receive_call", "p.Done()", "Done", "channel expression", graph.EdgeRecvs},
+		{"receive_field", "p.C", "C", "channel expression", graph.EdgeRecvs},
+		{"send_field", "p.C", "C", "channel expression", graph.EdgeSends},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			var selected []*graph.Edge
+			for _, e := range facts.Edges {
+				if e.Kind == tc.kind && e.To == "unresolved::"+tc.target {
+					selected = append(selected, cloneFrameworkEdge(e))
+				}
+			}
+			require.Len(t, selected, 1)
+			row := selected[0]
+			if tc.kind == graph.EdgeCalls {
+				require.Equal(t, "temporal.executor-field", row.Meta["via"])
+				require.Equal(t, "Dispatcher", row.Meta["executor_type"])
+				require.Equal(t, "Name", row.Meta["executor_field"])
+				require.Equal(t, "activity", row.Meta["executor_value"])
+			} else {
+				require.Equal(t, graph.OriginASTInferred, row.Origin)
+			}
+			setEdgeTerminal(row, terminalReasonNoDefinition)
+			before := cloneFrameworkEdge(row)
+			for _, hit := range []bool{false, true} {
+				t.Run(fmt.Sprintf("hit=%v", hit), func(t *testing.T) {
+					nodes := append(slices.Clone(facts.Nodes),
+						&graph.Node{ID: "suffix", Name: tc.suffix, RepoPrefix: "repo", Language: "go", FilePath: file, Kind: graph.KindFunction},
+						&graph.Node{ID: "other-repo", Name: tc.target, RepoPrefix: "other", Language: "go", FilePath: file, Kind: graph.KindFunction},
+						&graph.Node{ID: "other-language", Name: tc.target, RepoPrefix: "repo", Language: "python", FilePath: file, Kind: graph.KindFunction},
+					)
+					if hit {
+						nodes = append(nodes, &graph.Node{ID: "compatible", Name: tc.target, RepoPrefix: "repo", FilePath: file, Kind: graph.KindFunction})
+					}
+					g := graph.New()
+					g.AddBatch(nodes, selected)
+					native := New(g)
+					native.bulkMode = true
+					require.NoError(t, native.warmLookupCache(selected))
+					defer native.clearLookupCache()
+					e := cloneFrameworkEdge(row)
+					_, changed := native.resolveEdge(e, &ResolveStats{})
+					require.Equal(t, hit, changed)
+					if hit {
+						require.Equal(t, "compatible", e.To)
+					} else {
+						require.Equal(t, before, e)
+					}
+
+					ctx, build, opts := frontierFixture(t, 2, 0)
+					opts.SpillBytes = 1
+					build.AddBatch(nodes, selected)
+					err := runRebuildLinkFrontier(ctx, build, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
+						require.Equal(t, []*graph.Edge{before}, page)
+						moves, err := reduceRebuildMainPage(ctx, f, page)
+						require.Empty(t, moves)
+						require.Equal(t, []*graph.Edge{before}, page)
+						require.Equal(t, store_pebble.LinkRequestProgress{CandidateCalls: 1, RequestsSent: 1, FramesSent: 1, RoundTrips: 1}, f.link.RequestProgress())
+						return err
+					})
+					if hit {
+						require.ErrorIs(t, err, errRebuildMainRule)
+						require.ErrorContains(t, err, "non-bare "+tc.family+" candidate")
+					} else {
+						require.NoError(t, err)
+					}
+					require.Equal(t, []*graph.Edge{before}, rebuildFnPointerSaved(t, build))
+					require.Equal(t, before, row)
+					checkFrontierScratch(t, opts.ScratchParent)
+				})
+			}
+		})
+	}
+}
+
+func TestRebuildFunctionGoFullNameRefusesOtherRows(t *testing.T) {
+	marker := &graph.Edge{From: "caller", To: "unresolved::temporal-executor::Dispatcher::Name", FilePath: "caller.go", Kind: graph.EdgeCalls,
+		Meta: map[string]any{"via": "temporal.executor-field", "executor_type": "Dispatcher", "executor_field": "Name", "executor_value": "activity"}}
+	channel := &graph.Edge{From: "caller", To: "unresolved::p.Done()", FilePath: "caller.go", Kind: graph.EdgeRecvs, Origin: graph.OriginASTInferred}
+	for _, tc := range []struct {
+		label  string
+		base   *graph.Edge
+		mutate func(*graph.Edge)
+	}{
+		{"marker_kind", marker, func(e *graph.Edge) { e.Kind = graph.EdgeReads }},
+		{"marker_via", marker, func(e *graph.Edge) { delete(e.Meta, "via") }},
+		{"marker_type", marker, func(e *graph.Edge) { e.Meta["executor_type"] = "Other" }},
+		{"marker_value", marker, func(e *graph.Edge) { delete(e.Meta, "executor_value") }},
+		{"marker_extra_component", marker, func(e *graph.Edge) { e.To += "::Extra" }},
+		{"channel_kind", channel, func(e *graph.Edge) { e.Kind = graph.EdgeCalls }},
+		{"channel_origin", channel, func(e *graph.Edge) { e.Origin = graph.OriginSpeculative }},
+		{"channel_path", channel, func(e *graph.Edge) { e.FilePath = "caller.ts" }},
+		{"channel_marker", channel, func(e *graph.Edge) { e.To = "unresolved::other::p.Done()" }},
+		{"channel_stale_using", channel, func(e *graph.Edge) { e.Meta = map[string]any{"resolution": "using_static"} }},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			e := cloneFrameworkEdge(tc.base)
+			tc.mutate(e)
+			before := cloneFrameworkEdge(e)
+			require.ErrorIs(t, resolveRebuildFunction(t.Context(), nil, e, graph.UnresolvedName(e.To)), errRebuildMainRule)
 			require.Equal(t, before, e)
 		})
 	}

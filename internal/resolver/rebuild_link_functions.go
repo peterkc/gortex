@@ -3,6 +3,7 @@ package resolver
 import (
 	"context"
 	"fmt"
+	"go/token"
 	"maps"
 	"strings"
 
@@ -10,23 +11,28 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
 
-// resolveRebuildFunction handles the default bare-name branch and a checked
-// full-name miss for extractor value-ref candidates. The caller owns dispatch,
+// resolveRebuildFunction handles the default bare-name branch and checked
+// full-name misses for typed extractor markers. The caller owns dispatch,
 // terminal clearing on a move, and applying the complete page. A refused call
 // leaves even this tentative edge unchanged.
 func resolveRebuildFunction(ctx context.Context, f *rebuildLinkFrontier, edge *graph.Edge, target string) error {
-	valueRef := false
+	checkedMiss := ""
 	if edge.Kind == graph.EdgeRendersChild || strings.ContainsAny(target, `.\:`) {
 		name, _ := edge.Meta["name"].(string)
-		if edge.Kind != graph.EdgeReads || edge.Origin != graph.OriginSpeculative ||
-			edge.Meta["via"] != valueRefCandidateVia || !isDistinctiveValueName(name) ||
-			strings.ContainsAny(name, `.\:`) || target != "valueref::"+name {
+		switch {
+		case edge.Kind == graph.EdgeReads && edge.Origin == graph.OriginSpeculative &&
+			edge.Meta["via"] == valueRefCandidateVia && isDistinctiveValueName(name) &&
+			!strings.ContainsAny(name, `.\:`) && target == "valueref::"+name:
+			checkedMiss = "value-ref"
+		default:
+			checkedMiss = rebuildGoFullNameMissFamily(edge, target)
+		}
+		if checkedMiss == "" {
 			return fmt.Errorf("%w: non-bare call %q in %q", errRebuildMainRule, target, edge.FilePath)
 		}
-		valueRef = true
 	}
 	e := *edge
-	if !valueRef {
+	if checkedMiss == "" {
 		csharpUsing, _ := e.Meta["resolution"].(string)
 		if csharpUsing == "using_static" {
 			e.Meta = maps.Clone(e.Meta)
@@ -48,9 +54,9 @@ func resolveRebuildFunction(ctx context.Context, f *rebuildLinkFrontier, edge *g
 	}
 	_, langs := resolverCompatibleLanguages(lang)
 	req := store_pebble.LinkRequest{Kind: store_pebble.LinkName, Key: target, RepoPrefix: repo, Languages: langs}
-	if valueRef {
-		// Native main searches the full "valueref::name", not the bare
-		// declaration name. Only a checked miss can wait for ResolveValueRefs.
+	if checkedMiss != "" {
+		// Native main searches the entire extractor target, not a suffix.
+		// Only a checked miss permits the original row to remain unchanged.
 		matched := false
 		_, err := f.candidates(ctx, []store_pebble.LinkRequest{req}, func(_ int, n *graph.Node) error {
 			matched = matched || rebuildFunctionCandidateEligible(edge, n)
@@ -60,7 +66,7 @@ func resolveRebuildFunction(ctx context.Context, f *rebuildLinkFrontier, edge *g
 			return err
 		}
 		if matched {
-			return fmt.Errorf("%w: non-bare value-ref candidate %q in %q", errRebuildMainRule, target, edge.FilePath)
+			return fmt.Errorf("%w: non-bare %s candidate %q in %q", errRebuildMainRule, checkedMiss, target, edge.FilePath)
 		}
 		return nil
 	}
@@ -188,6 +194,32 @@ func resolveRebuildFunction(ctx context.Context, f *rebuildLinkFrontier, edge *g
 	}
 	*edge = e
 	return nil
+}
+
+// The Go extractor emits executor-field Calls from keyed string composites
+// and AST-inferred Sends/Recvs from the channel expression's source text.
+// This identifies only those typed shapes, not arbitrary qualified names.
+func rebuildGoFullNameMissFamily(edge *graph.Edge, target string) string {
+	if !strings.HasSuffix(edge.FilePath, ".go") || edge.Meta["resolution"] == "using_static" || csharpLocalShadowed(edge) {
+		return ""
+	}
+	switch edge.Kind {
+	case graph.EdgeCalls:
+		if edge.Meta["via"] == "temporal.executor-field" {
+			typ, _ := edge.Meta["executor_type"].(string)
+			field, _ := edge.Meta["executor_field"].(string)
+			_, valueOK := edge.Meta["executor_value"].(string)
+			if valueOK && token.IsIdentifier(typ) && token.IsIdentifier(field) && target == "temporal-executor::"+typ+"::"+field {
+				return "temporal executor-field"
+			}
+		}
+	case graph.EdgeRecvs, graph.EdgeSends:
+		if edge.Origin == graph.OriginASTInferred && strings.Contains(target, ".") &&
+			!strings.ContainsAny(target, `\:`) && strings.TrimSpace(target) == target {
+			return "channel expression"
+		}
+	}
+	return ""
 }
 
 type rebuildFunctionPick struct {
