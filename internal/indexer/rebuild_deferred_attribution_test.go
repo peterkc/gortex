@@ -29,10 +29,12 @@ func TestRebuildDeferredAttribution(t *testing.T) {
 	root, src := rebuildInputFixture(t)
 	t.Setenv(rebuildDeferredProbeEnv, "1")
 	t.Setenv("GORTEX_TEST_REBUILD_BUILD_CHILD", "1")
+	binary, err := os.Executable()
+	require.NoError(t, err)
 	link := rebuildTestLinkOptions(t)
 	cfg := config.Default().Index
 	cfg.ExtractorPlugins = []config.ExtractorPluginSpec{{
-		Language: deferred, Extensions: []string{".t95deferred"}, Command: link.Binary,
+		Language: deferred, Extensions: []string{".t95deferred"}, Command: binary,
 		Args: []string{"-test.run=^TestRebuildDeferredAttributionPlugin$"},
 	}}
 	log := zap.NewNop()
@@ -154,10 +156,11 @@ func TestRebuildDeferredArgOfRefusal(t *testing.T) {
 	const deferred, goPath = "t95deferred", "z.go"
 	t.Setenv(rebuildDeferredProbeEnv, "arg_lift")
 	t.Setenv("GORTEX_TEST_REBUILD_BUILD_CHILD", "1")
-	link := rebuildTestLinkOptions(t)
+	binary, err := os.Executable()
+	require.NoError(t, err)
 	cfg := config.Default().Index
 	cfg.ExtractorPlugins = []config.ExtractorPluginSpec{{
-		Language: deferred, Extensions: []string{".t95deferred"}, Command: link.Binary,
+		Language: deferred, Extensions: []string{".t95deferred"}, Command: binary,
 		Args: []string{"-test.run=^TestRebuildDeferredAttributionPlugin$"},
 	}}
 	var inputs []rebuildInput
@@ -186,7 +189,7 @@ func TestRebuildDeferredArgOfRefusal(t *testing.T) {
 	var stages []store_pebble.Stage
 	err = withRebuildBuildInputs(ctx, leases, src, map[string]*rebuildInput{"go.mod": nil, "package.json": nil}, req, nil,
 		func(lease string, bound rebuildBuildRequest) error {
-			return runRebuildBuild(ctx, link.Binary, []string{"-test.run=^TestRebuildBuildChildEntry$", "--"}, lease, headDir, bound, cfg, inputs,
+			return runRebuildBuild(ctx, binary, []string{"-test.run=^TestRebuildBuildChildEntry$", "--"}, lease, headDir, bound, cfg, inputs,
 				func(_ context.Context, offer store_pebble.StageTables) error {
 					stages = append(stages, offer.Witness.Stage)
 					return nil

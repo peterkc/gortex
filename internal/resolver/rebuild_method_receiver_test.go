@@ -158,8 +158,8 @@ func TestRunRebuildMainGoMethodReceiversRawPending(t *testing.T) {
 			const keepName = "gortex-resolve-guard-keep"
 			keep := filepath.Join(lease, keepName)
 			require.NoError(t, os.WriteFile(keep, []byte("unowned guard file"), 0600))
-			// No Binary: even attempting to start a candidate worker fails.
-			opts := store_pebble.RebuildLinkOptions{ScratchParent: lease, SpillBytes: 1}
+			// The candidate reader must not start, even when the tail runs.
+			opts := store_pebble.RebuildLinkOptions{ScratchParent: filepath.Join(lease, "must-not-start"), SpillBytes: 1}
 			seen := 0
 			require.NoError(t, RunRebuildMain(t.Context(), build, opts, RebuildMainInputs{
 				SelectCallers: func(page []*graph.Edge) ([]*graph.Edge, error) {
