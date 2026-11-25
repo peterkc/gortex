@@ -395,11 +395,13 @@ func TestRebuildViewStreamsCandidateFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
+	// The test context is canceled before t.Cleanup runs. Close while the
+	// pass context is still active, and keep the successful-close assertion.
+	defer func() {
 		if err := pass.Close(); err != nil {
 			t.Error(err)
 		}
-	})
+	}()
 	b.AddNode(&graph.Node{ID: "a", Name: "Moved"})
 	assertRebuildNodeIDs(t, func(yield func(*graph.Node) error) error { return view.VisitNameCandidates(ctx, "Run", nil, yield) }, "b")
 	assertRebuildNodeIDs(t, func(yield func(*graph.Node) error) error {
