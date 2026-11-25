@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/storage"
 	"slices"
 )
 
@@ -76,24 +77,11 @@ func (s *Store) PublishContractAttachmentWithInputsContext(ctx context.Context, 
 
 // ContractAttachmentPublishTarget binds a captured input to its selected core
 // handle. Every handle in a batch must share the receiver's store core.
-type ContractAttachmentPublishTarget struct {
-	// ProjectionWitness is job-local proof of every selected physical input.
-	// Incremental consumers must capture it before their checked reads; it is
-	// never stored in an actor checkpoint or substituted for receipt/work CAS.
-	ProjectionWitness *PayloadInputWitness
-	Store             *Store
-	Expected          graph.ContractInputState
-	Witnesses         []graph.ContractInputWitness
-	Attachment        graph.ContractAttachment
-	Work              []graph.ContractWork
-}
+type ContractAttachmentPublishTarget = storage.ContractAttachmentPublishTarget
 
 // ContractAttachmentPublication reports the immutable winning payload and the
 // losing reservation, if any. The caller owns retirement of unused reservations.
-type ContractAttachmentPublication struct {
-	PayloadGeneration       int64
-	UnusedPayloadGeneration int64
-}
+type ContractAttachmentPublication = storage.ContractAttachmentPublication
 
 // PublishContractAttachmentsWithInputsContext publishes the entire cohort under
 // one write gate and transaction. Results are returned only after commit and in
@@ -123,14 +111,17 @@ func (s *Store) publishContractAttachments(ctx context.Context, targets []Contra
 		return nil, sql.ErrConnDone
 	}
 	reservations := make(map[int64]bool, len(targets))
-	for _, target := range targets {
+	stores := make([]*Store, len(targets))
+	for i, target := range targets {
 		if reservations[target.Attachment.PayloadGeneration] {
 			return nil, fmt.Errorf("%w: shared attachment reservation", ErrCatalogInvalidValue)
 		}
 		reservations[target.Attachment.PayloadGeneration] = true
-		if target.Store == nil || target.Store.coreless() || target.Store.storeCore != s.storeCore {
+		native, ok := target.Store.(*Store)
+		if !ok || native == nil || native.coreless() || native.storeCore != s.storeCore {
 			return nil, fmt.Errorf("%w: attachment stores differ", ErrCatalogInvalidValue)
 		}
+		stores[i] = native
 	}
 	if len(targets) == 0 {
 		return []ContractAttachmentPublication{}, nil
@@ -143,9 +134,9 @@ func (s *Store) publishContractAttachments(ctx context.Context, targets []Contra
 	// Validate all carried/recomputed projection inputs before opening the
 	// transaction. validateLocked uses this already-held gate and never
 	// reacquires it; a late selected metadata write refuses the whole cohort.
-	for _, target := range targets {
+	for i, target := range targets {
 		if witness := target.ProjectionWitness; witness != nil {
-			if err := witness.validateContractSelectionLocked(target.Store, ctx, target.Witnesses); err != nil {
+			if err := validateContractSelectionLocked(witness, stores[i], ctx, target.Witnesses); err != nil {
 				return nil, err
 			}
 		}
@@ -163,7 +154,7 @@ func (s *Store) publishContractAttachments(ctx context.Context, targets []Contra
 		workVariableLimit = sqliteFallbackVariableLimit
 	}
 	for i, target := range targets {
-		if err := target.Store.validateContractAttachmentPublicationWorkBatchTx(ctx, tx, target.Expected, target.Witnesses, target.Attachment, target.Work, &results[i], workVariableLimit); err != nil {
+		if err := stores[i].validateContractAttachmentPublicationWorkBatchTx(ctx, tx, target.Expected, target.Witnesses, target.Attachment, target.Work, &results[i], workVariableLimit); err != nil {
 			return nil, err
 		}
 	}
@@ -174,7 +165,7 @@ func (s *Store) publishContractAttachments(ctx context.Context, targets []Contra
 			}
 			continue
 		}
-		if err := target.Store.writeContractAttachmentTx(ctx, tx, target.Expected, target.Witnesses, target.Attachment, target.Work, publishedAt); err != nil {
+		if err := stores[i].writeContractAttachmentTx(ctx, tx, target.Expected, target.Witnesses, target.Attachment, target.Work, publishedAt); err != nil {
 			return nil, err
 		}
 		results[i].PayloadGeneration = target.Attachment.PayloadGeneration

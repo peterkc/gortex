@@ -8,7 +8,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -101,14 +101,14 @@ func (l *CheckoutLifecycle) sweepRefViewRetention(ctx context.Context) int {
 	if l == nil || l.store == nil || l.catalog == nil {
 		return 0
 	}
-	rows, err := l.catalog.ListViewGenerations(ctx, store_sqlite.ViewGenerationFilter{
+	rows, err := l.catalog.ListViewGenerations(ctx, storage.ViewGenerationFilter{
 		OwnerKind: refViewOwnerKind,
 	})
 	if err != nil {
 		l.logger.Debug("checkout lifecycle: could not scan ref view generations", zap.Error(err))
 		return 0
 	}
-	byGraph := map[string][]store_sqlite.ViewGeneration{}
+	byGraph := map[string][]storage.ViewGeneration{}
 	for _, row := range rows {
 		if row.GraphID == "" || row.GenerationID <= 0 {
 			continue
@@ -128,7 +128,7 @@ func (l *CheckoutLifecycle) sweepRefViewRetention(ctx context.Context) int {
 			}
 			err := l.store.RetirePayloadGeneration(ctx, candidate.generationID, l.leases.InUse)
 			switch {
-			case err == nil, errors.Is(err, store_sqlite.ErrCatalogNotFound):
+			case err == nil, errors.Is(err, storage.ErrCatalogNotFound):
 				retired++
 				viewmetrics.Count(viewmetrics.RefViewEvictedTotal, candidate.reason)
 				viewmetrics.Count(viewmetrics.GenerationSweepCollectedTotal, viewmetrics.SweepRefView)
@@ -153,15 +153,15 @@ func (l *CheckoutLifecycle) queueRefViewRetirements(ctx context.Context) {
 	if l == nil || l.store == nil || l.catalog == nil {
 		return
 	}
-	rows, err := l.catalog.ListViewGenerations(ctx, store_sqlite.ViewGenerationFilter{
+	rows, err := l.catalog.ListViewGenerations(ctx, storage.ViewGenerationFilter{
 		OwnerKind: refViewOwnerKind,
 	})
 	if err != nil {
 		l.logger.Debug("checkout lifecycle: could not scan ref view generations", zap.Error(err))
 		return
 	}
-	byGraph := map[string][]store_sqlite.ViewGeneration{}
-	states := make(map[int64]store_sqlite.ViewGenerationState, len(rows))
+	byGraph := map[string][]storage.ViewGeneration{}
+	states := make(map[int64]storage.ViewGenerationState, len(rows))
 	for _, row := range rows {
 		if row.GraphID == "" || row.GenerationID <= 0 {
 			continue
@@ -190,7 +190,7 @@ func (l *CheckoutLifecycle) queueRefViewRetirement(
 	ctx context.Context,
 	graphID string,
 	candidate refViewCandidate,
-	state store_sqlite.ViewGenerationState,
+	state storage.ViewGenerationState,
 ) bool {
 	if candidate.refViewID != "" {
 		released, err := l.catalog.ReleaseRefViewGeneration(
@@ -204,7 +204,7 @@ func (l *CheckoutLifecycle) queueRefViewRetirement(
 		if !released {
 			return false
 		}
-	} else if state == store_sqlite.ViewGenerationReady {
+	} else if state == storage.ViewGenerationReady {
 		marked, err := l.catalog.MarkUnreferencedRefViewGenerationSuperseded(ctx, candidate.generationID)
 		if err != nil {
 			l.logger.Debug("checkout lifecycle: could not persist an unpointed ref view eviction",
@@ -225,7 +225,7 @@ func (l *CheckoutLifecycle) queueRefViewRetirement(
 func (l *CheckoutLifecycle) refViewEvictions(
 	ctx context.Context,
 	graphID string,
-	generations []store_sqlite.ViewGeneration,
+	generations []storage.ViewGeneration,
 ) []refViewCandidate {
 	views, err := l.catalog.ListRefViews(ctx, graphID)
 	if err != nil {
@@ -252,7 +252,7 @@ func (l *CheckoutLifecycle) refViewEvictions(
 		kept       int
 	)
 	for _, row := range generations {
-		if row.State == store_sqlite.ViewGenerationBuilding && row.CreatedAt >= inFlightSince {
+		if row.State == storage.ViewGenerationBuilding && row.CreatedAt >= inFlightSince {
 			// A build is writing this payload right now. Nothing references it
 			// and nothing leases it, so the guarded retire would accept it and
 			// seal it under its own builder — the janitor failing a build

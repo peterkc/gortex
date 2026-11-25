@@ -21,8 +21,8 @@ func (s *Server) announceInteractiveRead(ctx context.Context) func() {
 	var release func()
 	if store, ok := s.graph.(interactiveReadAnnouncer); ok {
 		release = store.AnnounceInteractiveRead()
-	} else if s.materializer != nil && s.materializer.Store != nil {
-		release = s.materializer.Store.AnnounceInteractiveRead()
+	} else if s.materializer != nil && s.materializer.Store != nil && !s.materializer.Store.IsNilGenerationHandle() {
+		release = s.materializer.Store.(interactiveReadAnnouncer).AnnounceInteractiveRead()
 	}
 	if release == nil {
 		return func() {}

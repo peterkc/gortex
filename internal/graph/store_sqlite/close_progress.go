@@ -1,5 +1,7 @@
 package store_sqlite
 
+import "github.com/zzet/gortex/internal/storage"
+
 import (
 	"encoding/json"
 	"os"
@@ -29,29 +31,7 @@ import (
 // (closeRatePath); the next estimate uses it instead of the default, so the
 // estimate corrects itself to the store and the disk it runs on.
 
-// CloseProgress is the close's progress as the stop path reads it.
-type CloseProgress struct {
-	PID                  int     `json:"pid"`
-	Phase                string  `json:"phase"` // draining | done | failed
-	StartedUnixNano      int64   `json:"started_unix_nano"`
-	UpdatedUnixNano      int64   `json:"updated_unix_nano"`
-	LastProgressUnixNano int64   `json:"last_progress_unix_nano"`
-	PendingFrames        int64   `json:"pending_frames"`
-	PerFrameNanos        int64   `json:"per_frame_nanos"`
-	EstimateMillis       int64   `json:"estimate_millis"`
-	ElapsedMillis        int64   `json:"elapsed_millis"`
-	FramesCopiedEstimate int64   `json:"frames_copied_estimate"`
-	RateFramesPerSec     float64 `json:"rate_frames_per_sec"`
-	RemainingMillis      int64   `json:"remaining_millis"`
-}
-
-// Since reports how long ago the close last showed progress.
-func (p CloseProgress) Since(now time.Time) time.Duration {
-	if p.LastProgressUnixNano == 0 {
-		return now.Sub(time.Unix(0, p.StartedUnixNano))
-	}
-	return now.Sub(time.Unix(0, p.LastProgressUnixNano))
-}
+type CloseProgress = storage.CloseProgress
 
 // CloseProgressPath is where a store at dbPath reports its close.
 func CloseProgressPath(dbPath string) string { return dbPath + ".close-progress" }

@@ -69,13 +69,13 @@ func testEvalStoreIsPrivateAndRemovedOnCleanup(t *testing.T, backend string) {
 	f := storetest.NewFixtureF(t)
 	tmp := k12PrivateTemp(t)
 
-	first, closeFirst, err := newEvalStore("k12")
+	first, closeFirst, err := newEvalStoreForBackend("k12", backend)
 	if err != nil {
 		t.Fatalf("open the first eval store: %v", err)
 	}
 	t.Cleanup(closeFirst)
 	requireK12SQLiteStore(t, first)
-	second, closeSecond, err := newEvalStore("k12")
+	second, closeSecond, err := newEvalStoreForBackend("k12", backend)
 	if err != nil {
 		closeFirst()
 		t.Fatalf("open the second eval store: %v", err)
@@ -112,7 +112,7 @@ func testEvalStoreIsPrivateAndRemovedOnCleanup(t *testing.T, backend string) {
 	if got := tempEntries(t, tmp); len(got) != 0 {
 		t.Fatalf("eval cleanup left %v in the temp directory", got)
 	}
-	again, closeAgain, err := newEvalStore("k12")
+	again, closeAgain, err := newEvalStoreForBackend("k12", backend)
 	if err != nil {
 		t.Fatalf("reopen an eval store: %v", err)
 	}
@@ -134,7 +134,7 @@ func testInitIndexesIntoAPrivateStoreAndRemovesIt(t *testing.T, backend string) 
 	tmp := k12PrivateTemp(t)
 	ctx := k12Context(t)
 
-	store, cleanup, err := indexRepoForInit(ctx, f.R.Root, zap.NewNop())
+	store, cleanup, err := indexRepoForInitWithBackend(ctx, f.R.Root, zap.NewNop(), backend)
 	if err != nil {
 		t.Fatalf("init index of R: %v", err)
 	}
@@ -152,7 +152,7 @@ func testInitIndexesIntoAPrivateStoreAndRemovesIt(t *testing.T, backend string) 
 
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if store, cleanup, err := indexRepoForInit(canceled, f.R.Root, zap.NewNop()); err == nil {
+	if store, cleanup, err := indexRepoForInitWithBackend(canceled, f.R.Root, zap.NewNop(), backend); err == nil {
 		cleanup()
 		t.Fatalf("init index under a canceled context returned store %T and no error", store)
 	}

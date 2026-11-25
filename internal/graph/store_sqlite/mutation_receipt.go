@@ -195,7 +195,7 @@ func (s *Store) EndMutationReceipt(token graph.MutationReceiptToken) graph.Mutat
 // store the next fact to arrive may be a sibling repository's.
 //
 // This is the production half of the axis: *Store is the graph.Store the
-// daemon actually holds (serverstack openSqliteBackend -> store_sqlite.Open),
+// daemon actually holds (backend.Open -> store_sqlite.Open),
 // so a fact that only the in-memory *graph.Graph could carry reached no
 // shipped consumer at all — a truncated affected-by pass read as a complete
 // one on every real save.

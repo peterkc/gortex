@@ -15,7 +15,7 @@ import (
 // conflicting positive ActiveGenerationID is deliberately ignored, not adopted.
 // Existing owner, namespace and family cannot be rebound through an upsert.
 func (c *Catalog) upsertDedicatedGraphIdentity(ctx context.Context, dedicated DedicatedGraph) error {
-	if err := dedicated.validate(); err != nil {
+	if err := validateDedicatedGraph(dedicated); err != nil {
 		return err
 	}
 	var released int64

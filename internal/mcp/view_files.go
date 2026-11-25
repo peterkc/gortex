@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/indexer/source"
 )
@@ -38,7 +37,7 @@ const refViewWithdrawBudget = 2 * time.Second
 type refViewFiles struct {
 	// store records the withdrawal a pruned object causes. Nil disables it —
 	// the read still fails, it just leaves no trace on the generation.
-	store *store_sqlite.Store
+	store producerWithdrawer
 
 	fingerprint  string
 	repoPrefix   string
@@ -180,7 +179,7 @@ func (f *refViewFiles) withdraw() {
 }
 
 func (f *refViewFiles) withdrawLocked() {
-	if f.store == nil || f.generationID <= 0 {
+	if f.store == nil || f.store.IsNilGenerationHandle() || f.generationID <= 0 {
 		return
 	}
 	// Bounded, because this is a write on a read path: the store's mutation
@@ -191,7 +190,7 @@ func (f *refViewFiles) withdrawLocked() {
 	defer cancel()
 	// A repeat withdrawal reports a stale guard, which is the right answer and
 	// nothing to act on: the capability is already gone.
-	_ = f.store.Catalog().WithdrawProducer(ctx, f.generationID,
+	_ = f.store.WithdrawProducer(ctx, f.generationID,
 		string(graphview.CapSourceSnapshot),
 		"the object store no longer holds this view's blobs")
 }

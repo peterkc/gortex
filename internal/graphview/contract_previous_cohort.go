@@ -5,7 +5,7 @@ import (
 	"slices"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // OpenPreviousContractCohort recovers only one physical contributor move from
@@ -19,7 +19,7 @@ func (m *Materializer) OpenPreviousContractCohort(ctx context.Context, selected 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if m == nil || m.Store == nil || m.Catalog == nil || m.Leases == nil || len(repos) == 0 || len(repos) > 1024 {
+	if m == nil || (m.Store == nil || m.Store.IsNilGenerationHandle()) || (m.Catalog == nil || m.Catalog.IsNilMaterializerCatalog()) || m.Leases == nil || len(repos) == 0 || len(repos) > 1024 {
 		return nil, graph.ErrContractInputVector
 	}
 	seenRepos := map[string]bool{}
@@ -135,10 +135,10 @@ func (m *Materializer) OpenPreviousContractCohort(ctx context.Context, selected 
 			if readErr != nil {
 				return readErr
 			}
-			if !found || row.State == store_sqlite.ViewGenerationRetiring {
+			if !found || row.State == storage.ViewGenerationRetiring {
 				return graph.ErrContractPredecessorRetired
 			}
-			if row.State != store_sqlite.ViewGenerationReady && row.State != store_sqlite.ViewGenerationSuperseded {
+			if row.State != storage.ViewGenerationReady && row.State != storage.ViewGenerationSuperseded {
 				return graph.ErrContractProjectionStale
 			}
 		}

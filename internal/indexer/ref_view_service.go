@@ -6,7 +6,7 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/gitstate"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // The lifecycle's ref-view entry point.
@@ -81,9 +81,9 @@ func (l *CheckoutLifecycle) EnsureRefView(ctx context.Context, sel RefViewSelect
 // state it is in. It is the read a caller makes when it wants to serve what is
 // already published rather than drive a new selection — the older generation a
 // building view can still answer from.
-func (l *CheckoutLifecycle) RefViewGeneration(ctx context.Context, refViewID string) (store_sqlite.RefView, bool, error) {
+func (l *CheckoutLifecycle) RefViewGeneration(ctx context.Context, refViewID string) (storage.RefView, bool, error) {
 	if l == nil || l.catalog == nil || refViewID == "" {
-		return store_sqlite.RefView{}, false, nil
+		return storage.RefView{}, false, nil
 	}
 	return l.catalog.GetRefView(ctx, refViewID)
 }
@@ -106,8 +106,10 @@ func (l *CheckoutLifecycle) refViewManager(repoPrefix string, idx *Indexer) (*Re
 	}
 	index := repoCfg.Index
 	manager, err := NewRefViewManager(RefViewManagerConfig{
-		Store: l.store,
+		Catalog: l.catalog,
+		Store:   l.store,
 		Builder: l.installContractCoreBuilder(&SparseGenerationBuilder{
+			Catalog:    l.catalog,
 			Store:      l.store,
 			Registry:   l.mi.registry,
 			Config:     index,

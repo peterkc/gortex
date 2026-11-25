@@ -10,10 +10,10 @@ import (
 	"unicode"
 
 	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/search/rerank"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Source operations prove the bytes they serve rather than wait for unrelated
@@ -86,7 +86,7 @@ func (s *Server) resolveSourceRequestView(ctx context.Context, selector graphvie
 		if err != nil {
 			return nil, err
 		}
-		if checkout.State != store_sqlite.CheckoutStateReady {
+		if checkout.State != storage.CheckoutStateReady {
 			// Preserve the original state-specific whole-view refusal rather
 			// than letting a source scope lookup change its ordering.
 			return nil, nil
@@ -103,7 +103,7 @@ func (s *Server) resolveSourceRequestView(ctx context.Context, selector graphvie
 	if selector.Kind == graphview.SelectorAuto && !graphview.ServesAutomaticView(checkout) {
 		return nil, nil
 	}
-	if checkout.State != store_sqlite.CheckoutStateReady {
+	if checkout.State != storage.CheckoutStateReady {
 		return nil, graphview.NewViewError(graphview.CodeCheckoutInaccessible, fmt.Sprintf("checkout %q is %s", checkout.CheckoutID, checkout.State))
 	}
 	if _, err := s.familyPrimary(ctx, checkout.FamilyID); err != nil {
@@ -126,7 +126,7 @@ func (s *Server) resolveSourceRequestView(ctx context.Context, selector graphvie
 			paths[i] = filepath.ToSlash(relative)
 		}
 	}
-	graphPending := len(paths) > 0 || control.Route == nil || control.Route.State != store_sqlite.RouteActive || control.Route.DirtyGenerationID == 0
+	graphPending := len(paths) > 0 || control.Route == nil || control.Route.State != storage.RouteActive || control.Route.DirtyGenerationID == 0
 	if scope != "file" && !graphPending && len(s.resolvePathFilter(*req, fq)) == 0 {
 		return nil, nil
 	}
@@ -156,7 +156,7 @@ func (s *Server) resolveSourceRequestView(ctx context.Context, selector graphvie
 	// and forget; the answer and what it proves are unchanged. Pending paths on
 	// an active route are not a reason, and a retired route declines as byte
 	// admission does.
-	if route := control.Route; route == nil || (route.State != store_sqlite.RouteRetired && !graphview.RouteReady(*route)) {
+	if route := control.Route; route == nil || (route.State != storage.RouteRetired && !graphview.RouteReady(*route)) {
 		s.activateSelectedCheckout(checkout.CheckoutID, "source read of an unrouted checkout")
 	}
 	if freshness.requested() {

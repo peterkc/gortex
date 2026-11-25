@@ -7,7 +7,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 func TestContractIDReplayProvesCoreInputsBeforeLocalShapeWrites(t *testing.T) {
@@ -63,7 +62,7 @@ func TestContractShapePostpassRechecksWithoutTreatingOwnWritesAsInputs(t *testin
 	armed, staged := false, false
 	waits := 0
 	var release func()
-	hooks := &contractConvergenceHooks{beforeR1: func([]string) { armed = true }, openedEvidence: func(*store_sqlite.Store) {
+	hooks := &contractConvergenceHooks{beforeR1: func([]string) { armed = true }, openedEvidence: func(contractEvidenceStore) {
 		if armed && !staged {
 			staged = true
 			f.stageInFlight("fixture/types.go")

@@ -12,7 +12,6 @@ import (
 	"sync"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/viewmetrics"
 	"go.uber.org/zap"
@@ -29,7 +28,7 @@ func NewContractBaselineReconciler(options ContractFollowupCaptureOptions) func(
 		if err := ctx.Err(); err != nil {
 			return false, err
 		}
-		if options.Context == nil || options.BaselineAdmissionMu == nil || options.BaselineJobs == nil || options.Store == nil || options.Materializer == nil || options.Materializer.Leases == nil || options.MultiIndexer == nil || options.Yield == nil {
+		if options.Context == nil || options.BaselineAdmissionMu == nil || options.BaselineJobs == nil || options.Store == nil || options.Store.IsNilGenerationHandle() || options.Materializer == nil || options.Materializer.Leases == nil || options.MultiIndexer == nil || options.Yield == nil {
 			return false, fmt.Errorf("contract baseline: incomplete runtime owner")
 		}
 		if view != nil || checkout != "" {
@@ -40,7 +39,7 @@ func NewContractBaselineReconciler(options ContractFollowupCaptureOptions) func(
 		// store's consumers waiting on a producer that never started. The job
 		// runs its census and every write under the repository lanes and
 		// fences on the pending input state instead.
-		baseline, err := options.Store.AtGeneration(0).ContractBoundaryReceiptBaselineContext(ctx, repo, "")
+		baseline, err := generationAt(options.Store, 0).ContractBoundaryReceiptBaselineContext(ctx, repo, "")
 		if err != nil {
 			return false, err
 		}
@@ -110,7 +109,7 @@ func NewContractBaselineReconciler(options ContractFollowupCaptureOptions) func(
 func reconcilePrimaryContractBaseline(ctx context.Context, options ContractFollowupCaptureOptions, repo string) error {
 	end := options.MultiIndexer.beginContractBaseline(repo)
 	defer end()
-	store := options.Store.AtGeneration(0)
+	store := generationAt(options.Store, 0)
 	var pending graph.ContractInputState
 	var snapshot ContractFollowupSnapshot
 	defer func() {
@@ -366,7 +365,10 @@ func collectContractBaselineAcceptedReceipt(ctx context.Context, idx *Indexer, f
 // the reconstruction's own accepted-source and sidecar CAS fences remain in fn.
 // Callers pass the actual runtime Store used for these writes, not a temporary
 // AtGeneration handle, and already own the repository mutation lane.
-func (mi *MultiIndexer) withContractBaselineOutput(ctx context.Context, output *store_sqlite.Store, repo string, entry OutputMutationEntry, fn func() error) error {
+func (mi *MultiIndexer) withContractBaselineOutput(ctx context.Context, output interface {
+	graph.Store
+	SymbolSearchViewGeneration() int64
+}, repo string, entry OutputMutationEntry, fn func() error) error {
 	if fn == nil {
 		return nil
 	}

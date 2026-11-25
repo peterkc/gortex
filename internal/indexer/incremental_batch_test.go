@@ -445,10 +445,9 @@ func TestSQLiteIncrementalSingleFileEditKeepsMutationReceiptExact(t *testing.T) 
 // reportAffectedByTruncation) and the open receipt reports a complete fan-out
 // while two files went unrefreshed.
 // It runs over BOTH receipt backends. The sqlite arm is the one that matters:
-// *store_sqlite.Store is the graph.Store the daemon holds (serverstack
-// openSqliteBackend), and its receipt accumulator is a separate implementation
-// from the in-memory one — a fact the in-memory graph carries says nothing
-// about what a real save carries.
+// *store_sqlite.Store is the graph.Store the daemon holds (backend.Open),
+// and its receipt accumulator is a separate implementation from the in-memory
+// one — a fact the in-memory graph carries says nothing about a real save.
 func TestBoundedAffectedByPlanCarriesTheCutOntoTheOpenReceipt(t *testing.T) {
 	for _, backend := range receiptBackends() {
 		t.Run(backend.name, func(t *testing.T) {

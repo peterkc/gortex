@@ -1,21 +1,14 @@
 package store_sqlite
 
+import "github.com/zzet/gortex/internal/storage"
+
 import (
 	"context"
 	"fmt"
 	"strings"
 )
 
-// RetirementCandidateShape is what the deferred retirement sweep orders its
-// candidates by: whether a generation is already fenced and part-swept, how
-// large its payload was at publication, and whether any generation is still
-// built on it (which refuses its retirement as "based" until that child's row
-// is gone).
-type RetirementCandidateShape struct {
-	State        ViewGenerationState
-	StorageBytes int64
-	HasChildren  bool
-}
+type RetirementCandidateShape = storage.RetirementCandidateShape
 
 // retirementShapesBatch bounds one IN list.
 const retirementShapesBatch = 500

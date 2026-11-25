@@ -17,10 +17,9 @@ import (
 // path sets no fault hook (FR-6): no production Go file in the module names a
 // backend's WithFaultHook option except the file that declares it, so
 // OpenBackend, NewSharedServer, the public Engine and the eval and init paths
-// all open their store without one. The suite's own support packages under
-// internal/graph/storetest (backendtest passes the option) are not production:
-// the scan also shows that no production file imports them. Each backend's own
-// test shows that an open without the option leaves the hook nil.
+// all open their store without one. The suite's external test package passes
+// the option from test-only adapter code. Each backend's own test shows that
+// an open without the option leaves the hook nil.
 func TestStorageFaultDefaultOpenPathsSetNoHook(t *testing.T) {
 	t.Run("ScannerReportsAPlantedCaller", func(t *testing.T) {
 		dir := t.TempDir()

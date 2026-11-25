@@ -165,7 +165,7 @@ func TestGenerationLayerCacheSharesOneLoadAndRetriesFailures(t *testing.T) {
 
 	var loads atomic.Int32
 	release := make(chan struct{})
-	load := func(ctx context.Context, handle *store_sqlite.Store) (*GenerationLayer, error) {
+	load := func(ctx context.Context, handle GenerationLayerHandle) (*GenerationLayer, error) {
 		loads.Add(1)
 		<-release
 		return NewGenerationLayerContext(ctx, handle)
@@ -198,7 +198,7 @@ func TestGenerationLayerCacheSharesOneLoadAndRetriesFailures(t *testing.T) {
 	failing := layerCacheKey{generation: commit, createdAt: 1}
 	boom := errors.New("boom")
 	if _, err := cache.open(context.Background(), failing, store.AtGeneration(commit),
-		func(context.Context, *store_sqlite.Store) (*GenerationLayer, error) { return nil, boom }); !errors.Is(err, boom) {
+		func(context.Context, GenerationLayerHandle) (*GenerationLayer, error) { return nil, boom }); !errors.Is(err, boom) {
 		t.Fatalf("failing load error = %v", err)
 	}
 	if _, err := cache.open(context.Background(), failing, store.AtGeneration(commit), NewGenerationLayerContext); err != nil {

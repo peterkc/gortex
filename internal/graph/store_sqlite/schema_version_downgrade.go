@@ -1,5 +1,7 @@
 package store_sqlite
 
+import "github.com/zzet/gortex/internal/storage"
+
 import (
 	"errors"
 	"fmt"
@@ -9,23 +11,9 @@ import (
 	"strings"
 )
 
-// ErrSchemaTooNew means this binary cannot safely interpret the stored schema.
-// WithRebuild never overrides this refusal: the store also holds durable
-// checkout metadata, and a newer schema is not an authorized rebuild target.
-var ErrSchemaTooNew = errors.New("sqlite store schema is newer than this binary supports")
+var ErrSchemaTooNew = storage.ErrSchemaTooNew
 
-// SchemaTooNewError identifies the incompatible versions without suggesting
-// deletion as a recovery step. Callers can match ErrSchemaTooNew with errors.Is.
-type SchemaTooNewError struct {
-	Stored    int
-	Supported int
-}
-
-func (e *SchemaTooNewError) Error() string {
-	return fmt.Sprintf("%v: stored v%d, supported v%d; database retained, use a compatible newer binary", ErrSchemaTooNew, e.Stored, e.Supported)
-}
-
-func (e *SchemaTooNewError) Unwrap() error { return ErrSchemaTooNew }
+type SchemaTooNewError = storage.SchemaTooNewError
 
 // checkSchemaDowngrade runs before the writer DSN can change journal mode or
 // checkpoint a newer database. It uses SQLite's read-only WAL-aware view, not

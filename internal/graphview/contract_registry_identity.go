@@ -6,7 +6,7 @@ import (
 	"sort"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // ContractRegistryIdentity names every input a checked repository registry
@@ -23,7 +23,7 @@ type ContractRegistryIdentity struct {
 	repo, checkout, version, fingerprint string
 	tokens                               []string
 	payload                              int64
-	layer                                store_sqlite.PayloadInputRevision
+	layer                                storage.PayloadInputRevision
 	layerEpoch                           uint64
 	core                                 bool
 	sources                              []contractRegistrySourceIdentity
@@ -32,7 +32,7 @@ type ContractRegistryIdentity struct {
 
 type contractRegistrySourceIdentity struct {
 	repo     string
-	revision store_sqlite.PayloadInputRevision
+	revision storage.PayloadInputRevision
 	epoch    uint64
 }
 
@@ -53,7 +53,7 @@ func (v *ContractAnalysisView) RegistryIdentity(ctx context.Context) (ContractRe
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if v == nil || v.Layer == nil || v.Layer.handle == nil {
+	if v == nil || v.Layer == nil || (v.Layer.handle == nil || v.Layer.handle.IsNilGenerationHandle()) {
 		return ContractRegistryIdentity{}, false
 	}
 	reader, ok := v.RegistryReader.(*contractRegistryReader)
@@ -77,8 +77,8 @@ func (v *ContractAnalysisView) RegistryIdentity(ctx context.Context) (ContractRe
 		sources = map[string]graph.Reader{"": reader.Reader}
 	}
 	for repo, source := range sources {
-		native, ok := source.(*store_sqlite.Store)
-		if !ok || native == nil || !native.SharesSymbolSearchCore(handle) {
+		native, ok := source.(contractRegistrySource)
+		if !ok || native == nil || !native.SharesSymbolSearchCore(source) || !native.SharesSymbolSearchCore(handle) {
 			return ContractRegistryIdentity{}, false
 		}
 		revision, err := native.PayloadInputRevisionContext(ctx)

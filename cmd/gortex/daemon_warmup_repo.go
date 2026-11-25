@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 
 	"github.com/zzet/gortex/internal/config"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer"
+	"github.com/zzet/gortex/internal/storage"
 	"go.uber.org/zap"
 )
 
@@ -141,7 +141,7 @@ func warmupPriorMtimes(state *daemonState, entry config.RepoEntry, logger *zap.L
 // warmup itself was still live: the reclaim could not reach its mark because
 // of the other parallel loads, not because this repository is broken.
 func warmupWALRetryable(batchCtx context.Context, err error) bool {
-	return err != nil && batchCtx.Err() == nil && errors.Is(err, store_sqlite.ErrWarmupWALPressure)
+	return err != nil && batchCtx.Err() == nil && errors.Is(err, storage.ErrWarmupWALPressure)
 }
 
 // warmupWALRetries collects repositories to retry after the parallel phase,

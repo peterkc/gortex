@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"uuid"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Row states this package writes and reads back.
@@ -18,7 +18,7 @@ const (
 	// FamilyStateReady is a family whose common-dir identity is known.
 	FamilyStateReady = "family_ready"
 	// GraphStateReady is a dedicated graph that can serve queries.
-	GraphStateReady = store_sqlite.DedicatedGraphReady
+	GraphStateReady = storage.DedicatedGraphReady
 )
 
 // ErrIntentNotRevocable reports that a checkout is still wanted by a tracking
@@ -29,10 +29,10 @@ var ErrIntentNotRevocable = errors.New("reconcile: tracking intent cannot be rev
 
 // revocableIntentKinds is the single policy list shared by the public
 // predicate and the catalog's atomic revocation transaction.
-var revocableIntentKinds = []store_sqlite.IntentSourceKind{
-	store_sqlite.IntentSourceCLITrack,
-	store_sqlite.IntentSourceMCPTrack,
-	store_sqlite.IntentSourceManualConfig,
+var revocableIntentKinds = []storage.IntentSourceKind{
+	storage.IntentSourceCLITrack,
+	storage.IntentSourceMCPTrack,
+	storage.IntentSourceManualConfig,
 }
 
 // RevocableIntent reports whether an explicit forget may withdraw an intent.
@@ -42,7 +42,7 @@ var revocableIntentKinds = []store_sqlite.IntentSourceKind{
 // person asking for the opposite. An intent that exists because the checkout
 // belongs to something else (a tracked project) is not: the membership is
 // still true after the forget, so revoking it here would only be undone.
-func RevocableIntent(kind store_sqlite.IntentSourceKind) bool {
+func RevocableIntent(kind storage.IntentSourceKind) bool {
 	for _, candidate := range revocableIntentKinds {
 		if kind == candidate {
 			return true
@@ -54,10 +54,10 @@ func RevocableIntent(kind store_sqlite.IntentSourceKind) bool {
 // IntentRevocation is what a forget preflight found and did.
 type IntentRevocation struct {
 	// Revoked are the intents this preflight marked inactive.
-	Revoked []store_sqlite.TrackingIntent
+	Revoked []storage.TrackingIntent
 	// Blocked are the active intents that may not be revoked here. A
 	// non-empty Blocked means the forget must not proceed.
-	Blocked []store_sqlite.TrackingIntent
+	Blocked []storage.TrackingIntent
 }
 
 // Blocked reports whether the preflight refused the forget.
@@ -152,7 +152,7 @@ func (r *Reconciler) Dependents(ctx context.Context, checkoutID string) ([]Depen
 		}
 		for _, sibling := range siblings {
 			if sibling.CheckoutID == checkoutID ||
-				sibling.EffectiveMode != store_sqlite.CheckoutModeAutomatic {
+				sibling.EffectiveMode != storage.CheckoutModeAutomatic {
 				continue
 			}
 			out = append(out, Dependent{
@@ -233,14 +233,14 @@ func (r *Reconciler) RetireCheckout(ctx context.Context, checkoutID, incarnation
 	}
 	if checkout.Incarnation != incarnation {
 		return "", fmt.Errorf("%w: checkout %s is at incarnation %s, not %s",
-			store_sqlite.ErrCatalogStaleGuard, checkoutID, checkout.Incarnation, incarnation)
+			storage.ErrCatalogStaleGuard, checkoutID, checkout.Incarnation, incarnation)
 	}
 
 	graphs, err := r.catalog.ListDedicatedGraphs(ctx, checkout.FamilyID)
 	if err != nil {
 		return "", err
 	}
-	var owned, primary *store_sqlite.DedicatedGraph
+	var owned, primary *storage.DedicatedGraph
 	for i := range graphs {
 		if graphs[i].OwnerCheckoutID == checkoutID {
 			owned = &graphs[i]
@@ -250,7 +250,7 @@ func (r *Reconciler) RetireCheckout(ctx context.Context, checkoutID, incarnation
 		}
 	}
 
-	demotable := ConfigRemovalAllowed(cause) && checkout.State == store_sqlite.CheckoutStateReady &&
+	demotable := ConfigRemovalAllowed(cause) && checkout.State == storage.CheckoutStateReady &&
 		(owned == nil || !owned.IsPrimaryBase) &&
 		primary != nil &&
 		primary.OwnerCheckoutID != checkoutID &&
@@ -262,20 +262,20 @@ func (r *Reconciler) RetireCheckout(ctx context.Context, checkoutID, incarnation
 		return OutcomeForgotten, nil
 	}
 
-	transition := store_sqlite.IntentTransition{
+	transition := storage.IntentTransition{
 		TransitionID:       uuid.NewV7().String(),
 		CheckoutID:         checkoutID,
 		Cause:              cause,
 		PriorDesiredMode:   checkout.DesiredMode,
 		PriorEffectiveMode: checkout.EffectiveMode,
-		RequestedMode:      store_sqlite.CheckoutModeAutomatic,
+		RequestedMode:      storage.CheckoutModeAutomatic,
 		PriorCheckoutState: checkout.State,
-		State:              store_sqlite.IntentTransitionPending,
+		State:              storage.IntentTransitionPending,
 		CreatedAt:          r.now().Unix(),
 		LastProgress:       r.now().Unix(),
 	}
 	if err := r.catalog.BeginIntentTransition(ctx, transition); err != nil {
-		if errors.Is(err, store_sqlite.ErrCatalogIntentTransitionActive) {
+		if errors.Is(err, storage.ErrCatalogIntentTransitionActive) {
 			// The checkout already carries the one transition slot it is
 			// allowed. Recording a second would be refused anyway, and the
 			// standing one already says the checkout is on its way out.

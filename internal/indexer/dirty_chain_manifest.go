@@ -14,8 +14,8 @@ import (
 	"strings"
 
 	"github.com/zzet/gortex/internal/gitstate"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer/source"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // The admitted-input manifest of a working-tree generation, and the pure
@@ -99,7 +99,7 @@ const (
 )
 
 // manifestAdmitFunc is the builder's admission verdict for one present path.
-type manifestAdmitFunc func(path string) store_sqlite.InputManifestAdmission
+type manifestAdmitFunc func(path string) storage.InputManifestAdmission
 
 // admittedManifest turns one checkout sample into a full admitted-input
 // manifest: one entry per distinct path the sample reported, sorted, with the
@@ -113,8 +113,8 @@ func admittedManifest(
 	snap gitstate.DirtySnapshot,
 	admit manifestAdmitFunc,
 	policy string,
-) (store_sqlite.InputManifestMeta, []store_sqlite.InputManifestEntry) {
-	entries := make([]store_sqlite.InputManifestEntry, 0, len(snap.Contents))
+) (storage.InputManifestMeta, []storage.InputManifestEntry) {
+	entries := make([]storage.InputManifestEntry, 0, len(snap.Contents))
 	seen := make(map[string]struct{}, len(snap.Contents))
 	for _, content := range snap.Contents {
 		if content.Path == "" {
@@ -125,41 +125,41 @@ func admittedManifest(
 			continue
 		}
 		seen[clean] = struct{}{}
-		entry := store_sqlite.InputManifestEntry{
+		entry := storage.InputManifestEntry{
 			FilePath:  clean,
-			Admission: store_sqlite.InputManifestNotApplicable,
+			Admission: storage.InputManifestNotApplicable,
 		}
 		switch content.State {
 		case gitstate.DirtyContentPresent:
-			entry.State = store_sqlite.InputManifestPresent
+			entry.State = storage.InputManifestPresent
 			if content.HeadEqual {
-				entry.State = store_sqlite.InputManifestHeadEqual
+				entry.State = storage.InputManifestHeadEqual
 			}
 			entry.Mode = content.Mode
 			entry.ContentSHA256 = content.SHA256
-			entry.Admission = store_sqlite.InputManifestAdmitted
+			entry.Admission = storage.InputManifestAdmitted
 			if admit != nil {
 				entry.Admission = admit(clean)
 			}
 		case gitstate.DirtyContentAbsent:
-			entry.State = store_sqlite.InputManifestAbsent
+			entry.State = storage.InputManifestAbsent
 			if content.HeadEqual {
 				// Absent on disk and absent from HEAD: nothing differs.
-				entry.State = store_sqlite.InputManifestHeadEqual
+				entry.State = storage.InputManifestHeadEqual
 			}
 		case gitstate.DirtyContentOpaque:
-			entry.State = store_sqlite.InputManifestOpaque
+			entry.State = storage.InputManifestOpaque
 			entry.ContentSHA256 = content.SHA256
 		default:
 			// An unknown sampler state must never be read as "unchanged".
-			entry.State = store_sqlite.InputManifestOpaque
+			entry.State = storage.InputManifestOpaque
 			entry.ContentSHA256 = "unknown-state:" + string(content.State)
 		}
 		entries = append(entries, entry)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].FilePath < entries[j].FilePath })
-	return store_sqlite.InputManifestMeta{
-		ManifestVersion: store_sqlite.InputManifestVersion,
+	return storage.InputManifestMeta{
+		ManifestVersion: storage.InputManifestVersion,
 		IsFull:          true,
 		EntryCount:      len(entries),
 		PolicyDigest:    policy,
@@ -175,7 +175,7 @@ type resolvedManifest struct {
 	// policy is the policy digest every link was admitted under.
 	policy string
 	// entries maps canonical path to its dirty entry.
-	entries map[string]store_sqlite.InputManifestEntry
+	entries map[string]storage.InputManifestEntry
 }
 
 // dirtyCount is the size of the dirty set the manifest describes: the number
@@ -183,7 +183,7 @@ type resolvedManifest struct {
 func (m resolvedManifest) dirtyCount() int { return len(m.entries) }
 
 // entry returns p's dirty entry, or false when p is in its committed state.
-func (m resolvedManifest) entry(p string) (store_sqlite.InputManifestEntry, bool) {
+func (m resolvedManifest) entry(p string) (storage.InputManifestEntry, bool) {
 	e, ok := m.entries[p]
 	return e, ok
 }
@@ -191,11 +191,11 @@ func (m resolvedManifest) entry(p string) (store_sqlite.InputManifestEntry, bool
 // resolveChainManifest folds manifests oldest-first into one resolved map; a
 // later entry for a path replaces an earlier one (newest wins). A head_equal
 // entry returns its path to the committed state.
-func resolveChainManifest(entries ...[]store_sqlite.InputManifestEntry) resolvedManifest {
-	out := resolvedManifest{entries: make(map[string]store_sqlite.InputManifestEntry)}
+func resolveChainManifest(entries ...[]storage.InputManifestEntry) resolvedManifest {
+	out := resolvedManifest{entries: make(map[string]storage.InputManifestEntry)}
 	for _, link := range entries {
 		for _, e := range link {
-			if e.State == store_sqlite.InputManifestHeadEqual {
+			if e.State == storage.InputManifestHeadEqual {
 				delete(out.entries, e.FilePath)
 				continue
 			}
@@ -208,8 +208,8 @@ func resolveChainManifest(entries ...[]store_sqlite.InputManifestEntry) resolved
 // chainManifestLink is one generation's stored manifest as InputManifest
 // returned it.
 type chainManifestLink struct {
-	Meta    store_sqlite.InputManifestMeta
-	Entries []store_sqlite.InputManifestEntry
+	Meta    storage.InputManifestMeta
+	Entries []storage.InputManifestEntry
 	// OK is InputManifest's bool: false when the generation has no manifest.
 	OK bool
 }
@@ -227,7 +227,7 @@ func resolveChainLinks(links ...chainManifestLink) (resolvedManifest, string) {
 	policy := ""
 	start := -1
 	for i, link := range links {
-		if !link.OK || link.Meta.ManifestVersion != store_sqlite.InputManifestVersion || link.Meta.PolicyDigest == "" {
+		if !link.OK || link.Meta.ManifestVersion != storage.InputManifestVersion || link.Meta.PolicyDigest == "" {
 			return resolvedManifest{}, dirtyChainFallbackParentManifestMissing
 		}
 		if link.Meta.EntryCount != len(link.Entries) {
@@ -245,7 +245,7 @@ func resolveChainLinks(links ...chainManifestLink) (resolvedManifest, string) {
 	if start < 0 {
 		return resolvedManifest{}, dirtyChainFallbackParentManifestMissing
 	}
-	folded := make([][]store_sqlite.InputManifestEntry, 0, len(links)-start)
+	folded := make([][]storage.InputManifestEntry, 0, len(links)-start)
 	for _, link := range links[start:] {
 		folded = append(folded, link.Entries)
 	}
@@ -255,7 +255,7 @@ func resolveChainLinks(links ...chainManifestLink) (resolvedManifest, string) {
 }
 
 // resolvedFromFull resolves one full manifest (a build's own sample).
-func resolvedFromFull(meta store_sqlite.InputManifestMeta, entries []store_sqlite.InputManifestEntry) resolvedManifest {
+func resolvedFromFull(meta storage.InputManifestMeta, entries []storage.InputManifestEntry) resolvedManifest {
 	out := resolveChainManifest(entries)
 	out.policy = meta.PolicyDigest
 	return out
@@ -263,7 +263,7 @@ func resolvedFromFull(meta store_sqlite.InputManifestMeta, entries []store_sqlit
 
 // manifestEntriesEqual compares the four fields that make two entries the same
 // admitted input.
-func manifestEntriesEqual(a, b store_sqlite.InputManifestEntry) bool {
+func manifestEntriesEqual(a, b storage.InputManifestEntry) bool {
 	return a.State == b.State && a.Mode == b.Mode && a.ContentSHA256 == b.ContentSHA256 && a.Admission == b.Admission
 }
 
@@ -271,8 +271,8 @@ func manifestEntriesEqual(a, b store_sqlite.InputManifestEntry) bool {
 // describe next: every path whose resolved entry differs, with a path that
 // returned to its committed state written head_equal. Resolving the parent's
 // chain plus this delta yields next exactly.
-func manifestDeltaEntries(parent, next resolvedManifest) []store_sqlite.InputManifestEntry {
-	var out []store_sqlite.InputManifestEntry
+func manifestDeltaEntries(parent, next resolvedManifest) []storage.InputManifestEntry {
+	var out []storage.InputManifestEntry
 	for p, n := range next.entries {
 		if pe, ok := parent.entries[p]; ok && manifestEntriesEqual(pe, n) {
 			continue
@@ -283,10 +283,10 @@ func manifestDeltaEntries(parent, next resolvedManifest) []store_sqlite.InputMan
 		if _, ok := next.entries[p]; ok {
 			continue
 		}
-		out = append(out, store_sqlite.InputManifestEntry{
+		out = append(out, storage.InputManifestEntry{
 			FilePath:  p,
-			State:     store_sqlite.InputManifestHeadEqual,
-			Admission: store_sqlite.InputManifestNotApplicable,
+			State:     storage.InputManifestHeadEqual,
+			Admission: storage.InputManifestNotApplicable,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].FilePath < out[j].FilePath })
@@ -352,15 +352,15 @@ func planDelta(parent, next resolvedManifest, headHolds func(string) bool) ([]La
 		if dependencyManifestPath(p) {
 			reason = worseChainReason(reason, dirtyChainFallbackDependencyManifestChanged)
 		}
-		parentViewHolds := (pDirty && pe.State == store_sqlite.InputManifestPresent) || (!pDirty && holds(p))
+		parentViewHolds := (pDirty && pe.State == storage.InputManifestPresent) || (!pDirty && holds(p))
 		var kind LayerChangeKind
 		switch {
-		case nDirty && ne.State == store_sqlite.InputManifestPresent:
+		case nDirty && ne.State == storage.InputManifestPresent:
 			kind = LayerPathAdded
 			if parentViewHolds {
 				kind = LayerPathModified
 			}
-		case nDirty && ne.State == store_sqlite.InputManifestAbsent:
+		case nDirty && ne.State == storage.InputManifestAbsent:
 			if !parentViewHolds {
 				continue
 			}
@@ -429,11 +429,11 @@ func worseChainReason(current, candidate string) string {
 
 // manifestEntryOpaque reports whether a dirty entry is content the planner
 // does not diff: an opaque directory, a symlink or a gitlink.
-func manifestEntryOpaque(e store_sqlite.InputManifestEntry, dirty bool) bool {
+func manifestEntryOpaque(e storage.InputManifestEntry, dirty bool) bool {
 	if !dirty {
 		return false
 	}
-	return e.State == store_sqlite.InputManifestOpaque || e.Mode == manifestSymlinkMode || e.Mode == manifestGitlinkMode
+	return e.State == storage.InputManifestOpaque || e.Mode == manifestSymlinkMode || e.Mode == manifestGitlinkMode
 }
 
 // dependencyManifestPath reports whether p is an input that changes how other
@@ -536,27 +536,27 @@ func (b *SparseGenerationBuilder) manifestAdmitter(root string, target source.Co
 		rootPath:   absRoot,
 	}
 	idx.setContentSourceWithManifests(target, target)
-	return func(p string) store_sqlite.InputManifestAdmission {
+	return func(p string) storage.InputManifestAdmission {
 		if target == nil {
-			return store_sqlite.InputManifestAdmitted
+			return storage.InputManifestAdmitted
 		}
 		meta, statErr := target.Stat(p)
 		switch {
 		case errors.Is(statErr, source.ErrNotInSource):
-			return store_sqlite.InputManifestNotApplicable
+			return storage.InputManifestNotApplicable
 		case statErr != nil:
-			return store_sqlite.InputManifestUnreadable
+			return storage.InputManifestUnreadable
 		}
 		adm := idx.admitWalkEntry(absRoot, filepath.Join(absRoot, filepath.FromSlash(p)), meta.Size, false)
 		switch {
 		case adm.admit:
-			return store_sqlite.InputManifestAdmitted
+			return storage.InputManifestAdmitted
 		case adm.excluded:
-			return store_sqlite.InputManifestExcluded
+			return storage.InputManifestExcluded
 		case adm.oversize:
-			return store_sqlite.InputManifestOversized
+			return storage.InputManifestOversized
 		default:
-			return store_sqlite.InputManifestUnknownLanguage
+			return storage.InputManifestUnknownLanguage
 		}
 	}
 }

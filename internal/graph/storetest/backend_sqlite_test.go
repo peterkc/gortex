@@ -1,4 +1,4 @@
-package backendtest
+package storetest_test
 
 import (
 	"context"

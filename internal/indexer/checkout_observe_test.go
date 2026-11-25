@@ -45,7 +45,7 @@ func newCheckoutObservationFixture(t testing.TB) (*CheckoutLifecycle, *store_sql
 		t.Fatal(err)
 	}
 	mi := NewMultiIndexer(store, newTestRegistry(), search.NewNull(), cm, zap.NewNop())
-	lc, err := NewCheckoutLifecycle(CheckoutLifecycleConfig{MultiIndexer: mi, ConfigManager: cm, Graph: store, Logger: zap.NewNop()})
+	lc, err := NewCheckoutLifecycle(CheckoutLifecycleConfig{Catalog: testCatalog(store), MultiIndexer: mi, ConfigManager: cm, Graph: store, Logger: zap.NewNop()})
 	if err != nil {
 		t.Fatal(err)
 	}

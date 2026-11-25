@@ -9,10 +9,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/zzet/gortex/internal/storage"
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 )
 
@@ -67,18 +67,18 @@ func (c *CheckoutCoordinator) inlineFoldBudget() time.Duration {
 // edit takes the existing direct-build fallback, without starting a monolithic
 // copy beside the active fold. The admitted stepped copy keeps its budget.
 func (c *CheckoutCoordinator) copyChainInline() chainCopier {
-	return func(ctx context.Context, oldestFirst []int64, to int64) (store_sqlite.GenerationCopyCounts, func(context.Context, bool), error) {
+	return func(ctx context.Context, oldestFirst []int64, to int64) (storage.GenerationCopyCounts, func(context.Context, bool), error) {
 		// The caller's context carries the budget (foldInlineAtCap).
 		backend := c.foldBackend()
 		fold, err := backend.BeginChainFold(ctx, oldestFirst, to, c.checkoutID+"/inline")
 
 		if err != nil {
-			return store_sqlite.GenerationCopyCounts{}, nil, err
+			return storage.GenerationCopyCounts{}, nil, err
 		}
 		_, _, err = runChainFoldSteps(ctx, fold, backend.StepRetryable, nil)
-		var counts store_sqlite.GenerationCopyCounts
+		var counts storage.GenerationCopyCounts
 		if stepped, ok := fold.(interface {
-			Counts() (store_sqlite.GenerationCopyCounts, int, int)
+			Counts() (storage.GenerationCopyCounts, int, int)
 		}); ok {
 			counts, _, _ = stepped.Counts()
 		}
@@ -111,7 +111,7 @@ func (c *CheckoutCoordinator) afterFoldCopy(ctx context.Context, to int64) error
 // the inline budget, and only a fold that passed the check is published. The
 // background check is scheduled as the second line. It returns the fold (0
 // when it was refused, failed its check or ran out of budget).
-func (c *CheckoutCoordinator) foldInlineAtCap(ctx context.Context, commit, root store_sqlite.ViewGeneration, top int64, what string) int64 {
+func (c *CheckoutCoordinator) foldInlineAtCap(ctx context.Context, commit, root storage.ViewGeneration, top int64, what string) int64 {
 	budget := c.inlineFoldBudget()
 	started := time.Now()
 	members := c.dirtyChainMembers(ctx, top)
@@ -206,7 +206,7 @@ func (c *CheckoutCoordinator) verifyFlattenedChainInSteps(ctx context.Context, c
 	paths := map[string]struct{}{}
 	ids := map[string]struct{}{}
 	for _, id := range oldestFirst {
-		layer, err := graphview.NewGenerationLayerContext(ctx, c.store.AtGeneration(id))
+		layer, err := graphview.NewGenerationLayerContext(ctx, generationAt(c.store, id).(graphview.GenerationLayerHandle))
 		if err != nil {
 			return err
 		}
@@ -216,7 +216,7 @@ func (c *CheckoutCoordinator) verifyFlattenedChainInSteps(ctx context.Context, c
 		for removed := range layer.RemovedIDs() {
 			ids[removed] = struct{}{}
 		}
-		marks, err := c.store.AtGeneration(id).EdgeSourceMasksContext(ctx)
+		marks, err := generationAt(c.store, id).EdgeSourceMasksContext(ctx)
 		if err != nil {
 			return err
 		}
@@ -225,7 +225,7 @@ func (c *CheckoutCoordinator) verifyFlattenedChainInSteps(ctx context.Context, c
 		}
 		chainView = graph.NewOverlaidViewWithLayer(chainView, layer)
 	}
-	foldedLayer, err := graphview.NewGenerationLayerContext(ctx, c.store.AtGeneration(folded))
+	foldedLayer, err := graphview.NewGenerationLayerContext(ctx, generationAt(c.store, folded).(graphview.GenerationLayerHandle))
 	if err != nil {
 		return err
 	}
@@ -238,7 +238,7 @@ func (c *CheckoutCoordinator) verifyFlattenedChainInSteps(ctx context.Context, c
 	for removed := range foldedLayer.RemovedIDs() {
 		ids[removed] = struct{}{}
 	}
-	foldMarks, err := c.store.AtGeneration(folded).EdgeSourceMasksContext(ctx)
+	foldMarks, err := generationAt(c.store, folded).EdgeSourceMasksContext(ctx)
 	if err != nil {
 		return err
 	}

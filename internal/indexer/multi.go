@@ -24,7 +24,6 @@ import (
 	"github.com/zzet/gortex/internal/embedding"
 	"github.com/zzet/gortex/internal/entrypoints"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer/source"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/pathkey"
@@ -34,6 +33,7 @@ import (
 	"github.com/zzet/gortex/internal/search"
 	"github.com/zzet/gortex/internal/search/trigram"
 	"github.com/zzet/gortex/internal/semantic"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // RepoMetadata holds per-repo indexing state.
@@ -87,6 +87,8 @@ type repositoryUntrackState struct {
 // MultiIndexer orchestrates indexing across multiple repositories.
 type MultiIndexer struct {
 	graph               graph.Store
+	writeCounters       func() storage.VFSIOMark
+	censusCatalog       viewGenerationCatalog
 	relationsPending    atomic.Bool // restart batch has not published its shared resolver tail
 	contractCoreRuntime atomic.Pointer[ContractCoreRuntimeHooks]
 	// contractSources caches the accepted bytes each journal fingerprinted,
@@ -412,6 +414,7 @@ func (mi *MultiIndexer) newPerRepoIndexerGuardedWithMode(
 		factory = New
 	}
 	idx := factory(mi.graph, mi.registry, cfg, mi.logger)
+	idx.censusCatalog = mi.censusCatalog
 	idx.contractCoreRuntime.Store(mi.contractCoreRuntime.Load())
 	idx.shadowAdmission = mi.shadowAdmission
 	idx.parseAdmission.Store(mi.parseAdmission.Load())
@@ -3268,7 +3271,9 @@ func (mi *MultiIndexer) trackPreparedRepoSourceCtx(
 // awaitWarmupWAL is a restored indexer's warmup write boundary. A package
 // variable only so the in-package cases can inject a refusal; production never
 // assigns it.
-var awaitWarmupWAL = (*store_sqlite.Store).AwaitWarmupWAL
+var awaitWarmupWAL = func(store warmupWALWaiter, ctx context.Context) error {
+	return store.AwaitWarmupWAL(ctx)
+}
 
 // ReconcileRepoCtx registers a repo that already has nodes in the graph
 // (typically restored from a daemon snapshot) and brings it back into
@@ -3372,7 +3377,7 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 	idx.SetProjectID(resolveProjectID(&entryCopy, cfg, prefix))
 	idx.SetRootPath(absPath)
 	idx.SetFileMtimes(priorMtimes)
-	if store, ok := mi.graph.(*store_sqlite.Store); ok {
+	if store, ok := mi.graph.(warmupWALWaiter); ok && store.SharesSymbolSearchCore(mi.graph) {
 		idx.warmupWriteBoundary = func() error { return awaitWarmupWAL(store, ctx) }
 		defer func() {
 			if idx.warmupWriteBoundary != nil {

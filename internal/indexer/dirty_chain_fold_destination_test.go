@@ -59,7 +59,7 @@ func (f destinationProbeFold) Release(ctx context.Context) error {
 	if err := f.chainFoldSteps.Release(ctx); err != nil {
 		return err
 	}
-	row, found, err := f.backend.store.Catalog().GetViewGeneration(ctx, f.backend.to)
+	row, found, err := f.backend.store.(*store_sqlite.Store).Catalog().GetViewGeneration(ctx, f.backend.to)
 	if err != nil || !found {
 		return fmt.Errorf("fold destination lookup: found=%t err=%v", found, err)
 	}
@@ -74,7 +74,7 @@ func (f destinationProbeFold) Release(ctx context.Context) error {
 
 func TestSteppedFoldDestinationOwnedAcrossRetryAndLandingWithoutLeases(t *testing.T) {
 	f, c, trigger := destinationWithoutLeasesFixture(t)
-	probe := &destinationProbeBackend{storeChainFoldBackend: storeChainFoldBackend{store: f.store}}
+	probe := &destinationProbeBackend{storeChainFoldBackend: storeChainFoldBackend{store: f.store, catalog: testCatalog(f.store)}}
 	c.compaction.backend = probe
 	report := c.compactDirtyChain(t.Context(), trigger)
 	if report.Err != nil || report.Outcome != dirtyChainCompactionFlipped {
@@ -95,7 +95,7 @@ func TestSteppedFoldDestinationCancelledBeginAbandonsWithoutLeases(t *testing.T)
 	f, c, trigger := destinationWithoutLeasesFixture(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	probe := &cancelDestinationBackend{storeChainFoldBackend: storeChainFoldBackend{store: f.store}, cancel: cancel}
+	probe := &cancelDestinationBackend{storeChainFoldBackend: storeChainFoldBackend{store: f.store, catalog: testCatalog(f.store)}, cancel: cancel}
 	c.compaction.backend = probe
 	report := c.compactDirtyChain(ctx, trigger)
 	if !report.Canceled || probe.to == 0 {

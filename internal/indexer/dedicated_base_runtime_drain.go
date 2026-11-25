@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 var errDedicatedBaseRuntimeClosed = errors.New("dedicated base publisher admission is closed")
@@ -15,7 +15,7 @@ var errDedicatedBaseRuntimeClosed = errors.New("dedicated base publisher admissi
 // authorized re-registration may replace a drained closing slot, never reopen
 // that old slot. Held publishers therefore cannot resurrect a forgotten owner.
 type dedicatedBaseOwnerAdmission struct {
-	owner         store_sqlite.DedicatedBaseOwner
+	owner         storage.DedicatedBaseOwner
 	active        int
 	closing       bool
 	drained       chan struct{}
@@ -25,12 +25,12 @@ type dedicatedBaseOwnerAdmission struct {
 // admitOwner precedes both observation-gate waits and authority/allocation SQL.
 // It covers the complete public runtime call, including physical work after the
 // observation gate is released. Physical-flight drain remains a separate fence.
-func (r *dedicatedBaseRuntime) admitOwner(ctx context.Context, graphID string, owner store_sqlite.DedicatedBaseOwner) (func(), error) {
+func (r *dedicatedBaseRuntime) admitOwner(ctx context.Context, graphID string, owner storage.DedicatedBaseOwner) (func(), error) {
 	release, _, err := r.admitOwnerState(ctx, graphID, owner, nil)
 	return release, err
 }
 
-func (r *dedicatedBaseRuntime) admitOwnerState(ctx context.Context, graphID string, owner store_sqlite.DedicatedBaseOwner, expected *dedicatedBaseOwnerAdmission) (func(), *dedicatedBaseOwnerAdmission, error) {
+func (r *dedicatedBaseRuntime) admitOwnerState(ctx context.Context, graphID string, owner storage.DedicatedBaseOwner, expected *dedicatedBaseOwnerAdmission) (func(), *dedicatedBaseOwnerAdmission, error) {
 	if r == nil || ctx == nil || graphID == "" || owner.CheckoutID == "" || owner.Incarnation == "" {
 		return nil, nil, fmt.Errorf("%w: owner admission requires context and exact graph/owner", errDedicatedBaseRuntimeInput)
 	}
@@ -68,7 +68,7 @@ func (r *dedicatedBaseRuntime) admitOwnerState(ctx context.Context, graphID stri
 			// Failed validation never issued a publisher capability. Release an
 			// unconfirmed idle slot, but retain confirmed owners and closing
 			// tombstones; a different admitted actor may still confirm this slot.
-			if state.active == 0 && !state.closing && state.owner == (store_sqlite.DedicatedBaseOwner{}) && r.ownerAdmissions[graphID] == state {
+			if state.active == 0 && !state.closing && state.owner == (storage.DedicatedBaseOwner{}) && r.ownerAdmissions[graphID] == state {
 				delete(r.ownerAdmissions, graphID)
 				if len(r.ownerAdmissions) == 0 {
 					r.ownerAdmissions = nil
@@ -89,7 +89,7 @@ func (r *dedicatedBaseRuntime) admitOwnerState(ctx context.Context, graphID stri
 // A repeated live registration is idempotent; replacing a closed, drained slot
 // deliberately permits deterministic GraphID reuse, including explicit retrack
 // of the same checkout incarnation. Old publisher capabilities stay revoked.
-func (r *dedicatedBaseRuntime) RegisterDedicatedBaseOwner(graphID string, owner store_sqlite.DedicatedBaseOwner) error {
+func (r *dedicatedBaseRuntime) RegisterDedicatedBaseOwner(graphID string, owner storage.DedicatedBaseOwner) error {
 	if r == nil || graphID == "" || owner.CheckoutID == "" || owner.Incarnation == "" {
 		return fmt.Errorf("%w: registration requires exact graph/owner", errDedicatedBaseRuntimeInput)
 	}
@@ -104,7 +104,7 @@ func (r *dedicatedBaseRuntime) RegisterDedicatedBaseOwner(graphID string, owner 
 	old := r.ownerAdmissions[graphID]
 	if old != nil && !old.closing {
 		if old.owner.CheckoutID != "" && old.owner != owner {
-			return fmt.Errorf("%w: cannot replace a live publisher owner", store_sqlite.ErrCatalogStaleGuard)
+			return fmt.Errorf("%w: cannot replace a live publisher owner", storage.ErrCatalogStaleGuard)
 		}
 		old.owner = owner
 		return nil
@@ -116,7 +116,7 @@ func (r *dedicatedBaseRuntime) RegisterDedicatedBaseOwner(graphID string, owner 
 	return nil
 }
 
-func (r *dedicatedBaseRuntime) ownerAdmissionLocked(graphID string, owner store_sqlite.DedicatedBaseOwner) (*dedicatedBaseOwnerAdmission, error) {
+func (r *dedicatedBaseRuntime) ownerAdmissionLocked(graphID string, owner storage.DedicatedBaseOwner) (*dedicatedBaseOwnerAdmission, error) {
 	if r.ownerAdmissions == nil {
 		r.ownerAdmissions = make(map[string]*dedicatedBaseOwnerAdmission)
 	}
@@ -127,7 +127,7 @@ func (r *dedicatedBaseRuntime) ownerAdmissionLocked(graphID string, owner store_
 		state = &dedicatedBaseOwnerAdmission{drained: make(chan struct{})}
 		r.ownerAdmissions[graphID] = state
 	} else if state.owner.CheckoutID != "" && state.owner != owner {
-		return nil, fmt.Errorf("%w: publisher owner differs for graph %s", store_sqlite.ErrCatalogStaleGuard, graphID)
+		return nil, fmt.Errorf("%w: publisher owner differs for graph %s", storage.ErrCatalogStaleGuard, graphID)
 	}
 	return state, nil
 }
@@ -136,7 +136,7 @@ func (r *dedicatedBaseRuntime) ownerAdmissionLocked(graphID string, owner store_
 // admitted actor. The caller still owns the graph observation gate. Cleanup may
 // have closed admission in between, but cannot delete the graph until this
 // already-counted actor drains; no outer precheck replaces catalog write guards.
-func (r *dedicatedBaseRuntime) confirmOwner(graphID string, owner store_sqlite.DedicatedBaseOwner) error {
+func (r *dedicatedBaseRuntime) confirmOwner(graphID string, owner storage.DedicatedBaseOwner) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	state, err := r.ownerAdmissionLocked(graphID, owner)
@@ -159,7 +159,7 @@ func (r *dedicatedBaseRuntime) finishOwnerDrainLocked(state *dedicatedBaseOwnerA
 // New requests fail immediately; the returned channel joins calls already
 // admitted, including actors waiting to observe or allocate. It does no SQL,
 // does not delete data, and does not start a waiter goroutine.
-func (r *dedicatedBaseRuntime) CloseDedicatedBaseOwner(graphID string, owner store_sqlite.DedicatedBaseOwner) (<-chan struct{}, error) {
+func (r *dedicatedBaseRuntime) CloseDedicatedBaseOwner(graphID string, owner storage.DedicatedBaseOwner) (<-chan struct{}, error) {
 	if r == nil || graphID == "" || owner.CheckoutID == "" || owner.Incarnation == "" {
 		return nil, fmt.Errorf("%w: closing requires exact graph/owner", errDedicatedBaseRuntimeInput)
 	}

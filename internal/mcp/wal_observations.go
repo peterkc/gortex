@@ -5,18 +5,18 @@ import (
 
 	"github.com/zzet/gortex/internal/daemon"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // walReclaimSnapshotReader is intentionally smaller than daemon storage status:
 // WALReclaimStats copies counters under a short mutex plus atomic loads. It
 // does not stat files, read the wal-index, query SQL or wait for the writer.
 type walPassiveSnapshotReader interface {
-	WALPassiveStats() store_sqlite.WALPassiveStats
+	WALPassiveStats() storage.WALPassiveStats
 }
 
 type walReclaimSnapshotReader interface {
-	WALReclaimStats() store_sqlite.WALReclaimStats
+	WALReclaimStats() storage.WALReclaimStats
 }
 
 type walReclaimObservation struct {

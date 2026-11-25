@@ -33,7 +33,7 @@ func TestPayloadInputWitnessDetectsCommittedBindingTypeChanges(t *testing.T) {
 				require.Equal(t, "After", current[site])
 			}
 			s.writeMu.Lock()
-			err = witness.validateLocked(s, t.Context())
+			err = validatePayloadInputWitnessLocked(witness, s, t.Context())
 			s.writeMu.Unlock()
 			require.ErrorIs(t, err, ErrPayloadInputChanged, "a selected proof may not certify an older semantic binding answer")
 		})
@@ -65,7 +65,7 @@ func TestSemanticBindingProofIsScopedWithoutInvalidatingNodeProjection(t *testin
 	require.NoError(t, err)
 	require.NoError(t, s.AtGeneration(11).ReplaceSemanticBindingTypes("repo", rows))
 	s.writeMu.Lock()
-	err = witness.validateLocked(s, t.Context())
+	err = validatePayloadInputWitnessLocked(witness, s, t.Context())
 	s.writeMu.Unlock()
 	require.NoError(t, err, "unselected physical generation cannot invalidate this exact witness")
 }
@@ -94,7 +94,7 @@ func TestSemanticBindingOnlyEvictionInvalidatesWitness(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, current, "eviction removes all repository bindings for the path")
 	s.writeMu.Lock()
-	err = witness.validateLocked(s, t.Context())
+	err = validatePayloadInputWitnessLocked(witness, s, t.Context())
 	s.writeMu.Unlock()
 	require.ErrorIs(t, err, ErrPayloadInputChanged, "no-node early return must still announce changed sidecars")
 	delta, err := s.ContractProjectionChanges(t.Context(), before)
@@ -125,7 +125,7 @@ func TestSemanticBindingRollbackAndEmptyDeleteDoNotAdvanceProof(t *testing.T) {
 	require.Equal(t, before, delta.After)
 	require.Empty(t, delta.Domains)
 	s.writeMu.Lock()
-	err = witness.validateLocked(s, t.Context())
+	err = validatePayloadInputWitnessLocked(witness, s, t.Context())
 	s.writeMu.Unlock()
 	require.NoError(t, err)
 }

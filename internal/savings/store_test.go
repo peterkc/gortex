@@ -633,18 +633,23 @@ func waitFor(t *testing.T, d time.Duration, cond func() bool) bool {
 // book its own accounting. N observations inside one flush window must cost
 // ZERO transactions until the window closes, and then exactly one.
 func TestAddObservation_CoalescesIntoOneTransaction(t *testing.T) {
-	s, err := Open(testLedgerPath(t))
+	path := testLedgerPath(t)
+	s, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	closeOnCleanup(t, s)
+	native, err := persistence.OpenSidecar(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	const n = 12
-	before := s.sc.SavingsCommitCount()
+	before := native.SavingsCommitCount()
 	for range n {
 		s.AddObservation(Observation{Repo: "/r", Language: "go", Tool: "search_symbols", Returned: 10, Saved: 100})
 	}
-	if got := s.sc.SavingsCommitCount() - before; got != 0 {
+	if got := native.SavingsCommitCount() - before; got != 0 {
 		t.Errorf("sidecar transactions for %d read-only observations = %d, want 0 before the flush window closes", n, got)
 	}
 	if got := s.Pending(); got != n {
@@ -654,7 +659,7 @@ func TestAddObservation_CoalescesIntoOneTransaction(t *testing.T) {
 	if err := s.Flush(); err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
-	if got := s.sc.SavingsCommitCount() - before; got != 1 {
+	if got := native.SavingsCommitCount() - before; got != 1 {
 		t.Errorf("sidecar transactions after the flush = %d, want exactly 1", got)
 	}
 	if got := s.Pending(); got != 0 {
@@ -785,20 +790,25 @@ func TestClose_PersistsBufferedObservations(t *testing.T) {
 // The count bound. A busy daemon must not accumulate an unbounded buffer
 // waiting for a timer: the buffer flushes itself once it is full.
 func TestFlushMax_BoundsTheBuffer(t *testing.T) {
-	s, err := Open(testLedgerPath(t))
+	path := testLedgerPath(t)
+	s, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	closeOnCleanup(t, s)
+	native, err := persistence.OpenSidecar(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	s.mu.Lock()
 	s.flushMax = 4
 	s.mu.Unlock()
 
-	before := s.sc.SavingsCommitCount()
+	before := native.SavingsCommitCount()
 	for range 10 {
 		s.AddObservation(Observation{Tool: "search_symbols", Returned: 1, Saved: 10})
 	}
-	if got := s.sc.SavingsCommitCount() - before; got != 2 {
+	if got := native.SavingsCommitCount() - before; got != 2 {
 		t.Errorf("transactions for 10 observations at flushMax=4 = %d, want 2", got)
 	}
 	if got := s.Pending(); got != 2 {
@@ -812,24 +822,29 @@ func TestFlushMax_BoundsTheBuffer(t *testing.T) {
 // The time bound. Nothing may sit buffered indefinitely just because the
 // caller went quiet: an idle daemon still commits its window.
 func TestFlushTimer_CommitsWithoutAReader(t *testing.T) {
-	s, err := Open(testLedgerPath(t))
+	path := testLedgerPath(t)
+	s, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	closeOnCleanup(t, s)
+	native, err := persistence.OpenSidecar(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	s.mu.Lock()
 	s.flushEvery = 20 * time.Millisecond
 	s.mu.Unlock()
 
-	before := s.sc.SavingsCommitCount()
+	before := native.SavingsCommitCount()
 	s.AddObservation(Observation{Tool: "search_symbols", Returned: 1, Saved: 10})
-	if !waitFor(t, 5*time.Second, func() bool { return s.sc.SavingsCommitCount() > before }) {
+	if !waitFor(t, 5*time.Second, func() bool { return native.SavingsCommitCount() > before }) {
 		t.Fatal("the flush timer never committed the buffered observation")
 	}
 	if got := s.Pending(); got != 0 {
 		t.Errorf("Pending() after the timer fired = %d, want 0", got)
 	}
-	if got := s.sc.SavingsCommitCount() - before; got != 1 {
+	if got := native.SavingsCommitCount() - before; got != 1 {
 		t.Errorf("transactions = %d, want exactly 1 (the timer must not re-arm on an empty buffer)", got)
 	}
 }
@@ -840,16 +855,21 @@ func TestFlushTimer_CommitsWithoutAReader(t *testing.T) {
 func TestFlushIntervalEnv(t *testing.T) {
 	t.Run("zero restores a transaction per observation", func(t *testing.T) {
 		t.Setenv(flushIntervalEnv, "0")
-		s, err := Open(testLedgerPath(t))
+		path := testLedgerPath(t)
+		s, err := Open(path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		closeOnCleanup(t, s)
-		before := s.sc.SavingsCommitCount()
+		native, err := persistence.OpenSidecar(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := native.SavingsCommitCount()
 		for range 3 {
 			s.AddObservation(Observation{Tool: "read_file", Returned: 1, Saved: 10})
 		}
-		if got := s.sc.SavingsCommitCount() - before; got != 3 {
+		if got := native.SavingsCommitCount() - before; got != 3 {
 			t.Errorf("transactions with the buffer disabled = %d, want 3", got)
 		}
 		if got := s.Pending(); got != 0 {

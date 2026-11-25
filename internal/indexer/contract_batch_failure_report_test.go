@@ -30,7 +30,7 @@ func TestContractFollowupBatchKeepsWorkReportWhenInputKeyMoves(t *testing.T) {
 	snapshot.Work = targets[0].Work
 	session, err := newContractDeltaSession(cache, snapshot, f.options.Config)
 	require.NoError(t, err)
-	_, payload, err := f.options.Store.BeginPayloadGeneration(ctx, store_sqlite.PayloadGenerationRequest{
+	_, payload, err := f.options.Store.(*store_sqlite.Store).BeginPayloadGeneration(ctx, store_sqlite.PayloadGenerationRequest{
 		OwnerKind: "dedicated_graph", GraphID: "contract-failed-batch", LayerID: "job-" + time.Now().Format(time.RFC3339Nano),
 		GenerationKind: "contract_analysis", ConfigHash: "job-config", ExtractorVersions: `{"go":"1"}`, ResolverVersion: "contract-only",
 	})
@@ -38,7 +38,7 @@ func TestContractFollowupBatchKeepsWorkReportWhenInputKeyMoves(t *testing.T) {
 	targets[0].Payload = payload
 	moved := false
 	scratch := t.TempDir()
-	batch, err := RunContractFollowupBatch(ctx, ContractFollowupBatchRequest{
+	batch, err := RunContractFollowupBatch(ctx, ContractFollowupBatchRequest{OpenEvidence: openTestEvidenceStore,
 		RebuildReason: ContractFollowupUnknownInterval,
 		Snapshot:      snapshot, Targets: targets, Registry: f.options.Registry, Config: f.options.Config, RepoConfigs: snapshot.RepoConfigs,
 		Leases: f.options.Materializer.Leases, Logger: zap.NewNop(), Yield: f.options.Yield, ScratchParent: scratch,

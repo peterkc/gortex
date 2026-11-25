@@ -43,7 +43,7 @@ func newCatalogMCPServer(t *testing.T) (*Server, *indexer.MultiIndexer, *store_s
 
 	eng := query.NewEngine(store)
 	singleton := indexer.New(store, reg, config.IndexConfig{}, zap.NewNop())
-	srv := NewServer(eng, store, singleton, nil, zap.NewNop(), nil, MultiRepoOptions{
+	srv := NewServer(eng, store, singleton, nil, zap.NewNop(), nil, MultiRepoOptions{Catalog: store.Catalog(),
 		ConfigManager: cm,
 		MultiIndexer:  mi,
 	})

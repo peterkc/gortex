@@ -46,7 +46,7 @@ func newFanoutFixture(t *testing.T) *fanoutFixture {
 	mi := NewMultiIndexer(store, newTestRegistry(), search.NewNull(), nil, zap.NewNop())
 	// The real constructor: it is what registers the lifecycle's adoption
 	// observer, so nothing about this trace is arranged by the test.
-	lifecycle, err := NewCheckoutLifecycle(CheckoutLifecycleConfig{
+	lifecycle, err := NewCheckoutLifecycle(CheckoutLifecycleConfig{Catalog: testCatalog(store),
 		MultiIndexer: mi,
 		Graph:        store,
 		Logger:       zap.NewNop(),

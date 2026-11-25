@@ -1,5 +1,7 @@
 package store_sqlite
 
+import "github.com/zzet/gortex/internal/storage"
+
 import (
 	"context"
 	"database/sql"
@@ -72,12 +74,7 @@ import (
 // the verdict that caused it still stands, the counters record the deferral,
 // and the next boundary asks again.
 
-// ErrMaintenanceBusy reports that a whole-database maintenance action did not
-// run because the store was busy: the lane was occupied, or a publish drain or
-// payload build stayed in flight for the action's whole budget. It is a
-// deferral, not a fault — the store is untouched and every caller treats it as
-// skip-and-continue.
-var ErrMaintenanceBusy = errors.New("store_sqlite: whole-database maintenance deferred: store busy")
+var ErrMaintenanceBusy = storage.ErrMaintenanceBusy
 
 // errMaintenanceNoCore is the coreless-handle answer. A zero Store has no
 // database to maintain, so every lane entry point is inert on one.

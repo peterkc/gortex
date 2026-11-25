@@ -20,13 +20,17 @@ import (
 // every method: IsSuppressed returns false, the mutators are no-ops, and List
 // returns nothing. So a review flow can hold a nil store with no guard.
 type SuppressionStore struct {
-	sidecar *persistence.SidecarStore
+	sidecar suppressionRecords
 }
 
 // NewSuppressionStore binds a suppression store to an already-open sidecar. A
 // nil sidecar yields a store that tolerates every call as a no-op / false.
 func NewSuppressionStore(sidecar *persistence.SidecarStore) *SuppressionStore {
-	return &SuppressionStore{sidecar: sidecar}
+	s := &SuppressionStore{}
+	if sidecar != nil {
+		s.sidecar = sidecar
+	}
+	return s
 }
 
 // SuppressionRow is the read-side projection of a stored suppression — the

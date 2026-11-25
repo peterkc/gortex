@@ -18,8 +18,8 @@ import (
 
 	"github.com/zzet/gortex/internal/gitcmd"
 	"github.com/zzet/gortex/internal/gitstate"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/pathkey"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 const (
@@ -51,7 +51,7 @@ type CheckoutRefreshTicket struct {
 type checkoutRefreshRequest struct {
 	ticket      *CheckoutRefreshTicket
 	done        chan MutationResult
-	checkout    store_sqlite.Checkout
+	checkout    storage.Checkout
 	rootInfo    os.FileInfo
 	headRef     string
 	headCommit  string
@@ -201,10 +201,10 @@ func (l *CheckoutLifecycle) requestCheckoutRefresh(
 // the admission's bounded context (capture timeout, coordinator lifetime).
 // The returned cancel releases it; it is set only on success.
 func (l *CheckoutLifecycle) checkoutRefreshTarget(ctx context.Context, checkoutID, expectedRoot string) (
-	context.Context, *CheckoutCoordinator, store_sqlite.Checkout, os.FileInfo, context.CancelFunc, error,
+	context.Context, *CheckoutCoordinator, storage.Checkout, os.FileInfo, context.CancelFunc, error,
 ) {
 	if l == nil || l.catalog == nil || checkoutID == "" || expectedRoot == "" {
-		return nil, nil, store_sqlite.Checkout{}, nil, nil, fmt.Errorf("%w: checkout identity and root are required", ErrCheckoutMutationStale)
+		return nil, nil, storage.Checkout{}, nil, nil, fmt.Errorf("%w: checkout identity and root are required", ErrCheckoutMutationStale)
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -282,7 +282,7 @@ func (l *CheckoutLifecycle) requestBoundCheckoutRefresh(ctx context.Context, che
 // working copy (bindAtCompletion, headUnbound): the first sample begun after
 // its admission decides it.
 func (c *CheckoutCoordinator) captureBoundCheckoutRefresh(
-	ctx context.Context, checkout store_sqlite.Checkout, rootInfo os.FileInfo,
+	ctx context.Context, checkout storage.Checkout, rootInfo os.FileInfo,
 ) (*checkoutRefreshRequest, error) {
 	request := &checkoutRefreshRequest{
 		checkout: checkout, rootInfo: rootInfo, record: publicationRecordFrom(ctx),
@@ -307,14 +307,14 @@ func (c *CheckoutCoordinator) captureBoundCheckoutRefresh(
 	return request, nil
 }
 
-func (c *CheckoutCoordinator) captureCheckoutRefresh(ctx context.Context, checkout store_sqlite.Checkout, rootInfo os.FileInfo, path string) (*checkoutRefreshRequest, error) {
+func (c *CheckoutCoordinator) captureCheckoutRefresh(ctx context.Context, checkout storage.Checkout, rootInfo os.FileInfo, path string) (*checkoutRefreshRequest, error) {
 	return c.captureCheckoutRefreshFrom(ctx, checkout, rootInfo, path, nil)
 }
 
 // captureCheckoutRefreshFrom captures a ticket against given, or against a
 // new sample when given is nil.
 func (c *CheckoutCoordinator) captureCheckoutRefreshFrom(
-	ctx context.Context, checkout store_sqlite.Checkout, rootInfo os.FileInfo, path string, given *gitstate.DirtySnapshot,
+	ctx context.Context, checkout storage.Checkout, rootInfo os.FileInfo, path string, given *gitstate.DirtySnapshot,
 ) (*checkoutRefreshRequest, error) {
 	request := &checkoutRefreshRequest{checkout: checkout, rootInfo: rootInfo, record: publicationRecordFrom(ctx)}
 	if path != "" {
@@ -462,7 +462,7 @@ func (c *CheckoutCoordinator) reportCheckoutCycle(ctx context.Context, through u
 		hasAnchor := c.byteAnchor != nil
 		c.byteAnchorMu.Unlock()
 		if hasAnchor {
-			if route, found, err := c.catalog.GetCheckoutRoute(ctx, c.checkoutID); err == nil && found && route.State == store_sqlite.RouteActive && route.CommitGenerationID == out.CommitGenerationID && route.DirtyGenerationID == out.DirtyGenerationID {
+			if route, found, err := c.catalog.GetCheckoutRoute(ctx, c.checkoutID); err == nil && found && route.State == storage.RouteActive && route.CommitGenerationID == out.CommitGenerationID && route.DirtyGenerationID == out.DirtyGenerationID {
 				_ = c.captureByteAnchor(ctx, route)
 			}
 		}
@@ -542,7 +542,7 @@ func (c *CheckoutCoordinator) completeCheckoutRefreshTickets(ctx context.Context
 		c.failCheckoutRefreshRequests(owed, err)
 		return
 	}
-	if !found || route.State != store_sqlite.RouteActive || route.CommitGenerationID != out.CommitGenerationID || route.DirtyGenerationID != out.DirtyGenerationID {
+	if !found || route.State != storage.RouteActive || route.CommitGenerationID != out.CommitGenerationID || route.DirtyGenerationID != out.DirtyGenerationID {
 		return
 	}
 	dirty, found, err := c.catalog.GetViewGeneration(ctx, out.DirtyGenerationID)
@@ -660,7 +660,7 @@ func (c *CheckoutCoordinator) completeCheckoutRefreshTickets(ctx context.Context
 		c.failCheckoutRefreshRequests(requests, err)
 		return
 	}
-	if !found || current.State != store_sqlite.CheckoutStateReady || current.EffectiveMode != store_sqlite.CheckoutModeAutomatic || current.DesiredMode != store_sqlite.CheckoutModeAutomatic || current.ActiveIntentTransitionID != "" || current.UnavailableSince != 0 || current.RemovalDetectedAt != 0 || !sameMutationRoot(current.RootPath, c.root) {
+	if !found || current.State != storage.CheckoutStateReady || current.EffectiveMode != storage.CheckoutModeAutomatic || current.DesiredMode != storage.CheckoutModeAutomatic || current.ActiveIntentTransitionID != "" || current.UnavailableSince != 0 || current.RemovalDetectedAt != 0 || !sameMutationRoot(current.RootPath, c.root) {
 		c.failCheckoutRefreshRequests(requests, ErrCheckoutRefreshSuperseded)
 		return
 	}

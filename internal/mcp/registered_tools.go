@@ -6,8 +6,8 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/query"
+	"github.com/zzet/gortex/internal/storage/backend"
 )
 
 // registeredToolNames is the process-cached result of RegisteredToolNames. The
@@ -27,7 +27,7 @@ var (
 // mutate the cache.
 func RegisteredToolNames() []string {
 	registeredToolNamesOnce.Do(func() {
-		st, err := store_sqlite.Open(":memory:")
+		st, _, err := backend.OpenRaw("sqlite", ":memory:")
 		if err != nil {
 			return
 		}

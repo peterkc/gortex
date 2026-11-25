@@ -8,7 +8,6 @@ import (
 	"unsafe"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 const (
@@ -18,9 +17,9 @@ const (
 )
 
 type outlineResponseKey struct {
-	reader            *store_sqlite.Store
+	reader            outlineSource
 	revision          uint64
-	analysisReader    *store_sqlite.Store
+	analysisReader    outlineSource
 	analysisRevision  uint64
 	epoch, scopeEpoch uint64
 	generation        int64
@@ -66,12 +65,12 @@ func (s *Server) outlineCacheKey(reader graph.Reader, scope graph.NodeScope, bou
 			key.mask = "ids:" + string(data)
 		}
 	}
-	store, ok := reader.(*store_sqlite.Store)
-	if !ok {
+	store, ok := reader.(outlineSource)
+	if !ok || !store.SharesSymbolSearchCore(reader) {
 		return outlineResponseKey{}, false
 	}
-	analysisStore, ok := s.graph.(*store_sqlite.Store)
-	if !ok {
+	analysisStore, ok := s.graph.(outlineSource)
+	if !ok || !analysisStore.SharesSymbolSearchCore(s.graph) {
 		return outlineResponseKey{}, false
 	}
 	// Both clocks are complete mutation clocks, not counts. The exact handle

@@ -12,9 +12,9 @@ import (
 
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphpath"
 	"github.com/zzet/gortex/internal/indexer"
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -149,7 +149,7 @@ func (c *realController) selectProbeView(ctx context.Context, path string) probe
 		return base
 	}
 
-	if binding.Matched && binding.CheckoutState != string(store_sqlite.CheckoutStateReady) {
+	if binding.Matched && binding.CheckoutState != string(storage.CheckoutStateReady) {
 		// Availability and removal grace are read-only fallbacks even for a
 		// checkout that was dedicated. The path is not live, so presenting its
 		// retained corpus as an exact working-copy view would make stale data
@@ -164,7 +164,7 @@ func (c *realController) selectProbeView(ctx context.Context, path string) probe
 		}
 	}
 
-	if !binding.Matched || binding.EffectiveMode != string(store_sqlite.CheckoutModeAutomatic) {
+	if !binding.Matched || binding.EffectiveMode != string(storage.CheckoutModeAutomatic) {
 		// A live dedicated checkout, the family primary, and every tracked
 		// path no checkout owns read the indexed corpus directly, exactly as
 		// they were before routed views existed. The corpus the binding named
@@ -201,7 +201,7 @@ func (c *realController) selectProbeView(ctx context.Context, path string) probe
 	// Nothing composed answers this working copy. Ask for a build so a later
 	// probe can, and answer without waiting on it — a probe that blocked on a
 	// build would cost the agent the latency the hook exists to save.
-	if binding.CheckoutState == string(store_sqlite.CheckoutStateReady) {
+	if binding.CheckoutState == string(storage.CheckoutStateReady) {
 		// Registered, live, automatic and unrouted: the worktree may be dormant
 		// since startup. Activate its own coordinator so the exact view it needs
 		// is built, and answer from what exists now. A rejected activation (the

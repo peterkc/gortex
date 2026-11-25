@@ -2,19 +2,14 @@ package store_sqlite
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"time"
+
+	"github.com/zzet/gortex/internal/storage"
 )
 
-// ErrWarmupWALPressure marks an AwaitWarmupWAL refusal that came from the WAL
-// reclaim not reaching its mark in time, not from the caller's context. It is
-// transient by construction: the reclaim is blocked by concurrent warm-up
-// readers and writers, so a caller may retry the refused work once they are
-// gone. An error AwaitWarmupWAL returns carrying it also matches
-// context.DeadlineExceeded.
-var ErrWarmupWALPressure = errors.New("warmup WAL reclaim did not reach its mark in time")
+var ErrWarmupWALPressure = storage.ErrWarmupWALPressure
 
 // Retirement yields to the WAL reclaim.
 //

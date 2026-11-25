@@ -36,7 +36,7 @@ import (
 // sink, so an assertion made against it stays green no matter what the shipped
 // backend does — which is exactly how the production gap this file covers
 // stayed invisible. *store_sqlite.Store is what
-// internal/serverstack/backend.go openSqliteBackend hands the daemon, so it is
+// backend.Open hands the daemon, so it is
 // what has to carry the fact, and it is what produces the receipt every
 // assertion below is derived from.
 

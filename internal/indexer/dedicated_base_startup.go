@@ -12,7 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/config"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/storage"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
@@ -738,7 +738,7 @@ func (p *InitialBasePublisher) publish(ctx context.Context, req basePublishReque
 		out.Err = err
 		return out
 	}
-	if !found || graph.State != store_sqlite.DedicatedGraphReady {
+	if !found || graph.State != storage.DedicatedGraphReady {
 		out.Skipped = "no ready dedicated graph"
 		return out
 	}
@@ -817,9 +817,9 @@ func (p *InitialBasePublisher) publish(ctx context.Context, req basePublishReque
 		out.Skipped = "no dependent checkout"
 		return out
 	}
-	owner := store_sqlite.DedicatedBaseOwner{CheckoutID: checkout.CheckoutID, Incarnation: checkout.Incarnation}
+	owner := storage.DedicatedBaseOwner{CheckoutID: checkout.CheckoutID, Incarnation: checkout.Incarnation}
 
-	authority := store_sqlite.AcquireDedicatedBaseAuthorityRequest{
+	authority := storage.AcquireDedicatedBaseAuthorityRequest{
 		GraphID: graphID, Owner: owner, Token: initialDedicatedBaseAuthorityToken(graphID, owner),
 	}
 	// Read the stored authority so a token that does NOT match can still
@@ -902,7 +902,7 @@ func (p *InitialBasePublisher) observe(ctx context.Context, graphID, repoPrefix 
 		return dedicatedBaseObservation{}, err
 	}
 	if !found {
-		return dedicatedBaseObservation{}, fmt.Errorf("%w: dedicated graph %s vanished", store_sqlite.ErrCatalogStaleGuard, graphID)
+		return dedicatedBaseObservation{}, fmt.Errorf("%w: dedicated graph %s vanished", storage.ErrCatalogStaleGuard, graphID)
 	}
 	checkout, found, err := l.catalog.GetCheckout(ctx, graph.OwnerCheckoutID)
 	if err != nil {
@@ -910,14 +910,14 @@ func (p *InitialBasePublisher) observe(ctx context.Context, graphID, repoPrefix 
 	}
 	if !found {
 		return dedicatedBaseObservation{}, fmt.Errorf("%w: dedicated owner %s is gone",
-			store_sqlite.ErrCatalogStaleGuard, graph.OwnerCheckoutID)
+			storage.ErrCatalogStaleGuard, graph.OwnerCheckoutID)
 	}
 	if target.TreeOID == "" {
 		target = dedicatedBaseTarget{CommitOID: checkout.HeadCommit, TreeOID: checkout.HeadTree}
 	}
 	if target.TreeOID == "" {
 		return dedicatedBaseObservation{}, fmt.Errorf("%w: dedicated owner %s has no committed tree",
-			store_sqlite.ErrCatalogStaleGuard, graph.OwnerCheckoutID)
+			storage.ErrCatalogStaleGuard, graph.OwnerCheckoutID)
 	}
 	idx := l.mi.GetIndexer(repoPrefix)
 	if idx == nil {
@@ -938,6 +938,7 @@ func (p *InitialBasePublisher) observe(ctx context.Context, graphID, repoPrefix 
 	}
 	sections := dedicatedBaseConfigSections(repoCfg)
 	builder := &SparseGenerationBuilder{
+		Catalog:    l.catalog,
 		Store:      l.store,
 		Registry:   l.mi.registry,
 		Config:     frozen,
@@ -981,7 +982,7 @@ func (p *InitialBasePublisher) observe(ctx context.Context, graphID, repoPrefix 
 		now = l.now
 	}
 	return dedicatedBaseObservation{
-		Identity: store_sqlite.DedicatedBaseIdentity{
+		Identity: storage.DedicatedBaseIdentity{
 			TreeOID:            target.TreeOID,
 			ConfigHash:         checkoutConfigHash(fingerprint, sections),
 			ExtractorVersions:  builder.extractorVersionsFingerprint(),
@@ -1000,7 +1001,7 @@ func (p *InitialBasePublisher) observe(ctx context.Context, graphID, repoPrefix 
 
 // initialDedicatedBaseAuthorityToken derives the deterministic authority token
 // described on initialDedicatedBaseAuthorityDomain.
-func initialDedicatedBaseAuthorityToken(graphID string, owner store_sqlite.DedicatedBaseOwner) string {
+func initialDedicatedBaseAuthorityToken(graphID string, owner storage.DedicatedBaseOwner) string {
 	var e dependencyRevisionEncoder
 	e.field("domain", initialDedicatedBaseAuthorityDomain)
 	e.field("graph", graphID)

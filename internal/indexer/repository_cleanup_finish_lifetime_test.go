@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"fmt"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -252,7 +253,7 @@ func TestRepositoryLateCleanupFinishCannotSignalRetrackedState(t *testing.T) {
 			if !oldState.finalized || len(l.repositoryCleanup.states) != 0 {
 				t.Fatal("old cleanup state was not actually removed")
 			}
-			if err := l.catalog.UpsertCheckout(ctx, owner); err != nil {
+			if err := any(l.catalog).(*store_sqlite.Catalog).UpsertCheckout(ctx, owner); err != nil {
 				t.Fatal(err)
 			}
 			if err := l.catalog.UpsertDedicatedGraph(ctx, graph); err != nil {

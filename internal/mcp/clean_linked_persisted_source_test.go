@@ -85,7 +85,7 @@ func newCleanLinkedSourceFixtureWithSource(t *testing.T, source []byte, symbol s
 		registerMCPFixtureRepos(t, mi, cm)
 		eng := query.NewEngine(store)
 		eng.SetSearch(search.NewNull())
-		srv := NewServer(eng, store, nil, nil, zap.NewNop(), nil, MultiRepoOptions{MultiIndexer: mi, ConfigManager: cm})
+		srv := NewServer(eng, store, nil, nil, zap.NewNop(), nil, MultiRepoOptions{Catalog: store.Catalog(), MultiIndexer: mi, ConfigManager: cm})
 		require.NotNil(t, srv.lifecycle)
 		srv.SetMaterializer(&graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: srv.lifecycle.ViewLeases()})
 		f.store, f.srv, f.extractor = store, srv, e

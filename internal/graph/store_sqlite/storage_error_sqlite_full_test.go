@@ -201,7 +201,7 @@ func (privateNonSQLiteFullCode) Code() int     { return 13 }
 
 func TestPrivateSQLiteFullEmitterCauseMatrix(t *testing.T) {
 	full := privateCaptureRealSQLiteFull(t)
-	typed := &StorageError{err: full}
+	typed := &StorageError{Err: full}
 	for _, tc := range []struct {
 		name string
 		err  error

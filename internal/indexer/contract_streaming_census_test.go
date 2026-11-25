@@ -88,7 +88,7 @@ func TestContractColdStreamingTextCensusMatchesGitTree(t *testing.T) {
 				require.NoError(t, err)
 				mi.SetOutputGenerationAuthority(NewOutputGenerationAuthority(leases))
 				materializer := &graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: leases}
-				options := ContractFollowupCaptureOptions{Context: ctx, Store: store, Materializer: materializer, MultiIndexer: mi, Registry: idx.registry, Config: idx.config, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }}
+				options := ContractFollowupCaptureOptions{Catalog: testCatalog(store), Context: ctx, Store: store, Materializer: materializer, MultiIndexer: mi, Registry: idx.registry, Config: idx.config, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }}
 				require.NoError(t, reconcilePrimaryContractBaseline(ctx, options, "repo"))
 				inputs, err := materializer.CaptureContractInputs(ctx, nil, "repo", "")
 				require.NoError(t, err)

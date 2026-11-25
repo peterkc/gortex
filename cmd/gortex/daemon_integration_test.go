@@ -86,12 +86,12 @@ func spinUpDaemonWithConfig(t *testing.T) (configPath, socket, trackedRoot strin
 	// checkout lifecycle. An in-memory graph has no catalog, so this one
 	// runs in its degraded shape: the index, watcher, config and session
 	// side effects, with no durable identity behind them.
-	lifecycle, err := indexer.NewCheckoutLifecycle(indexer.CheckoutLifecycleConfig{
+	lifecycle, err := indexer.NewCheckoutLifecycle(withPairedCatalog(indexer.CheckoutLifecycleConfig{
 		MultiIndexer:  mi,
 		ConfigManager: cm,
 		Graph:         g,
 		Logger:        zap.NewNop(),
-	})
+	}))
 	require.NoError(t, err)
 
 	d := daemon.New(socket, "test", zap.NewNop())

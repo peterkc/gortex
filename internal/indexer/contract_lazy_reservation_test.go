@@ -21,17 +21,17 @@ func TestContractCoordinatorFillContinuationDoesNotReservePayload(t *testing.T) 
 	}
 	f := newContractJobFixture(t, files)
 	var retired []store_sqlite.ViewGeneration
-	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{
+	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(f.store), OpenEvidence: openTestEvidenceStore,
 		Store: f.store, Leases: f.options.Materializer.Leases, Registry: f.options.Registry,
 		Config: f.options.Config, Capture: NewContractFollowupSourceCapture(f.options), Yield: f.options.Yield,
-		RetireReservation: func(ctx context.Context, catalog *store_sqlite.Store, generation int64, inUse func(int64) bool) error {
-			row, found, err := catalog.Catalog().GetViewGeneration(ctx, generation)
+		RetireReservation: func(ctx context.Context, catalog ContractReservationStore, generation int64, inUse func(int64) bool) error {
+			row, found, err := testCatalog(catalog).GetViewGeneration(ctx, generation)
 			require.NoError(t, err)
 			require.True(t, found, "retirement must refer to an actual catalog generation")
 			require.Equal(t, "contract_analysis", row.GenerationKind)
 			require.False(t, inUse(generation), "batch leases drain before failed reservation cleanup")
 			retired = append(retired, row)
-			return catalog.RetirePayloadGeneration(ctx, generation, inUse)
+			return catalog.(*store_sqlite.Store).RetirePayloadGeneration(ctx, generation, inUse)
 		},
 	})
 	require.NoError(t, err)
@@ -53,12 +53,12 @@ func TestContractCoordinatorFillContinuationDoesNotReservePayload(t *testing.T) 
 func TestContractCoordinatorCompletedFillKeepsPublishedPayload(t *testing.T) {
 	f := newRouteConstantFixture(t)
 	var retired []int64
-	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{
+	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Catalog: testCatalog(f.store), OpenEvidence: openTestEvidenceStore,
 		Store: f.store, Leases: f.options.Materializer.Leases, Registry: f.options.Registry,
 		Config: f.options.Config, Capture: NewContractFollowupSourceCapture(f.options), Yield: f.options.Yield,
-		RetireReservation: func(ctx context.Context, catalog *store_sqlite.Store, generation int64, inUse func(int64) bool) error {
+		RetireReservation: func(ctx context.Context, catalog ContractReservationStore, generation int64, inUse func(int64) bool) error {
 			retired = append(retired, generation)
-			return catalog.RetirePayloadGeneration(ctx, generation, inUse)
+			return catalog.(*store_sqlite.Store).RetirePayloadGeneration(ctx, generation, inUse)
 		},
 	})
 	require.NoError(t, err)

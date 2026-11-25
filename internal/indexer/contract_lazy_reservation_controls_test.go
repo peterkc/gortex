@@ -20,11 +20,11 @@ func TestContractCoordinatorLazyFillResumesToPublication(t *testing.T) {
 	f := newContractJobFixture(t, files)
 	var retired []int64
 	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{
-		Store: f.store, Leases: f.options.Materializer.Leases, Registry: f.options.Registry,
+		Catalog: testCatalog(f.store), OpenEvidence: openTestEvidenceStore, Store: f.store, Leases: f.options.Materializer.Leases, Registry: f.options.Registry,
 		Config: f.options.Config, Capture: NewContractFollowupSourceCapture(f.options), Yield: f.options.Yield,
-		RetireReservation: func(ctx context.Context, catalog *store_sqlite.Store, generation int64, inUse func(int64) bool) error {
+		RetireReservation: func(ctx context.Context, catalog ContractReservationStore, generation int64, inUse func(int64) bool) error {
 			retired = append(retired, generation)
-			return catalog.RetirePayloadGeneration(ctx, generation, inUse)
+			return catalog.(*store_sqlite.Store).RetirePayloadGeneration(ctx, generation, inUse)
 		},
 	})
 	require.NoError(t, err)
@@ -71,11 +71,11 @@ func TestContractCoordinatorLazyCancellationDoesNotReserve(t *testing.T) {
 	f := newRouteConstantFixture(t)
 	retired := 0
 	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{
-		Store: f.store, Leases: f.options.Materializer.Leases, Registry: f.options.Registry,
+		Catalog: testCatalog(f.store), OpenEvidence: openTestEvidenceStore, Store: f.store, Leases: f.options.Materializer.Leases, Registry: f.options.Registry,
 		Config: f.options.Config, Capture: NewContractFollowupSourceCapture(f.options), Yield: f.options.Yield,
-		RetireReservation: func(ctx context.Context, catalog *store_sqlite.Store, generation int64, inUse func(int64) bool) error {
+		RetireReservation: func(ctx context.Context, catalog ContractReservationStore, generation int64, inUse func(int64) bool) error {
 			retired++
-			return catalog.RetirePayloadGeneration(ctx, generation, inUse)
+			return catalog.(*store_sqlite.Store).RetirePayloadGeneration(ctx, generation, inUse)
 		},
 	})
 	require.NoError(t, err)
@@ -125,7 +125,7 @@ func TestContractLazyReservationRefusalAndCancellation(t *testing.T) {
 			}
 			t.Cleanup(snapshot.Release)
 			r := ContractFollowupRequest{
-				Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, RebuildReason: ContractFollowupUnknownInterval,
+				OpenEvidence: openTestEvidenceStore, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, RebuildReason: ContractFollowupUnknownInterval,
 				Registry: f.options.Registry, Config: f.options.Config, RepoConfigs: snapshot.RepoConfigs,
 				Logger: f.options.Logger, Leases: f.options.Materializer.Leases, Yield: f.options.Yield,
 			}
@@ -134,10 +134,10 @@ func TestContractLazyReservationRefusalAndCancellation(t *testing.T) {
 			refused := errors.New("reservation refused")
 			calls := 0
 			req := ContractFollowupBatchRequest{
-				Snapshot: r.Snapshot, Targets: []ContractFollowupTarget{{Key: r.Snapshot.Key, Work: r.Snapshot.Work, Catalog: r.Catalog}},
+				OpenEvidence: r.OpenEvidence, Snapshot: r.Snapshot, Targets: []ContractFollowupTarget{{Key: r.Snapshot.Key, Work: r.Snapshot.Work, Catalog: r.Catalog}},
 				RebuildReason: r.RebuildReason, Registry: r.Registry, Config: r.Config, RepoConfigs: r.RepoConfigs,
 				Logger: r.Logger, Leases: r.Leases, Yield: r.Yield,
-				reservePayload: func(context.Context, ContractFollowupTarget) (*store_sqlite.Store, error) {
+				reservePayload: func(context.Context, ContractFollowupTarget) (generationPayloadStore, error) {
 					calls++
 					switch mode {
 					case "refused":
@@ -160,7 +160,7 @@ func TestContractLazyReservationRefusalAndCancellation(t *testing.T) {
 			}
 			var report ContractFollowupBatchReport
 			if mode == "single_ownership" {
-				r.reservePayload = func(context.Context) (*store_sqlite.Store, error) {
+				r.reservePayload = func(context.Context) (generationPayloadStore, error) {
 					calls++
 					return r.Payload, nil
 				}
@@ -182,7 +182,7 @@ func TestContractLazyReservationRefusalAndCancellation(t *testing.T) {
 				require.Positive(t, report.Cohort.SourceReads, "reservation follows real converged source reads")
 			}
 			require.Nil(t, report.Publication)
-			stats, statsErr := r.Payload.StatsContext(t.Context())
+			stats, statsErr := r.Payload.(*store_sqlite.Store).StatsContext(t.Context())
 			require.NoError(t, statsErr)
 			require.Zero(t, stats.TotalNodes, "refused or canceled allocation must precede payload writes")
 			require.Zero(t, stats.TotalEdges)

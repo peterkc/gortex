@@ -1,5 +1,7 @@
 package store_sqlite
 
+import "github.com/zzet/gortex/internal/storage"
+
 import (
 	"context"
 	"database/sql"
@@ -16,10 +18,7 @@ import (
 // concurrently otherwise. Waiting for this guard remains cancelable.
 var vacuumTempDirectoryGate sqliteWriteGate
 
-// ErrVacuumTempDirectory means no VACUUM ran because its scratch volume could
-// not be confirmed. Callers must skip instead of assuming the system temp
-// volume has the headroom checked for the store directory.
-var ErrVacuumTempDirectory = errors.New("sqlite vacuum: temporary directory unconfirmed")
+var ErrVacuumTempDirectory = storage.ErrVacuumTempDirectory
 
 func sqliteVacuumDSN(path string) string {
 	return strings.Replace(sqliteWriterDSN(path), "temp_store(MEMORY)", "temp_store(FILE)", 1)

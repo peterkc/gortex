@@ -26,11 +26,11 @@ import (
 	"github.com/zzet/gortex/internal/analysis"
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
+	"github.com/zzet/gortex/internal/storage/backend"
 )
 
 // repoSpec names one benchmark target. Path is either an absolute /
@@ -99,12 +99,12 @@ func runRepo(spec repoSpec, queries []string, budget budgets) repoRow {
 		return row
 	}
 	defer func() { _ = os.RemoveAll(storeDir) }()
-	g, err := store_sqlite.Open(filepath.Join(storeDir, "bench.sqlite"))
+	g, closeBackend, err := backend.OpenRaw("", filepath.Join(storeDir, "bench.sqlite"))
 	if err != nil {
 		row.Error = fmt.Sprintf("open store: %v", err)
 		return row
 	}
-	defer func() { _ = g.Close() }()
+	defer func() { _ = closeBackend() }()
 
 	reg := parser.NewRegistry()
 	languages.RegisterAll(reg)

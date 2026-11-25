@@ -85,12 +85,12 @@ func buildWorktreeController(t *testing.T) (*realController, *indexer.MultiIndex
 	// An in-memory graph has no checkout catalog, so the lifecycle runs in
 	// its degraded shape here: no identities, and the same index / watcher /
 	// config side effects the reload diff has always had.
-	lifecycle, err := indexer.NewCheckoutLifecycle(indexer.CheckoutLifecycleConfig{
+	lifecycle, err := indexer.NewCheckoutLifecycle(withPairedCatalog(indexer.CheckoutLifecycleConfig{
 		MultiIndexer:  mi,
 		ConfigManager: cm,
 		Graph:         g,
 		Logger:        zap.NewNop(),
-	})
+	}))
 	require.NoError(t, err)
 
 	c := &realController{

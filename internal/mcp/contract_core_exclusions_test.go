@@ -169,12 +169,12 @@ func TestContractCoreExclusionSetReadAcrossAWriteIsNotKept(t *testing.T) {
 	ctx := withContractCoreReadErrors(t.Context())
 	cache := newContractCoreExclusionCache(contractCoreExclusionLimit)
 	reads := 0
-	cache.read = func(s *store_sqlite.Store, ctx context.Context, kinds []graph.NodeKind, limit int) ([]string, bool, error) {
+	cache.read = func(s exclusionSource, ctx context.Context, kinds []graph.NodeKind, limit int) ([]string, bool, error) {
 		ids, complete, err := s.NodeIDsByKindsBoundedContext(ctx, kinds, limit)
 		reads++
 		if reads == 1 {
 			// b becomes owned after the first set was read.
-			s.AddNode(&graph.Node{ID: "b", Kind: graph.KindConfigKey})
+			store.AddNode(&graph.Node{ID: "b", Kind: graph.KindConfigKey})
 		}
 		return ids, complete, err
 	}

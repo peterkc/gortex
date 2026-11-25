@@ -482,7 +482,7 @@ func TestWorktreeBatchFacadePendingStatusAndJournalReload(t *testing.T) {
 	// A fresh server has no batch state or publication receipts in memory.
 	// Keep the real catalog/lifecycle so the facade reloads and validates its
 	// journal against exactly the same checkout authority as after a restart.
-	reloaded := NewServer(query.NewEngine(f.store), f.store, nil, nil, zap.NewNop(), nil, MultiRepoOptions{
+	reloaded := NewServer(query.NewEngine(f.store), f.store, nil, nil, zap.NewNop(), nil, MultiRepoOptions{Catalog: f.store.Catalog(),
 		MultiIndexer: f.srv.multiIndexer, ConfigManager: f.srv.configManager,
 	})
 	reloaded.SetMaterializer(f.srv.materializer)

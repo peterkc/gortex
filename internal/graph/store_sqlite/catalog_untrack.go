@@ -1,5 +1,7 @@
 package store_sqlite
 
+import "github.com/zzet/gortex/internal/storage"
+
 import (
 	"context"
 	"database/sql"
@@ -7,15 +9,12 @@ import (
 	"fmt"
 )
 
-// UntrackAuthorizationPlan names the durable operation an explicit untrack is
-// authorizing. Cleanup plans start a cleanup-journal entry; demotion starts an
-// intent transition that is completed only after its replacement route exists.
-type UntrackAuthorizationPlan string
+type UntrackAuthorizationPlan = storage.UntrackAuthorizationPlan
 
 const (
-	UntrackAuthorizationForget         UntrackAuthorizationPlan = "forget"
-	UntrackAuthorizationPrimaryClosure UntrackAuthorizationPlan = "primary_closure"
-	UntrackAuthorizationDemote         UntrackAuthorizationPlan = "demote"
+	UntrackAuthorizationForget         = storage.UntrackAuthorizationForget
+	UntrackAuthorizationPrimaryClosure = storage.UntrackAuthorizationPrimaryClosure
+	UntrackAuthorizationDemote         = storage.UntrackAuthorizationDemote
 )
 
 var untrackAuthorizationPlans = []UntrackAuthorizationPlan{
@@ -24,60 +23,11 @@ var untrackAuthorizationPlans = []UntrackAuthorizationPlan{
 	UntrackAuthorizationDemote,
 }
 
-// AuthorizeUntrackRequest is the complete compare-and-set for an explicit
-// untrack. Every identity named here came from the preview. The catalog checks
-// them and the active intent set in one write transaction, then records the
-// durable work item in that same transaction before intent revocation becomes
-// visible.
-type AuthorizeUntrackRequest struct {
-	Plan UntrackAuthorizationPlan
+type AuthorizeUntrackRequest = storage.AuthorizeUntrackRequest
 
-	CheckoutID  string
-	Incarnation string
-	FamilyID    string
+type AuthorizeUntrackResult = storage.AuthorizeUntrackResult
 
-	OwnedGraphID         string
-	PrimaryGraphID       string
-	ExpectedPrimaryEpoch int64
-	RequiredPrimaryState string
-
-	RevokedAt      int64
-	RevocableKinds []IntentSourceKind
-
-	Cleanup    *CleanupEntry
-	Transition *IntentTransition
-}
-
-// AuthorizeUntrackResult reports the atomic preflight and the durable work item
-// that now owns cleanup. Existing carries a journal/transition written by an
-// earlier attempt; callers resume it rather than minting competing work.
-type AuthorizeUntrackResult struct {
-	Revoked    []TrackingIntent
-	Blocked    []TrackingIntent
-	Cleanup    *CleanupEntry
-	Transition *IntentTransition
-	Existing   bool
-}
-
-// CommitAuthorizedDemotionRequest atomically makes a prepared automatic route
-// authoritative. When a dedicated graph has to be retired, Cleanup is inserted
-// in the same transaction as the mode flip, so a crash cannot leave an
-// automatic checkout with an unjournalled private graph.
-type CommitAuthorizedDemotionRequest struct {
-	CheckoutID   string
-	Incarnation  string
-	FamilyID     string
-	TransitionID string
-
-	OwnedGraphID         string
-	PrimaryGraphID       string
-	ExpectedPrimaryEpoch int64
-	RequiredPrimaryState string
-
-	State    CheckoutState
-	LastSeen int64
-	Cleanup  *CleanupEntry
-}
+type CommitAuthorizedDemotionRequest = storage.CommitAuthorizedDemotionRequest
 
 // AuthorizeUntrack validates the preview, revokes every revocable active intent
 // as one set, and starts the corresponding durable operation in one catalog
@@ -346,7 +296,7 @@ func validateAuthorizeUntrackRequest(req AuthorizeUntrackRequest) error {
 			req.RequiredPrimaryState == "" {
 			return fmt.Errorf("%w: demotion authorization needs a ready primary and transition", ErrCatalogInvalidValue)
 		}
-		if err := req.Transition.validate(); err != nil {
+		if err := validateIntentTransition(*req.Transition); err != nil {
 			return err
 		}
 		if req.Transition.CheckoutID != req.CheckoutID ||
@@ -355,7 +305,7 @@ func validateAuthorizeUntrackRequest(req AuthorizeUntrackRequest) error {
 		}
 	}
 	if req.Cleanup != nil {
-		if err := req.Cleanup.validate(); err != nil {
+		if err := validateCleanupEntry(*req.Cleanup); err != nil {
 			return err
 		}
 		if req.Cleanup.Phase != CleanupPhasePending {
@@ -387,7 +337,7 @@ func validateCommitAuthorizedDemotionRequest(req CommitAuthorizedDemotionRequest
 		if req.OwnedGraphID == "" {
 			return fmt.Errorf("%w: graph cleanup has no owned graph", ErrCatalogInvalidValue)
 		}
-		if err := req.Cleanup.validate(); err != nil {
+		if err := validateCleanupEntry(*req.Cleanup); err != nil {
 			return err
 		}
 		if req.Cleanup.Phase != CleanupPhasePending {

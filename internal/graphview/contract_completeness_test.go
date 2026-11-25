@@ -35,7 +35,7 @@ func TestContractCompletenessDoesNotUseSemanticFileFollowup(t *testing.T) {
 	}
 	pending := makeGeneration(0, store_sqlite.ProducerStateIncomplete)
 	unrelatedComplete := makeGeneration(pending, store_sqlite.ProducerStateComplete)
-	c, err := newTestMaterializer(store).completeness([]*store_sqlite.Store{store.AtGeneration(pending), store.AtGeneration(unrelatedComplete)})
+	c, err := newTestMaterializer(store).completeness([]GenerationSourceHandle{store.AtGeneration(pending), store.AtGeneration(unrelatedComplete)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestContractCompletenessDoesNotCertifySilentBaseline(t *testing.T) {
 	commit := writeProducerGeneration(t, store, "commit", stackCommitLayerID, 0, 1000)
 	dirty := writeProducerGeneration(t, store, "dirty", stackDirtyLayerID, commit, 2000,
 		store_sqlite.ProducerCompleteness{Producer: string(CapContracts), State: store_sqlite.ProducerStateComplete})
-	c, err := newTestMaterializer(store).completeness([]*store_sqlite.Store{store.AtGeneration(commit), store.AtGeneration(dirty)})
+	c, err := newTestMaterializer(store).completeness([]GenerationSourceHandle{store.AtGeneration(commit), store.AtGeneration(dirty)})
 	if err != nil {
 		t.Fatal(err)
 	}

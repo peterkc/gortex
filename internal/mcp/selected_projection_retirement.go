@@ -6,9 +6,9 @@ import (
 	"reflect"
 
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/pathkey"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // Retirement is optional proof about the same selected reader, never a reason
@@ -48,7 +48,7 @@ type selectedProjectionStore struct {
 	checked   graph.ConstantValueProjectionReader
 	sources   []graphview.GenerationSource
 	entry     *projectionEntry
-	revisions []store_sqlite.PayloadInputRevision
+	revisions []storage.PayloadInputRevision
 	initial   map[string]graph.FileMetaRow
 	err       error
 }
@@ -62,10 +62,10 @@ func (p *selectedProjectionStore) validateLayers() error {
 	}
 	first := p.revisions == nil
 	if first {
-		p.revisions = make([]store_sqlite.PayloadInputRevision, len(p.sources))
+		p.revisions = make([]storage.PayloadInputRevision, len(p.sources))
 	}
 	for i, source := range p.sources {
-		if source.Handle == nil || source.Layer == nil {
+		if (source.Handle == nil || source.Handle.IsNilGenerationHandle()) || source.Layer == nil {
 			return graph.ErrConstantProjectionUnsupported
 		}
 		before, err := source.Handle.PayloadInputRevisionContext(p.ctx)
@@ -108,7 +108,11 @@ func (p *selectedProjectionStore) selectedDeletion() (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		rows, err := source.Handle.FileMasksForContext(p.ctx, p.entry.repoPrefix, []string{p.entry.graphPath})
+		masks, ok := source.Handle.(selectedMaskReader)
+		if !ok {
+			return false, graph.ErrConstantProjectionUnsupported
+		}
+		rows, err := masks.FileMasksForContext(p.ctx, p.entry.repoPrefix, []string{p.entry.graphPath})
 		if err != nil {
 			return false, err
 		}
@@ -119,7 +123,7 @@ func (p *selectedProjectionStore) selectedDeletion() (bool, error) {
 		if before != after || after != p.revisions[i] {
 			return false, graph.ErrConstantProjectionStale
 		}
-		return len(rows) == 1 && rows[0].RepoPrefix == p.entry.repoPrefix && rows[0].FilePath == p.entry.graphPath && rows[0].Mode == store_sqlite.OwnershipDelete, nil
+		return len(rows) == 1 && rows[0].RepoPrefix == p.entry.repoPrefix && rows[0].FilePath == p.entry.graphPath && rows[0].Mode == storage.OwnershipDelete, nil
 	}
 	return false, nil
 }

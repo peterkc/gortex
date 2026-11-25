@@ -14,8 +14,8 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/progress"
+	"github.com/zzet/gortex/internal/storage/backend"
 	"github.com/zzet/gortex/internal/tui"
 )
 
@@ -111,7 +111,7 @@ type repoStatus struct {
 	// FreshnessScope names which generation the Indexed* / Stale fields
 	// describe. It is always reposFreshnessScope ("base"): the door this
 	// command reads through is base-only by construction
-	// (store_sqlite.RepoIndexStateBaseViewGen). It is emitted
+	// (backend.RepoIndexStateBaseViewGen). It is emitted
 	// unconditionally, and not omitted when it is the default, because a
 	// scripted consumer must be able to tell "base, declared" from "an
 	// older gortex that did not say" — an absent field is the second.
@@ -125,10 +125,10 @@ type repoStatus struct {
 //
 // A non-base generation would need a different reader; this one cannot produce
 // it, which is why the value is a constant rather than a field of the answer.
-var reposFreshnessScope = reposScopeName(store_sqlite.RepoIndexStateBaseViewGen)
+var reposFreshnessScope = reposScopeName(backend.RepoIndexStateBaseViewGen)
 
 func reposScopeName(viewGen int) string {
-	if viewGen == store_sqlite.RepoIndexStateBaseViewGen {
+	if viewGen == backend.RepoIndexStateBaseViewGen {
 		return daemon.ProbeViewBase
 	}
 	// Unreachable while the read door is base-only. Spelled rather than
@@ -175,6 +175,10 @@ func runRepos(cmd *cobra.Command, _ []string) error {
 	return renderReposTable(cmd, entries)
 }
 
+type repoIndexStateReader interface {
+	ReadRepoIndexStates(string) (map[string]graph.RepoIndexState, error)
+}
+
 // loadRepoIndexStates reads the daemon's per-repo index-freshness rows
 // (the SQLite repo_index_state table) keyed by repo prefix. It opens the
 // backend store read-only so it is safe to run while a daemon holds the
@@ -188,7 +192,11 @@ func runRepos(cmd *cobra.Command, _ []string) error {
 // re-index work that is already done.
 func loadRepoIndexStates() (map[string]graph.RepoIndexState, error) {
 	path := resolveReposBackendPath()
-	states, err := store_sqlite.ReadRepoIndexStates(path)
+	reader, ok := backend.Offline("").(repoIndexStateReader)
+	if !ok {
+		return nil, fmt.Errorf("read index freshness from %s: unavailable for this backend", path)
+	}
+	states, err := reader.ReadRepoIndexStates(path)
 	if err != nil {
 		return nil, fmt.Errorf("read index freshness from %s: %w", path, err)
 	}
@@ -368,7 +376,7 @@ func emitReposMissingHint(w interface{ Write([]byte) (int, error) }, entries []r
 func emitReposScopeNote(w interface{ Write([]byte) (int, error) }) {
 	fmt.Fprintf(w, "note: freshness below is the %s corpus only (view generation %d) — "+
 		"a routed worktree's own generation is not read here; ask `gortex repos explain-view <path>`\n",
-		reposFreshnessScope, store_sqlite.RepoIndexStateBaseViewGen)
+		reposFreshnessScope, backend.RepoIndexStateBaseViewGen)
 }
 
 // emitReposBanner prints the gortex mesh banner on stderr above the table.

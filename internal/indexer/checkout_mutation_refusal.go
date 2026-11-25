@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/pathkey"
+	"github.com/zzet/gortex/internal/storage"
 )
 
 // These slots belong to the lifecycle, not an MCP session. Only a final stale
@@ -23,7 +23,7 @@ type checkoutMutationRefusalSlot struct {
 }
 
 type checkoutMutationRefusalMark struct {
-	route  store_sqlite.CheckoutRoute
+	route  storage.CheckoutRoute
 	at     time.Time
 	reason string
 	// A late precommit witness additionally pins the admitted physical root.
@@ -35,7 +35,7 @@ type checkoutMutationRefusalWitness struct {
 	slot       *checkoutMutationRefusalSlot
 	revision   uint64
 	routeEpoch int64
-	route      store_sqlite.CheckoutRoute
+	route      storage.CheckoutRoute
 	rootInfo   os.FileInfo
 }
 
@@ -47,7 +47,7 @@ type checkoutMutationRefusalError struct {
 func (e *checkoutMutationRefusalError) Error() string { return e.err.Error() }
 func (e *checkoutMutationRefusalError) Unwrap() error { return e.err }
 
-func (l *CheckoutLifecycle) mutationRefusalWitness(checkout store_sqlite.Checkout, routeEpoch int64) checkoutMutationRefusalWitness {
+func (l *CheckoutLifecycle) mutationRefusalWitness(checkout storage.Checkout, routeEpoch int64) checkoutMutationRefusalWitness {
 	// Refuse oversized identities rather than retaining arbitrary error text or
 	// caller data. Normal catalog IDs and OS paths fit comfortably inside this.
 	if l == nil || checkout.CheckoutID == "" || checkout.Incarnation == "" || checkout.RootPath == "" ||
@@ -73,15 +73,15 @@ func (l *CheckoutLifecycle) mutationRefusalWitness(checkout store_sqlite.Checkou
 // refusal. Unknown pre-route failures remain unmarked.
 type checkoutMutationObservedRouteError struct {
 	err   error
-	route store_sqlite.CheckoutRoute
+	route storage.CheckoutRoute
 }
 
 func (e *checkoutMutationObservedRouteError) Error() string { return e.err.Error() }
 func (e *checkoutMutationObservedRouteError) Unwrap() error { return e.err }
 
-func withMutationRefusalRoute(err error, route store_sqlite.CheckoutRoute) error {
+func withMutationRefusalRoute(err error, route storage.CheckoutRoute) error {
 	var observed *checkoutMutationObservedRouteError
-	if err == nil || !errors.Is(err, ErrCheckoutMutationStale) || errors.As(err, &observed) || route.RouteEpoch <= 0 || route.State != store_sqlite.RouteActive {
+	if err == nil || !errors.Is(err, ErrCheckoutMutationStale) || errors.As(err, &observed) || route.RouteEpoch <= 0 || route.State != storage.RouteActive {
 		return err
 	}
 	return &checkoutMutationObservedRouteError{err: err, route: route}
@@ -140,11 +140,11 @@ func (m *CheckoutMutation) prepareRefusal(ctx context.Context, err error) error 
 	return m.refusalOwner.captureMutationRefusalError(withMutationRefusalRoute(err, m.route), m.refusalWitness)
 }
 
-func currentLeaseRefusalRoot(checkout store_sqlite.Checkout, rootInfo os.FileInfo) bool {
+func currentLeaseRefusalRoot(checkout storage.Checkout, rootInfo os.FileInfo) bool {
 	if rootInfo == nil {
 		return true
 	}
-	if checkout.EffectiveMode != store_sqlite.CheckoutModeAutomatic || checkout.DesiredMode != store_sqlite.CheckoutModeAutomatic ||
+	if checkout.EffectiveMode != storage.CheckoutModeAutomatic || checkout.DesiredMode != storage.CheckoutModeAutomatic ||
 		checkout.ActiveIntentTransitionID != "" || checkout.UnavailableSince != 0 || checkout.RemovalDetectedAt != 0 {
 		return false
 	}
@@ -163,22 +163,22 @@ func (l *CheckoutLifecycle) forgetMutationRefusal(checkoutID string) {
 
 // Read identity on both sides of the route: do not join an old incarnation
 // to a replacement's route. Errors are unknown, never a healthy verdict.
-func (l *CheckoutLifecycle) currentMutationRefusalRoute(ctx context.Context, checkoutID, root string) (store_sqlite.Checkout, store_sqlite.CheckoutRoute, bool) {
-	var noCheckout store_sqlite.Checkout
-	var noRoute store_sqlite.CheckoutRoute
+func (l *CheckoutLifecycle) currentMutationRefusalRoute(ctx context.Context, checkoutID, root string) (storage.Checkout, storage.CheckoutRoute, bool) {
+	var noCheckout storage.Checkout
+	var noRoute storage.CheckoutRoute
 	if l == nil || l.catalog == nil {
 		return noCheckout, noRoute, false
 	}
 	checkout, found, err := l.catalog.GetCheckout(ctx, checkoutID)
-	if err != nil || !found || !sameMutationRoot(checkout.RootPath, root) || checkout.State != store_sqlite.CheckoutStateReady {
+	if err != nil || !found || !sameMutationRoot(checkout.RootPath, root) || checkout.State != storage.CheckoutStateReady {
 		return noCheckout, noRoute, false
 	}
 	route, found, err := l.catalog.GetCheckoutRoute(ctx, checkoutID)
-	if err != nil || !found || route.RouteEpoch <= 0 || route.State != store_sqlite.RouteActive || route.CommitGenerationID <= 0 || route.DirtyGenerationID <= 0 {
+	if err != nil || !found || route.RouteEpoch <= 0 || route.State != storage.RouteActive || route.CommitGenerationID <= 0 || route.DirtyGenerationID <= 0 {
 		return noCheckout, noRoute, false
 	}
 	again, found, err := l.catalog.GetCheckout(ctx, checkoutID)
-	if err != nil || !found || again.Incarnation != checkout.Incarnation || !sameMutationRoot(again.RootPath, checkout.RootPath) || again.State != store_sqlite.CheckoutStateReady {
+	if err != nil || !found || again.Incarnation != checkout.Incarnation || !sameMutationRoot(again.RootPath, checkout.RootPath) || again.State != storage.CheckoutStateReady {
 		return noCheckout, noRoute, false
 	}
 	return again, route, true

@@ -8,7 +8,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"go.uber.org/zap"
 )
 
@@ -18,7 +17,7 @@ func checkpointOwnedInventory(t *testing.T, repos, rows int) *contractInventoryV
 	t.Helper()
 	h := sparseShapeStore(t).AtGeneration(10)
 	readers := make(map[string]graph.Reader, repos)
-	handles := make(map[string][]*store_sqlite.Store, repos)
+	handles := make(map[string][]generationPayloadStore, repos)
 	for repo := range repos {
 		prefix := fmt.Sprintf("r%d", repo)
 		files := make([]graph.FileMetaRow, rows)
@@ -32,7 +31,7 @@ func checkpointOwnedInventory(t *testing.T, repos, rows int) *contractInventoryV
 			}
 		}
 		require.NoError(t, h.SetFileMetas(prefix, files))
-		readers[prefix], handles[prefix] = h, []*store_sqlite.Store{h}
+		readers[prefix], handles[prefix] = h, []generationPayloadStore{h}
 	}
 	p := newContractInventoryProjection(readers, handles)
 	for prefix := range readers {

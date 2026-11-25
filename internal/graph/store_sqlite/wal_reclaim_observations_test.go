@@ -153,7 +153,7 @@ func TestWALReclaimDemandConsumersRetainOneAttemptCause(t *testing.T) {
 	noteWALReclaimDemand(ctx, walIntentDemand)
 	require.Equal(t, uint32(walReclaimWriterParked), attempt.reclaimInterruption.Load())
 	var stats WALReclaimStats
-	stats.noteInterruption(walReclaimResult{attempt: attempt})
+	noteWALReclaimInterruption(&stats, walReclaimResult{attempt: attempt})
 	require.Equal(t, int64(1), stats.CancelledWriterParked)
 	require.Zero(t, stats.CancelledWriteIntent+stats.CancelledOther)
 }
@@ -173,7 +173,7 @@ func TestWALReclaimHelperCleanupAndResetAreNotExtraAttempts(t *testing.T) {
 	require.Zero(t, attempt.reclaimInterruption.Load(), "normal attempt cleanup must not increment causes")
 	var stats WALReclaimStats
 	attempt.reclaimInterruption.Store(uint32(walReclaimWriteIntent))
-	stats.noteInterruption(walReclaimResult{attempt: attempt, outcome: walReclaimReset})
+	noteWALReclaimInterruption(&stats, walReclaimResult{attempt: attempt, outcome: walReclaimReset})
 	require.Zero(t, stats.CancelledWriteIntent, "a successful final reset is not a cancelled attempt")
 	var cause *walReclaimDemandCause
 	require.True(t, errors.As(walParkedDemand, &cause))

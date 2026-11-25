@@ -112,7 +112,7 @@ func checkoutCWDSetup(t *testing.T) (d *mcpDispatcher, primaryRoot, worktreeRoot
 	}))
 
 	srv := gortexmcp.NewServer(query.NewEngine(store), store, idx, nil, zap.NewNop(), nil,
-		gortexmcp.MultiRepoOptions{MultiIndexer: mi, ConfigManager: cm})
+		gortexmcp.MultiRepoOptions{Catalog: store.Catalog(), MultiIndexer: mi, ConfigManager: cm})
 	srv.SetMaterializer(&graphview.Materializer{Store: store, Catalog: catalog})
 
 	return newMCPDispatcher(srv, mi, zap.NewNop()), primaryRoot, worktreeRoot

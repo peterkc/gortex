@@ -59,7 +59,7 @@ func noteWALReclaimCancellation(attempt *backgroundCheckpointAttempt, err error)
 	}
 }
 
-func (st *WALReclaimStats) noteInterruption(res walReclaimResult) {
+func noteWALReclaimInterruption(st *WALReclaimStats, res walReclaimResult) {
 	if res.outcome == walReclaimReset || res.attempt == nil {
 		return
 	}
