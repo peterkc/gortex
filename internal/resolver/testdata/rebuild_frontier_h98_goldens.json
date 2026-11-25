@@ -1,0 +1,125 @@
+{
+  "mixed": {
+    "SHA256": "4632e62d49d51d486e667113c21621521f3f585b54960efd8d0a986a7e608f04",
+    "PageRows": [
+      2048,
+      2
+    ],
+    "CandidateCalls": [
+      3,
+      4
+    ],
+    "Moves": 11,
+    "SavedRows": 2050,
+    "Error": ""
+  },
+  "types": {
+    "SHA256": "6675d4aff752562ef13f9f9c4b9ba665a614800eeaabac76f7e228e9937a5e9d",
+    "Requests": 8,
+    "Refusals": [
+      "rebuild link candidate pass failed: type \"User\" in \"src/use.cs\" needs C# namespace visibility",
+      "rebuild link candidate pass failed: PHP alias \"User\" in \"repo\" needs page name scopes"
+    ],
+    "PageRows": [
+      11
+    ],
+    "CandidateCalls": [
+      2
+    ],
+    "Moves": 6,
+    "SavedRows": 14,
+    "Error": "rebuild link candidate pass failed: type \"User\" in \"src/use.cs\" needs C# namespace visibility",
+    "TypeOutcomes": 8
+  },
+  "trace": {
+    "SHA256": "7ba35d752dbb26dd382d12030cb5663fe59a82880b620080ac2ce6248b725eff",
+    "PageRows": [
+      2048,
+      1
+    ],
+    "CandidateCalls": [
+      1,
+      2
+    ],
+    "Requests": 6,
+    "CandidateRows": 8,
+    "Error": ""
+  },
+  "caller": {
+    "SHA256": "0e8340e1a372348eed30e2147092d43f9c265770eb7a72948b6e92aa49cf2a13",
+    "CallerObservations": 10,
+    "Error": ""
+  },
+  "type-wire": {
+    "SHA256": "a2dd976bd7cc4a08296867e8a2f750a7d2be4dff78530dbe2ecad4dcf77507a3",
+    "PageRows": [
+      2
+    ],
+    "CandidateCalls": [
+      1
+    ],
+    "Moves": 0,
+    "SavedRows": 2,
+    "Error": "wire byte bound"
+  },
+  "scalar-wire": {
+    "SHA256": "711e955f412615d1426c5dd7ef650e6445b5d26aa8184d08e4a57b379ec61eda",
+    "PageRows": [
+      2
+    ],
+    "CandidateCalls": [
+      2
+    ],
+    "Moves": 0,
+    "SavedRows": 2,
+    "Error": ""
+  },
+  "scalar-result": {
+    "SHA256": "dfe78db044508f42481ae57b6641126bd3006c3712592e8ee9c8d3d831272566",
+    "PageRows": [
+      26
+    ],
+    "CandidateCalls": [
+      9
+    ],
+    "Moves": 26,
+    "SavedRows": 26,
+    "Error": ""
+  },
+  "visitor": {
+    "SHA256": "a31e74d44ae7f13175fbdd4efcf7c88c4e7c6c834e9659319d6caa2ccbb37542",
+    "PageRows": [
+      2
+    ],
+    "CandidateCalls": [
+      1
+    ],
+    "Moves": 0,
+    "SavedRows": 2,
+    "Error": "visitor"
+  },
+  "cancel": {
+    "SHA256": "ac1a38505a610c1c8c1cc069945c71213f8b9a781963377ae5f51d53a1d6e903",
+    "PageRows": [
+      2
+    ],
+    "CandidateCalls": [
+      0
+    ],
+    "Moves": 0,
+    "SavedRows": 2,
+    "Error": "cancel"
+  },
+  "semantic": {
+    "SHA256": "366995e1d8619986a57f0e4977eb08f2c63a819a1dbe5d5200ccf8f5b1c62108",
+    "PageRows": [
+      2
+    ],
+    "CandidateCalls": [
+      1
+    ],
+    "Moves": 0,
+    "SavedRows": 2,
+    "Error": "semantic"
+  }
+}

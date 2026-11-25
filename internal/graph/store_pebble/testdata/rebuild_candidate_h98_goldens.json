@@ -1,0 +1,293 @@
+{
+  "TestRebuildV3ExactOrderAndLive/call=0": {
+    "SHA256": "69633db00f26a3d42976dbb19e2adbb33f9312fcd5654a42d5513bde12a005a4",
+    "Requests": 7,
+    "TraceRows": 23,
+    "Rows": 23,
+    "Bytes": 1096,
+    "Error": ""
+  },
+  "TestRebuildV3ExactOrderAndLive/charge=after-write": {
+    "SHA256": "3ae424d7f423b6cddc42efd3ecdf41d5cd5379273b8f70930accd4b028384e6b",
+    "Requests": 1,
+    "TraceRows": 0,
+    "Rows": 0,
+    "Bytes": 0,
+    "Error": "",
+    "Charge": {
+      "Rows": 0,
+      "Bytes": 0,
+      "Oversize": false
+    }
+  },
+  "TestRebuildV3ExactOrderAndLive/call=1": {
+    "SHA256": "7bd82630ae2b9d6e2ab2c63d12b096e5e586b5a22d94d21f3939851c1dbb4f05",
+    "Requests": 3,
+    "TraceRows": 9,
+    "Rows": 9,
+    "Bytes": 413,
+    "Error": ""
+  },
+  "TestRebuildV3ExactOrderAndLive/charge=live-before": {
+    "SHA256": "8b7cac8ccddfc3d088f197ce87ccf614ce06b7e1d3413ad81091abc9d7b00a3e",
+    "Requests": 1,
+    "TraceRows": 0,
+    "Rows": 0,
+    "Bytes": 0,
+    "Error": "",
+    "Charge": {
+      "Rows": 1,
+      "Bytes": 55,
+      "Oversize": false
+    }
+  },
+  "TestRebuildV3ExactOrderAndLive/call=2": {
+    "SHA256": "f08aaafa0bff9013e492aef611bd1eab3a6df1709fe1b14fb6f30bee5b098d54",
+    "Requests": 2,
+    "TraceRows": 2,
+    "Rows": 2,
+    "Bytes": 110,
+    "Error": ""
+  },
+  "TestRebuildV3ExactOrderAndLive/charge=live-after": {
+    "SHA256": "c0bc1e93100fc1ec09cb16b3a0148c0d8684d95af9a9ea799eb733af58ce73c7",
+    "Requests": 1,
+    "TraceRows": 0,
+    "Rows": 0,
+    "Bytes": 0,
+    "Error": "",
+    "Charge": {
+      "Rows": 1,
+      "Bytes": 387,
+      "Oversize": false
+    }
+  },
+  "TestRebuildV3ExactOrderAndLive/call=3": {
+    "SHA256": "cdd5a247a64f25d959af1242270d7d741fbe267863069f9871f62839dd9b4793",
+    "Requests": 2,
+    "TraceRows": 2,
+    "Rows": 2,
+    "Bytes": 774,
+    "Error": ""
+  },
+  "TestRebuildV3UnstableUnsized/charge=unsized": {
+    "SHA256": "0ac32e192e6b7a8127d0a3c3107c64939a4de5b85d5cbcca3c0460d606b383fb",
+    "Requests": 1,
+    "TraceRows": 0,
+    "Rows": 0,
+    "Bytes": 0,
+    "Error": "",
+    "Charge": {
+      "Rows": 0,
+      "Bytes": 0,
+      "Oversize": true
+    }
+  },
+  "TestRebuildV3UnstableUnsized/call=0": {
+    "SHA256": "215dd904fb668355d7d35c3796e3add9b220e6e3456adeb734f731bb69af8752",
+    "Requests": 2,
+    "TraceRows": 2,
+    "Rows": 2,
+    "Bytes": 118,
+    "Error": ""
+  },
+  "TestRebuildV3EvictionWithinCall/call=0": {
+    "SHA256": "36f42b21b53576f80965c27ffa4cfe0206aaf874f1d2ad7267003d6f89e9d008",
+    "Requests": 1,
+    "TraceRows": 240,
+    "Rows": 240,
+    "Bytes": 505200,
+    "Error": ""
+  },
+  "TestRebuildV3LogicalRecordAndByteLimits/record-build-over": {
+    "SHA256": "1d2d24cbbb22c8b63bd629f521a6e20e4749b1ae74f273a94f5ba0dca1bac457",
+    "Requests": 0,
+    "TraceRows": 0,
+    "Rows": 0,
+    "Bytes": 0,
+    "Error": "candidate record exceeds 16777216 bytes"
+  },
+  "TestRebuildV3LogicalRecordAndByteLimits/long-id-at-limit/call=0": {
+    "SHA256": "803c17690660d321b026150fa7d56a35748469a05348e923ede12bc1a7023386",
+    "Requests": 1,
+    "TraceRows": 1,
+    "Rows": 1,
+    "Bytes": 16777216,
+    "Error": ""
+  },
+  "TestRebuildV3LogicalRecordAndByteLimits/long-id-over-limit/call=0": {
+    "SHA256": "542b23a0cdfd23450e3450478bc4acb2dccf5d484bfbeb76f9c28c5730fd0718",
+    "Requests": 1,
+    "TraceRows": 0,
+    "Rows": 0,
+    "Bytes": 0,
+    "Error": "candidate order exceeds link record or page bound"
+  },
+  "TestRebuildV3LogicalRecordAndByteLimits/bytes-over=false/call=0": {
+    "SHA256": "836ea2fa5c0fccd0018f836dd39fee0e659d5220cde0dbd846e9752bd7addb15",
+    "Requests": 16,
+    "TraceRows": 16,
+    "Rows": 16,
+    "Bytes": 134217728,
+    "Error": ""
+  },
+  "TestRebuildV3LogicalRecordAndByteLimits/bytes-over=true/call=0": {
+    "SHA256": "9620ea68b8b666572223553a9e16b2a36dc54309b4cb31de95763d66a38800c3",
+    "Requests": 17,
+    "TraceRows": 0,
+    "Rows": 0,
+    "Bytes": 0,
+    "Error": "candidate order exceeds link record or page bound"
+  },
+  "TestRebuildV3LogicalRowAndRunLimits/rows-over=false/call=0": {
+    "SHA256": "93ff490c961cbbf01711820cf10f626fadc02b9ad164dfe672320c540c7be638",
+    "Requests": 4096,
+    "TraceRows": 262144,
+    "Rows": 262144,
+    "Bytes": 10141696,
+    "Error": ""
+  },
+  "TestRebuildV3LogicalRowAndRunLimits/rows-over=true/call=0": {
+    "SHA256": "404f764f5cf0cd613f9e99e2a40f48a4099bf754475677eaed95c700332f616e",
+    "Requests": 4096,
+    "TraceRows": 0,
+    "Rows": 0,
+    "Bytes": 0,
+    "Error": "candidate result exceeds link record or page bound"
+  },
+  "TestRebuildV3LogicalRowAndRunLimits/runs-over=false/call=0": {
+    "SHA256": "07886e4d5fe8c90bf397375f1fd5c076a58d745f7f62b16eb53e79989b1ca2f0",
+    "Requests": 1,
+    "TraceRows": 1024,
+    "Rows": 1024,
+    "Bytes": 44032,
+    "Error": ""
+  },
+  "TestRebuildV3LogicalRowAndRunLimits/runs-over=true/call=0": {
+    "SHA256": "a05b584c5fc04ad8e1deb56235397b9c8a640d1536027b238c634fe8671cf467",
+    "Requests": 1,
+    "TraceRows": 0,
+    "Rows": 0,
+    "Bytes": 0,
+    "Error": "pebble order exceeds 1024 sorted runs"
+  },
+  "TestRebuildV3WireAndReducerPrecedence/call=0": {
+    "SHA256": "c10ef061eaebb057b667f720a9ec782d338ee81343d3fa02f9d29df175a311de",
+    "Requests": 1,
+    "TraceRows": 0,
+    "Rows": 0,
+    "Bytes": 0,
+    "Error": ""
+  },
+  "TestRebuildV3WireAndReducerPrecedence/call=1": {
+    "SHA256": "02f4c6e2f093c04b21c3a3a74cfef25f09437dccd2f1a3c96413d731eb5caa56",
+    "Requests": 2,
+    "TraceRows": 0,
+    "Rows": 0,
+    "Bytes": 0,
+    "Error": "link request page exceeds wire byte bound"
+  },
+  "TestRebuildV3WireAndReducerPrecedence/call=2": {
+    "SHA256": "06a7bed3ff9293024a1d48bf4eac27191166351f4a4df6d4ce7ee26efb0336db",
+    "Requests": 1,
+    "TraceRows": 1,
+    "Rows": 0,
+    "Bytes": 0,
+    "Error": "fixture reducer refusal"
+  },
+  "TestRebuildV3ExceptionalMapStream/call=0": {
+    "SHA256": "54a432efb4419163e23469d6b9402b74323626d49bffbbebbe3ea229177c2bc0",
+    "Requests": 1,
+    "TraceRows": 4,
+    "Rows": 4,
+    "Bytes": 12740,
+    "Error": ""
+  },
+  "TestRebuildV3BoundedIndex/call=0": {
+    "SHA256": "89c7dab4dac248f389030daad7603ee2e8416428ef848636da9f296b4e1856dc",
+    "Requests": 256,
+    "TraceRows": 256,
+    "Rows": 256,
+    "Bytes": 12544,
+    "Error": ""
+  },
+  "TestRebuildV3BoundedIndex/call=1": {
+    "SHA256": "5f3cf7b80ed00f9bf1afdc674b2cf0a180218b28a2c18e995aa92dfda457912b",
+    "Requests": 256,
+    "TraceRows": 256,
+    "Rows": 256,
+    "Bytes": 12544,
+    "Error": ""
+  },
+  "TestRebuildV3AdmissionEpoch/charge=sized": {
+    "SHA256": "2e83bf63be381ae7bc9a1614e106cc38dabe88e337e064c9ea1f98b1081fe76c",
+    "Requests": 1,
+    "TraceRows": 0,
+    "Rows": 0,
+    "Bytes": 0,
+    "Error": "",
+    "Charge": {
+      "Rows": 1,
+      "Bytes": 61,
+      "Oversize": false
+    }
+  },
+  "TestRebuildV3AdmissionEpoch/charge=repeat": {
+    "SHA256": "3dde43c2a43fb024a649506f8d89b19bb9c7f61f9ded1b28c43a2c24e30d2db1",
+    "Requests": 1,
+    "TraceRows": 0,
+    "Rows": 0,
+    "Bytes": 0,
+    "Error": "",
+    "Charge": {
+      "Rows": 1,
+      "Bytes": 61,
+      "Oversize": false
+    }
+  },
+  "TestRebuildV3AdmissionEpoch/charge=node-write": {
+    "SHA256": "17c9d1e9ed3ef04948a971a6b3c993b8e4180e4e7b7a8345c4a6f77b7a583c98",
+    "Requests": 1,
+    "TraceRows": 0,
+    "Rows": 0,
+    "Bytes": 0,
+    "Error": "",
+    "Charge": {
+      "Rows": 1,
+      "Bytes": 1086,
+      "Oversize": false
+    }
+  },
+  "TestRebuildV3AdmissionEpoch/call=0": {
+    "SHA256": "8d1ae4a675a580b493fb28e4cfd5574f0b6cc4da60011d0804ed5cb2198992d7",
+    "Requests": 2,
+    "TraceRows": 2,
+    "Rows": 2,
+    "Bytes": 1146,
+    "Error": ""
+  },
+  "TestRebuildV3ReadFailure/integrity": {
+    "SHA256": "03b6e7f21d2ade45e8fa46e75557edaad9098d841f7a9e7556ab1a4e01e3d951",
+    "Requests": 2,
+    "TraceRows": 0,
+    "Rows": 0,
+    "Bytes": 0,
+    "Error": "integrity"
+  },
+  "TestRebuildV3ReadFailure/cancel": {
+    "SHA256": "72a58b118ded4eabde1a93a5e04cd58faed926c578782e4f9f144e5ac1be498e",
+    "Requests": 2,
+    "TraceRows": 1,
+    "Rows": 0,
+    "Bytes": 0,
+    "Error": "cancel"
+  },
+  "TestRebuildV3ReadFailure/live-index": {
+    "SHA256": "e22132afcf2792b414518405e7bad0e65bde76240eb08897c5dc3babb50b9ccb",
+    "Requests": 2,
+    "TraceRows": 0,
+    "Rows": 0,
+    "Bytes": 0,
+    "Error": "live-index"
+  }
+}

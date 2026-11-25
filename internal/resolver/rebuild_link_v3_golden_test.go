@@ -41,21 +41,66 @@ type frontierGoldenResult struct {
 	Error string
 }
 
-// This helper captures only the H98 arm when capture is true. For focused CI
-// it executes the same fixture on both concrete readers and compares the
-// complete ordered serialized observations (not just counts).
-func compareFrontierGolden(t *testing.T, capture bool, name string, run func(*testing.T, bool) any) frontierGoldenCase {
+// The digest commits the full serialized H98 case, including ordered
+// candidate requests, resolved rows, moves and refusals when observable.
+// Plain counts in the fixture aid review of the captured expectations.
+type frontierGoldenExpectation struct {
+	SHA256             string
+	PageRows           []int    `json:",omitempty"`
+	CandidateCalls     []uint64 `json:",omitempty"`
+	Requests           int      `json:",omitempty"`
+	CandidateRows      int      `json:",omitempty"`
+	TypeOutcomes       int      `json:",omitempty"`
+	Refusals           []string `json:",omitempty"`
+	Moves              int      `json:",omitempty"`
+	SavedRows          int      `json:",omitempty"`
+	CallerObservations int      `json:",omitempty"`
+	Error              string
+}
+
+func checkFrontierGolden(t *testing.T, c frontierGoldenCase, want frontierGoldenExpectation) {
 	t.Helper()
-	old, err := json.Marshal(run(t, true))
+	raw, err := json.Marshal(c)
 	require.NoError(t, err)
-	if !capture {
-		product, err := json.Marshal(run(t, false))
-		require.NoError(t, err)
-		if !bytes.Equal(old, product) {
-			t.Fatalf("%s differs: H98 sha=%x product sha=%x", name, sha256.Sum256(old), sha256.Sum256(product))
-		}
+	got := fmt.Sprintf("%x", sha256.Sum256(raw))
+	if got != want.SHA256 {
+		t.Fatalf("H98 golden %s: got %s want %s", c.Name, got, want.SHA256)
 	}
-	return frontierGoldenCase{Name: name, Data: old}
+	// Reconcile the readable witness fields with the exact observation.
+	var result frontierGoldenResult
+	actual := frontierGoldenExpectation{SHA256: got}
+	switch c.Name {
+	case "caller":
+		var rows []json.RawMessage
+		require.NoError(t, json.Unmarshal(c.Data, &rows))
+		actual.CallerObservations = len(rows)
+	case "trace":
+		require.NoError(t, json.Unmarshal(c.Data, &result.Pages))
+	case "types":
+		var typed struct {
+			Rows   []struct{ Refusal string }
+			Result frontierGoldenResult
+		}
+		require.NoError(t, json.Unmarshal(c.Data, &typed))
+		actual.Requests, actual.TypeOutcomes = len(typed.Rows), len(typed.Rows)
+		for _, row := range typed.Rows {
+			if row.Refusal != "" {
+				actual.Refusals = append(actual.Refusals, row.Refusal)
+			}
+		}
+		result = typed.Result
+	default:
+		require.NoError(t, json.Unmarshal(c.Data, &result))
+	}
+	for _, page := range result.Pages {
+		actual.PageRows = append(actual.PageRows, page.Rows)
+		actual.CandidateCalls = append(actual.CandidateCalls, page.Calls)
+		actual.Moves += len(page.Moves)
+		actual.Requests += len(page.Requests)
+		actual.CandidateRows += len(page.Candidates)
+	}
+	actual.SavedRows, actual.Error = len(result.Saved), result.Error
+	require.Equal(t, want, actual, "readable H98 witness differs from verified digest %s", got)
 }
 
 func frontierGoldenMixed(t *testing.T, legacy bool) any {
@@ -452,6 +497,13 @@ func frontierGoldenFailure(t *testing.T, legacy bool, mode string) any {
 
 func runFrontierGoldens(t *testing.T, capture bool) []frontierGoldenCase {
 	var out []frontierGoldenCase
+	var want map[string]frontierGoldenExpectation
+	if !capture {
+		raw, err := os.ReadFile("testdata/rebuild_frontier_h98_goldens.json")
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(raw, &want))
+		require.Len(t, want, 10)
+	}
 	cases := []struct {
 		name string
 		run  func(*testing.T, bool) any
@@ -468,7 +520,22 @@ func runFrontierGoldens(t *testing.T, capture bool) []frontierGoldenCase {
 		}{mode, func(t *testing.T, legacy bool) any { return frontierGoldenFailure(t, legacy, mode) }})
 	}
 	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) { out = append(out, compareFrontierGolden(t, capture, c.name, c.run)) })
+		t.Run(c.name, func(t *testing.T) {
+			data, err := json.Marshal(c.run(t, capture))
+			require.NoError(t, err)
+			observation := frontierGoldenCase{Name: c.name, Data: data}
+			if capture {
+				out = append(out, observation)
+				return
+			}
+			expected, ok := want[c.name]
+			require.True(t, ok, "missing H98 case %s", c.name)
+			checkFrontierGolden(t, observation, expected)
+			delete(want, c.name)
+		})
+	}
+	if !t.Failed() {
+		require.Empty(t, want, "unvisited H98 golden cases")
 	}
 	return out
 }

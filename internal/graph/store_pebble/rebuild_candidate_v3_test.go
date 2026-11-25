@@ -26,8 +26,6 @@ import (
 // exact native tuple digest, and structural digest of the complete decoded
 // payload (including Meta types and nested values). Lengths and SHA-256s
 // keep long-ID and row-limit fixtures bounded without losing any position.
-const v3GoldenRowBytes = 8 + 32 + 32
-
 type v3GoldenCase struct {
 	Name     string
 	Requests []byte // ordered SHA-256 per complete LinkRequest, including misses
@@ -38,14 +36,69 @@ type v3GoldenCase struct {
 	Error    string
 }
 
+type v3GoldenExpectation struct {
+	SHA256      string
+	Requests    int
+	TraceRows   int
+	Rows, Bytes int
+	Charge      *CandidateBatchCharge `json:",omitempty"`
+	Error       string
+}
+
 type v3FixtureSuite struct {
 	capture bool
 	cases   []v3GoldenCase
+	want    map[string]v3GoldenExpectation
 }
 
-func (s *v3FixtureSuite) record(c v3GoldenCase) {
-	if s.capture {
-		s.cases = append(s.cases, c)
+// The expected fingerprint commits the complete canonical H98 case, not a
+// sample of its rows. The capture command is temporary and cannot update
+// these expectations; no product test path writes a fixture.
+func (s *v3FixtureSuite) expect(t *testing.T, c v3GoldenCase) {
+	t.Helper()
+	want, ok := s.want[c.Name]
+	if !ok {
+		t.Fatalf("unexpected or duplicate H98 golden case %q", c.Name)
+	}
+	raw, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := fmt.Sprintf("%x", sha256.Sum256(raw))
+	if got != want.SHA256 {
+		t.Fatalf("H98 golden %s: got %s want %s (rows=%d bytes=%d error=%q)", c.Name, got, want.SHA256, c.Rows, c.Bytes, c.Error)
+	}
+	if len(c.Requests) != 32*want.Requests || len(c.Trace) != 72*want.TraceRows || c.Rows != want.Rows || c.Bytes != want.Bytes || c.Error != want.Error || !reflect.DeepEqual(c.Charge, want.Charge) {
+		t.Fatalf("H98 golden %s: plain expectation disagrees with verified digest %s", c.Name, got)
+	}
+	delete(s.want, c.Name)
+}
+
+func runV3Fixture(t *testing.T, run func(*v3FixtureSuite, *testing.T)) {
+	t.Helper()
+	raw, err := os.ReadFile("testdata/rebuild_candidate_h98_goldens.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var all map[string]v3GoldenExpectation
+	if err := json.Unmarshal(raw, &all); err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 32 {
+		t.Fatalf("H98 golden case count=%d, want 32", len(all))
+	}
+	s := &v3FixtureSuite{want: make(map[string]v3GoldenExpectation)}
+	for name, digest := range all {
+		if name == t.Name() || strings.HasPrefix(name, t.Name()+"/") {
+			s.want[name] = digest
+		}
+	}
+	if len(s.want) == 0 {
+		t.Fatal("no H98 expectations for fixture")
+	}
+	run(s, t)
+	if !t.Failed() && len(s.want) != 0 {
+		t.Fatalf("unvisited H98 golden cases: %v", s.want)
 	}
 }
 
@@ -138,69 +191,52 @@ func v3RequestDigests(t *testing.T, reqs []LinkRequest) []byte {
 	return out
 }
 
-func (s *v3FixtureSuite) compareCall(t *testing.T, ctx context.Context, h, v *RebuildLink, view RebuildView, call int, reqs []LinkRequest, spill int, refuse bool, wantErr string) ([]string, CandidatePageStats) {
+func (s *v3FixtureSuite) checkCall(t *testing.T, ctx context.Context, p *RebuildLink, view RebuildView, call int, reqs []LinkRequest, spill int, refuse bool, wantErr string) ([]string, CandidatePageStats) {
 	t.Helper()
-	a, ids, hs, he := v3TraceCall(t, ctx, h, view, reqs, spill, refuse)
-	if v3ErrorClass(he) != wantErr {
-		t.Fatalf("H98=%v want %q", he, wantErr)
+	trace, ids, stats, err := v3TraceCall(t, ctx, p, view, reqs, spill, refuse)
+	c := v3GoldenCase{Name: fmt.Sprintf("%s/call=%d", t.Name(), call), Requests: v3RequestDigests(t, reqs), Trace: trace, Rows: stats.ResultRows, Bytes: stats.ResultBytes, Error: v3ErrorClass(err)}
+	s.record(t, c)
+	if v3ErrorClass(err) != wantErr {
+		t.Fatalf("candidate error=%v want %q", err, wantErr)
 	}
-	s.record(v3GoldenCase{Name: fmt.Sprintf("%s/call=%d", t.Name(), call), Requests: v3RequestDigests(t, reqs), Trace: a, Rows: hs.ResultRows, Bytes: hs.ResultBytes, Error: v3ErrorClass(he)})
-	if v != nil {
-		b, vids, vs, ve := v3TraceCall(t, ctx, v, view, reqs, spill, refuse)
-		if v3ErrorClass(ve) != wantErr {
-			t.Fatalf("H98=%v cached=%v want %q", he, ve, wantErr)
-		}
-		if !bytes.Equal(a, b) || !reflect.DeepEqual(ids, vids) {
-			i := 0
-			for i < min(len(a), len(b)) && a[i] == b[i] {
-				i++
-			}
-			t.Fatalf("ordered traces differ at row %d: H98=%d cached=%d", i/v3GoldenRowBytes, len(a)/v3GoldenRowBytes, len(b)/v3GoldenRowBytes)
-		}
-		if hs.ResultRows != vs.ResultRows || hs.ResultBytes != vs.ResultBytes {
-			t.Fatalf("logical counts H98=%+v cached=%+v", hs, vs)
-		}
-	}
-	if wantErr != "" && wantErr != "fixture reducer refusal" && len(a) != 0 {
+	if wantErr != "" && wantErr != "fixture reducer refusal" && len(trace) != 0 {
 		t.Fatal("visitor ran before staged limit checks")
 	}
-	return ids, hs
+	return ids, stats
 }
 
-func (s *v3FixtureSuite) charge(t *testing.T, ctx context.Context, v *RebuildLink, view RebuildView, name string, req LinkRequest) CandidateBatchCharge {
+func (s *v3FixtureSuite) record(t *testing.T, c v3GoldenCase) {
 	t.Helper()
-	hc, err := view.ChargeCandidateRequest(ctx, req)
+	if s.capture {
+		s.cases = append(s.cases, c)
+		return
+	}
+	s.expect(t, c)
+}
+
+func (s *v3FixtureSuite) charge(t *testing.T, ctx context.Context, p *RebuildLink, view RebuildView, name string, req LinkRequest) CandidateBatchCharge {
+	t.Helper()
+	charge, err := p.ChargeCandidateRequest(ctx, view, req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.record(v3GoldenCase{Name: t.Name() + "/charge=" + name, Requests: v3RequestDigests(t, []LinkRequest{req}), Charge: &hc})
-	if v != nil {
-		vc, err := v.ChargeCandidateRequest(ctx, view, req)
-		if err != nil || hc != vc {
-			t.Fatalf("H98 charge=%+v cached=%+v %v", hc, vc, err)
-		}
-	}
-	return hc
+	s.record(t, v3GoldenCase{Name: t.Name() + "/charge=" + name, Requests: v3RequestDigests(t, []LinkRequest{req}), Charge: &charge})
+	return charge
 }
 
-func (s *v3FixtureSuite) pair(t *testing.T, view RebuildView, nodes []*graph.Node, budget int64) (context.Context, *RebuildLink, *RebuildLink) {
+func (s *v3FixtureSuite) pass(t *testing.T, view RebuildView, nodes []*graph.Node, budget int64) (context.Context, *RebuildLink) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 	t.Cleanup(cancel)
-	h, err := v3FixturePass(t, ctx, 0, view, nodes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = h.Close() })
 	if s.capture {
-		return ctx, h, nil
+		budget = 0
 	}
-	v, err := v3FixturePass(t, ctx, budget, view, nodes)
+	p, err := v3FixturePass(t, ctx, budget, view, nodes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = v.Close() })
-	return ctx, h, v
+	t.Cleanup(func() { _ = p.Close() })
+	return ctx, p
 }
 
 func v3RetainedCharge(c *v3Cache) int64 {
@@ -221,7 +257,7 @@ func (s *v3FixtureSuite) RebuildV3ExactOrderAndLive(t *testing.T) {
 	build := newBuild(t, FullProfile)
 	build.AddBatch([]*graph.Node{a, b, c, d}, nil)
 	view := build.RebuildView()
-	ctx, h, v := s.pair(t, view, nodes, 512<<20)
+	ctx, v := s.pass(t, view, nodes, 512<<20)
 	requests := []LinkRequest{
 		{Kind: LinkQualName, Key: "q.N", AllRepos: true},
 		{Kind: LinkQualName, Key: "q.N", RepoPrefix: "r", Languages: []string{"go"}},
@@ -234,13 +270,13 @@ func (s *v3FixtureSuite) RebuildV3ExactOrderAndLive(t *testing.T) {
 	// The synthetic duplicate source is not one-to-one with the working
 	// index; use a separate stationary fixture for admission-cache checks.
 	// One multi-position fixture also proves positions and duplicate ordinals.
-	ids, _ := s.compareCall(t, ctx, h, v, view, 0, requests, 1<<20, false, "")
+	ids, _ := s.checkCall(t, ctx, v, view, 0, requests, 1<<20, false, "")
 	want := []string{"0", "a", "e", "z", "z", "z", "z", "e", "z", "z", "a", "a", "e", "z", "z", "a", "e", "z", "0", "e", "z", "a", "0"}
 	if !slices.Equal(ids, want) {
 		t.Fatalf("native order %v want %v", ids, want)
 	}
 	// This write must be visible on the next live page, but not in frozen Q.
-	if v != nil {
+	if v.v3 != nil {
 		if len(v.v3.summaries) == 0 {
 			t.Fatal("missing page-local summary cache")
 		}
@@ -260,23 +296,18 @@ func (s *v3FixtureSuite) RebuildV3ExactOrderAndLive(t *testing.T) {
 		t.Fatalf("fresh admission H98=%+v", oldCharge)
 	}
 
-	ids, _ = s.compareCall(t, ctx, h, v, view, 1, []LinkRequest{{Kind: LinkName, Key: "N", AllRepos: true}, {Kind: LinkName, Key: "Changed", AllRepos: true}, requests[0]}, 1<<20, false, "")
+	ids, _ = s.checkCall(t, ctx, v, view, 1, []LinkRequest{{Kind: LinkName, Key: "N", AllRepos: true}, {Kind: LinkName, Key: "Changed", AllRepos: true}, requests[0]}, 1<<20, false, "")
 	if want := []string{"e", "z", "0", "a", "0", "a", "e", "z", "z"}; !slices.Equal(ids, want) {
 		t.Fatalf("fresh live %v want %v", ids, want)
 	}
 	live := LinkRequest{Kind: LinkName, Key: "Changed", AllRepos: true}
 	s.charge(t, ctx, v, view, "live-before", live)
-	s.compareCall(t, ctx, h, v, view, 2, []LinkRequest{live, live}, 1<<20, false, "")
+	s.checkCall(t, ctx, v, view, 2, []LinkRequest{live, live}, 1<<20, false, "")
 	changed.Meta = map[string]any{"now": strings.Repeat("fresh", 64)}
 	build.AddNode(&changed)
 	s.charge(t, ctx, v, view, "live-after", live)
-	s.compareCall(t, ctx, h, v, view, 3, []LinkRequest{live, live}, 1<<20, false, "")
-	if v != nil {
-		if err := v.Close(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := h.Close(); err != nil {
+	s.checkCall(t, ctx, v, view, 3, []LinkRequest{live, live}, 1<<20, false, "")
+	if err := v.Close(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -303,13 +334,13 @@ func (s *v3FixtureSuite) RebuildV3UnstableUnsized(t *testing.T) {
 	if err := build.pending.Set(rebuildCandidateKey(nameRebuildScoped, n), []byte(n.ID), pebble.NoSync); err != nil {
 		t.Fatal(err)
 	}
-	ctx, h, v := s.pair(t, view, []*graph.Node{n}, 512<<20)
+	ctx, v := s.pass(t, view, []*graph.Node{n}, 512<<20)
 	req := LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "r"}
 	hc := s.charge(t, ctx, v, view, "unsized", req)
 	if !hc.Oversize {
 		t.Fatalf("H98=%+v", hc)
 	}
-	s.compareCall(t, ctx, h, v, view, 0, []LinkRequest{req, {Kind: LinkQualName, Key: "q.N", AllRepos: true}}, 1<<20, false, "")
+	s.checkCall(t, ctx, v, view, 0, []LinkRequest{req, {Kind: LinkQualName, Key: "q.N", AllRepos: true}}, 1<<20, false, "")
 }
 
 // A deliberately tiny retained budget forces eviction and re-read between the
@@ -319,9 +350,9 @@ func (s *v3FixtureSuite) RebuildV3EvictionWithinCall(t *testing.T) {
 	for i := range 240 {
 		nodes = append(nodes, &graph.Node{ID: fmt.Sprintf("%04d", i), Name: "N", RepoPrefix: "r", Meta: map[string]any{"value": strings.Repeat("p", 2048)}})
 	}
-	ctx, h, v := s.pair(t, RebuildView{}, nodes, 512<<10)
-	s.compareCall(t, ctx, h, v, RebuildView{}, 0, []LinkRequest{{Kind: LinkName, Key: "N", RepoPrefix: "r"}}, 1<<20, false, "")
-	if v != nil {
+	ctx, v := s.pass(t, RebuildView{}, nodes, 512<<10)
+	s.checkCall(t, ctx, v, RebuildView{}, 0, []LinkRequest{{Kind: LinkName, Key: "N", RepoPrefix: "r"}}, 1<<20, false, "")
+	if v.v3 != nil {
 		c := v.v3.cache
 		sum, err := v.v3.requestSummary(ctx, LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "r"})
 		if err != nil {
@@ -364,41 +395,37 @@ func (s *v3FixtureSuite) RebuildV3LogicalRecordAndByteLimits(t *testing.T) {
 	t.Run("record-build-over", func(t *testing.T) {
 		n := &graph.Node{ID: "a", Name: "N", Meta: map[string]any{"p": strings.Repeat("x", linkRecordBytes)}}
 		ctx := t.Context()
-		budgets := []int64{0, rebuildCandidateCacheBytes}
+		budget := int64(rebuildCandidateCacheBytes)
 		if s.capture {
-			budgets = budgets[:1]
+			budget = 0
 		}
-		for _, budget := range budgets {
-			p, err := v3FixturePass(t, ctx, budget, RebuildView{}, []*graph.Node{n})
-			if p != nil {
-				_ = p.Close()
-			}
-			if budget == 0 {
-				s.record(v3GoldenCase{Name: t.Name(), Error: v3ErrorClass(err)})
-			}
-			if v3ErrorClass(err) != "candidate record exceeds 16777216 bytes" {
-				t.Fatalf("budget=%d err=%v", budget, err)
-			}
+		p, err := v3FixturePass(t, ctx, budget, RebuildView{}, []*graph.Node{n})
+		if p != nil {
+			_ = p.Close()
+		}
+		s.record(t, v3GoldenCase{Name: t.Name(), Error: v3ErrorClass(err)})
+		if v3ErrorClass(err) != "candidate record exceeds 16777216 bytes" {
+			t.Fatalf("budget=%d err=%v", budget, err)
 		}
 	})
 	t.Run("long-id-at-limit", func(t *testing.T) {
 		n := v3SizedNode(t, strings.Repeat("x", (linkRecordBytes/2)-512), "N", linkRecordBytes)
-		ctx, h, v := s.pair(t, RebuildView{}, []*graph.Node{n}, 512<<20)
-		_, st := s.compareCall(t, ctx, h, v, RebuildView{}, 0, []LinkRequest{{Kind: LinkName, Key: "N", RepoPrefix: "r"}}, 1<<20, false, "")
+		ctx, v := s.pass(t, RebuildView{}, []*graph.Node{n}, 512<<20)
+		_, st := s.checkCall(t, ctx, v, RebuildView{}, 0, []LinkRequest{{Kind: LinkName, Key: "N", RepoPrefix: "r"}}, 1<<20, false, "")
 		if st.ResultBytes != linkRecordBytes {
 			t.Fatal(st)
 		}
 	})
 	t.Run("long-id-over-limit", func(t *testing.T) {
 		n := v3SizedNode(t, strings.Repeat("x", (linkRecordBytes/2)-512), "N", linkRecordBytes+1)
-		ctx, h, v := s.pair(t, RebuildView{}, []*graph.Node{n}, 512<<20)
-		s.compareCall(t, ctx, h, v, RebuildView{}, 0, []LinkRequest{{Kind: LinkName, Key: "N", RepoPrefix: "r"}}, 1<<20, false, "candidate order exceeds link record or page bound")
+		ctx, v := s.pass(t, RebuildView{}, []*graph.Node{n}, 512<<20)
+		s.checkCall(t, ctx, v, RebuildView{}, 0, []LinkRequest{{Kind: LinkName, Key: "N", RepoPrefix: "r"}}, 1<<20, false, "candidate order exceeds link record or page bound")
 	})
 	for _, over := range []bool{false, true} {
 		t.Run(fmt.Sprintf("bytes-over=%t", over), func(t *testing.T) {
 			n := v3SizedNode(t, "a", "N", linkResultBytes/16)
 			other := &graph.Node{ID: "b", Name: "Y", RepoPrefix: "r"}
-			ctx, h, v := s.pair(t, RebuildView{}, []*graph.Node{n, other}, 512<<20)
+			ctx, v := s.pass(t, RebuildView{}, []*graph.Node{n, other}, 512<<20)
 			req := LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "r"}
 			reqs := make([]LinkRequest, 16)
 			for i := range reqs {
@@ -409,7 +436,7 @@ func (s *v3FixtureSuite) RebuildV3LogicalRecordAndByteLimits(t *testing.T) {
 				reqs = append(reqs, LinkRequest{Kind: LinkName, Key: "Y", RepoPrefix: "r"})
 				want = "candidate order exceeds link record or page bound"
 			}
-			_, st := s.compareCall(t, ctx, h, v, RebuildView{}, 0, reqs, 1<<20, false, want)
+			_, st := s.checkCall(t, ctx, v, RebuildView{}, 0, reqs, 1<<20, false, want)
 			if !over && st.ResultBytes != linkResultBytes {
 				t.Fatal(st)
 			}
@@ -432,12 +459,12 @@ func (s *v3FixtureSuite) RebuildV3LogicalRowAndRunLimits(t *testing.T) {
 			for i := range reqs {
 				reqs[i] = LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "r"}
 			}
-			ctx, h, v := s.pair(t, RebuildView{}, nodes, 512<<20)
+			ctx, v := s.pass(t, RebuildView{}, nodes, 512<<20)
 			want := ""
 			if over {
 				want = "candidate result exceeds link record or page bound"
 			}
-			_, st := s.compareCall(t, ctx, h, v, RebuildView{}, 0, reqs, 1<<20, false, want)
+			_, st := s.checkCall(t, ctx, v, RebuildView{}, 0, reqs, 1<<20, false, want)
 			if !over && st.ResultRows != linkResultRows {
 				t.Fatal(st)
 			}
@@ -453,12 +480,12 @@ func (s *v3FixtureSuite) RebuildV3LogicalRowAndRunLimits(t *testing.T) {
 			for i := range rows {
 				nodes = append(nodes, &graph.Node{ID: fmt.Sprintf("%04d", rows-i), Name: "N", RepoPrefix: "r"})
 			}
-			ctx, h, v := s.pair(t, RebuildView{}, nodes, 512<<20)
+			ctx, v := s.pass(t, RebuildView{}, nodes, 512<<20)
 			want := ""
 			if over {
 				want = "pebble order exceeds 1024 sorted runs"
 			}
-			s.compareCall(t, ctx, h, v, RebuildView{}, 0, []LinkRequest{{Kind: LinkName, Key: "N", RepoPrefix: "r"}}, 1, over, want)
+			s.checkCall(t, ctx, v, RebuildView{}, 0, []LinkRequest{{Kind: LinkName, Key: "N", RepoPrefix: "r"}}, 1, over, want)
 		})
 	}
 }
@@ -466,13 +493,13 @@ func (s *v3FixtureSuite) RebuildV3LogicalRowAndRunLimits(t *testing.T) {
 // H96 type-batch aggregate wire refusal must precede a scalar-admissible
 // request or reducer failure; each admitted singleton remains a checked miss.
 func (s *v3FixtureSuite) RebuildV3WireAndReducerPrecedence(t *testing.T) {
-	ctx, h, v := s.pair(t, RebuildView{}, []*graph.Node{{ID: "a", Name: "N"}}, 512<<20)
+	ctx, v := s.pass(t, RebuildView{}, []*graph.Node{{ID: "a", Name: "N"}}, 512<<20)
 	req := LinkRequest{Kind: LinkName, Key: strings.Repeat("q", linkFrameBytes/2)}
-	s.compareCall(t, ctx, h, v, RebuildView{}, 0, []LinkRequest{req}, 1<<20, false, "")
-	s.compareCall(t, ctx, h, v, RebuildView{}, 1, []LinkRequest{req, req}, 1<<20, true, "link request page exceeds wire byte bound")
-	ctx, h, v = s.pair(t, RebuildView{}, []*graph.Node{{ID: "a", Name: "N"}}, 512<<20)
+	s.checkCall(t, ctx, v, RebuildView{}, 0, []LinkRequest{req}, 1<<20, false, "")
+	s.checkCall(t, ctx, v, RebuildView{}, 1, []LinkRequest{req, req}, 1<<20, true, "link request page exceeds wire byte bound")
+	ctx, v = s.pass(t, RebuildView{}, []*graph.Node{{ID: "a", Name: "N"}}, 512<<20)
 	// The fixture call ordinal spans passes, so the capture key stays unique.
-	s.compareCall(t, ctx, h, v, RebuildView{}, 2, []LinkRequest{{Kind: LinkName, Key: "N"}}, 1<<20, true, "fixture reducer refusal")
+	s.checkCall(t, ctx, v, RebuildView{}, 2, []LinkRequest{{Kind: LinkName, Key: "N"}}, 1<<20, true, "fixture reducer refusal")
 }
 
 func (s *v3FixtureSuite) RebuildV3ExceptionalMapStream(t *testing.T) {
@@ -486,9 +513,9 @@ func (s *v3FixtureSuite) RebuildV3ExceptionalMapStream(t *testing.T) {
 	}
 	deep := json.RawMessage(strings.Repeat("[", 1001) + "null" + strings.Repeat("]", 1001))
 	nodes := []*graph.Node{{ID: "a", Name: "N", Meta: map[string]any{"native": m}}, {ID: "b", Name: "N", Meta: map[string]any{"extension": json.RawMessage(raw)}}, {ID: "c", Name: "N"}, {ID: "d", Name: "N", Meta: map[string]any{"deep": deep}}}
-	ctx, h, v := s.pair(t, RebuildView{}, nodes, 512<<20)
-	s.compareCall(t, ctx, h, v, RebuildView{}, 0, []LinkRequest{{Kind: LinkName, Key: "N"}}, 1<<20, false, "")
-	if v != nil {
+	ctx, v := s.pass(t, RebuildView{}, nodes, 512<<20)
+	s.checkCall(t, ctx, v, RebuildView{}, 0, []LinkRequest{{Kind: LinkName, Key: "N"}}, 1<<20, false, "")
+	if v.v3 != nil {
 		c := v.v3.cache
 		for _, g := range c.gens {
 			for e := g.head; e != nil; e = e.next {
@@ -511,10 +538,10 @@ func (s *v3FixtureSuite) RebuildV3BoundedIndex(t *testing.T) {
 		nodes = append(nodes, &graph.Node{ID: name, Name: name, RepoPrefix: "r"})
 		reqs = append(reqs, LinkRequest{Kind: LinkName, Key: name, RepoPrefix: "r"})
 	}
-	ctx, h, v := s.pair(t, RebuildView{}, nodes, budget)
-	s.compareCall(t, ctx, h, v, RebuildView{}, 0, reqs, 1<<20, false, "")
-	s.compareCall(t, ctx, h, v, RebuildView{}, 1, reqs, 1<<20, false, "")
-	if v != nil {
+	ctx, v := s.pass(t, RebuildView{}, nodes, budget)
+	s.checkCall(t, ctx, v, RebuildView{}, 0, reqs, 1<<20, false, "")
+	s.checkCall(t, ctx, v, RebuildView{}, 1, reqs, 1<<20, false, "")
+	if v.v3 != nil {
 		c := v.v3.cache
 		if c.pieceCount <= uint64(len(c.index)) || len(c.index) == 0 || v3RetainedCharge(c) > budget {
 			t.Fatalf("slots=%d pieces=%d charge=%d", len(c.index), c.pieceCount, v3RetainedCharge(c))
@@ -532,13 +559,13 @@ func (s *v3FixtureSuite) RebuildV3AdmissionEpoch(t *testing.T) {
 	n := &graph.Node{ID: "a", Name: "N", QualName: "q.N", RepoPrefix: "r", Language: "go", Meta: map[string]any{"payload": "x"}}
 	build.AddNode(n)
 	view := build.RebuildView()
-	ctx, h, v := s.pair(t, view, []*graph.Node{n}, rebuildCandidateCacheBytes)
+	ctx, v := s.pass(t, view, []*graph.Node{n}, rebuildCandidateCacheBytes)
 	req := LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "r", Languages: []string{"go"}}
 	before := s.charge(t, ctx, v, view, "sized", req)
 	if before.Oversize || before.Rows != 1 {
 		t.Fatal(before)
 	}
-	if v != nil && len(v.v3.summaries) != 1 {
+	if v.v3 != nil && len(v.v3.summaries) != 1 {
 		t.Fatal("sized admission did not use S summary")
 	}
 	s.charge(t, ctx, v, view, "repeat", req)
@@ -549,28 +576,36 @@ func (s *v3FixtureSuite) RebuildV3AdmissionEpoch(t *testing.T) {
 	if after.Bytes <= before.Bytes || after.Rows != 1 {
 		t.Fatalf("before=%+v after=%+v", before, after)
 	}
-	s.compareCall(t, ctx, h, v, view, 0, []LinkRequest{req, {Kind: LinkName, Key: "N", AllRepos: true}}, 1<<20, false, "")
+	s.checkCall(t, ctx, v, view, 0, []LinkRequest{req, {Kind: LinkName, Key: "N", AllRepos: true}}, 1<<20, false, "")
 }
 
-func TestRebuildV3ExactOrderAndLive(t *testing.T) { (&v3FixtureSuite{}).RebuildV3ExactOrderAndLive(t) }
-func TestRebuildV3UnstableUnsized(t *testing.T)   { (&v3FixtureSuite{}).RebuildV3UnstableUnsized(t) }
+func TestRebuildV3ExactOrderAndLive(t *testing.T) {
+	runV3Fixture(t, (*v3FixtureSuite).RebuildV3ExactOrderAndLive)
+}
+func TestRebuildV3UnstableUnsized(t *testing.T) {
+	runV3Fixture(t, (*v3FixtureSuite).RebuildV3UnstableUnsized)
+}
 func TestRebuildV3EvictionWithinCall(t *testing.T) {
-	(&v3FixtureSuite{}).RebuildV3EvictionWithinCall(t)
+	runV3Fixture(t, (*v3FixtureSuite).RebuildV3EvictionWithinCall)
 }
 func TestRebuildV3LogicalRecordAndByteLimits(t *testing.T) {
-	(&v3FixtureSuite{}).RebuildV3LogicalRecordAndByteLimits(t)
+	runV3Fixture(t, (*v3FixtureSuite).RebuildV3LogicalRecordAndByteLimits)
 }
 func TestRebuildV3LogicalRowAndRunLimits(t *testing.T) {
-	(&v3FixtureSuite{}).RebuildV3LogicalRowAndRunLimits(t)
+	runV3Fixture(t, (*v3FixtureSuite).RebuildV3LogicalRowAndRunLimits)
 }
 func TestRebuildV3WireAndReducerPrecedence(t *testing.T) {
-	(&v3FixtureSuite{}).RebuildV3WireAndReducerPrecedence(t)
+	runV3Fixture(t, (*v3FixtureSuite).RebuildV3WireAndReducerPrecedence)
 }
 func TestRebuildV3ExceptionalMapStream(t *testing.T) {
-	(&v3FixtureSuite{}).RebuildV3ExceptionalMapStream(t)
+	runV3Fixture(t, (*v3FixtureSuite).RebuildV3ExceptionalMapStream)
 }
-func TestRebuildV3BoundedIndex(t *testing.T)   { (&v3FixtureSuite{}).RebuildV3BoundedIndex(t) }
-func TestRebuildV3AdmissionEpoch(t *testing.T) { (&v3FixtureSuite{}).RebuildV3AdmissionEpoch(t) }
+func TestRebuildV3BoundedIndex(t *testing.T) {
+	runV3Fixture(t, (*v3FixtureSuite).RebuildV3BoundedIndex)
+}
+func TestRebuildV3AdmissionEpoch(t *testing.T) {
+	runV3Fixture(t, (*v3FixtureSuite).RebuildV3AdmissionEpoch)
+}
 
 func (s *v3FixtureSuite) RebuildV3ReadFailure(t *testing.T) {
 	for _, mode := range []string{"integrity", "cancel", "live-index"} {
@@ -586,91 +621,83 @@ func (s *v3FixtureSuite) RebuildV3ReadFailure(t *testing.T) {
 				}
 			}
 			reqs := []LinkRequest{{Kind: LinkName, Key: "B"}, {Kind: LinkName, Key: "A", AllRepos: true}}
-			budgets := []int64{0, rebuildCandidateCacheBytes}
+			budget := int64(rebuildCandidateCacheBytes)
 			if s.capture {
-				budgets = budgets[:1]
+				budget = 0
 			}
-			var reference []byte
-			for _, budget := range budgets {
-				ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
-				workerMode := "ordinary"
-				if mode == "integrity" && budget == 0 {
-					workerMode = "corrupt-partition"
-				}
-				p, err := v3FixturePassMode(t, ctx, budget, view, nodes, workerMode)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+			workerMode := "ordinary"
+			if mode == "integrity" && budget == 0 {
+				workerMode = "corrupt-partition"
+			}
+			p, err := v3FixturePassMode(t, ctx, budget, view, nodes, workerMode)
+			if err != nil {
+				cancel()
+				t.Fatal(err)
+			}
+			if mode == "integrity" && budget != 0 {
+				f, err := os.OpenFile(filepath.Join(p.dir, "v3.sst"), os.O_WRONLY, 0)
 				if err != nil {
 					cancel()
 					t.Fatal(err)
 				}
-				if mode == "integrity" && budget != 0 {
-					f, err := os.OpenFile(filepath.Join(p.dir, "v3.sst"), os.O_WRONLY, 0)
-					if err != nil {
-						cancel()
-						t.Fatal(err)
-					}
-					_, err = f.WriteAt(bytes.Repeat([]byte{0xff}, 8), 0)
-					if err = errors.Join(err, f.Close()); err != nil {
-						cancel()
-						t.Fatal(err)
-					}
+				_, err = f.WriteAt(bytes.Repeat([]byte{0xff}, 8), 0)
+				if err = errors.Join(err, f.Close()); err != nil {
+					cancel()
+					t.Fatal(err)
 				}
-				page, cancelPage := context.WithCancel(ctx)
-				visits := 0
-				var trace []byte
-				stats, err := p.SelectCandidatePage(page, view, reqs, 1, func(pos int, n *graph.Node) error {
-					visits++
-					digest, e := v3Fingerprint(n)
-					if e != nil {
-						return e
-					}
-					key := sha256.Sum256(candidateOrderKey(reqs[pos], pos, n, 0))
-					trace = binary.BigEndian.AppendUint32(trace, uint32(pos))
-					trace = binary.BigEndian.AppendUint32(trace, 0)
-					trace = append(trace, key[:]...)
-					trace = append(trace, digest[:]...)
-					if mode == "cancel" {
-						cancelPage()
-					}
-					return nil
-				})
-				cancelPage()
-				if !errors.Is(err, ErrRebuildLink) || stats != (CandidatePageStats{}) {
-					t.Fatalf("mode=%s stats=%+v err=%v", mode, stats, err)
-				}
-				switch mode {
-				case "integrity":
-					if visits != 0 || budget == 0 && !strings.Contains(err.Error(), "read candidate partition") {
-						t.Fatalf("integrity visits=%d err=%v", visits, err)
-					}
-				case "cancel":
-					if visits != 1 || !errors.Is(err, context.Canceled) {
-						t.Fatalf("cancel visits=%d err=%v", visits, err)
-					}
-				case "live-index":
-					if visits != 0 || !errors.Is(err, ErrRebuildView) || !strings.Contains(err.Error(), "stale working candidate index entry") {
-						t.Fatalf("live index visits=%d err=%v", visits, err)
-					}
-				}
-				if budget == 0 {
-					reference = trace
-					s.record(v3GoldenCase{Name: t.Name(), Requests: v3RequestDigests(t, reqs), Trace: trace, Error: mode})
-				} else if !bytes.Equal(reference, trace) {
-					t.Fatal("failure delivered different tentative rows")
-				}
-				entries, e := os.ReadDir(filepath.Dir(p.dir))
-				if e != nil || len(entries) != 1 || entries[0].Name() != "keep" {
-					t.Fatalf("scratch after failure %v %v", entries, e)
-				}
-				if _, e := p.SelectCandidatePage(ctx, view, reqs, 1, func(int, *graph.Node) error { t.Fatal("retry visited"); return nil }); !errors.Is(e, ErrRebuildLink) {
-					t.Fatalf("failed pass admitted retry: %v", e)
-				}
-				cancel()
 			}
+			page, cancelPage := context.WithCancel(ctx)
+			visits := 0
+			var trace []byte
+			stats, err := p.SelectCandidatePage(page, view, reqs, 1, func(pos int, n *graph.Node) error {
+				visits++
+				digest, e := v3Fingerprint(n)
+				if e != nil {
+					return e
+				}
+				key := sha256.Sum256(candidateOrderKey(reqs[pos], pos, n, 0))
+				trace = binary.BigEndian.AppendUint32(trace, uint32(pos))
+				trace = binary.BigEndian.AppendUint32(trace, 0)
+				trace = append(trace, key[:]...)
+				trace = append(trace, digest[:]...)
+				if mode == "cancel" {
+					cancelPage()
+				}
+				return nil
+			})
+			cancelPage()
+			if !errors.Is(err, ErrRebuildLink) || stats != (CandidatePageStats{}) {
+				t.Fatalf("mode=%s stats=%+v err=%v", mode, stats, err)
+			}
+			switch mode {
+			case "integrity":
+				if visits != 0 || budget == 0 && !strings.Contains(err.Error(), "read candidate partition") {
+					t.Fatalf("integrity visits=%d err=%v", visits, err)
+				}
+			case "cancel":
+				if visits != 1 || !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancel visits=%d err=%v", visits, err)
+				}
+			case "live-index":
+				if visits != 0 || !errors.Is(err, ErrRebuildView) || !strings.Contains(err.Error(), "stale working candidate index entry") {
+					t.Fatalf("live index visits=%d err=%v", visits, err)
+				}
+			}
+			s.record(t, v3GoldenCase{Name: t.Name(), Requests: v3RequestDigests(t, reqs), Trace: trace, Error: mode})
+			entries, e := os.ReadDir(filepath.Dir(p.dir))
+			if e != nil || len(entries) != 1 || entries[0].Name() != "keep" {
+				t.Fatalf("scratch after failure %v %v", entries, e)
+			}
+			if _, e := p.SelectCandidatePage(ctx, view, reqs, 1, func(int, *graph.Node) error { t.Fatal("retry visited"); return nil }); !errors.Is(e, ErrRebuildLink) {
+				t.Fatalf("failed pass admitted retry: %v", e)
+			}
+			cancel()
 		})
 	}
 }
 
-func TestRebuildV3ReadFailure(t *testing.T) { (&v3FixtureSuite{}).RebuildV3ReadFailure(t) }
+func TestRebuildV3ReadFailure(t *testing.T) { runV3Fixture(t, (*v3FixtureSuite).RebuildV3ReadFailure) }
 
 // Both the ordinary CI dry run and opt-in capture use this exact collection
 // and key validation. A failed fixture or invalid key cannot produce output.
