@@ -471,7 +471,8 @@ func (s *v3FixtureSuite) RebuildV3WireAndReducerPrecedence(t *testing.T) {
 	s.compareCall(t, ctx, h, v, RebuildView{}, 0, []LinkRequest{req}, 1<<20, false, "")
 	s.compareCall(t, ctx, h, v, RebuildView{}, 1, []LinkRequest{req, req}, 1<<20, true, "link request page exceeds wire byte bound")
 	ctx, h, v = s.pair(t, RebuildView{}, []*graph.Node{{ID: "a", Name: "N"}}, 512<<20)
-	s.compareCall(t, ctx, h, v, RebuildView{}, 0, []LinkRequest{{Kind: LinkName, Key: "N"}}, 1<<20, true, "fixture reducer refusal")
+	// The fixture call ordinal spans passes, so the capture key stays unique.
+	s.compareCall(t, ctx, h, v, RebuildView{}, 2, []LinkRequest{{Kind: LinkName, Key: "N"}}, 1<<20, true, "fixture reducer refusal")
 }
 
 func (s *v3FixtureSuite) RebuildV3ExceptionalMapStream(t *testing.T) {
@@ -671,16 +672,10 @@ func (s *v3FixtureSuite) RebuildV3ReadFailure(t *testing.T) {
 
 func TestRebuildV3ReadFailure(t *testing.T) { (&v3FixtureSuite{}).RebuildV3ReadFailure(t) }
 
-// Opt-in temporary capture. Never derive golden expectations from the new
-// reader: this suite runs only the H98 subprocess path.
-func TestCaptureRebuildCandidateGoldens(t *testing.T) {
-	prefix := os.Getenv("GORTEX_CAPTURE_GOLDEN")
-	if prefix == "" {
-		t.Skip("explicit H98 golden capture only")
-	}
-	if !filepath.IsAbs(prefix) {
-		t.Fatal("capture prefix must be absolute")
-	}
+// Both the ordinary CI dry run and opt-in capture use this exact collection
+// and key validation. A failed fixture or invalid key cannot produce output.
+func collectV3GoldenCases(t *testing.T) []v3GoldenCase {
+	t.Helper()
 	s := &v3FixtureSuite{capture: true}
 	t.Run("TestRebuildV3ExactOrderAndLive", s.RebuildV3ExactOrderAndLive)
 	t.Run("TestRebuildV3UnstableUnsized", s.RebuildV3UnstableUnsized)
@@ -693,20 +688,39 @@ func TestCaptureRebuildCandidateGoldens(t *testing.T) {
 	t.Run("TestRebuildV3AdmissionEpoch", s.RebuildV3AdmissionEpoch)
 	t.Run("TestRebuildV3ReadFailure", s.RebuildV3ReadFailure)
 	if t.Failed() {
-		return
+		t.FailNow()
 	}
 	if len(s.cases) != 32 {
 		t.Fatalf("H98 capture has %d cases, want 32", len(s.cases))
 	}
 	names := make(map[string]bool, len(s.cases))
 	for i := range s.cases {
-		s.cases[i].Name = strings.TrimPrefix(s.cases[i].Name, t.Name()+"/")
-		if names[s.cases[i].Name] {
-			t.Fatalf("duplicate case %q", s.cases[i].Name)
+		name, ok := strings.CutPrefix(s.cases[i].Name, t.Name()+"/")
+		if !ok || strings.TrimSpace(name) == "" || names[name] {
+			t.Fatalf("missing or duplicate capture case %q", s.cases[i].Name)
 		}
-		names[s.cases[i].Name] = true
+		s.cases[i].Name = name
+		names[name] = true
 	}
-	raw, err := json.Marshal(s.cases)
+	return s.cases
+}
+
+func TestRebuildV3CandidateCaptureCases(t *testing.T) {
+	collectV3GoldenCases(t)
+}
+
+// Opt-in temporary capture. Never derive golden expectations from the new
+// reader: this suite runs only the H98 subprocess path.
+func TestCaptureRebuildCandidateGoldens(t *testing.T) {
+	prefix := os.Getenv("GORTEX_CAPTURE_GOLDEN")
+	if prefix == "" {
+		t.Skip("explicit H98 golden capture only")
+	}
+	if !filepath.IsAbs(prefix) {
+		t.Fatal("capture prefix must be absolute")
+	}
+	cases := collectV3GoldenCases(t)
+	raw, err := json.Marshal(cases)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -728,7 +742,7 @@ func TestCaptureRebuildCandidateGoldens(t *testing.T) {
 	header := struct {
 		Cases, Bytes, CompressedBytes int
 		SHA256, CompressedSHA256      string
-	}{len(s.cases), len(raw), compressed.Len(), fmt.Sprintf("%x", sha256.Sum256(raw)), fmt.Sprintf("%x", sha256.Sum256(compressed.Bytes()))}
+	}{len(cases), len(raw), compressed.Len(), fmt.Sprintf("%x", sha256.Sum256(raw)), fmt.Sprintf("%x", sha256.Sum256(compressed.Bytes()))}
 	meta, err := json.Marshal(header)
 	if err != nil {
 		t.Fatal(err)

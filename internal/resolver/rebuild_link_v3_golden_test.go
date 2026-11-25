@@ -475,6 +475,28 @@ func runFrontierGoldens(t *testing.T, capture bool) []frontierGoldenCase {
 
 func TestRebuildV3FrontierDifferential(t *testing.T) { runFrontierGoldens(t, false) }
 
+// Run the same H98 fixtures and validate the keys before any capture output.
+func collectFrontierGoldenCases(t *testing.T) []frontierGoldenCase {
+	t.Helper()
+	cases := runFrontierGoldens(t, true)
+	if t.Failed() {
+		t.FailNow()
+	}
+	require.Len(t, cases, 10)
+	names := make(map[string]bool, len(cases))
+	for _, c := range cases {
+		if strings.TrimSpace(c.Name) == "" || names[c.Name] {
+			t.Fatalf("missing or duplicate capture case %q", c.Name)
+		}
+		names[c.Name] = true
+	}
+	return cases
+}
+
+func TestRebuildV3FrontierCaptureCases(t *testing.T) {
+	collectFrontierGoldenCases(t)
+}
+
 func TestCaptureRebuildFrontierGoldens(t *testing.T) {
 	prefix := os.Getenv("GORTEX_CAPTURE_GOLDEN")
 	if prefix == "" {
@@ -483,11 +505,7 @@ func TestCaptureRebuildFrontierGoldens(t *testing.T) {
 	if !filepath.IsAbs(prefix) {
 		t.Fatal("capture prefix must be absolute")
 	}
-	cases := runFrontierGoldens(t, true)
-	if t.Failed() {
-		return
-	}
-	require.Len(t, cases, 10)
+	cases := collectFrontierGoldenCases(t)
 	raw, err := json.Marshal(cases)
 	require.NoError(t, err)
 	const maxBytes = 16 << 20
