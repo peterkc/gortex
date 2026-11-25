@@ -42,7 +42,7 @@ func TestRebuildCandidateBatchCharge(t *testing.T) {
 	b := newBuild(t, FullProfile)
 	nodes := []*graph.Node{{ID: "a", Name: "A", QualName: "pkg.A", RepoPrefix: "repo", Language: "go", Meta: map[string]any{"x": "value"}}, {ID: "b", Name: "A", QualName: "pkg.A", RepoPrefix: "repo", Language: "python"}, {ID: "c", Name: "A", QualName: "pkg.A", RepoPrefix: "else", Language: "go"}}
 	b.AddBatch(nodes, nil)
-	pass, ctx := startLinkFixture(t, RebuildLinkOptions{Partitions: 2, SpillBytes: 1 << 20}, "ordinary", nodes)
+	pass, ctx := startLinkFixture(t, b.RebuildView(), nodes)
 	for _, req := range []LinkRequest{{Kind: LinkName, Key: "A", RepoPrefix: "repo", Languages: []string{"go"}}, {Kind: LinkName, Key: "A", RepoPrefix: "repo"}, {Kind: LinkName, Key: "A", AllRepos: true}, {Kind: LinkQualName, Key: "pkg.A", AllRepos: true}, {Kind: LinkName, Key: "missing"}} {
 		charge, err := b.RebuildView().ChargeCandidateRequest(ctx, req)
 		if err != nil || charge.Oversize {
@@ -131,7 +131,7 @@ func TestRebuildCandidateChargeCanonicalSize(t *testing.T) {
 	if err := view.VisitNodes(ctx, func(n *graph.Node) error { frozen = append(frozen, n); return nil }); err != nil {
 		t.Fatal(err)
 	}
-	pass, passCtx := startLinkFixture(t, RebuildLinkOptions{Partitions: 2, SpillBytes: 1 << 20}, "ordinary", frozen)
+	pass, passCtx := startLinkFixture(t, view, frozen)
 	for _, req := range requests {
 		charge := check(req)
 		stats, err := pass.SelectCandidatePage(passCtx, view, []LinkRequest{req}, 1<<20, func(int, *graph.Node) error { return nil })
@@ -159,7 +159,7 @@ func TestRebuildCandidateChargeUnsizedAndIndexOnly(t *testing.T) {
 	n := &graph.Node{ID: "a", Name: "N", QualName: "q.N", RepoPrefix: "r", Language: "go"}
 	other := &graph.Node{ID: "b", Name: "N", RepoPrefix: "r", Language: "python"}
 	b.AddBatch([]*graph.Node{n, other}, nil)
-	pass, ctx := startLinkFixture(t, RebuildLinkOptions{Partitions: 1, SpillBytes: 1 << 20}, "ordinary", []*graph.Node{n, other})
+	pass, ctx := startLinkFixture(t, b.RebuildView(), []*graph.Node{n, other})
 	view := b.RebuildView()
 	live := LinkRequest{Kind: LinkName, Key: "N", AllRepos: true, Languages: []string{"go"}}
 	if err := b.pending.Set(rebuildCandidateKey(nameRebuildScoped, n), []byte(n.ID), pebble.NoSync); err != nil {

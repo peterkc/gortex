@@ -15,7 +15,7 @@ import (
 
 func TestRebuildMainTokenAndSource(t *testing.T) {
 	t.Setenv("GORTEX_RESOLVE_FROM_RECONCILE", "1")
-	ctx, build, opts := frontierFixture(t, 2, 0)
+	ctx, build, opts := frontierFixture(t, 0)
 	node := func(id, name, repo, lang, file string) *graph.Node {
 		return &graph.Node{ID: id, Name: name, QualName: id, RepoPrefix: repo, Language: lang, FilePath: file, Kind: graph.KindVariable}
 	}
@@ -92,7 +92,7 @@ func TestRebuildMainTokenAndSource(t *testing.T) {
 // their kind and Vue sites bind through imports. A Rust-qualified call stays
 // untouched for its scope pass, even when the bare name would match.
 func TestRebuildMainBareAndVueDispatch(t *testing.T) {
-	ctx, build, opts := frontierFixture(t, 2, 0)
+	ctx, build, opts := frontierFixture(t, 0)
 	const goFile, vueFile, jsxFile = "src/caller.go", "ui/view.vue", "ui/view.tsx"
 	const goID, panelFile, panelID, jsxID = "src/caller.go::Run", "ui/Panel.vue", "ui/Panel.vue::Panel", "ui/Child.tsx::Child"
 	nodes := []*graph.Node{
@@ -119,7 +119,7 @@ func TestRebuildMainBareAndVueDispatch(t *testing.T) {
 }
 
 func TestRebuildMainRefusesIncompletePage(t *testing.T) {
-	ctx, build, opts := frontierFixture(t, 1, 0)
+	ctx, build, opts := frontierFixture(t, 0)
 	token := &graph.Edge{From: "a", Kind: graph.EdgeProvides, To: "unresolved::Run"}
 	unsupported := &graph.Edge{From: "z", Kind: graph.EdgeCalls, To: "unresolved::*.Run", FilePath: "z.go",
 		Meta: map[string]any{"receiver_type": "MissingOwner"}}
@@ -132,7 +132,7 @@ func TestRebuildMainRefusesIncompletePage(t *testing.T) {
 }
 
 func TestRunRebuildMainSelectsCallers(t *testing.T) {
-	ctx, build, opts := frontierFixture(t, 2, 0)
+	ctx, build, opts := frontierFixture(t, 0)
 	const caller, deferredCaller, candidate = "repo/src/main.ts", "repo/legacy/caller.py", "repo/legacy/provider.py"
 	selected := rebuildImportTestEdge(caller, caller, "package::Item", 7)
 	deferred := rebuildImportTestEdge(deferredCaller, deferredCaller, "rewritten::Item", 7)
@@ -158,16 +158,17 @@ func TestRunRebuildMainSelectsCallers(t *testing.T) {
 		},
 	}))
 	// The link still finds a deferred-language node in the frozen candidate
-	// partitions. The selected old key disappears; the deferred row is exact.
+	// file. The selected old key disappears; the deferred row is exact.
 	want := []*graph.Edge{deferred, rebuildImportTestMove(selected, candidate, false)}
 	require.Equal(t, want, rebuildFnPointerSaved(t, build))
 	checkFrontierScratch(t, opts.ScratchParent)
 }
 
 func TestRunRebuildMainSkipsCandidateStartup(t *testing.T) {
-	ctx, build, opts := frontierFixture(t, 1, resolvePendingPageRows+1)
+	ctx, build, opts := frontierFixture(t, resolvePendingPageRows+1)
 	build.AddNode(&graph.Node{ID: "caller", Language: "python", FilePath: "caller.py"})
-	opts.Binary = filepath.Join(opts.ScratchParent, "must-not-start")
+	lease := opts.ScratchParent
+	opts.ScratchParent = filepath.Join(lease, "must-not-start") // nonexistent, invalid for candidate startup
 	want := rebuildFnPointerSaved(t, build)
 	require.Len(t, want, resolvePendingPageRows+1)
 	require.ErrorContains(t, RunRebuildMain(ctx, build, opts, RebuildMainInputs{}), "missing caller selector")
@@ -183,7 +184,7 @@ func TestRunRebuildMainSkipsCandidateStartup(t *testing.T) {
 	}))
 	require.Equal(t, len(want), seen)
 	require.Equal(t, want, rebuildFnPointerSaved(t, build))
-	checkFrontierScratch(t, opts.ScratchParent)
+	checkFrontierScratch(t, lease)
 
 	rejected := errors.New("receipt selection refused")
 	calls := 0
@@ -198,12 +199,12 @@ func TestRunRebuildMainSkipsCandidateStartup(t *testing.T) {
 	require.NotErrorIs(t, err, store_pebble.ErrRebuildLink)
 	require.Equal(t, 1, calls)
 	require.Equal(t, want, rebuildFnPointerSaved(t, build))
-	checkFrontierScratch(t, opts.ScratchParent)
+	checkFrontierScratch(t, lease)
 }
 
 func TestRebuildMainFrozenPlaceholderPolicy(t *testing.T) {
 	t.Setenv("GORTEX_RESOLVE_FROM_RECONCILE", "1")
-	ctx, build, opts := frontierFixture(t, 1, 0)
+	ctx, build, opts := frontierFixture(t, 0)
 	const source, file = "repo/caller", "repo/caller.ts"
 	const target, pending = "repo/Token", "unresolved::TOKEN"
 	token := &graph.Edge{From: source, To: pending, Kind: graph.EdgeProvides, FilePath: file, Line: 3}
@@ -226,7 +227,7 @@ func TestRebuildMainFrozenPlaceholderPolicy(t *testing.T) {
 // call and its source repoint, without changing the reachable call site.
 func TestRebuildMainCrossPackageGuard(t *testing.T) {
 	t.Setenv("GORTEX_RESOLVE_FROM_RECONCILE", "1")
-	ctx, build, opts := frontierFixture(t, 1, 0)
+	ctx, build, opts := frontierFixture(t, 0)
 	opts.SpillBytes = 256 // smaller than one guard record
 	const file, caller = "app/main.ts", "app/main.ts::Caller"
 	const barrel = "entry/index.ts"

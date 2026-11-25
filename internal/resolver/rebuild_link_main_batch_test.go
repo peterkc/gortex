@@ -1,10 +1,13 @@
 package resolver
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -56,87 +59,84 @@ func TestRebuildMainCandidateBatchRows(t *testing.T) {
 	edge := func(from, target string, kind graph.EdgeKind, line int) *graph.Edge {
 		return &graph.Edge{From: from, To: "unresolved::" + target, Kind: kind, FilePath: file, Line: line, Origin: graph.OriginASTInferred, Confidence: .42, Meta: map[string]any{"payload": "kept"}}
 	}
-	for _, workers := range []int{1, 2} {
-		for _, spill := range []int{1, 1 << 20} {
-			t.Run(fmt.Sprintf("workers=%d/spill=%d", workers, spill), func(t *testing.T) {
-				observe := func(batched bool) ([][]graph.EdgeReindex, []*graph.Edge, store_pebble.LinkRequestProgress) {
-					ctx, b, opts := frontierFixture(t, workers, 0)
-					opts.SpillBytes = spill
-					caller := node("a", "caller", "go", "repo", file, graph.KindFunction)
-					later := node("z", "later", "go", "repo", file, graph.KindFunction)
-					memberA := node("aa-method", "Work", "go", "repo", file, graph.KindMethod)
-					memberA.Meta = map[string]any{"receiver": "A"}
-					memberB := node("zz-method", "Work", "go", "repo", file, graph.KindMethod)
-					memberB.Meta = map[string]any{"receiver": "B"}
-					iface := node("iface", "Reader", "go", "repo", file, graph.KindInterface)
-					imported := node("pkg", "Package", "rust", "repo", "pkg.rs", graph.KindPackage)
-					imported.QualName = "example.test/pkg"
-					nodes := []*graph.Node{caller, later, memberA, memberB, iface, imported, node("a-fn", "First", "go", "repo", file, graph.KindFunction), node("b-fn", "Second", "go", "repo", file, graph.KindFunction), node("wrong", "First", "python", "repo", file, graph.KindFunction), node("old-live", "Live", "go", "repo", "pkg/old.go", graph.KindFunction)}
-					var input []*graph.Edge
-					for i, target := range []string{"First", "First", "Second", "Missing", "*.Work", "*.Work", "extern::pkg::Live", "extern::pkg::Live", "import::example.test/pkg", "import::example.test/pkg", "ctx.Done()"} {
-						kind := graph.EdgeCalls
-						if strings.HasPrefix(target, "import::") {
-							kind = graph.EdgeImports
-						}
-						if target == "ctx.Done()" {
-							kind = graph.EdgeRecvs
-						}
-						e := edge("a", target, kind, i+1)
-						if target == "*.Work" {
-							e.Meta["receiver_type"] = "Reader"
-						}
-						setEdgeTerminal(e, terminalReasonNoDefinition)
-						input = append(input, e)
+	for _, spill := range []int{1, 1 << 20} {
+		t.Run(fmt.Sprintf("spill=%d", spill), func(t *testing.T) {
+			observe := func(batched bool) ([][]graph.EdgeReindex, []*graph.Edge, store_pebble.LinkRequestProgress) {
+				ctx, b, opts := frontierFixture(t, 0)
+				opts.SpillBytes = spill
+				caller := node("a", "caller", "go", "repo", file, graph.KindFunction)
+				later := node("z", "later", "go", "repo", file, graph.KindFunction)
+				memberA := node("aa-method", "Work", "go", "repo", file, graph.KindMethod)
+				memberA.Meta = map[string]any{"receiver": "A"}
+				memberB := node("zz-method", "Work", "go", "repo", file, graph.KindMethod)
+				memberB.Meta = map[string]any{"receiver": "B"}
+				iface := node("iface", "Reader", "go", "repo", file, graph.KindInterface)
+				imported := node("pkg", "Package", "rust", "repo", "pkg.rs", graph.KindPackage)
+				imported.QualName = "example.test/pkg"
+				nodes := []*graph.Node{caller, later, memberA, memberB, iface, imported, node("a-fn", "First", "go", "repo", file, graph.KindFunction), node("b-fn", "Second", "go", "repo", file, graph.KindFunction), node("wrong", "First", "python", "repo", file, graph.KindFunction), node("old-live", "Live", "go", "repo", "pkg/old.go", graph.KindFunction)}
+				var input []*graph.Edge
+				for i, target := range []string{"First", "First", "Second", "Missing", "*.Work", "*.Work", "extern::pkg::Live", "extern::pkg::Live", "import::example.test/pkg", "import::example.test/pkg", "ctx.Done()"} {
+					kind := graph.EdgeCalls
+					if strings.HasPrefix(target, "import::") {
+						kind = graph.EdgeImports
 					}
-					for i := len(input); i < resolvePendingPageRows; i++ {
-						input = append(input, edge("middle", "grpc::Ignored::Run", graph.EdgeCalls, i+1))
+					if target == "ctx.Done()" {
+						kind = graph.EdgeRecvs
 					}
-					input = append(input, edge("z", "extern::pkg::Live", graph.EdgeCalls, resolvePendingPageRows+1), edge("z", "extern::pkg::Live", graph.EdgeCalls, resolvePendingPageRows+2))
-					b.AddBatch(nodes, input)
-					var all [][]graph.EdgeReindex
-					var progress store_pebble.LinkRequestProgress
-					require.NoError(t, runRebuildLinkFrontier(ctx, b, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
-						f.imports.checkGoExtern = func(string) error { return nil }
-						f.imports.goOwnership = func(GoImportCandidate) (GoPackageOwnershipResult, error) { return GoPackageOwnershipExact, nil }
-						f.providesFor = map[string]map[string]struct{}{}
-						if len(all) == 1 {
-							// Existing live route sees the next page's working facts.
-							b.AddNode(node("old-live", "Other", "go", "repo", "pkg/old.go", graph.KindFunction))
-							b.AddNode(node("new-live", "Live", "go", "repo", "pkg/new.go", graph.KindFunction))
-						}
-						var moves []graph.EdgeReindex
-						var err error
-						if batched {
-							moves, err = reduceRebuildMainPage(ctx, f, page)
-						} else {
-							moves, err = scalarRebuildBatchFixture(ctx, f, page)
-						}
-						if err != nil {
-							return err
-						}
-						all = append(all, moves)
-						progress = f.link.RequestProgress()
-						return b.ApplyLinkReindexes(ctx, moves)
-					}))
-					checkFrontierScratch(t, opts.ScratchParent)
-					require.Len(t, all, 2)
-					require.Len(t, all[0], 9)
-					require.Len(t, all[1], 2)
-					for _, move := range all[1] {
-						require.Equal(t, "new-live", move.Edge.To)
+					e := edge("a", target, kind, i+1)
+					if target == "*.Work" {
+						e.Meta["receiver_type"] = "Reader"
 					}
-					return all, rebuildFnPointerSaved(t, b), progress
+					setEdgeTerminal(e, terminalReasonNoDefinition)
+					input = append(input, e)
 				}
-				scalar, saved, sc := observe(false)
-				batch, after, bc := observe(true)
-				require.Equal(t, scalar, batch, "complete ordered moves")
-				require.Equal(t, saved, after, "complete stored rows")
-				require.Equal(t, sc.RequestsSent, bc.RequestsSent)
-				require.Equal(t, bc.FramesSent, bc.RoundTrips)
-				require.Less(t, bc.CandidateCalls, sc.CandidateCalls)
-				require.Less(t, bc.FramesSent, sc.FramesSent)
-			})
-		}
+				for i := len(input); i < resolvePendingPageRows; i++ {
+					input = append(input, edge("middle", "grpc::Ignored::Run", graph.EdgeCalls, i+1))
+				}
+				input = append(input, edge("z", "extern::pkg::Live", graph.EdgeCalls, resolvePendingPageRows+1), edge("z", "extern::pkg::Live", graph.EdgeCalls, resolvePendingPageRows+2))
+				b.AddBatch(nodes, input)
+				var all [][]graph.EdgeReindex
+				var progress store_pebble.LinkRequestProgress
+				require.NoError(t, runRebuildLinkFrontier(ctx, b, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
+					f.imports.checkGoExtern = func(string) error { return nil }
+					f.imports.goOwnership = func(GoImportCandidate) (GoPackageOwnershipResult, error) { return GoPackageOwnershipExact, nil }
+					f.providesFor = map[string]map[string]struct{}{}
+					if len(all) == 1 {
+						// Existing live route sees the next page's working facts.
+						b.AddNode(node("old-live", "Other", "go", "repo", "pkg/old.go", graph.KindFunction))
+						b.AddNode(node("new-live", "Live", "go", "repo", "pkg/new.go", graph.KindFunction))
+					}
+					var moves []graph.EdgeReindex
+					var err error
+					if batched {
+						moves, err = reduceRebuildMainPage(ctx, f, page)
+					} else {
+						moves, err = scalarRebuildBatchFixture(ctx, f, page)
+					}
+					if err != nil {
+						return err
+					}
+					all = append(all, moves)
+					progress = f.link.RequestProgress()
+					return b.ApplyLinkReindexes(ctx, moves)
+				}))
+				checkFrontierScratch(t, opts.ScratchParent)
+				require.Len(t, all, 2)
+				require.Len(t, all[0], 9)
+				require.Len(t, all[1], 2)
+				for _, move := range all[1] {
+					require.Equal(t, "new-live", move.Edge.To)
+				}
+				return all, rebuildFnPointerSaved(t, b), progress
+			}
+			scalar, saved, sc := observe(false)
+			batch, after, bc := observe(true)
+			require.Equal(t, scalar, batch, "complete ordered moves")
+			require.Equal(t, saved, after, "complete stored rows")
+
+			require.Less(t, bc.CandidateCalls, sc.CandidateCalls)
+
+		})
 	}
 }
 
@@ -152,7 +152,7 @@ func TestRebuildMainCandidateBatchAggregateBounds(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			observe := func(batched bool) ([]graph.EdgeReindex, store_pebble.LinkRequestProgress) {
-				ctx, b, opts := frontierFixture(t, 1, 0)
+				ctx, b, opts := frontierFixture(t, 0)
 				b.AddNode(&graph.Node{ID: "caller", Name: "caller", Language: "go", Kind: graph.KindFunction, FilePath: "a.go"})
 				if tc.payload != "" {
 					b.AddNode(&graph.Node{ID: "huge", Name: tc.key, Kind: graph.KindFunction, Language: "go", FilePath: "a.go", Meta: map[string]any{"payload": tc.payload}})
@@ -179,8 +179,8 @@ func TestRebuildMainCandidateBatchAggregateBounds(t *testing.T) {
 			s, sc := observe(false)
 			a, ac := observe(true)
 			require.Equal(t, s, a)
-			require.EqualValues(t, tc.count, sc.RequestsSent)
-			require.EqualValues(t, tc.count, ac.RequestsSent)
+			require.EqualValues(t, tc.count, sc.CandidateCalls)
+
 			require.EqualValues(t, tc.wantCalls, ac.CandidateCalls)
 			if tc.payload != "" {
 				require.Len(t, a, tc.count)
@@ -192,12 +192,9 @@ func TestRebuildMainCandidateBatchAggregateBounds(t *testing.T) {
 }
 
 func TestRebuildMainCandidateBatchFailure(t *testing.T) {
-	for _, mode := range []string{"wire", "transport", "visitor", "canceled", "integrity", "semantic"} {
+	for _, mode := range []string{"wire", "file-integrity", "visitor", "canceled", "integrity", "semantic"} {
 		t.Run(mode, func(t *testing.T) {
-			if mode == "transport" {
-				t.Setenv("GORTEX_TEST_FRONTIER_CORRUPT", "1")
-			}
-			ctx, b, opts := frontierFixture(t, 1, 0)
+			ctx, b, opts := frontierFixture(t, 0)
 			b.AddBatch([]*graph.Node{{ID: "caller", Name: "caller", Language: "go", Kind: graph.KindFunction, FilePath: "a.go"}, {ID: "fn", Name: "A", Kind: graph.KindFunction, Language: "go", FilePath: "a.go"}, {ID: "qualified", Name: "qualified", QualName: "pkg", Kind: graph.KindFunction, Language: "go", FilePath: "pkg.go"}}, nil)
 			first := &graph.Edge{From: "caller", To: "unresolved::A", Kind: graph.EdgeCalls, FilePath: "a.go", Line: 1}
 			later := &graph.Edge{From: "caller", To: "unresolved::A", Kind: graph.EdgeCalls, FilePath: "a.go", Line: 2}
@@ -216,6 +213,15 @@ func TestRebuildMainCandidateBatchFailure(t *testing.T) {
 			failure := errors.New("fixture candidate visitor")
 			err := runRebuildLinkFrontier(ctx, b, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
 				f.imports.goOwnership = func(GoImportCandidate) (GoPackageOwnershipResult, error) { return GoPackageOwnershipUnknown, failure }
+				if mode == "file-integrity" {
+					paths, err := filepath.Glob(filepath.Join(opts.ScratchParent, "link-*", "v3.sst"))
+					require.NoError(t, err)
+					require.Len(t, paths, 1)
+					file, err := os.OpenFile(paths[0], os.O_WRONLY, 0)
+					require.NoError(t, err)
+					_, err = file.WriteAt(bytes.Repeat([]byte{0xff}, 8), 0)
+					require.NoError(t, errors.Join(err, file.Close()))
+				}
 				if mode == "canceled" {
 					c, cancel := context.WithCancel(ctx)
 					cancel()

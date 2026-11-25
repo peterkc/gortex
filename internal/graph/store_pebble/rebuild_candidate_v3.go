@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"slices"
 	"sort"
 	"sync"
@@ -36,9 +35,6 @@ func (v *v3Reader) close() error {
 // ResetCandidatePage drops page-local summaries. The immutable decoded cache
 // spans the pass; working-view charges and live rows never enter either cache.
 func (s *RebuildLink) ResetCandidatePage() {
-	if s.v3 == nil {
-		return
-	}
 	s.v3.mu.Lock()
 	defer s.v3.mu.Unlock()
 	s.v3.summaries = nil
@@ -46,9 +42,6 @@ func (s *RebuildLink) ResetCandidatePage() {
 
 func (s *RebuildLink) ChargeCandidateRequest(ctx context.Context, view RebuildView, req LinkRequest) (CandidateBatchCharge, error) {
 	v := s.v3
-	if v == nil {
-		return view.ChargeCandidateRequest(ctx, req)
-	}
 	select {
 	case <-s.ctx.Done():
 		return CandidateBatchCharge{}, context.Cause(s.ctx)
@@ -85,7 +78,7 @@ func (s *RebuildLink) ChargeCandidateRequest(ctx context.Context, view RebuildVi
 	if sum.unsized || sum.maxOrder > linkRecordBytes || sum.rows > linkResultRows || sum.orderBytes > linkResultBytes {
 		// H98 accumulates a partial charge even when it routes the request to a
 		// singleton. Read the original compact index to preserve those exact
-		// partial counters; the singleton still uses the v3 reader, never IPC.
+		// partial counters; the singleton still uses the same ordered reader.
 		return view.ChargeCandidateRequest(ctx, req)
 	}
 	return CandidateBatchCharge{Rows: sum.rows, Bytes: sum.orderBytes}, nil
@@ -116,8 +109,6 @@ func (c *v3Checks) finish() error {
 		if err := c.runs.finish(); err != nil {
 			return err
 		}
-		c.stats.SpillRows = c.runs.spilled
-		c.stats.SpillRuns = c.runs.runs
 	}
 	return nil
 }
@@ -205,14 +196,13 @@ func (v *v3Reader) visitLive(ctx context.Context, req LinkRequest, rows []v3Live
 	return nil
 }
 
-func (v *v3Reader) selectPage(ctx context.Context, view RebuildView, requests []LinkRequest, parts, spill int, visit func(int, *graph.Node) error) (CandidatePageStats, error) {
+func (v *v3Reader) selectPage(ctx context.Context, view RebuildView, requests []LinkRequest, spill int, visit func(int, *graph.Node) error) (CandidatePageStats, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	sums := make([]v3Summary, len(requests))
-	var partRows, partBytes [linkPartitionLimit]int
 	totalRows, totalBytes := 0, 0
-	// Stage 2: child logical limits apply per original partition (including
-	// duplicate positions). Do not expose any coordinator or live error yet.
+	// Stage 2: the original one-partition result limits apply to all
+	// immutable requests, including duplicates. Check before coordinator or live errors.
 	for i, req := range requests {
 		if liveCandidateRequest(req) {
 			continue
@@ -222,19 +212,13 @@ func (v *v3Reader) selectPage(ctx context.Context, view RebuildView, requests []
 			return CandidatePageStats{}, err
 		}
 		sums[i] = sum
-		part := linkPartition(linkPrefix(req.Kind, req.Key), parts)
-		if sum.maxChild > linkRecordBytes || sum.rows > linkResultRows-partRows[part] || sum.childBytes > linkResultBytes-partBytes[part] {
-			return CandidatePageStats{}, fmt.Errorf("partition %d: read candidate partition: candidate result exceeds link record or page bound", part)
+		if sum.maxChild > linkRecordBytes || sum.rows > linkResultRows-totalRows || sum.childBytes > linkResultBytes-totalBytes {
+			return CandidatePageStats{}, errors.New("candidate result exceeds link record or page bound")
 		}
-		partRows[part] += sum.rows
-		partBytes[part] += sum.childBytes
 		totalRows += sum.rows
 		totalBytes += sum.childBytes
 	}
-	// Stage 3: merged cap.
-	if totalRows > linkResultRows || totalBytes > linkResultBytes {
-		return CandidatePageStats{}, errors.New("merged candidate page exceeds row or byte bound")
-	}
+	// The original merged cap is identical to the preceding one-partition cap.
 	// Stage 4: exact original immutable-then-live check order. The worst-case
 	// total accepted order payload bounds run count without a size replay.
 	checks := v3Checks{spill: spill, exact: min(linkResultRows, 2*(linkResultBytes+48*linkResultRows)/spill+1) > goldFileCap}

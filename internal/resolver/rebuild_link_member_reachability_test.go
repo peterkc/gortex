@@ -171,7 +171,7 @@ func EmptyOnly(as []onlyAdapter) string { for _, a := range as { return a.Only()
 	rebuildFnPointerSortRows(nativeRows)
 
 	t.Run("selected page", func(t *testing.T) {
-		ctx, build, opts := frontierFixture(t, 2, 0)
+		ctx, build, opts := frontierFixture(t, 0)
 		opts.SpillBytes = 1
 		build.AddBatch(nodes, edges)
 		before := rebuildFnPointerSaved(t, build)
@@ -200,7 +200,7 @@ func EmptyOnly(as []onlyAdapter) string { for _, a := range as { return a.Only()
 	})
 
 	t.Run("unproved extension still refuses", func(t *testing.T) {
-		ctx, build, opts := frontierFixture(t, 1, 0)
+		ctx, build, opts := frontierFixture(t, 0)
 		const file, caller = "repo/z/caller.cs", "repo/z/caller.cs::Caller"
 		bad := &graph.Edge{From: caller, To: "unresolved::*.NeedsEvidence", Kind: graph.EdgeCalls, FilePath: file}
 		build.AddBatch(nodes, edges)

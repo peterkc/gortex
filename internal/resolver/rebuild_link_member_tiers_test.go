@@ -303,7 +303,7 @@ func checkRebuildMainMemberTiers(t *testing.T, nodes []*graph.Node, edges []*gra
 	rebuildFnPointerSortRows(nativeRows)
 	require.Len(t, nativeRows, len(edges))
 
-	ctx, build, opts := frontierFixture(t, 2, 0)
+	ctx, build, opts := frontierFixture(t, 0)
 	opts.SpillBytes = 1
 	build.AddBatch(nodes, edges)
 	require.ElementsMatch(t, edges, rebuildFnPointerSaved(t, build))

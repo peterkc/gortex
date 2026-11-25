@@ -187,7 +187,7 @@ func TestRunRebuildMainDataflowCalleesAfterLexical(t *testing.T) {
 	// Selecting no callers keeps the candidate worker closed. The raw frontier
 	// still enables the tails; only the newly bound reference provides Run's site.
 	seen := 0
-	options := store_pebble.RebuildLinkOptions{ScratchParent: t.TempDir(), Partitions: 1, SpillBytes: 1}
+	options := store_pebble.RebuildLinkOptions{ScratchParent: t.TempDir(), SpillBytes: 1}
 	require.NoError(t, RunRebuildMain(t.Context(), build, options, RebuildMainInputs{
 		SelectCallers: func(page []*graph.Edge) ([]*graph.Edge, error) {
 			seen += len(page)

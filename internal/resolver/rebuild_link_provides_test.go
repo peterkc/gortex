@@ -22,7 +22,7 @@ func rebuildProvidesTestEdge(from, file, target, abstract string, line int) *gra
 }
 
 func TestRebuildProvidesCensusNative(t *testing.T) {
-	ctx, build, _ := frontierFixture(t, 1, 0)
+	ctx, build, _ := frontierFixture(t, 0)
 	nodes := []*graph.Node{
 		{ID: "ts", Language: "typescript", RepoPrefix: "repo", FilePath: "module.ts"},
 		{ID: "php", Language: "php", RepoPrefix: "other", FilePath: "module.php"},
@@ -63,7 +63,7 @@ func TestRebuildProvidesCensusNative(t *testing.T) {
 // the triggering page and all subsequent commits are not, even if the page
 // is empty after selection.
 func TestRebuildProvidesFirstUse(t *testing.T) {
-	ctx, build, _ := frontierFixture(t, 1, 0)
+	ctx, build, _ := frontierFixture(t, 0)
 	before := rebuildProvidesTestEdge("a", "first.ts", "unresolved::Before", "First", 1)
 	samePage := rebuildProvidesTestEdge("b", "page.ts", "unresolved::Current", "Second", 1)
 	trigger := &graph.Edge{From: "z", Kind: graph.EdgeCalls, To: "unresolved::*.Run", FilePath: "call.ts", Meta: map[string]any{"receiver_type": "First"}}
@@ -114,7 +114,7 @@ func TestRebuildProvidesStationarity(t *testing.T) {
 		{"php-no-candidate", "php", "", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, build, _ := frontierFixture(t, 1, 0)
+			ctx, build, _ := frontierFixture(t, 0)
 			provider := rebuildProvidesTestEdge("module", "module."+tc.lang, "unresolved::Impl", "Abstract", 1)
 			build.AddBatch([]*graph.Node{{ID: provider.From, Language: tc.lang, RepoPrefix: "repo", FilePath: provider.FilePath}}, []*graph.Edge{provider})
 			// All-repo scan must not admit the unrelated repository's hit.
@@ -143,7 +143,7 @@ func TestRebuildProvidesStationarity(t *testing.T) {
 // site. Resolve both through the native dispatcher, then apply those actual
 // reindexes to the private build and compare the complete census on both sides.
 func TestRebuildProvidesStationarityLaravel(t *testing.T) {
-	ctx, build, _ := frontierFixture(t, 1, 0)
+	ctx, build, _ := frontierFixture(t, 0)
 	const providerPath = "app/Providers/AppServiceProvider.php"
 	const abstractPath = "app/Repositories/UserRepository.php"
 	const concretePath = "app/Repositories/EloquentUserRepository.php"
@@ -260,7 +260,7 @@ func TestRebuildProvidesStationarityDestinations(t *testing.T) {
 		{name: "different-line", classTarget: "unresolved::Impl", ordinaryTargets: []string{"defs.php::Impl"}, otherSite: "line"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, build, _ := frontierFixture(t, 1, 0)
+			ctx, build, _ := frontierFixture(t, 0)
 			provider := rebuildProvidesTestEdge("module", "module.php", tc.classTarget, "Abstract", 1)
 			build.AddBatch([]*graph.Node{
 				{ID: provider.From, Language: "php", RepoPrefix: "repo", FilePath: provider.FilePath},
@@ -294,8 +294,9 @@ func TestRebuildProvidesStationarityDestinations(t *testing.T) {
 }
 
 func TestRebuildProvidesOriginalPageRefusalEvenWhenUnselected(t *testing.T) {
-	ctx, build, opts := frontierFixture(t, 1, 0)
-	opts.Binary = filepath.Join(opts.ScratchParent, "must-not-start")
+	ctx, build, opts := frontierFixture(t, 0)
+	lease := opts.ScratchParent
+	opts.ScratchParent = filepath.Join(lease, "must-not-start")
 	provider := rebuildProvidesTestEdge("a", "module.php", "unresolved::Impl", "Abstract", 1)
 	member := &graph.Edge{From: "z", Kind: graph.EdgeCalls, To: "unresolved::*.Run", FilePath: "call.php", Meta: map[string]any{"receiver_type": "Abstract"}}
 	build.AddBatch([]*graph.Node{
@@ -314,12 +315,12 @@ func TestRebuildProvidesOriginalPageRefusalEvenWhenUnselected(t *testing.T) {
 	require.ErrorContains(t, err, "useClass stationarity")
 	require.Zero(t, selectCalls, "original typed page must prepare before receipt selection")
 	require.Equal(t, want, rebuildFnPointerSaved(t, build))
-	checkFrontierScratch(t, opts.ScratchParent)
+	checkFrontierScratch(t, lease)
 }
 
 func TestRebuildProvidesProjectionRefusals(t *testing.T) {
 	t.Run("retention limit", func(t *testing.T) {
-		ctx, build, _ := frontierFixture(t, 1, 0)
+		ctx, build, _ := frontierFixture(t, 0)
 		edges := make([]*graph.Edge, 0, rebuildProvidesRows+1)
 		for i := range rebuildProvidesRows + 1 {
 			edges = append(edges, rebuildProvidesTestEdge("module", "module.ts", fmt.Sprintf("file.ts::Impl%d", i), "Abstract", i+1))
@@ -331,7 +332,7 @@ func TestRebuildProvidesProjectionRefusals(t *testing.T) {
 		require.ErrorIs(t, checkRebuildProvidesStationarity(ctx, build.RebuildView()), store_pebble.ErrRebuildLinkInputSize)
 	})
 	t.Run("candidate visit limit", func(t *testing.T) {
-		ctx, build, _ := frontierFixture(t, 1, 0)
+		ctx, build, _ := frontierFixture(t, 0)
 		nodes := []*graph.Node{{ID: "module", Language: "typescript", RepoPrefix: "repo"}}
 		var edges []*graph.Edge
 		for i := range 129 {
@@ -344,7 +345,7 @@ func TestRebuildProvidesProjectionRefusals(t *testing.T) {
 		require.ErrorContains(t, err, "candidate rows")
 	})
 	t.Run("latched invalid record", func(t *testing.T) {
-		ctx, build, _ := frontierFixture(t, 1, 0)
+		ctx, build, _ := frontierFixture(t, 0)
 		valid := rebuildProvidesTestEdge("module", "module.ts", "Impl", "Abstract", 1)
 		build.AddEdge(valid)
 		invalid := *valid
@@ -356,7 +357,7 @@ func TestRebuildProvidesProjectionRefusals(t *testing.T) {
 		require.Nil(t, idx)
 	})
 	t.Run("canceled read", func(t *testing.T) {
-		ctx, build, _ := frontierFixture(t, 1, 0)
+		ctx, build, _ := frontierFixture(t, 0)
 		canceled, cancel := context.WithCancel(ctx)
 		cancel()
 		idx, err := captureRebuildProvides(canceled, build.RebuildView())

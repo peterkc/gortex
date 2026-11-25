@@ -5,28 +5,21 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 
-	"github.com/cockroachdb/pebble/v2/sstable"
 	"github.com/zzet/gortex/internal/graph"
 )
 
-// CandidatePageStats counts coordinator results and threshold-triggered runs.
-// ResultBytes counts serialized keys and values. SpillBytes counts on-disk
-// bytes of overflow runs, not the final run written to drain the buffer.
+// CandidatePageStats counts complete logical coordinator results and bytes,
+// including repeated positions and hits in the decoded cache.
 type CandidatePageStats struct {
 	ResultRows  int
 	ResultBytes int
-	SpillRows   int
-	SpillRuns   int
-	SpillBytes  int64
 }
 
 // SelectCandidatePage visits one coordinator-owned page in request-position
 // order, then native candidate order. Only AllRepos exact-name requests read
 // the live working view. Qualified-name and scoped name requests use the
-// immutable pass, whose SelectPage transport remains in source order.
+// immutable ordered file.
 //
 // The coordinator calls this serially and keeps requests and the working view
 // unchanged until it returns. Visits are tentative: stage decisions only and
@@ -38,18 +31,12 @@ func (s *RebuildLink) SelectCandidatePage(ctx context.Context, view RebuildView,
 	stop := context.AfterFunc(s.ctx, func() { cancel(context.Cause(s.ctx)) })
 	defer stop()
 
-	var dir string
 	defer func() {
-		var cleanup error
-		if dir != "" {
-			cleanup = os.RemoveAll(dir)
-		}
 		if err == nil {
-			err = errors.Join(context.Cause(ctx), context.Cause(s.ctx), cleanup)
-			cleanup = nil
+			err = errors.Join(context.Cause(ctx), context.Cause(s.ctx))
 		}
 		if err != nil {
-			stats, err = CandidatePageStats{}, errors.Join(s.fail(err), cleanup)
+			stats, err = CandidatePageStats{}, s.fail(err)
 		}
 	}()
 	if err := errors.Join(context.Cause(ctx), context.Cause(s.ctx)); err != nil {
@@ -58,78 +45,42 @@ func (s *RebuildLink) SelectCandidatePage(ctx context.Context, view RebuildView,
 	if len(requests) > LinkPageRequests || spillBytes < 1 || spillBytes > linkResultBytes || visit == nil {
 		return stats, errors.New("invalid candidate page length, spill limit or visitor")
 	}
-	immutable, positions, err := splitCandidateRequests(requests)
+	live, err := checkCandidateRequests(requests)
 	if err != nil || len(requests) == 0 {
 		return stats, err
 	}
-	if len(immutable) != len(requests) && view.build == nil {
+	if live && view.build == nil {
 		return stats, errors.New("live candidate page requires a working view")
 	}
-	if s.v3 != nil {
-		select {
-		case <-pageCtx.Done():
-			return stats, context.Cause(pageCtx)
-		case s.active <- struct{}{}:
-		}
-		defer func() { <-s.active }()
-		return s.v3.selectPage(pageCtx, view, requests, s.parts, spillBytes, visit)
+	select {
+	case <-pageCtx.Done():
+		return stats, context.Cause(pageCtx)
+	case s.active <- struct{}{}:
 	}
-	// SelectPage can reap its own directory before returning an error.
-	// Page runs have an independent lifetime under the same private lease.
-	dir, err = os.MkdirTemp(filepath.Dir(s.dir), "candidate-page-")
-	if err != nil {
-		return stats, err
-	}
-	page := candidatePageOrder{runs: sortedRuns{
-		dir: dir, name: "order", limit: spillBytes,
-		options: headOptions(), format: sstable.TableFormatPebblev4,
-	}}
-	if len(immutable) > 0 {
-		if _, err := s.SelectPage(pageCtx, immutable, func(i int, n *graph.Node) error {
-			pos := positions[i]
-			return page.add(requests[pos], pos, n)
-		}); err != nil {
-			return stats, err
-		}
-	}
-	for pos, req := range requests {
-		if !liveCandidateRequest(req) {
-			continue
-		}
-		if err := view.VisitNameCandidates(pageCtx, req.Key, req.Languages, func(n *graph.Node) error {
-			return page.add(req, pos, n)
-		}); err != nil {
-			return stats, err
-		}
-	}
-	return page.finish(pageCtx, visit)
+	defer func() { <-s.active }()
+	return s.v3.selectPage(pageCtx, view, requests, spillBytes, visit)
 }
 
 func liveCandidateRequest(req LinkRequest) bool { return req.Kind == LinkName && req.AllRepos }
 
-func splitCandidateRequests(requests []LinkRequest) ([]LinkRequest, []int, error) {
-	immutable := make([]LinkRequest, 0, len(requests))
-	positions := make([]int, 0, len(requests))
+func checkCandidateRequests(requests []LinkRequest) (live bool, err error) {
 	var wire []byte
 	remaining := linkFrameBytes
 	for pos, req := range requests {
 		if !req.valid() {
-			return nil, nil, fmt.Errorf("invalid candidate request at position %d", pos)
+			return false, fmt.Errorf("invalid candidate request at position %d", pos)
 		}
-		// Enforce the same aggregate byte bound on both routes. Reuse only
-		// one record's frame storage; the split copies no strings or lists.
+		// Preserve the historical aggregate wire bound. Reuse only one
+		// record's encoding buffer and do not retain request copies.
 		var err error
 		wire, err = appendLinkRequest(wire[:0], req, pos, remaining)
 		if err != nil {
-			return nil, nil, fmt.Errorf("candidate request at position %d: %w", pos, err)
+			return false, fmt.Errorf("candidate request at position %d: %w", pos, err)
 		}
 		remaining -= len(wire)
-		if !liveCandidateRequest(req) {
-			immutable = append(immutable, req)
-			positions = append(positions, pos)
-		}
+		live = live || liveCandidateRequest(req)
 	}
-	return immutable, positions, nil
+	return live, nil
 }
 
 func candidateOrderKey(req LinkRequest, pos int, n *graph.Node, ordinal uint64) []byte {
@@ -144,55 +95,4 @@ func candidateOrderKey(req LinkRequest, pos int, n *graph.Node, ordinal uint64) 
 	}
 	key = appendKeyString(key, n.ID)
 	return binary.BigEndian.AppendUint64(key, ordinal)
-}
-
-type candidatePageOrder struct {
-	runs  sortedRuns
-	stats CandidatePageStats
-}
-
-func (p *candidatePageOrder) add(req LinkRequest, pos int, n *graph.Node) error {
-	// This tuple mirrors graph.resolverNameScopeSort and the P3 qualified
-	// lookup's ID order. Keep source order for ties in the complete tuple.
-	key := candidateOrderKey(req, pos, n, uint64(p.stats.ResultRows))
-	value, err := encodeNode(n)
-	if err != nil {
-		return err
-	}
-	size := len(key) + len(value)
-	if size > linkRecordBytes || p.stats.ResultRows >= linkResultRows || p.stats.ResultBytes+size > linkResultBytes {
-		return errors.New("candidate order exceeds link record or page bound")
-	}
-	priorRows, priorRuns := len(p.runs.rows), len(p.runs.paths)
-	if err := p.runs.add(key, value); err != nil {
-		return err
-	}
-	if len(p.runs.paths) != priorRuns {
-		p.stats.SpillRows += priorRows
-	}
-	p.stats.ResultRows++
-	p.stats.ResultBytes += size
-	return nil
-}
-
-func (p *candidatePageOrder) finish(ctx context.Context, visit func(int, *graph.Node) error) (CandidatePageStats, error) {
-	p.stats.SpillRuns = len(p.runs.paths)
-	for _, path := range p.runs.paths {
-		if err := ctx.Err(); err != nil {
-			return CandidatePageStats{}, err
-		}
-		info, err := os.Stat(path)
-		if err != nil {
-			return CandidatePageStats{}, err
-		}
-		p.stats.SpillBytes += info.Size()
-	}
-	err := p.runs.merge(ctx, func(r row) error {
-		n, err := decodeNode(r.value)
-		if err != nil {
-			return err
-		}
-		return visit(int(binary.BigEndian.Uint32(r.key)), n)
-	})
-	return p.stats, err
 }

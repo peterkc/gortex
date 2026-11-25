@@ -91,17 +91,14 @@ func (f *rebuildLinkFrontier) importDirectories(ctx context.Context) (*store_peb
 }
 
 // runRebuildLinkFrontier selects from each original pending page before starting
-// the candidate pass. Candidate partitions freeze the entire working node view
+// the candidate pass. The ordered file freezes the entire working node view
 // before the first reducer call. Only the private AllRepos name lookup sees
 // intervening writes.
 // The owner must discard its private work on any scan, reducer or close error.
 func runRebuildLinkFrontier(ctx context.Context, build *store_pebble.BuildStore, opts store_pebble.RebuildLinkOptions,
 	selectCallers func([]*graph.Edge) ([]*graph.Edge, error), reduce func(*rebuildLinkFrontier, []*graph.Edge) error,
 ) (err error) {
-	f := rebuildLinkFrontier{view: build.RebuildView(), opts: opts}
-	if !opts.LegacyCandidates {
-		f.view = f.view.WithCallerPageCache()
-	}
+	f := rebuildLinkFrontier{view: build.RebuildView().WithCallerPageCache(), opts: opts}
 	defer func() {
 		if f.closeImportDirs != nil {
 			err = errors.Join(err, f.closeImportDirs())
@@ -122,13 +119,7 @@ func runRebuildLinkFrontier(ctx context.Context, build *store_pebble.BuildStore,
 		if f.link == nil {
 			view := build.RebuildView()
 			source := func(yield func(*graph.Node) error) error { return view.VisitNodes(ctx, yield) }
-			var link *store_pebble.RebuildLink
-			var err error
-			if opts.LegacyCandidates {
-				link, err = store_pebble.StartRebuildLink(ctx, opts, source)
-			} else {
-				link, err = store_pebble.StartCachedRebuildLink(ctx, opts, view, source)
-			}
+			link, err := store_pebble.StartRebuildLink(ctx, opts, view, source)
 			if err != nil {
 				return err
 			}

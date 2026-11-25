@@ -102,7 +102,7 @@ func TestRebuildExternNativeRows(t *testing.T) {
 	for _, e := range append(input, want...) {
 		e.Context, e.Alias, e.Via = "argument", "local", "source"
 	}
-	ctx, b, opts := frontierFixture(t, 1, 0)
+	ctx, b, opts := frontierFixture(t, 0)
 	b.AddBatch(nodes, input)
 	require.NoError(t, runRebuildLinkFrontier(ctx, b, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
 		b.AddNode(late) // not in the immutable candidate partitions
@@ -230,7 +230,7 @@ func TestRebuildGoExternEmptyTrackedNativeRows(t *testing.T) {
 	wantAfterAttribution := rebuildVueSortedRows(g.AllEdges())
 	require.Len(t, wantAfterAttribution, len(want)+len(externalIDs))
 
-	ctx, b, opts := frontierFixture(t, 1, 0)
+	ctx, b, opts := frontierFixture(t, 0)
 	b.AddBatch(nodes, input)
 	checks := 0
 	require.NoError(t, runRebuildMain(ctx, b, opts, false, RebuildMainInputs{
@@ -258,7 +258,7 @@ func TestRebuildGoExternUnprovedOwnershipRefusesPage(t *testing.T) {
 	const file = "main.go"
 	const pkg = "example.test/pkg"
 	n := rebuildExternTestNode
-	ctx, b, opts := frontierFixture(t, 1, 0)
+	ctx, b, opts := frontierFixture(t, 0)
 	first := rebuildExternTestEdge(file, file, "a-malformed", 1)
 	blocked := rebuildExternTestEdge(file, file, pkg+"::Bind", 2)
 	before := rebuildVueSortedRows([]*graph.Edge{first, blocked})
@@ -331,7 +331,7 @@ func TestRebuildExternRefusesIncompletePage(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, b, opts := frontierFixture(t, 1, 0)
+			ctx, b, opts := frontierFixture(t, 0)
 			nodes := []*graph.Node{
 				n("a/start", "start", "a/main.c", "repo", "app", "c", graph.KindFunction),
 				n("repo/keep", "Keep", "repo/pkg/keep.c", "repo", "app", "c", graph.KindFunction),

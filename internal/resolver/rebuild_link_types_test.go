@@ -1,7 +1,6 @@
 package resolver
 
 import (
-	"fmt"
 	"maps"
 	"path/filepath"
 	"strings"
@@ -67,7 +66,7 @@ func checkRebuildTypeRows(t *testing.T, nodes []*graph.Node, edges []*graph.Edge
 		require.Equal(t, &before, e)
 	}
 
-	ctx, b, opts := frontierFixture(t, 1, 0)
+	ctx, b, opts := frontierFixture(t, 0)
 	b.AddBatch(nodes, edges)
 	err = runRebuildMain(ctx, b, opts, false, RebuildMainInputs{})
 	if refusal != "" {
@@ -194,187 +193,182 @@ func TestRebuildTypeMissingVisibility(t *testing.T) {
 // precommit view. Expected targets/refusals are independently specified.
 // The mixed main reducer also proves that Vue fallback stays conditional.
 func TestRebuildTypePrimaryBatch(t *testing.T) {
-	for _, workers := range []int{1, 2} {
-		t.Run(fmt.Sprintf("workers=%d", workers), func(t *testing.T) {
-			ctx, b, opts := frontierFixture(t, workers, 0)
-			const goFile, phpFile, csFile = "src/use.go", "src/use.php", "src/use.cs"
-			const vueFile, fallbackFile, panel = "ui/View.vue", "ui/Fallback.vue", "ui/Panel.vue"
-			nodes := []*graph.Node{
-				typeTestNode("go", "Caller", graph.KindFunction, "go", goFile),
-				typeTestNode("php", "Caller", graph.KindFunction, "php", phpFile),
-				typeTestNode("cs", "Caller", graph.KindFunction, "csharp", csFile),
-				typeTestNode("go-A", "A", graph.KindType, "go", "defs/a.go"),
-				typeTestNode("wrong-A", "A", graph.KindType, "rust", goFile),
-				typeTestNode("go-B", "B", graph.KindFunction, "go", goFile),
-				typeTestNode("web-B", "B", graph.KindType, "typescript", "ui/b.ts"),
-				testNamespacedType("php-User", "User", "php", "Model"),
-				testNamespacedType("cs-other", "User", "csharp", "Other"),
-				testNamespacedType("cs-model", "User", "csharp", "Model"),
-				typeTestNode(vueFile+"::Source", "Source", graph.KindFunction, "vue", vueFile),
-				typeTestNode(fallbackFile+"::Source", "Source", graph.KindFunction, "vue", fallbackFile),
-				typeTestNode(panel, "Panel.vue", graph.KindFile, "vue", panel),
-				typeTestNode(panel+"::A", "A", graph.KindFunction, "vue", panel),
-			}
-			// A and B route to different worker slots. Duplicate A positions
-			// remain distinct; a type branch never falls back to a function.
-			edges := []*graph.Edge{
-				typeTestEdge("go", goFile, "*.A", graph.EdgeExtends, ""),
-				typeTestEdge("go", goFile, "A", graph.EdgeReferences, ""),
-				typeTestEdge("go", goFile, "B", graph.EdgeInstantiates, ""),
-				typeTestEdge("go", goFile, "B", graph.EdgeReturns, ""),
-				typeTestEdge("go", goFile, "Missing", graph.EdgeTypedAs, ""),
-				typeTestEdge("php", phpFile, "Nickname", graph.EdgeTypedAs, `Model\User`),
-				typeTestEdge("cs", csFile, "User", graph.EdgeReferences, ""),
-				typeTestEdge("cs", csFile, "User", graph.EdgeImplements, "Model.User"),
-				rebuildVueTestRef(vueFile, "A", "A", 9),
-				rebuildVueTestRef(fallbackFile, "B", "B", 10),
-				typeTestEdge("go", goFile, "grpc::Skip", graph.EdgeReferences, ""),
-				typeTestEdge("go", goFile, "pyrel::Skip", graph.EdgeTypedAs, ""),
-				typeTestEdge("go", goFile, "A", graph.EdgeTests, ""),
-			}
-			for i, e := range edges {
-				e.Line = i + 1
-			}
-			b.AddBatch(nodes, append(edges, rebuildVueTestImport(vueFile, panel, "A", 1)))
-			before := rebuildFnPointerSaved(t, b)
-			type expectation struct {
-				target        string
-				allowFunction bool
-				refusal       string
-			}
-			want := map[int]expectation{
-				1: {target: "go-A"}, 2: {target: "go-A", allowFunction: true},
-				3: {target: "go-B", allowFunction: true}, 4: {target: "unresolved::B"},
-				5: {target: "unresolved::Missing"},
-				6: {target: "unresolved::Nickname", refusal: "needs page name scopes"},
-				7: {target: "unresolved::User", allowFunction: true, refusal: "needs C# namespace visibility"},
-				8: {target: "cs-model"},
-			}
-			type outcome struct {
-				old     graph.EdgeIdentity
-				row     graph.Edge
-				refusal string
-			}
-			observe := func(batched bool) ([]outcome, store_pebble.LinkRequestProgress) {
-				var rows []outcome
-				var counts store_pebble.LinkRequestProgress
-				require.NoError(t, runRebuildLinkFrontier(ctx, b, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
-					require.Len(t, page, len(edges))
-					var queries []rebuildTypeQuery
-					if batched {
-						var err error
-						queries, err = resolveRebuildTypePage(ctx, f, page)
-						if err != nil {
-							return err
-						}
-					}
-					for i, e := range page {
-						expected, primary := want[e.Line]
-						if !primary {
-							if batched {
-								require.Empty(t, queries[i].request.Key)
-							}
-							continue
-						}
-						copy := *e
-						var err error
-						if batched {
-							require.NotEmpty(t, queries[i].request.Key)
-							err = queries[i].finish(&copy)
-						} else {
-							err = resolveRebuildType(ctx, f, &copy, graph.UnresolvedName(e.To), expected.allowFunction)
-						}
-						var refused string
-						if expected.refusal != "" {
-							require.ErrorIs(t, err, store_pebble.ErrRebuildLink)
-							require.ErrorContains(t, err, expected.refusal)
-							refused = err.Error()
-						} else {
-							require.NoError(t, err)
-						}
-						w := *e
-						w.To = expected.target
-						require.Equal(t, w, copy)
-						rows = append(rows, outcome{graph.EdgeIdentityFor(e), copy, refused})
-					}
-					counts = f.link.RequestProgress()
-					return nil
-				}))
-				checkFrontierScratch(t, opts.ScratchParent)
-				require.Len(t, rows, len(want))
-				return rows, counts
-			}
-			serial, unbatched := observe(false)
-			batch, batched := observe(true)
-			require.Equal(t, serial, batch, "complete old keys, payloads and refusal sequence")
-			require.Equal(t, store_pebble.LinkRequestProgress{CandidateCalls: 8, RequestsSent: 8, FramesSent: 8, RoundTrips: 8}, unbatched)
-			require.Equal(t, store_pebble.LinkRequestProgress{CandidateCalls: 1, RequestsSent: 8, FramesSent: uint64(workers), RoundTrips: uint64(workers)}, batched)
-			require.Less(t, batched.FramesSent, unbatched.FramesSent)
-
-			// The actual mixed main reducer must return the first original
-			// semantic refusal. Its tentative successful rows are not applied.
-			var first string
-			for _, row := range serial {
-				if row.refusal != "" {
-					first = row.refusal
-					break
-				}
-			}
-			require.NotEmpty(t, first)
-			err := runRebuildLinkFrontier(ctx, b, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
-				moves, err := reduceRebuildMainPage(ctx, f, page)
-				require.Empty(t, moves)
-				require.EqualError(t, err, first)
-				return err
-			})
-			require.ErrorIs(t, err, store_pebble.ErrRebuildLink)
-			require.Equal(t, before, rebuildFnPointerSaved(t, b))
-			checkFrontierScratch(t, opts.ScratchParent)
-
-			// With just the two deliberately refused sites removed, assert
-			// actual mixed-page move order and payload. Vue hit issues no type
-			// query. The Vue import miss still issues one conditional query.
-			require.NoError(t, runRebuildLinkFrontier(ctx, b, opts, func(page []*graph.Edge) ([]*graph.Edge, error) {
-				var kept []*graph.Edge
-				for _, e := range page {
-					if e.Line != 6 && e.Line != 7 {
-						kept = append(kept, e)
-					}
-				}
-				return kept, nil
-			}, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
-				var moves []graph.EdgeReindex
-				for _, e := range page {
-					copy := *e
-					switch e.Line {
-					case 1, 2, 3, 8:
-						copy.To = want[e.Line].target
-					case 9:
-						copy = *rebuildVueTestSaved(e, panel+"::A", true)
-					case 10:
-						copy.To = "web-B"
-					default:
-						continue
-					}
-					copy.Meta = maps.Clone(copy.Meta)
-					clearEdgeTerminal(&copy)
-					moves = append(moves, graph.EdgeReindex{Edge: &copy, OldTo: e.To, OldKind: e.Kind})
-				}
-				got, err := reduceRebuildMainPage(ctx, f, page)
-				require.NoError(t, err)
-				require.Len(t, moves, 6)
-				require.Equal(t, moves, got)
-				require.Equal(t, store_pebble.LinkRequestProgress{CandidateCalls: 2, RequestsSent: 7, FramesSent: uint64(workers + 1), RoundTrips: uint64(workers + 1)}, f.link.RequestProgress())
-				return nil
-			}))
-			require.Equal(t, before, rebuildFnPointerSaved(t, b))
-			checkFrontierScratch(t, opts.ScratchParent)
-		})
+	ctx, b, opts := frontierFixture(t, 0)
+	const goFile, phpFile, csFile = "src/use.go", "src/use.php", "src/use.cs"
+	const vueFile, fallbackFile, panel = "ui/View.vue", "ui/Fallback.vue", "ui/Panel.vue"
+	nodes := []*graph.Node{
+		typeTestNode("go", "Caller", graph.KindFunction, "go", goFile),
+		typeTestNode("php", "Caller", graph.KindFunction, "php", phpFile),
+		typeTestNode("cs", "Caller", graph.KindFunction, "csharp", csFile),
+		typeTestNode("go-A", "A", graph.KindType, "go", "defs/a.go"),
+		typeTestNode("wrong-A", "A", graph.KindType, "rust", goFile),
+		typeTestNode("go-B", "B", graph.KindFunction, "go", goFile),
+		typeTestNode("web-B", "B", graph.KindType, "typescript", "ui/b.ts"),
+		testNamespacedType("php-User", "User", "php", "Model"),
+		testNamespacedType("cs-other", "User", "csharp", "Other"),
+		testNamespacedType("cs-model", "User", "csharp", "Model"),
+		typeTestNode(vueFile+"::Source", "Source", graph.KindFunction, "vue", vueFile),
+		typeTestNode(fallbackFile+"::Source", "Source", graph.KindFunction, "vue", fallbackFile),
+		typeTestNode(panel, "Panel.vue", graph.KindFile, "vue", panel),
+		typeTestNode(panel+"::A", "A", graph.KindFunction, "vue", panel),
 	}
+	// Duplicate A positions
+	// remain distinct; a type branch never falls back to a function.
+	edges := []*graph.Edge{
+		typeTestEdge("go", goFile, "*.A", graph.EdgeExtends, ""),
+		typeTestEdge("go", goFile, "A", graph.EdgeReferences, ""),
+		typeTestEdge("go", goFile, "B", graph.EdgeInstantiates, ""),
+		typeTestEdge("go", goFile, "B", graph.EdgeReturns, ""),
+		typeTestEdge("go", goFile, "Missing", graph.EdgeTypedAs, ""),
+		typeTestEdge("php", phpFile, "Nickname", graph.EdgeTypedAs, `Model\User`),
+		typeTestEdge("cs", csFile, "User", graph.EdgeReferences, ""),
+		typeTestEdge("cs", csFile, "User", graph.EdgeImplements, "Model.User"),
+		rebuildVueTestRef(vueFile, "A", "A", 9),
+		rebuildVueTestRef(fallbackFile, "B", "B", 10),
+		typeTestEdge("go", goFile, "grpc::Skip", graph.EdgeReferences, ""),
+		typeTestEdge("go", goFile, "pyrel::Skip", graph.EdgeTypedAs, ""),
+		typeTestEdge("go", goFile, "A", graph.EdgeTests, ""),
+	}
+	for i, e := range edges {
+		e.Line = i + 1
+	}
+	b.AddBatch(nodes, append(edges, rebuildVueTestImport(vueFile, panel, "A", 1)))
+	before := rebuildFnPointerSaved(t, b)
+	type expectation struct {
+		target        string
+		allowFunction bool
+		refusal       string
+	}
+	want := map[int]expectation{
+		1: {target: "go-A"}, 2: {target: "go-A", allowFunction: true},
+		3: {target: "go-B", allowFunction: true}, 4: {target: "unresolved::B"},
+		5: {target: "unresolved::Missing"},
+		6: {target: "unresolved::Nickname", refusal: "needs page name scopes"},
+		7: {target: "unresolved::User", allowFunction: true, refusal: "needs C# namespace visibility"},
+		8: {target: "cs-model"},
+	}
+	type outcome struct {
+		old     graph.EdgeIdentity
+		row     graph.Edge
+		refusal string
+	}
+	observe := func(batched bool) ([]outcome, store_pebble.LinkRequestProgress) {
+		var rows []outcome
+		var counts store_pebble.LinkRequestProgress
+		require.NoError(t, runRebuildLinkFrontier(ctx, b, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
+			require.Len(t, page, len(edges))
+			var queries []rebuildTypeQuery
+			if batched {
+				var err error
+				queries, err = resolveRebuildTypePage(ctx, f, page)
+				if err != nil {
+					return err
+				}
+			}
+			for i, e := range page {
+				expected, primary := want[e.Line]
+				if !primary {
+					if batched {
+						require.Empty(t, queries[i].request.Key)
+					}
+					continue
+				}
+				copy := *e
+				var err error
+				if batched {
+					require.NotEmpty(t, queries[i].request.Key)
+					err = queries[i].finish(&copy)
+				} else {
+					err = resolveRebuildType(ctx, f, &copy, graph.UnresolvedName(e.To), expected.allowFunction)
+				}
+				var refused string
+				if expected.refusal != "" {
+					require.ErrorIs(t, err, store_pebble.ErrRebuildLink)
+					require.ErrorContains(t, err, expected.refusal)
+					refused = err.Error()
+				} else {
+					require.NoError(t, err)
+				}
+				w := *e
+				w.To = expected.target
+				require.Equal(t, w, copy)
+				rows = append(rows, outcome{graph.EdgeIdentityFor(e), copy, refused})
+			}
+			counts = f.link.RequestProgress()
+			return nil
+		}))
+		checkFrontierScratch(t, opts.ScratchParent)
+		require.Len(t, rows, len(want))
+		return rows, counts
+	}
+	serial, unbatched := observe(false)
+	batch, batched := observe(true)
+	require.Equal(t, serial, batch, "complete old keys, payloads and refusal sequence")
+	require.Equal(t, store_pebble.LinkRequestProgress{CandidateCalls: 8}, unbatched)
+	require.Equal(t, store_pebble.LinkRequestProgress{CandidateCalls: 1}, batched)
+
+	// The actual mixed main reducer must return the first original
+	// semantic refusal. Its tentative successful rows are not applied.
+	var first string
+	for _, row := range serial {
+		if row.refusal != "" {
+			first = row.refusal
+			break
+		}
+	}
+	require.NotEmpty(t, first)
+	err := runRebuildLinkFrontier(ctx, b, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
+		moves, err := reduceRebuildMainPage(ctx, f, page)
+		require.Empty(t, moves)
+		require.EqualError(t, err, first)
+		return err
+	})
+	require.ErrorIs(t, err, store_pebble.ErrRebuildLink)
+	require.Equal(t, before, rebuildFnPointerSaved(t, b))
+	checkFrontierScratch(t, opts.ScratchParent)
+
+	// With just the two deliberately refused sites removed, assert
+	// actual mixed-page move order and payload. Vue hit issues no type
+	// query. The Vue import miss still issues one conditional query.
+	require.NoError(t, runRebuildLinkFrontier(ctx, b, opts, func(page []*graph.Edge) ([]*graph.Edge, error) {
+		var kept []*graph.Edge
+		for _, e := range page {
+			if e.Line != 6 && e.Line != 7 {
+				kept = append(kept, e)
+			}
+		}
+		return kept, nil
+	}, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
+		var moves []graph.EdgeReindex
+		for _, e := range page {
+			copy := *e
+			switch e.Line {
+			case 1, 2, 3, 8:
+				copy.To = want[e.Line].target
+			case 9:
+				copy = *rebuildVueTestSaved(e, panel+"::A", true)
+			case 10:
+				copy.To = "web-B"
+			default:
+				continue
+			}
+			copy.Meta = maps.Clone(copy.Meta)
+			clearEdgeTerminal(&copy)
+			moves = append(moves, graph.EdgeReindex{Edge: &copy, OldTo: e.To, OldKind: e.Kind})
+		}
+		got, err := reduceRebuildMainPage(ctx, f, page)
+		require.NoError(t, err)
+		require.Len(t, moves, 6)
+		require.Equal(t, moves, got)
+		require.Equal(t, store_pebble.LinkRequestProgress{CandidateCalls: 2}, f.link.RequestProgress())
+		return nil
+	}))
+	require.Equal(t, before, rebuildFnPointerSaved(t, b))
+	checkFrontierScratch(t, opts.ScratchParent)
 }
 
 func TestRebuildTypePrimaryBatchWireBound(t *testing.T) {
-	ctx, b, opts := frontierFixture(t, 1, 0)
+	ctx, b, opts := frontierFixture(t, 0)
 	// Each request fits the existing wire cap. Together they do not. No
 	// raised bound, retry, partial update, or singleton fallback is allowed.
 	a := typeTestEdge("caller", "use.go", strings.Repeat("a", 1100<<10), graph.EdgeReferences, "")

@@ -1,15 +1,12 @@
 package resolver
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -103,9 +100,8 @@ func checkFrontierGolden(t *testing.T, c frontierGoldenCase, want frontierGolden
 	require.Equal(t, want, actual, "readable H98 witness differs from verified digest %s", got)
 }
 
-func frontierGoldenMixed(t *testing.T, legacy bool) any {
-	ctx, b, opts := frontierFixture(t, 1, 0)
-	opts.LegacyCandidates = legacy
+func frontierGoldenMixed(t *testing.T) any {
+	ctx, b, opts := frontierFixture(t, 0)
 	const file = "src/use.go"
 	node := func(id, name, lang, repo, location string, kind graph.NodeKind) *graph.Node {
 		return &graph.Node{ID: id, Name: name, Language: lang, RepoPrefix: repo, FilePath: location, Kind: kind}
@@ -174,9 +170,8 @@ func frontierGoldenMixed(t *testing.T, legacy bool) any {
 	return out
 }
 
-func frontierGoldenTypes(t *testing.T, legacy bool) any {
-	ctx, b, opts := frontierFixture(t, 1, 0)
-	opts.LegacyCandidates = legacy
+func frontierGoldenTypes(t *testing.T) any {
+	ctx, b, opts := frontierFixture(t, 0)
 	const goFile, phpFile, csFile = "src/use.go", "src/use.php", "src/use.cs"
 	const vueFile, fallbackFile, panel = "ui/View.vue", "ui/Fallback.vue", "ui/Panel.vue"
 	nodes := []*graph.Node{
@@ -287,9 +282,8 @@ func frontierGoldenTypes(t *testing.T, legacy bool) any {
 	}{typeRows, out}
 }
 
-func frontierGoldenAggregate(t *testing.T, legacy bool, kind string) any {
-	ctx, b, opts := frontierFixture(t, 1, 0)
-	opts.LegacyCandidates = legacy
+func frontierGoldenAggregate(t *testing.T, kind string) any {
+	ctx, b, opts := frontierFixture(t, 0)
 	var key string
 	count, wantCalls := 2, 2
 	if kind == "result" {
@@ -355,9 +349,8 @@ func frontierGoldenAggregate(t *testing.T, legacy bool, kind string) any {
 // T1's actual reader trace fixture (not its disposable timing/checkpoint
 // report). Original page boundaries, checked misses and duplicate payloads
 // remain observable without a permanent trace hook in production.
-func frontierGoldenTrace(t *testing.T, legacy bool) any {
-	ctx, b, opts := frontierFixture(t, 1, resolvePendingPageRows+1)
-	opts.LegacyCandidates = legacy
+func frontierGoldenTrace(t *testing.T) any {
+	ctx, b, opts := frontierFixture(t, resolvePendingPageRows+1)
 	b.AddNode(&graph.Node{ID: "z", Name: "Run", RepoPrefix: "repo"})
 	requests := []store_pebble.LinkRequest{{Kind: store_pebble.LinkName, Key: "Run", RepoPrefix: "repo"}, {Kind: store_pebble.LinkName, Key: "Missing", RepoPrefix: "repo"}, {Kind: store_pebble.LinkName, Key: "Run", AllRepos: true}}
 	var pages []frontierGoldenPage
@@ -382,16 +375,13 @@ func frontierGoldenTrace(t *testing.T, legacy bool) any {
 	return pages
 }
 
-func frontierGoldenCaller(t *testing.T, legacy bool) any {
-	ctx, b, _ := frontierFixture(t, 1, 0)
+func frontierGoldenCaller(t *testing.T) any {
+	ctx, b, _ := frontierFixture(t, 0)
 	const file = "repo/caller.go"
 	source := &graph.Node{ID: "source", FilePath: file, Meta: map[string]any{"raw": []int{1, 2}}}
 	target := &graph.Node{ID: "target", FilePath: "repo/old/target.go", Meta: map[string]any{"raw": []int64{3, 4}}}
 	b.AddBatch([]*graph.Node{source, target}, []*graph.Edge{{From: source.ID, To: target.ID, Kind: graph.EdgeImports}, {From: source.ID, To: "missing", Kind: graph.EdgeImports}})
-	view := b.RebuildView()
-	if !legacy {
-		view = view.WithCallerPageCache()
-	}
+	view := b.RebuildView().WithCallerPageCache()
 	type importRow struct{ ID, Path string }
 	type row struct {
 		Read    string
@@ -426,9 +416,7 @@ func frontierGoldenCaller(t *testing.T, legacy bool) any {
 	again := node(source.ID)
 	require.Equal(t, source, a)
 	require.Equal(t, source, again)
-	if !legacy {
-		require.Same(t, a, again)
-	}
+	require.Same(t, a, again)
 	require.Nil(t, node("missing"))
 	require.Nil(t, node("missing"))
 	want := map[string]string{target.ID: target.FilePath, "missing": ""}
@@ -449,9 +437,8 @@ func frontierGoldenCaller(t *testing.T, legacy bool) any {
 // Genuine failures must never apply the partially reduced page or admit a
 // snapshot offer. The old worker's transport-specific cases are historical;
 // file integrity of the new reader is checked at its real file boundary.
-func frontierGoldenFailure(t *testing.T, legacy bool, mode string) any {
-	ctx, b, opts := frontierFixture(t, 1, 0)
-	opts.LegacyCandidates = legacy
+func frontierGoldenFailure(t *testing.T, mode string) any {
+	ctx, b, opts := frontierFixture(t, 0)
 	b.AddBatch([]*graph.Node{{ID: "caller", Name: "caller", Language: "go", Kind: graph.KindFunction, FilePath: "a.go"}, {ID: "fn", Name: "A", Kind: graph.KindFunction, Language: "go", FilePath: "a.go"}, {ID: "qualified", Name: "qualified", QualName: "pkg", Kind: graph.KindFunction, Language: "go", FilePath: "pkg.go"}}, nil)
 	first := &graph.Edge{From: "caller", To: "unresolved::A", Kind: graph.EdgeCalls, FilePath: "a.go", Line: 1}
 	later := &graph.Edge{From: "caller", To: "unresolved::A", Kind: graph.EdgeCalls, FilePath: "a.go", Line: 2}
@@ -495,106 +482,38 @@ func frontierGoldenFailure(t *testing.T, legacy bool, mode string) any {
 	return out
 }
 
-func runFrontierGoldens(t *testing.T, capture bool) []frontierGoldenCase {
-	var out []frontierGoldenCase
+func TestRebuildV3FrontierDifferential(t *testing.T) {
+	raw, err := os.ReadFile("testdata/rebuild_frontier_h98_goldens.json")
+	require.NoError(t, err)
 	var want map[string]frontierGoldenExpectation
-	if !capture {
-		raw, err := os.ReadFile("testdata/rebuild_frontier_h98_goldens.json")
-		require.NoError(t, err)
-		require.NoError(t, json.Unmarshal(raw, &want))
-		require.Len(t, want, 10)
-	}
+	require.NoError(t, json.Unmarshal(raw, &want))
+	require.Len(t, want, 10)
 	cases := []struct {
 		name string
-		run  func(*testing.T, bool) any
+		run  func(*testing.T) any
 	}{
 		{"mixed", frontierGoldenMixed}, {"types", frontierGoldenTypes}, {"trace", frontierGoldenTrace}, {"caller", frontierGoldenCaller},
-		{"type-wire", func(t *testing.T, legacy bool) any { return frontierGoldenAggregate(t, legacy, "type-wire") }},
-		{"scalar-wire", func(t *testing.T, legacy bool) any { return frontierGoldenAggregate(t, legacy, "wire") }},
-		{"scalar-result", func(t *testing.T, legacy bool) any { return frontierGoldenAggregate(t, legacy, "result") }},
+		{"type-wire", func(t *testing.T) any { return frontierGoldenAggregate(t, "type-wire") }},
+		{"scalar-wire", func(t *testing.T) any { return frontierGoldenAggregate(t, "wire") }},
+		{"scalar-result", func(t *testing.T) any { return frontierGoldenAggregate(t, "result") }},
 	}
 	for _, mode := range []string{"visitor", "cancel", "semantic"} {
 		cases = append(cases, struct {
 			name string
-			run  func(*testing.T, bool) any
-		}{mode, func(t *testing.T, legacy bool) any { return frontierGoldenFailure(t, legacy, mode) }})
+			run  func(*testing.T) any
+		}{mode, func(t *testing.T) any { return frontierGoldenFailure(t, mode) }})
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			data, err := json.Marshal(c.run(t, capture))
+			data, err := json.Marshal(c.run(t))
 			require.NoError(t, err)
-			observation := frontierGoldenCase{Name: c.name, Data: data}
-			if capture {
-				out = append(out, observation)
-				return
-			}
 			expected, ok := want[c.name]
 			require.True(t, ok, "missing H98 case %s", c.name)
-			checkFrontierGolden(t, observation, expected)
+			checkFrontierGolden(t, frontierGoldenCase{Name: c.name, Data: data}, expected)
 			delete(want, c.name)
 		})
 	}
 	if !t.Failed() {
 		require.Empty(t, want, "unvisited H98 golden cases")
-	}
-	return out
-}
-
-func TestRebuildV3FrontierDifferential(t *testing.T) { runFrontierGoldens(t, false) }
-
-// Run the same H98 fixtures and validate the keys before any capture output.
-func collectFrontierGoldenCases(t *testing.T) []frontierGoldenCase {
-	t.Helper()
-	cases := runFrontierGoldens(t, true)
-	if t.Failed() {
-		t.FailNow()
-	}
-	require.Len(t, cases, 10)
-	names := make(map[string]bool, len(cases))
-	for _, c := range cases {
-		if strings.TrimSpace(c.Name) == "" || names[c.Name] {
-			t.Fatalf("missing or duplicate capture case %q", c.Name)
-		}
-		names[c.Name] = true
-	}
-	return cases
-}
-
-func TestRebuildV3FrontierCaptureCases(t *testing.T) {
-	collectFrontierGoldenCases(t)
-}
-
-func TestCaptureRebuildFrontierGoldens(t *testing.T) {
-	prefix := os.Getenv("GORTEX_CAPTURE_GOLDEN")
-	if prefix == "" {
-		t.Skip("explicit H98 golden capture only")
-	}
-	if !filepath.IsAbs(prefix) {
-		t.Fatal("capture prefix must be absolute")
-	}
-	cases := collectFrontierGoldenCases(t)
-	raw, err := json.Marshal(cases)
-	require.NoError(t, err)
-	const maxBytes = 16 << 20
-	require.LessOrEqual(t, len(raw), maxBytes)
-	var compressed bytes.Buffer
-	w := gzip.NewWriter(&compressed)
-	_, err = w.Write(raw)
-	require.NoError(t, errors.Join(err, w.Close()))
-	require.LessOrEqual(t, compressed.Len(), maxBytes)
-	header := struct {
-		Cases, Bytes, CompressedBytes int
-		SHA256, CompressedSHA256      string
-	}{len(cases), len(raw), compressed.Len(), fmt.Sprintf("%x", sha256.Sum256(raw)), fmt.Sprintf("%x", sha256.Sum256(compressed.Bytes()))}
-	meta, err := json.Marshal(header)
-	require.NoError(t, err)
-	for _, file := range []struct {
-		path string
-		data []byte
-	}{{prefix + ".frontier.json.gz", compressed.Bytes()}, {prefix + ".frontier.header.json", meta}} {
-		f, err := os.OpenFile(file.path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-		require.NoError(t, err)
-		_, err = f.Write(file.data)
-		require.NoError(t, errors.Join(err, f.Close()))
 	}
 }

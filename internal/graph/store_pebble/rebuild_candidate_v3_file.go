@@ -27,7 +27,7 @@ const (
 
 // Simulates sortedRuns' logical limits without writing any order tables.
 // The final drain counts too; the first row itself may exceed spill.
-type v3LogicalRuns struct{ rows, bytes, runs, spilled int }
+type v3LogicalRuns struct{ rows, bytes, runs int }
 
 func (r *v3LogicalRuns) add(size, spill int) error {
 	if r.rows != 0 && r.bytes+size+48 > spill {
@@ -35,7 +35,6 @@ func (r *v3LogicalRuns) add(size, spill int) error {
 			return fmt.Errorf("pebble order exceeds %d sorted runs", goldFileCap)
 		}
 		r.runs++
-		r.spilled += r.rows
 		r.rows, r.bytes = 0, 0
 	}
 	r.rows++

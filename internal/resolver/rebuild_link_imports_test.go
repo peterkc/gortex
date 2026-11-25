@@ -133,7 +133,7 @@ func TestRebuildImportNativeRows(t *testing.T) {
 		})
 	})
 	require.Equal(t, want, gotNative)
-	ctx, b, opts := frontierFixture(t, 1, 0)
+	ctx, b, opts := frontierFixture(t, 0)
 	// SQLite does not save these struct-only fields (scanEdgeWithMeta).
 	// The new writer does; assert their exact retained payload separately.
 	for _, rows := range [][]*graph.Edge{input, want} {
@@ -181,7 +181,7 @@ func TestRebuildImportWithCheckedJSTSInputs(t *testing.T) {
 		r.SetPathAliasResolver(pathAlias)
 		r.SetNpmAliasResolver(rewrite)
 	}))
-	ctx, b, opts := frontierFixture(t, 1, 0)
+	ctx, b, opts := frontierFixture(t, 0)
 	b.AddBatch(nodes, edges)
 	require.NoError(t, runRebuildMain(ctx, b, opts, false, RebuildMainInputs{
 		PathAlias: func(file, module string) (string, error) { return pathAlias(file, module), nil },
@@ -216,7 +216,7 @@ func TestRebuildImportWithCheckedGoOwnership(t *testing.T) {
 	require.Equal(t, want, rebuildImportNativeRows(t, nodes, []*graph.Edge{edge}, func(r *Resolver) {
 		r.SetGoPackageOwnership(owner)
 	}))
-	ctx, b, opts := frontierFixture(t, 1, 0)
+	ctx, b, opts := frontierFixture(t, 0)
 	b.AddBatch(nodes, []*graph.Edge{edge})
 	in := RebuildMainInputs{GoOwnership: func(q GoImportCandidate) (GoPackageOwnershipResult, error) {
 		if q.CandidateID == right.ID {
@@ -313,7 +313,7 @@ func TestRebuildImportRefusesUnprovedInputs(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, b, opts := frontierFixture(t, 1, 0)
+			ctx, b, opts := frontierFixture(t, 0)
 			nodes := append(tc.nodes, file(tc.caller, tc.lang), file("a/start.ts", "typescript"), file("a/keep.ts", "typescript"))
 			first := rebuildImportTestEdge("a/start.ts", "a/start.ts", "./keep", 1)
 			b.AddBatch(nodes, []*graph.Edge{first})
@@ -447,7 +447,7 @@ func TestRebuildImportFileDirectories(t *testing.T) {
 				r.SetGoPackageOwnership(owner)
 				r.SetWorkspaceMembership(workspace)
 			}))
-			ctx, b, opts := frontierFixture(t, 1, 0)
+			ctx, b, opts := frontierFixture(t, 0)
 			opts.SpillBytes = 1
 			b.AddBatch(nodes, []*graph.Edge{edge})
 			in := RebuildMainInputs{GoOwnership: func(q GoImportCandidate) (GoPackageOwnershipResult, error) {
@@ -503,7 +503,7 @@ func TestRebuildImportFileDirectoryBareJSTS(t *testing.T) {
 				r.SetNpmDependencyLookup(declaresExternal)
 				r.SetWorkspaceMembership(func(string) string { return "" })
 			}))
-			ctx, b, opts := frontierFixture(t, 1, 0)
+			ctx, b, opts := frontierFixture(t, 0)
 			b.AddBatch(nodes, []*graph.Edge{edge})
 			noRewrite := func(_, _ string) (string, error) { return "", nil }
 			in := RebuildMainInputs{PathAlias: noRewrite, RewriteNpm: noRewrite, DependencyContractsReady: tc.ready}
@@ -530,7 +530,7 @@ func TestRebuildImportFileDirectoryBareJSTS(t *testing.T) {
 }
 
 func TestRebuildImportDirectoryFrontierBorrow(t *testing.T) {
-	ctx, b, opts := frontierFixture(t, 1, resolvePendingPageRows+1)
+	ctx, b, opts := frontierFixture(t, resolvePendingPageRows+1)
 	const file = "repo/pkg/file.go"
 	b.AddNode(rebuildImportTestNode(file, "repo", "", "", "go", graph.KindFile))
 	var first *store_pebble.RebuildImportDirectories
@@ -599,7 +599,7 @@ func TestRebuildImportDependencyContracts(t *testing.T) {
 		r.SetGoPackageOwnership(owner)
 		r.SetWorkspaceMembership(func(string) string { return "" })
 	}))
-	ctx, b, opts := frontierFixture(t, 1, 0)
+	ctx, b, opts := frontierFixture(t, 0)
 	b.AddBatch(nodes, edges)
 	require.NoError(t, RunRebuildMain(ctx, b, opts, RebuildMainInputs{
 		SelectCallers:            func(page []*graph.Edge) ([]*graph.Edge, error) { return page, nil },
@@ -671,7 +671,7 @@ func TestRebuildImportRewrittenPackagePrefix(t *testing.T) {
 			e.Context, e.Alias, e.Via = "import binding", "LocalName", "fixture"
 		}
 	}
-	ctx, b, opts := frontierFixture(t, 1, 0)
+	ctx, b, opts := frontierFixture(t, 0)
 	b.AddBatch(nodes, edges)
 	in := RebuildMainInputs{
 		PathAlias:                func(_, _ string) (string, error) { return "", nil },
@@ -686,7 +686,7 @@ func TestRebuildImportRewrittenPackagePrefix(t *testing.T) {
 
 func TestRebuildImportPostDirectoryRefusals(t *testing.T) {
 	t.Run("PrefixBudget", func(t *testing.T) {
-		ctx, b, opts := frontierFixture(t, 1, 0)
+		ctx, b, opts := frontierFixture(t, 0)
 		// Each key fits alone. Repeated full-component probes exhaust the
 		// shared budget without mutating the private graph.
 		spec := strings.Repeat("/", 4096)
@@ -705,7 +705,7 @@ func TestRebuildImportPostDirectoryRefusals(t *testing.T) {
 		{name: "NUL", spec: "./missing\x00::Export", ready: true, reason: "valid native external target"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, b, opts := frontierFixture(t, 1, 0)
+			ctx, b, opts := frontierFixture(t, 0)
 			before := []*graph.Edge{
 				rebuildImportTestEdge(first, first, "./found", 1),
 				rebuildImportTestEdge(caller, caller, tc.spec, 2),

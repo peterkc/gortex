@@ -2,7 +2,6 @@ package store_pebble
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -46,9 +45,7 @@ type v3GoldenExpectation struct {
 }
 
 type v3FixtureSuite struct {
-	capture bool
-	cases   []v3GoldenCase
-	want    map[string]v3GoldenExpectation
+	want map[string]v3GoldenExpectation
 }
 
 // The expected fingerprint commits the complete canonical H98 case, not a
@@ -121,16 +118,7 @@ func v3ErrorClass(err error) string {
 }
 func v3FixturePass(t *testing.T, ctx context.Context, budget int64, view RebuildView, nodes []*graph.Node) (*RebuildLink, error) {
 	t.Helper()
-	return v3FixturePassMode(t, ctx, budget, view, nodes, "ordinary")
-}
-
-func v3FixturePassMode(t *testing.T, ctx context.Context, budget int64, view RebuildView, nodes []*graph.Node, mode string) (*RebuildLink, error) {
-	t.Helper()
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	opts := RebuildLinkOptions{Binary: exe, WorkerArgs: []string{"-test.run=^TestRebuildLinkChild$", "--", mode}, ScratchParent: t.TempDir(), Partitions: 1, SpillBytes: 1 << 20}
+	opts := RebuildLinkOptions{ScratchParent: t.TempDir(), SpillBytes: 1 << 20}
 	if err := os.WriteFile(filepath.Join(opts.ScratchParent, "keep"), []byte("owner data"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -142,13 +130,10 @@ func v3FixturePassMode(t *testing.T, ctx context.Context, budget int64, view Reb
 		}
 		return nil
 	}
-	if budget == 0 {
-		return StartRebuildLink(ctx, opts, source)
-	}
 	if budget == rebuildCandidateCacheBytes {
-		return StartCachedRebuildLink(ctx, opts, view, source)
+		return StartRebuildLink(ctx, opts, view, source)
 	}
-	return startCachedRebuildLink(ctx, opts, view, budget, source)
+	return startRebuildLink(ctx, opts, view, budget, source)
 }
 
 func v3TraceCall(t *testing.T, ctx context.Context, p *RebuildLink, view RebuildView, reqs []LinkRequest, spill int, refuse bool) (trace []byte, seen []string, stats CandidatePageStats, err error) {
@@ -195,7 +180,7 @@ func (s *v3FixtureSuite) checkCall(t *testing.T, ctx context.Context, p *Rebuild
 	t.Helper()
 	trace, ids, stats, err := v3TraceCall(t, ctx, p, view, reqs, spill, refuse)
 	c := v3GoldenCase{Name: fmt.Sprintf("%s/call=%d", t.Name(), call), Requests: v3RequestDigests(t, reqs), Trace: trace, Rows: stats.ResultRows, Bytes: stats.ResultBytes, Error: v3ErrorClass(err)}
-	s.record(t, c)
+	s.expect(t, c)
 	if v3ErrorClass(err) != wantErr {
 		t.Fatalf("candidate error=%v want %q", err, wantErr)
 	}
@@ -205,22 +190,13 @@ func (s *v3FixtureSuite) checkCall(t *testing.T, ctx context.Context, p *Rebuild
 	return ids, stats
 }
 
-func (s *v3FixtureSuite) record(t *testing.T, c v3GoldenCase) {
-	t.Helper()
-	if s.capture {
-		s.cases = append(s.cases, c)
-		return
-	}
-	s.expect(t, c)
-}
-
 func (s *v3FixtureSuite) charge(t *testing.T, ctx context.Context, p *RebuildLink, view RebuildView, name string, req LinkRequest) CandidateBatchCharge {
 	t.Helper()
 	charge, err := p.ChargeCandidateRequest(ctx, view, req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.record(t, v3GoldenCase{Name: t.Name() + "/charge=" + name, Requests: v3RequestDigests(t, []LinkRequest{req}), Charge: &charge})
+	s.expect(t, v3GoldenCase{Name: t.Name() + "/charge=" + name, Requests: v3RequestDigests(t, []LinkRequest{req}), Charge: &charge})
 	return charge
 }
 
@@ -228,9 +204,6 @@ func (s *v3FixtureSuite) pass(t *testing.T, view RebuildView, nodes []*graph.Nod
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 	t.Cleanup(cancel)
-	if s.capture {
-		budget = 0
-	}
 	p, err := v3FixturePass(t, ctx, budget, view, nodes)
 	if err != nil {
 		t.Fatal(err)
@@ -276,14 +249,12 @@ func (s *v3FixtureSuite) RebuildV3ExactOrderAndLive(t *testing.T) {
 		t.Fatalf("native order %v want %v", ids, want)
 	}
 	// This write must be visible on the next live page, but not in frozen Q.
-	if v.v3 != nil {
-		if len(v.v3.summaries) == 0 {
-			t.Fatal("missing page-local summary cache")
-		}
-		v.ResetCandidatePage()
-		if len(v.v3.summaries) != 0 {
-			t.Fatal("summary cache survived page")
-		}
+	if len(v.v3.summaries) == 0 {
+		t.Fatal("missing page-local summary cache")
+	}
+	v.ResetCandidatePage()
+	if len(v.v3.summaries) != 0 {
+		t.Fatal("summary cache survived page")
 	}
 	changed := *b
 	changed.Name = "Changed"
@@ -352,18 +323,16 @@ func (s *v3FixtureSuite) RebuildV3EvictionWithinCall(t *testing.T) {
 	}
 	ctx, v := s.pass(t, RebuildView{}, nodes, 512<<10)
 	s.checkCall(t, ctx, v, RebuildView{}, 0, []LinkRequest{{Kind: LinkName, Key: "N", RepoPrefix: "r"}}, 1<<20, false, "")
-	if v.v3 != nil {
-		c := v.v3.cache
-		sum, err := v.v3.requestSummary(ctx, LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "r"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if v3RetainedCharge(c) > 512<<10 || c.slot(uint64(sum.first)) != nil || c.gens[0].head == nil && c.gens[1].head == nil {
-			t.Fatalf("first piece should be evicted with other retained rows: charge=%d", v3RetainedCharge(c))
-		}
-		if err := v.Close(); err != nil {
-			t.Fatal(err)
-		}
+	c := v.v3.cache
+	sum, err := v.v3.requestSummary(ctx, LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "r"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v3RetainedCharge(c) > 512<<10 || c.slot(uint64(sum.first)) != nil || c.gens[0].head == nil && c.gens[1].head == nil {
+		t.Fatalf("first piece should be evicted with other retained rows: charge=%d", v3RetainedCharge(c))
+	}
+	if err := v.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -396,14 +365,11 @@ func (s *v3FixtureSuite) RebuildV3LogicalRecordAndByteLimits(t *testing.T) {
 		n := &graph.Node{ID: "a", Name: "N", Meta: map[string]any{"p": strings.Repeat("x", linkRecordBytes)}}
 		ctx := t.Context()
 		budget := int64(rebuildCandidateCacheBytes)
-		if s.capture {
-			budget = 0
-		}
 		p, err := v3FixturePass(t, ctx, budget, RebuildView{}, []*graph.Node{n})
 		if p != nil {
 			_ = p.Close()
 		}
-		s.record(t, v3GoldenCase{Name: t.Name(), Error: v3ErrorClass(err)})
+		s.expect(t, v3GoldenCase{Name: t.Name(), Error: v3ErrorClass(err)})
 		if v3ErrorClass(err) != "candidate record exceeds 16777216 bytes" {
 			t.Fatalf("budget=%d err=%v", budget, err)
 		}
@@ -515,13 +481,11 @@ func (s *v3FixtureSuite) RebuildV3ExceptionalMapStream(t *testing.T) {
 	nodes := []*graph.Node{{ID: "a", Name: "N", Meta: map[string]any{"native": m}}, {ID: "b", Name: "N", Meta: map[string]any{"extension": json.RawMessage(raw)}}, {ID: "c", Name: "N"}, {ID: "d", Name: "N", Meta: map[string]any{"deep": deep}}}
 	ctx, v := s.pass(t, RebuildView{}, nodes, 512<<20)
 	s.checkCall(t, ctx, v, RebuildView{}, 0, []LinkRequest{{Kind: LinkName, Key: "N"}}, 1<<20, false, "")
-	if v.v3 != nil {
-		c := v.v3.cache
-		for _, g := range c.gens {
-			for e := g.head; e != nil; e = e.next {
-				if e.unbounded {
-					t.Fatal("exceptional piece retained")
-				}
+	c := v.v3.cache
+	for _, g := range c.gens {
+		for e := g.head; e != nil; e = e.next {
+			if e.unbounded {
+				t.Fatal("exceptional piece retained")
 			}
 		}
 	}
@@ -541,14 +505,12 @@ func (s *v3FixtureSuite) RebuildV3BoundedIndex(t *testing.T) {
 	ctx, v := s.pass(t, RebuildView{}, nodes, budget)
 	s.checkCall(t, ctx, v, RebuildView{}, 0, reqs, 1<<20, false, "")
 	s.checkCall(t, ctx, v, RebuildView{}, 1, reqs, 1<<20, false, "")
-	if v.v3 != nil {
-		c := v.v3.cache
-		if c.pieceCount <= uint64(len(c.index)) || len(c.index) == 0 || v3RetainedCharge(c) > budget {
-			t.Fatalf("slots=%d pieces=%d charge=%d", len(c.index), c.pieceCount, v3RetainedCharge(c))
-		}
-		if err := v.Close(); err != nil {
-			t.Fatal(err)
-		}
+	c := v.v3.cache
+	if c.pieceCount <= uint64(len(c.index)) || len(c.index) == 0 || v3RetainedCharge(c) > budget {
+		t.Fatalf("slots=%d pieces=%d charge=%d", len(c.index), c.pieceCount, v3RetainedCharge(c))
+	}
+	if err := v.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -565,7 +527,7 @@ func (s *v3FixtureSuite) RebuildV3AdmissionEpoch(t *testing.T) {
 	if before.Oversize || before.Rows != 1 {
 		t.Fatal(before)
 	}
-	if v.v3 != nil && len(v.v3.summaries) != 1 {
+	if len(v.v3.summaries) != 1 {
 		t.Fatal("sized admission did not use S summary")
 	}
 	s.charge(t, ctx, v, view, "repeat", req)
@@ -622,20 +584,13 @@ func (s *v3FixtureSuite) RebuildV3ReadFailure(t *testing.T) {
 			}
 			reqs := []LinkRequest{{Kind: LinkName, Key: "B"}, {Kind: LinkName, Key: "A", AllRepos: true}}
 			budget := int64(rebuildCandidateCacheBytes)
-			if s.capture {
-				budget = 0
-			}
 			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
-			workerMode := "ordinary"
-			if mode == "integrity" && budget == 0 {
-				workerMode = "corrupt-partition"
-			}
-			p, err := v3FixturePassMode(t, ctx, budget, view, nodes, workerMode)
+			p, err := v3FixturePass(t, ctx, budget, view, nodes)
 			if err != nil {
 				cancel()
 				t.Fatal(err)
 			}
-			if mode == "integrity" && budget != 0 {
+			if mode == "integrity" {
 				f, err := os.OpenFile(filepath.Join(p.dir, "v3.sst"), os.O_WRONLY, 0)
 				if err != nil {
 					cancel()
@@ -672,7 +627,7 @@ func (s *v3FixtureSuite) RebuildV3ReadFailure(t *testing.T) {
 			}
 			switch mode {
 			case "integrity":
-				if visits != 0 || budget == 0 && !strings.Contains(err.Error(), "read candidate partition") {
+				if visits != 0 {
 					t.Fatalf("integrity visits=%d err=%v", visits, err)
 				}
 			case "cancel":
@@ -684,7 +639,7 @@ func (s *v3FixtureSuite) RebuildV3ReadFailure(t *testing.T) {
 					t.Fatalf("live index visits=%d err=%v", visits, err)
 				}
 			}
-			s.record(t, v3GoldenCase{Name: t.Name(), Requests: v3RequestDigests(t, reqs), Trace: trace, Error: mode})
+			s.expect(t, v3GoldenCase{Name: t.Name(), Requests: v3RequestDigests(t, reqs), Trace: trace, Error: mode})
 			entries, e := os.ReadDir(filepath.Dir(p.dir))
 			if e != nil || len(entries) != 1 || entries[0].Name() != "keep" {
 				t.Fatalf("scratch after failure %v %v", entries, e)
@@ -698,93 +653,3 @@ func (s *v3FixtureSuite) RebuildV3ReadFailure(t *testing.T) {
 }
 
 func TestRebuildV3ReadFailure(t *testing.T) { runV3Fixture(t, (*v3FixtureSuite).RebuildV3ReadFailure) }
-
-// Both the ordinary CI dry run and opt-in capture use this exact collection
-// and key validation. A failed fixture or invalid key cannot produce output.
-func collectV3GoldenCases(t *testing.T) []v3GoldenCase {
-	t.Helper()
-	s := &v3FixtureSuite{capture: true}
-	t.Run("TestRebuildV3ExactOrderAndLive", s.RebuildV3ExactOrderAndLive)
-	t.Run("TestRebuildV3UnstableUnsized", s.RebuildV3UnstableUnsized)
-	t.Run("TestRebuildV3EvictionWithinCall", s.RebuildV3EvictionWithinCall)
-	t.Run("TestRebuildV3LogicalRecordAndByteLimits", s.RebuildV3LogicalRecordAndByteLimits)
-	t.Run("TestRebuildV3LogicalRowAndRunLimits", s.RebuildV3LogicalRowAndRunLimits)
-	t.Run("TestRebuildV3WireAndReducerPrecedence", s.RebuildV3WireAndReducerPrecedence)
-	t.Run("TestRebuildV3ExceptionalMapStream", s.RebuildV3ExceptionalMapStream)
-	t.Run("TestRebuildV3BoundedIndex", s.RebuildV3BoundedIndex)
-	t.Run("TestRebuildV3AdmissionEpoch", s.RebuildV3AdmissionEpoch)
-	t.Run("TestRebuildV3ReadFailure", s.RebuildV3ReadFailure)
-	if t.Failed() {
-		t.FailNow()
-	}
-	if len(s.cases) != 32 {
-		t.Fatalf("H98 capture has %d cases, want 32", len(s.cases))
-	}
-	names := make(map[string]bool, len(s.cases))
-	for i := range s.cases {
-		name, ok := strings.CutPrefix(s.cases[i].Name, t.Name()+"/")
-		if !ok || strings.TrimSpace(name) == "" || names[name] {
-			t.Fatalf("missing or duplicate capture case %q", s.cases[i].Name)
-		}
-		s.cases[i].Name = name
-		names[name] = true
-	}
-	return s.cases
-}
-
-func TestRebuildV3CandidateCaptureCases(t *testing.T) {
-	collectV3GoldenCases(t)
-}
-
-// Opt-in temporary capture. Never derive golden expectations from the new
-// reader: this suite runs only the H98 subprocess path.
-func TestCaptureRebuildCandidateGoldens(t *testing.T) {
-	prefix := os.Getenv("GORTEX_CAPTURE_GOLDEN")
-	if prefix == "" {
-		t.Skip("explicit H98 golden capture only")
-	}
-	if !filepath.IsAbs(prefix) {
-		t.Fatal("capture prefix must be absolute")
-	}
-	cases := collectV3GoldenCases(t)
-	raw, err := json.Marshal(cases)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// 262,144 row-limit frames (72 B each), request hashes, plus the
-	// remaining cases fit well below this uncompressed cap.
-	const maxBytes = 64 << 20
-	if len(raw) > maxBytes {
-		t.Fatal("candidate golden exceeds 64 MiB")
-	}
-	var compressed bytes.Buffer
-	w := gzip.NewWriter(&compressed)
-	_, err = w.Write(raw)
-	if err = errors.Join(err, w.Close()); err != nil {
-		t.Fatal(err)
-	}
-	if compressed.Len() > maxBytes {
-		t.Fatal("compressed candidate golden exceeds 64 MiB")
-	}
-	header := struct {
-		Cases, Bytes, CompressedBytes int
-		SHA256, CompressedSHA256      string
-	}{len(cases), len(raw), compressed.Len(), fmt.Sprintf("%x", sha256.Sum256(raw)), fmt.Sprintf("%x", sha256.Sum256(compressed.Bytes()))}
-	meta, err := json.Marshal(header)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, file := range []struct {
-		path string
-		data []byte
-	}{{prefix + ".candidates.json.gz", compressed.Bytes()}, {prefix + ".candidates.header.json", meta}} {
-		f, err := os.OpenFile(file.path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, err = f.Write(file.data)
-		if err = errors.Join(err, f.Close()); err != nil {
-			t.Fatal(err)
-		}
-	}
-}

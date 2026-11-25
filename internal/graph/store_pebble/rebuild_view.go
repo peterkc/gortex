@@ -64,7 +64,7 @@ func (v RebuildView) Node(ctx context.Context, id string) (*graph.Node, error) {
 
 // VisitNodes streams all saved nodes in ID order, including rows not kept by
 // the publication profile. It can feed StartRebuildLink's source directly via
-// a closure that binds ctx: the partition writer receives one node at a time.
+// a closure that binds ctx: the ordered file builder receives one node at a time.
 func (v RebuildView) VisitNodes(ctx context.Context, yield func(*graph.Node) error) error {
 	return v.visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
 		n, err := decodeNode(r.value)

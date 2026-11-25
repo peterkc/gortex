@@ -1,7 +1,6 @@
 package store_pebble
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/pebble/v2"
-	"github.com/cockroachdb/pebble/v2/sstable"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
@@ -388,54 +386,25 @@ func TestRebuildViewReadFailures(t *testing.T) {
 	assertTyped(err, errInvalidRecord)
 }
 
-func TestRebuildViewStreamsLinkPartition(t *testing.T) {
-	ctx := context.Background()
+func TestRebuildViewStreamsCandidateFile(t *testing.T) {
+	ctx := t.Context()
 	b := newBuild(t, FullProfile)
 	b.AddBatch([]*graph.Node{{ID: "b", Name: "Run"}, {ID: "a", Name: "Run"}}, nil)
-	dir := t.TempDir()
-	if err := buildLinkTables(ctx, dir, 1, func(yield func(*graph.Node) error) error {
-		return b.RebuildView().VisitNodes(ctx, yield)
-	}); err != nil {
+	view := b.RebuildView()
+	pass, err := StartRebuildLink(ctx, RebuildLinkOptions{ScratchParent: t.TempDir(), SpillBytes: 1 << 20}, view, func(yield func(*graph.Node) error) error { return view.VisitNodes(ctx, yield) })
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := pass.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	b.AddNode(&graph.Node{ID: "a", Name: "Moved"})
+	assertRebuildNodeIDs(t, func(yield func(*graph.Node) error) error { return view.VisitNameCandidates(ctx, "Run", nil, yield) }, "b")
 	assertRebuildNodeIDs(t, func(yield func(*graph.Node) error) error {
-		return b.RebuildView().VisitNameCandidates(ctx, "Run", nil, yield)
-	}, "b")
-	table, err := openLinkTable(ctx, linkPartitionPath(dir, 0))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := table.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
-	it, err := table.NewIter(sstable.NoTransforms, nil, nil, sstable.TableBlobContext{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := it.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
-	assertRebuildNodeIDs(t, func(yield func(*graph.Node) error) error {
-		prefix := linkPrefix(LinkName, "Run")
-		for kv := it.SeekGE(prefix, 0); kv != nil && bytes.HasPrefix(kv.K.UserKey, prefix); kv = it.Next() {
-			raw, _, err := kv.Value(nil)
-			if err != nil {
-				return err
-			}
-			n, err := decodeNode(raw)
-			if err != nil {
-				return err
-			}
-			if err := yield(n); err != nil {
-				return err
-			}
-		}
-		return it.Error()
+		_, err := pass.SelectCandidatePage(ctx, view, []LinkRequest{{Kind: LinkName, Key: "Run"}}, 1<<20, func(_ int, n *graph.Node) error { return yield(n) })
+		return err
 	}, "a", "b")
 }
 

@@ -136,7 +136,7 @@ func TestRunRebuildMainGenericParamsAfterDataflow(t *testing.T) {
 	// The raw frontier enables the tails even when no caller is selected.
 	// Binding ref too early would supply a resolved Run site to dataflow.
 	seen := 0
-	options := store_pebble.RebuildLinkOptions{ScratchParent: t.TempDir(), Partitions: 1, SpillBytes: 1}
+	options := store_pebble.RebuildLinkOptions{ScratchParent: t.TempDir(), SpillBytes: 1}
 	require.NoError(t, RunRebuildMain(t.Context(), build, options, RebuildMainInputs{
 		SelectCallers: func(page []*graph.Edge) ([]*graph.Edge, error) {
 			seen += len(page)

@@ -96,9 +96,9 @@ func TestRebuildMemberNativeRows(t *testing.T) {
 	// The same complete SQLite rows must survive either native insertion
 	// order and either worker order. Opposite fixture order stresses the
 	// canonical tie order instead of just checking that a winner exists.
-	for i, order := range []string{"forward", "reverse"} {
+	for _, order := range []string{"forward", "reverse"} {
 		t.Run(order, func(t *testing.T) {
-			ctx, build, opts := frontierFixture(t, i+1, 0)
+			ctx, build, opts := frontierFixture(t, 0)
 			opts.SpillBytes = 1
 			ordered := slices.Clone(nodes)
 			if order == "reverse" {
@@ -183,7 +183,7 @@ func TestRebuildMemberRefusesMissingEvidence(t *testing.T) {
 		{"C# extension visibility", "csharp", "src/caller.cs", "src/def.cs", map[string]any{"this_param_type": "I", "extension": true}},
 	} {
 		t.Run(tc.reason, func(t *testing.T) {
-			ctx, build, opts := frontierFixture(t, 1, 0)
+			ctx, build, opts := frontierFixture(t, 0)
 			opts.SpillBytes = 1
 			badMeta := map[string]any{"receiver_type": "NotOwner", "payload": []any{"unchanged"}}
 			if tc.lang == "csharp" {

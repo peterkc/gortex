@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -277,26 +276,7 @@ func TestRebuildBuildChildEntry(t *testing.T) {
 
 func rebuildTestLinkOptions(t *testing.T) store_pebble.RebuildLinkOptions {
 	t.Helper()
-	binary, err := os.Executable()
-	require.NoError(t, err)
-	return store_pebble.RebuildLinkOptions{
-		Binary: binary, WorkerArgs: []string{"-test.run=^TestRebuildBuildLinkEntry$", "--"}, Partitions: 1, SpillBytes: 1 << 20,
-	}
-}
-
-func TestRebuildBuildLinkEntry(t *testing.T) {
-	if os.Getenv("GORTEX_TEST_REBUILD_BUILD_CHILD") != "1" {
-		t.Skip("worker entry point")
-	}
-	spill, err := strconv.Atoi(os.Args[len(os.Args)-1])
-	if err == nil {
-		err = store_pebble.RunRebuildLinkWorker(t.Context(), os.Args[len(os.Args)-2], spill, os.Stdin, os.Stdout)
-	}
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	os.Exit(0)
+	return store_pebble.RebuildLinkOptions{SpillBytes: 1 << 20}
 }
 
 func TestRebuildBuildFatalChildDiagnostic(t *testing.T) {

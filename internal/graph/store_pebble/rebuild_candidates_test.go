@@ -1,6 +1,7 @@
 package store_pebble
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -45,39 +46,35 @@ func TestRebuildCandidatePageOrder(t *testing.T) {
 		{python, goQ, goZ}, {goQ, goZ, python, synth}, {moved}, {goQ, goZ, python}, {python, goQ, goZ}, nil, {old},
 	}
 	const wantRows = 26
-	for _, children := range []int{1, 2} {
-		t.Run(fmt.Sprintf("children=%d", children), func(t *testing.T) {
-			b := newBuild(t, FullProfile)
-			b.AddBatch(nodes, nil)
-			pass, ctx := startLinkFixture(t, RebuildLinkOptions{Partitions: children, SpillBytes: 1 << 20}, "ordinary", nodes)
-			b.AddBatch([]*graph.Node{moved, synth}, nil)
-			got := make([][]*graph.Node, len(requests))
-			last := -1
-			stats, err := pass.SelectCandidatePage(ctx, b.RebuildView(), requests, 1<<20, func(pos int, n *graph.Node) error {
-				if pos < last || pos >= len(requests) {
-					return fmt.Errorf("candidate position %d after %d", pos, last)
-				}
-				last = pos
-				got[pos] = append(got[pos], n)
-				return nil
-			})
-			if err != nil || stats.ResultRows != wantRows || stats.ResultBytes <= 0 || stats.SpillRuns != 0 || stats.SpillRows != 0 || stats.SpillBytes != 0 {
-				t.Fatalf("saved candidate page counts %+v: %v", stats, err)
-			}
-			for i := range want {
-				if len(got[i]) != len(want[i]) {
-					t.Errorf("position %d: got %d rows; want %d", i, len(got[i]), len(want[i]))
-					continue
-				}
-				for j := range want[i] {
-					if !reflect.DeepEqual(got[i][j], want[i][j]) {
-						t.Errorf("position %d row %d: got %+v; want %+v", i, j, got[i][j], want[i][j])
-					}
-				}
-			}
-			assertCandidatePageScratch(t, pass)
-		})
+	b := newBuild(t, FullProfile)
+	b.AddBatch(nodes, nil)
+	pass, ctx := startLinkFixture(t, b.RebuildView(), nodes)
+	b.AddBatch([]*graph.Node{moved, synth}, nil)
+	got := make([][]*graph.Node, len(requests))
+	last := -1
+	stats, err := pass.SelectCandidatePage(ctx, b.RebuildView(), requests, 1<<20, func(pos int, n *graph.Node) error {
+		if pos < last || pos >= len(requests) {
+			return fmt.Errorf("candidate position %d after %d", pos, last)
+		}
+		last = pos
+		got[pos] = append(got[pos], n)
+		return nil
+	})
+	if err != nil || stats.ResultRows != wantRows || stats.ResultBytes <= 0 {
+		t.Fatalf("saved candidate page counts %+v: %v", stats, err)
 	}
+	for i := range want {
+		if len(got[i]) != len(want[i]) {
+			t.Errorf("position %d: got %d rows; want %d", i, len(got[i]), len(want[i]))
+			continue
+		}
+		for j := range want[i] {
+			if !reflect.DeepEqual(got[i][j], want[i][j]) {
+				t.Errorf("position %d row %d: got %+v; want %+v", i, j, got[i][j], want[i][j])
+			}
+		}
+	}
+	assertCandidatePageScratch(t, pass)
 }
 
 func TestRebuildCandidatePageSpill(t *testing.T) {
@@ -89,7 +86,8 @@ func TestRebuildCandidatePageSpill(t *testing.T) {
 			Meta: map[string]any{"payload": payload}})
 	}
 	requests := []LinkRequest{{Kind: LinkName, Key: "Work", RepoPrefix: "repo"}}
-	pass, ctx := startLinkFixture(t, RebuildLinkOptions{Partitions: 2, SpillBytes: 1 << 20}, "ordinary", nodes)
+	pass, ctx := startLinkFixture(t, RebuildView{}, nodes)
+	var first CandidatePageStats
 	for _, threshold := range []int{1, 1 << 20} {
 		t.Run(fmt.Sprintf("limit=%d", threshold), func(t *testing.T) {
 			visits := 0
@@ -101,14 +99,13 @@ func TestRebuildCandidatePageSpill(t *testing.T) {
 				return nil
 			})
 			t.Logf("coordinator threshold=%d saved counts=%+v", threshold, stats)
-			if err != nil || visits != rows || stats.ResultRows != rows || stats.ResultBytes <= 1<<20 || stats.SpillBytes <= 0 {
+			if err != nil || visits != rows || stats.ResultRows != rows || stats.ResultBytes <= 1<<20 {
 				t.Fatalf("visits=%d counts=%+v: %v", visits, stats, err)
 			}
-			if threshold == 1 && (stats.SpillRows != rows-1 || stats.SpillRuns != rows-1) {
-				t.Fatalf("one byte must spill each pre-drain row: %+v", stats)
-			}
-			if threshold == 1<<20 && (stats.SpillRows <= 0 || stats.SpillRows >= rows-1 || stats.SpillRuns != 1) {
-				t.Fatalf("one MiB must spill one populated run: %+v", stats)
+			if threshold == 1 {
+				first = stats
+			} else if stats != first {
+				t.Fatalf("logical charges differ by spill threshold: %+v vs %+v", first, stats)
 			}
 			assertCandidatePageScratch(t, pass)
 		})
@@ -128,31 +125,45 @@ func assertCandidatePageScratch(t *testing.T, pass *RebuildLink) {
 	if !slices.Equal(names, []string{"keep", filepath.Base(pass.dir)}) {
 		t.Fatalf("scratch entries %v", names)
 	}
+	owned, err := os.ReadDir(pass.dir)
+	if err != nil || len(owned) != 1 || owned[0].Name() != "v3.sst" {
+		t.Fatalf("unexpected candidate scratch %v: %v", owned, err)
+	}
 }
 
 func TestRebuildCandidatePageFailure(t *testing.T) {
 	visitorErr := errors.New("candidate consumer refused")
 	for _, tc := range []struct {
-		name, mode string
+		name       string
 		cause      error
 		message    string
 		wantVisits int
 	}{
-		{name: "immutable", mode: "corrupt-partition", message: "read candidate partition"},
-		{name: "live", mode: "ordinary", cause: ErrRebuildView, message: "stale working candidate index entry"},
-		{name: "visitor", mode: "ordinary", cause: visitorErr, wantVisits: 1},
-		{name: "cancel", mode: "ordinary", cause: context.Canceled, wantVisits: 1},
-		{name: "request-bytes", mode: "ordinary", message: "link request page exceeds wire byte bound"},
+		{name: "immutable", message: "checksum mismatch"},
+		{name: "live", cause: ErrRebuildView, message: "stale working candidate index entry"},
+		{name: "visitor", cause: visitorErr, wantVisits: 1},
+		{name: "cancel", cause: context.Canceled, wantVisits: 1},
+		{name: "request-bytes", message: "link request page exceeds wire byte bound"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := newBuild(t, FullProfile)
 			nodes := []*graph.Node{{ID: "a", Name: "A"}, {ID: "b", Name: "B"}, {ID: "c", Name: "B"}}
 			b.AddBatch(nodes, nil)
-			pass, ctx := startLinkFixture(t, RebuildLinkOptions{Partitions: 2, SpillBytes: 1}, tc.mode, nodes)
+			pass, ctx := startLinkFixture(t, b.RebuildView(), nodes)
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
+			if tc.name == "immutable" {
+				f, err := os.OpenFile(filepath.Join(pass.dir, "v3.sst"), os.O_WRONLY, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = f.WriteAt(bytes.Repeat([]byte{0xff}, 8), 0)
+				if err = errors.Join(err, f.Close()); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if tc.name == "live" {
-				// A good immutable prefix already flushed a run when the
+				// Immutable checks already ran when the
 				// live lookup encounters this dangling name index entry.
 				key := keyStrings([]byte{familyName, nameRebuildScoped}, "A", "", "", "z")
 				if err := b.pending.Set(key, []byte("z"), pebble.NoSync); err != nil {

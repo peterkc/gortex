@@ -90,7 +90,7 @@ func (*T) Stationary() {}
 			slices.SortFunc(rawWant, compareRebuildImportEdges)
 			require.Equal(t, rawWant, raw)
 
-			ctx, build, _ := frontierFixture(t, 1, 0)
+			ctx, build, _ := frontierFixture(t, 0)
 			build.AddBatch(nodes, tc.input)
 			before := slices.Clone(tc.input)
 			slices.SortFunc(before, compareRebuildImportEdges)
@@ -159,7 +159,7 @@ func TestRunRebuildMainGoMethodReceiversRawPending(t *testing.T) {
 			keep := filepath.Join(lease, keepName)
 			require.NoError(t, os.WriteFile(keep, []byte("unowned guard file"), 0600))
 			// No Binary: even attempting to start a candidate worker fails.
-			opts := store_pebble.RebuildLinkOptions{ScratchParent: lease, Partitions: 1, SpillBytes: 1}
+			opts := store_pebble.RebuildLinkOptions{ScratchParent: lease, SpillBytes: 1}
 			seen := 0
 			require.NoError(t, RunRebuildMain(t.Context(), build, opts, RebuildMainInputs{
 				SelectCallers: func(page []*graph.Edge) ([]*graph.Edge, error) {

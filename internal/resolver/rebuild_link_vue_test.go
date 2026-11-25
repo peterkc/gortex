@@ -116,7 +116,7 @@ func rebuildVueSortedRows(edges []*graph.Edge) []*graph.Edge {
 // are saved evidence, not a second resolver path under test.
 func rebuildVueWorkingRows(t *testing.T, nodes []*graph.Node, edges []*graph.Edge) ([]*graph.Edge, error) {
 	t.Helper()
-	ctx, b, opts := frontierFixture(t, 1, 0)
+	ctx, b, opts := frontierFixture(t, 0)
 	b.AddBatch(nodes, edges)
 	err := runRebuildLinkFrontier(ctx, b, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
 		var moves []graph.EdgeReindex

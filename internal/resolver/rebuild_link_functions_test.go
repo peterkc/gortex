@@ -15,7 +15,7 @@ import (
 )
 
 func TestRebuildFunctionNativeRows(t *testing.T) {
-	ctx, build, opts := frontierFixture(t, 2, 0)
+	ctx, build, opts := frontierFixture(t, 0)
 	opts.SpillBytes = 1 // exercise the sorted stream, not insertion order
 	const goFile, cFile, tsFile, csFile = "src/caller.go", "src/caller.c", "src/caller.ts", "src/caller.cs"
 	const cppFile, javaFile, phpFile = "src/caller.cpp", "src/Caller.java", "src/caller.php"
@@ -176,7 +176,7 @@ func TestRebuildFunctionRefusesMissingRule(t *testing.T) {
 		{"csharp", "caller.cs", "using.cs", "csRun", "C# first-use visibility", graph.KindMethod},
 	} {
 		t.Run(tc.lang, func(t *testing.T) {
-			ctx, build, opts := frontierFixture(t, 1, 0)
+			ctx, build, opts := frontierFixture(t, 0)
 			build.AddBatch([]*graph.Node{
 				{ID: "a-go", Name: "caller", RepoPrefix: "repo", Language: "go", FilePath: "caller.go", Kind: graph.KindFunction},
 				{ID: "goRun", Name: "Run", RepoPrefix: "repo", Language: "go", FilePath: "caller.go", Kind: graph.KindFunction},
@@ -269,7 +269,7 @@ func Limit() int { return MAX_RETRIES }
 				require.Equal(t, before, e)
 			}
 
-			ctx, build, opts := frontierFixture(t, 2, 0)
+			ctx, build, opts := frontierFixture(t, 0)
 			opts.SpillBytes = 1
 			build.AddBatch(nodes, selected)
 			err := runRebuildLinkFrontier(ctx, build, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
@@ -391,7 +391,7 @@ func TestRebuildFunctionGoFullNameMiss(t *testing.T) {
 						require.Equal(t, before, e)
 					}
 
-					ctx, build, opts := frontierFixture(t, 2, 0)
+					ctx, build, opts := frontierFixture(t, 0)
 					opts.SpillBytes = 1
 					build.AddBatch(nodes, selected)
 					err := runRebuildLinkFrontier(ctx, build, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
@@ -399,7 +399,7 @@ func TestRebuildFunctionGoFullNameMiss(t *testing.T) {
 						moves, err := reduceRebuildMainPage(ctx, f, page)
 						require.Empty(t, moves)
 						require.Equal(t, []*graph.Edge{before}, page)
-						require.Equal(t, store_pebble.LinkRequestProgress{CandidateCalls: 1, RequestsSent: 1, FramesSent: 1, RoundTrips: 1}, f.link.RequestProgress())
+						require.Equal(t, store_pebble.LinkRequestProgress{CandidateCalls: 1}, f.link.RequestProgress())
 						return err
 					})
 					if hit {

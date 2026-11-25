@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"strconv"
 
 	"github.com/spf13/cobra"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
@@ -10,7 +9,6 @@ import (
 )
 
 const rebuildBuildWorkerCommand = "__rebuild-build-worker"
-const rebuildLinkWorkerCommand = "__rebuild-link-worker"
 
 var rebuildBuildWorkerCmd = &cobra.Command{
 	Use:               rebuildBuildWorkerCommand + " lease-dir",
@@ -21,31 +19,8 @@ var rebuildBuildWorkerCmd = &cobra.Command{
 	PersistentPreRun:  skipWorkerHooks,
 	PersistentPostRun: skipWorkerHooks,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		binary, err := os.Executable()
-		if err != nil {
-			return err
-		}
-		link := store_pebble.RebuildLinkOptions{
-			Binary: binary, WorkerArgs: []string{rebuildLinkWorkerCommand}, Partitions: 1, SpillBytes: 1 << 20,
-		}
+		link := store_pebble.RebuildLinkOptions{SpillBytes: 1 << 20}
 		return indexer.RunRebuildBuildWorker(cmd.Context(), args[0], os.Stdin, os.Stdout, newLogger(), link)
-	},
-}
-
-var rebuildLinkWorkerCmd = &cobra.Command{
-	Use:               rebuildLinkWorkerCommand + " partition-path spill-bytes",
-	Args:              cobra.ExactArgs(2),
-	Hidden:            true,
-	SilenceUsage:      true,
-	SilenceErrors:     true,
-	PersistentPreRun:  skipWorkerHooks,
-	PersistentPostRun: skipWorkerHooks,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		spill, err := strconv.Atoi(args[1])
-		if err != nil {
-			return err
-		}
-		return store_pebble.RunRebuildLinkWorker(cmd.Context(), args[0], spill, os.Stdin, os.Stdout)
 	},
 }
 
@@ -54,5 +29,5 @@ var rebuildLinkWorkerCmd = &cobra.Command{
 func skipWorkerHooks(*cobra.Command, []string) {}
 
 func init() {
-	rootCmd.AddCommand(rebuildBuildWorkerCmd, rebuildLinkWorkerCmd)
+	rootCmd.AddCommand(rebuildBuildWorkerCmd)
 }

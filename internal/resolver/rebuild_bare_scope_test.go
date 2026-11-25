@@ -141,7 +141,7 @@ func TestRebuildBareNameScopeRejectsMovingDestination(t *testing.T) {
 	// Unselected raw pending rows still enable the native cold tail. With no
 	// worker binary, an attempted candidate scan would fail instead.
 	seen := 0
-	options := store_pebble.RebuildLinkOptions{ScratchParent: t.TempDir(), Partitions: 1, SpillBytes: 1}
+	options := store_pebble.RebuildLinkOptions{ScratchParent: t.TempDir(), SpillBytes: 1}
 	err := RunRebuildMain(t.Context(), build, options, RebuildMainInputs{
 		SelectCallers: func(page []*graph.Edge) ([]*graph.Edge, error) {
 			seen += len(page)

@@ -90,7 +90,7 @@ func TestRebuildCppOverloadNativeRows(t *testing.T) {
 	}
 	add("Filtered", "char,char", best.ID, best, lower, barrel, attributed, plain, foreign, otherLang).Meta[graph.MetaGenericInstantiation] = true
 
-	ctx, b, opts := frontierFixture(t, 2, 0)
+	ctx, b, opts := frontierFixture(t, 0)
 	opts.SpillBytes = 1 // the real scoped candidate page, with a forced sort spill
 	b.AddBatch(nodes, edges)
 	slices.Reverse(nodes)
@@ -113,7 +113,7 @@ func TestRebuildCppOverloadNativeRows(t *testing.T) {
 }
 
 func TestRebuildCppOverloadReplayPageError(t *testing.T) {
-	ctx, b, opts := frontierFixture(t, 1, 0)
+	ctx, b, opts := frontierFixture(t, 0)
 	best := rebuildCppTestFn("best", "int", "v", 1)
 	worse := rebuildCppTestFn("worse", "double", "v", 1)
 	e := &graph.Edge{From: "caller", To: "unresolved::process", Kind: graph.EdgeCalls,
