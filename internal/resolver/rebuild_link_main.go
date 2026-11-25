@@ -167,6 +167,33 @@ func runRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts st
 	return runRebuildGoExternalCalls(ctx, build)
 }
 
+func rebuildMainTarget(edge *graph.Edge) string {
+	target := graph.UnresolvedName(edge.To)
+	if target == "" {
+		target = strings.TrimPrefix(edge.To, unresolvedPrefix)
+	}
+	return target
+}
+
+// Only the unconditional type branches of the existing dispatch. Hierarchy
+// precedes wildcard; reference/instantiation follows wildcard and Vue.
+func rebuildMainTypePrimary(edge *graph.Edge, target string) (primary, allowFunction bool) {
+	if resolutionExempt(edge) || strings.HasPrefix(target, "grpc::") || strings.HasPrefix(target, "pyrel::") ||
+		strings.HasPrefix(target, "import::") || strings.HasPrefix(target, "extern::") {
+		return false, false
+	}
+	switch edge.Kind {
+	case graph.EdgeExtends, graph.EdgeImplements, graph.EdgeComposes, graph.EdgeReturns, graph.EdgeTypedAs:
+		return true, false
+	case graph.EdgeInstantiates, graph.EdgeReferences:
+		if strings.HasPrefix(target, "*.") || (edge.Kind == graph.EdgeReferences && strings.HasSuffix(edge.FilePath, ".vue") && edge.Meta["template"] == true) {
+			return false, false
+		}
+		return true, true
+	}
+	return false, false
+}
+
 func reduceRebuildMainPage(ctx context.Context, f *rebuildLinkFrontier, page []*graph.Edge) ([]graph.EdgeReindex, error) {
 	type tokenSite struct {
 		index   int
@@ -175,6 +202,7 @@ func reduceRebuildMainPage(ctx context.Context, f *rebuildLinkFrontier, page []*
 	}
 	var requests []store_pebble.LinkRequest
 	var tokens []tokenSite
+	var typeQueries []rebuildTypeQuery
 	updates := make([]*graph.Edge, len(page))
 	for i, edge := range page {
 		if err := ctx.Err(); err != nil {
@@ -183,10 +211,8 @@ func reduceRebuildMainPage(ctx context.Context, f *rebuildLinkFrontier, page []*
 		if resolutionExempt(edge) {
 			continue
 		}
-		target := graph.UnresolvedName(edge.To)
-		if target == "" {
-			target = strings.TrimPrefix(edge.To, unresolvedPrefix)
-		}
+		target := rebuildMainTarget(edge)
+		primaryType, _ := rebuildMainTypePrimary(edge, target)
 		switch {
 		case edge.Kind == graph.EdgeCalls && phpEdgeMetaString(edge, "eloquent_model") != "":
 			// The declared-static branch precedes even the tail-owned stubs.
@@ -205,10 +231,18 @@ func reduceRebuildMainPage(ctx context.Context, f *rebuildLinkFrontier, page []*
 				return nil, err
 			}
 			updates[i] = &e
-		case edge.Kind == graph.EdgeExtends || edge.Kind == graph.EdgeImplements || edge.Kind == graph.EdgeComposes ||
-			edge.Kind == graph.EdgeReturns || edge.Kind == graph.EdgeTypedAs:
+		case primaryType:
+			// Warm at first use, as the old reducer did; all other type
+			// primary requests read the same immutable pre-page snapshot.
+			if typeQueries == nil {
+				var err error
+				typeQueries, err = resolveRebuildTypePage(ctx, f, page)
+				if err != nil {
+					return nil, err
+				}
+			}
 			e := *edge
-			if err := resolveRebuildType(ctx, f, &e, target, false); err != nil {
+			if err := typeQueries[i].finish(&e); err != nil {
 				return nil, err
 			}
 			updates[i] = &e
@@ -237,12 +271,6 @@ func reduceRebuildMainPage(ctx context.Context, f *rebuildLinkFrontier, page []*
 			(edge.Kind == graph.EdgeReferences && strings.HasSuffix(edge.FilePath, ".vue") && edge.Meta["template"] == true):
 			e := *edge
 			if err := resolveRebuildVue(ctx, f, &e, target); err != nil {
-				return nil, err
-			}
-			updates[i] = &e
-		case edge.Kind == graph.EdgeInstantiates || edge.Kind == graph.EdgeReferences:
-			e := *edge
-			if err := resolveRebuildType(ctx, f, &e, target, true); err != nil {
 				return nil, err
 			}
 			updates[i] = &e

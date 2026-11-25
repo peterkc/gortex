@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/cockroachdb/pebble/v2/sstable"
 	"github.com/zzet/gortex/internal/graph"
@@ -47,6 +48,25 @@ type RebuildLink struct {
 	active  chan struct{}
 	done    chan struct{}
 	cleanup error // read only after done closes
+
+	candidateCalls atomic.Uint64
+	requestsSent   atomic.Uint64
+	framesSent     atomic.Uint64
+	roundTrips     atomic.Uint64
+}
+
+// LinkRequestProgress counts candidate page calls, immutable requests fully
+// written to children and corresponding framed IPC. Ready frames are not round trips.
+// A round trip counts only when the coordinator consumes a valid reply.
+type LinkRequestProgress struct {
+	CandidateCalls uint64
+	RequestsSent   uint64
+	FramesSent     uint64
+	RoundTrips     uint64
+}
+
+func (s *RebuildLink) RequestProgress() LinkRequestProgress {
+	return LinkRequestProgress{CandidateCalls: s.candidateCalls.Load(), RequestsSent: s.requestsSent.Load(), FramesSent: s.framesSent.Load(), RoundTrips: s.roundTrips.Load()}
 }
 
 type linkWorker struct {
@@ -280,7 +300,7 @@ func (s *RebuildLink) SelectPage(ctx context.Context, requests []LinkRequest, vi
 	if err != nil {
 		return stats, err
 	}
-	replies, err := s.requestPage(pages)
+	replies, err := s.requestPage(parts, pages)
 	if err != nil {
 		return stats, err
 	}
@@ -340,7 +360,11 @@ type linkReplyFile struct {
 	stats LinkPageStats
 }
 
-func (s *RebuildLink) requestPage(pages [linkPartitionLimit][]byte) ([linkPartitionLimit]linkReplyFile, error) {
+func (s *RebuildLink) requestPage(parts []int, pages [linkPartitionLimit][]byte) ([linkPartitionLimit]linkReplyFile, error) {
+	var counts [linkPartitionLimit]uint64
+	for _, part := range parts {
+		counts[part]++
+	}
 	var files [linkPartitionLimit]linkReplyFile
 	var waits [linkPartitionLimit]<-chan LinkPageStats
 	var ids [linkPartitionLimit]uint64
@@ -352,6 +376,8 @@ func (s *RebuildLink) requestPage(pages [linkPartitionLimit][]byte) ([linkPartit
 		if err != nil {
 			return files, err
 		}
+		s.requestsSent.Add(counts[part])
+		s.framesSent.Add(1)
 		waits[part], ids[part] = ch, id
 	}
 	for part, ch := range waits {
@@ -362,6 +388,7 @@ func (s *RebuildLink) requestPage(pages [linkPartitionLimit][]byte) ([linkPartit
 		case <-s.ctx.Done():
 			return files, context.Cause(s.ctx)
 		case stats := <-ch:
+			s.roundTrips.Add(1)
 			files[part].stats = stats
 			if stats.ResultRows != 0 {
 				files[part].path = linkReplyPath(s.workers[part].path, ids[part])

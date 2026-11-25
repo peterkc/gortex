@@ -32,6 +32,7 @@ type CandidatePageStats struct {
 // unchanged until it returns. Visits are tentative: stage decisions only and
 // apply nothing unless the call returns nil. Any error fails and reaps the pass.
 func (s *RebuildLink) SelectCandidatePage(ctx context.Context, view RebuildView, requests []LinkRequest, spillBytes int, visit func(int, *graph.Node) error) (stats CandidatePageStats, err error) {
+	s.candidateCalls.Add(1)
 	pageCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	stop := context.AfterFunc(s.ctx, func() { cancel(context.Cause(s.ctx)) })
