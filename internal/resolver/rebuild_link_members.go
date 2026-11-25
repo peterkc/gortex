@@ -35,11 +35,11 @@ func resolveRebuildMember(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 	scope := newRebuildFunctionScope(edge, caller, name)
 	all := newRebuildMemberGroup(scope)
 	reachable := newRebuildMemberGroup(scope)
-	// D71 Go callers require the native direct-import cut. Other callers
-	// retain the existing refusal path until their domain is proved.
-	goReach := lang == "go"
+	// D71 callers use the native direct-import cut and ordered member
+	// fallbacks. Other callers retain the existing refusal paths.
+	selected := lang == "go" || lang == "javascript" || lang == "typescript"
 	var dirs map[string]struct{}
-	if goReach && name != "" {
+	if selected && name != "" {
 		dirs, err = f.reachableDirectories(ctx, edge.FilePath)
 		if err != nil {
 			return err
@@ -48,6 +48,7 @@ func resolveRebuildMember(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 	_, hasTypeArgs := metaIntValue(edge.Meta["type_arg_count"])
 	_, hasArgs := metaIntValue(edge.Meta["arg_count"])
 	member, _ := edge.Meta["member_call"].(bool)
+	bound := f.providesFor[receiver]
 	var firstDir string
 	mixedDirs := false
 	if name != "" {
@@ -80,12 +81,14 @@ func resolveRebuildMember(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 			mixedDirs = mixedDirs || firstDir != candidateDir
 			exact := receiver != "" && recv == receiver && n.Kind == graph.KindMethod
 			callerMethod := !member && callerRecv != "" && recv == callerRecv && n.Kind == graph.KindMethod
+			_, di := bound[recv]
+			di = receiver != "" && di && n.Kind == graph.KindMethod
 			locality := !isCSharpExtension(n) && (!member || n.ID != edge.From)
 			typeOK := hasTypeArgs && csharpAcceptsTypeArgCount(edge, n)
 			argOK := hasArgs && csharpMethodAcceptsArgCount(edge, n)
-			all.consider(n, candidateDir == dir, exact, callerMethod, locality, typeOK, argOK)
+			all.consider(n, candidateDir == dir, exact, di, callerMethod, locality, typeOK, argOK)
 			if _, ok := dirs[candidateDir]; ok {
-				reachable.consider(n, candidateDir == dir, exact, callerMethod, locality, typeOK, argOK)
+				reachable.consider(n, candidateDir == dir, exact, di, callerMethod, locality, typeOK, argOK)
 			}
 			return nil
 		})
@@ -117,7 +120,7 @@ func resolveRebuildMember(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 	// With one candidate directory, reachability keeps all or discards all
 	// and then restores all. With no recorded edge path native skips it.
 	// Otherwise scope (unlike the exact tiers) sees the filtered group.
-	reachMayNarrow := !goReach && edge.FilePath != "" && mixedDirs
+	reachMayNarrow := !selected && edge.FilePath != "" && mixedDirs
 	e := *edge
 	picked := false
 	if raw.count != 0 {
@@ -155,19 +158,46 @@ func resolveRebuildMember(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 				return refuse("PHP in-repo receiver and inherited dispatch evidence")
 			case reachMayNarrow && (all.all.method || all.all.locality):
 				return refuse("native page direct-import reachability")
-			case receiver != "" && raw.method:
+			case receiver != "" && raw.method && (!selected || f.providesFor == nil):
 				return refuse("native first-use useClass bindings")
-			case filtered.callerMethod:
+			case selected && filtered.diMethod != "":
+				picked = true
+				e.To, e.Confidence = filtered.diMethod, 0.9
+				e.Meta = maps.Clone(e.Meta)
+				if e.Meta == nil {
+					e.Meta = make(map[string]any, 1)
+				}
+				e.Meta["resolution"] = "useClass_binding"
+			case filtered.callerMethod && !selected:
 				return refuse("caller-receiver method fallback")
+			case selected && filtered.dirCallerMethod != "":
+				picked = true
+				e.To, e.Confidence = filtered.dirCallerMethod, 0.9
+			case selected && filtered.firstCallerMethod != "":
+				picked = true
+				e.To, e.Confidence = filtered.firstCallerMethod, 0.8
 			case lang == "csharp" && raw.extension:
 				return refuse("C# extension visibility and hierarchy evidence")
 			case receiver == "" && filtered.methodCount > 1:
 				return nil // native leaves an untyped ambiguous member unresolved
-			case filtered.locality && !goReach:
+			case filtered.locality && !selected:
 				return refuse("method locality or interface dispatch fallback")
 			case filtered.locality:
-				// The preceding DI and receiver guards still own typed dispatch.
-				// This is the native first reachable method/function fallback.
+				// Native marks a typed ambiguous interface pick before locality.
+				if receiver != "" && filtered.methodCount > 1 {
+					isInterface, err := rebuildMemberReceiverIsInterface(ctx, f, edge, receiver, repo, lang)
+					if err != nil {
+						return err
+					}
+					if isInterface {
+						e.Meta = maps.Clone(e.Meta)
+						if e.Meta == nil {
+							e.Meta = make(map[string]any, 1)
+						}
+						e.Meta["dispatch"] = "interface"
+						e.Origin = graph.OriginASTInferred
+					}
+				}
 				if filtered.methodCount == 1 && loneMemberLang(filtered.firstMethodLanguage) && e.Origin == "" {
 					e.Origin = graph.OriginASTInferred
 					if e.Confidence == 0 {
@@ -205,6 +235,22 @@ func resolveRebuildMember(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 	return nil
 }
 
+// The native receiver interface predicate is a compatible same-repo name
+// lookup, not a test of structural method satisfaction or reachability.
+func rebuildMemberReceiverIsInterface(ctx context.Context, f *rebuildLinkFrontier, edge *graph.Edge, receiver, repo, lang string) (bool, error) {
+	_, langs := resolverCompatibleLanguages(lang)
+	req := store_pebble.LinkRequest{Kind: store_pebble.LinkName, Key: receiver, RepoPrefix: repo, Languages: langs}
+	var found bool
+	_, err := f.candidates(ctx, []store_pebble.LinkRequest{req}, func(_ int, n *graph.Node) error {
+		one := [1]*graph.Node{n}
+		if n.Kind == graph.KindInterface && len(genericInstantiationOnly(edge, withoutAttributedTerminals(one[:]))) != 0 {
+			found = true
+		}
+		return nil
+	})
+	return found, err
+}
+
 // Field owner equality uses the stored package stamp before the Go-only
 // directory fallback, and compares empty non-Go stamps as native does.
 func rebuildFieldPackage(n *graph.Node) string {
@@ -234,15 +280,15 @@ func newRebuildMemberGroup(scope rebuildFunctionScope) rebuildMemberGroup {
 	return rebuildMemberGroup{base, base, base, base}
 }
 
-func (g *rebuildMemberGroup) consider(n *graph.Node, sameDir, exact, callerMethod, locality, typeOK, argOK bool) {
-	g.all.consider(n, sameDir, exact, callerMethod, locality)
+func (g *rebuildMemberGroup) consider(n *graph.Node, sameDir, exact, di, callerMethod, locality, typeOK, argOK bool) {
+	g.all.consider(n, sameDir, exact, di, callerMethod, locality)
 	if typeOK {
-		g.typed.consider(n, sameDir, exact, callerMethod, locality)
+		g.typed.consider(n, sameDir, exact, di, callerMethod, locality)
 	}
 	if argOK {
-		g.arity.consider(n, sameDir, exact, callerMethod, locality)
+		g.arity.consider(n, sameDir, exact, di, callerMethod, locality)
 		if typeOK {
-			g.typedArity.consider(n, sameDir, exact, callerMethod, locality)
+			g.typedArity.consider(n, sameDir, exact, di, callerMethod, locality)
 		}
 	}
 }
@@ -264,14 +310,26 @@ type rebuildMemberChoices struct {
 	exact, localExact                                    string
 	dirMethod, firstMethod, firstMethodLanguage          string
 	dirFunc, firstFunc                                   string
+	diMethod, dirCallerMethod, firstCallerMethod         string
 	ambiguous, method, callerMethod, extension, locality bool
 }
 
-func (s *rebuildMemberChoices) consider(n *graph.Node, sameDir, exact, callerMethod, locality bool) {
+func (s *rebuildMemberChoices) consider(n *graph.Node, sameDir, exact, di, callerMethod, locality bool) {
 	s.count++
 	s.scope.consider(n)
 	s.method = s.method || n.Kind == graph.KindMethod
-	s.callerMethod = s.callerMethod || callerMethod
+	if di && s.diMethod == "" {
+		s.diMethod = n.ID
+	}
+	if callerMethod {
+		s.callerMethod = true
+		if s.firstCallerMethod == "" {
+			s.firstCallerMethod = n.ID
+		}
+		if sameDir && s.dirCallerMethod == "" {
+			s.dirCallerMethod = n.ID
+		}
+	}
 	s.extension = s.extension || isCSharpExtension(n)
 	if locality && (n.Kind == graph.KindFunction || n.Kind == graph.KindMethod) {
 		s.locality = true

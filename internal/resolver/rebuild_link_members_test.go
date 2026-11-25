@@ -178,7 +178,7 @@ func TestRebuildMemberRefusesMissingEvidence(t *testing.T) {
 		reason, lang, caller, file string
 		meta                       map[string]any
 	}{
-		{"direct-import reachability", "typescript", "src/caller.ts", "far/def.ts", nil},
+		{"direct-import reachability", "python", "src/caller.py", "far/def.py", nil},
 		{"first-use useClass", "go", "src/caller.go", "src/def.go", nil},
 		{"C# extension visibility", "csharp", "src/caller.cs", "src/def.cs", map[string]any{"this_param_type": "I", "extension": true}},
 	} {

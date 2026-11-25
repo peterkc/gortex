@@ -15,6 +15,7 @@ type rebuildLinkFrontier struct {
 	link                          *store_pebble.RebuildLink
 	opts                          store_pebble.RebuildLinkOptions
 	imports                       rebuildMainImportInputs
+	providesFor                   map[string]map[string]struct{} // frozen at first original typed wildcard page
 	importDirs                    *store_pebble.RebuildImportDirectories
 	closeImportDirs               func() error
 	pageReach                     map[string]map[string]struct{} // borrowed for one precommit page

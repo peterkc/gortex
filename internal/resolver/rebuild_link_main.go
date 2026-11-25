@@ -78,7 +78,26 @@ func runRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts st
 		}
 	}()
 	hadPending := false
+	var providesProof error
+	var providesFor map[string]map[string]struct{}
+	view := build.RebuildView()
 	selectCallers := func(page []*graph.Edge) ([]*graph.Edge, error) {
+		// Prove the projection stable across native and private page order
+		// before any main move. Only the first original wildcard needs the
+		// proof or the census, including pages receipt selection empties.
+		if !hadPending {
+			providesProof = checkRebuildProvidesStationarity(ctx, view)
+		}
+		if providesFor == nil && pendingNeedsProvidesIndex(page) {
+			if providesProof != nil {
+				return nil, providesProof
+			}
+			var err error
+			providesFor, err = captureRebuildProvides(ctx, view)
+			if err != nil {
+				return nil, err
+			}
+		}
 		// Native's cold tail is enabled by the original pending stream,
 		// even if receipt selection keeps nothing or main moves no rows.
 		hadPending = true
@@ -89,6 +108,7 @@ func runRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts st
 	}
 	err = runRebuildLinkFrontier(ctx, build, opts, selectCallers, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
 		f.imports = imports
+		f.providesFor = providesFor
 		moves, err := reduceRebuildMainPage(ctx, f, page)
 		if err != nil || len(moves) == 0 {
 			return err
