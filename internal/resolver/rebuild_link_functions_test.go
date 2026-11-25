@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/parser/languages"
 )
 
 func TestRebuildFunctionNativeRows(t *testing.T) {
@@ -201,6 +202,116 @@ func TestRebuildFunctionRefusesMissingRule(t *testing.T) {
 			require.ErrorContains(t, err, tc.reason)
 			require.Equal(t, want, rebuildFnPointerSaved(t, build))
 			checkFrontierScratch(t, opts.ScratchParent)
+		})
+	}
+}
+
+// The main pass sees the extractor's prefixed read, not the declaration's
+// bare name. A compatible full-name hit is deliberately unsupported.
+func TestRebuildFunctionValueRefFullNameMiss(t *testing.T) {
+	const file, name = "src/config.go", "MAX_RETRIES"
+	const target = "valueref::" + name
+	facts, err := languages.NewGoExtractor().Extract(file, []byte(`package config
+const MAX_RETRIES = 3
+func Limit() int { return MAX_RETRIES }
+`))
+	require.NoError(t, err)
+	defer facts.ReleaseTree()
+	var selected []*graph.Edge
+	for _, e := range facts.Edges {
+		if e.To == "unresolved::"+target && e.Kind == graph.EdgeReads {
+			selected = append(selected, e)
+		}
+	}
+	require.Len(t, selected, 1)
+	read := selected[0]
+	require.Equal(t, graph.OriginSpeculative, read.Origin)
+	require.Equal(t, valueRefCandidateVia, read.Meta["via"])
+	require.Equal(t, name, read.Meta["name"])
+	setEdgeTerminal(read, terminalReasonNoDefinition)
+	before := cloneFrameworkEdge(read)
+	var foundDeclaration bool
+	for _, n := range facts.Nodes {
+		n.RepoPrefix = "repo"
+		foundDeclaration = foundDeclaration || (n.Name == name && n.Kind == graph.KindConstant)
+	}
+	require.True(t, foundDeclaration, "bare declaration must exist")
+	for _, tc := range []struct {
+		label string
+		hit   bool
+	}{{"miss", false}, {"compatible_hit", true}} {
+		t.Run(tc.label, func(t *testing.T) {
+			hit := tc.hit
+			nodes := slices.Clone(facts.Nodes)
+			// These exact-name decoys are excluded by the native request scope.
+			nodes = append(nodes,
+				&graph.Node{ID: "other-repo", Name: target, RepoPrefix: "other", Language: "go", FilePath: file, Kind: graph.KindFunction},
+				&graph.Node{ID: "other-language", Name: target, RepoPrefix: "repo", Language: "python", FilePath: file, Kind: graph.KindFunction},
+			)
+			if hit {
+				// A language-neutral definition is also native-compatible.
+				nodes = append(nodes, &graph.Node{ID: "compatible", Name: target, RepoPrefix: "repo", FilePath: file, Kind: graph.KindFunction})
+			}
+			g := graph.New()
+			g.AddBatch(nodes, selected)
+			native := New(g)
+			native.bulkMode = true
+			require.NoError(t, native.warmLookupCache(selected))
+			defer native.clearLookupCache()
+			e := cloneFrameworkEdge(read)
+			_, changed := native.resolveEdge(e, &ResolveStats{})
+			require.Equal(t, hit, changed)
+			if hit {
+				require.Equal(t, "compatible", e.To)
+			} else {
+				require.Equal(t, before, e)
+			}
+
+			ctx, build, opts := frontierFixture(t, 2, 0)
+			opts.SpillBytes = 1
+			build.AddBatch(nodes, selected)
+			err := runRebuildLinkFrontier(ctx, build, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
+				require.Equal(t, []*graph.Edge{before}, page)
+				moves, err := reduceRebuildMainPage(ctx, f, page)
+				require.Empty(t, moves)
+				require.Equal(t, []*graph.Edge{before}, page)
+				return err
+			})
+			if hit {
+				require.ErrorIs(t, err, errRebuildMainRule)
+				require.ErrorContains(t, err, "non-bare value-ref candidate")
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, []*graph.Edge{before}, rebuildFnPointerSaved(t, build))
+			require.Equal(t, before, read)
+			checkFrontierScratch(t, opts.ScratchParent)
+		})
+	}
+}
+
+func TestRebuildFunctionValueRefRefusesOtherNonBareRows(t *testing.T) {
+	const name = "MAX_RETRIES"
+	const target = "valueref::" + name
+	for _, tc := range []struct {
+		label, target, name, origin, via string
+		kind                             graph.EdgeKind
+	}{
+		{"call", target, name, graph.OriginSpeculative, valueRefCandidateVia, graph.EdgeCalls},
+		{"origin", target, name, graph.OriginASTResolved, valueRefCandidateVia, graph.EdgeReads},
+		{"via", target, name, graph.OriginSpeculative, "other", graph.EdgeReads},
+		{"name", target, "OTHER", graph.OriginSpeculative, valueRefCandidateVia, graph.EdgeReads},
+		{"empty", "valueref::", "", graph.OriginSpeculative, valueRefCandidateVia, graph.EdgeReads},
+		{"qualified_suffix", "valueref::pkg::MAX_RETRIES", "pkg::MAX_RETRIES", graph.OriginSpeculative, valueRefCandidateVia, graph.EdgeReads},
+		{"other_family", "other::" + name, name, graph.OriginSpeculative, valueRefCandidateVia, graph.EdgeReads},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			e := &graph.Edge{From: "caller", To: "unresolved::" + tc.target, Kind: tc.kind, Origin: tc.origin,
+				FilePath: "caller.go", Line: 7, Confidence: 0.42, Meta: map[string]any{"via": tc.via, "name": tc.name}}
+			before := cloneFrameworkEdge(e)
+			// Refusal occurs before any view or candidate access.
+			require.ErrorIs(t, resolveRebuildFunction(t.Context(), nil, e, tc.target), errRebuildMainRule)
+			require.Equal(t, before, e)
 		})
 	}
 }

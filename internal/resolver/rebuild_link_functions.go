@@ -10,22 +10,32 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
 
-// resolveRebuildFunction handles the default bare-name branch. The caller owns
-// dispatch, terminal clearing on a move, and applying the complete page. A
-// refused call leaves even this tentative edge unchanged.
+// resolveRebuildFunction handles the default bare-name branch and a checked
+// full-name miss for extractor value-ref candidates. The caller owns dispatch,
+// terminal clearing on a move, and applying the complete page. A refused call
+// leaves even this tentative edge unchanged.
 func resolveRebuildFunction(ctx context.Context, f *rebuildLinkFrontier, edge *graph.Edge, target string) error {
+	valueRef := false
 	if edge.Kind == graph.EdgeRendersChild || strings.ContainsAny(target, `.\:`) {
-		return fmt.Errorf("%w: non-bare call %q in %q", errRebuildMainRule, target, edge.FilePath)
+		name, _ := edge.Meta["name"].(string)
+		if edge.Kind != graph.EdgeReads || edge.Origin != graph.OriginSpeculative ||
+			edge.Meta["via"] != valueRefCandidateVia || !isDistinctiveValueName(name) ||
+			strings.ContainsAny(name, `.\:`) || target != "valueref::"+name {
+			return fmt.Errorf("%w: non-bare call %q in %q", errRebuildMainRule, target, edge.FilePath)
+		}
+		valueRef = true
 	}
 	e := *edge
-	csharpUsing, _ := e.Meta["resolution"].(string)
-	if csharpUsing == "using_static" {
-		e.Meta = maps.Clone(e.Meta)
-		csharpDropStaleUsingStaticTag(&e)
-	}
-	if target == "" || csharpLocalShadowed(&e) {
-		*edge = e
-		return nil
+	if !valueRef {
+		csharpUsing, _ := e.Meta["resolution"].(string)
+		if csharpUsing == "using_static" {
+			e.Meta = maps.Clone(e.Meta)
+			csharpDropStaleUsingStaticTag(&e)
+		}
+		if target == "" || csharpLocalShadowed(&e) {
+			*edge = e
+			return nil
+		}
 	}
 
 	caller, err := f.view.Node(ctx, e.From)
@@ -38,6 +48,22 @@ func resolveRebuildFunction(ctx context.Context, f *rebuildLinkFrontier, edge *g
 	}
 	_, langs := resolverCompatibleLanguages(lang)
 	req := store_pebble.LinkRequest{Kind: store_pebble.LinkName, Key: target, RepoPrefix: repo, Languages: langs}
+	if valueRef {
+		// Native main searches the full "valueref::name", not the bare
+		// declaration name. Only a checked miss can wait for ResolveValueRefs.
+		matched := false
+		_, err := f.candidates(ctx, []store_pebble.LinkRequest{req}, func(_ int, n *graph.Node) error {
+			matched = matched || rebuildFunctionCandidateEligible(edge, n)
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if matched {
+			return fmt.Errorf("%w: non-bare value-ref candidate %q in %q", errRebuildMainRule, target, edge.FilePath)
+		}
+		return nil
+	}
 
 	resolution, _ := e.Meta["resolution"].(string)
 	receiver, _ := e.Meta["receiver_type"].(string)
