@@ -1,9 +1,12 @@
 package store_pebble
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"slices"
 
+	"github.com/cockroachdb/pebble/v2"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -16,43 +19,71 @@ type CandidateBatchCharge struct {
 	Oversize    bool
 }
 
+// Both immutable table construction and live sorting encode the decoded
+// scratch node. A fallback JSON value can normalize to a different encoding.
+// Check the second immutable coordinator encoding when normalization changes
+// the raw bytes. An unproved size keeps the original scalar path.
+func rebuildCandidateEncodedSize(raw []byte) uint64 {
+	n, err := decodeNode(raw)
+	if err != nil {
+		return 0
+	}
+	encoded, err := encodeNode(n)
+	if err != nil {
+		return 0
+	}
+	if !bytes.Equal(raw, encoded) {
+		n, err = decodeNode(encoded)
+		if err != nil {
+			return 0
+		}
+		again, err := encodeNode(n)
+		if err != nil || len(again) != len(encoded) {
+			return 0
+		}
+	}
+	return uint64(len(encoded))
+}
+
 func (v RebuildView) ChargeCandidateRequest(ctx context.Context, req LinkRequest) (charge CandidateBatchCharge, err error) {
 	if v.build == nil {
 		return charge, errors.New("candidate batch sizing requires a working view")
 	}
-	if !req.valid() {
-		return CandidateBatchCharge{Oversize: true}, nil // original scalar path owns refusal
+	// Qualified keys carry no repo or language; the main all-repo qualified
+	// import is exact. Any narrower qualified query stays scalar.
+	if !req.valid() || req.Kind == LinkQualName && (!req.AllRepos || len(req.Languages) != 0) {
+		return CandidateBatchCharge{Oversize: true}, nil
 	}
-	// The main frontier freezes VisitNodes before its first page, then mutates
-	// only edge keys. These exact name/qualified indexes project the same
-	// node rows. They are used solely for sizing, never selecting candidates.
-	visit := func(n *graph.Node) error {
-		if !req.match(n) {
-			return nil
-		}
-		value, err := encodeNode(n)
+	column := nameRebuildScoped
+	if req.Kind == LinkQualName {
+		column = nameQualified
+	}
+	prefix := keyStrings([]byte{familyName, column}, req.Key)
+	if req.Kind == LinkName && !req.AllRepos {
+		prefix = appendKeyString(prefix, req.RepoPrefix)
+	}
+	err = v.visit(ctx, prefix, func(_ *pebble.Snapshot, r row) error {
+		repo, lang, id, encoded, err := readRebuildCandidateIndex(column, r.key, r.value)
 		if err != nil {
 			return err
 		}
-		size := len(candidateOrderKey(req, 0, n, 0)) + len(value)
+		if req.Kind == LinkName && len(req.Languages) != 0 && !slices.Contains(req.Languages, lang) {
+			return nil
+		}
+		if encoded == 0 || encoded > linkRecordBytes {
+			charge.Oversize = true
+			return nil
+		}
+		key := candidateOrderKey(req, 0, &graph.Node{ID: id, RepoPrefix: repo, Language: lang}, 0)
+		size := len(key) + int(encoded)
 		if size > linkRecordBytes || charge.Rows == linkResultRows || size > linkResultBytes-charge.Bytes {
 			charge.Oversize = true
-			return nil // keep validating the read; do not grow counters beyond the caps
+			return nil
 		}
 		charge.Rows++
 		charge.Bytes += size
 		return nil
-	}
-	if req.Kind == LinkName && !req.AllRepos {
-		// The scratch index tuple is (name, repository, language, ID).
-		// Do not read other repos just to discard them from the size.
-		prefix := keyStrings([]byte{familyName, nameRebuildScoped}, req.Key, req.RepoPrefix)
-		err = v.visitCandidatePrefix(ctx, nameRebuildScoped, prefix, nil, visit)
-	} else if req.Kind == LinkName {
-		err = v.VisitNameCandidates(ctx, req.Key, nil, visit)
-	} else {
-		err = v.VisitQualNameCandidates(ctx, req.Key, visit)
-	}
+	})
 	return charge, err
 }
 

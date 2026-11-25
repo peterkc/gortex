@@ -140,7 +140,11 @@ func (b *BuildStore) writeNode(n *graph.Node) error {
 	if err := batch.Set(pendingNodeKey(n.ID), value, nil); err != nil {
 		return err
 	}
-	if err := updateRebuildCandidates(batch, prev, n); err != nil {
+	var candidateSize uint64
+	if n.Name != "" || n.QualName != "" {
+		candidateSize = rebuildCandidateEncodedSize(value)
+	}
+	if err := updateRebuildCandidates(batch, prev, n, candidateSize); err != nil {
 		return err
 	}
 	return batch.Commit(pebble.NoSync)
@@ -229,7 +233,7 @@ func (b *BuildStore) evict(prefix []byte) (nodes, edges int, err error) {
 				return err
 			}
 		}
-		if err := updateRebuildCandidates(batch, n, nil); err != nil {
+		if err := updateRebuildCandidates(batch, n, nil, 0); err != nil {
 			return err
 		}
 		if err := batch.Commit(pebble.NoSync); err != nil {

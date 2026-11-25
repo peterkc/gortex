@@ -3,6 +3,7 @@ package store_pebble
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"slices"
@@ -360,7 +361,10 @@ func (v RebuildView) visitCandidates(ctx context.Context, column byte, key strin
 
 func (v RebuildView) visitCandidatePrefix(ctx context.Context, column byte, prefix []byte, languages []string, yield func(*graph.Node) error) error {
 	return v.visit(ctx, prefix, func(snap *pebble.Snapshot, r row) error {
-		id := string(r.value)
+		_, _, id, _, err := readRebuildCandidateIndex(column, r.key, r.value)
+		if err != nil {
+			return err
+		}
 		n, err := pendingGet(snap, pendingNodeKey(id), decodeNode)
 		if err != nil {
 			return err
@@ -416,7 +420,8 @@ func (v RebuildView) read(ctx context.Context, read func(*pebble.Snapshot) error
 }
 
 // The scoped-name column is scratch-only. The qualified-name column uses the
-// existing exact qualified-name layout. Both store only the referenced ID.
+// existing exact qualified-name layout. Private entries store ID and the
+// optional canonical candidate encoded length; serving indexes are unchanged.
 const nameRebuildScoped byte = 'r'
 
 func rebuildCandidateKey(column byte, n *graph.Node) []byte {
@@ -435,19 +440,61 @@ func rebuildCandidateKey(column byte, n *graph.Node) []byte {
 	return keyStrings([]byte{familyName, column}, n.Name, n.RepoPrefix, n.Language, n.ID)
 }
 
-func updateRebuildCandidates(batch *pebble.Batch, prev, next *graph.Node) error {
+// Key fields are the exact scope and ID used by candidate order. ID-only
+// values are unsized, not invalid: scalar selection still checks the node.
+func readRebuildCandidateIndex(column byte, key, value []byte) (repo, lang, id string, size uint64, err error) {
+	if len(key) < 2 || key[0] != familyName || key[1] != column {
+		return "", "", "", 0, invalid("stale working candidate index entry")
+	}
+	_, rest, err := readKeyString(key[2:])
+	if err != nil {
+		return "", "", "", 0, err
+	}
+	if column == nameRebuildScoped {
+		repo, rest, err = readKeyString(rest)
+		if err != nil {
+			return "", "", "", 0, err
+		}
+		lang, rest, err = readKeyString(rest)
+		if err != nil {
+			return "", "", "", 0, err
+		}
+	}
+	id, rest, err = readKeyString(rest)
+	if err != nil {
+		return "", "", "", 0, err
+	}
+	if len(rest) != 0 || len(value) < len(id) || string(value[:len(id)]) != id {
+		return "", "", "", 0, invalid("stale working candidate index entry")
+	}
+	if len(value) == len(id) {
+		return repo, lang, id, 0, nil
+	}
+	if len(value) != len(id)+8 {
+		return "", "", "", 0, invalid("stale working candidate index entry")
+	}
+	size = binary.BigEndian.Uint64(value[len(id):])
+	return repo, lang, id, size, nil
+}
+
+func updateRebuildCandidates(batch *pebble.Batch, prev, next *graph.Node, size uint64) error {
+	var value []byte
+	if next != nil {
+		value = []byte(next.ID)
+		if size != 0 {
+			value = binary.BigEndian.AppendUint64(value, size)
+		}
+	}
 	for _, column := range [...]byte{nameRebuildScoped, nameQualified} {
 		oldKey, newKey := rebuildCandidateKey(column, prev), rebuildCandidateKey(column, next)
-		if bytes.Equal(oldKey, newKey) {
-			continue
-		}
-		if oldKey != nil {
+		if oldKey != nil && !bytes.Equal(oldKey, newKey) {
 			if err := batch.Delete(oldKey, nil); err != nil {
 				return err
 			}
 		}
+		// Even an unchanged key must receive the new payload length.
 		if newKey != nil {
-			if err := batch.Set(newKey, []byte(next.ID), nil); err != nil {
+			if err := batch.Set(newKey, value, nil); err != nil {
 				return err
 			}
 		}
