@@ -355,7 +355,10 @@ func (v RebuildView) visitCandidates(ctx context.Context, column byte, key strin
 	if key == "" {
 		return v.read(ctx, func(*pebble.Snapshot) error { return nil })
 	}
-	prefix := keyStrings([]byte{familyName, column}, key)
+	return v.visitCandidatePrefix(ctx, column, keyStrings([]byte{familyName, column}, key), languages, yield)
+}
+
+func (v RebuildView) visitCandidatePrefix(ctx context.Context, column byte, prefix []byte, languages []string, yield func(*graph.Node) error) error {
 	return v.visit(ctx, prefix, func(snap *pebble.Snapshot, r row) error {
 		id := string(r.value)
 		n, err := pendingGet(snap, pendingNodeKey(id), decodeNode)

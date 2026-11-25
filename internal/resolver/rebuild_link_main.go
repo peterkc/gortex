@@ -203,6 +203,9 @@ func reduceRebuildMainPage(ctx context.Context, f *rebuildLinkFrontier, page []*
 	var requests []store_pebble.LinkRequest
 	var tokens []tokenSite
 	var typeQueries []rebuildTypeQuery
+	var batch []rebuildMainPrepared
+	var carry *rebuildMainPrepared
+	batchEnd := 0
 	updates := make([]*graph.Edge, len(page))
 	for i, edge := range page {
 		if err := ctx.Err(); err != nil {
@@ -212,6 +215,26 @@ func reduceRebuildMainPage(ctx context.Context, f *rebuildLinkFrontier, page []*
 			continue
 		}
 		target := rebuildMainTarget(edge)
+		if i >= batchEnd && rebuildMainBatchFamily(edge, target) != "" {
+			var err error
+			batch, batchEnd, carry, err = prepareRebuildMainBatch(ctx, f, page, i, carry)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if len(batch) > 0 && batch[0].index == i {
+			p := batch[0]
+			batch[0] = rebuildMainPrepared{}
+			batch = batch[1:]
+			if p.err != nil {
+				return nil, p.err
+			}
+			if err := p.query.finishRow(); err != nil {
+				return nil, err
+			}
+			updates[i] = p.edge
+			continue
+		}
 		primaryType, _ := rebuildMainTypePrimary(edge, target)
 		switch {
 		case edge.Kind == graph.EdgeCalls && phpEdgeMetaString(edge, "eloquent_model") != "":

@@ -13,24 +13,32 @@ import (
 // resolveRebuildExtern ports the ordinary cold resolveExtern cascade. The
 // caller owns the tentative edge and clears terminal stamps when it saves a move.
 func resolveRebuildExtern(ctx context.Context, f *rebuildLinkFrontier, edge *graph.Edge, spec string) error {
-	if err := ctx.Err(); err != nil {
+	q, err := prepareRebuildExtern(ctx, f, edge, spec)
+	if err != nil {
 		return err
+	}
+	return q.run(ctx, f)
+}
+
+func prepareRebuildExtern(ctx context.Context, f *rebuildLinkFrontier, edge *graph.Edge, spec string) (rebuildMainQuery, error) {
+	if err := ctx.Err(); err != nil {
+		return rebuildMainQuery{}, err
 	}
 	sep := strings.LastIndex(spec, "::")
 	if sep < 0 {
 		edge.To = "external::" + spec
-		return nil
+		return rebuildMainQuery{}, nil
 	}
 	importPath, symbol := spec[:sep], spec[sep+2:]
 	goPath := strings.HasSuffix(edge.FilePath, ".go")
 	if goPath {
 		if check := f.imports.checkGoExtern; check != nil {
 			if err := check(importPath); err != nil {
-				return err
+				return rebuildMainQuery{}, err
 			}
 		} else if importPath != "" {
 			// A tracked module can keep even a complete name miss pending.
-			return rebuildExternNeeds(edge, spec, "Go module identities/replacements, package ownership and cold deferral")
+			return rebuildMainQuery{}, rebuildExternNeeds(edge, spec, "Go module identities/replacements, package ownership and cold deferral")
 		}
 	}
 
@@ -39,13 +47,13 @@ func resolveRebuildExtern(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 		var err error
 		caller, err = f.view.Node(ctx, edge.From)
 		if err != nil {
-			return err
+			return rebuildMainQuery{}, err
 		}
 	}
 	if caller == nil && strings.HasPrefix(edge.From, "dep::") {
 		// Native seeds Go dependency-contract nodes before ResolveAll. A
 		// missing private row cannot certify the caller's repo or language.
-		return rebuildExternNeeds(edge, spec, "transient dependency-contract source identity")
+		return rebuildMainQuery{}, rebuildExternNeeds(edge, spec, "transient dependency-contract source identity")
 	}
 	repo, language := "", ""
 	if caller != nil {
@@ -56,20 +64,23 @@ func resolveRebuildExtern(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 	if isPythonSourcePath(edge.FilePath) && isDottedPythonModule(importPath) {
 		match, err := rebuildPythonExternMatch(ctx, f, languages, repo, importPath, symbol)
 		if err != nil {
-			return err
+			return rebuildMainQuery{}, err
 		}
 		if match != nil {
 			edge.To = match.ID
 			if repo != "" && match.RepoPrefix != "" && match.RepoPrefix != repo {
 				edge.CrossRepo = true
 			}
-			return nil
+			return rebuildMainQuery{}, nil
 		}
 	}
 
+	if caller != nil {
+		caller = &graph.Node{ID: caller.ID, RepoPrefix: caller.RepoPrefix, Language: caller.Language, FilePath: caller.FilePath, WorkspaceID: caller.WorkspaceID}
+	}
 	preferLocal := repo != "" && language == "go"
 	var precise, match, foreignFallback *graph.Node
-	if err := visitRebuildExternCandidates(ctx, f, symbol, languages, func(n *graph.Node) error {
+	return rebuildMainQuery{request: store_pebble.LinkRequest{Kind: store_pebble.LinkName, Key: symbol, Languages: languages, AllRepos: true}, charge: rebuildMainCallerCharge(caller), consider: func(n *graph.Node) error {
 		if precise != nil || (!goPath && match != nil) {
 			return nil
 		}
@@ -129,42 +140,41 @@ func resolveRebuildExtern(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 			match = n
 		}
 		return nil
-	}); err != nil {
-		return err
-	}
-	if precise != nil {
-		// The native binder clones only when it can stamp go_import. A
-		// preexisting malformed spec can still carry terminal/restub keys.
-		if !strings.Contains(goModuleEdgeSpec(edge), "::") {
-			edge.Meta = maps.Clone(edge.Meta)
+	}, finish: func() error {
+		if precise != nil {
+			// The native binder clones only when it can stamp go_import. A
+			// preexisting malformed spec can still carry terminal/restub keys.
+			if !strings.Contains(goModuleEdgeSpec(edge), "::") {
+				edge.Meta = maps.Clone(edge.Meta)
+			}
+			bindGoModuleEdge(edge, precise, repo, "", nil)
+			return nil
 		}
-		bindGoModuleEdge(edge, precise, repo, "", nil)
-		return nil
-	}
-	if match == nil {
-		match = foreignFallback
-	}
-	if match != nil {
-		cross := repo != "" && match.RepoPrefix != "" && match.RepoPrefix != repo
-		if cross && candidateWorkspaceID(caller) != candidateWorkspaceID(match) {
-			return rebuildExternNeeds(edge, spec, "cross-workspace dependency eligibility")
+		if match == nil {
+			match = foreignFallback
 		}
-		edge.To = match.ID
-		if cross || preferLocal {
-			edge.CrossRepo = cross
+		if match != nil {
+			cross := repo != "" && match.RepoPrefix != "" && match.RepoPrefix != repo
+			if cross && candidateWorkspaceID(caller) != candidateWorkspaceID(match) {
+				return rebuildExternNeeds(edge, spec, "cross-workspace dependency eligibility")
+			}
+			edge.To = match.ID
+			if cross || preferLocal {
+				edge.CrossRepo = cross
+			}
+			return nil
 		}
-		return nil
-	}
 
-	if isStdlibLike(importPath) {
-		if caller == nil {
-			repo = sourceSpellingRepoPrefix(edge.From)
+		if isStdlibLike(importPath) {
+			if caller == nil {
+				repo = sourceSpellingRepoPrefix(edge.From)
+			}
+			edge.To = graph.StubID(repo, graph.StubKindStdlib, importPath, symbol)
+		} else {
+			edge.To = "dep::" + importPath + "::" + symbol
 		}
-		edge.To = graph.StubID(repo, graph.StubKindStdlib, importPath, symbol)
-	} else {
-		edge.To = "dep::" + importPath + "::" + symbol
-	}
-	return nil
+		return nil
+	}}, nil
 }
 
 func rebuildPythonExternMatch(ctx context.Context, f *rebuildLinkFrontier, languages []string, repo, importPath, symbol string) (*graph.Node, error) {

@@ -23,12 +23,20 @@ type rebuildMainImportInputs struct {
 // the tentative edge; the page owner clears terminal stamps and saves moves.
 // Missing input authority is not a native miss and cannot emit an external ID.
 func resolveRebuildImport(ctx context.Context, f *rebuildLinkFrontier, edge *graph.Edge, spec string) error {
+	q, err := prepareRebuildImport(ctx, f, edge, spec)
+	if err != nil {
+		return err
+	}
+	return q.run(ctx, f)
+}
+
+func prepareRebuildImport(ctx context.Context, f *rebuildLinkFrontier, edge *graph.Edge, spec string) (rebuildMainQuery, error) {
 	if isGodotResPlaceholder(edge.To) || isLuaRequireEdge(edge) {
-		return nil
+		return rebuildMainQuery{}, nil
 	}
 	source, err := f.view.Node(ctx, edge.From)
 	if err != nil {
-		return err
+		return rebuildMainQuery{}, err
 	}
 	repo := ""
 	if source != nil {
@@ -47,11 +55,11 @@ func resolveRebuildImport(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 			return f.view.Node(ctx, id)
 		}, f.imports.jsts)
 		if err != nil {
-			return err
+			return rebuildMainQuery{}, err
 		}
 		if target != nil {
 			bind(target.ID, target.RepoPrefix)
-			return nil
+			return rebuildMainQuery{}, nil
 		}
 		// The checked point tier changes the effective spec only on a real npm rewrite.
 		npmAliased = effective != spec
@@ -60,7 +68,7 @@ func resolveRebuildImport(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 		callerFile := jsTSImportCallerFile(edge)
 		if module, _ := splitImportSpecSymbol(spec); module != "" && isJSTSPath(callerFile) {
 			if !strings.HasPrefix(module, "./") && !strings.HasPrefix(module, "../") {
-				return rebuildImportNeeds(edge, spec, "TS path-alias/baseUrl result (before npm rewrite)")
+				return rebuildMainQuery{}, rebuildImportNeeds(edge, spec, "TS path-alias/baseUrl result (before npm rewrite)")
 			}
 			// Native relative expansion never calls the alias callback. Reuse
 			// its exact file and binding probes against the typed working rows.
@@ -73,21 +81,21 @@ func resolveRebuildImport(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 				return n
 			}, nil, callerFile, spec)
 			if err != nil {
-				return err
+				return rebuildMainQuery{}, err
 			}
 			if id != "" {
 				n, err := f.view.Node(ctx, id)
 				if err != nil {
-					return err
+					return rebuildMainQuery{}, err
 				}
 				if n == nil {
-					return rebuildImportNeeds(edge, spec, "stable relative target")
+					return rebuildMainQuery{}, rebuildImportNeeds(edge, spec, "stable relative target")
 				}
 				if rebuildImportNeedsGoOwnership(source, n) {
-					return rebuildImportNeeds(edge, spec, "Go package ownership")
+					return rebuildMainQuery{}, rebuildImportNeeds(edge, spec, "Go package ownership")
 				}
 				bind(n.ID, n.RepoPrefix)
-				return nil
+				return rebuildMainQuery{}, nil
 			}
 		}
 		// Unlike the JS/TS point probe, the cold indexer's npm callback uses
@@ -96,82 +104,94 @@ func resolveRebuildImport(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 		if spec != "" && !strings.HasPrefix(spec, ".") && !strings.HasPrefix(spec, "/") {
 			switch path.Ext(edge.FilePath) {
 			case ".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs":
-				return rebuildImportNeeds(edge, spec, "npm alias/workspace/exports rewrite result")
+				return rebuildMainQuery{}, rebuildImportNeeds(edge, spec, "npm alias/workspace/exports rewrite result")
 			}
 		}
 	}
 	if fqn := phpEdgeMetaString(edge, "fqn"); fqn != "" && !strings.HasSuffix(fqn, `\`) {
 		// A point/live name lookup cannot replace the cold page's merged
 		// repository + language groups, including their checked negatives.
-		return rebuildImportNeeds(edge, spec, "native PHP FQN warm candidate group")
+		return rebuildMainQuery{}, rebuildImportNeeds(edge, spec, "native PHP FQN warm candidate group")
 	}
 
 	if spec == "" {
-		return rebuildImportNeeds(edge, spec, "native file-directory buckets and terminal result")
+		return rebuildMainQuery{}, rebuildImportNeeds(edge, spec, "native file-directory buckets and terminal result")
 	}
-	node, ambiguous, err := pickRebuildImportQualName(ctx, f, edge, source, spec, spec)
-	if err != nil {
-		return err
+	if source != nil {
+		source = &graph.Node{ID: source.ID, FilePath: source.FilePath, Language: source.Language, RepoPrefix: source.RepoPrefix, WorkspaceID: source.WorkspaceID}
 	}
-	if node != nil {
-		bind(node.ID, node.RepoPrefix)
-		return nil
-	}
-	// Source authority is required for this tier. Do not expand the
-	// projected pass to deferred languages or to a missing source.
-	canUseDirectory := source != nil && (source.Language == "go" && f.imports.goOwnership != nil ||
-		source.Language == "typescript" || source.Language == "javascript")
-	if canUseDirectory {
-		file, err := resolveRebuildImportDirectory(ctx, f, edge, source, spec)
-		if err != nil {
-			return err
-		}
-		if file.ID != "" {
-			bind(file.ID, file.RepoPrefix)
+	req, consider, winner := prepareRebuildImportQualName(f, edge, source, spec, spec)
+	return rebuildMainQuery{request: req, consider: consider, charge: rebuildMainCallerCharge(source), finish: func() error {
+		node, ambiguous := winner()
+		if node != nil {
+			bind(node.ID, node.RepoPrefix)
 			return nil
 		}
-	}
-	// A directory miss or bypass doesn't prove the downstream tiers.
-	if !canUseDirectory || !f.imports.dependencyContractsReady {
-		if source != nil && source.Language == "go" {
-			return rebuildImportNeeds(edge, spec, "native file-directory buckets with Go package ownership and workspace membership")
-		}
-		return rebuildImportNeeds(edge, spec, "native file-directory buckets and workspace membership")
-	}
-
-	id, err := lookupRebuildDepModule(ctx, f.view, repo, spec)
-	if err != nil {
-		return err
-	}
-	if id != "" {
-		edge.To = id
-		return nil
-	}
-	if npmAliased {
-		if pkg := npmPackagePrefix(spec); pkg != "" {
-			node, retryAmbiguous, err := pickRebuildImportQualName(ctx, f, edge, source, spec, pkg)
+		// Source authority is required for this tier. Do not expand the
+		// projected pass to deferred languages or to a missing source.
+		canUseDirectory := source != nil && (source.Language == "go" && f.imports.goOwnership != nil ||
+			source.Language == "typescript" || source.Language == "javascript")
+		if canUseDirectory {
+			file, err := resolveRebuildImportDirectory(ctx, f, edge, source, spec)
 			if err != nil {
 				return err
 			}
-			if node != nil {
-				bind(node.ID, node.RepoPrefix)
+			if file.ID != "" {
+				bind(file.ID, file.RepoPrefix)
 				return nil
 			}
-			ambiguous = ambiguous || retryAmbiguous
 		}
-	}
-	if ambiguous {
-		return nil // leave the original import pending for the cross-repo pass
-	}
-	id, ok := store_pebble.RebuildExternalImportTarget(spec)
-	if !ok {
-		return rebuildImportNeeds(edge, spec, "valid native external target")
-	}
-	edge.To = id
-	return nil
+		// A directory miss or bypass doesn't prove the downstream tiers.
+		if !canUseDirectory || !f.imports.dependencyContractsReady {
+			if source != nil && source.Language == "go" {
+				return rebuildImportNeeds(edge, spec, "native file-directory buckets with Go package ownership and workspace membership")
+			}
+			return rebuildImportNeeds(edge, spec, "native file-directory buckets and workspace membership")
+		}
+
+		id, err := lookupRebuildDepModule(ctx, f.view, repo, spec)
+		if err != nil {
+			return err
+		}
+		if id != "" {
+			edge.To = id
+			return nil
+		}
+		if npmAliased {
+			if pkg := npmPackagePrefix(spec); pkg != "" {
+				node, retryAmbiguous, err := pickRebuildImportQualName(ctx, f, edge, source, spec, pkg)
+				if err != nil {
+					return err
+				}
+				if node != nil {
+					bind(node.ID, node.RepoPrefix)
+					return nil
+				}
+				ambiguous = ambiguous || retryAmbiguous
+			}
+		}
+		if ambiguous {
+			return nil // leave the original import pending for the cross-repo pass
+		}
+		id, ok := store_pebble.RebuildExternalImportTarget(spec)
+		if !ok {
+			return rebuildImportNeeds(edge, spec, "valid native external target")
+		}
+		edge.To = id
+		return nil
+	}}, nil
 }
 
 func pickRebuildImportQualName(ctx context.Context, f *rebuildLinkFrontier, edge *graph.Edge, source *graph.Node, spec, key string) (*graph.Node, bool, error) {
+	req, consider, finish := prepareRebuildImportQualName(f, edge, source, spec, key)
+	if _, err := f.candidates(ctx, []store_pebble.LinkRequest{req}, func(_ int, n *graph.Node) error { return consider(n) }); err != nil {
+		return nil, false, err
+	}
+	n, ambiguous := finish()
+	return n, ambiguous, nil
+}
+
+func prepareRebuildImportQualName(f *rebuildLinkFrontier, edge *graph.Edge, source *graph.Node, spec, key string) (store_pebble.LinkRequest, func(*graph.Node) error, func() (*graph.Node, bool)) {
 	// Keep only the native qualified-name winners. Repo/workspace here
 	// are saved node identities, not package-manager directory ownership.
 	var sameWorkspace, sameRepo, foreign *graph.Node
@@ -181,57 +201,56 @@ func pickRebuildImportQualName(ctx context.Context, f *rebuildLinkFrontier, edge
 		repo = source.RepoPrefix
 	}
 	req := store_pebble.LinkRequest{Kind: store_pebble.LinkQualName, Key: key, AllRepos: true}
-	if _, err := f.candidates(ctx, []store_pebble.LinkRequest{req}, func(_ int, n *graph.Node) error {
-		// Native excludes synthesized external calls from the full lookup,
-		// but not from the package-prefix retry.
-		if key == spec && strings.HasPrefix(n.ID, externalCallPrefix) {
-			return nil
-		}
-		if rebuildImportNeedsGoOwnership(source, n) {
-			if f.imports.goOwnership == nil {
-				return rebuildImportNeeds(edge, spec, "Go package ownership")
-			}
-			owner, err := f.imports.goOwnership(GoImportCandidate{
-				ImportPath: spec, ImporterRepoPrefix: source.RepoPrefix, ImporterFilePath: source.FilePath,
-				CandidateID: n.ID, CandidateRepoPrefix: n.RepoPrefix, CandidateFilePath: n.FilePath, CandidateNode: n,
-			})
-			if err != nil {
-				return err
-			}
-			switch owner {
-			case GoPackageOwnershipDifferent:
+	return req, func(n *graph.Node) error {
+			// Native excludes synthesized external calls from the full lookup,
+			// but not from the package-prefix retry.
+			if key == spec && strings.HasPrefix(n.ID, externalCallPrefix) {
 				return nil
-			case GoPackageOwnershipExact, GoPackageOwnershipUnknown:
+			}
+			if rebuildImportNeedsGoOwnership(source, n) {
+				if f.imports.goOwnership == nil {
+					return rebuildImportNeeds(edge, spec, "Go package ownership")
+				}
+				owner, err := f.imports.goOwnership(GoImportCandidate{
+					ImportPath: spec, ImporterRepoPrefix: source.RepoPrefix, ImporterFilePath: source.FilePath,
+					CandidateID: n.ID, CandidateRepoPrefix: n.RepoPrefix, CandidateFilePath: n.FilePath, CandidateNode: n,
+				})
+				if err != nil {
+					return err
+				}
+				switch owner {
+				case GoPackageOwnershipDifferent:
+					return nil
+				case GoPackageOwnershipExact, GoPackageOwnershipUnknown:
+				default:
+					return rebuildImportNeeds(edge, spec, "valid Go package ownership")
+				}
+			}
+			if n.RepoPrefix == repo {
+				if sameRepo == nil || n.ID < sameRepo.ID {
+					sameRepo = n
+				}
+				if candidateWorkspaceID(n) == workspace && (sameWorkspace == nil || n.ID < sameWorkspace.ID) {
+					sameWorkspace = n
+				}
+			} else if foreign == nil {
+				foreign = n
+			} else {
+				ambiguousForeign = true
+			}
+			return nil
+		}, func() (*graph.Node, bool) {
+			switch {
+			case sameWorkspace != nil:
+				return sameWorkspace, false
+			case sameRepo != nil:
+				return sameRepo, false
+			case ambiguousForeign:
+				return nil, true
 			default:
-				return rebuildImportNeeds(edge, spec, "valid Go package ownership")
+				return foreign, false
 			}
 		}
-		if n.RepoPrefix == repo {
-			if sameRepo == nil || n.ID < sameRepo.ID {
-				sameRepo = n
-			}
-			if candidateWorkspaceID(n) == workspace && (sameWorkspace == nil || n.ID < sameWorkspace.ID) {
-				sameWorkspace = n
-			}
-		} else if foreign == nil {
-			foreign = n
-		} else {
-			ambiguousForeign = true
-		}
-		return nil
-	}); err != nil {
-		return nil, false, err
-	}
-	switch {
-	case sameWorkspace != nil:
-		return sameWorkspace, false, nil
-	case sameRepo != nil:
-		return sameRepo, false, nil
-	case ambiguousForeign:
-		return nil, true, nil
-	default:
-		return foreign, false, nil
-	}
 }
 
 // Limit cumulative key bytes: shortening one slash at a time can turn a

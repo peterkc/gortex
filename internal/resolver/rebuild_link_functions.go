@@ -16,6 +16,14 @@ import (
 // terminal clearing on a move, and applying the complete page. A refused call
 // leaves even this tentative edge unchanged.
 func resolveRebuildFunction(ctx context.Context, f *rebuildLinkFrontier, edge *graph.Edge, target string) error {
+	q, err := prepareRebuildFunction(ctx, f, edge, target)
+	if err != nil {
+		return err
+	}
+	return q.run(ctx, f)
+}
+
+func prepareRebuildFunction(ctx context.Context, f *rebuildLinkFrontier, edge *graph.Edge, target string) (rebuildMainQuery, error) {
 	checkedMiss := ""
 	if edge.Kind == graph.EdgeRendersChild || strings.ContainsAny(target, `.\:`) {
 		name, _ := edge.Meta["name"].(string)
@@ -28,7 +36,7 @@ func resolveRebuildFunction(ctx context.Context, f *rebuildLinkFrontier, edge *g
 			checkedMiss = rebuildGoFullNameMissFamily(edge, target)
 		}
 		if checkedMiss == "" {
-			return fmt.Errorf("%w: non-bare call %q in %q", errRebuildMainRule, target, edge.FilePath)
+			return rebuildMainQuery{}, fmt.Errorf("%w: non-bare call %q in %q", errRebuildMainRule, target, edge.FilePath)
 		}
 	}
 	e := *edge
@@ -40,13 +48,13 @@ func resolveRebuildFunction(ctx context.Context, f *rebuildLinkFrontier, edge *g
 		}
 		if target == "" || csharpLocalShadowed(&e) {
 			*edge = e
-			return nil
+			return rebuildMainQuery{}, nil
 		}
 	}
 
 	caller, err := f.view.Node(ctx, e.From)
 	if err != nil {
-		return err
+		return rebuildMainQuery{}, err
 	}
 	var repo, lang string
 	if caller != nil {
@@ -55,20 +63,17 @@ func resolveRebuildFunction(ctx context.Context, f *rebuildLinkFrontier, edge *g
 	_, langs := resolverCompatibleLanguages(lang)
 	req := store_pebble.LinkRequest{Kind: store_pebble.LinkName, Key: target, RepoPrefix: repo, Languages: langs}
 	if checkedMiss != "" {
-		// Native main searches the entire extractor target, not a suffix.
-		// Only a checked miss permits the original row to remain unchanged.
+		// Only a checked full-name miss permits the original row to remain unchanged.
 		matched := false
-		_, err := f.candidates(ctx, []store_pebble.LinkRequest{req}, func(_ int, n *graph.Node) error {
+		return rebuildMainQuery{request: req, consider: func(n *graph.Node) error {
 			matched = matched || rebuildFunctionCandidateEligible(edge, n)
 			return nil
-		})
-		if err != nil {
-			return err
-		}
-		if matched {
-			return fmt.Errorf("%w: non-bare %s candidate %q in %q", errRebuildMainRule, checkedMiss, target, edge.FilePath)
-		}
-		return nil
+		}, finish: func() error {
+			if matched {
+				return fmt.Errorf("%w: non-bare %s candidate %q in %q", errRebuildMainRule, checkedMiss, target, edge.FilePath)
+			}
+			return nil
+		}}, nil
 	}
 
 	resolution, _ := e.Meta["resolution"].(string)
@@ -86,7 +91,14 @@ func resolveRebuildFunction(ctx context.Context, f *rebuildLinkFrontier, edge *g
 	if scope.lang == "cpp" {
 		scope.rankedCpp = &rebuildCppOverload{argHints: scope.cppArgs}
 	}
-	_, err = f.candidates(ctx, []store_pebble.LinkRequest{req}, func(_ int, n *graph.Node) error {
+	charge := len(scope.namespace) + len(scope.owner) + len(scope.callerFile) + len(scope.phpKind)
+	for _, arg := range scope.cppArgs {
+		charge += len(arg)
+	}
+	for ns := range scope.cppADL {
+		charge += len(ns)
+	}
+	return rebuildMainQuery{request: req, charge: charge, consider: func(n *graph.Node) error {
 		if !rebuildFunctionCandidateEligible(&e, n) {
 			return nil
 		}
@@ -105,95 +117,94 @@ func resolveRebuildFunction(ctx context.Context, f *rebuildLinkFrontier, edge *g
 			}
 		}
 		return nil
-	})
-	if err != nil {
-		return err
-	}
-	if all.count == 0 {
+	}, finish: func() error {
+		if all.count == 0 {
+			*edge = e
+			return nil
+		}
+		var pick rebuildFunctionPick
+		if scope.rankedCpp != nil {
+			var err error
+			pick, err = scope.rankedCpp.pick(ctx, f, req, &e)
+			if err != nil {
+				return err
+			}
+		}
+		if pick.id == "" {
+			var missing string
+			pick, missing = scope.pick()
+			if missing != "" {
+				return fmt.Errorf("%w: %s for %q in %q", errRebuildMainRule, missing, target, e.FilePath)
+			}
+		}
+		tag := ""
+		if pick.id != "" {
+			e.Origin, e.Confidence, tag = graph.OriginASTResolved, 0.92, "scope"
+		} else {
+			if member && lang == "csharp" && extension {
+				return fmt.Errorf("%w: C# extension evidence for %q in %q", errRebuildMainRule, target, e.FilePath)
+			}
+			if resolution == "extension_method" {
+				e.Meta = maps.Clone(e.Meta)
+				delete(e.Meta, "resolution")
+			}
+
+			// Each applicability filter narrows only a multi-candidate set
+			// and keeps the input on a miss. It counts non-callable nodes too.
+			choices, withArity := &all, &arity
+			if all.count > 1 && typed.count > 0 {
+				choices, withArity = &typed, &typedArity
+			}
+			if choices.count > 1 && withArity.count > 0 {
+				choices = withArity
+			}
+			switch {
+			case choices.file.id != "":
+				pick = choices.file
+				if choices.fileCount == 1 && e.Kind == graph.EdgeCalls && e.Origin == "" {
+					e.Origin, e.Confidence = graph.OriginASTResolved, 0.9
+				}
+			case !member && strings.HasSuffix(e.FilePath, ".cs"):
+				// Native reads (and caches) visibility even before checking
+				// whether any surviving candidate is using-static importable.
+				return fmt.Errorf("%w: C# first-use visibility for %q in %q", errRebuildMainRule, target, e.FilePath)
+			case choices.importable && !choices.localShadow:
+				return fmt.Errorf("%w: JS/TS import closure for %q in %q", errRebuildMainRule, target, e.FilePath)
+			case choices.dir.id != "":
+				pick = choices.dir
+				if choices.dirCount == 1 && e.Kind == graph.EdgeCalls && e.Origin == "" {
+					e.Origin, e.Confidence = graph.OriginASTResolved, 0.9
+				}
+			case choices.first.id != "":
+				pick = choices.first
+				if e.Origin == "" {
+					e.Origin = graph.OriginTextMatched
+				}
+			case choices.dirValues == 1 || choices.values == 1:
+				pick = choices.value
+				if choices.dirValues == 1 {
+					pick = choices.dirValue
+				}
+				e.Origin, e.Confidence, tag = graph.OriginASTInferred, 0.7, "value_callee"
+			}
+		}
+
+		if tag != "" {
+			e.Meta = maps.Clone(e.Meta)
+			if e.Meta == nil {
+				e.Meta = make(map[string]any, 1)
+			}
+			e.Meta["resolution"] = tag
+		}
+		if pick.id != "" && pick.id != e.To {
+			e.To = pick.id
+			if e.Kind == graph.EdgeReads && (pick.kind == graph.KindFunction || pick.kind == graph.KindMethod) {
+				e.Kind = graph.EdgeReferences
+			}
+		}
 		*edge = e
 		return nil
-	}
-	var pick rebuildFunctionPick
-	if scope.rankedCpp != nil {
-		pick, err = scope.rankedCpp.pick(ctx, f, req, &e)
-		if err != nil {
-			return err
-		}
-	}
-	if pick.id == "" {
-		var missing string
-		pick, missing = scope.pick()
-		if missing != "" {
-			return fmt.Errorf("%w: %s for %q in %q", errRebuildMainRule, missing, target, e.FilePath)
-		}
-	}
-	tag := ""
-	if pick.id != "" {
-		e.Origin, e.Confidence, tag = graph.OriginASTResolved, 0.92, "scope"
-	} else {
-		if member && lang == "csharp" && extension {
-			return fmt.Errorf("%w: C# extension evidence for %q in %q", errRebuildMainRule, target, e.FilePath)
-		}
-		if resolution == "extension_method" {
-			e.Meta = maps.Clone(e.Meta)
-			delete(e.Meta, "resolution")
-		}
-
-		// Each applicability filter narrows only a multi-candidate set
-		// and keeps the input on a miss. It counts non-callable nodes too.
-		choices, withArity := &all, &arity
-		if all.count > 1 && typed.count > 0 {
-			choices, withArity = &typed, &typedArity
-		}
-		if choices.count > 1 && withArity.count > 0 {
-			choices = withArity
-		}
-		switch {
-		case choices.file.id != "":
-			pick = choices.file
-			if choices.fileCount == 1 && e.Kind == graph.EdgeCalls && e.Origin == "" {
-				e.Origin, e.Confidence = graph.OriginASTResolved, 0.9
-			}
-		case !member && strings.HasSuffix(e.FilePath, ".cs"):
-			// Native reads (and caches) visibility even before checking
-			// whether any surviving candidate is using-static importable.
-			return fmt.Errorf("%w: C# first-use visibility for %q in %q", errRebuildMainRule, target, e.FilePath)
-		case choices.importable && !choices.localShadow:
-			return fmt.Errorf("%w: JS/TS import closure for %q in %q", errRebuildMainRule, target, e.FilePath)
-		case choices.dir.id != "":
-			pick = choices.dir
-			if choices.dirCount == 1 && e.Kind == graph.EdgeCalls && e.Origin == "" {
-				e.Origin, e.Confidence = graph.OriginASTResolved, 0.9
-			}
-		case choices.first.id != "":
-			pick = choices.first
-			if e.Origin == "" {
-				e.Origin = graph.OriginTextMatched
-			}
-		case choices.dirValues == 1 || choices.values == 1:
-			pick = choices.value
-			if choices.dirValues == 1 {
-				pick = choices.dirValue
-			}
-			e.Origin, e.Confidence, tag = graph.OriginASTInferred, 0.7, "value_callee"
-		}
-	}
-
-	if tag != "" {
-		e.Meta = maps.Clone(e.Meta)
-		if e.Meta == nil {
-			e.Meta = make(map[string]any, 1)
-		}
-		e.Meta["resolution"] = tag
-	}
-	if pick.id != "" && pick.id != e.To {
-		e.To = pick.id
-		if e.Kind == graph.EdgeReads && (pick.kind == graph.KindFunction || pick.kind == graph.KindMethod) {
-			e.Kind = graph.EdgeReferences
-		}
-	}
-	*edge = e
-	return nil
+	}}, nil
 }
 
 // The Go extractor emits executor-field Calls from keyed string composites

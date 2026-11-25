@@ -123,14 +123,7 @@ func splitCandidateRequests(requests []LinkRequest) ([]LinkRequest, []int, error
 	return immutable, positions, nil
 }
 
-type candidatePageOrder struct {
-	runs  sortedRuns
-	stats CandidatePageStats
-}
-
-func (p *candidatePageOrder) add(req LinkRequest, pos int, n *graph.Node) error {
-	// This tuple mirrors graph.resolverNameScopeSort and the P3 qualified
-	// lookup's ID order. Keep source order for ties in the complete tuple.
+func candidateOrderKey(req LinkRequest, pos int, n *graph.Node, ordinal uint64) []byte {
 	key := binary.BigEndian.AppendUint32(nil, uint32(pos))
 	if req.Kind == LinkName {
 		if req.AllRepos {
@@ -141,7 +134,18 @@ func (p *candidatePageOrder) add(req LinkRequest, pos int, n *graph.Node) error 
 		}
 	}
 	key = appendKeyString(key, n.ID)
-	key = binary.BigEndian.AppendUint64(key, uint64(p.stats.ResultRows))
+	return binary.BigEndian.AppendUint64(key, ordinal)
+}
+
+type candidatePageOrder struct {
+	runs  sortedRuns
+	stats CandidatePageStats
+}
+
+func (p *candidatePageOrder) add(req LinkRequest, pos int, n *graph.Node) error {
+	// This tuple mirrors graph.resolverNameScopeSort and the P3 qualified
+	// lookup's ID order. Keep source order for ties in the complete tuple.
+	key := candidateOrderKey(req, pos, n, uint64(p.stats.ResultRows))
 	value, err := encodeNode(n)
 	if err != nil {
 		return err

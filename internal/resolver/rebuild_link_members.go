@@ -13,9 +13,17 @@ import (
 // precedence, terminal clearing, and committing the whole page. A refusal
 // leaves even the tentative edge unchanged.
 func resolveRebuildMember(ctx context.Context, f *rebuildLinkFrontier, edge *graph.Edge, name string) error {
-	caller, err := f.view.Node(ctx, edge.From)
+	q, err := prepareRebuildMember(ctx, f, edge, name)
 	if err != nil {
 		return err
+	}
+	return q.run(ctx, f)
+}
+
+func prepareRebuildMember(ctx context.Context, f *rebuildLinkFrontier, edge *graph.Edge, name string) (rebuildMainQuery, error) {
+	caller, err := f.view.Node(ctx, edge.From)
+	if err != nil {
+		return rebuildMainQuery{}, err
 	}
 	var repo, lang, callerRecv, callerScope string
 	if caller != nil {
@@ -42,7 +50,7 @@ func resolveRebuildMember(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 	if selected && name != "" {
 		dirs, err = f.reachableDirectories(ctx, edge.FilePath)
 		if err != nil {
-			return err
+			return rebuildMainQuery{}, err
 		}
 	}
 	_, hasTypeArgs := metaIntValue(edge.Meta["type_arg_count"])
@@ -51,10 +59,23 @@ func resolveRebuildMember(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 	bound := f.providesFor[receiver]
 	var firstDir string
 	mixedDirs := false
+	callerMissing := caller == nil
+	callerFile := ""
+	if caller != nil {
+		callerFile = caller.FilePath
+	}
+	phpCaller := phpTypedReceiverCaller(caller)
+	query := rebuildMainQuery{charge: len(callerRecv) + len(callerScope) + len(callerFile) + len(scope.namespace) + len(scope.owner) + len(scope.callerFile) + len(scope.phpKind)}
+	for _, arg := range scope.cppArgs {
+		query.charge += len(arg)
+	}
+	for ns := range scope.cppADL {
+		query.charge += len(ns)
+	}
 	if name != "" {
 		_, langs := resolverCompatibleLanguages(lang)
-		req := store_pebble.LinkRequest{Kind: store_pebble.LinkName, Key: name, RepoPrefix: repo, Languages: langs}
-		_, err = f.candidates(ctx, []store_pebble.LinkRequest{req}, func(_ int, n *graph.Node) error {
+		query.request = store_pebble.LinkRequest{Kind: store_pebble.LinkName, Key: name, RepoPrefix: repo, Languages: langs}
+		query.consider = func(n *graph.Node) error {
 			one := [1]*graph.Node{n}
 			if len(genericInstantiationOnly(edge, withoutAttributedTerminals(one[:]))) == 0 {
 				return nil
@@ -68,7 +89,7 @@ func resolveRebuildMember(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 					keepFirstRebuildField(&fields[1], n.ID)
 				}
 				if callerRecv != "" && recv == callerRecv && n.Language == lang &&
-					(lang != "go" || caller.FilePath != "" && n.FilePath != "") && rebuildFieldPackage(n) == callerScope {
+					(lang != "go" || callerFile != "" && n.FilePath != "") && rebuildFieldPackage(n) == callerScope {
 					keepFirstRebuildField(&fields[2], n.ID)
 				}
 				if candidateDir == dir {
@@ -91,148 +112,148 @@ func resolveRebuildMember(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 				reachable.consider(n, candidateDir == dir, exact, di, callerMethod, locality, typeOK, argOK)
 			}
 			return nil
-		})
-		if err != nil {
-			return err
 		}
 	}
-	for i, id := range fields {
-		if id != "" {
-			edge.To, edge.Confidence = id, [4]float64{0.95, 0.85, 0.85, 0.6}[i]
-			return nil
+	query.finish = func() error {
+		for i, id := range fields {
+			if id != "" {
+				edge.To, edge.Confidence = id, [4]float64{0.95, 0.85, 0.85, 0.6}[i]
+				return nil
+			}
 		}
-	}
 
-	refuse := func(reason string) error {
-		return fmt.Errorf("%w: %s for wildcard member %q in %q", errRebuildMainRule, reason, name, edge.FilePath)
-	}
-	if phpTypedReceiverCaller(caller) && (phpEdgeMetaString(edge, "php_property_path") != "" || phpEdgeMetaString(edge, "receiver_fqn") != "") {
-		return refuse("PHP property or FQN receiver lookup")
-	}
+		refuse := func(reason string) error {
+			return fmt.Errorf("%w: %s for wildcard member %q in %q", errRebuildMainRule, reason, name, edge.FilePath)
+		}
+		if phpCaller && (phpEdgeMetaString(edge, "php_property_path") != "" || phpEdgeMetaString(edge, "receiver_fqn") != "") {
+			return refuse("PHP property or FQN receiver lookup")
+		}
 
-	raw := all.narrow()
-	filtered := raw
-	// Native first filters the whole compatible name group, then applies
-	// applicability independently to both groups. A filter miss keeps all.
-	if reachable.all.count != 0 {
-		filtered = reachable.narrow()
-	}
-	// With one candidate directory, reachability keeps all or discards all
-	// and then restores all. With no recorded edge path native skips it.
-	// Otherwise scope (unlike the exact tiers) sees the filtered group.
-	reachMayNarrow := !selected && edge.FilePath != "" && mixedDirs
-	e := *edge
-	picked := false
-	if raw.count != 0 {
-		if reachMayNarrow {
-			pick, missing := all.all.scope.pick()
-			if pick.id != "" || missing != "" || all.all.scope.cppCount != 0 {
-				return refuse("scope selection needs native page direct-import reachability")
-			}
-		} else {
-			pick, missing := filtered.scope.pick()
-			if missing != "" {
-				return refuse(missing)
-			}
-			if pick.id != "" {
-				picked = true
-				e.To, e.Confidence, e.Origin = pick.id, 0.92, graph.OriginASTResolved
-				e.Meta = maps.Clone(e.Meta)
-				if e.Meta == nil {
-					e.Meta = make(map[string]any, 1)
+		raw := all.narrow()
+		filtered := raw
+		// Native first filters the whole compatible name group, then applies
+		// applicability independently to both groups. A filter miss keeps all.
+		if reachable.all.count != 0 {
+			filtered = reachable.narrow()
+		}
+		// With one candidate directory, reachability keeps all or discards all
+		// and then restores all. With no recorded edge path native skips it.
+		// Otherwise scope (unlike the exact tiers) sees the filtered group.
+		reachMayNarrow := !selected && edge.FilePath != "" && mixedDirs
+		e := *edge
+		picked := false
+		if raw.count != 0 {
+			if reachMayNarrow {
+				pick, missing := all.all.scope.pick()
+				if pick.id != "" || missing != "" || all.all.scope.cppCount != 0 {
+					return refuse("scope selection needs native page direct-import reachability")
 				}
-				e.Meta["resolution"] = "scope"
+			} else {
+				pick, missing := filtered.scope.pick()
+				if missing != "" {
+					return refuse(missing)
+				}
+				if pick.id != "" {
+					picked = true
+					e.To, e.Confidence, e.Origin = pick.id, 0.92, graph.OriginASTResolved
+					e.Meta = maps.Clone(e.Meta)
+					if e.Meta == nil {
+						e.Meta = make(map[string]any, 1)
+					}
+					e.Meta["resolution"] = "scope"
+				}
+			}
+			if !picked {
+				switch {
+				case lang == "php" && scopeMetaString(edge.Meta, MetaScopeKind) == ScopeKindParent:
+					return refuse("PHP parent lookup")
+				case raw.localExact != "":
+					picked = true
+					e.To, e.Confidence, e.Origin = raw.localExact, 0.95, graph.OriginASTResolved
+				case raw.exact != "" && !raw.ambiguous:
+					picked = true
+					e.To, e.Confidence, e.Origin = raw.exact, 0.85, graph.OriginASTResolved
+				case receiver != "" && lang == "php":
+					return refuse("PHP in-repo receiver and inherited dispatch evidence")
+				case reachMayNarrow && (all.all.method || all.all.locality):
+					return refuse("native page direct-import reachability")
+				case receiver != "" && raw.method && (!selected || f.providesFor == nil):
+					return refuse("native first-use useClass bindings")
+				case selected && filtered.diMethod != "":
+					picked = true
+					e.To, e.Confidence = filtered.diMethod, 0.9
+					e.Meta = maps.Clone(e.Meta)
+					if e.Meta == nil {
+						e.Meta = make(map[string]any, 1)
+					}
+					e.Meta["resolution"] = "useClass_binding"
+				case filtered.callerMethod && !selected:
+					return refuse("caller-receiver method fallback")
+				case selected && filtered.dirCallerMethod != "":
+					picked = true
+					e.To, e.Confidence = filtered.dirCallerMethod, 0.9
+				case selected && filtered.firstCallerMethod != "":
+					picked = true
+					e.To, e.Confidence = filtered.firstCallerMethod, 0.8
+				case lang == "csharp" && raw.extension:
+					return refuse("C# extension visibility and hierarchy evidence")
+				case receiver == "" && filtered.methodCount > 1:
+					return nil // native leaves an untyped ambiguous member unresolved
+				case filtered.locality && !selected:
+					return refuse("method locality or interface dispatch fallback")
+				case filtered.locality:
+					// Native marks a typed ambiguous interface pick before locality.
+					if receiver != "" && filtered.methodCount > 1 {
+						isInterface, err := rebuildMemberReceiverIsInterface(ctx, f, edge, receiver, repo, lang)
+						if err != nil {
+							return err
+						}
+						if isInterface {
+							e.Meta = maps.Clone(e.Meta)
+							if e.Meta == nil {
+								e.Meta = make(map[string]any, 1)
+							}
+							e.Meta["dispatch"] = "interface"
+							e.Origin = graph.OriginASTInferred
+						}
+					}
+					if filtered.methodCount == 1 && loneMemberLang(filtered.firstMethodLanguage) && e.Origin == "" {
+						e.Origin = graph.OriginASTInferred
+						if e.Confidence == 0 {
+							e.Confidence = 0.7
+						}
+					}
+					for _, id := range [...]string{filtered.dirMethod, filtered.firstMethod, filtered.dirFunc, filtered.firstFunc} {
+						if id != "" {
+							picked, e.To = true, id
+							if e.Origin == "" {
+								e.Origin = graph.OriginTextMatched
+							}
+							break
+						}
+					}
+				}
 			}
 		}
 		if !picked {
-			switch {
-			case lang == "php" && scopeMetaString(edge.Meta, MetaScopeKind) == ScopeKindParent:
-				return refuse("PHP parent lookup")
-			case raw.localExact != "":
-				picked = true
-				e.To, e.Confidence, e.Origin = raw.localExact, 0.95, graph.OriginASTResolved
-			case raw.exact != "" && !raw.ambiguous:
-				picked = true
-				e.To, e.Confidence, e.Origin = raw.exact, 0.85, graph.OriginASTResolved
-			case receiver != "" && lang == "php":
-				return refuse("PHP in-repo receiver and inherited dispatch evidence")
-			case reachMayNarrow && (all.all.method || all.all.locality):
-				return refuse("native page direct-import reachability")
-			case receiver != "" && raw.method && (!selected || f.providesFor == nil):
-				return refuse("native first-use useClass bindings")
-			case selected && filtered.diMethod != "":
-				picked = true
-				e.To, e.Confidence = filtered.diMethod, 0.9
-				e.Meta = maps.Clone(e.Meta)
-				if e.Meta == nil {
-					e.Meta = make(map[string]any, 1)
-				}
-				e.Meta["resolution"] = "useClass_binding"
-			case filtered.callerMethod && !selected:
-				return refuse("caller-receiver method fallback")
-			case selected && filtered.dirCallerMethod != "":
-				picked = true
-				e.To, e.Confidence = filtered.dirCallerMethod, 0.9
-			case selected && filtered.firstCallerMethod != "":
-				picked = true
-				e.To, e.Confidence = filtered.firstCallerMethod, 0.8
-			case lang == "csharp" && raw.extension:
-				return refuse("C# extension visibility and hierarchy evidence")
-			case receiver == "" && filtered.methodCount > 1:
-				return nil // native leaves an untyped ambiguous member unresolved
-			case filtered.locality && !selected:
-				return refuse("method locality or interface dispatch fallback")
-			case filtered.locality:
-				// Native marks a typed ambiguous interface pick before locality.
-				if receiver != "" && filtered.methodCount > 1 {
-					isInterface, err := rebuildMemberReceiverIsInterface(ctx, f, edge, receiver, repo, lang)
-					if err != nil {
-						return err
+			// Pinned applyBuiltinIfKnown changes only To. Its repo spelling is
+			// different from name lookup only when the source node is missing.
+			if language := langFromFilePath(e.FilePath); language != "" {
+				if category, ok := classifyBuiltin(name, language); ok {
+					if callerMissing {
+						repo = sourceSpellingRepoPrefix(e.From)
 					}
-					if isInterface {
-						e.Meta = maps.Clone(e.Meta)
-						if e.Meta == nil {
-							e.Meta = make(map[string]any, 1)
-						}
-						e.Meta["dispatch"] = "interface"
-						e.Origin = graph.OriginASTInferred
-					}
-				}
-				if filtered.methodCount == 1 && loneMemberLang(filtered.firstMethodLanguage) && e.Origin == "" {
-					e.Origin = graph.OriginASTInferred
-					if e.Confidence == 0 {
-						e.Confidence = 0.7
-					}
-				}
-				for _, id := range [...]string{filtered.dirMethod, filtered.firstMethod, filtered.dirFunc, filtered.firstFunc} {
-					if id != "" {
-						picked, e.To = true, id
-						if e.Origin == "" {
-							e.Origin = graph.OriginTextMatched
-						}
-						break
-					}
+					e.To = graph.StubID(repo, graph.StubKindBuiltin, language, category, name)
 				}
 			}
 		}
-	}
-	if !picked {
-		// Pinned applyBuiltinIfKnown changes only To. Its repo spelling is
-		// different from name lookup only when the source node is missing.
-		if language := langFromFilePath(e.FilePath); language != "" {
-			if category, ok := classifyBuiltin(name, language); ok {
-				if caller == nil {
-					repo = sourceSpellingRepoPrefix(e.From)
-				}
-				e.To = graph.StubID(repo, graph.StubKindBuiltin, language, category, name)
-			}
+		if e.Kind == graph.EdgeReads && e.To != edge.To {
+			e.Kind = graph.EdgeReferences
 		}
+		*edge = e
+		return nil
 	}
-	if e.Kind == graph.EdgeReads && e.To != edge.To {
-		e.Kind = graph.EdgeReferences
-	}
-	*edge = e
-	return nil
+	return query, nil
 }
 
 // The native receiver interface predicate is a compatible same-repo name
