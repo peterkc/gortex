@@ -125,7 +125,7 @@ func prepareRebuildMainBatch(ctx context.Context, f *rebuildLinkFrontier, page [
 		} else {
 			p = prepareRebuildMainQuery(ctx, f, page[i], target, family, i)
 			if p.err == nil && p.query.request.Key != "" {
-				p.charge, err = f.view.ChargeCandidateRequest(ctx, p.query.request)
+				p.charge, err = f.link.ChargeCandidateRequest(ctx, f.view, p.query.request)
 				if err != nil {
 					return nil, 0, nil, err
 				}

@@ -147,7 +147,11 @@ func (b *BuildStore) writeNode(n *graph.Node) error {
 	if err := updateRebuildCandidates(batch, prev, n, candidateSize); err != nil {
 		return err
 	}
-	return batch.Commit(pebble.NoSync)
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		return err
+	}
+	b.v3NodeWrites++
+	return nil
 }
 
 func (b *BuildStore) putEdge(e *graph.Edge) error {
@@ -239,6 +243,7 @@ func (b *BuildStore) evict(prefix []byte) (nodes, edges int, err error) {
 		if err := batch.Commit(pebble.NoSync); err != nil {
 			return err
 		}
+		b.v3NodeWrites++
 		nodes++
 		return nil
 	})

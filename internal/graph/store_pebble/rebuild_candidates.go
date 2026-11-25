@@ -65,6 +65,15 @@ func (s *RebuildLink) SelectCandidatePage(ctx context.Context, view RebuildView,
 	if len(immutable) != len(requests) && view.build == nil {
 		return stats, errors.New("live candidate page requires a working view")
 	}
+	if s.v3 != nil {
+		select {
+		case <-pageCtx.Done():
+			return stats, context.Cause(pageCtx)
+		case s.active <- struct{}{}:
+		}
+		defer func() { <-s.active }()
+		return s.v3.selectPage(pageCtx, view, requests, s.parts, spillBytes, visit)
+	}
 	// SelectPage can reap its own directory before returning an error.
 	// Page runs have an independent lifetime under the same private lease.
 	dir, err = os.MkdirTemp(filepath.Dir(s.dir), "candidate-page-")

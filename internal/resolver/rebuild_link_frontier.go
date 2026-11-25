@@ -99,6 +99,9 @@ func runRebuildLinkFrontier(ctx context.Context, build *store_pebble.BuildStore,
 	selectCallers func([]*graph.Edge) ([]*graph.Edge, error), reduce func(*rebuildLinkFrontier, []*graph.Edge) error,
 ) (err error) {
 	f := rebuildLinkFrontier{view: build.RebuildView(), opts: opts}
+	if !opts.LegacyCandidates {
+		f.view = f.view.WithCallerPageCache()
+	}
 	defer func() {
 		if f.closeImportDirs != nil {
 			err = errors.Join(err, f.closeImportDirs())
@@ -106,6 +109,7 @@ func runRebuildLinkFrontier(ctx context.Context, build *store_pebble.BuildStore,
 		if f.link != nil {
 			err = errors.Join(err, f.link.Close())
 		}
+		err = errors.Join(err, f.view.ResetCallerPage())
 	}()
 	return f.view.VisitLinkPendingPages(ctx, resolvePendingPageRows, resolvePendingPageBytes, func(page []*graph.Edge) error {
 		if selectCallers != nil {
@@ -116,9 +120,15 @@ func runRebuildLinkFrontier(ctx context.Context, build *store_pebble.BuildStore,
 			page = selected
 		}
 		if f.link == nil {
-			link, err := store_pebble.StartRebuildLink(ctx, opts, func(yield func(*graph.Node) error) error {
-				return f.view.VisitNodes(ctx, yield)
-			})
+			view := build.RebuildView()
+			source := func(yield func(*graph.Node) error) error { return view.VisitNodes(ctx, yield) }
+			var link *store_pebble.RebuildLink
+			var err error
+			if opts.LegacyCandidates {
+				link, err = store_pebble.StartRebuildLink(ctx, opts, source)
+			} else {
+				link, err = store_pebble.StartCachedRebuildLink(ctx, opts, view, source)
+			}
 			if err != nil {
 				return err
 			}
@@ -128,6 +138,10 @@ func runRebuildLinkFrontier(ctx context.Context, build *store_pebble.BuildStore,
 		// A subsequent page must read imports changed by the previous apply.
 		f.pageReach = nil
 		f.pageReachDirs, f.pageReachBytes = 0, 0
-		return reduce(&f, page)
+		if err := reduce(&f, page); err != nil {
+			return err
+		}
+		f.link.ResetCandidatePage()
+		return f.view.ResetCallerPage()
 	})
 }

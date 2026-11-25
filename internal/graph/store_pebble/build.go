@@ -29,6 +29,7 @@ type BuildStore struct {
 	readErr       error
 	cleanupErr    error
 	resolveMu     sync.Mutex
+	v3NodeWrites  uint64 // protected by mu; edge moves do not change it
 }
 
 var _ graph.Store = (*BuildStore)(nil)

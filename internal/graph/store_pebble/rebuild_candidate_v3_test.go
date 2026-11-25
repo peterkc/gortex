@@ -1,0 +1,749 @@
+package store_pebble
+
+import (
+	"bytes"
+	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+	"unsafe"
+
+	"github.com/cockroachdb/pebble/v2"
+	"github.com/zzet/gortex/internal/graph"
+)
+
+// One row frame per delivered candidate: request position and ordinal,
+// exact native tuple digest, and structural digest of the complete decoded
+// payload (including Meta types and nested values). Lengths and SHA-256s
+// keep long-ID and row-limit fixtures bounded without losing any position.
+const v3GoldenRowBytes = 8 + 32 + 32
+
+type v3GoldenCase struct {
+	Name     string
+	Requests []byte // ordered SHA-256 per complete LinkRequest, including misses
+	Trace    []byte // ordered fixed-size row frames
+	Rows     int
+	Bytes    int
+	Charge   *CandidateBatchCharge `json:",omitempty"`
+	Error    string
+}
+
+type v3FixtureSuite struct {
+	capture bool
+	cases   []v3GoldenCase
+}
+
+func (s *v3FixtureSuite) record(c v3GoldenCase) {
+	if s.capture {
+		s.cases = append(s.cases, c)
+	}
+}
+
+// The H98 subprocess includes its random private partition path and child
+// process-exit detail in the wrapping error. Compare the owning stage and
+// original logical error, not these deliberately absent v3 IPC details.
+func v3ErrorClass(err error) string {
+	if err == nil {
+		return ""
+	}
+	if !errors.Is(err, ErrRebuildLink) {
+		return err.Error()
+	}
+	for _, text := range []string{"candidate result exceeds link record or page bound", "merged candidate page exceeds row or byte bound", "candidate order exceeds link record or page bound", "pebble order exceeds 1024 sorted runs", "link request page exceeds wire byte bound", "candidate record exceeds 16777216 bytes", "fixture reducer refusal"} {
+		if strings.Contains(err.Error(), text) {
+			return text
+		}
+	}
+	return err.Error()
+}
+func v3FixturePass(t *testing.T, ctx context.Context, budget int64, view RebuildView, nodes []*graph.Node) (*RebuildLink, error) {
+	t.Helper()
+	return v3FixturePassMode(t, ctx, budget, view, nodes, "ordinary")
+}
+
+func v3FixturePassMode(t *testing.T, ctx context.Context, budget int64, view RebuildView, nodes []*graph.Node, mode string) (*RebuildLink, error) {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := RebuildLinkOptions{Binary: exe, WorkerArgs: []string{"-test.run=^TestRebuildLinkChild$", "--", mode}, ScratchParent: t.TempDir(), Partitions: 1, SpillBytes: 1 << 20}
+	if err := os.WriteFile(filepath.Join(opts.ScratchParent, "keep"), []byte("owner data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	source := func(yield func(*graph.Node) error) error {
+		for _, n := range nodes {
+			if err := yield(n); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if budget == 0 {
+		return StartRebuildLink(ctx, opts, source)
+	}
+	if budget == rebuildCandidateCacheBytes {
+		return StartCachedRebuildLink(ctx, opts, view, source)
+	}
+	return startCachedRebuildLink(ctx, opts, view, budget, source)
+}
+
+func v3TraceCall(t *testing.T, ctx context.Context, p *RebuildLink, view RebuildView, reqs []LinkRequest, spill int, refuse bool) (trace []byte, seen []string, stats CandidatePageStats, err error) {
+	t.Helper()
+	last, ordinal := -1, uint32(0)
+	stats, err = p.SelectCandidatePage(ctx, view, reqs, spill, func(pos int, n *graph.Node) error {
+		if pos != last {
+			last, ordinal = pos, 0
+		}
+		digest, err := v3Fingerprint(n)
+		if err != nil {
+			return err
+		}
+		key := sha256.Sum256(candidateOrderKey(reqs[pos], pos, n, uint64(ordinal)))
+		trace = binary.BigEndian.AppendUint32(trace, uint32(pos))
+		trace = binary.BigEndian.AppendUint32(trace, ordinal)
+		trace = append(trace, key[:]...)
+		trace = append(trace, digest[:]...)
+		ordinal++
+		seen = append(seen, n.ID)
+		if refuse {
+			return errors.New("fixture reducer refusal")
+		}
+		return nil
+	})
+	return
+}
+
+func v3RequestDigests(t *testing.T, reqs []LinkRequest) []byte {
+	t.Helper()
+	var out []byte
+	for _, req := range reqs {
+		raw, err := json.Marshal(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(raw)
+		out = append(out, digest[:]...)
+	}
+	return out
+}
+
+func (s *v3FixtureSuite) compareCall(t *testing.T, ctx context.Context, h, v *RebuildLink, view RebuildView, call int, reqs []LinkRequest, spill int, refuse bool, wantErr string) ([]string, CandidatePageStats) {
+	t.Helper()
+	a, ids, hs, he := v3TraceCall(t, ctx, h, view, reqs, spill, refuse)
+	if v3ErrorClass(he) != wantErr {
+		t.Fatalf("H98=%v want %q", he, wantErr)
+	}
+	s.record(v3GoldenCase{Name: fmt.Sprintf("%s/call=%d", t.Name(), call), Requests: v3RequestDigests(t, reqs), Trace: a, Rows: hs.ResultRows, Bytes: hs.ResultBytes, Error: v3ErrorClass(he)})
+	if v != nil {
+		b, vids, vs, ve := v3TraceCall(t, ctx, v, view, reqs, spill, refuse)
+		if v3ErrorClass(ve) != wantErr {
+			t.Fatalf("H98=%v cached=%v want %q", he, ve, wantErr)
+		}
+		if !bytes.Equal(a, b) || !reflect.DeepEqual(ids, vids) {
+			i := 0
+			for i < min(len(a), len(b)) && a[i] == b[i] {
+				i++
+			}
+			t.Fatalf("ordered traces differ at row %d: H98=%d cached=%d", i/v3GoldenRowBytes, len(a)/v3GoldenRowBytes, len(b)/v3GoldenRowBytes)
+		}
+		if hs.ResultRows != vs.ResultRows || hs.ResultBytes != vs.ResultBytes {
+			t.Fatalf("logical counts H98=%+v cached=%+v", hs, vs)
+		}
+	}
+	if wantErr != "" && wantErr != "fixture reducer refusal" && len(a) != 0 {
+		t.Fatal("visitor ran before staged limit checks")
+	}
+	return ids, hs
+}
+
+func (s *v3FixtureSuite) charge(t *testing.T, ctx context.Context, v *RebuildLink, view RebuildView, name string, req LinkRequest) CandidateBatchCharge {
+	t.Helper()
+	hc, err := view.ChargeCandidateRequest(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.record(v3GoldenCase{Name: t.Name() + "/charge=" + name, Requests: v3RequestDigests(t, []LinkRequest{req}), Charge: &hc})
+	if v != nil {
+		vc, err := v.ChargeCandidateRequest(ctx, view, req)
+		if err != nil || hc != vc {
+			t.Fatalf("H98 charge=%+v cached=%+v %v", hc, vc, err)
+		}
+	}
+	return hc
+}
+
+func (s *v3FixtureSuite) pair(t *testing.T, view RebuildView, nodes []*graph.Node, budget int64) (context.Context, *RebuildLink, *RebuildLink) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
+	t.Cleanup(cancel)
+	h, err := v3FixturePass(t, ctx, 0, view, nodes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	if s.capture {
+		return ctx, h, nil
+	}
+	v, err := v3FixturePass(t, ctx, budget, view, nodes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = v.Close() })
+	return ctx, h, v
+}
+
+func v3RetainedCharge(c *v3Cache) int64 {
+	return v3Alloc(int64(unsafe.Sizeof(*c))) + c.indexBytes + c.gens[0].charge + c.gens[1].charge
+}
+
+// Given two repositories, mixed/empty languages and duplicate occurrences,
+// native order is independent of source order and of language request order.
+// A checked miss has no visits. A live wildcard must reorder z/go vs a/python.
+func (s *v3FixtureSuite) RebuildV3ExactOrderAndLive(t *testing.T) {
+	a := &graph.Node{ID: "z", Name: "N", QualName: "q.N", RepoPrefix: "r", Language: "go"}
+	b := &graph.Node{ID: "a", Name: "N", QualName: "q.N", RepoPrefix: "r", Language: "python"}
+	c := &graph.Node{ID: "0", Name: "N", QualName: "q.N", RepoPrefix: "s", Language: ""}
+	d := &graph.Node{ID: "e", Name: "N", QualName: "q.N", RepoPrefix: "r", Language: ""}
+	dup := *a
+	dup.Meta = map[string]any{"occurrence": 2}
+	nodes := []*graph.Node{a, c, b, d, &dup}
+	build := newBuild(t, FullProfile)
+	build.AddBatch([]*graph.Node{a, b, c, d}, nil)
+	view := build.RebuildView()
+	ctx, h, v := s.pair(t, view, nodes, 512<<20)
+	requests := []LinkRequest{
+		{Kind: LinkQualName, Key: "q.N", AllRepos: true},
+		{Kind: LinkQualName, Key: "q.N", RepoPrefix: "r", Languages: []string{"go"}},
+		{Kind: LinkName, Key: "N", RepoPrefix: "r", Languages: []string{"python", "go", "", "go"}},
+		{Kind: LinkName, Key: "N", RepoPrefix: "r"},
+		{Kind: LinkName, Key: "missing", RepoPrefix: "r"},
+		{Kind: LinkName, Key: "N", AllRepos: true},
+		{Kind: LinkName, Key: "N", AllRepos: true, Languages: []string{"python", "go", ""}},
+	}
+	// The synthetic duplicate source is not one-to-one with the working
+	// index; use a separate stationary fixture for admission-cache checks.
+	// One multi-position fixture also proves positions and duplicate ordinals.
+	ids, _ := s.compareCall(t, ctx, h, v, view, 0, requests, 1<<20, false, "")
+	want := []string{"0", "a", "e", "z", "z", "z", "z", "e", "z", "z", "a", "a", "e", "z", "z", "a", "e", "z", "0", "e", "z", "a", "0"}
+	if !slices.Equal(ids, want) {
+		t.Fatalf("native order %v want %v", ids, want)
+	}
+	// This write must be visible on the next live page, but not in frozen Q.
+	if v != nil {
+		if len(v.v3.summaries) == 0 {
+			t.Fatal("missing page-local summary cache")
+		}
+		v.ResetCandidatePage()
+		if len(v.v3.summaries) != 0 {
+			t.Fatal("summary cache survived page")
+		}
+	}
+	changed := *b
+	changed.Name = "Changed"
+	build.AddNode(&changed)
+	// H98 admission still reads the current scratch index after a node write.
+	// The immutable candidate payload stream stays frozen on both routes.
+	changedReq := LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "r", Languages: []string{"python"}}
+	oldCharge := s.charge(t, ctx, v, view, "after-write", changedReq)
+	if oldCharge.Rows != 0 {
+		t.Fatalf("fresh admission H98=%+v", oldCharge)
+	}
+
+	ids, _ = s.compareCall(t, ctx, h, v, view, 1, []LinkRequest{{Kind: LinkName, Key: "N", AllRepos: true}, {Kind: LinkName, Key: "Changed", AllRepos: true}, requests[0]}, 1<<20, false, "")
+	if want := []string{"e", "z", "0", "a", "0", "a", "e", "z", "z"}; !slices.Equal(ids, want) {
+		t.Fatalf("fresh live %v want %v", ids, want)
+	}
+	live := LinkRequest{Kind: LinkName, Key: "Changed", AllRepos: true}
+	s.charge(t, ctx, v, view, "live-before", live)
+	s.compareCall(t, ctx, h, v, view, 2, []LinkRequest{live, live}, 1<<20, false, "")
+	changed.Meta = map[string]any{"now": strings.Repeat("fresh", 64)}
+	build.AddNode(&changed)
+	s.charge(t, ctx, v, view, "live-after", live)
+	s.compareCall(t, ctx, h, v, view, 3, []LinkRequest{live, live}, 1<<20, false, "")
+	if v != nil {
+		if err := v.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Given JSON-extension metadata whose second encoding differs and a valid
+// scratch index with an ID-only unsized entry, both remain scalar-admissible.
+func (s *v3FixtureSuite) RebuildV3UnstableUnsized(t *testing.T) {
+	n := &graph.Node{ID: "a", Name: "N", QualName: "q.N", RepoPrefix: "r", Meta: map[string]any{"score": json.Number("7")}}
+	raw, err := encodeNode(n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodeNode(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := encodeNode(decoded)
+	if err != nil || bytes.Equal(raw, canonical) {
+		t.Fatalf("not an unstable fixture: %v", err)
+	}
+	build := newBuild(t, FullProfile)
+	build.AddNode(n)
+	view := build.RebuildView()
+	if err := build.pending.Set(rebuildCandidateKey(nameRebuildScoped, n), []byte(n.ID), pebble.NoSync); err != nil {
+		t.Fatal(err)
+	}
+	ctx, h, v := s.pair(t, view, []*graph.Node{n}, 512<<20)
+	req := LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "r"}
+	hc := s.charge(t, ctx, v, view, "unsized", req)
+	if !hc.Oversize {
+		t.Fatalf("H98=%+v", hc)
+	}
+	s.compareCall(t, ctx, h, v, view, 0, []LinkRequest{req, {Kind: LinkQualName, Key: "q.N", AllRepos: true}}, 1<<20, false, "")
+}
+
+// A deliberately tiny retained budget forces eviction and re-read between the
+// stage-check walk and the delivery walk inside one complete scalar call.
+func (s *v3FixtureSuite) RebuildV3EvictionWithinCall(t *testing.T) {
+	nodes := make([]*graph.Node, 0, 240)
+	for i := range 240 {
+		nodes = append(nodes, &graph.Node{ID: fmt.Sprintf("%04d", i), Name: "N", RepoPrefix: "r", Meta: map[string]any{"value": strings.Repeat("p", 2048)}})
+	}
+	ctx, h, v := s.pair(t, RebuildView{}, nodes, 512<<10)
+	s.compareCall(t, ctx, h, v, RebuildView{}, 0, []LinkRequest{{Kind: LinkName, Key: "N", RepoPrefix: "r"}}, 1<<20, false, "")
+	if v != nil {
+		c := v.v3.cache
+		sum, err := v.v3.requestSummary(ctx, LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "r"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v3RetainedCharge(c) > 512<<10 || c.slot(uint64(sum.first)) != nil || c.gens[0].head == nil && c.gens[1].head == nil {
+			t.Fatalf("first piece should be evicted with other retained rows: charge=%d", v3RetainedCharge(c))
+		}
+		if err := v.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Construct a canonical payload with the requested order-record byte size.
+func v3SizedNode(t *testing.T, id, name string, want int) *graph.Node {
+	t.Helper()
+	n := &graph.Node{ID: id, Name: name, RepoPrefix: "r", Meta: map[string]any{"p": ""}}
+	req := LinkRequest{Kind: LinkName, Key: name, RepoPrefix: "r"}
+	payload := 0
+	for range 6 {
+		n.Meta["p"] = strings.Repeat("x", payload)
+		raw, err := encodeNode(n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		delta := want - len(raw) - len(candidateOrderKey(req, 0, n, 0))
+		if delta == 0 {
+			return n
+		}
+		payload += delta
+		if payload < 0 {
+			t.Fatal("negative fixture padding")
+		}
+	}
+	t.Fatal("failed to construct exact record bytes")
+	return nil
+}
+func (s *v3FixtureSuite) RebuildV3LogicalRecordAndByteLimits(t *testing.T) {
+	t.Run("record-build-over", func(t *testing.T) {
+		n := &graph.Node{ID: "a", Name: "N", Meta: map[string]any{"p": strings.Repeat("x", linkRecordBytes)}}
+		ctx := t.Context()
+		budgets := []int64{0, rebuildCandidateCacheBytes}
+		if s.capture {
+			budgets = budgets[:1]
+		}
+		for _, budget := range budgets {
+			p, err := v3FixturePass(t, ctx, budget, RebuildView{}, []*graph.Node{n})
+			if p != nil {
+				_ = p.Close()
+			}
+			if budget == 0 {
+				s.record(v3GoldenCase{Name: t.Name(), Error: v3ErrorClass(err)})
+			}
+			if v3ErrorClass(err) != "candidate record exceeds 16777216 bytes" {
+				t.Fatalf("budget=%d err=%v", budget, err)
+			}
+		}
+	})
+	t.Run("long-id-at-limit", func(t *testing.T) {
+		n := v3SizedNode(t, strings.Repeat("x", (linkRecordBytes/2)-512), "N", linkRecordBytes)
+		ctx, h, v := s.pair(t, RebuildView{}, []*graph.Node{n}, 512<<20)
+		_, st := s.compareCall(t, ctx, h, v, RebuildView{}, 0, []LinkRequest{{Kind: LinkName, Key: "N", RepoPrefix: "r"}}, 1<<20, false, "")
+		if st.ResultBytes != linkRecordBytes {
+			t.Fatal(st)
+		}
+	})
+	t.Run("long-id-over-limit", func(t *testing.T) {
+		n := v3SizedNode(t, strings.Repeat("x", (linkRecordBytes/2)-512), "N", linkRecordBytes+1)
+		ctx, h, v := s.pair(t, RebuildView{}, []*graph.Node{n}, 512<<20)
+		s.compareCall(t, ctx, h, v, RebuildView{}, 0, []LinkRequest{{Kind: LinkName, Key: "N", RepoPrefix: "r"}}, 1<<20, false, "candidate order exceeds link record or page bound")
+	})
+	for _, over := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bytes-over=%t", over), func(t *testing.T) {
+			n := v3SizedNode(t, "a", "N", linkResultBytes/16)
+			other := &graph.Node{ID: "b", Name: "Y", RepoPrefix: "r"}
+			ctx, h, v := s.pair(t, RebuildView{}, []*graph.Node{n, other}, 512<<20)
+			req := LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "r"}
+			reqs := make([]LinkRequest, 16)
+			for i := range reqs {
+				reqs[i] = req
+			}
+			want := ""
+			if over {
+				reqs = append(reqs, LinkRequest{Kind: LinkName, Key: "Y", RepoPrefix: "r"})
+				want = "candidate order exceeds link record or page bound"
+			}
+			_, st := s.compareCall(t, ctx, h, v, RebuildView{}, 0, reqs, 1<<20, false, want)
+			if !over && st.ResultBytes != linkResultBytes {
+				t.Fatal(st)
+			}
+		})
+	}
+}
+
+func (s *v3FixtureSuite) RebuildV3LogicalRowAndRunLimits(t *testing.T) {
+	for _, over := range []bool{false, true} {
+		t.Run(fmt.Sprintf("rows-over=%t", over), func(t *testing.T) {
+			rows := 64
+			if over {
+				rows++
+			}
+			nodes := make([]*graph.Node, 0, rows)
+			for i := range rows {
+				nodes = append(nodes, &graph.Node{ID: fmt.Sprint(i), Name: "N", RepoPrefix: "r"})
+			}
+			reqs := make([]LinkRequest, LinkPageRequests)
+			for i := range reqs {
+				reqs[i] = LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "r"}
+			}
+			ctx, h, v := s.pair(t, RebuildView{}, nodes, 512<<20)
+			want := ""
+			if over {
+				want = "candidate result exceeds link record or page bound"
+			}
+			_, st := s.compareCall(t, ctx, h, v, RebuildView{}, 0, reqs, 1<<20, false, want)
+			if !over && st.ResultRows != linkResultRows {
+				t.Fatal(st)
+			}
+		})
+	}
+	for _, over := range []bool{false, true} {
+		t.Run(fmt.Sprintf("runs-over=%t", over), func(t *testing.T) {
+			rows := goldFileCap
+			if over {
+				rows++
+			}
+			nodes := make([]*graph.Node, 0, rows)
+			for i := range rows {
+				nodes = append(nodes, &graph.Node{ID: fmt.Sprintf("%04d", rows-i), Name: "N", RepoPrefix: "r"})
+			}
+			ctx, h, v := s.pair(t, RebuildView{}, nodes, 512<<20)
+			want := ""
+			if over {
+				want = "pebble order exceeds 1024 sorted runs"
+			}
+			s.compareCall(t, ctx, h, v, RebuildView{}, 0, []LinkRequest{{Kind: LinkName, Key: "N", RepoPrefix: "r"}}, 1, over, want)
+		})
+	}
+}
+
+// H96 type-batch aggregate wire refusal must precede a scalar-admissible
+// request or reducer failure; each admitted singleton remains a checked miss.
+func (s *v3FixtureSuite) RebuildV3WireAndReducerPrecedence(t *testing.T) {
+	ctx, h, v := s.pair(t, RebuildView{}, []*graph.Node{{ID: "a", Name: "N"}}, 512<<20)
+	req := LinkRequest{Kind: LinkName, Key: strings.Repeat("q", linkFrameBytes/2)}
+	s.compareCall(t, ctx, h, v, RebuildView{}, 0, []LinkRequest{req}, 1<<20, false, "")
+	s.compareCall(t, ctx, h, v, RebuildView{}, 1, []LinkRequest{req, req}, 1<<20, true, "link request page exceeds wire byte bound")
+	ctx, h, v = s.pair(t, RebuildView{}, []*graph.Node{{ID: "a", Name: "N"}}, 512<<20)
+	s.compareCall(t, ctx, h, v, RebuildView{}, 0, []LinkRequest{{Kind: LinkName, Key: "N"}}, 1<<20, true, "fixture reducer refusal")
+}
+
+func (s *v3FixtureSuite) RebuildV3ExceptionalMapStream(t *testing.T) {
+	m := map[string]any{}
+	for i := range 897 {
+		m[fmt.Sprint(i)] = true
+	}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deep := json.RawMessage(strings.Repeat("[", 1001) + "null" + strings.Repeat("]", 1001))
+	nodes := []*graph.Node{{ID: "a", Name: "N", Meta: map[string]any{"native": m}}, {ID: "b", Name: "N", Meta: map[string]any{"extension": json.RawMessage(raw)}}, {ID: "c", Name: "N"}, {ID: "d", Name: "N", Meta: map[string]any{"deep": deep}}}
+	ctx, h, v := s.pair(t, RebuildView{}, nodes, 512<<20)
+	s.compareCall(t, ctx, h, v, RebuildView{}, 0, []LinkRequest{{Kind: LinkName, Key: "N"}}, 1<<20, false, "")
+	if v != nil {
+		c := v.v3.cache
+		for _, g := range c.gens {
+			for e := g.head; e != nil; e = e.next {
+				if e.unbounded {
+					t.Fatal("exceptional piece retained")
+				}
+			}
+		}
+	}
+}
+
+// The dense file index cannot fit in this budget. More distinct pieces than
+// slots must stream without refusing or changing a single delivery.
+func (s *v3FixtureSuite) RebuildV3BoundedIndex(t *testing.T) {
+	const budget = 4 << 10
+	var nodes []*graph.Node
+	var reqs []LinkRequest
+	for i := range 256 {
+		name := fmt.Sprintf("N%04d", i)
+		nodes = append(nodes, &graph.Node{ID: name, Name: name, RepoPrefix: "r"})
+		reqs = append(reqs, LinkRequest{Kind: LinkName, Key: name, RepoPrefix: "r"})
+	}
+	ctx, h, v := s.pair(t, RebuildView{}, nodes, budget)
+	s.compareCall(t, ctx, h, v, RebuildView{}, 0, reqs, 1<<20, false, "")
+	s.compareCall(t, ctx, h, v, RebuildView{}, 1, reqs, 1<<20, false, "")
+	if v != nil {
+		c := v.v3.cache
+		if c.pieceCount <= uint64(len(c.index)) || len(c.index) == 0 || v3RetainedCharge(c) > budget {
+			t.Fatalf("slots=%d pieces=%d charge=%d", len(c.index), c.pieceCount, v3RetainedCharge(c))
+		}
+		if err := v.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// An ordinary stationary index can answer from its S summary. A same-key
+// payload update changes the working admission size, not the frozen rows.
+func (s *v3FixtureSuite) RebuildV3AdmissionEpoch(t *testing.T) {
+	build := newBuild(t, FullProfile)
+	n := &graph.Node{ID: "a", Name: "N", QualName: "q.N", RepoPrefix: "r", Language: "go", Meta: map[string]any{"payload": "x"}}
+	build.AddNode(n)
+	view := build.RebuildView()
+	ctx, h, v := s.pair(t, view, []*graph.Node{n}, rebuildCandidateCacheBytes)
+	req := LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "r", Languages: []string{"go"}}
+	before := s.charge(t, ctx, v, view, "sized", req)
+	if before.Oversize || before.Rows != 1 {
+		t.Fatal(before)
+	}
+	if v != nil && len(v.v3.summaries) != 1 {
+		t.Fatal("sized admission did not use S summary")
+	}
+	s.charge(t, ctx, v, view, "repeat", req)
+	changed := *n
+	changed.Meta = map[string]any{"payload": strings.Repeat("y", 1024)}
+	build.AddNode(&changed)
+	after := s.charge(t, ctx, v, view, "node-write", req)
+	if after.Bytes <= before.Bytes || after.Rows != 1 {
+		t.Fatalf("before=%+v after=%+v", before, after)
+	}
+	s.compareCall(t, ctx, h, v, view, 0, []LinkRequest{req, {Kind: LinkName, Key: "N", AllRepos: true}}, 1<<20, false, "")
+}
+
+func TestRebuildV3ExactOrderAndLive(t *testing.T) { (&v3FixtureSuite{}).RebuildV3ExactOrderAndLive(t) }
+func TestRebuildV3UnstableUnsized(t *testing.T)   { (&v3FixtureSuite{}).RebuildV3UnstableUnsized(t) }
+func TestRebuildV3EvictionWithinCall(t *testing.T) {
+	(&v3FixtureSuite{}).RebuildV3EvictionWithinCall(t)
+}
+func TestRebuildV3LogicalRecordAndByteLimits(t *testing.T) {
+	(&v3FixtureSuite{}).RebuildV3LogicalRecordAndByteLimits(t)
+}
+func TestRebuildV3LogicalRowAndRunLimits(t *testing.T) {
+	(&v3FixtureSuite{}).RebuildV3LogicalRowAndRunLimits(t)
+}
+func TestRebuildV3WireAndReducerPrecedence(t *testing.T) {
+	(&v3FixtureSuite{}).RebuildV3WireAndReducerPrecedence(t)
+}
+func TestRebuildV3ExceptionalMapStream(t *testing.T) {
+	(&v3FixtureSuite{}).RebuildV3ExceptionalMapStream(t)
+}
+func TestRebuildV3BoundedIndex(t *testing.T)   { (&v3FixtureSuite{}).RebuildV3BoundedIndex(t) }
+func TestRebuildV3AdmissionEpoch(t *testing.T) { (&v3FixtureSuite{}).RebuildV3AdmissionEpoch(t) }
+
+func (s *v3FixtureSuite) RebuildV3ReadFailure(t *testing.T) {
+	for _, mode := range []string{"integrity", "cancel", "live-index"} {
+		t.Run(mode, func(t *testing.T) {
+			build := newBuild(t, FullProfile)
+			nodes := []*graph.Node{{ID: "a", Name: "A"}, {ID: "b", Name: "B"}, {ID: "c", Name: "B"}}
+			build.AddBatch(nodes, nil)
+			view := build.RebuildView()
+			if mode == "live-index" {
+				key := keyStrings([]byte{familyName, nameRebuildScoped}, "A", "", "", "z")
+				if err := build.pending.Set(key, []byte("z"), pebble.NoSync); err != nil {
+					t.Fatal(err)
+				}
+			}
+			reqs := []LinkRequest{{Kind: LinkName, Key: "B"}, {Kind: LinkName, Key: "A", AllRepos: true}}
+			budgets := []int64{0, rebuildCandidateCacheBytes}
+			if s.capture {
+				budgets = budgets[:1]
+			}
+			var reference []byte
+			for _, budget := range budgets {
+				ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+				workerMode := "ordinary"
+				if mode == "integrity" && budget == 0 {
+					workerMode = "corrupt-partition"
+				}
+				p, err := v3FixturePassMode(t, ctx, budget, view, nodes, workerMode)
+				if err != nil {
+					cancel()
+					t.Fatal(err)
+				}
+				if mode == "integrity" && budget != 0 {
+					f, err := os.OpenFile(filepath.Join(p.dir, "v3.sst"), os.O_WRONLY, 0)
+					if err != nil {
+						cancel()
+						t.Fatal(err)
+					}
+					_, err = f.WriteAt(bytes.Repeat([]byte{0xff}, 8), 0)
+					if err = errors.Join(err, f.Close()); err != nil {
+						cancel()
+						t.Fatal(err)
+					}
+				}
+				page, cancelPage := context.WithCancel(ctx)
+				visits := 0
+				var trace []byte
+				stats, err := p.SelectCandidatePage(page, view, reqs, 1, func(pos int, n *graph.Node) error {
+					visits++
+					digest, e := v3Fingerprint(n)
+					if e != nil {
+						return e
+					}
+					key := sha256.Sum256(candidateOrderKey(reqs[pos], pos, n, 0))
+					trace = binary.BigEndian.AppendUint32(trace, uint32(pos))
+					trace = binary.BigEndian.AppendUint32(trace, 0)
+					trace = append(trace, key[:]...)
+					trace = append(trace, digest[:]...)
+					if mode == "cancel" {
+						cancelPage()
+					}
+					return nil
+				})
+				cancelPage()
+				if !errors.Is(err, ErrRebuildLink) || stats != (CandidatePageStats{}) {
+					t.Fatalf("mode=%s stats=%+v err=%v", mode, stats, err)
+				}
+				switch mode {
+				case "integrity":
+					if visits != 0 || budget == 0 && !strings.Contains(err.Error(), "read candidate partition") {
+						t.Fatalf("integrity visits=%d err=%v", visits, err)
+					}
+				case "cancel":
+					if visits != 1 || !errors.Is(err, context.Canceled) {
+						t.Fatalf("cancel visits=%d err=%v", visits, err)
+					}
+				case "live-index":
+					if visits != 0 || !errors.Is(err, ErrRebuildView) || !strings.Contains(err.Error(), "stale working candidate index entry") {
+						t.Fatalf("live index visits=%d err=%v", visits, err)
+					}
+				}
+				if budget == 0 {
+					reference = trace
+					s.record(v3GoldenCase{Name: t.Name(), Requests: v3RequestDigests(t, reqs), Trace: trace, Error: mode})
+				} else if !bytes.Equal(reference, trace) {
+					t.Fatal("failure delivered different tentative rows")
+				}
+				entries, e := os.ReadDir(filepath.Dir(p.dir))
+				if e != nil || len(entries) != 1 || entries[0].Name() != "keep" {
+					t.Fatalf("scratch after failure %v %v", entries, e)
+				}
+				if _, e := p.SelectCandidatePage(ctx, view, reqs, 1, func(int, *graph.Node) error { t.Fatal("retry visited"); return nil }); !errors.Is(e, ErrRebuildLink) {
+					t.Fatalf("failed pass admitted retry: %v", e)
+				}
+				cancel()
+			}
+		})
+	}
+}
+
+func TestRebuildV3ReadFailure(t *testing.T) { (&v3FixtureSuite{}).RebuildV3ReadFailure(t) }
+
+// Opt-in temporary capture. Never derive golden expectations from the new
+// reader: this suite runs only the H98 subprocess path.
+func TestCaptureRebuildCandidateGoldens(t *testing.T) {
+	prefix := os.Getenv("GORTEX_CAPTURE_GOLDEN")
+	if prefix == "" {
+		t.Skip("explicit H98 golden capture only")
+	}
+	if !filepath.IsAbs(prefix) {
+		t.Fatal("capture prefix must be absolute")
+	}
+	s := &v3FixtureSuite{capture: true}
+	t.Run("TestRebuildV3ExactOrderAndLive", s.RebuildV3ExactOrderAndLive)
+	t.Run("TestRebuildV3UnstableUnsized", s.RebuildV3UnstableUnsized)
+	t.Run("TestRebuildV3EvictionWithinCall", s.RebuildV3EvictionWithinCall)
+	t.Run("TestRebuildV3LogicalRecordAndByteLimits", s.RebuildV3LogicalRecordAndByteLimits)
+	t.Run("TestRebuildV3LogicalRowAndRunLimits", s.RebuildV3LogicalRowAndRunLimits)
+	t.Run("TestRebuildV3WireAndReducerPrecedence", s.RebuildV3WireAndReducerPrecedence)
+	t.Run("TestRebuildV3ExceptionalMapStream", s.RebuildV3ExceptionalMapStream)
+	t.Run("TestRebuildV3BoundedIndex", s.RebuildV3BoundedIndex)
+	t.Run("TestRebuildV3AdmissionEpoch", s.RebuildV3AdmissionEpoch)
+	t.Run("TestRebuildV3ReadFailure", s.RebuildV3ReadFailure)
+	if t.Failed() {
+		return
+	}
+	if len(s.cases) != 32 {
+		t.Fatalf("H98 capture has %d cases, want 32", len(s.cases))
+	}
+	names := make(map[string]bool, len(s.cases))
+	for i := range s.cases {
+		s.cases[i].Name = strings.TrimPrefix(s.cases[i].Name, t.Name()+"/")
+		if names[s.cases[i].Name] {
+			t.Fatalf("duplicate case %q", s.cases[i].Name)
+		}
+		names[s.cases[i].Name] = true
+	}
+	raw, err := json.Marshal(s.cases)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 262,144 row-limit frames (72 B each), request hashes, plus the
+	// remaining cases fit well below this uncompressed cap.
+	const maxBytes = 64 << 20
+	if len(raw) > maxBytes {
+		t.Fatal("candidate golden exceeds 64 MiB")
+	}
+	var compressed bytes.Buffer
+	w := gzip.NewWriter(&compressed)
+	_, err = w.Write(raw)
+	if err = errors.Join(err, w.Close()); err != nil {
+		t.Fatal(err)
+	}
+	if compressed.Len() > maxBytes {
+		t.Fatal("compressed candidate golden exceeds 64 MiB")
+	}
+	header := struct {
+		Cases, Bytes, CompressedBytes int
+		SHA256, CompressedSHA256      string
+	}{len(s.cases), len(raw), compressed.Len(), fmt.Sprintf("%x", sha256.Sum256(raw)), fmt.Sprintf("%x", sha256.Sum256(compressed.Bytes()))}
+	meta, err := json.Marshal(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []struct {
+		path string
+		data []byte
+	}{{prefix + ".candidates.json.gz", compressed.Bytes()}, {prefix + ".candidates.header.json", meta}} {
+		f, err := os.OpenFile(file.path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = f.Write(file.data)
+		if err = errors.Join(err, f.Close()); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

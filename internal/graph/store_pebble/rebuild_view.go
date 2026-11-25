@@ -28,7 +28,8 @@ const rebuildLinkPendingRows = 2048
 // Visits are tentative until the call returns nil. Callbacks may read or write
 // the working store. The owner must join all calls before closing the store.
 type RebuildView struct {
-	build *BuildStore
+	build      *BuildStore
+	callerPage *rebuildCallerPageCache
 }
 
 // RebuildView returns the typed read surface without changing graph.Store reads.
@@ -38,7 +39,14 @@ func (b *BuildStore) RebuildView() RebuildView { return RebuildView{build: b} }
 func (v RebuildView) Node(ctx context.Context, id string) (*graph.Node, error) {
 	var n *graph.Node
 	err := v.read(ctx, func(snap *pebble.Snapshot) error {
-		node, err := pendingGet(snap, pendingNodeKey(id), decodeNode)
+		key := pendingNodeKey(id)
+		var node *graph.Node
+		var err error
+		if v.callerPage != nil {
+			node, err = v.callerPage.read(snap, id, key, false, nil)
+		} else {
+			node, err = pendingGet(snap, key, decodeNode)
+		}
 		if err != nil {
 			return err
 		}
@@ -108,12 +116,18 @@ func (v RebuildView) VisitFileImportTargets(ctx context.Context, file string, yi
 			if err := chargeRow(key, nil); err != nil {
 				return nil, err
 			}
-			n, err := pendingGet(snap, key, func(raw []byte) (*graph.Node, error) {
-				if err := chargeBytes(len(raw)); err != nil {
-					return nil, err
-				}
-				return decodeNodeLight(raw)
-			})
+			var n *graph.Node
+			var err error
+			if v.callerPage != nil {
+				n, err = v.callerPage.read(snap, id, key, true, chargeBytes)
+			} else {
+				n, err = pendingGet(snap, key, func(raw []byte) (*graph.Node, error) {
+					if err := chargeBytes(len(raw)); err != nil {
+						return nil, err
+					}
+					return decodeNodeLight(raw)
+				})
+			}
 			if err == nil && n != nil && n.ID != id {
 				return nil, invalid("working import node ID does not match key")
 			}

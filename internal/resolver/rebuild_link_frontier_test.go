@@ -66,7 +66,7 @@ func frontierFixture(t *testing.T, workers, lines int) (context.Context, *store_
 	t.Cleanup(cancel)
 	return ctx, b, store_pebble.RebuildLinkOptions{
 		Binary: exe, WorkerArgs: []string{"-test.run=^TestRebuildLinkFrontierChild$", "--", "__rebuild-link-worker"},
-		ScratchParent: lease, Partitions: workers, SpillBytes: 1 << 20,
+		ScratchParent: lease, Partitions: workers, SpillBytes: 1 << 20, LegacyCandidates: true,
 	}
 }
 

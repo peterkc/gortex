@@ -35,6 +35,8 @@ type RebuildLinkOptions struct {
 	Partitions    int
 	SpillBytes    int
 	reverse       bool // tests launch in the other slot order without changing key ownership
+	// Temporary differential oracle. Removed with the old worker path.
+	LegacyCandidates bool
 }
 
 // RebuildLink owns one immutable candidate pass and its exiting child processes.
@@ -48,6 +50,7 @@ type RebuildLink struct {
 	active  chan struct{}
 	done    chan struct{}
 	cleanup error // read only after done closes
+	v3      *v3Reader
 
 	candidateCalls atomic.Uint64
 	requestsSent   atomic.Uint64
@@ -119,6 +122,37 @@ func StartRebuildLink(ctx context.Context, opts RebuildLinkOptions, source func(
 				return nil, s.fail(fmt.Errorf("partition %d sent counts at startup", worker.part))
 			}
 		}
+	}
+	if err := context.Cause(ctx); err != nil {
+		return nil, s.fail(err)
+	}
+	return s, nil
+}
+
+// StartCachedRebuildLink opens the ordered candidate file and its fixed-budget
+// decoded row cache. The working view supplies the initial index sizing facts.
+func StartCachedRebuildLink(ctx context.Context, opts RebuildLinkOptions, view RebuildView, source func(func(*graph.Node) error) error) (*RebuildLink, error) {
+	return startCachedRebuildLink(ctx, opts, view, rebuildCandidateCacheBytes, source)
+}
+
+// A small budget is used by cache-boundary tests, not product configuration.
+func startCachedRebuildLink(ctx context.Context, opts RebuildLinkOptions, view RebuildView, budget int64, source func(func(*graph.Node) error) error) (*RebuildLink, error) {
+	if opts.SpillBytes < 1 || opts.SpillBytes > linkResultBytes || !filepath.IsAbs(opts.ScratchParent) || source == nil {
+		return nil, fmt.Errorf("%w: invalid scratch lease, source or limits", ErrRebuildLink)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrRebuildLink, err)
+	}
+	dir, err := os.MkdirTemp(opts.ScratchParent, "link-")
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrRebuildLink, err)
+	}
+	ctx, cancel := context.WithCancelCause(ctx)
+	s := &RebuildLink{ctx: ctx, cancel: cancel, dir: dir, parts: 1, active: make(chan struct{}, linkInFlight), done: make(chan struct{})}
+	s.v3, err = openV3Reader(ctx, dir, view, budget, source)
+	go s.reap()
+	if err != nil {
+		return nil, s.fail(fmt.Errorf("write candidate partitions: %w", err))
 	}
 	if err := context.Cause(ctx); err != nil {
 		return nil, s.fail(err)
@@ -235,7 +269,10 @@ func (s *RebuildLink) reap() {
 	for range cap(s.active) {
 		s.active <- struct{}{}
 	}
-	s.cleanup = os.RemoveAll(s.dir)
+	if s.v3 != nil {
+		s.cleanup = s.v3.close()
+	}
+	s.cleanup = errors.Join(s.cleanup, os.RemoveAll(s.dir))
 	close(s.done)
 }
 
