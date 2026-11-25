@@ -326,6 +326,9 @@ func (p *Provider) acquireHeavy(ctx context.Context, large bool) (func(), error)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if ctx.Value(startupCompilerAdmission{}) == p {
+		return func() {}, nil
+	}
 	preempt := committedPreempt(ctx)
 	if p.warm.startup.Load() > 0 {
 		large = true
@@ -1601,50 +1604,18 @@ func (p *Provider) EnrichFilesContext(ctx context.Context, g graph.Store, repoPr
 		return nil, err
 	}
 	defer release()
+	p.logger.Info("go-types: file binding admitted",
+		zap.String("stage", "binding"),
+		zap.Duration("admission_wait", time.Since(start)),
+	)
 
-	absRoot, err := filepath.Abs(repoRoot)
+	absRoot, sourceRoot, requestedFiles, patterns, fileLoadDir, err := fileCompilerInputs(repoPrefix, repoRoot, filePaths)
 	if err != nil {
-		return nil, fmt.Errorf("absolute path: %w", err)
+		return nil, err
 	}
-
-	prefix := normalizeRelPath(repoPrefix)
-	seen := make(map[string]struct{}, len(filePaths))
-	requestedFiles := make([]string, 0, len(filePaths))
-	for _, filePath := range filePaths {
-		graphPath := normalizeRelPath(filePath)
-		if graphPath == "" {
-			continue
-		}
-		if _, ok := seen[graphPath]; ok {
-			continue
-		}
-		seen[graphPath] = struct{}{}
-		requestedFiles = append(requestedFiles, graphPath)
-	}
-	sort.Strings(requestedFiles)
 	if len(requestedFiles) == 0 {
 		return &semantic.EnrichResult{Provider: p.Name(), Language: "go"}, nil
 	}
-
-	// Use canonical source paths for directory queries while keeping absRoot as
-	// the binding-index owner (callers may release that owner through a symlink).
-	sourceRoot := absRoot
-	if resolved, err := filepath.EvalSymlinks(absRoot); err == nil {
-		sourceRoot = resolved
-	}
-	patterns := make([]string, 0, len(requestedFiles))
-	for _, graphPath := range requestedFiles {
-		relPath := graphPath
-		if prefix != "" {
-			relPath = strings.TrimPrefix(relPath, prefix+"/")
-		}
-		patterns = append(patterns, "file="+filepath.Join(sourceRoot, filepath.FromSlash(relPath)))
-	}
-	// The file= patterns are absolute, but Dir still selects the module whose
-	// build list resolves them: a repository whose module lives in a
-	// subdirectory resolves nothing from the root. absRoot remains the
-	// relativization base for graph paths.
-	fileLoadDir, _ := goLoadDir(absRoot)
 	pkgs, fset, err := p.loadPackagesContext(ctx, fileLoadDir, patterns...)
 	defer func() {
 		clearGoPackageCompilerRoots(pkgs)
@@ -2216,6 +2187,15 @@ func (p *Provider) loadCompilerPackages(cfg *packages.Config, patterns ...string
 		p.logger.Info("go-types: package load uses native driver chunks",
 			zap.Int("driver_chunks", chunks), zap.Int("patterns", len(patterns)),
 			zap.Int("pattern_bytes", total), zap.String("module_dir", cfg.Dir))
+	}
+	if p.logger != nil {
+		p.logger.Debug("go-types: package driver dispatch",
+			zap.Uint("load_mode", uint(cfg.Mode)),
+			zap.Int("patterns", len(patterns)),
+			zap.Int("driver_chunks", chunks),
+			zap.Bool("file_fallback", len(patterns) > 0 && strings.HasPrefix(patterns[0], "file=")),
+			zap.String("module_dir", cfg.Dir),
+		)
 	}
 	load := p.packagesLoad
 	if load == nil {

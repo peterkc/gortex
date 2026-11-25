@@ -1444,6 +1444,18 @@ func (m *Manager) EnrichFiles(g graph.Store, repoPrefix, repoRoot, language stri
 // callers that already own a tighter deadline can pass it here without it
 // being replaced by a Background root.
 func (m *Manager) EnrichFilesContext(ctx context.Context, g graph.Store, repoPrefix, repoRoot, language string, filePaths []string) (*EnrichResult, error) {
+	return m.enrichFilesContext(ctx, g, repoPrefix, repoRoot, language, filePaths, false)
+}
+
+const startupFileExportTimeout = 480 * time.Second
+
+// EnrichStartupFilesContext prepares the selected primary provider before
+// starting a fresh partial-file timeout. Both stages share one lifecycle pass.
+func (m *Manager) EnrichStartupFilesContext(ctx context.Context, g graph.Store, repoPrefix, repoRoot, language string, filePaths []string) (*EnrichResult, error) {
+	return m.enrichFilesContext(ctx, g, repoPrefix, repoRoot, language, filePaths, true)
+}
+
+func (m *Manager) enrichFilesContext(ctx context.Context, g graph.Store, repoPrefix, repoRoot, language string, filePaths []string, startup bool) (*EnrichResult, error) {
 	if !m.config.Enabled || language == "" || len(filePaths) == 0 {
 		return nil, nil
 	}
@@ -1474,6 +1486,56 @@ func (m *Manager) EnrichFilesContext(ctx context.Context, g graph.Store, repoPre
 	}
 	sort.Strings(files)
 
+	provider := m.selectProviders()[language]
+	if provider != nil && !provider.Available() {
+		provider = nil
+	}
+	if startup {
+		if provider != nil {
+			if preparer, ok := provider.(FileBatchExportPreparer); ok {
+				prepareCtx, cancel := context.WithTimeout(ctx, startupFileExportTimeout)
+				started := time.Now()
+				m.logger.Info("semantic file stage start",
+					zap.String("stage", "export_preparation"),
+					zap.String("language", language),
+					zap.Int("files", len(files)),
+				)
+				var err error
+				if admission, ok := provider.(FileBatchExportAdmission); ok {
+					var decorate func(context.Context) context.Context
+					var release func()
+					decorate, release, err = admission.AcquireFileExportAdmission(prepareCtx)
+					if err == nil {
+						defer release()
+						prepareCtx = decorate(prepareCtx)
+						ctx = decorate(ctx)
+					}
+				}
+				if err == nil {
+					err = preparer.PrepareFileExportsContext(prepareCtx, repoPrefix, repoRoot, files)
+				}
+				if prepareCtx.Err() != nil {
+					err = prepareCtx.Err()
+				}
+				cancel()
+				m.logger.Info("semantic file stage complete",
+					zap.String("stage", "export_preparation"),
+					zap.String("language", language),
+					zap.Duration("elapsed", time.Since(started)),
+					zap.Error(err),
+				)
+				if err != nil {
+					return nil, fmt.Errorf("prepare file exports: %w", err)
+				}
+			}
+		}
+		if m.config.TimeoutSeconds > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, time.Duration(m.config.TimeoutSeconds)*time.Second)
+			defer cancel()
+		}
+	}
+
 	run := func(provider Provider) (*EnrichResult, error) {
 		if batch, ok := provider.(ContextFileBatchEnricher); ok {
 			return batch.EnrichFilesContext(ctx, g, repoPrefix, repoRoot, files)
@@ -1493,11 +1555,26 @@ func (m *Manager) EnrichFilesContext(ctx context.Context, g graph.Store, repoPre
 		return provider.Enrich(g, repoRoot)
 	}
 
-	langProviders := m.selectProviders()
 	var primary *EnrichResult
 	var primaryErr error
-	if provider, ok := langProviders[language]; ok && provider.Available() {
+	if provider != nil {
+		started := time.Now()
+		m.logger.Info("semantic file stage start",
+			zap.String("stage", "binding"),
+			zap.String("language", language),
+			zap.Int("files", len(files)),
+		)
 		primary, primaryErr = run(provider)
+		if startup && ctx.Err() != nil {
+			primaryErr = ctx.Err()
+		}
+		m.logger.Info("semantic file stage complete",
+			zap.String("stage", "binding"),
+			zap.String("language", language),
+			zap.Duration("elapsed", time.Since(started)),
+			zap.Error(primaryErr),
+			zap.Bool("partial", primary != nil && primary.Partial),
+		)
 	}
 
 	// Supplemental providers preserve EnrichAll parity. Each receives one

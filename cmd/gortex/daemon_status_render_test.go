@@ -190,7 +190,7 @@ func TestRenderDaemonHeader_EnrichmentProgress_NoSummary(t *testing.T) {
 	st.Enrichment = nil
 	var buf bytes.Buffer
 	renderDaemonHeader(&buf, st)
-	assert.Contains(t, buf.String(), "enrichment in progress")
+	assert.Contains(t, buf.String(), "warmup incomplete; semantic enrichment pending")
 }
 
 func TestRenderDaemonHeader_EnrichmentProgress_WithCurrent(t *testing.T) {
@@ -227,7 +227,7 @@ func TestRenderDaemonHeader_EnrichmentProgress_NoCurrentPass(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	renderDaemonHeader(&buf, st)
-	assert.Contains(t, buf.String(), "enriching 5/5 repos")
+	assert.Contains(t, buf.String(), "warmup incomplete; semantic enrichment pending")
 }
 
 // TestRenderDaemonHeader_LSPRouterSection — alive language servers are

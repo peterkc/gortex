@@ -190,6 +190,7 @@ type deferredPassAttempt struct {
 	indexer  *Indexer
 	registry *contracts.Registry
 	enrich   bool
+	outcome  deferredEnrichOutcome // poolDone publishes this to the owned tail
 }
 
 // Indexer walks a repository and populates the graph.
@@ -1371,8 +1372,18 @@ func (idx *Indexer) runDeferredGoMod() {
 // repo-scoped binding strings; tstypes is stateless; and providers serialize
 // graph mutations on the backend resolve mutex.
 func (idx *Indexer) runDeferredEnrich() {
+	outcome := idx.runDeferredEnrichContext(context.Background(), deferredEnrichOptions{})
+	err := idx.coordinateRepositoryMutation(context.Background(), OutputEntryDeferredPasses, func() error {
+		return idx.finishDeferredFileEnrich(outcome)
+	})
+	if err != nil {
+		idx.logger.Warn("deferred enrichment incomplete", zap.Error(err))
+	}
+}
+
+func (idx *Indexer) runDeferredEnrichContext(ctx context.Context, options deferredEnrichOptions) deferredEnrichOutcome {
 	if idx.semanticMgr == nil || !idx.semanticMgr.Enabled() || !idx.semanticMgr.HasProviders() {
-		return
+		return deferredEnrichOutcome{}
 	}
 	// Gate the pass to repos that actually changed. The daemon warmup collects
 	// every indexer and enriches them all, but an unchanged repo's persisted
@@ -1385,7 +1396,7 @@ func (idx *Indexer) runDeferredEnrich() {
 			idx.logger.Info("deferred enrichment skipped",
 				zap.String("repo", idx.repoPrefix),
 				zap.String("reason", "unchanged"))
-			return
+			return deferredEnrichOutcome{}
 		}
 		idx.logger.Info("deferred enrichment forced despite no pending changes",
 			zap.String("repo", idx.repoPrefix))
@@ -1414,18 +1425,35 @@ func (idx *Indexer) runDeferredEnrich() {
 			languages = append(languages, language)
 		}
 		sort.Strings(languages)
+		outcome := deferredEnrichOutcome{generation: pendingGeneration, files: pendingFiles}
+		failed := make(map[string]bool)
 		for _, language := range languages {
 			files := byLanguage[language]
-			result, err := idx.semanticMgr.EnrichFiles(
-				idx.graph, idx.repoPrefix, idx.rootPath, language, files,
-			)
+			if options.PrepareFileExports && ctx.Err() != nil {
+				outcome.err = errors.Join(outcome.err, ctx.Err())
+				for _, file := range files {
+					failed[file] = true
+				}
+				continue
+			}
+			var result *semantic.EnrichResult
+			var err error
+			if options.PrepareFileExports {
+				result, err = idx.semanticMgr.EnrichStartupFilesContext(ctx, idx.graph, idx.repoPrefix, idx.rootPath, language, files)
+			} else {
+				result, err = idx.semanticMgr.EnrichFiles(idx.graph, idx.repoPrefix, idx.rootPath, language, files)
+			}
 			if err != nil {
 				idx.logger.Warn("file-scoped deferred semantic enrichment failed",
 					zap.String("repo", idx.repoPrefix),
 					zap.String("language", language),
 					zap.Int("files", len(files)),
 					zap.Error(err))
-				return
+				outcome.err = errors.Join(outcome.err, fmt.Errorf("%s (%d files): %w", language, len(files), err))
+				for _, file := range files {
+					failed[file] = true
+				}
+				continue
 			}
 			if result != nil {
 				idx.logger.Info("semantic enrichment result",
@@ -1438,23 +1466,26 @@ func (idx *Indexer) runDeferredEnrich() {
 					zap.Float64("coverage", result.CoveragePercent),
 				)
 				if result.Partial {
-					return
+					idx.logger.Warn("file-scoped deferred semantic enrichment partial",
+						zap.String("repo", idx.repoPrefix),
+						zap.String("language", language),
+						zap.Int("files", len(files)),
+						zap.String("abort_reason", result.AbortReason),
+						zap.String("bound_reason", result.BoundReason),
+					)
+					outcome.err = errors.Join(outcome.err, fmt.Errorf("%s (%d files): partial enrichment (abort=%s, bound=%s)", language, len(files), result.AbortReason, result.BoundReason))
+					for _, file := range files {
+						failed[file] = true
+					}
 				}
 			}
 		}
-		// A file frontier proves only that the affected language/file batches
-		// were refreshed. It must never publish the whole-repository completion
-		// marker: files and packages outside this exact frontier did not run.
-		if idx.clearPendingEnrich(pendingGeneration) {
-			// The whole dispatched frontier is discharged, not just the paths a
-			// provider claimed: a file whose language no provider covers still
-			// had its deferred pass run, and leaving it marked would re-arm it
-			// on every restart forever. A newer generation (the watcher queued
-			// work mid-pass) keeps its own markers — clearPendingEnrich already
-			// declined, so this does not run.
-			idx.dischargePendingEnrichFrontier(pendingFiles)
+		for _, file := range pendingFiles {
+			if !failed[file] {
+				outcome.completed = append(outcome.completed, file)
+			}
 		}
-		return
+		return outcome
 	}
 	// A re-parse this run evicted the persisted hover edges of the re-parsed
 	// files, so force the pass past the completion-marker gate — an unchanged
@@ -1473,7 +1504,7 @@ func (idx *Indexer) runDeferredEnrich() {
 	results, partialRepos, err := idx.semanticMgr.EnrichAll(idx.graph, roots, opts)
 	if err != nil {
 		idx.logger.Warn("semantic enrichment failed", zap.Error(err))
-		return
+		return deferredEnrichOutcome{err: err}
 	}
 	for _, r := range results {
 		idx.logger.Info("semantic enrichment result",
@@ -1486,24 +1517,10 @@ func (idx *Indexer) runDeferredEnrich() {
 			zap.Float64("coverage", r.CoveragePercent),
 		)
 	}
-	// Clear the pending marker only when every provider that ran for this repo
-	// finished non-partial. A partial / abandoned / failed pass leaves it set
-	// so a later deferred pass (or the next restart, once the repo changes
-	// again) retries the enrichment rather than trusting an incomplete graph.
-	if !partialRepos[idx.repoPrefix] && idx.clearPendingEnrich(pendingGeneration) {
-		// A whole-repo pass covers every file, so it discharges the durable
-		// per-file ledger outright. This is the only place a non-git or dirty
-		// repo can ever retire those markers — RecordRepoEnrichmentComplete
-		// below no-ops for it — and it is what keeps find_usages from riding a
-		// re-verification-pending flag on files whose enrichment did complete.
-		idx.dischargePendingEnrichFrontier(idx.pendingEnrichFrontier())
-		// Persist a whole-repo completion marker at this HEAD so the next warm
-		// restart can tell, with one lookup, that this repo's enrichment finished
-		// and MaybeSeedPendingEnrich need not resume it. A partial / abandoned
-		// pass takes the other branch and writes no marker, so the absent marker
-		// re-arms the pass on the next start. No-op on a dirty tree / empty sha.
-		idx.semanticMgr.RecordRepoEnrichmentComplete(idx.graph, idx.repoPrefix, sha, dirty)
+	if partialRepos[idx.repoPrefix] {
+		return deferredEnrichOutcome{err: fmt.Errorf("%s: required enrichment incomplete", idx.repoPrefix)}
 	}
+	return deferredEnrichOutcome{generation: pendingGeneration, full: true, sha: sha, dirty: dirty}
 }
 
 // MaybeSeedPendingEnrich re-arms the deferred-enrichment gate for a repo whose

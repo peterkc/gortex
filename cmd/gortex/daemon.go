@@ -897,7 +897,12 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 // A canceled ctx stops before view admission and publication, as on the
 // success path.
 func publishWarmupCompletion(ctx context.Context, state *daemonState, controller *realController, logger *zap.Logger, viewBuilds *indexer.ViewBuildGate, warmup *warmupTimings, queryable, elapsed time.Duration) {
-	if warmup.resolveErr != nil {
+	incompleteErr := errors.Join(warmup.resolveErr, warmup.enrichErr)
+	if incompleteErr != nil {
+		detail := "warmup resolve failed; check the daemon log"
+		if warmup.resolveErr == nil {
+			detail = "warmup enrichment incomplete; check the daemon log"
+		}
 		// Preserve MarkEnriched's usable-daemon fallback without claiming
 		// enrichment, even when the resolver skipped compute-ready.
 		controller.ready.Store(true)
@@ -907,13 +912,13 @@ func publishWarmupCompletion(ctx context.Context, state *daemonState, controller
 		// The warmup tail has joined even on failure; release queued builds
 		// without claiming that enrichment completed successfully.
 		viewBuilds.Open()
-		logger.Warn("daemon: warmup incomplete", zap.Error(warmup.resolveErr), zap.Duration("warmup", elapsed))
+		logger.Warn("daemon: warmup incomplete", zap.Error(incompleteErr), zap.Duration("warmup", elapsed))
 		publishReadinessPhase(state, "warmup_incomplete", true, map[string]any{
 			"enriched":       false,
 			"warmup_seconds": int64(elapsed.Seconds()),
 			"warmup_ms":      elapsed.Milliseconds(),
 			// Keep storage details in the daemon log, not the readiness channel.
-			"error": "warmup resolve failed; check the daemon log",
+			"error": detail,
 		})
 		// This fallback serves requests even when compute-ready was skipped.
 		// Publish its readiness before allowing physical cleanup to start.
@@ -2134,13 +2139,11 @@ func formatLSPLastUsed(raw string, now time.Time) string {
 
 // formatEnrichmentProgress renders the semantic-enrichment progress
 // suffix appended to the "state" row while Ready but not yet
-// EnrichmentComplete. Falls back to the old mute message when no
-// progress summary is available (no semantic manager wired, or an
-// older daemon build reporting a nil Enrichment) — the row still says
-// something instead of going blank.
+// EnrichmentComplete. Without an active summary, report pending work rather
+// than claiming a failed or partial warmup is still running.
 func formatEnrichmentProgress(e *daemon.EnrichmentProgress) string {
-	if e == nil {
-		return " enrichment in progress"
+	if e == nil || !e.Running {
+		return " warmup incomplete; semantic enrichment pending"
 	}
 	if e.Current == nil {
 		return fmt.Sprintf(" enriching %d/%d repos", e.ReposDone, e.ReposTotal)
