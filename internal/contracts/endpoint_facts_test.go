@@ -40,7 +40,7 @@ func H() {}
 		g.AddNode(&graph.Node{ID: c.NodeID, Name: name, Kind: graph.KindConstant, FilePath: c.FilePath})
 	}
 	require.NoError(t, g.BulkSetConstantValues("", consts))
-	for _, tc := range []struct{
+	for _, tc := range []struct {
 		name      string
 		ex        StoreAwareExtractor
 		questions int
@@ -91,7 +91,7 @@ func Other(w Writer) { value, err := svc.Get(); _ = err; WriteJSON(w, 200, value
 	for _, n := range nodes {
 		for _, seeded := range []bool{false, true} {
 			makeContract := func() Contract {
-				c := Contract{Role: RoleProvider, SymbolID: n.ID, FilePath: path, Line: n.StartLine, Meta: map[string]any{"path":"/items/{p1}", "status_codes": []int{404}, "response_expr": "old"}}
+				c := Contract{Role: RoleProvider, SymbolID: n.ID, FilePath: path, Line: n.StartLine, Meta: map[string]any{"path": "/items/{p1}", "status_codes": []int{404}, "response_expr": "old"}}
 				if seeded {
 					c.Meta["response_type"] = "Seed"
 				}
@@ -117,7 +117,7 @@ def fetch():
 	defer tree.Release()
 	const path = "client.py"
 	nodes := makeNodes(path, []struct {
-		name string
+		name       string
 		start, end int
 	}{{"fetch", 3, 4}})
 	ex := &HTTPExtractor{}

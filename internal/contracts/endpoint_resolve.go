@@ -408,8 +408,8 @@ func nodeInRepoScope(n *graph.Node, repoPrefix string) bool {
 type EndpointQuestionKind string
 
 const (
-	EndpointGoRoute EndpointQuestionKind = "go_route"
-	EndpointTopic EndpointQuestionKind = "topic"
+	EndpointGoRoute    EndpointQuestionKind = "go_route"
+	EndpointTopic      EndpointQuestionKind = "topic"
 	EndpointHTTPClient EndpointQuestionKind = "http_client"
 )
 
@@ -434,7 +434,9 @@ type EndpointFactCapture struct {
 }
 
 func (*EndpointFactCapture) FindNodesByNames([]string) map[string][]*graph.Node { return nil }
-func (*EndpointFactCapture) ConstantValuesByNodeIDs([]string) (map[string]string, error) { return nil, nil }
+func (*EndpointFactCapture) ConstantValuesByNodeIDs([]string) (map[string]string, error) {
+	return nil, nil
+}
 
 func (c *EndpointFactCapture) add(q EndpointContractQuestion) {
 	c.Questions = append(c.Questions, q)

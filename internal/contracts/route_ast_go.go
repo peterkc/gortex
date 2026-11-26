@@ -307,12 +307,12 @@ func buildGoRouteContract(
 		meta["handler_trail"] = rm.handlerTrail
 	}
 	c := Contract{
-		Type:       ContractHTTP,
-		Role:       RoleProvider,
-		SymbolID:   symbolID,
-		FilePath:   filePath,
-		Line:       rm.line,
-		Meta:       meta,
+		Type:     ContractHTTP,
+		Role:     RoleProvider,
+		SymbolID: symbolID,
+		FilePath: filePath,
+		Line:     rm.line,
+		Meta:     meta,
 	}
 	if rm.question == nil {
 		completeGoRouteContract(&c, rm)
