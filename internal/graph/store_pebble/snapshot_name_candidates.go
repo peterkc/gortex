@@ -50,19 +50,20 @@ func (s *Snapshot) nameCandidates(ctx context.Context, needle string, yield func
 	return s.scanNameGramNodes(ctx, strings.ToLower(needle), decodeNodeLight, yield)
 }
 
-// Intersect the distinct longest byte grams in ID order. All shorter grams
-// are implied by these; the caller still checks the full name predicate.
+// Intersect a bounded subset of the distinct longest byte grams in ID order.
+// The caller still checks the full name predicate.
 func (s *Snapshot) scanNameGramNodes(ctx context.Context, folded string, decode decodeRow[*graph.Node], yield func(*graph.Node) (bool, error)) (err error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if folded == "" {
-		return nil
-	}
+	const maxGramPostings = 8
 	width := min(3, len(folded))
+	// Spread the selected grams across the needle without opening an iterator
+	// for every distinct gram of a long name.
+	stride := (len(folded)-width)/maxGramPostings + 1
 	var prefixes [][]byte
 	seen := make(map[string]bool)
-	for i := 0; i+width <= len(folded); i++ {
+	for i := 0; i+width <= len(folded); i += stride {
 		gram := folded[i : i+width]
 		if !seen[gram] {
 			seen[gram] = true

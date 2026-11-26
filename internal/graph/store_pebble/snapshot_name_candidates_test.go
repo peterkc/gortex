@@ -114,9 +114,15 @@ func TestSnapshotNameGramIntersectionBounds(t *testing.T) {
 	require.Equal(t, want, got)
 	require.Equal(t, more, gotMore)
 	require.Equal(t, []string{key("a"), key("b"), key("c"), key("c")}, reads.points)
-	for _, needle := range []string{"a", "ab", "ababa", "[", "missing", ""} {
+	for _, needle := range []string{"a", "ab", "[", "missing", ""} {
 		require.Equal(t, sql.FindNodesByNameContaining(needle, 0), s.FindNodesByNameContaining(needle, 0))
 	}
+	reads.scans = nil
+	require.Equal(t, sql.FindNodesByNameContaining("ababa", 0), s.FindNodesByNameContaining("ababa", 0))
+	require.ElementsMatch(t, []string{
+		string(keyStrings([]byte{familyName, nameGram}, "aba")),
+		string(keyStrings([]byte{familyName, nameGram}, "bab")),
+	}, reads.scans)
 	unicodeMatch := s.FindNodesByNameContaining("äλä", 0)
 	require.Len(t, unicodeMatch, 1)
 	require.Equal(t, "f", unicodeMatch[0].ID)
@@ -130,5 +136,23 @@ func TestSnapshotNameGramIntersectionBounds(t *testing.T) {
 	_, _, err = s.FindFoldedNameCandidatesContext(ctx, "abcd", 0, filter)
 	require.Error(t, err)
 	require.Empty(t, reads.points)
+	require.NoError(t, s.ReadError())
+}
+
+func TestSnapshotNameGramPostingCap(t *testing.T) {
+	const needle = "abcdefghijklmnopqrstuvwxyz0123456789"
+	nodes := []*graph.Node{
+		{ID: "a", Kind: graph.KindFunction, Name: needle},
+		{ID: "b", Kind: graph.KindFunction, Name: "prefix-" + needle + "-suffix"},
+	}
+	sql, _, s := pairedSnapshot(t, nodes, nil)
+	reads := trackSnapshotReads(s)
+	for _, limit := range []int{1, 0} {
+		reads.scans = nil
+		got := s.FindNodesByNameContaining(needle, limit)
+		require.Equal(t, sql.FindNodesByNameContaining(needle, limit), got)
+		require.NotEmpty(t, got)
+		require.LessOrEqual(t, len(reads.scans), 8)
+	}
 	require.NoError(t, s.ReadError())
 }
