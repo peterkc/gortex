@@ -94,9 +94,17 @@ func TestRebuildPlaceholderLookupEquality(t *testing.T) {
 		if !legacy {
 			require.Len(t, p.sites, 4)
 		}
+		// The legacy range deletes and the point deletes may produce different
+		// physical spill sizes. Compare the logical counts only.
+		logicalStats := func() RebuildPlaceholderStats {
+			stats := p.stats
+			stats.Flushes = 0
+			stats.SpillBytes = 0
+			return stats
+		}
 		var got result
 		got.rows = append(got.rows, placeholderLookupRows(t, b, placeholderPrefix))
-		got.stats = append(got.stats, p.stats)
+		got.stats = append(got.stats, logicalStats())
 		record := func(batch []graph.EdgeReindex) error {
 			if legacy {
 				return legacyPlaceholderRecord(t.Context(), p, batch)
@@ -125,7 +133,7 @@ func TestRebuildPlaceholderLookupEquality(t *testing.T) {
 					require.Contains(t, p.sites, string(placeholderSite(source, file, 2)))
 				}
 				got.rows = append(got.rows, placeholderLookupRows(t, b, placeholderPrefix))
-				got.stats = append(got.stats, p.stats)
+				got.stats = append(got.stats, logicalStats())
 				require.NoError(t, b.pending.Close())
 				opts.ReadOnly = false
 				b.pending, err = pebble.Open(filepath.Join(b.scratchParent, "pending"), opts)
@@ -137,7 +145,7 @@ func TestRebuildPlaceholderLookupEquality(t *testing.T) {
 			}
 			require.NoError(t, record(batch))
 			got.rows = append(got.rows, placeholderLookupRows(t, b, placeholderPrefix))
-			got.stats = append(got.stats, p.stats)
+			got.stats = append(got.stats, logicalStats())
 			if !legacy && i == 0 {
 				require.Len(t, p.sites, 2)
 				require.NotContains(t, p.sites, string(placeholderSite(source, file, 1)))
@@ -150,7 +158,7 @@ func TestRebuildPlaceholderLookupEquality(t *testing.T) {
 		require.Equal(t, 4, stats.Claimed)
 		require.Equal(t, 1, stats.Links)
 		require.Equal(t, 4, stats.Reindexes)
-		got.stats = append(got.stats, stats)
+		got.stats = append(got.stats, logicalStats())
 		got.applied = placeholderLookupRows(t, b, []byte{familyEdge})
 		return got
 	}

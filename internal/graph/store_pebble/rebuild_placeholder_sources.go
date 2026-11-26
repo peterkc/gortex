@@ -116,16 +116,24 @@ func (p *RebuildPlaceholderSources) claim(ctx context.Context, rp graph.Placehol
 	if _, ok := p.sites[string(site)]; !ok {
 		return ctx.Err()
 	}
-	before := p.stats.Claimed
+	var claimedKeys [][]byte
 	if err := pendingVisit(ctx, p.build.pending, site, func(r row) error {
+		claimedKeys = append(claimedKeys, bytes.Clone(r.key))
 		key := binary.BigEndian.AppendUint64(bytes.Clone(placeholderMoves), uint64(p.stats.Claimed))
 		p.stats.Claimed++
 		return p.put(append(key, r.key[len(site):]...), []byte(rp.NewFrom))
 	}); err != nil {
 		return err
 	}
-	if p.stats.Claimed > before {
-		if err := p.build.pending.DeleteRange(site, prefixEnd(site), pebble.NoSync); err != nil {
+	if len(claimedKeys) > 0 {
+		batch := p.build.pending.NewBatch()
+		defer batch.Close()
+		for _, key := range claimedKeys {
+			if err := batch.Delete(key, nil); err != nil {
+				return err
+			}
+		}
+		if err := batch.Commit(pebble.NoSync); err != nil {
 			return err
 		}
 		delete(p.sites, string(site))
