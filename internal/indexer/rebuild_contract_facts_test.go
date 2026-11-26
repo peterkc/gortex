@@ -61,8 +61,17 @@ func Register(r Router) { r.GET(Route, Handle) }
 	require.Empty(t, router.facts.Records)
 	require.Len(t, router.facts.Questions, 1)
 	require.Equal(t, []contracts.EndpointTerm{{Name: "Route"}}, router.facts.Questions[0].Expression.Terms)
-	require.Empty(t, resolve(router.facts.Records, router.facts.Questions, g))
+	// Keep the router-context superset even before the constant exists. The
+	// native census only admits this file once the route question resolves.
+	require.NotNil(t, router.facts.Router)
+	wantQuestionRouter := contracts.RouterFileFacts("app/routes.go", router.source)
+	require.Equal(t, &wantQuestionRouter, router.facts.Router)
+	routerFile := ContractFollowupFile{Path: "app/routes.go", Language: "go"}
+	unresolved := resolve(router.facts.Records, router.facts.Questions, g)
+	require.Empty(t, unresolved)
+	require.False(t, contractRouterSupported(routerFile, unresolved))
 	capture("app/constant.go", "go", "package app\nconst Route = \"/api/items\"\n")
+	require.True(t, contractRouterSupported(routerFile, resolve(router.facts.Records, router.facts.Questions, g)))
 	handler := capture("app/handler.go", "go", `package app
 func Handle(w Writer, r RequestReader) {
 	var payload Input
@@ -300,6 +309,26 @@ func Register(r Router) { r.GET("/api/users", Register) }`, "http::GET::/api/use
 			legacy, err := idx.extractPreparedRebuildFile(t.Context(), tc.path, tc.ext, src)
 			require.NoError(t, err)
 			require.Equal(t, legacy, parsed, "capture changes no ordinary parse facts")
+
+			var fileID string
+			for _, n := range legacy.Nodes {
+				if n.Kind == graph.KindFile {
+					fileID = n.ID
+					break
+				}
+			}
+			require.NotEmpty(t, fileID)
+			var fileEdges []*graph.Edge
+			for _, edge := range legacy.Edges {
+				if edge.From == fileID {
+					fileEdges = append(fileEdges, edge)
+				}
+			}
+			_, byLanguage := idx.buildPerFileContractExtractors()
+			want := idx.runContractExtractorsForFile(tc.path, src, legacy.Nodes, fileEdges, byLanguage[tc.ext.Language()], nil)
+			got, err := contracts.ResolveEndpointQuestions(facts.Records, facts.Questions, nil)
+			require.NoError(t, err)
+			require.Equal(t, want, got, "complete contract records must match the native nil-tree path")
 		})
 	}
 }

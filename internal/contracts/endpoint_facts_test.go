@@ -189,6 +189,8 @@ func f() {}`)
 	original := FactoryForLang("go")
 	t.Cleanup(func() { RegisterBodyFactsFactory("go", original) })
 	RegisterBodyFactsFactory("go", func(*parser.ParseTree, *graph.Node) BodyFacts { return nopBodyFacts{} })
+	// No detector requires a tree here: the refusal must come from the factory guard.
+	require.ErrorIs(t, CheckFileFactTree("x.go", src, tree, nil), ErrContractFactTree)
 	_, err := CaptureFileHandlerFacts(t.Context(), nil, nil, "go", tree)
 	require.ErrorIs(t, err, ErrContractFactTree)
 }

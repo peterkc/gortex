@@ -16,6 +16,9 @@ import (
 // FileFacts is the checked, detached contract input from one accepted parse.
 // Nil shape values explicitly record that a declaration has no native shape.
 // NeedsRawHandlerTree names the transformed Go exception without retaining raw bytes.
+// Router includes a superset of the native router census: an unresolved Go
+// route question also retains file facts. C1b must filter these facts with
+// contractRouterSupported on the resolved records before native prefix joining.
 type FileFacts struct {
 	Records             []Contract
 	Questions           []EndpointContractQuestion
