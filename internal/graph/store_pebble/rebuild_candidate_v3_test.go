@@ -617,7 +617,6 @@ func (s *v3FixtureSuite) RebuildV3ReadFailure(t *testing.T) {
 				}
 			}
 			reqs := []LinkRequest{{Kind: LinkName, Key: "B"}, {Kind: LinkName, Key: "A", AllRepos: true}}
-			budget := s.budget
 			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 			p, err := v3FixturePass(t, ctx, s.budget, view, nodes)
 			if err != nil {
