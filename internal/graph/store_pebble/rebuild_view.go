@@ -24,7 +24,9 @@ const rebuildLinkPendingRows = 2048
 
 // RebuildView reads a worker's private mutable rows, not a published graph.
 // Obtain a view from BuildStore.RebuildView. Each call uses one snapshot;
-// later calls see successful intervening writes.
+// ordinary views see successful intervening writes. WithCallerPageCache
+// keeps caller rows until ResetCallerPage. This is safe in the main frontier,
+// where the only page write is the apply after reduce.
 // Visits are tentative until the call returns nil. Callbacks may read or write
 // the working store. The owner must join all calls before closing the store.
 type RebuildView struct {

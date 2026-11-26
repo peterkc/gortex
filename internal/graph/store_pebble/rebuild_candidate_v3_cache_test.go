@@ -102,7 +102,7 @@ func TestV3CacheUnretained(t *testing.T) {
 		exceptional bool
 	}{
 		{"budget", &graph.Node{ID: "x"}, 1, false},
-		{"oversized", &graph.Node{ID: strings.Repeat("x", v3CachePieceBytes)}, 512 << 20, false},
+		{"oversized", &graph.Node{ID: strings.Repeat("x", v3PieceBytes)}, 512 << 20, false},
 		{"exception", &graph.Node{Meta: map[string]any{"large": v3CacheMap(v3SingleTableEntries + 1)}}, 512 << 20, true},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
@@ -140,7 +140,7 @@ func TestV3CacheUnretained(t *testing.T) {
 
 func TestV3CacheNextKey(t *testing.T) {
 	c := newV3Cache(1<<20, 1)
-	next := strings.Repeat("x", v3CachePieceBytes)
+	next := strings.Repeat("x", v3PieceBytes)
 	p, err := c.get("k", 0, func(reserve func(int, bool) error) (*v3Piece, error) {
 		encoded := len(next) + 100
 		if err := reserve(encoded, false); err != nil {

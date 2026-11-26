@@ -642,9 +642,8 @@ func v3LargeJSONObject(raw []byte) (bool, error) {
 func v3Fingerprint(n *graph.Node) ([32]byte, error) { return v3RowFingerprint(v3CachedRow{node: n}) }
 
 const (
-	v3CachePieceBytes = 64 << 10
-	v3Expansion       = 512
-	v3DecoderScratch  = 256 << 10
+	v3Expansion      = 512
+	v3DecoderScratch = 256 << 10
 )
 
 // Source accounting for a structurally preflighted record (Go 1.27.3 arm64):
@@ -896,7 +895,7 @@ func (c *v3Cache) get(key string, pieceID uint64, load func(reserve func(encoded
 	if rowBytes <= 0 {
 		return nil, errors.New("v3 cache piece has no encoded rows")
 	}
-	if (unbounded || rowBytes > v3CachePieceBytes) && len(piece.rows) != 1 {
+	if (unbounded || rowBytes > v3PieceBytes) && len(piece.rows) != 1 {
 		return nil, errors.New("v3 cache exceptional piece is not a singleton")
 	}
 	entry, deferred, err := v3PieceEntry(key, pieceID, piece)
@@ -906,7 +905,7 @@ func (c *v3Cache) get(key string, pieceID uint64, load func(reserve func(encoded
 	if !unbounded && !deferred && entry.charge > reserved {
 		return nil, fmt.Errorf("v3 cache piece %d exceeded its decode reserve: %d > %d", pieceID, entry.charge, reserved)
 	}
-	if len(c.index) == 0 || c.slot(pieceID) != nil || unbounded || deferred || rowBytes > v3CachePieceBytes || entry.charge > c.half {
+	if len(c.index) == 0 || c.slot(pieceID) != nil || unbounded || deferred || rowBytes > v3PieceBytes || entry.charge > c.half {
 		// No additional candidate size refusal. Same decoded reader, one
 		// borrowed piece, verified even though it never enters a generation.
 		c.borrowed = entry

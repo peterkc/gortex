@@ -398,7 +398,7 @@ func (v *v3Reader) summary(prefix []byte) (sum v3Summary, err error) {
 		return sum, nil
 	}
 	defer func() {
-		if err == nil && len(skey) < 4096 && len(v.summaries) < 896 {
+		if err == nil && len(skey) < 4096 && len(v.summaries) < v3SingleTableEntries {
 			if v.summaries == nil {
 				v.summaries = map[string]v3Summary{}
 			}
@@ -495,8 +495,8 @@ func (v *v3Reader) loadPiece(ctx context.Context, prefix, start string, id uint6
 
 // Requests with narrower qualified filters have no H98 admission summary.
 // The file still preserves global ID order; their matching rows are checked
-// individually. This scan is also used for rare exact run-count replay.
-func (v *v3Reader) rawRows(ctx context.Context, req LinkRequest, fn func(key, raw []byte, canon int, ordinal uint64) error) (err error) {
+// individually.
+func (v *v3Reader) rawRows(ctx context.Context, req LinkRequest, fn func(key, raw []byte, canon int) error) (err error) {
 	it, err := v.table.NewIter(sstable.NoTransforms, nil, nil, sstable.TableBlobContext{})
 	if err != nil {
 		return err
@@ -515,16 +515,14 @@ func (v *v3Reader) rawRows(ctx context.Context, req LinkRequest, fn func(key, ra
 				return invalid("v3 candidate row")
 			}
 			raw := value[v3Header:]
-			if req.Kind == LinkQualName && (!req.AllRepos || len(req.Languages) != 0) {
-				n, err := decodeNodeLight(raw)
-				if err != nil {
-					return err
-				}
-				if !req.match(n) {
-					continue
-				}
+			n, err := decodeNodeLight(raw)
+			if err != nil {
+				return err
 			}
-			if err := fn(kv.K.UserKey, raw, int(binary.BigEndian.Uint64(value)), binary.BigEndian.Uint64(kv.K.UserKey[len(kv.K.UserKey)-8:])); err != nil {
+			if !req.match(n) {
+				continue
+			}
+			if err := fn(kv.K.UserKey, raw, int(binary.BigEndian.Uint64(value))); err != nil {
 				return err
 			}
 		}
@@ -579,7 +577,7 @@ func (v *v3Reader) walk(ctx context.Context, req LinkRequest, fn func(v3CachedRo
 
 func (v *v3Reader) requestSummary(ctx context.Context, req LinkRequest) (sum v3Summary, err error) {
 	if req.Kind == LinkQualName && (!req.AllRepos || len(req.Languages) != 0) {
-		err = v.rawRows(ctx, req, func(key, raw []byte, canon int, _ uint64) error {
+		err = v.rawRows(ctx, req, func(key, raw []byte, canon int) error {
 			prefix, e := v3RunKey(key)
 			if e != nil {
 				return e
