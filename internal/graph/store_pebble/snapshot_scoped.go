@@ -30,39 +30,71 @@ func (s *Snapshot) ScopedOutlineCounts(scope graph.NodeScope) (graph.OutlineCoun
 
 func (s *Snapshot) ScopedOutlineCountsFiltered(scope graph.NodeScope, filter graph.OutlineEdgeFilter) (graph.OutlineCounts, error) {
 	out := graph.OutlineCounts{ByLanguage: make(map[string]int)}
-	decodeRows(s, []byte{familyNode}, decodeNodeLight, func(n *graph.Node) bool {
+	allowed := make(map[string]*graph.Node)
+	admit := func(n *graph.Node) bool {
 		if scope.Allows(n) {
+			allowed[n.ID] = n
 			out.TotalNodes++
 			if n.Language != "" {
 				out.ByLanguage[n.Language]++
 			}
 		}
 		return true
-	})
+	}
+	if len(scope.RepoAllow) == 0 {
+		decodeRows(s, []byte{familyNode}, decodeNodeLight, admit)
+	} else {
+		// NodeScope admits unowned nodes even with a repository narrow.
+		repos := []string{""}
+		for repo, ok := range scope.RepoAllow {
+			if repo != "" && ok {
+				repos = append(repos, repo)
+			}
+		}
+		s.NodesLightInScopeSeq(repos, nil)(admit)
+	}
+	if err := s.ReadError(); err != nil {
+		return graph.OutlineCounts{}, err
+	}
 	imports := make(map[string]int)
 	decode := decodeEdgeLight
 	if filter.ExcludeVia != "" {
 		decode = decodeEdge
 	}
-	decodeRows(s, []byte{familyEdge, edgeOut}, decode, func(e *graph.Edge) bool {
-		from, to := s.lightNode(e.From), s.lightNode(e.To)
-		if to == nil || !scope.Allows(to) || !filter.Allows(e, from, to) {
-			return true
-		}
-		if from != nil && scope.Allows(from) {
-			out.TotalEdges++
-		}
-		if e.Kind == graph.EdgeImports {
-			path := to.FilePath
-			if path == "" {
-				path = to.ID
+	outsideSources := make(map[string]*graph.Node)
+	for id, n := range allowed {
+		decodeRows(s, keyStrings([]byte{familyEdge, edgeOut}, id), decode, func(e *graph.Edge) bool {
+			if to := allowed[e.To]; to != nil && filter.Allows(e, n, to) {
+				out.TotalEdges++
 			}
-			imports[path]++
+			return true
+		})
+		// Imports are scoped at the target, including imports from outside
+		// the selected repositories. The incoming kind key bounds that read.
+		if !slices.Contains(filter.ExcludeKinds, graph.EdgeImports) {
+			prefix := keyStrings([]byte{familyEdge, edgeIn}, id, string(graph.EdgeImports))
+			decodeRows(s, prefix, decode, func(e *graph.Edge) bool {
+				from := allowed[e.From]
+				if from == nil && len(filter.ExcludeNodeKinds) != 0 {
+					var ok bool
+					if from, ok = outsideSources[e.From]; !ok {
+						from = s.lightNode(e.From)
+						outsideSources[e.From] = from
+					}
+				}
+				if filter.Allows(e, from, n) {
+					path := n.FilePath
+					if path == "" {
+						path = n.ID
+					}
+					imports[path]++
+				}
+				return true
+			})
 		}
-		return true
-	})
-	if err := s.ReadError(); err != nil {
-		return graph.OutlineCounts{}, err
+		if err := s.ReadError(); err != nil {
+			return graph.OutlineCounts{}, err
+		}
 	}
 	for path, count := range imports {
 		out.FileImports = append(out.FileImports, graph.FileImportCountRow{FilePath: path, Count: count})

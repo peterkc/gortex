@@ -9,8 +9,10 @@ import (
 
 type snapshotReadTracker struct {
 	snapshotReader
-	points []string
-	scans  []string
+	points    []string
+	scans     []string
+	failPoint string
+	failure   error
 }
 
 func trackSnapshotReads(s *Snapshot) *snapshotReadTracker {
@@ -21,6 +23,9 @@ func trackSnapshotReads(s *Snapshot) *snapshotReadTracker {
 
 func (r *snapshotReadTracker) Get(key []byte) ([]byte, io.Closer, error) {
 	r.points = append(r.points, string(key))
+	if r.failure != nil && string(key) == r.failPoint {
+		return nil, nil, r.failure
+	}
 	return r.snapshotReader.Get(key)
 }
 
