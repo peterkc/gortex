@@ -56,13 +56,8 @@ func CheckFileFactTree(filePath string, src []byte, tree *parser.ParseTree, exts
 				required = "hcl"
 			}
 		case *GRPCExtractor:
-			if needsTSGRPCTree(src) {
-				required = "typescript"
-				// Native gRPC chooses TSX only for a lower-case suffix.
-				// A different grammar cannot be substituted for that AST.
-				if strings.HasSuffix(strings.ToLower(filePath), ".tsx") != (strings.HasSuffix(filePath, ".tsx") || strings.HasSuffix(filePath, ".jsx")) {
-					return fmt.Errorf("%w: %s: gRPC grammar differs", ErrContractFactTree, filePath)
-				}
+			if needsTSGRPCTree(src) && !matchesTSGRPCTree(filePath, tree) {
+				return fmt.Errorf("%w: %s: gRPC grammar differs or is unavailable", ErrContractFactTree, filePath)
 			}
 		}
 		if required != "" && (!hasTree || tree.Lang() != required) {

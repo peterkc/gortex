@@ -677,21 +677,33 @@ func needsTSGRPCTree(src []byte) bool {
 		bytes.Contains(src, []byte("_pb")) || bytes.Contains(src, []byte(grpcWebClientSuffix)))
 }
 
+// tsGRPCGrammar preserves the native extension rule. The graph extractor's
+// language label alone does not distinguish TS from TSX.
+func tsGRPCGrammar(filePath string) *sitter.Language {
+	if strings.HasSuffix(filePath, ".tsx") || strings.HasSuffix(filePath, ".jsx") {
+		return tsx.GetLanguage()
+	}
+	return typescript.GetLanguage()
+}
+
+func matchesTSGRPCTree(filePath string, supplied *parser.ParseTree) bool {
+	if supplied == nil || supplied.Tree() == nil || supplied.Lang() != "typescript" {
+		return false
+	}
+	root := supplied.Tree().Inner().RootNode()
+	return root != nil && root.Language().Inner == tsGRPCGrammar(filePath).Inner
+}
+
 func tsFileImportsGRPC(filePath string, src []byte, supplied *parser.ParseTree) bool {
 	if !needsTSGRPCTree(src) {
 		return false
 	}
 	var tree *sitter.Tree
-	if supplied != nil && supplied.Tree() != nil && supplied.Lang() == "typescript" &&
-		strings.HasSuffix(strings.ToLower(filePath), ".tsx") == (strings.HasSuffix(filePath, ".tsx") || strings.HasSuffix(filePath, ".jsx")) {
+	if matchesTSGRPCTree(filePath, supplied) {
 		tree = supplied.Tree()
 	} else {
-		grammar := typescript.GetLanguage()
-		if strings.HasSuffix(filePath, ".tsx") || strings.HasSuffix(filePath, ".jsx") {
-			grammar = tsx.GetLanguage()
-		}
 		var err error
-		tree, err = parser.ParseFile(src, grammar)
+		tree, err = parser.ParseFile(src, tsGRPCGrammar(filePath))
 		if err != nil || tree == nil {
 			return false
 		}

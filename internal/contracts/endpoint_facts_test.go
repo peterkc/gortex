@@ -5,6 +5,10 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/parser"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
+	"github.com/zzet/gortex/internal/parser/tsitter/tsx"
+	"github.com/zzet/gortex/internal/parser/tsitter/typescript"
 )
 
 func TestEndpointContractQuestionsNativeOrder(t *testing.T) {
@@ -126,5 +130,39 @@ def fetch():
 		want := ex.ExtractWithStore(path, src, nodes, nil, tree, g, "")
 		got := ResolveEndpointQuestions(raw, capture.Questions, g)
 		require.Equal(t, want, got)
+	}
+}
+
+func TestGRPCContractFactTreeChecksNativeGrammar(t *testing.T) {
+	src := []byte("import { UsersClient } from './users_pb'; const client = new UsersClient('host');")
+	for _, tc := range []struct {
+		path    string
+		grammar *sitter.Language
+		want    bool
+	}{
+		{"client.ts", typescript.GetLanguage(), true},
+		{"client.ts", tsx.GetLanguage(), false},
+		{"client.tsx", tsx.GetLanguage(), true},
+		{"client.tsx", typescript.GetLanguage(), false},
+		{"client.jsx", tsx.GetLanguage(), true},
+		{"client.jsx", typescript.GetLanguage(), false},
+		{"client.TSX", typescript.GetLanguage(), true},
+		{"client.TSX", tsx.GetLanguage(), false},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			raw, err := parser.ParseFile(src, tc.grammar)
+			require.NoError(t, err)
+			require.NotNil(t, raw)
+			tree := parser.NewParseTree(raw, src, "typescript")
+			t.Cleanup(tree.Release)
+			err = CheckFileFactTree(tc.path, src, tree, []Extractor{&GRPCExtractor{}})
+			if !tc.want {
+				require.ErrorIs(t, err, ErrContractFactTree)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tsFileImportsGRPC(tc.path, src, nil), tsFileImportsGRPC(tc.path, src, tree))
+			require.True(t, tsFileImportsGRPC(tc.path, src, tree))
+		})
 	}
 }
