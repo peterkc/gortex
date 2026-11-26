@@ -208,15 +208,13 @@ func (s *Snapshot) FindNodesByNameContaining(substr string, limit int) []*graph.
 	if substr == "" {
 		return nil
 	}
-	width := min(3, len(substr))
-	prefix := keyStrings([]byte{familyName, nameGram}, substr[:width])
 	var out []*graph.Node
-	s.indexedNodes(prefix, func(n *graph.Node) bool {
+	s.retain(s.scanNameGramNodes(context.Background(), substr, decodeNode, func(n *graph.Node) (bool, error) {
 		if strings.Contains(strings.ToLower(n.Name), substr) {
 			out = append(out, n)
 		}
-		return limit <= 0 || len(out) < limit
-	})
+		return limit <= 0 || len(out) < limit, nil
+	}))
 	return out
 }
 

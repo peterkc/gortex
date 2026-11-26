@@ -1,12 +1,15 @@
 package store_pebble
 
 import (
+	"bytes"
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
 
+	"github.com/cockroachdb/pebble/v2"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -44,8 +47,89 @@ func nameCandidateHeader(n *graph.Node) *graph.Node {
 }
 
 func (s *Snapshot) nameCandidates(ctx context.Context, needle string, yield func(*graph.Node) (bool, error)) error {
-	lookup := strings.ToLower(needle)
-	return s.scanIndexedNodes(ctx, keyStrings([]byte{familyName, nameGram}, lookup[:min(3, len(lookup))]), decodeNodeLight, yield)
+	return s.scanNameGramNodes(ctx, strings.ToLower(needle), decodeNodeLight, yield)
+}
+
+// Intersect the distinct longest byte grams in ID order. All shorter grams
+// are implied by these; the caller still checks the full name predicate.
+func (s *Snapshot) scanNameGramNodes(ctx context.Context, folded string, decode decodeRow[*graph.Node], yield func(*graph.Node) (bool, error)) (err error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if folded == "" {
+		return nil
+	}
+	width := min(3, len(folded))
+	var prefixes [][]byte
+	seen := make(map[string]bool)
+	for i := 0; i+width <= len(folded); i++ {
+		gram := folded[i : i+width]
+		if !seen[gram] {
+			seen[gram] = true
+			prefixes = append(prefixes, keyStrings([]byte{familyName, nameGram}, gram))
+		}
+	}
+	if len(prefixes) == 1 {
+		return s.scanIndexedNodes(ctx, prefixes[0], decode, yield)
+	}
+	cursors := make([]*pebble.Iterator, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		i, openErr := s.snap.NewIterWithContext(ctx, &pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
+		if openErr != nil {
+			return openErr
+		}
+		defer func() { err = errors.Join(err, i.Close()) }()
+		if !i.First() {
+			return errors.Join(ctx.Err(), i.Error())
+		}
+		cursors = append(cursors, i)
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// Each key is the gram prefix followed by the same encoded node ID.
+		// Seek lagging postings to the largest head, then repeat until equal.
+		largest := 0
+		for j := 1; j < len(cursors); j++ {
+			if bytes.Compare(cursors[j].Key()[len(prefixes[j]):], cursors[largest].Key()[len(prefixes[largest]):]) > 0 {
+				largest = j
+			}
+		}
+		idKey := cursors[largest].Key()[len(prefixes[largest]):]
+		aligned := true
+		for j, i := range cursors {
+			if bytes.Equal(i.Key()[len(prefixes[j]):], idKey) {
+				continue
+			}
+			aligned = false
+			if !i.SeekGE(append(bytes.Clone(prefixes[j]), idKey...)) {
+				return errors.Join(ctx.Err(), i.Error())
+			}
+		}
+		if !aligned {
+			continue
+		}
+		id, tail, err := readKeyString(idKey)
+		if err != nil || len(tail) != 0 {
+			return invalid("name gram node key")
+		}
+		n, err := point(s, keyStrings([]byte{familyNode}, id), decode)
+		if err != nil {
+			return err
+		}
+		if n == nil {
+			return invalid("missing indexed node")
+		}
+		more, err := yield(n)
+		if err != nil || !more {
+			return err
+		}
+		// Advancing just one cursor is enough; the others will seek forward.
+		if !cursors[0].Next() {
+			return errors.Join(ctx.Err(), cursors[0].Error())
+		}
+	}
 }
 
 func (s *Snapshot) FindNodesByNameContainingFilteredContext(ctx context.Context, needle string, limit int, filter graph.NameSearchFilter) ([]*graph.Node, error) {
