@@ -138,10 +138,10 @@ func TestRebuildBareNameScopeRejectsMovingDestination(t *testing.T) {
 	slices.SortFunc(input, compareRebuildImportEdges)
 	require.Equal(t, input, rebuildFnPointerSaved(t, build))
 
-	// Unselected raw pending rows still enable the native cold tail. With no
-	// worker binary, an attempted candidate scan would fail instead.
+	// Unselected raw pending rows still enable the native cold tail. The
+	// missing scratch parent makes an attempted candidate scan fail.
 	seen := 0
-	options := store_pebble.RebuildLinkOptions{ScratchParent: t.TempDir(), SpillBytes: 1}
+	options := store_pebble.RebuildLinkOptions{ScratchParent: filepath.Join(t.TempDir(), "missing"), SpillBytes: 1}
 	err := RunRebuildMain(t.Context(), build, options, RebuildMainInputs{
 		SelectCallers: func(page []*graph.Edge) ([]*graph.Edge, error) {
 			seen += len(page)
