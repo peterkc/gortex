@@ -721,7 +721,7 @@ func TestRebuildV3BorrowedPieceReleased(t *testing.T) {
 // A filtered summary cannot bypass an earlier malformed index row or omit a
 // valid index-only charge for a stale row absent from the frozen node source.
 func TestRebuildV3ChargeIndexErrors(t *testing.T) {
-	for _, mode := range []string{"other-language", "dangling", "qualified-dangling"} {
+	for _, mode := range []string{"other-language", "dangling", "qualified-dangling", "mismatch"} {
 		t.Run(mode, func(t *testing.T) {
 			build := newBuild(t, FullProfile)
 			n := &graph.Node{ID: "a", Name: "N", QualName: "q.N", RepoPrefix: "r", Language: "go"}
@@ -734,6 +734,15 @@ func TestRebuildV3ChargeIndexErrors(t *testing.T) {
 			if mode == "other-language" {
 				bad.Language = "python"
 				value = []byte("wrong-id")
+				second := *bad
+				second.ID = "y"
+				if err := build.pending.Set(rebuildCandidateKey(column, &second), value, pebble.NoSync); err != nil {
+					t.Fatal(err)
+				}
+			} else if mode == "mismatch" {
+				bad.ID, bad.RepoPrefix = n.ID, "other"
+				value = binary.BigEndian.AppendUint64([]byte(bad.ID), 100)
+				req = LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "other"}
 			} else if mode == "qualified-dangling" {
 				column = nameQualified
 				req = LinkRequest{Kind: LinkQualName, Key: "q.N", AllRepos: true}
@@ -753,11 +762,17 @@ func TestRebuildV3ChargeIndexErrors(t *testing.T) {
 				if !errors.Is(wantErr, ErrRebuildView) || !errors.Is(wantErr, errInvalidRecord) || !errors.Is(err, ErrRebuildView) || !errors.Is(err, errInvalidRecord) || err.Error() != wantErr.Error() || got != want {
 					t.Fatalf("filtered malformed index: got %+v %v want %+v %v", got, err, want, wantErr)
 				}
-			} else if wantErr != nil || want.Rows != 2 || got != want || err != nil {
-				t.Fatalf("dangling index charge: got %+v %v want %+v %v", got, err, want, wantErr)
+			} else {
+				rows := 2
+				if mode == "mismatch" {
+					rows = 1
+				}
+				if wantErr != nil || want.Rows != rows || got != want || err != nil {
+					t.Fatalf("stale index charge: got %+v %v want %+v %v", got, err, want, wantErr)
+				}
 			}
 			// A separately scoped miss remains an ordinary checked miss.
-			miss := LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "other", Languages: []string{"go"}}
+			miss := LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "unrelated", Languages: []string{"go"}}
 			if got, err := v.ChargeCandidateRequest(ctx, view, miss); got != (CandidateBatchCharge{}) || err != nil {
 				t.Fatalf("unrelated scope: %+v %v", got, err)
 			}
@@ -766,64 +781,100 @@ func TestRebuildV3ChargeIndexErrors(t *testing.T) {
 }
 
 func TestRebuildV3BuildIndexReadError(t *testing.T) {
-	failure := errors.New("fixture index read failure")
-	fault := &errorfs.Toggle{Injector: errorfs.InjectorFunc(func(op errorfs.Op) error {
-		if strings.HasSuffix(op.Path, ".sst") && (op.Kind == errorfs.OpOpen || op.Kind == errorfs.OpFileReadAt || op.Kind == errorfs.OpFileRead) {
-			return failure
-		}
-		return nil
-	})}
-	opts := pendingOptions(nil)
-	opts.FS = errorfs.Wrap(vfs.NewMem(), fault)
-	opts.CacheSize = 1
-	db, err := pebble.Open("pending", opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	n := &graph.Node{ID: "a", Name: "N", RepoPrefix: "r", Language: "go"}
-	key := rebuildCandidateKey(nameRebuildScoped, n)
-	if err := db.Set(key, binary.BigEndian.AppendUint64([]byte(n.ID), 100), pebble.NoSync); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if err := db.Flush(); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	opts.ErrorIfExists = false
-	db, err = pebble.Open("pending", opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = db.Close() }()
-	view := (&BuildStore{pending: db}).RebuildView()
-	parent := t.TempDir()
-	p, err := StartRebuildLink(t.Context(), RebuildLinkOptions{ScratchParent: parent, SpillBytes: 1 << 20}, view, func(yield func(*graph.Node) error) error {
-		fault.On()
-		defer fault.Off()
-		return yield(n)
-	})
-	if p != nil {
-		_ = p.Close()
-	}
-	if !errors.Is(err, ErrRebuildLink) || !errors.Is(err, failure) {
-		t.Fatalf("candidate build hid scratch read error: %v", err)
-	}
-	entries, err := os.ReadDir(parent)
-	if err != nil || len(entries) != 0 {
-		t.Fatalf("failed build left scratch: %v %v", entries, err)
+	for _, mode := range []string{"index", "flag-node"} {
+		t.Run(mode, func(t *testing.T) {
+			failure := errors.New("fixture index read failure")
+			fault := &errorfs.Toggle{Injector: errorfs.InjectorFunc(func(op errorfs.Op) error {
+				if strings.HasSuffix(op.Path, ".sst") && (op.Kind == errorfs.OpOpen || op.Kind == errorfs.OpFileReadAt || op.Kind == errorfs.OpFileRead) {
+					return failure
+				}
+				return nil
+			})}
+			opts := pendingOptions(nil)
+			opts.FS = errorfs.Wrap(vfs.NewMem(), fault)
+			opts.CacheSize = 1
+			db, err := pebble.Open("pending", opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			n := &graph.Node{ID: "a", Name: "N", RepoPrefix: "r", Language: "go"}
+			key := rebuildCandidateKey(nameRebuildScoped, n)
+			value := binary.BigEndian.AppendUint64([]byte(n.ID), 100)
+			flushKey, flushValue := key, value
+			if mode == "flag-node" {
+				flushKey = pendingNodeKey(n.ID)
+				flushValue, err = encodeNode(n)
+				if err != nil {
+					_ = db.Close()
+					t.Fatal(err)
+				}
+			}
+			if err := db.Set(flushKey, flushValue, pebble.NoSync); err != nil {
+				_ = db.Close()
+				t.Fatal(err)
+			}
+			if err := db.Flush(); err != nil {
+				_ = db.Close()
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			opts.ErrorIfExists = false
+			db, err = pebble.Open("pending", opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			if mode == "flag-node" {
+				// The index stays in memory; only the saved node is in the cold SST.
+				if err := db.Set(key, value, pebble.NoSync); err != nil {
+					t.Fatal(err)
+				}
+			}
+			view := (&BuildStore{pending: db}).RebuildView()
+			parent := t.TempDir()
+			p, err := StartRebuildLink(t.Context(), RebuildLinkOptions{ScratchParent: parent, SpillBytes: 1 << 20}, view, func(yield func(*graph.Node) error) error {
+				if mode == "flag-node" {
+					if err := yield(n); err != nil {
+						return err
+					}
+					fault.On() // remains active through the flag scan's node Get
+					return nil
+				}
+				fault.On()
+				defer fault.Off()
+				return yield(n)
+			})
+			fault.Off()
+			if p != nil {
+				_ = p.Close()
+			}
+			if !errors.Is(err, ErrRebuildLink) || !errors.Is(err, failure) {
+				t.Fatalf("candidate build hid scratch read error: %v", err)
+			}
+			entries, err := os.ReadDir(parent)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("failed build left scratch: %v %v", entries, err)
+			}
+		})
 	}
 }
 
 func TestRebuildV3ChargeFileIntegrity(t *testing.T) {
-	for _, admission := range []bool{true, false} {
-		t.Run(fmt.Sprintf("admission=%t", admission), func(t *testing.T) {
+	for _, mode := range []string{"admission", "selection", "flag-admission"} {
+		t.Run(mode, func(t *testing.T) {
 			build := newBuild(t, FullProfile)
 			n := &graph.Node{ID: "a", Name: "N", RepoPrefix: "r", Language: "go"}
 			build.AddNode(n)
+			if mode == "flag-admission" {
+				bad := *n
+				bad.ID = "missing"
+				value := binary.BigEndian.AppendUint64([]byte(bad.ID), 100)
+				if err := build.pending.Set(rebuildCandidateKey(nameRebuildScoped, &bad), value, pebble.NoSync); err != nil {
+					t.Fatal(err)
+				}
+			}
 			view := build.RebuildView()
 			ctx := t.Context()
 			v, err := v3FixturePass(t, ctx, rebuildCandidateCacheBytes, view, []*graph.Node{n})
@@ -831,6 +882,9 @@ func TestRebuildV3ChargeFileIntegrity(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer func() { _ = v.Close() }()
+			if v.v3.chargeErrors != (mode == "flag-admission") {
+				t.Fatal("incorrect fixture flag state")
+			}
 			f, err := os.OpenFile(filepath.Join(v.dir, "v3.sst"), os.O_WRONLY, 0)
 			if err != nil {
 				t.Fatal(err)
@@ -840,7 +894,7 @@ func TestRebuildV3ChargeFileIntegrity(t *testing.T) {
 				t.Fatal(err)
 			}
 			req := LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "r", Languages: []string{"go"}}
-			if admission {
+			if mode != "selection" {
 				var charge CandidateBatchCharge
 				charge, err = v.ChargeCandidateRequest(ctx, view, req)
 				if charge != (CandidateBatchCharge{}) {
