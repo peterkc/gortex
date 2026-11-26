@@ -3,6 +3,7 @@ package store_pebble
 import (
 	"context"
 	"iter"
+	"maps"
 	"slices"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -30,10 +31,14 @@ func (s *Snapshot) ScopedOutlineCounts(scope graph.NodeScope) (graph.OutlineCoun
 
 func (s *Snapshot) ScopedOutlineCountsFiltered(scope graph.NodeScope, filter graph.OutlineEdgeFilter) (graph.OutlineCounts, error) {
 	out := graph.OutlineCounts{ByLanguage: make(map[string]int)}
-	allowed := make(map[string]*graph.Node)
+	type outlineNode struct {
+		kind graph.NodeKind
+		path string
+	}
+	allowed := make(map[string]outlineNode)
 	admit := func(n *graph.Node) bool {
 		if scope.Allows(n) {
-			allowed[n.ID] = n
+			allowed[n.ID] = outlineNode{kind: n.Kind, path: n.FilePath}
 			out.TotalNodes++
 			if n.Language != "" {
 				out.ByLanguage[n.Language]++
@@ -62,9 +67,11 @@ func (s *Snapshot) ScopedOutlineCountsFiltered(scope graph.NodeScope, filter gra
 		decode = decodeEdge
 	}
 	outsideSources := make(map[string]*graph.Node)
-	for id, n := range allowed {
+	for _, id := range slices.Sorted(maps.Keys(allowed)) {
+		n := allowed[id]
+		node := graph.Node{Kind: n.kind}
 		decodeRows(s, keyStrings([]byte{familyEdge, edgeOut}, id), decode, func(e *graph.Edge) bool {
-			if to := allowed[e.To]; to != nil && filter.Allows(e, n, to) {
+			if to, ok := allowed[e.To]; ok && filter.Allows(e, &node, &graph.Node{Kind: to.kind}) {
 				out.TotalEdges++
 			}
 			return true
@@ -74,18 +81,20 @@ func (s *Snapshot) ScopedOutlineCountsFiltered(scope graph.NodeScope, filter gra
 		if !slices.Contains(filter.ExcludeKinds, graph.EdgeImports) {
 			prefix := keyStrings([]byte{familyEdge, edgeIn}, id, string(graph.EdgeImports))
 			decodeRows(s, prefix, decode, func(e *graph.Edge) bool {
-				from := allowed[e.From]
-				if from == nil && len(filter.ExcludeNodeKinds) != 0 {
+				var from *graph.Node
+				if source, ok := allowed[e.From]; ok {
+					from = &graph.Node{Kind: source.kind}
+				} else if len(filter.ExcludeNodeKinds) != 0 {
 					var ok bool
 					if from, ok = outsideSources[e.From]; !ok {
 						from = s.lightNode(e.From)
 						outsideSources[e.From] = from
 					}
 				}
-				if filter.Allows(e, from, n) {
-					path := n.FilePath
+				if filter.Allows(e, from, &node) {
+					path := n.path
 					if path == "" {
-						path = n.ID
+						path = id
 					}
 					imports[path]++
 				}

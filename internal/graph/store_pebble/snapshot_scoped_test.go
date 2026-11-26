@@ -71,7 +71,7 @@ func TestSnapshotScopedOutlineReadBounds(t *testing.T) {
 			}
 		}
 		require.ElementsMatch(t, points, reads.points)
-		require.ElementsMatch(t, scans, reads.scans)
+		require.Equal(t, scans, reads.scans)
 	}
 	for _, scope := range []graph.NodeScope{
 		{}, {ProjectID: "p"}, {WorkspaceID: "w"}, {RepoAllow: map[string]bool{"repo": false}}, {RepoAllow: map[string]bool{"missing": true}}, narrow,
@@ -94,6 +94,22 @@ func TestSnapshotScopedOutlineReadError(t *testing.T) {
 	reads.failPoint = string(keyStrings([]byte{familyNode}, "b"))
 	reads.failure = errors.New("injected snapshot read failure")
 	got, err := s.ScopedOutlineCounts(graph.NodeScope{RepoAllow: map[string]bool{"repo": true}})
+	require.ErrorIs(t, err, reads.failure)
+	require.Equal(t, graph.OutlineCounts{}, got)
+}
+
+func TestSnapshotScopedOutlineOutsideSourceReadError(t *testing.T) {
+	nodes := []*graph.Node{
+		{ID: "target", Kind: graph.KindFile, RepoPrefix: "repo"},
+		{ID: "outside", Kind: graph.KindFunction, RepoPrefix: "other"},
+	}
+	edges := []*graph.Edge{{From: "outside", To: "target", Kind: graph.EdgeImports}}
+	_, _, s := pairedSnapshot(t, nodes, edges)
+	reads := trackSnapshotReads(s)
+	reads.failPoint = string(keyStrings([]byte{familyNode}, "outside"))
+	reads.failure = errors.New("injected outside source read failure")
+	got, err := s.ScopedOutlineCountsFiltered(graph.NodeScope{RepoAllow: map[string]bool{"repo": true}}, graph.OutlineEdgeFilter{ExcludeNodeKinds: []graph.NodeKind{graph.KindFunction}})
+	require.Contains(t, reads.points, reads.failPoint)
 	require.ErrorIs(t, err, reads.failure)
 	require.Equal(t, graph.OutlineCounts{}, got)
 }

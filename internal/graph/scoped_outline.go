@@ -76,9 +76,9 @@ type OutlineCounts struct {
 	FileImports []FileImportCountRow
 }
 
-// ScopedOutlineAggregator avoids materializing every node and edge to produce
-// an outline. Overlay views deliberately omit it so unsaved edits use the
-// reader-based fallback.
+// ScopedOutlineAggregator lets a backend aggregate outline counts without
+// returning a materialized graph. Overlay views deliberately omit it so
+// unsaved edits use the reader-based fallback.
 type ScopedOutlineAggregator interface {
 	ScopedOutlineCounts(NodeScope) (OutlineCounts, error)
 }
