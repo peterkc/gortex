@@ -49,6 +49,14 @@ func TestStaleLangsDetection(t *testing.T) {
 		}
 	})
 
+	t.Run("native_grpc_language_and_grammar_upgrade", func(t *testing.T) {
+		// Python had no explicit version in the prior snapshot (implicit 1).
+		old := snapshotJSON(t, map[string]int{"go": 5, "typescript": 3}, "python")
+		if got, want := ExtractorVersionStaleLangs(old), []string{"go", "python", "typescript"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("previous gRPC extraction must restage only Go, Python and TypeScript: got %v, want %v", got, want)
+		}
+	})
+
 	t.Run("only_behind_langs", func(t *testing.T) {
 		stored := map[string]int{"go": 1, "python": 2, "ruby": 1}
 		current := map[string]int{"go": 2, "python": 2, "ruby": 1, "rust": 3, "lua": 1}
@@ -235,7 +243,7 @@ func TestStaleLangsDetection(t *testing.T) {
 		}
 
 		policySalt := "_post_extraction_policy@2"
-		for _, path := range []string{"model.py", "Model.java", "model.rb", "schema.ex"} {
+		for _, path := range []string{"Model.java", "model.rb", "schema.ex"} {
 			if got := merkleSaltFor(path); got != policySalt {
 				t.Errorf("global policy salt for %s = %q, want %q", path, got, policySalt)
 			}
@@ -247,13 +255,17 @@ func TestStaleLangsDetection(t *testing.T) {
 			snapshotJSON(t, map[string]int{"javascript": 1, "typescript": 1})); !reflect.DeepEqual(got, []string{"javascript", "typescript"}) {
 			t.Errorf("snapshot stored before import_alias = %v, want [javascript typescript]", got)
 		}
-		for path, want := range map[string]string{"model.js": policySalt + "|javascript@2", "model.ts": policySalt + "|typescript@3"} {
+		for path, want := range map[string]string{
+			"model.js":  policySalt + "|javascript@2",
+			"model.go":  policySalt + "|go@6",
+			"model.py":  policySalt + "|python@2",
+			"model.pyi": policySalt + "|python@2",
+			"model.ts":  policySalt + "|typescript@4",
+			"model.TSX": policySalt + "|typescript@4",
+		} {
 			if got := merkleSaltFor(path); got != want {
 				t.Errorf("extractor salt for %s = %q, want %q", path, got, want)
 			}
-		}
-		if got, want := merkleSaltFor("model.go"), policySalt+"|go@5"; got != want {
-			t.Errorf("Go extractor salt = %q, want %q", got, want)
 		}
 
 		for _, path := range []string{"src/Handler.cs", "Views/Page.razor", "Views/Page.cshtml"} {

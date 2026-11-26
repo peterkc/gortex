@@ -2,6 +2,9 @@ package contracts
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/require"
+	"github.com/zzet/gortex/internal/parser"
 )
 
 func TestGRPCExtractor_ProtoProvider(t *testing.T) {
@@ -362,6 +365,56 @@ func TestGRPCExtractor_TSClientsRequireGRPCEvidence(t *testing.T) {
 			findContract(t, got, "grpc::Hub", RoleConsumer)
 		})
 	}
+}
+
+func TestGRPCExtractor_SkipsTypeScriptParseForGoAndPython(t *testing.T) {
+	ext := &GRPCExtractor{}
+	for _, tc := range []struct {
+		path string
+		lang string
+		src  string
+	}{
+		{"client.go", "go", `package p
+// grpc example: new PreviewClient("host")
+func f() { _ = pb.NewUsersClient(conn) }
+`},
+		{"client.py", "python", `# generated users_pb example: new PreviewClient("host")
+stub = UsersStub(channel)
+`},
+	} {
+		t.Run(tc.lang, func(t *testing.T) {
+			src := []byte(tc.src)
+			// Both inputs pass the old constructor and marker check. Pin the
+			// positive inputs before checking the new path-based rejection.
+			require.True(t, needsTSGRPCTree("control.ts", src))
+			require.NoError(t, CheckFileFactTree(tc.path, src, nil, []Extractor{ext}))
+			before := parser.ParseCount()
+			got := ext.Extract(tc.path, src, nil, nil)
+			require.Equal(t, before, parser.ParseCount(), "native gRPC must not parse this file as TypeScript")
+			consumer := findContract(t, got, "grpc::Users", RoleConsumer)
+			require.Equal(t, tc.lang, consumer.Meta["lang"])
+			for _, record := range got {
+				require.NotEqual(t, "typescript", record.Meta["lang"])
+			}
+		})
+	}
+}
+
+func TestGRPCExtractor_UppercaseTSXUsesTSXGrammar(t *testing.T) {
+	// TSX sees the require call inside a JSX expression. The plain TS
+	// grammar does not, so selecting the wrong grammar changes the record.
+	src := []byte(`const view = <div>{require("./users_pb")}</div>;
+const client = new UsersClient("host");
+`)
+	ext := &GRPCExtractor{}
+	require.NoError(t, CheckFileFactTree("client.TSX", []byte(`new UsersClient("host")`), nil, []Extractor{ext}))
+	require.ErrorIs(t, CheckFileFactTree("client.TSX", src, nil, []Extractor{ext}), ErrContractFactTree)
+	before := parser.ParseCount()
+	got := ext.Extract("client.TSX", src, nil, nil)
+	require.Equal(t, before+1, parser.ParseCount())
+	consumer := findContract(t, got, "grpc::Users", RoleConsumer)
+	require.Equal(t, "typescript", consumer.Meta["lang"])
+	require.Empty(t, ext.Extract("client.ts", src, nil, nil), "plain TS grammar must not interpret the JSX require")
 }
 
 func assertContract(t *testing.T, c Contract, id string, ctype ContractType, role Role) {
