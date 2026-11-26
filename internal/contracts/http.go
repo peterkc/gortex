@@ -681,6 +681,11 @@ func (h *HTTPExtractor) extract(
 		matches := detectGoRoutesAST(root, src, filePath, repoPrefix, store)
 		for _, rm := range matches {
 			c := buildGoRouteContract(rm, filePath, fileNodes, lines, lang, tree, text, src)
+			if rm.question != nil {
+				store.(*EndpointFactCapture).add(EndpointContractQuestion{Position: len(out), Kind: EndpointGoRoute,
+					Expression: *rm.question, Record: c, Method: rm.methodToken, StdlibConsumer: rm.stdlibConsumer})
+				continue
+			}
 			out = append(out, c)
 		}
 	}
@@ -899,7 +904,7 @@ func (h *HTTPExtractor) extract(
 	// surface is bound to a resolved import rather than a call-text substring
 	// (python/rust/ruby/php/java/kotlin/scala). Runs after the regex / framework
 	// passes so the canonical contract IDs match the provider side.
-	out = append(out, h.detectClientLibConsumers(filePath, lang, src, lines, fileNodes, tree, store, repoPrefix)...)
+	out = append(out, h.detectClientLibConsumers(filePath, lang, src, lines, fileNodes, tree, store, repoPrefix, len(out))...)
 
 	// Preserve the developer-written path and stamp the per-reference route
 	// kind on every HTTP contract.

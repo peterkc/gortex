@@ -20,6 +20,9 @@ type goRouteMatch struct {
 	line         int    // 1-based line of the call_expression
 	framework    string // "net/http" / "gin/echo/chi" / "fiber"
 	confidence   float64
+	question     *EndpointExpression
+	methodToken  string
+	stdlibConsumer bool
 }
 
 // detectGoRoutesAST walks the parse tree's call_expressions and
@@ -102,54 +105,50 @@ func goRouteFromCall(call *sitter.Node, src []byte, filePath, repoPrefix string,
 	// literal's endpoint field. forRoute=true vets a const / composite
 	// dereference through the route guard so a value that is really a
 	// filesystem path is dropped; a plain literal is returned unchanged.
-	pathArg := argList[0]
-	pathText, ok := ResolveEndpointArg(pathArg, src, filePath, repoPrefix, store, true)
+	q := endpointExpression(argList[0], src)
+	stdlibConsumer := isHTTPStdlibConsumer(fn, src)
+	if _, capture := store.(*EndpointFactCapture); capture && q.HasQuestion() {
+		match := finishGoRoute(call, args, argList, src, "", "", "", 0)
+		match.methodToken, match.stdlibConsumer, match.question = methodTok, stdlibConsumer, &q
+		return match, true
+	}
+	pathText, ok := q.Resolve(filePath, repoPrefix, store, true)
 	if !ok {
 		return goRouteMatch{}, false
 	}
+	match, ok := classifyGoRoute(goRouteMatch{methodToken: methodTok, stdlibConsumer: stdlibConsumer}, pathText)
+	if !ok {
+		return goRouteMatch{}, false
+	}
+	return finishGoRoute(call, args, argList, src, match.method, match.path, match.framework, match.confidence), true
+}
 
-	// Identify framework + method by the field name and path shape.
-	switch methodTok {
+// classifyGoRoute is shared by the parse turn and question replay.
+func classifyGoRoute(m goRouteMatch, pathText string) (goRouteMatch, bool) {
+	switch m.methodToken {
 	case "Handle", "HandleFunc":
-		// net/http: receiver name is anything (mux, router, http) — we
-		// don't care. Method is embedded in the path for Go 1.22+ or
-		// "ANY" for legacy. Path must start with `/` (legacy) OR
-		// "VERB /" (Go 1.22+).
 		method, path, ok := splitNetHTTPPattern(pathText)
 		if !ok {
 			return goRouteMatch{}, false
 		}
-		conf := 0.9
+		m.method, m.path, m.framework, m.confidence = method, path, "net/http", 0.9
 		if method != "ANY" {
-			conf = 0.95
+			m.confidence = 0.95
 		}
-		return finishGoRoute(call, args, argList, src, method, path, "net/http", conf), true
-
 	case "Get", "Post", "Put", "Delete", "Patch", "Head", "Options":
-		// gin/echo/chi: lowercase-method call on a router-shaped
-		// receiver. The original regex restricted receivers to
-		// {r, g, e, router, group, api, v1, mux, app}. Tightening
-		// further is risky — production code uses other names.
-		// Reject when receiver is `http` (avoids matching
-		// http.Get(url) consumer patterns).
-		if isHTTPStdlibConsumer(fn, src) {
+		if m.stdlibConsumer || !strings.HasPrefix(pathText, "/") {
 			return goRouteMatch{}, false
 		}
-		// Path must start with `/` to avoid false-matching arbitrary
-		// `.Get("name")` calls on non-router types.
-		if !strings.HasPrefix(pathText, "/") {
-			return goRouteMatch{}, false
-		}
-		return finishGoRoute(call, args, argList, src, strings.ToUpper(methodTok), pathText, "gin/echo/chi", 0.9), true
-
+		m.method, m.path, m.framework, m.confidence = strings.ToUpper(m.methodToken), pathText, "gin/echo/chi", 0.9
 	case "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS":
-		// fiber: uppercase method call. Path must start with `/`.
 		if !strings.HasPrefix(pathText, "/") {
 			return goRouteMatch{}, false
 		}
-		return finishGoRoute(call, args, argList, src, methodTok, pathText, "fiber", 0.9), true
+		m.method, m.path, m.framework, m.confidence = m.methodToken, pathText, "fiber", 0.9
+	default:
+		return goRouteMatch{}, false
 	}
-	return goRouteMatch{}, false
+	return m, true
 }
 
 // finishGoRoute builds the goRouteMatch with handler metadata.
@@ -274,20 +273,6 @@ func buildGoRouteContract(
 	_ string, // text: kept for signature symmetry with the regex caller
 	_ []byte, // src
 ) Contract {
-	path := rm.path
-	subtree := false
-
-	// Same trailing-slash subtree treatment net/http gets in the regex
-	// pipeline (http.go ~line 600). gin/echo/chi/fiber treat trailing
-	// slash as a literal, so we only patch for net/http.
-	if rm.framework == "net/http" && len(path) > 1 && strings.HasSuffix(path, "/") {
-		path = strings.TrimRight(path, "/") + "/{rest}"
-		subtree = true
-	}
-
-	normPath, origNames := NormalizeHTTPPathWithParams(path)
-	contractID := "http::" + rm.method + "::" + normPath
-
 	symbolID := findEnclosingSymbol(fileNodes, rm.line)
 
 	// Re-point SymbolID at the actual handler when we can resolve it
@@ -302,36 +287,44 @@ func buildGoRouteContract(
 		}
 	}
 
-	meta := map[string]any{
-		"method":    rm.method,
-		"path":      normPath,
-		"framework": rm.framework,
-	}
-	if len(origNames) > 0 {
-		meta["path_param_names"] = origNames
-	}
+	meta := map[string]any{}
 	if rm.handlerIdent != "" {
 		meta["handler_ident"] = rm.handlerIdent
 	}
 	if rm.handlerTrail != "" {
 		meta["handler_trail"] = rm.handlerTrail
 	}
-	if subtree {
-		meta["subtree"] = true
-	}
-
 	c := Contract{
-		ID:         contractID,
 		Type:       ContractHTTP,
 		Role:       RoleProvider,
 		SymbolID:   symbolID,
 		FilePath:   filePath,
 		Line:       rm.line,
 		Meta:       meta,
-		Confidence: rm.confidence,
+	}
+	if rm.question == nil {
+		completeGoRouteContract(&c, rm)
 	}
 	EnrichHTTPContractWithTree(&c, lines, fileNodes, lang, tree)
 	return c
+}
+
+func completeGoRouteContract(c *Contract, rm goRouteMatch) {
+	path := rm.path
+	if rm.framework == "net/http" && len(path) > 1 && strings.HasSuffix(path, "/") {
+		path = strings.TrimRight(path, "/") + "/{rest}"
+		c.Meta["subtree"] = true
+	}
+	normPath, origNames := NormalizeHTTPPathWithParams(path)
+	c.ID = "http::" + rm.method + "::" + normPath
+	c.Confidence = rm.confidence
+	c.Meta["method"], c.Meta["path"], c.Meta["framework"] = rm.method, normPath, rm.framework
+	if len(origNames) > 0 {
+		c.Meta["path_param_names"] = origNames
+	}
+	if params := pathParamsFromTemplate(normPath); len(params) > 0 {
+		c.Meta["path_params"] = params
+	}
 }
 
 // isHTTPStdlibConsumer reports whether the selector_expression

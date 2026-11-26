@@ -99,6 +99,10 @@ var (
 )
 
 func (e *GRPCExtractor) Extract(filePath string, src []byte, nodes []*graph.Node, edges []*graph.Edge) []Contract {
+	return e.ExtractWithTree(filePath, src, nodes, edges, nil)
+}
+
+func (e *GRPCExtractor) ExtractWithTree(filePath string, src []byte, nodes []*graph.Node, _ []*graph.Edge, tree *parser.ParseTree) []Contract {
 	var contracts []Contract
 
 	if strings.HasSuffix(filePath, ".proto") {
@@ -116,7 +120,7 @@ func (e *GRPCExtractor) Extract(filePath string, src []byte, nodes []*graph.Node
 		return fileNodes[i].StartLine < fileNodes[j].StartLine
 	})
 	if hasClient {
-		contracts = append(contracts, e.extractConsumers(filePath, src, fileNodes)...)
+		contracts = append(contracts, e.extractConsumers(filePath, src, fileNodes, tree)...)
 	}
 	if hasRegistration {
 		contracts = append(contracts, e.extractServerRegistrations(filePath, src, fileNodes)...)
@@ -399,7 +403,7 @@ func matchCloseBrace(text string, openEnd int) int {
 // so the matcher never paired any gRPC contract and no EdgeMatches
 // bridge formed for gRPC. TS/Python stay at the service-level for now
 // (client construction only); v1 scope.
-func (e *GRPCExtractor) extractConsumers(filePath string, src []byte, fileNodes []*graph.Node) []Contract {
+func (e *GRPCExtractor) extractConsumers(filePath string, src []byte, fileNodes []*graph.Node, tree *parser.ParseTree) []Contract {
 	var contracts []Contract
 	text := string(src)
 	lines := strings.Split(text, "\n")
@@ -530,7 +534,7 @@ func (e *GRPCExtractor) extractConsumers(filePath string, src []byte, fileNodes 
 	}
 
 	// Only interpret Client constructors when the file imports a gRPC package or stub.
-	if tsGRPCNewClientRe.MatchString(text) && tsFileImportsGRPC(filePath, src) {
+	if tsGRPCNewClientRe.MatchString(text) && tsFileImportsGRPC(filePath, src, tree) {
 		contracts = append(contracts, extractTSGRPCConsumers(text, lines, filePath, fileNodes)...)
 	}
 
@@ -668,21 +672,31 @@ func extractTSGRPCConsumers(text string, lines []string, filePath string, fileNo
 // The grpc-web TypeScript generator uses <Service>ClientPb, alongside the usual _pb modules.
 const grpcWebClientSuffix = "ClientPb"
 
-func tsFileImportsGRPC(filePath string, src []byte) bool {
-	if !bytes.Contains(src, []byte("grpc")) && !bytes.Contains(src, []byte("@connectrpc/")) &&
-		!bytes.Contains(src, []byte("_pb")) && !bytes.Contains(src, []byte(grpcWebClientSuffix)) {
-		return false
-	}
+func needsTSGRPCTree(src []byte) bool {
+	return tsGRPCNewClientRe.Match(src) && (bytes.Contains(src, []byte("grpc")) || bytes.Contains(src, []byte("@connectrpc/")) ||
+		bytes.Contains(src, []byte("_pb")) || bytes.Contains(src, []byte(grpcWebClientSuffix)))
+}
 
-	grammar := typescript.GetLanguage()
-	if strings.HasSuffix(filePath, ".tsx") || strings.HasSuffix(filePath, ".jsx") {
-		grammar = tsx.GetLanguage()
-	}
-	tree, err := parser.ParseFile(src, grammar)
-	if err != nil || tree == nil {
+func tsFileImportsGRPC(filePath string, src []byte, supplied *parser.ParseTree) bool {
+	if !needsTSGRPCTree(src) {
 		return false
 	}
-	defer tree.Close()
+	var tree *sitter.Tree
+	if supplied != nil && supplied.Tree() != nil && supplied.Lang() == "typescript" &&
+		strings.HasSuffix(strings.ToLower(filePath), ".tsx") == (strings.HasSuffix(filePath, ".tsx") || strings.HasSuffix(filePath, ".jsx")) {
+		tree = supplied.Tree()
+	} else {
+		grammar := typescript.GetLanguage()
+		if strings.HasSuffix(filePath, ".tsx") || strings.HasSuffix(filePath, ".jsx") {
+			grammar = tsx.GetLanguage()
+		}
+		var err error
+		tree, err = parser.ParseFile(src, grammar)
+		if err != nil || tree == nil {
+			return false
+		}
+		defer tree.Close()
+	}
 
 	found := false
 	walkNodes(tree.RootNode(), func(n *sitter.Node) {

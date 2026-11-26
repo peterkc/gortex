@@ -7874,34 +7874,49 @@ func (idx *Indexer) collectContractRecordsForFile(
 	// once per call; nil when the backend can't satisfy the reader (const
 	// dereference is then disabled and store-aware extractors degrade to their
 	// tree-aware behaviour).
+	capture, _ := endpointStore.(*contracts.EndpointFactCapture)
 	for _, ex := range exts {
 		var found []contracts.Contract
+		questionStart := 0
+		if capture != nil {
+			questionStart = len(capture.Questions)
+		}
 		if sae, ok := ex.(contracts.StoreAwareExtractor); ok {
 			found = sae.ExtractWithStore(graphPath, src, fileNodes, fileEdges, tree, endpointStore, idx.repoPrefix)
-		} else if tae, ok := ex.(contracts.TreeAwareExtractor); ok && tree != nil {
+		} else if tae, ok := ex.(contracts.TreeAwareExtractor); ok && (tree != nil || capture != nil) {
 			found = tae.ExtractWithTree(graphPath, src, fileNodes, fileEdges, tree)
 		} else {
 			found = ex.Extract(graphPath, src, fileNodes, fileEdges)
 		}
-		for i := range found {
-			found[i].RepoPrefix = idx.repoPrefix
+		stamp := func(record *contracts.Contract) {
+			record.RepoPrefix = idx.repoPrefix
 			// Stamp the workspace / project slugs alongside the repo
 			// prefix so the matcher's boundary check has the data it
 			// needs without a second registry walk. Empty slugs
 			// default to RepoPrefix at Match time via
 			// Contract.EffectiveWorkspace / EffectiveProject.
 			if idx.workspaceID != "" {
-				found[i].WorkspaceID = idx.workspaceID
+				record.WorkspaceID = idx.workspaceID
 			}
 			if idx.projectID != "" {
-				found[i].ProjectID = idx.projectID
+				record.ProjectID = idx.projectID
 			}
 			if testSource != "" {
-				if found[i].Meta == nil {
-					found[i].Meta = map[string]any{}
+				if record.Meta == nil {
+					record.Meta = map[string]any{}
 				}
-				found[i].Meta["is_test"] = true
-				found[i].Meta["test_source"] = testSource
+				record.Meta["is_test"] = true
+				record.Meta["test_source"] = testSource
+			}
+		}
+		for i := range found {
+			stamp(&found[i])
+		}
+		if capture != nil {
+			for i := questionStart; i < len(capture.Questions); i++ {
+				q := &capture.Questions[i]
+				q.Position += len(out)
+				stamp(&q.Record)
 			}
 		}
 		out = append(out, found...)

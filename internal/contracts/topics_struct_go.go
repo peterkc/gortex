@@ -52,7 +52,7 @@ func (e *TopicExtractor) ExtractWithStore(
 	sort.Slice(fileNodes, func(i, j int) bool {
 		return fileNodes[i].StartLine < fileNodes[j].StartLine
 	})
-	out = append(out, detectGoEndpointStructTopics(tree.Tree().RootNode(), src, filePath, repoPrefix, store, fileNodes)...)
+	out = append(out, detectGoEndpointStructTopics(tree.Tree().RootNode(), src, filePath, repoPrefix, store, fileNodes, len(out))...)
 	return out
 }
 
@@ -64,7 +64,7 @@ func (e *TopicExtractor) ExtractWithStore(
 // or cross-file-const queue resolves where the regex layer cannot. The role is
 // inferred from the enclosing call's method name (receive / subscribe / consume
 // → consumer; otherwise provider).
-func detectGoEndpointStructTopics(root *sitter.Node, src []byte, filePath, repoPrefix string, store EndpointConstStore, fileNodes []*graph.Node) []Contract {
+func detectGoEndpointStructTopics(root *sitter.Node, src []byte, filePath, repoPrefix string, store EndpointConstStore, fileNodes []*graph.Node, base int) []Contract {
 	if root == nil {
 		return nil
 	}
@@ -85,24 +85,29 @@ func detectGoEndpointStructTopics(root *sitter.Node, src []byte, filePath, repoP
 				continue
 			}
 			broker := awsEndpointStructField[field]
-			topic, ok := ResolveEndpointArg(valNode, src, filePath, repoPrefix, store, false)
-			if !ok || topic == "" {
-				continue
-			}
+			q := endpointExpression(valNode, src)
 			ln := int(call.StartPoint().Row) + 1
-			out = append(out, Contract{
-				ID:       fmt.Sprintf("topic::%s::%s", broker, topic),
+			c := Contract{
 				Type:     ContractTopic,
 				Role:     role,
 				SymbolID: findEnclosingSymbol(fileNodes, ln),
 				FilePath: filePath,
 				Line:     ln,
 				Meta: map[string]any{
-					"topic":  topic,
 					"broker": broker,
 				},
 				Confidence: 0.8,
-			})
+			}
+			if capture, ok := store.(*EndpointFactCapture); ok && q.HasQuestion() {
+				capture.add(EndpointContractQuestion{Position: base + len(out), Kind: EndpointTopic, Expression: q, Record: c})
+				continue
+			}
+			topic, ok := q.Resolve(filePath, repoPrefix, store, false)
+			if !ok {
+				continue
+			}
+			completeEndpointTopic(&c, topic)
+			out = append(out, c)
 		}
 	})
 	return out
@@ -189,4 +194,9 @@ func topicRoleForMethod(method string) Role {
 	default:
 		return RoleProvider
 	}
+}
+
+func completeEndpointTopic(c *Contract, topic string) {
+	c.ID = fmt.Sprintf("topic::%s::%s", c.Meta["broker"], topic)
+	c.Meta["topic"] = topic
 }

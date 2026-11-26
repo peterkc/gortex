@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,10 +9,12 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/indexer/source"
 	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/pathkey"
 	"go.uber.org/zap"
 )
@@ -127,6 +130,25 @@ func possibleRebuildLanguageRefinement(path, lang string) bool {
 // extractPreparedRebuildFile runs only inside the build worker or the strict
 // parse worker. The caller already selected the extractor from frozen input.
 func (idx *Indexer) extractPreparedRebuildFile(ctx context.Context, rel string, ext parser.Extractor, prepared []byte) (store_pebble.ParseFacts, error) {
+	return idx.extractPreparedRebuildFileInto(ctx, rel, ext, prepared, prepared, nil)
+}
+
+// extractPreparedRebuildFileWithContractFacts is the in-memory receipt seam.
+// C1b will persist these facts alongside ordinary parse facts. This uses the
+// same parse step and ownership as the legacy receipt writer, never a later
+// source read or parser call.
+func (idx *Indexer) extractPreparedRebuildFileWithContractFacts(ctx context.Context, rel string, ext parser.Extractor, raw, prepared []byte) (store_pebble.ParseFacts, *contracts.FileFacts, error) {
+	var facts *contracts.FileFacts
+	out, err := idx.extractPreparedRebuildFileInto(ctx, rel, ext, raw, prepared, &facts)
+	return out, facts, err
+}
+
+func (idx *Indexer) extractPreparedRebuildFileInto(ctx context.Context, rel string, ext parser.Extractor, raw, prepared []byte, contractFacts **contracts.FileFacts) (store_pebble.ParseFacts, error) {
+	if contractFacts != nil {
+		if ts, ok := ext.(*languages.TypeScriptExtractor); ok {
+			ext = ts.WithRetainedTree()
+		}
+	}
 	graphPath := pathkey.Normalize(rel)
 	lang := ext.Language()
 	admission := newNativeParseExtractionAdmission(0, nil, idx.nativeParseAdmission.Load())
@@ -163,6 +185,13 @@ func (idx *Indexer) extractPreparedRebuildFile(ctx context.Context, rel string, 
 	facts := store_pebble.ParseFacts{
 		Nodes: result.Nodes, Edges: result.Edges, File: meta, Constants: constants, EffectiveLanguage: lang,
 	}
+	if contractFacts != nil {
+		captured, err := idx.captureRebuildContractFacts(ctx, graphPath, lang, raw, prepared, result, skipped)
+		if err != nil {
+			return store_pebble.ParseFacts{}, err
+		}
+		*contractFacts = captured
+	}
 	for _, n := range facts.Nodes {
 		if n == nil {
 			continue
@@ -178,4 +207,76 @@ func (idx *Indexer) extractPreparedRebuildFile(ctx context.Context, rel string, 
 		}
 	}
 	return facts, nil
+}
+
+// captureRebuildContractFacts is source-local. Contract records see prepared
+// source and raw file-scope edges; native lazy shape, mount and configuration
+// readers see accepted raw source and the prepared declaration coordinates.
+func (idx *Indexer) captureRebuildContractFacts(ctx context.Context, graphPath, lang string, raw, prepared []byte, result *parser.ExtractionResult, skipped bool) (*contracts.FileFacts, error) {
+	c := &contracts.FileFacts{Shapes: make(map[string]*contracts.Shape), Handlers: make(map[string]contracts.HandlerFacts)}
+	var fileID string
+	for _, node := range result.Nodes {
+		if node.Kind == graph.KindFile {
+			fileID = node.ID
+			break
+		}
+	}
+	_, byLanguage := idx.buildPerFileContractExtractors()
+	c.ScanSkipped = skipped || extractionDispositionFor(result).omitSecondarySourceScans() || len(prepared) > maxContractSourceBytes
+	if !c.ScanSkipped && fileID != "" {
+		exts := byLanguage[lang]
+		if err := contracts.CheckFileFactTree(graphPath, prepared, result.Tree, exts); err != nil {
+			return nil, err
+		}
+		var edges []*graph.Edge
+		for _, edge := range result.Edges {
+			if edge.From == fileID {
+				edges = append(edges, edge)
+			}
+		}
+		capture := &contracts.EndpointFactCapture{}
+		c.Records = idx.collectContractRecordsForFile(graphPath, prepared, result.Nodes, edges, exts, result.Tree, capture)
+		c.Questions = capture.Questions
+	}
+	var callables bool
+	for _, node := range result.Nodes {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		switch node.Kind {
+		case graph.KindType, graph.KindInterface:
+			c.Shapes[node.ID] = contracts.ExtractShape(node.FilePath, raw, node.StartLine, node.EndLine)
+		case graph.KindFunction, graph.KindMethod:
+			callables = true
+		}
+	}
+	if callables {
+		if lang == "go" && !bytes.Equal(raw, prepared) && len(raw) != 0 {
+			// C1c owns retaining checked raw bytes and the named-fact replay.
+			c.NeedsRawHandlerTree = true
+			c.Handlers = nil
+		} else {
+			var tree *parser.ParseTree
+			if lang == "go" && len(raw) != 0 {
+				if result.Tree == nil || result.Tree.Tree() == nil || result.Tree.Lang() != "go" {
+					return nil, fmt.Errorf("%w: %s: Go handler facts", contracts.ErrContractFactTree, graphPath)
+				}
+				tree = result.Tree
+			}
+			// Native lazy handler enrichment only parses Go; other body
+			// facts use the raw-source regex detectors.
+			var err error
+			c.Handlers, err = contracts.CaptureFileHandlerFacts(ctx, result.Nodes, splitLines(raw), detectLangFromPath(graphPath), tree)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	switch lang {
+	case "go", "typescript", "javascript", "python", "java", "ruby", "php", "rust", "swift":
+		facts := contracts.RouterFileFacts(graphPath, raw).Clone()
+		c.Router = &facts
+	}
+	c.ConfigKeys = contracts.SpringFileFacts(graphPath, raw)
+	return c, nil
 }

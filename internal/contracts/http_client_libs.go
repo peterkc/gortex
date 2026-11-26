@@ -183,6 +183,7 @@ func (h *HTTPExtractor) detectClientLibConsumers(
 	suppliedTree *parser.ParseTree,
 	store EndpointConstStore,
 	repoPrefix string,
+	base int,
 ) []Contract {
 	libs := httpClientLibraries[lang]
 	ad := clientLibAdapters[lang]
@@ -225,6 +226,8 @@ func (h *HTTPExtractor) detectClientLibConsumers(
 	}
 
 	var out []Contract
+	capture, _ := store.(*EndpointFactCapture)
+	var candidates []EndpointContractQuestion
 	seen := map[string]bool{}
 	ad.walkCalls(root, src, func(recv, method string, args []*sitter.Node, line int) {
 		libName, ok := env[recv]
@@ -235,52 +238,63 @@ func (h *HTTPExtractor) detectClientLibConsumers(
 		if urlArg == nil {
 			return
 		}
-		path, ok := ResolveEndpointArg(urlArg, src, filePath, repoPrefix, store, true)
-		if !ok || path == "" {
+		q := endpointExpression(urlArg, src)
+		c := Contract{
+			Type: ContractHTTP, Role: RoleConsumer,
+			SymbolID: findEnclosingSymbol(fileNodes, line), FilePath: filePath, Line: line,
+			Meta: map[string]any{"method": httpMethod, "framework": libName}, Confidence: 0.9,
+		}
+		// Keep this subpass's complete ordered candidate stream: a formerly
+		// missing constant can collide with a literal at the same line.
+		if capture != nil {
+			if len(q.Terms) > 0 {
+				EnrichHTTPContractWithTree(&c, lines, fileNodes, lang, suppliedTree)
+				candidates = append(candidates, EndpointContractQuestion{Position: base, Kind: EndpointHTTPClient, Expression: q, Record: c})
+			}
 			return
 		}
-		// Reject filesystem / static-asset literals the same way the regex
-		// consumer path does — only rooted "/..." literals are gated.
-		if strings.HasPrefix(path, "/") &&
-			(!IsLikelyHTTPRouteLiteral(path, "") || IsStaticAssetPath(path)) {
+		path, ok := q.Resolve(filePath, repoPrefix, store, true)
+		if !ok || !completeEndpointHTTPClient(&c, path) {
 			return
 		}
-		normPath, origNames := NormalizeHTTPPathWithParams(path)
-		contractID := fmt.Sprintf("http::%s::%s", httpMethod, normPath)
-		// One contract per (id, line) so a chained call walked twice does not
-		// double-emit.
-		dedup := contractID + "@" + fmt.Sprint(line)
+		dedup := c.ID + "@" + fmt.Sprint(line)
 		if seen[dedup] {
 			return
 		}
 		seen[dedup] = true
-
-		c := Contract{
-			ID:         contractID,
-			Type:       ContractHTTP,
-			Role:       RoleConsumer,
-			SymbolID:   findEnclosingSymbol(fileNodes, line),
-			FilePath:   filePath,
-			Line:       line,
-			Meta: map[string]any{
-				"method":    httpMethod,
-				"path":      normPath,
-				"framework": libName,
-			},
-			Confidence: 0.9,
-		}
-		if len(origNames) > 0 {
-			c.Meta["path_param_names"] = origNames
-		}
-		// Enrich through the same pipeline the regex consumers use. Pass the
-		// ORIGINAL supplied tree (nil in the regex-path test harness) — only Go
-		// has a BodyFacts factory, so a self-built non-Go tree would be a no-op
-		// for enrichment anyway, and passing it could only diverge from the
-		// regex path's behaviour.
 		EnrichHTTPContractWithTree(&c, lines, fileNodes, lang, suppliedTree)
 		out = append(out, c)
 	})
+	if capture != nil {
+		for _, q := range candidates {
+			if q.Expression.HasQuestion() {
+				capture.Questions = append(capture.Questions, candidates...)
+				return nil
+			}
+		}
+		// The whole subpass is literal; native output needs no late lookup.
+		for i := range candidates {
+			candidates[i].Position = 0
+		}
+		return ResolveEndpointQuestions(nil, candidates, nil)
+	}
 	return out
+}
+
+func completeEndpointHTTPClient(c *Contract, path string) bool {
+	if strings.HasPrefix(path, "/") && (!IsLikelyHTTPRouteLiteral(path, "") || IsStaticAssetPath(path)) {
+		return false
+	}
+	normPath, origNames := NormalizeHTTPPathWithParams(path)
+	c.ID = fmt.Sprintf("http::%s::%s", c.Meta["method"], normPath)
+	c.Meta["path"] = normPath
+	if len(origNames) > 0 {
+		c.Meta["path_param_names"] = origNames
+	}
+	if params := pathParamsFromTemplate(normPath); len(params) > 0 {
+		c.Meta["path_params"] = params
+	}
+	return true
 }
 
 // clientCallTarget resolves a client method call to its HTTP method and URL

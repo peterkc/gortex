@@ -108,6 +108,7 @@ type TypeScriptExtractor struct {
 	qAll    *parser.PreparedQuery
 	tsxLang *sitter.Language
 	tsxQAll *parser.PreparedQuery
+	retainTree bool
 }
 
 func NewTypeScriptExtractor() *TypeScriptExtractor {
@@ -119,6 +120,14 @@ func NewTypeScriptExtractor() *TypeScriptExtractor {
 		tsxLang: tsxLang,
 		tsxQAll: parser.MustPreparedQuery(tsQAll, tsxLang),
 	}
+}
+
+// WithRetainedTree makes an extraction-scoped copy; the caller must release
+// its result tree. Ordinary extraction retains its original ownership.
+func (e *TypeScriptExtractor) WithRetainedTree() *TypeScriptExtractor {
+	copy := *e
+	copy.retainTree = true
+	return &copy
 }
 
 func (e *TypeScriptExtractor) Language() string { return "typescript" }
@@ -186,7 +195,12 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 	if err != nil {
 		return nil, err
 	}
-	defer tree.Close()
+	keepTree := false
+	defer func() {
+		if !keepTree {
+			tree.Close()
+		}
+	}()
 
 	root := tree.RootNode()
 	checked, parseErrors := parser.ParseErrorVerdict(root)
@@ -674,6 +688,10 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 	captureVuexDispatch(result, root, filePath, src)
 	captureExpressInlineHandlers(result, root, filePath, src)
 	captureReactContextRefs(result, root, filePath, src)
+	if e.retainTree {
+		result.Tree = parser.NewParseTree(tree, src, "typescript")
+		keepTree = true
+	}
 	return result, nil
 }
 
