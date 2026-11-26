@@ -12,7 +12,7 @@ import (
 
 // ErrRebuildGoExternalRecordingPath marks a potential external-attribution
 // site whose stored path contains a NUL. Do not assume SQLite's suffix result.
-var ErrRebuildGoExternalRecordingPath = errors.New("Go external attribution recording path contains NUL")
+var ErrRebuildGoExternalRecordingPath = errors.New("recording path for Go external attribution contains NUL")
 
 func runRebuildGoExternalCalls(ctx context.Context, build *store_pebble.BuildStore) error {
 	return build.RebuildGoExternalCalls(ctx, rebuildGoExternalNodes, goExternalModuleRoleRank)
@@ -23,7 +23,7 @@ func rebuildGoExternalNodes(e *graph.Edge) (*graph.Node, *graph.Node, error) {
 		return nil, nil, nil
 	}
 	beforeNUL, _, nul := strings.Cut(e.FilePath, "\x00")
-	if !strings.HasSuffix(e.FilePath, ".go") && !(nul && strings.HasSuffix(beforeNUL, ".go")) {
+	if !strings.HasSuffix(e.FilePath, ".go") && (!nul || !strings.HasSuffix(beforeNUL, ".go")) {
 		return nil, nil, nil
 	}
 	prefix, importPath, symbol := splitGoExternalTarget(e.To)

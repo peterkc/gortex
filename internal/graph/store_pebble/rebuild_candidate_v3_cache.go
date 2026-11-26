@@ -608,9 +608,10 @@ func v3LargeJSONObject(raw []byte) (bool, error) {
 	for i := 0; i < len(raw); i++ {
 		b := raw[i]
 		if quoted {
-			if b == '\\' {
+			switch b {
+			case '\\':
 				i++
-			} else if b == '"' {
+			case '"':
 				quoted = false
 			}
 			continue

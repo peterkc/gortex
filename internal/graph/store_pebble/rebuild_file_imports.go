@@ -249,7 +249,7 @@ func (p *fileImportPass) apply(ctx context.Context, prefix []byte) error {
 		old.To = oldTo
 		key := r.key[len(prefix):]
 		if bytes.Equal(prefix, fileImportGodot) {
-			if len(key) == 0 || !(key[0] == 0 && e.Kind == graph.EdgeReferences || key[0] == 1 && e.Kind == graph.EdgeImports) {
+			if len(key) == 0 || ((key[0] != 0 || e.Kind != graph.EdgeReferences) && (key[0] != 1 || e.Kind != graph.EdgeImports)) {
 				return invalid("bad staged Godot move group")
 			}
 			key = key[1:]

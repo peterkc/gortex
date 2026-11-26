@@ -72,7 +72,7 @@ func TestSnapshotScopeKindReadsOnlyIntersection(t *testing.T) {
 	repos := []string{"repo/sub", "repo", "repo"}
 	kinds := []graph.NodeKind{graph.KindFile, "", graph.KindFile}
 	wantKeys := []string{string(keyStrings([]byte{familyNode}, "a")), string(keyStrings([]byte{familyNode}, "c"))}
-	kindPrefix := string(keyStrings([]byte{familyNodeKind}, string(graph.KindFile)))
+	kindPrefix := keyStrings([]byte{familyNodeKind}, string(graph.KindFile))
 	for _, files := range [][]string{nil, {"nested/a.go", "nested/a.go"}} {
 		reads.points = nil
 		clear(reads.steps)
@@ -80,13 +80,13 @@ func TestSnapshotScopeKindReadsOnlyIntersection(t *testing.T) {
 		require.Equal(t, slices.Collect(sql.NodesInScopeSeq(repos, files, kinds...)), slices.Collect(s.NodesInScopeSeq(repos, files, kinds...)))
 		require.Equal(t, wantKeys, reads.points)
 		// A step-only kind scan visits the 80 unrelated file IDs before "a".
-		require.LessOrEqual(t, reads.steps[kindPrefix]+reads.seeks[kindPrefix], 4)
+		require.LessOrEqual(t, reads.steps[string(kindPrefix)]+reads.seeks[string(kindPrefix)], 4)
 		reads.points = nil
 		clear(reads.steps)
 		clear(reads.seeks)
 		require.Equal(t, slices.Collect(sql.NodesLightByKindsInScopeSeq(repos, files, kinds...)), slices.Collect(s.NodesLightByKindsInScopeSeq(repos, files, kinds...)))
 		require.Equal(t, wantKeys, reads.points)
-		require.LessOrEqual(t, reads.steps[kindPrefix]+reads.seeks[kindPrefix], 4)
+		require.LessOrEqual(t, reads.steps[string(kindPrefix)]+reads.seeks[string(kindPrefix)], 4)
 	}
 	reads.points = nil
 	require.Equal(t, slices.Collect(sql.FileLocationsInScopeSeq(repos)), slices.Collect(s.FileLocationsInScopeSeq(repos)))
@@ -100,7 +100,7 @@ func TestSnapshotScopeKindReadsOnlyIntersection(t *testing.T) {
 	require.Equal(t, "c", got[0].ID)
 	require.Equal(t, "a", got[1].ID)
 	require.Equal(t, []string{wantKeys[1], wantKeys[0]}, reads.points)
-	require.LessOrEqual(t, reads.steps[kindPrefix]+reads.seeks[kindPrefix], 5)
+	require.LessOrEqual(t, reads.steps[string(kindPrefix)]+reads.seeks[string(kindPrefix)], 5)
 	reads.points = nil
 	for n := range s.NodesInScopeSeq(repos, nil, kinds...) {
 		require.Equal(t, "a", n.ID)

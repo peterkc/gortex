@@ -141,7 +141,7 @@ func (b *BuildStore) RebuildDataflowCallees(ctx context.Context) (_ int, err err
 // suffix after the final delimiter can match, and it must follow . or ::.
 func rebuildDataflowMethodSuffix(id string) string {
 	i := strings.LastIndexAny(id, ".*:#")
-	if i < 0 || (id[i] != '.' && !(id[i] == ':' && i > 0 && id[i-1] == ':')) {
+	if i < 0 || (id[i] != '.' && (id[i] != ':' || i <= 0 || id[i-1] != ':')) {
 		return ""
 	}
 	return id[i+1:]

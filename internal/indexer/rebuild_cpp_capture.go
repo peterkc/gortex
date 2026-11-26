@@ -26,7 +26,7 @@ const (
 )
 
 var (
-	errRebuildCppCaptureLimit = errors.New("C-family input capture exceeds limit")
+	errRebuildCppCaptureLimit = errors.New("capture of C-family input exceeds limit")
 	errRebuildCppCapturePath  = errors.New("cannot capture C-family input path")
 )
 

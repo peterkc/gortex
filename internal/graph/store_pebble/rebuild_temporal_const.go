@@ -132,7 +132,7 @@ func (v RebuildView) startTemporalConstScratch() error {
 		return err
 	}
 	if owned {
-		return errors.New("Temporal constant scratch already owned")
+		return errors.New("scratch for Temporal constants already owned")
 	}
 	return db.Set(temporalConstPrefix, nil, pebble.NoSync)
 }
@@ -285,7 +285,7 @@ func (p *temporalConstPass) set(key []byte, value string) error {
 	}
 	p.stats.SpillBytes = db.Metrics().Levels[0].TableBytesFlushed - p.flushBase
 	if p.stats.SpillBytes == 0 {
-		return errors.New("Temporal constant spill checkpoint produced no SST bytes")
+		return errors.New("spill checkpoint for Temporal constants produced no SST bytes")
 	}
 	return nil
 }

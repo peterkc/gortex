@@ -147,15 +147,16 @@ esac
 			if tc.cause != nil {
 				require.ErrorIs(t, err, tc.cause)
 			}
-			if tc.fault == "timeout" {
+			switch tc.fault {
+			case "timeout":
 				started, err := os.ReadFile(spawn)
 				require.NoError(t, err)
 				require.Equal(t, "started", string(started))
-			} else if tc.fault == "warn-zero" {
+			case "warn-zero":
 				require.ErrorContains(t, err, "stderr")
-			} else if tc.fault == "warn-one" {
+			case "warn-one":
 				require.ErrorContains(t, err, "ignore read failed")
-			} else if tc.fault == "fatal" {
+			case "fatal":
 				require.ErrorContains(t, err, "exit status 128")
 			}
 		})

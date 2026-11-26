@@ -71,7 +71,7 @@ func (n *rebuildResolverNamespace) add(row rebuildNamespaceRow) error {
 
 func (n *rebuildResolverNamespace) addRow(row rebuildNamespaceRow) error {
 	closing := row.kind == rebuildNamespaceClose || row.kind == rebuildNamespaceCloseExact
-	if !validRebuildNamespaceKey(row.key) && !(closing && row.key == ".") {
+	if !validRebuildNamespaceKey(row.key) && (!closing || row.key != ".") {
 		return fmt.Errorf("%w: nonportable row key", errRebuildResolverNamespace)
 	}
 	entry, seen := n.entries[row.key]

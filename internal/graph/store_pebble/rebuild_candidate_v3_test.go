@@ -731,7 +731,8 @@ func TestRebuildV3ChargeIndexErrors(t *testing.T) {
 			column := nameRebuildScoped
 			req := LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "r", Languages: []string{"go"}}
 			value := binary.BigEndian.AppendUint64([]byte(bad.ID), 100)
-			if mode == "other-language" {
+			switch mode {
+			case "other-language":
 				bad.Language = "python"
 				value = []byte("wrong-id")
 				second := *bad
@@ -739,11 +740,11 @@ func TestRebuildV3ChargeIndexErrors(t *testing.T) {
 				if err := build.pending.Set(rebuildCandidateKey(column, &second), value, pebble.NoSync); err != nil {
 					t.Fatal(err)
 				}
-			} else if mode == "mismatch" {
+			case "mismatch":
 				bad.ID, bad.RepoPrefix = n.ID, "other"
 				value = binary.BigEndian.AppendUint64([]byte(bad.ID), 100)
 				req = LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "other"}
-			} else if mode == "qualified-dangling" {
+			case "qualified-dangling":
 				column = nameQualified
 				req = LinkRequest{Kind: LinkQualName, Key: "q.N", AllRepos: true}
 			}

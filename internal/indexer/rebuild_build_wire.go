@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
@@ -135,7 +136,7 @@ func readRebuildBuildRequest(ctx context.Context, dir string) (req rebuildBuildR
 		}
 		inputs = append(inputs, input)
 	}
-	if err := dec.Decode(nil); err != io.EOF {
+	if err := dec.DecodeValue(reflect.Value{}); err != io.EOF {
 		return req, nil, fmt.Errorf("%w: trailing or unreadable request data: %v", errRebuildBuildWire, err)
 	}
 	return req, inputs, nil
@@ -230,7 +231,7 @@ func readRebuildBuildReply(in io.Reader) (r rebuildBuildReply, err error) {
 	if err := dec.Decode(&r); err != nil {
 		return r, fmt.Errorf("%w: decode stage: %w", errRebuildBuildWire, err)
 	}
-	if err := dec.Decode(nil); err != io.EOF {
+	if err := dec.DecodeValue(reflect.Value{}); err != io.EOF {
 		return r, fmt.Errorf("%w: trailing or unreadable stage data: %v", errRebuildBuildWire, err)
 	}
 	return r, nil
