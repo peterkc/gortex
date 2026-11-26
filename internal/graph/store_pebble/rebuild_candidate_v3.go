@@ -41,8 +41,16 @@ func (s *RebuildLink) ResetCandidatePage() {
 	s.v3.summaries = nil
 }
 
-func (s *RebuildLink) ChargeCandidateRequest(ctx context.Context, view RebuildView, req LinkRequest) (CandidateBatchCharge, error) {
+func (s *RebuildLink) ChargeCandidateRequest(ctx context.Context, view RebuildView, req LinkRequest) (charge CandidateBatchCharge, err error) {
 	v := s.v3
+	var summaryFailed bool
+	// Fail only after releasing the active slot and reader mutex, as reap
+	// takes both. Working-index errors retain H98's admission contract.
+	defer func() {
+		if summaryFailed {
+			err = s.fail(err)
+		}
+	}()
 	select {
 	case <-s.ctx.Done():
 		return CandidateBatchCharge{}, context.Cause(s.ctx)
@@ -79,6 +87,7 @@ func (s *RebuildLink) ChargeCandidateRequest(ctx context.Context, view RebuildVi
 		}
 		flag, err := v.summary(key)
 		if err != nil {
+			summaryFailed = true
 			return CandidateBatchCharge{}, err
 		}
 		if flag.unsized {
@@ -87,6 +96,7 @@ func (s *RebuildLink) ChargeCandidateRequest(ctx context.Context, view RebuildVi
 	}
 	sum, err := v.requestSummary(ctx, req)
 	if err != nil {
+		summaryFailed = true
 		return CandidateBatchCharge{}, err
 	}
 	if sum.unsized || sum.maxOrder > linkRecordBytes || sum.rows > linkResultRows || sum.orderBytes > linkResultBytes {

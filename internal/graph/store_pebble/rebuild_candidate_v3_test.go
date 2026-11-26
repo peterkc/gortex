@@ -806,3 +806,48 @@ func TestRebuildV3BuildIndexReadError(t *testing.T) {
 		t.Fatalf("failed build left scratch: %v %v", entries, err)
 	}
 }
+
+func TestRebuildV3ChargeFileIntegrity(t *testing.T) {
+	for _, admission := range []bool{true, false} {
+		t.Run(fmt.Sprintf("admission=%t", admission), func(t *testing.T) {
+			build := newBuild(t, FullProfile)
+			n := &graph.Node{ID: "a", Name: "N", RepoPrefix: "r", Language: "go"}
+			build.AddNode(n)
+			view := build.RebuildView()
+			ctx := t.Context()
+			v, err := v3FixturePass(t, ctx, rebuildCandidateCacheBytes, view, []*graph.Node{n})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = v.Close() }()
+			f, err := os.OpenFile(filepath.Join(v.dir, "v3.sst"), os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = f.WriteAt(bytes.Repeat([]byte{0xff}, 8), 0)
+			if err = errors.Join(err, f.Close()); err != nil {
+				t.Fatal(err)
+			}
+			req := LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "r", Languages: []string{"go"}}
+			if admission {
+				var charge CandidateBatchCharge
+				charge, err = v.ChargeCandidateRequest(ctx, view, req)
+				if charge != (CandidateBatchCharge{}) {
+					t.Fatal(charge)
+				}
+			} else {
+				_, err = v.SelectCandidatePage(ctx, view, []LinkRequest{req}, 1<<20, func(int, *graph.Node) error {
+					t.Error("visitor ran on corrupt candidate file")
+					return nil
+				})
+			}
+			if !errors.Is(err, ErrRebuildLink) {
+				t.Fatalf("candidate file integrity class: %v", err)
+			}
+			entries, err := os.ReadDir(filepath.Dir(v.dir))
+			if err != nil || len(entries) != 1 || entries[0].Name() != "keep" {
+				t.Fatalf("scratch after corrupt file: %v %v", entries, err)
+			}
+		})
+	}
+}
