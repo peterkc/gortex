@@ -216,7 +216,7 @@ func TestRebuildNpmManifestCodecCaps(t *testing.T) {
 	require.NoError(t, os.Truncate(name, rebuildInputEncodedLimit+1))
 	ns, got, followed, err := openRebuildNpmManifestFacts(t.Context(), lease, rebuildDigest{1})
 	require.ErrorIs(t, err, errRebuildInputSidecar)
-	require.ErrorContains(t, err, "sidecar size")
+	require.ErrorIs(t, err, errRebuildCppCaptureLimit)
 	require.Nil(t, ns)
 	require.Nil(t, got)
 	require.Zero(t, followed)

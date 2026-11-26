@@ -201,7 +201,7 @@ func TestRebuildBuildInputsRawAllowanceRefusal(t *testing.T) {
 	root, src := rebuildInputFixture(t)
 	leases := t.TempDir()
 	req := rebuildBuildRequest{Root: root, Witness: store_pebble.Witness{Recipe: store_pebble.HeadDigest{1}}}
-	for _, left := range []int64{0, -1} {
+	for _, left := range []int64{0, -1, rebuildCppRawLimit + 1} {
 		called := false
 		err := withRebuildBuildInputs(t.Context(), leases, src, map[string]*rebuildInput{"go.mod": nil, "package.json": nil}, req,
 			func(remaining *int64, emit func(rebuildSidecarRow) error) error {

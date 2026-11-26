@@ -169,6 +169,28 @@ func TestRebuildInputSidecarRejectsNoncanonicalNamespace(t *testing.T) {
 	require.ErrorContains(t, err, "noncanonical namespace")
 }
 
+func TestRebuildInputSidecarRejectsNoncanonicalFollowedManifest(t *testing.T) {
+	ctx := t.Context()
+	lease := t.TempDir()
+	digest, err := writeRebuildInputSidecar(ctx, lease, func(emit func(rebuildSidecarRow) error) error {
+		if err := emit(rebuildSidecarRow{Kind: rebuildFollowedManifest, Path: []byte("go.mod"), Present: true, Digest: rebuildDigest{1}}); err != nil {
+			return err
+		}
+		return emit(rebuildSidecarRow{Kind: rebuildNamespaceCloseExactFact, Path: []byte(".")})
+	})
+	require.NoError(t, err)
+	name := filepath.Join(lease, rebuildInputSidecarName)
+	data, err := os.ReadFile(name)
+	require.NoError(t, err)
+	data = bytes.Replace(data, []byte(`"path":"Z28ubW9k"`), []byte(`"path":"Z28ubW9k","path":"Z28ubW9k"`), 1)
+	require.NotEqual(t, digest, rebuildDigest(blake3.Sum256(data)))
+	require.NoError(t, os.WriteFile(name, data, 0o600))
+	ns, err := openRebuildResolverNamespace(ctx, lease, blake3.Sum256(data))
+	require.Nil(t, ns)
+	require.ErrorIs(t, err, errRebuildInputSidecar)
+	require.ErrorContains(t, err, "noncanonical followed manifest row")
+}
+
 func TestRebuildInputSidecarReplayCaps(t *testing.T) {
 	for _, size := range []int{rebuildCppEntryLimit + 1, rebuildInputEncodedLimit + 1} {
 		lease := t.TempDir()
