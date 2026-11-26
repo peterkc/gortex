@@ -3,7 +3,9 @@
 package indexer
 
 import (
+	"context"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -13,8 +15,11 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
+	"github.com/zzet/gortex/internal/indexer/source"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
+	"github.com/zzet/gortex/internal/parser/tsalias"
+	"github.com/zzet/gortex/internal/resolver"
 	"go.uber.org/zap"
 )
 
@@ -326,4 +331,146 @@ void c_entry(void) {
 			return nil
 		})
 	require.NoError(t, err)
+}
+
+// Exercise the owner capture and the same frozen providers used by main, with
+// a real post-parse import query and a fresh lease after the checkout is gone.
+func TestRebuildResolverInputsRestart(t *testing.T) {
+	const caller, target = "app/main.ts", "shared/x.ts"
+	const goCaller, goTarget = "main.go", "pkg/lib.go"
+	const alias, npmSpec = "@lib/x", "alias/sub"
+	var first store_pebble.Witness
+	for _, basename := range []string{"repo", "repo[1]"} {
+		t.Run(basename, func(t *testing.T) {
+			ctx := t.Context()
+			root := filepath.Join(t.TempDir(), basename)
+			require.NoError(t, os.Mkdir(root, 0o700))
+			files := map[string]string{
+				"go.mod":            "module example.org/fixture\n",
+				goCaller:            "package main\nimport _ \"example.org/fixture/pkg\"\n",
+				goTarget:            "package pkg\nfunc Bind() {}\n",
+				caller:              `import "@lib/x"` + "\n" + `import "alias/sub"` + "\n",
+				target:              "export {}\n",
+				"tsconfig.json":     `{"compilerOptions":{"paths":{"@lib/*":["wrong/*"]}}}`,
+				"app/tsconfig.json": `{"extends":"../never.json","compilerOptions":{"paths":{"@lib/*":["../missing/*","../shared/*"]}}}`,
+				"npm.manifest":      `{"dependencies":{"alias":"npm:actual@1.0.0"}}`,
+			}
+			for key, body := range files {
+				writeRebuildTSAliasFixtureFile(t, root, key, body)
+			}
+			require.NoError(t, os.Symlink("npm.manifest", filepath.Join(root, "package.json")))
+			src, err := source.NewFilesystemSource(root)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, src.Close()) })
+			native := tsalias.Load(root)
+			require.Equal(t, "shared/x", tsalias.Resolve(native.FindForFile(caller), alias))
+			require.Equal(t, "actual/sub", newNpmAliasIndex(map[string]string{"": root}).Resolve(caller, npmSpec))
+			candidate := resolver.GoImportCandidate{ImporterFilePath: goCaller, CandidateFilePath: goTarget, ImportPath: "example.org/fixture/pkg"}
+			owner, err := goPackageOwnershipFromFiles(ctx, src, "", map[string]string{goCaller: "", goTarget: "pkg"})
+			require.NoError(t, err)
+			require.Equal(t, resolver.GoPackageOwnershipExact, owner(candidate))
+
+			cfg := config.Default().Index
+			reg := parser.NewRegistry()
+			reg.Register(languages.NewTypeScriptExtractor())
+			reg.Register(languages.NewGoExtractor())
+			idx := New(graph.New(), reg, cfg, zap.NewNop())
+			t.Cleanup(idx.Close)
+			idx.installRebuildParsePolicy(freezeRebuildParsePolicy(root, cfg))
+			idx.SetRootPath(root)
+			leases, headDir := t.TempDir(), t.TempDir()
+			var witness store_pebble.Witness
+			var specs []string
+			goFiles := make(map[string]bool)
+			req := rebuildBuildRequest{Root: root, Witness: store_pebble.Witness{Recipe: store_pebble.HeadDigest{1}}}
+			err = withRebuildCheckoutBuildInputs(ctx, leases, src, req, nil, false,
+				func(key string, mode fs.FileMode, member rebuildGitMember, raw *int64, emit func(rebuildSidecarRow) error) (rebuildCheckoutLeaf, error) {
+					return idx.freezeRebuildCheckoutLeaf(ctx, src.FrozenRoot(), key, mode, member, nil, 1024, raw, emit)
+				}, func(epoch rebuildCheckoutInputs, raw *int64, emit func(rebuildSidecarRow) error) (string, error) {
+					return captureRebuildCheckoutResolverInputs(ctx, src, epoch, true, raw, emit)
+				}, func(lease string, bound rebuildBuildRequest, inputs []rebuildInput) error {
+					require.NoError(t, bound.checkProjectRecipe())
+					require.NotZero(t, bound.Witness.FrozenInputs)
+					store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+					recipe := rebuildDigest{1}
+					var manifest []store_pebble.ManifestFile
+					for _, in := range inputs {
+						facts, reused, err := idx.loadRebuildFile(ctx, src, store, in, recipe, rebuildTransformBounds{})
+						require.NoError(t, err)
+						require.False(t, reused)
+						goFiles[in.Path] = facts.EffectiveLanguage == "go"
+						if in.Path == caller {
+							for _, edge := range facts.Edges {
+								if edge.Kind == graph.EdgeImports {
+									spec, ok := strings.CutPrefix(edge.To, "unresolved::import::")
+									require.True(t, ok)
+									specs = append(specs, spec)
+								}
+							}
+						}
+						manifest = append(manifest, store_pebble.ManifestFile{Path: in.Path, Language: in.Language, Kind: byte(in.Kind), Size: in.Size, Content: store_pebble.HeadDigest(in.Content), Extractor: store_pebble.HeadDigest(idx.rebuildExtractorRecipe(recipe, in))})
+					}
+					require.ElementsMatch(t, []string{alias, npmSpec}, specs)
+					w := bound.Witness
+					w.Stage, w.Profile = store_pebble.StageManifest, store_pebble.FullProfile
+					stage, err := store_pebble.PrepareManifest(ctx, t.TempDir(), manifest, w, rebuildTestIncarnation)
+					require.NoError(t, err)
+					require.NoError(t, retainRebuildInputSidecar(ctx, headDir, lease, rebuildDigest(w.FrozenInputs)))
+					head, err := store_pebble.OpenHead(headDir, rebuildTestIncarnation, w.Profile)
+					require.NoError(t, err)
+					defer func() { require.NoError(t, head.Close()) }()
+					_, err = head.PublishStage(ctx, stage)
+					require.NoError(t, err)
+					witness = stage.Witness
+					return nil
+				})
+			require.NoError(t, err)
+			if basename == "repo" {
+				first = witness
+			} else {
+				require.Equal(t, first, witness)
+			}
+			entries, err := os.ReadDir(leases)
+			require.NoError(t, err)
+			require.Empty(t, entries)
+			writeRebuildTSAliasFixtureFile(t, root, "go.mod", "module example.org/changed\n")
+			writeRebuildTSAliasFixtureFile(t, root, "npm.manifest", `{"dependencies":{"alias":"npm:changed@1"}}`)
+			writeRebuildTSAliasFixtureFile(t, root, "missing/x.ts", "export {}")
+			require.NoError(t, os.Remove(filepath.Join(root, target)))
+			require.NoError(t, os.Rename(root, filepath.Join(t.TempDir(), "moved")))
+			head, err := store_pebble.OpenHead(headDir, rebuildTestIncarnation, witness.Profile)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, head.Close()) }()
+			saved, _, err := head.ReconcilePublication(nil)
+			require.NoError(t, err)
+			require.Equal(t, witness, saved)
+			digest := rebuildDigest(saved.FrozenInputs)
+			resume := t.TempDir()
+			require.NoError(t, restoreRebuildInputSidecar(ctx, headDir, resume, digest))
+			goFacts, aliases, err := openRebuildResolverConfigFacts(ctx, resume, digest)
+			require.NoError(t, err)
+			ns, npm, followed, err := openRebuildNpmManifestFacts(ctx, resume, digest)
+			require.NoError(t, err)
+			require.NotZero(t, followed)
+			glob, err := newRebuildWorkspaceGlob(ctx, ns)
+			require.NoError(t, err)
+			lookup := newRebuildNpmLookup(ctx, rebuildNpmInputs{namespace: ns, manifests: npm, followedRoot: followed,
+				isFile: func(_ context.Context, key string) (bool, error) { return ns.probeFile(key) }, matchDirs: glob.matchDirs})
+			got, err := rebuildGoOwnership(candidate, func(key string) (bool, error) { return goFiles[key], nil }, func(key string) (string, error) { return key, nil }, goFacts.lookup)
+			require.NoError(t, err)
+			require.Equal(t, resolver.GoPackageOwnershipExact, got)
+			for _, spec := range specs {
+				switch spec {
+				case alias:
+					stem, err := aliases.resolve(ns, caller, spec)
+					require.NoError(t, err)
+					require.Equal(t, tsalias.FrozenAliasStem("shared/x"), stem)
+				case npmSpec:
+					rewrite, err := lookup.rewrite(caller, spec)
+					require.NoError(t, err)
+					require.Equal(t, "actual/sub", rewrite)
+				}
+			}
+		})
+	}
 }

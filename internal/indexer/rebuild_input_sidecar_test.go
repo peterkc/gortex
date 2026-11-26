@@ -151,3 +151,36 @@ func TestRebuildInputSidecarRefusesCaps(t *testing.T) {
 	require.NoError(t, w.Flush())
 	require.Equal(t, 2*exact, data.Len(), "rejected rows wrote no partial frame")
 }
+
+func TestRebuildInputSidecarRejectsNoncanonicalNamespace(t *testing.T) {
+	lease := t.TempDir()
+	digest, err := writeRebuildInputSidecar(t.Context(), lease, func(emit func(rebuildSidecarRow) error) error {
+		return emit(rebuildSidecarRow{Kind: rebuildNamespaceCloseExactFact, Path: []byte(".")})
+	})
+	require.NoError(t, err)
+	data, err := os.ReadFile(filepath.Join(lease, rebuildInputSidecarName))
+	require.NoError(t, err)
+	data = bytes.Replace(data, []byte(`"path":"Lg=="`), []byte(`"path":"Lg==","path":"Lg=="`), 1)
+	require.NotEqual(t, digest, rebuildDigest(blake3.Sum256(data)))
+	require.NoError(t, os.WriteFile(filepath.Join(lease, rebuildInputSidecarName), data, 0o600))
+	ns, err := openRebuildResolverNamespace(t.Context(), lease, blake3.Sum256(data))
+	require.Nil(t, ns)
+	require.ErrorIs(t, err, errRebuildInputSidecar)
+	require.ErrorContains(t, err, "noncanonical namespace")
+}
+
+func TestRebuildInputSidecarReplayCaps(t *testing.T) {
+	for _, size := range []int{rebuildCppEntryLimit + 1, rebuildInputEncodedLimit + 1} {
+		lease := t.TempDir()
+		// Sparse extension for the aggregate cap; an oversized unbroken
+		// row for the per-entry cap. A digest must not authorize either.
+		name := filepath.Join(lease, rebuildInputSidecarName)
+		require.NoError(t, os.WriteFile(name, []byte(rebuildInputSidecarMagic), 0o600))
+		require.NoError(t, os.Truncate(name, int64(size+len(rebuildInputSidecarMagic))))
+		ns, err := openRebuildResolverNamespace(t.Context(), lease, rebuildDigest{1})
+		require.Nil(t, ns)
+		require.ErrorIs(t, err, errRebuildInputSidecar)
+		require.ErrorIs(t, err, errRebuildCppCaptureLimit)
+		require.ErrorContains(t, err, rebuildInputSidecarName)
+	}
+}

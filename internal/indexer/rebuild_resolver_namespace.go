@@ -127,7 +127,7 @@ func (n *rebuildResolverNamespace) freeze() error {
 // clean raw paths or pass a trailing-directory request as a plain key.
 func (n *rebuildResolverNamespace) lookup(key string) (rebuildNamespaceKind, error) {
 	if !n.frozen || !validRebuildNamespaceKey(key) {
-		return rebuildNamespaceUnknown, fmt.Errorf("%w: unfrozen namespace or nonportable query", errRebuildResolverNamespace)
+		return rebuildNamespaceUnknown, fmt.Errorf("%w: unfrozen namespace or nonportable query %q", errRebuildResolverNamespace, key)
 	}
 	switch kind := n.entries[key].kind; kind {
 	case rebuildNamespaceRegular, rebuildNamespaceDirectory:
@@ -142,7 +142,7 @@ func (n *rebuildResolverNamespace) lookup(key string) (rebuildNamespaceKind, err
 	// descendant of one is denied, not an unknown admission decision.
 	for ancestor := key; ; {
 		if n.entries[ancestor].kind == rebuildNamespaceDenied {
-			return rebuildNamespaceUnknown, fmt.Errorf("%w: %w", errRebuildResolverNamespace, errRebuildResolverInputDenied)
+			return rebuildNamespaceUnknown, fmt.Errorf("%w: lookup %q: %w", errRebuildResolverNamespace, key, errRebuildResolverInputDenied)
 		}
 		cut := strings.LastIndexByte(ancestor, '/')
 		if cut < 0 {
@@ -150,7 +150,7 @@ func (n *rebuildResolverNamespace) lookup(key string) (rebuildNamespaceKind, err
 		}
 		ancestor = ancestor[:cut]
 	}
-	return rebuildNamespaceUnknown, fmt.Errorf("%w: no checked answer for key", errRebuildResolverNamespace)
+	return rebuildNamespaceUnknown, fmt.Errorf("%w: no checked answer for %q", errRebuildResolverNamespace, key)
 }
 
 // probeFile interprets a checked slash path with stat-style file semantics.
@@ -170,7 +170,7 @@ func (n *rebuildResolverNamespace) probeFile(key string) (bool, error) {
 		}
 		kind, err := n.lookup(key[:end])
 		if err != nil {
-			return false, err
+			return false, fmt.Errorf("file probe %q: %w", key, err)
 		}
 		if end == len(key) {
 			return kind == rebuildNamespaceRegular, nil

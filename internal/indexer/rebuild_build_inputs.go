@@ -168,6 +168,9 @@ func sealRebuildBuildInputs(ctx context.Context, lease string, src *source.Files
 		}
 		var err error
 		name, input, err = capture(&remaining, yield)
+		if err == nil && (remaining < 0 || remaining > rebuildCppRawLimit) {
+			return fmt.Errorf("%w: raw capture allowance for %q: %w", errRebuildInputSidecar, rebuildInputSidecarName, errRebuildCppCaptureLimit)
+		}
 		return err
 	})
 	if err != nil {

@@ -53,6 +53,7 @@ func TestRebuildResolverNamespaceReplay(t *testing.T) {
 			require.ErrorIs(t, err, errRebuildResolverNamespace, "%s", key)
 			require.ErrorIs(t, err, errRebuildResolverInputDenied, "%s", key)
 			require.Equal(t, rebuildNamespaceUnknown, kind, "%s", key)
+			require.ErrorContains(t, err, key)
 		}
 	}
 	var captured rebuildResolverNamespace
@@ -157,6 +158,8 @@ func TestRebuildResolverNamespaceFileProbe(t *testing.T) {
 		got, err := n.probeFile(key)
 		require.False(t, got)
 		require.ErrorIs(t, err, errRebuildResolverNamespace, "%q", key)
+		require.ErrorContains(t, err, key)
+		require.Contains(t, buildRefusal(err).Detail, key)
 		if key == "exact/opaque/leaf.ts" {
 			require.ErrorIs(t, err, errRebuildResolverInputDenied)
 		} else {

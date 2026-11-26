@@ -196,7 +196,7 @@ func writeRebuildSidecarRow(ctx context.Context, w *bufio.Writer, left *int, row
 	}
 	lineSize := len(b) + 1
 	if lineSize > rebuildCppEntryLimit || lineSize > *left {
-		return fmt.Errorf("%w: encoded input cap: %w", errRebuildInputSidecar, errRebuildCppCaptureLimit)
+		return fmt.Errorf("%w: encoded input cap for %q: %w", errRebuildInputSidecar, row.Path, errRebuildCppCaptureLimit)
 	}
 	if _, err := w.Write(b); err != nil {
 		return err
@@ -232,8 +232,11 @@ func visitRebuildInputSidecar(ctx context.Context, lease string, expected rebuil
 	if err != nil {
 		return fmt.Errorf("%w: %w", errRebuildInputSidecar, err)
 	}
-	if !os.SameFile(before, info) || !info.Mode().IsRegular() || info.Size() < int64(len(rebuildInputSidecarMagic)) || info.Size() > rebuildInputEncodedLimit {
+	if !os.SameFile(before, info) || !info.Mode().IsRegular() || info.Size() < int64(len(rebuildInputSidecarMagic)) {
 		return fmt.Errorf("%w: sidecar size or kind", errRebuildInputSidecar)
+	}
+	if info.Size() > rebuildInputEncodedLimit {
+		return fmt.Errorf("%w: encoded input cap for %q: %w", errRebuildInputSidecar, rebuildInputSidecarName, errRebuildCppCaptureLimit)
 	}
 	h := blake3.New()
 	limit := &io.LimitedReader{R: f, N: rebuildInputEncodedLimit + 1}
@@ -251,8 +254,11 @@ func visitRebuildInputSidecar(ctx context.Context, lease string, expected rebuil
 		if err == io.EOF && len(line) == 0 {
 			break
 		}
-		if err != nil || len(line) > rebuildCppEntryLimit || limit.N == 0 {
-			return fmt.Errorf("%w: truncated, unreadable or oversized row: %v", errRebuildInputSidecar, err)
+		if errors.Is(err, bufio.ErrBufferFull) || len(line) > rebuildCppEntryLimit || limit.N == 0 {
+			return fmt.Errorf("%w: oversized row or encoded input cap in %q: %w", errRebuildInputSidecar, rebuildInputSidecarName, errRebuildCppCaptureLimit)
+		}
+		if err != nil {
+			return fmt.Errorf("%w: truncated or unreadable row: %w", errRebuildInputSidecar, err)
 		}
 		var row rebuildSidecarRow
 		if err := json.Unmarshal(line, &row); err != nil {
@@ -261,26 +267,31 @@ func visitRebuildInputSidecar(ctx context.Context, lease string, expected rebuil
 		if err := row.check(); err != nil {
 			return err
 		}
-		if row.isResolverConfig() || row.Kind == rebuildNpmManifestRow || row.Kind == rebuildClassificationRow || row.Kind == rebuildWorkspaceConfigRow ||
+		_, namespace := row.namespaceRow()
+		if namespace || row.Kind == rebuildFollowedManifest || row.isResolverConfig() || row.Kind == rebuildNpmManifestRow || row.Kind == rebuildClassificationRow || row.Kind == rebuildWorkspaceConfigRow ||
 			row.Kind == rebuildGitIndexStampRow || row.Kind == rebuildGitIgnoreVerdictRow || row.Kind == rebuildModuleFact {
 			// Refuse ambiguous fields (including duplicate JSON keys and null
-			// payload members). Only the new row kinds require canonical bytes.
+			// payload members) on frozen resolver and owner facts.
 			encoded, err := json.Marshal(row)
 			if err != nil || !bytes.Equal(encoded, line[:len(line)-1]) {
 				name := "resolver config"
-				switch row.Kind {
-				case rebuildNpmManifestRow:
+				switch {
+				case namespace:
+					name = "namespace"
+				case row.Kind == rebuildFollowedManifest:
+					name = "followed manifest"
+				case row.Kind == rebuildNpmManifestRow:
 					name = "npm manifest"
-				case rebuildWorkspaceConfigRow:
+				case row.Kind == rebuildWorkspaceConfigRow:
 					name = "workspace declaration"
-				case rebuildModuleFact:
+				case row.Kind == rebuildModuleFact:
 					return fmt.Errorf("%w: noncanonical module row", errRebuildModuleInput)
-				case rebuildClassificationRow:
+				case row.Kind == rebuildClassificationRow:
 					name = "classification"
-				case rebuildGitIndexStampRow, rebuildGitIgnoreVerdictRow:
+				case row.Kind == rebuildGitIndexStampRow || row.Kind == rebuildGitIgnoreVerdictRow:
 					name = "Git policy"
 				}
-				return fmt.Errorf("%w: noncanonical %s row", errRebuildInputSidecar, name)
+				return fmt.Errorf("%w: noncanonical %s row %q", errRebuildInputSidecar, name, row.Path)
 			}
 		}
 		if fact := row.Classification; fact != nil {
