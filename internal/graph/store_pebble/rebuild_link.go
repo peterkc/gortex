@@ -29,24 +29,26 @@ type RebuildLinkOptions struct {
 // RebuildLink owns one immutable ordered candidate file and its decoded cache.
 // The main coordinator selects serially until Close or failure.
 type RebuildLink struct {
-	ctx            context.Context
-	cancel         context.CancelCauseFunc
-	dir            string
-	active         chan struct{}
-	done           chan struct{}
-	cleanup        error // read only after done closes
-	v3             *v3Reader
-	candidateCalls atomic.Uint64
+	ctx                context.Context
+	cancel             context.CancelCauseFunc
+	dir                string
+	active             chan struct{}
+	done               chan struct{}
+	cleanup            error // read only after done closes
+	v3                 *v3Reader
+	candidateCalls     atomic.Uint64
+	candidatePositions atomic.Uint64
 }
 
-// LinkRequestProgress counts logical candidate page calls, including misses.
-// Reducer tests use the count to check conditional calls and batch splitting.
+// LinkRequestProgress counts logical candidate page calls and admitted
+// request positions, including checked misses. Reducer tests use the counts
+// to check conditional calls and batch splitting.
 type LinkRequestProgress struct {
-	CandidateCalls uint64
+	CandidateCalls, CandidatePositions uint64
 }
 
 func (s *RebuildLink) RequestProgress() LinkRequestProgress {
-	return LinkRequestProgress{CandidateCalls: s.candidateCalls.Load()}
+	return LinkRequestProgress{CandidateCalls: s.candidateCalls.Load(), CandidatePositions: s.candidatePositions.Load()}
 }
 
 // StartRebuildLink opens the ordered candidate file and its fixed-budget

@@ -58,6 +58,7 @@ func (s *RebuildLink) SelectCandidatePage(ctx context.Context, view RebuildView,
 	case s.active <- struct{}{}:
 	}
 	defer func() { <-s.active }()
+	s.candidatePositions.Add(uint64(len(requests)))
 	return s.v3.selectPage(pageCtx, view, requests, spillBytes, visit)
 }
 

@@ -399,7 +399,7 @@ func TestRebuildFunctionGoFullNameMiss(t *testing.T) {
 						moves, err := reduceRebuildMainPage(ctx, f, page)
 						require.Empty(t, moves)
 						require.Equal(t, []*graph.Edge{before}, page)
-						require.Equal(t, store_pebble.LinkRequestProgress{CandidateCalls: 1}, f.link.RequestProgress())
+						require.Equal(t, store_pebble.LinkRequestProgress{CandidateCalls: 1, CandidatePositions: 1}, f.link.RequestProgress())
 						return err
 					})
 					if hit {

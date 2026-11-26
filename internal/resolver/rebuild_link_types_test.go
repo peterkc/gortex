@@ -304,8 +304,8 @@ func TestRebuildTypePrimaryBatch(t *testing.T) {
 	serial, unbatched := observe(false)
 	batch, batched := observe(true)
 	require.Equal(t, serial, batch, "complete old keys, payloads and refusal sequence")
-	require.Equal(t, store_pebble.LinkRequestProgress{CandidateCalls: 8}, unbatched)
-	require.Equal(t, store_pebble.LinkRequestProgress{CandidateCalls: 1}, batched)
+	require.Equal(t, store_pebble.LinkRequestProgress{CandidateCalls: 8, CandidatePositions: 8}, unbatched)
+	require.Equal(t, store_pebble.LinkRequestProgress{CandidateCalls: 1, CandidatePositions: 8}, batched)
 
 	// The actual mixed main reducer must return the first original
 	// semantic refusal. Its tentative successful rows are not applied.
@@ -360,7 +360,7 @@ func TestRebuildTypePrimaryBatch(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, moves, 6)
 		require.Equal(t, moves, got)
-		require.Equal(t, store_pebble.LinkRequestProgress{CandidateCalls: 2}, f.link.RequestProgress())
+		require.Equal(t, store_pebble.LinkRequestProgress{CandidateCalls: 2, CandidatePositions: 7}, f.link.RequestProgress())
 		return nil
 	}))
 	require.Equal(t, before, rebuildFnPointerSaved(t, b))

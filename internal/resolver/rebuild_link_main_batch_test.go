@@ -133,9 +133,8 @@ func TestRebuildMainCandidateBatchRows(t *testing.T) {
 			batch, after, bc := observe(true)
 			require.Equal(t, scalar, batch, "complete ordered moves")
 			require.Equal(t, saved, after, "complete stored rows")
-
+			require.Equal(t, sc.CandidatePositions, bc.CandidatePositions)
 			require.Less(t, bc.CandidateCalls, sc.CandidateCalls)
-
 		})
 	}
 }
@@ -180,7 +179,8 @@ func TestRebuildMainCandidateBatchAggregateBounds(t *testing.T) {
 			a, ac := observe(true)
 			require.Equal(t, s, a)
 			require.EqualValues(t, tc.count, sc.CandidateCalls)
-
+			require.EqualValues(t, tc.count, sc.CandidatePositions)
+			require.EqualValues(t, tc.count, ac.CandidatePositions)
 			require.EqualValues(t, tc.wantCalls, ac.CandidateCalls)
 			if tc.payload != "" {
 				require.Len(t, a, tc.count)
