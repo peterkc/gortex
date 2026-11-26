@@ -125,13 +125,12 @@ func runRebuildLinkFrontier(ctx context.Context, build *store_pebble.BuildStore,
 			}
 			f.link = link
 		}
-		// All main resolutions in a page see the committed pre-page graph.
-		// A subsequent page must read imports changed by the previous apply.
-		f.pageReach = nil
-		f.pageReachDirs, f.pageReachBytes = 0, 0
 		if err := reduce(&f, page); err != nil {
 			return err
 		}
+		// Release precommit import facts before scanning the next original page.
+		f.pageReach = nil
+		f.pageReachDirs, f.pageReachBytes = 0, 0
 		f.link.ResetCandidatePage()
 		return f.view.ResetCallerPage()
 	})
