@@ -85,12 +85,9 @@ func (s *Snapshot) NodesByKindInRepos(kind graph.NodeKind, repos []string) iter.
 				continue
 			}
 			seen[repo] = true
-			stopped := false
-			s.indexedNodes(keyStrings([]byte{familyRepo}, repo), func(n *graph.Node) bool {
-				stopped = n.Kind == kind && !yield(n)
-				return !stopped
-			})
-			if stopped {
+			if !s.mergeScopedNodes([][]byte{keyStrings([]byte{familyRepo}, repo)}, kind, decodeNode, func(n *graph.Node) bool {
+				return n.Kind != kind || yield(n)
+			}) {
 				return
 			}
 		}

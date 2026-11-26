@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"maps"
 	"slices"
@@ -17,11 +18,19 @@ import (
 // Snapshot is a request-scoped reader of one published head. The caller owns
 // its lifetime and must finish reads before closing it.
 type Snapshot struct {
-	snap       *pebble.Snapshot
+	snap       snapshotReader
 	profile    Profile
 	mu         sync.Mutex
 	first      error
 	searchMemo []searchMemoEntry
+}
+
+// snapshotReader keeps the read seam at the published snapshot. Tests can
+// count logical point reads and prefix scans without relying on I/O caches.
+type snapshotReader interface {
+	Get([]byte) ([]byte, io.Closer, error)
+	NewIterWithContext(context.Context, *pebble.IterOptions) (*pebble.Iterator, error)
+	Close() error
 }
 
 var _ graph.Reader = (*Snapshot)(nil)

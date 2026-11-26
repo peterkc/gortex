@@ -174,6 +174,22 @@ func (s *Snapshot) mergeScopedNodes(prefixes [][]byte, kind graph.NodeKind, deco
 			cursors = append(cursors, cursor{id, next})
 		}
 	}
+	// Intersect the merged scope IDs with the existing kind index before
+	// fetching any node payload. Both streams are in ascending ID order.
+	var kindID string
+	var kindOK bool
+	var nextKind func() (string, bool)
+	if kind != "" {
+		ids := iter.Seq[string](func(yield func(string) bool) {
+			s.retain(scan(context.Background(), s, keyStrings([]byte{familyNodeKind}, string(kind)), func(_, raw []byte) (bool, error) {
+				return yield(string(raw)), nil
+			}))
+		})
+		next, stop := iter.Pull(ids)
+		defer stop()
+		nextKind = next
+		kindID, kindOK = nextKind()
+	}
 	for len(cursors) > 0 {
 		i := 0
 		for j := 1; j < len(cursors); j++ {
@@ -182,16 +198,26 @@ func (s *Snapshot) mergeScopedNodes(prefixes [][]byte, kind graph.NodeKind, deco
 			}
 		}
 		id := cursors[i].id
-		n, err := point(s, keyStrings([]byte{familyNode}, id), decode)
-		if err == nil && n == nil {
-			err = invalid("missing scoped node")
+		if nextKind != nil {
+			for kindOK && kindID < id {
+				kindID, kindOK = nextKind()
+			}
+			if !kindOK {
+				break
+			}
 		}
-		if err != nil {
-			s.retain(err)
-			return false
-		}
-		if (kind == "" || kind == n.Kind) && !yield(n) {
-			return false
+		if nextKind == nil || kindID == id {
+			n, err := point(s, keyStrings([]byte{familyNode}, id), decode)
+			if err == nil && n == nil {
+				err = invalid("missing scoped node")
+			}
+			if err != nil {
+				s.retain(err)
+				return false
+			}
+			if (kind == "" || kind == n.Kind) && !yield(n) {
+				return false
+			}
 		}
 		if next, ok := cursors[i].next(); ok {
 			cursors[i].id = next
