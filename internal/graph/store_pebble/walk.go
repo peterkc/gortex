@@ -75,7 +75,7 @@ func (s *Snapshot) visitKindEdges(ctx context.Context, id string, direction grap
 		return err
 	}
 	type rangeCursor struct {
-		i         *pebble.Iterator
+		i         snapshotIterator
 		prefixLen int
 	}
 	ordered := slices.Clone(kinds)

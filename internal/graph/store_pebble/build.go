@@ -96,7 +96,7 @@ func (b *BuildStore) OpenSnapshot() (*Snapshot, error) {
 	if !b.published {
 		return nil, ErrUnpublishedBuild
 	}
-	return &Snapshot{snap: b.db.NewSnapshot(), profile: b.profile}, nil
+	return &Snapshot{snap: pebbleSnapshotReader{b.db.NewSnapshot()}, profile: b.profile}, nil
 }
 
 func nodeIndexKeys(n *graph.Node) [][]byte {

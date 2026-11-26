@@ -72,7 +72,7 @@ func (s *Snapshot) scanNameGramNodes(ctx context.Context, folded string, decode 
 	if len(prefixes) == 1 {
 		return s.scanIndexedNodes(ctx, prefixes[0], decode, yield)
 	}
-	cursors := make([]*pebble.Iterator, 0, len(prefixes))
+	cursors := make([]snapshotIterator, 0, len(prefixes))
 	for _, prefix := range prefixes {
 		i, openErr := s.snap.NewIterWithContext(ctx, &pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
 		if openErr != nil {

@@ -66,7 +66,7 @@ func OpenHead(path string, incarnation string, profile Profile) (*Head, error) {
 func (h *Head) Close() error { return h.db.Close() }
 
 func (h *Head) OpenSnapshot() *Snapshot {
-	return &Snapshot{snap: h.db.NewSnapshot(), profile: h.profile}
+	return &Snapshot{snap: pebbleSnapshotReader{h.db.NewSnapshot()}, profile: h.profile}
 }
 
 func (h *Head) Checkpoint(dir string) error { return h.db.Checkpoint(dir) }

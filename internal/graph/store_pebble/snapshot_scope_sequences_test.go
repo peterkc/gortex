@@ -58,6 +58,11 @@ func TestSnapshotScopeKindReadsOnlyIntersection(t *testing.T) {
 		{ID: "a", Name: "a.go", Kind: graph.KindFile, RepoPrefix: "repo", FilePath: "nested/a.go"},
 		{ID: "c", Name: "a.go", Kind: graph.KindFile, RepoPrefix: "repo/sub", FilePath: "nested/a.go"},
 		{ID: "b", Name: "b.go", Kind: graph.KindFile, RepoPrefix: "other"},
+		{ID: "a-noise", Name: "noise", Kind: graph.KindFunction, RepoPrefix: "repo", FilePath: "nested/a.go"},
+		{ID: "b-noise", Name: "noise", Kind: graph.KindFunction, RepoPrefix: "repo", FilePath: "nested/a.go"},
+	}
+	for i := range 80 {
+		nodes = append(nodes, &graph.Node{ID: fmt.Sprintf("0-file-%02d", i), Name: "other.go", Kind: graph.KindFile, RepoPrefix: "other"})
 	}
 	for i := range 40 {
 		nodes = append(nodes, &graph.Node{ID: fmt.Sprintf("noise-%02d", i), Name: "noise", Kind: graph.KindFunction, RepoPrefix: "repo", FilePath: "nested/a.go"})
@@ -67,28 +72,44 @@ func TestSnapshotScopeKindReadsOnlyIntersection(t *testing.T) {
 	repos := []string{"repo/sub", "repo", "repo"}
 	kinds := []graph.NodeKind{graph.KindFile, "", graph.KindFile}
 	wantKeys := []string{string(keyStrings([]byte{familyNode}, "a")), string(keyStrings([]byte{familyNode}, "c"))}
+	kindPrefix := string(keyStrings([]byte{familyNodeKind}, string(graph.KindFile)))
 	for _, files := range [][]string{nil, {"nested/a.go", "nested/a.go"}} {
 		reads.points = nil
+		clear(reads.steps)
+		clear(reads.seeks)
 		require.Equal(t, slices.Collect(sql.NodesInScopeSeq(repos, files, kinds...)), slices.Collect(s.NodesInScopeSeq(repos, files, kinds...)))
 		require.Equal(t, wantKeys, reads.points)
+		// A step-only kind scan visits the 80 unrelated file IDs before "a".
+		require.LessOrEqual(t, reads.steps[kindPrefix]+reads.seeks[kindPrefix], 4)
 		reads.points = nil
+		clear(reads.steps)
+		clear(reads.seeks)
 		require.Equal(t, slices.Collect(sql.NodesLightByKindsInScopeSeq(repos, files, kinds...)), slices.Collect(s.NodesLightByKindsInScopeSeq(repos, files, kinds...)))
 		require.Equal(t, wantKeys, reads.points)
+		require.LessOrEqual(t, reads.steps[kindPrefix]+reads.seeks[kindPrefix], 4)
 	}
 	reads.points = nil
 	require.Equal(t, slices.Collect(sql.FileLocationsInScopeSeq(repos)), slices.Collect(s.FileLocationsInScopeSeq(repos)))
 	require.Equal(t, wantKeys, reads.points)
 	reads.points = nil
-	require.ElementsMatch(t, slices.Collect(sql.NodesByKindInRepos(graph.KindFile, repos)), slices.Collect(s.NodesByKindInRepos(graph.KindFile, repos)))
-	require.ElementsMatch(t, wantKeys, reads.points)
+	clear(reads.steps)
+	clear(reads.seeks)
+	got := slices.Collect(s.NodesByKindInRepos(graph.KindFile, repos))
+	require.ElementsMatch(t, slices.Collect(sql.NodesByKindInRepos(graph.KindFile, repos)), got)
+	require.Len(t, got, 2)
+	require.Equal(t, "c", got[0].ID)
+	require.Equal(t, "a", got[1].ID)
+	require.Equal(t, []string{wantKeys[1], wantKeys[0]}, reads.points)
+	require.LessOrEqual(t, reads.steps[kindPrefix]+reads.seeks[kindPrefix], 5)
 	reads.points = nil
 	for n := range s.NodesInScopeSeq(repos, nil, kinds...) {
 		require.Equal(t, "a", n.ID)
 		break
 	}
 	require.Equal(t, wantKeys[:1], reads.points)
-	reads.points = nil
+	reads.points, reads.scans = nil, nil
 	require.Empty(t, slices.Collect(s.NodesInScopeSeq([]string{"missing"}, nil, kinds...)))
+	require.Equal(t, []string{string(keyStrings([]byte{familyRepo}, "missing"))}, reads.scans)
 	require.Empty(t, slices.Collect(s.NodesInScopeSeq(repos, nil, graph.NodeKind(""))))
 	require.Empty(t, reads.points)
 	require.NoError(t, s.ReadError())

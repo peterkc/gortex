@@ -6,6 +6,7 @@ import (
 	"iter"
 	"slices"
 
+	"github.com/cockroachdb/pebble/v2"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -158,7 +159,8 @@ func (s *Snapshot) nodesInScope(repos, files []string, kinds []graph.NodeKind, d
 	}
 }
 
-func (s *Snapshot) mergeScopedNodes(prefixes [][]byte, kind graph.NodeKind, decode decodeRow[*graph.Node], yield func(*graph.Node) bool) bool {
+func (s *Snapshot) mergeScopedNodes(prefixes [][]byte, kind graph.NodeKind, decode decodeRow[*graph.Node], yield func(*graph.Node) bool) (more bool) {
+	defer func() { more = more && s.ReadError() == nil }()
 	type cursor struct {
 		id   string
 		next func() (string, bool)
@@ -174,21 +176,23 @@ func (s *Snapshot) mergeScopedNodes(prefixes [][]byte, kind graph.NodeKind, deco
 			cursors = append(cursors, cursor{id, next})
 		}
 	}
-	// Intersect the merged scope IDs with the existing kind index before
-	// fetching any node payload. Both streams are in ascending ID order.
+	if len(cursors) == 0 {
+		return true
+	}
+	// Seek the global kind posting to the current scope ID rather than
+	// stepping through unrelated repositories before fetching node payloads.
 	var kindID string
 	var kindOK bool
-	var nextKind func() (string, bool)
+	var kindCursor snapshotIterator
 	if kind != "" {
-		ids := iter.Seq[string](func(yield func(string) bool) {
-			s.retain(scan(context.Background(), s, keyStrings([]byte{familyNodeKind}, string(kind)), func(_, raw []byte) (bool, error) {
-				return yield(string(raw)), nil
-			}))
-		})
-		next, stop := iter.Pull(ids)
-		defer stop()
-		nextKind = next
-		kindID, kindOK = nextKind()
+		prefix := keyStrings([]byte{familyNodeKind}, string(kind))
+		var err error
+		kindCursor, err = s.snap.NewIterWithContext(context.Background(), &pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
+		if err != nil {
+			s.retain(err)
+			return false
+		}
+		defer func() { s.retain(kindCursor.Close()) }()
 	}
 	for len(cursors) > 0 {
 		i := 0
@@ -198,15 +202,19 @@ func (s *Snapshot) mergeScopedNodes(prefixes [][]byte, kind graph.NodeKind, deco
 			}
 		}
 		id := cursors[i].id
-		if nextKind != nil {
-			for kindOK && kindID < id {
-				kindID, kindOK = nextKind()
-			}
-			if !kindOK {
+		if kindCursor != nil && (!kindOK || kindID < id) {
+			if !kindCursor.SeekGE(keyStrings([]byte{familyNodeKind}, string(kind), id)) {
+				s.retain(kindCursor.Error())
 				break
 			}
+			raw, err := kindCursor.ValueAndErr()
+			if err != nil {
+				s.retain(err)
+				return false
+			}
+			kindID, kindOK = string(raw), true
 		}
-		if nextKind == nil || kindID == id {
+		if kindCursor == nil || kindID == id {
 			n, err := point(s, keyStrings([]byte{familyNode}, id), decode)
 			if err == nil && n == nil {
 				err = invalid("missing scoped node")
@@ -226,5 +234,5 @@ func (s *Snapshot) mergeScopedNodes(prefixes [][]byte, kind graph.NodeKind, deco
 			cursors = cursors[:len(cursors)-1]
 		}
 	}
-	return s.ReadError() == nil
+	return true
 }

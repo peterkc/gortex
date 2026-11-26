@@ -26,11 +26,27 @@ type Snapshot struct {
 }
 
 // snapshotReader keeps the read seam at the published snapshot. Tests can
-// count logical point reads and prefix scans without relying on I/O caches.
+// count logical point reads, prefix scans and cursor movement without relying on I/O caches.
 type snapshotReader interface {
 	Get([]byte) ([]byte, io.Closer, error)
-	NewIterWithContext(context.Context, *pebble.IterOptions) (*pebble.Iterator, error)
+	NewIterWithContext(context.Context, *pebble.IterOptions) (snapshotIterator, error)
 	Close() error
+}
+
+type snapshotIterator interface {
+	First() bool
+	Next() bool
+	SeekGE([]byte) bool
+	Key() []byte
+	ValueAndErr() ([]byte, error)
+	Error() error
+	Close() error
+}
+
+type pebbleSnapshotReader struct{ *pebble.Snapshot }
+
+func (s pebbleSnapshotReader) NewIterWithContext(ctx context.Context, opts *pebble.IterOptions) (snapshotIterator, error) {
+	return s.Snapshot.NewIterWithContext(ctx, opts)
 }
 
 var _ graph.Reader = (*Snapshot)(nil)
