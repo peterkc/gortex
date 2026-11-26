@@ -92,6 +92,17 @@ func runV3Fixture(t *testing.T, run func(*v3FixtureSuite, *testing.T)) {
 	if len(all) != 32 {
 		t.Fatalf("H98 golden case count=%d, want 32", len(all))
 	}
+	fixtures := []string{
+		"TestRebuildV3ExactOrderAndLive", "TestRebuildV3UnstableUnsized", "TestRebuildV3EvictionWithinCall",
+		"TestRebuildV3LogicalRecordAndByteLimits", "TestRebuildV3LogicalRowAndRunLimits", "TestRebuildV3WireAndReducerPrecedence",
+		"TestRebuildV3ExceptionalMapStream", "TestRebuildV3BoundedIndex", "TestRebuildV3AdmissionEpoch", "TestRebuildV3ReadFailure",
+	}
+	for name := range all {
+		fixture, _, _ := strings.Cut(name, "/")
+		if !slices.Contains(fixtures, fixture) {
+			t.Fatalf("H98 golden case %q has no fixture", name)
+		}
+	}
 	root := t.Name()
 	small := int64(512 << 10)
 	if root == "TestRebuildV3BoundedIndex" {
