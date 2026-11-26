@@ -39,6 +39,7 @@ type RebuildPlaceholderSources struct {
 	spillAt   int
 	unflushed int
 	stats     RebuildPlaceholderStats
+	sites     map[string]struct{} // unclaimed exact census site keys
 	applied   bool
 }
 
@@ -50,7 +51,7 @@ func (b *BuildStore) CapturePlaceholderSources(ctx context.Context, spillAt int)
 	if spillAt < 1 {
 		return nil, fmt.Errorf("%w: invalid spill threshold", ErrRebuildPlaceholderSources)
 	}
-	p := &RebuildPlaceholderSources{build: b, spillAt: spillAt}
+	p := &RebuildPlaceholderSources{build: b, spillAt: spillAt, sites: make(map[string]struct{})}
 	prefix := []byte{familyEdge, edgeOut}
 	err := b.RebuildView().visit(ctx, prefix, func(_ *pebble.Snapshot, r row) error {
 		e, err := decodeEdgeLight(r.value)
@@ -64,7 +65,9 @@ func (b *BuildStore) CapturePlaceholderSources(ctx context.Context, spillAt int)
 			return nil
 		}
 		p.stats.Census++
-		return p.put(append(placeholderSite(e.From, e.FilePath, e.Line), r.key...), nil)
+		site := placeholderSite(e.From, e.FilePath, e.Line)
+		p.sites[string(site)] = struct{}{}
+		return p.put(append(site, r.key...), nil)
 	})
 	if err != nil {
 		return nil, placeholderError(errors.Join(err, p.Close()))
@@ -108,6 +111,11 @@ func (p *RebuildPlaceholderSources) claim(ctx context.Context, rp graph.Placehol
 		return nil
 	}
 	site := placeholderSite(rp.OldFrom, rp.FilePath, rp.Line)
+	// Capture is the only writer of site rows. Successful claims remove
+	// the entire exact prefix; neither moves nor links add sites.
+	if _, ok := p.sites[string(site)]; !ok {
+		return ctx.Err()
+	}
 	before := p.stats.Claimed
 	if err := pendingVisit(ctx, p.build.pending, site, func(r row) error {
 		key := binary.BigEndian.AppendUint64(bytes.Clone(placeholderMoves), uint64(p.stats.Claimed))
@@ -117,7 +125,10 @@ func (p *RebuildPlaceholderSources) claim(ctx context.Context, rp graph.Placehol
 		return err
 	}
 	if p.stats.Claimed > before {
-		return p.build.pending.DeleteRange(site, prefixEnd(site), pebble.NoSync)
+		if err := p.build.pending.DeleteRange(site, prefixEnd(site), pebble.NoSync); err != nil {
+			return err
+		}
+		delete(p.sites, string(site))
 	}
 	return nil
 }
@@ -267,6 +278,7 @@ func (p *RebuildPlaceholderSources) Close() error {
 	}
 	db := p.build.pending
 	p.build = nil
+	p.sites = nil
 	return placeholderError(db.DeleteRange(placeholderPrefix, prefixEnd(placeholderPrefix), pebble.NoSync))
 }
 
