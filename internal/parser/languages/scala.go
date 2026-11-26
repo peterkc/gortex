@@ -12,7 +12,8 @@ import (
 
 // ScalaExtractor extracts Scala source files.
 type ScalaExtractor struct {
-	lang *sitter.Language
+	retainTree bool
+	lang       *sitter.Language
 }
 
 func NewScalaExtractor() *ScalaExtractor {
@@ -22,12 +23,24 @@ func NewScalaExtractor() *ScalaExtractor {
 func (e *ScalaExtractor) Language() string     { return "scala" }
 func (e *ScalaExtractor) Extensions() []string { return []string{".scala", ".sc"} }
 
+// WithRetainedTree requests the contract capture tree on an extraction-scoped copy.
+func (e *ScalaExtractor) WithRetainedTree() parser.Extractor {
+	copy := *e
+	copy.retainTree = true
+	return &copy
+}
+
 func (e *ScalaExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
 	tree, err := parser.ParseFile(src, e.lang)
 	if err != nil {
 		return nil, err
 	}
-	defer tree.Close()
+	keepTree := false
+	defer func() {
+		if !keepTree {
+			tree.Close()
+		}
+	}()
 
 	root := tree.RootNode()
 	result := &parser.ExtractionResult{}
@@ -54,6 +67,10 @@ func (e *ScalaExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 	// edges. Runs after node extraction so buildFuncRanges sees every
 	// function/method node when attributing expression-position references.
 	emitScalaReferenceForms(root, filePath, src, result)
+	if e.retainTree {
+		result.ContractTree = parser.NewParseTree(tree, src, "scala")
+		keepTree = true
+	}
 	return result, nil
 }
 

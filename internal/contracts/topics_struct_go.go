@@ -60,7 +60,7 @@ func (e *TopicExtractor) ExtractWithStore(
 // an AWS-style request struct (&sqs.SendMessageInput{QueueUrl: q} /
 // sns.PublishInput{TopicArn: t}) and emits a ContractTopic whose name is the
 // resolved queue / topic. The endpoint value is resolved graph-wide via
-// ResolveEndpointArg (forRoute=false — a queue URL is not a route), so a const
+// ResolveEndpointArg or a detached EndpointExpression (forRoute=false), so a const
 // or cross-file-const queue resolves where the regex layer cannot. The role is
 // inferred from the enclosing call's method name (receive / subscribe / consume
 // → consumer; otherwise provider).
@@ -85,29 +85,36 @@ func detectGoEndpointStructTopics(root *sitter.Node, src []byte, filePath, repoP
 				continue
 			}
 			broker := awsEndpointStructField[field]
-			q := endpointExpression(valNode, src)
+			if capture, ok := store.(*EndpointFactCapture); ok {
+				q := endpointExpression(valNode, src)
+				if q.HasQuestion() {
+					ln := int(call.StartPoint().Row) + 1
+					c := Contract{
+						Type: ContractTopic, Role: role, SymbolID: findEnclosingSymbol(fileNodes, ln),
+						FilePath: filePath, Line: ln, Meta: map[string]any{"broker": broker}, Confidence: 0.8,
+					}
+					capture.add(EndpointContractQuestion{Position: base + len(out), Kind: EndpointTopic, Expression: q, Record: c})
+					continue
+				}
+			}
+			topic, ok := ResolveEndpointArg(valNode, src, filePath, repoPrefix, store, false)
+			if !ok || topic == "" {
+				continue
+			}
 			ln := int(call.StartPoint().Row) + 1
-			c := Contract{
+			out = append(out, Contract{
+				ID:       fmt.Sprintf("topic::%s::%s", broker, topic),
 				Type:     ContractTopic,
 				Role:     role,
 				SymbolID: findEnclosingSymbol(fileNodes, ln),
 				FilePath: filePath,
 				Line:     ln,
 				Meta: map[string]any{
+					"topic":  topic,
 					"broker": broker,
 				},
 				Confidence: 0.8,
-			}
-			if capture, ok := store.(*EndpointFactCapture); ok && q.HasQuestion() {
-				capture.add(EndpointContractQuestion{Position: base + len(out), Kind: EndpointTopic, Expression: q, Record: c})
-				continue
-			}
-			topic, ok := q.Resolve(filePath, repoPrefix, store, false)
-			if !ok {
-				continue
-			}
-			completeEndpointTopic(&c, topic)
-			out = append(out, c)
+			})
 		}
 	})
 	return out

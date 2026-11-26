@@ -179,6 +179,9 @@ type ExtractionResult struct {
 	Nodes        []*graph.Node
 	Edges        []*graph.Edge
 	Tree         *ParseTree
+	// ContractTree is retained only by an explicit contract capture request.
+	// It must not affect ordinary parse metadata or graph facts.
+	ContractTree *ParseTree
 	// ConstValues carries the literal value of each KindConstant node
 	// whose RHS is a string / numeric literal, for the indexer to persist
 	// in the queryable constant_values sidecar (kept out of the gob Meta

@@ -17,14 +17,14 @@ import (
 // Nil shape values explicitly record that a declaration has no native shape.
 // NeedsRawHandlerTree names the transformed Go exception without retaining raw bytes.
 type FileFacts struct {
-	Records []Contract
-	Questions []EndpointContractQuestion
-	Shapes map[string]*Shape
-	Handlers map[string]HandlerFacts
-	Router *RouterFacts
-	ConfigKeys []*graph.Node
+	Records             []Contract
+	Questions           []EndpointContractQuestion
+	Shapes              map[string]*Shape
+	Handlers            map[string]HandlerFacts
+	Router              *RouterFacts
+	ConfigKeys          []*graph.Node
 	NeedsRawHandlerTree bool
-	ScanSkipped bool
+	ScanSkipped         bool
 }
 
 // ErrContractFactTree indicates that a required native detector would need
@@ -39,6 +39,9 @@ func CheckFileFactTree(filePath string, src []byte, tree *parser.ParseTree, exts
 	hasTree := tree != nil && tree.Tree() != nil
 	if hasTree && !bytes.Equal(tree.Source(), src) {
 		return fmt.Errorf("%w: %s: source differs", ErrContractFactTree, filePath)
+	}
+	if lang == "go" && hasTree && !NativeGoBodyFactsFactory() {
+		return fmt.Errorf("%w: native Go body facts factory changed", ErrContractFactTree)
 	}
 	for _, ex := range exts {
 		var required string
@@ -56,7 +59,7 @@ func CheckFileFactTree(filePath string, src []byte, tree *parser.ParseTree, exts
 				required = "hcl"
 			}
 		case *GRPCExtractor:
-			if needsTSGRPCTree(src) && !matchesTSGRPCTree(filePath, tree) {
+			if needsTSGRPCTree(filePath, src) && !matchesTSGRPCTree(filePath, tree) {
 				return fmt.Errorf("%w: %s: gRPC grammar differs or is unavailable", ErrContractFactTree, filePath)
 			}
 		}
@@ -70,8 +73,8 @@ func CheckFileFactTree(filePath string, src []byte, tree *parser.ParseTree, exts
 // HandlerFacts holds separate regex writes and AST writes so replay preserves
 // native overwrite, merge and deletion behavior. Binding lookups remain local.
 type HandlerFacts struct {
-	Regex map[string]any
-	AST map[string]any
+	Regex    map[string]any
+	AST      map[string]any
 	Bindings map[string]Binding
 }
 
@@ -79,6 +82,9 @@ type HandlerFacts struct {
 // then first-name selection as native MakeBodyFacts. Index the accepted tree
 // once so eager capture does not scan the whole tree for each function.
 func CaptureFileHandlerFacts(ctx context.Context, nodes []*graph.Node, lines []string, lang string, tree *parser.ParseTree) (map[string]HandlerFacts, error) {
+	if lang == "go" && tree != nil && !NativeGoBodyFactsFactory() {
+		return nil, fmt.Errorf("%w: native Go body facts factory changed", ErrContractFactTree)
+	}
 	byRow := make(map[int]*sitter.Node)
 	byName := make(map[string]*sitter.Node)
 	if tree != nil && tree.Tree() != nil && tree.Lang() == "go" {
@@ -149,7 +155,9 @@ func CaptureFileHandlerFacts(ctx context.Context, nodes []*graph.Node, lines []s
 // EnrichProvider applies precisely the native provider regex/AST updates to
 // the selected handler's incoming record; the caller retains registration site.
 func (f HandlerFacts) EnrichProvider(c *Contract) {
-	if c.Meta == nil { c.Meta = map[string]any{} }
+	if c.Meta == nil {
+		c.Meta = map[string]any{}
+	}
 	if path, _ := c.Meta["path"].(string); path != "" {
 		if params := pathParamsFromTemplate(path); len(params) > 0 {
 			c.Meta["path_params"] = params
@@ -158,13 +166,16 @@ func (f HandlerFacts) EnrichProvider(c *Contract) {
 	maps.Copy(c.Meta, cloneFactMeta(f.Regex))
 	for k, v := range cloneFactMeta(f.AST) {
 		switch k {
-		case "status_codes": mergeIntStrings(c.Meta, k, v.([]int))
-		case "query_params": mergeStringList(c.Meta, k, v.([]string))
+		case "status_codes":
+			mergeIntStrings(c.Meta, k, v.([]int))
+		case "query_params":
+			mergeStringList(c.Meta, k, v.([]string))
 		case "response_expr":
 			if rt, _ := c.Meta["response_type"].(string); rt == "" {
 				c.Meta[k] = v
 			}
-		default: c.Meta[k] = v
+		default:
+			c.Meta[k] = v
 		}
 	}
 	if _, ok := f.AST["request_type"]; ok {

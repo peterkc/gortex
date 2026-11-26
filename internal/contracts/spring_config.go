@@ -131,6 +131,7 @@ func ExtractSpringConfigKeys(filePath string, src []byte, profile string) []*gra
 			continue
 		}
 		seen[id] = true
+		k = strings.Clone(k) // Detach the key from the value-bearing input string.
 		meta := map[string]any{
 			"source":         "spring",
 			"raw_key":        k,

@@ -13,7 +13,8 @@ import (
 
 // PHPExtractor extracts PHP source files.
 type PHPExtractor struct {
-	lang *sitter.Language
+	retainTree bool
+	lang       *sitter.Language
 }
 
 func NewPHPExtractor() *PHPExtractor {
@@ -32,12 +33,24 @@ func (e *PHPExtractor) Extensions() []string {
 	}
 }
 
+// WithRetainedTree requests the contract capture tree on an extraction-scoped copy.
+func (e *PHPExtractor) WithRetainedTree() parser.Extractor {
+	copy := *e
+	copy.retainTree = true
+	return &copy
+}
+
 func (e *PHPExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
 	tree, err := parser.ParseFile(src, e.lang)
 	if err != nil {
 		return nil, err
 	}
-	defer tree.Close()
+	keepTree := false
+	defer func() {
+		if !keepTree {
+			tree.Close()
+		}
+	}()
 
 	root := tree.RootNode()
 	result := &parser.ExtractionResult{}
@@ -76,6 +89,10 @@ func (e *PHPExtractor) Extract(filePath string, src []byte) (*parser.ExtractionR
 	// above produced.
 	applyPHPNamespaceIdentity(root, src, result)
 
+	if e.retainTree {
+		result.ContractTree = parser.NewParseTree(tree, src, "php")
+		keepTree = true
+	}
 	return result, nil
 }
 

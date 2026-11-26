@@ -16,6 +16,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -478,4 +479,49 @@ func TestColdIndexLargestFirstKeepsGraphIdentical(t *testing.T) {
 		"cold-index node count must be identical regardless of dispatch order")
 	assert.Equal(t, a.EdgeCount, b.EdgeCount,
 		"cold-index edge count must be identical regardless of dispatch order")
+}
+
+// A channel-controlled worker cannot finish until after the timeout returns.
+type lateTreeExtractor struct {
+	unblock <-chan struct{}
+	result  *parser.ExtractionResult
+}
+
+func (e *lateTreeExtractor) Language() string     { return "go" }
+func (e *lateTreeExtractor) Extensions() []string { return []string{".go"} }
+func (e *lateTreeExtractor) Extract(string, []byte) (*parser.ExtractionResult, error) {
+	<-e.unblock
+	return e.result, nil
+}
+
+func TestExtractTimeoutReleasesLateTrees(t *testing.T) {
+	idx := newTestIndexer(graph.New())
+	t.Cleanup(idx.Close)
+	idx.config.MaxExtractMillis = 1
+	src := []byte("package p\n")
+	native := contracts.ParseTreeForLang("go", src)
+	capture := contracts.ParseTreeForLang("go", src)
+	require.NotNil(t, native)
+	require.NotNil(t, capture)
+	unblock := make(chan struct{})
+	defer func() {
+		if unblock != nil {
+			close(unblock)
+		}
+	}()
+	done := make(chan struct{})
+	ext := &lateTreeExtractor{unblock: unblock, result: &parser.ExtractionResult{Tree: native, ContractTree: capture}}
+	_, err := idx.extractWithTimeoutDone(ext, "x.go", src, func() { close(done) })
+	close(unblock)
+	unblock = nil
+	require.ErrorIs(t, err, errExtractTimeout)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("late extraction did not release its admission")
+	}
+	require.Nil(t, native.Tree())
+	require.Nil(t, capture.Tree())
+	require.Nil(t, ext.result.Tree)
+	require.Nil(t, ext.result.ContractTree)
 }

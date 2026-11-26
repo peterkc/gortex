@@ -68,8 +68,9 @@ const qJavaAll = `
 
 // JavaExtractor extracts Java source files into graph nodes and edges.
 type JavaExtractor struct {
-	lang *sitter.Language
-	qAll *parser.PreparedQuery
+	retainTree bool
+	lang       *sitter.Language
+	qAll       *parser.PreparedQuery
 	// javaInvokers / javaInvokerMethods configure the Temporal invoker
 	// detector (corporate, per-repo), installed via SetTemporalInvokers /
 	// ConfigureTemporalJavaInvokers. javaInvokers holds invoker class
@@ -176,12 +177,24 @@ type javaTypeUse struct {
 	line     int // 1-based
 }
 
+// WithRetainedTree requests the contract capture tree on an extraction-scoped copy.
+func (e *JavaExtractor) WithRetainedTree() parser.Extractor {
+	copy := *e
+	copy.retainTree = true
+	return &copy
+}
+
 func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
 	tree, err := parser.ParseFile(src, e.lang)
 	if err != nil {
 		return nil, err
 	}
-	defer tree.Close()
+	keepTree := false
+	defer func() {
+		if !keepTree {
+			tree.Close()
+		}
+	}()
 
 	root := tree.RootNode()
 	checked, parseErrors := parser.ParseErrorVerdict(root)
@@ -510,6 +523,10 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 
 	captureSpringEvents(result, root, filePath, src)
 
+	if e.retainTree {
+		result.ContractTree = parser.NewParseTree(tree, src, "java")
+		keepTree = true
+	}
 	return result, nil
 }
 

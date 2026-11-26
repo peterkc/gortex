@@ -111,8 +111,9 @@ const qRustAll = `
 
 // RustExtractor extracts Rust source files into graph nodes and edges.
 type RustExtractor struct {
-	lang *sitter.Language
-	qAll *parser.PreparedQuery
+	retainTree bool
+	lang       *sitter.Language
+	qAll       *parser.PreparedQuery
 }
 
 func NewRustExtractor() *RustExtractor {
@@ -169,12 +170,24 @@ type rustFuncDef struct {
 	line  int    // 1-based start line, mapped back to the emitted id via funcRanges
 }
 
+// WithRetainedTree requests the contract capture tree on an extraction-scoped copy.
+func (e *RustExtractor) WithRetainedTree() parser.Extractor {
+	copy := *e
+	copy.retainTree = true
+	return &copy
+}
+
 func (e *RustExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
 	tree, err := parser.ParseFile(src, e.lang)
 	if err != nil {
 		return nil, err
 	}
-	defer tree.Close()
+	keepTree := false
+	defer func() {
+		if !keepTree {
+			tree.Close()
+		}
+	}()
 
 	root := tree.RootNode()
 	checked, parseErrors := parser.ParseErrorVerdict(root)
@@ -552,6 +565,10 @@ func (e *RustExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 
 	captureValueRefCandidates(result, root, filePath, src)
 	captureFnValueCandidates(result, root, filePath, src)
+	if e.retainTree {
+		result.ContractTree = parser.NewParseTree(tree, src, "rust")
+		keepTree = true
+	}
 	return result, nil
 }
 

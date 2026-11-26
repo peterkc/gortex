@@ -534,7 +534,7 @@ func (e *GRPCExtractor) extractConsumers(filePath string, src []byte, fileNodes 
 	}
 
 	// Only interpret Client constructors when the file imports a gRPC package or stub.
-	if tsGRPCNewClientRe.MatchString(text) && tsFileImportsGRPC(filePath, src, tree) {
+	if tsFileImportsGRPC(filePath, src, tree) {
 		contracts = append(contracts, extractTSGRPCConsumers(text, lines, filePath, fileNodes)...)
 	}
 
@@ -672,15 +672,22 @@ func extractTSGRPCConsumers(text string, lines []string, filePath string, fileNo
 // The grpc-web TypeScript generator uses <Service>ClientPb, alongside the usual _pb modules.
 const grpcWebClientSuffix = "ClientPb"
 
-func needsTSGRPCTree(src []byte) bool {
+func needsTSGRPCTree(filePath string, src []byte) bool {
+	switch strings.ToLower(path.Ext(filePath)) {
+	case ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx":
+	default:
+		return false
+	}
 	return tsGRPCNewClientRe.Match(src) && (bytes.Contains(src, []byte("grpc")) || bytes.Contains(src, []byte("@connectrpc/")) ||
 		bytes.Contains(src, []byte("_pb")) || bytes.Contains(src, []byte(grpcWebClientSuffix)))
 }
 
-// tsGRPCGrammar preserves the native extension rule. The graph extractor's
-// language label alone does not distinguish TS from TSX.
+// tsGRPCGrammar uses the graph extractor's case-insensitive TSX rule.
+// Direct gRPC callers may also extract JSX. A language label alone does not
+// distinguish TS from TSX.
 func tsGRPCGrammar(filePath string) *sitter.Language {
-	if strings.HasSuffix(filePath, ".tsx") || strings.HasSuffix(filePath, ".jsx") {
+	suffix := strings.ToLower(path.Ext(filePath))
+	if suffix == ".tsx" || suffix == ".jsx" {
 		return tsx.GetLanguage()
 	}
 	return typescript.GetLanguage()
@@ -695,7 +702,7 @@ func matchesTSGRPCTree(filePath string, supplied *parser.ParseTree) bool {
 }
 
 func tsFileImportsGRPC(filePath string, src []byte, supplied *parser.ParseTree) bool {
-	if !needsTSGRPCTree(src) {
+	if !needsTSGRPCTree(filePath, src) {
 		return false
 	}
 	var tree *sitter.Tree

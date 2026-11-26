@@ -139,18 +139,26 @@ func (idx *Indexer) extractWithTimeoutDone(
 		result *parser.ExtractionResult
 		err    error
 	}
-	ch := make(chan outcome, 1)
+	ch := make(chan outcome)
+	abandoned := make(chan struct{})
 	go func() {
 		r, err := safeExtractWithOptions(ext, relPath, src, opts)
-		finish()
-		ch <- outcome{result: r, err: err}
+		select {
+		case ch <- outcome{result: r, err: err}:
+			// The receiver owns the result and finishes the admission.
+		case <-abandoned:
+			r.ReleaseTree()
+			finish()
+		}
 	}()
 	timer := time.NewTimer(time.Duration(budget) * time.Millisecond)
 	defer timer.Stop()
 	select {
 	case o := <-ch:
+		finish()
 		return o.result, o.err
 	case <-timer.C:
+		close(abandoned)
 		return nil, errExtractTimeout
 	}
 }

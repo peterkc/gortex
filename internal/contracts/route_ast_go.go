@@ -13,15 +13,15 @@ import (
 // HTTPExtractor.extract can stitch contracts the same way regardless
 // of which detector found the route.
 type goRouteMatch struct {
-	method       string // "GET" / "ANY" / etc.
-	path         string // raw path text (with the verb prefix stripped for Go 1.22+ form)
-	handlerIdent string // first identifier in the handler-arg position, or ""
-	handlerTrail string // source span from the first handler argument, or ""
-	line         int    // 1-based line of the call_expression
-	framework    string // "net/http" / "gin/echo/chi" / "fiber"
-	confidence   float64
-	question     *EndpointExpression
-	methodToken  string
+	method         string // "GET" / "ANY" / etc.
+	path           string // raw path text (with the verb prefix stripped for Go 1.22+ form)
+	handlerIdent   string // first identifier in the handler-arg position, or ""
+	handlerTrail   string // source span from the first handler argument, or ""
+	line           int    // 1-based line of the call_expression
+	framework      string // "net/http" / "gin/echo/chi" / "fiber"
+	confidence     float64
+	question       *EndpointExpression
+	methodToken    string
 	stdlibConsumer bool
 }
 
@@ -105,18 +105,26 @@ func goRouteFromCall(call *sitter.Node, src []byte, filePath, repoPrefix string,
 	// literal's endpoint field. forRoute=true vets a const / composite
 	// dereference through the route guard so a value that is really a
 	// filesystem path is dropped; a plain literal is returned unchanged.
-	q := endpointExpression(argList[0], src)
-	stdlibConsumer := isHTTPStdlibConsumer(fn, src)
-	if _, capture := store.(*EndpointFactCapture); capture && q.HasQuestion() {
-		match := finishGoRoute(call, args, argList, src, "", "", "", 0)
-		match.methodToken, match.stdlibConsumer, match.question = methodTok, stdlibConsumer, &q
-		return match, true
+	if _, capture := store.(*EndpointFactCapture); capture {
+		// A stdlib consumer never becomes a provider, regardless of a constant's value.
+		switch methodTok {
+		case "Get", "Post", "Put", "Delete", "Patch", "Head", "Options":
+			if isHTTPStdlibConsumer(fn, src) {
+				return goRouteMatch{}, false
+			}
+		}
+		q := endpointExpression(argList[0], src)
+		if q.HasQuestion() {
+			match := finishGoRoute(call, args, argList, src, "", "", "", 0)
+			match.methodToken, match.question = methodTok, &q
+			return match, true
+		}
 	}
-	pathText, ok := q.Resolve(filePath, repoPrefix, store, true)
+	pathText, ok := ResolveEndpointArg(argList[0], src, filePath, repoPrefix, store, true)
 	if !ok {
 		return goRouteMatch{}, false
 	}
-	match, ok := classifyGoRoute(goRouteMatch{methodToken: methodTok, stdlibConsumer: stdlibConsumer}, pathText)
+	match, ok := classifyGoRoute(goRouteMatch{methodToken: methodTok, stdlibConsumer: isHTTPStdlibConsumer(fn, src)}, pathText)
 	if !ok {
 		return goRouteMatch{}, false
 	}
@@ -127,6 +135,7 @@ func goRouteFromCall(call *sitter.Node, src []byte, filePath, repoPrefix string,
 func classifyGoRoute(m goRouteMatch, pathText string) (goRouteMatch, bool) {
 	switch m.methodToken {
 	case "Handle", "HandleFunc":
+		// net/http accepts any receiver and either /path or a Go 1.22+ VERB /path.
 		method, path, ok := splitNetHTTPPattern(pathText)
 		if !ok {
 			return goRouteMatch{}, false
@@ -136,11 +145,14 @@ func classifyGoRoute(m goRouteMatch, pathText string) (goRouteMatch, bool) {
 			m.confidence = 0.95
 		}
 	case "Get", "Post", "Put", "Delete", "Patch", "Head", "Options":
+		// Do not restrict router receiver names: production code uses varied names.
+		// Exclude http.Get consumers and require a rooted path to avoid ordinary Get calls.
 		if m.stdlibConsumer || !strings.HasPrefix(pathText, "/") {
 			return goRouteMatch{}, false
 		}
 		m.method, m.path, m.framework, m.confidence = strings.ToUpper(m.methodToken), pathText, "gin/echo/chi", 0.9
 	case "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS":
+		// Fiber uses uppercase methods and a rooted path.
 		if !strings.HasPrefix(pathText, "/") {
 			return goRouteMatch{}, false
 		}

@@ -238,30 +238,63 @@ func (h *HTTPExtractor) detectClientLibConsumers(
 		if urlArg == nil {
 			return
 		}
-		q := endpointExpression(urlArg, src)
-		c := Contract{
-			Type: ContractHTTP, Role: RoleConsumer,
-			SymbolID: findEnclosingSymbol(fileNodes, line), FilePath: filePath, Line: line,
-			Meta: map[string]any{"method": httpMethod, "framework": libName}, Confidence: 0.9,
-		}
-		// Keep this subpass's complete ordered candidate stream: a formerly
-		// missing constant can collide with a literal at the same line.
+		// Only capture lowers detached terms; the ordinary path retains its
+		// resolve → filter → dedup → owner/enrich order.
 		if capture != nil {
+			q := endpointExpression(urlArg, src)
 			if len(q.Terms) > 0 {
+				c := Contract{
+					Type: ContractHTTP, Role: RoleConsumer,
+					SymbolID: findEnclosingSymbol(fileNodes, line), FilePath: filePath, Line: line,
+					Meta: map[string]any{"method": httpMethod, "framework": libName}, Confidence: 0.9,
+				}
 				EnrichHTTPContractWithTree(&c, lines, fileNodes, lang, suppliedTree)
 				candidates = append(candidates, EndpointContractQuestion{Position: base, Kind: EndpointHTTPClient, Expression: q, Record: c})
 			}
 			return
 		}
-		path, ok := q.Resolve(filePath, repoPrefix, store, true)
-		if !ok || !completeEndpointHTTPClient(&c, path) {
+		path, ok := ResolveEndpointArg(urlArg, src, filePath, repoPrefix, store, true)
+		if !ok || path == "" {
 			return
 		}
-		dedup := c.ID + "@" + fmt.Sprint(line)
+		// Reject filesystem / static-asset literals the same way the regex
+		// consumer path does — only rooted "/..." literals are gated.
+		if strings.HasPrefix(path, "/") &&
+			(!IsLikelyHTTPRouteLiteral(path, "") || IsStaticAssetPath(path)) {
+			return
+		}
+		normPath, origNames := NormalizeHTTPPathWithParams(path)
+		contractID := fmt.Sprintf("http::%s::%s", httpMethod, normPath)
+		// One contract per (id, line) so a chained call walked twice does not
+		// double-emit.
+		dedup := contractID + "@" + fmt.Sprint(line)
 		if seen[dedup] {
 			return
 		}
 		seen[dedup] = true
+
+		c := Contract{
+			ID:         contractID,
+			Type:       ContractHTTP,
+			Role:       RoleConsumer,
+			SymbolID:   findEnclosingSymbol(fileNodes, line),
+			FilePath:   filePath,
+			Line:       line,
+			Meta: map[string]any{
+				"method":    httpMethod,
+				"path":      normPath,
+				"framework": libName,
+			},
+			Confidence: 0.9,
+		}
+		if len(origNames) > 0 {
+			c.Meta["path_param_names"] = origNames
+		}
+		// Enrich through the same pipeline the regex consumers use. Pass the
+		// ORIGINAL supplied tree (nil in the regex-path test harness) — only Go
+		// has a BodyFacts factory, so a self-built non-Go tree would be a no-op
+		// for enrichment anyway, and passing it could only diverge from the
+		// regex path's behaviour.
 		EnrichHTTPContractWithTree(&c, lines, fileNodes, lang, suppliedTree)
 		out = append(out, c)
 	})
@@ -276,7 +309,7 @@ func (h *HTTPExtractor) detectClientLibConsumers(
 		for i := range candidates {
 			candidates[i].Position = 0
 		}
-		return ResolveEndpointQuestions(nil, candidates, nil)
+		return resolveEndpointQuestions(nil, candidates, nil)
 	}
 	return out
 }

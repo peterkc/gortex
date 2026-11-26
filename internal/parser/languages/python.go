@@ -74,8 +74,9 @@ const qPyAll = `
 
 // PythonExtractor extracts Python source files into graph nodes and edges.
 type PythonExtractor struct {
-	lang *sitter.Language
-	qAll *parser.PreparedQuery
+	retainTree bool
+	lang       *sitter.Language
+	qAll       *parser.PreparedQuery
 }
 
 func NewPythonExtractor() *PythonExtractor {
@@ -146,12 +147,24 @@ func pyStringLiteralValue(tok string) string {
 	return ""
 }
 
+// WithRetainedTree requests the contract capture tree on an extraction-scoped copy.
+func (e *PythonExtractor) WithRetainedTree() parser.Extractor {
+	copy := *e
+	copy.retainTree = true
+	return &copy
+}
+
 func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
 	tree, err := parser.ParseFile(src, e.lang)
 	if err != nil {
 		return nil, err
 	}
-	defer tree.Close()
+	keepTree := false
+	defer func() {
+		if !keepTree {
+			tree.Close()
+		}
+	}()
 
 	root := tree.RootNode()
 	checked, parseErrors := parser.ParseErrorVerdict(root)
@@ -458,6 +471,10 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 	captureCeleryDispatch(result, root, filePath, src)
 	captureDjangoDescriptors(result, root, filePath, src)
 	captureFastAPIRouterRefs(result, root, filePath, src)
+	if e.retainTree {
+		result.ContractTree = parser.NewParseTree(tree, src, "python")
+		keepTree = true
+	}
 	return result, nil
 }
 

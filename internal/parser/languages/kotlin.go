@@ -55,8 +55,9 @@ const qKotlinAll = `
 
 // KotlinExtractor extracts Kotlin source files into graph nodes and edges.
 type KotlinExtractor struct {
-	lang *sitter.Language
-	qAll *parser.PreparedQuery
+	retainTree bool
+	lang       *sitter.Language
+	qAll       *parser.PreparedQuery
 }
 
 func NewKotlinExtractor() *KotlinExtractor {
@@ -115,12 +116,24 @@ type kotlinLambdaScope struct {
 	endLine   int
 }
 
+// WithRetainedTree requests the contract capture tree on an extraction-scoped copy.
+func (e *KotlinExtractor) WithRetainedTree() parser.Extractor {
+	copy := *e
+	copy.retainTree = true
+	return &copy
+}
+
 func (e *KotlinExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
 	tree, err := parser.ParseFile(src, e.lang)
 	if err != nil {
 		return nil, err
 	}
-	defer tree.Close()
+	keepTree := false
+	defer func() {
+		if !keepTree {
+			tree.Close()
+		}
+	}()
 
 	root := tree.RootNode()
 	result := &parser.ExtractionResult{}
@@ -363,6 +376,10 @@ func (e *KotlinExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 	stampScopePkg(result, kotlinPackageName(root, src))
 	captureValueRefCandidates(result, root, filePath, src)
 	captureFnValueCandidates(result, root, filePath, src)
+	if e.retainTree {
+		result.ContractTree = parser.NewParseTree(tree, src, "kotlin")
+		keepTree = true
+	}
 	return result, nil
 }
 

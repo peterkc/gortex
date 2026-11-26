@@ -66,8 +66,9 @@ var rubyMixinMacros = map[string]bool{"include": true, "extend": true, "prepend"
 
 // RubyExtractor extracts Ruby source files into graph nodes and edges.
 type RubyExtractor struct {
-	lang *sitter.Language
-	qAll *parser.PreparedQuery
+	retainTree bool
+	lang       *sitter.Language
+	qAll       *parser.PreparedQuery
 }
 
 func NewRubyExtractor() *RubyExtractor {
@@ -98,12 +99,24 @@ type rubyDeferredCall struct {
 	returnUsage string
 }
 
+// WithRetainedTree requests the contract capture tree on an extraction-scoped copy.
+func (e *RubyExtractor) WithRetainedTree() parser.Extractor {
+	copy := *e
+	copy.retainTree = true
+	return &copy
+}
+
 func (e *RubyExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
 	tree, err := parser.ParseFile(src, e.lang)
 	if err != nil {
 		return nil, err
 	}
-	defer tree.Close()
+	keepTree := false
+	defer func() {
+		if !keepTree {
+			tree.Close()
+		}
+	}()
 
 	root := tree.RootNode()
 	result := &parser.ExtractionResult{}
@@ -227,6 +240,10 @@ func (e *RubyExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 	captureValueRefCandidates(result, root, filePath, src)
 	captureFnValueCandidates(result, root, filePath, src)
 	captureSidekiqDispatch(result, root, filePath, src)
+	if e.retainTree {
+		result.ContractTree = parser.NewParseTree(tree, src, "ruby")
+		keepTree = true
+	}
 	return result, nil
 }
 

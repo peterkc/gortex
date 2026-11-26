@@ -26,10 +26,16 @@ func TestRebuildContractFactsNativeParity(t *testing.T) {
 	t.Cleanup(idx.Close)
 	type captured struct {
 		parsed store_pebble.ParseFacts
-		facts *contracts.FileFacts
+		facts  *contracts.FileFacts
 		source []byte
 	}
 	files := map[string]captured{}
+	resolve := func(records []contracts.Contract, questions []contracts.EndpointContractQuestion, store contracts.EndpointConstStore) []contracts.Contract {
+		t.Helper()
+		got, err := contracts.ResolveEndpointQuestions(records, questions, store)
+		require.NoError(t, err)
+		return got
+	}
 	capture := func(path, lang, text string) captured {
 		t.Helper()
 		absolute := filepath.Join(root, path)
@@ -55,7 +61,7 @@ func Register(r Router) { r.GET(Route, Handle) }
 	require.Empty(t, router.facts.Records)
 	require.Len(t, router.facts.Questions, 1)
 	require.Equal(t, []contracts.EndpointTerm{{Name: "Route"}}, router.facts.Questions[0].Expression.Terms)
-	require.Empty(t, contracts.ResolveEndpointQuestions(router.facts.Records, router.facts.Questions, g))
+	require.Empty(t, resolve(router.facts.Records, router.facts.Questions, g))
 	capture("app/constant.go", "go", "package app\nconst Route = \"/api/items\"\n")
 	handler := capture("app/handler.go", "go", `package app
 func Handle(w Writer, r RequestReader) {
@@ -101,17 +107,22 @@ export interface DTO {
 		var fileID string
 		for _, n := range f.parsed.Nodes {
 			if n.Kind == graph.KindFile {
-				fileID = n.ID; break
+				fileID = n.ID
+				break
 			}
 		}
 		var edges []*graph.Edge
-		for _, e := range f.parsed.Edges { if e.From == fileID { edges = append(edges, e) } }
+		for _, e := range f.parsed.Edges {
+			if e.From == fileID {
+				edges = append(edges, e)
+			}
+		}
 		// The oracle uses the native accepted-source extraction at the
 		// complete graph turn. Reparse is allowed only in this oracle.
 		tree := contracts.ParseTreeForLang(f.parsed.EffectiveLanguage, f.source)
 		want := idx.runContractExtractorsForFile(path, f.source, f.parsed.Nodes, edges, byLang[f.parsed.EffectiveLanguage], tree)
 		tree.Release()
-		got := contracts.ResolveEndpointQuestions(f.facts.Records, f.facts.Questions, g)
+		got := resolve(f.facts.Records, f.facts.Questions, g)
 		require.Equal(t, want, got, path)
 		for _, n := range f.parsed.Nodes {
 			if n.Kind == graph.KindType || n.Kind == graph.KindInterface {
@@ -127,10 +138,14 @@ export interface DTO {
 	wantRouter := contracts.RouterFileFacts("web/routes.ts", ts.source)
 	require.Equal(t, &wantRouter, ts.facts.Router)
 	var grpcFound bool
-	for _, c := range ts.facts.Records { if c.Type == contracts.ContractGRPC { grpcFound = true } }
+	for _, c := range ts.facts.Records {
+		if c.Type == contracts.ContractGRPC {
+			grpcFound = true
+		}
+	}
 	require.True(t, grpcFound, "fixture must exercise the native TS gRPC AST import gate")
 
-	routes := contracts.ResolveEndpointQuestions(router.facts.Records, router.facts.Questions, g)
+	routes := resolve(router.facts.Records, router.facts.Questions, g)
 	require.Len(t, routes, 1)
 	require.Equal(t, "http::GET::/api/items", routes[0].ID)
 	reg := contracts.NewRegistry()
@@ -173,12 +188,12 @@ export interface DTO {
 	// Change only the producer's constant values; reuse the same raw route
 	// fact and check absence of the old route, then the ambiguous case.
 	require.NoError(t, g.BulkSetConstantValues("", []graph.ConstantValueRow{{NodeID: "app/constant.go::Route", FilePath: "app/constant.go", Value: "/api/new"}}))
-	routes = contracts.ResolveEndpointQuestions(router.facts.Records, router.facts.Questions, g)
+	routes = resolve(router.facts.Records, router.facts.Questions, g)
 	require.Len(t, routes, 1)
 	require.Equal(t, "http::GET::/api/new", routes[0].ID)
 	g.AddNode(&graph.Node{ID: "other/constant.go::Route", Name: "Route", Kind: graph.KindConstant, FilePath: "other/constant.go"})
 	require.NoError(t, g.BulkSetConstantValues("", []graph.ConstantValueRow{{NodeID: "other/constant.go::Route", FilePath: "other/constant.go", Value: "/api/ambiguous"}}))
-	require.Empty(t, contracts.ResolveEndpointQuestions(router.facts.Records, router.facts.Questions, g))
+	require.Empty(t, resolve(router.facts.Records, router.facts.Questions, g))
 }
 
 func TestRebuildContractFactsRequiredTreeAndScanSkip(t *testing.T) {
@@ -224,4 +239,125 @@ func TestRebuildContractFactsRequiredTreeAndScanSkip(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, transformed.NeedsRawHandlerTree)
 	require.Empty(t, transformed.Handlers)
+}
+
+func TestRebuildContractFactsRetainRequiredTrees(t *testing.T) {
+	idx := newTestIndexer(graph.New())
+	idx.SetRootPath(t.TempDir())
+	t.Cleanup(idx.Close)
+	for _, tc := range []struct {
+		path string
+		ext  parser.Extractor
+		src  string
+		id   string
+	}{
+		{"client.py", languages.NewPythonExtractor(), "import requests\ndef f():\n    return requests.get('/api/users')\n", "http::GET::/api/users"},
+		{"client.rb", languages.NewRubyExtractor(), "require 'faraday'\nFaraday.get('/api/users')\n", "http::GET::/api/users"},
+		{"client.php", languages.NewPHPExtractor(), "<?php\nuse GuzzleHttp\\Client;\n$client = new Client();\n$client->get('/api/users');\n", "http::GET::/api/users"},
+		{"Client.java", languages.NewJavaExtractor(), `import org.springframework.web.client.RestTemplate;
+class Client {
+    String fetch() {
+        RestTemplate rt = new RestTemplate();
+        return rt.getForObject("/api/users", String.class);
+    }
+}`, "http::GET::/api/users"},
+		{"Client.kt", languages.NewKotlinExtractor(), `import org.springframework.web.client.RestTemplate
+fun fetch(): String {
+    val rt = RestTemplate()
+    return rt.getForObject("/api/users", String::class.java)
+}`, "http::GET::/api/users"},
+		{"Client.scala", languages.NewScalaExtractor(), `import sttp.client3._
+val request = basicRequest.get(uri"/api/users")`, "http::GET::/api/users"},
+		{"client.rs", languages.NewRustExtractor(), `use reqwest::Client;
+async fn fetch(client: Client) { client.get("/api/users").send().await; }`, "http::GET::/api/users"},
+		{"lambda.tf", languages.NewHCLExtractor(), `resource "aws_lambda_function" "processor" {
+  environment {
+    variables = { MAX_BATCH_SIZE = "100" }
+  }
+}`, ""},
+		{"client.ts", languages.NewTypeScriptExtractor(), `import { UsersClient } from './users_pb';
+const client = new UsersClient('host');`, "grpc::Users"},
+		{"client.TSX", languages.NewTypeScriptExtractor(), `import { UsersClient } from './users_pb';
+const client = new UsersClient('host');`, "grpc::Users"},
+		{"routes.go", languages.NewGoExtractor(), `package p
+func Register(r Router) { r.GET("/api/users", Register) }`, "http::GET::/api/users"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			src := []byte(tc.src)
+			before := parser.ParseCount()
+			parsed, facts, err := idx.extractPreparedRebuildFileWithContractFacts(t.Context(), tc.path, tc.ext, src, src)
+			require.NoError(t, err)
+			require.Equal(t, before+1, parser.ParseCount(), "exactly one accepted parse")
+			require.NotNil(t, facts)
+			require.NotEmpty(t, facts.Records)
+			if tc.id != "" {
+				var ids []string
+				for _, record := range facts.Records {
+					ids = append(ids, record.ID)
+				}
+				require.Contains(t, ids, tc.id)
+			}
+			legacy, err := idx.extractPreparedRebuildFile(t.Context(), tc.path, tc.ext, src)
+			require.NoError(t, err)
+			require.Equal(t, legacy, parsed, "capture changes no ordinary parse facts")
+		})
+	}
+}
+
+func TestRebuildContractFactsTSParseErrorParity(t *testing.T) {
+	idx := newTestIndexer(graph.New())
+	idx.SetRootPath(t.TempDir())
+	t.Cleanup(idx.Close)
+	ext := languages.NewTypeScriptExtractor()
+	src := []byte("export function f() { const x = ; }\n")
+	plain, err := idx.extractPreparedRebuildFile(t.Context(), "broken.ts", ext, src)
+	require.NoError(t, err)
+	captured, _, err := idx.extractPreparedRebuildFileWithContractFacts(t.Context(), "broken.ts", ext, src, src)
+	require.NoError(t, err)
+	require.Empty(t, plain.File.Errors)
+	require.Equal(t, plain, captured)
+	retained, err := ext.WithRetainedTree().Extract("broken.ts", src)
+	require.NoError(t, err)
+	defer retained.ReleaseTree()
+	require.Nil(t, retained.Tree)
+	require.True(t, retained.ContractTree.HasParseErrors(), "fixture must contain a real parse error")
+}
+
+func TestRebuildContractFactsKotlinRouterPrefix(t *testing.T) {
+	idx := newTestIndexer(graph.New())
+	idx.SetRootPath(t.TempDir())
+	t.Cleanup(idx.Close)
+	const path = "UserController.kt"
+	src := []byte(`@RestController
+@RequestMapping("/api")
+class UserController {
+    @GetMapping("/users")
+    fun list(): String { return "users" }
+}`)
+	_, facts, err := idx.extractPreparedRebuildFileWithContractFacts(t.Context(), path, languages.NewKotlinExtractor(), src, src)
+	require.NoError(t, err)
+	require.NotNil(t, facts.Router)
+	reg := contracts.NewRegistry()
+	for _, record := range facts.Records {
+		reg.Add(record)
+	}
+	contracts.JoinRouterPrefixFacts(reg, map[string]contracts.RouterFacts{path: *facts.Router})
+	require.NotEmpty(t, reg.ByID("http::GET::/api/users"))
+}
+
+func TestRebuildContractFactsNoHiddenFallback(t *testing.T) {
+	idx := newTestIndexer(graph.New())
+	t.Cleanup(idx.Close)
+	before := parser.ParseCount()
+	// Terraform's marker prefilter says no tree is required. The native
+	// Extract (nil tree) would still parse; capture must reach ExtractWithTree.
+	got := idx.collectContractRecordsForFile("empty.tf", []byte(`variable "key" {}`), nil, nil,
+		[]contracts.Extractor{&contracts.TerraformExtractor{}}, nil, &contracts.EndpointFactCapture{})
+	require.Empty(t, got)
+	require.Equal(t, before, parser.ParseCount())
+	// Isolate the handler-tree refusal from the earlier HTTP/Topic check.
+	src := []byte("package p\nfunc f() {}\n")
+	result := &parser.ExtractionResult{Nodes: []*graph.Node{{ID: "x.go::f", Name: "f", Kind: graph.KindFunction, FilePath: "x.go", StartLine: 2}}}
+	_, err := idx.captureRebuildContractFacts(t.Context(), "x.go", "go", src, src, result, false)
+	require.ErrorIs(t, err, contracts.ErrContractFactTree)
 }

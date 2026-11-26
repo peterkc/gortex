@@ -1,6 +1,7 @@
 package contracts
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -81,20 +82,110 @@ var endpointCompositeFields = map[string]bool{
 // store may be nil, which disables const dereference; paths 1 and a composite
 // whose field is itself a literal still resolve.
 func ResolveEndpointArg(arg *sitter.Node, src []byte, filePath, repoPrefix string, store EndpointConstStore, forRoute bool) (string, bool) {
-	return endpointExpression(arg, src).Resolve(filePath, repoPrefix, store, forRoute)
+	value, derefd, ok := resolveEndpointValue(arg, src, filePath, repoPrefix, store)
+	if !ok || value == "" {
+		return "", false
+	}
+	if forRoute && derefd && !IsLikelyHTTPRouteLiteral(value, "") {
+		return "", false
+	}
+	return value, true
+}
+
+// resolveEndpointValue returns (value, derefd, ok). derefd is true when the
+// value came from a const or composite dereference (a value the route guard
+// should vet) and false for a direct string literal (explicit author intent).
+func resolveEndpointValue(arg *sitter.Node, src []byte, filePath, repoPrefix string, store EndpointConstStore) (string, bool, bool) {
+	if arg == nil {
+		return "", false, false
+	}
+	switch arg.Type() {
+	case "interpreted_string_literal", "raw_string_literal":
+		if v, ok := stringLiteralValue(arg, src); ok {
+			return v, false, true
+		}
+		return "", false, false
+	case "string", "string_literal", "template_string", "interpolated_string_expression":
+		// Cross-language string literals (python/rust/ruby/php/java/kotlin/scala).
+		// A plain literal is the author's explicit intent — like a Go literal it
+		// is reported as a non-deref value so the route guard does not vet it.
+		if v, ok := crossLangStringLiteral(arg, src); ok {
+			return v, false, true
+		}
+		return "", false, false
+	case "identifier":
+		v, ok := resolveConstIdentifier(arg.Content(src), filePath, repoPrefix, store)
+		return v, true, ok
+	case "selector_expression":
+		// pkg.CONST / routes.UsersPath — dereference by the trailing name.
+		if f := arg.ChildByFieldName("field"); f != nil {
+			v, ok := resolveConstIdentifier(f.Content(src), filePath, repoPrefix, store)
+			return v, true, ok
+		}
+		return "", false, false
+	case "unary_expression":
+		// &Type{...} — resolve the pointed-to composite. The operand field
+		// name is grammar-version-dependent, so fall back to the first named
+		// child (the operator `&` is an anonymous child).
+		op := arg.ChildByFieldName("operand")
+		if op == nil {
+			op = firstNamedChild(arg)
+		}
+		if op != nil {
+			return resolveEndpointValue(op, src, filePath, repoPrefix, store)
+		}
+		return "", false, false
+	case "parenthesized_expression":
+		if inner := firstNamedChild(arg); inner != nil {
+			return resolveEndpointValue(inner, src, filePath, repoPrefix, store)
+		}
+		return "", false, false
+	case "composite_literal":
+		return resolveCompositeEndpointField(arg, src, filePath, repoPrefix, store)
+	}
+	return "", false, false
+}
+
+// resolveCompositeEndpointField finds the endpoint field of a composite literal
+// (the first field whose bare name is in endpointCompositeFields) and resolves
+// its value recursively. A composite read is always a dereference, so derefd is
+// reported true.
+func resolveCompositeEndpointField(comp *sitter.Node, src []byte, filePath, repoPrefix string, store EndpointConstStore) (string, bool, bool) {
+	body := compositeBodyNode(comp)
+	if body == nil {
+		return "", false, false
+	}
+	for i := 0; i < int(body.NamedChildCount()); i++ {
+		kv := body.NamedChild(i)
+		if kv == nil || kv.Type() != "keyed_element" || kv.NamedChildCount() < 2 {
+			continue
+		}
+		keyNode := unwrapLiteralElement(kv.NamedChild(0))
+		valNode := unwrapLiteralElement(kv.NamedChild(1))
+		if keyNode == nil || valNode == nil {
+			continue
+		}
+		if !endpointCompositeFields[strings.ToLower(strings.TrimSpace(keyNode.Content(src)))] {
+			continue
+		}
+		if v, _, ok := resolveEndpointValue(valNode, src, filePath, repoPrefix, store); ok && v != "" {
+			return v, true, true
+		}
+	}
+	return "", false, false
 }
 
 // EndpointTerm is a source-local literal or constant-name lookup. The first
 // successful nonempty term wins, in source order, exactly as for a composite.
 type EndpointTerm struct {
-	Name string
+	Name    string
 	Literal string
 }
 
 // EndpointExpression is the detached question, never the value found in a
 // different file. Dereferenced retains the native route-guard distinction.
 type EndpointExpression struct {
-	Terms []EndpointTerm
+	Terms        []EndpointTerm
 	Dereferenced bool
 }
 
@@ -135,6 +226,7 @@ func endpointExpression(arg *sitter.Node, src []byte) EndpointExpression {
 			return EndpointExpression{Terms: []EndpointTerm{{Literal: v}}}
 		}
 	case "string", "string_literal", "template_string", "interpolated_string_expression":
+		// A literal expresses the author's intent; only dereferences use the route guard.
 		if v, ok := crossLangStringLiteral(arg, src); ok && v != "" {
 			return EndpointExpression{Terms: []EndpointTerm{{Literal: v}}}
 		}
@@ -143,12 +235,14 @@ func endpointExpression(arg *sitter.Node, src []byte) EndpointExpression {
 			return EndpointExpression{Terms: []EndpointTerm{{Name: name}}, Dereferenced: true}
 		}
 	case "selector_expression":
+		// Resolve pkg.CONST by its trailing name, like the native resolver.
 		if f := arg.ChildByFieldName("field"); f != nil {
 			if name := strings.TrimSpace(f.Content(src)); name != "" {
 				return EndpointExpression{Terms: []EndpointTerm{{Name: name}}, Dereferenced: true}
 			}
 		}
 	case "unary_expression":
+		// &Type{...}; some grammar versions omit the operand field.
 		op := arg.ChildByFieldName("operand")
 		if op == nil {
 			op = firstNamedChild(arg)
@@ -324,11 +418,11 @@ const (
 // a cross-file constant lookup. Position is the index in the raw record stream
 // before which this question is evaluated.
 type EndpointContractQuestion struct {
-	Position int
-	Kind EndpointQuestionKind
-	Expression EndpointExpression
-	Record Contract
-	Method string
+	Position       int
+	Kind           EndpointQuestionKind
+	Expression     EndpointExpression
+	Record         Contract
+	Method         string
 	StdlibConsumer bool
 }
 
@@ -369,9 +463,23 @@ func cloneFactMeta(meta map[string]any) map[string]any {
 	return out
 }
 
+// ErrEndpointQuestionPosition identifies malformed detached question ordering.
+var ErrEndpointQuestionPosition = errors.New("invalid endpoint question position")
+
 // ResolveEndpointQuestions performs only the native value-dependent part of
 // endpoint detection. It does not parse, transform, or read source.
-func ResolveEndpointQuestions(raw []Contract, questions []EndpointContractQuestion, store EndpointConstStore) []Contract {
+func ResolveEndpointQuestions(raw []Contract, questions []EndpointContractQuestion, store EndpointConstStore) ([]Contract, error) {
+	pos := 0
+	for _, q := range questions {
+		if q.Position < pos || q.Position > len(raw) {
+			return nil, fmt.Errorf("%w %d (previous %d, records %d)", ErrEndpointQuestionPosition, q.Position, pos, len(raw))
+		}
+		pos = q.Position
+	}
+	return resolveEndpointQuestions(raw, questions, store), nil
+}
+
+func resolveEndpointQuestions(raw []Contract, questions []EndpointContractQuestion, store EndpointConstStore) []Contract {
 	var out []Contract
 	seen := make(map[string]bool)
 	pos := 0
@@ -393,15 +501,21 @@ func ResolveEndpointQuestions(raw []Contract, questions []EndpointContractQuesti
 		switch q.Kind {
 		case EndpointGoRoute:
 			rm, ok := classifyGoRoute(goRouteMatch{methodToken: q.Method, stdlibConsumer: q.StdlibConsumer}, value)
-			if !ok { continue }
+			if !ok {
+				continue
+			}
 			completeGoRouteContract(&c, rm)
 			stampHTTPRouteShape(c.Meta)
 		case EndpointTopic:
 			completeEndpointTopic(&c, value)
 		case EndpointHTTPClient:
-			if !completeEndpointHTTPClient(&c, value) { continue }
+			if !completeEndpointHTTPClient(&c, value) {
+				continue
+			}
 			key := c.ID + "@" + fmt.Sprint(c.Line)
-			if seen[key] { continue }
+			if seen[key] {
+				continue
+			}
 			seen[key] = true
 			stampHTTPRouteShape(c.Meta)
 		default:

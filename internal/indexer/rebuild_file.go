@@ -14,7 +14,6 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/indexer/source"
 	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/pathkey"
 	"go.uber.org/zap"
 )
@@ -145,8 +144,8 @@ func (idx *Indexer) extractPreparedRebuildFileWithContractFacts(ctx context.Cont
 
 func (idx *Indexer) extractPreparedRebuildFileInto(ctx context.Context, rel string, ext parser.Extractor, raw, prepared []byte, contractFacts **contracts.FileFacts) (store_pebble.ParseFacts, error) {
 	if contractFacts != nil {
-		if ts, ok := ext.(*languages.TypeScriptExtractor); ok {
-			ext = ts.WithRetainedTree()
+		if retained, ok := ext.(interface{ WithRetainedTree() parser.Extractor }); ok {
+			ext = retained.WithRetainedTree()
 		}
 	}
 	graphPath := pathkey.Normalize(rel)
@@ -225,7 +224,11 @@ func (idx *Indexer) captureRebuildContractFacts(ctx context.Context, graphPath, 
 	c.ScanSkipped = skipped || extractionDispositionFor(result).omitSecondarySourceScans() || len(prepared) > maxContractSourceBytes
 	if !c.ScanSkipped && fileID != "" {
 		exts := byLanguage[lang]
-		if err := contracts.CheckFileFactTree(graphPath, prepared, result.Tree, exts); err != nil {
+		tree := result.Tree
+		if result.ContractTree != nil {
+			tree = result.ContractTree
+		}
+		if err := contracts.CheckFileFactTree(graphPath, prepared, tree, exts); err != nil {
 			return nil, err
 		}
 		var edges []*graph.Edge
@@ -235,7 +238,7 @@ func (idx *Indexer) captureRebuildContractFacts(ctx context.Context, graphPath, 
 			}
 		}
 		capture := &contracts.EndpointFactCapture{}
-		c.Records = idx.collectContractRecordsForFile(graphPath, prepared, result.Nodes, edges, exts, result.Tree, capture)
+		c.Records = idx.collectContractRecordsForFile(graphPath, prepared, result.Nodes, edges, exts, tree, capture)
 		c.Questions = capture.Questions
 	}
 	var callables bool
@@ -272,8 +275,14 @@ func (idx *Indexer) captureRebuildContractFacts(ctx context.Context, graphPath, 
 			}
 		}
 	}
-	switch lang {
-	case "go", "typescript", "javascript", "python", "java", "ruby", "php", "rust", "swift":
+	routerSupported := contractRouterSupported(ContractFollowupFile{Path: graphPath, Language: lang}, c.Records)
+	for _, q := range c.Questions {
+		if q.Kind == contracts.EndpointGoRoute {
+			routerSupported = true
+			break
+		}
+	}
+	if routerSupported {
 		facts := contracts.RouterFileFacts(graphPath, raw).Clone()
 		c.Router = &facts
 	}

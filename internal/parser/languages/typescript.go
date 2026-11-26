@@ -104,10 +104,10 @@ const tsQAll = `
 // TS and TSX disagree on `<T>x` (TSX treats it as a JSX opening element,
 // TS as a type assertion); per-extension dispatch keeps both honest.
 type TypeScriptExtractor struct {
-	lang    *sitter.Language
-	qAll    *parser.PreparedQuery
-	tsxLang *sitter.Language
-	tsxQAll *parser.PreparedQuery
+	lang       *sitter.Language
+	qAll       *parser.PreparedQuery
+	tsxLang    *sitter.Language
+	tsxQAll    *parser.PreparedQuery
 	retainTree bool
 }
 
@@ -124,7 +124,7 @@ func NewTypeScriptExtractor() *TypeScriptExtractor {
 
 // WithRetainedTree makes an extraction-scoped copy; the caller must release
 // its result tree. Ordinary extraction retains its original ownership.
-func (e *TypeScriptExtractor) WithRetainedTree() *TypeScriptExtractor {
+func (e *TypeScriptExtractor) WithRetainedTree() parser.Extractor {
 	copy := *e
 	copy.retainTree = true
 	return &copy
@@ -689,7 +689,7 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 	captureExpressInlineHandlers(result, root, filePath, src)
 	captureReactContextRefs(result, root, filePath, src)
 	if e.retainTree {
-		result.Tree = parser.NewParseTree(tree, src, "typescript")
+		result.ContractTree = parser.NewParseTree(tree, src, "typescript")
 		keepTree = true
 	}
 	return result, nil

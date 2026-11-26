@@ -7875,6 +7875,27 @@ func (idx *Indexer) collectContractRecordsForFile(
 	// dereference is then disabled and store-aware extractors degrade to their
 	// tree-aware behaviour).
 	capture, _ := endpointStore.(*contracts.EndpointFactCapture)
+	stamp := func(record *contracts.Contract) {
+		record.RepoPrefix = idx.repoPrefix
+		// Stamp the workspace / project slugs alongside the repo
+		// prefix so the matcher's boundary check has the data it
+		// needs without a second registry walk. Empty slugs
+		// default to RepoPrefix at Match time via
+		// Contract.EffectiveWorkspace / EffectiveProject.
+		if idx.workspaceID != "" {
+			record.WorkspaceID = idx.workspaceID
+		}
+		if idx.projectID != "" {
+			record.ProjectID = idx.projectID
+		}
+		if testSource != "" {
+			if record.Meta == nil {
+				record.Meta = map[string]any{}
+			}
+			record.Meta["is_test"] = true
+			record.Meta["test_source"] = testSource
+		}
+	}
 	for _, ex := range exts {
 		var found []contracts.Contract
 		questionStart := 0
@@ -7888,27 +7909,7 @@ func (idx *Indexer) collectContractRecordsForFile(
 		} else {
 			found = ex.Extract(graphPath, src, fileNodes, fileEdges)
 		}
-		stamp := func(record *contracts.Contract) {
-			record.RepoPrefix = idx.repoPrefix
-			// Stamp the workspace / project slugs alongside the repo
-			// prefix so the matcher's boundary check has the data it
-			// needs without a second registry walk. Empty slugs
-			// default to RepoPrefix at Match time via
-			// Contract.EffectiveWorkspace / EffectiveProject.
-			if idx.workspaceID != "" {
-				record.WorkspaceID = idx.workspaceID
-			}
-			if idx.projectID != "" {
-				record.ProjectID = idx.projectID
-			}
-			if testSource != "" {
-				if record.Meta == nil {
-					record.Meta = map[string]any{}
-				}
-				record.Meta["is_test"] = true
-				record.Meta["test_source"] = testSource
-			}
-		}
+
 		for i := range found {
 			stamp(&found[i])
 		}

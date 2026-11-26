@@ -27,7 +27,8 @@ import (
 // reference in one .tf file resolves to a block defined in a sibling .tf
 // file of the same module by exact ID match.
 type HCLExtractor struct {
-	lang *sitter.Language
+	retainTree bool
+	lang       *sitter.Language
 }
 
 func NewHCLExtractor() *HCLExtractor {
@@ -37,12 +38,24 @@ func NewHCLExtractor() *HCLExtractor {
 func (e *HCLExtractor) Language() string     { return "hcl" }
 func (e *HCLExtractor) Extensions() []string { return []string{".tf", ".tfvars", ".hcl"} }
 
+// WithRetainedTree requests the contract capture tree on an extraction-scoped copy.
+func (e *HCLExtractor) WithRetainedTree() parser.Extractor {
+	copy := *e
+	copy.retainTree = true
+	return &copy
+}
+
 func (e *HCLExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
 	tree, err := parser.ParseFile(src, e.lang)
 	if err != nil {
 		return nil, err
 	}
-	defer tree.Close()
+	keepTree := false
+	defer func() {
+		if !keepTree {
+			tree.Close()
+		}
+	}()
 
 	root := tree.RootNode()
 	result := &parser.ExtractionResult{}
@@ -59,6 +72,10 @@ func (e *HCLExtractor) Extract(filePath string, src []byte) (*parser.ExtractionR
 	refSeen := make(map[string]bool) // (from\x00to) reference dedup
 	e.walkTopLevel(root, src, filePath, dir, fileNode.ID, result, seen, refSeen)
 
+	if e.retainTree {
+		result.ContractTree = parser.NewParseTree(tree, src, "hcl")
+		keepTree = true
+	}
 	return result, nil
 }
 
