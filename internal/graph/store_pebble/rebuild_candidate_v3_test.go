@@ -352,7 +352,8 @@ func (s *v3FixtureSuite) RebuildV3EvictionWithinCall(t *testing.T) {
 	ctx, v := s.pass(t, RebuildView{}, nodes)
 	s.checkCall(t, ctx, v, RebuildView{}, 0, []LinkRequest{{Kind: LinkName, Key: "N", RepoPrefix: "r"}}, 1<<20, false, "")
 	c := v.v3.cache
-	sum, err := v.v3.requestSummary(ctx, LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "r"})
+	// requestSummary does not set first; read the walked B prefix summary.
+	sum, err := v.v3.summary(v3Prefixes(LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "r"})[0])
 	if err != nil {
 		t.Fatal(err)
 	}
