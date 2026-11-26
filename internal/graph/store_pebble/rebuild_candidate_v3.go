@@ -13,12 +13,13 @@ import (
 )
 
 type v3Reader struct {
-	mu         sync.Mutex // serial cache and summary access
-	summaries  map[string]v3Summary
-	buildEpoch uint64
-	buildView  *BuildStore
-	table      *sstable.Reader
-	cache      *v3Cache
+	mu           sync.Mutex // serial cache and summary access
+	summaries    map[string]v3Summary
+	buildEpoch   uint64
+	chargeErrors bool
+	buildView    *BuildStore
+	table        *sstable.Reader
+	cache        *v3Cache
 }
 
 type v3LiveRow struct {
@@ -70,6 +71,19 @@ func (s *RebuildLink) ChargeCandidateRequest(ctx context.Context, view RebuildVi
 	view.build.mu.Unlock()
 	if changed || mutationErr != nil {
 		return view.ChargeCandidateRequest(ctx, req)
+	}
+	if v.chargeErrors {
+		key := keyStrings([]byte{'Z', nameQualified}, req.Key)
+		if req.Kind == LinkName {
+			key = keyStrings([]byte{'Z', nameRebuildScoped}, req.Key, req.RepoPrefix)
+		}
+		flag, err := v.summary(key)
+		if err != nil {
+			return CandidateBatchCharge{}, err
+		}
+		if flag.unsized {
+			return view.ChargeCandidateRequest(ctx, req)
+		}
 	}
 	sum, err := v.requestSummary(ctx, req)
 	if err != nil {

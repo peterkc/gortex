@@ -18,6 +18,8 @@ import (
 	"unsafe"
 
 	"github.com/cockroachdb/pebble/v2"
+	"github.com/cockroachdb/pebble/v2/vfs"
+	"github.com/cockroachdb/pebble/v2/vfs/errorfs"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -681,5 +683,105 @@ func TestRebuildV3BorrowedPieceReleased(t *testing.T) {
 	})
 	if !errors.Is(err, failure) || !strings.Contains(err.Error(), "mutated") || v.v3.cache.borrowed != nil {
 		t.Fatalf("borrowed error release: %v", err)
+	}
+}
+
+// A filtered summary cannot bypass an earlier malformed index row or omit a
+// valid index-only charge for a stale row absent from the frozen node source.
+func TestRebuildV3ChargeIndexErrors(t *testing.T) {
+	for _, mode := range []string{"other-language", "dangling", "qualified-dangling"} {
+		t.Run(mode, func(t *testing.T) {
+			build := newBuild(t, FullProfile)
+			n := &graph.Node{ID: "a", Name: "N", QualName: "q.N", RepoPrefix: "r", Language: "go"}
+			build.AddNode(n)
+			view := build.RebuildView()
+			bad := &graph.Node{ID: "z", Name: "N", QualName: "q.N", RepoPrefix: "r", Language: "go"}
+			column := nameRebuildScoped
+			req := LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "r", Languages: []string{"go"}}
+			value := binary.BigEndian.AppendUint64([]byte(bad.ID), 100)
+			if mode == "other-language" {
+				bad.Language = "python"
+				value = []byte("wrong-id")
+			} else if mode == "qualified-dangling" {
+				column = nameQualified
+				req = LinkRequest{Kind: LinkQualName, Key: "q.N", AllRepos: true}
+			}
+			if err := build.pending.Set(rebuildCandidateKey(column, bad), value, pebble.NoSync); err != nil {
+				t.Fatal(err)
+			}
+			ctx := t.Context()
+			v, err := v3FixturePass(t, ctx, rebuildCandidateCacheBytes, view, []*graph.Node{n})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = v.Close() }()
+			want, wantErr := view.ChargeCandidateRequest(ctx, req)
+			got, err := v.ChargeCandidateRequest(ctx, view, req)
+			if mode == "other-language" {
+				if !errors.Is(wantErr, ErrRebuildView) || !errors.Is(wantErr, errInvalidRecord) || !errors.Is(err, ErrRebuildView) || !errors.Is(err, errInvalidRecord) || err.Error() != wantErr.Error() || got != want {
+					t.Fatalf("filtered malformed index: got %+v %v want %+v %v", got, err, want, wantErr)
+				}
+			} else if wantErr != nil || want.Rows != 2 || got != want || err != nil {
+				t.Fatalf("dangling index charge: got %+v %v want %+v %v", got, err, want, wantErr)
+			}
+			// A separately scoped miss remains an ordinary checked miss.
+			miss := LinkRequest{Kind: LinkName, Key: "N", RepoPrefix: "other", Languages: []string{"go"}}
+			if got, err := v.ChargeCandidateRequest(ctx, view, miss); got != (CandidateBatchCharge{}) || err != nil {
+				t.Fatalf("unrelated scope: %+v %v", got, err)
+			}
+		})
+	}
+}
+
+func TestRebuildV3BuildIndexReadError(t *testing.T) {
+	failure := errors.New("fixture index read failure")
+	fault := &errorfs.Toggle{Injector: errorfs.InjectorFunc(func(op errorfs.Op) error {
+		if strings.HasSuffix(op.Path, ".sst") && (op.Kind == errorfs.OpOpen || op.Kind == errorfs.OpFileReadAt || op.Kind == errorfs.OpFileRead) {
+			return failure
+		}
+		return nil
+	})}
+	opts := pendingOptions(nil)
+	opts.FS = errorfs.Wrap(vfs.NewMem(), fault)
+	opts.CacheSize = 1
+	db, err := pebble.Open("pending", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := &graph.Node{ID: "a", Name: "N", RepoPrefix: "r", Language: "go"}
+	key := rebuildCandidateKey(nameRebuildScoped, n)
+	if err := db.Set(key, binary.BigEndian.AppendUint64([]byte(n.ID), 100), pebble.NoSync); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Flush(); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	opts.ErrorIfExists = false
+	db, err = pebble.Open("pending", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	view := (&BuildStore{pending: db}).RebuildView()
+	parent := t.TempDir()
+	p, err := StartRebuildLink(t.Context(), RebuildLinkOptions{ScratchParent: parent, SpillBytes: 1 << 20}, view, func(yield func(*graph.Node) error) error {
+		fault.On()
+		defer fault.Off()
+		return yield(n)
+	})
+	if p != nil {
+		_ = p.Close()
+	}
+	if !errors.Is(err, ErrRebuildLink) || !errors.Is(err, failure) {
+		t.Fatalf("candidate build hid scratch read error: %v", err)
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("failed build left scratch: %v %v", entries, err)
 	}
 }

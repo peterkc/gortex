@@ -120,10 +120,10 @@ func v3LogicalOrderKeyBytes(key, prefix []byte) int {
 	return 12 + extra
 }
 
-func buildV3File(ctx context.Context, dir string, view RebuildView, source func(func(*graph.Node) error) error) (pieces uint64, err error) {
+func buildV3File(ctx context.Context, dir string, view RebuildView, source func(func(*graph.Node) error) error) (pieces uint64, chargeErrors bool, err error) {
 	runsDir := filepath.Join(dir, "v3-runs")
 	if err = os.Mkdir(runsDir, 0700); err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	// Each A/B/Q physical row is <=3 times its corresponding H98 build row:
 	// every added escaped tuple byte comes from the same raw value, and the
@@ -198,13 +198,16 @@ func buildV3File(ctx context.Context, dir string, view RebuildView, source func(
 					column = nameQualified
 				}
 				key := rebuildCandidateKey(column, n)
-				// A missing, unsized or malformed scratch index stays on
-				// H98's exact index-only charge path, not a new build error.
+				// Missing or malformed entries are unsized here; the scope
+				// scan below flags malformed entries even in other languages.
 				nbytes, e := pendingGet(snap, key, func(value []byte) (uint64, error) {
-					_, _, _, nbytes, e := readRebuildCandidateIndex(column, key, value)
-					return nbytes, e
+					_, _, _, nbytes, _ := readRebuildCandidateIndex(column, key, value)
+					return nbytes, nil
 				})
-				sized = sized && e == nil && nbytes == uint64(len(canonical))
+				if e != nil {
+					return e
+				}
+				sized = sized && nbytes == uint64(len(canonical))
 			}
 			val := make([]byte, v3Header, len(raw)+v3Header)
 			binary.BigEndian.PutUint64(val, uint64(len(canonical)))
@@ -228,22 +231,22 @@ func buildV3File(ctx context.Context, dir string, view RebuildView, source func(
 		return nil
 	})
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	if err = logical.finish(); err != nil {
-		return 0, fmt.Errorf("pebble candidates exceeds %d sorted runs", goldFileCap)
+		return 0, false, fmt.Errorf("pebble candidates exceeds %d sorted runs", goldFileCap)
 	}
 	// Summaries have the same lexical order as the run prefixes. A temporary
 	// SST allows writing S after Q without a repository-sized in-memory map.
 	table, err := newLinkTable(filepath.Join(dir, "v3.sst"))
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	defer func() { err = errors.Join(err, table.Close()) }()
 	summaryPath := filepath.Join(runsDir, "summaries.sst")
 	summaries, err := newLinkTable(summaryPath)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	var current []byte
 	var sum v3Summary
@@ -287,11 +290,11 @@ func buildV3File(ctx context.Context, dir string, view RebuildView, source func(
 		err = flush()
 	}
 	if err = errors.Join(err, summaries.Close()); err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	reader, err := openLinkTable(ctx, summaryPath)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	err = func() (err error) {
 		defer func() { err = errors.Join(err, reader.Close()) }()
@@ -315,9 +318,61 @@ func buildV3File(ctx context.Context, dir string, view RebuildView, source func(
 		return it.Error()
 	}()
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	return pieces, os.RemoveAll(runsDir)
+	if snap != nil {
+		chargeErrors, err = v3WriteChargeErrors(ctx, snap, table)
+		if err != nil {
+			return 0, false, err
+		}
+	}
+	return pieces, chargeErrors, os.RemoveAll(runsDir)
+}
+
+// H98 reads the whole name+repo index prefix before filtering language. An
+// invalid entry or an index row not represented by a node can invalidate a
+// request's charge even when that row is absent from its candidate summary.
+// Write only affected scopes, in key order, after the ordinary summaries.
+func v3WriteChargeErrors(ctx context.Context, snap *pebble.Snapshot, table *sstable.Writer) (found bool, err error) {
+	for _, column := range []byte{nameQualified, nameRebuildScoped} {
+		var last []byte
+		if err := pendingVisit(ctx, snap, []byte{familyName, column}, func(r row) error {
+			name, rest, err := readKeyString(r.key[2:])
+			if err != nil {
+				return nil // no valid request prefix can reach this key
+			}
+			scope := keyStrings([]byte{'S', 'Z', column}, name)
+			if column == nameRebuildScoped {
+				repo, _, err := readKeyString(rest)
+				if err != nil {
+					return nil // no valid scoped request can reach this key
+				}
+				scope = appendKeyString(scope, repo)
+			}
+			if bytes.Equal(last, scope) {
+				return nil // one flag per affected scope
+			}
+			_, _, id, _, entryErr := readRebuildCandidateIndex(column, r.key, r.value)
+			if entryErr == nil {
+				matches, err := pendingGet(snap, pendingNodeKey(id), func(raw []byte) (bool, error) {
+					n, err := decodeNodeLight(raw)
+					return err == nil && n.ID == id && bytes.Equal(r.key, rebuildCandidateKey(column, n)), nil
+				})
+				if err != nil {
+					return err
+				}
+				if matches {
+					return nil
+				}
+			}
+			last = scope
+			found = true
+			return table.Set(scope, (v3Summary{unsized: true}).value())
+		}); err != nil {
+			return found, err
+		}
+	}
+	return found, nil
 }
 
 func v3Prefixes(req LinkRequest) [][]byte {
@@ -550,7 +605,7 @@ func (v *v3Reader) requestSummary(ctx context.Context, req LinkRequest) (sum v3S
 }
 
 func openV3Reader(ctx context.Context, dir string, view RebuildView, budget int64, source func(func(*graph.Node) error) error) (*v3Reader, error) {
-	pieces, err := buildV3File(ctx, dir, view, source)
+	pieces, chargeErrors, err := buildV3File(ctx, dir, view, source)
 	if err != nil {
 		return nil, err
 	}
@@ -558,7 +613,7 @@ func openV3Reader(ctx context.Context, dir string, view RebuildView, budget int6
 	if err != nil {
 		return nil, err
 	}
-	v := &v3Reader{table: table, cache: newV3Cache(budget, pieces), buildView: view.build}
+	v := &v3Reader{table: table, cache: newV3Cache(budget, pieces), buildView: view.build, chargeErrors: chargeErrors}
 	if view.build != nil {
 		view.build.mu.Lock()
 		v.buildEpoch = view.build.v3NodeWrites
