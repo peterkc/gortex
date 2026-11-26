@@ -653,3 +653,33 @@ func (s *v3FixtureSuite) RebuildV3ReadFailure(t *testing.T) {
 }
 
 func TestRebuildV3ReadFailure(t *testing.T) { runV3Fixture(t, (*v3FixtureSuite).RebuildV3ReadFailure) }
+
+func TestRebuildV3BorrowedPieceReleased(t *testing.T) {
+	ctx := t.Context()
+	n := &graph.Node{ID: "a", Name: "N", Meta: map[string]any{"p": strings.Repeat("x", v3PieceBytes)}}
+	v, err := v3FixturePass(t, ctx, rebuildCandidateCacheBytes, RebuildView{}, []*graph.Node{n})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = v.Close() }()
+	req := LinkRequest{Kind: LinkName, Key: "N"}
+	ids := []string{}
+	_, err = v.SelectCandidatePage(ctx, RebuildView{}, []LinkRequest{req}, 1<<20, func(_ int, n *graph.Node) error {
+		ids = append(ids, n.ID)
+		return nil
+	})
+	if err != nil || !slices.Equal(ids, []string{"a"}) {
+		t.Fatalf("ids=%v err=%v", ids, err)
+	}
+	if v.v3.cache.borrowed != nil {
+		t.Fatal("oversized borrowed piece survived candidate call")
+	}
+	failure := errors.New("fixture visitor refusal")
+	err = v.v3.walk(ctx, req, func(r v3CachedRow) error {
+		r.node.Name = "mutated"
+		return failure
+	})
+	if !errors.Is(err, failure) || !strings.Contains(err.Error(), "mutated") || v.v3.cache.borrowed != nil {
+		t.Fatalf("borrowed error release: %v", err)
+	}
+}

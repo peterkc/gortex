@@ -479,7 +479,8 @@ func (v *v3Reader) rawRows(ctx context.Context, req LinkRequest, fn func(key, ra
 	}
 	return nil
 }
-func (v *v3Reader) walk(ctx context.Context, req LinkRequest, fn func(v3CachedRow) error) error {
+func (v *v3Reader) walk(ctx context.Context, req LinkRequest, fn func(v3CachedRow) error) (err error) {
+	defer func() { err = errors.Join(err, v.cache.releaseBorrowed()) }()
 	for _, prefix := range v3Prefixes(req) {
 		sum, err := v.summary(prefix)
 		if err != nil {
