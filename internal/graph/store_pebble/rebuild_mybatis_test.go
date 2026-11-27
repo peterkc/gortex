@@ -380,3 +380,48 @@ func TestRebuildMyBatisMoverCallerReceiptRepo(t *testing.T) {
 	require.Zero(t, stats)
 	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 }
+
+func TestRebuildMyBatisCandidateCohortProof(t *testing.T) {
+	for _, name := range []string{"unrelated_unproved", "loser_missing", "loser_repo", "loser_join_key", "loser_extractor_language"} {
+		t.Run(name, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			old := myBatisTestStub(myBatisTestPlaceholder("find"), "find")
+			xml := myBatisTestXML(t, "local", old)
+			require.NoError(t, b.AddParsedFile("local", xml))
+			winner := myBatisTestMethod(t, b, "local")
+			loser := myBatisTestMethod(t, b, "remote")
+
+			// This method has the same name but is in a different join cohort.
+			// Keep it live and omit its receipt in every case.
+			const otherFile = "local/OtherMapper.java"
+			other := &graph.Node{ID: otherFile + "::OtherMapper.find", Name: "find", Kind: graph.KindMethod,
+				FilePath: otherFile, Language: "java", Meta: map[string]any{"receiver": "OtherMapper"}}
+			require.NoError(t, b.AddParsedFile("local", myBatisTestQualifiedFacts(t, "local", other)))
+
+			// Change only the losing receipt, after installing the exact live candidates.
+			switch name {
+			case "loser_repo":
+				loser.Nodes[0].RepoPrefix = "elsewhere"
+			case "loser_join_key":
+				loser.Nodes[0].Meta["receiver"] = "ChangedMapper"
+			case "loser_extractor_language":
+				loser.EffectiveLanguage = "kotlin"
+			}
+			receipts := []ParseFacts{xml, winner}
+			if name != "loser_missing" {
+				receipts = append(receipts, loser)
+			}
+			before := rebuildFrameworkCustodyRows(t, b)
+			stats, err := runTestRebuildMyBatis(t, b, receipts...)
+			if name == "unrelated_unproved" {
+				require.NoError(t, err)
+				require.Equal(t, RebuildMyBatisStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+				requireRebuildMyBatisMove(t, b, old, old, myBatisTestLocal)
+				return
+			}
+			requireRebuildMyBatisRefusal(t, err, old, myBatisTestLocal)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}

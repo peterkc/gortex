@@ -14,7 +14,6 @@ import (
 
 func TestRebuildMyBatisSQLiteOracle(t *testing.T) {
 	const namespace = "example.UserMapper"
-	const xmlFile = "local/UserMapper.xml"
 	const localFile, remoteFile = "local/UserMapper.java", "remote/UserMapper.java"
 	const stmtID, methodName = namespace + "::findUser", "findUser"
 	const oldTarget, newTarget = "unresolved::mybatis::" + stmtID, localFile + "::" + methodName
@@ -24,30 +23,51 @@ func TestRebuildMyBatisSQLiteOracle(t *testing.T) {
 	const java = `public interface UserMapper {
     int findUser();
 }`
+	const kotlin = `class UserMapper {
+    fun findUser(): Int = 1
+}`
 
 	for _, tc := range []struct {
-		name, secondRepo string
-		resolved         uint64
+		name, callerRepo, secondRepo string
+		kotlinDecoy                  bool
+		resolved                     uint64
 	}{
-		{name: "same_repo_wins", secondRepo: "remote", resolved: 1},
-		{name: "ambiguous_in_same_repo", secondRepo: "local"},
+		{name: "same_repo_wins", callerRepo: "local", secondRepo: "remote", resolved: 1},
+		{name: "ambiguous_in_same_repo", callerRepo: "local", secondRepo: "local"},
+		{name: "workspace_fallback", callerRepo: "mapper", resolved: 1},
+		{name: "kotlin_decoy", callerRepo: "local", kotlinDecoy: true, resolved: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			xml := rebuildMyBatisExtract(t, languages.NewMyBatisExtractor(), xmlFile, "local", mapper)
-			remote := rebuildMyBatisExtract(t, languages.NewJavaExtractor(), remoteFile, tc.secondRepo, java)
-			local := rebuildMyBatisExtract(t, languages.NewJavaExtractor(), localFile, "local", java)
-			for _, f := range []store_pebble.ParseFacts{remote, local} {
-				i := slices.IndexFunc(f.Nodes, func(n *graph.Node) bool {
-					return n.ID == f.File.FilePath+"::"+methodName
-				})
+			xml := rebuildMyBatisExtract(t, languages.NewMyBatisExtractor(), tc.callerRepo+"/UserMapper.xml", tc.callerRepo, mapper)
+			facts := []store_pebble.ParseFacts{xml}
+			if tc.secondRepo != "" {
+				facts = append(facts, rebuildMyBatisExtract(t, languages.NewJavaExtractor(), remoteFile, tc.secondRepo, java))
+			}
+			if tc.kotlinDecoy {
+				// Same repo and join key as the Java winner: admitting Kotlin would make the call ambiguous.
+				facts = append(facts, rebuildMyBatisExtract(t, languages.NewKotlinExtractor(), "local/UserMapper.kt", "local", kotlin))
+			}
+			facts = append(facts, rebuildMyBatisExtract(t, languages.NewJavaExtractor(), localFile, "local", java))
+			for _, f := range facts[1:] {
+				wantID := f.File.FilePath + "::" + methodName
+				if f.EffectiveLanguage == "kotlin" {
+					wantID = f.File.FilePath + "::UserMapper." + methodName
+				}
+				i := slices.IndexFunc(f.Nodes, func(n *graph.Node) bool { return n.ID == wantID })
 				require.NotEqual(t, -1, i)
 				require.Equal(t, graph.KindMethod, f.Nodes[i].Kind)
+				require.Equal(t, methodName, f.Nodes[i].Name)
 				require.Equal(t, "UserMapper", f.Nodes[i].Meta["receiver"])
+				require.Equal(t, f.EffectiveLanguage, f.Nodes[i].Language)
 			}
 
-			facts := []store_pebble.ParseFacts{xml, remote, local}
 			native := openRebuildTemporalOracle(t, facts...)
-			private := openRebuildGRPCBuild(t, local, remote, xml)
+			caller := native.GetNode(stmtID)
+			require.NotNil(t, caller)
+			require.Equal(t, tc.callerRepo, caller.RepoPrefix)
+			privateFacts := slices.Clone(facts)
+			slices.Reverse(privateFacts)
+			private := openRebuildGRPCBuild(t, privateFacts...)
 			before := rebuildEventSQLiteRows(native)
 			require.Equal(t, before, rebuildEventSavedRows(t, private))
 			i := slices.IndexFunc(before.edges, func(e *graph.Edge) bool {
@@ -82,10 +102,11 @@ func TestRebuildMyBatisSQLiteOracle(t *testing.T) {
 				want.edges = slices.Clone(before.edges)
 				want.edges[i] = &moved
 				want.sort()
-
+			}
+			if tc.name == "same_repo_wins" {
 				// The elected same-repo method still exists in the private graph.
 				// Losing its receipt must refuse, not elect the proved remote method.
-				stats, err := RunRebuildMyBatis(t.Context(), private, rebuildGRPCReceipts(xml, remote), frozen)
+				stats, err := RunRebuildMyBatis(t.Context(), private, rebuildGRPCReceipts(facts[:len(facts)-1]...), frozen)
 				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
 				require.Zero(t, stats)
 				require.Equal(t, before, rebuildEventSavedRows(t, private))
