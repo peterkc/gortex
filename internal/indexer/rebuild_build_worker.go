@@ -444,6 +444,15 @@ func buildRebuildStages(
 				zap.Uint64("moves", temporal.Moves),
 				zap.Uint64("spill_bytes", temporal.SpillBytes))
 		}
+		eventChannel, err := resolver.RunRebuildEventChannel(ctx, private, receipts, idx.frameworkSynthesizerSelection(), 1<<20)
+		if err != nil {
+			return err
+		}
+		if eventChannel.Pairs != 0 || eventChannel.SpillBytes != 0 {
+			logger.Info("rebuild event channel applied to private build",
+				zap.Uint64("pairs", eventChannel.Pairs),
+				zap.Uint64("spill_bytes", eventChannel.SpillBytes))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.

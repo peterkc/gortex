@@ -169,6 +169,7 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrReceiverMutationNonconvergent, store_pebble.ErrReceiverMutationInput, store_pebble.ErrRebuildReceiverMutation,
 	store_pebble.ErrRebuildGRPC,
 	store_pebble.ErrRebuildTemporal,
+	store_pebble.ErrRebuildEventChannel,
 }
 
 func buildRefusal(err error) rebuildBuildReply {
