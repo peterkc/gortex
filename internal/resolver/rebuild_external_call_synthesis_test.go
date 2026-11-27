@@ -159,11 +159,12 @@ func TestRebuildExternalCallConvergenceSQLiteOracle(t *testing.T) {
 }
 
 func TestRebuildExternalCallSynthesisFrozenAlias(t *testing.T) {
+	const shared = "acme-tools.example"
 	goNode := rebuildEventNode("z.go", "invoke", "go", "")
 	plugin := rebuildEventNode("a.custom", "invoke", "custom", "")
-	retained := &graph.Edge{From: goNode.ID, Kind: graph.EdgeCalls, To: "external::acme-tools", FilePath: goNode.FilePath}
+	retained := &graph.Edge{From: goNode.ID, Kind: graph.EdgeCalls, To: "external::" + shared, FilePath: goNode.FilePath}
 	uncertain := &graph.Edge{From: plugin.ID, Kind: graph.EdgeReferences, To: "unresolved::import::tool-alias", FilePath: "recording.ts"}
-	for _, real := range []string{"acme-tools", "other-tools"} {
+	for _, real := range []string{shared, "other-tools.example"} {
 		t.Run(real, func(t *testing.T) {
 			facts := []store_pebble.ParseFacts{
 				rebuildEventFacts(goNode.FilePath, goNode.Language, []*graph.Node{goNode}, retained),
@@ -180,7 +181,7 @@ func TestRebuildExternalCallSynthesisFrozenAlias(t *testing.T) {
 					return real, nil
 				})
 			require.Equal(t, 1, calls)
-			if real == "acme-tools" {
+			if real == shared {
 				require.ErrorIs(t, err, store_pebble.ErrRebuildExternalCallSynthesis)
 				require.Zero(t, count)
 				require.Equal(t, before, rebuildEventSavedRows(t, b))
