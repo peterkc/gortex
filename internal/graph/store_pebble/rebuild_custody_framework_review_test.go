@@ -24,7 +24,8 @@ func TestRebuildGRPCOrdersAndProvesRawCustody(t *testing.T) {
 	}
 	for _, name := range []string{
 		"raw receipt before competitor", "raw receipt after competitor", "missing raw receipt",
-		"synthetic", "untracked", "stale", "unproved stationary",
+		"synthetic mover", "untracked mover", "stale", "unproved stationary",
+		"synthetic stationary", "untracked stationary",
 	} {
 		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
@@ -54,23 +55,28 @@ func TestRebuildGRPCOrdersAndProvesRawCustody(t *testing.T) {
 				},
 				Edges: []*graph.Edge{raw, rival, register, member},
 			}
-			if name == "unproved stationary" {
+			stationary := name == "unproved stationary" || name == "synthetic stationary" || name == "untracked stationary"
+			if stationary {
 				live.To = handler
-				facts.Edges = []*graph.Edge{live, register, member}
+				if name == "untracked stationary" {
+					facts.Edges = []*graph.Edge{raw, register, member}
+				} else {
+					facts.Edges = []*graph.Edge{live, register, member}
+				}
 			}
 			require.NoError(t, b.AddParsedFile("", facts))
 			move := []graph.EdgeReindex{{Edge: live, OldTo: raw.To}}
 			switch name {
 			case "raw receipt before competitor", "raw receipt after competitor",
-				"missing raw receipt", "synthetic", "stale":
+				"missing raw receipt", "synthetic mover", "stale":
 				require.NoError(t, b.ApplyLinkReindexes(ctx, move))
-			case "untracked":
+			case "untracked mover", "untracked stationary":
 				b.ReindexEdges(move)
 				custody, err := readRebuildEdgeCustody(b.pending, pendingEdgeKey(live))
 				require.NoError(t, err)
 				require.Equal(t, rebuildEdgeCustody{proof: rebuildProofUntrackedMove}, custody)
 			}
-			if name == "synthetic" || name == "stale" {
+			if name == "synthetic mover" || name == "synthetic stationary" || name == "stale" {
 				custody := rebuildEdgeCustody{proof: rebuildProofReceiver}
 				require.NoError(t, b.withWrites(func() error {
 					return b.putEdgeWithCustody(live, custody)
@@ -96,9 +102,9 @@ func TestRebuildGRPCOrdersAndProvesRawCustody(t *testing.T) {
 			case "raw receipt after competitor":
 				facts.Edges = []*graph.Edge{decoy, rival, raw, register, member}
 			case "stale":
-				// A valid move before stale custody exposes a partial delete in apply.
+				// order refuses stale custody before replaying even the valid rival.
 				facts.Edges = []*graph.Edge{rival, decoy, register, member}
-			case "unproved stationary":
+			case "unproved stationary", "synthetic stationary", "untracked stationary":
 				facts.Edges = []*graph.Edge{register, member}
 			}
 			before := rebuildFrameworkCustodyRows(t, b)
@@ -129,7 +135,7 @@ func TestRebuildGRPCOrdersAndProvesRawCustody(t *testing.T) {
 				custody, err := readRebuildEdgeCustody(b.pending, pendingEdgeKey(&winner))
 				require.NoError(t, err)
 				require.Equal(t, rebuildEdgeCustody{raw: pendingEdgeKey(winnerRaw)}, custody)
-			case "unproved stationary":
+			case "unproved stationary", "synthetic stationary", "untracked stationary":
 				require.NoError(t, err)
 				require.Positive(t, stats.SpillBytes)
 				stats.SpillBytes = 0
@@ -151,6 +157,33 @@ func TestRebuildGRPCOrdersAndProvesRawCustody(t *testing.T) {
 	}
 }
 
+func TestRebuildGRPCRefusesDuplicateRawCustody(t *testing.T) {
+	ctx := t.Context()
+	b := newBuild(t, FullProfile)
+	raw := graph.Edge{
+		From: "caller", To: "unresolved::a", Kind: graph.EdgeCalls, FilePath: "rpc.go", Line: 1,
+		Meta: map[string]any{"via": "grpc.stub", "grpc_service": "Greeter", "grpc_method": "Hello"},
+	}
+	live := raw
+	live.To = "unresolved::z"
+	b.AddEdge(&raw)
+	require.NoError(t, b.ApplyLinkReindexes(ctx, []graph.EdgeReindex{{Edge: &live, OldTo: raw.To}}))
+	// Reuse of the old key leaves a stationary stub and a moved stub claiming the same raw key.
+	b.AddEdge(&raw)
+	before := rebuildFrameworkCustodyRows(t, b)
+	facts := ParseFacts{
+		EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: raw.FilePath}, Edges: []*graph.Edge{&raw},
+	}
+	receipts := func(yield func(ParseFacts, error) bool) { yield(facts, nil) }
+	stats, err := b.RebuildGRPC(ctx, receipts, 1, func(*graph.Edge, string, string, string, string) bool { return false })
+	require.ErrorIs(t, err, ErrRebuildGRPC)
+	var refused *RebuildUnknownProvenanceError
+	require.ErrorAs(t, err, &refused)
+	require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(&live)}, refused)
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+}
+
 func rebuildFrameworkCustodyRows(t *testing.T, b *BuildStore) map[string][]byte {
 	t.Helper()
 	rows := make(map[string][]byte)
@@ -164,23 +197,23 @@ func rebuildFrameworkCustodyRows(t *testing.T, b *BuildStore) map[string][]byte 
 func TestRebuildGRPCWindowSpillsInheritedProof(t *testing.T) {
 	ctx := t.Context()
 	b := newBuild(t, FullProfile)
-	old := graph.Edge{
-		From: "caller", To: "unresolved::stub", Kind: graph.EdgeCalls, FilePath: "rpc.go", Line: 1,
+	raw := graph.Edge{
+		From: "caller", To: "unresolved::original", Kind: graph.EdgeCalls, FilePath: "rpc.go", Line: 1,
+		Meta: map[string]any{"via": "grpc.stub", "grpc_service": "Greeter", "grpc_method": "Hello"},
 	}
-	next := old
-	next.To = "handler"
-	custody := rebuildEdgeCustody{proof: rebuildProofReceiver}
-	require.NoError(t, b.withWrites(func() error { return b.putEdgeWithCustody(&old, custody) }))
+	old, next := raw, raw
+	old.To, next.To = "unresolved::stub", "handler"
+	b.AddEdge(&raw)
+	require.NoError(t, b.ApplyLinkReindexes(ctx, []graph.EdgeReindex{{Edge: &old, OldTo: raw.To}}))
 	move := binary.BigEndian.AppendUint64(rebuildGRPCMoveKey(0), 0)
 	value, err := encodeEdge(&next)
 	require.NoError(t, err)
 	value = append(keyStrings(nil, string(pendingEdgeKey(&old)), next.To), value...)
 	require.NoError(t, b.pending.Set(move, value, pebble.NoSync))
 
-	// Test the window alone: this proof must not pass public gRPC recorder election.
 	pass := rebuildGRPC{b: b, threshold: 1, stats: RebuildGRPCStats{Moves: 1}}
 	require.NoError(t, b.withWrites(func() error { return pass.apply(ctx) }))
-	// The inherited custody copy is the only window scratch write.
+	// The inherited raw key is the only window scratch write.
 	require.Positive(t, pass.stats.SpillBytes)
 	stored, err := b.pendingEdge(pendingEdgeKey(&old))
 	require.NoError(t, err)
@@ -190,7 +223,7 @@ func TestRebuildGRPCWindowSpillsInheritedProof(t *testing.T) {
 	require.Equal(t, &next, stored)
 	got, err := readRebuildEdgeCustody(b.pending, pendingEdgeKey(&next))
 	require.NoError(t, err)
-	require.Equal(t, custody, got)
+	require.Equal(t, rebuildEdgeCustody{raw: pendingEdgeKey(&raw)}, got)
 }
 
 func TestRebuildTemporalWindowPreservesStagedWrapperProof(t *testing.T) {
@@ -207,7 +240,11 @@ func TestRebuildTemporalWindowPreservesStagedWrapperProof(t *testing.T) {
 	stored, err := b.pendingEdge(pendingEdgeKey(&resolved))
 	require.NoError(t, err)
 	require.Equal(t, &resolved, stored)
-	got, err := readRebuildEdgeCustody(b.pending, pendingEdgeKey(&resolved))
-	require.NoError(t, err)
-	require.Equal(t, rebuildEdgeCustody{proof: rebuildProofTemporalSynthetic}, got)
+	RequireRebuildTemporalSyntheticCustody(t, b, &resolved)
+}
+
+// RequireRebuildTemporalSyntheticCustody checks the exact proof from an external test of the resolver.
+func RequireRebuildTemporalSyntheticCustody(t *testing.T, b *BuildStore, e *graph.Edge) {
+	t.Helper()
+	requireSyntheticCustody(t, b, map[graph.EdgeIdentity]rebuildEdgeProof{graph.EdgeIdentityFor(e): rebuildProofTemporalSynthetic})
 }

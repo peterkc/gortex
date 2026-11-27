@@ -129,6 +129,13 @@ func TestRebuildCustodySameKeyWriters(t *testing.T) {
 	require.Equal(t, graph.EdgeIdentityFor(&live), unknown.First)
 	require.EqualValues(t, 1, unknown.Count)
 	require.Zero(t, got)
+
+	before := rebuildFrameworkCustodyRows(t, b)
+	changed = live
+	require.False(t, b.SetEdgeProvenance(&changed, graph.OriginASTInferred))
+	require.ErrorIs(t, b.first, ErrRebuildUnknownProvenance)
+	require.Equal(t, live, changed)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 }
 
 func TestRebuildCustodyGuardReverts(t *testing.T) {
@@ -136,9 +143,11 @@ func TestRebuildCustodyGuardReverts(t *testing.T) {
 		name      string
 		kind      graph.EdgeKind
 		to        string
+		missing   bool
 		untracked bool
 	}{
 		{name: "stationary", kind: graph.EdgeCalls, to: "old"},
+		{name: "same key without old row", kind: graph.EdgeCalls, to: "old", missing: true, untracked: true},
 		{name: "moved-call", kind: graph.EdgeCalls, to: "unresolved::new", untracked: true},
 		{name: "non-reader", kind: graph.EdgeDefines, to: "new"},
 	} {
@@ -152,7 +161,9 @@ func TestRebuildCustodyGuardReverts(t *testing.T) {
 				Line:     9,
 				Origin:   graph.OriginASTInferred,
 			}
-			b.AddEdge(&old)
+			if !tc.missing {
+				b.AddEdge(&old)
+			}
 			live := old
 			live.To = tc.to
 			moves := []graph.EdgeReindex{{Edge: &live, OldTo: old.To}}
@@ -200,6 +211,7 @@ func TestRebuildCustodyRecordValidation(t *testing.T) {
 		{name: "version", value: badVersion},
 		{name: "zero-code", value: zeroCode},
 		{name: "exclusive-limit", value: limitCode},
+		{name: "truncated-raw-key", value: []byte{familyEdge, edgeOut}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.NoError(t, b.pending.Set(recorder, tc.value, pebble.NoSync))

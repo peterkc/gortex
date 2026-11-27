@@ -531,6 +531,8 @@ func (p *rebuildReactNativeBridge) prove(ctx context.Context, receipts iter.Seq2
 			mod, method := p.policy.names(n.Meta)
 			bit := byte(rebuildCapabilityUnproved)
 			// HTML receipts can contain delegated JavaScript callers.
+			// D71 still defers HTML in the build worker's main-link caller
+			// selection. This proof does not admit HTML links for publication.
 			if live != nil && n.FilePath == file && live.FilePath == file && facts.EffectiveLanguage != "" &&
 				live.Language == n.Language && live.Kind == n.Kind && live.Name == n.Name && live.RepoPrefix == n.RepoPrefix {
 				liveMod, liveMethod := p.policy.names(live.Meta)

@@ -350,9 +350,15 @@ func (p *rebuildGRPC) order(ctx context.Context, receipts iter.Seq2[ParseFacts, 
 	// different live stubs cannot both claim the same receipt ordinal.
 	if err := pendingVisit(ctx, p.b.pending, stubs, func(r row) error {
 		live := r.key[len(stubs):]
-		raw, err := rebuildReceiptKey(p.b.pending, live)
-		if err != nil {
+		custody, err := readRebuildEdgeCustody(p.b.pending, live)
+		if err != nil || custody.proof != 0 {
+			// A valid producer record cannot supply a raw ordinal. The
+			// unordered tail still elects this stub and refuses a move.
 			return err
+		}
+		raw := custody.raw
+		if raw == nil {
+			raw = live
 		}
 		key := append(bytes.Clone(recorders), raw...)
 		present, err := pendingGet(p.b.pending, key, func([]byte) (bool, error) { return true, nil })
