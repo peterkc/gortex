@@ -1,6 +1,7 @@
 package store_pebble
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -482,4 +483,56 @@ func TestRebuildMyBatisCollectsOnlyLiveJoins(t *testing.T) {
 		string(rebuildMyBatisKey('n', local.ID)),
 		string(rebuildMyBatisKey('n', remote.ID)),
 	}, byColumn('n'))
+}
+
+func TestRebuildMyBatisRejectsInvalidInputAndOccupiedScratch(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	ctx := t.Context()
+	receipts := func(func(ParseFacts, error) bool) { t.Fatal("refused pass must not read receipts") }
+	methodKey := func(*graph.Node) string { return "" }
+	stub := func(*graph.Edge) (string, string) { return "", "" }
+	join := func(string, string) string { return "" }
+	rebind := func(*graph.Edge, string, string, string) bool { return false }
+
+	before := rebuildFrameworkCustodyRows(t, b)
+	stats, err := b.RebuildMyBatis(ctx, nil, methodKey, stub, join, rebind)
+	require.ErrorIs(t, err, ErrRebuildMyBatis)
+	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+	require.Zero(t, stats)
+	stats, err = b.RebuildMyBatis(ctx, receipts, methodKey, stub, join, nil)
+	require.ErrorIs(t, err, ErrRebuildMyBatis)
+	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+
+	key := rebuildMyBatisKey('s', "busy")
+	require.NoError(t, b.pending.Set(key, []byte("sentinel"), pebble.NoSync))
+	before = rebuildFrameworkCustodyRows(t, b)
+	stats, err = b.RebuildMyBatis(ctx, receipts, methodKey, stub, join, rebind)
+	require.ErrorIs(t, err, ErrRebuildMyBatis)
+	require.ErrorIs(t, err, errInvalidRecord)
+	require.ErrorContains(t, err, "MyBatis scratch range occupied")
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+}
+
+func TestRebuildMyBatisRejectsOversizedCall(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	old := myBatisTestStub(myBatisTestPlaceholder("find"), "find")
+	xml := myBatisTestXML(t, "local", old)
+	require.NoError(t, b.AddParsedFile("local", xml))
+	large := *old
+	large.Context = strings.Repeat("x", rebuildMyBatisRowBytes)
+	key := pendingEdgeKey(&large)
+	raw, err := encodeEdge(&large)
+	require.NoError(t, err)
+	require.Greater(t, len(key)+len(raw), rebuildMyBatisRowBytes)
+	require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
+	before := rebuildFrameworkCustodyRows(t, b)
+	stats, err := runTestRebuildMyBatis(t, b, xml)
+	require.ErrorIs(t, err, ErrRebuildMyBatis)
+	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+	require.ErrorContains(t, err, "MyBatis input row")
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 }
