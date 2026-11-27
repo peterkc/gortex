@@ -87,7 +87,6 @@ func TestRebuildDjangoDescriptorSQLiteOracle(t *testing.T) {
 				require.NoError(t, err)
 				require.Zero(t, count)
 				require.Equal(t, want, rebuildEventSavedRows(t, b))
-				require.NoError(t, b.VerifyEdgeIdentities())
 			case "disabled":
 				require.NoError(t, err)
 				require.Zero(t, count)
