@@ -19,7 +19,10 @@ var ErrRebuildTemporal = errors.New("pebble rebuild Temporal stage failed")
 
 var rebuildTemporalPrefix = []byte{'g', 'Y'}
 
-const rebuildTemporalRowLimit = 16 << 20
+const (
+	rebuildTemporalRowLimit        = 16 << 20
+	rebuildTemporalProofStateBytes = 1 + 8 // flags and a big-endian ordinal
+)
 
 // RebuildTemporalStats describes the complete private turn, including spill.
 type RebuildTemporalStats struct {
@@ -39,7 +42,7 @@ type RebuildTemporalPass struct {
 	spill     uint64
 	moves     uint64
 	adds      uint64
-	wants     bool
+	wants     uint64
 }
 
 // RebuildTemporal runs a reducer over a quiet private graph, proves the
@@ -73,7 +76,7 @@ func (b *BuildStore) RebuildTemporal(ctx context.Context, receipts iter.Seq2[Par
 	if err != nil {
 		return stats, err
 	}
-	if p.wants {
+	if p.wants != 0 {
 		if err := p.prove(ctx, receipts); err != nil {
 			return stats, err
 		}
@@ -475,11 +478,40 @@ func (p *RebuildTemporalPass) insertIfAbsent(e *graph.Edge, custody rebuildEdgeC
 	return p.build.addEdgeWithCustody(e, custody)
 }
 
-// Prove roles and changed calls using the original exact row, not the
-// synthetic placeholder, a bare file suffix, or a same-line contestant.
-func (p *RebuildTemporalPass) WantRecorder(ctx context.Context, e *graph.Edge) error {
+// RebuildTemporalProof attaches receipt demands to one proposed output row.
+// Wrapper slots have a separate identity until the rebind sweep settles them.
+type RebuildTemporalProof struct {
+	pass *RebuildTemporalPass
+	key  []byte
+}
+
+func (p *RebuildTemporalPass) EdgeProof(e *graph.Edge) RebuildTemporalProof {
+	return RebuildTemporalProof{pass: p, key: pendingEdgeKey(e)}
+}
+
+func (p *RebuildTemporalPass) NodeProof(n *graph.Node) RebuildTemporalProof {
+	return RebuildTemporalProof{pass: p, key: pendingNodeKey(n.ID)}
+}
+
+func (p *RebuildTemporalPass) WrapperProof(e *graph.Edge) RebuildTemporalProof {
+	return RebuildTemporalProof{pass: p, key: append([]byte{'w'}, pendingEdgeKey(e)...)}
+}
+
+// FinishWrapper associates a staged slot's original proof demands with its
+// final output key, even when rebind moves the slot away from its placeholder.
+func (p *RebuildTemporalPass) FinishWrapper(ctx context.Context, old graph.EdgeIdentity, e *graph.Edge) error {
+	if old == graph.EdgeIdentityFor(e) {
+		return nil
+	}
+	key := pendingEdgeKey(&graph.Edge{From: old.From, To: old.To, Kind: old.Kind, FilePath: old.FilePath, Line: old.Line})
+	return p.put(ctx, append(rebuildTemporalKey('f'), key...), pendingEdgeKey(e))
+}
+
+// WantRecorder proves the original exact row, not the synthetic placeholder,
+// a bare file suffix, or a same-line contestant.
+func (s RebuildTemporalProof) WantRecorder(ctx context.Context, e *graph.Edge) error {
 	id := graph.EdgeIdentityFor(e)
-	raw, found, err := p.View().OriginalLinkRecorder(ctx, id)
+	raw, found, err := s.pass.View().OriginalLinkRecorder(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -488,7 +520,7 @@ func (p *RebuildTemporalPass) WantRecorder(ctx context.Context, e *graph.Edge) e
 	}
 	// No inherited identity doesn't establish provenance. In that case
 	// the very same full live key must be present in a checked receipt.
-	return p.want(ctx, rebuildTemporalRecorder(id, e))
+	return s.want(ctx, rebuildTemporalRecorder(id, e))
 }
 
 func rebuildTemporalRecorder(id graph.EdgeIdentity, e *graph.Edge) []byte {
@@ -511,21 +543,21 @@ func rebuildTemporalRecorder(id graph.EdgeIdentity, e *graph.Edge) []byte {
 	return key
 }
 
-func (p *RebuildTemporalPass) WantNode(ctx context.Context, id string) error {
-	return p.want(ctx, rebuildTemporalKey('d', id))
+func (s RebuildTemporalProof) WantNode(ctx context.Context, id string) error {
+	return s.want(ctx, rebuildTemporalKey('d', id))
 }
 
 // WantRoleNode proves the declaration and, for a preexisting role, the
 // role/name on its receipt. New role writes have their own recorder proof.
-func (p *RebuildTemporalPass) WantRoleNode(ctx context.Context, n *graph.Node) error {
-	if err := p.WantNode(ctx, n.ID); err != nil {
+func (s RebuildTemporalProof) WantRoleNode(ctx context.Context, n *graph.Node) error {
+	if err := s.WantNode(ctx, n.ID); err != nil {
 		return err
 	}
-	staged, err := p.stagedNode(n.ID)
+	staged, err := s.pass.stagedNode(n.ID)
 	if err != nil || staged != nil {
 		return err
 	}
-	return p.want(ctx, rebuildTemporalRole(n))
+	return s.want(ctx, rebuildTemporalRole(n))
 }
 
 func rebuildTemporalRole(n *graph.Node) []byte {
@@ -534,9 +566,25 @@ func rebuildTemporalRole(n *graph.Node) []byte {
 	return rebuildTemporalKey('h', n.ID, role, name)
 }
 
-func (p *RebuildTemporalPass) want(ctx context.Context, key []byte) error {
-	p.wants = true
-	return p.put(ctx, key, []byte{rebuildCapabilityWanted})
+func (s RebuildTemporalProof) want(ctx context.Context, key []byte) error {
+	p := s.pass
+	state, found, err := p.get(key)
+	if err != nil {
+		return err
+	}
+	if !found {
+		p.wants++
+		state = string(binary.BigEndian.AppendUint64([]byte{rebuildCapabilityWanted}, p.wants))
+		if err := p.put(ctx, key, []byte(state)); err != nil {
+			return err
+		}
+	}
+	if len(state) != rebuildTemporalProofStateBytes {
+		return invalid("Temporal receipt proof state")
+	}
+	// Use the proof ordinal instead of combining two potentially large keys.
+	link := append(rebuildTemporalKey('p'), state[1:]...)
+	return p.put(ctx, append(link, s.key...), nil)
 }
 
 func (p *RebuildTemporalPass) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
@@ -579,19 +627,77 @@ func (p *RebuildTemporalPass) prove(ctx context.Context, receipts iter.Seq2[Pars
 			}
 		}
 	}
-	var count uint64
+	return p.refusedOutputs(ctx)
+}
+
+func (p *RebuildTemporalPass) refusedOutputs(ctx context.Context) error {
+	// Only unproved demands enter the output set. Deduplicate on the durable
+	// key so that several failed proofs or moves cannot count a row twice.
 	for _, col := range []byte{'d', 'e', 'h'} {
 		if err := pendingVisit(ctx, p.build.pending, rebuildTemporalKey(col), func(r row) error {
-			if !slices.Equal(r.value, []byte{rebuildCapabilityWanted | rebuildCapabilityProved}) {
-				count++
+			if len(r.value) != rebuildTemporalProofStateBytes {
+				return invalid("Temporal receipt proof state")
 			}
-			return nil
+			if r.value[0] == rebuildCapabilityWanted|rebuildCapabilityProved {
+				return nil
+			}
+			link := append(rebuildTemporalKey('p'), r.value[1:]...)
+			return pendingVisit(ctx, p.build.pending, link, func(r row) error {
+				out := r.key[len(link):]
+				if len(out) == 0 {
+					return invalid("Temporal output proof key")
+				}
+				if out[0] == 'w' {
+					out = out[1:]
+					final, found, err := p.get(append(rebuildTemporalKey('f'), out...))
+					if err != nil {
+						return err
+					}
+					if found {
+						out = []byte(final)
+					}
+				}
+				return p.put(ctx, append(rebuildTemporalKey('u'), out...), nil)
+			})
 		}); err != nil {
 			return err
 		}
 	}
-	if count != 0 {
-		return &RebuildUnknownProvenanceError{Count: count}
+	var refused RebuildUnknownProvenanceError
+	if err := pendingVisit(ctx, p.build.pending, rebuildTemporalKey('u'), func(r row) error {
+		if refused.Count == 0 {
+			key := r.key[3:]
+			if key[0] == familyNode {
+				id, tail, err := readKeyString(key[1:])
+				if err != nil {
+					return err
+				}
+				if len(tail) != 0 {
+					return invalid("Temporal refused node key")
+				}
+				n, err := p.stagedNode(id)
+				if err != nil {
+					return err
+				}
+				if n == nil {
+					return invalid("Temporal refused node missing")
+				}
+				refused.First = graph.EdgeIdentity{From: n.ID, FilePath: n.FilePath}
+			} else {
+				id, err := decodeLinkRecorder(key)
+				if err != nil {
+					return err
+				}
+				refused.First = id
+			}
+		}
+		refused.Count++
+		return nil
+	}); err != nil {
+		return err
+	}
+	if refused.Count != 0 {
+		return &refused
 	}
 	return nil
 }
@@ -601,7 +707,7 @@ func (p *RebuildTemporalPass) note(ctx context.Context, key []byte, proved bool)
 	if err != nil || !found {
 		return err
 	}
-	if len(state) != 1 {
+	if len(state) != rebuildTemporalProofStateBytes {
 		return invalid("Temporal receipt proof state")
 	}
 	bit := byte(rebuildCapabilityUnproved)
@@ -609,7 +715,7 @@ func (p *RebuildTemporalPass) note(ctx context.Context, key []byte, proved bool)
 		bit = rebuildCapabilityProved
 	}
 	if state[0]&bit == 0 {
-		return p.put(ctx, key, []byte{state[0] | bit})
+		return p.put(ctx, key, append([]byte{state[0] | bit}, state[1:]...))
 	}
 	return nil
 }

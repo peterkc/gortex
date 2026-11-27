@@ -182,10 +182,11 @@ func (p *rebuildTemporal) stampTemporalJava(e *graph.Edge, n *graph.Node, role, 
 }
 
 func (p *rebuildTemporal) writeTemporalIndexRole(e *graph.Edge, n *graph.Node, role, name string) error {
-	if err := p.s.WantRecorder(p.ctx, e); err != nil {
+	proof := p.s.NodeProof(n)
+	if err := proof.WantRecorder(p.ctx, e); err != nil {
 		return err
 	}
-	if err := p.s.WantNode(p.ctx, n.ID); err != nil {
+	if err := proof.WantNode(p.ctx, n.ID); err != nil {
 		return err
 	}
 	if n.Meta == nil {

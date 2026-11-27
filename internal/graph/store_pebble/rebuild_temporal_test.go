@@ -39,10 +39,11 @@ func TestRebuildTemporalWinnerCustody(t *testing.T) {
 	_, err = b.RebuildTemporal(ctx, func(yield func(ParseFacts, error) bool) { yield(facts, nil) }, 1,
 		func(p *RebuildTemporalPass) (RebuildTemporalStats, error) {
 			for _, e := range []*graph.Edge{prior, direct, trigger} {
-				require.NoError(t, p.WantRecorder(ctx, e))
+				proof := p.EdgeProof(call(target, e.Line))
+				require.NoError(t, proof.WantRecorder(ctx, e))
+				require.NoError(t, proof.WantNode(ctx, caller))
+				require.NoError(t, proof.WantNode(ctx, target))
 			}
-			require.NoError(t, p.WantNode(ctx, caller))
-			require.NoError(t, p.WantNode(ctx, target))
 			require.NoError(t, p.QueueMove(ctx, prior.To, call(target, 1), false))
 			require.NoError(t, p.QueueMove(ctx, direct.To, call(target, 2), false))
 			require.NoError(t, p.QueueMove(ctx, shadowed.To, call(target, 3), true))
@@ -77,4 +78,108 @@ func TestRebuildTemporalWinnerCustody(t *testing.T) {
 		}
 	}
 	assertCustodyRemovalLeavesWorkingRows(t, b, 4)
+}
+
+func TestRebuildTemporalRefusesAffectedOutputRows(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		wantCount  uint64
+		keepCaller bool
+		keepTarget bool
+		keepRecord bool
+		firstNode  bool
+	}{
+		{name: "shared missing declaration", wantCount: 3, keepCaller: true, keepRecord: true},
+		{name: "several failed demands per row", wantCount: 3},
+		{name: "node role only", wantCount: 1, keepCaller: true, keepTarget: true, firstNode: true},
+		{name: "all proved", keepCaller: true, keepTarget: true, keepRecord: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			ctx := t.Context()
+			const file = "flow.go"
+			caller := &graph.Node{ID: "caller", Name: "Run", Kind: graph.KindFunction, Language: "go", FilePath: file}
+			target := &graph.Node{ID: "target", Name: "Activity", Kind: graph.KindFunction, Language: "go", FilePath: file}
+			raw := &graph.Edge{From: caller.ID, To: "unresolved::Activity", Kind: graph.EdgeCalls, FilePath: file, Line: 1}
+			other := *raw
+			other.Line = 2
+			facts := ParseFacts{
+				EffectiveLanguage: "go",
+				File:              graph.FileMetaRow{FilePath: file, NodeCount: 2},
+				Nodes:             []*graph.Node{caller, target},
+				Edges:             []*graph.Edge{raw, &other},
+			}
+			require.NoError(t, b.AddParsedFile("", facts))
+			proofFacts := facts
+			proofFacts.Nodes = nil
+			if tc.keepCaller {
+				proofFacts.Nodes = append(proofFacts.Nodes, caller)
+			}
+			if tc.keepTarget {
+				proofFacts.Nodes = append(proofFacts.Nodes, target)
+			}
+			if !tc.keepRecord {
+				proofFacts.Edges = nil
+			}
+			first := *raw
+			first.To = target.ID
+			stats, err := b.RebuildTemporal(ctx, func(yield func(ParseFacts, error) bool) {
+				yield(proofFacts, nil)
+			}, 1<<20, func(p *RebuildTemporalPass) (RebuildTemporalStats, error) {
+				stamped := *target
+				stamped.Meta = map[string]any{"temporal_role": "activity"}
+				role := p.NodeProof(&stamped)
+				require.NoError(t, role.WantRecorder(ctx, raw))
+				require.NoError(t, role.WantNode(ctx, target.ID))
+				require.NoError(t, p.StampNode(ctx, &stamped))
+				for _, e := range facts.Edges {
+					out := *e
+					out.To = target.ID
+					proof := p.EdgeProof(&out)
+					if !tc.firstNode {
+						require.NoError(t, proof.WantRecorder(ctx, e))
+					}
+					require.NoError(t, proof.WantNode(ctx, caller.ID))
+					require.NoError(t, proof.WantNode(ctx, target.ID))
+					require.NoError(t, p.QueueMove(ctx, e.To, &out, false))
+				}
+				return RebuildTemporalStats{}, nil
+			})
+			if tc.wantCount == 0 {
+				require.NoError(t, err)
+				for _, e := range facts.Edges {
+					out := *e
+					out.To = target.ID
+					stored, err := b.pendingEdge(pendingEdgeKey(&out))
+					require.NoError(t, err)
+					require.Equal(t, &out, stored)
+				}
+			} else {
+				var refused *RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refused)
+				require.ErrorIs(t, err, ErrRebuildTemporal)
+				require.Equal(t, tc.wantCount, refused.Count)
+				wantFirst := graph.EdgeIdentityFor(&first)
+				if tc.firstNode {
+					wantFirst = graph.EdgeIdentity{From: target.ID, FilePath: target.FilePath}
+				}
+				require.Equal(t, wantFirst, refused.First)
+				require.Zero(t, stats)
+				for _, e := range facts.Edges {
+					stored, err := b.pendingEdge(pendingEdgeKey(e))
+					require.NoError(t, err)
+					require.Equal(t, e, stored)
+				}
+				stored, err := b.pendingNode(target.ID)
+				require.NoError(t, err)
+				require.Equal(t, target, stored)
+				storedEdge, err := b.pendingEdge(pendingEdgeKey(&first))
+				require.NoError(t, err)
+				require.Nil(t, storedEdge)
+			}
+			busy, err := rebuildGuardHasPrefix(ctx, b.pending, rebuildTemporalPrefix)
+			require.NoError(t, err)
+			require.False(t, busy)
+		})
+	}
 }

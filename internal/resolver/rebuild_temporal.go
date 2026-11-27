@@ -161,6 +161,7 @@ func (p *rebuildTemporal) rebind(spillAt int, stats *store_pebble.RebuildTempora
 				stats.Resolved++
 			}
 			if moved {
+				proof := p.s.EdgeProof(e)
 				if !staged {
 					original, err := p.s.Edge(p.ctx, old)
 					if err != nil {
@@ -169,15 +170,15 @@ func (p *rebuildTemporal) rebind(spillAt int, stats *store_pebble.RebuildTempora
 					if original == nil {
 						return store_pebble.ErrRebuildUnknownProvenance
 					}
-					if err := p.s.WantRecorder(p.ctx, original); err != nil {
+					if err := proof.WantRecorder(p.ctx, original); err != nil {
 						return err
 					}
-					if err := p.s.WantNode(p.ctx, e.From); err != nil {
+					if err := proof.WantNode(p.ctx, e.From); err != nil {
 						return err
 					}
 				}
 				if resolved {
-					if err := p.s.WantNode(p.ctx, e.To); err != nil {
+					if err := proof.WantNode(p.ctx, e.To); err != nil {
 						return err
 					}
 				}
@@ -187,6 +188,9 @@ func (p *rebuildTemporal) rebind(spillAt int, stats *store_pebble.RebuildTempora
 				stats.Moves++
 			}
 			if staged {
+				if err := p.s.FinishWrapper(p.ctx, old, e); err != nil {
+					return err
+				}
 				return p.s.QueueAdd(p.ctx, e)
 			}
 			return nil
@@ -267,6 +271,11 @@ func (p *rebuildTemporal) crossLanguage() error {
 			if to == n.ID {
 				return nil
 			}
+			out := &graph.Edge{
+				From: n.ID, To: to, Kind: graph.EdgeCalls, Origin: graph.OriginASTInferred,
+				Meta: map[string]any{"via": via, "cross_language": true},
+			}
+			proof := p.s.EdgeProof(out)
 			if len(fields) == 6 {
 				line, err := strconv.Atoi(fields[5])
 				if err != nil {
@@ -279,11 +288,11 @@ func (p *rebuildTemporal) crossLanguage() error {
 				if e == nil {
 					return store_pebble.ErrRebuildUnknownProvenance
 				}
-				if err := p.s.WantRecorder(p.ctx, e); err != nil {
+				if err := proof.WantRecorder(p.ctx, e); err != nil {
 					return err
 				}
 			}
-			if err := p.s.WantRoleNode(p.ctx, n); err != nil {
+			if err := proof.WantRoleNode(p.ctx, n); err != nil {
 				return err
 			}
 			if role == "workflow" {
@@ -294,16 +303,13 @@ func (p *rebuildTemporal) crossLanguage() error {
 				if provider == nil {
 					return store_pebble.ErrRebuildUnknownProvenance
 				}
-				if err := p.s.WantRoleNode(p.ctx, provider); err != nil {
+				if err := proof.WantRoleNode(p.ctx, provider); err != nil {
 					return err
 				}
-			} else if err := p.s.WantNode(p.ctx, to); err != nil {
+			} else if err := proof.WantNode(p.ctx, to); err != nil {
 				return err
 			}
-			return p.s.QueueAdd(p.ctx, &graph.Edge{
-				From: n.ID, To: to, Kind: graph.EdgeCalls, Origin: graph.OriginASTInferred,
-				Meta: map[string]any{"via": via, "cross_language": true},
-			})
+			return p.s.QueueAdd(p.ctx, out)
 		})
 	})
 }

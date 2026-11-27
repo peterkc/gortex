@@ -283,10 +283,11 @@ func (p *rebuildTemporal) queueWrapper(trigger, stub *graph.Edge) (bool, error) 
 	}); err != nil || duplicate {
 		return false, err
 	}
-	if err := p.s.WantRecorder(p.ctx, trigger); err != nil {
+	proof := p.s.WrapperProof(stub)
+	if err := proof.WantRecorder(p.ctx, trigger); err != nil {
 		return false, err
 	}
-	if err := p.s.WantNode(p.ctx, stub.From); err != nil {
+	if err := proof.WantNode(p.ctx, stub.From); err != nil {
 		return false, err
 	}
 	key := temporalWrapperKey(stub)

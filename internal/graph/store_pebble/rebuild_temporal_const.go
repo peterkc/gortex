@@ -67,17 +67,24 @@ func (r *TemporalConstDeref) Value(ctx context.Context, name string) (string, er
 // private working DB. The owner freezes graph facts through construction and
 // joins all result reads before consume returns. Seed must call yield serially
 // and propagate its error. No callback runs on partial construction; any error
-// including cleanup after consume requires the worker to abort.
+// including cleanup after consume requires the worker to abort. Errors from
+// consume retain their own cause; Value marks its constant lookup failures.
 func (v RebuildView) WithTemporalConstDeref(
 	ctx context.Context, spillAt int,
 	seed func(yield func(string) error) error,
 	project func(*graph.Node) TemporalConstCandidate,
 	consume func(*TemporalConstDeref) error,
 ) (stats TemporalConstStats, err error) {
+	var consumeErr error
 	defer func() {
 		if err != nil {
-			stats = TemporalConstStats{}
 			err = fmt.Errorf("%w: %w", ErrRebuildTemporalConst, err)
+		}
+		// The reducer owns consume errors. Constant reads mark their own
+		// failures in Value, while construction and cleanup are ours.
+		err = errors.Join(err, consumeErr)
+		if err != nil {
+			stats = TemporalConstStats{}
 		}
 	}()
 	if v.build == nil || spillAt <= 0 || seed == nil || project == nil || consume == nil {
@@ -117,7 +124,8 @@ func (v RebuildView) WithTemporalConstDeref(
 	if err := errors.Join(ctx.Err(), v.mutationError()); err != nil {
 		return stats, err
 	}
-	return p.stats, errors.Join(consume(result), ctx.Err())
+	consumeErr = consume(result)
+	return p.stats, ctx.Err()
 }
 
 func (v RebuildView) startTemporalConstScratch() error {

@@ -176,7 +176,7 @@ func openRebuildTemporalOracle(t *testing.T, receipts ...store_pebble.ParseFacts
 	return native
 }
 
-func assertRebuildTemporalOracle(t *testing.T, native *store_sqlite.Store, selection FrameworkSynthesizerSelection, spillAt int, facts ...store_pebble.ParseFacts) {
+func assertRebuildTemporalOracle(t *testing.T, native *store_sqlite.Store, selection FrameworkSynthesizerSelection, spillAt int, facts ...store_pebble.ParseFacts) store_pebble.RebuildTemporalStats {
 	t.Helper()
 	private, err := store_pebble.OpenBuild(filepath.Join(t.TempDir(), "working"), store_pebble.FullProfile)
 	require.NoError(t, err)
@@ -220,4 +220,5 @@ func assertRebuildTemporalOracle(t *testing.T, native *store_sqlite.Store, selec
 	slices.SortFunc(wantNodes, nodeOrder)
 	slices.SortFunc(gotNodes, nodeOrder)
 	require.Equal(t, wantNodes, gotNodes)
+	return stats
 }

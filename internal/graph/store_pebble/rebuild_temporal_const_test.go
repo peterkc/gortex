@@ -52,7 +52,7 @@ func TestRebuildTemporalConstScratchRows(t *testing.T) {
 }
 
 func TestRebuildTemporalConstRefusesErrorsAndCleansScratch(t *testing.T) {
-	for _, where := range []string{"seed", "name index", "sidecar", "consume"} {
+	for _, where := range []string{"seed", "name index", "sidecar", "consume", "consume lookup"} {
 		t.Run(where, func(t *testing.T) {
 			b := newBuild(t, FullProfile)
 			ctx := t.Context()
@@ -79,16 +79,28 @@ func TestRebuildTemporalConstRefusesErrorsAndCleansScratch(t *testing.T) {
 				return nil
 			}, func(*graph.Node) TemporalConstCandidate {
 				return TemporalConstCandidate{ReadSidecar: true}
-			}, func(*TemporalConstDeref) error {
+			}, func(values *TemporalConstDeref) error {
 				consumes++
+				if where == "consume lookup" {
+					require.NoError(t, b.pending.Set(temporalConstKey(temporalConstValue, n.Name), nil, pebble.NoSync))
+					_, err := values.Value(ctx, n.Name)
+					return err
+				}
 				return injected
 			})
-			require.ErrorIs(t, err, ErrRebuildTemporalConst)
-			require.ErrorIs(t, err, want)
 			require.Zero(t, stats)
-			if where == "consume" {
+			switch where {
+			case "consume":
+				require.ErrorIs(t, err, injected)
+				require.NotErrorIs(t, err, ErrRebuildTemporalConst)
 				require.Equal(t, 1, consumes)
-			} else {
+			case "consume lookup":
+				require.ErrorIs(t, err, errInvalidRecord)
+				require.ErrorIs(t, err, ErrRebuildTemporalConst)
+				require.Equal(t, 1, consumes)
+			default:
+				require.ErrorIs(t, err, want)
+				require.ErrorIs(t, err, ErrRebuildTemporalConst)
 				require.Zero(t, consumes)
 			}
 			assertNoTemporalConstScratch(t, b)

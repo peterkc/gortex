@@ -71,7 +71,10 @@ func TestRebuildTemporalFollowsInstalledCallRecorder(t *testing.T) {
 			before := rebuildGRPCSavedCalls(t, b)
 			stats, err := RunRebuildTemporal(t.Context(), b, rebuildGRPCReceipts(wrapperFacts, receipt), selection, 1)
 			if !withRecorder {
-				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+				var refused *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refused)
+				require.Equal(t, uint64(1), refused.Count)
+				require.Equal(t, graph.EdgeIdentity{From: caller, To: activity, Kind: graph.EdgeCalls, FilePath: callerFile, Line: call.Line}, refused.First)
 				require.Zero(t, stats)
 				require.Equal(t, before, rebuildGRPCSavedCalls(t, b))
 				return
