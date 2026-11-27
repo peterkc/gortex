@@ -229,8 +229,9 @@ func (p *rebuildCSharpDI) captureCandidates(ctx context.Context) error {
 			if err != nil || bound {
 				return err
 			}
-			// Only check the rows of a registration that can offer an edge.
-			for _, id := range [...]string{from, impl.ID, iface.ID} {
+			// Only the declarations of an offering registration need
+			// the row cap. The source supplies just its repository.
+			for _, id := range [...]string{impl.ID, iface.ID} {
 				if _, err := p.node(id, true); err != nil {
 					return err
 				}
@@ -280,7 +281,7 @@ func (p *rebuildCSharpDI) record(ctx context.Context, receipts iter.Seq2[ParseFa
 			if !wanted && !sourceWanted {
 				continue
 			}
-			live, err := p.node(n.ID, true)
+			live, err := p.node(n.ID, wanted)
 			if err != nil {
 				return err
 			}
@@ -367,8 +368,9 @@ func (p *rebuildCSharpDI) plan(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		// SQLite GetOutEdges explicitly sorts by line; rowid ties use the
-		// frozen receipt order. Different registrations cannot share a key.
+		// SQLite GetOutEdges sorts by line. Rebuild uses frozen receipt
+		// order on ties. U5: a partial fold can reinsert an Implements
+		// row with a different SQLite rowid than its source receipt.
 		key := binary.BigEndian.AppendUint64(appendKeyLine(p.key('o', from, name), id.Line), ordinal)
 		return p.put(append(key, site...), r.value)
 	}); err != nil {

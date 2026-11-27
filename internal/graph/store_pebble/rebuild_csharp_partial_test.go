@@ -58,11 +58,7 @@ func TestRebuildCSharpPartialNoGroupByteIdentity(t *testing.T) {
 		replays := 0
 		receipts := func(func(ParseFacts, error) bool) { replays++ }
 		require.NoError(t, b.RebuildCSharpPartial(t.Context(), receipts, partialTestRules()))
-		want := 0
-		if lang == "csharp" {
-			want = 1 // The receipts could form a group that the live graph lacks.
-		}
-		require.Equal(t, want, replays)
+		require.Equal(t, 1, replays, "the receipts could form a group that the live graph lacks")
 		require.Equal(t, before, rebuildFrameworkCustodyRows(t, b), "every downstream input row and custody byte is unchanged")
 	}
 }
@@ -153,6 +149,63 @@ func TestRebuildCSharpPartialReceiptCohorts(t *testing.T) {
 	}
 }
 
+func TestRebuildCSharpPartialReceiptOnlyGroup(t *testing.T) {
+	canonical := partialTestType("a", "A.cs", "ns")
+	fragment := partialTestType("b", "B.cs", "ns")
+	for _, tc := range []struct {
+		name string
+		lang string
+	}{
+		{"no live candidate", "go"},
+		{"one live candidate", "csharp"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			first, second := *canonical, *fragment
+			first.Language, second.Language = tc.lang, "go"
+			b.AddBatch([]*graph.Node{&first, &second}, nil)
+			before := rebuildFrameworkCustodyRows(t, b)
+			receipts := partialTestReceipts(partialTestFacts("csharp", canonical), partialTestFacts("razor", fragment))
+			err := b.RebuildCSharpPartial(t.Context(), receipts, partialTestRules())
+			var refused *RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refused)
+			require.EqualValues(t, 2, refused.Count)
+			require.Equal(t, graph.EdgeIdentity{From: canonical.ID, Kind: "node"}, refused.First)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
+func TestRebuildCSharpPartialReceiptAdmission(t *testing.T) {
+	canonical := partialTestType("a", "A.cs", "ns")
+	fragment := partialTestType("b", "B.cs", "ns")
+	for _, name := range []string{"no language", "other file", "unknown ID", "role cleared"} {
+		t.Run(name, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			live := *fragment
+			live.Kind = graph.KindInterface
+			b.AddNode(canonical)
+			if name != "unknown ID" {
+				b.AddNode(&live)
+			}
+			before := rebuildFrameworkCustodyRows(t, b)
+			facts := partialTestFacts("razor", fragment)
+			if name == "no language" {
+				facts.EffectiveLanguage = ""
+			}
+			if name == "other file" {
+				facts.File.FilePath = "Other.cs"
+			}
+			receipts := []ParseFacts{partialTestFacts("csharp", canonical), facts}
+			if name == "role cleared" {
+				receipts = append(receipts, partialTestFacts("csharp", &live))
+			}
+			require.NoError(t, b.RebuildCSharpPartial(t.Context(), partialTestReceipts(receipts...), partialTestRules()))
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
 func TestRebuildCSharpPartialSettledAndSuppressed(t *testing.T) {
 	canonical := partialTestType("a", "A.cs", "ns")
 	fragment := partialTestType("b", "B.cs", "ns")
@@ -238,15 +291,22 @@ func TestRebuildCSharpPartialIncidentRowsAndClaims(t *testing.T) {
 func TestRebuildCSharpPartialAttributionBoundary(t *testing.T) {
 	canonical := partialTestType("a", "A.cs", "ns")
 	fragment := partialTestType("b", "B.cs", "ns")
+	later := partialTestType("c", "C.cs", "ns")
 	use := &graph.Node{ID: "use", FilePath: "Use.cs", Kind: graph.KindFunction}
 	var incoming []*graph.Edge
-	for i := 1; i <= 2049; i++ {
+	for i := 1; i <= 2048; i++ {
 		incoming = append(incoming, &graph.Edge{From: use.ID, To: fragment.ID, Kind: graph.EdgeReferences,
 			FilePath: use.FilePath, Line: i, Meta: map[string]any{"payload": fmt.Sprint(i)}})
 	}
 	b := newBuild(t, FullProfile)
-	b.AddBatch([]*graph.Node{canonical, fragment, use}, incoming)
-	receipts := partialTestReceipts(partialTestFacts("csharp", canonical), partialTestFacts("csharp", fragment), partialTestFacts("csharp", use, incoming...))
+	last := *incoming[len(incoming)-1]
+	last.To = later.ID
+	last.Meta = map[string]any{"payload": "loser"}
+	b.AddBatch([]*graph.Node{canonical, fragment, later, use}, append(incoming, &last))
+	// The last fragment offers the same destination as move 2048. Its
+	// earlier receipt cannot supersede the first fragment's payload.
+	receipts := partialTestReceipts(partialTestFacts("csharp", canonical), partialTestFacts("csharp", fragment),
+		partialTestFacts("csharp", later), partialTestFacts("csharp", use, append([]*graph.Edge{&last}, incoming...)...))
 	require.NoError(t, b.RebuildCSharpPartial(t.Context(), receipts, partialTestRules()))
 	for _, e := range incoming {
 		want := *e
@@ -254,7 +314,13 @@ func TestRebuildCSharpPartialAttributionBoundary(t *testing.T) {
 		got, err := b.pendingEdge(pendingEdgeKey(&want))
 		require.NoError(t, err)
 		require.Equal(t, &want, got)
+		old, err := b.pendingEdge(pendingEdgeKey(e))
+		require.NoError(t, err)
+		require.Nil(t, old)
 	}
+	old, err := b.pendingEdge(pendingEdgeKey(&last))
+	require.NoError(t, err)
+	require.Nil(t, old)
 }
 
 func TestRebuildCSharpPartialStaleSourceNotConsulted(t *testing.T) {

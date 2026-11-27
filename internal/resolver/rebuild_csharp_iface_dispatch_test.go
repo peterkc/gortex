@@ -216,7 +216,7 @@ func TestRebuildCSharpIfaceDispatchReceiptFamily(t *testing.T) {
 	}
 }
 
-// U5 records ties between native families at one physical Call key.
+// SQLite sorts the anchor projection by complete member site, not receipt order.
 func TestRebuildCSharpIfaceDispatchTwoFamiliesOneKey(t *testing.T) {
 	const file = "Types.cs"
 	a := ifaceRebuildNode(file, "IA", "csharp", graph.KindInterface)
@@ -234,11 +234,14 @@ func TestRebuildCSharpIfaceDispatchTwoFamiliesOneKey(t *testing.T) {
 		ifaceRebuildEdge(owner, z.ID, graph.EdgeImplements, 2),
 		ifaceRebuildEdge(owner, a.ID, graph.EdgeImplements, 2),
 		ifaceRebuildEdge(method, owner.ID, graph.EdgeMemberOf, 2), call)
-	build := openRebuildGRPCBuild(t, facts)
+	build, native := openRebuildEventStores(t, facts)
+	require.Equal(t, 1, ResolveCSharpInterfaceDispatch(native))
 	adds, err := RunRebuildCSharpIfaceDispatch(t.Context(), build, rebuildGRPCReceipts(facts), ifaceRebuildSelection(t, build))
 	require.NoError(t, err)
 	require.EqualValues(t, 1, adds)
-	require.Contains(t, rebuildEventSavedRows(t, build).edges, csharpIfaceDispatchEdge(call, method.ID, a.ID, 1))
+	want := rebuildEventSQLiteRows(native)
+	require.Contains(t, want.edges, csharpIfaceDispatchEdge(call, method.ID, a.ID, 1))
+	require.Equal(t, want, rebuildEventSavedRows(t, build))
 }
 
 func TestRebuildCSharpIfaceDispatchParentNodeCap(t *testing.T) {

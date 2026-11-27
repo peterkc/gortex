@@ -1,6 +1,7 @@
 package store_pebble
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -24,6 +25,12 @@ func TestRebuildCSharpIfaceDispatchProvedCallProducer(t *testing.T) {
 			{From: method.ID, To: impl.ID, Kind: graph.EdgeMemberOf, FilePath: file},
 		}
 		b.AddBatch(nodes, edges)
+		// A method with MemberOf, but no family, cannot dispatch this Call.
+		other := &graph.Node{ID: "other", Name: "Other", Kind: graph.KindMethod, Language: "csharp", FilePath: file}
+		b.AddNode(other)
+		b.AddEdge(&graph.Edge{From: other.ID, To: impl.ID, Kind: graph.EdgeMemberOf, FilePath: file})
+		b.AddEdge(&graph.Edge{From: call.From, To: other.ID, Kind: graph.EdgeCalls, FilePath: file,
+			Meta: map[string]any{"unrelated": strings.Repeat("x", rebuildCSharpIfaceRowBytes)}})
 		require.NoError(t, b.putEdgeWithCustody(call, rebuildEdgeCustody{proof: proof}))
 		facts := ParseFacts{EffectiveLanguage: "csharp", File: graph.FileMetaRow{FilePath: file}, Nodes: nodes, Edges: edges}
 		receipts := func(yield func(ParseFacts, error) bool) { yield(facts, nil) }

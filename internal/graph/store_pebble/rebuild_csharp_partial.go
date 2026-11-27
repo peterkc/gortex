@@ -56,8 +56,8 @@ func (b *BuildStore) RebuildCSharpPartial(ctx context.Context, receipts iter.Seq
 	}
 	defer func() { err = errors.Join(err, b.pending.DeleteRange(prefix, prefixEnd(prefix), pebble.NoSync)) }()
 	p := rebuildCSharpPartial{b: b, rules: rules}
-	candidate, active, err := p.groups(ctx)
-	if err != nil || !candidate {
+	active, err := p.groups(ctx)
+	if err != nil {
 		return err
 	}
 	if active {
@@ -65,6 +65,8 @@ func (b *BuildStore) RebuildCSharpPartial(ctx context.Context, receipts iter.Seq
 			return err
 		}
 	}
+	// A receipt can restore the C# role of a known ID even when no live
+	// node is a C# type. Check that cohort before treating the fold as inert.
 	if err := p.record(ctx, receipts); err != nil {
 		return err
 	}
@@ -104,7 +106,7 @@ func (p *rebuildCSharpPartial) visit(ctx context.Context, key []byte, visit func
 
 // c holds a group's lowest ID. x marks groups with more than one node, and
 // n maps every candidate ID to its group. Node keys already sort by ID.
-func (p *rebuildCSharpPartial) groups(ctx context.Context) (candidate, active bool, err error) {
+func (p *rebuildCSharpPartial) groups(ctx context.Context) (active bool, err error) {
 	err = p.b.RebuildView().visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
 		n, err := checkedRebuildLightNode(r, "C# partial")
 		if err != nil || n.Kind != graph.KindType || n.Language != "csharp" || n.Name == "" || n.FilePath == "" {
@@ -121,7 +123,6 @@ func (p *rebuildCSharpPartial) groups(ctx context.Context) (candidate, active bo
 		if name == "" {
 			return nil
 		}
-		candidate = true
 		group := keyStrings(nil, repo, ns, name)
 		if err := p.put(p.key('n', n.ID), group); err != nil {
 			return err
@@ -137,7 +138,7 @@ func (p *rebuildCSharpPartial) groups(ctx context.Context) (candidate, active bo
 		active = true
 		return p.put(append(p.key('x'), group...), first)
 	})
-	return candidate, active, err
+	return active, err
 }
 
 // h is the immutable roster of affected live edges. Register claims before

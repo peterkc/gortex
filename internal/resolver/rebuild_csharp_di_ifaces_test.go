@@ -163,7 +163,7 @@ func TestRebuildCSharpDIIfacesPhysicalKeyAndProof(t *testing.T) {
 	facts := rebuildEventFacts(file, "csharp", []*graph.Node{reg, impl, one, two}, marker, oneArc, twoArc)
 	winner := csharpDIProvideEdge(file, "Svc", one)
 	require.Equal(t, graph.EdgeIdentityFor(winner), graph.EdgeIdentityFor(csharpDIProvideEdge(file, "Svc", two)))
-	for _, tc := range []string{"exact", "source repo only", "marker", "declaration", "physical order"} {
+	for _, tc := range []string{"exact", "source repo only", "marker", "source repo mismatch", "declaration", "physical order"} {
 		t.Run(tc, func(t *testing.T) {
 			build, native := openRebuildEventStores(t, facts)
 			before := rebuildEventSavedRows(t, build)
@@ -179,7 +179,13 @@ func TestRebuildCSharpDIIfacesPhysicalKeyAndProof(t *testing.T) {
 				source.Name, source.Language, source.Kind = "renamed", "go", graph.KindVariable
 				receipt.Nodes = []*graph.Node{&source, impl, one, two}
 			case "marker":
-				receipt.Edges = []*graph.Edge{oneArc, twoArc}
+				changed := *marker
+				changed.Meta = nil // Same site does not prove the registration.
+				receipt.Edges = []*graph.Edge{&changed, oneArc, twoArc}
+			case "source repo mismatch":
+				changed := *reg
+				changed.RepoPrefix = "foreign"
+				receipt.Nodes = []*graph.Node{&changed, impl, one, two}
 			case "declaration":
 				changed := *one
 				changed.StartLine++
@@ -220,7 +226,7 @@ func TestRebuildCSharpDIIfacesNodeRowCaps(t *testing.T) {
 		interfaceTarget string
 		refuse          bool
 	}{
-		{"registration source", reg, iface.ID, true},
+		{"registration source", reg, iface.ID, false},
 		{"implementation", impl, iface.ID, true},
 		{"resolved interface", iface, iface.ID, true},
 		{"named interface", iface, "unresolved::IService", true},
