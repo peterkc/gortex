@@ -257,8 +257,31 @@ func TestRebuildReduxThunkRefusesUnprovedMove(t *testing.T) {
 	call.Meta["store_binding"] = "useStore"
 	left := rebuildEventFacts(callerFile, caller.Language, []*graph.Node{caller, local}, call)
 	right := rebuildEventFacts(getterFile, caller.Language, []*graph.Node{remote, getter})
-	for _, mismatch := range []string{"raw binding", "losing thunk scope", "getter eligibility"} {
-		t.Run(mismatch, func(t *testing.T) {
+	for _, tc := range []struct {
+		name, target string
+	}{
+		{name: "raw binding"},
+		{name: "losing thunk scope", target: remote.ID},
+		{name: "getter eligibility"},
+		{name: "caller moves within workspace", target: remote.ID},
+		{name: "caller workspace excludes getter winner"},
+		{name: "scoped singleton ignores changed raw binding", target: remote.ID},
+		{name: "raw binding omitted for caller-file winner", target: local.ID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			left, right := left, right
+			switch tc.name {
+			case "scoped singleton ignores changed raw binding":
+				// Keep a second live candidate outside the caller's workspace.
+				foreign := *local
+				foreign.WorkspaceID = "other"
+				left.Nodes = []*graph.Node{caller, &foreign}
+			case "raw binding omitted for caller-file winner":
+				localGetter := rebuildEventNode(callerFile, getter.Name, caller.Language, "")
+				localGetter.Kind = getter.Kind
+				left = rebuildEventFacts(callerFile, caller.Language, []*graph.Node{caller, local, localGetter}, call)
+				right = rebuildEventFacts(getterFile, caller.Language, []*graph.Node{remote})
+			}
 			b := openRebuildGRPCBuild(t, left, right)
 			before := rebuildEventSavedRows(t, b)
 			selection, err := NewFrameworkSynthesizerSelection([]string{SynthReduxThunk})
@@ -266,12 +289,28 @@ func TestRebuildReduxThunkRefusesUnprovedMove(t *testing.T) {
 			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
 			require.NoError(t, err)
 			l, r := left, right
-			switch mismatch {
-			case "raw binding":
+			var tail []store_pebble.ParseFacts
+			switch tc.name {
+			case "raw binding", "raw binding omitted for caller-file winner",
+				"scoped singleton ignores changed raw binding":
 				e := *call
 				e.Meta = maps.Clone(e.Meta)
-				delete(e.Meta, "store_binding")
+				if tc.name == "scoped singleton ignores changed raw binding" {
+					e.Meta["store_binding"] = "differentStore"
+				} else {
+					delete(e.Meta, "store_binding")
+				}
 				l.Edges = []*graph.Edge{&e}
+			case "caller moves within workspace":
+				// Move only the caller node receipt, not the Call receipt.
+				n := *caller
+				n.FilePath = "moved.ts"
+				l = rebuildEventFacts(callerFile, caller.Language, []*graph.Node{local}, call)
+				tail = append(tail, rebuildEventFacts(n.FilePath, n.Language, []*graph.Node{&n}))
+			case "caller workspace excludes getter winner":
+				n := *caller
+				n.WorkspaceID = "other"
+				l.Nodes = []*graph.Node{&n, local}
 			case "losing thunk scope":
 				n := *local
 				n.WorkspaceID = "other"
@@ -281,11 +320,12 @@ func TestRebuildReduxThunkRefusesUnprovedMove(t *testing.T) {
 				n.Meta = map[string]any{"store_factory": false}
 				r.Nodes = []*graph.Node{remote, &n}
 			}
-			stats, err := RunRebuildReduxThunk(t.Context(), b, rebuildGRPCReceipts(l, r), frozen)
-			if mismatch == "losing thunk scope" {
+			receipts := append([]store_pebble.ParseFacts{l, r}, tail...)
+			stats, err := RunRebuildReduxThunk(t.Context(), b, rebuildGRPCReceipts(receipts...), frozen)
+			if tc.target != "" {
 				require.NoError(t, err)
 				require.Equal(t, store_pebble.RebuildReduxThunkStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
-				requireRebuildStoreCandidateMove(t, b, before, call, remote.ID, SynthReduxThunk, ConfidenceHeuristic)
+				requireRebuildStoreCandidateMove(t, b, before, call, tc.target, SynthReduxThunk, ConfidenceHeuristic)
 				return
 			}
 			first := graph.EdgeIdentityFor(call)

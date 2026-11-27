@@ -87,7 +87,7 @@ func (b *BuildStore) RebuildReduxThunk(ctx context.Context, receipts iter.Seq2[P
 // Pool keys start with t (thunks), a (actions), or g (getters), then
 // a column: c candidate by ID, u cohort proof, i/w global/workspace
 // singleton, f/s their file singletons. Other columns: b wanted getter
-// names, l deferred Calls, n caller proof, p election witnesses, x exact getter files.
+// names, l deferred Calls, n caller scope proof, p election witnesses, x exact getter files.
 // The move helper uses r/m/o.
 func (p *rebuildReduxThunkPass) poolKey(pool, col byte, fields ...string) []byte {
 	return keyStrings(append(p.column(pool), col), fields...)
@@ -185,11 +185,14 @@ func (p *rebuildReduxThunkPass) collectGetters(ctx context.Context) error {
 }
 
 type rebuildReduxThunkPick struct {
-	target      string
-	inputs      [][]byte                       // consulted pool markers and caller
-	buckets     []rebuildStoreCandidateWitness // deciding candidate buckets
-	getter      bool                           // a pool consulted the getter
-	getterProof bool                           // the getter file can change a pool's decision
+	target         string
+	inputs         [][]byte                       // consulted pool markers and caller scopes
+	buckets        []rebuildStoreCandidateWitness // deciding candidate buckets
+	getter         bool                           // a pool consulted the getter
+	getterProof    bool                           // the getter file can change a pool's decision
+	getterWinner   bool                           // a getter selected a different winner from file fallback
+	bindingMatters bool                           // a consulted pool can use a binding
+	callerFile     bool                           // a pool can fall back to the caller file
 }
 
 func (p *rebuildReduxThunkPass) elect(e *graph.Edge, callee, binding string, resolveGetter bool) (pick rebuildReduxThunkPick, err error) {
@@ -226,6 +229,9 @@ func (p *rebuildReduxThunkPass) elect(e *graph.Edge, callee, binding string, res
 			}
 			callerFile = caller.FilePath
 		}
+		if seen && id == "" {
+			pick.bindingMatters = true
+		}
 		if !resolveGetter && binding != "" && seen && id == "" {
 			pick.getter = true
 			return pick, nil
@@ -248,8 +254,14 @@ func (p *rebuildReduxThunkPass) elect(e *graph.Edge, callee, binding string, res
 		if err != nil {
 			return pick, err
 		}
-		if binding != "" && seen && id == "" {
-			pick.getterProof = pick.getterProof || getterFile == "" || chosen.getterWinner
+		if seen && id == "" {
+			if binding != "" {
+				pick.getterProof = pick.getterProof || getterFile == "" || chosen.getterWinner
+				pick.getterWinner = pick.getterWinner || chosen.getterWinner
+			}
+			// A distinct winning getter has its own proof and masks caller
+			// file. Without it, even an empty caller file can affect fallback.
+			pick.callerFile = pick.callerFile || caller != nil && !chosen.getterWinner
 		}
 		pick.buckets = append(pick.buckets, chosen.buckets...)
 		if chosen.target != "" {
@@ -439,9 +451,22 @@ func (p *rebuildReduxThunkPass) record(ctx context.Context, facts ParseFacts) er
 		if live == nil {
 			return invalid("Redux Thunk recorder has no old Call")
 		}
-		rawBinding, _ := raw.Meta["store_binding"].(string)
-		liveBinding, _ := live.Meta["store_binding"].(string)
-		ok := lang != "" && raw.FilePath == file && p.rules.Stub(raw) == p.rules.Stub(live) && rawBinding == liveBinding
+		callee := p.rules.Stub(live)
+		ok := lang != "" && raw.FilePath == file && p.rules.Stub(raw) == callee
+		if ok {
+			rawBinding, _ := raw.Meta["store_binding"].(string)
+			liveBinding, _ := live.Meta["store_binding"].(string)
+			if rawBinding != liveBinding {
+				pick, err := p.elect(live, callee, liveBinding, true)
+				if err != nil {
+					return err
+				}
+				// Empty raw binding takes the same proven caller-file fallback
+				// unless a distinct getter winner overrides it. Other bindings
+				// can name an unconsulted getter when a pool is ambiguous.
+				ok = !pick.bindingMatters || rawBinding == "" && !pick.getterWinner
+			}
+		}
 		if err := p.noteReceipt(key, claim, ok); err != nil {
 			return err
 		}
@@ -460,9 +485,15 @@ func (p *rebuildReduxThunkPass) recordNode(raw *graph.Node, file, lang string) e
 		if err != nil {
 			return err
 		}
-		ok := rebuildStoreCallerReceipt(raw, live, file, lang)
-		if err := noteRebuildScratchState(p.put, key, state, rebuildScratchProofBit(ok)); err != nil {
-			return err
+		valid := rebuildStoreNodeReceipt(raw, live, file, lang)
+		proof := rebuildScratchProofBit(valid && raw.WorkspaceID == live.WorkspaceID)
+		if valid && raw.FilePath != live.FilePath {
+			proof |= rebuildStoreOtherFile
+		}
+		if proof&^state != 0 {
+			if err := p.put(key, []byte{state | proof}); err != nil {
+				return err
+			}
 		}
 	}
 	for _, pool := range [...]byte{'t', 'a', 'g'} {
@@ -548,6 +579,9 @@ func (p *rebuildReduxThunkPass) proved(old []byte, e *graph.Edge, anchor bool) (
 		want := byte(rebuildCapabilityWanted)
 		if key[len(p.prefix)] == 'n' {
 			want = rebuildScratchExact
+			if !pick.callerFile {
+				state &^= rebuildStoreOtherFile
+			}
 		}
 		if err != nil || state != want {
 			return false, err
