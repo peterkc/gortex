@@ -26,6 +26,14 @@ func (p *rebuildCallMoves) column(col byte) []byte {
 	return append(bytes.Clone(p.prefix), col)
 }
 
+func (p *rebuildCallMoves) key(col byte, fields ...string) []byte {
+	return keyStrings(p.column(col), fields...)
+}
+
+func (p *rebuildCallMoves) get(key []byte) ([]byte, error) {
+	return pendingGet(p.b.pending, key, copyValue)
+}
+
 func (p *rebuildCallMoves) put(key, value []byte) error {
 	return p.b.putRebuildScratch(key, value, p.rowBytes, p.label)
 }

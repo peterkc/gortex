@@ -91,14 +91,6 @@ func (b *BuildStore) RebuildObjectRegistry(ctx context.Context, receipts iter.Se
 	return p.stats, err
 }
 
-func (p *rebuildObjectRegistryPass) key(col byte, fields ...string) []byte {
-	return keyStrings(p.column(col), fields...)
-}
-
-func (p *rebuildObjectRegistryPass) get(key []byte) ([]byte, error) {
-	return pendingGet(p.b.pending, key, copyValue)
-}
-
 func (p *rebuildObjectRegistryPass) state(key []byte) (byte, error) {
 	return rebuildScratchState(p.b.pending, key, "Object Registry receipt proof")
 }

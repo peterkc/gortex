@@ -77,14 +77,6 @@ func (b *BuildStore) RebuildRTKQuery(ctx context.Context, receipts iter.Seq2[Par
 	return p.stats, err
 }
 
-func (p *rebuildRTKQueryPass) key(col byte, fields ...string) []byte {
-	return keyStrings(p.column(col), fields...)
-}
-
-func (p *rebuildRTKQueryPass) get(key []byte) ([]byte, error) {
-	return pendingGet(p.b.pending, key, copyValue)
-}
-
 func (p *rebuildRTKQueryPass) state(key []byte) (byte, error) {
 	return rebuildScratchState(p.b.pending, key, "RTK Query receipt proof")
 }
