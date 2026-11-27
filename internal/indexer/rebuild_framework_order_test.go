@@ -631,9 +631,9 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	implMethod := node(ifaceFile, "csharp", ifaceMethod.Name, graph.KindMethod, 5)
 	ifaceMethod.ID, implMethod.ID = iface.ID+".Tick", impl.ID+".Tick"
 	invoke := node(ifaceFile, "csharp", "invoke", graph.KindMethod, 7)
-	registration := &graph.Node{ID: ifaceFile, Name: ifaceFile, Kind: graph.KindFile, Language: "csharp", FilePath: ifaceFile}
-	ifaceFacts := receipt([]*graph.Node{iface, ifaceMethod, impl, implMethod, invoke, registration},
-		edge(registration, graph.UnresolvedMarker+impl.Name, graph.EdgeProvides, 9,
+	diRegistration := &graph.Node{ID: ifaceFile, Name: ifaceFile, Kind: graph.KindFile, Language: "csharp", FilePath: ifaceFile}
+	ifaceFacts := receipt([]*graph.Node{iface, ifaceMethod, impl, implMethod, invoke, diRegistration},
+		edge(diRegistration, graph.UnresolvedMarker+impl.Name, graph.EdgeProvides, 9,
 			map[string]any{graph.MetaDIBinding: graph.DIBindingAsImplemented}),
 		edge(ifaceMethod, iface.ID, graph.EdgeMemberOf, 2, nil),
 		edge(impl, iface.ID, graph.EdgeImplements, 4, nil),
