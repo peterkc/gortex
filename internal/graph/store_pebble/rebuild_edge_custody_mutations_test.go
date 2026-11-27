@@ -318,7 +318,7 @@ func seedClosureMutationCustody(t *testing.T) (*BuildStore, graph.Edge) {
 		File:              graph.FileMetaRow{FilePath: file},
 		Nodes:             []*graph.Node{dispatch, registrar},
 	})
-	stats, err := b.RebuildClosureCollection(t.Context(), receipts, 8,
+	stats, err := b.RebuildClosureCollection(t.Context(), nil, receipts, 8,
 		func(d, r *graph.Node) bool { return d.WorkspaceID == r.WorkspaceID }, makeCall, closureTestApple)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, stats.Edges)

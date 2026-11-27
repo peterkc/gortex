@@ -206,6 +206,8 @@ type FrameworkSynthesizerSelection struct {
 	// the chains that failed before a declaration-preserving save
 	// (WithFactoryChainPrior).
 	factoryChainPrior *FactoryChainPrior
+	// Only private rebuild readers use this exact early contract set.
+	rebuildEarlyContractIDs map[string]string
 }
 
 // WithFactoryChainPrior returns the selection with the changed files'

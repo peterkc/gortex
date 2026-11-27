@@ -35,6 +35,9 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 	present, markers := map[string]int{}, map[string]int{}
 	var observerRoles int
 	if err := view.VisitFrameworkGateNodes(ctx, func(n *graph.Node) error {
+		if _, replaced := selection.rebuildEarlyContractIDs[n.ID]; replaced {
+			return nil
+		}
 		family := frameworkLanguageFamily(n.Language)
 		if family != "" {
 			present[family]++

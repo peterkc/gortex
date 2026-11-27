@@ -25,7 +25,7 @@ type RebuildClosureCollectionStats struct {
 // raw roles before filtering pairs, then prove only the endpoints of new calls
 // and the Apple witness. Preserve occupied SQLite durable keys. makeEdge
 // builds a call from the dispatcher to the registrar for each distinct pair.
-func (b *BuildStore) RebuildClosureCollection(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
+func (b *BuildStore) RebuildClosureCollection(ctx context.Context, contractIDs map[string]string, receipts iter.Seq2[ParseFacts, error],
 	maxFanout int, sameBoundary func(*graph.Node, *graph.Node) bool, makeEdge func(*graph.Node, *graph.Node, string) *graph.Edge,
 	appleLanguage func(string) bool,
 ) (stats RebuildClosureCollectionStats, err error) {
@@ -48,7 +48,7 @@ func (b *BuildStore) RebuildClosureCollection(ctx context.Context, receipts iter
 	defer func() {
 		err = errors.Join(err, b.pending.DeleteRange(rebuildClosurePrefix, prefixEnd(rebuildClosurePrefix), pebble.NoSync))
 	}()
-	p := rebuildClosurePass{b: b}
+	p := rebuildClosurePass{b: b, contractIDs: contractIDs}
 	if err := p.pair(ctx, maxFanout, sameBoundary, makeEdge); err != nil {
 		return stats, err
 	}
@@ -63,9 +63,10 @@ func (b *BuildStore) RebuildClosureCollection(ctx context.Context, receipts iter
 }
 
 type rebuildClosurePass struct {
-	b       *BuildStore
-	changed bool
-	stats   RebuildClosureCollectionStats
+	b           *BuildStore
+	contractIDs map[string]string
+	changed     bool
+	stats       RebuildClosureCollectionStats
 }
 
 func rebuildClosureKey(col byte, fields ...string) []byte {
@@ -87,6 +88,9 @@ func (p *rebuildClosurePass) pair(ctx context.Context, maxFanout int,
 		}
 		if !bytes.Equal(r.key, pendingNodeKey(light.ID)) {
 			return invalid("closure collection node identity")
+		}
+		if _, replaced := p.contractIDs[light.ID]; replaced {
+			return nil
 		}
 		if light.Kind != graph.KindMethod && light.Kind != graph.KindFunction {
 			return nil
@@ -229,6 +233,9 @@ func (p *rebuildClosurePass) prove(ctx context.Context, receipts iter.Seq2[Parse
 		n, err := checkedRebuildLightNode(r, "closure collection")
 		if err != nil || !appleLanguage(n.Language) {
 			return err
+		}
+		if _, replaced := p.contractIDs[n.ID]; replaced {
+			return nil
 		}
 		return p.put(rebuildClosureKey('a', n.ID), []byte{rebuildCapabilityWanted})
 	}); err != nil {

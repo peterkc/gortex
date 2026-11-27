@@ -16,7 +16,7 @@ func RunRebuildGRPC(ctx context.Context, b *store_pebble.BuildStore, receipts it
 	if !selection.allows(SynthGRPCStub) {
 		return store_pebble.RebuildGRPCStats{}, nil
 	}
-	return b.RebuildGRPC(ctx, receipts, func(e *graph.Edge, service, method, handler, origin string) bool {
+	return b.RebuildGRPC(ctx, selection.rebuildEarlyContractIDs, receipts, func(e *graph.Edge, service, method, handler, origin string) bool {
 		confidence := 0.7
 		if origin == graph.OriginASTResolved {
 			confidence = 0.9

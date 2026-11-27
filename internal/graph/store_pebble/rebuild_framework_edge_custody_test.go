@@ -190,7 +190,7 @@ func TestRebuildGRPCOrdersAndProvesRawCustody(t *testing.T) {
 			}
 			before := rebuildFrameworkCustodyRows(t, b)
 			receipts := func(yield func(ParseFacts, error) bool) { yield(facts, nil) }
-			stats, err := b.RebuildGRPC(ctx, receipts,
+			stats, err := b.RebuildGRPC(ctx, nil, receipts,
 				func(e *graph.Edge, _, _, to, _ string) bool {
 					if to == "" || e.To == to {
 						return false
@@ -328,7 +328,7 @@ func TestRebuildGRPCRefusesDuplicateRawCustody(t *testing.T) {
 		EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: raw.FilePath}, Edges: []*graph.Edge{&raw},
 	}
 	receipts := func(yield func(ParseFacts, error) bool) { yield(facts, nil) }
-	stats, err := b.RebuildGRPC(ctx, receipts, func(*graph.Edge, string, string, string, string) bool { return false })
+	stats, err := b.RebuildGRPC(ctx, nil, receipts, func(*graph.Edge, string, string, string, string) bool { return false })
 	require.ErrorIs(t, err, ErrRebuildGRPC)
 	var refused *RebuildUnknownProvenanceError
 	require.ErrorAs(t, err, &refused)

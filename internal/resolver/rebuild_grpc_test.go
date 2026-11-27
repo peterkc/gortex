@@ -520,3 +520,47 @@ func TestRebuildGRPCExactReceiptProof(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildGRPCEarlyContractFallback(t *testing.T) {
+	const impl, contract = "p/f.go::other", "env::WORLD"
+	facts := rebuildGRPCFixture(0)
+	facts.Nodes = slices.DeleteFunc(facts.Nodes, func(n *graph.Node) bool { return n.ID == impl })
+	facts.File.NodeCount = len(facts.Nodes)
+	for _, e := range facts.Edges {
+		if e.Kind == graph.EdgeImplements && e.From == impl {
+			e.From = contract
+		}
+		if e.Kind == graph.EdgeMemberOf && e.To == impl {
+			e.To = contract
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		ids  map[string]string
+		want int
+	}{
+		{name: "built-empty", ids: map[string]string{}, want: 4},
+		{name: "private deferred-only id", ids: map[string]string{contract: "settings.rb"}, want: 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			native := rebuildGRPCNative(t, facts)
+			for id, file := range tc.ids {
+				require.NoError(t, native.AddBatchChecked([]*graph.Node{{
+					ID: id, Name: id, Kind: graph.KindContract, FilePath: file, Language: "contract",
+				}}, nil))
+			}
+			want := rebuildGRPCNativeCalls(t, native, tc.want)
+			b, receipts := openRebuildGRPCFixture(t, facts)
+			selection := AllFrameworkSynthesizers().WithRebuildEarlyContractIDs(tc.ids)
+			selection, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+			require.NoError(t, err)
+			s, err := RunRebuildGRPC(t.Context(), b, receipts, selection)
+			require.NoError(t, err)
+			require.Equal(t, uint64(tc.want), s.Resolved)
+			require.Equal(t, want, rebuildGRPCSavedCalls(t, b))
+			n, err := b.RebuildView().Node(t.Context(), contract)
+			require.NoError(t, err)
+			require.Nil(t, n)
+		})
+	}
+}

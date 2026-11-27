@@ -455,7 +455,7 @@ func buildRebuildStages(
 			zap.Uint64("claim_peak_row_bytes", stats.Signatures.Claims.PeakRowBytes))
 		// Positions 1–12 preserve node Language, Kind and Name used by the live
 		// KMP and RN/Expo gates. Temporal can stamp node metadata.
-		requestedSelection := idx.frameworkSynthesizerSelection()
+		requestedSelection := idx.frameworkSynthesizerSelection().WithRebuildEarlyContractIDs(earlyIDs)
 		familyGate, err := resolver.FreezeRebuildFrameworkFamilyGate(ctx, private.RebuildView(), requestedSelection)
 		if err != nil {
 			return err

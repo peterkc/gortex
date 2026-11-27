@@ -26,7 +26,7 @@ func TestRebuildGRPCRejectsInvalidScratch(t *testing.T) {
 	}
 	key := rebuildGRPCKey('s', "occupied")
 	require.NoError(t, b.pending.Set(key, []byte("owner"), pebble.NoSync))
-	stats, err := b.RebuildGRPC(ctx, receipts, rebind)
+	stats, err := b.RebuildGRPC(ctx, nil, receipts, rebind)
 	require.ErrorIs(t, err, ErrRebuildGRPC)
 	require.ErrorContains(t, err, "gRPC scratch range occupied")
 	require.Zero(t, stats)
@@ -56,7 +56,7 @@ func TestRebuildGRPCRejectsMalformedRecorder(t *testing.T) {
 	receipts := func(func(ParseFacts, error) bool) {
 		t.Fatal("malformed custody must refuse before receipt replay")
 	}
-	stats, err := b.RebuildGRPC(t.Context(), receipts, func(*graph.Edge, string, string, string, string) bool {
+	stats, err := b.RebuildGRPC(t.Context(), nil, receipts, func(*graph.Edge, string, string, string, string) bool {
 		t.Fatal("malformed custody must refuse before rebind")
 		return false
 	})
@@ -106,7 +106,7 @@ func TestRebuildGRPCWinnerCustody(t *testing.T) {
 	before := rebuildFrameworkCustodyRows(t, b)
 	flushed := b.pending.Metrics().Levels[0].TableBytesFlushed
 	var reduced []string
-	stats, err := b.RebuildGRPC(ctx, func(yield func(ParseFacts, error) bool) { yield(facts, nil) },
+	stats, err := b.RebuildGRPC(ctx, nil, func(yield func(ParseFacts, error) bool) { yield(facts, nil) },
 		func(e *graph.Edge, _, _, to, _ string) bool {
 			reduced = append(reduced, e.To)
 			if to == "" || e.To == to {
@@ -212,7 +212,7 @@ func TestRebuildGRPCStaleCustodyOrder(t *testing.T) {
 			}
 			before := savedRows()
 			var reduced []int
-			stats, err := b.RebuildGRPC(ctx, func(yield func(ParseFacts, error) bool) { yield(facts, nil) },
+			stats, err := b.RebuildGRPC(ctx, nil, func(yield func(ParseFacts, error) bool) { yield(facts, nil) },
 				func(e *graph.Edge, _, _, to, _ string) bool {
 					require.Equal(t, handler, to)
 					reduced = append(reduced, e.Line)

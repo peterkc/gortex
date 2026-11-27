@@ -401,3 +401,37 @@ func TestRebuildClosureCollectionAppleMarkerNodeCap(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildClosureCollectionEarlyContractMasksRole(t *testing.T) {
+	const file, language, field = "roles.swift", "swift", "handlers"
+	dispatch := rebuildClosureCollectionNode(file, "dispatch", language, rebuildCCDispatch, field)
+	registrar := rebuildClosureCollectionNode(file, "register", language, rebuildCCAppend, field)
+	dispatch.ID = "env::DISPATCH"
+	for _, tc := range []struct {
+		name string
+		ids  map[string]string
+		want int
+	}{
+		{name: "built-empty", ids: map[string]string{}, want: 1},
+		{name: "contract replaces dispatcher", ids: map[string]string{dispatch.ID: "settings.rb"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			proof, b, native := openRebuildObserverStores(t, nil, rebuildEventFacts(file, language, []*graph.Node{dispatch, registrar}))
+			for id, path := range tc.ids {
+				require.NoError(t, native.AddBatchChecked([]*graph.Node{{
+					ID: id, Name: id, Kind: graph.KindContract, FilePath: path, Language: "contract",
+				}}, nil))
+			}
+			require.Equal(t, tc.want, ResolveClosureCollectionCalls(native))
+			selection := rebuildClosureCollectionSelection(t).WithRebuildEarlyContractIDs(tc.ids)
+			selection, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+			require.NoError(t, err)
+			s, err := RunRebuildClosureCollection(t.Context(), b, rebuildGRPCReceipts(proof...), selection)
+			require.NoError(t, err)
+			require.Equal(t, uint64(tc.want), s.Edges)
+			n, err := b.RebuildView().Node(t.Context(), dispatch.ID)
+			require.NoError(t, err)
+			require.Equal(t, graph.KindMethod, n.Kind)
+		})
+	}
+}
