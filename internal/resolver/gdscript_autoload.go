@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"iter"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -115,15 +116,23 @@ func gdAutoloadScripts(g gdKindNodes) map[string]string {
 		if decls == nil {
 			decls = map[string]string{}
 		}
-		if prev, dup := decls[name]; dup && prev != script {
-			decls[name] = ""
-			continue
-		}
-		decls[name] = script
+		gdRecordAutoload(decls, name, script)
 	}
 	if len(decls) == 0 {
 		return nil
 	}
+	return gdResolveAutoloadScripts(decls, g.NodesByKind(graph.KindFile))
+}
+
+func gdRecordAutoload(decls map[string]string, name, script string) {
+	if prev, dup := decls[name]; dup && prev != script {
+		decls[name] = ""
+		return
+	}
+	decls[name] = script
+}
+
+func gdResolveAutoloadScripts(decls map[string]string, files iter.Seq[*graph.Node]) map[string]string {
 	// `res://` paths are project-root relative; graph file IDs carry the
 	// repo prefix and the repo-relative path. Match by path suffix on a
 	// separator boundary, and drop any singleton whose path is ambiguous
@@ -132,7 +141,7 @@ func gdAutoloadScripts(g gdKindNodes) map[string]string {
 	// a scan per singleton would multiply that by the manifest's length.
 	out := make(map[string]string, len(decls))
 	ambiguous := make(map[string]bool, len(decls))
-	for f := range g.NodesByKind(graph.KindFile) {
+	for f := range files {
 		if !isGDScriptFile(f) {
 			continue
 		}

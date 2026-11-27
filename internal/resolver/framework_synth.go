@@ -907,7 +907,7 @@ func recordFrameworkNodeCandidates(markers map[string]int, n *graph.Node, family
 		markers[SynthEventChannel]++
 	}
 
-	language := strings.ToLower(strings.TrimSpace(n.Language))
+	language := normalizeFrameworkLanguage(n.Language)
 	if strict := languageFamily(language); strict != "" {
 		markers[frameworkMarkerStrictFamilyPrefix+strict]++
 	}
@@ -1020,8 +1020,12 @@ func frameworkObserverRole(n *graph.Node) uint8 {
 	return role
 }
 
+func normalizeFrameworkLanguage(language string) string {
+	return strings.ToLower(strings.TrimSpace(language))
+}
+
 func frameworkLanguageFamily(language string) string {
-	language = strings.ToLower(strings.TrimSpace(language))
+	language = normalizeFrameworkLanguage(language)
 	if family := languageFamily(language); family != "" {
 		return family
 	}

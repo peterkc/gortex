@@ -98,26 +98,36 @@ type gdClass struct {
 func gdClassIndex(g gdKindNodes) map[string]*gdClass {
 	out := map[string]*gdClass{}
 	for n := range g.NodesByKind(graph.KindType) {
-		if n == nil || n.Language != "gdscript" || n.Meta == nil {
-			continue
+		if class, ok := gdClassDecl(n); ok {
+			gdIndexClass(out, n.Name, class)
 		}
-		switch kind, _ := n.Meta["gd_kind"].(string); kind {
-		case "class_name", "inner_class":
-		default:
-			continue
-		}
-		fileID, _, _ := strings.Cut(n.ID, "::")
-		parent, _ := n.Meta["gd_extends"].(string)
-		opaque, _ := n.Meta["gd_extends_opaque"].(bool)
-		if prev, dup := out[n.Name]; dup {
-			if prev.fileID != fileID {
-				prev.opaque = true
-			}
-			continue
-		}
-		out[n.Name] = &gdClass{fileID: fileID, parent: parent, opaque: opaque}
 	}
 	return out
+}
+
+func gdClassDecl(n *graph.Node) (gdClass, bool) {
+	if n == nil || n.Language != "gdscript" || n.Meta == nil {
+		return gdClass{}, false
+	}
+	switch kind, _ := n.Meta["gd_kind"].(string); kind {
+	case "class_name", "inner_class":
+	default:
+		return gdClass{}, false
+	}
+	fileID, _, _ := strings.Cut(n.ID, "::")
+	parent, _ := n.Meta["gd_extends"].(string)
+	opaque, _ := n.Meta["gd_extends_opaque"].(bool)
+	return gdClass{fileID: fileID, parent: parent, opaque: opaque}, true
+}
+
+func gdIndexClass(out map[string]*gdClass, name string, class gdClass) {
+	if prev, dup := out[name]; dup {
+		if prev.fileID != class.fileID {
+			prev.opaque = true
+		}
+		return
+	}
+	out[name] = &class
 }
 
 // gdReceiverMismatch reports whether a resolved GDScript edge binds to a

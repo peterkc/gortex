@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"iter"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -104,14 +105,22 @@ func gdPreloadAliases(g gdKindNodes) map[string]map[string]string {
 		if decls == nil {
 			decls = map[string]map[string]string{}
 		}
-		if decls[fileID] == nil {
-			decls[fileID] = map[string]string{}
-		}
-		decls[fileID][n.Name] = path
+		gdRecordPreloadAlias(decls, fileID, n.Name, path)
 	}
 	if len(decls) == 0 {
 		return nil
 	}
+	return gdResolvePreloadAliases(decls, g.NodesByKind(graph.KindFile))
+}
+
+func gdRecordPreloadAlias(decls map[string]map[string]string, fileID, name, path string) {
+	if decls[fileID] == nil {
+		decls[fileID] = map[string]string{}
+	}
+	decls[fileID][name] = path
+}
+
+func gdResolvePreloadAliases(decls map[string]map[string]string, files iter.Seq[*graph.Node]) map[string]map[string]string {
 
 	// One pass over the script file nodes serves every alias — a scan per
 	// alias would multiply a full-store walk by the project's alias count.
@@ -123,7 +132,7 @@ func gdPreloadAliases(g gdKindNodes) map[string]map[string]string {
 			wanted[path] = true
 		}
 	}
-	for f := range g.NodesByKind(graph.KindFile) {
+	for f := range files {
 		if !isGDScriptFile(f) {
 			continue
 		}
