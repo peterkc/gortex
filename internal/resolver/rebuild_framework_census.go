@@ -22,7 +22,7 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 		SynthReactNative, SynthReactNativePair, SynthObserverChannel, SynthClosureCollection,
 		SynthReactSetState, SynthFlutterSetState, SynthKMPExpectActual, SynthExpoModules, SynthFabric, SynthMyBatis,
 		SynthSQLCallsite, SynthStoreFactory, SynthReduxThunk, SynthNgRxEffect,
-		SynthObjectRegistry, SynthRTKQuery, SynthVuexDispatch, SynthCelery, SynthSpringEvent, SynthMediatR, SynthCSharpDIIfaces, SynthCSharpIfaceDispatch, SynthCSharpEFCoreModels, SynthSidekiq, SynthLaravelEvent, SynthFnPointerDispatch, SynthMacroExpansion, SynthGinMiddleware,
+		SynthObjectRegistry, SynthRTKQuery, SynthVuexDispatch, SynthCelery, SynthSpringEvent, SynthMediatR, SynthCSharpDIIfaces, SynthCSharpIfaceDispatch, SynthCSharpEFCoreModels, SynthSidekiq, SynthLaravelEvent, SynthFnPointerDispatch, SynthMacroExpansion, SynthGinMiddleware, SynthExpressResolve,
 	} {
 		if selection.allows(name) {
 			frozen.names[name] = struct{}{}
@@ -70,10 +70,11 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 	_, spring := frozen.names[SynthSpringEvent]
 	_, mediatr := frozen.names[SynthMediatR]
 	_, laravel := frozen.names[SynthLaravelEvent]
+	_, express := frozen.names[SynthExpressResolve]
 	if redux || ngrx || rtk || vuex || celery || spring || mediatr || laravel {
 		edges.via = make(map[string]bool, 8)
 	}
-	if grpc || temporal || react || flutter || redux || ngrx || registry || rtk || vuex || celery || spring || mediatr || laravel {
+	if grpc || temporal || react || flutter || redux || ngrx || registry || rtk || vuex || celery || spring || mediatr || laravel || express {
 		if err := view.VisitFrameworkGateEdges(ctx, temporal, func(e graph.FrameworkCensusEdge) error {
 			if e.Kind == graph.EdgeCalls {
 				via := (redux && e.Via == reduxThunkVia) || (ngrx && e.Via == ngrxEffectVia) ||
@@ -86,6 +87,7 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 				if via || (spring && e.Via == springEventVia) {
 					edges.via[e.Via] = true
 				}
+				edges.expressHandlerRef = edges.expressHandlerRef || express && e.HasExpressHandlerRef && graph.IsUnresolvedTarget(e.To)
 				edges.objectRegistryValue = edges.objectRegistryValue || objectRegistry
 				edges.setStateTarget = edges.setStateTarget || setState
 				edges.grpcStub = edges.grpcStub || grpcStub

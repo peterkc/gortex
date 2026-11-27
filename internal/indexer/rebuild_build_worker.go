@@ -709,6 +709,14 @@ func buildRebuildStages(
 		if ginOffers != 0 {
 			logger.Info("rebuild Gin middleware applied to private build", zap.Uint64("offers", ginOffers))
 		}
+		express, err := resolver.RunRebuildExpress(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if express.Stubs != 0 {
+			logger.Info("rebuild Express applied to private build",
+				zap.Uint64("stubs", express.Stubs), zap.Uint64("moves", express.Moves))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.

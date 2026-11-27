@@ -59,6 +59,7 @@ func (v RebuildView) VisitFrameworkGateEdges(ctx context.Context, annotations bo
 		}
 		row := graph.FrameworkCensusEdge{EdgeIdentity: graph.EdgeIdentityFor(e)}
 		row.Via, _ = e.Meta["via"].(string)
+		_, row.HasExpressHandlerRef = e.Meta["express_handler_ref"]
 		row.GRPCService, _ = e.Meta["grpc_service"].(string)
 		row.GRPCMethod, _ = e.Meta["grpc_method"].(string)
 		row.RegistryValue, _ = e.Meta["registry_value"].(string)
