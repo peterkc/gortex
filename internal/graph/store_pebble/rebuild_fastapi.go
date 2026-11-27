@@ -28,6 +28,8 @@ type RebuildConventionRules struct {
 	Eligible func(*graph.Node) bool
 	Rank     func(file, caller string, dirs []string) int
 	Rebind   func(*graph.Edge, string, float64) graph.EdgeReindex
+	// AllowWinner rejects the elected candidate, not the candidate itself.
+	AllowWinner func(name, file string) bool
 }
 
 type rebuildConventionPass struct {
@@ -153,22 +155,23 @@ func (b *BuildStore) rebuildConvention(ctx context.Context, receipts iter.Seq2[P
 // A tie at the highest rank is ambiguous; caller directory cannot break a
 // tie among preferred candidates unless exactly one of them is local.
 type rebuildConventionPick struct {
-	id     string
-	rank   int
-	tied   bool
-	chosen bool
+	id      string
+	rank    int
+	tied    bool
+	chosen  bool
+	allowed bool
 }
 
-func (p *rebuildConventionPick) add(id string, rank int) {
+func (p *rebuildConventionPick) add(id string, rank int, allowed bool) {
 	if !p.chosen || rank > p.rank {
-		*p = rebuildConventionPick{id: id, rank: rank, chosen: true}
+		*p = rebuildConventionPick{id: id, rank: rank, chosen: true, allowed: allowed}
 	} else if rank == p.rank {
 		p.tied = true
 	}
 }
 
 func (p rebuildConventionPick) result() (string, float64) {
-	if !p.chosen || p.tied || p.id == "" {
+	if !p.chosen || p.tied || p.id == "" || !p.allowed {
 		return "", 0
 	}
 	return p.id, [...]float64{0.7, 0.85, 0.9, 0.9}[p.rank]
@@ -183,13 +186,14 @@ func (p *rebuildConventionPass) pick(ctx context.Context, names, dirs []string, 
 				return nil
 			}
 			rank := p.rules.Rank(n.FilePath, file, dirs)
-			live.add(n.ID, rank)
+			allowed := p.rules.AllowWinner == nil || p.rules.AllowWinner(name, n.FilePath)
+			live.add(n.ID, rank, allowed)
 			if !prove {
 				return nil
 			}
 			exact, err := p.present(p.key('p', n.ID))
 			if exact {
-				proved.add(n.ID, rank)
+				proved.add(n.ID, rank, allowed)
 			}
 			return err
 		}); err != nil {

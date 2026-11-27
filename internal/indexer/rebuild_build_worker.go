@@ -762,6 +762,13 @@ func buildRebuildStages(
 		if godotPreloadMoves != 0 {
 			logger.Info("rebuild Godot preload alias applied to private build", zap.Uint64("moves", godotPreloadMoves))
 		}
+		swiftuiMoves, err := resolver.RunRebuildSwiftUI(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if swiftuiMoves != 0 {
+			logger.Info("rebuild SwiftUI applied to private build", zap.Uint64("moves", swiftuiMoves))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.

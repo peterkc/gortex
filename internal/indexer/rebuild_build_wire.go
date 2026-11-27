@@ -209,6 +209,8 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildRails,
 	store_pebble.ErrRebuildGodotAutoload,
 	store_pebble.ErrRebuildGodotPreloadAlias,
+	nil, // 84: deferred Godot scene connections
+	store_pebble.ErrRebuildSwiftUI,
 }
 
 func buildRefusal(err error) rebuildBuildReply {

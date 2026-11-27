@@ -65,6 +65,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"Rails", "moves", 1},
 		{"Godot autoload", "moves", 1},
 		{"Godot preload alias", "moves", 1},
+		{"SwiftUI", "moves", 1},
 	}
 	for _, tc := range []struct {
 		name              string
@@ -755,6 +756,12 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	godotPreloadFacts := receipt([]*graph.Node{godotPreloadCaller, godotPreloadDecl},
 		edge(godotPreloadCaller, "unresolved::*."+godotMember.Name, graph.EdgeCalls, 3, map[string]any{"receiver_type": godotPreloadDecl.Name}))
 
+	const swiftuiPath = "SwiftUIHarness.swift"
+	swiftuiCaller := node(swiftuiPath, "swift", "makePanel", graph.KindFunction, 1)
+	swiftuiTarget := node(swiftuiPath, "swift", "DashboardView", graph.KindType, 4)
+	swiftuiFacts := receipt([]*graph.Node{swiftuiCaller, swiftuiTarget},
+		edge(swiftuiCaller, "unresolved::"+swiftuiTarget.Name, graph.EdgeInstantiates, 2, nil))
+
 	return []store_pebble.ParseFacts{
 		receipt([]*graph.Node{objc}),
 		receipt([]*graph.Node{swift, dispatch, appendHandler, expo}),
@@ -766,6 +773,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{sql}),
 		receipt([]*graph.Node{action}),
 		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts, laravelFacts, fnFacts, macroFacts, ginFacts, expressFacts, reactFallbackFacts, fastapiFacts, railsFacts,
-		godotManifestFacts, godotScriptFacts, godotPreloadFacts,
+		godotManifestFacts, godotScriptFacts, godotPreloadFacts, swiftuiFacts,
 	}
 }
