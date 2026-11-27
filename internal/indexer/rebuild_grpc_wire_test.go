@@ -52,6 +52,7 @@ func TestRebuildGRPCWireRefusals(t *testing.T) {
 		{"macro expansion", store_pebble.ErrRebuildMacroExpansion, 76},
 		{"Gin middleware", store_pebble.ErrRebuildGinMiddleware, 77},
 		{"Express", store_pebble.ErrRebuildExpress, 78},
+		{"FastAPI", store_pebble.ErrRebuildFastAPI, 80},
 	} {
 		t.Run(stage.name, func(t *testing.T) {
 			for _, tc := range []struct {

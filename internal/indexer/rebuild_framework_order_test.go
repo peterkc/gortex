@@ -60,6 +60,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"macro expansion", "adds", 1},
 		{"Gin middleware", "offers", 1},
 		{"Express", "moves", 1},
+		{"FastAPI", "moves", 1},
 	}
 	for _, tc := range []struct {
 		name              string
@@ -703,7 +704,8 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	ginDispatch.Meta = map[string]any{"gin_dispatcher": true}
 	ginHandler := node(ginFile, "go", "ginHandler", graph.KindFunction, 4)
 	ginHandler.Meta = map[string]any{"gin_handlers": []string{ginHandler.Name}}
-	ginFacts := receipt([]*graph.Node{ginDispatch, ginHandler})
+	fastapiTarget := node(ginFile, "go", "lookupDependency", graph.KindVariable, 6)
+	ginFacts := receipt([]*graph.Node{ginDispatch, ginHandler, fastapiTarget})
 
 	const expressPath = "express.ts"
 	expressAnchor := node(expressPath, "typescript", "route handler", graph.KindFunction, 1)
@@ -711,6 +713,12 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	expressFacts := receipt([]*graph.Node{expressAnchor, expressAuth},
 		edge(expressAnchor, "unresolved::routeAuthMiddleware", graph.EdgeCalls, 2,
 			map[string]any{"express_handler_ref": true, "express_ref_name": "routeAuthMiddleware"}))
+
+	const fastapiFile = "api.py"
+	fastapiSource := node(fastapiFile, "python", "dependencyCaller", graph.KindFunction, 1)
+	fastapiFacts := receipt([]*graph.Node{fastapiSource},
+		edge(fastapiSource, "unresolved::"+fastapiTarget.Name, graph.EdgeCalls, 2,
+			map[string]any{"via": "fastapi.Depends"}))
 
 	return []store_pebble.ParseFacts{
 		receipt([]*graph.Node{objc}),
@@ -722,6 +730,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{actual}),
 		receipt([]*graph.Node{sql}),
 		receipt([]*graph.Node{action}),
-		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts, laravelFacts, fnFacts, macroFacts, ginFacts, expressFacts,
+		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts, laravelFacts, fnFacts, macroFacts, ginFacts, expressFacts, fastapiFacts,
 	}
 }

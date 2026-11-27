@@ -434,6 +434,9 @@ func buildRebuildStages(
 		if err := resolver.FreezeRebuildMacroExpansionInputs(ctx, private, selection); err != nil {
 			return err
 		}
+		if err := resolver.FreezeRebuildFastAPIInputs(ctx, private, selection); err != nil {
+			return err
+		}
 		grpc, err := resolver.RunRebuildGRPC(ctx, private, receipts, selection)
 		if err != nil {
 			return err
@@ -716,6 +719,13 @@ func buildRebuildStages(
 		if express.Stubs != 0 {
 			logger.Info("rebuild Express applied to private build",
 				zap.Uint64("stubs", express.Stubs), zap.Uint64("moves", express.Moves))
+		}
+		fastapiMoves, err := resolver.RunRebuildFastAPI(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if fastapiMoves != 0 {
+			logger.Info("rebuild FastAPI applied to private build", zap.Uint64("moves", fastapiMoves))
 		}
 	}
 	// The supported tails only changed private scratch. Relation projection
