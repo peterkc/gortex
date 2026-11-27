@@ -174,22 +174,24 @@ func TestRebuildSetStateFiltersUntrackedTargetMembership(t *testing.T) {
 			exact := setStateProofMethod("exact-render", "render", 10)
 			other := setStateProofMethod("other-render", "render", 15)
 			old := setStateProofMember(other, "Old")
-			live := setStateProofMember(other, otherClass)
+			reused := setStateProofMember(other, otherClass)
+			checked := setStateProofMember(other, "Unused")
 			alternate := exactClass
 			if chosen == exactClass {
 				alternate = otherClass
 			}
 			facts := setStateProofFacts([]*graph.Node{caller, exact, other},
 				setStateProofMember(caller, chosen), setStateProofMember(caller, alternate),
-				setStateProofMember(exact, exactClass), setStateProofCall(caller, "unresolved::setState"),
+				setStateProofMember(exact, exactClass), reused, setStateProofCall(caller, "unresolved::setState"),
 			)
-			b, _ := seedSyntheticCustody(t, facts)
+			b, receipts := seedSyntheticCustody(t, facts)
+			// The tracked membership moves away from the receipt key. The
+			// untracked membership then reuses it without owning the receipt.
+			require.NoError(t, b.ApplyLinkReindexes(t.Context(), []graph.EdgeReindex{{Edge: checked, OldTo: reused.To}}))
 			b.AddEdge(old)
-			b.ReindexEdges([]graph.EdgeReindex{{Edge: live, OldTo: old.To}})
-			requireRebuildLinkCustody(t, b, live, rebuildEdgeCustody{proof: rebuildProofUntrackedMove})
-			// A receipt at the new key cannot establish the untracked move.
-			facts.Edges = append(facts.Edges, live)
-			receipts := func(yield func(ParseFacts, error) bool) { yield(facts, nil) }
+			b.ReindexEdges([]graph.EdgeReindex{{Edge: reused, OldTo: old.To}})
+			requireRebuildLinkCustody(t, b, checked, rebuildEdgeCustody{raw: pendingEdgeKey(reused)})
+			requireRebuildLinkCustody(t, b, reused, rebuildEdgeCustody{proof: rebuildProofUntrackedMove})
 			before := rebuildFrameworkCustodyRows(t, b)
 			stats, err := b.RebuildReactSetState(t.Context(), receipts, setStateProofTarget, setStateProofOutput)
 			if chosen == exactClass {
@@ -201,7 +203,7 @@ func TestRebuildSetStateFiltersUntrackedTargetMembership(t *testing.T) {
 			require.ErrorIs(t, err, ErrRebuildReactSetState)
 			var refusal *RebuildUnknownProvenanceError
 			require.ErrorAs(t, err, &refusal)
-			require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(live)}, refusal)
+			require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(reused)}, refusal)
 			require.Zero(t, stats)
 			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 		})

@@ -100,8 +100,7 @@ type rebuildSetStatePass struct {
 
 // c: highest live lifecycle candidate ID by class; m: candidate methods;
 // q: possible caller classes; s: first caller owner classes that can emit;
-// r: membership claim -> live key (untracked claims have a 0 byte before
-// their live key instead of a receipt key); o: first owner by method;
+// r: membership claim -> live key; o: first owner by method;
 // t: qualifying call receipt key -> caller; g: live call gate;
 // p: proved call gate; n: declaration proof;
 // l: lifecycle winner by class; w: staged output by exact key;
@@ -307,8 +306,8 @@ func (p *rebuildSetStatePass) wantMembership(e *graph.Edge, live []byte) error {
 		return err
 	}
 	if custody.proof == rebuildProofUntrackedMove {
-		// Use a non-receipt key so replay cannot prove this membership or
-		// collide with the raw key claimed by another live membership.
+		// Prefix with 0 so reusing a checked move's raw receipt key does
+		// not collide with that move's claim or let replay prove this one.
 		key := append(append(setStateScratch('r'), 0), live...)
 		return p.put(key, append([]byte{rebuildCapabilityWanted | rebuildCapabilityUnproved}, live...))
 	}
