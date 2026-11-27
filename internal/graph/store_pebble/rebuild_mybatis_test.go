@@ -179,12 +179,12 @@ func runTestRebuildMyBatis(t *testing.T, b *BuildStore, facts ...ParseFacts) (Re
 			}
 		}
 	}
-	return b.RebuildMyBatis(t.Context(), receipts,
-		func(n *graph.Node) string {
+	return b.RebuildMyBatis(t.Context(), receipts, RebuildMyBatisRules{
+		MethodKey: func(n *graph.Node) string {
 			receiver, _ := n.Meta["receiver"].(string)
 			return receiver + "." + n.Name
 		},
-		func(e *graph.Edge) (string, string) {
+		Stub: func(e *graph.Edge) (string, string) {
 			if via, _ := e.Meta["via"].(string); via != "mybatis.mapper" {
 				return "", ""
 			}
@@ -192,8 +192,8 @@ func runTestRebuildMyBatis(t *testing.T, b *BuildStore, facts ...ParseFacts) (Re
 			stmt, _ := e.Meta["mybatis_statement"].(string)
 			return ns, stmt
 		},
-		func(ns, stmt string) string { return ns + "." + stmt },
-		func(e *graph.Edge, _, stmt, method string) bool {
+		Join: func(ns, stmt string) string { return ns + "." + stmt },
+		Rebind: func(e *graph.Edge, _, stmt, method string) bool {
 			target := method
 			if target == "" {
 				target = myBatisTestPlaceholder(stmt)
@@ -203,7 +203,8 @@ func runTestRebuildMyBatis(t *testing.T, b *BuildStore, facts ...ParseFacts) (Re
 			}
 			e.To = target
 			return true
-		})
+		},
+	})
 }
 
 func requireRebuildMyBatisMove(t *testing.T, b *BuildStore, old, raw *graph.Edge, to string) {
@@ -445,19 +446,19 @@ func TestRebuildMyBatisCollectsOnlyLiveJoins(t *testing.T) {
 
 	ctx := t.Context()
 	p := rebuildMyBatisPass{b: b}
-	rules := rebuildMyBatisRules{
-		stub: func(e *graph.Edge) (string, string) {
+	rules := RebuildMyBatisRules{
+		Stub: func(e *graph.Edge) (string, string) {
 			ns, _ := e.Meta["mybatis_namespace"].(string)
 			stmt, _ := e.Meta["mybatis_statement"].(string)
 			return ns, stmt
 		},
-		join: func(ns, stmt string) string { return ns + "." + stmt },
+		Join: func(ns, stmt string) string { return ns + "." + stmt },
 	}
 	require.NoError(t, p.capture(ctx, rules))
 	require.EqualValues(t, 2, p.stats.Stubs)
 	require.NoError(t, p.collect(ctx, func(n *graph.Node) string {
 		receiver, _ := n.Meta["receiver"].(string)
-		return rules.join(receiver, n.Name)
+		return rules.Join(receiver, n.Name)
 	}))
 
 	const join = "UserMapper.find"
@@ -489,17 +490,21 @@ func TestRebuildMyBatisRejectsInvalidInputAndOccupiedScratch(t *testing.T) {
 	b := newBuild(t, FullProfile)
 	ctx := t.Context()
 	receipts := func(func(ParseFacts, error) bool) { t.Fatal("refused pass must not read receipts") }
-	methodKey := func(*graph.Node) string { return "" }
-	stub := func(*graph.Edge) (string, string) { return "", "" }
-	join := func(string, string) string { return "" }
-	rebind := func(*graph.Edge, string, string, string) bool { return false }
+	rules := RebuildMyBatisRules{
+		MethodKey: func(*graph.Node) string { return "" },
+		Stub:      func(*graph.Edge) (string, string) { return "", "" },
+		Join:      func(string, string) string { return "" },
+		Rebind:    func(*graph.Edge, string, string, string) bool { return false },
+	}
 
 	before := rebuildFrameworkCustodyRows(t, b)
-	stats, err := b.RebuildMyBatis(ctx, nil, methodKey, stub, join, rebind)
+	stats, err := b.RebuildMyBatis(ctx, nil, rules)
 	require.ErrorIs(t, err, ErrRebuildMyBatis)
 	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
 	require.Zero(t, stats)
-	stats, err = b.RebuildMyBatis(ctx, receipts, methodKey, stub, join, nil)
+	missingRebind := rules
+	missingRebind.Rebind = nil
+	stats, err = b.RebuildMyBatis(ctx, receipts, missingRebind)
 	require.ErrorIs(t, err, ErrRebuildMyBatis)
 	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
 	require.Zero(t, stats)
@@ -508,7 +513,7 @@ func TestRebuildMyBatisRejectsInvalidInputAndOccupiedScratch(t *testing.T) {
 	key := rebuildMyBatisKey('s', "busy")
 	require.NoError(t, b.pending.Set(key, []byte("sentinel"), pebble.NoSync))
 	before = rebuildFrameworkCustodyRows(t, b)
-	stats, err = b.RebuildMyBatis(ctx, receipts, methodKey, stub, join, rebind)
+	stats, err = b.RebuildMyBatis(ctx, receipts, rules)
 	require.ErrorIs(t, err, ErrRebuildMyBatis)
 	require.ErrorIs(t, err, errInvalidRecord)
 	require.ErrorContains(t, err, "MyBatis scratch range occupied")

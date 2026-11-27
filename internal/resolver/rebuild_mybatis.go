@@ -14,5 +14,10 @@ func RunRebuildMyBatis(ctx context.Context, b *store_pebble.BuildStore, receipts
 	if !selection.allows(SynthMyBatis) {
 		return store_pebble.RebuildMyBatisStats{}, nil
 	}
-	return b.RebuildMyBatis(ctx, receipts, javaMethodJoinKey, myBatisStub, myBatisJoinKey, rebindMyBatisCall)
+	return b.RebuildMyBatis(ctx, receipts, store_pebble.RebuildMyBatisRules{
+		MethodKey: javaMethodJoinKey,
+		Stub:      myBatisStub,
+		Join:      myBatisJoinKey,
+		Rebind:    rebindMyBatisCall,
+	})
 }

@@ -44,18 +44,19 @@ type rebuildMyBatisPass struct {
 	stats RebuildMyBatisStats
 }
 
-type rebuildMyBatisRules struct {
-	methodKey func(*graph.Node) string
-	stub      func(*graph.Edge) (namespace, statement string)
-	join      func(namespace, statement string) string
-	rebind    func(e *graph.Edge, namespace, statement, method string) bool
+// RebuildMyBatisRules supplies the mapper and Java matching rules for RebuildMyBatis.
+// All callbacks are required.
+type RebuildMyBatisRules struct {
+	MethodKey func(*graph.Node) string
+	Stub      func(*graph.Edge) (namespace, statement string)
+	Join      func(namespace, statement string) string
+	Rebind    func(e *graph.Edge, namespace, statement, method string) bool
 }
 
 // RebuildMyBatis runs at the live mapper turn on a quiet private build.
 // The reducer elects from all live Java candidates before checking receipts.
 func (b *BuildStore) RebuildMyBatis(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
-	methodKey func(*graph.Node) string, stub func(*graph.Edge) (string, string),
-	join func(string, string) string, rebind func(*graph.Edge, string, string, string) bool,
+	rules RebuildMyBatisRules,
 ) (stats RebuildMyBatisStats, err error) {
 	defer func() {
 		if err != nil {
@@ -63,7 +64,7 @@ func (b *BuildStore) RebuildMyBatis(ctx context.Context, receipts iter.Seq2[Pars
 			err = fmt.Errorf("%w: %w", ErrRebuildMyBatis, err)
 		}
 	}()
-	if receipts == nil || methodKey == nil || stub == nil || join == nil || rebind == nil {
+	if receipts == nil || rules.MethodKey == nil || rules.Stub == nil || rules.Join == nil || rules.Rebind == nil {
 		return stats, fmt.Errorf("%w: invalid MyBatis inputs", ErrRebuildLinkInputSize)
 	}
 	occupied, err := rebuildGuardHasPrefix(ctx, b.pending, rebuildMyBatisPrefix)
@@ -77,11 +78,10 @@ func (b *BuildStore) RebuildMyBatis(ctx context.Context, receipts iter.Seq2[Pars
 		err = errors.Join(err, b.pending.DeleteRange(rebuildMyBatisPrefix, prefixEnd(rebuildMyBatisPrefix), pebble.NoSync))
 	}()
 	p := rebuildMyBatisPass{b: b}
-	rules := rebuildMyBatisRules{methodKey: methodKey, stub: stub, join: join, rebind: rebind}
 	if err := p.capture(ctx, rules); err != nil || p.stats.Stubs == 0 {
 		return p.stats, err
 	}
-	if err := p.collect(ctx, methodKey); err != nil {
+	if err := p.collect(ctx, rules.MethodKey); err != nil {
 		return stats, err
 	}
 	if err := p.plan(ctx, rules); err != nil || p.stats.Moves == 0 {
@@ -198,7 +198,7 @@ func (p *rebuildMyBatisPass) elect(join, from string) (method string, caller *gr
 	return method, caller, err
 }
 
-func (p *rebuildMyBatisPass) capture(ctx context.Context, rules rebuildMyBatisRules) error {
+func (p *rebuildMyBatisPass) capture(ctx context.Context, rules RebuildMyBatisRules) error {
 	return p.b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(snap *pebble.Snapshot, r row) error {
 		kind, err := rebuildAttributionEdgeKind(r.key)
 		if err != nil || kind != graph.EdgeCalls {
@@ -214,7 +214,7 @@ func (p *rebuildMyBatisPass) capture(ctx context.Context, rules rebuildMyBatisRu
 		if !bytes.Equal(r.key, pendingEdgeKey(e)) {
 			return invalid("MyBatis Calls row does not match key")
 		}
-		ns, stmt := rules.stub(e)
+		ns, stmt := rules.Stub(e)
 		if ns == "" || stmt == "" {
 			return nil
 		}
@@ -231,7 +231,7 @@ func (p *rebuildMyBatisPass) capture(ctx context.Context, rules rebuildMyBatisRu
 				return err
 			}
 		}
-		if join := rules.join(ns, stmt); join != "" {
+		if join := rules.Join(ns, stmt); join != "" {
 			key := rebuildMyBatisKey('j', join)
 			found, err := p.present(key)
 			if err != nil {
@@ -247,7 +247,7 @@ func (p *rebuildMyBatisPass) capture(ctx context.Context, rules rebuildMyBatisRu
 	})
 }
 
-func (p *rebuildMyBatisPass) plan(ctx context.Context, rules rebuildMyBatisRules) error {
+func (p *rebuildMyBatisPass) plan(ctx context.Context, rules RebuildMyBatisRules) error {
 	prefix := rebuildMyBatisKey('s')
 	return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
 		old := r.key[len(prefix):]
@@ -258,8 +258,8 @@ func (p *rebuildMyBatisPass) plan(ctx context.Context, rules rebuildMyBatisRules
 		if e == nil {
 			return invalid("MyBatis census lost a live stub")
 		}
-		ns, stmt := rules.stub(e)
-		join := rules.join(ns, stmt)
+		ns, stmt := rules.Stub(e)
+		join := rules.Join(ns, stmt)
 		method, caller, err := p.elect(join, e.From)
 		if err != nil {
 			return err
@@ -267,7 +267,7 @@ func (p *rebuildMyBatisPass) plan(ctx context.Context, rules rebuildMyBatisRules
 		if method != "" {
 			p.stats.Resolved++
 		}
-		if !rules.rebind(e, ns, stmt, method) {
+		if !rules.Rebind(e, ns, stmt, method) {
 			return nil
 		}
 		if caller != nil {
@@ -388,7 +388,7 @@ func (p *rebuildMyBatisPass) state(key []byte) (byte, error) {
 	return rebuildScratchState(p.b.pending, key, "MyBatis receipt proof")
 }
 
-func (p *rebuildMyBatisPass) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, error], rules rebuildMyBatisRules) error {
+func (p *rebuildMyBatisPass) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, error], rules RebuildMyBatisRules) error {
 	for facts, err := range receipts {
 		if err != nil {
 			return err
@@ -413,7 +413,7 @@ func (p *rebuildMyBatisPass) prove(ctx context.Context, receipts iter.Seq2[Parse
 	return refused.err()
 }
 
-func (p *rebuildMyBatisPass) record(ctx context.Context, facts ParseFacts, rules rebuildMyBatisRules) error {
+func (p *rebuildMyBatisPass) record(ctx context.Context, facts ParseFacts, rules RebuildMyBatisRules) error {
 	file := pathkey.Normalize(facts.File.FilePath)
 	for _, raw := range facts.Nodes {
 		if err := ctx.Err(); err != nil {
@@ -434,7 +434,7 @@ func (p *rebuildMyBatisPass) record(ctx context.Context, facts ParseFacts, rules
 		ok := live != nil && facts.EffectiveLanguage != "" && raw.FilePath == file && live.FilePath == file &&
 			raw.Language == live.Language && raw.Kind == live.Kind && raw.RepoPrefix == live.RepoPrefix
 		if ok && live.Kind == graph.KindMethod && live.Language == "java" {
-			ok = facts.EffectiveLanguage == "java" && raw.Name == live.Name && rules.methodKey(raw) == rules.methodKey(live)
+			ok = facts.EffectiveLanguage == "java" && raw.Name == live.Name && rules.MethodKey(raw) == rules.MethodKey(live)
 		}
 		if err := noteRebuildScratchState(p.put, key, state, rebuildScratchProofBit(ok)); err != nil {
 			return err
@@ -462,8 +462,8 @@ func (p *rebuildMyBatisPass) record(ctx context.Context, facts ParseFacts, rules
 		if live == nil {
 			return invalid("MyBatis recorder has no old call")
 		}
-		ns, stmt := rules.stub(live)
-		rawNS, rawStmt := rules.stub(raw)
+		ns, stmt := rules.Stub(live)
+		rawNS, rawStmt := rules.Stub(raw)
 		ok := facts.EffectiveLanguage == "mybatis" && raw.FilePath == file && ns == rawNS && stmt == rawStmt
 		if err := noteRebuildScratchPayload(p.put, key, claim, rebuildScratchProofBit(ok)); err != nil {
 			return err
@@ -501,7 +501,7 @@ func (p *rebuildMyBatisPass) checkCohorts(ctx context.Context) error {
 	})
 }
 
-func (p *rebuildMyBatisPass) proved(old []byte, e *graph.Edge, rules rebuildMyBatisRules) (bool, error) {
+func (p *rebuildMyBatisPass) proved(old []byte, e *graph.Edge, rules RebuildMyBatisRules) (bool, error) {
 	raw, err := rebuildReceiptKey(p.b.pending, old)
 	if errors.Is(err, ErrRebuildUnknownProvenance) {
 		return false, nil // count the affected output, not the old call
@@ -513,8 +513,8 @@ func (p *rebuildMyBatisPass) proved(old []byte, e *graph.Edge, rules rebuildMyBa
 	if err != nil || len(claim) <= 1 || claim[0] != rebuildScratchExact || !bytes.Equal(claim[1:], old) {
 		return false, err
 	}
-	ns, stmt := rules.stub(e)
-	join := rules.join(ns, stmt)
+	ns, stmt := rules.Stub(e)
+	join := rules.Join(ns, stmt)
 	if join == "" {
 		return true, nil
 	}
