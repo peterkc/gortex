@@ -51,8 +51,8 @@ func resolveFastAPIDeps(g graph.Store, cands *frameworkPassCandidates) int {
 				continue
 			}
 			via, _ := e.Meta["via"].(string)
-			name, preferDirs := fastapiResolveShape(e.To, via)
-			if preferDirs == nil {
+			name, preferDirs, ok := fastapiResolveShape(e.To, via)
+			if !ok {
 				continue
 			}
 			fromFile := ""
@@ -76,30 +76,30 @@ func resolveFastAPIDeps(g graph.Store, cands *frameworkPassCandidates) int {
 	return resolved
 }
 
-func fastapiConventionDirs(via string) []string {
+func fastapiConventionDirs(via string) ([]string, bool) {
 	switch via {
 	case "fastapi.Depends":
-		return fastapiDepDirs
+		return fastapiDepDirs, true
 	case "fastapi.router":
-		return fastapiRouterDirs
+		return fastapiRouterDirs, true
 	default:
-		return nil
+		return nil, false
 	}
 }
 
-func fastapiResolveShape(target, via string) (string, []string) {
+func fastapiResolveShape(target, via string) (string, []string, bool) {
 	if !graph.IsUnresolvedTarget(target) {
-		return "", nil
+		return "", nil, false
 	}
-	dirs := fastapiConventionDirs(via)
-	if dirs == nil {
-		return "", nil
+	dirs, ok := fastapiConventionDirs(via)
+	if !ok {
+		return "", nil, false
 	}
 	name := graph.UnresolvedName(target)
 	if strings.ContainsRune(name, '.') {
-		return "", nil // member expressions are left to the import resolver
+		return "", nil, false // member expressions are left to the import resolver
 	}
-	return name, dirs
+	return name, dirs, true
 }
 
 func fastapiResolveSource(path string) bool {

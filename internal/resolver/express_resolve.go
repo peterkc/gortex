@@ -64,7 +64,7 @@ func expressHandlerKey(e *graph.Edge) (class, method, name string, ok bool) {
 	if e == nil || !graph.IsUnresolvedTarget(e.To) {
 		return "", "", "", false
 	}
-	if _, ok := e.Meta["express_handler_ref"]; !ok {
+	if _, marked := e.Meta["express_handler_ref"]; !marked {
 		return "", "", "", false
 	}
 	class, _ = e.Meta["express_ref_class"].(string)

@@ -401,7 +401,8 @@ func reactCandidateEdge(e graph.FrameworkCensusEdge) bool {
 }
 
 func fastapiCandidateEdge(e graph.FrameworkCensusEdge) bool {
-	return graph.IsUnresolvedTarget(e.To) && fastapiConventionDirs(e.Via) != nil
+	_, ok := fastapiConventionDirs(e.Via)
+	return graph.IsUnresolvedTarget(e.To) && ok
 }
 
 func factoryChainCandidateEdge(e graph.FrameworkCensusEdge) bool {

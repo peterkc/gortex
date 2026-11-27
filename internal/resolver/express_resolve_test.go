@@ -74,3 +74,9 @@ func TestResolveExpressHandlers_UnresolvableLeftAlone(t *testing.T) {
 	assert.Equal(t, 0, ResolveExpressHandlers(g))
 	assert.Nil(t, synthExpressEdge(g, anchor, "unresolved::ghostMiddleware"))
 }
+
+func TestExpressMemberDirs(t *testing.T) {
+	assert.Equal(t, []string{"/controllers/", "/controller/"}, expressMemberDirs("UserController"))
+	assert.Equal(t, []string{"/services/", "/service/", "/helpers/", "/utils/"}, expressMemberDirs("UserService"))
+	assert.Equal(t, []string{"/services/", "/service/", "/helpers/", "/utils/"}, expressMemberDirs("User"))
+}

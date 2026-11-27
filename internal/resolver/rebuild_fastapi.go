@@ -32,8 +32,8 @@ func RunRebuildFastAPI(ctx context.Context, build *store_pebble.BuildStore, rece
 }
 
 func rebuildFastAPIShape(target, via string) ([]string, []string) {
-	name, dirs := fastapiResolveShape(target, via)
-	if name == "" || dirs == nil {
+	name, dirs, ok := fastapiResolveShape(target, via)
+	if !ok || name == "" {
 		return nil, nil
 	}
 	return []string{name}, dirs
