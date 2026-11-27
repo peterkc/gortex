@@ -20,6 +20,7 @@ const (
 // a pure-name guess, lower than a typed binding.
 const (
 	fnPointerFanoutCap  = 64
+	fnPointerSweepCap   = 8
 	fnPointerConfidence = 0.7
 )
 
@@ -64,24 +65,11 @@ func resolveFnPointerDispatch(g graph.Store, cands *frameworkPassCandidates) int
 	}
 	var regReindex []graph.EdgeReindex
 	for e := range regStream {
-		if e == nil || e.Meta == nil {
+		key, src, fn := fnPtrRegistration(e)
+		if src != "" {
+			copies = append(copies, copyEdge{to: key, from: src})
 			continue
 		}
-		if v, _ := e.Meta["via"].(string); v != fnPtrRegVia {
-			continue
-		}
-		st, _ := e.Meta["fnptr_struct"].(string)
-		field, _ := e.Meta["fnptr_field"].(string)
-		if st == "" || field == "" {
-			continue
-		}
-		key := st + "\x00" + field
-		if cs, _ := e.Meta["fnptr_copy_struct"].(string); cs != "" {
-			cf, _ := e.Meta["fnptr_copy_field"].(string)
-			copies = append(copies, copyEdge{to: key, from: cs + "\x00" + cf})
-			continue
-		}
-		fn, _ := e.Meta["fnptr_fn"].(string)
 		if fn == "" {
 			continue
 		}
@@ -90,10 +78,8 @@ func resolveFnPointerDispatch(g graph.Store, cands *frameworkPassCandidates) int
 			continue
 		}
 		addFn(key, target)
-		if e.To != target.ID {
-			oldTo := e.To
-			e.To = target.ID
-			e.Origin = graph.OriginASTInferred
+		oldTo := e.To
+		if rebindFnPtrRegistration(e, target.ID) {
 			regReindex = append(regReindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		}
 	}
@@ -105,7 +91,7 @@ func resolveFnPointerDispatch(g graph.Store, cands *frameworkPassCandidates) int
 	}
 
 	// Field←field propagation fixpoint.
-	for iter := 0; iter < 8; iter++ {
+	for iter := 0; iter < fnPointerSweepCap; iter++ {
 		changed := false
 		for _, c := range copies {
 			for id, n := range slotFns[c.from] {
@@ -131,15 +117,8 @@ func resolveFnPointerDispatch(g graph.Store, cands *frameworkPassCandidates) int
 	var reindex []graph.EdgeReindex
 	var batch []*graph.Edge
 	for e := range dispatchStream {
-		if e == nil || e.Meta == nil {
-			continue
-		}
-		if v, _ := e.Meta["via"].(string); v != fnPtrDispatchVia {
-			continue
-		}
-		st, _ := e.Meta["fnptr_struct"].(string)
-		field, _ := e.Meta["fnptr_field"].(string)
-		if st == "" || field == "" {
+		st, field, ok := fnPtrSlot(e, fnPtrDispatchVia)
+		if !ok {
 			continue
 		}
 		fns := fnPtrSortedSlot(slotFns[st+"\x00"+field])
@@ -165,35 +144,72 @@ func resolveFnPointerDispatch(g graph.Store, cands *frameworkPassCandidates) int
 	return resolved
 }
 
+func fnPtrSlot(e *graph.Edge, wantVia string) (st, field string, ok bool) {
+	if e == nil {
+		return "", "", false
+	}
+	via, _ := e.Meta["via"].(string)
+	st, _ = e.Meta["fnptr_struct"].(string)
+	field, _ = e.Meta["fnptr_field"].(string)
+	return st, field, via == wantVia && st != "" && field != ""
+}
+
+func fnPtrRegistration(e *graph.Edge) (slot, source, name string) {
+	st, field, ok := fnPtrSlot(e, fnPtrRegVia)
+	if !ok {
+		return "", "", ""
+	}
+	slot = st + "\x00" + field
+	if cs, _ := e.Meta["fnptr_copy_struct"].(string); cs != "" {
+		cf, _ := e.Meta["fnptr_copy_field"].(string)
+		return slot, cs + "\x00" + cf, ""
+	}
+	name, _ = e.Meta["fnptr_fn"].(string)
+	return slot, "", name
+}
+
+func rebindFnPtrRegistration(e *graph.Edge, target string) bool {
+	if e.To == target {
+		return false
+	}
+	e.To = target
+	e.Origin = graph.OriginASTInferred
+	return true
+}
+
 func fnPtrRebind(e *graph.Edge, target *graph.Node, reindex *[]graph.EdgeReindex) int {
-	field, _ := e.Meta["fnptr_field"].(string)
-	want := "unresolved::*." + field
-	if target != nil {
-		want = target.ID
-	}
-	if e.To == want {
-		if target != nil {
-			return 1
-		}
-		return 0
-	}
-	oldTo := e.To
-	e.To = want
+	var id string
 	hit := 0
 	if target != nil {
-		e.Origin = graph.OriginASTInferred
+		id, hit = target.ID, 1
+	}
+	oldTo := e.To
+	if rebindFnPtrDispatch(e, id, target != nil) {
+		*reindex = append(*reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+	}
+	return hit
+}
+
+func rebindFnPtrDispatch(e *graph.Edge, target string, matched bool) bool {
+	if !matched {
+		field, _ := e.Meta["fnptr_field"].(string)
+		target = "unresolved::*." + field
+	}
+	if e.To == target {
+		return false
+	}
+	e.To = target
+	e.Origin = graph.OriginASTInferred
+	if matched {
 		e.Confidence = fnPointerConfidence
 		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, fnPointerConfidence)
 		StampSynthesized(e, SynthFnPointerDispatch)
-		hit = 1
 	} else {
-		e.Origin = graph.OriginASTInferred
 		e.Confidence = 0
 		e.ConfidenceLabel = ""
 		UnstampSynthesized(e)
 	}
-	*reindex = append(*reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
-	return hit
+	return true
 }
 
 func fnPtrFanoutEdge(e *graph.Edge, target *graph.Node, st, field string) *graph.Edge {
@@ -218,15 +234,17 @@ func fnPtrFanoutEdge(e *graph.Edge, target *graph.Node, st, field string) *graph
 func fnPtrFunctionByName(g graph.Store, reg *graph.Edge, name string) *graph.Node {
 	var cands []*graph.Node
 	for _, n := range g.FindNodesByName(name) {
-		if n == nil || (n.Kind != graph.KindFunction && n.Kind != graph.KindMethod) {
-			continue
-		}
-		if graph.IsStub(n.ID) || graph.IsUnresolvedTarget(n.ID) {
+		if !fnPtrCallable(n) {
 			continue
 		}
 		cands = append(cands, n)
 	}
 	return pickStoreAction(g, reg, sameBoundaryCandidates(g, reg.From, cands))
+}
+
+func fnPtrCallable(n *graph.Node) bool {
+	return n != nil && (n.Kind == graph.KindFunction || n.Kind == graph.KindMethod) &&
+		!graph.IsStub(n.ID) && !graph.IsUnresolvedTarget(n.ID)
 }
 
 func fnPtrSortedSlot(m map[string]*graph.Node) []*graph.Node {
