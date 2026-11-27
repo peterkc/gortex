@@ -212,6 +212,36 @@ func (v RebuildView) VisitEdges(ctx context.Context, yield func(*graph.Edge) err
 	})
 }
 
+// VisitDIContractEdges streams the two edge kinds used by the native DI
+// contract reader, with the source-repository check in the same snapshot.
+func (v RebuildView) VisitDIContractEdges(ctx context.Context, repo string, yield func(*graph.Edge) error) error {
+	for _, kind := range [...]graph.EdgeKind{graph.EdgeProvides, graph.EdgeConsumes} {
+		if err := v.visit(ctx, keyStrings([]byte{familyEdge, edgeKind}, string(kind)), func(snap *pebble.Snapshot, r row) error {
+			e, err := pendingGet(snap, r.value, decodeEdge)
+			if err != nil {
+				return err
+			}
+			if e == nil || e.Kind != kind || !bytes.Equal(r.value, pendingEdgeKey(e)) {
+				return invalid("working di contract edge identity")
+			}
+			n, err := pendingGet(snap, pendingNodeKey(e.From), decodeNodeLight)
+			if err != nil || n == nil {
+				return err
+			}
+			if n.ID != e.From {
+				return invalid("working di contract edge source identity")
+			}
+			if n.RepoPrefix != repo {
+				return nil
+			}
+			return yield(e)
+		}); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
 // VisitLinkPendingPages streams the cold resolver frontier from one snapshot
 // in complete edge-key order. The caller borrows the page until it returns;
 // edge edits cannot insert an additional input into this scan. It must discard

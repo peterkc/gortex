@@ -273,7 +273,8 @@ func buildRebuildStages(
 	}
 	var classifications map[string]rebuildClassificationFact
 	var gitPolicy rebuildGitPolicyProof
-	var exactCheckout bool
+	var exactCheckout, rootDepFact bool
+	var rootDeps []string
 	if digest := rebuildDigest(req.Witness.FrozenInputs); digest != (rebuildDigest{}) {
 		if err := visitRebuildInputSidecar(ctx, lease, digest, func(row rebuildSidecarRow) error {
 			if err := gitPolicy.add(row); err != nil {
@@ -281,6 +282,15 @@ func buildRebuildStages(
 			}
 			if row.Kind == rebuildNamespaceCloseExactFact && string(row.Path) == "." {
 				exactCheckout = true
+			}
+			if row.Kind == rebuildGoManifestFact && string(row.Path) == "go.mod" {
+				if rootDepFact {
+					return fmt.Errorf("%w: duplicate root Go manifest", errRebuildGoEvidence)
+				}
+				rootDepFact = true
+				if row.Config != nil {
+					rootDeps = row.Config.DirectDeps
+				}
 			}
 			if row.Classification == nil {
 				return nil
@@ -350,6 +360,16 @@ func buildRebuildStages(
 	if err != nil {
 		return err
 	}
+	var earlyFacts *rebuildEarlyContractFacts
+	if exactCheckout {
+		if !rootDepFact {
+			return fmt.Errorf("%w: manifest row %q not covered", errRebuildGoEvidence, "go.mod")
+		}
+		earlyFacts, err = idx.readRebuildEarlyContractFacts(ctx, private.RebuildView(), job, store, counts.census, rootDeps)
+		if err != nil {
+			return err
+		}
+	}
 	if err := runRebuildFrozenMain(ctx, lease, rebuildDigest(req.Witness.FrozenInputs), private, counts.census, link, req.SkipPlaceholderSources); err != nil {
 		return err
 	}
@@ -381,6 +401,14 @@ func buildRebuildStages(
 			return err
 		}
 	}
+	var earlyIDs rebuildEarlyContractIDs
+	if exactCheckout {
+		earlyIDs, err = earlyFacts.finish(ctx, private.RebuildView(), idx.repoPrefix, idx.workspaceID, idx.projectID)
+		if err != nil {
+			return err
+		}
+		earlyFacts = nil
+	}
 	if err := runRebuildTestFiles(ctx, private, receipts, classifications); err != nil {
 		return err
 	}
@@ -407,7 +435,7 @@ func buildRebuildStages(
 			return err
 		}
 		predecessors := rebuildClonePredecessors{
-			namespace: namespace, modules: cfg.Coverage.IsEnabled("modules"), fileClaims: &counts.claims,
+			namespace: namespace, modules: cfg.Coverage.IsEnabled("modules"), fileClaims: &counts.claims, contracts: earlyIDs,
 		}
 		// Native cold detection still banks pre-signed callables when raw
 		// clone extraction is disabled.

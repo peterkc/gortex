@@ -15,6 +15,7 @@ import (
 type rebuildClonePredecessors struct {
 	namespace *rebuildResolverNamespace
 	modules   bool
+	contracts rebuildEarlyContractIDs
 	// Set only from the file-graph writer for the same immutable receipts.
 	// Standalone clone callers still need the raw collision census.
 	fileClaims *store_pebble.RebuildSharedClaimStats
@@ -71,6 +72,10 @@ func (p rebuildClonePredecessors) mayReadRoot(path string) bool {
 // Its legacy route is not ruled out by the frozen parse receipts. Unlike its
 // insert-only Go dependency seed, the late pass can replace an existing ID.
 func (p rebuildClonePredecessors) mayReplaceWithContract(id string) bool {
+	if p.contracts != nil {
+		return p.contracts.contains(id)
+	}
+	// Legacy standalone callers do not carry full checked contract facts.
 	kind, name, ok := strings.Cut(id, "::")
 	if !ok || name == "" {
 		return false
