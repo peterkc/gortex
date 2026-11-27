@@ -1,6 +1,7 @@
 package languages
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -10,13 +11,19 @@ import (
 // jsBuiltinReceivers is a file-wide veto set, not a scope/type solver. A name
 // gets positive evidence only from one supported binding visible at the call,
 // or from a builtin spelling with no binding or write anywhere in the file.
-// Unrecognized identifier roles can veto proof; they cannot supply it.
+// Reads never create a binding, even when the receiver type is unknown.
 type jsBuiltinReceivers struct {
 	language string
 	src      []byte
 	bindings map[string]jsReceiverBinding
+	types    map[string]bool
+	writes   map[jsReceiverWrite]bool
 	unsafe   bool
 }
+
+// Empty form denotes a write to a local name; "global" replaces the family.
+// Static and instance writes affect only their own member (empty = all).
+type jsReceiverWrite struct{ form, owner, member string }
 
 type jsReceiverBinding struct {
 	scope *sitter.Node
@@ -29,61 +36,202 @@ func collectJSBuiltinReceivers(root *sitter.Node, src []byte, language string) *
 	if r.unsafe {
 		return r
 	}
+	var writes []*sitter.Node
 	r.bindings = make(map[string]jsReceiverBinding)
+	r.types = make(map[string]bool)
+	bind := func(n *sitter.Node) {
+		name := n.Content(src)
+		if _, exists := r.bindings[name]; exists {
+			r.bindings[name] = jsReceiverBinding{}
+			return
+		}
+		r.bindings[name] = jsReceiverBindingAt(n, n.Parent(), src)
+	}
 	walkNodes(root, func(n *sitter.Node) {
 		switch n.Type() {
 		case "with_statement":
 			r.unsafe = true
 		case "identifier", "type_identifier", "shorthand_property_identifier_pattern", "shorthand_property_identifier":
 			name := n.Content(src)
-			// Escapes can give another spelling to any binding. Direct eval
-			// and with can change which binding is visible at a call site.
 			if strings.ContainsRune(name, '\\') || name == "eval" {
 				r.unsafe = true
 			}
-			p := n.Parent()
-			if jsReceiverRead(n, p) {
-				return
+		case "property_identifier":
+			if strings.ContainsRune(n.Content(src), '\\') {
+				r.unsafe = true
 			}
-			if p.Type() == "import_specifier" && p.ChildByFieldName("alias") != nil && n.Equal(p.ChildByFieldName("name")) {
-				return // The imported name is not the local binding.
+		case "variable_declarator", "function_declaration", "function_expression", "generator_function", "generator_function_declaration",
+			"function_signature":
+			jsReceiverTargets(n.ChildByFieldName("name"), bind)
+		case "internal_module", "module":
+			name := n.ChildByFieldName("name")
+			for name != nil && (name.Type() == "nested_identifier" || name.Type() == "member_expression") {
+				name = name.ChildByFieldName("object")
 			}
-			if _, exists := r.bindings[name]; exists {
-				r.bindings[name] = jsReceiverBinding{}
-				return
+			jsReceiverTargets(name, bind)
+		case "class", "class_declaration", "abstract_class_declaration", "enum_declaration":
+			if name := n.ChildByFieldName("name"); name != nil {
+				r.types[name.Content(src)] = true
+				bind(name)
 			}
-			r.bindings[name] = jsReceiverBindingAt(n, p, src)
+		case "interface_declaration":
+			r.types[n.ChildByFieldName("name").Content(src)] = true
+		case "arrow_function", "catch_clause":
+			jsReceiverTargets(n.ChildByFieldName("parameter"), bind)
+		case "formal_parameters", "import_clause", "namespace_import", "import_require_clause":
+			for c := range n.NamedChildren() {
+				jsReceiverTargets(c, bind)
+			}
+		case "import_alias":
+			jsReceiverTargets(n.NamedChild(0), bind)
+		case "import_specifier":
+			local := n.ChildByFieldName("alias")
+			if local == nil {
+				local = n.ChildByFieldName("name")
+			}
+			jsReceiverTargets(local, bind)
+		case "assignment_expression", "augmented_assignment_expression":
+			writes = append(writes, n.ChildByFieldName("left"))
+		case "for_in_statement":
+			left := n.ChildByFieldName("left")
+			if n.ChildByFieldName("kind") == nil {
+				writes = append(writes, left)
+			} else {
+				jsReceiverTargets(left, bind)
+			}
+		case "update_expression":
+			writes = append(writes, n.ChildByFieldName("argument"))
+		case "unary_expression":
+			if n.ChildByFieldName("operator").Content(src) == "delete" {
+				writes = append(writes, n.ChildByFieldName("argument"))
+			}
 		}
 	})
+	// Only unbound constructor/global names denote the platform here. Collect
+	// their writes after declarations so a later shadow is respected too.
+	if len(writes) != 0 {
+		r.writes = make(map[jsReceiverWrite]bool)
+		for _, write := range writes {
+			jsReceiverTargets(write, r.recordWrite)
+		}
+	}
 	return r
 }
 
-// These positions are reads, not bindings or assignment destinations. In
-// particular x.m() does not veto x, but x.m = f and x[k]++ do.
-func jsReceiverRead(n, p *sitter.Node) bool {
-	for p != nil {
-		switch p.Type() {
-		case "parenthesized_expression":
-			if p.ChildByFieldName("type") != nil {
-				return false
-			}
-		case "member_expression":
-			if !n.Equal(p.ChildByFieldName("object")) {
-				return false
-			}
-		case "call_expression":
-			return n.Equal(p.ChildByFieldName("function"))
-		case "new_expression":
-			return n.Equal(p.ChildByFieldName("constructor"))
-		default:
-			return false
-		}
-		n, p = p, p.Parent()
+// Follow only target fields. In { [key]: x = fallback } only x is a target.
+func jsReceiverTargets(n *sitter.Node, visit func(*sitter.Node)) {
+	if n == nil {
+		return
 	}
-	return false
+	switch n.Type() {
+	case "identifier", "type_identifier", "shorthand_property_identifier_pattern", "member_expression", "subscript_expression":
+		visit(n)
+	case "required_parameter", "optional_parameter":
+		pattern := n.ChildByFieldName("pattern")
+		if pattern == nil {
+			pattern = n.ChildByFieldName("name")
+		}
+		jsReceiverTargets(pattern, visit)
+	case "array_pattern", "object_pattern":
+		for c := range n.NamedChildren() {
+			jsReceiverTargets(c, visit)
+		}
+	case "rest_pattern", "parenthesized_expression", "non_null_expression", "as_expression", "satisfies_expression":
+		for c := range n.NamedChildren() {
+			if c.Type() != "comment" {
+				jsReceiverTargets(c, visit)
+				break
+			}
+		}
+	case "pair_pattern":
+		jsReceiverTargets(n.ChildByFieldName("value"), visit)
+	case "assignment_pattern", "object_assignment_pattern":
+		jsReceiverTargets(n.ChildByFieldName("left"), visit)
+	}
+}
+
+// For writes, follow only the object spine. A computed index is a read, not
+// a write to that index's binding. "*" means the property is not known.
+func jsReceiverWritePath(n *sitter.Node, src []byte) (string, []string) {
+	var fields []string
+	for n = jsUnwrapReceiver(n); n != nil; n = jsUnwrapReceiver(n.ChildByFieldName("object")) {
+		switch n.Type() {
+		case "identifier", "shorthand_property_identifier_pattern":
+			slices.Reverse(fields)
+			return n.Content(src), fields
+		case "member_expression":
+			fields = append(fields, n.ChildByFieldName("property").Content(src))
+		case "subscript_expression":
+			index := n.ChildByFieldName("index")
+			key := "*"
+			if index.Type() == "string" {
+				text := index.Content(src)
+				if !strings.ContainsRune(text, '\\') {
+					key = text[1 : len(text)-1]
+					if key == "" || key == "*" {
+						return "", nil // Neither names a callable identifier.
+					}
+				}
+			}
+			fields = append(fields, key)
+		default:
+			return "", nil
+		}
+	}
+	return "", nil
+}
+
+func (r *jsBuiltinReceivers) recordWrite(n *sitter.Node) {
+	name, fields := jsReceiverWritePath(n, r.src)
+	if name == "" {
+		return
+	}
+	binding, bound := r.bindings[name]
+	if bound || (name != "globalThis" && jsStaticReceiverFamily(name) == "") {
+		switch len(fields) {
+		case 0:
+			r.writes[jsReceiverWrite{owner: name}] = true
+		case 1:
+			r.writes[jsReceiverWrite{owner: name, member: fields[0]}] = true
+		}
+		if bound && !binding.visibleAt(n.StartByte()) && (name == "globalThis" || jsStaticReceiverFamily(name) != "") {
+			r.unsafe = true // Cannot tell whether this write reaches the platform.
+		}
+		return
+	}
+	if name == "globalThis" {
+		if len(fields) == 0 || fields[0] == "*" {
+			r.unsafe = true
+			return
+		}
+		name, fields = fields[0], fields[1:]
+	}
+	family := jsStaticReceiverFamily(name)
+	if family == "" {
+		return
+	}
+	form := "static"
+	switch {
+	case len(fields) == 0:
+		form = "global"
+	case fields[0] == "prototype":
+		form, fields = "instance", fields[1:]
+	case fields[0] == "*":
+		r.writes[jsReceiverWrite{"global", family, "*"}] = true
+		return
+	}
+	switch len(fields) {
+	case 0:
+		r.writes[jsReceiverWrite{form, family, ""}] = true
+	case 1:
+		r.writes[jsReceiverWrite{form, family, fields[0]}] = true
+	}
 }
 
 func jsReceiverBindingAt(n, p *sitter.Node, src []byte) jsReceiverBinding {
+	if n.Type() == "shorthand_property_identifier_pattern" {
+		return jsReceiverBinding{known: graph.BuiltinReceiverHint{Form: "unknown"}}
+	}
 	if n.Type() != "identifier" {
 		return jsReceiverBinding{}
 	}
@@ -119,7 +267,7 @@ func jsReceiverBindingAt(n, p *sitter.Node, src []byte) jsReceiverBinding {
 		}
 		declaration := p.Parent()
 		if declaration.Type() != "lexical_declaration" {
-			break // var hoisting is not modeled.
+			return jsReceiverBinding{known: graph.BuiltinReceiverHint{Form: "unknown"}} // No var hoisting proof.
 		}
 		scope := declaration.Parent()
 		if scope.Type() == "export_statement" {
@@ -128,6 +276,7 @@ func jsReceiverBindingAt(n, p *sitter.Node, src []byte) jsReceiverBinding {
 		if scope.Type() == "program" || scope.Type() == "statement_block" {
 			return jsReceiverBinding{scope: scope, decl: p}
 		}
+		return jsReceiverBinding{known: graph.BuiltinReceiverHint{Form: "unknown"}}
 	case "required_parameter":
 		if !n.Equal(p.ChildByFieldName("pattern")) && !n.Equal(p.ChildByFieldName("name")) {
 			break
@@ -137,6 +286,11 @@ func jsReceiverBindingAt(n, p *sitter.Node, src []byte) jsReceiverBinding {
 				return jsReceiverBinding{scope: body, decl: p}
 			}
 		}
+	case "arrow_function":
+		return jsReceiverBinding{scope: p.ChildByFieldName("body"), decl: n}
+	case "optional_parameter", "assignment_pattern", "object_assignment_pattern", "pair_pattern", "rest_pattern", "array_pattern", "object_pattern",
+		"catch_clause", "for_in_statement":
+		return jsReceiverBinding{known: graph.BuiltinReceiverHint{Form: "unknown"}}
 	case "formal_parameters":
 		// A unique untyped JS parameter gives no family and no contrary
 		// evidence unless it shadows a builtin spelling.
@@ -158,12 +312,40 @@ func (r *jsBuiltinReceivers) stamp(edge *graph.Edge, call *sitter.Node) {
 	if fn == nil || fn.Type() != "member_expression" {
 		return
 	}
-	hint := graph.BuiltinReceiverHint{Form: "unknown"}
-	if !r.unsafe {
-		hint = r.receiver(fn.ChildByFieldName("object"), call.StartByte())
-	}
+	hint := r.memberHint(fn, call.StartByte())
 	hint.Language = r.language
 	edge.SetBuiltinReceiverHint(hint)
+}
+
+func (r *jsBuiltinReceivers) memberHint(fn *sitter.Node, site uint32) graph.BuiltinReceiverHint {
+	if r.unsafe {
+		return graph.BuiltinReceiverHint{Form: "unknown"}
+	}
+	obj := jsUnwrapReceiver(fn.ChildByFieldName("object"))
+	hint := r.receiver(obj, site)
+	if len(r.writes) == 0 {
+		return hint
+	}
+	member := fn.ChildByFieldName("property").Content(r.src)
+	if obj != nil && obj.Type() == "identifier" {
+		name := obj.Content(r.src)
+		if r.writes[jsReceiverWrite{owner: name, member: member}] {
+			return graph.BuiltinReceiverHint{Form: "shadowed"}
+		}
+		if r.writes[jsReceiverWrite{owner: name, member: "*"}] {
+			return graph.BuiltinReceiverHint{Form: "unknown"}
+		}
+	}
+	if family := hint.Family; family != "" {
+		if r.writes[jsReceiverWrite{"global", family, ""}] || r.writes[jsReceiverWrite{hint.Form, family, ""}] ||
+			r.writes[jsReceiverWrite{hint.Form, family, member}] {
+			return graph.BuiltinReceiverHint{Form: "shadowed"}
+		}
+		if r.writes[jsReceiverWrite{"global", family, "*"}] || r.writes[jsReceiverWrite{hint.Form, family, "*"}] {
+			return graph.BuiltinReceiverHint{Form: "unknown"}
+		}
+	}
+	return hint
 }
 
 func (r *jsBuiltinReceivers) receiver(node *sitter.Node, site uint32) graph.BuiltinReceiverHint {
@@ -174,7 +356,13 @@ func (r *jsBuiltinReceivers) receiver(node *sitter.Node, site uint32) graph.Buil
 	switch n.Type() {
 	case "identifier":
 		name := n.Content(r.src)
+		if r.writes[jsReceiverWrite{owner: name}] {
+			return graph.BuiltinReceiverHint{Form: "shadowed"}
+		}
 		if b, exists := r.bindings[name]; exists {
+			if b.known.Form == "unknown" && jsStaticReceiverFamily(name) == "" {
+				return b.known
+			}
 			if !b.visibleAt(site) {
 				return graph.BuiltinReceiverHint{Form: "shadowed"}
 			}
@@ -210,7 +398,7 @@ func (r *jsBuiltinReceivers) bindingValue(decl *sitter.Node) graph.BuiltinReceiv
 	if annotation := decl.ChildByFieldName("type"); annotation != nil {
 		t := annotation.NamedChild(0)
 		if t == nil {
-			return graph.BuiltinReceiverHint{Form: "shadowed"}
+			return graph.BuiltinReceiverHint{Form: "unknown"}
 		}
 		var family string
 		switch t.Type() {
@@ -220,16 +408,25 @@ func (r *jsBuiltinReceivers) bindingValue(decl *sitter.Node) graph.BuiltinReceiv
 			if name := t.Content(r.src); name == "string" || name == "number" {
 				family = name
 			}
-		case "type_identifier", "generic_type", "nested_type_identifier", "object_type":
-			return graph.BuiltinReceiverHint{Form: "user", Name: t.Content(r.src)}
+		case "type_identifier", "generic_type":
+			if t.Type() == "generic_type" {
+				t = t.ChildByFieldName("name")
+			}
+			name := t.Content(r.src)
+			if r.types[name] {
+				return graph.BuiltinReceiverHint{Form: "user", Name: name}
+			}
+			if b := r.bindings[name]; b.known.Form == "import" {
+				return b.known
+			}
 		}
-		if family == "" || (value != nil && hint.Family != family) {
+		if family == "" || (value != nil && hint.Form == "unknown") {
+			return graph.BuiltinReceiverHint{Form: "unknown"}
+		}
+		if value != nil && hint.Family != family {
 			return graph.BuiltinReceiverHint{Form: "shadowed"}
 		}
 		return graph.BuiltinReceiverHint{Form: "instance", Family: family}
-	}
-	if value != nil && hint.Form == "unknown" {
-		return graph.BuiltinReceiverHint{Form: "shadowed"} // Unsupported initializer or alias.
 	}
 	return hint
 }
@@ -263,6 +460,9 @@ func (r *jsBuiltinReceivers) receiverValue(node *sitter.Node) graph.BuiltinRecei
 		switch ctor.Type() {
 		case "identifier":
 			name := ctor.Content(r.src)
+			if r.writes[jsReceiverWrite{owner: name}] {
+				return graph.BuiltinReceiverHint{Form: "shadowed"}
+			}
 			if b, exists := r.bindings[name]; exists {
 				if b.known.Form == "import" && b.visibleAt(n.StartByte()) {
 					return b.known
@@ -272,8 +472,6 @@ func (r *jsBuiltinReceivers) receiverValue(node *sitter.Node) graph.BuiltinRecei
 			switch name {
 			case "Array", "String", "Number", "Map", "Set", "Promise":
 				family = jsStaticReceiverFamily(name)
-			default:
-				return graph.BuiltinReceiverHint{Form: "user", Name: name}
 			}
 		case "member_expression", "subscript_expression":
 			return r.receiver(ctor, n.StartByte())
