@@ -203,3 +203,84 @@ func TestRebuildLaravelDuplicateReceiptRoles(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildLaravelCollidingDispatchOrder(t *testing.T) {
+	const file, lang = "events.php", "php"
+	publisher := rebuildEventNode(file, "publish", lang, "")
+	a := rebuildEventNode(file, "a", lang, "")
+	b := rebuildEventNode(file, "b", lang, "")
+	for _, n := range []*graph.Node{a, b} {
+		n.Meta = map[string]any{"laravel_listener_type": "Notice"}
+	}
+	call := func(stub, event string) *graph.Edge {
+		return &graph.Edge{
+			From: publisher.ID, To: stub, Kind: graph.EdgeCalls, FilePath: file, Line: 3,
+			Meta: map[string]any{"via": laravelEventVia, "laravel_event_type": event},
+		}
+	}
+	first := call("unresolved::z", "First\\Notice")
+	second := call("unresolved::a", "Second\\Notice")
+	facts := rebuildEventFacts(file, lang, []*graph.Node{publisher, b, a}, first, second)
+	build, native := openRebuildEventStores(t, facts)
+	require.Equal(t, 4, ResolveLaravelEventCalls(native))
+	want := rebuildEventSQLiteRows(native)
+	require.Len(t, want.edges, 2)
+	for i, id := range []string{a.ID, b.ID} {
+		require.Equal(t, id, want.edges[i].To)
+		require.Equal(t, "First\\Notice", want.edges[i].Meta["laravel_event_type"])
+	}
+	stats, err := RunRebuildLaravelEvent(t.Context(), build, rebuildGRPCReceipts(facts), rebuildLaravelTestSelection(t))
+	require.NoError(t, err)
+	require.Equal(t, store_pebble.RebuildLaravelEventStats{Stubs: 2, Resolved: 4, Moves: 2, Adds: 2}, stats)
+	require.Equal(t, want, rebuildEventSavedRows(t, build))
+}
+
+func TestRebuildLaravelReceiptOnlyHandle(t *testing.T) {
+	const file, lang = "events.php", "php"
+	publisher := rebuildEventNode(file, "publish", lang, "")
+	typed := rebuildEventNode(file, "typed", lang, "")
+	typed.Meta = map[string]any{"laravel_listener_type": "Notice"}
+	provider := rebuildEventNode(file, "Provider", lang, "")
+	provider.Kind = graph.KindType
+	provider.Meta = map[string]any{"laravel_listen_map": "Notice=>Listener"}
+	leaf := rebuildEventNode(file, "Listener.handle", lang, "")
+	leaf.Kind = graph.KindMethod
+	member := &graph.Edge{From: leaf.ID, To: file + "::Listener", Kind: graph.EdgeMemberOf, FilePath: file, Line: 3}
+	call := &graph.Edge{
+		From: publisher.ID, To: "unresolved::*.handle", Kind: graph.EdgeCalls, FilePath: file, Line: 4,
+		Meta: map[string]any{"via": laravelEventVia, "laravel_event_type": "Notice"},
+	}
+	facts := rebuildEventFacts(file, lang, []*graph.Node{publisher, typed, provider, leaf}, member, call)
+	for _, mode := range []string{"raw handle", "wrong node receipt file", "empty node effective language", "wrong Call receipt file", "empty Call effective language", "wrong Call route"} {
+		t.Run(mode, func(t *testing.T) {
+			build := openRebuildGRPCBuild(t, facts)
+			before := rebuildEventSavedRows(t, build)
+			declarations, calls := facts, facts
+			declarations.Edges, calls.Nodes = nil, nil
+			calls.Edges = []*graph.Edge{call}
+			declarations.Edges = []*graph.Edge{member}
+			switch mode {
+			case "raw handle":
+				changed := *leaf
+				changed.Name = "handle"
+				declarations.Nodes = []*graph.Node{publisher, typed, provider, &changed}
+			case "wrong node receipt file":
+				declarations.File.FilePath = "wrong.php"
+			case "empty node effective language":
+				declarations.EffectiveLanguage = ""
+			case "wrong Call receipt file":
+				calls.File.FilePath = "wrong.php"
+			case "empty Call effective language":
+				calls.EffectiveLanguage = ""
+			case "wrong Call route":
+				changed := *call
+				changed.Meta = map[string]any{"via": laravelEventVia, "laravel_event_type": "Different"}
+				calls.Edges = []*graph.Edge{&changed}
+			}
+			stats, err := RunRebuildLaravelEvent(t.Context(), build, rebuildGRPCReceipts(declarations, calls), rebuildLaravelTestSelection(t))
+			require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, build))
+		})
+	}
+}
