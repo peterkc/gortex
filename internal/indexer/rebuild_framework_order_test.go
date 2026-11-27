@@ -53,6 +53,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"MediatR", "moves", 1},
 		{"C# DI interfaces", "edges", 1},
 		{"C# interface dispatch", "edges", 1},
+		{"EF Core models", "models", 1},
 		{"Sidekiq", "moves", 1},
 		{"Laravel event", "moves", 1},
 		{"function pointer", "moves", 1},
@@ -629,6 +630,7 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	ifaceMethod := node(ifaceFile, "csharp", "Tick", graph.KindMethod, 2)
 	ifaceMethod.Meta = map[string]any{"iface_member": true}
 	impl := node(ifaceFile, "csharp", "Clock", graph.KindType, 4)
+	impl.Meta = map[string]any{"ef_attribute_table": "clocks"}
 	implMethod := node(ifaceFile, "csharp", ifaceMethod.Name, graph.KindMethod, 5)
 	ifaceMethod.ID, implMethod.ID = iface.ID+".Tick", impl.ID+".Tick"
 	invoke := node(ifaceFile, "csharp", "invoke", graph.KindMethod, 7)

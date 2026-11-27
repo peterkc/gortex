@@ -200,6 +200,7 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildLaravelEvent,
 	store_pebble.ErrRebuildFnPointer,
 	store_pebble.ErrRebuildCSharpIfaceDispatch,
+	store_pebble.ErrRebuildEFCoreModels,
 }
 
 func buildRefusal(err error) rebuildBuildReply {

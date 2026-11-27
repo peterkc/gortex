@@ -655,6 +655,13 @@ func buildRebuildStages(
 		if csharpIface != 0 {
 			logger.Info("rebuild C# interface dispatch applied to private build", zap.Uint64("edges", csharpIface))
 		}
+		efModels, err := resolver.RunRebuildEFCoreModels(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if efModels != 0 {
+			logger.Info("rebuild EF Core models applied to private build", zap.Uint64("models", efModels))
+		}
 		sidekiq, err := resolver.RunRebuildSidekiq(ctx, private, receipts, selection)
 		if err != nil {
 			return err

@@ -48,6 +48,7 @@ func TestRebuildGRPCWireRefusals(t *testing.T) {
 		{"Laravel event", store_pebble.ErrRebuildLaravelEvent, 72},
 		{"function pointer", store_pebble.ErrRebuildFnPointer, 73},
 		{"C# interface dispatch", store_pebble.ErrRebuildCSharpIfaceDispatch, 74},
+		{"EF Core models", store_pebble.ErrRebuildEFCoreModels, 75},
 	} {
 		t.Run(stage.name, func(t *testing.T) {
 			for _, tc := range []struct {
