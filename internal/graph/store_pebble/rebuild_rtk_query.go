@@ -170,14 +170,15 @@ func (p *rebuildRTKQueryPass) collect(ctx context.Context) (bool, error) {
 }
 
 type rebuildRTKQueryPick struct {
-	target      string
-	caller      *graph.Node
-	buckets     []rebuildStoreCandidateWitness
-	getter      []byte // nonempty only when ambiguity consulted the binding getter
-	getterProof bool   // getter file can change the pick
-	ambiguous   bool   // the scoped pool must consult the binding and file
-	callerFile  bool   // caller file can decide an untagged election
-	file        string // file for a tagged endpoint lookup
+	target             string
+	caller             *graph.Node
+	buckets            []rebuildStoreCandidateWitness
+	getter             []byte // nonempty only when ambiguity consulted the binding getter
+	getterProof        bool   // getter file can change the pick
+	ambiguous          bool   // the scoped pool must consult the binding and file
+	callerFile         bool   // caller file supplied the untagged winner
+	getterInCallerFile bool   // a getter won in the caller's own file
+	file               string // file for a tagged endpoint lookup
 }
 
 func (p *rebuildRTKQueryPass) elect(e *graph.Edge, name string, tagged, resolveGetter bool) (pick rebuildRTKQueryPick, err error) {
@@ -223,7 +224,8 @@ func (p *rebuildRTKQueryPass) elect(e *graph.Edge, name string, tagged, resolveG
 		return p.key('f', name, file)
 	})
 	pick.target, pick.buckets = decision.target, decision.buckets
-	pick.callerFile = pick.ambiguous && !decision.getterWinner
+	pick.getterInCallerFile = decision.target != "" && getterFile != "" && getterFile == pick.file
+	pick.callerFile = pick.ambiguous && !decision.getterWinner && !pick.getterInCallerFile
 	pick.getterProof = pick.getter != nil && (getterFile == "" || decision.getterWinner)
 	return pick, err
 }
@@ -461,11 +463,11 @@ func (p *rebuildRTKQueryPass) recordNode(raw *graph.Node, file, lang string) err
 	}
 	// A receipt can enter the binding even when its live node was not a getter.
 	if admitted && getterState != 0 && (getter == nil || !bytes.Equal(getter[1:], getterWanted)) {
-		getterFile, seen, err := p.unique(p.key('t', raw.Name))
+		getterFile, _, err := p.unique(p.key('t', raw.Name))
 		if err != nil {
 			return err
 		}
-		if !seen || getterFile != "" && getterFile != raw.FilePath {
+		if getterFile != raw.FilePath {
 			if err := noteRebuildScratchState(p.put, getterWanted, getterState, rebuildCapabilityUnproved); err != nil {
 				return err
 			}
@@ -606,6 +608,7 @@ func (p *rebuildRTKQueryPass) proved(old []byte, anchor bool) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	getterProof := pick.getterProof
 	if pick.caller != nil {
 		state, err := p.state(p.key('n', pick.caller.ID))
 		if err != nil || !rebuildStoreCandidateExact(state) {
@@ -614,8 +617,11 @@ func (p *rebuildRTKQueryPass) proved(old []byte, anchor bool) (bool, error) {
 		if tagged && state&rebuildStoreOtherFile != 0 || !tagged && state&rebuildStoreOtherWorkspace != 0 {
 			return false, nil
 		}
-		if !tagged && state&rebuildStoreOtherFile != 0 && pick.callerFile {
-			return false, nil
+		if !tagged && state&rebuildStoreOtherFile != 0 {
+			if pick.callerFile {
+				return false, nil
+			}
+			getterProof = getterProof || pick.getterInCallerFile
 		}
 	}
 	if tagged {
@@ -631,11 +637,11 @@ func (p *rebuildRTKQueryPass) proved(old []byte, anchor bool) (bool, error) {
 	}
 	if pick.getter != nil {
 		var ok bool
-		if pick.getterProof {
-			binding, _ := e.Meta["store_binding"].(string)
+		binding, _ := e.Meta["store_binding"].(string)
+		if getterProof {
 			ok, err = p.getterFilesProved(p.key('t', binding), pick.getter, p.unique)
 		} else {
-			ok, err = p.getterFileUnchanged(pick.getter)
+			ok, err = p.getterFallbackProved(p.key('t', binding), pick.getter)
 		}
 		if err != nil || !ok {
 			return false, err

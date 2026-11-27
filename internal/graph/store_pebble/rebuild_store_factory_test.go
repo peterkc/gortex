@@ -1,6 +1,7 @@
 package store_pebble
 
 import (
+	"bytes"
 	"iter"
 	"slices"
 	"strings"
@@ -48,7 +49,7 @@ func TestRebuildStoreFactoryRejectsInvalidInputs(t *testing.T) {
 
 func TestRebuildStoreFactoryRejectsOccupiedScratch(t *testing.T) {
 	b := newBuild(t, FullProfile)
-	require.NoError(t, b.pending.Set(rebuildStoreFactoryKey('z'), []byte("sentinel"), pebble.NoSync))
+	require.NoError(t, b.pending.Set(append(bytes.Clone(rebuildStoreFactoryPrefix), 'z'), []byte("sentinel"), pebble.NoSync))
 	before := rebuildFrameworkCustodyRows(t, b)
 	stats, err := b.RebuildStoreFactory(t.Context(), unreadStoreFactoryReceipts(t), storeFactoryTestRules())
 	require.ErrorIs(t, err, ErrRebuildStoreFactory)

@@ -116,10 +116,6 @@ func (p *rebuildStoreFactoryPass) run(ctx context.Context, receipts iter.Seq2[Pa
 // t: live getter files, x: exact getter files. u/v: wanted action/getter cohorts.
 // l: deferred Calls; n: affected caller proof; p: election witnesses; r: raw-key claims;
 // m: new payload by old key; o: raw receipt key in move order.
-func rebuildStoreFactoryKey(col byte, fields ...string) []byte {
-	return keyStrings(append(bytes.Clone(rebuildStoreFactoryPrefix), col), fields...)
-}
-
 func (p *rebuildStoreFactoryPass) key(col byte, fields ...string) []byte {
 	return keyStrings(p.column(col), fields...)
 }

@@ -238,21 +238,36 @@ func TestRebuildRTKQueryGetterEntrant(t *testing.T) {
 		Meta: map[string]any{"store_binding": binding}}
 	left := rebuildEventFacts(file, "typescript", []*graph.Node{caller, local, entrant}, call)
 	right := rebuildEventFacts(other, "typescript", []*graph.Node{remote, endpoint, getter})
-	b := openRebuildGRPCBuild(t, left, right)
-	before := rebuildEventSavedRows(t, b)
-	selection, err := NewFrameworkSynthesizerSelection([]string{SynthRTKQuery})
-	require.NoError(t, err)
-	raw := *entrant
-	raw.Meta = nil
-	proof := rebuildEventFacts(file, "typescript", []*graph.Node{caller, local, &raw}, call)
-	stats, err := RunRebuildRTKQuery(t.Context(), b, rebuildGRPCReceipts(proof, right), selection)
-	requireRTKQueryRefusal(t, err, stats, call, remote.ID)
-	require.Equal(t, before, rebuildEventSavedRows(t, b))
-	native := openRebuildTemporalOracle(t, proof, right)
-	require.Equal(t, 1, ResolveRTKQueryCalls(native))
-	rows := rebuildEventSQLiteRows(native)
-	require.Len(t, rows.edges, 1)
-	require.Equal(t, local.ID, rows.edges[0].To)
+	for _, haveGetter := range []bool{false, true} {
+		right := right
+		if !haveGetter {
+			right = rebuildEventFacts(other, "typescript", []*graph.Node{remote, endpoint})
+		}
+		b := openRebuildGRPCBuild(t, left, right)
+		before := rebuildEventSavedRows(t, b)
+		selection, err := NewFrameworkSynthesizerSelection([]string{SynthRTKQuery})
+		require.NoError(t, err)
+		raw := *entrant
+		raw.Meta = nil
+		proof := rebuildEventFacts(file, "typescript", []*graph.Node{caller, local}, call)
+		liveTarget, rawTarget := remote.ID, local.ID
+		if haveGetter {
+			proof.Nodes = append(proof.Nodes, &raw)
+			proof.File.NodeCount++
+		} else {
+			raw.FilePath = other
+			right = rebuildEventFacts(other, "typescript", []*graph.Node{remote, endpoint, &raw})
+			liveTarget, rawTarget = local.ID, remote.ID
+		}
+		stats, err := RunRebuildRTKQuery(t.Context(), b, rebuildGRPCReceipts(proof, right), selection)
+		requireRTKQueryRefusal(t, err, stats, call, liveTarget)
+		require.Equal(t, before, rebuildEventSavedRows(t, b))
+		native := openRebuildTemporalOracle(t, proof, right)
+		require.Equal(t, 1, ResolveRTKQueryCalls(native))
+		rows := rebuildEventSQLiteRows(native)
+		require.Len(t, rows.edges, 1)
+		require.Equal(t, rawTarget, rows.edges[0].To)
+	}
 }
 
 func rtkQueryTestHook(file, suffix string) *graph.Node {

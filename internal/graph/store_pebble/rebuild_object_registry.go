@@ -98,8 +98,18 @@ func (p *rebuildObjectRegistryPass) state(key []byte) (byte, error) {
 func (p *rebuildObjectRegistryPass) node(id string) (*graph.Node, error) {
 	key := pendingNodeKey(id)
 	return pendingGet(p.b.pending, key, func(raw []byte) (*graph.Node, error) {
+		if err := p.nodeInput(key, raw); err != nil {
+			return nil, err
+		}
 		return checkedRebuildLightNode(row{key, raw}, p.label)
 	})
+}
+
+func (p *rebuildObjectRegistryPass) nodeInput(key, val []byte) error {
+	if len(key)+len(val) > p.rowBytes {
+		return fmt.Errorf("%w: %s node row", ErrRebuildLinkInputSize, p.label)
+	}
+	return nil
 }
 
 func rebuildObjectRegistryCallable(kind graph.NodeKind) bool {
@@ -324,6 +334,9 @@ func (p *rebuildObjectRegistryPass) collectGetters(ctx context.Context) error {
 		}
 		full, err := decodeNode(r.value)
 		if err != nil || !p.rules.Getter(full, n.Name) {
+			return err
+		}
+		if err := p.nodeInput(r.key, r.value); err != nil {
 			return err
 		}
 		if err := p.put(p.key('g', n.ID), append([]byte{rebuildCapabilityWanted}, p.key('v', n.Name)...)); err != nil {
@@ -680,7 +693,7 @@ func (p *rebuildObjectRegistryPass) proved(old []byte, e *graph.Edge, anchor boo
 		if pick.getterProof {
 			ok, err = p.getterFilesProved(p.key('t', binding), wanted, p.unique)
 		} else {
-			ok, err = p.getterFileUnchanged(wanted)
+			ok, err = p.getterFallbackProved(p.key('t', binding), wanted)
 		}
 		if err != nil || !ok {
 			return false, err
