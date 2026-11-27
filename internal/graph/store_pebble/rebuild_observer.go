@@ -52,11 +52,18 @@ func (b *BuildStore) RebuildObserver(ctx context.Context, receipts iter.Seq2[Par
 	if err := p.capture(ctx, registrar, dispatcher); err != nil {
 		return stats, err
 	}
-	if err := p.elect(ctx, sameBoundary, maxCallbacks, makeCall); err != nil {
+	if err := p.elect(ctx, sameBoundary, maxCallbacks, makeCall, false); err != nil {
 		return stats, err
 	}
-	if err := p.prove(ctx, receipts); err != nil {
+	fallback, err := p.prove(ctx, receipts)
+	if err != nil {
 		return stats, err
+	}
+	if fallback != nil {
+		if err := p.elect(ctx, sameBoundary, maxCallbacks, makeCall, true); err != nil {
+			return stats, err
+		}
+		return stats, p.refusal(ctx, fallback)
 	}
 	err = b.withWrites(func() error { return p.apply(ctx) })
 	return p.stats, err
@@ -72,7 +79,8 @@ type rebuildObserverPass struct {
 
 // f: field IDs; r/d: access rows by field/role; c: distinct callbacks by
 // field; v: live inputs requiring exact raw keys; e: receipt proof states;
-// n: declaration proof states with a live witness; w: staged output rows.
+// n: declaration proof states with a live witness; w: staged output rows;
+// x: output proof flags used only when a witness fails.
 func observerScratch(col byte, fields ...string) []byte {
 	return keyStrings([]byte{'g', 'O', col}, fields...)
 }
@@ -163,19 +171,11 @@ func (p *rebuildObserverPass) access(ctx context.Context, col byte, field string
 		if err != nil {
 			return err
 		}
-		if err := p.wantEdge(e); err != nil {
-			return err
-		}
-		if err := p.wantNode(e.From, e); err != nil {
-			return err
-		}
 		return yield(e)
 	})
 }
 
-func (p *rebuildObserverPass) elect(ctx context.Context, sameBoundary func(*graph.Node, *graph.Node) bool, maxCallbacks int,
-	makeCall func(*graph.Node, string, string) *graph.Edge,
-) error {
+func (p *rebuildObserverPass) fields(ctx context.Context, yield func(string) error) error {
 	return pendingVisit(ctx, p.b.pending, observerScratch('f'), func(r row) error {
 		field, _, err := readKeyString(r.key[3:])
 		if err != nil {
@@ -187,10 +187,35 @@ func (p *rebuildObserverPass) elect(ctx context.Context, sameBoundary func(*grap
 				return err
 			}
 		}
-		if err := p.access(ctx, 'r', field, func(e *graph.Edge) error {
-			return p.collectCallbacks(ctx, field, e.From)
-		}); err != nil {
+		return yield(field)
+	})
+}
+
+func (p *rebuildObserverPass) prepare(ctx context.Context, field string) error {
+	return p.access(ctx, 'r', field, func(access *graph.Edge) error {
+		if err := p.wantWitness(access, access.From); err != nil {
 			return err
+		}
+		return p.callbackWitnesses(ctx, access.From, func(in, ref *graph.Edge) error {
+			if err := p.wantEdge(in); err != nil {
+				return err
+			}
+			if err := p.wantWitness(ref, ref.To); err != nil {
+				return err
+			}
+			return p.put(observerScratch('c', field, ref.To), nil)
+		})
+	})
+}
+
+func (p *rebuildObserverPass) elect(ctx context.Context, sameBoundary func(*graph.Node, *graph.Node) bool, maxCallbacks int,
+	makeCall func(*graph.Node, string, string) *graph.Edge, reporting bool,
+) error {
+	return p.fields(ctx, func(field string) error {
+		if !reporting {
+			if err := p.prepare(ctx, field); err != nil {
+				return err
+			}
 		}
 		prefix := observerScratch('c', field)
 		count := 0
@@ -200,15 +225,35 @@ func (p *rebuildObserverPass) elect(ctx context.Context, sameBoundary func(*grap
 		}); err != nil {
 			return err
 		}
+		var badRegistrar bool
+		if reporting && count > 0 && count <= maxCallbacks {
+			var err error
+			badRegistrar, err = p.attributeCallbacks(ctx, field)
+			if err != nil {
+				return err
+			}
+		}
 		return p.access(ctx, 'd', field, func(access *graph.Edge) error {
-			// Prove the dispatcher that admitted the field even when
-			// the callback count rules out writing calls.
+			if !reporting {
+				// The dispatcher still admits the field when the cap
+				// prevents it from writing calls.
+				if err := p.wantWitness(access, access.From); err != nil {
+					return err
+				}
+			}
 			if count == 0 || count > maxCallbacks {
 				return nil
 			}
 			disp, err := p.node(ctx, access.From)
 			if err != nil {
 				return err
+			}
+			badDispatch := false
+			if reporting {
+				badDispatch, err = p.witnessUnproved(access, access.From)
+				if err != nil {
+					return err
+				}
 			}
 			return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
 				id, _, err := readKeyString(r.key[len(prefix):])
@@ -219,13 +264,13 @@ func (p *rebuildObserverPass) elect(ctx context.Context, sameBoundary func(*grap
 				if err != nil || !sameBoundary(disp, cb) {
 					return err
 				}
-				return p.propose(makeCall(disp, id, field))
+				return p.propose(makeCall(disp, id, field), field, reporting, badRegistrar || badDispatch || len(r.value) != 0)
 			})
 		})
 	})
 }
 
-func (p *rebuildObserverPass) collectCallbacks(ctx context.Context, field, registrar string) error {
+func (p *rebuildObserverPass) callbackWitnesses(ctx context.Context, registrar string, yield func(*graph.Edge, *graph.Edge) error) error {
 	prefix := keyStrings([]byte{familyEdge, edgeIn}, registrar)
 	return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
 		kind, err := rebuildAttributionEdgeKind(r.value)
@@ -249,16 +294,7 @@ func (p *rebuildObserverPass) collectCallbacks(ctx context.Context, field, regis
 				if err != nil || !observerCallable(n) {
 					return err
 				}
-				if err := p.wantEdge(in); err != nil {
-					return err
-				}
-				if err := p.wantEdge(ref); err != nil {
-					return err
-				}
-				if err := p.wantNode(ref.To, ref); err != nil {
-					return err
-				}
-				return p.put(observerScratch('c', field, ref.To), nil)
+				return yield(in, ref)
 			}); err != nil {
 				return err
 			}
@@ -267,19 +303,38 @@ func (p *rebuildObserverPass) collectCallbacks(ctx context.Context, field, regis
 	})
 }
 
-func (p *rebuildObserverPass) propose(e *graph.Edge) error {
+func (p *rebuildObserverPass) propose(e *graph.Edge, field string, reporting, unproved bool) error {
 	key := pendingEdgeKey(e)
 	prior, err := p.b.pendingEdge(key)
 	if err != nil || prior != nil {
 		return err
 	}
+	proposal := append(observerScratch('w'), key...)
+	// Fields arrive in native sorted ID order. A later field replaces the
+	// earlier staged payload; an occupied durable identity remains untouched.
+	if reporting {
+		staged, err := p.get(proposal)
+		if err != nil || staged == nil {
+			return err
+		}
+		// Use the winning field's proof. Within a field, fold any
+		// repeated routes to the same output key into one refusal.
+		key := append(observerScratch('x'), key...)
+		prior, err := p.get(key)
+		if err != nil {
+			return err
+		}
+		bad := byte(0)
+		if unproved || len(prior) > 0 && prior[0] != 0 && string(prior[1:]) == field {
+			bad = 1
+		}
+		return p.put(key, append([]byte{bad}, field...))
+	}
 	value, err := encodeEdge(e)
 	if err != nil {
 		return err
 	}
-	// Fields arrive in native sorted ID order. A later field replaces the
-	// earlier staged payload; an occupied durable identity remains untouched.
-	return p.put(append(observerScratch('w'), key...), value)
+	return p.put(proposal, value)
 }
 
 func observerProofMatches(proof rebuildEdgeProof, kind graph.EdgeKind) bool {
@@ -303,12 +358,15 @@ func (p *rebuildObserverPass) wantEdge(e *graph.Edge) error {
 		return err
 	}
 	custody, err := readRebuildEdgeCustody(p.b.pending, live)
+	if errors.Is(err, ErrRebuildUnknownProvenance) {
+		return p.put(key, []byte{0})
+	}
 	if err != nil {
 		return err
 	}
 	if custody.proof != 0 {
 		if !observerProofMatches(custody.proof, e.Kind) {
-			return &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(e)}
+			return p.put(key, []byte{0})
 		}
 		return nil
 	}
@@ -320,6 +378,13 @@ func (p *rebuildObserverPass) wantEdge(e *graph.Edge) error {
 		return err
 	}
 	return p.put(append(observerScratch('e'), raw...), []byte{rebuildCapabilityWanted})
+}
+
+func (p *rebuildObserverPass) wantWitness(e *graph.Edge, id string) error {
+	if err := p.wantEdge(e); err != nil {
+		return err
+	}
+	return p.wantNode(id, e)
 }
 
 func (p *rebuildObserverPass) wantNode(id string, witness *graph.Edge) error {
@@ -339,10 +404,10 @@ func (p *rebuildObserverPass) note(key []byte, bit byte) error {
 	return noteRebuildScratchPayload(p.put, key, state, bit)
 }
 
-func (p *rebuildObserverPass) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
+func (p *rebuildObserverPass) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) (*RebuildUnknownProvenanceError, error) {
 	found, err := rebuildGuardHasPrefix(ctx, p.b.pending, observerScratch('n'))
 	if err != nil || !found {
-		return err
+		return nil, err
 	}
 	if err := recordRebuildScratchReceipts(receipts, func(facts ParseFacts) error {
 		file := pathkey.Normalize(facts.File.FilePath)
@@ -386,9 +451,8 @@ func (p *rebuildObserverPass) prove(ctx context.Context, receipts iter.Seq2[Pars
 		}
 		return nil
 	}); err != nil {
-		return err
+		return nil, err
 	}
-	const exact = rebuildCapabilityWanted | rebuildCapabilityProved
 	var refused rebuildScratchRefusals
 	refuse := func(key []byte) error {
 		id, err := decodeLinkRecorder(key)
@@ -399,26 +463,111 @@ func (p *rebuildObserverPass) prove(ctx context.Context, receipts iter.Seq2[Pars
 		return nil
 	}
 	if err := pendingVisit(ctx, p.b.pending, observerScratch('v'), func(r row) error {
-		state, err := p.get(append(observerScratch('e'), r.value...))
-		if err != nil || len(state) == 1 && state[0] == exact {
+		bad, err := p.rawUnproved(r.value)
+		if err != nil || !bad {
 			return err
 		}
 		return refuse(r.key[3:])
 	}); err != nil {
-		return err
+		return nil, err
 	}
 	if err := pendingVisit(ctx, p.b.pending, observerScratch('n'), func(r row) error {
 		if len(r.value) < 2 {
 			return invalid("Observer declaration proof row")
 		}
-		if r.value[0] != exact {
+		if r.value[0] != rebuildScratchExact {
 			return refuse(r.value[1:])
 		}
 		return nil
 	}); err != nil {
+		return nil, err
+	}
+	if refused.result.Count != 0 {
+		return &refused.result, nil
+	}
+	return nil, nil
+}
+
+// rawUnproved reads the state for a wanted raw key. A one-byte marker
+// records checked custody that was stale or supplied by the wrong producer.
+func (p *rebuildObserverPass) rawUnproved(raw []byte) (bool, error) {
+	if len(raw) == 1 {
+		return true, nil
+	}
+	state, err := p.get(append(observerScratch('e'), raw...))
+	return len(state) != 1 || state[0] != rebuildScratchExact, err
+}
+
+func (p *rebuildObserverPass) edgeUnproved(e *graph.Edge) (bool, error) {
+	raw, err := p.get(append(observerScratch('v'), pendingEdgeKey(e)...))
+	if err != nil || raw == nil {
+		return false, err // producer custody was already checked
+	}
+	return p.rawUnproved(raw)
+}
+
+func (p *rebuildObserverPass) witnessUnproved(e *graph.Edge, id string) (bool, error) {
+	bad, err := p.edgeUnproved(e)
+	if err != nil || bad {
+		return bad, err
+	}
+	state, err := p.get(observerScratch('n', id))
+	return len(state) < 2 || state[0] != rebuildScratchExact, err
+}
+
+// Report registrar admission against the field and each callback witness
+// against its own callback. Repeat the read-only join only on refusal.
+func (p *rebuildObserverPass) attributeCallbacks(ctx context.Context, field string) (bool, error) {
+	badRegistrar := false
+	err := p.access(ctx, 'r', field, func(access *graph.Edge) error {
+		bad, err := p.witnessUnproved(access, access.From)
+		if err != nil {
+			return err
+		}
+		badRegistrar = badRegistrar || bad
+		return p.callbackWitnesses(ctx, access.From, func(in, ref *graph.Edge) error {
+			bad, err := p.edgeUnproved(in)
+			if err != nil {
+				return err
+			}
+			if !bad {
+				bad, err = p.witnessUnproved(ref, ref.To)
+				if err != nil {
+					return err
+				}
+			}
+			if !bad {
+				return nil
+			}
+			return p.put(observerScratch('c', field, ref.To), []byte{1})
+		})
+	})
+	return badRegistrar, err
+}
+
+func (p *rebuildObserverPass) refusal(ctx context.Context, fallback error) error {
+	prefix := observerScratch('x')
+	var refused rebuildScratchRefusals
+	if err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
+		if len(r.value) == 0 {
+			return invalid("Observer proposal proof row")
+		}
+		if r.value[0] == 0 {
+			return nil
+		}
+		id, err := decodeLinkRecorder(r.key[len(prefix):])
+		if err != nil {
+			return err
+		}
+		refused.add(id, nil)
+		return nil
+	}); err != nil {
 		return err
 	}
-	return refused.err()
+	if err := refused.err(); err != nil {
+		return err
+	}
+	return fallback
 }
 
 func (p *rebuildObserverPass) apply(ctx context.Context) error {

@@ -180,7 +180,8 @@ func TestRebuildObserverCapBeforeWorkspaceAndLanguage(t *testing.T) {
 		language string
 		want     int
 	}{
-		{name: "40 including a foreign workspace", want: 39},
+		{name: "40 distinct with a duplicate and a foreign workspace", want: 39},
+		{name: "41 including a self candidate", language: "go"},
 		{name: "41 including a deferred language", language: "python"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -198,9 +199,15 @@ func TestRebuildObserverCapBeforeWorkspaceAndLanguage(t *testing.T) {
 			channel.facts.Nodes = append(channel.facts.Nodes, foreign)
 			channel.facts.Edges = append(channel.facts.Edges,
 				rebuildObserverEdge(channel.caller, foreign, graph.EdgeReads, 20))
+			// A read and reference to the same callback count once.
+			channel.facts.Edges = append(channel.facts.Edges,
+				rebuildObserverEdge(channel.caller, foreign, graph.EdgeReferences, 20))
 			inputs := []store_pebble.ParseFacts{channel.facts}
 			workspaces := map[string]string{foreign.ID: "elsewhere"}
-			if tc.language != "" {
+			if tc.language == "go" {
+				inputs[0].Edges = append(inputs[0].Edges,
+					rebuildObserverEdge(channel.caller, channel.dispatch, graph.EdgeReferences, 20))
+			} else if tc.language != "" {
 				cb := rebuildEventNode("extra.py", "extra", tc.language, "")
 				inputs = append(inputs, rebuildEventFacts(cb.FilePath, tc.language, []*graph.Node{cb}))
 				inputs[0].Edges = append(inputs[0].Edges,
@@ -226,11 +233,19 @@ func TestRebuildObserverCapBeforeWorkspaceAndLanguage(t *testing.T) {
 				before := rebuildEventSavedRows(t, b)
 				// Only the dispatcher access loses its proof. It is still
 				// live and admits the field, even though the cap blocks it.
+				var dispatcherAccess *graph.Edge
 				receipts[0].Edges = slices.DeleteFunc(receipts[0].Edges, func(e *graph.Edge) bool {
-					return e.Kind == graph.EdgeAccessesField && e.From == channel.dispatch.ID
+					if e.Kind == graph.EdgeAccessesField && e.From == channel.dispatch.ID {
+						dispatcherAccess = e
+						return true
+					}
+					return false
 				})
+				require.NotNil(t, dispatcherAccess)
 				stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(receipts...), selection, 1<<20)
-				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+				var refusal *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refusal)
+				require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(dispatcherAccess)}, refusal)
 				require.Zero(t, stats)
 				require.Equal(t, before, rebuildEventSavedRows(t, b))
 			}
@@ -256,11 +271,15 @@ func TestRebuildObserverRefusesMissingWinnerReceipt(t *testing.T) {
 	report := RunFrameworkSynthesizersWithSelection(native, selection)
 	require.NoError(t, report.Err)
 	require.Equal(t, 2, report.Total)
+	want := rebuildObserverNativeDispatchCalls(native, newRebuildObserverChannel("z.ts", "typescript").dispatch.ID)
+	require.Len(t, want, 1)
 	// Keep the later channel's wrong-line receipt and live winning row. A
 	// missing proof cannot justify either dropping this pair or writing the first.
 	receipts[1].Edges = receipts[1].Edges[:len(receipts[1].Edges)-1]
 	stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(receipts...), selection, 1)
-	require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+	var refusal *store_pebble.RebuildUnknownProvenanceError
+	require.ErrorAs(t, err, &refusal)
+	require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(want[0])}, refusal)
 	require.Zero(t, stats)
 	require.Equal(t, before, rebuildEventSavedRows(t, b))
 }

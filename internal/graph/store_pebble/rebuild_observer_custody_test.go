@@ -9,8 +9,96 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
+func TestRebuildObserverOriginalKeyAndScratchOwnership(t *testing.T) {
+	for _, mode := range []string{"checked move", "untracked move with destination receipt", "missing declaration", "changed declaration", "scratch occupied"} {
+		t.Run(mode, func(t *testing.T) {
+			registrar := setStateProofMethod("register", "subscribe", 2)
+			dispatch := setStateProofMethod("dispatch", "notify", 4)
+			callback := setStateProofMethod("callback", "callback", 6)
+			access := &graph.Edge{From: registrar.ID, To: "field", Kind: graph.EdgeAccessesField, FilePath: registrar.FilePath, Line: 3}
+			other := &graph.Edge{From: dispatch.ID, To: "field", Kind: graph.EdgeAccessesField, FilePath: dispatch.FilePath, Line: 5}
+			raw := &graph.Edge{From: "setup", To: "unresolved::subscribe", Kind: graph.EdgeCalls, FilePath: registrar.FilePath, Line: 9}
+			ref := &graph.Edge{From: "setup", To: callback.ID, Kind: graph.EdgeReferences, FilePath: registrar.FilePath, Line: 9}
+			facts := setStateProofFacts([]*graph.Node{registrar, dispatch, callback}, access, other, raw, ref)
+			b, _ := seedSyntheticCustody(t, facts)
+			live := *raw
+			live.To = registrar.ID
+			move := []graph.EdgeReindex{{Edge: &live, OldTo: raw.To}}
+			ctx := t.Context()
+			if mode == "untracked move with destination receipt" {
+				b.ReindexEdges(move)
+				facts.Edges = append(facts.Edges, &live)
+				custody, err := readRebuildEdgeCustody(b.pending, pendingEdgeKey(&live))
+				require.NoError(t, err)
+				require.Equal(t, rebuildProofUntrackedMove, custody.proof)
+			} else {
+				require.NoError(t, b.ApplyLinkReindexes(ctx, move))
+				custody, err := readRebuildEdgeCustody(b.pending, pendingEdgeKey(&live))
+				require.NoError(t, err)
+				require.Equal(t, pendingEdgeKey(raw), custody.raw)
+			}
+			switch mode {
+			case "missing declaration":
+				facts.Nodes = facts.Nodes[:2]
+			case "changed declaration":
+				changed := *callback
+				changed.StartLine++
+				facts.Nodes[2] = &changed
+			case "scratch occupied":
+				require.NoError(t, b.pending.Set(observerScratch('z'), []byte("sentinel"), pebble.NoSync))
+			}
+			receipts := func(yield func(ParseFacts, error) bool) {
+				require.NotEqual(t, "scratch occupied", mode)
+				yield(facts, nil)
+			}
+			makeCall := func(from *graph.Node, to, field string) *graph.Edge {
+				return setStateProofOutput(from, &graph.Node{ID: to}, field)
+			}
+			want := makeCall(dispatch, callback.ID, "field")
+			before := rebuildFrameworkCustodyRows(t, b)
+			stats, err := b.RebuildObserver(ctx, receipts, 1,
+				func(name string) bool { return name == "subscribe" },
+				func(name string) bool { return name == "notify" },
+				func(_, _ *graph.Node) bool { return true }, 40, makeCall)
+			if mode == "checked move" {
+				require.NoError(t, err)
+				require.EqualValues(t, 1, stats.Edges)
+				checkSetStateProofOutput(t, b, want, rebuildProofObserver)
+				return
+			}
+			require.ErrorIs(t, err, ErrRebuildObserver)
+			if mode == "scratch occupied" {
+				require.ErrorContains(t, err, "Observer scratch range occupied")
+			} else {
+				var refusal *RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refusal)
+				require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(want)}, refusal)
+			}
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
+func TestRebuildObserverProofKinds(t *testing.T) {
+	for _, tc := range []struct {
+		kind   graph.EdgeKind
+		proofs []rebuildEdgeProof
+	}{
+		{graph.EdgeAccessesField, []rebuildEdgeProof{rebuildProofDirect, rebuildProofReceiver}},
+		{graph.EdgeCalls, []rebuildEdgeProof{rebuildProofTemporalSynthetic, rebuildProofEventChannel, rebuildProofRNBridge, rebuildProofObserver}},
+		{graph.EdgeReferences, []rebuildEdgeProof{rebuildProofSwiftObjC, rebuildProofRNPair}},
+	} {
+		for _, proof := range tc.proofs {
+			require.True(t, observerProofMatches(proof, tc.kind))
+			require.False(t, observerProofMatches(proof, graph.EdgeReads))
+		}
+	}
+	require.False(t, observerProofMatches(rebuildProofUntrackedMove, graph.EdgeCalls))
+}
+
 func TestRebuildObserverPredecessorCustody(t *testing.T) {
-	for _, name := range []string{"authentic", "missing direct", "stale receiver", "forged event call"} {
+	for _, name := range []string{"authentic", "missing direct", "stale receiver", "forged event call", "wrong kind"} {
 		t.Run(name, func(t *testing.T) {
 			const (
 				channelFile = "channel.go"
@@ -137,6 +225,10 @@ func TestRebuildObserverPredecessorCustody(t *testing.T) {
 				value, err := encodeEdge(indirect)
 				require.NoError(t, err)
 				require.NoError(t, b.pending.Set(pendingEdgeKey(indirect), value, pebble.NoSync))
+			case "wrong kind":
+				require.NoError(t, b.withWrites(func() error {
+					return b.putEdgeWithCustody(direct, rebuildEdgeCustody{proof: rebuildProofSwiftObjC})
+				}))
 			case "forged event call":
 				// An ordinary replacement can reproduce the producer's exact tags and bytes.
 				require.NoError(t, b.addEdge(call))
@@ -174,7 +266,16 @@ func TestRebuildObserverPredecessorCustody(t *testing.T) {
 			}
 			observerStats, err := run()
 			if name != "authentic" {
-				require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
+				var refusal *RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refusal)
+				count, first := uint64(2), onEvent.ID
+				if name == "forged event call" {
+					count = 1
+				}
+				require.Equal(t, &RebuildUnknownProvenanceError{
+					Count: count,
+					First: graph.EdgeIdentityFor(makeCall(dispatcher, first, field.ID)),
+				}, refusal)
 				require.Zero(t, observerStats)
 				require.Equal(t, want, actualRows())
 				return
@@ -208,7 +309,7 @@ func TestRebuildObserverPredecessorCustody(t *testing.T) {
 			var refused *RebuildUnknownProvenanceError
 			require.ErrorAs(t, err, &refused)
 			require.EqualValues(t, 1, refused.Count)
-			require.Equal(t, graph.EdgeIdentityFor(firstHop), refused.First)
+			require.Equal(t, graph.EdgeIdentityFor(makeCall(nextDispatch, onPlain.ID, nextField.ID)), refused.First)
 			require.Zero(t, observerStats)
 			require.Equal(t, want, actualRows())
 		})

@@ -15,8 +15,10 @@ import (
 // proved independent of deferred or cross-recording-path receipt rows.
 var ErrRebuildUnknownProvenance = errors.New("rebuild: unknown provenance")
 
-// RebuildUnknownProvenanceError counts affected output rows, not possible
-// producers or contenders. First names the lowest affected key.
+// RebuildUnknownProvenanceError counts distinct affected output rows, not
+// possible producers or contenders. First names the lowest affected key.
+// If a pass must prove inputs but cannot elect an output without guessing,
+// Count and First describe the unproved inputs instead.
 type RebuildUnknownProvenanceError struct {
 	Count uint64
 	First graph.EdgeIdentity

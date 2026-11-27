@@ -1,11 +1,150 @@
 package store_pebble
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/cockroachdb/pebble/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 )
+
+func TestRebuildClosureCollectionCountsAffectedOutputs(t *testing.T) {
+	// The smallest output belongs to the last field. The first proposal
+	// fails both endpoint proofs but contributes only one count.
+	for _, mutate := range []struct {
+		name string
+		run  func(*graph.Node)
+	}{
+		{"kind", func(n *graph.Node) { n.Kind = graph.KindFunction }},
+		{"name", func(n *graph.Node) { n.Name = "replacement" }},
+		{"language", func(n *graph.Node) { n.Language = "typescript" }},
+		{"file", func(n *graph.Node) { n.FilePath = "wrong.go" }},
+		{"line", func(n *graph.Node) { n.StartLine++ }},
+		{"repo", func(n *graph.Node) { n.RepoPrefix = "other" }},
+	} {
+		for _, conflictFirst := range []bool{true, false} {
+			order := "valid then conflicting"
+			if conflictFirst {
+				order = "conflicting then valid"
+			}
+			t.Run(mutate.name+"/"+order, func(t *testing.T) {
+				d1, r1 := closureProofPair("z", "alpha")
+				d2, r2 := closureProofPair("a", "omega")
+				facts := setStateProofFacts([]*graph.Node{d1, r1, d2, r2})
+				b, exact := seedSyntheticCustody(t, facts)
+				bad := setStateProofFacts(nil)
+				for _, n := range []*graph.Node{d1, r1, r2} {
+					changed := *n
+					mutate.run(&changed)
+					bad.Nodes = append(bad.Nodes, &changed)
+				}
+				receipts := func(yield func(ParseFacts, error) bool) {
+					first, last := facts, bad
+					if conflictFirst {
+						first, last = bad, facts
+					}
+					if yield(first, nil) {
+						yield(last, nil)
+					}
+				}
+				before := rebuildFrameworkCustodyRows(t, b)
+				boundary := func(_, _ *graph.Node) bool { return true }
+				stats, err := b.RebuildClosureCollection(t.Context(), receipts, 1, 8, boundary, setStateProofOutput)
+				var refusal *RebuildUnknownProvenanceError
+				require.ErrorIs(t, err, ErrRebuildClosureCollection)
+				require.ErrorAs(t, err, &refusal)
+				require.Equal(t, &RebuildUnknownProvenanceError{
+					Count: 2,
+					First: graph.EdgeIdentityFor(setStateProofOutput(d2, r2, "omega")),
+				}, refusal)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+				stats, err = b.RebuildClosureCollection(t.Context(), exact, 1, 8, boundary, setStateProofOutput)
+				require.NoError(t, err)
+				require.EqualValues(t, 2, stats.Edges)
+			})
+		}
+	}
+}
+
+func TestRebuildClosureCollectionCountsUnprovedRoleWithoutOutput(t *testing.T) {
+	dispatch, register := closureProofPair("one", "listeners")
+	_, missing := closureProofPair("two", "listeners")
+	facts := setStateProofFacts([]*graph.Node{dispatch, register, missing})
+	b, _ := seedSyntheticCustody(t, facts)
+	facts.Nodes = facts.Nodes[:2]
+	before := rebuildFrameworkCustodyRows(t, b)
+	stats, err := b.RebuildClosureCollection(t.Context(), func(yield func(ParseFacts, error) bool) {
+		yield(facts, nil)
+	}, 1, 1, func(_, _ *graph.Node) bool { return true }, setStateProofOutput)
+	var refusal *RebuildUnknownProvenanceError
+	require.ErrorAs(t, err, &refusal)
+	require.Equal(t, &RebuildUnknownProvenanceError{
+		Count: 1,
+		First: graph.EdgeIdentity{From: missing.ID, FilePath: missing.FilePath},
+	}, refusal)
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+}
+
+func TestRebuildClosureCollectionInvalidInputsAndRows(t *testing.T) {
+	for _, mode := range []string{"fanout", "nil boundary", "nil builder", "scratch occupied", "input row", "proposal row"} {
+		t.Run(mode, func(t *testing.T) {
+			dispatch, register := closureProofPair("one", "listeners")
+			facts := setStateProofFacts([]*graph.Node{dispatch, register})
+			b, _ := seedSyntheticCustody(t, facts)
+			cap := 8
+			boundary := func(_, _ *graph.Node) bool { return true }
+			makeCall := setStateProofOutput
+			want := "invalid closure collection stage inputs"
+			switch mode {
+			case "fanout":
+				cap = 0
+			case "nil boundary":
+				boundary = nil
+			case "nil builder":
+				makeCall = nil
+			case "scratch occupied":
+				want = "closure collection scratch range occupied"
+				require.NoError(t, b.pending.Set(rebuildClosureKey('z'), []byte("sentinel"), pebble.NoSync))
+			case "input row":
+				want = "closure collection input row"
+				large := *dispatch
+				large.Meta = map[string]any{"cc_dispatch_field": "listeners", "padding": strings.Repeat("x", 16<<20)}
+				raw, err := encodeNode(&large)
+				require.NoError(t, err)
+				require.NoError(t, b.pending.Set(pendingNodeKey(large.ID), raw, pebble.NoSync))
+			case "proposal row":
+				want = "closure collection scratch row"
+				makeCall = func(from, to *graph.Node, field string) *graph.Edge {
+					e := setStateProofOutput(from, to, field)
+					e.Via = strings.Repeat("x", 16<<20)
+					return e
+				}
+			}
+			before := rebuildFrameworkCustodyRows(t, b)
+			stats, err := b.RebuildClosureCollection(t.Context(), func(func(ParseFacts, error) bool) {
+				t.Fatal("replayed receipts before validating closure input and proposals")
+			}, 1, cap, boundary, makeCall)
+			require.ErrorIs(t, err, ErrRebuildClosureCollection)
+			require.ErrorContains(t, err, want)
+			if mode != "scratch occupied" {
+				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+			}
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
+func closureProofPair(id, field string) (*graph.Node, *graph.Node) {
+	d := setStateProofMethod(id+"-dispatch", "dispatch", 5)
+	r := setStateProofMethod(id+"-register", "register", 10)
+	d.Meta = map[string]any{"cc_dispatch_field": field}
+	r.Meta = map[string]any{"cc_append_field": field}
+	return d, r
+}
 
 func TestRebuildClosureCollectionInstalledCustody(t *testing.T) {
 	const file = "bus.swift"

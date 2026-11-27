@@ -57,6 +57,9 @@ func (b *BuildStore) rebuildSetState(ctx context.Context, receipts iter.Seq2[Par
 		}
 	}()
 	if receipts == nil || spillAt < 1 || spillAt > goldBufferBytes || isSetState == nil || makeCall == nil {
+		if proof == rebuildProofReactSetState {
+			return stats, fmt.Errorf("%w: invalid React setState inputs", ErrRebuildLinkInputSize)
+		}
 		return stats, fmt.Errorf("%w: invalid setState inputs", ErrRebuildLinkInputSize)
 	}
 	occupied, err := rebuildGuardHasPrefix(ctx, b.pending, rebuildSetStatePrefix)
@@ -96,7 +99,8 @@ type rebuildSetStatePass struct {
 // callers; r: exact membership receipt identity -> live key; o: first owner
 // by method; t: qualifying call receipt
 // identity -> caller; g: live call gate; p: proved call gate; n: declaration
-// proof; l: lifecycle winner by class; w: staged output by exact key.
+// proof; l: lifecycle winner by class; w: staged output by exact key;
+// x: unproved output keys.
 func setStateScratch(col byte, fields ...string) []byte {
 	return keyStrings([]byte{'g', 'W', col}, fields...)
 }
@@ -467,7 +471,6 @@ func (p *rebuildSetStatePass) elect(ctx context.Context, lifecycle string, makeC
 	}); err != nil {
 		return err
 	}
-	var refused rebuildScratchRefusals
 	if err := p.methods(ctx, func(n *graph.Node) error {
 		class, err := p.owner(n.ID)
 		if err != nil || class == "" {
@@ -506,14 +509,25 @@ func (p *rebuildSetStatePass) elect(ctx context.Context, lifecycle string, makeC
 			proved = proved && len(state) == 1 && state[0] == rebuildCapabilityProved
 		}
 		if !proved {
-			refused.add(graph.EdgeIdentityFor(e), nil)
-			return nil
+			return p.put(append(setStateScratch('x'), key...), nil)
 		}
 		raw, err := encodeEdge(e)
 		if err != nil {
 			return err
 		}
 		return p.put(append(setStateScratch('w'), key...), raw)
+	}); err != nil {
+		return err
+	}
+	prefix := setStateScratch('x')
+	var refused rebuildScratchRefusals
+	if err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
+		id, err := decodeLinkRecorder(r.key[len(prefix):])
+		if err != nil {
+			return err
+		}
+		refused.add(id, nil)
+		return nil
 	}); err != nil {
 		return err
 	}

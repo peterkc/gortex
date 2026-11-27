@@ -45,7 +45,9 @@ func TestRebuildReactSetStateRejectsWrongRecordingPathBeforeOwner(t *testing.T) 
 			stats, err := b.RebuildReactSetState(t.Context(), receipts, 1<<20, setStateProofTarget, setStateProofOutput)
 			if tc.decoy {
 				require.ErrorIs(t, err, ErrRebuildReactSetState)
-				require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
+				var refusal *RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refusal)
+				require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(secondOwner)}, refusal)
 				require.Zero(t, stats)
 				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 				return
@@ -203,6 +205,157 @@ func TestRebuildSetStateRejectsOwnCustodyAsGate(t *testing.T) {
 			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 		})
 	}
+}
+
+func TestRebuildSetStateMovesAndOutputRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name, lifecycle string
+		proof           rebuildEdgeProof
+	}{
+		{"React", "render", rebuildProofReactSetState},
+		{"Flutter", "build", rebuildProofFlutterSetState},
+	} {
+		for _, mode := range []string{"checked moves", "untracked reused destination", "target receipt changed", "wrong gate recording", "non-method caller", "non-method lifecycle"} {
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				ctx := t.Context()
+				const owner = "Widget"
+				first := setStateProofMethod("a-caller", "refresh", 5)
+				second := setStateProofMethod("z-caller", "refresh", 10)
+				target := setStateProofMethod("lifecycle", tc.lifecycle, 15)
+				if mode == "non-method caller" {
+					first.Kind, second.Kind = graph.KindFunction, graph.KindFunction
+				}
+				if mode == "non-method lifecycle" {
+					target.Kind = graph.KindFunction
+				}
+				membership := setStateProofMember(target, "unresolved::Widget")
+				rawFirst := setStateProofCall(first, "unresolved::resolveFirst")
+				rawSecond := setStateProofCall(second, "unresolved::resolveSecond")
+				facts := setStateProofFacts([]*graph.Node{first, second, target},
+					setStateProofMember(first, owner), setStateProofMember(second, owner), membership, rawFirst, rawSecond)
+				decoy := setStateProofCall(first, "Widget.setState")
+				if mode == "untracked reused destination" {
+					facts.Edges = append(facts.Edges, decoy)
+				}
+				b, _ := seedSyntheticCustody(t, facts)
+				moveTarget := func(raw *graph.Edge, dest string, checked bool) {
+					t.Helper()
+					live := *raw
+					live.To = dest
+					moves := []graph.EdgeReindex{{Edge: &live, OldTo: raw.To}}
+					if checked {
+						require.NoError(t, b.ApplyLinkReindexes(ctx, moves))
+					} else {
+						b.ReindexEdges(moves)
+					}
+					custody, err := readRebuildEdgeCustody(b.pending, pendingEdgeKey(&live))
+					require.NoError(t, err)
+					if checked {
+						require.Equal(t, pendingEdgeKey(raw), custody.raw)
+					} else {
+						require.Equal(t, rebuildProofUntrackedMove, custody.proof)
+					}
+				}
+				moveTarget(membership, owner, true)
+				if mode == "untracked reused destination" {
+					moveTarget(decoy, "Widget.helper", true)
+				}
+				moveTarget(rawFirst, decoy.To, mode != "untracked reused destination")
+				moveTarget(rawSecond, decoy.To, true)
+				if mode == "target receipt changed" {
+					changed := *target
+					changed.RepoPrefix = "other"
+					facts.Nodes[2] = &changed
+				}
+				receipts := func(yield func(ParseFacts, error) bool) {
+					require.NotContains(t, mode, "non-method")
+					if mode == "wrong gate recording" {
+						wrong := facts
+						wrong.File.FilePath = "wrong.go"
+						wrong.Nodes = nil
+						wrong.Edges = []*graph.Edge{rawFirst, rawSecond}
+						if !yield(wrong, nil) {
+							return
+						}
+						facts.Edges = facts.Edges[:3]
+					}
+					yield(facts, nil)
+				}
+				before := rebuildFrameworkCustodyRows(t, b)
+				run := b.RebuildReactSetState
+				if tc.proof == rebuildProofFlutterSetState {
+					run = b.RebuildFlutterSetState
+				}
+				stats, err := run(ctx, receipts, 1, setStateProofTarget, setStateProofOutput)
+				firstOut := setStateProofOutput(first, target, owner)
+				switch mode {
+				case "checked moves":
+					require.NoError(t, err)
+					require.EqualValues(t, 2, stats.Edges)
+					checkSetStateProofOutput(t, b, firstOut, tc.proof)
+					checkSetStateProofOutput(t, b, setStateProofOutput(second, target, owner), tc.proof)
+					return
+				case "non-method caller", "non-method lifecycle":
+					require.NoError(t, err)
+				default:
+					var refusal *RebuildUnknownProvenanceError
+					require.ErrorAs(t, err, &refusal)
+					count := uint64(2)
+					if mode == "untracked reused destination" {
+						count = 1
+					}
+					require.Equal(t, &RebuildUnknownProvenanceError{Count: count, First: graph.EdgeIdentityFor(firstOut)}, refusal)
+				}
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+			})
+		}
+	}
+}
+
+func TestRebuildSetStateRefusesReceiptKeyCollisions(t *testing.T) {
+	for _, mode := range []string{"membership with stage custody", "membership key reused", "call key reused"} {
+		t.Run(mode, func(t *testing.T) {
+			caller := setStateProofMethod("a", "refresh", 5)
+			other := setStateProofMethod("z", "refresh", 10)
+			target := setStateProofMethod("render", "render", 15)
+			member := setStateProofMember(caller, "Widget")
+			otherMember := setStateProofMember(other, "Widget")
+			call := setStateProofCall(caller, "Widget.setState")
+			otherCall := setStateProofCall(other, "Widget.setState")
+			facts := setStateProofFacts([]*graph.Node{caller, other, target}, member, otherMember,
+				setStateProofMember(target, "Widget"), call, otherCall)
+			b, _ := seedSyntheticCustody(t, facts)
+			bad := otherMember
+			custody := rebuildEdgeCustody{raw: pendingEdgeKey(member)}
+			switch mode {
+			case "membership with stage custody":
+				custody = rebuildEdgeCustody{proof: rebuildProofClosureCollection}
+			case "call key reused":
+				bad = otherCall
+				custody.raw = pendingEdgeKey(call)
+			}
+			require.NoError(t, b.withWrites(func() error { return b.putEdgeWithCustody(bad, custody) }))
+			before := rebuildFrameworkCustodyRows(t, b)
+			stats, err := b.RebuildReactSetState(t.Context(), func(func(ParseFacts, error) bool) {
+				t.Fatal("replayed receipts after a conflicting input key")
+			}, 1, setStateProofTarget, setStateProofOutput)
+			var refusal *RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refusal)
+			require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(bad)}, refusal)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
+func TestRebuildReactSetStateInvalidInputWording(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	stats, err := b.RebuildReactSetState(t.Context(), nil, 1, setStateProofTarget, setStateProofOutput)
+	require.ErrorIs(t, err, ErrRebuildReactSetState)
+	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+	require.ErrorContains(t, err, "invalid React setState inputs")
+	require.Zero(t, stats)
 }
 
 const setStateProofFile = "widget.go"
