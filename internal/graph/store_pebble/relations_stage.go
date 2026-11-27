@@ -112,7 +112,7 @@ func (b *BuildStore) PrepareRelations(ctx context.Context, dir string, base File
 	if base.build != b || !filepath.IsAbs(dir) {
 		return StageTables{}, invalid("relations needs a retained file graph from this build and an absolute stage directory")
 	}
-	endpoints, err := b.checkRelationsEndpoints(ctx, extractorOf)
+	endpoints, err := b.checkRelationsEndpoints(ctx, base.witness.PlatformCatalogRevision, extractorOf)
 	if err != nil {
 		return StageTables{}, err
 	}
@@ -239,7 +239,7 @@ func (b *BuildStore) rebuildExternalProved(r row, e *graph.Edge) (bool, error) {
 		(original == spec || string(lang) == "typescript" || string(lang) == "javascript"), nil
 }
 
-func (b *BuildStore) checkRelationsEndpoints(ctx context.Context, extractorOf func(string) string) (relationsEndpointCounts, error) {
+func (b *BuildStore) checkRelationsEndpoints(ctx context.Context, revision uint32, extractorOf func(string) string) (relationsEndpointCounts, error) {
 	var counts relationsEndpointCounts
 	// The same lock covers this private lookup and the final node projection.
 	// A saved logical node may be omitted by the profile; an unknown ID may
@@ -248,6 +248,9 @@ func (b *BuildStore) checkRelationsEndpoints(ctx context.Context, extractorOf fu
 		if graph.IsProxyID(id) {
 			return invalid("proxy relations endpoint")
 		}
+		if graph.IsBuiltinStub(id) {
+			return nil // Whole-edge validation already proved role and scope.
+		}
 		n, err := pendingGet(b.pending, pendingNodeKey(id), decodeNodeLight)
 		if err != nil {
 			return err
@@ -255,6 +258,9 @@ func (b *BuildStore) checkRelationsEndpoints(ctx context.Context, extractorOf fu
 		if n != nil {
 			if graph.IsProxyNode(n) {
 				return invalid("proxy relations endpoint")
+			}
+			if n.Kind == graph.KindBuiltin {
+				return invalid("builtin node cannot supply a relations endpoint")
 			}
 			if id == "" || n.ID != id {
 				return invalid("invalid relations endpoint identity")
@@ -293,12 +299,15 @@ func (b *BuildStore) checkRelationsEndpoints(ctx context.Context, extractorOf fu
 		return fmt.Errorf("%w: dangling relations endpoint %q", errInvalidRecord, id)
 	}
 	err := pendingVisit(ctx, b.pending, []byte{familyEdge, edgeOut}, func(r row) error {
-		e, err := decodeEdgeLight(r.value)
+		e, err := decodeEdge(r.value)
 		if err != nil {
 			return err
 		}
 		if !bytes.Equal(r.key, pendingEdgeKey(e)) {
 			return invalid("working edge identity does not match key")
+		}
+		if err := b.validateRebuildPlatformEdge(ctx, b.pending, e, revision, extractorOf); err != nil {
+			return err
 		}
 		kept := true
 		if b.profile != FullProfile {

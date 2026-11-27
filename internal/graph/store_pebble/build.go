@@ -262,6 +262,9 @@ func (b *BuildStore) writeRows(ctx context.Context, gold *sortedRuns, stage Stag
 		if err != nil {
 			return err
 		}
+		if n.Kind == graph.KindBuiltin {
+			return invalid("builtin node cannot be published")
+		}
 		if !b.profile.keepsNode(n.Kind) {
 			return nil
 		}

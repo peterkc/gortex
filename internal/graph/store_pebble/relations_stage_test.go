@@ -544,6 +544,11 @@ func TestRelationsStageRefusesIncompleteRetainedBase(t *testing.T) {
 
 func relationsStageFixture(t *testing.T, profile Profile) (*BuildStore, *Head, FileGraphBase, *graph.Node, *graph.Edge, ManifestFile, graph.FileMetaRow) {
 	t.Helper()
+	return relationsStageFixtureRevision(t, profile, 0)
+}
+
+func relationsStageFixtureRevision(t *testing.T, profile Profile, revision uint32) (*BuildStore, *Head, FileGraphBase, *graph.Node, *graph.Edge, ManifestFile, graph.FileMetaRow) {
+	t.Helper()
 	ctx := t.Context()
 	dir := t.TempDir()
 	worker, err := OpenBuild(filepath.Join(dir, "working"), profile)
@@ -553,7 +558,7 @@ func relationsStageFixture(t *testing.T, profile Profile) (*BuildStore, *Head, F
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, head.Close()) })
 	file := ManifestFile{Path: "old.go", Language: "go", Size: 17, Kind: 'f', Content: HeadDigest{3}, Extractor: HeadDigest{4}}
-	w := Witness{Input: HeadDigest{1}, Recipe: HeadDigest{2}, Profile: profile, Stage: StageManifest}
+	w := Witness{Input: HeadDigest{1}, Recipe: HeadDigest{2}, Profile: profile, Stage: StageManifest, PlatformCatalogRevision: revision}
 	manifest, err := PrepareManifest(ctx, t.TempDir(), []ManifestFile{file}, w, testHeadIncarnation)
 	require.NoError(t, err)
 	_, err = head.PublishStage(ctx, manifest)

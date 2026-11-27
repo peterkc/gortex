@@ -869,6 +869,11 @@ func buildRebuildStages(
 			logger.Info("rebuild external-call synthesis applied to private build", zap.Uint64("external_calls", externalCalls))
 		}
 	}
+	if err := private.SettleRebuildPlatformCalls(ctx, func(p string) string {
+		return counts.census.byPath[counts.census.originByGraphPath[p]]
+	}); err != nil {
+		return err
+	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.
 	return errRebuildBuildIncomplete
