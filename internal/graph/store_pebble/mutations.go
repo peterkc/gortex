@@ -218,8 +218,8 @@ func (b *BuildStore) reindexChunk(batch []graph.EdgeReindex) error {
 // ReturnsTo) do not.
 // Generic reindexes, including placeholder source moves and function-pointer
 // moves, do not capture an old key. They keep inherited raw lineage or mark
-// a receipt-input move as untracked. A producer proof cannot move to a new
-// identity, and a missing old row cannot establish raw lineage.
+// a receipt-input move as untracked. Only a Go builtin source proof can
+// survive a target-only move. A missing old row cannot establish raw lineage.
 func (b *BuildStore) reindexChunkWithRecorders(batch []graph.EdgeReindex, capture bool) error {
 	return b.reindexChunkWithProof(batch, capture, false)
 }
@@ -261,7 +261,11 @@ func (b *BuildStore) reindexChunkWithProof(batch []graph.EdgeReindex, capture, g
 				continue
 			}
 			if index, ok := created[string(oldKey)]; ok {
-				custody = candidates[index].custody
+				prior := candidates[index]
+				custody = prior.custody
+				if custody.proof == rebuildProofGoBuiltinSource {
+					custody = custody.reindexed(nil, prior.edge, e, false, false)
+				}
 				candidates[index] = claim{}
 				delete(created, string(oldKey))
 			} else if r.RefreshIdentity {
@@ -279,12 +283,7 @@ func (b *BuildStore) reindexChunkWithProof(batch []graph.EdgeReindex, capture, g
 			if err != nil {
 				return err
 			}
-			custody = custody.moved(oldKey, e.Kind, capture)
-			if goBuiltinRepoint && e.From != old.From && graph.PlaceholderSourceKind(e.Kind) {
-				if entry, ok := graph.LookupPlatformBuiltin(graph.PlatformCatalogRevision, e.From); ok && entry.Language == "go" && entry.Category == "" {
-					custody = rebuildEdgeCustody{proof: rebuildProofGoBuiltinSource}
-				}
-			}
+			custody = custody.reindexed(oldKey, old, e, capture, goBuiltinRepoint)
 			if err := b.deleteEdge(oldKey, old); err != nil {
 				return err
 			}

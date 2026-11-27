@@ -396,7 +396,7 @@ func (b *BuildStore) applyRebuildLinkReindexes(ctx context.Context, moves []grap
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := b.reindexChunkWithRecorders(moves, refreshKind == ""); err != nil {
+		if err := b.reindexChunkWithProof(moves, refreshKind == "", refreshKind == graph.EdgeReturnsTo); err != nil {
 			return err
 		}
 		return ctx.Err()

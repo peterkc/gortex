@@ -9,6 +9,8 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/parser/languages"
+	"github.com/zzet/gortex/internal/resolver"
 )
 
 const (
@@ -21,6 +23,117 @@ const (
 	returnsToC         = returnsToOtherFile + "::C.Run"
 	returnsToLocal     = returnsToA + "#local:value@+2"
 )
+
+func TestRebuildGoBuiltinSourcesPublished(t *testing.T) {
+	ctx := t.Context()
+	t.Setenv("GORTEX_RESOLVE_FROM_RECONCILE", "1")
+	const file = "flow.go"
+	source := []byte(`package p
+func foo(v int) {}
+func f(v int) {}
+func use(b []byte, c int, v byte) {
+	foo(len(b))
+	_ = append(b, byte(c))
+	f(int(v))
+	n := len(b)
+	s := string(b)
+	m := make(map[int]string)
+	_, _, _ = n, s, m
+}
+func convert(v byte) int { return int(v) }
+`)
+	ext := languages.NewGoExtractor()
+	extracted, err := ext.Extract(file, source)
+	require.NoError(t, err)
+	defer extracted.ReleaseTree()
+	native := newFTSStore(t)
+	require.NoError(t, native.AddBatchChecked(extracted.Nodes, extracted.Edges))
+	stats, err := resolver.New(native).ResolveAllContext(ctx)
+	require.NoError(t, err)
+	require.False(t, stats.Incomplete)
+	(&Indexer{graph: native}).materializeDataflowParams()
+
+	idx := newTestIndexer(graph.New())
+	t.Cleanup(idx.Close)
+	idx.SetRootPath(t.TempDir())
+	facts, err := idx.extractPreparedRebuildFile(ctx, file, ext, source)
+	require.NoError(t, err)
+	build, dir := openRebuildTestFileStore(t)
+	require.NoError(t, build.AddParsedFile("", facts))
+	w := store_pebble.Witness{Input: store_pebble.HeadDigest{1}, Recipe: store_pebble.HeadDigest{2},
+		Stage: store_pebble.StageManifest, Profile: store_pebble.FullProfile, PlatformCatalogRevision: graph.PlatformCatalogRevision}
+	manifest, err := store_pebble.PrepareManifest(ctx, t.TempDir(), []store_pebble.ManifestFile{{Path: file, Kind: 'f', Language: "go"}}, w, rebuildTestIncarnation)
+	require.NoError(t, err)
+	fileGraph, err := build.PrepareFileGraph(ctx, t.TempDir(), manifest.Witness, rebuildTestIncarnation)
+	require.NoError(t, err)
+	base, err := build.RetainFileGraph(ctx, fileGraph)
+	require.NoError(t, err)
+
+	receipts := func(yield func(store_pebble.ParseFacts, error) bool) { yield(facts, nil) }
+	opts := store_pebble.RebuildLinkOptions{ScratchParent: dir, SpillBytes: 1 << 20}
+	require.NoError(t, resolver.RunRebuildMain(ctx, build, opts, resolver.RebuildMainInputs{
+		SelectCallers: func(page []*graph.Edge) ([]*graph.Edge, error) { return page, nil },
+		Receipts:      receipts,
+	}))
+	require.NoError(t, runRebuildArgOf(ctx, build, receipts))
+	require.NoError(t, runRebuildReturnsTo(ctx, build, receipts))
+	extractor := func(path string) string {
+		if path == facts.File.FilePath {
+			return facts.EffectiveLanguage
+		}
+		return ""
+	}
+	require.NoError(t, build.SettleRebuildPlatformCalls(ctx, extractor))
+	relations, err := build.PrepareRelations(ctx, t.TempDir(), base, extractor)
+	require.NoError(t, err)
+	head, err := store_pebble.OpenHead(filepath.Join(t.TempDir(), "head"), rebuildTestIncarnation, w.Profile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, head.Close()) })
+	for _, stage := range []store_pebble.StageTables{manifest, fileGraph, relations} {
+		_, err := head.PublishStage(ctx, stage)
+		require.NoError(t, err)
+	}
+	staged := head.OpenSnapshot()
+	t.Cleanup(func() { require.NoError(t, staged.Close()) })
+	require.NoError(t, build.Publish(ctx))
+	published, err := build.OpenSnapshot()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, published.Close()) })
+
+	// Check each extracted shape against native, then compare every outgoing
+	// dataflow identity for its builtin in both serving snapshots.
+	const intrinsic = "builtin::go::"
+	dataflow := func(edges []*graph.Edge) []graph.EdgeIdentity {
+		var ids []graph.EdgeIdentity
+		for _, e := range edges {
+			if graph.PlaceholderSourceKind(e.Kind) || e.Kind == graph.EdgeReturnsTo {
+				ids = append(ids, graph.EdgeIdentityFor(e))
+			}
+		}
+		return ids
+	}
+	for _, row := range []struct {
+		from, to string
+		kind     graph.EdgeKind
+		line     int
+	}{
+		{"len", file + "::foo#param:v", graph.EdgeArgOf, 5},
+		{"type::byte", intrinsic + "append", graph.EdgeArgOf, 6},
+		{"type::int", file + "::f#param:v", graph.EdgeArgOf, 7},
+		{"len", file + "::use#local:n@+5", graph.EdgeReturnsTo, 8},
+		{"type::string", file + "::use#local:s@+6", graph.EdgeReturnsTo, 9},
+		{"make", file + "::use#local:m@+7", graph.EdgeReturnsTo, 10},
+		{"type::int", file + "::convert", graph.EdgeValueFlow, 13},
+	} {
+		id := intrinsic + row.from
+		want := dataflow(native.GetOutEdges(id))
+		require.Contains(t, want, graph.EdgeIdentity{From: id, To: row.to, Kind: row.kind, FilePath: file, Line: row.line})
+		for _, snap := range []*store_pebble.Snapshot{staged, published} {
+			require.Nil(t, snap.GetNode(id))
+			require.ElementsMatch(t, want, dataflow(snap.GetOutEdges(id)))
+		}
+	}
+}
 
 func TestRebuildReturnsToNativeOrder(t *testing.T) {
 	calls := []*graph.Edge{

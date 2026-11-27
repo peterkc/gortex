@@ -71,7 +71,7 @@ const (
 	rebuildProofSvelteKitLoad
 	// Native external-call group and package election over proved live bytes.
 	rebuildProofExternalCallSynthesis
-	// A Go builtin claimed this exact placeholder-source site.
+	// A checked Go builtin repoint or return lift supplied this source at this site.
 	rebuildProofGoBuiltinSource
 	rebuildProofLimit
 )
@@ -153,6 +153,22 @@ func rebuildReceiptKey(reader pebble.Reader, live []byte) ([]byte, error) {
 		return custody.raw, nil
 	}
 	return live, nil
+}
+
+// A builtin source proof certifies the source, kind and recording site, not
+// the target. The winning move binds the proof to the new saved bytes.
+func (c rebuildEdgeCustody) reindexed(key []byte, old, e *graph.Edge, capture, goBuiltinRepoint bool) rebuildEdgeCustody {
+	if old.Kind == e.Kind && old.FilePath == e.FilePath && old.Line == e.Line {
+		if old.From == e.From && c.proof == rebuildProofGoBuiltinSource {
+			return c
+		}
+		if goBuiltinRepoint && old.From != e.From && old.To == e.To {
+			if _, ok := rebuildGoBuiltinSource(e); ok {
+				return rebuildEdgeCustody{proof: rebuildProofGoBuiltinSource}
+			}
+		}
+	}
+	return c.moved(key, e.Kind, capture)
 }
 
 // A generic identity change may keep raw lineage. A producer proof does

@@ -221,6 +221,49 @@ func TestRebuildLinkRecorderFollowsGuardSourceRestoration(t *testing.T) {
 	requireRebuildLinkCustody(t, b, &restored, rawCustody)
 }
 
+func TestRebuildGoBuiltinSourceCustodyFollowsOnlyItsSite(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	proof := rebuildEdgeCustody{proof: rebuildProofGoBuiltinSource}
+	for i, tc := range []struct {
+		name   string
+		change func(*graph.Edge)
+		want   rebuildEdgeProof
+	}{
+		{"target", func(e *graph.Edge) { e.To = "param" }, rebuildProofGoBuiltinSource},
+		{"source", func(e *graph.Edge) { e.From = "builtin::go::len" }, rebuildProofUntrackedMove},
+		{"kind", func(e *graph.Edge) { e.Kind = graph.EdgeValueFlow }, rebuildProofUntrackedMove},
+		{"file", func(e *graph.Edge) { e.FilePath = "other.go" }, rebuildProofUntrackedMove},
+		{"line", func(e *graph.Edge) { e.Line += 100 }, rebuildProofUntrackedMove},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The second move consumes the first winner before it is written.
+			old := graph.Edge{From: "builtin::go::type::int", To: "pending", Kind: graph.EdgeArgOf, FilePath: "f.go", Line: i + 1}
+			require.NoError(t, b.withWrites(func() error { return b.putEdgeWithCustody(&old, proof) }))
+			first := old
+			first.To = "callee"
+			last := first
+			tc.change(&last)
+			b.ReindexEdges([]graph.EdgeReindex{
+				{Edge: &first, OldTo: old.To},
+				{Edge: &last, OldFrom: first.From, OldTo: first.To, OldKind: first.Kind,
+					OldFilePath: first.FilePath, OldLine: first.Line, RefreshIdentity: true},
+			})
+			requireRebuildLinkCustody(t, b, &last, rebuildEdgeCustody{proof: tc.want})
+		})
+	}
+
+	// A proved loser cannot give its custody to a stationary destination.
+	old := graph.Edge{From: "builtin::go::len", To: "callee", Kind: graph.EdgeArgOf, FilePath: "f.go", Line: 20}
+	require.NoError(t, b.withWrites(func() error { return b.putEdgeWithCustody(&old, proof) }))
+	stationary := old
+	stationary.To = "param"
+	b.AddEdge(&stationary)
+	b.ReindexEdge(&stationary, old.To)
+	requireRebuildLinkCustody(t, b, &stationary, rebuildEdgeCustody{})
+	_, err := b.provedBuiltinSourceOwner(&stationary)
+	require.ErrorContains(t, err, "unproved builtin source repoint")
+}
+
 func requireRebuildLinkCustody(t *testing.T, b *BuildStore, e *graph.Edge, want rebuildEdgeCustody) {
 	t.Helper()
 	got, err := readRebuildEdgeCustody(b.pending, pendingEdgeKey(e))

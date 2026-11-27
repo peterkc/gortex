@@ -195,12 +195,19 @@ func (b *BuildStore) keptOwner(id string) (sourceOwner, error) {
 	return sourceOwner{repo: n.RepoPrefix, present: kept, off: !kept}, nil
 }
 
+// Main reconciles placeholder sources; the return lift uses the selected Call.
+// Both can name a Go builtin function or a type conversion.
+func rebuildGoBuiltinSource(e *graph.Edge) (graph.PlatformBuiltin, bool) {
+	entry, ok := graph.LookupPlatformBuiltin(graph.PlatformCatalogRevision, e.From)
+	return entry, ok && entry.Language == "go" && (entry.Category == "" || entry.Category == "type") &&
+		(graph.PlaceholderSourceKind(e.Kind) || e.Kind == graph.EdgeReturnsTo)
+}
+
 // The node-free source takes its scope from the recorded Go file, not the
 // builtin ID. Producer custody ties that scope to a same-site move.
 func (b *BuildStore) provedBuiltinSourceOwner(e *graph.Edge) (sourceOwner, error) {
-	entry, ok := graph.LookupPlatformBuiltin(graph.PlatformCatalogRevision, e.From)
-	if !ok || entry.Language != "go" || entry.Category != "" ||
-		!graph.PlaceholderSourceKind(e.Kind) || e.FilePath == "" || e.Line <= 0 {
+	entry, ok := rebuildGoBuiltinSource(e)
+	if !ok || e.FilePath == "" || e.Line <= 0 {
 		return sourceOwner{}, invalid("invalid builtin source role")
 	}
 	c, err := readRebuildEdgeCustody(b.pending, pendingEdgeKey(e))
