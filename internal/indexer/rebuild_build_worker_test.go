@@ -173,10 +173,12 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
 		exact, shadowed bool
+		badCallStatus   bool
 	}{
 		{name: "signed_only_with_extraction_off", exact: true},
 		{name: "refuses_shadow_before_apply", exact: true, shadowed: true},
 		{name: "legacy_capture_stops_before_clones", shadowed: true},
+		{name: "final_call_status_refuses_relations", exact: true, badCallStatus: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
@@ -208,7 +210,13 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 				if tc.shadowed && path == "a.go" {
 					n.ID, n.FilePath, n.Kind, n.Meta = "b.go::F", "b.go", graph.KindVariable, nil
 				}
-				payload := encodeRebuildTestParseFacts(t, rebuildCloneClaimFixture(path, n))
+				facts := rebuildCloneClaimFixture(path, n)
+				if tc.badCallStatus && path == "a.go" {
+					// A call to an ordinary function must not carry platform status.
+					facts.Edges = []*graph.Edge{{From: n.ID, To: n.ID, Kind: graph.EdgeCalls, FilePath: path, Line: 1,
+						Meta: map[string]any{graph.MetaLinkStatus: string(graph.LinkStatusPlatform)}}}
+				}
+				payload := encodeRebuildTestParseFacts(t, facts)
 				require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(req.Recipes["go"], input)), payload))
 			}
 			inputRoot, err := rebuildInputRoot(inputs)
@@ -257,6 +265,11 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 				return
 			}
 			require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, sent)
+			if tc.badCallStatus {
+				require.Len(t, applied, 1, "the private clone pass must finish before settlement")
+				require.ErrorContains(t, err, "link_status outside a builtin Call")
+				return
+			}
 			require.ErrorIs(t, err, errRebuildBuildIncomplete)
 			if !tc.exact {
 				require.Empty(t, applied)
