@@ -23,6 +23,7 @@ type RebuildObserverStats struct {
 // RebuildObserver streams the native field/registrar/site join against the
 // quiet private view. The callback cutoff precedes workspace filtering. Prove
 // exact receipt or checked predecessor custody before writing any calls.
+// Discard the private build if applying the calls fails.
 func (b *BuildStore) RebuildObserver(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
 	registrar, dispatcher func(string) bool, sameBoundary func(*graph.Node, *graph.Node) bool, maxCallbacks int,
 	makeCall func(*graph.Node, string, string) *graph.Edge,
@@ -196,10 +197,15 @@ func (p *rebuildObserverPass) elect(ctx context.Context, sameBoundary func(*grap
 		if err := pendingVisit(ctx, p.b.pending, prefix, func(row) error {
 			count++
 			return nil
-		}); err != nil || count == 0 || count > maxCallbacks {
+		}); err != nil {
 			return err
 		}
 		return p.access(ctx, 'd', field, func(access *graph.Edge) error {
+			// Prove the dispatcher that admitted the field even when
+			// the callback count rules out writing calls.
+			if count == 0 || count > maxCallbacks {
+				return nil
+			}
 			disp, err := p.node(ctx, access.From)
 			if err != nil {
 				return err
@@ -369,7 +375,7 @@ func (p *rebuildObserverPass) prove(ctx context.Context, receipts iter.Seq2[Pars
 				return err
 			}
 			bit := byte(rebuildCapabilityUnproved)
-			if live != nil && facts.EffectiveLanguage == n.Language && n.FilePath == file &&
+			if live != nil && facts.EffectiveLanguage != "" && n.FilePath == file &&
 				live.FilePath == file && live.Kind == n.Kind && live.Language == n.Language &&
 				live.Name == n.Name && live.StartLine == n.StartLine && live.RepoPrefix == n.RepoPrefix {
 				bit = rebuildCapabilityProved

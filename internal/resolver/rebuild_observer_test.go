@@ -10,6 +10,7 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/parser/languages"
 )
 
 func TestRebuildObserverSQLiteOracle(t *testing.T) {
@@ -80,6 +81,61 @@ func TestRebuildObserverSQLiteOracle(t *testing.T) {
 	}
 }
 
+func TestRebuildObserverInlineScriptProof(t *testing.T) {
+	const file = "page.html"
+	parsed, err := languages.NewHTMLExtractor().Extract(file, []byte("<script>function callback() {}</script>"))
+	require.NoError(t, err)
+	i := slices.IndexFunc(parsed.Nodes, func(n *graph.Node) bool {
+		return n.Name == "callback" && n.Kind == graph.KindFunction
+	})
+	require.GreaterOrEqual(t, i, 0)
+	callback := parsed.Nodes[i]
+	require.Equal(t, "javascript", callback.Language)
+	require.Equal(t, file, callback.FilePath)
+	require.Equal(t, true, callback.Meta["inline_script"])
+
+	for _, tc := range []struct {
+		name         string
+		liveLanguage string
+		legacy       bool
+	}{
+		{name: "delegated JavaScript"},
+		{name: "different live language", liveLanguage: "typescript"},
+		{name: "empty extractor and node language", legacy: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			channel := newRebuildObserverChannel("bus.ts", "typescript")
+			cb := *callback
+			extractor := "html"
+			if tc.legacy {
+				extractor, cb.Language = "", ""
+			}
+			channel.facts.Edges = append(channel.facts.Edges, rebuildObserverEdge(channel.caller, &cb, graph.EdgeReferences, 20))
+			html := rebuildEventFacts(file, extractor, []*graph.Node{&cb})
+			receipts, b, native := openRebuildObserverStores(t, nil, channel.facts, html)
+			if tc.liveLanguage != "" {
+				cb.Language = tc.liveLanguage
+				b.AddNode(&cb)
+			}
+			before := rebuildEventSavedRows(t, b)
+			selection := rebuildObserverSelection(t)
+			stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(receipts...), selection, 1)
+			if tc.legacy || tc.liveLanguage != "" {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildObserver)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, uint64(1), stats.Edges)
+			require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selection).Err)
+			require.NotNil(t, observerChannelEdgeBetween(native, channel.dispatch.ID, cb.ID))
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+		})
+	}
+}
+
 func TestRebuildObserverCapBeforeWorkspaceAndLanguage(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -128,6 +184,18 @@ func TestRebuildObserverCapBeforeWorkspaceAndLanguage(t *testing.T) {
 				require.Positive(t, stats.SpillBytes)
 			}
 			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+			if tc.want == 0 {
+				before := rebuildEventSavedRows(t, b)
+				// Only the dispatcher access loses its proof. It is still
+				// live and admits the field, even though the cap blocks it.
+				receipts[0].Edges = slices.DeleteFunc(receipts[0].Edges, func(e *graph.Edge) bool {
+					return e.Kind == graph.EdgeAccessesField && e.From == channel.dispatch.ID
+				})
+				stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(receipts...), selection, 1<<20)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+			}
 		})
 	}
 }
