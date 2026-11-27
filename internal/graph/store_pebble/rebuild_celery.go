@@ -111,9 +111,7 @@ func (p *rebuildCeleryPass) collect(ctx context.Context) (bool, error) {
 		if task == "" && registered == "" {
 			return nil
 		}
-		if err := p.nodeInput(r.key, r.value); err != nil {
-			return err
-		}
+		oversized := p.nodeInput(r.key, r.value) != nil
 		haveTasks = haveTasks || task != ""
 		for i, name := range [...]string{task, registered} {
 			if name == "" {
@@ -129,6 +127,14 @@ func (p *rebuildCeleryPass) collect(ctx context.Context) (bool, error) {
 			cohort := p.key('u', group.name, name)
 			if err := p.put(p.key(group.col, n.ID), append([]byte{rebuildCapabilityWanted}, cohort...)); err != nil {
 				return err
+			}
+			if oversized {
+				// Keep the task-name anchor and count, but refuse only a Call
+				// that consults this task or registration pool.
+				if err := p.put(p.key('Z', group.name, name), nil); err != nil {
+					return err
+				}
+				continue
 			}
 			for _, key := range rebuildStoreScopeKeys(cohort, len(p.prefix), 'a', n) {
 				if err := p.addUnique(key, n.ID); err != nil {
@@ -155,6 +161,13 @@ func (p *rebuildCeleryPass) call(e *graph.Edge) rebuildStoreDispatchCall {
 }
 
 func (p *rebuildCeleryPass) elect(e *graph.Edge, call rebuildStoreDispatchCall, getters bool) (rebuildStoreFactoryElection, error) {
+	oversized, err := p.present(p.key('Z', call.group, call.member))
+	if err != nil {
+		return rebuildStoreFactoryElection{}, err
+	}
+	if oversized {
+		return rebuildStoreFactoryElection{}, fmt.Errorf("%w: Celery node row", ErrRebuildLinkInputSize)
+	}
 	n, err := p.state(p.key('k', call.group, call.member))
 	if err != nil || n > p.celery.FanoutCap {
 		// Native does not read the caller or any scoped pool above the cap.
@@ -276,12 +289,25 @@ func (p *rebuildCeleryPass) recordCeleryNode(raw *graph.Node, file, lang string)
 		if name == "" && claim == nil {
 			continue
 		}
-		live, err := p.node(raw.ID)
+		cohort := p.key('u', group.name, name)
+		wanted, err := p.state(cohort)
+		if err != nil {
+			return err
+		}
+		nodeKey := pendingNodeKey(raw.ID)
+		live, err := pendingGet(p.b.pending, nodeKey, func(val []byte) (*graph.Node, error) {
+			// An unrelated task can still prove the stage-wide name anchor.
+			if wanted != 0 {
+				if err := p.nodeInput(nodeKey, val); err != nil {
+					return nil, err
+				}
+			}
+			return checkedRebuildLightNode(row{nodeKey, val}, p.label)
+		})
 		if err != nil {
 			return err
 		}
 		admitted := rebuildStoreNodeReceipt(raw, live, file, lang)
-		cohort := p.key('u', group.name, name)
 		same := claim != nil && name != "" && bytes.Equal(claim[1:], cohort)
 		if claim != nil {
 			proof := rebuildStoreCandidateProof(admitted && same, raw, live)
@@ -292,14 +318,7 @@ func (p *rebuildCeleryPass) recordCeleryNode(raw *graph.Node, file, lang string)
 				return err
 			}
 		}
-		if !admitted || name == "" {
-			continue
-		}
-		wanted, err := p.state(cohort)
-		if err != nil {
-			return err
-		}
-		if wanted == 0 {
+		if !admitted || name == "" || wanted == 0 {
 			continue
 		}
 		before := p.key('u', "", "")

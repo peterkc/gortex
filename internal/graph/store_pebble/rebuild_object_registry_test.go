@@ -188,3 +188,46 @@ func TestRebuildObjectRegistryBucketScope(t *testing.T) {
 		}
 	}
 }
+
+func TestRebuildObjectRegistryCandidateNodeCap(t *testing.T) {
+	for _, tc := range []struct {
+		name, class, fromTarget, toTarget string
+	}{
+		{"wanted class", "Cmd", "unresolved::*.Cmd", ""},
+		{"unwanted class", "Other", "stale-method", "unresolved::*.Cmd"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const capBytes = 16 << 20
+			facts := objectRegistryTestFacts()
+			method, member, call := facts.Nodes[0], facts.Edges[0], facts.Edges[1]
+			method.Meta = map[string]any{"payload": strings.Repeat("x", capBytes)}
+			member.To, call.To = tc.class, tc.fromTarget
+			b, receipts := seedSyntheticCustody(t, facts)
+			before := rebuildFrameworkCustodyRows(t, b)
+			key := pendingNodeKey(method.ID)
+			require.Greater(t, len(key)+len(before[string(key)]), capBytes)
+
+			stats, err := b.RebuildObjectRegistry(t.Context(), receipts, objectRegistryTestRules())
+			if tc.toTarget == "" {
+				require.ErrorIs(t, err, ErrRebuildObjectRegistry)
+				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "Object Registry node row")
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+				return
+			}
+			// The foreign method still supplies the method-index anchor for a reset.
+			require.NoError(t, err)
+			require.Equal(t, RebuildObjectRegistryStats{Stubs: 1, Moves: 1}, stats)
+			moved := *call
+			moved.To = tc.toTarget
+			stored, err := b.pendingEdge(pendingEdgeKey(&moved))
+			require.NoError(t, err)
+			require.Equal(t, &moved, stored)
+			old, err := b.pendingEdge(pendingEdgeKey(call))
+			require.NoError(t, err)
+			require.Nil(t, old)
+			require.Equal(t, before[string(key)], rebuildFrameworkCustodyRows(t, b)[string(key)])
+		})
+	}
+}

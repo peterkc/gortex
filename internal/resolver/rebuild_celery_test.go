@@ -193,32 +193,52 @@ func TestRebuildCeleryProofGuards(t *testing.T) {
 }
 
 func TestRebuildCeleryCandidateNodeCap(t *testing.T) {
-	const file = "tasks.py"
-	caller := celeryTestNode(file, "dispatch", "", "")
-	anchor := celeryTestNode(file, "anchor", "mail", "")
-	call := celeryTestCall(caller.ID, "unresolved::*.mail", file, "mail", "", 4)
+	const file, registration = "tasks.py", "email.send"
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthCelery})
 	require.NoError(t, err)
-	for _, task := range []string{"", "mail"} {
-		large := celeryTestNode(file, "large", task, "")
-		large.Meta["payload"] = strings.Repeat("x", 16<<20)
-		facts := rebuildEventFacts(file, "python", []*graph.Node{caller, anchor, large}, call)
-		proof := rebuildEventFacts(file, "python", []*graph.Node{caller, anchor}, call)
-		b := openRebuildGRPCBuild(t, facts)
-		before := rebuildEventSavedRows(t, b)
-		stats, err := RunRebuildCelery(t.Context(), b, rebuildGRPCReceipts(proof), selection)
-		if task != "" {
-			require.ErrorIs(t, err, store_pebble.ErrRebuildCelery)
-			require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
-			require.ErrorContains(t, err, "Celery node row")
-			require.Zero(t, stats)
-			require.Equal(t, before, rebuildEventSavedRows(t, b))
-		} else {
+	for _, tc := range []struct {
+		name, task, registered, callRegistration string
+		calls, refuse                            bool
+	}{
+		{name: "not a candidate", calls: true},
+		{name: "no Call", task: "mail", registered: registration},
+		{name: "unrelated name and registration", task: "other", registered: registration, calls: true},
+		{name: "wanted task", task: "mail", calls: true, refuse: true},
+		{name: "wanted registration", registered: registration, callRegistration: registration, calls: true, refuse: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caller := celeryTestNode(file, "dispatch", "", "")
+			anchor := celeryTestNode(file, "anchor", "mail", "")
+			large := celeryTestNode(file, "large", tc.task, tc.registered)
+			large.Meta["payload"] = strings.Repeat("x", 16<<20)
+			facts := rebuildEventFacts(file, "python", []*graph.Node{caller, anchor, large})
+			if tc.calls {
+				facts.Edges = []*graph.Edge{celeryTestCall(caller.ID, "unresolved::*.mail", file, "mail", tc.callRegistration, 4)}
+			}
+			b := openRebuildGRPCBuild(t, facts)
+			before := rebuildEventSavedRows(t, b)
+			stats, err := RunRebuildCelery(t.Context(), b, func(yield func(store_pebble.ParseFacts, error) bool) {
+				require.True(t, tc.calls && !tc.refuse, "only a moving, in-budget Call needs receipts")
+				yield(facts, nil)
+			}, selection)
+			if tc.refuse {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildCelery)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "Celery node row")
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
 			require.NoError(t, err)
+			if !tc.calls {
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
 			native := openRebuildTemporalOracle(t, facts)
 			require.Equal(t, 1, ResolveCeleryCalls(native))
 			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
-		}
+		})
 	}
 }
 

@@ -96,10 +96,16 @@ func (p *rebuildObjectRegistryPass) state(key []byte) (byte, error) {
 }
 
 func (p *rebuildObjectRegistryPass) node(id string) (*graph.Node, error) {
+	return p.readNode(id, true)
+}
+
+func (p *rebuildObjectRegistryPass) readNode(id string, capped bool) (*graph.Node, error) {
 	key := pendingNodeKey(id)
 	return pendingGet(p.b.pending, key, func(raw []byte) (*graph.Node, error) {
-		if err := p.nodeInput(key, raw); err != nil {
-			return nil, err
+		if capped {
+			if err := p.nodeInput(key, raw); err != nil {
+				return nil, err
+			}
 		}
 		return checkedRebuildLightNode(row{key, raw}, p.label)
 	})
@@ -281,6 +287,9 @@ func (p *rebuildObjectRegistryPass) collectCandidates(ctx context.Context) (bool
 					if !wanted {
 						continue
 					}
+					if err := p.nodeInput(r.key, r.value); err != nil {
+						return err
+					}
 					cohort := p.key('u', possible, n.Name)
 					for _, bucket := range rebuildStoreScopeKeys(cohort, len(p.prefix), 'i', n) {
 						if err := p.put(p.key('e', string(bucket)), nil); err != nil {
@@ -310,6 +319,9 @@ func (p *rebuildObjectRegistryPass) collectCandidates(ctx context.Context) (bool
 		}
 		wanted, err := p.present(p.key('k', class))
 		if err != nil || !wanted {
+			return err
+		}
+		if err := p.nodeInput(r.key, r.value); err != nil {
 			return err
 		}
 		for _, key := range rebuildStoreScopeKeys(cohort, len(p.prefix), 'i', n) {
@@ -532,7 +544,9 @@ func (p *rebuildObjectRegistryPass) recordNode(ctx context.Context, raw *graph.N
 	if err := p.recordStoreGetter(getterKey, wanted, files, raw, file, lang, p.node); err != nil || (caller == 0 && candidate == nil) {
 		return err
 	}
-	live, err := p.node(raw.ID)
+	// Wanted candidates were capped at census. Other classes can still
+	// prove the stage-wide method anchor without reading node metadata.
+	live, err := p.readNode(raw.ID, caller != 0)
 	if err != nil {
 		return err
 	}
@@ -641,6 +655,14 @@ func (p *rebuildObjectRegistryPass) prove(ctx context.Context, receipts iter.Seq
 		anchor = anchor || rebuildStoreAnchorExact(r.value[0])
 		if !rebuildStoreCandidateExact(r.value[0]) {
 			return nil
+		}
+		class, _, err := readKeyString(r.value[len(p.prefix)+1:])
+		if err != nil {
+			return err
+		}
+		wanted, err := p.present(p.key('k', class))
+		if err != nil || !wanted {
+			return err
 		}
 		return p.foldExactCandidate(r, prefix, len(p.prefix), 'i', p.node)
 	}); err != nil {

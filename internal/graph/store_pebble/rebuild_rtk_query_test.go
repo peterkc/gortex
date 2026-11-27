@@ -157,3 +157,74 @@ func TestRebuildRTKQueryRowCaps(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildRTKQueryGetterInCallerFile(t *testing.T) {
+	const file, other, binding = "app.ts", "other.ts", "useStore"
+	for _, getterReceipt := range []bool{false, true} {
+		name := "missing getter receipt"
+		if getterReceipt {
+			name = "exact getter receipt"
+		}
+		t.Run(name, func(t *testing.T) {
+			caller := &graph.Node{ID: "caller", Name: "caller", Kind: graph.KindFunction, FilePath: file, Language: "typescript"}
+			hook := &graph.Node{ID: "hook", Name: "useQuery", Kind: graph.KindFunction, FilePath: file, Language: "typescript",
+				Meta: map[string]any{"rtk_generated_hook": true}}
+			rival := *hook
+			rival.ID, rival.FilePath = "rival", other
+			endpoint := &graph.Node{ID: "endpoint", Name: "query", Kind: graph.KindFunction, FilePath: file, Language: "typescript",
+				Meta: map[string]any{"rtk_endpoint": "query"}}
+			getter := &graph.Node{ID: "getter", Name: binding, Kind: graph.KindVariable, FilePath: file, Language: "typescript"}
+			call := &graph.Edge{From: caller.ID, To: "unresolved::useQuery", Kind: graph.EdgeCalls, FilePath: file, Line: 2,
+				Meta: map[string]any{"store_binding": binding}}
+			app := ParseFacts{
+				EffectiveLanguage: "typescript",
+				File:              graph.FileMetaRow{FilePath: file, NodeCount: 4},
+				Nodes:             []*graph.Node{caller, hook, endpoint, getter},
+				Edges:             []*graph.Edge{call},
+			}
+			elsewhere := ParseFacts{
+				EffectiveLanguage: "typescript",
+				File:              graph.FileMetaRow{FilePath: other, NodeCount: 1},
+				Nodes:             []*graph.Node{&rival},
+			}
+			b := newBuild(t, FullProfile)
+			require.NoError(t, b.AddParsedFile("", app))
+			require.NoError(t, b.AddParsedFile("", elsewhere))
+			before := rebuildFrameworkCustodyRows(t, b)
+
+			receiptCaller := *caller
+			receiptCaller.FilePath = other
+			elsewhere.Nodes = []*graph.Node{&rival, &receiptCaller}
+			elsewhere.File.NodeCount = len(elsewhere.Nodes)
+			app.Nodes = []*graph.Node{hook, endpoint}
+			if getterReceipt {
+				app.Nodes = append(app.Nodes, getter)
+			}
+			app.File.NodeCount = len(app.Nodes)
+			stats, err := b.RebuildRTKQuery(t.Context(), func(yield func(ParseFacts, error) bool) {
+				if yield(app, nil) {
+					yield(elsewhere, nil)
+				}
+			}, rtkQueryStoreTestRules())
+			moved := *call
+			moved.To = hook.ID
+			if !getterReceipt {
+				require.ErrorIs(t, err, ErrRebuildRTKQuery)
+				var refused *RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refused)
+				require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(&moved)}, refused)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, RebuildRTKQueryStats{Resolved: 1, Moves: 1}, stats)
+			stored, err := b.pendingEdge(pendingEdgeKey(&moved))
+			require.NoError(t, err)
+			require.Equal(t, &moved, stored)
+			old, err := b.pendingEdge(pendingEdgeKey(call))
+			require.NoError(t, err)
+			require.Nil(t, old)
+		})
+	}
+}
