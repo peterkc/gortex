@@ -133,30 +133,34 @@ func resolveGRPCStubCalls(g graph.Store, cands *frameworkPassCandidates) int {
 		}
 
 		oldTo := e.To
-		e.To = want
-		if handlerID != "" {
-			e.Origin = origin
-			e.Confidence = conf
-			e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, conf)
-			e.Meta["grpc_resolution"] = origin
-			StampSynthesized(e, SynthGRPCStub)
-			resolved++
-		} else {
-			// Re-orphaned (handler removed since the last pass): drop the
-			// resolution-tier metadata so the edge reads as a plain
-			// unresolved placeholder again.
-			e.Origin = ""
-			e.Confidence = 0
-			e.ConfidenceLabel = ""
-			delete(e.Meta, "grpc_resolution")
-			UnstampSynthesized(e)
-		}
+		rebindGRPCStub(e, want, handlerID, origin, conf, &resolved)
 		reindexBatch = append(reindexBatch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 	}
 	if len(reindexBatch) > 0 {
 		g.ReindexEdges(reindexBatch)
 	}
 	return resolved
+}
+
+func rebindGRPCStub(e *graph.Edge, want, handlerID, origin string, conf float64, resolved *int) {
+	e.To = want
+	if handlerID != "" {
+		e.Origin = origin
+		e.Confidence = conf
+		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, conf)
+		e.Meta["grpc_resolution"] = origin
+		StampSynthesized(e, SynthGRPCStub)
+		*resolved++
+	} else {
+		// Re-orphaned (handler removed since the last pass): drop the
+		// resolution-tier metadata so the edge reads as a plain
+		// unresolved placeholder again.
+		e.Origin = ""
+		e.Confidence = 0
+		e.ConfidenceLabel = ""
+		delete(e.Meta, "grpc_resolution")
+		UnstampSynthesized(e)
+	}
 }
 
 // grpcStubPlaceholder is the canonical placeholder target for an
