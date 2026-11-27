@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -10,6 +11,58 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/parser/languages"
 )
+
+func TestRebuildMediatRNodeInputCaps(t *testing.T) {
+	const file, otherFile, lang = "App.cs", "Other.cs", "csharp"
+	padding := strings.Repeat("x", 16<<20)
+	for _, role := range []string{"handler", "caller", "getter", "unrelated"} {
+		t.Run(role, func(t *testing.T) {
+			caller := &graph.Node{ID: otherFile + "::Publish", Name: "Publish", Kind: graph.KindMethod, FilePath: otherFile, Language: lang}
+			handler := &graph.Node{ID: file + "::Handle", Name: "Handle", Kind: graph.KindMethod, FilePath: file, Language: lang,
+				Meta: map[string]any{"mediatr_kind": "request", "mediatr_request_type": "Notice"}}
+			otherHandler := *handler
+			otherHandler.ID, otherHandler.FilePath = otherFile+"::Handle", otherFile
+			otherHandler.Meta = map[string]any{"mediatr_kind": "request", "mediatr_request_type": "Notice"}
+			getter := &graph.Node{ID: file + "::Use", Name: "Use", Kind: graph.KindVariable, FilePath: file, Language: lang}
+			unrelated := &graph.Node{ID: otherFile + "::Other", Name: "Other", Kind: graph.KindMethod, FilePath: otherFile, Language: lang}
+			large := map[string]*graph.Node{"handler": handler, "caller": caller, "getter": getter, "unrelated": unrelated}[role]
+			if large.Meta == nil {
+				large.Meta = map[string]any{}
+			}
+			large.Meta["padding"] = padding
+			call := &graph.Edge{From: caller.ID, To: "unresolved::*.Handle", Kind: graph.EdgeCalls, FilePath: otherFile, Line: 4,
+				Meta: map[string]any{"via": mediatrVia, "mediatr_kind": "request", "mediatr_request_type": "Notice", "store_binding": getter.Name}}
+			facts := []store_pebble.ParseFacts{
+				rebuildEventFacts(file, lang, []*graph.Node{handler, getter}),
+				rebuildEventFacts(otherFile, lang, []*graph.Node{caller, &otherHandler, unrelated}, call),
+			}
+			b, native := openRebuildEventStores(t, facts...)
+			selection, err := NewFrameworkSynthesizerSelection([]string{SynthMediatR})
+			require.NoError(t, err)
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+			require.NoError(t, err)
+			require.True(t, frozen.allows(SynthMediatR))
+			before := rebuildEventSavedRows(t, b)
+			stats, err := RunRebuildMediatR(t.Context(), b, rebuildGRPCReceipts(facts...), frozen)
+			if role != "unrelated" {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildMediatR)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "MediatR node row")
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.RebuildMediatRStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+			after := rebuildEventSavedRows(t, b)
+			require.Equal(t, 1, ResolveMediatRCalls(native))
+			require.Equal(t, rebuildEventSQLiteRows(native), after)
+			require.Len(t, after.edges, 1)
+			require.Equal(t, handler.ID, after.edges[0].To)
+			require.Equal(t, before.nodes, after.nodes)
+		})
+	}
+}
 
 func TestRebuildMediatRSQLiteOracle(t *testing.T) {
 	const file = "App.cs"

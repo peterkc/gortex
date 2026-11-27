@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -33,6 +34,42 @@ func springRebuildSelection(t *testing.T, b *store_pebble.BuildStore) FrameworkS
 	frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
 	require.NoError(t, err)
 	return frozen
+}
+
+func TestRebuildSpringEventsNodeInputCaps(t *testing.T) {
+	padding := strings.Repeat("x", 16<<20)
+	for _, role := range []string{"listener", "unrelated"} {
+		t.Run(role, func(t *testing.T) {
+			pub := springRebuildNode("publish", "")
+			listener := springRebuildNode("listen", "Notice")
+			unrelated := springRebuildNode("other", "")
+			large := map[string]*graph.Node{"listener": listener, "unrelated": unrelated}[role]
+			large.Meta["padding"] = padding
+			call := springRebuildCall(pub.ID, "unresolved::*.Notice", "Notice", 4)
+			facts := rebuildEventFacts(springRebuildFile, "java", []*graph.Node{pub, listener, unrelated}, call)
+			b, native := openRebuildEventStores(t, facts)
+			frozen := springRebuildSelection(t, b)
+			require.True(t, frozen.allows(SynthSpringEvent))
+			before := rebuildEventSavedRows(t, b)
+			stats, err := RunRebuildSpringEvents(t.Context(), b, rebuildGRPCReceipts(facts), frozen)
+			if role == "listener" {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildSpringEvents)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "Spring events row")
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.RebuildSpringEventStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+			after := rebuildEventSavedRows(t, b)
+			require.Equal(t, 1, ResolveSpringEventCalls(native))
+			require.Equal(t, rebuildEventSQLiteRows(native), after)
+			require.Len(t, after.edges, 1)
+			require.Equal(t, listener.ID, after.edges[0].To)
+			require.Equal(t, before.nodes, after.nodes)
+		})
+	}
 }
 
 func TestRebuildSpringEventsSQLiteHierarchy(t *testing.T) {
