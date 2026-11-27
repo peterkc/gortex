@@ -177,6 +177,25 @@ func (p *RebuildTemporalPass) Node(ctx context.Context, id string) (*graph.Node,
 	return p.View().Node(ctx, id)
 }
 
+// CheckNodeInput bounds a saved row once a Temporal role needs its fields.
+func (p *RebuildTemporalPass) CheckNodeInput(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	key := pendingNodeKey(id)
+	_, err := pendingGet(p.build.pending, key, func(value []byte) (bool, error) {
+		return true, checkRebuildTemporalNodeInput(key, value)
+	})
+	return err
+}
+
+func checkRebuildTemporalNodeInput(key, value []byte) error {
+	if len(key)+len(value) > rebuildTemporalRowLimit {
+		return fmt.Errorf("%w: temporal node row", ErrRebuildLinkInputSize)
+	}
+	return nil
+}
+
 func (p *RebuildTemporalPass) stagedNode(id string) (*graph.Node, error) {
 	key := rebuildTemporalKey('n', id)
 	return pendingGet(p.build.pending, key, func(raw []byte) (*graph.Node, error) {
@@ -697,6 +716,9 @@ func rebuildTemporalRecorder(id graph.EdgeIdentity, e *graph.Edge) []byte {
 }
 
 func (s RebuildTemporalProof) WantNode(ctx context.Context, id string) error {
+	if err := s.pass.CheckNodeInput(ctx, id); err != nil {
+		return err
+	}
 	return s.want(ctx, rebuildTemporalKey('d', id))
 }
 
@@ -755,7 +777,13 @@ func (p *RebuildTemporalPass) prove(ctx context.Context, receipts iter.Seq2[Pars
 			if !wanted {
 				continue
 			}
-			live, err := p.View().Node(ctx, n.ID)
+			nodeKey := pendingNodeKey(n.ID)
+			live, err := pendingGet(p.build.pending, nodeKey, func(value []byte) (*graph.Node, error) {
+				if err := checkRebuildTemporalNodeInput(nodeKey, value); err != nil {
+					return nil, err
+				}
+				return checkedRebuildLightNode(row{nodeKey, value}, "temporal receipt node")
+			})
 			if err != nil {
 				return err
 			}

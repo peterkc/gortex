@@ -40,6 +40,9 @@ func (u rebuildTemporalUnique) winner() string {
 func (p *rebuildTemporal) buildIndex() error {
 	var next uint64
 	appendRow := func(kind, name, id string) error {
+		if err := p.s.CheckNodeInput(p.ctx, id); err != nil {
+			return err
+		}
 		next++
 		return p.s.Put(p.ctx, temporalIndexRegistered, id, kind+"::"+name, temporalOrdinal(next))
 	}
@@ -61,6 +64,12 @@ func (p *rebuildTemporal) buildIndex() error {
 		if err != nil || target == nil {
 			return err
 		}
+		checkRegistration := func() error {
+			if err := p.s.CheckNodeInput(p.ctx, caller.ID); err != nil {
+				return err
+			}
+			return p.s.CheckNodeInput(p.ctx, target.ID)
+		}
 		if plural {
 			return p.s.Incoming(p.ctx, target.ID, graph.EdgeMemberOf, func(link *graph.Edge) error {
 				if link.From == "" {
@@ -73,11 +82,17 @@ func (p *rebuildTemporal) buildIndex() error {
 				if m.Language != "go" || m.Kind != graph.KindMethod || !isExportedGoName(m.Name) {
 					return nil
 				}
+				if err := checkRegistration(); err != nil {
+					return err
+				}
 				if err := p.stampTemporalGo(e, m, kind, m.Name, true); err != nil {
 					return err
 				}
 				return appendRow(kind, m.Name, m.ID)
 			})
+		}
+		if err := checkRegistration(); err != nil {
+			return err
 		}
 		regName, _ := e.Meta["temporal_registered_name"].(string)
 		if regName == "" {
@@ -222,6 +237,9 @@ func (p *rebuildTemporal) indexTemporalJava(appendRow func(kind, name, id string
 		if ifaceRole == "" || from.Kind != graph.KindInterface {
 			return nil
 		}
+		if err := p.s.CheckNodeInput(p.ctx, from.ID); err != nil {
+			return err
+		}
 		if err := p.stampTemporalJava(e, from, ifaceRole, from.Name); err != nil {
 			return err
 		}
@@ -305,6 +323,9 @@ func (p *rebuildTemporal) propagateTemporalJava(e *graph.Edge, iface *graph.Node
 				return p.visitTemporalJavaMethods("receiver", recv, func(m *graph.Node) error {
 					_, member, err := p.s.Get(p.ctx, temporalIndexJavaMember, iface.ID, m.Name)
 					if err != nil || !member {
+						return err
+					}
+					if err := p.s.CheckNodeInput(p.ctx, impl.ID); err != nil {
 						return err
 					}
 					return stampMethod(m) // Implementors do not protect explicit roles.

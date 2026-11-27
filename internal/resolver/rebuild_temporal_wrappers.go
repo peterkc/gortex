@@ -51,12 +51,18 @@ func (p *rebuildTemporal) indexWrappers(ordinal *uint64) error {
 		if !ok {
 			return nil
 		}
+		if err := p.s.CheckNodeInput(p.ctx, pn.ID); err != nil {
+			return err
+		}
 		wn, err := p.s.Node(p.ctx, e.From)
 		if err != nil {
 			return err
 		}
 		name := ""
 		if wn != nil {
+			if err := p.s.CheckNodeInput(p.ctx, wn.ID); err != nil {
+				return err
+			}
 			name = wn.Name
 		}
 		if err := p.s.Put(p.ctx, 'W', kind, e.From); err != nil {
@@ -142,6 +148,9 @@ func (p *rebuildTemporal) stageWrapperCall(call *graph.Edge, id, kind, wrapperNa
 	fwd := ""
 	if pn != nil && pn.Kind == graph.KindParam {
 		if _, ok := metaIntValue(pn.Meta["position"]); ok {
+			if err := p.s.CheckNodeInput(p.ctx, pn.ID); err != nil {
+				return err
+			}
 			fwd = name
 		}
 	}

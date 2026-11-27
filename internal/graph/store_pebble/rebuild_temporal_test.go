@@ -348,3 +348,54 @@ func TestRebuildTemporalWrapperCallRequiresSource(t *testing.T) {
 		})
 	require.NoError(t, err)
 }
+
+func TestRebuildTemporalNodeWitnessCap(t *testing.T) {
+	const file = "flow.go"
+	caller := &graph.Node{ID: "caller", Name: "Run", Kind: graph.KindFunction, Language: "go", FilePath: file}
+	target := &graph.Node{ID: "target", Name: "Activity", Kind: graph.KindFunction, Language: "go", FilePath: file}
+	unrelated := &graph.Node{ID: "other", Name: "Other", Kind: graph.KindFunction, Language: "go", FilePath: file}
+	raw := &graph.Edge{From: caller.ID, To: "unresolved::Activity", Kind: graph.EdgeCalls, FilePath: file, Line: 1}
+	facts := ParseFacts{
+		EffectiveLanguage: "go",
+		File:              graph.FileMetaRow{FilePath: file, NodeCount: 3},
+		Nodes:             []*graph.Node{caller, target, unrelated},
+		Edges:             []*graph.Edge{raw},
+	}
+	padding := strings.Repeat("x", rebuildTemporalRowLimit)
+	for _, n := range []*graph.Node{target, unrelated} {
+		t.Run(n.ID, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			require.NoError(t, b.AddParsedFile("", facts))
+			large := *n
+			large.Meta = map[string]any{"padding": padding}
+			b.AddNode(&large)
+			before := rebuildFrameworkCustodyRows(t, b)
+			ctx := t.Context()
+			out := *raw
+			out.To = target.ID
+			stats, err := b.RebuildTemporal(ctx, sqlCallsiteTestReceipts(facts), 1,
+				func(p *RebuildTemporalPass) (RebuildTemporalStats, error) {
+					proof := p.EdgeProof(&out)
+					if err := proof.WantRecorder(ctx, raw); err != nil {
+						return RebuildTemporalStats{}, err
+					}
+					if err := proof.WantNode(ctx, target.ID); err != nil {
+						return RebuildTemporalStats{}, err
+					}
+					return RebuildTemporalStats{}, p.QueueMove(ctx, raw.To, &out, false)
+				})
+			if n == target {
+				require.ErrorIs(t, err, ErrRebuildTemporal)
+				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "temporal node row")
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			moved, err := b.pendingEdge(pendingEdgeKey(&out))
+			require.NoError(t, err)
+			require.Equal(t, &out, moved)
+		})
+	}
+}
