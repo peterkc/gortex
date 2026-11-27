@@ -120,14 +120,16 @@ func TestRebuildReactNativeBridgeRejectsMissingFirstSite(t *testing.T) {
 func TestRebuildReactNativeBridgeDuplicateRecorder(t *testing.T) {
 	for _, tc := range []struct {
 		name, field, value string
+		wantCount          uint64
 	}{
 		{name: "matching"},
-		{"conflicting via", "via", "not-rn"},
-		{"missing via", "via", ""},
-		{"conflicting module", "rn_module", "Contacts"},
-		{"missing module", "rn_module", ""},
-		{"conflicting method", "rn_method", "close"},
-		{"missing method", "rn_method", ""},
+		{"conflicting via", "via", "not-rn", 3},
+		{"missing via", "via", "", 3},
+		{"conflicting module", "rn_module", "Contacts", 3},
+		{"missing module", "rn_module", "", 3},
+		// The conflicting receipt also names the existing Calendar.close bucket.
+		{"conflicting method", "rn_method", "close", 4},
+		{"missing method", "rn_method", "", 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			facts := rebuildRNBridgeFacts(t, "Calendar")
@@ -150,10 +152,10 @@ func TestRebuildReactNativeBridgeDuplicateRecorder(t *testing.T) {
 			selection, err := NewFrameworkSynthesizerSelection([]string{SynthReactNative})
 			require.NoError(t, err)
 			stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(proof...), selection, 1)
-			if tc.field != "" {
+			if tc.wantCount != 0 {
 				var refused *store_pebble.RebuildUnknownProvenanceError
 				require.ErrorAs(t, err, &refused)
-				require.Equal(t, uint64(3), refused.Count)
+				require.Equal(t, tc.wantCount, refused.Count)
 				require.Equal(t, graph.EdgeIdentityFor(facts[0].Edges[2]), refused.First)
 				require.Zero(t, stats)
 				require.Equal(t, before, rebuildEventSavedRows(t, private))
