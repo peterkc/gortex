@@ -215,9 +215,10 @@ func (p *rebuildStoreFactoryPass) node(id string) (*graph.Node, error) {
 
 type rebuildStoreFactoryElection struct {
 	rebuildStoreCandidatePick
-	caller *graph.Node
-	seen   bool // an action cohort exists before workspace filtering
-	getter bool // the filtered cohort needs the getter/fallback decision
+	caller      *graph.Node
+	seen        bool // an action cohort exists before workspace filtering
+	getter      bool // the filtered cohort needs the getter/fallback decision
+	getterProof bool // the getter file can change the decision
 }
 
 func (p *rebuildStoreFactoryPass) elect(from, binding, member string, resolveGetter bool) (pick rebuildStoreFactoryElection, err error) {
@@ -248,9 +249,11 @@ func (p *rebuildStoreFactoryPass) elect(from, binding, member string, resolveGet
 		pick.getter = true
 		return pick, nil
 	}
+	var getterFile string
 	pick.rebuildStoreCandidatePick, err = pickRebuildStoreCandidate(p.unique, scoped, id, seen, func() (string, error) {
 		pick.getter = true
 		file, _, err := p.unique(rebuildStoreFactoryKey('t', binding))
+		getterFile = file
 		return file, err
 	}, callerFile, func(file string) []byte {
 		if pick.caller != nil {
@@ -258,6 +261,7 @@ func (p *rebuildStoreFactoryPass) elect(from, binding, member string, resolveGet
 		}
 		return rebuildStoreFactoryKey('f', binding, member, file)
 	})
+	pick.getterProof = pick.getter && (getterFile == "" || pick.getterWinner)
 	return pick, err
 }
 
@@ -569,7 +573,13 @@ func (p *rebuildStoreFactoryPass) proved(old []byte, e *graph.Edge, anchor bool)
 		return false, err
 	}
 	if pick.getter {
-		ok, err := p.getterFilesProved(rebuildStoreFactoryKey('t', binding), rebuildStoreFactoryKey('v', binding), p.unique)
+		wanted := rebuildStoreFactoryKey('v', binding)
+		var ok bool
+		if pick.getterProof {
+			ok, err = p.getterFilesProved(rebuildStoreFactoryKey('t', binding), wanted, p.unique)
+		} else {
+			ok, err = p.getterFileUnchanged(wanted)
+		}
 		if err != nil || !ok {
 			return false, err
 		}

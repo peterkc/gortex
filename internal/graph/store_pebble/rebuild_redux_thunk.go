@@ -211,10 +211,11 @@ func (p *rebuildReduxThunkPass) addUnique(key []byte, value string) error {
 }
 
 type rebuildReduxThunkPick struct {
-	target  string
-	inputs  [][]byte                       // consulted pool markers and caller
-	buckets []rebuildStoreCandidateWitness // deciding candidate buckets
-	getter  bool                           // a pool consulted the getter
+	target      string
+	inputs      [][]byte                       // consulted pool markers and caller
+	buckets     []rebuildStoreCandidateWitness // deciding candidate buckets
+	getter      bool                           // a pool consulted the getter
+	getterProof bool                           // the getter file can change a pool's decision
 }
 
 func (p *rebuildReduxThunkPass) elect(e *graph.Edge, callee, binding string, resolveGetter bool) (pick rebuildReduxThunkPick, err error) {
@@ -272,6 +273,9 @@ func (p *rebuildReduxThunkPass) elect(e *graph.Edge, callee, binding string, res
 		})
 		if err != nil {
 			return pick, err
+		}
+		if binding != "" && seen && id == "" {
+			pick.getterProof = pick.getterProof || getterFile == "" || chosen.getterWinner
 		}
 		pick.buckets = append(pick.buckets, chosen.buckets...)
 		if chosen.target != "" {
@@ -600,7 +604,13 @@ func (p *rebuildReduxThunkPass) proved(old []byte, e *graph.Edge, anchor bool) (
 		}
 	}
 	if pick.getter {
-		ok, err := p.getterFilesProved(p.poolKey('g', 'i', binding), p.poolKey('g', 'u', binding), p.unique)
+		wanted := p.poolKey('g', 'u', binding)
+		var ok bool
+		if pick.getterProof {
+			ok, err = p.getterFilesProved(p.poolKey('g', 'i', binding), wanted, p.unique)
+		} else {
+			ok, err = p.getterFileUnchanged(wanted)
+		}
 		if err != nil || !ok {
 			return false, err
 		}

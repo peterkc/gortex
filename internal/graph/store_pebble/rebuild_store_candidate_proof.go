@@ -12,9 +12,10 @@ import (
 // also rule out a singleton before the file checks. Empty buckets use the
 // live census, but must not gain a candidate from a conflicting receipt.
 type rebuildStoreCandidatePick struct {
-	target   string
-	buckets  []rebuildStoreCandidateWitness
-	nonempty bool // the scoped pool is not empty
+	target       string
+	buckets      []rebuildStoreCandidateWitness
+	nonempty     bool // the scoped pool is not empty
+	getterWinner bool
 }
 
 type rebuildStoreCandidateWitness struct {
@@ -38,7 +39,7 @@ func pickRebuildStoreCandidate(unique func([]byte) (string, bool, error), scoped
 	if err != nil {
 		return pick, err
 	}
-	for _, file := range [...]string{getterFile, callerFile} {
+	for i, file := range [...]string{getterFile, callerFile} {
 		if file == "" {
 			continue
 		}
@@ -50,6 +51,7 @@ func pickRebuildStoreCandidate(unique func([]byte) (string, bool, error), scoped
 		if id != "" {
 			pick.buckets = append(pick.buckets, rebuildStoreCandidateWitness{key, 1})
 			pick.target = id
+			pick.getterWinner = i == 0 && file != callerFile
 			return pick, nil
 		}
 		var need byte
@@ -253,6 +255,13 @@ func (p *rebuildCallMoves) foldGetterFiles(ctx context.Context, prefix []byte,
 	})
 }
 
+// A unique getter that did not change the pick can be omitted, but a known
+// getter moving to another file could still redirect the Call.
+func (p *rebuildCallMoves) getterFileUnchanged(wanted []byte) (bool, error) {
+	state, err := rebuildScratchState(p.b.pending, wanted, p.label+" getter proof")
+	return state == rebuildCapabilityWanted, err
+}
+
 func (p *rebuildCallMoves) getterFilesProved(live, wanted []byte, unique func([]byte) (string, bool, error)) (bool, error) {
 	file, seen, err := unique(live)
 	if err != nil {
@@ -265,8 +274,7 @@ func (p *rebuildCallMoves) getterFilesProved(live, wanted []byte, unique func([]
 	if seen && file == "" {
 		return true, nil // two exact files already exclude a unique file
 	}
-	state, err := rebuildScratchState(p.b.pending, wanted, p.label+" getter proof")
-	return state == rebuildCapabilityWanted, err
+	return p.getterFileUnchanged(wanted)
 }
 
 // rebuildStoreScopeKeys changes the cohort column and extends its encoded member key.

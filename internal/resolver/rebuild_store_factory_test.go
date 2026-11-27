@@ -610,12 +610,14 @@ func TestRebuildStoreFactoryAndReduxThunkGetterFileProof(t *testing.T) {
 			for _, tc := range []struct {
 				name                 string
 				ambiguous, extraFile bool
-				refuse               bool
+				unrelated, refuse    bool
 			}{
 				{name: "two exact files", ambiguous: true, extraFile: true},
 				{name: "two declarations in one file", ambiguous: true, refuse: true},
 				{name: "one exact declaration in the only file"},
 				{name: "duplicate moved to a second file", extraFile: true, refuse: true},
+				{name: "getter file without candidates needs no receipt", unrelated: true},
+				{name: "otherwise irrelevant getter moves into candidate file", unrelated: true, extraFile: true, refuse: true},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					caller := rebuildEventNode(callerFile, "call", "typescript", "local")
@@ -627,7 +629,11 @@ func TestRebuildStoreFactoryAndReduxThunkGetterFileProof(t *testing.T) {
 						}
 						return rebuildStoreFactoryAction(file, caller.WorkspaceID)
 					}
-					local, remote := candidate(callerFile), candidate(getterFile)
+					remoteFile := getterFile
+					if tc.unrelated {
+						remoteFile = "other.ts"
+					}
+					local, remote := candidate(callerFile), candidate(remoteFile)
 					getter := func(file string) *graph.Node {
 						n := rebuildEventNode(file, "useStore", caller.Language, "")
 						n.Kind = graph.KindVariable
@@ -642,10 +648,18 @@ func TestRebuildStoreFactoryAndReduxThunkGetterFileProof(t *testing.T) {
 						call.Meta["store_binding"] = "useStore"
 					}
 					left := rebuildEventFacts(callerFile, caller.Language, []*graph.Node{caller, local}, call)
-					right := rebuildEventFacts(getterFile, caller.Language, []*graph.Node{remote, one, duplicate})
+					rightNodes := []*graph.Node{one, duplicate}
+					if !tc.unrelated {
+						rightNodes = append(rightNodes, remote)
+					}
+					right := rebuildEventFacts(getterFile, caller.Language, rightNodes)
 					otherFacts := rebuildEventFacts(other.FilePath, caller.Language, []*graph.Node{other})
 					live := []store_pebble.ParseFacts{left, right}
 					want := remote.ID
+					if tc.unrelated {
+						want = local.ID
+						live = append(live, rebuildEventFacts(remoteFile, caller.Language, []*graph.Node{remote}))
+					}
 					if tc.ambiguous {
 						want = local.ID
 						live = append(live, otherFacts, rebuildEventFacts(third.FilePath, caller.Language, []*graph.Node{third}))
@@ -656,15 +670,20 @@ func TestRebuildStoreFactoryAndReduxThunkGetterFileProof(t *testing.T) {
 					require.NoError(t, err)
 					frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
 					require.NoError(t, err)
-					if !tc.ambiguous || tc.extraFile {
-						right.Nodes = []*graph.Node{remote, one}
+					if tc.unrelated {
+						right = rebuildEventFacts(getterFile, caller.Language, nil)
+					} else if !tc.ambiguous || tc.extraFile {
+						right = rebuildEventFacts(getterFile, caller.Language, []*graph.Node{remote, one})
 					}
 					recorded := []store_pebble.ParseFacts{left, right}
+					if tc.unrelated {
+						recorded = append(recorded, live[2]) // the remote candidate, not a getter
+					}
 					if tc.extraFile {
 						if !tc.ambiguous {
 							moved := *duplicate
 							moved.FilePath = other.FilePath
-							otherFacts.Nodes = []*graph.Node{&moved}
+							otherFacts = rebuildEventFacts(moved.FilePath, caller.Language, []*graph.Node{&moved})
 						}
 						recorded = append(recorded, otherFacts)
 					}
