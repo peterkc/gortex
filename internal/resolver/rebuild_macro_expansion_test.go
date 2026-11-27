@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -419,6 +420,72 @@ func TestRebuildMacroExpansionRequiresDeclarationAndBody(t *testing.T) {
 			want := rebuildEventSQLiteRows(native)
 			require.Contains(t, want.edges, add)
 			require.Equal(t, want, rebuildEventSavedRows(t, b))
+		})
+	}
+}
+
+func TestRebuildMacroExpansionCapsOnlyReachedRoles(t *testing.T) {
+	const file, lang = "cap.c", "c"
+	large := strings.Repeat("x", 16<<20)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthMacroExpansion})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name, largeRow string
+		unrelated      bool
+		refusal        string
+	}{
+		{"large active body", "body", false, "macro expansion edge row"},
+		{"large deciding caller", "caller", false, "macro expansion caller node"},
+		{"large unrelated body", "body", true, ""},
+		{"large unrelated caller", "caller", true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			caller := rebuildEventNode(file, "run", lang, "")
+			nonmacro := rebuildEventNode(file, "ordinary", lang, "")
+			callee := rebuildEventNode(file, "work", lang, "")
+			macro := &graph.Node{ID: file + "::APPLY", Name: "APPLY", Kind: graph.KindMacro, FilePath: file, Language: lang,
+				Meta: map[string]any{"macro_kind": macroFunctionKindMeta}}
+			body := &graph.Edge{From: macro.ID, To: callee.ID, Kind: graph.EdgeCalls, FilePath: file, Line: 1}
+			use := &graph.Edge{From: caller.ID, To: "unresolved::APPLY", Kind: graph.EdgeCalls, FilePath: file, Line: 3}
+			edges := []*graph.Edge{body, use}
+			if tc.largeRow == "caller" {
+				caller.Meta = map[string]any{"payload": large}
+				if tc.unrelated {
+					caller.RepoPrefix = "another-repo"
+				}
+			} else if tc.unrelated {
+				extra := *body
+				extra.From, extra.Context = nonmacro.ID, large
+				edges = append(edges, &extra)
+			} else {
+				body.Context = large
+			}
+			facts := rebuildEventFacts(file, lang, []*graph.Node{caller, callee, macro, nonmacro}, edges...)
+			b := openRebuildGRPCBuild(t, facts)
+			frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
+			require.NoError(t, err)
+			require.True(t, frozen.allows(SynthMacroExpansion))
+			require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, frozen))
+			stats, err := RunRebuildMacroExpansion(ctx, b, rebuildGRPCReceipts(facts), frozen)
+			id := graph.EdgeIdentityFor(macroExpansionEdge(caller.ID, callee.ID, file, use.Line, macro.Name))
+			added, readErr := b.RebuildView().Edge(ctx, id)
+			require.NoError(t, readErr)
+			if tc.refusal != "" {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, tc.refusal)
+				require.Zero(t, stats)
+				require.Nil(t, added)
+				return
+			}
+			require.NoError(t, err)
+			if tc.largeRow == "caller" {
+				require.Zero(t, stats)
+				require.Nil(t, added)
+				return
+			}
+			require.EqualValues(t, 1, stats.Adds)
+			require.Equal(t, macroExpansionEdge(caller.ID, callee.ID, file, use.Line, macro.Name), added)
 		})
 	}
 }

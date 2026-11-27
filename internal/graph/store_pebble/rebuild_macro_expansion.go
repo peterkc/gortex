@@ -203,6 +203,9 @@ func (p *rebuildMacroExpansion) body(ctx context.Context, id string, yield func(
 			return err
 		}
 		if callee := p.rules.Body(e); callee != "" {
+			if err := p.input(r.key, r.value); err != nil {
+				return err
+			}
 			return yield(r, callee)
 		}
 		return nil
@@ -258,6 +261,16 @@ func (p *rebuildMacroExpansion) claimInput(live []byte) error {
 	return p.claim(raw, live)
 }
 
+func (p *rebuildMacroExpansion) readCaller(id string) (*graph.Node, bool, error) {
+	key := pendingNodeKey(id)
+	var oversized bool
+	n, err := pendingGet(p.b.pending, key, func(value []byte) (*graph.Node, error) {
+		oversized = len(key)+len(value) > p.rowBytes
+		return checkedRebuildLightNode(row{key, value}, p.label)
+	})
+	return n, oversized, err
+}
+
 func (p *rebuildMacroExpansion) collectUses(ctx context.Context) error {
 	prefix := p.column('i')
 	return p.visit(ctx, prefix, func(r row) error {
@@ -270,6 +283,7 @@ func (p *rebuildMacroExpansion) collectUses(ctx context.Context) error {
 			return err
 		}
 		var repo, name string
+		var oversizedCaller bool
 		unresolved := graph.IsUnresolvedTarget(e.To)
 		if unresolved {
 			if err := p.put(p.key('h', e.From), []byte{rebuildCapabilityWanted}); err != nil {
@@ -278,11 +292,12 @@ func (p *rebuildMacroExpansion) collectUses(ctx context.Context) error {
 			if err := p.put(append(p.key('j', e.From), old...), nil); err != nil {
 				return err
 			}
-			caller, err := p.storeReceiptNode(e.From)
+			caller, oversized, err := p.readCaller(e.From)
 			if err != nil || caller == nil {
 				return err
 			}
 			repo, name = caller.RepoPrefix, graph.UnresolvedName(e.To)
+			oversizedCaller = oversized
 		} else {
 			n, err := p.macro(e.To)
 			if err != nil || n == nil {
@@ -293,6 +308,9 @@ func (p *rebuildMacroExpansion) collectUses(ctx context.Context) error {
 		id, seen, err := p.unique(p.key('a', repo, name))
 		if err != nil || !seen {
 			return err
+		}
+		if oversizedCaller {
+			return fmt.Errorf("%w: %s caller node", ErrRebuildLinkInputSize, p.label)
 		}
 		if id == "" {
 			if err := p.put(p.key('L', repo, name), nil); err != nil {
