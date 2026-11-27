@@ -275,7 +275,7 @@ func TestRebuildContractRawUTF16NativeParity(t *testing.T) {
 		withBOM                  bool
 	}{
 		{"Go BOM", "handler.go", "go", goSource, true},
-		{"Go unmarked", "handler.go", "go", goSource, false},
+		{"Go unmarked", "handler.go", "go", goSource + "// Enough code units for the BOM-less UTF-16 sniff.\n", false},
 		{"PHP BOM", "routes.php", "php", phpSource, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -290,6 +290,7 @@ func TestRebuildContractRawUTF16NativeParity(t *testing.T) {
 			idx.registry.Register(languages.NewPHPExtractor())
 			idx.SetRootPath(root)
 			t.Cleanup(idx.Close)
+			require.Equal(t, []byte(tc.source), idx.transforms.run(tc.path, raw), "native preparation must decode this fixture")
 			input, _, err := readRebuildInput(t.Context(), src, tc.path, tc.lang, 1024)
 			require.NoError(t, err)
 			store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
@@ -342,6 +343,44 @@ func TestRebuildContractRawUTF16NativeParity(t *testing.T) {
 			require.Equal(t, want, replay.ByID(id))
 		})
 	}
+}
+
+func TestRebuildContractRawUTF16ShortUnmarkedNativeSkip(t *testing.T) {
+	const path = "handler.go"
+	const source = "package p\nfunc handler() { WriteJSON (w, 200, \"ok\") }\n"
+	ctx := t.Context()
+	root, src := rebuildInputFixture(t)
+	raw := utf16LENoBOM(t, source)
+	absolute := filepath.Join(root, path)
+	require.NoError(t, os.WriteFile(absolute, raw, 0o600))
+	idx := newTestIndexer(graph.New())
+	idx.SetRootPath(root)
+	t.Cleanup(idx.Close)
+	ext, ok := idx.registry.GetByLanguage("go")
+	require.True(t, ok)
+	prepared := idx.transforms.run(path, raw)
+	require.Equal(t, raw, prepared, "the unmarked sample is below the native detection threshold")
+	before := parser.ParseCount()
+	native, skipped, err := idx.extractFileWithRawLease(nil, nil, nil, absolute, path, "go", ext, prepared)
+	require.NoError(t, err)
+	require.NotNil(t, native)
+	defer native.ReleaseTree()
+	require.True(t, skipped)
+	require.Len(t, native.Nodes, 1)
+	require.Equal(t, true, native.Nodes[0].Meta["skipped_due_to_binary"])
+	require.Equal(t, before, parser.ParseCount(), "native never enters tree-sitter")
+
+	input, _, err := readRebuildInput(ctx, src, path, "go", 1024)
+	require.NoError(t, err)
+	store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+	base, facts, reused, err := idx.loadRebuildFileWithContractFacts(ctx, src, store, input, rebuildDigest{1}, rebuildTransformBounds{FileBytes: 1024})
+	require.NoError(t, err)
+	require.False(t, reused)
+	require.Equal(t, native.Nodes, base.Nodes)
+	require.True(t, facts.ScanSkipped)
+	require.Empty(t, facts.Records)
+	require.Empty(t, facts.Handlers)
+	require.Equal(t, before, parser.ParseCount(), "rebuild also skips before either parse")
 }
 
 func TestRebuildContractRawParseNativeSkips(t *testing.T) {
