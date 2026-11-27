@@ -33,15 +33,12 @@ func ResolveFabricComponents(g graph.Store) int {
 	var specs []*graph.Node
 	nativeByComponent := map[string][]*graph.Node{}
 	for _, n := range nodesByKindsOrAll(g, graph.KindType) {
-		if n == nil || n.Meta == nil {
+		component, normalized, native := fabricComponentCandidate(n)
+		if component == "" {
 			continue
 		}
-		comp, _ := n.Meta["fabric_component"].(string)
-		if comp == "" {
-			continue
-		}
-		if _, isNative := n.Meta["fabric_native"]; isNative {
-			nativeByComponent[fabricNormalize(comp)] = append(nativeByComponent[fabricNormalize(comp)], n)
+		if native {
+			nativeByComponent[normalized] = append(nativeByComponent[normalized], n)
 		} else {
 			specs = append(specs, n)
 		}
@@ -53,8 +50,8 @@ func ResolveFabricComponents(g graph.Store) int {
 	var batch []*graph.Edge
 	bound := 0
 	for _, spec := range specs {
-		comp, _ := spec.Meta["fabric_component"].(string)
-		matches := nativeByComponent[fabricNormalize(comp)]
+		comp, normalized, _ := fabricComponentCandidate(spec)
+		matches := nativeByComponent[normalized]
 		if len(matches) == 0 {
 			continue
 		}
@@ -78,6 +75,17 @@ func ResolveFabricComponents(g graph.Store) int {
 		g.AddEdge(e)
 	}
 	return bound
+}
+
+// fabricComponentCandidate reads only the component and role markers. Both
+// reducers scan Type rows; role is key presence, not the marker's value.
+func fabricComponentCandidate(n *graph.Node) (component, normalized string, native bool) {
+	if n == nil || n.Kind != graph.KindType {
+		return "", "", false
+	}
+	component, _ = n.Meta["fabric_component"].(string)
+	_, native = n.Meta["fabric_native"]
+	return component, fabricNormalize(component), native
 }
 
 // fabricNormalize folds a component name for cross-language matching: the
