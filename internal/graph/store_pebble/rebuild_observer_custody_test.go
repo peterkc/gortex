@@ -80,6 +80,79 @@ func TestRebuildObserverOriginalKeyAndScratchOwnership(t *testing.T) {
 	}
 }
 
+func TestRebuildObserverReportsProposalProofFolds(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		lastField string
+		bad       byte
+	}{
+		{"same field keeps bad proof", "a", 1},
+		{"later field resets proof", "z", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			p := rebuildObserverPass{b: b}
+			e := &graph.Edge{From: "dispatcher", To: "callback", Kind: graph.EdgeCalls, FilePath: "bus.go", Line: 5}
+			require.NoError(t, p.propose(e, tc.lastField, false, false))
+			require.NoError(t, p.propose(e, "a", true, true))
+			require.NoError(t, p.propose(e, tc.lastField, true, false))
+			value, err := p.get(append(observerScratch('x'), pendingEdgeKey(e)...))
+			require.NoError(t, err)
+			require.Equal(t, append([]byte{tc.bad}, tc.lastField...), value)
+		})
+	}
+}
+
+func TestRebuildObserverRefusalNamesOnlyRegistrarCallbacks(t *testing.T) {
+	bad := setStateProofMethod("reg-bad", "subscribe", 1)
+	good := setStateProofMethod("reg-good", "subscribe", 2)
+	dispatch := setStateProofMethod("dispatch", "notify", 3)
+	a := setStateProofMethod("a-callback", "a", 4)
+	z := setStateProofMethod("z-callback", "z", 5)
+	const field = "field"
+	access := func(n *graph.Node) *graph.Edge {
+		return &graph.Edge{From: n.ID, To: field, Kind: graph.EdgeAccessesField, FilePath: n.FilePath, Line: n.StartLine}
+	}
+	at := func(registrar, callback *graph.Node, line int) []*graph.Edge {
+		return []*graph.Edge{
+			{From: "setup", To: registrar.ID, Kind: graph.EdgeCalls, FilePath: registrar.FilePath, Line: line},
+			{From: "setup", To: callback.ID, Kind: graph.EdgeReferences, FilePath: callback.FilePath, Line: line},
+		}
+	}
+	// The proved registrar owns the lowest callback key. The unproved
+	// access must not add it to the refused output set.
+	edges := []*graph.Edge{access(bad), access(good), access(dispatch)}
+	edges = append(edges, at(good, a, 8)...)
+	edges = append(edges, at(bad, z, 9)...)
+	facts := setStateProofFacts([]*graph.Node{bad, good, dispatch, a, z}, edges...)
+	b, complete := seedSyntheticCustody(t, facts)
+	proof := facts
+	proof.Edges = proof.Edges[1:]
+	receipts := func(yield func(ParseFacts, error) bool) { yield(proof, nil) }
+	makeCall := func(from *graph.Node, to, field string) *graph.Edge {
+		return setStateProofOutput(from, &graph.Node{ID: to}, field)
+	}
+	run := func(receipts func(func(ParseFacts, error) bool)) (RebuildObserverStats, error) {
+		return b.RebuildObserver(t.Context(), receipts, 1,
+			func(name string) bool { return name == "subscribe" },
+			func(name string) bool { return name == "notify" },
+			func(_, _ *graph.Node) bool { return true }, 40, makeCall)
+	}
+	before := rebuildFrameworkCustodyRows(t, b)
+	stats, err := run(receipts)
+	var refused *RebuildUnknownProvenanceError
+	require.ErrorAs(t, err, &refused)
+	require.Equal(t, &RebuildUnknownProvenanceError{
+		Count: 1,
+		First: graph.EdgeIdentityFor(makeCall(dispatch, z.ID, field)),
+	}, refused)
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+	stats, err = run(complete)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, stats.Edges)
+}
+
 func TestRebuildObserverProofKinds(t *testing.T) {
 	for _, tc := range []struct {
 		kind   graph.EdgeKind

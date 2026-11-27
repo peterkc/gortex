@@ -1,6 +1,7 @@
 package store_pebble
 
 import (
+	"bytes"
 	"slices"
 	"strings"
 	"testing"
@@ -114,6 +115,52 @@ func TestRebuildReactSetStateProvesOnlyGatedMemberships(t *testing.T) {
 			require.NoError(t, err)
 			require.EqualValues(t, 1, stats.Edges)
 			checkSetStateProofOutput(t, b, setStateProofOutput(caller, render, chosen), rebuildProofReactSetState)
+		})
+	}
+}
+
+func TestRebuildSetStateCountsMissingMembershipsByLiveKey(t *testing.T) {
+	for _, tc := range []struct {
+		name, lifecycle string
+		stage           error
+	}{
+		{"React", "render", ErrRebuildReactSetState},
+		{"Flutter", "build", ErrRebuildFlutterSetState},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			caller := setStateProofMethod("refresh", "refresh", 5)
+			target := setStateProofMethod(tc.lifecycle, tc.lifecycle, 10)
+			facts := setStateProofFacts([]*graph.Node{caller, target},
+				setStateProofMember(caller, "Widget"), setStateProofMember(target, "Widget"),
+				setStateProofCall(caller, "unresolved::setState"))
+			rawFirst := setStateProofMember(caller, "unresolved::AOldOwner")
+			rawSecond := setStateProofMember(caller, "unresolved::ZOldOwner")
+			assembled := facts
+			assembled.Edges = append(slices.Clone(facts.Edges), rawFirst, rawSecond)
+			b, _ := seedSyntheticCustody(t, assembled)
+
+			liveHigher := setStateProofMember(caller, "ZNewOwner")
+			liveLower := setStateProofMember(caller, "ANewOwner")
+			require.Less(t, bytes.Compare(pendingEdgeKey(rawFirst), pendingEdgeKey(rawSecond)), 0)
+			require.Less(t, bytes.Compare(pendingEdgeKey(liveLower), pendingEdgeKey(liveHigher)), 0)
+			require.NoError(t, b.ApplyLinkReindexes(ctx, []graph.EdgeReindex{
+				{Edge: liveHigher, OldTo: rawFirst.To},
+				{Edge: liveLower, OldTo: rawSecond.To},
+			}))
+			before := rebuildFrameworkCustodyRows(t, b)
+			receipts := func(yield func(ParseFacts, error) bool) { yield(facts, nil) }
+			run := b.RebuildReactSetState
+			if tc.stage == ErrRebuildFlutterSetState {
+				run = b.RebuildFlutterSetState
+			}
+			stats, err := run(ctx, receipts, 1, setStateProofTarget, setStateProofOutput)
+			require.ErrorIs(t, err, tc.stage)
+			var refusal *RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refusal)
+			require.Equal(t, &RebuildUnknownProvenanceError{Count: 2, First: graph.EdgeIdentityFor(liveLower)}, refusal)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 		})
 	}
 }

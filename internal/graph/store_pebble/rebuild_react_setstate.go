@@ -75,6 +75,8 @@ func (b *BuildStore) rebuildSetState(ctx context.Context, receipts iter.Seq2[Par
 		err = errors.Join(err, b.pending.DeleteRange(rebuildSetStatePrefix, prefixEnd(rebuildSetStatePrefix), pebble.NoSync))
 	}()
 	p := rebuildSetStatePass{b: b, proof: proof}
+	// Capture stops at the first custody conflict, before replaying receipts.
+	// Only the completed membership proof scan counts all unproved inputs.
 	active, err := p.capture(ctx, lifecycle, isSetState)
 	if err != nil || !active {
 		return p.stats, err
@@ -374,19 +376,27 @@ func (p *rebuildSetStatePass) record(ctx context.Context, receipts iter.Seq2[Par
 			}
 		}
 	}
-	return pendingVisit(ctx, p.b.pending, setStateScratch('r'), func(r row) error {
+	// Capture rejects receipt-key collisions, so each row represents one
+	// distinct live membership. Receipt-key order can differ from live order.
+	var refused rebuildScratchRefusals
+	if err := pendingVisit(ctx, p.b.pending, setStateScratch('r'), func(r row) error {
 		if len(r.value) < 2 {
 			return invalid("setState membership proof state")
 		}
 		if r.value[0] == rebuildScratchExact {
 			return nil
 		}
-		id, err := decodeLinkRecorder(r.value[1:])
+		live := r.value[1:]
+		id, err := decodeLinkRecorder(live)
 		if err != nil {
 			return err
 		}
-		return &RebuildUnknownProvenanceError{Count: 1, First: id}
-	})
+		refused.add(id, bytes.Clone(live))
+		return nil
+	}); err != nil {
+		return err
+	}
+	return refused.err()
 }
 
 func (p *rebuildSetStatePass) noteMembership(raw []byte, admitted bool) error {

@@ -287,12 +287,9 @@ func TestRebuildObserverCapBeforeWorkspaceAndLanguage(t *testing.T) {
 			require.Len(t, rebuildObserverNativeDispatchCalls(native, channel.dispatch.ID), tc.want)
 
 			if tc.want == 0 {
-				// The dispatcher access is still live. The cap makes its
-				// proof irrelevant, even before self and workspace filters.
-				receipts[0].Edges = slices.DeleteFunc(receipts[0].Edges, func(e *graph.Edge) bool {
-					return e.Kind == graph.EdgeAccessesField && e.From == channel.dispatch.ID
-				})
-				require.Len(t, receipts[0].Edges, len(inputs[0].Edges)-1)
+				// Keep all live rows. An over-cap channel cannot emit,
+				// so none of its access, inbound or callback proof is needed.
+				receipts[0].Edges = nil
 			}
 			stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(receipts...), selection, 1<<20)
 			require.NoError(t, err)
