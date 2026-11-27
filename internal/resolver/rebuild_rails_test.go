@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -183,6 +184,64 @@ func TestRebuildRailsConflictingEFCoreReceipt(t *testing.T) {
 			} else {
 				require.Equal(t, want.nodes, got.nodes)
 			}
+		})
+	}
+}
+
+func TestRebuildRailsCallerNodeCap(t *testing.T) {
+	const callerPath = "shop/app/controllers/users_controller.rb"
+	const missPath = "shop/app/controllers/admin_controller.rb"
+	const servicePath = "shop/app/services/user_service.rb"
+	caller := &graph.Node{ID: callerPath + "::index", Name: "index", Kind: graph.KindMethod, Language: "ruby", FilePath: callerPath}
+	miss := &graph.Node{ID: missPath + "::index", Name: "index", Kind: graph.KindMethod, Language: "ruby", FilePath: missPath}
+	service := &graph.Node{ID: servicePath + "::UserService", Name: "UserService", Kind: graph.KindType, Language: "ruby", FilePath: servicePath}
+	call := &graph.Edge{From: caller.ID, To: "unresolved::*.perform", Kind: graph.EdgeCalls, FilePath: callerPath, Line: 3,
+		Meta: map[string]any{"recv_const": service.Name}}
+	noMatch := &graph.Edge{From: miss.ID, To: call.To, Kind: graph.EdgeCalls, FilePath: missPath, Line: 3,
+		Meta: map[string]any{"recv_const": "MissingService"}}
+	facts := []store_pebble.ParseFacts{
+		rebuildEventFacts(callerPath, "ruby", []*graph.Node{caller}, call),
+		rebuildEventFacts(missPath, "ruby", []*graph.Node{miss}, noMatch),
+		rebuildEventFacts(servicePath, "ruby", []*graph.Node{service}),
+	}
+	selected, err := NewFrameworkSynthesizerSelection([]string{SynthRailsResolve})
+	require.NoError(t, err)
+	padding := strings.Repeat("x", 16<<20)
+	for _, tc := range []struct {
+		name   string
+		large  *graph.Node
+		refuse bool
+	}{
+		{"matching Call", caller, true},
+		{"unmatched Call", miss, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			build := openRebuildGRPCBuild(t, facts...)
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), build.RebuildView(), selected)
+			require.NoError(t, err)
+			require.True(t, frozen.allows(SynthRailsResolve))
+			require.NoError(t, FreezeRebuildRailsInputs(t.Context(), build, frozen))
+			large := *tc.large
+			large.Meta = map[string]any{"padding": padding}
+			build.AddNode(&large)
+			before := rebuildEventSavedRows(t, build).edges
+			stats, err := RunRebuildRails(t.Context(), build, rebuildGRPCReceipts(facts...), frozen)
+			after := rebuildEventSavedRows(t, build).edges
+			if tc.refuse {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildRails)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "rails caller node")
+				require.Zero(t, stats)
+				require.Equal(t, before, after)
+				return
+			}
+			require.NoError(t, err)
+			require.EqualValues(t, 1, stats.Moves)
+			want := *call
+			want.To, want.Origin, want.Confidence = service.ID, graph.OriginASTInferred, 0.8
+			want.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, 0.8)
+			want.Meta = map[string]any{"recv_const": service.Name, MetaSynthesizedBy: SynthRailsResolve}
+			require.ElementsMatch(t, []*graph.Edge{&want, noMatch}, after)
 		})
 	}
 }

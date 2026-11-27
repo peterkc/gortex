@@ -394,6 +394,18 @@ func (p *rebuildRails) plan(ctx context.Context) error {
 		}); err != nil {
 			return err
 		}
+		// A source that leaves both elections empty cannot affect a move.
+		if caller != nil && (changed || uncertain || live.target != "") {
+			key := pendingNodeKey(caller.ID)
+			if _, err := pendingGet(p.b.pending, key, func(val []byte) (bool, error) {
+				if len(key)+len(val) > p.rowBytes {
+					return false, fmt.Errorf("%w: rails caller node", ErrRebuildLinkInputSize)
+				}
+				return true, nil
+			}); err != nil {
+				return err
+			}
+		}
 		if changed || uncertain {
 			refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
 			return nil
