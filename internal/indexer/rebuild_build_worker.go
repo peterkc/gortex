@@ -579,6 +579,15 @@ func buildRebuildStages(
 				zap.Uint64("stubs", reduxThunk.Stubs), zap.Uint64("resolved", reduxThunk.Resolved),
 				zap.Uint64("moves", reduxThunk.Moves))
 		}
+		objectRegistry, err := resolver.RunRebuildObjectRegistry(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if objectRegistry.Stubs != 0 {
+			logger.Info("rebuild Object Registry applied to private build",
+				zap.Uint64("stubs", objectRegistry.Stubs), zap.Uint64("resolved", objectRegistry.Resolved),
+				zap.Uint64("moves", objectRegistry.Moves))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.
