@@ -91,7 +91,9 @@ func TestRebuildReactNativeBridgeGuardLineage(t *testing.T) {
 			offers := 0
 			stats, err := b.RebuildReactNativeBridge(ctx, receipts, 1<<20,
 				func(language string) bool { return language == "typescript" || language == "java" },
-				func(e *graph.Edge) bool { return e.Kind == graph.EdgeCalls && e.From != "" && e.Meta["via"] == "rn.native" },
+				func(e *graph.Edge) bool {
+					return e.Kind == graph.EdgeCalls && e.From != "" && e.Meta["via"] == "rn.native"
+				},
 				func(e *graph.Edge, n *graph.Node) *graph.Edge {
 					offers++
 					return &graph.Edge{From: e.From, To: n.ID, Kind: graph.EdgeCalls, FilePath: e.FilePath, Line: e.Line}
