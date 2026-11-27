@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"regexp"
+	"slices"
 	"sort"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -62,7 +63,7 @@ func ResolveObserverChannelCalls(g graph.Store) int {
 			continue
 		}
 		m := g.GetNode(e.From)
-		if m == nil || (m.Kind != graph.KindMethod && m.Kind != graph.KindFunction) {
+		if !graph.ObserverCallable(m) {
 			continue
 		}
 		isReg := observerRegistrarRe.MatchString(m.Name)
@@ -101,12 +102,12 @@ func ResolveObserverChannelCalls(g graph.Store) int {
 			continue
 		}
 		callbacks := observerCallbacks(g, c.registrars)
-		if len(callbacks) == 0 || len(callbacks) > maxObserverCallbacksPerChannel {
+		if !graph.ObserverCallbackCountAllowed(len(callbacks), maxObserverCallbacksPerChannel) {
 			continue
 		}
 		for _, disp := range c.dispatchers {
 			for _, cb := range callbacks {
-				if cb == disp.ID {
+				if !graph.ObserverCallbackIsDistinct(disp.ID, cb) {
 					continue
 				}
 				if !sameDispatchBoundary(disp, g.GetNode(cb)) {
@@ -130,23 +131,17 @@ func ResolveObserverChannelCalls(g graph.Store) int {
 // list for deterministic edge synthesis.
 func observerCallbacks(g graph.Store, registrars []*graph.Node) []string {
 	seen := map[string]bool{}
+	kinds := graph.ObserverCallbackKinds()
 	for _, reg := range registrars {
 		for _, in := range g.GetInEdges(reg.ID) {
 			if in == nil || in.Kind != graph.EdgeCalls || in.From == "" {
 				continue
 			}
 			for _, ref := range g.GetOutEdges(in.From) {
-				if ref == nil || ref.To == "" {
+				if !graph.ObserverCallbackAtSite(in, ref) || !slices.Contains(kinds, ref.Kind) {
 					continue
 				}
-				if ref.Line != in.Line || ref.FilePath != in.FilePath {
-					continue
-				}
-				if ref.Kind != graph.EdgeReads && ref.Kind != graph.EdgeReferences {
-					continue
-				}
-				t := g.GetNode(ref.To)
-				if t == nil || (t.Kind != graph.KindFunction && t.Kind != graph.KindMethod) {
+				if !graph.ObserverCallable(g.GetNode(ref.To)) {
 					continue
 				}
 				seen[ref.To] = true
