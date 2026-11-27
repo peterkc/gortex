@@ -3,6 +3,7 @@ package store_pebble
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"iter"
@@ -18,6 +19,8 @@ import (
 var ErrRebuildEventChannel = errors.New("pebble rebuild event channel stage failed")
 
 var rebuildEventPrefix = []byte{'g', 'X'}
+
+const eventUnorderedSite = ^uint64(0)
 
 // RebuildEventChannelStats reports actual added pairs.
 type RebuildEventChannelStats struct {
@@ -56,6 +59,15 @@ func (b *BuildStore) RebuildEventChannel(ctx context.Context, receipts iter.Seq2
 	}()
 	p := rebuildEventChannel{b: b}
 	if err := p.capture(ctx, topicPrefixes); err != nil {
+		return stats, err
+	}
+	for _, col := range [...]byte{'t', 'l'} {
+		found, err := rebuildGuardHasPrefix(ctx, b.pending, eventScratch(col))
+		if err != nil || !found {
+			return stats, err
+		}
+	}
+	if err := p.order(ctx, receipts); err != nil {
 		return stats, err
 	}
 	if err := p.elect(ctx, channelPolicy, makeCall); err != nil {
@@ -151,14 +163,71 @@ func (p *rebuildEventChannel) capture(ctx context.Context, topicPrefixes []strin
 				return err
 			}
 		}
-		return p.put(append(eventScratch(col, e.To), r.key...), nil)
+		return p.put(eventSiteKey(col, e, eventUnorderedSite), nil)
 	})
+}
+
+func eventSiteKey(col byte, e *graph.Edge, ordinal uint64) []byte {
+	key := binary.BigEndian.AppendUint64(eventScratch(col, e.To), ordinal)
+	return append(key, pendingEdgeKey(e)...)
+}
+
+// order gives live sites their first frozen receipt position. Like the gRPC
+// tail, an unmatched site still enters election, but cannot pass receipt
+// proof if it supplies a winning row. Native direct SQLite uses rowid order.
+func (p *rebuildEventChannel) order(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
+	var ordinal uint64
+	for facts, err := range receipts {
+		if err != nil {
+			return err
+		}
+		if facts.EffectiveLanguage == "" {
+			continue
+		}
+		file := pathkey.Normalize(facts.File.FilePath)
+		for _, e := range facts.Edges {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if e.FilePath != file {
+				continue
+			}
+			var col byte
+			switch e.Kind {
+			case graph.EdgeEmits:
+				col = 'e'
+			case graph.EdgeListensOn:
+				col = 'l'
+			default:
+				continue
+			}
+			unordered := eventSiteKey(col, e, eventUnorderedSite)
+			present, err := pendingGet(p.b.pending, unordered, func([]byte) (bool, error) { return true, nil })
+			if err != nil {
+				return err
+			}
+			if !present {
+				continue
+			}
+			if err := p.put(eventSiteKey(col, e, ordinal), nil); err != nil {
+				return err
+			}
+			ordinal++
+			if err := p.b.pending.Delete(unordered, pebble.NoSync); err != nil {
+				return err
+			}
+		}
+	}
+	return ctx.Err()
 }
 
 func (p *rebuildEventChannel) sites(ctx context.Context, col byte, event string, visit func(*graph.Edge) error) error {
 	prefix := eventScratch(col, event)
 	return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
-		e, err := p.b.pendingEdge(r.key[len(prefix):])
+		if len(r.key) <= len(prefix)+8 {
+			return invalid("event channel site key")
+		}
+		e, err := p.b.pendingEdge(r.key[len(prefix)+8:])
 		if err != nil {
 			return err
 		}

@@ -124,8 +124,9 @@ func TestRebuildEventChannelFirstNonemptyTransport(t *testing.T) {
 	facts := rebuildEventFacts(file, language, []*graph.Node{
 		emitter, listener, rebuildEventTopic(file, language, topic, "tick", "kafka"),
 	}, rebuildEventSite(emitter, topic, graph.EdgeEmits, 2, ""),
-		rebuildEventSite(emitter, topic, graph.EdgeEmits, 4, "socketio"),
-		rebuildEventSite(emitter, topic, graph.EdgeEmits, 6, "kafka"),
+		// SQLite sees the socketio row first; Pebble key order sees kafka first.
+		rebuildEventSite(emitter, topic, graph.EdgeEmits, 6, "socketio"),
+		rebuildEventSite(emitter, topic, graph.EdgeEmits, 4, "kafka"),
 		rebuildEventSite(listener, topic, graph.EdgeListensOn, 8, "kafka"))
 	b, native := openRebuildEventStores(t, facts)
 	require.Equal(t, 1, ResolveEventChannelCalls(native))
@@ -297,6 +298,35 @@ func TestRebuildEventChannelLowerLineInLaterPath(t *testing.T) {
 	stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(early, later), AllFrameworkSynthesizers())
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), stats.Pairs)
+	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+}
+
+func TestRebuildEventChannelTiedLineUsesReceiptOrder(t *testing.T) {
+	const file, firstSite, language = "a.ts", "z.ts", "typescript"
+	const topic, transport = "event::pubsub::eventemitter::tick", "eventemitter"
+	emitter := rebuildEventNode(file, "emit", language, "")
+	listener := rebuildEventNode(file, "listen", language, "")
+	first := rebuildEventSite(emitter, topic, graph.EdgeEmits, 4, transport)
+	first.FilePath = firstSite
+	// Offer the same-line emit from z.ts first, even though its old key
+	// sorts after the a.ts emit. Only its receipt position breaks the tie.
+	facts := []store_pebble.ParseFacts{
+		rebuildEventFacts(firstSite, language, nil, first),
+		rebuildEventFacts(file, language, []*graph.Node{
+			emitter, listener, rebuildEventTopic(file, language, topic, "tick", transport),
+		}, rebuildEventSite(emitter, topic, graph.EdgeEmits, 4, transport),
+			rebuildEventSite(listener, topic, graph.EdgeListensOn, 8, transport)),
+	}
+	b, native := openRebuildEventStores(t, facts...)
+	require.Equal(t, 1, ResolveEventChannelCalls(native))
+	call := synthEventEdge(native, emitter.ID, listener.ID)
+	require.NotNil(t, call)
+	require.Equal(t, firstSite, call.FilePath)
+	require.Equal(t, 4, call.Line)
+
+	stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(facts...), AllFrameworkSynthesizers())
+	require.NoError(t, err)
+	require.EqualValues(t, 1, stats.Pairs)
 	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
 }
 
