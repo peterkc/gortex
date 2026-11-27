@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -41,15 +42,19 @@ func TestRebuildMacroExpansionReceiptCallerRepository(t *testing.T) {
 	owned := call(live.ID, handler.ID, callerFile, use)
 	owned.Origin = graph.OriginASTInferred
 	owned.Meta = map[string]any{"via": "macro_expansion", "witness": "saved macro call"}
+	padding := strings.Repeat("x", 16<<20)
 	for _, fixture := range []struct {
 		name      string
 		incumbent *graph.Edge
 		control   bool
+		oversized bool
 	}{
-		{"missing add", nil, true},
-		{"no live site", nil, false},
-		{"real incumbent", lsp, true},
-		{"macro incumbent", owned, true},
+		{"missing add", nil, true, false},
+		{"no live site", nil, false, false},
+		{"real incumbent", lsp, true, false},
+		{"macro incumbent", owned, true, false},
+		{"large caller, missing add", nil, true, true},
+		{"large caller, real incumbent", lsp, true, true},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			ctx := t.Context()
@@ -83,7 +88,21 @@ func TestRebuildMacroExpansionReceiptCallerRepository(t *testing.T) {
 			require.NoError(t, err)
 			require.True(t, frozen.allows(SynthMacroExpansion))
 			require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, frozen))
+			if fixture.oversized {
+				large := *live
+				large.Meta = map[string]any{"padding": padding}
+				b.AddNode(&large)
+				before = rebuildEventSavedRows(t, b)
+			}
 			stats, err := RunRebuildMacroExpansion(ctx, b, rebuildGRPCReceipts(rawFacts...), frozen)
+			if fixture.oversized && fixture.incumbent == nil {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildMacroExpansion)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "caller node")
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
 			if fixture.incumbent == nil {
 				var refused *store_pebble.RebuildUnknownProvenanceError
 				require.ErrorAs(t, err, &refused)

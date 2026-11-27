@@ -493,14 +493,14 @@ func (p *rebuildMacroExpansion) recordNode(ctx context.Context, n *graph.Node, f
 		return err
 	}
 	if caller != 0 {
-		live, err := p.storeReceiptNode(n.ID)
+		live, oversized, err := p.readCaller(n.ID)
 		if err != nil {
 			return err
 		}
 		admitted := language != "" && n.FilePath == file
 		exact := admitted && live != nil && live.FilePath == file && n.RepoPrefix == live.RepoPrefix
 		if admitted && (live == nil || n.RepoPrefix != live.RepoPrefix) {
-			if err := p.noteRawCallerOutputs(ctx, n); err != nil {
+			if err := p.noteRawCallerOutputs(ctx, n, oversized); err != nil {
 				return err
 			}
 		}
@@ -544,7 +544,7 @@ func (p *rebuildMacroExpansion) recordNode(ctx context.Context, n *graph.Node, f
 
 // A caller receipt in another repo can select a macro the live use missed.
 // Check only its missing outputs; existing rows suppress native writes.
-func (p *rebuildMacroExpansion) noteRawCallerOutputs(ctx context.Context, n *graph.Node) error {
+func (p *rebuildMacroExpansion) noteRawCallerOutputs(ctx context.Context, n *graph.Node, oversizedCaller bool) error {
 	uses := p.key('j', n.ID)
 	return p.visit(ctx, uses, func(r row) error {
 		e, err := p.edge(r.key[len(uses):])
@@ -570,6 +570,9 @@ func (p *rebuildMacroExpansion) noteRawCallerOutputs(ctx context.Context, n *gra
 			exists, err := p.present(key)
 			if err != nil || exists {
 				return err
+			}
+			if oversizedCaller {
+				return fmt.Errorf("%w: %s caller node", ErrRebuildLinkInputSize, p.label)
 			}
 			return p.put(append(p.column('y'), key...), nil)
 		})
