@@ -543,11 +543,15 @@ func parseExternalCallTarget(target string) (ecosystem, importPath string, ok bo
 // pathological case of a path that itself contains `::`. Returns "" when
 // the string carries no `::` separator at all.
 func importPathOfExtern(s string) string {
-	i := strings.LastIndex(s, "::")
-	if i < 0 {
-		return ""
+	path, _, _ := splitExternSpec(s)
+	return path
+}
+
+func splitExternSpec(spec string) (path, symbol string, ok bool) {
+	if i := strings.LastIndex(spec, "::"); i >= 0 {
+		return spec[:i], spec[i+2:], true
 	}
-	return s[:i]
+	return "", "", false
 }
 
 // externalCallNodeID is the deterministic ID of the synthetic node for

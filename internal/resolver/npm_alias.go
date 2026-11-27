@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"path"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -200,4 +201,14 @@ func (r *Resolver) resolveImportedComponent(filePath, importPath, name string) s
 		}
 	}
 	return ""
+}
+
+// IsNpmAliasImporter reports whether the path has an extension accepted by
+// the native npm alias resolver.
+func IsNpmAliasImporter(filePath string) bool {
+	switch path.Ext(filePath) {
+	case ".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs":
+		return true
+	}
+	return false
 }

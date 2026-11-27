@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/zzet/gortex/internal/modules"
+	"github.com/zzet/gortex/internal/resolver"
 )
 
 // npmAliasIndex implements resolver.NpmAliasResolver: it rewrites a
@@ -135,7 +136,7 @@ func (x *npmAliasIndex) Resolve(callerFile, specifier string) string {
 	}
 	// Only JS/TS imports go through npm aliases. A relative or
 	// absolute specifier is a path import, never a package name.
-	if !isJSTSFile(callerFile) {
+	if !resolver.IsNpmAliasImporter(callerFile) {
 		return ""
 	}
 	if strings.HasPrefix(specifier, ".") || strings.HasPrefix(specifier, "/") {
@@ -287,7 +288,7 @@ func (x *npmAliasIndex) DeclaresExternalDependency(callerFile, specifier string)
 	if x == nil || callerFile == "" || specifier == "" {
 		return false
 	}
-	if !isJSTSFile(callerFile) {
+	if !resolver.IsNpmAliasImporter(callerFile) {
 		return false
 	}
 	if strings.HasPrefix(specifier, ".") || strings.HasPrefix(specifier, "/") {
@@ -591,16 +592,6 @@ func joinRel(dir, name string) string {
 		return name
 	}
 	return dir + "/" + name
-}
-
-// isJSTSFile reports whether filePath has a JavaScript/TypeScript
-// extension — the only files whose imports resolve through npm.
-func isJSTSFile(filePath string) bool {
-	switch path.Ext(filePath) {
-	case ".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs":
-		return true
-	}
-	return false
 }
 
 // workspaceRewrite resolves a specifier whose leading segments name a monorepo

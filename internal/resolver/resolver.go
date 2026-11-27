@@ -4147,16 +4147,14 @@ func (r *Resolver) resolveEdge(e *graph.Edge, stats *ResolveStats) (oldTo string
 // Nothing is created as a graph node — these are bookkeeping strings,
 // same as the existing "external::<path>" stubs for unresolved imports.
 func (r *Resolver) resolveExtern(e *graph.Edge, spec string, stats *ResolveStats) {
-	sep := strings.LastIndex(spec, "::")
-	if sep < 0 {
+	importPath, symbol, ok := splitExternSpec(spec)
+	if !ok {
 		// Malformed — treat as unresolved so we don't leak the
 		// "unresolved::extern::" prefix into the graph.
 		e.To = "external::" + spec
 		stats.External++
 		return
 	}
-	importPath := spec[:sep]
-	symbol := spec[sep+2:]
 	caller := r.cachedGetNode(e.From)
 	callerRepo := ""
 	if caller != nil {
@@ -6658,13 +6656,14 @@ func detachedSource(from string) bool {
 // depended on the order the whole index and the per-save path resolved the
 // site's edges in.
 func (r *Resolver) stubRepoPrefix(e *graph.Edge) string {
-	if repo := r.callerRepoPrefix(e); repo != "" {
-		return repo
+	return stubRepoPrefixForCaller(e.From, r.cachedGetNode(e.From))
+}
+
+func stubRepoPrefixForCaller(from string, caller *graph.Node) string {
+	if caller != nil {
+		return caller.RepoPrefix
 	}
-	if e == nil || r.cachedGetNode(e.From) != nil {
-		return ""
-	}
-	return sourceSpellingRepoPrefix(e.From)
+	return sourceSpellingRepoPrefix(from)
 }
 
 // sourceSpellingRepoPrefix is the repository prefix a non-node source id
