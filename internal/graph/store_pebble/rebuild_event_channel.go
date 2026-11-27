@@ -132,6 +132,16 @@ func (p *rebuildEventChannel) put(key, value []byte) error {
 	return p.b.putRebuildScratch(key, value, 16<<20, "event channel")
 }
 
+func (p *rebuildEventChannel) node(id string, reached bool) (*graph.Node, error) {
+	key := pendingNodeKey(id)
+	return pendingGet(p.b.pending, key, func(val []byte) (*graph.Node, error) {
+		if reached && len(key)+len(val) > 16<<20 {
+			return nil, fmt.Errorf("%w: event channel endpoint node", ErrRebuildLinkInputSize)
+		}
+		return checkedRebuildLightNode(row{key, val}, "event channel")
+	})
+}
+
 func (p *rebuildEventChannel) capture(ctx context.Context, topicPrefixes []string) error {
 	return p.b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(_ *pebble.Snapshot, r row) error {
 		kind, err := rebuildAttributionEdgeKind(r.key)
@@ -268,7 +278,7 @@ func (p *rebuildEventChannel) elect(ctx context.Context, channelPolicy func(even
 			return err
 		}
 		if err := p.sites(ctx, 'e', event, func(em *graph.Edge) error {
-			emitter, err := p.b.RebuildView().Node(ctx, em.From)
+			emitter, err := p.node(em.From, false)
 			if err != nil || emitter == nil {
 				return err
 			}
@@ -276,7 +286,7 @@ func (p *rebuildEventChannel) elect(ctx context.Context, channelPolicy func(even
 				if em.From == li.From {
 					return nil
 				}
-				listener, err := p.b.RebuildView().Node(ctx, li.From)
+				listener, err := p.node(li.From, false)
 				if err != nil || listener == nil || emitter.WorkspaceID != listener.WorkspaceID {
 					return err
 				}
@@ -378,10 +388,23 @@ func (p *rebuildEventChannel) prove(ctx context.Context, receipts iter.Seq2[Pars
 				}
 			}
 		}
-		if err := p.put(eventScratch('n', e.From), []byte{rebuildCapabilityWanted}); err != nil {
-			return err
+		for _, id := range [...]string{e.From, e.To} {
+			key := eventScratch('n', id)
+			state, err := p.state(key)
+			if err != nil {
+				return err
+			}
+			if state != 0 {
+				continue
+			}
+			if _, err := p.node(id, true); err != nil {
+				return err
+			}
+			if err := p.put(key, []byte{rebuildCapabilityWanted}); err != nil {
+				return err
+			}
 		}
-		return p.put(eventScratch('n', e.To), []byte{rebuildCapabilityWanted})
+		return nil
 	}); err != nil || !wanted {
 		return err
 	}
@@ -402,7 +425,7 @@ func (p *rebuildEventChannel) prove(ctx context.Context, receipts iter.Seq2[Pars
 			if state == 0 {
 				continue
 			}
-			live, err := p.b.RebuildView().Node(ctx, n.ID)
+			live, err := p.node(n.ID, true)
 			if err != nil {
 				return err
 			}

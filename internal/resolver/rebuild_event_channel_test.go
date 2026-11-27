@@ -552,3 +552,53 @@ func (rows rebuildEventRows) sort() {
 			cmp.Compare(a.FilePath, b.FilePath), cmp.Compare(a.Line, b.Line))
 	})
 }
+
+func TestRebuildEventChannelEndpointNodeCaps(t *testing.T) {
+	const file, lang = "bus.ts", "typescript"
+	const topic, transport = "event::pubsub::eventemitter::tick", "eventemitter"
+	emitter := rebuildEventNode(file, "emit", lang, "local")
+	listener := rebuildEventNode(file, "listen", lang, "local")
+	foreign := rebuildEventNode(file, "remote", lang, "foreign")
+	facts := rebuildEventFacts(file, lang, []*graph.Node{emitter, listener, foreign, rebuildEventTopic(file, lang, topic, "tick", transport)},
+		rebuildEventSite(emitter, topic, graph.EdgeEmits, 4, transport),
+		rebuildEventSite(listener, topic, graph.EdgeListensOn, 8, transport),
+		rebuildEventSite(foreign, topic, graph.EdgeListensOn, 9, transport),
+	)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthEventChannel})
+	require.NoError(t, err)
+	padding := strings.Repeat("x", 16<<20)
+	for _, tc := range []struct {
+		name   string
+		large  *graph.Node
+		refuse bool
+	}{
+		{"emitter", emitter, true},
+		{"listener", listener, true},
+		{"foreign listener", foreign, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, native := openRebuildEventStores(t, facts)
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+			require.NoError(t, err)
+			require.True(t, frozen.allows(SynthEventChannel))
+			large := *tc.large
+			large.Meta = map[string]any{"padding": padding}
+			b.AddNode(&large)
+			before := rebuildEventSavedRows(t, b).edges
+			stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(facts), frozen)
+			after := rebuildEventSavedRows(t, b).edges
+			if tc.refuse {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildEventChannel)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "event channel endpoint node")
+				require.Zero(t, stats)
+				require.Equal(t, before, after)
+				return
+			}
+			require.NoError(t, err)
+			require.EqualValues(t, 1, stats.Pairs)
+			require.Equal(t, 1, ResolveEventChannelCalls(native))
+			require.Equal(t, rebuildEventSQLiteRows(native).edges, after)
+		})
+	}
+}
