@@ -25,9 +25,16 @@ type RebuildGodotAutoloadRules struct {
 }
 
 type rebuildGodotAutoload struct {
-	rebuildCallMoves
+	rebuildGodotScripts
 	rules RebuildGodotAutoloadRules
 	moves uint64
+}
+
+// The two Godot Call turns use the same script, member and Call proofs.
+type rebuildGodotScripts struct {
+	rebuildCallMoves
+	memberFileRule func(*graph.Node) (string, bool)
+	callKey        func(*graph.Edge) (receiver, member string)
 }
 
 // RebuildGodotAutoload binds the live residual Calls. It compares the exact
@@ -54,8 +61,12 @@ func (b *BuildStore) RebuildGodotAutoload(ctx context.Context, receipts iter.Seq
 		err = errors.Join(err, b.pending.DeleteRange(prefix, prefixEnd(prefix), pebble.NoSync))
 	}()
 	p := rebuildGodotAutoload{
-		rebuildCallMoves: rebuildCallMoves{b: b, prefix: prefix, rowBytes: 16 << 20, label: "godot autoload", inputRow: "edge row"},
-		rules:            rules,
+		rebuildGodotScripts: rebuildGodotScripts{
+			rebuildCallMoves: rebuildCallMoves{b: b, prefix: prefix, rowBytes: 16 << 20, label: "godot autoload", inputRow: "edge row"},
+			memberFileRule:   rules.MemberFile,
+			callKey:          rules.Call,
+		},
+		rules: rules,
 	}
 	active, err := p.captureDecls(ctx)
 	if err != nil || !active {
@@ -81,7 +92,7 @@ func (b *BuildStore) RebuildGodotAutoload(ctx context.Context, receipts iter.Seq
 	})
 }
 
-func (p *rebuildGodotAutoload) visitNodes(ctx context.Context, visit func(*graph.Node, row) error) error {
+func (p *rebuildGodotScripts) visitNodes(ctx context.Context, visit func(*graph.Node, row) error) error {
 	return p.b.RebuildView().visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
 		n, err := checkedRebuildLightNode(r, p.label)
 		if err != nil {
@@ -118,7 +129,7 @@ func (p *rebuildGodotAutoload) captureDecls(ctx context.Context) (bool, error) {
 
 // f/F elect the unique indexed file ID for one manifest path. Enumerating a
 // file's slash-boundary suffixes is the inverse of native gdPathMatches.
-func (p *rebuildGodotAutoload) noteScript(n *graph.Node, col byte) error {
+func (p *rebuildGodotScripts) noteScript(n *graph.Node, col byte) error {
 	for tail := strings.ReplaceAll(n.FilePath, "\\", "/"); tail != ""; {
 		wanted, err := p.present(p.key('s', tail))
 		if err != nil {
@@ -139,7 +150,7 @@ func (p *rebuildGodotAutoload) noteScript(n *graph.Node, col byte) error {
 	return nil
 }
 
-func (p *rebuildGodotAutoload) captureScripts(ctx context.Context) error {
+func (p *rebuildGodotScripts) captureScripts(ctx context.Context) error {
 	return p.visitNodes(ctx, func(n *graph.Node, _ row) error {
 		if n.Kind == graph.KindFile && n.Language == "gdscript" {
 			return p.noteScript(n, 'f')
@@ -148,11 +159,11 @@ func (p *rebuildGodotAutoload) captureScripts(ctx context.Context) error {
 	})
 }
 
-func (p *rebuildGodotAutoload) memberFile(n *graph.Node) (string, bool, error) {
+func (p *rebuildGodotScripts) memberFile(n *graph.Node) (string, bool, error) {
 	if n.Kind != graph.KindMethod && n.Kind != graph.KindFunction {
 		return "", false, nil
 	}
-	file, ok := p.rules.MemberFile(n)
+	file, ok := p.memberFileRule(n)
 	if !ok {
 		return "", false, nil
 	}
@@ -195,6 +206,10 @@ func (p *rebuildGodotAutoload) recordNode(raw *graph.Node, file string) error {
 			return p.addUnique(p.key('A', name), script)
 		}
 	}
+	return p.recordScriptNode(raw, live)
+}
+
+func (p *rebuildGodotScripts) recordScriptNode(raw, live *graph.Node) error {
 	if raw.Kind == graph.KindFile && raw.Language == "gdscript" {
 		return p.noteScript(live, 'F')
 	}
@@ -216,16 +231,20 @@ func (p *rebuildGodotAutoload) recordNode(raw *graph.Node, file string) error {
 
 func (p *rebuildGodotAutoload) markUnproved(ctx context.Context) error {
 	return p.visitNodes(ctx, func(n *graph.Node, _ row) error {
-		file, wanted, err := p.memberFile(n)
-		if err != nil || !wanted {
-			return err
-		}
-		proved, err := p.present(p.key('p', n.ID))
-		if err != nil || proved {
-			return err
-		}
-		return p.put(p.key('u', file, n.Name, string(n.Kind)), nil)
+		return p.markUnprovedMember(n)
 	})
+}
+
+func (p *rebuildGodotScripts) markUnprovedMember(n *graph.Node) error {
+	file, wanted, err := p.memberFile(n)
+	if err != nil || !wanted {
+		return err
+	}
+	proved, err := p.present(p.key('p', n.ID))
+	if err != nil || proved {
+		return err
+	}
+	return p.put(p.key('u', file, n.Name, string(n.Kind)), nil)
 }
 
 func (p *rebuildGodotAutoload) target(recv, member string, proved bool) (id string, unproved bool, err error) {
@@ -241,6 +260,10 @@ func (p *rebuildGodotAutoload) target(recv, member string, proved bool) (id stri
 	if err != nil || fileID == "" {
 		return "", false, err
 	}
+	return p.targetMember(fileID, member, proved)
+}
+
+func (p *rebuildGodotScripts) targetMember(fileID, member string, proved bool) (string, bool, error) {
 	// Method priority is native. An unproved member can matter only at the
 	// first nonempty kind, before or instead of that kind's proved winner.
 	for _, kind := range [...]graph.NodeKind{graph.KindMethod, graph.KindFunction} {
@@ -314,7 +337,7 @@ func (p *rebuildGodotAutoload) plan(ctx context.Context) error {
 	return refused.err()
 }
 
-func (p *rebuildGodotAutoload) recordCalls(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
+func (p *rebuildGodotScripts) recordCalls(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
 	for facts, err := range receipts {
 		if err != nil {
 			return err
@@ -351,7 +374,7 @@ func (p *rebuildGodotAutoload) recordCalls(ctx context.Context, receipts iter.Se
 	return refused.err()
 }
 
-func (p *rebuildGodotAutoload) recordCall(raw *graph.Edge) error {
+func (p *rebuildGodotScripts) recordCall(raw *graph.Edge) error {
 	key := append(p.column('r'), pendingEdgeKey(raw)...)
 	claim, err := p.marked(key)
 	if err != nil || len(claim) < 2 {
@@ -361,7 +384,7 @@ func (p *rebuildGodotAutoload) recordCall(raw *graph.Edge) error {
 	if err != nil || live == nil {
 		return errors.Join(err, invalid("godot autoload receipt has no call"))
 	}
-	recv, member := p.rules.Call(raw)
-	liveRecv, liveMember := p.rules.Call(live)
+	recv, member := p.callKey(raw)
+	liveRecv, liveMember := p.callKey(live)
 	return p.noteReceipt(key, claim, recv == liveRecv && member == liveMember)
 }
