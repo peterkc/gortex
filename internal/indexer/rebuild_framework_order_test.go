@@ -70,13 +70,16 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"Vapor", "moves", 1},
 	}
 	for _, tc := range []struct {
-		name              string
-		exact             bool
-		cancelBeforeRedux bool
+		name        string
+		exact       bool
+		cancelAfter string
+		noGin       bool
 	}{
 		{name: "exact_checkout", exact: true},
 		{name: "legacy_without_namespace"},
-		{name: "redux_thunk_refusal", exact: true, cancelBeforeRedux: true},
+		{name: "redux_thunk_refusal", exact: true, cancelAfter: "Store Factory"},
+		{name: "gin_refusal", exact: true, cancelAfter: "macro expansion"},
+		{name: "gin_no_offers", exact: true, noGin: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
@@ -109,6 +112,11 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 			// Feed the same checked parse receipts to both checkout modes.
 			// The files carry no framework facts if a cache lookup is missed.
 			for _, facts := range rebuildFrameworkOrderReceipts() {
+				if tc.noGin {
+					for _, n := range facts.Nodes {
+						delete(n.Meta, "gin_handlers")
+					}
+				}
 				path, lang := facts.File.FilePath, facts.EffectiveLanguage
 				require.NoError(t, os.WriteFile(filepath.Join(root, path), []byte("// cached receipt fixture\n"), 0o600))
 				input, _, err := readRebuildInput(ctx, src, path, lang, 1024)
@@ -139,8 +147,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 			require.NoError(t, writeRebuildBuildRequest(ctx, lease, req, cfg, inputs))
 			core, logs := observer.New(zap.InfoLevel)
 			logger := zap.New(core, zap.Hooks(func(entry zapcore.Entry) error {
-				// Store Factory has returned; Redux Thunk is the next turn.
-				if tc.cancelBeforeRedux && entry.Message == "rebuild Store Factory applied to private build" {
+				if tc.cancelAfter != "" && entry.Message == "rebuild "+tc.cancelAfter+" applied to private build" {
 					cancel()
 				}
 				return nil
@@ -152,20 +159,24 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 					return nil
 				})
 			require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, sent)
-			if tc.cancelBeforeRedux {
-				require.ErrorIs(t, err, store_pebble.ErrRebuildReduxThunk)
+			if tc.cancelAfter != "" {
+				wantErr, wire := store_pebble.ErrRebuildReduxThunk, uint8(61)
+				if tc.cancelAfter == "macro expansion" {
+					wantErr, wire = store_pebble.ErrRebuildGinMiddleware, 77
+				}
+				require.ErrorIs(t, err, wantErr)
 				require.ErrorIs(t, err, context.Canceled)
 				refusal := buildRefusal(err)
-				require.Equal(t, uint8(61), refusal.Refusal)
+				require.Equal(t, wire, refusal.Refusal)
 				var reply, acks bytes.Buffer
 				require.NoError(t, writeRebuildBuildReply(&reply, refusal))
 				err = receiveRebuildStages(t.Context(), lease, req, &reply, &acks,
 					func(context.Context, store_pebble.StageTables) error {
-						t.Fatal("a Redux Thunk refusal must not publish")
+						t.Fatal("a framework refusal must not publish")
 						return nil
 					})
 				require.ErrorIs(t, err, ErrRebuildWorker)
-				require.ErrorIs(t, err, store_pebble.ErrRebuildReduxThunk)
+				require.ErrorIs(t, err, wantErr)
 				require.ErrorContains(t, err, context.Canceled.Error())
 				require.Empty(t, acks.Bytes())
 				return
@@ -184,6 +195,13 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 			expected := applied
 			if !tc.exact {
 				expected = applied[:1] // Legacy still runs capabilities, but no clone or framework turn.
+			} else if tc.noGin {
+				expected = expected[:0:0]
+				for _, step := range applied {
+					if step.pass != "Gin middleware" {
+						expected = append(expected, step)
+					}
+				}
 			}
 			for _, step := range expected {
 				want = append(want, prefix+step.pass+suffix)

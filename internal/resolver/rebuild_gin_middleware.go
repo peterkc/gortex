@@ -23,6 +23,10 @@ func RunRebuildGinMiddleware(ctx context.Context, build *store_pebble.BuildStore
 		Names:      names,
 		Target:     ginMiddlewareTarget,
 		Edge:       ginMiddlewareEdge,
-		Threshold:  ginFanoutCap,
+		SeenKey:    ginMiddlewareSeenKey,
+		GoLanguage: func(language string) bool {
+			return frameworkLanguageFamily(language) == "go"
+		},
+		Threshold: ginFanoutCap,
 	})
 }
