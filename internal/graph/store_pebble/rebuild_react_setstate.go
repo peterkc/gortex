@@ -69,7 +69,7 @@ func (b *BuildStore) rebuildSetState(ctx context.Context, receipts iter.Seq2[Par
 	defer func() {
 		err = errors.Join(err, b.pending.DeleteRange(rebuildSetStatePrefix, prefixEnd(rebuildSetStatePrefix), pebble.NoSync))
 	}()
-	p := rebuildSetStatePass{b: b, spillAt: spillAt}
+	p := rebuildSetStatePass{b: b, spillAt: spillAt, proof: proof}
 	active, err := p.capture(ctx, lifecycle, isSetState)
 	if err != nil || !active {
 		return p.stats, err
@@ -80,7 +80,7 @@ func (b *BuildStore) rebuildSetState(ctx context.Context, receipts iter.Seq2[Par
 	if err := p.elect(ctx, lifecycle, makeCall); err != nil {
 		return stats, err
 	}
-	err = b.withWrites(func() error { return p.apply(ctx, proof) })
+	err = b.withWrites(func() error { return p.apply(ctx) })
 	return p.stats, err
 }
 
@@ -88,6 +88,7 @@ type rebuildSetStatePass struct {
 	b        *BuildStore
 	spillAt  int
 	buffered int
+	proof    rebuildEdgeProof
 	stats    RebuildReactSetStateStats
 }
 
@@ -284,10 +285,13 @@ func (p *rebuildSetStatePass) wantMembership(e *graph.Edge, live []byte) error {
 	return p.put(key, append([]byte{rebuildCapabilityWanted}, live...))
 }
 
-func setStateCallProof(proof rebuildEdgeProof) bool {
+func (p *rebuildSetStatePass) callProof(proof rebuildEdgeProof) bool {
 	switch proof {
 	case rebuildProofTemporalSynthetic, rebuildProofEventChannel, rebuildProofRNBridge, rebuildProofObserver, rebuildProofClosureCollection:
 		return true
+	case rebuildProofReactSetState:
+		// React runs before Flutter. Neither turn can prove itself.
+		return p.proof == rebuildProofFlutterSetState
 	default:
 		return false
 	}
@@ -304,7 +308,7 @@ func (p *rebuildSetStatePass) wantCall(e *graph.Edge, live []byte) error {
 		return err
 	}
 	if custody.proof != 0 {
-		if setStateCallProof(custody.proof) {
+		if p.callProof(custody.proof) {
 			return p.mark('p', e.From)
 		}
 		return nil // not a proven witness of the existential call predicate
@@ -516,8 +520,8 @@ func (p *rebuildSetStatePass) elect(ctx context.Context, lifecycle string, makeC
 	return refused.err()
 }
 
-func (p *rebuildSetStatePass) apply(ctx context.Context, proof rebuildEdgeProof) error {
-	return applyRebuildScratchEdges(ctx, p.visit, p.b, proof, &p.stats.Edges)
+func (p *rebuildSetStatePass) apply(ctx context.Context) error {
+	return applyRebuildScratchEdges(ctx, p.visit, p.b, p.proof, &p.stats.Edges)
 }
 
 func (p *rebuildSetStatePass) visit(ctx context.Context, yield func(*graph.Edge) error) error {

@@ -170,46 +170,37 @@ func TestRebuildReactSetStateUsesAnotherGateWhenProducerDigestIsStale(t *testing
 	}
 }
 
-func TestRebuildFlutterSetStateDoesNotUseReactCustodyAsGate(t *testing.T) {
-	const owner = "Widget"
+func TestRebuildSetStateRejectsOwnCustodyAsGate(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		moveRaw bool
+		name, lifecycle string
+		proof           rebuildEdgeProof
+		stage           error
 	}{
-		{name: "proved raw gate alongside React output"},
-		{name: "only React output qualifies", moveRaw: true},
+		{"React", "render", rebuildProofReactSetState, ErrRebuildReactSetState},
+		{"Flutter", "build", rebuildProofFlutterSetState, ErrRebuildFlutterSetState},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			const owner = "Widget"
 			caller := setStateProofMethod("refresh", "refresh", 5)
-			// Make the real React output match the shared target predicate for Flutter.
-			render := setStateProofMethod("widget::setState", "render", 10)
-			build := setStateProofMethod("build", "build", 15)
-			raw := setStateProofCall(caller, "unresolved::setState")
-			b, receipts := seedSyntheticCustody(t, setStateProofFacts([]*graph.Node{caller, render, build},
-				setStateProofMember(caller, owner), setStateProofMember(render, owner), setStateProofMember(build, owner), raw))
-			ctx := t.Context()
-			react, err := b.RebuildReactSetState(ctx, receipts, 1<<20, setStateProofTarget, setStateProofOutput)
+			target := setStateProofMethod(tc.lifecycle, tc.lifecycle, 10)
+			b, receipts := seedSyntheticCustody(t, setStateProofFacts([]*graph.Node{caller, target},
+				setStateProofMember(caller, owner), setStateProofMember(target, owner)))
+			gate := setStateProofCall(caller, "widget::setState")
+			custody := rebuildEdgeCustody{proof: tc.proof}
+			require.NoError(t, b.withWrites(func() error { return b.putEdgeWithCustody(gate, custody) }))
+			valid, err := readRebuildEdgeCustody(b.pending, pendingEdgeKey(gate))
 			require.NoError(t, err)
-			require.EqualValues(t, 1, react.Edges)
-			checkSetStateProofOutput(t, b, setStateProofOutput(caller, render, owner), rebuildProofReactSetState)
-			if tc.moveRaw {
-				// Leave the receipt intact, but remove its live setState target.
-				helper := *raw
-				helper.To = "widget.helper"
-				require.NoError(t, b.ApplyLinkReindexes(ctx, []graph.EdgeReindex{{Edge: &helper, OldTo: raw.To}}))
-			}
+			require.Equal(t, custody, valid)
 			before := rebuildFrameworkCustodyRows(t, b)
-			flutter, err := b.RebuildFlutterSetState(ctx, receipts, 1<<20, setStateProofTarget, setStateProofOutput)
-			if tc.moveRaw {
-				require.ErrorIs(t, err, ErrRebuildFlutterSetState)
-				require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
-				require.Zero(t, flutter)
-				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
-				return
+			run := b.RebuildReactSetState
+			if tc.proof == rebuildProofFlutterSetState {
+				run = b.RebuildFlutterSetState
 			}
-			require.NoError(t, err)
-			require.EqualValues(t, 1, flutter.Edges)
-			checkSetStateProofOutput(t, b, setStateProofOutput(caller, build, owner), rebuildProofFlutterSetState)
+			stats, err := run(t.Context(), receipts, 1, setStateProofTarget, setStateProofOutput)
+			require.ErrorIs(t, err, tc.stage)
+			require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 		})
 	}
 }
