@@ -112,11 +112,16 @@ func TestRebuildExpoModuleBridgePreservesReactNativeCollision(t *testing.T) {
 	caller := &graph.Node{ID: "app.ts::open", Kind: graph.KindFunction, Name: "open", FilePath: "app.ts", Language: "typescript"}
 	target := &graph.Node{ID: "native.swift::open", Kind: graph.KindMethod, Name: "open", FilePath: "native.swift", Language: "swift",
 		Meta: map[string]any{"rn_module": "Widget", "rn_method": "open", "expo_module": "Widget", "expo_method": "open"}}
-	marker := &graph.Edge{From: caller.ID, To: "unresolved::rn::Widget::open", Kind: graph.EdgeCalls, FilePath: caller.FilePath, Line: 4,
+	peer := &graph.Node{ID: "peer.swift::open", Kind: graph.KindMethod, Name: "open", FilePath: "peer.swift", Language: "swift",
+		Meta: map[string]any{"expo_module": "Widget", "expo_method": "open"}}
+	first := &graph.Edge{From: caller.ID, To: "unresolved::rn::Widget::open", Kind: graph.EdgeCalls, FilePath: caller.FilePath, Line: 30,
 		Meta: map[string]any{"via": "rn.native", "rn_module": "Widget", "rn_method": "open"}}
+	second := *first
+	second.Line = 4 // First in receipt order is not the lowest line.
 	facts := []store_pebble.ParseFacts{
-		rebuildEventFacts(caller.FilePath, caller.Language, []*graph.Node{caller}, marker),
+		rebuildEventFacts(caller.FilePath, caller.Language, []*graph.Node{caller}, first, &second),
 		rebuildEventFacts(target.FilePath, target.Language, []*graph.Node{target}),
+		rebuildEventFacts(peer.FilePath, peer.Language, []*graph.Node{peer}),
 	}
 	native := openRebuildTemporalOracle(t, facts...)
 	private := openRebuildGRPCBuild(t, facts...)
@@ -131,26 +136,32 @@ func TestRebuildExpoModuleBridgePreservesReactNativeCollision(t *testing.T) {
 
 	report := RunFrameworkSynthesizersWithSelection(native, selection)
 	require.NoError(t, report.Err)
-	require.Equal(t, 2, report.Total) // Both passes try the same key.
+	require.Equal(t, 3, report.Total) // RN offers one edge; Expo offers two, including the occupied key.
 	want := rebuildEventSQLiteRows(native)
-	require.Len(t, want.edges, len(before.edges)+1)
-	var winner *graph.Edge
-	for _, e := range want.edges {
-		if e.To == target.ID {
-			winner = e
-		}
+	require.Len(t, want.edges, len(before.edges)+2)
+	for _, tc := range []struct {
+		id, via, synth string
+	}{
+		{target.ID, rnBridgeVia, SynthReactNative},
+		{peer.ID, expoBridgeVia, SynthExpoModules},
+	} {
+		key := graph.EdgeIdentityFor(first)
+		key.To = tc.id
+		i := slices.IndexFunc(want.edges, func(e *graph.Edge) bool { return graph.EdgeIdentityFor(e) == key })
+		require.NotEqual(t, -1, i, "%+v", key)
+		require.Equal(t, tc.via, want.edges[i].Meta["via"])
+		require.Equal(t, tc.synth, want.edges[i].Meta[MetaSynthesizedBy])
 	}
-	require.NotNil(t, winner)
-	require.Equal(t, rnBridgeVia, winner.Meta["via"])
-	require.Equal(t, SynthReactNative, winner.Meta[MetaSynthesizedBy])
 
 	rn, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(facts...), frozen, 1)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, rn.Edges)
-	require.Equal(t, want, rebuildEventSavedRows(t, private))
+	wantRN := want
+	wantRN.edges = slices.DeleteFunc(slices.Clone(want.edges), func(e *graph.Edge) bool { return e.To == peer.ID })
+	require.Equal(t, wantRN, rebuildEventSavedRows(t, private))
 	expo, err := RunRebuildExpoModuleBridge(t.Context(), private, rebuildGRPCReceipts(facts...), frozen, 1)
 	require.NoError(t, err)
-	require.Zero(t, expo.Edges)
+	require.EqualValues(t, 1, expo.Edges)
 	require.Equal(t, want, rebuildEventSavedRows(t, private))
 }
 

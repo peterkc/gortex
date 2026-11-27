@@ -63,6 +63,50 @@ func TestRebuildExpoModuleBridgeCensusAndCustody(t *testing.T) {
 	requireSyntheticCustody(t, b, map[graph.EdgeIdentity]rebuildEdgeProof{graph.EdgeIdentityFor(want): rebuildProofExpoModules})
 }
 
+func TestRebuildExpoModuleBridgePreservesReactNativeCustody(t *testing.T) {
+	caller := &graph.Node{ID: "app.ts::open", Kind: graph.KindFunction, Name: "open", FilePath: "app.ts", Language: "typescript"}
+	target := &graph.Node{ID: "native.swift::open", Kind: graph.KindMethod, Name: "open", FilePath: "native.swift", Language: "swift",
+		Meta: map[string]any{"rn_module": "Widget", "rn_method": "open", "expo_module": "Widget", "expo_method": "open"}}
+	peer := &graph.Node{ID: "peer.swift::open", Kind: graph.KindMethod, Name: "open", FilePath: "peer.swift", Language: "swift",
+		Meta: map[string]any{"expo_module": "Widget", "expo_method": "open"}}
+	first := &graph.Edge{From: caller.ID, To: "unresolved::rn::Widget::open", Kind: graph.EdgeCalls, FilePath: caller.FilePath, Line: 30,
+		Meta: map[string]any{"via": "rn.native", "rn_module": "Widget", "rn_method": "open"}}
+	second := *first
+	second.Line = 4
+	callerFacts := producerProofFacts(caller)
+	callerFacts.Edges = []*graph.Edge{first, &second}
+	b, receipts := seedSyntheticCustody(t, callerFacts, producerProofFacts(target), producerProofFacts(peer))
+
+	ctx := t.Context()
+	isCall := func(e *graph.Edge) bool { return e.Kind == graph.EdgeCalls && e.Meta["via"] == "rn.native" }
+	makeCall := func(e *graph.Edge, n *graph.Node) *graph.Edge {
+		return &graph.Edge{From: e.From, To: n.ID, Kind: graph.EdgeCalls, FilePath: e.FilePath, Line: e.Line,
+			Origin: graph.OriginASTInferred}
+	}
+	isWeb := func(language string) bool { return language == "typescript" }
+	rn, err := b.RebuildReactNativeBridge(ctx, receipts, 1, isWeb, isCall, makeCall)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, rn.Edges)
+	want := map[graph.EdgeIdentity]rebuildEdgeProof{graph.EdgeIdentityFor(makeCall(first, target)): rebuildProofRNBridge}
+	requireSyntheticCustody(t, b, want)
+
+	family := func(language string) uint8 {
+		switch language {
+		case "typescript":
+			return 1
+		case "swift":
+			return 2
+		default:
+			return 0
+		}
+	}
+	expo, err := b.RebuildExpoModuleBridge(ctx, receipts, 1, 3, family, isCall, makeCall)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, expo.Edges)
+	want[graph.EdgeIdentityFor(makeCall(first, peer))] = rebuildProofExpoModules
+	requireSyntheticCustody(t, b, want)
+}
+
 func TestRebuildExpoModuleBridgeRejectsLostMarker(t *testing.T) {
 	for _, tc := range []struct {
 		name string
