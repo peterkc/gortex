@@ -190,9 +190,9 @@ func TestRebuildGRPCStaleCustodyOrder(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.EqualValues(t, 1, stats.Moves)
-			recorder := string(rebuildLinkRecorderKey(staleKey))
+			recorder := rebuildLinkRecorderKey(staleKey)
 			require.Equal(t, before[string(staleKey)], after[string(staleKey)])
-			require.Equal(t, before[recorder], after[recorder])
+			require.Equal(t, before[string(recorder)], after[string(recorder)])
 			old, dest := pendingEdgeKey(mover), pendingEdgeKey(stub(handler, mover.Line))
 			require.NotContains(t, after, string(old))
 			require.Contains(t, after, string(dest))
