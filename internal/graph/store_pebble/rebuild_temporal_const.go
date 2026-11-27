@@ -177,8 +177,8 @@ func (p *temporalConstPass) resolve(ctx context.Context) error {
 		progress := false
 		// Use first discovery from the frozen dispatch stream, with live reads.
 		// For chains longer than eight hops among discovered names, this is
-		// a deterministic choice, not native-exact. The VM parity report
-		// records any Go map-order mismatch as a native-defect difference.
+		// a deterministic choice, not native-exact. The VM proof labels any
+		// Go map-order mismatch as a native-defect difference.
 		if err := p.visit(ctx, temporalConstAlias, func(name, ref string) error {
 			db := p.view.build.pending
 			value, err := readTemporalConstValue(db, name)

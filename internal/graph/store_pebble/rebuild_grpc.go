@@ -18,7 +18,7 @@ var ErrRebuildGRPC = errors.New("pebble rebuild gRPC stage failed")
 
 var rebuildGRPCPrefix = []byte{'g', 'r'}
 
-// SQLite elects destinations in windows of 5,000 moves, not inputs.
+// Bound the encoded rows retained by the gRPC turn.
 const rebuildGRPCRowLimit = 16 << 20
 
 // RebuildGRPCStats reports candidates and mutations in the first registry turn.

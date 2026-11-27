@@ -37,8 +37,9 @@ func (b *BuildStore) RebuildGoMethodReceivers(ctx context.Context, receipts iter
 			err = fmt.Errorf("%w: Go method receivers: %w", ErrRebuildView, err)
 		}
 	}()
+	types := append(bytes.Clone(prefix), 't')
 	key := func(repo, dir, name string) []byte {
-		return keyStrings([]byte{'g', 'r', 't'}, repo, dir, name)
+		return keyStrings(bytes.Clone(types), repo, dir, name)
 	}
 	haveTypes := false
 	if err := view.visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
@@ -72,7 +73,7 @@ func (b *BuildStore) RebuildGoMethodReceivers(ctx context.Context, receipts iter
 		return 0, err
 	}
 
-	planned := []byte{'g', 'r', 'm'}
+	planned := append(bytes.Clone(prefix), 'm')
 	haveMoves := false
 	edges := []byte{familyEdge, edgeOut}
 	if err := view.visit(ctx, edges, func(snap *pebble.Snapshot, r row) error {
@@ -194,8 +195,8 @@ func (b *BuildStore) RebuildGoMethodReceivers(ctx context.Context, receipts iter
 					continue
 				}
 				old := pendingEdgeKey(e)
-				key := append(bytes.Clone(planned), old...)
-				to, err := pendingGet(b.pending, key, func(raw []byte) (string, error) { return string(raw), nil })
+				claim := append(bytes.Clone(planned), old...)
+				to, err := pendingGet(b.pending, claim, func(raw []byte) (string, error) { return string(raw), nil })
 				if err != nil {
 					return 0, err
 				}
@@ -205,7 +206,7 @@ func (b *BuildStore) RebuildGoMethodReceivers(ctx context.Context, receipts iter
 				if err := queue(old, to); err != nil {
 					return 0, err
 				}
-				if err := b.pending.Delete(key, pebble.NoSync); err != nil {
+				if err := b.pending.Delete(claim, pebble.NoSync); err != nil {
 					return 0, err
 				}
 			}

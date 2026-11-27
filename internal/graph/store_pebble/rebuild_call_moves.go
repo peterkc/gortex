@@ -120,7 +120,8 @@ func (p *rebuildCallMoves) moves(ctx context.Context, yield func([]byte, *graph.
 // actual mover. Frozen receipt order matches SQLite rowid order only for
 // rows inserted and retained in that order. Native UPDATE keeps an earlier
 // move's rowid, delete+insert appends it, and the in-memory shadow sorts
-// batches. Stationary calls take no slot.
+// drain batches and reindexes without SQLite's 5,000-move windows. The VM
+// proof labels these native-defect differences. Stationary calls take no slot.
 func (p *rebuildCallMoves) noteReceipt(key, claim []byte, exact bool) error {
 	if exact && claim[0] == rebuildCapabilityWanted {
 		moving, err := p.present(append(p.column('m'), claim[1:]...))
