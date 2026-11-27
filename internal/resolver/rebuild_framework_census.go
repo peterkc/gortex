@@ -22,7 +22,7 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 		SynthReactNative, SynthReactNativePair, SynthObserverChannel, SynthClosureCollection,
 		SynthReactSetState, SynthFlutterSetState, SynthKMPExpectActual, SynthExpoModules, SynthFabric, SynthMyBatis,
 		SynthSQLCallsite, SynthStoreFactory, SynthReduxThunk, SynthNgRxEffect,
-		SynthObjectRegistry, SynthRTKQuery, SynthVuexDispatch, SynthCelery, SynthSpringEvent, SynthMediatR, SynthCSharpDIIfaces, SynthCSharpIfaceDispatch, SynthCSharpEFCoreModels, SynthSidekiq, SynthLaravelEvent, SynthFnPointerDispatch, SynthMacroExpansion, SynthGinMiddleware, SynthExpressResolve, SynthReactResolve, SynthFastAPIResolve,
+		SynthObjectRegistry, SynthRTKQuery, SynthVuexDispatch, SynthCelery, SynthSpringEvent, SynthMediatR, SynthCSharpDIIfaces, SynthCSharpIfaceDispatch, SynthCSharpEFCoreModels, SynthSidekiq, SynthLaravelEvent, SynthFnPointerDispatch, SynthMacroExpansion, SynthGinMiddleware, SynthExpressResolve, SynthReactResolve, SynthFastAPIResolve, SynthRailsResolve,
 	} {
 		if selection.allows(name) {
 			frozen.names[name] = struct{}{}
@@ -71,10 +71,11 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 	_, mediatr := frozen.names[SynthMediatR]
 	_, laravel := frozen.names[SynthLaravelEvent]
 	_, express := frozen.names[SynthExpressResolve]
+	_, rails := frozen.names[SynthRailsResolve]
 	if redux || ngrx || rtk || vuex || celery || spring || mediatr || laravel {
 		edges.via = make(map[string]bool, 8)
 	}
-	if grpc || temporal || react || flutter || redux || ngrx || registry || rtk || vuex || celery || spring || mediatr || laravel || express {
+	if grpc || temporal || react || flutter || redux || ngrx || registry || rtk || vuex || celery || spring || mediatr || laravel || express || rails {
 		if err := view.VisitFrameworkGateEdges(ctx, temporal, func(e graph.FrameworkCensusEdge) error {
 			if e.Kind == graph.EdgeCalls {
 				via := (redux && e.Via == reduxThunkVia) || (ngrx && e.Via == ngrxEffectVia) ||
@@ -87,6 +88,7 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 				if via || (spring && e.Via == springEventVia) {
 					edges.via[e.Via] = true
 				}
+				edges.recvConst = edges.recvConst || rails && e.RecvConst != "" && graph.IsUnresolvedTarget(e.To)
 				edges.expressHandlerRef = edges.expressHandlerRef || express && e.HasExpressHandlerRef && graph.IsUnresolvedTarget(e.To)
 				edges.objectRegistryValue = edges.objectRegistryValue || objectRegistry
 				edges.setStateTarget = edges.setStateTarget || setState

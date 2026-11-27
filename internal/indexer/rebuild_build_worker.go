@@ -440,6 +440,9 @@ func buildRebuildStages(
 		if err := resolver.FreezeRebuildFastAPIInputs(ctx, private, selection); err != nil {
 			return err
 		}
+		if err := resolver.FreezeRebuildRailsInputs(ctx, private, selection); err != nil {
+			return err
+		}
 		grpc, err := resolver.RunRebuildGRPC(ctx, private, receipts, selection)
 		if err != nil {
 			return err
@@ -736,6 +739,14 @@ func buildRebuildStages(
 		}
 		if fastapiMoves != 0 {
 			logger.Info("rebuild FastAPI applied to private build", zap.Uint64("moves", fastapiMoves))
+		}
+		rails, err := resolver.RunRebuildRails(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if rails.Stubs != 0 {
+			logger.Info("rebuild Rails applied to private build",
+				zap.Uint64("stubs", rails.Stubs), zap.Uint64("moves", rails.Moves))
 		}
 	}
 	// The supported tails only changed private scratch. Relation projection

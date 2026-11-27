@@ -206,6 +206,7 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildExpress,
 	store_pebble.ErrRebuildReactResolve,
 	store_pebble.ErrRebuildFastAPI,
+	store_pebble.ErrRebuildRails,
 }
 
 func buildRefusal(err error) rebuildBuildReply {

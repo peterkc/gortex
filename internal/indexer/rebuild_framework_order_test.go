@@ -62,6 +62,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"Express", "moves", 1},
 		{"React hooks and context", "moves", 1},
 		{"FastAPI", "moves", 1},
+		{"Rails", "moves", 1},
 	}
 	for _, tc := range []struct {
 		name              string
@@ -727,6 +728,13 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		edge(fastapiSource, "unresolved::"+fastapiTarget.Name, graph.EdgeCalls, 2,
 			map[string]any{"via": "fastapi.Depends"}))
 
+	const railsFile = "invoice.rb"
+	railsCaller := node(railsFile, "ruby", "invoiceCaller", graph.KindFunction, 1)
+	railsService := node(railsFile, "ruby", "InvoiceService", graph.KindType, 4)
+	railsFacts := receipt([]*graph.Node{railsCaller, railsService},
+		edge(railsCaller, "unresolved::*.issue", graph.EdgeCalls, 2,
+			map[string]any{"recv_const": railsService.Name}))
+
 	return []store_pebble.ParseFacts{
 		receipt([]*graph.Node{objc}),
 		receipt([]*graph.Node{swift, dispatch, appendHandler, expo}),
@@ -737,6 +745,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{actual}),
 		receipt([]*graph.Node{sql}),
 		receipt([]*graph.Node{action}),
-		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts, laravelFacts, fnFacts, macroFacts, ginFacts, expressFacts, reactFallbackFacts, fastapiFacts,
+		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts, laravelFacts, fnFacts, macroFacts, ginFacts, expressFacts, reactFallbackFacts, fastapiFacts, railsFacts,
 	}
 }
